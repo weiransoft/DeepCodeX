@@ -26,7 +26,7 @@ Create `~/.deepcode/settings.json`:
 }
 ```
 
-The same settings file is shared with the [Deep Code VSCode extension](https://github.com/qorzj/deepcode).
+The same settings file is shared with the [Deep Code VSCode extension](https://github.com/lessweb/deepcode).
 
 ## Skills
 
