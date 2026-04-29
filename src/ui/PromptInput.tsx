@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useStdin, useStdout } from "ink";
 import chalk from "chalk";
 import {
@@ -6,6 +6,7 @@ import {
   PromptBufferState,
   backspace,
   deleteForward,
+  deleteWordBefore,
   getCurrentSlashToken,
   insertText,
   isEmpty,
@@ -15,6 +16,8 @@ import {
   moveLineEnd,
   moveLineStart,
   moveRight,
+  moveWordLeft,
+  moveWordRight,
   moveUp
 } from "./promptBuffer";
 import {
@@ -45,12 +48,24 @@ type Props = {
 
 const BACKSPACE_BYTES = new Set(["", ""]);
 const FORWARD_DELETE_SEQUENCES = new Set(["[3~", "[P"]);
+const HOME_SEQUENCES = new Set(["[H", "[1~", "[7~", "OH"]);
+const END_SEQUENCES = new Set(["[F", "[4~", "[8~", "OF"]);
+const SHIFT_RETURN_SEQUENCES = new Set(["\r", "[13;2u"]);
+const META_RETURN_SEQUENCES = new Set(["[13;3u", "[13;4u"]);
+const CTRL_LEFT_SEQUENCES = new Set(["[1;5D", "[5D"]);
+const CTRL_RIGHT_SEQUENCES = new Set(["[1;5C", "[5C"]);
+const META_LEFT_SEQUENCES = new Set(["[1;3D", "[3D", "b"]);
+const META_RIGHT_SEQUENCES = new Set(["[1;3C", "[3C", "f"]);
+const TERMINAL_FOCUS_IN = "[I";
+const TERMINAL_FOCUS_OUT = "[O";
 
 export type InputKey = {
   upArrow: boolean;
   downArrow: boolean;
   leftArrow: boolean;
   rightArrow: boolean;
+  home: boolean;
+  end: boolean;
   pageDown: boolean;
   pageUp: boolean;
   return: boolean;
@@ -61,6 +76,8 @@ export type InputKey = {
   backspace: boolean;
   delete: boolean;
   meta: boolean;
+  focusIn: boolean;
+  focusOut: boolean;
 };
 
 export function PromptInput({
@@ -82,6 +99,7 @@ export function PromptInput({
   const [menuIndex, setMenuIndex] = useState(0);
   const [historyCursor, setHistoryCursor] = useState(-1);
   const [draftBeforeHistory, setDraftBeforeHistory] = useState<string | null>(null);
+  const [hasTerminalFocus, setHasTerminalFocus] = useState(true);
   const lastCtrlDAt = useRef<number>(0);
 
   const slashItems = useMemo(() => buildSlashCommands(skills), [skills]);
@@ -89,6 +107,21 @@ export function PromptInput({
   const slashMenu = slashToken ? filterSlashCommands(slashItems, slashToken) : [];
   const showMenu = slashMenu.length > 0;
   const promptHistoryKey = useMemo(() => promptHistory.join("\0"), [promptHistory]);
+  const promptPrefix = busy ? "⠋ " : "❯ ";
+  const footerText = statusMessage
+    ? statusMessage
+    : busy
+      ? loadingText && loadingText.trim()
+        ? loadingText
+        : "Esc to interrupt · Ctrl+C to cancel input"
+      : "Enter send · Shift+Enter newline · Ctrl+V image · / commands · Ctrl+D exit";
+  const cursorPlacement = useMemo(
+    () => getPromptCursorPlacement(buffer, screenWidth, promptPrefix, footerText),
+    [buffer, footerText, promptPrefix, screenWidth]
+  );
+
+  useTerminalFocusReporting(stdout, !disabled);
+  usePromptTerminalCursor(stdout, cursorPlacement, !disabled);
 
   useEffect(() => {
     if (!showMenu) {
@@ -114,6 +147,15 @@ export function PromptInput({
   }, [promptHistoryKey]);
 
   useTerminalInput((input, key) => {
+    if (key.focusIn) {
+      setHasTerminalFocus(true);
+      return;
+    }
+    if (key.focusOut) {
+      setHasTerminalFocus(false);
+      return;
+    }
+
     if (disabled) {
       return;
     }
@@ -128,6 +170,7 @@ export function PromptInput({
 
     if (key.ctrl && (input === "d" || input === "D")) {
       if (!isEmpty(buffer)) {
+        updateBuffer((s) => deleteForward(s));
         return;
       }
       const now = Date.now();
@@ -219,6 +262,16 @@ export function PromptInput({
       return;
     }
 
+    if ((key.ctrl || key.meta) && key.leftArrow) {
+      updateBuffer((s) => moveWordLeft(s));
+      return;
+    }
+
+    if ((key.ctrl || key.meta) && key.rightArrow) {
+      updateBuffer((s) => moveWordRight(s));
+      return;
+    }
+
     if (key.leftArrow) {
       updateBuffer((s) => moveLeft(s));
       return;
@@ -226,6 +279,16 @@ export function PromptInput({
 
     if (key.rightArrow) {
       updateBuffer((s) => moveRight(s));
+      return;
+    }
+
+    if (key.home) {
+      updateBuffer((s) => moveLineStart(s));
+      return;
+    }
+
+    if (key.end) {
+      updateBuffer((s) => moveLineEnd(s));
       return;
     }
 
@@ -247,6 +310,14 @@ export function PromptInput({
       return;
     }
 
+    if (key.ctrl && (input === "p" || input === "P")) {
+      navigateHistory(-1);
+      return;
+    }
+    if (key.ctrl && (input === "n" || input === "N")) {
+      navigateHistory(1);
+      return;
+    }
     if (key.ctrl && (input === "a" || input === "A")) {
       updateBuffer((s) => moveLineStart(s));
       return;
@@ -255,12 +326,32 @@ export function PromptInput({
       updateBuffer((s) => moveLineEnd(s));
       return;
     }
+    if (key.ctrl && (input === "b" || input === "B")) {
+      updateBuffer((s) => moveLeft(s));
+      return;
+    }
+    if (key.ctrl && (input === "f" || input === "F")) {
+      updateBuffer((s) => moveRight(s));
+      return;
+    }
+    if (key.meta && (input === "b" || input === "B")) {
+      updateBuffer((s) => moveWordLeft(s));
+      return;
+    }
+    if (key.meta && (input === "f" || input === "F")) {
+      updateBuffer((s) => moveWordRight(s));
+      return;
+    }
     if (key.ctrl && (input === "k" || input === "K")) {
       updateBuffer((s) => killLine(s));
       return;
     }
     if (key.ctrl && (input === "u" || input === "U")) {
       updateBuffer(() => EMPTY_BUFFER);
+      return;
+    }
+    if (key.ctrl && (input === "w" || input === "W")) {
+      updateBuffer((s) => deleteWordBefore(s));
       return;
     }
     if (key.ctrl && (input === "j" || input === "J")) {
@@ -277,7 +368,7 @@ export function PromptInput({
       const sanitized = input.replace(/\r/g, "");
       updateBuffer((s) => insertText(s, sanitized));
     }
-  });
+  }, { isActive: !disabled });
 
   function exitHistoryBrowsing(): void {
     setHistoryCursor(-1);
@@ -395,31 +486,228 @@ export function PromptInput({
       ) : null}
       <Text dimColor>{divider}</Text>
       <Box>
-        <Text color={busy ? "yellow" : "green"}>{busy ? "⠋ " : "❯ "}</Text>
-        <Text>{renderBufferWithCursor(buffer)}</Text>
+        <Text color={busy ? "yellow" : "green"}>{promptPrefix}</Text>
+        <Text>{renderBufferWithCursor(buffer, !disabled && hasTerminalFocus)}</Text>
       </Box>
       <Text dimColor>{divider}</Text>
       <Box>
-        <Text dimColor>
-          {statusMessage
-            ? statusMessage
-            : busy
-              ? loadingText && loadingText.trim()
-                ? loadingText
-                : "Esc to interrupt · Ctrl+C to cancel input"
-              : "Enter to send · Shift+Enter for newline · Ctrl+V paste image · / for skills · Ctrl+D to exit"}
-        </Text>
+        <Text dimColor>{footerText}</Text>
       </Box>
     </Box>
   );
 }
 
-function renderBufferWithCursor(state: PromptBufferState): string {
+type CursorPlacement = {
+  rowsUp: number;
+  column: number;
+};
+
+type WriteFn = (
+  chunk: string | Uint8Array,
+  encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
+  callback?: (error?: Error | null) => void
+) => boolean;
+
+function usePromptTerminalCursor(
+  stdout: NodeJS.WriteStream | undefined,
+  placement: CursorPlacement,
+  isActive: boolean
+): void {
+  const directWriteRef = useRef<((data: string) => void) | null>(null);
+  const activePlacementRef = useRef<CursorPlacement | null>(null);
+
+  useLayoutEffect(() => {
+    if (!stdout?.isTTY) {
+      return;
+    }
+
+    const stream = stdout as NodeJS.WriteStream & { write: WriteFn };
+    const originalWrite = stream.write;
+    const directWrite = (data: string) => {
+      originalWrite.call(stdout, data);
+    };
+    const restorePromptCursor = () => {
+      const activePlacement = activePlacementRef.current;
+      if (!activePlacement) {
+        return;
+      }
+      directWrite("\r" + cursorDown(activePlacement.rowsUp) + hideCursor());
+      activePlacementRef.current = null;
+    };
+    const patchedWrite: WriteFn = (...args) => {
+      restorePromptCursor();
+      return originalWrite.apply(stdout, args);
+    };
+
+    directWriteRef.current = directWrite;
+    stream.write = patchedWrite;
+
+    return () => {
+      restorePromptCursor();
+      stream.write = originalWrite;
+      directWriteRef.current = null;
+    };
+  }, [stdout]);
+
+  useLayoutEffect(() => {
+    if (!isActive || !stdout?.isTTY) {
+      return;
+    }
+
+    const directWrite = directWriteRef.current;
+    if (!directWrite) {
+      return;
+    }
+
+    directWrite(showCursor() + cursorUp(placement.rowsUp) + "\r" + cursorForward(placement.column));
+    activePlacementRef.current = placement;
+
+    return () => {
+      const activePlacement = activePlacementRef.current;
+      if (!activePlacement) {
+        return;
+      }
+      directWrite("\r" + cursorDown(activePlacement.rowsUp) + hideCursor());
+      activePlacementRef.current = null;
+    };
+  }, [isActive, placement.column, placement.rowsUp, stdout]);
+}
+
+function useTerminalFocusReporting(stdout: NodeJS.WriteStream | undefined, isActive: boolean): void {
+  useLayoutEffect(() => {
+    if (!isActive || !stdout?.isTTY) {
+      return;
+    }
+
+    stdout.write(enableTerminalFocusReporting());
+    return () => {
+      stdout.write(disableTerminalFocusReporting());
+    };
+  }, [isActive, stdout]);
+}
+
+export function getPromptCursorPlacement(
+  state: PromptBufferState,
+  screenWidth: number,
+  promptPrefix: string,
+  footerText: string
+): CursorPlacement {
+  const width = Math.max(1, screenWidth);
+  const cursor = Math.max(0, Math.min(state.cursor, state.text.length));
+  const beforeCursor = state.text.slice(0, cursor);
+  const at = state.text[cursor];
+  const displayText = beforeCursor + (typeof at === "undefined" || at === "\n" ? " " : at) +
+    (at === "\n" ? "\n" : "") + (typeof at === "undefined" ? "" : state.text.slice(cursor + 1));
+
+  const cursorPosition = measureTextPosition(beforeCursor, width, textWidth(promptPrefix));
+  const promptRows = measureTextRows(displayText, width, textWidth(promptPrefix));
+  const footerRows = 1 + measureTextRows(footerText, width, 0);
+
+  return {
+    rowsUp: (promptRows - 1 - cursorPosition.row) + footerRows + 1,
+    column: cursorPosition.column
+  };
+}
+
+function measureTextRows(text: string, width: number, initialColumn: number): number {
+  return measureTextPosition(text, width, initialColumn).row + 1;
+}
+
+function measureTextPosition(text: string, width: number, initialColumn: number): { row: number; column: number } {
+  let row = 0;
+  let column = Math.min(initialColumn, width - 1);
+
+  for (const char of Array.from(text)) {
+    if (char === "\n") {
+      row++;
+      column = 0;
+      continue;
+    }
+
+    const charColumns = textWidth(char);
+    if (column + charColumns > width) {
+      row++;
+      column = 0;
+    }
+    column += charColumns;
+    if (column >= width) {
+      row++;
+      column = 0;
+    }
+  }
+
+  return { row, column };
+}
+
+function textWidth(value: string): number {
+  let width = 0;
+  for (const char of Array.from(value.normalize())) {
+    width += characterWidth(char);
+  }
+  return width;
+}
+
+function characterWidth(char: string): number {
+  const codePoint = char.codePointAt(0) ?? 0;
+  if (codePoint === 0 || codePoint < 32 || (codePoint >= 0x7f && codePoint < 0xa0)) {
+    return 0;
+  }
+  if (codePoint >= 0x300 && codePoint <= 0x36f) {
+    return 0;
+  }
+  if (
+    (codePoint >= 0x1100 && codePoint <= 0x115f) ||
+    (codePoint >= 0x2e80 && codePoint <= 0xa4cf) ||
+    (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+    (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+    (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+    (codePoint >= 0xffe0 && codePoint <= 0xffe6)
+  ) {
+    return 2;
+  }
+  return 1;
+}
+
+function cursorUp(rows: number): string {
+  return rows > 0 ? `\u001B[${rows}A` : "";
+}
+
+function cursorDown(rows: number): string {
+  return rows > 0 ? `\u001B[${rows}B` : "";
+}
+
+function cursorForward(columns: number): string {
+  return columns > 0 ? `\u001B[${columns}C` : "";
+}
+
+function showCursor(): string {
+  return "\u001B[?25h";
+}
+
+function hideCursor(): string {
+  return "\u001B[?25l";
+}
+
+function enableTerminalFocusReporting(): string {
+  return "\u001B[?1004h";
+}
+
+function disableTerminalFocusReporting(): string {
+  return "\u001B[?1004l";
+}
+
+export function renderBufferWithCursor(state: PromptBufferState, isFocused: boolean): string {
   const text = state.text || "";
   const cursor = Math.max(0, Math.min(state.cursor, text.length));
   const before = text.slice(0, cursor);
   const at = text[cursor];
   const after = text.slice(cursor + 1);
+  if (!isFocused) {
+    return text;
+  }
+
   if (typeof at === "undefined") {
     return before + chalk.inverse(" ");
   }
@@ -429,17 +717,27 @@ function renderBufferWithCursor(state: PromptBufferState): string {
   return before + chalk.inverse(at) + after;
 }
 
-export function useTerminalInput(inputHandler: (input: string, key: InputKey) => void): void {
+export function useTerminalInput(
+  inputHandler: (input: string, key: InputKey) => void,
+  options: { isActive?: boolean } = {}
+): void {
   const { stdin, setRawMode, internal_exitOnCtrlC } = useStdin();
+  const isActive = options.isActive ?? true;
 
   useEffect(() => {
+    if (!isActive) {
+      return;
+    }
     setRawMode(true);
     return () => {
       setRawMode(false);
     };
-  }, [setRawMode]);
+  }, [isActive, setRawMode]);
 
   useEffect(() => {
+    if (!isActive) {
+      return;
+    }
     const handleData = (data: Buffer | string) => {
       const { input, key } = parseTerminalInput(data);
 
@@ -452,7 +750,7 @@ export function useTerminalInput(inputHandler: (input: string, key: InputKey) =>
     return () => {
       stdin?.off("data", handleData);
     };
-  }, [stdin, internal_exitOnCtrlC, inputHandler]);
+  }, [isActive, stdin, internal_exitOnCtrlC, inputHandler]);
 }
 
 export function parseTerminalInput(data: Buffer | string): { input: string; key: InputKey } {
@@ -461,18 +759,22 @@ export function parseTerminalInput(data: Buffer | string): { input: string; key:
   const key: InputKey = {
     upArrow: raw === "\u001B[A",
     downArrow: raw === "\u001B[B",
-    leftArrow: raw === "\u001B[D",
-    rightArrow: raw === "\u001B[C",
+    leftArrow: raw === "\u001B[D" || CTRL_LEFT_SEQUENCES.has(raw) || META_LEFT_SEQUENCES.has(raw),
+    rightArrow: raw === "\u001B[C" || CTRL_RIGHT_SEQUENCES.has(raw) || META_RIGHT_SEQUENCES.has(raw),
+    home: HOME_SEQUENCES.has(raw),
+    end: END_SEQUENCES.has(raw),
     pageDown: raw === "\u001B[6~",
     pageUp: raw === "\u001B[5~",
-    return: raw === "\r",
+    return: raw === "\r" || SHIFT_RETURN_SEQUENCES.has(raw) || META_RETURN_SEQUENCES.has(raw),
     escape: raw === "\u001B",
-    ctrl: false,
-    shift: false,
+    ctrl: CTRL_LEFT_SEQUENCES.has(raw) || CTRL_RIGHT_SEQUENCES.has(raw),
+    shift: SHIFT_RETURN_SEQUENCES.has(raw),
     tab: raw === "\t" || raw === "\u001B[Z",
     backspace: BACKSPACE_BYTES.has(raw),
     delete: FORWARD_DELETE_SEQUENCES.has(raw),
-    meta: false
+    meta: META_LEFT_SEQUENCES.has(raw) || META_RIGHT_SEQUENCES.has(raw) || META_RETURN_SEQUENCES.has(raw),
+    focusIn: raw === TERMINAL_FOCUS_IN,
+    focusOut: raw === TERMINAL_FOCUS_OUT
   };
 
   if (input <= "\u001A" && !key.return) {
@@ -485,14 +787,21 @@ export function parseTerminalInput(data: Buffer | string): { input: string; key:
     key.downArrow ||
     key.leftArrow ||
     key.rightArrow ||
+    key.home ||
+    key.end ||
     key.pageDown ||
     key.pageUp ||
     key.tab ||
-    key.delete;
+    key.delete ||
+    key.return ||
+    key.ctrl ||
+    key.meta ||
+    key.focusIn ||
+    key.focusOut;
 
   if (raw.startsWith("\u001B")) {
     input = raw.slice(1);
-    key.meta = !isKnownEscapeSequence;
+    key.meta = key.meta || !isKnownEscapeSequence;
   }
 
   const isLatinUppercase = input >= "A" && input <= "Z";

@@ -43,6 +43,28 @@ export function moveRight(state: PromptBufferState): PromptBufferState {
   return { ...state, cursor: state.cursor + 1 };
 }
 
+export function moveWordLeft(state: PromptBufferState): PromptBufferState {
+  let cursor = state.cursor;
+  while (cursor > 0 && /\s/.test(state.text[cursor - 1] ?? "")) {
+    cursor--;
+  }
+  while (cursor > 0 && !/\s/.test(state.text[cursor - 1] ?? "")) {
+    cursor--;
+  }
+  return { ...state, cursor };
+}
+
+export function moveWordRight(state: PromptBufferState): PromptBufferState {
+  let cursor = state.cursor;
+  while (cursor < state.text.length && /\s/.test(state.text[cursor] ?? "")) {
+    cursor++;
+  }
+  while (cursor < state.text.length && !/\s/.test(state.text[cursor] ?? "")) {
+    cursor++;
+  }
+  return { ...state, cursor };
+}
+
 export function moveUp(state: PromptBufferState): PromptBufferState {
   const { line, column, lineStart } = locate(state);
   if (line === 0) {
@@ -85,6 +107,24 @@ export function killLine(state: PromptBufferState): PromptBufferState {
   }
   const text = state.text.slice(0, state.cursor) + state.text.slice(lineEnd);
   return { text, cursor: state.cursor };
+}
+
+export function deleteWordBefore(state: PromptBufferState): PromptBufferState {
+  const end = state.cursor;
+  let start = end;
+  while (start > 0 && /\s/.test(state.text[start - 1] ?? "")) {
+    start--;
+  }
+  while (start > 0 && !/\s/.test(state.text[start - 1] ?? "")) {
+    start--;
+  }
+  if (start === end) {
+    return state;
+  }
+  return {
+    text: state.text.slice(0, start) + state.text.slice(end),
+    cursor: start
+  };
 }
 
 export function reset(): PromptBufferState {

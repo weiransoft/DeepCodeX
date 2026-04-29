@@ -4,6 +4,7 @@ import {
   EMPTY_BUFFER,
   backspace,
   deleteForward,
+  deleteWordBefore,
   getCurrentSlashToken,
   insertText,
   killLine,
@@ -12,6 +13,8 @@ import {
   moveLineEnd,
   moveLineStart,
   moveRight,
+  moveWordLeft,
+  moveWordRight,
   moveUp
 } from "../ui/promptBuffer";
 
@@ -47,6 +50,12 @@ test("moveLeft and moveRight clamp at boundaries", () => {
   assert.equal(right.cursor, 2);
 });
 
+test("word movement skips whitespace and preserves buffer text", () => {
+  const buffer = { text: "hello  brave world", cursor: 18 };
+  assert.deepEqual(moveWordLeft(buffer), { text: buffer.text, cursor: 13 });
+  assert.deepEqual(moveWordRight({ text: buffer.text, cursor: 5 }), { text: buffer.text, cursor: 12 });
+});
+
 test("moveUp navigates to the previous line preserving column", () => {
   const buffer = { text: "hello\nworld", cursor: 9 };
   const result = moveUp(buffer);
@@ -77,6 +86,12 @@ test("killLine removes from the cursor to end of line only", () => {
   const buffer = { text: "abc\nxyz", cursor: 1 };
   const result = killLine(buffer);
   assert.equal(result.text, "a\nxyz");
+});
+
+test("deleteWordBefore removes the previous word and any adjacent whitespace", () => {
+  const result = deleteWordBefore({ text: "ask the model", cursor: 8 });
+  assert.equal(result.text, "ask model");
+  assert.equal(result.cursor, 4);
 });
 
 test("getCurrentSlashToken returns the slash word at the cursor", () => {
