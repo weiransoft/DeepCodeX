@@ -64,10 +64,12 @@ test("renderBufferWithCursor hides the simulated cursor when unfocused", () => {
   assert.equal(renderBufferWithCursor({ text: "hello", cursor: 1 }, false), "hello");
 });
 
-test("renderBufferWithCursor reserves the focused cursor cell without drawing a simulated cursor", () => {
+test("renderBufferWithCursor draws the simulated cursor when focused", () => {
+  assert.equal(renderBufferWithCursor({ text: "", cursor: 0 }, true), " ");
   assert.equal(renderBufferWithCursor({ text: "hello", cursor: 5 }, true), "hello ");
   assert.equal(renderBufferWithCursor({ text: "hello", cursor: 1 }, true), "hello");
   assert.equal(renderBufferWithCursor({ text: "hello\n", cursor: 6 }, true), "hello\n ");
+  assert.equal(renderBufferWithCursor({ text: "\n", cursor: 1 }, true), "\n ");
 });
 
 test("getPromptCursorPlacement targets the prompt row above divider and footer", () => {

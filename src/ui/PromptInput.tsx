@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useStdin, useStdout } from "ink";
+import chalk from "chalk";
 import {
   EMPTY_BUFFER,
   PromptBufferState,
@@ -721,12 +722,12 @@ export function renderBufferWithCursor(state: PromptBufferState, isFocused: bool
   }
 
   if (typeof at === "undefined") {
-    return before + " ";
+    return before + chalk.inverse(" ");
   }
   if (at === "\n") {
-    return before + " " + "\n" + after;
+    return before + chalk.inverse(" ") + "\n" + after;
   }
-  return text;
+  return before + chalk.inverse(at) + after;
 }
 
 export function useTerminalInput(
