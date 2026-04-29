@@ -20,7 +20,8 @@ type UpdateState = {
 };
 
 const UPDATE_STATE_FILE = "update-check.json";
-const NPM_REGISTRY_URL = "https://registry.npmjs.org";
+const NPM_VIEW_TIMEOUT_MS = 5000;
+const MAX_NPM_VIEW_OUTPUT_CHARS = 64 * 1024;
 
 export async function promptForPendingUpdate(packageInfo: PackageInfo): Promise<{ installed: boolean }> {
   const state = readUpdateState();
@@ -175,16 +176,65 @@ async function runNpmInstallGlobal(installSpec: string): Promise<boolean> {
 }
 
 async function fetchLatestNpmVersion(packageName: string): Promise<string | null> {
-  const encodedName = encodeURIComponent(packageName);
-  const response = await fetch(`${NPM_REGISTRY_URL}/${encodedName}`, {
-    headers: { Accept: "application/json" }
-  });
-  if (!response.ok) {
+  const result = await runNpmViewLatestVersion(packageName, NPM_VIEW_TIMEOUT_MS);
+  if (!result.ok) {
     return null;
   }
-  const payload = await response.json() as { "dist-tags"?: { latest?: unknown } };
-  const latest = payload["dist-tags"]?.latest;
-  return typeof latest === "string" && latest.trim() ? latest.trim() : null;
+  return parseNpmViewVersion(result.stdout);
+}
+
+function runNpmViewLatestVersion(
+  packageName: string,
+  timeoutMs: number
+): Promise<{ ok: true; stdout: string } | { ok: false }> {
+  return new Promise((resolve) => {
+    const child = spawn("npm", ["view", packageName, "dist-tags.latest", "--json"], {
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: process.platform === "win32"
+    });
+
+    let stdout = "";
+    let settled = false;
+    const finish = (result: { ok: true; stdout: string } | { ok: false }): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => {
+      child.kill();
+      finish({ ok: false });
+    }, timeoutMs);
+
+    child.stdout?.on("data", (chunk: string | Buffer) => {
+      if (stdout.length >= MAX_NPM_VIEW_OUTPUT_CHARS) {
+        return;
+      }
+      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      stdout += text.slice(0, MAX_NPM_VIEW_OUTPUT_CHARS - stdout.length);
+    });
+
+    child.on("error", () => finish({ ok: false }));
+    child.on("close", (code) => {
+      finish(code === 0 ? { ok: true, stdout } : { ok: false });
+    });
+  });
+}
+
+export function parseNpmViewVersion(output: string): string | null {
+  const trimmed = output.trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return typeof parsed === "string" && parsed.trim() ? parsed.trim() : null;
+  } catch {
+    return trimmed.split(/\r?\n/)[0]?.trim() || null;
+  }
 }
 
 function readUpdateState(): UpdateState {
