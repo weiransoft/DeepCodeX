@@ -1,0 +1,227 @@
+import { spawn } from "child_process";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
+import * as readline from "readline/promises";
+
+export type PackageInfo = {
+  name: string;
+  version: string;
+};
+
+type UpdateState = {
+  pending?: {
+    currentVersion: string;
+    latestVersion: string;
+    packageName: string;
+    checkedAt: string;
+  } | null;
+  ignoredVersions?: string[];
+};
+
+const UPDATE_STATE_FILE = "update-check.json";
+const NPM_REGISTRY_URL = "https://registry.npmjs.org";
+
+export async function promptForPendingUpdate(packageInfo: PackageInfo): Promise<{ installed: boolean }> {
+  const state = readUpdateState();
+  const pending = state.pending;
+  if (!pending) {
+    return { installed: false };
+  }
+
+  if (compareVersions(packageInfo.version, pending.latestVersion) >= 0) {
+    writeUpdateState({ ...state, pending: null });
+    return { installed: false };
+  }
+
+  if (state.ignoredVersions?.includes(pending.latestVersion)) {
+    writeUpdateState({ ...state, pending: null });
+    return { installed: false };
+  }
+
+  const installSpec = `${pending.packageName}@${pending.latestVersion}`;
+  const installCommand = `npm install -g ${installSpec}`;
+  const choice = await promptUpdateChoice({
+    currentVersion: packageInfo.version,
+    latestVersion: pending.latestVersion,
+    installCommand
+  });
+
+  if (choice === "install") {
+    const ok = await runNpmInstallGlobal(installSpec);
+    if (ok) {
+      writeUpdateState({ ...state, pending: null });
+      process.stdout.write("Deep Code has been updated. Please restart the CLI to use the new version.\n");
+    }
+    return { installed: ok };
+  }
+
+  if (choice === "ignore-version") {
+    const ignoredVersions = Array.from(new Set([...(state.ignoredVersions ?? []), pending.latestVersion]));
+    writeUpdateState({ ...state, pending: null, ignoredVersions });
+    return { installed: false };
+  }
+
+  writeUpdateState({ ...state, pending: null });
+  return { installed: false };
+}
+
+export async function checkForNpmUpdate(packageInfo: PackageInfo): Promise<void> {
+  if (!packageInfo.name || !packageInfo.version) {
+    return;
+  }
+
+  try {
+    const latestVersion = await fetchLatestNpmVersion(packageInfo.name);
+    if (!latestVersion || compareVersions(latestVersion, packageInfo.version) <= 0) {
+      clearPendingUpdate();
+      return;
+    }
+
+    const state = readUpdateState();
+    if (state.ignoredVersions?.includes(latestVersion)) {
+      clearPendingUpdate(state);
+      return;
+    }
+
+    writeUpdateState({
+      ...state,
+      pending: {
+        currentVersion: packageInfo.version,
+        latestVersion,
+        packageName: packageInfo.name,
+        checkedAt: new Date().toISOString()
+      }
+    });
+  } catch {
+    // Update checks must never affect CLI startup or normal operation.
+  }
+}
+
+export function compareVersions(a: string, b: string): number {
+  const left = parseVersion(a);
+  const right = parseVersion(b);
+  const width = Math.max(left.length, right.length);
+  for (let index = 0; index < width; index += 1) {
+    const leftPart = left[index] ?? 0;
+    const rightPart = right[index] ?? 0;
+    if (leftPart > rightPart) {
+      return 1;
+    }
+    if (leftPart < rightPart) {
+      return -1;
+    }
+  }
+  return 0;
+}
+
+export function getUpdateStatePath(): string {
+  return path.join(os.homedir(), ".deepcode", UPDATE_STATE_FILE);
+}
+
+async function promptUpdateChoice({
+  currentVersion,
+  latestVersion,
+  installCommand
+}: {
+  currentVersion: string;
+  latestVersion: string;
+  installCommand: string;
+}): Promise<"install" | "ignore-once" | "ignore-version"> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    process.stdout.write(`Deep Code latest version has been released: ${currentVersion} -> ${latestVersion}\n`);
+    process.stdout.write(`1. Install the latest version with \`${installCommand}\`\n`);
+    process.stdout.write("2. Ignore once\n");
+    process.stdout.write(`3. Ignore this version (${latestVersion})\n`);
+
+    while (true) {
+      const answer = (await rl.question("Choose 1, 2, or 3: ")).trim();
+      if (answer === "1") {
+        return "install";
+      }
+      if (answer === "2" || answer === "") {
+        return "ignore-once";
+      }
+      if (answer === "3") {
+        return "ignore-version";
+      }
+      process.stdout.write("Please enter 1, 2, or 3.\n");
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+async function runNpmInstallGlobal(installSpec: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = spawn("npm", ["install", "-g", installSpec], {
+      stdio: "inherit",
+      shell: process.platform === "win32"
+    });
+    child.on("error", (error) => {
+      process.stderr.write(`Failed to start npm install: ${error.message}\n`);
+      resolve(false);
+    });
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve(true);
+        return;
+      }
+      process.stderr.write(`npm install exited with code ${code ?? "unknown"}.\n`);
+      resolve(false);
+    });
+  });
+}
+
+async function fetchLatestNpmVersion(packageName: string): Promise<string | null> {
+  const encodedName = encodeURIComponent(packageName);
+  const response = await fetch(`${NPM_REGISTRY_URL}/${encodedName}`, {
+    headers: { Accept: "application/json" }
+  });
+  if (!response.ok) {
+    return null;
+  }
+  const payload = await response.json() as { "dist-tags"?: { latest?: unknown } };
+  const latest = payload["dist-tags"]?.latest;
+  return typeof latest === "string" && latest.trim() ? latest.trim() : null;
+}
+
+function readUpdateState(): UpdateState {
+  const statePath = getUpdateStatePath();
+  if (!fs.existsSync(statePath)) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(statePath, "utf8")) as UpdateState;
+    return {
+      pending: parsed.pending ?? null,
+      ignoredVersions: Array.isArray(parsed.ignoredVersions)
+        ? parsed.ignoredVersions.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+        : []
+    };
+  } catch {
+    return {};
+  }
+}
+
+function writeUpdateState(state: UpdateState): void {
+  const statePath = getUpdateStatePath();
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+}
+
+function clearPendingUpdate(state = readUpdateState()): void {
+  if (!state.pending) {
+    return;
+  }
+  writeUpdateState({ ...state, pending: null });
+}
+
+function parseVersion(value: string): number[] {
+  return value
+    .split("-", 1)[0]
+    .split(".")
+    .map((part) => Number.parseInt(part, 10))
+    .map((part) => (Number.isFinite(part) ? part : 0));
+}

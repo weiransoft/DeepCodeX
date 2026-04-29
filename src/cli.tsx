@@ -1,18 +1,13 @@
 import React from "react";
 import { render } from "ink";
 import { App } from "./ui/App";
+import { checkForNpmUpdate, promptForPendingUpdate, type PackageInfo } from "./updateCheck";
 
 const args = process.argv.slice(2);
+const packageInfo = readPackageInfo();
 
 if (args.includes("--version") || args.includes("-v")) {
-  // version is replaced at build time below if needed; fallback to package.json read
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const pkg = require("../package.json");
-    process.stdout.write(`${pkg.version}\n`);
-  } catch {
-    process.stdout.write("unknown\n");
-  }
+  process.stdout.write(`${packageInfo.version || "unknown"}\n`);
   process.exit(0);
 }
 
@@ -56,10 +51,33 @@ if (!process.stdin.isTTY) {
   process.exit(1);
 }
 
-const inkInstance = render(<App projectRoot={projectRoot} />, {
-  exitOnCtrlC: false
-});
+void main();
 
-inkInstance.waitUntilExit().then(() => {
-  process.exit(0);
-});
+async function main(): Promise<void> {
+  const updatePromptResult = await promptForPendingUpdate(packageInfo);
+
+  const inkInstance = render(<App projectRoot={projectRoot} />, {
+    exitOnCtrlC: false
+  });
+
+  if (!updatePromptResult.installed) {
+    void checkForNpmUpdate(packageInfo);
+  }
+
+  inkInstance.waitUntilExit().then(() => {
+    process.exit(0);
+  });
+}
+
+function readPackageInfo(): PackageInfo {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const pkg = require("../package.json") as { name?: unknown; version?: unknown };
+    return {
+      name: typeof pkg.name === "string" ? pkg.name : "@vegamo/deepcode-cli",
+      version: typeof pkg.version === "string" ? pkg.version : ""
+    };
+  } catch {
+    return { name: "@vegamo/deepcode-cli", version: "" };
+  }
+}
