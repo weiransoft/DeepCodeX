@@ -64,9 +64,20 @@ test("renderBufferWithCursor hides the simulated cursor when unfocused", () => {
   assert.equal(renderBufferWithCursor({ text: "hello", cursor: 1 }, false), "hello");
 });
 
+test("renderBufferWithCursor reserves the focused cursor cell without drawing a simulated cursor", () => {
+  assert.equal(renderBufferWithCursor({ text: "hello", cursor: 5 }, true), "hello ");
+  assert.equal(renderBufferWithCursor({ text: "hello", cursor: 1 }, true), "hello");
+  assert.equal(renderBufferWithCursor({ text: "hello\n", cursor: 6 }, true), "hello\n ");
+});
+
 test("getPromptCursorPlacement targets the prompt row above divider and footer", () => {
   const placement = getPromptCursorPlacement({ text: "hello", cursor: 5 }, 80, "❯ ", "Enter send");
   assert.deepEqual(placement, { rowsUp: 3, column: 7 });
+});
+
+test("getPromptCursorPlacement targets the reserved row after a trailing newline", () => {
+  const placement = getPromptCursorPlacement({ text: "hello\n", cursor: 6 }, 80, "❯ ", "Enter send");
+  assert.deepEqual(placement, { rowsUp: 3, column: 2 });
 });
 
 test("getPromptCursorPlacement accounts for CJK character width", () => {
@@ -76,7 +87,7 @@ test("getPromptCursorPlacement accounts for CJK character width", () => {
 
 test("getPromptCursorPlacement accounts for multiline buffer rows", () => {
   const placement = getPromptCursorPlacement({ text: "hello\nworld", cursor: 11 }, 80, "❯ ", "Enter send");
-  assert.deepEqual(placement, { rowsUp: 3, column: 5 });
+  assert.deepEqual(placement, { rowsUp: 3, column: 7 });
   const middle = getPromptCursorPlacement({ text: "hello\nworld", cursor: 2 }, 80, "❯ ", "Enter send");
   assert.deepEqual(middle, { rowsUp: 4, column: 4 });
 });

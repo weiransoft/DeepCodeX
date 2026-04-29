@@ -1,6 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useStdin, useStdout } from "ink";
-import chalk from "chalk";
 import {
   EMPTY_BUFFER,
   PromptBufferState,
@@ -58,6 +57,7 @@ const META_LEFT_SEQUENCES = new Set(["[1;3D", "[3D", "b"]);
 const META_RIGHT_SEQUENCES = new Set(["[1;3C", "[3C", "f"]);
 const TERMINAL_FOCUS_IN = "[I";
 const TERMINAL_FOCUS_OUT = "[O";
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 export type InputKey = {
   upArrow: boolean;
@@ -100,6 +100,7 @@ export function PromptInput({
   const [historyCursor, setHistoryCursor] = useState(-1);
   const [draftBeforeHistory, setDraftBeforeHistory] = useState<string | null>(null);
   const [hasTerminalFocus, setHasTerminalFocus] = useState(true);
+  const [spinnerIndex, setSpinnerIndex] = useState(0);
   const lastCtrlDAt = useRef<number>(0);
 
   const slashItems = useMemo(() => buildSlashCommands(skills), [skills]);
@@ -107,7 +108,7 @@ export function PromptInput({
   const slashMenu = slashToken ? filterSlashCommands(slashItems, slashToken) : [];
   const showMenu = slashMenu.length > 0;
   const promptHistoryKey = useMemo(() => promptHistory.join("\0"), [promptHistory]);
-  const promptPrefix = busy ? "⠋ " : "❯ ";
+  const promptPrefix = busy ? `${SPINNER_FRAMES[spinnerIndex]} ` : "❯ ";
   const footerText = statusMessage
     ? statusMessage
     : busy
@@ -122,6 +123,17 @@ export function PromptInput({
 
   useTerminalFocusReporting(stdout, !disabled);
   usePromptTerminalCursor(stdout, cursorPlacement, !disabled);
+
+  useEffect(() => {
+    if (!busy) {
+      setSpinnerIndex(0);
+      return;
+    }
+    const timer = setInterval(() => {
+      setSpinnerIndex((index) => (index + 1) % SPINNER_FRAMES.length);
+    }, 80);
+    return () => clearInterval(timer);
+  }, [busy]);
 
   useEffect(() => {
     if (!showMenu) {
@@ -620,19 +632,19 @@ function measureTextPosition(text: string, width: number, initialColumn: number)
   for (const char of Array.from(text)) {
     if (char === "\n") {
       row++;
-      column = 0;
+      column = Math.min(initialColumn, width - 1);
       continue;
     }
 
     const charColumns = textWidth(char);
     if (column + charColumns > width) {
       row++;
-      column = 0;
+      column = Math.min(initialColumn, width - 1);
     }
     column += charColumns;
     if (column >= width) {
       row++;
-      column = 0;
+      column = Math.min(initialColumn, width - 1);
     }
   }
 
@@ -705,16 +717,16 @@ export function renderBufferWithCursor(state: PromptBufferState, isFocused: bool
   const at = text[cursor];
   const after = text.slice(cursor + 1);
   if (!isFocused) {
-    return text;
+    return text.endsWith("\n") ? `${text} ` : text;
   }
 
   if (typeof at === "undefined") {
-    return before + chalk.inverse(" ");
+    return before + " ";
   }
   if (at === "\n") {
-    return before + chalk.inverse(" ") + "\n" + after;
+    return before + " " + "\n" + after;
   }
-  return before + chalk.inverse(at) + after;
+  return text;
 }
 
 export function useTerminalInput(
