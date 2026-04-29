@@ -50,13 +50,15 @@ export function MessageView({ message }: Props): React.ReactElement | null {
 
   if (message.role === "tool") {
     const summary = buildToolSummary(message);
+    const diffLines = getToolDiffPreviewLines(summary);
     return (
-      <Box marginY={0}>
+      <Box flexDirection="column" marginY={0}>
         <StatusLine
           bulletColor={summary.ok ? "green" : "red"}
           name={formatStatusName(summary.name)}
           params={truncate(firstNonEmptyLine(summary.params), 120)}
         />
+        {diffLines.length > 0 ? <DiffPreview lines={diffLines} /> : null}
       </Box>
     );
   }
@@ -103,7 +105,20 @@ function StatusLine({
   );
 }
 
-function buildToolSummary(message: SessionMessage): { name: string; params: string; ok: boolean } {
+type ToolSummary = {
+  name: string;
+  params: string;
+  ok: boolean;
+  metadata: Record<string, unknown> | null;
+};
+
+type DiffPreviewLine = {
+  marker: string;
+  content: string;
+  kind: "added" | "removed" | "context";
+};
+
+function buildToolSummary(message: SessionMessage): ToolSummary {
   const payload = parseToolPayload(message.content);
   const metaFunctionName =
     message.meta?.function && typeof (message.meta.function as { name?: unknown }).name === "string"
@@ -117,7 +132,8 @@ function buildToolSummary(message: SessionMessage): { name: string; params: stri
   return {
     name,
     params,
-    ok: payload.ok !== false
+    ok: payload.ok !== false,
+    metadata: payload.metadata
   };
 }
 
@@ -177,20 +193,77 @@ function extractQuestionsFromValue(value: unknown): string {
     .join(" / ");
 }
 
-function parseToolPayload(content: string | null): { name: string | null; ok: boolean } {
+function parseToolPayload(
+  content: string | null
+): { name: string | null; ok: boolean; metadata: Record<string, unknown> | null } {
   if (!content) {
-    return { name: null, ok: true };
+    return { name: null, ok: true, metadata: null };
   }
 
   try {
-    const parsed = JSON.parse(content) as { name?: unknown; ok?: unknown };
+    const parsed = JSON.parse(content) as { name?: unknown; ok?: unknown; metadata?: unknown };
     return {
       name: typeof parsed.name === "string" && parsed.name.trim() ? parsed.name.trim() : null,
-      ok: parsed.ok !== false
+      ok: parsed.ok !== false,
+      metadata: isPlainRecord(parsed.metadata) ? parsed.metadata : null
     };
   } catch {
-    return { name: null, ok: true };
+    return { name: null, ok: true, metadata: null };
   }
+}
+
+function getToolDiffPreviewLines(summary: ToolSummary): DiffPreviewLine[] {
+  if (!summary.ok || !["edit", "write"].includes(summary.name.toLowerCase())) {
+    return [];
+  }
+  const diffPreview = summary.metadata?.diff_preview;
+  if (typeof diffPreview !== "string" || !diffPreview.trim()) {
+    return [];
+  }
+  return parseDiffPreview(diffPreview);
+}
+
+export function parseDiffPreview(diffPreview: string): DiffPreviewLine[] {
+  return diffPreview
+    .split("\n")
+    .filter((line) => line && !line.startsWith("--- ") && !line.startsWith("+++ ") && !line.startsWith("@@ "))
+    .map((line) => {
+      if (line.startsWith("+")) {
+        return { marker: "+", content: line.slice(1), kind: "added" };
+      }
+      if (line.startsWith("-")) {
+        return { marker: "-", content: line.slice(1), kind: "removed" };
+      }
+      return {
+        marker: " ",
+        content: line.startsWith(" ") ? line.slice(1) : line,
+        kind: "context"
+      };
+    });
+}
+
+function DiffPreview({ lines }: { lines: DiffPreviewLine[] }): React.ReactElement {
+  return (
+    <Box flexDirection="column" marginLeft={2}>
+      <Text dimColor>└ Changes</Text>
+      <Box flexDirection="column" marginLeft={2}>
+        {lines.map((line, index) => (
+          <Text key={`${index}-${line.marker}-${line.content}`} wrap="truncate-end">
+            <Text color={line.kind === "added" ? "green" : line.kind === "removed" ? "red" : "gray"}>
+              {line.marker}
+            </Text>
+            <Text color={line.kind === "added" ? "green" : line.kind === "removed" ? "red" : undefined}>
+              {line.content}
+            </Text>
+          </Text>
+        ))}
+      </Box>
+    </Box>
+  );
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function formatStatusName(value: string): string {
