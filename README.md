@@ -10,6 +10,8 @@ npm install -g @vegamo/deepcode-cli
 
 Then run `deepcode` inside any project directory.
 
+![intro1](resources/intro1.png)
+
 ## Configure
 
 Create `~/.deepcode/settings.json`:
@@ -48,6 +50,7 @@ Inside the TUI press `/` to open the skill picker, or type the skill name direct
 | `/`             | Open the skills / commands menu              |
 | `/new`          | Start a fresh conversation                   |
 | `/resume`       | Choose a previous conversation to continue   |
+| `/skills`       | List available skills                        |
 | `/exit`         | Quit Deep Code                               |
 | `Ctrl+D` twice  | Quit Deep Code                               |
 
