@@ -19,6 +19,7 @@ import { MessageView } from "./MessageView";
 import { SessionList } from "./SessionList";
 import { buildLoadingText } from "./loadingText";
 import { findExpandedThinkingId } from "./thinkingState";
+import { WelcomeScreen } from "./WelcomeScreen";
 import { AskUserQuestionPrompt } from "./AskUserQuestionPrompt";
 import {
   findPendingAskUserQuestion,
@@ -33,9 +34,10 @@ type View = "chat" | "session-list";
 
 type AppProps = {
   projectRoot: string;
+  version?: string;
 };
 
-export function App({ projectRoot }: AppProps): React.ReactElement {
+export function App({ projectRoot, version = "" }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout, write } = useStdout();
   const [view, setView] = useState<View>("chat");
@@ -222,6 +224,7 @@ export function App({ projectRoot }: AppProps): React.ReactElement {
   const loadingText = busy
     ? buildLoadingText({ progress: streamProgress, processes: runningProcesses, now: Date.now() })
     : null;
+  const welcomeSettings = useMemo(() => resolveCurrentSettings(), []);
 
   const handleQuestionAnswers = useCallback(
     (answers: AskUserQuestionAnswers) => {
@@ -242,6 +245,15 @@ export function App({ projectRoot }: AppProps): React.ReactElement {
 
   return (
     <Box flexDirection="column" width={screenWidth}>
+      {view === "chat" && messages.length === 0 ? (
+        <WelcomeScreen
+          projectRoot={projectRoot}
+          settings={welcomeSettings}
+          skills={skills}
+          version={version}
+          width={screenWidth}
+        />
+      ) : null}
       <Static items={messages}>
         {(message) => (
           <MessageView

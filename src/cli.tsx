@@ -60,7 +60,7 @@ void main();
 async function main(): Promise<void> {
   const updatePromptResult = await promptForPendingUpdate(packageInfo);
 
-  const inkInstance = render(<App projectRoot={projectRoot} />, {
+  const inkInstance = render(<App projectRoot={projectRoot} version={packageInfo.version} />, {
     exitOnCtrlC: false
   });
 
