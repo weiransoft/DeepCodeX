@@ -48,7 +48,7 @@ export function SessionList({ sessions, onSelect, onCancel }: Props): React.Reac
         <Text key={session.id} color={i === index ? "cyanBright" : undefined}>
           {i === index ? "› " : "  "}
           <Text dimColor>{formatTimestamp(session.updateTime)} </Text>
-          <Text>{truncate(session.summary || "Untitled", 70)}</Text>
+          <Text>{formatSessionTitle(session.summary || "Untitled")}</Text>
           <Text dimColor>  ({session.status})</Text>
         </Text>
       ))}
@@ -70,6 +70,10 @@ function formatTimestamp(value: string): string {
   } catch {
     return value;
   }
+}
+
+export function formatSessionTitle(value: string, max = 70): string {
+  return truncate(value.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim(), max);
 }
 
 function truncate(value: string, max: number): string {

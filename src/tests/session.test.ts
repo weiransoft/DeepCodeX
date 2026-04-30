@@ -168,6 +168,48 @@ test("SessionManager repairs legacy thinking tool calls missing reasoning conten
   );
 });
 
+test("SessionManager replays normal assistant messages with reasoning content in thinking mode", () => {
+  const manager = new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({
+      client: null,
+      model: "test-model",
+      thinkingEnabled: false
+    }),
+    getResolvedSettings: () => ({}),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {}
+  });
+
+  const messages: SessionMessage[] = [
+    {
+      id: "assistant-final",
+      sessionId: "session-1",
+      role: "assistant",
+      content: "Final answer",
+      contentParams: null,
+      messageParams: null,
+      compacted: false,
+      visible: true,
+      createTime: "2026-01-01T00:00:00.000Z",
+      updateTime: "2026-01-01T00:00:00.000Z"
+    }
+  ];
+
+  const thinkingMessages = (manager as any).buildOpenAIMessages(messages, true) as Array<{
+    reasoning_content?: string;
+  }>;
+  const nonThinkingMessages = (manager as any).buildOpenAIMessages(messages, false) as Array<{
+    reasoning_content?: string;
+  }>;
+
+  assert.equal(thinkingMessages[0]?.reasoning_content, "");
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(nonThinkingMessages[0] ?? {}, "reasoning_content"),
+    false
+  );
+});
+
 test("SessionManager normalizes legacy sessions without activeTokens to zero", () => {
   const workspace = createTempDir("deepcode-legacy-active-tokens-workspace-");
   const home = createTempDir("deepcode-legacy-active-tokens-home-");

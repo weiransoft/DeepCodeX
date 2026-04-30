@@ -1516,8 +1516,8 @@ ${skillMd}
           }
           if (typeof messageParams?.reasoning_content === "string") {
             (base as { reasoning_content?: string }).reasoning_content = messageParams.reasoning_content;
-          } else if (thinkingEnabled && message.role === "assistant" && messageParams?.tool_calls) {
-            // Thinking-mode providers require replayed tool-call assistant messages
+          } else if (thinkingEnabled && message.role === "assistant") {
+            // Thinking-mode providers require every replayed assistant message
             // to include the reasoning_content field, even when it is empty.
             (base as { reasoning_content?: string }).reasoning_content = "";
           }
