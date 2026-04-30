@@ -27,18 +27,19 @@ if (args.includes("--help") || args.includes("-h")) {
       "  ./.deepcode/skills/*/SKILL.md Project-level skills",
       "",
       "Inside the TUI:",
-      "  Enter            Send the prompt",
-      "  Shift+Enter      Insert a newline",
-      "  Home/End         Move within the current line",
-      "  Alt+Left/Right   Move by word",
-      "  Ctrl+W           Delete the previous word",
-      "  Ctrl+V           Paste an image from the clipboard",
-      "  Esc              Interrupt the current model turn",
+      "  enter            Send the prompt",
+      "  shift+enter      Insert a newline",
+      "  home/end         Move within the current line",
+      "  alt+left/right   Move by word",
+      "  ctrl+w           Delete the previous word",
+      "  ctrl+v           Paste an image from the clipboard",
+      "  ctrl+x           Clear pasted images",
+      "  esc              Interrupt the current model turn",
       "  /                Open the skills/commands menu",
       "  /new             Start a fresh conversation",
       "  /resume          Pick a previous conversation to continue",
       "  /exit            Quit",
-      "  Ctrl+D twice     Quit"
+      "  ctrl+d twice     Quit"
     ].join("\n") + "\n"
   );
   process.exit(0);

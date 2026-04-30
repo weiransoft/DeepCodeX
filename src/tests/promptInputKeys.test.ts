@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { getPromptCursorPlacement, parseTerminalInput, renderBufferWithCursor } from "../ui/PromptInput";
+import {
+  IMAGE_ATTACHMENT_CLEAR_HINT,
+  formatImageAttachmentStatus,
+  getPromptCursorPlacement,
+  isClearImageAttachmentsShortcut,
+  parseTerminalInput,
+  renderBufferWithCursor
+} from "../ui/PromptInput";
 
 test("parseTerminalInput treats DEL bytes as backspace", () => {
   const { input, key } = parseTerminalInput("\u007F");
@@ -57,6 +64,20 @@ test("parseTerminalInput recognizes terminal focus events", () => {
   assert.equal(focusIn.key.meta, false);
   assert.equal(focusOut.key.focusOut, true);
   assert.equal(focusOut.key.meta, false);
+});
+
+test("parseTerminalInput recognizes ctrl+x as the image attachment clear shortcut", () => {
+  const { input, key } = parseTerminalInput("\u0018");
+  assert.equal(input, "x");
+  assert.equal(key.ctrl, true);
+  assert.equal(isClearImageAttachmentsShortcut(input, key), true);
+});
+
+test("formatImageAttachmentStatus formats the image count label", () => {
+  assert.equal(formatImageAttachmentStatus(0), "");
+  assert.equal(formatImageAttachmentStatus(1), "📎 1 image attached");
+  assert.equal(formatImageAttachmentStatus(2), "📎 2 images attached");
+  assert.equal(IMAGE_ATTACHMENT_CLEAR_HINT, "ctrl+x clear images");
 });
 
 test("renderBufferWithCursor hides the simulated cursor when unfocused", () => {

@@ -115,8 +115,8 @@ export function PromptInput({
     : busy
       ? loadingText && loadingText.trim()
         ? loadingText
-        : "Esc to interrupt · Ctrl+C to cancel input"
-      : "Enter send · Shift+Enter newline · Ctrl+V image · / commands · Ctrl+D exit";
+        : "esc to interrupt · ctrl+c to cancel input"
+      : "enter send · shift+enter newline · ctrl+v image · / commands · ctrl+d exit";
   const cursorPlacement = useMemo(
     () => getPromptCursorPlacement(buffer, screenWidth, promptPrefix, footerText),
     [buffer, footerText, promptPrefix, screenWidth]
@@ -194,7 +194,7 @@ export function PromptInput({
       }
       lastCtrlDAt.current = now;
       setPendingExit(true);
-      setStatusMessage("Press Ctrl+D again to exit");
+      setStatusMessage("press ctrl+d again to exit");
       return;
     }
 
@@ -205,7 +205,7 @@ export function PromptInput({
       } else if (!isEmpty(buffer)) {
         setBuffer(EMPTY_BUFFER);
       } else {
-        setStatusMessage("Press Ctrl+D to exit");
+        setStatusMessage("press ctrl+d to exit");
       }
       return;
     }
@@ -229,11 +229,21 @@ export function PromptInput({
       return;
     }
 
+    if (isClearImageAttachmentsShortcut(input, key)) {
+      if (imageUrls.length > 0) {
+        setImageUrls([]);
+        setStatusMessage("Cleared attached images");
+      } else {
+        setStatusMessage("No attached images to clear");
+      }
+      return;
+    }
+
     const noModifier = !key.shift && !key.ctrl && !key.meta;
     const isPlainReturn = key.return && !key.shift && !key.meta;
 
     if (busy && (isPlainReturn || (showMenu && key.tab))) {
-      setStatusMessage("Wait for the current response or press Esc to interrupt");
+      setStatusMessage("wait for the current response or press esc to interrupt");
       return;
     }
 
@@ -421,7 +431,7 @@ export function PromptInput({
 
   function handleSlashSelection(item: SlashCommandItem): void {
     if (busy && item.kind !== "exit") {
-      setStatusMessage("Wait for the current response or press Esc to interrupt");
+      setStatusMessage("wait for the current response or press esc to interrupt");
       return;
     }
 
@@ -451,7 +461,7 @@ export function PromptInput({
 
   function submitCurrentBuffer(): void {
     if (busy) {
-      setStatusMessage("Wait for the current response or press Esc to interrupt");
+      setStatusMessage("wait for the current response or press esc to interrupt");
       return;
     }
 
@@ -482,7 +492,8 @@ export function PromptInput({
     <Box flexDirection="column">
       {imageUrls.length > 0 ? (
         <Box>
-          <Text color="magenta">{`📎 ${imageUrls.length} image${imageUrls.length === 1 ? "" : "s"} attached`}</Text>
+          <Text color="magenta">{formatImageAttachmentStatus(imageUrls.length)}</Text>
+          <Text dimColor>{` (${IMAGE_ATTACHMENT_CLEAR_HINT})`}</Text>
         </Box>
       ) : null}
       {showMenu ? (
@@ -508,6 +519,19 @@ export function PromptInput({
       </Box>
     </Box>
   );
+}
+
+export const IMAGE_ATTACHMENT_CLEAR_HINT = "ctrl+x clear images";
+
+export function formatImageAttachmentStatus(count: number): string {
+  if (count <= 0) {
+    return "";
+  }
+  return `📎 ${count} image${count === 1 ? "" : "s"} attached`;
+}
+
+export function isClearImageAttachmentsShortcut(input: string, key: Pick<InputKey, "ctrl">): boolean {
+  return key.ctrl && (input === "x" || input === "X");
 }
 
 type CursorPlacement = {
