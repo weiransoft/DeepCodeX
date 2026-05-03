@@ -50,6 +50,34 @@ test("findPendingAskUserQuestion returns latest pending AskUserQuestion tool mes
   assert.equal(pending?.questions[0]?.options[0]?.description, "Use package-lock.json.");
 });
 
+test("findPendingAskUserQuestion preserves multiple pending questions in order", () => {
+  const pending = findPendingAskUserQuestion([
+    message({
+      ok: true,
+      name: "AskUserQuestion",
+      awaitUserResponse: true,
+      metadata: {
+        kind: "ask_user_question",
+        questions: [
+          {
+            question: "Use default description?",
+            options: [{ label: "Yes" }, { label: "Custom" }]
+          },
+          {
+            question: "Where should the project be created?",
+            options: [{ label: "Current directory" }, { label: "Custom path" }]
+          }
+        ]
+      }
+    })
+  ], "waiting_for_user");
+
+  assert.deepEqual(
+    pending?.questions.map((question) => question.question),
+    ["Use default description?", "Where should the project be created?"]
+  );
+});
+
 test("findPendingAskUserQuestion ignores questions unless session waits for user", () => {
   const pending = findPendingAskUserQuestion([
     message({

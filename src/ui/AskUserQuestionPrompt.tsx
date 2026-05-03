@@ -70,16 +70,6 @@ export function AskUserQuestionPrompt({ questions, onSubmit, onCancel }: Props):
       return;
     }
 
-    if (key.tab || key.rightArrow) {
-      moveQuestion(1);
-      return;
-    }
-
-    if (key.leftArrow) {
-      moveQuestion(-1);
-      return;
-    }
-
     if (key.upArrow) {
       setCursorIndex((index) => Math.max(0, index - 1));
       return;
@@ -131,14 +121,6 @@ export function AskUserQuestionPrompt({ questions, onSubmit, onCancel }: Props):
     return null;
   }
 
-  function moveQuestion(direction: -1 | 1): void {
-    if (questions.length <= 1) {
-      return;
-    }
-    setQuestionIndex((index) => Math.max(0, Math.min(questions.length - 1, index + direction)));
-    setCursorIndex(0);
-  }
-
   function toggleCurrentOption(): void {
     const value = options[cursorIndex]?.value;
     if (value) {
@@ -186,7 +168,6 @@ export function AskUserQuestionPrompt({ questions, onSubmit, onCancel }: Props):
         <Text color="yellow" bold>Answer questions</Text>
         <Text dimColor>  {questionIndex + 1}/{questions.length}</Text>
       </Box>
-      {questions.length > 1 ? <QuestionTabs questions={questions} currentIndex={questionIndex} answers={answers} /> : null}
       <Text bold>{question.question}</Text>
       <Box flexDirection="column" marginTop={1}>
         {options.map((option, index) => {
@@ -221,34 +202,10 @@ export function AskUserQuestionPrompt({ questions, onSubmit, onCancel }: Props):
           {statusMessage ?? (isCurrentOther
             ? "Type your answer · Backspace edit · Enter submit/next · ↑ choose presets · Esc type manually"
             : question.multiSelect
-              ? "↑/↓ move · Space toggle · Enter submit/next · Tab switch · Esc type manually"
-              : "↑/↓ move · Enter select/next · Tab switch · Esc type manually")}
+              ? "↑/↓ move · Space toggle · Enter submit/next · Esc type manually"
+              : "↑/↓ move · Enter select/next · Esc type manually")}
         </Text>
       </Box>
-    </Box>
-  );
-}
-
-function QuestionTabs({
-  questions,
-  currentIndex,
-  answers
-}: {
-  questions: AskUserQuestionItem[];
-  currentIndex: number;
-  answers: AskUserQuestionAnswers;
-}): React.ReactElement {
-  return (
-    <Box marginBottom={1}>
-      {questions.map((question, index) => {
-        const answered = Boolean(answers[question.question]);
-        const label = ` ${answered ? "✓" : "□"} Q${index + 1} `;
-        return (
-          <Text key={question.question} inverse={index === currentIndex} color={answered ? "green" : undefined}>
-            {label}
-          </Text>
-        );
-      })}
     </Box>
   );
 }
