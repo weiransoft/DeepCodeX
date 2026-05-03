@@ -37,7 +37,6 @@ Deep Code CLI 支持 agent skills，允许您扩展助手的能力：
 
 - **User-level Skills**：从 `~/.agents/skills/` 目录中发现并激活 skills。
 - **Project-level Skills**：从 `./.deepcode/skills/` 目录中加载项目专属 skills。
-- 在 TUI 中按 `/` 打开 skill 选择器，或直接输入 skill 名称（如 `/skill-writer`）。
 
 ### **为 DeepSeek 优化**
 - 专门为 DeepSeek 模型性能调优。

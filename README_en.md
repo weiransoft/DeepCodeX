@@ -37,7 +37,6 @@ Deep Code CLI supports agent skills that allow you to extend the assistant's cap
 
 - **User-level Skills**: discovered and activated from `~/.agents/skills/`.
 - **Project-level Skills**: loaded from `./.deepcode/skills/` for project-specific workflows.
-- Press `/` in the TUI to open the skill picker, or type the skill name directly (e.g. `/skill-writer`).
 
 ### **Optimized for DeepSeek**
 - Specifically tuned for DeepSeek model performance.
