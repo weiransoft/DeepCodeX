@@ -899,7 +899,7 @@ export function useTerminalInput(
   inputHandler: (input: string, key: InputKey) => void,
   options: { isActive?: boolean } = {}
 ): void {
-  const { stdin, setRawMode, internal_exitOnCtrlC } = useStdin();
+  const { stdin, setRawMode } = useStdin();
   const isActive = options.isActive ?? true;
 
   useEffect(() => {
@@ -918,17 +918,14 @@ export function useTerminalInput(
     }
     const handleData = (data: Buffer | string) => {
       const { input, key } = parseTerminalInput(data);
-
-      if (!(input === "c" && key.ctrl) || !internal_exitOnCtrlC) {
-        inputHandler(input, key);
-      }
+      inputHandler(input, key);
     };
 
     stdin?.on("data", handleData);
     return () => {
       stdin?.off("data", handleData);
     };
-  }, [isActive, stdin, internal_exitOnCtrlC, inputHandler]);
+  }, [isActive, stdin, inputHandler]);
 }
 
 export function parseTerminalInput(data: Buffer | string): { input: string; key: InputKey } {
