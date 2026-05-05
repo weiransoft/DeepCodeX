@@ -278,11 +278,6 @@ export function PromptInput({
     const noModifier = !key.shift && !key.ctrl && !key.meta;
     const isPlainReturn = key.return && !key.shift && !key.meta;
 
-    if (busy && (isPlainReturn || (showMenu && key.tab))) {
-      setStatusMessage("wait for the current response or press esc to interrupt");
-      return;
-    }
-
     if (showMenu) {
       if (key.upArrow) {
         setMenuIndex((idx) => (idx - 1 + slashMenu.length) % slashMenu.length);
@@ -299,6 +294,11 @@ export function PromptInput({
           return;
         }
       }
+    }
+
+    if (busy && isPlainReturn) {
+      setStatusMessage("wait for the current response or press esc to interrupt");
+      return;
     }
 
     if (key.return) {

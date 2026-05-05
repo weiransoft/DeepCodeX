@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, Static, Text, useApp, useStdout } from "ink";
+import chalk from "chalk";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -52,6 +53,7 @@ export function App({ projectRoot, version = "" }: AppProps): React.ReactElement
   const [runningProcesses, setRunningProcesses] = useState<SessionEntry["processes"]>(null);
   const [activeStatus, setActiveStatus] = useState<SessionStatus | null>(null);
   const [dismissedQuestionIds, setDismissedQuestionIds] = useState<Set<string>>(() => new Set());
+  const [isExiting, setIsExiting] = useState(false);
   const [, setNowTick] = useState(0);
 
   const messagesRef = useRef<SessionMessage[]>([]);
@@ -115,15 +117,22 @@ export function App({ projectRoot, version = "" }: AppProps): React.ReactElement
   const handlePrompt = useCallback(
     async (submission: PromptSubmission) => {
       if (submission.command === "exit") {
-        const activeSessionId = sessionManager.getActiveSessionId();
-        const session = activeSessionId ? sessionManager.getSession(activeSessionId) : null;
-        const allMessages = activeSessionId
-          ? sessionManager.listSessionMessages(activeSessionId)
-          : messagesRef.current;
-        const resolved = resolveCurrentSettings();
-        const summary = buildExitSummaryText({ session, messages: allMessages, model: resolved.model });
-        write("\n" + summary + "\n");
-        exit();
+        setIsExiting(true);
+        setTimeout(() => {
+          const activeSessionId = sessionManager.getActiveSessionId();
+          const session = activeSessionId ? sessionManager.getSession(activeSessionId) : null;
+          const allMessages = activeSessionId
+            ? sessionManager.listSessionMessages(activeSessionId)
+            : messagesRef.current;
+          const resolved = resolveCurrentSettings();
+          const summary = buildExitSummaryText({ session, messages: allMessages, model: resolved.model });
+          process.stdout.write("\n");
+          process.stdout.write(chalk.green("> /exit "));
+          process.stdout.write("\n\n");
+          process.stdout.write(summary);
+          process.stdout.write("\n\n");
+          exit();
+        }, 0);
         return;
       }
       if (submission.command === "new") {
@@ -306,7 +315,7 @@ export function App({ projectRoot, version = "" }: AppProps): React.ReactElement
           onSubmit={handleQuestionAnswers}
           onCancel={handleQuestionCancel}
         />
-      ) : (
+      ) : isExiting ? null : (
         <PromptInput
           skills={skills}
           promptHistory={promptHistory}
