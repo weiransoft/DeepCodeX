@@ -233,24 +233,28 @@ export function PromptInput({
     }
 
     if (showSkillsDropdown) {
-      if (key.upArrow) {
-        setSkillsDropdownIndex((idx) => (idx - 1 + Math.max(skills.length, 1)) % Math.max(skills.length, 1));
-        return;
-      }
-      if (key.downArrow) {
-        setSkillsDropdownIndex((idx) => (idx + 1) % Math.max(skills.length, 1));
-        return;
-      }
-      if ((input === " " && !key.ctrl && !key.meta) || (key.return && !key.shift && !key.meta)) {
-        const skill = skills[skillsDropdownIndex];
-        if (skill) {
-          toggleSelectedSkill(skill);
-        }
-        return;
-      }
-      if (key.tab) {
+      if (skills.length === 0) {
         setShowSkillsDropdown(false);
-        return;
+      } else {
+        if (key.upArrow) {
+          setSkillsDropdownIndex((idx) => (idx - 1 + skills.length) % skills.length);
+          return;
+        }
+        if (key.downArrow) {
+          setSkillsDropdownIndex((idx) => (idx + 1) % skills.length);
+          return;
+        }
+        if ((input === " " && !key.ctrl && !key.meta) || (key.return && !key.shift && !key.meta)) {
+          const skill = skills[skillsDropdownIndex];
+          if (skill) {
+            toggleSelectedSkill(skill);
+          }
+          return;
+        }
+        if (key.tab) {
+          setShowSkillsDropdown(false);
+          return;
+        }
       }
     }
 
