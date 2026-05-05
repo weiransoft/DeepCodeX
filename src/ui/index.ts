@@ -65,3 +65,4 @@ export {
   type SlashCommandItem
 } from "./slashCommands";
 export { findExpandedThinkingId } from "./thinkingState";
+export { buildExitSummaryText } from "./exitSummary";

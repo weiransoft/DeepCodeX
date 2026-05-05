@@ -114,7 +114,7 @@ export function PromptInput({
   const slashMenu = showSkillsDropdown ? [] : slashToken ? filterSlashCommands(slashItems, slashToken) : [];
   const showMenu = slashMenu.length > 0;
   const promptHistoryKey = useMemo(() => promptHistory.join("\0"), [promptHistory]);
-  const promptPrefix = busy ? `${SPINNER_FRAMES[spinnerIndex]} ` : "❯ ";
+  const promptPrefix = busy ? `${SPINNER_FRAMES[spinnerIndex]} ` : "> ";
   const footerText = statusMessage
     ? statusMessage
     : busy
@@ -204,7 +204,6 @@ export function PromptInput({
       const now = Date.now();
       if (pendingExit && now - lastCtrlDAt.current < 2000) {
         exit();
-        process.exit(0);
         return;
       }
       lastCtrlDAt.current = now;
@@ -500,7 +499,8 @@ export function PromptInput({
       return;
     }
     if (item.kind === "exit") {
-      onSubmit({ text: "", imageUrls: [], command: "exit" });
+      onSubmit({ text: "/exit", imageUrls: [], command: "exit" });
+      setBuffer(EMPTY_BUFFER);
       return;
     }
   }

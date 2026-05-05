@@ -1,0 +1,278 @@
+import chalk from "chalk";
+import gradientString from "gradient-string";
+import type { SessionEntry, SessionMessage } from "../session";
+
+type ExitSummaryInput = {
+  session: SessionEntry | null;
+  messages: SessionMessage[];
+  model?: string;
+};
+
+type ToolCallStats = {
+  total: number;
+  succeeded: number;
+  failed: number;
+};
+
+function countToolCalls(messages: SessionMessage[]): ToolCallStats {
+  let total = 0;
+  let succeeded = 0;
+  let failed = 0;
+
+  for (const message of messages) {
+    if (message.role !== "tool") {
+      continue;
+    }
+    total += 1;
+    const content = message.content ?? "";
+    const isError =
+      /"error"\s*:\s*"/i.test(content) ||
+      /"isError"\s*:\s*true/i.test(content) ||
+      content.startsWith("Error:") ||
+      content.startsWith("ERROR:");
+    if (isError) {
+      failed += 1;
+    } else {
+      succeeded += 1;
+    }
+  }
+
+  return { total, succeeded, failed };
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) {
+    return `${ms}ms`;
+  }
+  const seconds = ms / 1000;
+  if (seconds < 60) {
+    return `${seconds.toFixed(1)}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const remaining = (seconds % 60).toFixed(0);
+  return `${minutes}m ${remaining}s`;
+}
+
+function padRight(text: string, width: number): string {
+  const visible = text.replace(/\u001b\[[0-9;]*m/g, "");
+  const padding = Math.max(0, width - visible.length);
+  return text + " ".repeat(padding);
+}
+
+function padLeft(text: string, width: number): string {
+  const visible = text.replace(/\u001b\[[0-9;]*m/g, "");
+  const padding = Math.max(0, width - visible.length);
+  return " ".repeat(padding)+ text;
+}
+
+function formatNumber(n: number): string {
+  return n.toLocaleString("en-US");
+}
+
+/**
+ * Wrap a string of ANSI-colored text to fit within `maxWidth` visible characters per line.
+ * Returns an array of lines.
+ */
+function wrapAnsiText(text: string, maxWidth: number): string[] {
+  // Strip ANSI codes to measure visible length
+  const stripAnsi = (s: string) => s.replace(/\u001b\[[0-9;]*m/g, "");
+  const visibleLen = stripAnsi(text).length;
+  if (visibleLen <= maxWidth) {
+    return [text];
+  }
+
+  // Tokenize into ANSI-colored segments: each segment is either an escape sequence or a printable char
+  const tokens: { char: string; visible: boolean }[] = [];
+  const re = /\u001b\[[0-9;]*m/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      for (const ch of text.slice(lastIndex, match.index)) {
+        tokens.push({ char: ch, visible: true });
+      }
+    }
+    tokens.push({ char: match[0], visible: false });
+    lastIndex = re.lastIndex;
+  }
+  if (lastIndex < text.length) {
+    for (const ch of text.slice(lastIndex)) {
+      tokens.push({ char: ch, visible: true });
+    }
+  }
+
+  const lines: string[] = [];
+  let currentLine = "";
+  let currentVisibleLen = 0;
+  let lastAnsiState = ""; // tracks the active ANSI escape sequence
+
+  for (const token of tokens) {
+    if (!token.visible) {
+      // ANSI escape: carry forward into current line and remember state
+      currentLine += token.char;
+      lastAnsiState = token.char;
+      continue;
+    }
+
+    if (currentVisibleLen >= maxWidth) {
+      // Reset color at end of current line before wrapping
+      lines.push(currentLine + "\u001b[0m");
+      // Restart the next line with the last active ANSI color
+      currentLine = lastAnsiState + token.char;
+      currentVisibleLen = 1;
+    } else {
+      currentLine += token.char;
+      currentVisibleLen += 1;
+    }
+  }
+
+  if (currentLine) {
+    lines.push(currentLine);
+  }
+
+  return lines;
+}
+
+type UsageFields = {
+  promptTokens: number;
+  completionTokens: number;
+  cachedTokens: number;
+};
+
+function extractUsageFields(usage: unknown | null): UsageFields {
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) {
+    return { promptTokens: 0, completionTokens: 0, cachedTokens: 0 };
+  }
+
+  const record = usage as Record<string, unknown>;
+  const promptTokens =
+    typeof record.prompt_tokens === "number" ? record.prompt_tokens : 0;
+  const completionTokens =
+    typeof record.completion_tokens === "number"
+      ? record.completion_tokens
+      : 0;
+
+  let cachedTokens = 0;
+  const details = record.prompt_tokens_details;
+  if (details && typeof details === "object" && !Array.isArray(details)) {
+    const cached = (details as Record<string, unknown>).cached_tokens;
+    if (typeof cached === "number") {
+      cachedTokens = cached;
+    }
+  }
+
+  // Some providers use prompt_cache_hit_tokens directly
+  if (cachedTokens === 0 && typeof record.prompt_cache_hit_tokens === "number") {
+    cachedTokens = record.prompt_cache_hit_tokens;
+  }
+
+  return { promptTokens, completionTokens, cachedTokens };
+}
+
+export function buildExitSummaryText(input: ExitSummaryInput): string {
+  const { session, messages, model } = input;
+  const stats = countToolCalls(messages);
+
+  const sessionId = session?.id ?? "N/A";
+  const successRate = stats.total > 0
+    ? ((stats.succeeded / stats.total) * 100).toFixed(1)
+    : "0.0";
+
+  const createTime = session?.createTime ? new Date(session.createTime).getTime() : 0;
+  const updateTime = session?.updateTime ? new Date(session.updateTime).getTime() : Date.now();
+  const wallMs = createTime > 0 ? updateTime - createTime : 0;
+
+  // Count assistant messages (API calls) for API time approximation
+  const assistantCount = messages.filter((m) => m.role === "assistant").length;
+
+  const innerWidth = 98;
+  const contentWidth = innerWidth - 4; // "│  " prefix + "  │" suffix → 4 chars padding
+
+  const borderColor = chalk.dim.gray;
+  const titleColor = gradientString('#229ac3e6', 'rgb(125 51 247 / 0.7)');
+  const labelColor = chalk.rgb(34, 154, 195);
+  const line = (text: string) =>
+    `${borderColor("|")}  ${padRight(text, contentWidth)}  ${borderColor("|")}`;
+
+  const blank = line("");
+  const header = chalk.bold(titleColor("Agent powering down. Goodbye!"));
+  const divider = chalk.dim("─".repeat(contentWidth-4));
+
+  const rows: string[] = [
+    "",
+    `  ${header}`,
+    "",
+    `  ${chalk.bold("Interaction Summary")}`,
+    `  ${labelColor("Session ID:")}        ${chalk.white(sessionId)}`,
+    `  ${labelColor("Tool Calls:")}        ${chalk.white(String(stats.total))}  ( ${chalk.green(`✓ ${stats.succeeded}`)}  ${chalk.red(`✕ ${stats.failed}`)} )`,
+    `  ${labelColor("Success Rate:")}      ${chalk.white(successRate + "%")}`,
+    "",
+    `  ${chalk.bold("Performance")}`,
+    `  ${labelColor("Wall Time:")}         ${chalk.white(formatDuration(wallMs))}`,
+    `  ${labelColor("Agent Active:")}      ${chalk.white(formatDuration(wallMs))}`,
+    `    ${chalk.dim("» API Calls:")}     ${chalk.white(String(assistantCount))}`,
+    `    ${chalk.dim("» Tool Calls:")}    ${chalk.white(String(stats.total))}`,
+    "",
+  ];
+
+  // ── Model Usage section ──
+  const usage = extractUsageFields(session?.usage ?? null);
+  const modelName = model ?? "unknown";
+  const hasUsage = usage.promptTokens > 0 || usage.completionTokens > 0;
+
+  if (hasUsage && model) {
+
+
+    // Table header
+    const colModel = 44;
+    const colReqs = 8;
+    const colInput = 18;
+    const colOutput = 18;
+
+    const headerRow =
+      padRight("Model Usage", colModel) +
+      padLeft("Reqs", colReqs) +
+      padLeft("Input Tokens", colInput) +
+      padLeft("Output Tokens", colOutput);
+    rows.push(`  ${chalk.dim.black.bold(headerRow)}`);
+    rows.push(`  ${divider}`);
+
+    // Data row
+    const reqsStr = String(assistantCount).padStart(colReqs);
+    const inputStr = formatNumber(usage.promptTokens).padStart(colInput);
+    const outputStr = formatNumber(usage.completionTokens).padStart(colOutput);
+    const dataRow =
+      padRight(chalk.black(modelName), colModel) +
+      padRight(chalk.black(reqsStr), colReqs) +
+      padRight(chalk.yellow(inputStr), colInput) +
+      padRight(chalk.yellow(outputStr), colOutput);
+    rows.push(`  ${dataRow}`);
+
+    // Cache savings highlight
+    if (usage.cachedTokens > 0 && usage.promptTokens > 0) {
+      const cachePct = ((usage.cachedTokens / usage.promptTokens) * 100).toFixed(1);
+      const savingsText =
+        `${chalk.dim.rgb(34, 154, 195)("Savings Highlight:")} ${chalk.green(formatNumber(usage.cachedTokens))} ${chalk.dim(`(${cachePct}%) of input tokens were served from the cache, reducing costs.`)}`;
+      const wrappedLines = wrapAnsiText(savingsText, contentWidth - 2);
+      rows.push("");
+      for (const wLine of wrappedLines) {
+        rows.push(`  ${wLine}`);
+      }
+    }
+
+    rows.push("");
+    // rows.push(
+    //   `  ${chalk.dim("» Tip: For a full token breakdown, run")} ${chalk.white("/stats model")}${chalk.dim(".")}`
+    // );
+  }
+
+  rows.push("");
+
+  const border = borderColor("-".repeat(innerWidth));
+  const top = `${borderColor("+")}${border}${borderColor("+")}`;
+  const bottom = `${borderColor("+")}${border}${borderColor("+")}`;
+
+  const body = rows.map((row) => line(row)).join("\n");
+
+  return [top, body, bottom].join("\n");
+}

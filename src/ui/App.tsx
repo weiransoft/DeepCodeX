@@ -26,6 +26,7 @@ import {
   formatAskUserQuestionAnswers,
   type AskUserQuestionAnswers
 } from "./askUserQuestion";
+import { buildExitSummaryText } from "./exitSummary";
 
 const DEFAULT_MODEL = "deepseek-v4-pro";
 const DEFAULT_BASE_URL = "https://api.deepseek.com";
@@ -90,18 +91,7 @@ export function App({ projectRoot, version = "" }: AppProps): React.ReactElement
 
   useEffect(() => {
     refreshSessionsList();
-    const list = sessionManager.listSessions();
-    if (list.length > 0) {
-      const latest = list[0];
-      sessionManager.setActiveSessionId(latest.id);
-      setMessages(loadVisibleMessages(sessionManager, latest.id));
-      setStatusLine(buildStatusLine(latest));
-      setRunningProcesses(latest.processes);
-      setActiveStatus(latest.status);
-      void refreshSkills(latest.id);
-    } else {
-      void refreshSkills();
-    }
+    void refreshSkills();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -125,8 +115,15 @@ export function App({ projectRoot, version = "" }: AppProps): React.ReactElement
   const handlePrompt = useCallback(
     async (submission: PromptSubmission) => {
       if (submission.command === "exit") {
+        const activeSessionId = sessionManager.getActiveSessionId();
+        const session = activeSessionId ? sessionManager.getSession(activeSessionId) : null;
+        const allMessages = activeSessionId
+          ? sessionManager.listSessionMessages(activeSessionId)
+          : messagesRef.current;
+        const resolved = resolveCurrentSettings();
+        const summary = buildExitSummaryText({ session, messages: allMessages, model: resolved.model });
+        write("\n" + summary + "\n");
         exit();
-        process.exit(0);
         return;
       }
       if (submission.command === "new") {
@@ -225,6 +222,25 @@ export function App({ projectRoot, version = "" }: AppProps): React.ReactElement
     ? buildLoadingText({ progress: streamProgress, processes: runningProcesses, now: Date.now() })
     : null;
   const welcomeSettings = useMemo(() => resolveCurrentSettings(), []);
+  const showWelcome = view === "chat";
+  const welcomeItem: SessionMessage = useMemo(() => ({
+    id: "__welcome__",
+    sessionId: "",
+    role: "welcome",
+    content: "",
+    contentParams: null,
+    messageParams: null,
+    compacted: false,
+    visible: true,
+    createTime: "",
+    updateTime: ""
+  }), []);
+  const staticItems = useMemo(() => {
+    if (showWelcome) {
+      return [welcomeItem, ...messages];
+    }
+    return messages;
+  }, [showWelcome, messages, welcomeItem]);
 
   const handleQuestionAnswers = useCallback(
     (answers: AskUserQuestionAnswers) => {
@@ -245,23 +261,28 @@ export function App({ projectRoot, version = "" }: AppProps): React.ReactElement
 
   return (
     <Box flexDirection="column" width={screenWidth}>
-      {view === "chat" ? (
-        <WelcomeScreen
-          projectRoot={projectRoot}
-          settings={welcomeSettings}
-          skills={skills}
-          version={version}
-          width={screenWidth}
-        />
-      ) : null}
-      <Static items={messages}>
-        {(message) => (
-          <MessageView
-            key={message.id}
-            message={message}
-            collapsed={isCollapsedThinking(message, expandedThinkingId)}
-          />
-        )}
+      <Static items={staticItems}>
+        {(item) => {
+          if (item.id === "__welcome__") {
+            return (
+              <WelcomeScreen
+                key="__welcome__"
+                projectRoot={projectRoot}
+                settings={welcomeSettings}
+                skills={skills}
+                version={version}
+                width={screenWidth}
+              />
+            );
+          }
+          return (
+            <MessageView
+              key={item.id}
+              message={item}
+              collapsed={isCollapsedThinking(item, expandedThinkingId)}
+            />
+          );
+        }}
       </Static>
       {statusLine ? (
         <Box>
