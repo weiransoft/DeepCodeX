@@ -46,14 +46,13 @@ export function WelcomeScreen({
   const panelWidth = compact ? undefined : Math.min(width, 72);
 
   return (
-    <Box flexDirection="column" marginBottom={1}>
+    <Box flexDirection="column" marginY={1}>
       <Box flexDirection="column" width={panelWidth}>
         <Box flexDirection='column' paddingX={1}>
           <Box
             flexDirection="column"
-            height={PANEL_CONTENT_HEIGHT}
             justifyContent="center"
-            width={compact ? undefined : TITLE_PANEL_WIDTH}
+            paddingX={1}
           >
             <Box justifyContent="center" width={compact ? undefined : TITLE_PANEL_WIDTH}>
               <Text color={"#229ac3e6"}>
@@ -74,6 +73,7 @@ export function WelcomeScreen({
             flexGrow={1}
             height={compact ? undefined : PANEL_CONTENT_HEIGHT}
             marginTop={compact ? 1 : 0}
+            paddingX={1}
           >
             <Box flexGrow={1} marginBottom={compact ? 1 : 0}>
               <Text color={"#229ac3e6"}>{">"}_ Deep Code </Text>

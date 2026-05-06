@@ -9,11 +9,11 @@
     "url": "https://github.com/lessweb/deepcode.git"
   },
   "bin": {
-    "deepcode": "./dist/cli.cjs"
+    "deepcode": "./dist/cli.js"
   },
-  "main": "./dist/cli.cjs",
+  "main": "./dist/cli.js",
   "files": [
-    "dist/cli.cjs",
+    "dist/cli.js",
     "docs/tools/**",
     "README.md",
     "LICENSE"
@@ -23,8 +23,8 @@
   },
   "scripts": {
     "typecheck": "tsc -p ./ --noEmit",
-    "bundle": "esbuild ./src/cli.tsx --bundle --platform=node --format=cjs --target=node18 --outfile=dist/cli.cjs --banner:js='#!/usr/bin/env node' --jsx=automatic --jsx-import-source=react --packages=external --log-override:empty-import-meta=silent",
-    "build": "npm run typecheck && npm run bundle && chmod +x dist/cli.cjs",
+    "bundle": "esbuild ./src/cli.tsx --bundle --platform=node --format=esm --target=node18 --outfile=dist/cli.js --banner:js='#!/usr/bin/env node' --jsx=automatic --jsx-import-source=react --packages=external --log-override:empty-import-meta=silent",
+    "build": "npm run typecheck && npm run bundle && chmod +x dist/cli.js",
     "test": "tsx --test src/tests/*.test.ts",
     "test:single": "tsx --test",
     "prepack": "npm run build"
