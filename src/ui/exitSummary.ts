@@ -273,7 +273,6 @@ export function buildExitSummaryText(input: ExitSummaryInput): string {
   const header = chalk.bold(titleColor("Agent powering down. Goodbye!"));
   const divider = chalk.dim("─".repeat(contentWidth-4));
 
-  // TODO: 暂时不显示这些统计信息，后面修改为 VSCode 插件的 context window的弹框统计信息
   // ── Interaction Summary section ──
   const rows: string[] = [
     "",

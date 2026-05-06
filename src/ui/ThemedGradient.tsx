@@ -1,16 +1,10 @@
-/**
- * @license
- * Copyright 2025 Google LLC
- * SPDX-License-Identifier: Apache-2.0
- */
-
 import type React from 'react';
 import { Text, type TextProps } from 'ink';
 import Gradient from 'ink-gradient';
 
 
 export const ThemedGradient: React.FC<TextProps> = ({ children, ...props }) => {
-  const gradient = ['yellow', 'red', 'green', 'blue', 'magenta', 'cyan'];
+  const gradient = ['#229ac3e6', '#229ac3e6']; //先用纯色
 
   if (gradient && gradient.length >= 2) {
     return (
