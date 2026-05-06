@@ -6,8 +6,9 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "https://github.com/lessweb/deepcode.git"
+    "url": "https://github.com/lessweb/deepcode-cli.git"
   },
+  "homepage": "https://deepcode.vegamo.cn",
   "bin": {
     "deepcode": "./dist/cli.js"
   },

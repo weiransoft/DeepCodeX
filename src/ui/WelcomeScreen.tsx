@@ -67,7 +67,7 @@ export function WelcomeScreen({
           </Box>
 
           <Box
-            borderStyle={"classic"}
+            borderStyle={"round"}
             borderColor={"#229ac3e6"}
             flexDirection="column"
             flexGrow={1}

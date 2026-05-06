@@ -55,6 +55,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   const [activeStatus, setActiveStatus] = useState<SessionStatus | null>(null);
   const [dismissedQuestionIds, setDismissedQuestionIds] = useState<Set<string>>(() => new Set());
   const [isExiting, setIsExiting] = useState(false);
+  const [showWelcome, setShowWelcome] = useState(true);
   const [, setNowTick] = useState(0);
 
   const messagesRef = useRef<SessionMessage[]>([]);
@@ -148,12 +149,14 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
           setRunningProcesses(null);
           setActiveStatus(null);
           setDismissedQuestionIds(new Set());
+          setShowWelcome(true);
           await refreshSkills();
           refreshSessionsList();
         }
         return;
       }
       if (submission.command === "resume") {
+        setShowWelcome(false);
         refreshSessionsList();
         setView("session-list");
         return;
@@ -211,6 +214,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
       setStatusLine(session ? buildStatusLine(session) : "");
       setRunningProcesses(session?.processes ?? null);
       setActiveStatus(session?.status ?? null);
+      setShowWelcome(false);
       setView("chat");
       await refreshSkills(sessionId);
     },
@@ -236,7 +240,6 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
     ? buildLoadingText({ progress: streamProgress, processes: runningProcesses, now: Date.now() })
     : null;
   const welcomeSettings = useMemo(() => resolveCurrentSettings(), []);
-  const showWelcome = view === "chat";
   const welcomeItem: SessionMessage = useMemo(() => ({
     id: "__welcome__",
     sessionId: "",
@@ -250,11 +253,11 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
     updateTime: ""
   }), []);
   const staticItems = useMemo(() => {
-    if (showWelcome) {
+    if (showWelcome && view === "chat") {
       return [welcomeItem, ...messages];
     }
     return messages;
-  }, [showWelcome, messages, welcomeItem]);
+  }, [showWelcome, view, messages, welcomeItem]);
 
   const handleQuestionAnswers = useCallback(
     (answers: AskUserQuestionAnswers) => {
