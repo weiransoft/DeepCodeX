@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Box, Static, Text, useApp, useStdout } from "ink";
+import { Box, Static, Text, useApp, useStdout, useWindowSize } from "ink";
 import chalk from "chalk";
 import * as fs from "fs";
 import * as os from "os";
@@ -43,6 +43,7 @@ type AppProps = {
 export function App({ projectRoot, version = "", onRestart }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout, write } = useStdout();
+  const { columns } = useWindowSize();
   const [view, setView] = useState<View>("chat");
   const [busy, setBusy] = useState(false);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
@@ -116,6 +117,8 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
     }
   }
 
+  const writeRef = useRef(write);
+  writeRef.current = write;
   const handlePrompt = useCallback(
     async (submission: PromptSubmission) => {
       if (submission.command === "exit") {
@@ -141,7 +144,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         if (onRestart) {
           onRestart();
         } else {
-          write("\u001B[2J\u001B[3J\u001B[H");
+          writeRef.current("\u001B[2J\u001B[3J\u001B[H");
           sessionManager.setActiveSessionId(null);
           setMessages([]);
           setStatusLine("");
@@ -199,7 +202,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         setRunningProcesses(null);
       }
     },
-    [exit, onRestart, sessionManager, write]
+    [exit, onRestart, sessionManager]
   );
 
   const handleInterrupt = useCallback(() => {
@@ -221,7 +224,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
     [sessionManager]
   );
 
-  const screenWidth = stdout?.columns ?? 80;
+  const screenWidth = useMemo(()=> columns ?? stdout?.columns ?? 80, [columns, stdout]);
   const promptHistory = useMemo(() => {
     return messages
       .filter((message) => message.role === "user" && typeof message.content === "string")
@@ -236,9 +239,12 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   const shouldShowQuestionPrompt = Boolean(
     pendingQuestion && !dismissedQuestionIds.has(pendingQuestion.messageId)
   );
-  const loadingText = busy
-    ? buildLoadingText({ progress: streamProgress, processes: runningProcesses, now: Date.now() })
-    : null;
+  const loadingText = useMemo(
+    () => busy
+      ? buildLoadingText({ progress: streamProgress, processes: runningProcesses, now: Date.now() })
+      : null,
+    [busy, streamProgress, runningProcesses]
+  );
   const welcomeSettings = useMemo(() => resolveCurrentSettings(), []);
   const welcomeItem: SessionMessage = useMemo(() => ({
     id: "__welcome__",
@@ -277,7 +283,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   }, [pendingQuestion]);
 
   return (
-    <Box flexDirection="column" width={screenWidth}>
+    <Box flexDirection="column" width={screenWidth} minWidth={80} overflowX={'visible'}>
       <Static items={staticItems}>
         {(item) => {
           if (item.id === "__welcome__") {
@@ -325,6 +331,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         />
       ) : isExiting ? null : (
         <PromptInput
+          screenWidth={screenWidth}
           skills={skills}
           promptHistory={promptHistory}
           busy={busy}

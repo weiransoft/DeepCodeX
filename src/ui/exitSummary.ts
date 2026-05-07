@@ -82,7 +82,7 @@ export function buildExitSummaryText(input: ExitSummaryInput): string {
 
   const rows: string[] = [
     "",
-    `  ${header}`,
+    `${header}`,
     "",
   ];
 
@@ -105,8 +105,8 @@ export function buildExitSummaryText(input: ExitSummaryInput): string {
       padLeft("Input Tokens", colInput) +
       padLeft("Output Tokens", colOutput) +
       padLeft("Cached Tokens", colCached);
-    rows.push(`  ${chalk.bold(headerRow)}`);
-    rows.push(`  ${divider}`);
+    rows.push(chalk.bold(headerRow));
+    rows.push(divider);
 
     const reqsStr = String(assistantCount).padStart(colReqs);
     const inputStr = formatNumber(usage.promptTokens).padStart(colInput);
@@ -118,7 +118,7 @@ export function buildExitSummaryText(input: ExitSummaryInput): string {
       padRight(chalk.yellow(inputStr), colInput) +
       padRight(chalk.yellow(outputStr), colOutput) +
       padRight(chalk.yellow(cachedStr), colCached);
-    rows.push(`  ${dataRow}`);
+    rows.push(dataRow);
 
     rows.push("");
   }
