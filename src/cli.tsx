@@ -87,6 +87,10 @@ async function main(): Promise<void> {
     });
   }
 
+  if (!updatePromptResult.installed) {
+    void checkForNpmUpdate(packageInfo);
+  }
+
   startApp();
 }
 
