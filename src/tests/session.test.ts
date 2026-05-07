@@ -352,7 +352,7 @@ test("replySession reports a new prompt with the machineId token", async () => {
   assert.equal((fetchCalls[0].init?.headers as Record<string, string>).Token, "machine-id-456");
 });
 
-test("replySession closes pending tool calls before appending a new user message", async () => {
+test("replySession preserves raw session messages when a previous tool call is pending", async () => {
   const workspace = createTempDir("deepcode-pending-tool-workspace-");
   const home = createTempDir("deepcode-pending-tool-home-");
   process.env.HOME = home;
@@ -385,11 +385,338 @@ test("replySession closes pending tool calls before appending a new user message
   const messages = manager.listSessionMessages(sessionId);
   const assistantIndex = messages.findIndex((message) => message.id === assistantMessage.id);
   assert.notEqual(assistantIndex, -1);
-  assert.equal(messages[assistantIndex + 1]?.role, "tool");
-  assert.equal((messages[assistantIndex + 1]?.messageParams as any)?.tool_call_id, "call-1");
-  assert.match(String(messages[assistantIndex + 1]?.content), /Previous tool call did not complete/);
-  assert.equal(messages[assistantIndex + 2]?.role, "user");
-  assert.equal(messages[assistantIndex + 2]?.content, "second prompt");
+  assert.equal(messages[assistantIndex + 1]?.role, "user");
+  assert.equal(messages[assistantIndex + 1]?.content, "second prompt");
+  assert.equal(messages.some((message) => String(message.content).includes("Previous tool call did not complete.")), false);
+});
+
+test("buildOpenAIMessages inserts interrupted results for missing tool messages", () => {
+  const manager = createSessionManager(process.cwd(), "machine-id-missing-tool");
+  const assistantMessage = (manager as any).buildAssistantMessage(
+    "session-1",
+    "I will run a tool.",
+    [
+      {
+        id: "call-1",
+        type: "function",
+        function: { name: "bash", arguments: "{\"command\":\"sleep 100\"}" }
+      }
+    ],
+    ""
+  ) as SessionMessage;
+  const userMessage = buildTestMessage("user-after-tool-call", "session-1", "user", "continue");
+
+  const openAIMessages = (manager as any).buildOpenAIMessages([assistantMessage, userMessage], false) as Array<{
+    role: string;
+    content: string;
+    tool_call_id?: string;
+  }>;
+
+  assert.equal(openAIMessages.length, 3);
+  assert.equal(openAIMessages[0]?.role, "assistant");
+  assert.equal(openAIMessages[1]?.role, "tool");
+  assert.equal(openAIMessages[1]?.tool_call_id, "call-1");
+  assert.match(openAIMessages[1]?.content ?? "", /Previous tool call did not complete/);
+  assert.equal(openAIMessages[2]?.role, "user");
+});
+
+test("buildOpenAIMessages keeps only the first non-interrupted tool result for a tool call", () => {
+  const manager = createSessionManager(process.cwd(), "machine-id-duplicate-tool");
+  const assistantMessage = (manager as any).buildAssistantMessage(
+    "session-1",
+    "",
+    [
+      {
+        id: "call-1",
+        type: "function",
+        function: { name: "bash", arguments: "{\"command\":\"date\"}" }
+      }
+    ],
+    ""
+  ) as SessionMessage;
+  const successToolMessage = (manager as any).buildToolMessage(
+    "session-1",
+    "call-1",
+    JSON.stringify({ ok: true, name: "bash", output: "2026-05-07 星期四\n" }),
+    { name: "bash", arguments: "{\"command\":\"date\"}" }
+  ) as SessionMessage;
+  const interruptedToolMessage = (manager as any).buildToolMessage(
+    "session-1",
+    "call-1",
+    JSON.stringify({
+      ok: false,
+      name: "bash",
+      error: "Previous tool call did not complete.",
+      metadata: { interrupted: true }
+    }),
+    { name: "bash", arguments: "{\"command\":\"date\"}" }
+  ) as SessionMessage;
+
+  const openAIMessages = (manager as any).buildOpenAIMessages(
+    [assistantMessage, successToolMessage, interruptedToolMessage],
+    false
+  ) as Array<{ role: string; content: string; tool_call_id?: string }>;
+  const toolMessages = openAIMessages.filter((message) => message.role === "tool");
+
+  assert.equal(toolMessages.length, 1);
+  assert.equal(toolMessages[0]?.tool_call_id, "call-1");
+  assert.match(toolMessages[0]?.content ?? "", /2026-05-07/);
+  assert.doesNotMatch(toolMessages[0]?.content ?? "", /Previous tool call did not complete/);
+});
+
+test("buildOpenAIMessages prefers a later real tool result over an earlier interrupted placeholder", () => {
+  const manager = createSessionManager(process.cwd(), "machine-id-prefer-real-tool");
+  const assistantMessage = (manager as any).buildAssistantMessage(
+    "session-1",
+    "",
+    [
+      {
+        id: "call-1",
+        type: "function",
+        function: { name: "bash", arguments: "{\"command\":\"date\"}" }
+      }
+    ],
+    ""
+  ) as SessionMessage;
+  const interruptedToolMessage = (manager as any).buildToolMessage(
+    "session-1",
+    "call-1",
+    JSON.stringify({
+      ok: false,
+      name: "bash",
+      error: "Previous tool call did not complete.",
+      metadata: { interrupted: true }
+    }),
+    { name: "bash", arguments: "{\"command\":\"date\"}" }
+  ) as SessionMessage;
+  const successToolMessage = (manager as any).buildToolMessage(
+    "session-1",
+    "call-1",
+    JSON.stringify({ ok: true, name: "bash", output: "real result" }),
+    { name: "bash", arguments: "{\"command\":\"date\"}" }
+  ) as SessionMessage;
+
+  const openAIMessages = (manager as any).buildOpenAIMessages(
+    [assistantMessage, interruptedToolMessage, successToolMessage],
+    false
+  ) as Array<{ role: string; content: string; tool_call_id?: string }>;
+  const toolMessages = openAIMessages.filter((message) => message.role === "tool");
+
+  assert.equal(toolMessages.length, 1);
+  assert.equal(toolMessages[0]?.tool_call_id, "call-1");
+  assert.match(toolMessages[0]?.content ?? "", /real result/);
+});
+
+test("buildOpenAIMessages ignores orphan tool messages", () => {
+  const manager = createSessionManager(process.cwd(), "machine-id-orphan-tool");
+  const userMessage = buildTestMessage("user-1", "session-1", "user", "hello");
+  const orphanToolMessage = (manager as any).buildToolMessage(
+    "session-1",
+    "call-orphan",
+    JSON.stringify({ ok: true, name: "bash", output: "orphan" }),
+    { name: "bash", arguments: "{\"command\":\"echo orphan\"}" }
+  ) as SessionMessage;
+
+  const openAIMessages = (manager as any).buildOpenAIMessages(
+    [userMessage, orphanToolMessage],
+    false
+  ) as Array<{ role: string }>;
+
+  assert.deepEqual(openAIMessages.map((message) => message.role), ["user"]);
+});
+
+test("buildOpenAIMessages moves a later paired tool message behind its assistant", () => {
+  const manager = createSessionManager(process.cwd(), "machine-id-later-tool");
+  const assistantMessage = (manager as any).buildAssistantMessage(
+    "session-1",
+    "",
+    [
+      {
+        id: "call-1",
+        type: "function",
+        function: { name: "bash", arguments: "{\"command\":\"date\"}" }
+      }
+    ],
+    ""
+  ) as SessionMessage;
+  const userMessage = buildTestMessage("user-between", "session-1", "user", "continue");
+  const toolMessage = (manager as any).buildToolMessage(
+    "session-1",
+    "call-1",
+    JSON.stringify({ ok: true, name: "bash", output: "paired later" }),
+    { name: "bash", arguments: "{\"command\":\"date\"}" }
+  ) as SessionMessage;
+
+  const openAIMessages = (manager as any).buildOpenAIMessages(
+    [assistantMessage, userMessage, toolMessage],
+    false
+  ) as Array<{ role: string; content: string }>;
+
+  assert.deepEqual(openAIMessages.map((message) => message.role), ["assistant", "tool", "user"]);
+  assert.match(openAIMessages[1]?.content ?? "", /paired later/);
+});
+
+test("buildOpenAIMessages preserves a complete multi-tool happy path", () => {
+  const manager = createSessionManager(process.cwd(), "machine-id-multi-tool-happy");
+  const assistantMessage = (manager as any).buildAssistantMessage(
+    "session-1",
+    "",
+    [
+      {
+        id: "call-1",
+        type: "function",
+        function: { name: "read", arguments: "{\"file_path\":\"/tmp/a.txt\"}" }
+      },
+      {
+        id: "call-2",
+        type: "function",
+        function: { name: "bash", arguments: "{\"command\":\"pwd\"}" }
+      }
+    ],
+    ""
+  ) as SessionMessage;
+  const firstToolMessage = (manager as any).buildToolMessage(
+    "session-1",
+    "call-1",
+    JSON.stringify({ ok: true, name: "read", content: "file content" }),
+    { name: "read", arguments: "{\"file_path\":\"/tmp/a.txt\"}" }
+  ) as SessionMessage;
+  const secondToolMessage = (manager as any).buildToolMessage(
+    "session-1",
+    "call-2",
+    JSON.stringify({ ok: true, name: "bash", output: "/tmp\n" }),
+    { name: "bash", arguments: "{\"command\":\"pwd\"}" }
+  ) as SessionMessage;
+  const userMessage = buildTestMessage("user-after-complete-tools", "session-1", "user", "thanks");
+
+  const openAIMessages = (manager as any).buildOpenAIMessages(
+    [assistantMessage, firstToolMessage, secondToolMessage, userMessage],
+    false
+  ) as Array<{ role: string; content: string; tool_call_id?: string }>;
+
+  assert.deepEqual(openAIMessages.map((message) => message.role), ["assistant", "tool", "tool", "user"]);
+  assert.deepEqual(
+    openAIMessages.filter((message) => message.role === "tool").map((message) => message.tool_call_id),
+    ["call-1", "call-2"]
+  );
+  assert.equal(openAIMessages.some((message) => message.content.includes("Previous tool call did not complete.")), false);
+});
+
+test("buildOpenAIMessages preserves a real failed tool result", () => {
+  const manager = createSessionManager(process.cwd(), "machine-id-real-failed-tool");
+  const assistantMessage = (manager as any).buildAssistantMessage(
+    "session-1",
+    "",
+    [
+      {
+        id: "call-1",
+        type: "function",
+        function: { name: "bash", arguments: "{\"command\":\"false\"}" }
+      }
+    ],
+    ""
+  ) as SessionMessage;
+  const failedToolMessage = (manager as any).buildToolMessage(
+    "session-1",
+    "call-1",
+    JSON.stringify({ ok: false, name: "bash", error: "Command failed", metadata: { exitCode: 1 } }),
+    { name: "bash", arguments: "{\"command\":\"false\"}" }
+  ) as SessionMessage;
+
+  const openAIMessages = (manager as any).buildOpenAIMessages(
+    [assistantMessage, failedToolMessage],
+    false
+  ) as Array<{ role: string; content: string; tool_call_id?: string }>;
+
+  assert.deepEqual(openAIMessages.map((message) => message.role), ["assistant", "tool"]);
+  assert.equal(openAIMessages[1]?.tool_call_id, "call-1");
+  assert.match(openAIMessages[1]?.content ?? "", /Command failed/);
+  assert.doesNotMatch(openAIMessages[1]?.content ?? "", /Previous tool call did not complete/);
+});
+
+test("buildOpenAIMessages repairs mixed missing duplicate and orphan tool messages", () => {
+  const manager = createSessionManager(process.cwd(), "machine-id-mixed-tool-badcase");
+  const assistantMessage = (manager as any).buildAssistantMessage(
+    "session-1",
+    "",
+    [
+      {
+        id: "call-1",
+        type: "function",
+        function: { name: "read", arguments: "{\"file_path\":\"/tmp/missing.txt\"}" }
+      },
+      {
+        id: "call-2",
+        type: "function",
+        function: { name: "bash", arguments: "{\"command\":\"pwd\"}" }
+      }
+    ],
+    ""
+  ) as SessionMessage;
+  const orphanToolMessage = (manager as any).buildToolMessage(
+    "session-1",
+    "call-orphan",
+    JSON.stringify({ ok: true, name: "bash", output: "orphan" }),
+    { name: "bash", arguments: "{\"command\":\"echo orphan\"}" }
+  ) as SessionMessage;
+  const pairedToolMessage = (manager as any).buildToolMessage(
+    "session-1",
+    "call-2",
+    JSON.stringify({ ok: true, name: "bash", output: "/tmp\n" }),
+    { name: "bash", arguments: "{\"command\":\"pwd\"}" }
+  ) as SessionMessage;
+  const duplicateToolMessage = (manager as any).buildToolMessage(
+    "session-1",
+    "call-2",
+    JSON.stringify({ ok: true, name: "bash", output: "duplicate" }),
+    { name: "bash", arguments: "{\"command\":\"pwd\"}" }
+  ) as SessionMessage;
+  const userMessage = buildTestMessage("user-after-mixed-tools", "session-1", "user", "continue");
+
+  const openAIMessages = (manager as any).buildOpenAIMessages(
+    [assistantMessage, orphanToolMessage, pairedToolMessage, duplicateToolMessage, userMessage],
+    false
+  ) as Array<{ role: string; content: string; tool_call_id?: string }>;
+  const toolMessages = openAIMessages.filter((message) => message.role === "tool");
+
+  assert.deepEqual(openAIMessages.map((message) => message.role), ["assistant", "tool", "tool", "user"]);
+  assert.deepEqual(toolMessages.map((message) => message.tool_call_id), ["call-1", "call-2"]);
+  assert.match(toolMessages[0]?.content ?? "", /Previous tool call did not complete/);
+  assert.match(toolMessages[1]?.content ?? "", /\/tmp/);
+  assert.equal(openAIMessages.some((message) => message.content.includes("orphan")), false);
+  assert.equal(openAIMessages.some((message) => message.content.includes("duplicate")), false);
+});
+
+test("buildOpenAIMessages ignores tool messages that appear before their assistant", () => {
+  const manager = createSessionManager(process.cwd(), "machine-id-tool-before-assistant");
+  const earlyToolMessage = (manager as any).buildToolMessage(
+    "session-1",
+    "call-1",
+    JSON.stringify({ ok: true, name: "bash", output: "too early" }),
+    { name: "bash", arguments: "{\"command\":\"date\"}" }
+  ) as SessionMessage;
+  const assistantMessage = (manager as any).buildAssistantMessage(
+    "session-1",
+    "",
+    [
+      {
+        id: "call-1",
+        type: "function",
+        function: { name: "bash", arguments: "{\"command\":\"date\"}" }
+      }
+    ],
+    ""
+  ) as SessionMessage;
+
+  const openAIMessages = (manager as any).buildOpenAIMessages(
+    [earlyToolMessage, assistantMessage],
+    false
+  ) as Array<{ role: string; content: string; tool_call_id?: string }>;
+
+  assert.deepEqual(openAIMessages.map((message) => message.role), ["assistant", "tool"]);
+  assert.equal(openAIMessages[1]?.tool_call_id, "call-1");
+  assert.match(openAIMessages[1]?.content ?? "", /Previous tool call did not complete/);
+  assert.doesNotMatch(openAIMessages[1]?.content ?? "", /too early/);
 });
 
 test("SessionManager accumulates response usage while active tokens track the latest response", async () => {
@@ -685,6 +1012,26 @@ function createChatResponse(content: string, usage: Record<string, unknown>): un
   return {
     choices: [{ message: { content } }],
     usage
+  };
+}
+
+function buildTestMessage(
+  id: string,
+  sessionId: string,
+  role: SessionMessage["role"],
+  content: string
+): SessionMessage {
+  return {
+    id,
+    sessionId,
+    role,
+    content,
+    contentParams: null,
+    messageParams: null,
+    compacted: false,
+    visible: true,
+    createTime: "2026-01-01T00:00:00.000Z",
+    updateTime: "2026-01-01T00:00:00.000Z"
   };
 }
 
