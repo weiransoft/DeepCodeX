@@ -8,15 +8,19 @@ type ExitSummaryInput = {
   model?: string;
 };
 
+const ANSI_RE = /\u001b\[[0-9;]*[a-zA-Z]/g;
+
+function visibleLength(text: string): number {
+  return text.replace(ANSI_RE, "").length;
+}
+
 function padRight(text: string, width: number): string {
-  const visible = text.replace(/\u001b\[[0-9;]*m/g, "");
-  const padding = Math.max(0, width - visible.length);
+  const padding = Math.max(0, width - visibleLength(text));
   return text + " ".repeat(padding);
 }
 
 function padLeft(text: string, width: number): string {
-  const visible = text.replace(/\u001b\[[0-9;]*m/g, "");
-  const padding = Math.max(0, width - visible.length);
+  const padding = Math.max(0, width - visibleLength(text));
   return " ".repeat(padding) + text;
 }
 

@@ -57,7 +57,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   const [dismissedQuestionIds, setDismissedQuestionIds] = useState<Set<string>>(() => new Set());
   const [isExiting, setIsExiting] = useState(false);
   const [showWelcome, setShowWelcome] = useState(true);
-  const [, setNowTick] = useState(0);
+  const [nowTick, setNowTick] = useState(0);
 
   const rootDirectoryWarning = useMemo(() => {
     try {
@@ -266,7 +266,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
     () => busy
       ? buildLoadingText({ progress: streamProgress, processes: runningProcesses, now: Date.now() })
       : null,
-    [busy, streamProgress, runningProcesses]
+    [busy, streamProgress, runningProcesses, nowTick]
   );
   const welcomeSettings = useMemo(() => resolveCurrentSettings(), []);
   const welcomeItem: SessionMessage = useMemo(() => ({

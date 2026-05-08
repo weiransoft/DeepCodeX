@@ -145,7 +145,7 @@ export function readClipboardImage(): ClipboardImage | null {
 
 export async function readClipboardImageAsync(): Promise<ClipboardImage | null> {
   return new Promise((resolve) => {
-    // 使用 setImmediate 确保不会阻塞事件循环
+    // Use setImmediate to avoid blocking the event loop
     setImmediate(() => {
       try {
         const result = readClipboardImage();

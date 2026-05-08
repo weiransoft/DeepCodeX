@@ -8,7 +8,7 @@ type Props = {
   collapsed?: boolean;
 };
 
-export function MessageView({ message }: Props): React.ReactElement | null {
+export function MessageView({ message, collapsed }: Props): React.ReactElement | null {
   if (!message.visible) {
     return null;
   }
@@ -31,9 +31,19 @@ export function MessageView({ message }: Props): React.ReactElement | null {
 
     if (isThinking) {
       const summary = buildThinkingSummary(content, message.messageParams);
+      if (collapsed !== false) {
+        return (
+          <Box marginY={0}>
+            <StatusLine bulletColor="gray" name="Thinking" params={summary} />
+          </Box>
+        );
+      }
       return (
-        <Box marginY={0}>
+        <Box flexDirection="column" marginY={0}>
           <StatusLine bulletColor="gray" name="Thinking" params={summary} />
+          <Box marginLeft={2} flexDirection="column">
+            {content ? <Text dimColor>{renderMarkdown(content)}</Text> : null}
+          </Box>
         </Box>
       );
     }

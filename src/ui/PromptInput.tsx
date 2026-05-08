@@ -28,7 +28,7 @@ import {
   formatSlashCommandDescription,
   formatSlashCommandLabel
 } from "./slashCommands";
-import { readClipboardImage } from "./clipboard";
+import { readClipboardImageAsync } from "./clipboard";
 import type { SkillInfo } from "../session";
 
 // Re-exported from prompt modules for backward compatibility
@@ -243,13 +243,17 @@ export const PromptInput = React.memo(function PromptInput({
     }
 
     if (key.ctrl && (input === "v" || input === "V")) {
-      const image = readClipboardImage();
-      if (image) {
-        setImageUrls((prev) => [...prev, image.dataUrl]);
-        setStatusMessage("Attached image from clipboard");
-      } else {
-        setStatusMessage("No image found in clipboard");
-      }
+      setStatusMessage("Reading clipboard...");
+      readClipboardImageAsync().then((image) => {
+        if (image) {
+          setImageUrls((prev) => [...prev, image.dataUrl]);
+          setStatusMessage("Attached image from clipboard");
+        } else {
+          setStatusMessage("No image found in clipboard");
+        }
+      }).catch(() => {
+        setStatusMessage("Failed to read clipboard");
+      });
       return;
     }
 

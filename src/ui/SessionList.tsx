@@ -12,29 +12,29 @@ export function SessionList({sessions, onSelect, onCancel}: Props): React.ReactE
   const [index, setIndex] = useState(0);
   const {columns, rows} = useWindowSize();
 
-  // 根据终端高度动态计算可见的会话数量
+  // Dynamically calculate the number of visible sessions based on terminal height
   const maxVisibleSessions = useMemo(() => {
-    // 减去边框、标题、页脚、滚动指示器等占用的空间
-    // 外层容器 height=rows-1，外边框2 + header1 + 内边框2 + footer1 + 滚动指示器1 = 8
+    // Subtract space used by borders, header, footer, scroll indicator, etc.
+    // Outer container height=rows-1, outer border 2 + header 1 + inner border 2 + footer 1 + scroll indicator 1 = 8
     const reservedLines = 8;
     const linesPerSession = 3; // height=2 + marginBottom=1
     const availableLines = Math.max(0, Math.min(rows, 30) - reservedLines);
     return Math.max(1, Math.floor(availableLines / linesPerSession));
   }, [rows]);
 
-  // 确保index在有效范围内
+  // Ensure index stays within valid range
   const safeIndex = useMemo(() => {
     if (sessions.length === 0) return 0;
     return Math.max(0, Math.min(index, sessions.length - 1));
   }, [index, sessions.length]);
 
-  // 计算滚动偏移量，确保选中的项目始终可见
+  // Calculate scroll offset to keep the selected item visible
   const scrollOffset = useMemo(() => {
     if (safeIndex < maxVisibleSessions) return 0;
     return safeIndex - maxVisibleSessions + 1;
   }, [safeIndex, maxVisibleSessions]);
 
-  // 获取当前可见的会话列表
+  // Get the currently visible session list
   const visibleSessions = useMemo(() => {
     return sessions.slice(scrollOffset, scrollOffset + maxVisibleSessions);
   }, [sessions, scrollOffset, maxVisibleSessions]);
@@ -91,8 +91,8 @@ export function SessionList({sessions, onSelect, onCancel}: Props): React.ReactE
   return (
     <Box
       flexDirection="column"
-      width={columns - 6}
-      height={Math.min(rows - 1, 30)}
+      width={Math.max(20, columns - 6)}
+      height={Math.max(5, Math.min(rows - 1, 30))}
       overflow="hidden"
       paddingX={1}
       marginTop={1}
