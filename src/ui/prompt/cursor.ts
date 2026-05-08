@@ -200,6 +200,7 @@ export function usePromptTerminalCursor(
 
     return () => {
       unmountingRef.current = true;
+      lastPlacementRef.current = null;
       const activePlacement = activePlacementRef.current;
       if (!activePlacement) {
         return;
