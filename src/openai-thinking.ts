@@ -1,7 +1,7 @@
 import type { ReasoningEffort } from "./settings";
 
 type ThinkingConfig = {
-  type: "enabled";
+  type: "enabled" | "disabled";
 };
 
 type ThinkingRequestOptions = {
@@ -17,24 +17,20 @@ export function buildThinkingRequestOptions(
   baseURL?: string,
   reasoningEffort: ReasoningEffort = "max"
 ): ThinkingRequestOptions {
-  if (!thinkingEnabled) {
-    return {};
-  }
-
-  const thinking: ThinkingConfig = { type: "enabled" };
+  const thinking: ThinkingConfig = { type: thinkingEnabled ? "enabled" : "disabled" };
   const normalizedBaseURL = baseURL?.toLowerCase() ?? "";
 
   if (normalizedBaseURL.includes(".volces.com")) {
     return {
       thinking,
-      extra_body: { reasoning_effort: reasoningEffort }
+      ...(thinkingEnabled ? { extra_body: { reasoning_effort: reasoningEffort } } : {})
     };
   }
 
   return {
     extra_body: {
       thinking,
-      reasoning_effort: reasoningEffort
+      ...(thinkingEnabled ? { reasoning_effort: reasoningEffort } : {})
     }
   };
 }
