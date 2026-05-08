@@ -407,6 +407,7 @@ export function createOpenAIClient(): {
   baseURL: string;
   thinkingEnabled: boolean;
   reasoningEffort: "high" | "max";
+  debugLogEnabled: boolean;
   notify?: string;
   webSearchTool?: string;
   machineId?: string;
@@ -419,6 +420,7 @@ export function createOpenAIClient(): {
       baseURL: settings.baseURL,
       thinkingEnabled: settings.thinkingEnabled,
       reasoningEffort: settings.reasoningEffort,
+      debugLogEnabled: settings.debugLogEnabled,
       notify: settings.notify,
       webSearchTool: settings.webSearchTool,
       machineId: getMachineId()
@@ -435,6 +437,7 @@ export function createOpenAIClient(): {
     baseURL: settings.baseURL,
     thinkingEnabled: settings.thinkingEnabled,
     reasoningEffort: settings.reasoningEffort,
+    debugLogEnabled: settings.debugLogEnabled,
     notify: settings.notify,
     webSearchTool: settings.webSearchTool,
     machineId: getMachineId()
