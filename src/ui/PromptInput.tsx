@@ -123,7 +123,8 @@ export const PromptInput = React.memo(function PromptInput({
   );
 
   useTerminalFocusReporting(stdout, !disabled);
-  usePromptTerminalCursor(stdout, cursorPlacement, !disabled);
+  const layoutKey = showSkillsDropdown || showMenu;
+  usePromptTerminalCursor(stdout, cursorPlacement, !disabled, layoutKey);
 
   useEffect(() => {
     if (!showMenu) {
@@ -597,6 +598,7 @@ export const PromptInput = React.memo(function PromptInput({
           {slashMenu.length > 8 ? <Text dimColor>… {slashMenu.length - 8} more</Text> : null}
         </Box>
       ) : null}
+      {/* Input */}
       <Text dimColor wrap="truncate-end">{divider}</Text>
       <Box>
         <PromptPrefixLine busy={busy} />

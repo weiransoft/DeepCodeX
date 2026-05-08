@@ -18,7 +18,7 @@ export function SessionList({sessions, onSelect, onCancel}: Props): React.ReactE
     // 外层容器 height=rows-1，外边框2 + header1 + 内边框2 + footer1 + 滚动指示器1 = 8
     const reservedLines = 8;
     const linesPerSession = 3; // height=2 + marginBottom=1
-    const availableLines = Math.max(0, rows - reservedLines);
+    const availableLines = Math.max(0, Math.min(rows, 30) - reservedLines);
     return Math.max(1, Math.floor(availableLines / linesPerSession));
   }, [rows]);
 
@@ -92,7 +92,7 @@ export function SessionList({sessions, onSelect, onCancel}: Props): React.ReactE
     <Box
       flexDirection="column"
       width={columns - 6}
-      height={rows - 1}
+      height={Math.min(rows - 1, 30)}
       overflow="hidden"
       paddingX={1}
       marginTop={1}

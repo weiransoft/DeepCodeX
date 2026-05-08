@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 import type { PromptBufferState } from "../promptBuffer";
 
 type CursorPlacement = {
@@ -127,10 +127,12 @@ function characterWidth(char: string): number {
 export function usePromptTerminalCursor(
   stdout: NodeJS.WriteStream | undefined,
   placement: CursorPlacement,
-  isActive: boolean
+  isActive: boolean,
+  layoutKey?: boolean
 ): void {
   const directWriteRef = useRef<((data: string) => void) | null>(null);
   const activePlacementRef = useRef<CursorPlacement | null>(null);
+  const unmountingRef = useRef(false);
 
   useLayoutEffect(() => {
     if (!stdout?.isTTY) {
@@ -143,6 +145,9 @@ export function usePromptTerminalCursor(
       originalWrite.call(stdout, data);
     };
     const restorePromptCursor = () => {
+      if (unmountingRef.current) {
+        return;
+      }
       const activePlacement = activePlacementRef.current;
       if (!activePlacement) {
         return;
@@ -170,6 +175,7 @@ export function usePromptTerminalCursor(
       return;
     }
 
+    unmountingRef.current = false;
     const directWrite = directWriteRef.current;
     if (!directWrite) {
       return;
@@ -179,6 +185,7 @@ export function usePromptTerminalCursor(
     activePlacementRef.current = placement;
 
     return () => {
+      unmountingRef.current = true;
       const activePlacement = activePlacementRef.current;
       if (!activePlacement) {
         return;
@@ -186,7 +193,7 @@ export function usePromptTerminalCursor(
       directWrite("\r" + cursorDown(activePlacement.rowsUp) + hideCursor());
       activePlacementRef.current = null;
     };
-  }, [isActive, placement.column, placement.rowsUp, stdout]);
+  }, [isActive, placement.column, placement.rowsUp, stdout, layoutKey]);
 }
 
 export function useTerminalFocusReporting(stdout: NodeJS.WriteStream | undefined, isActive: boolean): void {
