@@ -35,7 +35,7 @@ export type PromptSubmission = {
   text: string;
   imageUrls: string[];
   selectedSkills?: SkillInfo[];
-  command?: "new" | "resume" | "exit";
+  command?: "new" | "resume" | "init" | "exit";
 };
 
 type Props = {
@@ -496,6 +496,14 @@ export function PromptInput({
     }
     if (item.kind === "resume") {
       onSubmit({ text: "", imageUrls: [], command: "resume" });
+      setBuffer(EMPTY_BUFFER);
+      setImageUrls([]);
+      setSelectedSkills([]);
+      setShowSkillsDropdown(false);
+      return;
+    }
+    if (item.kind === "init") {
+      onSubmit({ text: "/init", imageUrls: [], command: "init" });
       setBuffer(EMPTY_BUFFER);
       setImageUrls([]);
       setSelectedSkills([]);

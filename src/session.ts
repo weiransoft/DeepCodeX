@@ -1449,26 +1449,29 @@ ${skillMd}
   }
 
   private loadAgentInstructions(): string | null {
-    const candidatePaths = [
-      path.join(this.projectRoot, "AGENTS.md"),
-      path.join(os.homedir(), ".deepcode", "AGENTS.md")
+    const candidateFiles = [
+      { label: "Project AGENTS.md", filePath: path.join(this.projectRoot, "AGENTS.md") },
+      { label: "User AGENTS.md", filePath: path.join(os.homedir(), ".deepcode", "AGENTS.md") }
     ];
+    const loadedInstructions: string[] = [];
 
-    for (const candidatePath of candidatePaths) {
+    for (const candidate of candidateFiles) {
       try {
-        if (!fs.existsSync(candidatePath)) {
+        if (!fs.existsSync(candidate.filePath)) {
           continue;
         }
-        const content = fs.readFileSync(candidatePath, "utf8").trim();
+        const content = fs.readFileSync(candidate.filePath, "utf8").trim();
         if (content) {
-          return content;
+          loadedInstructions.push(
+            `# ${candidate.label}\n\n${content}`
+          );
         }
       } catch {
         continue;
       }
     }
 
-    return null;
+    return loadedInstructions.length > 0 ? loadedInstructions.join("\n\n---\n\n") : null;
   }
 
   private buildSystemMessage(

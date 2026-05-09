@@ -5,6 +5,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import OpenAI from "openai";
+import { buildInitPrompt } from "../init";
 import {
   SessionManager,
   type LlmStreamProgress,
@@ -162,24 +163,31 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         return;
       }
 
+      const isInitCommand = submission.command === "init";
+      if (isInitCommand) {
+        setShowWelcome(false);
+      }
+
       const prompt: UserPromptContent = {
-        text: submission.text,
-        imageUrls: submission.imageUrls,
-        skills: submission.selectedSkills && submission.selectedSkills.length > 0
+        text: isInitCommand ? buildInitPrompt() : submission.text,
+        imageUrls: isInitCommand ? [] : submission.imageUrls,
+        skills: !isInitCommand && submission.selectedSkills && submission.selectedSkills.length > 0
           ? submission.selectedSkills
           : undefined
       };
 
-      const trimmedText = (submission.text ?? "").trim();
-      const selectedSkillNames = submission.selectedSkills?.map((skill) => skill.name).filter(Boolean) ?? [];
+      const trimmedText = (isInitCommand ? "/init" : submission.text ?? "").trim();
+      const selectedSkillNames = isInitCommand
+        ? []
+        : submission.selectedSkills?.map((skill) => skill.name).filter(Boolean) ?? [];
       const userDisplayContent = trimmedText
         || (selectedSkillNames.length > 0 ? `Use skills: ${selectedSkillNames.join(", ")}` : "")
-        || (submission.imageUrls.length > 0 ? "[Image]" : "");
+        || (!isInitCommand && submission.imageUrls.length > 0 ? "[Image]" : "");
 
       if (userDisplayContent) {
         setMessages((prev) => [
           ...prev,
-          buildSyntheticUserMessage(userDisplayContent, submission.imageUrls.length)
+          buildSyntheticUserMessage(userDisplayContent, isInitCommand ? 0 : submission.imageUrls.length)
         ]);
       }
 
