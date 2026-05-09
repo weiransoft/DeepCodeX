@@ -36,7 +36,7 @@ npm install -g @vegamo/deepcode-cli
 Deep Code CLI 支持 agent skills，允许您扩展助手的能力：
 
 - **User-level Skills**：从 `~/.agents/skills/` 目录中发现并激活 skills。
-- **Project-level Skills**：从 `./.deepcode/skills/` 目录中加载项目专属 skills。
+- **Project-level Skills**：从 `./.agents/skills/` 目录中加载项目专属 skills，并兼容旧的 `./.deepcode/skills/` 目录。
 
 ### **为 DeepSeek 优化**
 - 专门为 DeepSeek 模型性能调优。
