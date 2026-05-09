@@ -687,6 +687,8 @@ export function renderBufferWithCursor(state: PromptBufferState, isFocused: bool
   return before + renderCursorCell(at) + after;
 }
 
+// Use explicit ANSI instead of chalk.inverse so cursor rendering stays enabled
+// in non-TTY environments such as tests, where Chalk may strip styling.
 function renderCursorCell(value: string): string {
   return `\u001B[7m${value}\u001B[27m`;
 }
