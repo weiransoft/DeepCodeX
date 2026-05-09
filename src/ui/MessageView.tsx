@@ -1,5 +1,5 @@
 import React from "react";
-import { Box, Text } from "ink";
+import {Box, Newline, Text} from "ink";
 import { renderMarkdown } from "./markdown";
 import type { SessionMessage } from "../session";
 
@@ -16,11 +16,16 @@ export function MessageView({ message, collapsed }: Props): React.ReactElement |
   if (message.role === "user") {
     const text = message.content || "(no content)";
     return (
-      <Box flexDirection="column" marginY={0}>
-        <Text color="#229ac3">{`> ${text}`}</Text>
-        {Array.isArray(message.contentParams) && message.contentParams.length > 0 ? (
-          <Text color="#229ac3">{`  📎 ${message.contentParams.length} image attachment(s)`}</Text>
-        ) : null}
+      <Box  marginLeft={1} marginBottom={1} flexDirection="column" marginY={0}>
+        <Box flexGrow={1} gap={1}>
+          <Box><Text color="#229ac3">{`>`}</Text></Box>
+          <Box flexGrow={1}>
+            <Text color="#229ac3">{text}</Text>
+            {Array.isArray(message.contentParams) && message.contentParams.length > 0 ? (
+              <Text color="#229ac3">{`  📎 ${message.contentParams.length} image attachment(s)`}</Text>
+            ) : null}
+          </Box>
+        </Box>
       </Box>
     );
   }
@@ -39,9 +44,9 @@ export function MessageView({ message, collapsed }: Props): React.ReactElement |
         );
       }
       return (
-        <Box flexDirection="column" marginY={0}>
+        <Box  marginLeft={1} flexDirection="column" marginY={0}>
           <StatusLine bulletColor="gray" name="Thinking" params={summary} />
-          <Box marginLeft={2} flexDirection="column">
+          <Box flexDirection="column">
             {content ? <Text dimColor>{renderMarkdown(content)}</Text> : null}
           </Box>
         </Box>
@@ -49,9 +54,9 @@ export function MessageView({ message, collapsed }: Props): React.ReactElement |
     }
 
     return (
-      <Box flexDirection="column" marginY={0}>
-        <Text color="cyan" bold>Assistant</Text>
-        <Box marginLeft={2} flexDirection="column">
+      <Box marginLeft={1} marginBottom={1} flexGrow={1} gap={1} marginY={0}>
+        <Box><Text color="#229ac3">✦</Text></Box>
+        <Box flexDirection="column" flexGrow={1}>
           {content ? <Text>{renderMarkdown(content)}</Text> : null}
         </Box>
       </Box>
@@ -62,7 +67,7 @@ export function MessageView({ message, collapsed }: Props): React.ReactElement |
     const summary = buildToolSummary(message);
     const diffLines = getToolDiffPreviewLines(summary);
     return (
-      <Box flexDirection="column" marginY={0}>
+      <Box flexDirection="column" marginBottom={1} marginY={0}>
         <StatusLine
           bulletColor={summary.ok ? "green" : "red"}
           name={formatStatusName(summary.name)}
@@ -76,14 +81,14 @@ export function MessageView({ message, collapsed }: Props): React.ReactElement |
   if (message.role === "system") {
     if (message.meta?.skill) {
       return (
-        <Box marginY={0}>
+        <Box marginY={0} marginBottom={1}>
           <Text color="magenta">⚡ Loaded skill: {message.meta.skill.name}</Text>
         </Box>
       );
     }
     if (message.meta?.isSummary) {
       return (
-        <Box marginY={0}>
+        <Box marginY={0} marginBottom={1}>
           <Text dimColor italic>(conversation summary inserted)</Text>
         </Box>
       );

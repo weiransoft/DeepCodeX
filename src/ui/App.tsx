@@ -57,6 +57,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   const [dismissedQuestionIds, setDismissedQuestionIds] = useState<Set<string>>(() => new Set());
   const [isExiting, setIsExiting] = useState(false);
   const [showWelcome, setShowWelcome] = useState(true);
+  const [welcomeNonce, setWelcomeNonce] = useState(0);
   const [nowTick, setNowTick] = useState(0);
 
   const messagesRef = useRef<SessionMessage[]>([]);
@@ -153,6 +154,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
           setActiveStatus(null);
           setDismissedQuestionIds(new Set());
           setShowWelcome(true);
+          setWelcomeNonce((n) => n + 1);
           await refreshSkills();
           refreshSessionsList();
         }
@@ -216,14 +218,25 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
 
   const handleSelectSession = useCallback(
     async (sessionId: string) => {
+      const currentSessionId = sessionManager.getActiveSessionId();
+      if (currentSessionId !== sessionId) {
+        process.stdout.write("\u001B[2J\u001B[3J\u001B[H");
+      }
       sessionManager.setActiveSessionId(sessionId);
-      setMessages(loadVisibleMessages(sessionManager, sessionId));
+      // 先清空让 <Static> 的 index 重置为 0
+      setMessages([]);
+      setShowWelcome(false);
+      setWelcomeNonce((n) => n + 1);
+      setView("chat");
+      // 再加载新消息，此时 index 已为 0，会渲染全部 items
+      setTimeout(() => {
+        setMessages(loadVisibleMessages(sessionManager, sessionId));
+        setShowWelcome(true);
+      }, 0);
       const session = sessionManager.getSession(sessionId);
       setStatusLine(session ? buildStatusLine(session) : "");
       setRunningProcesses(session?.processes ?? null);
       setActiveStatus(session?.status ?? null);
-      setShowWelcome(false);
-      setView("chat");
       await refreshSkills(sessionId);
     },
     [sessionManager]
@@ -257,7 +270,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   );
   const welcomeSettings = useMemo(() => resolveCurrentSettings(), []);
   const welcomeItem: SessionMessage = useMemo(() => ({
-    id: "__welcome__",
+    id: `__welcome__${welcomeNonce}`,
     sessionId: "",
     role: "system",
     content: "",
@@ -267,7 +280,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
     visible: true,
     createTime: "",
     updateTime: ""
-  }), []);
+  }), [welcomeNonce]);
   const staticItems = useMemo(() => {
     if (showWelcome && view === "chat") {
       return [welcomeItem, ...messages];
@@ -296,10 +309,10 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
     <Box flexDirection="column" width={screenWidth} minWidth={80} overflowX={'visible'}>
       <Static items={staticItems}>
         {(item) => {
-          if (item.id === "__welcome__") {
+          if (item.id.startsWith("__welcome__")) {
             return (
               <WelcomeScreen
-                key="__welcome__"
+                key={item.id}
                 projectRoot={projectRoot}
                 settings={welcomeSettings}
                 skills={skills}
