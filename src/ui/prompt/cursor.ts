@@ -40,6 +40,12 @@ function disableTerminalFocusReporting(): string {
   return "\u001B[?1004l";
 }
 
+/**
+ * Calculate where the terminal hardware cursor should be placed relative to
+ * the Ink-rendered inverse cursor cell.  The returned {@code rowsUp} and
+ * {@code column} values are used by {@link usePromptTerminalCursor} to
+ * position the terminal's blinking cursor on top of the simulated inverse cell.
+ */
 export function getPromptCursorPlacement(
   state: PromptBufferState,
   screenWidth: number,
@@ -189,19 +195,6 @@ export function usePromptTerminalCursor(
       activePlacementRef.current = null;
     };
   }, [isActive, placement.rowsUp, placement.column, stdout]);
-}
-
-export function useHiddenTerminalCursor(stdout: NodeJS.WriteStream | undefined, isActive: boolean): void {
-  useLayoutEffect(() => {
-    if (!isActive || !stdout?.isTTY) {
-      return;
-    }
-
-    stdout.write(hideCursor());
-    return () => {
-      stdout.write(showCursor());
-    };
-  }, [isActive, stdout]);
 }
 
 export function useTerminalFocusReporting(stdout: NodeJS.WriteStream | undefined, isActive: boolean): void {

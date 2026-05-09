@@ -34,7 +34,7 @@ export { useTerminalInput, parseTerminalInput } from "./prompt";
 export type { InputKey } from "./prompt";
 
 import type { InputKey } from "./prompt";
-import { useTerminalInput, useHiddenTerminalCursor, useTerminalFocusReporting } from "./prompt/cursor";
+import { useTerminalInput, usePromptTerminalCursor, useTerminalFocusReporting, getPromptCursorPlacement, measureTextRows } from "./prompt";
 import SlashCommandMenu from "./SlashCommandMenu";
 
 export type PromptSubmission = {
@@ -115,8 +115,33 @@ export const PromptInput = React.memo(function PromptInput({
         ? loadingText
         : "esc to interrupt · ctrl+c to cancel input"
       : "enter send · shift+enter newline · ctrl+v image · / commands · ctrl+d exit";
+
+  // Compute where the terminal hardware cursor should be placed.
+  // The terminal cursor is the ONLY cursor — BufferWithCursor renders
+  // plain text without any inverse styling, relying on the terminal's
+  // native blinking cursor for visual feedback.
+  const cursorPlacement = React.useMemo(() => {
+    const menuRows = showMenu
+      ? (() => {
+          const maxVisible = 6;
+          const visibleStart = Math.min(
+            Math.max(0, menuIndex - Math.floor((maxVisible - 1) / 2)),
+            Math.max(0, slashMenu.length - maxVisible)
+          );
+          const visibleCount = Math.min(slashMenu.length, maxVisible);
+          const hasTopArrow = visibleStart > 0 ? 1 : 0;
+          const hasBottomArrow = visibleStart + visibleCount < slashMenu.length ? 1 : 0;
+          return hasTopArrow + visibleCount + hasBottomArrow + 1 + 1;
+        })()
+      : 0;
+    const belowRows = showMenu
+      ? 1 + menuRows
+      : 1 + measureTextRows(footerText, screenWidth, 0);
+    return getPromptCursorPlacement(buffer, screenWidth, PROMPT_PREFIX_WIDTH, belowRows);
+  }, [buffer, footerText, screenWidth, showMenu, slashMenu.length, menuIndex]);
+
   useTerminalFocusReporting(stdout, !disabled);
-  useHiddenTerminalCursor(stdout, !disabled);
+  usePromptTerminalCursor(stdout, cursorPlacement, !disabled);
 
   useEffect(() => {
     if (!showMenu) {
@@ -561,7 +586,7 @@ export const PromptInput = React.memo(function PromptInput({
            borderRight={false}
            borderDimColor>
         <PromptPrefixLine busy={busy} />
-        <Text>{renderBufferWithCursor(buffer, !disabled && hasTerminalFocus, placeholder)}</Text>
+        <BufferWithCursor state={buffer} isFocused={!disabled && hasTerminalFocus} placeholder={placeholder} />
       </Box>
       {showSkillsDropdown ? (
         <Box flexDirection="column" marginBottom={1}>
@@ -652,6 +677,15 @@ export function isClearImageAttachmentsShortcut(input: string, key: Pick<InputKe
   return key.ctrl && (input === "x" || input === "X");
 }
 
+/**
+ * JSX component that renders the input buffer as plain text.
+ * No inverse styling is applied — the terminal hardware cursor
+ * (positioned by usePromptTerminalCursor) provides the only
+ * cursor visual, giving the user a native blinking cursor.
+ *
+ * The key={state.cursor} forces a full re-render on cursor movement,
+ * which prevents Ink from leaving stale characters in the terminal.
+ */
 function BufferWithCursor({ state, isFocused, placeholder }: {
   state: PromptBufferState;
   isFocused: boolean;
@@ -667,11 +701,16 @@ function BufferWithCursor({ state, isFocused, placeholder }: {
     return <Text key={state.cursor}>{text.endsWith("\n") ? `${text} ` : text}</Text>;
   }
 
-  // Render text normally. The terminal hardware cursor (positioned by
-  // usePromptTerminalCursor) provides the blinking cursor feedback.
+  // Render plain text only.  The terminal hardware cursor provides the
+  // blinking indicator at the correct position.
   return <Text key={state.cursor}>{text}</Text>;
 }
 
+/**
+ * Render the input buffer as a plain string with an ANSI inverse cell at the
+ * cursor position.  Kept for external use (e.g. tests) where Ink JSX is not
+ * available.  Prefer BufferWithCursor inside Ink render trees.
+ */
 export function renderBufferWithCursor(state: PromptBufferState, isFocused: boolean, placeholder?: string): string {
   const text = state.text || "";
   const cursor = Math.max(0, Math.min(state.cursor, text.length));
@@ -696,8 +735,11 @@ export function renderBufferWithCursor(state: PromptBufferState, isFocused: bool
   return before + renderCursorCell(at) + after;
 }
 
-// Use explicit ANSI instead of chalk.inverse so cursor rendering stays enabled
-// in non-TTY environments such as tests, where Chalk may strip styling.
+/**
+ * Wrap a character with ANSI inverse codes (CSI 7 m ... CSI 27 m).
+ * Explicit ANSI is used instead of chalk.inverse so the cursor stays visible
+ * in non-TTY environments (e.g. tests) where Chalk strips styling.
+ */
 function renderCursorCell(value: string): string {
   return `\u001B[7m${value}\u001B[27m`;
 }
