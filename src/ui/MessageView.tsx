@@ -111,7 +111,7 @@ function StatusLine({
   return (
     <Text wrap="truncate-end">
       {[
-        <Text key="bullet" color={bulletColor}>•</Text>,
+        <Text key="bullet" color={bulletColor}>✧</Text>,
         " ",
         <Text key="name" bold>{name}</Text>,
         params ? <Text key="params" color="white">{`  ${params}`}</Text> : null
