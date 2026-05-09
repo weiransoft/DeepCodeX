@@ -8,15 +8,19 @@ type ExitSummaryInput = {
   model?: string;
 };
 
+const ANSI_RE = /\u001b\[[0-9;]*[a-zA-Z]/g;
+
+function visibleLength(text: string): number {
+  return text.replace(ANSI_RE, "").length;
+}
+
 function padRight(text: string, width: number): string {
-  const visible = text.replace(/\u001b\[[0-9;]*m/g, "");
-  const padding = Math.max(0, width - visible.length);
+  const padding = Math.max(0, width - visibleLength(text));
   return text + " ".repeat(padding);
 }
 
 function padLeft(text: string, width: number): string {
-  const visible = text.replace(/\u001b\[[0-9;]*m/g, "");
-  const padding = Math.max(0, width - visible.length);
+  const padding = Math.max(0, width - visibleLength(text));
   return " ".repeat(padding) + text;
 }
 
@@ -82,7 +86,7 @@ export function buildExitSummaryText(input: ExitSummaryInput): string {
 
   const rows: string[] = [
     "",
-    `  ${header}`,
+    `${header}`,
     "",
   ];
 
@@ -105,8 +109,8 @@ export function buildExitSummaryText(input: ExitSummaryInput): string {
       padLeft("Input Tokens", colInput) +
       padLeft("Output Tokens", colOutput) +
       padLeft("Cached Tokens", colCached);
-    rows.push(`  ${chalk.bold(headerRow)}`);
-    rows.push(`  ${divider}`);
+    rows.push(chalk.bold(headerRow));
+    rows.push(divider);
 
     const reqsStr = String(assistantCount).padStart(colReqs);
     const inputStr = formatNumber(usage.promptTokens).padStart(colInput);
@@ -118,7 +122,7 @@ export function buildExitSummaryText(input: ExitSummaryInput): string {
       padRight(chalk.yellow(inputStr), colInput) +
       padRight(chalk.yellow(outputStr), colOutput) +
       padRight(chalk.yellow(cachedStr), colCached);
-    rows.push(`  ${dataRow}`);
+    rows.push(dataRow);
 
     rows.push("");
   }

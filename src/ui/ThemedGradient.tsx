@@ -4,7 +4,7 @@ import Gradient from 'ink-gradient';
 
 
 export const ThemedGradient: React.FC<TextProps> = ({ children, ...props }) => {
-  const gradient = ['#229ac3e6', '#229ac3e6']; //先用纯色
+  const gradient = ['#229ac3e6', '#229ac3e6']; // Use solid color for now
 
   if (gradient && gradient.length >= 2) {
     return (
