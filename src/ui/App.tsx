@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Box, Static, Text, useApp, useStdout } from "ink";
+import { Box, Static, Text, useApp, useStdout, useWindowSize } from "ink";
 import chalk from "chalk";
 import * as fs from "fs";
 import * as os from "os";
@@ -44,6 +44,7 @@ type AppProps = {
 export function App({ projectRoot, version = "", onRestart }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout, write } = useStdout();
+  const { columns } = useWindowSize();
   const [view, setView] = useState<View>("chat");
   const [busy, setBusy] = useState(false);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
@@ -57,7 +58,8 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   const [dismissedQuestionIds, setDismissedQuestionIds] = useState<Set<string>>(() => new Set());
   const [isExiting, setIsExiting] = useState(false);
   const [showWelcome, setShowWelcome] = useState(true);
-  const [, setNowTick] = useState(0);
+  const [welcomeNonce, setWelcomeNonce] = useState(0);
+  const [nowTick, setNowTick] = useState(0);
 
   const messagesRef = useRef<SessionMessage[]>([]);
   messagesRef.current = messages;
@@ -117,6 +119,8 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
     }
   }
 
+  const writeRef = useRef(write);
+  writeRef.current = write;
   const handlePrompt = useCallback(
     async (submission: PromptSubmission) => {
       if (submission.command === "exit") {
@@ -142,7 +146,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         if (onRestart) {
           onRestart();
         } else {
-          write("\u001B[2J\u001B[3J\u001B[H");
+          writeRef.current("\u001B[2J\u001B[3J\u001B[H");
           sessionManager.setActiveSessionId(null);
           setMessages([]);
           setStatusLine("");
@@ -151,6 +155,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
           setActiveStatus(null);
           setDismissedQuestionIds(new Set());
           setShowWelcome(true);
+          setWelcomeNonce((n) => n + 1);
           await refreshSkills();
           refreshSessionsList();
         }
@@ -207,29 +212,50 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         setRunningProcesses(null);
       }
     },
-    [exit, onRestart, sessionManager, write]
+    [exit, onRestart, sessionManager]
   );
 
   const handleInterrupt = useCallback(() => {
     sessionManager.interruptActiveSession();
   }, [sessionManager]);
 
+  const handleSubmit = useCallback(
+    (submission: PromptSubmission) => { void handlePrompt(submission); },
+    [handlePrompt]
+  );
+
   const handleSelectSession = useCallback(
     async (sessionId: string) => {
+      const currentSessionId = sessionManager.getActiveSessionId();
+      if (currentSessionId !== sessionId) {
+        process.stdout.write("\u001B[2J\u001B[3J\u001B[H");
+      }
       sessionManager.setActiveSessionId(sessionId);
-      setMessages(loadVisibleMessages(sessionManager, sessionId));
+      // 先清空让 <Static> 的 index 重置为 0
+      setMessages([]);
+      setShowWelcome(false);
+      setWelcomeNonce((n) => n + 1);
+      setView("chat");
+      // 再加载新消息，此时 index 已为 0，会渲染全部 items
+      setTimeout(() => {
+        setMessages(loadVisibleMessages(sessionManager, sessionId));
+        setShowWelcome(true);
+      }, 0);
       const session = sessionManager.getSession(sessionId);
       setStatusLine(session ? buildStatusLine(session) : "");
       setRunningProcesses(session?.processes ?? null);
       setActiveStatus(session?.status ?? null);
-      setShowWelcome(false);
-      setView("chat");
       await refreshSkills(sessionId);
     },
     [sessionManager]
   );
 
-  const screenWidth = stdout?.columns ?? 80;
+  const [stableColumns, setStableColumns] = useState(columns);
+  useEffect(() => {
+    const timer = setTimeout(() => setStableColumns(columns), 100);
+    return () => clearTimeout(timer);
+  }, [columns]);
+  const screenWidth = useMemo(() => stableColumns ?? stdout?.columns ?? 80, [stableColumns, stdout]);
   const promptHistory = useMemo(() => {
     return messages
       .filter((message) => message.role === "user" && typeof message.content === "string")
@@ -244,12 +270,15 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   const shouldShowQuestionPrompt = Boolean(
     pendingQuestion && !dismissedQuestionIds.has(pendingQuestion.messageId)
   );
-  const loadingText = busy
-    ? buildLoadingText({ progress: streamProgress, processes: runningProcesses, now: Date.now() })
-    : null;
+  const loadingText = useMemo(
+    () => busy
+      ? buildLoadingText({ progress: streamProgress, processes: runningProcesses, now: Date.now() })
+      : null,
+    [busy, streamProgress, runningProcesses, nowTick]
+  );
   const welcomeSettings = useMemo(() => resolveCurrentSettings(), []);
   const welcomeItem: SessionMessage = useMemo(() => ({
-    id: "__welcome__",
+    id: `__welcome__${welcomeNonce}`,
     sessionId: "",
     role: "system",
     content: "",
@@ -259,7 +288,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
     visible: true,
     createTime: "",
     updateTime: ""
-  }), []);
+  }), [welcomeNonce]);
   const staticItems = useMemo(() => {
     if (showWelcome && view === "chat") {
       return [welcomeItem, ...messages];
@@ -285,13 +314,13 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   }, [pendingQuestion]);
 
   return (
-    <Box flexDirection="column" width={screenWidth}>
+    <Box flexDirection="column" width={screenWidth} minWidth={80} overflowX={'visible'}>
       <Static items={staticItems}>
         {(item) => {
-          if (item.id === "__welcome__") {
+          if (item.id.startsWith("__welcome__")) {
             return (
               <WelcomeScreen
-                key="__welcome__"
+                key={item.id}
                 projectRoot={projectRoot}
                 settings={welcomeSettings}
                 skills={skills}
@@ -333,12 +362,14 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         />
       ) : isExiting ? null : (
         <PromptInput
+          screenWidth={screenWidth}
           skills={skills}
           promptHistory={promptHistory}
           busy={busy}
           loadingText={loadingText}
-          onSubmit={(submission) => void handlePrompt(submission)}
+          onSubmit={handleSubmit}
           onInterrupt={handleInterrupt}
+          placeholder='Type your message...'
         />
       )}
     </Box>

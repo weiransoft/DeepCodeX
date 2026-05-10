@@ -289,6 +289,46 @@ test("SessionManager marks skills loaded from existing session messages", async 
   assert.equal(loadedSkill?.isLoaded, true);
 });
 
+test("SessionManager lists project skills from .agents with legacy .deepcode compatibility", async () => {
+  const workspace = createTempDir("deepcode-project-skills-workspace-");
+  const home = createTempDir("deepcode-project-skills-home-");
+  process.env.HOME = home;
+
+  const userSkillDir = path.join(home, ".agents", "skills", "shared");
+  fs.mkdirSync(userSkillDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(userSkillDir, "SKILL.md"),
+    "---\nname: shared\ndescription: User-level skill\n---\n# Shared\n",
+    "utf8"
+  );
+
+  const legacyProjectSkillDir = path.join(workspace, ".deepcode", "skills", "legacy");
+  fs.mkdirSync(legacyProjectSkillDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(legacyProjectSkillDir, "SKILL.md"),
+    "---\nname: legacy\ndescription: Legacy project skill\n---\n# Legacy\n",
+    "utf8"
+  );
+
+  const projectAgentsSkillDir = path.join(workspace, ".agents", "skills", "shared");
+  fs.mkdirSync(projectAgentsSkillDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(projectAgentsSkillDir, "SKILL.md"),
+    "---\nname: shared\ndescription: Project .agents skill\n---\n# Shared\n",
+    "utf8"
+  );
+
+  const manager = createSessionManager(workspace, "machine-id-project-skills");
+  const skills = await manager.listSkills();
+  const legacySkill = skills.find((skill) => skill.name === "legacy");
+  const sharedSkill = skills.find((skill) => skill.name === "shared");
+
+  assert.equal(legacySkill?.path, "./.deepcode/skills/legacy/SKILL.md");
+  assert.equal(legacySkill?.description, "Legacy project skill");
+  assert.equal(sharedSkill?.path, "./.agents/skills/shared/SKILL.md");
+  assert.equal(sharedSkill?.description, "Project .agents skill");
+});
+
 test("createSession reports a new prompt with the machineId token", async () => {
   const workspace = createTempDir("deepcode-session-workspace-");
   const home = createTempDir("deepcode-session-home-");

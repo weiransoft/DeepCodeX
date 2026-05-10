@@ -142,3 +142,17 @@ export function readClipboardImage(): ClipboardImage | null {
 
   return null;
 }
+
+export async function readClipboardImageAsync(): Promise<ClipboardImage | null> {
+  return new Promise((resolve, reject) => {
+    // Use setImmediate to avoid blocking the event loop
+    setImmediate(() => {
+      try {
+        const result = readClipboardImage();
+        resolve(result);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
+}

@@ -556,7 +556,8 @@ The candidate skills are as follows:\n\n`;
   async listSkills(sessionId?: string): Promise<SkillInfo[]> {
     const homeDir = os.homedir();
     const agentsRoot = path.join(homeDir, ".agents", "skills");
-    const projectSkillsRoot = path.join(this.projectRoot, ".deepcode", "skills");
+    const legacyProjectSkillsRoot = path.join(this.projectRoot, ".deepcode", "skills");
+    const projectAgentsSkillsRoot = path.join(this.projectRoot, ".agents", "skills");
     const skillsByName = new Map<string, SkillInfo>();
 
     const collectSkills = (root: string, displayRoot: string): SkillInfo[] => {
@@ -596,7 +597,10 @@ The candidate skills are as follows:\n\n`;
     for (const skill of collectSkills(agentsRoot, "~/.agents/skills")) {
       skillsByName.set(skill.name, skill);
     }
-    for (const skill of collectSkills(projectSkillsRoot, "./.deepcode/skills")) {
+    for (const skill of collectSkills(legacyProjectSkillsRoot, "./.deepcode/skills")) {
+      skillsByName.set(skill.name, skill);
+    }
+    for (const skill of collectSkills(projectAgentsSkillsRoot, "./.agents/skills")) {
       skillsByName.set(skill.name, skill);
     }
 

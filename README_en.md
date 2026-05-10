@@ -36,7 +36,7 @@ The configuration file is shared with the [Deep Code VSCode extension](https://g
 Deep Code CLI supports agent skills that allow you to extend the assistant's capabilities:
 
 - **User-level Skills**: discovered and activated from `~/.agents/skills/`.
-- **Project-level Skills**: loaded from `./.deepcode/skills/` for project-specific workflows.
+- **Project-level Skills**: loaded from `./.agents/skills/` for project-specific workflows, with legacy `./.deepcode/skills/` compatibility.
 
 ### **Optimized for DeepSeek**
 - Specifically tuned for DeepSeek model performance.
