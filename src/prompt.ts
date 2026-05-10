@@ -598,26 +598,6 @@ export function getTools(options: PromptToolOptions = {}): ToolDefinition[] {
         },
       },
     },
-    {
-      type: "function",
-      function: {
-        name: "Init",
-        description:
-          "Save the completed project agent guide to AGENTS.md in the current project root. Use this after inspecting the repository and drafting the final Markdown content.",
-        parameters: {
-          type: "object",
-          properties: {
-            content: {
-              type: "string",
-              description:
-                "Complete Markdown content for AGENTS.md. The document should be titled \"Repository Guidelines\".",
-            },
-          },
-          required: ["content"],
-          additionalProperties: false,
-        },
-      },
-    },
   ];
 
   tools.push({

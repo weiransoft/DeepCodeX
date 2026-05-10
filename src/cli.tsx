@@ -40,7 +40,6 @@ if (args.includes("--help") || args.includes("-h")) {
       "  /                Open the skills/commands menu",
       "  /new             Start a fresh conversation",
       "  /resume          Pick a previous conversation to continue",
-      "  /init            Create AGENTS.md in the current project",
       "  /exit            Quit",
       "  ctrl+d twice     Quit"
     ].join("\n") + "\n"
