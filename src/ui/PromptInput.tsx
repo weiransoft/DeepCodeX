@@ -475,6 +475,14 @@ export const PromptInput = React.memo(function PromptInput({
       setShowSkillsDropdown(false);
       return;
     }
+    if (item.kind === "init") {
+      onSubmit({ text: "/init", imageUrls: [] });
+      setBuffer(EMPTY_BUFFER);
+      setImageUrls([]);
+      setSelectedSkills([]);
+      setShowSkillsDropdown(false);
+      return;
+    }
     if (item.kind === "resume") {
       onSubmit({ text: "", imageUrls: [], command: "resume" });
       setBuffer(EMPTY_BUFFER);

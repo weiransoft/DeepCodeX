@@ -39,6 +39,7 @@ if (args.includes("--help") || args.includes("-h")) {
       "  esc              Interrupt the current model turn",
       "  /                Open the skills/commands menu",
       "  /new             Start a fresh conversation",
+      "  /init            Initialize an AGENTS.md file with instructions for LLM",
       "  /resume          Pick a previous conversation to continue",
       "  /exit            Quit",
       "  ctrl+d twice     Quit"
