@@ -6,6 +6,7 @@ import {
   backspace,
   deleteForward,
   deleteWordBefore,
+  deleteWordAfter,
   getCurrentSlashToken,
   insertText,
   isEmpty,
@@ -400,11 +401,18 @@ export const PromptInput = React.memo(function PromptInput({
         updateBuffer((s) => deleteWordBefore(s));
         return;
       }
+      if (key.meta && (input === "d" || input === "D")) {
+        updateBuffer((s) => deleteWordAfter(s));
+        return;
+      }
+      if (key.meta && (input === "\u007F" || input === "\b")) {
+        updateBuffer((s) => deleteWordBefore(s));
+        return;
+      }
       if (key.ctrl && (input === "j" || input === "J")) {
         updateBuffer((s) => insertText(s, "\n"));
         return;
       }
-
       if (input.startsWith("\u001B")) {
         // Unhandled escape sequence (e.g. function keys); ignore to avoid inserting garbage.
         return;

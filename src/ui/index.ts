@@ -49,6 +49,7 @@ export {
   moveLineEnd,
   killLine,
   deleteWordBefore,
+  deleteWordAfter,
   reset,
   isEmpty,
   getCurrentSlashToken,
