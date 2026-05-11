@@ -2,9 +2,9 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
-import { createRequire } from "module";
 import { fileURLToPath } from "url";
 import matter from "gray-matter";
+import ejs from "ejs";
 import type { ChatCompletionMessageParam, ChatCompletionContentPart } from "openai/resources/chat/completions";
 import { launchNotifyScript } from "./notify";
 import { buildThinkingRequestOptions } from "./openai-thinking";
@@ -18,10 +18,6 @@ const MAX_SESSION_ENTRIES = 50;
 const DEFAULT_NEW_PROMPT_API_URL = "https://deepcode.vegamo.cn/api/plugin/new";
 const DEFAULT_COMPACT_PROMPT_TOKEN_THRESHOLD = 128 * 1024;
 const DEEPSEEK_V4_COMPACT_PROMPT_TOKEN_THRESHOLD = 512 * 1024;
-const require = createRequire(import.meta.url);
-const ejs = require("ejs") as {
-  render: (template: string, data?: Record<string, unknown>) => string;
-};
 
 type ChatCompletionDebugOptions = {
   enabled?: boolean;
