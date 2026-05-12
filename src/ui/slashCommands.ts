@@ -1,6 +1,6 @@
 import type { SkillInfo } from "../session";
 
-export type SlashCommandKind = "skill" | "skills" | "new" | "init" | "resume" | "exit";
+export type SlashCommandKind = "skill" | "skills" | "new" | "init" | "resume" | "mcp" | "exit";
 
 export type SlashCommandItem = {
   kind: SlashCommandKind;
@@ -34,6 +34,12 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
     name: "resume",
     label: "/resume",
     description: "Pick a previous conversation to continue",
+  },
+  {
+    kind: "mcp",
+    name: "mcp",
+    label: "/mcp",
+    description: "Show MCP server status and available tools",
   },
   {
     kind: "exit",
