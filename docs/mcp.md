@@ -47,18 +47,18 @@ MCP 工具在 Deep Code 中的命名格式为 `mcp__<服务名>__<工具名>`，
 | `args` | string[] | 否 | 传递给命令的参数列表 |
 | `env` | object | 否 | 传递给 MCP 服务器进程的环境变量（如 API Key） |
 
-## 内置 MCP 示例
+## 常用 MCP 示例
 
 ### GitHub MCP
 
-让 Deep Code 直接操作 GitHub 仓库：
+让 Deep Code 直接操作 GitHub 仓库（搜索代码、管理 Issue/PR、读写文件等）：
 
 ```json
 {
   "mcpServers": {
     "github": {
       "command": "npx",
-      "args": ["-y", "@anthropic-ai/mcp-server-github"],
+      "args": ["-y", "@modelcontextprotocol/server-github"],
       "env": {
         "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxxxxxxxxxxx"
       }
@@ -78,7 +78,7 @@ MCP 工具在 Deep Code 中的命名格式为 `mcp__<服务名>__<工具名>`，
   "mcpServers": {
     "playwright": {
       "command": "npx",
-      "args": ["-y", "@anthropic-ai/mcp-server-playwright"]
+      "args": ["@playwright/mcp@latest"]
     }
   }
 }
@@ -93,7 +93,7 @@ MCP 工具在 Deep Code 中的命名格式为 `mcp__<服务名>__<工具名>`，
   "mcpServers": {
     "filesystem": {
       "command": "npx",
-      "args": ["-y", "@anthropic-ai/mcp-server-filesystem", "/path/to/allowed/dir"]
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"]
     }
   }
 }
@@ -117,7 +117,7 @@ MCP 工具在 Deep Code 中的命名格式为 `mcp__<服务名>__<工具名>`，
 
 ## 完整配置示例
 
-以下是一个配置了 GitHub 和 Playwright 两个 MCP 服务器的完整示例：
+以下是一个配置了 GitHub 和 Playwright 两个 MCP 服务器的完整 `~/.deepcode/settings.json`：
 
 ```json
 {
@@ -131,14 +131,14 @@ MCP 工具在 Deep Code 中的命名格式为 `mcp__<服务名>__<工具名>`，
   "mcpServers": {
     "github": {
       "command": "npx",
-      "args": ["-y", "@anthropic-ai/mcp-server-github"],
+      "args": ["-y", "@modelcontextprotocol/server-github"],
       "env": {
         "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxxxxxxxxxxx"
       }
     },
     "playwright": {
       "command": "npx",
-      "args": ["-y", "@anthropic-ai/mcp-server-playwright"]
+      "args": ["@playwright/mcp@latest"]
     }
   }
 }
