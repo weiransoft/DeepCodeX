@@ -2,6 +2,17 @@
 
 [Deep Code](https://github.com/lessweb/deepcode-cli) 是专为 `deepseek-v4` 模型优化的终端 AI 编码助手，支持深度思考、推理强度控制以及 Agent Skills。
 
+## 🚀 新增功能（本 Fork）
+
+### `/mcp` Skill 与 MCP 实现
+
+本 Fork 新增了 `/mcp` 命令和 MCP（Model Context Protocol）集成，让 Deep Code CLI 能够连接外部工具和服务：
+
+- **`/mcp` Skill**：一键管理 MCP 服务器连接，支持添加、移除、列出已配置的 MCP 服务。
+- **MCP 协议实现**：支持与 GitHub、文件系统、数据库等多种外部服务的标准化集成，大幅扩展 AI 助手的操作能力。
+
+通过 MCP，你现在可以让 Deep Code 直接操作 GitHub 仓库、读取文件、查询数据库等，而无需离开终端。
+
 ## 安装
 
 ```bash
