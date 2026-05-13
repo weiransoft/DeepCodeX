@@ -12,12 +12,15 @@ import {
   formatImageAttachmentStatus,
   formatSelectedSkillsStatus,
   getPromptCursorPlacement,
+  getPromptReturnKeyAction,
   isClearImageAttachmentsShortcut,
   parseTerminalInput,
   removeCurrentSlashToken,
   toggleSkillSelection,
   renderBufferWithCursor,
   buildInitPromptSubmission,
+  disableTerminalExtendedKeys,
+  enableTerminalExtendedKeys,
 } from "../ui";
 import type { SkillInfo } from "../session";
 
@@ -81,6 +84,32 @@ test("parseTerminalInput recognizes shifted return sequences", () => {
   assert.equal(key.return, true);
   assert.equal(key.shift, true);
   assert.equal(key.meta, false);
+});
+
+test("prompt return key action submits on plain enter", () => {
+  const { key } = parseTerminalInput("\r");
+  assert.equal(getPromptReturnKeyAction(key), "submit");
+});
+
+test("prompt return key action inserts newline on shift+enter", () => {
+  const { key } = parseTerminalInput("\u001B[13;2u");
+  assert.equal(key.return, true);
+  assert.equal(key.shift, true);
+  assert.equal(getPromptReturnKeyAction(key), "newline");
+});
+
+test("parseTerminalInput recognizes alternate shifted return sequences", () => {
+  for (const sequence of ["\u001B[13;2~", "\u001B[27;2;13~"]) {
+    const { key } = parseTerminalInput(sequence);
+    assert.equal(key.return, true);
+    assert.equal(key.shift, true);
+    assert.equal(getPromptReturnKeyAction(key), "newline");
+  }
+});
+
+test("terminal extended key helpers request and restore modifyOtherKeys mode", () => {
+  assert.equal(enableTerminalExtendedKeys(), "\u001B[>4;1m");
+  assert.equal(disableTerminalExtendedKeys(), "\u001B[>4;0m");
 });
 
 test("parseTerminalInput recognizes terminal focus events", () => {
