@@ -4,6 +4,7 @@ import {
   buildDisableExtglobCommand,
   getShellKind,
   posixPathToWindowsPath,
+  resolveWindowsGitBashPath,
   rewriteWindowsNullRedirect,
   windowsPathToPosixPath,
 } from "../common/shell-utils";
@@ -36,6 +37,39 @@ test("Shell kind detection supports Windows bash.exe paths", () => {
     "shopt -u extglob 2>/dev/null || true"
   );
   assert.equal(buildDisableExtglobCommand("/bin/zsh"), "setopt NO_EXTENDED_GLOB 2>/dev/null || true");
+});
+
+test("Windows Git Bash detection prefers bash.exe from PATH", () => {
+  const bashPath = "D:\\Tools\\Git\\bin\\bash.exe";
+  const resolved = resolveWindowsGitBashPath({
+    findExecutableCandidates: (executable) => (executable === "bash" ? [bashPath] : []),
+    findGitExecPath: () => null,
+    existsSync: (candidate) => candidate === bashPath,
+  });
+
+  assert.equal(resolved, bashPath);
+});
+
+test("Windows Git Bash detection derives bash.exe from git exec path", () => {
+  const bashPath = "D:\\Tools\\Git\\bin\\bash.exe";
+  const resolved = resolveWindowsGitBashPath({
+    findExecutableCandidates: () => [],
+    findGitExecPath: () => "D:/Tools/Git/mingw64/libexec/git-core",
+    existsSync: (candidate) => candidate === bashPath,
+  });
+
+  assert.equal(resolved, bashPath);
+});
+
+test("Windows Git Bash detection derives bash.exe from git.exe candidates", () => {
+  const bashPath = "D:\\Tools\\Git\\bin\\bash.exe";
+  const resolved = resolveWindowsGitBashPath({
+    findExecutableCandidates: (executable) => (executable === "git" ? ["D:\\Tools\\Git\\cmd\\git.exe"] : []),
+    findGitExecPath: () => null,
+    existsSync: (candidate) => candidate === bashPath,
+  });
+
+  assert.equal(resolved, bashPath);
 });
 
 test("File tool path normalization converts Git Bash drive paths on Windows", () => {
