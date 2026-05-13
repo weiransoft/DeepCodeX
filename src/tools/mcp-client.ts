@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "child_process";
 import { createInterface, type Interface } from "readline";
 import * as os from "os";
+import * as path from "path";
 
 type JsonRpcRequest = {
   jsonrpc: "2.0";
@@ -28,6 +29,7 @@ export type McpToolDefinition = {
 
 type ListToolsResult = {
   tools: McpToolDefinition[];
+  nextCursor?: string;
 };
 
 type CallToolResult = {
@@ -39,8 +41,11 @@ export class McpClient {
   private process: ChildProcess | null = null;
   private reader: Interface | null = null;
   private nextId = 1;
-  private pendingRequests = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
-  private buffer = "";
+  private pendingRequests = new Map<
+    number,
+    { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
+  >();
+  private stderrBuffer = "";
 
   constructor(
     private readonly serverName: string,
@@ -49,19 +54,20 @@ export class McpClient {
     private readonly env?: Record<string, string>
   ) {}
 
-  async connect(): Promise<void> {
+  async connect(timeoutMs: number): Promise<void> {
     return new Promise((resolve, reject) => {
       const childEnv = {
         ...process.env,
         ...this.env,
       };
+      const args = this.withNpxYesArg(this.command, this.args);
 
       const isWindows = os.platform() === "win32";
 
       if (isWindows) {
         // On Windows, .cmd files require shell: true to be spawned.
         // Build a single command string so cmd.exe handles quoting correctly.
-        const cmd = [this.command + ".cmd", ...this.args].join(" ");
+        const cmd = [this.command + ".cmd", ...args].join(" ");
         this.process = spawn(cmd, [], {
           stdio: ["pipe", "pipe", "pipe"],
           env: childEnv,
@@ -69,27 +75,28 @@ export class McpClient {
           windowsHide: true,
         });
       } else {
-        this.process = spawn(this.command, this.args, {
+        this.process = spawn(this.command, args, {
           stdio: ["pipe", "pipe", "pipe"],
           env: childEnv,
         });
       }
 
       this.process.on("error", (err) => {
-        reject(new Error(`Failed to start MCP server "${this.serverName}" (${this.command}): ${err.message}`));
+        reject(this.withStderr(`Failed to start MCP server "${this.serverName}" (${this.command}): ${err.message}`));
       });
 
-      this.process.on("exit", (code) => {
-        const error = new Error(`MCP server "${this.serverName}" exited with code ${code}`);
+      this.process.on("close", (code) => {
+        const error = this.withStderr(`MCP server "${this.serverName}" exited with code ${code}`);
         for (const [, pending] of this.pendingRequests) {
+          clearTimeout(pending.timer);
           pending.reject(error);
         }
         this.pendingRequests.clear();
       });
 
       if (this.process.stderr) {
-        this.process.stderr.on("data", (_data: Buffer) => {
-          // MCP servers log to stderr; we ignore for now
+        this.process.stderr.on("data", (data: Buffer) => {
+          this.appendStderr(data.toString("utf8"));
         });
       }
 
@@ -99,11 +106,15 @@ export class McpClient {
       });
 
       // Send initialize request (MCP protocol handshake)
-      this.sendRequest("initialize", {
-        protocolVersion: "2024-11-05",
-        capabilities: {},
-        clientInfo: { name: "deepcode-cli", version: "0.1.0" },
-      })
+      this.sendRequest(
+        "initialize",
+        {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "deepcode-cli", version: "0.1.0" },
+        },
+        timeoutMs
+      )
         .then(() => {
           // Send initialized notification
           this.sendNotification("notifications/initialized");
@@ -113,9 +124,21 @@ export class McpClient {
     });
   }
 
-  async listTools(): Promise<McpToolDefinition[]> {
-    const result = (await this.sendRequest("tools/list", {})) as ListToolsResult;
-    return result.tools ?? [];
+  async listTools(timeoutMs: number): Promise<McpToolDefinition[]> {
+    const tools: McpToolDefinition[] = [];
+    let cursor: string | undefined;
+
+    for (let page = 0; page < 100; page++) {
+      const params = cursor ? { cursor } : {};
+      const result = (await this.sendRequest("tools/list", params, timeoutMs)) as ListToolsResult;
+      tools.push(...(result.tools ?? []));
+      cursor = typeof result.nextCursor === "string" && result.nextCursor ? result.nextCursor : undefined;
+      if (!cursor) {
+        return tools;
+      }
+    }
+
+    throw this.withStderr(`MCP server "${this.serverName}" returned too many tools/list pages`);
   }
 
   async callTool(name: string, args: Record<string, unknown>): Promise<CallToolResult> {
@@ -133,7 +156,7 @@ export class McpClient {
     }
   }
 
-  private sendRequest(method: string, params: Record<string, unknown>): Promise<unknown> {
+  private sendRequest(method: string, params: Record<string, unknown>, timeoutMs = 30_000): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
       const request: JsonRpcRequest = {
@@ -142,7 +165,15 @@ export class McpClient {
         method,
         params,
       };
-      this.pendingRequests.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(id);
+        reject(
+          this.withStderr(
+            `Timed out after ${timeoutMs}ms waiting for MCP server "${this.serverName}" to respond to ${method}`
+          )
+        );
+      }, timeoutMs);
+      this.pendingRequests.set(id, { resolve, reject, timer });
       this.writeLine(JSON.stringify(request));
     });
   }
@@ -168,8 +199,9 @@ export class McpClient {
       if (message.id !== undefined && this.pendingRequests.has(message.id)) {
         const pending = this.pendingRequests.get(message.id)!;
         this.pendingRequests.delete(message.id);
+        clearTimeout(pending.timer);
         if (message.error) {
-          pending.reject(new Error(`MCP error: ${message.error.message}`));
+          pending.reject(this.withStderr(`MCP error: ${message.error.message}`));
         } else {
           pending.resolve(message.result);
         }
@@ -177,5 +209,31 @@ export class McpClient {
     } catch {
       // Ignore unparseable lines
     }
+  }
+
+  private withNpxYesArg(command: string, args: string[]): string[] {
+    const executable = path
+      .basename(command)
+      .toLowerCase()
+      .replace(/\.cmd$/, "");
+    if (executable !== "npx") {
+      return args;
+    }
+    if (args.includes("-y") || args.includes("--yes")) {
+      return args;
+    }
+    return ["-y", ...args];
+  }
+
+  private appendStderr(text: string): void {
+    this.stderrBuffer = `${this.stderrBuffer}${text}`;
+    if (this.stderrBuffer.length > 4000) {
+      this.stderrBuffer = this.stderrBuffer.slice(-4000);
+    }
+  }
+
+  private withStderr(message: string): Error {
+    const stderr = this.stderrBuffer.trim();
+    return new Error(stderr ? `${message}. stderr: ${stderr}` : message);
   }
 }

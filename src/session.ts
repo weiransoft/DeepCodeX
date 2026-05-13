@@ -12,6 +12,7 @@ import { DEEPSEEK_V4_MODELS } from "./model-capabilities";
 import { getCompactPrompt, getSystemPrompt, getTools, AGENT_DRIFT_GUARD_SKILL, type ToolDefinition } from "./prompt";
 import { ToolExecutor, type CreateOpenAIClient } from "./tools/executor";
 import { McpManager } from "./tools/mcp-manager";
+import type { McpServerConfig } from "./settings";
 import { logApiError } from "./error-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./debug-logger";
 
@@ -154,7 +155,7 @@ export type SkillInfo = {
 type SessionManagerOptions = {
   projectRoot: string;
   createOpenAIClient: CreateOpenAIClient;
-  getResolvedSettings: () => { webSearchTool?: string };
+  getResolvedSettings: () => { webSearchTool?: string; mcpServers?: Record<string, McpServerConfig> };
   renderMarkdown: (text: string) => string;
   onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   onSessionEntryUpdated?: (entry: SessionEntry) => void;
@@ -173,7 +174,7 @@ export type LlmStreamProgress = {
 export class SessionManager {
   private readonly projectRoot: string;
   private readonly createOpenAIClient: CreateOpenAIClient;
-  private readonly getResolvedSettings: () => { webSearchTool?: string };
+  private readonly getResolvedSettings: () => { webSearchTool?: string; mcpServers?: Record<string, McpServerConfig> };
   private readonly onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   private readonly onSessionEntryUpdated?: (entry: SessionEntry) => void;
   private readonly onLlmStreamProgress?: (progress: LlmStreamProgress) => void;
@@ -192,11 +193,10 @@ export class SessionManager {
     this.onSessionEntryUpdated = options.onSessionEntryUpdated;
     this.onLlmStreamProgress = options.onLlmStreamProgress;
     this.toolExecutor = new ToolExecutor(this.projectRoot, this.createOpenAIClient, this.mcpManager);
+    this.mcpManager.prepare(this.getResolvedSettings().mcpServers);
   }
 
-  async initMcpServers(
-    servers?: Record<string, { command: string; args?: string[]; env?: Record<string, string> }>
-  ): Promise<void> {
+  async initMcpServers(servers?: Record<string, McpServerConfig>): Promise<void> {
     await this.mcpManager.initialize(servers);
     this.mcpToolDefinitions = this.mcpManager.getMcpToolDefinitions();
   }

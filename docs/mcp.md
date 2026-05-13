@@ -41,11 +41,11 @@ MCP 工具在 Deep Code 中的命名格式为 `mcp__<服务名>__<工具名>`，
 
 ### 配置项说明
 
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `command` | string | 是 | MCP 服务器的可执行文件路径或命令（如 `npx`、`node`、`python`） |
-| `args` | string[] | 否 | 传递给命令的参数列表 |
-| `env` | object | 否 | 传递给 MCP 服务器进程的环境变量（如 API Key） |
+| 字段      | 类型     | 必填 | 说明                                                                                                                   |
+| --------- | -------- | ---- | ---------------------------------------------------------------------------------------------------------------------- |
+| `command` | string   | 是   | MCP 服务器的可执行文件路径或命令（如 `npx`、`node`、`python`）。当命令是 `npx` 时，Deep Code 会自动在参数前补充 `-y`。 |
+| `args`    | string[] | 否   | 传递给命令的参数列表                                                                                                   |
+| `env`     | object   | 否   | 传递给 MCP 服务器进程的环境变量（如 API Key）                                                                          |
 
 ## 常用 MCP 示例
 
@@ -165,11 +165,11 @@ AI 会自动调用 `mcp__github__search_issues` 工具完成操作。
 
 MCP 工具名称由三部分组成：`mcp__<服务名>__<工具名>`
 
-| 服务名 | 工具名 | 完整调用名 |
-|--------|--------|-----------|
-| github | search_code | `mcp__github__search_code` |
-| github | create_pull_request | `mcp__github__create_pull_request` |
-| playwright | browser_navigate | `mcp__playwright__browser_navigate` |
+| 服务名     | 工具名                  | 完整调用名                                 |
+| ---------- | ----------------------- | ------------------------------------------ |
+| github     | search_code             | `mcp__github__search_code`                 |
+| github     | create_pull_request     | `mcp__github__create_pull_request`         |
+| playwright | browser_navigate        | `mcp__playwright__browser_navigate`        |
 | playwright | browser_take_screenshot | `mcp__playwright__browser_take_screenshot` |
 
 你可以通过 `/mcp list` 查看每个服务器提供的具体工具列表。

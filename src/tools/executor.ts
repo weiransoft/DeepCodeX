@@ -165,7 +165,7 @@ export class ToolExecutor {
     const handler = this.toolHandlers.get(toolName);
     if (!handler) {
       // Try MCP tools
-      if (toolName.startsWith("mcp__") && this.mcpManager) {
+      if (this.mcpManager?.isMcpTool(toolName)) {
         const parsedArgs = this.parseToolArguments(toolCall.function.arguments);
         const args = parsedArgs.ok ? parsedArgs.args : {};
         return this.mcpManager.executeMcpTool(toolName, args);

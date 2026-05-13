@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Box, Static, Text, useApp, useStdout, useWindowSize } from "ink";
 import chalk from "chalk";
 import * as fs from "fs";
@@ -126,7 +126,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
     void refreshSkills();
   }, [refreshSessionsList, refreshSkills]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const settings = resolveCurrentSettings();
     void sessionManager.initMcpServers(settings.mcpServers);
   }, [sessionManager]);
@@ -195,25 +195,26 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
           process.stdout.write(chalk.dim("  No MCP servers configured.\n"));
         } else {
           for (const s of statuses) {
-            const icon = s.connected ? chalk.green("✔") : chalk.red("✖");
-            process.stdout.write(`  ${icon} ${chalk.bold(s.name)}`);
-            if (s.connected) {
-              process.stdout.write(chalk.dim(`  (${s.toolCount} tools)`));
+            if (s.status === "starting") {
+              process.stdout.write(`${chalk.yellow("●")} ${chalk.bold(s.name)} - Starting...`);
+            } else if (s.status === "failed") {
+              process.stdout.write(`${chalk.red("✖")} ${chalk.bold(s.name)} - Failed (${s.error ?? "unknown error"})`);
             } else {
-              process.stdout.write(chalk.dim(`  — ${s.error ?? "failed"}`));
+              process.stdout.write(`${chalk.green("✔")} ${chalk.bold(s.name)} - Ready (${s.toolCount} tools)`);
             }
             process.stdout.write("\n");
-            if (s.connected && s.tools.length > 0) {
+            if (s.status === "ready" && s.tools.length > 0) {
               for (const tool of s.tools) {
-                process.stdout.write(chalk.dim(`    - mcp__${s.name}__${tool}\n`));
+                process.stdout.write(chalk.dim(`  - ${tool}\n`));
               }
             }
           }
         }
         process.stdout.write(chalk.dim("─────────────────\n"));
         process.stdout.write(
-          chalk.dim(`  Total: ${statuses.filter((s) => s.connected).length} connected, `) +
-            chalk.dim(`${statuses.filter((s) => !s.connected).length} failed\n`)
+          chalk.dim(`  Total: ${statuses.filter((s) => s.status === "ready").length} ready, `) +
+            chalk.dim(`${statuses.filter((s) => s.status === "starting").length} starting, `) +
+            chalk.dim(`${statuses.filter((s) => s.status === "failed").length} failed\n`)
         );
         process.stdout.write("\n");
         return;
