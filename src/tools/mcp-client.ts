@@ -88,7 +88,7 @@ export class McpClient {
       });
 
       if (this.process.stderr) {
-        this.process.stderr.on("data", (data: Buffer) => {
+        this.process.stderr.on("data", (_data: Buffer) => {
           // MCP servers log to stderr; we ignore for now
         });
       }

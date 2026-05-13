@@ -131,6 +131,12 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
     void sessionManager.initMcpServers(settings.mcpServers);
   }, [sessionManager]);
 
+  useEffect(() => {
+    return () => {
+      sessionManager.dispose();
+    };
+  }, [sessionManager]);
+
   const writeRef = useRef(write);
   writeRef.current = write;
   const handlePrompt = useCallback(
@@ -150,6 +156,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
           process.stdout.write("\n\n");
           process.stdout.write(summary);
           process.stdout.write("\n\n");
+          sessionManager.dispose();
           exit();
         }, 0);
         return;

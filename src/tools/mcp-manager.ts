@@ -140,6 +140,7 @@ export class McpManager {
     }
     this.clients = [];
     this.tools = [];
+    this.serverStatuses = [];
     this.initialized = false;
   }
 }

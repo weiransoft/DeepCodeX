@@ -205,6 +205,10 @@ export class SessionManager {
     return this.mcpManager.getStatus();
   }
 
+  dispose(): void {
+    this.mcpManager.disconnect();
+  }
+
   private estimateStreamTokens(text: string): number {
     let tokens = 0;
     for (const char of text) {
