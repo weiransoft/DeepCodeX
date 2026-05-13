@@ -4,7 +4,7 @@ import * as os from "os";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import type { SessionMessage } from "./session";
-import { findGitBashPath, resolveShellPath } from "./tools/shell-utils";
+import { findGitBashPath, resolveShellPath } from "./common/shell-utils";
 
 export const AGENT_DRIFT_GUARD_SKILL = `
 ---

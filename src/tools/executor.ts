@@ -6,7 +6,7 @@ import { handleEditTool } from "./edit-handler";
 import { handleReadTool } from "./read-handler";
 import { handleWebSearchTool } from "./web-search-handler";
 import { handleWriteTool } from "./write-handler";
-import type { McpManager } from "./mcp-manager";
+import type { McpManager } from "../mcp/mcp-manager";
 
 export type CreateOpenAIClient = () => {
   client: OpenAI | null;

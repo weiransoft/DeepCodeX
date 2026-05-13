@@ -1,7 +1,7 @@
 import React from "react";
 import { render } from "ink";
 import { App } from "./ui";
-import { setShellIfWindows } from "./tools/shell-utils";
+import { setShellIfWindows } from "./common/shell-utils";
 import { checkForNpmUpdate, promptForPendingUpdate, type PackageInfo } from "./updateCheck";
 
 const args = process.argv.slice(2);

@@ -11,7 +11,7 @@ import { buildThinkingRequestOptions } from "./openai-thinking";
 import { DEEPSEEK_V4_MODELS } from "./model-capabilities";
 import { getCompactPrompt, getSystemPrompt, getTools, AGENT_DRIFT_GUARD_SKILL, type ToolDefinition } from "./prompt";
 import { ToolExecutor, type CreateOpenAIClient } from "./tools/executor";
-import { McpManager } from "./tools/mcp-manager";
+import { McpManager } from "./mcp/mcp-manager";
 import type { McpServerConfig } from "./settings";
 import { logApiError } from "./error-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./debug-logger";

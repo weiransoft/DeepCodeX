@@ -2,8 +2,13 @@ import * as fs from "fs";
 import { z } from "zod";
 import { buildThinkingRequestOptions } from "../openai-thinking";
 import type { ToolExecutionContext, ToolExecutionResult } from "./executor";
-import { buildDiffPreview, hasFileChangedSinceState, readTextFileWithMetadata, writeTextFile } from "./file-utils";
-import { executeValidatedTool, semanticBoolean } from "./runtime";
+import {
+  buildDiffPreview,
+  hasFileChangedSinceState,
+  readTextFileWithMetadata,
+  writeTextFile,
+} from "../common/file-utils";
+import { executeValidatedTool, semanticBoolean } from "../common/runtime";
 import {
   createSnippet,
   getFileState,
@@ -12,7 +17,7 @@ import {
   isFullFileView,
   normalizeFilePath,
   recordFileState,
-} from "./state";
+} from "../common/state";
 
 const MAX_CANDIDATE_COUNT = 5;
 const REPLACE_ALL_MATCH_THRESHOLD = 5;
