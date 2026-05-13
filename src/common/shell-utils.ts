@@ -175,13 +175,17 @@ function findAllWindowsExecutableCandidates(executable: string): string[] {
       stdio: ["ignore", "pipe", "ignore"],
       windowsHide: true,
     });
-    return filterWindowsExecutableCandidates([
-      ...output
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter(Boolean),
-      ...extraCandidates,
-    ]);
+    let whereResults = output
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (executable === "bash") {
+      // Skip WSL's deprecated bash.exe launcher (C:\Windows\System32\bash.exe).
+      // It would start commands inside the Linux distro instead of the Windows host,
+      // breaking all path translations and tool invocations.
+      whereResults = whereResults.filter((candidate) => !/system32[\\/]bash\.exe$/i.test(candidate));
+    }
+    return filterWindowsExecutableCandidates([...whereResults, ...extraCandidates]);
   } catch {
     return filterWindowsExecutableCandidates(extraCandidates);
   }
