@@ -18,6 +18,7 @@ export {
   toggleSkillSelection,
   removeCurrentSlashToken,
   isClearImageAttachmentsShortcut,
+  getPromptReturnKeyAction,
   renderBufferWithCursor,
   buildInitPromptSubmission,
   getThinkingOptionIndex,
@@ -28,7 +29,7 @@ export {
   type PromptSubmission,
   type InputKey,
 } from "./PromptInput";
-export { getPromptCursorPlacement } from "./prompt/cursor";
+export { disableTerminalExtendedKeys, enableTerminalExtendedKeys, getPromptCursorPlacement } from "./prompt/cursor";
 export { SessionList, formatSessionTitle } from "./SessionList";
 export { ThemedGradient } from "./ThemedGradient";
 export { UpdatePrompt, type UpdatePromptChoice } from "./UpdatePrompt";

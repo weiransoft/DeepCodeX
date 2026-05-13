@@ -32,7 +32,7 @@ export type { InputKey } from "./prompt";
 
 import { useTerminalInput } from "./prompt";
 import type { InputKey } from "./prompt";
-import { useHiddenTerminalCursor, useTerminalFocusReporting } from "./prompt";
+import { useHiddenTerminalCursor, useTerminalExtendedKeys, useTerminalFocusReporting } from "./prompt";
 import SlashCommandMenu from "./SlashCommandMenu";
 import type { ModelConfigSelection, ReasoningEffort } from "../settings";
 
@@ -140,6 +140,7 @@ export const PromptInput = React.memo(function PromptInput({
         : "esc to interrupt · ctrl+c to cancel input"
       : "enter send · shift+enter newline · ctrl+v image · / commands · ctrl+d exit";
   useTerminalFocusReporting(stdout, !disabled);
+  useTerminalExtendedKeys(stdout, !disabled);
   useHiddenTerminalCursor(stdout, !disabled);
 
   useEffect(() => {
@@ -324,7 +325,8 @@ export const PromptInput = React.memo(function PromptInput({
       }
 
       const noModifier = !key.shift && !key.ctrl && !key.meta;
-      const isPlainReturn = key.return && !key.shift && !key.meta;
+      const returnAction = getPromptReturnKeyAction(key);
+      const isPlainReturn = returnAction === "submit";
 
       if (showMenu) {
         if (key.upArrow) {
@@ -335,7 +337,7 @@ export const PromptInput = React.memo(function PromptInput({
           setMenuIndex((idx) => (idx + 1) % slashMenu.length);
           return;
         }
-        if (key.tab || (key.return && !key.shift && !key.meta)) {
+        if (key.tab || returnAction === "submit") {
           const selected = slashMenu[menuIndex];
           if (selected) {
             handleSlashSelection(selected);
@@ -349,12 +351,12 @@ export const PromptInput = React.memo(function PromptInput({
         return;
       }
 
-      if (key.return) {
-        const isShiftEnter = key.shift || key.meta;
-        if (isShiftEnter) {
-          updateBuffer((s) => insertText(s, "\n"));
-          return;
-        }
+      if (returnAction === "newline") {
+        updateBuffer((s) => insertText(s, "\n"));
+        return;
+      }
+
+      if (returnAction === "submit") {
         submitCurrentBuffer();
         return;
       }
@@ -842,6 +844,18 @@ export function removeCurrentSlashToken(state: PromptBufferState): PromptBufferS
 
 export function isClearImageAttachmentsShortcut(input: string, key: Pick<InputKey, "ctrl">): boolean {
   return key.ctrl && (input === "x" || input === "X");
+}
+
+export type PromptReturnKeyAction = "submit" | "newline" | null;
+
+export function getPromptReturnKeyAction(key: Pick<InputKey, "return" | "shift" | "meta">): PromptReturnKeyAction {
+  if (!key.return) {
+    return null;
+  }
+  if (key.shift || key.meta) {
+    return "newline";
+  }
+  return "submit";
 }
 
 export function renderBufferWithCursor(state: PromptBufferState, isFocused: boolean, placeholder?: string): string {
