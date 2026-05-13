@@ -941,7 +941,7 @@ ${skillMd}
 
   async activateSession(sessionId: string, controller?: AbortController): Promise<void> {
     const startedAt = Date.now();
-    const { client, model, baseURL, thinkingEnabled, reasoningEffort, debugLogEnabled, notify } =
+    const { client, model, baseURL, thinkingEnabled, reasoningEffort, debugLogEnabled, notify, env } =
       this.createOpenAIClient();
     const now = new Date().toISOString();
 
@@ -955,12 +955,12 @@ ${skillMd}
       this.onAssistantMessage(
         this.buildAssistantMessage(
           sessionId,
-          "OpenAI API key not found. Please configure ~/.deepcode/settings.json.",
+          "OpenAI API key not found. Please configure ~/.deepcode/settings.json or ./.deepcode/settings.json.",
           null
         ),
         false
       );
-      this.maybeNotifyTaskCompletion(sessionId, notify, startedAt);
+      this.maybeNotifyTaskCompletion(sessionId, notify, startedAt, env);
       return;
     }
 
@@ -972,7 +972,7 @@ ${skillMd}
         failReason: "interrupted",
         updateTime: now,
       }));
-      this.maybeNotifyTaskCompletion(sessionId, notify, startedAt);
+      this.maybeNotifyTaskCompletion(sessionId, notify, startedAt, env);
       return;
     }
 
@@ -1114,7 +1114,7 @@ ${skillMd}
       if (this.sessionControllers.get(sessionId) === sessionController) {
         this.sessionControllers.delete(sessionId);
       }
-      this.maybeNotifyTaskCompletion(sessionId, notify, startedAt);
+      this.maybeNotifyTaskCompletion(sessionId, notify, startedAt, env);
     }
   }
 
@@ -1966,7 +1966,12 @@ ${skillMd}
     }
   }
 
-  private maybeNotifyTaskCompletion(sessionId: string, notifyCommand: string | undefined, startedAt: number): void {
+  private maybeNotifyTaskCompletion(
+    sessionId: string,
+    notifyCommand: string | undefined,
+    startedAt: number,
+    configuredEnv: Record<string, string> = {}
+  ): void {
     if (!notifyCommand) {
       return;
     }
@@ -1976,7 +1981,7 @@ ${skillMd}
       return;
     }
 
-    launchNotifyScript(notifyCommand, Date.now() - startedAt, this.projectRoot);
+    launchNotifyScript(notifyCommand, Date.now() - startedAt, this.projectRoot, undefined, configuredEnv);
   }
 
   private addSessionProcess(sessionId: string, processId: string | number, command: string): void {

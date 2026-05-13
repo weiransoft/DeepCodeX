@@ -128,9 +128,10 @@ export function toNativeCwd(shellCwd: string): string {
   return posixPathToWindowsPath(shellCwd);
 }
 
-export function buildShellEnv(shellPath: string): NodeJS.ProcessEnv {
+export function buildShellEnv(shellPath: string, extraEnv: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    ...extraEnv,
     SHELL: shellPath,
     GIT_EDITOR: "true",
   };

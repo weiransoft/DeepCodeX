@@ -17,6 +17,7 @@ export type CreateOpenAIClient = () => {
   debugLogEnabled?: boolean;
   notify?: string;
   webSearchTool?: string;
+  env?: Record<string, string>;
   machineId?: string;
 };
 
