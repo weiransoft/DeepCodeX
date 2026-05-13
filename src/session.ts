@@ -1729,8 +1729,9 @@ ${skillMd}
       }
       const params = Array.isArray(message.contentParams) ? message.contentParams : [message.contentParams];
       for (const param of params) {
-        if (param && typeof param === "object") {
-          contentParts.push(param as ChatCompletionContentPart);
+        const part = param as ChatCompletionContentPart;
+        if (part && part.type !== "image_url") {
+          contentParts.push(part);
         }
       }
       const contentValue: string | ChatCompletionContentPart[] = contentParts.length > 0 ? contentParts : content;
