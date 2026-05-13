@@ -17,6 +17,7 @@ export type McpServerConfig = {
 
 export type DeepcodingSettings = {
   env?: DeepcodingEnv;
+  model?: string;
   thinkingEnabled?: boolean;
   reasoningEffort?: ReasoningEffort;
   debugLogEnabled?: boolean;
@@ -35,6 +36,12 @@ export type ResolvedDeepcodingSettings = {
   notify?: string;
   webSearchTool?: string;
   mcpServers?: Record<string, McpServerConfig>;
+};
+
+export type ModelConfigSelection = {
+  model: string;
+  thinkingEnabled: boolean;
+  reasoningEffort: ReasoningEffort;
 };
 
 function resolveReasoningEffort(value: unknown): ReasoningEffort {
@@ -59,7 +66,8 @@ export function resolveSettings(
   defaults: { model: string; baseURL: string }
 ): ResolvedDeepcodingSettings {
   const env = settings?.env ?? {};
-  const model = env.MODEL?.trim() || defaults.model;
+  const topLevelModel = typeof settings?.model === "string" ? settings.model.trim() : "";
+  const model = topLevelModel || env.MODEL?.trim() || defaults.model;
   const notify = typeof settings?.notify === "string" ? settings.notify.trim() : "";
   const webSearchTool = typeof settings?.webSearchTool === "string" ? settings.webSearchTool.trim() : "";
 
@@ -76,4 +84,34 @@ export function resolveSettings(
     webSearchTool: webSearchTool || undefined,
     mcpServers,
   };
+}
+
+export function modelConfigKey(config: Pick<ModelConfigSelection, "thinkingEnabled" | "reasoningEffort">): string {
+  return config.thinkingEnabled ? `thinking:${config.reasoningEffort}` : "thinking:none";
+}
+
+export function applyModelConfigSelection(
+  settings: DeepcodingSettings | null | undefined,
+  current: ModelConfigSelection,
+  selected: ModelConfigSelection
+): { settings: DeepcodingSettings; changed: boolean } {
+  const changed = selected.model !== current.model || modelConfigKey(selected) !== modelConfigKey(current);
+  const next: DeepcodingSettings = { ...(settings ?? {}) };
+
+  if (!changed) {
+    return { settings: next, changed: false };
+  }
+
+  if (selected.model !== current.model || Object.prototype.hasOwnProperty.call(next, "model")) {
+    next.model = selected.model;
+  } else {
+    delete next.model;
+  }
+
+  next.thinkingEnabled = selected.thinkingEnabled;
+  if (selected.thinkingEnabled) {
+    next.reasoningEffort = selected.reasoningEffort;
+  }
+
+  return { settings: next, changed: true };
 }

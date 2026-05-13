@@ -14,7 +14,12 @@ import {
   type SkillInfo,
   type UserPromptContent,
 } from "../session";
-import { resolveSettings, type DeepcodingSettings } from "../settings";
+import {
+  applyModelConfigSelection,
+  resolveSettings,
+  type DeepcodingSettings,
+  type ModelConfigSelection,
+} from "../settings";
 import { PromptInput, type PromptSubmission } from "./PromptInput";
 import { MessageView } from "./MessageView";
 import { SessionList } from "./SessionList";
@@ -58,6 +63,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   const [isExiting, setIsExiting] = useState(false);
   const [showWelcome, setShowWelcome] = useState(true);
   const [welcomeNonce, setWelcomeNonce] = useState(0);
+  const [resolvedSettings, setResolvedSettings] = useState(() => resolveCurrentSettings());
   const [nowTick, setNowTick] = useState(0);
 
   const messagesRef = useRef<SessionMessage[]>([]);
@@ -247,6 +253,17 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
     sessionManager.interruptActiveSession();
   }, [sessionManager]);
 
+  const handleModelConfigChange = useCallback((selection: ModelConfigSelection): string => {
+    const current = resolveCurrentSettings();
+    const { changed } = writeModelConfigSelection(selection, current);
+    const next = resolveCurrentSettings();
+    setResolvedSettings(next);
+    if (!changed) {
+      return "Model settings unchanged";
+    }
+    return `Model settings updated: ${formatModelConfig(current)} → ${formatModelConfig(next)}`;
+  }, []);
+
   const handleSubmit = useCallback(
     (submission: PromptSubmission) => {
       void handlePrompt(submission);
@@ -285,6 +302,37 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
     const timer = setTimeout(() => setStableColumns(columns), 100);
     return () => clearTimeout(timer);
   }, [columns]);
+  const lastRenderedColumnsRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!stdout?.isTTY) {
+      return;
+    }
+    if (stableColumns <= 0) {
+      return;
+    }
+    if (lastRenderedColumnsRef.current === null) {
+      lastRenderedColumnsRef.current = stableColumns;
+      return;
+    }
+    if (lastRenderedColumnsRef.current === stableColumns) {
+      return;
+    }
+    lastRenderedColumnsRef.current = stableColumns;
+
+    // Force full redraw on terminal resize to avoid stale wrapped rows.
+    writeRef.current("\u001B[2J\u001B[H");
+    setMessages([]);
+    setShowWelcome(false);
+    setWelcomeNonce((n) => n + 1);
+
+    const activeSessionId = sessionManager.getActiveSessionId();
+    const nextMessages =
+      activeSessionId && !busy ? loadVisibleMessages(sessionManager, activeSessionId) : messagesRef.current;
+    setTimeout(() => {
+      setMessages(nextMessages);
+      setShowWelcome(true);
+    }, 0);
+  }, [busy, sessionManager, stableColumns, stdout]);
   const screenWidth = useMemo(() => stableColumns ?? stdout?.columns ?? 80, [stableColumns, stdout]);
   const promptHistory = useMemo(() => {
     return messages
@@ -300,7 +348,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
     // eslint-disable-next-line react-hooks/exhaustive-deps -- nowTick forces periodic recalculation for spinner animation
     [busy, streamProgress, runningProcesses, nowTick]
   );
-  const welcomeSettings = useMemo(() => resolveCurrentSettings(), []);
+  const welcomeSettings = resolvedSettings;
   const welcomeItem: SessionMessage = useMemo(
     () => ({
       id: `__welcome__${welcomeNonce}`,
@@ -385,10 +433,12 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         <PromptInput
           screenWidth={screenWidth}
           skills={skills}
+          modelConfig={resolvedSettings}
           promptHistory={promptHistory}
           busy={busy}
           loadingText={loadingText}
           onSubmit={handleSubmit}
+          onModelConfigChange={handleModelConfigChange}
           onInterrupt={handleInterrupt}
           placeholder="Type your message..."
         />
@@ -443,7 +493,7 @@ function buildStatusLine(entry: SessionEntry): string {
 
 export function readSettings(): DeepcodingSettings | null {
   try {
-    const settingsPath = path.join(os.homedir(), ".deepcode", "settings.json");
+    const settingsPath = getSettingsPath();
     if (!fs.existsSync(settingsPath)) {
       return null;
     }
@@ -452,6 +502,24 @@ export function readSettings(): DeepcodingSettings | null {
   } catch {
     return null;
   }
+}
+
+export function writeSettings(settings: DeepcodingSettings): void {
+  const settingsPath = getSettingsPath();
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+  fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+}
+
+export function writeModelConfigSelection(
+  selection: ModelConfigSelection,
+  current: ModelConfigSelection = resolveCurrentSettings()
+): { changed: boolean; settings: DeepcodingSettings } {
+  const rawSettings = readSettings();
+  const result = applyModelConfigSelection(rawSettings, current, selection);
+  if (result.changed) {
+    writeSettings(result.settings);
+  }
+  return result;
 }
 
 export function resolveCurrentSettings(): ReturnType<typeof resolveSettings> {
@@ -520,4 +588,19 @@ function getMachineId(): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function getSettingsPath(): string {
+  return path.join(os.homedir(), ".deepcode", "settings.json");
+}
+
+function formatThinkingMode(settings: Pick<ModelConfigSelection, "thinkingEnabled" | "reasoningEffort">): string {
+  if (!settings.thinkingEnabled) {
+    return "no thinking";
+  }
+  return `thinking ${settings.reasoningEffort}`;
+}
+
+function formatModelConfig(settings: ModelConfigSelection): string {
+  return `${settings.model}, ${formatThinkingMode(settings)}`;
 }

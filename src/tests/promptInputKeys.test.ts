@@ -17,6 +17,7 @@ import {
   removeCurrentSlashToken,
   toggleSkillSelection,
   renderBufferWithCursor,
+  buildInitPromptSubmission,
 } from "../ui";
 import type { SkillInfo } from "../session";
 
@@ -60,6 +61,20 @@ test("parseTerminalInput recognizes word navigation modifiers", () => {
   assert.equal(metaRight.key.meta, true);
 });
 
+test("parseTerminalInput keeps DEL payload for meta+backspace", () => {
+  const { input, key } = parseTerminalInput("\u001B\u007F");
+  assert.equal(input, "\u007F");
+  assert.equal(key.meta, true);
+  assert.equal(key.backspace, false);
+});
+
+test("parseTerminalInput keeps BS payload for meta+backspace", () => {
+  const { input, key } = parseTerminalInput("\u001B\b");
+  assert.equal(input, "\b");
+  assert.equal(key.meta, true);
+  assert.equal(key.backspace, false);
+});
+
 test("parseTerminalInput recognizes shifted return sequences", () => {
   const { input, key } = parseTerminalInput("\u001B\r");
   assert.equal(input, "\r");
@@ -89,6 +104,17 @@ test("formatImageAttachmentStatus formats the image count label", () => {
   assert.equal(formatImageAttachmentStatus(1), "📎 1 image attached");
   assert.equal(formatImageAttachmentStatus(2), "📎 2 images attached");
   assert.equal(IMAGE_ATTACHMENT_CLEAR_HINT, "ctrl+x clear images");
+});
+
+test("buildInitPromptSubmission preserves manually selected skills", () => {
+  const skill: SkillInfo = { name: "skill-writer", path: "/skills/skill-writer/SKILL.md", description: "Write skills" };
+
+  assert.deepEqual(buildInitPromptSubmission([skill]), {
+    text: "/init",
+    imageUrls: [],
+    selectedSkills: [skill],
+  });
+  assert.deepEqual(buildInitPromptSubmission([]), { text: "/init", imageUrls: [], selectedSkills: undefined });
 });
 
 test("selected skill helpers format, dedupe, toggle, and clear slash tokens", () => {
