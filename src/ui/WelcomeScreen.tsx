@@ -68,7 +68,7 @@ export function WelcomeScreen({
             {!compact ? <Text> </Text> : null}
             <SettingRow label="Model" value={settings.model} />
             <SettingRow label="Thinking Enabled" value={String(settings.thinkingEnabled)} />
-            <SettingRow label="Reasoning Effort" value={settings.reasoningEffort} />
+            <SettingRow label="Reasoning Effort" value={settings.thinkingEnabled ? settings.reasoningEffort : "-"} />
             <SettingRow label="CWD" value={cwd} />
           </Box>
         </Box>

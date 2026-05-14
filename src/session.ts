@@ -121,6 +121,7 @@ export type MessageMeta = {
   resultMd?: string;
   asThinking?: boolean;
   isSummary?: boolean;
+  isModelChange?: boolean;
   skill?: SkillInfo;
 };
 
@@ -598,7 +599,7 @@ The candidate skills are as follows:\n\n`;
       if (!fs.existsSync(root)) {
         return [];
       }
-      let entries: fs.Dirent[] = [];
+      let entries: fs.Dirent[];
       try {
         entries = fs.readdirSync(root, { withFileTypes: true });
       } catch {
@@ -770,6 +771,12 @@ The candidate skills are as follows:\n\n`;
 
   setActiveSessionId(sessionId: string | null): void {
     this.activeSessionId = sessionId;
+  }
+
+  addSessionSystemMessage(sessionId: string, content: string, meta?: MessageMeta): void {
+    const message = this.buildSystemMessage(sessionId, content, meta);
+    this.appendSessionMessage(sessionId, message);
+    this.onAssistantMessage(message, false);
   }
 
   async handleUserPrompt(userPrompt: UserPromptContent): Promise<void> {
@@ -1535,7 +1542,12 @@ ${skillMd}
     return this.readNonEmptyFile(path.join(os.homedir(), ".deepcode", "AGENTS.md"));
   }
 
-  private buildSystemMessage(sessionId: string, content: string, contentParams: unknown | null = null): SessionMessage {
+  private buildSystemMessage(
+    sessionId: string,
+    content: string,
+    contentParams: unknown | null = null,
+    meta?: MessageMeta
+  ): SessionMessage {
     const now = new Date().toISOString();
     return {
       id: crypto.randomUUID(),
@@ -1548,6 +1560,7 @@ ${skillMd}
       visible: false,
       createTime: now,
       updateTime: now,
+      meta,
     };
   }
 

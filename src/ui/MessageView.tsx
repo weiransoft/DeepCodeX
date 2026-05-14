@@ -16,17 +16,15 @@ export function MessageView({ message, collapsed }: Props): React.ReactElement |
   if (message.role === "user") {
     const text = message.content || "(no content)";
     return (
-      <Box marginLeft={1} marginBottom={1} flexDirection="column" marginY={0}>
-        <Box flexGrow={1} gap={1}>
-          <Box>
-            <Text color="#229ac3">{`>`}</Text>
-          </Box>
-          <Box flexGrow={1}>
-            <Text color="#229ac3">{text}</Text>
-            {Array.isArray(message.contentParams) && message.contentParams.length > 0 ? (
-              <Text color="#229ac3">{`  📎 ${message.contentParams.length} image attachment(s)`}</Text>
-            ) : null}
-          </Box>
+      <Box marginLeft={1} marginBottom={1} flexDirection="row" marginY={0} flexGrow={1} gap={1}>
+        <Box>
+          <Text color="#229ac3">{`>`}</Text>
+        </Box>
+        <Box flexGrow={1}>
+          <Text color="#229ac3">{text}</Text>
+          {Array.isArray(message.contentParams) && message.contentParams.length > 0 ? (
+            <Text color="#229ac3">{`  📎 ${message.contentParams.length} image attachment(s)`}</Text>
+          ) : null}
         </Box>
       </Box>
     );
@@ -48,7 +46,9 @@ export function MessageView({ message, collapsed }: Props): React.ReactElement |
       return (
         <Box marginLeft={1} flexDirection="column" marginY={0}>
           <StatusLine bulletColor="gray" name="Thinking" params={summary} />
-          <Box flexDirection="column">{content ? <Text dimColor>{renderMarkdown(content)}</Text> : null}</Box>
+          <Box flexDirection="column" marginLeft={2}>
+            {content ? <Text dimColor>{renderMarkdown(content)}</Text> : null}
+          </Box>
         </Box>
       );
     }
@@ -81,6 +81,20 @@ export function MessageView({ message, collapsed }: Props): React.ReactElement |
   }
 
   if (message.role === "system") {
+    // 渲染模型变更消息
+    if (message.meta?.isModelChange) {
+      return (
+        <Box marginY={0} marginLeft={1} marginBottom={1} flexGrow={1} flexDirection="row" gap={1}>
+          <Box>
+            <Text color="#229ac3">{`>`}</Text>
+          </Box>
+          <Box flexGrow={1} flexDirection="column">
+            <Text color="#229ac3">{message.content}</Text>
+          </Box>
+        </Box>
+      );
+    }
+
     if (message.meta?.skill) {
       return (
         <Box marginY={0} marginLeft={1} marginBottom={1}>
