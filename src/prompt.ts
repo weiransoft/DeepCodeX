@@ -252,7 +252,7 @@ type PromptToolOptions = {
 };
 
 function readToolDocs(extensionRoot: string, _options: PromptToolOptions = {}): string {
-  const toolsDir = path.join(extensionRoot, "docs", "tools");
+  const toolsDir = path.join(extensionRoot, "templates", "tools");
   if (!fs.existsSync(toolsDir)) {
     return "";
   }
