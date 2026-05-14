@@ -25,7 +25,12 @@ test("WebSearch executes the configured script with the query as one argument", 
   const scriptPath = path.join(workspace, "web-search.sh");
   fs.writeFileSync(
     scriptPath,
-    ["#!/bin/sh", "printf 'query=%s\\n' \"$1\"", "printf 'cwd=%s\\n' \"$PWD\""].join("\n"),
+    [
+      "#!/bin/sh",
+      "printf 'query=%s\\n' \"$1\"",
+      "printf 'cwd=%s\\n' \"$PWD\"",
+      "printf 'webhook=%s\\n' \"$WEBHOOK\"",
+    ].join("\n"),
     "utf8"
   );
   fs.chmodSync(scriptPath, 0o755);
@@ -36,6 +41,7 @@ test("WebSearch executes the configured script with the query as one argument", 
     { query: "latest node release" },
     createContext(workspace, {
       webSearchTool: scriptPath,
+      env: { WEBHOOK: "configured" },
       onProcessStart: (id, command) => starts.push({ id, command }),
       onProcessExit: (id) => exits.push(id),
     })
@@ -43,7 +49,7 @@ test("WebSearch executes the configured script with the query as one argument", 
   const realWorkspace = fs.realpathSync(workspace);
 
   assert.equal(result.ok, true);
-  assert.equal(result.output, `query=latest node release\ncwd=${realWorkspace}\n`);
+  assert.equal(result.output, `query=latest node release\ncwd=${realWorkspace}\nwebhook=configured\n`);
   assert.equal(starts.length, 1);
   assert.match(starts[0].command, /^WebSearch: latest node release$/);
   assert.deepEqual(exits, [starts[0].id]);
@@ -128,7 +134,10 @@ test("WebSearch returns a configuration error when neither a script nor an LLM c
   const result = await handleWebSearchTool({ query: "latest node release" }, createContext(workspace));
 
   assert.equal(result.ok, false);
-  assert.equal(result.error, "WebSearch default mode requires a valid LLM configuration in ~/.deepcode/settings.json.");
+  assert.equal(
+    result.error,
+    "WebSearch default mode requires a valid LLM configuration in ~/.deepcode/settings.json or ./.deepcode/settings.json."
+  );
 });
 
 function createContext(
@@ -136,6 +145,7 @@ function createContext(
   options: {
     client?: OpenAI | null;
     webSearchTool?: string;
+    env?: Record<string, string>;
     machineId?: string;
     onProcessStart?: (processId: string | number, command: string) => void;
     onProcessExit?: (processId: string | number) => void;
@@ -157,6 +167,7 @@ function createContext(
       model: "test-model",
       thinkingEnabled: false,
       webSearchTool: options.webSearchTool,
+      env: options.env,
       machineId: options.machineId,
     }),
     onProcessStart: options.onProcessStart,

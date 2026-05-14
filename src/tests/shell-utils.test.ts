@@ -4,10 +4,11 @@ import {
   buildDisableExtglobCommand,
   getShellKind,
   posixPathToWindowsPath,
+  resolveWindowsGitBashPath,
   rewriteWindowsNullRedirect,
   windowsPathToPosixPath,
-} from "../tools/shell-utils";
-import { isAbsoluteFilePath, normalizeFilePath } from "../tools/state";
+} from "../common/shell-utils";
+import { isAbsoluteFilePath, normalizeFilePath } from "../common/state";
 
 test("Windows paths convert to Git Bash POSIX paths", () => {
   assert.equal(windowsPathToPosixPath("C:\\Users\\foo"), "/c/Users/foo");
@@ -36,6 +37,56 @@ test("Shell kind detection supports Windows bash.exe paths", () => {
     "shopt -u extglob 2>/dev/null || true"
   );
   assert.equal(buildDisableExtglobCommand("/bin/zsh"), "setopt NO_EXTENDED_GLOB 2>/dev/null || true");
+});
+
+test("Windows Git Bash detection prefers bash.exe from PATH", () => {
+  const bashPath = "D:\\Tools\\Git\\bin\\bash.exe";
+  const resolved = resolveWindowsGitBashPath({
+    findExecutableCandidates: (executable) => (executable === "bash" ? [bashPath] : []),
+    findGitExecPath: () => null,
+    existsSync: (candidate) => candidate === bashPath,
+  });
+
+  assert.equal(resolved, bashPath);
+});
+
+test("Windows Git Bash detection derives bash.exe from git exec path", () => {
+  const bashPath = "D:\\Tools\\Git\\bin\\bash.exe";
+  const resolved = resolveWindowsGitBashPath({
+    findExecutableCandidates: () => [],
+    findGitExecPath: () => "D:/Tools/Git/mingw64/libexec/git-core",
+    existsSync: (candidate) => candidate === bashPath,
+  });
+
+  assert.equal(resolved, bashPath);
+});
+
+test("Windows Git Bash detection derives bash.exe from git.exe candidates", () => {
+  const bashPath = "D:\\Tools\\Git\\bin\\bash.exe";
+  const resolved = resolveWindowsGitBashPath({
+    findExecutableCandidates: (executable) => (executable === "git" ? ["D:\\Tools\\Git\\cmd\\git.exe"] : []),
+    findGitExecPath: () => null,
+    existsSync: (candidate) => candidate === bashPath,
+  });
+
+  assert.equal(resolved, bashPath);
+});
+
+test("Windows Git Bash detection skips WSL System32 bash.exe in PATH results", () => {
+  // When WSL1 is enabled on older Windows 10, C:\Windows\System32\bash.exe
+  // appears in PATH. That launcher would execute commands inside the Linux
+  // distro instead of the Windows host, breaking all tool invocations.
+  // The PATH bash strategy should ignore it and fall through.
+  const system32Bash = "C:\\Windows\\System32\\bash.exe";
+  const gitBash = "D:\\Tools\\Git\\bin\\bash.exe";
+  const resolved = resolveWindowsGitBashPath({
+    findExecutableCandidates: (executable) =>
+      executable === "bash" ? [system32Bash] : executable === "git" ? ["D:\\Tools\\Git\\cmd\\git.exe"] : [],
+    findGitExecPath: () => null,
+    existsSync: (candidate) => candidate === gitBash,
+  });
+
+  assert.equal(resolved, gitBash);
 });
 
 test("File tool path normalization converts Git Bash drive paths on Windows", () => {

@@ -7,7 +7,7 @@ import {
   resolveShellPath,
   rewriteWindowsNullRedirect,
   toNativeCwd,
-} from "./shell-utils";
+} from "../common/shell-utils";
 
 const MAX_OUTPUT_CHARS = 30000;
 const MAX_CAPTURE_CHARS = 10 * 1024 * 1024;
@@ -105,9 +105,10 @@ async function executeShellCommand(
 ): Promise<{ stdout: string; stderr: string; exitCode: number | null; signal: string | null; error?: string }> {
   return new Promise((resolve) => {
     const detached = process.platform !== "win32";
+    const configuredEnv = context.createOpenAIClient?.().env ?? {};
     const child = spawn(shellPath, shellArgs, {
       cwd,
-      env: buildShellEnv(shellPath),
+      env: buildShellEnv(shellPath, configuredEnv),
       detached,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],

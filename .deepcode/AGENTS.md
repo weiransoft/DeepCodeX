@@ -15,6 +15,14 @@ src/
 │   ├── MessageView.tsx  # Renders assistant/tool messages with markdown
 │   ├── SessionList.tsx  # Session picker for /resume
 │   └── ...
+├── mcp/
+│   ├── mcp-client.ts    # MCP client — JSON-RPC communication with MCP servers
+│   └── mcp-manager.ts   # MCP manager — lifecycle, tool registration, execution
+├── common/
+│   ├── file-utils.ts    # File read/write with encoding and diff preview
+│   ├── shell-utils.ts   # Shell path resolution (Git Bash, zsh, bash)
+│   ├── state.ts         # In-memory file state and snippet tracking
+│   └── runtime.ts       # Tool validation runtime helpers (executeValidatedTool, semanticBoolean)
 ├── tools/
 │   ├── executor.ts      # ToolExecutor — dispatches tool calls to handlers
 │   ├── bash-handler.ts  # Executes shell commands

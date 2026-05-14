@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ToolExecutionContext, ToolExecutionResult } from "./executor";
+import type { ToolExecutionContext, ToolExecutionResult } from "../tools/executor";
 
 export type ValidationResult = { ok: true; input: Record<string, unknown> } | { ok: false; error: string };
 

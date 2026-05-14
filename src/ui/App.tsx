@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Box, Static, Text, useApp, useStdout, useWindowSize } from "ink";
 import chalk from "chalk";
 import * as fs from "fs";
@@ -16,9 +16,10 @@ import {
 } from "../session";
 import {
   applyModelConfigSelection,
-  resolveSettings,
+  resolveSettingsSources,
   type DeepcodingSettings,
   type ModelConfigSelection,
+  type ResolvedDeepcodingSettings,
 } from "../settings";
 import { PromptInput, type PromptSubmission } from "./PromptInput";
 import { MessageView } from "./MessageView";
@@ -63,7 +64,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   const [isExiting, setIsExiting] = useState(false);
   const [showWelcome, setShowWelcome] = useState(true);
   const [welcomeNonce, setWelcomeNonce] = useState(0);
-  const [resolvedSettings, setResolvedSettings] = useState(() => resolveCurrentSettings());
+  const [resolvedSettings, setResolvedSettings] = useState(() => resolveCurrentSettings(projectRoot));
   const [nowTick, setNowTick] = useState(0);
 
   const messagesRef = useRef<SessionMessage[]>([]);
@@ -72,8 +73,8 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   const sessionManager = useMemo(() => {
     return new SessionManager({
       projectRoot,
-      createOpenAIClient: () => createOpenAIClient(),
-      getResolvedSettings: () => resolveCurrentSettings(),
+      createOpenAIClient: () => createOpenAIClient(projectRoot),
+      getResolvedSettings: () => resolveCurrentSettings(projectRoot),
       renderMarkdown: (text) => text,
       onAssistantMessage: (message: SessionMessage) => {
         setMessages((prev) => [...prev, message]);
@@ -126,9 +127,15 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
     void refreshSkills();
   }, [refreshSessionsList, refreshSkills]);
 
-  useEffect(() => {
-    const settings = resolveCurrentSettings();
+  useLayoutEffect(() => {
+    const settings = resolveCurrentSettings(projectRoot);
     void sessionManager.initMcpServers(settings.mcpServers);
+  }, [projectRoot, sessionManager]);
+
+  useEffect(() => {
+    return () => {
+      sessionManager.dispose();
+    };
   }, [sessionManager]);
 
   const writeRef = useRef(write);
@@ -143,13 +150,14 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
           const allMessages = activeSessionId
             ? sessionManager.listSessionMessages(activeSessionId)
             : messagesRef.current;
-          const resolved = resolveCurrentSettings();
+          const resolved = resolveCurrentSettings(projectRoot);
           const summary = buildExitSummaryText({ session, messages: allMessages, model: resolved.model });
           process.stdout.write("\n");
           process.stdout.write(chalk.green("> /exit "));
           process.stdout.write("\n\n");
           process.stdout.write(summary);
           process.stdout.write("\n\n");
+          sessionManager.dispose();
           exit();
         }, 0);
         return;
@@ -188,25 +196,26 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
           process.stdout.write(chalk.dim("  No MCP servers configured.\n"));
         } else {
           for (const s of statuses) {
-            const icon = s.connected ? chalk.green("✔") : chalk.red("✖");
-            process.stdout.write(`  ${icon} ${chalk.bold(s.name)}`);
-            if (s.connected) {
-              process.stdout.write(chalk.dim(`  (${s.toolCount} tools)`));
+            if (s.status === "starting") {
+              process.stdout.write(`${chalk.yellow("●")} ${chalk.bold(s.name)} - Starting...`);
+            } else if (s.status === "failed") {
+              process.stdout.write(`${chalk.red("✖")} ${chalk.bold(s.name)} - Failed (${s.error ?? "unknown error"})`);
             } else {
-              process.stdout.write(chalk.dim(`  — ${s.error ?? "failed"}`));
+              process.stdout.write(`${chalk.green("✔")} ${chalk.bold(s.name)} - Ready (${s.toolCount} tools)`);
             }
             process.stdout.write("\n");
-            if (s.connected && s.tools.length > 0) {
+            if (s.status === "ready" && s.tools.length > 0) {
               for (const tool of s.tools) {
-                process.stdout.write(chalk.dim(`    - mcp__${s.name}__${tool}\n`));
+                process.stdout.write(chalk.dim(`  - ${tool}\n`));
               }
             }
           }
         }
         process.stdout.write(chalk.dim("─────────────────\n"));
         process.stdout.write(
-          chalk.dim(`  Total: ${statuses.filter((s) => s.connected).length} connected, `) +
-            chalk.dim(`${statuses.filter((s) => !s.connected).length} failed\n`)
+          chalk.dim(`  Total: ${statuses.filter((s) => s.status === "ready").length} ready, `) +
+            chalk.dim(`${statuses.filter((s) => s.status === "starting").length} starting, `) +
+            chalk.dim(`${statuses.filter((s) => s.status === "failed").length} failed\n`)
         );
         process.stdout.write("\n");
         return;
@@ -246,23 +255,26 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         setRunningProcesses(null);
       }
     },
-    [exit, onRestart, sessionManager, refreshSkills, refreshSessionsList]
+    [exit, onRestart, projectRoot, sessionManager, refreshSkills, refreshSessionsList]
   );
 
   const handleInterrupt = useCallback(() => {
     sessionManager.interruptActiveSession();
   }, [sessionManager]);
 
-  const handleModelConfigChange = useCallback((selection: ModelConfigSelection): string => {
-    const current = resolveCurrentSettings();
-    const { changed } = writeModelConfigSelection(selection, current);
-    const next = resolveCurrentSettings();
-    setResolvedSettings(next);
-    if (!changed) {
-      return "Model settings unchanged";
-    }
-    return `Model settings updated: ${formatModelConfig(current)} → ${formatModelConfig(next)}`;
-  }, []);
+  const handleModelConfigChange = useCallback(
+    (selection: ModelConfigSelection): string => {
+      const current = resolveCurrentSettings(projectRoot);
+      const { changed } = writeModelConfigSelection(selection, current, projectRoot);
+      const next = resolveCurrentSettings(projectRoot);
+      setResolvedSettings(next);
+      if (!changed) {
+        return "Model settings unchanged";
+      }
+      return `Model settings updated: ${formatModelConfig(current)} → ${formatModelConfig(next)}`;
+    },
+    [projectRoot]
+  );
 
   const handleSubmit = useCallback(
     (submission: PromptSubmission) => {
@@ -492,8 +504,15 @@ function buildStatusLine(entry: SessionEntry): string {
 }
 
 export function readSettings(): DeepcodingSettings | null {
+  return readSettingsFile(getUserSettingsPath());
+}
+
+export function readProjectSettings(projectRoot: string = process.cwd()): DeepcodingSettings | null {
+  return readSettingsFile(getProjectSettingsPath(projectRoot));
+}
+
+function readSettingsFile(settingsPath: string): DeepcodingSettings | null {
   try {
-    const settingsPath = getSettingsPath();
     if (!fs.existsSync(settingsPath)) {
       return null;
     }
@@ -505,31 +524,52 @@ export function readSettings(): DeepcodingSettings | null {
 }
 
 export function writeSettings(settings: DeepcodingSettings): void {
-  const settingsPath = getSettingsPath();
+  const settingsPath = getUserSettingsPath();
+  writeSettingsFile(settingsPath, settings);
+}
+
+export function writeProjectSettings(settings: DeepcodingSettings, projectRoot: string = process.cwd()): void {
+  const settingsPath = getProjectSettingsPath(projectRoot);
+  writeSettingsFile(settingsPath, settings);
+}
+
+function writeSettingsFile(settingsPath: string, settings: DeepcodingSettings): void {
   fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
   fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
 }
 
 export function writeModelConfigSelection(
   selection: ModelConfigSelection,
-  current: ModelConfigSelection = resolveCurrentSettings()
+  current: ModelConfigSelection = resolveCurrentSettings(),
+  projectRoot: string = process.cwd()
 ): { changed: boolean; settings: DeepcodingSettings } {
-  const rawSettings = readSettings();
+  const projectSettingsPath = getProjectSettingsPath(projectRoot);
+  const shouldWriteProjectSettings = fs.existsSync(projectSettingsPath);
+  const rawSettings = shouldWriteProjectSettings ? readProjectSettings(projectRoot) : readSettings();
   const result = applyModelConfigSelection(rawSettings, current, selection);
   if (result.changed) {
-    writeSettings(result.settings);
+    if (shouldWriteProjectSettings) {
+      writeProjectSettings(result.settings, projectRoot);
+    } else {
+      writeSettings(result.settings);
+    }
   }
   return result;
 }
 
-export function resolveCurrentSettings(): ReturnType<typeof resolveSettings> {
-  return resolveSettings(readSettings(), {
-    model: DEFAULT_MODEL,
-    baseURL: DEFAULT_BASE_URL,
-  });
+export function resolveCurrentSettings(projectRoot: string = process.cwd()): ResolvedDeepcodingSettings {
+  return resolveSettingsSources(
+    readSettings(),
+    readProjectSettings(projectRoot),
+    {
+      model: DEFAULT_MODEL,
+      baseURL: DEFAULT_BASE_URL,
+    },
+    process.env
+  );
 }
 
-export function createOpenAIClient(): {
+export function createOpenAIClient(projectRoot: string = process.cwd()): {
   client: OpenAI | null;
   model: string;
   baseURL: string;
@@ -538,9 +578,10 @@ export function createOpenAIClient(): {
   debugLogEnabled: boolean;
   notify?: string;
   webSearchTool?: string;
+  env: Record<string, string>;
   machineId?: string;
 } {
-  const settings = resolveCurrentSettings();
+  const settings = resolveCurrentSettings(projectRoot);
   if (!settings.apiKey) {
     return {
       client: null,
@@ -551,6 +592,7 @@ export function createOpenAIClient(): {
       debugLogEnabled: settings.debugLogEnabled,
       notify: settings.notify,
       webSearchTool: settings.webSearchTool,
+      env: settings.env,
       machineId: getMachineId(),
     };
   }
@@ -568,6 +610,7 @@ export function createOpenAIClient(): {
     debugLogEnabled: settings.debugLogEnabled,
     notify: settings.notify,
     webSearchTool: settings.webSearchTool,
+    env: settings.env,
     machineId: getMachineId(),
   };
 }
@@ -590,8 +633,12 @@ function getMachineId(): string | undefined {
   }
 }
 
-function getSettingsPath(): string {
+function getUserSettingsPath(): string {
   return path.join(os.homedir(), ".deepcode", "settings.json");
+}
+
+function getProjectSettingsPath(projectRoot: string): string {
+  return path.join(projectRoot, ".deepcode", "settings.json");
 }
 
 function formatThinkingMode(settings: Pick<ModelConfigSelection, "thinkingEnabled" | "reasoningEffort">): string {

@@ -1,7 +1,7 @@
 import React from "react";
 import { render } from "ink";
 import { App } from "./ui";
-import { setShellIfWindows } from "./tools/shell-utils";
+import { setShellIfWindows } from "./common/shell-utils";
 import { checkForNpmUpdate, promptForPendingUpdate, type PackageInfo } from "./updateCheck";
 
 const args = process.argv.slice(2);
@@ -23,7 +23,8 @@ if (args.includes("--help") || args.includes("-h")) {
       "  deepcode --help        Show this help",
       "",
       "Configuration:",
-      "  ~/.deepcode/settings.json   API key, model, base URL",
+      "  ~/.deepcode/settings.json    User-level API key, model, base URL",
+      "  ./.deepcode/settings.json    Project-level settings",
       "  ~/.agents/skills/*/SKILL.md  User-level skills",
       "  ./.agents/skills/*/SKILL.md  Project-level skills",
       "  ./.deepcode/skills/*/SKILL.md Legacy project-level skills",
@@ -64,19 +65,22 @@ async function main(): Promise<void> {
   const restartRef: { current: (() => void) | null } = { current: null };
 
   function startApp(): void {
+    let restarting = false;
     const inkInstance = render(
       <App projectRoot={projectRoot} version={packageInfo.version} onRestart={() => restartRef.current?.()} />,
       { exitOnCtrlC: false }
     );
 
     restartRef.current = () => {
+      restarting = true;
       process.stdout.write("\u001B[2J\u001B[3J\u001B[H");
       inkInstance.unmount();
       startApp();
     };
 
     inkInstance.waitUntilExit().then(() => {
-      if (!restartRef.current) {
+      if (!restarting) {
+        restartRef.current = null;
         process.exit(0);
       }
     });

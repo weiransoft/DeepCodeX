@@ -27,7 +27,8 @@ export function launchNotifyScript(
   notifyPath: string | undefined,
   durationMs: number,
   workingDirectory?: string,
-  spawnProcess: NotifySpawn = spawn as unknown as NotifySpawn
+  spawnProcess: NotifySpawn = spawn as unknown as NotifySpawn,
+  configuredEnv: Record<string, string> = {}
 ): void {
   const commandPath = notifyPath?.trim();
   if (!commandPath) {
@@ -37,7 +38,7 @@ export function launchNotifyScript(
   const options = {
     cwd: workingDirectory,
     detached: process.platform !== "win32",
-    env: buildNotifyEnv(durationMs),
+    env: buildNotifyEnv(durationMs, { ...process.env, ...configuredEnv }),
     stdio: "ignore" as const,
   };
 

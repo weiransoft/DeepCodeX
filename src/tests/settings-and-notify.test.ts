@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildNotifyEnv, formatDurationSeconds, launchNotifyScript, type NotifySpawn } from "../notify";
-import { applyModelConfigSelection, resolveSettings } from "../settings";
+import { applyModelConfigSelection, resolveSettings, resolveSettingsSources } from "../settings";
+
+const TEST_PROCESS_ENV = {};
 
 test("resolveSettings reads top-level thinkingEnabled, notify, and webSearchTool", () => {
   const resolved = resolveSettings(
@@ -20,7 +22,8 @@ test("resolveSettings reads top-level thinkingEnabled, notify, and webSearchTool
     {
       model: "default-model",
       baseURL: "https://default.example.com",
-    }
+    },
+    TEST_PROCESS_ENV
   );
 
   assert.equal(resolved.model, "deepseek-v3.2");
@@ -44,13 +47,37 @@ test("resolveSettings gives top-level model priority over env MODEL", () => {
     {
       model: "default-model",
       baseURL: "https://default.example.com",
-    }
+    },
+    TEST_PROCESS_ENV
   );
 
   assert.equal(resolved.model, "deepseek-v4-flash");
 });
 
-test("resolveSettings still accepts legacy env.THINKING and defaults reasoning effort when absent", () => {
+test("resolveSettings reads THINKING_ENABLED, REASONING_EFFORT, and DEBUG_LOG_ENABLED from env", () => {
+  const resolved = resolveSettings(
+    {
+      env: {
+        THINKING_ENABLED: "true",
+        REASONING_EFFORT: "high",
+        DEBUG_LOG_ENABLED: "true",
+      },
+    },
+    {
+      model: "default-model",
+      baseURL: "https://default.example.com",
+    },
+    TEST_PROCESS_ENV
+  );
+
+  assert.equal(resolved.thinkingEnabled, true);
+  assert.equal(resolved.reasoningEffort, "high");
+  assert.equal(resolved.debugLogEnabled, true);
+  assert.equal(resolved.model, "default-model");
+  assert.equal(resolved.baseURL, "https://default.example.com");
+});
+
+test("resolveSettings ignores removed legacy env.THINKING", () => {
   const resolved = resolveSettings(
     {
       env: {
@@ -60,13 +87,108 @@ test("resolveSettings still accepts legacy env.THINKING and defaults reasoning e
     {
       model: "default-model",
       baseURL: "https://default.example.com",
+    },
+    {}
+  );
+
+  assert.equal(resolved.thinkingEnabled, false);
+});
+
+test("resolveSettingsSources applies user, project, and DEEPCODE environment precedence", () => {
+  const resolved = resolveSettingsSources(
+    {
+      env: {
+        API_KEY: "user-key",
+        MODEL: "user-env-model",
+        THINKING_ENABLED: "false",
+        REASONING_EFFORT: "high",
+        DEBUG_LOG_ENABLED: "false",
+        WEBHOOK: "user-webhook",
+      },
+      model: "user-top-model",
+      thinkingEnabled: true,
+      reasoningEffort: "max",
+      debugLogEnabled: true,
+    },
+    {
+      env: {
+        API_KEY: "project-key",
+        MODEL: "project-env-model",
+        THINKING_ENABLED: "false",
+        DEBUG_LOG_ENABLED: "false",
+      },
+      model: "project-top-model",
+      thinkingEnabled: true,
+    },
+    {
+      model: "default-model",
+      baseURL: "https://default.example.com",
+    },
+    {
+      DEEPCODE_MODEL: "system-model",
+      DEEPCODE_THINKING_ENABLED: "false",
+      DEEPCODE_REASONING_EFFORT: "high",
+      DEEPCODE_DEBUG_LOG_ENABLED: "true",
+      DEEPCODE_WEBHOOK: "system-webhook",
     }
   );
 
-  assert.equal(resolved.thinkingEnabled, true);
-  assert.equal(resolved.reasoningEffort, "max");
-  assert.equal(resolved.model, "default-model");
-  assert.equal(resolved.baseURL, "https://default.example.com");
+  assert.equal(resolved.model, "system-model");
+  assert.equal(resolved.apiKey, "project-key");
+  assert.equal(resolved.thinkingEnabled, false);
+  assert.equal(resolved.reasoningEffort, "high");
+  assert.equal(resolved.debugLogEnabled, true);
+  assert.equal(resolved.env.WEBHOOK, "system-webhook");
+});
+
+test("resolveSettingsSources merges MCP env with documented priority", () => {
+  const resolved = resolveSettingsSources(
+    {
+      env: {
+        MCP_GITHUB_PERSONAL_ACCESS_TOKEN: "user-global",
+      },
+      mcpServers: {
+        github: {
+          command: "node",
+          args: ["user-server.js"],
+          env: {
+            GITHUB_PERSONAL_ACCESS_TOKEN: "user-local",
+            USER_ONLY: "1",
+          },
+        },
+      },
+    },
+    {
+      env: {
+        MCP_GITHUB_PERSONAL_ACCESS_TOKEN: "project-global",
+      },
+      mcpServers: {
+        github: {
+          command: "python",
+          env: {
+            GITHUB_PERSONAL_ACCESS_TOKEN: "project-local",
+            PROJECT_ONLY: "1",
+          },
+        },
+      },
+    },
+    {
+      model: "default-model",
+      baseURL: "https://default.example.com",
+    },
+    {
+      DEEPCODE_MCP_GITHUB_PERSONAL_ACCESS_TOKEN: "system-global",
+    }
+  );
+
+  assert.equal(resolved.mcpServers?.github?.command, "python");
+  assert.deepEqual(resolved.mcpServers?.github?.args, ["user-server.js"]);
+  assert.deepEqual(resolved.mcpServers?.github?.env, {
+    MCP_GITHUB_PERSONAL_ACCESS_TOKEN: "system-global",
+    GITHUB_PERSONAL_ACCESS_TOKEN: "system-global",
+    USER_ONLY: "1",
+    PROJECT_ONLY: "1",
+  });
 });
 
 test("resolveSettings defaults DeepSeek v4 models to thinking mode", () => {
@@ -79,7 +201,8 @@ test("resolveSettings defaults DeepSeek v4 models to thinking mode", () => {
     {
       model: "default-model",
       baseURL: "https://default.example.com",
-    }
+    },
+    TEST_PROCESS_ENV
   );
 
   assert.equal(resolved.thinkingEnabled, true);
@@ -91,7 +214,8 @@ test("resolveSettings applies thinking defaults to the fallback model", () => {
     {
       model: "deepseek-v4-pro",
       baseURL: "https://default.example.com",
-    }
+    },
+    TEST_PROCESS_ENV
   );
 
   assert.equal(resolved.model, "deepseek-v4-pro");
@@ -108,7 +232,8 @@ test("resolveSettings keeps thinking mode off by default for other models", () =
     {
       model: "default-model",
       baseURL: "https://default.example.com",
-    }
+    },
+    TEST_PROCESS_ENV
   );
 
   assert.equal(resolved.thinkingEnabled, false);
@@ -125,7 +250,8 @@ test("resolveSettings allows explicit thinkingEnabled to override model defaults
     {
       model: "default-model",
       baseURL: "https://default.example.com",
-    }
+    },
+    TEST_PROCESS_ENV
   );
 
   assert.equal(resolved.thinkingEnabled, false);
@@ -139,7 +265,8 @@ test("resolveSettings defaults invalid reasoning effort to max", () => {
     {
       model: "default-model",
       baseURL: "https://default.example.com",
-    }
+    },
+    TEST_PROCESS_ENV
   );
 
   assert.equal(resolved.reasoningEffort, "max");
@@ -260,13 +387,14 @@ test("launchNotifyScript passes DURATION and falls back to /bin/sh for non-execu
     };
   };
 
-  launchNotifyScript("/tmp/notify.sh", 2750, "/tmp/project", spawnProcess);
+  launchNotifyScript("/tmp/notify.sh", 2750, "/tmp/project", spawnProcess, { WEBHOOK: "configured" });
 
   assert.equal(calls.length, 2);
   assert.equal(calls[0]?.command, "/tmp/notify.sh");
   assert.deepEqual(calls[0]?.args, []);
   assert.equal(calls[0]?.options.cwd, "/tmp/project");
   assert.equal(calls[0]?.options.env?.DURATION, "2");
+  assert.equal(calls[0]?.options.env?.WEBHOOK, "configured");
   assert.equal(calls[1]?.command, "/bin/sh");
   assert.deepEqual(calls[1]?.args, ["/tmp/notify.sh"]);
   assert.equal(calls[1]?.options.cwd, "/tmp/project");

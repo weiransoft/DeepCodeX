@@ -27,6 +27,7 @@ type LLMClientContext = {
   thinkingEnabled: boolean;
   notify?: string;
   webSearchTool?: string;
+  env?: Record<string, string>;
   machineId?: string;
 };
 
@@ -46,14 +47,15 @@ export async function handleWebSearchTool(
   const llmContext = context.createOpenAIClient?.();
   const scriptPath = llmContext?.webSearchTool?.trim();
   if (scriptPath) {
-    return executeConfiguredWebSearch(query, scriptPath, context);
+    return executeConfiguredWebSearch(query, scriptPath, context, llmContext?.env ?? {});
   }
 
   if (!hasUsableClient(llmContext)) {
     return {
       ok: false,
       name: "WebSearch",
-      error: "WebSearch default mode requires a valid LLM configuration in ~/.deepcode/settings.json.",
+      error:
+        "WebSearch default mode requires a valid LLM configuration in ~/.deepcode/settings.json or ./.deepcode/settings.json.",
     };
   }
 
@@ -67,9 +69,10 @@ function hasUsableClient(value: ReturnType<CreateOpenAIClient> | undefined): val
 async function executeConfiguredWebSearch(
   query: string,
   scriptPath: string,
-  context: ToolExecutionContext
+  context: ToolExecutionContext,
+  configuredEnv: Record<string, string>
 ): Promise<ToolExecutionResult> {
-  const execution = await runWebSearchScript(scriptPath, query, context);
+  const execution = await runWebSearchScript(scriptPath, query, context, configuredEnv);
   const output = execution.stdout.slice(0, MAX_OUTPUT_CHARS);
   const truncated = execution.stdout.length > MAX_OUTPUT_CHARS;
 
@@ -150,12 +153,13 @@ async function executeDefaultWebSearch(
 async function runWebSearchScript(
   scriptPath: string,
   query: string,
-  context: ToolExecutionContext
+  context: ToolExecutionContext,
+  configuredEnv: Record<string, string>
 ): Promise<{ stdout: string; stderr: string; exitCode: number | null; signal: string | null; error?: string }> {
   return new Promise((resolve) => {
     const child = spawn(scriptPath, [query], {
       cwd: context.projectRoot,
-      env: process.env,
+      env: { ...process.env, ...configuredEnv },
       stdio: ["ignore", "pipe", "pipe"],
     });
     const pid = child.pid;
