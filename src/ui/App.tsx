@@ -283,7 +283,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
           reasoningEffort: selection.reasoningEffort,
         },
       };
-      const content = `/model\n⎿ Set model to ${selection.model}`;
+      const content = `/model\n└ Set model to ${selection.model}`;
 
       if (activeSessionId) {
         sessionManager.addSessionSystemMessage(activeSessionId, content, meta);

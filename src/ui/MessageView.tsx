@@ -91,7 +91,7 @@ export function MessageView({ message, collapsed }: Props): React.ReactElement |
           <Box flexGrow={1} flexDirection="column">
             <Text color="cyan">/model</Text>
             <Text color="cyan">
-              ⎿ Set model to{" "}
+              └ Set model to{" "}
               <Text bold color="#229ac3">
                 {message.meta.modelConfig?.model}
               </Text>
