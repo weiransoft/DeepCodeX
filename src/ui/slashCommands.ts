@@ -21,7 +21,7 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
     kind: "model",
     name: "model",
     label: "/model",
-    description: "Select model, thinking mode and thinking effort",
+    description: "Select model, thinking mode and effort control",
   },
   {
     kind: "new",

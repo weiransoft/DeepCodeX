@@ -1,6 +1,6 @@
 # Deep Code CLI
 
-[Deep Code](https://github.com/lessweb/deepcode-cli) is a terminal AI coding assistant optimized for the `deepseek-v4` model, with support for deep thinking, reasoning effort control, and Agent Skills.
+[Deep Code](https://github.com/lessweb/deepcode-cli) is a terminal AI coding assistant optimized for the `deepseek-v4` model, with support for deep thinking, reasoning effort control, Agent Skills, and MCP (Model Context Protocol) integration.
 
 ## Installation
 
@@ -30,6 +30,8 @@ Create `~/.deepcode/settings.json`:
 
 The configuration file is shared with the [Deep Code VSCode extension](https://github.com/lessweb/deepcode) — configure once, use everywhere.
 
+For complete configuration details (multi-level priority, environment variables, etc.), see [docs/configuration.md](docs/configuration.md).
+
 ## Key Features
 
 ### **Skills**
@@ -41,22 +43,28 @@ Deep Code CLI supports agent skills that allow you to extend the assistant's cap
 ### **Optimized for DeepSeek**
 - Specifically tuned for DeepSeek model performance.
 - Reduce costs by using [Context Caching](https://api-docs.deepseek.com/guides/kv_cache).
-- Natively supports [Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode) and Thinking Effort Control.
+- Natively supports [Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode) and Effort Control.
 
-## Keyboard Shortcuts
+## Slash Commands & Keyboard Shortcuts
 
-| Key             | Action                                       |
-|-----------------|----------------------------------------------|
-| `Enter`         | Send the prompt                              |
-| `Shift+Enter`   | Insert a newline (also `Ctrl+J`)             |
-| `Ctrl+V`        | Paste an image from the clipboard            |
-| `Esc`           | Interrupt the current model turn             |
-| `/`             | Open the skills / commands menu              |
-| `/new`          | Start a fresh conversation                   |
-| `/resume`       | Choose a previous conversation to continue   |
-| `/skills`       | List available skills                        |
-| `/exit`         | Quit Deep Code                               |
-| `Ctrl+D` twice  | Quit Deep Code                               |
+| Slash Command    | Action                                                   |
+|------------------|----------------------------------------------------------|
+| `/`              | Open the skills / commands menu                          |
+| `/new`           | Start a fresh conversation                               |
+| `/resume`        | Choose a previous conversation to continue               |
+| `/model`         | Switch model, thinking mode, and reasoning effort        |
+| `/init`          | Initialize an AGENTS.md file (LLM project instructions)  |
+| `/skills`        | List available skills                                    |
+| `/mcp`           | View MCP server status and available tools               |
+| `/exit`          | Quit (also `Ctrl+D` twice)                               |
+
+| Key              | Action                                                   |
+|------------------|----------------------------------------------------------|
+| `Enter`          | Send the prompt                                          |
+| `Shift+Enter`    | Insert a newline (also `Ctrl+J`)                         |
+| `Ctrl+V`         | Paste an image from the clipboard                        |
+| `Esc`            | Interrupt the current model turn                         |
+| `Ctrl+D` twice   | Quit Deep Code                                           |
 
 ## Supported Models
 
@@ -96,6 +104,37 @@ Yes. Just set `env.BASE_URL` in `~/.deepcode/settings.json` to an OpenAI-compati
   "thinkingEnabled": true
 }
 ```
+
+### How do I configure MCP?
+
+Deep Code supports MCP (Model Context Protocol) to connect external services such as GitHub, browsers, databases, and more. Configure the `mcpServers` field in `settings.json` to enable it, then use the `/mcp` command to view MCP server status and available tools.
+
+For detailed setup instructions, see: [docs/mcp.md](docs/mcp.md)
+
+## Contributing
+
+Contributions are welcome! Here's how to get started:
+
+```bash
+# Clone the repository
+git clone https://github.com/lessweb/deepcode-cli.git
+cd deepcode-cli
+
+# Install dependencies
+npm install
+
+# Local development (typecheck + lint + format check + bundle)
+npm run build
+
+# Run tests
+npm test
+
+# Link globally (local global install)
+npm link
+```
+
+- Make sure `npm run check` passes before submitting a PR (typecheck + lint + format check)
+- We recommend running `npm run format` before building to avoid errors
 
 ## Getting Help
 
