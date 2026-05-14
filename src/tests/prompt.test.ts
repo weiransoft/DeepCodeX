@@ -17,6 +17,13 @@ test("getSystemPrompt always includes WebSearch docs", () => {
   assert.equal(prompt.includes("## WebSearch"), true);
 });
 
+test("getSystemPrompt includes current date guidance", () => {
+  const now = new Date();
+  const expected = `今天是${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日。随着对话的进行，时间在流逝。`;
+  const prompt = getSystemPrompt("/tmp/project");
+  assert.equal(prompt.includes(expected), true);
+});
+
 test("getSystemPrompt renders Read docs for non-multimodal models", () => {
   const prompt = getSystemPrompt("/tmp/project", { model: "deepseek-chat" });
   assert.equal(prompt.includes("the current model is not multimodal"), true);

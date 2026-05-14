@@ -281,10 +281,14 @@ function readToolDocs(extensionRoot: string, options: PromptToolOptions = {}): s
   return docs.join("\n\n");
 }
 
+function getCurrentDatePrompt(date = new Date()): string {
+  return `今天是${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日。随着对话的进行，时间在流逝。`;
+}
+
 export function getSystemPrompt(projectRoot: string, options: PromptToolOptions = {}): string {
   const toolDocs = readToolDocs(getExtensionRoot(), options);
   const basePrompt = toolDocs ? `${SYSTEM_PROMPT_BASE}\n\n# Available Tools\n\n${toolDocs}` : SYSTEM_PROMPT_BASE;
-  return `${basePrompt}\n\n${getRuntimeContext(projectRoot)}`;
+  return `${basePrompt}\n\n${getCurrentDatePrompt()}\n\n${getRuntimeContext(projectRoot)}`;
 }
 
 export function getCompactPrompt(sessionMessages: SessionMessage[]): string {
@@ -317,7 +321,6 @@ function getRuntimeContext(projectRoot: string): string {
     ...shellModeOpts,
     ...runtimeVersions,
     "command installed": {
-      "ast-grep": checkToolInstalled("ast-grep"),
       ripgrep: checkToolInstalled("rg"),
       jq: checkToolInstalled("jq"),
     },
