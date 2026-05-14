@@ -35,9 +35,75 @@ const META_RIGHT_SEQUENCES = new Set(["\u001B[1;3C", "\u001B[3C", "\u001Bf"]);
 const TERMINAL_FOCUS_IN = "\u001B[I";
 const TERMINAL_FOCUS_OUT = "\u001B[O";
 
+// Ctrl+- (minus) sequences in modifyOtherKeys mode.
+// \u001B[45;5u  — standard format: keycode=45 ('-'), modifier=5 (Ctrl)
+// \u001B[27;5;45~ — extended format for function-like reporting
+const CTRL_MINUS_SEQUENCES = new Set(["\u001B[45;5u", "\u001B[27;5;45~"]);
+
+// Ctrl+Shift+- (minus) sequences in modifyOtherKeys mode.
+// \u001B[45;6u  — standard format: keycode=45 ('-'), modifier=6 (Ctrl+Shift)
+// \u001B[27;6;45~ — extended format for function-like reporting
+const CTRL_SHIFT_MINUS_SEQUENCES = new Set(["\u001B[45;6u", "\u001B[27;6;45~"]);
+
 export function parseTerminalInput(data: Buffer | string): { input: string; key: InputKey } {
   const raw = String(data);
   let input = raw;
+
+  // Ctrl+- undo shortcut: only via modifyOtherKeys CSI sequences.
+  // Raw 0x1F is NOT included here because it represents Ctrl+_ (Ctrl+Shift+-
+  // on US keyboards), which should trigger redo instead.
+  if (CTRL_MINUS_SEQUENCES.has(raw)) {
+    input = "-";
+    const key: InputKey = {
+      upArrow: false,
+      downArrow: false,
+      leftArrow: false,
+      rightArrow: false,
+      home: false,
+      end: false,
+      pageDown: false,
+      pageUp: false,
+      return: false,
+      escape: false,
+      ctrl: true,
+      shift: false,
+      tab: false,
+      backspace: false,
+      delete: false,
+      meta: false,
+      focusIn: false,
+      focusOut: false,
+    };
+    return { input, key };
+  }
+
+  // Ctrl+Shift+- redo shortcut: modifyOtherKeys CSI sequences + raw 0x1F fallback.
+  // \x1F is Ctrl+_ which on US keyboards = Ctrl+Shift+-.
+  if (CTRL_SHIFT_MINUS_SEQUENCES.has(raw) || raw === "\u001F") {
+    input = "-";
+    const key: InputKey = {
+      upArrow: false,
+      downArrow: false,
+      leftArrow: false,
+      rightArrow: false,
+      home: false,
+      end: false,
+      pageDown: false,
+      pageUp: false,
+      return: false,
+      escape: false,
+      ctrl: true,
+      shift: true,
+      tab: false,
+      backspace: false,
+      delete: false,
+      meta: false,
+      focusIn: false,
+      focusOut: false,
+    };
+    return { input, key };
+  }
+
   const key: InputKey = {
     upArrow: raw === "\u001B[A",
     downArrow: raw === "\u001B[B",
