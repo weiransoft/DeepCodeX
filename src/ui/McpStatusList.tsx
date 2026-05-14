@@ -9,6 +9,7 @@ type Props = {
 
 type FlatItem =
   | { kind: "server"; status: McpServerStatus; serverIndex: number }
+  | { kind: "error"; error: string; serverName: string }
   | { kind: "tool"; name: string; serverName: string }
   | { kind: "prompt"; name: string; serverName: string }
   | { kind: "resource"; name: string; serverName: string };
@@ -18,6 +19,10 @@ function buildFlatItems(statuses: McpServerStatus[]): FlatItem[] {
   for (let i = 0; i < statuses.length; i++) {
     const status = statuses[i];
     items.push({ kind: "server", status, serverIndex: i });
+    // 为失败的服务添加错误消息
+    if (status.status === "failed" && status.error) {
+      items.push({ kind: "error", error: status.error, serverName: status.name });
+    }
     if (status.status === "ready") {
       for (const tool of status.tools) {
         items.push({ kind: "tool", name: tool, serverName: status.name });
@@ -99,11 +104,17 @@ export function McpStatusList({ statuses, onCancel }: Props): React.ReactElement
 
   if (statuses.length === 0) {
     return (
-      <Box flexDirection="column">
-        <Text color="yellow">Manage MCP servers</Text>
-        <Text color="yellow">0 servers</Text>
-        <Text color="yellow">No MCP servers configured.</Text>
-        <Text color="yellow">Add MCP servers to your settings to get started.</Text>
+      <Box flexDirection="column" marginLeft={1} paddingX={1} gap={1} borderStyle="round" borderDimColor>
+        <Box flexDirection="column">
+          <Text color="#229ac3" bold>
+            Manage MCP servers
+          </Text>
+          <Text dimColor>0 servers</Text>
+        </Box>
+        <Box flexDirection="column">
+          <Text dimColor>No MCP servers configured.</Text>
+          <Text dimColor>Add MCP servers to your settings to get started.</Text>
+        </Box>
         <Text dimColor>Esc to close</Text>
       </Box>
     );
@@ -148,6 +159,9 @@ export function McpStatusList({ statuses, onCancel }: Props): React.ReactElement
 
             if (item.kind === "server") {
               return <ServerRow key={`server-${item.status.name}`} status={item.status} selected={isSelected} />;
+            }
+            if (item.kind === "error") {
+              return <ErrorRow key={`error-${item.serverName}`} error={item.error} />;
             }
             return (
               <CapabilityRow
@@ -209,11 +223,28 @@ function CapabilityRow({
 }): React.ReactElement {
   const prefix = kind === "tool" ? "🔧" : kind === "prompt" ? "📝" : "📦";
   return (
-    <Box height={1}>
+    <Box height={1} marginLeft={2}>
       <Text color="#229ac3">{selected ? "› " : "  "}</Text>
       <Text dimColor>
         {prefix} {name}
       </Text>
+    </Box>
+  );
+}
+
+function ErrorRow({ error }: { error: string }): React.ReactElement {
+  // 将错误消息按行分割，每行单独显示
+  const lines = error.split("\n").filter((line) => line.trim().length > 0);
+
+  return (
+    <Box flexDirection="column" marginLeft={2} marginTop={0} marginBottom={1}>
+      {lines.map((line, index) => (
+        <Box key={index}>
+          <Text color="red" dimColor>
+            {line}
+          </Text>
+        </Box>
+      ))}
     </Box>
   );
 }
