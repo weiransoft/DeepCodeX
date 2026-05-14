@@ -261,16 +261,47 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
     sessionManager.interruptActiveSession();
   }, [sessionManager]);
 
-  const handleModelConfigChange = useCallback((selection: ModelConfigSelection): string => {
-    const current = resolveCurrentSettings();
-    const { changed } = writeModelConfigSelection(selection, current);
-    const next = resolveCurrentSettings();
-    setResolvedSettings(next);
-    if (!changed) {
-      return "Model settings unchanged";
-    }
-    return `Model settings updated: ${formatModelConfig(current)} → ${formatModelConfig(next)}`;
-  }, []);
+  const handleModelConfigChange = useCallback(
+    (selection: ModelConfigSelection): string => {
+      const current = resolveCurrentSettings();
+      const { changed } = writeModelConfigSelection(selection, current);
+      const next = resolveCurrentSettings();
+      setResolvedSettings(next);
+
+      if (!changed) {
+        return "Model settings unchanged";
+      }
+
+      // 构建模型变更消息
+      const activeSessionId = sessionManager.getActiveSessionId();
+      const message: SessionMessage = {
+        id: crypto.randomUUID(),
+        sessionId: activeSessionId ?? "local",
+        role: "system",
+        content: `/model\n⎿ Set model to ${selection.model}`,
+        contentParams: null,
+        messageParams: null,
+        compacted: false,
+        visible: true,
+        createTime: new Date().toISOString(),
+        updateTime: new Date().toISOString(),
+        meta: {
+          isModelChange: true,
+          modelConfig: {
+            model: selection.model,
+            thinkingEnabled: selection.thinkingEnabled,
+            reasoningEffort: selection.reasoningEffort,
+          },
+        },
+      };
+
+      // 添加到消息列表
+      setMessages((prev) => [...prev, message]);
+
+      return `Model settings updated: ${formatModelConfig(current)} → ${formatModelConfig(next)}`;
+    },
+    [sessionManager]
+  );
 
   const handleSubmit = useCallback(
     (submission: PromptSubmission) => {

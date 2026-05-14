@@ -121,6 +121,12 @@ export type MessageMeta = {
   resultMd?: string;
   asThinking?: boolean;
   isSummary?: boolean;
+  isModelChange?: boolean;
+  modelConfig?: {
+    model: string;
+    thinkingEnabled: boolean;
+    reasoningEffort?: string;
+  };
   skill?: SkillInfo;
 };
 

@@ -733,7 +733,7 @@ export const PromptInput = React.memo(function PromptInput({
           }))}
           activeIndex={skillsDropdownIndex}
           activeColor="#229ac3"
-          maxVisible={8}
+          maxVisible={6}
         />
       ) : null}
       {modelDropdownStep ? (
@@ -753,7 +753,7 @@ export const PromptInput = React.memo(function PromptInput({
           }))}
           activeIndex={modelDropdownIndex}
           activeColor="#229ac3"
-          maxVisible={8}
+          maxVisible={6}
         />
       ) : null}
       <SlashCommandMenu width={screenWidth} items={slashMenu} activeIndex={menuIndex} />
