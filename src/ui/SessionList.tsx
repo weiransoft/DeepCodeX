@@ -126,7 +126,7 @@ export function SessionList({ sessions, onSelect, onCancel }: Props): React.Reac
             return (
               <Box key={session.id} height={2} marginBottom={1}>
                 <Box>
-                  <Text color="#229ac3">{actualIndex === safeIndex ? "› " : "  "}</Text>
+                  <Text color="#229ac3">{actualIndex === safeIndex ? "> " : "  "}</Text>
                 </Box>
                 <Box flexDirection="column" flexGrow={1}>
                   <Box width={"100%"}>

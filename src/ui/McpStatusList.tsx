@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useCallback, useEffect } from "react";
 import { Box, Text, useInput, useWindowSize } from "ink";
 import type { McpServerStatus } from "../mcp/mcp-manager";
 
@@ -7,100 +7,26 @@ type Props = {
   onCancel: () => void;
 };
 
-type FlatItem =
-  | { kind: "server"; status: McpServerStatus; serverIndex: number }
-  | { kind: "error"; error: string; serverName: string }
-  | { kind: "tool"; name: string; serverName: string }
-  | { kind: "prompt"; name: string; serverName: string }
-  | { kind: "resource"; name: string; serverName: string };
-
-function buildFlatItems(statuses: McpServerStatus[]): FlatItem[] {
-  const items: FlatItem[] = [];
-  for (let i = 0; i < statuses.length; i++) {
-    const status = statuses[i];
-    items.push({ kind: "server", status, serverIndex: i });
-    // 为失败的服务添加错误消息
-    if (status.status === "failed" && status.error) {
-      items.push({ kind: "error", error: status.error, serverName: status.name });
-    }
-    if (status.status === "ready") {
-      for (const tool of status.tools) {
-        items.push({ kind: "tool", name: tool, serverName: status.name });
-      }
-      for (const prompt of status.prompts) {
-        items.push({ kind: "prompt", name: prompt, serverName: status.name });
-      }
-      for (const resource of status.resources) {
-        items.push({ kind: "resource", name: resource, serverName: status.name });
-      }
-    }
-  }
-  return items;
-}
-
 export function McpStatusList({ statuses, onCancel }: Props): React.ReactElement {
-  const [index, setIndex] = useState(0);
   const { columns, rows } = useWindowSize();
 
-  const flatItems = useMemo(() => buildFlatItems(statuses), [statuses]);
+  // 视图模式：server-list（服务器列表） 或 server-detail（服务器详情）
+  const [viewMode, setViewMode] = useState<"server-list" | "server-detail">("server-list");
+  // 选中的服务器索引
+  const [selectedServerIndex, setSelectedServerIndex] = useState(0);
 
-  const maxVisible = useMemo(() => {
-    const reservedLines = 8;
-    const linesPerItem = 2;
-    const availableLines = Math.max(0, Math.min(rows, 30) - reservedLines);
-    return Math.max(1, Math.floor(availableLines / linesPerItem));
-  }, [rows]);
+  // 返回服务器列表
+  const goBack = useCallback(() => {
+    setViewMode("server-list");
+  }, []);
 
-  const safeIndex = useMemo(() => {
-    if (flatItems.length === 0) return 0;
-    return Math.max(0, Math.min(index, flatItems.length - 1));
-  }, [index, flatItems.length]);
-
-  const scrollOffset = useMemo(() => {
-    if (safeIndex < maxVisible) return 0;
-    return safeIndex - maxVisible + 1;
-  }, [safeIndex, maxVisible]);
-
-  const visibleItems = useMemo(() => {
-    return flatItems.slice(scrollOffset, scrollOffset + maxVisible);
-  }, [flatItems, scrollOffset, maxVisible]);
-
-  useInput((input, key) => {
-    if (key.escape || (key.ctrl && (input === "c" || input === "C"))) {
-      onCancel();
-      return;
+  // 进入服务器详情
+  const enterDetail = useCallback(() => {
+    const server = statuses[selectedServerIndex];
+    if (server && server.status === "ready") {
+      setViewMode("server-detail");
     }
-    if (flatItems.length === 0) {
-      return;
-    }
-    if (key.upArrow) {
-      setIndex((i) => Math.max(0, i - 1));
-      return;
-    }
-    if (key.downArrow) {
-      setIndex((i) => Math.min(flatItems.length - 1, i + 1));
-      return;
-    }
-    if (key.pageUp) {
-      setIndex((i) => Math.max(0, i - maxVisible));
-      return;
-    }
-    if (key.pageDown) {
-      setIndex((i) => Math.min(flatItems.length - 1, i + maxVisible));
-      return;
-    }
-    if (key.home) {
-      setIndex(0);
-      return;
-    }
-    if (key.end) {
-      setIndex(flatItems.length - 1);
-    }
-  });
-
-  const readyCount = statuses.filter((s) => s.status === "ready").length;
-  const startingCount = statuses.filter((s) => s.status === "starting").length;
-  const failedCount = statuses.filter((s) => s.status === "failed").length;
+  }, [statuses, selectedServerIndex]);
 
   if (statuses.length === 0) {
     return (
@@ -119,6 +45,128 @@ export function McpStatusList({ statuses, onCancel }: Props): React.ReactElement
       </Box>
     );
   }
+
+  if (viewMode === "server-detail") {
+    return (
+      <ServerDetailView
+        server={statuses[selectedServerIndex]}
+        onBack={goBack}
+        onCancel={onCancel}
+        rows={rows}
+        columns={columns}
+      />
+    );
+  }
+
+  return (
+    <ServerListView
+      statuses={statuses}
+      selectedIndex={selectedServerIndex}
+      onSelect={setSelectedServerIndex}
+      onEnter={enterDetail}
+      onCancel={onCancel}
+      rows={rows}
+      columns={columns}
+    />
+  );
+}
+
+// ==================== 服务器列表视图 ====================
+function ServerListView({
+  statuses,
+  selectedIndex,
+  onSelect,
+  onEnter,
+  onCancel,
+  rows,
+  columns,
+}: {
+  statuses: McpServerStatus[];
+  selectedIndex: number;
+  onSelect: (index: number) => void;
+  onEnter: () => void;
+  onCancel: () => void;
+  rows: number;
+  columns: number;
+}): React.ReactElement {
+  const [scrollOffset, setScrollOffset] = useState(0);
+  const serverCount = statuses.length;
+
+  const maxVisible = useMemo(() => {
+    const reservedLines = 8; // header + footer + borders
+    const availableLines = Math.max(0, Math.min(rows, 30) - reservedLines);
+    // 每个服务器占用 1 行（标题）+ 1 行（错误信息或统计）+ 1 行（间隔）
+    return Math.max(1, Math.floor(availableLines / 3));
+  }, [rows]);
+
+  // 计算标签列宽度：找到最长的服务器名称，加上前缀和图标
+  const labelColumnWidth = useMemo(() => {
+    if (serverCount === 0) return 0;
+    const longestName = Math.max(...statuses.map((s) => s.name.length));
+    const contentWidth = longestName + 5; // +2 for prefix "> " or "  ", +3 for icon "✓ "
+    const maxAllowed = Math.max(15, Math.floor((columns - 6) * 0.4)); // 容器40%宽度，至少15列
+    return Math.min(contentWidth, maxAllowed);
+  }, [statuses, serverCount, columns]);
+
+  const safeIndex = useMemo(() => {
+    if (serverCount === 0) return 0;
+    return Math.max(0, Math.min(selectedIndex, serverCount - 1));
+  }, [selectedIndex, serverCount]);
+
+  // 自动滚动确保选中项可见
+  React.useEffect(() => {
+    if (safeIndex < scrollOffset) {
+      setScrollOffset(safeIndex);
+    } else if (safeIndex >= scrollOffset + maxVisible) {
+      setScrollOffset(safeIndex - maxVisible + 1);
+    }
+  }, [safeIndex, scrollOffset, maxVisible]);
+
+  const visibleServers = useMemo(() => {
+    return statuses.slice(scrollOffset, scrollOffset + maxVisible);
+  }, [statuses, scrollOffset, maxVisible]);
+
+  useInput((input, key) => {
+    if (key.escape || (key.ctrl && (input === "c" || input === "C"))) {
+      onCancel();
+      return;
+    }
+    if (serverCount === 0) {
+      return;
+    }
+    if (key.upArrow) {
+      onSelect(Math.max(0, selectedIndex - 1));
+      return;
+    }
+    if (key.downArrow) {
+      onSelect(Math.min(serverCount - 1, selectedIndex + 1));
+      return;
+    }
+    if (key.pageUp) {
+      onSelect(Math.max(0, selectedIndex - maxVisible));
+      return;
+    }
+    if (key.pageDown) {
+      onSelect(Math.min(serverCount - 1, selectedIndex + maxVisible));
+      return;
+    }
+    if (key.home) {
+      onSelect(0);
+      return;
+    }
+    if (key.end) {
+      onSelect(serverCount - 1);
+    }
+    // Enter 键进入详情
+    if (key.return) {
+      onEnter();
+      return;
+    }
+  });
+
+  const readyCount = statuses.filter((s) => s.status === "ready").length;
+  const startingCount = statuses.filter((s) => s.status === "starting").length;
+  const failedCount = statuses.filter((s) => s.status === "failed").length;
 
   return (
     <Box
@@ -162,80 +210,282 @@ export function McpStatusList({ statuses, onCancel }: Props): React.ReactElement
           paddingX={1}
           overflow="hidden"
         >
-          {visibleItems.map((item, i) => {
+          {visibleServers.map((status, i) => {
             const actualIndex = scrollOffset + i;
             const isSelected = actualIndex === safeIndex;
 
-            if (item.kind === "server") {
-              return <ServerRow key={`server-${item.status.name}`} status={item.status} selected={isSelected} />;
-            }
-            if (item.kind === "error") {
-              return <ErrorRow key={`error-${item.serverName}`} error={item.error} />;
-            }
             return (
-              <CapabilityRow
-                key={`${item.kind}-${item.name}`}
-                kind={item.kind}
-                name={item.name}
+              <ServerRow
+                key={`server-${status.name}`}
+                status={status}
                 selected={isSelected}
+                labelColumnWidth={labelColumnWidth}
               />
             );
           })}
-          {scrollOffset > 0 || scrollOffset + maxVisible < flatItems.length ? (
+          {scrollOffset > 0 || scrollOffset + maxVisible < serverCount ? (
             <Box marginTop={1}>
-              {scrollOffset > 0 ? <Text dimColor>… {scrollOffset} items above. </Text> : null}
-              {scrollOffset + maxVisible < flatItems.length ? (
-                <Text dimColor>… {flatItems.length - scrollOffset - maxVisible} items below.</Text>
+              {scrollOffset > 0 ? <Text dimColor>… {scrollOffset} servers above. </Text> : null}
+              {scrollOffset + maxVisible < serverCount ? (
+                <Text dimColor>… {serverCount - scrollOffset - maxVisible} servers below.</Text>
               ) : null}
             </Box>
           ) : null}
         </Box>
         {/* Footer */}
-        <Box>
-          <Text dimColor>↑/↓ navigate · PgUp/PgDn page · Esc cancel</Text>
+        <Box paddingX={1}>
+          <Text dimColor>↑/↓ navigate · Enter view details · Esc cancel</Text>
         </Box>
       </Box>
     </Box>
   );
 }
 
-function ServerRow({ status, selected }: { status: McpServerStatus; selected: boolean }): React.ReactElement {
-  const icon = status.status === "ready" ? "✔" : status.status === "failed" ? "✖" : "●";
+function ServerRow({
+  status,
+  selected,
+  labelColumnWidth,
+}: {
+  status: McpServerStatus;
+  selected: boolean;
+  labelColumnWidth: number;
+}): React.ReactElement {
+  const icon = status.status === "ready" ? "✓" : status.status === "failed" ? "✗" : "●";
   const color = status.status === "ready" ? "green" : status.status === "failed" ? "red" : "yellow";
+
+  // 加载动画：循环显示 (空) → . → .. → ... → (空) → ...
+  const [dots, setDots] = React.useState(0);
+  React.useEffect(() => {
+    if (status.status !== "starting") return;
+    const interval = setInterval(() => {
+      setDots((d) => (d + 1) % 4); // 0 → 1 → 2 → 3 → 0 ...
+    }, 500);
+    return () => clearInterval(interval);
+  }, [status.status]);
+
   const detail =
     status.status === "ready"
       ? `Ready (${status.toolCount} tools, ${status.promptCount} prompts, ${status.resourceCount} resources)`
       : status.status === "failed"
-        ? `Failed (${status.error ?? "unknown error"})`
-        : "Starting...";
+        ? `Failed`
+        : "Starting" + (dots > 0 ? ".".repeat(dots) : "   "); // 动态显示 (空) / . / .. / ...
 
   return (
-    <Box height={1} marginBottom={0}>
-      <Text color="#229ac3">{selected ? "› " : "  "}</Text>
-      <Text>
-        <Text color={color}>{icon} </Text>
-        <Text bold>{status.name}</Text>
-        <Text dimColor> — {detail}</Text>
-      </Text>
+    <Box flexDirection="column" marginBottom={1}>
+      {/* Server row */}
+      <Box gap={2}>
+        <Box width={labelColumnWidth} flexShrink={0}>
+          <Text color={selected ? "#229ac3" : undefined}>
+            {selected ? "> " : "  "}
+            <Text color={color}>{icon} </Text>
+            <Text bold>{status.name}</Text>
+          </Text>
+        </Box>
+        <Box flexGrow={1}>
+          <Text dimColor>{detail}</Text>
+        </Box>
+      </Box>
+
+      {/* Error message for failed servers */}
+      {status.status === "failed" && status.error ? <ErrorRow error={status.error} /> : null}
     </Box>
   );
 }
 
-function CapabilityRow({
-  kind,
-  name,
-  selected,
+// ==================== 服务器详情视图 ====================
+function ServerDetailView({
+  server,
+  onBack,
+  onCancel,
+  rows,
+  columns,
 }: {
-  kind: "tool" | "prompt" | "resource";
-  name: string;
-  selected: boolean;
+  server: McpServerStatus;
+  onBack: () => void;
+  onCancel: () => void;
+  rows: number;
+  columns: number;
 }): React.ReactElement {
-  const prefix = kind === "tool" ? "🔧" : kind === "prompt" ? "📝" : "📦";
+  const [activeIndex, setActiveIndex] = useState(0);
+
+  // 合并所有 items（tools, prompts, resources）
+  const allItems = useMemo(() => {
+    const items: { type: string; name: string }[] = [];
+    server.tools.forEach((tool) => items.push({ type: "tool", name: tool }));
+    server.prompts.forEach((prompt) => items.push({ type: "prompt", name: prompt }));
+    server.resources.forEach((resource) => items.push({ type: "resource", name: resource }));
+    return items;
+  }, [server]);
+
+  const totalItems = allItems.length;
+
+  const maxVisible = useMemo(() => {
+    const reservedLines = 10; // header + title + stats + footer + borders
+    const availableLines = Math.max(0, Math.min(rows, 28) - reservedLines);
+    return Math.max(1, availableLines);
+  }, [rows]);
+
+  // 使用 ref 跟踪 visibleStart，避免循环依赖
+  const visibleStartRef = React.useRef(0);
+
+  // 计算可见窗口起始位置：当 activeIndex 超出可见区域时才滚动（类似终端光标行为）
+  const visibleStart = useMemo(() => {
+    if (totalItems === 0) return 0;
+
+    const currentStart = visibleStartRef.current;
+    let newStart = currentStart;
+
+    // 如果 activeIndex 在当前可见窗口之前，滚动到 activeIndex
+    if (activeIndex < currentStart) {
+      newStart = activeIndex;
+    }
+    // 如果 activeIndex 在当前可见窗口之后，滚动到 activeIndex
+    else if (activeIndex >= currentStart + maxVisible) {
+      newStart = activeIndex - maxVisible + 1;
+    }
+
+    console.log("maxVisible:", maxVisible);
+
+    // 限制在合法范围内
+    newStart = Math.max(0, Math.min(newStart, Math.max(0, totalItems - maxVisible)));
+
+    // 更新 ref
+    visibleStartRef.current = newStart;
+
+    return newStart;
+  }, [activeIndex, maxVisible, totalItems]);
+
+  const visibleItems = allItems.slice(visibleStart, visibleStart + maxVisible);
+
+  useInput((input, key) => {
+    if (key.escape || (key.ctrl && (input === "c" || input === "C"))) {
+      onCancel();
+      return;
+    }
+    if (key.escape) {
+      onBack();
+      return;
+    }
+    // Space 或 Enter 键返回一级菜单
+    if (input === " " || key.return) {
+      onBack();
+      return;
+    }
+    if (key.upArrow) {
+      setActiveIndex((prev) => Math.max(0, prev - 1));
+      return;
+    }
+    if (key.downArrow) {
+      setActiveIndex((prev) => Math.min(totalItems - 1, prev + 1));
+      return;
+    }
+    if (key.pageUp) {
+      setActiveIndex((prev) => Math.max(0, prev - maxVisible));
+      return;
+    }
+    if (key.pageDown) {
+      setActiveIndex((prev) => Math.min(totalItems - 1, prev + maxVisible));
+      return;
+    }
+    if (key.home) {
+      setActiveIndex(0);
+      return;
+    }
+    if (key.end) {
+      setActiveIndex(totalItems - 1);
+    }
+  });
+
+  const icon = "✓";
+  const color = "green";
+
   return (
-    <Box height={1} marginLeft={2}>
-      <Text color="#229ac3">{selected ? "› " : "  "}</Text>
-      <Text dimColor>
-        {prefix} {name}
+    <Box
+      flexDirection="column"
+      width={Math.max(20, columns - 6)}
+      height={Math.max(5, Math.min(rows - 1, 30))}
+      overflow="hidden"
+      paddingX={1}
+      marginTop={1}
+    >
+      <Box flexDirection="column" borderStyle="round" borderDimColor flexGrow={1} overflow="hidden">
+        {/* Header row */}
+        <Box paddingX={1} gap={1}>
+          <Text color={color}>{icon} </Text>
+          <Text bold color="#229ac3">
+            {server.name}
+          </Text>
+          <Text dimColor>— Details</Text>
+          <Text>
+            {activeIndex + 1}/{totalItems}
+          </Text>
+        </Box>
+        {/* Server info */}
+        <Box paddingX={1} marginLeft={3}>
+          <Text>
+            {server.toolCount} tools, {server.promptCount} prompts, {server.resourceCount} resources
+          </Text>
+        </Box>
+        {/* Items list */}
+        <Box
+          borderTop={true}
+          borderBottom={true}
+          borderLeft={false}
+          borderRight={false}
+          borderStyle="round"
+          borderDimColor
+          flexDirection="column"
+          flexGrow={1}
+          paddingX={1}
+          overflow="hidden"
+        >
+          {visibleStart > 0 ? (
+            <Box>
+              <Text dimColor>▲</Text>
+            </Box>
+          ) : (
+            <Text> </Text>
+          )}
+          <Box paddingX={1} flexDirection="column">
+            {visibleItems.length === 0 ? (
+              <Box paddingY={1}>
+                <Text dimColor>No items available</Text>
+              </Box>
+            ) : (
+              visibleItems.map((item, idx) => {
+                const actualIndex = visibleStart + idx;
+                const isSelected = actualIndex === activeIndex;
+                return <ItemRow key={`${item.type}-${item.name}`} item={item} selected={isSelected} />;
+              })
+            )}
+          </Box>
+          {visibleStart > 0 || visibleStart + maxVisible < totalItems ? (
+            <Box marginTop={1} gap={1}>
+              {totalItems - visibleStart - maxVisible > 0 ? <Text dimColor>▼</Text> : <Text> </Text>}
+              {visibleStart > 0 ? <Text dimColor>… {visibleStart} items above. </Text> : null}
+              {totalItems - visibleStart - maxVisible > 0 ? (
+                <Text dimColor>… {totalItems - visibleStart - maxVisible} items below.</Text>
+              ) : null}
+            </Box>
+          ) : null}
+        </Box>
+        {/* Footer */}
+        <Box paddingX={1}>
+          <Text dimColor>↑/↓ scroll · Space/Enter back · Esc close</Text>
+        </Box>
+      </Box>
+    </Box>
+  );
+}
+
+function ItemRow({ item, selected }: { item: { type: string; name: string }; selected: boolean }): React.ReactElement {
+  const icon = item.type === "tool" ? "🔧" : item.type === "prompt" ? "📝" : "📦";
+
+  return (
+    <Box height={1} flexDirection="row" flexGrow={1}>
+      <Text dimColor>{icon} </Text>
+      <Text color={selected ? "#229ac3" : undefined} dimColor wrap="truncate-end">
+        {item.name}
       </Text>
     </Box>
   );
@@ -246,7 +496,15 @@ function ErrorRow({ error }: { error: string }): React.ReactElement {
   const lines = error.split("\n").filter((line) => line.trim().length > 0);
 
   return (
-    <Box flexDirection="column" marginLeft={2} marginTop={0} marginBottom={1}>
+    <Box
+      flexDirection="column"
+      marginLeft={4}
+      marginTop={0}
+      marginBottom={0}
+      borderStyle="round"
+      borderColor="red"
+      borderDimColor
+    >
       {lines.map((line, index) => (
         <Box key={index}>
           <Text color="red" dimColor>
