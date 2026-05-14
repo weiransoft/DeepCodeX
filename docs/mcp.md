@@ -146,12 +146,7 @@ MCP 工具在 Deep Code 中的命名格式为 `mcp__<服务名>__<工具名>`，
 
 ## 使用 MCP
 
-配置完成后，启动 `deepcode`，使用 `/mcp` 命令管理 MCP 连接：
-
-- `/mcp` — 查看已配置的 MCP 服务器状态
-- `/mcp add` — 添加新的 MCP 服务器
-- `/mcp remove` — 移除 MCP 服务器
-- `/mcp list` — 列出所有已连接的 MCP 服务器及其工具
+配置完成后，启动 `deepcode`，在聊天中输入 `/mcp` 即可查看所有已配置的 MCP 服务器状态以及每个服务器提供的工具列表。
 
 在对话中直接使用 MCP 工具名称即可调用，例如：
 
@@ -172,7 +167,7 @@ MCP 工具名称由三部分组成：`mcp__<服务名>__<工具名>`
 | playwright | browser_navigate        | `mcp__playwright__browser_navigate`        |
 | playwright | browser_take_screenshot | `mcp__playwright__browser_take_screenshot` |
 
-你可以通过 `/mcp list` 查看每个服务器提供的具体工具列表。
+你可以通过 `/mcp` 查看每个服务器提供的具体工具列表。
 
 ## 故障排查
 
