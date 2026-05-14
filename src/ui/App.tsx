@@ -281,7 +281,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
       const content = `/model\n└ Set model to ${selection.model} (${selection?.thinkingEnabled ? selection?.reasoningEffort : "no thinking"})`;
 
       if (activeSessionId) {
-        sessionManager.addSessionSystemMessage(activeSessionId, content, meta);
+        sessionManager.addSessionSystemMessage(activeSessionId, content, true, meta);
       } else {
         const now = new Date().toISOString();
         setMessages((prev) => [

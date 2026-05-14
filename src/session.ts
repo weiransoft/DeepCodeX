@@ -773,9 +773,9 @@ The candidate skills are as follows:\n\n`;
     this.activeSessionId = sessionId;
   }
 
-  addSessionSystemMessage(sessionId: string, content: string, meta?: MessageMeta): void {
-    const message = this.buildSystemMessage(sessionId, content, meta);
-    this.appendSessionMessage(sessionId, message);
+  addSessionSystemMessage(sessionId: string, content: string, visible?: boolean, meta?: MessageMeta): void {
+    const message = this.buildSystemMessage(sessionId, content, null, visible, meta);
+    if (sessionId) this.appendSessionMessage(sessionId, message);
     this.onAssistantMessage(message, false);
   }
 
@@ -1546,6 +1546,7 @@ ${skillMd}
     sessionId: string,
     content: string,
     contentParams: unknown | null = null,
+    visible = false,
     meta?: MessageMeta
   ): SessionMessage {
     const now = new Date().toISOString();
@@ -1557,7 +1558,7 @@ ${skillMd}
       contentParams,
       messageParams: null,
       compacted: false,
-      visible: false,
+      visible,
       createTime: now,
       updateTime: now,
       meta,
