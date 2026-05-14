@@ -1485,7 +1485,7 @@ ${skillMd}
   }
 
   private renderInitCommandPrompt(): string {
-    const templatePath = path.join(getExtensionRoot(), "docs", "prompts", "init_command.md.ejs");
+    const templatePath = path.join(getExtensionRoot(), "templates", "prompts", "init_command.md.ejs");
     const template = fs.readFileSync(templatePath, "utf8");
     return ejs.render(template, {
       agentsMdFile: this.getEffectiveProjectAgentsMdFile(),
