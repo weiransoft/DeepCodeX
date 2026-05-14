@@ -203,6 +203,9 @@ export class SessionManager {
   }
 
   async initMcpServers(servers?: Record<string, McpServerConfig>): Promise<void> {
+    this.mcpManager.setOnToolsListChanged(() => {
+      this.mcpToolDefinitions = this.mcpManager.getMcpToolDefinitions();
+    });
     await this.mcpManager.initialize(servers);
     this.mcpToolDefinitions = this.mcpManager.getMcpToolDefinitions();
   }

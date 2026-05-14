@@ -29,6 +29,7 @@ import { buildLoadingText } from "./loadingText";
 import { findExpandedThinkingId } from "./thinkingState";
 import { WelcomeScreen } from "./WelcomeScreen";
 import { AskUserQuestionPrompt } from "./AskUserQuestionPrompt";
+import { McpStatusList } from "./McpStatusList";
 import {
   findPendingAskUserQuestion,
   formatAskUserQuestionAnswers,
@@ -39,7 +40,7 @@ import { buildExitSummaryText } from "./exitSummary";
 const DEFAULT_MODEL = "deepseek-v4-pro";
 const DEFAULT_BASE_URL = "https://api.deepseek.com";
 
-type View = "chat" | "session-list";
+type View = "chat" | "session-list" | "mcp-status";
 
 type AppProps = {
   projectRoot: string;
@@ -67,6 +68,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   const [welcomeNonce, setWelcomeNonce] = useState(0);
   const [resolvedSettings, setResolvedSettings] = useState(() => resolveCurrentSettings(projectRoot));
   const [nowTick, setNowTick] = useState(0);
+  const [mcpStatuses, setMcpStatuses] = useState<ReturnType<typeof sessionManager.getMcpStatus>>([]);
 
   const messagesRef = useRef<SessionMessage[]>([]);
   messagesRef.current = messages;
@@ -189,36 +191,9 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         return;
       }
       if (submission.command === "mcp") {
-        process.stdout.write("\n");
-        process.stdout.write(chalk.bold.cyan("MCP Server Status\n"));
-        process.stdout.write(chalk.dim("─────────────────\n"));
-        const statuses = sessionManager.getMcpStatus();
-        if (statuses.length === 0) {
-          process.stdout.write(chalk.dim("  No MCP servers configured.\n"));
-        } else {
-          for (const s of statuses) {
-            if (s.status === "starting") {
-              process.stdout.write(`${chalk.yellow("●")} ${chalk.bold(s.name)} - Starting...`);
-            } else if (s.status === "failed") {
-              process.stdout.write(`${chalk.red("✖")} ${chalk.bold(s.name)} - Failed (${s.error ?? "unknown error"})`);
-            } else {
-              process.stdout.write(`${chalk.green("✔")} ${chalk.bold(s.name)} - Ready (${s.toolCount} tools)`);
-            }
-            process.stdout.write("\n");
-            if (s.status === "ready" && s.tools.length > 0) {
-              for (const tool of s.tools) {
-                process.stdout.write(chalk.dim(`  - ${tool}\n`));
-              }
-            }
-          }
-        }
-        process.stdout.write(chalk.dim("─────────────────\n"));
-        process.stdout.write(
-          chalk.dim(`  Total: ${statuses.filter((s) => s.status === "ready").length} ready, `) +
-            chalk.dim(`${statuses.filter((s) => s.status === "starting").length} starting, `) +
-            chalk.dim(`${statuses.filter((s) => s.status === "failed").length} failed\n`)
-        );
-        process.stdout.write("\n");
+        setShowWelcome(false);
+        setMcpStatuses(sessionManager.getMcpStatus());
+        setView("mcp-status");
         return;
       }
 
@@ -471,6 +446,8 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
           onSelect={(id) => void handleSelectSession(id)}
           onCancel={() => setView("chat")}
         />
+      ) : view === "mcp-status" ? (
+        <McpStatusList statuses={mcpStatuses} onCancel={() => setView("chat")} />
       ) : shouldShowQuestionPrompt && pendingQuestion && !busy ? (
         <AskUserQuestionPrompt
           questions={pendingQuestion.questions}
