@@ -131,14 +131,23 @@ export function McpStatusList({ statuses, onCancel }: Props): React.ReactElement
     >
       <Box flexDirection="column" borderStyle="round" borderDimColor flexGrow={1} overflow="hidden">
         {/* Header row */}
-        <Box paddingX={1}>
-          <Text bold color="cyanBright">
-            MCP Server Status
-          </Text>
+        <Box paddingX={1} gap={1}>
           <Text bold color="#229ac3">
-            {" "}
-            ({readyCount} ready, {startingCount} starting, {failedCount} failed)
+            Manage MCP servers
           </Text>
+          <Box gap={1}>
+            <Text dimColor>(</Text>
+            <Text color="green" bold>
+              {readyCount} ready,
+            </Text>
+            <Text color="yellow" bold>
+              {startingCount} starting,
+            </Text>
+            <Text color="red" bold>
+              {failedCount} failed
+            </Text>
+            <Text dimColor>)</Text>
+          </Box>
         </Box>
         {/* Items list */}
         <Box

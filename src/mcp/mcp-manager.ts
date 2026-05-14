@@ -45,6 +45,7 @@ export class McpManager {
   private configuredServerNames: string[] = [];
   private serverStatuses: McpServerStatus[] = [];
   private onToolsListChanged: (() => void) | null = null;
+  private onStatusChanged: (() => void) | null = null;
 
   prepare(servers?: Record<string, McpServerConfig>): void {
     if (!servers || Object.keys(servers).length === 0) return;
@@ -172,7 +173,8 @@ export class McpManager {
         if (this.disposed) break;
         client?.disconnect();
         const message = err instanceof Error ? err.message : String(err);
-        process.stderr.write(`[deepcode] MCP server "${name}" failed to initialize: ${message}\n`);
+        // 不在控制台输出错误日志，避免暴露敏感信息
+        // process.stderr.write(`[deepcode] MCP server "${name}" failed to initialize: ${message}\n`);
         this.setStatus({
           name,
           status: "failed",
@@ -376,13 +378,19 @@ export class McpManager {
     this.onToolsListChanged = handler;
   }
 
+  setOnStatusChanged(handler: () => void): void {
+    this.onStatusChanged = handler;
+  }
+
   private setStatus(status: McpServerStatus): void {
     if (this.disposed) return;
     const index = this.serverStatuses.findIndex((s) => s.name === status.name);
     if (index === -1) {
       this.serverStatuses.push(status);
-      return;
+    } else {
+      this.serverStatuses[index] = status;
     }
-    this.serverStatuses[index] = status;
+    // 触发状态变更回调
+    this.onStatusChanged?.();
   }
 }
