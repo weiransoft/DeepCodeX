@@ -33,7 +33,7 @@ test("SessionManager preserves structured system content when building OpenAI me
       model: "test-model",
       thinkingEnabled: false,
     }),
-    getResolvedSettings: () => ({}),
+    getResolvedSettings: () => ({ model: "test-model" }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
   });
@@ -58,7 +58,7 @@ test("SessionManager preserves structured system content when building OpenAI me
     },
   ];
 
-  const openAIMessages = (manager as any).buildOpenAIMessages(messages) as Array<{
+  const openAIMessages = (manager as any).buildOpenAIMessages(messages, false, "test-model") as Array<{
     role: string;
     content: unknown;
   }>;
@@ -74,6 +74,48 @@ test("SessionManager preserves structured system content when building OpenAI me
   ]);
 });
 
+test("SessionManager filters image content for non-multimodal models", () => {
+  const manager = new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({
+      client: null,
+      model: "deepseek-chat",
+      thinkingEnabled: false,
+    }),
+    getResolvedSettings: () => ({ model: "deepseek-chat" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+  });
+
+  const messages: SessionMessage[] = [
+    {
+      id: "system-image",
+      sessionId: "session-1",
+      role: "system",
+      content: "The read tool has loaded `pixel.png`.",
+      contentParams: [
+        {
+          type: "image_url",
+          image_url: { url: "data:image/png;base64,abc123" },
+        },
+      ],
+      messageParams: null,
+      compacted: false,
+      visible: false,
+      createTime: "2026-01-01T00:00:00.000Z",
+      updateTime: "2026-01-01T00:00:00.000Z",
+    },
+  ];
+
+  const openAIMessages = (manager as any).buildOpenAIMessages(messages, false, "deepseek-chat") as Array<{
+    role: string;
+    content: unknown;
+  }>;
+
+  assert.equal(openAIMessages.length, 1);
+  assert.deepEqual(openAIMessages[0]?.content, [{ type: "text", text: "The read tool has loaded `pixel.png`." }]);
+});
+
 test("SessionManager preserves empty reasoning content on assistant tool calls", () => {
   const manager = new SessionManager({
     projectRoot: process.cwd(),
@@ -82,7 +124,7 @@ test("SessionManager preserves empty reasoning content on assistant tool calls",
       model: "test-model",
       thinkingEnabled: false,
     }),
-    getResolvedSettings: () => ({}),
+    getResolvedSettings: () => ({ model: "test-model" }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
   });
@@ -111,7 +153,7 @@ test("SessionManager preserves empty reasoning content on assistant tool calls",
     reasoning_content: "",
   });
 
-  const openAIMessages = (manager as any).buildOpenAIMessages([message], true) as Array<{
+  const openAIMessages = (manager as any).buildOpenAIMessages([message], true, "test-model") as Array<{
     reasoning_content?: string;
   }>;
 
@@ -126,7 +168,7 @@ test("SessionManager repairs legacy thinking tool calls missing reasoning conten
       model: "test-model",
       thinkingEnabled: false,
     }),
-    getResolvedSettings: () => ({}),
+    getResolvedSettings: () => ({ model: "test-model" }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
   });
@@ -154,10 +196,10 @@ test("SessionManager repairs legacy thinking tool calls missing reasoning conten
     },
   ];
 
-  const thinkingMessages = (manager as any).buildOpenAIMessages(messages, true) as Array<{
+  const thinkingMessages = (manager as any).buildOpenAIMessages(messages, true, "test-model") as Array<{
     reasoning_content?: string;
   }>;
-  const nonThinkingMessages = (manager as any).buildOpenAIMessages(messages, false) as Array<{
+  const nonThinkingMessages = (manager as any).buildOpenAIMessages(messages, false, "test-model") as Array<{
     reasoning_content?: string;
   }>;
 
@@ -173,7 +215,7 @@ test("SessionManager replays normal assistant messages with reasoning content in
       model: "test-model",
       thinkingEnabled: false,
     }),
-    getResolvedSettings: () => ({}),
+    getResolvedSettings: () => ({ model: "test-model" }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
   });
@@ -193,10 +235,10 @@ test("SessionManager replays normal assistant messages with reasoning content in
     },
   ];
 
-  const thinkingMessages = (manager as any).buildOpenAIMessages(messages, true) as Array<{
+  const thinkingMessages = (manager as any).buildOpenAIMessages(messages, true, "test-model") as Array<{
     reasoning_content?: string;
   }>;
-  const nonThinkingMessages = (manager as any).buildOpenAIMessages(messages, false) as Array<{
+  const nonThinkingMessages = (manager as any).buildOpenAIMessages(messages, false, "test-model") as Array<{
     reasoning_content?: string;
   }>;
 
@@ -405,6 +447,7 @@ test("SessionManager reports configured MCP servers as starting before initializ
       thinkingEnabled: false,
     }),
     getResolvedSettings: () => ({
+      model: "test-model",
       mcpServers: {
         playwright: { command: "npx", args: ["@playwright/mcp@latest"] },
       },
@@ -492,7 +535,7 @@ test("createSession stores /init and sends the active .deepcode project AGENTS p
   const sessionId = await manager.createSession({ text: "/init" });
   const messages = manager.listSessionMessages(sessionId);
   const userMessage = messages.find((message) => message.role === "user");
-  const openAIMessages = (manager as any).buildOpenAIMessages(messages, false) as Array<{
+  const openAIMessages = (manager as any).buildOpenAIMessages(messages, false, "test-model") as Array<{
     role: string;
     content: string;
   }>;
@@ -524,7 +567,7 @@ test("replySession stores /init and sends the active root project AGENTS path to
   const messages = manager.listSessionMessages(sessionId);
   const userMessages = messages.filter((message) => message.role === "user");
   const replyMessage = userMessages[userMessages.length - 1];
-  const openAIMessages = (manager as any).buildOpenAIMessages(messages, false) as Array<{
+  const openAIMessages = (manager as any).buildOpenAIMessages(messages, false, "test-model") as Array<{
     role: string;
     content: string;
   }>;
@@ -550,7 +593,7 @@ test("createSession stores /init and sends generate prompt when no project AGENT
   const sessionId = await manager.createSession({ text: "/init" });
   const messages = manager.listSessionMessages(sessionId);
   const userMessage = messages.find((message) => message.role === "user");
-  const openAIMessages = (manager as any).buildOpenAIMessages(messages, false) as Array<{
+  const openAIMessages = (manager as any).buildOpenAIMessages(messages, false, "test-model") as Array<{
     role: string;
     content: string;
   }>;
@@ -682,7 +725,11 @@ test("buildOpenAIMessages inserts interrupted results for missing tool messages"
   ) as SessionMessage;
   const userMessage = buildTestMessage("user-after-tool-call", "session-1", "user", "continue");
 
-  const openAIMessages = (manager as any).buildOpenAIMessages([assistantMessage, userMessage], false) as Array<{
+  const openAIMessages = (manager as any).buildOpenAIMessages(
+    [assistantMessage, userMessage],
+    false,
+    "test-model"
+  ) as Array<{
     role: string;
     content: string;
     tool_call_id?: string;
@@ -730,7 +777,8 @@ test("buildOpenAIMessages keeps only the first non-interrupted tool result for a
 
   const openAIMessages = (manager as any).buildOpenAIMessages(
     [assistantMessage, successToolMessage, interruptedToolMessage],
-    false
+    false,
+    "test-model"
   ) as Array<{ role: string; content: string; tool_call_id?: string }>;
   const toolMessages = openAIMessages.filter((message) => message.role === "tool");
 
@@ -774,7 +822,8 @@ test("buildOpenAIMessages prefers a later real tool result over an earlier inter
 
   const openAIMessages = (manager as any).buildOpenAIMessages(
     [assistantMessage, interruptedToolMessage, successToolMessage],
-    false
+    false,
+    "test-model"
   ) as Array<{ role: string; content: string; tool_call_id?: string }>;
   const toolMessages = openAIMessages.filter((message) => message.role === "tool");
 
@@ -793,7 +842,11 @@ test("buildOpenAIMessages ignores orphan tool messages", () => {
     { name: "bash", arguments: '{"command":"echo orphan"}' }
   ) as SessionMessage;
 
-  const openAIMessages = (manager as any).buildOpenAIMessages([userMessage, orphanToolMessage], false) as Array<{
+  const openAIMessages = (manager as any).buildOpenAIMessages(
+    [userMessage, orphanToolMessage],
+    false,
+    "test-model"
+  ) as Array<{
     role: string;
   }>;
 
@@ -827,7 +880,8 @@ test("buildOpenAIMessages moves a later paired tool message behind its assistant
 
   const openAIMessages = (manager as any).buildOpenAIMessages(
     [assistantMessage, userMessage, toolMessage],
-    false
+    false,
+    "test-model"
   ) as Array<{ role: string; content: string }>;
 
   assert.deepEqual(
@@ -872,7 +926,8 @@ test("buildOpenAIMessages preserves a complete multi-tool happy path", () => {
 
   const openAIMessages = (manager as any).buildOpenAIMessages(
     [assistantMessage, firstToolMessage, secondToolMessage, userMessage],
-    false
+    false,
+    "test-model"
   ) as Array<{ role: string; content: string; tool_call_id?: string }>;
 
   assert.deepEqual(
@@ -910,7 +965,11 @@ test("buildOpenAIMessages preserves a real failed tool result", () => {
     { name: "bash", arguments: '{"command":"false"}' }
   ) as SessionMessage;
 
-  const openAIMessages = (manager as any).buildOpenAIMessages([assistantMessage, failedToolMessage], false) as Array<{
+  const openAIMessages = (manager as any).buildOpenAIMessages(
+    [assistantMessage, failedToolMessage],
+    false,
+    "test-model"
+  ) as Array<{
     role: string;
     content: string;
     tool_call_id?: string;
@@ -966,7 +1025,8 @@ test("buildOpenAIMessages repairs mixed missing duplicate and orphan tool messag
 
   const openAIMessages = (manager as any).buildOpenAIMessages(
     [assistantMessage, orphanToolMessage, pairedToolMessage, duplicateToolMessage, userMessage],
-    false
+    false,
+    "test-model"
   ) as Array<{ role: string; content: string; tool_call_id?: string }>;
   const toolMessages = openAIMessages.filter((message) => message.role === "tool");
 
@@ -1011,7 +1071,11 @@ test("buildOpenAIMessages ignores tool messages that appear before their assista
     ""
   ) as SessionMessage;
 
-  const openAIMessages = (manager as any).buildOpenAIMessages([earlyToolMessage, assistantMessage], false) as Array<{
+  const openAIMessages = (manager as any).buildOpenAIMessages(
+    [earlyToolMessage, assistantMessage],
+    false,
+    "test-model"
+  ) as Array<{
     role: string;
     content: string;
     tool_call_id?: string;
@@ -1146,7 +1210,7 @@ test("SessionManager streams chat completions and counts reasoning progress", as
       baseURL: "https://api.deepseek.com",
       thinkingEnabled: false,
     }),
-    getResolvedSettings: () => ({}),
+    getResolvedSettings: () => ({ model: "test-model" }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
     onLlmStreamProgress: (progress) => {
@@ -1232,7 +1296,7 @@ test("SessionManager treats OpenAI APIUserAbortError as interrupted", async () =
       baseURL: "https://api.deepseek.com",
       thinkingEnabled: false,
     }),
-    getResolvedSettings: () => ({}),
+    getResolvedSettings: () => ({ model: "test-model" }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
     onSessionEntryUpdated: (entry) => {
@@ -1261,7 +1325,7 @@ function createSessionManager(projectRoot: string, machineId: string): SessionMa
       thinkingEnabled: false,
       machineId,
     }),
-    getResolvedSettings: () => ({}),
+    getResolvedSettings: () => ({ model: "test-model" }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
   });
@@ -1288,7 +1352,7 @@ function createMockedClientSessionManager(projectRoot: string, responses: unknow
       baseURL: "https://api.deepseek.com",
       thinkingEnabled: false,
     }),
-    getResolvedSettings: () => ({}),
+    getResolvedSettings: () => ({ model: "test-model" }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
   });
@@ -1303,7 +1367,7 @@ function createMockedClientSessionManagerWithClient(projectRoot: string, client:
       baseURL: "https://api.deepseek.com",
       thinkingEnabled: false,
     }),
-    getResolvedSettings: () => ({}),
+    getResolvedSettings: () => ({ model: "test-model" }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
   });

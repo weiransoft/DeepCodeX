@@ -21,6 +21,13 @@ import {
   moveUp,
 } from "./promptBuffer";
 import type { PromptBufferState } from "./promptBuffer";
+import {
+  clearPromptUndoRedoState,
+  createPromptUndoRedoState,
+  recordPromptEdit,
+  redoPromptEdit,
+  undoPromptEdit,
+} from "./promptUndoRedo";
 import { buildSlashCommands, filterSlashCommands, findExactSlashCommand } from "./slashCommands";
 import type { SlashCommandItem } from "./slashCommands";
 import { readClipboardImageAsync } from "./clipboard";
@@ -123,6 +130,7 @@ export const PromptInput = React.memo(function PromptInput({
   const [draftBeforeHistory, setDraftBeforeHistory] = useState<string | null>(null);
   const [hasTerminalFocus, setHasTerminalFocus] = useState(true);
   const lastCtrlDAt = React.useRef<number>(0);
+  const undoRedoRef = React.useRef(createPromptUndoRedoState());
 
   const slashItems = React.useMemo(() => buildSlashCommands(skills), [skills]);
   const slashToken = getCurrentSlashToken(buffer);
@@ -237,6 +245,7 @@ export const PromptInput = React.memo(function PromptInput({
           setStatusMessage("Interrupting…");
         } else if (!isEmpty(buffer)) {
           setBuffer(EMPTY_BUFFER);
+          clearUndoRedoStacks();
         } else {
           setStatusMessage("press ctrl+d to exit");
         }
@@ -476,6 +485,14 @@ export const PromptInput = React.memo(function PromptInput({
         updateBuffer((s) => insertText(s, "\n"));
         return;
       }
+      if (key.ctrl && key.shift && input === "-") {
+        redo();
+        return;
+      }
+      if (key.ctrl && input === "-") {
+        undo();
+        return;
+      }
       if (input.startsWith("\u001B")) {
         // Unhandled escape sequence (e.g. function keys); ignore to avoid inserting garbage.
         return;
@@ -491,6 +508,28 @@ export const PromptInput = React.memo(function PromptInput({
     { isActive: !disabled }
   );
 
+  function undo(): void {
+    const previous = undoPromptEdit(undoRedoRef.current, buffer);
+    if (!previous) {
+      return;
+    }
+    exitHistoryBrowsing();
+    setBuffer(previous);
+  }
+
+  function redo(): void {
+    const next = redoPromptEdit(undoRedoRef.current, buffer);
+    if (!next) {
+      return;
+    }
+    exitHistoryBrowsing();
+    setBuffer(next);
+  }
+
+  function clearUndoRedoStacks(): void {
+    clearPromptUndoRedoState(undoRedoRef.current);
+  }
+
   function exitHistoryBrowsing(): void {
     setHistoryCursor(-1);
     setDraftBeforeHistory(null);
@@ -498,7 +537,11 @@ export const PromptInput = React.memo(function PromptInput({
 
   function updateBuffer(updater: (state: PromptBufferState) => PromptBufferState): void {
     exitHistoryBrowsing();
-    setBuffer(updater);
+    setBuffer((current) => {
+      const next = updater(current);
+      recordPromptEdit(undoRedoRef.current, current, next);
+      return next;
+    });
   }
 
   function navigateHistory(direction: -1 | 1): void {
@@ -552,6 +595,7 @@ export const PromptInput = React.memo(function PromptInput({
     if (item.kind === "new") {
       onSubmit({ text: "", imageUrls: [], command: "new" });
       setBuffer(EMPTY_BUFFER);
+      clearUndoRedoStacks();
       setImageUrls([]);
       setSelectedSkills([]);
       setShowSkillsDropdown(false);
@@ -560,6 +604,7 @@ export const PromptInput = React.memo(function PromptInput({
     if (item.kind === "init") {
       onSubmit(buildInitPromptSubmission(selectedSkills));
       setBuffer(EMPTY_BUFFER);
+      clearUndoRedoStacks();
       setImageUrls([]);
       setSelectedSkills([]);
       setShowSkillsDropdown(false);
@@ -568,6 +613,7 @@ export const PromptInput = React.memo(function PromptInput({
     if (item.kind === "resume") {
       onSubmit({ text: "", imageUrls: [], command: "resume" });
       setBuffer(EMPTY_BUFFER);
+      clearUndoRedoStacks();
       setImageUrls([]);
       setSelectedSkills([]);
       setShowSkillsDropdown(false);
@@ -576,6 +622,7 @@ export const PromptInput = React.memo(function PromptInput({
     if (item.kind === "mcp") {
       onSubmit({ text: "/mcp", imageUrls: [], command: "mcp" });
       setBuffer(EMPTY_BUFFER);
+      clearUndoRedoStacks();
       setImageUrls([]);
       setSelectedSkills([]);
       setShowSkillsDropdown(false);
@@ -584,6 +631,7 @@ export const PromptInput = React.memo(function PromptInput({
     if (item.kind === "exit") {
       onSubmit({ text: "/exit", imageUrls: [], command: "exit" });
       setBuffer(EMPTY_BUFFER);
+      clearUndoRedoStacks();
       return;
     }
   }
@@ -613,6 +661,7 @@ export const PromptInput = React.memo(function PromptInput({
       selectedSkills,
     });
     setBuffer(EMPTY_BUFFER);
+    clearUndoRedoStacks();
     setImageUrls([]);
     setSelectedSkills([]);
     setShowSkillsDropdown(false);
@@ -629,6 +678,7 @@ export const PromptInput = React.memo(function PromptInput({
   function clearSlashToken(): void {
     exitHistoryBrowsing();
     setBuffer((state) => removeCurrentSlashToken(state));
+    clearUndoRedoStacks();
   }
 
   function openModelDropdown(): void {

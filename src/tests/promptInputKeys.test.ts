@@ -128,6 +128,44 @@ test("parseTerminalInput recognizes ctrl+x as the image attachment clear shortcu
   assert.equal(isClearImageAttachmentsShortcut(input, key), true);
 });
 
+test("parseTerminalInput recognizes ctrl+- modifyOtherKeys sequence (standard)", () => {
+  const { input, key } = parseTerminalInput("\u001B[45;5u");
+  assert.equal(input, "-");
+  assert.equal(key.ctrl, true);
+  assert.equal(key.meta, false);
+});
+
+test("parseTerminalInput recognizes ctrl+- modifyOtherKeys sequence (extended)", () => {
+  const { input, key } = parseTerminalInput("\u001B[27;5;45~");
+  assert.equal(input, "-");
+  assert.equal(key.ctrl, true);
+  assert.equal(key.meta, false);
+});
+
+test("parseTerminalInput recognizes raw 0x1F as ctrl+shift+- (redo)", () => {
+  const { input, key } = parseTerminalInput("\u001F");
+  assert.equal(input, "-");
+  assert.equal(key.ctrl, true);
+  assert.equal(key.shift, true);
+  assert.equal(key.meta, false);
+});
+
+test("parseTerminalInput recognizes ctrl+shift+- modifyOtherKeys sequence (standard)", () => {
+  const { input, key } = parseTerminalInput("\u001B[45;6u");
+  assert.equal(input, "-");
+  assert.equal(key.ctrl, true);
+  assert.equal(key.shift, true);
+  assert.equal(key.meta, false);
+});
+
+test("parseTerminalInput recognizes ctrl+shift+- modifyOtherKeys sequence (extended)", () => {
+  const { input, key } = parseTerminalInput("\u001B[27;6;45~");
+  assert.equal(input, "-");
+  assert.equal(key.ctrl, true);
+  assert.equal(key.shift, true);
+  assert.equal(key.meta, false);
+});
+
 test("formatImageAttachmentStatus formats the image count label", () => {
   assert.equal(formatImageAttachmentStatus(0), "");
   assert.equal(formatImageAttachmentStatus(1), "📎 1 image attached");

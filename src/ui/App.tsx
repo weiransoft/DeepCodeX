@@ -256,16 +256,11 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
       const activeSessionId = sessionManager.getActiveSessionId();
       const meta: MessageMeta = {
         isModelChange: true,
-        modelConfig: {
-          model: selection.model,
-          thinkingEnabled: selection.thinkingEnabled,
-          reasoningEffort: selection.reasoningEffort,
-        },
       };
-      const content = `/model\n└ Set model to ${selection.model}`;
+      const content = `/model\n└ Set model to ${selection.model} (${selection?.thinkingEnabled ? selection?.reasoningEffort : "no thinking"})`;
 
       if (activeSessionId) {
-        sessionManager.addSessionSystemMessage(activeSessionId, content, meta);
+        sessionManager.addSessionSystemMessage(activeSessionId, content, true, meta);
       } else {
         const now = new Date().toISOString();
         setMessages((prev) => [
@@ -305,12 +300,12 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         process.stdout.write("\u001B[2J\u001B[3J\u001B[H");
       }
       sessionManager.setActiveSessionId(sessionId);
-      // 先清空让 <Static> 的 index 重置为 0
+      // Clear first so <Static> resets its index to 0.
       setMessages([]);
       setShowWelcome(false);
       setWelcomeNonce((n) => n + 1);
       setView("chat");
-      // 再加载新消息，此时 index 已为 0，会渲染全部 items
+      // Load messages after the reset so all static items are rendered.
       setTimeout(() => {
         setMessages(loadVisibleMessages(sessionManager, sessionId));
         setShowWelcome(true);
@@ -431,7 +426,14 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
               />
             );
           }
-          return <MessageView key={item.id} message={item} collapsed={isCollapsedThinking(item, expandedThinkingId)} />;
+          return (
+            <MessageView
+              key={item.id}
+              message={item}
+              collapsed={isCollapsedThinking(item, expandedThinkingId)}
+              width={screenWidth}
+            />
+          );
         }}
       </Static>
       {statusLine ? (

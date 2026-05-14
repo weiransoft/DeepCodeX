@@ -13,7 +13,9 @@ src/
 │   ├── App.tsx          # Root Ink component — state, routing, session orchestration
 │   ├── PromptInput.tsx  # Multi-line input with slash commands, image paste, skills
 │   ├── MessageView.tsx  # Renders assistant/tool messages with markdown
+│   ├── DropdownMenu.tsx # Reusable dropdown for skill/model selection
 │   ├── SessionList.tsx  # Session picker for /resume
+│   ├── promptUndoRedo.ts # Ctrl+- undo / Ctrl+Shift+- redo for prompt input
 │   └── ...
 ├── mcp/
 │   ├── mcp-client.ts    # MCP client — JSON-RPC communication with MCP servers
@@ -22,7 +24,7 @@ src/
 │   ├── file-utils.ts    # File read/write with encoding and diff preview
 │   ├── shell-utils.ts   # Shell path resolution (Git Bash, zsh, bash)
 │   ├── state.ts         # In-memory file state and snippet tracking
-│   └── runtime.ts       # Tool validation runtime helpers (executeValidatedTool, semanticBoolean)
+│   └── runtime.ts       # Tool validation runtime helpers
 ├── tools/
 │   ├── executor.ts      # ToolExecutor — dispatches tool calls to handlers
 │   ├── bash-handler.ts  # Executes shell commands
@@ -32,9 +34,10 @@ src/
 │   ├── web-search-handler.ts # Web search tool
 │   └── ask-user-question-handler.ts # Interactive user prompts
 ├── tests/               # Test suite — one *.test.ts per module
-docs/
+templates/
 ├── tools/               # Tool descriptions fed to the LLM
 ├── prompts/             # EJS templates (e.g., init_command.md.ejs)
+docs/                    # User-facing documentation
 dist/                    # Bundled CLI output (gitignored)
 ```
 
@@ -87,7 +90,8 @@ Run the CLI locally for manual testing: `node dist/cli.js` (after `npm run bundl
 - `fix:` — bug fix (e.g., `fix(ui): redraw cleanly after terminal resize`)
 - `chore:` — tooling, deps, hooks (e.g., `chore: add husky + lint-staged`)
 - `refactor:` — code restructuring (e.g., `refactor(ui): optimize App hooks`)
-- `style:` — formatting-only changes
+- `style:` — formatting-only changes (e.g., `style: adjust the tree structure symbols`)
+- `docs:` — documentation (e.g., `docs: add MCP configuration guide`)
 
 **Pull requests** should include:
 - A clear description of what changed and why
@@ -100,7 +104,7 @@ Run the CLI locally for manual testing: `node dist/cli.js` (after `npm run bundl
 
 The CLI renders a terminal UI using [Ink](https://github.com/vadimdemedes/ink) (React for terminals). `SessionManager` drives the LLM interaction loop: it builds system prompts, sends user messages with optional skills/images, streams responses, executes tool calls via `ToolExecutor`, and compacts context when token thresholds are exceeded (512K for DeepSeek V4 models, 128K for others).
 
-Six tools are available to the LLM: `bash`, `read`, `write`, `edit`, `AskUserQuestion`, and `WebSearch`. Tool definitions are registered in `src/tools/executor.ts` and described to the LLM via `src/prompt.ts` and `docs/tools/`.
+Six tools are available to the LLM: `bash`, `read`, `write`, `edit`, `AskUserQuestion`, and `WebSearch`. Tool definitions are registered in `src/tools/executor.ts` and described to the LLM via `src/prompt.ts` and `templates/tools/`.
 
 ## Agent-Specific Instructions
 
