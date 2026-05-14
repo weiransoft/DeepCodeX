@@ -1,15 +1,15 @@
 import React from "react";
-import { Box, Text, useWindowSize } from "ink";
+import { Box, Text } from "ink";
 import { renderMarkdown } from "./markdown";
 import type { SessionMessage } from "../session";
 
 type Props = {
   message: SessionMessage;
   collapsed?: boolean;
+  width?: number;
 };
 
-export function MessageView({ message, collapsed }: Props): React.ReactElement | null {
-  const { columns } = useWindowSize();
+export function MessageView({ message, collapsed, width = 80 }: Props): React.ReactElement | null {
   if (!message.visible) {
     return null;
   }
@@ -54,12 +54,15 @@ export function MessageView({ message, collapsed }: Props): React.ReactElement |
       );
     }
 
+    const containerWidth = Math.max(1, width - 2);
+    const contentWidth = Math.max(1, width - 4);
+
     return (
-      <Box marginLeft={1} marginBottom={1} width={columns - 2} gap={1} marginY={0} flexDirection="row">
+      <Box marginLeft={1} marginBottom={1} width={containerWidth} gap={1} marginY={0} flexDirection="row">
         <Box alignSelf="stretch">
           <Text color="#229ac3">✦</Text>
         </Box>
-        <Box flexGrow={1} width={columns - 4}>
+        <Box flexGrow={1} width={contentWidth}>
           {content ? <Text wrap="wrap">{renderMarkdown(content)}</Text> : null}
         </Box>
       </Box>
@@ -82,7 +85,7 @@ export function MessageView({ message, collapsed }: Props): React.ReactElement |
   }
 
   if (message.role === "system") {
-    // 渲染模型变更消息
+    // Render model change messages in the same style as user commands.
     if (message.meta?.isModelChange) {
       return (
         <Box marginY={0} marginLeft={1} marginBottom={1} flexGrow={1} flexDirection="row" gap={1}>
