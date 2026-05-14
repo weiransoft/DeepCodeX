@@ -269,19 +269,6 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
       const { changed } = writeModelConfigSelection(selection, current, projectRoot);
       const next = resolveCurrentSettings(projectRoot);
       setResolvedSettings(next);
-      if (!changed) {
-        return "Model settings unchanged";
-      }
-      return `Model settings updated: ${formatModelConfig(current)} → ${formatModelConfig(next)}`;
-    },
-    [projectRoot]
-  );
-  const handleModelConfigChange = useCallback(
-    (selection: ModelConfigSelection): string => {
-      const current = resolveCurrentSettings();
-      const { changed } = writeModelConfigSelection(selection, current);
-      const next = resolveCurrentSettings();
-      setResolvedSettings(next);
 
       if (!changed) {
         return "Model settings unchanged";
@@ -322,7 +309,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
 
       return `Model settings updated: ${formatModelConfig(current)} → ${formatModelConfig(next)}`;
     },
-    [sessionManager]
+    [projectRoot, sessionManager]
   );
 
   const handleSubmit = useCallback(
