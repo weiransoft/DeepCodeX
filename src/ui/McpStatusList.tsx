@@ -321,7 +321,7 @@ function ServerDetailView({
 
   const maxVisible = useMemo(() => {
     const reservedLines = 10; // header + title + stats + footer + borders
-    const availableLines = Math.max(0, Math.min(rows, 28) - reservedLines);
+    const availableLines = Math.max(0, Math.min(rows, 30) - reservedLines);
     return Math.max(1, availableLines);
   }, [rows]);
 
@@ -343,8 +343,6 @@ function ServerDetailView({
     else if (activeIndex >= currentStart + maxVisible) {
       newStart = activeIndex - maxVisible + 1;
     }
-
-    console.log("maxVisible:", maxVisible);
 
     // 限制在合法范围内
     newStart = Math.max(0, Math.min(newStart, Math.max(0, totalItems - maxVisible)));
@@ -412,7 +410,7 @@ function ServerDetailView({
         {/* Header row */}
         <Box paddingX={1} gap={1}>
           <Text color={color}>{icon} </Text>
-          <Text bold color="#229ac3">
+          <Text bold color="#229ac3" wrap="truncate-end">
             {server.name}
           </Text>
           <Text dimColor>— Details</Text>
@@ -422,7 +420,7 @@ function ServerDetailView({
         </Box>
         {/* Server info */}
         <Box paddingX={1} marginLeft={3}>
-          <Text>
+          <Text wrap="truncate-end">
             {server.toolCount} tools, {server.promptCount} prompts, {server.resourceCount} resources
           </Text>
         </Box>
@@ -455,7 +453,7 @@ function ServerDetailView({
               visibleItems.map((item, idx) => {
                 const actualIndex = visibleStart + idx;
                 const isSelected = actualIndex === activeIndex;
-                return <ItemRow key={`${item.type}-${item.name}`} item={item} selected={isSelected} />;
+                return <ItemRow key={`${item.type}-${item.name}-${actualIndex}`} item={item} selected={isSelected} />;
               })
             )}
           </Box>
@@ -482,7 +480,7 @@ function ItemRow({ item, selected }: { item: { type: string; name: string }; sel
   const icon = item.type === "tool" ? "🔧" : item.type === "prompt" ? "📝" : "📦";
 
   return (
-    <Box height={1} flexDirection="row" flexGrow={1}>
+    <Box height={1} flexDirection="row">
       <Text dimColor>{icon} </Text>
       <Text color={selected ? "#229ac3" : undefined} dimColor wrap="truncate-end">
         {item.name}
