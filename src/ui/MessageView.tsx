@@ -1,5 +1,5 @@
 import React from "react";
-import { Box, Text } from "ink";
+import { Box, Text, useWindowSize } from "ink";
 import { renderMarkdown } from "./markdown";
 import type { SessionMessage } from "../session";
 
@@ -9,6 +9,7 @@ type Props = {
 };
 
 export function MessageView({ message, collapsed }: Props): React.ReactElement | null {
+  const { columns } = useWindowSize();
   if (!message.visible) {
     return null;
   }
@@ -46,7 +47,7 @@ export function MessageView({ message, collapsed }: Props): React.ReactElement |
       return (
         <Box marginLeft={1} flexDirection="column" marginY={0}>
           <StatusLine bulletColor="gray" name="Thinking" params={summary} />
-          <Box flexDirection="column" marginLeft={2}>
+          <Box flexDirection="column" marginLeft={4}>
             {content ? <Text dimColor>{renderMarkdown(content)}</Text> : null}
           </Box>
         </Box>
@@ -54,12 +55,12 @@ export function MessageView({ message, collapsed }: Props): React.ReactElement |
     }
 
     return (
-      <Box marginLeft={1} marginBottom={1} flexGrow={1} gap={1} marginY={0}>
-        <Box>
+      <Box marginLeft={1} marginBottom={1} width={columns - 2} gap={1} marginY={0} flexDirection="row">
+        <Box alignSelf="stretch">
           <Text color="#229ac3">✦</Text>
         </Box>
-        <Box flexDirection="column" flexGrow={1}>
-          {content ? <Text>{renderMarkdown(content)}</Text> : null}
+        <Box flexGrow={1} width={columns - 4}>
+          {content ? <Text wrap="wrap">{renderMarkdown(content)}</Text> : null}
         </Box>
       </Box>
     );
