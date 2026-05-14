@@ -277,13 +277,8 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
       const activeSessionId = sessionManager.getActiveSessionId();
       const meta: MessageMeta = {
         isModelChange: true,
-        modelConfig: {
-          model: selection.model,
-          thinkingEnabled: selection.thinkingEnabled,
-          reasoningEffort: selection.reasoningEffort,
-        },
       };
-      const content = `/model\n└ Set model to ${selection.model}`;
+      const content = `/model\n└ Set model to ${selection.model} (${selection?.reasoningEffort || "no thinking"})`;
 
       if (activeSessionId) {
         sessionManager.addSessionSystemMessage(activeSessionId, content, meta);

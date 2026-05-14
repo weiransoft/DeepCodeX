@@ -122,11 +122,6 @@ export type MessageMeta = {
   asThinking?: boolean;
   isSummary?: boolean;
   isModelChange?: boolean;
-  modelConfig?: {
-    model: string;
-    thinkingEnabled: boolean;
-    reasoningEffort?: string;
-  };
   skill?: SkillInfo;
 };
 
@@ -778,6 +773,12 @@ The candidate skills are as follows:\n\n`;
     this.activeSessionId = sessionId;
   }
 
+  addSessionSystemMessage(sessionId: string, content: string, meta?: MessageMeta): void {
+    const message = this.buildSystemMessage(sessionId, content, meta);
+    this.appendSessionMessage(sessionId, message);
+    this.onAssistantMessage(message, false);
+  }
+
   async handleUserPrompt(userPrompt: UserPromptContent): Promise<void> {
     const controller = new AbortController();
     this.activePromptController = controller;
@@ -1332,25 +1333,6 @@ ${skillMd}
     return messages;
   }
 
-  addSessionSystemMessage(sessionId: string, content: string, meta?: MessageMeta): void {
-    const now = new Date().toISOString();
-    const message: SessionMessage = {
-      id: crypto.randomUUID(),
-      sessionId,
-      role: "system",
-      content,
-      contentParams: null,
-      messageParams: null,
-      compacted: false,
-      visible: true,
-      createTime: now,
-      updateTime: now,
-      meta,
-    };
-    this.appendSessionMessage(sessionId, message);
-    this.onAssistantMessage(message, false);
-  }
-
   private normalizeSessionMessage(message: SessionMessage): SessionMessage {
     if (message.role !== "tool") {
       return message;
@@ -1560,7 +1542,12 @@ ${skillMd}
     return this.readNonEmptyFile(path.join(os.homedir(), ".deepcode", "AGENTS.md"));
   }
 
-  private buildSystemMessage(sessionId: string, content: string, contentParams: unknown | null = null): SessionMessage {
+  private buildSystemMessage(
+    sessionId: string,
+    content: string,
+    contentParams: unknown | null = null,
+    meta?: MessageMeta
+  ): SessionMessage {
     const now = new Date().toISOString();
     return {
       id: crypto.randomUUID(),
@@ -1573,6 +1560,7 @@ ${skillMd}
       visible: false,
       createTime: now,
       updateTime: now,
+      meta,
     };
   }
 
