@@ -1,4 +1,4 @@
-import { defaultsToThinkingMode } from "./model-capabilities";
+import { defaultsToThinkingMode } from "./common/model-capabilities";
 
 export type DeepcodingEnv = Record<string, string | undefined> & {
   MODEL?: string;

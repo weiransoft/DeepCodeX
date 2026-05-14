@@ -17,9 +17,17 @@ test("getSystemPrompt always includes WebSearch docs", () => {
   assert.equal(prompt.includes("## WebSearch"), true);
 });
 
+test("getSystemPrompt renders Read docs for non-multimodal models", () => {
+  const prompt = getSystemPrompt("/tmp/project", { model: "deepseek-chat" });
+  assert.equal(prompt.includes("the current model is not multimodal"), true);
+  assert.equal(prompt.includes("the contents are presented visually"), false);
+});
+
 test("runtime prompt assets live under templates", () => {
   assert.equal(fs.existsSync(path.join(repoRoot, "templates", "tools", "web-search.md")), true);
+  assert.equal(fs.existsSync(path.join(repoRoot, "templates", "tools", "read.md.ejs")), true);
   assert.equal(fs.existsSync(path.join(repoRoot, "templates", "prompts", "init_command.md.ejs")), true);
+  assert.equal(fs.existsSync(path.join(repoRoot, "templates", "tools", "read.md")), false);
   assert.equal(fs.existsSync(path.join(repoRoot, "docs", "tools")), false);
   assert.equal(fs.existsSync(path.join(repoRoot, "docs", "prompts")), false);
 });
