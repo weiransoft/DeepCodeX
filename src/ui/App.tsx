@@ -8,6 +8,7 @@ import OpenAI from "openai";
 import {
   SessionManager,
   type LlmStreamProgress,
+  type MessageMeta,
   type SessionEntry,
   type SessionMessage,
   type SessionStatus,
@@ -272,31 +273,38 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         return "Model settings unchanged";
       }
 
-      // 构建模型变更消息
       const activeSessionId = sessionManager.getActiveSessionId();
-      const message: SessionMessage = {
-        id: crypto.randomUUID(),
-        sessionId: activeSessionId ?? "local",
-        role: "system",
-        content: `/model\n⎿ Set model to ${selection.model}`,
-        contentParams: null,
-        messageParams: null,
-        compacted: false,
-        visible: true,
-        createTime: new Date().toISOString(),
-        updateTime: new Date().toISOString(),
-        meta: {
-          isModelChange: true,
-          modelConfig: {
-            model: selection.model,
-            thinkingEnabled: selection.thinkingEnabled,
-            reasoningEffort: selection.reasoningEffort,
-          },
+      const meta: MessageMeta = {
+        isModelChange: true,
+        modelConfig: {
+          model: selection.model,
+          thinkingEnabled: selection.thinkingEnabled,
+          reasoningEffort: selection.reasoningEffort,
         },
       };
+      const content = `/model\n⎿ Set model to ${selection.model}`;
 
-      // 添加到消息列表
-      setMessages((prev) => [...prev, message]);
+      if (activeSessionId) {
+        sessionManager.addSessionSystemMessage(activeSessionId, content, meta);
+      } else {
+        const now = new Date().toISOString();
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            sessionId: "local",
+            role: "system" as const,
+            content,
+            contentParams: null,
+            messageParams: null,
+            compacted: false,
+            visible: true,
+            createTime: now,
+            updateTime: now,
+            meta,
+          },
+        ]);
+      }
 
       return `Model settings updated: ${formatModelConfig(current)} → ${formatModelConfig(next)}`;
     },

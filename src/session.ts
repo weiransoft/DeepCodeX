@@ -1332,6 +1332,25 @@ ${skillMd}
     return messages;
   }
 
+  addSessionSystemMessage(sessionId: string, content: string, meta?: MessageMeta): void {
+    const now = new Date().toISOString();
+    const message: SessionMessage = {
+      id: crypto.randomUUID(),
+      sessionId,
+      role: "system",
+      content,
+      contentParams: null,
+      messageParams: null,
+      compacted: false,
+      visible: true,
+      createTime: now,
+      updateTime: now,
+      meta,
+    };
+    this.appendSessionMessage(sessionId, message);
+    this.onAssistantMessage(message, false);
+  }
+
   private normalizeSessionMessage(message: SessionMessage): SessionMessage {
     if (message.role !== "tool") {
       return message;
