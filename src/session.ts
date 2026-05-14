@@ -121,6 +121,12 @@ export type MessageMeta = {
   resultMd?: string;
   asThinking?: boolean;
   isSummary?: boolean;
+  isModelChange?: boolean;
+  modelConfig?: {
+    model: string;
+    thinkingEnabled: boolean;
+    reasoningEffort?: string;
+  };
   skill?: SkillInfo;
 };
 
@@ -598,7 +604,7 @@ The candidate skills are as follows:\n\n`;
       if (!fs.existsSync(root)) {
         return [];
       }
-      let entries: fs.Dirent[] = [];
+      let entries: fs.Dirent[];
       try {
         entries = fs.readdirSync(root, { withFileTypes: true });
       } catch {
@@ -1324,6 +1330,25 @@ ${skillMd}
       }
     }
     return messages;
+  }
+
+  addSessionSystemMessage(sessionId: string, content: string, meta?: MessageMeta): void {
+    const now = new Date().toISOString();
+    const message: SessionMessage = {
+      id: crypto.randomUUID(),
+      sessionId,
+      role: "system",
+      content,
+      contentParams: null,
+      messageParams: null,
+      compacted: false,
+      visible: true,
+      createTime: now,
+      updateTime: now,
+      meta,
+    };
+    this.appendSessionMessage(sessionId, message);
+    this.onAssistantMessage(message, false);
   }
 
   private normalizeSessionMessage(message: SessionMessage): SessionMessage {
