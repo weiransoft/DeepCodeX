@@ -28,6 +28,13 @@ export function McpStatusList({ statuses, onCancel }: Props): React.ReactElement
     }
   }, [statuses, selectedServerIndex]);
 
+  // 当没有服务器时，监听 Esc 键退出
+  useInput((input, key) => {
+    if (statuses.length === 0 && (key.escape || (key.ctrl && (input === "c" || input === "C")))) {
+      onCancel();
+    }
+  });
+
   if (statuses.length === 0) {
     return (
       <Box flexDirection="column" marginLeft={1} paddingX={1} gap={1} borderStyle="round" borderDimColor>
