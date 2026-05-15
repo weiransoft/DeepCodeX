@@ -72,6 +72,29 @@ function accumulateUsage(current: ModelUsage | null, next: unknown | null | unde
   return addUsageValue(current, next) as ModelUsage;
 }
 
+function usageWithRequestCount(usage: ModelUsage): ModelUsage {
+  const totalReqs = typeof usage.total_reqs === "number" ? usage.total_reqs + 1 : 1;
+  return {
+    ...usage,
+    total_reqs: totalReqs,
+  };
+}
+
+function accumulateUsagePerModel(
+  current: Record<string, ModelUsage> | null | undefined,
+  model: string,
+  next: ModelUsage | null | undefined
+): Record<string, ModelUsage> | null {
+  if (next == null) {
+    return current ?? null;
+  }
+
+  const usagePerModel = { ...(current ?? {}) };
+  const modelName = model.trim() || "unknown";
+  usagePerModel[modelName] = accumulateUsage(usagePerModel[modelName] ?? null, usageWithRequestCount(next))!;
+  return usagePerModel;
+}
+
 function getExtensionRoot(): string {
   if (typeof __dirname !== "undefined") {
     return path.resolve(__dirname, "..");
@@ -112,6 +135,7 @@ export type SessionEntry = {
   status: SessionStatus;
   failReason: string | null;
   usage: ModelUsage | null;
+  usagePerModel: Record<string, ModelUsage> | null;
   activeTokens: number;
   createTime: string;
   updateTime: string;
@@ -847,6 +871,7 @@ The candidate skills are as follows:\n\n`;
       status: "pending",
       failReason: null,
       usage: null,
+      usagePerModel: null,
       activeTokens: 0,
       createTime: now,
       updateTime: now,
@@ -1087,6 +1112,7 @@ ${skillMd}
           assistantRefusal: refusal,
           toolCalls,
           usage: accumulateUsage(entry.usage, responseUsage),
+          usagePerModel: accumulateUsagePerModel(entry.usagePerModel, model, responseUsage),
           activeTokens: getTotalTokens(responseUsage),
           status: refusal ? "failed" : waitingForUser ? "waiting_for_user" : toolCalls ? "processing" : "completed",
           failReason: refusal ? refusal : entry.failReason,
@@ -1196,6 +1222,7 @@ ${skillMd}
     this.updateSessionEntry(sessionId, (entry) => ({
       ...entry,
       usage: accumulateUsage(entry.usage, responseUsage),
+      usagePerModel: accumulateUsagePerModel(entry.usagePerModel, model, responseUsage),
       activeTokens: getTotalTokens(responseUsage),
       updateTime: now,
     }));
@@ -2108,6 +2135,7 @@ ${skillMd}
       status: this.normalizeSessionStatus(value.status),
       failReason: typeof value.failReason === "string" ? value.failReason : null,
       usage: (value.usage as ModelUsage) ?? null,
+      usagePerModel: this.normalizeUsagePerModel(value),
       activeTokens: typeof value.activeTokens === "number" ? value.activeTokens : 0,
       createTime: typeof value.createTime === "string" ? value.createTime : new Date().toISOString(),
       updateTime: typeof value.updateTime === "string" ? value.updateTime : new Date().toISOString(),
@@ -2127,6 +2155,23 @@ ${skillMd}
       return status;
     }
     return "pending";
+  }
+
+  private normalizeUsagePerModel(entry: Record<string, unknown>): Record<string, ModelUsage> | null {
+    if (!Object.prototype.hasOwnProperty.call(entry, "usagePerModel")) {
+      return null;
+    }
+    if (!isUsageRecord(entry.usagePerModel)) {
+      return null;
+    }
+    const usagePerModel: Record<string, ModelUsage> = {};
+    for (const [model, usage] of Object.entries(entry.usagePerModel)) {
+      if (!model || !isUsageRecord(usage)) {
+        continue;
+      }
+      usagePerModel[model] = usage as ModelUsage;
+    }
+    return usagePerModel;
   }
 
   private deserializeProcesses(value: unknown): Map<string, { startTime: string; command: string }> | null {

@@ -148,11 +148,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         setTimeout(() => {
           const activeSessionId = sessionManager.getActiveSessionId();
           const session = activeSessionId ? sessionManager.getSession(activeSessionId) : null;
-          const allMessages = activeSessionId
-            ? sessionManager.listSessionMessages(activeSessionId)
-            : messagesRef.current;
-          const resolved = resolveCurrentSettings(projectRoot);
-          const summary = buildExitSummaryText({ session, messages: allMessages, model: resolved.model });
+          const summary = buildExitSummaryText({ session });
           process.stdout.write("\n");
           process.stdout.write(chalk.green("> /exit "));
           process.stdout.write("\n\n");
@@ -256,7 +252,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         setRunningProcesses(null);
       }
     },
-    [exit, onRestart, projectRoot, sessionManager, refreshSkills, refreshSessionsList]
+    [exit, onRestart, sessionManager, refreshSkills, refreshSessionsList]
   );
 
   const handleInterrupt = useCallback(() => {

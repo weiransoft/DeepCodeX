@@ -1,11 +1,9 @@
 import chalk from "chalk";
 import gradientString from "gradient-string";
-import type { SessionEntry, SessionMessage } from "../session";
+import type { ModelUsage, SessionEntry } from "../session";
 
 type ExitSummaryInput = {
   session: SessionEntry | null;
-  messages: SessionMessage[];
-  model?: string;
 };
 
 const ANSI_RE = /\u001b\[[0-9;]*[a-zA-Z]/g;
@@ -32,13 +30,15 @@ type UsageFields = {
   promptTokens: number;
   completionTokens: number;
   cachedTokens: number;
+  totalReqs: number;
 };
 
-function extractUsageFields(usage: unknown | null): UsageFields {
+function extractUsageFields(usage: ModelUsage | null): UsageFields {
   const empty: UsageFields = {
     promptTokens: 0,
     completionTokens: 0,
     cachedTokens: 0,
+    totalReqs: 0,
   };
   if (!usage || typeof usage !== "object" || Array.isArray(usage)) {
     return empty;
@@ -61,14 +61,13 @@ function extractUsageFields(usage: unknown | null): UsageFields {
     cachedTokens = record.prompt_cache_hit_tokens;
   }
 
-  return { promptTokens, completionTokens, cachedTokens };
+  const totalReqs = typeof record.total_reqs === "number" ? record.total_reqs : 0;
+
+  return { promptTokens, completionTokens, cachedTokens, totalReqs };
 }
 
 export function buildExitSummaryText(input: ExitSummaryInput): string {
-  const { session, messages, model } = input;
-
-  // Count assistant messages as the request count shown in the usage table.
-  const assistantCount = messages.filter((m) => m.role === "assistant").length;
+  const { session } = input;
 
   const innerWidth = 98;
   const contentWidth = innerWidth - 4; // "│  " prefix + "  │" suffix → 4 chars padding
@@ -81,9 +80,22 @@ export function buildExitSummaryText(input: ExitSummaryInput): string {
 
   const rows: string[] = ["", `${header}`, ""];
 
-  const usage = extractUsageFields(session?.usage ?? null);
-  const modelName = model ?? "unknown";
-  const hasUsage = usage.promptTokens > 0 || usage.completionTokens > 0;
+  const usageRows = Object.entries(session?.usagePerModel ?? {})
+    .map(([modelName, usage]) => ({
+      modelName,
+      usage: extractUsageFields(usage),
+    }))
+    .filter(
+      (row) =>
+        row.usage.totalReqs > 0 ||
+        row.usage.promptTokens > 0 ||
+        row.usage.completionTokens > 0 ||
+        row.usage.cachedTokens > 0
+    )
+    .sort(
+      (left, right) => right.usage.totalReqs - left.usage.totalReqs || left.modelName.localeCompare(right.modelName)
+    );
+  const hasUsage = usageRows.length > 0;
 
   if (hasUsage) {
     const colModel = 34;
@@ -103,17 +115,19 @@ export function buildExitSummaryText(input: ExitSummaryInput): string {
     rows.push(chalk.bold(headerRow));
     rows.push(divider);
 
-    const reqsStr = String(assistantCount).padStart(colReqs);
-    const inputStr = formatNumber(usage.promptTokens).padStart(colInput);
-    const outputStr = formatNumber(usage.completionTokens).padStart(colOutput);
-    const cachedStr = formatNumber(usage.cachedTokens).padStart(colCached);
-    const dataRow =
-      padRight(modelName, colModel) +
-      padRight(reqsStr, colReqs) +
-      padRight(chalk.yellow(inputStr), colInput) +
-      padRight(chalk.yellow(outputStr), colOutput) +
-      padRight(chalk.yellow(cachedStr), colCached);
-    rows.push(dataRow);
+    for (const { modelName, usage } of usageRows) {
+      const reqsStr = formatNumber(usage.totalReqs).padStart(colReqs);
+      const inputStr = formatNumber(usage.promptTokens).padStart(colInput);
+      const outputStr = formatNumber(usage.completionTokens).padStart(colOutput);
+      const cachedStr = formatNumber(usage.cachedTokens).padStart(colCached);
+      const dataRow =
+        padRight(modelName, colModel) +
+        padRight(reqsStr, colReqs) +
+        padRight(chalk.yellow(inputStr), colInput) +
+        padRight(chalk.yellow(outputStr), colOutput) +
+        padRight(chalk.yellow(cachedStr), colCached);
+      rows.push(dataRow);
+    }
 
     rows.push("");
   }
