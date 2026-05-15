@@ -356,7 +356,7 @@ function ServerDetailView({
   const visibleItems = allItems.slice(visibleStart, visibleStart + maxVisible);
 
   useInput((input, key) => {
-    if (key.escape || (key.ctrl && (input === "c" || input === "C"))) {
+    if (key.ctrl && (input === "c" || input === "C")) {
       onCancel();
       return;
     }
@@ -466,7 +466,7 @@ function ServerDetailView({
         </Box>
         {/* Footer */}
         <Box paddingX={1}>
-          <Text dimColor>↑/↓ scroll · Space/Enter back · Esc close</Text>
+          <Text dimColor>↑/↓ scroll · Space/Enter back · Esc back · Ctrl+C close</Text>
         </Box>
       </Box>
     </Box>

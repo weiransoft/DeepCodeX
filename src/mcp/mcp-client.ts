@@ -178,7 +178,19 @@ export class McpClient {
         },
         timeoutMs
       )
-        .then(() => {
+        .then((result) => {
+          // Validate protocol version from server response (per MCP spec §4.2.1.2)
+          const initResult = result as { protocolVersion?: string } | undefined;
+          const serverVersion = initResult?.protocolVersion;
+          if (serverVersion && serverVersion !== "2025-03-26" && serverVersion !== "2024-11-05") {
+            reject(
+              new Error(
+                `Unsupported MCP protocol version "${serverVersion}" from server "${this.serverName}". ` +
+                  `Client supports 2025-03-26 and 2024-11-05.`
+              )
+            );
+            return;
+          }
           // Send initialized notification
           this.sendNotification("notifications/initialized");
           resolve();
@@ -302,33 +314,51 @@ export class McpClient {
     try {
       const parsed: unknown = JSON.parse(line);
 
-      // Handle notifications (no id field — server-initiated)
-      if (parsed && typeof parsed === "object" && !("id" in parsed)) {
-        const notification = parsed as JsonRpcNotification;
-        if (this.notificationHandler && typeof notification.method === "string") {
-          try {
-            this.notificationHandler(notification.method, notification.params);
-          } catch {
-            // Swallow handler errors to avoid crashing the reader loop
+      // Handle JSON-RPC batch (array of requests/notifications/responses)
+      // Per MCP 2025-03-26 §4.1.1.3: implementations MUST support receiving batches.
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (item && typeof item === "object") {
+            this.handleSingleMessage(item);
           }
         }
         return;
       }
 
-      // Handle responses to our requests
-      const message = parsed as JsonRpcResponse;
-      if (message.id !== undefined && this.pendingRequests.has(message.id)) {
-        const pending = this.pendingRequests.get(message.id)!;
-        this.pendingRequests.delete(message.id);
-        clearTimeout(pending.timer);
-        if (message.error) {
-          pending.reject(this.withStderr(`MCP error: ${message.error.message}`));
-        } else {
-          pending.resolve(message.result);
-        }
+      // Handle single message
+      if (parsed && typeof parsed === "object") {
+        this.handleSingleMessage(parsed);
       }
     } catch {
       // Ignore unparseable lines
+    }
+  }
+
+  private handleSingleMessage(msg: object): void {
+    // Handle notifications (no id field — server-initiated)
+    if (!("id" in msg)) {
+      const notification = msg as unknown as JsonRpcNotification;
+      if (this.notificationHandler && typeof notification.method === "string") {
+        try {
+          this.notificationHandler(notification.method, notification.params);
+        } catch {
+          // Swallow handler errors to avoid crashing the reader loop
+        }
+      }
+      return;
+    }
+
+    // Handle responses to our requests
+    const message = msg as unknown as JsonRpcResponse;
+    if (message.id !== undefined && this.pendingRequests.has(message.id)) {
+      const pending = this.pendingRequests.get(message.id)!;
+      this.pendingRequests.delete(message.id);
+      clearTimeout(pending.timer);
+      if (message.error) {
+        pending.reject(this.withStderr(`MCP error: ${message.error.message}`));
+      } else {
+        pending.resolve(message.result);
+      }
     }
   }
 
