@@ -65,11 +65,11 @@ function addUsageValue(current: unknown, next: unknown): unknown {
   return next;
 }
 
-function accumulateUsage(current: unknown | null, next: unknown | null | undefined): unknown | null {
+function accumulateUsage(current: ModelUsage | null, next: unknown | null | undefined): ModelUsage | null {
   if (next == null) {
     return current ?? null;
   }
-  return addUsageValue(current, next);
+  return addUsageValue(current, next) as ModelUsage;
 }
 
 function getExtensionRoot(): string {
@@ -81,7 +81,7 @@ function getExtensionRoot(): string {
   return path.resolve(path.dirname(currentFilePath), "..");
 }
 
-function getTotalTokens(usage: unknown | null | undefined): number {
+function getTotalTokens(usage: ModelUsage | null | undefined): number {
   if (!isUsageRecord(usage)) {
     return 0;
   }
@@ -90,6 +90,17 @@ function getTotalTokens(usage: unknown | null | undefined): number {
 }
 
 export type SessionStatus = "failed" | "pending" | "processing" | "waiting_for_user" | "completed" | "interrupted";
+
+export type ModelUsage = {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  completion_tokens_details?: Record<string, unknown>;
+  prompt_tokens_details?: Record<string, unknown>;
+  prompt_cache_hit_tokens?: number;
+  prompt_cache_miss_tokens?: number;
+  total_reqs?: number;
+};
 
 export type SessionEntry = {
   id: string;
@@ -100,7 +111,7 @@ export type SessionEntry = {
   toolCalls: unknown[] | null;
   status: SessionStatus;
   failReason: string | null;
-  usage: unknown | null;
+  usage: ModelUsage | null;
   activeTokens: number;
   createTime: string;
   updateTime: string;
@@ -286,7 +297,7 @@ export class SessionManager {
     debug?: ChatCompletionDebugOptions
   ): Promise<{
     choices?: Array<{ message?: Record<string, unknown> }>;
-    usage?: unknown;
+    usage?: ModelUsage | null;
   }> {
     const requestId = crypto.randomUUID();
     const startedAt = new Date().toISOString();
@@ -355,13 +366,13 @@ export class SessionManager {
         request: streamRequest,
         response,
       });
-      return response as { choices?: Array<{ message?: Record<string, unknown> }>; usage?: unknown };
+      return response as { choices?: Array<{ message?: Record<string, unknown> }>; usage?: ModelUsage | null };
     }
 
     let content = "";
     let reasoningContent = "";
     let refusal: string | null = null;
-    let usage: unknown = null;
+    let usage: ModelUsage | null = null;
     const responseChunks: unknown[] = [];
     const toolCallsByIndex = new Map<
       number,
@@ -386,7 +397,7 @@ export class SessionManager {
           responseChunks.push(chunk);
         }
         if ("usage" in chunk && chunk.usage != null) {
-          usage = chunk.usage;
+          usage = chunk.usage as ModelUsage;
         }
 
         const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
@@ -2096,7 +2107,7 @@ ${skillMd}
       toolCalls: Array.isArray(value.toolCalls) ? value.toolCalls : null,
       status: this.normalizeSessionStatus(value.status),
       failReason: typeof value.failReason === "string" ? value.failReason : null,
-      usage: value.usage ?? null,
+      usage: (value.usage as ModelUsage) ?? null,
       activeTokens: typeof value.activeTokens === "number" ? value.activeTokens : 0,
       createTime: typeof value.createTime === "string" ? value.createTime : new Date().toISOString(),
       updateTime: typeof value.updateTime === "string" ? value.updateTime : new Date().toISOString(),

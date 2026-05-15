@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildExitSummaryText } from "../ui";
-import type { SessionEntry, SessionMessage } from "../session";
+import type { SessionEntry, SessionMessage, ModelUsage } from "../session";
 
 const stripAnsi = (text: string): string => text.replace(/\u001b\[[0-9;]*m/g, "");
 
@@ -33,7 +33,7 @@ test("buildExitSummaryText only shows Goodbye and model usage with cached tokens
   assert.doesNotMatch(summary, /Reasoning Tokens/);
 });
 
-function buildSession(usage: unknown): SessionEntry {
+function buildSession(usage: ModelUsage | null): SessionEntry {
   return {
     id: "session-1",
     summary: null,
