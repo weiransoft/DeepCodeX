@@ -123,6 +123,7 @@ const DropdownMenu = React.memo(function DropdownMenu({
           borderRight={false}
           borderTop={false}
           borderLeft={false}
+          paddingX={1}
         >
           <Text color={titleColor} bold>
             {title}
@@ -138,31 +139,33 @@ const DropdownMenu = React.memo(function DropdownMenu({
       ) : null}
 
       {/* Visible items */}
-      {visibleItems.map((item, idx) => {
-        const actualIndex = visibleStart + idx;
-        const isActive = actualIndex === activeIndex;
+      <Box flexDirection="column">
+        {visibleItems.map((item, idx) => {
+          const actualIndex = visibleStart + idx;
+          const isActive = actualIndex === activeIndex;
 
-        // Use custom renderer if provided
-        if (renderItem) {
-          return <React.Fragment key={item.key}>{renderItem(item, isActive)}</React.Fragment>;
-        }
+          // Use custom renderer if provided
+          if (renderItem) {
+            return <React.Fragment key={item.key}>{renderItem(item, isActive)}</React.Fragment>;
+          }
 
-        // Default rendering with selection indicator and optional features
-        return (
-          <Box key={item.key} flexGrow={1} flexDirection="row" gap={2}>
-            <Box width={labelColumnWidth} flexShrink={0}>
-              <Text color={isActive ? activeColor : undefined} wrap="truncate-end">
-                {isActive ? "› " : "  "}
-                {item.selected !== undefined ? (item.selected ? "●" : "○") : null} <Text bold>{item.label}</Text>
-                {item.statusIndicator ? (
-                  <Text color={item.statusIndicator.color}> {item.statusIndicator.symbol}</Text>
-                ) : null}
-              </Text>
+          // Default rendering with selection indicator and optional features
+          return (
+            <Box key={item.key} flexGrow={1} flexDirection="row" gap={2} paddingX={1}>
+              <Box width={labelColumnWidth} flexShrink={0}>
+                <Text color={isActive ? activeColor : undefined} wrap="truncate-end">
+                  {isActive ? "› " : "  "}
+                  {item.selected !== undefined ? (item.selected ? "●" : "○") : null} <Text bold>{item.label}</Text>
+                  {item.statusIndicator ? (
+                    <Text color={item.statusIndicator.color}> {item.statusIndicator.symbol}</Text>
+                  ) : null}
+                </Text>
+              </Box>
+              <Box flexGrow={1}>{item.description ? <Text dimColor>{`${item.description}`}</Text> : null}</Box>
             </Box>
-            <Box flexGrow={1}>{item.description ? <Text dimColor>{`${item.description}`}</Text> : null}</Box>
-          </Box>
-        );
-      })}
+          );
+        })}
+      </Box>
 
       {/* Scroll indicator - bottom */}
       {visibleStart + visibleItems.length < items.length ? (
@@ -180,6 +183,7 @@ const DropdownMenu = React.memo(function DropdownMenu({
           borderRight={false}
           borderTop={true}
           borderLeft={false}
+          paddingX={1}
         >
           <Text dimColor>{helpText}</Text>
         </Box>
