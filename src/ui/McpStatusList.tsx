@@ -241,7 +241,7 @@ function ServerListView({
         </Box>
         {/* Footer */}
         <Box paddingX={1}>
-          <Text dimColor>↑/↓ navigate · Enter view details · Esc cancel</Text>
+          <Text dimColor>↑/↓ navigate · Enter view details · Esc close</Text>
         </Box>
       </Box>
     </Box>
