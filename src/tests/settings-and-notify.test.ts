@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildNotifyEnv, formatDurationSeconds, launchNotifyScript, type NotifySpawn } from "../notify";
+import { buildNotifyEnv, formatDurationSeconds, launchNotifyScript, type NotifySpawn } from "../common/notify";
 import { applyModelConfigSelection, resolveSettings, resolveSettingsSources } from "../settings";
 
 const TEST_PROCESS_ENV = {};

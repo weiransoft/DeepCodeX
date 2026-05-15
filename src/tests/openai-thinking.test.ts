@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildThinkingRequestOptions } from "../openai-thinking";
+import { buildThinkingRequestOptions } from "../common/openai-thinking";
 
 test("buildThinkingRequestOptions explicitly disables thinking", () => {
   assert.deepEqual(buildThinkingRequestOptions(false, "https://api.deepseek.com"), {

@@ -6,15 +6,15 @@ import { fileURLToPath } from "url";
 import matter from "gray-matter";
 import ejs from "ejs";
 import type { ChatCompletionMessageParam, ChatCompletionContentPart } from "openai/resources/chat/completions";
-import { launchNotifyScript } from "./notify";
-import { buildThinkingRequestOptions } from "./openai-thinking";
-import { DEEPSEEK_V4_MODELS } from "./model-capabilities";
+import { launchNotifyScript } from "./common/notify";
+import { buildThinkingRequestOptions } from "./common/openai-thinking";
+import { DEEPSEEK_V4_MODELS, supportsMultimodal } from "./common/model-capabilities";
 import { getCompactPrompt, getSystemPrompt, getTools, AGENT_DRIFT_GUARD_SKILL, type ToolDefinition } from "./prompt";
 import { ToolExecutor, type CreateOpenAIClient } from "./tools/executor";
 import { McpManager } from "./mcp/mcp-manager";
 import type { McpServerConfig } from "./settings";
-import { logApiError } from "./error-logger";
-import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./debug-logger";
+import { logApiError } from "./common/error-logger";
+import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./common/debug-logger";
 
 const MAX_SESSION_ENTRIES = 50;
 const DEFAULT_NEW_PROMPT_API_URL = "https://deepcode.vegamo.cn/api/plugin/new";
@@ -156,7 +156,7 @@ export type SkillInfo = {
 type SessionManagerOptions = {
   projectRoot: string;
   createOpenAIClient: CreateOpenAIClient;
-  getResolvedSettings: () => { webSearchTool?: string; mcpServers?: Record<string, McpServerConfig> };
+  getResolvedSettings: () => { model: string; webSearchTool?: string; mcpServers?: Record<string, McpServerConfig> };
   renderMarkdown: (text: string) => string;
   onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   onSessionEntryUpdated?: (entry: SessionEntry) => void;
@@ -175,7 +175,11 @@ export type LlmStreamProgress = {
 export class SessionManager {
   private readonly projectRoot: string;
   private readonly createOpenAIClient: CreateOpenAIClient;
-  private readonly getResolvedSettings: () => { webSearchTool?: string; mcpServers?: Record<string, McpServerConfig> };
+  private readonly getResolvedSettings: () => {
+    model: string;
+    webSearchTool?: string;
+    mcpServers?: Record<string, McpServerConfig>;
+  };
   private readonly onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   private readonly onSessionEntryUpdated?: (entry: SessionEntry) => void;
   private readonly onLlmStreamProgress?: (progress: LlmStreamProgress) => void;
@@ -773,9 +777,9 @@ The candidate skills are as follows:\n\n`;
     this.activeSessionId = sessionId;
   }
 
-  addSessionSystemMessage(sessionId: string, content: string, meta?: MessageMeta): void {
-    const message = this.buildSystemMessage(sessionId, content, meta);
-    this.appendSessionMessage(sessionId, message);
+  addSessionSystemMessage(sessionId: string, content: string, visible?: boolean, meta?: MessageMeta): void {
+    const message = this.buildSystemMessage(sessionId, content, null, visible, meta);
+    if (sessionId) this.appendSessionMessage(sessionId, message);
     this.onAssistantMessage(message, false);
   }
 
@@ -1017,7 +1021,7 @@ ${skillMd}
           await this.compactSession(sessionId, sessionController.signal);
         }
 
-        const messages = this.buildOpenAIMessages(this.listSessionMessages(sessionId), thinkingEnabled);
+        const messages = this.buildOpenAIMessages(this.listSessionMessages(sessionId), thinkingEnabled, model);
         const thinkingOptions = buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort);
         const response = await this.createChatCompletionStream(
           client,
@@ -1208,8 +1212,9 @@ ${skillMd}
     this.saveSessionMessages(sessionId, sessionMessages);
   }
 
-  private getPromptToolOptions(): { webSearchEnabled: boolean } {
+  private getPromptToolOptions(): { model: string; webSearchEnabled: boolean } {
     return {
+      model: this.getResolvedSettings().model,
       webSearchEnabled: true,
     };
   }
@@ -1485,7 +1490,7 @@ ${skillMd}
   }
 
   private renderInitCommandPrompt(): string {
-    const templatePath = path.join(getExtensionRoot(), "docs", "prompts", "init_command.md.ejs");
+    const templatePath = path.join(getExtensionRoot(), "templates", "prompts", "init_command.md.ejs");
     const template = fs.readFileSync(templatePath, "utf8");
     return ejs.render(template, {
       agentsMdFile: this.getEffectiveProjectAgentsMdFile(),
@@ -1546,6 +1551,7 @@ ${skillMd}
     sessionId: string,
     content: string,
     contentParams: unknown | null = null,
+    visible = false,
     meta?: MessageMeta
   ): SessionMessage {
     const now = new Date().toISOString();
@@ -1557,7 +1563,7 @@ ${skillMd}
       contentParams,
       messageParams: null,
       compacted: false,
-      visible: false,
+      visible,
       createTime: now,
       updateTime: now,
       meta,
@@ -1677,7 +1683,11 @@ ${skillMd}
     return { waitingForUser };
   }
 
-  private buildOpenAIMessages(messages: SessionMessage[], thinkingEnabled: boolean): ChatCompletionMessageParam[] {
+  private buildOpenAIMessages(
+    messages: SessionMessage[],
+    thinkingEnabled: boolean,
+    model: string
+  ): ChatCompletionMessageParam[] {
     const activeMessages = messages.filter((message) => !message.compacted);
     const toolPairings = this.pairToolMessages(activeMessages);
     const openAIMessages: ChatCompletionMessageParam[] = [];
@@ -1688,7 +1698,7 @@ ${skillMd}
         continue;
       }
 
-      openAIMessages.push(this.sessionMessageToOpenAIMessage(message, thinkingEnabled));
+      openAIMessages.push(this.sessionMessageToOpenAIMessage(message, thinkingEnabled, model));
 
       const toolCalls = this.getAssistantToolCalls(message);
       if (toolCalls.length === 0) {
@@ -1703,7 +1713,9 @@ ${skillMd}
 
         const pairedToolIndex = toolPairings.get(this.buildToolPairingKey(index, toolCallIndex));
         if (pairedToolIndex != null) {
-          openAIMessages.push(this.sessionMessageToOpenAIMessage(activeMessages[pairedToolIndex], thinkingEnabled));
+          openAIMessages.push(
+            this.sessionMessageToOpenAIMessage(activeMessages[pairedToolIndex], thinkingEnabled, model)
+          );
           continue;
         }
 
@@ -1714,7 +1726,11 @@ ${skillMd}
     return openAIMessages;
   }
 
-  private sessionMessageToOpenAIMessage(message: SessionMessage, thinkingEnabled: boolean): ChatCompletionMessageParam {
+  private sessionMessageToOpenAIMessage(
+    message: SessionMessage,
+    thinkingEnabled: boolean,
+    model: string
+  ): ChatCompletionMessageParam {
     const content = this.renderOpenAIMessageContent(message);
     const base: ChatCompletionMessageParam = {
       role: message.role,
@@ -1747,7 +1763,7 @@ ${skillMd}
       const params = Array.isArray(message.contentParams) ? message.contentParams : [message.contentParams];
       for (const param of params) {
         const part = param as ChatCompletionContentPart;
-        if (part && part.type !== "image_url") {
+        if (part && (part.type !== "image_url" || supportsMultimodal(model))) {
           contentParts.push(part);
         }
       }

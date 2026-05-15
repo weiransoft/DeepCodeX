@@ -1,4 +1,4 @@
-import type { ReasoningEffort } from "./settings";
+import type { ReasoningEffort } from "../settings";
 
 type ThinkingConfig = {
   type: "enabled" | "disabled";
