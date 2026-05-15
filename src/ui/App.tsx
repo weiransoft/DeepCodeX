@@ -160,7 +160,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
           const resolved = resolveCurrentSettings(projectRoot);
           const summary = buildExitSummaryText({ session, messages: allMessages, model: resolved.model });
           process.stdout.write("\n");
-          process.stdout.write(chalk.rgb(128, 128, 128)("> /exit "));
+          process.stdout.write(chalk.rgb(34, 154, 195)("> /exit "));
           process.stdout.write("\n\n");
           process.stdout.write(summary);
           process.stdout.write("\n\n");
