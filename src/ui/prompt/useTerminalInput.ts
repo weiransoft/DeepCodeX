@@ -26,7 +26,15 @@ const BACKSPACE_BYTES = new Set(["\u007F", "\b"]);
 const FORWARD_DELETE_SEQUENCES = new Set(["\u001B[3~", "\u001B[P"]);
 const HOME_SEQUENCES = new Set(["\u001B[H", "\u001B[1~", "\u001B[7~", "\u001BOH"]);
 const END_SEQUENCES = new Set(["\u001B[F", "\u001B[4~", "\u001B[8~", "\u001BOF"]);
-const SHIFT_RETURN_SEQUENCES = new Set(["\u001B\r", "\u001B[13;2u", "\u001B[13;2~", "\u001B[27;2;13~"]);
+const SHIFT_RETURN_SEQUENCES = new Set([
+  "\u001B\r",
+  "\u001B[13;2u", // xterm modifyOtherKeys: keycode=13 (Enter), modifier=2 (Shift)
+  "\u001B[13;1u", // Kitty keyboard protocol: keycode=13, modifier=1 (Shift)
+  "\u001B[13;2~",
+  "\u001B[13;1~", // tmux / alternate terminals may use ~ terminator
+  "\u001B[27;2;13~",
+  "\u001B[27;1;13~", // extended format, Kitty encoding
+]);
 const META_RETURN_SEQUENCES = new Set(["\u001B[13;3u", "\u001B[13;4u"]);
 const CTRL_LEFT_SEQUENCES = new Set(["\u001B[1;5D", "\u001B[5D"]);
 const CTRL_RIGHT_SEQUENCES = new Set(["\u001B[1;5C", "\u001B[5C"]);
@@ -162,7 +170,7 @@ export function parseTerminalInput(data: Buffer | string): { input: string; key:
     key.shift = true;
   }
 
-  if (key.tab || key.backspace || key.delete) {
+  if (key.tab || key.backspace || key.delete || key.return) {
     input = "";
   }
 

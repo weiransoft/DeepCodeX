@@ -80,7 +80,7 @@ test("parseTerminalInput keeps BS payload for meta+backspace", () => {
 
 test("parseTerminalInput recognizes shifted return sequences", () => {
   const { input, key } = parseTerminalInput("\u001B\r");
-  assert.equal(input, "\r");
+  assert.equal(input, "");
   assert.equal(key.return, true);
   assert.equal(key.shift, true);
   assert.equal(key.meta, false);
