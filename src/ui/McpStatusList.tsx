@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback, useEffect } from "react";
+import React, { useState, useMemo, useCallback } from "react";
 import { Box, Text, useInput, useWindowSize } from "ink";
 import type { McpServerStatus } from "../mcp/mcp-manager";
 
@@ -414,9 +414,6 @@ function ServerDetailView({
             {server.name}
           </Text>
           <Text dimColor>— Details</Text>
-          <Text>
-            {activeIndex + 1}/{totalItems}
-          </Text>
         </Box>
         {/* Server info */}
         <Box paddingX={1} marginLeft={3}>
