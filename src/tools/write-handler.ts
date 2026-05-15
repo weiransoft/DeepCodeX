@@ -100,13 +100,17 @@ export async function handleWriteTool(
         const bytes = writeTextFile(filePath, normalizedContent, encoding, lineEndings);
         const freshMetadata = readTextFileWithMetadata(filePath);
 
-        recordFileState(context.sessionId, {
-          filePath,
-          content: freshMetadata.content,
-          timestamp: freshMetadata.timestamp,
-          encoding: freshMetadata.encoding,
-          lineEndings: freshMetadata.lineEndings,
-        });
+        recordFileState(
+          context.sessionId,
+          {
+            filePath,
+            content: freshMetadata.content,
+            timestamp: freshMetadata.timestamp,
+            encoding: freshMetadata.encoding,
+            lineEndings: freshMetadata.lineEndings,
+          },
+          { incrementVersion: true }
+        );
 
         return {
           ok: true,

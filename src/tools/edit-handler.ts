@@ -13,6 +13,7 @@ import {
   createSnippet,
   getFileState,
   getSnippet,
+  hasSnippetOutdatedFileVersion,
   isAbsoluteFilePath,
   isFullFileView,
   normalizeFilePath,
@@ -22,7 +23,10 @@ import {
 const MAX_CANDIDATE_COUNT = 5;
 const REPLACE_ALL_MATCH_THRESHOLD = 5;
 const SHORT_REPLACE_ALL_LENGTH = 40;
-const MIN_FUZZY_SCORE = 0.45;
+const MIN_FUZZY_SCORE = 0.8;
+const CLOSEST_MATCH_CONTEXT_LINES = 2;
+const OUTDATED_SNIPPET_NOT_FOUND_ERROR =
+  "old_string was not found in this snippet scope. The file has changed since this snippet was created. Read the file again before editing.";
 
 type LineIndex = {
   lines: string[];
@@ -242,6 +246,17 @@ export async function handleEditTool(
         }
 
         if (matches.length === 0) {
+          if (snippet && hasSnippetOutdatedFileVersion(context.sessionId, snippet)) {
+            return {
+              ok: false,
+              name: "edit",
+              error: OUTDATED_SNIPPET_NOT_FOUND_ERROR,
+              metadata: {
+                scope: formatScopeMetadata(scope),
+              },
+            };
+          }
+
           const closestMatch = findClosestMatch(raw, oldString, scope, lineIndex);
           return {
             ok: false,
@@ -295,13 +310,17 @@ export async function handleEditTool(
         const diffPreview = buildDiffPreview(filePath, raw, updated);
         writeTextFile(filePath, updated, metadata.encoding, metadata.lineEndings);
         const freshMetadata = readTextFileWithMetadata(filePath);
-        recordFileState(context.sessionId, {
-          filePath,
-          content: freshMetadata.content,
-          timestamp: freshMetadata.timestamp,
-          encoding: freshMetadata.encoding,
-          lineEndings: freshMetadata.lineEndings,
-        });
+        recordFileState(
+          context.sessionId,
+          {
+            filePath,
+            content: freshMetadata.content,
+            timestamp: freshMetadata.timestamp,
+            encoding: freshMetadata.encoding,
+            lineEndings: freshMetadata.lineEndings,
+          },
+          { incrementVersion: true }
+        );
         const replacedCount = replaceAll ? matches.length : 1;
         return {
           ok: true,
@@ -603,8 +622,8 @@ function findClosestMatch(
       }
     }
 
-    if (bestLooseMatch) {
-      return bestLooseMatch;
+    if (bestLooseMatch && bestLooseMatch.score >= MIN_FUZZY_SCORE) {
+      return expandClosestMatch(raw, lineIndex, scope, bestLooseMatch);
     }
   }
 
@@ -640,7 +659,23 @@ function findClosestMatch(
     }
   }
 
-  return bestMatch;
+  return bestMatch ? expandClosestMatch(raw, lineIndex, scope, bestMatch) : null;
+}
+
+function expandClosestMatch(
+  raw: string,
+  lineIndex: LineIndex,
+  scope: SearchScope,
+  closestMatch: ClosestMatch
+): ClosestMatch {
+  const startLine = clamp(closestMatch.startLine - CLOSEST_MATCH_CONTEXT_LINES, scope.startLine, scope.endLine);
+  const endLine = clamp(closestMatch.endLine + CLOSEST_MATCH_CONTEXT_LINES, startLine, scope.endLine);
+  return {
+    ...closestMatch,
+    text: sliceLines(raw, lineIndex, startLine, endLine),
+    startLine,
+    endLine,
+  };
 }
 
 function buildLooseEscapeRegex(source: string): RegExp | null {

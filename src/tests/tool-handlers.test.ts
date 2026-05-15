@@ -88,6 +88,184 @@ test("Edit returns candidate match snippets when old_string is not unique", asyn
   assert.match(candidates[0]?.preview ?? "", /city/);
 });
 
+test("Edit returns closest matches only above threshold with surrounding context", async () => {
+  const workspace = createTempWorkspace();
+  const filePath = path.join(workspace, "closest.ts");
+  fs.writeFileSync(
+    filePath,
+    [
+      "const before = true;",
+      "function computeSubtotal(value: number) {",
+      "  return value;",
+      "}",
+      "const after = true;",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const sessionId = "closest-match-context";
+  await handleReadTool({ file_path: filePath }, createContext(sessionId, workspace));
+
+  const closeResult = await handleEditTool(
+    {
+      file_path: filePath,
+      old_string: "function computeTotal(value: number) {",
+      new_string: "function computeTotal(input: number) {",
+    },
+    createContext(sessionId, workspace)
+  );
+
+  assert.equal(closeResult.ok, false);
+  assert.equal(closeResult.error, "old_string not found in file.");
+  const closestMatch = closeResult.metadata?.closest_match as
+    | { snippet_id?: string; start_line?: number; end_line?: number; similarity?: number; preview?: string }
+    | undefined;
+  assert.ok(closestMatch?.snippet_id);
+  assert.equal(closestMatch.start_line, 1);
+  assert.equal(closestMatch.end_line, 4);
+  assert.ok((closestMatch.similarity ?? 0) >= 0.8);
+  assert.match(closestMatch.preview ?? "", /const before = true/);
+  assert.match(closestMatch.preview ?? "", /return value/);
+
+  const lowResult = await handleEditTool(
+    {
+      file_path: filePath,
+      old_string: 'query: string = Field(description="search query")',
+      new_string: "query: string",
+    },
+    createContext(sessionId, workspace)
+  );
+
+  assert.equal(lowResult.ok, false);
+  assert.equal(lowResult.error, "old_string not found in file.");
+  assert.equal(lowResult.metadata?.closest_match, undefined);
+
+  const partialRead = await handleReadTool(
+    { file_path: filePath, offset: 2, limit: 2 },
+    createContext(sessionId, workspace)
+  );
+  const snippet = (partialRead.metadata?.snippet ?? null) as { id: string } | null;
+  assert.ok(snippet);
+
+  const scopedCloseResult = await handleEditTool(
+    {
+      snippet_id: snippet.id,
+      old_string: "function computeTotal(value: number) {",
+      new_string: "function computeTotal(input: number) {",
+    },
+    createContext(sessionId, workspace)
+  );
+
+  assert.equal(scopedCloseResult.ok, false);
+  const scopedClosestMatch = scopedCloseResult.metadata?.closest_match as
+    | { start_line?: number; end_line?: number; preview?: string }
+    | undefined;
+  assert.equal(scopedClosestMatch?.start_line, 2);
+  assert.equal(scopedClosestMatch?.end_line, 3);
+  assert.doesNotMatch(scopedClosestMatch?.preview ?? "", /const before = true/);
+});
+
+test("Edit allows outdated snippet matches but reports outdated snippet when no match is found", async () => {
+  const workspace = createTempWorkspace();
+  const filePath = path.join(workspace, "snippet-outdated.txt");
+  fs.writeFileSync(filePath, ["alpha = 1", "beta = 1", "gamma = 1"].join("\n"), "utf8");
+
+  const sessionId = "outdated-snippet-miss";
+  const readResult = await handleReadTool({ file_path: filePath }, createContext(sessionId, workspace));
+  const snippet = (readResult.metadata?.snippet ?? null) as { id: string } | null;
+  assert.ok(snippet);
+
+  const firstEdit = await handleEditTool(
+    {
+      snippet_id: snippet.id,
+      old_string: "alpha = 1",
+      new_string: "alpha = 2",
+    },
+    createContext(sessionId, workspace)
+  );
+  assert.equal(firstEdit.ok, true);
+
+  const secondEdit = await handleEditTool(
+    {
+      snippet_id: snippet.id,
+      old_string: "beta = 1",
+      new_string: "beta = 2",
+    },
+    createContext(sessionId, workspace)
+  );
+  assert.equal(secondEdit.ok, true);
+  assert.equal(fs.readFileSync(filePath, "utf8"), ["alpha = 2", "beta = 2", "gamma = 1"].join("\n"));
+
+  const missingEdit = await handleEditTool(
+    {
+      snippet_id: snippet.id,
+      old_string: "delta = 1",
+      new_string: "delta = 2",
+    },
+    createContext(sessionId, workspace)
+  );
+
+  assert.equal(missingEdit.ok, false);
+  assert.equal(
+    missingEdit.error,
+    "old_string was not found in this snippet scope. The file has changed since this snippet was created. Read the file again before editing."
+  );
+  const outdatedScope = (missingEdit.metadata?.scope ?? {}) as { snippet_id?: string };
+  assert.equal(outdatedScope.snippet_id, snippet.id);
+
+  const freshRead = await handleReadTool({ file_path: filePath }, createContext(sessionId, workspace));
+  const freshSnippet = (freshRead.metadata?.snippet ?? null) as { id: string } | null;
+  assert.ok(freshSnippet);
+
+  const freshMissingEdit = await handleEditTool(
+    {
+      snippet_id: freshSnippet.id,
+      old_string: "delta = 1",
+      new_string: "delta = 2",
+    },
+    createContext(sessionId, workspace)
+  );
+
+  assert.equal(freshMissingEdit.ok, false);
+  assert.equal(freshMissingEdit.error, "old_string not found in file.");
+});
+
+test("Edit reports outdated snippet when a later Write changes the file and snippet matching fails", async () => {
+  const workspace = createTempWorkspace();
+  const filePath = path.join(workspace, "write-outdated.txt");
+  fs.writeFileSync(filePath, ["alpha = 1", "beta = 1"].join("\n"), "utf8");
+
+  const sessionId = "write-outdated-snippet";
+  const readResult = await handleReadTool({ file_path: filePath }, createContext(sessionId, workspace));
+  const snippet = (readResult.metadata?.snippet ?? null) as { id: string } | null;
+  assert.ok(snippet);
+
+  const writeResult = await handleWriteTool(
+    {
+      file_path: filePath,
+      content: ["alpha = 2", "gamma = 2"].join("\n"),
+    },
+    createContext(sessionId, workspace)
+  );
+
+  assert.equal(writeResult.ok, true);
+
+  const editResult = await handleEditTool(
+    {
+      snippet_id: snippet.id,
+      old_string: "beta = 1",
+      new_string: "beta = 2",
+    },
+    createContext(sessionId, workspace)
+  );
+
+  assert.equal(editResult.ok, false);
+  assert.equal(
+    editResult.error,
+    "old_string was not found in this snippet scope. The file has changed since this snippet was created. Read the file again before editing."
+  );
+});
+
 test("replace_all requires expected_occurrences for broad short-fragment replacements", async () => {
   const workspace = createTempWorkspace();
   const filePath = path.join(workspace, "openapi.yaml");
