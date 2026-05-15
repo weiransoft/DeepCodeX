@@ -1,22 +1,22 @@
-# Deep Code CLI MCP Configuration Guide
+# Deep Code CLI MCP 配置指南
 
-Deep Code CLI supports MCP (Model Context Protocol), enabling AI assistants to connect with external tools and services such as GitHub, browsers, databases, and more.
+Deep Code CLI 支持 MCP（Model Context Protocol），让 AI 助手能够连接外部工具和服务，如 GitHub、浏览器、数据库等。
 
-## Overview
+## 概述
 
-Once MCP is configured, Deep Code can:
+配置 MCP 后，Deep Code 可以：
 
-- Operate on GitHub repositories (view issues, create PRs, search code, etc.)
-- Control browsers (screenshots, clicks, form filling, etc.)
-- Access the file system
-- Connect to databases and APIs
-- ...and any external service compatible with the MCP protocol
+- 操作 GitHub 仓库（查看 Issues、创建 PR、搜索代码等）
+- 操控浏览器（截图、点击、填表单等）
+- 访问文件系统
+- 连接数据库和 API
+- ...以及任何兼容 MCP 协议的外部服务
 
-MCP tools are named in Deep Code using the format `mcp__<service_name>__<tool_name>`, for example `mcp__github__search_code`.
+MCP 工具在 Deep Code 中的命名格式为 `mcp__<服务名>__<工具名>`，例如 `mcp__github__search_code`。
 
-## Configuring MCP Servers
+## 配置 MCP 服务器
 
-Edit `~/.deepcode/settings.json` and add the `mcpServers` field:
+编辑 `~/.deepcode/settings.json`，添加 `mcpServers` 字段：
 
 ```json
 {
@@ -28,30 +28,30 @@ Edit `~/.deepcode/settings.json` and add the `mcpServers` field:
   "thinkingEnabled": true,
   "reasoningEffort": "max",
   "mcpServers": {
-    "<service_name>": {
-      "command": "<executable>",
-      "args": ["<arg1>", "<arg2>"],
+    "<服务名称>": {
+      "command": "<可执行文件>",
+      "args": ["<参数1>", "<参数2>"],
       "env": {
-        "<env_var>": "<value>"
+        "<环境变量>": "<值>"
       }
     }
   }
 }
 ```
 
-### Configuration Fields
+### 配置项说明
 
-| Field     | Type     | Required | Description                                                                                                                                                        |
-| --------- | -------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `command` | string   | Yes      | Path or command of the MCP server executable (e.g., `npx`, `node`, `python`). When the command is `npx`, Deep Code automatically prepends `-y` to the arguments. |
-| `args`    | string[] | No       | List of arguments to pass to the command                                                                                                                           |
-| `env`     | object   | No       | Environment variables (e.g., API keys) to pass to the MCP server process                                                                                           |
+| 字段      | 类型     | 必填 | 说明                                                                                                                   |
+| --------- | -------- | ---- | ---------------------------------------------------------------------------------------------------------------------- |
+| `command` | string   | 是   | MCP 服务器的可执行文件路径或命令（如 `npx`、`node`、`python`）。当命令是 `npx` 时，Deep Code 会自动在参数前补充 `-y`。 |
+| `args`    | string[] | 否   | 传递给命令的参数列表                                                                                                   |
+| `env`     | object   | 否   | 传递给 MCP 服务器进程的环境变量（如 API Key）                                                                          |
 
-## Common MCP Examples
+## 常用 MCP 示例
 
 ### GitHub MCP
 
-Allows Deep Code to directly operate on GitHub repositories (search code, manage issues/PRs, read/write files, etc.):
+让 Deep Code 直接操作 GitHub 仓库（搜索代码、管理 Issue/PR、读写文件等）：
 
 ```json
 {
@@ -67,11 +67,11 @@ Allows Deep Code to directly operate on GitHub repositories (search code, manage
 }
 ```
 
-> Generate a GitHub Personal Access Token at [GitHub Settings > Developer settings > Personal access tokens](https://github.com/settings/tokens).
+> GitHub Personal Access Token 可在 [GitHub Settings > Developer settings > Personal access tokens](https://github.com/settings/tokens) 生成。
 
-### Browser Control (Playwright)
+### 浏览器控制（Playwright）
 
-Lets Deep Code control a browser for screenshots, page interactions, etc.:
+让 Deep Code 操控浏览器进行截图、页面操作等：
 
 ```json
 {
@@ -84,9 +84,9 @@ Lets Deep Code control a browser for screenshots, page interactions, etc.:
 }
 ```
 
-### File System
+### 文件系统
 
-Enables Deep Code to read and write files within a specified directory:
+让 Deep Code 在指定目录中读写文件：
 
 ```json
 {
@@ -99,7 +99,7 @@ Enables Deep Code to read and write files within a specified directory:
 }
 ```
 
-### Custom Python MCP
+### 自定义 Python MCP
 
 ```json
 {
@@ -115,9 +115,9 @@ Enables Deep Code to read and write files within a specified directory:
 }
 ```
 
-## Full Configuration Example
+## 完整配置示例
 
-Below is a complete `~/.deepcode/settings.json` with both GitHub and Playwright MCP servers configured:
+以下是一个配置了 GitHub 和 Playwright 两个 MCP 服务器的完整 `~/.deepcode/settings.json`：
 
 ```json
 {
@@ -144,62 +144,57 @@ Below is a complete `~/.deepcode/settings.json` with both GitHub and Playwright 
 }
 ```
 
-## Using MCP
+## 使用 MCP
 
-After configuration, start `deepcode` and use the `/mcp` command to manage MCP connections:
+配置完成后，启动 `deepcode`，在聊天中输入 `/mcp` 即可查看所有已配置的 MCP 服务器状态以及每个服务器提供的工具列表。
 
-- `/mcp` — View the status of configured MCP servers
-- `/mcp add` — Add a new MCP server
-- `/mcp remove` — Remove an MCP server
-- `/mcp list` — List all connected MCP servers and their tools
-
-Simply use the MCP tool name in your conversation to invoke it, for example:
+在对话中直接使用 MCP 工具名称即可调用，例如：
 
 ```
-Help me search for issues in the deepcode-cli repository on GitHub
+帮我搜索 GitHub 上 deepcode-cli 仓库的 issues
 ```
 
-The AI will automatically invoke the `mcp__github__search_issues` tool to complete the action.
+AI 会自动调用 `mcp__github__search_issues` 工具完成操作。
 
-## Tool Naming Convention
+## 工具命名规则
 
-An MCP tool name consists of three parts: `mcp__<service_name>__<tool_name>`
+MCP 工具名称由三部分组成：`mcp__<服务名>__<工具名>`
 
-| Service    | Tool Name               | Full Invocation Name                        |
-| ---------- | ----------------------- | ------------------------------------------- |
-| github     | search_code             | `mcp__github__search_code`                  |
-| github     | create_pull_request     | `mcp__github__create_pull_request`          |
-| playwright | browser_navigate        | `mcp__playwright__browser_navigate`         |
-| playwright | browser_take_screenshot | `mcp__playwright__browser_take_screenshot`  |
+| 服务名     | 工具名                  | 完整调用名                                 |
+| ---------- | ----------------------- | ------------------------------------------ |
+| github     | search_code             | `mcp__github__search_code`                 |
+| github     | create_pull_request     | `mcp__github__create_pull_request`         |
+| playwright | browser_navigate        | `mcp__playwright__browser_navigate`        |
+| playwright | browser_take_screenshot | `mcp__playwright__browser_take_screenshot` |
 
-You can view the list of tools provided by each server using `/mcp list`.
+你可以通过 `/mcp` 查看每个服务器提供的具体工具列表。
 
-## Troubleshooting
+## 故障排查
 
-### Startup Failure
+### 启动失败
 
-If an MCP server fails to start, check:
+如果 MCP 服务器无法启动，检查：
 
-1. Whether `command` is installed (e.g., `npx` requires Node.js)
-2. Whether environment variables in `env` are correct (e.g., `GITHUB_PERSONAL_ACCESS_TOKEN`)
-3. Whether the terminal running `deepcode` has network access
+1. `command` 是否已安装（如 `npx` 需要 Node.js）
+2. `env` 中的环境变量是否正确（如 `GITHUB_PERSONAL_ACCESS_TOKEN`）
+3. 运行 `deepcode` 的终端是否有网络访问权限
 
-### Tools Not Showing Up
+### 工具不显示
 
-1. Verify that the `mcpServers` field in `settings.json` is correctly formatted
-2. After starting deepcode, use `/mcp` to check server status
-3. If the server status shows an error, debug based on the error message
+1. 确认 `settings.json` 中的 `mcpServers` 字段格式正确
+2. 启动 deepcode 后使用 `/mcp` 查看服务器状态
+3. 如果服务器状态显示错误，根据错误信息排查
 
-### Windows Users
+### Windows 用户
 
-On Windows, Deep Code CLI automatically adds shell support for `.cmd` commands. If your MCP command is a batch script, ensure the filename ends with `.cmd`.
+在 Windows 上，Deep Code CLI 会自动为 `.cmd` 命令添加 shell 支持。如果你的 MCP 命令是批处理脚本，确保文件名以 `.cmd` 结尾。
 
-## Writing Your Own MCP Server
+## 编写你自己的 MCP 服务器
 
-MCP servers follow the [Model Context Protocol](https://modelcontextprotocol.io/) specification and communicate using JSON‑RPC 2.0. You can write an MCP server in any language as long as it implements the following methods:
+MCP 服务器遵循 [Model Context Protocol](https://modelcontextprotocol.io/) 规范，使用 JSON-RPC 2.0 通信。你可以用任何语言编写 MCP 服务器，只要实现以下协议即可：
 
-1. `initialize` — Handshake and protocol negotiation
-2. `tools/list` — Return the list of available tools
-3. `tools/call` — Execute a tool call
+1. `initialize` — 握手和协议协商
+2. `tools/list` — 返回可用工具列表
+3. `tools/call` — 执行工具调用
 
-For more information, see the [official MCP documentation](https://modelcontextprotocol.io/).
+更多参考：[MCP 官方文档](https://modelcontextprotocol.io/)
