@@ -8,7 +8,12 @@ src/
 ├── session.ts           # SessionManager — LLM loop, compaction, tool orchestration
 ├── settings.ts          # Settings resolution from ~/.deepcode/settings.json
 ├── prompt.ts            # System prompt builder, tool definitions, agent-drift-guard skill
-├── model-capabilities.ts # Model detection and thinking-mode defaults
+├── common/
+│   ├── model-capabilities.ts # Model detection and thinking-mode defaults
+│   ├── file-utils.ts    # File read/write with encoding and diff preview
+│   ├── shell-utils.ts   # Shell path resolution (Git Bash, zsh, bash)
+│   ├── state.ts         # In-memory file state and snippet tracking
+│   └── runtime.ts       # Tool validation runtime helpers
 ├── ui/
 │   ├── App.tsx          # Root Ink component — state, routing, session orchestration
 │   ├── PromptInput.tsx  # Multi-line input with slash commands, image paste, skills
@@ -20,11 +25,6 @@ src/
 ├── mcp/
 │   ├── mcp-client.ts    # MCP client — JSON-RPC communication with MCP servers
 │   └── mcp-manager.ts   # MCP manager — lifecycle, tool registration, execution
-├── common/
-│   ├── file-utils.ts    # File read/write with encoding and diff preview
-│   ├── shell-utils.ts   # Shell path resolution (Git Bash, zsh, bash)
-│   ├── state.ts         # In-memory file state and snippet tracking
-│   └── runtime.ts       # Tool validation runtime helpers
 ├── tools/
 │   ├── executor.ts      # ToolExecutor — dispatches tool calls to handlers
 │   ├── bash-handler.ts  # Executes shell commands
@@ -52,7 +52,7 @@ dist/                    # Bundled CLI output (gitignored)
 | `npm run format:check` | Prettier in check-only mode |
 | `npm run check` | Runs typecheck + lint + format:check together |
 | `npm run bundle` | esbuild bundles `src/cli.tsx` → `dist/cli.js` (ESM, Node 18) |
-| `npm run build` | `check` + `bundle` — full CI gate before publish |
+| `npm run build` | `check` + `bundle` + chmod 755 — full CI gate before publish |
 | `npm test` | Runs all tests via `tsx --test src/tests/*.test.ts` |
 | `npm run test:single -- <file>` | Run a single test file (e.g., `npm run test:single -- src/tests/session.test.ts`) |
 

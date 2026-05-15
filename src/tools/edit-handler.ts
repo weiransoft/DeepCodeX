@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import { z } from "zod";
-import { buildThinkingRequestOptions } from "../openai-thinking";
+import { buildThinkingRequestOptions } from "../common/openai-thinking";
 import type { ToolExecutionContext, ToolExecutionResult } from "./executor";
 import {
   buildDiffPreview,
