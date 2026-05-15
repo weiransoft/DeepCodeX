@@ -108,8 +108,8 @@ test("parseTerminalInput recognizes alternate shifted return sequences", () => {
 });
 
 test("terminal extended key helpers request and restore modifyOtherKeys mode", () => {
-  assert.equal(enableTerminalExtendedKeys(), "\u001B[>4;1m");
-  assert.equal(disableTerminalExtendedKeys(), "\u001B[>4;0m");
+  assert.equal(enableTerminalExtendedKeys(), "\u001B[>4;1m\u001B[>1u");
+  assert.equal(disableTerminalExtendedKeys(), "\u001B[>4;0m\u001B[<u");
 });
 
 test("parseTerminalInput recognizes terminal focus events", () => {
