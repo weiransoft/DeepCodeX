@@ -196,6 +196,7 @@ type SessionManagerOptions = {
   onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   onSessionEntryUpdated?: (entry: SessionEntry) => void;
   onLlmStreamProgress?: (progress: LlmStreamProgress) => void;
+  onMcpStatusChanged?: () => void;
 };
 
 export type LlmStreamProgress = {
@@ -218,6 +219,7 @@ export class SessionManager {
   private readonly onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   private readonly onSessionEntryUpdated?: (entry: SessionEntry) => void;
   private readonly onLlmStreamProgress?: (progress: LlmStreamProgress) => void;
+  private readonly onMcpStatusChanged?: () => void;
   private activeSessionId: string | null = null;
   private activePromptController: AbortController | null = null;
   private readonly sessionControllers = new Map<string, AbortController>();
@@ -232,11 +234,19 @@ export class SessionManager {
     this.onAssistantMessage = options.onAssistantMessage;
     this.onSessionEntryUpdated = options.onSessionEntryUpdated;
     this.onLlmStreamProgress = options.onLlmStreamProgress;
+    this.onMcpStatusChanged = options.onMcpStatusChanged;
     this.toolExecutor = new ToolExecutor(this.projectRoot, this.createOpenAIClient, this.mcpManager);
     this.mcpManager.prepare(this.getResolvedSettings().mcpServers);
   }
 
   async initMcpServers(servers?: Record<string, McpServerConfig>): Promise<void> {
+    this.mcpManager.setOnToolsListChanged(() => {
+      this.mcpToolDefinitions = this.mcpManager.getMcpToolDefinitions();
+    });
+    // 设置状态变更回调，通知 UI 更新
+    this.mcpManager.setOnStatusChanged(() => {
+      this.onMcpStatusChanged?.();
+    });
     await this.mcpManager.initialize(servers);
     this.mcpToolDefinitions = this.mcpManager.getMcpToolDefinitions();
   }

@@ -772,7 +772,7 @@ export const PromptInput = React.memo(function PromptInput({
         <DropdownMenu
           width={screenWidth}
           title="Select Skills"
-          helpText="space toggle · enter toggle · esc to close"
+          helpText="Space toggle · Enter toggle · Esc to close"
           emptyText="No skills found"
           items={skills.map((skill) => ({
             key: skill.path || skill.name,
@@ -792,8 +792,8 @@ export const PromptInput = React.memo(function PromptInput({
           title={modelDropdownStep === "model" ? "Select Model" : "Select Thinking Mode"}
           helpText={
             modelDropdownStep === "model"
-              ? "space/enter select model · esc to cancel"
-              : "space/enter apply · esc to cancel"
+              ? "Space/Enter select model · Esc to cancel"
+              : "Space/Enter apply · Esc to cancel"
           }
           items={modelDropdownItems.map((item) => ({
             key: item.label,

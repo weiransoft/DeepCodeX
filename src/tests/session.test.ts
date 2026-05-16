@@ -424,7 +424,17 @@ rl.on("line", (line) => {
   const initPromise = manager.initMcpServers({ smoke: { command: process.execPath, args: [serverPath] } });
 
   assert.deepEqual(manager.getMcpStatus(), [
-    { name: "smoke", status: "starting", connected: false, toolCount: 0, tools: [] },
+    {
+      name: "smoke",
+      status: "starting",
+      connected: false,
+      toolCount: 0,
+      tools: [],
+      promptCount: 0,
+      prompts: [],
+      resourceCount: 0,
+      resources: [],
+    },
   ]);
 
   await initPromise;
@@ -436,6 +446,10 @@ rl.on("line", (line) => {
       connected: true,
       toolCount: 2,
       tools: ["mcp__smoke__echo", "mcp__smoke__count"],
+      promptCount: 0,
+      prompts: [],
+      resourceCount: 0,
+      resources: [],
     },
   ]);
   const mcpManager = (manager as any).mcpManager;
@@ -471,7 +485,17 @@ test("SessionManager reports configured MCP servers as starting before initializ
   });
 
   assert.deepEqual(manager.getMcpStatus(), [
-    { name: "playwright", status: "starting", connected: false, toolCount: 0, tools: [] },
+    {
+      name: "playwright",
+      status: "starting",
+      connected: false,
+      toolCount: 0,
+      tools: [],
+      promptCount: 0,
+      prompts: [],
+      resourceCount: 0,
+      resources: [],
+    },
   ]);
 });
 

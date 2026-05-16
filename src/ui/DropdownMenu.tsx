@@ -82,7 +82,7 @@ const DropdownMenu = React.memo(function DropdownMenu({
     // 计算每个 item 实际需要的最大宽度
     const maxContentWidth = Math.max(
       ...visibleItems.map((item) => {
-        let width = 2; // prefix "› " or "  "
+        let width = 2; // prefix "> " or "  "
         if (item.selected !== undefined) {
           width += 2; // "● " or "○ "
         }
@@ -152,7 +152,7 @@ const DropdownMenu = React.memo(function DropdownMenu({
           <Box key={item.key} flexGrow={1} flexDirection="row" gap={2}>
             <Box width={labelColumnWidth} flexShrink={0}>
               <Text color={isActive ? activeColor : undefined} wrap="truncate-end">
-                {isActive ? "› " : "  "}
+                {isActive ? "> " : "  "}
                 {item.selected !== undefined ? (item.selected ? "●" : "○") : null} <Text bold>{item.label}</Text>
                 {item.statusIndicator ? (
                   <Text color={item.statusIndicator.color}> {item.statusIndicator.symbol}</Text>
