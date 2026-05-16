@@ -15,10 +15,7 @@ const testFiles = readdirSync(__dirname)
   .map((f) => join(__dirname, f))
   .sort();
 
-// Resolve tsx from the project root
-const tsx = new URL("../../node_modules/.bin/tsx", import.meta.url).pathname;
-
-const result = spawnSync(process.execPath, [tsx, "--test", ...testFiles], {
+const result = spawnSync("npx", ["--no-install", "tsx", "--test", ...testFiles], {
   stdio: "inherit",
   cwd: join(__dirname, "../.."),
 });
