@@ -281,14 +281,17 @@ function readToolDocs(extensionRoot: string, options: PromptToolOptions = {}): s
   return docs.join("\n\n");
 }
 
-function getCurrentDatePrompt(date = new Date()): string {
-  return `今天是${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日。随着对话的进行，时间在流逝。`;
+function getCurrentDateAndModelPrompt(model?: string): string {
+  const date = new Date();
+  let prompt = `今天是${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日。随着对话的进行，时间在流逝。`;
+  prompt += model ? `\n当前LLM模型为${model}，对话中可通过/model命令切换模型。` : "";
+  return prompt;
 }
 
 export function getSystemPrompt(projectRoot: string, options: PromptToolOptions = {}): string {
   const toolDocs = readToolDocs(getExtensionRoot(), options);
   const basePrompt = toolDocs ? `${SYSTEM_PROMPT_BASE}\n\n# Available Tools\n\n${toolDocs}` : SYSTEM_PROMPT_BASE;
-  return `${basePrompt}\n\n${getCurrentDatePrompt()}\n\n${getRuntimeContext(projectRoot)}`;
+  return `${basePrompt}\n\n${getCurrentDateAndModelPrompt(options.model)}\n\n${getRuntimeContext(projectRoot)}`;
 }
 
 export function getCompactPrompt(sessionMessages: SessionMessage[]): string {
