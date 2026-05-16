@@ -4,20 +4,35 @@
 /* eslint-disable */
 
 import { spawnSync } from "child_process";
-import { readdirSync } from "fs";
+import { readdirSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const projectRoot = join(__dirname, "../..");
 
 const testFiles = readdirSync(__dirname)
   .filter((f) => f.endsWith(".test.ts"))
   .map((f) => join(__dirname, f))
   .sort();
 
-const result = spawnSync("npx", ["--no-install", "tsx", "--test", ...testFiles], {
+// Cross-platform resolution of the local tsx binary
+function findTsx() {
+  const candidates = [
+    join(projectRoot, "node_modules", ".bin", "tsx"),
+    join(projectRoot, "node_modules", ".bin", "tsx.cmd"),
+  ];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  return candidates[0];
+}
+
+const tsx = findTsx();
+
+const result = spawnSync(tsx, ["--test", ...testFiles], {
   stdio: "inherit",
-  cwd: join(__dirname, "../.."),
+  cwd: projectRoot,
 });
 
 process.exit(result.status ?? 1);
