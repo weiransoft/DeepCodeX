@@ -30,6 +30,7 @@ import { findExpandedThinkingId } from "./thinkingState";
 import { WelcomeScreen } from "./WelcomeScreen";
 import { AskUserQuestionPrompt } from "./AskUserQuestionPrompt";
 import { McpStatusList } from "./McpStatusList";
+import { ProcessStdoutView } from "./ProcessStdoutView";
 import {
   findPendingAskUserQuestion,
   formatAskUserQuestionAnswers,
@@ -69,6 +70,8 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   const [resolvedSettings, setResolvedSettings] = useState(() => resolveCurrentSettings(projectRoot));
   const [nowTick, setNowTick] = useState(0);
   const [mcpStatuses, setMcpStatuses] = useState<ReturnType<typeof sessionManager.getMcpStatus>>([]);
+  const [showProcessStdout, setShowProcessStdout] = useState(false);
+  const processStdoutRef = useRef<Map<number, string>>(new Map());
 
   const messagesRef = useRef<SessionMessage[]>([]);
   messagesRef.current = messages;
@@ -97,6 +100,19 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
       onMcpStatusChanged: () => {
         // 当 MCP 状态变更时，如果当前正在查看 MCP 状态页面，则更新显示
         setMcpStatuses(sessionManager.getMcpStatus());
+      },
+      onProcessStdout: (pid, chunk) => {
+        const buf = processStdoutRef.current;
+        const current = buf.get(pid) ?? "";
+        // Cap at 1 MB per process to avoid unbounded memory growth
+        // on noisy or long-running commands like `yes` or verbose builds.
+        const MAX_STDOUT_BUFFER = 1_000_000;
+        if (current.length >= MAX_STDOUT_BUFFER) {
+          return;
+        }
+        const text = typeof chunk === "string" ? chunk : String(chunk);
+        const available = MAX_STDOUT_BUFFER - current.length;
+        buf.set(pid, current + text.slice(0, available));
       },
     });
   }, [projectRoot]);
@@ -218,6 +234,8 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
       setBusy(true);
       setErrorLine(null);
       setRunningProcesses(null);
+      setShowProcessStdout(false);
+      processStdoutRef.current.clear();
       try {
         await sessionManager.handleUserPrompt(prompt);
         await refreshSkills();
@@ -237,6 +255,14 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   const handleInterrupt = useCallback(() => {
     sessionManager.interruptActiveSession();
   }, [sessionManager]);
+
+  const handleToggleProcessStdout = useCallback(() => {
+    setShowProcessStdout(true);
+  }, []);
+
+  const handleDismissProcessStdout = useCallback(() => {
+    setShowProcessStdout(false);
+  }, []);
 
   const handleModelConfigChange = useCallback(
     (selection: ModelConfigSelection): string => {
@@ -442,7 +468,14 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
           <Text color="red">Error: {errorLine}</Text>
         </Box>
       ) : null}
-      {view === "session-list" ? (
+      {showProcessStdout ? (
+        <ProcessStdoutView
+          processStdoutRef={processStdoutRef}
+          runningProcesses={runningProcesses}
+          onDismiss={handleDismissProcessStdout}
+          screenWidth={screenWidth}
+        />
+      ) : view === "session-list" ? (
         <SessionList
           sessions={sessions}
           onSelect={(id) => void handleSelectSession(id)}
@@ -464,9 +497,11 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
           promptHistory={promptHistory}
           busy={busy}
           loadingText={loadingText}
+          runningProcesses={runningProcesses}
           onSubmit={handleSubmit}
           onModelConfigChange={handleModelConfigChange}
           onInterrupt={handleInterrupt}
+          onToggleProcessStdout={handleToggleProcessStdout}
           placeholder="Type your message..."
         />
       )}
