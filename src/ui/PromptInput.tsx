@@ -48,7 +48,7 @@ export type PromptSubmission = {
   text: string;
   imageUrls: string[];
   selectedSkills?: SkillInfo[];
-  command?: "new" | "resume" | "mcp" | "exit";
+  command?: "new" | "resume" | "continue" | "mcp" | "exit";
 };
 
 type Props = {
@@ -612,6 +612,15 @@ export const PromptInput = React.memo(function PromptInput({
     }
     if (item.kind === "resume") {
       onSubmit({ text: "", imageUrls: [], command: "resume" });
+      setBuffer(EMPTY_BUFFER);
+      clearUndoRedoStacks();
+      setImageUrls([]);
+      setSelectedSkills([]);
+      setShowSkillsDropdown(false);
+      return;
+    }
+    if (item.kind === "continue") {
+      onSubmit({ text: "/continue", imageUrls: [], command: "continue" });
       setBuffer(EMPTY_BUFFER);
       clearUndoRedoStacks();
       setImageUrls([]);

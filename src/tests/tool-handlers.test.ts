@@ -356,6 +356,80 @@ test("Edit accepts a unique loose-escape match when only escaping differs", asyn
   assert.equal(fs.readFileSync(filePath, "utf8"), "params['city_json'] = city\n");
 });
 
+test("Edit accepts a unique loose-escape match for over-escaped unicode sequences", async () => {
+  const workspace = createTempWorkspace();
+  const filePath = path.join(workspace, "keys.ts");
+  fs.writeFileSync(filePath, 'const sequence = "\\u001B[13;2~";\n', "utf8");
+
+  const sessionId = "unicode-loose-escape";
+  await handleReadTool({ file_path: filePath }, createContext(sessionId, workspace));
+
+  let llmCalls = 0;
+  const editResult = await handleEditTool(
+    {
+      file_path: filePath,
+      old_string: 'const sequence = "\\\\u001B[13;2~";',
+      new_string: 'const sequence = "\\\\u001B[13;130u";',
+    },
+    createContext(sessionId, workspace, {
+      createOpenAIClient: () => ({
+        client: {
+          chat: {
+            completions: {
+              create: async (request: { messages?: Array<{ content?: string }> }) => {
+                llmCalls += 1;
+                assert.match(String(request.messages?.[1]?.content ?? ""), /<matched_text><!\[CDATA\[/);
+                return {
+                  choices: [
+                    {
+                      message: {
+                        content:
+                          "<response>" +
+                          '<corrected_old_string><![CDATA[const sequence = "\\u001B[13;2~";]]></corrected_old_string>' +
+                          '<corrected_new_string><![CDATA[const sequence = "\\u001B[13;130u";]]></corrected_new_string>' +
+                          "</response>",
+                      },
+                    },
+                  ],
+                };
+              },
+            },
+          },
+        } as any,
+        model: "test-model",
+        thinkingEnabled: false,
+      }),
+    })
+  );
+
+  assert.equal(editResult.ok, true);
+  assert.equal(llmCalls, 1);
+  assert.equal(editResult.metadata?.matched_via, "llm_escape_correction");
+  assert.equal(fs.readFileSync(filePath, "utf8"), 'const sequence = "\\u001B[13;130u";\n');
+});
+
+test("Edit strips accidental read-result tabs after newlines when that creates a unique match", async () => {
+  const workspace = createTempWorkspace();
+  const filePath = path.join(workspace, "tabs.ts");
+  fs.writeFileSync(filePath, ["function demo() {", "  return 1;", "}"].join("\n") + "\n", "utf8");
+
+  const sessionId = "line-leading-tab-correction";
+  await handleReadTool({ file_path: filePath }, createContext(sessionId, workspace));
+
+  const editResult = await handleEditTool(
+    {
+      file_path: filePath,
+      old_string: "function demo() {\n\t  return 1;\n\t}",
+      new_string: "function demo() {\n\t  return 2;\n\t}",
+    },
+    createContext(sessionId, workspace)
+  );
+
+  assert.equal(editResult.ok, true);
+  assert.equal(editResult.metadata?.matched_via, "line_leading_tab_correction");
+  assert.equal(fs.readFileSync(filePath, "utf8"), ["function demo() {", "  return 2;", "}"].join("\n") + "\n");
+});
+
 test("Write repairs JSON object content for .json files", async () => {
   const workspace = createTempWorkspace();
   const filePath = path.join(workspace, "package.json");

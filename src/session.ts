@@ -957,6 +957,12 @@ ${skillMd}
       return;
     }
 
+    if (this.isContinuePrompt(userPrompt)) {
+      this.activeSessionId = sessionId;
+      await this.activateSession(sessionId, controller);
+      return;
+    }
+
     this.reportNewPrompt();
 
     if (userPrompt.text) {
@@ -994,6 +1000,15 @@ ${skillMd}
     }
     this.activeSessionId = sessionId;
     await this.activateSession(sessionId, controller);
+  }
+
+  private isContinuePrompt(userPrompt: UserPromptContent): boolean {
+    return (
+      typeof userPrompt.text === "string" &&
+      userPrompt.text.trim() === "/continue" &&
+      (!userPrompt.imageUrls || userPrompt.imageUrls.length === 0) &&
+      (!userPrompt.skills || userPrompt.skills.length === 0)
+    );
   }
 
   async activateSession(sessionId: string, controller?: AbortController): Promise<void> {
@@ -1053,6 +1068,23 @@ ${skillMd}
         const session = this.getSession(sessionId);
         if (session == null || session.status === "interrupted" || session.status === "failed") {
           return;
+        }
+
+        const pendingToolCalls = this.getTrailingPendingToolCalls(this.listSessionMessages(sessionId));
+        if (pendingToolCalls.length > 0) {
+          const toolAppendResult = await this.appendToolMessages(sessionId, pendingToolCalls);
+          if (this.isInterrupted(sessionId)) {
+            return;
+          }
+          if (toolAppendResult.waitingForUser) {
+            this.updateSessionEntry(sessionId, (entry) => ({
+              ...entry,
+              toolCalls: pendingToolCalls,
+              status: "waiting_for_user",
+              updateTime: new Date().toISOString(),
+            }));
+            return;
+          }
         }
 
         const compactPromptTokenThreshold = getCompactPromptTokenThreshold(model);
@@ -1857,6 +1889,20 @@ ${skillMd}
     }
 
     return pairings;
+  }
+
+  private getTrailingPendingToolCalls(messages: SessionMessage[]): unknown[] {
+    const activeMessages = messages.filter((message) => !message.compacted);
+    const latestMessage = activeMessages[activeMessages.length - 1];
+    if (!latestMessage || latestMessage.role !== "assistant") {
+      return [];
+    }
+
+    const toolCalls = this.getAssistantToolCalls(latestMessage);
+    if (toolCalls.length === 0) {
+      return [];
+    }
+    return toolCalls.filter((toolCall) => Boolean(this.getToolCallId(toolCall)));
   }
 
   private findPairableToolMessageIndex(

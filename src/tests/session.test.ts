@@ -723,6 +723,100 @@ test("replySession reports a new prompt with the machineId token", async () => {
   assert.equal((fetchCalls[0].init?.headers as Record<string, string>).Token, "machine-id-456");
 });
 
+test("replySession continues without appending /continue as a user message", async () => {
+  const workspace = createTempDir("deepcode-continue-workspace-");
+  const home = createTempDir("deepcode-continue-home-");
+  setHomeDir(home);
+
+  const fetchCalls: Array<{ input: string | URL; init?: RequestInit }> = [];
+  globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+    fetchCalls.push({ input, init });
+    return {
+      ok: true,
+      text: async () => "",
+    } as Response;
+  }) as typeof fetch;
+
+  const manager = createSessionManager(workspace, "machine-id-continue");
+  const activatedSessionIds: string[] = [];
+  (manager as any).activateSession = async (sessionId: string) => {
+    activatedSessionIds.push(sessionId);
+  };
+
+  const sessionId = await manager.createSession({ text: "first prompt" });
+  await flushPromises();
+  const messagesBefore = manager.listSessionMessages(sessionId);
+  fetchCalls.length = 0;
+  activatedSessionIds.length = 0;
+
+  await manager.replySession(sessionId, { text: "/continue" });
+  await flushPromises();
+
+  const messagesAfter = manager.listSessionMessages(sessionId);
+  const userMessages = messagesAfter.filter((message) => message.role === "user");
+
+  assert.equal(activatedSessionIds.length, 1);
+  assert.equal(activatedSessionIds[0], sessionId);
+  assert.equal(messagesAfter.length, messagesBefore.length);
+  assert.equal(
+    userMessages.some((message) => message.content === "/continue"),
+    false
+  );
+  assert.equal(fetchCalls.length, 0);
+});
+
+test("replySession /continue runs trailing pending tool calls before requesting another response", async () => {
+  const workspace = createTempDir("deepcode-continue-tool-workspace-");
+  const home = createTempDir("deepcode-continue-tool-home-");
+  setHomeDir(home);
+
+  const responses = [
+    createChatResponse("continued after tool", {
+      prompt_tokens: 9,
+      completion_tokens: 2,
+      total_tokens: 11,
+    }),
+  ];
+  const manager = createMockedClientSessionManager(workspace, responses);
+  const originalActivateSession = manager.activateSession.bind(manager);
+  (manager as any).activateSession = async () => {};
+
+  const sessionId = await manager.createSession({ text: "first prompt" });
+  const pendingAssistant = (manager as any).buildAssistantMessage(
+    sessionId,
+    "Need to read a file",
+    [
+      {
+        id: "call-pending-read",
+        type: "function",
+        function: { name: "read", arguments: JSON.stringify({ file_path: path.join(workspace, "note.txt") }) },
+      },
+    ],
+    null
+  ) as SessionMessage;
+  fs.writeFileSync(path.join(workspace, "note.txt"), "hello from pending tool\n", "utf8");
+  (manager as any).appendSessionMessage(sessionId, pendingAssistant);
+  (manager as any).activateSession = originalActivateSession;
+
+  await manager.replySession(sessionId, { text: "/continue" });
+
+  const messages = manager.listSessionMessages(sessionId);
+  const toolMessage = messages.find((message) => {
+    const params = message.messageParams as { tool_call_id?: string } | null;
+    return message.role === "tool" && params?.tool_call_id === "call-pending-read";
+  });
+  const assistantMessages = messages.filter((message) => message.role === "assistant");
+  const userMessages = messages.filter((message) => message.role === "user");
+
+  assert.ok(toolMessage);
+  assert.match(toolMessage.content ?? "", /hello from pending tool/);
+  assert.equal(assistantMessages[assistantMessages.length - 1]?.content, "continued after tool");
+  assert.equal(
+    userMessages.some((message) => message.content === "/continue"),
+    false
+  );
+});
+
 test("replySession preserves raw session messages when a previous tool call is pending", async () => {
   const workspace = createTempDir("deepcode-pending-tool-workspace-");
   const home = createTempDir("deepcode-pending-tool-home-");

@@ -213,9 +213,22 @@ export async function handleEditTool(
         const lineIndex = buildLineIndex(raw);
         const scope = buildSearchScope(filePath, raw, lineIndex, snippet ?? null);
         let matches = findOccurrences(raw, oldString, scope);
-        let matchedVia: "exact" | "loose_escape" | "llm_escape_correction" = "exact";
+        let matchedVia: "exact" | "line_leading_tab_correction" | "loose_escape" | "llm_escape_correction" = "exact";
         let replacementOldString = oldString;
         let replacementNewString = newString;
+
+        if (matches.length === 0) {
+          const tabStrippedOldString = stripReadResultLineTabs(oldString);
+          if (tabStrippedOldString !== oldString) {
+            const tabStrippedMatches = findOccurrences(raw, tabStrippedOldString, scope);
+            if (tabStrippedMatches.length === 1) {
+              matches = tabStrippedMatches;
+              matchedVia = "line_leading_tab_correction";
+              replacementOldString = tabStrippedOldString;
+              replacementNewString = stripReadResultLineTabs(newString);
+            }
+          }
+        }
 
         if (matches.length === 0) {
           const looseEscapeMatches = findLooseEscapeMatches(raw, oldString, scope);
@@ -545,6 +558,10 @@ function applyReplacement(
   return result;
 }
 
+function stripReadResultLineTabs(value: string): string {
+  return value.replaceAll("\n\t", "\n");
+}
+
 function buildCandidateMetadata(
   sessionId: string,
   filePath: string,
@@ -691,7 +708,7 @@ function buildLooseEscapeRegex(source: string): RegExp | null {
         slashEnd += 1;
       }
 
-      if (slashEnd < source.length && isEscapeSensitiveChar(source[slashEnd])) {
+      if (slashEnd < source.length) {
         pattern += "\\\\*";
         pattern += escapeRegExp(source[slashEnd]);
         index = slashEnd;
@@ -805,10 +822,6 @@ function parseCorrectedEditStrings(content: string): CorrectedEditStrings | null
   }
 
   return null;
-}
-
-function isEscapeSensitiveChar(value: string): boolean {
-  return value === '"' || value === "'" || value === "`" || value === "\\";
 }
 
 function escapeRegExp(value: string): string {

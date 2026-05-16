@@ -1,6 +1,6 @@
 import type { SkillInfo } from "../session";
 
-export type SlashCommandKind = "skill" | "skills" | "model" | "new" | "init" | "resume" | "mcp" | "exit";
+export type SlashCommandKind = "skill" | "skills" | "model" | "new" | "init" | "resume" | "continue" | "mcp" | "exit";
 
 export type SlashCommandItem = {
   kind: SlashCommandKind;
@@ -40,6 +40,12 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
     name: "resume",
     label: "/resume",
     description: "Pick a previous conversation to continue",
+  },
+  {
+    kind: "continue",
+    name: "continue",
+    label: "/continue",
+    description: "Continue the active conversation or pick one to resume",
   },
   {
     kind: "mcp",

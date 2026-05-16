@@ -190,6 +190,12 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         setView("session-list");
         return;
       }
+      if (submission.command === "continue" && isCurrentSessionEmpty(sessionManager)) {
+        setShowWelcome(false);
+        refreshSessionsList();
+        setView("session-list");
+        return;
+      }
       if (submission.command === "mcp") {
         setShowWelcome(false);
         setMcpStatuses(sessionManager.getMcpStatus());
@@ -211,7 +217,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         (selectedSkillNames.length > 0 ? `Use skills: ${selectedSkillNames.join(", ")}` : "") ||
         (submission.imageUrls.length > 0 ? "[Image]" : "");
 
-      if (userDisplayContent) {
+      if (userDisplayContent && submission.command !== "continue") {
         setMessages((prev) => [...prev, buildSyntheticUserMessage(userDisplayContent, submission.imageUrls.length)]);
       }
 
@@ -504,6 +510,11 @@ function buildSyntheticUserMessage(content: string, imageCount: number): Session
     createTime: now,
     updateTime: now,
   };
+}
+
+function isCurrentSessionEmpty(sessionManager: SessionManager): boolean {
+  const activeSessionId = sessionManager.getActiveSessionId();
+  return !activeSessionId || !sessionManager.getSession(activeSessionId);
 }
 
 function buildStatusLine(entry: SessionEntry): string {
