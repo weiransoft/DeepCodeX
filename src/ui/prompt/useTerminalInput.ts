@@ -26,55 +26,7 @@ const BACKSPACE_BYTES = new Set(["\u007F", "\b"]);
 const FORWARD_DELETE_SEQUENCES = new Set(["\u001B[3~", "\u001B[P"]);
 const HOME_SEQUENCES = new Set(["\u001B[H", "\u001B[1~", "\u001B[7~", "\u001BOH"]);
 const END_SEQUENCES = new Set(["\u001B[F", "\u001B[4~", "\u001B[8~", "\u001BOF"]);
-// Known exact Shift+Enter sequences (both xterm modifyOtherKeys and Kitty protocol).
-const SHIFT_RETURN_SEQUENCES = new Set([
-  "\u001B\r",
-  "\u001B[13;2u",
-  "\u001B[13;1u",
-  "\u001B[13;2~",
-  "\u001B[13;1~",
-  "\u001B[27;2;13~",
-  "\u001B[27;1;13~",
-]);
-
-// CSI u format: ESC [ keycode ; modifier u
-// CSI ~ format: ESC [ keycode ; modifier ~
-// Extended:     ESC [ 27 ; modifier ; keycode ~
-const CSI_SHIFT_RETURN_RE = /^\u001B\[13;(\d+)[u~]$/;
-const CSI_EXTENDED_SHIFT_RETURN_RE = /^\u001B\[27;(\d+);13~$/;
-
-// Check whether a raw sequence represents Shift+Enter by parsing the modifier
-// parameter dynamically.  This handles terminals (e.g. Windows Terminal) that
-// set extra flags on the modifier (e.g. 130 = 128 + 2) while the existing
-// SHIFT_RETURN_SEQUENCES Set only covers the canonical values (2 and 1).
-function isShiftReturn(raw: string): boolean {
-  if (SHIFT_RETURN_SEQUENCES.has(raw)) return true;
-
-  let m: RegExpMatchArray | null;
-  if ((m = raw.match(CSI_SHIFT_RETURN_RE)) !== null) {
-    const mod = parseInt(m[1], 10);
-    // xterm: Shift=2 (bit 1); Kitty: Shift=1 (bit 0)
-    return (mod & 2) !== 0 || (mod & 1) !== 0;
-  }
-  if ((m = raw.match(CSI_EXTENDED_SHIFT_RETURN_RE)) !== null) {
-    const mod = parseInt(m[1], 10);
-    return (mod & 2) !== 0 || (mod & 1) !== 0;
-  }
-  return false;
-}
-
-// Any CSI sequence with keycode=13 (Enter) — with or without modifiers.
-// Kitty progressive enhancement (ESC[>1u) sends plain Enter as ESC[13u
-// or ESC[13;NUMBERu with extra flags; xterm sends ESC[13;2u for Shift.
-const CSI_RETURN_RE = /^\u001B\[13;(\d+)[u~]$/;
-const CSI_EXTENDED_RETURN_RE = /^\u001B\[27;(\d+);13~$/;
-
-function isReturn(raw: string): boolean {
-  if (raw === "\r") return true;
-  if (SHIFT_RETURN_SEQUENCES.has(raw)) return true;
-  if (META_RETURN_SEQUENCES.has(raw)) return true;
-  return CSI_RETURN_RE.test(raw) || CSI_EXTENDED_RETURN_RE.test(raw);
-}
+const SHIFT_RETURN_SEQUENCES = new Set(["\u001B\r", "\u001B[13;2u", "\u001B[13;2~", "\u001B[27;2;13~"]);
 const META_RETURN_SEQUENCES = new Set(["\u001B[13;3u", "\u001B[13;4u"]);
 const CTRL_LEFT_SEQUENCES = new Set(["\u001B[1;5D", "\u001B[5D"]);
 const CTRL_RIGHT_SEQUENCES = new Set(["\u001B[1;5C", "\u001B[5C"]);
@@ -161,10 +113,10 @@ export function parseTerminalInput(data: Buffer | string): { input: string; key:
     end: END_SEQUENCES.has(raw),
     pageDown: raw === "\u001B[6~",
     pageUp: raw === "\u001B[5~",
-    return: isReturn(raw),
+    return: raw === "\r" || SHIFT_RETURN_SEQUENCES.has(raw) || META_RETURN_SEQUENCES.has(raw),
     escape: raw === "\u001B",
     ctrl: CTRL_LEFT_SEQUENCES.has(raw) || CTRL_RIGHT_SEQUENCES.has(raw),
-    shift: isShiftReturn(raw),
+    shift: SHIFT_RETURN_SEQUENCES.has(raw),
     tab: raw === "\t" || raw === "\u001B[Z",
     backspace: BACKSPACE_BYTES.has(raw),
     delete: FORWARD_DELETE_SEQUENCES.has(raw),
@@ -210,7 +162,7 @@ export function parseTerminalInput(data: Buffer | string): { input: string; key:
     key.shift = true;
   }
 
-  if (key.tab || key.backspace || key.delete || key.return) {
+  if (key.tab || key.backspace || key.delete) {
     input = "";
   }
 
