@@ -184,7 +184,7 @@ export function AskUserQuestionPrompt({ questions, onSubmit, onCancel }: Props):
           return (
             <Box key={option.value} flexDirection="column">
               <Text color={isCursor ? "cyanBright" : undefined}>
-                {isCursor ? "› " : "  "}
+                {isCursor ? "> " : "  "}
                 {marker} <Text bold={isCursor}>{option.label}</Text>
               </Text>
               {option.isOther ? (

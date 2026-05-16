@@ -17,6 +17,12 @@ type JsonRpcResponse = {
   error?: { code: number; message: string; data?: unknown };
 };
 
+type JsonRpcNotification = {
+  jsonrpc: "2.0";
+  method: string;
+  params?: Record<string, unknown>;
+};
+
 export type McpToolDefinition = {
   name: string;
   description?: string;
@@ -24,6 +30,7 @@ export type McpToolDefinition = {
     type: "object";
     properties: Record<string, unknown>;
     required?: string[];
+    additionalProperties?: boolean;
   };
 };
 
@@ -37,6 +44,58 @@ type CallToolResult = {
   isError?: boolean;
 };
 
+export type McpPromptArgument = {
+  name: string;
+  description?: string;
+  required?: boolean;
+};
+
+export type McpPromptDefinition = {
+  name: string;
+  description?: string;
+  arguments?: McpPromptArgument[];
+};
+
+type ListPromptsResult = {
+  prompts: McpPromptDefinition[];
+  nextCursor?: string;
+};
+
+export type McpPromptMessage = {
+  role: "user" | "assistant";
+  content: { type: string; text?: string };
+};
+
+type GetPromptResult = {
+  description?: string;
+  messages: McpPromptMessage[];
+};
+
+export type McpResourceDefinition = {
+  uri: string;
+  name: string;
+  description?: string;
+  mimeType?: string;
+};
+
+type ListResourcesResult = {
+  resources: McpResourceDefinition[];
+  nextCursor?: string;
+};
+
+export type McpResourceContent = {
+  uri: string;
+  mimeType?: string;
+  text?: string;
+  blob?: string;
+};
+
+type ReadResourceResult = {
+  contents: McpResourceContent[];
+};
+
+export type McpNotificationHandler = (method: string, params?: Record<string, unknown>) => void;
+
 export class McpClient {
   private process: ChildProcess | null = null;
   private reader: Interface | null = null;
@@ -46,13 +105,17 @@ export class McpClient {
     { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
   >();
   private stderrBuffer = "";
+  private notificationHandler: McpNotificationHandler | null = null;
 
   constructor(
     private readonly serverName: string,
     private readonly command: string,
     private readonly args: string[] = [],
-    private readonly env?: Record<string, string>
-  ) {}
+    private readonly env?: Record<string, string>,
+    onNotification?: McpNotificationHandler
+  ) {
+    this.notificationHandler = onNotification ?? null;
+  }
 
   async connect(timeoutMs: number): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -109,13 +172,25 @@ export class McpClient {
       this.sendRequest(
         "initialize",
         {
-          protocolVersion: "2024-11-05",
+          protocolVersion: "2025-03-26",
           capabilities: {},
           clientInfo: { name: "deepcode-cli", version: "0.1.0" },
         },
         timeoutMs
       )
-        .then(() => {
+        .then((result) => {
+          // Validate protocol version from server response (per MCP spec §4.2.1.2)
+          const initResult = result as { protocolVersion?: string } | undefined;
+          const serverVersion = initResult?.protocolVersion;
+          if (serverVersion && serverVersion !== "2025-03-26" && serverVersion !== "2024-11-05") {
+            reject(
+              new Error(
+                `Unsupported MCP protocol version "${serverVersion}" from server "${this.serverName}". ` +
+                  `Client supports 2025-03-26 and 2024-11-05.`
+              )
+            );
+            return;
+          }
           // Send initialized notification
           this.sendNotification("notifications/initialized");
           resolve();
@@ -141,8 +216,50 @@ export class McpClient {
     throw this.withStderr(`MCP server "${this.serverName}" returned too many tools/list pages`);
   }
 
-  async callTool(name: string, args: Record<string, unknown>): Promise<CallToolResult> {
-    return (await this.sendRequest("tools/call", { name, arguments: args })) as CallToolResult;
+  async callTool(name: string, args: Record<string, unknown>, timeoutMs = 60_000): Promise<CallToolResult> {
+    return (await this.sendRequest("tools/call", { name, arguments: args }, timeoutMs)) as CallToolResult;
+  }
+
+  async listPrompts(timeoutMs: number): Promise<McpPromptDefinition[]> {
+    const prompts: McpPromptDefinition[] = [];
+    let cursor: string | undefined;
+
+    for (let page = 0; page < 100; page++) {
+      const params = cursor ? { cursor } : {};
+      const result = (await this.sendRequest("prompts/list", params, timeoutMs)) as ListPromptsResult;
+      prompts.push(...(result.prompts ?? []));
+      cursor = typeof result.nextCursor === "string" && result.nextCursor ? result.nextCursor : undefined;
+      if (!cursor) {
+        return prompts;
+      }
+    }
+
+    throw this.withStderr(`MCP server "${this.serverName}" returned too many prompts/list pages`);
+  }
+
+  async getPrompt(name: string, args: Record<string, unknown>, timeoutMs = 30_000): Promise<GetPromptResult> {
+    return (await this.sendRequest("prompts/get", { name, arguments: args }, timeoutMs)) as GetPromptResult;
+  }
+
+  async listResources(timeoutMs: number): Promise<McpResourceDefinition[]> {
+    const resources: McpResourceDefinition[] = [];
+    let cursor: string | undefined;
+
+    for (let page = 0; page < 100; page++) {
+      const params = cursor ? { cursor } : {};
+      const result = (await this.sendRequest("resources/list", params, timeoutMs)) as ListResourcesResult;
+      resources.push(...(result.resources ?? []));
+      cursor = typeof result.nextCursor === "string" && result.nextCursor ? result.nextCursor : undefined;
+      if (!cursor) {
+        return resources;
+      }
+    }
+
+    throw this.withStderr(`MCP server "${this.serverName}" returned too many resources/list pages`);
+  }
+
+  async readResource(uri: string, timeoutMs = 30_000): Promise<ReadResourceResult> {
+    return (await this.sendRequest("resources/read", { uri }, timeoutMs)) as ReadResourceResult;
   }
 
   disconnect(): void {
@@ -195,19 +312,53 @@ export class McpClient {
 
   private handleLine(line: string): void {
     try {
-      const message = JSON.parse(line) as JsonRpcResponse;
-      if (message.id !== undefined && this.pendingRequests.has(message.id)) {
-        const pending = this.pendingRequests.get(message.id)!;
-        this.pendingRequests.delete(message.id);
-        clearTimeout(pending.timer);
-        if (message.error) {
-          pending.reject(this.withStderr(`MCP error: ${message.error.message}`));
-        } else {
-          pending.resolve(message.result);
+      const parsed: unknown = JSON.parse(line);
+
+      // Handle JSON-RPC batch (array of requests/notifications/responses)
+      // Per MCP 2025-03-26 §4.1.1.3: implementations MUST support receiving batches.
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (item && typeof item === "object") {
+            this.handleSingleMessage(item);
+          }
         }
+        return;
+      }
+
+      // Handle single message
+      if (parsed && typeof parsed === "object") {
+        this.handleSingleMessage(parsed);
       }
     } catch {
       // Ignore unparseable lines
+    }
+  }
+
+  private handleSingleMessage(msg: object): void {
+    // Handle notifications (no id field — server-initiated)
+    if (!("id" in msg)) {
+      const notification = msg as unknown as JsonRpcNotification;
+      if (this.notificationHandler && typeof notification.method === "string") {
+        try {
+          this.notificationHandler(notification.method, notification.params);
+        } catch {
+          // Swallow handler errors to avoid crashing the reader loop
+        }
+      }
+      return;
+    }
+
+    // Handle responses to our requests
+    const message = msg as unknown as JsonRpcResponse;
+    if (message.id !== undefined && this.pendingRequests.has(message.id)) {
+      const pending = this.pendingRequests.get(message.id)!;
+      this.pendingRequests.delete(message.id);
+      clearTimeout(pending.timer);
+      if (message.error) {
+        pending.reject(this.withStderr(`MCP error: ${message.error.message}`));
+      } else {
+        pending.resolve(message.result);
+      }
     }
   }
 

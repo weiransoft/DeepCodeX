@@ -47,7 +47,7 @@ export function MessageView({ message, collapsed, width = 80 }: Props): React.Re
       return (
         <Box marginLeft={1} flexDirection="column" marginY={0}>
           <StatusLine bulletColor="gray" name="Thinking" params={summary} />
-          <Box flexDirection="column" marginLeft={4}>
+          <Box flexDirection="column" marginLeft={2}>
             {content ? <Text dimColor>{renderMarkdown(content)}</Text> : null}
           </Box>
         </Box>

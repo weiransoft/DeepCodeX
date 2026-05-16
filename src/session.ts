@@ -65,11 +65,34 @@ function addUsageValue(current: unknown, next: unknown): unknown {
   return next;
 }
 
-function accumulateUsage(current: unknown | null, next: unknown | null | undefined): unknown | null {
+function accumulateUsage(current: ModelUsage | null, next: unknown | null | undefined): ModelUsage | null {
   if (next == null) {
     return current ?? null;
   }
-  return addUsageValue(current, next);
+  return addUsageValue(current, next) as ModelUsage;
+}
+
+function usageWithRequestCount(usage: ModelUsage): ModelUsage {
+  const totalReqs = typeof usage.total_reqs === "number" ? usage.total_reqs + 1 : 1;
+  return {
+    ...usage,
+    total_reqs: totalReqs,
+  };
+}
+
+function accumulateUsagePerModel(
+  current: Record<string, ModelUsage> | null | undefined,
+  model: string,
+  next: ModelUsage | null | undefined
+): Record<string, ModelUsage> | null {
+  if (next == null) {
+    return current ?? null;
+  }
+
+  const usagePerModel = { ...(current ?? {}) };
+  const modelName = model.trim() || "unknown";
+  usagePerModel[modelName] = accumulateUsage(usagePerModel[modelName] ?? null, usageWithRequestCount(next))!;
+  return usagePerModel;
 }
 
 function getExtensionRoot(): string {
@@ -81,7 +104,7 @@ function getExtensionRoot(): string {
   return path.resolve(path.dirname(currentFilePath), "..");
 }
 
-function getTotalTokens(usage: unknown | null | undefined): number {
+function getTotalTokens(usage: ModelUsage | null | undefined): number {
   if (!isUsageRecord(usage)) {
     return 0;
   }
@@ -90,6 +113,17 @@ function getTotalTokens(usage: unknown | null | undefined): number {
 }
 
 export type SessionStatus = "failed" | "pending" | "processing" | "waiting_for_user" | "completed" | "interrupted";
+
+export type ModelUsage = {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  completion_tokens_details?: Record<string, unknown>;
+  prompt_tokens_details?: Record<string, unknown>;
+  prompt_cache_hit_tokens?: number;
+  prompt_cache_miss_tokens?: number;
+  total_reqs?: number;
+};
 
 export type SessionEntry = {
   id: string;
@@ -100,7 +134,8 @@ export type SessionEntry = {
   toolCalls: unknown[] | null;
   status: SessionStatus;
   failReason: string | null;
-  usage: unknown | null;
+  usage: ModelUsage | null;
+  usagePerModel: Record<string, ModelUsage> | null;
   activeTokens: number;
   createTime: string;
   updateTime: string;
@@ -161,6 +196,7 @@ type SessionManagerOptions = {
   onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   onSessionEntryUpdated?: (entry: SessionEntry) => void;
   onLlmStreamProgress?: (progress: LlmStreamProgress) => void;
+  onMcpStatusChanged?: () => void;
 };
 
 export type LlmStreamProgress = {
@@ -183,6 +219,7 @@ export class SessionManager {
   private readonly onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   private readonly onSessionEntryUpdated?: (entry: SessionEntry) => void;
   private readonly onLlmStreamProgress?: (progress: LlmStreamProgress) => void;
+  private readonly onMcpStatusChanged?: () => void;
   private activeSessionId: string | null = null;
   private activePromptController: AbortController | null = null;
   private readonly sessionControllers = new Map<string, AbortController>();
@@ -197,11 +234,19 @@ export class SessionManager {
     this.onAssistantMessage = options.onAssistantMessage;
     this.onSessionEntryUpdated = options.onSessionEntryUpdated;
     this.onLlmStreamProgress = options.onLlmStreamProgress;
+    this.onMcpStatusChanged = options.onMcpStatusChanged;
     this.toolExecutor = new ToolExecutor(this.projectRoot, this.createOpenAIClient, this.mcpManager);
     this.mcpManager.prepare(this.getResolvedSettings().mcpServers);
   }
 
   async initMcpServers(servers?: Record<string, McpServerConfig>): Promise<void> {
+    this.mcpManager.setOnToolsListChanged(() => {
+      this.mcpToolDefinitions = this.mcpManager.getMcpToolDefinitions();
+    });
+    // 设置状态变更回调，通知 UI 更新
+    this.mcpManager.setOnStatusChanged(() => {
+      this.onMcpStatusChanged?.();
+    });
     await this.mcpManager.initialize(servers);
     this.mcpToolDefinitions = this.mcpManager.getMcpToolDefinitions();
   }
@@ -286,7 +331,7 @@ export class SessionManager {
     debug?: ChatCompletionDebugOptions
   ): Promise<{
     choices?: Array<{ message?: Record<string, unknown> }>;
-    usage?: unknown;
+    usage?: ModelUsage | null;
   }> {
     const requestId = crypto.randomUUID();
     const startedAt = new Date().toISOString();
@@ -355,13 +400,13 @@ export class SessionManager {
         request: streamRequest,
         response,
       });
-      return response as { choices?: Array<{ message?: Record<string, unknown> }>; usage?: unknown };
+      return response as { choices?: Array<{ message?: Record<string, unknown> }>; usage?: ModelUsage | null };
     }
 
     let content = "";
     let reasoningContent = "";
     let refusal: string | null = null;
-    let usage: unknown = null;
+    let usage: ModelUsage | null = null;
     const responseChunks: unknown[] = [];
     const toolCallsByIndex = new Map<
       number,
@@ -386,7 +431,7 @@ export class SessionManager {
           responseChunks.push(chunk);
         }
         if ("usage" in chunk && chunk.usage != null) {
-          usage = chunk.usage;
+          usage = chunk.usage as ModelUsage;
         }
 
         const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
@@ -836,6 +881,7 @@ The candidate skills are as follows:\n\n`;
       status: "pending",
       failReason: null,
       usage: null,
+      usagePerModel: null,
       activeTokens: 0,
       createTime: now,
       updateTime: now,
@@ -1076,6 +1122,7 @@ ${skillMd}
           assistantRefusal: refusal,
           toolCalls,
           usage: accumulateUsage(entry.usage, responseUsage),
+          usagePerModel: accumulateUsagePerModel(entry.usagePerModel, model, responseUsage),
           activeTokens: getTotalTokens(responseUsage),
           status: refusal ? "failed" : waitingForUser ? "waiting_for_user" : toolCalls ? "processing" : "completed",
           failReason: refusal ? refusal : entry.failReason,
@@ -1185,6 +1232,7 @@ ${skillMd}
     this.updateSessionEntry(sessionId, (entry) => ({
       ...entry,
       usage: accumulateUsage(entry.usage, responseUsage),
+      usagePerModel: accumulateUsagePerModel(entry.usagePerModel, model, responseUsage),
       activeTokens: getTotalTokens(responseUsage),
       updateTime: now,
     }));
@@ -2096,7 +2144,8 @@ ${skillMd}
       toolCalls: Array.isArray(value.toolCalls) ? value.toolCalls : null,
       status: this.normalizeSessionStatus(value.status),
       failReason: typeof value.failReason === "string" ? value.failReason : null,
-      usage: value.usage ?? null,
+      usage: (value.usage as ModelUsage) ?? null,
+      usagePerModel: this.normalizeUsagePerModel(value),
       activeTokens: typeof value.activeTokens === "number" ? value.activeTokens : 0,
       createTime: typeof value.createTime === "string" ? value.createTime : new Date().toISOString(),
       updateTime: typeof value.updateTime === "string" ? value.updateTime : new Date().toISOString(),
@@ -2116,6 +2165,23 @@ ${skillMd}
       return status;
     }
     return "pending";
+  }
+
+  private normalizeUsagePerModel(entry: Record<string, unknown>): Record<string, ModelUsage> | null {
+    if (!Object.prototype.hasOwnProperty.call(entry, "usagePerModel")) {
+      return null;
+    }
+    if (!isUsageRecord(entry.usagePerModel)) {
+      return null;
+    }
+    const usagePerModel: Record<string, ModelUsage> = {};
+    for (const [model, usage] of Object.entries(entry.usagePerModel)) {
+      if (!model || !isUsageRecord(usage)) {
+        continue;
+      }
+      usagePerModel[model] = usage as ModelUsage;
+    }
+    return usagePerModel;
   }
 
   private deserializeProcesses(value: unknown): Map<string, { startTime: string; command: string }> | null {
