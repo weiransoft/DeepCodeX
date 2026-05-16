@@ -7,7 +7,16 @@ import { SessionManager, type SessionMessage } from "../session";
 
 const originalFetch = globalThis.fetch;
 const originalHome = process.env.HOME;
+const originalUserProfile = process.env.USERPROFILE;
 const tempDirs: string[] = [];
+
+/** Set homedir in a cross-platform way (HOME on Unix, USERPROFILE on Windows). */
+function setHomeDir(dir: string): void {
+  process.env.HOME = dir;
+  if (process.platform === "win32") {
+    process.env.USERPROFILE = dir;
+  }
+}
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -15,6 +24,11 @@ afterEach(() => {
     delete process.env.HOME;
   } else {
     process.env.HOME = originalHome;
+  }
+  if (originalUserProfile === undefined) {
+    delete process.env.USERPROFILE;
+  } else {
+    process.env.USERPROFILE = originalUserProfile;
   }
 
   while (tempDirs.length > 0) {
@@ -249,7 +263,7 @@ test("SessionManager replays normal assistant messages with reasoning content in
 test("SessionManager normalizes legacy sessions without activeTokens to zero", () => {
   const workspace = createTempDir("deepcode-legacy-active-tokens-workspace-");
   const home = createTempDir("deepcode-legacy-active-tokens-home-");
-  process.env.HOME = home;
+  setHomeDir(home);
 
   const projectCode = workspace.replace(/[\\/]/g, "-").replace(/:/g, "");
   const projectDir = path.join(home, ".deepcode", "projects", projectCode);
@@ -281,7 +295,7 @@ test("SessionManager normalizes legacy sessions without activeTokens to zero", (
 test("SessionManager keeps usagePerModel null until response usage is available", async () => {
   const workspace = createTempDir("deepcode-null-usage-per-model-workspace-");
   const home = createTempDir("deepcode-null-usage-per-model-home-");
-  process.env.HOME = home;
+  setHomeDir(home);
 
   const manager = createMockedClientSessionManager(workspace, [{ choices: [{ message: { content: "no usage" } }] }]);
 
@@ -294,7 +308,7 @@ test("SessionManager keeps usagePerModel null until response usage is available"
 test("SessionManager marks skills loaded from existing session messages", async () => {
   const workspace = createTempDir("deepcode-loaded-skills-workspace-");
   const home = createTempDir("deepcode-loaded-skills-home-");
-  process.env.HOME = home;
+  setHomeDir(home);
 
   const skillDir = path.join(home, ".agents", "skills", "lessweb-starter");
   fs.mkdirSync(skillDir, { recursive: true });
@@ -341,7 +355,7 @@ test("SessionManager marks skills loaded from existing session messages", async 
 test("SessionManager lists project skills from .agents with legacy .deepcode compatibility", async () => {
   const workspace = createTempDir("deepcode-project-skills-workspace-");
   const home = createTempDir("deepcode-project-skills-home-");
-  process.env.HOME = home;
+  setHomeDir(home);
 
   const userSkillDir = path.join(home, ".agents", "skills", "shared");
   fs.mkdirSync(userSkillDir, { recursive: true });
@@ -514,13 +528,16 @@ test("SessionManager reports MCP startup stderr on failure", async () => {
   assert.match(status?.error ?? "", /mcp startup boom/);
 });
 
-test("SessionManager adds -y when launching MCP servers through npx", async () => {
-  const workspace = createTempDir("deepcode-mcp-npx-workspace-");
-  const argsPath = path.join(workspace, "args.json");
-  const fakeNpxPath = path.join(workspace, "npx");
-  fs.writeFileSync(
-    fakeNpxPath,
-    `#!/usr/bin/env node
+test(
+  "SessionManager adds -y when launching MCP servers through npx",
+  { skip: process.platform === "win32" },
+  async () => {
+    const workspace = createTempDir("deepcode-mcp-npx-workspace-");
+    const argsPath = path.join(workspace, "args.json");
+    const fakeNpxPath = path.join(workspace, "npx");
+    fs.writeFileSync(
+      fakeNpxPath,
+      `#!/usr/bin/env node
 const fs = require("fs");
 const readline = require("readline");
 fs.writeFileSync(process.env.ARGS_PATH, JSON.stringify(process.argv.slice(2)));
@@ -544,23 +561,24 @@ rl.on("line", (line) => {
   send({ jsonrpc: "2.0", id: request.id, result: { content: [] } });
 });
 `,
-    "utf8"
-  );
-  fs.chmodSync(fakeNpxPath, 0o755);
+      "utf8"
+    );
+    fs.chmodSync(fakeNpxPath, 0o755);
 
-  const manager = createSessionManager(workspace, "machine-id-mcp-npx");
-  await manager.initMcpServers({
-    npxed: { command: fakeNpxPath, args: ["@playwright/mcp@latest"], env: { ARGS_PATH: argsPath } },
-  });
+    const manager = createSessionManager(workspace, "machine-id-mcp-npx");
+    await manager.initMcpServers({
+      npxed: { command: fakeNpxPath, args: ["@playwright/mcp@latest"], env: { ARGS_PATH: argsPath } },
+    });
 
-  assert.deepEqual(JSON.parse(fs.readFileSync(argsPath, "utf8")) as string[], ["-y", "@playwright/mcp@latest"]);
-  manager.dispose();
-});
+    assert.deepEqual(JSON.parse(fs.readFileSync(argsPath, "utf8")) as string[], ["-y", "@playwright/mcp@latest"]);
+    manager.dispose();
+  }
+);
 
 test("createSession stores /init and sends the active .deepcode project AGENTS path to the LLM", async () => {
   const workspace = createTempDir("deepcode-init-deepcode-workspace-");
   const home = createTempDir("deepcode-init-deepcode-home-");
-  process.env.HOME = home;
+  setHomeDir(home);
   globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
 
   fs.mkdirSync(path.join(workspace, ".deepcode"), { recursive: true });
@@ -592,7 +610,7 @@ test("createSession stores /init and sends the active .deepcode project AGENTS p
 test("replySession stores /init and sends the active root project AGENTS path to the LLM", async () => {
   const workspace = createTempDir("deepcode-init-root-workspace-");
   const home = createTempDir("deepcode-init-root-home-");
-  process.env.HOME = home;
+  setHomeDir(home);
   globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
 
   fs.writeFileSync(path.join(workspace, "AGENTS.md"), "root project instructions", "utf8");
@@ -619,7 +637,7 @@ test("replySession stores /init and sends the active root project AGENTS path to
 test("createSession stores /init and sends generate prompt when no project AGENTS file is effective", async () => {
   const workspace = createTempDir("deepcode-init-generate-workspace-");
   const home = createTempDir("deepcode-init-generate-home-");
-  process.env.HOME = home;
+  setHomeDir(home);
   globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
 
   fs.mkdirSync(path.join(home, ".deepcode"), { recursive: true });
@@ -645,7 +663,7 @@ test("createSession stores /init and sends generate prompt when no project AGENT
 test("createSession reports a new prompt with the machineId token", async () => {
   const workspace = createTempDir("deepcode-session-workspace-");
   const home = createTempDir("deepcode-session-home-");
-  process.env.HOME = home;
+  setHomeDir(home);
 
   const fetchCalls: Array<{ input: string | URL; init?: RequestInit }> = [];
   globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
@@ -677,7 +695,7 @@ test("createSession reports a new prompt with the machineId token", async () => 
 test("replySession reports a new prompt with the machineId token", async () => {
   const workspace = createTempDir("deepcode-reply-workspace-");
   const home = createTempDir("deepcode-reply-home-");
-  process.env.HOME = home;
+  setHomeDir(home);
 
   const fetchCalls: Array<{ input: string | URL; init?: RequestInit }> = [];
   globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
@@ -708,7 +726,7 @@ test("replySession reports a new prompt with the machineId token", async () => {
 test("replySession preserves raw session messages when a previous tool call is pending", async () => {
   const workspace = createTempDir("deepcode-pending-tool-workspace-");
   const home = createTempDir("deepcode-pending-tool-home-");
-  process.env.HOME = home;
+  setHomeDir(home);
 
   globalThis.fetch = (async () =>
     ({
@@ -1131,7 +1149,7 @@ test("buildOpenAIMessages ignores tool messages that appear before their assista
 test("SessionManager accumulates response usage while active tokens track the latest response", async () => {
   const workspace = createTempDir("deepcode-usage-workspace-");
   const home = createTempDir("deepcode-usage-home-");
-  process.env.HOME = home;
+  setHomeDir(home);
 
   const responses = [
     createChatResponse("first", {
@@ -1182,7 +1200,7 @@ test("SessionManager accumulates response usage while active tokens track the la
 test("SessionManager stores usage per model across model changes", async () => {
   const workspace = createTempDir("deepcode-usage-per-model-workspace-");
   const home = createTempDir("deepcode-usage-per-model-home-");
-  process.env.HOME = home;
+  setHomeDir(home);
 
   let currentModel = "deepseek-v4-pro";
   const responses = [
@@ -1243,7 +1261,7 @@ test("SessionManager stores usage per model across model changes", async () => {
 test("SessionManager resets active tokens to latest post-compaction response usage", async () => {
   const workspace = createTempDir("deepcode-compact-usage-workspace-");
   const home = createTempDir("deepcode-compact-usage-home-");
-  process.env.HOME = home;
+  setHomeDir(home);
 
   const responses = [
     createChatResponse("large", {
@@ -1285,7 +1303,7 @@ test("SessionManager resets active tokens to latest post-compaction response usa
 test("SessionManager streams chat completions and counts reasoning progress", async () => {
   const workspace = createTempDir("deepcode-stream-workspace-");
   const home = createTempDir("deepcode-stream-home-");
-  process.env.HOME = home;
+  setHomeDir(home);
 
   const progressEvents: Array<{
     phase: string;
@@ -1352,7 +1370,7 @@ test("SessionManager streams chat completions and counts reasoning progress", as
 test("SessionManager cancels skill matching before a session is created", async () => {
   const workspace = createTempDir("deepcode-skill-abort-workspace-");
   const home = createTempDir("deepcode-skill-abort-home-");
-  process.env.HOME = home;
+  setHomeDir(home);
 
   const skillDir = path.join(home, ".agents", "skills", "demo");
   fs.mkdirSync(skillDir, { recursive: true });
@@ -1384,7 +1402,7 @@ test("SessionManager cancels skill matching before a session is created", async 
 test("SessionManager treats OpenAI APIUserAbortError as interrupted", async () => {
   const workspace = createTempDir("deepcode-api-abort-workspace-");
   const home = createTempDir("deepcode-api-abort-home-");
-  process.env.HOME = home;
+  setHomeDir(home);
 
   let manager: SessionManager;
   const client = {
