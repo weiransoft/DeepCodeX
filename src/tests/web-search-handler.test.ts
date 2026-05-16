@@ -20,40 +20,44 @@ afterEach(() => {
   }
 });
 
-test("WebSearch executes the configured script with the query as one argument", async () => {
-  const workspace = createTempWorkspace();
-  const scriptPath = path.join(workspace, "web-search.sh");
-  fs.writeFileSync(
-    scriptPath,
-    [
-      "#!/bin/sh",
-      "printf 'query=%s\\n' \"$1\"",
-      "printf 'cwd=%s\\n' \"$PWD\"",
-      "printf 'webhook=%s\\n' \"$WEBHOOK\"",
-    ].join("\n"),
-    "utf8"
-  );
-  fs.chmodSync(scriptPath, 0o755);
+test(
+  "WebSearch executes the configured script with the query as one argument",
+  { skip: process.platform === "win32" },
+  async () => {
+    const workspace = createTempWorkspace();
+    const scriptPath = path.join(workspace, "web-search.sh");
+    fs.writeFileSync(
+      scriptPath,
+      [
+        "#!/bin/sh",
+        "printf 'query=%s\\n' \"$1\"",
+        "printf 'cwd=%s\\n' \"$PWD\"",
+        "printf 'webhook=%s\\n' \"$WEBHOOK\"",
+      ].join("\n"),
+      "utf8"
+    );
+    fs.chmodSync(scriptPath, 0o755);
 
-  const starts: Array<{ id: string | number; command: string }> = [];
-  const exits: Array<string | number> = [];
-  const result = await handleWebSearchTool(
-    { query: "latest node release" },
-    createContext(workspace, {
-      webSearchTool: scriptPath,
-      env: { WEBHOOK: "configured" },
-      onProcessStart: (id, command) => starts.push({ id, command }),
-      onProcessExit: (id) => exits.push(id),
-    })
-  );
-  const realWorkspace = fs.realpathSync(workspace);
+    const starts: Array<{ id: string | number; command: string }> = [];
+    const exits: Array<string | number> = [];
+    const result = await handleWebSearchTool(
+      { query: "latest node release" },
+      createContext(workspace, {
+        webSearchTool: scriptPath,
+        env: { WEBHOOK: "configured" },
+        onProcessStart: (id, command) => starts.push({ id, command }),
+        onProcessExit: (id) => exits.push(id),
+      })
+    );
+    const realWorkspace = fs.realpathSync(workspace);
 
-  assert.equal(result.ok, true);
-  assert.equal(result.output, `query=latest node release\ncwd=${realWorkspace}\nwebhook=configured\n`);
-  assert.equal(starts.length, 1);
-  assert.match(starts[0].command, /^WebSearch: latest node release$/);
-  assert.deepEqual(exits, [starts[0].id]);
-});
+    assert.equal(result.ok, true);
+    assert.equal(result.output, `query=latest node release\ncwd=${realWorkspace}\nwebhook=configured\n`);
+    assert.equal(starts.length, 1);
+    assert.match(starts[0].command, /^WebSearch: latest node release$/);
+    assert.deepEqual(exits, [starts[0].id]);
+  }
+);
 
 test("WebSearch uses the default API when no script is configured", async () => {
   const workspace = createTempWorkspace();

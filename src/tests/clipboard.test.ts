@@ -36,40 +36,44 @@ test("readClipboardImage returns null when no clipboard helpers are installed", 
   assert.equal(result, null);
 });
 
-test("readClipboardImage uses osascript fallback on macOS when pngpaste is missing", async () => {
-  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "deepcode-clipboard-test-bin-"));
-  try {
-    fs.writeFileSync(path.join(binDir, "pngpaste"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-    fs.writeFileSync(
-      path.join(binDir, "osascript"),
-      [
-        "#!/bin/sh",
-        'for arg in "$@"; do',
-        '  case "$arg" in',
-        "    *'open for access POSIX file " + '"' + "'*)",
-        '      path_part=${arg#*POSIX file \\"}',
-        '      out_path=${path_part%%\\"*}',
-        '      printf fakepng > "$out_path"',
-        "      exit 0",
-        "      ;;",
-        "  esac",
-        "done",
-        "exit 1",
-        "",
-      ].join("\n"),
-      { mode: 0o755 }
-    );
+test(
+  "readClipboardImage uses osascript fallback on macOS when pngpaste is missing",
+  { skip: process.platform === "win32" },
+  async () => {
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "deepcode-clipboard-test-bin-"));
+    try {
+      fs.writeFileSync(path.join(binDir, "pngpaste"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+      fs.writeFileSync(
+        path.join(binDir, "osascript"),
+        [
+          "#!/bin/sh",
+          'for arg in "$@"; do',
+          '  case "$arg" in',
+          "    *'open for access POSIX file " + '"' + "'*)",
+          '      path_part=${arg#*POSIX file \\"}',
+          '      out_path=${path_part%%\\"*}',
+          '      printf fakepng > "$out_path"',
+          "      exit 0",
+          "      ;;",
+          "  esac",
+          "done",
+          "exit 1",
+          "",
+        ].join("\n"),
+        { mode: 0o755 }
+      );
 
-    const moduleUrl = new URL(`../ui/clipboard.ts?t=${Date.now()}`, import.meta.url).href;
-    const { readClipboardImage } = (await import(moduleUrl)) as ClipboardModule;
+      const moduleUrl = new URL(`../ui/clipboard.ts?t=${Date.now()}`, import.meta.url).href;
+      const { readClipboardImage } = (await import(moduleUrl)) as ClipboardModule;
 
-    process.env.PATH = binDir;
-    const result = withPlatform("darwin", () => readClipboardImage());
-    assert.equal(result?.mimeType, "image/png");
-    assert.equal(result?.dataUrl, `data:image/png;base64,${Buffer.from("fakepng").toString("base64")}`);
-  } finally {
-    process.env.PATH = ORIGINAL_PATH;
-    Object.defineProperty(process, "platform", { value: ORIGINAL_PLATFORM });
-    fs.rmSync(binDir, { recursive: true, force: true });
+      process.env.PATH = binDir;
+      const result = withPlatform("darwin", () => readClipboardImage());
+      assert.equal(result?.mimeType, "image/png");
+      assert.equal(result?.dataUrl, `data:image/png;base64,${Buffer.from("fakepng").toString("base64")}`);
+    } finally {
+      process.env.PATH = ORIGINAL_PATH;
+      Object.defineProperty(process, "platform", { value: ORIGINAL_PLATFORM });
+      fs.rmSync(binDir, { recursive: true, force: true });
+    }
   }
-});
+);

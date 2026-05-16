@@ -364,39 +364,43 @@ test("buildNotifyEnv injects DURATION", () => {
   assert.equal(env.DURATION, "2");
 });
 
-test("launchNotifyScript passes DURATION and falls back to /bin/sh for non-executable scripts", () => {
-  const calls: Array<{
-    command: string;
-    args: string[];
-    options: { cwd?: string | URL; env?: NodeJS.ProcessEnv };
-  }> = [];
+test(
+  "launchNotifyScript passes DURATION and falls back to /bin/sh for non-executable scripts",
+  { skip: process.platform === "win32" },
+  () => {
+    const calls: Array<{
+      command: string;
+      args: string[];
+      options: { cwd?: string | URL; env?: NodeJS.ProcessEnv };
+    }> = [];
 
-  const spawnProcess: NotifySpawn = (command, args, options) => {
-    calls.push({ command, args, options: { cwd: options.cwd, env: options.env } });
+    const spawnProcess: NotifySpawn = (command, args, options) => {
+      calls.push({ command, args, options: { cwd: options.cwd, env: options.env } });
 
-    return {
-      once(event, listener) {
-        if (event === "error" && calls.length === 1) {
-          listener({ code: "EACCES" } as NodeJS.ErrnoException);
-        }
-        return this;
-      },
-      unref() {
-        return undefined;
-      },
+      return {
+        once(event, listener) {
+          if (event === "error" && calls.length === 1) {
+            listener({ code: "EACCES" } as NodeJS.ErrnoException);
+          }
+          return this;
+        },
+        unref() {
+          return undefined;
+        },
+      };
     };
-  };
 
-  launchNotifyScript("/tmp/notify.sh", 2750, "/tmp/project", spawnProcess, { WEBHOOK: "configured" });
+    launchNotifyScript("/tmp/notify.sh", 2750, "/tmp/project", spawnProcess, { WEBHOOK: "configured" });
 
-  assert.equal(calls.length, 2);
-  assert.equal(calls[0]?.command, "/tmp/notify.sh");
-  assert.deepEqual(calls[0]?.args, []);
-  assert.equal(calls[0]?.options.cwd, "/tmp/project");
-  assert.equal(calls[0]?.options.env?.DURATION, "2");
-  assert.equal(calls[0]?.options.env?.WEBHOOK, "configured");
-  assert.equal(calls[1]?.command, "/bin/sh");
-  assert.deepEqual(calls[1]?.args, ["/tmp/notify.sh"]);
-  assert.equal(calls[1]?.options.cwd, "/tmp/project");
-  assert.equal(calls[1]?.options.env?.DURATION, "2");
-});
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0]?.command, "/tmp/notify.sh");
+    assert.deepEqual(calls[0]?.args, []);
+    assert.equal(calls[0]?.options.cwd, "/tmp/project");
+    assert.equal(calls[0]?.options.env?.DURATION, "2");
+    assert.equal(calls[0]?.options.env?.WEBHOOK, "configured");
+    assert.equal(calls[1]?.command, "/bin/sh");
+    assert.deepEqual(calls[1]?.args, ["/tmp/notify.sh"]);
+    assert.equal(calls[1]?.options.cwd, "/tmp/project");
+    assert.equal(calls[1]?.options.env?.DURATION, "2");
+  }
+);

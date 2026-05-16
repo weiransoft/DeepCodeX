@@ -128,10 +128,10 @@ export class McpClient {
       const isWindows = os.platform() === "win32";
 
       if (isWindows) {
-        // On Windows, .cmd files require shell: true to be spawned.
-        // Build a single command string so cmd.exe handles quoting correctly.
-        const cmd = [this.command + ".cmd", ...args].join(" ");
-        this.process = spawn(cmd, [], {
+        // On Windows, shell: true lets cmd.exe resolve the command via
+        // PATHEXT (npx → npx.cmd, etc.) without blindly appending .cmd,
+        // which would break absolute paths like process.execPath.
+        this.process = spawn(this.command, args, {
           stdio: ["pipe", "pipe", "pipe"],
           env: childEnv,
           shell: true,

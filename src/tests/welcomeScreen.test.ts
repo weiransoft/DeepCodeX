@@ -1,17 +1,26 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import * as os from "os";
+import * as path from "path";
 import { buildWelcomeTips, formatHomeRelativePath } from "../ui";
 
 test("formatHomeRelativePath returns tilde for the home directory", () => {
-  assert.equal(formatHomeRelativePath("/Users/example", "/Users/example"), "~");
+  const home = path.resolve("/Users/example");
+  assert.equal(formatHomeRelativePath(home, home), "~");
 });
 
 test("formatHomeRelativePath shortens paths inside the home directory", () => {
-  assert.equal(formatHomeRelativePath("/Users/example/dev/project", "/Users/example"), "~/dev/project");
+  const home = path.resolve("/Users/example");
+  const result = formatHomeRelativePath(path.resolve("/Users/example/dev/project"), home);
+  assert.equal(result, `~${path.sep}dev${path.sep}project`);
 });
 
 test("formatHomeRelativePath keeps paths outside the home directory absolute", () => {
-  assert.equal(formatHomeRelativePath("/tmp/project", "/Users/example"), "/tmp/project");
+  const home = path.resolve("/Users/example");
+  const other = path.resolve("/tmp/project");
+  // The result should be the absolute path since it's outside home
+  const result = formatHomeRelativePath(other, home);
+  assert.equal(result, other);
 });
 
 test("buildWelcomeTips includes built-in slash commands and loaded skills", () => {
