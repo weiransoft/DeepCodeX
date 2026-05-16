@@ -40,12 +40,14 @@ function disableTerminalFocusReporting(): string {
   return "\u001B[?1004l";
 }
 
+// xterm modifyOtherKeys + Kitty progressive enhancement.
+// Both are needed: some terminals (incl. Windows Terminal) only respond to Kitty.
 export function enableTerminalExtendedKeys(): string {
-  return "\u001B[>4;1m";
+  return "\u001B[>4;1m\u001B[>1u";
 }
 
 export function disableTerminalExtendedKeys(): string {
-  return "\u001B[>4;0m";
+  return "\u001B[>4;0m\u001B[<u";
 }
 
 export function getPromptCursorPlacement(
