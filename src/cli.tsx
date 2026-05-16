@@ -18,9 +18,11 @@ if (args.includes("--help") || args.includes("-h")) {
       "deepcode - Deep Code CLI",
       "",
       "Usage:",
-      "  deepcode               Launch the interactive TUI in the current directory",
-      "  deepcode --version     Print the version",
-      "  deepcode --help        Show this help",
+      "  deepcode                              Launch the interactive TUI in the current directory",
+      "  deepcode -p <prompt>                  Launch with a pre-filled prompt",
+      "  deepcode --prompt <prompt>            Same as -p",
+      "  deepcode --version                    Print the version",
+      "  deepcode --help                       Show this help",
       "",
       "Configuration:",
       "  ~/.deepcode/settings.json    User-level API key, model, base URL",
@@ -50,6 +52,15 @@ if (args.includes("--help") || args.includes("-h")) {
   process.exit(0);
 }
 
+function extractInitialPrompt(args: string[]): string | undefined {
+  const promptIndex = args.findIndex((arg) => arg === "-p" || arg === "--prompt");
+  if (promptIndex !== -1 && promptIndex + 1 < args.length) {
+    return args[promptIndex + 1];
+  }
+  return undefined;
+}
+
+const initialPrompt = extractInitialPrompt(args);
 const projectRoot = process.cwd();
 configureWindowsShell();
 
@@ -68,7 +79,12 @@ async function main(): Promise<void> {
   function startApp(): void {
     let restarting = false;
     const inkInstance = render(
-      <App projectRoot={projectRoot} version={packageInfo.version} onRestart={() => restartRef.current?.()} />,
+      <App
+        projectRoot={projectRoot}
+        version={packageInfo.version}
+        initialPrompt={initialPrompt}
+        onRestart={() => restartRef.current?.()}
+      />,
       { exitOnCtrlC: false }
     );
 

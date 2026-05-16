@@ -45,10 +45,11 @@ type View = "chat" | "session-list" | "mcp-status";
 type AppProps = {
   projectRoot: string;
   version?: string;
+  initialPrompt?: string;
   onRestart?: () => void;
 };
 
-export function App({ projectRoot, version = "", onRestart }: AppProps): React.ReactElement {
+export function App({ projectRoot, version = "", initialPrompt, onRestart }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout, write } = useStdout();
   const { columns } = useWindowSize();
@@ -470,6 +471,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
           promptHistory={promptHistory}
           busy={busy}
           loadingText={loadingText}
+          initialPrompt={initialPrompt}
           onSubmit={handleSubmit}
           onModelConfigChange={handleModelConfigChange}
           onInterrupt={handleInterrupt}
