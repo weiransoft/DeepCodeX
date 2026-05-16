@@ -455,7 +455,14 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
           onCancel={() => setView("chat")}
         />
       ) : view === "mcp-status" ? (
-        <McpStatusList statuses={mcpStatuses} onCancel={() => setView("chat")} />
+        <McpStatusList
+          statuses={mcpStatuses}
+          onCancel={() => setView("chat")}
+          onReconnect={(name) => {
+            const latest = resolveCurrentSettings(projectRoot);
+            void sessionManager.reconnectMcpServer(name, latest.mcpServers?.[name]);
+          }}
+        />
       ) : shouldShowQuestionPrompt && pendingQuestion && !busy ? (
         <AskUserQuestionPrompt
           questions={pendingQuestion.questions}
