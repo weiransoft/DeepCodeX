@@ -60,6 +60,7 @@ type Props = {
   loadingText?: string | null;
   disabled?: boolean;
   placeholder?: string;
+  initialPrompt?: string;
   onSubmit: (submission: PromptSubmission) => void;
   onModelConfigChange: (selection: ModelConfigSelection) => string | Promise<string>;
   onInterrupt: () => void;
@@ -109,13 +110,16 @@ export const PromptInput = React.memo(function PromptInput({
   loadingText,
   disabled,
   placeholder,
+  initialPrompt,
   onSubmit,
   onModelConfigChange,
   onInterrupt,
 }: Props): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
-  const [buffer, setBuffer] = useState<PromptBufferState>(EMPTY_BUFFER);
+  const [buffer, setBuffer] = useState<PromptBufferState>(() =>
+    initialPrompt ? { text: initialPrompt, cursor: initialPrompt.length } : EMPTY_BUFFER
+  );
   const [imageUrls, setImageUrls] = useState<string[]>([]);
   const [selectedSkills, setSelectedSkills] = useState<SkillInfo[]>([]);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -191,6 +195,19 @@ export const PromptInput = React.memo(function PromptInput({
     setHistoryCursor(-1);
     setDraftBeforeHistory(null);
   }, [promptHistoryKey]);
+
+  // Auto-submit initial prompt provided via -p/--prompt CLI flag
+  useEffect(() => {
+    if (!initialPrompt || !initialPrompt.trim()) return;
+
+    onSubmit({
+      text: initialPrompt,
+      imageUrls: [],
+      selectedSkills: undefined,
+    });
+    setBuffer(EMPTY_BUFFER);
+    clearPromptUndoRedoState(undoRedoRef.current);
+  }, []); // Only on mount
 
   useTerminalInput(
     (input, key) => {
