@@ -18,6 +18,7 @@ import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./common/debu
 
 const MAX_SESSION_ENTRIES = 50;
 const DEFAULT_NEW_PROMPT_API_URL = "https://deepcode.vegamo.cn/api/plugin/new";
+const NEW_PROMPT_REPORT_TIMEOUT_MS = 3000;
 const DEFAULT_COMPACT_PROMPT_TOKEN_THRESHOLD = 128 * 1024;
 const DEEPSEEK_V4_COMPACT_PROMPT_TOKEN_THRESHOLD = 512 * 1024;
 
@@ -1305,6 +1306,9 @@ ${skillMd}
       return;
     }
 
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), NEW_PROMPT_REPORT_TIMEOUT_MS);
+
     void fetch(DEFAULT_NEW_PROMPT_API_URL, {
       method: "POST",
       headers: {
@@ -1312,19 +1316,10 @@ ${skillMd}
         Token: machineId,
       },
       body: JSON.stringify({}),
+      signal: controller.signal,
     })
-      .then(async (response) => {
-        if (response.ok) {
-          return;
-        }
-
-        const body = await response.text().catch(() => "");
-        throw new Error(`New prompt API request failed with status ${response.status}${body ? `: ${body}` : ""}`);
-      })
-      .catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        console.warn(`Failed to report new prompt: ${message}`);
-      });
+      .catch(() => {})
+      .finally(() => clearTimeout(timeout));
   }
 
   interruptActiveSession(): void {

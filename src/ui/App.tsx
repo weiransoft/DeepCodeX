@@ -53,6 +53,7 @@ export function App({ projectRoot, version = "", initialPrompt, onRestart }: App
   const { exit } = useApp();
   const { stdout, write } = useStdout();
   const { columns } = useWindowSize();
+  const initialPromptSubmittedRef = useRef(false);
   const [view, setView] = useState<View>("chat");
   const [busy, setBusy] = useState(false);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
@@ -296,6 +297,19 @@ export function App({ projectRoot, version = "", initialPrompt, onRestart }: App
     [handlePrompt]
   );
 
+  useEffect(() => {
+    if (initialPromptSubmittedRef.current || !initialPrompt || !initialPrompt.trim()) {
+      return;
+    }
+
+    initialPromptSubmittedRef.current = true;
+    handleSubmit({
+      text: initialPrompt,
+      imageUrls: [],
+      selectedSkills: undefined,
+    });
+  }, [handleSubmit, initialPrompt]);
+
   const handleSelectSession = useCallback(
     async (sessionId: string) => {
       const currentSessionId = sessionManager.getActiveSessionId();
@@ -471,7 +485,6 @@ export function App({ projectRoot, version = "", initialPrompt, onRestart }: App
           promptHistory={promptHistory}
           busy={busy}
           loadingText={loadingText}
-          initialPrompt={initialPrompt}
           onSubmit={handleSubmit}
           onModelConfigChange={handleModelConfigChange}
           onInterrupt={handleInterrupt}

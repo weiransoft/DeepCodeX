@@ -6,6 +6,7 @@ import * as path from "path";
 import { SessionManager, type SessionMessage } from "../session";
 
 const originalFetch = globalThis.fetch;
+const originalConsoleWarn = console.warn;
 const originalHome = process.env.HOME;
 const originalUserProfile = process.env.USERPROFILE;
 const tempDirs: string[] = [];
@@ -20,6 +21,7 @@ function setHomeDir(dir: string): void {
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  console.warn = originalConsoleWarn;
   if (originalHome === undefined) {
     delete process.env.HOME;
   } else {
@@ -688,6 +690,7 @@ test("createSession reports a new prompt with the machineId token", async () => 
   assert.equal(fetchCalls.length, 1);
   assert.equal(String(fetchCalls[0].input), "https://deepcode.vegamo.cn/api/plugin/new");
   assert.equal(fetchCalls[0].init?.method, "POST");
+  assert.ok(fetchCalls[0].init?.signal instanceof AbortSignal);
   assert.deepEqual(JSON.parse(String(fetchCalls[0].init?.body)), {});
   assert.equal((fetchCalls[0].init?.headers as Record<string, string>).Token, "machine-id-123");
 });
@@ -719,8 +722,31 @@ test("replySession reports a new prompt with the machineId token", async () => {
   assert.equal(fetchCalls.length, 1);
   assert.equal(String(fetchCalls[0].input), "https://deepcode.vegamo.cn/api/plugin/new");
   assert.equal(fetchCalls[0].init?.method, "POST");
+  assert.ok(fetchCalls[0].init?.signal instanceof AbortSignal);
   assert.deepEqual(JSON.parse(String(fetchCalls[0].init?.body)), {});
   assert.equal((fetchCalls[0].init?.headers as Record<string, string>).Token, "machine-id-456");
+});
+
+test("reporting a new prompt does not warn when the background request fails", async () => {
+  const workspace = createTempDir("deepcode-report-failure-workspace-");
+  const home = createTempDir("deepcode-report-failure-home-");
+  setHomeDir(home);
+
+  const warnings: unknown[][] = [];
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args);
+  };
+  globalThis.fetch = (async () => {
+    throw new Error("fetch failed");
+  }) as typeof fetch;
+
+  const manager = createSessionManager(workspace, "machine-id-failure");
+  (manager as any).activateSession = async () => {};
+
+  await manager.createSession({ text: "hello world" });
+  await flushPromises();
+
+  assert.deepEqual(warnings, []);
 });
 
 test("replySession continues without appending /continue as a user message", async () => {

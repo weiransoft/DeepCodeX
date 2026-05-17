@@ -60,7 +60,7 @@ function extractInitialPrompt(args: string[]): string | undefined {
   return undefined;
 }
 
-const initialPrompt = extractInitialPrompt(args);
+let initialPrompt = extractInitialPrompt(args);
 const projectRoot = process.cwd();
 configureWindowsShell();
 
@@ -78,11 +78,13 @@ async function main(): Promise<void> {
 
   function startApp(): void {
     let restarting = false;
+    const appInitialPrompt = initialPrompt;
+    initialPrompt = undefined;
     const inkInstance = render(
       <App
         projectRoot={projectRoot}
         version={packageInfo.version}
-        initialPrompt={initialPrompt}
+        initialPrompt={appInitialPrompt}
         onRestart={() => restartRef.current?.()}
       />,
       { exitOnCtrlC: false }
