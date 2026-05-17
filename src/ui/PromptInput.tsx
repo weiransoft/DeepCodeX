@@ -60,9 +60,11 @@ type Props = {
   loadingText?: string | null;
   disabled?: boolean;
   placeholder?: string;
+  runningProcesses?: Map<string, { startTime: string; command: string }> | null;
   onSubmit: (submission: PromptSubmission) => void;
   onModelConfigChange: (selection: ModelConfigSelection) => string | Promise<string>;
   onInterrupt: () => void;
+  onToggleProcessStdout?: () => void;
 };
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -109,9 +111,11 @@ export const PromptInput = React.memo(function PromptInput({
   loadingText,
   disabled,
   placeholder,
+  runningProcesses,
   onSubmit,
   onModelConfigChange,
   onInterrupt,
+  onToggleProcessStdout,
 }: Props): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -141,13 +145,15 @@ export const PromptInput = React.memo(function PromptInput({
   );
   const showMenu = slashMenu.length > 0;
   const promptHistoryKey = React.useMemo(() => promptHistory.join("\0"), [promptHistory]);
+  const hasRunningProcess = runningProcesses && runningProcesses.size > 0;
+  const processHint = hasRunningProcess ? " · ctrl+o view output" : "";
   const footerText = statusMessage
     ? statusMessage
     : busy
       ? loadingText && loadingText.trim()
-        ? loadingText
-        : "esc to interrupt · ctrl+c to cancel input"
-      : "enter send · shift+enter newline · ctrl+v image · / commands · ctrl+d exit";
+        ? `${loadingText}${processHint}`
+        : `esc to interrupt · ctrl+c to cancel input${processHint}`
+      : `enter send · shift+enter newline · ctrl+v image · / commands · ctrl+d exit${processHint}`;
   useTerminalFocusReporting(stdout, !disabled);
   useTerminalExtendedKeys(stdout, !disabled);
   useHiddenTerminalCursor(stdout, !disabled);
@@ -219,6 +225,15 @@ export const PromptInput = React.memo(function PromptInput({
         if (busy) {
           onInterrupt();
           setStatusMessage("Interrupting…");
+        }
+        return;
+      }
+
+      if (key.ctrl && (input === "o" || input === "O")) {
+        if (runningProcesses && runningProcesses.size > 0 && onToggleProcessStdout) {
+          onToggleProcessStdout();
+        } else {
+          setStatusMessage("No running process to inspect");
         }
         return;
       }

@@ -124,9 +124,13 @@ async function executeShellCommand(
 
     child.stdout?.on("data", (chunk: string | Buffer) => {
       stdout = appendChunk(stdout, chunk);
+      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      context.onProcessStdout?.(pid as number, text);
     });
     child.stderr?.on("data", (chunk: string | Buffer) => {
       stderr = appendChunk(stderr, chunk);
+      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      context.onProcessStdout?.(pid as number, text);
     });
 
     child.on("error", (spawnError) => {

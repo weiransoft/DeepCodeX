@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { setTimeout as delay } from "node:timers/promises";
 import type { ToolExecutionContext } from "../tools/executor";
+import { handleBashTool } from "../tools/bash-handler";
 import { handleEditTool } from "../tools/edit-handler";
 import { handleReadTool } from "../tools/read-handler";
 import { handleWriteTool } from "../tools/write-handler";
@@ -17,6 +19,36 @@ afterEach(() => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   }
+});
+
+test("Bash streams stdout and stderr before command completion", async () => {
+  const workspace = createTempWorkspace();
+  const chunks: string[] = [];
+  let completed = false;
+
+  const resultPromise = handleBashTool(
+    {
+      command: "printf 'first\\n'; sleep 1; printf 'second\\n'; printf 'err\\n' >&2",
+    },
+    createContext("bash-live-output", workspace, {
+      onProcessStdout: (_pid, chunk) => {
+        chunks.push(chunk);
+      },
+    })
+  ).finally(() => {
+    completed = true;
+  });
+
+  await waitFor(() => chunks.join("").includes("first"), 1500);
+
+  assert.equal(completed, false);
+
+  const result = await resultPromise;
+  const streamedOutput = chunks.join("");
+  assert.equal(result.ok, true);
+  assert.match(streamedOutput, /first/);
+  assert.match(streamedOutput, /second/);
+  assert.match(streamedOutput, /err/);
 });
 
 test("Read returns snippet metadata and Edit can scope replacements by snippet_id", async () => {
@@ -646,4 +678,15 @@ function createTempWorkspace(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deepcode-tools-"));
   tempDirs.push(dir);
   return dir;
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) {
+      return;
+    }
+    await delay(25);
+  }
+  assert.equal(predicate(), true);
 }

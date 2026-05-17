@@ -37,11 +37,13 @@ export type ToolExecutionContext = {
   createOpenAIClient?: CreateOpenAIClient;
   onProcessStart?: (processId: string | number, command: string) => void;
   onProcessExit?: (processId: string | number) => void;
+  onProcessStdout?: (processId: string | number, chunk: string) => void;
 };
 
 export type ToolExecutionHooks = {
   onProcessStart?: (processId: string | number, command: string) => void;
   onProcessExit?: (processId: string | number) => void;
+  onProcessStdout?: (processId: string | number, chunk: string) => void;
   shouldStop?: () => boolean;
 };
 
@@ -195,6 +197,7 @@ export class ToolExecutor {
         createOpenAIClient: this.createOpenAIClient,
         onProcessStart: hooks?.onProcessStart,
         onProcessExit: hooks?.onProcessExit,
+        onProcessStdout: hooks?.onProcessStdout,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
