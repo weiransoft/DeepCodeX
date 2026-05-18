@@ -116,55 +116,55 @@ After all tasks are completed (`[x]`):
 
 **Example requirements:**
 ```markdown
-# Feature: Add dark mode toggle
+# 新功能：添加深色模式切换
 
-Users should be able to switch between light and dark themes.
-The toggle should be in the settings page.
+用户应该能够在浅色和深色主题之间切换。
+切换开关应放在设置页面中。
 ```
 
-**UpdatePlan call after analysis:**
+**分析后的 UpdatePlan 调用：**
 ```markdown
 ## Task List
 
-- [ ] Create dark mode toggle component in Settings page
-- [ ] Add dark mode state management (context/store)
-- [ ] Implement CSS-in-JS styles for dark theme
-- [ ] Update existing components to support theme switching
-- [ ] Run tests and verify functionality
+- [ ] 在设置页面创建深色模式切换组件
+- [ ] 添加深色模式状态管理（context/store）
+- [ ] 实现深色主题的 CSS-in-JS 样式
+- [ ] 更新现有组件以支持主题切换
+- [ ] 运行测试并验证功能
 ```
 
 **UpdatePlan call during execution:**
 ```markdown
 ## Task List
 
-- [x] Create dark mode toggle component in Settings page
-- [>] Add dark mode state management (context/store)
-- [ ] Implement CSS-in-JS styles for dark theme
-- [ ] Update existing components to support theme switching
-- [ ] Run tests and verify functionality
+- [x] 在设置页面创建深色模式切换组件
+- [>] 添加深色模式状态管理（context/store）
+- [ ] 实现深色主题的 CSS-in-JS 样式
+- [ ] 更新现有组件以支持主题切换
+- [ ] 运行测试并验证功能
 ```
 
 ### Example 2: Bug fix with investigation
 
 **Example requirements:**
 ```markdown
-# Bug: Login form crashes on submit
+# Fix bug：登录表单提交时崩溃
 
-When users click submit, the app crashes.
-Error message: "Cannot read property 'email' of undefined"
+当用户点击提交时，应用崩溃。
+错误信息："Cannot read property 'email' of undefined"
 ```
 
 **UpdatePlan call after analysis:**
 ```markdown
 ## Task List
 
-- [ ] Reproduce the bug locally
-- [ ] Investigate the error in login form component
-- [ ] Identify root cause of undefined email property
-- [ ] Implement fix
-- [ ] Add validation to prevent similar issues
-- [ ] Test the fix with various inputs
-- [ ] Update error handling
+- [ ] 在本地复现缺陷
+- [ ] 调查登录表单组件中的错误
+- [ ] 定位 undefined email 属性的根本原因
+- [ ] 实施修复
+- [ ] 添加验证以防止类似问题
+- [ ] 使用各种输入测试修复
+- [ ] 更新错误处理
 ```
 
 ## When to Use This Skill
