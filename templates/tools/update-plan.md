@@ -8,13 +8,6 @@ Usage:
 - The `plan` argument is a markdown string, not an array of step objects.
 - Keep exactly one task marked `[>]` while work is in progress.
 - Update the plan before starting a task, immediately after completing a task, and whenever tasks are split, merged, reordered, blocked, or changed.
-- Do not edit issue documents just to maintain task status; use `UpdatePlan` for the task list instead.
-
-Task markers:
-- `[ ]` Pending
-- `[>]` In progress
-- `[x]` Completed
-- `[!]` Blocked
 
 ```json
 {
