@@ -609,6 +609,40 @@ test("createSession stores /init and sends the active .deepcode project AGENTS p
   assert.ok(!systemContents.includes("root project instructions"));
 });
 
+test("createSession appends default system prompts in prefix-cache-friendly order", async () => {
+  const workspace = createTempDir("deepcode-system-order-workspace-");
+  const home = createTempDir("deepcode-system-order-home-");
+  setHomeDir(home);
+  globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
+
+  fs.writeFileSync(path.join(workspace, "AGENTS.md"), "root project instructions", "utf8");
+
+  const manager = createSessionManager(workspace, "machine-id-system-order");
+  (manager as any).activateSession = async () => {};
+
+  const sessionId = await manager.createSession({ text: "hello" });
+  const systemContents = manager
+    .listSessionMessages(sessionId)
+    .filter((message) => message.role === "system")
+    .map((message) => message.content ?? "");
+
+  assert.equal(systemContents.length >= 4, true);
+  assert.match(systemContents[0] ?? "", /# Available Tools/);
+  assert.doesNotMatch(systemContents[0] ?? "", /# Local Workspace Environment/);
+  assert.doesNotMatch(systemContents[0] ?? "", /当前LLM模型为test-model/);
+  assert.match(systemContents[1] ?? "", /<agent-drift-guard-skill>/);
+  assert.match(systemContents[1] ?? "", /<plan-and-execute-skill>/);
+  assert.doesNotMatch(systemContents[1] ?? "", /path="templates\/skills\//);
+  assert.doesNotMatch(systemContents[1] ?? "", /当前LLM模型为test-model/);
+  assert.match(systemContents[2] ?? "", /# Local Workspace Environment/);
+  assert.match(systemContents[2] ?? "", /当前LLM模型为test-model/);
+  const environmentJsonMatch = (systemContents[2] ?? "").match(/```json\n([\s\S]+?)\n```/);
+  assert.ok(environmentJsonMatch);
+  const environmentInfo = JSON.parse(environmentJsonMatch[1] ?? "{}") as { "root path"?: string };
+  assert.equal(environmentInfo["root path"], workspace);
+  assert.equal(systemContents[3], "root project instructions");
+});
+
 test("replySession stores /init and sends the active root project AGENTS path to the LLM", async () => {
   const workspace = createTempDir("deepcode-init-root-workspace-");
   const home = createTempDir("deepcode-init-root-home-");
@@ -1160,6 +1194,27 @@ test("buildOpenAIMessages preserves a real failed tool result", () => {
   assert.doesNotMatch(openAIMessages[1]?.content ?? "", /Previous tool call did not complete/);
 });
 
+test("UpdatePlan tool params only show explanation when provided", () => {
+  const manager = createSessionManager(process.cwd(), "machine-id-update-plan-params");
+  const plan = "## Task List\n\n- [ ] Inspect project";
+
+  const withExplanation = (manager as any).buildToolMessage(
+    "session-1",
+    "call-plan-1",
+    JSON.stringify({ ok: true, name: "UpdatePlan", output: "Plan updated." }),
+    { name: "UpdatePlan", arguments: JSON.stringify({ plan, explanation: "Start planning" }) }
+  ) as SessionMessage;
+  const withoutExplanation = (manager as any).buildToolMessage(
+    "session-1",
+    "call-plan-2",
+    JSON.stringify({ ok: true, name: "UpdatePlan", output: "Plan updated." }),
+    { name: "UpdatePlan", arguments: JSON.stringify({ plan }) }
+  ) as SessionMessage;
+
+  assert.equal(withExplanation.meta?.paramsMd, "Start planning");
+  assert.equal(withoutExplanation.meta?.paramsMd, "");
+});
+
 test("buildOpenAIMessages repairs mixed missing duplicate and orphan tool messages", () => {
   const manager = createSessionManager(process.cwd(), "machine-id-mixed-tool-badcase");
   const assistantMessage = (manager as any).buildAssistantMessage(
@@ -1663,6 +1718,10 @@ function createTempDir(prefix: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   tempDirs.push(dir);
   return dir;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function flushPromises(): Promise<void> {

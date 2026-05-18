@@ -253,3 +253,17 @@ export function renderMessageToStdout(message: SessionMessage, mode: RawMode): s
 
   return "";
 }
+
+export function getUpdatePlanPreviewLines(summary: ToolSummary): string[] {
+  if (!summary.ok || summary.name !== "UpdatePlan") {
+    return [];
+  }
+  const plan = summary.metadata?.plan;
+  if (typeof plan !== "string" || !plan.trim()) {
+    return [];
+  }
+  return plan
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0);
+}

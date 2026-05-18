@@ -12,12 +12,12 @@ export const RAW_COMMAND_MODELS: DropdownMenuItem[] = [
     key: RawMode.Lite,
   },
   {
-    label: "Raw scrollback mode",
-    key: RawMode.Raw,
-  },
-  {
     label: "Normal mode",
     key: RawMode.None,
+  },
+  {
+    label: "Raw scrollback mode",
+    key: RawMode.Raw,
   },
 ] as const;
 

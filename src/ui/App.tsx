@@ -560,6 +560,7 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
         />
       ) : isExiting ? null : (
         <PromptInput
+          projectRoot={projectRoot}
           screenWidth={screenWidth}
           skills={skills}
           modelConfig={resolvedSettings}

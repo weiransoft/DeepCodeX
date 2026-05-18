@@ -7,6 +7,7 @@ import {
   formatStatusName,
   formatToolStatusParams,
   getToolDiffPreviewLines,
+  getUpdatePlanPreviewLines,
 } from "./utils";
 import type { DiffPreviewLine, MessageViewProps } from "./types";
 import { RawMode, useRawModeContext } from "../../contexts";
@@ -75,6 +76,7 @@ export function MessageView({ message, collapsed, width = 80 }: MessageViewProps
   if (message.role === "tool") {
     const summary = buildToolSummary(message);
     const diffLines = getToolDiffPreviewLines(summary);
+    const planLines = getUpdatePlanPreviewLines(summary);
     return (
       <Box flexDirection="column" marginLeft={1} marginBottom={1} marginY={0}>
         <StatusLine
@@ -84,6 +86,7 @@ export function MessageView({ message, collapsed, width = 80 }: MessageViewProps
           params={formatToolStatusParams(summary)}
         />
         {diffLines.length > 0 ? <DiffPreview lines={diffLines} /> : null}
+        {planLines.length > 0 ? <PlanPreview lines={planLines} /> : null}
       </Box>
     );
   }
@@ -175,6 +178,21 @@ function DiffPreview({ lines }: { lines: DiffPreviewLine[] }): React.ReactElemen
             <Text color={line.kind === "added" ? "green" : line.kind === "removed" ? "red" : undefined}>
               {line.content}
             </Text>
+          </Text>
+        ))}
+      </Box>
+    </Box>
+  );
+}
+
+function PlanPreview({ lines }: { lines: string[] }): React.ReactElement {
+  return (
+    <Box flexDirection="column" marginLeft={2}>
+      <Text dimColor>└ Plan</Text>
+      <Box flexDirection="column" marginLeft={2}>
+        {lines.map((line, index) => (
+          <Text key={`${index}-${line}`} wrap="wrap">
+            {line}
           </Text>
         ))}
       </Box>
