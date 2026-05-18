@@ -12,9 +12,10 @@ This Skill helps you automatically plan and execute requirements. It creates a s
 When you need to work through a multi-step request:
 
 1. Analyze the requirements and explore enough project context
-2. Create a markdown task list by calling the UpdatePlan tool
-3. Execute tasks one by one, updating the tool plan in real time
-4. Revise the remaining plan as new context appears
+2. Clarify unclear or ambiguous requirements with AskUserQuestion
+3. Create a markdown task list by calling the UpdatePlan tool
+4. Execute tasks one by one, updating the tool plan in real time
+5. Revise the remaining plan as new context appears
 
 ## Instructions
 
@@ -22,7 +23,9 @@ When you need to work through a multi-step request:
 
 Identify the requirements from the available context. Explore the project enough to make the plan concrete and accurate.
 
-If a required referenced file path is missing, ask for it:
+If the original requirements are unclear, incomplete, or ambiguous, call the AskUserQuestion tool before creating the task list. Ask only the questions needed to avoid implementing the wrong behavior, and keep each question specific to the decision that affects the plan or acceptance criteria.
+
+If a required referenced file path is missing, ask for it with AskUserQuestion:
 
 ```
 What is the path to the referenced file?
@@ -35,6 +38,7 @@ Referenced files can be in any text format (.md, .txt, etc.) that contains task 
 - Are there dependencies between tasks?
 - What is the complexity level?
 - Which files, modules, commands, or tests are relevant?
+- What ambiguity would change the implementation or acceptance criteria?
 
 ### Step 2: Create the task list
 
@@ -229,13 +233,14 @@ Add implementation notes or findings:
 ## Workflow Summary
 
 1. Analyze the requirements and relevant project context
-2. Call UpdatePlan with the structured markdown task list
-3. Refresh the remaining plan before the first task
-4. For each task:
+2. Call AskUserQuestion if the original requirements are unclear or ambiguous
+3. Call UpdatePlan with the structured markdown task list
+4. Refresh the remaining plan before the first task
+5. For each task:
    - Update to `[>]` with UpdatePlan
    - Execute the task
    - Update to `[x]` with UpdatePlan
    - Re-evaluate and revise remaining tasks before moving on
-5. Call UpdatePlan with all tasks completed and summarize the result
+6. Call UpdatePlan with all tasks completed and summarize the result
 
 This approach keeps planning and progress tracking in the UpdatePlan display, leaving source materials unchanged unless the actual task requires editing them.
