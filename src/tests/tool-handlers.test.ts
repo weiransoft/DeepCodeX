@@ -8,6 +8,7 @@ import type { ToolExecutionContext } from "../tools/executor";
 import { handleBashTool } from "../tools/bash-handler";
 import { handleEditTool } from "../tools/edit-handler";
 import { handleReadTool } from "../tools/read-handler";
+import { handleUpdatePlanTool } from "../tools/update-plan-handler";
 import { handleWriteTool } from "../tools/write-handler";
 
 const tempDirs: string[] = [];
@@ -49,6 +50,31 @@ test("Bash streams stdout and stderr before command completion", async () => {
   assert.match(streamedOutput, /first/);
   assert.match(streamedOutput, /second/);
   assert.match(streamedOutput, /err/);
+});
+
+test("UpdatePlan accepts a markdown task list string", async () => {
+  const workspace = createTempWorkspace();
+  const plan = ["## Task List", "", "- [>] Inspect current behavior", "- [ ] Implement UpdatePlan"].join("\n");
+
+  const result = await handleUpdatePlanTool({ plan }, createContext("update-plan", workspace));
+
+  assert.equal(result.ok, true);
+  assert.equal(result.name, "UpdatePlan");
+  assert.equal(result.output, "Plan updated.");
+  assert.equal(result.metadata?.plan, plan);
+});
+
+test("UpdatePlan rejects non-string plan payloads", async () => {
+  const workspace = createTempWorkspace();
+
+  const result = await handleUpdatePlanTool(
+    { plan: [{ step: "Inspect current behavior", status: "in_progress" }] },
+    createContext("update-plan-invalid", workspace)
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.name, "UpdatePlan");
+  assert.match(result.error ?? "", /InputValidationError/);
 });
 
 test("Read returns snippet metadata and Edit can scope replacements by snippet_id", async () => {

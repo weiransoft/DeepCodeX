@@ -9,7 +9,14 @@ import type { ChatCompletionMessageParam, ChatCompletionContentPart } from "open
 import { launchNotifyScript } from "./common/notify";
 import { buildThinkingRequestOptions } from "./common/openai-thinking";
 import { DEEPSEEK_V4_MODELS, supportsMultimodal } from "./common/model-capabilities";
-import { getCompactPrompt, getSystemPrompt, getTools, AGENT_DRIFT_GUARD_SKILL, type ToolDefinition } from "./prompt";
+import {
+  getCompactPrompt,
+  getDefaultSkillPrompt,
+  getRuntimeContext,
+  getSystemPrompt,
+  getTools,
+  type ToolDefinition,
+} from "./prompt";
 import { ToolExecutor, type CreateOpenAIClient } from "./tools/executor";
 import { McpManager } from "./mcp/mcp-manager";
 import type { McpServerConfig } from "./settings";
@@ -912,19 +919,28 @@ The candidate skills are as follows:\n\n`;
     this.saveSessionsIndex(index);
     this.removeSessionMessages(droppedEntries.map((item) => item.id));
 
-    const systemPrompt = getSystemPrompt(this.projectRoot, this.getPromptToolOptions());
+    const promptToolOptions = this.getPromptToolOptions();
+    const systemPrompt = getSystemPrompt(this.projectRoot, promptToolOptions);
     const systemMessage = this.buildSystemMessage(sessionId, systemPrompt);
     this.appendSessionMessage(sessionId, systemMessage);
+
+    const defaultSkillPrompt = getDefaultSkillPrompt();
+    if (defaultSkillPrompt) {
+      const defaultSkillMessage = this.buildSystemMessage(sessionId, defaultSkillPrompt);
+      this.appendSessionMessage(sessionId, defaultSkillMessage);
+    }
+
+    const runtimeContextMessage = this.buildSystemMessage(
+      sessionId,
+      getRuntimeContext(this.projectRoot, promptToolOptions.model)
+    );
+    this.appendSessionMessage(sessionId, runtimeContextMessage);
 
     const agentInstructions = this.loadAgentInstructions();
     if (agentInstructions) {
       const instructionsMessage = this.buildSystemMessage(sessionId, agentInstructions);
       this.appendSessionMessage(sessionId, instructionsMessage);
     }
-
-    const defaultSkillPrompt = `Use the skill document below to assist the user:\n<agent-drift-guard-skill>${AGENT_DRIFT_GUARD_SKILL}</agent-drift-guard-skill>`;
-    const defaultSkillMessage = this.buildSystemMessage(sessionId, defaultSkillPrompt);
-    this.appendSessionMessage(sessionId, defaultSkillMessage);
 
     const userMessage = this.buildUserMessage(sessionId, userPrompt);
     this.appendSessionMessage(sessionId, userMessage);
@@ -2037,6 +2053,8 @@ ${skillMd}
       if (description) {
         return description;
       }
+    } else if (toolName === "UpdatePlan") {
+      return typeof args.explanation === "string" ? args.explanation.trim() : "";
     }
 
     const firstKey = Object.keys(args)[0];
