@@ -636,7 +636,10 @@ test("createSession appends default system prompts in prefix-cache-friendly orde
   assert.doesNotMatch(systemContents[1] ?? "", /当前LLM模型为test-model/);
   assert.match(systemContents[2] ?? "", /# Local Workspace Environment/);
   assert.match(systemContents[2] ?? "", /当前LLM模型为test-model/);
-  assert.match(systemContents[2] ?? "", new RegExp(escapeRegExp(`"root path": "${workspace}"`)));
+  const environmentJsonMatch = (systemContents[2] ?? "").match(/```json\n([\s\S]+?)\n```/);
+  assert.ok(environmentJsonMatch);
+  const environmentInfo = JSON.parse(environmentJsonMatch[1] ?? "{}") as { "root path"?: string };
+  assert.equal(environmentInfo["root path"], workspace);
   assert.equal(systemContents[3], "root project instructions");
 });
 
