@@ -503,7 +503,14 @@ export function App({ projectRoot, version = "", initialPrompt, onRestart }: App
           onCancel={() => setView("chat")}
         />
       ) : view === "mcp-status" ? (
-        <McpStatusList statuses={mcpStatuses} onCancel={() => setView("chat")} />
+        <McpStatusList
+          statuses={mcpStatuses}
+          onCancel={() => setView("chat")}
+          onReconnect={(name) => {
+            const latest = resolveCurrentSettings(projectRoot);
+            void sessionManager.reconnectMcpServer(name, latest.mcpServers?.[name]);
+          }}
+        />
       ) : shouldShowQuestionPrompt && pendingQuestion && !busy ? (
         <AskUserQuestionPrompt
           questions={pendingQuestion.questions}

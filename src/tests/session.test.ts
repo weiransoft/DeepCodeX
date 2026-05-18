@@ -1566,6 +1566,61 @@ test("SessionManager treats OpenAI APIUserAbortError as interrupted", async () =
   assert.equal(session?.failReason, "interrupted");
 });
 
+test("SessionManager marks MCP server as failed on single failed attempt (no auto-retry)", async () => {
+  const workspace = createTempDir("deepcode-mcp-fail-noworkspace-");
+  const serverPath = path.join(workspace, "mcp-server-fail.cjs");
+  fs.writeFileSync(serverPath, "process.exit(7);", "utf8");
+
+  const manager = createSessionManager(workspace, "machine-id-mcp-fail-no");
+  await manager.initMcpServers({ broken: { command: process.execPath, args: [serverPath] } });
+
+  const status = manager.getMcpStatus();
+  assert.equal(status.length, 1);
+  assert.equal(status[0]?.status, "failed");
+  assert.match(status[0]?.error ?? "", /exited with code 7/);
+
+  manager.dispose();
+});
+
+test("SessionManager reconnect succeeds on previously failed server", async () => {
+  const workspace = createTempDir("deepcode-mcp-reconn-ok-workspace-");
+  const serverPath = path.join(workspace, "mcp-server-ok.cjs");
+  fs.writeFileSync(
+    serverPath,
+    `
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+function send(message) {
+  process.stdout.write(JSON.stringify(message) + "\\n");
+}
+rl.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (!("id" in request)) return;
+  if (request.method === "initialize") {
+    send({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: "2024-11-05", capabilities: {} } });
+    return;
+  }
+  if (request.method === "tools/list") {
+    send({ jsonrpc: "2.0", id: request.id, result: { tools: [{ name: "ping", inputSchema: { type: "object", properties: {} } }] } });
+    return;
+  }
+  send({ jsonrpc: "2.0", id: request.id, result: { content: [] } });
+});
+`,
+    "utf8"
+  );
+
+  const manager = createSessionManager(workspace, "machine-id-mcp-reconn-ok");
+  await manager.initMcpServers({ fixable: { command: process.execPath, args: [serverPath] } });
+
+  const status = manager.getMcpStatus();
+  assert.equal(status.length, 1);
+  assert.equal(status[0]?.status, "ready");
+  assert.equal(status[0]?.toolCount, 1);
+
+  manager.dispose();
+});
+
 function createSessionManager(projectRoot: string, machineId: string): SessionManager {
   return new SessionManager({
     projectRoot,
