@@ -17,6 +17,7 @@
     "dist/cli.js",
     "templates/tools/**",
     "templates/prompts/**",
+    "templates/skills/**",
     "README.md",
     "LICENSE"
   ],

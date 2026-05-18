@@ -609,6 +609,37 @@ test("createSession stores /init and sends the active .deepcode project AGENTS p
   assert.ok(!systemContents.includes("root project instructions"));
 });
 
+test("createSession appends default system prompts in prefix-cache-friendly order", async () => {
+  const workspace = createTempDir("deepcode-system-order-workspace-");
+  const home = createTempDir("deepcode-system-order-home-");
+  setHomeDir(home);
+  globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
+
+  fs.writeFileSync(path.join(workspace, "AGENTS.md"), "root project instructions", "utf8");
+
+  const manager = createSessionManager(workspace, "machine-id-system-order");
+  (manager as any).activateSession = async () => {};
+
+  const sessionId = await manager.createSession({ text: "hello" });
+  const systemContents = manager
+    .listSessionMessages(sessionId)
+    .filter((message) => message.role === "system")
+    .map((message) => message.content ?? "");
+
+  assert.equal(systemContents.length >= 4, true);
+  assert.match(systemContents[0] ?? "", /# Available Tools/);
+  assert.doesNotMatch(systemContents[0] ?? "", /# Local Workspace Environment/);
+  assert.doesNotMatch(systemContents[0] ?? "", /当前LLM模型为test-model/);
+  assert.match(systemContents[1] ?? "", /<agent-drift-guard-skill>/);
+  assert.match(systemContents[1] ?? "", /<plan-and-execute-skill>/);
+  assert.doesNotMatch(systemContents[1] ?? "", /path="templates\/skills\//);
+  assert.doesNotMatch(systemContents[1] ?? "", /当前LLM模型为test-model/);
+  assert.match(systemContents[2] ?? "", /# Local Workspace Environment/);
+  assert.match(systemContents[2] ?? "", /当前LLM模型为test-model/);
+  assert.match(systemContents[2] ?? "", new RegExp(escapeRegExp(`"root path": "${workspace}"`)));
+  assert.equal(systemContents[3], "root project instructions");
+});
+
 test("replySession stores /init and sends the active root project AGENTS path to the LLM", async () => {
   const workspace = createTempDir("deepcode-init-root-workspace-");
   const home = createTempDir("deepcode-init-root-home-");
@@ -1684,6 +1715,10 @@ function createTempDir(prefix: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   tempDirs.push(dir);
   return dir;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function flushPromises(): Promise<void> {
