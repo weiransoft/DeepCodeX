@@ -2032,6 +2032,8 @@ ${skillMd}
       if (description) {
         return description;
       }
+    } else if (toolName === "UpdatePlan") {
+      return typeof args.explanation === "string" ? args.explanation.trim() : "";
     }
 
     const firstKey = Object.keys(args)[0];

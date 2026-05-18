@@ -1160,6 +1160,27 @@ test("buildOpenAIMessages preserves a real failed tool result", () => {
   assert.doesNotMatch(openAIMessages[1]?.content ?? "", /Previous tool call did not complete/);
 });
 
+test("UpdatePlan tool params only show explanation when provided", () => {
+  const manager = createSessionManager(process.cwd(), "machine-id-update-plan-params");
+  const plan = "## Task List\n\n- [ ] Inspect project";
+
+  const withExplanation = (manager as any).buildToolMessage(
+    "session-1",
+    "call-plan-1",
+    JSON.stringify({ ok: true, name: "UpdatePlan", output: "Plan updated." }),
+    { name: "UpdatePlan", arguments: JSON.stringify({ plan, explanation: "Start planning" }) }
+  ) as SessionMessage;
+  const withoutExplanation = (manager as any).buildToolMessage(
+    "session-1",
+    "call-plan-2",
+    JSON.stringify({ ok: true, name: "UpdatePlan", output: "Plan updated." }),
+    { name: "UpdatePlan", arguments: JSON.stringify({ plan }) }
+  ) as SessionMessage;
+
+  assert.equal(withExplanation.meta?.paramsMd, "Start planning");
+  assert.equal(withoutExplanation.meta?.paramsMd, "");
+});
+
 test("buildOpenAIMessages repairs mixed missing duplicate and orphan tool messages", () => {
   const manager = createSessionManager(process.cwd(), "machine-id-mixed-tool-badcase");
   const assistantMessage = (manager as any).buildAssistantMessage(
