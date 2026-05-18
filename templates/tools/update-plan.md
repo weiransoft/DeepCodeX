@@ -8,6 +8,8 @@ Usage:
 - The `plan` argument is a markdown string, not an array of step objects.
 - Keep exactly one task marked `[>]` while work is in progress.
 - Update the plan before starting a task, immediately after completing a task, and whenever tasks are split, merged, reordered, blocked, or changed.
+- Before executing the first task and after completing each task, re-evaluate the latest conversation and project context, then revise the remaining plan if needed.
+- Remove tasks that are no longer relevant, and add newly discovered follow-up tasks before working on them.
 
 ```json
 {

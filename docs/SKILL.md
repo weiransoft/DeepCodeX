@@ -11,16 +11,16 @@ This Skill helps you automatically plan and execute requirements. It creates a s
 
 When you need to work through a multi-step request:
 
-1. Understand the requirements
-2. Read referenced files only when they are needed for context
-3. Create a markdown task list by calling the UpdatePlan tool
-4. Execute tasks one by one, updating the tool plan in real time
+1. Analyze the requirements and explore enough project context
+2. Create a markdown task list by calling the UpdatePlan tool
+3. Execute tasks one by one, updating the tool plan in real time
+4. Revise the remaining plan as new context appears
 
 ## Instructions
 
-### Step 1: Gather the requirements
+### Step 1: Analyze the requirements
 
-Identify the requirements from the available context. Do not require the requirements to be moved into a separate document.
+Identify the requirements from the available context. Explore the project enough to make the plan concrete and accurate.
 
 If a required referenced file path is missing, ask for it:
 
@@ -30,16 +30,13 @@ What is the path to the referenced file?
 
 Referenced files can be in any text format (.md, .txt, etc.) that contains task requirements or feature descriptions. If no additional file is needed, continue from the available requirements.
 
-### Step 2: Read and analyze the requirements
-
-Analyze the requirements and read any referenced files needed for context:
-
 - What are the main requirements?
 - What tasks need to be completed?
 - Are there dependencies between tasks?
 - What is the complexity level?
+- Which files, modules, commands, or tests are relevant?
 
-### Step 3: Create the task list
+### Step 2: Create the task list
 
 Create a structured markdown task list and pass it to the UpdatePlan tool as the `plan` string. The tool input must use this shape:
 
@@ -59,25 +56,28 @@ Use this markdown format for the `plan` content:
 - [ ] Task 3 description
 ```
 
-Do not append the task list to a source file. Break down complex requirements into specific, actionable tasks and call UpdatePlan with the full markdown task list.
+Break down complex requirements into specific, actionable tasks and call UpdatePlan with the full markdown task list.
 
-### Step 4: Execute tasks systematically
+### Step 3: Execute tasks systematically
 
 For each task in the list:
 
-1. **Mark as in progress**: Call UpdatePlan with the task changed from `[ ]` to `[>]`
-2. **Execute the task**: Use appropriate tools to complete the work
-3. **Mark as completed**: Call UpdatePlan with the task changed from `[>]` to `[x]` when finished
-4. **Move to next task**: Only ONE task should be in progress at a time
+1. **Refresh the plan**: Before starting the first task and after completing each task, re-evaluate the latest conversation and project context. Update the remaining tasks when scope, order, blockers, or follow-up work changes.
+2. **Mark as in progress**: Call UpdatePlan with the task changed from `[ ]` to `[>]`
+3. **Execute the task**: Use appropriate tools to complete the work
+4. **Mark as completed**: Call UpdatePlan with the task changed from `[>]` to `[x]` when finished
+5. **Move to next task**: Only ONE task should be in progress at a time
 
 Important rules:
+- Always keep the plan aligned with the latest context before executing the next task
 - Always call UpdatePlan BEFORE starting work on a task
 - Always call UpdatePlan IMMEDIATELY after completing a task
 - Always pass the complete current markdown task list, not a partial diff
 - Never work on multiple tasks simultaneously
+- Remove tasks that are no longer relevant, and add newly discovered tasks before working on them
 - If you encounter errors, keep the task as `[>]` and create new tasks to resolve blockers
 
-### Step 5: Handle task breakdown
+### Step 4: Handle task breakdown
 
 If during execution you discover a task is more complex than expected:
 
@@ -90,7 +90,7 @@ If during execution you discover a task is more complex than expected:
    ```
 3. Complete sub-tasks first, then mark the main task as complete with UpdatePlan
 
-### Step 6: Final verification
+### Step 5: Final verification
 
 After all tasks are completed (`[x]`):
 
@@ -230,7 +230,7 @@ Add implementation notes or findings:
 
 This Skill uses standard tools:
 
-- **Read**: To inspect referenced files when needed
+- **Read**: To inspect relevant files and explore project context
 - **UpdatePlan**: To create and update the markdown task list
 - **Bash**: To run tests, builds, or other commands
 - **Write**: To create new files if needed
@@ -239,13 +239,14 @@ No additional dependencies required.
 
 ## Workflow Summary
 
-1. Analyze the requirements
-2. Read referenced files when needed
-3. Call UpdatePlan with the structured markdown task list
+1. Analyze the requirements and relevant project context
+2. Call UpdatePlan with the structured markdown task list
+3. Refresh the remaining plan before the first task
 4. For each task:
    - Update to `[>]` with UpdatePlan
    - Execute the task
    - Update to `[x]` with UpdatePlan
+   - Re-evaluate and revise remaining tasks before moving on
 5. Call UpdatePlan with all tasks completed and summarize the result
 
 This approach keeps planning and progress tracking in the UpdatePlan display, leaving source materials unchanged unless the actual task requires editing them.
