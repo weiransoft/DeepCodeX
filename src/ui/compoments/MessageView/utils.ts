@@ -234,7 +234,21 @@ export function renderMessageToStdout(message: SessionMessage, mode: RawMode): s
     const name = payload.name || metaFunctionName || "tool";
     const metaParams = typeof message.meta?.paramsMd === "string" ? message.meta.paramsMd.trim() : "";
     const params = name.toLowerCase() === "bash" ? metaParams : truncate(metaParams, 120);
-    return `${chalk("✧")} ${chalk(formatStatusName(name))}${params ? ` ${chalk(params)}` : ""}`;
+    const statusLine = `${chalk("✧")} ${chalk(formatStatusName(name))}${params ? ` ${chalk(params)}` : ""}`;
+
+    const summary: ToolSummary = {
+      name,
+      params,
+      ok: payload.ok !== false,
+      metadata: payload.metadata,
+    };
+    const planLines = getUpdatePlanPreviewLines(summary);
+    if (planLines.length > 0) {
+      const planText = planLines.map((line) => `  ${line}`).join("\n");
+      return `${statusLine}\n${chalk.dim("  └ Plan")}\n${planText}`;
+    }
+
+    return statusLine;
   }
 
   if (message.role === "system") {
