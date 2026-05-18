@@ -4,40 +4,47 @@
 
 ```
 src/
-├── cli.tsx              # Entry point — parses args, renders Ink App
+├── cli.tsx              # Entry point — parses args (-p, -v), renders Ink App
 ├── session.ts           # SessionManager — LLM loop, compaction, tool orchestration
 ├── settings.ts          # Settings resolution from ~/.deepcode/settings.json
-├── prompt.ts            # System prompt builder, tool definitions, agent-drift-guard skill
+├── prompt.ts            # System prompt builder, tool definitions, built-in skills
 ├── common/
 │   ├── model-capabilities.ts # Model detection and thinking-mode defaults
+│   ├── openai-thinking.ts    # OpenAI thinking request options builder
 │   ├── file-utils.ts    # File read/write with encoding and diff preview
 │   ├── shell-utils.ts   # Shell path resolution (Git Bash, zsh, bash)
 │   ├── state.ts         # In-memory file state and snippet tracking
-│   └── runtime.ts       # Tool validation runtime helpers
+│   ├── runtime.ts       # Tool validation runtime helpers
+│   ├── notify.ts        # Desktop notification after LLM turn completion
+│   ├── debug-logger.ts  # Debug logging for OpenAI API calls
+│   └── error-logger.ts  # API error logging
 ├── ui/
 │   ├── App.tsx          # Root Ink component — state, routing, session orchestration
-│   ├── PromptInput.tsx  # Multi-line input with slash commands, image paste, skills
+│   ├── PromptInput.tsx  # Multi-line input with file mentions (@), slash commands, image paste, skills
 │   ├── MessageView.tsx  # Renders assistant/tool messages with markdown
-│   ├── DropdownMenu.tsx # Reusable dropdown for skill/model selection
-│   ├── SessionList.tsx  # Session picker for /resume
-│   ├── promptUndoRedo.ts # Ctrl+- undo / Ctrl+Shift+- redo for prompt input
+│   ├── McpStatusList.tsx # MCP server connection status and available tools
+│   ├── ProcessStdoutView.tsx # Ctrl+O fullscreen overlay for live process stdout
+│   ├── UpdatePrompt.tsx  # UpdatePlan task list progress display
+│   ├── fileMentions.ts  # @-mention file scanning, filtering, and insertion
 │   └── ...
 ├── mcp/
 │   ├── mcp-client.ts    # MCP client — JSON-RPC communication with MCP servers
-│   └── mcp-manager.ts   # MCP manager — lifecycle, tool registration, execution
+│   └── mcp-manager.ts   # MCP manager — lifecycle, tool registration, execution, status
 ├── tools/
-│   ├── executor.ts      # ToolExecutor — dispatches tool calls to handlers
-│   ├── bash-handler.ts  # Executes shell commands
-│   ├── read-handler.ts  # Reads files and images
+│   ├── executor.ts      # ToolExecutor — dispatches tool calls to handlers (7 built-in)
+│   ├── bash-handler.ts  # Executes shell commands with live stdout streaming
+│   ├── read-handler.ts  # Reads files, images, PDFs, and notebooks
 │   ├── write-handler.ts # Creates/overwrites files
-│   ├── edit-handler.ts  # Scoped string replacements in files
-│   ├── web-search-handler.ts # Web search tool
-│   └── ask-user-question-handler.ts # Interactive user prompts
-├── tests/               # Test suite — one *.test.ts per module
+│   ├── edit-handler.ts  # Scoped string replacements with snippet tracking
+│   ├── update-plan-handler.ts # Updates the task plan progress display
+│   ├── web-search-handler.ts  # Web search via natural language queries
+│   └── ask-user-question-handler.ts # Interactive user prompts with options
+├── tests/               # One *.test.ts per source module, plus run-tests.mjs
 templates/
 ├── tools/               # Tool descriptions fed to the LLM
+├── skills/              # Built-in skill definitions (agent-drift-guard, plan-and-execute)
 ├── prompts/             # EJS templates (e.g., init_command.md.ejs)
-docs/                    # User-facing documentation
+docs/                    # User-facing documentation (configuration, MCP, skills)
 dist/                    # Bundled CLI output (gitignored)
 ```
 
@@ -80,7 +87,7 @@ Run the CLI locally for manual testing: `node dist/cli.js` (after `npm run bundl
 - **Coverage**: Target meaningful unit tests for core logic (session management, tool handlers, settings resolution, prompt buffer). Test files are in `src/tests/` matching the source module name.
 - **Test naming**: `describe`/`test` blocks with descriptive names. Example: `test("SessionManager preserves structured system content when building OpenAI messages", ...)`
 - **Relaxed lint rules**: Test files allow `any` and unused vars.
-- Run all tests with `npm test` before submitting a PR.
+- Run all tests with `npm test` before submitting a PR. A cross-platform test runner is available at `src/tests/run-tests.mjs`.
 
 ## Commit & Pull Request Guidelines
 
@@ -102,12 +109,18 @@ Run the CLI locally for manual testing: `node dist/cli.js` (after `npm run bundl
 
 ## Architecture Overview
 
-The CLI renders a terminal UI using [Ink](https://github.com/vadimdemedes/ink) (React for terminals). `SessionManager` drives the LLM interaction loop: it builds system prompts, sends user messages with optional skills/images, streams responses, executes tool calls via `ToolExecutor`, and compacts context when token thresholds are exceeded (512K for DeepSeek V4 models, 128K for others).
+The CLI (`@vegamo/deepcode-cli`) renders a terminal UI using [Ink](https://github.com/vadimdemedes/ink) (React for terminals). `SessionManager` drives the LLM interaction loop: it builds system prompts, sends user messages with optional skills/images, streams responses, executes tool calls via `ToolExecutor`, and compacts context when token thresholds are exceeded (512K for DeepSeek V4 models, 128K for others).
 
-Six tools are available to the LLM: `bash`, `read`, `write`, `edit`, `AskUserQuestion`, and `WebSearch`. Tool definitions are registered in `src/tools/executor.ts` and described to the LLM via `src/prompt.ts` and `templates/tools/`.
+Seven built-in tools are available to the LLM: `bash`, `read`, `write`, `edit`, `AskUserQuestion`, `UpdatePlan`, and `WebSearch`. Tool definitions are registered in `src/tools/executor.ts` and described to the LLM via `src/prompt.ts` and `templates/tools/`. The `UpdatePlan` tool enables the LLM to display and update a structured task list in the terminal.
+
+**Slash commands**: `/model`, `/new`, `/init`, `/resume`, `/continue`, `/mcp`, `/exit`, plus dynamic `/skill-name` for each loaded skill.
+
+**Key UI features**: `@` file mentions in the prompt input (scans project files), `Ctrl+O` to view live process stdout in fullscreen, `Ctrl+V` to paste images, MCP server status display.
+
+**CLI flags**: `-p <prompt>` / `--prompt` to auto-submit a prompt on launch, `-v` / `--version`, `-h` / `--help`.
 
 ## Agent-Specific Instructions
 
 - **AGENTS.md loading**: The CLI loads agent instructions from `./AGENTS.md`, `./.deepcode/AGENTS.md`, or `~/.deepcode/AGENTS.md` (first found wins). Write project-specific guidance for the LLM in any of these.
 - **Skills**: Place skill definitions in `~/.agents/skills/<name>/SKILL.md` (user-level) or `./.agents/skills/<name>/SKILL.md` (project-level). Legacy path `./.deepcode/skills/` is also supported. Each SKILL.md uses YAML frontmatter with `name` and `description` fields.
-- The built-in `agent-drift-guard` skill is always injected into every session.
+- **Built-in skills**: `agent-drift-guard` (detects and corrects execution drift) and `plan-and-execute` (structured task planning with progress tracking). Both are defined in `templates/skills/` and always injected into every session.
