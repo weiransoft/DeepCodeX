@@ -512,6 +512,7 @@ export function App({ projectRoot, version = "", initialPrompt, onRestart }: App
         />
       ) : isExiting ? null : (
         <PromptInput
+          projectRoot={projectRoot}
           screenWidth={screenWidth}
           skills={skills}
           modelConfig={resolvedSettings}

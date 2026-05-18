@@ -79,5 +79,14 @@ export {
   type SlashCommandKind,
   type SlashCommandItem,
 } from "./slashCommands";
+export {
+  filterFileMentionItems,
+  formatFileMentionPath,
+  getCurrentFileMentionToken,
+  replaceCurrentFileMentionToken,
+  scanFileMentionItems,
+  type FileMentionItem,
+  type FileMentionToken,
+} from "./fileMentions";
 export { findExpandedThinkingId } from "./thinkingState";
 export { buildExitSummaryText } from "./exitSummary";

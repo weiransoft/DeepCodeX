@@ -30,6 +30,13 @@ import {
 } from "./promptUndoRedo";
 import { buildSlashCommands, filterSlashCommands, findExactSlashCommand } from "./slashCommands";
 import type { SlashCommandItem } from "./slashCommands";
+import {
+  filterFileMentionItems,
+  getCurrentFileMentionToken,
+  replaceCurrentFileMentionToken,
+  scanFileMentionItems,
+} from "./fileMentions";
+import type { FileMentionItem } from "./fileMentions";
 import { readClipboardImageAsync } from "./clipboard";
 import type { SkillInfo } from "../session";
 
@@ -52,6 +59,7 @@ export type PromptSubmission = {
 };
 
 type Props = {
+  projectRoot: string;
   skills: SkillInfo[];
   modelConfig: ModelConfigSelection;
   screenWidth: number;
@@ -103,6 +111,7 @@ const PromptPrefixLine = React.memo(function PromptPrefixLine({ busy }: { busy: 
 });
 
 export const PromptInput = React.memo(function PromptInput({
+  projectRoot,
   skills,
   modelConfig,
   screenWidth,
@@ -130,18 +139,36 @@ export const PromptInput = React.memo(function PromptInput({
   const [modelDropdownStep, setModelDropdownStep] = useState<ModelDropdownStep | null>(null);
   const [modelDropdownIndex, setModelDropdownIndex] = useState(0);
   const [pendingModel, setPendingModel] = useState<string | null>(null);
+  const [fileMentionIndex, setFileMentionIndex] = useState(0);
+  const [dismissedFileMentionKey, setDismissedFileMentionKey] = useState<string | null>(null);
   const [historyCursor, setHistoryCursor] = useState(-1);
   const [draftBeforeHistory, setDraftBeforeHistory] = useState<string | null>(null);
   const [hasTerminalFocus, setHasTerminalFocus] = useState(true);
   const lastCtrlDAt = React.useRef<number>(0);
   const undoRedoRef = React.useRef(createPromptUndoRedoState());
 
+  const fileMentionItems = React.useMemo(() => scanFileMentionItems(projectRoot), [projectRoot]);
+  const fileMentionToken = getCurrentFileMentionToken(buffer);
+  const fileMentionKey = fileMentionToken ? `${fileMentionToken.start}:${fileMentionToken.query}` : null;
+  const fileMentionMatches = React.useMemo(
+    () => (fileMentionToken ? filterFileMentionItems(fileMentionItems, fileMentionToken.query) : []),
+    [fileMentionItems, fileMentionToken]
+  );
+  const showFileMentionMenu =
+    !showSkillsDropdown &&
+    !modelDropdownStep &&
+    fileMentionToken !== null &&
+    fileMentionKey !== dismissedFileMentionKey;
   const slashItems = React.useMemo(() => buildSlashCommands(skills), [skills]);
   const slashToken = getCurrentSlashToken(buffer);
   const slashMenu = React.useMemo(
     () =>
-      showSkillsDropdown || modelDropdownStep ? [] : slashToken ? filterSlashCommands(slashItems, slashToken) : [],
-    [showSkillsDropdown, modelDropdownStep, slashToken, slashItems]
+      showSkillsDropdown || modelDropdownStep || showFileMentionMenu
+        ? []
+        : slashToken
+          ? filterSlashCommands(slashItems, slashToken)
+          : [],
+    [showSkillsDropdown, modelDropdownStep, showFileMentionMenu, slashToken, slashItems]
   );
   const showMenu = slashMenu.length > 0;
   const promptHistoryKey = React.useMemo(() => promptHistory.join("\0"), [promptHistory]);
@@ -153,7 +180,7 @@ export const PromptInput = React.memo(function PromptInput({
       ? loadingText && loadingText.trim()
         ? `${loadingText}${processHint}`
         : `esc to interrupt · ctrl+c to cancel input${processHint}`
-      : `enter send · shift+enter newline · ctrl+v image · / commands · ctrl+d exit${processHint}`;
+      : `enter send · shift+enter newline · @ files · ctrl+v image · / commands · ctrl+d exit${processHint}`;
   useTerminalFocusReporting(stdout, !disabled);
   useTerminalExtendedKeys(stdout, !disabled);
   useHiddenTerminalCursor(stdout, !disabled);
@@ -167,6 +194,22 @@ export const PromptInput = React.memo(function PromptInput({
       setMenuIndex(slashMenu.length - 1);
     }
   }, [slashMenu, showMenu, menuIndex]);
+
+  useEffect(() => {
+    if (!fileMentionKey) {
+      setDismissedFileMentionKey(null);
+    }
+  }, [fileMentionKey]);
+
+  useEffect(() => {
+    if (!showFileMentionMenu) {
+      setFileMentionIndex(0);
+      return;
+    }
+    if (fileMentionIndex >= fileMentionMatches.length) {
+      setFileMentionIndex(Math.max(0, fileMentionMatches.length - 1));
+    }
+  }, [fileMentionMatches.length, fileMentionIndex, showFileMentionMenu]);
 
   useEffect(() => {
     if (skillsDropdownIndex >= skills.length) {
@@ -220,6 +263,10 @@ export const PromptInput = React.memo(function PromptInput({
         }
         if (showSkillsDropdown) {
           setShowSkillsDropdown(false);
+          return;
+        }
+        if (showFileMentionMenu && fileMentionKey) {
+          setDismissedFileMentionKey(fileMentionKey);
           return;
         }
         if (busy) {
@@ -352,6 +399,35 @@ export const PromptInput = React.memo(function PromptInput({
       const noModifier = !key.shift && !key.ctrl && !key.meta;
       const returnAction = getPromptReturnKeyAction(key);
       const isPlainReturn = returnAction === "submit";
+
+      if (showFileMentionMenu) {
+        if (key.upArrow) {
+          if (fileMentionMatches.length > 0) {
+            setFileMentionIndex((idx) => (idx - 1 + fileMentionMatches.length) % fileMentionMatches.length);
+          }
+          return;
+        }
+        if (key.downArrow) {
+          if (fileMentionMatches.length > 0) {
+            setFileMentionIndex((idx) => (idx + 1) % fileMentionMatches.length);
+          }
+          return;
+        }
+        if (key.tab || returnAction === "submit") {
+          const selected = fileMentionMatches[fileMentionIndex];
+          if (selected && fileMentionToken) {
+            insertFileMentionSelection(selected);
+            return;
+          }
+          if (key.tab) {
+            setDismissedFileMentionKey(fileMentionKey);
+            return;
+          }
+          if (fileMentionKey) {
+            setDismissedFileMentionKey(fileMentionKey);
+          }
+        }
+      }
 
       if (showMenu) {
         if (key.upArrow) {
@@ -585,6 +661,14 @@ export const PromptInput = React.memo(function PromptInput({
     setHistoryCursor(nextCursor);
   }
 
+  function insertFileMentionSelection(item: FileMentionItem): void {
+    if (!fileMentionToken) {
+      return;
+    }
+    updateBuffer((state) => replaceCurrentFileMentionToken(state, fileMentionToken, item.path));
+    setDismissedFileMentionKey(null);
+  }
+
   function handleSlashSelection(item: SlashCommandItem): void {
     if (busy && item.kind !== "exit") {
       setStatusMessage("wait for the current response or press esc to interrupt");
@@ -760,8 +844,8 @@ export const PromptInput = React.memo(function PromptInput({
         }));
 
   const showFooterText = useMemo(
-    () => showMenu || showSkillsDropdown || modelDropdownStep !== null,
-    [showMenu, showSkillsDropdown, modelDropdownStep]
+    () => showMenu || showSkillsDropdown || modelDropdownStep !== null || showFileMentionMenu,
+    [showMenu, showSkillsDropdown, modelDropdownStep, showFileMentionMenu]
   );
 
   return (
@@ -828,6 +912,22 @@ export const PromptInput = React.memo(function PromptInput({
           activeIndex={modelDropdownIndex}
           activeColor="#229ac3"
           maxVisible={6}
+        />
+      ) : null}
+      {showFileMentionMenu ? (
+        <DropdownMenu
+          width={screenWidth}
+          title="Mention File"
+          helpText="Enter/Tab insert · Esc close"
+          emptyText={fileMentionToken?.query ? "No matching files" : "Type after @ to search files"}
+          items={fileMentionMatches.map((item) => ({
+            key: item.path,
+            label: item.path,
+            description: item.type === "directory" ? "directory" : "file",
+          }))}
+          activeIndex={fileMentionIndex}
+          activeColor="#229ac3"
+          maxVisible={8}
         />
       ) : null}
       <SlashCommandMenu width={screenWidth} items={slashMenu} activeIndex={menuIndex} />
