@@ -1,6 +1,16 @@
 import type { SkillInfo } from "../session";
 
-export type SlashCommandKind = "skill" | "skills" | "model" | "new" | "init" | "resume" | "continue" | "mcp" | "exit";
+export type SlashCommandKind =
+  | "skill"
+  | "skills"
+  | "model"
+  | "new"
+  | "init"
+  | "resume"
+  | "continue"
+  | "mcp"
+  | "raw"
+  | "exit";
 
 export type SlashCommandItem = {
   kind: SlashCommandKind;
@@ -8,6 +18,7 @@ export type SlashCommandItem = {
   label: string;
   description: string;
   skill?: SkillInfo;
+  args?: string[];
 };
 
 export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
@@ -54,6 +65,13 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
     description: "Show MCP server status and available tools",
   },
   {
+    kind: "raw",
+    name: "raw",
+    label: "/raw",
+    args: ["lite", "normal", "raw-scrollback"],
+    description: "Toggle display mode for viewing or collapsing reasoning content",
+  },
+  {
     kind: "exit",
     name: "exit",
     label: "/exit",
@@ -88,7 +106,7 @@ export function findExactSlashCommand(items: SlashCommandItem[], token: string):
     return null;
   }
   const query = token.slice(1);
-  const matches = items.filter((item) => item.name === query);
+  const matches = items.filter((item) => item.name.includes(query));
   return matches.find((item) => item.kind !== "skill") ?? matches[0] ?? null;
 }
 
