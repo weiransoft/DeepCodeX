@@ -72,6 +72,7 @@ export function MessageView({ message, collapsed, width = 80 }: Props): React.Re
   if (message.role === "tool") {
     const summary = buildToolSummary(message);
     const diffLines = getToolDiffPreviewLines(summary);
+    const planLines = getUpdatePlanPreviewLines(summary);
     return (
       <Box flexDirection="column" marginLeft={1} marginBottom={1} marginY={0}>
         <StatusLine
@@ -80,6 +81,7 @@ export function MessageView({ message, collapsed, width = 80 }: Props): React.Re
           params={formatToolStatusParams(summary)}
         />
         {diffLines.length > 0 ? <DiffPreview lines={diffLines} /> : null}
+        {planLines.length > 0 ? <PlanPreview lines={planLines} /> : null}
       </Box>
     );
   }
@@ -272,6 +274,20 @@ function getToolDiffPreviewLines(summary: ToolSummary): DiffPreviewLine[] {
   return parseDiffPreview(diffPreview);
 }
 
+function getUpdatePlanPreviewLines(summary: ToolSummary): string[] {
+  if (!summary.ok || summary.name !== "UpdatePlan") {
+    return [];
+  }
+  const plan = summary.metadata?.plan;
+  if (typeof plan !== "string" || !plan.trim()) {
+    return [];
+  }
+  return plan
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0);
+}
+
 export function parseDiffPreview(diffPreview: string): DiffPreviewLine[] {
   return diffPreview
     .split("\n")
@@ -304,6 +320,21 @@ function DiffPreview({ lines }: { lines: DiffPreviewLine[] }): React.ReactElemen
             <Text color={line.kind === "added" ? "green" : line.kind === "removed" ? "red" : undefined}>
               {line.content}
             </Text>
+          </Text>
+        ))}
+      </Box>
+    </Box>
+  );
+}
+
+function PlanPreview({ lines }: { lines: string[] }): React.ReactElement {
+  return (
+    <Box flexDirection="column" marginLeft={2}>
+      <Text dimColor>└ Plan</Text>
+      <Box flexDirection="column" marginLeft={2}>
+        {lines.map((line, index) => (
+          <Text key={`${index}-${line}`} wrap="wrap">
+            {line}
           </Text>
         ))}
       </Box>

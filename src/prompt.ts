@@ -512,6 +512,30 @@ export function getTools(_options: PromptToolOptions = {}, externalTools: ToolDe
     {
       type: "function",
       function: {
+        name: "UpdatePlan",
+        description:
+          "Update the current task plan. The plan argument must be the complete markdown task list to show as the latest progress state.",
+        parameters: {
+          type: "object",
+          properties: {
+            plan: {
+              type: "string",
+              description:
+                "The complete markdown task list, including task status markers such as [ ], [>], [x], and optional notes.",
+            },
+            explanation: {
+              type: "string",
+              description: "Optional short reason for changing the plan.",
+            },
+          },
+          required: ["plan"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
         name: "read",
         description: "Read files from the filesystem (text, images, PDFs, notebooks).",
         parameters: {

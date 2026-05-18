@@ -12,9 +12,22 @@ test("getTools always includes WebSearch", () => {
   assert.equal(names.includes("WebSearch"), true);
 });
 
+test("getTools includes UpdatePlan with string plan schema", () => {
+  const tool = getTools().find((candidate) => candidate.function.name === "UpdatePlan");
+  assert.ok(tool);
+  assert.deepEqual(tool.function.parameters.required, ["plan"]);
+  assert.equal((tool.function.parameters.properties.plan as { type?: unknown }).type, "string");
+});
+
 test("getSystemPrompt always includes WebSearch docs", () => {
   const prompt = getSystemPrompt("/tmp/project");
   assert.equal(prompt.includes("## WebSearch"), true);
+});
+
+test("getSystemPrompt includes UpdatePlan docs", () => {
+  const prompt = getSystemPrompt("/tmp/project");
+  assert.equal(prompt.includes("## UpdatePlan"), true);
+  assert.equal(prompt.includes("The `plan` argument is a markdown string, not an array of step objects."), true);
 });
 
 test("getSystemPrompt includes current date guidance", () => {

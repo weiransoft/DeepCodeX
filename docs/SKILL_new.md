@@ -1,0 +1,264 @@
+---
+name: plan-and-execute
+description: Automatically plan and execute tasks from issue documents. Reads issue requirements, creates a markdown task list with the UpdatePlan tool, and systematically executes each task while updating progress. Use when working with issue documents, task planning, or when you need to break down and execute complex multi-step requirements.
+---
+
+# Plan and Execute
+
+This Skill helps you automatically plan and execute tasks based on issue documents. It reads your requirements, creates a structured markdown task list with the UpdatePlan tool, and systematically works through each task while keeping progress visible.
+
+## Quick Start
+
+When you need to work through an issue document:
+
+1. The Skill will first ask you for the issue document path
+2. It reads the document to understand requirements
+3. Creates a markdown task list by calling the UpdatePlan tool
+4. Executes tasks one by one, updating the tool plan in real time
+
+## Instructions
+
+### Step 1: Get the issue document path
+
+Ask the user for the path to their issue document:
+
+```
+What is the path to your issue document?
+```
+
+The document can be in any text format (.md, .txt, etc.) that contains task requirements or feature descriptions.
+
+### Step 2: Read and analyze the issue document
+
+Use the Read tool to load the document content and analyze:
+
+- What are the main requirements?
+- What tasks need to be completed?
+- Are there dependencies between tasks?
+- What is the complexity level?
+
+### Step 3: Create the task list
+
+Create a structured markdown task list and pass it to the UpdatePlan tool as the `plan` string. The tool input must use this shape:
+
+```json
+{
+  "plan": "## Task List\n\n- [ ] Task 1 description\n- [ ] Task 2 description\n- [ ] Task 3 description\n\n### Task Status Legend\n- [ ] Pending\n- [>] In Progress\n- [x] Completed"
+}
+```
+
+Use this markdown format for the `plan` content:
+
+```markdown
+## Task List
+
+- [ ] Task 1 description
+- [ ] Task 2 description
+- [ ] Task 3 description
+
+### Task Status Legend
+- [ ] Pending
+- [>] In Progress
+- [x] Completed
+```
+
+Do not append the task list to the issue document. Break down complex requirements into specific, actionable tasks and call UpdatePlan with the full markdown task list.
+
+### Step 4: Execute tasks systematically
+
+For each task in the list:
+
+1. **Mark as in progress**: Call UpdatePlan with the task changed from `[ ]` to `[>]`
+2. **Execute the task**: Use appropriate tools to complete the work
+3. **Mark as completed**: Call UpdatePlan with the task changed from `[>]` to `[x]` when finished
+4. **Move to next task**: Only ONE task should be in progress at a time
+
+Important rules:
+- Always call UpdatePlan BEFORE starting work on a task
+- Always call UpdatePlan IMMEDIATELY after completing a task
+- Always pass the complete current markdown task list, not a partial diff
+- Never work on multiple tasks simultaneously
+- If you encounter errors, keep the task as `[>]` and create new tasks to resolve blockers
+
+### Step 5: Handle task breakdown
+
+If during execution you discover a task is more complex than expected:
+
+1. Keep the current task as `[>]`
+2. Call UpdatePlan with new sub-tasks below it with indentation:
+   ```markdown
+   - [>] Main task
+     - [ ] Sub-task 1
+     - [ ] Sub-task 2
+   ```
+3. Complete sub-tasks first, then mark the main task as complete with UpdatePlan
+
+### Step 6: Final verification
+
+After all tasks are completed (`[x]`):
+
+1. Review the issue requirements to ensure everything is addressed
+2. Run any final checks (tests, builds, linting)
+3. Call UpdatePlan with every task marked `[x]`
+4. Provide a concise completion summary in the final response
+
+## Task State Symbols
+
+- `[ ]` - **Pending**: Not started yet
+- `[>]` - **In Progress**: Currently working on this
+- `[x]` - **Completed**: Finished successfully
+- `[!]` - **Blocked**: Cannot proceed (optional, for blocked tasks)
+
+## Examples
+
+### Example 1: Simple feature request
+
+**Issue document (before):**
+```markdown
+# Feature: Add dark mode toggle
+
+Users should be able to switch between light and dark themes.
+The toggle should be in the settings page.
+```
+
+**UpdatePlan call after analysis:**
+```markdown
+## Task List
+
+- [ ] Create dark mode toggle component in Settings page
+- [ ] Add dark mode state management (context/store)
+- [ ] Implement CSS-in-JS styles for dark theme
+- [ ] Update existing components to support theme switching
+- [ ] Run tests and verify functionality
+
+### Task Status Legend
+- [ ] Pending
+- [>] In Progress
+- [x] Completed
+```
+
+**UpdatePlan call during execution:**
+```markdown
+## Task List
+
+- [x] Create dark mode toggle component in Settings page
+- [>] Add dark mode state management (context/store)
+- [ ] Implement CSS-in-JS styles for dark theme
+- [ ] Update existing components to support theme switching
+- [ ] Run tests and verify functionality
+```
+
+### Example 2: Bug fix with investigation
+
+**Issue document:**
+```markdown
+# Bug: Login form crashes on submit
+
+When users click submit, the app crashes.
+Error message: "Cannot read property 'email' of undefined"
+```
+
+**UpdatePlan call after analysis:**
+```markdown
+## Task List
+
+- [ ] Reproduce the bug locally
+- [ ] Investigate the error in login form component
+- [ ] Identify root cause of undefined email property
+- [ ] Implement fix
+- [ ] Add validation to prevent similar issues
+- [ ] Test the fix with various inputs
+- [ ] Update error handling
+
+### Task Status Legend
+- [ ] Pending
+- [>] In Progress
+- [x] Completed
+```
+
+## When to Use This Skill
+
+Use this Skill when:
+
+1. **Complex multi-step tasks** - Issue requires 3+ distinct steps
+2. **Feature implementation** - Building new functionality from requirements
+3. **Bug fixing** - Need to investigate, fix, and verify
+4. **Refactoring** - Multiple files or components need changes
+5. **User provides requirements** - Issue document contains specifications
+6. **Need progress tracking** - Want visible progress without editing the issue document
+
+## When NOT to Use This Skill
+
+Skip this Skill when:
+
+1. **Single simple task** - Just one straightforward action needed
+2. **Trivial changes** - Quick fixes that don't need planning
+3. **Informational requests** - User just wants explanation, not execution
+4. **No document provided** - User hasn't created an issue document
+
+## Best Practices
+
+1. **Be specific with tasks**: "Add login button to navbar" not "Update UI"
+2. **Keep tasks atomic**: Each task should be independently completable
+3. **Update immediately**: Don't batch status updates, do them in real-time
+4. **One task at a time**: Never mark multiple tasks as `[>]`
+5. **Handle blockers**: If stuck, create new tasks to resolve the blocker
+6. **Verify completion**: Only mark `[x]` when task is fully done
+
+## Advanced Usage
+
+### Handling dependencies
+
+When tasks have dependencies, order them properly:
+
+```markdown
+- [ ] Create database schema
+- [ ] Implement API endpoints (depends on schema)
+- [ ] Build frontend forms (depends on API)
+```
+
+### Using sub-tasks
+
+For complex tasks, break them down:
+
+```markdown
+- [>] Implement authentication system
+  - [x] Set up JWT library
+  - [>] Create login endpoint
+  - [ ] Create logout endpoint
+  - [ ] Add token refresh logic
+```
+
+### Adding notes
+
+Add implementation notes or findings:
+
+```markdown
+- [x] Investigate performance issue
+  - Note: Found N+1 query in user loader
+  - Solution: Added dataloader batching
+```
+
+## Requirements
+
+This Skill uses standard tools:
+
+- **Read**: To read the issue document
+- **UpdatePlan**: To create and update the markdown task list
+- **Bash**: To run tests, builds, or other commands
+- **Write**: To create new files if needed
+
+No additional dependencies required.
+
+## Workflow Summary
+
+1. Ask user for issue document path
+2. Read and analyze the document
+3. Call UpdatePlan with the structured markdown task list
+4. For each task:
+   - Update to `[>]` with UpdatePlan
+   - Execute the task
+   - Update to `[x]` with UpdatePlan
+5. Call UpdatePlan with all tasks completed and summarize the result
+
+This approach keeps planning and progress tracking in the UpdatePlan display, leaving the issue document unchanged unless the actual task requires editing it.
