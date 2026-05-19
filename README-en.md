@@ -99,7 +99,7 @@ Deep Code supports multimodal input — you can paste images from the clipboard 
 
 ### How to automatically send a Slack message after a task completes?
 
-Write a shell notification script that calls a Slack webhook, then set the `notify` field in `~/.deepcode/settings.json` to the full path of the script. For detailed steps, refer to: https://binfer.net/share/jby5xnc-so6g
+Write a shell notification script that calls a Slack webhook, then set the `notify` field in `~/.deepcode/settings.json` to the full path of the script. For detailed steps, see [docs/notify_en.md](docs/notify_en.md).
 
 ### How do I enable web search?
 

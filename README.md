@@ -99,7 +99,7 @@ Deep Code 支持多模态，可使用ctrl+v从剪贴板粘贴图片。但目前 
 
 ### 怎样在任务完成后自动给 Slack 发消息？
 
-编写一个调用 Slack webhook 的 Shell 通知脚本，然后在 `~/.deepcode/settings.json` 中将 `notify` 字段设为该脚本的完整路径即可。详细步骤可参考：https://binfer.net/share/jby5xnc-so6g
+编写一个调用 Slack webhook 的 Shell 通知脚本，然后在 `~/.deepcode/settings.json` 中将 `notify` 字段设为该脚本的完整路径即可。详细步骤请参考 [docs/notify.md](docs/notify.md)。
 
 ### 怎样启用联网搜索功能？
 
