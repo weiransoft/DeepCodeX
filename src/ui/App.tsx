@@ -796,9 +796,17 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
   _cachedOpenAIKey = cacheKey;
 
   // Fire-and-forget warmup: pre-establish TCP+TLS connection to the API
-  // server while the user is composing their first prompt.  Errors are
-  // silently ignored — the real request will retry on its own if needed.
-  void _cachedOpenAI.models.list().catch(() => {});
+  // server while the user is composing their first prompt.  Bounded by a
+  // short timeout so a slow / unreachable API never blocks process exit.
+  void (async () => {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 3000);
+    try {
+      await _cachedOpenAI.models.list({ signal: ac.signal }).catch(() => {});
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
 
   return {
     client: _cachedOpenAI,
