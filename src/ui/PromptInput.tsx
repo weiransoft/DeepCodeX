@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Box, Text, useApp, useStdout } from "ink";
 import chalk from "chalk";
+import { ARGS_SEPARATOR } from "./constants";
 import {
   EMPTY_BUFFER,
   backspace,
@@ -50,6 +51,7 @@ import { useHiddenTerminalCursor, useTerminalExtendedKeys, useTerminalFocusRepor
 import SlashCommandMenu from "./SlashCommandMenu";
 import type { ModelConfigSelection, ReasoningEffort } from "../settings";
 import DropdownMenu from "./DropdownMenu";
+import { RawModelDropdown } from "./compoments";
 
 export type PromptSubmission = {
   text: string;
@@ -71,6 +73,7 @@ type Props = {
   runningProcesses?: Map<string, { startTime: string; command: string }> | null;
   onSubmit: (submission: PromptSubmission) => void;
   onModelConfigChange: (selection: ModelConfigSelection) => string | Promise<string>;
+  onRawModeChange?: (mode: string) => void;
   onInterrupt: () => void;
   onToggleProcessStdout?: () => void;
 };
@@ -125,6 +128,7 @@ export const PromptInput = React.memo(function PromptInput({
   onModelConfigChange,
   onInterrupt,
   onToggleProcessStdout,
+  onRawModeChange,
 }: Props): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -135,6 +139,7 @@ export const PromptInput = React.memo(function PromptInput({
   const [pendingExit, setPendingExit] = useState(false);
   const [menuIndex, setMenuIndex] = useState(0);
   const [showSkillsDropdown, setShowSkillsDropdown] = useState(false);
+  const [openRawModelDropdown, setOpenRawModelDropdown] = useState(false);
   const [skillsDropdownIndex, setSkillsDropdownIndex] = useState(0);
   const [modelDropdownStep, setModelDropdownStep] = useState<ModelDropdownStep | null>(null);
   const [modelDropdownIndex, setModelDropdownIndex] = useState(0);
@@ -341,6 +346,10 @@ export const PromptInput = React.memo(function PromptInput({
 
       if (pendingExit && (!key.ctrl || (input !== "d" && input !== "D"))) {
         setPendingExit(false);
+      }
+
+      if (openRawModelDropdown) {
+        return;
       }
 
       if (historyCursor !== -1 && !key.upArrow && !key.downArrow) {
@@ -716,6 +725,11 @@ export const PromptInput = React.memo(function PromptInput({
       openModelDropdown();
       return;
     }
+    if (item.kind === "raw") {
+      clearSlashToken();
+      setOpenRawModelDropdown(true);
+      return;
+    }
     if (item.kind === "new") {
       onSubmit({ text: "", imageUrls: [], command: "new" });
       setBuffer(EMPTY_BUFFER);
@@ -869,9 +883,12 @@ export const PromptInput = React.memo(function PromptInput({
         }));
 
   const showFooterText = useMemo(
-    () => showMenu || showSkillsDropdown || modelDropdownStep !== null || showFileMentionMenu,
-    [showMenu, showSkillsDropdown, modelDropdownStep, showFileMentionMenu]
+    () => showMenu || showSkillsDropdown || openRawModelDropdown || modelDropdownStep !== null || showFileMentionMenu,
+    [showMenu, showSkillsDropdown, modelDropdownStep, openRawModelDropdown, showFileMentionMenu]
   );
+
+  const matchedCommand = slashToken ? findExactSlashCommand(slashItems, slashToken) : null;
+  const inlineHint = matchedCommand?.args ? ` ${matchedCommand.args.join(ARGS_SEPARATOR)}` : "";
 
   return (
     <Box flexDirection="column" width={screenWidth}>
@@ -900,7 +917,14 @@ export const PromptInput = React.memo(function PromptInput({
       >
         <PromptPrefixLine busy={busy} />
         <Text>{renderBufferWithCursor(buffer, !disabled && hasTerminalFocus, placeholder)}</Text>
+        {inlineHint ? <Text dimColor>{inlineHint}</Text> : null}
       </Box>
+      <RawModelDropdown
+        open={openRawModelDropdown}
+        onClose={setOpenRawModelDropdown}
+        onSelect={(mode) => onRawModeChange?.(mode)}
+        screenWidth={screenWidth}
+      />
       {showSkillsDropdown ? (
         <DropdownMenu
           width={screenWidth}

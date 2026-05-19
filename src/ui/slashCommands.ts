@@ -1,6 +1,16 @@
 import type { SkillInfo } from "../session";
 
-export type SlashCommandKind = "skill" | "skills" | "model" | "new" | "init" | "resume" | "continue" | "mcp" | "exit";
+export type SlashCommandKind =
+  | "skill"
+  | "skills"
+  | "model"
+  | "new"
+  | "init"
+  | "resume"
+  | "continue"
+  | "mcp"
+  | "raw"
+  | "exit";
 
 export type SlashCommandItem = {
   kind: SlashCommandKind;
@@ -8,6 +18,7 @@ export type SlashCommandItem = {
   label: string;
   description: string;
   skill?: SkillInfo;
+  args?: string[];
 };
 
 export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
@@ -52,6 +63,13 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
     name: "mcp",
     label: "/mcp",
     description: "Show MCP server status and available tools",
+  },
+  {
+    kind: "raw",
+    name: "raw",
+    label: "/raw",
+    args: ["lite", "normal", "raw-scrollback"],
+    description: "Toggle display mode for viewing or collapsing reasoning content",
   },
   {
     kind: "exit",

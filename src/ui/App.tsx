@@ -6,10 +6,10 @@ import * as os from "os";
 import * as path from "path";
 import OpenAI from "openai";
 import {
-  SessionManager,
   type LlmStreamProgress,
   type MessageMeta,
   type SessionEntry,
+  SessionManager,
   type SessionMessage,
   type SessionStatus,
   type SkillInfo,
@@ -17,13 +17,13 @@ import {
 } from "../session";
 import {
   applyModelConfigSelection,
-  resolveSettingsSources,
   type DeepcodingSettings,
   type ModelConfigSelection,
   type ResolvedDeepcodingSettings,
+  resolveSettingsSources,
 } from "../settings";
 import { PromptInput, type PromptSubmission } from "./PromptInput";
-import { MessageView } from "./MessageView";
+import { MessageView, RawModeExitPrompt } from "./compoments";
 import { SessionList } from "./SessionList";
 import { buildLoadingText } from "./loadingText";
 import { findExpandedThinkingId } from "./thinkingState";
@@ -32,11 +32,13 @@ import { AskUserQuestionPrompt } from "./AskUserQuestionPrompt";
 import { McpStatusList } from "./McpStatusList";
 import { ProcessStdoutView } from "./ProcessStdoutView";
 import {
+  type AskUserQuestionAnswers,
   findPendingAskUserQuestion,
   formatAskUserQuestionAnswers,
-  type AskUserQuestionAnswers,
 } from "./askUserQuestion";
 import { buildExitSummaryText } from "./exitSummary";
+import { RawMode, useRawModeContext } from "./contexts";
+import { renderMessageToStdout } from "./compoments/MessageView/utils";
 
 const DEFAULT_MODEL = "deepseek-v4-pro";
 const DEFAULT_BASE_URL = "https://api.deepseek.com";
@@ -45,16 +47,21 @@ type View = "chat" | "session-list" | "mcp-status";
 
 type AppProps = {
   projectRoot: string;
-  version?: string;
   initialPrompt?: string;
   onRestart?: () => void;
 };
 
-export function App({ projectRoot, version = "", initialPrompt, onRestart }: AppProps): React.ReactElement {
+export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout, write } = useStdout();
   const { columns } = useWindowSize();
+  const { mode, setMode } = useRawModeContext();
   const initialPromptSubmittedRef = useRef(false);
+  const processStdoutRef = useRef<Map<number, string>>(new Map());
+  const rawModeRef = useRef<RawMode>(mode);
+  const writeRef = useRef(write);
+  const lastRenderedColumnsRef = useRef<number | null>(null);
+  const messagesRef = useRef<SessionMessage[]>([]);
   const [view, setView] = useState<View>("chat");
   const [busy, setBusy] = useState(false);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
@@ -73,9 +80,8 @@ export function App({ projectRoot, version = "", initialPrompt, onRestart }: App
   const [nowTick, setNowTick] = useState(0);
   const [mcpStatuses, setMcpStatuses] = useState<ReturnType<typeof sessionManager.getMcpStatus>>([]);
   const [showProcessStdout, setShowProcessStdout] = useState(false);
-  const processStdoutRef = useRef<Map<number, string>>(new Map());
 
-  const messagesRef = useRef<SessionMessage[]>([]);
+  rawModeRef.current = mode;
   messagesRef.current = messages;
 
   const sessionManager = useMemo(() => {
@@ -86,6 +92,10 @@ export function App({ projectRoot, version = "", initialPrompt, onRestart }: App
       renderMarkdown: (text) => text,
       onAssistantMessage: (message: SessionMessage) => {
         setMessages((prev) => [...prev, message]);
+        if (rawModeRef.current === RawMode.Raw) {
+          process.stdout.write("\n");
+          process.stdout.write(renderMessageToStdout(message, rawModeRef.current) + "\n\n");
+        }
       },
       onSessionEntryUpdated: (entry) => {
         setStatusLine(buildStatusLine(entry));
@@ -163,7 +173,6 @@ export function App({ projectRoot, version = "", initialPrompt, onRestart }: App
     };
   }, [sessionManager]);
 
-  const writeRef = useRef(write);
   writeRef.current = write;
   const handlePrompt = useCallback(
     async (submission: PromptSubmission) => {
@@ -362,30 +371,88 @@ export function App({ projectRoot, version = "", initialPrompt, onRestart }: App
     [sessionManager, refreshSkills]
   );
 
-  const [stableColumns, setStableColumns] = useState(columns);
-  useEffect(() => {
-    const timer = setTimeout(() => setStableColumns(columns), 100);
-    return () => clearTimeout(timer);
-  }, [columns]);
-  const lastRenderedColumnsRef = useRef<number | null>(null);
+  const handleRawModeChange = useCallback(
+    (nextMode: string) => {
+      const activeSessionId = sessionManager.getActiveSessionId();
+      setMode(nextMode as RawMode);
+      // Reset chat view state synchronously so the transition frame does not
+      // re-render a stale welcome screen before handleSelectSession runs.
+      setShowWelcome(false);
+      setMessages([]);
+      // Clear screen to remove stale formatted text.
+      process.stdout.write("\u001B[2J\u001B[3J\u001B[H");
+
+      setTimeout(() => {
+        if (nextMode === RawMode.Raw) {
+          // Write all messages directly to stdout for raw scrollback mode.
+          const allMessages = activeSessionId ? loadVisibleMessages(sessionManager, activeSessionId) : [];
+          for (const msg of allMessages) {
+            process.stdout.write("\n");
+            process.stdout.write(renderMessageToStdout(msg, nextMode) + "\n\n");
+          }
+          if (allMessages.length > 0) {
+            process.stdout.write("\n\n");
+            process.stdout.write(chalk.dim("Press ESC to exit raw mode"));
+          } else {
+            process.stdout.write("\n");
+            process.stdout.write(chalk.dim("(No messages in this session yet. Start chatting to see them here.)"));
+            process.stdout.write("\n\n");
+            process.stdout.write(chalk.dim("Press ESC to exit raw mode"));
+          }
+        } else if (activeSessionId) {
+          // Switch to chat view to render messages.
+          handleSelectSession(activeSessionId);
+        } else {
+          // No active session: just show the welcome screen once.
+          setWelcomeNonce((n) => n + 1);
+          setShowWelcome(true);
+        }
+      }, 200);
+    },
+    [handleSelectSession, sessionManager, setMode]
+  );
+
   useEffect(() => {
     if (!stdout?.isTTY) {
       return;
     }
-    if (stableColumns <= 0) {
+    if (columns <= 0) {
       return;
     }
     if (lastRenderedColumnsRef.current === null) {
-      lastRenderedColumnsRef.current = stableColumns;
+      lastRenderedColumnsRef.current = columns;
       return;
     }
-    if (lastRenderedColumnsRef.current === stableColumns) {
+    if (lastRenderedColumnsRef.current === columns) {
       return;
     }
-    lastRenderedColumnsRef.current = stableColumns;
+    lastRenderedColumnsRef.current = columns;
+
+    if (mode === RawMode.Raw) {
+      // In raw mode, re-render all messages directly to stdout at the new width.
+      // Use process.stdout.write instead of writeRef to avoid Ink interference.
+      process.stdout.write("\u001B[2J\u001B[3J\u001B[H");
+      const activeSessionId = sessionManager.getActiveSessionId();
+      const allMessages = activeSessionId ? loadVisibleMessages(sessionManager, activeSessionId) : [];
+      for (const msg of allMessages) {
+        process.stdout.write("\n");
+        process.stdout.write(renderMessageToStdout(msg, mode) + "\n\n");
+      }
+      if (allMessages.length > 0) {
+        process.stdout.write("\n\n");
+        process.stdout.write(chalk.dim("Press ESC to exit raw mode"));
+      } else {
+        process.stdout.write("\n");
+        process.stdout.write(chalk.dim("(No messages in this session yet. Start chatting to see them here.)"));
+        process.stdout.write("\n\n");
+        process.stdout.write(chalk.dim("Press ESC to exit raw mode"));
+      }
+      return;
+    }
 
     // Force full redraw on terminal resize to avoid stale wrapped rows.
     writeRef.current("\u001B[2J\u001B[H");
+
     setMessages([]);
     setShowWelcome(false);
     setWelcomeNonce((n) => n + 1);
@@ -397,8 +464,9 @@ export function App({ projectRoot, version = "", initialPrompt, onRestart }: App
       setMessages(nextMessages);
       setShowWelcome(true);
     }, 0);
-  }, [busy, sessionManager, stableColumns, stdout]);
-  const screenWidth = useMemo(() => stableColumns ?? stdout?.columns ?? 80, [stableColumns, stdout]);
+  }, [busy, mode, sessionManager, columns, stdout]);
+
+  const screenWidth = useMemo(() => columns ?? stdout?.columns ?? 80, [columns, stdout]);
   const promptHistory = useMemo(() => {
     return messages
       .filter((message) => message.role === "user" && typeof message.content === "string")
@@ -413,7 +481,7 @@ export function App({ projectRoot, version = "", initialPrompt, onRestart }: App
     // eslint-disable-next-line react-hooks/exhaustive-deps -- nowTick forces periodic recalculation for spinner animation
     [busy, streamProgress, runningProcesses, nowTick]
   );
-  const welcomeSettings = resolvedSettings;
+
   const welcomeItem: SessionMessage = useMemo(
     () => ({
       id: `__welcome__${welcomeNonce}`,
@@ -430,11 +498,14 @@ export function App({ projectRoot, version = "", initialPrompt, onRestart }: App
     [welcomeNonce]
   );
   const staticItems = useMemo(() => {
+    if (mode === RawMode.Raw) {
+      return [];
+    }
     if (showWelcome && view === "chat") {
       return [welcomeItem, ...messages];
     }
     return messages;
-  }, [showWelcome, view, messages, welcomeItem]);
+  }, [mode, showWelcome, view, messages, welcomeItem]);
 
   const handleQuestionAnswers = useCallback(
     (answers: AskUserQuestionAnswers) => {
@@ -453,6 +524,10 @@ export function App({ projectRoot, version = "", initialPrompt, onRestart }: App
     setDismissedQuestionIds((prev) => new Set(prev).add(pendingQuestion.messageId));
   }, [pendingQuestion]);
 
+  if (mode === RawMode.Raw) {
+    return <RawModeExitPrompt onExit={(prev) => handleRawModeChange(prev)} />;
+  }
+
   return (
     <Box flexDirection="column" width={screenWidth} minWidth={80} overflowX={"visible"}>
       <Static items={staticItems}>
@@ -462,9 +537,8 @@ export function App({ projectRoot, version = "", initialPrompt, onRestart }: App
               <WelcomeScreen
                 key={item.id}
                 projectRoot={projectRoot}
-                settings={welcomeSettings}
+                settings={resolvedSettings}
                 skills={skills}
-                version={version}
                 width={screenWidth}
               />
             );
@@ -522,6 +596,7 @@ export function App({ projectRoot, version = "", initialPrompt, onRestart }: App
           runningProcesses={runningProcesses}
           onSubmit={handleSubmit}
           onModelConfigChange={handleModelConfigChange}
+          onRawModeChange={handleRawModeChange}
           onInterrupt={handleInterrupt}
           onToggleProcessStdout={handleToggleProcessStdout}
           placeholder="Type your message..."

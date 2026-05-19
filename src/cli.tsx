@@ -1,8 +1,8 @@
 import React from "react";
 import { render } from "ink";
-import { App } from "./ui";
 import { setShellIfWindows } from "./common/shell-utils";
 import { checkForNpmUpdate, promptForPendingUpdate, type PackageInfo } from "./updateCheck";
+import { AppContainer } from "./ui";
 
 const args = process.argv.slice(2);
 const packageInfo = readPackageInfo();
@@ -81,7 +81,7 @@ async function main(): Promise<void> {
     const appInitialPrompt = initialPrompt;
     initialPrompt = undefined;
     const inkInstance = render(
-      <App
+      <AppContainer
         projectRoot={projectRoot}
         version={packageInfo.version}
         initialPrompt={appInitialPrompt}

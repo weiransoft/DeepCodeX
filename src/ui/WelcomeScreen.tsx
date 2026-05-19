@@ -7,12 +7,12 @@ import type { ResolvedDeepcodingSettings } from "../settings";
 import { buildSlashCommands, BUILTIN_SLASH_COMMANDS, formatSlashCommandDescription } from "./slashCommands";
 import { ThemedGradient } from "./ThemedGradient";
 import { AsciiLogo } from "../AsciiArt";
+import { useAppContext } from "./contexts";
 
 type WelcomeScreenProps = {
   projectRoot: string;
   settings: ResolvedDeepcodingSettings;
   skills: SkillInfo[];
-  version: string;
   width: number;
 };
 
@@ -28,13 +28,8 @@ const SHORTCUT_TIPS = [
   { label: "Ctrl+D twice", description: "Quit Deep Code CLI" },
 ];
 
-export function WelcomeScreen({
-  projectRoot,
-  settings,
-  skills,
-  version,
-  width,
-}: WelcomeScreenProps): React.ReactElement {
+export function WelcomeScreen({ projectRoot, settings, skills, width }: WelcomeScreenProps): React.ReactElement {
+  const { version } = useAppContext();
   const tips = useMemo(() => buildWelcomeTips(skills), [skills]);
   const [tipIndex] = useState(() => randomTipIndex(tips.length));
   const compact = width < TITLE_PANEL_WIDTH + 42;

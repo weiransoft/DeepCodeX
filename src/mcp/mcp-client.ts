@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "child_process";
 import { createInterface, type Interface } from "readline";
 import * as os from "os";
 import * as path from "path";
+import { killProcessTree } from "../common/process-tree";
 
 type JsonRpcRequest = {
   jsonrpc: "2.0";
@@ -268,7 +269,11 @@ export class McpClient {
       this.reader = null;
     }
     if (this.process) {
-      this.process.kill();
+      if (typeof this.process.pid === "number") {
+        killProcessTree(this.process.pid, "SIGTERM", { killGroupOnNonWindows: false });
+      } else {
+        this.process.kill();
+      }
       this.process = null;
     }
   }
