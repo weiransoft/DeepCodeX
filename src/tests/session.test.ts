@@ -1215,6 +1215,26 @@ test("UpdatePlan tool params only show explanation when provided", () => {
   assert.equal(withoutExplanation.meta?.paramsMd, "");
 });
 
+test("Write tool params prefer file_path even when content appears first", () => {
+  const manager = createSessionManager(process.cwd(), "machine-id-write-params");
+  const filePath = path.join(process.cwd(), "index.html");
+
+  const toolMessage = (manager as any).buildToolMessage(
+    "session-1",
+    "call-write-1",
+    JSON.stringify({ ok: true, name: "write", output: "Created file." }),
+    {
+      name: "write",
+      arguments: JSON.stringify({
+        content: "// === entry ===\nconsole.log('demo');\n",
+        file_path: filePath,
+      }),
+    }
+  ) as SessionMessage;
+
+  assert.equal(toolMessage.meta?.paramsMd, filePath);
+});
+
 test("buildOpenAIMessages repairs mixed missing duplicate and orphan tool messages", () => {
   const manager = createSessionManager(process.cwd(), "machine-id-mixed-tool-badcase");
   const assistantMessage = (manager as any).buildAssistantMessage(

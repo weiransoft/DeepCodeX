@@ -2050,6 +2050,8 @@ ${skillMd}
       }
     } else if (toolName === "UpdatePlan") {
       return typeof args.explanation === "string" ? args.explanation.trim() : "";
+    } else if (toolName === "write") {
+      return typeof args.file_path === "string" ? args.file_path.trim() : "";
     }
 
     const firstKey = Object.keys(args)[0];
