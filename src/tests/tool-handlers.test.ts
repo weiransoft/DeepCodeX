@@ -4,7 +4,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { setTimeout as delay } from "node:timers/promises";
-import type { ToolExecutionContext } from "../tools/executor";
+import type { ProcessTimeoutControl, ToolExecutionContext } from "../tools/executor";
 import { handleBashTool } from "../tools/bash-handler";
 import { handleEditTool } from "../tools/edit-handler";
 import { handleReadTool } from "../tools/read-handler";
@@ -50,6 +50,58 @@ test("Bash streams stdout and stderr before command completion", async () => {
   assert.match(streamedOutput, /first/);
   assert.match(streamedOutput, /second/);
   assert.match(streamedOutput, /err/);
+});
+
+test("Bash terminates commands that exceed the configured timeout", async () => {
+  const workspace = createTempWorkspace();
+  const exitedPids: Array<string | number> = [];
+
+  const result = await handleBashTool(
+    {
+      command: "printf 'start\\n'; sleep 5; printf 'done\\n'",
+    },
+    createContext("bash-timeout", workspace, {
+      bashTimeoutMs: 100,
+      bashMinTimeoutMs: 1,
+      onProcessExit: (pid) => {
+        exitedPids.push(pid);
+      },
+    })
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "Command timed out.");
+  assert.equal(result.metadata?.timedOut, true);
+  assert.equal(result.metadata?.timeoutMs, 100);
+  assert.doesNotMatch(result.output ?? "", /done/);
+  assert.equal(exitedPids.length, 1);
+});
+
+test("Bash timeout control can extend the active command deadline", async () => {
+  const workspace = createTempWorkspace();
+  let timeoutControl: ProcessTimeoutControl | null = null;
+
+  const result = await handleBashTool(
+    {
+      command: "sleep 0.2; printf 'done\\n'",
+    },
+    createContext("bash-timeout-extend", workspace, {
+      bashTimeoutMs: 100,
+      bashMinTimeoutMs: 1,
+      onProcessTimeoutControl: (_pid, control) => {
+        if (control) {
+          timeoutControl = control;
+          control.setTimeoutMs(1000);
+        }
+      },
+    })
+  );
+
+  assert.ok(timeoutControl);
+  assert.equal(result.ok, true);
+  assert.match(result.output ?? "", /done/);
+  assert.equal(result.metadata?.timedOut, false);
+  assert.equal(result.metadata?.timeoutMs, 1000);
 });
 
 test("UpdatePlan accepts a markdown task list string", async () => {

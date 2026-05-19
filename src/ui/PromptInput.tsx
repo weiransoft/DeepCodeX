@@ -39,7 +39,7 @@ import {
 } from "./fileMentions";
 import type { FileMentionItem } from "./fileMentions";
 import { readClipboardImageAsync } from "./clipboard";
-import type { SkillInfo } from "../session";
+import type { SessionEntry, SkillInfo } from "../session";
 
 // Re-exported from prompt modules for backward compatibility
 export { useTerminalInput, parseTerminalInput } from "./prompt";
@@ -70,7 +70,7 @@ type Props = {
   loadingText?: string | null;
   disabled?: boolean;
   placeholder?: string;
-  runningProcesses?: Map<string, { startTime: string; command: string }> | null;
+  runningProcesses?: SessionEntry["processes"];
   onSubmit: (submission: PromptSubmission) => void;
   onModelConfigChange: (selection: ModelConfigSelection) => string | Promise<string>;
   onRawModeChange?: (mode: string) => void;
