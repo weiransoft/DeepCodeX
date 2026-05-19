@@ -39,13 +39,29 @@ export type ToolExecutionContext = {
   onProcessStart?: (processId: string | number, command: string) => void;
   onProcessExit?: (processId: string | number) => void;
   onProcessStdout?: (processId: string | number, chunk: string) => void;
+  onProcessTimeoutControl?: (processId: string | number, control: ProcessTimeoutControl | null) => void;
+  bashTimeoutMs?: number;
+  bashMinTimeoutMs?: number;
 };
 
 export type ToolExecutionHooks = {
   onProcessStart?: (processId: string | number, command: string) => void;
   onProcessExit?: (processId: string | number) => void;
   onProcessStdout?: (processId: string | number, chunk: string) => void;
+  onProcessTimeoutControl?: (processId: string | number, control: ProcessTimeoutControl | null) => void;
   shouldStop?: () => boolean;
+};
+
+export type ProcessTimeoutInfo = {
+  timeoutMs: number;
+  startedAtMs: number;
+  deadlineAtMs: number;
+  timedOut: boolean;
+};
+
+export type ProcessTimeoutControl = {
+  getInfo: () => ProcessTimeoutInfo;
+  setTimeoutMs: (timeoutMs: number) => ProcessTimeoutInfo;
 };
 
 export type ToolExecutionResult = {
@@ -200,6 +216,7 @@ export class ToolExecutor {
         onProcessStart: hooks?.onProcessStart,
         onProcessExit: hooks?.onProcessExit,
         onProcessStdout: hooks?.onProcessStdout,
+        onProcessTimeoutControl: hooks?.onProcessTimeoutControl,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

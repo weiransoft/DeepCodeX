@@ -1,5 +1,7 @@
 import { spawn } from "child_process";
-import type { ToolExecutionContext, ToolExecutionResult } from "./executor";
+import { DEFAULT_BASH_TIMEOUT_MS, clampBashTimeoutMs } from "../common/bash-timeout";
+import { killProcessTree } from "../common/process-tree";
+import type { ProcessTimeoutControl, ProcessTimeoutInfo, ToolExecutionContext, ToolExecutionResult } from "./executor";
 import {
   buildDisableExtglobCommand,
   buildShellEnv,
@@ -22,6 +24,9 @@ type ToolCommandResult = {
   truncated: boolean;
   shellPath?: string;
   startCwd?: string;
+  timedOut?: boolean;
+  timeoutMs?: number;
+  deadlineAt?: string;
 };
 
 export async function handleBashTool(
@@ -48,12 +53,15 @@ export async function handleBashTool(
     execution.exitCode,
     execution.signal,
     shellPath,
-    startCwd
+    startCwd,
+    execution.timedOut,
+    execution.timeoutMs,
+    execution.deadlineAtMs
   );
   updateSessionCwd(context.sessionId, startCwd, result.cwd);
 
   if (execution.error || result.exitCode !== 0 || result.signal !== null) {
-    const errorMessage = buildErrorMessage(result.exitCode, result.signal, execution.error);
+    const errorMessage = buildErrorMessage(result.exitCode, result.signal, execution.error, execution.timedOut);
     return formatResult({ ...result, ok: false }, "bash", errorMessage);
   }
 
@@ -102,10 +110,27 @@ async function executeShellCommand(
   cwd: string,
   command: string,
   context: ToolExecutionContext
-): Promise<{ stdout: string; stderr: string; exitCode: number | null; signal: string | null; error?: string }> {
+): Promise<{
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  signal: string | null;
+  error?: string;
+  timedOut: boolean;
+  timeoutMs: number;
+  deadlineAtMs: number;
+}> {
   return new Promise((resolve) => {
     const detached = process.platform !== "win32";
     const configuredEnv = context.createOpenAIClient?.().env ?? {};
+    const minTimeoutMs = context.bashMinTimeoutMs;
+    const initialTimeoutMs = clampBashTimeoutMs(context.bashTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS, minTimeoutMs);
+    const startedAtMs = Date.now();
+    let timeoutMs = initialTimeoutMs;
+    let deadlineAtMs = startedAtMs + timeoutMs;
+    let timedOut = false;
+    let settled = false;
+    let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
     const child = spawn(shellPath, shellArgs, {
       cwd,
       env: buildShellEnv(shellPath, configuredEnv),
@@ -114,8 +139,53 @@ async function executeShellCommand(
       stdio: ["ignore", "pipe", "pipe"],
     });
     const pid = child.pid;
+
+    const getTimeoutInfo = (): ProcessTimeoutInfo => ({
+      timeoutMs,
+      startedAtMs,
+      deadlineAtMs,
+      timedOut,
+    });
+    const stopTimeoutTimer = () => {
+      if (timeoutTimer) {
+        clearTimeout(timeoutTimer);
+        timeoutTimer = null;
+      }
+    };
+    const triggerTimeout = () => {
+      if (settled || timedOut || typeof pid !== "number") {
+        return;
+      }
+      timedOut = true;
+      stopTimeoutTimer();
+      killProcessTree(pid, "SIGKILL");
+    };
+    const scheduleTimeout = () => {
+      stopTimeoutTimer();
+      if (settled) {
+        return;
+      }
+      const remainingMs = Math.max(0, deadlineAtMs - Date.now());
+      timeoutTimer = setTimeout(triggerTimeout, remainingMs);
+    };
+    const timeoutControl: ProcessTimeoutControl = {
+      getInfo: getTimeoutInfo,
+      setTimeoutMs: (nextTimeoutMs) => {
+        timeoutMs = clampBashTimeoutMs(nextTimeoutMs, minTimeoutMs);
+        deadlineAtMs = startedAtMs + timeoutMs;
+        if (deadlineAtMs <= Date.now()) {
+          triggerTimeout();
+        } else {
+          scheduleTimeout();
+        }
+        return getTimeoutInfo();
+      },
+    };
+
     if (typeof pid === "number") {
       context.onProcessStart?.(pid, command);
+      context.onProcessTimeoutControl?.(pid, timeoutControl);
+      scheduleTimeout();
     }
 
     let stdout = "";
@@ -138,7 +208,10 @@ async function executeShellCommand(
     });
 
     child.on("close", (code, signal) => {
+      settled = true;
+      stopTimeoutTimer();
       if (typeof pid === "number") {
+        context.onProcessTimeoutControl?.(pid, null);
         context.onProcessExit?.(pid);
       }
       resolve({
@@ -147,6 +220,9 @@ async function executeShellCommand(
         exitCode: typeof code === "number" ? code : null,
         signal: signal ?? null,
         error,
+        timedOut,
+        timeoutMs,
+        deadlineAtMs,
       });
     });
   });
@@ -173,7 +249,10 @@ function buildToolCommandResult(
   exitCode: number | null,
   signal: string | null,
   shellPath: string,
-  startCwd: string
+  startCwd: string,
+  timedOut: boolean = false,
+  timeoutMs?: number,
+  deadlineAtMs?: number
 ): ToolCommandResult {
   const { output: cleanedStdout, cwd } = stripMarker(stdout, marker);
   const combined = joinOutput(cleanedStdout, stderr);
@@ -187,6 +266,9 @@ function buildToolCommandResult(
     truncated,
     shellPath,
     startCwd,
+    timedOut,
+    timeoutMs,
+    deadlineAt: typeof deadlineAtMs === "number" ? new Date(deadlineAtMs).toISOString() : undefined,
   };
 }
 
@@ -231,9 +313,12 @@ function truncateOutput(output: string): { text: string; truncated: boolean } {
   return { text: output.slice(0, MAX_OUTPUT_CHARS), truncated: true };
 }
 
-function buildErrorMessage(exitCode: number | null, signal: string | null, error?: string): string {
+function buildErrorMessage(exitCode: number | null, signal: string | null, error?: string, timedOut = false): string {
   if (error) {
     return error;
+  }
+  if (timedOut) {
+    return "Command timed out.";
   }
   if (signal) {
     return `Command terminated by signal ${signal}.`;
@@ -253,6 +338,15 @@ function formatResult(result: ToolCommandResult, name: string, errorMessage?: st
     shellPath: result.shellPath,
     startCwd: result.startCwd,
   };
+  if (typeof result.timedOut === "boolean") {
+    metadata.timedOut = result.timedOut;
+  }
+  if (typeof result.timeoutMs === "number") {
+    metadata.timeoutMs = result.timeoutMs;
+  }
+  if (result.deadlineAt) {
+    metadata.deadlineAt = result.deadlineAt;
+  }
 
   const outputValue = result.output ? result.output : undefined;
 

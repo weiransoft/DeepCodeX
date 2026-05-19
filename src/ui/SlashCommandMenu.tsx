@@ -1,5 +1,6 @@
 import { formatSlashCommandDescription, formatSlashCommandLabel } from "./slashCommands";
 import type { SlashCommandItem } from "./slashCommands";
+import { ARGS_SEPARATOR } from "./constants";
 import React from "react";
 import { Box, Text } from "ink";
 
@@ -21,7 +22,9 @@ const SlashCommandMenu = React.memo(function SlashCommandMenu({
     if (items.length === 0) {
       return 0;
     }
-    const longestLabel = Math.max(...items.map((s) => s.label.length));
+    const longestLabel = Math.max(
+      ...items.map((s) => s.label.length + (s.args ? s.args?.join(ARGS_SEPARATOR)?.length + 4 : 0))
+    );
     const contentWidth = longestLabel + 2; // +2 for prefix "> " or "  "
     const maxAllowed = Math.max(10, (width - 2) >> 1); // 容器50%宽度（减去gap），至少保留10列
     return Math.min(contentWidth, maxAllowed);
@@ -49,11 +52,12 @@ const SlashCommandMenu = React.memo(function SlashCommandMenu({
         const actualIndex = visibleStart + idx;
         return (
           <Box key={item.label} gap={2} flexDirection="row" flexGrow={1}>
-            <Box width={labelColumnWidth} flexShrink={0}>
+            <Box width={labelColumnWidth} flexShrink={0} gap={2}>
               <Text color={actualIndex === activeIndex ? "#229ac3" : undefined} wrap="truncate-end">
                 {actualIndex === activeIndex ? "> " : "  "}
                 <Text bold>{formatSlashCommandLabel(item)}</Text>
               </Text>
+              {item.args ? <Text dimColor>{item.args.join(ARGS_SEPARATOR)}</Text> : null}
             </Box>
             <Box flexGrow={1}>
               <Text color={actualIndex === activeIndex ? "#229ac3" : undefined} wrap="truncate-end" dimColor>

@@ -17,7 +17,12 @@ import {
   getTools,
   type ToolDefinition,
 } from "./prompt";
-import { ToolExecutor, type CreateOpenAIClient } from "./tools/executor";
+import {
+  ToolExecutor,
+  type CreateOpenAIClient,
+  type ProcessTimeoutControl,
+  type ProcessTimeoutInfo,
+} from "./tools/executor";
 import { McpManager } from "./mcp/mcp-manager";
 import type { McpServerConfig } from "./settings";
 import { logApiError } from "./common/error-logger";
@@ -134,6 +139,21 @@ export type ModelUsage = {
   total_reqs?: number;
 };
 
+export type SessionProcessEntry = {
+  startTime: string;
+  command: string;
+  timeoutMs?: number;
+  deadlineAt?: string;
+  timedOut?: boolean;
+};
+
+export type BashTimeoutAdjustment = {
+  processId: string;
+  timeoutMs: number;
+  deadlineAt: string;
+  timedOut: boolean;
+};
+
 export type SessionEntry = {
   id: string;
   summary: string | null;
@@ -148,7 +168,7 @@ export type SessionEntry = {
   activeTokens: number;
   createTime: string;
   updateTime: string;
-  processes: Map<string, { startTime: string; command: string }> | null; // {pid: {startTime, command}}
+  processes: Map<string, SessionProcessEntry> | null; // {pid: process info}
 };
 
 export type SessionsIndex = {
@@ -234,6 +254,7 @@ export class SessionManager {
   private activeSessionId: string | null = null;
   private activePromptController: AbortController | null = null;
   private readonly sessionControllers = new Map<string, AbortController>();
+  private readonly processTimeoutControls = new Map<string, ProcessTimeoutControl>();
   private readonly toolExecutor: ToolExecutor;
   private readonly mcpManager = new McpManager();
   private mcpToolDefinitions: ToolDefinition[] = [];
@@ -1365,6 +1386,7 @@ ${skillMd}
     const killedPids: number[] = [];
     const failedPids: number[] = [];
     for (const pid of processIds) {
+      this.processTimeoutControls.delete(this.getProcessControlKey(sessionId, pid));
       if (killProcessTree(pid, "SIGKILL")) {
         killedPids.push(pid);
         continue;
@@ -1400,6 +1422,37 @@ ${skillMd}
 
   private isInterrupted(sessionId: string): boolean {
     return !this.sessionControllers.has(sessionId);
+  }
+
+  adjustActiveBashTimeout(deltaMs: number): BashTimeoutAdjustment | null {
+    const sessionId = this.activeSessionId;
+    if (!sessionId || !Number.isFinite(deltaMs)) {
+      return null;
+    }
+    const session = this.getSession(sessionId);
+    if (!session?.processes) {
+      return null;
+    }
+
+    let selectedPid: string | null = null;
+    for (const pid of session.processes.keys()) {
+      if (this.processTimeoutControls.has(this.getProcessControlKey(sessionId, pid))) {
+        selectedPid = pid;
+      }
+    }
+    if (!selectedPid) {
+      return null;
+    }
+
+    const control = this.processTimeoutControls.get(this.getProcessControlKey(sessionId, selectedPid));
+    if (!control) {
+      return null;
+    }
+
+    const current = control.getInfo();
+    const next = control.setTimeoutMs(current.timeoutMs + deltaMs);
+    this.updateSessionProcessTimeout(sessionId, selectedPid, next);
+    return this.buildBashTimeoutAdjustment(selectedPid, next);
   }
 
   listSessions(): SessionEntry[] {
@@ -1746,6 +1799,7 @@ ${skillMd}
       onProcessStart: (pid, command) => this.addSessionProcess(sessionId, pid, command),
       onProcessExit: (pid) => this.removeSessionProcess(sessionId, pid),
       onProcessStdout: (pid, chunk) => this.onProcessStdout?.(Number(pid), chunk),
+      onProcessTimeoutControl: (pid, control) => this.setSessionProcessTimeoutControl(sessionId, pid, control),
       shouldStop: () => this.isInterrupted(sessionId),
     });
     if (this.isInterrupted(sessionId)) {
@@ -2124,7 +2178,23 @@ ${skillMd}
       return;
     }
 
-    launchNotifyScript(notifyCommand, Date.now() - startedAt, this.projectRoot, undefined, configuredEnv);
+    // Find the last assistant message body for the BODY env variable.
+    let body: string | undefined;
+    const messages = this.listSessionMessages(sessionId);
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg && msg.role === "assistant" && msg.content) {
+        body = msg.content;
+        break;
+      }
+    }
+
+    launchNotifyScript(notifyCommand, Date.now() - startedAt, this.projectRoot, undefined, configuredEnv, {
+      status: session.status,
+      failReason: session.failReason ?? undefined,
+      body,
+      title: session.summary ?? undefined,
+    });
   }
 
   private addSessionProcess(sessionId: string, processId: string | number, command: string): void {
@@ -2142,6 +2212,7 @@ ${skillMd}
 
   private removeSessionProcess(sessionId: string, processId: string | number): void {
     const now = new Date().toISOString();
+    this.processTimeoutControls.delete(this.getProcessControlKey(sessionId, processId));
     this.updateSessionEntry(sessionId, (entry) => {
       const processes = new Map(entry.processes ?? []);
       processes.delete(String(processId));
@@ -2153,7 +2224,58 @@ ${skillMd}
     });
   }
 
-  private getProcessIds(processes: Map<string, { startTime: string; command: string }> | null): number[] {
+  private setSessionProcessTimeoutControl(
+    sessionId: string,
+    processId: string | number,
+    control: ProcessTimeoutControl | null
+  ): void {
+    const key = this.getProcessControlKey(sessionId, processId);
+    if (!control) {
+      this.processTimeoutControls.delete(key);
+      return;
+    }
+
+    this.processTimeoutControls.set(key, control);
+    this.updateSessionProcessTimeout(sessionId, processId, control.getInfo());
+  }
+
+  private updateSessionProcessTimeout(sessionId: string, processId: string | number, info: ProcessTimeoutInfo): void {
+    const now = new Date().toISOString();
+    this.updateSessionEntry(sessionId, (entry) => {
+      const processes = new Map(entry.processes ?? []);
+      const pid = String(processId);
+      const processInfo = processes.get(pid);
+      if (!processInfo) {
+        return entry;
+      }
+      processes.set(pid, {
+        ...processInfo,
+        timeoutMs: info.timeoutMs,
+        deadlineAt: new Date(info.deadlineAtMs).toISOString(),
+        timedOut: info.timedOut,
+      });
+      return {
+        ...entry,
+        processes,
+        updateTime: now,
+      };
+    });
+  }
+
+  private buildBashTimeoutAdjustment(processId: string, info: ProcessTimeoutInfo): BashTimeoutAdjustment {
+    return {
+      processId,
+      timeoutMs: info.timeoutMs,
+      deadlineAt: new Date(info.deadlineAtMs).toISOString(),
+      timedOut: info.timedOut,
+    };
+  }
+
+  private getProcessControlKey(sessionId: string, processId: string | number): string {
+    return `${sessionId}:${String(processId)}`;
+  }
+
+  private getProcessIds(processes: Map<string, SessionProcessEntry> | null): number[] {
     if (!processes) {
       return [];
     }
@@ -2237,11 +2359,11 @@ ${skillMd}
     return usagePerModel;
   }
 
-  private deserializeProcesses(value: unknown): Map<string, { startTime: string; command: string }> | null {
+  private deserializeProcesses(value: unknown): Map<string, SessionProcessEntry> | null {
     if (!value || typeof value !== "object") {
       return null;
     }
-    const processes = new Map<string, { startTime: string; command: string }>();
+    const processes = new Map<string, SessionProcessEntry>();
     for (const [pid, entry] of Object.entries(value as Record<string, unknown>)) {
       if (!pid) {
         continue;
@@ -2250,22 +2372,34 @@ ${skillMd}
         // Backward compatibility for old format where just stored start time
         processes.set(pid, { startTime: entry, command: "Running process..." });
       } else if (typeof entry === "object" && entry !== null) {
-        const obj = entry as { startTime?: unknown; command?: unknown };
+        const obj = entry as {
+          startTime?: unknown;
+          command?: unknown;
+          timeoutMs?: unknown;
+          deadlineAt?: unknown;
+          timedOut?: unknown;
+        };
         const startTime = typeof obj.startTime === "string" ? obj.startTime : new Date().toISOString();
         const command = typeof obj.command === "string" ? obj.command : "Running process...";
-        processes.set(pid, { startTime, command });
+        processes.set(pid, {
+          startTime,
+          command,
+          timeoutMs: typeof obj.timeoutMs === "number" ? obj.timeoutMs : undefined,
+          deadlineAt: typeof obj.deadlineAt === "string" ? obj.deadlineAt : undefined,
+          timedOut: typeof obj.timedOut === "boolean" ? obj.timedOut : undefined,
+        });
       }
     }
     return processes.size > 0 ? processes : null;
   }
 
   private serializeProcesses(
-    processes: Map<string, { startTime: string; command: string }> | null
-  ): Record<string, { startTime: string; command: string }> | null {
+    processes: Map<string, SessionProcessEntry> | null
+  ): Record<string, SessionProcessEntry> | null {
     if (!processes || processes.size === 0) {
       return null;
     }
-    const serialized: Record<string, { startTime: string; command: string }> = {};
+    const serialized: Record<string, SessionProcessEntry> = {};
     for (const [pid, entry] of processes.entries()) {
       serialized[pid] = entry;
     }

@@ -67,11 +67,23 @@ When thinking mode is enabled, controls the depth of the model’s reasoning:
 
 Set a full path to a shell script. When the AI assistant finishes a round of tasks, the script is executed automatically, which can be used to send notifications (e.g., a Slack message).
 
+The following context is injected as environment variables when the notify script runs:
+
+| Variable | Description |
+|----------|-------------|
+| `DURATION` | Session duration in seconds (integer) |
+| `STATUS` | Session status: `"completed"` or `"failed"` |
+| `FAIL_REASON` | Failure reason (only set on failure) |
+| `BODY` | The text content of the last AI assistant reply |
+| `TITLE` | Session title (matches the resume list title) |
+
 ```json
 {
-  "notify": "/path/to/slack-notify.sh"
+  "notify": "/path/to/notify-script.sh"
 }
 ```
+
+> For detailed configuration examples (Slack, Feishu, terminal notifications, system notifications, etc.), see [notify_en.md](notify_en.md).
 
 #### `webSearchTool` — Custom Web Search
 

@@ -783,6 +783,68 @@ test("reporting a new prompt does not warn when the background request fails", a
   assert.deepEqual(warnings, []);
 });
 
+test(
+  "SessionManager notifies successful completion with session context",
+  { skip: process.platform === "win32" },
+  async () => {
+    const workspace = createTempDir("deepcode-notify-success-workspace-");
+    const home = createTempDir("deepcode-notify-success-home-");
+    setHomeDir(home);
+
+    const notifyOutput = path.join(workspace, "notify.jsonl");
+    const notifyScript = createNotifyRecorderScript(workspace);
+    const manager = createNotifyingSessionManager(
+      workspace,
+      [createChatResponse("final answer", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 })],
+      notifyScript,
+      notifyOutput
+    );
+
+    await manager.createSession({ text: "notify success" });
+
+    const records = await waitForNotifyRecords(notifyOutput, 1);
+    assert.equal(records[0]?.STATUS, "completed");
+    assert.equal(records[0]?.FAIL_REASON, null);
+    assert.equal(records[0]?.BODY, "final answer");
+    assert.equal(records[0]?.TITLE, "notify success");
+    assert.match(String(records[0]?.DURATION), /^\d+$/);
+  }
+);
+
+test(
+  "SessionManager notifies failed completion with failure context",
+  { skip: process.platform === "win32" },
+  async () => {
+    const workspace = createTempDir("deepcode-notify-failure-workspace-");
+    const home = createTempDir("deepcode-notify-failure-home-");
+    setHomeDir(home);
+
+    const notifyOutput = path.join(workspace, "notify.jsonl");
+    const notifyScript = createNotifyRecorderScript(workspace);
+    const manager = createNotifyingSessionManager(
+      workspace,
+      [
+        createChatResponse("first answer", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }),
+        new Error("second request failed"),
+      ],
+      notifyScript,
+      notifyOutput
+    );
+
+    const sessionId = await manager.createSession({ text: "notify failure" });
+    await waitForNotifyRecords(notifyOutput, 1);
+    await manager.replySession(sessionId, { text: "second prompt" });
+
+    const records = await waitForNotifyRecords(notifyOutput, 2);
+    const failedRecord = records[1];
+    assert.equal(failedRecord?.STATUS, "failed");
+    assert.equal(failedRecord?.FAIL_REASON, "second request failed");
+    assert.equal(failedRecord?.BODY, "first answer");
+    assert.notEqual(failedRecord?.BODY, "stale-body");
+    assert.equal(failedRecord?.TITLE, "notify failure");
+  }
+);
+
 test("replySession continues without appending /continue as a user message", async () => {
   const workspace = createTempDir("deepcode-continue-workspace-");
   const home = createTempDir("deepcode-continue-home-");
@@ -1696,6 +1758,40 @@ rl.on("line", (line) => {
   manager.dispose();
 });
 
+test("SessionManager adjusts the active Bash timeout control and session metadata", async () => {
+  const workspace = createTempDir("deepcode-bash-timeout-session-");
+  const manager = createSessionManager(workspace, "");
+  const sessionId = await manager.createSession({ text: "hello" });
+
+  (manager as any).addSessionProcess(sessionId, 123, "sleep 10");
+
+  let timeoutInfo = {
+    timeoutMs: 10 * 60 * 1000,
+    startedAtMs: 1000,
+    deadlineAtMs: 1000 + 10 * 60 * 1000,
+    timedOut: false,
+  };
+  (manager as any).setSessionProcessTimeoutControl(sessionId, 123, {
+    getInfo: () => timeoutInfo,
+    setTimeoutMs: (timeoutMs: number) => {
+      timeoutInfo = {
+        ...timeoutInfo,
+        timeoutMs,
+        deadlineAtMs: timeoutInfo.startedAtMs + timeoutMs,
+      };
+      return timeoutInfo;
+    },
+  });
+
+  const adjustment = manager.adjustActiveBashTimeout(5 * 60 * 1000);
+  const processInfo = manager.getSession(sessionId)?.processes?.get("123");
+
+  assert.equal(adjustment?.processId, "123");
+  assert.equal(adjustment?.timeoutMs, 15 * 60 * 1000);
+  assert.equal(processInfo?.timeoutMs, 15 * 60 * 1000);
+  assert.equal(processInfo?.deadlineAt, new Date(timeoutInfo.deadlineAtMs).toISOString());
+});
+
 function createSessionManager(projectRoot: string, machineId: string): SessionManager {
   return new SessionManager({
     projectRoot,
@@ -1705,6 +1801,49 @@ function createSessionManager(projectRoot: string, machineId: string): SessionMa
       baseURL: "https://api.deepseek.com",
       thinkingEnabled: false,
       machineId,
+    }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+  });
+}
+
+function createNotifyingSessionManager(
+  projectRoot: string,
+  responses: unknown[],
+  notifyPath: string,
+  notifyOutput: string
+): SessionManager {
+  const client = {
+    chat: {
+      completions: {
+        create: async () => {
+          const response = responses.shift();
+          assert.ok(response, "expected a queued chat response");
+          if (response instanceof Error) {
+            throw response;
+          }
+          return response;
+        },
+      },
+    },
+  };
+
+  return new SessionManager({
+    projectRoot,
+    createOpenAIClient: () => ({
+      client: client as any,
+      model: "test-model",
+      baseURL: "https://api.deepseek.com",
+      thinkingEnabled: false,
+      notify: notifyPath,
+      env: {
+        NOTIFY_OUTPUT: notifyOutput,
+        STATUS: "stale-status",
+        FAIL_REASON: "stale-failure",
+        BODY: "stale-body",
+        TITLE: "stale-title",
+      },
     }),
     getResolvedSettings: () => ({ model: "test-model" }),
     renderMarkdown: (text) => text,
@@ -1793,6 +1932,45 @@ function createTempDir(prefix: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   tempDirs.push(dir);
   return dir;
+}
+
+function createNotifyRecorderScript(dir: string): string {
+  const scriptPath = path.join(dir, "notify-recorder.cjs");
+  fs.writeFileSync(
+    scriptPath,
+    `#!/usr/bin/env node
+const fs = require("fs");
+const keys = ["DURATION", "STATUS", "FAIL_REASON", "BODY", "TITLE"];
+const record = {};
+for (const key of keys) {
+  record[key] = Object.prototype.hasOwnProperty.call(process.env, key) ? process.env[key] : null;
+}
+fs.appendFileSync(process.env.NOTIFY_OUTPUT, JSON.stringify(record) + "\\n", "utf8");
+`,
+    "utf8"
+  );
+  fs.chmodSync(scriptPath, 0o755);
+  return scriptPath;
+}
+
+async function waitForNotifyRecords(
+  outputPath: string,
+  expectedCount: number
+): Promise<Array<Record<string, unknown>>> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (fs.existsSync(outputPath)) {
+      const records = fs
+        .readFileSync(outputPath, "utf8")
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      if (records.length >= expectedCount) {
+        return records;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail(`expected ${expectedCount} notify records in ${outputPath}`);
 }
 
 function escapeRegExp(value: string): string {
