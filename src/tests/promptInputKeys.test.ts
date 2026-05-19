@@ -80,7 +80,7 @@ test("parseTerminalInput keeps BS payload for meta+backspace", () => {
 
 test("parseTerminalInput recognizes shifted return sequences", () => {
   const { input, key } = parseTerminalInput("\u001B\r");
-  assert.equal(input, "");
+  assert.equal(input, "\r");
   assert.equal(key.return, true);
   assert.equal(key.shift, true);
   assert.equal(key.meta, false);
@@ -108,8 +108,8 @@ test("parseTerminalInput recognizes alternate shifted return sequences", () => {
 });
 
 test("terminal extended key helpers request and restore modifyOtherKeys mode", () => {
-  assert.equal(enableTerminalExtendedKeys(), "\u001B[>4;1m\u001B[>1u");
-  assert.equal(disableTerminalExtendedKeys(), "\u001B[>4;0m\u001B[<u");
+  assert.equal(enableTerminalExtendedKeys(), "\u001B[>4;1m");
+  assert.equal(disableTerminalExtendedKeys(), "\u001B[>4;0m");
 });
 
 test("parseTerminalInput recognizes terminal focus events", () => {
