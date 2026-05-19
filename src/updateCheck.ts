@@ -1,4 +1,4 @@
-import { spawn } from "child_process";
+import { spawn, type ChildProcess, type SpawnOptions } from "child_process";
 import React from "react";
 import * as fs from "fs";
 import * as os from "os";
@@ -162,9 +162,8 @@ async function promptUpdateChoice({
 
 async function runNpmInstallGlobal(installSpec: string): Promise<boolean> {
   return new Promise((resolve) => {
-    const child = spawn("npm", ["install", "-g", installSpec], {
+    const child = spawnNpm(["install", "-g", installSpec], {
       stdio: "inherit",
-      shell: process.platform === "win32",
     });
     child.on("error", (error) => {
       process.stderr.write(`Failed to start npm install: ${error.message}\n`);
@@ -206,9 +205,8 @@ function runNpmViewLatestVersion(
     if (registry) {
       args.push("--registry", registry);
     }
-    const child = spawn("npm", args, {
+    const child = spawnNpm(args, {
       stdio: ["ignore", "pipe", "pipe"],
-      shell: process.platform === "win32",
     });
 
     let stdout = "";
@@ -244,6 +242,24 @@ function runNpmViewLatestVersion(
       finish(code === 0 ? { ok: true, stdout } : { ok: false });
     });
   });
+}
+
+function spawnNpm(args: string[], options: SpawnOptions): ChildProcess {
+  if (process.platform === "win32") {
+    return spawn(["npm", ...args.map(quoteCmdArg)].join(" "), [], {
+      ...options,
+      shell: true,
+    });
+  }
+
+  return spawn("npm", args, {
+    ...options,
+    shell: false,
+  });
+}
+
+function quoteCmdArg(arg: string): string {
+  return `"${String(arg).replace(/"/g, '\\"')}"`;
 }
 
 export function parseNpmViewVersion(output: string): string | null {
