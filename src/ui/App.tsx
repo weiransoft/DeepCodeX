@@ -55,7 +55,13 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
   const { exit } = useApp();
   const { stdout, write } = useStdout();
   const { columns } = useWindowSize();
+  const { mode, setMode } = useRawModeContext();
   const initialPromptSubmittedRef = useRef(false);
+  const processStdoutRef = useRef<Map<number, string>>(new Map());
+  const rawModeRef = useRef<RawMode>(mode);
+  const writeRef = useRef(write);
+  const lastRenderedColumnsRef = useRef<number | null>(null);
+  const messagesRef = useRef<SessionMessage[]>([]);
   const [view, setView] = useState<View>("chat");
   const [busy, setBusy] = useState(false);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
@@ -74,13 +80,8 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
   const [nowTick, setNowTick] = useState(0);
   const [mcpStatuses, setMcpStatuses] = useState<ReturnType<typeof sessionManager.getMcpStatus>>([]);
   const [showProcessStdout, setShowProcessStdout] = useState(false);
-  const processStdoutRef = useRef<Map<number, string>>(new Map());
 
-  const { mode, setMode } = useRawModeContext();
-  const rawModeRef = useRef<RawMode>(mode);
   rawModeRef.current = mode;
-
-  const messagesRef = useRef<SessionMessage[]>([]);
   messagesRef.current = messages;
 
   const sessionManager = useMemo(() => {
@@ -172,7 +173,6 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
     };
   }, [sessionManager]);
 
-  const writeRef = useRef(write);
   writeRef.current = write;
   const handlePrompt = useCallback(
     async (submission: PromptSubmission) => {
@@ -412,27 +412,21 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
     [handleSelectSession, sessionManager, setMode]
   );
 
-  const [stableColumns, setStableColumns] = useState(columns);
-  useEffect(() => {
-    const timer = setTimeout(() => setStableColumns(columns), 100);
-    return () => clearTimeout(timer);
-  }, [columns]);
-  const lastRenderedColumnsRef = useRef<number | null>(null);
   useEffect(() => {
     if (!stdout?.isTTY) {
       return;
     }
-    if (stableColumns <= 0) {
+    if (columns <= 0) {
       return;
     }
     if (lastRenderedColumnsRef.current === null) {
-      lastRenderedColumnsRef.current = stableColumns;
+      lastRenderedColumnsRef.current = columns;
       return;
     }
-    if (lastRenderedColumnsRef.current === stableColumns) {
+    if (lastRenderedColumnsRef.current === columns) {
       return;
     }
-    lastRenderedColumnsRef.current = stableColumns;
+    lastRenderedColumnsRef.current = columns;
 
     if (mode === RawMode.Raw) {
       // In raw mode, re-render all messages directly to stdout at the new width.
@@ -470,9 +464,9 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
       setMessages(nextMessages);
       setShowWelcome(true);
     }, 0);
-  }, [busy, mode, sessionManager, stableColumns, stdout]);
+  }, [busy, mode, sessionManager, columns, stdout]);
 
-  const screenWidth = useMemo(() => stableColumns ?? stdout?.columns ?? 80, [stableColumns, stdout]);
+  const screenWidth = useMemo(() => columns ?? stdout?.columns ?? 80, [columns, stdout]);
   const promptHistory = useMemo(() => {
     return messages
       .filter((message) => message.role === "user" && typeof message.content === "string")
