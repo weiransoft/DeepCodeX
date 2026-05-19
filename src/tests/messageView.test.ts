@@ -65,15 +65,18 @@ test("MessageView shows full reasoning content in Normal/Raw mode", () => {
 function makeSessionMessage(overrides: Partial<SessionMessage> & Pick<SessionMessage, "role">): SessionMessage {
   const now = new Date().toISOString();
   return {
-    id: `test-${Math.random().toString(36).slice(2)}`,
-    sessionId: "test-session",
-    visible: true,
-    compacted: false,
-    createTime: now,
-    updateTime: now,
-    contentParams: null,
-    messageParams: null,
-    ...overrides,
+    id: overrides.id ?? `test-${Math.random().toString(36).slice(2)}`,
+    sessionId: overrides.sessionId ?? "test-session",
+    role: overrides.role,
+    content: overrides.content ?? null,
+    visible: overrides.visible ?? true,
+    compacted: overrides.compacted ?? false,
+    createTime: overrides.createTime ?? now,
+    updateTime: overrides.updateTime ?? now,
+    contentParams: overrides.contentParams ?? null,
+    messageParams: overrides.messageParams ?? null,
+    meta: overrides.meta,
+    html: overrides.html,
   };
 }
 
@@ -149,7 +152,7 @@ test("renderMessageToStdout renders system skill load messages", () => {
   const msg = makeSessionMessage({
     role: "system",
     content: "",
-    meta: { skill: { name: "code-review" } },
+    meta: { skill: { name: "code-review", path: "", description: "" } },
   });
   const output = renderMessageToStdout(msg, RawMode.Raw);
   assert.ok(output.includes("⚡ Loaded skill: code-review"));

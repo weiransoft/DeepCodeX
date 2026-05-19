@@ -374,19 +374,18 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
   const handleRawModeChange = useCallback(
     (nextMode: string) => {
       const activeSessionId = sessionManager.getActiveSessionId();
-      if (!activeSessionId) {
-        return;
-      }
-
       setMode(nextMode as RawMode);
-
+      // Reset chat view state synchronously so the transition frame does not
+      // re-render a stale welcome screen before handleSelectSession runs.
+      setShowWelcome(false);
+      setMessages([]);
       // Clear screen to remove stale formatted text.
       process.stdout.write("\u001B[2J\u001B[3J\u001B[H");
 
       setTimeout(() => {
         if (nextMode === RawMode.Raw) {
           // Write all messages directly to stdout for raw scrollback mode.
-          const allMessages = loadVisibleMessages(sessionManager, activeSessionId);
+          const allMessages = activeSessionId ? loadVisibleMessages(sessionManager, activeSessionId) : [];
           for (const msg of allMessages) {
             process.stdout.write("\n");
             process.stdout.write(renderMessageToStdout(msg, nextMode) + "\n\n");
@@ -394,10 +393,19 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
           if (allMessages.length > 0) {
             process.stdout.write("\n\n");
             process.stdout.write(chalk.dim("Press ESC to exit raw mode"));
+          } else {
+            process.stdout.write("\n");
+            process.stdout.write(chalk.dim("(No messages in this session yet. Start chatting to see them here.)"));
+            process.stdout.write("\n\n");
+            process.stdout.write(chalk.dim("Press ESC to exit raw mode"));
           }
-        } else {
+        } else if (activeSessionId) {
           // Switch to chat view to render messages.
           handleSelectSession(activeSessionId);
+        } else {
+          // No active session: just show the welcome screen once.
+          setWelcomeNonce((n) => n + 1);
+          setShowWelcome(true);
         }
       }, 200);
     },
@@ -499,7 +507,7 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
   }, [pendingQuestion]);
 
   if (mode === RawMode.Raw) {
-    return <RawModeExitPrompt onExit={() => handleRawModeChange(RawMode.None)} />;
+    return <RawModeExitPrompt onExit={(prev) => handleRawModeChange(prev)} />;
   }
 
   return (

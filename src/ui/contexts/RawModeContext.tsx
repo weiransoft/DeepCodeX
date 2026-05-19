@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState } from "react";
+import React, { createContext, useCallback, useContext, useRef, useState } from "react";
 import type { DropdownMenuItem } from "../DropdownMenu";
 
 export enum RawMode {
@@ -21,9 +21,17 @@ export const RAW_COMMAND_MODELS: DropdownMenuItem[] = [
   },
 ] as const;
 
-const RawModeContext = createContext<{ mode: RawMode; setMode: React.Dispatch<React.SetStateAction<RawMode>> }>({
+type RawModeContextValue = {
+  mode: RawMode;
+  setMode: React.Dispatch<React.SetStateAction<RawMode>>;
+  // The mode that was active right before the most recent mode transition.
+  previousMode: RawMode;
+};
+
+const RawModeContext = createContext<RawModeContextValue>({
   mode: RawMode.Lite,
   setMode: () => {},
+  previousMode: RawMode.Lite,
 });
 
 export function useRawModeContext() {
@@ -35,6 +43,22 @@ export function useRawModeContext() {
 }
 
 export const RawModeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [mode, setMode] = useState<RawMode>(RawMode.Lite);
-  return <RawModeContext.Provider value={{ mode, setMode }}>{children}</RawModeContext.Provider>;
+  const [mode, _setMode] = useState<RawMode>(RawMode.Lite);
+  const previousModeRef = useRef<RawMode>(RawMode.Lite);
+
+  const setMode = useCallback<React.Dispatch<React.SetStateAction<RawMode>>>((next) => {
+    _setMode((current) => {
+      const resolved = typeof next === "function" ? (next as (prev: RawMode) => RawMode)(current) : next;
+      if (resolved !== current) {
+        previousModeRef.current = current;
+      }
+      return resolved;
+    });
+  }, []);
+
+  return (
+    <RawModeContext.Provider value={{ mode, setMode, previousMode: previousModeRef.current }}>
+      {children}
+    </RawModeContext.Provider>
+  );
 };
