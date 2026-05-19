@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { Box, Static, Text, useApp, useStdout, useWindowSize } from "ink";
 import chalk from "chalk";
 import * as fs from "fs";
+import https from "node:https";
 import * as os from "os";
 import * as path from "path";
 import OpenAI from "openai";
@@ -728,6 +729,99 @@ export function resolveCurrentSettings(projectRoot: string = process.cwd()): Res
   );
 }
 
+// Custom fetch implementation that uses node:https.Agent with a configurable
+// keepAlive timeout.  The default undici-based global fetch only keeps
+// connections alive for 4 seconds, which is too short for a CLI where the
+// user may spend 10–30 seconds reading output before typing the next prompt.
+// With this custom Agent we get full control over idle connection lifetime.
+const KEEP_ALIVE_MSEC = 60_000; // 1 minute
+
+function createCustomFetch(keepAliveMsecs: number = KEEP_ALIVE_MSEC) {
+  const agent = new https.Agent({ keepAlive: true, keepAliveMsecs });
+
+  return async function customFetch(url: string | URL | Request, init?: RequestInit): Promise<Response> {
+    const urlObj = typeof url === "string" ? new URL(url) : url instanceof URL ? url : new URL(url.url);
+    const { method = "GET", headers = {}, body: reqBody, signal } = init ?? {};
+
+    // Normalize Headers to a plain Record
+    const plainHeaders: Record<string, string> = {};
+    if (headers instanceof Headers) {
+      for (const [k, v] of headers) plainHeaders[k] = v;
+    } else if (Array.isArray(headers)) {
+      for (const [k, v] of headers) plainHeaders[k] = v;
+    } else {
+      Object.assign(plainHeaders, headers);
+    }
+
+    const port = urlObj.port ? Number(urlObj.port) : 443;
+
+    return new Promise((resolve, reject) => {
+      const req = https.request(
+        {
+          hostname: urlObj.hostname,
+          port,
+          path: urlObj.pathname + urlObj.search,
+          method,
+          headers: plainHeaders,
+          agent,
+          signal: signal ?? undefined,
+        },
+        (res) => {
+          const resHeaders = new Headers();
+          for (const [k, v] of Object.entries(res.headers)) {
+            if (v) (Array.isArray(v) ? v : [v]).forEach((val) => resHeaders.append(k, val));
+          }
+
+          const body = new ReadableStream({
+            start(controller) {
+              res.on("data", (chunk: Buffer) => controller.enqueue(new Uint8Array(chunk)));
+              res.on("end", () => controller.close());
+              res.on("error", (err) => controller.error(err));
+            },
+            cancel() {
+              res.destroy();
+            },
+          });
+
+          resolve(
+            new Response(body, {
+              status: res.statusCode,
+              statusText: res.statusMessage,
+              headers: resHeaders,
+            })
+          );
+        }
+      );
+
+      req.on("error", reject);
+
+      if (reqBody) {
+        if (typeof reqBody === "string" || reqBody instanceof Uint8Array || ArrayBuffer.isView(reqBody)) {
+          req.write(reqBody as Parameters<typeof req.write>[0]);
+        } else if (reqBody instanceof ReadableStream) {
+          // Pipe streaming request body (used for file uploads by the SDK)
+          const reader = (reqBody as ReadableStream<Uint8Array>).getReader();
+          (async () => {
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                if (value) req.write(value);
+              }
+              req.end();
+            } catch (err) {
+              req.destroy(err instanceof Error ? err : new Error(String(err)));
+            }
+          })();
+          return; // req.end() is called inside the async IIFE
+        }
+      }
+
+      req.end();
+    });
+  };
+}
+
 // Module-level cache for the OpenAI client instance.  The client itself is
 // a stateless fetch wrapper, so it is safe to share across calls as long as
 // the apiKey + baseURL stay the same.  Model, thinking-mode and other
@@ -782,6 +876,7 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
   _cachedOpenAI = new OpenAI({
     apiKey: settings.apiKey,
     baseURL: settings.baseURL || undefined,
+    fetch: createCustomFetch(),
   });
   _cachedOpenAIKey = cacheKey;
 
