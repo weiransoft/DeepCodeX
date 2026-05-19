@@ -2124,7 +2124,23 @@ ${skillMd}
       return;
     }
 
-    launchNotifyScript(notifyCommand, Date.now() - startedAt, this.projectRoot, undefined, configuredEnv);
+    // Find the last assistant message body for the BODY env variable.
+    let body: string | undefined;
+    const messages = this.listSessionMessages(sessionId);
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg && msg.role === "assistant" && msg.content) {
+        body = msg.content;
+        break;
+      }
+    }
+
+    launchNotifyScript(notifyCommand, Date.now() - startedAt, this.projectRoot, undefined, configuredEnv, {
+      status: session.status,
+      failReason: session.failReason ?? undefined,
+      body,
+      title: session.summary ?? undefined,
+    });
   }
 
   private addSessionProcess(sessionId: string, processId: string | number, command: string): void {

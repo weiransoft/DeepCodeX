@@ -67,10 +67,44 @@ When thinking mode is enabled, controls the depth of the model’s reasoning:
 
 Set a full path to a shell script. When the AI assistant finishes a round of tasks, the script is executed automatically, which can be used to send notifications (e.g., a Slack message).
 
+The following context is injected as environment variables when the notify script runs:
+
+| Variable | Description |
+|----------|-------------|
+| `DURATION` | Session duration in seconds (integer) |
+| `STATUS` | Session status: `"completed"` or `"failed"` |
+| `FAIL_REASON` | Failure reason (only set on failure) |
+| `BODY` | The text content of the last AI assistant reply |
+| `TITLE` | Session title (matches the resume list title) |
+
 ```json
 {
   "notify": "/path/to/slack-notify.sh"
 }
+```
+
+**iTerm2 Notification Example**:
+
+On iTerm2 you can use the OSC 9 escape sequence for native notifications. Create a script (e.g., `~/.deepcode/notify.sh`):
+
+```bash
+#!/bin/bash
+# iTerm2 OSC 9 notification
+echo -e "\x1b]9;DeepCode: task ${STATUS:-completed} (${DURATION}s)\x07"
+```
+
+```json
+{
+  "notify": "/Users/you/.deepcode/notify.sh"
+}
+```
+
+**macOS System Notification Example**:
+
+```bash
+#!/bin/bash
+# macOS system notification
+osascript -e "display notification \"Task ${STATUS:-completed}, took ${DURATION}s\" with title \"DeepCode\""
 ```
 
 #### `webSearchTool` — Custom Web Search

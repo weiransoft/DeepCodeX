@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildNotifyEnv, formatDurationSeconds, launchNotifyScript, type NotifySpawn } from "../common/notify";
+import {
+  buildNotifyEnv,
+  formatDurationSeconds,
+  launchNotifyScript,
+  type NotifyContext,
+  type NotifySpawn,
+} from "../common/notify";
 import { applyModelConfigSelection, resolveSettings, resolveSettingsSources } from "../settings";
 
 const TEST_PROCESS_ENV = {};
@@ -358,14 +364,52 @@ test("formatDurationSeconds preserves sub-second precision and trims trailing ze
   assert.equal(formatDurationSeconds(4000), "4");
 });
 
-test("buildNotifyEnv injects DURATION", () => {
+test("buildNotifyEnv injects DURATION without context", () => {
   const env = buildNotifyEnv(2750, { HOME: "/tmp/home" });
   assert.equal(env.HOME, "/tmp/home");
   assert.equal(env.DURATION, "2");
+  assert.equal(env.STATUS, undefined);
+  assert.equal(env.FAIL_REASON, undefined);
+  assert.equal(env.BODY, undefined);
+  assert.equal(env.TITLE, undefined);
+});
+
+test("buildNotifyEnv injects STATUS, FAIL_REASON, BODY, and TITLE from context", () => {
+  const context: NotifyContext = {
+    status: "failed",
+    failReason: "API key not found",
+    body: "Hello, this is the last assistant message.",
+    title: "Fix login bug",
+  };
+  const env = buildNotifyEnv(5000, { HOME: "/tmp/home" }, context);
+  assert.equal(env.HOME, "/tmp/home");
+  assert.equal(env.DURATION, "5");
+  assert.equal(env.STATUS, "failed");
+  assert.equal(env.FAIL_REASON, "API key not found");
+  assert.equal(env.BODY, "Hello, this is the last assistant message.");
+  assert.equal(env.TITLE, "Fix login bug");
+});
+
+test("buildNotifyEnv omits optional context fields when not provided", () => {
+  const env = buildNotifyEnv(
+    1000,
+    {
+      HOME: "/tmp/home",
+      STATUS: "stale-status",
+      FAIL_REASON: "stale-failure",
+      BODY: "stale-body",
+      TITLE: "stale-title",
+    },
+    { status: "completed" }
+  );
+  assert.equal(env.STATUS, "completed");
+  assert.equal(env.FAIL_REASON, undefined);
+  assert.equal(env.BODY, undefined);
+  assert.equal(env.TITLE, undefined);
 });
 
 test(
-  "launchNotifyScript passes DURATION and falls back to /bin/sh for non-executable scripts",
+  "launchNotifyScript passes DURATION, context vars, and falls back to /bin/sh for non-executable scripts",
   { skip: process.platform === "win32" },
   () => {
     const calls: Array<{
@@ -390,7 +434,13 @@ test(
       };
     };
 
-    launchNotifyScript("/tmp/notify.sh", 2750, "/tmp/project", spawnProcess, { WEBHOOK: "configured" });
+    const context: NotifyContext = {
+      status: "completed",
+      body: "Task finished successfully.",
+      title: "Fix login bug",
+    };
+
+    launchNotifyScript("/tmp/notify.sh", 2750, "/tmp/project", spawnProcess, { WEBHOOK: "configured" }, context);
 
     assert.equal(calls.length, 2);
     assert.equal(calls[0]?.command, "/tmp/notify.sh");
@@ -398,9 +448,16 @@ test(
     assert.equal(calls[0]?.options.cwd, "/tmp/project");
     assert.equal(calls[0]?.options.env?.DURATION, "2");
     assert.equal(calls[0]?.options.env?.WEBHOOK, "configured");
+    assert.equal(calls[0]?.options.env?.STATUS, "completed");
+    assert.equal(calls[0]?.options.env?.FAIL_REASON, undefined);
+    assert.equal(calls[0]?.options.env?.BODY, "Task finished successfully.");
+    assert.equal(calls[0]?.options.env?.TITLE, "Fix login bug");
     assert.equal(calls[1]?.command, "/bin/sh");
     assert.deepEqual(calls[1]?.args, ["/tmp/notify.sh"]);
     assert.equal(calls[1]?.options.cwd, "/tmp/project");
     assert.equal(calls[1]?.options.env?.DURATION, "2");
+    assert.equal(calls[1]?.options.env?.STATUS, "completed");
+    assert.equal(calls[1]?.options.env?.BODY, "Task finished successfully.");
+    assert.equal(calls[1]?.options.env?.TITLE, "Fix login bug");
   }
 );
