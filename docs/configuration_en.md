@@ -83,53 +83,35 @@ The following context is injected as environment variables when the notify scrip
 }
 ```
 
-**Terminal Notification Example (iTerm2 / Windows Terminal)**:
+**Feishu (Lark) Webhook Notification Example**:
 
-On iTerm2 or Windows Terminal you can use the OSC 9 escape sequence for native terminal notifications with zero dependencies. Create a script (e.g., `~/.deepcode/notify.sh`):
-
-```bash
-#!/bin/bash
-# iTerm2 / Windows Terminal OSC 9 notification
-printf '\x1b]9;DeepCode: task %s (%ss)\x07' "${STATUS:-completed}" "${DURATION}"
-```
-
-```json
-{
-  "notify": "/Users/you/.deepcode/notify.sh"
-}
-```
-
-Windows users on Git Bash can use the same script; alternatively create a `.bat` script:
-
-```batch
-@echo off
-REM Windows Terminal OSC 9 notification
-echo \x1b]9;DeepCode: task %STATUS% (%DURATION%s)\x07
-```
-
-**macOS System Notification Example**:
+`node` builds the JSON (auto-escapes special characters), `curl` sends it:
 
 ```bash
 #!/bin/bash
-# macOS system notification
-osascript -e "display notification \"Task ${STATUS:-completed}, took ${DURATION}s\" with title \"DeepCode\""
+WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxxxx"
+
+STATUS="${STATUS:-completed}"
+TITLE="${TITLE:-Untitled}"
+DURATION="${DURATION:-0}"
+BODY="${BODY:-(no output)}"
+
+PAYLOAD=$(node -e "
+process.stdout.write(JSON.stringify({
+  msg_type: 'interactive',
+  card: {
+    header: { title: { tag: 'plain_text', content: 'DeepCode: ' + process.env.TITLE + ' ' + process.env.STATUS + ' [' + process.env.DURATION + 's]' } },
+    elements: [{ tag: 'markdown', content: (process.env.BODY || '').slice(0, 2000) || '(no output)' }]
+  }
+}))
+")
+
+curl -s -X POST "$WEBHOOK_URL" \
+  -H "Content-Type: application/json" \
+  -d "$PAYLOAD"
 ```
 
-**Linux System Notification Example** (requires `libnotify-bin`):
-
-```bash
-#!/bin/bash
-# Linux notify-send notification
-notify-send "DeepCode" "Task ${STATUS:-completed}, took ${DURATION}s"
-```
-
-**Windows msg Popup Notification Example**:
-
-```batch
-@echo off
-REM Windows msg popup notification
-msg %USERNAME% "DeepCode: task %STATUS% (%DURATION%s)"
-```
+Replace `WEBHOOK_URL` with your Feishu bot webhook URL. See the table above for all available variables. This pattern also works for other webhook-based notifications (Slack, WeCom, etc.) — just adjust the JSON payload format.
 
 #### `webSearchTool` — Custom Web Search
 
