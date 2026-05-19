@@ -636,7 +636,10 @@ test("createSession appends default system prompts in prefix-cache-friendly orde
   assert.doesNotMatch(systemContents[1] ?? "", /当前LLM模型为test-model/);
   assert.match(systemContents[2] ?? "", /# Local Workspace Environment/);
   assert.match(systemContents[2] ?? "", /当前LLM模型为test-model/);
-  assert.match(systemContents[2] ?? "", new RegExp(escapeRegExp(`"root path": "${workspace}"`)));
+  const environmentJsonMatch = (systemContents[2] ?? "").match(/```json\n([\s\S]+?)\n```/);
+  assert.ok(environmentJsonMatch);
+  const environmentInfo = JSON.parse(environmentJsonMatch[1] ?? "{}") as { "root path"?: string };
+  assert.equal(environmentInfo["root path"], workspace);
   assert.equal(systemContents[3], "root project instructions");
 });
 
@@ -1210,6 +1213,26 @@ test("UpdatePlan tool params only show explanation when provided", () => {
 
   assert.equal(withExplanation.meta?.paramsMd, "Start planning");
   assert.equal(withoutExplanation.meta?.paramsMd, "");
+});
+
+test("Write tool params prefer file_path even when content appears first", () => {
+  const manager = createSessionManager(process.cwd(), "machine-id-write-params");
+  const filePath = path.join(process.cwd(), "index.html");
+
+  const toolMessage = (manager as any).buildToolMessage(
+    "session-1",
+    "call-write-1",
+    JSON.stringify({ ok: true, name: "write", output: "Created file." }),
+    {
+      name: "write",
+      arguments: JSON.stringify({
+        content: "// === entry ===\nconsole.log('demo');\n",
+        file_path: filePath,
+      }),
+    }
+  ) as SessionMessage;
+
+  assert.equal(toolMessage.meta?.paramsMd, filePath);
 });
 
 test("buildOpenAIMessages repairs mixed missing duplicate and orphan tool messages", () => {
