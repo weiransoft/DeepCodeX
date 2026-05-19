@@ -10,14 +10,17 @@ export const RAW_COMMAND_MODELS: DropdownMenuItem[] = [
   {
     label: "Lite mode",
     key: RawMode.Lite,
+    description: "Collapse chain-of-thought reasoning.",
   },
   {
     label: "Normal mode",
     key: RawMode.None,
+    description: "Show full chain-of-thought reasoning.",
   },
   {
     label: "Raw scrollback mode",
     key: RawMode.Raw,
+    description: "Show scrollback mode for copy-friendly terminal selection.",
   },
 ] as const;
 
