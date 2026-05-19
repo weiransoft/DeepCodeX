@@ -162,6 +162,13 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
     void refreshSkills();
   }, [refreshSessionsList, refreshSkills]);
 
+  // Eagerly create the OpenAI client on mount so the TCP+TLS connection
+  // warmup (fire-and-forget inside createOpenAIClient) starts before the
+  // user sends their first prompt.
+  useEffect(() => {
+    createOpenAIClient(projectRoot);
+  }, [projectRoot]);
+
   useLayoutEffect(() => {
     const settings = resolveCurrentSettings(projectRoot);
     void sessionManager.initMcpServers(settings.mcpServers);
@@ -721,6 +728,13 @@ export function resolveCurrentSettings(projectRoot: string = process.cwd()): Res
   );
 }
 
+// Module-level cache for the OpenAI client instance.  The client itself is
+// a stateless fetch wrapper, so it is safe to share across calls as long as
+// the apiKey + baseURL stay the same.  Model, thinking-mode and other
+// settings are always read fresh from the project / user config files.
+let _cachedOpenAI: OpenAI | null = null;
+let _cachedOpenAIKey = "";
+
 export function createOpenAIClient(projectRoot: string = process.cwd()): {
   client: OpenAI | null;
   model: string;
@@ -749,12 +763,35 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
     };
   }
 
-  const client = new OpenAI({
+  const cacheKey = `${settings.apiKey}::${settings.baseURL}`;
+  if (_cachedOpenAI && _cachedOpenAIKey === cacheKey) {
+    return {
+      client: _cachedOpenAI,
+      model: settings.model,
+      baseURL: settings.baseURL,
+      thinkingEnabled: settings.thinkingEnabled,
+      reasoningEffort: settings.reasoningEffort,
+      debugLogEnabled: settings.debugLogEnabled,
+      notify: settings.notify,
+      webSearchTool: settings.webSearchTool,
+      env: settings.env,
+      machineId: getMachineId(),
+    };
+  }
+
+  _cachedOpenAI = new OpenAI({
     apiKey: settings.apiKey,
     baseURL: settings.baseURL || undefined,
   });
+  _cachedOpenAIKey = cacheKey;
+
+  // Fire-and-forget warmup: pre-establish TCP+TLS connection to the API
+  // server while the user is composing their first prompt.  Errors are
+  // silently ignored — the real request will retry on its own if needed.
+  void _cachedOpenAI.models.list().catch(() => {});
+
   return {
-    client,
+    client: _cachedOpenAI,
     model: settings.model,
     baseURL: settings.baseURL,
     thinkingEnabled: settings.thinkingEnabled,
