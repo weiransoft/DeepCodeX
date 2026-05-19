@@ -106,7 +106,7 @@ export function findExactSlashCommand(items: SlashCommandItem[], token: string):
     return null;
   }
   const query = token.slice(1);
-  const matches = items.filter((item) => item.name.includes(query));
+  const matches = items.filter((item) => item.name === query);
   return matches.find((item) => item.kind !== "skill") ?? matches[0] ?? null;
 }
 

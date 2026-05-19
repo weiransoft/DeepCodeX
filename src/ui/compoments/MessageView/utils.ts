@@ -236,6 +236,9 @@ export function renderMessageToStdout(message: SessionMessage, mode: RawMode): s
     const params = name.toLowerCase() === "bash" ? metaParams : truncate(metaParams, 120);
     const statusLine = `${chalk("✧")} ${chalk(formatStatusName(name))}${params ? ` ${chalk(params)}` : ""}`;
 
+    const metaResultMd = typeof message.meta?.resultMd === "string" ? message.meta.resultMd.trim() : "";
+    const result = metaResultMd ? `\n${chalk.dim("  └ Result")}\n${metaResultMd}` : "";
+
     const summary: ToolSummary = {
       name,
       params,
@@ -245,10 +248,10 @@ export function renderMessageToStdout(message: SessionMessage, mode: RawMode): s
     const planLines = getUpdatePlanPreviewLines(summary);
     if (planLines.length > 0) {
       const planText = planLines.map((line) => `  ${line}`).join("\n");
-      return `${statusLine}\n${chalk.dim("  └ Plan")}\n${planText}`;
+      return `${statusLine}\n${chalk.dim("  └ Plan")}\n${planText}${result}`;
     }
 
-    return statusLine;
+    return `${statusLine}${result}`;
   }
 
   if (message.role === "system") {

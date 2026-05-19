@@ -124,6 +124,40 @@ test("renderMessageToStdout renders tool messages with ✧ and tool name", () =>
   assert.ok(output.includes("Read"));
 });
 
+test("renderMessageToStdout renders tool messages with resultMd output", () => {
+  const payload = JSON.stringify({ name: "read", ok: true });
+  const msg = makeSessionMessage({
+    role: "tool",
+    content: payload,
+    meta: { resultMd: "File content:\n  line 1\n  line 2" },
+  });
+  const output = renderMessageToStdout(msg, RawMode.Raw);
+  assert.ok(output.includes("✧"));
+  assert.ok(output.includes("Read"));
+  assert.ok(output.includes("└ Result"));
+  assert.ok(output.includes("File content:"));
+  assert.ok(output.includes("line 1"));
+});
+
+test("renderMessageToStdout renders UpdatePlan tool messages with Plan preview and resultMd", () => {
+  const payload = JSON.stringify({
+    name: "UpdatePlan",
+    ok: true,
+    metadata: { plan: "Step 1: Analyze\nStep 2: Implement\nStep 3: Test" },
+  });
+  const msg = makeSessionMessage({
+    role: "tool",
+    content: payload,
+    meta: { resultMd: "Plan updated successfully" },
+  });
+  const output = renderMessageToStdout(msg, RawMode.Raw);
+  assert.ok(output.includes("UpdatePlan"));
+  assert.ok(output.includes("└ Plan"));
+  assert.ok(output.includes("Step 1: Analyze"));
+  assert.ok(output.includes(" Result"));
+  assert.ok(output.includes("Plan updated successfully"));
+});
+
 test("renderMessageToStdout renders UpdatePlan tool messages with Plan preview", () => {
   const payload = JSON.stringify({
     name: "UpdatePlan",
@@ -136,6 +170,8 @@ test("renderMessageToStdout renders UpdatePlan tool messages with Plan preview",
   assert.ok(output.includes("└ Plan"));
   assert.ok(output.includes("Step 1: Analyze"));
   assert.ok(output.includes("Step 2: Implement"));
+  // Verify resultMd is NOT included when meta.resultMd is absent
+  assert.ok(!output.includes("└ Result"));
 });
 
 test("renderMessageToStdout renders system model change messages", () => {

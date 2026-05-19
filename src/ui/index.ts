@@ -1,5 +1,4 @@
 export {
-  App,
   readSettings,
   readProjectSettings,
   writeSettings,
@@ -8,6 +7,7 @@ export {
   resolveCurrentSettings,
   createOpenAIClient,
 } from "./App";
+export { default as AppContainer } from "./AppContainer";
 export { AskUserQuestionPrompt } from "./AskUserQuestionPrompt";
 export { MessageView } from "./compoments";
 export { parseDiffPreview } from "./compoments/MessageView/utils";

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Box, Text, useApp, useStdout } from "ink";
 import chalk from "chalk";
+import { ARGS_SEPARATOR } from "./constants";
 import {
   EMPTY_BUFFER,
   backspace,
@@ -887,7 +888,7 @@ export const PromptInput = React.memo(function PromptInput({
   );
 
   const matchedCommand = slashToken ? findExactSlashCommand(slashItems, slashToken) : null;
-  const inlineHint = matchedCommand?.args ? ` ${matchedCommand.args.join("|")}` : "";
+  const inlineHint = matchedCommand?.args ? ` ${matchedCommand.args.join(ARGS_SEPARATOR)}` : "";
 
   return (
     <Box flexDirection="column" width={screenWidth}>

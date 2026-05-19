@@ -2,7 +2,7 @@ import React from "react";
 import { render } from "ink";
 import { setShellIfWindows } from "./common/shell-utils";
 import { checkForNpmUpdate, promptForPendingUpdate, type PackageInfo } from "./updateCheck";
-import AppContainer from "./ui/AppContainer";
+import { AppContainer } from "./ui";
 
 const args = process.argv.slice(2);
 const packageInfo = readPackageInfo();
