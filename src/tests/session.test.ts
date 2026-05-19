@@ -1641,6 +1641,40 @@ test("SessionManager treats OpenAI APIUserAbortError as interrupted", async () =
   assert.equal(session?.failReason, "interrupted");
 });
 
+test("SessionManager adjusts the active Bash timeout control and session metadata", async () => {
+  const workspace = createTempDir("deepcode-bash-timeout-session-");
+  const manager = createSessionManager(workspace, "");
+  const sessionId = await manager.createSession({ text: "hello" });
+
+  (manager as any).addSessionProcess(sessionId, 123, "sleep 10");
+
+  let timeoutInfo = {
+    timeoutMs: 10 * 60 * 1000,
+    startedAtMs: 1000,
+    deadlineAtMs: 1000 + 10 * 60 * 1000,
+    timedOut: false,
+  };
+  (manager as any).setSessionProcessTimeoutControl(sessionId, 123, {
+    getInfo: () => timeoutInfo,
+    setTimeoutMs: (timeoutMs: number) => {
+      timeoutInfo = {
+        ...timeoutInfo,
+        timeoutMs,
+        deadlineAtMs: timeoutInfo.startedAtMs + timeoutMs,
+      };
+      return timeoutInfo;
+    },
+  });
+
+  const adjustment = manager.adjustActiveBashTimeout(5 * 60 * 1000);
+  const processInfo = manager.getSession(sessionId)?.processes?.get("123");
+
+  assert.equal(adjustment?.processId, "123");
+  assert.equal(adjustment?.timeoutMs, 15 * 60 * 1000);
+  assert.equal(processInfo?.timeoutMs, 15 * 60 * 1000);
+  assert.equal(processInfo?.deadlineAt, new Date(timeoutInfo.deadlineAtMs).toISOString());
+});
+
 function createSessionManager(projectRoot: string, machineId: string): SessionManager {
   return new SessionManager({
     projectRoot,

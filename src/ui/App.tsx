@@ -54,7 +54,7 @@ type AppProps = {
 export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout, write } = useStdout();
-  const { columns } = useWindowSize();
+  const { columns, rows } = useWindowSize();
   const { mode, setMode } = useRawModeContext();
   const initialPromptSubmittedRef = useRef(false);
   const processStdoutRef = useRef<Map<number, string>>(new Map());
@@ -281,6 +281,11 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
     setShowProcessStdout(false);
   }, []);
 
+  const handleAdjustBashTimeout = useCallback(
+    (deltaMs: number) => sessionManager.adjustActiveBashTimeout(deltaMs),
+    [sessionManager]
+  );
+
   const handleModelConfigChange = useCallback(
     (selection: ModelConfigSelection): string => {
       const current = resolveCurrentSettings(projectRoot);
@@ -467,6 +472,7 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
   }, [busy, mode, sessionManager, columns, stdout]);
 
   const screenWidth = useMemo(() => columns ?? stdout?.columns ?? 80, [columns, stdout]);
+  const screenHeight = useMemo(() => rows ?? stdout?.rows ?? 24, [rows, stdout]);
   const promptHistory = useMemo(() => {
     return messages
       .filter((message) => message.role === "user" && typeof message.content === "string")
@@ -568,7 +574,9 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
           processStdoutRef={processStdoutRef}
           runningProcesses={runningProcesses}
           onDismiss={handleDismissProcessStdout}
+          onAdjustTimeout={handleAdjustBashTimeout}
           screenWidth={screenWidth}
+          screenHeight={screenHeight}
         />
       ) : view === "session-list" ? (
         <SessionList
