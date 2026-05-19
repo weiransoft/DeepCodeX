@@ -83,14 +83,14 @@ The following context is injected as environment variables when the notify scrip
 }
 ```
 
-**iTerm2 Notification Example**:
+**Terminal Notification Example (iTerm2 / Windows Terminal)**:
 
-On iTerm2 you can use the OSC 9 escape sequence for native notifications. Create a script (e.g., `~/.deepcode/notify.sh`):
+On iTerm2 or Windows Terminal you can use the OSC 9 escape sequence for native terminal notifications with zero dependencies. Create a script (e.g., `~/.deepcode/notify.sh`):
 
 ```bash
 #!/bin/bash
-# iTerm2 OSC 9 notification
-echo -e "\x1b]9;DeepCode: task ${STATUS:-completed} (${DURATION}s)\x07"
+# iTerm2 / Windows Terminal OSC 9 notification
+printf '\x1b]9;DeepCode: task %s (%ss)\x07' "${STATUS:-completed}" "${DURATION}"
 ```
 
 ```json
@@ -99,12 +99,36 @@ echo -e "\x1b]9;DeepCode: task ${STATUS:-completed} (${DURATION}s)\x07"
 }
 ```
 
+Windows users on Git Bash can use the same script; alternatively create a `.bat` script:
+
+```batch
+@echo off
+REM Windows Terminal OSC 9 notification
+echo \x1b]9;DeepCode: task %STATUS% (%DURATION%s)\x07
+```
+
 **macOS System Notification Example**:
 
 ```bash
 #!/bin/bash
 # macOS system notification
 osascript -e "display notification \"Task ${STATUS:-completed}, took ${DURATION}s\" with title \"DeepCode\""
+```
+
+**Linux System Notification Example** (requires `libnotify-bin`):
+
+```bash
+#!/bin/bash
+# Linux notify-send notification
+notify-send "DeepCode" "Task ${STATUS:-completed}, took ${DURATION}s"
+```
+
+**Windows msg Popup Notification Example**:
+
+```batch
+@echo off
+REM Windows msg popup notification
+msg %USERNAME% "DeepCode: task %STATUS% (%DURATION%s)"
 ```
 
 #### `webSearchTool` — Custom Web Search

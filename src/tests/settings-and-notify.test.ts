@@ -408,6 +408,33 @@ test("buildNotifyEnv omits optional context fields when not provided", () => {
   assert.equal(env.TITLE, undefined);
 });
 
+test("buildNotifyEnv ignores empty strings in context", () => {
+  const env = buildNotifyEnv(
+    1000,
+    { HOME: "/tmp/home" },
+    {
+      status: "",
+      failReason: "",
+      body: "",
+      title: "",
+    }
+  );
+  assert.equal(env.STATUS, undefined);
+  assert.equal(env.FAIL_REASON, undefined);
+  assert.equal(env.BODY, undefined);
+  assert.equal(env.TITLE, undefined);
+});
+
+test("buildNotifyEnv preserves special characters in body and title", () => {
+  const context: NotifyContext = {
+    body: 'Line 1\nLine 2\tindented "quoted"',
+    title: "Fix: login & signup (urgent)",
+  };
+  const env = buildNotifyEnv(1000, {}, context);
+  assert.equal(env.BODY, 'Line 1\nLine 2\tindented "quoted"');
+  assert.equal(env.TITLE, "Fix: login & signup (urgent)");
+});
+
 test(
   "launchNotifyScript passes DURATION, context vars, and falls back to /bin/sh for non-executable scripts",
   { skip: process.platform === "win32" },
