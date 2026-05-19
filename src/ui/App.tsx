@@ -434,8 +434,31 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
     }
     lastRenderedColumnsRef.current = stableColumns;
 
+    if (mode === RawMode.Raw) {
+      // In raw mode, re-render all messages directly to stdout at the new width.
+      // Use process.stdout.write instead of writeRef to avoid Ink interference.
+      process.stdout.write("\u001B[2J\u001B[3J\u001B[H");
+      const activeSessionId = sessionManager.getActiveSessionId();
+      const allMessages = activeSessionId ? loadVisibleMessages(sessionManager, activeSessionId) : [];
+      for (const msg of allMessages) {
+        process.stdout.write("\n");
+        process.stdout.write(renderMessageToStdout(msg, mode) + "\n\n");
+      }
+      if (allMessages.length > 0) {
+        process.stdout.write("\n\n");
+        process.stdout.write(chalk.dim("Press ESC to exit raw mode"));
+      } else {
+        process.stdout.write("\n");
+        process.stdout.write(chalk.dim("(No messages in this session yet. Start chatting to see them here.)"));
+        process.stdout.write("\n\n");
+        process.stdout.write(chalk.dim("Press ESC to exit raw mode"));
+      }
+      return;
+    }
+
     // Force full redraw on terminal resize to avoid stale wrapped rows.
     writeRef.current("\u001B[2J\u001B[H");
+
     setMessages([]);
     setShowWelcome(false);
     setWelcomeNonce((n) => n + 1);
@@ -447,7 +470,8 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
       setMessages(nextMessages);
       setShowWelcome(true);
     }, 0);
-  }, [busy, sessionManager, stableColumns, stdout]);
+  }, [busy, mode, sessionManager, stableColumns, stdout]);
+
   const screenWidth = useMemo(() => stableColumns ?? stdout?.columns ?? 80, [stableColumns, stdout]);
   const promptHistory = useMemo(() => {
     return messages
