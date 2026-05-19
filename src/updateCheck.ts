@@ -6,6 +6,7 @@ import * as path from "path";
 import { render, type Instance } from "ink";
 import chalk from "chalk";
 import { UpdatePrompt, type UpdatePromptChoice } from "./ui";
+import { killProcessTree } from "./common/process-tree";
 
 export type PackageInfo = {
   name: string;
@@ -222,7 +223,11 @@ function runNpmViewLatestVersion(
     };
 
     const timer = setTimeout(() => {
-      child.kill();
+      if (typeof child.pid === "number") {
+        killProcessTree(child.pid, "SIGTERM", { killGroupOnNonWindows: false });
+      } else {
+        child.kill();
+      }
       finish({ ok: false });
     }, timeoutMs);
 

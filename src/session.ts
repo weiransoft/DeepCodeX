@@ -22,6 +22,7 @@ import { McpManager } from "./mcp/mcp-manager";
 import type { McpServerConfig } from "./settings";
 import { logApiError } from "./common/error-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./common/debug-logger";
+import { killProcessTree } from "./common/process-tree";
 
 const MAX_SESSION_ENTRIES = 50;
 const DEFAULT_NEW_PROMPT_API_URL = "https://deepcode.vegamo.cn/api/plugin/new";
@@ -1359,17 +1360,11 @@ ${skillMd}
     const killedPids: number[] = [];
     const failedPids: number[] = [];
     for (const pid of processIds) {
-      const killedGroup = this.killProcessGroup(pid);
-      if (killedGroup) {
+      if (killProcessTree(pid, "SIGKILL")) {
         killedPids.push(pid);
         continue;
       }
-      try {
-        process.kill(pid, "SIGKILL");
-        killedPids.push(pid);
-      } catch {
-        failedPids.push(pid);
-      }
+      failedPids.push(pid);
     }
 
     const controller = this.sessionControllers.get(sessionId);
@@ -2184,18 +2179,6 @@ ${skillMd}
       null,
       2
     );
-  }
-
-  private killProcessGroup(pid: number): boolean {
-    if (process.platform === "win32") {
-      return false;
-    }
-    try {
-      process.kill(-pid, "SIGKILL");
-      return true;
-    } catch {
-      return false;
-    }
   }
 
   private normalizeSessionEntry(entry: unknown): SessionEntry {
