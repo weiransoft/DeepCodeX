@@ -1,5 +1,4 @@
 export {
-  App,
   readSettings,
   readProjectSettings,
   writeSettings,
@@ -8,8 +7,10 @@ export {
   resolveCurrentSettings,
   createOpenAIClient,
 } from "./App";
+export { default as AppContainer } from "./AppContainer";
 export { AskUserQuestionPrompt } from "./AskUserQuestionPrompt";
-export { MessageView, parseDiffPreview } from "./MessageView";
+export { MessageView } from "./compoments";
+export { parseDiffPreview } from "./compoments/MessageView/utils";
 export {
   PromptInput,
   IMAGE_ATTACHMENT_CLEAR_HINT,
@@ -47,7 +48,7 @@ export {
 } from "./askUserQuestion";
 export { readClipboardImage, type ClipboardImage } from "./clipboard";
 export { buildLoadingText, type LoadingTextInput } from "./loadingText";
-export { renderMarkdown } from "./markdown";
+export { renderMarkdown } from "./compoments/MessageView/markdown";
 export {
   EMPTY_BUFFER,
   insertText,

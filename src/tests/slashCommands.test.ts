@@ -19,7 +19,7 @@ test("buildSlashCommands prefixes skills before built-ins", () => {
   assert.equal(items[0].kind, "skill");
   assert.equal(items[0].name, "skill-writer");
   const builtinNames = items.filter((i) => i.kind !== "skill").map((i) => i.name);
-  assert.deepEqual(builtinNames, ["skills", "model", "new", "init", "resume", "continue", "mcp", "exit"]);
+  assert.deepEqual(builtinNames, ["skills", "model", "new", "init", "resume", "continue", "mcp", "raw", "exit"]);
 });
 
 test("filterSlashCommands matches partial prefixes", () => {
@@ -78,6 +78,13 @@ test("findExactSlashCommand returns built-in /model", () => {
   const item = findExactSlashCommand(items, "/model");
   assert.ok(item);
   assert.equal(item?.kind, "model");
+});
+
+test("findExactSlashCommand returns built-in /raw", () => {
+  const items = buildSlashCommands(skills);
+  const item = findExactSlashCommand(items, "/raw");
+  assert.ok(item);
+  assert.equal(item?.kind, "raw");
 });
 
 test("findExactSlashCommand returns the matching skill", () => {
