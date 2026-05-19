@@ -79,39 +79,11 @@ The following context is injected as environment variables when the notify scrip
 
 ```json
 {
-  "notify": "/path/to/slack-notify.sh"
+  "notify": "/path/to/notify-script.sh"
 }
 ```
 
-**Feishu (Lark) Webhook Notification Example**:
-
-`node` builds the JSON (auto-escapes special characters), `curl` sends it:
-
-```bash
-#!/bin/bash
-WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxxxx"
-
-STATUS="${STATUS:-completed}"
-TITLE="${TITLE:-Untitled}"
-DURATION="${DURATION:-0}"
-BODY="${BODY:-(no output)}"
-
-PAYLOAD=$(node -e "
-process.stdout.write(JSON.stringify({
-  msg_type: 'interactive',
-  card: {
-    header: { title: { tag: 'plain_text', content: 'DeepCode: ' + process.env.TITLE + ' ' + process.env.STATUS + ' [' + process.env.DURATION + 's]' } },
-    elements: [{ tag: 'markdown', content: (process.env.BODY || '').slice(0, 2000) || '(no output)' }]
-  }
-}))
-")
-
-curl -s -X POST "$WEBHOOK_URL" \
-  -H "Content-Type: application/json" \
-  -d "$PAYLOAD"
-```
-
-Replace `WEBHOOK_URL` with your Feishu bot webhook URL. See the table above for all available variables. This pattern also works for other webhook-based notifications (Slack, WeCom, etc.) — just adjust the JSON payload format.
+> For detailed configuration examples (Slack, Feishu, terminal notifications, system notifications, etc.), see [notify_en.md](notify_en.md).
 
 #### `webSearchTool` — Custom Web Search
 
