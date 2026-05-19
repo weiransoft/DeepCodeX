@@ -50,7 +50,7 @@ export function MessageView({ message, collapsed, width = 80 }: MessageViewProps
       }
       return (
         <Box marginLeft={1} flexDirection="column" marginBottom={1} marginY={0}>
-          <StatusLine width={width} bulletColor="gray" name="Thinking" params={summary} />
+          <StatusLine width={width} bulletColor="gray" name="Thinking" params={content ? "" : summary} />
           <Box flexDirection="column" marginLeft={2}>
             {content ? <Text dimColor>{renderMarkdown(content)}</Text> : null}
           </Box>
