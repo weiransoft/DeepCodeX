@@ -48,7 +48,7 @@ export type { InputKey } from "./prompt";
 import { useTerminalInput } from "./prompt";
 import type { InputKey } from "./prompt";
 import { useHiddenTerminalCursor, useTerminalExtendedKeys, useTerminalFocusReporting } from "./prompt";
-import SlashCommandMenu from "./SlashCommandMenu";
+import SlashCommandMenu, { isSkillSelected } from "./SlashCommandMenu";
 import type { ModelConfigSelection } from "../settings";
 import { FileMentionMenu, ModelsDropdown, RawModelDropdown, SkillsDropdown } from "./components";
 
@@ -816,10 +816,6 @@ export function formatSelectedSkillsStatus(skills: SkillInfo[]): string {
     return "";
   }
   return `⚡ ${names.join(", ")}`;
-}
-
-export function isSkillSelected(skills: SkillInfo[], skill: SkillInfo): boolean {
-  return skills.some((item) => item.name === skill.name);
 }
 
 export function addUniqueSkill(skills: SkillInfo[], skill: SkillInfo): SkillInfo[] {
