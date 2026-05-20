@@ -23,7 +23,6 @@ export {
   IMAGE_ATTACHMENT_CLEAR_HINT,
   formatImageAttachmentStatus,
   formatSelectedSkillsStatus,
-  isSkillSelected,
   addUniqueSkill,
   toggleSkillSelection,
   removeCurrentSlashToken,

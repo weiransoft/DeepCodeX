@@ -1,8 +1,8 @@
 import DropdownMenu from "../../DropdownMenu";
 import React, { useEffect, useState } from "react";
-import { isSkillSelected } from "../../PromptInput";
 import type { SkillInfo } from "../../../session";
 import { useInput } from "ink";
+import { isSkillSelected } from "../../SlashCommandMenu";
 
 const SkillsDropdown: React.FC<{
   open: boolean;
