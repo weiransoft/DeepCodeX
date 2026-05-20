@@ -177,7 +177,7 @@ export function getCurrentSlashToken(state: PromptBufferState): string | null {
  * marker is inserted instead of the full content. The actual content is stored in a
  * Map and expanded back before submission.
  */
-export const PASTE_MARKER_REGEX = /\[paste #(\d+)( (\+?\d+ lines|\d+ chars))?\]/g;
+export const PASTE_MARKER_REGEX = /\[paste #(\d+) (\+?\d+ lines|\d+ chars)\]/g;
 
 /**
  * Find the paste marker that ends exactly at `state.cursor`, if any.
@@ -214,9 +214,16 @@ export function findPasteMarkerAt(state: PromptBufferState): { start: number; en
  * If the cursor is immediately after a paste marker, delete the entire marker
  * (atomic backspace). Returns the new state, or `state` unchanged if no marker.
  */
-export function deletePasteMarkerBackward(state: PromptBufferState): PromptBufferState | null {
+export function deletePasteMarkerBackward(
+  state: PromptBufferState,
+  validIds: Map<number, unknown>
+): PromptBufferState | null {
   const marker = findPasteMarkerBefore(state);
   if (!marker) return null;
+  // Only delete if this is a real paste marker (ID in validIds).
+  PASTE_MARKER_REGEX.lastIndex = 0;
+  const m = PASTE_MARKER_REGEX.exec(state.text.slice(marker.start, marker.end));
+  if (!m || !validIds.has(Number.parseInt(m[1]!, 10))) return null;
   const text = state.text.slice(0, marker.start) + state.text.slice(marker.end);
   return { text, cursor: marker.start };
 }
@@ -225,9 +232,16 @@ export function deletePasteMarkerBackward(state: PromptBufferState): PromptBuffe
  * If the cursor is at the start of a paste marker, delete the entire marker
  * (atomic forward delete). Returns the new state, or `state` unchanged if no marker.
  */
-export function deletePasteMarkerForward(state: PromptBufferState): PromptBufferState | null {
+export function deletePasteMarkerForward(
+  state: PromptBufferState,
+  validIds: Map<number, unknown>
+): PromptBufferState | null {
   const marker = findPasteMarkerAt(state);
   if (!marker) return null;
+  // Only delete if this is a real paste marker (ID in validIds).
+  PASTE_MARKER_REGEX.lastIndex = 0;
+  const m = PASTE_MARKER_REGEX.exec(state.text.slice(marker.start, marker.end));
+  if (!m || !validIds.has(Number.parseInt(m[1]!, 10))) return null;
   const text = state.text.slice(0, marker.start) + state.text.slice(marker.end);
   return { text, cursor: marker.start };
 }
@@ -252,7 +266,7 @@ export function expandPasteMarkers(text: string, pastes: Map<number, string>): s
   if (pastes.size === 0) return text;
   let result = text;
   for (const [pasteId, pasteContent] of pastes) {
-    const markerRegex = new RegExp(`\\[paste #${pasteId}( (\\+?\\d+ lines|\\d+ chars))?\\]`, "g");
+    const markerRegex = new RegExp(`\\[paste #${pasteId} (\\+?\\d+ lines|\\d+ chars)\\]`, "g");
     result = result.replace(markerRegex, () => cleanPasteContent(pasteContent));
   }
   return result;
@@ -278,11 +292,18 @@ export function findPasteMarkerContaining(state: PromptBufferState): { start: nu
 }
 
 /**
- * Check whether the given text contains any paste markers.
+ * Check whether the text contains real paste markers (IDs present in validIds).
  */
-export function hasActivePasteMarkers(text: string): boolean {
+export function hasActivePasteMarkers(text: string, validIds: Map<number, unknown>): boolean {
+  if (!text.includes("[paste #")) return false;
   PASTE_MARKER_REGEX.lastIndex = 0;
-  return PASTE_MARKER_REGEX.test(text);
+  let match: RegExpExecArray | null;
+  while ((match = PASTE_MARKER_REGEX.exec(text)) !== null) {
+    if (validIds.has(Number.parseInt(match[1]!, 10))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function locate(state: PromptBufferState): {

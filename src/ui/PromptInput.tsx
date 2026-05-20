@@ -188,7 +188,7 @@ export const PromptInput = React.memo(function PromptInput({
   const showMenu = slashMenu.length > 0;
   const promptHistoryKey = React.useMemo(() => promptHistory.join("\0"), [promptHistory]);
   const hasRunningProcess = runningProcesses && runningProcesses.size > 0;
-  const hasCollapsedMarkers = hasActivePasteMarkers(buffer.text);
+  const hasCollapsedMarkers = hasActivePasteMarkers(buffer.text, pastesRef.current);
   const hasExpandedRegions = expandedRegionsRef.current.size > 0;
   const processOrPasteHint = hasRunningProcess
     ? " · ctrl+o view output"
@@ -431,12 +431,12 @@ export const PromptInput = React.memo(function PromptInput({
       }
 
       if (key.delete) {
-        updateBuffer((s) => deletePasteMarkerForward(s) ?? deleteForward(s));
+        updateBuffer((s) => deletePasteMarkerForward(s, pastesRef.current) ?? deleteForward(s));
         return;
       }
 
       if (key.backspace) {
-        updateBuffer((s) => deletePasteMarkerBackward(s) ?? backspace(s));
+        updateBuffer((s) => deletePasteMarkerBackward(s, pastesRef.current) ?? backspace(s));
         return;
       }
 
@@ -872,7 +872,7 @@ export const PromptInput = React.memo(function PromptInput({
         borderDimColor
       >
         <PromptPrefixLine busy={busy} />
-        <Text>{renderBufferWithCursor(buffer, !disabled && hasTerminalFocus, placeholder)}</Text>
+        <Text>{renderBufferWithCursor(buffer, !disabled && hasTerminalFocus, placeholder, pastesRef.current)}</Text>
         {inlineHint ? <Text dimColor>{inlineHint}</Text> : null}
       </Box>
       <RawModelDropdown
@@ -986,9 +986,15 @@ export function getPromptReturnKeyAction(key: Pick<InputKey, "return" | "shift" 
   return "submit";
 }
 
-export function renderBufferWithCursor(state: PromptBufferState, isFocused: boolean, placeholder?: string): string {
+export function renderBufferWithCursor(
+  state: PromptBufferState,
+  isFocused: boolean,
+  placeholder?: string,
+  validPastes?: Map<number, string>
+): string {
   const text = state.text || "";
   const cursor = Math.max(0, Math.min(state.cursor, text.length));
+  const validIds = validPastes ?? new Map<number, string>();
 
   if (text.length === 0 && placeholder) {
     if (!isFocused) {
@@ -997,18 +1003,18 @@ export function renderBufferWithCursor(state: PromptBufferState, isFocused: bool
     return renderCursorCell(" ") + chalk.dim(` ${placeholder}`);
   }
 
-  if (!isFocused) {
-    return highlightPasteMarkersInText(text);
+  if (text.length === 0) {
+    return isFocused ? renderCursorCell(" ") : "";
   }
 
-  // Focused: scan through the text, highlight paste markers, and insert
-  // the cursor cell at the correct position. This approach handles the
-  // case where the cursor sits at the start of (or inside) a paste marker.
-  return renderFocusedText(text, cursor);
+  if (!isFocused) {
+    return highlightPasteMarkersInText(text, validIds);
+  }
+
+  return renderFocusedText(text, cursor, validIds);
 }
 
-/** Highlight paste markers in a plain string (no cursor). */
-function highlightPasteMarkersInText(s: string): string {
+function highlightPasteMarkersInText(s: string, validIds: Map<number, string>): string {
   if (!s.includes("[paste #")) return s;
   PASTE_MARKER_REGEX.lastIndex = 0;
   let result = "";
@@ -1016,7 +1022,8 @@ function highlightPasteMarkersInText(s: string): string {
   let match: RegExpExecArray | null;
   while ((match = PASTE_MARKER_REGEX.exec(s)) !== null) {
     result += s.slice(pos, match.index);
-    result += chalk.yellow(match[0]);
+    const id = Number.parseInt(match[1]!, 10);
+    result += validIds.has(id) ? chalk.yellow(match[0]) : match[0];
     pos = match.index + match[0].length;
   }
   result += s.slice(pos);
@@ -1029,7 +1036,7 @@ function highlightPasteMarkersInText(s: string): string {
  * anywhere (including inside or at the boundary of a paste marker) and the
  * marker will still be highlighted correctly.
  */
-function renderFocusedText(text: string, cursor: number): string {
+function renderFocusedText(text: string, cursor: number, validIds: Map<number, string>): string {
   let result = "";
   let pos = 0;
   PASTE_MARKER_REGEX.lastIndex = 0;
@@ -1038,14 +1045,15 @@ function renderFocusedText(text: string, cursor: number): string {
   while ((match = PASTE_MARKER_REGEX.exec(text)) !== null) {
     const markerStart = match.index;
     const markerEnd = match.index + match[0].length;
+    const id = Number.parseInt(match[1]!, 10);
+    const isReal = validIds.has(id);
 
     // 1. Non-marker segment before this marker.
     result += renderTextSegmentWithCursor(text, pos, markerStart, cursor, false);
     pos = markerStart;
 
-    // 2. Marker segment — highlighted with chalk.yellow.
-    //    The cursor may fall inside it.
-    result += renderTextSegmentWithCursor(text, pos, markerEnd, cursor, true);
+    // 2. Marker segment — highlighted only if it corresponds to a real paste.
+    result += renderTextSegmentWithCursor(text, pos, markerEnd, cursor, isReal);
     pos = markerEnd;
   }
 
