@@ -1919,6 +1919,9 @@ test("SessionManager treats OpenAI APIUserAbortError as interrupted", async () =
 
 test("SessionManager adjusts the active Bash timeout control and session metadata", async () => {
   const workspace = createTempDir("deepcode-bash-timeout-session-");
+  const home = createTempDir("deepcode-bash-timeout-home-");
+  setHomeDir(home);
+
   const manager = createSessionManager(workspace, "");
   const sessionId = await manager.createSession({ text: "hello" });
 
