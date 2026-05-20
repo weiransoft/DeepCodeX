@@ -30,6 +30,7 @@ export {
   MODEL_COMMAND_THINKING_OPTIONS,
   useTerminalInput,
   parseTerminalInput,
+  dispatchTerminalInput,
   type PromptSubmission,
   type PromptDraft,
   type InputKey,

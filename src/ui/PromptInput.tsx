@@ -42,7 +42,7 @@ import { readClipboardImageAsync } from "./clipboard";
 import type { SessionEntry, SkillInfo } from "../session";
 
 // Re-exported from prompt modules for backward compatibility
-export { useTerminalInput, parseTerminalInput } from "./prompt";
+export { useTerminalInput, parseTerminalInput, dispatchTerminalInput } from "./prompt";
 export type { InputKey } from "./prompt";
 
 import { useTerminalInput } from "./prompt";
