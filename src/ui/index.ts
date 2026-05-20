@@ -1,3 +1,9 @@
+import {
+  getThinkingOptionIndex,
+  MODEL_COMMAND_MODELS,
+  MODEL_COMMAND_THINKING_OPTIONS,
+} from "./components/ModelsDropdown";
+
 export {
   readSettings,
   readProjectSettings,
@@ -17,7 +23,6 @@ export {
   IMAGE_ATTACHMENT_CLEAR_HINT,
   formatImageAttachmentStatus,
   formatSelectedSkillsStatus,
-  isSkillSelected,
   addUniqueSkill,
   toggleSkillSelection,
   removeCurrentSlashToken,
@@ -25,9 +30,6 @@ export {
   getPromptReturnKeyAction,
   renderBufferWithCursor,
   buildInitPromptSubmission,
-  getThinkingOptionIndex,
-  MODEL_COMMAND_MODELS,
-  MODEL_COMMAND_THINKING_OPTIONS,
   useTerminalInput,
   parseTerminalInput,
   dispatchTerminalInput,
@@ -35,8 +37,9 @@ export {
   type PromptDraft,
   type InputKey,
 } from "./PromptInput";
+export { getThinkingOptionIndex, MODEL_COMMAND_MODELS, MODEL_COMMAND_THINKING_OPTIONS };
 export { disableTerminalExtendedKeys, enableTerminalExtendedKeys, getPromptCursorPlacement } from "./prompt/cursor";
-export { SessionList, formatSessionTitle } from "./SessionList";
+export { SessionList, formatSessionTitle, filterSessions, formatSessionStatus } from "./SessionList";
 export { ThemedGradient } from "./ThemedGradient";
 export { UpdatePrompt, type UpdatePromptChoice } from "./UpdatePrompt";
 export { WelcomeScreen, formatHomeRelativePath, buildWelcomeTips } from "./WelcomeScreen";
