@@ -482,6 +482,60 @@ rl.on("line", (line) => {
   assert.deepEqual(manager.getMcpStatus(), []);
 });
 
+test("SessionManager refreshes cached MCP tool definitions after server crash", async () => {
+  const workspace = createTempDir("deepcode-mcp-crash-cache-workspace-");
+  const serverPath = path.join(workspace, "mcp-server-crash.cjs");
+  fs.writeFileSync(
+    serverPath,
+    `
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+function send(message) {
+  process.stdout.write(JSON.stringify(message) + "\\n");
+}
+rl.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (!("id" in request)) {
+    return;
+  }
+  if (request.method === "initialize") {
+    send({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} } } });
+    return;
+  }
+  if (request.method === "tools/list") {
+    send({ jsonrpc: "2.0", id: request.id, result: { tools: [
+      { name: "echo", inputSchema: { type: "object", properties: {} } }
+    ] } });
+    return;
+  }
+  if (request.method === "prompts/list") {
+    send({ jsonrpc: "2.0", id: request.id, result: { prompts: [] } });
+    return;
+  }
+  if (request.method === "resources/list") {
+    send({ jsonrpc: "2.0", id: request.id, result: { resources: [] } });
+    setTimeout(() => process.exit(9), 10);
+    return;
+  }
+  send({ jsonrpc: "2.0", id: request.id, result: { content: [] } });
+});
+`,
+    "utf8"
+  );
+
+  const manager = createSessionManager(workspace, "machine-id-mcp-crash-cache");
+  await manager.initMcpServers({ crashy: { command: process.execPath, args: [serverPath] } });
+
+  assert.equal(manager.getMcpStatus()[0]?.status, "ready");
+  assert.equal((manager as any).mcpToolDefinitions.length, 1);
+
+  await waitForMcpStatus(manager, "failed");
+
+  assert.equal((manager as any).mcpToolDefinitions.length, 0);
+
+  manager.dispose();
+});
+
 test("SessionManager reports configured MCP servers as starting before initialization", () => {
   const workspace = createTempDir("deepcode-mcp-configured-workspace-");
   const manager = new SessionManager({
@@ -2274,6 +2328,16 @@ async function waitForNotifyRecords(
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   assert.fail(`expected ${expectedCount} notify records in ${outputPath}`);
+}
+
+async function waitForMcpStatus(manager: SessionManager, expectedStatus: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (manager.getMcpStatus()[0]?.status === expectedStatus) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail(`expected MCP status ${expectedStatus}`);
 }
 
 function escapeRegExp(value: string): string {
