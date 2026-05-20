@@ -6,6 +6,7 @@ export {
   writeModelConfigSelection,
   resolveCurrentSettings,
   createOpenAIClient,
+  buildPromptDraftFromSessionMessage,
 } from "./App";
 export { default as AppContainer } from "./AppContainer";
 export { AskUserQuestionPrompt } from "./AskUserQuestionPrompt";
@@ -30,6 +31,7 @@ export {
   useTerminalInput,
   parseTerminalInput,
   type PromptSubmission,
+  type PromptDraft,
   type InputKey,
 } from "./PromptInput";
 export { disableTerminalExtendedKeys, enableTerminalExtendedKeys, getPromptCursorPlacement } from "./prompt/cursor";
