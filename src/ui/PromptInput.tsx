@@ -51,7 +51,7 @@ import { useHiddenTerminalCursor, useTerminalExtendedKeys, useTerminalFocusRepor
 import SlashCommandMenu from "./SlashCommandMenu";
 import type { ModelConfigSelection, ReasoningEffort } from "../settings";
 import DropdownMenu from "./DropdownMenu";
-import { RawModelDropdown } from "./compoments";
+import { RawModelDropdown } from "./components";
 
 export type PromptSubmission = {
   text: string;
