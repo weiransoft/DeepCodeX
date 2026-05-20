@@ -37,7 +37,7 @@ export {
 } from "./PromptInput";
 export { getThinkingOptionIndex, MODEL_COMMAND_MODELS, MODEL_COMMAND_THINKING_OPTIONS };
 export { disableTerminalExtendedKeys, enableTerminalExtendedKeys, getPromptCursorPlacement } from "./prompt/cursor";
-export { SessionList, formatSessionTitle } from "./SessionList";
+export { SessionList, formatSessionTitle, filterSessions, formatSessionStatus } from "./SessionList";
 export { ThemedGradient } from "./ThemedGradient";
 export { UpdatePrompt, type UpdatePromptChoice } from "./UpdatePrompt";
 export { WelcomeScreen, formatHomeRelativePath, buildWelcomeTips } from "./WelcomeScreen";
