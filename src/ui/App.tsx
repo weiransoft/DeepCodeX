@@ -23,7 +23,7 @@ import {
   resolveSettingsSources,
 } from "../settings";
 import { PromptInput, type PromptSubmission } from "./PromptInput";
-import { MessageView, RawModeExitPrompt } from "./compoments";
+import { MessageView, RawModeExitPrompt } from "./components";
 import { SessionList } from "./SessionList";
 import { buildLoadingText } from "./loadingText";
 import { findExpandedThinkingId } from "./thinkingState";
@@ -38,7 +38,7 @@ import {
 } from "./askUserQuestion";
 import { buildExitSummaryText } from "./exitSummary";
 import { RawMode, useRawModeContext } from "./contexts";
-import { renderMessageToStdout } from "./compoments/MessageView/utils";
+import { renderMessageToStdout } from "./components/MessageView/utils";
 
 const DEFAULT_MODEL = "deepseek-v4-pro";
 const DEFAULT_BASE_URL = "https://api.deepseek.com";
