@@ -50,8 +50,7 @@ import type { InputKey } from "./prompt";
 import { useHiddenTerminalCursor, useTerminalExtendedKeys, useTerminalFocusReporting } from "./prompt";
 import SlashCommandMenu from "./SlashCommandMenu";
 import type { ModelConfigSelection } from "../settings";
-import DropdownMenu from "./DropdownMenu";
-import { ModelsDropdown, RawModelDropdown, SkillsDropdown } from "./components";
+import { FileMentionMenu, ModelsDropdown, RawModelDropdown, SkillsDropdown } from "./components";
 
 export type PromptSubmission = {
   text: string;
@@ -127,7 +126,6 @@ export const PromptInput = React.memo(function PromptInput({
   const [openRawModelDropdown, setOpenRawModelDropdown] = useState(false);
   const [showModelDropdown, setShowModelDropdown] = useState(false);
   const [fileMentionItems, setFileMentionItems] = useState<FileMentionItem[]>(() => scanFileMentionItems(projectRoot));
-  const [fileMentionIndex, setFileMentionIndex] = useState(0);
   const [dismissedFileMentionKey, setDismissedFileMentionKey] = useState<string | null>(null);
   const [historyCursor, setHistoryCursor] = useState(-1);
   const [draftBeforeHistory, setDraftBeforeHistory] = useState<string | null>(null);
@@ -214,16 +212,6 @@ export const PromptInput = React.memo(function PromptInput({
   }, [fileMentionKey]);
 
   useEffect(() => {
-    if (!showFileMentionMenu) {
-      setFileMentionIndex(0);
-      return;
-    }
-    if (fileMentionIndex >= fileMentionMatches.length) {
-      setFileMentionIndex(Math.max(0, fileMentionMatches.length - 1));
-    }
-  }, [fileMentionMatches.length, fileMentionIndex, showFileMentionMenu]);
-
-  useEffect(() => {
     if (!statusMessage) {
       return;
     }
@@ -252,8 +240,7 @@ export const PromptInput = React.memo(function PromptInput({
       }
 
       if (key.escape) {
-        if (showFileMentionMenu && fileMentionKey) {
-          setDismissedFileMentionKey(fileMentionKey);
+        if (showFileMentionMenu) {
           return;
         }
         if (busy) {
@@ -345,31 +332,8 @@ export const PromptInput = React.memo(function PromptInput({
       const isPlainReturn = returnAction === "submit";
 
       if (showFileMentionMenu) {
-        if (key.upArrow) {
-          if (fileMentionMatches.length > 0) {
-            setFileMentionIndex((idx) => (idx - 1 + fileMentionMatches.length) % fileMentionMatches.length);
-          }
+        if (key.upArrow || key.downArrow || key.tab || returnAction === "submit") {
           return;
-        }
-        if (key.downArrow) {
-          if (fileMentionMatches.length > 0) {
-            setFileMentionIndex((idx) => (idx + 1) % fileMentionMatches.length);
-          }
-          return;
-        }
-        if (key.tab || returnAction === "submit") {
-          const selected = fileMentionMatches[fileMentionIndex];
-          if (selected && fileMentionToken) {
-            insertFileMentionSelection(selected);
-            return;
-          }
-          if (key.tab) {
-            setDismissedFileMentionKey(fileMentionKey);
-            return;
-          }
-          if (fileMentionKey) {
-            setDismissedFileMentionKey(fileMentionKey);
-          }
         }
       }
 
@@ -613,6 +577,14 @@ export const PromptInput = React.memo(function PromptInput({
     setDismissedFileMentionKey(null);
   }
 
+  function resetPromptInput(): void {
+    setBuffer(EMPTY_BUFFER);
+    clearUndoRedoStacks();
+    setImageUrls([]);
+    setSelectedSkills([]);
+    setShowSkillsDropdown(false);
+  }
+
   function handleSlashSelection(item: SlashCommandItem): void {
     if (busy && item.kind !== "exit") {
       setStatusMessage("wait for the current response or press esc to interrupt");
@@ -643,47 +615,27 @@ export const PromptInput = React.memo(function PromptInput({
     }
     if (item.kind === "new") {
       onSubmit({ text: "", imageUrls: [], command: "new" });
-      setBuffer(EMPTY_BUFFER);
-      clearUndoRedoStacks();
-      setImageUrls([]);
-      setSelectedSkills([]);
-      setShowSkillsDropdown(false);
+      resetPromptInput();
       return;
     }
     if (item.kind === "init") {
       onSubmit(buildInitPromptSubmission(selectedSkills));
-      setBuffer(EMPTY_BUFFER);
-      clearUndoRedoStacks();
-      setImageUrls([]);
-      setSelectedSkills([]);
-      setShowSkillsDropdown(false);
+      resetPromptInput();
       return;
     }
     if (item.kind === "resume") {
       onSubmit({ text: "", imageUrls: [], command: "resume" });
-      setBuffer(EMPTY_BUFFER);
-      clearUndoRedoStacks();
-      setImageUrls([]);
-      setSelectedSkills([]);
-      setShowSkillsDropdown(false);
+      resetPromptInput();
       return;
     }
     if (item.kind === "continue") {
       onSubmit({ text: "/continue", imageUrls: [], command: "continue" });
-      setBuffer(EMPTY_BUFFER);
-      clearUndoRedoStacks();
-      setImageUrls([]);
-      setSelectedSkills([]);
-      setShowSkillsDropdown(false);
+      resetPromptInput();
       return;
     }
     if (item.kind === "mcp") {
       onSubmit({ text: "/mcp", imageUrls: [], command: "mcp" });
-      setBuffer(EMPTY_BUFFER);
-      clearUndoRedoStacks();
-      setImageUrls([]);
-      setSelectedSkills([]);
-      setShowSkillsDropdown(false);
+      resetPromptInput();
       return;
     }
     if (item.kind === "exit") {
@@ -718,11 +670,7 @@ export const PromptInput = React.memo(function PromptInput({
       imageUrls,
       selectedSkills,
     });
-    setBuffer(EMPTY_BUFFER);
-    clearUndoRedoStacks();
-    setImageUrls([]);
-    setSelectedSkills([]);
-    setShowSkillsDropdown(false);
+    resetPromptInput();
   }
 
   function addSelectedSkill(skill: SkillInfo): void {
@@ -798,37 +746,18 @@ export const PromptInput = React.memo(function PromptInput({
         onModelConfigChange={onModelConfigChange}
         onStatusMessage={setStatusMessage}
       />
-      {showFileMentionMenu ? (
-        <DropdownMenu
-          width={screenWidth}
-          title="Mention File"
-          helpText="Enter/Tab insert · Esc close"
-          emptyText={fileMentionToken?.query ? "No matching files" : "Type after @ to search files"}
-          items={fileMentionMatches.map((item) => ({
-            key: item.path,
-            label: item.path,
-            description: item.type === "directory" ? "directory" : "file",
-          }))}
-          activeIndex={fileMentionIndex}
-          activeColor="#229ac3"
-          maxVisible={8}
-          renderItem={(item, isActive) => (
-            <Box flexDirection="row" paddingX={1} gap={1}>
-              <Text color={isActive ? "#229ac3" : undefined}>{isActive ? "> " : "  "}</Text>
-              <Box flexGrow={1}>
-                <Text color={isActive ? "#229ac3" : undefined} wrap="truncate-end" bold={isActive}>
-                  {item.label}
-                </Text>
-              </Box>
-              {item.description ? (
-                <Box width={10} flexShrink={0}>
-                  <Text dimColor>{item.description}</Text>
-                </Box>
-              ) : null}
-            </Box>
-          )}
-        />
-      ) : null}
+      <FileMentionMenu
+        open={showFileMentionMenu}
+        width={screenWidth}
+        token={fileMentionToken}
+        items={fileMentionMatches}
+        onClose={() => {
+          if (fileMentionKey) {
+            setDismissedFileMentionKey(fileMentionKey);
+          }
+        }}
+        onSelect={insertFileMentionSelection}
+      />
       <SlashCommandMenu width={screenWidth} items={slashMenu} activeIndex={menuIndex} />
       {!showFooterText && (
         <Box>
