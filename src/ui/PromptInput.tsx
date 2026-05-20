@@ -238,7 +238,6 @@ export const PromptInput = React.memo(function PromptInput({
     setSelectedSkills([]);
     setShowSkillsDropdown(false);
     setOpenRawModelDropdown(false);
-    setModelDropdownStep(null);
     setHistoryCursor(-1);
     setDraftBeforeHistory(null);
     clearPromptUndoRedoState(undoRedoRef.current);
