@@ -5,12 +5,12 @@ import OpenAI from "openai";
 import { Agent, fetch as undiciFetch } from "undici";
 import { resolveCurrentSettings } from "../ui/App";
 
-// Custom undici Agent with a 60-second keepAlive timeout.  The default
+// Custom undici Agent with a 180-second keepAlive timeout.  The default
 // global fetch (undici) only keeps connections alive for 4 seconds, which
 // is too short for a CLI where the user may spend 10–30 seconds reading
 // output between prompts.  By passing a dedicated Agent to undiciFetch we
-// keep connections reusable for a full minute after the last request.
-const keepAliveAgent = new Agent({ keepAliveTimeout: 60_000 });
+// keep connections reusable for three minutes after the last request.
+const keepAliveAgent = new Agent({ keepAliveTimeout: 180_000 });
 
 // Module-level cache for the OpenAI client instance.  The client itself is
 // a stateless fetch wrapper, so it is safe to share across calls as long as
