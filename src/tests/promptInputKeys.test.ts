@@ -19,10 +19,11 @@ import {
   toggleSkillSelection,
   renderBufferWithCursor,
   buildInitPromptSubmission,
+  buildPromptDraftFromSessionMessage,
   disableTerminalExtendedKeys,
   enableTerminalExtendedKeys,
 } from "../ui";
-import type { SkillInfo } from "../session";
+import type { SessionMessage, SkillInfo } from "../session";
 
 test("parseTerminalInput treats DEL bytes as backspace", () => {
   const { input, key } = parseTerminalInput("\u007F");
@@ -110,6 +111,31 @@ test("parseTerminalInput recognizes alternate shifted return sequences", () => {
 test("terminal extended key helpers request and restore modifyOtherKeys mode", () => {
   assert.equal(enableTerminalExtendedKeys(), "\u001B[>4;1m");
   assert.equal(disableTerminalExtendedKeys(), "\u001B[>4;0m");
+});
+
+test("buildPromptDraftFromSessionMessage restores text and image urls", () => {
+  const message: SessionMessage = {
+    id: "user-with-images",
+    sessionId: "session-1",
+    role: "user",
+    content: "revise this prompt",
+    contentParams: [
+      { type: "image_url", image_url: { url: "data:image/png;base64,abc" } },
+      { type: "text", text: "ignored" },
+      { type: "image_url", image_url: { url: "data:image/jpeg;base64,def" } },
+    ],
+    messageParams: null,
+    compacted: false,
+    visible: true,
+    createTime: "2026-01-01T00:00:00.000Z",
+    updateTime: "2026-01-01T00:00:00.000Z",
+  };
+
+  assert.deepEqual(buildPromptDraftFromSessionMessage(message, 7), {
+    nonce: 7,
+    text: "revise this prompt",
+    imageUrls: ["data:image/png;base64,abc", "data:image/jpeg;base64,def"],
+  });
 });
 
 test("parseTerminalInput recognizes terminal focus events", () => {

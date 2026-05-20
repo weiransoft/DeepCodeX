@@ -56,7 +56,13 @@ export type PromptSubmission = {
   text: string;
   imageUrls: string[];
   selectedSkills?: SkillInfo[];
-  command?: "new" | "resume" | "continue" | "mcp" | "exit";
+  command?: "new" | "resume" | "continue" | "undo" | "mcp" | "exit";
+};
+
+export type PromptDraft = {
+  nonce: number;
+  text: string;
+  imageUrls: string[];
 };
 
 type Props = {
@@ -70,6 +76,7 @@ type Props = {
   disabled?: boolean;
   placeholder?: string;
   runningProcesses?: SessionEntry["processes"];
+  promptDraft?: PromptDraft | null;
   onSubmit: (submission: PromptSubmission) => void;
   onModelConfigChange: (selection: ModelConfigSelection) => string | Promise<string>;
   onRawModeChange?: (mode: string) => void;
@@ -108,6 +115,7 @@ export const PromptInput = React.memo(function PromptInput({
   disabled,
   placeholder,
   runningProcesses,
+  promptDraft,
   onSubmit,
   onModelConfigChange,
   onInterrupt,
@@ -134,6 +142,7 @@ export const PromptInput = React.memo(function PromptInput({
   const undoRedoRef = React.useRef(createPromptUndoRedoState());
   const wasBusyRef = React.useRef(busy);
   const hadFileMentionTokenRef = React.useRef(false);
+  const appliedDraftNonceRef = React.useRef<number | null>(null);
 
   const fileMentionToken = getCurrentFileMentionToken(buffer);
   const hasFileMentionToken = fileMentionToken !== null;
@@ -218,6 +227,22 @@ export const PromptInput = React.memo(function PromptInput({
     const timer = setTimeout(() => setStatusMessage(null), 2500);
     return () => clearTimeout(timer);
   }, [statusMessage]);
+
+  useEffect(() => {
+    if (!promptDraft || appliedDraftNonceRef.current === promptDraft.nonce) {
+      return;
+    }
+    appliedDraftNonceRef.current = promptDraft.nonce;
+    setBuffer({ text: promptDraft.text, cursor: promptDraft.text.length });
+    setImageUrls(promptDraft.imageUrls);
+    setSelectedSkills([]);
+    setShowSkillsDropdown(false);
+    setOpenRawModelDropdown(false);
+    setModelDropdownStep(null);
+    setHistoryCursor(-1);
+    setDraftBeforeHistory(null);
+    clearPromptUndoRedoState(undoRedoRef.current);
+  }, [promptDraft]);
 
   useEffect(() => {
     setHistoryCursor(-1);
@@ -631,6 +656,15 @@ export const PromptInput = React.memo(function PromptInput({
     if (item.kind === "continue") {
       onSubmit({ text: "/continue", imageUrls: [], command: "continue" });
       resetPromptInput();
+      return;
+    }
+    if (item.kind === "undo") {
+      onSubmit({ text: "/undo", imageUrls: [], command: "undo" });
+      setBuffer(EMPTY_BUFFER);
+      clearUndoRedoStacks();
+      setImageUrls([]);
+      setSelectedSkills([]);
+      setShowSkillsDropdown(false);
       return;
     }
     if (item.kind === "mcp") {
