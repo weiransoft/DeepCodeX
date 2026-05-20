@@ -296,6 +296,11 @@ export class SessionManager {
     return this.mcpManager.getStatus();
   }
 
+  async reconnectMcpServer(name: string, config?: McpServerConfig): Promise<void> {
+    await this.mcpManager.reconnect(name, config);
+    this.mcpToolDefinitions = this.mcpManager.getMcpToolDefinitions();
+  }
+
   dispose(): void {
     this.mcpManager.disconnect();
   }
