@@ -29,9 +29,9 @@ test("ToolExecutor accepts title-case built-in tool aliases", async () => {
       type: "function",
       function: {
         name: "Read",
-        arguments: JSON.stringify({ file_path: filePath })
-      }
-    }
+        arguments: JSON.stringify({ file_path: filePath }),
+      },
+    },
   ]);
 
   assert.equal(executions.length, 1);

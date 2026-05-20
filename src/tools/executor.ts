@@ -93,7 +93,7 @@ const BUILT_IN_TOOL_NAME_ALIASES = new Map<string, string>([
   ["Bash", "bash"],
   ["Read", "read"],
   ["Write", "write"],
-  ["Edit", "edit"]
+  ["Edit", "edit"],
 ]);
 
 export type ToolCallExecution = {
