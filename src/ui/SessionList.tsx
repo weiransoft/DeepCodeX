@@ -105,7 +105,7 @@ export function SessionList({ sessions, onSelect, onCancel }: Props): React.Reac
     }
 
     // Printable character: append to search query
-    if (input && input.length > 0 && !key.meta && !key.ctrl && !key.tab) {
+    if (input && input.length > 0 && !key.meta && !key.ctrl && !key.tab && !key.return) {
       // Ignore if it's a named key that happens to have input (safety check)
       if (key.upArrow || key.downArrow || key.leftArrow || key.rightArrow) {
         return;
