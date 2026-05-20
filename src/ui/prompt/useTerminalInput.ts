@@ -193,6 +193,30 @@ export function useTerminalInput(
       return;
     }
     const handleData = (data: Buffer | string) => {
+      const raw = String(data);
+
+      // Fix CJK composition bug on iOS terminals (Moshi, Blink, etc.).
+      // iOS keyboards send composed characters as a single packet like:
+      //   "가\x7f나"  (character + backspace + new character)
+      // Without splitting, parseTerminalInput treats the whole packet as
+      // one input and drops the composition backspaces, corrupting the text.
+      if (raw.includes("\x7f") && raw.length > 1) {
+        const parts = raw.split("\x7f");
+        if (parts[0]) {
+          const { input, key } = parseTerminalInput(parts[0]);
+          handlerRef.current(input, key);
+        }
+        for (let i = 1; i < parts.length; i++) {
+          const bs = parseTerminalInput("\x7f");
+          handlerRef.current(bs.input, bs.key);
+          if (parts[i]) {
+            const { input, key } = parseTerminalInput(parts[i]);
+            handlerRef.current(input, key);
+          }
+        }
+        return;
+      }
+
       const { input, key } = parseTerminalInput(data);
       handlerRef.current(input, key);
     };
