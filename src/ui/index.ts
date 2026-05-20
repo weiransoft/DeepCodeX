@@ -33,6 +33,7 @@ export {
   buildInitPromptSubmission,
   useTerminalInput,
   parseTerminalInput,
+  dispatchTerminalInput,
   type PromptSubmission,
   type PromptDraft,
   type InputKey,
