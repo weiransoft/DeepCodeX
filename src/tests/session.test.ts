@@ -1565,6 +1565,66 @@ test("Write tool params prefer file_path even when content appears first", () =>
   assert.equal(toolMessage.meta?.paramsMd, filePath);
 });
 
+test("LLM tool calls without ids receive generated 32 character ids", async () => {
+  const workspace = createTempDir("deepcode-tool-call-id-workspace-");
+  const home = createTempDir("deepcode-tool-call-id-home-");
+  setHomeDir(home);
+
+  const filePath = path.join(workspace, "note.txt");
+  fs.writeFileSync(filePath, "hello\n", "utf8");
+  const plan = "## Task List\n\n- [ ] Inspect current behavior";
+  const manager = createMockedClientSessionManager(workspace, [
+    {
+      choices: [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                id: "",
+                type: "function",
+                function: {
+                  name: "UpdatePlan",
+                  arguments: JSON.stringify({ plan, explanation: "Initial plan" }),
+                },
+              },
+              {
+                type: "function",
+                function: {
+                  name: "read",
+                  arguments: JSON.stringify({ file_path: filePath }),
+                },
+              },
+            ],
+          },
+        },
+      ],
+    },
+    createChatResponse("done", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }),
+  ]);
+
+  const sessionId = await manager.createSession({ text: "inspect note" });
+  const assistantMessage = manager
+    .listSessionMessages(sessionId)
+    .find((message) => message.role === "assistant" && (message.messageParams as any)?.tool_calls);
+  const toolCalls = (assistantMessage?.messageParams as { tool_calls?: Array<{ id?: unknown }> } | null)?.tool_calls;
+
+  assert.equal(toolCalls?.length, 2);
+  assert.match(String(toolCalls?.[0]?.id), /^[0-9a-f]{32}$/);
+  assert.match(String(toolCalls?.[1]?.id), /^[0-9a-f]{32}$/);
+  assert.notEqual(toolCalls?.[0]?.id, toolCalls?.[1]?.id);
+
+  const toolMessages = manager.listSessionMessages(sessionId).filter((message) => message.role === "tool");
+  assert.deepEqual(
+    toolMessages.map((message) => (message.messageParams as { tool_call_id?: unknown } | null)?.tool_call_id),
+    toolCalls?.map((toolCall) => toolCall.id)
+  );
+
+  const readToolMessage = toolMessages.find((message) => JSON.parse(message.content ?? "{}").name === "read");
+  assert.equal((readToolMessage?.meta?.function as { name?: string } | undefined)?.name, "read");
+  assert.equal(readToolMessage?.meta?.paramsMd, "note.txt");
+});
+
 test("buildOpenAIMessages repairs mixed missing duplicate and orphan tool messages", () => {
   const manager = createSessionManager(process.cwd(), "machine-id-mixed-tool-badcase");
   const assistantMessage = (manager as any).buildAssistantMessage(
