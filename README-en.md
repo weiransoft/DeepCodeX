@@ -61,19 +61,19 @@ Deep Code CLI supports agent skills that allow you to extend the assistant's cap
 
 ## Slash Commands & Keyboard Shortcuts
 
-| Slash Command    | Action                                                   |
-|------------------|----------------------------------------------------------|
-| `/`              | Open the skills / commands menu                          |
-| `/new`           | Start a fresh conversation                               |
-| `/resume`        | Choose a previous conversation to continue               |
-| `/continue`      | Continue the active conversation or pick one to resume   |
-| `/model`         | Switch model, thinking mode, and reasoning effort        |
-| `/raw`           | Toggle display mode (Normal / Lite / Raw scrollback)     |
-| `/init`          | Initialize an AGENTS.md file (LLM project instructions)  |
-| `/skills`        | List available skills                                    |
-| `/mcp`           | View MCP server status and available tools               |
-| `/undo`          | Restore code and/or conversation to a previous point     |
-| `/exit`          | Quit (also `Ctrl+D` twice)                               |
+| Slash Command    | Action                                                  |
+|------------------|---------------------------------------------------------|
+| `/`              | Open the skills / commands menu                         |
+| `/new`           | Start a fresh conversation                              |
+| `/resume`        | Choose a previous conversation to continue              |
+| `/continue`      | Continue the active conversation or pick one to resume  |
+| `/model`         | Switch model, thinking mode, and reasoning effort       |
+| `/raw`           | Toggle display mode (Normal / Lite / Raw scrollback)    |
+| `/init`          | Initialize an AGENTS.md file (LLM project instructions) |
+| `/skills`        | List available skills                                   |
+| `/mcp`           | View MCP server status and available tools              |
+| `/undo`          | Restore code and/or conversation to a previous point    |
+| `/exit`          | Quit (also `Ctrl+D` twice)                              |
 
 | Key              | Action                                                   |
 |------------------|----------------------------------------------------------|
