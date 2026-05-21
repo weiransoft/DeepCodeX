@@ -8,6 +8,9 @@
 </p>
 <h1>Deep Code CLI</h1>
 
+[![][npm-release-shield]][npm-release-link] [![][npm-downloads-shield]][npm-downloads-link] [![][github-contributors-shield]][github-contributors-link] [![][github-forks-shield]][github-forks-link] [![][github-stars-shield]][github-stars-link]
+[![][github-issues-shield]][github-issues-link] [![][github-issues-pr-shield]][github-issues-pr-link] [![][github-license-shield]][github-license-link]
+
 [English](README-en.md) · 中文
 
 <br/>
@@ -173,3 +176,22 @@ npm link
 - 在 GitHub 上给我们一个 Star (https://github.com/lessweb/deepcode-cli)
 - 向我们提交反馈和建议
 - 分享给你的朋友和同事
+
+<!-- LINK GROUP -->
+
+[npm-release-link]: https://www.npmjs.com/package/@vegamo/deepcode-cli
+[npm-release-shield]: https://img.shields.io/npm/v/@vegamo/deepcode-cli?color=4d6BFE&labelColor=black&logo=npm&logoColor=white&style=flat-square
+[npm-downloads-link]: https://www.npmjs.com/package/@vegamo/deepcode-cli
+[npm-downloads-shield]: https://img.shields.io/npm/dt/@vegamo/deepcode-cli?labelColor=black&style=flat-square&color=4d6BFE
+[github-contributors-link]: https://github.com/lessweb/deepcode-cli/graphs/contributors
+[github-contributors-shield]: https://img.shields.io/github/contributors/lessweb/deepcode-cli?color=4d6BFE&labelColor=black&style=flat-square
+[github-forks-link]: https://github.com/lessweb/deepcode-cli/network/members
+[github-forks-shield]: https://img.shields.io/github/forks/lessweb/deepcode-cli?color=4d6BFE&labelColor=black&style=flat-square
+[github-stars-link]: https://github.com/lessweb/deepcode-cli/network/stargazers
+[github-stars-shield]: https://img.shields.io/github/stars/lessweb/deepcode-cli?color=4d6BFE&labelColor=black&style=flat-square
+[github-issues-link]: https://github.com/lessweb/deepcode-cli/issues
+[github-issues-shield]: https://img.shields.io/github/issues/lessweb/deepcode-cli?color=4d6BFE&labelColor=black&style=flat-square
+[github-issues-pr-link]: https://github.com/lessweb/deepcode-cli/pulls
+[github-issues-pr-shield]: https://img.shields.io/github/issues-pr/lessweb/deepcode-cli?color=4d6BFE&labelColor=black&style=flat-square
+[github-license-link]: https://github.com/lessweb/deepcode-cli/blob/master/LICENSE
+[github-license-shield]: https://img.shields.io/github/license/lessweb/deepcode-cli?color=4d6BFE&labelColor=black&style=flat-square
