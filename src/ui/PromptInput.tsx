@@ -775,13 +775,7 @@ export const PromptInput = React.memo(function PromptInput({
     }
     if (item.kind === "undo") {
       onSubmit({ text: "/undo", imageUrls: [], command: "undo" });
-      setBuffer(EMPTY_BUFFER);
-      clearUndoRedoStacks();
-      setImageUrls([]);
-      setSelectedSkills([]);
-      setShowSkillsDropdown(false);
-      pastesRef.current.clear();
-      expandedRegionsRef.current.clear();
+      resetPromptInput();
       return;
     }
     if (item.kind === "mcp") {

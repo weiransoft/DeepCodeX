@@ -570,9 +570,10 @@ export class SessionManager {
     const toolCalls = Array.from(toolCallsByIndex.entries())
       .sort(([left], [right]) => left - right)
       .map(([, toolCall]) => toolCall);
+    const normalizedToolCalls = this.normalizeLlmToolCalls(toolCalls);
     const message: Record<string, unknown> = { content };
-    if (toolCalls.length > 0) {
-      message.tool_calls = toolCalls;
+    if (normalizedToolCalls) {
+      message.tool_calls = normalizedToolCalls;
     }
     if (reasoningContent.length > 0) {
       message.reasoning_content = reasoningContent;
@@ -1180,7 +1181,7 @@ ${skillMd}
         const rawContent = message?.content;
         const content = typeof rawContent === "string" ? rawContent : "";
         const rawToolCalls = (message as { tool_calls?: unknown[] } | undefined)?.tool_calls ?? null;
-        toolCalls = Array.isArray(rawToolCalls) && rawToolCalls.length > 0 ? rawToolCalls : null;
+        toolCalls = this.normalizeLlmToolCalls(rawToolCalls);
         const rawThinking = (message as { reasoning_content?: unknown } | undefined)?.reasoning_content;
         const thinking = typeof rawThinking === "string" ? rawThinking : null;
         const refusal = (message as { refusal?: string } | undefined)?.refusal ?? null;
@@ -1897,6 +1898,33 @@ ${skillMd}
       updateTime: now,
       meta: toolCalls ? { asThinking: true } : undefined,
     };
+  }
+
+  private generateToolCallId(): string {
+    return crypto.randomBytes(16).toString("hex");
+  }
+
+  private normalizeLlmToolCalls(rawToolCalls: unknown[] | null | undefined): unknown[] | null {
+    if (!Array.isArray(rawToolCalls) || rawToolCalls.length === 0) {
+      return null;
+    }
+
+    return rawToolCalls.map((toolCall) => {
+      if (!toolCall || typeof toolCall !== "object" || Array.isArray(toolCall)) {
+        return toolCall;
+      }
+
+      const record = toolCall as Record<string, unknown>;
+      const id = typeof record.id === "string" ? record.id.trim() : "";
+      if (id) {
+        return toolCall;
+      }
+
+      return {
+        ...record,
+        id: this.generateToolCallId(),
+      };
+    });
   }
 
   private buildToolMessage(
