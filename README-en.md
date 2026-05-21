@@ -66,11 +66,13 @@ Deep Code CLI supports agent skills that allow you to extend the assistant's cap
 | `/`              | Open the skills / commands menu                          |
 | `/new`           | Start a fresh conversation                               |
 | `/resume`        | Choose a previous conversation to continue               |
+| `/continue`      | Continue the active conversation or pick one to resume   |
 | `/model`         | Switch model, thinking mode, and reasoning effort        |
 | `/raw`           | Toggle display mode (Normal / Lite / Raw scrollback)     |
 | `/init`          | Initialize an AGENTS.md file (LLM project instructions)  |
 | `/skills`        | List available skills                                    |
 | `/mcp`           | View MCP server status and available tools               |
+| `/undo`          | Restore code and/or conversation to a previous point     |
 | `/exit`          | Quit (also `Ctrl+D` twice)                               |
 
 | Key              | Action                                                   |
@@ -125,6 +127,12 @@ Yes. Just set `env.BASE_URL` in `~/.deepcode/settings.json` to an OpenAI-compati
 Deep Code supports MCP (Model Context Protocol) to connect external services such as GitHub, browsers, databases, and more. Configure the `mcpServers` field in `settings.json` to enable it, then use the `/mcp` command to view MCP server status and available tools.
 
 For detailed setup instructions, see: [docs/mcp.md](docs/mcp.md)
+
+### How to configure Deep Code to send notifications after a task completes?
+
+When the AI assistant completes a task, Deep Code can automatically execute a notification script to send the task results to the specified channel (e.g., Slack, system notifications, etc.).
+
+For detailed configuration instructions, see: [docs/notify_en.md](docs/notify_en.md)
 
 ## Contributing
 
