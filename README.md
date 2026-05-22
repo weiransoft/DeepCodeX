@@ -193,5 +193,5 @@ npm link
 [github-issues-shield]: https://img.shields.io/github/issues/lessweb/deepcode-cli?color=4d6BFE&labelColor=black&style=flat-square
 [github-issues-pr-link]: https://github.com/lessweb/deepcode-cli/pulls
 [github-issues-pr-shield]: https://img.shields.io/github/issues-pr/lessweb/deepcode-cli?color=4d6BFE&labelColor=black&style=flat-square
-[github-license-link]: https://github.com/lessweb/deepcode-cli/blob/master/LICENSE
+[github-license-link]: https://github.com/lessweb/deepcode-cli/blob/main/LICENSE
 [github-license-shield]: https://img.shields.io/github/license/lessweb/deepcode-cli?color=4d6BFE&labelColor=black&style=flat-square
