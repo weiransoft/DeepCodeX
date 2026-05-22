@@ -46,7 +46,7 @@ import {
 } from "./fileMentions";
 import type { FileMentionItem } from "./fileMentions";
 import { readClipboardImageAsync } from "./clipboard";
-import type { SessionEntry, SkillInfo } from "../session";
+import type { PermissionScope, SessionEntry, SkillInfo, UserToolPermission } from "../session";
 
 // Re-exported from prompt modules for backward compatibility
 export { useTerminalInput, parseTerminalInput, dispatchTerminalInput } from "./prompt";
@@ -68,6 +68,8 @@ export type PromptSubmission = {
   text: string;
   imageUrls: string[];
   selectedSkills?: SkillInfo[];
+  permissions?: UserToolPermission[];
+  alwaysAllows?: PermissionScope[];
   command?: "new" | "resume" | "continue" | "undo" | "mcp" | "exit";
 };
 
