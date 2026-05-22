@@ -106,6 +106,126 @@ test("appendProjectPermissionAllows writes unique project-level allow scopes", (
   assert.deepEqual(settings.permissions.allow, ["read-in-cwd", "write-in-cwd"]);
 });
 
+test("appendProjectPermissionAllows seeds inherited permissions before adding allow scopes", () => {
+  const projectRoot = createTempDir("deepcode-permission-settings-default-");
+
+  appendProjectPermissionAllows(projectRoot, ["query-git-log"], {
+    inheritedPermissions: {
+      allow: ["read-in-cwd"],
+      deny: ["write-out-cwd"],
+      ask: ["network"],
+      defaultMode: "askAll",
+    },
+  });
+
+  const settingsPath = path.join(projectRoot, ".deepcode", "settings.json");
+  const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+  assert.deepEqual(settings.permissions, {
+    allow: ["read-in-cwd", "query-git-log"],
+    deny: ["write-out-cwd"],
+    ask: ["network"],
+    defaultMode: "askAll",
+  });
+});
+
+test("appendProjectPermissionAllows moves inherited ask and deny scopes into allow", () => {
+  const projectRoot = createTempDir("deepcode-permission-settings-move-inherited-");
+
+  appendProjectPermissionAllows(projectRoot, ["network", "write-out-cwd"], {
+    inheritedPermissions: {
+      allow: ["read-in-cwd"],
+      deny: ["write-out-cwd"],
+      ask: ["network", "mcp"],
+      defaultMode: "askAll",
+    },
+  });
+
+  const settingsPath = path.join(projectRoot, ".deepcode", "settings.json");
+  const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+  assert.deepEqual(settings.permissions, {
+    allow: ["read-in-cwd", "network", "write-out-cwd"],
+    deny: [],
+    ask: ["mcp"],
+    defaultMode: "askAll",
+  });
+});
+
+test("appendProjectPermissionAllows writes inherited permissions even when scope is already allowed", () => {
+  const projectRoot = createTempDir("deepcode-permission-settings-inherited-existing-");
+
+  appendProjectPermissionAllows(projectRoot, ["read-in-cwd"], {
+    inheritedPermissions: {
+      allow: ["read-in-cwd"],
+      deny: [],
+      ask: ["network"],
+      defaultMode: "askAll",
+    },
+  });
+
+  const settingsPath = path.join(projectRoot, ".deepcode", "settings.json");
+  const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+  assert.deepEqual(settings.permissions, {
+    allow: ["read-in-cwd"],
+    deny: [],
+    ask: ["network"],
+    defaultMode: "askAll",
+  });
+});
+
+test("appendProjectPermissionAllows preserves existing project permissions", () => {
+  const projectRoot = createTempDir("deepcode-permission-settings-explicit-default-");
+  const settingsPath = path.join(projectRoot, ".deepcode", "settings.json");
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+  fs.writeFileSync(
+    settingsPath,
+    JSON.stringify({ permissions: { allow: ["read-in-cwd"], defaultMode: "allowAll" } }),
+    "utf8"
+  );
+
+  appendProjectPermissionAllows(projectRoot, ["query-git-log"], {
+    inheritedPermissions: {
+      allow: ["write-in-cwd"],
+      deny: ["write-out-cwd"],
+      ask: ["network"],
+      defaultMode: "askAll",
+    },
+  });
+
+  const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+  assert.deepEqual(settings.permissions, {
+    allow: ["read-in-cwd", "query-git-log"],
+    defaultMode: "allowAll",
+  });
+});
+
+test("appendProjectPermissionAllows removes existing ask and deny conflicts", () => {
+  const projectRoot = createTempDir("deepcode-permission-settings-existing-conflict-");
+  const settingsPath = path.join(projectRoot, ".deepcode", "settings.json");
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+  fs.writeFileSync(
+    settingsPath,
+    JSON.stringify({
+      permissions: {
+        allow: ["read-in-cwd"],
+        deny: ["network", "write-out-cwd"],
+        ask: ["network", "mcp"],
+        defaultMode: "askAll",
+      },
+    }),
+    "utf8"
+  );
+
+  appendProjectPermissionAllows(projectRoot, ["network"]);
+
+  const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+  assert.deepEqual(settings.permissions, {
+    allow: ["read-in-cwd", "network"],
+    deny: ["write-out-cwd"],
+    ask: ["mcp"],
+    defaultMode: "askAll",
+  });
+});
+
 test("hasUserPermissionReplies detects permission reply payloads", () => {
   assert.equal(hasUserPermissionReplies({}), false);
   assert.equal(hasUserPermissionReplies({ permissions: [] }), false);

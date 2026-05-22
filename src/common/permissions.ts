@@ -360,7 +360,11 @@ export function hasUserPermissionReplies(value: { permissions?: unknown; alwaysA
   );
 }
 
-export function appendProjectPermissionAllows(projectRoot: string, scopes: PermissionScope[] | undefined): void {
+export function appendProjectPermissionAllows(
+  projectRoot: string,
+  scopes: PermissionScope[] | undefined,
+  options: { inheritedPermissions?: Required<PermissionSettings> } = {}
+): void {
   if (!Array.isArray(scopes) || scopes.length === 0) {
     return;
   }
@@ -392,14 +396,35 @@ export function appendProjectPermissionAllows(projectRoot: string, scopes: Permi
   } catch {
     settings = {};
   }
-  const currentAllow = Array.isArray(settings.permissions?.allow) ? settings.permissions.allow : [];
+
+  const existingPermissions = settings.permissions;
+  const permissions: PermissionSettings = existingPermissions
+    ? { ...existingPermissions }
+    : options.inheritedPermissions
+      ? {
+          allow: [...options.inheritedPermissions.allow],
+          deny: [...options.inheritedPermissions.deny],
+          ask: [...options.inheritedPermissions.ask],
+          defaultMode: options.inheritedPermissions.defaultMode,
+        }
+      : {};
+
+  const currentAllow = Array.isArray(permissions.allow) ? permissions.allow : [];
   const allow = [...currentAllow];
   for (const scope of nextScopes) {
     if (!allow.includes(scope)) {
       allow.push(scope);
     }
   }
-  if (allow.length === currentAllow.length) {
+  const currentDeny = Array.isArray(permissions.deny) ? permissions.deny : undefined;
+  const currentAsk = Array.isArray(permissions.ask) ? permissions.ask : undefined;
+  const deny = currentDeny ? currentDeny.filter((scope) => !nextScopes.includes(scope)) : permissions.deny;
+  const ask = currentAsk ? currentAsk.filter((scope) => !nextScopes.includes(scope)) : permissions.ask;
+  const changed =
+    allow.length !== currentAllow.length ||
+    (currentDeny ? (deny as PermissionScope[]).length !== currentDeny.length : false) ||
+    (currentAsk ? (ask as PermissionScope[]).length !== currentAsk.length : false);
+  if (existingPermissions && !changed) {
     return;
   }
   fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
@@ -409,7 +434,9 @@ export function appendProjectPermissionAllows(projectRoot: string, scopes: Permi
       {
         ...settings,
         permissions: {
-          ...(settings.permissions ?? {}),
+          ...permissions,
+          deny,
+          ask,
           allow,
         },
       },

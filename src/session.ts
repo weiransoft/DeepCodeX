@@ -1045,7 +1045,9 @@ ${skillMd}
   async replySession(sessionId: string, userPrompt: UserPromptContent, controller?: AbortController): Promise<void> {
     const signal = controller?.signal;
     this.throwIfAborted(signal);
-    appendProjectPermissionAllows(this.projectRoot, userPrompt.alwaysAllows);
+    appendProjectPermissionAllows(this.projectRoot, userPrompt.alwaysAllows, {
+      inheritedPermissions: this.getResolvedSettings().permissions,
+    });
     const now = new Date().toISOString();
     const updated = this.updateSessionEntry(sessionId, (entry) => ({
       ...entry,
