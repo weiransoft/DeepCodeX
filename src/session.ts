@@ -901,20 +901,6 @@ The candidate skills are as follows:\n\n`;
     const signal = controller?.signal;
     this.throwIfAborted(signal);
 
-    if (userPrompt.text) {
-      const skills = await this.listSkills();
-      const skillNames = await this.identifyMatchingSkillNames(skills, userPrompt.text, { signal });
-      this.throwIfAborted(signal);
-      const skillSet = new Set(skillNames);
-      const matchedSkill = skills.filter((skill) => skillSet.has(skill.name));
-      if (Array.isArray(userPrompt.skills)) {
-        userPrompt.skills.push(...matchedSkill);
-      } else if (matchedSkill.length > 0) {
-        userPrompt.skills = matchedSkill;
-      }
-    }
-    userPrompt.skills = await this.normalizeSkills(userPrompt.skills);
-    this.throwIfAborted(signal);
     const sessionId = crypto.randomUUID();
     this.ensureFileHistorySession(sessionId);
     const now = new Date().toISOString();
@@ -977,6 +963,21 @@ The candidate skills are as follows:\n\n`;
     const userMessage = this.buildUserMessage(sessionId, userPrompt);
     this.appendSessionMessage(sessionId, userMessage);
 
+    if (userPrompt.text) {
+      const skills = await this.listSkills();
+      const skillNames = await this.identifyMatchingSkillNames(skills, userPrompt.text, { signal });
+      this.throwIfAborted(signal);
+      const skillSet = new Set(skillNames);
+      const matchedSkill = skills.filter((skill) => skillSet.has(skill.name));
+      if (Array.isArray(userPrompt.skills)) {
+        userPrompt.skills.push(...matchedSkill);
+      } else if (matchedSkill.length > 0) {
+        userPrompt.skills = matchedSkill;
+      }
+    }
+    userPrompt.skills = await this.normalizeSkills(userPrompt.skills);
+    this.throwIfAborted(signal);
+
     if (userPrompt.skills && userPrompt.skills.length > 0) {
       for (const skill of userPrompt.skills) {
         if (skill.isLoaded) {
@@ -1022,6 +1023,10 @@ ${skillMd}
 
     this.reportNewPrompt();
 
+    this.ensureFileHistorySession(sessionId);
+    const userMessage = this.buildUserMessage(sessionId, userPrompt);
+    this.appendSessionMessage(sessionId, userMessage);
+
     if (userPrompt.text) {
       const skills = await this.listSkills(sessionId);
       const skillNames = await this.identifyMatchingSkillNames(skills, userPrompt.text, { signal, sessionId });
@@ -1036,10 +1041,6 @@ ${skillMd}
     }
     userPrompt.skills = await this.normalizeSkills(userPrompt.skills, sessionId);
     this.throwIfAborted(signal);
-
-    this.ensureFileHistorySession(sessionId);
-    const userMessage = this.buildUserMessage(sessionId, userPrompt);
-    this.appendSessionMessage(sessionId, userMessage);
 
     if (userPrompt.skills && userPrompt.skills.length > 0) {
       for (const skill of userPrompt.skills) {

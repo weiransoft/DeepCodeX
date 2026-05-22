@@ -1952,7 +1952,7 @@ test("SessionManager streams chat completions and counts reasoning progress", as
   assert.equal(progressEvents[2]?.formattedTokens, "3");
 });
 
-test("SessionManager cancels skill matching before a session is created", async () => {
+test("SessionManager persists session and user message before skill matching is cancelled", async () => {
   const workspace = createTempDir("deepcode-skill-abort-workspace-");
   const home = createTempDir("deepcode-skill-abort-home-");
   setHomeDir(home);
@@ -1981,7 +1981,13 @@ test("SessionManager cancels skill matching before a session is created", async 
 
   await manager.handleUserPrompt({ text: "please use demo" });
 
-  assert.equal(manager.listSessions().length, 0);
+  // Session and user message are persisted before skill matching triggers an abort.
+  assert.equal(manager.listSessions().length, 1);
+  const [session] = manager.listSessions();
+  assert.equal(session?.status, "pending");
+  const messages = manager.listSessionMessages(session!.id);
+  const userMessage = messages.find((m) => m.role === "user");
+  assert.equal(userMessage?.content, "please use demo");
 });
 
 test("SessionManager treats OpenAI APIUserAbortError as interrupted", async () => {
