@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { GitFileHistory } from "../common/file-history";
 import { SessionManager, type SessionMessage } from "../session";
 
 const originalFetch = globalThis.fetch;
@@ -1038,6 +1039,54 @@ test("Write tool advances file-history while preserving the user prompt checkpoi
   manager.restoreSessionCode(sessionId, userMessage.id);
 
   assert.equal(fs.existsSync(filePath), false);
+});
+
+test("Write checkpoints restore tool-touched files outside the workspace and leave unrelated files alone", async (t) => {
+  if (!hasGit()) {
+    t.skip("git is not available");
+    return;
+  }
+
+  const workspace = createTempDir("deepcode-write-outside-workspace-");
+  const outsideDir = createTempDir("deepcode-write-outside-target-");
+  const home = createTempDir("deepcode-write-outside-home-");
+  setHomeDir(home);
+
+  const outsideFilePath = path.join(outsideDir, "outside.txt");
+  const unrelatedWorkspaceFilePath = path.join(workspace, "unrelated.txt");
+  const manager = createMockedClientSessionManager(workspace, [
+    {
+      choices: [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                id: "call-write-outside",
+                type: "function",
+                function: {
+                  name: "write",
+                  arguments: JSON.stringify({ file_path: outsideFilePath, content: "outside\n" }),
+                },
+              },
+            ],
+          },
+        },
+      ],
+    },
+    createChatResponse("done", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }),
+  ]);
+
+  const sessionId = await manager.createSession({ text: "create an outside file" });
+  const userMessage = manager.listSessionMessages(sessionId).find((message) => message.role === "user");
+  assert.ok(userMessage?.checkpointHash);
+  assert.equal(fs.readFileSync(outsideFilePath, "utf8"), "outside\n");
+
+  fs.writeFileSync(unrelatedWorkspaceFilePath, "keep\n", "utf8");
+  manager.restoreSessionCode(sessionId, userMessage.id);
+
+  assert.equal(fs.existsSync(outsideFilePath), false);
+  assert.equal(fs.readFileSync(unrelatedWorkspaceFilePath, "utf8"), "keep\n");
 });
 
 test("missing git executable does not block sessions or Write tool calls", async () => {
@@ -2146,43 +2195,18 @@ function createFileHistoryCommit(
 ): string {
   const projectCode = workspace.replace(/[\\/]/g, "-").replace(/:/g, "");
   const gitDir = path.join(home, ".deepcode", "projects", projectCode, "file-history", ".git");
-  const branchRef = `refs/heads/${sessionId}`;
-  fs.mkdirSync(path.dirname(gitDir), { recursive: true });
-  if (!fs.existsSync(gitDir)) {
-    runFileHistoryGit(gitDir, workspace, ["init"]);
-  }
+  const fileHistory = new GitFileHistory(workspace, gitDir);
+  fileHistory.ensureSession(sessionId);
 
-  let parentHash = "";
-  try {
-    parentHash = runFileHistoryGit(gitDir, workspace, ["rev-parse", "--verify", `${branchRef}^{commit}`]).trim();
-  } catch {
-    const emptyTree = runFileHistoryGit(gitDir, workspace, ["mktree"], "");
-    parentHash = runFileHistoryGit(
-      gitDir,
-      workspace,
-      ["commit-tree", emptyTree.trim(), "-m", "initial checkpoint"],
-      "",
-      fileHistoryCommitEnv()
-    ).trim();
-    runFileHistoryGit(gitDir, workspace, ["update-ref", branchRef, parentHash]);
-  }
-  runFileHistoryGit(gitDir, workspace, ["read-tree", "--reset", branchRef]);
-
+  const filePaths: string[] = [];
   for (const [relativePath, content] of Object.entries(files)) {
     const filePath = path.join(workspace, relativePath);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, content, "utf8");
+    filePaths.push(filePath);
   }
-  runFileHistoryGit(gitDir, workspace, ["add", "-f", "-A", "--", ...Object.keys(files)]);
-  const treeHash = runFileHistoryGit(gitDir, workspace, ["write-tree"]).trim();
-  const commitHash = runFileHistoryGit(
-    gitDir,
-    workspace,
-    ["commit-tree", treeHash, "-p", parentHash, "-m", "checkpoint"],
-    "",
-    fileHistoryCommitEnv()
-  ).trim();
-  runFileHistoryGit(gitDir, workspace, ["update-ref", branchRef, commitHash, parentHash]);
+  const commitHash = fileHistory.recordCheckpoint(sessionId, filePaths, "checkpoint");
+  assert.ok(commitHash);
   return commitHash;
 }
 
@@ -2203,16 +2227,6 @@ function runFileHistoryGit(
       stdio: ["pipe", "pipe", "pipe"],
     }
   );
-}
-
-function fileHistoryCommitEnv(): NodeJS.ProcessEnv {
-  return {
-    ...process.env,
-    GIT_AUTHOR_NAME: "DeepCode Test",
-    GIT_AUTHOR_EMAIL: "deepcode-test@example.com",
-    GIT_COMMITTER_NAME: "DeepCode Test",
-    GIT_COMMITTER_EMAIL: "deepcode-test@example.com",
-  };
 }
 
 function createSessionManager(projectRoot: string, machineId: string): SessionManager {
