@@ -658,6 +658,14 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
           sessions={sessions}
           onSelect={(id) => void handleSelectSession(id)}
           onCancel={() => setView("chat")}
+          onDelete={(id) => {
+            // If the deleted session is the active one, clear it
+            if (sessionManager.getActiveSessionId() === id) {
+              sessionManager.setActiveSessionId(null);
+            }
+            sessionManager.deleteSession(id);
+            refreshSessionsList();
+          }}
         />
       ) : view === "undo" ? (
         <UndoSelector
