@@ -54,7 +54,7 @@ export {
 } from "./askUserQuestion";
 export { readClipboardImage, type ClipboardImage } from "./clipboard";
 export { buildLoadingText, type LoadingTextInput } from "./loadingText";
-export { renderMarkdown } from "./components/MessageView/markdown";
+export { renderMarkdown, renderMarkdownSegments, type MarkdownSegment } from "./components/MessageView/markdown";
 export {
   EMPTY_BUFFER,
   insertText,
