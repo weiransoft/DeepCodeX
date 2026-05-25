@@ -1313,6 +1313,57 @@ test("activateSession pauses for permission when a tool call requires ask", asyn
   );
 });
 
+test("SessionManager preserves permission_denied status when sessions are reloaded", async () => {
+  const workspace = createTempDir("deepcode-permission-denied-workspace-");
+  const home = createTempDir("deepcode-permission-denied-home-");
+  setHomeDir(home);
+
+  const permissions = {
+    allow: [],
+    deny: [],
+    ask: [],
+    defaultMode: "askAll" as const,
+  };
+  const manager = createPermissionSessionManager(
+    workspace,
+    [
+      {
+        choices: [
+          {
+            message: {
+              content: "",
+              tool_calls: [
+                {
+                  id: "call-bash",
+                  type: "function",
+                  function: {
+                    name: "bash",
+                    arguments: JSON.stringify({
+                      command: "rg TODO src",
+                      description: "Search TODO markers",
+                      sideEffects: ["read-in-cwd"],
+                    }),
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+    permissions
+  );
+
+  const sessionId = await manager.createSession({ text: "search todos" });
+  manager.denySessionPermission(sessionId);
+
+  const reloadedManager = createPermissionSessionManager(workspace, [], permissions);
+  const reloadedSession = reloadedManager.getSession(sessionId);
+
+  assert.equal(reloadedSession?.status, "permission_denied");
+  assert.equal(reloadedSession?.failReason, "Permission denied by user");
+});
+
 test("replySession applies permission replies, runs pending tools, and stores always allow scopes", async () => {
   const workspace = createTempDir("deepcode-permission-allow-workspace-");
   const home = createTempDir("deepcode-permission-allow-home-");

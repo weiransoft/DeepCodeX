@@ -669,6 +669,8 @@ function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactEl
           alwaysAllows: result.alwaysAllows,
         });
         setStatusLine("Permission denied. Add a reply, then press Enter to continue.");
+        setPromptDraft(null);
+        sessionManager.denySessionPermission(sessionId);
         return;
       }
       void handlePrompt({
@@ -686,6 +688,7 @@ function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactEl
     sessionManager.interruptActiveSession();
     setActiveStatus("interrupted");
     setActiveAskPermissions(undefined);
+    setPromptDraft(null);
     refreshSessionsList();
   }, [refreshSessionsList, sessionManager]);
 

@@ -332,6 +332,10 @@ export function formatSessionStatus(status: SessionStatus): string {
       return "failed";
     case "interrupted":
       return "stopped";
+    case "ask_permission":
+      return "waiting";
+    case "permission_denied":
+      return "denied";
     default:
       return status;
   }
