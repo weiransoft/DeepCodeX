@@ -1,5 +1,5 @@
 import { DEEPSEEK_V4_MODELS } from "../common/model-capabilities";
-import type { ModelUsage } from "../session-types";
+import type { ModelUsage } from "./types";
 
 const DEFAULT_COMPACT_PROMPT_TOKEN_THRESHOLD = 128 * 1024;
 const DEEPSEEK_V4_COMPACT_PROMPT_TOKEN_THRESHOLD = 512 * 1024;

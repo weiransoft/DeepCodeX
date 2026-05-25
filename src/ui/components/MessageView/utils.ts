@@ -1,5 +1,5 @@
 import type { DiffPreviewLine, ToolSummary } from "./types";
-import type { SessionMessage } from "../../../session-types";
+import type { SessionMessage } from "../../../session/types";
 import { RawMode } from "../../contexts";
 import chalk from "chalk";
 

@@ -7,8 +7,8 @@ import {
 export { getThinkingOptionIndex, MODEL_COMMAND_MODELS, MODEL_COMMAND_THINKING_OPTIONS };
 export { buildPromptDraftFromSessionMessage } from "./utils";
 export { disableTerminalExtendedKeys, enableTerminalExtendedKeys, getPromptCursorPlacement } from "./hooks/cursor";
-export { default as AppContainer } from "./AppContainer";
-export { AskUserQuestionPrompt } from "./AskUserQuestionPrompt";
+export { default as AppContainer } from "./views/AppContainer";
+export { AskUserQuestionPrompt } from "./views/AskUserQuestionPrompt";
 export { MessageView } from "./components";
 export { parseDiffPreview } from "./components/MessageView/utils";
 export {
@@ -23,17 +23,13 @@ export {
   getPromptReturnKeyAction,
   renderBufferWithCursor,
   buildInitPromptSubmission,
-  useTerminalInput,
-  parseTerminalInput,
-  dispatchTerminalInput,
   type PromptSubmission,
   type PromptDraft,
-  type InputKey,
-} from "./PromptInput";
-export { SessionList, formatSessionTitle, filterSessions, formatSessionStatus } from "./SessionList";
-export { ThemedGradient } from "./ThemedGradient";
-export { UpdatePrompt, type UpdatePromptChoice } from "./UpdatePrompt";
-export { WelcomeScreen, formatHomeRelativePath, buildWelcomeTips } from "./WelcomeScreen";
+} from "./views/PromptInput";
+export { SessionList, formatSessionTitle, filterSessions, formatSessionStatus } from "./views/SessionList";
+export { ThemedGradient } from "./views/ThemedGradient";
+export { UpdatePrompt, type UpdatePromptChoice } from "./views/UpdatePrompt";
+export { WelcomeScreen, formatHomeRelativePath, buildWelcomeTips } from "./views/WelcomeScreen";
 export {
   findPendingAskUserQuestion,
   formatAskUserQuestionAnswers,

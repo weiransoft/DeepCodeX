@@ -1,4 +1,4 @@
-import type { SessionMessage } from "../../../session-types";
+import type { SessionMessage } from "../../../session/types";
 
 export type MessageViewProps = {
   message: SessionMessage;

@@ -6,9 +6,9 @@ import { fileURLToPath } from "url";
 import matter from "gray-matter";
 import ejs from "ejs";
 import type { ChatCompletionContentPart, ChatCompletionMessageParam } from "openai/resources/chat/completions";
-import { launchNotifyScript } from "./common/notify";
-import { buildThinkingRequestOptions } from "./common/openai-thinking";
-import { supportsMultimodal } from "./common/model-capabilities";
+import { launchNotifyScript } from "../common/notify";
+import { buildThinkingRequestOptions } from "../common/openai-thinking";
+import { supportsMultimodal } from "../common/model-capabilities";
 import {
   getCompactPrompt,
   getDefaultSkillPrompt,
@@ -16,7 +16,7 @@ import {
   getSystemPrompt,
   getTools,
   type ToolDefinition,
-} from "./prompt";
+} from "../prompt";
 import {
   type CreateOpenAIClient,
   type ProcessTimeoutControl,
@@ -24,14 +24,14 @@ import {
   type ToolCallExecution,
   type ToolExecutionHooks,
   ToolExecutor,
-} from "./tools/executor";
-import { McpManager } from "./mcp/mcp-manager";
-import type { McpServerConfig, PermissionSettings } from "./settings";
-import { logApiError } from "./common/logging/error-logger";
-import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./common/logging/debug-logger";
-import { killProcessTree } from "./common/system/process-tree";
-import { GitFileHistory } from "./common/runtime/file-history";
-import { getSnippet } from "./common/runtime/state";
+} from "../tools/executor";
+import { McpManager } from "../mcp/mcp-manager";
+import type { McpServerConfig, PermissionSettings } from "../settings";
+import { logApiError } from "../common/logging/error-logger";
+import { logOpenAIChatCompletionDebug, normalizeDebugError } from "../common/logging/debug-logger";
+import { killProcessTree } from "../common/system/process-tree";
+import { GitFileHistory } from "../common/runtime/file-history";
+import { getSnippet } from "../common/runtime/state";
 import {
   appendProjectPermissionAllows,
   buildPermissionToolExecution,
@@ -42,9 +42,9 @@ import {
   parseToolCallForPermissions,
   type PermissionToolCall,
   type UserToolPermission,
-} from "./common/permissions";
+} from "../common/permissions";
 
-import { getCompactPromptTokenThreshold, getTotalTokens } from "./session/utils";
+import { getCompactPromptTokenThreshold, getTotalTokens } from "./utils";
 import {
   type BashTimeoutAdjustment,
   type LlmStreamProgress,
@@ -59,7 +59,7 @@ import {
   type SkillInfo,
   type UndoTarget,
   type UserPromptContent,
-} from "./session-types";
+} from "./types";
 
 const MAX_SESSION_ENTRIES = 50;
 const DEFAULT_NEW_PROMPT_API_URL = "https://deepcode.vegamo.cn/api/plugin/new";
@@ -135,11 +135,11 @@ function accumulateUsagePerModel(
 
 function getExtensionRoot(): string {
   if (typeof __dirname !== "undefined") {
-    return path.resolve(__dirname, "..");
+    return path.resolve(__dirname, "../..");
   }
 
   const currentFilePath = fileURLToPath(import.meta.url);
-  return path.resolve(path.dirname(currentFilePath), "..");
+  return path.resolve(path.dirname(currentFilePath), "../..");
 }
 
 export class SessionManager {

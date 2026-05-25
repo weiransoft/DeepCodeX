@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Box, Text, useApp, useStdout } from "ink";
 import chalk from "chalk";
-import { ARGS_SEPARATOR } from "./constants";
+import { ARGS_SEPARATOR } from "../constants";
 import {
   EMPTY_BUFFER,
   PASTE_MARKER_REGEX,
@@ -24,45 +24,38 @@ import {
   moveWordLeft,
   moveWordRight,
   moveUp,
-} from "./core/promptBuffer";
-import type { PromptBufferState } from "./core/promptBuffer";
+} from "../core/promptBuffer";
+import type { PromptBufferState } from "../core/promptBuffer";
 import {
   clearPromptUndoRedoState,
   createPromptUndoRedoState,
   recordPromptEdit,
   redoPromptEdit,
   undoPromptEdit,
-} from "./core/promptUndoRedo";
-import { buildSlashCommands, filterSlashCommands, findExactSlashCommand } from "./core/slashCommands";
-import type { SlashCommandItem } from "./core/slashCommands";
+} from "../core/promptUndoRedo";
+import { buildSlashCommands, filterSlashCommands, findExactSlashCommand } from "../core/slashCommands";
+import type { SlashCommandItem } from "../core/slashCommands";
 import {
   filterFileMentionItems,
   getCurrentFileMentionToken,
   replaceCurrentFileMentionToken,
   scanFileMentionItems,
-} from "./core/fileMentions";
-import type { FileMentionItem } from "./core/fileMentions";
-import { readClipboardImageAsync } from "./core/clipboard";
-
-// Re-exported from prompt modules for backward compatibility
-export { useTerminalInput, parseTerminalInput, dispatchTerminalInput } from "./hooks";
-export type { InputKey } from "./hooks";
-
-import { useTerminalInput } from "./hooks";
-import type { InputKey } from "./hooks";
-import { usePasteHandling } from "./hooks/paste-handling";
-import { useHistoryNavigation } from "./hooks/history-navigation";
+} from "../core/fileMentions";
+import type { FileMentionItem } from "../core/fileMentions";
+import { readClipboardImageAsync } from "../core/clipboard";
+import { useTerminalInput, usePasteHandling, useHistoryNavigation } from "../hooks";
+import type { InputKey } from "../hooks";
 import {
   useHiddenTerminalCursor,
   useTerminalExtendedKeys,
   useBracketedPaste,
   useTerminalFocusReporting,
-} from "./hooks";
+} from "../hooks";
 import SlashCommandMenu, { isSkillSelected } from "./SlashCommandMenu";
-import type { ModelConfigSelection, PermissionScope } from "../settings";
-import { FileMentionMenu, ModelsDropdown, RawModelDropdown, SkillsDropdown } from "./components";
-import type { SessionEntry, SkillInfo } from "../session-types";
-import type { UserToolPermission } from "../common/permissions";
+import type { ModelConfigSelection, PermissionScope } from "../../settings";
+import { FileMentionMenu, ModelsDropdown, RawModelDropdown, SkillsDropdown } from "../components";
+import type { SessionEntry, SkillInfo } from "../../session/types";
+import type { UserToolPermission } from "../../common/permissions";
 
 export type PromptSubmission = {
   text: string;

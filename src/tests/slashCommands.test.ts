@@ -7,7 +7,7 @@ import {
   formatSlashCommandDescription,
   formatSlashCommandLabel,
 } from "../ui";
-import type { SkillInfo } from "../session-types";
+import type { SkillInfo } from "../session/types";
 
 const skills: SkillInfo[] = [
   { name: "skill-writer", path: "~/.agents/skills/skill-writer/SKILL.md", description: "Write a SKILL.md" },

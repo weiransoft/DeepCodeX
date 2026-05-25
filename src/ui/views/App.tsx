@@ -1,15 +1,15 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Box, Static, Text, useApp, useStdout, useWindowSize } from "ink";
 import chalk from "chalk";
-import { createOpenAIClient } from "../common/openai-client";
-import type { PermissionScope } from "../settings";
-import { type ModelConfigSelection } from "../settings";
+import { createOpenAIClient } from "../../common/openai-client";
+import type { PermissionScope } from "../../settings";
+import { type ModelConfigSelection } from "../../settings";
 import { type PromptDraft, PromptInput, type PromptSubmission } from "./PromptInput";
-import { MessageView, RawModeExitPrompt } from "./components";
+import { MessageView, RawModeExitPrompt } from "../components";
 import { SessionList } from "./SessionList";
 import { type UndoRestoreMode, UndoSelector } from "./UndoSelector";
-import { buildLoadingText } from "./core/loadingText";
-import { findExpandedThinkingId } from "./core/thinkingState";
+import { buildLoadingText } from "../core/loadingText";
+import { findExpandedThinkingId } from "../core/thinkingState";
 import { WelcomeScreen } from "./WelcomeScreen";
 import { AskUserQuestionPrompt } from "./AskUserQuestionPrompt";
 import { McpStatusList } from "./McpStatusList";
@@ -18,11 +18,11 @@ import {
   type AskUserQuestionAnswers,
   findPendingAskUserQuestion,
   formatAskUserQuestionAnswers,
-} from "./core/askUserQuestion";
+} from "../core/askUserQuestion";
 import { PermissionPrompt, type PermissionPromptResult } from "./PermissionPrompt";
-import { buildExitSummaryText } from "./exitSummary";
-import { RawMode, useRawModeContext } from "./contexts";
-import { renderMessageToStdout } from "./components/MessageView/utils";
+import { buildExitSummaryText } from "../exitSummary";
+import { RawMode, useRawModeContext } from "../contexts";
+import { renderMessageToStdout } from "../components/MessageView/utils";
 import {
   buildPromptDraftFromSessionMessage,
   buildStatusLine,
@@ -30,10 +30,10 @@ import {
   formatModelConfig,
   isCurrentSessionEmpty,
   renderRawModeMessages,
-} from "./utils";
-import { resolveCurrentSettings, writeModelConfigSelection } from "../settings";
-import { isCollapsedThinking } from "./core/thinkingState";
-import { ANSI_CLEAR_SCREEN } from "./constants";
+} from "../utils";
+import { resolveCurrentSettings, writeModelConfigSelection } from "../../settings";
+import { isCollapsedThinking } from "../core/thinkingState";
+import { ANSI_CLEAR_SCREEN } from "../constants";
 import type {
   LlmStreamProgress,
   MessageMeta,
@@ -43,8 +43,8 @@ import type {
   SkillInfo,
   UndoTarget,
   UserPromptContent,
-} from "../session-types";
-import { SessionManager } from "../session";
+} from "../../session/types";
+import { SessionManager } from "../../session";
 
 type View = "chat" | "session-list" | "undo" | "mcp-status";
 

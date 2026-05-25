@@ -4,7 +4,7 @@ import * as os from "os";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import ejs from "ejs";
-import type { SessionMessage } from "./session-types";
+import type { SessionMessage } from "./session/types";
 import { findGitBashPath, resolveShellPath } from "./common/system/shell-utils";
 import { supportsMultimodal } from "./common/model-capabilities";
 

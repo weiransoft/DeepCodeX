@@ -1,8 +1,8 @@
 import Index from "../DropdownMenu";
 import React, { useEffect, useState } from "react";
-import type { SkillInfo } from "../../../session-types";
+import type { SkillInfo } from "../../../session/types";
 import { useInput } from "ink";
-import { isSkillSelected } from "../../SlashCommandMenu";
+import { isSkillSelected } from "../../views/SlashCommandMenu";
 
 const SkillsDropdown: React.FC<{
   open: boolean;

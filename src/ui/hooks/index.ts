@@ -10,8 +10,8 @@ export {
   getPromptCursorPlacement,
 } from "./cursor";
 
-export { usePasteHandling } from "./paste-handling";
-export type { PasteRegion, PasteHandlingState, PasteHandlingActions } from "./paste-handling";
+export { usePasteHandling } from "./usePasteHandling";
+export type { PasteRegion, PasteHandlingState, PasteHandlingActions } from "./usePasteHandling";
 
-export { useHistoryNavigation } from "./history-navigation";
-export type { HistoryNavigationState, HistoryNavigationActions } from "./history-navigation";
+export { useHistoryNavigation } from "./useHistoryNavigation";
+export type { HistoryNavigationState, HistoryNavigationActions } from "./useHistoryNavigation";

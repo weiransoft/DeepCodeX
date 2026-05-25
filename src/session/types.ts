@@ -1,6 +1,6 @@
-import type { McpServerConfig, PermissionScope, PermissionSettings } from "./settings";
-import type { AskPermissionRequest, MessageToolPermission, UserToolPermission } from "./common/permissions";
-import type { CreateOpenAIClient } from "./tools/executor";
+import type { McpServerConfig, PermissionScope, PermissionSettings } from "../settings";
+import type { AskPermissionRequest, MessageToolPermission, UserToolPermission } from "../common/permissions";
+import type { CreateOpenAIClient } from "../tools/executor";
 
 export type SessionStatus =
   | "failed"

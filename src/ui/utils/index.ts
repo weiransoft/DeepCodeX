@@ -1,9 +1,9 @@
 import chalk from "chalk";
 import { renderMessageToStdout } from "../components/MessageView/utils";
 import type { RawMode } from "../contexts";
-import type { PromptDraft } from "../PromptInput";
+import type { PromptDraft } from "../views/PromptInput";
 import type { ModelConfigSelection } from "../../settings";
-import type { SessionEntry, SessionMessage } from "../../session-types";
+import type { SessionEntry, SessionMessage } from "../../session/types";
 import type { SessionManager } from "../../session";
 
 /**
