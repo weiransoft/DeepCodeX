@@ -2730,7 +2730,8 @@ ${skillMd}
       status === "waiting_for_user" ||
       status === "completed" ||
       status === "interrupted" ||
-      status === "ask_permission"
+      status === "ask_permission" ||
+      status === "permission_denied"
     ) {
       return status;
     }
