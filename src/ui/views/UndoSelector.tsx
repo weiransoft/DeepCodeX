@@ -99,7 +99,7 @@ export function UndoSelector({ targets, onSelect, onCancel }: Props): React.Reac
     >
       <Box flexDirection="column" borderStyle="round" borderDimColor flexGrow={1} overflow="hidden">
         <Box paddingX={1}>
-          <Text bold color="cyanBright">
+          <Text bold color="#229ac3">
             Undo
           </Text>
           <Text dimColor> restore to the point before a prompt</Text>

@@ -195,20 +195,10 @@ function ServerListView({
           </Text>
           <Box gap={1}>
             <Text dimColor>(</Text>
-            <Text color="green" bold>
-              {readyCount} ready,
-            </Text>
-            <Text color="yellow" bold>
-              {startingCount} starting,
-            </Text>
-            {reconnectingCount > 0 && (
-              <Text color="#ff9900" bold>
-                {reconnectingCount} reconnecting,
-              </Text>
-            )}
-            <Text color="red" bold>
-              {failedCount} failed
-            </Text>
+            <Text color="green">{readyCount} ready,</Text>
+            <Text color="yellow">{startingCount} starting,</Text>
+            {reconnectingCount > 0 && <Text color="#ff9900">{reconnectingCount} reconnecting,</Text>}
+            <Text color="red">{failedCount} failed</Text>
             <Text dimColor>)</Text>
           </Box>
         </Box>

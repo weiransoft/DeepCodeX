@@ -751,6 +751,7 @@ function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactEl
           targets={undoTargets}
           onSelect={(target, restoreMode) => void handleUndoRestore(target, restoreMode)}
           onCancel={() => {
+            setPromptDraft(null);
             setView("chat");
             setShowWelcome(true);
           }}
