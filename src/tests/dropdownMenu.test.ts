@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { calculateVisibleStart } from "../ui/DropdownMenu";
+import { calculateVisibleStart } from "../ui/components/DropdownMenu";
 
 test("calculateVisibleStart centers active item when possible", () => {
   // 10 items, max 5 visible, active index 4 (middle)

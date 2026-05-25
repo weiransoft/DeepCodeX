@@ -12,7 +12,7 @@ export {
   writeModelConfigSelection,
   resolveCurrentSettings,
   buildPromptDraftFromSessionMessage,
-} from "./App";
+} from "./utils";
 export { createOpenAIClient } from "../common/openai-client";
 export { default as AppContainer } from "./AppContainer";
 export { AskUserQuestionPrompt } from "./AskUserQuestionPrompt";

@@ -1,4 +1,4 @@
-import DropdownMenu from "../../DropdownMenu";
+import Index from "../DropdownMenu";
 import React, { useEffect, useState } from "react";
 import type { SkillInfo } from "../../../session";
 import { useInput } from "ink";
@@ -52,7 +52,7 @@ const SkillsDropdown: React.FC<{
   }
 
   return (
-    <DropdownMenu
+    <Index
       width={width}
       title="Select Skills"
       helpText="Space toggle · Enter toggle · Esc to close"

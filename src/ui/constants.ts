@@ -1,4 +1,7 @@
-// UI-level shared constants used across components.
+/** Default model to use for completions. */
+export const DEFAULT_MODEL = "deepseek-v4-pro";
+/** Default base URL for API requests. */
+export const DEFAULT_BASE_URL = "https://api.deepseek.com";
 
 /** Separator used when rendering command arguments inline (e.g., `arg1 | arg2 | arg3`). */
 export const ARGS_SEPARATOR = " | ";

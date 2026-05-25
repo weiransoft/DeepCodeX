@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text } from "ink";
 import { useInput } from "ink";
-import DropdownMenu from "../../DropdownMenu";
+import DropdownMenu from "../DropdownMenu";
 import type { FileMentionItem, FileMentionToken } from "../../fileMentions";
 
 type Props = {

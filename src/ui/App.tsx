@@ -1,9 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Box, Static, Text, useApp, useStdout, useWindowSize } from "ink";
 import chalk from "chalk";
-import * as fs from "fs";
-import * as os from "os";
-import * as path from "path";
 import { createOpenAIClient } from "../common/openai-client";
 import {
   type LlmStreamProgress,
@@ -17,17 +14,11 @@ import {
   type UndoTarget,
   type UserPromptContent,
 } from "../session";
-import {
-  applyModelConfigSelection,
-  type DeepcodingSettings,
-  type ModelConfigSelection,
-  type ResolvedDeepcodingSettings,
-  resolveSettingsSources,
-} from "../settings";
-import { PromptInput, type PromptDraft, type PromptSubmission } from "./PromptInput";
+import { type ModelConfigSelection } from "../settings";
+import { type PromptDraft, PromptInput, type PromptSubmission } from "./PromptInput";
 import { MessageView, RawModeExitPrompt } from "./components";
 import { SessionList } from "./SessionList";
-import { UndoSelector, type UndoRestoreMode } from "./UndoSelector";
+import { type UndoRestoreMode, UndoSelector } from "./UndoSelector";
 import { buildLoadingText } from "./loadingText";
 import { findExpandedThinkingId } from "./thinkingState";
 import { WelcomeScreen } from "./WelcomeScreen";
@@ -43,11 +34,18 @@ import { PermissionPrompt, type PermissionPromptResult } from "./PermissionPromp
 import { buildExitSummaryText } from "./exitSummary";
 import { RawMode, useRawModeContext } from "./contexts";
 import { renderMessageToStdout } from "./components/MessageView/utils";
-import { renderRawModeMessages } from "./utils";
+import {
+  buildPromptDraftFromSessionMessage,
+  buildStatusLine,
+  buildSyntheticUserMessage,
+  formatModelConfig,
+  isCollapsedThinking,
+  isCurrentSessionEmpty,
+  renderRawModeMessages,
+  resolveCurrentSettings,
+  writeModelConfigSelection,
+} from "./utils";
 import { ANSI_CLEAR_SCREEN } from "./constants";
-
-const DEFAULT_MODEL = "deepseek-v4-pro";
-const DEFAULT_BASE_URL = "https://api.deepseek.com";
 
 type View = "chat" | "session-list" | "undo" | "mcp-status";
 
@@ -807,163 +805,3 @@ function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactEl
 }
 
 export default App;
-
-function isCollapsedThinking(message: SessionMessage, expandedId: string | null): boolean {
-  if (message.role !== "assistant") {
-    return false;
-  }
-  if (!message.meta?.asThinking) {
-    return false;
-  }
-  return message.id !== expandedId;
-}
-
-function buildSyntheticUserMessage(content: string, imageCount: number): SessionMessage {
-  const now = new Date().toISOString();
-  return {
-    id: `local-${Math.random().toString(36).slice(2)}`,
-    sessionId: "local",
-    role: "user",
-    content,
-    contentParams:
-      imageCount > 0
-        ? Array.from({ length: imageCount }, () => ({
-            type: "image_url",
-            image_url: { url: "" },
-          }))
-        : null,
-    messageParams: null,
-    compacted: false,
-    visible: true,
-    createTime: now,
-    updateTime: now,
-  };
-}
-
-export function buildPromptDraftFromSessionMessage(message: SessionMessage, nonce: number): PromptDraft {
-  return {
-    nonce,
-    text: typeof message.content === "string" ? message.content : "",
-    imageUrls: extractImageUrlsFromContentParams(message.contentParams),
-  };
-}
-
-function extractImageUrlsFromContentParams(contentParams: unknown): string[] {
-  const params = Array.isArray(contentParams) ? contentParams : contentParams ? [contentParams] : [];
-  const imageUrls: string[] = [];
-  for (const param of params) {
-    if (!param || typeof param !== "object") {
-      continue;
-    }
-    const record = param as { type?: unknown; image_url?: { url?: unknown } };
-    const url = record.image_url?.url;
-    if (record.type === "image_url" && typeof url === "string" && url) {
-      imageUrls.push(url);
-    }
-  }
-  return imageUrls;
-}
-
-function isCurrentSessionEmpty(sessionManager: SessionManager): boolean {
-  const activeSessionId = sessionManager.getActiveSessionId();
-  return !activeSessionId || !sessionManager.getSession(activeSessionId);
-}
-
-function buildStatusLine(entry: SessionEntry): string {
-  const parts: string[] = [];
-  parts.push(`status: ${entry.status}`);
-  if (typeof entry.activeTokens === "number" && entry.activeTokens > 0) {
-    parts.push(`tokens: ${entry.activeTokens}`);
-  }
-  if (entry.failReason) {
-    parts.push(`fail: ${entry.failReason}`);
-  }
-  return parts.join(" · ");
-}
-
-export function readSettings(): DeepcodingSettings | null {
-  return readSettingsFile(getUserSettingsPath());
-}
-
-export function readProjectSettings(projectRoot: string = process.cwd()): DeepcodingSettings | null {
-  return readSettingsFile(getProjectSettingsPath(projectRoot));
-}
-
-function readSettingsFile(settingsPath: string): DeepcodingSettings | null {
-  try {
-    if (!fs.existsSync(settingsPath)) {
-      return null;
-    }
-    const raw = fs.readFileSync(settingsPath, "utf8");
-    return JSON.parse(raw) as DeepcodingSettings;
-  } catch {
-    return null;
-  }
-}
-
-export function writeSettings(settings: DeepcodingSettings): void {
-  const settingsPath = getUserSettingsPath();
-  writeSettingsFile(settingsPath, settings);
-}
-
-export function writeProjectSettings(settings: DeepcodingSettings, projectRoot: string = process.cwd()): void {
-  const settingsPath = getProjectSettingsPath(projectRoot);
-  writeSettingsFile(settingsPath, settings);
-}
-
-function writeSettingsFile(settingsPath: string, settings: DeepcodingSettings): void {
-  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-  fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
-}
-
-export function writeModelConfigSelection(
-  selection: ModelConfigSelection,
-  current: ModelConfigSelection = resolveCurrentSettings(),
-  projectRoot: string = process.cwd()
-): { changed: boolean; settings: DeepcodingSettings } {
-  const projectSettingsPath = getProjectSettingsPath(projectRoot);
-  const shouldWriteProjectSettings = fs.existsSync(projectSettingsPath);
-  const rawSettings = shouldWriteProjectSettings ? readProjectSettings(projectRoot) : readSettings();
-  const result = applyModelConfigSelection(rawSettings, current, selection);
-  if (result.changed) {
-    if (shouldWriteProjectSettings) {
-      writeProjectSettings(result.settings, projectRoot);
-    } else {
-      writeSettings(result.settings);
-    }
-  }
-  return result;
-}
-
-export function resolveCurrentSettings(projectRoot: string = process.cwd()): ResolvedDeepcodingSettings {
-  return resolveSettingsSources(
-    readSettings(),
-    readProjectSettings(projectRoot),
-    {
-      model: DEFAULT_MODEL,
-      baseURL: DEFAULT_BASE_URL,
-    },
-    process.env
-  );
-}
-
-export { createOpenAIClient } from "../common/openai-client";
-
-function getUserSettingsPath(): string {
-  return path.join(os.homedir(), ".deepcode", "settings.json");
-}
-
-function getProjectSettingsPath(projectRoot: string): string {
-  return path.join(projectRoot, ".deepcode", "settings.json");
-}
-
-function formatThinkingMode(settings: Pick<ModelConfigSelection, "thinkingEnabled" | "reasoningEffort">): string {
-  if (!settings.thinkingEnabled) {
-    return "no thinking";
-  }
-  return `thinking ${settings.reasoningEffort}`;
-}
-
-function formatModelConfig(settings: ModelConfigSelection): string {
-  return `${settings.model}, ${formatThinkingMode(settings)}`;
-}
