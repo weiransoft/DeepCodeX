@@ -231,42 +231,68 @@ function renderTableBorder(rows: string[][], maxWidth?: number): string {
   const colCount = rows[0].length;
   const calcW = (cs: number[]) => cs.reduce((a, b) => a + b + 2, 0) + cs.length + 1;
 
-  // Ideal widths — longest word / 1.5 so cells can wrap in 2-3 lines
-  const ideal: number[] = Array.from({ length: colCount }, (_, i) => {
+  // Natural width per column: longest line + cell padding
+  const natural: number[] = Array.from({ length: colCount }, (_, i) => {
     const texts = rows.map((r) => r[i] ?? "");
-    const maxLine = Math.max(...texts.map((t) => visualWidth(t)));
-    const words = texts.flatMap((t) => t.split(/\s+/));
-    const maxWord = Math.max(4, ...words.map((w) => visualWidth(w)));
-    return Math.max(maxWord + 2, Math.ceil(maxLine / 1.5));
+    const maxLine = Math.max(4, ...texts.map((t) => visualWidth(t)));
+    return maxLine + 2;
   });
 
-  const colWidths = [...ideal];
+  // Minimum width per column: longest word + padding (can't go below this)
+  const minWidths: number[] = Array.from({ length: colCount }, (_, i) => {
+    const texts = rows.map((r) => r[i] ?? "");
+    const words = texts.flatMap((t) => t.split(/\s+/));
+    const maxWord = Math.max(4, ...words.map((w) => visualWidth(w)));
+    return maxWord + 2;
+  });
 
-  // Shrink to fit terminal width
-  if (maxWidth != null && calcW(colWidths) > maxWidth) {
-    const narrow = new Set([0, 1, colCount - 2, colCount - 1]); // #, status, count, date
-    const MIN_NARROW = 6;
-    const MIN_CONTENT = 12;
-    const contentCols = Array.from({ length: colCount }, (_, i) => i).filter((i) => !narrow.has(i));
+  let colWidths: number[];
+  const totalNatural = calcW(natural);
+  const totalMin = calcW(minWidths);
 
-    // Cap narrow columns first
-    for (const ci of narrow) colWidths[ci] = Math.min(colWidths[ci], MIN_NARROW);
+  const effectiveMax = maxWidth ?? 120; // default to a generous terminal width
 
-    // Shrink until we fit
-    while (calcW(colWidths) > maxWidth) {
-      // Try narrow columns first
-      let shrunk = false;
-      for (const ci of narrow) {
-        if (colWidths[ci] > 4 && calcW(colWidths) > maxWidth) {
-          colWidths[ci]--;
-          shrunk = true;
+  if (totalNatural <= effectiveMax) {
+    // Content fits comfortably — use natural widths and grow to fill available space
+    colWidths = [...natural];
+    const slack = effectiveMax - totalNatural;
+    if (slack > 0) {
+      // Distribute slack proportionally to content columns (skip tiny label columns)
+      const isLabel = colWidths.map((w) => w <= 8);
+      const candidates = colWidths.map((w, i) => (isLabel[i] ? 0 : w));
+      const totalWeight = candidates.reduce((a, b) => a + b, 0);
+      if (totalWeight > 0) {
+        for (let ci = 0; ci < colCount; ci++) {
+          if (candidates[ci] > 0) {
+            colWidths[ci] += Math.floor((slack * candidates[ci]) / totalWeight);
+          }
         }
       }
-      if (shrunk) continue;
-      // Then content columns
-      const widest = contentCols.reduce((a, b) => (colWidths[a] > colWidths[b] ? a : b), contentCols[0]);
-      if (colWidths[widest] > MIN_CONTENT) colWidths[widest]--;
-      else break;
+    }
+  } else if (totalMin >= effectiveMax) {
+    // Even minimums don't fit — use mins and accept truncation
+    colWidths = [...minWidths];
+  } else {
+    // Need to compress — start from mins, share remaining budget proportionally
+    const budget = effectiveMax - totalMin;
+    const deficits = natural.map((n, i) => Math.max(0, n - minWidths[i]));
+    const totalDeficit = deficits.reduce((a, b) => a + b, 0);
+    colWidths = [...minWidths];
+    if (totalDeficit > 0) {
+      for (let ci = 0; ci < colCount; ci++) {
+        colWidths[ci] += Math.floor((budget * deficits[ci]) / totalDeficit);
+      }
+    }
+    // Distribute any leftover due to flooring
+    let used = calcW(colWidths);
+    const deficitByIdx = colWidths.map((w, i) => ({ i, gap: natural[i] - w }));
+    deficitByIdx.sort((a, b) => b.gap - a.gap);
+    for (const { i } of deficitByIdx) {
+      if (used >= effectiveMax) break;
+      if (colWidths[i] < natural[i]) {
+        colWidths[i]++;
+        used = calcW(colWidths);
+      }
     }
   }
 
