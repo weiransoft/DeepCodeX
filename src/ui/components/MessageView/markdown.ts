@@ -18,7 +18,11 @@ export type MarkdownSegment =
 export function renderMarkdown(text: string, maxWidth?: number): string {
   return renderMarkdownSegments(text, maxWidth)
     .map((s) => s.body)
-    .join("");
+    .reduce((out, body) => {
+      if (!out) return body;
+      if (!body) return out;
+      return out.endsWith("\n") || body.startsWith("\n") ? out + body : `${out}\n${body}`;
+    }, "");
 }
 
 /** Render markdown, returning typed segments so the caller can choose the
@@ -128,6 +132,12 @@ function splitTableBlocks(text: string): TableBlock[] {
   };
 
   const sepRe = /^\|?\s*:?[-]{3,}:?\s*(\|\s*:?[-]{3,}:?\s*)*\|?\s*$/;
+  const parseRow = (row: string) => {
+    let body = row.trim();
+    if (body.startsWith("|")) body = body.slice(1);
+    if (body.endsWith("|")) body = body.slice(0, -1);
+    return body.split("|").map((s) => s.trim());
+  };
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -143,22 +153,12 @@ function splitTableBlocks(text: string): TableBlock[] {
     if (isHeader && !inTable) {
       flushText();
       inTable = true;
-      tableRows = [
-        trimmed
-          .split("|")
-          .filter(Boolean)
-          .map((s) => s.trim()),
-      ];
+      tableRows = [parseRow(trimmed)];
       continue;
     }
 
     if (isRow && inTable) {
-      tableRows.push(
-        trimmed
-          .split("|")
-          .filter(Boolean)
-          .map((s) => s.trim())
-      );
+      tableRows.push(parseRow(trimmed));
       continue;
     }
 
@@ -229,21 +229,26 @@ function renderTableBorder(rows: string[][], maxWidth?: number): string {
   if (rows.length === 0) return "";
 
   const colCount = rows[0].length;
+  const normalizedRows = rows.map((row) =>
+    Array.from({ length: colCount }, (_, i) => {
+      return row[i] ?? "";
+    })
+  );
   const calcW = (cs: number[]) => cs.reduce((a, b) => a + b + 2, 0) + cs.length + 1;
 
-  // Natural width per column: longest line + cell padding
+  // Natural width per column, measured as terminal cells rather than UTF-16 units.
   const natural: number[] = Array.from({ length: colCount }, (_, i) => {
-    const texts = rows.map((r) => r[i] ?? "");
+    const texts = normalizedRows.map((r) => r[i] ?? "");
     const maxLine = Math.max(4, ...texts.map((t) => visualWidth(t)));
-    return maxLine + 2;
+    return maxLine;
   });
 
-  // Minimum width per column: longest word + padding (can't go below this)
+  // Keep minimums small so long CJK text or unbroken tokens can wrap by character.
   const minWidths: number[] = Array.from({ length: colCount }, (_, i) => {
-    const texts = rows.map((r) => r[i] ?? "");
-    const words = texts.flatMap((t) => t.split(/\s+/));
-    const maxWord = Math.max(4, ...words.map((w) => visualWidth(w)));
-    return maxWord + 2;
+    const headerWidth = visualWidth(normalizedRows[0]?.[i] ?? "");
+    const labelColumn = natural[i] <= 12;
+    const minReadable = labelColumn ? natural[i] : Math.max(4, Math.min(headerWidth, 12));
+    return Math.min(natural[i], minReadable);
   });
 
   let colWidths: number[];
@@ -270,8 +275,11 @@ function renderTableBorder(rows: string[][], maxWidth?: number): string {
       }
     }
   } else if (totalMin >= effectiveMax) {
-    // Even minimums don't fit — use mins and accept truncation
     colWidths = [...minWidths];
+    while (calcW(colWidths) > effectiveMax && colWidths.some((w) => w > 1)) {
+      const widest = colWidths.reduce((maxIdx, width, idx) => (width > colWidths[maxIdx] ? idx : maxIdx), 0);
+      colWidths[widest]--;
+    }
   } else {
     // Need to compress — start from mins, share remaining budget proportionally
     const budget = effectiveMax - totalMin;
@@ -327,7 +335,7 @@ function renderTableBorder(rows: string[][], maxWidth?: number): string {
     return lines.length > 0 ? lines : [""];
   };
 
-  const wrapped = rows.map((r) => r.map((c, ci) => wrapCell(c, colWidths[ci])));
+  const wrapped = normalizedRows.map((r) => r.map((c, ci) => wrapCell(c, colWidths[ci])));
   const heights = wrapped.map((wr) => Math.max(1, ...wr.map((lines) => lines.length)));
 
   const pad = (s: string, w: number) => s + " ".repeat(Math.max(0, w - visualWidth(s)));

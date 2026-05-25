@@ -71,9 +71,13 @@ export function MessageView({ message, collapsed, width = 80 }: MessageViewProps
             ? renderMarkdownSegments(content, Math.max(20, contentWidth - 4)).map((seg, i) => {
                 if (seg.kind === "table") {
                   return (
-                    <Text key={i} wrap="truncate-end">
-                      {seg.body}
-                    </Text>
+                    <Box key={i} flexDirection="column">
+                      {seg.body.split("\n").map((line, lineIndex) => (
+                        <Text key={lineIndex} wrap="truncate-end">
+                          {line}
+                        </Text>
+                      ))}
+                    </Box>
                   );
                 }
                 return <Text key={i}>{seg.body}</Text>;
