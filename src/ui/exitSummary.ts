@@ -1,6 +1,6 @@
 import chalk from "chalk";
 import gradientString from "gradient-string";
-import type { ModelUsage, SessionEntry } from "../session";
+import type { ModelUsage, SessionEntry } from "../session-types";
 
 type ExitSummaryInput = {
   session: SessionEntry | null;

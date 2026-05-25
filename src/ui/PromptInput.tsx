@@ -46,7 +46,6 @@ import {
 } from "./fileMentions";
 import type { FileMentionItem } from "./fileMentions";
 import { readClipboardImageAsync } from "./clipboard";
-import type { PermissionScope, SessionEntry, SkillInfo, UserToolPermission } from "../session";
 
 // Re-exported from prompt modules for backward compatibility
 export { useTerminalInput, parseTerminalInput, dispatchTerminalInput } from "./prompt";
@@ -61,8 +60,10 @@ import {
   useTerminalFocusReporting,
 } from "./prompt";
 import SlashCommandMenu, { isSkillSelected } from "./SlashCommandMenu";
-import type { ModelConfigSelection } from "../settings";
+import type { ModelConfigSelection, PermissionScope } from "../settings";
 import { FileMentionMenu, ModelsDropdown, RawModelDropdown, SkillsDropdown } from "./components";
+import type { SessionEntry, SkillInfo } from "../session-types";
+import type { UserToolPermission } from "../common/permissions";
 
 export type PromptSubmission = {
   text: string;

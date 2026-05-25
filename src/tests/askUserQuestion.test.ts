@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { findPendingAskUserQuestion, formatAskUserQuestionAnswers, formatAskUserQuestionDecline } from "../ui";
-import type { SessionMessage } from "../session";
+import type { SessionMessage } from "../session-types";
 
 function message(content: unknown): SessionMessage {
   const now = "2026-04-29T00:00:00.000Z";

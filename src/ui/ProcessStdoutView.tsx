@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text } from "ink";
 import { BASH_TIMEOUT_DECREMENT_MS, BASH_TIMEOUT_INCREMENT_MS } from "../common/bash-timeout";
-import type { BashTimeoutAdjustment, SessionEntry, SessionProcessEntry } from "../session";
+import type { BashTimeoutAdjustment, SessionEntry, SessionProcessEntry } from "../session-types";
 import { useTerminalInput } from "./prompt";
 
 type RunningProcesses = SessionEntry["processes"];

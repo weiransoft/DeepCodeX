@@ -1,15 +1,10 @@
 import chalk from "chalk";
-import type { SessionManager, SessionMessage } from "../../session";
-import { type SessionEntry } from "../../session";
 import { renderMessageToStdout } from "../components/MessageView/utils";
 import type { RawMode } from "../contexts";
 import type { PromptDraft } from "../PromptInput";
-import type { DeepcodingSettings, ModelConfigSelection } from "../../settings";
-import { applyModelConfigSelection, type ResolvedDeepcodingSettings, resolveSettingsSources } from "../../settings";
-import fs from "fs";
-import path from "path";
-import os from "os";
-import { DEFAULT_BASE_URL, DEFAULT_MODEL } from "../constants";
+import type { ModelConfigSelection } from "../../settings";
+import type { SessionEntry, SessionMessage } from "../../session-types";
+import type { SessionManager } from "../../session";
 
 /**
  * Render all messages directly to stdout for Raw mode display.
@@ -29,16 +24,6 @@ export function renderRawModeMessages(allMessages: SessionMessage[], mode: strin
     process.stdout.write("\n\n");
     process.stdout.write(chalk.dim("Press ESC to exit raw mode"));
   }
-}
-
-export function isCollapsedThinking(message: SessionMessage, expandedId: string | null): boolean {
-  if (message.role !== "assistant") {
-    return false;
-  }
-  if (!message.meta?.asThinking) {
-    return false;
-  }
-  return message.id !== expandedId;
 }
 
 export function buildSyntheticUserMessage(content: string, imageCount: number): SessionMessage {
@@ -102,80 +87,6 @@ export function buildStatusLine(entry: SessionEntry): string {
     parts.push(`fail: ${entry.failReason}`);
   }
   return parts.join(" · ");
-}
-
-export function readSettings(): DeepcodingSettings | null {
-  return readSettingsFile(getUserSettingsPath());
-}
-
-export function readProjectSettings(projectRoot: string = process.cwd()): DeepcodingSettings | null {
-  return readSettingsFile(getProjectSettingsPath(projectRoot));
-}
-
-export function readSettingsFile(settingsPath: string): DeepcodingSettings | null {
-  try {
-    if (!fs.existsSync(settingsPath)) {
-      return null;
-    }
-    const raw = fs.readFileSync(settingsPath, "utf8");
-    return JSON.parse(raw) as DeepcodingSettings;
-  } catch {
-    return null;
-  }
-}
-
-export function writeSettings(settings: DeepcodingSettings): void {
-  const settingsPath = getUserSettingsPath();
-  writeSettingsFile(settingsPath, settings);
-}
-
-export function writeProjectSettings(settings: DeepcodingSettings, projectRoot: string = process.cwd()): void {
-  const settingsPath = getProjectSettingsPath(projectRoot);
-  writeSettingsFile(settingsPath, settings);
-}
-
-function writeSettingsFile(settingsPath: string, settings: DeepcodingSettings): void {
-  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-  fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
-}
-
-export function writeModelConfigSelection(
-  selection: ModelConfigSelection,
-  current: ModelConfigSelection = resolveCurrentSettings(),
-  projectRoot: string = process.cwd()
-): { changed: boolean; settings: DeepcodingSettings } {
-  const projectSettingsPath = getProjectSettingsPath(projectRoot);
-  const shouldWriteProjectSettings = fs.existsSync(projectSettingsPath);
-  const rawSettings = shouldWriteProjectSettings ? readProjectSettings(projectRoot) : readSettings();
-  const result = applyModelConfigSelection(rawSettings, current, selection);
-  if (result.changed) {
-    if (shouldWriteProjectSettings) {
-      writeProjectSettings(result.settings, projectRoot);
-    } else {
-      writeSettings(result.settings);
-    }
-  }
-  return result;
-}
-
-export function resolveCurrentSettings(projectRoot: string = process.cwd()): ResolvedDeepcodingSettings {
-  return resolveSettingsSources(
-    readSettings(),
-    readProjectSettings(projectRoot),
-    {
-      model: DEFAULT_MODEL,
-      baseURL: DEFAULT_BASE_URL,
-    },
-    process.env
-  );
-}
-
-export function getUserSettingsPath(): string {
-  return path.join(os.homedir(), ".deepcode", "settings.json");
-}
-
-export function getProjectSettingsPath(projectRoot: string): string {
-  return path.join(projectRoot, ".deepcode", "settings.json");
 }
 
 export function formatThinkingMode(

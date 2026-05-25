@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useCallback } from "react";
 import { Box, Text, useInput, useWindowSize } from "ink";
-import type { SessionEntry, SessionStatus } from "../session";
+import type { SessionEntry, SessionStatus } from "../session-types";
 import { truncate } from "./components/MessageView/utils";
 
 type Props = {

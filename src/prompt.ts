@@ -4,7 +4,7 @@ import * as os from "os";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import ejs from "ejs";
-import type { SessionMessage } from "./session";
+import type { SessionMessage } from "./session-types";
 import { findGitBashPath, resolveShellPath } from "./common/shell-utils";
 import { supportsMultimodal } from "./common/model-capabilities";
 
@@ -166,8 +166,7 @@ function getCurrentDateAndModelPrompt(model?: string): string {
 
 export function getSystemPrompt(_projectRoot: string, options: PromptToolOptions = {}): string {
   const toolDocs = readToolDocs(getExtensionRoot(), options);
-  const basePrompt = toolDocs ? `${SYSTEM_PROMPT_BASE}\n\n# Available Tools\n\n${toolDocs}` : SYSTEM_PROMPT_BASE;
-  return basePrompt;
+  return toolDocs ? `${SYSTEM_PROMPT_BASE}\n\n# Available Tools\n\n${toolDocs}` : SYSTEM_PROMPT_BASE;
 }
 
 export function getCompactPrompt(sessionMessages: SessionMessage[]): string {

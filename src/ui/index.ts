@@ -11,8 +11,10 @@ export {
   writeProjectSettings,
   writeModelConfigSelection,
   resolveCurrentSettings,
-  buildPromptDraftFromSessionMessage,
-} from "./utils";
+  DEFAULT_MODEL,
+  DEFAULT_BASE_URL,
+} from "../settings";
+export { buildPromptDraftFromSessionMessage } from "./utils";
 export { createOpenAIClient } from "../common/openai-client";
 export { default as AppContainer } from "./AppContainer";
 export { AskUserQuestionPrompt } from "./AskUserQuestionPrompt";
@@ -95,5 +97,5 @@ export {
   type FileMentionItem,
   type FileMentionToken,
 } from "./fileMentions";
-export { findExpandedThinkingId } from "./thinkingState";
+export { findExpandedThinkingId, isCollapsedThinking } from "./thinkingState";
 export { buildExitSummaryText } from "./exitSummary";

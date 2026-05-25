@@ -5,10 +5,10 @@ import * as crypto from "crypto";
 import { fileURLToPath } from "url";
 import matter from "gray-matter";
 import ejs from "ejs";
-import type { ChatCompletionMessageParam, ChatCompletionContentPart } from "openai/resources/chat/completions";
+import type { ChatCompletionContentPart, ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { launchNotifyScript } from "./common/notify";
 import { buildThinkingRequestOptions } from "./common/openai-thinking";
-import { DEEPSEEK_V4_MODELS, supportsMultimodal } from "./common/model-capabilities";
+import { supportsMultimodal } from "./common/model-capabilities";
 import {
   getCompactPrompt,
   getDefaultSkillPrompt,
@@ -18,15 +18,15 @@ import {
   type ToolDefinition,
 } from "./prompt";
 import {
-  ToolExecutor,
   type CreateOpenAIClient,
   type ProcessTimeoutControl,
   type ProcessTimeoutInfo,
   type ToolCallExecution,
   type ToolExecutionHooks,
+  ToolExecutor,
 } from "./tools/executor";
 import { McpManager } from "./mcp/mcp-manager";
-import type { McpServerConfig, PermissionScope, PermissionSettings } from "./settings";
+import type { McpServerConfig, PermissionSettings } from "./settings";
 import { logApiError } from "./common/error-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./common/debug-logger";
 import { killProcessTree } from "./common/process-tree";
@@ -37,29 +37,34 @@ import {
   buildPermissionToolExecution,
   computeToolCallPermissions,
   hasUserPermissionReplies,
+  type MessageToolPermission,
   normalizeAskPermissions,
   parseToolCallForPermissions,
-  type AskPermissionRequest,
-  type MessageToolPermission,
   type PermissionToolCall,
   type UserToolPermission,
 } from "./common/permissions";
 
-export type { PermissionScope } from "./settings";
-export type {
-  AskPermissionRequest,
-  AskPermissionScope,
-  BashPermissionScope,
-  MessageToolPermission,
-  PermissionDecision,
-  UserToolPermission,
-} from "./common/permissions";
+import {
+  type BashTimeoutAdjustment,
+  getCompactPromptTokenThreshold,
+  getTotalTokens,
+  type LlmStreamProgress,
+  type MessageMeta,
+  type ModelUsage,
+  type SessionEntry,
+  type SessionManagerOptions,
+  type SessionMessage,
+  type SessionProcessEntry,
+  type SessionsIndex,
+  type SessionStatus,
+  type SkillInfo,
+  type UndoTarget,
+  type UserPromptContent,
+} from "./session-types";
 
 const MAX_SESSION_ENTRIES = 50;
 const DEFAULT_NEW_PROMPT_API_URL = "https://deepcode.vegamo.cn/api/plugin/new";
 const NEW_PROMPT_REPORT_TIMEOUT_MS = 3000;
-const DEFAULT_COMPACT_PROMPT_TOKEN_THRESHOLD = 128 * 1024;
-const DEEPSEEK_V4_COMPACT_PROMPT_TOKEN_THRESHOLD = 512 * 1024;
 
 type ChatCompletionDebugOptions = {
   enabled?: boolean;
@@ -67,12 +72,6 @@ type ChatCompletionDebugOptions = {
   baseURL?: string;
   params?: Record<string, unknown>;
 };
-
-export function getCompactPromptTokenThreshold(model: string): number {
-  return DEEPSEEK_V4_MODELS.has(model)
-    ? DEEPSEEK_V4_COMPACT_PROMPT_TOKEN_THRESHOLD
-    : DEFAULT_COMPACT_PROMPT_TOKEN_THRESHOLD;
-}
 
 function isUsageRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -143,151 +142,6 @@ function getExtensionRoot(): string {
   const currentFilePath = fileURLToPath(import.meta.url);
   return path.resolve(path.dirname(currentFilePath), "..");
 }
-
-function getTotalTokens(usage: ModelUsage | null | undefined): number {
-  if (!isUsageRecord(usage)) {
-    return 0;
-  }
-  const totalTokens = usage.total_tokens;
-  return typeof totalTokens === "number" ? totalTokens : 0;
-}
-
-export type SessionStatus =
-  | "failed"
-  | "pending"
-  | "processing"
-  | "waiting_for_user"
-  | "completed"
-  | "interrupted"
-  | "ask_permission"
-  | "permission_denied";
-
-export type ModelUsage = {
-  prompt_tokens: number;
-  completion_tokens: number;
-  total_tokens: number;
-  completion_tokens_details?: Record<string, unknown>;
-  prompt_tokens_details?: Record<string, unknown>;
-  prompt_cache_hit_tokens?: number;
-  prompt_cache_miss_tokens?: number;
-  total_reqs?: number;
-};
-
-export type SessionProcessEntry = {
-  startTime: string;
-  command: string;
-  timeoutMs?: number;
-  deadlineAt?: string;
-  timedOut?: boolean;
-};
-
-export type BashTimeoutAdjustment = {
-  processId: string;
-  timeoutMs: number;
-  deadlineAt: string;
-  timedOut: boolean;
-};
-
-export type SessionEntry = {
-  id: string;
-  summary: string | null;
-  assistantReply: string | null;
-  assistantThinking: string | null;
-  assistantRefusal: string | null;
-  toolCalls: unknown[] | null;
-  status: SessionStatus;
-  failReason: string | null;
-  usage: ModelUsage | null;
-  usagePerModel: Record<string, ModelUsage> | null;
-  activeTokens: number;
-  createTime: string;
-  updateTime: string;
-  processes: Map<string, SessionProcessEntry> | null; // {pid: process info}
-  askPermissions?: AskPermissionRequest[];
-};
-
-export type SessionsIndex = {
-  version: 1;
-  entries: SessionEntry[];
-  originalPath: string;
-};
-
-export type SessionMessageRole = "system" | "user" | "assistant" | "tool";
-
-export type MessageMeta = {
-  function?: unknown;
-  paramsMd?: string;
-  resultMd?: string;
-  asThinking?: boolean;
-  isSummary?: boolean;
-  isModelChange?: boolean;
-  skill?: SkillInfo;
-  permissions?: MessageToolPermission[];
-  userPrompt?: UserPromptContent;
-};
-
-export type SessionMessage = {
-  id: string;
-  sessionId: string;
-  role: SessionMessageRole;
-  content: string | null;
-  contentParams: unknown | null;
-  messageParams: unknown | null;
-  compacted: boolean;
-  visible: boolean;
-  createTime: string;
-  updateTime: string;
-  meta?: MessageMeta;
-  html?: string;
-  checkpointHash?: string;
-};
-
-export type UndoTarget = {
-  message: SessionMessage;
-  index: number;
-  canRestoreCode: boolean;
-};
-
-export type UserPromptContent = {
-  text?: string;
-  imageUrls?: string[];
-  skills?: SkillInfo[];
-  permissions?: UserToolPermission[];
-  alwaysAllows?: PermissionScope[];
-};
-
-export type SkillInfo = {
-  name: string;
-  path: string;
-  description: string;
-  isLoaded?: boolean;
-};
-
-type SessionManagerOptions = {
-  projectRoot: string;
-  createOpenAIClient: CreateOpenAIClient;
-  getResolvedSettings: () => {
-    model: string;
-    webSearchTool?: string;
-    mcpServers?: Record<string, McpServerConfig>;
-    permissions?: Required<PermissionSettings>;
-  };
-  renderMarkdown: (text: string) => string;
-  onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
-  onSessionEntryUpdated?: (entry: SessionEntry) => void;
-  onLlmStreamProgress?: (progress: LlmStreamProgress) => void;
-  onMcpStatusChanged?: () => void;
-  onProcessStdout?: (pid: number, chunk: string) => void;
-};
-
-export type LlmStreamProgress = {
-  requestId: string;
-  sessionId?: string;
-  startedAt: string;
-  estimatedTokens: number;
-  formattedTokens: string;
-  phase: "start" | "update" | "end";
-};
 
 export class SessionManager {
   private readonly projectRoot: string;

@@ -27,7 +27,7 @@ import {
   insertText,
   backspace,
 } from "../ui";
-import type { SessionMessage, SkillInfo } from "../session";
+import type { SessionMessage, SkillInfo } from "../session-types";
 
 function collectDispatchedInput(data: string) {
   const events: ReturnType<typeof parseTerminalInput>[] = [];

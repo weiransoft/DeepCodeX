@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { Box, Text, useInput, useWindowSize } from "ink";
-import type { UndoTarget } from "../session";
+import type { UndoTarget } from "../session-types";
 
 export type UndoRestoreMode = "code-and-conversation" | "conversation";
 

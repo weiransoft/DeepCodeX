@@ -5,8 +5,8 @@ import * as os from "os";
 import * as path from "path";
 import { render, type Instance } from "ink";
 import chalk from "chalk";
-import { UpdatePrompt, type UpdatePromptChoice } from "./ui";
-import { killProcessTree } from "./common/process-tree";
+import { UpdatePrompt, type UpdatePromptChoice } from "../ui";
+import { killProcessTree } from "./process-tree";
 
 export type PackageInfo = {
   name: string;

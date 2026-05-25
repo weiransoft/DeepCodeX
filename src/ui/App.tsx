@@ -2,18 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { Box, Static, Text, useApp, useStdout, useWindowSize } from "ink";
 import chalk from "chalk";
 import { createOpenAIClient } from "../common/openai-client";
-import {
-  type LlmStreamProgress,
-  type MessageMeta,
-  type PermissionScope,
-  type SessionEntry,
-  SessionManager,
-  type SessionMessage,
-  type SessionStatus,
-  type SkillInfo,
-  type UndoTarget,
-  type UserPromptContent,
-} from "../session";
+import type { PermissionScope } from "../settings";
 import { type ModelConfigSelection } from "../settings";
 import { type PromptDraft, PromptInput, type PromptSubmission } from "./PromptInput";
 import { MessageView, RawModeExitPrompt } from "./components";
@@ -39,13 +28,23 @@ import {
   buildStatusLine,
   buildSyntheticUserMessage,
   formatModelConfig,
-  isCollapsedThinking,
   isCurrentSessionEmpty,
   renderRawModeMessages,
-  resolveCurrentSettings,
-  writeModelConfigSelection,
 } from "./utils";
+import { resolveCurrentSettings, writeModelConfigSelection } from "../settings";
+import { isCollapsedThinking } from "./thinkingState";
 import { ANSI_CLEAR_SCREEN } from "./constants";
+import type {
+  LlmStreamProgress,
+  MessageMeta,
+  SessionEntry,
+  SessionMessage,
+  SessionStatus,
+  SkillInfo,
+  UndoTarget,
+  UserPromptContent,
+} from "../session-types";
+import { SessionManager } from "../session";
 
 type View = "chat" | "session-list" | "undo" | "mcp-status";
 

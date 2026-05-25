@@ -1,6 +1,6 @@
 import Index from "../DropdownMenu";
 import React, { useEffect, useState } from "react";
-import type { SkillInfo } from "../../../session";
+import type { SkillInfo } from "../../../session-types";
 import { useInput } from "ink";
 import { isSkillSelected } from "../../SlashCommandMenu";
 
