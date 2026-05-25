@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useCallback } from "react";
 import { Box, Text, useInput, useWindowSize } from "ink";
 import type { SessionEntry, SessionStatus } from "../session";
+import { truncate } from "./components/MessageView/utils";
 
 type Props = {
   sessions: SessionEntry[];
@@ -113,17 +114,10 @@ export function SessionList({ sessions, onSelect, onCancel, onDelete }: Props): 
       return;
     }
 
-    // Backspace: remove last search character
-    if (key.backspace) {
-      if (searchQuery) {
-        handleBackspace();
-        return;
-      }
-    }
-
     // Delete key: remove search character, or start delete confirmation
-    if (key.delete) {
+    if (key.delete || key.backspace) {
       if (searchQuery) {
+        // remove last search character
         handleBackspace();
         return;
       }
@@ -341,11 +335,4 @@ export function formatSessionStatus(status: SessionStatus): string {
     default:
       return status;
   }
-}
-
-function truncate(value: string, max: number): string {
-  if (value.length <= max) {
-    return value;
-  }
-  return `${value.slice(0, max)}…`;
 }
