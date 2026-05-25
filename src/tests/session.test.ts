@@ -1256,6 +1256,162 @@ test("replySession /continue runs trailing pending tool calls before requesting 
   );
 });
 
+test("activateSession pauses for permission when a tool call requires ask", async () => {
+  const workspace = createTempDir("deepcode-permission-ask-workspace-");
+  const home = createTempDir("deepcode-permission-ask-home-");
+  setHomeDir(home);
+
+  const manager = createPermissionSessionManager(
+    workspace,
+    [
+      {
+        choices: [
+          {
+            message: {
+              content: "",
+              tool_calls: [
+                {
+                  id: "call-bash",
+                  type: "function",
+                  function: {
+                    name: "bash",
+                    arguments: JSON.stringify({
+                      command: "rg TODO src",
+                      description: "Search TODO markers",
+                      sideEffects: ["read-in-cwd"],
+                    }),
+                  },
+                },
+              ],
+            },
+          },
+        ],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      },
+    ],
+    {
+      allow: [],
+      deny: [],
+      ask: [],
+      defaultMode: "askAll",
+    }
+  );
+
+  const sessionId = await manager.createSession({ text: "search todos" });
+  const session = manager.getSession(sessionId);
+  const assistant = manager
+    .listSessionMessages(sessionId)
+    .find((message) => message.role === "assistant" && (message.messageParams as any)?.tool_calls);
+
+  assert.equal(session?.status, "ask_permission");
+  assert.equal(session?.askPermissions?.[0]?.toolCallId, "call-bash");
+  assert.deepEqual(session?.askPermissions?.[0]?.scopes, ["read-in-cwd"]);
+  assert.deepEqual(assistant?.meta?.permissions, [{ toolCallId: "call-bash", permission: "ask" }]);
+  assert.equal(
+    manager.listSessionMessages(sessionId).some((message) => message.role === "tool"),
+    false
+  );
+});
+
+test("replySession applies permission replies, runs pending tools, and stores always allow scopes", async () => {
+  const workspace = createTempDir("deepcode-permission-allow-workspace-");
+  const home = createTempDir("deepcode-permission-allow-home-");
+  setHomeDir(home);
+  fs.writeFileSync(path.join(workspace, "note.txt"), "allowed content\n", "utf8");
+
+  const manager = createPermissionSessionManager(
+    workspace,
+    [createChatResponse("continued", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 })],
+    {
+      allow: [],
+      deny: [],
+      ask: ["read-in-cwd"],
+      defaultMode: "allowAll",
+    }
+  );
+  const originalActivateSession = manager.activateSession.bind(manager);
+  (manager as any).activateSession = async () => {};
+  const sessionId = await manager.createSession({ text: "first prompt" });
+  const assistant = (manager as any).buildAssistantMessage(
+    sessionId,
+    "Need to read",
+    [
+      {
+        id: "call-read",
+        type: "function",
+        function: { name: "read", arguments: JSON.stringify({ file_path: path.join(workspace, "note.txt") }) },
+      },
+    ],
+    null
+  ) as SessionMessage;
+  assistant.meta = { ...(assistant.meta ?? {}), permissions: [{ toolCallId: "call-read", permission: "ask" }] };
+  (manager as any).appendSessionMessage(sessionId, assistant);
+  (manager as any).activateSession = originalActivateSession;
+
+  await manager.replySession(sessionId, {
+    text: "/continue",
+    permissions: [{ toolCallId: "call-read", permission: "allow" }],
+    alwaysAllows: ["read-in-cwd"],
+  });
+
+  const toolMessage = manager.listSessionMessages(sessionId).find((message) => message.role === "tool");
+  const settings = JSON.parse(fs.readFileSync(path.join(workspace, ".deepcode", "settings.json"), "utf8"));
+
+  assert.match(toolMessage?.content ?? "", /allowed content/);
+  assert.deepEqual(settings.permissions.allow, ["read-in-cwd"]);
+  assert.equal(manager.getSession(sessionId)?.status, "completed");
+});
+
+test("replySession turns denied permission replies into tool errors before appending user text", async () => {
+  const workspace = createTempDir("deepcode-permission-deny-workspace-");
+  const home = createTempDir("deepcode-permission-deny-home-");
+  setHomeDir(home);
+
+  const manager = createPermissionSessionManager(
+    workspace,
+    [createChatResponse("handled denial", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 })],
+    {
+      allow: [],
+      deny: [],
+      ask: ["write-out-cwd"],
+      defaultMode: "allowAll",
+    }
+  );
+  const originalActivateSession = manager.activateSession.bind(manager);
+  (manager as any).activateSession = async () => {};
+  const sessionId = await manager.createSession({ text: "first prompt" });
+  const assistant = (manager as any).buildAssistantMessage(
+    sessionId,
+    "Need to write",
+    [
+      {
+        id: "call-write",
+        type: "function",
+        function: { name: "write", arguments: JSON.stringify({ file_path: "/tmp/outside.txt", content: "x" }) },
+      },
+    ],
+    null
+  ) as SessionMessage;
+  assistant.meta = { ...(assistant.meta ?? {}), permissions: [{ toolCallId: "call-write", permission: "ask" }] };
+  (manager as any).appendSessionMessage(sessionId, assistant);
+  (manager as any).activateSession = originalActivateSession;
+
+  await manager.replySession(sessionId, {
+    text: "Do not write outside the workspace.",
+    permissions: [{ toolCallId: "call-write", permission: "deny" }],
+  });
+
+  const messages = manager.listSessionMessages(sessionId);
+  const assistantIndex = messages.findIndex((message) => message.id === assistant.id);
+  const toolMessage = messages[assistantIndex + 1];
+  const userMessage = messages[assistantIndex + 2];
+
+  assert.equal(toolMessage?.role, "tool");
+  assert.match(toolMessage?.content ?? "", /User denied the required permission/);
+  assert.equal(userMessage?.role, "user");
+  assert.equal(userMessage?.content, "Do not write outside the workspace.");
+});
+
 test("replySession preserves raw session messages when a previous tool call is pending", async () => {
   const workspace = createTempDir("deepcode-pending-tool-workspace-");
   const home = createTempDir("deepcode-pending-tool-home-");
@@ -2439,6 +2595,42 @@ function createMockedClientSessionManager(projectRoot: string, responses: unknow
       thinkingEnabled: false,
     }),
     getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+  });
+}
+
+function createPermissionSessionManager(
+  projectRoot: string,
+  responses: unknown[],
+  permissions: {
+    allow: any[];
+    deny: any[];
+    ask: any[];
+    defaultMode: "allowAll" | "askAll";
+  }
+): SessionManager {
+  const client = {
+    chat: {
+      completions: {
+        create: async () => {
+          const response = responses.shift();
+          assert.ok(response, "expected a queued chat response");
+          return response;
+        },
+      },
+    },
+  };
+
+  return new SessionManager({
+    projectRoot,
+    createOpenAIClient: () => ({
+      client: client as any,
+      model: "test-model",
+      baseURL: "https://api.deepseek.com",
+      thinkingEnabled: false,
+    }),
+    getResolvedSettings: () => ({ model: "test-model", permissions }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
   });

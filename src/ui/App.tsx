@@ -8,6 +8,7 @@ import { createOpenAIClient } from "../common/openai-client";
 import {
   type LlmStreamProgress,
   type MessageMeta,
+  type PermissionScope,
   type SessionEntry,
   SessionManager,
   type SessionMessage,
@@ -38,6 +39,7 @@ import {
   findPendingAskUserQuestion,
   formatAskUserQuestionAnswers,
 } from "./askUserQuestion";
+import { PermissionPrompt, type PermissionPromptResult } from "./PermissionPrompt";
 import { buildExitSummaryText } from "./exitSummary";
 import { RawMode, useRawModeContext } from "./contexts";
 import { renderMessageToStdout } from "./components/MessageView/utils";
@@ -76,6 +78,12 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
   const [streamProgress, setStreamProgress] = useState<LlmStreamProgress | null>(null);
   const [runningProcesses, setRunningProcesses] = useState<SessionEntry["processes"]>(null);
   const [activeStatus, setActiveStatus] = useState<SessionStatus | null>(null);
+  const [activeAskPermissions, setActiveAskPermissions] = useState<SessionEntry["askPermissions"]>(undefined);
+  const [pendingPermissionReply, setPendingPermissionReply] = useState<{
+    sessionId: string;
+    permissions: PermissionPromptResult["permissions"];
+    alwaysAllows: PermissionScope[];
+  } | null>(null);
   const [dismissedQuestionIds, setDismissedQuestionIds] = useState<Set<string>>(() => new Set());
   const [isExiting, setIsExiting] = useState(false);
   const [showWelcome, setShowWelcome] = useState(true);
@@ -105,6 +113,7 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
         setStatusLine(buildStatusLine(entry));
         setRunningProcesses(entry.processes);
         setActiveStatus(entry.status);
+        setActiveAskPermissions(entry.askPermissions);
       },
       onLlmStreamProgress: (progress) => {
         if (progress.phase === "end") {
@@ -214,6 +223,8 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
           setErrorLine(null);
           setRunningProcesses(null);
           setActiveStatus(null);
+          setActiveAskPermissions(undefined);
+          setPendingPermissionReply(null);
           setDismissedQuestionIds(new Set());
           setShowWelcome(true);
           setWelcomeNonce((n) => n + 1);
@@ -257,7 +268,16 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
         imageUrls: submission.imageUrls,
         skills:
           submission.selectedSkills && submission.selectedSkills.length > 0 ? submission.selectedSkills : undefined,
+        permissions: submission.permissions,
+        alwaysAllows: submission.alwaysAllows,
       };
+      const activeSessionId = sessionManager.getActiveSessionId();
+      const permissionReply =
+        pendingPermissionReply && activeSessionId === pendingPermissionReply.sessionId ? pendingPermissionReply : null;
+      if (permissionReply) {
+        prompt.permissions = permissionReply.permissions;
+        prompt.alwaysAllows = permissionReply.alwaysAllows;
+      }
 
       const trimmedText = (submission.text ?? "").trim();
       const selectedSkillNames = submission.selectedSkills?.map((skill) => skill.name).filter(Boolean) ?? [];
@@ -277,6 +297,9 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
       processStdoutRef.current.clear();
       try {
         await sessionManager.handleUserPrompt(prompt);
+        if (permissionReply) {
+          setPendingPermissionReply(null);
+        }
         await refreshSkills();
         refreshSessionsList();
       } catch (error) {
@@ -288,7 +311,7 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
         setRunningProcesses(null);
       }
     },
-    [exit, onRestart, sessionManager, refreshSkills, refreshSessionsList]
+    [exit, onRestart, pendingPermissionReply, sessionManager, refreshSkills, refreshSessionsList]
   );
 
   const handleInterrupt = useCallback(() => {
@@ -407,9 +430,13 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
       setStatusLine(session ? buildStatusLine(session) : "");
       setRunningProcesses(session?.processes ?? null);
       setActiveStatus(session?.status ?? null);
+      setActiveAskPermissions(session?.askPermissions);
+      if (pendingPermissionReply && pendingPermissionReply.sessionId !== sessionId) {
+        setPendingPermissionReply(null);
+      }
       await refreshSkills(sessionId);
     },
-    [sessionManager, refreshSkills]
+    [pendingPermissionReply, sessionManager, refreshSkills]
   );
 
   const handleUndoRestore = useCallback(
@@ -605,6 +632,39 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
     setDismissedQuestionIds((prev) => new Set(prev).add(pendingQuestion.messageId));
   }, [pendingQuestion]);
 
+  const handlePermissionResult = useCallback(
+    (result: PermissionPromptResult) => {
+      const sessionId = sessionManager.getActiveSessionId();
+      if (!sessionId) {
+        return;
+      }
+      if (result.hasDeny) {
+        setPendingPermissionReply({
+          sessionId,
+          permissions: result.permissions,
+          alwaysAllows: result.alwaysAllows,
+        });
+        setStatusLine("Permission denied. Add a reply, then press Enter to continue.");
+        return;
+      }
+      void handlePrompt({
+        text: "/continue",
+        imageUrls: [],
+        command: "continue",
+        permissions: result.permissions,
+        alwaysAllows: result.alwaysAllows,
+      });
+    },
+    [handlePrompt, sessionManager]
+  );
+
+  const handlePermissionCancel = useCallback(() => {
+    sessionManager.interruptActiveSession();
+    setActiveStatus("interrupted");
+    setActiveAskPermissions(undefined);
+    refreshSessionsList();
+  }, [refreshSessionsList, sessionManager]);
+
   if (mode === RawMode.Raw) {
     return <RawModeExitPrompt onExit={(prev) => handleRawModeChange(prev)} />;
   }
@@ -690,6 +750,16 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
           questions={pendingQuestion.questions}
           onSubmit={handleQuestionAnswers}
           onCancel={handleQuestionCancel}
+        />
+      ) : activeStatus === "ask_permission" &&
+        activeAskPermissions &&
+        activeAskPermissions.length > 0 &&
+        !pendingPermissionReply &&
+        !busy ? (
+        <PermissionPrompt
+          requests={activeAskPermissions}
+          onSubmit={handlePermissionResult}
+          onCancel={handlePermissionCancel}
         />
       ) : isExiting ? null : (
         <PromptInput
