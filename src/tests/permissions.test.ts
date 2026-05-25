@@ -93,6 +93,39 @@ test("computeToolCallPermissions maps tool calls to permission requests", () => 
   );
 });
 
+test("computeToolCallPermissions only asks for scopes not already allowed", () => {
+  const projectRoot = createTempDir("deepcode-permissions-filter-workspace-");
+  const plan = computeToolCallPermissions({
+    sessionId: "session-1",
+    projectRoot,
+    settings: {
+      allow: ["read-in-cwd"],
+      deny: [],
+      ask: [],
+      defaultMode: "askAll",
+    },
+    toolCalls: [
+      {
+        id: "call-bash",
+        type: "function",
+        function: {
+          name: "bash",
+          arguments: JSON.stringify({
+            command: "curl -s http://localhost:8899/ && ls index.html",
+            sideEffects: ["network", "read-in-cwd"],
+          }),
+        },
+      },
+    ],
+  });
+
+  assert.deepEqual(plan.permissions, [{ toolCallId: "call-bash", permission: "ask" }]);
+  assert.deepEqual(
+    plan.askPermissions.map((item) => ({ id: item.toolCallId, scopes: item.scopes })),
+    [{ id: "call-bash", scopes: ["network"] }]
+  );
+});
+
 test("appendProjectPermissionAllows writes unique project-level allow scopes", () => {
   const projectRoot = createTempDir("deepcode-permission-settings-");
   const settingsPath = path.join(projectRoot, ".deepcode", "settings.json");

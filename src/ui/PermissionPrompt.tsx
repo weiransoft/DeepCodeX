@@ -20,6 +20,13 @@ type ScopePrompt = {
   scope: AskPermissionScope;
 };
 
+type PromptOption = {
+  kind: "allow" | "always" | "deny";
+  label: string;
+  scopeDescription?: string;
+  scopeColor?: string;
+};
+
 const ALWAYS_ALLOWED_SCOPES = new Set<AskPermissionScope>([
   "read-in-cwd",
   "read-out-cwd",
@@ -138,7 +145,7 @@ export function PermissionPrompt({ requests, onSubmit, onCancel }: Props): React
         {options.map((option, optionIndex) => (
           <Text key={option.kind} color={optionIndex === cursor ? "cyanBright" : undefined}>
             {optionIndex === cursor ? "> " : "  "}
-            {optionIndex + 1}. {option.label}
+            {optionIndex + 1}. {renderOptionLabel(option)}
           </Text>
         ))}
       </Box>
@@ -147,6 +154,18 @@ export function PermissionPrompt({ requests, onSubmit, onCancel }: Props): React
       </Box>
     </Box>
   );
+}
+
+function renderOptionLabel(option: PromptOption): React.ReactNode {
+  if (option.scopeDescription && option.scopeColor) {
+    return (
+      <>
+        {option.label}
+        <Text color={option.scopeColor}>{option.scopeDescription}</Text>
+      </>
+    );
+  }
+  return option.label;
 }
 
 function buildScopePrompts(requests: AskPermissionRequest[]): ScopePrompt[] {
@@ -159,10 +178,15 @@ function buildScopePrompts(requests: AskPermissionRequest[]): ScopePrompt[] {
   return prompts;
 }
 
-function buildOptions(scope: AskPermissionScope): Array<{ kind: "allow" | "always" | "deny"; label: string }> {
-  const options: Array<{ kind: "allow" | "always" | "deny"; label: string }> = [{ kind: "allow", label: "Yes" }];
+function buildOptions(scope: AskPermissionScope): PromptOption[] {
+  const options: PromptOption[] = [{ kind: "allow", label: "Yes" }];
   if (isAlwaysAllowedScope(scope)) {
-    options.push({ kind: "always", label: `Yes, and always allow ${describeScope(scope)}` });
+    options.push({
+      kind: "always",
+      label: "Yes, and always allow ",
+      scopeDescription: describeScope(scope),
+      scopeColor: getScopeRiskColor(scope),
+    });
   }
   options.push({ kind: "deny", label: "No" });
   return options;
@@ -199,6 +223,27 @@ function buildResult(
 
 function isAlwaysAllowedScope(scope: AskPermissionScope): scope is PermissionScope {
   return ALWAYS_ALLOWED_SCOPES.has(scope);
+}
+
+export function getScopeRiskColor(scope: AskPermissionScope): string {
+  switch (scope) {
+    case "read-in-cwd":
+    case "query-git-log":
+      return "#22c55e";
+    case "read-out-cwd":
+    case "write-in-cwd":
+    case "network":
+    case "mcp":
+      return "#f59e0b";
+    case "write-out-cwd":
+    case "delete-in-cwd":
+    case "delete-out-cwd":
+    case "mutate-git-log":
+    case "unknown":
+      return "#ef4444";
+    default:
+      return "#ef4444";
+  }
 }
 
 function describeScope(scope: PermissionScope): string {

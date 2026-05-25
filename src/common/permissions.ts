@@ -164,9 +164,10 @@ export function computeToolCallPermissions(options: ComputeToolCallPermissionsOp
     const permission = evaluatePermissionScopes(request.scopes, options.settings);
     permissions.push({ toolCallId: toolCall.id, permission });
     if (permission === "ask") {
+      const askScopes = getPermissionScopesRequiringAsk(request.scopes, options.settings);
       askPermissions.push({
         toolCallId: toolCall.id,
-        scopes: request.scopes,
+        scopes: askScopes.length > 0 ? askScopes : request.scopes,
         name: request.name,
         command: request.command,
         description: request.description,
@@ -283,6 +284,38 @@ export function evaluatePermissionScopes(
     return "allow";
   }
   return settings.defaultMode === "askAll" ? "ask" : "allow";
+}
+
+export function getPermissionScopesRequiringAsk(
+  scopes: AskPermissionScope[],
+  settings: Required<PermissionSettings> = {
+    allow: [],
+    deny: [],
+    ask: [],
+    defaultMode: "allowAll",
+  }
+): AskPermissionScope[] {
+  const result: AskPermissionScope[] = [];
+  for (const scope of scopes) {
+    if (scope === "unknown") {
+      result.push(scope);
+      continue;
+    }
+    if (settings.deny.includes(scope)) {
+      continue;
+    }
+    if (settings.ask.includes(scope)) {
+      result.push(scope);
+      continue;
+    }
+    if (settings.allow.includes(scope)) {
+      continue;
+    }
+    if (settings.defaultMode === "askAll") {
+      result.push(scope);
+    }
+  }
+  return result;
 }
 
 export function parseBashSideEffects(value: unknown): AskPermissionScope[] {
