@@ -43,6 +43,8 @@ import { PermissionPrompt, type PermissionPromptResult } from "./PermissionPromp
 import { buildExitSummaryText } from "./exitSummary";
 import { RawMode, useRawModeContext } from "./contexts";
 import { renderMessageToStdout } from "./components/MessageView/utils";
+import { renderRawModeMessages } from "./utils";
+import { ANSI_CLEAR_SCREEN } from "./constants";
 
 const DEFAULT_MODEL = "deepseek-v4-pro";
 const DEFAULT_BASE_URL = "https://api.deepseek.com";
@@ -55,7 +57,7 @@ type AppProps = {
   onRestart?: () => void;
 };
 
-export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactElement {
+function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout, write } = useStdout();
   const { columns, rows } = useWindowSize();
@@ -142,6 +144,33 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
     });
   }, [projectRoot]);
 
+  /**
+   * Navigate to a sub-view.
+   */
+  const navigateToSubView = useCallback((targetView: View) => {
+    setShowWelcome(false);
+    setView(targetView);
+  }, []);
+
+  /**
+   * Reset the static view to the welcome screen.
+   */
+  const resetStaticView = useCallback(
+    (loadedMessages: SessionMessage[], options?: { clearScreen?: boolean }) => {
+      if (options?.clearScreen) {
+        process.stdout.write(ANSI_CLEAR_SCREEN);
+      }
+      setMessages([]);
+      setWelcomeNonce((n) => n + 1);
+      navigateToSubView("chat");
+      setTimeout(() => {
+        setMessages(loadedMessages);
+        setShowWelcome(true);
+      }, 0);
+    },
+    [navigateToSubView]
+  );
+
   useEffect(() => {
     if (!busy) {
       return;
@@ -170,6 +199,26 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
     [sessionManager]
   );
 
+  /**
+   * Reset the app to the welcome screen.
+   */
+  const resetToWelcome = useCallback(async () => {
+    writeRef.current(ANSI_CLEAR_SCREEN);
+    sessionManager.setActiveSessionId(null);
+    setStatusLine("");
+    setErrorLine(null);
+    setRunningProcesses(null);
+    setActiveStatus(null);
+    setActiveAskPermissions(undefined);
+    setPendingPermissionReply(null);
+    setDismissedQuestionIds(new Set());
+    resetStaticView([]);
+    await refreshSkills();
+  }, [sessionManager, resetStaticView, refreshSkills]);
+
+  /**
+   * Refresh the list of sessions.
+   */
   useEffect(() => {
     refreshSessionsList();
     void refreshSkills();
@@ -182,11 +231,17 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
     createOpenAIClient(projectRoot);
   }, [projectRoot]);
 
+  /**
+   * Initialize MCP servers.
+   */
   useLayoutEffect(() => {
     const settings = resolveCurrentSettings(projectRoot);
     void sessionManager.initMcpServers(settings.mcpServers);
   }, [projectRoot, sessionManager]);
 
+  /**
+   * Dispose the session manager on unmount.
+   */
   useEffect(() => {
     return () => {
       sessionManager.dispose();
@@ -216,33 +271,19 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
         if (onRestart) {
           onRestart();
         } else {
-          writeRef.current("\u001B[2J\u001B[3J\u001B[H");
-          sessionManager.setActiveSessionId(null);
-          setMessages([]);
-          setStatusLine("");
-          setErrorLine(null);
-          setRunningProcesses(null);
-          setActiveStatus(null);
-          setActiveAskPermissions(undefined);
-          setPendingPermissionReply(null);
-          setDismissedQuestionIds(new Set());
-          setShowWelcome(true);
-          setWelcomeNonce((n) => n + 1);
-          await refreshSkills();
+          await resetToWelcome();
           refreshSessionsList();
         }
         return;
       }
       if (submission.command === "resume") {
-        setShowWelcome(false);
         refreshSessionsList();
-        setView("session-list");
+        navigateToSubView("session-list");
         return;
       }
       if (submission.command === "continue" && isCurrentSessionEmpty(sessionManager)) {
-        setShowWelcome(false);
         refreshSessionsList();
-        setView("session-list");
+        navigateToSubView("session-list");
         return;
       }
       if (submission.command === "undo") {
@@ -251,15 +292,13 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
           setErrorLine("No active session to undo.");
           return;
         }
-        setShowWelcome(false);
         setUndoTargets(sessionManager.listUndoTargets(activeSessionId));
-        setView("undo");
+        navigateToSubView("undo");
         return;
       }
       if (submission.command === "mcp") {
-        setShowWelcome(false);
         setMcpStatuses(sessionManager.getMcpStatus());
-        setView("mcp-status");
+        navigateToSubView("mcp-status");
         return;
       }
 
@@ -311,7 +350,16 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
         setRunningProcesses(null);
       }
     },
-    [exit, onRestart, pendingPermissionReply, sessionManager, refreshSkills, refreshSessionsList]
+    [
+      sessionManager,
+      pendingPermissionReply,
+      exit,
+      onRestart,
+      refreshSkills,
+      refreshSessionsList,
+      navigateToSubView,
+      resetToWelcome,
+    ]
   );
 
   const handleInterrupt = useCallback(() => {
@@ -384,16 +432,9 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
 
   const reloadActiveSessionView = useCallback(
     (sessionId: string): void => {
-      process.stdout.write("\u001B[2J\u001B[3J\u001B[H");
-      setMessages([]);
-      setShowWelcome(false);
-      setWelcomeNonce((n) => n + 1);
-      setTimeout(() => {
-        setMessages(loadVisibleMessages(sessionManager, sessionId));
-        setShowWelcome(true);
-      }, 0);
+      resetStaticView(loadVisibleMessages(sessionManager, sessionId), { clearScreen: true });
     },
-    [sessionManager]
+    [resetStaticView, sessionManager]
   );
 
   useEffect(() => {
@@ -411,21 +452,9 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
 
   const handleSelectSession = useCallback(
     async (sessionId: string) => {
-      const currentSessionId = sessionManager.getActiveSessionId();
-      if (currentSessionId !== sessionId) {
-        process.stdout.write("\u001B[2J\u001B[3J\u001B[H");
-      }
       sessionManager.setActiveSessionId(sessionId);
       // Clear first so <Static> resets its index to 0.
-      setMessages([]);
-      setShowWelcome(false);
-      setWelcomeNonce((n) => n + 1);
-      setView("chat");
-      // Load messages after the reset so all static items are rendered.
-      setTimeout(() => {
-        setMessages(loadVisibleMessages(sessionManager, sessionId));
-        setShowWelcome(true);
-      }, 0);
+      resetStaticView(loadVisibleMessages(sessionManager, sessionId), { clearScreen: true });
       const session = sessionManager.getSession(sessionId);
       setStatusLine(session ? buildStatusLine(session) : "");
       setRunningProcesses(session?.processes ?? null);
@@ -436,7 +465,26 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
       }
       await refreshSkills(sessionId);
     },
-    [pendingPermissionReply, sessionManager, refreshSkills]
+    [sessionManager, resetStaticView, pendingPermissionReply, refreshSkills]
+  );
+
+  const handleDeleteSession = useCallback(
+    async (id: string): Promise<void> => {
+      const isActiveSession = sessionManager.getActiveSessionId() === id;
+
+      // If the deleted session is the active one, clear the active session first
+      if (isActiveSession) {
+        sessionManager.setActiveSessionId(null);
+      }
+
+      sessionManager.deleteSession(id);
+      refreshSessionsList();
+
+      if (isActiveSession) {
+        await resetToWelcome();
+      }
+    },
+    [sessionManager, refreshSessionsList, resetToWelcome]
   );
 
   const handleUndoRestore = useCallback(
@@ -487,25 +535,13 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
       setShowWelcome(false);
       setMessages([]);
       // Clear screen to remove stale formatted text.
-      process.stdout.write("\u001B[2J\u001B[3J\u001B[H");
+      process.stdout.write(ANSI_CLEAR_SCREEN);
 
       setTimeout(() => {
         if (nextMode === RawMode.Raw) {
           // Write all messages directly to stdout for raw scrollback mode.
           const allMessages = activeSessionId ? loadVisibleMessages(sessionManager, activeSessionId) : [];
-          for (const msg of allMessages) {
-            process.stdout.write("\n");
-            process.stdout.write(renderMessageToStdout(msg, nextMode) + "\n\n");
-          }
-          if (allMessages.length > 0) {
-            process.stdout.write("\n\n");
-            process.stdout.write(chalk.dim("Press ESC to exit raw mode"));
-          } else {
-            process.stdout.write("\n");
-            process.stdout.write(chalk.dim("(No messages in this session yet. Start chatting to see them here.)"));
-            process.stdout.write("\n\n");
-            process.stdout.write(chalk.dim("Press ESC to exit raw mode"));
-          }
+          renderRawModeMessages(allMessages, nextMode);
         } else if (activeSessionId) {
           // Switch to chat view to render messages.
           handleSelectSession(activeSessionId);
@@ -538,22 +574,10 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
     if (mode === RawMode.Raw) {
       // In raw mode, re-render all messages directly to stdout at the new width.
       // Use process.stdout.write instead of writeRef to avoid Ink interference.
-      process.stdout.write("\u001B[2J\u001B[3J\u001B[H");
+      process.stdout.write(ANSI_CLEAR_SCREEN);
       const activeSessionId = sessionManager.getActiveSessionId();
       const allMessages = activeSessionId ? loadVisibleMessages(sessionManager, activeSessionId) : [];
-      for (const msg of allMessages) {
-        process.stdout.write("\n");
-        process.stdout.write(renderMessageToStdout(msg, mode) + "\n\n");
-      }
-      if (allMessages.length > 0) {
-        process.stdout.write("\n\n");
-        process.stdout.write(chalk.dim("Press ESC to exit raw mode"));
-      } else {
-        process.stdout.write("\n");
-        process.stdout.write(chalk.dim("(No messages in this session yet. Start chatting to see them here.)"));
-        process.stdout.write("\n\n");
-        process.stdout.write(chalk.dim("Press ESC to exit raw mode"));
-      }
+      renderRawModeMessages(allMessages, mode);
       return;
     }
 
@@ -719,12 +743,7 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
           onSelect={(id) => void handleSelectSession(id)}
           onCancel={() => setView("chat")}
           onDelete={(id) => {
-            // If the deleted session is the active one, clear it
-            if (sessionManager.getActiveSessionId() === id) {
-              sessionManager.setActiveSessionId(null);
-            }
-            sessionManager.deleteSession(id);
-            refreshSessionsList();
+            void handleDeleteSession(id);
           }}
         />
       ) : view === "undo" ? (
@@ -783,6 +802,8 @@ export function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.
     </Box>
   );
 }
+
+export default App;
 
 function isCollapsedThinking(message: SessionMessage, expandedId: string | null): boolean {
   if (message.role !== "assistant") {
