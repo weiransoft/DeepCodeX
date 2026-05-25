@@ -1477,6 +1477,28 @@ ${skillMd}
     return index.entries.find((entry) => entry.id === sessionId) ?? null;
   }
 
+  /**
+   * Delete a session by its ID.
+   * Removes the session entry from the index and deletes the associated messages file.
+   * Returns true if the session was found and deleted, false otherwise.
+   */
+  deleteSession(sessionId: string): boolean {
+    const index = this.loadSessionsIndex();
+    const entryIndex = index.entries.findIndex((entry) => entry.id === sessionId);
+    if (entryIndex === -1) {
+      return false;
+    }
+
+    // Remove from index
+    index.entries.splice(entryIndex, 1);
+    this.saveSessionsIndex(index);
+
+    // Remove messages file
+    this.removeSessionMessages([sessionId]);
+
+    return true;
+  }
+
   listSessionMessages(sessionId: string): SessionMessage[] {
     const messagePath = this.getSessionMessagesPath(sessionId);
     if (!fs.existsSync(messagePath)) {

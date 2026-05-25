@@ -2178,6 +2178,135 @@ test("SessionManager adjusts the active Bash timeout control and session metadat
   assert.equal(processInfo?.deadlineAt, new Date(timeoutInfo.deadlineAtMs).toISOString());
 });
 
+test("SessionManager.deleteSession removes session entry from the index", () => {
+  const workspace = createTempDir("deepcode-delete-workspace-");
+  const home = createTempDir("deepcode-delete-home-");
+  setHomeDir(home);
+
+  const manager = createSessionManager(workspace, "machine-id-delete");
+  (manager as any).activateSession = async () => {};
+
+  // Create two sessions
+  const session1 = createSessionAndMessages(manager, "session-delete-1", "First session");
+  const session2 = createSessionAndMessages(manager, "session-delete-2", "Second session");
+
+  assert.equal(manager.listSessions().length, 2);
+
+  // Delete the first session
+  const result = manager.deleteSession(session1);
+  assert.equal(result, true);
+
+  const remaining = manager.listSessions();
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0]?.id, session2);
+});
+
+test("SessionManager.deleteSession removes the messages file", () => {
+  const workspace = createTempDir("deepcode-delete-msg-workspace-");
+  const home = createTempDir("deepcode-delete-msg-home-");
+  setHomeDir(home);
+
+  const manager = createSessionManager(workspace, "machine-id-delete-msg");
+  (manager as any).activateSession = async () => {};
+
+  const sessionId = createSessionAndMessages(manager, "session-delete-msg", "Test session");
+  const messagePath = path.join(
+    home,
+    ".deepcode",
+    "projects",
+    workspace.replace(/[\\\\/]/g, "-").replace(/:/g, ""),
+    `${sessionId}.jsonl`
+  );
+
+  // Verify messages file exists
+  assert.ok(fs.existsSync(messagePath));
+
+  manager.deleteSession(sessionId);
+
+  // Verify messages file is removed
+  assert.equal(fs.existsSync(messagePath), false);
+});
+
+test("SessionManager.deleteSession returns false when session does not exist", () => {
+  const workspace = createTempDir("deepcode-delete-nonexist-workspace-");
+  const home = createTempDir("deepcode-delete-nonexist-home-");
+  setHomeDir(home);
+
+  const manager = createSessionManager(workspace, "machine-id-delete-nonexist");
+
+  const result = manager.deleteSession("nonexistent-session-id");
+  assert.equal(result, false);
+  assert.equal(manager.listSessions().length, 0);
+});
+
+test("SessionManager.deleteSession does not affect other sessions", () => {
+  const workspace = createTempDir("deepcode-delete-others-workspace-");
+  const home = createTempDir("deepcode-delete-others-home-");
+  setHomeDir(home);
+
+  const manager = createSessionManager(workspace, "machine-id-delete-others");
+  (manager as any).activateSession = async () => {};
+
+  const session1 = createSessionAndMessages(manager, "session-keep-1", "Keep session 1");
+  const session2 = createSessionAndMessages(manager, "session-keep-2", "Keep session 2");
+
+  // Delete non-existent session
+  const result = manager.deleteSession("non-existent");
+  assert.equal(result, false);
+  assert.equal(manager.listSessions().length, 2);
+
+  // Delete one session
+  assert.equal(manager.deleteSession(session1), true);
+  assert.equal(manager.listSessions().length, 1);
+  assert.equal(manager.listSessions()[0]?.id, session2);
+
+  // The remaining session should still have its messages accessible
+  const messages = manager.listSessionMessages(session2);
+  assert.ok(messages.length > 0);
+});
+
+/**
+ * Helper: creates a session and writes a few messages to it so we can test
+ * that deleteSession removes both the index entry and the messages file.
+ */
+function createSessionAndMessages(manager: SessionManager, sessionId: string, summary: string): string {
+  const now = new Date().toISOString();
+  const index = (manager as any).loadSessionsIndex();
+  index.entries.push({
+    id: sessionId,
+    summary,
+    assistantReply: null,
+    assistantThinking: null,
+    assistantRefusal: null,
+    toolCalls: null,
+    status: "completed",
+    failReason: null,
+    usage: null,
+    usagePerModel: null,
+    activeTokens: 0,
+    createTime: now,
+    updateTime: now,
+    processes: null,
+  });
+  (manager as any).saveSessionsIndex(index);
+
+  // Write a couple of message lines to the messages file
+  const projectDir = (manager as any).getProjectStorage().projectDir;
+  const messagePath = path.join(projectDir, `${sessionId}.jsonl`);
+  const msg = JSON.stringify({
+    id: "msg-1",
+    sessionId,
+    role: "user",
+    content: summary,
+    visible: true,
+    createTime: now,
+    updateTime: now,
+  });
+  fs.writeFileSync(messagePath, `${msg}\n`, "utf8");
+
+  return sessionId;
+}
+
 function hasGit(): boolean {
   try {
     execFileSync("git", ["--version"], { stdio: "ignore" });
