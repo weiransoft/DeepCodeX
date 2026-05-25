@@ -2,7 +2,6 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
-import { fileURLToPath } from "url";
 import matter from "gray-matter";
 import ejs from "ejs";
 import type { ChatCompletionContentPart, ChatCompletionMessageParam } from "openai/resources/chat/completions";
@@ -44,7 +43,15 @@ import {
   type UserToolPermission,
 } from "../common/permissions";
 
-import { getCompactPromptTokenThreshold, getTotalTokens } from "./utils";
+import {
+  accumulateUsage,
+  accumulateUsagePerModel,
+  getCompactPromptTokenThreshold,
+  getExtensionRoot,
+  getTotalTokens,
+  isUsageRecord,
+  summarizeCompletionOptions,
+} from "./utils";
 import {
   type BashTimeoutAdjustment,
   type LlmStreamProgress,
@@ -71,76 +78,6 @@ type ChatCompletionDebugOptions = {
   baseURL?: string;
   params?: Record<string, unknown>;
 };
-
-function isUsageRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function summarizeCompletionOptions(options?: Record<string, unknown>): Record<string, unknown> | undefined {
-  if (!options) {
-    return undefined;
-  }
-  return {
-    ...options,
-    signal: options.signal instanceof AbortSignal ? { aborted: options.signal.aborted } : options.signal,
-  };
-}
-
-function addUsageValue(current: unknown, next: unknown): unknown {
-  if (typeof next === "number") {
-    return (typeof current === "number" ? current : 0) + next;
-  }
-
-  if (isUsageRecord(next)) {
-    const currentRecord = isUsageRecord(current) ? current : {};
-    const result: Record<string, unknown> = { ...currentRecord };
-    for (const [key, value] of Object.entries(next)) {
-      result[key] = addUsageValue(currentRecord[key], value);
-    }
-    return result;
-  }
-
-  return next;
-}
-
-function accumulateUsage(current: ModelUsage | null, next: unknown | null | undefined): ModelUsage | null {
-  if (next == null) {
-    return current ?? null;
-  }
-  return addUsageValue(current, next) as ModelUsage;
-}
-
-function usageWithRequestCount(usage: ModelUsage): ModelUsage {
-  const totalReqs = typeof usage.total_reqs === "number" ? usage.total_reqs + 1 : 1;
-  return {
-    ...usage,
-    total_reqs: totalReqs,
-  };
-}
-
-function accumulateUsagePerModel(
-  current: Record<string, ModelUsage> | null | undefined,
-  model: string,
-  next: ModelUsage | null | undefined
-): Record<string, ModelUsage> | null {
-  if (next == null) {
-    return current ?? null;
-  }
-
-  const usagePerModel = { ...(current ?? {}) };
-  const modelName = model.trim() || "unknown";
-  usagePerModel[modelName] = accumulateUsage(usagePerModel[modelName] ?? null, usageWithRequestCount(next))!;
-  return usagePerModel;
-}
-
-function getExtensionRoot(): string {
-  if (typeof __dirname !== "undefined") {
-    return path.resolve(__dirname, "../..");
-  }
-
-  const currentFilePath = fileURLToPath(import.meta.url);
-  return path.resolve(path.dirname(currentFilePath), "../..");
-}
 
 export class SessionManager {
   private readonly projectRoot: string;

@@ -9,7 +9,7 @@ import {
   readTextFileWithMetadata,
   writeTextFile,
 } from "../common/file-utils";
-import { executeValidatedTool } from "../common/runtime/runtime";
+import { executeValidatedTool } from "../common/runtime/validate";
 import {
   getFileState,
   isAbsoluteFilePath,
