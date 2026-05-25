@@ -159,7 +159,8 @@ export type SessionStatus =
   | "waiting_for_user"
   | "completed"
   | "interrupted"
-  | "ask_permission";
+  | "ask_permission"
+  | "permission_denied";
 
 export type ModelUsage = {
   prompt_tokens: number;
@@ -1532,6 +1533,20 @@ ${skillMd}
     return !this.sessionControllers.has(sessionId);
   }
 
+  /**
+   * Mark a session's permission as denied by the user.
+   * Updates the session entry status and failReason so the denial is visible in the session list.
+   */
+  denySessionPermission(sessionId: string, reason?: string): void {
+    const now = new Date().toISOString();
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: "permission_denied",
+      failReason: reason ?? "Permission denied by user",
+      updateTime: now,
+    }));
+  }
+
   adjustActiveBashTimeout(deltaMs: number): BashTimeoutAdjustment | null {
     const sessionId = this.activeSessionId;
     if (!sessionId || !Number.isFinite(deltaMs)) {
@@ -2715,7 +2730,8 @@ ${skillMd}
       status === "waiting_for_user" ||
       status === "completed" ||
       status === "interrupted" ||
-      status === "ask_permission"
+      status === "ask_permission" ||
+      status === "permission_denied"
     ) {
       return status;
     }
