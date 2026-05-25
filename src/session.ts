@@ -27,11 +27,11 @@ import {
 } from "./tools/executor";
 import { McpManager } from "./mcp/mcp-manager";
 import type { McpServerConfig, PermissionSettings } from "./settings";
-import { logApiError } from "./common/error-logger";
-import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./common/debug-logger";
-import { killProcessTree } from "./common/process-tree";
-import { GitFileHistory } from "./common/file-history";
-import { getSnippet } from "./common/state";
+import { logApiError } from "./common/logging/error-logger";
+import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./common/logging/debug-logger";
+import { killProcessTree } from "./common/system/process-tree";
+import { GitFileHistory } from "./common/runtime/file-history";
+import { getSnippet } from "./common/runtime/state";
 import {
   appendProjectPermissionAllows,
   buildPermissionToolExecution,
@@ -44,10 +44,9 @@ import {
   type UserToolPermission,
 } from "./common/permissions";
 
+import { getCompactPromptTokenThreshold, getTotalTokens } from "./session/utils";
 import {
   type BashTimeoutAdjustment,
-  getCompactPromptTokenThreshold,
-  getTotalTokens,
   type LlmStreamProgress,
   type MessageMeta,
   type ModelUsage,

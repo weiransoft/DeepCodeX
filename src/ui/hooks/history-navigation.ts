@@ -1,6 +1,6 @@
 import type React from "react";
 import { useCallback, useState } from "react";
-import type { PromptBufferState } from "../promptBuffer";
+import type { PromptBufferState } from "../core/promptBuffer";
 
 export type HistoryNavigationState = {
   historyCursor: number;

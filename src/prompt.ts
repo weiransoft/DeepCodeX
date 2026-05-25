@@ -5,7 +5,7 @@ import * as path from "path";
 import { fileURLToPath } from "url";
 import ejs from "ejs";
 import type { SessionMessage } from "./session-types";
-import { findGitBashPath, resolveShellPath } from "./common/shell-utils";
+import { findGitBashPath, resolveShellPath } from "./common/system/shell-utils";
 import { supportsMultimodal } from "./common/model-capabilities";
 
 const COMPACT_PROMPT_BASE = `Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.

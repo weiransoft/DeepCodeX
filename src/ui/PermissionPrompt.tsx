@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Box, Text } from "ink";
-import { useTerminalInput } from "./prompt";
+import { useTerminalInput } from "./hooks";
 import type { AskPermissionRequest, AskPermissionScope, UserToolPermission } from "../common/permissions";
 import type { PermissionScope } from "../settings";
 

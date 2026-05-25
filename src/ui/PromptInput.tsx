@@ -24,40 +24,40 @@ import {
   moveWordLeft,
   moveWordRight,
   moveUp,
-} from "./promptBuffer";
-import type { PromptBufferState } from "./promptBuffer";
+} from "./core/promptBuffer";
+import type { PromptBufferState } from "./core/promptBuffer";
 import {
   clearPromptUndoRedoState,
   createPromptUndoRedoState,
   recordPromptEdit,
   redoPromptEdit,
   undoPromptEdit,
-} from "./promptUndoRedo";
-import { buildSlashCommands, filterSlashCommands, findExactSlashCommand } from "./slashCommands";
-import type { SlashCommandItem } from "./slashCommands";
+} from "./core/promptUndoRedo";
+import { buildSlashCommands, filterSlashCommands, findExactSlashCommand } from "./core/slashCommands";
+import type { SlashCommandItem } from "./core/slashCommands";
 import {
   filterFileMentionItems,
   getCurrentFileMentionToken,
   replaceCurrentFileMentionToken,
   scanFileMentionItems,
-} from "./fileMentions";
-import type { FileMentionItem } from "./fileMentions";
-import { readClipboardImageAsync } from "./clipboard";
+} from "./core/fileMentions";
+import type { FileMentionItem } from "./core/fileMentions";
+import { readClipboardImageAsync } from "./core/clipboard";
 
 // Re-exported from prompt modules for backward compatibility
-export { useTerminalInput, parseTerminalInput, dispatchTerminalInput } from "./prompt";
-export type { InputKey } from "./prompt";
+export { useTerminalInput, parseTerminalInput, dispatchTerminalInput } from "./hooks";
+export type { InputKey } from "./hooks";
 
-import { useTerminalInput } from "./prompt";
-import type { InputKey } from "./prompt";
-import { usePasteHandling } from "./prompt/paste-handling";
-import { useHistoryNavigation } from "./prompt/history-navigation";
+import { useTerminalInput } from "./hooks";
+import type { InputKey } from "./hooks";
+import { usePasteHandling } from "./hooks/paste-handling";
+import { useHistoryNavigation } from "./hooks/history-navigation";
 import {
   useHiddenTerminalCursor,
   useTerminalExtendedKeys,
   useBracketedPaste,
   useTerminalFocusReporting,
-} from "./prompt";
+} from "./hooks";
 import SlashCommandMenu, { isSkillSelected } from "./SlashCommandMenu";
 import type { ModelConfigSelection, PermissionScope } from "../settings";
 import { FileMentionMenu, ModelsDropdown, RawModelDropdown, SkillsDropdown } from "./components";

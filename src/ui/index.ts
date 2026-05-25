@@ -4,18 +4,9 @@ import {
   MODEL_COMMAND_THINKING_OPTIONS,
 } from "./components/ModelsDropdown";
 
-export {
-  readSettings,
-  readProjectSettings,
-  writeSettings,
-  writeProjectSettings,
-  writeModelConfigSelection,
-  resolveCurrentSettings,
-  DEFAULT_MODEL,
-  DEFAULT_BASE_URL,
-} from "../settings";
+export { getThinkingOptionIndex, MODEL_COMMAND_MODELS, MODEL_COMMAND_THINKING_OPTIONS };
 export { buildPromptDraftFromSessionMessage } from "./utils";
-export { createOpenAIClient } from "../common/openai-client";
+export { disableTerminalExtendedKeys, enableTerminalExtendedKeys, getPromptCursorPlacement } from "./hooks/cursor";
 export { default as AppContainer } from "./AppContainer";
 export { AskUserQuestionPrompt } from "./AskUserQuestionPrompt";
 export { MessageView } from "./components";
@@ -39,8 +30,6 @@ export {
   type PromptDraft,
   type InputKey,
 } from "./PromptInput";
-export { getThinkingOptionIndex, MODEL_COMMAND_MODELS, MODEL_COMMAND_THINKING_OPTIONS };
-export { disableTerminalExtendedKeys, enableTerminalExtendedKeys, getPromptCursorPlacement } from "./prompt/cursor";
 export { SessionList, formatSessionTitle, filterSessions, formatSessionStatus } from "./SessionList";
 export { ThemedGradient } from "./ThemedGradient";
 export { UpdatePrompt, type UpdatePromptChoice } from "./UpdatePrompt";
@@ -53,9 +42,9 @@ export {
   type AskUserQuestionItem,
   type PendingAskUserQuestion,
   type AskUserQuestionAnswers,
-} from "./askUserQuestion";
-export { readClipboardImage, type ClipboardImage } from "./clipboard";
-export { buildLoadingText, type LoadingTextInput } from "./loadingText";
+} from "./core/askUserQuestion";
+export { readClipboardImage, type ClipboardImage } from "./core/clipboard";
+export { buildLoadingText, type LoadingTextInput } from "./core/loadingText";
 export { renderMarkdown, renderMarkdownSegments, type MarkdownSegment } from "./components/MessageView/markdown";
 export {
   EMPTY_BUFFER,
@@ -77,7 +66,7 @@ export {
   isEmpty,
   getCurrentSlashToken,
   type PromptBufferState,
-} from "./promptBuffer";
+} from "./core/promptBuffer";
 export {
   BUILTIN_SLASH_COMMANDS,
   buildSlashCommands,
@@ -87,7 +76,7 @@ export {
   formatSlashCommandLabel,
   type SlashCommandKind,
   type SlashCommandItem,
-} from "./slashCommands";
+} from "./core/slashCommands";
 export {
   filterFileMentionItems,
   formatFileMentionPath,
@@ -96,6 +85,6 @@ export {
   scanFileMentionItems,
   type FileMentionItem,
   type FileMentionToken,
-} from "./fileMentions";
-export { findExpandedThinkingId, isCollapsedThinking } from "./thinkingState";
+} from "./core/fileMentions";
+export { findExpandedThinkingId, isCollapsedThinking } from "./core/thinkingState";
 export { buildExitSummaryText } from "./exitSummary";

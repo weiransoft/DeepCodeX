@@ -7,8 +7,8 @@ import {
   resolveWindowsGitBashPath,
   rewriteWindowsNullRedirect,
   windowsPathToPosixPath,
-} from "../common/shell-utils";
-import { isAbsoluteFilePath, normalizeFilePath } from "../common/state";
+} from "../common/system/shell-utils";
+import { isAbsoluteFilePath, normalizeFilePath } from "../common/runtime/state";
 
 test("Windows paths convert to Git Bash POSIX paths", () => {
   assert.equal(windowsPathToPosixPath("C:\\Users\\foo"), "/c/Users/foo");

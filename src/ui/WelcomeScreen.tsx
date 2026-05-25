@@ -4,7 +4,7 @@ import * as os from "node:os";
 import path from "node:path";
 import type { SkillInfo } from "../session-types";
 import type { ResolvedDeepcodingSettings } from "../settings";
-import { buildSlashCommands, BUILTIN_SLASH_COMMANDS, formatSlashCommandDescription } from "./slashCommands";
+import { buildSlashCommands, BUILTIN_SLASH_COMMANDS, formatSlashCommandDescription } from "./core/slashCommands";
 import { ThemedGradient } from "./ThemedGradient";
 import { AsciiLogo } from "./AsciiArt";
 import { useAppContext } from "./contexts";

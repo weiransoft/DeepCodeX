@@ -3,7 +3,7 @@ import * as path from "path";
 import ignore from "ignore";
 import type { ToolExecutionContext, ToolExecutionFollowUpMessage, ToolExecutionResult } from "./executor";
 import { readTextFileWithMetadata } from "../common/file-utils";
-import { createSnippet, isAbsoluteFilePath, markFileRead, normalizeFilePath } from "../common/state";
+import { createSnippet, isAbsoluteFilePath, markFileRead, normalizeFilePath } from "../common/runtime/state";
 
 const DEFAULT_LINE_LIMIT = 2000;
 const MAX_LINE_LENGTH = 2000;

@@ -1,7 +1,7 @@
 import type React from "react";
 import { useRef, useState } from "react";
-import type { PromptBufferState } from "../promptBuffer";
-import { cleanPasteContent, findPasteMarkerContaining, hasActivePasteMarkers, insertText } from "../promptBuffer";
+import type { PromptBufferState } from "../core/promptBuffer";
+import { cleanPasteContent, findPasteMarkerContaining, hasActivePasteMarkers, insertText } from "../core/promptBuffer";
 
 export type PasteRegion = {
   start: number;

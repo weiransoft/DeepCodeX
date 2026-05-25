@@ -10,7 +10,7 @@ import {
   replaceCurrentFileMentionToken,
   scanFileMentionItems,
   type FileMentionItem,
-} from "../ui/fileMentions";
+} from "../ui/core/fileMentions";
 
 test("getCurrentFileMentionToken detects bare @file tokens under the cursor", () => {
   assert.deepEqual(getCurrentFileMentionToken({ text: "review @src/app.ts please", cursor: 10 }), {

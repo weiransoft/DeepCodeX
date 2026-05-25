@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Box, Text } from "ink";
-import type { AskUserQuestionAnswers, AskUserQuestionItem } from "./askUserQuestion";
-import { useTerminalInput } from "./prompt";
+import type { AskUserQuestionAnswers, AskUserQuestionItem } from "./core/askUserQuestion";
+import { useTerminalInput } from "./hooks";
 
 type Props = {
   questions: AskUserQuestionItem[];

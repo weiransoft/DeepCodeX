@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { killProcessTree, runWindowsTaskkill } from "../common/process-tree";
+import { killProcessTree, runWindowsTaskkill } from "../common/system/process-tree";
 
 test("runWindowsTaskkill invokes taskkill for the full process tree", () => {
   const calls: Array<{ command: string; args: string[]; options: { stdio: "ignore"; windowsHide: true } }> = [];

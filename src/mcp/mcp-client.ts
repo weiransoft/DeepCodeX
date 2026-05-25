@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "child_process";
 import { createInterface, type Interface } from "readline";
 import * as path from "path";
-import { killProcessTree } from "../common/process-tree";
+import { killProcessTree } from "../common/system/process-tree";
 
 type JsonRpcRequest = {
   jsonrpc: "2.0";

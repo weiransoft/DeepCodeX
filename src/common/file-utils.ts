@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import type { FileState, FileLineEnding } from "./state";
+import type { FileState, FileLineEnding } from "./runtime/state";
 
 export type FileReadMetadata = {
   content: string;

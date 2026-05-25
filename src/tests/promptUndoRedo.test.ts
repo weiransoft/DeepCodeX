@@ -8,7 +8,7 @@ import {
   recordPromptEdit,
   redoPromptEdit,
   undoPromptEdit,
-} from "../ui/promptUndoRedo";
+} from "../ui/core/promptUndoRedo";
 
 test("prompt undo and redo restore edited buffer states", () => {
   const history = createPromptUndoRedoState();

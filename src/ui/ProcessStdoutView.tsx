@@ -1,13 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text } from "ink";
-import { BASH_TIMEOUT_DECREMENT_MS, BASH_TIMEOUT_INCREMENT_MS } from "../common/bash-timeout";
+import { BASH_TIMEOUT_DECREMENT_MS, BASH_TIMEOUT_INCREMENT_MS } from "../common/system/bash-timeout";
 import type { BashTimeoutAdjustment, SessionEntry, SessionProcessEntry } from "../session-types";
-import { useTerminalInput } from "./prompt";
+import { useTerminalInput } from "./hooks";
 
 type RunningProcesses = SessionEntry["processes"];
 
 type ProcessStdoutViewProps = {
-  processStdoutRef: React.MutableRefObject<Map<number, string>>;
+  processStdoutRef: React.RefObject<Map<number, string>>;
   runningProcesses: RunningProcesses;
   onDismiss: () => void;
   onAdjustTimeout: (deltaMs: number) => BashTimeoutAdjustment | null;

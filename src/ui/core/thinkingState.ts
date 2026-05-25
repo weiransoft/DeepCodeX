@@ -1,4 +1,4 @@
-import type { SessionMessage } from "../session-types";
+import type { SessionMessage } from "../../session-types";
 
 /**
  * Returns the message id of the assistant "thinking" message that should stay

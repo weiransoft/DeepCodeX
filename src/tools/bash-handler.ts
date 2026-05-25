@@ -1,6 +1,6 @@
 import { spawn } from "child_process";
-import { DEFAULT_BASH_TIMEOUT_MS, clampBashTimeoutMs } from "../common/bash-timeout";
-import { killProcessTree } from "../common/process-tree";
+import { DEFAULT_BASH_TIMEOUT_MS, clampBashTimeoutMs } from "../common/system/bash-timeout";
+import { killProcessTree } from "../common/system/process-tree";
 import type { ProcessTimeoutControl, ProcessTimeoutInfo, ToolExecutionContext, ToolExecutionResult } from "./executor";
 import {
   buildDisableExtglobCommand,
@@ -9,7 +9,7 @@ import {
   resolveShellPath,
   rewriteWindowsNullRedirect,
   toNativeCwd,
-} from "../common/shell-utils";
+} from "../common/system/shell-utils";
 
 const MAX_OUTPUT_CHARS = 30000;
 const MAX_CAPTURE_CHARS = 10 * 1024 * 1024;
