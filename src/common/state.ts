@@ -22,11 +22,13 @@ export type FileSnippet = {
   endLine: number;
   preview: string;
   fileVersion: number;
+  scopeType: "snippet" | "full";
 };
 
 const fileStatesBySession = new Map<string, Map<string, FileState>>();
 const snippetsBySession = new Map<string, Map<string, FileSnippet>>();
 const snippetCountersBySession = new Map<string, number>();
+const fullFileSnippetCountersBySession = new Map<string, number>();
 const fileVersionsBySession = new Map<string, Map<string, number>>();
 
 export function normalizeFilePath(filePath: string, platform: NodeJS.Platform = process.platform): string {
@@ -148,20 +150,44 @@ export function createSnippet(
   endLine: number,
   preview: string
 ): FileSnippet | null {
+  const nextCounter = (snippetCountersBySession.get(sessionId) ?? 0) + 1;
+  snippetCountersBySession.set(sessionId, nextCounter);
+  return createSnippetWithId(sessionId, filePath, startLine, endLine, preview, `snippet_${nextCounter}`, "snippet");
+}
+
+export function createFullFileSnippet(
+  sessionId: string,
+  filePath: string,
+  startLine: number,
+  endLine: number,
+  preview: string
+): FileSnippet | null {
+  const nextCounter = fullFileSnippetCountersBySession.get(sessionId) ?? 0;
+  fullFileSnippetCountersBySession.set(sessionId, nextCounter + 1);
+  return createSnippetWithId(sessionId, filePath, startLine, endLine, preview, `full_file_${nextCounter}`, "full");
+}
+
+function createSnippetWithId(
+  sessionId: string,
+  filePath: string,
+  startLine: number,
+  endLine: number,
+  preview: string,
+  id: string,
+  scopeType: FileSnippet["scopeType"]
+): FileSnippet | null {
   if (!sessionId || !filePath || startLine < 1 || endLine < startLine) {
     return null;
   }
 
-  const nextCounter = (snippetCountersBySession.get(sessionId) ?? 0) + 1;
-  snippetCountersBySession.set(sessionId, nextCounter);
-
   const snippet: FileSnippet = {
-    id: `snippet_${nextCounter}`,
+    id,
     filePath: normalizeFilePath(filePath),
     startLine,
     endLine,
     preview,
     fileVersion: getFileVersion(sessionId, filePath),
+    scopeType,
   };
 
   let snippets = snippetsBySession.get(sessionId);
