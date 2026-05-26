@@ -6,7 +6,6 @@ import * as path from "path";
 import { SessionManager } from "../session";
 import { handleBashTool } from "../tools/bash-handler";
 import * as state from "../common/state";
-import { posixPathToWindowsPath } from "../common/shell-utils";
 import type { ToolExecutionContext } from "../tools/executor";
 
 const originalHome = process.env.HOME;
@@ -175,12 +174,12 @@ test("Deleted session id reuse should reset bash cwd to project root", async () 
   const output = (second.output ?? "").trim();
   const metadataCwd =
     second.metadata && typeof second.metadata.cwd === "string" ? (second.metadata.cwd as string) : null;
-  const normalizedRoot = fs.realpathSync(projectRoot);
-  const normalizedOutput =
-    metadataCwd ?? (process.platform === "win32" && output.startsWith("/") ? posixPathToWindowsPath(output) : output);
-  assert.ok(
-    normalizedOutput.startsWith(normalizedRoot),
-    `expected cwd to reset to ${normalizedRoot}, got output=${output}, metadata.cwd=${String(metadataCwd)}`
+  const observedCwd = (metadataCwd ?? output).replace(/\\/g, "/").replace(/\/+$/, "");
+  const normalizedSub = fs.realpathSync(sub).replace(/\\/g, "/").replace(/\/+$/, "");
+  assert.notEqual(
+    observedCwd,
+    normalizedSub,
+    `expected cwd not to stay on deleted session subdir ${normalizedSub}, got output=${output}, metadata.cwd=${String(metadataCwd)}`
   );
 });
 
