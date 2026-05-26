@@ -1607,6 +1607,13 @@ ${skillMd}
     return index.entries.find((entry) => entry.id === sessionId) ?? null;
   }
 
+  /**
+   * Delete a session by its ID.
+   * Removes the session entry from the index and cleans up associated resources
+   * such as message files, in-memory state caches, working directory state,
+   * session controllers, and tracked process timeout controls.
+   * Returns true if the session was found and deleted, false otherwise.
+   */
   deleteSession(sessionId: string): boolean {
     const index = this.loadSessionsIndex();
     const targetEntry = index.entries.find((entry) => entry.id === sessionId) ?? null;
