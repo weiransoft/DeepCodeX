@@ -173,10 +173,15 @@ test("Deleted session id reuse should reset bash cwd to project root", async () 
   assert.equal(second.ok, true);
 
   const output = (second.output ?? "").trim();
+  const metadataCwd =
+    second.metadata && typeof second.metadata.cwd === "string" ? (second.metadata.cwd as string) : null;
   const normalizedRoot = fs.realpathSync(projectRoot);
   const normalizedOutput =
-    process.platform === "win32" && output.startsWith("/") ? posixPathToWindowsPath(output) : output;
-  assert.ok(normalizedOutput.startsWith(normalizedRoot), `expected cwd to reset to ${normalizedRoot}, got ${output}`);
+    metadataCwd ?? (process.platform === "win32" && output.startsWith("/") ? posixPathToWindowsPath(output) : output);
+  assert.ok(
+    normalizedOutput.startsWith(normalizedRoot),
+    `expected cwd to reset to ${normalizedRoot}, got output=${output}, metadata.cwd=${String(metadataCwd)}`
+  );
 });
 
 test("deleteSession should not kill untracked stale persisted pids", async () => {
