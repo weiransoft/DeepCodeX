@@ -6,6 +6,7 @@ import * as path from "path";
 import { SessionManager } from "../session";
 import { handleBashTool } from "../tools/bash-handler";
 import * as state from "../common/state";
+import { posixPathToWindowsPath } from "../common/shell-utils";
 import type { ToolExecutionContext } from "../tools/executor";
 
 const originalHome = process.env.HOME;
@@ -173,7 +174,9 @@ test("Deleted session id reuse should reset bash cwd to project root", async () 
 
   const output = (second.output ?? "").trim();
   const normalizedRoot = fs.realpathSync(projectRoot);
-  assert.ok(output.startsWith(normalizedRoot), `expected cwd to reset to ${normalizedRoot}, got ${output}`);
+  const normalizedOutput =
+    process.platform === "win32" && output.startsWith("/") ? posixPathToWindowsPath(output) : output;
+  assert.ok(normalizedOutput.startsWith(normalizedRoot), `expected cwd to reset to ${normalizedRoot}, got ${output}`);
 });
 
 test("deleteSession should not kill untracked stale persisted pids", async () => {
