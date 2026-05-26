@@ -8,7 +8,7 @@ import {
   readTextFileWithMetadata,
   writeTextFile,
 } from "../common/file-utils";
-import { executeValidatedTool, semanticBoolean } from "../common/runtime/validate";
+import { executeValidatedTool, semanticBoolean } from "../common/validate";
 import {
   createSnippet,
   getFileState,
@@ -18,7 +18,7 @@ import {
   isFullFileView,
   normalizeFilePath,
   recordFileState,
-} from "../common/runtime/state";
+} from "../common/state";
 
 const MAX_CANDIDATE_COUNT = 5;
 const REPLACE_ALL_MATCH_THRESHOLD = 5;

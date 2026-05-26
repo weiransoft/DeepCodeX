@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import type { DeepcodingSettings, PermissionScope, PermissionSettings } from "../settings";
-import { isAbsoluteFilePath, normalizeFilePath } from "./runtime/state";
+import { isAbsoluteFilePath, normalizeFilePath } from "./state";
 
 export type BashPermissionScope = Exclude<PermissionScope, "mcp"> | "unknown";
 

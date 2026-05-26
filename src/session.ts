@@ -247,11 +247,11 @@ import {
 } from "./tools/executor";
 import { McpManager } from "./mcp/mcp-manager";
 
-import { logApiError } from "./common/logging/error-logger";
-import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./common/logging/debug-logger";
-import { killProcessTree } from "./common/system/process-tree";
-import { GitFileHistory } from "./common/runtime/file-history";
-import { getSnippet } from "./common/runtime/state";
+import { logApiError } from "./common/error-logger";
+import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./common/debug-logger";
+import { killProcessTree } from "./common/process-tree";
+import { GitFileHistory } from "./common/file-history";
+import { getSnippet } from "./common/state";
 import {
   appendProjectPermissionAllows,
   buildPermissionToolExecution,

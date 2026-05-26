@@ -1,5 +1,5 @@
 import * as path from "path";
-import { posixPathToWindowsPath } from "../system/shell-utils";
+import { posixPathToWindowsPath } from "./shell-utils";
 
 export type FileLineEnding = "LF" | "CRLF";
 

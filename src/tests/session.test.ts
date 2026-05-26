@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { GitFileHistory } from "../common/runtime/file-history";
+import { GitFileHistory } from "../common/file-history";
 import { type SessionMessage } from "../session";
 import { SessionManager } from "../session";
 
