@@ -8,8 +8,8 @@ import { type PromptDraft, PromptInput, type PromptSubmission } from "./PromptIn
 import { MessageView, RawModeExitPrompt } from "../components";
 import { SessionList } from "./SessionList";
 import { type UndoRestoreMode, UndoSelector } from "./UndoSelector";
-import { buildLoadingText } from "../core/loadingText";
-import { findExpandedThinkingId } from "../core/thinkingState";
+import { buildLoadingText } from "../core/loading-text";
+import { findExpandedThinkingId } from "../core/thinking-state";
 import { WelcomeScreen } from "./WelcomeScreen";
 import { AskUserQuestionPrompt } from "./AskUserQuestionPrompt";
 import { McpStatusList } from "./McpStatusList";
@@ -18,9 +18,9 @@ import {
   type AskUserQuestionAnswers,
   findPendingAskUserQuestion,
   formatAskUserQuestionAnswers,
-} from "../core/askUserQuestion";
+} from "../core/ask-user-question";
 import { PermissionPrompt, type PermissionPromptResult } from "./PermissionPrompt";
-import { buildExitSummaryText } from "../exitSummary";
+import { buildExitSummaryText } from "../exit-summary";
 import { RawMode, useRawModeContext } from "../contexts";
 import { renderMessageToStdout } from "../components/MessageView/utils";
 import {
@@ -32,7 +32,7 @@ import {
   renderRawModeMessages,
 } from "../utils";
 import { resolveCurrentSettings, writeModelConfigSelection } from "../../settings";
-import { isCollapsedThinking } from "../core/thinkingState";
+import { isCollapsedThinking } from "../core/thinking-state";
 import { ANSI_CLEAR_SCREEN } from "../constants";
 import type {
   LlmStreamProgress,

@@ -38,9 +38,9 @@ export {
   type AskUserQuestionItem,
   type PendingAskUserQuestion,
   type AskUserQuestionAnswers,
-} from "./core/askUserQuestion";
+} from "./core/ask-user-question";
 export { readClipboardImage, type ClipboardImage } from "./core/clipboard";
-export { buildLoadingText, type LoadingTextInput } from "./core/loadingText";
+export { buildLoadingText, type LoadingTextInput } from "./core/loading-text";
 export { renderMarkdown, renderMarkdownSegments, type MarkdownSegment } from "./components/MessageView/markdown";
 export {
   EMPTY_BUFFER,
@@ -62,7 +62,7 @@ export {
   isEmpty,
   getCurrentSlashToken,
   type PromptBufferState,
-} from "./core/promptBuffer";
+} from "./core/prompt-buffer";
 export {
   BUILTIN_SLASH_COMMANDS,
   buildSlashCommands,
@@ -72,7 +72,7 @@ export {
   formatSlashCommandLabel,
   type SlashCommandKind,
   type SlashCommandItem,
-} from "./core/slashCommands";
+} from "./core/slash-commands";
 export {
   filterFileMentionItems,
   formatFileMentionPath,
@@ -81,6 +81,6 @@ export {
   scanFileMentionItems,
   type FileMentionItem,
   type FileMentionToken,
-} from "./core/fileMentions";
-export { findExpandedThinkingId, isCollapsedThinking } from "./core/thinkingState";
-export { buildExitSummaryText } from "./exitSummary";
+} from "./core/file-mentions";
+export { findExpandedThinkingId, isCollapsedThinking } from "./core/thinking-state";
+export { buildExitSummaryText } from "./exit-summary";

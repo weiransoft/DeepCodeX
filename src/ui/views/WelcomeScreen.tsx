@@ -4,9 +4,9 @@ import * as os from "node:os";
 import path from "node:path";
 import type { SkillInfo } from "../../session/types";
 import type { ResolvedDeepcodingSettings } from "../../settings";
-import { buildSlashCommands, BUILTIN_SLASH_COMMANDS, formatSlashCommandDescription } from "../core/slashCommands";
+import { buildSlashCommands, BUILTIN_SLASH_COMMANDS, formatSlashCommandDescription } from "../core/slash-commands";
 import { ThemedGradient } from "./ThemedGradient";
-import { AsciiLogo } from "../AsciiArt";
+import { AsciiLogo } from "../ascii-art";
 import { useAppContext } from "../contexts";
 
 type WelcomeScreenProps = {

@@ -1,5 +1,5 @@
-import { formatSlashCommandDescription, formatSlashCommandLabel } from "../core/slashCommands";
-import type { SlashCommandItem } from "../core/slashCommands";
+import { formatSlashCommandDescription, formatSlashCommandLabel } from "../core/slash-commands";
+import type { SlashCommandItem } from "../core/slash-commands";
 import { ARGS_SEPARATOR } from "../constants";
 import React from "react";
 import { Box, Text } from "ink";

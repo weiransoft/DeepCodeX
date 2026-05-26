@@ -24,24 +24,24 @@ import {
   moveWordLeft,
   moveWordRight,
   moveUp,
-} from "../core/promptBuffer";
-import type { PromptBufferState } from "../core/promptBuffer";
+} from "../core/prompt-buffer";
+import type { PromptBufferState } from "../core/prompt-buffer";
 import {
   clearPromptUndoRedoState,
   createPromptUndoRedoState,
   recordPromptEdit,
   redoPromptEdit,
   undoPromptEdit,
-} from "../core/promptUndoRedo";
-import { buildSlashCommands, filterSlashCommands, findExactSlashCommand } from "../core/slashCommands";
-import type { SlashCommandItem } from "../core/slashCommands";
+} from "../core/prompt-undo-redo";
+import { buildSlashCommands, filterSlashCommands, findExactSlashCommand } from "../core/slash-commands";
+import type { SlashCommandItem } from "../core/slash-commands";
 import {
   filterFileMentionItems,
   getCurrentFileMentionToken,
   replaceCurrentFileMentionToken,
   scanFileMentionItems,
-} from "../core/fileMentions";
-import type { FileMentionItem } from "../core/fileMentions";
+} from "../core/file-mentions";
+import type { FileMentionItem } from "../core/file-mentions";
 import { readClipboardImageAsync } from "../core/clipboard";
 import { useTerminalInput, usePasteHandling, useHistoryNavigation } from "../hooks";
 import type { InputKey } from "../hooks";
