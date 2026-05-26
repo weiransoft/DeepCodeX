@@ -9,3 +9,9 @@ export {
   useTerminalFocusReporting,
   getPromptCursorPlacement,
 } from "./cursor";
+
+export { usePasteHandling } from "./usePasteHandling";
+export type { PasteRegion, PasteHandlingState, PasteHandlingActions } from "./usePasteHandling";
+
+export { useHistoryNavigation } from "./useHistoryNavigation";
+export type { HistoryNavigationState, HistoryNavigationActions } from "./useHistoryNavigation";

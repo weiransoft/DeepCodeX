@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import ignore from "ignore";
-import type { PromptBufferState } from "./promptBuffer";
+import type { PromptBufferState } from "./prompt-buffer";
 
 export type FileMentionItem = {
   path: string;

@@ -64,7 +64,7 @@ const DropdownMenu = React.memo(function DropdownMenu({
   maxVisible = 8,
   width,
   title,
-  titleColor = "magenta",
+  titleColor = "#229ac3",
   activeColor = "cyanBright",
   helpText,
   emptyText = "No items found",

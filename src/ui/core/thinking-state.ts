@@ -1,4 +1,4 @@
-import type { SessionMessage } from "../session";
+import type { SessionMessage } from "../../session";
 
 /**
  * Returns the message id of the assistant "thinking" message that should stay
@@ -20,4 +20,19 @@ export function findExpandedThinkingId(messages: SessionMessage[]): string | nul
     }
   }
   return expanded;
+}
+
+/**
+ * Returns whether a message's thinking block should be rendered collapsed.
+ * A thinking message is collapsed when its id does not match the currently
+ * expanded thinking id.
+ */
+export function isCollapsedThinking(message: SessionMessage, expandedId: string | null): boolean {
+  if (message.role !== "assistant") {
+    return false;
+  }
+  if (!message.meta?.asThinking) {
+    return false;
+  }
+  return message.id !== expandedId;
 }

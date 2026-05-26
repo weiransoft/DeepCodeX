@@ -2,7 +2,6 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
-import { fileURLToPath } from "url";
 import matter from "gray-matter";
 import ejs from "ejs";
 import type { ChatCompletionMessageParam, ChatCompletionContentPart } from "openai/resources/chat/completions";
@@ -12,6 +11,7 @@ import { DEEPSEEK_V4_MODELS, supportsMultimodal } from "./common/model-capabilit
 import {
   getCompactPrompt,
   getDefaultSkillPrompt,
+  getExtensionRoot,
   getRuntimeContext,
   getSystemPrompt,
   getTools,
@@ -133,15 +133,6 @@ function accumulateUsagePerModel(
   const modelName = model.trim() || "unknown";
   usagePerModel[modelName] = accumulateUsage(usagePerModel[modelName] ?? null, usageWithRequestCount(next))!;
   return usagePerModel;
-}
-
-function getExtensionRoot(): string {
-  if (typeof __dirname !== "undefined") {
-    return path.resolve(__dirname, "..");
-  }
-
-  const currentFilePath = fileURLToPath(import.meta.url);
-  return path.resolve(path.dirname(currentFilePath), "..");
 }
 
 function getTotalTokens(usage: ModelUsage | null | undefined): number {

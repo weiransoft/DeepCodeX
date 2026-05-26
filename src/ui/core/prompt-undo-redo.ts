@@ -1,4 +1,4 @@
-import type { PromptBufferState } from "./promptBuffer";
+import type { PromptBufferState } from "./prompt-buffer";
 
 export type PromptUndoRedoState = {
   undoStack: PromptBufferState[];

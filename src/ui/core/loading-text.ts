@@ -1,4 +1,4 @@
-import type { LlmStreamProgress, SessionEntry } from "../session";
+import type { LlmStreamProgress, SessionEntry } from "../../session";
 
 type RunningProcesses = SessionEntry["processes"];
 

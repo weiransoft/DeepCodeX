@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { getScopeRiskColor } from "../ui/PermissionPrompt";
+import { getScopeRiskColor } from "../ui/views/PermissionPrompt";
 
 test("getScopeRiskColor maps permission scopes by risk", () => {
   assert.equal(getScopeRiskColor("read-in-cwd"), "#22c55e");

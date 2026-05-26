@@ -14,13 +14,11 @@ import {
   getPromptCursorPlacement,
   getPromptReturnKeyAction,
   isClearImageAttachmentsShortcut,
-  parseTerminalInput,
   removeCurrentSlashToken,
   toggleSkillSelection,
   renderBufferWithCursor,
   buildInitPromptSubmission,
   buildPromptDraftFromSessionMessage,
-  dispatchTerminalInput,
   disableTerminalExtendedKeys,
   enableTerminalExtendedKeys,
   EMPTY_BUFFER,
@@ -28,6 +26,7 @@ import {
   backspace,
 } from "../ui";
 import type { SessionMessage, SkillInfo } from "../session";
+import { dispatchTerminalInput, parseTerminalInput } from "../ui/hooks";
 
 function collectDispatchedInput(data: string) {
   const events: ReturnType<typeof parseTerminalInput>[] = [];

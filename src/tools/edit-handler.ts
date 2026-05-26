@@ -8,7 +8,7 @@ import {
   readTextFileWithMetadata,
   writeTextFile,
 } from "../common/file-utils";
-import { executeValidatedTool, semanticBoolean } from "../common/runtime";
+import { executeValidatedTool, semanticBoolean } from "../common/validate";
 import {
   createSnippet,
   getFileState,
