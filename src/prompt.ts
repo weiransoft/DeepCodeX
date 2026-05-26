@@ -2,8 +2,8 @@ import { execFileSync, execSync } from "child_process";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { fileURLToPath } from "url";
 import ejs from "ejs";
+import { fileURLToPath } from "url";
 import type { SessionMessage } from "./session/types";
 import { findGitBashPath, resolveShellPath } from "./common/system/shell-utils";
 import { supportsMultimodal } from "./common/model-capabilities";
@@ -286,7 +286,7 @@ function getUnameInfo(): string {
   }
 }
 
-function getExtensionRoot(): string {
+export function getExtensionRoot(): string {
   // Prefer `__dirname` which is always available in the CJS bundle output.
   // Fall back to `import.meta.url` for ESM test environments (tsx --test).
   if (typeof __dirname !== "undefined") {

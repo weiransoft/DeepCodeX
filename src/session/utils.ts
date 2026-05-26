@@ -1,5 +1,3 @@
-import * as path from "path";
-import { fileURLToPath } from "url";
 import { DEEPSEEK_V4_MODELS } from "../common/model-capabilities";
 import type { ModelUsage } from "./types";
 
@@ -81,11 +79,4 @@ export function accumulateUsagePerModel(
   return usagePerModel;
 }
 
-export function getExtensionRoot(): string {
-  if (typeof __dirname !== "undefined") {
-    return path.resolve(__dirname, "../..");
-  }
-
-  const currentFilePath = fileURLToPath(import.meta.url);
-  return path.resolve(path.dirname(currentFilePath), "../..");
-}
+export { getExtensionRoot } from "../prompt";
