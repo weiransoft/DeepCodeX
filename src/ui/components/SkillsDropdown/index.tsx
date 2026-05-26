@@ -1,6 +1,6 @@
 import DropdownMenu from "../DropdownMenu";
 import React, { useEffect, useState } from "react";
-import type { SkillInfo } from "../../../session/types";
+import type { SkillInfo } from "../../../session";
 import { useInput } from "ink";
 import { isSkillSelected } from "../../views/SlashCommandMenu";
 

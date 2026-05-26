@@ -25,7 +25,7 @@ import {
   insertText,
   backspace,
 } from "../ui";
-import type { SessionMessage, SkillInfo } from "../session/types";
+import type { SessionMessage, SkillInfo } from "../session";
 import { dispatchTerminalInput, parseTerminalInput } from "../ui/hooks";
 
 function collectDispatchedInput(data: string) {

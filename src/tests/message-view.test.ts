@@ -8,7 +8,7 @@ import {
   parseToolPayload,
 } from "../ui/components/MessageView/utils";
 import { RawMode } from "../ui/contexts";
-import type { SessionMessage } from "../session/types";
+import type { SessionMessage } from "../session";
 import type { ToolSummary } from "../ui/components/MessageView/types";
 
 test("parseDiffPreview removes headers and classifies lines", () => {

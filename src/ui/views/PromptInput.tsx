@@ -54,7 +54,7 @@ import {
 import SlashCommandMenu, { isSkillSelected } from "./SlashCommandMenu";
 import type { ModelConfigSelection, PermissionScope } from "../../settings";
 import { FileMentionMenu, ModelsDropdown, RawModelDropdown, SkillsDropdown } from "../components";
-import type { SessionEntry, SkillInfo } from "../../session/types";
+import type { SessionEntry, SkillInfo } from "../../session";
 import type { UserToolPermission } from "../../common/permissions";
 
 export type PromptSubmission = {

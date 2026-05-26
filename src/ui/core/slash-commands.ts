@@ -1,4 +1,4 @@
-import type { SkillInfo } from "../../session/types";
+import type { SkillInfo } from "../../session";
 
 export type SlashCommandKind =
   | "skill"

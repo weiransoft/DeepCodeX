@@ -43,7 +43,7 @@ import type {
   SkillInfo,
   UndoTarget,
   UserPromptContent,
-} from "../../session/types";
+} from "../../session";
 import { SessionManager } from "../../session";
 
 type View = "chat" | "session-list" | "undo" | "mcp-status";

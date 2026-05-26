@@ -3,7 +3,7 @@ import type { SlashCommandItem } from "../core/slash-commands";
 import { ARGS_SEPARATOR } from "../constants";
 import React from "react";
 import { Box, Text } from "ink";
-import type { SkillInfo } from "../../session/types";
+import type { SkillInfo } from "../../session";
 
 type SlashCommandMenuProps = {
   items: SlashCommandItem[];
