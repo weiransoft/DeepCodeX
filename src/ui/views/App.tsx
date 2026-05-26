@@ -659,6 +659,7 @@ function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactEl
       if (!sessionId) {
         return;
       }
+      setPromptDraft(null);
       if (result.hasDeny) {
         setPendingPermissionReply({
           sessionId,
@@ -666,7 +667,6 @@ function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactEl
           alwaysAllows: result.alwaysAllows,
         });
         setStatusLine("Permission denied. Add a reply, then press Enter to continue.");
-        setPromptDraft(null);
         sessionManager.denySessionPermission(sessionId);
         return;
       }
@@ -753,7 +753,6 @@ function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactEl
           onCancel={() => {
             setPromptDraft(null);
             setView("chat");
-            setShowWelcome(true);
           }}
         />
       ) : view === "mcp-status" ? (
