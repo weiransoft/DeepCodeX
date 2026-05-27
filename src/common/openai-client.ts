@@ -3,7 +3,7 @@ import * as os from "os";
 import * as path from "path";
 import OpenAI from "openai";
 import { Agent, fetch as undiciFetch } from "undici";
-import { resolveCurrentSettings } from "../ui/App";
+import { resolveCurrentSettings } from "../settings";
 
 // Custom undici Agent with a 180-second keepAlive timeout.  The default
 // global fetch (undici) only keeps connections alive for 4 seconds, which

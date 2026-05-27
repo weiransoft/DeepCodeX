@@ -1,7 +1,7 @@
 import React from "react";
-import { AppContext } from "./contexts";
+import { AppContext } from "../contexts";
 import App from "./App";
-import { RawModeProvider } from "./contexts/RawModeContext";
+import { RawModeProvider } from "../contexts";
 
 const AppContainer: React.FC<{
   projectRoot: string;

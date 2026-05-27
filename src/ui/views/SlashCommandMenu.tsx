@@ -1,9 +1,9 @@
-import { formatSlashCommandDescription, formatSlashCommandLabel } from "./slashCommands";
-import type { SlashCommandItem } from "./slashCommands";
-import { ARGS_SEPARATOR } from "./constants";
+import { formatSlashCommandDescription, formatSlashCommandLabel } from "../core/slash-commands";
+import type { SlashCommandItem } from "../core/slash-commands";
+import { ARGS_SEPARATOR } from "../constants";
 import React from "react";
 import { Box, Text } from "ink";
-import type { SkillInfo } from "../session";
+import type { SkillInfo } from "../../session";
 
 type SlashCommandMenuProps = {
   items: SlashCommandItem[];

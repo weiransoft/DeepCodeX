@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Box, Text } from "ink";
-import type { AskPermissionRequest, AskPermissionScope, PermissionScope, UserToolPermission } from "../session";
-import { useTerminalInput } from "./PromptInput";
+import { useTerminalInput } from "../hooks";
+import type { AskPermissionRequest, AskPermissionScope, UserToolPermission } from "../../common/permissions";
+import type { PermissionScope } from "../../settings";
 
 export type PermissionPromptResult = {
   permissions: UserToolPermission[];

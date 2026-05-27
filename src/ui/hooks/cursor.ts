@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef } from "react";
-import type { PromptBufferState } from "../promptBuffer";
+import type { PromptBufferState } from "../core/prompt-buffer";
 
 type CursorPlacement = {
   rowsUp: number;

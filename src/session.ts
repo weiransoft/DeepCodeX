@@ -2,7 +2,6 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
-import { fileURLToPath } from "url";
 import matter from "gray-matter";
 import ejs from "ejs";
 import type { ChatCompletionMessageParam, ChatCompletionContentPart } from "openai/resources/chat/completions";
@@ -12,6 +11,7 @@ import { DEEPSEEK_V4_MODELS, supportsMultimodal } from "./common/model-capabilit
 import {
   getCompactPrompt,
   getDefaultSkillPrompt,
+  getExtensionRoot,
   getRuntimeContext,
   getSystemPrompt,
   getTools,
@@ -44,6 +44,8 @@ import {
   type PermissionToolCall,
   type UserToolPermission,
 } from "./common/permissions";
+import { clearSessionWorkingDir } from "./tools/bash-handler";
+import { clearSessionState } from "./common/state";
 
 export type { PermissionScope } from "./settings";
 export type {
@@ -133,15 +135,6 @@ function accumulateUsagePerModel(
   const modelName = model.trim() || "unknown";
   usagePerModel[modelName] = accumulateUsage(usagePerModel[modelName] ?? null, usageWithRequestCount(next))!;
   return usagePerModel;
-}
-
-function getExtensionRoot(): string {
-  if (typeof __dirname !== "undefined") {
-    return path.resolve(__dirname, "..");
-  }
-
-  const currentFilePath = fileURLToPath(import.meta.url);
-  return path.resolve(path.dirname(currentFilePath), "..");
 }
 
 function getTotalTokens(usage: ModelUsage | null | undefined): number {
@@ -346,6 +339,18 @@ export class SessionManager {
   }
 
   dispose(): void {
+    const controller = this.activePromptController;
+    if (controller && !controller.signal.aborted) {
+      controller.abort();
+    }
+    this.activePromptController = null;
+    for (const sessionController of this.sessionControllers.values()) {
+      if (!sessionController.signal.aborted) {
+        sessionController.abort();
+      }
+    }
+    this.sessionControllers.clear();
+    this.processTimeoutControls.clear();
     this.mcpManager.disconnect();
   }
 
@@ -979,7 +984,12 @@ The candidate skills are as follows:\n\n`;
     const droppedEntries = sortedEntries.filter((item) => !keptIds.has(item.id));
     index.entries = keptEntries;
     this.saveSessionsIndex(index);
-    this.removeSessionMessages(droppedEntries.map((item) => item.id));
+    for (const dropped of droppedEntries) {
+      this.cleanupSessionResources(dropped.id, {
+        removeMessages: true,
+        processIds: this.getProcessIds(dropped.processes ?? null),
+      });
+    }
 
     const promptToolOptions = this.getPromptToolOptions();
     const systemPrompt = getSystemPrompt(this.projectRoot, promptToolOptions);
@@ -1590,23 +1600,25 @@ ${skillMd}
 
   /**
    * Delete a session by its ID.
-   * Removes the session entry from the index and deletes the associated messages file.
+   * Removes the session entry from the index and cleans up associated resources
+   * such as message files, in-memory state caches, working directory state,
+   * session controllers, and tracked process timeout controls.
    * Returns true if the session was found and deleted, false otherwise.
    */
   deleteSession(sessionId: string): boolean {
     const index = this.loadSessionsIndex();
-    const entryIndex = index.entries.findIndex((entry) => entry.id === sessionId);
-    if (entryIndex === -1) {
+    const targetEntry = index.entries.find((entry) => entry.id === sessionId) ?? null;
+    const nextEntries = index.entries.filter((entry) => entry.id !== sessionId);
+    if (nextEntries.length === index.entries.length) {
       return false;
     }
 
-    // Remove from index
-    index.entries.splice(entryIndex, 1);
+    index.entries = nextEntries;
     this.saveSessionsIndex(index);
-
-    // Remove messages file
-    this.removeSessionMessages([sessionId]);
-
+    this.cleanupSessionResources(sessionId, {
+      removeMessages: true,
+      processIds: this.getProcessIds(targetEntry?.processes ?? null),
+    });
     return true;
   }
 
@@ -1850,6 +1862,42 @@ ${skillMd}
       } catch {
         // ignore delete failures
       }
+    }
+  }
+
+  private cleanupSessionResources(
+    sessionId: string,
+    options: { removeMessages: boolean; processIds?: number[] }
+  ): void {
+    const processIds = options.processIds ?? [];
+    for (const pid of processIds) {
+      const processControlKey = this.getProcessControlKey(sessionId, pid);
+      if (!this.processTimeoutControls.has(processControlKey)) {
+        continue;
+      }
+
+      const killedGroup = killProcessTree(pid, "SIGKILL");
+      if (killedGroup) {
+        this.processTimeoutControls.delete(processControlKey);
+        continue;
+      }
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // ignore process-kill failures during cleanup
+      }
+      this.processTimeoutControls.delete(processControlKey);
+    }
+
+    clearSessionState(sessionId);
+    clearSessionWorkingDir(sessionId);
+    const controller = this.sessionControllers.get(sessionId);
+    if (controller && !controller.signal.aborted) {
+      controller.abort();
+    }
+    this.sessionControllers.delete(sessionId);
+    if (options.removeMessages) {
+      this.removeSessionMessages([sessionId]);
     }
   }
 

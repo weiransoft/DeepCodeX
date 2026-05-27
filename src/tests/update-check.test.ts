@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { compareVersions, parseNpmViewVersion } from "../updateCheck";
+import { compareVersions, parseNpmViewVersion } from "../common/update-check";
 
 test("compareVersions orders semantic versions", () => {
   assert.equal(compareVersions("0.1.4", "0.1.3"), 1);

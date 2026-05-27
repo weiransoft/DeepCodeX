@@ -1,4 +1,4 @@
-import type { SessionMessage, SessionStatus } from "../session";
+import type { SessionMessage, SessionStatus } from "../../session";
 
 export type AskUserQuestionOption = {
   label: string;
