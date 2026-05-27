@@ -2547,6 +2547,12 @@ ${skillMd}
       return typeof args.explanation === "string" ? args.explanation.trim() : "";
     } else if (toolName === "write") {
       return typeof args.file_path === "string" ? args.file_path.trim() : "";
+    } else if (toolName === "edit") {
+      const filePath = typeof args.file_path === "string" ? args.file_path.trim() : "";
+      if (filePath) {
+        return filePath;
+      }
+      return typeof args.snippet_id === "string" ? args.snippet_id.trim() : "";
     }
 
     const firstKey = Object.keys(args)[0];
