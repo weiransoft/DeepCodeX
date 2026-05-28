@@ -18,6 +18,11 @@ type FileHistoryManifest = {
   files: Record<string, FileHistoryEntry>;
 };
 
+export type FileHistoryCheckpointResult = {
+  checkpointHash: string | undefined;
+  changedFilePaths: string[];
+};
+
 export class GitFileHistory {
   constructor(
     _projectRoot: string,
@@ -114,21 +119,33 @@ export class GitFileHistory {
     }
   }
 
-  recordTrackedFilesCheckpoint(sessionId: string, message: string): string | undefined {
+  recordTrackedFilesCheckpoint(sessionId: string, message: string): FileHistoryCheckpointResult {
     const currentHash = this.ensureSession(sessionId);
     if (!currentHash) {
-      return undefined;
+      return { checkpointHash: undefined, changedFilePaths: [] };
     }
 
     try {
       const manifest = this.readManifest(currentHash);
-      const trackedPaths = Object.values(manifest.files).map((entry) => entry.path);
+      const trackedPaths = Object.values(manifest.files)
+        .map((entry) => entry.path)
+        .sort((left, right) => left.localeCompare(right));
       if (trackedPaths.length === 0) {
-        return currentHash;
+        return { checkpointHash: currentHash, changedFilePaths: [] };
       }
-      return this.recordCheckpoint(sessionId, trackedPaths, message);
+      const nextHash = this.recordCheckpoint(sessionId, trackedPaths, message);
+      if (!nextHash) {
+        return { checkpointHash: undefined, changedFilePaths: [] };
+      }
+
+      const nextManifest = this.readManifest(nextHash);
+      const changedFilePaths = Object.entries(manifest.files)
+        .filter(([key, entry]) => !isSameFileHistoryEntry(entry, nextManifest.files[key]))
+        .map(([key, entry]) => nextManifest.files[key]?.path ?? entry.path)
+        .sort((left, right) => left.localeCompare(right));
+      return { checkpointHash: nextHash, changedFilePaths };
     } catch {
-      return undefined;
+      return { checkpointHash: undefined, changedFilePaths: [] };
     }
   }
 
@@ -338,6 +355,13 @@ function normalizeManifest(manifest: FileHistoryManifest): FileHistoryManifest {
     };
   }
   return { version: 2, files };
+}
+
+function isSameFileHistoryEntry(left: FileHistoryEntry, right: FileHistoryEntry | undefined): boolean {
+  if (!right) {
+    return false;
+  }
+  return left.path === right.path && left.blob === right.blob && left.mode === right.mode;
 }
 
 function uniqueAbsolutePaths(filePaths: string[]): string[] {

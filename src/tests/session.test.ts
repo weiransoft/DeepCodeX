@@ -1061,6 +1061,219 @@ test("replySession snapshots manual edits to tracked files before appending the 
   assert.equal(fs.readFileSync(filePath, "utf8"), manualEdit);
 });
 
+test("replySession inserts hidden system notice for manually changed tracked files", async (t) => {
+  if (!hasGit()) {
+    t.skip("git is not available");
+    return;
+  }
+
+  const workspace = createTempDir("deepcode-manual-change-notice-workspace-");
+  const home = createTempDir("deepcode-manual-change-notice-home-");
+  setHomeDir(home);
+
+  const firstPath = path.join(workspace, "a.txt");
+  const secondPath = path.join(workspace, "b.txt");
+  const manager = createSessionManager(workspace, "machine-id-manual-change-notice");
+  (manager as any).activateSession = async () => {};
+
+  const sessionId = await manager.createSession({ text: "first prompt" });
+  const fileHistory = new GitFileHistory(workspace, getFileHistoryGitDir(home, workspace));
+  fs.writeFileSync(firstPath, "one\n", "utf8");
+  fs.writeFileSync(secondPath, "two\n", "utf8");
+  assert.ok(fileHistory.recordCheckpoint(sessionId, [secondPath, firstPath], "track files"));
+
+  fs.writeFileSync(secondPath, "two changed\n", "utf8");
+  fs.writeFileSync(firstPath, "one changed\n", "utf8");
+  await manager.replySession(sessionId, { text: "check manual changes" });
+
+  const messages = manager.listSessionMessages(sessionId);
+  const userIndex = messages.findIndex(
+    (message) => message.role === "user" && message.content === "check manual changes"
+  );
+  assert.ok(userIndex > 0);
+  const notice = messages[userIndex - 1];
+  assert.equal(notice?.role, "system");
+  assert.equal(notice?.visible, false);
+  assert.equal(notice?.content, `Note that the user manually modified these files:\n${firstPath}\n${secondPath}`);
+});
+
+test("replySession does not insert manual-change notice when tracked files are unchanged", async (t) => {
+  if (!hasGit()) {
+    t.skip("git is not available");
+    return;
+  }
+
+  const workspace = createTempDir("deepcode-no-manual-change-notice-workspace-");
+  const home = createTempDir("deepcode-no-manual-change-notice-home-");
+  setHomeDir(home);
+
+  const filePath = path.join(workspace, "tracked.txt");
+  const manager = createSessionManager(workspace, "machine-id-no-manual-change-notice");
+  (manager as any).activateSession = async () => {};
+
+  const sessionId = await manager.createSession({ text: "first prompt" });
+  const fileHistory = new GitFileHistory(workspace, getFileHistoryGitDir(home, workspace));
+  fs.writeFileSync(filePath, "same\n", "utf8");
+  assert.ok(fileHistory.recordCheckpoint(sessionId, [filePath], "track file"));
+
+  await manager.replySession(sessionId, { text: "second prompt" });
+
+  const notices = manager
+    .listSessionMessages(sessionId)
+    .filter(
+      (message) =>
+        message.role === "system" &&
+        typeof message.content === "string" &&
+        message.content.startsWith("Note that the user manually modified these files:")
+    );
+  assert.equal(notices.length, 0);
+});
+
+test("replySession reports manual deletion of a tracked file", async (t) => {
+  if (!hasGit()) {
+    t.skip("git is not available");
+    return;
+  }
+
+  const workspace = createTempDir("deepcode-manual-delete-notice-workspace-");
+  const home = createTempDir("deepcode-manual-delete-notice-home-");
+  setHomeDir(home);
+
+  const filePath = path.join(workspace, "deleted.txt");
+  const manager = createSessionManager(workspace, "machine-id-manual-delete-notice");
+  (manager as any).activateSession = async () => {};
+
+  const sessionId = await manager.createSession({ text: "first prompt" });
+  const fileHistory = new GitFileHistory(workspace, getFileHistoryGitDir(home, workspace));
+  fs.writeFileSync(filePath, "delete me\n", "utf8");
+  assert.ok(fileHistory.recordCheckpoint(sessionId, [filePath], "track file"));
+
+  fs.unlinkSync(filePath);
+  await manager.replySession(sessionId, { text: "check deletion" });
+
+  const notice = manager
+    .listSessionMessages(sessionId)
+    .find(
+      (message) =>
+        message.role === "system" &&
+        message.content === `Note that the user manually modified these files:\n${filePath}`
+    );
+  assert.ok(notice);
+});
+
+test("replySession ignores manually created untracked files", async (t) => {
+  if (!hasGit()) {
+    t.skip("git is not available");
+    return;
+  }
+
+  const workspace = createTempDir("deepcode-untracked-manual-file-workspace-");
+  const home = createTempDir("deepcode-untracked-manual-file-home-");
+  setHomeDir(home);
+
+  const trackedPath = path.join(workspace, "tracked.txt");
+  const untrackedPath = path.join(workspace, "untracked.txt");
+  const manager = createSessionManager(workspace, "machine-id-untracked-manual-file");
+  (manager as any).activateSession = async () => {};
+
+  const sessionId = await manager.createSession({ text: "first prompt" });
+  const fileHistory = new GitFileHistory(workspace, getFileHistoryGitDir(home, workspace));
+  fs.writeFileSync(trackedPath, "tracked\n", "utf8");
+  assert.ok(fileHistory.recordCheckpoint(sessionId, [trackedPath], "track file"));
+
+  fs.writeFileSync(untrackedPath, "new manual file\n", "utf8");
+  await manager.replySession(sessionId, { text: "second prompt" });
+
+  const notices = manager
+    .listSessionMessages(sessionId)
+    .filter(
+      (message) =>
+        message.role === "system" &&
+        typeof message.content === "string" &&
+        message.content.startsWith("Note that the user manually modified these files:")
+    );
+  assert.equal(notices.length, 0);
+});
+
+test("replySession does not insert manual-change notice for /continue", async (t) => {
+  if (!hasGit()) {
+    t.skip("git is not available");
+    return;
+  }
+
+  const workspace = createTempDir("deepcode-continue-no-manual-change-notice-workspace-");
+  const home = createTempDir("deepcode-continue-no-manual-change-notice-home-");
+  setHomeDir(home);
+
+  const filePath = path.join(workspace, "tracked.txt");
+  const manager = createSessionManager(workspace, "machine-id-continue-no-manual-change-notice");
+  (manager as any).activateSession = async () => {};
+
+  const sessionId = await manager.createSession({ text: "first prompt" });
+  const fileHistory = new GitFileHistory(workspace, getFileHistoryGitDir(home, workspace));
+  fs.writeFileSync(filePath, "before\n", "utf8");
+  assert.ok(fileHistory.recordCheckpoint(sessionId, [filePath], "track file"));
+
+  fs.writeFileSync(filePath, "manual change\n", "utf8");
+  await manager.replySession(sessionId, { text: "/continue" });
+
+  const notices = manager
+    .listSessionMessages(sessionId)
+    .filter(
+      (message) =>
+        message.role === "system" &&
+        typeof message.content === "string" &&
+        message.content.startsWith("Note that the user manually modified these files:")
+    );
+  assert.equal(notices.length, 0);
+});
+
+test("replySession does not insert manual-change notice for permission-only replies", async (t) => {
+  if (!hasGit()) {
+    t.skip("git is not available");
+    return;
+  }
+
+  const workspace = createTempDir("deepcode-permission-no-manual-change-notice-workspace-");
+  const home = createTempDir("deepcode-permission-no-manual-change-notice-home-");
+  setHomeDir(home);
+
+  const filePath = path.join(workspace, "tracked.txt");
+  const manager = createSessionManager(workspace, "machine-id-permission-no-manual-change-notice");
+  (manager as any).activateSession = async () => {};
+
+  const sessionId = await manager.createSession({ text: "first prompt" });
+  const fileHistory = new GitFileHistory(workspace, getFileHistoryGitDir(home, workspace));
+  fs.writeFileSync(filePath, "before\n", "utf8");
+  assert.ok(fileHistory.recordCheckpoint(sessionId, [filePath], "track file"));
+  const assistant = (manager as any).buildAssistantMessage(
+    sessionId,
+    "Need permission",
+    [
+      {
+        id: "call-read",
+        type: "function",
+        function: { name: "read", arguments: JSON.stringify({ file_path: filePath }) },
+      },
+    ],
+    null
+  ) as SessionMessage;
+  (manager as any).appendSessionMessage(sessionId, assistant);
+
+  fs.writeFileSync(filePath, "manual change\n", "utf8");
+  await manager.replySession(sessionId, { permissions: [{ toolCallId: "call-read", permission: "allow" }] });
+
+  const notices = manager
+    .listSessionMessages(sessionId)
+    .filter(
+      (message) =>
+        message.role === "system" &&
+        typeof message.content === "string" &&
+        message.content.startsWith("Note that the user manually modified these files:")
+    );
+  assert.equal(notices.length, 0);
+});
+
 test("Write tool advances file-history while preserving the user prompt checkpoint", async (t) => {
   if (!hasGit()) {
     t.skip("git is not available");

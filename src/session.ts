@@ -30,7 +30,7 @@ import type { McpServerConfig, PermissionScope, PermissionSettings } from "./set
 import { logApiError } from "./common/error-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./common/debug-logger";
 import { killProcessTree } from "./common/process-tree";
-import { GitFileHistory } from "./common/file-history";
+import { GitFileHistory, type FileHistoryCheckpointResult } from "./common/file-history";
 import { clearSessionState, getSnippet, rebuildSessionStateFromHistory } from "./common/state";
 import {
   appendProjectPermissionAllows,
@@ -1088,7 +1088,11 @@ ${skillMd}
     this.reportNewPrompt();
 
     this.ensureFileHistorySession(sessionId);
-    this.recordUserPromptCheckpoint(sessionId);
+    const checkpoint = this.recordUserPromptCheckpoint(sessionId);
+    if (checkpoint.changedFilePaths.length) {
+      const content = `Note that the user manually modified these files:\n${checkpoint.changedFilePaths.join("\n")}`;
+      this.appendSessionMessage(sessionId, this.buildSystemMessage(sessionId, content));
+    }
     const userMessage = this.buildUserMessage(sessionId, userPrompt);
     this.appendSessionMessage(sessionId, userMessage);
 
@@ -1754,7 +1758,7 @@ ${skillMd}
     return this.getFileHistory().getCurrentCheckpointHash(sessionId);
   }
 
-  private recordUserPromptCheckpoint(sessionId: string): string | undefined {
+  private recordUserPromptCheckpoint(sessionId: string): FileHistoryCheckpointResult {
     return this.getFileHistory().recordTrackedFilesCheckpoint(sessionId, "User prompt checkpoint");
   }
 
