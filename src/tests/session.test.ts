@@ -6,8 +6,7 @@ import * as os from "os";
 import * as path from "path";
 import { GitFileHistory } from "../common/file-history";
 import { clearSessionState } from "../common/state";
-import { type SessionMessage } from "../session";
-import { SessionManager } from "../session";
+import { getProjectCode, SessionManager, type SessionMessage } from "../session";
 
 const originalFetch = globalThis.fetch;
 const originalConsoleWarn = console.warn;
@@ -43,6 +42,21 @@ afterEach(() => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   }
+});
+
+test("getProjectCode shortens long project roots for Windows-compatible storage paths", () => {
+  const shortRoot = "short-project";
+  assert.equal(getProjectCode(shortRoot), shortRoot.replace(/[\\/]/g, "-").replace(/:/g, ""));
+
+  const longRoot = path.join(
+    os.tmpdir(),
+    "deepcode-project-code-workspace-with-a-long-name-that-would-create-long-git-internal-paths"
+  );
+  const projectCode = getProjectCode(longRoot);
+
+  assert.ok(projectCode.length <= 64);
+  assert.match(projectCode, /^[A-Za-z0-9._-]+$/);
+  assert.notEqual(projectCode, longRoot.replace(/[\\/]/g, "-").replace(/:/g, ""));
 });
 
 test("SessionManager preserves structured system content when building OpenAI messages", () => {
@@ -271,7 +285,7 @@ test("SessionManager normalizes legacy sessions without activeTokens to zero", (
   const home = createTempDir("deepcode-legacy-active-tokens-home-");
   setHomeDir(home);
 
-  const projectCode = workspace.replace(/[\\/]/g, "-").replace(/:/g, "");
+  const projectCode = getProjectCode(workspace);
   const projectDir = path.join(home, ".deepcode", "projects", projectCode);
   fs.mkdirSync(projectDir, { recursive: true });
   fs.writeFileSync(
@@ -324,7 +338,7 @@ test("SessionManager marks skills loaded from existing session messages", async 
     "utf8"
   );
 
-  const projectCode = workspace.replace(/[\\/]/g, "-").replace(/:/g, "");
+  const projectCode = getProjectCode(workspace);
   const projectDir = path.join(home, ".deepcode", "projects", projectCode);
   fs.mkdirSync(projectDir, { recursive: true });
   fs.writeFileSync(
@@ -982,14 +996,7 @@ test("createSession initializes file-history repo and session branch", async (t)
 
   const sessionId = await manager.createSession({ text: "first prompt" });
   const userMessage = manager.listSessionMessages(sessionId).find((message) => message.role === "user");
-  const gitDir = path.join(
-    home,
-    ".deepcode",
-    "projects",
-    workspace.replace(/[\\/]/g, "-").replace(/:/g, ""),
-    "file-history",
-    ".git"
-  );
+  const gitDir = path.join(home, ".deepcode", "projects", getProjectCode(workspace), "file-history", ".git");
 
   assert.ok(fs.existsSync(gitDir));
   assert.ok(userMessage?.checkpointHash);
@@ -2850,13 +2857,7 @@ test("SessionManager.deleteSession removes the messages file", () => {
   (manager as any).activateSession = async () => {};
 
   const sessionId = createSessionAndMessages(manager, "session-delete-msg", "Test session");
-  const messagePath = path.join(
-    home,
-    ".deepcode",
-    "projects",
-    workspace.replace(/[\\\\/]/g, "-").replace(/:/g, ""),
-    `${sessionId}.jsonl`
-  );
+  const messagePath = path.join(home, ".deepcode", "projects", getProjectCode(workspace), `${sessionId}.jsonl`);
 
   // Verify messages file exists
   assert.ok(fs.existsSync(messagePath));
@@ -2962,7 +2963,7 @@ function createFileHistoryCommit(
   sessionId: string,
   files: Record<string, string>
 ): string {
-  const projectCode = workspace.replace(/[\\/]/g, "-").replace(/:/g, "");
+  const projectCode = getProjectCode(workspace);
   const gitDir = path.join(home, ".deepcode", "projects", projectCode, "file-history", ".git");
   const fileHistory = new GitFileHistory(workspace, gitDir);
   fileHistory.ensureSession(sessionId);
@@ -2980,7 +2981,7 @@ function createFileHistoryCommit(
 }
 
 function getFileHistoryGitDir(home: string, workspace: string): string {
-  const projectCode = workspace.replace(/[\\/]/g, "-").replace(/:/g, "");
+  const projectCode = getProjectCode(workspace);
   return path.join(home, ".deepcode", "projects", projectCode, "file-history", ".git");
 }
 
