@@ -1013,6 +1013,7 @@ The candidate skills are as follows:\n\n`;
       this.appendSessionMessage(sessionId, instructionsMessage);
     }
 
+    this.recordUserPromptCheckpoint(sessionId);
     const userMessage = this.buildUserMessage(sessionId, userPrompt);
     this.appendSessionMessage(sessionId, userMessage);
 
@@ -1087,6 +1088,7 @@ ${skillMd}
     this.reportNewPrompt();
 
     this.ensureFileHistorySession(sessionId);
+    this.recordUserPromptCheckpoint(sessionId);
     const userMessage = this.buildUserMessage(sessionId, userPrompt);
     this.appendSessionMessage(sessionId, userMessage);
 
@@ -1750,6 +1752,10 @@ ${skillMd}
 
   private getCurrentCheckpointHash(sessionId: string): string | undefined {
     return this.getFileHistory().getCurrentCheckpointHash(sessionId);
+  }
+
+  private recordUserPromptCheckpoint(sessionId: string): string | undefined {
+    return this.getFileHistory().recordTrackedFilesCheckpoint(sessionId, "User prompt checkpoint");
   }
 
   private prepareFileMutationCheckpoint(sessionId: string, filePath: string): void {

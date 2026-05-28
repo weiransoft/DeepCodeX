@@ -999,6 +999,68 @@ test("createSession initializes file-history repo and session branch", async (t)
   );
 });
 
+test("createSession initializes an empty file-history manifest without scanning existing files", async (t) => {
+  if (!hasGit()) {
+    t.skip("git is not available");
+    return;
+  }
+
+  const workspace = createTempDir("deepcode-file-history-empty-init-workspace-");
+  const home = createTempDir("deepcode-file-history-empty-init-home-");
+  setHomeDir(home);
+  fs.writeFileSync(path.join(workspace, "unrelated.txt"), "keep me\n", "utf8");
+  fs.mkdirSync(path.join(workspace, "nested"));
+  fs.writeFileSync(path.join(workspace, "nested", "another.txt"), "also keep me\n", "utf8");
+
+  const manager = createSessionManager(workspace, "machine-id-file-history-empty-init");
+  (manager as any).activateSession = async () => {};
+
+  const sessionId = await manager.createSession({ text: "first prompt" });
+  const userMessage = manager.listSessionMessages(sessionId).find((message) => message.role === "user");
+  assert.ok(userMessage?.checkpointHash);
+
+  const manifest = readFileHistoryManifest(home, workspace, userMessage.checkpointHash);
+  assert.deepEqual(manifest.files, {});
+});
+
+test("replySession snapshots manual edits to tracked files before appending the user prompt", async (t) => {
+  if (!hasGit()) {
+    t.skip("git is not available");
+    return;
+  }
+
+  const workspace = createTempDir("deepcode-prompt-checkpoint-manual-edit-workspace-");
+  const home = createTempDir("deepcode-prompt-checkpoint-manual-edit-home-");
+  setHomeDir(home);
+
+  const filePath = path.join(workspace, "hello_world.py");
+  const manager = createSessionManager(workspace, "machine-id-prompt-checkpoint-manual-edit");
+  (manager as any).activateSession = async () => {};
+
+  const sessionId = await manager.createSession({ text: "create hello world" });
+  const gitDir = getFileHistoryGitDir(home, workspace);
+  const fileHistory = new GitFileHistory(workspace, gitDir);
+
+  fs.writeFileSync(filePath, 'print("Hello, World!")\n', "utf8");
+  assert.ok(fileHistory.recordCheckpoint(sessionId, [filePath], "created hello world"));
+
+  const manualEdit = 'if name == main:\n  print("Hello, World!")\n';
+  fs.writeFileSync(filePath, manualEdit, "utf8");
+  await manager.replySession(sessionId, { text: "I manually edited @hello_world.py, note it" });
+  const manualEditUserMessage = manager
+    .listSessionMessages(sessionId)
+    .filter((message) => message.role === "user")
+    .at(-1);
+  assert.ok(manualEditUserMessage?.checkpointHash);
+
+  fs.writeFileSync(filePath, 'if __name__ == "__main__":\n  print("Hello, World!")\n', "utf8");
+  assert.ok(fileHistory.recordCheckpoint(sessionId, [filePath], "fixed hello world"));
+
+  manager.restoreSessionCode(sessionId, manualEditUserMessage.id);
+
+  assert.equal(fs.readFileSync(filePath, "utf8"), manualEdit);
+});
+
 test("Write tool advances file-history while preserving the user prompt checkpoint", async (t) => {
   if (!hasGit()) {
     t.skip("git is not available");
@@ -1191,6 +1253,8 @@ test("restoreSessionCode restores project files from the recorded Git checkpoint
   const manager = createSessionManager(workspace, "machine-id-undo-code");
   const sessionId = "session-code-restore";
   const checkpointHash = createFileHistoryCommit(home, workspace, sessionId, { "tracked.txt": "before\n" });
+  const fileHistory = new GitFileHistory(workspace, getFileHistoryGitDir(home, workspace));
+  assert.ok(fileHistory.recordCheckpoint(sessionId, [path.join(workspace, "new.txt")], "pre-create new.txt"));
   createFileHistoryCommit(home, workspace, sessionId, { "tracked.txt": "after\n", "new.txt": "remove me\n" });
   fs.writeFileSync(path.join(workspace, "tracked.txt"), "after\n", "utf8");
   fs.writeFileSync(path.join(workspace, "new.txt"), "remove me\n", "utf8");
@@ -1204,6 +1268,91 @@ test("restoreSessionCode restores project files from the recorded Git checkpoint
 
   assert.equal(fs.readFileSync(path.join(workspace, "tracked.txt"), "utf8"), "before\n");
   assert.equal(fs.existsSync(path.join(workspace, "new.txt")), false);
+});
+
+test("restoreSessionCode preserves files that predate their first tracked mutation", async (t) => {
+  if (!hasGit()) {
+    t.skip("git is not available");
+    return;
+  }
+
+  const workspace = createTempDir("deepcode-undo-preexisting-files-workspace-");
+  const home = createTempDir("deepcode-undo-preexisting-files-home-");
+  setHomeDir(home);
+
+  const readmePath = path.join(workspace, "README.md");
+  const readmeEnPath = path.join(workspace, "README-en.md");
+  const readmeZhPath = path.join(workspace, "README-zh_CN.md");
+  fs.writeFileSync(readmePath, "这是一个hello world演示项目\n", "utf8");
+  fs.writeFileSync(readmeEnPath, "This is a hello world demo project.\n", "utf8");
+  fs.writeFileSync(readmeZhPath, "", "utf8");
+
+  const manager = createSessionManager(workspace, "machine-id-undo-preexisting-files");
+  const sessionId = "session-undo-preexisting-files";
+  const gitDir = getFileHistoryGitDir(home, workspace);
+  const fileHistory = new GitFileHistory(workspace, gitDir);
+  fileHistory.ensureSession(sessionId);
+
+  const targetCheckpoint = fileHistory.recordCheckpoint(
+    sessionId,
+    [readmePath, readmeEnPath],
+    "checkpoint before syncing all readmes"
+  );
+  assert.ok(targetCheckpoint);
+
+  assert.ok(fileHistory.recordCheckpoint(sessionId, [readmeZhPath], "pre-sync zh readme"));
+  fs.writeFileSync(readmePath, "Synced readme\n", "utf8");
+  fs.writeFileSync(readmeEnPath, "Synced readme\n", "utf8");
+  fs.writeFileSync(readmeZhPath, "Synced readme\n", "utf8");
+  assert.ok(fileHistory.recordCheckpoint(sessionId, [readmePath, readmeEnPath, readmeZhPath], "synced readmes"));
+
+  (manager as any).appendSessionMessage(sessionId, {
+    ...buildTestMessage("user-with-readme-checkpoint", sessionId, "user", "sync README*.md"),
+    checkpointHash: targetCheckpoint,
+  });
+
+  manager.restoreSessionCode(sessionId, "user-with-readme-checkpoint");
+
+  assert.equal(fs.readFileSync(readmePath, "utf8"), "这是一个hello world演示项目\n");
+  assert.equal(fs.readFileSync(readmeEnPath, "utf8"), "This is a hello world demo project.\n");
+  assert.equal(fs.readFileSync(readmeZhPath, "utf8"), "");
+});
+
+test("restoreSessionCode restores deleted tracked files and leaves unrelated files alone", async (t) => {
+  if (!hasGit()) {
+    t.skip("git is not available");
+    return;
+  }
+
+  const workspace = createTempDir("deepcode-undo-deleted-files-workspace-");
+  const home = createTempDir("deepcode-undo-deleted-files-home-");
+  setHomeDir(home);
+
+  const trackedPath = path.join(workspace, "tracked.txt");
+  const unrelatedPath = path.join(workspace, "unrelated.txt");
+  fs.writeFileSync(trackedPath, "before delete\n", "utf8");
+  fs.writeFileSync(unrelatedPath, "do not touch\n", "utf8");
+
+  const manager = createSessionManager(workspace, "machine-id-undo-deleted-files");
+  const sessionId = "session-undo-deleted-files";
+  const gitDir = getFileHistoryGitDir(home, workspace);
+  const fileHistory = new GitFileHistory(workspace, gitDir);
+  fileHistory.ensureSession(sessionId);
+  const targetCheckpoint = fileHistory.recordCheckpoint(sessionId, [trackedPath], "before delete");
+  assert.ok(targetCheckpoint);
+
+  fs.unlinkSync(trackedPath);
+  assert.ok(fileHistory.recordCheckpoint(sessionId, [trackedPath], "after delete"));
+
+  (manager as any).appendSessionMessage(sessionId, {
+    ...buildTestMessage("user-before-delete", sessionId, "user", "restore deleted file"),
+    checkpointHash: targetCheckpoint,
+  });
+
+  manager.restoreSessionCode(sessionId, "user-before-delete");
+
+  assert.equal(fs.readFileSync(trackedPath, "utf8"), "before delete\n");
+  assert.equal(fs.readFileSync(unrelatedPath, "utf8"), "do not touch\n");
 });
 
 test("replySession /continue runs trailing pending tool calls before requesting another response", async () => {
@@ -2615,6 +2764,18 @@ function createFileHistoryCommit(
   const commitHash = fileHistory.recordCheckpoint(sessionId, filePaths, "checkpoint");
   assert.ok(commitHash);
   return commitHash;
+}
+
+function getFileHistoryGitDir(home: string, workspace: string): string {
+  const projectCode = workspace.replace(/[\\/]/g, "-").replace(/:/g, "");
+  return path.join(home, ".deepcode", "projects", projectCode, "file-history", ".git");
+}
+
+function readFileHistoryManifest(home: string, workspace: string, checkpointHash: string): any {
+  const gitDir = getFileHistoryGitDir(home, workspace);
+  return JSON.parse(
+    runFileHistoryGit(gitDir, workspace, ["cat-file", "blob", `${checkpointHash}:.deepcode-file-history.json`])
+  );
 }
 
 function runFileHistoryGit(
