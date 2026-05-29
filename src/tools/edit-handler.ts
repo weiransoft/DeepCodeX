@@ -660,7 +660,7 @@ async function inferOldStringNotFoundReasonWithLLM(
           content:
             "You diagnose failed file edits when old_string was not found. " +
             "Return XML only using <response><reason>...</reason></response>. " +
-            "Be concise and specific. Explain the likely mismatch between old_string and the provided file context. " +
+            "Be concise and specific. Explain the likely mismatch between old_string and the <snippet_text/> content. " +
             "Do not suggest unrelated changes.",
         },
         {
