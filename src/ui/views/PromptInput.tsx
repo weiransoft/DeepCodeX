@@ -46,9 +46,11 @@ import { readClipboardImageAsync } from "../core/clipboard";
 import { useTerminalInput, usePasteHandling, useHistoryNavigation } from "../hooks";
 import type { InputKey } from "../hooks";
 import {
+  getPromptCursorPlacement,
   useHiddenTerminalCursor,
   useTerminalExtendedKeys,
   useBracketedPaste,
+  usePromptTerminalCursor,
   useTerminalFocusReporting,
 } from "../hooks";
 import SlashCommandMenu, { isSkillSelected } from "./SlashCommandMenu";
@@ -198,10 +200,20 @@ export const PromptInput = React.memo(function PromptInput({
         ? `${loadingText}${processOrPasteHint}`
         : `esc to interrupt · ctrl+c to cancel input${processOrPasteHint}`
       : `enter send · shift+enter newline · @ files · ctrl+v image · / commands · ctrl+d exit${processOrPasteHint}`;
+  const showFooterText = useMemo(
+    () => showMenu || showSkillsDropdown || openRawModelDropdown || showModelDropdown || showFileMentionMenu,
+    [showMenu, showSkillsDropdown, showModelDropdown, openRawModelDropdown, showFileMentionMenu]
+  );
+  const cursorPlacement = useMemo(
+    () => getPromptCursorPlacement(buffer, screenWidth, 2, footerText),
+    [buffer, footerText, screenWidth]
+  );
+  const usePositionedCursor = !disabled && hasTerminalFocus && !showFooterText;
   useTerminalFocusReporting(stdout, !disabled);
   useTerminalExtendedKeys(stdout, !disabled);
   useBracketedPaste(stdout, !disabled);
-  useHiddenTerminalCursor(stdout, !disabled);
+  usePromptTerminalCursor(stdout, cursorPlacement, usePositionedCursor);
+  useHiddenTerminalCursor(stdout, !disabled && !usePositionedCursor);
 
   const refreshFileMentionItems = React.useCallback(() => {
     setFileMentionItems(scanFileMentionItems(projectRoot));
@@ -713,11 +725,6 @@ export const PromptInput = React.memo(function PromptInput({
     setBuffer((state) => removeCurrentSlashToken(state));
     clearUndoRedoStacks();
   }
-
-  const showFooterText = useMemo(
-    () => showMenu || showSkillsDropdown || openRawModelDropdown || showModelDropdown || showFileMentionMenu,
-    [showMenu, showSkillsDropdown, showModelDropdown, openRawModelDropdown, showFileMentionMenu]
-  );
 
   const matchedCommand = slashToken ? findExactSlashCommand(slashItems, slashToken) : null;
   const inlineHint = matchedCommand?.args ? ` ${matchedCommand.args.join(ARGS_SEPARATOR)}` : "";
