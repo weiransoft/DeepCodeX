@@ -131,6 +131,13 @@ test("Bash can run commands in the background and report completion output", asy
   assert.equal(result.metadata?.runInBackground, true);
   assert.equal(typeof result.metadata?.backgroundTaskId, "string");
   assert.equal(typeof result.metadata?.outputPath, "string");
+  assert.equal(typeof result.metadata?.processId, "number");
+  const stopCommand =
+    process.platform === "win32"
+      ? `cmd.exe /c "taskkill /PID ${result.metadata.processId} /T /F"`
+      : `kill -- -${result.metadata.processId}`;
+  assert.equal(result.metadata?.stopCommand, stopCommand);
+  assert.match(result.output ?? "", /Stop it with:/);
   assert.ok(Date.now() - startedAt < 500);
   assert.equal(starts.length, 1);
 
@@ -174,6 +181,38 @@ test("Bash background completion reports failed exit codes", async () => {
   assert.match(done.error ?? "", /exit code 7/);
   const output = fs.readFileSync(done.outputPath, "utf8");
   assert.match(output, /bad/);
+});
+
+test("Bash removes a trailing ampersand when run_in_background is true", async () => {
+  const workspace = createTempWorkspace();
+  let startedCommand = "";
+  let completion: BackgroundProcessCompletion | null = null;
+
+  const result = await handleBashTool(
+    {
+      command: "printf 'trimmed\\n' &",
+      run_in_background: true,
+    },
+    createContext("bash-background-trailing-ampersand", workspace, {
+      onProcessStart: (_pid, command) => {
+        startedCommand = command;
+      },
+      onBackgroundProcessComplete: (event) => {
+        completion = event;
+      },
+    })
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(startedCommand, "printf 'trimmed\\n'");
+
+  await waitFor(() => completion !== null, 2000);
+
+  assert.ok(completion);
+  const done = completion as BackgroundProcessCompletion;
+  assert.equal(done.command, "printf 'trimmed\\n'");
+  assert.equal(done.ok, true);
+  assert.equal(fs.readFileSync(done.outputPath, "utf8"), "trimmed\n");
 });
 
 test("UpdatePlan accepts a markdown task list string", async () => {

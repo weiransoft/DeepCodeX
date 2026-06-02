@@ -48,7 +48,9 @@ test("getSystemPrompt includes UpdatePlan docs", () => {
 test("getSystemPrompt includes Bash background guidance", () => {
   const prompt = getSystemPrompt("/tmp/project");
   assert.equal(prompt.includes("run_in_background: true"), true);
-  assert.equal(prompt.includes("do not add `&`"), true);
+  assert.equal(prompt.includes("do NOT add `&`"), true);
+  assert.equal(prompt.includes("use the `stopCommand` returned in the tool result metadata"), true);
+  assert.equal(prompt.includes("stop background tasks that has not reported a completed state"), true);
 });
 
 test("getSystemPrompt does not include runtime context", () => {

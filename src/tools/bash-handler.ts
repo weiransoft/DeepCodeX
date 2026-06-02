@@ -18,6 +18,7 @@ import {
 const MAX_OUTPUT_CHARS = 30000;
 const MAX_CAPTURE_CHARS = 10 * 1024 * 1024;
 const BACKGROUND_OUTPUT_DIR = path.join(os.tmpdir(), "deepcode-background");
+const TRAILING_BACKGROUND_OPERATOR_PATTERN = /(^|[^\\&])\s*&\s*$/;
 const sessionWorkingDirs = new Map<string, string>();
 
 export function clearSessionWorkingDir(sessionId: string): void {
@@ -45,7 +46,9 @@ export async function handleBashTool(
   args: Record<string, unknown>,
   context: ToolExecutionContext
 ): Promise<ToolExecutionResult> {
-  const command = typeof args.command === "string" ? args.command : "";
+  const rawCommand = typeof args.command === "string" ? args.command : "";
+  const runInBackground = isTrue(args.run_in_background);
+  const command = runInBackground ? stripTrailingBackgroundOperator(rawCommand) : rawCommand;
   if (!command.trim()) {
     return {
       ok: false,
@@ -56,7 +59,6 @@ export async function handleBashTool(
 
   const startCwd = getSessionCwd(context.sessionId, context.projectRoot);
   const { shellPath, shellArgs, marker } = buildShellCommand(command);
-  const runInBackground = isTrue(args.run_in_background);
 
   if (runInBackground) {
     return startBackgroundShellCommand(shellPath, shellArgs, startCwd, command, marker, context);
@@ -87,6 +89,10 @@ export async function handleBashTool(
 
 function isTrue(value: unknown): boolean {
   return value === true || value === "true";
+}
+
+function stripTrailingBackgroundOperator(command: string): string {
+  return command.replace(TRAILING_BACKGROUND_OPERATOR_PATTERN, "$1").trimEnd();
 }
 
 function getSessionCwd(sessionId: string, fallback: string): string {
@@ -272,6 +278,7 @@ function startBackgroundShellCommand(
   });
   const pid = child.pid;
   const processId = typeof pid === "number" ? pid : -1;
+  const stopCommand = typeof pid === "number" ? buildStopBackgroundProcessCommand(pid) : null;
 
   let stdout = "";
   let stderr = "";
@@ -347,17 +354,34 @@ function startBackgroundShellCommand(
   return {
     ok: true,
     name: "bash",
-    output: `Command running in background with ID: ${taskId}. Output is being written to: ${outputPath}`,
+    output: buildBackgroundStartMessage(taskId, outputPath, stopCommand),
     metadata: {
       backgroundTaskId: taskId,
       processId: typeof pid === "number" ? pid : null,
       outputPath,
+      stopCommand,
       cwd,
       shellPath,
       startCwd: cwd,
       runInBackground: true,
     },
   };
+}
+
+function buildBackgroundStartMessage(taskId: string, outputPath: string, stopCommand: string | null): string {
+  const parts = [`Command running in background with ID: ${taskId}.`];
+  if (stopCommand) {
+    parts.push(`Stop it with: ${stopCommand}`);
+  }
+  parts.push(`Output is being written to: ${outputPath}`);
+  return parts.join(" ");
+}
+
+function buildStopBackgroundProcessCommand(processId: number): string {
+  if (process.platform === "win32") {
+    return `cmd.exe /c "taskkill /PID ${processId} /T /F"`;
+  }
+  return `kill -- -${processId}`;
 }
 
 function writeFinalBackgroundOutput(outputPath: string, output: string | undefined): void {

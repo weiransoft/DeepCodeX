@@ -8,6 +8,7 @@ import type { ChatCompletionMessageParam, ChatCompletionContentPart } from "open
 import { launchNotifyScript } from "./common/notify";
 import { buildThinkingRequestOptions } from "./common/openai-thinking";
 import { DEEPSEEK_V4_MODELS, supportsMultimodal } from "./common/model-capabilities";
+import { readTextFileWithMetadata } from "./common/file-utils";
 import {
   getCompactPrompt,
   getDefaultSkillPrompt,
@@ -60,6 +61,7 @@ export type {
 const MAX_SESSION_ENTRIES = 50;
 const MAX_PROJECT_CODE_LENGTH = 64;
 const PROJECT_CODE_HASH_LENGTH = 16;
+const BACKGROUND_FAILURE_LOG_TAIL_CHARS = 4000;
 const DEFAULT_COMPACT_PROMPT_TOKEN_THRESHOLD = 128 * 1024;
 const DEEPSEEK_V4_COMPACT_PROMPT_TOKEN_THRESHOLD = 512 * 1024;
 
@@ -330,6 +332,7 @@ export class SessionManager {
   private activePromptController: AbortController | null = null;
   private readonly sessionControllers = new Map<string, AbortController>();
   private readonly processTimeoutControls = new Map<string, ProcessTimeoutControl>();
+  private readonly liveProcessKeys = new Set<string>();
   private readonly toolExecutor: ToolExecutor;
   private readonly mcpManager = new McpManager();
   private mcpToolDefinitions: ToolDefinition[] = [];
@@ -379,6 +382,7 @@ export class SessionManager {
         sessionController.abort();
       }
     }
+    this.killLiveProcesses();
     this.sessionControllers.clear();
     this.processTimeoutControls.clear();
     this.mcpManager.disconnect();
@@ -1525,7 +1529,9 @@ ${skillMd}
     const killedPids: number[] = [];
     const failedPids: number[] = [];
     for (const pid of processIds) {
-      this.processTimeoutControls.delete(this.getProcessControlKey(sessionId, pid));
+      const processControlKey = this.getProcessControlKey(sessionId, pid);
+      this.processTimeoutControls.delete(processControlKey);
+      this.liveProcessKeys.delete(processControlKey);
       if (killProcessTree(pid, "SIGKILL")) {
         killedPids.push(pid);
         continue;
@@ -1892,21 +1898,11 @@ ${skillMd}
     const processIds = options.processIds ?? [];
     for (const pid of processIds) {
       const processControlKey = this.getProcessControlKey(sessionId, pid);
-      if (!this.processTimeoutControls.has(processControlKey)) {
+      if (!this.processTimeoutControls.has(processControlKey) && !this.liveProcessKeys.has(processControlKey)) {
         continue;
       }
 
-      const killedGroup = killProcessTree(pid, "SIGKILL");
-      if (killedGroup) {
-        this.processTimeoutControls.delete(processControlKey);
-        continue;
-      }
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        // ignore process-kill failures during cleanup
-      }
-      this.processTimeoutControls.delete(processControlKey);
+      this.killTrackedProcess(processControlKey, pid);
     }
 
     clearSessionState(sessionId);
@@ -2667,6 +2663,7 @@ ${skillMd}
 
   private addSessionProcess(sessionId: string, processId: string | number, command: string): void {
     const now = new Date().toISOString();
+    this.liveProcessKeys.add(this.getProcessControlKey(sessionId, processId));
     this.updateSessionEntry(sessionId, (entry) => {
       const processes = new Map(entry.processes ?? []);
       processes.set(String(processId), { startTime: now, command });
@@ -2699,10 +2696,45 @@ ${skillMd}
           ? `signal ${completion.signal}`
           : completion.error || "unknown status";
     const durationMs = Math.max(0, completion.completedAtMs - completion.startedAtMs);
-    const content =
+    const baseContent =
       `Background command "${completion.command}" ${status} with ${exitText} ` +
       `after ${this.formatBackgroundDuration(durationMs)}. Output: ${completion.outputPath}`;
+    const logTail = completion.ok ? null : this.buildBackgroundFailureLogTailSlice(completion.outputPath);
+    const content = logTail ? `${baseContent}\n${logTail}` : baseContent;
     this.addSessionSystemMessage(sessionId, content, true);
+  }
+
+  private buildBackgroundFailureLogTailSlice(outputPath: string): string | null {
+    const tail = this.readTextFileTail(outputPath, BACKGROUND_FAILURE_LOG_TAIL_CHARS);
+    if (!tail || !tail.content) {
+      return null;
+    }
+    const prefix = tail.truncated ? `(${tail.totalBytes} bytes)...\n` : "";
+    return [
+      `<background_task_failure_log path="${outputPath}">`,
+      `${prefix}${tail.content}`,
+      "</background_task_failure_log>",
+    ].join("\n");
+  }
+
+  private readTextFileTail(
+    filePath: string,
+    maxChars: number
+  ): { content: string; totalBytes: number; truncated: boolean } | null {
+    try {
+      const stat = fs.statSync(filePath);
+      if (!stat.isFile() || stat.size <= 0) {
+        return null;
+      }
+      const content = readTextFileWithMetadata(filePath).content;
+      return {
+        content: content.slice(-maxChars).trimEnd(),
+        totalBytes: stat.size,
+        truncated: content.length > maxChars,
+      };
+    } catch {
+      return null;
+    }
   }
 
   private formatBackgroundDuration(durationMs: number): string {
@@ -2720,7 +2752,9 @@ ${skillMd}
 
   private removeSessionProcess(sessionId: string, processId: string | number): void {
     const now = new Date().toISOString();
-    this.processTimeoutControls.delete(this.getProcessControlKey(sessionId, processId));
+    const processControlKey = this.getProcessControlKey(sessionId, processId);
+    this.processTimeoutControls.delete(processControlKey);
+    this.liveProcessKeys.delete(processControlKey);
     this.updateSessionEntry(sessionId, (entry) => {
       const processes = new Map(entry.processes ?? []);
       processes.delete(String(processId));
@@ -2781,6 +2815,37 @@ ${skillMd}
 
   private getProcessControlKey(sessionId: string, processId: string | number): string {
     return `${sessionId}:${String(processId)}`;
+  }
+
+  private killLiveProcesses(): void {
+    for (const processControlKey of Array.from(this.liveProcessKeys)) {
+      const processId = this.getProcessIdFromControlKey(processControlKey);
+      if (processId === null) {
+        this.liveProcessKeys.delete(processControlKey);
+        continue;
+      }
+      this.killTrackedProcess(processControlKey, processId);
+    }
+  }
+
+  private killTrackedProcess(processControlKey: string, processId: number): void {
+    const killedGroup = killProcessTree(processId, "SIGKILL");
+    if (!killedGroup) {
+      try {
+        process.kill(processId, "SIGKILL");
+      } catch {
+        // Ignore process-kill failures during cleanup.
+      }
+    }
+    this.processTimeoutControls.delete(processControlKey);
+    this.liveProcessKeys.delete(processControlKey);
+  }
+
+  private getProcessIdFromControlKey(processControlKey: string): number | null {
+    const separatorIndex = processControlKey.lastIndexOf(":");
+    const rawProcessId = separatorIndex >= 0 ? processControlKey.slice(separatorIndex + 1) : processControlKey;
+    const processId = Number(rawProcessId);
+    return Number.isInteger(processId) && processId > 0 ? processId : null;
   }
 
   private getProcessIds(processes: Map<string, SessionProcessEntry> | null): number[] {
