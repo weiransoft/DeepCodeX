@@ -1197,7 +1197,7 @@ ${skillMd}
     permissionPrompt?: UserPromptContent
   ): Promise<void> {
     const startedAt = Date.now();
-    const { client, model, baseURL, thinkingEnabled, reasoningEffort, debugLogEnabled, notify, env } =
+    const { client, model, baseURL, temperature, thinkingEnabled, reasoningEffort, debugLogEnabled, notify, env } =
       this.createOpenAIClient();
     const now = new Date().toISOString();
     rebuildSessionStateFromHistory(sessionId, this.listSessionMessages(sessionId));
@@ -1300,6 +1300,7 @@ ${skillMd}
           client,
           {
             model,
+            ...(temperature !== undefined ? { temperature } : {}),
             messages,
             tools: getTools(this.getPromptToolOptions(), this.mcpToolDefinitions),
             ...thinkingOptions,
@@ -1310,7 +1311,7 @@ ${skillMd}
             enabled: debugLogEnabled,
             location: "SessionManager.activateSession",
             baseURL,
-            params: { iteration, thinkingEnabled, reasoningEffort },
+            params: { iteration, temperature, thinkingEnabled, reasoningEffort },
           }
         );
 
@@ -1440,7 +1441,8 @@ ${skillMd}
 
   async compactSession(sessionId: string, signal?: AbortSignal): Promise<void> {
     this.throwIfAborted(signal);
-    const { client, model, baseURL, thinkingEnabled, reasoningEffort, debugLogEnabled } = this.createOpenAIClient();
+    const { client, model, baseURL, temperature, thinkingEnabled, reasoningEffort, debugLogEnabled } =
+      this.createOpenAIClient();
     if (!client) {
       return;
     }
@@ -1472,6 +1474,7 @@ ${skillMd}
       client,
       {
         model,
+        ...(temperature !== undefined ? { temperature } : {}),
         messages: [{ role: "user", content: compactPrompt }],
         ...thinkingOptions,
       },
@@ -1481,7 +1484,7 @@ ${skillMd}
         enabled: debugLogEnabled,
         location: "SessionManager.compactSession",
         baseURL,
-        params: { thinkingEnabled, reasoningEffort },
+        params: { temperature, thinkingEnabled, reasoningEffort },
       }
     );
     this.throwIfAborted(signal);

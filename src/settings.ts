@@ -7,6 +7,7 @@ export type DeepcodingEnv = Record<string, string | undefined> & {
   MODEL?: string;
   BASE_URL?: string;
   API_KEY?: string;
+  TEMPERATURE?: string;
   THINKING_ENABLED?: string;
   REASONING_EFFORT?: string;
   DEBUG_LOG_ENABLED?: string;
@@ -45,6 +46,7 @@ export type PermissionSettings = {
 export type DeepcodingSettings = {
   env?: DeepcodingEnv;
   model?: string;
+  temperature?: number;
   thinkingEnabled?: boolean;
   reasoningEffort?: ReasoningEffort;
   debugLogEnabled?: boolean;
@@ -60,6 +62,7 @@ export type ResolvedDeepcodingSettings = {
   apiKey?: string;
   baseURL: string;
   model: string;
+  temperature?: number;
   thinkingEnabled: boolean;
   reasoningEffort: ReasoningEffort;
   debugLogEnabled: boolean;
@@ -98,6 +101,14 @@ function parseBoolean(value: unknown): boolean | undefined {
     return false;
   }
   return undefined;
+}
+
+function parseTemperature(value: unknown): number | undefined {
+  const raw = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
+  if (!Number.isFinite(raw) || raw < 0 || raw > 2) {
+    return undefined;
+  }
+  return raw;
 }
 
 function trimString(value: unknown): string {
@@ -308,6 +319,13 @@ export function resolveSettingsSources(
     resolveReasoningEffort(userEnv.REASONING_EFFORT) ??
     "max";
 
+  const temperature =
+    parseTemperature(systemEnv.TEMPERATURE) ??
+    parseTemperature(projectSettings?.temperature) ??
+    parseTemperature(projectEnv.TEMPERATURE) ??
+    parseTemperature(userSettings?.temperature) ??
+    parseTemperature(userEnv.TEMPERATURE);
+
   const debugLogEnabled =
     parseBoolean(systemEnv.DEBUG_LOG_ENABLED) ??
     parseBoolean(projectSettings?.debugLogEnabled) ??
@@ -337,6 +355,7 @@ export function resolveSettingsSources(
     apiKey: trimString(env.API_KEY) || undefined,
     baseURL: trimString(env.BASE_URL) || defaults.baseURL,
     model,
+    temperature,
     thinkingEnabled,
     reasoningEffort,
     debugLogEnabled,

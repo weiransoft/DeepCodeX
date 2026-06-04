@@ -2759,6 +2759,7 @@ test("SessionManager streams chat completions and counts reasoning progress", as
         create: async (request: Record<string, unknown>) => {
           assert.equal(request.stream, true);
           assert.deepEqual(request.stream_options, { include_usage: true });
+          assert.equal(request.temperature, 0.25);
           return createChatStreamResponse([
             { choices: [{ delta: { reasoning_content: "思考" } }] },
             { choices: [{ delta: { content: "hello" } }] },
@@ -2782,6 +2783,7 @@ test("SessionManager streams chat completions and counts reasoning progress", as
       client: client as any,
       model: "test-model",
       baseURL: "https://api.deepseek.com",
+      temperature: 0.25,
       thinkingEnabled: false,
     }),
     getResolvedSettings: () => ({ model: "test-model" }),
