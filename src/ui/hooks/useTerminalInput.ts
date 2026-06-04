@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 import { useStdin } from "ink";
 
 export type InputKey = {
@@ -249,7 +249,7 @@ export function useTerminalInput(
   // O(n²) copying when the terminal splits a large paste across many events.
   const pasteRef = useRef({ active: false, chunks: [] as string[] });
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isActive) {
       pasteRef.current.active = false;
       pasteRef.current.chunks = [];
@@ -261,7 +261,7 @@ export function useTerminalInput(
     };
   }, [isActive, setRawMode]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isActive) {
       return;
     }

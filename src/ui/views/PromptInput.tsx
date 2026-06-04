@@ -46,11 +46,9 @@ import { readClipboardImageAsync } from "../core/clipboard";
 import { useTerminalInput, usePasteHandling, useHistoryNavigation } from "../hooks";
 import type { InputKey } from "../hooks";
 import {
-  getPromptCursorPlacement,
   useHiddenTerminalCursor,
   useTerminalExtendedKeys,
   useBracketedPaste,
-  usePromptTerminalCursor,
   useTerminalFocusReporting,
 } from "../hooks";
 import SlashCommandMenu, { isSkillSelected } from "./SlashCommandMenu";
@@ -204,16 +202,9 @@ export const PromptInput = React.memo(function PromptInput({
     () => showMenu || showSkillsDropdown || openRawModelDropdown || showModelDropdown || showFileMentionMenu,
     [showMenu, showSkillsDropdown, showModelDropdown, openRawModelDropdown, showFileMentionMenu]
   );
-  const cursorPlacement = useMemo(
-    () => getPromptCursorPlacement(buffer, screenWidth, 2, footerText),
-    [buffer, footerText, screenWidth]
-  );
-  const usePositionedCursor = !disabled && hasTerminalFocus && !showFooterText;
-  useTerminalFocusReporting(stdout, !disabled);
-  useTerminalExtendedKeys(stdout, !disabled);
-  useBracketedPaste(stdout, !disabled);
-  usePromptTerminalCursor(stdout, cursorPlacement, usePositionedCursor);
-  useHiddenTerminalCursor(stdout, !disabled && !usePositionedCursor);
+  // The prompt draws its own inverse-video cursor inside the text. Keep the
+  // native terminal cursor hidden so wrapping edges do not show two cursors.
+  const hideNativeCursor = !disabled;
 
   const refreshFileMentionItems = React.useCallback(() => {
     setFileMentionItems(scanFileMentionItems(projectRoot));
@@ -569,6 +560,10 @@ export const PromptInput = React.memo(function PromptInput({
     },
     { isActive: !disabled }
   );
+  useTerminalFocusReporting(stdout, !disabled);
+  useTerminalExtendedKeys(stdout, !disabled);
+  useBracketedPaste(stdout, !disabled);
+  useHiddenTerminalCursor(stdout, hideNativeCursor);
 
   function undo(): void {
     const previous = undoPromptEdit(undoRedoRef.current, buffer);
