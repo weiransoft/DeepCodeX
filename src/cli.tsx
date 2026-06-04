@@ -78,6 +78,9 @@ void main();
 
 async function main(): Promise<void> {
   const updatePromptResult = await promptForPendingUpdate(packageInfo);
+  if (updatePromptResult.installed) {
+    process.exit(0);
+  }
 
   const restartRef: { current: (() => void) | null } = { current: null };
 
@@ -110,9 +113,7 @@ async function main(): Promise<void> {
     });
   }
 
-  if (!updatePromptResult.installed) {
-    void checkForNpmUpdate(packageInfo);
-  }
+  void checkForNpmUpdate(packageInfo);
 
   startApp();
 }
