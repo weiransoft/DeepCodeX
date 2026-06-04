@@ -751,6 +751,14 @@ function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactEl
           onDelete={(id) => {
             void handleDeleteSession(id);
           }}
+          onRename={(id, newName) => {
+            if (sessionManager.renameSession(id, newName)) {
+              refreshSessionsList();
+              setStatusLine(`Session renamed to "${newName}".`);
+            } else {
+              setErrorLine("Failed to rename session.");
+            }
+          }}
         />
       ) : view === "undo" ? (
         <UndoSelector
