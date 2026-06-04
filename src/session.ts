@@ -1671,6 +1671,27 @@ ${skillMd}
     return true;
   }
 
+  /**
+   * Rename a session by updating its summary (display title).
+   * Returns true if the session was found and renamed, false otherwise.
+   */
+  renameSession(sessionId: string, summary: string): boolean {
+    const trimmed = summary.trim();
+    if (!trimmed) {
+      return false;
+    }
+    const entry = this.getSession(sessionId);
+    if (!entry) {
+      return false;
+    }
+    this.updateSessionEntry(sessionId, (existing) => ({
+      ...existing,
+      summary: trimmed,
+      updateTime: new Date().toISOString(),
+    }));
+    return true;
+  }
+
   listSessionMessages(sessionId: string): SessionMessage[] {
     const messagePath = this.getSessionMessagesPath(sessionId);
     if (!fs.existsSync(messagePath)) {
