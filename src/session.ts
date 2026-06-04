@@ -747,6 +747,7 @@ The candidate skills are as follows:\n\n`;
         client,
         {
           model,
+          temperature: 0.1,
           messages: [
             { role: "system", content: systemPrompt },
             { role: "user", content: userPrompt },
@@ -759,7 +760,7 @@ The candidate skills are as follows:\n\n`;
           enabled: debugLogEnabled,
           location: "SessionManager.identifyMatchingSkillNames",
           baseURL,
-          params: { purpose: "skill-matching" },
+          params: { purpose: "skill-matching", temperature: 0.1 },
         }
       );
       this.throwIfAborted(options?.signal);

@@ -2826,7 +2826,8 @@ test("SessionManager persists session and user message before skill matching is 
   const client = {
     chat: {
       completions: {
-        create: async (_request: Record<string, unknown>, options?: { signal?: AbortSignal }) => {
+        create: async (request: Record<string, unknown>, options?: { signal?: AbortSignal }) => {
+          assert.equal(request.temperature, 0.1);
           return new Promise((_resolve, reject) => {
             const signal = options?.signal;
             signal?.addEventListener("abort", () => reject(new APIUserAbortError()), { once: true });
