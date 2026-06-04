@@ -542,6 +542,64 @@ rl.on("line", (line) => {
   assert.deepEqual(manager.getMcpStatus(), []);
 });
 
+test("SessionManager exposes MCP tools with API-safe names and preserves original dispatch names", async () => {
+  const workspace = createTempDir("deepcode-mcp-safe-name-workspace-");
+  const serverPath = path.join(workspace, "mcp-invalid-name-server.cjs");
+  fs.writeFileSync(
+    serverPath,
+    `
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+function send(message) {
+  process.stdout.write(JSON.stringify(message) + "\\n");
+}
+rl.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (!("id" in request)) {
+    return;
+  }
+  if (request.method === "initialize") {
+    send({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} } } });
+    return;
+  }
+  if (request.method === "tools/list") {
+    send({ jsonrpc: "2.0", id: request.id, result: { tools: [
+      { name: "speak.text", description: "Speak text", inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
+      { name: "speak/text", description: "Speak text using a slash name", inputSchema: { type: "object", properties: {} } }
+    ] } });
+    return;
+  }
+  if (request.method === "tools/call") {
+    send({ jsonrpc: "2.0", id: request.id, result: { content: [{ type: "text", text: request.params.name + ":" + (request.params.arguments.text || "") }] } });
+    return;
+  }
+  send({ jsonrpc: "2.0", id: request.id, result: { content: [] } });
+});
+`,
+    "utf8"
+  );
+
+  const manager = createSessionManager(workspace, "machine-id-mcp-safe-name");
+  await manager.initMcpServers({ "voice.box": { command: process.execPath, args: [serverPath] } });
+
+  const status = manager.getMcpStatus()[0];
+  assert.equal(status?.status, "ready");
+  assert.deepEqual(status?.tools, ["mcp__voice_box__speak_text", "mcp__voice_box__speak_text_59a610ad"]);
+
+  const mcpManager = (manager as any).mcpManager;
+  const definitions = mcpManager.getMcpToolDefinitions();
+  assert.equal(definitions[0].function.name, "mcp__voice_box__speak_text");
+  assert.match(definitions[0].function.name, /^[a-zA-Z0-9_-]+$/);
+  assert.match(definitions[0].function.description, /MCP source: voice\.box: speak\.text/);
+  assert.deepEqual(await mcpManager.executeMcpTool("mcp__voice_box__speak_text", { text: "ok" }), {
+    ok: true,
+    name: "mcp__voice_box__speak_text",
+    output: "speak.text:ok",
+  });
+
+  manager.dispose();
+});
+
 test("SessionManager dispose kills live processes without timeout controls", (t) => {
   if (process.platform === "win32") {
     t.skip("process group kill assertion is non-Windows specific");
