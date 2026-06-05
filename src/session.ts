@@ -1275,7 +1275,9 @@ ${skillMd}
             permissionOverrides: permissionPrompt?.permissions,
             messagePermissions: pendingToolCallMessage.message?.meta?.permissions,
           });
-          permissionPrompt = await this.appendDeferredPermissionPrompt(sessionId, permissionPrompt, sessionController);
+          await this.appendDeferredPermissionPrompt(sessionId, permissionPrompt, sessionController);
+          // Permission replies are one-shot: do not reuse decisions or append the deferred user prompt again on later tool-call batches.
+          permissionPrompt = undefined;
           if (this.isInterrupted(sessionId)) {
             return;
           }
@@ -2298,9 +2300,9 @@ ${skillMd}
     sessionId: string,
     userPrompt: UserPromptContent | undefined,
     controller: AbortController
-  ): Promise<UserPromptContent | undefined> {
+  ): Promise<void> {
     if (!userPrompt || this.isContinuePrompt(userPrompt)) {
-      return undefined;
+      return;
     }
     const text = userPrompt.text ?? "";
     const hasUserContent =
@@ -2308,7 +2310,7 @@ ${skillMd}
       (Array.isArray(userPrompt.imageUrls) && userPrompt.imageUrls.length > 0) ||
       (Array.isArray(userPrompt.skills) && userPrompt.skills.length > 0);
     if (!hasUserContent) {
-      return undefined;
+      return;
     }
     this.reportNewPrompt();
     const signal = controller.signal;
@@ -2343,7 +2345,6 @@ ${skillMd}
         this.onAssistantMessage(skillMessage, true);
       }
     }
-    return undefined;
   }
 
   private buildToolParamsSnippet(toolFunction: unknown | null): string {
