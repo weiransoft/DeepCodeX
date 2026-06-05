@@ -10,6 +10,7 @@ import { buildThinkingRequestOptions } from "./common/openai-thinking";
 import { DEEPSEEK_V4_MODELS } from "./common/model-capabilities";
 import { readTextFileWithMetadata } from "./common/file-utils";
 import {
+  buildSkillDocumentsPrompt,
   getCompactPrompt,
   getDefaultSkillPrompt,
   getExtensionRoot,
@@ -878,6 +879,18 @@ ${agentInstructions}
     return path.join(os.homedir(), skillPath);
   }
 
+  private buildSkillPrompt(skill: SkillInfo): string {
+    const skillPath = this.resolveSkillPath(skill.path);
+    return buildSkillDocumentsPrompt([
+      {
+        name: skill.name,
+        content: fs.readFileSync(skillPath, "utf8"),
+        path: skillPath,
+        skillFilePath: skillPath,
+      },
+    ]);
+  }
+
   private readSkillInfo(skillPath: string, displayPath: string, fallbackName: string): SkillInfo {
     const fallbackSkill: SkillInfo = {
       name: fallbackName.replace(/_/g, "-"),
@@ -1101,11 +1114,7 @@ ${agentInstructions}
         if (skill.isLoaded) {
           continue;
         }
-        const skillMd = fs.readFileSync(this.resolveSkillPath(skill.path), "utf8");
-        const skillPrompt = `Use the skill document below to assist the user:\n
-<${skill.name}-skill path="${this.resolveSkillPath(skill.path)}">
-${skillMd}
-</${skill.name}-skill>`;
+        const skillPrompt = this.buildSkillPrompt(skill);
         const skillMessage = this.buildSkillMessage(sessionId, skillPrompt, skill);
         this.appendSessionMessage(sessionId, skillMessage);
         this.onAssistantMessage(skillMessage, true);
@@ -1180,11 +1189,7 @@ ${skillMd}
         if (skill.isLoaded) {
           continue;
         }
-        const skillMd = fs.readFileSync(this.resolveSkillPath(skill.path), "utf8");
-        const skillPrompt = `Use the skill document below to assist the user:\n
-<${skill.name}-skill path="${this.resolveSkillPath(skill.path)}">
-${skillMd}
-</${skill.name}-skill>`;
+        const skillPrompt = this.buildSkillPrompt(skill);
         const skillMessage = this.buildSkillMessage(sessionId, skillPrompt, skill);
         this.appendSessionMessage(sessionId, skillMessage);
         this.onAssistantMessage(skillMessage, true);
@@ -2335,11 +2340,7 @@ ${skillMd}
         if (skill.isLoaded) {
           continue;
         }
-        const skillMd = fs.readFileSync(this.resolveSkillPath(skill.path), "utf8");
-        const skillPrompt = `Use the skill document below to assist the user:\n
-<${skill.name}-skill path="${this.resolveSkillPath(skill.path)}">
-${skillMd}
-</${skill.name}-skill>`;
+        const skillPrompt = this.buildSkillPrompt(skill);
         const skillMessage = this.buildSkillMessage(sessionId, skillPrompt, skill);
         this.appendSessionMessage(sessionId, skillMessage);
         this.onAssistantMessage(skillMessage, true);
