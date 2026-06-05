@@ -415,7 +415,7 @@ test("SessionManager marks skills loaded from existing session messages", async 
   assert.equal(loadedSkill?.isLoaded, true);
 });
 
-test("SessionManager lists project skills from .agents with legacy .deepcode compatibility", async () => {
+test("SessionManager lists skills from Deep Code and .agents roots by priority", async () => {
   const workspace = createTempDir("deepcode-project-skills-workspace-");
   const home = createTempDir("deepcode-project-skills-home-");
   setHomeDir(home);
@@ -428,11 +428,19 @@ test("SessionManager lists project skills from .agents with legacy .deepcode com
     "utf8"
   );
 
-  const legacyProjectSkillDir = path.join(workspace, ".deepcode", "skills", "legacy");
-  fs.mkdirSync(legacyProjectSkillDir, { recursive: true });
+  const userNativeSkillDir = path.join(home, ".deepcode", "skills", "native-user");
+  fs.mkdirSync(userNativeSkillDir, { recursive: true });
   fs.writeFileSync(
-    path.join(legacyProjectSkillDir, "SKILL.md"),
-    "---\nname: legacy\ndescription: Legacy project skill\n---\n# Legacy\n",
+    path.join(userNativeSkillDir, "SKILL.md"),
+    "---\nname: native-user\ndescription: User .deepcode skill\n---\n# Native User\n",
+    "utf8"
+  );
+
+  const userNativeSharedSkillDir = path.join(home, ".deepcode", "skills", "shared");
+  fs.mkdirSync(userNativeSharedSkillDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(userNativeSharedSkillDir, "SKILL.md"),
+    "---\nname: shared\ndescription: User .deepcode skill\n---\n# Shared\n",
     "utf8"
   );
 
@@ -444,15 +452,23 @@ test("SessionManager lists project skills from .agents with legacy .deepcode com
     "utf8"
   );
 
+  const projectNativeSkillDir = path.join(workspace, ".deepcode", "skills", "shared");
+  fs.mkdirSync(projectNativeSkillDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(projectNativeSkillDir, "SKILL.md"),
+    "---\nname: shared\ndescription: Project .deepcode skill\n---\n# Shared\n",
+    "utf8"
+  );
+
   const manager = createSessionManager(workspace, "machine-id-project-skills");
   const skills = await manager.listSkills();
-  const legacySkill = skills.find((skill) => skill.name === "legacy");
+  const nativeUserSkill = skills.find((skill) => skill.name === "native-user");
   const sharedSkill = skills.find((skill) => skill.name === "shared");
 
-  assert.equal(legacySkill?.path, "./.deepcode/skills/legacy/SKILL.md");
-  assert.equal(legacySkill?.description, "Legacy project skill");
-  assert.equal(sharedSkill?.path, "./.agents/skills/shared/SKILL.md");
-  assert.equal(sharedSkill?.description, "Project .agents skill");
+  assert.equal(nativeUserSkill?.path, "~/.deepcode/skills/native-user/SKILL.md");
+  assert.equal(nativeUserSkill?.description, "User .deepcode skill");
+  assert.equal(sharedSkill?.path, "./.deepcode/skills/shared/SKILL.md");
+  assert.equal(sharedSkill?.description, "Project .deepcode skill");
 });
 
 test("SessionManager dispose disconnects MCP servers", async () => {
