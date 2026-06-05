@@ -718,7 +718,7 @@ export class SessionManager {
     options?: { signal?: AbortSignal; sessionId?: string }
   ): Promise<string[]> {
     this.throwIfAborted(options?.signal);
-    let systemPrompt = `When users ask you to perform tasks, check if any of the available skills match. Skills provide specialized capabilities and domain knowledge.\n
+    let systemPrompt = `When users ask you to perform tasks, check if any of the available skills match the goal and situation. Skills provide specialized capabilities and domain knowledge.\n
 Response in JSON format:
 \`\`\`
 {
@@ -726,7 +726,7 @@ Response in JSON format:
 }
 \`\`\`\n
 If none of the available skills match, respond with an empty array, i.e. \`{"skillNames": []}\`.\n
-The candidate skills are as follows:\n\n`;
+`;
     const simpleSkills = skills
       .filter((x) => !x.isLoaded)
       .map((x) => {
@@ -735,12 +735,22 @@ The candidate skills are as follows:\n\n`;
     if (simpleSkills.length === 0) {
       return [];
     }
-    systemPrompt += "```\n" + JSON.stringify(simpleSkills, null, 2) + "\n```";
 
     const { client, model, baseURL, debugLogEnabled } = this.createOpenAIClient();
     if (!client) {
       return [];
     }
+
+    const agentInstructions = this.loadAgentInstructions();
+    if (agentInstructions) {
+      systemPrompt += `Use the current agent instructions as additional context when deciding which skills match:\n
+<agent-instructions>
+${agentInstructions}
+</agent-instructions>\n
+`;
+    }
+    systemPrompt += "The candidate skills are as follows:\n\n";
+    systemPrompt += "```\n" + JSON.stringify(simpleSkills, null, 2) + "\n```";
 
     try {
       const response = await this.createChatCompletionStream(

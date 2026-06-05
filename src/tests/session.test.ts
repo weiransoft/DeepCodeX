@@ -893,6 +893,88 @@ test("createSession appends default system prompts in prefix-cache-friendly orde
   assert.equal(systemContents[3], "root project instructions");
 });
 
+test("createSession includes agent instructions in the skill matching system prompt", async () => {
+  const workspace = createTempDir("deepcode-skill-match-create-workspace-");
+  const home = createTempDir("deepcode-skill-match-create-home-");
+  setHomeDir(home);
+  globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
+
+  fs.mkdirSync(path.join(workspace, ".deepcode"), { recursive: true });
+  fs.writeFileSync(path.join(workspace, ".deepcode", "AGENTS.md"), "prefer project-specific skill matching", "utf8");
+  const skillDir = path.join(workspace, ".deepcode", "skills", "project-aware");
+  fs.mkdirSync(skillDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(skillDir, "SKILL.md"),
+    "---\nname: project-aware\ndescription: Match project-specific instructions\n---\n# Project Aware\n",
+    "utf8"
+  );
+
+  const requests: any[] = [];
+  const client = {
+    chat: {
+      completions: {
+        create: async (request: any) => {
+          requests.push(request);
+          return { choices: [{ message: { content: '{"skillNames":[]}' } }] };
+        },
+      },
+    },
+  };
+  const manager = createMockedClientSessionManagerWithClient(workspace, client);
+  (manager as any).activateSession = async () => {};
+
+  await manager.createSession({ text: "pick the right workflow" });
+
+  const messages = (requests[0]?.messages ?? []) as Array<{ role?: string; content?: string }>;
+  assert.equal(messages[0]?.role, "system");
+  assert.match(messages[0]?.content ?? "", /<agent-instructions>/);
+  assert.match(messages[0]?.content ?? "", /prefer project-specific skill matching/);
+  assert.match(messages[0]?.content ?? "", /<\/agent-instructions>/);
+  assert.match(messages[0]?.content ?? "", /The candidate skills are as follows/);
+  assert.equal(messages[1]?.role, "user");
+});
+
+test("replySession includes current agent instructions in the skill matching system prompt", async () => {
+  const workspace = createTempDir("deepcode-skill-match-reply-workspace-");
+  const home = createTempDir("deepcode-skill-match-reply-home-");
+  setHomeDir(home);
+  globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
+
+  const requests: any[] = [];
+  const client = {
+    chat: {
+      completions: {
+        create: async (request: any) => {
+          requests.push(request);
+          return { choices: [{ message: { content: '{"skillNames":[]}' } }] };
+        },
+      },
+    },
+  };
+  const manager = createMockedClientSessionManagerWithClient(workspace, client);
+  (manager as any).activateSession = async () => {};
+
+  const sessionId = await manager.createSession({ text: "" });
+  fs.writeFileSync(path.join(workspace, "AGENTS.md"), "use reply-time agent instructions", "utf8");
+  const skillDir = path.join(workspace, ".agents", "skills", "reply-aware");
+  fs.mkdirSync(skillDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(skillDir, "SKILL.md"),
+    "---\nname: reply-aware\ndescription: Match reply-time instructions\n---\n# Reply Aware\n",
+    "utf8"
+  );
+
+  await manager.replySession(sessionId, { text: "pick the reply workflow" });
+
+  const messages = (requests[0]?.messages ?? []) as Array<{ role?: string; content?: string }>;
+  assert.equal(messages[0]?.role, "system");
+  assert.match(messages[0]?.content ?? "", /<agent-instructions>/);
+  assert.match(messages[0]?.content ?? "", /use reply-time agent instructions/);
+  assert.match(messages[0]?.content ?? "", /<\/agent-instructions>/);
+  assert.match(messages[0]?.content ?? "", /The candidate skills are as follows/);
+  assert.equal(messages[1]?.role, "user");
+});
+
 test("replySession stores /init and sends the active root project AGENTS path to the LLM", async () => {
   const workspace = createTempDir("deepcode-init-root-workspace-");
   const home = createTempDir("deepcode-init-root-home-");
