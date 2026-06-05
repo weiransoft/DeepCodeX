@@ -796,14 +796,18 @@ ${agentInstructions}
     }
   }
 
-  async listSkills(sessionId?: string): Promise<SkillInfo[]> {
+  private getSkillScanRoots(): Array<{ root: string; displayRoot: string }> {
     const homeDir = os.homedir();
-    const skillRoots = [
+    return [
       { root: path.join(this.projectRoot, ".deepcode", "skills"), displayRoot: "./.deepcode/skills" },
       { root: path.join(this.projectRoot, ".agents", "skills"), displayRoot: "./.agents/skills" },
       { root: path.join(homeDir, ".deepcode", "skills"), displayRoot: "~/.deepcode/skills" },
       { root: path.join(homeDir, ".agents", "skills"), displayRoot: "~/.agents/skills" },
     ];
+  }
+
+  async listSkills(sessionId?: string): Promise<SkillInfo[]> {
+    const skillRoots = this.getSkillScanRoots();
     const skillsByName = new Map<string, SkillInfo>();
 
     const collectSkills = (root: string, displayRoot: string): SkillInfo[] => {
@@ -1354,6 +1358,7 @@ ${agentInstructions}
               projectRoot: this.projectRoot,
               toolCalls,
               settings: this.getResolvedSettings().permissions,
+              readPermissionExemptPaths: this.getSkillScanRoots().map((entry) => entry.root),
               resolveSnippetPath: (id, snippetId) => getSnippet(id, snippetId)?.filePath,
             })
           : null;
