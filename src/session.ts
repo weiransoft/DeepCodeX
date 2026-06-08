@@ -298,6 +298,7 @@ type SessionManagerOptions = {
     webSearchTool?: string;
     mcpServers?: Record<string, McpServerConfig>;
     permissions?: Required<PermissionSettings>;
+    enabledSkills?: Record<string, boolean>;
   };
   renderMarkdown: (text: string) => string;
   onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
@@ -324,6 +325,7 @@ export class SessionManager {
     webSearchTool?: string;
     mcpServers?: Record<string, McpServerConfig>;
     permissions?: Required<PermissionSettings>;
+    enabledSkills?: Record<string, boolean>;
   };
   private readonly onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   private readonly onSessionEntryUpdated?: (entry: SessionEntry) => void;
@@ -808,6 +810,7 @@ ${agentInstructions}
 
   async listSkills(sessionId?: string): Promise<SkillInfo[]> {
     const skillRoots = this.getSkillScanRoots();
+    const enabledSkills = this.getResolvedSettings().enabledSkills ?? {};
     const skillsByName = new Map<string, SkillInfo>();
 
     const collectSkills = (root: string, displayRoot: string): SkillInfo[] => {
@@ -839,7 +842,11 @@ ${agentInstructions}
         } catch {
           continue;
         }
-        results.push(this.readSkillInfo(skillPath, `${displayRoot}/${skillName}/SKILL.md`, skillName));
+        const skill = this.readSkillInfo(skillPath, `${displayRoot}/${skillName}/SKILL.md`, skillName);
+        if (enabledSkills[skill.name] === false) {
+          continue;
+        }
+        results.push(skill);
       }
       return results;
     };

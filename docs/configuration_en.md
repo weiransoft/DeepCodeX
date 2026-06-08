@@ -36,6 +36,7 @@ The following are all the top-level fields supported in `settings.json`, along w
 | `webSearchTool`    | string  | Full path to a custom web search script                                     |
 | `mcpServers`       | object  | MCP server configurations (keys are service names, values are McpServerConfig objects) |
 | `temperature`      | number  | Sampling temperature for LLM, from `0` to `2`                 |
+| `enabledSkills`    | object  | Per-skill enable/disable map, keyed by skill name                           |
 
 #### `env` Sub-fields
 
@@ -100,6 +101,23 @@ Deep Code has a built-in, free-to-use Web Search tool. If you need custom search
 ```
 
 The script receives a search query as an argument and outputs results in JSON format for the AI.
+
+#### `enabledSkills` — Skill Enablement
+
+Controls whether skills are included during skill scanning. Keys are resolved skill names, and values must be booleans:
+
+```json
+{
+  "enabledSkills": {
+    "skill-writer": false,
+    "code-review": true
+  }
+}
+```
+
+- Missing entries are enabled by default.
+- Setting a skill to `false` hides every skill with that resolved `name`, across project and user skill roots.
+- Project settings override user settings per skill. If the project setting omits a skill, the user setting is used.
 
 #### `mcpServers` — MCP Servers
 

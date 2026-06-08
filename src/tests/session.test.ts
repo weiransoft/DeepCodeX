@@ -471,6 +471,60 @@ test("SessionManager lists skills from Deep Code and .agents roots by priority",
   assert.equal(sharedSkill?.description, "Project .deepcode skill");
 });
 
+test("SessionManager excludes disabled skills by resolved skill name", async () => {
+  const workspace = createTempDir("deepcode-disabled-skills-workspace-");
+  const home = createTempDir("deepcode-disabled-skills-home-");
+  setHomeDir(home);
+
+  const writeSkill = (root: string, dirName: string, skillName: string): void => {
+    const skillDir = path.join(root, dirName);
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(skillDir, "SKILL.md"),
+      `---\nname: ${skillName}\ndescription: ${skillName} description\n---\n# ${skillName}\n`,
+      "utf8"
+    );
+  };
+
+  for (const root of [
+    path.join(workspace, ".deepcode", "skills"),
+    path.join(workspace, ".agents", "skills"),
+    path.join(home, ".deepcode", "skills"),
+    path.join(home, ".agents", "skills"),
+  ]) {
+    writeSkill(root, "skill-writer", "skill-writer");
+  }
+  writeSkill(path.join(workspace, ".deepcode", "skills"), "frontmatter-disabled", "renamed-disabled");
+  writeSkill(path.join(workspace, ".deepcode", "skills"), "enabled-skill", "enabled-skill");
+
+  const manager = new SessionManager({
+    projectRoot: workspace,
+    createOpenAIClient: () => ({
+      client: null,
+      model: "test-model",
+      baseURL: "https://api.deepseek.com",
+      thinkingEnabled: false,
+      machineId: "machine-id-disabled-skills",
+    }),
+    getResolvedSettings: () => ({
+      model: "test-model",
+      enabledSkills: {
+        "skill-writer": false,
+        "renamed-disabled": false,
+        "enabled-skill": true,
+      },
+    }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+  });
+
+  const skills = await manager.listSkills();
+  const skillNames = skills.map((skill) => skill.name);
+
+  assert.deepEqual(skillNames, ["enabled-skill"]);
+  assert.equal(skills[0]?.path, "./.deepcode/skills/enabled-skill/SKILL.md");
+});
+
 test("SessionManager dispose disconnects MCP servers", async () => {
   const workspace = createTempDir("deepcode-mcp-dispose-workspace-");
   const serverPath = path.join(workspace, "mcp-server.cjs");

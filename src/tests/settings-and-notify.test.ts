@@ -220,6 +220,39 @@ test("resolveSettingsSources merges permission settings", () => {
   assert.equal(resolved.permissions.defaultMode, "allowAll");
 });
 
+test("resolveSettingsSources merges enabledSkills with project precedence", () => {
+  const resolved = resolveSettingsSources(
+    {
+      enabledSkills: {
+        inherited: false,
+        "project-enabled": false,
+        "project-disabled": true,
+        invalid: "false" as never,
+      },
+    },
+    {
+      enabledSkills: {
+        "project-enabled": true,
+        "project-disabled": false,
+        projectOnly: true,
+        ignored: null as never,
+      },
+    },
+    {
+      model: "default-model",
+      baseURL: "https://default.example.com",
+    },
+    TEST_PROCESS_ENV
+  );
+
+  assert.deepEqual(resolved.enabledSkills, {
+    inherited: false,
+    "project-enabled": true,
+    "project-disabled": false,
+    projectOnly: true,
+  });
+});
+
 test("resolveSettingsSources merges MCP env with documented priority", () => {
   const resolved = resolveSettingsSources(
     {
