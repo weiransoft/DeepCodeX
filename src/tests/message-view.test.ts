@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import React from "react";
+import { renderToString } from "ink";
 import { parseDiffPreview } from "../ui";
+import { MessageView, getPromptEchoContentWidth } from "../ui/components/MessageView";
 import {
   buildThinkingSummary,
   formatBashStatusParams,
@@ -117,6 +120,26 @@ test("renderMessageToStdout shows (no content) for empty user messages", () => {
   const msg = makeSessionMessage({ role: "user", content: "" });
   const output = renderMessageToStdout(msg, RawMode.Raw);
   assert.ok(output.includes("(no content)"));
+});
+
+test("MessageView echoes submitted user prompts with live prompt wrapping width", () => {
+  assert.equal(getPromptEchoContentWidth(8), 6);
+
+  const msg = makeSessionMessage({ role: "user", content: "abcdefg" });
+  const output = renderToString(React.createElement(MessageView, { message: msg, width: 8 }), { columns: 8 });
+
+  assert.equal(output, "> abcdef\n  g\n");
+});
+
+test("MessageView echoes model changes with submitted prompt wrapping", () => {
+  const msg = makeSessionMessage({
+    role: "system",
+    content: "abcdefgh",
+    meta: { isModelChange: true },
+  });
+  const output = renderToString(React.createElement(MessageView, { message: msg, width: 8 }), { columns: 8 });
+
+  assert.equal(output, "> abcdef\n  gh\n");
 });
 
 test("renderMessageToStdout renders assistant non-thinking messages with ✦", () => {
