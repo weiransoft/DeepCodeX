@@ -471,6 +471,57 @@ test("SessionManager lists skills from Deep Code and .agents roots by priority",
   assert.equal(sharedSkill?.description, "Project .deepcode skill");
 });
 
+test("SessionManager lists bundled skills at lowest priority", async () => {
+  const workspace = createTempDir("deepcode-bundled-skills-workspace-");
+  const home = createTempDir("deepcode-bundled-skills-home-");
+  setHomeDir(home);
+
+  const manager = createSessionManager(workspace, "machine-id-bundled-skills");
+  const skills = await manager.listSkills();
+  const skillWriter = skills.find((skill) => skill.name === "skill-writer");
+  const selfRefer = skills.find((skill) => skill.name === "deepcode-self-refer");
+
+  assert.equal(skillWriter?.path, "bundled:skill-writer/SKILL.md");
+  assert.equal(selfRefer?.path, "bundled:deepcode-self-refer/SKILL.md");
+  assert.match(skillWriter?.description ?? "", /Guide users through creating/);
+});
+
+test("SessionManager lets project skills override bundled skills", async () => {
+  const workspace = createTempDir("deepcode-bundled-override-workspace-");
+  const home = createTempDir("deepcode-bundled-override-home-");
+  setHomeDir(home);
+
+  const projectSkillDir = path.join(workspace, ".deepcode", "skills", "skill-writer");
+  fs.mkdirSync(projectSkillDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(projectSkillDir, "SKILL.md"),
+    "---\nname: skill-writer\ndescription: Project override skill writer\n---\n# Project Skill Writer\n",
+    "utf8"
+  );
+
+  const manager = createSessionManager(workspace, "machine-id-bundled-override");
+  const skillWriter = (await manager.listSkills()).find((skill) => skill.name === "skill-writer");
+
+  assert.equal(skillWriter?.path, "./.deepcode/skills/skill-writer/SKILL.md");
+  assert.equal(skillWriter?.description, "Project override skill writer");
+});
+
+test("SessionManager resolves bundled skill prompts", () => {
+  const workspace = createTempDir("deepcode-bundled-prompt-workspace-");
+  const home = createTempDir("deepcode-bundled-prompt-home-");
+  setHomeDir(home);
+
+  const manager = createSessionManager(workspace, "machine-id-bundled-prompt");
+  const prompt = (manager as any).buildSkillPrompt({
+    name: "skill-writer",
+    path: "bundled:skill-writer/SKILL.md",
+    description: "Write skills",
+  });
+
+  assert.match(prompt, /<skill-writer-skill/);
+  assert.match(prompt, /# Skill Writer/);
+});
+
 test("SessionManager excludes disabled skills by resolved skill name", async () => {
   const workspace = createTempDir("deepcode-disabled-skills-workspace-");
   const home = createTempDir("deepcode-disabled-skills-home-");
@@ -511,6 +562,8 @@ test("SessionManager excludes disabled skills by resolved skill name", async () 
       enabledSkills: {
         "skill-writer": false,
         "renamed-disabled": false,
+        "deepcode-self-refer": false,
+        "skill-digester": false,
         "enabled-skill": true,
       },
     }),
@@ -2814,7 +2867,10 @@ test("SessionManager stores usage per model across model changes", async () => {
   const client = {
     chat: {
       completions: {
-        create: async () => {
+        create: async (request: any) => {
+          if (isSkillMatchingRequest(request)) {
+            return createSkillMatchingResponse();
+          }
           const response = responses.shift();
           assert.ok(response, "expected a queued chat response");
           return response;
@@ -3353,7 +3409,10 @@ function createNotifyingSessionManager(
   const client = {
     chat: {
       completions: {
-        create: async () => {
+        create: async (request: any) => {
+          if (isSkillMatchingRequest(request)) {
+            return createSkillMatchingResponse();
+          }
           const response = responses.shift();
           assert.ok(response, "expected a queued chat response");
           if (response instanceof Error) {
@@ -3391,7 +3450,10 @@ function createMockedClientSessionManager(projectRoot: string, responses: unknow
   const client = {
     chat: {
       completions: {
-        create: async () => {
+        create: async (request: any) => {
+          if (isSkillMatchingRequest(request)) {
+            return createSkillMatchingResponse();
+          }
           const response = responses.shift();
           assert.ok(response, "expected a queued chat response");
           return response;
@@ -3427,7 +3489,10 @@ function createPermissionSessionManager(
   const client = {
     chat: {
       completions: {
-        create: async () => {
+        create: async (request: any) => {
+          if (isSkillMatchingRequest(request)) {
+            return createSkillMatchingResponse();
+          }
           const response = responses.shift();
           assert.ok(response, "expected a queued chat response");
           return response;
@@ -3466,6 +3531,14 @@ function createMockedClientSessionManagerWithClient(projectRoot: string, client:
 }
 
 class APIUserAbortError extends Error {}
+
+function isSkillMatchingRequest(request: any): boolean {
+  return request?.response_format?.type === "json_object";
+}
+
+function createSkillMatchingResponse(): unknown {
+  return { choices: [{ message: { content: '{"skillNames":[]}' } }] };
+}
 
 function createChatResponse(content: string, usage: Record<string, unknown>): unknown {
   return {

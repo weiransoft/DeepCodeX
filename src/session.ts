@@ -805,7 +805,20 @@ ${agentInstructions}
       { root: path.join(this.projectRoot, ".agents", "skills"), displayRoot: "./.agents/skills" },
       { root: path.join(homeDir, ".deepcode", "skills"), displayRoot: "~/.deepcode/skills" },
       { root: path.join(homeDir, ".agents", "skills"), displayRoot: "~/.agents/skills" },
+      { root: this.getBundledSkillsRoot(), displayRoot: "bundled:" },
     ];
+  }
+
+  private getBundledSkillsRoot(): string {
+    const extensionRoot = getExtensionRoot();
+    const sourceRoot = path.join(extensionRoot, "templates", "skills", "bundled");
+    const distRoot = path.join(extensionRoot, "dist", "bundled");
+
+    // Source check keeps local development/tests on the checked-in templates.
+    if (fs.existsSync(path.join(extensionRoot, "src", "session.ts")) && fs.existsSync(sourceRoot)) {
+      return sourceRoot;
+    }
+    return fs.existsSync(distRoot) ? distRoot : sourceRoot;
   }
 
   async listSkills(sessionId?: string): Promise<SkillInfo[]> {
@@ -842,7 +855,9 @@ ${agentInstructions}
         } catch {
           continue;
         }
-        const skill = this.readSkillInfo(skillPath, `${displayRoot}/${skillName}/SKILL.md`, skillName);
+        const displayPath =
+          displayRoot === "bundled:" ? `bundled:${skillName}/SKILL.md` : `${displayRoot}/${skillName}/SKILL.md`;
+        const skill = this.readSkillInfo(skillPath, displayPath, skillName);
         if (enabledSkills[skill.name] === false) {
           continue;
         }
@@ -872,6 +887,16 @@ ${agentInstructions}
   }
 
   private resolveSkillPath(skillPath: string): string {
+    if (skillPath.startsWith("bundled:")) {
+      const relativePath = skillPath.slice("bundled:".length);
+      const root = this.getBundledSkillsRoot();
+      const resolvedPath = path.resolve(root, relativePath);
+      const resolvedRoot = path.resolve(root);
+      if (resolvedPath === resolvedRoot || !resolvedPath.startsWith(`${resolvedRoot}${path.sep}`)) {
+        return path.join(root, "__invalid_bundled_skill__");
+      }
+      return resolvedPath;
+    }
     if (skillPath.startsWith("~/")) {
       return path.join(os.homedir(), skillPath.slice(2));
     }

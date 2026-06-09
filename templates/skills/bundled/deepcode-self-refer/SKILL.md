@@ -1,0 +1,125 @@
+---
+name: deepcode-self-refer
+description: 回答关于 Deep Code CLI 本身的问题——包括功能特性、配置项、斜杠命令、Skills、MCP 集成、权限、通知、会话持久化及故障排查。当用户询问如何配置或使用 Deep Code、如何设置 MCP 服务器、配置通知（如 Slack/飞书）、管理权限、查看可用技能、理解斜杠命令、配置思考模式、使用 Undo 功能，或咨询 Deep Code 与 VSCode 集成等场景时使用。
+---
+
+# Deep Code Self-Refer
+
+This Skill helps you answer user questions about Deep Code CLI itself by consulting the reference documentation bundled with this Skill. All docs live in the `references/` subdirectory — always refer to them for authoritative answers.
+
+## When to use this Skill
+
+Use this Skill when the user asks any question about Deep Code itself, such as:
+
+- "列出可用的 skills"
+- "如何配置 MCP？"
+- "给当前项目配置 playwright mcp"
+- "怎么启用搜索功能？"
+- "支持哪些模型？"
+- "如何配置思考模式？"
+- "怎么设置权限？"
+- "任务完成后怎么发通知？"
+- "支持哪些斜杠命令？"
+- "会话历史保存在哪里？"
+- "/undo 是怎么工作的？"
+- "Deep Code 和 VSCode 插件怎么配合？"
+- Any other question about Deep Code CLI's features, configuration, or usage.
+
+## Instructions
+
+### Step 1: Identify the topic
+
+Map the user's question to the appropriate document(s):
+
+| Topic | Document | Key contents |
+|-------|----------|-------------|
+| **Overview, features, quick start** | `references/README.md` | Installation, slash commands, keyboard shortcuts, supported models, FAQ |
+| **Configuration & settings** | `references/configuration.md` | `settings.json` fields, config hierarchy, env vars, thinking mode, reasoning effort, webSearchTool, enabledSkills |
+| **MCP setup & usage** | `references/mcp.md` | MCP server config format, GitHub/Playwright/Filesystem examples, tool naming (`mcp__<name>__<tool>`), troubleshooting |
+| **Permissions** | `references/permission.md` | Permission scopes (10 types), allow/deny/ask/defaultMode config, priority rules, persistence |
+| **Notifications** | `references/notify.md` | Notify script path, injected env vars, Slack/Feishu/iTerm2/macOS/Linux/Windows examples |
+| **Session persistence** | `references/session-persistence.md` | Storage paths, JSONL format, session index, compaction, `/undo` mechanics, code snapshots |
+
+### Step 2: Read the relevant document(s)
+
+Use the `Read` tool to read the appropriate document(s) from the list above. All paths are relative to this Skill's loaded root directory, where the `references/` subdirectory lives.
+
+- If the question spans multiple topics, read multiple documents.
+- If a document doesn't exist in the user's preferred language (e.g., Chinese), try the other language variant (e.g., `references/configuration_en.md`).
+- When answering from references/README.md, focus on the relevant sections.
+
+### Step 3: Answer with precision
+
+- **Quote the doc directly** for config examples, JSON snippets, or command syntax.
+- **Don't guess** — if the answer isn't in the docs, say so and suggest checking GitHub Issues.
+- **Provide copy-paste-ready configurations** when the user asks to set something up (e.g., MCP servers, notify scripts, permissions).
+- **Mention related docs** when appropriate (e.g., MCP setup references `references/mcp.md`, the permissions section references `references/permission.md`).
+
+### Step 4: Handle common request patterns
+
+**"列出/查看可用的 skills":**
+- Explain the skill scanning paths from references/README.md (`./.deepcode/skills/`, `./.agents/skills/`, `~/.deepcode/skills/`, `~/.agents/skills/`, and bundled built-in skills)
+- Explain that `/skills` slash command lists available skills
+- Mention `enabledSkills` in `settings.json` for enabling/disabling specific skills
+
+**"配置 <X> MCP":**
+- Read `references/mcp.md` for the MCP format and examples
+- Ask the user for any required credentials (e.g., GitHub token)
+- Provide the exact `mcpServers` JSON block to add to `settings.json`
+- Mention using `/mcp` to verify the setup afterwards
+
+**"如何配置/修改 <设置项>":**
+- Read `references/configuration.md`
+- Explain which `settings.json` field controls the setting
+- Clarify user-level (`~/.deepcode/settings.json`) vs project-level (`.deepcode/settings.json`)
+- Provide the exact JSON snippet
+
+**"<斜杠命令> 是做什么的？":**
+- Read the slash command table from references/README.md
+- Provide a brief explanation with any additional context from relevant docs
+
+### Best practices
+
+1. **Always consult the docs first** — never answer from memory alone; the docs are the source of truth.
+2. **Provide copy-paste-ready JSON** — users want to copy config blocks directly into their `settings.json`.
+3. **Be specific about file paths** — always specify whether it's `~/.deepcode/settings.json` or `.deepcode/settings.json`.
+4. **Mention `/mcp` verification** — after any MCP configuration change, remind users to use `/mcp` to verify.
+5. **Acknowledge both Chinese and English docs** — the project has docs in both languages (`references/xxx.md` for Chinese, `references/xxx_en.md` for English).
+
+## Examples
+
+### Example 1: "列出可用的skills"
+
+Read references/README.md, locate the Skills section. Answer:
+
+- Skills are discovered from: `./.deepcode/skills/`, `./.agents/skills/`, `~/.deepcode/skills/`, `~/.agents/skills/`, and bundled built-in skills such as `bundled:deepcode-self-refer/SKILL.md`.
+- Use `/skills` slash command in the Deep Code CLI to list all available skills
+- Use `enabledSkills` in `settings.json` to enable/disable skills by name
+
+### Example 2: "给当前项目配置playwright mcp"
+
+Read `references/mcp.md`, locate the Playwright example. Answer:
+
+- Add to `settings.json` (user-level `~/.deepcode/settings.json` or project-level `.deepcode/settings.json`):
+
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"]
+    }
+  }
+}
+```
+
+- If merging with existing config, add the `"playwright"` entry into the existing `mcpServers` object
+- After saving, use `/mcp` in Deep Code to verify the server is running
+
+### Example 3: "怎么设置通知到Slack?"
+
+Read `references/notify.md`, locate the Slack section. Answer with the script + config.
+
+### Example 4: "如何只允许AI读写当前目录?"
+
+Read `references/permission.md`, locate the strict mode example. Provide the exact JSON.

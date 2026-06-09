@@ -15,6 +15,7 @@
   "main": "./dist/cli.js",
   "files": [
     "dist/cli.js",
+    "dist/bundled/**",
     "templates/tools/**",
     "templates/prompts/**",
     "templates/skills/**",
@@ -26,7 +27,7 @@
   },
   "scripts": {
     "typecheck": "tsc -p ./ --noEmit",
-    "bundle": "esbuild ./src/cli.tsx --bundle --platform=node --format=esm --target=node18 --outfile=dist/cli.js --banner:js=\"#!/usr/bin/env node\" --jsx=automatic --jsx-import-source=react --packages=external --log-override:empty-import-meta=silent",
+    "bundle": "esbuild ./src/cli.tsx --bundle --platform=node --format=esm --target=node18 --outfile=dist/cli.js --banner:js=\"#!/usr/bin/env node\" --jsx=automatic --jsx-import-source=react --packages=external --log-override:empty-import-meta=silent && node scripts/copy_bundle_assets.js",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "format": "prettier --write 'src/**/*.{ts,tsx}'",
