@@ -15,6 +15,7 @@ import {
   getPromptReturnKeyAction,
   isPromptCursorAtWrapBoundary,
   isClearImageAttachmentsShortcut,
+  isRawModeShortcut,
   removeCurrentSlashToken,
   resolvePromptTerminalCursorPosition,
   toggleSkillSelection,
@@ -204,6 +205,13 @@ test("parseTerminalInput recognizes ctrl+x as the image attachment clear shortcu
   assert.equal(input, "x");
   assert.equal(key.ctrl, true);
   assert.equal(isClearImageAttachmentsShortcut(input, key), true);
+});
+
+test("parseTerminalInput recognizes ctrl+r as the raw mode shortcut", () => {
+  const { input, key } = parseTerminalInput("\u0012");
+  assert.equal(input, "r");
+  assert.equal(key.ctrl, true);
+  assert.equal(isRawModeShortcut(input, key), true);
 });
 
 test("parseTerminalInput recognizes ctrl+- modifyOtherKeys sequence (standard)", () => {

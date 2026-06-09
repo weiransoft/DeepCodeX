@@ -26,6 +26,7 @@ export {
   toggleSkillSelection,
   removeCurrentSlashToken,
   isClearImageAttachmentsShortcut,
+  isRawModeShortcut,
   getPromptReturnKeyAction,
   renderBufferWithCursor,
   buildInitPromptSubmission,

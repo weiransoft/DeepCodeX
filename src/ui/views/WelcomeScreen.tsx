@@ -23,6 +23,7 @@ const SHORTCUT_TIPS = [
   { label: "Enter", description: "Send the prompt" },
   { label: "Shift+Enter", description: "Insert a newline" },
   { label: "Ctrl+V", description: "Paste an image from the clipboard" },
+  { label: "Ctrl+R", description: "Open raw display mode selection" },
   { label: "Esc", description: "Interrupt the current model turn" },
   { label: "/", description: "Open the skills and commands menu" },
   { label: "Ctrl+D twice", description: "Quit Deep Code CLI" },

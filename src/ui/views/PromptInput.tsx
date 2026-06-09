@@ -169,18 +169,19 @@ export const PromptInput = React.memo(function PromptInput({
   const showFileMentionMenu =
     !showSkillsDropdown &&
     !showModelDropdown &&
+    !openRawModelDropdown &&
     fileMentionToken !== null &&
     fileMentionKey !== dismissedFileMentionKey;
   const slashItems = React.useMemo(() => buildSlashCommands(skills), [skills]);
   const slashToken = getCurrentSlashToken(buffer);
   const slashMenu = React.useMemo(
     () =>
-      showSkillsDropdown || showModelDropdown || showFileMentionMenu
+      showSkillsDropdown || showModelDropdown || openRawModelDropdown || showFileMentionMenu
         ? []
         : slashToken
           ? filterSlashCommands(slashItems, slashToken)
           : [],
-    [showSkillsDropdown, showModelDropdown, showFileMentionMenu, slashToken, slashItems]
+    [showSkillsDropdown, showModelDropdown, openRawModelDropdown, showFileMentionMenu, slashToken, slashItems]
   );
   const showMenu = slashMenu.length > 0;
   const promptHistoryKey = React.useMemo(() => promptHistory.join("\0"), [promptHistory]);
@@ -315,6 +316,9 @@ export const PromptInput = React.memo(function PromptInput({
       }
 
       if (key.escape) {
+        if (openRawModelDropdown) {
+          return;
+        }
         if (showFileMentionMenu) {
           return;
         }
@@ -322,6 +326,13 @@ export const PromptInput = React.memo(function PromptInput({
           onInterrupt();
           setStatusMessage("Interrupting…");
         }
+        return;
+      }
+
+      if (isRawModeShortcut(input, key)) {
+        setShowSkillsDropdown(false);
+        setShowModelDropdown(false);
+        setOpenRawModelDropdown(true);
         return;
       }
 
@@ -885,6 +896,10 @@ export function removeCurrentSlashToken(state: PromptBufferState): PromptBufferS
 
 export function isClearImageAttachmentsShortcut(input: string, key: Pick<InputKey, "ctrl">): boolean {
   return key.ctrl && (input === "x" || input === "X");
+}
+
+export function isRawModeShortcut(input: string, key: Pick<InputKey, "ctrl">): boolean {
+  return key.ctrl && (input === "r" || input === "R");
 }
 
 export type PromptReturnKeyAction = "submit" | "newline" | null;
