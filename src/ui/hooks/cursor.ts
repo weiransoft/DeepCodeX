@@ -1,28 +1,19 @@
-import { useLayoutEffect, useRef } from "react";
+import { useCursor, useBoxMetrics } from "ink";
+import { useLayoutEffect, useState } from "react";
+import type { RefObject } from "react";
+import type { DOMElement } from "ink";
 import type { PromptBufferState } from "../core/prompt-buffer";
 
-type CursorPlacement = {
-  rowsUp: number;
+export type CursorPlacement = {
+  row: number;
   column: number;
 };
 
-type WriteFn = (
-  chunk: string | Uint8Array,
-  encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
-  callback?: (error?: Error | null) => void
-) => boolean;
-
-function cursorUp(rows: number): string {
-  return rows > 0 ? `\u001B[${rows}A` : "";
-}
-
-function cursorDown(rows: number): string {
-  return rows > 0 ? `\u001B[${rows}B` : "";
-}
-
-function cursorForward(columns: number): string {
-  return columns > 0 ? `\u001B[${columns}C` : "";
-}
+export type PromptCursorOrigin = {
+  layoutKey: string;
+  left: number;
+  top: number;
+};
 
 function showCursor(): string {
   return "\u001B[?25h";
@@ -59,42 +50,40 @@ export function disableTerminalExtendedKeys(): string {
 export function getPromptCursorPlacement(
   state: PromptBufferState,
   screenWidth: number,
-  prefixWidth: number,
-  footerText: string
+  initialColumn = 0
 ): CursorPlacement {
   const width = Math.max(1, screenWidth);
   const cursor = Math.max(0, Math.min(state.cursor, state.text.length));
   const beforeCursor = state.text.slice(0, cursor);
-  const at = state.text[cursor];
-  const displayText =
-    beforeCursor +
-    (typeof at === "undefined" || at === "\n" ? " " : at) +
-    (at === "\n" ? "\n" : "") +
-    (typeof at === "undefined" ? "" : state.text.slice(cursor + 1));
-
-  const cursorPosition = measureTextPosition(beforeCursor, width, prefixWidth);
-  const promptRows = measureTextRows(displayText, width, prefixWidth);
-  const footerRows = 1 + measureTextRows(footerText, width, 0);
-
-  return {
-    rowsUp: promptRows - 1 - cursorPosition.row + footerRows + 1,
-    column: cursorPosition.column,
-  };
+  const cursorPosition = measureTextPosition(beforeCursor, width, initialColumn);
+  return { row: cursorPosition.row, column: cursorPosition.column };
 }
 
-function measureTextRows(text: string, width: number, initialColumn: number): number {
-  return measureTextPosition(text, width, initialColumn).row + 1;
+export function isPromptCursorAtWrapBoundary(state: PromptBufferState, screenWidth: number): boolean {
+  const width = Math.max(1, screenWidth);
+  const cursor = Math.max(0, Math.min(state.cursor, state.text.length));
+  const currentLineStart = state.text.lastIndexOf("\n", Math.max(0, cursor - 1)) + 1;
+  const currentLineBeforeCursor = state.text.slice(currentLineStart, cursor);
+  return measureTextPosition(currentLineBeforeCursor, width, 0).row > 0;
 }
 
 function measureTextPosition(text: string, width: number, initialColumn: number): { row: number; column: number } {
   let row = 0;
   let column = Math.min(initialColumn, width - 1);
+  let pendingWrap = false;
 
   for (const char of Array.from(text)) {
     if (char === "\n") {
       row++;
       column = Math.min(initialColumn, width - 1);
+      pendingWrap = false;
       continue;
+    }
+
+    if (pendingWrap) {
+      row++;
+      column = Math.min(initialColumn, width - 1);
+      pendingWrap = false;
     }
 
     const charColumns = textWidth(char);
@@ -104,9 +93,13 @@ function measureTextPosition(text: string, width: number, initialColumn: number)
     }
     column += charColumns;
     if (column >= width) {
-      row++;
-      column = Math.min(initialColumn, width - 1);
+      column = width;
+      pendingWrap = true;
     }
+  }
+
+  if (pendingWrap) {
+    return { row: row + 1, column: Math.min(initialColumn, width - 1) };
   }
 
   return { row, column };
@@ -144,90 +137,79 @@ function characterWidth(char: string): number {
 }
 
 export function usePromptTerminalCursor(
-  stdout: NodeJS.WriteStream | undefined,
+  targetRef: RefObject<DOMElement | null>,
   placement: CursorPlacement,
-  isActive: boolean
-): void {
-  const directWriteRef = useRef<((data: string) => void) | null>(null);
-  const activePlacementRef = useRef<CursorPlacement | null>(null);
-  const lastPlacementRef = useRef<CursorPlacement | null>(null);
-  const unmountingRef = useRef(false);
+  isActive: boolean,
+  layoutKey = "default"
+): boolean {
+  const { setCursorPosition } = useCursor();
+  const metrics = useBoxMetrics(targetRef as RefObject<DOMElement>);
+  const [origin, setOrigin] = useState<PromptCursorOrigin | null>(null);
 
   useLayoutEffect(() => {
-    if (!stdout?.isTTY) {
+    if (!isActive || !metrics.hasMeasured) {
       return;
     }
 
-    const stream = stdout as NodeJS.WriteStream & { write: WriteFn };
-    const originalWrite = stream.write;
-    const directWrite = (data: string) => {
-      originalWrite.call(stdout, data);
-    };
-    const restorePromptCursor = () => {
-      if (unmountingRef.current) {
-        return;
+    const absolutePosition = getAbsoluteElementPosition(targetRef.current);
+    setOrigin((previous) => {
+      if (!absolutePosition) {
+        return previous === null ? previous : null;
       }
-      const activePlacement = activePlacementRef.current;
-      if (!activePlacement) {
-        return;
+
+      if (
+        previous?.layoutKey === layoutKey &&
+        previous.left === absolutePosition.left &&
+        previous.top === absolutePosition.top
+      ) {
+        return previous;
       }
-      directWrite("\r" + cursorDown(activePlacement.rowsUp) + hideCursor());
-      activePlacementRef.current = null;
-      // Schedule a deferred re-position in case the layout effect does not
-      // re-run (e.g. a dropdown closed without changing the buffer).
-      Promise.resolve().then(() => {
-        if (unmountingRef.current || activePlacementRef.current) {
-          return;
-        }
-        const latest = directWriteRef.current;
-        const p = lastPlacementRef.current;
-        if (latest && p) {
-          latest(showCursor() + cursorUp(p.rowsUp) + "\r" + cursorForward(p.column));
-          activePlacementRef.current = p;
-        }
-      });
-    };
-    const patchedWrite: WriteFn = (...args) => {
-      restorePromptCursor();
-      return originalWrite.apply(stdout, args);
-    };
 
-    directWriteRef.current = directWrite;
-    stream.write = patchedWrite;
+      return {
+        layoutKey,
+        left: absolutePosition.left,
+        top: absolutePosition.top,
+      };
+    });
+  }, [isActive, layoutKey, metrics.hasMeasured, metrics.height, metrics.left, metrics.top, metrics.width, targetRef]);
 
-    return () => {
-      restorePromptCursor();
-      stream.write = originalWrite;
-      directWriteRef.current = null;
-    };
-  }, [stdout]);
+  const cursorPosition = resolvePromptTerminalCursorPosition(placement, isActive, layoutKey, origin);
+  setCursorPosition(cursorPosition);
+  return cursorPosition !== undefined;
+}
 
-  useLayoutEffect(() => {
-    if (!isActive || !stdout?.isTTY) {
-      return;
+export function resolvePromptTerminalCursorPosition(
+  placement: CursorPlacement,
+  isActive: boolean,
+  layoutKey: string,
+  origin: PromptCursorOrigin | null
+): { x: number; y: number } | undefined {
+  if (!isActive || origin?.layoutKey !== layoutKey) {
+    return undefined;
+  }
+
+  return {
+    x: Math.max(0, Math.round(origin.left + placement.column)),
+    y: Math.max(0, Math.round(origin.top + placement.row)),
+  };
+}
+
+function getAbsoluteElementPosition(element: DOMElement | null): { left: number; top: number } | null {
+  let current: DOMElement | undefined = element ?? undefined;
+  let left = 0;
+  let top = 0;
+
+  while (current) {
+    const layout = current.yogaNode?.getComputedLayout();
+    if (!layout) {
+      return null;
     }
+    left += layout.left;
+    top += layout.top;
+    current = current.parentNode;
+  }
 
-    unmountingRef.current = false;
-    const directWrite = directWriteRef.current;
-    if (!directWrite) {
-      return;
-    }
-
-    directWrite(showCursor() + cursorUp(placement.rowsUp) + "\r" + cursorForward(placement.column));
-    activePlacementRef.current = placement;
-    lastPlacementRef.current = placement;
-
-    return () => {
-      unmountingRef.current = true;
-      lastPlacementRef.current = null;
-      const activePlacement = activePlacementRef.current;
-      if (!activePlacement) {
-        return;
-      }
-      directWrite("\r" + cursorDown(activePlacement.rowsUp) + hideCursor());
-      activePlacementRef.current = null;
-    };
-  }, [isActive, placement, stdout]);
+  return { left, top };
 }
 
 export function useHiddenTerminalCursor(stdout: NodeJS.WriteStream | undefined, isActive: boolean): void {

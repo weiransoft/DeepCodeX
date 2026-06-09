@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useApp, useStdout } from "ink";
+import type { DOMElement } from "ink";
 import chalk from "chalk";
 import { ARGS_SEPARATOR } from "../constants";
 import {
@@ -48,6 +49,7 @@ import {
   usePasteHandling,
   useHistoryNavigation,
   getPromptCursorPlacement,
+  isPromptCursorAtWrapBoundary,
   usePromptTerminalCursor,
 } from "../hooks";
 import type { InputKey } from "../hooks";
@@ -85,6 +87,7 @@ type Props = {
   screenWidth: number;
   promptHistory: string[];
   busy: boolean;
+  cursorLayoutKey?: string;
   loadingText?: string | null;
   disabled?: boolean;
   placeholder?: string;
@@ -97,26 +100,12 @@ type Props = {
   onToggleProcessStdout?: () => void;
 };
 
-const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const PROMPT_PREFIX_WIDTH = 2;
 
-const PromptPrefixLine = React.memo(function PromptPrefixLine({ busy }: { busy: boolean }): React.ReactElement {
-  const [spinnerIndex, setSpinnerIndex] = useState(0);
-
-  useEffect(() => {
-    if (!busy) {
-      setSpinnerIndex(0);
-      return;
-    }
-    const timer = setInterval(() => {
-      setSpinnerIndex((index) => (index + 1) % SPINNER_FRAMES.length);
-    }, 80);
-    return () => clearInterval(timer);
-  }, [busy]);
-
-  const prefix = busy ? `${SPINNER_FRAMES[spinnerIndex]} ` : "> ";
+const PromptPrefixLine = React.memo(function PromptPrefixLine(): React.ReactElement {
   return (
-    <Box width={2}>
-      <Text color={busy ? "yellow" : "#229ac3"}>{prefix}</Text>
+    <Box width={PROMPT_PREFIX_WIDTH}>
+      <Text color="#229ac3">{"> "}</Text>
     </Box>
   );
 });
@@ -128,6 +117,7 @@ export const PromptInput = React.memo(function PromptInput({
   screenWidth,
   promptHistory,
   busy,
+  cursorLayoutKey,
   loadingText,
   disabled,
   placeholder,
@@ -141,6 +131,7 @@ export const PromptInput = React.memo(function PromptInput({
 }: Props): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
+  const inputTextRef = useRef<DOMElement | null>(null);
   const [buffer, setBuffer] = useState<PromptBufferState>(EMPTY_BUFFER);
   const [imageUrls, setImageUrls] = useState<string[]>([]);
   const [selectedSkills, setSelectedSkills] = useState<SkillInfo[]>([]);
@@ -201,28 +192,47 @@ export const PromptInput = React.memo(function PromptInput({
       : hasExpandedRegions
         ? " · ctrl+o collapse"
         : "";
+  const busyStatusText =
+    loadingText && loadingText.trim()
+      ? `${loadingText}${processOrPasteHint}`
+      : `esc to interrupt · ctrl+c to cancel input${processOrPasteHint}`;
   const footerText = statusMessage
     ? statusMessage
     : busy
-      ? loadingText && loadingText.trim()
-        ? `${loadingText}${processOrPasteHint}`
-        : `esc to interrupt · ctrl+c to cancel input${processOrPasteHint}`
+      ? busyStatusText
       : `enter send · shift+enter newline · @ files · ctrl+v image · / commands · ctrl+d exit${processOrPasteHint}`;
   const showFooterText = useMemo(
     () => showMenu || showSkillsDropdown || openRawModelDropdown || showModelDropdown || showFileMentionMenu,
     [showMenu, showSkillsDropdown, showModelDropdown, openRawModelDropdown, showFileMentionMenu]
   );
+  const inputContentWidth = Math.max(1, screenWidth - PROMPT_PREFIX_WIDTH);
 
   const cursorPlacement = useMemo(
-    () => getPromptCursorPlacement(buffer, screenWidth, 2, footerText),
-    [buffer, footerText, screenWidth]
+    () => getPromptCursorPlacement(buffer, inputContentWidth),
+    [buffer, inputContentWidth]
   );
-  const usePositionedCursor = !disabled && hasTerminalFocus && !showFooterText;
+  const useInlineCursor = isPromptCursorAtWrapBoundary(buffer, inputContentWidth);
+  const usePositionedCursor = !disabled && hasTerminalFocus && !showFooterText && stdout.isTTY && !useInlineCursor;
+  const promptCursorLayoutKey = useMemo(
+    () =>
+      [
+        screenWidth,
+        cursorLayoutKey ?? "default",
+        imageUrls.length,
+        selectedSkills.map((skill) => skill.name).join("\u001F"),
+      ].join("\u001E"),
+    [cursorLayoutKey, imageUrls.length, screenWidth, selectedSkills]
+  );
   useTerminalFocusReporting(stdout, !disabled);
   useTerminalExtendedKeys(stdout, !disabled);
   useBracketedPaste(stdout, !disabled);
-  usePromptTerminalCursor(stdout, cursorPlacement, usePositionedCursor);
-  useHiddenTerminalCursor(stdout, !disabled && !usePositionedCursor);
+  const terminalCursorActive = usePromptTerminalCursor(
+    inputTextRef,
+    cursorPlacement,
+    !busy && usePositionedCursor,
+    promptCursorLayoutKey
+  );
+  useHiddenTerminalCursor(stdout, !disabled && (busy || !terminalCursorActive));
 
   const refreshFileMentionItems = React.useCallback(() => {
     setFileMentionItems(scanFileMentionItems(projectRoot));
@@ -764,9 +774,17 @@ export const PromptInput = React.memo(function PromptInput({
         borderRight={false}
         borderDimColor
       >
-        <PromptPrefixLine busy={busy} />
-        <Box flexGrow={1} flexShrink={1} width={screenWidth - 2}>
-          <Text>{renderBufferWithCursor(buffer, !disabled && hasTerminalFocus, placeholder, pastesRef.current)}</Text>
+        <PromptPrefixLine />
+        <Box ref={inputTextRef} flexGrow={1} flexShrink={1} width={inputContentWidth}>
+          <Text wrap="hard">
+            {renderBufferWithCursor(
+              buffer,
+              !disabled && hasTerminalFocus,
+              placeholder,
+              pastesRef.current,
+              !busy && !terminalCursorActive
+            )}
+          </Text>
           {inlineHint ? <Text dimColor>{inlineHint}</Text> : null}
         </Box>
       </Box>
@@ -885,24 +903,28 @@ export function renderBufferWithCursor(
   state: PromptBufferState,
   isFocused: boolean,
   placeholder?: string,
-  validPastes?: Map<number, string>
+  validPastes?: Map<number, string>,
+  showSimulatedCursor = true
 ): string {
   const text = state.text || "";
   const cursor = Math.max(0, Math.min(state.cursor, text.length));
   const validIds = validPastes ?? new Map<number, string>();
 
   if (text.length === 0 && placeholder) {
-    if (!isFocused) {
+    if (!isFocused || !showSimulatedCursor) {
       return chalk.dim(`  ${placeholder}`);
     }
     return renderCursorCell(" ") + chalk.dim(` ${placeholder}`);
   }
 
   if (text.length === 0) {
-    return isFocused ? renderCursorCell(" ") : "";
+    if (!isFocused) {
+      return "";
+    }
+    return showSimulatedCursor ? renderCursorCell(" ") : " ";
   }
 
-  if (!isFocused) {
+  if (!isFocused || !showSimulatedCursor) {
     return highlightPasteMarkersInText(text, validIds);
   }
 
@@ -910,7 +932,7 @@ export function renderBufferWithCursor(
 }
 
 function highlightPasteMarkersInText(s: string, validIds: Map<number, string>): string {
-  if (!s.includes("[paste #")) return s;
+  if (!s.includes("[paste #")) return s.endsWith("\n") ? `${s} ` : s;
   PASTE_MARKER_REGEX.lastIndex = 0;
   let result = "";
   let pos = 0;

@@ -6,7 +6,13 @@ import {
 
 export { getThinkingOptionIndex, MODEL_COMMAND_MODELS, MODEL_COMMAND_THINKING_OPTIONS };
 export { buildPromptDraftFromSessionMessage } from "./utils";
-export { disableTerminalExtendedKeys, enableTerminalExtendedKeys, getPromptCursorPlacement } from "./hooks/cursor";
+export {
+  disableTerminalExtendedKeys,
+  enableTerminalExtendedKeys,
+  getPromptCursorPlacement,
+  isPromptCursorAtWrapBoundary,
+  resolvePromptTerminalCursorPosition,
+} from "./hooks/cursor";
 export { default as AppContainer } from "./views/AppContainer";
 export { AskUserQuestionPrompt } from "./views/AskUserQuestionPrompt";
 export { MessageView } from "./components";

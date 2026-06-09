@@ -13,8 +13,10 @@ import {
   formatSelectedSkillsStatus,
   getPromptCursorPlacement,
   getPromptReturnKeyAction,
+  isPromptCursorAtWrapBoundary,
   isClearImageAttachmentsShortcut,
   removeCurrentSlashToken,
+  resolvePromptTerminalCursorPosition,
   toggleSkillSelection,
   renderBufferWithCursor,
   buildInitPromptSubmission,
@@ -294,24 +296,83 @@ test("renderBufferWithCursor styles exactly one simulated cursor", () => {
   assert.equal((renderBufferWithCursor({ text: "hello\nworld", cursor: 6 }, true).match(ANSI_RE) ?? []).length, 2);
 });
 
-test("getPromptCursorPlacement targets the prompt row above divider and footer", () => {
-  const placement = getPromptCursorPlacement({ text: "hello", cursor: 5 }, 80, 2, "Enter send");
-  assert.deepEqual(placement, { rowsUp: 3, column: 7 });
+test("renderBufferWithCursor can suppress the simulated cursor for real terminal cursor mode", () => {
+  assert.equal(
+    (renderBufferWithCursor({ text: "", cursor: 0 }, true, undefined, undefined, false).match(ANSI_RE) ?? []).length,
+    0
+  );
+  assert.equal(
+    stripAnsi(renderBufferWithCursor({ text: "", cursor: 0 }, true, "Ask anything", undefined, false)),
+    "  Ask anything"
+  );
+  assert.equal(
+    (renderBufferWithCursor({ text: "hello", cursor: 1 }, true, undefined, undefined, false).match(ANSI_RE) ?? [])
+      .length,
+    0
+  );
+  assert.equal(
+    stripAnsi(renderBufferWithCursor({ text: "hello\n", cursor: 6 }, true, undefined, undefined, false)),
+    "hello\n "
+  );
+});
+
+test("getPromptCursorPlacement targets an Ink-relative prompt cell", () => {
+  const placement = getPromptCursorPlacement({ text: "hello", cursor: 5 }, 80);
+  assert.deepEqual(placement, { row: 0, column: 5 });
 });
 
 test("getPromptCursorPlacement targets the reserved row after a trailing newline", () => {
-  const placement = getPromptCursorPlacement({ text: "hello\n", cursor: 6 }, 80, 2, "Enter send");
-  assert.deepEqual(placement, { rowsUp: 3, column: 2 });
+  const placement = getPromptCursorPlacement({ text: "hello\n", cursor: 6 }, 80);
+  assert.deepEqual(placement, { row: 1, column: 0 });
 });
 
 test("getPromptCursorPlacement accounts for CJK character width", () => {
-  const placement = getPromptCursorPlacement({ text: "你好", cursor: 2 }, 80, 2, "Enter send");
-  assert.equal(placement.column, 6);
+  const placement = getPromptCursorPlacement({ text: "你好", cursor: 2 }, 80);
+  assert.equal(placement.column, 4);
 });
 
 test("getPromptCursorPlacement accounts for multiline buffer rows", () => {
-  const placement = getPromptCursorPlacement({ text: "hello\nworld", cursor: 11 }, 80, 2, "Enter send");
-  assert.deepEqual(placement, { rowsUp: 3, column: 7 });
-  const middle = getPromptCursorPlacement({ text: "hello\nworld", cursor: 2 }, 80, 2, "Enter send");
-  assert.deepEqual(middle, { rowsUp: 4, column: 4 });
+  const placement = getPromptCursorPlacement({ text: "hello\nworld", cursor: 11 }, 80);
+  assert.deepEqual(placement, { row: 1, column: 5 });
+  const middle = getPromptCursorPlacement({ text: "hello\nworld", cursor: 2 }, 80);
+  assert.deepEqual(middle, { row: 0, column: 2 });
+});
+
+test("getPromptCursorPlacement accounts for wrapped input rows", () => {
+  const placement = getPromptCursorPlacement({ text: "hello", cursor: 5 }, 5);
+  assert.deepEqual(placement, { row: 1, column: 0 });
+  const cursorBeforeWrappedChar = getPromptCursorPlacement({ text: "hello!", cursor: 5 }, 5);
+  assert.deepEqual(cursorBeforeWrappedChar, { row: 1, column: 0 });
+  const secondLine = getPromptCursorPlacement({ text: "hello!", cursor: 6 }, 5);
+  assert.deepEqual(secondLine, { row: 1, column: 1 });
+});
+
+test("isPromptCursorAtWrapBoundary detects hard-wrapped cursor positions", () => {
+  assert.equal(isPromptCursorAtWrapBoundary({ text: "hell", cursor: 4 }, 5), false);
+  assert.equal(isPromptCursorAtWrapBoundary({ text: "hello", cursor: 5 }, 5), true);
+  assert.equal(isPromptCursorAtWrapBoundary({ text: "hello!", cursor: 6 }, 5), true);
+  assert.equal(isPromptCursorAtWrapBoundary({ text: "hello world", cursor: 6 }, 5), true);
+  assert.equal(isPromptCursorAtWrapBoundary({ text: "hello\n", cursor: 6 }, 5), false);
+  assert.equal(isPromptCursorAtWrapBoundary({ text: "hello\nworld", cursor: 11 }, 5), true);
+});
+
+test("resolvePromptTerminalCursorPosition requires matching measured layout", () => {
+  const placement = { row: 1, column: 4 };
+  const origin = { layoutKey: "skills:1", left: 2, top: 3 };
+
+  assert.deepEqual(resolvePromptTerminalCursorPosition(placement, true, "skills:1", origin), { x: 6, y: 4 });
+  assert.equal(resolvePromptTerminalCursorPosition(placement, true, "skills:0", origin), undefined);
+  assert.equal(resolvePromptTerminalCursorPosition(placement, false, "skills:1", origin), undefined);
+  assert.equal(resolvePromptTerminalCursorPosition(placement, true, "skills:1", null), undefined);
+});
+
+test("resolvePromptTerminalCursorPosition clamps negative terminal cells", () => {
+  assert.deepEqual(
+    resolvePromptTerminalCursorPosition({ row: 0, column: 1 }, true, "current", {
+      layoutKey: "current",
+      left: -5,
+      top: -1,
+    }),
+    { x: 0, y: 0 }
+  );
 });

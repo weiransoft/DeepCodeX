@@ -8,6 +8,8 @@ export {
   usePromptTerminalCursor,
   useTerminalFocusReporting,
   getPromptCursorPlacement,
+  isPromptCursorAtWrapBoundary,
+  resolvePromptTerminalCursorPosition,
 } from "./cursor";
 
 export { usePasteHandling } from "./usePasteHandling";
