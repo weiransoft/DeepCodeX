@@ -87,6 +87,7 @@ type Props = {
   screenWidth: number;
   promptHistory: string[];
   busy: boolean;
+  cursorLayoutKey?: string;
   loadingText?: string | null;
   disabled?: boolean;
   placeholder?: string;
@@ -99,27 +100,12 @@ type Props = {
   onToggleProcessStdout?: () => void;
 };
 
-const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const PROMPT_PREFIX_WIDTH = 2;
 
-const PromptPrefixLine = React.memo(function PromptPrefixLine({ busy }: { busy: boolean }): React.ReactElement {
-  const [spinnerIndex, setSpinnerIndex] = useState(0);
-
-  useEffect(() => {
-    if (!busy) {
-      setSpinnerIndex(0);
-      return;
-    }
-    const timer = setInterval(() => {
-      setSpinnerIndex((index) => (index + 1) % SPINNER_FRAMES.length);
-    }, 80);
-    return () => clearInterval(timer);
-  }, [busy]);
-
-  const prefix = busy ? `${SPINNER_FRAMES[spinnerIndex]} ` : "> ";
+const PromptPrefixLine = React.memo(function PromptPrefixLine(): React.ReactElement {
   return (
-    <Box width={2}>
-      <Text color={busy ? "yellow" : "#229ac3"}>{prefix}</Text>
+    <Box width={PROMPT_PREFIX_WIDTH}>
+      <Text color="#229ac3">{"> "}</Text>
     </Box>
   );
 });
@@ -131,6 +117,7 @@ export const PromptInput = React.memo(function PromptInput({
   screenWidth,
   promptHistory,
   busy,
+  cursorLayoutKey,
   loadingText,
   disabled,
   placeholder,
@@ -205,12 +192,14 @@ export const PromptInput = React.memo(function PromptInput({
       : hasExpandedRegions
         ? " · ctrl+o collapse"
         : "";
+  const busyStatusText =
+    loadingText && loadingText.trim()
+      ? `${loadingText}${processOrPasteHint}`
+      : `esc to interrupt · ctrl+c to cancel input${processOrPasteHint}`;
   const footerText = statusMessage
     ? statusMessage
     : busy
-      ? loadingText && loadingText.trim()
-        ? `${loadingText}${processOrPasteHint}`
-        : `esc to interrupt · ctrl+c to cancel input${processOrPasteHint}`
+      ? busyStatusText
       : `enter send · shift+enter newline · @ files · ctrl+v image · / commands · ctrl+d exit${processOrPasteHint}`;
   const showFooterText = useMemo(
     () => showMenu || showSkillsDropdown || openRawModelDropdown || showModelDropdown || showFileMentionMenu,
@@ -225,8 +214,14 @@ export const PromptInput = React.memo(function PromptInput({
   const useInlineCursor = isPromptCursorAtWrapBoundary(buffer, inputContentWidth);
   const usePositionedCursor = !disabled && hasTerminalFocus && !showFooterText && stdout.isTTY && !useInlineCursor;
   const promptCursorLayoutKey = useMemo(
-    () => [screenWidth, imageUrls.length, selectedSkills.map((skill) => skill.name).join("\u001F")].join("\u001E"),
-    [imageUrls.length, screenWidth, selectedSkills]
+    () =>
+      [
+        screenWidth,
+        cursorLayoutKey ?? "default",
+        imageUrls.length,
+        selectedSkills.map((skill) => skill.name).join("\u001F"),
+      ].join("\u001E"),
+    [cursorLayoutKey, imageUrls.length, screenWidth, selectedSkills]
   );
   useTerminalFocusReporting(stdout, !disabled);
   useTerminalExtendedKeys(stdout, !disabled);
@@ -234,10 +229,10 @@ export const PromptInput = React.memo(function PromptInput({
   const terminalCursorActive = usePromptTerminalCursor(
     inputTextRef,
     cursorPlacement,
-    usePositionedCursor,
+    !busy && usePositionedCursor,
     promptCursorLayoutKey
   );
-  useHiddenTerminalCursor(stdout, !disabled && !terminalCursorActive);
+  useHiddenTerminalCursor(stdout, !disabled && (busy || !terminalCursorActive));
 
   const refreshFileMentionItems = React.useCallback(() => {
     setFileMentionItems(scanFileMentionItems(projectRoot));
@@ -779,7 +774,7 @@ export const PromptInput = React.memo(function PromptInput({
         borderRight={false}
         borderDimColor
       >
-        <PromptPrefixLine busy={busy} />
+        <PromptPrefixLine />
         <Box ref={inputTextRef} flexGrow={1} flexShrink={1} width={inputContentWidth}>
           <Text wrap="hard">
             {renderBufferWithCursor(
@@ -787,7 +782,7 @@ export const PromptInput = React.memo(function PromptInput({
               !disabled && hasTerminalFocus,
               placeholder,
               pastesRef.current,
-              !terminalCursorActive
+              !busy && !terminalCursorActive
             )}
           </Text>
           {inlineHint ? <Text dimColor>{inlineHint}</Text> : null}

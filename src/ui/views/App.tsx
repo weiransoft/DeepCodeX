@@ -48,11 +48,46 @@ import { SessionManager } from "../../session";
 
 type View = "chat" | "session-list" | "undo" | "mcp-status";
 
+const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 type AppProps = {
   projectRoot: string;
   initialPrompt?: string;
   onRestart?: () => void;
 };
+
+const StatusLine = React.memo(function StatusLine({
+  busy,
+  text,
+}: {
+  busy: boolean;
+  text?: string;
+}): React.ReactElement {
+  const [spinnerIndex, setSpinnerIndex] = useState(0);
+
+  useEffect(() => {
+    if (!busy) {
+      setSpinnerIndex(0);
+      return;
+    }
+
+    const timer = setInterval(() => {
+      setSpinnerIndex((index) => (index + 1) % STATUS_SPINNER_FRAMES.length);
+    }, 80);
+    return () => clearInterval(timer);
+  }, [busy]);
+
+  return (
+    <Box>
+      {busy ? (
+        <Box marginRight={1}>
+          <Text color="yellow">{STATUS_SPINNER_FRAMES[spinnerIndex]}</Text>
+        </Box>
+      ) : null}
+      {text ? <Text dimColor>{text}</Text> : null}
+    </Box>
+  );
+});
 
 function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactElement {
   const { exit } = useApp();
@@ -641,6 +676,35 @@ function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactEl
     }
     return messages;
   }, [mode, showWelcome, view, messages, welcomeItem]);
+  const promptCursorLayoutKey = useMemo(() => {
+    const lastStaticItem = staticItems.at(-1);
+    return [
+      view,
+      busy ? "busy" : "idle",
+      statusLine,
+      errorLine ?? "",
+      showProcessStdout ? "stdout" : "main",
+      activeStatus ?? "",
+      staticItems.length,
+      lastStaticItem?.id ?? "",
+      lastStaticItem?.updateTime ?? "",
+      shouldShowQuestionPrompt ? (pendingQuestion?.messageId ?? "") : "",
+      activeAskPermissions?.length ?? 0,
+      pendingPermissionReply ? "pending-permission-reply" : "no-pending-permission-reply",
+    ].join("\u001E");
+  }, [
+    activeAskPermissions,
+    activeStatus,
+    busy,
+    errorLine,
+    pendingPermissionReply,
+    pendingQuestion,
+    shouldShowQuestionPrompt,
+    showProcessStdout,
+    staticItems,
+    statusLine,
+    view,
+  ]);
 
   const handleQuestionAnswers = useCallback(
     (answers: AskUserQuestionAnswers) => {
@@ -724,11 +788,7 @@ function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactEl
           );
         }}
       </Static>
-      {statusLine ? (
-        <Box>
-          <Text dimColor>{statusLine}</Text>
-        </Box>
-      ) : null}
+      {busy || statusLine ? <StatusLine busy={busy} text={statusLine} /> : null}
       {errorLine ? (
         <Box>
           <Text color="red">Error: {errorLine}</Text>
@@ -802,6 +862,7 @@ function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactEl
           modelConfig={resolvedSettings}
           promptHistory={promptHistory}
           busy={busy}
+          cursorLayoutKey={promptCursorLayoutKey}
           loadingText={loadingText}
           runningProcesses={runningProcesses}
           promptDraft={promptDraft}
