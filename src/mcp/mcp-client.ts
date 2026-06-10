@@ -427,7 +427,7 @@ export function createMcpSpawnSpec(
       // On Windows, shell: true lets cmd.exe resolve the command via PATHEXT
       // (npx -> npx.cmd, etc.). Join command and args into a single string
       // with empty spawn args to avoid Node 24 DEP0190.
-      // Only quote arguments that contain spaces or double-quotes to prevent
+      // Only quote arguments that need protection from cmd.exe to prevent
       // double-wrapping by Node.js's own shell quoting.
       command: [command, ...args].map(quoteWindowsArgIfNeeded).join(" "),
       args: [],
@@ -444,7 +444,7 @@ export function createMcpSpawnSpec(
 }
 
 function quoteWindowsArgIfNeeded(arg: string): string {
-  if (arg.includes(" ") || arg.includes('"')) {
+  if (/[\s"&|<>^()]/.test(arg)) {
     return `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/\\+$/g, "$&$&")}"`;
   }
   return arg;
