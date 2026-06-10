@@ -10,9 +10,9 @@ test("createMcpSpawnSpec keeps non-Windows MCP launches shell-free", () => {
   });
 });
 
-test("createMcpSpawnSpec avoids Windows shell args for Node 24", () => {
+test("createMcpSpawnSpec joins args without quoting when spaces are absent (Windows)", () => {
   assert.deepEqual(createMcpSpawnSpec("npx", ["-y", "@playwright/mcp@latest"], "win32"), {
-    command: '"npx" "-y" "@playwright/mcp@latest"',
+    command: "npx -y @playwright/mcp@latest",
     args: [],
     shell: true,
     windowsHide: true,

@@ -425,9 +425,11 @@ export function createMcpSpawnSpec(
   if (platform === "win32") {
     return {
       // On Windows, shell: true lets cmd.exe resolve the command via PATHEXT
-      // (npx -> npx.cmd, etc.). Pass one quoted command line with no spawn
-      // args to avoid Node 24 DEP0190.
-      command: [command, ...args].map(quoteWindowsShellArg).join(" "),
+      // (npx -> npx.cmd, etc.). Join command and args into a single string
+      // with empty spawn args to avoid Node 24 DEP0190.
+      // Only quote arguments that contain spaces or double-quotes to prevent
+      // double-wrapping by Node.js's own shell quoting.
+      command: [command, ...args].map(quoteWindowsArgIfNeeded).join(" "),
       args: [],
       shell: true,
       windowsHide: true,
@@ -441,6 +443,9 @@ export function createMcpSpawnSpec(
   };
 }
 
-function quoteWindowsShellArg(arg: string): string {
-  return `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/\\+$/g, "$&$&")}"`;
+function quoteWindowsArgIfNeeded(arg: string): string {
+  if (arg.includes(" ") || arg.includes('"')) {
+    return `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/\\+$/g, "$&$&")}"`;
+  }
+  return arg;
 }
