@@ -13,7 +13,7 @@ const originalConsoleWarn = console.warn;
 const originalHome = process.env.HOME;
 const originalUserProfile = process.env.USERPROFILE;
 const tempDirs: string[] = [];
-const PLAN_MODE_STATUS_MESSAGE = "Set Plan Mode on. Awaiting <proposed_plan>.";
+const PLAN_MODE_STATUS_MESSAGE = "/plan\n  └ Set Plan Mode on. Awaiting <proposed_plan>.";
 
 /** Set homedir in a cross-platform way (HOME on Unix, USERPROFILE on Windows). */
 function setHomeDir(dir: string): void {

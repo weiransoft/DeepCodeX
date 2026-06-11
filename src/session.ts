@@ -66,7 +66,7 @@ const PROJECT_CODE_HASH_LENGTH = 16;
 const BACKGROUND_FAILURE_LOG_TAIL_CHARS = 4000;
 const DEFAULT_COMPACT_PROMPT_TOKEN_THRESHOLD = 128 * 1024;
 const DEEPSEEK_V4_COMPACT_PROMPT_TOKEN_THRESHOLD = 512 * 1024;
-const PLAN_MODE_STATUS_MESSAGE = "Set Plan Mode on. Awaiting <proposed_plan>.";
+const PLAN_MODE_STATUS_MESSAGE = "/plan\n  └ Set Plan Mode on. Awaiting <proposed_plan>.";
 
 type ChatCompletionDebugOptions = {
   enabled?: boolean;
