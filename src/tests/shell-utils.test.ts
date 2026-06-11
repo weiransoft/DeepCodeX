@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildDisableExtglobCommand,
+  buildShellInitCommand,
   getShellKind,
   posixPathToWindowsPath,
   resolveWindowsGitBashPath,
@@ -37,6 +38,18 @@ test("Shell kind detection supports Windows bash.exe paths", () => {
     "shopt -u extglob 2>/dev/null || true"
   );
   assert.equal(buildDisableExtglobCommand("/bin/zsh"), "setopt NO_EXTENDED_GLOB 2>/dev/null || true");
+});
+
+test("Shell init commands suppress startup file output", () => {
+  assert.equal(
+    buildShellInitCommand("/bin/zsh"),
+    'ZSHRC="${ZDOTDIR:-$HOME}/.zshrc"; if [ -f "$ZSHRC" ]; then { . "$ZSHRC"; } >/dev/null 2>&1; fi'
+  );
+  assert.equal(
+    buildShellInitCommand("/bin/bash"),
+    'BASHRC="${BASH_ENV:-$HOME/.bashrc}"; if [ -f "$BASHRC" ]; then { . "$BASHRC"; } >/dev/null 2>&1; fi'
+  );
+  assert.equal(buildShellInitCommand("/bin/fish"), null);
 });
 
 test("Windows Git Bash detection prefers bash.exe from PATH", () => {

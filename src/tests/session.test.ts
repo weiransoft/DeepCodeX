@@ -6,13 +6,14 @@ import * as os from "os";
 import * as path from "path";
 import { GitFileHistory } from "../common/file-history";
 import { clearSessionState } from "../common/state";
-import { getProjectCode, SessionManager, type SessionMessage } from "../session";
+import { getProjectCode, SessionManager, type SessionMessage, type SkillInfo } from "../session";
 
 const originalFetch = globalThis.fetch;
 const originalConsoleWarn = console.warn;
 const originalHome = process.env.HOME;
 const originalUserProfile = process.env.USERPROFILE;
 const tempDirs: string[] = [];
+const PLAN_MODE_STATUS_MESSAGE = "Set Plan Mode on. Awaiting <proposed_plan>.";
 
 /** Set homedir in a cross-platform way (HOME on Unix, USERPROFILE on Windows). */
 function setHomeDir(dir: string): void {
@@ -522,6 +523,70 @@ test("SessionManager resolves bundled skill prompts", () => {
   assert.match(prompt, /# Skill Writer/);
 });
 
+test("SessionManager appends plan mode status whenever the plan skill is selected", async () => {
+  const workspace = createTempDir("deepcode-plan-skill-workspace-");
+  const home = createTempDir("deepcode-plan-skill-home-");
+  setHomeDir(home);
+
+  const manager = createSessionManager(workspace, "machine-id-plan-skill");
+  const planSkill = await getPlanSkill(manager);
+
+  const sessionId = await manager.createSession({ text: "", skills: [planSkill] });
+  let messages = manager.listSessionMessages(sessionId);
+  assert.equal(countPlanModeStatusMessages(messages), 1);
+  assert.equal(countLoadedSkillMessages(messages, "plan"), 1);
+
+  await manager.replySession(sessionId, { text: "", skills: [planSkill] });
+  messages = manager.listSessionMessages(sessionId);
+  assert.equal(countPlanModeStatusMessages(messages), 2);
+  assert.equal(countLoadedSkillMessages(messages, "plan"), 1);
+});
+
+test("SessionManager appends plan mode status when the plan skill is auto-matched", async () => {
+  const workspace = createTempDir("deepcode-plan-matched-workspace-");
+  const home = createTempDir("deepcode-plan-matched-home-");
+  setHomeDir(home);
+
+  const client = {
+    chat: {
+      completions: {
+        create: async (request: any) => {
+          if (isSkillMatchingRequest(request)) {
+            return createSkillMatchingResponse(["plan"]);
+          }
+          return createChatResponse("planned", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 });
+        },
+      },
+    },
+  };
+  const manager = createMockedClientSessionManagerWithClient(workspace, client);
+
+  const sessionId = await manager.createSession({ text: "Plan Mode for this change" });
+  const messages = manager.listSessionMessages(sessionId);
+  assert.equal(countPlanModeStatusMessages(messages), 1);
+  assert.equal(countLoadedSkillMessages(messages, "plan"), 1);
+});
+
+test("SessionManager appends plan mode status for deferred permission prompts", async () => {
+  const workspace = createTempDir("deepcode-plan-deferred-workspace-");
+  const home = createTempDir("deepcode-plan-deferred-home-");
+  setHomeDir(home);
+
+  const manager = createSessionManager(workspace, "machine-id-plan-deferred");
+  const sessionId = await manager.createSession({ text: "" });
+  const planSkill = await getPlanSkill(manager);
+
+  await (manager as any).appendDeferredPermissionPrompt(
+    sessionId,
+    { text: "", skills: [planSkill] },
+    new AbortController()
+  );
+
+  const messages = manager.listSessionMessages(sessionId);
+  assert.equal(countPlanModeStatusMessages(messages), 1);
+  assert.equal(countLoadedSkillMessages(messages, "plan"), 1);
+});
+
 test("SessionManager excludes disabled skills by resolved skill name", async () => {
   const workspace = createTempDir("deepcode-disabled-skills-workspace-");
   const home = createTempDir("deepcode-disabled-skills-home-");
@@ -564,6 +629,7 @@ test("SessionManager excludes disabled skills by resolved skill name", async () 
         "renamed-disabled": false,
         "deepcode-self-refer": false,
         "skill-digester": false,
+        plan: false,
         "enabled-skill": true,
       },
     }),
@@ -3400,6 +3466,20 @@ function createSessionManager(projectRoot: string, machineId: string): SessionMa
   });
 }
 
+async function getPlanSkill(manager: SessionManager): Promise<SkillInfo> {
+  const planSkill = (await manager.listSkills()).find((skill) => skill.name === "plan");
+  assert.ok(planSkill);
+  return planSkill;
+}
+
+function countPlanModeStatusMessages(messages: SessionMessage[]): number {
+  return messages.filter((message) => message.role === "system" && message.content === PLAN_MODE_STATUS_MESSAGE).length;
+}
+
+function countLoadedSkillMessages(messages: SessionMessage[], skillName: string): number {
+  return messages.filter((message) => message.role === "system" && message.meta?.skill?.name === skillName).length;
+}
+
 function createNotifyingSessionManager(
   projectRoot: string,
   responses: unknown[],
@@ -3536,8 +3616,8 @@ function isSkillMatchingRequest(request: any): boolean {
   return request?.response_format?.type === "json_object";
 }
 
-function createSkillMatchingResponse(): unknown {
-  return { choices: [{ message: { content: '{"skillNames":[]}' } }] };
+function createSkillMatchingResponse(skillNames: string[] = []): unknown {
+  return { choices: [{ message: { content: JSON.stringify({ skillNames }) } }] };
 }
 
 function createChatResponse(content: string, usage: Record<string, unknown>): unknown {

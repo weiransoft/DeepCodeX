@@ -66,6 +66,7 @@ const PROJECT_CODE_HASH_LENGTH = 16;
 const BACKGROUND_FAILURE_LOG_TAIL_CHARS = 4000;
 const DEFAULT_COMPACT_PROMPT_TOKEN_THRESHOLD = 128 * 1024;
 const DEEPSEEK_V4_COMPACT_PROMPT_TOKEN_THRESHOLD = 512 * 1024;
+const PLAN_MODE_STATUS_MESSAGE = "Set Plan Mode on. Awaiting <proposed_plan>.";
 
 type ChatCompletionDebugOptions = {
   enabled?: boolean;
@@ -1022,6 +1023,25 @@ ${agentInstructions}
     });
   }
 
+  private appendSkillMessages(sessionId: string, skills?: SkillInfo[]): void {
+    if (!skills || skills.length === 0) {
+      return;
+    }
+
+    for (const skill of skills) {
+      if (skill.name === "plan") {
+        this.appendSessionMessage(sessionId, this.buildSystemMessage(sessionId, PLAN_MODE_STATUS_MESSAGE));
+      }
+      if (skill.isLoaded) {
+        continue;
+      }
+      const skillPrompt = this.buildSkillPrompt(skill);
+      const skillMessage = this.buildSkillMessage(sessionId, skillPrompt, skill);
+      this.appendSessionMessage(sessionId, skillMessage);
+      this.onAssistantMessage(skillMessage, true);
+    }
+  }
+
   getActiveSessionId(): string | null {
     return this.activeSessionId;
   }
@@ -1145,17 +1165,7 @@ ${agentInstructions}
     userPrompt.skills = await this.normalizeSkills(userPrompt.skills);
     this.throwIfAborted(signal);
 
-    if (userPrompt.skills && userPrompt.skills.length > 0) {
-      for (const skill of userPrompt.skills) {
-        if (skill.isLoaded) {
-          continue;
-        }
-        const skillPrompt = this.buildSkillPrompt(skill);
-        const skillMessage = this.buildSkillMessage(sessionId, skillPrompt, skill);
-        this.appendSessionMessage(sessionId, skillMessage);
-        this.onAssistantMessage(skillMessage, true);
-      }
-    }
+    this.appendSkillMessages(sessionId, userPrompt.skills);
 
     this.activeSessionId = sessionId;
     await this.activateSession(sessionId, controller);
@@ -1220,17 +1230,7 @@ ${agentInstructions}
     userPrompt.skills = await this.normalizeSkills(userPrompt.skills, sessionId);
     this.throwIfAborted(signal);
 
-    if (userPrompt.skills && userPrompt.skills.length > 0) {
-      for (const skill of userPrompt.skills) {
-        if (skill.isLoaded) {
-          continue;
-        }
-        const skillPrompt = this.buildSkillPrompt(skill);
-        const skillMessage = this.buildSkillMessage(sessionId, skillPrompt, skill);
-        this.appendSessionMessage(sessionId, skillMessage);
-        this.onAssistantMessage(skillMessage, true);
-      }
-    }
+    this.appendSkillMessages(sessionId, userPrompt.skills);
     this.activeSessionId = sessionId;
     await this.activateSession(sessionId, controller);
   }
@@ -2372,17 +2372,7 @@ ${agentInstructions}
     }
     userPrompt.skills = await this.normalizeSkills(userPrompt.skills, sessionId);
     this.throwIfAborted(signal);
-    if (userPrompt.skills && userPrompt.skills.length > 0) {
-      for (const skill of userPrompt.skills) {
-        if (skill.isLoaded) {
-          continue;
-        }
-        const skillPrompt = this.buildSkillPrompt(skill);
-        const skillMessage = this.buildSkillMessage(sessionId, skillPrompt, skill);
-        this.appendSessionMessage(sessionId, skillMessage);
-        this.onAssistantMessage(skillMessage, true);
-      }
-    }
+    this.appendSkillMessages(sessionId, userPrompt.skills);
   }
 
   private buildToolParamsSnippet(toolFunction: unknown | null): string {

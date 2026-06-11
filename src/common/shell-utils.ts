@@ -83,9 +83,14 @@ export function getShellKind(shellPath: string): ShellKind {
 export function buildShellInitCommand(shellPath: string): string | null {
   switch (getShellKind(shellPath)) {
     case "zsh":
-      return ['ZSHRC="${ZDOTDIR:-$HOME}/.zshrc"', 'if [ -f "$ZSHRC" ]; then . "$ZSHRC"; fi'].join("; ");
+      return ['ZSHRC="${ZDOTDIR:-$HOME}/.zshrc"', 'if [ -f "$ZSHRC" ]; then { . "$ZSHRC"; } >/dev/null 2>&1; fi'].join(
+        "; "
+      );
     case "bash":
-      return ['BASHRC="${BASH_ENV:-$HOME/.bashrc}"', 'if [ -f "$BASHRC" ]; then . "$BASHRC"; fi'].join("; ");
+      return [
+        'BASHRC="${BASH_ENV:-$HOME/.bashrc}"',
+        'if [ -f "$BASHRC" ]; then { . "$BASHRC"; } >/dev/null 2>&1; fi',
+      ].join("; ");
     default:
       return null;
   }
