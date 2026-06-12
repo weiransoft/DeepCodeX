@@ -58,9 +58,23 @@ Use the `Read` tool to read the appropriate document(s) from the list above. All
 ### Step 4: Handle common request patterns
 
 **"列出/查看可用的 skills":**
-- Explain the skill scanning paths from references/README.md (`./.deepcode/skills/`, `./.agents/skills/`, `~/.deepcode/skills/`, `~/.agents/skills/`, and bundled built-in skills)
-- Explain that `/skills` slash command lists available skills
-- Mention `enabledSkills` in `settings.json` for enabling/disabling specific skills
+- Treat `/skills` as the canonical UI for listing currently available skills.
+- If answering directly, do not infer the list only from loaded skill prompts or from project/user directories. Enumerate all discovery roots:
+  1. `./.deepcode/skills/<folder>/SKILL.md`
+  2. `./.agents/skills/<folder>/SKILL.md`
+  3. `~/.deepcode/skills/<folder>/SKILL.md`
+  4. `~/.agents/skills/<folder>/SKILL.md`
+  5. bundled built-in skills as `bundled:<folder>/SKILL.md`
+- For a source checkout, bundled skills live under `templates/skills/bundled/<folder>/SKILL.md`. For a packaged install, bundled skills may live under `dist/bundled/<folder>/SKILL.md`.
+- Read each candidate `SKILL.md` frontmatter to get the resolved `name` and `description`; the folder name is only a fallback.
+- De-duplicate by resolved `name`, keeping the highest-priority root from the order above.
+- Apply `enabledSkills` from `settings.json`: if `enabledSkills["<name>"] === false`, do not list that skill as available.
+- Clearly separate discoverable skills from other concepts:
+  - Discoverable skills are selectable through `/skills` and come from the roots above.
+  - Bundled skills are discoverable skills shipped with Deep Code, such as `bundled:deepcode-self-refer/SKILL.md`.
+  - Default prompt templates or always-injected guidance are not necessarily discoverable skills unless they also exist as `*/SKILL.md` in one of the scan roots.
+  - Slash commands such as `/skills`, `/mcp`, and `/undo` are commands, not skills.
+- Mention that `/skills` can be used to verify the result and `enabledSkills` can enable/disable specific skills by name.
 
 **"配置 <X> MCP":**
 - Read `references/mcp.md` for the MCP format and examples
@@ -90,9 +104,11 @@ Use the `Read` tool to read the appropriate document(s) from the list above. All
 
 ### Example 1: "列出可用的skills"
 
-Read references/README.md, locate the Skills section. Answer:
+Read references/README.md, locate the Skills section, then enumerate all scan roots including bundled skills. Answer:
 
 - Skills are discovered from: `./.deepcode/skills/`, `./.agents/skills/`, `~/.deepcode/skills/`, `~/.agents/skills/`, and bundled built-in skills such as `bundled:deepcode-self-refer/SKILL.md`.
+- In a source checkout, check `templates/skills/bundled/*/SKILL.md`; in a packaged install, check `dist/bundled/*/SKILL.md`.
+- Built-in bundled skills may include `deepcode-self-refer`, `plan`, `skill-digester`, and `skill-writer`; verify the actual list by scanning the bundled root because it can change between versions.
 - Use `/skills` slash command in the Deep Code CLI to list all available skills
 - Use `enabledSkills` in `settings.json` to enable/disable skills by name
 
