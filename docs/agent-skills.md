@@ -1,4 +1,4 @@
-# Deep Code CLI Agent Skills 指南
+# Agent Skills
 
 ## 概述
 
