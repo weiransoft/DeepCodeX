@@ -644,6 +644,78 @@ test("SessionManager excludes disabled skills by resolved skill name", async () 
   assert.equal(skills[0]?.path, "./.deepcode/skills/enabled-skill/SKILL.md");
 });
 
+test("SessionManager keeps implicit opt-out skills available for manual invocation", async () => {
+  const workspace = createTempDir("deepcode-manual-only-skill-workspace-");
+  const home = createTempDir("deepcode-manual-only-skill-home-");
+  setHomeDir(home);
+
+  const skillDir = path.join(workspace, ".agents", "skills", "manual-only");
+  fs.mkdirSync(skillDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(skillDir, "SKILL.md"),
+    "---\nname: manual-only\ndescription: Manual-only skill\nmetadata:\n  allow-implicit-invocation: false\n---\n# Manual Only\n",
+    "utf8"
+  );
+
+  const manager = createSessionManager(workspace, "machine-id-manual-only-skill");
+  const skill = (await manager.listSkills()).find((candidate) => candidate.name === "manual-only");
+  assert.ok(skill);
+  assert.equal(skill.allowImplicitInvocation, false);
+
+  const sessionId = await manager.createSession({ text: "", skills: [skill] });
+  const skillMessages = manager
+    .listSessionMessages(sessionId)
+    .filter((message) => message.role === "system" && message.meta?.skill?.name === "manual-only");
+
+  assert.equal(skillMessages.length, 1);
+  assert.match(skillMessages[0]?.content ?? "", /<manual-only-skill/);
+  assert.doesNotMatch(skillMessages[0]?.content ?? "", /allow-implicit-invocation/);
+});
+
+test("SessionManager excludes implicit opt-out skills from automatic matching candidates", async () => {
+  const workspace = createTempDir("deepcode-implicit-opt-out-workspace-");
+  const home = createTempDir("deepcode-implicit-opt-out-home-");
+  setHomeDir(home);
+  globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
+
+  const writeSkill = (name: string, metadata = ""): void => {
+    const skillDir = path.join(workspace, ".deepcode", "skills", name);
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(skillDir, "SKILL.md"),
+      `---\nname: ${name}\ndescription: ${name} description${metadata}\n---\n# ${name}\n`,
+      "utf8"
+    );
+  };
+  writeSkill("auto-skill");
+  writeSkill("manual-only", "\nmetadata:\n  allow-implicit-invocation: false");
+
+  const requests: any[] = [];
+  const client = {
+    chat: {
+      completions: {
+        create: async (request: any) => {
+          requests.push(request);
+          if (isSkillMatchingRequest(request)) {
+            return createSkillMatchingResponse(["manual-only", "auto-skill"]);
+          }
+          return createChatResponse("done", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 });
+        },
+      },
+    },
+  };
+  const manager = createMockedClientSessionManagerWithClient(workspace, client);
+  (manager as any).activateSession = async () => {};
+
+  const sessionId = await manager.createSession({ text: "choose an automatic skill" });
+  const matchingPrompt = String(requests[0]?.messages?.[0]?.content ?? "");
+
+  assert.match(matchingPrompt, /"name": "auto-skill"/);
+  assert.doesNotMatch(matchingPrompt, /"name": "manual-only"/);
+  assert.equal(countLoadedSkillMessages(manager.listSessionMessages(sessionId), "auto-skill"), 1);
+  assert.equal(countLoadedSkillMessages(manager.listSessionMessages(sessionId), "manual-only"), 0);
+});
+
 test("SessionManager dispose disconnects MCP servers", async () => {
   const workspace = createTempDir("deepcode-mcp-dispose-workspace-");
   const serverPath = path.join(workspace, "mcp-server.cjs");

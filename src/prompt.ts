@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import ejs from "ejs";
+import matter from "gray-matter";
 import { fileURLToPath } from "url";
 import type { SessionMessage } from "./session";
 import { findGitBashPath, resolveShellPath } from "./common/shell-utils";
@@ -184,9 +185,25 @@ export function buildSkillDocumentsPrompt(skills: SkillPromptDocument[]): string
 function renderSkillDocumentBlock(skill: SkillPromptDocument): string {
   const pathAttribute = skill.path ? ` path="${escapeXml(skill.path)}"` : "";
   const resources = renderSkillResources(skill.skillFilePath);
+  const content = stripSkillPromptMetadata(skill.content);
   return `<${skill.name}-skill${pathAttribute}>
-${skill.content}${resources}
+${content}${resources}
 </${skill.name}-skill>`;
+}
+
+function stripSkillPromptMetadata(content: string): string {
+  try {
+    const parsed = matter(content);
+    if (!Object.prototype.hasOwnProperty.call(parsed.data, "metadata")) {
+      return content;
+    }
+
+    const frontmatter = { ...parsed.data };
+    delete frontmatter.metadata;
+    return matter.stringify(parsed.content, frontmatter);
+  } catch {
+    return content;
+  }
 }
 
 function renderSkillResources(skillFilePath?: string): string {

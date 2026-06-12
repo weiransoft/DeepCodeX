@@ -289,6 +289,7 @@ export type SkillInfo = {
   path: string;
   description: string;
   isLoaded?: boolean;
+  allowImplicitInvocation?: boolean;
 };
 
 type SessionManagerOptions = {
@@ -732,13 +733,14 @@ Response in JSON format:
 If none of the available skills match, respond with an empty array, i.e. \`{"skillNames": []}\`.\n
 `;
     const simpleSkills = skills
-      .filter((x) => !x.isLoaded)
+      .filter((x) => !x.isLoaded && x.allowImplicitInvocation !== false)
       .map((x) => {
         return { name: x.name, description: x.description };
       });
     if (simpleSkills.length === 0) {
       return [];
     }
+    const candidateSkillNames = new Set(simpleSkills.map((skill) => skill.name));
 
     const { client, model, baseURL, debugLogEnabled } = this.createOpenAIClient();
     if (!client) {
@@ -787,7 +789,10 @@ ${agentInstructions}
 
       const parsed = JSON.parse(content);
       if (parsed && Array.isArray(parsed.skillNames)) {
-        return parsed.skillNames;
+        return parsed.skillNames.filter(
+          (skillName: unknown): skillName is string =>
+            typeof skillName === "string" && candidateSkillNames.has(skillName)
+        );
       }
 
       return [];
@@ -938,6 +943,14 @@ ${agentInstructions}
     try {
       const skillMd = fs.readFileSync(skillPath, "utf8");
       const parsed = matter(skillMd);
+      const metadata = parsed.data.metadata;
+      const allowImplicitInvocation =
+        metadata &&
+        typeof metadata === "object" &&
+        !Array.isArray(metadata) &&
+        (metadata as Record<string, unknown>)["allow-implicit-invocation"] === false
+          ? false
+          : undefined;
       return {
         name:
           typeof parsed.data.name === "string" && parsed.data.name.trim()
@@ -945,6 +958,7 @@ ${agentInstructions}
             : fallbackSkill.name,
         path: displayPath,
         description: typeof parsed.data.description === "string" ? parsed.data.description.trim() : "",
+        allowImplicitInvocation,
       };
     } catch {
       return fallbackSkill;

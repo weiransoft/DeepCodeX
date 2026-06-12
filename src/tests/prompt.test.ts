@@ -88,6 +88,27 @@ test("getDefaultSkillPrompt loads the default skill template", () => {
   assert.equal(prompt.includes('path="templates/skills/'), false);
 });
 
+test("buildSkillDocumentsPrompt excludes SKILL.md frontmatter metadata", () => {
+  const prompt = buildSkillDocumentsPrompt([
+    {
+      name: "example",
+      content:
+        "---\nname: example\ndescription: Example skill\nlicense: MIT\ncompatibility: Node.js\nallowed-tools: Read Bash\nmetadata:\n  author: test\n  allow-implicit-invocation: false\n---\n# Example Skill\n\nUse these instructions.\n",
+    },
+  ]);
+
+  assert.equal(prompt.includes("name: example"), true);
+  assert.equal(prompt.includes("description: Example skill"), true);
+  assert.equal(prompt.includes("license: MIT"), true);
+  assert.equal(prompt.includes("compatibility: Node.js"), true);
+  assert.equal(prompt.includes("allowed-tools: Read Bash"), true);
+  assert.equal(prompt.includes("# Example Skill"), true);
+  assert.equal(prompt.includes("Use these instructions."), true);
+  assert.equal(prompt.includes("metadata:"), false);
+  assert.equal(prompt.includes("author: test"), false);
+  assert.equal(prompt.includes("allow-implicit-invocation"), false);
+});
+
 test("buildSkillDocumentsPrompt lists skill resources", () => {
   const skillDir = createTempDir("deepcode-skill-resources-");
   fs.mkdirSync(path.join(skillDir, "scripts"), { recursive: true });
