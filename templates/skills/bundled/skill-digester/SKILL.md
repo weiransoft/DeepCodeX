@@ -1,17 +1,27 @@
 ---
 name: skill-digester
-description: Reviews and improves another DeepCode skill's SKILL.md description field against the Agent Skills description-field rules. Use when the user asks to "digest" a skill, including requests like "digest the pdf skill" or "消化 pdf 技能".
+description: Reviews and improves another DeepCode skill's SKILL.md description field, and guides Agent Skill installation into user or project .agents/skills roots. Use when the user asks to digest a skill, install an Agent Skill, install a skill to user/project scope, or says "消化技能" or "安装 agent skill".
 ---
 
 # Skill Digester
 
-Use this skill to review and optionally rewrite the `description` field of another DeepCode skill.
+Use this skill for two related tasks:
+
+- Review and optionally rewrite the `description` field of another DeepCode skill.
+- Guide installation of an Agent Skill into an interoperable `.agents/skills` root.
 
 ## Interaction Rule
 
-Whenever user input is needed, call the `AskUserQuestion` tool. Do not ask follow-up questions as plain assistant text. This includes missing skill names, language preference, duplicate matches, malformed frontmatter decisions, and whether to apply a recommended rewrite.
+Whenever user input is needed, call the `AskUserQuestion` tool. Do not ask follow-up questions as plain assistant text. This includes missing skill names or paths, install scope, language preference, duplicate matches, malformed frontmatter decisions, and whether to apply a recommended rewrite.
 
 ## Workflow
+
+First classify the request:
+
+- If the user asks to install, add, copy, or place an Agent Skill, use the [Install Agent Skill Workflow](#install-agent-skill-workflow).
+- Otherwise, use the [Digest Description Workflow](#digest-description-workflow).
+
+## Digest Description Workflow
 
 1. Identify the target skill from the user's request.
    - If the user did not provide a skill name, use `AskUserQuestion` to ask for one.
@@ -82,6 +92,46 @@ Whenever user input is needed, call the `AskUserQuestion` tool. Do not ask follo
    - Preserve body content exactly unless the user separately asks to edit it.
    - After editing, report the source path, updated digest output path, and final description.
 
+## Install Agent Skill Workflow
+
+Use this workflow when the user asks to install an Agent Skill. Installation always writes to `.agents/skills`, not `.deepcode/skills`.
+
+1. Identify the source skill directory.
+   - If the user provided an explicit file or directory path, resolve it:
+     - `~/...` relative to the user's home directory.
+     - `./...` relative to the current project root.
+     - Absolute paths as written.
+     - A `SKILL.md` path means its parent directory is the source skill directory.
+   - If the user provided a skill name instead of a path, locate it with `scripts/find-skill.js` using the same command and match rules as the digest workflow.
+   - If the user did not provide a skill name or path, use `AskUserQuestion` to ask for the source skill name or path.
+   - The source directory must contain `SKILL.md`. If it does not, report that the path is not an Agent Skill and ask for another source only if the user still wants to install.
+
+2. Determine the installed skill folder name.
+   - Parse the source `SKILL.md` frontmatter.
+   - Use the trimmed frontmatter `name` when present.
+   - Otherwise use the source folder name with underscores converted to hyphens.
+   - Use that resolved name as the target folder name.
+
+3. Ask exactly one installation scope question.
+   - Use `AskUserQuestion` to ask whether to install the skill at user level or project level.
+   - Offer only these scope choices:
+     - User-level install: `~/.agents/skills/<skill-name>/`
+     - Project-level install: `./.agents/skills/<skill-name>/`
+   - Do not ask any other installation preference before copying.
+
+4. Copy the complete skill directory.
+   - User-level destination: `~/.agents/skills/<skill-name>/`.
+   - Project-level destination: `./.agents/skills/<skill-name>/`.
+   - Copy the whole source skill directory, including `SKILL.md`, `references/`, `scripts/`, `templates/`, examples, assets, and other support files.
+   - Preserve file contents and relative paths exactly.
+   - Create the `.agents/skills` parent directory if needed.
+   - If the destination directory already exists, stop and report the conflict. Do not overwrite or merge files unless the user explicitly asks in a later message.
+
+5. Report the result.
+   - Report the source directory and installation destination.
+   - Mention that the agent client may need to reload or restart before the installed skill appears.
+   - Do not digest, rewrite, or normalize the installed skill unless the user separately asks for that.
+
 ## AskUserQuestion Patterns
 
 Use one question at a time unless two decisions are tightly coupled. Each question must include `options`; rely on the UI's `Other` option for free-form input.
@@ -94,6 +144,10 @@ Examples:
 
 ```json
 {"questions":[{"question":"How should I proceed with this description recommendation?","options":[{"label":"Apply change","description":"Update only the description field in the native digest output SKILL.md."},{"label":"Abandon change","description":"Leave the file unchanged."},{"label":"Discuss wording","description":"Continue refining the proposed description before editing."}]}]}
+```
+
+```json
+{"questions":[{"question":"Where should I install this Agent Skill?","options":[{"label":"User-level","description":"Install to ~/.agents/skills so it is available across projects."},{"label":"Project-level","description":"Install to ./.agents/skills so it is available in this project."}]}]}
 ```
 
 ## Review Heuristics
@@ -110,6 +164,7 @@ Avoid descriptions that are only generic labels, marketing copy, or internal imp
 
 - Never modify a different skill with a similar name without asking.
 - Never save the digested output under `.agents/skills`; `.agents/skills` is only a source root for digestion.
+- Never save installed Agent Skills under `.deepcode/skills`; installation writes only to `.agents/skills`.
 - Never move a skill between project and user level during digestion.
+- Never overwrite or merge an existing installed skill directory unless the user explicitly asks after seeing the conflict.
 - Never change the target skill's language preference after confirmation unless the user asks.
-
