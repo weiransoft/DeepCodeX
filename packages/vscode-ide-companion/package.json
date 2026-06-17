@@ -15,7 +15,16 @@
     "vscode": "^1.85.0"
   },
   "categories": [
-    "Other"
+    "AI"
+  ],
+  "keywords": [
+    "deep-code",
+    "deep code",
+    "deep",
+    "code",
+    "cli",
+    "ide integration",
+    "ide companion"
   ],
   "icon": "resources/deepcoding_icon.png",
   "activationEvents": [],
