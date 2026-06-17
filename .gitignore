@@ -1,8 +1,15 @@
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Dependency directory
 node_modules/
+# Ignore built ts files
 dist/
 out/
-src/generated/
-.DS_Store
+
+
+# Editors
 .idea/
 .vscode/
 *.tgz
