@@ -10,6 +10,8 @@ src/generated/
 *.vsix
 .deepcode/settings.json
 
+# TypeScript build info files
+*.tsbuildinfo
 
 # Generated files
 packages/cli/src/generated/
