@@ -24,113 +24,113 @@ First classify the request:
 ## Digest Description Workflow
 
 1. Identify the target skill from the user's request.
-    - If the user did not provide a skill name, use `AskUserQuestion` to ask for one.
-    - Locate the skill by running the bundled Node script from this skill directory:
+   - If the user did not provide a skill name, use `AskUserQuestion` to ask for one.
+   - Locate the skill by running the bundled Node script from this skill directory:
 
-      ```bash
-      node ~/.deepcode/skills/skill-digester/scripts/find-skill.js "<skill-name-or-path>" "<project-root>"
-      ```
+     ```bash
+     node ~/.deepcode/skills/skill-digester/scripts/find-skill.js "<skill-name-or-path>" "<project-root>"
+     ```
 
-      If this skill is loaded from a project-level or different user-level path, use the `scripts/find-skill.js` file next to this `SKILL.md` instead.
-    - The script searches the same roots Deep Code CLI scans, in priority order:
-        1. Project native skills: `./.deepcode/skills/<folder>/SKILL.md`
-        2. Project interoperable skills: `./.agents/skills/<folder>/SKILL.md`
-        3. User native skills: `~/.deepcode/skills/<folder>/SKILL.md`
-        4. User interoperable skills: `~/.agents/skills/<folder>/SKILL.md`
-    - Treat `./` as the current Deep Code project root only; do not scan parent directories unless the running project root is changed.
-    - The script resolves each candidate's skill name the way Deep Code does: use the trimmed frontmatter `name` when present, otherwise use the folder name with underscores converted to hyphens.
-    - Match the user's input against the resolved skill name first. If needed, also consider the folder name or an explicit path the user provided.
-    - Treat the matched skill's `path` as the source `SKILL.md` to review.
-    - Treat the matched skill's `digestTarget.path` as the only output `SKILL.md` path to create or edit.
-    - `digestTarget.path` always points to the same scope's native Deep Code root:
-        - Project sources from `./.deepcode/skills` or `./.agents/skills` digest to `./.deepcode/skills/<folder>/SKILL.md`.
-        - User sources from `~/.deepcode/skills` or `~/.agents/skills` digest to `~/.deepcode/skills/<folder>/SKILL.md`.
-    - If the script returns one active match, use its `path` for reading and `digestTarget.path` for writing.
-    - If the script returns active and shadowed matches, present each source path and digest target path, then use `AskUserQuestion` before using a shadowed source.
-    - If the script returns no match, state that the skill was not found in Deep Code's scanned skill roots and use `AskUserQuestion` to ask whether the user wants to try another name.
+     If this skill is loaded from a project-level or different user-level path, use the `scripts/find-skill.js` file next to this `SKILL.md` instead.
+   - The script searches the same roots Deep Code CLI scans, in priority order:
+     1. Project native skills: `./.deepcode/skills/<folder>/SKILL.md`
+     2. Project interoperable skills: `./.agents/skills/<folder>/SKILL.md`
+     3. User native skills: `~/.deepcode/skills/<folder>/SKILL.md`
+     4. User interoperable skills: `~/.agents/skills/<folder>/SKILL.md`
+   - Treat `./` as the current Deep Code project root only; do not scan parent directories unless the running project root is changed.
+   - The script resolves each candidate's skill name the way Deep Code does: use the trimmed frontmatter `name` when present, otherwise use the folder name with underscores converted to hyphens.
+   - Match the user's input against the resolved skill name first. If needed, also consider the folder name or an explicit path the user provided.
+   - Treat the matched skill's `path` as the source `SKILL.md` to review.
+   - Treat the matched skill's `digestTarget.path` as the only output `SKILL.md` path to create or edit.
+   - `digestTarget.path` always points to the same scope's native Deep Code root:
+     - Project sources from `./.deepcode/skills` or `./.agents/skills` digest to `./.deepcode/skills/<folder>/SKILL.md`.
+     - User sources from `~/.deepcode/skills` or `~/.agents/skills` digest to `~/.deepcode/skills/<folder>/SKILL.md`.
+   - If the script returns one active match, use its `path` for reading and `digestTarget.path` for writing.
+   - If the script returns active and shadowed matches, present each source path and digest target path, then use `AskUserQuestion` before using a shadowed source.
+   - If the script returns no match, state that the skill was not found in Deep Code's scanned skill roots and use `AskUserQuestion` to ask whether the user wants to try another name.
 
 2. Infer the user's preferred language before reviewing.
-    - Infer a likely language from the user's wording. For example, if the user says `消化pdf技能`, infer Chinese.
-    - Confirm the language with `AskUserQuestion` in the inferred language. For Chinese, ask: `请选择您偏好的语言。`
-    - Offer the inferred language first and include `English` as a fallback. The UI provides an `Other` option, so the user can type a different language.
-    - Use the confirmed preferred language for every later question, recommendation, and rewritten `description` field.
+   - Infer a likely language from the user's wording. For example, if the user says `消化pdf技能`, infer Chinese.
+   - Confirm the language with `AskUserQuestion` in the inferred language. For Chinese, ask: `请选择您偏好的语言。`
+   - Offer the inferred language first and include `English` as a fallback. The UI provides an `Other` option, so the user can type a different language.
+   - Use the confirmed preferred language for every later question, recommendation, and rewritten `description` field.
 
 3. Read the source `SKILL.md`.
-    - Parse the YAML frontmatter and Markdown body from the matched source path.
-    - Preserve all frontmatter fields and body content except for the `description` field if the user approves a rewrite.
-    - If frontmatter is missing or malformed, explain the issue and use `AskUserQuestion` before making structural repairs.
+   - Parse the YAML frontmatter and Markdown body from the matched source path.
+   - Preserve all frontmatter fields and body content except for the `description` field if the user approves a rewrite.
+   - If frontmatter is missing or malformed, explain the issue and use `AskUserQuestion` before making structural repairs.
 
 4. Review the current `description` field against the Agent Skills specification.
-    - Required constraints:
-        - It must be non-empty.
-        - It must be 1-1024 characters.
-        - It should describe what the skill does.
-        - It should describe when to use the skill.
-        - It should include specific keywords that help agents identify relevant tasks.
-    - Compare the description with the actual `SKILL.md` body. Flag mismatches, missing capabilities, overbroad activation language, vague wording, or important trigger keywords that are absent.
-    - Do not rewrite for style alone if the existing description is accurate, specific, and useful.
+   - Required constraints:
+     - It must be non-empty.
+     - It must be 1-1024 characters.
+     - It should describe what the skill does.
+     - It should describe when to use the skill.
+     - It should include specific keywords that help agents identify relevant tasks.
+   - Compare the description with the actual `SKILL.md` body. Flag mismatches, missing capabilities, overbroad activation language, vague wording, or important trigger keywords that are absent.
+   - Do not rewrite for style alone if the existing description is accurate, specific, and useful.
 
 5. Present the review and recommendation.
-    - If the description is already good, say so and do not change the file unless the user asks.
-    - If improvements are useful, show:
-        - The current description.
-        - Concise review findings.
-        - A recommended replacement written in the preferred language.
-        - The source path being reviewed.
-        - The digest output path that would be created or edited.
-    - Use `AskUserQuestion` to ask the user to choose one of three actions in the preferred language:
-        - Apply the recommended change.
-        - Abandon the change.
-        - Continue discussing the wording.
+   - If the description is already good, say so and do not change the file unless the user asks.
+   - If improvements are useful, show:
+     - The current description.
+     - Concise review findings.
+     - A recommended replacement written in the preferred language.
+     - The source path being reviewed.
+     - The digest output path that would be created or edited.
+   - Use `AskUserQuestion` to ask the user to choose one of three actions in the preferred language:
+     - Apply the recommended change.
+     - Abandon the change.
+     - Continue discussing the wording.
 
 6. Apply the change only after explicit approval.
-    - Write only to `digestTarget.path`; never write the digested result to `.agents/skills`.
-    - If `digestTarget.sameAsSource` is true, update only the `description` field in that existing native `SKILL.md`.
-    - If `digestTarget.sameAsSource` is false and `digestTarget.exists` is false, create the native target skill directory by copying the source skill directory first, then update only the target `SKILL.md` description. This preserves bundled scripts, references, and assets.
-    - If `digestTarget.sameAsSource` is false and `digestTarget.exists` is true, update only the `description` field in the existing native target `SKILL.md`; do not overwrite its body or bundled files unless the user explicitly asks.
-    - Keep the original `name` and any other frontmatter fields unchanged in the file being written.
-    - Preserve body content exactly unless the user separately asks to edit it.
-    - After editing, report the source path, updated digest output path, and final description.
+   - Write only to `digestTarget.path`; never write the digested result to `.agents/skills`.
+   - If `digestTarget.sameAsSource` is true, update only the `description` field in that existing native `SKILL.md`.
+   - If `digestTarget.sameAsSource` is false and `digestTarget.exists` is false, create the native target skill directory by copying the source skill directory first, then update only the target `SKILL.md` description. This preserves bundled scripts, references, and assets.
+   - If `digestTarget.sameAsSource` is false and `digestTarget.exists` is true, update only the `description` field in the existing native target `SKILL.md`; do not overwrite its body or bundled files unless the user explicitly asks.
+   - Keep the original `name` and any other frontmatter fields unchanged in the file being written.
+   - Preserve body content exactly unless the user separately asks to edit it.
+   - After editing, report the source path, updated digest output path, and final description.
 
 ## Install Agent Skill Workflow
 
 Use this workflow when the user asks to install an Agent Skill. Installation always writes to `.agents/skills`, not `.deepcode/skills`.
 
 1. Identify the source skill directory.
-    - If the user provided an explicit file or directory path, resolve it:
-        - `~/...` relative to the user's home directory.
-        - `./...` relative to the current project root.
-        - Absolute paths as written.
-        - A `SKILL.md` path means its parent directory is the source skill directory.
-    - If the user provided a skill name instead of a path, locate it with `scripts/find-skill.js` using the same command and match rules as the digest workflow.
-    - If the user did not provide a skill name or path, use `AskUserQuestion` to ask for the source skill name or path.
-    - The source directory must contain `SKILL.md`. If it does not, report that the path is not an Agent Skill and ask for another source only if the user still wants to install.
+   - If the user provided an explicit file or directory path, resolve it:
+     - `~/...` relative to the user's home directory.
+     - `./...` relative to the current project root.
+     - Absolute paths as written.
+     - A `SKILL.md` path means its parent directory is the source skill directory.
+   - If the user provided a skill name instead of a path, locate it with `scripts/find-skill.js` using the same command and match rules as the digest workflow.
+   - If the user did not provide a skill name or path, use `AskUserQuestion` to ask for the source skill name or path.
+   - The source directory must contain `SKILL.md`. If it does not, report that the path is not an Agent Skill and ask for another source only if the user still wants to install.
 
 2. Determine the installed skill folder name.
-    - Parse the source `SKILL.md` frontmatter.
-    - Use the trimmed frontmatter `name` when present.
-    - Otherwise use the source folder name with underscores converted to hyphens.
-    - Use that resolved name as the target folder name.
+   - Parse the source `SKILL.md` frontmatter.
+   - Use the trimmed frontmatter `name` when present.
+   - Otherwise use the source folder name with underscores converted to hyphens.
+   - Use that resolved name as the target folder name.
 
 3. Ask exactly one installation scope question.
-    - Use `AskUserQuestion` to ask whether to install the skill at user level or project level.
-    - Offer only these scope choices:
-        - User-level install: `~/.agents/skills/<skill-name>/`
-        - Project-level install: `./.agents/skills/<skill-name>/`
-    - Do not ask any other installation preference before copying.
+   - Use `AskUserQuestion` to ask whether to install the skill at user level or project level.
+   - Offer only these scope choices:
+     - User-level install: `~/.agents/skills/<skill-name>/`
+     - Project-level install: `./.agents/skills/<skill-name>/`
+   - Do not ask any other installation preference before copying.
 
 4. Copy the complete skill directory.
-    - User-level destination: `~/.agents/skills/<skill-name>/`.
-    - Project-level destination: `./.agents/skills/<skill-name>/`.
-    - Copy the whole source skill directory, including `SKILL.md`, `references/`, `scripts/`, `templates/`, examples, assets, and other support files.
-    - Preserve file contents and relative paths exactly.
-    - Create the `.agents/skills` parent directory if needed.
-    - If the destination directory already exists, stop and report the conflict. Do not overwrite or merge files unless the user explicitly asks in a later message.
+   - User-level destination: `~/.agents/skills/<skill-name>/`.
+   - Project-level destination: `./.agents/skills/<skill-name>/`.
+   - Copy the whole source skill directory, including `SKILL.md`, `references/`, `scripts/`, `templates/`, examples, assets, and other support files.
+   - Preserve file contents and relative paths exactly.
+   - Create the `.agents/skills` parent directory if needed.
+   - If the destination directory already exists, stop and report the conflict. Do not overwrite or merge files unless the user explicitly asks in a later message.
 
 5. Report the result.
-    - Report the source directory and installation destination.
-    - Mention that the agent client may need to reload or restart before the installed skill appears.
-    - Do not digest, rewrite, or normalize the installed skill unless the user separately asks for that.
+   - Report the source directory and installation destination.
+   - Mention that the agent client may need to reload or restart before the installed skill appears.
+   - Do not digest, rewrite, or normalize the installed skill unless the user separately asks for that.
 
 ## AskUserQuestion Patterns
 
