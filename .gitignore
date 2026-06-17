@@ -9,3 +9,9 @@ src/generated/
 *.log
 *.vsix
 .deepcode/settings.json
+
+
+# Generated files
+packages/cli/src/generated/
+packages/core/src/generated/
+packages/vscode-ide-companion/*.vsix
