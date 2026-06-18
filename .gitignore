@@ -24,3 +24,4 @@ out/
 packages/cli/src/generated/
 packages/core/src/generated/
 packages/vscode-ide-companion/*.vsix
+packages/vscode-ide-companion/templates/

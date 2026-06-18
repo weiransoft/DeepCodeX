@@ -31,6 +31,7 @@
   "files": [
     "out/extension.js",
     "resources/**",
+    "templates/**",
     "README.md",
     "README_cn.md",
     "README_en.md",
