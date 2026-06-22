@@ -105,7 +105,7 @@ git tag v0.1.32
 
 ## prepare:package — 构建并发布到 npm
 
-完成质量检查、构建、发布两个 npm 包，并自动创建 git commit 和 tag。
+完成质量检查、构建、发布 CLI 到 npm，并自动创建 git commit 和 tag。
 
 ### 基本用法
 
@@ -122,7 +122,7 @@ npm run prepare:package -- <version> [options]
 | `--dry-run` | 预演模式，不实际执行任何写操作 |
 | `--force` | 跳过 main 分支检查，允许从其他分支发布 |
 
-### 执行流程（9 步）
+### 执行流程（8 步）
 
 | 步骤 | 操作 | 说明 |
 |------|------|------|
@@ -131,10 +131,9 @@ npm run prepare:package -- <version> [options]
 | 3 | 更新版本号 | 同时更新 `packages/core` 和 `packages/cli` 的 version |
 | 4 | 质量检查 | `npm run check`（typecheck + eslint + prettier） |
 | 5 | 测试 | `npm run test --workspaces` |
-| 6 | 构建 | `npm run build`（core tsc + cli esbuild bundle） |
-| 7 | 发布 core | `npm publish --workspace=@vegamo/deepcode-core --access public` |
-| 8 | 发布 cli | 将 cli 的 `@vegamo/deepcode-core` 依赖从 `file:../core` 临时改为 `^<version>`，发布后恢复 |
-| 9 | Git commit & tag | `chore(release): v<version>` + `git tag v<version>` |
+| 6 | 构建 | `npm run build`（core tsc + esbuild 将 core 及所有依赖内联到 `dist/cli.js`） |
+| 7 | 发布 CLI | 往 `dist/` 写入 `dependencies: {}` 的 package.json，从 `dist/` 目录执行 `npm publish` |
+| 8 | Git commit & tag | `chore(release): v<version>` + `git tag v<version>` |
 
 ### 完整示例
 
@@ -152,9 +151,9 @@ npm run prepare:package -- 0.1.32 --dry-run
 npm run prepare:package -- 0.1.32 --force
 ```
 
-### 关于 file:../core 依赖
+### 关于 Core 打包策略
 
-CLI 包的 `@vegamo/deepcode-core` 依赖在开发时使用 `"file:../core"`（monorepo 本地链接）。发布到 npm 时，脚本会自动将其替换为 `"^<version>"`，发布完成后恢复为 `file:../core`。这个过程对用户透明，无需手动处理。
+CLI 的 `package.json` 中保留 `"@vegamo/deepcode-core": "file:../core"` 用于本地开发（IDE 类型检查、monorepo 工作区解析）。构建时 esbuild 使用 `packages: "bundle"` 将 core 的全部代码及其运行时依赖（`openai`、`ejs`、`zod` 等）内联到单个 `dist/cli.js` 文件中。发布时脚本往 `dist/` 写入 `dependencies: {}` 的 `package.json`，从 `dist/` 目录发布，因此发布的 CLI 包零运行时依赖。`@vegamo/deepcode-core` 不再作为独立 npm 包发布。
 
 ### 发布后
 

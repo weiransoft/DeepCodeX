@@ -105,7 +105,7 @@ git tag v0.1.32
 
 ## prepare:package — Build and Publish to npm
 
-Runs quality checks, builds, publishes both npm packages, and automatically creates a git commit with tag.
+Runs quality checks, builds, publishes the CLI to npm, and automatically creates a git commit with tag.
 
 ### Basic Usage
 
@@ -122,7 +122,7 @@ npm run prepare:package -- <version> [options]
 | `--dry-run` | Preview mode, no actual writes |
 | `--force` | Skip main branch check, allow publishing from other branches |
 
-### Execution Flow (9 Steps)
+### Execution Flow (8 Steps)
 
 | Step | Action | Description |
 |------|--------|-------------|
@@ -131,10 +131,9 @@ npm run prepare:package -- <version> [options]
 | 3 | Update versions | Updates `packages/core` and `packages/cli` version fields |
 | 4 | Quality checks | `npm run check` (typecheck + eslint + prettier) |
 | 5 | Tests | `npm run test --workspaces` |
-| 6 | Build | `npm run build` (core tsc + cli esbuild bundle) |
-| 7 | Publish core | `npm publish --workspace=@vegamo/deepcode-core --access public` |
-| 8 | Publish cli | Temporarily changes cli's `@vegamo/deepcode-core` dep from `file:../core` to `^<version>`, restores after publish |
-| 9 | Git commit & tag | `chore(release): v<version>` + `git tag v<version>` |
+| 6 | Build | `npm run build` (core tsc + esbuild inlines core and all deps into `dist/cli.js`) |
+| 7 | Publish CLI | Writes `dist/package.json` with `dependencies: {}`, runs `npm publish` from `dist/` |
+| 8 | Git commit & tag | `chore(release): v<version>` + `git tag v<version>` |
 
 ### Examples
 
@@ -152,9 +151,9 @@ npm run prepare:package -- 0.1.32 --dry-run
 npm run prepare:package -- 0.1.32 --force
 ```
 
-### About the file:../core Dependency
+### About the Core Bundling Strategy
 
-The CLI package uses `"file:../core"` for the `@vegamo/deepcode-core` dependency during development (monorepo local link). When publishing to npm, the script automatically replaces it with `"^<version>"` and restores it after publishing. This is transparent — no manual handling required.
+The CLI's `package.json` keeps `"@vegamo/deepcode-core": "file:../core"` for local development (IDE type checking, monorepo workspace resolution). At build time, esbuild uses `packages: "bundle"` to inline all of core's code and its runtime dependencies (`openai`, `ejs`, `zod`, etc.) into a single `dist/cli.js` file. At publish time, the script writes a `dist/package.json` with `dependencies: {}` and publishes from the `dist/` directory, so the published CLI package has zero runtime dependencies. `@vegamo/deepcode-core` is no longer published as a separate npm package.
 
 ### After Publishing
 
