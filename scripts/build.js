@@ -17,7 +17,8 @@ console.log("=========================================");
 console.log("  Deep Code CLI — Build");
 console.log("=========================================");
 
-run("npm", ["run", "build", "--workspace=@vegamo/deepcode-core"], "1/2");
-run("npm", ["run", "bundle"], "2/2");
+run("npm", ["run", "build", "--workspace=@vegamo/deepcode-core"], "1/3");
+run("node", ["scripts/rewrite-esm-imports.js"], "2/3");
+run("npm", ["run", "bundle"], "3/3");
 
 console.log("\n✅  Build complete.\n\n");

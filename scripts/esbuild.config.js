@@ -20,6 +20,7 @@ await build({
   jsx: "automatic",
   jsxImportSource: "react",
   packages: "external",
+  external: ["@vegamo/deepcode-core"],
   logOverride: {
     "empty-import-meta": "silent",
   },
