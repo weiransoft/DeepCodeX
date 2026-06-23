@@ -68,8 +68,8 @@ dist/                    # Bundled CLI output (gitignored)
 | `npm run format` | Prettier on all `src/**/*.{ts,tsx}` |
 | `npm run format:check` | Prettier in check-only mode |
 | `npm run check` | Runs typecheck + lint + format:check together |
-| `npm run bundle` | esbuild bundles `src/cli.tsx` → `dist/cli.js` (ESM, Node 18) |
-| `npm run build` | `check` + `bundle` + chmod 755 — full CI gate before publish |
+| `npm run bundle` | esbuild bundles cli + core + all deps → `dist/cli.js` (ESM, Node 22) |
+| `npm run build` | build core (tsc) + rewrite ESM imports + bundle CLI (esbuild) |
 | `npm test` | Runs all tests via `node src/tests/run-tests.mjs` |
 | `npm run test:single -- <file>` | Run a single test file via `tsx --test` (e.g., `npm run test:single -- src/tests/session.test.ts`) |
 
