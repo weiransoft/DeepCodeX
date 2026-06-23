@@ -1,6 +1,9 @@
 import React from "react";
 import { render } from "ink";
-import { setShellIfWindows } from "@vegamo/deepcode-core";
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import { setShellIfWindows, getProjectCode } from "@vegamo/deepcode-core";
 import { checkForNpmUpdate, promptForPendingUpdate, type PackageInfo } from "./common/update-check";
 import { AppContainer } from "./ui";
 import { extractInitialPrompt, extractResumeSessionId } from "./cli-args";
@@ -64,6 +67,23 @@ let initialPrompt = extractInitialPrompt(args);
 const resumeSessionId = extractResumeSessionId(args);
 const projectRoot = process.cwd();
 configureWindowsShell();
+
+// Validate --resume <sessionId> before entering TUI
+if (typeof resumeSessionId === "string") {
+  const projectCode = getProjectCode(projectRoot);
+  const indexPath = join(homedir(), ".deepcode", "projects", projectCode, "sessions-index.json");
+  try {
+    const index = JSON.parse(readFileSync(indexPath, "utf-8"));
+    const found = Array.isArray(index?.entries) && index.entries.some((e: { id: string }) => e.id === resumeSessionId);
+    if (!found) {
+      process.stderr.write(`No saved session found with ID "${resumeSessionId}".\n`);
+      process.exit(1);
+    }
+  } catch {
+    process.stderr.write(`No saved session found with ID "${resumeSessionId}".\n`);
+    process.exit(1);
+  }
+}
 
 if (!process.stdin.isTTY) {
   process.stderr.write("deepcode requires an interactive terminal (TTY). " + "Re-run from a real terminal session.\n");

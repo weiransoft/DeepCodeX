@@ -519,6 +519,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
       refreshSessionsList();
       navigateToSubView("session-list");
     } else {
+      // Session ID already validated in cli.tsx — guaranteed to exist
       handleSelectSession(resumeSessionId);
     }
   }, [handleSelectSession, navigateToSubView, refreshSessionsList, resumeSessionId]);
