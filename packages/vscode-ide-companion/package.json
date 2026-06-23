@@ -7,15 +7,18 @@
   "license": "MIT",
   "type": "commonjs",
   "main": "./out/extension.js",
+  "preview": true,
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lessweb/deepcode-cli.git"
+    "url": "https://github.com/lessweb/deepcode-cli.git",
+    "directory": "packages/vscode-ide-companion"
   },
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
-    "AI"
+    "AI",
+    "Chat"
   ],
   "keywords": [
     "deep-code",
