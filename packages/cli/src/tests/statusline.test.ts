@@ -7,7 +7,7 @@ import { sanitizeStatusText, STATUS_SEGMENT_MAX_LENGTH } from "../ui/statusline/
 import { validateModulePath, loadModuleProvider } from "../ui/statusline/module-provider";
 import { createCommandStatusProvider } from "../ui/statusline/command-provider";
 import { StatusLineManager } from "../ui/statusline/manager";
-import { resolveSettings } from "@vegamo/deepcode-core";
+import { resolveSettings, resolveSettingsSources } from "@vegamo/deepcode-core";
 import type { ResolvedStatusLineSettings } from "@vegamo/deepcode-core";
 
 test("sanitizeStatusText returns empty for null/undefined/empty", () => {
@@ -169,6 +169,33 @@ test("loadModuleProvider succeeds for a well-formed module", async () => {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("resolveSettingsSources lets project-level providers override user-level by id", () => {
+  const resolved = resolveSettingsSources(
+    {
+      statusline: {
+        enabled: true,
+        providers: [
+          { type: "command", id: "model", command: "echo user-model" },
+          { type: "command", id: "branch", command: "echo user-branch" },
+        ],
+      },
+    },
+    {
+      statusline: {
+        providers: [
+          { type: "command", id: "model", command: "echo project-model" },
+          { type: "command", id: "cwd", command: "echo project-cwd" },
+        ],
+      },
+    },
+    { model: "default-model", baseURL: "https://default.example.com" }
+  );
+  const ids = resolved.statusline.providers.map((p) => p.id);
+  assert.deepEqual(ids, ["branch", "model", "cwd"]);
+  const modelProvider = resolved.statusline.providers.find((p) => p.id === "model");
+  assert.equal(modelProvider?.type === "command" && modelProvider.command, "echo project-model");
 });
 
 test("StatusLineManager emits segments after fetch and stops cleanly", async () => {

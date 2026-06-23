@@ -845,15 +845,33 @@ export const PromptInput = React.memo(function PromptInput({
         </Box>
       )}
       {statusLineSegments && statusLineSegments.length > 0 && (
-        <Box>
-          {statusLineSegments.map((segment, index) => (
-            <React.Fragment key={segment.id}>
-              {index > 0 && <Text dimColor>{statusLineSeparator ?? " · "}</Text>}
-              <Text color={segment.color} dimColor={!segment.color}>
-                {segment.text}
-              </Text>
-            </React.Fragment>
-          ))}
+        <Box flexDirection="column">
+          {(() => {
+            const lines: StatusSegment[][] = [];
+            let currentLine: StatusSegment[] = [];
+            for (const segment of statusLineSegments) {
+              if (segment.newLine && currentLine.length > 0) {
+                lines.push(currentLine);
+                currentLine = [];
+              }
+              currentLine.push(segment);
+            }
+            if (currentLine.length > 0) {
+              lines.push(currentLine);
+            }
+            return lines.map((line, lineIndex) => (
+              <Box key={lineIndex}>
+                {line.map((segment, index) => (
+                  <React.Fragment key={segment.id}>
+                    {index > 0 && <Text dimColor>{statusLineSeparator ?? " · "}</Text>}
+                    <Text color={segment.color} dimColor={!segment.color}>
+                      {segment.text}
+                    </Text>
+                  </React.Fragment>
+                ))}
+              </Box>
+            ));
+          })()}
         </Box>
       )}
     </Box>

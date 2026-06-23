@@ -11,6 +11,7 @@ import {
   isPathInAnyDirectory,
   parseBashSideEffects,
 } from "../common/permissions";
+import type { PermissionScope } from "../settings";
 
 const tempDirs: string[] = [];
 
@@ -52,10 +53,10 @@ test("computeToolCallPermissions maps tool calls to permission requests", () => 
     sessionId: "session-1",
     projectRoot,
     settings: {
-      allow: [],
-      deny: [],
-      ask: ["write-out-cwd", "network"],
-      defaultMode: "allowAll",
+      allow: [] as PermissionScope[],
+      deny: [] as PermissionScope[],
+      ask: ["write-out-cwd", "network"] as PermissionScope[],
+      defaultMode: "allowAll" as const,
     },
     resolveSnippetPath: () => path.join(projectRoot, "src", "file.ts"),
     toolCalls: [
@@ -100,10 +101,10 @@ test("computeToolCallPermissions only asks for scopes not already allowed", () =
     sessionId: "session-1",
     projectRoot,
     settings: {
-      allow: ["read-in-cwd"],
-      deny: [],
-      ask: [],
-      defaultMode: "askAll",
+      allow: ["read-in-cwd"] as PermissionScope[],
+      deny: [] as PermissionScope[],
+      ask: [] as PermissionScope[],
+      defaultMode: "askAll" as const,
     },
     toolCalls: [
       {
@@ -138,10 +139,10 @@ test("computeToolCallPermissions allows read tool calls under skill scan paths",
     projectRoot,
     readPermissionExemptPaths: [skillRoot],
     settings: {
-      allow: [],
-      deny: [],
-      ask: [],
-      defaultMode: "askAll",
+      allow: [] as PermissionScope[],
+      deny: [] as PermissionScope[],
+      ask: [] as PermissionScope[],
+      defaultMode: "askAll" as const,
     },
     toolCalls: [
       {

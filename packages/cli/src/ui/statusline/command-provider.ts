@@ -32,6 +32,7 @@ export function createCommandStatusProvider(
   return {
     id,
     color: config.color,
+    newLine: config.newLine,
     maxLength: config.maxLength,
     fetch: ({ signal }: StatusProviderContext) =>
       new Promise<string>((resolve) => {

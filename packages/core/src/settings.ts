@@ -53,6 +53,7 @@ export type StatusLineProviderConfig =
       cwd?: string;
       timeoutMs?: number;
       color?: string;
+      newLine?: boolean;
       maxLength?: number;
     }
   | {
@@ -61,6 +62,7 @@ export type StatusLineProviderConfig =
       path: string;
       timeoutMs?: number;
       color?: string;
+      newLine?: boolean;
       maxLength?: number;
     };
 
@@ -278,6 +280,7 @@ function normalizeStatusLineProvider(value: unknown): StatusLineProviderConfig |
     typeof maxLengthRaw === "number" && Number.isFinite(maxLengthRaw) && maxLengthRaw > 0
       ? Math.floor(maxLengthRaw)
       : undefined;
+  const newLine = value["newLine"] === true ? true : undefined;
 
   if (type === "command") {
     const command = trimString(value["command"]);
@@ -292,6 +295,7 @@ function normalizeStatusLineProvider(value: unknown): StatusLineProviderConfig |
       cwd: cwdRaw || undefined,
       timeoutMs,
       color,
+      newLine,
       maxLength,
     };
   }
@@ -306,6 +310,7 @@ function normalizeStatusLineProvider(value: unknown): StatusLineProviderConfig |
       path: modulePath,
       timeoutMs,
       color,
+      newLine,
       maxLength,
     };
   }
@@ -349,7 +354,10 @@ function mergeStatusLine(
 ): ResolvedStatusLineSettings {
   const userConfig = normalizeStatusLine(userSettings?.statusline) ?? {};
   const projectConfig = normalizeStatusLine(projectSettings?.statusline) ?? {};
-  const providers = [...(userConfig.providers ?? []), ...(projectConfig.providers ?? [])];
+  const userProviders = userConfig.providers ?? [];
+  const projectProviders = projectConfig.providers ?? [];
+  const projectIds = new Set(projectProviders.map((p) => p.id));
+  const providers = [...userProviders.filter((p) => !projectIds.has(p.id)), ...projectProviders];
   const enabled = projectConfig.enabled ?? userConfig.enabled ?? providers.length > 0;
   const refreshMs = projectConfig.refreshMs ?? userConfig.refreshMs ?? DEFAULT_STATUSLINE_REFRESH_MS;
   const separator = projectConfig.separator ?? userConfig.separator ?? DEFAULT_STATUSLINE_SEPARATOR;

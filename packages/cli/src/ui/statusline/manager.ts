@@ -11,7 +11,12 @@ function segmentsEqual(a: StatusSegment[], b: StatusSegment[]): boolean {
     return false;
   }
   for (let i = 0; i < a.length; i++) {
-    if (a[i]?.id !== b[i]?.id || a[i]?.text !== b[i]?.text || a[i]?.color !== b[i]?.color) {
+    if (
+      a[i]?.id !== b[i]?.id ||
+      a[i]?.text !== b[i]?.text ||
+      a[i]?.color !== b[i]?.color ||
+      a[i]?.newLine !== b[i]?.newLine
+    ) {
       return false;
     }
   }
@@ -130,7 +135,17 @@ export class StatusLineManager {
       if (!resolvedPath) {
         return null;
       }
-      return loadModuleProvider(resolvedPath, config.color, providerId, config.timeoutMs, config.maxLength);
+      const provider = await loadModuleProvider(
+        resolvedPath,
+        config.color,
+        providerId,
+        config.timeoutMs,
+        config.maxLength
+      );
+      if (provider && config.newLine) {
+        provider.newLine = true;
+      }
+      return provider;
     }
     return null;
   }
@@ -155,6 +170,9 @@ export class StatusLineManager {
           const segment: StatusSegment = { id: provider.id, text: sanitized };
           if (provider.color) {
             segment.color = provider.color;
+          }
+          if (provider.newLine) {
+            segment.newLine = true;
           }
           return segment;
         } catch {

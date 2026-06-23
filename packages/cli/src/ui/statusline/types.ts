@@ -4,6 +4,7 @@ export type StatusSegment = {
   id: string;
   text: string;
   color?: string;
+  newLine?: boolean;
 };
 
 export type SessionInfo = {
@@ -29,6 +30,7 @@ export type StatusProvider = {
   id: string;
   color?: string;
   maxLength?: number;
+  newLine?: boolean;
   fetch: (ctx: StatusProviderContext) => Promise<string>;
   dispose?: () => void;
 };
