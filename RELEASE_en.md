@@ -1,13 +1,14 @@
 # Release
 
-Deep Code uses two scripts to manage version releases in the monorepo:
+Deep Code uses three scripts to manage version releases in the monorepo:
 
 | Script | Command | Purpose |
 |--------|---------|---------|
 | `scripts/version.js` | `npm run release:version` | Bump all workspace package versions + regenerate lockfile |
-| `scripts/prepare-package.js` | `npm run prepare:package` | Build + quality checks + publish to npm + git commit & tag |
+| `scripts/prepare-package.js` | `npm run prepare:package` | Build CLI + quality checks + publish to npm + git commit & tag |
+| `scripts/prepare-vscode.js` | `npm run prepare:vscode` | Build VSCode extension + quality checks + publish to VS Code Marketplace + git commit & tag |
 
-Use them together: bump version first, then publish.
+Release flow: bump version first, then publish CLI and VSCode extension separately.
 
 ---
 
@@ -172,6 +173,58 @@ npx @vegamo/deepcode-cli --version
 
 ---
 
+## prepare:vscode — Build and Publish VSCode Extension to Marketplace
+
+Runs quality checks, builds, publishes the VSCode extension to the VS Code Marketplace, and automatically creates a git commit with tag.
+
+### Prerequisites
+
+Requires an Azure DevOps Personal Access Token (PAT) for marketplace authentication:
+
+1. Generate a token at https://dev.azure.com/vegamo/_usersSettings/tokens
+2. Set the environment variable `VSCE_PAT=<token>`
+
+### Basic Usage
+
+```bash
+VSCE_PAT=<token> npm run prepare:vscode -- <version> [options]
+```
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `<version>` | **Required**. Semver version to publish |
+| `--dry-run` | Preview mode, no actual writes |
+| `--force` | Skip main branch check, allow publishing from other branches |
+
+### Execution Flow (7 Steps)
+
+| Step | Action | Description |
+|------|--------|-------------|
+| 1 | Git check | Working tree must be clean, must be on main branch |
+| 2 | VSCE_PAT check | Environment variable must be set |
+| 3 | Update versions | Updates `packages/core`, `packages/cli`, and `packages/vscode-ide-companion` version fields |
+| 4 | Quality checks | `npm run check` (typecheck + eslint + prettier) |
+| 5 | Tests | `npm run test --workspaces` |
+| 6 | Build | `npm run build:vscode` (core tsc + esbuild bundle extension + copy templates + vsce package) |
+| 7 | Publish | `vsce publish <version> --no-dependencies` to VS Code Marketplace |
+
+### Examples
+
+```bash
+# Publish stable release
+VSCE_PAT=xxx npm run prepare:vscode -- 0.1.32
+
+# Publish pre-release
+VSCE_PAT=xxx npm run prepare:vscode -- 0.1.32-beta.1
+
+# Dry run (no actual publish)
+npm run prepare:vscode -- 0.1.32 --dry-run
+```
+
+---
+
 ## Typical Release Flow
 
 A complete version release follows these steps:
@@ -190,18 +243,22 @@ git diff
 git add -A
 git commit -m "chore(release): v0.1.32"
 
-# 5. Build + quality check + publish
+# 5. Build + quality check + publish CLI
 npm run prepare:package -- 0.1.32
 
-# 6. Push to remote
+# 6. Publish VSCode extension
+VSCE_PAT=xxx npm run prepare:vscode -- 0.1.32
+
+# 7. Push to remote
 git push && git push --tags
 ```
 
-Or simplified to two steps (`prepare:package` auto-commits and tags):
+Or simplified to three steps (`prepare:package` and `prepare:vscode` each auto-commit and tag):
 
 ```bash
 npm run release:version -- patch
 npm run prepare:package -- 0.1.32
+VSCE_PAT=xxx npm run prepare:vscode -- 0.1.32
 git push && git push --tags
 ```
 

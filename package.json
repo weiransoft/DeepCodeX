@@ -28,6 +28,7 @@
     "test": "npm run test --workspaces --if-present",
     "release:version": "node scripts/version.js",
     "prepare:package": "node scripts/prepare-package.js",
+    "prepare:vscode": "node scripts/prepare-vscode.js",
     "prepare": "husky && npm run build && npm run bundle"
   },
   "devDependencies": {
