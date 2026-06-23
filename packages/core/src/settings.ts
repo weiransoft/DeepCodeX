@@ -654,9 +654,12 @@ export function writeModelConfigSelection(
 }
 
 export function resolveCurrentSettings(projectRoot: string = process.cwd()): ResolvedDeepcodingSettings {
+  const userPath = path.resolve(getUserSettingsPath());
+  const projectPath = path.resolve(getProjectSettingsPath(projectRoot));
+  const sameFile = userPath === projectPath;
   return resolveSettingsSources(
     readSettings(),
-    readProjectSettings(projectRoot),
+    sameFile ? null : readProjectSettings(projectRoot),
     {
       model: DEFAULT_MODEL,
       baseURL: DEFAULT_BASE_URL,
