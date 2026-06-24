@@ -10,6 +10,7 @@ import { killProcessTree } from "@vegamo/deepcode-core";
 export type PackageInfo = {
   name: string;
   version: string;
+  gitCommit?: string;
 };
 
 type UpdateState = {

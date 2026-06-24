@@ -7,6 +7,7 @@ import { setShellIfWindows, getProjectCode } from "@vegamo/deepcode-core";
 import { checkForNpmUpdate, promptForPendingUpdate, type PackageInfo } from "./common/update-check";
 import { AppContainer } from "./ui";
 import { extractInitialPrompt, extractResumeSessionId } from "./cli-args";
+import { CLI_VERSION, GIT_COMMIT_INFO } from "./generated/git-commit";
 
 const args = process.argv.slice(2);
 const packageInfo = readPackageInfo();
@@ -151,9 +152,10 @@ function readPackageInfo(): PackageInfo {
     const pkg = require("../package.json") as { name?: unknown; version?: unknown };
     return {
       name: typeof pkg.name === "string" ? pkg.name : "@vegamo/deepcode-cli",
-      version: typeof pkg.version === "string" ? pkg.version : "",
+      version: typeof pkg.version === "string" ? pkg.version : (CLI_VERSION ?? ""),
+      gitCommit: GIT_COMMIT_INFO ?? "",
     };
   } catch {
-    return { name: "@vegamo/deepcode-cli", version: "" };
+    return { name: "@vegamo/deepcode-cli", version: CLI_VERSION ?? "", gitCommit: GIT_COMMIT_INFO ?? "" };
   }
 }
