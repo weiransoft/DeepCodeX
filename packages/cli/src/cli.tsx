@@ -1,6 +1,6 @@
 import React from "react";
 import { render } from "ink";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { setShellIfWindows, getProjectCode } from "@vegamo/deepcode-core";
