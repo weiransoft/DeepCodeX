@@ -37,6 +37,10 @@
     "ignore": "^7.0.5",
     "ink": "^7.0.4",
     "ink-gradient": "^4.0.1",
-    "react": "^19.2.5"
+    "react": "^19.2.5",
+    "yargs": "^18.0.0"
+  },
+  "devDependencies": {
+    "@types/yargs": "^17.0.35"
   }
 }

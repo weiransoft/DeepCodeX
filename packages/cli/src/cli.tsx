@@ -6,68 +6,85 @@ import { homedir } from "node:os";
 import { setShellIfWindows, getProjectCode } from "@vegamo/deepcode-core";
 import { checkForNpmUpdate, promptForPendingUpdate, type PackageInfo } from "./common/update-check";
 import { AppContainer } from "./ui";
-import { extractInitialPrompt, extractResumeSessionId } from "./cli-args";
+import { hideBin } from "yargs/helpers";
+import { parseCliArgs } from "./cli-args";
 import { CLI_VERSION, GIT_COMMIT_INFO } from "./generated/git-commit";
 
-const args = process.argv.slice(2);
+const args = hideBin(process.argv);
 const packageInfo = readPackageInfo();
 
-if (args.includes("--version") || args.includes("-v")) {
+const HELP_TEXT =
+  [
+    "",
+    "Usage: deepcode [options] [command]\n\nDeep Code - Launch an interactive CLI, use -p/--prompt for non-interactive mode",
+    "",
+    "Commands:",
+    "  deepcode                     Launch the interactive TUI in the current directory",
+    "",
+    "Options:",
+    "  -p, --prompt <prompt>        Launch with a pre-filled prompt",
+    "  -r, --resume [sessionId]     Resume a specific session by its ID. Use without an ID to show session picker",
+    "  -v, --version                Show version number",
+    "  -h, --help                   Show help",
+    "",
+    "Configuration:",
+    "  ~/.deepcode/settings.json    User-level API key, model, base URL",
+    "  ./.deepcode/settings.json    Project-level settings",
+    "  ./.deepcode/skills/*/SKILL.md Project-level native skills",
+    "  ./.agents/skills/*/SKILL.md   Project-level interoperable skills",
+    "  ~/.deepcode/skills/*/SKILL.md User-level native skills",
+    "  ~/.agents/skills/*/SKILL.md   User-level interoperable skills",
+    "",
+    "Inside the TUI:",
+    "  enter            Send the prompt",
+    "  shift+enter      Insert a newline",
+    "  home/end         Move within the current line",
+    "  alt+left/right   Move by word",
+    "  ctrl+w           Delete the previous word",
+    "  ctrl+v           Paste an image from the clipboard",
+    "  ctrl+x           Clear pasted images",
+    "  esc              Interrupt the current model turn",
+    "  /                Open the skills/commands menu",
+    "  /skills          List available skills",
+    "  /model           Select model, thinking mode and effort control",
+    "  /new             Start a fresh conversation",
+    "  /init            Initialize an AGENTS.md file with instructions for LLM",
+    "  /resume          Pick a previous conversation to continue",
+    "  /continue        Continue the active conversation, or resume one if empty",
+    "  /undo            Restore code and/or conversation to a previous point",
+    "  /mcp             Show MCP server status and available tools",
+    "  /raw             Toggle display mode for viewing or collapsing reasoning content",
+    "  /exit            Quit",
+    "  ctrl+d twice     Quit",
+  ].join("\n") + "\n";
+
+const parsed = parseCliArgs(args);
+
+if ("message" in parsed) {
+  process.stderr.write(parsed.message + "\n\n");
+  process.stdout.write(HELP_TEXT);
+  process.exit(1);
+}
+
+if (parsed.version) {
   process.stdout.write(`${packageInfo.version || "unknown"}\n`);
   process.exit(0);
 }
 
-if (args.includes("--help") || args.includes("-h")) {
-  process.stdout.write(
-    [
-      "deepcode - Deep Code CLI",
-      "",
-      "Usage:",
-      "  deepcode                              Launch the interactive TUI in the current directory",
-      "  deepcode -p <prompt>                  Launch with a pre-filled prompt",
-      "  deepcode --prompt <prompt>            Same as -p",
-      "  deepcode --resume [sessionId]         Resume a specific session by its ID. Use without an ID to show session picker",
-      "  deepcode --version                    Print the version",
-      "  deepcode --help                       Show this help",
-      "",
-      "Configuration:",
-      "  ~/.deepcode/settings.json    User-level API key, model, base URL",
-      "  ./.deepcode/settings.json    Project-level settings",
-      "  ./.deepcode/skills/*/SKILL.md Project-level native skills",
-      "  ./.agents/skills/*/SKILL.md   Project-level interoperable skills",
-      "  ~/.deepcode/skills/*/SKILL.md User-level native skills",
-      "  ~/.agents/skills/*/SKILL.md   User-level interoperable skills",
-      "",
-      "Inside the TUI:",
-      "  enter            Send the prompt",
-      "  shift+enter      Insert a newline",
-      "  home/end         Move within the current line",
-      "  alt+left/right   Move by word",
-      "  ctrl+w           Delete the previous word",
-      "  ctrl+v           Paste an image from the clipboard",
-      "  ctrl+x           Clear pasted images",
-      "  esc              Interrupt the current model turn",
-      "  /                Open the skills/commands menu",
-      "  /skills          List available skills",
-      "  /model           Select model, thinking mode and effort control",
-      "  /new             Start a fresh conversation",
-      "  /init            Initialize an AGENTS.md file with instructions for LLM",
-      "  /resume          Pick a previous conversation to continue",
-      "  /continue        Continue the active conversation, or resume one if empty",
-      "  /undo            Restore code and/or conversation to a previous point",
-      "  /mcp             Show MCP server status and available tools",
-      "  /raw             Toggle display mode for viewing or collapsing reasoning content",
-      "  /exit            Quit",
-      "  ctrl+d twice     Quit",
-    ].join("\n") + "\n"
-  );
+if (parsed.help) {
+  process.stdout.write(HELP_TEXT);
   process.exit(0);
 }
 
-let initialPrompt = extractInitialPrompt(args);
-const resumeSessionId = extractResumeSessionId(args);
+let initialPrompt = parsed.prompt;
+let resumeSessionId = parsed.resume;
 const projectRoot = process.cwd();
 configureWindowsShell();
+
+if (!process.stdin.isTTY) {
+  process.stderr.write("deepcode requires an interactive terminal (TTY). " + "Re-run from a real terminal session.\n");
+  process.exit(1);
+}
 
 // Validate --resume <sessionId> before entering TUI
 if (typeof resumeSessionId === "string") {
@@ -86,11 +103,6 @@ if (typeof resumeSessionId === "string") {
   }
 }
 
-if (!process.stdin.isTTY) {
-  process.stderr.write("deepcode requires an interactive terminal (TTY). " + "Re-run from a real terminal session.\n");
-  process.exit(1);
-}
-
 void main();
 
 async function main(): Promise<void> {
@@ -105,12 +117,14 @@ async function main(): Promise<void> {
     let restarting = false;
     const appInitialPrompt = initialPrompt;
     initialPrompt = undefined;
+    const appResumeSessionId = resumeSessionId;
+    resumeSessionId = undefined;
     const inkInstance = render(
       <AppContainer
         projectRoot={projectRoot}
         version={packageInfo.version}
         initialPrompt={appInitialPrompt}
-        resumeSessionId={resumeSessionId}
+        resumeSessionId={appResumeSessionId}
         onRestart={() => restartRef.current?.()}
       />,
       { exitOnCtrlC: false }

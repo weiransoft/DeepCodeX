@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { buildExitSummaryText } from "../ui";
 import type { ModelUsage, SessionEntry } from "@vegamo/deepcode-core";
 
-const stripAnsi = (text: string): string => text.replace(/\u001b\[[0-9;]*m/g, "");
+const stripAnsi = (text: string): string => text.replace(/\u001b\[[0-9;]*[a-zA-Z]/g, "");
 
 test("buildExitSummaryText only shows Goodbye and model usage with cached tokens", () => {
   const summary = stripAnsi(
