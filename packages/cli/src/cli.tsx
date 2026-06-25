@@ -11,7 +11,6 @@ import { writeStderrLine, writeStdoutLine } from "./utils/stdioHelpers";
 import { getPackageJson } from "./utils/package";
 import { CLI_VERSION } from "./generated/git-commit";
 
-configureWindowsShell();
 void main();
 
 async function main(): Promise<void> {
@@ -23,6 +22,11 @@ async function main(): Promise<void> {
   if (parsed.version || parsed.help) {
     process.exit(0);
   }
+
+  // Configure Windows shell AFTER --version/--help handling.
+  // On Windows without Git Bash, setShellIfWindows() throws and calls process.exit(1).
+  // If called before argument parsing, --help and --version would fail on those machines.
+  configureWindowsShell();
 
   let initialPrompt = parsed.prompt;
   let resumeSessionId = parsed.resume;
@@ -95,6 +99,12 @@ async function main(): Promise<void> {
   startApp();
 }
 
+/**
+ * Configure shell environment for Windows.
+ * Sets NoDefaultCurrentDirectoryInExePath and resolves Git Bash path.
+ * Must be called after --version/--help handling to avoid blocking those
+ * commands on Windows machines without Git Bash installed.
+ */
 function configureWindowsShell(): void {
   process.env.NoDefaultCurrentDirectoryInExePath = "1";
   try {
