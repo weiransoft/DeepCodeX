@@ -32,6 +32,8 @@ import {
   renderRawModeMessages,
 } from "../utils";
 import { resolveCurrentSettings, writeModelConfigSelection } from "@vegamo/deepcode-core";
+import { useStatusLine } from "../hooks";
+import type { SessionInfo } from "../statusline";
 import { isCollapsedThinking } from "../core/thinking-state";
 import { ANSI_CLEAR_SCREEN } from "../constants";
 import type {
@@ -45,6 +47,7 @@ import type {
   UserPromptContent,
 } from "@vegamo/deepcode-core";
 import { SessionManager } from "@vegamo/deepcode-core";
+import { getCompactPromptTokenThreshold } from "@vegamo/deepcode-core";
 
 type View = "chat" | "session-list" | "undo" | "mcp-status";
 
@@ -667,6 +670,61 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
 
   const screenWidth = useMemo(() => columns ?? stdout?.columns ?? 80, [columns, stdout]);
   const screenHeight = useMemo(() => rows ?? stdout?.rows ?? 24, [rows, stdout]);
+  const getSessionInfo = useCallback((): SessionInfo | null => {
+    const activeSessionId = sessionManager.getActiveSessionId();
+    const settings = resolveCurrentSettings(projectRoot);
+    const model = settings.model || "";
+    const thinkingEnabled = settings.thinkingEnabled;
+    const reasoningEffort = settings.reasoningEffort;
+    const maxContextTokens = getCompactPromptTokenThreshold(model);
+    if (!activeSessionId) {
+      return {
+        activeSessionId: null,
+        messageCount: 0,
+        requestCount: 0,
+        totalTokens: 0,
+        activeTokens: 0,
+        maxContextTokens,
+        model,
+        thinkingEnabled,
+        reasoningEffort,
+        toolUsage: {},
+      };
+    }
+    const session = sessionManager.getSession(activeSessionId);
+    const messages = sessionManager.listSessionMessages(activeSessionId);
+    const usage = session?.usage;
+    const totalTokens =
+      usage && typeof (usage as { total_tokens?: unknown }).total_tokens === "number"
+        ? ((usage as { total_tokens: number }).total_tokens ?? 0)
+        : 0;
+    const requestCount =
+      usage && typeof (usage as { total_reqs?: unknown }).total_reqs === "number"
+        ? ((usage as { total_reqs: number }).total_reqs ?? 0)
+        : 0;
+    const toolUsage: Record<string, number> = {};
+    for (const msg of messages) {
+      if (msg.role === "tool" && msg.meta?.function) {
+        const fn = msg.meta.function as { name?: string };
+        if (fn.name) {
+          toolUsage[fn.name] = (toolUsage[fn.name] || 0) + 1;
+        }
+      }
+    }
+    return {
+      activeSessionId,
+      messageCount: messages.length,
+      requestCount,
+      totalTokens,
+      activeTokens: session?.activeTokens ?? 0,
+      maxContextTokens,
+      model,
+      thinkingEnabled,
+      reasoningEffort,
+      toolUsage,
+    };
+  }, [sessionManager, projectRoot]);
+  const statusLineSegments = useStatusLine(resolvedSettings.statusline, projectRoot, getSessionInfo);
   const promptHistory = useMemo(() => {
     return messages
       .filter((message) => message.role === "user" && typeof message.content === "string")
@@ -902,6 +960,8 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
           onInterrupt={handleInterrupt}
           onToggleProcessStdout={handleToggleProcessStdout}
           placeholder="Type your message..."
+          statusLineSegments={statusLineSegments}
+          statusLineSeparator={resolvedSettings.statusline.separator}
         />
       )}
     </Box>
