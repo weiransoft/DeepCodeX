@@ -145,7 +145,7 @@ function PromptEchoLine({
 }): React.ReactElement {
   const contentWidth = getPromptEchoContentWidth(width);
   return (
-    <Box marginBottom={1} marginY={0} width={Math.max(1, width)} flexDirection="row">
+    <Box marginBottom={1} marginLeft={1} marginY={0} width={Math.max(1, width)} flexDirection="row">
       <Box width={PROMPT_ECHO_PREFIX_WIDTH}>
         <Text color="#229ac3">{"> "}</Text>
       </Box>
