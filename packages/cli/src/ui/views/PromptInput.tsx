@@ -64,6 +64,7 @@ import type { ModelConfigSelection, PermissionScope } from "@vegamo/deepcode-cor
 import { FileMentionMenu, ModelsDropdown, RawModelDropdown, SkillsDropdown } from "../components";
 import type { SessionEntry, SkillInfo } from "@vegamo/deepcode-core";
 import type { UserToolPermission } from "@vegamo/deepcode-core";
+import type { StatusSegment } from "../statusline";
 
 export type PromptSubmission = {
   text: string;
@@ -93,6 +94,8 @@ type Props = {
   placeholder?: string;
   runningProcesses?: SessionEntry["processes"];
   promptDraft?: PromptDraft | null;
+  statusLineSegments?: StatusSegment[];
+  statusLineSeparator?: string;
   onSubmit: (submission: PromptSubmission) => void;
   onModelConfigChange: (selection: ModelConfigSelection) => string | Promise<string>;
   onRawModeChange?: (mode: string) => void;
@@ -123,6 +126,8 @@ export const PromptInput = React.memo(function PromptInput({
   placeholder,
   runningProcesses,
   promptDraft,
+  statusLineSegments,
+  statusLineSeparator,
   onSubmit,
   onModelConfigChange,
   onInterrupt,
@@ -837,6 +842,36 @@ export const PromptInput = React.memo(function PromptInput({
       {!showFooterText && (
         <Box>
           <Text dimColor>{footerText}</Text>
+        </Box>
+      )}
+      {statusLineSegments && statusLineSegments.length > 0 && (
+        <Box flexDirection="column">
+          {(() => {
+            const lines: StatusSegment[][] = [];
+            let currentLine: StatusSegment[] = [];
+            for (const segment of statusLineSegments) {
+              if (segment.newLine && currentLine.length > 0) {
+                lines.push(currentLine);
+                currentLine = [];
+              }
+              currentLine.push(segment);
+            }
+            if (currentLine.length > 0) {
+              lines.push(currentLine);
+            }
+            return lines.map((line, lineIndex) => (
+              <Box key={lineIndex}>
+                {line.map((segment, index) => (
+                  <React.Fragment key={segment.id}>
+                    {index > 0 && <Text dimColor>{statusLineSeparator ?? " · "}</Text>}
+                    <Text color={segment.color} dimColor={!segment.color}>
+                      {segment.text}
+                    </Text>
+                  </React.Fragment>
+                ))}
+              </Box>
+            ));
+          })()}
         </Box>
       )}
     </Box>
