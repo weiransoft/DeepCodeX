@@ -4,6 +4,7 @@ import type { ModelUsage, SessionEntry } from "@vegamo/deepcode-core";
 
 type ExitSummaryInput = {
   session: SessionEntry | null;
+  sessionId?: string;
 };
 
 const ANSI_RE = /\u001b\[[0-9;]*[a-zA-Z]/g;
@@ -67,12 +68,12 @@ function extractUsageFields(usage: ModelUsage | null): UsageFields {
 }
 
 export function buildExitSummaryText(input: ExitSummaryInput): string {
-  const { session } = input;
+  const { session, sessionId } = input;
 
   const innerWidth = 98;
   const contentWidth = innerWidth - 4; // "│  " prefix + "  │" suffix → 4 chars padding
 
-  const borderColor = chalk.hex("#229ac3e6");
+  const borderColor = chalk.dim;
   const titleColor = gradientString("#229ac3e6", "rgb(125 51 247 / 0.7)");
   const line = (text: string) => `${borderColor("│")}  ${padRight(text, contentWidth)}  ${borderColor("│")}`;
 
@@ -113,7 +114,7 @@ export function buildExitSummaryText(input: ExitSummaryInput): string {
       padLeft("Output Tokens", colOutput) +
       padLeft("Cached Tokens", colCached);
     rows.push(chalk.bold(headerRow));
-    rows.push(divider);
+    rows.push(chalk.gray(divider));
 
     for (const { modelName, usage } of usageRows) {
       const reqsStr = formatNumber(usage.totalReqs).padStart(colReqs);
@@ -133,6 +134,13 @@ export function buildExitSummaryText(input: ExitSummaryInput): string {
   }
 
   rows.push("");
+
+  if (sessionId) {
+    const resumeHint =
+      chalk.dim(`To continue this session, run `) + chalk.hex("#229ac3")(`deepcode --resume ${sessionId}`);
+    rows.push(resumeHint);
+    rows.push("");
+  }
 
   const border = borderColor("─".repeat(innerWidth));
   const top = `${borderColor("╭")}${border}${borderColor("╮")}`;

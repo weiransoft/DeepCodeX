@@ -56,6 +56,7 @@ const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", 
 type AppProps = {
   projectRoot: string;
   initialPrompt?: string;
+  resumeSessionId?: string | true;
   onRestart?: () => void;
 };
 
@@ -92,12 +93,14 @@ const StatusLine = React.memo(function StatusLine({
   );
 });
 
-function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactElement {
+function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout, write } = useStdout();
   const { columns, rows } = useWindowSize();
   const { mode, setMode } = useRawModeContext();
   const initialPromptSubmittedRef = useRef(false);
+  const resumeSessionIdRef = useRef(false);
+  const startupDoneRef = useRef(false);
   const processStdoutRef = useRef<Map<number, string>>(new Map());
   const rawModeRef = useRef<RawMode>(mode);
   const writeRef = useRef(write);
@@ -191,17 +194,20 @@ function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactEl
    * Reset the static view to the welcome screen.
    */
   const resetStaticView = useCallback(
-    (loadedMessages: SessionMessage[], options?: { clearScreen?: boolean }) => {
+    (loadedMessages: SessionMessage[], options?: { clearScreen?: boolean }): Promise<void> => {
       if (options?.clearScreen) {
         process.stdout.write(ANSI_CLEAR_SCREEN);
       }
       setMessages([]);
       setWelcomeNonce((n) => n + 1);
       navigateToSubView("chat");
-      setTimeout(() => {
-        setMessages(loadedMessages);
-        setShowWelcome(true);
-      }, 0);
+      return new Promise<void>((resolve) => {
+        setTimeout(() => {
+          setMessages(loadedMessages);
+          setShowWelcome(true);
+          resolve();
+        }, 0);
+      });
     },
     [navigateToSubView]
   );
@@ -247,7 +253,7 @@ function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactEl
     setActiveAskPermissions(undefined);
     setPendingPermissionReply(null);
     setDismissedQuestionIds(new Set());
-    resetStaticView([]);
+    await resetStaticView([]);
     await refreshSkills();
   }, [sessionManager, resetStaticView, refreshSkills]);
 
@@ -291,7 +297,7 @@ function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactEl
         setTimeout(() => {
           const activeSessionId = sessionManager.getActiveSessionId();
           const session = activeSessionId ? sessionManager.getSession(activeSessionId) : null;
-          const summary = buildExitSummaryText({ session });
+          const summary = buildExitSummaryText({ session, sessionId: activeSessionId ?? undefined });
           process.stdout.write("\n");
           process.stdout.write(chalk.rgb(34, 154, 195)("> /exit "));
           process.stdout.write("\n\n");
@@ -478,24 +484,11 @@ function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactEl
     [resetStaticView, sessionManager]
   );
 
-  useEffect(() => {
-    if (initialPromptSubmittedRef.current || !initialPrompt || !initialPrompt.trim()) {
-      return;
-    }
-
-    initialPromptSubmittedRef.current = true;
-    handleSubmit({
-      text: initialPrompt,
-      imageUrls: [],
-      selectedSkills: undefined,
-    });
-  }, [handleSubmit, initialPrompt]);
-
   const handleSelectSession = useCallback(
     async (sessionId: string) => {
       sessionManager.setActiveSessionId(sessionId);
       // Clear first so <Static> resets its index to 0.
-      resetStaticView(loadVisibleMessages(sessionManager, sessionId), { clearScreen: true });
+      await resetStaticView(loadVisibleMessages(sessionManager, sessionId), { clearScreen: true });
       const session = sessionManager.getSession(sessionId);
       setStatusLine(session ? buildStatusLine(session) : "");
       setRunningProcesses(session?.processes ?? null);
@@ -508,6 +501,43 @@ function App({ projectRoot, initialPrompt, onRestart }: AppProps): React.ReactEl
     },
     [sessionManager, resetStaticView, pendingPermissionReply, refreshSkills]
   );
+
+  /**
+   * Coordinated startup effect: handle --resume and --prompt together.
+   * When both are present, resume the session first, then submit the prompt.
+   */
+  useEffect(() => {
+    if (startupDoneRef.current) {
+      return;
+    }
+    startupDoneRef.current = true;
+
+    async function run() {
+      // Step 1: Resume session if requested
+      if (resumeSessionId) {
+        resumeSessionIdRef.current = true;
+        if (resumeSessionId === true) {
+          // Bare --resume — show session picker; prompt makes no sense here
+          refreshSessionsList();
+          navigateToSubView("session-list");
+          return;
+        }
+        await handleSelectSession(resumeSessionId);
+      }
+
+      // Step 2: Submit prompt if provided
+      if (initialPrompt && initialPrompt.trim()) {
+        initialPromptSubmittedRef.current = true;
+        handleSubmit({
+          text: initialPrompt,
+          imageUrls: [],
+          selectedSkills: undefined,
+        });
+      }
+    }
+
+    void run();
+  }, [handleSubmit, handleSelectSession, initialPrompt, navigateToSubView, refreshSessionsList, resumeSessionId]);
 
   const handleDeleteSession = useCallback(
     async (id: string): Promise<void> => {
