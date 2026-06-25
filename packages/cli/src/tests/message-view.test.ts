@@ -132,7 +132,7 @@ test("MessageView echoes submitted user prompts with live prompt wrapping width"
   const msg = makeSessionMessage({ role: "user", content: "abcdefg" });
   const output = renderToString(React.createElement(MessageView, { message: msg, width: 8 }), { columns: 8 });
 
-  assert.equal(stripAnsi(output), "> abcdef\n  g\n");
+  assert.equal(stripAnsi(output), " > abcdef\n   g\n");
 });
 
 test("MessageView echoes model changes with submitted prompt wrapping", () => {
@@ -143,7 +143,7 @@ test("MessageView echoes model changes with submitted prompt wrapping", () => {
   });
   const output = renderToString(React.createElement(MessageView, { message: msg, width: 8 }), { columns: 8 });
 
-  assert.equal(stripAnsi(output), "> abcdef\n  gh\n");
+  assert.equal(stripAnsi(output), " > abcdef\n   gh\n");
 });
 
 test("renderMessageToStdout renders assistant non-thinking messages with ✦", () => {
