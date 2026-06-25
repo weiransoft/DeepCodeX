@@ -171,6 +171,42 @@ test("loadModuleProvider succeeds for a well-formed module", async () => {
   }
 });
 
+test("loadModuleProvider removes abort listener after successful fetch", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deepcode-statusline-"));
+  const modPath = path.join(dir, "cleanup.mjs");
+  fs.writeFileSync(modPath, "export default () => 'ok';", "utf8");
+  try {
+    const provider = await loadModuleProvider(modPath, undefined, "cleanup", 10_000);
+    assert.ok(provider);
+
+    const ac = new AbortController();
+    const signal = ac.signal;
+    const originalAdd = signal.addEventListener;
+    const originalRemove = signal.removeEventListener;
+    let abortListenerAdds = 0;
+    let abortListenerRemoves = 0;
+    signal.addEventListener = function (this: AbortSignal, ...args: Parameters<AbortSignal["addEventListener"]>) {
+      if (args[0] === "abort") {
+        abortListenerAdds += 1;
+      }
+      return originalAdd.apply(this, args);
+    } as AbortSignal["addEventListener"];
+    signal.removeEventListener = function (this: AbortSignal, ...args: Parameters<AbortSignal["removeEventListener"]>) {
+      if (args[0] === "abort") {
+        abortListenerRemoves += 1;
+      }
+      return originalRemove.apply(this, args);
+    } as AbortSignal["removeEventListener"];
+
+    const result = await provider!.fetch({ projectRoot: dir, signal });
+    assert.equal(result, "ok");
+    assert.equal(abortListenerAdds, 1);
+    assert.equal(abortListenerRemoves, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("resolveSettingsSources lets project-level providers override user-level by id", () => {
   const resolved = resolveSettingsSources(
     {

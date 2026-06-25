@@ -63,26 +63,33 @@ export async function loadModuleProvider(
         if (ctx.signal.aborted) {
           return "";
         }
-        const result = await Promise.race([
-          Promise.resolve().then(() =>
-            providerFn({
-              projectRoot: ctx.projectRoot,
-              session: ctx.getSessionInfo ? ctx.getSessionInfo() : null,
-            })
-          ),
-          new Promise<string>((_, reject) => {
-            const timer = setTimeout(() => reject(new Error("timeout")), timeout);
-            ctx.signal.addEventListener(
-              "abort",
-              () => {
-                clearTimeout(timer);
-                reject(new Error("aborted"));
-              },
-              { once: true }
-            );
-          }),
-        ]);
-        return typeof result === "string" ? result : "";
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        let onAbort: (() => void) | null = null;
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("timeout")), timeout);
+          onAbort = () => reject(new Error("aborted"));
+          ctx.signal.addEventListener("abort", onAbort, { once: true });
+        });
+
+        try {
+          const result = await Promise.race([
+            Promise.resolve().then(() =>
+              providerFn({
+                projectRoot: ctx.projectRoot,
+                session: ctx.getSessionInfo ? ctx.getSessionInfo() : null,
+              })
+            ),
+            timeoutPromise,
+          ]);
+          return typeof result === "string" ? result : "";
+        } finally {
+          if (timer) {
+            clearTimeout(timer);
+          }
+          if (onAbort) {
+            ctx.signal.removeEventListener("abort", onAbort);
+          }
+        }
       },
     };
   } catch {

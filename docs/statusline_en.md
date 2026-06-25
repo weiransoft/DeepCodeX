@@ -6,7 +6,7 @@ Deep Code CLI lets you inject custom information into the status line at the bot
 
 Add a `statusline` field to `~/.deepcode/settings.json` (or the project-level `.deepcode/settings.json`):
 
-```jsonc
+```json
 {
   "statusline": {
     "enabled": true,

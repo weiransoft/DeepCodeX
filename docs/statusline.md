@@ -6,7 +6,7 @@ Deep Code CLI 支持通过插件向终端底部状态栏注入自定义信息（
 
 在 `~/.deepcode/settings.json`(或项目级 `.deepcode/settings.json`)中添加 `statusline` 字段:
 
-```jsonc
+```json
 {
   "statusline": {
     "enabled": true,
@@ -100,7 +100,7 @@ export default function tokensProvider({ projectRoot, session }) {
 
 ## 安全限制
 
-- **module provider 路径必须位于项目根目录或用户家目录之下**,绝对路径在这两个范围之外会被拒绝加载(防止从任意位置执行代码)。
+- **module provider 路径必须位于项目根目录或用户home目录之下**,绝对路径在这两个范围之外会被拒绝加载(防止从任意位置执行代码)。
 - 单个 segment 文本被自动:
   - 取第一个非空行
   - 去除 ANSI 转义序列
