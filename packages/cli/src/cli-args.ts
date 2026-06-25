@@ -6,7 +6,7 @@
 import type { Argv } from "yargs";
 import Yargs from "yargs";
 import { getCliVersion } from "./utils/version";
-import { writeStderrLine } from "./utils/stdioHelpers";
+import { writeStderrLine } from "./utils/stdio-helpers";
 import { hideBin } from "yargs/helpers";
 
 // UUID v4 regex pattern for validation
