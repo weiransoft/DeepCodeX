@@ -8,12 +8,6 @@ import { UpdatePrompt, type UpdatePromptChoice } from "../ui";
 import { killProcessTree } from "@vegamo/deepcode-core";
 import type { PackageJson } from "../utils/package";
 
-export type PackageInfo = {
-  name: string;
-  version: string;
-  gitCommit?: string;
-};
-
 type UpdateState = {
   pending?: {
     currentVersion: string;
