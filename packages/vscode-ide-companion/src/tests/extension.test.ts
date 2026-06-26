@@ -82,6 +82,18 @@ test("ready message triggers loadInitialSession and sendSkillsList", async () =>
   assert.ok(types.includes("skillsList"), `Expected skillsList, got: ${types.join(", ")}`);
 });
 
+test("ready message renders markdown for initial session messages", async () => {
+  const deps = createDeps({
+    messages: [{ role: "assistant", content: "**bold**", visible: true }],
+  });
+
+  await handleWebviewMessage({ type: "ready" }, deps);
+
+  const loadMsg = deps.messages.find((m: any) => m.type === "loadSession") as any;
+  assert.ok(loadMsg, "Should send loadSession");
+  assert.equal(loadMsg.messages[0].html, "<p>**bold**</p>");
+});
+
 test("ready with no sessions sends initializeEmpty", async () => {
   const deps = createDeps({ sessions: [] });
   await handleWebviewMessage({ type: "ready" }, deps);
