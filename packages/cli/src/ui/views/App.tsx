@@ -20,7 +20,7 @@ import {
   formatAskUserQuestionAnswers,
 } from "../core/ask-user-question";
 import { PermissionPrompt, type PermissionPromptResult } from "./PermissionPrompt";
-import { buildExitSummaryText } from "../exit-summary";
+import { buildExitSummaryText, buildResumeHintText } from "../exit-summary";
 import { RawMode, useRawModeContext } from "../contexts";
 import { renderMessageToStdout } from "../components/MessageView/utils";
 import {
@@ -290,22 +290,40 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
   }, [sessionManager]);
 
   writeRef.current = write;
+  const handleExit = useCallback(
+    ({ showCommand, showSummary }: { showCommand: boolean; showSummary: boolean }) => {
+      setIsExiting(true);
+      setTimeout(() => {
+        const activeSessionId = sessionManager.getActiveSessionId();
+        const session = activeSessionId ? sessionManager.getSession(activeSessionId) : null;
+        const resumeHint = buildResumeHintText(activeSessionId ?? undefined);
+
+        process.stdout.write("\n");
+        if (showCommand) {
+          process.stdout.write(chalk.rgb(34, 154, 195)("> /exit "));
+          process.stdout.write("\n\n");
+        }
+        if (showSummary) {
+          const summary = buildExitSummaryText({ session, sessionId: activeSessionId ?? undefined });
+          process.stdout.write(summary);
+          process.stdout.write("\n\n");
+        }
+        if (resumeHint) {
+          process.stdout.write(resumeHint);
+          process.stdout.write("\n");
+        }
+
+        sessionManager.dispose();
+        exit();
+      }, 0);
+    },
+    [exit, sessionManager]
+  );
+
   const handlePrompt = useCallback(
     async (submission: PromptSubmission) => {
       if (submission.command === "exit") {
-        setIsExiting(true);
-        setTimeout(() => {
-          const activeSessionId = sessionManager.getActiveSessionId();
-          const session = activeSessionId ? sessionManager.getSession(activeSessionId) : null;
-          const summary = buildExitSummaryText({ session, sessionId: activeSessionId ?? undefined });
-          process.stdout.write("\n");
-          process.stdout.write(chalk.rgb(34, 154, 195)("> /exit "));
-          process.stdout.write("\n\n");
-          process.stdout.write(summary);
-          process.stdout.write("\n\n");
-          sessionManager.dispose();
-          exit();
-        }, 0);
+        handleExit({ showCommand: true, showSummary: true });
         return;
       }
       if (submission.command === "new") {
@@ -400,7 +418,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
     [
       sessionManager,
       pendingPermissionReply,
-      exit,
+      handleExit,
       onRestart,
       refreshSkills,
       refreshSessionsList,
@@ -476,6 +494,10 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
     },
     [handlePrompt]
   );
+
+  const handleExitShortcut = useCallback(() => {
+    handleExit({ showCommand: false, showSummary: false });
+  }, [handleExit]);
 
   const reloadActiveSessionView = useCallback(
     (sessionId: string): void => {
@@ -959,6 +981,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
           onRawModeChange={handleRawModeChange}
           onInterrupt={handleInterrupt}
           onToggleProcessStdout={handleToggleProcessStdout}
+          onExitShortcut={handleExitShortcut}
           placeholder="Type your message..."
           statusLineSegments={statusLineSegments}
           statusLineSeparator={resolvedSettings.statusline.separator}

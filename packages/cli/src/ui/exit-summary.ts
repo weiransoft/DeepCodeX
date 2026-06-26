@@ -68,7 +68,7 @@ function extractUsageFields(usage: ModelUsage | null): UsageFields {
 }
 
 export function buildExitSummaryText(input: ExitSummaryInput): string {
-  const { session, sessionId } = input;
+  const { session } = input;
 
   const innerWidth = 98;
   const contentWidth = innerWidth - 4; // "│  " prefix + "  │" suffix → 4 chars padding
@@ -135,13 +135,6 @@ export function buildExitSummaryText(input: ExitSummaryInput): string {
 
   rows.push("");
 
-  if (sessionId) {
-    const resumeHint =
-      chalk.dim(`To continue this session, run `) + chalk.hex("#229ac3")(`deepcode --resume ${sessionId}`);
-    rows.push(resumeHint);
-    rows.push("");
-  }
-
   const border = borderColor("─".repeat(innerWidth));
   const top = `${borderColor("╭")}${border}${borderColor("╮")}`;
   const bottom = `${borderColor("╰")}${border}${borderColor("╯")}`;
@@ -149,4 +142,11 @@ export function buildExitSummaryText(input: ExitSummaryInput): string {
   const body = rows.map((row) => line(row)).join("\n");
 
   return [top, body, bottom].join("\n");
+}
+
+export function buildResumeHintText(sessionId?: string): string | null {
+  if (!sessionId) {
+    return null;
+  }
+  return chalk.dim(`To continue this session, run `) + chalk.hex("#229ac3")(`deepcode --resume ${sessionId}`);
 }

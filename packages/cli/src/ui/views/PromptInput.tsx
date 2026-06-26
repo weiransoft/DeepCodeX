@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Box, Text, useApp, useStdout } from "ink";
+import { Box, Text, useStdout } from "ink";
 import type { DOMElement } from "ink";
 import chalk from "chalk";
 import { ARGS_SEPARATOR } from "../constants";
@@ -101,6 +101,7 @@ type Props = {
   onRawModeChange?: (mode: string) => void;
   onInterrupt: () => void;
   onToggleProcessStdout?: () => void;
+  onExitShortcut?: () => void;
 };
 
 const PROMPT_PREFIX_WIDTH = 2;
@@ -132,9 +133,9 @@ export const PromptInput = React.memo(function PromptInput({
   onModelConfigChange,
   onInterrupt,
   onToggleProcessStdout,
+  onExitShortcut,
   onRawModeChange,
 }: Props): React.ReactElement {
-  const { exit } = useApp();
   const { stdout } = useStdout();
   const inputTextRef = useRef<DOMElement | null>(null);
   const [buffer, setBuffer] = useState<PromptBufferState>(EMPTY_BUFFER);
@@ -357,7 +358,7 @@ export const PromptInput = React.memo(function PromptInput({
         }
         const now = Date.now();
         if (pendingExit && now - lastCtrlDAt.current < 2000) {
-          exit();
+          onExitShortcut?.();
           return;
         }
         lastCtrlDAt.current = now;
