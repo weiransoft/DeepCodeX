@@ -7,7 +7,7 @@ import { setShellIfWindows, getProjectCode } from "@vegamo/deepcode-core";
 import { checkForNpmUpdate, promptForPendingUpdate } from "./common/update-check";
 import { AppContainer } from "./ui";
 import { parseArguments } from "./cli-args";
-import { writeStderrLine, writeStdoutLine } from "./utils/stdioHelpers";
+import { writeStderrLine, writeStdoutLine } from "./utils/stdio-helpers";
 import { getPackageJson } from "./utils/package";
 import { CLI_VERSION } from "./generated/git-commit";
 

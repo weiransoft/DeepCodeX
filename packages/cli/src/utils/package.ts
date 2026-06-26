@@ -3,11 +3,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { CLI_VERSION } from "../generated/git-commit";
 
-export type PackageJson = BasePackageJson & {
-  config?: {
-    sandboxImageUri?: string;
-  };
-};
+export type PackageJson = BasePackageJson;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
