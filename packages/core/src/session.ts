@@ -69,6 +69,13 @@ const DEFAULT_COMPACT_PROMPT_TOKEN_THRESHOLD = 128 * 1024;
 const DEEPSEEK_V4_COMPACT_PROMPT_TOKEN_THRESHOLD = 512 * 1024;
 const PLAN_MODE_ON_STATUS_MESSAGE = "  └ Set Plan Mode on. Awaiting <proposed_plan>.";
 const PLAN_MODE_OFF_STATUS_MESSAGE = "  └ Set Plan Mode off.";
+const PLAN_MODE_FORCE_ASK_SCOPES = [
+  "write-in-cwd",
+  "write-out-cwd",
+  "delete-in-cwd",
+  "delete-out-cwd",
+  "mutate-git-log",
+] as const satisfies readonly PermissionScope[];
 
 type ChatCompletionDebugOptions = {
   enabled?: boolean;
@@ -1416,6 +1423,7 @@ ${agentInstructions}
               projectRoot: this.projectRoot,
               toolCalls,
               settings: this.getResolvedSettings().permissions,
+              forceAskScopes: this.getSession(sessionId)?.planMode ? PLAN_MODE_FORCE_ASK_SCOPES : undefined,
               readPermissionExemptPaths: this.getSkillScanRoots().map((entry) => entry.root),
               resolveSnippetPath: (id, snippetId) => getSnippet(id, snippetId)?.filePath,
             })

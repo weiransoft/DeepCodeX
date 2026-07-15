@@ -19,6 +19,7 @@ export {
   PlanImplementationPrompt,
   extractProposedPlan,
   getImplementationPrompt,
+  getPlanImplementationChoice,
 } from "./views/PlanImplementationPrompt";
 export { MessageView } from "./components";
 export { parseDiffPreview } from "./components/MessageView/utils";

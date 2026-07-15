@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text } from "ink";
 import { useTerminalInput } from "../hooks";
+import type { InputKey } from "../hooks";
 
 type PlanImplementationChoice = "implement" | "stay" | "default";
 
@@ -28,6 +29,20 @@ export function getImplementationPrompt(plan: string): string {
   return fullWidthPunctuationCount > 5 ? "实现此方案。" : "Implement the plan.";
 }
 
+export function getPlanImplementationChoice(
+  input: string,
+  key: Pick<InputKey, "escape" | "return">,
+  cursor: number
+): PlanImplementationChoice | null {
+  if (key.escape) {
+    return "stay";
+  }
+  if (input && /^[1-3]$/.test(input)) {
+    return CHOICES[Number(input) - 1]!.value;
+  }
+  return key.return ? CHOICES[cursor]!.value : null;
+}
+
 export function PlanImplementationPrompt({ onSelect }: Props): React.ReactElement {
   const [cursor, setCursor] = useState(0);
 
@@ -36,6 +51,11 @@ export function PlanImplementationPrompt({ onSelect }: Props): React.ReactElemen
   }, []);
 
   useTerminalInput((input, key) => {
+    const choice = getPlanImplementationChoice(input, key, cursor);
+    if (choice) {
+      onSelect(choice);
+      return;
+    }
     if (key.upArrow) {
       setCursor((value) => Math.max(0, value - 1));
       return;
@@ -43,13 +63,6 @@ export function PlanImplementationPrompt({ onSelect }: Props): React.ReactElemen
     if (key.downArrow) {
       setCursor((value) => Math.min(CHOICES.length - 1, value + 1));
       return;
-    }
-    if (input && /^[1-3]$/.test(input)) {
-      onSelect(CHOICES[Number(input) - 1]!.value);
-      return;
-    }
-    if (key.return) {
-      onSelect(CHOICES[cursor]!.value);
     }
   });
 

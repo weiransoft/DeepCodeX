@@ -24,6 +24,7 @@ import {
   buildPromptDraftFromSessionMessage,
   extractProposedPlan,
   getImplementationPrompt,
+  getPlanImplementationChoice,
   disableTerminalExtendedKeys,
   enableTerminalExtendedKeys,
   EMPTY_BUFFER,
@@ -158,6 +159,10 @@ test("extractProposedPlan only returns a complete non-empty plan", () => {
 test("getImplementationPrompt uses Chinese only above five full-width punctuation marks", () => {
   assert.equal(getImplementationPrompt("，、；。；"), "Implement the plan.");
   assert.equal(getImplementationPrompt("，、；。；。"), "实现此方案。");
+});
+
+test("getPlanImplementationChoice treats escape as staying in Plan Mode", () => {
+  assert.equal(getPlanImplementationChoice("", { escape: true, return: false }, 0), "stay");
 });
 
 test("prompt return key action submits on plain enter", () => {
