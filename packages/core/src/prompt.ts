@@ -589,7 +589,7 @@ export function getTools(_options: PromptToolOptions = {}, externalTools: ToolDe
       type: "function",
       function: {
         name: "read",
-        description: "Read files from the filesystem (text, images, PDFs, notebooks).",
+        description: "Read files from the filesystem (text, images, notebooks).",
         parameters: {
           type: "object",
           properties: {
@@ -604,10 +604,6 @@ export function getTools(_options: PromptToolOptions = {}, externalTools: ToolDe
             limit: {
               type: "number",
               description: "Number of lines to read",
-            },
-            pages: {
-              type: "string",
-              description: 'Page range for PDF files (e.g., "1-5", "3", "10-20"). Only applicable to PDF files.',
             },
           },
           required: ["file_path"],

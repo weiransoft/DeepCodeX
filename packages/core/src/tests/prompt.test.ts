@@ -55,6 +55,12 @@ test("getTools requires bash sideEffects permission scopes", () => {
   assert.equal(runInBackground.type, "boolean");
 });
 
+test("getTools does not expose the unused PDF pages parameter", () => {
+  const tool = getTools().find((candidate) => candidate.function.name === "read");
+  assert.ok(tool);
+  assert.equal("pages" in tool.function.parameters.properties, false);
+});
+
 test("getSystemPrompt always includes WebSearch docs", () => {
   const prompt = getSystemPrompt("/tmp/project");
   assert.equal(prompt.includes("## WebSearch"), true);
