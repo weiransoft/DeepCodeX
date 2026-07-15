@@ -800,7 +800,8 @@ export const PromptInput = React.memo(function PromptInput({
       ) : null}
       {planMode ? (
         <Box width={screenWidth} justifyContent="flex-end">
-          <Text color="yellow">💡 Plan mode (shift+tab to cycle)</Text>
+          <Text color="yellow">💡 Plan mode</Text>
+          <Text dimColor> (shift+tab to cycle)</Text>
         </Box>
       ) : null}
       {/* Input */}
