@@ -32,6 +32,26 @@ await suite("显式 settings.provider 优先", () => {
   assertEqual(r.provider, "anthropic", "provider 字段直读");
 });
 
+// ---------------------------------------------------------------------------
+// M4：显式 provider 冲突时 project settings 优先于 user settings
+// （与同文件 model/thinkingEnabled/temperature 等字段的合并惯例一致）
+// ---------------------------------------------------------------------------
+
+await suite("M4: project=anthropic 覆盖 user=openai", () => {
+  const r = resolveSettingsSources({ provider: "openai" }, { provider: "anthropic" }, defaults, {});
+  assertEqual(r.provider, "anthropic", "project 声明优先");
+});
+
+await suite("M4: project=openai 覆盖 user=anthropic", () => {
+  const r = resolveSettingsSources({ provider: "anthropic" }, { provider: "openai" }, defaults, {});
+  assertEqual(r.provider, "openai", "project 声明优先（反向冲突）");
+});
+
+await suite("M4: project 未声明时回退 user 声明", () => {
+  const r = resolveSettingsSources({ provider: "anthropic", model: "claude-sonnet-4-6" }, null, defaults, {});
+  assertEqual(r.provider, "anthropic", "user 声明兜底");
+});
+
 await suite("env.PROVIDER 次之", () => {
   const r = resolveSettingsSources({ env: { PROVIDER: "anthropic" } }, null, defaults, {});
   assertEqual(r.provider, "anthropic", "env.PROVIDER 生效");

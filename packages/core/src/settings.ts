@@ -545,13 +545,15 @@ export function resolveSettingsSources(
     "";
 
   // ------------------------------------------------------------------
-  // Provider 解析（优先级：settings.provider > env > model 前缀 > 默认 openai）
+  // Provider 解析（优先级：settings.provider > env 变量 > model 前缀 > 默认 openai）
+  // 显式声明内部冲突时 project settings 优先于 user settings（M4），
+  // 与同文件 model/thinkingEnabled/temperature 等字段的合并惯例保持一致。
   // ------------------------------------------------------------------
   const explicitProvider =
-    userSettings?.provider === "anthropic" || userSettings?.provider === "openai"
-      ? userSettings.provider
-      : projectSettings?.provider === "anthropic" || projectSettings?.provider === "openai"
-        ? projectSettings.provider
+    projectSettings?.provider === "anthropic" || projectSettings?.provider === "openai"
+      ? projectSettings.provider
+      : userSettings?.provider === "anthropic" || userSettings?.provider === "openai"
+        ? userSettings.provider
         : undefined;
 
   const envProviderRaw = trimString(env.PROVIDER) || trimString(env.LLM_PROVIDER);
