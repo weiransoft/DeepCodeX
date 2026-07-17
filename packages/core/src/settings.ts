@@ -83,6 +83,8 @@ export type ResolvedStatusLineSettings = {
 export type DeepcodingSettings = {
   env?: DeepcodingEnv;
   model?: string;
+  /** LLM provider 显式声明（最高优先级），未设置时按 env/model 前缀推断 */
+  provider?: "openai" | "anthropic";
   temperature?: number;
   thinkingEnabled?: boolean;
   reasoningEffort?: ReasoningEffort;
@@ -101,6 +103,17 @@ export type ResolvedDeepcodingSettings = {
   apiKey?: string;
   baseURL: string;
   model: string;
+  /** 解析后的 LLM provider（路由依据） */
+  provider: "openai" | "anthropic";
+  /** Anthropic 专属配置（provider=anthropic 时填充） */
+  anthropic?: {
+    /** 启用的 beta 特性列表（来自 env.ANTHROPIC_BETA，逗号分隔） */
+    betaFeatures: string[];
+    /** Claude 必填的最大输出 token（默认 8192，可用 env.ANTHROPIC_MAX_TOKENS 覆盖） */
+    maxTokens: number;
+    /** extended thinking 预算 token（env.ANTHROPIC_THINKING_BUDGET，默认 4096） */
+    thinkingBudgetTokens?: number;
+  };
   temperature?: number;
   thinkingEnabled: boolean;
   reasoningEffort: ReasoningEffort;
@@ -531,11 +544,44 @@ export function resolveSettingsSources(
     trimString(userSettings?.webSearchTool) ||
     "";
 
+  // ------------------------------------------------------------------
+  // Provider 解析（优先级：settings.provider > env > model 前缀 > 默认 openai）
+  // ------------------------------------------------------------------
+  const explicitProvider =
+    userSettings?.provider === "anthropic" || userSettings?.provider === "openai"
+      ? userSettings.provider
+      : projectSettings?.provider === "anthropic" || projectSettings?.provider === "openai"
+        ? projectSettings.provider
+        : undefined;
+
+  const envProviderRaw = trimString(env.PROVIDER) || trimString(env.LLM_PROVIDER);
+  const envProvider = envProviderRaw === "anthropic" || envProviderRaw === "openai" ? envProviderRaw : undefined;
+
+  /** 按 model 前缀推断 provider：claude-* → anthropic，其余 → openai */
+  const inferredProvider: "openai" | "anthropic" = model.startsWith("claude-") ? "anthropic" : "openai";
+
+  const provider: "openai" | "anthropic" = explicitProvider ?? envProvider ?? inferredProvider;
+
+  /** Anthropic 专属配置（仅 provider=anthropic 时填充，避免误导消费方） */
+  const anthropic =
+    provider === "anthropic"
+      ? {
+          betaFeatures: trimString(env.ANTHROPIC_BETA)
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0),
+          maxTokens: Number(trimString(env.ANTHROPIC_MAX_TOKENS)) || 8192,
+          thinkingBudgetTokens: Number(trimString(env.ANTHROPIC_THINKING_BUDGET)) || 4096,
+        }
+      : undefined;
+
   return {
     env,
     apiKey: trimString(env.API_KEY) || undefined,
     baseURL: trimString(env.BASE_URL) || defaults.baseURL,
     model,
+    provider,
+    anthropic,
     temperature,
     thinkingEnabled,
     reasoningEffort,
