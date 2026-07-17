@@ -1570,6 +1570,13 @@ ${agentInstructions}
     const startedAt = Date.now();
     const { client, model, baseURL, temperature, thinkingEnabled, reasoningEffort, debugLogEnabled, notify, env } =
       this.createOpenAIClient();
+    // Claude 主对话流式接入（2026-07-18 设计 §3）：方法开头一次性解析统一 LLM 客户端，循环内复用。
+    // provider 判定取 llmClient.providerName 而非 settings.provider——单一事实源，
+    // 且测试可经 createLLMClient 注入桩（B1 缝合点），无需改写 settings 文件。
+    // provider=anthropic 且 apiKey 缺失时 createOpenAIClient() 与 createLLMClient() 同时返回空：
+    // anthropicClient 为 null、走 OpenAI 分支并命中下方 !client →「API key not found」，失败语义与现状一致。
+    const llmClient = this.createLLMClient();
+    const anthropicClient = llmClient?.providerName === "anthropic" ? llmClient : null;
     const now = new Date().toISOString();
     rebuildSessionStateFromHistory(sessionId, this.listSessionMessages(sessionId));
 
@@ -1669,24 +1676,50 @@ ${agentInstructions}
           model
         );
         const thinkingOptions = buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort);
-        const response = await this.createChatCompletionStream(
-          client,
-          {
-            model,
-            ...(temperature !== undefined ? { temperature } : {}),
-            messages,
-            tools: getTools(this.getPromptToolOptions(), this.mcpToolDefinitions),
-            ...thinkingOptions,
-          },
-          { signal: sessionController.signal },
-          sessionId,
-          {
-            enabled: debugLogEnabled,
-            location: "SessionManager.activateSession",
-            baseURL,
-            params: { iteration, temperature, thinkingEnabled, reasoningEffort },
-          }
-        );
+        // 仅流式调用一处三元分支，前后逻辑共享（2026-07-18 设计 §3 调用点形态）；
+        // OpenAI 分支保持原样，Anthropic 分支聚合产物与 OpenAI 形态契约完全一致，
+        // 主循环消费面（content/tool_calls/reasoning_content/refusal/usage）零改动。
+        // 请求构建按 §6.1：messages 直接传 SessionMessage[]（converter 原生消费，不绕行 OpenAI 形态）；
+        // tools 为 getTools 产物的纯字段提取；maxTokens/temperature 省略（client 回落 settings
+        // 单一配置源，避免 Claude 侧每次调用产生误导性告警噪声）；signal 与 OpenAI 分支同源。
+        const response = anthropicClient
+          ? await this.createLlmMessageStream(
+              anthropicClient,
+              {
+                messages: this.listSessionMessages(sessionId),
+                tools: getTools(this.getPromptToolOptions(), this.mcpToolDefinitions).map((tool) => ({
+                  name: tool.function.name,
+                  description: tool.function.description,
+                  parameters: tool.function.parameters,
+                })),
+                thinkingEnabled,
+                signal: sessionController.signal,
+              },
+              sessionId,
+              {
+                enabled: debugLogEnabled,
+                location: "SessionManager.activateSession",
+                params: { iteration, temperature, thinkingEnabled, reasoningEffort },
+              }
+            )
+          : await this.createChatCompletionStream(
+              client,
+              {
+                model,
+                ...(temperature !== undefined ? { temperature } : {}),
+                messages,
+                tools: getTools(this.getPromptToolOptions(), this.mcpToolDefinitions),
+                ...thinkingOptions,
+              },
+              { signal: sessionController.signal },
+              sessionId,
+              {
+                enabled: debugLogEnabled,
+                location: "SessionManager.activateSession",
+                baseURL,
+                params: { iteration, temperature, thinkingEnabled, reasoningEffort },
+              }
+            );
 
         const message = response.choices?.[0]?.message;
         const rawContent = message?.content;
