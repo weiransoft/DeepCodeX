@@ -153,7 +153,36 @@ export class ToolExecutor {
     }
 
     try {
-      return await handler(parsedArgs.args, {
+      // V2 钩子：工具执行前审批
+      // 在 handler 调用前调用 onBeforeToolExecution 钩子进行审批决策
+      // 向后兼容：未提供钩子时（undefined）跳过决策，按原流程执行
+      //
+      // v2.4 修订（P0-05 修复）：钩子签名升级为 async（返回 Promise），
+      // 必须使用 await 解包以支持 V2-P0b side-git 快照创建等异步操作。
+      // V1 既有同步钩子需迁移为 async（返回 Promise）。
+      if (hooks?.onBeforeToolExecution) {
+        const decision = await hooks.onBeforeToolExecution(toolName, parsedArgs.args);
+        // deny：审批拒绝，直接返回失败结果（不执行 handler）
+        if (decision === "deny") {
+          return {
+            ok: false,
+            name: toolName,
+            error: "工具执行被审批门控拒绝（Tool execution denied by approval gate）",
+          };
+        }
+        // ask_user：需要用户确认，返回 awaitUserResponse 标志由调用方处理
+        if (decision === "ask_user") {
+          return {
+            ok: false,
+            name: toolName,
+            error: "需要用户确认（User confirmation required）",
+            awaitUserResponse: true,
+          };
+        }
+        // decision === "approve" → 继续执行 handler
+      }
+
+      const result = await handler(parsedArgs.args, {
         sessionId,
         projectRoot: this.projectRoot,
         toolCall,
@@ -166,6 +195,17 @@ export class ToolExecutor {
         onBeforeFileMutation: hooks?.onBeforeFileMutation,
         onAfterFileMutation: hooks?.onAfterFileMutation,
       });
+
+      // V2 钩子：工具执行结果后处理
+      // handler 返回后调用 onAfterToolExecution 钩子，允许对结果进行增强（如 diff 预览增强）
+      // 命名说明（V2.3 P1-04）：原名 onToolResult，统一更名与 onBeforeToolExecution 对称，
+      // 只在 ToolExecutor 层触发一次，文件级钩子（onAfterFileMutation）不重复处理
+      // 向后兼容：未提供钩子时（undefined）直接返回 handler 原始结果
+      if (hooks?.onAfterToolExecution) {
+        return hooks.onAfterToolExecution(result, { toolName, args: parsedArgs.args });
+      }
+
+      return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return {

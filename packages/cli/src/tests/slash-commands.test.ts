@@ -31,6 +31,15 @@ test("buildSlashCommands prefixes skills before built-ins", () => {
     "mcp",
     "raw",
     "exit",
+    // DeepCodeX 融合：多角色团队命令
+    "team",
+    "architect",
+    "pm",
+    "coder",
+    "tester",
+    "ui",
+    // DeepCodeX V2 记忆管理命令
+    "memory",
   ]);
 });
 

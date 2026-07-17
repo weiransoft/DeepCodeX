@@ -8,6 +8,7 @@ import Yargs from "yargs";
 import { getCliVersion } from "./utils/version";
 import { writeStderrLine } from "./utils/stdio-helpers";
 import { hideBin } from "yargs/helpers";
+import { ROLE_REGISTRY } from "@vegamo/deepcode-core";
 
 // UUID v4 regex pattern for validation
 const SESSION_ID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -33,6 +34,14 @@ export interface ParsedCliArgs {
   version: boolean;
   /** True when --help / -h was passed */
   help: boolean;
+  /**
+   * Team subcommand arguments.
+   * - `undefined` — no team subcommand was invoked
+   * - `string`    — a team subcommand name (e.g. "list", "match", "dispatch")
+   */
+  team: string | undefined;
+  /** Team subcommand options (key-value pairs) */
+  teamOptions: Record<string, string | boolean | number | string[] | undefined>;
 }
 
 const EPILOG = [
@@ -111,6 +120,40 @@ async function configureYargs(argv?: string[]) {
           return true;
         })
     )
+    .command(
+      "team <subcommand>",
+      "Multi-role team dispatch (list / match / dispatch / autonomous / full-lifecycle)",
+      (y: Argv) =>
+        y
+          .positional("subcommand", {
+            type: "string",
+            choices: ["list", "match", "dispatch", "autonomous", "full-lifecycle"] as const,
+            describe: "Team subcommand",
+          })
+          .option("role", {
+            type: "string",
+            describe: `Target role id. Available: ${ROLE_REGISTRY.map((r) => r.roleId).join(", ")}`,
+          })
+          .option("task", { type: "string", describe: "Task description" })
+          .option("goal", { type: "string", describe: "Goal / project name (autonomous / full-lifecycle)" })
+          .option("project", { type: "string", describe: "Project name (full-lifecycle alias)" })
+          .option("keywords", { type: "string", describe: "Comma-separated keywords for role matching" })
+          .option("max-iterations", { type: "number", describe: "Max iterations (autonomous, default 5)" })
+          .option("force-role", { type: "boolean", describe: "Disable auto role matching" })
+          .option("consensus", { type: "boolean", describe: "Enable 5-role consensus review" })
+          .option("fail-fast", { type: "boolean", describe: "Abort on first failure (default true)" })
+          .option("project-root", { type: "string", describe: "Project root directory" })
+          .check((argv: { [x: string]: unknown }) => {
+            const role = argv["role"];
+            if (typeof role === "string" && role.length > 0) {
+              const known = ROLE_REGISTRY.some((r) => r.roleId === role);
+              if (!known) {
+                return `Unknown role id: "${role}". Available: ${ROLE_REGISTRY.map((r) => r.roleId).join(", ")}`;
+              }
+            }
+            return true;
+          })
+    )
     .example("deepcode", "Launch the interactive TUI in the current directory")
     .example("deepcode -p <prompt>", "Launch with a pre-filled prompt")
     .example("deepcode -r, --resume [sessionId]", "Resume a session or show session picker")
@@ -153,10 +196,36 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     resume = resumeRaw;
   }
 
+  // 提取 team 子命令及其选项
+  const teamRaw = parsed["team"] as string | undefined;
+  const teamOptions: Record<string, string | boolean | number | string[] | undefined> = {};
+  if (teamRaw) {
+    const optionKeys = [
+      "role",
+      "task",
+      "goal",
+      "project",
+      "keywords",
+      "max-iterations",
+      "force-role",
+      "consensus",
+      "fail-fast",
+      "project-root",
+    ];
+    for (const key of optionKeys) {
+      const v = parsed[key];
+      if (v !== undefined) {
+        teamOptions[key] = v as string | boolean | number | string[];
+      }
+    }
+  }
+
   return {
     prompt: parsed.prompt as string | undefined,
     resume,
     version: parsed.version === true,
     help: parsed.help === true,
+    team: teamRaw,
+    teamOptions,
   };
 }

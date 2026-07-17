@@ -278,6 +278,73 @@ test("Read returns snippet metadata and Edit can scope replacements by snippet_i
   );
 });
 
+test("Edit returns old_content and new_content metadata for V2 diff enhancement", async () => {
+  // V2 F-2 验收标准 1：edit 成功后 metadata.old_content 为替换前完整文本、
+  // new_content 为替换后完整文本（含中文等多字节字符，验证内容原样保留）。
+  const workspace = createTempWorkspace();
+  const filePath = path.join(workspace, "v2-metadata.txt");
+  const original = ["# 配置标题", "target = 1", "末尾行"].join("\n");
+  fs.writeFileSync(filePath, original, "utf8");
+
+  const sessionId = "edit-v2-content-fields";
+  const snippet = await readSnippet(filePath, sessionId, workspace);
+
+  const editResult = await handleEditTool(
+    {
+      snippet_id: snippet.id,
+      old_string: "target = 1",
+      new_string: "target = 2",
+    },
+    createContext(sessionId, workspace)
+  );
+
+  assert.equal(editResult.ok, true);
+  // 替换前完整文本：与磁盘原始内容逐字节一致
+  assert.equal(editResult.metadata?.old_content, original);
+  // 替换后完整文本：与写盘后的实际内容逐字节一致
+  const expected = original.replace("target = 1", "target = 2");
+  assert.equal(editResult.metadata?.new_content, expected);
+  assert.equal(fs.readFileSync(filePath, "utf8"), expected);
+});
+
+test("Edit degrades old_content/new_content to null when content exceeds 256KB", async () => {
+  // V2 F-2 验收标准 2：单字段 UTF-8 字节数超过 256KB 时两字段降级为 null，
+  // 既有 diff_preview 字段保持原样且编辑本身成功（钩子侧回退不抛错）。
+  const workspace = createTempWorkspace();
+  const filePath = path.join(workspace, "large-file.txt");
+  // 构造约 300KB 内容：1000 行 × 300 字符（ASCII，字符数即字节数），
+  // 1000 行在读工具默认 2000 行限额内，可整文件读取并登记文件状态。
+  const markerLine = "target = 1" + "x".repeat(290);
+  const lines: string[] = [];
+  for (let i = 0; i < 1000; i += 1) {
+    lines.push(i === 500 ? markerLine : `line-${i}-` + "y".repeat(290));
+  }
+  const original = lines.join("\n");
+  assert.ok(Buffer.byteLength(original, "utf8") > 256 * 1024);
+  fs.writeFileSync(filePath, original, "utf8");
+
+  const sessionId = "edit-large-file-degrade";
+  const snippet = await readSnippet(filePath, sessionId, workspace);
+
+  const editResult = await handleEditTool(
+    {
+      snippet_id: snippet.id,
+      old_string: "target = 1",
+      new_string: "target = 2",
+    },
+    createContext(sessionId, workspace)
+  );
+
+  assert.equal(editResult.ok, true);
+  // 超限降级：两字段均为 null
+  assert.equal(editResult.metadata?.old_content, null);
+  assert.equal(editResult.metadata?.new_content, null);
+  // 既有 diff_preview 保持原样（仍包含替换后行内容），编辑结果其他字段不受影响
+  assert.match(String(editResult.metadata?.diff_preview ?? ""), /\+target = 2/);
+  assert.equal(editResult.metadata?.replaced_count, 1);
+  assert.equal(editResult.metadata?.cache_refreshed, true);
+});
+
 test("Read returns full-file snippet ids with a semantic prefix", async () => {
   const workspace = createTempWorkspace();
   const filePath = path.join(workspace, "full.txt");

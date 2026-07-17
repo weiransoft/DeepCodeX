@@ -1,5 +1,14 @@
 import type { SkillInfo } from "@vegamo/deepcode-core";
 
+/**
+ * 斜杠命令种类
+ *
+ * DeepCodeX 扩展：新增 6 个多角色团队命令
+ *   - team: 多角色调度（自动匹配最合适角色）
+ *   - architect / pm / coder / tester / ui: 强制指定角色
+ * DeepCodeX V2 扩展：新增 memory 命令
+ *   - memory: 记忆管理（list/delete/review/export）
+ */
 export type SlashCommandKind =
   | "skill"
   | "skills"
@@ -12,7 +21,14 @@ export type SlashCommandKind =
   | "undo"
   | "mcp"
   | "raw"
-  | "exit";
+  | "exit"
+  | "team"
+  | "architect"
+  | "pm"
+  | "coder"
+  | "tester"
+  | "ui"
+  | "memory";
 
 export type SlashCommandItem = {
   kind: SlashCommandKind;
@@ -91,6 +107,58 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
     label: "/exit",
     description: "Quit Deep Code CLI",
   },
+  // ===== DeepCodeX 多角色团队命令（5 角色 + 自动调度） =====
+  {
+    kind: "team",
+    name: "team",
+    label: "/team",
+    args: ["<task description>"],
+    description:
+      "Auto-dispatch task to best-fit multi-role team member (Karpathy 4 principles + Ponytail 16 red lines)",
+  },
+  {
+    kind: "architect",
+    name: "architect",
+    label: "/architect",
+    args: ["<task description>"],
+    description: "Force dispatch to Architect role (system design, tech selection, ADR)",
+  },
+  {
+    kind: "pm",
+    name: "pm",
+    label: "/pm",
+    args: ["<task description>"],
+    description: "Force dispatch to Product Manager role (PRD, user story, acceptance criteria)",
+  },
+  {
+    kind: "coder",
+    name: "coder",
+    label: "/coder",
+    args: ["<task description>"],
+    description: "Force dispatch to Solo Coder role (implementation, refactor, unit test)",
+  },
+  {
+    kind: "tester",
+    name: "tester",
+    label: "/tester",
+    args: ["<task description>"],
+    description: "Force dispatch to Test Expert role (test design, E2E, coverage)",
+  },
+  {
+    kind: "ui",
+    name: "ui",
+    label: "/ui",
+    args: ["<task description>"],
+    description: "Force dispatch to UI Designer role (UI/UX, accessibility, design system)",
+  },
+  // ===== DeepCodeX V2 记忆管理命令 =====
+  {
+    kind: "memory",
+    name: "memory",
+    label: "/memory",
+    args: ["<subcommand>"],
+    description: "Memory management (list/delete/review/export)",
+  },
 ];
 
 export function buildSlashCommands(skills: SkillInfo[]): SlashCommandItem[] {
@@ -130,4 +198,35 @@ export function formatSlashCommandDescription(description: string): string {
 
 export function formatSlashCommandLabel(item: SlashCommandItem): string {
   return item.kind === "skill" && item.skill?.isLoaded ? `${item.label} ✓` : item.label;
+}
+
+/**
+ * DeepCodeX 扩展：判断是否为多角色团队命令
+ */
+export function isTeamCommand(kind: SlashCommandKind): boolean {
+  return (
+    kind === "team" || kind === "architect" || kind === "pm" || kind === "coder" || kind === "tester" || kind === "ui"
+  );
+}
+
+/**
+ * DeepCodeX 扩展：team 命令 → roleId 映射
+ */
+export function teamCommandToRoleId(kind: SlashCommandKind): string | null {
+  switch (kind) {
+    case "team":
+      return null; // auto
+    case "architect":
+      return "architect";
+    case "pm":
+      return "product-manager";
+    case "coder":
+      return "solo-coder";
+    case "tester":
+      return "test-expert";
+    case "ui":
+      return "ui-designer";
+    default:
+      return null;
+  }
 }

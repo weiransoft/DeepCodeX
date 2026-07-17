@@ -22,6 +22,15 @@ import {
 const MAX_CANDIDATE_COUNT = 5;
 const REPLACE_ALL_MATCH_THRESHOLD = 5;
 const SHORT_REPLACE_ALL_LENGTH = 40;
+/**
+ * V2 新增：metadata 中 old_content / new_content 字段的内联大小上限（字节）。
+ * 供 ToolExecutionHooks.onAfterToolExecution 钩子（V2.3 P1-04 前名 onToolResult）做 diff 增强时读取完整原文/新文；
+ * 单字段超过 256KB 时降级为 null，避免超大文件的全文内容挤占工具结果内存，
+ * 钩子侧检测到 null 时回退使用既有 diff_preview 字段（详见 V2 技术方案 §3.3）。
+ * 注意：必须使用 Buffer.byteLength(raw, 'utf8') 按 UTF-8 字节数计量，
+ * 不能使用 raw.length（字符数），否则中文等多字节内容会被低估导致超限。
+ */
+const MAX_INLINE_CONTENT_BYTES = 256 * 1024;
 const OUTDATED_SNIPPET_NOT_FOUND_ERROR =
   "old_string was not found in this snippet scope. The file has changed since this snippet was created. Read the file again before editing.";
 
@@ -341,6 +350,14 @@ export async function handleEditTool(
             file_path: filePath,
             replaced_count: replacedCount,
             matched_via: matchedVia,
+            // V2 新增：供 ToolExecutionHooks.onAfterToolExecution 钩子（V2.3 P1-04 前名 onToolResult）做 diff 增强的原始内容对。
+            // old_content 为替换前完整文本（本函数内局部变量 raw），
+            // new_content 为替换后完整文本（本函数内局部变量 updated）。
+            // 大文件降级保护：单字段 UTF-8 字节数超过 256KB 时置为 null，
+            // 钩子侧回退使用既有 diff_preview 字段，保证 diff 增强静默降级而非失效抛错。
+            // 计量使用 Buffer.byteLength(..., 'utf8') 而非字符串 length（多字节字符场景更准确）。
+            old_content: Buffer.byteLength(raw, "utf8") <= MAX_INLINE_CONTENT_BYTES ? raw : null,
+            new_content: Buffer.byteLength(updated, "utf8") <= MAX_INLINE_CONTENT_BYTES ? updated : null,
             cache_refreshed: true,
             read_scope_type: snippet.scopeType,
             encoding: freshMetadata.encoding,

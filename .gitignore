@@ -1,7 +1,8 @@
 # OS metadata
 .DS_Store
 Thumbs.db
-
+# Fusion docs
+docs/fusion/
 # Dependency directory
 node_modules/
 # Ignore built ts files

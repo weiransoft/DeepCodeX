@@ -23,6 +23,40 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  // team 子命令路由：多角色协同 CLI 模式（非 TUI 模式）
+  if (parsed.team) {
+    // 延迟导入避免启动开销
+    const { executeTeamCommand, formatTeamHelp } = await import("./team/team-cmd.js");
+    if (parsed.team === "help") {
+      process.stdout.write(formatTeamHelp());
+      process.exit(0);
+    }
+    // 构造命令参数
+    const subcommand = parsed.team;
+    const opts = parsed.teamOptions;
+    const goalRaw = (opts["goal"] ?? opts["project"]) as string | undefined;
+    const keywordsRaw = opts["keywords"] as string | undefined;
+    const keywords = keywordsRaw
+      ? keywordsRaw
+          .split(",")
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+      : undefined;
+    const exitCode = await executeTeamCommand({
+      subcommand: subcommand as "list" | "match" | "dispatch" | "autonomous" | "full-lifecycle",
+      role: opts["role"] as "architect" | "solo-coder" | "test-expert" | "ui-designer" | "product-manager" | undefined,
+      task: opts["task"] as string | undefined,
+      goal: goalRaw,
+      keywords,
+      maxIterations: typeof opts["max-iterations"] === "number" ? (opts["max-iterations"] as number) : undefined,
+      forceRole: opts["force-role"] === true,
+      consensus: opts["consensus"] === true,
+      failFast: opts["fail-fast"] === false ? false : true,
+      projectRoot: (opts["project-root"] as string | undefined) ?? process.cwd(),
+    });
+    process.exit(exitCode);
+  }
+
   // Configure Windows shell AFTER --version/--help handling.
   // On Windows without Git Bash, setShellIfWindows() throws and calls process.exit(1).
   // If called before argument parsing, --help and --version would fail on those machines.

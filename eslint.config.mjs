@@ -41,6 +41,30 @@ export default tseslint.config(
       "react-hooks/exhaustive-deps": "warn",
     },
   },
+  // V2 模块边界（V2.3 P1-05 修复）：V2 → V1 依赖必须经由唯一入口
+  // packages/core/src/v2/integration/v1-adapters.ts。
+  // 禁止 V2 业务模块直接 import V1 目录（team/ common/ tools/ session 等），
+  // 依赖面集中在 v1-adapters 一处，可审计、可门禁。
+  // 豁免：v1-adapters.ts 自身（它是对外 re-export 的唯一入口）与 v2/tests
+  //（测试可直接构造 V1 被测对象，如 ToolExecutor 集成测试）。
+  {
+    files: ["packages/core/src/v2/**/*.ts"],
+    ignores: ["packages/core/src/v2/integration/v1-adapters.ts", "packages/core/src/v2/tests/**/*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["../../team/*", "../../common/*", "../../tools/*", "../../session*", "../../settings*"],
+              message:
+                "V2 模块禁止直接 import V1 文件（V2.3 P1-05 单一入口约束）。请从 ../../integration/v1-adapters 导入 V1 能力；若依赖缺失，请在 v1-adapters.ts 中补充 re-export。",
+            },
+          ],
+        },
+      ],
+    },
+  },
   // Test files: relaxed rules
   {
     files: ["packages/*/src/tests/**/*.ts", "packages/*/src/tests/**/*.mjs"],
