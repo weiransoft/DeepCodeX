@@ -126,8 +126,23 @@ export class OpenAILLMClient implements LLMClient {
 
     const messages = this.converter.buildMessages(request.messages, request.thinkingEnabled, this.model);
     try {
+      // M3：流式参数与非流式 createMessage 对齐——tools 映射为 function 工具、
+      // temperature 仅在显式提供时传递（未提供时不发送，保持服务端默认采样行为）
       const stream = await client.chat.completions.create(
-        { model: this.model, messages, stream: true },
+        {
+          model: this.model,
+          messages,
+          stream: true,
+          ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
+          ...(request.tools && request.tools.length > 0
+            ? {
+                tools: request.tools.map((t) => ({
+                  type: "function" as const,
+                  function: { name: t.name, description: t.description, parameters: t.parameters },
+                })),
+              }
+            : {}),
+        },
         { signal: request.signal ?? undefined }
       );
 
