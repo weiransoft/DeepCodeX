@@ -78,6 +78,22 @@ await suite("anthropic 缺 API_KEY 时 fail-fast", () => {
   assertTrue(threw, "应抛配置错误");
 });
 
+await suite("未知 provider 防御分支：显式报错而非 undefined 崩溃", () => {
+  // 运行时 settings.json 可被手改为任意字符串（如 "gemini"），绕过 TS 联合类型约束
+  // factory 的 !provider 防御分支必须显式抛出带原值的错误，而非后续 undefined 调用崩溃
+  const s = makeSettings("openai");
+  (s as { provider: string }).provider = "gemini";
+  let threw = false;
+  try {
+    ProviderFactory.create(s);
+  } catch (e) {
+    threw = true;
+    assertTrue(e instanceof Error && e.message.includes("未知的 LLM provider"), "错误信息含未知 provider 提示");
+    assertTrue(e instanceof Error && e.message.includes("gemini"), "错误信息透传原始 provider 值");
+  }
+  assertTrue(threw, "应抛出未知 provider 错误");
+});
+
 console.log(`\n=== Test Summary ===`);
 console.log(`Passed: ${passed}`);
 console.log(`Failed: ${failed}`);

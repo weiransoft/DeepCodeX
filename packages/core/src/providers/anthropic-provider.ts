@@ -30,6 +30,11 @@ import type {
 /** 非流式响应 transport 签名（生产=SDK 调用，测试=桩函数） */
 type CreateTransport = (params: Anthropic.MessageCreateParamsNonStreaming) => Promise<Anthropic.Message>;
 
+/** 流式事件 transport 签名（生产=SDK 流式调用，测试=桩函数，真实异步迭代器非 mock 框架） */
+type StreamTransport = (
+  params: Anthropic.MessageCreateParamsNonStreaming
+) => AsyncIterable<Anthropic.RawMessageStreamEvent>;
+
 export class AnthropicProvider implements LLMProvider {
   readonly name = "anthropic" as const;
 
@@ -58,6 +63,8 @@ export class AnthropicLLMClient implements LLMClient {
   private readonly converter = new AnthropicMessageConverter();
   /** 测试注入点：非流式 transport（生产环境为 null，走 SDK） */
   private transport: CreateTransport | null = null;
+  /** 测试注入点：流式 transport（生产环境为 null，走 SDK 流式） */
+  private streamTransport: StreamTransport | null = null;
 
   constructor(settings: ResolvedDeepcodingSettings) {
     this.apiKey = settings.apiKey ?? "";
@@ -71,6 +78,11 @@ export class AnthropicLLMClient implements LLMClient {
   /** 测试专用：注入非流式 transport 桩（验证解析逻辑，绕开网络） */
   setTransportForTesting(transport: CreateTransport): void {
     this.transport = transport;
+  }
+
+  /** 测试专用：注入流式 transport 桩（验证 SSE 事件归一化逻辑，绕开网络） */
+  setStreamTransportForTesting(transport: StreamTransport): void {
+    this.streamTransport = transport;
   }
 
   /**
@@ -125,8 +137,11 @@ export class AnthropicLLMClient implements LLMClient {
   /** 流式调用：SDK 事件流 → 归一化 LLMStreamEvent */
   async *createMessageStream(request: LLMRequest): AsyncIterable<LLMStreamEvent> {
     const params = this.buildRequestParams(request);
-    // SDK 的 messages.stream() 接受非流式形态参数并自动启用流式，无需（也不可）传 stream: true
-    const stream = this.getSdk().messages.stream(params, { signal: request.signal ?? undefined });
+    // SDK 的 messages.stream() 接受非流式形态参数并自动启用流式，无需（也不可）传 stream: true；
+    // 测试场景经注入的流式 transport 供给真实异步事件序列（验证归一化逻辑本身）
+    const stream: AsyncIterable<Anthropic.RawMessageStreamEvent> = this.streamTransport
+      ? this.streamTransport(params)
+      : this.getSdk().messages.stream(params, { signal: request.signal ?? undefined });
 
     // 流式状态：tool_use 块的 id/name 在 content_block_start 给出，input_json_delta 后续增量
     let currentToolId: string | null = null;
