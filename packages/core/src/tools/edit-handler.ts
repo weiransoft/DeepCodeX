@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import { z } from "zod";
-import { buildThinkingRequestOptions } from "../common/openai-thinking";
+import { resolveCurrentSettings } from "../settings";
+import type { SessionMessage } from "../session";
 import type { ToolExecutionContext, ToolExecutionResult } from "./executor";
 import {
   buildDiffPreview,
@@ -645,6 +646,28 @@ function buildLooseEscapeRegex(source: string): RegExp | null {
   return new RegExp(pattern, "g");
 }
 
+/**
+ * 构造 LLM 辅助调用的合成 SessionMessage（B1）
+ *
+ * provider 层统一转换入口（OpenAI/Anthropic converter）以 SessionMessage 为输入形态；
+ * 此处的消息仅存在于单次请求内、不落盘，id 使用静态标识即可（converter 不消费 id）。
+ */
+function buildLlmAssistMessage(role: SessionMessage["role"], content: string, sessionId: string): SessionMessage {
+  const now = new Date().toISOString();
+  return {
+    id: `edit-llm-assist-${role}`,
+    sessionId,
+    role,
+    content,
+    contentParams: null,
+    messageParams: null,
+    compacted: false,
+    visible: false,
+    createTime: now,
+    updateTime: now,
+  };
+}
+
 async function inferOldStringNotFoundReasonWithLLM(
   raw: string,
   lineIndex: LineIndex,
@@ -653,15 +676,14 @@ async function inferOldStringNotFoundReasonWithLLM(
   newString: string,
   context: ToolExecutionContext
 ): Promise<string | null> {
-  const clientFactory = context.createOpenAIClient;
-  if (!clientFactory) {
+  // B1：经统一 LLM 客户端（provider 路由）发起，替代 OpenAI SDK 直连；
+  // 工厂未注入或无凭据（返回 null）时静默降级，沿用旧 client:null 语义
+  const llmClient = context.createLLMClient?.() ?? null;
+  if (!llmClient) {
     return null;
   }
-
-  const { client, model, baseURL, thinkingEnabled, reasoningEffort } = clientFactory();
-  if (!client) {
-    return null;
-  }
+  // thinking 开关取自统一 settings 解析链（与旧 createOpenAIClient 返回值同源）
+  const { thinkingEnabled } = resolveCurrentSettings(context.projectRoot);
 
   const contextLineLimit = Math.max(1, oldString.split(/\r?\n/).length);
   const snippetText = raw.slice(scope.startOffset, scope.endOffset);
@@ -669,21 +691,20 @@ async function inferOldStringNotFoundReasonWithLLM(
   const contentAfterSnippet = getLinesAfterScope(lineIndex, scope, contextLineLimit);
 
   try {
-    const response = await client.chat.completions.create({
-      model,
+    // 提示词保持原有内容不变，仅换成合成 SessionMessage 形态适配 provider 统一转换入口
+    const response = await llmClient.createMessage({
       messages: [
-        {
-          role: "system",
-          content:
-            "You diagnose failed file edits when old_string was not found. " +
+        buildLlmAssistMessage(
+          "system",
+          "You diagnose failed file edits when old_string was not found. " +
             "Return XML only using <response><reason>...</reason></response>. " +
             "Be concise and specific. Explain the likely mismatch between old_string and the <snippet_text/> content. " +
             "Do not suggest unrelated changes.",
-        },
-        {
-          role: "user",
-          content:
-            "<request>\n" +
+          context.sessionId
+        ),
+        buildLlmAssistMessage(
+          "user",
+          "<request>\n" +
             `  <content_before_snippet><![CDATA[${contentBeforeSnippet}]]></content_before_snippet>\n` +
             `  <snippet_text><![CDATA[${snippetText}]]></snippet_text>\n` +
             `  <content_after_snippet><![CDATA[${contentAfterSnippet}]]></content_after_snippet>\n` +
@@ -695,12 +716,14 @@ async function inferOldStringNotFoundReasonWithLLM(
             "    <reason><![CDATA[...]]></reason>\n" +
             "  </response>\n" +
             "</output_format>",
-        },
+          context.sessionId
+        ),
       ],
-      ...buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort),
+      thinkingEnabled,
+      signal: null,
     });
 
-    return parseOldStringNotFoundReason(response.choices?.[0]?.message?.content ?? "");
+    return parseOldStringNotFoundReason(response.content);
   } catch {
     return null;
   }
@@ -737,31 +760,29 @@ async function correctEscapedStringsWithLLM(
   matchedText: string,
   context: ToolExecutionContext
 ): Promise<CorrectedEditStrings | null> {
-  const clientFactory = context.createOpenAIClient;
-  if (!clientFactory) {
+  // B1：经统一 LLM 客户端（provider 路由）发起，替代 OpenAI SDK 直连；
+  // 工厂未注入或无凭据（返回 null）时静默降级，沿用旧 client:null 语义
+  const llmClient = context.createLLMClient?.() ?? null;
+  if (!llmClient) {
     return null;
   }
-
-  const { client, model, baseURL, thinkingEnabled, reasoningEffort } = clientFactory();
-  if (!client) {
-    return null;
-  }
+  // thinking 开关取自统一 settings 解析链（与旧 createOpenAIClient 返回值同源）
+  const { thinkingEnabled } = resolveCurrentSettings(context.projectRoot);
 
   try {
-    const response = await client.chat.completions.create({
-      model,
+    // 提示词保持原有内容不变，仅换成合成 SessionMessage 形态适配 provider 统一转换入口
+    const response = await llmClient.createMessage({
       messages: [
-        {
-          role: "system",
-          content:
-            "You correct file-edit strings when the only problem is escaping. " +
+        buildLlmAssistMessage(
+          "system",
+          "You correct file-edit strings when the only problem is escaping. " +
             "Return XML only using <response><corrected_old_string>...</corrected_old_string><corrected_new_string>...</corrected_new_string></response>. " +
             "Do not change semantics; only fix quoting or escaping so corrected_old_string matches the snippet exactly.",
-        },
-        {
-          role: "user",
-          content:
-            "<request>\n" +
+          context.sessionId
+        ),
+        buildLlmAssistMessage(
+          "user",
+          "<request>\n" +
             `  <snippet_text><![CDATA[${snippetText}]]></snippet_text>\n` +
             `  <old_string><![CDATA[${oldString}]]></old_string>\n` +
             `  <new_string><![CDATA[${newString}]]></new_string>\n` +
@@ -773,13 +794,14 @@ async function correctEscapedStringsWithLLM(
             "    <corrected_new_string><![CDATA[...]]></corrected_new_string>\n" +
             "  </response>\n" +
             "</output_format>",
-        },
+          context.sessionId
+        ),
       ],
-      ...buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort),
+      thinkingEnabled,
+      signal: null,
     });
 
-    const content = response.choices?.[0]?.message?.content ?? "";
-    const parsed = parseCorrectedEditStrings(content);
+    const parsed = parseCorrectedEditStrings(response.content);
     if (!parsed) {
       return null;
     }

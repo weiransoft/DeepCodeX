@@ -5,6 +5,7 @@ import * as os from "os";
 import * as path from "path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { BackgroundProcessCompletion, ProcessTimeoutControl, ToolExecutionContext } from "../tools/executor";
+import type { LLMClient, LLMRequest, LLMResponse } from "../providers/llm-provider";
 import { handleBashTool } from "../tools/bash-handler";
 import { handleEditTool } from "../tools/edit-handler";
 import { handleReadTool } from "../tools/read-handler";
@@ -488,30 +489,19 @@ test("Edit appends an LLM diagnosis when old_string is not found", async () => {
       new_string: "function computeTotal(input: number) {\n  return input;",
     },
     createContext(sessionId, workspace, {
-      createOpenAIClient: () => ({
-        client: {
-          chat: {
-            completions: {
-              create: async (request: { messages?: Array<{ content?: string }> }) => {
-                llmCalls += 1;
-                prompt = String(request.messages?.[1]?.content ?? "");
-                return {
-                  choices: [
-                    {
-                      message: {
-                        content:
-                          "<response><reason><![CDATA[The requested function name is computeTotal, but the snippet contains computeSubtotal.]]></reason></response>",
-                      },
-                    },
-                  ],
-                };
-              },
-            },
-          },
-        } as any,
-        model: "test-model",
-        thinkingEnabled: false,
-      }),
+      createLLMClient: () =>
+        createStubLLMClient(async (request) => {
+          llmCalls += 1;
+          prompt = String(request.messages?.[1]?.content ?? "");
+          return {
+            content:
+              "<response><reason><![CDATA[The requested function name is computeTotal, but the snippet contains computeSubtotal.]]></reason></response>",
+            thinking: "",
+            toolCalls: [],
+            stopReason: "stop",
+            usage: null,
+          };
+        }),
     })
   );
 
@@ -543,19 +533,14 @@ test("Edit keeps the base not-found error when the LLM diagnosis is unavailable"
       new_string: "const missing = false;",
     },
     createContext(sessionId, workspace, {
-      createOpenAIClient: () => ({
-        client: {
-          chat: {
-            completions: {
-              create: async () => ({
-                choices: [{ message: { content: "<response></response>" } }],
-              }),
-            },
-          },
-        } as any,
-        model: "test-model",
-        thinkingEnabled: false,
-      }),
+      createLLMClient: () =>
+        createStubLLMClient(async () => ({
+          content: "<response></response>",
+          thinking: "",
+          toolCalls: [],
+          stopReason: "stop",
+          usage: null,
+        })),
     })
   );
 
@@ -724,29 +709,18 @@ test("Edit accepts a unique loose-escape match when only escaping differs", asyn
       new_string: "params['city_json'] = city",
     },
     createContext(sessionId, workspace, {
-      createOpenAIClient: () => ({
-        client: {
-          chat: {
-            completions: {
-              create: async () => ({
-                choices: [
-                  {
-                    message: {
-                      content:
-                        "<response>" +
-                        "<corrected_old_string><![CDATA[params['city_json'] = f'\"{city}\"']]></corrected_old_string>" +
-                        "<corrected_new_string><![CDATA[params['city_json'] = city]]></corrected_new_string>" +
-                        "</response>",
-                    },
-                  },
-                ],
-              }),
-            },
-          },
-        } as any,
-        model: "test-model",
-        thinkingEnabled: false,
-      }),
+      createLLMClient: () =>
+        createStubLLMClient(async () => ({
+          content:
+            "<response>" +
+            "<corrected_old_string><![CDATA[params['city_json'] = f'\"{city}\"']]></corrected_old_string>" +
+            "<corrected_new_string><![CDATA[params['city_json'] = city]]></corrected_new_string>" +
+            "</response>",
+          thinking: "",
+          toolCalls: [],
+          stopReason: "stop",
+          usage: null,
+        })),
     })
   );
 
@@ -771,33 +745,22 @@ test("Edit accepts a unique loose-escape match for over-escaped unicode sequence
       new_string: 'const sequence = "\\\\u001B[13;130u";',
     },
     createContext(sessionId, workspace, {
-      createOpenAIClient: () => ({
-        client: {
-          chat: {
-            completions: {
-              create: async (request: { messages?: Array<{ content?: string }> }) => {
-                llmCalls += 1;
-                assert.match(String(request.messages?.[1]?.content ?? ""), /<matched_text><!\[CDATA\[/);
-                return {
-                  choices: [
-                    {
-                      message: {
-                        content:
-                          "<response>" +
-                          '<corrected_old_string><![CDATA[const sequence = "\\u001B[13;2~";]]></corrected_old_string>' +
-                          '<corrected_new_string><![CDATA[const sequence = "\\u001B[13;130u";]]></corrected_new_string>' +
-                          "</response>",
-                      },
-                    },
-                  ],
-                };
-              },
-            },
-          },
-        } as any,
-        model: "test-model",
-        thinkingEnabled: false,
-      }),
+      createLLMClient: () =>
+        createStubLLMClient(async (request) => {
+          llmCalls += 1;
+          assert.match(String(request.messages?.[1]?.content ?? ""), /<matched_text><!\[CDATA\[/);
+          return {
+            content:
+              "<response>" +
+              '<corrected_old_string><![CDATA[const sequence = "\\u001B[13;2~";]]></corrected_old_string>' +
+              '<corrected_new_string><![CDATA[const sequence = "\\u001B[13;130u";]]></corrected_new_string>' +
+              "</response>",
+            thinking: "",
+            toolCalls: [],
+            stopReason: "stop",
+            usage: null,
+          };
+        }),
     })
   );
 
@@ -1100,6 +1063,28 @@ function createContext(
       },
     },
     ...overrides,
+  };
+}
+
+/**
+ * 构造 edit-handler LLM 辅助调用链路的 LLMClient 测试桩（B1）
+ *
+ * edit-handler 的「未找到原因诊断」与「转义纠正」增强现经统一 provider 层
+ * （ToolExecutionContext.createLLMClient）发起，不再直连 OpenAI SDK；
+ * 测试经该工厂注入桩实现：createMessage 由调用方按场景定义（记录入参/返回排队响应），
+ * createMessageStream 为非流式场景不会消费的空迭代器（仅满足接口签名）。
+ */
+function createStubLLMClient(createImpl: (request: LLMRequest) => Promise<LLMResponse>): LLMClient {
+  return {
+    providerName: "openai",
+    model: "test-model",
+    baseURL: "https://test.invalid",
+    supportsThinking: false,
+    supportsPromptCaching: false,
+    createMessage: createImpl,
+    createMessageStream: async function* () {
+      // 非流式辅助场景不消费流式接口，空实现仅满足 LLMClient 签名
+    },
   };
 }
 
