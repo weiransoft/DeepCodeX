@@ -33,7 +33,7 @@ import { McpManager } from "./mcp/mcp-manager";
 import type { McpServerConfig, PermissionScope, PermissionSettings } from "./settings";
 import { resolveCurrentSettings } from "./settings";
 import { ProviderFactory } from "./providers/provider-factory";
-import type { LLMClient, LLMResponse, LLMUsage } from "./providers/llm-provider";
+import type { LLMClient, LLMResponse, LLMToolDefinition, LLMUsage } from "./providers/llm-provider";
 import { logApiError } from "./common/error-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./common/debug-logger";
 import { killProcessTree } from "./common/process-tree";
@@ -194,26 +194,38 @@ function getTotalTokens(usage: ModelUsage | null | undefined): number {
 }
 
 /**
- * 统一 LLMUsage → 会话持久化 ModelUsage 转换（B1：compactSession 接线 provider 层）
+ * 统一 LLMUsage → 会话持久化 ModelUsage 转换
+ * （B1：compactSession 接线 provider 层；2026-07-18 设计 §4.4 cache 语义修正）
  *
- * 字段映射：
- * - prompt_tokens ← inputTokens；completion_tokens ← outputTokens；
- * - total_tokens = input + output（与 DeepSeek 服务端 total 口径一致）；
- * - cacheReadInputTokens → prompt_cache_hit_tokens（均为「命中缓存的输入 token」）；
- * - cacheCreationInputTokens → prompt_cache_miss_tokens（近似映射：
- *   均为「未直接命中、需额外写入计量的输入 token」，供用量展示参考）。
+ * 字段映射（修正版，一处定义两通路共享）：
+ * - prompt_tokens ← inputTokens + cacheCreation + cacheRead。
+ *   语义事实：Anthropic 的 input_tokens 不含 cache_read/cache_creation（三者独立计量计费），
+ *   而 DeepSeek 的 prompt_tokens 为输入总量（= prompt_cache_hit + prompt_cache_miss）。
+ *   消费方约束：getTotalTokens 只读 total_tokens → activeTokens → 驱动 compact 阈值；
+ *   若 prompt_tokens 不含 cache 命中部分，prompt caching 生效时 activeTokens 被严重低估
+ *   （cache 命中可占上下文 90%+），compact 永不触发 → 上下文溢出。故必须含 cache 部分；
+ * - completion_tokens ← outputTokens；total_tokens = prompt_tokens + completion_tokens；
+ * - cacheReadInputTokens → prompt_cache_hit_tokens（命中计量，缺省不输出字段）；
+ * - inputTokens + cacheCreationInputTokens → prompt_cache_miss_tokens
+ *   （未命中计量 = 新输入 + 写缓存，缺省不输出字段）。
  * DeepSeek 自有 prompt_cache_hit/miss_tokens 不经此函数（主对话流式通路保持原样透传）。
+ * OpenAI provider 的 LLMUsage 永无 cache 字段，映射结果与修正前逐值相等（OpenAI 通路零变化）。
  */
 function toModelUsage(usage: LLMUsage | null): ModelUsage | null {
   if (!usage) {
     return null;
   }
+  const cacheCreation = usage.cacheCreationInputTokens ?? 0;
+  const cacheRead = usage.cacheReadInputTokens ?? 0;
+  const promptTokens = usage.inputTokens + cacheCreation + cacheRead;
   return {
-    prompt_tokens: usage.inputTokens,
+    prompt_tokens: promptTokens,
     completion_tokens: usage.outputTokens,
-    total_tokens: usage.inputTokens + usage.outputTokens,
+    total_tokens: promptTokens + usage.outputTokens,
     ...(usage.cacheReadInputTokens != null ? { prompt_cache_hit_tokens: usage.cacheReadInputTokens } : {}),
-    ...(usage.cacheCreationInputTokens != null ? { prompt_cache_miss_tokens: usage.cacheCreationInputTokens } : {}),
+    ...(usage.cacheCreationInputTokens != null
+      ? { prompt_cache_miss_tokens: usage.inputTokens + usage.cacheCreationInputTokens }
+      : {}),
   };
 }
 
@@ -777,6 +789,214 @@ export class SessionManager {
       durationMs: Date.now() - startedAtMs,
       params: { ...debug?.params, options: summarizeCompletionOptions(options) },
       request: streamRequest,
+      responseChunks,
+      response: finalResponse,
+    });
+    return finalResponse;
+  }
+
+  /**
+   * Anthropic 通路流式聚合（Claude 主对话接入 · 2026-07-18 设计 §3/§4/§5）
+   *
+   * 消费 LLMClient.createMessageStream 的归一化事件流（text_delta/thinking_delta/
+   * tool_call_start/tool_call_delta/tool_call_end/message_end/error），聚合为与
+   * createChatCompletionStream 完全一致的 OpenAI 形态返回契约
+   * （{choices:[{message:{content, tool_calls?, reasoning_content?, refusal?}}], usage}），
+   * 使主循环消费面（content/tool_calls/reasoning_content/refusal/usage）零改动。
+   *
+   * 横切能力逐一对等 OpenAI 通路（§5）：流式进度 start/update/end、debug 全量记录
+   * （responseChunks 记录归一化事件序列，由 location 区分事件形态差异）、
+   * logApiError 结构化错误日志、前置 throwIfAborted 与 abort 身份保留（原样 rethrow）。
+   *
+   * 关键语义规则：
+   * - error 事件必须转回抛出（§4.1）：OpenAI 通路流式错误是抛出语义，主循环 catch
+   *   据此置 failed/interrupted；provider 层把错误归一化为事件（不抛出），聚合层
+   *   若不转回抛出，主循环会把「半段响应 + 错误」误当作正常完成落盘；
+   * - 工具调用桶按 id 索引（Anthropic toolu_* id 唯一），Map 插入序 = 事件出现序，
+   *   对等 OpenAI 侧 index 排序后的语义；孤立 tool_call_delta 直接丢弃（§4.2）；
+   * - 无参工具空 arguments 兜底 "{}"（executor JSON.parse("") 必败）；非空 arguments
+   *   不做 JSON 合法性校验——异常截断时下游 InputParseError 自恢复，与 OpenAI 通路同语义；
+   * - 聚合产物形态与 normalizeLlmToolCalls 输入契约一致，多轮回放闭环由
+   *   AnthropicMessageConverter.extractToolCalls 原样读回 messageParams.tool_calls 保证。
+   *
+   * 有意不对等：OpenAI 侧的 Symbol.asyncIterator 非流式回退是其测试基建产物，
+   * LLMClient.createMessageStream 契约保证必返回 AsyncIterable，此处不照搬（避免死代码）。
+   */
+  private async createLlmMessageStream(
+    llmClient: LLMClient,
+    request: {
+      messages: SessionMessage[];
+      tools?: LLMToolDefinition[];
+      thinkingEnabled: boolean;
+      signal?: AbortSignal | null;
+    },
+    sessionId?: string,
+    debug?: ChatCompletionDebugOptions
+  ): Promise<{
+    choices?: Array<{ message?: Record<string, unknown> }>;
+    usage?: ModelUsage | null;
+  }> {
+    const requestId = crypto.randomUUID();
+    const startedAt = new Date().toISOString();
+    const startedAtMs = Date.now();
+    let estimatedTokens = 0;
+    this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "start", sessionId);
+
+    // debug/error 日志共用的请求快照：不含 signal（对齐 OpenAI 侧 request 不含 signal 的现状）
+    const logRequest: Record<string, unknown> = {
+      provider: llmClient.providerName,
+      model: llmClient.model,
+      messages: request.messages,
+      tools: request.tools,
+      thinkingEnabled: request.thinkingEnabled,
+    };
+
+    // 前置 abort 守卫（对齐 OpenAI 通路 throwIfAborted 语义）
+    this.throwIfAborted(request.signal);
+
+    let content = "";
+    let reasoningContent = "";
+    let refusal: string | null = null;
+    let usage: ModelUsage | null = null;
+    const responseChunks: unknown[] = [];
+    // 工具调用桶：按 id 索引（provider 层保证 start → delta* → end 顺序），
+    // 同时天然支持任意交错序列，不做「同时只有一个活跃桶」假设（§4.2 规则 1/3）
+    const toolCallBuckets = new Map<
+      string,
+      { id: string; type: string; function: { name: string; arguments: string } }
+    >();
+
+    // token 估算追踪：text/thinking/工具名/arguments 四类增量（对等 OpenAI 侧五类中的适用项）
+    const trackText = (value: string) => {
+      if (value.length === 0) {
+        return;
+      }
+      estimatedTokens += this.estimateStreamTokens(value);
+      this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "update", sessionId);
+    };
+
+    try {
+      for await (const event of llmClient.createMessageStream({
+        messages: request.messages,
+        tools: request.tools,
+        thinkingEnabled: request.thinkingEnabled,
+        signal: request.signal ?? null,
+      })) {
+        if (debug?.enabled) {
+          responseChunks.push(event);
+        }
+        switch (event.type) {
+          case "text_delta":
+            content += event.text;
+            trackText(event.text);
+            break;
+          case "thinking_delta":
+            reasoningContent += event.thinking;
+            trackText(event.thinking);
+            break;
+          case "tool_call_start":
+            toolCallBuckets.set(event.id, {
+              id: event.id,
+              type: "function",
+              function: { name: event.name, arguments: "" },
+            });
+            trackText(event.name);
+            break;
+          case "tool_call_delta": {
+            const bucket = toolCallBuckets.get(event.id);
+            // 孤立 delta（查无此 id）直接丢弃：provider 层已守卫，此处聚合层双保险；
+            // 不新建无名桶（name 缺失会污染下游权限解析）（§4.2 规则 2）
+            if (bucket) {
+              bucket.function.arguments += event.argumentsJsonDelta;
+              trackText(event.argumentsJsonDelta);
+            }
+            break;
+          }
+          case "tool_call_end": {
+            const bucket = toolCallBuckets.get(event.id);
+            // 空 arguments 兜底 "{}"：Claude 无参工具语义等价空对象（§4.2 规则 4）
+            if (bucket && bucket.function.arguments === "") {
+              bucket.function.arguments = "{}";
+            }
+            break;
+          }
+          case "message_end":
+            usage = toModelUsage(event.usage);
+            // refusal 映射（§4.3）：Claude 的拒绝说明文本在 text 块中（即已聚合 content），
+            // 直接复用；空内容极端情况给确定性兜底文案，避免 failed 状态无原因
+            if (event.stopReason === "refusal") {
+              refusal = content.trim().length > 0 ? content : "模型拒绝回答（Claude stop_reason: refusal）";
+            }
+            break;
+          case "error":
+            // error 事件转回抛出（§4.1）：原样 rethrow，不包装、不改 name，
+            // 保留 name 与 constructor.name 供主循环 isAbortLikeError 判定 abort 语义；
+            // 记录 debug + logApiError 由下方 catch 统一完成（与流中直接抛出的异常同路径）
+            throw event.error;
+        }
+      }
+    } catch (error) {
+      this.logChatCompletionDebug(debug, {
+        timestamp: new Date().toISOString(),
+        location: debug?.location ?? "SessionManager.createLlmMessageStream",
+        requestId,
+        sessionId,
+        model: llmClient.model,
+        baseURL: debug?.baseURL,
+        durationMs: Date.now() - startedAtMs,
+        params: debug?.params,
+        request: logRequest,
+        responseChunks,
+        error: normalizeDebugError(error),
+      });
+      logApiError({
+        timestamp: new Date().toISOString(),
+        location: "SessionManager.createLlmMessageStream",
+        requestId,
+        sessionId,
+        model: llmClient.model,
+        error: {
+          name: error instanceof Error ? error.name : "UnknownError",
+          message: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        },
+        request: logRequest,
+      });
+      throw error;
+    } finally {
+      // finally 进度 end 照发（对齐 OpenAI 路径正常/异常/abort 均发 end 的行为）
+      this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "end", sessionId);
+    }
+
+    // 桶按 Map 插入序迭代 = 事件出现序，即对等 OpenAI 侧 index 排序后的语义；
+    // 返回前过一次 normalizeLlmToolCalls（对齐 OpenAI 侧 L754）：Anthropic id 必然存在，
+    // 实际不触发补 id 逻辑，仅为两通路返回体语义严格一致
+    const normalizedToolCalls = this.normalizeLlmToolCalls(Array.from(toolCallBuckets.values()));
+    const message: Record<string, unknown> = { content };
+    if (normalizedToolCalls) {
+      message.tool_calls = normalizedToolCalls;
+    }
+    if (reasoningContent.length > 0) {
+      message.reasoning_content = reasoningContent;
+    }
+    if (refusal != null) {
+      message.refusal = refusal;
+    }
+
+    const finalResponse = {
+      choices: [{ message }],
+      usage,
+    };
+    this.logChatCompletionDebug(debug, {
+      timestamp: new Date().toISOString(),
+      location: debug?.location ?? "SessionManager.createLlmMessageStream",
+      requestId,
+      sessionId,
+      model: llmClient.model,
+      baseURL: debug?.baseURL,
+      durationMs: Date.now() - startedAtMs,
+      params: debug?.params,
+      request: logRequest,
       responseChunks,
       response: finalResponse,
     });
