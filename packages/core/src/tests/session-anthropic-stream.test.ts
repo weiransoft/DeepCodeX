@@ -725,3 +725,35 @@ test("activateSession marks session failed when anthropic stream errors with pla
   assert.ok(failureNotice);
   assert.match(failureNotice.content ?? "", /Request failed: 网络中断/);
 });
+
+// ---------------------------------------------------------------------------
+// §7.3 主循环集成（用例 7：技能匹配通路，Task 3）
+// ---------------------------------------------------------------------------
+
+test("identifyMatchingSkillNames routes to anthropic createMessage with thinking disabled", async () => {
+  const { manager, recordedMessages } = setupAnthropicIntegration({
+    streams: [
+      [
+        { type: "text_delta", text: "好的" },
+        { type: "message_end", stopReason: "end_turn", usage: { inputTokens: 2, outputTokens: 1 } },
+      ],
+    ],
+  });
+
+  // bundled skills 存在 → 技能匹配被真实触发（非空 text 才会进入识别流程）
+  const sessionId = await manager.createSession({ text: "帮我优化这个工作流程" });
+  const session = manager.getSession(sessionId);
+
+  // 桩 createMessage 收到技能匹配请求（§6.2：非流式、合成 SessionMessage、thinkingEnabled 关闭）
+  const skillRequest = recordedMessages.find((request) => isSkillMatchingLlmRequest(request));
+  assert.ok(skillRequest, "expected skill matching request via anthropic createMessage");
+  assert.equal(skillRequest.thinkingEnabled, false);
+  assert.deepEqual(
+    skillRequest.messages.map((message) => message.role),
+    ["system", "user"]
+  );
+  assert.equal(skillRequest.messages[1]?.content, "帮我优化这个工作流程");
+
+  // 返回 {"skillNames":[]} 后主流程正常继续
+  assert.equal(session?.status, "completed");
+});

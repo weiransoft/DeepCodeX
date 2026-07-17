@@ -1039,7 +1039,12 @@ If none of the available skills match, respond with an empty array, i.e. \`{"ski
     const candidateSkillNames = new Set(simpleSkills.map((skill) => skill.name));
 
     const { client, model, baseURL, debugLogEnabled } = this.createOpenAIClient();
-    if (!client) {
+    // Claude 技能匹配接入（2026-07-18 设计 §6.2）：provider 判定取 llmClient.providerName
+    // 单一事实源（与主循环同口径，测试可经 createLLMClient 注入桩）。
+    // anthropicClient 为 null 时走既有 OpenAI 分支（其内部 !client → return [] 语义不变）
+    const llmClient = this.createLLMClient();
+    const anthropicClient = llmClient?.providerName === "anthropic" ? llmClient : null;
+    if (!anthropicClient && !client) {
       return [];
     }
 
@@ -1055,30 +1060,61 @@ ${agentInstructions}
     systemPrompt += "```\n" + JSON.stringify(simpleSkills, null, 2) + "\n```";
 
     try {
-      const response = await this.createChatCompletionStream(
-        client,
-        {
-          model,
-          temperature: 0.1,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userPrompt },
-          ],
-          response_format: { type: "json_object" },
-        },
-        options?.signal ? { signal: options.signal } : undefined,
-        options?.sessionId,
-        {
-          enabled: debugLogEnabled,
-          location: "SessionManager.identifyMatchingSkillNames",
-          baseURL,
-          params: { purpose: "skill-matching", temperature: 0.1 },
-        }
-      );
-      this.throwIfAborted(options?.signal);
+      let content = "";
+      if (anthropicClient) {
+        // Anthropic 通路：非流式 createMessage（结果被整体 JSON.parse，无增量消费，流式零价值）；
+        // 合成 SessionMessage[]（system + user 两条），字段填法参照 compactSession 的合成消息。
+        // response_format 放弃（Claude 无此概念，prompt 已明确要求 JSON 输出；解析侧既有
+        // 白名单过滤 + JSON.parse 容错构成完整兜底）；temperature 省略（Claude 忽略并告警，
+        // 避免误导性告警噪声）；thinkingEnabled 关闭（低延迟分类任务不承担 thinking 开销，
+        // 对齐 OpenAI 侧该调用本就不携带 thinking 参数的现状）。
+        const skillSessionId = options?.sessionId ?? "skill-matching";
+        const messageTime = new Date().toISOString();
+        const buildSkillMessage = (role: SessionMessage["role"], messageContent: string): SessionMessage => ({
+          id: crypto.randomUUID(),
+          sessionId: skillSessionId,
+          role,
+          content: messageContent,
+          contentParams: null,
+          messageParams: null,
+          compacted: false,
+          visible: false,
+          createTime: messageTime,
+          updateTime: messageTime,
+        });
+        const llmResponse = await anthropicClient.createMessage({
+          messages: [buildSkillMessage("system", systemPrompt), buildSkillMessage("user", userPrompt)],
+          thinkingEnabled: false,
+          signal: options?.signal ?? null,
+        });
+        this.throwIfAborted(options?.signal);
+        content = llmResponse.content;
+      } else if (client) {
+        const response = await this.createChatCompletionStream(
+          client,
+          {
+            model,
+            temperature: 0.1,
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: userPrompt },
+            ],
+            response_format: { type: "json_object" },
+          },
+          options?.signal ? { signal: options.signal } : undefined,
+          options?.sessionId,
+          {
+            enabled: debugLogEnabled,
+            location: "SessionManager.identifyMatchingSkillNames",
+            baseURL,
+            params: { purpose: "skill-matching", temperature: 0.1 },
+          }
+        );
+        this.throwIfAborted(options?.signal);
 
-      const rawContent = response.choices?.[0]?.message?.content;
-      const content = typeof rawContent === "string" ? rawContent : "";
+        const rawContent = response.choices?.[0]?.message?.content;
+        content = typeof rawContent === "string" ? rawContent : "";
+      }
       if (!content) {
         return [];
       }
