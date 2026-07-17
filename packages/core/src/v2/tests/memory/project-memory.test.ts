@@ -32,9 +32,8 @@ import {
   generateProjectId,
   generateIssueFingerprint,
   MAX_PROJECT_HISTORY,
-  MAX_KNOWN_ISSUES,
 } from "../../memory/project-memory";
-import type { ProjectMemory, KnownIssue, ProjectUnderstandingInput } from "../../memory/project-memory";
+import type { KnownIssue, ProjectUnderstandingInput } from "../../memory/project-memory";
 
 // ============================================================================
 // 测试 fixture
