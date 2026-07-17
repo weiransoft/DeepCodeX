@@ -964,14 +964,18 @@ test("IT-P3-11: ConceptEntry 无 confidence 适配（persistToGlobalContext 后 
     const model = await modeler.model(projectRoot);
     await modeler.persistToGlobalContext("default", model);
 
-    // 验证：ConceptEntry 不含 confidence 字段（P0-1 修复依据）
+    // 验证：ConceptEntry 含 confidence 字段（V2-P3 多角色审查 L-4 修复后保留推断置信度）
     const ctx = globalManager.load("default");
     const concepts = ctx.domainKnowledge.conceptLibrary;
     assert.ok(concepts.length > 0, "应含至少 1 个 ConceptEntry");
     const sample = concepts[0];
     assert.ok(
-      !("confidence" in sample),
-      `ConceptEntry 不应含 confidence 字段（P0-1 修复依据），实际字段：${Object.keys(sample).join(", ")}`
+      "confidence" in sample,
+      `ConceptEntry 应含 confidence 字段（L-4 修复后保留推断置信度），实际字段：${Object.keys(sample).join(", ")}`
+    );
+    assert.ok(
+      typeof sample.confidence === "number" && sample.confidence > 0,
+      `confidence 应为正数（@Entity 装饰器 confidence ≥ 0.85），实际：${sample.confidence}`
     );
 
     // 构造 V2-P3 集成组件
@@ -996,6 +1000,190 @@ test("IT-P3-11: ConceptEntry 无 confidence 适配（persistToGlobalContext 后 
     assert.ok(
       contents.includes("User") || contents.includes("Order"),
       `片段 content 应含 "User" 或 "Order"，实际：${contents}`
+    );
+  } finally {
+    cleanupTmpDir(projectRoot);
+    cleanupTmpDir(tmpGlobalDir);
+  }
+});
+
+// ============================================================
+// IT-P3-12: ConceptEntry.confidence 字段持久化与排序（V2-P3 多角色审查 L-4 修复端到端）
+// ============================================================
+
+test("IT-P3-12: ConceptEntry.confidence 字段持久化与排序（L-4 修复端到端，优先 confidence 降序回退 relatedConcepts.length）", async () => {
+  const projectRoot = createTmpProjectDir();
+  const tmpGlobalDir = createTmpProjectDir();
+  try {
+    const globalContextPath = path.join(tmpGlobalDir, "global-context.json");
+    const { generator, codeMapProvider, globalManager, taskManager } = createV2P3Fixture(
+      projectRoot,
+      globalContextPath
+    );
+
+    // 构造 DomainModel 含 3 个不同 confidence 的概念：
+    // - low-conf-concept: confidence 0.6, relatedConcepts 5 个（仅后缀匹配，低置信度但关联多）
+    // - mid-conf-concept: confidence 0.75, relatedConcepts 2 个（仅后缀匹配，中置信度）
+    // - high-conf-concept: confidence 0.9, relatedConcepts 1 个（@Entity+后缀双重匹配，高置信度）
+    // 期望排序：high-conf(0.9) > mid-conf(0.75) > low-conf(0.6)
+    // 注：若按 relatedConcepts.length 排序会是 low-conf(5) > mid-conf(2) > high-conf(1)，与 confidence 排序相反
+    const model: DomainModel = {
+      concepts: [
+        {
+          id: "low-conf-concept",
+          name: "LowConf",
+          type: "value_object",
+          source: "src/low.ts",
+          description: "低置信度概念",
+          properties: [],
+          confidence: 0.6,
+        },
+        {
+          id: "mid-conf-concept",
+          name: "MidConf",
+          type: "entity",
+          source: "src/mid.ts",
+          description: "中置信度概念",
+          properties: [],
+          confidence: 0.75,
+        },
+        {
+          id: "high-conf-concept",
+          name: "HighConf",
+          type: "entity",
+          source: "src/high.ts",
+          description: "高置信度概念",
+          properties: [],
+          confidence: 0.9,
+        },
+      ],
+      relations: [
+        // low-conf 关联 5 个（通过 relations 体现，persistToGlobalContext 会填充 relatedConcepts）
+        { source: "low-conf-concept", target: "rel-1", type: "references", confidence: 0.7 },
+        { source: "low-conf-concept", target: "rel-2", type: "references", confidence: 0.7 },
+        { source: "low-conf-concept", target: "rel-3", type: "references", confidence: 0.7 },
+        { source: "low-conf-concept", target: "rel-4", type: "references", confidence: 0.7 },
+        { source: "low-conf-concept", target: "rel-5", type: "references", confidence: 0.7 },
+        // mid-conf 关联 2 个
+        { source: "mid-conf-concept", target: "rel-1", type: "references", confidence: 0.8 },
+        { source: "mid-conf-concept", target: "rel-2", type: "references", confidence: 0.8 },
+        // high-conf 关联 1 个
+        { source: "high-conf-concept", target: "rel-1", type: "references", confidence: 0.9 },
+      ],
+      rules: [],
+      knowledgeGraph: { nodes: [], edges: [] },
+    };
+
+    const modeler = new DomainModeler(generator, globalManager);
+    await modeler.persistToGlobalContext("default", model);
+
+    // 验证 1：ConceptEntry 保留了 confidence 字段（L-4 修复核心断言）
+    const ctx = globalManager.load("default");
+    const library = ctx.domainKnowledge.conceptLibrary;
+    assert.equal(library.length, 3, "应持久化 3 个 concept");
+
+    const lowConf = library.find((c) => c.id === "low-conf-concept");
+    const midConf = library.find((c) => c.id === "mid-conf-concept");
+    const highConf = library.find((c) => c.id === "high-conf-concept");
+    assert.ok(lowConf && midConf && highConf, "三个概念均应持久化");
+    assert.equal(lowConf!.confidence, 0.6, "low-conf confidence 应为 0.6");
+    assert.equal(midConf!.confidence, 0.75, "mid-conf confidence 应为 0.75");
+    assert.equal(highConf!.confidence, 0.9, "high-conf confidence 应为 0.9");
+
+    // 验证 2：relatedConcepts 已被 persistToGlobalContext 填充
+    assert.equal(lowConf!.relatedConcepts.length, 5, "low-conf 应有 5 个 relatedConcepts");
+    assert.equal(midConf!.relatedConcepts.length, 2, "mid-conf 应有 2 个 relatedConcepts");
+    assert.equal(highConf!.relatedConcepts.length, 1, "high-conf 应有 1 个 relatedConcepts");
+
+    // 构造 V2-P3 集成组件（不注入 userGlobalMemory/experienceRecommender，仅测 domain 排序）
+    const { dualLayer } = createV2P3Components(projectRoot, globalManager, taskManager, codeMapProvider);
+
+    const taskId = "it-p3-12-task";
+    taskManager.create(taskId, createTestTaskDef({ description: "IT-P3-12 confidence 排序测试" }));
+    taskManager.updateState(taskId, "in_progress", 0.5, "test");
+
+    // 调用 buildOptimizedContext
+    const snippets = await dualLayer.buildOptimizedContext("default", taskId);
+
+    // 验证 3：返回值含 domain_concept 片段，且按 confidence 降序排列
+    const conceptSnippets = snippets.filter((s) => s.type === "domain_concept");
+    assert.ok(conceptSnippets.length >= 1, "应含至少 1 个 domain_concept 片段");
+
+    // 提取片段中的概念名顺序（content 格式：[业务概念] <name>: <desc>）
+    // 正则用 [^:\s]+ 匹配 ":" 前的非空白字符，避免 \S+ 把 ":" 也匹配进来
+    const conceptNames = conceptSnippets.map((s) => {
+      const match = s.content.match(/\[业务概念\]\s+([^:\s]+)/);
+      return match ? match[1] : "";
+    });
+
+    // 期望顺序：HighConf(0.9) → MidConf(0.75) → LowConf(0.6)
+    // 若按 relatedConcepts.length 排序会是相反：LowConf(5) → MidConf(2) → HighConf(1)
+    const highIdx = conceptNames.indexOf("HighConf");
+    const midIdx = conceptNames.indexOf("MidConf");
+    const lowIdx = conceptNames.indexOf("LowConf");
+
+    assert.ok(highIdx >= 0 && midIdx >= 0 && lowIdx >= 0, "三个概念均应出现在片段中");
+
+    // 核心断言：high 在 mid 之前，mid 在 low 之前（按 confidence 降序）
+    assert.ok(
+      highIdx < midIdx,
+      `HighConf(0.9) 应在 MidConf(0.75) 之前（按 confidence 降序），实际顺序：${conceptNames.join(" → ")}`
+    );
+    assert.ok(
+      midIdx < lowIdx,
+      `MidConf(0.75) 应在 LowConf(0.6) 之前（按 confidence 降序），实际顺序：${conceptNames.join(" → ")}`
+    );
+
+    // 验证 4：向后兼容 — 旧 ConceptEntry 无 confidence 时按 relatedConcepts.length 回退排序
+    globalManager.update("default", (ctx2) => {
+      // 添加 2 个无 confidence 的旧概念（模拟 V2-P3 之前的持久化数据）
+      ctx2.domainKnowledge.conceptLibrary.push(
+        {
+          id: "legacy-few-related",
+          name: "LegacyFewRelated",
+          description: "旧数据无 confidence，关联少",
+          relatedConcepts: ["a"],
+          // 无 confidence 字段
+        },
+        {
+          id: "legacy-many-related",
+          name: "LegacyManyRelated",
+          description: "旧数据无 confidence，关联多",
+          relatedConcepts: ["a", "b", "c", "d", "e"],
+          // 无 confidence 字段
+        }
+      );
+      return ctx2; // update 回调必须返回 ctx
+    });
+
+    const snippets2 = await dualLayer.buildOptimizedContext("default", taskId);
+    const conceptSnippets2 = snippets2.filter((s) => s.type === "domain_concept");
+    const conceptNames2 = conceptSnippets2.map((s) => {
+      const match = s.content.match(/\[业务概念\]\s+([^:\s]+)/);
+      return match ? match[1] : "";
+    });
+
+    // 期望：有 confidence 的概念在前（按 confidence 降序），无 confidence 的概念在后（按 relatedConcepts.length 降序）
+    // 即：HighConf → MidConf → LowConf → LegacyManyRelated(5) → LegacyFewRelated(1)
+    const legacyManyIdx = conceptNames2.indexOf("LegacyManyRelated");
+    const legacyFewIdx = conceptNames2.indexOf("LegacyFewRelated");
+    assert.ok(legacyManyIdx >= 0 && legacyFewIdx >= 0, "两个旧概念均应出现");
+
+    // 旧概念之间按 relatedConcepts.length 降序
+    assert.ok(
+      legacyManyIdx < legacyFewIdx,
+      `LegacyManyRelated(5 关联) 应在 LegacyFewRelated(1 关联) 之前（无 confidence 时回退 relatedConcepts.length 降序），实际顺序：${conceptNames2.join(" → ")}`
+    );
+
+    // 有 confidence 的概念应在无 confidence 的概念之前（confidence ?? 0 = 0 < 0.6）
+    const lastConfIdx = Math.max(
+      conceptNames2.indexOf("HighConf"),
+      conceptNames2.indexOf("MidConf"),
+      conceptNames2.indexOf("LowConf")
+    );
+    assert.ok(
+      lastConfIdx < legacyManyIdx,
+      `有 confidence 的概念应均在无 confidence 的概念之前，实际顺序：${conceptNames2.join(" → ")}`
     );
   } finally {
     cleanupTmpDir(projectRoot);

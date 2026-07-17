@@ -594,10 +594,19 @@ export class DualLayerContextManager {
     const snippets: ContextSnippet[] = [];
     const dk = globalContext.domainKnowledge;
 
-    // 概念片段：按 relatedConcepts 数量降序取 Top-N（P0-1 修复，不依赖 confidence 字段）
-    // 关联概念多的概念更可能是核心业务概念（聚合根/实体），优先注入
+    // 概念片段排序策略（V2-P3 多角色审查 L-4 修复）：
+    // - 优先按 confidence 降序（V2-P3 起 ConceptEntry 含可选 confidence 字段）
+    // - 无 confidence 时回退 relatedConcepts.length 降序（V2-P3 之前持久化的旧数据兜底）
+    // - 关联概念多的概念更可能是核心业务概念（聚合根/实体）
     const concepts = [...dk.conceptLibrary]
-      .sort((a, b) => b.relatedConcepts.length - a.relatedConcepts.length)
+      .sort((a, b) => {
+        // L-4 修复：优先按推断置信度排序（@Entity+后缀双重匹配 0.9 > 仅后缀 0.75）
+        const aConf = a.confidence ?? 0;
+        const bConf = b.confidence ?? 0;
+        if (aConf !== bConf) return bConf - aConf;
+        // 无 confidence 或 confidence 相同时，回退 relatedConcepts.length 降序（向后兼容）
+        return b.relatedConcepts.length - a.relatedConcepts.length;
+      })
       .slice(0, MAX_DOMAIN_CONCEPT_SNIPPETS);
     for (const c of concepts) {
       // 仅在概念有 description 时注入（避免空描述挤占 Token）

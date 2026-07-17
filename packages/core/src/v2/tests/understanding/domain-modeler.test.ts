@@ -903,3 +903,112 @@ test("DM-12: modelFromCodeMap 轻量无 IO 提取（不触发 CodeMap 扫描，�
     cleanupTmpDir(dir);
   }
 });
+
+// ----------------------------------------------------------------------------
+// DM-13: persistToGlobalContext 保留 confidence 字段（V2-P3 多角色审查 L-4 修复）
+// ----------------------------------------------------------------------------
+
+test("DM-13: persistToGlobalContext 保留 confidence 字段（L-4 修复，避免推断置信度数据断层）", async () => {
+  const dir = createTmpProjectDir();
+  try {
+    const generator = createGenerator(dir);
+    const globalManager = createGlobalManager(dir);
+    const modeler = new DomainModeler(generator, globalManager);
+
+    // 构造含不同 confidence 的 DomainModel
+    // - UserEntity: confidence 0.9（@Entity+后缀双重匹配）
+    // - OrderDTO: confidence 0.75（仅后缀匹配）
+    // - PaymentService: confidence 0.6（modelFromCodeMap 轻量模式）
+    const model: DomainModel = {
+      concepts: [
+        {
+          id: "user-entity",
+          name: "UserEntity",
+          type: "entity",
+          source: "src/User.ts",
+          description: "用户实体",
+          properties: ["id", "name"],
+          confidence: 0.9,
+        },
+        {
+          id: "order-dto",
+          name: "OrderDTO",
+          type: "value_object",
+          source: "src/Order.ts",
+          description: "订单 DTO",
+          properties: ["id", "amount"],
+          confidence: 0.75,
+        },
+        {
+          id: "payment-service",
+          name: "PaymentService",
+          type: "service",
+          source: "src/Payment.ts",
+          description: "支付服务",
+          properties: [],
+          confidence: 0.6,
+        },
+      ],
+      relations: [],
+      rules: [],
+      knowledgeGraph: { nodes: [], edges: [] },
+    };
+
+    // 持久化到 GlobalContext
+    await modeler.persistToGlobalContext("default", model);
+
+    // 验证 ConceptEntry 保留了 confidence 字段（L-4 修复核心断言）
+    const ctx = globalManager.load("default");
+    const library = ctx.domainKnowledge.conceptLibrary;
+    assert.equal(library.length, 3, "应持久化 3 个 concept");
+
+    // 验证每个 ConceptEntry 的 confidence 与 DomainConcept 一致
+    const userEntity = library.find((c) => c.id === "user-entity");
+    assert.ok(userEntity, "应含 user-entity 概念");
+    assert.equal(
+      userEntity!.confidence,
+      0.9,
+      `user-entity confidence 应为 0.9（@Entity+后缀双重匹配），实际：${userEntity!.confidence}`
+    );
+
+    const orderDto = library.find((c) => c.id === "order-dto");
+    assert.ok(orderDto, "应含 order-dto 概念");
+    assert.equal(
+      orderDto!.confidence,
+      0.75,
+      `order-dto confidence 应为 0.75（仅后缀匹配），实际：${orderDto!.confidence}`
+    );
+
+    const paymentService = library.find((c) => c.id === "payment-service");
+    assert.ok(paymentService, "应含 payment-service 概念");
+    assert.equal(
+      paymentService!.confidence,
+      0.6,
+      `payment-service confidence 应为 0.6（modelFromCodeMap 轻量模式），实际：${paymentService!.confidence}`
+    );
+
+    // 验证向后兼容：手动构造无 confidence 的 ConceptEntry（模拟旧 global-context.json）
+    // 不应崩溃，confidence 字段为 undefined
+    globalManager.update("default", (ctx2) => {
+      ctx2.domainKnowledge.conceptLibrary.push({
+        id: "legacy-concept",
+        name: "LegacyConcept",
+        description: "旧数据无 confidence 字段",
+        relatedConcepts: [],
+        // 不设置 confidence，模拟 V2-P3 之前的持久化数据
+      });
+      return ctx2; // update 回调必须返回 ctx（GlobalContextManager.save 契约）
+    });
+
+    const ctx2 = globalManager.load("default");
+    const legacy = ctx2.domainKnowledge.conceptLibrary.find((c) => c.id === "legacy-concept");
+    assert.ok(legacy, "应含 legacy-concept 概念");
+    assert.equal(
+      legacy!.confidence,
+      undefined,
+      `旧 ConceptEntry 无 confidence 字段时应为 undefined（向后兼容），实际：${legacy!.confidence}`
+    );
+  } finally {
+    cleanupTmpDir(dir);
+  }
+});

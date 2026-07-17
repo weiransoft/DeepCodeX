@@ -498,6 +498,7 @@ export class DomainModeler {
       const dk = ctx.domainKnowledge;
 
       // 1. concepts → conceptLibrary：按 id 去重，已存在的不覆盖
+      // V2-P3 多角色审查 L-4 修复：保留 DomainConcept.confidence 字段，避免数据断层
       const existingConceptIds = new Set(dk.conceptLibrary.map((c) => c.id));
       const newConcepts: ConceptEntry[] = model.concepts
         .filter((c) => !existingConceptIds.has(c.id))
@@ -506,6 +507,7 @@ export class DomainModeler {
           name: c.name,
           description: c.description,
           relatedConcepts: this.findRelatedConcepts(c.id, model.relations),
+          confidence: c.confidence, // L-4 修复：保留推断置信度，供 collectDomainKnowledgeSnippets 排序使用
         }));
       dk.conceptLibrary.push(...newConcepts);
 

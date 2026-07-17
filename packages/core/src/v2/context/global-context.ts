@@ -166,6 +166,17 @@ export interface ConceptEntry {
   name: string;
   description: string;
   relatedConcepts: string[];
+  /**
+   * 推断置信度（0-1，V2-P3 多角色审查 L-4 修复新增可选字段）
+   *
+   * V2-P3 之前由 DomainModeler 推断但未持久化到 ConceptEntry，造成"推断侧有置信度、
+   * 消费侧无置信度"的信息断层（多角色共识评价 L-4 风险）。
+   *
+   * V2-P3 起 persistToGlobalContext 写入此字段，collectDomainKnowledgeSnippets
+   * 优先按 confidence 降序排序；旧 global-context.json 文件无此字段时按
+   * relatedConcepts.length 降序兜底（向后兼容）。
+   */
+  confidence?: number;
 }
 
 /** 规则库条目 */
