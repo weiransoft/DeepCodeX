@@ -542,6 +542,19 @@ export class CodeMapGenerator {
   }
 
   /**
+   * 获取生成器绑定的项目根绝对路径
+   *
+   * F-BIZ-01 ProjectUnderstandingService 需要此 getter 做一致性断言：
+   * 调用 understand(projectRoot) 时 projectRoot 必须与生成器内部绑定的 projectRoot 一致，
+   * 避免双源真相（生成器已绑定 projectRoot，understand 再传 projectRoot 时不一致即抛错）。
+   *
+   * @returns 项目根绝对路径（path.resolve 后）
+   */
+  getProjectRoot(): string {
+    return this.projectRoot;
+  }
+
+  /**
    * 生成完整代码地图
    *
    * 实现步骤：
