@@ -33,6 +33,11 @@ import {
 } from "./regex-analyzer";
 import { GitignoreFilter } from "../memory/gitignore-filter";
 
+// Re-export: FileInfo / FunctionInfo / SupportedLanguage 作为 codemap 模块门面的一部分，
+// 供 v2/context、v2/understanding、v2/tests 等模块统一从 generator 导入，
+// 避免调用方直接依赖 regex-analyzer 内部实现细节（TS 错误 TS2459 修复）。
+export type { FileInfo, FunctionInfo, SupportedLanguage };
+
 // ============================================================================
 // 类型定义（与设计文档 §6.1 对齐）
 // ============================================================================

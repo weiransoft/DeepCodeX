@@ -35,6 +35,7 @@ import { RuleBasedSummarizer } from "../../memory/rule-based-summarizer";
 import { ProjectUnderstandingService } from "../../understanding/project-understanding";
 import { ProjectMemoryManager } from "../../memory/project-memory";
 import { DefaultSessionContextHook } from "../../integration/session-hook";
+import type { SessionMessage } from "../../integration/v1-adapters";
 
 // ============================================================================
 // 辅助工厂
@@ -56,6 +57,31 @@ function cleanupTmpDir(dir: string): void {
   } catch {
     // 忽略清理失败
   }
+}
+
+/**
+ * 创建测试用 SessionMessage（完整字段，符合 SessionMessage 类型定义）
+ *
+ * preBuildContext 仅使用 sessionId 字段，其他字段填充默认值以满足类型约束。
+ *
+ * @param sessionId 会话 ID
+ * @param content 消息内容（默认 "test"）
+ * @returns 完整 SessionMessage 对象
+ */
+function createSessionMessage(sessionId: string, content = "test"): SessionMessage {
+  const now = new Date().toISOString();
+  return {
+    id: `msg-${sessionId}-${Math.random().toString(36).slice(2, 8)}`,
+    sessionId,
+    role: "user",
+    content,
+    contentParams: null,
+    messageParams: null,
+    compacted: false,
+    visible: true,
+    createTime: now,
+    updateTime: now,
+  };
 }
 
 /**
@@ -184,7 +210,7 @@ test("IT-01: 端到端注入（CodeMap 生成 → buildOptimizedContext → setS
     const sessionId = "session-it-01";
 
     // 构造 SessionMessage 列表（含 sessionId）
-    const messages = [{ role: "user" as const, content: "test", sessionId, timestamp: new Date().toISOString() }];
+    const messages = [createSessionMessage(sessionId)];
     hook.setSnippets(sessionId, snippets);
 
     // ---- preBuildContext 同步读缓存 ----

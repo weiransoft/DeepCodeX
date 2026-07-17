@@ -218,8 +218,10 @@ export class UserGlobalMemoryManager {
           // 不抛异常，避免损坏数据阻塞调用方
         }
       } else if (DIMENSION_KEYS.includes(entry.key as (typeof DIMENSION_KEYS)[number])) {
-        // 7 个字符串维度直接赋值
-        (memory as Record<string, unknown>)[entry.key] = entry.value;
+        // 6 个字符串维度直接赋值（facts 已单独处理）
+        // 类型安全：key 收窄为 DIMENSION_KEYS 的字面量联合，均为 string 字段
+        const key = entry.key as (typeof DIMENSION_KEYS)[number];
+        memory[key] = entry.value;
       }
     }
 

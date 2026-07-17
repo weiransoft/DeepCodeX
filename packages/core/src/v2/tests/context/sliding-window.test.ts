@@ -94,8 +94,9 @@ function createCodeMap(files: FileInfo[]): CodeMap {
     files,
     callGraph: [],
     dependencyGraph: files.flatMap((f) =>
-      f.dependencies.map((dep) => ({ source: f.path, target: dep, resolved: true }))
+      f.dependencies.map((dep) => ({ source: f.path, target: dep, type: "import" as const, resolved: true }))
     ),
+    cycles: [],
     generatedAt: new Date().toISOString(),
     stats: {
       totalFiles: files.length,
