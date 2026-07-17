@@ -13,6 +13,7 @@
 import OpenAI from "openai";
 import type { ResolvedDeepcodingSettings } from "../settings";
 import { OpenAIMessageConverter } from "../common/openai-message-converter";
+import { buildThinkingRequestOptions } from "../common/openai-thinking";
 import type {
   LLMClient,
   LLMProvider,
@@ -68,22 +69,25 @@ export class OpenAILLMClient implements LLMClient {
     }
 
     const messages = this.converter.buildMessages(request.messages, request.thinkingEnabled, this.model);
-    const completion = await client.chat.completions.create(
-      {
-        model: this.model,
-        messages,
-        ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
-        ...(request.tools && request.tools.length > 0
-          ? {
-              tools: request.tools.map((t) => ({
-                type: "function" as const,
-                function: { name: t.name, description: t.description, parameters: t.parameters },
-              })),
-            }
-          : {}),
-      },
-      { signal: request.signal ?? undefined }
-    );
+    // B1：DeepSeek thinking 请求参数补齐——compact/edit-handler 既有非流式调用均携带
+    // thinking 开关与 reasoning_effort（buildThinkingRequestOptions），接线 provider 层后
+    // 必须保持相同请求语义，否则 thinking 模式在后台总结场景静默丢失。
+    // thinking/extra_body 为 DeepSeek 非标准扩展字段，SDK 类型未覆盖，经显式类型拓宽注入。
+    const params = {
+      model: this.model,
+      messages,
+      ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
+      ...(request.tools && request.tools.length > 0
+        ? {
+            tools: request.tools.map((t) => ({
+              type: "function" as const,
+              function: { name: t.name, description: t.description, parameters: t.parameters },
+            })),
+          }
+        : {}),
+      ...buildThinkingRequestOptions(request.thinkingEnabled, this.baseURL, this.settings.reasoningEffort),
+    } as OpenAI.ChatCompletionCreateParamsNonStreaming;
+    const completion = await client.chat.completions.create(params, { signal: request.signal ?? undefined });
 
     const choice = completion.choices[0];
     const msg = choice?.message;

@@ -23,6 +23,7 @@ import {
 import {
   ToolExecutor,
   type CreateOpenAIClient,
+  type CreateLLMClient,
   type ProcessTimeoutControl,
   type ProcessTimeoutInfo,
   type ToolCallExecution,
@@ -32,7 +33,7 @@ import { McpManager } from "./mcp/mcp-manager";
 import type { McpServerConfig, PermissionScope, PermissionSettings } from "./settings";
 import { resolveCurrentSettings } from "./settings";
 import { ProviderFactory } from "./providers/provider-factory";
-import type { LLMClient } from "./providers/llm-provider";
+import type { LLMClient, LLMResponse, LLMUsage } from "./providers/llm-provider";
 import { logApiError } from "./common/error-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./common/debug-logger";
 import { killProcessTree } from "./common/process-tree";
@@ -192,6 +193,30 @@ function getTotalTokens(usage: ModelUsage | null | undefined): number {
   return typeof totalTokens === "number" ? totalTokens : 0;
 }
 
+/**
+ * 统一 LLMUsage → 会话持久化 ModelUsage 转换（B1：compactSession 接线 provider 层）
+ *
+ * 字段映射：
+ * - prompt_tokens ← inputTokens；completion_tokens ← outputTokens；
+ * - total_tokens = input + output（与 DeepSeek 服务端 total 口径一致）；
+ * - cacheReadInputTokens → prompt_cache_hit_tokens（均为「命中缓存的输入 token」）；
+ * - cacheCreationInputTokens → prompt_cache_miss_tokens（近似映射：
+ *   均为「未直接命中、需额外写入计量的输入 token」，供用量展示参考）。
+ * DeepSeek 自有 prompt_cache_hit/miss_tokens 不经此函数（主对话流式通路保持原样透传）。
+ */
+function toModelUsage(usage: LLMUsage | null): ModelUsage | null {
+  if (!usage) {
+    return null;
+  }
+  return {
+    prompt_tokens: usage.inputTokens,
+    completion_tokens: usage.outputTokens,
+    total_tokens: usage.inputTokens + usage.outputTokens,
+    ...(usage.cacheReadInputTokens != null ? { prompt_cache_hit_tokens: usage.cacheReadInputTokens } : {}),
+    ...(usage.cacheCreationInputTokens != null ? { prompt_cache_miss_tokens: usage.cacheCreationInputTokens } : {}),
+  };
+}
+
 export type SessionStatus =
   | "failed"
   | "pending"
@@ -309,6 +334,13 @@ export type SkillInfo = {
 type SessionManagerOptions = {
   projectRoot: string;
   createOpenAIClient: CreateOpenAIClient;
+  /**
+   * B1：统一 LLM 客户端工厂（可选注入，测试缝合点）。
+   *
+   * 未注入时走默认实现：resolveCurrentSettings(projectRoot) + ProviderFactory 路由；
+   * 返回 null 表示无可用凭据，对应非流式场景的静默降级语义。
+   */
+  createLLMClient?: CreateLLMClient;
   getResolvedSettings: () => {
     model: string;
     webSearchTool?: string;
@@ -336,6 +368,7 @@ export type LlmStreamProgress = {
 export class SessionManager {
   private readonly projectRoot: string;
   private readonly createOpenAIClient: CreateOpenAIClient;
+  private readonly createLLMClientOverride?: CreateLLMClient;
   private readonly getResolvedSettings: () => {
     model: string;
     webSearchTool?: string;
@@ -361,13 +394,16 @@ export class SessionManager {
   constructor(options: SessionManagerOptions) {
     this.projectRoot = options.projectRoot;
     this.createOpenAIClient = options.createOpenAIClient;
+    this.createLLMClientOverride = options.createLLMClient;
     this.getResolvedSettings = options.getResolvedSettings;
     this.onAssistantMessage = options.onAssistantMessage;
     this.onSessionEntryUpdated = options.onSessionEntryUpdated;
     this.onLlmStreamProgress = options.onLlmStreamProgress;
     this.onMcpStatusChanged = options.onMcpStatusChanged;
     this.onProcessStdout = options.onProcessStdout;
-    this.toolExecutor = new ToolExecutor(this.projectRoot, this.createOpenAIClient, this.mcpManager);
+    this.toolExecutor = new ToolExecutor(this.projectRoot, this.createOpenAIClient, this.mcpManager, () =>
+      this.createLLMClient()
+    );
     this.mcpManager.prepare(this.getResolvedSettings().mcpServers);
     this.messageConverter = new OpenAIMessageConverter({
       renderInitPrompt: () => this.renderInitCommandPrompt(),
@@ -375,17 +411,28 @@ export class SessionManager {
   }
 
   /**
-   * 创建统一 LLM 客户端（provider 路由入口）
+   * 创建统一 LLM 客户端（provider 路由入口，B1）
    *
    * provider=anthropic 时返回 Claude 客户端；openai 时返回 OpenAI 包装客户端。
    * 主对话流式逻辑仍走既有 createChatCompletionStream（OpenAI SDK 直操作），
-   * 本方法面向非流式场景（后台总结、edit-handler）与新消费方。
+   * 本方法面向非流式场景（compactSession 后台总结、edit-handler LLM 辅助）。
+   *
+   * 凭据缺失时返回 null（对齐旧 createOpenAIClient client:null 的静默降级语义，
+   * 调用方直接跳过 LLM 增强逻辑而非抛错）；其余配置错误（如 anthropic 缺
+   * API_KEY 之外的场景）由 ProviderFactory fail-fast 抛出。
    *
    * settings 来源：resolveCurrentSettings(this.projectRoot)，与类内既有
    * 用户级+项目级 settings 合并解析链路保持一致（含 provider 字段推断）。
+   * 测试可经 SessionManagerOptions.createLLMClient 注入桩实现（函数注入，非 mock 框架）。
    */
-  private createLLMClient(): LLMClient {
+  private createLLMClient(): LLMClient | null {
+    if (this.createLLMClientOverride) {
+      return this.createLLMClientOverride();
+    }
     const settings = resolveCurrentSettings(this.projectRoot);
+    if (!settings.apiKey) {
+      return null;
+    }
     return ProviderFactory.create(settings);
   }
 
@@ -1549,11 +1596,15 @@ ${agentInstructions}
 
   async compactSession(sessionId: string, signal?: AbortSignal): Promise<void> {
     this.throwIfAborted(signal);
-    const { client, model, baseURL, temperature, thinkingEnabled, reasoningEffort, debugLogEnabled } =
-      this.createOpenAIClient();
-    if (!client) {
+    // B1：非流式调用改经 provider 抽象层（createLLMClient 按 settings.provider 路由
+    // OpenAI/Anthropic），不再直连 OpenAI SDK；无凭据时保持静默返回（旧 client:null 语义）
+    const llmClient = this.createLLMClient();
+    if (!llmClient) {
       return;
     }
+    // 请求级参数（thinking 开关/采样温度）继续取自统一 settings 解析链，
+    // 与主对话及旧 compact 通路同源，保证行为语义不变
+    const { thinkingEnabled, temperature } = resolveCurrentSettings(this.projectRoot);
     const sessionMessages = this.listSessionMessages(sessionId).filter((message) => !message.compacted);
     if (sessionMessages.length === 0) {
       return;
@@ -1576,36 +1627,59 @@ ${agentInstructions}
       return;
     }
 
+    // 提示词保持原有构造逻辑（getCompactPrompt），仅换成合成 SessionMessage 形态
+    // 以适配 provider 层的统一转换入口（OpenAI/Anthropic converter 均按 user 文本处理）
     const compactPrompt = getCompactPrompt(sessionMessages.slice(startIndex, endIndex));
-    const thinkingOptions = buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort);
-    const response = await this.createChatCompletionStream(
-      client,
-      {
-        model,
-        ...(temperature !== undefined ? { temperature } : {}),
-        messages: [{ role: "user", content: compactPrompt }],
-        ...thinkingOptions,
-      },
-      signal ? { signal } : undefined,
+    const promptBuildTime = new Date().toISOString();
+    const promptMessage: SessionMessage = {
+      id: crypto.randomUUID(),
       sessionId,
-      {
-        enabled: debugLogEnabled,
+      role: "user",
+      content: compactPrompt,
+      contentParams: null,
+      messageParams: null,
+      compacted: false,
+      visible: false,
+      createTime: promptBuildTime,
+      updateTime: promptBuildTime,
+    };
+
+    let response: LLMResponse;
+    try {
+      response = await llmClient.createMessage({
+        messages: [promptMessage],
+        thinkingEnabled,
+        ...(temperature !== undefined ? { temperature } : {}),
+        signal: signal ?? null,
+      });
+    } catch (error) {
+      // 保持错误可观测性（对齐旧 createChatCompletionStream 的 logApiError 行为），随后原样抛出
+      logApiError({
+        timestamp: new Date().toISOString(),
         location: "SessionManager.compactSession",
-        baseURL,
-        params: { temperature, thinkingEnabled, reasoningEffort },
-      }
-    );
+        requestId: crypto.randomUUID(),
+        sessionId,
+        model: llmClient.model,
+        baseURL: llmClient.baseURL,
+        error: {
+          name: error instanceof Error ? error.name : "UnknownError",
+          message: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        },
+        request: { provider: llmClient.providerName, messages: [{ role: "user", content: compactPrompt }] },
+      });
+      throw error;
+    }
     this.throwIfAborted(signal);
-    const rawLlmResponse = response.choices?.[0]?.message?.content;
-    const llmResponse = typeof rawLlmResponse === "string" ? rawLlmResponse : "";
+    const llmResponse = response.content;
     const compactedSummary = llmResponse.replace(/<analysis>[\s\S]*?<\/analysis>/gi, "").trim();
 
     const now = new Date().toISOString();
-    const responseUsage = response.usage ?? null;
+    const responseUsage = toModelUsage(response.usage);
     this.updateSessionEntry(sessionId, (entry) => ({
       ...entry,
       usage: accumulateUsage(entry.usage, responseUsage),
-      usagePerModel: accumulateUsagePerModel(entry.usagePerModel, model, responseUsage),
+      usagePerModel: accumulateUsagePerModel(entry.usagePerModel, llmClient.model, responseUsage),
       activeTokens: getTotalTokens(responseUsage),
       updateTime: now,
     }));

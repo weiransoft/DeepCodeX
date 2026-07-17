@@ -1,5 +1,6 @@
 import type OpenAI from "openai";
 import type { ReasoningEffort } from "../settings";
+import type { LLMClient } from "../providers/llm-provider";
 
 export type CreateOpenAIClient = () => {
   client: OpenAI | null;
@@ -16,6 +17,14 @@ export type CreateOpenAIClient = () => {
   machineId?: string;
 };
 
+/**
+ * 统一 LLM 客户端工厂（B1：provider 路由入口）
+ *
+ * 返回 null 表示无可用凭据（对齐 CreateOpenAIClient 中 client:null 的静默降级语义），
+ * 调用方按「LLM 辅助能力不可用」处理（跳过增强逻辑，不报错）。
+ */
+export type CreateLLMClient = () => LLMClient | null;
+
 export type ToolCall = {
   id: string;
   type: "function";
@@ -30,6 +39,8 @@ export type ToolExecutionContext = {
   projectRoot: string;
   toolCall: ToolCall;
   createOpenAIClient?: CreateOpenAIClient;
+  /** B1：统一 LLM 客户端工厂（provider 路由），edit-handler 等 LLM 辅助调用经此发起 */
+  createLLMClient?: CreateLLMClient;
   onProcessStart?: (processId: string | number, command: string) => void;
   onProcessExit?: (processId: string | number) => void;
   onProcessStdout?: (processId: string | number, chunk: string) => void;

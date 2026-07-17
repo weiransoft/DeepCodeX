@@ -7,6 +7,7 @@ import * as path from "path";
 import { GitFileHistory } from "../common/file-history";
 import { clearSessionState } from "../common/state";
 import { getProjectCode, SessionManager, type SessionMessage } from "../session";
+import type { LLMClient, LLMRequest, LLMResponse } from "../providers/llm-provider";
 
 const originalFetch = globalThis.fetch;
 const originalConsoleWarn = console.warn;
@@ -3136,16 +3137,13 @@ test("SessionManager resets active tokens to latest post-compaction response usa
   const home = createTempDir("deepcode-compact-usage-home-");
   setHomeDir(home);
 
+  // B1：主对话流式通路仍消费 OpenAI 队列（createSession + compact 后 reply 各一次）；
+  // compact 非流式调用改经 createLLMClient 桩消费独立响应队列
   const responses = [
     createChatResponse("large", {
       prompt_tokens: 139_990,
       completion_tokens: 10,
       total_tokens: 140_000,
-    }),
-    createChatResponse("summary", {
-      prompt_tokens: 100,
-      completion_tokens: 23,
-      total_tokens: 123,
     }),
     createChatResponse("after compact", {
       prompt_tokens: 5,
@@ -3153,12 +3151,22 @@ test("SessionManager resets active tokens to latest post-compaction response usa
       total_tokens: 7,
     }),
   ];
-  const manager = createMockedClientSessionManager(workspace, responses);
+  const compactRequests: LLMRequest[] = [];
+  const compactLLMClient = createStubLLMClient(
+    [createLLMTextResponse("summary", { inputTokens: 100, outputTokens: 23 })],
+    compactRequests
+  );
+  const manager = createMockedClientSessionManager(workspace, responses, () => compactLLMClient);
 
   const sessionId = await manager.createSession({ text: "" });
   assert.equal(manager.getSession(sessionId)?.activeTokens, 140_000);
 
   await manager.replySession(sessionId, { text: "" });
+
+  // compact 调用经 provider 抽象层发起：恰好一次，请求为单条 user 消息
+  assert.equal(compactRequests.length, 1);
+  assert.equal(compactRequests[0]?.messages.length, 1);
+  assert.equal(compactRequests[0]?.messages[0]?.role, "user");
 
   const session = manager.getSession(sessionId);
   const usage = session?.usage as Record<string, any>;
@@ -3171,6 +3179,93 @@ test("SessionManager resets active tokens to latest post-compaction response usa
   assert.equal(usagePerModel.completion_tokens, 35);
   assert.equal(usagePerModel.total_tokens, 140_130);
   assert.equal(usagePerModel.total_reqs, 3);
+});
+
+test("SessionManager compactSession writes summary message and marks earlier messages compacted (B1)", async () => {
+  const workspace = createTempDir("deepcode-compact-summary-workspace-");
+  const home = createTempDir("deepcode-compact-summary-home-");
+  setHomeDir(home);
+
+  const responses = [
+    createChatResponse("large reply", {
+      prompt_tokens: 139_990,
+      completion_tokens: 10,
+      total_tokens: 140_000,
+    }),
+    createChatResponse("after compact", {
+      prompt_tokens: 5,
+      completion_tokens: 2,
+      total_tokens: 7,
+    }),
+  ];
+  const compactRequests: LLMRequest[] = [];
+  const compactLLMClient = createStubLLMClient(
+    [createLLMTextResponse("对话要点总结", { inputTokens: 100, outputTokens: 23 })],
+    compactRequests
+  );
+  const manager = createMockedClientSessionManager(workspace, responses, () => compactLLMClient);
+
+  const sessionId = await manager.createSession({ text: "" });
+  await manager.replySession(sessionId, { text: "" });
+
+  // 请求语义：thinkingEnabled 取自统一 settings 解析链（空 settings 下默认模型
+  // deepseek-v4-pro → thinking 默认开启）；提示词含被压缩会话内容（原提示词构造逻辑不变）
+  assert.equal(compactRequests.length, 1);
+  assert.equal(compactRequests[0]?.thinkingEnabled, true);
+  const compactPromptContent = compactRequests[0]?.messages[0]?.content;
+  assert.equal(typeof compactPromptContent, "string");
+  assert.ok(compactPromptContent.includes("large reply"), "compact 提示词应包含会话内容");
+
+  // 持久化语义：生成 isSummary 系统消息；其之前的消息全部标记 compacted
+  const messages = manager.listSessionMessages(sessionId);
+  const summaryIndex = messages.findIndex((message) => message.meta?.isSummary === true);
+  assert.ok(summaryIndex > 0, "应插入 summary 消息");
+  assert.ok(messages[summaryIndex]?.content?.includes("对话要点总结"), "summary 消息携带 LLM 总结文本");
+  for (let i = 0; i < summaryIndex; i += 1) {
+    const message = messages[i];
+    if (message.role === "system" && !message.meta?.isSummary) {
+      continue; // startIndex 之前的 system 消息不参与压缩
+    }
+    assert.equal(message.compacted, true, `消息 ${message.id} 应被标记 compacted`);
+  }
+});
+
+test("SessionManager compactSession silently skips when no LLM client credential is available (B1)", async () => {
+  const workspace = createTempDir("deepcode-compact-nocred-workspace-");
+  const home = createTempDir("deepcode-compact-nocred-home-");
+  setHomeDir(home);
+
+  const responses = [
+    createChatResponse("large reply", {
+      prompt_tokens: 139_990,
+      completion_tokens: 10,
+      total_tokens: 140_000,
+    }),
+    createChatResponse("without compact", {
+      prompt_tokens: 5,
+      completion_tokens: 2,
+      total_tokens: 7,
+    }),
+  ];
+  // createLLMClient 返回 null（无凭据）：compact 静默跳过，主对话继续
+  const manager = createMockedClientSessionManager(workspace, responses, () => null);
+
+  const sessionId = await manager.createSession({ text: "" });
+  await manager.replySession(sessionId, { text: "" });
+
+  const messages = manager.listSessionMessages(sessionId);
+  assert.equal(
+    messages.some((message) => message.meta?.isSummary === true),
+    false,
+    "不应生成 summary 消息"
+  );
+  assert.equal(
+    messages.some((message) => message.compacted),
+    false,
+    "不应有消息被标记 compacted"
+  );
+  // 主对话未受 compact 跳过影响：assistant 正常回复
+  assert.ok(messages.some((message) => message.role === "assistant" && message.content === "without compact"));
 });
 
 test("SessionManager streams chat completions and counts reasoning progress", async () => {
@@ -3672,7 +3767,11 @@ function createNotifyingSessionManager(
   });
 }
 
-function createMockedClientSessionManager(projectRoot: string, responses: unknown[]): SessionManager {
+function createMockedClientSessionManager(
+  projectRoot: string,
+  responses: unknown[],
+  createLLMClient?: () => LLMClient | null
+): SessionManager {
   const client = {
     chat: {
       completions: {
@@ -3696,10 +3795,45 @@ function createMockedClientSessionManager(projectRoot: string, responses: unknow
       baseURL: "https://api.deepseek.com",
       thinkingEnabled: false,
     }),
+    // B1：compact 非流式调用走 createLLMClient（provider 路由缝合点），测试经此注入桩实现
+    ...(createLLMClient ? { createLLMClient } : {}),
     getResolvedSettings: () => ({ model: "test-model" }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
   });
+}
+
+/**
+ * 构造 B1 测试用 LLMClient 桩（函数注入，非 mock 框架）：
+ * createMessage 依次出队返回预置 LLMResponse，并记录全部入参供断言。
+ */
+function createStubLLMClient(responses: LLMResponse[], recorded: LLMRequest[], model = "test-model"): LLMClient {
+  return {
+    providerName: "openai",
+    model,
+    baseURL: "https://api.deepseek.com",
+    supportsThinking: true,
+    supportsPromptCaching: false,
+    createMessage: async (request: LLMRequest): Promise<LLMResponse> => {
+      recorded.push(request);
+      const response = responses.shift();
+      assert.ok(response, "expected a queued LLM response");
+      return response;
+    },
+    // 非流式测试场景不消费流式接口，返回空事件流即可（接口完整性要求实现）
+    createMessageStream: async function* () {},
+  };
+}
+
+/** 构造文本型 LLMResponse（B1 测试数据） */
+function createLLMTextResponse(content: string, usage?: { inputTokens: number; outputTokens: number }): LLMResponse {
+  return {
+    content,
+    thinking: "",
+    toolCalls: [],
+    stopReason: "stop",
+    usage: usage ?? null,
+  };
 }
 
 function createPermissionSessionManager(

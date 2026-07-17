@@ -8,6 +8,7 @@ import { handleWriteTool } from "./write-handler";
 import type { McpManager } from "../mcp/mcp-manager";
 import type {
   CreateOpenAIClient,
+  CreateLLMClient,
   ToolCall,
   ToolExecutionHooks,
   ToolExecutionResult,
@@ -17,6 +18,7 @@ import type {
 
 export type {
   CreateOpenAIClient,
+  CreateLLMClient,
   ToolCall,
   ToolExecutionContext,
   ToolExecutionHooks,
@@ -39,13 +41,28 @@ const BUILT_IN_TOOL_NAME_ALIASES = new Map<string, string>([
 export class ToolExecutor {
   private readonly projectRoot: string;
   private readonly createOpenAIClient?: CreateOpenAIClient;
+  private readonly createLLMClient?: CreateLLMClient;
   private readonly mcpManager?: McpManager;
   private readonly toolHandlers = new Map<string, ToolHandler>();
 
-  constructor(projectRoot: string, createOpenAIClient?: CreateOpenAIClient, mcpManager?: McpManager) {
+  /**
+   * @param projectRoot 项目根目录
+   * @param createOpenAIClient 既有 OpenAI SDK 客户端工厂（主对话流式通路沿用）
+   * @param mcpManager MCP 管理器
+   * @param createLLMClient B1：统一 LLM 客户端工厂（provider 路由），
+   *                        供 edit-handler 等非流式 LLM 辅助调用使用；
+   *                        未注入时相关增强能力静默降级（与 createOpenAIClient 缺省语义一致）
+   */
+  constructor(
+    projectRoot: string,
+    createOpenAIClient?: CreateOpenAIClient,
+    mcpManager?: McpManager,
+    createLLMClient?: CreateLLMClient
+  ) {
     this.projectRoot = projectRoot;
     this.createOpenAIClient = createOpenAIClient;
     this.mcpManager = mcpManager;
+    this.createLLMClient = createLLMClient;
     this.registerToolHandlers();
   }
 
@@ -187,6 +204,7 @@ export class ToolExecutor {
         projectRoot: this.projectRoot,
         toolCall,
         createOpenAIClient: this.createOpenAIClient,
+        createLLMClient: this.createLLMClient,
         onProcessStart: hooks?.onProcessStart,
         onProcessExit: hooks?.onProcessExit,
         onProcessStdout: hooks?.onProcessStdout,
