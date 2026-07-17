@@ -63,6 +63,38 @@ await suite("anthropic 配置块解析", () => {
   assertEqual(r.anthropic?.maxTokens, 8192, "maxTokens 默认 8192");
 });
 
+// ---------------------------------------------------------------------------
+// M1：baseURL provider 感知默认值
+// provider=anthropic 且 env.BASE_URL 未显式设置时，缺省指向 Claude 官方端点；
+// provider=openai 时保持 defaults.baseURL（DeepSeek）现状；显式 BASE_URL 始终优先。
+// ---------------------------------------------------------------------------
+
+await suite("M1: anthropic 缺省 baseURL 指向 Claude 官方端点", () => {
+  const r = resolveSettingsSources({ provider: "anthropic", model: "claude-sonnet-4-6" }, null, defaults, {});
+  assertEqual(r.baseURL, "https://api.anthropic.com", "anthropic 缺省 baseURL");
+});
+
+await suite("M1: model 前缀推断 anthropic 时缺省 baseURL 同样指向 Claude 官方端点", () => {
+  const r = resolveSettingsSources({ model: "claude-opus-4-7" }, null, defaults, {});
+  assertEqual(r.provider, "anthropic", "前缀推断确认");
+  assertEqual(r.baseURL, "https://api.anthropic.com", "推断 anthropic 的缺省 baseURL");
+});
+
+await suite("M1: anthropic + 显式 BASE_URL 时显式值优先", () => {
+  const r = resolveSettingsSources(
+    { provider: "anthropic", env: { BASE_URL: "https://gateway.example.com/claude" } },
+    null,
+    defaults,
+    {}
+  );
+  assertEqual(r.baseURL, "https://gateway.example.com/claude", "显式 BASE_URL 覆盖默认值");
+});
+
+await suite("M1: openai 缺省 baseURL 保持 defaults（零回归）", () => {
+  const r = resolveSettingsSources({ provider: "openai" }, null, defaults, {});
+  assertEqual(r.baseURL, "https://api.deepseek.com", "openai 缺省 baseURL 不变");
+});
+
 console.log(`\n=== Test Summary ===`);
 console.log(`Passed: ${passed}`);
 console.log(`Failed: ${failed}`);

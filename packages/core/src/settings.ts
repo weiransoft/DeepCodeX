@@ -575,10 +575,17 @@ export function resolveSettingsSources(
         }
       : undefined;
 
+  // baseURL 默认值 provider 感知（M1）：
+  // - 显式 env.BASE_URL 始终优先（自建网关/代理场景）；
+  // - provider=anthropic 且未显式设置时，缺省指向 Claude 官方端点
+  //   （原先回退 defaults.baseURL=DeepSeek 端点，会导致 Claude 请求发往错误地址）；
+  // - provider=openai 时保持 defaults.baseURL 现状（DeepSeek 默认，零回归）。
+  const defaultBaseURL = provider === "anthropic" ? "https://api.anthropic.com" : defaults.baseURL;
+
   return {
     env,
     apiKey: trimString(env.API_KEY) || undefined,
-    baseURL: trimString(env.BASE_URL) || defaults.baseURL,
+    baseURL: trimString(env.BASE_URL) || defaultBaseURL,
     model,
     provider,
     anthropic,
