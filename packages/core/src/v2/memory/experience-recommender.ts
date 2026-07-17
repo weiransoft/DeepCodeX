@@ -111,6 +111,26 @@ export interface TaskFeatures {
   tags: string[];
 }
 
+/**
+ * recommend() 调用选项（P0-2 修复）
+ *
+ * V2-P3 集成 DualLayerContextManager 后，buildOptimizedContext 在每个 turn 入口
+ * 预计算上下文时调用 recommend()，若每次都触发 recordAccess 写盘，会导致 accessCount
+ * 异常膨胀（20 turn 会话会让同一条经验 accessCount+20），污染 LRU 淘汰信号。
+ *
+ * 解耦方案：buildOptimizedContext 调用时传 { recordAccess: false }，
+ * recordAccess 应由"经验被真正采纳/引用"时触发（如任务归档、用户显式确认）。
+ */
+export interface RecommendOptions {
+  /**
+   * 是否在返回前批量更新命中经验的 accessCount（默认 true，保持向后兼容）。
+   *
+   * - true：调用 recordExperienceAccessBatch 写盘（适用于显式用户请求经验推荐场景）
+   * - false：仅返回推荐结果，不写盘（适用于预计算路径如 buildOptimizedContext）
+   */
+  recordAccess?: boolean;
+}
+
 // ============================================================================
 // ExperienceRecommender 类
 // ============================================================================
@@ -152,12 +172,23 @@ export class ExperienceRecommender {
    *   3. rank：综合排序（relevance * 0.6 + importance/10 * 0.4）
    *   4. 取 Top-K（默认 K=5）
    *   5. recordAccess：批量更新命中经验的 accessCount（P1-5 修复，调用 recordExperienceAccessBatch）
+   *      —— 仅当 options.recordAccess !== false 时执行（P0-2 修复）
+   *
+   * P0-2 修复（架构师审查）：新增 options.recordAccess 参数（默认 true 保持向后兼容）。
+   * DualLayerContextManager.buildOptimizedContext 调用时传 { recordAccess: false }，
+   * 避免预计算路径每个 turn 都触发 recordAccess 写盘导致 accessCount 异常膨胀。
+   * recordAccess 应由"经验被真正采纳/引用"时触发（如任务归档、用户显式确认）。
    *
    * @param taskContext 当前任务上下文
    * @param limit 返回数量（默认 5）
+   * @param options 调用选项（P0-2 新增，recordAccess 默认 true）
    * @returns 推荐列表（按 score 降序）
    */
-  recommend(taskContext: TaskContext, limit: number = DEFAULT_LIMIT): ExperienceRecommendation[] {
+  recommend(
+    taskContext: TaskContext,
+    limit: number = DEFAULT_LIMIT,
+    options: RecommendOptions = {}
+  ): ExperienceRecommendation[] {
     // 步骤 1：提取任务特征
     const features = this.extractTaskFeatures(taskContext);
 
@@ -172,8 +203,10 @@ export class ExperienceRecommender {
     const all = [...successRecs, ...failureRecs].sort((a, b) => b.score - a.score);
     const topK = all.slice(0, limit);
 
-    // 步骤 5：批量更新命中经验的访问记录（P1-5 修复）
-    if (topK.length > 0) {
+    // 步骤 5：批量更新命中经验的访问记录（P1-5 修复 + P0-2 修复）
+    // P0-2：仅在 options.recordAccess !== false 时执行（默认 true 保持向后兼容）
+    // 预计算路径（buildOptimizedContext）应传 { recordAccess: false } 避免污染 accessCount
+    if (topK.length > 0 && options.recordAccess !== false) {
       this.recordAccess(
         "default",
         topK.map((r) => r.experience)

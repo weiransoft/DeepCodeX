@@ -1,5 +1,5 @@
 /**
- * ExperienceRecommender 单元测试（ER-01 ~ ER-10）
+ * ExperienceRecommender 单元测试（ER-01 ~ ER-12）
  *
  * 测试覆盖 V2-P3 F-MEM-04 经验 RAG 推荐器的核心能力：
  * - ER-01: 任务类型完全匹配召回
@@ -12,6 +12,8 @@
  * - ER-08: recommend 空经验库返回空数组
  * - ER-09: recordAccess 更新 accessCount（批量自增）
  * - ER-10: recommend 按 score 降序排序
+ * - ER-11: recommend 传 { recordAccess: false } 不触发 recordAccess（P0-2 修复）
+ * - ER-12: recommend 默认触发 recordAccess（向后兼容性验证，P0-2 修复）
  *
  * 所有测试使用真实文件系统（mkdtempSync 临时目录隔离 global-context.json），
  * 禁止 mock。通过自定义 GlobalContextManager filePath 避免污染真实 ~/.deepcode。
@@ -20,6 +22,7 @@
  * 设计依据：
  * - V2-P3 实施计划 §5.1.3（v1.1 修订 P1-2/P1-4/P1-5/P2-1）
  * - V2-P3 架构师审查报告 §2.2 P1-2（tags 路径）+ §2.3 P2-1（TF-IDF 范围）
+ * - V2-P3 集成架构师审查 v1（2026-07-17）§三 P0-2（recordAccess 解耦）
  *
  * @module v2/tests/memory/experience-recommender.test
  */
@@ -482,4 +485,107 @@ test("ER-10: recommend 按 score 降序排序", () => {
   // 验证：第一个应 importance 最高（=9），最后一个 importance 最低（=1）
   assert.equal(recs[0].importance, 9, "Top-1 应为 importance=9 的经验");
   assert.equal(recs[recs.length - 1].importance, 1, "末尾应为 importance=1 的经验");
+});
+
+// ============================================================================
+// ER-11：recommend 传 { recordAccess: false } 不触发 recordAccess
+// P0-2 修复（架构师审查）：buildOptimizedContext 预计算路径调用时传 recordAccess: false，
+// 避免每个 turn 触发 recordAccess 写盘导致 accessCount 异常膨胀。
+// ============================================================================
+
+test("ER-11: recommend 传 { recordAccess: false } 不触发 recordAccess（accessCount 保持 0）", () => {
+  const { manager, recommender } = createRecommender();
+
+  // 准备：3 条经验
+  const exp1 = makeSuccessExp({ description: "修复内存泄漏" });
+  const exp2 = makeSuccessExp({ description: "修复线程死锁" });
+  const exp3 = makeSuccessExp({ description: "修复 UI 渲染" });
+  manager.addSuccessExperience("default", exp1);
+  manager.addSuccessExperience("default", exp2);
+  manager.addSuccessExperience("default", exp3);
+
+  const taskCtx = makeTaskContext({
+    taskType: "bugfix", // 全部 taskType 匹配
+    description: "修复内存问题",
+    focusPoints: [],
+  });
+
+  // 调用 recommend 传 { recordAccess: false }（P0-2 修复）
+  const recs = recommender.recommend(taskCtx, 10, { recordAccess: false });
+  assert.ok(recs.length > 0, "应召回至少 1 条经验");
+
+  // 验证：所有命中的经验 accessCount 应保持 0（未触发 recordAccess）
+  const ctx = manager.load("default");
+  for (const rec of recs) {
+    const updated = ctx.historicalExperience.successExperiences.find((e) => e.id === rec.experience.id);
+    assert.ok(updated, `经验 ${rec.experience.id} 应在 GlobalContext 中找到`);
+    assert.equal(
+      updated.accessCount,
+      0,
+      `经验 "${updated.description}" 的 accessCount 应为 0（recordAccess: false 未触发，实际: ${updated.accessCount}）`
+    );
+  }
+
+  // 验证：连续调用 N 次，accessCount 仍保持 0（P0-2 核心断言）
+  for (let i = 0; i < 5; i++) {
+    recommender.recommend(taskCtx, 10, { recordAccess: false });
+  }
+  const ctxAfter5 = manager.load("default");
+  for (const rec of recs) {
+    const updated = ctxAfter5.historicalExperience.successExperiences.find((e) => e.id === rec.experience.id);
+    assert.ok(updated, `经验 ${rec.experience.id} 应在 GlobalContext 中找到`);
+    assert.equal(
+      updated.accessCount,
+      0,
+      `连续 6 次调用后，经验 "${updated.description}" 的 accessCount 应仍为 0（实际: ${updated.accessCount}）`
+    );
+  }
+});
+
+// ============================================================================
+// ER-12：recommend 默认触发 recordAccess（向后兼容性验证）
+// P0-2 修复：recordAccess 默认值为 true，保持向后兼容（不传 options 时行为不变）
+// ============================================================================
+
+test("ER-12: recommend 默认触发 recordAccess（不传 options 时与 V2-P3 前行为一致）", () => {
+  const { manager, recommender } = createRecommender();
+
+  // 准备：2 条经验
+  const exp1 = makeSuccessExp({ description: "修复内存泄漏" });
+  const exp2 = makeSuccessExp({ description: "修复线程死锁" });
+  manager.addSuccessExperience("default", exp1);
+  manager.addSuccessExperience("default", exp2);
+
+  const taskCtx = makeTaskContext({
+    taskType: "bugfix",
+    description: "修复内存问题",
+    focusPoints: [],
+  });
+
+  // 调用 recommend 不传 options（应使用默认值 recordAccess: true）
+  const recs = recommender.recommend(taskCtx, 10);
+  assert.ok(recs.length > 0, "应召回至少 1 条经验");
+
+  // 验证：命中的经验 accessCount 应自增 1（默认行为，与 ER-09 一致）
+  const ctx = manager.load("default");
+  for (const rec of recs) {
+    const updated = ctx.historicalExperience.successExperiences.find((e) => e.id === rec.experience.id);
+    assert.ok(updated, `经验 ${rec.experience.id} 应在 GlobalContext 中找到`);
+    assert.equal(
+      updated.accessCount,
+      1,
+      `默认 options 应触发 recordAccess，accessCount 应为 1（实际: ${updated.accessCount}）`
+    );
+  }
+
+  // 验证：显式传 { recordAccess: true } 行为与默认一致
+  const recs2 = recommender.recommend(taskCtx, 10, { recordAccess: true });
+  assert.ok(recs2.length > 0, "应召回至少 1 条经验");
+  const ctx2 = manager.load("default");
+  for (const rec of recs2) {
+    const updated = ctx2.historicalExperience.successExperiences.find((e) => e.id === rec.experience.id);
+    assert.ok(updated, `经验 ${rec.experience.id} 应在 GlobalContext 中找到`);
+    // 累计调用 2 次（默认 + recordAccess: true），accessCount 应为 2
+    assert.equal(updated.accessCount, 2, `第二次调用后 accessCount 应为 2（实际: ${updated.accessCount}）`);
+  }
 });
