@@ -1,0 +1,21 @@
+{
+  "name": "@deepcodex/quality",
+  "version": "1.0.0",
+  "description": "DeepCodeX Quality Gate - UI/UX 巡检分析 + 视觉回归测试 + 代码地图",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./uiux-analyzer": "./src/uiux-analyzer.ts",
+    "./visual-regression": "./src/visual-regression.ts",
+    "./codemap": "./src/codemap/generator.ts"
+  },
+  "scripts": {
+    "test": "node --import tsx --test src/tests/**/*.test.ts",
+    "typecheck": "tsc -p ./ --noEmit"
+  },
+  "dependencies": {
+    "@vegamo/deepcode-core": "workspace:*"
+  }
+}
