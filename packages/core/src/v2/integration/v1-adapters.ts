@@ -158,3 +158,10 @@ export {
   RED_LINES,
 } from "../../team/principles/ponytail";
 export type { PonytailModeType } from "../../team/principles/ponytail";
+
+// ============================================================================
+// 10. session（V1 会话消息类型）
+// ============================================================================
+// V2 集成钩子（session-hook）需要 SessionMessage 类型用于 preBuildContext
+// 参数签名。V2 模块禁止直接 import V1 文件，经此 re-export 暴露。
+export type { SessionMessage } from "../../session";

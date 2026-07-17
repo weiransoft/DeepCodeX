@@ -1,10 +1,20 @@
 import type { ChatCompletionMessageParam, ChatCompletionContentPart } from "openai/resources/chat/completions";
 import { supportsMultimodal } from "./model-capabilities";
 import type { SessionMessage } from "../session";
+import type { SessionContextHook, ContextSnippet } from "../v2/integration/session-hook";
 
 export type OpenAIMessageConverterOptions = {
   /** Optional callback to render the /init command prompt template. */
   renderInitPrompt?: () => string;
+  /**
+   * V2 上下文 hook（可选，V2 未启用时为 undefined）。
+   *
+   * 设计依据：§9.1 F-04 修复——通过构造函数注入 SessionContextHook，
+   * 在 buildMessages 开头同步调用 preBuildContext 拿到上下文片段并注入到 system message。
+   * - V2 启用时：contextHook 被注入，buildMessages 调用 preBuildContext 拿 snippets 注入 system message；
+   * - V2 未启用时：contextHook 为 undefined，OpenAIMessageConverter 行为与 v1 100% 一致（向后兼容）。
+   */
+  contextHook?: SessionContextHook;
 };
 
 /**
@@ -22,8 +32,27 @@ export class OpenAIMessageConverter {
   /**
    * Build the OpenAI messages array from session messages, applying compaction
    * filtering, tool pairing, and format conversion.
+   *
+   * V2 集成（§9.1 NP-01 修复）：
+   * - 在现有逻辑之前同步调用 contextHook.preBuildContext（无 await），保持同步签名不变；
+   * - 拿到上下文片段后注入到首条 system message 末尾的"## V2 Context"区块；
+   * - contextHook 为 undefined（V2 未启用）或 snippets 为空时，行为与 v1 100% 一致。
    */
   buildMessages(messages: SessionMessage[], thinkingEnabled: boolean, model: string): ChatCompletionMessageParam[] {
+    // V2 上下文 hook 注入（同步调用，无 await）
+    // NP-01 修复：preBuildContext 为同步方法，保持 buildMessages 同步签名不变
+    if (this.options.contextHook) {
+      const snippets = this.options.contextHook.preBuildContext(messages);
+      if (snippets.length > 0) {
+        // 将 snippets 注入到首条 system message（content 为字符串时才注入，
+        // 避免 content 为 null 或非字符串时的类型问题）
+        const systemMsg = messages.find((m) => m.role === "system");
+        if (systemMsg && typeof systemMsg.content === "string") {
+          systemMsg.content = this.injectSnippets(systemMsg.content, snippets);
+        }
+      }
+    }
+
     const activeMessages = messages.filter((message) => !message.compacted);
     const toolPairings = this.pairToolMessages(activeMessages);
     const openAIMessages: ChatCompletionMessageParam[] = [];
@@ -86,6 +115,24 @@ export class OpenAIMessageConverter {
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
+
+  /**
+   * 将上下文片段注入到 system message 内容末尾
+   *
+   * 格式约定（§9.1）：
+   * - 在原 system message 内容后追加"## V2 Context"区块标题；
+   * - 每个片段以"--- {type}: {source} ---"作为分隔头部，紧随片段内容；
+   * - 片段之间以空行分隔，便于 LLM 解析。
+   *
+   * @param content 原 system message 内容（非空字符串，由调用方保证）
+   * @param snippets 上下文片段列表（非空，由调用方保证 length > 0）
+   * @returns 拼接后的 system message 内容
+   */
+  private injectSnippets(content: string, snippets: ContextSnippet[]): string {
+    // 每个片段格式："--- {type}: {source} ---" 头部 + 换行 + 片段内容
+    const contextBlock = snippets.map((s) => `--- ${s.type}: ${s.source} ---\n${s.content}`).join("\n\n");
+    return `${content}\n\n## V2 Context\n\n${contextBlock}`;
+  }
 
   private convertMessage(message: SessionMessage, thinkingEnabled: boolean, model: string): ChatCompletionMessageParam {
     const content = this.renderContent(message);
