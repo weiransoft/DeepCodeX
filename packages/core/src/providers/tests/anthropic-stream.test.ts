@@ -8,8 +8,9 @@
  *    message_end），且分片 argumentsJsonDelta 可无损拼接为合法 JSON；
  * 3. 守卫分支：无 tool_use 上下文时到达的 input_json_delta 被安全丢弃（currentToolId === null）；
  * 4. 错误归一化：transport 中途抛错 / 抛非 Error 值，均归一化为 error 事件且迭代正常结束不抛出；
- * 5. message_delta.usage 映射（outputTokens 透传，inputTokens 按设计置 0——
- *    input token 数在 message_start 中，归一化层不聚合）。
+ * 5. 流式 usage 聚合（M2）：message_start 携带 input/cache 用量（暂存），
+ *    message_delta 仅携带 output_tokens，message_end 合并发出完整 LLMUsage；
+ *    无 message_start 时 inputTokens 回退 0。
  *
  * 测试方式：通过 setStreamTransportForTesting 注入真实异步生成器（函数注入桩，
  * 非 mock 框架），供给 SDK 原始 RawMessageStreamEvent 序列，验证归一化逻辑本身。
@@ -190,8 +191,64 @@ await suite("text/thinking 增量序列归一化（噪声事件被忽略）", as
     "message_delta.usage.output_tokens 映射为 outputTokens"
   );
   assertTrue(
+    endEv.type === "message_end" && endEv.usage !== null && endEv.usage.inputTokens === 10,
+    "M2: message_start.usage.input_tokens 聚合进 message_end.usage.inputTokens"
+  );
+});
+
+await suite("M2: message_start 的 cache 用量聚合进 message_end.usage", async () => {
+  const sdkEvents: Anthropic.RawMessageStreamEvent[] = [
+    {
+      type: "message_start",
+      message: {
+        id: "msg_cache",
+        type: "message",
+        role: "assistant",
+        content: [],
+        model: "claude-sonnet-4-6",
+        stop_reason: null,
+        stop_sequence: null,
+        usage: {
+          input_tokens: 42,
+          output_tokens: 0,
+          cache_creation: null,
+          cache_creation_input_tokens: 7,
+          cache_read_input_tokens: 35,
+          server_tool_use: null,
+          service_tier: null,
+        },
+      },
+    },
+    { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+    messageDeltaEvent("end_turn", 3),
+  ];
+
+  const events = await collectEvents(makeStreamClient(sdkEvents));
+  const endEv = events[events.length - 1];
+  assertTrue(endEv.type === "message_end" && endEv.usage !== null, "message_end 携带 usage");
+  if (endEv.type === "message_end" && endEv.usage !== null) {
+    assertEqual(endEv.usage.inputTokens, 42, "inputTokens 来自 message_start");
+    assertEqual(endEv.usage.outputTokens, 3, "outputTokens 来自 message_delta");
+    assertEqual(endEv.usage.cacheCreationInputTokens, 7, "cache_creation_input_tokens 聚合透传");
+    assertEqual(endEv.usage.cacheReadInputTokens, 35, "cache_read_input_tokens 聚合透传");
+  }
+});
+
+await suite("M2: 无 message_start 时 inputTokens 回退 0", async () => {
+  const sdkEvents: Anthropic.RawMessageStreamEvent[] = [
+    { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hi" } },
+    messageDeltaEvent("end_turn", 8),
+  ];
+
+  const events = await collectEvents(makeStreamClient(sdkEvents));
+  const endEv = events[events.length - 1];
+  assertTrue(
     endEv.type === "message_end" && endEv.usage !== null && endEv.usage.inputTokens === 0,
-    "inputTokens 按设计置 0（input 数在 message_start，归一化层不聚合）"
+    "缺失 message_start 时 inputTokens 回退 0"
+  );
+  assertTrue(
+    endEv.type === "message_end" && endEv.usage !== null && endEv.usage.outputTokens === 8,
+    "outputTokens 正常透传"
   );
 });
 

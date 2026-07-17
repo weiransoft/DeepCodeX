@@ -145,10 +145,29 @@ export class AnthropicLLMClient implements LLMClient {
 
     // 流式状态：tool_use 块的 id/name 在 content_block_start 给出，input_json_delta 后续增量
     let currentToolId: string | null = null;
+    // 流式 usage 聚合状态（M2）：Anthropic 的 input/cache 用量在 message_start 给出，
+    // message_delta.usage 仅携带 output_tokens，需暂存后在 message_end 合并发出完整 LLMUsage
+    let startUsage: {
+      inputTokens: number;
+      cacheCreationInputTokens?: number;
+      cacheReadInputTokens?: number;
+    } | null = null;
 
     try {
       for await (const event of stream) {
         switch (event.type) {
+          case "message_start": {
+            // 暂存 message_start 携带的 input/cache 用量，供 message_delta 合并
+            const usage = event.message.usage;
+            startUsage = {
+              inputTokens: usage.input_tokens,
+              ...(usage.cache_creation_input_tokens != null
+                ? { cacheCreationInputTokens: usage.cache_creation_input_tokens }
+                : {}),
+              ...(usage.cache_read_input_tokens != null ? { cacheReadInputTokens: usage.cache_read_input_tokens } : {}),
+            };
+            break;
+          }
           case "content_block_start": {
             const block = event.content_block;
             if (block.type === "tool_use") {
@@ -176,10 +195,18 @@ export class AnthropicLLMClient implements LLMClient {
             break;
           }
           case "message_delta": {
-            const usage: LLMUsage | null = event.usage
+            // M2：合并 message_start 暂存的 input/cache 用量与 message_delta 的 output_tokens。
+            // input/cache 字段优先取 message_delta 自带值（SDK 类型允许为空），缺省回落 message_start 暂存值；
+            // 两者均缺失（异常事件序列）时 inputTokens 回退 0，保持与原硬编码行为一致的兜底。
+            const deltaUsage = event.usage;
+            const usage: LLMUsage | null = deltaUsage
               ? {
-                  inputTokens: 0, // message_delta.usage 仅含 output_tokens，input 在 message_start
-                  outputTokens: event.usage.output_tokens,
+                  inputTokens: deltaUsage.input_tokens ?? startUsage?.inputTokens ?? 0,
+                  outputTokens: deltaUsage.output_tokens,
+                  cacheCreationInputTokens:
+                    deltaUsage.cache_creation_input_tokens ?? startUsage?.cacheCreationInputTokens ?? undefined,
+                  cacheReadInputTokens:
+                    deltaUsage.cache_read_input_tokens ?? startUsage?.cacheReadInputTokens ?? undefined,
                 }
               : null;
             yield {
@@ -190,7 +217,7 @@ export class AnthropicLLMClient implements LLMClient {
             break;
           }
           default:
-            // message_start / message_stop / ping 等事件不产生上层增量
+            // message_stop / ping 等事件不产生上层增量（message_start 已在上方分支暂存 usage）
             break;
         }
       }
