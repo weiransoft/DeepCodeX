@@ -30,3 +30,13 @@ packages/cli/src/generated/
 packages/core/src/generated/
 packages/vscode-ide-companion/*.vsix
 packages/vscode-ide-companion/templates/
+
+# Runtime feedback data (agent 反馈数据，运行时生成不应入库)
+packages/core/feedback_data/
+
+# Backup files (开发过程备份文件，不应入库)
+*.bak
+*.bak2
+*.bak3
+*.bak4
+*.bak5
