@@ -654,6 +654,43 @@ export class GlobalContextManager {
     });
   }
 
+  /**
+   * 批量记录经验访问（V2-P3 新增，P1-5 修复）
+   *
+   * 一次 load + save 更新多条经验的访问记录，避免循环调用
+   * recordExperienceAccess 导致的 N 次 load+save（性能优化）。
+   *
+   * 适用场景：ExperienceRecommender.recommend 命中多条经验后批量更新访问记录。
+   *
+   * @param userId 用户 ID
+   * @param experienceIds 经验 ID 列表
+   */
+  recordExperienceAccessBatch(userId: string, experienceIds: string[]): void {
+    if (!experienceIds || experienceIds.length === 0) {
+      return;
+    }
+    // 转为 Set 加速查找
+    const idSet = new Set(experienceIds);
+    this.update(userId, (ctx) => {
+      const now = new Date().toISOString();
+      // 在成功经验中批量更新
+      for (const exp of ctx.historicalExperience.successExperiences) {
+        if (idSet.has(exp.id)) {
+          exp.accessCount += 1;
+          exp.lastAccessedAt = now;
+        }
+      }
+      // 在失败经验中批量更新
+      for (const exp of ctx.historicalExperience.failureExperiences) {
+        if (idSet.has(exp.id)) {
+          exp.accessCount += 1;
+          exp.lastAccessedAt = now;
+        }
+      }
+      return ctx;
+    });
+  }
+
   // ------------------------------------------------------------------------
   // 私有方法
   // ------------------------------------------------------------------------
