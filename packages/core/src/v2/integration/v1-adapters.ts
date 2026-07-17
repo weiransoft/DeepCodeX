@@ -165,3 +165,10 @@ export type { PonytailModeType } from "../../team/principles/ponytail";
 // V2 集成钩子（session-hook）需要 SessionMessage 类型用于 preBuildContext
 // 参数签名。V2 模块禁止直接 import V1 文件，经此 re-export 暴露。
 export type { SessionMessage } from "../../session";
+
+// ============================================================================
+// 11. settings（V1 全局配置常量）
+// ============================================================================
+// V2 memory 模块（deepseek-summarizer）需要 DEFAULT_BASE_URL 作为 DeepSeek API
+// 默认基址。V2 模块禁止直接 import V1 文件（P1-05 单一入口约束），经此 re-export。
+export { DEFAULT_BASE_URL } from "../../settings";

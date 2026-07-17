@@ -1,14 +1,23 @@
 /**
- * 双层上下文管理器（DualLayerContextManager）—— V2-P1 集成入口
+ * 双层上下文管理器（DualLayerContextManager）—— V2-P1 集成入口 + V2-P2 升级
  *
  * 组装全局上下文 + 任务上下文 → 产出 session-hook 形态的 ContextSnippet[]，
  * 供编排器在 refreshContextAsync 中调用后 setSnippets 写入缓存。
+ *
+ * V2-P1 → V2-P2 升级点：
+ * 1. 构造函数增加 progressiveLoader + summarizer 参数（透传给 SlidingWindowManager）
+ * 2. buildOptimizedContext 中 buildWindow 调用改 await（buildWindow 已改 async）
+ * 3. 消费 result.compressedSnippets：压缩摘要片段追加到返回数组末尾（压缩而非丢弃）
+ * 4. P1-4 架构师建议：ProgressiveContextLoader 三层加载片段注入 directRetainSnippets
+ *    （确保 PCL 片段不参与评分，必注入到上下文）
  *
  * 设计依据：
  * - V2 技术方案 §5.2 双层上下文模型（GlobalContext + TaskContext）
  * - V2_P1_IMPLEMENTATION_PLAN.md §3.4 DualLayerContextManager 契约
  * - V2_P1_IMPLEMENTATION_PLAN.md §3.5 CodeMapProvider 接口
+ * - V2_P2_IMPLEMENTATION_PLAN.md §3.5 V2-P2 适配点
  * - NP-01 红线：preBuildContext 保持同步读缓存，本方法永不进热路径
+ * - P1-4 架构师建议：PCL 三层加载片段注入 directRetainSnippets（不参与评分）
  *
  * P1 裁剪（§3.4）：
  * - 无独立 TaskContextStore：任务层直接复用 P0b TaskContextManager（内存 Map）
@@ -18,11 +27,13 @@
  *   （{content, source, relevanceScore, tokenCount}）做形态映射，
  *   以 session-hook 契约为准（NP-01 集成红线，既有缓存结构不动）
  *
- * 候选片段收集策略（§5.2 双层模型）：
+ * 候选片段收集策略（§5.2 双层模型 + V2-P2 PCL 注入）：
  * - 全局层：UserProfile（codeStyle/frameworkPreferences/behaviorPatterns）+
  *   HistoricalExperience（最近 N 条成功/失败经验）
  * - 任务层：TaskContext 的 focusPoints/thoughtHistory/intermediateResults
  * - 文件层：focusPoints(type=file) 的 ref 作为文件路径，从 CodeMap.files 提取内容片段
+ * - V2-P2 PCL 层：ProgressiveContextLoader 三层加载片段（Metadata/Instruction/Resource）
+ *   注入 directRetainSnippets，确保必注入且不参与评分
  *
  * 偏离报备（架构师审查待补）：
  * - DualLayerContextConfig 增加 projectRoot 必填字段（§3.4 契约未列）
@@ -35,7 +46,7 @@
 
 import * as path from "node:path";
 import type { GlobalContextManager } from "./global-context";
-import type { GlobalContext, SuccessExperience, FailureExperience } from "./global-context";
+import type { GlobalContext } from "./global-context";
 import type { TaskContextManager } from "./task-context-manager";
 import type { TaskContext, FocusPoint } from "./types";
 import type { CodeMap, FileInfo } from "../codemap/generator";
@@ -44,6 +55,9 @@ import type { SlidingWindowManager } from "./sliding-window";
 import type { SlidingWindowConfig } from "./sliding-window";
 import type { RelevanceScoringConfig } from "./relevance-scorer";
 import type { ContextSnippet } from "../integration/session-hook";
+// V2-P2 新增导入：ProgressiveContextLoader（三层加载）+ ContentSummarizer（摘要器类型）
+import type { ProgressiveContextLoader } from "./progressive-loader";
+import type { ContentSummarizer } from "../memory/content-summarizer";
 
 // ============================================================================
 // 类型定义
@@ -107,10 +121,18 @@ const MAX_INTERMEDIATE_SNIPPETS = 3;
 // ============================================================================
 
 /**
- * 双层上下文管理器（V2-P1 集成入口）
+ * 双层上下文管理器（V2-P1 集成入口 + V2-P2 升级）
  *
- * 使用方式：
+ * 使用方式（V2-P2 版本，需传入 progressiveLoader + summarizer）：
  * ```typescript
+ * const progressiveLoader = new ProgressiveContextLoader({ tokenBudget: 100000 });
+ * const summarizer = createSummarizer({ llm: { enabled: false } });
+ * const windowManager = new SlidingWindowManager(
+ *   { tokenBudget: 100000, topKFiles: 20 },
+ *   scorer,
+ *   progressiveLoader,
+ *   summarizer,
+ * );
  * const manager = new DualLayerContextManager(
  *   { projectRoot: "/path/to/project", window: {}, scoring: {}, defaultTokenBudget: 100000 },
  *   globalManager,
@@ -118,6 +140,8 @@ const MAX_INTERMEDIATE_SNIPPETS = 3;
  *   codeMapProvider,
  *   scorer,
  *   windowManager,
+ *   progressiveLoader, // V2-P2 新增：用于 PCL 三层加载注入（P1-4）
+ *   summarizer,        // V2-P2 新增：透传一致性（实际由 window 内部使用）
  * );
  * // 由编排器在 refreshContextAsync 中调用（turn 入口）
  * const snippets = await manager.buildOptimizedContext("user-1", "task-1");
@@ -129,12 +153,16 @@ export class DualLayerContextManager {
   private readonly config: DualLayerContextConfig;
 
   /**
+   * V2-P2 构造函数（增加 progressiveLoader + summarizer 参数）
+   *
    * @param config 配置（必填 projectRoot）
    * @param globalManager 全局上下文管理器（P0a 既有）
    * @param taskManager 任务上下文管理器（P0b 既有）
    * @param codeMapProvider CodeMap 提供者
    * @param scorer 相关性评分器
-   * @param window 滑动窗口管理器
+   * @param window 滑动窗口管理器（V2-P2：构造时已注入 progressiveLoader + summarizer）
+   * @param progressiveLoader V2-P2 新增：渐进式三层加载器，用于 PCL 片段注入 directRetainSnippets（P1-4 架构师建议）
+   * @param summarizer V2-P2 新增：内容摘要器（透传一致性，实际由 window 内部 compressOldSnippets 使用）
    */
   constructor(
     config: Partial<DualLayerContextConfig> & Pick<DualLayerContextConfig, "projectRoot">,
@@ -142,7 +170,9 @@ export class DualLayerContextManager {
     private readonly taskManager: TaskContextManager,
     private readonly codeMapProvider: CodeMapProvider,
     private readonly scorer: RelevanceScorer,
-    private readonly window: SlidingWindowManager
+    private readonly window: SlidingWindowManager,
+    private readonly progressiveLoader: ProgressiveContextLoader,
+    private readonly summarizer: ContentSummarizer
   ) {
     this.config = {
       window: config.window ?? {},
@@ -158,23 +188,33 @@ export class DualLayerContextManager {
    * 由编排器在 refreshContextAsync 中调用后 setSnippets 写入缓存；
    * 热路径 preBuildContext 保持纯同步读缓存，本方法永不进热路径。
    *
-   * 实现步骤：
+   * V2-P2 升级实现步骤：
    * 1. 从 globalManager 加载 GlobalContext（含 UserProfile + HistoricalExperience）
    * 2. 从 taskManager 加载 TaskContext（含 focusPoints/thoughtHistory 等）
    * 3. 从 codeMapProvider 获取 CodeMap
-   * 4. 收集候选片段（全局层 + 任务层 + 文件层）
-   * 5. 调用 window.buildWindow 做评分 + Top-K + Token 预算截断
-   * 6. 返回 retainedSnippets（session-hook 形态）
+   * 4. 收集候选片段（全局层 + 任务层 + 文件层 + V2-P2 PCL 三层）
+   * 5. 调用 window.buildWindow 做评分 + Top-K + Token 预算截断 + V2-P2 压缩
+   * 6. 返回 retainedSnippets + compressedSnippets（session-hook 形态）
+   *
+   * V2-P2 新增（P1-4 架构师建议）：
+   * - 步骤 4 中调用 progressiveLoader.loadAll(taskContext) 加载三层片段
+   * - 三层片段（progressive_metadata/instruction/resource）注入 directRetainSnippets
+   * - 确保必注入且不参与评分（与文件层 scoringCandidates 分离）
+   *
+   * V2-P2 新增（压缩而非丢弃）：
+   * - 步骤 5 中 buildWindow 返回 compressedSnippets（超预算片段的摘要）
+   * - 步骤 6 中压缩摘要片段追加到返回数组末尾（优先级最低）
    *
    * 降级语义：
    * - TaskContext 不存在：返回空数组（任务未创建或已归档）
-   * - CodeMap 获取失败：仅返回全局层 + 任务层片段（文件层降级为空）
+   * - CodeMap 获取失败：仅返回全局层 + 任务层 + PCL 片段（文件层降级为空）
    * - GlobalContext 加载失败：globalManager 内部已降级返回默认空上下文
+   * - PCL 加载失败：try-catch 捕获，降级为无 PCL 片段（不中断流程）
    *
    * @param userId 用户 ID
    * @param taskId 任务 ID
    * @param maxTokens 可选的 Token 预算覆盖（默认使用 config.defaultTokenBudget）
-   * @returns 优化后的上下文片段列表（session-hook 形态）
+   * @returns 优化后的上下文片段列表（session-hook 形态，含压缩摘要）
    */
   async buildOptimizedContext(userId: string, taskId: string, maxTokens?: number): Promise<ContextSnippet[]> {
     // ---- 1. 加载 TaskContext（任务层）----
@@ -198,9 +238,9 @@ export class DualLayerContextManager {
     }
 
     // ---- 4. 收集候选片段 ----
-    // 分离"直接保留片段"（全局层/任务层，不参与评分）与"评分片段"（文件层，由 scorer 评分）
+    // 分离"直接保留片段"（全局层/任务层/PCL 层，不参与评分）与"评分片段"（文件层，由 scorer 评分）
     // 理由：SlidingWindowManager.buildWindow 假设非对话片段都是文件片段并对它们评分；
-    //       全局层/任务层片段的 source 不是文件路径，评分时距离分会得 0.1（图未含），
+    //       全局层/任务层/PCL 层片段的 source 不是文件路径，评分时距离分会得 0.1（图未含），
     //       导致被 Top-K 截断掉。分离后直接保留片段不进评分，保证必注入。
     const directRetainSnippets: ContextSnippet[] = [];
     const scoringCandidates: ContextSnippet[] = [];
@@ -217,28 +257,44 @@ export class DualLayerContextManager {
     const taskSnippets = this.collectTaskSnippets(taskContext);
     directRetainSnippets.push(...taskSnippets);
 
-    // 4.4 文件层：从 CodeMap.files 提取 focusPoints 文件内容片段（参与评分）
+    // 4.4 V2-P2 PCL 层：ProgressiveContextLoader 三层加载片段（直接保留，P1-4 架构师建议）
+    // PCL 片段（progressive_metadata/instruction/resource）注入 directRetainSnippets，
+    // 确保必注入且不参与评分。PCL 加载失败时降级为无 PCL 片段（不中断流程）。
+    try {
+      const pclResult = await this.progressiveLoader.loadAll(taskContext);
+      directRetainSnippets.push(...pclResult.metadata);
+      directRetainSnippets.push(...pclResult.instruction);
+      directRetainSnippets.push(...pclResult.resource);
+    } catch {
+      // PCL 加载失败：降级为无 PCL 片段（不中断整体 buildOptimizedContext 流程）
+    }
+
+    // 4.5 文件层：从 CodeMap.files 提取 focusPoints 文件内容片段（参与评分）
     if (codeMap) {
       const fileSnippets = this.collectFileSnippets(taskContext, codeMap);
       scoringCandidates.push(...fileSnippets);
     }
 
-    // ---- 5. 调用 SlidingWindowManager 做评分 + Top-K + Token 预算截断 ----
+    // ---- 5. 调用 SlidingWindowManager 做评分 + Top-K + Token 预算截断 + V2-P2 压缩 ----
     // 直接保留片段先扣除 Token 预算，剩余预算给评分片段
     const directTokens = this.estimateTokens(directRetainSnippets);
     const remainingBudget = Math.max(0, (maxTokens ?? this.config.defaultTokenBudget) - directTokens);
 
     let retainedScoringSnippets: ContextSnippet[] = [];
+    let compressedSnippets: ContextSnippet[] = []; // V2-P2 新增：压缩摘要片段
     if (codeMap && scoringCandidates.length > 0) {
-      const result = this.window.buildWindow(scoringCandidates, taskContext, codeMap, remainingBudget);
+      // V2-P2：buildWindow 已改 async，需 await
+      const result = await this.window.buildWindow(scoringCandidates, taskContext, codeMap, remainingBudget);
       retainedScoringSnippets = result.retainedSnippets;
+      compressedSnippets = result.compressedSnippets; // V2-P2：消费压缩摘要
     } else if (scoringCandidates.length > 0) {
       // CodeMap 缺失时无法评分：简单截断评分候选
       retainedScoringSnippets = this.truncateByTokenBudget(scoringCandidates, remainingBudget);
     }
 
-    // ---- 6. 合并：直接保留片段（前）+ 评分片段（后）----
-    return [...directRetainSnippets, ...retainedScoringSnippets];
+    // ---- 6. 合并：直接保留片段（前）+ 评分片段（中）+ 压缩摘要片段（末尾，V2-P2 新增）----
+    // V2-P2：压缩摘要片段追加到末尾（优先级最低，压缩而非丢弃）
+    return [...directRetainSnippets, ...retainedScoringSnippets, ...compressedSnippets];
   }
 
   /**

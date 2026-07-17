@@ -350,10 +350,122 @@ test("RA-LANG-01: detectLanguage 扩展名映射", () => {
   assert.equal(detectLanguage("/a/b.md"), null);
 });
 
-test("RA-LANG-02: 不支持的语言抛错（V2-P1 仅 TS/JS/Python）", () => {
-  assert.throws(() => new RegexASTAnalyzer("java"), /未在 V2-P1 启用/, "Java 应抛错（延后至 V2-P2）");
-  assert.throws(() => new RegexASTAnalyzer("rust"), /未在 V2-P1 启用/);
-  assert.throws(() => new RegexASTAnalyzer("go"), /未在 V2-P1 启用/);
+test("RA-LANG-02: V2-P2 启用全部 6 语言（Java/Rust/Go 不再抛错）", () => {
+  // V2-P1 之前：Java/Rust/Go 抛错"未在 V2-P1 启用"
+  // V2-P2：Java/Rust/Go 不再抛错，可正常构造分析器
+  assert.doesNotThrow(() => new RegexASTAnalyzer("java"), "Java 不应抛错（V2-P2 已启用）");
+  assert.doesNotThrow(() => new RegexASTAnalyzer("rust"), "Rust 不应抛错（V2-P2 已启用）");
+  assert.doesNotThrow(() => new RegexASTAnalyzer("go"), "Go 不应抛错（V2-P2 已启用）");
+
+  // 验证可正常分析对应语言的文件
+  const javaInfo = analyzeFile("test.java", "public class Bar {}\n");
+  assert.equal(javaInfo.language, "java");
+  const rustInfo = analyzeFile("test.rs", "pub struct Baz {}\n");
+  assert.equal(rustInfo.language, "rust");
+  const goInfo = analyzeFile("test.go", "type Foo struct {}\n");
+  assert.equal(goInfo.language, "go");
+});
+
+// ============================================================================
+// RA-JAVA-01~03: Java class / method / import（V2-P2 新增）
+// ============================================================================
+
+test("RA-JAVA-01: Java 类识别", () => {
+  const info = analyzeFile("Bar.java", "public class Bar {\n  private int x;\n}\n");
+  assert.equal(info.language, "java");
+  assert.equal(info.parseStatus, "ok");
+  assert.equal(info.classes.length, 1);
+  assert.equal(info.classes[0]!.name, "Bar");
+  assert.equal(info.classes[0]!.type, "class");
+});
+
+test("RA-JAVA-02: Java 方法识别", () => {
+  const info = analyzeFile(
+    "Bar.java",
+    ["public class Bar {", "  public void hello() {", '    System.out.println("hi");', "  }", "}"].join("\n")
+  );
+  // hello 方法应被识别（收集到 functions 列表）
+  const hello = info.functions.find((f) => f.name === "hello");
+  assert.ok(hello, "应识别 Java 方法 hello");
+});
+
+test("RA-JAVA-03: Java import 识别", () => {
+  const info = analyzeFile(
+    "Bar.java",
+    ["import java.util.List;", "import static java.lang.Math.PI;", "public class Bar {}"].join("\n")
+  );
+  assert.equal(info.imports.length, 2);
+  assert.ok(info.imports.includes("java.util.List"), "应识别 java.util.List");
+  assert.ok(info.imports.includes("java.lang.Math.PI"), "应识别 static import java.lang.Math.PI");
+});
+
+// ============================================================================
+// RA-RUST-01~03: Rust struct / fn / use（V2-P2 新增）
+// ============================================================================
+
+test("RA-RUST-01: Rust struct 识别（type === struct）", () => {
+  const info = analyzeFile("baz.rs", "pub struct Baz {\n  field: i32,\n}\n");
+  assert.equal(info.language, "rust");
+  assert.equal(info.parseStatus, "ok");
+  assert.equal(info.classes.length, 1);
+  assert.equal(info.classes[0]!.name, "Baz");
+  assert.equal(info.classes[0]!.type, "struct");
+});
+
+test("RA-RUST-02: Rust fn 识别（含返回类型）", () => {
+  const info = analyzeFile("add.rs", "pub fn add(a: i32, b: i32) -> i32 {\n  a + b\n}\n");
+  const addFn = info.functions.find((f) => f.name === "add");
+  assert.ok(addFn, "应识别 Rust fn add");
+  assert.equal(addFn!.params, "a: i32, b: i32");
+  assert.equal(addFn!.returnType, "i32");
+});
+
+test("RA-RUST-03: Rust use 识别", () => {
+  const info = analyzeFile("use.rs", "use std::collections::HashMap;\npub fn main() {}\n");
+  assert.ok(info.imports.includes("std::collections::HashMap"), "应识别 use std::collections::HashMap");
+});
+
+// ============================================================================
+// RA-GO-01~03: Go struct / func / import（V2-P2 新增）
+// ============================================================================
+
+test("RA-GO-01: Go struct 识别（type === struct）", () => {
+  const info = analyzeFile("foo.go", "type Foo struct {\n  X int\n}\n");
+  assert.equal(info.language, "go");
+  assert.equal(info.parseStatus, "ok");
+  assert.equal(info.classes.length, 1);
+  assert.equal(info.classes[0]!.name, "Foo");
+  assert.equal(info.classes[0]!.type, "struct");
+});
+
+test("RA-GO-02: Go func 识别", () => {
+  const info = analyzeFile("add.go", "func Add(a, b int) int { return a + b }\n");
+  const addFn = info.functions.find((f) => f.name === "Add");
+  assert.ok(addFn, "应识别 Go func Add");
+  assert.equal(addFn!.params, "a, b int");
+});
+
+test("RA-GO-03: Go import 识别（单行 import）", () => {
+  const info = analyzeFile("fmt.go", 'import "fmt"\nfunc main() { fmt.Println("hi") }\n');
+  assert.ok(info.imports.includes("fmt"), '应识别 import "fmt"');
+});
+
+// ============================================================================
+// RA-RUST-TYPE: Rust struct/enum/trait 类型映射（CM-06 配套）
+// ============================================================================
+
+test("RA-RUST-TYPE: Rust struct/enum/trait 类型映射正确", () => {
+  const info = analyzeFile("types.rs", ["pub struct Baz {}", "pub enum Qux {}", "pub trait Trait {}"].join("\n"));
+  assert.equal(info.classes.length, 3, "应识别 3 个类型");
+  const struct = info.classes.find((c) => c.name === "Baz");
+  assert.ok(struct, "应识别 struct Baz");
+  assert.equal(struct!.type, "struct");
+  const en = info.classes.find((c) => c.name === "Qux");
+  assert.ok(en, "应识别 enum Qux");
+  assert.equal(en!.type, "enum");
+  const trait = info.classes.find((c) => c.name === "Trait");
+  assert.ok(trait, "应识别 trait Trait");
+  assert.equal(trait!.type, "interface", "trait 应映射为 interface（语义最接近）");
 });
 
 test("RA-CALLS-01: 同文件函数调用识别（calls 字段）", () => {

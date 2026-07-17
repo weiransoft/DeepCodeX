@@ -126,28 +126,63 @@ test("CM-04: Python 类识别", async () => {
 });
 
 // ============================================================================
-// CM-05~CM-07: Java/Rust/Go（V2-P1 标记 skip，延后至 V2-P2）
+// CM-05~CM-07: Java/Rust/Go（V2-P2 去 skip 转绿，强化断言对齐测试方案 §2.5）
 // ============================================================================
 
-test("CM-05: Java 类识别（V2-P1 延后至 V2-P2）", { skip: "V2-P2 启用 Java/Rust/Go" }, async () => {
+test("CM-05: Java 类识别（V2-P2 去 skip 转绿）", async () => {
   writeFile("Bar.java", "public class Bar {}\n");
   const gen = makeGenerator(tempProject, [".java"]);
   const map = await gen.generateFullMap();
-  assert.ok(map.files.length >= 1);
+
+  assert.equal(map.stats.totalFiles, 1);
+  assert.equal(map.stats.parsedFiles, 1);
+  const barFile = map.files.find((f) => f.path.endsWith("Bar.java"));
+  assert.ok(barFile, "Bar.java 应在 CodeMap 中");
+  assert.equal(barFile!.language, "java");
+  assert.equal(barFile!.classes.length, 1, "应识别 1 个类");
+  assert.equal(barFile!.classes[0]!.name, "Bar", "类名应为 Bar");
+  assert.equal(barFile!.classes[0]!.type, "class", "类型应为 class");
 });
 
-test("CM-06: Rust struct/enum/trait（V2-P1 延后至 V2-P2）", { skip: "V2-P2 启用 Java/Rust/Go" }, async () => {
+test("CM-06: Rust struct/enum/trait（V2-P2 去 skip 转绿，验证三型映射）", async () => {
   writeFile("baz.rs", "pub struct Baz {}\npub enum Qux {}\npub trait Trait {}\n");
   const gen = makeGenerator(tempProject, [".rs"]);
   const map = await gen.generateFullMap();
-  assert.ok(map.files.length >= 1);
+
+  assert.equal(map.stats.totalFiles, 1);
+  const rustFile = map.files.find((f) => f.path.endsWith("baz.rs"));
+  assert.ok(rustFile, "baz.rs 应在 CodeMap 中");
+  assert.equal(rustFile!.language, "rust");
+  assert.equal(rustFile!.classes.length, 3, "应识别 3 个类型（struct/enum/trait）");
+
+  // struct → type === "struct"
+  const structCls = rustFile!.classes.find((c) => c.name === "Baz");
+  assert.ok(structCls, "应识别 struct Baz");
+  assert.equal(structCls!.type, "struct");
+
+  // enum → type === "enum"
+  const enumCls = rustFile!.classes.find((c) => c.name === "Qux");
+  assert.ok(enumCls, "应识别 enum Qux");
+  assert.equal(enumCls!.type, "enum");
+
+  // trait → type === "interface"（trait 语义最接近 interface）
+  const traitCls = rustFile!.classes.find((c) => c.name === "Trait");
+  assert.ok(traitCls, "应识别 trait Trait");
+  assert.equal(traitCls!.type, "interface", "trait 应映射为 interface");
 });
 
-test("CM-07: Go struct（V2-P1 延后至 V2-P2）", { skip: "V2-P2 启用 Java/Rust/Go" }, async () => {
+test("CM-07: Go struct（V2-P2 去 skip 转绿，验证 struct 类型）", async () => {
   writeFile("foo.go", "type Foo struct {}\n");
   const gen = makeGenerator(tempProject, [".go"]);
   const map = await gen.generateFullMap();
-  assert.ok(map.files.length >= 1);
+
+  assert.equal(map.stats.totalFiles, 1);
+  const goFile = map.files.find((f) => f.path.endsWith("foo.go"));
+  assert.ok(goFile, "foo.go 应在 CodeMap 中");
+  assert.equal(goFile!.language, "go");
+  assert.equal(goFile!.classes.length, 1, "应识别 1 个 struct");
+  assert.equal(goFile!.classes[0]!.name, "Foo", "结构体名应为 Foo");
+  assert.equal(goFile!.classes[0]!.type, "struct", "类型应为 struct");
 });
 
 // ============================================================================

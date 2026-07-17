@@ -1,21 +1,31 @@
 /**
  * 正则分析器（F-FOCUS-01 核心子模块）
  *
- * 零依赖使用正则表达式提取 TS/JS/Python 三语言的结构化信息：
- *   - 类/接口/结构体（ClassInfo）
+ * 零依赖使用正则表达式提取 TS/JS/Python/Java/Rust/Go 六语言的结构化信息：
+ *   - 类/接口/结构体/枚举（ClassInfo）
  *   - 函数/方法/箭头函数（FunctionInfo）
  *   - 导入/导出（原始说明符）
  *   - 同文件内函数调用关系（FunctionInfo.calls → 派生 CallEdge）
  *
  * 设计依据：
- * - V2 技术方案 §6.3 正则分析器（v2.1 修订：6 语言统一实现，V2-P1 仅启用 TS/JS/Python）
+ * - V2 技术方案 §6.3 正则分析器（v2.1 修订：6 语言统一实现）
  * - V2 技术方案 §6.1 FileInfo 接口（v2.6 补充 parseStatus/dependencies 字段）
+ * - V2_P2_IMPLEMENTATION_PLAN.md §3.1：V2-P2 启用 Java/Rust/Go（CM-05/06/07 去 skip 转绿）
  * - 架构师审查报告（2026-07-17）：CallEdge 仅同文件，简化建议已采纳
- * - 测试方案 §2.5 CM 系列（CM-01~CM-12，CM-05/06/07 Java/Rust/Go 延后至 V2-P2）
+ * - 测试方案 §2.5 CM 系列（CM-01~CM-12）
+ *
+ * V2-P2 变更点：
+ * - 新增 JAVA_PATTERNS / RUST_PATTERNS / GO_PATTERNS 三套正则规则集（自 quality 包移植）
+ * - getPatterns 方法补齐 java/rust/go 三个 case（移除 V2-P1 default 抛错）
+ * - matchClass 升级为语言感知 type 检测（新增 detectClassType 方法，支持 class/interface/struct/enum 四型）
+ * - matchFunction 增加 Java 关键字排除（P1-3 架构师建议，避免误匹配 if/for/while 等控制流）
+ * - extractReturnType 增加 Rust/Go 返回类型提取
  *
  * 已知局限（正则分析器固有，非简化）：
  * - 字符串/注释内的关键字可能被误匹配（正则无词法上下文）
  * - 大括号配对不处理字符串/注释内的花括号（endLine 可能偏差，fallback 到文件末尾）
+ * - Go import 块（import ( ... )）无状态ful解析，仅匹配单行 import 与块内行
+ * - Java returnType 提取留空（返回类型在方法名前，正则难以精确提取）
  * - 这些局限由 §4.6 US-ERR-003 单文件解析失败跳过机制兜底，不阻断整体扫描
  *
  * @module v2/codemap/regex-analyzer
@@ -28,7 +38,7 @@ import * as path from "node:path";
 // 类型定义（与设计文档 §6.1 对齐）
 // ============================================================================
 
-/** 支持的语言（V2-P1 启用 typescript/javascript/python，其余延后至 V2-P2） */
+/** 支持的语言（V2-P2 启用全部 6 语言：typescript/javascript/python/java/rust/go） */
 export type SupportedLanguage = "typescript" | "javascript" | "python" | "java" | "rust" | "go";
 
 /** 类/接口/结构体信息 */
@@ -123,6 +133,92 @@ const PYTHON_PATTERNS: LanguagePatterns = {
   // 导入：import x 或 from x import y，捕获模块路径
   importPattern: /^\s*(?:import\s+(\S+)|from\s+(\S+)\s+import)/,
   // 导出：Python 无显式 export，置空匹配（exports 恒为空数组）
+  exportPattern: /$^/,
+};
+
+// ============================================================================
+// V2-P2 新增：Java/Rust/Go 正则规则集（自 quality 包 generator.ts 移植）
+// ============================================================================
+
+/**
+ * Java 正则规则集
+ *
+ * 移植自 quality 包 analyzeJavaFile（generator.ts:851-970）。
+ * Java 特性：
+ * - 类/接口/枚举：[modifiers] class|interface|enum Name
+ * - 方法：[modifiers] returnType name(params) { （仅在类内部，正则无法精确归属）
+ * - 导入：import [static] fully.qualified.Name;
+ * - 无显式导出（Java 通过 public 修饰符控制可见性，exports 恒为空数组）
+ *
+ * 已知局限：方法正则可能误匹配字符串/注释内的关键字，
+ * 由 US-ERR-003 单文件解析失败跳过机制兜底。
+ */
+const JAVA_PATTERNS: LanguagePatterns = {
+  // 类/接口/枚举：[public|private|protected] [abstract|final] class|interface|enum Name
+  // 移植自 quality: /^(?:public\s+|private\s+|protected\s+)?(?:abstract\s+|final\s+)?(?:class|interface|enum)\s+([A-Z]\w*)/
+  classPattern: /(?:public\s+|private\s+|protected\s+)?(?:abstract\s+|final\s+)?(?:class|interface|enum)\s+([A-Z]\w*)/,
+  // 方法：[modifiers] returnType name(params) {
+  // 移植自 quality: /^(?:public\s+|private\s+|protected\s+)?(?:static\s+|final\s+|synchronized\s+|abstract\s+)*[\w<>\[\]]+\s+([A-Z]\w*|[a-z]\w*)\s*\(/
+  // 注意：Java 方法在类内部，正则无法精确归属，收集到 functions 列表
+  // matchFunction 中通过 KEYWORDS 排除控制流关键字（if/for/while 等后跟括号的场景）
+  functionPattern:
+    /(?:public\s+|private\s+|protected\s+)?(?:static\s+|final\s+|synchronized\s+|abstract\s+)*[\w<>[\]]+\s+([A-Z]\w*|[a-z]\w*)\s*\(([^)]*)\)/,
+  // 导入：import [static] fully.qualified.Name;
+  // 移植自 quality: /^import\s+(?:static\s+)?([\w.]+);/
+  importPattern: /^\s*import\s+(?:static\s+)?([\w.]+);/,
+  // 导出：Java 无显式导出，置空匹配
+  exportPattern: /$^/,
+};
+
+/**
+ * Rust 正则规则集
+ *
+ * 移植自 quality 包 analyzeRustFile（generator.ts:1097-1193）。
+ * Rust 特性：
+ * - 结构体/枚举/trait：[pub] struct|enum|trait Name
+ * - 函数：[pub] [async|const|unsafe] fn name(params) {
+ * - 导入：use path::to::module;
+ * - 无显式导出（Rust 通过 pub 修饰符控制可见性）
+ */
+const RUST_PATTERNS: LanguagePatterns = {
+  // 结构体/枚举/trait：[pub] struct|enum|trait Name
+  // 移植自 quality: /^(?:pub\s+)?(?:struct|enum|trait)\s+(\w+)/
+  classPattern: /(?:pub\s+)?(?:struct|enum|trait)\s+(\w+)/,
+  // 函数：[pub] [async|const|unsafe] fn name(params)
+  // 移植自 quality: /^(?:pub\s+)?(?:async\s+|const\s+|unsafe\s+)?fn\s+(\w+)\s*[<(]/
+  functionPattern: /(?:pub\s+)?(?:async\s+|const\s+|unsafe\s+)?fn\s+(\w+)\s*\(([^)]*)\)/,
+  // 导入：use path::to::module;
+  // 移植自 quality: /^use\s+([\w:]+)/
+  importPattern: /^\s*use\s+([\w:]+)/,
+  // 导出：Rust 无显式导出，置空匹配
+  exportPattern: /$^/,
+};
+
+/**
+ * Go 正则规则集
+ *
+ * 移植自 quality 包 analyzeGoFile（generator.ts:981-1086）。
+ * Go 特性：
+ * - 结构体：type Name struct {
+ * - 函数：func [receiver] name(params) {
+ * - 导入：import "path" 或 import ( "path1" "path2" )
+ * - 无显式导出（Go 通过首字母大写控制可见性）
+ *
+ * 已知局限：Go import 块（import ( ... )）需状态ful解析，当前无状态逐行正则
+ * 仅匹配单行 import 与块内行，块外字符串字面量可能误匹配（正则分析器固有局限，
+ * 由 US-ERR-003 单文件解析失败跳过机制兜底）。
+ */
+const GO_PATTERNS: LanguagePatterns = {
+  // 结构体：type Name struct {
+  // 移植自 quality: /^type\s+([A-Z]\w*)\s+struct/
+  classPattern: /type\s+([A-Z]\w*)\s+struct/,
+  // 函数：func [receiver] name(params) {
+  // 移植自 quality: /^func\s+(?:\(\s*\w+\s+\*?\w+\s*\)\s+)?([A-Z]\w*|[a-z]\w*)\s*\(/
+  functionPattern: /func\s+(?:\(\s*\w+\s+\*?\w+\s*\)\s+)?([A-Z]\w*|[a-z]\w*)\s*\(([^)]*)\)/,
+  // 导入：import "path" 或块内 "path" 行
+  // 移植自 quality: 单行 /^import\s+"([^"]+)"/ + 块内 /"([^"]+)"/
+  importPattern: /^\s*(?:import\s+)?"([^"]+)"/,
+  // 导出：Go 无显式导出，置空匹配
   exportPattern: /$^/,
 };
 
@@ -336,8 +432,8 @@ export class RegexASTAnalyzer {
   /**
    * 构造分析器
    *
-   * @param language 目标语言
-   * @throws {Error} 当 language 不是 TS/JS/Python 时抛错（V2-P1 仅支持三语言）
+   * @param language 目标语言（V2-P2 启用全部 6 语言：TS/JS/Python/Java/Rust/Go）
+   * @throws {Error} 当 language 不在 6 语言支持列表时抛错（SupportedLanguage 类型已约束，不应触达）
    */
   constructor(language: SupportedLanguage) {
     this.language = language;
@@ -347,11 +443,11 @@ export class RegexASTAnalyzer {
   /**
    * 获取语言对应的正则规则集
    *
-   * V2-P1 仅支持 TS/JS/Python，Java/Rust/Go 延后至 V2-P2。
+   * V2-P2 启用全部 6 语言（TS/JS/Python/Java/Rust/Go）。
    *
    * @param language 语言类型
    * @returns 正则规则集
-   * @throws {Error} 当语言未在 V2-P1 启用时抛错
+   * @throws {Error} 当语言不在 6 语言支持列表时抛错（fail-fast，类型已约束不应触达）
    */
   private static getPatterns(language: SupportedLanguage): LanguagePatterns {
     switch (language) {
@@ -360,9 +456,15 @@ export class RegexASTAnalyzer {
         return TS_JS_PATTERNS;
       case "python":
         return PYTHON_PATTERNS;
+      case "java":
+        return JAVA_PATTERNS;
+      case "rust":
+        return RUST_PATTERNS;
+      case "go":
+        return GO_PATTERNS;
       default:
-        // V2-P1 不启用 Java/Rust/Go，抛错以 fail-fast
-        throw new Error(`RegexASTAnalyzer: 语言 ${language} 未在 V2-P1 启用（延后至 V2-P2）`);
+        // 6 语言之外的值不应出现（SupportedLanguage 类型已约束）
+        throw new Error(`RegexASTAnalyzer: 不支持的语言 ${language}`);
     }
   }
 
@@ -477,7 +579,15 @@ export class RegexASTAnalyzer {
   }
 
   /**
-   * 匹配类定义
+   * 匹配类定义（V2-P2 升级：语言感知 type 检测）
+   *
+   * V2-P1 仅区分 interface vs class（line.includes("interface")）。
+   * V2-P2 扩展为支持 class/interface/struct/enum 四型：
+   * - TS/JS：interface → "interface"，其余 → "class"
+   * - Python：恒 → "class"
+   * - Java：interface → "interface"，enum → "enum"，其余 → "class"
+   * - Rust：struct → "struct"，enum → "enum"，trait → "interface"，其余 → "class"
+   * - Go：恒 → "struct"（Go type X struct）
    *
    * @param line 当前行文本
    * @param lineNum 当前行号（1-based）
@@ -489,8 +599,8 @@ export class RegexASTAnalyzer {
     if (!match) return;
     const name = match[1];
     if (!name) return;
-    // 判断类型：interface 关键字 → interface，否则 class（Python 只有 class）
-    const type: ClassInfo["type"] = line.includes("interface") ? "interface" : "class";
+    // 语言感知 type 检测（V2-P2 升级，支持 class/interface/struct/enum 四型）
+    const type = this.detectClassType(line);
     // 计算 endLine
     const endLine =
       this.language === "python" ? findPythonBlockEnd(lines, lineNum) : findMatchingBraceLine(lines, lineNum);
@@ -505,7 +615,48 @@ export class RegexASTAnalyzer {
   }
 
   /**
+   * 检测类/结构体/枚举/接口类型（V2-P2 新增，语言感知）
+   *
+   * 根据 language 与当前行关键字判定 ClassInfo["type"]：
+   * - TS/JS：interface 关键字 → "interface"，其余 → "class"
+   * - Python：恒 → "class"（Python 仅有 class）
+   * - Java：interface → "interface"，enum → "enum"，其余 → "class"
+   * - Rust：struct → "struct"，enum → "enum"，trait → "interface"（trait 语义最接近 interface），其余 → "class"
+   * - Go：恒 → "struct"（Go type X struct 形态固定）
+   *
+   * @param line 当前行文本
+   * @returns ClassInfo["type"] 联合类型之一
+   */
+  private detectClassType(line: string): ClassInfo["type"] {
+    switch (this.language) {
+      case "typescript":
+      case "javascript":
+        return line.includes("interface") ? "interface" : "class";
+      case "python":
+        return "class";
+      case "java":
+        if (line.includes("interface")) return "interface";
+        if (line.includes("enum")) return "enum";
+        return "class";
+      case "rust":
+        if (line.includes("struct")) return "struct";
+        if (line.includes("enum")) return "enum";
+        if (/\btrait\b/.test(line)) return "interface";
+        return "class";
+      case "go":
+        return "struct";
+      default:
+        return "class";
+    }
+  }
+
+  /**
    * 匹配函数定义
+   *
+   * V2-P2 升级：增加 Java 控制流关键字排除（P1-3 架构师建议）。
+   * Java functionPattern 含前置 returnType 捕获组，可能误匹配
+   * "return foo(args)" / "else if (cond)" 等控制流语句。
+   * 通过 KEYWORDS 集合排除这些误匹配（复用既有 KEYWORDS Set）。
    *
    * @param line 当前行文本
    * @param lineNum 当前行号（1-based）
@@ -517,6 +668,7 @@ export class RegexASTAnalyzer {
     if (!match) return;
     // TS/JS：match[1]=name, match[2]=params
     // Python：match[1]=indent, match[2]=name, match[3]=params
+    // Java/Rust/Go：match[1]=name, match[2]=params（与 TS/JS 一致）
     let name: string | undefined;
     let params: string | undefined;
     if (this.language === "python") {
@@ -527,6 +679,13 @@ export class RegexASTAnalyzer {
       params = match[2];
     }
     if (!name || params === undefined) return;
+
+    // V2-P2 新增：Java 关键字排除（P1-3 架构师建议）
+    // Java functionPattern 含前置 returnType，可能误匹配 "return foo(args)" / "else if (cond)"
+    // 通过 KEYWORDS 集合排除控制流关键字（if/for/while/return 等）
+    if (this.language === "java" && KEYWORDS.has(name)) {
+      return;
+    }
 
     // 提取返回类型注解（TS 的 ): ReturnType { 或 Python 的 ) -> ReturnType:）
     const returnType = this.extractReturnType(line);
@@ -642,20 +801,35 @@ export class RegexASTAnalyzer {
   /**
    * 提取返回类型注解
    *
-   * TS/JS：匹配 `): ReturnType {` 或 `): ReturnType;`
-   * Python：匹配 `) -> ReturnType:`
+   * 各语言返回类型位置不同：
+   * - TS/JS：`function name(params): ReturnType {` — 返回类型在 ) 后
+   * - Python：`def name(params) -> ReturnType:` — 返回类型在 ) 后，用 -> 标记
+   * - Java：`returnType name(params) {` — 返回类型在 name 前（正则难以精确提取，返回空串）
+   * - Rust：`fn name(params) -> ReturnType {` — 返回类型在 ) 后，用 -> 标记
+   * - Go：`func name(params) ReturnType {` — 返回类型在 ) 后，无标记符号
    *
    * @param line 当前行文本
    * @returns 返回类型字符串；提取不到返回空串
    */
   private extractReturnType(line: string): string {
-    if (this.language === "python") {
-      // Python: def foo(...) -> ReturnType:
-      const m = line.match(/->\s*([^:]+):/);
-      return m?.[1]?.trim() ?? "";
+    switch (this.language) {
+      case "python":
+        // Python: def foo(...) -> ReturnType:
+        return line.match(/->\s*([^:]+):/)?.[1]?.trim() ?? "";
+      case "rust":
+        // Rust: fn foo(...) -> ReturnType { 或 fn foo(...) -> ReturnType {
+        return line.match(/->\s*([^{]+)/)?.[1]?.trim() ?? "";
+      case "go":
+        // Go: func foo(params) ReturnType { — 返回类型在 ) 和 { 之间
+        return line.match(/\)\s+(\w+)\s*\{/)?.[1]?.trim() ?? "";
+      case "java":
+        // Java: returnType name(params) { — 返回类型在 name 前
+        // 正则难以精确提取（需解析 modifiers + returnType 前缀），
+        // V2-P2 范围内返回空串（YAGNI，测试用例不要求 Java returnType）
+        return "";
+      default:
+        // TS/JS: function foo(...): ReturnType { 或 ): ReturnType;
+        return line.match(/\)\s*:\s*([^{;]+)[{;]/)?.[1]?.trim() ?? "";
     }
-    // TS/JS: function foo(...): ReturnType {
-    const m = line.match(/\)\s*:\s*([^{;]+)[{;]/);
-    return m?.[1]?.trim() ?? "";
   }
 }

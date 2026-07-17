@@ -22,7 +22,6 @@ import * as os from "node:os";
 import { CodeMapGenerator } from "../../codemap/generator";
 import type { CodeMap } from "../../codemap/generator";
 import { GlobalContextManager } from "../../context/global-context";
-import type { GlobalContext } from "../../context/global-context";
 import { TaskContextManager } from "../../context/task-context-manager";
 import type { TaskDefinition, FocusPoint } from "../../context/types";
 import { ContextSynchronizer } from "../../context/synchronizer";
@@ -30,10 +29,12 @@ import { RelevanceScorer } from "../../context/relevance-scorer";
 import { SlidingWindowManager } from "../../context/sliding-window";
 import { DualLayerContextManager } from "../../context/dual-layer-manager";
 import type { CodeMapProvider } from "../../context/dual-layer-manager";
+// V2-P2 新增导入：ProgressiveContextLoader + RuleBasedSummarizer（真实实现，非 mock）
+import { ProgressiveContextLoader } from "../../context/progressive-loader";
+import { RuleBasedSummarizer } from "../../memory/rule-based-summarizer";
 import { ProjectUnderstandingService } from "../../understanding/project-understanding";
 import { ProjectMemoryManager } from "../../memory/project-memory";
 import { DefaultSessionContextHook } from "../../integration/session-hook";
-import type { ContextSnippet } from "../../integration/session-hook";
 
 // ============================================================================
 // 辅助工厂
@@ -142,14 +143,20 @@ test("IT-01: 端到端注入（CodeMap 生成 → buildOptimizedContext → setS
     const globalManager = new GlobalContextManager(path.join(tmpGlobalDir, "global-context.json"));
     const taskManager = new TaskContextManager();
     const scorer = new RelevanceScorer();
-    const windowManager = new SlidingWindowManager({}, scorer);
+    // V2-P2 升级：4 参 SlidingWindowManager + 8 参 DualLayerContextManager
+    // 注入真实 ProgressiveContextLoader（三层加载）+ RuleBasedSummarizer（摘要压缩，非 mock）
+    const progressiveLoader = new ProgressiveContextLoader({ tokenBudget: 100_000 });
+    const summarizer = new RuleBasedSummarizer();
+    const windowManager = new SlidingWindowManager({ tokenBudget: 100_000 }, scorer, progressiveLoader, summarizer);
     const dualLayer = new DualLayerContextManager(
-      { projectRoot, window: {}, scoring: {}, defaultTokenBudget: 100000 },
+      { projectRoot, window: {}, scoring: {}, defaultTokenBudget: 100_000 },
       globalManager,
       taskManager,
       codeMapProvider,
       scorer,
-      windowManager
+      windowManager,
+      progressiveLoader,
+      summarizer
     );
 
     // ---- 创建任务 + 加 focusPoint ----
@@ -329,14 +336,20 @@ test("IT-03: 识别→记忆→上下文（ProjectUnderstandingService.understan
 
     const taskManager = new TaskContextManager();
     const scorer = new RelevanceScorer();
-    const windowManager = new SlidingWindowManager({}, scorer);
+    // V2-P2 升级：4 参 SlidingWindowManager + 8 参 DualLayerContextManager
+    // 注入真实 ProgressiveContextLoader（三层加载）+ RuleBasedSummarizer（摘要压缩，非 mock）
+    const progressiveLoader = new ProgressiveContextLoader({ tokenBudget: 100_000 });
+    const summarizer = new RuleBasedSummarizer();
+    const windowManager = new SlidingWindowManager({ tokenBudget: 100_000 }, scorer, progressiveLoader, summarizer);
     const dualLayer = new DualLayerContextManager(
-      { projectRoot, window: {}, scoring: {}, defaultTokenBudget: 100000 },
+      { projectRoot, window: {}, scoring: {}, defaultTokenBudget: 100_000 },
       globalManager,
       taskManager,
       codeMapProvider,
       scorer,
-      windowManager
+      windowManager,
+      progressiveLoader,
+      summarizer
     );
 
     // 创建任务并加 focusPoint
@@ -415,14 +428,20 @@ test("IT-04: 错误恢复端到端（CodeMap 损坏降级 + global-context 损�
 
     const taskManager = new TaskContextManager();
     const scorer = new RelevanceScorer();
-    const windowManager = new SlidingWindowManager({}, scorer);
+    // V2-P2 升级：4 参 SlidingWindowManager + 8 参 DualLayerContextManager
+    // 注入真实 ProgressiveContextLoader（三层加载）+ RuleBasedSummarizer（摘要压缩，非 mock）
+    const progressiveLoader = new ProgressiveContextLoader({ tokenBudget: 100_000 });
+    const summarizer = new RuleBasedSummarizer();
+    const windowManager = new SlidingWindowManager({ tokenBudget: 100_000 }, scorer, progressiveLoader, summarizer);
     const dualLayer = new DualLayerContextManager(
-      { projectRoot, window: {}, scoring: {}, defaultTokenBudget: 100000 },
+      { projectRoot, window: {}, scoring: {}, defaultTokenBudget: 100_000 },
       globalManager,
       taskManager,
       codeMapProvider,
       scorer,
-      windowManager
+      windowManager,
+      progressiveLoader,
+      summarizer
     );
 
     // ---- 验证 1：global-context 损坏时降级为默认空上下文（不抛错）----

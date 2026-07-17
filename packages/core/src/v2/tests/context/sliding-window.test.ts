@@ -1,5 +1,5 @@
 /**
- * RelevanceScorer + SlidingWindowManager 单元测试（F-FOCUS-02）
+ * RelevanceScorer + SlidingWindowManager 单元测试（F-FOCUS-02 + V2-P2 升级）
  *
  * 测试覆盖：
  * - RS-01: 直达距离评分（d=0 → 1.0）
@@ -14,16 +14,25 @@
  * - RS-10: 总评分加权求和正确性
  * - SW-01: Top-K 相关文件保留
  * - SW-02: 最近 N 轮对话保留
- * - SW-03: Token 预算截断
- * - SW-04: 超预算从低分端丢弃
+ * - SW-03: Token 预算截断（V2-P2：超预算压缩而非丢弃，断言改为 compressedSnippets）
+ * - SW-04: 超预算从低分端丢弃（V2-P2：低分端压缩为摘要）
  * - SW-05: 空候选窗口
  * - SW-06: 单文件窗口
  * - SW-07: compressionRatio 正确性
  * - SW-08: 保留文件路径列表正确性
  * - SW-09: 保留对话轮数正确性
  * - SW-10: 文件片段携带 relevance 评分
+ * - SW-COMPRESS-01: 超预算片段被压缩为摘要（V2-P2 新增）
+ * - SW-COMPRESS-02: 压缩后 Token 下降且 compressionRatio < 1.0（V2-P2 新增）
+ * - SW-COMPRESS-03: getBudgetAllocation 三层预算分配正确（V2-P2 新增）
+ * - SW-ASYNC-01: buildWindow 返回 Promise（V2-P2 新增）
  *
- * 所有测试使用真实数据构造 CodeMap，禁止 mock。
+ * V2-P2 升级点：
+ * - SlidingWindowManager 构造函数从 2 参数升级为 4 参数（+progressiveLoader +summarizer）
+ * - buildWindow 从同步方法升级为 async 方法（compressOldSnippets 需异步调用 ContentSummarizer）
+ * - SW-03/SW-04 断言适配：V2-P2 超预算片段压缩为摘要而非丢弃，droppedCount 语义变化
+ *
+ * 所有测试使用真实数据构造 CodeMap + 真实 RuleBasedSummarizer（非 mock），禁止 mock。
  *
  * @module v2/tests/context/sliding-window.test
  */
@@ -33,9 +42,13 @@ import assert from "node:assert/strict";
 import { RelevanceScorer } from "../../context/relevance-scorer";
 import type { RelevanceScoreInput } from "../../context/relevance-scorer";
 import { SlidingWindowManager } from "../../context/sliding-window";
+import type { SlidingWindowConfig } from "../../context/sliding-window";
 import type { TaskContext, FocusPoint } from "../../context/types";
 import type { CodeMap, FileInfo } from "../../codemap/generator";
 import type { ContextSnippet } from "../../integration/session-hook";
+// V2-P2 新增导入：ProgressiveContextLoader + RuleBasedSummarizer（真实实现，非 mock）
+import { ProgressiveContextLoader } from "../../context/progressive-loader";
+import { RuleBasedSummarizer } from "../../memory/rule-based-summarizer";
 
 // ============================================================================
 // 辅助工厂
@@ -163,6 +176,34 @@ function createTaskContext(focusPoints: FocusPoint[] = [], description = "测试
  */
 function createSnippet(type: string, content: string, source: string): ContextSnippet {
   return { type, content, source };
+}
+
+/**
+ * 创建测试用 SlidingWindowManager（V2-P2 4 参构造）
+ *
+ * V2-P2 升级：SlidingWindowManager 构造函数从 2 参升级为 4 参（+progressiveLoader +summarizer）。
+ * 本工厂统一注入真实的 ProgressiveContextLoader + RuleBasedSummarizer（非 mock），
+ * 减少测试样板代码并确保三层预算比例与 SlidingWindowConfig 对齐。
+ *
+ * @param config 滑动窗口配置（部分字段，缺省使用 SlidingWindowManager.DEFAULT_CONFIG）
+ * @param scorer 相关性评分器（可选，默认 new RelevanceScorer()）
+ * @returns 4 参构造的 SlidingWindowManager 实例
+ */
+function createSlidingWindow(
+  config: Partial<SlidingWindowConfig> = {},
+  scorer: RelevanceScorer = new RelevanceScorer()
+): SlidingWindowManager {
+  // V2-P2：4 参构造，注入真实 ProgressiveContextLoader（tokenBudget 与 SW 对齐，保证三层预算分配正确）
+  const tokenBudget = config.tokenBudget ?? 100_000;
+  const progressiveLoader = new ProgressiveContextLoader({
+    tokenBudget,
+    metadataBudgetRatio: config.metadataBudgetRatio ?? 0.1,
+    instructionBudgetRatio: config.instructionBudgetRatio ?? 0.4,
+    resourceBudgetRatio: config.resourceBudgetRatio ?? 0.5,
+  });
+  // V2-P2：注入真实 RuleBasedSummarizer（真实启发式算法，非 mock，CI 环境无 DEEPSEEK_API_KEY 时使用）
+  const summarizer = new RuleBasedSummarizer();
+  return new SlidingWindowManager(config, scorer, progressiveLoader, summarizer);
 }
 
 // ============================================================================
@@ -448,9 +489,9 @@ test("RS-10: 总评分加权求和正确性", () => {
 // SW-01: Top-K 相关文件保留
 // ============================================================
 
-test("SW-01: Top-K 相关文件保留（topKFiles=2 时保留 2 个高分文件）", () => {
+test("SW-01: Top-K 相关文件保留（topKFiles=2 时保留 2 个高分文件）", async () => {
   const scorer = new RelevanceScorer();
-  const window = new SlidingWindowManager({ tokenBudget: 100_000, topKFiles: 2 }, scorer);
+  const window = createSlidingWindow({ tokenBudget: 100_000, topKFiles: 2 }, scorer);
   const codeMap = createCodeMap([
     createFileInfo("src/auth.ts", ["src/utils.ts"]),
     createFileInfo("src/utils.ts"),
@@ -465,7 +506,8 @@ test("SW-01: Top-K 相关文件保留（topKFiles=2 时保留 2 个高分文件�
     createSnippet("file_content", "unrelated content", "src/unrelated.ts"),
   ];
 
-  const result = window.buildWindow(candidates, task, codeMap);
+  // V2-P2：buildWindow 已改为 async，需 await
+  const result = await window.buildWindow(candidates, task, codeMap);
   assert.equal(result.retainedFiles.length, 2, "topKFiles=2 应保留 2 个文件");
   // auth.ts（距离 1.0）和 utils.ts（距离 0.7）应被保留
   assert.ok(result.retainedFiles.includes("src/auth.ts"), "应保留 src/auth.ts（距离 1.0）");
@@ -477,9 +519,9 @@ test("SW-01: Top-K 相关文件保留（topKFiles=2 时保留 2 个高分文件�
 // SW-02: 最近 N 轮对话保留
 // ============================================================
 
-test("SW-02: 最近 N 轮对话保留（keepRecentTurns=2）", () => {
+test("SW-02: 最近 N 轮对话保留（keepRecentTurns=2）", async () => {
   const scorer = new RelevanceScorer();
-  const window = new SlidingWindowManager({ tokenBudget: 100_000, keepRecentTurns: 2 }, scorer);
+  const window = createSlidingWindow({ tokenBudget: 100_000, keepRecentTurns: 2 }, scorer);
   const codeMap = createCodeMap([createFileInfo("src/a.ts")]);
   const task = createTaskContext([createFileFocusPoint("src/a.ts")]);
 
@@ -492,7 +534,8 @@ test("SW-02: 最近 N 轮对话保留（keepRecentTurns=2）", () => {
     createSnippet("conversation", "第5轮对话", "turn-5"),
   ];
 
-  const result = window.buildWindow(candidates, task, codeMap);
+  // V2-P2：buildWindow 已改为 async，需 await
+  const result = await window.buildWindow(candidates, task, codeMap);
   assert.equal(result.retainedTurns, 2, "keepRecentTurns=2 应保留 2 轮对话");
   // 保留最后 2 轮（turn-4, turn-5）
   const conversationSources = result.retainedSnippets.filter((s) => s.type === "conversation").map((s) => s.source);
@@ -505,10 +548,10 @@ test("SW-02: 最近 N 轮对话保留（keepRecentTurns=2）", () => {
 // SW-03: Token 预算截断
 // ============================================================
 
-test("SW-03: Token 预算截断（超预算时丢弃低分片段）", () => {
+test("SW-03: Token 预算截断（V2-P2：超预算片段压缩为摘要而非丢弃）", async () => {
   const scorer = new RelevanceScorer();
   // charsPerToken=4，tokenBudget=10 → 最大 40 字符
-  const window = new SlidingWindowManager({ tokenBudget: 10, charsPerToken: 4, topKFiles: 10 }, scorer);
+  const window = createSlidingWindow({ tokenBudget: 10, charsPerToken: 4, topKFiles: 10 }, scorer);
   const codeMap = createCodeMap([createFileInfo("src/a.ts"), createFileInfo("src/b.ts"), createFileInfo("src/c.ts")]);
   // focusPoint 是 a.ts，b/c 不在图中（距离 0.1）
   const task = createTaskContext([createFileFocusPoint("src/a.ts")]);
@@ -520,10 +563,12 @@ test("SW-03: Token 预算截断（超预算时丢弃低分片段）", () => {
     createSnippet("file_content", "c".repeat(20), "src/c.ts"), // 距离 0.1（图未含）
   ];
 
-  const result = window.buildWindow(candidates, task, codeMap);
-  // 预算 10 token，每片段 5 token → 最多保留 2 个
+  // V2-P2：buildWindow 已改为 async，需 await
+  const result = await window.buildWindow(candidates, task, codeMap);
+  // 预算 10 token，每片段 5 token → 最多保留 2 个，超预算的 1 个被压缩为摘要
   assert.ok(result.estimatedTokens <= 10, "估算 token 不应超预算");
-  assert.ok(result.droppedCount >= 1, "应至少丢弃 1 个片段");
+  // V2-P2 断言适配：超预算片段被压缩为摘要而非丢弃，断言改为 compressedSnippets
+  assert.ok(result.compressedSnippets.length >= 1, "应至少压缩 1 个片段为摘要");
   // a.ts（距离 1.0）应被保留（高分优先）
   assert.ok(result.retainedFiles.includes("src/a.ts"), "src/a.ts（高分）应被保留");
 });
@@ -532,10 +577,10 @@ test("SW-03: Token 预算截断（超预算时丢弃低分片段）", () => {
 // SW-04: 超预算从低分端丢弃
 // ============================================================
 
-test("SW-04: 超预算从低分端丢弃（a.ts 高分保留，c.ts 低分丢弃）", () => {
+test("SW-04: 超预算从低分端压缩（V2-P2：a.ts 高分保留，c.ts 低分压缩为摘要）", async () => {
   const scorer = new RelevanceScorer();
   // charsPerToken=4，tokenBudget=6 → 最大 24 字符 → 1 个片段（20 字符=5 token）
-  const window = new SlidingWindowManager({ tokenBudget: 6, charsPerToken: 4, topKFiles: 10 }, scorer);
+  const window = createSlidingWindow({ tokenBudget: 6, charsPerToken: 4, topKFiles: 10 }, scorer);
   const codeMap = createCodeMap([
     createFileInfo("src/a.ts", ["src/b.ts"]),
     createFileInfo("src/b.ts"),
@@ -550,26 +595,35 @@ test("SW-04: 超预算从低分端丢弃（a.ts 高分保留，c.ts 低分丢弃
     createSnippet("file_content", "c".repeat(20), "src/c.ts"), // 距离 0.1
   ];
 
-  const result = window.buildWindow(candidates, task, codeMap);
-  // 预算 6 token，每片段 5 token → 最多保留 1 个
-  assert.ok(result.retainedSnippets.length === 1, "应仅保留 1 个片段");
+  // V2-P2：buildWindow 已改为 async，需 await
+  const result = await window.buildWindow(candidates, task, codeMap);
+  // 预算 6 token，每片段 5 token → 最多保留 1 个（retainedSnippets 不含压缩片段）
+  assert.ok(result.retainedSnippets.length === 1, "应仅保留 1 个片段（压缩片段不计入 retainedSnippets）");
   // a.ts（距离 1.0，最高分）应被保留
   assert.ok(result.retainedFiles.includes("src/a.ts"), "src/a.ts（最高分）应被保留");
-  assert.ok(!result.retainedFiles.includes("src/c.ts"), "src/c.ts（最低分）应被丢弃");
+  // c.ts（距离 0.1，最低分）不应在 retainedFiles 中（被压缩为摘要，不在保留列表）
+  assert.ok(!result.retainedFiles.includes("src/c.ts"), "src/c.ts（最低分）应被压缩而非保留");
+  // V2-P2 新增断言：b.ts 和 c.ts 应被压缩为 compressed_summary 类型片段
+  assert.ok(result.compressedSnippets.length >= 1, "应至少压缩 1 个低分片段为摘要");
+  const compressedSources = result.compressedSnippets.map((s) => s.source);
+  // 低分端优先被压缩：c.ts（最低分）应在压缩列表中
+  assert.ok(compressedSources.includes("src/c.ts"), "src/c.ts（最低分）应在压缩片段中");
 });
 
 // ============================================================
 // SW-05: 空候选窗口
 // ============================================================
 
-test("SW-05: 空候选窗口（candidates=[] 返回空结果）", () => {
+test("SW-05: 空候选窗口（candidates=[] 返回空结果）", async () => {
   const scorer = new RelevanceScorer();
-  const window = new SlidingWindowManager({}, scorer);
+  const window = createSlidingWindow({}, scorer);
   const codeMap = createCodeMap([]);
   const task = createTaskContext();
 
-  const result = window.buildWindow([], task, codeMap);
+  // V2-P2：buildWindow 已改为 async，需 await
+  const result = await window.buildWindow([], task, codeMap);
   assert.equal(result.retainedSnippets.length, 0, "空候选应返回 0 个保留片段");
+  assert.equal(result.compressedSnippets.length, 0, "空候选应压缩 0 个片段");
   assert.equal(result.droppedCount, 0, "空候选应丢弃 0 个片段");
   assert.equal(result.estimatedTokens, 0, "空候选估算 token 应为 0");
   assert.equal(result.originalTokens, 0, "空候选原始 token 应为 0");
@@ -580,9 +634,9 @@ test("SW-05: 空候选窗口（candidates=[] 返回空结果）", () => {
 // SW-06: 单文件窗口
 // ============================================================
 
-test("SW-06: 单文件窗口（1 个文件片段 + 1 轮对话）", () => {
+test("SW-06: 单文件窗口（1 个文件片段 + 1 轮对话）", async () => {
   const scorer = new RelevanceScorer();
-  const window = new SlidingWindowManager({ topKFiles: 10, keepRecentTurns: 5 }, scorer);
+  const window = createSlidingWindow({ topKFiles: 10, keepRecentTurns: 5 }, scorer);
   const codeMap = createCodeMap([createFileInfo("src/a.ts")]);
   const task = createTaskContext([createFileFocusPoint("src/a.ts")]);
 
@@ -591,7 +645,8 @@ test("SW-06: 单文件窗口（1 个文件片段 + 1 轮对话）", () => {
     createSnippet("conversation", "对话内容", "turn-1"),
   ];
 
-  const result = window.buildWindow(candidates, task, codeMap);
+  // V2-P2：buildWindow 已改为 async，需 await
+  const result = await window.buildWindow(candidates, task, codeMap);
   assert.equal(result.retainedSnippets.length, 2, "应保留 2 个片段（1 文件 + 1 对话）");
   assert.equal(result.retainedFiles.length, 1, "应保留 1 个文件");
   assert.equal(result.retainedTurns, 1, "应保留 1 轮对话");
@@ -601,10 +656,10 @@ test("SW-06: 单文件窗口（1 个文件片段 + 1 轮对话）", () => {
 // SW-07: compressionRatio 正确性
 // ============================================================
 
-test("SW-07: compressionRatio 正确性（estimatedTokens / originalTokens）", () => {
+test("SW-07: compressionRatio 正确性（estimatedTokens / originalTokens）", async () => {
   const scorer = new RelevanceScorer();
   // charsPerToken=4，tokenBudget=10 → 最大 40 字符
-  const window = new SlidingWindowManager({ tokenBudget: 10, charsPerToken: 4, topKFiles: 10 }, scorer);
+  const window = createSlidingWindow({ tokenBudget: 10, charsPerToken: 4, topKFiles: 10 }, scorer);
   const codeMap = createCodeMap([createFileInfo("src/a.ts"), createFileInfo("src/b.ts")]);
   const task = createTaskContext([createFileFocusPoint("src/a.ts")]);
 
@@ -614,10 +669,11 @@ test("SW-07: compressionRatio 正确性（estimatedTokens / originalTokens）", 
     createSnippet("file_content", "b".repeat(40), "src/b.ts"),
   ];
 
-  const result = window.buildWindow(candidates, task, codeMap);
-  // originalTokens = 20，estimatedTokens = 10（仅保留 1 个）
+  // V2-P2：buildWindow 已改为 async，需 await
+  const result = await window.buildWindow(candidates, task, codeMap);
+  // originalTokens = 20，estimatedTokens = 10（仅保留 1 个；压缩片段不计入 estimatedTokens）
   assert.equal(result.originalTokens, 20, "原始 token 应为 20");
-  assert.equal(result.estimatedTokens, 10, "估算 token 应为 10");
+  assert.equal(result.estimatedTokens, 10, "估算 token 应为 10（不含压缩片段）");
   assert.equal(result.compressionRatio, 0.5, "压缩率应为 0.5");
 });
 
@@ -625,9 +681,9 @@ test("SW-07: compressionRatio 正确性（estimatedTokens / originalTokens）", 
 // SW-08: 保留文件路径列表正确性
 // ============================================================
 
-test("SW-08: 保留文件路径列表正确性", () => {
+test("SW-08: 保留文件路径列表正确性", async () => {
   const scorer = new RelevanceScorer();
-  const window = new SlidingWindowManager({ topKFiles: 2, keepRecentTurns: 0 }, scorer);
+  const window = createSlidingWindow({ topKFiles: 2, keepRecentTurns: 0 }, scorer);
   const codeMap = createCodeMap([createFileInfo("src/auth.ts", ["src/utils.ts"]), createFileInfo("src/utils.ts")]);
   const task = createTaskContext([createFileFocusPoint("src/auth.ts")]);
 
@@ -637,7 +693,8 @@ test("SW-08: 保留文件路径列表正确性", () => {
     createSnippet("file_content", "unrelated", "src/unrelated.ts"),
   ];
 
-  const result = window.buildWindow(candidates, task, codeMap);
+  // V2-P2：buildWindow 已改为 async，需 await
+  const result = await window.buildWindow(candidates, task, codeMap);
   assert.equal(result.retainedFiles.length, 2, "应保留 2 个文件");
   assert.deepEqual(
     result.retainedFiles.sort(),
@@ -650,9 +707,9 @@ test("SW-08: 保留文件路径列表正确性", () => {
 // SW-09: 保留对话轮数正确性
 // ============================================================
 
-test("SW-09: 保留对话轮数正确性（keepRecentTurns=3，5 轮对话保留 3 轮）", () => {
+test("SW-09: 保留对话轮数正确性（keepRecentTurns=3，5 轮对话保留 3 轮）", async () => {
   const scorer = new RelevanceScorer();
-  const window = new SlidingWindowManager({ keepRecentTurns: 3, topKFiles: 0 }, scorer);
+  const window = createSlidingWindow({ keepRecentTurns: 3, topKFiles: 0 }, scorer);
   const codeMap = createCodeMap([]);
   const task = createTaskContext();
 
@@ -664,7 +721,8 @@ test("SW-09: 保留对话轮数正确性（keepRecentTurns=3，5 轮对话保留
     createSnippet("conversation", "t5", "turn-5"),
   ];
 
-  const result = window.buildWindow(candidates, task, codeMap);
+  // V2-P2：buildWindow 已改为 async，需 await
+  const result = await window.buildWindow(candidates, task, codeMap);
   assert.equal(result.retainedTurns, 3, "应保留 3 轮对话");
   // 保留最后 3 轮
   const sources = result.retainedSnippets.map((s) => s.source);
@@ -679,18 +737,149 @@ test("SW-09: 保留对话轮数正确性（keepRecentTurns=3，5 轮对话保留
 // SW-10: 文件片段携带 relevance 评分
 // ============================================================
 
-test("SW-10: 文件片段携带 relevance 评分（由 scorer 计算）", () => {
+test("SW-10: 文件片段携带 relevance 评分（由 scorer 计算）", async () => {
   const scorer = new RelevanceScorer();
-  const window = new SlidingWindowManager({ topKFiles: 10 }, scorer);
+  const window = createSlidingWindow({ topKFiles: 10 }, scorer);
   const codeMap = createCodeMap([createFileInfo("src/auth.ts")]);
   const task = createTaskContext([createFileFocusPoint("src/auth.ts")]);
 
   const candidates: ContextSnippet[] = [createSnippet("file_content", "auth content", "src/auth.ts")];
 
-  const result = window.buildWindow(candidates, task, codeMap);
+  // V2-P2：buildWindow 已改为 async，需 await
+  const result = await window.buildWindow(candidates, task, codeMap);
   assert.equal(result.retainedSnippets.length, 1, "应保留 1 个片段");
   const retained = result.retainedSnippets[0];
   assert.ok(retained.relevance !== undefined, "文件片段应携带 relevance 评分");
   assert.ok(typeof retained.relevance === "number", "relevance 应为数字");
   assert.ok(retained.relevance >= 0 && retained.relevance <= 1, "relevance 应在 0-1 之间");
+});
+
+// ============================================================================
+// V2-P2 新增测试（SW-COMPRESS-01 ~ SW-COMPRESS-03 + SW-ASYNC-01）
+// ============================================================================
+
+// ============================================================
+// SW-COMPRESS-01: 超预算片段被压缩为摘要（type="compressed_summary"）
+// ============================================================
+
+test("SW-COMPRESS-01: 超预算片段被压缩为摘要（type=compressed_summary，content 前缀 [摘要]）", async () => {
+  const scorer = new RelevanceScorer();
+  // 预算 5 token（20 字符），2 个片段各 20 字符（5 token）→ 保留 1 个，压缩 1 个
+  const window = createSlidingWindow(
+    { tokenBudget: 5, charsPerToken: 4, topKFiles: 10, maxCompressedSnippets: 10 },
+    scorer
+  );
+  const codeMap = createCodeMap([createFileInfo("src/a.ts"), createFileInfo("src/b.ts")]);
+  const task = createTaskContext([createFileFocusPoint("src/a.ts")]);
+
+  // 2 个片段，每个 20 字符（5 token），总 40 字符（10 token）> 5 token 预算
+  const candidates: ContextSnippet[] = [
+    createSnippet("file_content", "a".repeat(20), "src/a.ts"), // 距离 1.0（直达，保留）
+    createSnippet("file_content", "b".repeat(20), "src/b.ts"), // 距离 0.1（图未含，压缩）
+  ];
+
+  const result = await window.buildWindow(candidates, task, codeMap);
+
+  // 断言 1：compressedSnippets 非空（至少 1 个被压缩）
+  assert.ok(result.compressedSnippets.length >= 1, "应至少压缩 1 个超预算片段");
+
+  // 断言 2：压缩片段 type 为 "compressed_summary"
+  const compressed = result.compressedSnippets[0];
+  assert.equal(compressed.type, "compressed_summary", "压缩片段 type 应为 compressed_summary");
+
+  // 断言 3：压缩片段 content 前缀为 "[摘要] "
+  assert.ok(
+    compressed.content.startsWith("[摘要] "),
+    `压缩片段 content 应以 "[摘要] " 开头，实际：${compressed.content}`
+  );
+
+  // 断言 4：压缩片段 source 保留原始来源
+  assert.equal(compressed.source, "src/b.ts", "压缩片段 source 应保留原始来源 src/b.ts");
+});
+
+// ============================================================
+// SW-COMPRESS-02: 压缩后 Token 下降且 compressionRatio < 1.0
+// ============================================================
+
+test("SW-COMPRESS-02: 压缩后 estimatedTokens < originalTokens 且 compressionRatio < 1.0", async () => {
+  const scorer = new RelevanceScorer();
+  // 预算 5 token，2 个片段各 40 字符（10 token）→ 保留 1 个，压缩 1 个
+  const window = createSlidingWindow(
+    { tokenBudget: 5, charsPerToken: 4, topKFiles: 10, maxCompressedSnippets: 10 },
+    scorer
+  );
+  const codeMap = createCodeMap([createFileInfo("src/a.ts"), createFileInfo("src/b.ts")]);
+  const task = createTaskContext([createFileFocusPoint("src/a.ts")]);
+
+  // 2 个片段，每个 40 字符（10 token），总 80 字符（20 token）> 5 token 预算
+  const candidates: ContextSnippet[] = [
+    createSnippet("file_content", "a".repeat(40), "src/a.ts"), // 距离 1.0（保留）
+    createSnippet("file_content", "b".repeat(40), "src/b.ts"), // 距离 0.1（压缩）
+  ];
+
+  const result = await window.buildWindow(candidates, task, codeMap);
+
+  // 断言 1：originalTokens = 20（全部候选累计 token）
+  assert.equal(result.originalTokens, 20, "原始 token 应为 20");
+
+  // 断言 2：estimatedTokens <= budget（5 token）
+  assert.ok(result.estimatedTokens <= 5, `估算 token 不应超预算 5，实际：${result.estimatedTokens}`);
+
+  // 断言 3：compressionRatio < 1.0（有压缩发生）
+  assert.ok(result.compressionRatio < 1.0, `压缩率应 < 1.0（有压缩），实际：${result.compressionRatio}`);
+
+  // 断言 4：compressedSnippets 非空
+  assert.ok(result.compressedSnippets.length >= 1, "应至少压缩 1 个片段");
+
+  // 断言 5：压缩片段的 summary 部分（去掉 "[摘要] " 前缀）长度 <= maxCompressedLength
+  // 注：compressOldSnippets 的 maxCompressedLength = max(50, floor(content.length / 3))
+  // 对于 40 字符内容：maxCompressedLength = max(50, 13) = 50
+  // RuleBasedSummarizer 按句子分割，"b".repeat(40) 无标点 → 整句 40 字符 <= 50 → 保留整句
+  // 压缩片段 content = "[摘要] " + "b".repeat(40)（前缀 5 字符 + 40 字符 = 45 字符）
+  const compressed = result.compressedSnippets[0];
+  const SUMMARY_PREFIX = "[摘要] ";
+  const summaryPart = compressed.content.slice(SUMMARY_PREFIX.length);
+  assert.ok(summaryPart.length <= 50, `压缩片段 summary 部分（${summaryPart.length}）应 <= maxCompressedLength（50）`);
+});
+
+// ============================================================
+// SW-COMPRESS-03: getBudgetAllocation 三层预算分配正确
+// ============================================================
+
+test("SW-COMPRESS-03: getBudgetAllocation 三层预算分配（10%/40%/50%）", () => {
+  const scorer = new RelevanceScorer();
+  // tokenBudget=10000，比例 10%/40%/50% → metadata=1000, instruction=4000, resource=5000
+  const window = createSlidingWindow(
+    {
+      tokenBudget: 10_000,
+      metadataBudgetRatio: 0.1,
+      instructionBudgetRatio: 0.4,
+      resourceBudgetRatio: 0.5,
+    },
+    scorer
+  );
+
+  // 调用 getBudgetAllocation（代理 progressiveLoader.getBudgetAllocation）
+  const allocation = window.getBudgetAllocation();
+
+  // 断言：三层预算按 10%/40%/50% 分配
+  assert.equal(allocation.metadata, 1_000, "Metadata 层预算应为 1000（10000 * 0.1）");
+  assert.equal(allocation.instruction, 4_000, "Instruction 层预算应为 4000（10000 * 0.4）");
+  assert.equal(allocation.resource, 5_000, "Resource 层预算应为 5000（10000 * 0.5）");
+});
+
+// ============================================================
+// SW-ASYNC-01: buildWindow 返回 Promise（V2-P2 升级为 async）
+// ============================================================
+
+test("SW-ASYNC-01: buildWindow 返回 Promise（V2-P2 升级为 async 方法）", () => {
+  const scorer = new RelevanceScorer();
+  const window = createSlidingWindow({ topKFiles: 10 }, scorer);
+  const codeMap = createCodeMap([createFileInfo("src/a.ts")]);
+  const task = createTaskContext([createFileFocusPoint("src/a.ts")]);
+  const candidates: ContextSnippet[] = [createSnippet("file_content", "content", "src/a.ts")];
+
+  // 调用 buildWindow（不 await），验证返回值为 Promise
+  const result = window.buildWindow(candidates, task, codeMap);
+  assert.ok(result instanceof Promise, "buildWindow 应返回 Promise（V2-P2 升级为 async）");
 });
