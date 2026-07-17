@@ -30,6 +30,9 @@ import {
 } from "./tools/executor";
 import { McpManager } from "./mcp/mcp-manager";
 import type { McpServerConfig, PermissionScope, PermissionSettings } from "./settings";
+import { resolveCurrentSettings } from "./settings";
+import { ProviderFactory } from "./providers/provider-factory";
+import type { LLMClient } from "./providers/llm-provider";
 import { logApiError } from "./common/error-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./common/debug-logger";
 import { killProcessTree } from "./common/process-tree";
@@ -369,6 +372,21 @@ export class SessionManager {
     this.messageConverter = new OpenAIMessageConverter({
       renderInitPrompt: () => this.renderInitCommandPrompt(),
     });
+  }
+
+  /**
+   * 创建统一 LLM 客户端（provider 路由入口）
+   *
+   * provider=anthropic 时返回 Claude 客户端；openai 时返回 OpenAI 包装客户端。
+   * 主对话流式逻辑仍走既有 createChatCompletionStream（OpenAI SDK 直操作），
+   * 本方法面向非流式场景（后台总结、edit-handler）与新消费方。
+   *
+   * settings 来源：resolveCurrentSettings(this.projectRoot)，与类内既有
+   * 用户级+项目级 settings 合并解析链路保持一致（含 provider 字段推断）。
+   */
+  private createLLMClient(): LLMClient {
+    const settings = resolveCurrentSettings(this.projectRoot);
+    return ProviderFactory.create(settings);
   }
 
   /**

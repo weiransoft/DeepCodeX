@@ -49,6 +49,23 @@ export type {
   LlmStreamProgress,
 } from "./session";
 
+// Provider 抽象层导出（原生 Claude API 支持）
+export { ProviderFactory } from "./providers/provider-factory";
+export { AnthropicProvider, AnthropicLLMClient } from "./providers/anthropic-provider";
+export { OpenAIProvider, OpenAILLMClient } from "./providers/openai-provider";
+export { AnthropicMessageConverter } from "./providers/anthropic-converter";
+export type {
+  LLMClient,
+  LLMProvider,
+  LLMRequest,
+  LLMResponse,
+  LLMStreamEvent,
+  LLMToolCall,
+  LLMToolDefinition,
+  LLMUsage,
+  ProviderName,
+} from "./providers/llm-provider";
+
 // Prompt utilities
 export {
   getSystemPrompt,
