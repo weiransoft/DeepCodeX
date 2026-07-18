@@ -426,8 +426,10 @@ export class SessionManager {
    * 创建统一 LLM 客户端（provider 路由入口，B1）
    *
    * provider=anthropic 时返回 Claude 客户端；openai 时返回 OpenAI 包装客户端。
-   * 主对话流式逻辑仍走既有 createChatCompletionStream（OpenAI SDK 直操作），
-   * 本方法面向非流式场景（compactSession 后台总结、edit-handler LLM 辅助）。
+   * 非流式场景（compactSession 后台总结、edit-handler LLM 辅助）与流式场景
+   * （activateSession 主对话、identifyMatchingSkillNames 技能匹配）均按 settings
+   * 路由，OpenAI 通路保持既有 createChatCompletionStream（零改动），Anthropic
+   * 通路走 LLMClient.createMessage/createMessageStream。
    *
    * 凭据缺失时返回 null（对齐旧 createOpenAIClient client:null 的静默降级语义，
    * 调用方直接跳过 LLM 增强逻辑而非抛错）；其余配置错误（如 anthropic 缺
@@ -840,19 +842,22 @@ export class SessionManager {
     const startedAt = new Date().toISOString();
     const startedAtMs = Date.now();
     let estimatedTokens = 0;
+
+    // 前置 abort 守卫（对齐 OpenAI 通路 throwIfAborted 语义）：
+    // 必须先于 progress start 发出，否则已中止信号会留下无 end 的孤对 progress
+    this.throwIfAborted(request.signal);
+
     this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "start", sessionId);
 
     // debug/error 日志共用的请求快照：不含 signal（对齐 OpenAI 侧 request 不含 signal 的现状）
     const logRequest: Record<string, unknown> = {
       provider: llmClient.providerName,
       model: llmClient.model,
+      baseURL: llmClient.baseURL,
       messages: request.messages,
       tools: request.tools,
       thinkingEnabled: request.thinkingEnabled,
     };
-
-    // 前置 abort 守卫（对齐 OpenAI 通路 throwIfAborted 语义）
-    this.throwIfAborted(request.signal);
 
     let content = "";
     let reasoningContent = "";
