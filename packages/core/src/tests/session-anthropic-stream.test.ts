@@ -260,6 +260,49 @@ test("createLlmMessageStream keeps multiple tool calls in event order with indep
   ]);
 });
 
+test("createLlmMessageStream assembles interleaved multi-tool streams into independent buckets", async () => {
+  const manager = createUnitManager();
+  const client = createAnthropicStreamStub({
+    events: [
+      // 交错序列：两工具的 start/delta/end 交叉产出（§4.2 规则 3：聚合层按 id 索引桶，
+      // 天然支持任意交错序列，不做「同时只有一个活跃桶」假设）。
+      // 真实 Claude 单条消息内多个 tool_use 块顺序产出（provider 层 currentToolId 单轨
+      // 也不会交错），此用例锁定聚合层设计声称的交错健壮性属性，防止后续改动回退为
+      // 「单活跃桶」假设而未被发现。
+      { type: "tool_call_start", id: "toolu_read", name: "read" },
+      { type: "tool_call_start", id: "toolu_bash", name: "bash" },
+      { type: "tool_call_delta", id: "toolu_read", argumentsJsonDelta: '{"file_path":' },
+      { type: "tool_call_delta", id: "toolu_bash", argumentsJsonDelta: '{"command":"ls' },
+      { type: "tool_call_delta", id: "toolu_read", argumentsJsonDelta: '"a.txt"}' },
+      // 注意：'"}"' 是 2 字符 JSON 片段（闭合引号 + 闭合花括号），
+      // 与首个 delta 拼接成完整 '{"command":"ls"}'
+      { type: "tool_call_delta", id: "toolu_bash", argumentsJsonDelta: '"}' },
+      // end 顺序与 start 相反：进一步验证闭桶按 id 寻址而非「最近活跃桶」
+      { type: "tool_call_end", id: "toolu_bash" },
+      { type: "tool_call_end", id: "toolu_read" },
+      { type: "message_end", stopReason: "tool_use", usage: null },
+    ],
+  });
+
+  const response = await callAggregate(manager, client);
+  const message = aggregateMessage(response);
+
+  // 交错下两桶仍按 id 独立累积完整 arguments；数组顺序 = 桶创建序
+  // （Map 插入序 = start 事件出现序，对等 OpenAI 侧 index 排序后的语义，§4.2 规则 1）
+  assert.deepEqual(message.tool_calls, [
+    {
+      id: "toolu_read",
+      type: "function",
+      function: { name: "read", arguments: '{"file_path":"a.txt"}' },
+    },
+    {
+      id: "toolu_bash",
+      type: "function",
+      function: { name: "bash", arguments: '{"command":"ls"}' },
+    },
+  ]);
+});
+
 test('createLlmMessageStream falls back empty tool arguments to "{}"', async () => {
   const manager = createUnitManager();
   const client = createAnthropicStreamStub({
