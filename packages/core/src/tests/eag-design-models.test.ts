@@ -61,6 +61,7 @@ import type {
   DesignEvaluationVerdict,
   DesignLoopResult,
   DesignLoopConfig,
+  DesignEvaluationMode,
 } from "../eag/design/design-models";
 
 // ============================================================================
@@ -379,9 +380,10 @@ test("M9d3. createDefaultDesignLoopConfig 非法 maxIterations=-1 抛错", () =>
 });
 
 test("M9e. createDefaultDesignLoopConfig 非法 triggerHumanCheckpoint 抛错", () => {
-  // @ts-expect-error 故意传入非 boolean 测试运行时校验
+  // 故意传入非 boolean 测试运行时校验（通过 as unknown as boolean 绕过编译期类型检查，
+  // 确保运行时 createDefaultDesignLoopConfig 内部 typeof 校验能捕获到非法值并抛错）
   assert.throws(
-    () => createDefaultDesignLoopConfig({ triggerHumanCheckpoint: "yes" }),
+    () => createDefaultDesignLoopConfig({ triggerHumanCheckpoint: "yes" as unknown as boolean }),
     (err: unknown) => {
       assert.ok(err instanceof DesignLoopConfigError);
       assert.equal((err as DesignLoopConfigError).field, "triggerHumanCheckpoint");
@@ -391,9 +393,10 @@ test("M9e. createDefaultDesignLoopConfig 非法 triggerHumanCheckpoint 抛错", 
 });
 
 test("M9f. createDefaultDesignLoopConfig 非法 evaluationMode 抛错", () => {
-  // @ts-expect-error 故意传入非法字面量测试运行时校验
+  // 故意传入非法字面量测试运行时校验（通过 as unknown as DesignEvaluationMode 绕过编译期类型检查，
+  // 确保运行时 createDefaultDesignLoopConfig 内部 !== "strict" && !== "lenient" 校验能捕获到非法值并抛错）
   assert.throws(
-    () => createDefaultDesignLoopConfig({ evaluationMode: "invalid" }),
+    () => createDefaultDesignLoopConfig({ evaluationMode: "invalid" as unknown as DesignEvaluationMode }),
     (err: unknown) => {
       assert.ok(err instanceof DesignLoopConfigError);
       assert.equal((err as DesignLoopConfigError).field, "evaluationMode");

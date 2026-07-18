@@ -171,27 +171,61 @@ export type {
   IndependentEvaluator,
 } from "./eag/evaluator/types";
 
-// RLIS (Rule Learning & Injection System) —— §5.5 三层规则存储
-export { SEED_RULES, getSeedRuleCount, getSeedRulesBySeverity, getSeedRulesForInjection } from "./eag/rlis/seed-rules";
+// RLIS (Rule Learning & Injection System) —— §5.5 三层规则存储 + 规则学习与注入
 export {
-  RuleStore,
-  DEFAULT_USER_RULES_PATH,
-  DEFAULT_TOKEN_BUDGET,
-  RULES_FILE_VERSION,
-  getDefaultProjectRulesPath,
-  validateRule,
-  ruleToRedline,
-  estimateTokens,
-} from "./eag/rlis/rule-store";
+  SEED_RULES,
+  getSeedRuleCount,
+  getSeedRulesBySeverity,
+  getSeedRulesByCategory,
+  getSeedRuleById,
+} from "./eag/rlis/seed-rules";
+export { RuleStore, SEVERITY_UPGRADE_VIOLATION_THRESHOLD, CLEANUP_USAGE_THRESHOLD } from "./eag/rlis/rule-store";
+export { RuleInjector, TOKEN_ESTIMATE_RATIO } from "./eag/rlis/rule-injector";
+export {
+  RuleLearner,
+  CORRECTION_PATTERNS,
+  CATEGORY_KEYWORDS,
+  SEVERITY_KEYWORDS,
+  CONFIRMATION_PUSH_THRESHOLD,
+  DEFAULT_CATEGORY,
+  DEFAULT_SEVERITY,
+} from "./eag/rlis/rule-learner";
 export type {
-  RuleSource,
+  RuleCategory,
   RuleSeverity,
-  InjectionTarget,
-  RuleDefinition,
-  RuleStorageLayer,
-  MergedRuleSet,
+  RuleSource,
+  RuleConfirmedBy,
+  UserRule,
+  RuleCandidate,
+  RuleStoreLayer,
+  RuleStoreSnapshot,
+  RuleInjectionConfig,
 } from "./eag/rlis/types";
-export type { RuleOperationResult, SystemPromptFormatOptions } from "./eag/rlis/rule-store";
+export {
+  RULE_CATEGORIES,
+  RULE_SEVERITIES,
+  RULE_SOURCES,
+  RULE_CONFIRMED_BY,
+  RULE_STORE_LAYERS,
+  SEVERITY_PRIORITY,
+  compareSeverity,
+} from "./eag/rlis/types";
+
+// Discovery (Brownfield) —— §6.2 棕地场景：既有系统增量改造
+export { BrownfieldDiscovery, REQUIREMENT_KEYWORD_MAPPING } from "./eag/discovery/brownfield-discovery";
+export { ChangeClassifier } from "./eag/discovery/change-classifier";
+export { ExistingContractGuard } from "./eag/discovery/existing-contract-guard";
+export type { ParadigmName } from "./eag/discovery/existing-contract-guard";
+export type {
+  ChangeType,
+  ExistingModelSnapshot,
+  IncrementalChange,
+  IncrementalDesignResult,
+  ContractViolation,
+  ContractViolationType,
+  TechDebtReport,
+} from "./eag/discovery/types";
+export { CHANGE_TYPES, CONTRACT_VIOLATION_TYPES } from "./eag/discovery/types";
 
 // Team (multi-role) module — DeepCodeX multi-agent team integration
 export {

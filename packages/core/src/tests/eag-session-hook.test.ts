@@ -147,6 +147,9 @@ class StaticEvaluator implements IndependentEvaluator {
  *
  * evaluate() 总是抛出异常，用于验证调用方（runEvaluatorHook）的 try-catch 降级行为：
  * 评估器故障不应阻塞主流程（EAG-P0 降级语义，session.ts §2091-2096）。
+ *
+ * 注意：evaluate 方法签名需与 IndependentEvaluator 接口一致
+ * （接收 context 与 redlines 参数，尽管本实现不使用它们）。
  */
 class ThrowingEvaluator implements IndependentEvaluator {
   getName(): string {
@@ -155,7 +158,7 @@ class ThrowingEvaluator implements IndependentEvaluator {
   getDefaultMode(): EvaluationMode {
     return "strict";
   }
-  async evaluate(): Promise<EvaluationReport> {
+  async evaluate(_context: EvaluationContext, _redlines: ReadonlyArray<RedlineDefinition>): Promise<EvaluationReport> {
     throw new Error("评估器内部异常（测试用）");
   }
 }

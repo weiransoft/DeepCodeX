@@ -65,12 +65,17 @@ async function main(): Promise<void> {
       process.exit(0);
     }
     const opts = parsed.rulesOptions;
+    // severity 参数：yargs choices 接受小写形式（blocker/major/warning），
+    // 新 RLIS API 要求大写形式（BLOCKER/MAJOR/WARNING），此处做转换
+    const severityRaw = opts["severity"] as "blocker" | "major" | "warning" | undefined;
+    const severity =
+      severityRaw !== undefined ? (severityRaw.toUpperCase() as "BLOCKER" | "MAJOR" | "WARNING") : undefined;
     const exitCode = (
       await executeRulesCommand({
         subcommand: parsed.rules as "list" | "add" | "remove" | "show" | "path",
         content: opts["content"] as string | undefined,
         ruleId: opts["rule-id"] as string | undefined,
-        severity: opts["severity"] as "blocker" | "major" | "warning" | undefined,
+        severity,
         layer: opts["layer"] as "user" | "project" | undefined,
         projectRoot: (opts["project-root"] as string | undefined) ?? process.cwd(),
       })

@@ -87,6 +87,8 @@ import { CONTEXT_SNIPPET_TYPE as ExperienceSnippetType } from "../memory/experie
 import { CONTEXT_SNIPPET_TYPE as DomainSnippetType } from "../understanding/domain-modeler";
 // EAG-P0 新增导入：RLIS RuleStore（规则注入 directRetainSnippets 通道，§5.5.3）
 import type { RuleStore } from "../../eag/rlis/rule-store";
+// EAG-P1 批次 6 新增导入：RuleInjector（规则格式化注入，§5.5.3）
+import { RuleInjector } from "../../eag/rlis/rule-injector";
 
 // ============================================================================
 // 类型定义
@@ -216,6 +218,14 @@ const USER_RULE_TOKEN_BUDGET = 4000;
 export class DualLayerContextManager {
   /** 配置（含 projectRoot、tokenBudget 等） */
   private readonly config: DualLayerContextConfig;
+  /**
+   * 规则注入器（EAG-P1 批次 6 新增，§5.5.3）
+   *
+   * 用于将 RuleStore 的生效规则格式化为 LLM system prompt 文本。
+   * 与 ruleStore 配合使用：ruleStore.getEffectiveRules() → ruleInjector.inject()。
+   * 构造时初始化，无状态，线程安全。
+   */
+  private readonly ruleInjector: RuleInjector = new RuleInjector();
 
   /**
    * V2-P3 构造函数（在 V2-P2 基础上增加 userGlobalMemory + experienceRecommender 可选参数）
@@ -742,27 +752,28 @@ export class DualLayerContextManager {
    * 收集 RLIS 三层规则片段（EAG-P0 全局层，§5.5.3 directRetainSnippets 通道）
    *
    * 实现策略（§5.5.3 规则注入通道）：
-   *   1. 调用 ruleStore.loadMergedRuleset() 获取三层合并规则集（种子 + 用户 + 项目）
-   *      - 合并优先级：project > user > seed；同 ID 高优先级覆盖低优先级
-   *      - BLOCKER 级种子规则（removable=false）永远保留，即使被加入 removedSeedIds
-   *   2. 调用 ruleStore.formatForSystemPrompt(ruleset, { tokenBudget: USER_RULE_TOKEN_BUDGET })
-   *      - 按 severity 分组：BLOCKER 置顶，CRITICAL 次之，WARNING 最后
-   *      - 超 Token 预算时按 severity 截断（WARNING 最先裁）
-   *      - 空规则集返回空字符串（此时 collectRuleSnippets 返回空数组）
+   *   1. 调用 ruleStore.getEffectiveRules() 获取三层合并后的生效规则列表
+   *      （种子 + 用户 + 项目，按 severity 排序 BLOCKER 优先）
+   *      - 合并优先级：project > global > seed；同 ID 高优先级覆盖低优先级
+   *      - BLOCKER 级种子规则永远保留
+   *   2. 调用 ruleInjector.inject(rules, { maxTokenBudget, truncateBySeverity: true })
+   *      - 按 category 分组：每个 category 内按 severity 排序（BLOCKER 置顶）
+   *      - 超 Token 预算时按 severity 截断（WARNING 最先裁，BLOCKER 永不裁）
+   *      - 空规则列表返回空字符串（此时 collectRuleSnippets 返回空数组）
    *   3. 汇总为单条片段（type="user_rule"），注入 directRetainSnippets 通道
    *      - 与用户全局记忆同通道：永远保留，不参与压缩与打分淘汰
    *      - relevance=1.0：硬约束级最高优先级（与 UserProfile 同级）
    *
    * 降级语义（§5.5.3 防御性设计）：
    *   - ruleStore 未注入：返回空数组（无规则片段，向后兼容旧会话）
-   *   - loadMergedRuleset 异常（如规则文件损坏）：上层 try-catch 降级为空数组
-   *   - formatForSystemPrompt 异常：同上降级
-   *   - 空规则集（rules.length === 0）：返回空数组（无规则可注入）
+   *   - getEffectiveRules 异常（如规则文件损坏）：上层 try-catch 降级为空数组
+   *   - inject 异常：同上降级
+   *   - 空规则列表（length === 0）：返回空数组（无规则可注入）
    *
    * 设计权衡：
-   *   - 单条汇总片段 vs 多条逐规则片段：选择单条汇总，因 formatForSystemPrompt
-   *     已做 severity 分组 + Token 预算截断，单条片段内已包含完整规则集，
-   *     多条逐规则片段会增加 directRetain 数量并破坏 severity 分组顺序。
+   *   - 单条汇总片段 vs 多条逐规则片段：选择单条汇总，因 ruleInjector.inject
+   *     已做 category 分组 + severity 排序 + Token 预算截断，单条片段内已包含完整规则集，
+   *     多条逐规则片段会增加 directRetain 数量并破坏分组顺序。
    *   - relevance=1.0 vs 0.9：规则为硬约束（BLOCKER 级尤其如此），应与
    *     UserProfile（用户偏好硬约束）同级，高于领域知识(0.85)和经验推荐(0.85)。
    *
@@ -774,21 +785,20 @@ export class DualLayerContextManager {
       return [];
     }
 
-    // 加载三层合并规则集（种子 + 用户 + 项目）
-    // loadMergedRuleset 内部已做合并优先级处理（project > user > seed）
-    const ruleset = this.ruleStore.loadMergedRuleset();
+    // 获取三层合并后的生效规则列表（按 severity 排序，BLOCKER 优先）
+    const rules = this.ruleStore.getEffectiveRules();
 
-    // 空规则集：返回空数组（无规则可注入）
-    if (ruleset.rules.length === 0) {
+    // 空规则列表：返回空数组（无规则可注入）
+    if (rules.length === 0) {
       return [];
     }
 
     // 格式化为 System Prompt 注入文本
-    // - 按 severity 分组：BLOCKER 置顶，CRITICAL 次之，WARNING 最后
-    // - Token 预算截断：超 USER_RULE_TOKEN_BUDGET 时按 severity 裁（WARNING 最先裁）
-    // - includeCategoryHeaders=true（默认）：包含 [BLOCKER]/[CRITICAL]/[WARNING] 分组标题
-    const content = this.ruleStore.formatForSystemPrompt(ruleset, {
-      tokenBudget: USER_RULE_TOKEN_BUDGET,
+    // - 按 category 分组：每个 category 内按 severity 排序（BLOCKER 置顶）
+    // - Token 预算截断：超 USER_RULE_TOKEN_BUDGET 时按 severity 裁（WARNING 最先裁，BLOCKER 永不裁）
+    const content = this.ruleInjector.inject(rules, {
+      maxTokenBudget: USER_RULE_TOKEN_BUDGET,
+      truncateBySeverity: true,
     });
 
     // 格式化后为空字符串（如所有规则被 Token 预算截断）：返回空数组
@@ -797,7 +807,7 @@ export class DualLayerContextManager {
     }
 
     // 汇总为单条片段（MAX_USER_RULE_SNIPPETS=1，与 collectUserGlobalMemorySnippets 同模式）
-    // formatForSystemPrompt 内部已做 severity 分组 + Token 截断，
+    // ruleInjector.inject 内部已做 category 分组 + severity 排序 + Token 截断，
     // 此处仅产出单条汇总片段，slice(0, MAX_USER_RULE_SNIPPETS) 为防御性截断（保持常量被使用）
     return [
       {

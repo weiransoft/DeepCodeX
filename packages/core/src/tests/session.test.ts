@@ -3222,7 +3222,9 @@ test("SessionManager compactSession writes summary message and marks earlier mes
   assert.equal(compactRequests[0]?.thinkingEnabled, true);
   const compactPromptContent = compactRequests[0]?.messages[0]?.content;
   assert.equal(typeof compactPromptContent, "string");
-  assert.ok(compactPromptContent.includes("large reply"), "compact 提示词应包含会话内容");
+  // 上一行 assert.equal 已在运行时保证 compactPromptContent 为 string，
+  // 此处使用非空断言告知 TS 类型已收窄（避免 possibly undefined 编译错误）
+  assert.ok(compactPromptContent!.includes("large reply"), "compact 提示词应包含会话内容");
 
   // 持久化语义：生成 isSummary 系统消息；其之前的消息全部标记 compacted
   const messages = manager.listSessionMessages(sessionId);

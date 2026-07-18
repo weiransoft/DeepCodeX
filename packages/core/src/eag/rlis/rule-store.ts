@@ -1,148 +1,64 @@
 /**
- * RLIS 三层规则存储（Rule Store）
+ * RLIS 三层规则存储（Rule Store）—— EAG 方案 §5.5.2
  *
- * EAG 方案 §5.5.2 三层规则存储的核心实现。负责加载、合并、持久化三层规则：
- * 1. 内置种子层（seed-rules.ts，最低优先级，随版本发布）
- * 2. 全局用户层（~/.deepcode/rules/user-rules.json，跨项目生效的个人规范）
- * 3. 项目层（.deepcode/rules/project-rules.json，最高优先级，覆盖全局同名规则）
+ * 本模块实现 EAG 方案 §5.5.2 三层规则存储的 `RuleStore` 类。
+ * 负责三层规则的构造合并、查询、统计、反馈闭环。
+ *
+ * 三层规则存储（优先级高 → 低）：
+ * 1. 项目层（.deepcode/rules/project-rules.json）—— 项目级约束（最高，覆盖同名规则）
+ * 2. 全局用户层（~/.deepcodeX/rules/global-rules.json）—— 个人偏好
+ * 3. 内置种子层（seed-rules.ts，CLI 打包发布）—— 系统默认（最低）
  *
  * 合并规则（§5.5.2）：
- * - 同 ID 规则按优先级覆盖：项目 > 用户 > 种子
+ * - 同 ID 规则按优先级覆盖：project > global > seed
  * - 不同 ID 规则全部生效
- * - 可移除的种子规则（removable=true）可通过 /rules remove 移除，
- *   移除后 ID 写入 removedSeedIds 数组，下次加载时跳过
- * - BLOCKER 级种子规则（removable=false）不可移除，确保系统硬约束永远生效
+ * - 生效规则按 severity 排序（BLOCKER 优先 → MAJOR → WARNING）
  *
- * 注入格式（§5.5.3）：
- * - system_prompt 注入：按 severity 分组（BLOCKER 置顶）+ category 标签
- * - evaluator 注入：转换为 RedlineDefinition[] 接入 IndependentEvaluator 判定清单
- * - 超 token 预算时按 severity 截断（WARNING 最先裁）
+ * 反馈闭环（§5.5.4）：
+ * - recordUsage(ruleId)：每次注入到 LLM system prompt 时 +1
+ * - recordViolation(ruleId)：评估器按该规则打回时 +1
+ * - suggestSeverityUpgrade(ruleId)：violationCount >= 5 时建议提升 severity
+ * - suggestCleanup(ruleId)：usageCount >= 10 且 violationCount === 0 时建议清理
  *
  * 设计依据：
+ * - EAG 方案 §5.5.1 规则模型（UserRule 字段定义）
  * - EAG 方案 §5.5.2 三层规则存储表
- * - EAG 方案 §5.5.3 规则注入（directRetainSnippets 通道复用）
- * - EAG 方案 §5.5.6 与 EAG 的集成（规则即红线）
- * - 项目约定：settings.ts 使用 ~/.deepcode/ 目录（本模块沿用相同约定）
+ * - EAG 方案 §5.5.4 规则学习的反馈闭环
+ *
+ * 不可变优先原则：
+ * - 内部状态使用私有字段，对外暴露的查询结果均为副本或只读视图
+ * - 统计字段更新通过 copy-on-write 模式（生成新对象替换原对象）
+ * - 三层规则列表均使用 ReadonlyArray<UserRule>
  *
  * @module eag/rlis/rule-store
  */
 
-import * as fs from "node:fs";
-import * as path from "node:path";
-import * as os from "node:os";
-import type { RedlineDefinition } from "../evaluator/types.js";
-import { SEED_RULES } from "./seed-rules.js";
-import type { InjectionTarget, MergedRuleSet, RuleDefinition, RuleSource, RuleStorageLayer } from "./types.js";
+import type { RuleCategory, RuleSeverity, UserRule, RuleStoreLayer, RuleStoreSnapshot } from "./types.js";
+import { compareSeverity } from "./types.js";
 
 // ============================================================================
 // 常量定义
 // ============================================================================
 
 /**
- * 规则文件版本号
+ * 高频违规触发 severity 提升建议的阈值
  *
- * 用于后续 schema 演进时的兼容性检测。当前版本 1。
+ * 对应 EAG 方案 §5.5.4 反馈闭环：「高频违规 → 建议提升 severity」。
+ * 当 violationCount >= 5 时，suggestSeverityUpgrade 返回 true。
+ *
+ * 取值依据：5 次违规表示规则被频繁违反，可能是 severity 设置过低（如 WARNING 应升为 MAJOR）。
  */
-const RULES_FILE_VERSION = 1;
+const SEVERITY_UPGRADE_VIOLATION_THRESHOLD = 5;
 
 /**
- * 默认用户规则文件路径
+ * 长期零违规触发清理建议的注入次数阈值
  *
- * 与 settings.ts 的 ~/.deepcode/settings.json 保持目录一致。
- * 路径：~/.deepcode/rules/user-rules.json
+ * 对应 EAG 方案 §5.5.4 反馈闭环：「长期零违规且被覆盖 → 建议清理」。
+ * 当 usageCount >= 10 且 violationCount === 0 时，suggestCleanup 返回 true。
+ *
+ * 取值依据：10 次注入零违规表示规则已被自然遵守或被高优先级规则覆盖，可建议清理。
  */
-const DEFAULT_USER_RULES_PATH = path.join(os.homedir(), ".deepcode", "rules", "user-rules.json");
-
-/**
- * 默认项目规则文件路径
- *
- * 与 settings.ts 的 .deepcode/settings.json 保持目录一致。
- * 路径：<projectRoot>/.deepcode/rules/project-rules.json
- *
- * @param projectRoot 项目根目录
- */
-function getDefaultProjectRulesPath(projectRoot: string): string {
-  return path.join(projectRoot, ".deepcode", "rules", "project-rules.json");
-}
-
-// ============================================================================
-// 规则文件结构
-// ============================================================================
-
-/**
- * 规则文件结构（user-rules.json / project-rules.json 的 JSON schema）
- *
- * 持久化到磁盘的规则文件格式。包含：
- * - version：schema 版本号，用于后续兼容性检测
- * - rules：规则列表（不含种子规则，种子规则在代码中）
- * - removedSeedIds：用户移除的可移除种子规则 ID 列表
- *
- * 注意：BLOCKER 级种子规则（removable=false）即使被加入 removedSeedIds 也会被忽略，
- * 确保系统硬约束永远生效。
- */
-interface RuleFile {
-  /** 文件 schema 版本号 */
-  version: number;
-  /** 用户/项目自定义规则列表 */
-  rules: RuleDefinition[];
-  /** 已移除的可移除种子规则 ID 列表 */
-  removedSeedIds: string[];
-}
-
-// ============================================================================
-// 操作结果类型
-// ============================================================================
-
-/**
- * 规则操作结果
- *
- * addRule / removeRule / disableRule 等变更操作的统一返回类型。
- * success=false 时 error 字段提供失败原因（用于 CLI 层面向用户展示）。
- */
-export interface RuleOperationResult {
-  /** 操作是否成功 */
-  success: boolean;
-  /** 失败原因（success=false 时填写） */
-  error?: string;
-  /** 操作影响的规则 ID（成功时填写） */
-  ruleId?: string;
-}
-
-// ============================================================================
-// 注入格式化配置
-// ============================================================================
-
-/**
- * System Prompt 注入格式化配置
- *
- * 控制规则格式化为 LLM system message 文本时的行为。
- */
-export interface SystemPromptFormatOptions {
-  /** Token 预算上限（超限时按 severity 截断，WARNING 最先裁） */
-  tokenBudget?: number;
-  /** 是否包含 WARNING 级规则（默认 true） */
-  includeWarnings?: boolean;
-  /** 是否包含 category 分组标题（默认 true） */
-  includeCategoryHeaders?: boolean;
-}
-
-/**
- * 默认 Token 预算
- *
- * 规则注入的默认 Token 上限。约 4000 Token，足够 10-30 条规则的完整注入。
- * 实际生产中由调用方按当前 LLM 上下文剩余空间动态传入。
- */
-const DEFAULT_TOKEN_BUDGET = 4000;
-
-/**
- * Token 估算系数
- *
- * 简单的 Token 估算：1 个中文字符 ≈ 2 Token，1 个英文单词 ≈ 1.3 Token。
- * 此估算不依赖 tokenizer 库，仅用于预算控制，精度足够。
- * 实际 Token 数由 LLM API 返回的 usage 字段精确统计。
- */
-const TOKEN_ESTIMATE_RATIO_CN = 2;
-const TOKEN_ESTIMATE_RATIO_EN = 1.3;
+const CLEANUP_USAGE_THRESHOLD = 10;
 
 // ============================================================================
 // RuleStore 类
@@ -151,154 +67,157 @@ const TOKEN_ESTIMATE_RATIO_EN = 1.3;
 /**
  * 三层规则存储器
  *
- * 负责加载、合并、持久化三层规则。每次操作都重新从磁盘加载，
- * 保证多进程/多会话并发修改时的一致性（rule 文件变更频率极低，性能可接受）。
+ * 负责三层规则的构造合并、查询、统计、反馈闭环。
+ * 构造时合并三层规则，运行时通过 recordUsage / recordViolation 更新统计字段，
+ * 通过 suggestSeverityUpgrade / suggestCleanup 提供反馈建议。
  *
  * 用法：
  * ```typescript
- * const store = new RuleStore({
- *   userRulesPath: "~/.deepcode/rules/user-rules.json",
- *   projectRulesPath: "./.deepcode/rules/project-rules.json",
+ * const store = new RuleStore(SEED_RULES, globalRules, projectRules);
+ *
+ * // 获取生效规则（按 severity 排序，BLOCKER 优先）
+ * const effective = store.getEffectiveRules();
+ *
+ * // 按分类查询
+ * const codeTruthRules = store.getRulesByCategory("code-truth");
+ *
+ * // 添加用户显式规则
+ * store.addUserRule({
+ *   id: "USER-01",
+ *   category: "code-truth",
+ *   severity: "MAJOR",
+ *   content: "禁止使用 console.log 调试语句",
+ *   source: "user-explicit",
+ *   confirmedBy: "auto",
+ *   usageCount: 0,
+ *   violationCount: 0,
+ *   createdAt: new Date().toISOString(),
  * });
  *
- * // 加载合并后的规则集
- * const ruleset = store.loadMergedRuleset();
- * console.log(`生效规则：${ruleset.rules.length} 条`);
+ * // 记录违规（评估器按该规则打回时调用）
+ * store.recordViolation("USER-01");
  *
- * // 添加用户规则
- * const result = store.addRule({
- *   id: "USER-01",
- *   name: "禁止 console.log",
- *   description: "生产代码中不得残留 console.log 调试语句",
- *   severity: "major",
- *   source: "user",
- *   injectionTargets: ["system_prompt", "evaluator"],
- *   pattern: "console\\.(log|debug|info)\\(",
- *   tags: ["code-quality", "no-debug"],
- *   removable: true,
- * }, "user");
- *
- * // 格式化为 system prompt 注入文本
- * const promptText = store.formatForSystemPrompt(ruleset);
- *
- * // 格式化为评估器红线清单
- * const redlines = store.formatForEvaluator(ruleset);
+ * // 高频违规建议提升 severity
+ * if (store.suggestSeverityUpgrade("USER-01")) {
+ *   console.log("建议将 USER-01 提升为 BLOCKER 级");
+ * }
  * ```
  *
- * 线程安全：本类不做内存缓存，每次操作都从磁盘加载，无并发问题。
- * 文件写入使用临时文件 + rename 原子操作，防止并发写入导致文件损坏。
+ * 线程安全：本类不做内存缓存，所有操作基于构造时传入的三层规则列表的副本，
+ * 通过 copy-on-write 模式更新统计字段，避免外部突变。
  */
 export class RuleStore {
-  /** 用户规则文件路径（~/.deepcode/rules/user-rules.json） */
-  private readonly userRulesPath: string;
-  /** 项目规则文件路径（<projectRoot>/.deepcode/rules/project-rules.json） */
-  private readonly projectRulesPath: string;
+  /**
+   * 内置种子层规则列表（最低优先级）
+   *
+   * 注意：此字段不带 readonly 修饰符，因 updateRuleStats 需通过 copy-on-write 模式
+   * 重新赋值（用包含更新后统计字段的新数组替换原数组）。
+   * 原始 SEED_RULES 常量在构造函数中已被拷贝，本字段的重新赋值不会影响外部常量。
+   */
+  private seedRules: ReadonlyArray<UserRule>;
+  /** 全局用户层规则列表（中优先级） */
+  private globalRules: ReadonlyArray<UserRule>;
+  /** 项目层规则列表（最高优先级，覆盖同名规则） */
+  private projectRules: ReadonlyArray<UserRule>;
+  /** 合并后生效规则列表（按 severity 排序，BLOCKER 优先） */
+  private effectiveRules: ReadonlyArray<UserRule>;
 
   /**
    * 构造 RuleStore
    *
-   * @param options 配置选项（主要用于测试注入临时路径）
+   * 构造时合并三层规则：
+   * 1. 内置种子层（seedRules，必填，通常为 SEED_RULES 常量）
+   * 2. 全局用户层（globalRules，可选，跨项目生效的个人规范）
+   * 3. 项目层（projectRules，可选，最高优先级，覆盖全局同名规则）
+   *
+   * 合并算法：
+   * - 以 ID 为键，按优先级 project > global > seed 覆盖
+   * - 不同 ID 规则全部保留
+   * - 合并后按 severity 排序（BLOCKER 优先 → MAJOR → WARNING）
+   *
+   * @param seedRules 内置种子层规则列表（必填）
+   * @param globalRules 全局用户层规则列表（可选，默认空数组）
+   * @param projectRules 项目层规则列表（可选，默认空数组）
    */
-  constructor(options?: {
-    /** 用户规则文件路径（默认 ~/.deepcode/rules/user-rules.json） */
-    userRulesPath?: string;
-    /** 项目规则文件路径（默认 <cwd>/.deepcode/rules/project-rules.json） */
-    projectRulesPath?: string;
-    /** 项目根目录（用于推导默认项目规则路径） */
-    projectRoot?: string;
-  }) {
-    this.userRulesPath = options?.userRulesPath ?? DEFAULT_USER_RULES_PATH;
-    this.projectRulesPath =
-      options?.projectRulesPath ?? getDefaultProjectRulesPath(options?.projectRoot ?? process.cwd());
+  constructor(
+    seedRules: ReadonlyArray<UserRule>,
+    globalRules?: ReadonlyArray<UserRule>,
+    projectRules?: ReadonlyArray<UserRule>
+  ) {
+    // 拷贝输入数组，避免外部突变影响内部状态
+    this.seedRules = Object.freeze([...seedRules]);
+    this.globalRules = Object.freeze([...(globalRules ?? [])]);
+    this.projectRules = Object.freeze([...(projectRules ?? [])]);
+    // 合并三层规则并按 severity 排序
+    this.effectiveRules = this.mergeRules(this.seedRules, this.globalRules, this.projectRules);
   }
 
   // ========================================================================
-  // 公共 API：加载与合并
+  // 公共 API：查询
   // ========================================================================
 
   /**
-   * 加载并合并三层规则
+   * 获取生效规则列表
    *
-   * 合并逻辑（§5.5.2）：
-   * 1. 加载种子规则（SEED_RULES，代码内常量）
-   * 2. 加载用户规则（user-rules.json，可选）
-   * 3. 加载项目规则（project-rules.json，可选）
-   * 4. 合并：同 ID 规则按优先级覆盖（项目 > 用户 > 种子）
-   * 5. 应用 removedSeedIds：从合并结果中移除被用户移除的可移除种子规则
+   * 返回合并后的全部生效规则，按 severity 排序（BLOCKER 优先 → MAJOR → WARNING）。
+   * 同 severity 内按 ID 字母序排序（保证测试可重现）。
    *
-   * @returns 合并后的规则集
+   * @returns 生效规则列表（只读视图）
    */
-  loadMergedRuleset(): MergedRuleSet {
-    // 1. 加载三层规则文件
-    const userFile = this.loadRuleFile(this.userRulesPath);
-    const projectFile = this.loadRuleFile(this.projectRulesPath);
+  getEffectiveRules(): ReadonlyArray<UserRule> {
+    return this.effectiveRules;
+  }
 
-    const userRules = userFile?.rules ?? [];
-    const projectRules = projectFile?.rules ?? [];
+  /**
+   * 按 ID 查询规则
+   *
+   * 从生效规则列表中按 ID 查询。同 ID 规则按优先级 project > global > seed 覆盖后，
+   * 仅返回优先级最高的那条。
+   *
+   * @param id 规则 ID（SEED-xx / USER-xx / LEARN-xx）
+   * @returns 规则对象；不存在时返回 null
+   */
+  getRuleById(id: string): UserRule | null {
+    return this.effectiveRules.find((r) => r.id === id) ?? null;
+  }
 
-    // 2. 合并 removedSeedIds（用户层和项目层都可能有移除记录，取并集）
-    const removedSeedIds = new Set<string>([
-      ...(userFile?.removedSeedIds ?? []),
-      ...(projectFile?.removedSeedIds ?? []),
-    ]);
+  /**
+   * 按分类查询规则
+   *
+   * 返回指定分类的全部生效规则，按 severity 排序（BLOCKER 优先）。
+   *
+   * @param category 规则分类
+   * @returns 符合分类的规则列表（只读视图）
+   */
+  getRulesByCategory(category: RuleCategory): ReadonlyArray<UserRule> {
+    return this.effectiveRules.filter((r) => r.category === category);
+  }
 
-    // 3. 按 ID 合并三层规则（项目 > 用户 > 种子）
-    const mergedById = new Map<string, RuleDefinition>();
+  /**
+   * 按严重级别查询规则
+   *
+   * 返回指定严重级别的全部生效规则，按 ID 字母序排序。
+   *
+   * @param severity 严重级别（BLOCKER/MAJOR/WARNING）
+   * @returns 符合级别的规则列表（只读视图）
+   */
+  getRulesBySeverity(severity: RuleSeverity): ReadonlyArray<UserRule> {
+    return this.effectiveRules.filter((r) => r.severity === severity);
+  }
 
-    // 3.1 先放种子规则（最低优先级）
-    for (const rule of SEED_RULES) {
-      mergedById.set(rule.id, rule);
-    }
-    // 3.2 再放用户规则（覆盖同 ID 的种子规则）
-    for (const rule of userRules) {
-      mergedById.set(rule.id, rule);
-    }
-    // 3.3 最后放项目规则（最高优先级，覆盖同 ID 的用户/种子规则）
-    for (const rule of projectRules) {
-      mergedById.set(rule.id, rule);
-    }
-
-    // 4. 应用 removedSeedIds：移除被标记移除的可移除种子规则
-    // BLOCKER 级种子规则（removable=false）即使在 removedSeedIds 中也保留
-    const finalRules: RuleDefinition[] = [];
-    let seedCount = 0;
-    let userCount = 0;
-    let projectCount = 0;
-
-    for (const rule of mergedById.values()) {
-      // 仅对种子规则检查移除标记（用户/项目规则不受 removedSeedIds 影响）
-      if (rule.source === "seed") {
-        // 检查是否被标记移除
-        if (removedSeedIds.has(rule.id)) {
-          // BLOCKER 级种子规则不可移除——即使被加入 removedSeedIds 也保留
-          if (!rule.removable) {
-            finalRules.push(rule);
-            seedCount++;
-            continue;
-          }
-          // 可移除的种子规则被标记移除——跳过
-          continue;
-        }
-        finalRules.push(rule);
-        seedCount++;
-      } else if (rule.source === "user" || rule.source === "learned") {
-        finalRules.push(rule);
-        userCount++;
-      } else if (rule.source === "project") {
-        finalRules.push(rule);
-        projectCount++;
-      } else {
-        // 未知 source（兼容性处理）：保留但不计入任何层
-        finalRules.push(rule);
-      }
-    }
-
+  /**
+   * 获取三层规则存储快照
+   *
+   * 返回当前三层存储的完整状态，用于调试、审计与测试断言。
+   *
+   * @returns 规则存储快照
+   */
+  getSnapshot(): RuleStoreSnapshot {
     return {
-      rules: finalRules,
-      seedCount,
-      userCount,
-      projectCount,
-      removedSeedIds: Array.from(removedSeedIds),
+      seedRules: this.seedRules,
+      globalRules: this.globalRules,
+      projectRules: this.projectRules,
+      effectiveRules: this.effectiveRules,
     };
   }
 
@@ -307,306 +226,149 @@ export class RuleStore {
   // ========================================================================
 
   /**
-   * 添加规则到指定存储层
+   * 添加用户显式规则
    *
-   * 限制：
-   * - 不允许添加 source="seed" 的规则（种子规则在代码中维护）
-   * - 同层内 ID 必须唯一（跨层允许覆盖，符合合并优先级）
-   * - learned 来源规则需经用户确认后才能添加（调用方负责确认流程）
+   * 将一条 USER-xx 规则添加到全局用户层（globalRules）。
+   * 添加后重新合并三层规则，更新 effectiveRules。
    *
-   * @param rule 规则定义（source 字段会被强制覆盖为 layer 对应值）
-   * @param layer 目标存储层（user / project）
-   * @returns 操作结果
+   * 注意：
+   * - 调用方负责生成 USER-xx 前缀的 ID 与确保唯一性
+   * - source 字段会被强制覆盖为 "user-explicit"
+   * - confirmedBy 字段会被强制覆盖为 "auto"（用户显式添加无需确认）
+   * - 若同 ID 规则已存在，会抛错（调用方负责捕获）
+   *
+   * @param rule 待添加的用户规则（source/confirmedBy 字段会被强制覆盖）
+   * @throws Error 当同 ID 规则已存在时抛错
    */
-  addRule(rule: RuleDefinition, layer: RuleStorageLayer): RuleOperationResult {
-    // 参数校验
-    if (layer === "seed") {
-      return {
-        success: false,
-        error: "种子规则在代码中维护，不支持通过 addRule 添加",
-      };
-    }
-
-    // 强制覆盖 source 字段，确保与存储层一致
-    const normalizedRule: RuleDefinition = {
+  addUserRule(rule: UserRule): void {
+    // 强制覆盖 source 与 confirmedBy 字段
+    const normalizedRule: UserRule = Object.freeze({
       ...rule,
-      source: layer as RuleSource,
-    };
-
-    // 基础校验
-    const validationError = validateRule(normalizedRule);
-    if (validationError) {
-      return { success: false, error: validationError };
+      source: "user-explicit",
+      confirmedBy: "auto",
+    });
+    // 检查同 ID 规则是否已存在
+    if (this.findRuleByIdInAllLayers(normalizedRule.id) !== null) {
+      throw new Error(`规则 ID "${normalizedRule.id}" 已存在，不能重复添加`);
     }
+    // 添加到全局用户层并重新合并
+    this.globalRules = Object.freeze([...this.globalRules, normalizedRule]);
+    this.effectiveRules = this.mergeRules(this.seedRules, this.globalRules, this.projectRules);
+  }
 
-    // 加载目标层文件
-    const filePath = this.getLayerFilePath(layer);
-    const file = this.loadRuleFile(filePath) ?? createEmptyRuleFile();
-
-    // 检查同层内 ID 唯一性
-    const existingIndex = file.rules.findIndex((r) => r.id === normalizedRule.id);
-    if (existingIndex >= 0) {
-      return {
-        success: false,
-        error: `规则 ID "${normalizedRule.id}" 在 ${layer} 层已存在，请使用不同 ID 或先移除原规则`,
-      };
+  /**
+   * 添加学习固化规则
+   *
+   * 将一条 LEARN-xx 规则添加到全局用户层（globalRules）。
+   * 添加后重新合并三层规则，更新 effectiveRules。
+   *
+   * 防误学红线（§5.5.4）：
+   * - learned 来源规则必须经用户确认才生效
+   * - 本方法要求传入的 rule.confirmedBy 必须为 "user"，否则抛错
+   * - source 字段会被强制覆盖为 "learned"
+   *
+   * @param rule 待添加的学习规则（confirmedBy 必须为 "user"，source 会被强制覆盖为 "learned"）
+   * @throws Error 当 confirmedBy 不为 "user" 或同 ID 规则已存在时抛错
+   */
+  addLearnedRule(rule: UserRule): void {
+    // 防误学红线：learned 来源规则必须经用户确认
+    if (rule.confirmedBy !== "user") {
+      throw new Error(
+        `学习规则 ${rule.id} 必须经用户确认（confirmedBy="user"）才生效，` + `当前 confirmedBy="${rule.confirmedBy}"`
+      );
     }
-
-    // 添加规则并保存
-    file.rules.push(normalizedRule);
-    const saveError = this.saveRuleFile(filePath, file);
-    if (saveError) {
-      return { success: false, error: saveError };
+    // 强制覆盖 source 字段
+    const normalizedRule: UserRule = Object.freeze({
+      ...rule,
+      source: "learned",
+    });
+    // 检查同 ID 规则是否已存在
+    if (this.findRuleByIdInAllLayers(normalizedRule.id) !== null) {
+      throw new Error(`规则 ID "${normalizedRule.id}" 已存在，不能重复添加`);
     }
-
-    return { success: true, ruleId: normalizedRule.id };
+    // 添加到全局用户层并重新合并
+    this.globalRules = Object.freeze([...this.globalRules, normalizedRule]);
+    this.effectiveRules = this.mergeRules(this.seedRules, this.globalRules, this.projectRules);
   }
 
   // ========================================================================
-  // 公共 API：移除规则
+  // 公共 API：统计与反馈
   // ========================================================================
 
   /**
-   * 移除规则
+   * 记录规则注入（usageCount +1）
    *
-   * 移除逻辑：
-   * - 用户/项目规则：从对应文件中删除
-   * - 种子规则：removable=true 的写入 removedSeedIds（下次加载时跳过）；
-   *            removable=false 的拒绝移除（BLOCKER 级种子规则不可移除）
+   * 对应 EAG 方案 §5.5.4 反馈闭环：每次注入到 LLM system prompt 时调用。
+   * 通过 copy-on-write 模式更新规则对象，避免突变原对象。
    *
    * @param ruleId 规则 ID
-   * @returns 操作结果
+   * @throws Error 当规则 ID 不存在时抛错
    */
-  removeRule(ruleId: string): RuleOperationResult {
-    // 1. 先查种子规则
-    const seedRule = SEED_RULES.find((r) => r.id === ruleId);
-    if (seedRule) {
-      // 检查是否可移除
-      if (!seedRule.removable) {
-        return {
-          success: false,
-          error: `种子规则 ${ruleId} 为 BLOCKER 级硬约束，不可移除（removable=false）`,
-        };
-      }
-      // 可移除：写入用户层的 removedSeedIds
-      const userFile = this.loadRuleFile(this.userRulesPath) ?? createEmptyRuleFile();
-      if (!userFile.removedSeedIds.includes(ruleId)) {
-        userFile.removedSeedIds.push(ruleId);
-        const saveError = this.saveRuleFile(this.userRulesPath, userFile);
-        if (saveError) {
-          return { success: false, error: saveError };
-        }
-      }
-      return { success: true, ruleId };
-    }
-    // 2. 查用户/项目规则并删除
-    for (const layer of ["user", "project"] as const) {
-      const filePath = this.getLayerFilePath(layer);
-      const file = this.loadRuleFile(filePath);
-      if (!file) continue;
-      const index = file.rules.findIndex((r) => r.id === ruleId);
-      if (index >= 0) {
-        file.rules.splice(index, 1);
-        const saveError = this.saveRuleFile(filePath, file);
-        if (saveError) {
-          return { success: false, error: saveError };
-        }
-        return { success: true, ruleId };
-      }
-    }
-    return {
-      success: false,
-      error: `规则 ID "${ruleId}" 不存在于任何层`,
-    };
+  recordUsage(ruleId: string): void {
+    this.updateRuleStats(ruleId, (rule) => ({
+      ...rule,
+      usageCount: rule.usageCount + 1,
+    }));
   }
 
-  // ========================================================================
-  // 公共 API：按 ID 查询规则
-  // ========================================================================
-
   /**
-   * 按 ID 查询单条规则
+   * 记录规则违规（violationCount +1）
+   *
+   * 对应 EAG 方案 §5.5.4 反馈闭环：评估器按该规则打回时调用。
+   * 通过 copy-on-write 模式更新规则对象，避免突变原对象。
    *
    * @param ruleId 规则 ID
-   * @returns 规则定义；不存在时返回 null
+   * @throws Error 当规则 ID 不存在时抛错
    */
-  getRuleById(ruleId: string): RuleDefinition | null {
-    const ruleset = this.loadMergedRuleset();
-    return ruleset.rules.find((r) => r.id === ruleId) ?? null;
-  }
-
-  // ========================================================================
-  // 公共 API：格式化为 System Prompt 注入文本
-  // ========================================================================
-
-  /**
-   * 格式化规则为 LLM System Prompt 注入文本
-   *
-   * 格式（§5.5.3）：
-   * ```
-   * ## 项目规则清单（生效中）
-   *
-   * ### BLOCKER 级（不可豁免）
-   * - [SEED-01] 禁止模拟/占位/mock 开发
-   *   严禁使用模拟、占位、mock、简化的方式开发代码...
-   * - [SEED-03] 严禁未批准的简化实现
-   *   ...
-   *
-   * ### MAJOR 级（可人工豁免）
-   * - [SEED-02] 代码注释中文且详细
-   *   ...
-   *
-   * ### WARNING 级（仅提示）
-   * - [USER-01] ...
-   *   ...
-   * ```
-   *
-   * Token 预算控制：
-   * - 超 budget 时按 severity 截断（WARNING 最先裁，然后 MAJOR，BLOCKER 永不裁）
-   * - 单条规则的超长描述截断到 200 字符并加 "..."
-   *
-   * @param ruleset 合并后的规则集（不传则重新加载）
-   * @param options 格式化选项
-   * @returns 格式化的注入文本（空规则集返回空字符串）
-   */
-  formatForSystemPrompt(ruleset?: MergedRuleSet, options?: SystemPromptFormatOptions): string {
-    const rs = ruleset ?? this.loadMergedRuleset();
-    const budget = options?.tokenBudget ?? DEFAULT_TOKEN_BUDGET;
-    const includeWarnings = options?.includeWarnings ?? true;
-    const includeCategoryHeaders = options?.includeCategoryHeaders ?? true;
-
-    if (rs.rules.length === 0) {
-      return "";
-    }
-
-    // 按 severity 分组（BLOCKER 优先）
-    const blockerRules: RuleDefinition[] = [];
-    const majorRules: RuleDefinition[] = [];
-    const warningRules: RuleDefinition[] = [];
-    for (const rule of rs.rules) {
-      // 仅注入目标包含 system_prompt 的规则
-      if (!rule.injectionTargets.includes("system_prompt")) {
-        continue;
-      }
-      if (rule.severity === "blocker") {
-        blockerRules.push(rule);
-      } else if (rule.severity === "major") {
-        majorRules.push(rule);
-      } else if (includeWarnings) {
-        warningRules.push(rule);
-      }
-    }
-
-    // 构建文本并控制 Token 预算
-    const lines: string[] = ["## 项目规则清单（生效中）", ""];
-
-    // 按层级追加，每次检查 Token 预算
-    let usedTokens = 0;
-    const headerTokens = estimateTokens(lines.join("\n"));
-    usedTokens += headerTokens;
-
-    // BLOCKER 永不裁剪
-    if (blockerRules.length > 0) {
-      const section = this.formatSeveritySection("BLOCKER 级（不可豁免）", blockerRules, includeCategoryHeaders);
-      usedTokens += estimateTokens(section);
-      lines.push(section);
-    }
-
-    // MAJOR 在预算内追加
-    if (majorRules.length > 0) {
-      const section = this.formatSeveritySection("MAJOR 级（可人工豁免）", majorRules, includeCategoryHeaders);
-      const sectionTokens = estimateTokens(section);
-      if (usedTokens + sectionTokens <= budget) {
-        usedTokens += sectionTokens;
-        lines.push(section);
-      } else {
-        // 预算不足——按单条裁剪
-        const partial = this.formatSeveritySectionWithBudget(
-          "MAJOR 级（可人工豁免）",
-          majorRules,
-          includeCategoryHeaders,
-          budget - usedTokens
-        );
-        if (partial) {
-          lines.push(partial);
-          usedTokens += estimateTokens(partial);
-        }
-      }
-    }
-
-    // WARNING 最先裁
-    if (includeWarnings && warningRules.length > 0) {
-      const section = this.formatSeveritySection("WARNING 级（仅提示）", warningRules, includeCategoryHeaders);
-      const sectionTokens = estimateTokens(section);
-      if (usedTokens + sectionTokens <= budget) {
-        lines.push(section);
-      } else {
-        const partial = this.formatSeveritySectionWithBudget(
-          "WARNING 级（仅提示）",
-          warningRules,
-          includeCategoryHeaders,
-          budget - usedTokens
-        );
-        if (partial) {
-          lines.push(partial);
-        }
-      }
-    }
-
-    return lines.join("\n").trim();
-  }
-
-  // ========================================================================
-  // 公共 API：格式化为评估器红线清单
-  // ========================================================================
-
-  /**
-   * 格式化规则为评估器红线清单
-   *
-   * 将规则转换为 RedlineDefinition[]，接入 IndependentEvaluator 判定清单。
-   * 仅包含 injectionTargets 包含 "evaluator" 的规则。
-   *
-   * 转换映射：
-   * - rule.id → redline.id
-   * - rule.name → redline.name
-   * - rule.description → redline.description
-   * - rule.severity → redline.severity
-   * - rule.pattern != null → checkType="static"，checkMethod="正则模式扫描"
-   * - rule.pattern == null → checkType="reasoning"，checkMethod="LLM 推理判定"
-   * - fixGuidance 由 rule.description 派生（"请按规则要求修复：<description>"）
-   *
-   * @param ruleset 合并后的规则集（不传则重新加载）
-   * @returns 红线定义列表
-   */
-  formatForEvaluator(ruleset?: MergedRuleSet): RedlineDefinition[] {
-    const rs = ruleset ?? this.loadMergedRuleset();
-    const redlines: RedlineDefinition[] = [];
-    for (const rule of rs.rules) {
-      // 仅注入目标包含 evaluator 的规则
-      if (!rule.injectionTargets.includes("evaluator")) {
-        continue;
-      }
-      redlines.push(ruleToRedline(rule));
-    }
-    return redlines;
-  }
-
-  // ========================================================================
-  // 公共 API：获取文件路径（供 CLI 显示）
-  // ========================================================================
-
-  /**
-   * 获取用户规则文件路径
-   */
-  getUserRulesPath(): string {
-    return this.userRulesPath;
+  recordViolation(ruleId: string): void {
+    this.updateRuleStats(ruleId, (rule) => ({
+      ...rule,
+      violationCount: rule.violationCount + 1,
+    }));
   }
 
   /**
-   * 获取项目规则文件路径
+   * 建议提升 severity（高频违规触发）
+   *
+   * 对应 EAG 方案 §5.5.4 反馈闭环：「高频违规 → 建议提升 severity」。
+   * 当 violationCount >= 5 时返回 true，建议将该规则提升 severity
+   * （WARNING → MAJOR → BLOCKER）。
+   *
+   * 注意：本方法仅返回建议，不自动提升 severity。调用方应根据建议
+   * 通过 HUMAN_CHECKPOINT 让用户决定是否提升。
+   *
+   * @param ruleId 规则 ID
+   * @returns true 表示建议提升 severity；false 表示未达阈值
+   * @throws Error 当规则 ID 不存在时抛错
    */
-  getProjectRulesPath(): string {
-    return this.projectRulesPath;
+  suggestSeverityUpgrade(ruleId: string): boolean {
+    const rule = this.getRuleById(ruleId);
+    if (rule === null) {
+      throw new Error(`规则 ID "${ruleId}" 不存在`);
+    }
+    return rule.violationCount >= SEVERITY_UPGRADE_VIOLATION_THRESHOLD;
+  }
+
+  /**
+   * 建议清理规则（长期零违规触发）
+   *
+   * 对应 EAG 方案 §5.5.4 反馈闭环：「长期零违规且被覆盖 → 建议清理」。
+   * 当 usageCount >= 10 且 violationCount === 0 时返回 true，
+   * 建议清理该规则（可能已被高优先级规则覆盖或自然遵守）。
+   *
+   * 注意：本方法仅返回建议，不自动清理规则。调用方应根据建议
+   * 通过 HUMAN_CHECKPOINT 让用户决定是否清理。
+   *
+   * @param ruleId 规则 ID
+   * @returns true 表示建议清理；false 表示未达阈值
+   * @throws Error 当规则 ID 不存在时抛错
+   */
+  suggestCleanup(ruleId: string): boolean {
+    const rule = this.getRuleById(ruleId);
+    if (rule === null) {
+      throw new Error(`规则 ID "${ruleId}" 不存在`);
+    }
+    return rule.usageCount >= CLEANUP_USAGE_THRESHOLD && rule.violationCount === 0;
   }
 
   // ========================================================================
@@ -614,280 +376,137 @@ export class RuleStore {
   // ========================================================================
 
   /**
-   * 获取指定层的规则文件路径
+   * 合并三层规则
    *
-   * @param layer 存储层
-   * @returns 文件路径
+   * 合并算法：
+   * 1. 以 ID 为键，按优先级 project > global > seed 覆盖
+   * 2. 不同 ID 规则全部保留
+   * 3. 合并后按 severity 排序（BLOCKER 优先 → MAJOR → WARNING）
+   * 4. 同 severity 内按 ID 字母序排序（保证测试可重现）
+   *
+   * @param seedRules 内置种子层规则
+   * @param globalRules 全局用户层规则
+   * @param projectRules 项目层规则
+   * @returns 合并后排序的生效规则列表
    */
-  private getLayerFilePath(layer: RuleStorageLayer): string {
-    if (layer === "user") return this.userRulesPath;
-    if (layer === "project") return this.projectRulesPath;
-    throw new Error(`不支持的存储层: ${layer}`);
-  }
-
-  /**
-   * 加载规则文件
-   *
-   * 文件不存在或解析失败时返回 null（不抛错，降级为空规则集）。
-   *
-   * @param filePath 文件路径
-   * @returns 规则文件对象；不存在或无效时返回 null
-   */
-  private loadRuleFile(filePath: string): RuleFile | null {
-    try {
-      if (!fs.existsSync(filePath)) {
-        return null;
-      }
-      const raw = fs.readFileSync(filePath, "utf8");
-      const parsed = JSON.parse(raw) as Partial<RuleFile>;
-
-      // 基础 schema 校验
-      if (typeof parsed !== "object" || parsed === null) {
-        return null;
-      }
-      if (!Array.isArray(parsed.rules)) {
-        return null;
-      }
-      if (!Array.isArray(parsed.removedSeedIds)) {
-        parsed.removedSeedIds = [];
-      }
-      // 版本号校验（未来版本演进时做兼容处理）
-      if (typeof parsed.version !== "number") {
-        parsed.version = RULES_FILE_VERSION;
-      }
-      return parsed as RuleFile;
-    } catch {
-      // 读取或解析失败——降级为空
-      return null;
+  private mergeRules(
+    seedRules: ReadonlyArray<UserRule>,
+    globalRules: ReadonlyArray<UserRule>,
+    projectRules: ReadonlyArray<UserRule>
+  ): ReadonlyArray<UserRule> {
+    // 以 ID 为键，按优先级 project > global > seed 覆盖
+    const mergedById = new Map<string, UserRule>();
+    // 先放种子层（最低优先级）
+    for (const rule of seedRules) {
+      mergedById.set(rule.id, rule);
     }
-  }
-
-  /**
-   * 保存规则文件（原子写入）
-   *
-   * 使用临时文件 + rename 实现原子写入，防止并发写入导致文件损坏。
-   * 自动创建父目录。
-   *
-   * @param filePath 文件路径
-   * @param file 规则文件对象
-   * @returns 错误信息（成功时为 null）
-   */
-  private saveRuleFile(filePath: string, file: RuleFile): string | null {
-    try {
-      // 确保父目录存在
-      const dir = path.dirname(filePath);
-      fs.mkdirSync(dir, { recursive: true });
-      // 写入临时文件，再 rename 为目标文件（原子操作）
-      const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
-      const content = JSON.stringify(file, null, 2) + "\n";
-      fs.writeFileSync(tmpPath, content, "utf8");
-      fs.renameSync(tmpPath, filePath);
-      return null;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return `写入规则文件失败: ${filePath} — ${message}`;
+    // 再放全局用户层（覆盖同 ID 的种子规则）
+    for (const rule of globalRules) {
+      mergedById.set(rule.id, rule);
     }
-  }
-
-  /**
-   * 格式化单个 severity 分组为文本
-   *
-   * @param header 分组标题
-   * @param rules 规则列表
-   * @param includeCategoryHeaders 是否在分组内按 category 子分组
-   * @returns 格式化的文本块
-   */
-  private formatSeveritySection(header: string, rules: RuleDefinition[], includeCategoryHeaders: boolean): string {
-    const lines: string[] = [`### ${header}`, ""];
-    if (includeCategoryHeaders) {
-      // 按 category（首个 tag）分组
-      const groups = new Map<string, RuleDefinition[]>();
-      for (const rule of rules) {
-        const category = rule.tags[0] ?? "general";
-        if (!groups.has(category)) groups.set(category, []);
-        groups.get(category)!.push(rule);
-      }
-      for (const [category, groupRules] of groups) {
-        lines.push(`**[${category}]**`);
-        for (const rule of groupRules) {
-          lines.push(...formatRuleLines(rule));
-        }
-        lines.push("");
-      }
-    } else {
-      for (const rule of rules) {
-        lines.push(...formatRuleLines(rule));
-      }
-      lines.push("");
+    // 最后放项目层（最高优先级，覆盖同 ID 的全局/种子规则）
+    for (const rule of projectRules) {
+      mergedById.set(rule.id, rule);
     }
-    return lines.join("\n");
+    // 转换为数组并按 severity 排序，同 severity 内按 ID 字母序
+    const merged = Array.from(mergedById.values());
+    merged.sort((a, b) => {
+      const severityCmp = compareSeverity(a.severity, b.severity);
+      if (severityCmp !== 0) return severityCmp;
+      return a.id.localeCompare(b.id);
+    });
+    return Object.freeze(merged);
   }
 
   /**
-   * 格式化单个 severity 分组为文本（带 Token 预算裁剪）
+   * 在三层规则中按 ID 查找规则
    *
-   * 超 budget 时按规则顺序截断，末尾追加 "...（已截断，剩余 N 条规则未显示）"
+   * 不应用覆盖优先级，返回首次找到的规则（按 project → global → seed 顺序）。
+   * 用于添加规则前检查 ID 唯一性。
    *
-   * @param header 分组标题
-   * @param rules 规则列表
-   * @param includeCategoryHeaders 是否在分组内按 category 子分组
-   * @param budgetTokens 剩余 Token 预算
-   * @returns 格式化的文本块；预算不足时返回空字符串
+   * @param id 规则 ID
+   * @returns 规则对象；不存在时返回 null
    */
-  private formatSeveritySectionWithBudget(
-    header: string,
-    rules: RuleDefinition[],
-    includeCategoryHeaders: boolean,
-    budgetTokens: number
-  ): string {
-    if (budgetTokens <= 0) return "";
-    const lines: string[] = [`### ${header}`, ""];
-    let usedTokens = estimateTokens(lines.join("\n"));
-    let shown = 0;
-    for (const rule of rules) {
-      const ruleLines = formatRuleLines(rule);
-      const ruleTokens = estimateTokens(ruleLines.join("\n"));
-      if (usedTokens + ruleTokens > budgetTokens) {
+  private findRuleByIdInAllLayers(id: string): UserRule | null {
+    // 按 project → global → seed 顺序查找
+    for (const rule of this.projectRules) {
+      if (rule.id === id) return rule;
+    }
+    for (const rule of this.globalRules) {
+      if (rule.id === id) return rule;
+    }
+    for (const rule of this.seedRules) {
+      if (rule.id === id) return rule;
+    }
+    return null;
+  }
+
+  /**
+   * 更新规则统计字段（copy-on-write）
+   *
+   * 通过 copy-on-write 模式更新规则的统计字段（usageCount / violationCount），
+   * 避免突变原对象。更新后重新合并三层规则。
+   *
+   * @param ruleId 规则 ID
+   * @param updater 更新函数，接收原规则返回新规则
+   * @throws Error 当规则 ID 不存在时抛错
+   */
+  private updateRuleStats(ruleId: string, updater: (rule: UserRule) => UserRule): void {
+    // 查找规则所在的层
+    let foundLayer: RuleStoreLayer | null = null;
+    let foundIndex = -1;
+    // 按 project → global → seed 顺序查找
+    for (let i = 0; i < this.projectRules.length; i++) {
+      if (this.projectRules[i].id === ruleId) {
+        foundLayer = "project";
+        foundIndex = i;
         break;
       }
-      lines.push(...ruleLines);
-      usedTokens += ruleTokens;
-      shown++;
     }
-    if (shown === 0) {
-      return "";
+    if (foundLayer === null) {
+      for (let i = 0; i < this.globalRules.length; i++) {
+        if (this.globalRules[i].id === ruleId) {
+          foundLayer = "global";
+          foundIndex = i;
+          break;
+        }
+      }
     }
-    if (shown < rules.length) {
-      lines.push(`...（已截断，剩余 ${rules.length - shown} 条规则未显示）`);
+    if (foundLayer === null) {
+      for (let i = 0; i < this.seedRules.length; i++) {
+        if (this.seedRules[i].id === ruleId) {
+          foundLayer = "seed";
+          foundIndex = i;
+          break;
+        }
+      }
     }
-    lines.push("");
-    return lines.join("\n");
-  }
-}
-
-// ============================================================================
-// 辅助函数
-// ============================================================================
-
-/**
- * 创建空规则文件对象
- *
- * @returns 空的 RuleFile
- */
-function createEmptyRuleFile(): RuleFile {
-  return {
-    version: RULES_FILE_VERSION,
-    rules: [],
-    removedSeedIds: [],
-  };
-}
-
-/**
- * 校验规则定义
- *
- * @param rule 规则定义
- * @returns 错误信息（通过校验时返回 null）
- */
-export function validateRule(rule: RuleDefinition): string | null {
-  if (!rule.id || rule.id.trim() === "") {
-    return "规则 ID 不能为空";
-  }
-  if (!rule.name || rule.name.trim() === "") {
-    return `规则 ${rule.id} 的 name 不能为空`;
-  }
-  if (!rule.description || rule.description.trim() === "") {
-    return `规则 ${rule.id} 的 description 不能为空`;
-  }
-  if (!["blocker", "major", "warning"].includes(rule.severity)) {
-    return `规则 ${rule.id} 的 severity 无效: ${rule.severity}`;
-  }
-  if (!["seed", "user", "project", "learned"].includes(rule.source)) {
-    return `规则 ${rule.id} 的 source 无效: ${rule.source}`;
-  }
-  if (!Array.isArray(rule.injectionTargets) || rule.injectionTargets.length === 0) {
-    return `规则 ${rule.id} 的 injectionTargets 不能为空`;
-  }
-  for (const target of rule.injectionTargets) {
-    if (!["system_prompt", "evaluator"].includes(target)) {
-      return `规则 ${rule.id} 的 injectionTarget 无效: ${target}`;
+    if (foundLayer === null || foundIndex < 0) {
+      throw new Error(`规则 ID "${ruleId}" 不存在`);
     }
+    // copy-on-write 更新规则对象
+    const updateLayer = (layer: ReadonlyArray<UserRule>): ReadonlyArray<UserRule> => {
+      const newLayer = [...layer];
+      newLayer[foundIndex] = Object.freeze(updater(newLayer[foundIndex]));
+      return Object.freeze(newLayer);
+    };
+    if (foundLayer === "project") {
+      this.projectRules = updateLayer(this.projectRules);
+    } else if (foundLayer === "global") {
+      this.globalRules = updateLayer(this.globalRules);
+    } else {
+      // 种子层规则通常是冻结的常量，但统计字段更新需要可变。
+      // 解决方案：构造新的种子层数组（包含更新后的规则），保留其他种子规则不变。
+      // 注：这不会修改 SEED_RULES 常量本身（因我们拷贝了数组），仅更新 store 内部的 seedRules 视图。
+      this.seedRules = updateLayer(this.seedRules);
+    }
+    // 重新合并三层规则
+    this.effectiveRules = this.mergeRules(this.seedRules, this.globalRules, this.projectRules);
   }
-  if (!Array.isArray(rule.tags)) {
-    return `规则 ${rule.id} 的 tags 必须是数组`;
-  }
-  // pattern 可以为 null（推理判定）或字符串（静态判定）
-  if (rule.pattern !== null && typeof rule.pattern !== "string") {
-    return `规则 ${rule.id} 的 pattern 必须是 string 或 null`;
-  }
-  // removable 必须是 boolean
-  if (typeof rule.removable !== "boolean") {
-    return `规则 ${rule.id} 的 removable 必须是 boolean`;
-  }
-  return null;
-}
-
-/**
- * 格式化单条规则为文本行
- *
- * @param rule 规则定义
- * @returns 文本行数组
- */
-function formatRuleLines(rule: RuleDefinition): string[] {
-  const lines: string[] = [];
-  // 标题行：- [ID] name
-  lines.push(`- [${rule.id}] ${rule.name}`);
-  // 描述行：缩进 2 空格，超 200 字符截断
-  const desc = rule.description.length > 200 ? rule.description.slice(0, 200) + "..." : rule.description;
-  lines.push(`  ${desc}`);
-  // pattern 提示行（仅当 pattern 存在时）
-  if (rule.pattern) {
-    lines.push(`  静态检测模式: \`${rule.pattern}\``);
-  }
-  return lines;
-}
-
-/**
- * 规则转换为评估器红线定义
- *
- * @param rule 规则定义
- * @returns 红线定义
- */
-export function ruleToRedline(rule: RuleDefinition): RedlineDefinition {
-  const isStatic = rule.pattern !== null && rule.pattern !== "";
-  return {
-    id: rule.id,
-    name: rule.name,
-    description: rule.description,
-    severity: rule.severity,
-    checkMethod: isStatic ? `正则模式扫描: ${rule.pattern}` : "LLM 推理判定（需读取代码理解语义）",
-    checkType: isStatic ? "static" : "reasoning",
-    fixGuidance: `请按规则 "${rule.name}" 要求修复：${rule.description}`,
-  };
-}
-
-/**
- * 估算文本 Token 数
- *
- * 简单估算：中文字符按 2 Token/字，英文单词按 1.3 Token/词。
- * 此估算仅用于预算控制，精度足够；实际 Token 数由 LLM API usage 字段统计。
- *
- * @param text 文本
- * @returns 估算的 Token 数
- */
-export function estimateTokens(text: string): number {
-  if (!text) return 0;
-  // 中文字符数（CJK 统一表意文字 + 全角标点）
-  const cnChars = (text.match(/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/g) ?? []).length;
-  // 英文单词数（去除中文后的非空白字符序列）
-  const stripped = text.replace(/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/g, " ");
-  const enWords = (stripped.match(/[a-zA-Z0-9_]+/g) ?? []).length;
-  return Math.ceil(cnChars * TOKEN_ESTIMATE_RATIO_CN + enWords * TOKEN_ESTIMATE_RATIO_EN);
 }
 
 // ============================================================================
 // 模块导出
 // ============================================================================
-// 注：RuleStore class、validateRule、ruleToRedline、estimateTokens 均在定义处
-// 通过 `export` 关键字导出，此处不再重复导出，避免 TS2323/TS2484 重复导出错误。
-// 仅常量和 getDefaultProjectRulesPath 辅助函数在此统一导出，保持模块 API 完整性。
-export { DEFAULT_USER_RULES_PATH, DEFAULT_TOKEN_BUDGET, RULES_FILE_VERSION, getDefaultProjectRulesPath };
+
+export { SEVERITY_UPGRADE_VIOLATION_THRESHOLD, CLEANUP_USAGE_THRESHOLD };

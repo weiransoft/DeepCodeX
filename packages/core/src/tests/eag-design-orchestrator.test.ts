@@ -53,6 +53,8 @@ import type {
   ArchitectureDocument,
   DomainModelDocument,
   UserStory,
+  DomainTerm,
+  NonFunctionalRequirement,
 } from "../eag/design/design-models";
 import type { ProductManagerProtocol, ArchitectProtocol } from "../eag/design/design-protocols";
 import type { ArchitectureParadigm, ParadigmId, ParadigmLockConfig } from "../eag/eak/types";
@@ -95,8 +97,10 @@ class StaticProductManager implements ProductManagerProtocol {
       .filter((l) => l.length > 0);
 
     const userStories: UserStory[] = [];
-    const domainGlossary: StructuredRequirement["domainGlossary"] = [];
-    const nonFunctionalRequirements: StructuredRequirement["nonFunctionalRequirements"] = [];
+    // 使用可变数组类型（DomainTerm[] / NonFunctionalRequirement[]）而非 StructuredRequirement 上的 readonly 派生类型，
+    // 以便在循环中调用 push 累积解析结果，最终在 return 时由 StructuredRequirement 的 readonly 字段接收（协变安全）
+    const domainGlossary: DomainTerm[] = [];
+    const nonFunctionalRequirements: NonFunctionalRequirement[] = [];
 
     // 用户故事计数器（用于生成 US-001、US-002 ...）
     let storyIndex = 0;

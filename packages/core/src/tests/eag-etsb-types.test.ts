@@ -171,7 +171,7 @@ test("T5a. TechStackMatrix 接口支持嵌套 Record 结构", () => {
       typescript: {
         frontend: [{ name: "React 18", priority: 1 }],
       },
-    } as TechStackMatrix["cells"],
+    } as unknown as TechStackMatrix["cells"],
   };
   assert.equal(matrix.cells.typescript.frontend[0].name, "React 18");
 });
@@ -185,7 +185,7 @@ test("T5b. TechStackMatrix 嵌套查询可获取 options", () => {
           { name: "Vue 3", priority: 2 },
         ],
       },
-    } as TechStackMatrix["cells"],
+    } as unknown as TechStackMatrix["cells"],
   };
   const options = matrix.cells.typescript.frontend;
   assert.equal(options.length, 2);
