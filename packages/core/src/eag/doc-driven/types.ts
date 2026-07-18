@@ -216,6 +216,17 @@ export interface TaskNode {
   readonly fileCluster: string;
   /** 验收命令（如 "npm test order"，由评估器执行判定完成） */
   readonly acceptanceCommand: string;
+  /**
+   * 任务卡声明受影响的符号 ID 列表（用于 G-3 门禁偏离检测）
+   *
+   * 对齐 §5.12.4 A-3 任务范围锁——任务卡应声明本任务预期影响的符号 ID，
+   * G-3 门禁将此字段与实际变更（actualSymbolIds）对比，统计符号级偏离。
+   *
+   * 设为可选字段以兼容旧数据：
+   * - 旧版本 TaskNode 不含此字段，转换时透传为空数组
+   * - 新版本 TaskDecomposer 应在生成 TaskNode 时显式填充此字段
+   */
+  readonly declaredSymbols?: ReadonlyArray<string>;
 }
 
 /**
@@ -426,4 +437,232 @@ export interface WorkflowValidationResult {
   readonly missingApprovals: ReadonlyArray<DocumentType>;
   /** 判定理由（人类可读，包含具体哪类文档未批准） */
   readonly reason: string;
+}
+
+// ============================================================================
+// 5. plan.md 生成器输入与产出
+// ============================================================================
+
+/**
+ * 模块切分条目（plan.md 章节 2：模块切分）
+ *
+ * 描述按聚合/模块对实现方案的切分：
+ * - moduleName：模块名（如 "UserAggregate"、"OrderService"）
+ * - responsibility：模块职责（如"用户认证与权限管理"）
+ * - dependsOn：依赖的其他模块名列表
+ * - keyFiles：模块关键文件路径列表（预估）
+ */
+export interface ModuleSplit {
+  /** 模块名（如 "UserAggregate"、"OrderService"） */
+  readonly moduleName: string;
+  /** 模块职责（一句话描述） */
+  readonly responsibility: string;
+  /** 依赖的其他模块名列表 */
+  readonly dependsOn: ReadonlyArray<string>;
+  /** 模块关键文件路径列表（预估） */
+  readonly keyFiles: ReadonlyArray<string>;
+}
+
+/**
+ * 接口契约条目（plan.md 章节 3：接口契约）
+ *
+ * 描述模块对外暴露的 API 或服务间接口：
+ * - interfaceName：接口名（如 "UserService.login"、"OrderController.create"）
+ * - type：接口类型（rest-api / service-method / event-handler / job）
+ * - signature：方法签名（如 "login(email: string, password: string): Promise<LoginResult>"）
+ * - description：接口描述
+ * - requestSchema：请求参数 schema（可选，JSON Schema 片段）
+ * - responseSchema：响应数据 schema（可选，JSON Schema 片段）
+ * - errorCodes：错误码列表
+ */
+export interface InterfaceContract {
+  /** 接口名（如 "UserService.login"、"OrderController.create"） */
+  readonly interfaceName: string;
+  /** 接口类型（rest-api / service-method / event-handler / job） */
+  readonly type: "rest-api" | "service-method" | "event-handler" | "job";
+  /** 方法签名（如 "login(email: string, password: string): Promise<LoginResult>"） */
+  readonly signature: string;
+  /** 接口描述 */
+  readonly description: string;
+  /** 请求参数 schema（可选，JSON Schema 片段字符串） */
+  readonly requestSchema?: string;
+  /** 响应数据 schema（可选，JSON Schema 片段字符串） */
+  readonly responseSchema?: string;
+  /** 错误码列表（如 ["400 InvalidEmail", "401 Unauthorized"]） */
+  readonly errorCodes: ReadonlyArray<string>;
+}
+
+/**
+ * 数据迁移条目（plan.md 章节 4：数据迁移）
+ *
+ * 描述 schema 变更与数据迁移脚本：
+ * - migrationId：迁移 ID（如 "20260720000000_create_users"）
+ * - changeType：变更类型（create-table / add-column / modify-column / drop-column / create-index / seed-data）
+ * - tableName：受影响的表名
+ * - description：变更描述
+ * - rollbackStrategy：回滚策略（如 "DROP TABLE users"）
+ */
+export interface DataMigration {
+  /** 迁移 ID（如 "20260720000000_create_users"） */
+  readonly migrationId: string;
+  /** 变更类型（create-table / add-column / modify-column / drop-column / create-index / seed-data） */
+  readonly changeType: "create-table" | "add-column" | "modify-column" | "drop-column" | "create-index" | "seed-data";
+  /** 受影响的表名 */
+  readonly tableName: string;
+  /** 变更描述 */
+  readonly description: string;
+  /** 回滚策略（如 "DROP TABLE users"） */
+  readonly rollbackStrategy: string;
+}
+
+/**
+ * 风险与回退条目（plan.md 章节 5：风险与回退）
+ *
+ * 识别实现方案中的风险并给出回退方案：
+ * - riskId：风险 ID（如 "R-001"）
+ * - description：风险描述
+ * - severity：严重性（high / medium / low）
+ * - mitigation：缓解措施
+ * - rollbackPlan：回退方案
+ */
+export interface RiskItem {
+  /** 风险 ID（如 "R-001"） */
+  readonly riskId: string;
+  /** 风险描述 */
+  readonly description: string;
+  /** 严重性（high / medium / low） */
+  readonly severity: "high" | "medium" | "low";
+  /** 缓解措施 */
+  readonly mitigation: string;
+  /** 回退方案 */
+  readonly rollbackPlan: string;
+}
+
+/**
+ * plan.md 生成器输入
+ *
+ * 对应 EAG 方案 §5.10.1 三文档契约中 plan.md 的生成需求。
+ * plan.md 在 CODING Loop 首轮产出，依赖已批准的 spec.md。
+ *
+ * 输入字段：
+ * - specContent：spec.md 内容字符串（含功能需求 + 领域模型 + 技术选型决策表）
+ * - constitutionContent：CONSTITUTION.md 内容字符串（含技术栈锁定 + 红线声明）
+ * - moduleSplits：模块切分条目列表
+ * - interfaceContracts：接口契约条目列表
+ * - dataMigrations：数据迁移条目列表
+ * - risks：风险与回退条目列表
+ * - techStack：技术栈列表（从 spec.md 决策表提取）
+ */
+export interface PlanGenerationInput {
+  /** spec.md 内容字符串（含功能需求 + 领域模型 + 技术选型决策表） */
+  readonly specContent: string;
+  /** CONSTITUTION.md 内容字符串（含技术栈锁定 + 红线声明） */
+  readonly constitutionContent: string;
+  /** 模块切分条目列表 */
+  readonly moduleSplits: ReadonlyArray<ModuleSplit>;
+  /** 接口契约条目列表 */
+  readonly interfaceContracts: ReadonlyArray<InterfaceContract>;
+  /** 数据迁移条目列表 */
+  readonly dataMigrations: ReadonlyArray<DataMigration>;
+  /** 风险与回退条目列表 */
+  readonly risks: ReadonlyArray<RiskItem>;
+  /** 技术栈列表（从 spec.md 决策表提取，如 ["TypeScript", "NestJS", "PostgreSQL"]） */
+  readonly techStack: ReadonlyArray<string>;
+}
+
+// ============================================================================
+// 6. tasks.md 生成器输入
+// ============================================================================
+
+/**
+ * 任务卡状态（4 态，字面量联合类型）
+ *
+ * 对应 EAG 方案 §5.12.2 进度可视化——tasks.md 实时回写状态：
+ * - pending：待办（任务尚未开始）
+ * - in-progress：进行中（任务正在执行）
+ * - completed：完成（任务验收通过）
+ * - blocked：阻塞（任务遇阻，需人工介入）
+ */
+export type TaskCardStatus = "pending" | "in-progress" | "completed" | "blocked";
+
+/**
+ * 任务卡状态全部合法值（用于运行时枚举与校验）
+ *
+ * 使用 Object.freeze 冻结。
+ */
+export const TASK_CARD_STATUSES: ReadonlyArray<TaskCardStatus> = Object.freeze([
+  "pending",
+  "in-progress",
+  "completed",
+  "blocked",
+]);
+
+/**
+ * 任务卡（tasks.md 中的任务单元，含 [REQ-F-xxx] 溯源标记）
+ *
+ * 对应 EAG 方案 §5.10.2 任务分解规范——每任务卡含：
+ * - 任务 ID（T-NNN）
+ * - 任务标题
+ * - [REQ-F-xxx] 需求溯源标记
+ * - 验收标准（可执行的测试命令）
+ * - 依赖任务 ID 列表
+ * - 状态（pending/in-progress/completed/blocked）
+ *
+ * 范例：
+ *   {
+ *     id: "T-001",
+ *     title: "UserAggregate 骨架",
+ *     requirementId: "F-001",
+ *     dependencies: [],
+ *     acceptanceCriteria: ["npm test user-aggregate"],
+ *     status: "pending"
+ *   }
+ */
+export interface TaskCard {
+  /** 任务 ID（如 "T-001"，遵循 T-NNN 三位数字编号规范） */
+  readonly id: string;
+  /** 任务标题（简洁描述任务） */
+  readonly title: string;
+  /** 需求溯源 ID（如 "F-001"，对齐 [REQ-F-xxx] 标记规范） */
+  readonly requirementId: string;
+  /** 依赖任务 ID 列表（必须在本任务启动前完成） */
+  readonly dependencies: ReadonlyArray<string>;
+  /** 验收标准列表（可执行的测试命令或自然语言断言） */
+  readonly acceptanceCriteria: ReadonlyArray<string>;
+  /** 任务状态（pending/in-progress/completed/blocked） */
+  readonly status: TaskCardStatus;
+  /**
+   * 任务卡声明受影响的符号 ID 列表（对齐 §5.12.4 A-3 任务范围锁的符号级偏离检测）
+   *
+   * 数据源契约：
+   * - 来源：TaskNode.declaredSymbols（由 TaskDecomposer 在分解时填写）
+   * - 用途：G-3 门禁将此字段与 FileChange.actualSymbolIds 对比，
+   *   统计符号级偏离（未声明的实际变更符号），偏离数 ≥ 阈值即触发 HUMAN_CHECKPOINT
+   * - 不可变保证：使用 ReadonlyArray<string> + Object.freeze 冻结
+   *
+   * 范例：
+   *   ["src/services/UserService.ts:UserService.login",
+   *    "src/domain/UserAggregate.ts:UserAggregate.constructor"]
+   */
+  readonly declaredSymbols: ReadonlyArray<string>;
+}
+
+/**
+ * tasks.md 生成器输入
+ *
+ * 对应 EAG 方案 §5.10.2 任务分解规范 + §5.12.2 进度可视化。
+ * tasks.md 在 CODING Loop 首轮产出，依赖 plan.md 与 TaskDag。
+ *
+ * 输入字段：
+ * - planContent：plan.md 内容字符串（含模块切分/接口契约/数据迁移/风险与回退）
+ * - taskDag：任务 DAG（已通过 TaskDecomposer 生成，含拓扑序）
+ * - acceptanceCriteriaMap：任务 ID → 验收标准列表的映射（来自 spec.md 的验收标准）
+ */
+export interface TasksGenerationInput {
+  /** plan.md 内容字符串（含模块切分/接口契约/数据迁移/风险与回退） */
+  readonly planContent: string;
+  /** 任务 DAG（已通过 TaskDecomposer 生成，含拓扑序） */
+  readonly taskDag: Readonly<TaskDag>;
+  /** 任务 ID → 验收标准列表的映射（来自 spec.md 的验收标准） */
+  readonly acceptanceCriteriaMap: Readonly<Record<string, ReadonlyArray<string>>>;
 }

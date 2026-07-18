@@ -1,0 +1,372 @@
+/**
+ * 方案先行门禁类型定义（EAG-P2 批次 8）
+ *
+ * 本模块定义 EAG 方案 §5.12.1 方案先行门禁（Spec-First Gate）所需的全部结构化数据类型。
+ * 门禁将"每次写代码前必先写方案、评审方案、按方案执行"从纪律变为系统门禁。
+ *
+ * 三道门禁：
+ * - G-1：无已批准 spec/plan 禁入 CODING Loop
+ * - G-2：方案必经多角色评审 + 用户批准
+ * - G-3：方案偏离检测（任务卡声明变更 vs 实际变更）
+ *
+ * 设计依据：
+ * - EAG 方案 §5.12.1 方案先行门禁
+ * - §5.10.1 文档即门禁（文档状态机作为 Loop 流转条件）
+ * - §5.12.4 A-3 任务范围锁（G-3 偏离检测的 autonomous 强化）
+ *
+ * 不可变优先原则（对齐 §5.12.4 G-A6d 配置冻结）：
+ * - 所有接口字段使用 readonly 修饰
+ * - 数组使用 ReadonlyArray<T>
+ * - 字面量联合类型避免字符串拼写错误
+ * - 顶层配置常量使用 Object.freeze 冻结，防止运行期被 LLM 自改
+ *
+ * @module eag/gate/gate-types
+ */
+
+// ============================================================================
+// 1. 共享类型：复用 doc-driven/types.ts 中已定义的 DocumentState 与 TaskCard
+// ============================================================================
+
+import type { DocumentState, TaskCard } from "../doc-driven/types";
+
+/**
+ * 文档状态类型（复用 doc-driven/types.ts 中的 DocumentState）
+ *
+ * 状态值：draft / reviewing / approved / rejected
+ */
+export type { DocumentState, TaskCard };
+
+// ============================================================================
+// 2. 评审记录类型
+// ============================================================================
+
+/**
+ * 评审角色（字面量联合类型，对齐 §5.12.1 G-2 多角色评审要求）
+ *
+ * 四角色覆盖方案评审的完整视角：
+ * - architect：架构师（系统设计 / 范式一致性 / 技术选型合理性）
+ * - pm：产品经理（需求覆盖 / 优先级 / 验收标准可执行性）
+ * - test-expert：测试专家（可测试性 / 验收卡 / 风险驱动用例）
+ * - solo-coder：独立开发者（可实施性 / 工作量评估 / 技术债）
+ *
+ * 字面量联合而非 string，避免拼写错误。
+ */
+export type ReviewRole = "architect" | "pm" | "test-expert" | "solo-coder";
+
+/**
+ * ReviewRole 全部合法值（用于运行时枚举、测试断言与配置校验）
+ *
+ * 使用 Object.freeze 冻结。顺序对齐 §5.12.1 G-2 多角色评审 4 角色顺序。
+ */
+export const REVIEW_ROLES: ReadonlyArray<ReviewRole> = Object.freeze(["architect", "pm", "test-expert", "solo-coder"]);
+
+/**
+ * 评审结论（字面量联合类型）
+ *
+ * - approve：通过（无重大问题，可批准方案）
+ * - reject：驳回（存在 BLOCKER 级问题，需修改后重审）
+ * - conditional-approve：有条件通过（存在 MAJOR 级问题，但可修复，附条件批准）
+ *
+ * 字面量联合而非 string，避免拼写错误。
+ */
+export type ReviewVerdict = "approve" | "reject" | "conditional-approve";
+
+/**
+ * 评审记录（单一角色对方案的评审产出）
+ *
+ * 对齐 §5.12.1 G-2——方案必须经多角色评审，评审记录写入文档头部。
+ *
+ * 范例：
+ *   {
+ *     role: "architect",
+ *     reviewer: "Alice",
+ *     verdict: "approve",
+ *     comments: "架构设计合理，分层清晰，建议在领域层增加审计日志。",
+ *     reviewedAt: "2026-07-19T10:00:00.000Z"
+ *   }
+ */
+export interface ReviewRecord {
+  /** 评审角色（architect/pm/test-expert/solo-coder） */
+  readonly role: ReviewRole;
+  /** 评审人姓名或 ID */
+  readonly reviewer: string;
+  /** 评审结论（approve/reject/conditional-approve） */
+  readonly verdict: ReviewVerdict;
+  /** 评审意见（含问题清单与建议） */
+  readonly comments: string;
+  /** 评审时间（ISO 8601 字符串） */
+  readonly reviewedAt: string;
+}
+
+// ============================================================================
+// 3. 文件变更与任务卡声明变更
+// ============================================================================
+
+/**
+ * 文件变更类型（字面量联合类型）
+ *
+ * - added：新增文件
+ * - modified：修改文件
+ * - deleted：删除文件
+ * - renamed：重命名文件
+ *
+ * 与 l2-types.ts 中的 GitDiffType 对齐，但此处独立定义以避免门禁模块耦合 L2。
+ */
+export type FileChangeType = "added" | "modified" | "deleted" | "renamed";
+
+/**
+ * 文件变更（单文件的实际变更信息）
+ *
+ * 用于 G-3 门禁比对"任务卡声明变更 vs 实际变更"。
+ *
+ * 范例：
+ *   {
+ *     type: "modified",
+ *     filePath: "src/services/PaymentService.ts",
+ *     declaredSymbolIds: ["src/services/PaymentService.ts:PaymentService.refund"],
+ *     actualSymbolIds: [
+ *       "src/services/PaymentService.ts:PaymentService.refund",
+ *       "src/services/PaymentCallbackHandler.ts:PaymentCallbackHandler.handle"
+ *     ]
+ *   }
+ */
+export interface FileChange {
+  /** 变更类型（added/modified/deleted/renamed） */
+  readonly type: FileChangeType;
+  /** 文件相对路径 */
+  readonly filePath: string;
+  /**
+   * 任务卡声明的受影响符号 ID 列表（来自 TaskCard.declaredSymbols）
+   *
+   * 数据源契约：
+   * - 上游来源：TaskNode.declaredSymbols（由 TaskDecomposer 在分解时填写）
+   * - 透传路径：TaskNode.declaredSymbols → TasksGenerator.convertToTaskCards →
+   *   TaskCard.declaredSymbols → GateContext.actualChanges[i].declaredSymbolIds
+   * - 对齐 §5.12.4 A-3 任务范围锁的符号级偏离检测
+   */
+  readonly declaredSymbolIds: ReadonlyArray<string>;
+  /** 实际变更涉及的符号 ID 列表（来自代码 diff 静态分析） */
+  readonly actualSymbolIds: ReadonlyArray<string>;
+}
+
+// ============================================================================
+// 4. Loop 类型与门禁上下文
+// ============================================================================
+
+/**
+ * Loop 类型（字面量联合类型）
+ *
+ * 对齐 EAG 三 Loop 编排：
+ * - design：DESIGN Loop（产出 spec.md + CONSTITUTION.md）
+ * - coding：CODING Loop（产出 plan.md + tasks.md + 代码实现）
+ * - testing：TESTING Loop（产出测试用例 + 合规证据 + PR 描述）
+ *
+ * 各 Loop 对应的门禁策略（详见 GateOrchestrator）：
+ * - design：跳过 G-1/G-2/G-3（DESIGN Loop 是方案产出阶段，无门禁）
+ * - coding：依次执行 G-1 → G-2 → G-3
+ * - testing：跳过 G-1/G-2/G-3（TESTING Loop 验证已实施代码，无方案门禁）
+ *
+ * 字面量联合而非 string，避免拼写错误。
+ */
+export type LoopType = "design" | "coding" | "testing";
+
+/**
+ * LoopType 全部合法值（用于运行时枚举与校验）
+ *
+ * 使用 Object.freeze 冻结。顺序对齐 EAG 三 Loop 编排自然顺序。
+ */
+export const LOOP_TYPES: ReadonlyArray<LoopType> = Object.freeze(["design", "coding", "testing"]);
+
+// ============================================================================
+// 5. 门禁类型与结果
+// ============================================================================
+
+/**
+ * 门禁 ID（字面量联合类型，对应三道门禁）
+ *
+ * - G-1：无已批准 spec/plan 禁入 CODING Loop
+ * - G-2：方案必经多角色评审 + 用户批准
+ * - G-3：方案偏离检测（任务卡声明变更 vs 实际变更）
+ *
+ * 字面量联合而非 string，避免拼写错误。
+ */
+export type GateId = "G-1" | "G-2" | "G-3";
+
+/**
+ * GateId 全部合法值（用于运行时枚举、测试断言）
+ *
+ * 使用 Object.freeze 冻结。顺序对应门禁执行顺序（G-1 → G-2 → G-3）。
+ */
+export const GATE_IDS: ReadonlyArray<GateId> = Object.freeze(["G-1", "G-2", "G-3"]);
+
+/**
+ * 门禁严重性（与 RedlineSeverity 对齐，使用小写）
+ *
+ * 对齐 `eag/evaluator/types.ts` 中的 RedlineSeverity：
+ * - blocker：阻塞级（不通过即打回，不可豁免）
+ * - major：主要级（打回但可人工豁免）
+ * - warning：警告级（仅提示不打回）
+ *
+ * 字面量联合而非 string，避免拼写错误。
+ */
+export type GateSeverity = "blocker" | "major" | "warning";
+
+/**
+ * 门禁上下文（GateChecker.check 的入参）
+ *
+ * 携带门禁判定所需的全部信息：
+ * - projectId / loopType：项目与 Loop 标识
+ * - specStatus / planStatus：spec.md / plan.md 的文档状态（G-1 检查）
+ * - reviewRecords：评审记录列表（G-2 检查）
+ * - userApproved：用户批准标记（G-2 检查）
+ * - taskCard：当前迭代的任务卡（G-3 检查）
+ * - actualChanges：实际变更列表（G-3 检查）
+ *
+ * 字段全部 readonly——上下文一经组装即不可变。
+ *
+ * 范例：
+ *   {
+ *     projectId: "order-system",
+ *     loopType: "coding",
+ *     specStatus: "approved",
+ *     planStatus: "approved",
+ *     reviewRecords: [...],
+ *     userApproved: true,
+ *     taskCard: { id: "T-001", ... },
+ *     actualChanges: [...]
+ *   }
+ */
+export interface GateContext {
+  /** 项目 ID */
+  readonly projectId: string;
+  /** Loop 类型（design/coding/testing） */
+  readonly loopType: LoopType;
+  /** spec.md 的文档状态 */
+  readonly specStatus: DocumentState;
+  /** plan.md 的文档状态 */
+  readonly planStatus: DocumentState;
+  /** 评审记录列表（含多角色评审） */
+  readonly reviewRecords: ReadonlyArray<ReviewRecord>;
+  /** 用户是否已显式批准方案 */
+  readonly userApproved: boolean;
+  /** 当前迭代的任务卡 */
+  readonly taskCard: TaskCard;
+  /** 实际变更列表（来自 git diff 静态分析） */
+  readonly actualChanges: ReadonlyArray<FileChange>;
+}
+
+/**
+ * 门禁结果（GateChecker.check 的产出）
+ *
+ * 描述单道门禁的判定结果：
+ * - passed：是否通过
+ * - gate：门禁 ID（G-1/G-2/G-3）
+ * - reason：判定理由（人类可读，含具体未通过项）
+ * - guidance：引导消息（失败时建议下一步动作，如"进入 DESIGN Loop"）
+ * - severity：严重性（blocker/major/warning）
+ *
+ * 字段全部 readonly。
+ *
+ * 范例：
+ *   {
+ *     passed: false,
+ *     gate: "G-1",
+ *     reason: "spec.md 状态为 reviewing，未批准",
+ *     guidance: "建议进入 DESIGN Loop 完成 spec.md 评审与批准",
+ *     severity: "blocker"
+ *   }
+ */
+export interface GateResult {
+  /** 是否通过（true=通过，false=不通过） */
+  readonly passed: boolean;
+  /** 门禁 ID（G-1/G-2/G-3） */
+  readonly gate: GateId;
+  /** 判定理由（人类可读，含具体未通过项） */
+  readonly reason: string;
+  /** 引导消息（失败时建议下一步动作） */
+  readonly guidance?: string;
+  /** 严重性（blocker/major/warning） */
+  readonly severity: GateSeverity;
+}
+
+// ============================================================================
+// 6. 门禁编排结果
+// ============================================================================
+
+/**
+ * 门禁编排结果（GateOrchestrator.run 的产出）
+ *
+ * 描述一次 Loop 启动前所有门禁的编排判定结果：
+ * - results：各门禁的判定结果列表（按执行顺序）
+ * - allPassed：是否全部通过
+ * - firstFailedGate：首个未通过的门禁（null 表示全部通过）
+ * - loopType：当前 Loop 类型
+ *
+ * 范例：
+ *   {
+ *     results: [...],
+ *     allPassed: false,
+ *     firstFailedGate: "G-1",
+ *     loopType: "coding"
+ *   }
+ */
+export interface GateOrchestrationResult {
+  /** 各门禁的判定结果列表（按执行顺序：G-1 → G-2 → G-3） */
+  readonly results: ReadonlyArray<GateResult>;
+  /** 是否全部通过 */
+  readonly allPassed: boolean;
+  /** 首个未通过的门禁（null 表示全部通过） */
+  readonly firstFailedGate: GateId | null;
+  /** 当前 Loop 类型 */
+  readonly loopType: LoopType;
+}
+
+// ============================================================================
+// 7. 门禁检查器协议（接口）
+// ============================================================================
+
+/**
+ * 门禁检查器协议（G-1/G-2/G-3 检查器的统一接口）
+ *
+ * 所有门禁检查器必须实现此接口，便于 GateOrchestrator 统一编排。
+ */
+export interface GateChecker {
+  /** 门禁 ID（G-1/G-2/G-3） */
+  readonly gateId: GateId;
+  /** 执行门禁检查 */
+  check(context: GateContext): GateResult;
+}
+
+// ============================================================================
+// 8. 默认配置常量
+// ============================================================================
+
+/**
+ * G-2 门禁要求的最少评审角色数（对齐 §5.12.1 G-2 多角色评审至少 2 角色）
+ *
+ * 数值依据：§5.12.1 G-2 明确要求"多角色评审（架构师 + 测试专家至少 2 角色）"。
+ *
+ * 使用 `as const` 字面量断言——数字本身已是不可变原始值，
+ * `Object.freeze(number)` 是冗余操作（冻结原始值无任何效果），改用 `as const` 更直观。
+ */
+export const G2_MIN_REVIEW_ROLES = 2 as const;
+
+/**
+ * G-2 门禁要求的全部评审角色数（4 角色：架构师/PM/测试专家/独立开发者）
+ *
+ * 数值依据：§5.12.1 G-2 描述"方案文档必须经多角色评审（架构师 + 测试专家至少 2 角色）"，
+ * 此处要求"至少 2 角色"为下限；上限为 4 角色（完整评审）。
+ * G2_MIN_REVIEW_ROLES 用于硬约束，G2_FULL_REVIEW_ROLES 用于完整性评分。
+ *
+ * 使用 `as const` 字面量断言（数字本身已是不可变原始值，无需 Object.freeze）。
+ */
+export const G2_FULL_REVIEW_ROLES = 4 as const;
+
+/**
+ * G-3 门禁偏离阈值（≥3 个符号级偏离即触发 HUMAN_CHECKPOINT）
+ *
+ * 数值依据：§5.12.1 G-3 偏离定义——"变更波及任务卡未声明的符号（≥3 个符号级偏离）"。
+ *
+ * 使用 `as const` 字面量断言（数字本身已是不可变原始值，无需 Object.freeze）。
+ */
+export const G3_DEVIATION_THRESHOLD = 3 as const;

@@ -82,3 +82,77 @@ export type {
   RequirementsTxtParseResult,
   GoModParseResult,
 } from "./tech-stack-fingerprint";
+
+// ============================================================================
+// L2 语义检索层（from l2-types.ts / semantic-searcher.ts / symbol-indexer.ts）
+// EAG-P2 批次 8 新增：符号粒度混合检索（FTS5 BM25 + 向量 RRF 融合）
+// ============================================================================
+
+export type {
+  SymbolKind,
+  IndexedSymbol,
+  SearchOptions,
+  SearchResult,
+  GitDiffType,
+  GitDiffFile,
+  GitDiff,
+  ReindexResult,
+} from "./l2-types";
+
+export {
+  SYMBOL_KINDS,
+  DEFAULT_KIND_BOOST,
+  DEFAULT_RRF_K,
+  DEFAULT_TOP_K,
+  FOCUS_POINT_BOOST,
+  SMALL_CHANGE_FILE_THRESHOLD,
+  SMALL_CHANGE_IMPACTED_THRESHOLD,
+} from "./l2-types";
+
+export { SemanticSearcher, SemanticSearcherError } from "./semantic-searcher";
+
+export { SymbolIndexer, SymbolIndexerError } from "./symbol-indexer";
+
+export type { Embedder } from "./symbol-indexer";
+
+// ============================================================================
+// L3 业务知识层（from l3/ 子模块）
+// EAG-P2 批次 8 新增：K2 业务流程还原 + K3 数据库结构 + K4 业务数据 + K5 周边系统
+// ============================================================================
+
+export type {
+  FlowStep,
+  FlowStepType,
+  FlowBranch,
+  AsyncBoundary,
+  StateMachine,
+  StateTransition,
+  FlowResult,
+  StateMachineResult,
+  DatabaseTable,
+  DatabaseColumn,
+  DatabaseIndex,
+  DatabaseForeignKey,
+  DatabaseMigration,
+  TableCodeTrace,
+  SchemaAnalysisResult,
+  BusinessEnum,
+  BusinessEnumValue,
+  DictionaryTable,
+  FieldSemantics,
+  SensitiveField,
+  DataDictionary,
+  PeripheralDependencyType,
+  PeripheralDependency,
+  InteractionMatrixEntry,
+  ConfigInventoryEntry,
+  PeripheralAnalysisResult,
+} from "./l3/l3-types";
+
+export { BusinessFlowDiscoverer, BusinessFlowDiscovererError } from "./l3/business-flow-discoverer";
+
+export { DatabaseSchemaAnalyzer, DatabaseSchemaAnalyzerError } from "./l3/database-schema-analyzer";
+
+export { DataDictionaryExtractor, DataDictionaryExtractorError } from "./l3/data-dictionary-extractor";
+
+export { PeripheralSystemAnalyzer, PeripheralSystemAnalyzerError } from "./l3/peripheral-system-analyzer";

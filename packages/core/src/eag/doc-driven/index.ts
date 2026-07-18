@@ -89,3 +89,21 @@ export type { PrDescription } from "./git-process-manager";
 // ============================================================================
 
 export { buildConstitution, ConstitutionBuilderError } from "./constitution-builder";
+
+// ============================================================================
+// plan.md 生成器（from plan-generator.ts）—— EAG-P2 批次 8 新增
+// ============================================================================
+
+export { PlanGenerator, PlanGeneratorError } from "./plan-generator";
+
+export type { PlanGenerationInput, ModuleSplit, InterfaceContract, DataMigration, RiskItem } from "./types";
+
+// ============================================================================
+// tasks.md 生成器（from tasks-generator.ts）—— EAG-P2 批次 8 新增
+// ============================================================================
+
+export { TasksGenerator, TasksGeneratorError } from "./tasks-generator";
+
+export type { TasksGenerationInput, TaskCard, TaskCardStatus } from "./types";
+
+export { TASK_CARD_STATUSES } from "./types";
