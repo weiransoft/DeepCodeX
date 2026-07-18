@@ -27,6 +27,7 @@ import { renderMessageToStdout } from "../components/MessageView/utils";
 import {
   buildPromptDraftFromSessionMessage,
   buildStatusLine,
+  buildSyntheticAssistantMessage,
   buildSyntheticUserMessage,
   formatModelConfig,
   isCurrentSessionEmpty,
@@ -364,6 +365,17 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
       if (submission.command === "mcp") {
         setMcpStatuses(sessionManager.getMcpStatus());
         navigateToSubView("mcp-status");
+        return;
+      }
+      if (submission.command === "rules") {
+        // /rules <subcommand> [args] —— 解析并调用 executeRulesCommand
+        // 将输出作为合成助手消息展示在会话中（不走完整 LLM 流程）
+        const rulesResult = await handleRulesSlashCommand(submission.text);
+        setMessages((prev) => [
+          ...prev,
+          buildSyntheticUserMessage(submission.text, submission.imageUrls.length),
+          buildSyntheticAssistantMessage(rulesResult),
+        ]);
         return;
       }
 
@@ -1028,6 +1040,88 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
       )}
     </Box>
   );
+}
+
+// ============================================================================
+// /rules 命令处理（TUI slash 命令模式）
+// ============================================================================
+
+/**
+ * 解析并执行 /rules slash 命令
+ *
+ * 支持的格式：
+ * - /rules            → 等价于 /rules list
+ * - /rules list       → 列出所有生效规则
+ * - /rules add <text> → 添加用户规则
+ * - /rules remove <id> → 移除规则
+ * - /rules show <id>  → 查看规则详情
+ * - /rules path       → 显示规则文件路径
+ *
+ * 解析逻辑：
+ * 1. 去除前导 "/"
+ * 2. 按空白拆分，首段为 "rules"，次段为 subcommand，其余为 args
+ * 3. add 子命令：args 用空格拼接作为 content
+ * 4. remove/show 子命令：args 首项作为 ruleId
+ *
+ * @param text 用户输入的完整文本（如 "/rules list"）
+ * @returns 命令输出文本（合并 stdout + stderr）
+ */
+async function handleRulesSlashCommand(text: string): Promise<string> {
+  // 动态导入避免启动开销
+  const { executeRulesCommand } = await import("../../rules/rules-cmd.js");
+  const trimmed = text.trim();
+
+  // 去除前导 "/" 得到 "rules list" 等
+  const body = trimmed.startsWith("/") ? trimmed.slice(1) : trimmed;
+  const tokens = body.split(/\s+/).filter(Boolean);
+
+  // tokens[0] 应为 "rules"
+  if (tokens.length === 0 || tokens[0] !== "rules") {
+    return `无效的 /rules 命令: ${text}`;
+  }
+
+  // 子命令：tokens[1]，默认 "list"
+  const subcommand = (tokens[1] ?? "list") as "list" | "add" | "remove" | "show" | "path";
+  const args = tokens.slice(2);
+
+  // 校验子命令合法性
+  const validSubs = ["list", "add", "remove", "show", "path"];
+  if (!validSubs.includes(subcommand)) {
+    return `未知的 /rules 子命令: ${subcommand}\n可用子命令: ${validSubs.join(", ")}`;
+  }
+
+  // 按子命令构造参数
+  let content: string | undefined;
+  let ruleId: string | undefined;
+
+  if (subcommand === "add") {
+    // add 子命令：args 全部拼接为 content
+    if (args.length === 0) {
+      return "✖ /rules add 需要 <内容> 参数\n用法: /rules add 禁止使用 console.log";
+    }
+    content = args.join(" ");
+  } else if (subcommand === "remove" || subcommand === "show") {
+    // remove / show 子命令：args 首项为 ruleId
+    if (args.length === 0) {
+      return `✖ /rules ${subcommand} 需要 <规则ID> 参数\n用法: /rules ${subcommand} SEED-01`;
+    }
+    ruleId = args[0];
+  }
+
+  // 调用 executeRulesCommand（不直接打印，返回输出文本）
+  const result = await executeRulesCommand(
+    {
+      subcommand,
+      content,
+      ruleId,
+      projectRoot: process.cwd(),
+    },
+    false
+  );
+
+  // 合并 stdout + stderr（stderr 用红色标记）
+  const output = [result.stdout, result.stderr].filter(Boolean).join("\n");
+  return output;
 }
 
 export default App;

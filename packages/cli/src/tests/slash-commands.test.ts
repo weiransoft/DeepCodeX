@@ -40,6 +40,8 @@ test("buildSlashCommands prefixes skills before built-ins", () => {
     "ui",
     // DeepCodeX V2 记忆管理命令
     "memory",
+    // DeepCodeX EAG 规则管理命令
+    "rules",
   ]);
 });
 

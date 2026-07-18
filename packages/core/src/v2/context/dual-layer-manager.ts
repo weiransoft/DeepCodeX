@@ -85,6 +85,8 @@ import type { SuccessExperience, FailureExperience } from "./global-context";
 import { CONTEXT_SNIPPET_TYPE as UserMemorySnippetType } from "../memory/user-global-memory";
 import { CONTEXT_SNIPPET_TYPE as ExperienceSnippetType } from "../memory/experience-recommender";
 import { CONTEXT_SNIPPET_TYPE as DomainSnippetType } from "../understanding/domain-modeler";
+// EAG-P0 新增导入：RLIS RuleStore（规则注入 directRetainSnippets 通道，§5.5.3）
+import type { RuleStore } from "../../eag/rlis/rule-store";
 
 // ============================================================================
 // 类型定义
@@ -156,6 +158,24 @@ const MAX_USER_MEMORY_SNIPPETS = 1;
 /** RAG 推荐经验片段最大条数（从 ExperienceRecommender.recommend 取 Top-N） */
 const MAX_EXPERIENCE_RECOMMENDATION_SNIPPETS = 5;
 
+// EAG-P0 新增常量（§5.5.3 规则注入通道，P1-4 修复模式：限制条数避免挤占 Token 预算）
+/**
+ * 用户规则片段最大条数
+ *
+ * RLIS 三层规则（种子 + 用户 + 项目）合并后通常 10-30 条，
+ * 汇总为单条片段（formatForSystemPrompt 返回完整文本），故限制为 1 条。
+ * 单条片段内已按 severity 分组（BLOCKER 置顶）+ Token 预算截断。
+ */
+const MAX_USER_RULE_SNIPPETS = 1;
+
+/**
+ * 用户规则片段的 Token 预算
+ *
+ * 规则注入的 Token 上限。约 4000 Token，足够 10-30 条规则的完整注入。
+ * 与 RuleStore.formatForSystemPrompt 的 DEFAULT_TOKEN_BUDGET 一致。
+ */
+const USER_RULE_TOKEN_BUDGET = 4000;
+
 // ============================================================================
 // DualLayerContextManager 实现
 // ============================================================================
@@ -205,6 +225,9 @@ export class DualLayerContextManager {
    * 由独立 lifecycle 触发（CLI 命令 / ProjectUnderstandingService / 显式用户动作），
    * buildOptimizedContext 仅从 GlobalContext.domainKnowledge 读取已持久化的领域知识。
    *
+   * EAG-P0 新增（§5.5.3）：ruleStore 可选参数，注入后收集 RLIS 三层规则片段到 directRetainSnippets。
+   * 规则片段 type="user_rule"，与用户全局记忆同通道（永远保留，不参与压缩与打分淘汰）。
+   *
    * @param config 配置（必填 projectRoot）
    * @param globalManager 全局上下文管理器（P0a 既有）
    * @param taskManager 任务上下文管理器（P0b 既有）
@@ -215,6 +238,7 @@ export class DualLayerContextManager {
    * @param summarizer V2-P2 新增：内容摘要器（透传一致性，实际由 window 内部 compressOldSnippets 使用）
    * @param userGlobalMemory V2-P3 新增可选：用户全局记忆管理器，注入后收集 7 维度 + facts 片段（P0-3 修复：复用 injectIntoSystemPrompt）
    * @param experienceRecommender V2-P3 新增可选：经验 RAG 推荐器，注入后收集推荐经验片段（P0-2 修复：传 recordAccess:false 避免污染 accessCount）
+   * @param ruleStore EAG-P0 新增可选：RLIS 规则存储器，注入后收集三层规则片段（§5.5.3 directRetainSnippets 通道）
    */
   constructor(
     config: Partial<DualLayerContextConfig> & Pick<DualLayerContextConfig, "projectRoot">,
@@ -227,7 +251,9 @@ export class DualLayerContextManager {
     private readonly summarizer: ContentSummarizer,
     // V2-P3 新增可选参数（向后兼容，未注入时跳过对应 collect 方法）
     private readonly userGlobalMemory?: UserGlobalMemoryManager,
-    private readonly experienceRecommender?: ExperienceRecommender
+    private readonly experienceRecommender?: ExperienceRecommender,
+    // EAG-P0 新增可选参数（§5.5.3 规则注入通道，向后兼容，未注入时跳过规则片段收集）
+    private readonly ruleStore?: RuleStore
   ) {
     this.config = {
       window: config.window ?? {},
@@ -359,6 +385,20 @@ export class DualLayerContextManager {
       directRetainSnippets.push(...pclResult.resource);
     } catch {
       // PCL 加载失败：降级为无 PCL 片段（不中断整体 buildOptimizedContext 流程）
+    }
+
+    // 4.8 EAG-P0 RLIS 规则层：三层规则合并文本（直接保留，§5.5.3）
+    // 规则片段 type="user_rule"，与用户全局记忆同通道：
+    // - 永远保留，不参与压缩与打分淘汰
+    // - BLOCKER 级规则置顶（确保 LLM 永远看到硬约束）
+    // - 超 Token 预算时按 severity 截断（WARNING 最先裁）
+    // 规则加载失败时降级为无规则片段（不中断整体流程，但会记录警告）
+    try {
+      const ruleSnippets = this.collectRuleSnippets();
+      directRetainSnippets.push(...ruleSnippets);
+    } catch {
+      // RuleStore 收集失败：降级为无规则片段（不中断整体 buildOptimizedContext 流程）
+      // 注意：这意味着 LLM 将失去 BLOCKER 级硬约束注入，应在日志中告警（P1+ 增强）
     }
 
     // 4.8 文件层：从 CodeMap.files 提取 focusPoints 文件内容片段（参与评分）
@@ -696,6 +736,86 @@ export class DualLayerContextManager {
     }
 
     return snippets;
+  }
+
+  /**
+   * 收集 RLIS 三层规则片段（EAG-P0 全局层，§5.5.3 directRetainSnippets 通道）
+   *
+   * 实现策略（§5.5.3 规则注入通道）：
+   *   1. 调用 ruleStore.loadMergedRuleset() 获取三层合并规则集（种子 + 用户 + 项目）
+   *      - 合并优先级：project > user > seed；同 ID 高优先级覆盖低优先级
+   *      - BLOCKER 级种子规则（removable=false）永远保留，即使被加入 removedSeedIds
+   *   2. 调用 ruleStore.formatForSystemPrompt(ruleset, { tokenBudget: USER_RULE_TOKEN_BUDGET })
+   *      - 按 severity 分组：BLOCKER 置顶，CRITICAL 次之，WARNING 最后
+   *      - 超 Token 预算时按 severity 截断（WARNING 最先裁）
+   *      - 空规则集返回空字符串（此时 collectRuleSnippets 返回空数组）
+   *   3. 汇总为单条片段（type="user_rule"），注入 directRetainSnippets 通道
+   *      - 与用户全局记忆同通道：永远保留，不参与压缩与打分淘汰
+   *      - relevance=1.0：硬约束级最高优先级（与 UserProfile 同级）
+   *
+   * 降级语义（§5.5.3 防御性设计）：
+   *   - ruleStore 未注入：返回空数组（无规则片段，向后兼容旧会话）
+   *   - loadMergedRuleset 异常（如规则文件损坏）：上层 try-catch 降级为空数组
+   *   - formatForSystemPrompt 异常：同上降级
+   *   - 空规则集（rules.length === 0）：返回空数组（无规则可注入）
+   *
+   * 设计权衡：
+   *   - 单条汇总片段 vs 多条逐规则片段：选择单条汇总，因 formatForSystemPrompt
+   *     已做 severity 分组 + Token 预算截断，单条片段内已包含完整规则集，
+   *     多条逐规则片段会增加 directRetain 数量并破坏 severity 分组顺序。
+   *   - relevance=1.0 vs 0.9：规则为硬约束（BLOCKER 级尤其如此），应与
+   *     UserProfile（用户偏好硬约束）同级，高于领域知识(0.85)和经验推荐(0.85)。
+   *
+   * @returns 规则片段列表（最多 MAX_USER_RULE_SNIPPETS 条，通常为单条汇总片段）
+   */
+  private collectRuleSnippets(): ContextSnippet[] {
+    // ruleStore 未注入：返回空数组（降级语义，向后兼容旧会话）
+    if (!this.ruleStore) {
+      return [];
+    }
+
+    // 加载三层合并规则集（种子 + 用户 + 项目）
+    // loadMergedRuleset 内部已做合并优先级处理（project > user > seed）
+    const ruleset = this.ruleStore.loadMergedRuleset();
+
+    // 空规则集：返回空数组（无规则可注入）
+    if (ruleset.rules.length === 0) {
+      return [];
+    }
+
+    // 格式化为 System Prompt 注入文本
+    // - 按 severity 分组：BLOCKER 置顶，CRITICAL 次之，WARNING 最后
+    // - Token 预算截断：超 USER_RULE_TOKEN_BUDGET 时按 severity 裁（WARNING 最先裁）
+    // - includeCategoryHeaders=true（默认）：包含 [BLOCKER]/[CRITICAL]/[WARNING] 分组标题
+    const content = this.ruleStore.formatForSystemPrompt(ruleset, {
+      tokenBudget: USER_RULE_TOKEN_BUDGET,
+    });
+
+    // 格式化后为空字符串（如所有规则被 Token 预算截断）：返回空数组
+    if (!content.trim()) {
+      return [];
+    }
+
+    // 汇总为单条片段（MAX_USER_RULE_SNIPPETS=1，与 collectUserGlobalMemorySnippets 同模式）
+    // formatForSystemPrompt 内部已做 severity 分组 + Token 截断，
+    // 此处仅产出单条汇总片段，slice(0, MAX_USER_RULE_SNIPPETS) 为防御性截断（保持常量被使用）
+    return [
+      {
+        // type="user_rule"：与 user_global_memory 同通道，标识为用户/项目规则片段
+        // 注：此 type 不在现有 CONTEXT_SNIPPET_TYPE 枚举中，因 RLIS 是 EAG-P0 新增模块，
+        //     未引入对应枚举常量，直接使用字符串字面量（与 task_definition/task_focus_points 同模式）
+        type: "user_rule",
+        content,
+        // source 命名：rlis:user_rules（标识来源为 RLIS 三层规则合并）
+        // 与 global:user_profile / global:user_global_memory 命名风格保持一致
+        source: "rlis:user_rules",
+        // relevance=1.0：硬约束级最高优先级
+        // - 与 UserProfile(1.0) 同级：规则与用户偏好都是硬约束
+        // - 高于 DomainKnowledge(0.85) 和 ExperienceRecommendation(0.85)
+        // 注：directRetain 片段不参与评分，relevance 仅作为降级截断排序依据（P2-2）
+        relevance: 1.0,
+      },
+    ].slice(0, MAX_USER_RULE_SNIPPETS);
   }
 
   /**

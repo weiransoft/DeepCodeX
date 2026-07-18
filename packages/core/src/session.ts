@@ -54,6 +54,16 @@ import {
 import { clearSessionWorkingDir } from "./tools/bash-handler";
 import { reportNewPrompt } from "./common/telemetry";
 import { OpenAIMessageConverter } from "./common/openai-message-converter";
+// EAG-P0 新增导入：LoopGuard 共享上限保护 + IndependentEvaluator 评估器外挂（§5.4 / §5.2.1）
+// 注：仅导入类型和类，不触发 EAG 模块初始化（外挂式，未注入时零开销）
+import type { LoopGuard } from "./common/loop-guard";
+import type {
+  IndependentEvaluator,
+  RedlineDefinition,
+  EvaluationContext,
+  EvaluationReport,
+  EvaluationVerdict,
+} from "./eag/evaluator/types";
 
 export type { PermissionScope } from "./settings";
 export type {
@@ -366,6 +376,44 @@ type SessionManagerOptions = {
   onLlmStreamProgress?: (progress: LlmStreamProgress) => void;
   onMcpStatusChanged?: () => void;
   onProcessStdout?: (pid: number, chunk: string) => void;
+  /**
+   * EAG-P0：独立评估器外挂（可选注入，§5.4 Goal Evaluator 接入主循环）
+   *
+   * 未注入时主循环行为完全不变（向后兼容，V2 526 测试零回归）。
+   * 注入后，在主循环 !toolCalls 判定点（LLM 给出最终回复且无工具调用）外挂调用评估器，
+   * 评估器按红线清单独立判定产出物，verdict 决定是否终止。
+   *
+   * EAG-P0 范围（最小必要集，评审 D-1 共识）：
+   * - pass → 任务完成（主循环 return）
+   * - fix/human_checkpoint/stop_failure → 通知用户评估结果（不做 FIX 回灌，留待 EAG-P2）
+   * - 评估器调用失败 → 降级为无操作（不阻塞主循环 return）
+   */
+  evaluator?: IndependentEvaluator;
+  /**
+   * EAG-P0：循环上限保护器（可选注入，§5.2.1 共享上限保护）
+   *
+   * 未注入时使用内置 maxIterations=80000（向后兼容）。
+   * 注入后，循环顶部调用 guard.check() 判定是否允许继续执行，
+   * 触达上限（max_iterations/max_tokens/连续失败）时终止并通知用户。
+   *
+   * 配置 Object.freeze 冻结保证（§5.12.3 AU-5）：LLM 在循环内不可自改上限。
+   *
+   * 跨 session 共享语义（架构师审查 Minor-3 修复）：
+   * - 推荐per-session 注入（每次 activateSession 构造新 LoopGuard），避免跨会话状态污染
+   *   （consecutiveFailures/tokensConsumed 跨 session 累加可能导致下一次 session 一开始就超限）
+   * - 跨 session 单例仅适用于 autonomous 长程任务场景（§5.12.3 AU-6 熔断回滚需跨迭代跟踪）
+   */
+  loopGuard?: LoopGuard;
+  /**
+   * EAG-P0：评估器红线清单（可选注入，§5.1.3 企业红线 + §5.5 RLIS 规则即红线）
+   *
+   * 未注入时评估器跳过判定（EAG-P0 降级语义）。
+   * 注入后，作为 evaluator.evaluate() 的 redlines 参数传入。
+   * 来源可以是：
+   * - 企业红线 E1~E8/UI-01/02/DEP-01~07（EAG-P1 起由范式库提供）
+   * - RLIS 三层规则转换的红线（ruleStore.formatForEvaluator()，EAG-P0 起）
+   */
+  evaluatorRedlines?: ReadonlyArray<RedlineDefinition>;
 };
 
 export type LlmStreamProgress = {
@@ -402,6 +450,10 @@ export class SessionManager {
   private readonly mcpManager = new McpManager();
   private mcpToolDefinitions: ToolDefinition[] = [];
   private readonly messageConverter: OpenAIMessageConverter;
+  // EAG-P0 外挂字段（可选注入，未注入时主循环行为不变，§5.4 / §5.2.1）
+  private readonly evaluator?: IndependentEvaluator;
+  private readonly loopGuard?: LoopGuard;
+  private readonly evaluatorRedlines?: ReadonlyArray<RedlineDefinition>;
 
   constructor(options: SessionManagerOptions) {
     this.projectRoot = options.projectRoot;
@@ -420,6 +472,10 @@ export class SessionManager {
     this.messageConverter = new OpenAIMessageConverter({
       renderInitPrompt: () => this.renderInitCommandPrompt(),
     });
+    // EAG-P0 外挂字段赋值（可选注入，未注入时为 undefined，主循环行为不变）
+    this.evaluator = options.evaluator;
+    this.loopGuard = options.loopGuard;
+    this.evaluatorRedlines = options.evaluatorRedlines;
   }
 
   /**
@@ -1669,6 +1725,43 @@ ${agentInstructions}
           return;
         }
 
+        // EAG-P0：LoopGuard 共享上限保护检查（§5.2.1 / §5.12.3 AU-5）
+        // 未注入 loopGuard 时跳过（向后兼容，使用内置 maxIterations=80000）
+        // 注入后每次迭代开始检查 max_iterations/max_tokens/连续失败/手动终止
+        if (this.loopGuard) {
+          const guardCheck = this.loopGuard.check();
+          if (!guardCheck.allowed) {
+            // 终止原因映射到 session 状态
+            const stopReason = guardCheck.stopReason ?? "manually_aborted";
+            const isManualAbort = stopReason === "manually_aborted";
+            this.updateSessionEntry(sessionId, (entry) => ({
+              ...entry,
+              status: isManualAbort ? "interrupted" : "failed",
+              failReason: `LoopGuard: ${stopReason}`,
+              updateTime: new Date().toISOString(),
+            }));
+            // 通知用户终止原因与消耗统计（便于审计与 /eag-usage 观察）
+            this.onAssistantMessage(
+              this.buildAssistantMessage(
+                sessionId,
+                `Loop terminated by guard: ${stopReason}.\nIterations: ${guardCheck.state.iterationsCompleted}/${this.loopGuard.getConfig().maxIterations}, Tokens: ${guardCheck.state.tokensConsumed}/${this.loopGuard.getConfig().maxTokens}, Consecutive failures: ${guardCheck.state.consecutiveFailures}/${this.loopGuard.getConfig().maxConsecutiveFailures}.`,
+                null
+              ),
+              false
+            );
+            this.maybeNotifyTaskCompletion(sessionId, notify, startedAt, env);
+            return;
+          }
+          // 退避建议（有失败记录时按指数退避+jitter 等待）
+          if (guardCheck.suggestedWaitMs && guardCheck.suggestedWaitMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, guardCheck.suggestedWaitMs));
+            // 等待期间可能被用户中断，等待后再次检查
+            if (this.isInterrupted(sessionId)) {
+              return;
+            }
+          }
+        }
+
         const session = this.getSession(sessionId);
         if (session == null || session.status === "interrupted" || session.status === "failed") {
           return;
@@ -1850,6 +1943,20 @@ ${agentInstructions}
         }
 
         if (!toolCalls) {
+          // EAG-P0：评估器外挂判定 + LoopGuard 迭代记录（§5.4 Goal Evaluator 接入主循环）
+          // !toolCalls 表示 LLM 已给出最终回复且无工具调用，是评估器判定的接入点。
+          // 未注入 evaluator 时保持现有行为（仅记录迭代后 return）。
+          // 注入 evaluator 时外挂调用评估器，按 verdict 决定通知行为（EAG-P0 不做 FIX 回灌）。
+          const evaluatorVerdict = await this.runEvaluatorHook(sessionId, content);
+          // 记录迭代消耗（success 语义：未注入 evaluator 或评估器 verdict=pass）
+          // 注：EAG-P0 阶段 recordIteration 主要用于状态跟踪与审计（/eag-usage 观测）；
+          //     consecutiveFailures 累加不会触发终止（因主循环已 return）；
+          //     EAG-P2 实现 FIX 回灌后，recordIteration 才会真正驱动终止决策。
+          if (this.loopGuard) {
+            const iterTokens = getTotalTokens(responseUsage);
+            const iterSuccess = evaluatorVerdict === "pass" || evaluatorVerdict === null;
+            this.loopGuard.recordIteration(iterTokens, iterSuccess);
+          }
           return;
         }
       }
@@ -1885,6 +1992,101 @@ ${agentInstructions}
         this.sessionControllers.delete(sessionId);
       }
       this.maybeNotifyTaskCompletion(sessionId, notify, startedAt, env);
+    }
+  }
+
+  /**
+   * EAG-P0 评估器外挂 hook（§5.4 Goal Evaluator 接入主循环）
+   *
+   * 在主循环 !toolCalls 判定点（LLM 给出最终回复且无工具调用）外挂调用评估器。
+   * 评估器按红线清单独立判定产出物，verdict 决定通知行为。
+   *
+   * EAG-P0 范围（最小必要集，评审 D-1 共识）：
+   * - 未注入 evaluator 或 evaluatorRedlines → 返回 null（主循环保持现有 return 行为）
+   * - pass → 返回 "pass"（任务完成，主循环 return，不追加消息）
+   * - fix/human_checkpoint/stop_failure → 返回对应 verdict，并通知用户评估结果
+   *   （EAG-P0 不做 FIX 回灌，仅通知；FIX 回灌留待 EAG-P2 CODING Loop）
+   * - 评估器调用异常 → 返回 null（降级为无操作，不阻塞主循环 return）
+   *
+   * 设计权衡（§5.4 评审 A-3/A-4 共识）：
+   * - 评估器与生成器严格分离（Generator 不给自己打分）
+   * - 评估器为外挂式（可选注入），未注入时主循环行为零变化（V2 526 测试零回归）
+   * - 评估器调用失败不阻塞主流程（降级语义，防评估器故障导致会话卡死）
+   *
+   * @param sessionId 会话 ID（用于构造 EvaluationContext.taskId 与消息回写）
+   * @param assistantContent LLM 最终回复内容（作为 inlineArtifacts 注入评估器）
+   * @returns 评估结论（"pass"/"fix"/"human_checkpoint"/"stop_failure"）；未注入或异常时返回 null
+   */
+  private async runEvaluatorHook(sessionId: string, assistantContent: string): Promise<EvaluationVerdict | null> {
+    // 未注入 evaluator 或 evaluatorRedlines：降级为无操作（返回 null）
+    // 注：EAG-P0 要求 evaluator + evaluatorRedlines 同时注入才生效，
+    //     单独注入 evaluator 但无红线清单时无法判定（评估器需要红线清单作为判定依据）
+    if (!this.evaluator || !this.evaluatorRedlines || this.evaluatorRedlines.length === 0) {
+      return null;
+    }
+
+    try {
+      // 构造评估上下文（EAG-P0 最小上下文，EAG-P2 起由 side-git diff 提供完整产出物）
+      const context: EvaluationContext = {
+        // EAG-P0 默认 coding Loop 类型；EAG-P1 起按当阶段 Loop 类型动态传入
+        loopType: "coding",
+        // EAG-P0 不跟踪迭代号（iteration 由 LoopGuard 独立管理）；
+        // EAG-P2 起由 LoopGuard.getState().iterationsCompleted 提供
+        iteration: 0,
+        taskId: sessionId,
+        // EAG-P0 不收集产出物文件路径（side-git diff 集成留待 EAG-P2）；
+        // 评估器仅判定 LLM 最终回复内容
+        artifactPaths: [],
+        inlineArtifacts: [
+          {
+            path: "<assistant-reply>",
+            content: assistantContent,
+          },
+        ],
+        // 评估模式由评估器自身默认模式决定（STRICT/STANDARD/OFF）
+        mode: this.evaluator.getDefaultMode(),
+      };
+
+      // 调用评估器（按红线清单逐条判定，返回 EvaluationReport）
+      const report: EvaluationReport = await this.evaluator.evaluate(context, this.evaluatorRedlines);
+
+      // 按 verdict 决定通知行为（EAG-P0：仅通知，不做 FIX 回灌）
+      if (report.verdict !== "pass") {
+        // 构造评估结果通知消息（让用户知道评估器判定结果与修复建议）
+        // 注：verdictText 覆盖全部 4 种 verdict（pass 占位为空串，因上方已过滤 pass 分支）
+        const verdictText: Record<EvaluationVerdict, string> = {
+          pass: "",
+          fix: "需修复（存在 BLOCKER/MAJOR 级违规）",
+          human_checkpoint: "需人工确认（存在无法自动判定的问题）",
+          stop_failure: "连续失败终止（连续失败次数超上限）",
+        };
+
+        // 汇总修复建议（verdict=fix 时附带，按优先级排序）
+        const suggestions = report.fixSuggestions?.length
+          ? `\n\n修复建议:\n${report.fixSuggestions.map((s) => `- ${s}`).join("\n")}`
+          : "";
+
+        // 评估器备注（LLM judge 模式下的推理摘要，或静态分析的统计信息）
+        const notes = report.notes ? `\n\n评估备注: ${report.notes}` : "";
+
+        this.onAssistantMessage(
+          this.buildAssistantMessage(
+            sessionId,
+            `[EAG 评估器] ${verdictText[report.verdict]}\n` +
+              `违规统计: BLOCKER=${report.blockerCount}, MAJOR=${report.majorCount}, WARNING=${report.warningCount}` +
+              `\n评估耗时: ${report.durationMs}ms${notes}${suggestions}`,
+            null
+          ),
+          false
+        );
+      }
+
+      return report.verdict;
+    } catch {
+      // 评估器调用异常：降级为无操作（返回 null，不阻塞主循环 return）
+      // 注：EAG-P0 评估器为外挂式，故障不应影响主流程；
+      //     EAG-P2 起评估器为 STRICT 模式时故障应转 HUMAN_CHECKPOINT（此处留待 EAG-P2 增强）
+      return null;
     }
   }
 

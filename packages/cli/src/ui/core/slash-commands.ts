@@ -8,6 +8,8 @@ import type { SkillInfo } from "@vegamo/deepcode-core";
  *   - architect / pm / coder / tester / ui: 强制指定角色
  * DeepCodeX V2 扩展：新增 memory 命令
  *   - memory: 记忆管理（list/delete/review/export）
+ * DeepCodeX EAG 扩展：新增 rules 命令
+ *   - rules: RLIS 规则管理（list/add/remove/show/path）
  */
 export type SlashCommandKind =
   | "skill"
@@ -28,7 +30,8 @@ export type SlashCommandKind =
   | "coder"
   | "tester"
   | "ui"
-  | "memory";
+  | "memory"
+  | "rules";
 
 export type SlashCommandItem = {
   kind: SlashCommandKind;
@@ -158,6 +161,14 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
     label: "/memory",
     args: ["<subcommand>"],
     description: "Memory management (list/delete/review/export)",
+  },
+  // ===== DeepCodeX EAG 规则管理命令 =====
+  {
+    kind: "rules",
+    name: "rules",
+    label: "/rules",
+    args: ["<subcommand>"],
+    description: "RLIS rule management (list/add/remove/show/path)",
   },
 ];
 

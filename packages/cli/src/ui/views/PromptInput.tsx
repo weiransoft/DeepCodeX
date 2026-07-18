@@ -73,7 +73,7 @@ export type PromptSubmission = {
   permissions?: UserToolPermission[];
   alwaysAllows?: PermissionScope[];
   planMode?: boolean;
-  command?: "new" | "resume" | "continue" | "undo" | "mcp" | "exit";
+  command?: "new" | "resume" | "continue" | "undo" | "mcp" | "rules" | "exit";
 };
 
 export type PromptDraft = {
@@ -726,6 +726,12 @@ export const PromptInput = React.memo(function PromptInput({
     }
     if (item.kind === "mcp") {
       onSubmit({ text: "/mcp", imageUrls: [], command: "mcp" });
+      resetPromptInput();
+      return;
+    }
+    if (item.kind === "rules") {
+      // /rules <subcommand> [args] —— 透传完整文本，由 App 层调用 executeRulesCommand
+      onSubmit({ text: "/rules", imageUrls: [], command: "rules" });
       resetPromptInput();
       return;
     }

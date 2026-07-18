@@ -42,6 +42,14 @@ export interface ParsedCliArgs {
   team: string | undefined;
   /** Team subcommand options (key-value pairs) */
   teamOptions: Record<string, string | boolean | number | string[] | undefined>;
+  /**
+   * Rules subcommand arguments.
+   * - `undefined` — no rules subcommand was invoked
+   * - `string`    — a rules subcommand name (e.g. "list", "add", "remove", "show", "path")
+   */
+  rules: string | undefined;
+  /** Rules subcommand options (key-value pairs) */
+  rulesOptions: Record<string, string | boolean | number | string[] | undefined>;
 }
 
 const EPILOG = [
@@ -74,6 +82,7 @@ const EPILOG = [
   "  /undo            Restore code and/or conversation to a previous point",
   "  /mcp             Show MCP server status and available tools",
   "  /raw             Toggle display mode for viewing or collapsing reasoning content",
+  "  /rules           RLIS rule management (list/add/remove/show/path)",
   "  /exit            Quit",
   "  ctrl+d twice     Quit",
 ].join("\n");
@@ -154,6 +163,54 @@ async function configureYargs(argv?: string[]) {
             return true;
           })
     )
+    .command("rules <subcommand>", "RLIS rule management (list / add / remove / show / path)", (y: Argv) =>
+      y
+        .positional("subcommand", {
+          type: "string",
+          choices: ["list", "add", "remove", "show", "path"] as const,
+          describe: "Rules subcommand",
+        })
+        .option("content", {
+          type: "string",
+          describe: "Rule content (add subcommand)",
+        })
+        .option("rule-id", {
+          type: "string",
+          describe: "Rule ID (remove / show subcommand)",
+        })
+        .option("severity", {
+          type: "string",
+          choices: ["blocker", "major", "warning"] as const,
+          describe: "Rule severity (add subcommand, default major)",
+        })
+        .option("layer", {
+          type: "string",
+          choices: ["user", "project"] as const,
+          describe: "Storage layer (add subcommand, default user)",
+        })
+        .option("project-root", {
+          type: "string",
+          describe: "Project root directory",
+        })
+        .check((argv: { [x: string]: unknown }) => {
+          const sub = argv["subcommand"];
+          // add 子命令需要 content
+          if (sub === "add") {
+            const content = argv["content"];
+            if (typeof content !== "string" || content.trim() === "") {
+              return "rules add 子命令需要 --content <规则内容> 参数";
+            }
+          }
+          // remove / show 子命令需要 rule-id
+          if (sub === "remove" || sub === "show") {
+            const ruleId = argv["rule-id"];
+            if (typeof ruleId !== "string" || ruleId.trim() === "") {
+              return `rules ${sub} 子命令需要 --rule-id <规则ID> 参数`;
+            }
+          }
+          return true;
+        })
+    )
     .example("deepcode", "Launch the interactive TUI in the current directory")
     .example("deepcode -p <prompt>", "Launch with a pre-filled prompt")
     .example("deepcode -r, --resume [sessionId]", "Resume a session or show session picker")
@@ -220,6 +277,19 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     }
   }
 
+  // 提取 rules 子命令及其选项
+  const rulesRaw = parsed["rules"] as string | undefined;
+  const rulesOptions: Record<string, string | boolean | number | string[] | undefined> = {};
+  if (rulesRaw) {
+    const optionKeys = ["content", "rule-id", "severity", "layer", "project-root"];
+    for (const key of optionKeys) {
+      const v = parsed[key];
+      if (v !== undefined) {
+        rulesOptions[key] = v as string | boolean | number | string[];
+      }
+    }
+  }
+
   return {
     prompt: parsed.prompt as string | undefined,
     resume,
@@ -227,5 +297,7 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     help: parsed.help === true,
     team: teamRaw,
     teamOptions,
+    rules: rulesRaw,
+    rulesOptions,
   };
 }

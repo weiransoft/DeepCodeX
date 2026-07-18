@@ -152,6 +152,47 @@ export type {
 export type { FileState, FileSnippet, FileLineEnding } from "./common/state";
 export type { FileReadMetadata } from "./common/file-utils";
 
+// Loop Guard —— EAG 与 autonomous 共享上限保护（EAG §5.2.1）
+export { DEFAULT_LOOP_GUARD_CONFIG, INITIAL_LOOP_GUARD_STATE, LoopGuard } from "./common/loop-guard";
+export type { LoopGuardConfig, LoopGuardState, GuardCheckResult, GuardStopReason } from "./common/loop-guard";
+
+// EAG (Enterprise App Generation) module —— 企业级应用生成能力
+// EAG 方案 §5.1~§5.13：Generator/Evaluator 分离 + 共享 LoopGuard + RLIS 规则注入
+export { decideVerdict, buildReport } from "./eag/evaluator/types";
+export type {
+  EvaluationMode,
+  RedlineSeverity,
+  EvaluationVerdict,
+  RedlineDefinition,
+  RedlineResult,
+  RedlineViolation,
+  EvaluationContext,
+  EvaluationReport,
+  IndependentEvaluator,
+} from "./eag/evaluator/types";
+
+// RLIS (Rule Learning & Injection System) —— §5.5 三层规则存储
+export { SEED_RULES, getSeedRuleCount, getSeedRulesBySeverity, getSeedRulesForInjection } from "./eag/rlis/seed-rules";
+export {
+  RuleStore,
+  DEFAULT_USER_RULES_PATH,
+  DEFAULT_TOKEN_BUDGET,
+  RULES_FILE_VERSION,
+  getDefaultProjectRulesPath,
+  validateRule,
+  ruleToRedline,
+  estimateTokens,
+} from "./eag/rlis/rule-store";
+export type {
+  RuleSource,
+  RuleSeverity,
+  InjectionTarget,
+  RuleDefinition,
+  RuleStorageLayer,
+  MergedRuleSet,
+} from "./eag/rlis/types";
+export type { RuleOperationResult, SystemPromptFormatOptions } from "./eag/rlis/rule-store";
+
 // Team (multi-role) module — DeepCodeX multi-agent team integration
 export {
   ROLE_REGISTRY,

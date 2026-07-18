@@ -48,6 +48,31 @@ export function buildSyntheticUserMessage(content: string, imageCount: number): 
   };
 }
 
+/**
+ * 构造合成助手消息
+ *
+ * 用于在 TUI 中显示命令执行结果（如 /rules list 的输出），
+ * 不走完整 LLM 流程，仅用于本地命令的输出展示。
+ *
+ * @param content 助手消息内容
+ * @returns SessionMessage（role=assistant）
+ */
+export function buildSyntheticAssistantMessage(content: string): SessionMessage {
+  const now = new Date().toISOString();
+  return {
+    id: `local-assistant-${Math.random().toString(36).slice(2)}`,
+    sessionId: "local",
+    role: "assistant",
+    content,
+    contentParams: null,
+    messageParams: null,
+    compacted: false,
+    visible: true,
+    createTime: now,
+    updateTime: now,
+  };
+}
+
 export function buildPromptDraftFromSessionMessage(message: SessionMessage, nonce: number): PromptDraft {
   return {
     nonce,

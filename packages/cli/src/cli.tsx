@@ -57,6 +57,27 @@ async function main(): Promise<void> {
     process.exit(exitCode);
   }
 
+  // rules 子命令路由：RLIS 规则管理 CLI 模式（非 TUI 模式）
+  if (parsed.rules) {
+    const { executeRulesCommand, formatRulesHelp } = await import("./rules/rules-cmd.js");
+    if (parsed.rules === "help") {
+      process.stdout.write(formatRulesHelp());
+      process.exit(0);
+    }
+    const opts = parsed.rulesOptions;
+    const exitCode = (
+      await executeRulesCommand({
+        subcommand: parsed.rules as "list" | "add" | "remove" | "show" | "path",
+        content: opts["content"] as string | undefined,
+        ruleId: opts["rule-id"] as string | undefined,
+        severity: opts["severity"] as "blocker" | "major" | "warning" | undefined,
+        layer: opts["layer"] as "user" | "project" | undefined,
+        projectRoot: (opts["project-root"] as string | undefined) ?? process.cwd(),
+      })
+    ).exitCode;
+    process.exit(exitCode);
+  }
+
   // Configure Windows shell AFTER --version/--help handling.
   // On Windows without Git Bash, setShellIfWindows() throws and calls process.exit(1).
   // If called before argument parsing, --help and --version would fail on those machines.
