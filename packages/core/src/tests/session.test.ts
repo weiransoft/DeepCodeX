@@ -633,6 +633,14 @@ test("SessionManager excludes disabled skills by resolved skill name", async () 
         "deepcode-self-refer": false,
         "skill-digester": false,
         plan: false,
+        // 批次 2 新增的 6 个 EAK 模式 Skill 包——本测试只验证 enabled-skill 的发现，
+        // 新增的 bundled skill 必须显式禁用以保持测试范围隔离
+        "eag-domain-modeling": false,
+        "eag-aggregate-design": false,
+        "eag-cqrs-separation": false,
+        "eag-saga-orchestration": false,
+        "eag-acl": false,
+        "eag-verify-enterprise": false,
         "enabled-skill": true,
       },
     }),
