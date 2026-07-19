@@ -35,12 +35,7 @@
  */
 
 import type { CodingContext, FillPlaceholder, FillStatus, GeneratedFile, LlmFillRequest, LlmFillResult } from "./types";
-import {
-  DEFAULT_CODE_GENERATION_TEMPERATURE,
-  DEFAULT_MAX_TOKENS_PER_FILE,
-  DEFAULT_MAX_TOKENS_PER_LLM_CALL,
-  DEFAULT_MAX_FILL_ROUNDS,
-} from "./types";
+import { DEFAULT_CODE_GENERATION_TEMPERATURE, DEFAULT_MAX_TOKENS_PER_LLM_CALL, DEFAULT_MAX_FILL_ROUNDS } from "./types";
 import type { LLMClient, LLMRequest, LLMResponse, LLMStreamEvent } from "../../providers/llm-provider";
 import type { SessionMessage } from "../../session";
 
@@ -75,13 +70,6 @@ const JSON_OUTPUT_SCHEMA_DESCRIPTION = `{
  * 用于设置 LLMRequest.maxTokens，防止单次填充产生超长代码导致循环依赖。
  */
 const MAX_TOKENS_PER_LLM_CALL = DEFAULT_MAX_TOKENS_PER_LLM_CALL;
-
-/**
- * 单文件最大 token 上限（对齐 §4.4.2 + types.ts DEFAULT_MAX_TOKENS_PER_FILE）
- *
- * 用于评估填充内容长度，超限时记录警告但不强制截断（首版实现）。
- */
-const MAX_TOKENS_PER_FILE = DEFAULT_MAX_TOKENS_PER_FILE;
 
 /**
  * LLM 调用温度（对齐 §4.4.2："0.2 低温代码生成"）
@@ -1002,7 +990,11 @@ export function defaultResponseGenerator(request: LLMRequest): LLMResponse {
   const descMatch = userContent.match(/占位描述：(.+?)(\n|$)/);
   const description = descMatch ? descMatch[1] : "";
   // 提取文件路径（用于构造响应的 path 字段）
-  const pathMatch = userContent.match(/文件：([^\s]+)/);
+  // 注意：路径终止符需排除全角括号 `）`（U+FF09）与半角括号 `)`，
+  // 因 LlmFiller 装配的 prompt 格式为 `## 骨架代码（文件：<path>）`，
+  // `）` 不属于 \s 字符类，若仅用 [^\s]+ 会将尾随括号一并捕获，
+  // 导致下游 files.find(f.path === placeholder.filePath) 精确匹配失败。
+  const pathMatch = userContent.match(/文件：([^\s）)]+)/);
   const filePath = pathMatch ? pathMatch[1] : "src/generated.ts";
 
   // 估算输入 token 数（用于 usage 字段）

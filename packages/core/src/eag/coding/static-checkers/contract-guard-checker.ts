@@ -5,17 +5,19 @@
  * - 棕地专属：复用 discovery/existing-contract-guard 逻辑，判定是否破坏既有 API 契约
  *
  * 判定算法：
- * 1. 扫描产出物中的公开 API（export class / export function）
+ * 1. 扫描产出物中的公开 API（export class 及其公开方法 / export function / export const 箭头函数）
  * 2. 提取每个 API 的签名（含参数列表与返回类型）
  * 3. 比对增量修改前后的 API 签名：
  *    - 删除既有公开 API → 违规（破坏向后兼容）
  *    - 修改既有 API 签名（减少参数 / 改变参数类型 / 改变返回类型）→ 违规
+ *    - 签名虽变化但向后兼容（如新增可选参数 reason?: string）→ 豁免，不构成违规
  * 4. 检查文件修改纪律：检测修改了不在白名单中的文件
  *
  * 判定规则：
  * - 删除既有公开 API export → 违规
  * - 修改既有 API 签名（参数数量减少 / 参数类型变化）→ 违规
  * - 新增公开 API → 合规（向后兼容）
+ * - 既有 API 新增可选参数（向后兼容演进）→ 合规
  * - 未触及公开 API → 合规
  *
  * 设计依据：
@@ -32,7 +34,7 @@
 import type { StaticChecker } from "../types";
 import type { RedlineDefinition, RedlineResult } from "../../evaluator/types";
 import { ExistingContractGuard } from "../../discovery/existing-contract-guard";
-import { buildViolations, buildPass, extractFilePathFromComment, lineOf } from "./checker-utils";
+import { buildViolations, buildPass, extractFilePathFromComment } from "./checker-utils";
 
 /**
  * 既有 API 契约清单（棕地场景的 baseline）
@@ -53,19 +55,6 @@ const DEFAULT_EXISTING_API_CONTRACTS: ReadonlyArray<{
 }> = Object.freeze([]);
 
 /**
- * 公开 API 关键字清单（识别公开导出的 API）
- *
- * 识别以下导出形式为公开 API：
- * - export class ClassName { ... }
- * - export function funcName(...) { ... }
- * - export const funcName = (...) => { ... }
- * - export async function funcName(...) { ... }
- *
- * 公开 API 是契约保护的对象——修改或删除公开 API 会破坏调用方代码。
- */
-const PUBLIC_API_KEYWORDS: ReadonlyArray<string> = Object.freeze(["export"]);
-
-/**
  * 从代码内容中提取公开 API 签名
  *
  * 扫描每个 export class / export function / export const 声明，
@@ -80,6 +69,10 @@ function extractPublicApis(
   const apis: Array<{ readonly apiName: string; readonly signature: string; readonly line: number }> = [];
   const lines = content.split(/\r?\n/);
 
+  // 跟踪类体大括号深度（类名仅用于构造 API 签名，无需跨行状态）
+  let classBraceDepth = 0;
+  let inClass = false;
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (/^\s*\/\//.test(line)) continue;
@@ -89,6 +82,12 @@ function extractPublicApis(
     const classMatch = line.match(/^\s*export\s+(?:abstract\s+)?class\s+([A-Za-z_][\w]*)/);
     if (classMatch) {
       const className = classMatch[1];
+      inClass = true;
+      // 初始化类体大括号深度（当前行可能含 {）
+      const openBraces = (line.match(/\{/g) ?? []).length;
+      const closeBraces = (line.match(/\}/g) ?? []).length;
+      classBraceDepth = openBraces - closeBraces;
+
       // 提取构造函数签名作为类 API 签名
       const constructorRe = new RegExp(`constructor\\s*\\(([^)]*)\\)`);
       const ctorMatch = content.match(constructorRe);
@@ -98,6 +97,38 @@ function extractPublicApis(
         signature: `new ${className}(${params})`,
         line: i + 1,
       });
+      continue;
+    }
+
+    // 在类体内提取公开方法签名
+    if (inClass) {
+      // 更新大括号深度
+      const openBraces = (line.match(/\{/g) ?? []).length;
+      const closeBraces = (line.match(/\}/g) ?? []).length;
+      classBraceDepth += openBraces - closeBraces;
+
+      // 识别类方法签名：methodName(params): ReturnType { 或 async methodName(params): ReturnType {
+      // 排除 constructor / private / protected 方法
+      const methodMatch = line.match(/^\s*(?:public\s+)?(?:async\s+)?([A-Za-z_][\w]*)\s*(\([^)]*\))\s*[:{]/);
+      if (methodMatch) {
+        const methodName = methodMatch[1];
+        const params = methodMatch[2];
+        // 排除构造函数与私有/受保护方法
+        const isConstructor = methodName === "constructor";
+        const isPrivateOrProtected = /^\s*(?:private|protected)\s+/.test(line);
+        if (!isConstructor && !isPrivateOrProtected) {
+          apis.push({
+            apiName: methodName,
+            signature: `${methodName}${params}`,
+            line: i + 1,
+          });
+        }
+      }
+
+      // 类体结束（大括号归零）
+      if (classBraceDepth <= 0) {
+        inClass = false;
+      }
       continue;
     }
 
@@ -252,7 +283,12 @@ export class ContractGuardChecker implements StaticChecker {
     // 调用 ExistingContractGuard.checkApiContract 比对契约
     const contractViolations = this.guard.checkApiContract(modifiedApis, this.existingApiContracts);
 
+    // 构建既有 API 签名映射（用于兼容性二次校验）
+    const existingMap = new Map(this.existingApiContracts.map((c) => [c.apiName, c.signature]));
+
     // 转换为 RedlineResult 格式
+    // 注：ExistingContractGuard 严格比对签名字符串，可能将"新增可选参数"误判为签名不匹配。
+    // 因此需用 isSignatureCompatible 二次过滤——若签名虽变化但向后兼容（如新增可选参数），则豁免。
     const violations: Array<{
       readonly filePath: string;
       readonly line: number;
@@ -263,6 +299,15 @@ export class ContractGuardChecker implements StaticChecker {
       // 提取 API 名称（location 字段格式为 "OrderService.cancel" 或文件路径）
       const apiName = cv.location.includes(".") ? cv.location : cv.location;
       const location = apiLocations.get(apiName) ?? { filePath: cv.location, line: 0 };
+
+      // 二次校验：若签名虽不匹配但向后兼容（如新增可选参数），则豁免
+      const modified = modifiedApis.find((m) => m.apiName === apiName);
+      const existingSig = existingMap.get(apiName);
+      if (modified && existingSig && isSignatureCompatible(existingSig, modified.signature)) {
+        // 签名虽变化但向后兼容（如新增可选参数），不构成违规
+        continue;
+      }
+
       violations.push({
         filePath: location.filePath,
         line: location.line,
@@ -280,7 +325,6 @@ export class ContractGuardChecker implements StaticChecker {
     // （ExistingContractGuard 主要检测 API 是否在 existingApiContracts 中存在，
     //   此处补充检测签名是否兼容）
     if (violations.length === 0) {
-      const existingMap = new Map(this.existingApiContracts.map((c) => [c.apiName, c.signature]));
       for (const modified of modifiedApis) {
         const existingSig = existingMap.get(modified.apiName);
         if (!existingSig) continue; // 新增 API，合规

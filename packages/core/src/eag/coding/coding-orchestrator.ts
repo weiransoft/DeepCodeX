@@ -57,12 +57,7 @@ import type {
   FixLoopRequest,
   FixLoopResult,
 } from "./types";
-import {
-  DEFAULT_MAX_CODING_ITERATIONS,
-  DEFAULT_MAX_FIX_ROUNDS,
-  DEFAULT_MAX_FILL_ROUNDS,
-  DEFAULT_MAX_TOKENS_PER_FILE,
-} from "./types";
+import { DEFAULT_MAX_FILL_ROUNDS, DEFAULT_MAX_TOKENS_PER_FILE } from "./types";
 import type { SkeletonGenerator } from "./skeleton-generator";
 import type { ContextAssembler } from "./context-assembler";
 import type { LlmFiller } from "./llm-filler";
@@ -542,7 +537,7 @@ export class CodingOrchestrator {
     // 步骤 4：G-5 退出门禁检查（所有任务卡完成后调用一次）
     // 仅在所有任务卡 completed 时才进行 G-5 检查；若有任务卡未完成，跳过 G-5（必然失败）
     if (loopFinalStatus === "completed") {
-      const g5Result = this.checkG5Gate(request, taskResults, allGeneratedFiles);
+      const g5Result = this.checkG5Gate(request, taskResults);
       if (!g5Result.passed) {
         loopFinalStatus = "failed";
         blockedReason = `G-5 门禁失败：${g5Result.reason}`;
@@ -861,14 +856,9 @@ export class CodingOrchestrator {
    *
    * @param request CODING Loop 编排请求
    * @param taskResults 各任务卡执行结果
-   * @param allGeneratedFiles 所有生成文件（用于构造最终评估报告）
    * @returns G-5 门禁判定结果
    */
-  private checkG5Gate(
-    request: Readonly<CodingLoopRequest>,
-    taskResults: ReadonlyArray<TaskCodingResult>,
-    allGeneratedFiles: ReadonlyArray<GeneratedFile>
-  ): GateResult {
+  private checkG5Gate(request: Readonly<CodingLoopRequest>, taskResults: ReadonlyArray<TaskCodingResult>): GateResult {
     // 更新 taskCards 的 status 为最终状态（用于 G-5 校验所有任务卡 completed）
     // 注：taskCards 是 ReadonlyArray，需构造一份带最新 status 的副本
     const completedTaskCards: TaskCard[] = request.taskCards.map((tc) => {

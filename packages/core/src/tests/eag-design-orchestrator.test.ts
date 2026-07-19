@@ -47,6 +47,7 @@ import { DDD_LAYERED_PARADIGM } from "../eag/eak/paradigms/ddd-layered";
 import { CQRS_ES_PARADIGM } from "../eag/eak/paradigms/cqrs-es";
 import { getParadigmById } from "../eag/eak/paradigm-registry";
 import { createDefaultDesignLoopConfig } from "../eag/design/design-models";
+import type { ProjectContext } from "../eag/design/design-models";
 import type {
   DesignLoopInput,
   StructuredRequirement,
@@ -86,10 +87,7 @@ class StaticProductManager implements ProductManagerProtocol {
    * @param _projectContext 项目上下文（本静态实现未使用，保留参数对齐协议）
    * @returns 确定性的 StructuredRequirement
    */
-  async structureRequirement(
-    rawRequirement: string,
-    _projectContext?: import("../eag/design/design-models").ProjectContext
-  ): Promise<StructuredRequirement> {
+  async structureRequirement(rawRequirement: string, _projectContext?: ProjectContext): Promise<StructuredRequirement> {
     // 按行切分，去掉空行
     const lines = rawRequirement
       .split(/\r?\n/)
@@ -277,7 +275,7 @@ class StaticArchitect implements ArchitectProtocol {
   async designArchitecture(
     requirement: StructuredRequirement,
     paradigmLock?: ParadigmLockConfig,
-    _projectContext?: import("../eag/design/design-models").ProjectContext
+    _projectContext?: ProjectContext
   ): Promise<{ architecture: ArchitectureDocument; domainModel: DomainModelDocument }> {
     this.callCount += 1;
 

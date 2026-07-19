@@ -34,8 +34,8 @@
 import type { CodingContext, FixLoopRequest, FixLoopResult, FixRoundRecord, GeneratedFile } from "./types";
 import { DEFAULT_MAX_FIX_ROUNDS, FIX_CONTEXT_WINDOW_SIZE, SAME_REDLINE_CONSECUTIVE_VIOLATION_LIMIT } from "./types";
 import type { StrictEvaluator } from "./strict-evaluator";
-import type { EvaluationContext, EvaluationReport, RedlineDefinition, RedlineResult } from "../evaluator/types";
-import type { LLMClient, LLMRequest, LLMResponse, LLMStreamEvent } from "../../providers/llm-provider";
+import type { EvaluationContext, EvaluationReport, RedlineDefinition } from "../evaluator/types";
+import type { LLMClient, LLMRequest, LLMResponse } from "../../providers/llm-provider";
 import type { SessionMessage } from "../../session";
 
 // ============================================================================
@@ -77,11 +77,6 @@ const LLM_TEMPERATURE = 0.2 as const;
  * 单次 LLM 调用最大 token 上限
  */
 const MAX_TOKENS_PER_LLM_CALL = 8000 as const;
-
-/**
- * 估算 token 数的字符换算比例（与 llm-filler.ts 一致）
- */
-const CHARS_PER_TOKEN = 4 as const;
 
 // ============================================================================
 // 异常类型

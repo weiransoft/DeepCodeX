@@ -45,20 +45,6 @@ const DB_QUERY_METHODS: ReadonlyArray<string> = Object.freeze([
 ]);
 
 /**
- * 数据库写入方法名清单（识别 db.save / db.update 等）
- */
-const DB_WRITE_METHODS: ReadonlyArray<string> = Object.freeze([
-  "save",
-  "update",
-  "updateMany",
-  "create",
-  "createMany",
-  "delete",
-  "deleteMany",
-  "upsert",
-]);
-
-/**
  * 数据库 receiver 名清单（识别 db / repository / prisma / knex 等数据库对象）
  */
 const DB_RECEIVER_NAMES: ReadonlyArray<string> = Object.freeze([
@@ -99,16 +85,6 @@ function isDbReceiver(receiver: string): boolean {
  */
 function isDbQueryMethod(method: string): boolean {
   return DB_QUERY_METHODS.includes(method);
-}
-
-/**
- * 判定方法名是否为数据库写入方法
- *
- * @param method 方法名
- * @returns true 表示写入方法
- */
-function isDbWriteMethod(method: string): boolean {
-  return DB_WRITE_METHODS.includes(method);
 }
 
 /**

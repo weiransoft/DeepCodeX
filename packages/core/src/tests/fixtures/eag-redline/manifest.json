@@ -1,0 +1,479 @@
+{
+  "version": "1.0.0",
+  "description": "EAG-P2 批次 9 redline-fixtures 样例库清单——13 个 StaticChecker × 19 条红线 × violation/compliant 成对样例（共 38 个样例）",
+  "generatedAt": "2026-07-19",
+  "totalFixtures": 38,
+  "checkers": [
+    {
+      "checkerName": "saga-detector",
+      "checkerClass": "SagaDetector",
+      "redlineIds": ["E1"],
+      "fixtures": [
+        {
+          "fixtureId": "saga-detector/e1-cross-aggregate-write.violation",
+          "kind": "violation",
+          "targetRedlineId": "E1",
+          "expectVerdict": "violated",
+          "description": "聚合根 OrderAggregate.confirm() 直接调用 InventoryAggregate 写方法，无 Saga 编排器",
+          "modulePath": "./saga-detector/e1-cross-aggregate-write.violation",
+          "expectedViolationCount": 1,
+          "expectedViolationPatterns": ["跨聚合写", "事务边界", "E1"]
+        },
+        {
+          "fixtureId": "saga-detector/e1-saga-orchestrator.compliant",
+          "kind": "compliant",
+          "targetRedlineId": "E1",
+          "expectVerdict": "passed",
+          "description": "聚合根仅修改自身状态，跨聚合一致性由 OrderSagaOrchestrator 编排",
+          "modulePath": "./saga-detector/e1-saga-orchestrator.compliant",
+          "expectedViolationCount": 0,
+          "expectedViolationPatterns": []
+        }
+      ]
+    },
+    {
+      "checkerName": "idempotency-checker",
+      "checkerClass": "IdempotencyChecker",
+      "redlineIds": ["E2"],
+      "fixtures": [
+        {
+          "fixtureId": "idempotency-checker/e2-no-idempotency-key.violation",
+          "kind": "violation",
+          "targetRedlineId": "E2",
+          "expectVerdict": "violated",
+          "description": "Controller @Post 方法无 Idempotency-Key 参数 + 事件处理器无去重表",
+          "modulePath": "./idempotency-checker/e2-no-idempotency-key.violation",
+          "expectedViolationCount": 2,
+          "expectedViolationPatterns": ["幂等键", "E2"]
+        },
+        {
+          "fixtureId": "idempotency-checker/e2-with-idempotency-key.compliant",
+          "kind": "compliant",
+          "targetRedlineId": "E2",
+          "expectVerdict": "passed",
+          "description": "@Post 方法含 @Headers('Idempotency-Key') + 事件处理器使用 SETNX 去重",
+          "modulePath": "./idempotency-checker/e2-with-idempotency-key.compliant",
+          "expectedViolationCount": 0,
+          "expectedViolationPatterns": []
+        }
+      ]
+    },
+    {
+      "checkerName": "audit-event-matcher",
+      "checkerClass": "AuditEventMatcher",
+      "redlineIds": ["E3"],
+      "fixtures": [
+        {
+          "fixtureId": "audit-event-matcher/e3-state-change-no-event.violation",
+          "kind": "violation",
+          "targetRedlineId": "E3",
+          "expectVerdict": "violated",
+          "description": "实体类状态变更方法 changePassword() 修改状态但无 .publish() 调用",
+          "modulePath": "./audit-event-matcher/e3-state-change-no-event.violation",
+          "expectedViolationCount": 1,
+          "expectedViolationPatterns": ["审计", "E3", "未发布领域事件"]
+        },
+        {
+          "fixtureId": "audit-event-matcher/e3-state-change-with-event.compliant",
+          "kind": "compliant",
+          "targetRedlineId": "E3",
+          "expectVerdict": "passed",
+          "description": "状态变更方法 changePassword() 末尾发布 PasswordChangedEvent 领域事件",
+          "modulePath": "./audit-event-matcher/e3-state-change-with-event.compliant",
+          "expectedViolationCount": 0,
+          "expectedViolationPatterns": []
+        }
+      ]
+    },
+    {
+      "checkerName": "import-analyzer",
+      "checkerClass": "ImportAnalyzer",
+      "redlineIds": ["E4", "TCS-OSS-01"],
+      "fixtures": [
+        {
+          "fixtureId": "import-analyzer/e4-domain-imports-infra.violation",
+          "kind": "violation",
+          "targetRedlineId": "E4",
+          "expectVerdict": "violated",
+          "description": "domain 层文件 import infrastructure 层模块——违反依赖方向",
+          "modulePath": "./import-analyzer/e4-domain-imports-infra.violation",
+          "expectedViolationCount": 1,
+          "expectedViolationPatterns": ["domain", "import", "E4"]
+        },
+        {
+          "fixtureId": "import-analyzer/e4-domain-clean.compliant",
+          "kind": "compliant",
+          "targetRedlineId": "E4",
+          "expectVerdict": "passed",
+          "description": "domain 层文件仅 import 同层模块与 Port 接口，无外层依赖",
+          "modulePath": "./import-analyzer/e4-domain-clean.compliant",
+          "expectedViolationCount": 0,
+          "expectedViolationPatterns": []
+        },
+        {
+          "fixtureId": "import-analyzer/tcs-oss-01-direct-sdk.violation",
+          "kind": "violation",
+          "targetRedlineId": "TCS-OSS-01",
+          "expectVerdict": "violated",
+          "description": "业务代码直接 import @aws-sdk/client-s3 厂商 SDK——违反 TCS-OSS-01",
+          "modulePath": "./import-analyzer/tcs-oss-01-direct-sdk.violation",
+          "expectedViolationCount": 1,
+          "expectedViolationPatterns": ["对象存储", "SDK", "TCS-OSS-01"]
+        },
+        {
+          "fixtureId": "import-analyzer/tcs-oss-01-port-abstraction.compliant",
+          "kind": "compliant",
+          "targetRedlineId": "TCS-OSS-01",
+          "expectVerdict": "passed",
+          "description": "业务代码仅 import ObjectStoragePort 抽象接口，无厂商 SDK 直连",
+          "modulePath": "./import-analyzer/tcs-oss-01-port-abstraction.compliant",
+          "expectedViolationCount": 0,
+          "expectedViolationPatterns": []
+        }
+      ]
+    },
+    {
+      "checkerName": "dto-validator-checker",
+      "checkerClass": "DtoValidatorChecker",
+      "redlineIds": ["E5"],
+      "fixtures": [
+        {
+          "fixtureId": "dto-validator-checker/e5-dto-no-validator.violation",
+          "kind": "violation",
+          "targetRedlineId": "E5",
+          "expectVerdict": "violated",
+          "description": "CreateUserDTO 类字段无任何 class-validator 装饰器——违反 E5",
+          "modulePath": "./dto-validator-checker/e5-dto-no-validator.violation",
+          "expectedViolationCount": 1,
+          "expectedViolationPatterns": ["class-validator", "E5", "输入校验"]
+        },
+        {
+          "fixtureId": "dto-validator-checker/e5-dto-with-validator.compliant",
+          "kind": "compliant",
+          "targetRedlineId": "E5",
+          "expectVerdict": "passed",
+          "description": "CreateUserDTO 字段含 @IsString / @IsEmail / @MinLength 等装饰器",
+          "modulePath": "./dto-validator-checker/e5-dto-with-validator.compliant",
+          "expectedViolationCount": 0,
+          "expectedViolationPatterns": []
+        }
+      ]
+    },
+    {
+      "checkerName": "hardcode-secret-scanner",
+      "checkerClass": "HardcodeSecretScanner",
+      "redlineIds": ["E6", "TCS-SEC-02"],
+      "fixtures": [
+        {
+          "fixtureId": "hardcode-secret-scanner/e6-hardcoded-aws-key.violation",
+          "kind": "violation",
+          "targetRedlineId": "E6",
+          "expectVerdict": "violated",
+          "description": "代码字符串字面量含 AKIAIOSFODNN7EXAMPLE 与 ghp_xxxxxxxxxxxx 等真实格式密钥",
+          "modulePath": "./hardcode-secret-scanner/e6-hardcoded-aws-key.violation",
+          "expectedViolationCount": 2,
+          "expectedViolationPatterns": ["硬编码", "AWS", "GitHub"]
+        },
+        {
+          "fixtureId": "hardcode-secret-scanner/e6-env-var-reference.compliant",
+          "kind": "compliant",
+          "targetRedlineId": "E6",
+          "expectVerdict": "passed",
+          "description": "密钥通过 process.env 读取，无明文字面量——合规",
+          "modulePath": "./hardcode-secret-scanner/e6-env-var-reference.compliant",
+          "expectedViolationCount": 0,
+          "expectedViolationPatterns": []
+        }
+      ]
+    },
+    {
+      "checkerName": "anemic-model-detector",
+      "checkerClass": "AnemicModelDetector",
+      "redlineIds": ["E7"],
+      "fixtures": [
+        {
+          "fixtureId": "anemic-model-detector/e7-anemic-entity.violation",
+          "kind": "violation",
+          "targetRedlineId": "E7",
+          "expectVerdict": "violated",
+          "description": "OrderAggregate 仅有 getter/setter，业务方法 0 个——疑似贫血模型",
+          "modulePath": "./anemic-model-detector/e7-anemic-entity.violation",
+          "expectedViolationCount": 1,
+          "expectedViolationPatterns": ["贫血模型", "E7", "业务方法"]
+        },
+        {
+          "fixtureId": "anemic-model-detector/e7-rich-entity.compliant",
+          "kind": "compliant",
+          "targetRedlineId": "E7",
+          "expectVerdict": "passed",
+          "description": "OrderAggregate 含 cancel / ship / applyDiscount 3 个业务方法，无 setter——充血模型",
+          "modulePath": "./anemic-model-detector/e7-rich-entity.compliant",
+          "expectedViolationCount": 0,
+          "expectedViolationPatterns": []
+        }
+      ]
+    },
+    {
+      "checkerName": "contract-existence-checker",
+      "checkerClass": "ContractExistenceChecker",
+      "redlineIds": ["E8"],
+      "fixtures": [
+        {
+          "fixtureId": "contract-existence-checker/e8-controller-no-openapi.violation",
+          "kind": "violation",
+          "targetRedlineId": "E8",
+          "expectVerdict": "violated",
+          "description": "UserController 无 @ApiTags/@ApiOperation 装饰器，且无 openapi.yaml——违反 E8",
+          "modulePath": "./contract-existence-checker/e8-controller-no-openapi.violation",
+          "expectedViolationCount": 1,
+          "expectedViolationPatterns": ["OpenAPI", "E8", "API 契约"]
+        },
+        {
+          "fixtureId": "contract-existence-checker/e8-controller-with-openapi.compliant",
+          "kind": "compliant",
+          "targetRedlineId": "E8",
+          "expectVerdict": "passed",
+          "description": "UserController 含 @ApiTags + @ApiOperation + @ApiResponse 装饰器——合规",
+          "modulePath": "./contract-existence-checker/e8-controller-with-openapi.compliant",
+          "expectedViolationCount": 0,
+          "expectedViolationPatterns": []
+        }
+      ]
+    },
+    {
+      "checkerName": "cache-pattern-checker",
+      "checkerClass": "CachePatternChecker",
+      "redlineIds": ["TCS-CACHE-01", "TCS-CACHE-02", "TCS-CACHE-03"],
+      "fixtures": [
+        {
+          "fixtureId": "cache-pattern-checker/tcs-cache-01-no-ttl.violation",
+          "kind": "violation",
+          "targetRedlineId": "TCS-CACHE-01",
+          "expectVerdict": "violated",
+          "description": "cache.set(key, value) 无第三参数 TTL——违反 TCS-CACHE-01",
+          "modulePath": "./cache-pattern-checker/tcs-cache-01-no-ttl.violation",
+          "expectedViolationCount": 1,
+          "expectedViolationPatterns": ["TTL", "TCS-CACHE-01"]
+        },
+        {
+          "fixtureId": "cache-pattern-checker/tcs-cache-01-with-ttl.compliant",
+          "kind": "compliant",
+          "targetRedlineId": "TCS-CACHE-01",
+          "expectVerdict": "passed",
+          "description": "cache.set(key, value, { ttlSeconds: 300 }) 显式提供 TTL——合规",
+          "modulePath": "./cache-pattern-checker/tcs-cache-01-with-ttl.compliant",
+          "expectedViolationCount": 0,
+          "expectedViolationPatterns": []
+        },
+        {
+          "fixtureId": "cache-pattern-checker/tcs-cache-02-wrong-order.violation",
+          "kind": "violation",
+          "targetRedlineId": "TCS-CACHE-02",
+          "expectVerdict": "violated",
+          "description": "先 cache.delete(key) 后 repository.save(order)——违反 TCS-CACHE-02 双写顺序",
+          "modulePath": "./cache-pattern-checker/tcs-cache-02-wrong-order.violation",
+          "expectedViolationCount": 1,
+          "expectedViolationPatterns": ["双写顺序", "TCS-CACHE-02"]
+        },
+        {
+          "fixtureId": "cache-pattern-checker/tcs-cache-02-correct-order.compliant",
+          "kind": "compliant",
+          "targetRedlineId": "TCS-CACHE-02",
+          "expectVerdict": "passed",
+          "description": "先 repository.save(order) 后 cache.delete(key)——Cache-Aside 正确顺序",
+          "modulePath": "./cache-pattern-checker/tcs-cache-02-correct-order.compliant",
+          "expectedViolationCount": 0,
+          "expectedViolationPatterns": []
+        },
+        {
+          "fixtureId": "cache-pattern-checker/tcs-cache-03-no-null-cache.violation",
+          "kind": "violation",
+          "targetRedlineId": "TCS-CACHE-03",
+          "expectVerdict": "violated",
+          "description": "cache.get 返回 null → 查 DB → 无记录直接 return null，不缓存空值——违反 TCS-CACHE-03",
+          "modulePath": "./cache-pattern-checker/tcs-cache-03-no-null-cache.violation",
+          "expectedViolationCount": 1,
+          "expectedViolationPatterns": ["缓存穿透", "TCS-CACHE-03"]
+        },
+        {
+          "fixtureId": "cache-pattern-checker/tcs-cache-03-with-null-cache.compliant",
+          "kind": "compliant",
+          "targetRedlineId": "TCS-CACHE-03",
+          "expectVerdict": "passed",
+          "description": "cache.get 返回 null → 查 DB → 无记录时缓存 NULL_SENTINEL——防穿透合规",
+          "modulePath": "./cache-pattern-checker/tcs-cache-03-with-null-cache.compliant",
+          "expectedViolationCount": 0,
+          "expectedViolationPatterns": []
+        }
+      ]
+    },
+    {
+      "checkerName": "sql-pattern-checker",
+      "checkerClass": "SqlPatternChecker",
+      "redlineIds": ["TCS-SQL-01", "TCS-SQL-02", "TCS-SQL-03"],
+      "fixtures": [
+        {
+          "fixtureId": "sql-pattern-checker/tcs-sql-01-select-all.violation",
+          "kind": "violation",
+          "targetRedlineId": "TCS-SQL-01",
+          "expectVerdict": "violated",
+          "description": "SQL 字符串含 SELECT * FROM users WHERE status = ?——疑似全表扫描",
+          "modulePath": "./sql-pattern-checker/tcs-sql-01-select-all.violation",
+          "expectedViolationCount": 1,
+          "expectedViolationPatterns": ["SELECT *", "TCS-SQL-01"]
+        },
+        {
+          "fixtureId": "sql-pattern-checker/tcs-sql-01-explicit-columns.compliant",
+          "kind": "compliant",
+          "targetRedlineId": "TCS-SQL-01",
+          "expectVerdict": "passed",
+          "description": "SQL 显式列字段 SELECT id, name, status FROM users WHERE status = ?——合规",
+          "modulePath": "./sql-pattern-checker/tcs-sql-01-explicit-columns.compliant",
+          "expectedViolationCount": 0,
+          "expectedViolationPatterns": []
+        },
+        {
+          "fixtureId": "sql-pattern-checker/tcs-sql-02-n-plus-one.violation",
+          "kind": "violation",
+          "targetRedlineId": "TCS-SQL-02",
+          "expectVerdict": "violated",
+          "description": "for 循环体内调用 db.findOne(id)——N+1 查询问题",
+          "modulePath": "./sql-pattern-checker/tcs-sql-02-n-plus-one.violation",
+          "expectedViolationCount": 1,
+          "expectedViolationPatterns": ["N+1", "TCS-SQL-02"]
+        },
+        {
+          "fixtureId": "sql-pattern-checker/tcs-sql-02-batch-query.compliant",
+          "kind": "compliant",
+          "targetRedlineId": "TCS-SQL-02",
+          "expectVerdict": "passed",
+          "description": "循环外批量查询 db.findMany({ where: { id: { in: ids } } })——合规",
+          "modulePath": "./sql-pattern-checker/tcs-sql-02-batch-query.compliant",
+          "expectedViolationCount": 0,
+          "expectedViolationPatterns": []
+        },
+        {
+          "fixtureId": "sql-pattern-checker/tcs-sql-03-deep-offset.violation",
+          "kind": "violation",
+          "targetRedlineId": "TCS-SQL-03",
+          "expectVerdict": "violated",
+          "description": "SQL 含 OFFSET 15000（> 10000 阈值）——深分页性能问题",
+          "modulePath": "./sql-pattern-checker/tcs-sql-03-deep-offset.violation",
+          "expectedViolationCount": 1,
+          "expectedViolationPatterns": ["OFFSET", "TCS-SQL-03"]
+        },
+        {
+          "fixtureId": "sql-pattern-checker/tcs-sql-03-cursor-pagination.compliant",
+          "kind": "compliant",
+          "targetRedlineId": "TCS-SQL-03",
+          "expectVerdict": "passed",
+          "description": "游标分页 WHERE id > lastId ORDER BY id LIMIT 20——无 OFFSET 合规",
+          "modulePath": "./sql-pattern-checker/tcs-sql-03-cursor-pagination.compliant",
+          "expectedViolationCount": 0,
+          "expectedViolationPatterns": []
+        }
+      ]
+    },
+    {
+      "checkerName": "ldap-pattern-checker",
+      "checkerClass": "LdapPatternChecker",
+      "redlineIds": ["TCS-LDAP-01", "TCS-LDAP-02"],
+      "fixtures": [
+        {
+          "fixtureId": "ldap-pattern-checker/tcs-ldap-01-direct-ldap.violation",
+          "kind": "violation",
+          "targetRedlineId": "TCS-LDAP-01",
+          "expectVerdict": "violated",
+          "description": "业务代码（非 Synchronizer）调用 ldapClient.validateCredentials()——违反 TCS-LDAP-01",
+          "modulePath": "./ldap-pattern-checker/tcs-ldap-01-direct-ldap.violation",
+          "expectedViolationCount": 1,
+          "expectedViolationPatterns": ["直连 LDAP", "TCS-LDAP-01"]
+        },
+        {
+          "fixtureId": "ldap-pattern-checker/tcs-ldap-01-sync-port.compliant",
+          "kind": "compliant",
+          "targetRedlineId": "TCS-LDAP-01",
+          "expectVerdict": "passed",
+          "description": "业务代码通过 ldapSyncPort.authenticate() 抽象接口——合规",
+          "modulePath": "./ldap-pattern-checker/tcs-ldap-01-sync-port.compliant",
+          "expectedViolationCount": 0,
+          "expectedViolationPatterns": []
+        },
+        {
+          "fixtureId": "ldap-pattern-checker/tcs-ldap-02-no-idempotent.violation",
+          "kind": "violation",
+          "targetRedlineId": "TCS-LDAP-02",
+          "expectVerdict": "violated",
+          "description": "LDAP 同步文件中 mirrorStore.createUser() 且无 upsert 调用——违反 TCS-LDAP-02",
+          "modulePath": "./ldap-pattern-checker/tcs-ldap-02-no-idempotent.violation",
+          "expectedViolationCount": 1,
+          "expectedViolationPatterns": ["幂等", "TCS-LDAP-02"]
+        },
+        {
+          "fixtureId": "ldap-pattern-checker/tcs-ldap-02-upsert.compliant",
+          "kind": "compliant",
+          "targetRedlineId": "TCS-LDAP-02",
+          "expectVerdict": "passed",
+          "description": "LDAP 同步文件中 mirrorStore.upsertUserByEntryUUID()——幂等合规",
+          "modulePath": "./ldap-pattern-checker/tcs-ldap-02-upsert.compliant",
+          "expectedViolationCount": 0,
+          "expectedViolationPatterns": []
+        }
+      ]
+    },
+    {
+      "checkerName": "dependency-scanner",
+      "checkerClass": "DependencyScanner",
+      "redlineIds": ["TCS-SEC-01"],
+      "fixtures": [
+        {
+          "fixtureId": "dependency-scanner/tcs-sec-01-vulnerable-lodash.violation",
+          "kind": "violation",
+          "targetRedlineId": "TCS-SEC-01",
+          "expectVerdict": "violated",
+          "description": "package.json 含 lodash@4.17.20（CVE-2021-23337，CVSS 7.2）——违反 TCS-SEC-01",
+          "modulePath": "./dependency-scanner/tcs-sec-01-vulnerable-lodash.violation",
+          "expectedViolationCount": 1,
+          "expectedViolationPatterns": ["lodash", "CVE", "TCS-SEC-01"]
+        },
+        {
+          "fixtureId": "dependency-scanner/tcs-sec-01-fixed-version.compliant",
+          "kind": "compliant",
+          "targetRedlineId": "TCS-SEC-01",
+          "expectVerdict": "passed",
+          "description": "package.json 含 lodash@^4.17.21（修复版本）——合规",
+          "modulePath": "./dependency-scanner/tcs-sec-01-fixed-version.compliant",
+          "expectedViolationCount": 0,
+          "expectedViolationPatterns": []
+        }
+      ]
+    },
+    {
+      "checkerName": "contract-guard-checker",
+      "checkerClass": "ContractGuardChecker",
+      "redlineIds": ["BROWNFIELD-CONTRACT"],
+      "fixtures": [
+        {
+          "fixtureId": "contract-guard-checker/brownfield-api-breaking-change.violation",
+          "kind": "violation",
+          "targetRedlineId": "BROWNFIELD-CONTRACT",
+          "expectVerdict": "violated",
+          "description": "修改既有 cancelOrder(orderId, reason) 为 cancelOrder(orderId)——参数减少，破坏向后兼容",
+          "modulePath": "./contract-guard-checker/brownfield-api-breaking-change.violation",
+          "expectedViolationCount": 1,
+          "expectedViolationPatterns": ["向后兼容", "签名不匹配"]
+        },
+        {
+          "fixtureId": "contract-guard-checker/brownfield-api-compatible.compliant",
+          "kind": "compliant",
+          "targetRedlineId": "BROWNFIELD-CONTRACT",
+          "expectVerdict": "passed",
+          "description": "新增可选参数 cancelOrder(orderId, reason?: string)——向后兼容",
+          "modulePath": "./contract-guard-checker/brownfield-api-compatible.compliant",
+          "expectedViolationCount": 0,
+          "expectedViolationPatterns": []
+        }
+      ]
+    }
+  ]
+}

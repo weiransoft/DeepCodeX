@@ -39,11 +39,6 @@ import { buildViolations, buildPass, extractFilePathFromComment, lineOf } from "
 const CACHE_SET_METHODS: ReadonlyArray<string> = Object.freeze(["set", "setJSON", "setWithTtl", "setex", "setEx"]);
 
 /**
- * 缓存读取方法名清单（识别 cache.get 调用）
- */
-const CACHE_GET_METHODS: ReadonlyArray<string> = Object.freeze(["get", "getJSON", "mget"]);
-
-/**
  * 缓存删除方法名清单（识别 cache.delete 调用）
  */
 const CACHE_DELETE_METHODS: ReadonlyArray<string> = Object.freeze(["delete", "del", "remove"]);
@@ -142,12 +137,10 @@ export class CachePatternChecker implements StaticChecker {
       // 匹配 cache.set( 或 redis.set( 形式，跨多行检查调用参数
       const cacheSetRe = /\b([a-zA-Z_][\w]*)\.([a-zA-Z_]\w*)\s*\(/g;
       let m: RegExpExecArray | null;
-      let lastIndex = 0;
       while ((m = cacheSetRe.exec(content)) !== null) {
         const receiver = m[1];
         const method = m[2];
         const callStart = m.index;
-        lastIndex = callStart + 1;
 
         // 检测 cache.set 调用
         if (isCacheReceiver(receiver) && CACHE_SET_METHODS.includes(method)) {

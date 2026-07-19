@@ -73,14 +73,6 @@ const EVALUATOR_NAME = "StrictEvaluator" as const;
 const DEFAULT_EVALUATION_MODE: EvaluationMode = "strict" as const;
 
 /**
- * 默认连续失败上限（用于 STOP_FAILURE 判定）
- *
- * 对齐 §5.2.3 + §5.12.2 失败上限纪律："连续 3 次 FIX 失败 → HUMAN_CHECKPOINT"。
- * 当 maxConsecutiveFailures >= 3 时，decideVerdict 返回 stop_failure。
- */
-const DEFAULT_FAILURE_THRESHOLD = 3 as const;
-
-/**
  * 默认连续失败次数（首次评估时为 0）
  *
  * 评估器首次调用时无历史失败记录，maxConsecutiveFailures=0。

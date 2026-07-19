@@ -18,7 +18,7 @@
  * @module eag/discovery/brownfield-discovery
  */
 
-import type { ExistingModelSnapshot, IncrementalChange, IncrementalDesignResult } from "./types.js";
+import type { ChangeType, ExistingModelSnapshot, IncrementalChange, IncrementalDesignResult } from "./types.js";
 import { ChangeClassifier } from "./change-classifier.js";
 
 // ============================================================================
@@ -192,7 +192,7 @@ export class BrownfieldDiscovery {
   classifyChanges(
     snapshot: ExistingModelSnapshot,
     newRequirement: string
-  ): ReadonlyArray<{ readonly name: string; readonly changeType: import("./types.js").ChangeType }> {
+  ): ReadonlyArray<{ readonly name: string; readonly changeType: ChangeType }> {
     const newNames = this.extractChangeItemNames(newRequirement);
     return this.classifier.classifyAll(snapshot, newNames);
   }
@@ -241,7 +241,7 @@ export class BrownfieldDiscovery {
    */
   private buildIncrementalChange(
     name: string,
-    changeType: import("./types.js").ChangeType,
+    changeType: ChangeType,
     snapshot: ExistingModelSnapshot
   ): IncrementalChange {
     // 查找既有项对应的文件路径（modify/unchanged 时）
