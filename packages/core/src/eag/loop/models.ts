@@ -144,6 +144,11 @@ export const SCHEDULING_ACTIONS: ReadonlyArray<SchedulingAction> = Object.freeze
  */
 export const DEFAULT_STAGE_ORDER: ReadonlyArray<string> = Object.freeze(["plan", "dev", "verify", "fix"]);
 
+// 类型导入：MultiLoopPlan（type-only import 避免运行期循环依赖）
+// 对齐 EAG-P3 批次 10 §4.17.2：LoopEngineeringConfig 新增可选 multiLoopPlan 字段，
+// 由 LoopKernel.scheduleMultiLoop() 消费，向后兼容（未提供时按单 Loop 执行 run()）
+import type { MultiLoopPlan } from "../long-horizon/types";
+
 /**
  * Loop Engineering 专属配置
  *
@@ -160,6 +165,11 @@ export const DEFAULT_STAGE_ORDER: ReadonlyArray<string> = Object.freeze(["plan",
  * - 构造时通过 `createLoopEngineeringConfig` 工厂函数 Object.freeze 冻结
  * - 运行期不可修改（LLM 在循环内不可自改上限）
  * - 配置变更需退出 Loop 后重新构造
+ *
+ * 扩展字段（EAG-P3 批次 10 §4.17.2 向后兼容扩展）：
+ * - multiLoopPlan：可选，多 Loop 串联计划。未提供时按单 Loop 执行 run()；
+ *   提供时由 LoopKernel.scheduleMultiLoop() 消费，串联执行 DESIGN → CODING → TESTING 三 Loop。
+ *   该字段对既有调用方透明——既有代码不读取此字段即不受影响。
  */
 export interface LoopEngineeringConfig {
   /** 业务 Loop 类型 */
@@ -194,6 +204,16 @@ export interface LoopEngineeringConfig {
   readonly securityAnalyzer: string;
   /** 验证通过后是否自动 git commit */
   readonly autoCommit: boolean;
+  /**
+   * 多 Loop 串联计划（EAG-P3 批次 10 §4.17.2 新增可选字段，向后兼容）
+   *
+   * - 未提供（undefined）：按单 Loop 执行 run()，既有行为不变
+   * - 提供：由 LoopKernel.scheduleMultiLoop(plan, store?) 消费，
+   *   串联执行 DESIGN → CODING → TESTING 三 Loop DAG
+   *
+   * 字段为 readonly + Readonly 包装，运行期不可修改（§5.12.4 G-A6d 配置冻结）
+   */
+  readonly multiLoopPlan?: Readonly<MultiLoopPlan>;
   /** 扩展字段（供未来插件使用，如 max_consecutive_failures / backoff_base_sec 等可调参数） */
   readonly extra: Readonly<Record<string, unknown>>;
 }
@@ -209,6 +229,10 @@ export interface LoopEngineeringConfig {
  * - maxTokens=500_000：Python 母本默认值，覆盖大型生成任务
  * - humanCheckpointEvery=5：每 5 轮触发人类检查点
  * - samplingReadRatio=0.1：抽样 10% artifacts 阅读
+ *
+ * 扩展字段（EAG-P3 批次 10 §4.17.2）：
+ * - multiLoopPlan: undefined：默认不启用多 Loop 串联模式，保持既有单 Loop 行为不变。
+ *   调用方需多 Loop 串联时通过 createLoopEngineeringConfig({ multiLoopPlan: ... }) 显式注入。
  */
 export const DEFAULT_LOOP_ENGINEERING_CONFIG: Readonly<LoopEngineeringConfig> = Object.freeze({
   loopType: "coding",
@@ -227,6 +251,8 @@ export const DEFAULT_LOOP_ENGINEERING_CONFIG: Readonly<LoopEngineeringConfig> = 
   testTimeoutSec: 600.0,
   securityAnalyzer: "builtin",
   autoCommit: true,
+  // 多 Loop 串联计划默认未启用（§4.17.2 向后兼容：既有调用方不受影响）
+  multiLoopPlan: undefined,
   extra: Object.freeze({}) as Readonly<Record<string, unknown>>,
 });
 

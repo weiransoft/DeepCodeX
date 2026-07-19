@@ -39,6 +39,11 @@ import type {
 } from "./protocols";
 import type { LoopScheduler } from "./scheduler";
 import type { SchedulingAction } from "./models";
+// EAG-P3 批次 10 §4.17.2 扩展：多 Loop 串联调度
+// 使用 type-only import 避免运行期循环依赖（long-horizon/types re-export 了 loop/models 的类型，
+// 但 type-only import 仅在编译期解析，不会触发运行期模块加载循环）
+import type { MultiLoopPlan, MultiLoopRunReport, MultiLoopNodeResult, MultiLoopNode } from "../long-horizon/types";
+import type { RunStateStore } from "../long-horizon/run-state-store";
 
 // ============================================================================
 // LoopKernel 类
@@ -232,6 +237,228 @@ export class LoopKernel {
       humanCheckpoints: [...this.humanCheckpoints],
       finalSummary: summary,
     };
+  }
+
+  // ===========================================================================
+  // EAG-P3 批次 10 §4.17.2 扩展：多 Loop 串联调度（向后兼容，新增方法）
+  // ===========================================================================
+
+  /**
+   * 执行多 Loop 串联计划（EAG-P3 批次 10 §4.17.3）
+   *
+   * 算法：
+   * 1. 遍历 multiLoopPlan.loops（按拓扑序，DESIGN → CODING → TESTING）
+   * 2. 对每个节点：
+   *    a. 检查依赖是否满足（dependencies 中所有节点 status="completed"）
+   *    b. 构造临时 LoopEngineeringConfig（loopType=node.loopType，其他字段复用当前 config）
+   *    c. 构造临时 LoopKernel 实例（注入相同组件 + 临时 config）
+   *    d. 调用临时 LoopKernel.run(node.objective) 执行单 Loop
+   *    e. Loop 成功（finalStatus="completed"）→ 节点 status="completed"
+   *    f. Loop 失败（finalStatus="failed"）→ 节点 status="failed" + 终止后续节点
+   *    g. Loop 中止（finalStatus="aborted"）→ 节点 status="human-checkpoint" + 终止后续节点
+   * 3. 全部节点完成 → 返回 multi-loop 报告（finalStatus="completed"）
+   * 4. 中途失败/中止 → 返回 multi-loop 报告（finalStatus="failed" / "human-checkpoint"）
+   *
+   * 向后兼容性（§4.17.2）：
+   * - 既有 run() 方法不变，调用方未调用 scheduleMultiLoop() 时不受影响
+   * - 仅当 config.multiLoopPlan 存在且调用方显式调用 scheduleMultiLoop() 时进入多 Loop 模式
+   * - 同一份 DiscoveryProbe / HandoffAdapter / Evaluator / Memory / Scheduler 组件可被复用
+   *
+   * @param multiLoopPlan 多 Loop 串联计划
+   * @param runStateStore RunState 持久化存储（可选，提供时记录 loop-started / loop-completed 事件）
+   * @returns 多 Loop 执行报告
+   */
+  async scheduleMultiLoop(
+    multiLoopPlan: Readonly<MultiLoopPlan>,
+    runStateStore?: RunStateStore
+  ): Promise<Readonly<MultiLoopRunReport>> {
+    const startTime = Date.now();
+    this.info(`启动多 Loop 串联调度：planId=${multiLoopPlan.planId} 节点数=${multiLoopPlan.loops.length}`);
+
+    // 校验入参
+    if (!multiLoopPlan || !multiLoopPlan.loops || multiLoopPlan.loops.length === 0) {
+      throw new Error("scheduleMultiLoop 入参非法：multiLoopPlan.loops 不能为空");
+    }
+
+    // 节点状态映射表：nodeId → status（"pending" | "completed" | "failed" | "human-checkpoint"）
+    // 初始化为 "pending"，遍历过程中更新
+    const nodeStatusMap = new Map<string, "pending" | "completed" | "failed" | "human-checkpoint">();
+    for (const node of multiLoopPlan.loops) {
+      nodeStatusMap.set(node.nodeId, "pending");
+    }
+
+    // 节点结果列表（按拓扑序）
+    const nodeResults: MultiLoopNodeResult[] = [];
+
+    // 累计统计
+    let totalIterations = 0;
+    const totalLlmCallCount = 0;
+    let totalTokensUsed = 0;
+
+    // 最终状态：默认 completed，遇到失败/中止时降级
+    let finalStatus: "completed" | "failed" | "human-checkpoint" = "completed";
+
+    // 遍历节点（按拓扑序）
+    for (const node of multiLoopPlan.loops) {
+      // 检查依赖是否满足
+      const depsNotSatisfied = node.dependencies.some((depId) => nodeStatusMap.get(depId) !== "completed");
+      if (depsNotSatisfied) {
+        // 依赖未满足：节点标记为 failed，终止后续节点
+        const unmetDeps = node.dependencies.filter((depId) => nodeStatusMap.get(depId) !== "completed");
+        const failureReason = `依赖未满足：${unmetDeps.join(", ")}`;
+        this.warn(`节点 ${node.nodeId} [${node.loopType}] 跳过：${failureReason}`);
+
+        nodeResults.push(
+          Object.freeze({
+            nodeId: node.nodeId,
+            loopType: node.loopType,
+            status: "failed",
+            failureReason,
+          }) as MultiLoopNodeResult
+        );
+        nodeStatusMap.set(node.nodeId, "failed");
+        finalStatus = "failed";
+        break;
+      }
+
+      // 依赖满足：构造临时 config 并执行单 Loop
+      // 使用 node.entryArtifact 作为 run() 的 objective（节点入口文档作为本轮 Loop 目标）
+      this.info(`节点 ${node.nodeId} [${node.loopType}] 开始执行，目标：${node.entryArtifact}`);
+
+      // 记录 loop-started 事件（如果提供了 RunStateStore）
+      if (runStateStore) {
+        try {
+          await runStateStore.appendEvent(multiLoopPlan.planId, {
+            type: "loop-started",
+            timestamp: new Date().toISOString(),
+            payload: {
+              loopType: node.loopType,
+              nodeId: node.nodeId,
+              objective: node.entryArtifact,
+              dependencies: [...node.dependencies],
+            },
+          });
+        } catch (exc) {
+          // 持久化失败仅告警，不阻断流程
+          this.warn(`记录 loop-started 事件失败：${exc instanceof Error ? exc.message : String(exc)}`);
+        }
+      }
+
+      // 构造临时 LoopEngineeringConfig：复用当前 config 的所有字段，仅切换 loopType
+      const nodeConfig: Readonly<LoopEngineeringConfig> = Object.freeze({
+        ...this.config,
+        loopType: node.loopType,
+      });
+
+      // 构造临时 LoopKernel 实例：复用相同的组件依赖
+      // 注意：临时实例的内部状态（events / consecutiveFailures 等）独立于当前实例，
+      // 避免多次 run() 之间的状态污染（对齐 run() 方法的设计约束）
+      const nodeKernel = new LoopKernel(
+        nodeConfig,
+        this.discoveryProbe,
+        this.handoffAdapter,
+        this.evaluator,
+        this.memory,
+        this.scheduler,
+        this.log
+      );
+
+      // 执行单 Loop（同步调用，对齐 run() 的同步签名）
+      // 使用 node.entryArtifact 作为 objective（节点入口文档作为本轮 Loop 目标）
+      const loopReport = nodeKernel.run(node.entryArtifact);
+
+      // 累计统计
+      totalIterations += loopReport.totalIterations;
+      totalTokensUsed += loopReport.tokenUsed;
+      // 注：LoopRunReport 不直接含 llmCallCount，使用 tokenUsed 近似（与 EagRunHandler 设计一致）
+
+      // 根据单 Loop 最终状态设置节点状态
+      let nodeStatus: "completed" | "failed" | "human-checkpoint";
+      let failureReason: string | undefined;
+
+      if (loopReport.finalStatus === "completed") {
+        nodeStatus = "completed";
+        this.info(`节点 ${node.nodeId} [${node.loopType}] 执行成功`);
+      } else if (loopReport.finalStatus === "failed") {
+        nodeStatus = "failed";
+        failureReason = `Loop 失败停止：${loopReport.finalSummary}`;
+        this.warn(`节点 ${node.nodeId} [${node.loopType}] 执行失败：${failureReason}`);
+        finalStatus = "failed";
+      } else {
+        // aborted → human-checkpoint（multi-loop 节点状态映射）
+        nodeStatus = "human-checkpoint";
+        failureReason = `Loop 被人类中止：${loopReport.finalSummary}`;
+        this.warn(`节点 ${node.nodeId} [${node.loopType}] 被中止：${failureReason}`);
+        finalStatus = "human-checkpoint";
+      }
+
+      // 记录节点结果
+      nodeResults.push(
+        Object.freeze({
+          nodeId: node.nodeId,
+          loopType: node.loopType,
+          status: nodeStatus,
+          loopReport,
+          failureReason,
+        }) as MultiLoopNodeResult
+      );
+      nodeStatusMap.set(node.nodeId, nodeStatus);
+
+      // 记录 loop-completed 事件（如果提供了 RunStateStore）
+      if (runStateStore) {
+        try {
+          await runStateStore.appendEvent(multiLoopPlan.planId, {
+            type: "loop-completed",
+            timestamp: new Date().toISOString(),
+            payload: {
+              loopType: node.loopType,
+              nodeId: node.nodeId,
+              finalStatus: nodeStatus,
+              totalIterations: loopReport.totalIterations,
+              tokenUsed: loopReport.tokenUsed,
+              durationSec: loopReport.durationSec,
+              failureReason: failureReason ?? null,
+            },
+          });
+        } catch (exc) {
+          this.warn(`记录 loop-completed 事件失败：${exc instanceof Error ? exc.message : String(exc)}`);
+        }
+      }
+
+      // 失败或中止时终止后续节点
+      if (nodeStatus !== "completed") {
+        this.info(`多 Loop 调度因节点 ${node.nodeId} 状态=${nodeStatus} 而提前终止`);
+        break;
+      }
+
+      // 自动流转判定：若 autoTransition=false，则在第一个节点完成后返回 human-checkpoint
+      // 等待用户确认后再次调用 scheduleMultiLoop（剩余节点）
+      // 注：首版实现简化为 autoTransition=true 模式（自动串联执行全部节点）；
+      // 若 autoTransition=false，调用方应在每节点完成后自行决定是否继续
+      if (!multiLoopPlan.autoTransition) {
+        // 非自动流转：剩余节点标记为 pending，返回 human-checkpoint
+        finalStatus = "human-checkpoint";
+        this.info(`autoTransition=false，节点 ${node.nodeId} 完成后暂停等待用户检查点`);
+        break;
+      }
+    }
+
+    const durationSec = (Date.now() - startTime) / 1000;
+    this.info(
+      `多 Loop 串联调度结束：planId=${multiLoopPlan.planId} finalStatus=${finalStatus} ` +
+        `节点数=${nodeResults.length} 总迭代=${totalIterations} 总 token=${totalTokensUsed} 耗时=${durationSec.toFixed(2)}s`
+    );
+
+    // 返回冻结的多 Loop 报告
+    return Object.freeze({
+      planId: multiLoopPlan.planId,
+      nodeResults: Object.freeze(nodeResults) as ReadonlyArray<MultiLoopNodeResult>,
+      finalStatus,
+      totalIterations,
+      totalLlmCallCount,
+      totalTokensUsed,
+      durationSec,
+    }) as MultiLoopRunReport;
   }
 
   /**

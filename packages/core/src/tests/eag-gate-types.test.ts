@@ -164,12 +164,12 @@ test("T6c. LOOP_TYPES 已冻结", () => {
 // T7. GateId 字面量联合完整性
 // ============================================================================
 
-test("T7a. GATE_IDS 包含 5 个门禁", () => {
-  assert.equal(GATE_IDS.length, 5);
+test("T7a. GATE_IDS 包含 7 个门禁（G-1~G-7）", () => {
+  assert.equal(GATE_IDS.length, 7);
 });
 
-test("T7b. GATE_IDS 顺序正确（G-1/G-2/G-3/G-4/G-5）", () => {
-  const expected: ReadonlyArray<GateId> = ["G-1", "G-2", "G-3", "G-4", "G-5"];
+test("T7b. GATE_IDS 顺序正确（G-1/G-2/G-3/G-4/G-5/G-6/G-7）", () => {
+  const expected: ReadonlyArray<GateId> = ["G-1", "G-2", "G-3", "G-4", "G-5", "G-6", "G-7"];
   assert.deepEqual([...GATE_IDS], [...expected]);
 });
 

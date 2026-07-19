@@ -3,10 +3,10 @@
  *
  * 测试范围：
  * - T1. GateOrchestrator 实例化
- *   - T1a. 默认检查器列表含 3 个检查器（G-1/G-2/G-3）
+ *   - T1a. 默认检查器列表含 5 个检查器（G-1/G-2/G-3/G-6/G-7，批次 10 新增 G-6/G-7）
  *   - T1b. 自定义检查器列表注入
  * - T2. design Loop → 跳过所有门禁
- * - T3. testing Loop → 跳过所有门禁
+ * - T3. testing Loop + 普通 GateContext → 向后兼容跳过 G-6/G-7（批次 10 新增）
  * - T4. coding Loop 全部通过 → allPassed=true
  * - T5. coding Loop G-1 失败 → 短路（不执行 G-2/G-3）
  * - T6. coding Loop G-2 失败 → 短路（不执行 G-3）
@@ -19,7 +19,7 @@
  *
  * 测试约定（遵循项目规则）：
  * - 使用 node:test + node:assert/strict
- * - 禁止 mock，使用真实检查器（GateG1Checker/GateG2Checker/GateG3Checker）
+ * - 禁止 mock，使用真实检查器（GateG1Checker/GateG2Checker/GateG3Checker/GateG6Checker/GateG7Checker）
  *
  * @module core/tests/eag-gate-orchestrator
  */
@@ -90,13 +90,15 @@ function createContext(overrides: Partial<GateContext> = {}): GateContext {
 // T1. GateOrchestrator 实例化
 // ============================================================================
 
-test("T1a. 默认检查器列表含 3 个检查器（G-1/G-2/G-3）", () => {
+test("T1a. 默认检查器列表含 5 个检查器（G-1/G-2/G-3/G-6/G-7）", () => {
   const orchestrator = new GateOrchestrator();
   const checkers = orchestrator.getCheckers();
-  assert.equal(checkers.length, 3);
+  assert.equal(checkers.length, 5);
   assert.equal(checkers[0].gateId, "G-1");
   assert.equal(checkers[1].gateId, "G-2");
   assert.equal(checkers[2].gateId, "G-3");
+  assert.equal(checkers[3].gateId, "G-6");
+  assert.equal(checkers[4].gateId, "G-7");
 });
 
 test("T1b. 自定义检查器列表注入", () => {
@@ -125,11 +127,13 @@ test("T2. design Loop → 跳过所有门禁（results 为空，allPassed=true�
 });
 
 // ============================================================================
-// T3. testing Loop → 跳过所有门禁
+// T3. testing Loop + 普通 GateContext → 向后兼容跳过 G-6/G-7
 // ============================================================================
 
-test("T3. testing Loop → 跳过所有门禁", () => {
+test("T3. testing Loop + 普通 GateContext → 向后兼容跳过 G-6/G-7（results 为空）", () => {
   const orchestrator = new GateOrchestrator();
+  // 传入普通 GateContext（非 GateG6Context/GateG7Context），run() 应跳过 G-6/G-7 校验
+  // 这是批次 10 的向后兼容策略：既有调用方传入 GateContext 不会因 G-6/G-7 而失败
   const ctx = createContext({
     loopType: "testing",
     specStatus: "draft",
@@ -244,7 +248,7 @@ test("T8. 非法 loopType → 抛 GateOrchestratorError", () => {
 // T9. 检查器协议违反（gateId 不合法）→ 抛 GateOrchestratorError
 // ============================================================================
 
-test("T9. 检查器协议违反（gateId 不在 G-1/G-2/G-3）→ 构造时抛 GateOrchestratorError", () => {
+test("T9. 检查器协议违反（gateId 不在 G-1~G-7）→ 构造时抛 GateOrchestratorError", () => {
   // 构造协议违反的检查器（gateId="G-99" 不合法）
   const invalidChecker: GateChecker = {
     gateId: "G-99" as GateId,

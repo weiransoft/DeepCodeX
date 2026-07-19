@@ -1,18 +1,25 @@
 /**
- * 方案先行门禁类型定义（EAG-P2 批次 8）
+ * 方案先行门禁类型定义（EAG-P2 批次 8 + 批次 9 + EAG-P3 批次 10）
  *
  * 本模块定义 EAG 方案 §5.12.1 方案先行门禁（Spec-First Gate）所需的全部结构化数据类型。
  * 门禁将"每次写代码前必先写方案、评审方案、按方案执行"从纪律变为系统门禁。
  *
- * 三道门禁：
- * - G-1：无已批准 spec/plan 禁入 CODING Loop
- * - G-2：方案必经多角色评审 + 用户批准
- * - G-3：方案偏离检测（任务卡声明变更 vs 实际变更）
+ * 七道门禁：
+ * - G-1：无已批准 spec/plan 禁入 CODING Loop（批次 8）
+ * - G-2：方案必经多角色评审 + 用户批准（批次 8）
+ * - G-3：方案偏离检测（任务卡声明变更 vs 实际变更）（批次 8）
+ * - G-4：CODING Loop 进入门禁（任务卡完整性 + 模板可用性 + 技术栈锁定）（批次 9）
+ * - G-5：CODING Loop 退出门禁（任务卡全 completed + STRICT 通过 + git clean + gitleaks）（批次 9）
+ * - G-6：TESTING Loop 进入门禁（G-5 通过 + 单测全过 + spec.md approved + implementationRoot 非空）（批次 10）
+ * - G-7：TESTING Loop 退出门禁（覆盖率达标 + 契约/E2E 测试全过 + 合规证据完整 + PR 描述就绪）（批次 10）
  *
  * 设计依据：
  * - EAG 方案 §5.12.1 方案先行门禁
  * - §5.10.1 文档即门禁（文档状态机作为 Loop 流转条件）
  * - §5.12.4 A-3 任务范围锁（G-3 偏离检测的 autonomous 强化）
+ * - §5.10.5 三 Loop 时序（design / coding / testing）
+ * - EAG-P2 批次 9 §4.8 G-4/G-5 CODING Loop 进入与退出门禁
+ * - EAG-P3 批次 10 §4.8 G-6/G-7 TESTING Loop 进入与退出门禁
  *
  * 不可变优先原则（对齐 §5.12.4 G-A6d 配置冻结）：
  * - 所有接口字段使用 readonly 修饰
@@ -30,6 +37,9 @@
 import type { DocumentState, TaskCard } from "../doc-driven/types";
 import type { EvaluationReport } from "../evaluator/types";
 import type { GeneratedFileKind } from "../coding/types";
+// 复用 testing/types.ts 中已定义的 CoverageReport 与 GeneratedTestFile，
+// 避免在 gate 模块内重复定义（DRY 原则 + 单一数据源）。
+import type { CoverageReport, GeneratedTestFile } from "../testing/types";
 
 /**
  * 文档状态类型（复用 doc-driven/types.ts 中的 DocumentState）
@@ -37,6 +47,10 @@ import type { GeneratedFileKind } from "../coding/types";
  * 状态值：draft / reviewing / approved / rejected
  */
 export type { DocumentState, TaskCard };
+
+// 复用 testing/types.ts 中的 CoverageReport 与 GeneratedTestFile 类型，
+// 重新导出供 gate 模块外部消费者从 gate/gate-types 统一导入。
+export type { CoverageReport, GeneratedTestFile };
 
 // ============================================================================
 // 2. 评审记录类型
@@ -184,21 +198,24 @@ export const LOOP_TYPES: ReadonlyArray<LoopType> = Object.freeze(["design", "cod
 // ============================================================================
 
 /**
- * 门禁 ID（字面量联合类型，对应五道门禁）
+ * 门禁 ID（字面量联合类型，对应七道门禁）
  *
  * - G-1：无已批准 spec/plan 禁入 CODING Loop
  * - G-2：方案必经多角色评审 + 用户批准
  * - G-3：方案偏离检测（任务卡声明变更 vs 实际变更）
  * - G-4：CODING Loop 进入门禁（任务卡完整性 + 模板可用性 + 技术栈锁定）
  * - G-5：CODING Loop 退出门禁（任务卡全 completed + STRICT 通过 + git clean + gitleaks）
+ * - G-6：TESTING Loop 进入门禁（G-5 通过 + 单测全过 + spec.md approved + implementationRoot 非空）
+ * - G-7：TESTING Loop 退出门禁（覆盖率达标 + 契约测试全过 + E2E 测试全过 + 合规证据完整 + PR 描述就绪）
  *
  * 字面量联合而非 string，避免拼写错误。
  *
  * 设计依据：
  * - G-1~G-3：EAG 方案 §5.12.1 方案先行门禁（批次 8 落地）
  * - G-4/G-5：EAG-P2 批次 9 §4.8 基于方案 §5.10.5 三 Loop 时序与 §5.12.2 里程碑检查点合理外推
+ * - G-6/G-7：EAG-P3 批次 10 §4.8 TESTING Loop 进入与退出门禁（同构外推 G-4/G-5 设计）
  */
-export type GateId = "G-1" | "G-2" | "G-3" | "G-4" | "G-5";
+export type GateId = "G-1" | "G-2" | "G-3" | "G-4" | "G-5" | "G-6" | "G-7";
 
 /**
  * GateId 全部合法值（用于运行时枚举、测试断言）
@@ -206,8 +223,10 @@ export type GateId = "G-1" | "G-2" | "G-3" | "G-4" | "G-5";
  * 使用 Object.freeze 冻结。顺序对应门禁执行顺序：
  * - coding Loop 进入：G-1 → G-2 → G-3 → G-4
  * - coding Loop 退出：G-5
+ * - testing Loop 进入：G-6
+ * - testing Loop 退出：G-7
  */
-export const GATE_IDS: ReadonlyArray<GateId> = Object.freeze(["G-1", "G-2", "G-3", "G-4", "G-5"]);
+export const GATE_IDS: ReadonlyArray<GateId> = Object.freeze(["G-1", "G-2", "G-3", "G-4", "G-5", "G-6", "G-7"]);
 
 /**
  * 门禁严重性（与 RedlineSeverity 对齐，使用小写）
@@ -469,4 +488,126 @@ export interface GateG5Context extends GateContext {
   readonly gitClean: boolean;
   /** gitleaks 扫描是否通过（无密钥泄露） */
   readonly gitleaksPassed: boolean;
+}
+
+// ============================================================================
+// 10. G-6/G-7 专属上下文类型（EAG-P3 批次 10 §4.8.4）
+// ============================================================================
+
+/**
+ * 测试执行结果（单次测试文件执行产出）
+ *
+ * 对应 EAG-P3 批次 10 设计 §4.8.4 TestExecutionResult：
+ * 描述单个测试文件（契约测试 / E2E 测试）执行后的结果信息，
+ * 供 G-7 门禁校验"全部测试通过"使用。
+ *
+ * 字段全部 readonly——执行结果一经采集即不可变。
+ *
+ * 范例：
+ *   {
+ *     filePath: "tests/contract/payment.callback.contract.test.ts",
+ *     exitCode: 0,
+ *     durationMs: 1200,
+ *     failedCount: 0,
+ *     passedCount: 5
+ *   }
+ */
+export interface TestExecutionResult {
+  /** 测试文件路径（相对 projectRoot，与 GeneratedTestFile.relativePath 对齐） */
+  readonly filePath: string;
+  /** 退出码（0=通过，非 0=失败，由 node --test 或 npm test 返回） */
+  readonly exitCode: number;
+  /** 执行耗时（毫秒，用于性能审计与超时分析） */
+  readonly durationMs: number;
+  /** 失败用例数（exitCode=0 时应为 0） */
+  readonly failedCount: number;
+  /** 通过用例数（exitCode=0 时 ≥1） */
+  readonly passedCount: number;
+}
+
+/**
+ * G-6 门禁上下文（继承 GateContext，扩展 TESTING Loop 进入门禁所需字段）
+ *
+ * 对应 EAG-P3 批次 10 设计 §4.8.4 GateG6Context：
+ * 在 G-1~G-5 通过基础上，G-6 校验 TESTING Loop 启动前的前置条件——
+ * CODING Loop 已退出（G-5 通过）+ 单测全过 + spec.md 已批准 + 实现根目录非空。
+ *
+ * 扩展字段语义：
+ * - g5Passed：G-5 门禁是否已通过（CODING Loop 退出门禁通过证据）
+ * - unitTestsPassed：单元测试是否全过（npm test 退出码 0 验证）
+ * - implementationRoot：CODING Loop 产出目录（G-6 校验非空字符串，用于 TESTING Loop 读取被测代码）
+ *
+ * 字段全部 readonly——上下文一经组装即不可变。
+ *
+ * 范例：
+ *   {
+ *     projectId: "order-system",
+ *     loopType: "testing",
+ *     specStatus: "approved",
+ *     planStatus: "approved",
+ *     reviewRecords: [...],
+ *     userApproved: true,
+ *     taskCard: { id: "T-001", ... },
+ *     actualChanges: [],
+ *     g5Passed: true,
+ *     unitTestsPassed: true,
+ *     implementationRoot: "src/"
+ *   }
+ */
+export interface GateG6Context extends GateContext {
+  /** G-5 门禁是否已通过（CODING Loop 退出证据） */
+  readonly g5Passed: boolean;
+  /** 单元测试是否全过（npm test 退出码 0） */
+  readonly unitTestsPassed: boolean;
+  /** CODING Loop 产出目录（相对 projectRoot，G-6 校验非空字符串） */
+  readonly implementationRoot: string;
+}
+
+/**
+ * G-7 门禁上下文（继承 GateContext，扩展 TESTING Loop 退出门禁所需字段）
+ *
+ * 对应 EAG-P3 批次 10 设计 §4.8.4 GateG7Context：
+ * G-7 校验 TESTING Loop 退出的 5 个前置条件——
+ * 覆盖率达标 + 契约测试全过 + E2E 测试全过 + 合规证据完整（如启用 ICP）+ PR 描述就绪。
+ *
+ * 扩展字段语义：
+ * - coverageReport：覆盖率报告（G-7 校验 passed=true，含行/分支/函数/高风险符号覆盖率）
+ * - contractTests：契约测试文件列表（G-7 校验非空）
+ * - contractTestResults：契约测试执行结果（G-7 校验全部 exitCode=0）
+ * - e2eTests：E2E 测试文件列表（G-7 校验非空）
+ * - e2eTestResults：E2E 测试执行结果（G-7 校验全部 exitCode=0）
+ * - complianceEvidence：合规证据报告（启用 ICP 时必填，对齐 §5.9.2）
+ * - prDescription：PR 描述（G-7 校验非空 + 含四段结构）
+ *
+ * PR 描述四段结构（对齐 §5.10.4 交付门禁）：
+ * 1. 变更摘要（## 变更摘要 / ## Change Summary）
+ * 2. 需求映射（## 需求映射 / ## Requirement Mapping）
+ * 3. 测试报告（## 测试报告 / ## Test Report）
+ * 4. 合规证据链接（## 合规证据 / ## Compliance Evidence）
+ *
+ * 字段全部 readonly——上下文一经组装即不可变。
+ */
+export interface GateG7Context extends GateContext {
+  /** 覆盖率报告（G-7 校验 passed=true） */
+  readonly coverageReport: Readonly<CoverageReport>;
+  /** 契约测试文件列表（G-7 校验非空 + 全部执行通过） */
+  readonly contractTests: ReadonlyArray<GeneratedTestFile>;
+  /** 契约测试执行结果（每文件 exitCode，G-7 校验全部 exitCode=0） */
+  readonly contractTestResults: ReadonlyArray<TestExecutionResult>;
+  /** E2E 测试文件列表（G-7 校验非空 + 全部执行通过） */
+  readonly e2eTests: ReadonlyArray<GeneratedTestFile>;
+  /** E2E 测试执行结果（每文件 exitCode，G-7 校验全部 exitCode=0） */
+  readonly e2eTestResults: ReadonlyArray<TestExecutionResult>;
+  /**
+   * 启用的 ICP 合规包 ID 列表（可选）
+   *
+   * 数据源：TestingLoopRequest.compliancePackIds 透传。
+   * G-7 判定规则：若非空 → complianceEvidence 必填。
+   * 对齐 testing-orchestrator.ts 中 GateG7Context 的同名字段（保证两套类型一致）。
+   */
+  readonly compliancePackIds?: ReadonlyArray<string>;
+  /** 合规证据报告（启用 ICP 时必填，对齐 §5.9.2） */
+  readonly complianceEvidence?: Readonly<Record<string, unknown>>;
+  /** PR 描述（G-7 校验非空 + 含变更摘要/需求映射/测试报告/合规证据链接四段） */
+  readonly prDescription: string;
 }

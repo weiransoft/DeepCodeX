@@ -68,6 +68,37 @@ import type {
 // 注：仅导入类型与类，未注入 codingOrchestrator 时零开销（向后兼容，§4.9.4）
 import type { CodingOrchestrator } from "./eag/coding";
 import type { CodingLoopRequest, CodingLoopResult, PkcAccessor } from "./eag/coding/types";
+// EAG-P3 批次 10 新增导入：TESTING Loop + 长程自动化 + DESIGN Loop 命令 Hook + RLIS 规则学习器
+// 注：仅导入类型与类，未注入对应 orchestrator 时零开销（向后兼容，§4.18.5）
+// 设计依据：EAG-P3 批次 10 设计文档 §4.9.3 / §4.18.3 / §4.18.4
+// - TestingOrchestrator：/eag-test 命令编排器（外挂注入，未注入时命令不可用）
+// - DesignLoopOrchestrator：/eag-design 命令编排器（外挂注入，未注入时命令不可用）
+// - RunStateStore：/eag-run /eag-resume /eag-status 共享依赖（外挂注入，未注入时三命令不可用）
+// - RuleLearner：候选规则检测 Hook 依赖（外挂注入，未注入时 Hook 跳过）
+// - EagRunHandler/EagResumeHandler/EagStatusHandler：长程自动化命令处理器
+//   注：在 handle 方法内部按需构造（依赖 MultiLoopPlanner/MilestoneTagger/BlockageAnalyzer）
+import type { TestingOrchestrator } from "./eag/testing";
+import type { TestingLoopRequest, TestingLoopResult } from "./eag/testing/types";
+import type { DesignLoopOrchestrator } from "./eag/design/design-orchestrator";
+import type { DesignLoopInput, DesignLoopResult } from "./eag/design/design-models";
+import type { RunStateStore } from "./eag/long-horizon/run-state-store";
+import type { RuleLearner } from "./eag/rlis/rule-learner";
+import type { RuleCandidate } from "./eag/rlis/types";
+import {
+  EagRunHandler,
+  EagResumeHandler,
+  EagStatusHandler,
+  MultiLoopPlanner,
+  MilestoneTagger,
+  BlockageAnalyzer,
+} from "./eag/long-horizon";
+import type {
+  EagRunRequest,
+  EagRunResult,
+  EagResumeRequest,
+  EagStatusRequest,
+  EagStatusResult,
+} from "./eag/long-horizon";
 
 export type { PermissionScope } from "./settings";
 export type {
@@ -450,6 +481,49 @@ type SessionManagerOptions = {
    * 与 codingOrchestrator 配套使用，单独注入无效。
    */
   pkcAccessor?: PkcAccessor;
+  /**
+   * EAG-P3 批次 10：TESTING Loop 编排器（可选注入，§4.18.3）
+   *
+   * 未注入时 `/eag-test` 命令不可用，主对话循环行为完全不变（向后兼容）。
+   * 注入后，在主对话循环检测到 `/eag-test` 命令时外挂调用 handleEagTestCommand，
+   * 路由到 TestingOrchestrator.run() 执行契约/E2E/覆盖率门禁完整闭环。
+   *
+   * 不可变优先（§5.12.4 G-A6d）：构造后字段不可变，循环内不可被 LLM 修改。
+   */
+  testingOrchestrator?: TestingOrchestrator;
+  /**
+   * EAG-P3 批次 10：DESIGN Loop 编排器（可选注入，§4.18.3）
+   *
+   * 未注入时 `/eag-design` 命令不可用，向后兼容。
+   * 注入后，在主对话循环检测到 `/eag-design` 命令时外挂调用 handleEagDesignCommand，
+   * 路由到 DesignLoopOrchestrator.run() 执行 PM→架构师→评估器完整闭环。
+   */
+  designOrchestrator?: DesignLoopOrchestrator;
+  /**
+   * EAG-P3 批次 10：RunState 持久化存储（可选注入，§4.18.3）
+   *
+   * 未注入时 `/eag-run` `/eag-resume` `/eag-status` 三命令不可用，向后兼容。
+   * 注入后，三个命令分别构造 EagRunHandler / EagResumeHandler / EagStatusHandler，
+   * 并共享此 RunStateStore 实例（保证 run→resume→status 状态一致）。
+   *
+   * 配套依赖（在 handle 方法内部按需构造，无需调用方注入）：
+   * - MultiLoopPlanner（无外部依赖，构造零成本）
+   * - MilestoneTagger（依赖 runStateStore，本字段注入后即可构造）
+   * - BlockageAnalyzer（依赖 runStateStore，本字段注入后即可构造）
+   */
+  runStateStore?: RunStateStore;
+  /**
+   * EAG-P3 批次 10：RLIS 规则学习器（可选注入，§4.18.3 / §4.18.4）
+   *
+   * 未注入时候选规则检测 Hook（detectRuleCandidateHook）跳过，向后兼容。
+   * 注入后，主对话循环每次用户输入后调用 detectRuleCandidateHook：
+   *   1. detectCorrection 检测纠正模式
+   *   2. extractCandidate 提取规则候选
+   *   3. accumulateCandidate 累积候选（同类纠正 occurrenceCount+1）
+   *   4. shouldPushConfirmation 判定是否推送确认请求（≥2 次才推送，§5.5.4 防误学红线）
+   *   5. 推送确认请求 → 用户回复 `/rule-confirm <id>` 后由调用方调用 confirmCandidate
+   */
+  ruleLearner?: RuleLearner;
 };
 
 export type LlmStreamProgress = {
@@ -493,6 +567,15 @@ export class SessionManager {
   // EAG-P2 批次 9 S5 外挂字段（可选注入，未注入时 /eag-build 命令不可用，§4.7 / §4.9）
   private readonly codingOrchestrator?: CodingOrchestrator;
   private readonly pkcAccessor?: PkcAccessor;
+  // EAG-P3 批次 10 外挂字段（可选注入，未注入时对应命令不可用，§4.18.3）
+  // - testingOrchestrator：未注入时 /eag-test 命令不可用
+  // - designOrchestrator：未注入时 /eag-design 命令不可用
+  // - runStateStore：未注入时 /eag-run /eag-resume /eag-status 三命令不可用
+  // - ruleLearner：未注入时候选规则检测 Hook 跳过（不影响主对话循环）
+  private readonly testingOrchestrator?: TestingOrchestrator;
+  private readonly designOrchestrator?: DesignLoopOrchestrator;
+  private readonly runStateStore?: RunStateStore;
+  private readonly ruleLearner?: RuleLearner;
 
   constructor(options: SessionManagerOptions) {
     this.projectRoot = options.projectRoot;
@@ -518,6 +601,11 @@ export class SessionManager {
     // EAG-P2 批次 9 S5 外挂字段赋值（可选注入，未注入时 /eag-build 命令不可用）
     this.codingOrchestrator = options.codingOrchestrator;
     this.pkcAccessor = options.pkcAccessor;
+    // EAG-P3 批次 10 外挂字段赋值（可选注入，未注入时对应命令不可用）
+    this.testingOrchestrator = options.testingOrchestrator;
+    this.designOrchestrator = options.designOrchestrator;
+    this.runStateStore = options.runStateStore;
+    this.ruleLearner = options.ruleLearner;
   }
 
   /**
@@ -1669,6 +1757,46 @@ ${agentInstructions}
       return;
     }
 
+    // EAG-P3 批次 10：新增 5 个命令分支（§4.18.3 增量外挂）
+    // 未注入对应 orchestrator 时各 handle 方法内部通知用户配置缺失（向后兼容）
+    // 判定规则与 isEagBuildPrompt 一致：text 严格匹配命令，无图片附件，无技能匹配
+    if (this.isEagDesignPrompt(userPrompt)) {
+      this.activeSessionId = sessionId;
+      await this.handleEagDesignCommand(sessionId, userPrompt, controller);
+      return;
+    }
+    if (this.isEagTestPrompt(userPrompt)) {
+      this.activeSessionId = sessionId;
+      await this.handleEagTestCommand(sessionId, userPrompt, controller);
+      return;
+    }
+    if (this.isEagRunPrompt(userPrompt)) {
+      this.activeSessionId = sessionId;
+      await this.handleEagRunCommand(sessionId, userPrompt, controller);
+      return;
+    }
+    if (this.isEagResumePrompt(userPrompt)) {
+      this.activeSessionId = sessionId;
+      await this.handleEagResumeCommand(sessionId, userPrompt, controller);
+      return;
+    }
+    if (this.isEagStatusPrompt(userPrompt)) {
+      this.activeSessionId = sessionId;
+      await this.handleEagStatusCommand(sessionId, userPrompt, controller);
+      return;
+    }
+
+    // EAG-P3 批次 10：候选规则检测 Hook（§4.18.4 detectRuleCandidateHook）
+    // 主对话循环每次用户输入后调用：
+    // 1. 调用 ruleLearner.detectCorrection 检测纠正模式
+    // 2. 命中纠正模式 → extractCandidate + accumulateCandidate 累积候选
+    // 3. shouldPushConfirmation 判定是否推送确认请求（≥2 次才推送，§5.5.4 防误学红线）
+    // 4. 推送确认请求 → 用户回复 `/rule-confirm <id>` 后由调用方调用 confirmCandidate
+    // 未注入 ruleLearner 时跳过（向后兼容，零开销）
+    if (typeof userPrompt.text === "string" && userPrompt.text.trim().length > 0) {
+      await this.detectRuleCandidateHook(userPrompt.text, sessionId);
+    }
+
     this.reportNewPrompt();
 
     this.ensureFileHistorySession(sessionId);
@@ -1726,6 +1854,97 @@ ${agentInstructions}
     return (
       typeof userPrompt.text === "string" &&
       userPrompt.text.trim() === "/eag-build" &&
+      (!userPrompt.imageUrls || userPrompt.imageUrls.length === 0) &&
+      (!userPrompt.skills || userPrompt.skills.length === 0)
+    );
+  }
+
+  /**
+   * EAG-P3 批次 10：判断用户输入是否为 `/eag-design` 命令（§4.18.3）
+   *
+   * 判定规则与 isEagBuildPrompt 一致：text 严格匹配 `/eag-design`，无图片附件，无技能匹配。
+   * 严格匹配（无参数）—— 设计文档 §4.18.3 约定设计请求参数通过 messageParams 注入，
+   * 避免命令行参数解析的歧义（如 `/eag-design --paradigm cqrs-es` 改为通过 messageParams 传入）。
+   *
+   * @param userPrompt 用户输入内容
+   * @returns 是否为 /eag-design 命令
+   */
+  private isEagDesignPrompt(userPrompt: UserPromptContent): boolean {
+    return (
+      typeof userPrompt.text === "string" &&
+      userPrompt.text.trim() === "/eag-design" &&
+      (!userPrompt.imageUrls || userPrompt.imageUrls.length === 0) &&
+      (!userPrompt.skills || userPrompt.skills.length === 0)
+    );
+  }
+
+  /**
+   * EAG-P3 批次 10：判断用户输入是否为 `/eag-test` 命令（§4.18.3）
+   *
+   * 判定规则与 isEagBuildPrompt 一致：text 严格匹配 `/eag-test`，无图片附件，无技能匹配。
+   * 严格匹配（无参数）—— 测试请求参数通过 messageParams 注入。
+   *
+   * @param userPrompt 用户输入内容
+   * @returns 是否为 /eag-test 命令
+   */
+  private isEagTestPrompt(userPrompt: UserPromptContent): boolean {
+    return (
+      typeof userPrompt.text === "string" &&
+      userPrompt.text.trim() === "/eag-test" &&
+      (!userPrompt.imageUrls || userPrompt.imageUrls.length === 0) &&
+      (!userPrompt.skills || userPrompt.skills.length === 0)
+    );
+  }
+
+  /**
+   * EAG-P3 批次 10：判断用户输入是否为 `/eag-run` 命令（§4.18.3）
+   *
+   * 判定规则与 isEagBuildPrompt 一致：text 严格匹配 `/eag-run`，无图片附件，无技能匹配。
+   * 严格匹配（无参数）—— 长程自动化请求参数通过 messageParams 注入。
+   *
+   * @param userPrompt 用户输入内容
+   * @returns 是否为 /eag-run 命令
+   */
+  private isEagRunPrompt(userPrompt: UserPromptContent): boolean {
+    return (
+      typeof userPrompt.text === "string" &&
+      userPrompt.text.trim() === "/eag-run" &&
+      (!userPrompt.imageUrls || userPrompt.imageUrls.length === 0) &&
+      (!userPrompt.skills || userPrompt.skills.length === 0)
+    );
+  }
+
+  /**
+   * EAG-P3 批次 10：判断用户输入是否为 `/eag-resume` 命令（§4.18.3）
+   *
+   * 判定规则与 isEagBuildPrompt 一致：text 严格匹配 `/eag-resume`，无图片附件，无技能匹配。
+   * 严格匹配（无参数）—— 恢复请求参数（含 runId）通过 messageParams 注入。
+   *
+   * @param userPrompt 用户输入内容
+   * @returns 是否为 /eag-resume 命令
+   */
+  private isEagResumePrompt(userPrompt: UserPromptContent): boolean {
+    return (
+      typeof userPrompt.text === "string" &&
+      userPrompt.text.trim() === "/eag-resume" &&
+      (!userPrompt.imageUrls || userPrompt.imageUrls.length === 0) &&
+      (!userPrompt.skills || userPrompt.skills.length === 0)
+    );
+  }
+
+  /**
+   * EAG-P3 批次 10：判断用户输入是否为 `/eag-status` 命令（§4.18.3）
+   *
+   * 判定规则与 isEagBuildPrompt 一致：text 严格匹配 `/eag-status`，无图片附件，无技能匹配。
+   * 严格匹配（无参数）—— 状态查询参数（含 runId 或 recentCount）通过 messageParams 注入。
+   *
+   * @param userPrompt 用户输入内容
+   * @returns 是否为 /eag-status 命令
+   */
+  private isEagStatusPrompt(userPrompt: UserPromptContent): boolean {
+    return (
+      typeof userPrompt.text === "string" &&
+      userPrompt.text.trim() === "/eag-status" &&
       (!userPrompt.imageUrls || userPrompt.imageUrls.length === 0) &&
       (!userPrompt.skills || userPrompt.skills.length === 0)
     );
@@ -1954,6 +2173,1000 @@ ${agentInstructions}
     }
 
     return lines.join("\n");
+  }
+
+  // ============================================================================
+  // EAG-P3 批次 10：/eag-design 命令处理（§4.18.3）
+  // ============================================================================
+
+  /**
+   * 处理 `/eag-design` 命令，触发 DESIGN Loop 编排（§4.18.3）
+   *
+   * 算法（对齐 §4.18.3 + 复用 handleEagBuildCommand 既有模式）：
+   * 1. 校验外挂依赖：designOrchestrator 必须注入
+   *    未注入 → 通知用户配置缺失，更新 session 状态为 failed（向后兼容）
+   * 2. 装配 DesignLoopInput：通过 userPrompt.messageParams.designLoopRequest 传入预装配对象
+   *    未提供 → 通知用户配置缺失
+   * 3. 调用 designOrchestrator.run(input) 执行 DESIGN Loop
+   *    异常路径：catch 后通知用户错误，更新 session 状态为 failed
+   * 4. 渲染结果：通过 onAssistantMessage 发送结果摘要（含 evaluationVerdict + iterations）
+   * 5. 更新 session 状态为 completed/failed（依据 evaluationVerdict.passed）
+   *
+   * 不可变优先（§5.12.4 G-A6d）：
+   * - input 字段使用 Readonly 包裹
+   * - result 通过 Object.freeze 由 DesignLoopOrchestrator 内部冻结
+   *
+   * @param sessionId 会话 ID
+   * @param userPrompt 用户输入（仅用于写入用户消息历史，不参与编排）
+   * @param controller 中断控制器（用于响应 abort 信号）
+   */
+  private async handleEagDesignCommand(
+    sessionId: string,
+    userPrompt: UserPromptContent,
+    controller?: AbortController
+  ): Promise<void> {
+    const signal = controller?.signal;
+    this.throwIfAborted(signal);
+
+    const now = new Date().toISOString();
+    // 记录用户输入到消息历史（保持会话上下文完整）
+    const userMessage = this.buildUserMessage(sessionId, userPrompt);
+    this.appendSessionMessage(sessionId, userMessage);
+
+    // 更新 session 状态为 processing
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: "processing",
+      failReason: null,
+      updateTime: now,
+    }));
+
+    // 步骤 1：校验外挂依赖
+    if (!this.designOrchestrator) {
+      const errMsg =
+        "DESIGN Loop 编排器未注入：请在 SessionManagerOptions.designOrchestrator 配置后重启（参考 §4.18.3）";
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: errMsg,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG DESIGN Loop] ${errMsg}`, null), false);
+      return;
+    }
+
+    // 步骤 2：装配 DesignLoopInput
+    const input = this.extractDesignLoopInput(userPrompt);
+    if (!input) {
+      const errMsg =
+        "DesignLoopInput 未提供：请通过 userPrompt.messageParams.designLoopInput 传入预装配的编排输入（参考 §4.18.3）";
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: errMsg,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG DESIGN Loop] ${errMsg}`, null), false);
+      return;
+    }
+
+    // 步骤 3：调用 designOrchestrator.run(input) 执行 DESIGN Loop
+    let result: DesignLoopResult;
+    try {
+      result = await this.designOrchestrator.run(input);
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: `DESIGN Loop 编排异常：${errMsg}`,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(
+        this.buildAssistantMessage(
+          sessionId,
+          `[EAG DESIGN Loop] 编排异常：${errMsg}\n请检查依赖组件（ProductManagerProtocol/ArchitectProtocol/DesignEvaluatorProtocol）配置是否正确。`,
+          null
+        ),
+        false
+      );
+      return;
+    }
+
+    // 步骤 4：渲染结果摘要
+    const summary = this.renderDesignLoopResult(result);
+    this.onAssistantMessage(this.buildAssistantMessage(sessionId, summary, null), false);
+
+    // 步骤 5：更新 session 状态（依据 evaluationVerdict.passed）
+    const isSuccess = result.evaluationVerdict.passed;
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: isSuccess ? "completed" : "failed",
+      failReason: isSuccess ? null : `DESIGN Loop 终止：${result.evaluationVerdict.reason}`,
+      updateTime: new Date().toISOString(),
+    }));
+  }
+
+  /**
+   * 从 userPrompt.messageParams 提取预装配的 DesignLoopInput（§4.18.3）
+   *
+   * 设计原则：session.ts 不直接解析原始需求文本，保持职责单一。
+   * 调用方通过 userPrompt.messageParams.designLoopInput 传入预装配的输入。
+   *
+   * @param userPrompt 用户输入（含 messageParams 元数据）
+   * @returns 预装配的 DesignLoopInput；未提供或字段不完整时返回 undefined
+   */
+  private extractDesignLoopInput(userPrompt: UserPromptContent): DesignLoopInput | undefined {
+    const params = userPrompt.messageParams as Record<string, unknown> | null | undefined;
+    if (!params || typeof params !== "object") {
+      return undefined;
+    }
+    const input = params.designLoopInput;
+    if (!input || typeof input !== "object") {
+      return undefined;
+    }
+    // 基本字段校验（避免类型断言误用）
+    const candidate = input as Partial<DesignLoopInput>;
+    if (typeof candidate.rawRequirement === "string" && candidate.rawRequirement.trim().length > 0) {
+      return candidate as DesignLoopInput;
+    }
+    return undefined;
+  }
+
+  /**
+   * 渲染 DesignLoopResult 为可读的摘要文本（§4.18.3）
+   *
+   * 渲染内容：
+   * - 评估器判定结果（passed/failed + reason + severity + findings）
+   * - 迭代次数（评估失败重试次数）
+   * - 是否触发人工检查点
+   * - 产出物摘要（架构文档 + 领域模型文档的元信息）
+   *
+   * @param result DESIGN Loop 编排产出
+   * @returns 可读的摘要文本
+   */
+  private renderDesignLoopResult(result: Readonly<DesignLoopResult>): string {
+    const lines: string[] = [];
+    lines.push("[EAG DESIGN Loop] 编排完成");
+    const verdictPassed = result.evaluationVerdict.passed ? "通过" : "未通过";
+    lines.push(`评估结果: ${verdictPassed}（severity=${result.evaluationVerdict.severity}）`);
+    lines.push(`迭代次数: ${result.iterations}`);
+    lines.push(`人工检查点已触发: ${result.humanCheckpointTriggered ? "是" : "否"}`);
+    lines.push(`判定理由: ${result.evaluationVerdict.reason}`);
+
+    // findings 列表（评估器发现的问题清单）
+    if (result.evaluationVerdict.findings.length > 0) {
+      lines.push("");
+      lines.push("评估器发现的问题:");
+      for (const finding of result.evaluationVerdict.findings) {
+        lines.push(`  - ${finding}`);
+      }
+    }
+
+    // 建议修复方案
+    if (result.evaluationVerdict.suggestedFix) {
+      lines.push("");
+      lines.push(`建议修复方案: ${result.evaluationVerdict.suggestedFix}`);
+    }
+
+    return lines.join("\n");
+  }
+
+  // ============================================================================
+  // EAG-P3 批次 10：/eag-test 命令处理（§4.18.3）
+  // ============================================================================
+
+  /**
+   * 处理 `/eag-test` 命令，触发 TESTING Loop 编排（§4.18.3）
+   *
+   * 算法（对齐 §4.18.3 + 复用 handleEagBuildCommand 既有模式）：
+   * 1. 校验外挂依赖：testingOrchestrator 必须注入
+   *    未注入 → 通知用户配置缺失，更新 session 状态为 failed（向后兼容）
+   * 2. 装配 TestingLoopRequest：通过 userPrompt.messageParams.testingLoopRequest 传入预装配对象
+   *    未提供 → 通知用户配置缺失
+   * 3. 调用 testingOrchestrator.run(request) 执行 TESTING Loop
+   *    异常路径：catch 后通知用户错误，更新 session 状态为 failed
+   * 4. 渲染结果：通过 onAssistantMessage 发送结果摘要（含 finalStatus + 测试文件清单 + 覆盖率报告）
+   * 5. 更新 session 状态为 completed/failed（依据 result.finalStatus === "success"）
+   *
+   * @param sessionId 会话 ID
+   * @param userPrompt 用户输入（仅用于写入用户消息历史，不参与编排）
+   * @param controller 中断控制器（用于响应 abort 信号）
+   */
+  private async handleEagTestCommand(
+    sessionId: string,
+    userPrompt: UserPromptContent,
+    controller?: AbortController
+  ): Promise<void> {
+    const signal = controller?.signal;
+    this.throwIfAborted(signal);
+
+    const now = new Date().toISOString();
+    const userMessage = this.buildUserMessage(sessionId, userPrompt);
+    this.appendSessionMessage(sessionId, userMessage);
+
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: "processing",
+      failReason: null,
+      updateTime: now,
+    }));
+
+    // 步骤 1：校验外挂依赖
+    if (!this.testingOrchestrator) {
+      const errMsg =
+        "TESTING Loop 编排器未注入：请在 SessionManagerOptions.testingOrchestrator 配置后重启（参考 §4.18.3）";
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: errMsg,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG TESTING Loop] ${errMsg}`, null), false);
+      return;
+    }
+
+    // 步骤 2：装配 TestingLoopRequest
+    const request = this.extractTestingLoopRequest(userPrompt);
+    if (!request) {
+      const errMsg =
+        "TestingLoopRequest 未提供：请通过 userPrompt.messageParams.testingLoopRequest 传入预装配的编排请求（参考 §4.18.3）";
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: errMsg,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG TESTING Loop] ${errMsg}`, null), false);
+      return;
+    }
+
+    // 步骤 3：调用 testingOrchestrator.run(request) 执行 TESTING Loop
+    let result: TestingLoopResult;
+    try {
+      result = await this.testingOrchestrator.run(request);
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: `TESTING Loop 编排异常：${errMsg}`,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(
+        this.buildAssistantMessage(
+          sessionId,
+          `[EAG TESTING Loop] 编排异常：${errMsg}\n请检查依赖组件（ContractTestGenerator/E2eTestGenerator/CoverageGate/BrownfieldContractGuard）配置是否正确。`,
+          null
+        ),
+        false
+      );
+      return;
+    }
+
+    // 步骤 4：渲染结果摘要
+    const summary = this.renderTestingLoopResult(result);
+    this.onAssistantMessage(this.buildAssistantMessage(sessionId, summary, null), false);
+
+    // 步骤 5：更新 session 状态（依据 result.finalStatus === "success"）
+    const isSuccess = result.finalStatus === "success";
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: isSuccess ? "completed" : "failed",
+      failReason: isSuccess ? null : `TESTING Loop 终止：${result.blockedReason ?? result.finalStatus}`,
+      updateTime: new Date().toISOString(),
+    }));
+  }
+
+  /**
+   * 从 userPrompt.messageParams 提取预装配的 TestingLoopRequest（§4.18.3）
+   *
+   * 设计原则：session.ts 不直接读取 spec.md/plan.md/tasks.md，保持职责单一。
+   * 调用方通过 userPrompt.messageParams.testingLoopRequest 传入预装配的请求。
+   *
+   * @param userPrompt 用户输入（含 messageParams 元数据）
+   * @returns 预装配的 TestingLoopRequest；未提供或字段不完整时返回 undefined
+   */
+  private extractTestingLoopRequest(userPrompt: UserPromptContent): TestingLoopRequest | undefined {
+    const params = userPrompt.messageParams as Record<string, unknown> | null | undefined;
+    if (!params || typeof params !== "object") {
+      return undefined;
+    }
+    const request = params.testingLoopRequest;
+    if (!request || typeof request !== "object") {
+      return undefined;
+    }
+    // 基本字段校验（避免类型断言误用）
+    const candidate = request as Partial<TestingLoopRequest>;
+    if (
+      typeof candidate.projectRoot === "string" &&
+      typeof candidate.specContent === "string" &&
+      typeof candidate.planContent === "string" &&
+      typeof candidate.tasksContent === "string" &&
+      typeof candidate.implementationRoot === "string" &&
+      candidate.taskDag &&
+      Array.isArray((candidate.taskDag as unknown as { nodes?: unknown[] }).nodes) &&
+      Array.isArray(candidate.acceptanceCriteria) &&
+      candidate.llmClient &&
+      candidate.pkcAccessor &&
+      candidate.loopGuard &&
+      candidate.coverageThreshold &&
+      typeof candidate.maxIterations === "number"
+    ) {
+      return candidate as TestingLoopRequest;
+    }
+    return undefined;
+  }
+
+  /**
+   * 渲染 TestingLoopResult 为可读的摘要文本（§4.18.3）
+   *
+   * 渲染内容：
+   * - 最终状态（success/human_checkpoint/stop_failure）
+   * - 测试文件统计（契约/E2E/集成/合规）
+   * - 覆盖率报告摘要（lines/branches/functions）
+   * - 总耗时与 token 消耗
+   * - 阻塞原因（若存在）
+   *
+   * @param result TESTING Loop 编排产出
+   * @returns 可读的摘要文本
+   */
+  private renderTestingLoopResult(result: Readonly<TestingLoopResult>): string {
+    const lines: string[] = [];
+    lines.push("[EAG TESTING Loop] 编排完成");
+    lines.push(`最终状态: ${result.finalStatus}`);
+    lines.push(
+      `测试文件数: 契约=${result.contractTests.length}, E2E=${result.e2eTests.length}, ` +
+        `集成=${result.integrationTests.length}, 合规=${result.complianceTests.length}`
+    );
+
+    // 覆盖率报告摘要
+    const cov = result.coverageReport;
+    lines.push(
+      `覆盖率: lines=${cov.lines}%, branches=${cov.branches}%, functions=${cov.functions}%, highRiskSymbols=${cov.highRiskSymbols}%`
+    );
+
+    // 总耗时与 token 消耗
+    lines.push(
+      `LLM 调用次数: ${result.totalLlmCallCount}，token 消耗: ${result.totalTokensUsed}，耗时: ${result.durationSec}s`
+    );
+
+    // 生成文件清单（仅展示前 10 个，避免输出过长）
+    const allFiles = [
+      ...result.contractTests,
+      ...result.e2eTests,
+      ...result.integrationTests,
+      ...result.complianceTests,
+    ];
+    if (allFiles.length > 0) {
+      lines.push("");
+      lines.push(`生成测试文件 (${allFiles.length} 个):`);
+      const fileLimit = Math.min(allFiles.length, 10);
+      for (let i = 0; i < fileLimit; i++) {
+        lines.push(`  - ${allFiles[i].relativePath}`);
+      }
+      if (allFiles.length > fileLimit) {
+        lines.push(`  ...（其余 ${allFiles.length - fileLimit} 个文件已省略）`);
+      }
+    }
+
+    // 阻塞原因
+    if (result.blockedReason) {
+      lines.push("");
+      lines.push(`终止原因: ${result.blockedReason}`);
+    }
+
+    return lines.join("\n");
+  }
+
+  // ============================================================================
+  // EAG-P3 批次 10：/eag-run 命令处理（§4.18.3）
+  // ============================================================================
+
+  /**
+   * 处理 `/eag-run` 命令，触发长程自动化多 Loop 串联编排（§4.18.3）
+   *
+   * 算法（对齐 §4.18.3 + 复用 handleEagBuildCommand 既有模式）：
+   * 1. 校验外挂依赖：runStateStore 必须注入
+   *    未注入 → 通知用户配置缺失，更新 session 状态为 failed（向后兼容）
+   * 2. 装配 EagRunRequest：通过 userPrompt.messageParams.eagRunRequest 传入预装配对象
+   *    未提供 → 通知用户配置缺失
+   * 3. 构造 EagRunHandler（内部 new MultiLoopPlanner / MilestoneTagger / BlockageAnalyzer，
+   *    共享注入的 runStateStore 实例）
+   * 4. 调用 handler.handle(request) 执行多 Loop 串联
+   *    异常路径：catch 后通知用户错误，更新 session 状态为 failed
+   * 5. 渲染结果：通过 onAssistantMessage 发送结果摘要（含 finalStatus + 里程碑 + 阻塞分析）
+   * 6. 更新 session 状态为 completed/failed（依据 result.finalStatus === "completed"）
+   *
+   * @param sessionId 会话 ID
+   * @param userPrompt 用户输入（仅用于写入用户消息历史，不参与编排）
+   * @param controller 中断控制器（用于响应 abort 信号）
+   */
+  private async handleEagRunCommand(
+    sessionId: string,
+    userPrompt: UserPromptContent,
+    controller?: AbortController
+  ): Promise<void> {
+    const signal = controller?.signal;
+    this.throwIfAborted(signal);
+
+    const now = new Date().toISOString();
+    const userMessage = this.buildUserMessage(sessionId, userPrompt);
+    this.appendSessionMessage(sessionId, userMessage);
+
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: "processing",
+      failReason: null,
+      updateTime: now,
+    }));
+
+    // 步骤 1：校验外挂依赖
+    if (!this.runStateStore) {
+      const errMsg = "RunStateStore 未注入：请在 SessionManagerOptions.runStateStore 配置后重启（参考 §4.18.3）";
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: errMsg,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG RUN] ${errMsg}`, null), false);
+      return;
+    }
+
+    // 步骤 2：装配 EagRunRequest
+    const request = this.extractEagRunRequest(userPrompt);
+    if (!request) {
+      const errMsg =
+        "EagRunRequest 未提供：请通过 userPrompt.messageParams.eagRunRequest 传入预装配的命令请求（参考 §4.18.3）";
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: errMsg,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG RUN] ${errMsg}`, null), false);
+      return;
+    }
+
+    // 步骤 3：构造 EagRunHandler
+    // 注：MultiLoopPlanner / MilestoneTagger / BlockageAnalyzer 在内部按需构造，
+    //     共享调用方注入的 runStateStore 实例（保证 run→resume→status 状态一致）
+    let handler: EagRunHandler;
+    try {
+      handler = new EagRunHandler({
+        multiLoopPlanner: new MultiLoopPlanner(),
+        runStateStore: this.runStateStore,
+        milestoneTagger: new MilestoneTagger(this.runStateStore),
+        blockageAnalyzer: new BlockageAnalyzer(this.runStateStore),
+      });
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: `EagRunHandler 构造失败：${errMsg}`,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(
+        this.buildAssistantMessage(sessionId, `[EAG RUN] 处理器构造失败：${errMsg}`, null),
+        false
+      );
+      return;
+    }
+
+    // 步骤 4：调用 handler.handle(request) 执行长程自动化
+    let result: EagRunResult;
+    try {
+      result = await handler.handle(request);
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: `EAG Run 编排异常：${errMsg}`,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(
+        this.buildAssistantMessage(
+          sessionId,
+          `[EAG RUN] 编排异常：${errMsg}\n请检查 LoopExecutor 配置与 MultiLoopPlanner 计划生成是否正确。`,
+          null
+        ),
+        false
+      );
+      return;
+    }
+
+    // 步骤 5：渲染结果摘要
+    const summary = this.renderEagRunResult(result);
+    this.onAssistantMessage(this.buildAssistantMessage(sessionId, summary, null), false);
+
+    // 步骤 6：更新 session 状态（依据 result.finalStatus === "completed"）
+    const isSuccess = result.finalStatus === "completed";
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: isSuccess ? "completed" : "failed",
+      failReason: isSuccess ? null : `EAG Run 终止：${result.blockageReport?.rootCauseHypotheses?.length ?? 0} 个根因`,
+      updateTime: new Date().toISOString(),
+    }));
+  }
+
+  /**
+   * 从 userPrompt.messageParams 提取预装配的 EagRunRequest（§4.18.3）
+   *
+   * 设计原则：session.ts 不直接组装 loopExecutors，保持职责单一。
+   * 调用方通过 userPrompt.messageParams.eagRunRequest 传入预装配的请求。
+   *
+   * @param userPrompt 用户输入（含 messageParams 元数据）
+   * @returns 预装配的 EagRunRequest；未提供或字段不完整时返回 undefined
+   */
+  private extractEagRunRequest(userPrompt: UserPromptContent): EagRunRequest | undefined {
+    const params = userPrompt.messageParams as Record<string, unknown> | null | undefined;
+    if (!params || typeof params !== "object") {
+      return undefined;
+    }
+    const request = params.eagRunRequest;
+    if (!request || typeof request !== "object") {
+      return undefined;
+    }
+    // 基本字段校验（避免类型断言误用）
+    const candidate = request as Partial<EagRunRequest>;
+    if (
+      typeof candidate.projectRoot === "string" &&
+      typeof candidate.userIntent === "string" &&
+      Array.isArray(candidate.loopExecutors) &&
+      candidate.loopExecutors.length > 0
+    ) {
+      return candidate as EagRunRequest;
+    }
+    return undefined;
+  }
+
+  /**
+   * 渲染 EagRunResult 为可读的摘要文本（§4.18.3）
+   *
+   * 渲染内容：
+   * - runId（运行 ID，用于 /eag-resume /eag-status 后续查询）
+   * - 最终状态（completed/failed/human-checkpoint/paused）
+   * - 完成的 Loop 列表
+   * - 里程碑数量
+   * - 总 LLM 调用次数 / token 消耗 / 耗时
+   * - 阻塞报告摘要（若存在）
+   *
+   * @param result EAG Run 编排产出
+   * @returns 可读的摘要文本
+   */
+  private renderEagRunResult(result: Readonly<EagRunResult>): string {
+    const lines: string[] = [];
+    lines.push("[EAG RUN] 长程自动化完成");
+    lines.push(`runId: ${result.runId}`);
+    lines.push(`最终状态: ${result.finalStatus}`);
+    lines.push(`完成的 Loop: ${result.completedLoops.length > 0 ? result.completedLoops.join(", ") : "（无）"}`);
+    lines.push(`里程碑数: ${result.milestones.length}`);
+    lines.push(
+      `LLM 调用次数: ${result.totalLlmCallCount}，token 消耗: ${result.totalTokensUsed}，耗时: ${result.durationSec}s`
+    );
+
+    // 里程碑列表（仅展示前 5 个，避免输出过长）
+    if (result.milestones.length > 0) {
+      lines.push("");
+      lines.push("里程碑列表:");
+      const milestoneLimit = Math.min(result.milestones.length, 5);
+      for (let i = 0; i < milestoneLimit; i++) {
+        const m = result.milestones[i];
+        lines.push(`  - ${m.tagName ?? m.name ?? `milestone-${i + 1}`}`);
+      }
+      if (result.milestones.length > milestoneLimit) {
+        lines.push(`  ...（其余 ${result.milestones.length - milestoneLimit} 个里程碑已省略）`);
+      }
+    }
+
+    // 阻塞报告摘要
+    if (result.blockageReport) {
+      lines.push("");
+      lines.push("阻塞分析:");
+      const rootCauseCount = result.blockageReport.rootCauseHypotheses?.length ?? 0;
+      lines.push(`  根因假设数: ${rootCauseCount}`);
+      if (result.blockageReport.requiredDecisions?.length) {
+        lines.push(`  待决策数: ${result.blockageReport.requiredDecisions.length}`);
+      }
+    }
+
+    return lines.join("\n");
+  }
+
+  // ============================================================================
+  // EAG-P3 批次 10：/eag-resume 命令处理（§4.18.3）
+  // ============================================================================
+
+  /**
+   * 处理 `/eag-resume` 命令，从断点恢复长程自动化（§4.18.3）
+   *
+   * 算法（对齐 §4.18.3 + 复用 handleEagRunCommand 既有模式）：
+   * 1. 校验外挂依赖：runStateStore 必须注入
+   *    未注入 → 通知用户配置缺失，更新 session 状态为 failed（向后兼容）
+   * 2. 装配 EagResumeRequest：通过 userPrompt.messageParams.eagResumeRequest 传入预装配对象
+   *    未提供 → 通知用户配置缺失
+   * 3. 构造 EagResumeHandler（内部 new MultiLoopPlanner / MilestoneTagger / BlockageAnalyzer）
+   * 4. 调用 handler.handle(request) 从断点恢复执行
+   *    异常路径：catch 后通知用户错误，更新 session 状态为 failed
+   * 5. 渲染结果：复用 renderEagRunResult（产出类型与 EagRunResult 一致）
+   * 6. 更新 session 状态为 completed/failed
+   *
+   * @param sessionId 会话 ID
+   * @param userPrompt 用户输入（仅用于写入用户消息历史，不参与编排）
+   * @param controller 中断控制器（用于响应 abort 信号）
+   */
+  private async handleEagResumeCommand(
+    sessionId: string,
+    userPrompt: UserPromptContent,
+    controller?: AbortController
+  ): Promise<void> {
+    const signal = controller?.signal;
+    this.throwIfAborted(signal);
+
+    const now = new Date().toISOString();
+    const userMessage = this.buildUserMessage(sessionId, userPrompt);
+    this.appendSessionMessage(sessionId, userMessage);
+
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: "processing",
+      failReason: null,
+      updateTime: now,
+    }));
+
+    // 步骤 1：校验外挂依赖
+    if (!this.runStateStore) {
+      const errMsg = "RunStateStore 未注入：请在 SessionManagerOptions.runStateStore 配置后重启（参考 §4.18.3）";
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: errMsg,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG RESUME] ${errMsg}`, null), false);
+      return;
+    }
+
+    // 步骤 2：装配 EagResumeRequest
+    const request = this.extractEagResumeRequest(userPrompt);
+    if (!request) {
+      const errMsg =
+        "EagResumeRequest 未提供：请通过 userPrompt.messageParams.eagResumeRequest 传入预装配的恢复请求（参考 §4.18.3）";
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: errMsg,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG RESUME] ${errMsg}`, null), false);
+      return;
+    }
+
+    // 步骤 3：构造 EagResumeHandler
+    let handler: EagResumeHandler;
+    try {
+      handler = new EagResumeHandler({
+        multiLoopPlanner: new MultiLoopPlanner(),
+        runStateStore: this.runStateStore,
+        milestoneTagger: new MilestoneTagger(this.runStateStore),
+        blockageAnalyzer: new BlockageAnalyzer(this.runStateStore),
+      });
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: `EagResumeHandler 构造失败：${errMsg}`,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(
+        this.buildAssistantMessage(sessionId, `[EAG RESUME] 处理器构造失败：${errMsg}`, null),
+        false
+      );
+      return;
+    }
+
+    // 步骤 4：调用 handler.handle(request) 从断点恢复
+    let result: EagRunResult;
+    try {
+      result = await handler.handle(request);
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: `EAG Resume 编排异常：${errMsg}`,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(
+        this.buildAssistantMessage(
+          sessionId,
+          `[EAG RESUME] 编排异常：${errMsg}\n请检查 runId 是否存在、git HEAD 是否一致、LoopExecutor 配置是否正确。`,
+          null
+        ),
+        false
+      );
+      return;
+    }
+
+    // 步骤 5：渲染结果摘要（复用 renderEagRunResult）
+    const summary = this.renderEagRunResult(result);
+    this.onAssistantMessage(this.buildAssistantMessage(sessionId, summary, null), false);
+
+    // 步骤 6：更新 session 状态
+    const isSuccess = result.finalStatus === "completed";
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: isSuccess ? "completed" : "failed",
+      failReason: isSuccess ? null : `EAG Resume 终止：${result.finalStatus}`,
+      updateTime: new Date().toISOString(),
+    }));
+  }
+
+  /**
+   * 从 userPrompt.messageParams 提取预装配的 EagResumeRequest（§4.18.3）
+   *
+   * @param userPrompt 用户输入（含 messageParams 元数据）
+   * @returns 预装配的 EagResumeRequest；未提供或字段不完整时返回 undefined
+   */
+  private extractEagResumeRequest(userPrompt: UserPromptContent): EagResumeRequest | undefined {
+    const params = userPrompt.messageParams as Record<string, unknown> | null | undefined;
+    if (!params || typeof params !== "object") {
+      return undefined;
+    }
+    const request = params.eagResumeRequest;
+    if (!request || typeof request !== "object") {
+      return undefined;
+    }
+    // 基本字段校验
+    const candidate = request as Partial<EagResumeRequest>;
+    if (
+      typeof candidate.runId === "string" &&
+      candidate.runId.trim().length > 0 &&
+      typeof candidate.projectRoot === "string" &&
+      typeof candidate.userIntent === "string" &&
+      Array.isArray(candidate.loopExecutors) &&
+      candidate.loopExecutors.length > 0
+    ) {
+      return candidate as EagResumeRequest;
+    }
+    return undefined;
+  }
+
+  // ============================================================================
+  // EAG-P3 批次 10：/eag-status 命令处理（§4.18.3）
+  // ============================================================================
+
+  /**
+   * 处理 `/eag-status` 命令，输出长程进度报告（§4.18.3）
+   *
+   * 算法（对齐 §4.18.3）：
+   * 1. 校验外挂依赖：runStateStore 必须注入
+   *    未注入 → 通知用户配置缺失，更新 session 状态为 failed（向后兼容）
+   * 2. 装配 EagStatusRequest：通过 userPrompt.messageParams.eagStatusRequest 传入预装配对象
+   *    未提供 → 通知用户配置缺失
+   * 3. 构造 EagStatusHandler（仅依赖 runStateStore）
+   * 4. 调用 handler.handle(request) 生成 Markdown 报告
+   *    异常路径：catch 后通知用户错误，更新 session 状态为 failed
+   * 5. 渲染结果：通过 onAssistantMessage 发送报告
+   * 6. 更新 session 状态为 completed（status 是查询命令，不会修改 run 状态）
+   *
+   * @param sessionId 会话 ID
+   * @param userPrompt 用户输入（仅用于写入用户消息历史，不参与编排）
+   * @param controller 中断控制器（用于响应 abort 信号）
+   */
+  private async handleEagStatusCommand(
+    sessionId: string,
+    userPrompt: UserPromptContent,
+    controller?: AbortController
+  ): Promise<void> {
+    const signal = controller?.signal;
+    this.throwIfAborted(signal);
+
+    const now = new Date().toISOString();
+    const userMessage = this.buildUserMessage(sessionId, userPrompt);
+    this.appendSessionMessage(sessionId, userMessage);
+
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: "processing",
+      failReason: null,
+      updateTime: now,
+    }));
+
+    // 步骤 1：校验外挂依赖
+    if (!this.runStateStore) {
+      const errMsg = "RunStateStore 未注入：请在 SessionManagerOptions.runStateStore 配置后重启（参考 §4.18.3）";
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: errMsg,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG STATUS] ${errMsg}`, null), false);
+      return;
+    }
+
+    // 步骤 2：装配 EagStatusRequest
+    const request = this.extractEagStatusRequest(userPrompt);
+    if (!request) {
+      const errMsg =
+        "EagStatusRequest 未提供：请通过 userPrompt.messageParams.eagStatusRequest 传入预装配的查询请求（参考 §4.18.3）";
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: errMsg,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG STATUS] ${errMsg}`, null), false);
+      return;
+    }
+
+    // 步骤 3 & 4：构造 EagStatusHandler 并执行查询
+    let result: EagStatusResult;
+    try {
+      const handler = new EagStatusHandler({ runStateStore: this.runStateStore });
+      result = await handler.handle(request);
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: `EAG Status 查询异常：${errMsg}`,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(
+        this.buildAssistantMessage(
+          sessionId,
+          `[EAG STATUS] 查询异常：${errMsg}\n请检查 runId 是否存在、projectRoot 是否正确。`,
+          null
+        ),
+        false
+      );
+      return;
+    }
+
+    // 步骤 5：渲染结果摘要
+    const summary = this.renderEagStatusResult(result);
+    this.onAssistantMessage(this.buildAssistantMessage(sessionId, summary, null), false);
+
+    // 步骤 6：更新 session 状态为 completed（查询命令不修改 run 状态）
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: "completed",
+      failReason: null,
+      updateTime: new Date().toISOString(),
+    }));
+  }
+
+  /**
+   * 从 userPrompt.messageParams 提取预装配的 EagStatusRequest（§4.18.3）
+   *
+   * @param userPrompt 用户输入（含 messageParams 元数据）
+   * @returns 预装配的 EagStatusRequest；未提供或字段不完整时返回 undefined
+   */
+  private extractEagStatusRequest(userPrompt: UserPromptContent): EagStatusRequest | undefined {
+    const params = userPrompt.messageParams as Record<string, unknown> | null | undefined;
+    if (!params || typeof params !== "object") {
+      return undefined;
+    }
+    const request = params.eagStatusRequest;
+    if (!request || typeof request !== "object") {
+      return undefined;
+    }
+    // 基本字段校验（projectRoot 必填，runId 与 recentCount 二选一）
+    const candidate = request as Partial<EagStatusRequest>;
+    if (typeof candidate.projectRoot === "string" && candidate.projectRoot.trim().length > 0) {
+      return candidate as EagStatusRequest;
+    }
+    return undefined;
+  }
+
+  /**
+   * 渲染 EagStatusResult 为可读的摘要文本（§4.18.3）
+   *
+   * 渲染内容：
+   * - 标题
+   * - 单 run 详情（runId 提供时）：状态 + 当前 Loop + 里程碑数 + 阻塞数
+   * - 最近 run 列表（runId 未提供时）：runId + status + 进度
+   * - 完整 Markdown 报告
+   *
+   * @param result EAG Status 查询产出
+   * @returns 可读的摘要文本
+   */
+  private renderEagStatusResult(result: Readonly<EagStatusResult>): string {
+    const lines: string[] = [];
+    lines.push("[EAG STATUS] 长程进度报告");
+
+    // 单 run 详情
+    if (result.runState) {
+      const rs = result.runState;
+      lines.push(`runId: ${rs.runId}`);
+      lines.push(`状态: ${rs.status}`);
+      lines.push(`当前 Loop: ${rs.currentLoop}`);
+      lines.push(`里程碑数: ${rs.milestones?.length ?? 0}`);
+      lines.push(`人工介入记录数: ${rs.humanInterventions?.length ?? 0}`);
+    }
+
+    // 最近 run 列表
+    if (result.recentRuns && result.recentRuns.length > 0) {
+      lines.push("");
+      lines.push(`最近 ${result.recentRuns.length} 次 run:`);
+      for (const summary of result.recentRuns) {
+        lines.push(`  - ${summary.runId}: ${summary.status}`);
+      }
+    }
+
+    // 完整 Markdown 报告（截断到 2000 字符避免输出过长）
+    if (result.report) {
+      lines.push("");
+      lines.push("完整报告:");
+      const reportLimit = 2000;
+      if (result.report.length > reportLimit) {
+        lines.push(result.report.slice(0, reportLimit));
+        lines.push(`...（其余 ${result.report.length - reportLimit} 字符已省略）`);
+      } else {
+        lines.push(result.report);
+      }
+    }
+
+    return lines.join("\n");
+  }
+
+  // ============================================================================
+  // EAG-P3 批次 10：候选规则检测 Hook（§4.18.4 detectRuleCandidateHook）
+  // ============================================================================
+
+  /**
+   * 候选规则检测 Hook（§4.18.4 detectRuleCandidateHook，落地 L-4）
+   *
+   * 主对话循环每次用户输入后调用：
+   * 1. 调用 ruleLearner.detectCorrection(userMessage) 检测纠正模式
+   *    （"不要..." / "严禁..." / "必须..." / "以后都..." / "禁止..."）
+   * 2. 命中纠正模式 → extractCandidate 提取规则候选（推断 category / severity）
+   * 3. accumulateCandidate 累积候选（同类纠正 occurrenceCount+1，§5.5.4 防误学红线）
+   * 4. shouldPushConfirmation 判定是否推送确认请求（≥2 次才推送）
+   * 5. 推送确认请求 → 通过 onAssistantMessage 提示用户回复 `/rule-confirm <id>` 确认
+   *
+   * 未注入 ruleLearner 时直接返回（向后兼容，零开销）。
+   * 异常路径：内部 try/catch，不影响主对话循环，仅通过 onAssistantMessage 通知异常。
+   *
+   * @param userMessage 用户输入文本
+   * @param sessionId 会话 ID（用于构造 assistant 消息）
+   */
+  private async detectRuleCandidateHook(userMessage: string, sessionId: string): Promise<void> {
+    // 未注入 ruleLearner 时跳过（向后兼容，零开销）
+    if (!this.ruleLearner) {
+      return;
+    }
+    try {
+      // 步骤 1：检测纠正模式（非纠正模式直接返回，不触发候选规则检测）
+      const detection = this.ruleLearner.detectCorrection(userMessage);
+      if (!detection) {
+        return;
+      }
+      // 步骤 2：提取规则候选（基于纠正内容推断 category / severity）
+      const candidate: RuleCandidate = this.ruleLearner.extractCandidate(userMessage, detection.pattern);
+      // 步骤 3：累积候选（同类纠正 occurrenceCount+1）
+      const accumulated: RuleCandidate = this.ruleLearner.accumulateCandidate(candidate);
+      // 步骤 4：判定是否推送确认请求（≥2 次才推送，§5.5.4 防误学红线）
+      if (!this.ruleLearner.shouldPushConfirmation(accumulated)) {
+        return;
+      }
+      // 步骤 5：推送确认请求
+      const prompt =
+        `检测到可能的候选规则：${accumulated.id} - ${accumulated.content}\n` +
+        `分类: ${accumulated.category}，级别: ${accumulated.severity}\n` +
+        `请回复 "/rule-confirm ${accumulated.id}" 确认或忽略。`;
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, prompt, null), false);
+    } catch (e) {
+      // 候选规则检测失败不影响主对话循环，仅记录日志
+      const errMsg = e instanceof Error ? e.message : String(e);
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[RLIS] 候选规则检测异常：${errMsg}`, null), false);
+    }
   }
 
   async activateSession(

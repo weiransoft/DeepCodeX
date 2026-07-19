@@ -1,0 +1,1262 @@
+/**
+ * EAG-P3 批次 10 单元测试：SessionManager 命令 Hook 集成（5 个命令 + 候选规则检测 Hook）
+ *
+ * 测试范围（对齐 EAG-P3 批次 10 设计 §4.18.3 / §4.18.4）：
+ * - G. /eag-design 命令：isEagDesignPrompt 判定 + handleEagDesignCommand 依赖校验 + extractDesignLoopInput + renderDesignLoopResult
+ * - H. /eag-test 命令：isEagTestPrompt 判定 + handleEagTestCommand 依赖校验 + extractTestingLoopRequest + renderTestingLoopResult
+ * - I. /eag-run 命令：isEagRunPrompt 判定 + handleEagRunCommand 依赖校验 + extractEagRunRequest + renderEagRunResult
+ * - J. /eag-resume 命令：isEagResumePrompt 判定 + handleEagResumeCommand 依赖校验 + extractEagResumeRequest
+ * - K. /eag-status 命令：isEagStatusPrompt 判定 + handleEagStatusCommand 依赖校验 + extractEagStatusRequest + renderEagStatusResult
+ * - L. 候选规则检测 Hook（detectRuleCandidateHook，落地 L-4）：未注入跳过 / 非纠正模式 / 防误学红线（≥2 次才推送）
+ * - M. SessionManagerOptions 新增字段（testingOrchestrator / designOrchestrator / runStateStore / ruleLearner）正确传递与向后兼容
+ *
+ * 测试约定（严格遵循项目"禁止 mock"规则）：
+ * - 使用 node:test + node:assert/strict
+ * - 真实组件：
+ *   1. RuleLearner（eag/rlis/rule-learner.ts）—— 真实类，无外部依赖，直接 new
+ *   2. RunStateStore（eag/long-horizon/run-state-store.ts）—— 真实类，构造零成本
+ *   3. 测试用 orchestrator 占位对象 —— 仅用于"已注入但未提供 request"路径的字段校验
+ *      （此路径不调用 orchestrator.run()，与既有 eag-session-hook.test.ts F19 模式一致）
+ * - 所有结果 fixture 使用 Object.freeze 冻结（对齐不可变优先 §5.12.4 G-A6d）
+ * - 通过 `manager as any` 访问私有方法（与既有测试模式一致，非 mock 框架）
+ * - 中文注释
+ *
+ * 设计依据：
+ * - EAG-P3 批次 10 设计文档 §4.18.3 命令 Hook 集成
+ * - EAG-P3 批次 10 设计文档 §4.18.4 候选规则检测 Hook（detectRuleCandidateHook，落地 L-4）
+ * - EAG 方案 §5.5.4 防误学红线（learned 来源规则未经用户确认绝不生效，≥2 次才推送确认请求）
+ * - EAG 方案 §5.12.4 G-A6d 配置冻结原则（不可变优先）
+ * - session.ts isEagXPrompt / handleEagXCommand / extractXxx / renderXxx / detectRuleCandidateHook
+ *
+ * @module tests/eag-session-commands-hook
+ */
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { SessionManager } from "../session";
+import { RuleLearner } from "../eag/rlis/rule-learner";
+import { RunStateStore } from "../eag/long-horizon/run-state-store";
+import type { DesignLoopInput, DesignLoopResult } from "../eag/design/design-models";
+import type { TestingLoopRequest, TestingLoopResult } from "../eag/testing/types";
+import type {
+  EagRunRequest,
+  EagRunResult,
+  EagResumeRequest,
+  EagStatusRequest,
+  EagStatusResult,
+} from "../eag/long-horizon";
+
+// ============================================================================
+// 测试辅助：构造最小请求 fixture（真实结构，非 mock）
+// ============================================================================
+
+/**
+ * 构造测试用最小 DesignLoopInput 占位对象
+ *
+ * 用于 extractDesignLoopInput 的字段校验逻辑测试。
+ * 注：此对象仅用于校验通过，不可真正传给 DesignLoopOrchestrator.run()。
+ */
+function createMinimalDesignLoopInput(): DesignLoopInput {
+  return Object.freeze({
+    rawRequirement: "作为一个用户，我希望创建订单，以便管理订单生命周期",
+  });
+}
+
+/**
+ * 构造测试用最小 TestingLoopRequest 占位对象
+ *
+ * 用于 extractTestingLoopRequest 的字段校验逻辑测试。
+ * 注：此对象仅用于校验通过，不可真正传给 TestingOrchestrator.run()。
+ */
+function createMinimalTestingLoopRequest(): TestingLoopRequest {
+  return Object.freeze({
+    projectRoot: "/test/project",
+    specContent: "# spec\n订单管理模块需求规格",
+    planContent: "# plan\n订单管理模块实施计划",
+    tasksContent: "# tasks\nT-001: OrderAggregate 实现",
+    implementationRoot: "src/",
+    taskDag: Object.freeze({ nodes: Object.freeze([]), topologicalOrder: Object.freeze([]) }) as any,
+    acceptanceCriteria: Object.freeze([]) as any,
+    llmClient: { createMessage: () => ({}), providerName: "test" } as any,
+    pkcAccessor: {
+      queryBusinessFlows: () => Promise.resolve([]),
+      queryRiskHotspots: () => Promise.resolve([]),
+      queryL1GlobalView: () => Promise.resolve({}),
+    } as any,
+    loopGuard: {
+      check: () => ({ allowed: true }),
+      recordIteration: () => {},
+      getConfig: () => ({
+        maxIterations: 10,
+        maxTokens: 100000,
+        maxConsecutiveFailures: 3,
+        initialBackoffMs: 1000,
+        maxBackoffMs: 30000,
+        backoffMultiplier: 2,
+        jitterRatio: 0.1,
+      }),
+      getState: () => ({
+        iterationsCompleted: 0,
+        tokensConsumed: 0,
+        consecutiveFailures: 0,
+        totalFailures: 0,
+        backoffLevel: 0,
+      }),
+    } as any,
+    coverageThreshold: Object.freeze({ lines: 80, branches: 70, functions: 85, highRiskSymbols: 100 }) as any,
+    maxIterations: 10,
+  }) as TestingLoopRequest;
+}
+
+/**
+ * 构造测试用最小 EagRunRequest 占位对象
+ *
+ * 用于 extractEagRunRequest 的字段校验逻辑测试。
+ * 注：此对象仅用于校验通过，不可真正传给 EagRunHandler.handle()。
+ */
+function createMinimalEagRunRequest(): EagRunRequest {
+  return Object.freeze({
+    projectRoot: "/test/project",
+    userIntent: "我需要一个订单管理微服务",
+    loopExecutors: Object.freeze([
+      Object.freeze({ loopType: "design", execute: () => Promise.resolve({}) }),
+      Object.freeze({ loopType: "coding", execute: () => Promise.resolve({}) }),
+    ]) as any,
+  }) as EagRunRequest;
+}
+
+/**
+ * 构造测试用最小 EagResumeRequest 占位对象
+ *
+ * 用于 extractEagResumeRequest 的字段校验逻辑测试。
+ */
+function createMinimalEagResumeRequest(): EagResumeRequest {
+  return Object.freeze({
+    runId: "abc123def456",
+    projectRoot: "/test/project",
+    userIntent: "我需要一个订单管理微服务",
+    loopExecutors: Object.freeze([Object.freeze({ loopType: "design", execute: () => Promise.resolve({}) })]) as any,
+  }) as EagResumeRequest;
+}
+
+/**
+ * 构造测试用最小 EagStatusRequest 占位对象
+ *
+ * 用于 extractEagStatusRequest 的字段校验逻辑测试。
+ */
+function createMinimalEagStatusRequest(): EagStatusRequest {
+  return Object.freeze({
+    projectRoot: "/test/project",
+    runId: "abc123def456",
+  }) as EagStatusRequest;
+}
+
+/**
+ * 构造 SessionManager 测试实例（最小依赖，仅注入 onAssistantMessage 回调）
+ *
+ * @param onMessage 消息回调（接收 assistant 消息内容）
+ * @param extraOptions 额外 SessionManagerOptions（用于注入 EAG 外挂依赖）
+ */
+function createTestManager(
+  onMessage: (content: string) => void,
+  extraOptions: Record<string, unknown> = {}
+): SessionManager {
+  return new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({ client: null, model: "test-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: (message: any) => onMessage(message.content),
+    ...extraOptions,
+  } as any);
+}
+
+// ============================================================================
+// G. /eag-design 命令测试（§4.18.3）
+// ============================================================================
+
+test("G1. isEagDesignPrompt 对 /eag-design 命令返回 true（命令判定逻辑）", () => {
+  // 验证：isEagDesignPrompt 能正确识别 /eag-design 命令
+  // 判定规则：text 严格匹配 /eag-design，无图片附件，无技能匹配
+  const manager = createTestManager(() => {});
+  const internal = manager as any;
+
+  // 正确命令格式
+  assert.equal(internal.isEagDesignPrompt({ text: "/eag-design" }), true);
+  assert.equal(internal.isEagDesignPrompt({ text: "  /eag-design  " }), true);
+  // 非命令格式
+  assert.equal(internal.isEagDesignPrompt({ text: "请帮我执行 /eag-design" }), false);
+  assert.equal(internal.isEagDesignPrompt({ text: "/eag-design arg" }), false);
+  assert.equal(internal.isEagDesignPrompt({ text: "/eag-build" }), false);
+  assert.equal(internal.isEagDesignPrompt({ text: undefined }), false);
+  // 含图片或技能时不识别为命令（避免误触发）
+  assert.equal(internal.isEagDesignPrompt({ text: "/eag-design", imageUrls: ["data:image/png;base64,..."] }), false);
+  assert.equal(
+    internal.isEagDesignPrompt({ text: "/eag-design", skills: [{ name: "test", path: "/", description: "" }] }),
+    false
+  );
+});
+
+test("G2. handleEagDesignCommand 未注入 designOrchestrator 时通知错误并标记 failed", async () => {
+  // 验证 handleEagDesignCommand 的依赖校验逻辑（session.ts §handleEagDesignCommand 步骤 1）：
+  // 未注入 designOrchestrator → 通知用户配置缺失，更新 session 状态为 failed
+  const messages: string[] = [];
+  const manager = createTestManager((content) => messages.push(content));
+
+  const internal = manager as any;
+  await internal.handleEagDesignCommand("test-session-design-1", { text: "/eag-design" }, new AbortController());
+
+  // 验证：通知消息含"DESIGN Loop 编排器未注入"字样
+  assert.ok(messages.length > 0, "应发送至少一条通知消息");
+  assert.ok(
+    messages.some((m) => m.includes("DESIGN Loop 编排器未注入")),
+    `通知消息应含"DESIGN Loop 编排器未注入"，实际为：${messages.join("\n")}`
+  );
+});
+
+test("G3. handleEagDesignCommand 已注入但未提供 DesignLoopInput 时通知错误", async () => {
+  // 验证 handleEagDesignCommand 的请求装配逻辑（session.ts §handleEagDesignCommand 步骤 2）：
+  // 已注入 designOrchestrator 但未通过 messageParams 提供 DesignLoopInput → 通知用户配置缺失
+  const messages: string[] = [];
+  // 注：此测试只走到请求装配失败分支，不调用 orchestrator.run()
+  // 使用最小真实对象（{ run: () => ({}) }）满足字段校验，与既有 F19 模式一致
+  const fakeOrchestrator = { run: () => ({}) } as any;
+  const manager = createTestManager((content) => messages.push(content), { designOrchestrator: fakeOrchestrator });
+
+  const internal = manager as any;
+  // 不通过 messageParams 提供 DesignLoopInput
+  await internal.handleEagDesignCommand("test-session-design-2", { text: "/eag-design" }, new AbortController());
+
+  // 验证：通知消息含"DesignLoopInput 未提供"字样
+  assert.ok(messages.length > 0, "应发送至少一条通知消息");
+  assert.ok(
+    messages.some((m) => m.includes("DesignLoopInput 未提供")),
+    `通知消息应含"DesignLoopInput 未提供"，实际为：${messages.join("\n")}`
+  );
+});
+
+test("G4. extractDesignLoopInput 正确提取并校验 DesignLoopInput 字段", () => {
+  // 验证 extractDesignLoopInput 的字段校验逻辑：
+  // 1. messageParams 为 undefined/null/空对象 → 返回 undefined
+  // 2. designLoopInput 字段缺失 → 返回 undefined
+  // 3. designLoopInput.rawRequirement 缺失或为空 → 返回 undefined
+  // 4. designLoopInput.rawRequirement 非空 → 返回 DesignLoopInput 对象
+  const manager = createTestManager(() => {});
+  const internal = manager as any;
+
+  // 情况 1：messageParams 为 undefined
+  assert.equal(internal.extractDesignLoopInput({ text: "/eag-design" }), undefined);
+  // 情况 1：messageParams 为 null
+  assert.equal(internal.extractDesignLoopInput({ text: "/eag-design", messageParams: null }), undefined);
+  // 情况 1：messageParams 为空对象
+  assert.equal(internal.extractDesignLoopInput({ text: "/eag-design", messageParams: {} }), undefined);
+  // 情况 2：designLoopInput 字段缺失
+  assert.equal(internal.extractDesignLoopInput({ text: "/eag-design", messageParams: { other: "value" } }), undefined);
+  // 情况 3：designLoopInput.rawRequirement 缺失
+  assert.equal(
+    internal.extractDesignLoopInput({
+      text: "/eag-design",
+      messageParams: { designLoopInput: { projectContext: {} } },
+    }),
+    undefined
+  );
+  // 情况 3：designLoopInput.rawRequirement 为空字符串
+  assert.equal(
+    internal.extractDesignLoopInput({
+      text: "/eag-design",
+      messageParams: { designLoopInput: { rawRequirement: "   " } },
+    }),
+    undefined
+  );
+  // 情况 4：designLoopInput.rawRequirement 非空 → 返回对象
+  const validInput = createMinimalDesignLoopInput();
+  const extracted = internal.extractDesignLoopInput({
+    text: "/eag-design",
+    messageParams: { designLoopInput: validInput },
+  });
+  assert.ok(extracted, "字段完整时应返回 DesignLoopInput 对象");
+  assert.equal(extracted.rawRequirement, validInput.rawRequirement);
+});
+
+test("G5. renderDesignLoopResult 正确渲染结果摘要（§4.18.3）", () => {
+  // 验证 renderDesignLoopResult 的渲染逻辑：
+  // 1. 包含标题 [EAG DESIGN Loop]
+  // 2. 包含评估结果（通过/未通过 + severity）
+  // 3. 包含迭代次数
+  // 4. 包含人工检查点触发状态
+  // 5. 包含判定理由
+  // 6. 包含评估器发现的问题清单（若有）
+  // 7. 包含建议修复方案（若有）
+  const manager = createTestManager(() => {});
+  const internal = manager as any;
+
+  // 构造测试用 DesignLoopResult（通过场景）
+  const passedResult: DesignLoopResult = Object.freeze({
+    input: Object.freeze({ rawRequirement: "需求" }) as any,
+    artifacts: Object.freeze({}) as any,
+    evaluationVerdict: Object.freeze({
+      passed: true,
+      reason: "全部判定项通过",
+      severity: "warning",
+      findings: [],
+      suggestedFix: "",
+    }),
+    humanCheckpointTriggered: true,
+    iterations: 1,
+  }) as DesignLoopResult;
+
+  const summary: string = internal.renderDesignLoopResult(passedResult);
+
+  // 验证渲染内容
+  assert.ok(summary.includes("[EAG DESIGN Loop]"), "应包含标题");
+  assert.ok(summary.includes("评估结果: 通过"), "应包含评估结果（通过）");
+  assert.ok(summary.includes("severity=warning"), "应包含 severity");
+  assert.ok(summary.includes("迭代次数: 1"), "应包含迭代次数");
+  assert.ok(summary.includes("人工检查点已触发: 是"), "应包含人工检查点触发状态");
+  assert.ok(summary.includes("判定理由: 全部判定项通过"), "应包含判定理由");
+
+  // 验证失败场景：含 findings 与 suggestedFix
+  const failedResult: DesignLoopResult = Object.freeze({
+    ...passedResult,
+    evaluationVerdict: Object.freeze({
+      passed: false,
+      reason: "E1 范式不一致",
+      severity: "blocker",
+      findings: Object.freeze(["范式 ID 与锁定值不一致", "依赖规则缺失"]),
+      suggestedFix: "重新选择范式或调整 paradigmLock",
+    }) as any,
+    iterations: 3,
+    humanCheckpointTriggered: false,
+  }) as DesignLoopResult;
+  const failedSummary: string = internal.renderDesignLoopResult(failedResult);
+  assert.ok(failedSummary.includes("评估结果: 未通过"), "应渲染未通过状态");
+  assert.ok(failedSummary.includes("迭代次数: 3"), "应渲染迭代次数 3");
+  assert.ok(failedSummary.includes("范式 ID 与锁定值不一致"), "应包含 findings 第一条");
+  assert.ok(failedSummary.includes("依赖规则缺失"), "应包含 findings 第二条");
+  assert.ok(failedSummary.includes("建议修复方案: 重新选择范式"), "应包含建议修复方案");
+});
+
+// ============================================================================
+// H. /eag-test 命令测试（§4.18.3）
+// ============================================================================
+
+test("H1. isEagTestPrompt 对 /eag-test 命令返回 true（命令判定逻辑）", () => {
+  // 验证：isEagTestPrompt 能正确识别 /eag-test 命令
+  const manager = createTestManager(() => {});
+  const internal = manager as any;
+
+  assert.equal(internal.isEagTestPrompt({ text: "/eag-test" }), true);
+  assert.equal(internal.isEagTestPrompt({ text: "  /eag-test  " }), true);
+  assert.equal(internal.isEagTestPrompt({ text: "请帮我执行 /eag-test" }), false);
+  assert.equal(internal.isEagTestPrompt({ text: "/eag-test arg" }), false);
+  assert.equal(internal.isEagTestPrompt({ text: "/eag-build" }), false);
+  assert.equal(internal.isEagTestPrompt({ text: undefined }), false);
+  assert.equal(internal.isEagTestPrompt({ text: "/eag-test", imageUrls: ["data:image/png;base64,..."] }), false);
+  assert.equal(
+    internal.isEagTestPrompt({ text: "/eag-test", skills: [{ name: "test", path: "/", description: "" }] }),
+    false
+  );
+});
+
+test("H2. handleEagTestCommand 未注入 testingOrchestrator 时通知错误并标记 failed", async () => {
+  // 验证 handleEagTestCommand 的依赖校验逻辑：
+  // 未注入 testingOrchestrator → 通知用户配置缺失
+  const messages: string[] = [];
+  const manager = createTestManager((content) => messages.push(content));
+
+  const internal = manager as any;
+  await internal.handleEagTestCommand("test-session-test-1", { text: "/eag-test" }, new AbortController());
+
+  assert.ok(messages.length > 0, "应发送至少一条通知消息");
+  assert.ok(
+    messages.some((m) => m.includes("TESTING Loop 编排器未注入")),
+    `通知消息应含"TESTING Loop 编排器未注入"，实际为：${messages.join("\n")}`
+  );
+});
+
+test("H3. handleEagTestCommand 已注入但未提供 TestingLoopRequest 时通知错误", async () => {
+  // 验证 handleEagTestCommand 的请求装配逻辑：
+  // 已注入 testingOrchestrator 但未通过 messageParams 提供 TestingLoopRequest → 通知用户配置缺失
+  const messages: string[] = [];
+  // 使用最小真实对象满足字段校验（此路径不调用 run()）
+  const fakeOrchestrator = { run: () => ({}) } as any;
+  const manager = createTestManager((content) => messages.push(content), { testingOrchestrator: fakeOrchestrator });
+
+  const internal = manager as any;
+  await internal.handleEagTestCommand("test-session-test-2", { text: "/eag-test" }, new AbortController());
+
+  assert.ok(messages.length > 0, "应发送至少一条通知消息");
+  assert.ok(
+    messages.some((m) => m.includes("TestingLoopRequest 未提供")),
+    `通知消息应含"TestingLoopRequest 未提供"，实际为：${messages.join("\n")}`
+  );
+});
+
+test("H4. extractTestingLoopRequest 正确提取并校验 TestingLoopRequest 字段", () => {
+  // 验证 extractTestingLoopRequest 的字段校验逻辑：
+  // 1. messageParams 缺失/空 → undefined
+  // 2. testingLoopRequest 字段缺失 → undefined
+  // 3. testingLoopRequest 字段不完整（缺 projectRoot / specContent 等）→ undefined
+  // 4. testingLoopRequest 字段完整 → 返回对象
+  const manager = createTestManager(() => {});
+  const internal = manager as any;
+
+  // 情况 1：messageParams 为 undefined
+  assert.equal(internal.extractTestingLoopRequest({ text: "/eag-test" }), undefined);
+  // 情况 1：messageParams 为空对象
+  assert.equal(internal.extractTestingLoopRequest({ text: "/eag-test", messageParams: {} }), undefined);
+  // 情况 2：testingLoopRequest 字段缺失
+  assert.equal(internal.extractTestingLoopRequest({ text: "/eag-test", messageParams: { other: "value" } }), undefined);
+  // 情况 3：testingLoopRequest.projectRoot 缺失
+  assert.equal(
+    internal.extractTestingLoopRequest({
+      text: "/eag-test",
+      messageParams: { testingLoopRequest: { specContent: "spec" } },
+    }),
+    undefined
+  );
+  // 情况 3：testingLoopRequest.maxIterations 缺失（非 number）
+  assert.equal(
+    internal.extractTestingLoopRequest({
+      text: "/eag-test",
+      messageParams: {
+        testingLoopRequest: {
+          projectRoot: "/test",
+          specContent: "spec",
+          planContent: "plan",
+          tasksContent: "tasks",
+          implementationRoot: "src/",
+          taskDag: { nodes: [] },
+          acceptanceCriteria: [],
+          llmClient: {},
+          pkcAccessor: {},
+          loopGuard: {},
+          coverageThreshold: {},
+          // 缺 maxIterations
+        },
+      },
+    }),
+    undefined
+  );
+  // 情况 4：字段完整 → 返回对象
+  const validRequest = createMinimalTestingLoopRequest();
+  const extracted = internal.extractTestingLoopRequest({
+    text: "/eag-test",
+    messageParams: { testingLoopRequest: validRequest },
+  });
+  assert.ok(extracted, "字段完整时应返回 TestingLoopRequest 对象");
+  assert.equal(extracted.projectRoot, "/test/project");
+  assert.equal(extracted.specContent, validRequest.specContent);
+  assert.equal(extracted.maxIterations, 10);
+});
+
+test("H5. renderTestingLoopResult 正确渲染结果摘要（§4.18.3）", () => {
+  // 验证 renderTestingLoopResult 的渲染逻辑：
+  // 1. 包含标题 [EAG TESTING Loop]
+  // 2. 包含最终状态
+  // 3. 包含测试文件统计（契约/E2E/集成/合规）
+  // 4. 包含覆盖率（lines/branches/functions/highRiskSymbols）
+  // 5. 包含 LLM 调用次数与 token 消耗
+  // 6. 包含生成文件清单（前 10 个）
+  // 7. 包含终止原因（若有）
+  const manager = createTestManager(() => {});
+  const internal = manager as any;
+
+  // 构造测试用 TestingLoopResult（成功场景）
+  const successResult: TestingLoopResult = Object.freeze({
+    runId: "test-run-001",
+    finalStatus: "success",
+    contractTests: Object.freeze([
+      Object.freeze({
+        relativePath: "tests/contract/order.callback.contract.test.ts",
+        content: "...",
+        kind: "contract",
+        requirementId: "F-001",
+        sourceId: "/api/v1/orders",
+        testCaseCount: 3,
+        testCaseDescriptions: Object.freeze(["should return 200", "should return 404", "should return 400"]),
+      }),
+    ]),
+    e2eTests: Object.freeze([]),
+    integrationTests: Object.freeze([]),
+    complianceTests: Object.freeze([]),
+    coverageReport: Object.freeze({
+      lines: 85,
+      branches: 75,
+      functions: 90,
+      highRiskSymbols: 100,
+      uncoveredHighRiskSymbols: Object.freeze([]),
+      uncoveredFiles: Object.freeze([]),
+      passed: true,
+      failedDimensions: Object.freeze([]),
+      rawReport: Object.freeze({}),
+    }),
+    prDescription: "PR 描述",
+    totalLlmCallCount: 5,
+    totalTokensUsed: 1200,
+    durationSec: 30,
+  }) as TestingLoopResult;
+
+  const summary: string = internal.renderTestingLoopResult(successResult);
+
+  // 验证渲染内容
+  assert.ok(summary.includes("[EAG TESTING Loop]"), "应包含标题");
+  assert.ok(summary.includes("最终状态: success"), "应包含最终状态");
+  assert.ok(summary.includes("契约=1"), "应包含契约测试数");
+  assert.ok(summary.includes("E2E=0"), "应包含 E2E 测试数");
+  assert.ok(summary.includes("lines=85%"), "应包含行覆盖率");
+  assert.ok(summary.includes("branches=75%"), "应包含分支覆盖率");
+  assert.ok(summary.includes("functions=90%"), "应包含函数覆盖率");
+  assert.ok(summary.includes("highRiskSymbols=100%"), "应包含高风险符号覆盖率");
+  assert.ok(summary.includes("LLM 调用次数: 5"), "应包含 LLM 调用次数");
+  assert.ok(summary.includes("token 消耗: 1200"), "应包含 token 消耗");
+  assert.ok(summary.includes("order.callback.contract.test.ts"), "应包含生成文件路径");
+
+  // 验证失败场景：含 blockedReason
+  const failedResult: TestingLoopResult = Object.freeze({
+    ...successResult,
+    finalStatus: "stop_failure",
+    blockedReason: "LoopGuard 触达上限",
+  }) as TestingLoopResult;
+  const failedSummary: string = internal.renderTestingLoopResult(failedResult);
+  assert.ok(failedSummary.includes("最终状态: stop_failure"), "应渲染失败状态");
+  assert.ok(failedSummary.includes("终止原因: LoopGuard 触达上限"), "应渲染终止原因");
+});
+
+// ============================================================================
+// I. /eag-run 命令测试（§4.18.3）
+// ============================================================================
+
+test("I1. isEagRunPrompt 对 /eag-run 命令返回 true（命令判定逻辑）", () => {
+  const manager = createTestManager(() => {});
+  const internal = manager as any;
+
+  assert.equal(internal.isEagRunPrompt({ text: "/eag-run" }), true);
+  assert.equal(internal.isEagRunPrompt({ text: "  /eag-run  " }), true);
+  assert.equal(internal.isEagRunPrompt({ text: "请帮我执行 /eag-run" }), false);
+  assert.equal(internal.isEagRunPrompt({ text: "/eag-run arg" }), false);
+  assert.equal(internal.isEagRunPrompt({ text: "/eag-build" }), false);
+  assert.equal(internal.isEagRunPrompt({ text: undefined }), false);
+  assert.equal(internal.isEagRunPrompt({ text: "/eag-run", imageUrls: ["data:image/png;base64,..."] }), false);
+  assert.equal(
+    internal.isEagRunPrompt({ text: "/eag-run", skills: [{ name: "test", path: "/", description: "" }] }),
+    false
+  );
+});
+
+test("I2. handleEagRunCommand 未注入 runStateStore 时通知错误并标记 failed", async () => {
+  // 验证 handleEagRunCommand 的依赖校验逻辑：
+  // 未注入 runStateStore → 通知用户配置缺失
+  const messages: string[] = [];
+  const manager = createTestManager((content) => messages.push(content));
+
+  const internal = manager as any;
+  await internal.handleEagRunCommand("test-session-run-1", { text: "/eag-run" }, new AbortController());
+
+  assert.ok(messages.length > 0, "应发送至少一条通知消息");
+  assert.ok(
+    messages.some((m) => m.includes("RunStateStore 未注入")),
+    `通知消息应含"RunStateStore 未注入"，实际为：${messages.join("\n")}`
+  );
+});
+
+test("I3. handleEagRunCommand 已注入但未提供 EagRunRequest 时通知错误", async () => {
+  // 验证 handleEagRunCommand 的请求装配逻辑：
+  // 已注入 runStateStore 但未通过 messageParams 提供 EagRunRequest → 通知用户配置缺失
+  const messages: string[] = [];
+  // 使用真实 RunStateStore（构造零成本，无外部依赖）
+  const runStateStore = new RunStateStore();
+  const manager = createTestManager((content) => messages.push(content), { runStateStore });
+
+  const internal = manager as any;
+  await internal.handleEagRunCommand("test-session-run-2", { text: "/eag-run" }, new AbortController());
+
+  assert.ok(messages.length > 0, "应发送至少一条通知消息");
+  assert.ok(
+    messages.some((m) => m.includes("EagRunRequest 未提供")),
+    `通知消息应含"EagRunRequest 未提供"，实际为：${messages.join("\n")}`
+  );
+});
+
+test("I4. extractEagRunRequest 正确提取并校验 EagRunRequest 字段", () => {
+  // 验证 extractEagRunRequest 的字段校验逻辑：
+  // 1. messageParams 缺失/空 → undefined
+  // 2. eagRunRequest 字段缺失 → undefined
+  // 3. eagRunRequest 字段不完整（缺 projectRoot / userIntent / loopExecutors）→ undefined
+  // 4. eagRunRequest.loopExecutors 为空数组 → undefined
+  // 5. 字段完整 → 返回对象
+  const manager = createTestManager(() => {});
+  const internal = manager as any;
+
+  // 情况 1：messageParams 为 undefined
+  assert.equal(internal.extractEagRunRequest({ text: "/eag-run" }), undefined);
+  // 情况 1：messageParams 为空对象
+  assert.equal(internal.extractEagRunRequest({ text: "/eag-run", messageParams: {} }), undefined);
+  // 情况 2：eagRunRequest 字段缺失
+  assert.equal(internal.extractEagRunRequest({ text: "/eag-run", messageParams: { other: "value" } }), undefined);
+  // 情况 3：projectRoot 缺失
+  assert.equal(
+    internal.extractEagRunRequest({
+      text: "/eag-run",
+      messageParams: { eagRunRequest: { userIntent: "意图", loopExecutors: [{}] } },
+    }),
+    undefined
+  );
+  // 情况 3：userIntent 缺失
+  assert.equal(
+    internal.extractEagRunRequest({
+      text: "/eag-run",
+      messageParams: { eagRunRequest: { projectRoot: "/test", loopExecutors: [{}] } },
+    }),
+    undefined
+  );
+  // 情况 4：loopExecutors 为空数组
+  assert.equal(
+    internal.extractEagRunRequest({
+      text: "/eag-run",
+      messageParams: { eagRunRequest: { projectRoot: "/test", userIntent: "意图", loopExecutors: [] } },
+    }),
+    undefined
+  );
+  // 情况 5：字段完整 → 返回对象
+  const validRequest = createMinimalEagRunRequest();
+  const extracted = internal.extractEagRunRequest({
+    text: "/eag-run",
+    messageParams: { eagRunRequest: validRequest },
+  });
+  assert.ok(extracted, "字段完整时应返回 EagRunRequest 对象");
+  assert.equal(extracted.projectRoot, "/test/project");
+  assert.equal(extracted.userIntent, "我需要一个订单管理微服务");
+  assert.equal(extracted.loopExecutors.length, 2);
+});
+
+test("I5. renderEagRunResult 正确渲染结果摘要（§4.18.3）", () => {
+  // 验证 renderEagRunResult 的渲染逻辑：
+  // 1. 包含标题 [EAG RUN]
+  // 2. 包含 runId
+  // 3. 包含最终状态
+  // 4. 包含完成的 Loop 列表
+  // 5. 包含里程碑数
+  // 6. 包含 LLM 调用次数与 token 消耗
+  // 7. 包含里程碑列表（前 5 个）
+  // 8. 包含阻塞分析摘要（若有）
+  const manager = createTestManager(() => {});
+  const internal = manager as any;
+
+  // 构造测试用 EagRunResult（完成场景）
+  const completedResult: EagRunResult = Object.freeze({
+    runId: "abc123def456",
+    finalStatus: "completed",
+    completedLoops: Object.freeze(["design", "coding"]) as any,
+    milestones: Object.freeze([
+      Object.freeze({
+        index: 1,
+        name: "DESIGN Loop 完成",
+        loopType: "design",
+        completedAt: "2026-07-19T10:00:00.000Z",
+        tagName: "eag/abc123def456/m1",
+        commitSha: "abc123",
+        healthScore: 0.95,
+      }),
+    ]) as any,
+    finalRunState: Object.freeze({}) as any,
+    finalReport: "# EAG Run 最终报告\n全部 Loop 已完成",
+    totalLlmCallCount: 28,
+    totalTokensUsed: 64200,
+    durationSec: 3600,
+  }) as EagRunResult;
+
+  const summary: string = internal.renderEagRunResult(completedResult);
+
+  // 验证渲染内容
+  assert.ok(summary.includes("[EAG RUN]"), "应包含标题");
+  assert.ok(summary.includes("runId: abc123def456"), "应包含 runId");
+  assert.ok(summary.includes("最终状态: completed"), "应包含最终状态");
+  assert.ok(summary.includes("design, coding"), "应包含完成的 Loop 列表");
+  assert.ok(summary.includes("里程碑数: 1"), "应包含里程碑数");
+  assert.ok(summary.includes("LLM 调用次数: 28"), "应包含 LLM 调用次数");
+  assert.ok(summary.includes("token 消耗: 64200"), "应包含 token 消耗");
+  assert.ok(summary.includes("eag/abc123def456/m1"), "应包含里程碑 tag 名");
+
+  // 验证失败场景：含 blockageReport
+  const failedResult: EagRunResult = Object.freeze({
+    ...completedResult,
+    finalStatus: "failed",
+    blockageReport: Object.freeze({
+      runId: "abc123def456",
+      generatedAt: "2026-07-19T11:00:00.000Z",
+      blockedLoop: "coding",
+      blockedIteration: 5,
+      rootCauseHypotheses: Object.freeze([
+        Object.freeze({
+          hypothesisId: "rc-001",
+          description: "评估器规则过严",
+          confidence: 0.8,
+          evidence: Object.freeze(["E7 红线连续 3 次 violated"]),
+          source: "rule-based",
+        }),
+      ]) as any,
+      suggestedSolutions: Object.freeze([]) as any,
+      requiredDecisions: Object.freeze([
+        Object.freeze({
+          decisionId: "dec-001",
+          description: "是否放宽 E7 评估器规则",
+          options: Object.freeze(["放宽", "保持"]) as any,
+        }),
+      ]) as any,
+      relatedInterventions: Object.freeze([]) as any,
+    }) as any,
+  }) as EagRunResult;
+  const failedSummary: string = internal.renderEagRunResult(failedResult);
+  assert.ok(failedSummary.includes("最终状态: failed"), "应渲染失败状态");
+  assert.ok(failedSummary.includes("阻塞分析:"), "应包含阻塞分析标题");
+  assert.ok(failedSummary.includes("根因假设数: 1"), "应包含根因假设数");
+  assert.ok(failedSummary.includes("待决策数: 1"), "应包含待决策数");
+});
+
+// ============================================================================
+// J. /eag-resume 命令测试（§4.18.3）
+// ============================================================================
+
+test("J1. isEagResumePrompt 对 /eag-resume 命令返回 true（命令判定逻辑）", () => {
+  const manager = createTestManager(() => {});
+  const internal = manager as any;
+
+  assert.equal(internal.isEagResumePrompt({ text: "/eag-resume" }), true);
+  assert.equal(internal.isEagResumePrompt({ text: "  /eag-resume  " }), true);
+  assert.equal(internal.isEagResumePrompt({ text: "请帮我执行 /eag-resume" }), false);
+  assert.equal(internal.isEagResumePrompt({ text: "/eag-resume arg" }), false);
+  assert.equal(internal.isEagResumePrompt({ text: "/eag-build" }), false);
+  assert.equal(internal.isEagResumePrompt({ text: undefined }), false);
+  assert.equal(internal.isEagResumePrompt({ text: "/eag-resume", imageUrls: ["data:image/png;base64,..."] }), false);
+  assert.equal(
+    internal.isEagResumePrompt({ text: "/eag-resume", skills: [{ name: "test", path: "/", description: "" }] }),
+    false
+  );
+});
+
+test("J2. handleEagResumeCommand 未注入 runStateStore 时通知错误并标记 failed", async () => {
+  // 验证 handleEagResumeCommand 的依赖校验逻辑：
+  // 未注入 runStateStore → 通知用户配置缺失
+  const messages: string[] = [];
+  const manager = createTestManager((content) => messages.push(content));
+
+  const internal = manager as any;
+  await internal.handleEagResumeCommand("test-session-resume-1", { text: "/eag-resume" }, new AbortController());
+
+  assert.ok(messages.length > 0, "应发送至少一条通知消息");
+  assert.ok(
+    messages.some((m) => m.includes("RunStateStore 未注入")),
+    `通知消息应含"RunStateStore 未注入"，实际为：${messages.join("\n")}`
+  );
+});
+
+test("J3. handleEagResumeCommand 已注入但未提供 EagResumeRequest 时通知错误", async () => {
+  // 验证 handleEagResumeCommand 的请求装配逻辑：
+  // 已注入 runStateStore 但未通过 messageParams 提供 EagResumeRequest → 通知用户配置缺失
+  const messages: string[] = [];
+  const runStateStore = new RunStateStore();
+  const manager = createTestManager((content) => messages.push(content), { runStateStore });
+
+  const internal = manager as any;
+  await internal.handleEagResumeCommand("test-session-resume-2", { text: "/eag-resume" }, new AbortController());
+
+  assert.ok(messages.length > 0, "应发送至少一条通知消息");
+  assert.ok(
+    messages.some((m) => m.includes("EagResumeRequest 未提供")),
+    `通知消息应含"EagResumeRequest 未提供"，实际为：${messages.join("\n")}`
+  );
+});
+
+test("J4. extractEagResumeRequest 正确提取并校验 EagResumeRequest 字段", () => {
+  // 验证 extractEagResumeRequest 的字段校验逻辑：
+  // 1. messageParams 缺失/空 → undefined
+  // 2. eagResumeRequest 字段缺失 → undefined
+  // 3. eagResumeRequest.runId 缺失或为空 → undefined
+  // 4. eagResumeRequest.projectRoot 缺失 → undefined
+  // 5. eagResumeRequest.userIntent 缺失 → undefined
+  // 6. eagResumeRequest.loopExecutors 为空数组 → undefined
+  // 7. 字段完整 → 返回对象
+  const manager = createTestManager(() => {});
+  const internal = manager as any;
+
+  // 情况 1：messageParams 为 undefined
+  assert.equal(internal.extractEagResumeRequest({ text: "/eag-resume" }), undefined);
+  // 情况 2：eagResumeRequest 字段缺失
+  assert.equal(internal.extractEagResumeRequest({ text: "/eag-resume", messageParams: { other: "value" } }), undefined);
+  // 情况 3：runId 缺失
+  assert.equal(
+    internal.extractEagResumeRequest({
+      text: "/eag-resume",
+      messageParams: {
+        eagResumeRequest: { projectRoot: "/test", userIntent: "意图", loopExecutors: [{}] },
+      },
+    }),
+    undefined
+  );
+  // 情况 3：runId 为空字符串
+  assert.equal(
+    internal.extractEagResumeRequest({
+      text: "/eag-resume",
+      messageParams: {
+        eagResumeRequest: { runId: "   ", projectRoot: "/test", userIntent: "意图", loopExecutors: [{}] },
+      },
+    }),
+    undefined
+  );
+  // 情况 4：projectRoot 缺失
+  assert.equal(
+    internal.extractEagResumeRequest({
+      text: "/eag-resume",
+      messageParams: {
+        eagResumeRequest: { runId: "abc123", userIntent: "意图", loopExecutors: [{}] },
+      },
+    }),
+    undefined
+  );
+  // 情况 5：userIntent 缺失
+  assert.equal(
+    internal.extractEagResumeRequest({
+      text: "/eag-resume",
+      messageParams: {
+        eagResumeRequest: { runId: "abc123", projectRoot: "/test", loopExecutors: [{}] },
+      },
+    }),
+    undefined
+  );
+  // 情况 6：loopExecutors 为空数组
+  assert.equal(
+    internal.extractEagResumeRequest({
+      text: "/eag-resume",
+      messageParams: {
+        eagResumeRequest: { runId: "abc123", projectRoot: "/test", userIntent: "意图", loopExecutors: [] },
+      },
+    }),
+    undefined
+  );
+  // 情况 7：字段完整 → 返回对象
+  const validRequest = createMinimalEagResumeRequest();
+  const extracted = internal.extractEagResumeRequest({
+    text: "/eag-resume",
+    messageParams: { eagResumeRequest: validRequest },
+  });
+  assert.ok(extracted, "字段完整时应返回 EagResumeRequest 对象");
+  assert.equal(extracted.runId, "abc123def456");
+  assert.equal(extracted.projectRoot, "/test/project");
+  assert.equal(extracted.userIntent, "我需要一个订单管理微服务");
+});
+
+// ============================================================================
+// K. /eag-status 命令测试（§4.18.3）
+// ============================================================================
+
+test("K1. isEagStatusPrompt 对 /eag-status 命令返回 true（命令判定逻辑）", () => {
+  const manager = createTestManager(() => {});
+  const internal = manager as any;
+
+  assert.equal(internal.isEagStatusPrompt({ text: "/eag-status" }), true);
+  assert.equal(internal.isEagStatusPrompt({ text: "  /eag-status  " }), true);
+  assert.equal(internal.isEagStatusPrompt({ text: "请帮我执行 /eag-status" }), false);
+  assert.equal(internal.isEagStatusPrompt({ text: "/eag-status arg" }), false);
+  assert.equal(internal.isEagStatusPrompt({ text: "/eag-build" }), false);
+  assert.equal(internal.isEagStatusPrompt({ text: undefined }), false);
+  assert.equal(internal.isEagStatusPrompt({ text: "/eag-status", imageUrls: ["data:image/png;base64,..."] }), false);
+  assert.equal(
+    internal.isEagStatusPrompt({ text: "/eag-status", skills: [{ name: "test", path: "/", description: "" }] }),
+    false
+  );
+});
+
+test("K2. handleEagStatusCommand 未注入 runStateStore 时通知错误并标记 failed", async () => {
+  // 验证 handleEagStatusCommand 的依赖校验逻辑：
+  // 未注入 runStateStore → 通知用户配置缺失
+  const messages: string[] = [];
+  const manager = createTestManager((content) => messages.push(content));
+
+  const internal = manager as any;
+  await internal.handleEagStatusCommand("test-session-status-1", { text: "/eag-status" }, new AbortController());
+
+  assert.ok(messages.length > 0, "应发送至少一条通知消息");
+  assert.ok(
+    messages.some((m) => m.includes("RunStateStore 未注入")),
+    `通知消息应含"RunStateStore 未注入"，实际为：${messages.join("\n")}`
+  );
+});
+
+test("K3. handleEagStatusCommand 已注入但未提供 EagStatusRequest 时通知错误", async () => {
+  // 验证 handleEagStatusCommand 的请求装配逻辑：
+  // 已注入 runStateStore 但未通过 messageParams 提供 EagStatusRequest → 通知用户配置缺失
+  const messages: string[] = [];
+  const runStateStore = new RunStateStore();
+  const manager = createTestManager((content) => messages.push(content), { runStateStore });
+
+  const internal = manager as any;
+  await internal.handleEagStatusCommand("test-session-status-2", { text: "/eag-status" }, new AbortController());
+
+  assert.ok(messages.length > 0, "应发送至少一条通知消息");
+  assert.ok(
+    messages.some((m) => m.includes("EagStatusRequest 未提供")),
+    `通知消息应含"EagStatusRequest 未提供"，实际为：${messages.join("\n")}`
+  );
+});
+
+test("K4. extractEagStatusRequest 正确提取并校验 EagStatusRequest 字段", () => {
+  // 验证 extractEagStatusRequest 的字段校验逻辑：
+  // 1. messageParams 缺失/空 → undefined
+  // 2. eagStatusRequest 字段缺失 → undefined
+  // 3. eagStatusRequest.projectRoot 缺失或为空 → undefined
+  // 4. 字段完整（含 runId）→ 返回对象
+  // 5. 字段完整（含 recentCount 而非 runId）→ 返回对象
+  const manager = createTestManager(() => {});
+  const internal = manager as any;
+
+  // 情况 1：messageParams 为 undefined
+  assert.equal(internal.extractEagStatusRequest({ text: "/eag-status" }), undefined);
+  // 情况 2：eagStatusRequest 字段缺失
+  assert.equal(internal.extractEagStatusRequest({ text: "/eag-status", messageParams: { other: "value" } }), undefined);
+  // 情况 3：projectRoot 缺失
+  assert.equal(
+    internal.extractEagStatusRequest({
+      text: "/eag-status",
+      messageParams: { eagStatusRequest: { runId: "abc123" } },
+    }),
+    undefined
+  );
+  // 情况 3：projectRoot 为空字符串
+  assert.equal(
+    internal.extractEagStatusRequest({
+      text: "/eag-status",
+      messageParams: { eagStatusRequest: { projectRoot: "   ", runId: "abc123" } },
+    }),
+    undefined
+  );
+  // 情况 4：字段完整（含 runId）
+  const validRequest1 = createMinimalEagStatusRequest();
+  const extracted1 = internal.extractEagStatusRequest({
+    text: "/eag-status",
+    messageParams: { eagStatusRequest: validRequest1 },
+  });
+  assert.ok(extracted1, "字段完整时应返回 EagStatusRequest 对象");
+  assert.equal(extracted1.projectRoot, "/test/project");
+  assert.equal(extracted1.runId, "abc123def456");
+  // 情况 5：字段完整（含 recentCount 而非 runId）
+  const extracted2 = internal.extractEagStatusRequest({
+    text: "/eag-status",
+    messageParams: {
+      eagStatusRequest: { projectRoot: "/test/project", recentCount: 5 },
+    },
+  });
+  assert.ok(extracted2, "仅含 recentCount 时也应返回对象");
+  assert.equal(extracted2.projectRoot, "/test/project");
+  assert.equal(extracted2.recentCount, 5);
+});
+
+test("K5. renderEagStatusResult 正确渲染结果摘要（§4.18.3）", () => {
+  // 验证 renderEagStatusResult 的渲染逻辑：
+  // 1. 包含标题 [EAG STATUS]
+  // 2. 单 run 详情：包含 runId / 状态 / 当前 Loop / 里程碑数 / 人工介入记录数
+  // 3. 最近 run 列表：包含 runId 与 status
+  // 4. 完整 Markdown 报告（截断到 2000 字符）
+  const manager = createTestManager(() => {});
+  const internal = manager as any;
+
+  // 构造测试用 EagStatusResult（含单 run 详情）
+  const resultWithRunState: EagStatusResult = Object.freeze({
+    report: "# EAG Status 报告\n## runId: abc123def456\n状态: running",
+    runState: Object.freeze({
+      runId: "abc123def456",
+      projectRoot: "/test/project",
+      startedAt: "2026-07-19T10:00:00.000Z",
+      updatedAt: "2026-07-19T11:00:00.000Z",
+      currentLoop: "coding",
+      currentIteration: 3,
+      completedLoops: Object.freeze(["design"]) as any,
+      completedTaskIds: Object.freeze(["T-001", "T-002"]) as any,
+      pendingDeleteFiles: Object.freeze([]) as any,
+      milestones: Object.freeze([
+        Object.freeze({
+          index: 1,
+          name: "DESIGN Loop 完成",
+          loopType: "design",
+          completedAt: "2026-07-19T10:30:00.000Z",
+          tagName: "eag/abc123def456/m1",
+          commitSha: "abc123",
+          healthScore: 0.95,
+        }),
+      ]) as any,
+      humanInterventions: Object.freeze([
+        Object.freeze({
+          intervenedAt: "2026-07-19T10:45:00.000Z",
+          loopType: "coding",
+          reason: "G-3 偏离检测",
+          decision: "调整任务卡声明",
+          resolved: true,
+        }),
+      ]) as any,
+      humanInterventionCount: 1,
+      totalLlmCallCount: 15,
+      totalTokensUsed: 32000,
+      status: "running",
+      checksum: "sha256:abcdef",
+    }) as any,
+  }) as EagStatusResult;
+
+  const summary: string = internal.renderEagStatusResult(resultWithRunState);
+
+  // 验证渲染内容
+  assert.ok(summary.includes("[EAG STATUS]"), "应包含标题");
+  assert.ok(summary.includes("runId: abc123def456"), "应包含 runId");
+  assert.ok(summary.includes("状态: running"), "应包含运行状态");
+  assert.ok(summary.includes("当前 Loop: coding"), "应包含当前 Loop");
+  assert.ok(summary.includes("里程碑数: 1"), "应包含里程碑数");
+  assert.ok(summary.includes("人工介入记录数: 1"), "应包含人工介入记录数");
+  assert.ok(summary.includes("完整报告:"), "应包含完整报告标题");
+  assert.ok(summary.includes("EAG Status 报告"), "应包含报告内容");
+
+  // 验证最近 run 列表场景
+  const resultWithRecentRuns: EagStatusResult = Object.freeze({
+    report: "# 最近 5 次 run",
+    recentRuns: Object.freeze([
+      Object.freeze({ runId: "run-001", status: "completed", progress: 100 }) as any,
+      Object.freeze({ runId: "run-002", status: "running", progress: 60 }) as any,
+    ]) as any,
+  }) as EagStatusResult;
+  const recentSummary: string = internal.renderEagStatusResult(resultWithRecentRuns);
+  assert.ok(recentSummary.includes("最近 2 次 run:"), "应包含最近 run 列表标题");
+  assert.ok(recentSummary.includes("run-001: completed"), "应包含 run-001 摘要");
+  assert.ok(recentSummary.includes("run-002: running"), "应包含 run-002 摘要");
+
+  // 验证长报告截断场景（>2000 字符）
+  const longReport = "x".repeat(2500);
+  const resultWithLongReport: EagStatusResult = Object.freeze({
+    report: longReport,
+  }) as EagStatusResult;
+  const longSummary: string = internal.renderEagStatusResult(resultWithLongReport);
+  assert.ok(longSummary.includes("..."), "长报告应包含省略标记");
+  assert.ok(longSummary.includes("字符已省略"), "长报告应包含截断提示");
+});
+
+// ============================================================================
+// L. 候选规则检测 Hook 测试（§4.18.4 detectRuleCandidateHook，落地 L-4）
+// ============================================================================
+
+test("L1. detectRuleCandidateHook 未注入 ruleLearner 时跳过（向后兼容，零开销）", async () => {
+  // 验证：未注入 ruleLearner 时 detectRuleCandidateHook 直接返回，不发送任何消息
+  // 对应 session.ts §detectRuleCandidateHook 步骤 1：if (!this.ruleLearner) return;
+  const messages: string[] = [];
+  const manager = createTestManager((content) => messages.push(content));
+  // 不注入 ruleLearner
+
+  const internal = manager as any;
+  // 输入含纠正模式关键词，但未注入 ruleLearner，应跳过
+  await internal.detectRuleCandidateHook("不要使用 mock 开发", "test-session-hook-1");
+
+  // 验证：未发送任何消息
+  assert.equal(messages.length, 0, "未注入 ruleLearner 时不应发送任何消息");
+});
+
+test("L2. detectRuleCandidateHook 非纠正模式不触发候选检测", async () => {
+  // 验证：用户输入非纠正模式时，detectCorrection 返回 null，Hook 直接返回
+  // 纠正模式仅匹配 5 种前缀：不要/严禁/必须/以后都/禁止
+  const messages: string[] = [];
+  // 使用真实 RuleLearner（无外部依赖，直接 new）
+  const ruleLearner = new RuleLearner();
+  const manager = createTestManager((content) => messages.push(content), { ruleLearner });
+
+  const internal = manager as any;
+  // 非纠正模式（普通对话内容）
+  await internal.detectRuleCandidateHook("请帮我创建一个订单聚合根", "test-session-hook-2");
+
+  // 验证：未发送任何消息（非纠正模式不触发候选检测）
+  assert.equal(messages.length, 0, "非纠正模式不应触发候选检测");
+});
+
+test("L3. detectRuleCandidateHook 单次纠正不推送确认（防误学红线，≥2 次才推送）", async () => {
+  // 验证 EAG 方案 §5.5.4 防误学红线：
+  // 「单次纠正默认只生成候选，同类纠正出现 ≥2 次才主动推送确认请求」
+  // 对应 session.ts §detectRuleCandidateHook 步骤 4：if (!shouldPushConfirmation) return;
+  const messages: string[] = [];
+  const ruleLearner = new RuleLearner();
+  const manager = createTestManager((content) => messages.push(content), { ruleLearner });
+
+  const internal = manager as any;
+  // 首次纠正（occurrenceCount=1，未达阈值 2）
+  await internal.detectRuleCandidateHook("不要使用 mock 开发", "test-session-hook-3");
+
+  // 验证：首次纠正不推送确认请求
+  assert.equal(messages.length, 0, "首次纠正不应推送确认请求（防误学红线，≥2 次才推送）");
+
+  // 验证 RuleLearner 内部状态：已累积 1 个候选
+  const candidates = ruleLearner.getCandidates();
+  assert.equal(candidates.length, 1, "RuleLearner 应累积 1 个候选");
+  assert.equal(candidates[0].occurrenceCount, 1, "候选 occurrenceCount 应为 1");
+  assert.equal(candidates[0].content, "不要使用 mock 开发", "候选 content 应正确");
+});
+
+test("L4. detectRuleCandidateHook 同类纠正 ≥2 次时推送确认请求", async () => {
+  // 验证 EAG 方案 §5.5.4 推送确认请求逻辑：
+  // 同类纠正出现 ≥2 次时，shouldPushConfirmation 返回 true，Hook 推送确认请求
+  // 对应 session.ts §detectRuleCandidateHook 步骤 5：推送确认请求
+  const messages: string[] = [];
+  const ruleLearner = new RuleLearner();
+  const manager = createTestManager((content) => messages.push(content), { ruleLearner });
+
+  const internal = manager as any;
+  // 首次纠正（不推送）
+  await internal.detectRuleCandidateHook("不要使用 mock 开发", "test-session-hook-4");
+  // 第二次同类纠正（应推送确认请求）
+  await internal.detectRuleCandidateHook("不要使用 mock 开发", "test-session-hook-4");
+
+  // 验证：第二次纠正后推送确认请求
+  assert.ok(messages.length > 0, "第二次同类纠正应推送确认请求");
+  const prompt = messages[messages.length - 1];
+  assert.ok(prompt.includes("检测到可能的候选规则"), "确认请求应包含标题");
+  assert.ok(prompt.includes("LEARN-01"), "确认请求应包含候选 ID");
+  assert.ok(prompt.includes("不要使用 mock 开发"), "确认请求应包含候选内容");
+  assert.ok(prompt.includes("/rule-confirm"), "确认请求应包含确认命令指引");
+  assert.ok(prompt.includes("code-truth"), "确认请求应包含推断的分类");
+  assert.ok(prompt.includes("WARNING"), "确认请求应包含推断的级别");
+
+  // 验证 RuleLearner 内部状态：累积 1 个候选，occurrenceCount=2
+  const candidates = ruleLearner.getCandidates();
+  assert.equal(candidates.length, 1, "RuleLearner 应累积 1 个候选");
+  assert.equal(candidates[0].occurrenceCount, 2, "候选 occurrenceCount 应为 2");
+});
+
+test("L5. detectRuleCandidateHook 不同类纠正分别累积（不互相影响）", async () => {
+  // 验证：不同内容的纠正分别累积，各自独立计数
+  // 对应 RuleLearner.accumulateCandidate 的"按 content 文本匹配"逻辑
+  const messages: string[] = [];
+  const ruleLearner = new RuleLearner();
+  const manager = createTestManager((content) => messages.push(content), { ruleLearner });
+
+  const internal = manager as any;
+  // 纠正 1（首次）
+  await internal.detectRuleCandidateHook("不要使用 mock 开发", "test-session-hook-5");
+  // 纠正 2（不同内容，首次）
+  await internal.detectRuleCandidateHook("严禁简化实现", "test-session-hook-5");
+  // 纠正 3（与纠正 2 同类，第二次）
+  await internal.detectRuleCandidateHook("严禁简化实现", "test-session-hook-5");
+
+  // 验证：仅纠正 3 触发推送（纠正 2 的第二次出现）
+  // 纠正 1 occurrenceCount=1（未达阈值），纠正 2 occurrenceCount=2（达阈值，推送）
+  const confirmMessages = messages.filter((m) => m.includes("检测到可能的候选规则"));
+  assert.equal(confirmMessages.length, 1, "应仅推送 1 次确认请求（仅纠正 2 达到阈值）");
+  assert.ok(confirmMessages[0].includes("严禁简化实现"), "确认请求应为纠正 2 的内容");
+
+  // 验证 RuleLearner 内部状态：累积 2 个候选
+  const candidates = ruleLearner.getCandidates();
+  assert.equal(candidates.length, 2, "应累积 2 个不同内容的候选");
+  // 找到 "不要使用 mock" 候选，occurrenceCount 应为 1
+  const c1 = candidates.find((c) => c.content === "不要使用 mock 开发");
+  assert.ok(c1, "应存在'不要使用 mock 开发'候选");
+  assert.equal(c1!.occurrenceCount, 1, "候选 1 occurrenceCount 应为 1");
+  // 找到 "严禁简化实现" 候选，occurrenceCount 应为 2
+  const c2 = candidates.find((c) => c.content === "严禁简化实现");
+  assert.ok(c2, "应存在'严禁简化实现'候选");
+  assert.equal(c2!.occurrenceCount, 2, "候选 2 occurrenceCount 应为 2");
+});
+
+test("L6. detectRuleCandidateHook 异常时不影响主对话循环（仅通知异常）", async () => {
+  // 验证 detectRuleCandidateHook 的异常降级行为（session.ts §detectRuleCandidateHook catch 块）：
+  // 候选规则检测失败不阻塞主对话循环，仅通过 onAssistantMessage 通知异常
+  // 使用一个会抛异常的 RuleLearner 子类替代（真实实现，非 mock 框架）
+  class ThrowingRuleLearner extends RuleLearner {
+    detectCorrection(_userInput: string): { pattern: string; content: string } | null {
+      throw new Error("RuleLearner 内部异常（测试用）");
+    }
+  }
+  const messages: string[] = [];
+  const ruleLearner = new ThrowingRuleLearner();
+  const manager = createTestManager((content) => messages.push(content), { ruleLearner });
+
+  const internal = manager as any;
+  // 调用 detectRuleCandidateHook，内部 detectCorrection 抛异常
+  // 验证：异常被 catch，不向上抛出，仅通知异常
+  await internal.detectRuleCandidateHook("不要使用 mock 开发", "test-session-hook-6");
+
+  // 验证：发送了异常通知消息
+  assert.ok(messages.length > 0, "异常时应发送通知消息");
+  assert.ok(
+    messages.some((m) => m.includes("[RLIS] 候选规则检测异常")),
+    `通知消息应含"[RLIS] 候选规则检测异常"，实际为：${messages.join("\n")}`
+  );
+  assert.ok(
+    messages.some((m) => m.includes("RuleLearner 内部异常")),
+    `通知消息应含异常详情，实际为：${messages.join("\n")}`
+  );
+});
+
+// ============================================================================
+// M. SessionManagerOptions 字段传递与向后兼容测试（§4.18.5）
+// ============================================================================
+
+test("M1. 注入 testingOrchestrator/designOrchestrator/runStateStore/ruleLearner 时字段正确传递", () => {
+  // 验证：SessionManager 构造函数正确赋值 EAG-P3 批次 10 新增字段
+  // 对应 session.ts §605-608：this.testingOrchestrator = options.testingOrchestrator 等
+  const fakeTestingOrchestrator = { run: () => ({}) } as any;
+  const fakeDesignOrchestrator = { run: () => ({}) } as any;
+  const runStateStore = new RunStateStore();
+  const ruleLearner = new RuleLearner();
+
+  const manager = new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({ client: null, model: "test-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+    // EAG-P3 批次 10 新增字段
+    testingOrchestrator: fakeTestingOrchestrator,
+    designOrchestrator: fakeDesignOrchestrator,
+    runStateStore,
+    ruleLearner,
+  });
+
+  const internal = manager as any;
+  assert.equal(internal.testingOrchestrator, fakeTestingOrchestrator, "testingOrchestrator 字段应正确传递");
+  assert.equal(internal.designOrchestrator, fakeDesignOrchestrator, "designOrchestrator 字段应正确传递");
+  assert.equal(internal.runStateStore, runStateStore, "runStateStore 字段应正确传递");
+  assert.equal(internal.ruleLearner, ruleLearner, "ruleLearner 字段应正确传递");
+});
+
+test("M2. 未注入 testingOrchestrator/designOrchestrator/runStateStore/ruleLearner 时 SessionManager 正常构造（向后兼容）", () => {
+  // 验证：EAG-P3 批次 10 字段均为可选，不注入时 SessionManager 正常构造
+  // （向后兼容保证，§4.18.5 既有测试零回归）
+  const manager = new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({ client: null, model: "test-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+    // 不传入任何 EAG-P3 批次 10 字段
+  });
+
+  assert.ok(manager instanceof SessionManager, "SessionManager 应正常实例化");
+  const internal = manager as any;
+  assert.equal(internal.testingOrchestrator, undefined, "未注入时 testingOrchestrator 应为 undefined");
+  assert.equal(internal.designOrchestrator, undefined, "未注入时 designOrchestrator 应为 undefined");
+  assert.equal(internal.runStateStore, undefined, "未注入时 runStateStore 应为 undefined");
+  assert.equal(internal.ruleLearner, undefined, "未注入时 ruleLearner 应为 undefined");
+});
+
+test("M3. 注入 ruleLearner 后主对话循环可调用 detectRuleCandidateHook（端到端验证字段传递）", async () => {
+  // 验证：注入 ruleLearner 后，detectRuleCandidateHook 可正常调用 ruleLearner.detectCorrection
+  // 端到端验证字段传递的正确性（不只是字段赋值，还包括方法可调用）
+  // 输入"必须测试先行再实现功能"含"测试先行"关键词 → 推断分类 process-gate
+  // detectedPattern "必须..." → 推断级别 MAJOR
+  const messages: string[] = [];
+  const ruleLearner = new RuleLearner();
+  const manager = createTestManager((content) => messages.push(content), { ruleLearner });
+
+  const internal = manager as any;
+  // 调用两次同类纠正，验证 ruleLearner 字段确实被注入并可调用
+  await internal.detectRuleCandidateHook("必须测试先行再实现功能", "test-session-field-1");
+  await internal.detectRuleCandidateHook("必须测试先行再实现功能", "test-session-field-1");
+
+  // 验证：第二次调用触发了推送（证明 ruleLearner 字段已正确注入且方法可调用）
+  assert.ok(messages.length > 0, "应推送确认请求（证明 ruleLearner 已正确注入）");
+  const prompt = messages[messages.length - 1];
+  assert.ok(prompt.includes("必须测试先行再实现功能"), "确认请求应包含纠正内容");
+  assert.ok(prompt.includes("process-gate"), "确认请求应包含推断的分类（process-gate，因输入含'测试先行'关键词）");
+  assert.ok(prompt.includes("MAJOR"), "确认请求应包含推断的级别（MAJOR，因'必须'语气）");
+});
