@@ -28,6 +28,8 @@
 // ============================================================================
 
 import type { DocumentState, TaskCard } from "../doc-driven/types";
+import type { EvaluationReport } from "../evaluator/types";
+import type { GeneratedFileKind } from "../coding/types";
 
 /**
  * 文档状态类型（复用 doc-driven/types.ts 中的 DocumentState）
@@ -182,22 +184,30 @@ export const LOOP_TYPES: ReadonlyArray<LoopType> = Object.freeze(["design", "cod
 // ============================================================================
 
 /**
- * 门禁 ID（字面量联合类型，对应三道门禁）
+ * 门禁 ID（字面量联合类型，对应五道门禁）
  *
  * - G-1：无已批准 spec/plan 禁入 CODING Loop
  * - G-2：方案必经多角色评审 + 用户批准
  * - G-3：方案偏离检测（任务卡声明变更 vs 实际变更）
+ * - G-4：CODING Loop 进入门禁（任务卡完整性 + 模板可用性 + 技术栈锁定）
+ * - G-5：CODING Loop 退出门禁（任务卡全 completed + STRICT 通过 + git clean + gitleaks）
  *
  * 字面量联合而非 string，避免拼写错误。
+ *
+ * 设计依据：
+ * - G-1~G-3：EAG 方案 §5.12.1 方案先行门禁（批次 8 落地）
+ * - G-4/G-5：EAG-P2 批次 9 §4.8 基于方案 §5.10.5 三 Loop 时序与 §5.12.2 里程碑检查点合理外推
  */
-export type GateId = "G-1" | "G-2" | "G-3";
+export type GateId = "G-1" | "G-2" | "G-3" | "G-4" | "G-5";
 
 /**
  * GateId 全部合法值（用于运行时枚举、测试断言）
  *
- * 使用 Object.freeze 冻结。顺序对应门禁执行顺序（G-1 → G-2 → G-3）。
+ * 使用 Object.freeze 冻结。顺序对应门禁执行顺序：
+ * - coding Loop 进入：G-1 → G-2 → G-3 → G-4
+ * - coding Loop 退出：G-5
  */
-export const GATE_IDS: ReadonlyArray<GateId> = Object.freeze(["G-1", "G-2", "G-3"]);
+export const GATE_IDS: ReadonlyArray<GateId> = Object.freeze(["G-1", "G-2", "G-3", "G-4", "G-5"]);
 
 /**
  * 门禁严重性（与 RedlineSeverity 对齐，使用小写）
@@ -370,3 +380,93 @@ export const G2_FULL_REVIEW_ROLES = 4 as const;
  * 使用 `as const` 字面量断言（数字本身已是不可变原始值，无需 Object.freeze）。
  */
 export const G3_DEVIATION_THRESHOLD = 3 as const;
+
+// ============================================================================
+// 9. G-4/G-5 专属上下文类型（EAG-P2 批次 9 §4.8.4）
+// ============================================================================
+
+/**
+ * G-4 门禁上下文（继承 GateContext，扩展 CODING Loop 进入门禁所需字段）
+ *
+ * 对应 EAG-P2 批次 9 设计 §4.8.4 GateG4Context：
+ * 在 G-1/G-2/G-3 通过基础上，G-4 额外校验 Phase A 骨架生成的前置条件。
+ *
+ * 扩展字段语义：
+ * - tasksStatus：tasks.md 文档状态（G-4 要求 tasks.md 已批准）
+ * - fileCluster：任务卡所属文件簇名（来自 TaskNode.fileCluster，G-4 校验其非空）
+ * - requiredTemplateKinds：本任务卡需要的模板 kind 列表（G-4 校验 TemplateRegistry 已注册）
+ * - techStack：技术栈锁定清单（G-4 校验非空，对齐 CONSTITUTION.techStackLocks）
+ * - outputDir：输出目录（G-4 校验可写，骨架文件写入此目录）
+ *
+ * 字段全部 readonly——上下文一经组装即不可变。
+ *
+ * 范例：
+ *   {
+ *     projectId: "order-system",
+ *     loopType: "coding",
+ *     specStatus: "approved",
+ *     planStatus: "approved",
+ *     reviewRecords: [...],
+ *     userApproved: true,
+ *     taskCard: { id: "T-001", ... },
+ *     actualChanges: [],
+ *     tasksStatus: "approved",
+ *     fileCluster: "OrderAggregate",
+ *     requiredTemplateKinds: ["aggregate", "domain-event"],
+ *     techStack: ["TypeScript", "NestJS", "PostgreSQL"],
+ *     outputDir: "src/"
+ *   }
+ */
+export interface GateG4Context extends GateContext {
+  /** tasks.md 文档状态（G-4 要求 tasks.md 已批准） */
+  readonly tasksStatus: DocumentState;
+  /** 任务卡所属文件簇名（来自 TaskNode.fileCluster） */
+  readonly fileCluster: string;
+  /** 本任务卡需要的模板 kind 列表（G-4 校验 TemplateRegistry 已注册） */
+  readonly requiredTemplateKinds: ReadonlyArray<GeneratedFileKind>;
+  /** 技术栈锁定清单（CONSTITUTION.techStackLocks，G-4 校验非空） */
+  readonly techStack: ReadonlyArray<string>;
+  /** 输出目录（相对 projectRoot，G-4 校验非空字符串） */
+  readonly outputDir: string;
+}
+
+/**
+ * G-5 门禁上下文（继承 GateContext，扩展 CODING Loop 退出门禁所需字段）
+ *
+ * 对应 EAG-P2 批次 9 设计 §4.8.4 GateG5Context：
+ * G-5 校验所有任务卡完成 + STRICT 评估通过 + git 工作区干净 + gitleaks 通过。
+ *
+ * 扩展字段语义：
+ * - allTaskCards：所有任务卡列表（G-5 校验 status 全为 completed）
+ * - finalEvaluationReport：最终 STRICT 评估报告（G-5 校验 verdict=pass）
+ * - gitClean：git 工作区是否干净（无未提交变更）
+ * - gitleaksPassed：gitleaks 扫描是否通过（无密钥泄露）
+ *
+ * 字段全部 readonly——上下文一经组装即不可变。
+ *
+ * 范例：
+ *   {
+ *     projectId: "order-system",
+ *     loopType: "coding",
+ *     specStatus: "approved",
+ *     planStatus: "approved",
+ *     reviewRecords: [...],
+ *     userApproved: true,
+ *     taskCard: { id: "T-001", status: "completed", ... },
+ *     actualChanges: [],
+ *     allTaskCards: [{ id: "T-001", status: "completed", ... }, ...],
+ *     finalEvaluationReport: { verdict: "pass", ... },
+ *     gitClean: true,
+ *     gitleaksPassed: true
+ *   }
+ */
+export interface GateG5Context extends GateContext {
+  /** 所有任务卡列表（G-5 校验 status 全为 completed） */
+  readonly allTaskCards: ReadonlyArray<TaskCard>;
+  /** 最终 STRICT 评估报告（G-5 校验 verdict=pass） */
+  readonly finalEvaluationReport: Readonly<EvaluationReport>;
+  /** git 工作区是否干净（无未提交变更） */
+  readonly gitClean: boolean;
+  /** gitleaks 扫描是否通过（无密钥泄露） */
+  readonly gitleaksPassed: boolean;
+}

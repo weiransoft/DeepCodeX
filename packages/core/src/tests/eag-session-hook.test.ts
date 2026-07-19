@@ -616,3 +616,309 @@ test("E14. 评估器 evaluate 抛异常时 simulateEvaluatorHook 降级为 null"
   const verdict = await simulateEvaluatorHook(evaluator, redlines, "内容");
   assert.equal(verdict, null, "评估器异常时应降级为 null，不阻塞主流程");
 });
+
+// ============================================================================
+// F. EAG-P2 批次 9 S5：/eag-build 命令外挂 hook 测试（§4.9.3）
+// ============================================================================
+//
+// 本节验证 EAG-P2 批次 9 S5 在 session.ts 中新增的 /eag-build 命令分支：
+// - isEagBuildPrompt 命令判定逻辑
+// - handleEagBuildCommand 依赖校验与错误处理
+// - extractCodingLoopRequest 元数据提取
+// - renderCodingLoopResult 结果渲染
+// - SessionManagerOptions 新增字段（codingOrchestrator / pkcAccessor）正确传递
+// - UserPromptContent 新增 messageParams 字段正确传递
+//
+// 设计依据：
+// - EAG-P2 批次 9 设计 §4.9.3 新增 Hook 点设计
+// - session.ts isEagBuildPrompt / handleEagBuildCommand / extractCodingLoopRequest / renderCodingLoopResult
+// - 向后兼容保证（§4.9.4）：未注入 codingOrchestrator 时零影响
+
+/**
+ * 构造测试用最小 CodingLoopRequest 占位对象
+ *
+ * 用于测试 extractCodingLoopRequest 的字段校验逻辑。
+ * 注：此对象仅用于校验通过，不可真正传给 CodingOrchestrator.run()。
+ */
+function createMinimalCodingLoopRequestPlaceholder(): Record<string, unknown> {
+  return {
+    projectRoot: "/test/project",
+    specContent: "spec",
+    planContent: "plan",
+    tasksContent: "tasks",
+    taskDag: { nodes: [], topologicalOrder: [] },
+    taskCards: [],
+    techStack: ["TypeScript"],
+    constitutionContent: "constitution",
+    llmClient: { createMessage: () => ({}), providerName: "test" },
+    pkcAccessor: { queryL1GlobalView: () => ({}), searchL2: () => [], queryL3BusinessKnowledge: () => ({}) },
+    loopGuard: {
+      check: () => ({ allowed: true }),
+      recordIteration: () => {},
+      getConfig: () => ({
+        maxIterations: 10,
+        maxTokens: 100000,
+        maxConsecutiveFailures: 3,
+        initialBackoffMs: 1000,
+        maxBackoffMs: 30000,
+        backoffMultiplier: 2,
+        jitterRatio: 0.1,
+      }),
+      getState: () => ({
+        iterationsCompleted: 0,
+        tokensConsumed: 0,
+        consecutiveFailures: 0,
+        totalFailures: 0,
+        backoffLevel: 0,
+      }),
+    },
+    maxIterations: 10,
+    maxFixRounds: 3,
+  };
+}
+
+test("F15. isEagBuildPrompt 对 /eag-build 命令返回 true（命令判定逻辑）", () => {
+  // 验证：isEagBuildPrompt 能正确识别 /eag-build 命令
+  // 通过构造 SessionManager 实例，调用其私有方法 isEagBuildPrompt
+  const manager = new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({ client: null, model: "test-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+  });
+  // 通过 any 访问私有方法（与既有测试模式一致）
+  const internal = manager as any;
+
+  // 正确命令格式
+  assert.equal(internal.isEagBuildPrompt({ text: "/eag-build" }), true);
+  assert.equal(internal.isEagBuildPrompt({ text: "  /eag-build  " }), true);
+  // 非命令格式
+  assert.equal(internal.isEagBuildPrompt({ text: "请帮我执行 /eag-build" }), false);
+  assert.equal(internal.isEagBuildPrompt({ text: "/eag-build arg" }), false);
+  assert.equal(internal.isEagBuildPrompt({ text: "/eag-design" }), false);
+  assert.equal(internal.isEagBuildPrompt({ text: undefined }), false);
+  // 含图片或技能时不识别为命令（避免误触发）
+  assert.equal(internal.isEagBuildPrompt({ text: "/eag-build", imageUrls: ["data:image/png;base64,..."] }), false);
+  assert.equal(
+    internal.isEagBuildPrompt({ text: "/eag-build", skills: [{ name: "test", path: "/", description: "" }] }),
+    false
+  );
+});
+
+test("F16. 未注入 codingOrchestrator 时 SessionManager 正常构造（向后兼容，§4.9.4）", () => {
+  // 验证：未注入 codingOrchestrator / pkcAccessor 时 SessionManager 仍可正常构造
+  // （向后兼容保证，V2 526 测试零回归，§4.9.4）
+  const manager = new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({ client: null, model: "test-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+    // 不传入 codingOrchestrator / pkcAccessor
+  });
+
+  assert.ok(manager instanceof SessionManager);
+  // 验证未注入时字段为 undefined
+  const internal = manager as any;
+  assert.equal(internal.codingOrchestrator, undefined, "未注入时 codingOrchestrator 应为 undefined");
+  assert.equal(internal.pkcAccessor, undefined, "未注入时 pkcAccessor 应为 undefined");
+});
+
+test("F17. 注入 codingOrchestrator / pkcAccessor 时字段正确传递（§4.9.3）", () => {
+  // 验证：SessionManager 构造函数正确赋值 EAG-P2 批次 9 S5 新增字段
+  const fakeOrchestrator = { run: () => ({}) } as any;
+  const fakePkcAccessor = {
+    queryL1GlobalView: () => ({}),
+    searchL2: () => [],
+    queryL3BusinessKnowledge: () => ({}),
+  } as any;
+
+  const manager = new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({ client: null, model: "test-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+    // EAG-P2 批次 9 S5 新增字段
+    codingOrchestrator: fakeOrchestrator,
+    pkcAccessor: fakePkcAccessor,
+  });
+
+  const internal = manager as any;
+  assert.equal(internal.codingOrchestrator, fakeOrchestrator, "codingOrchestrator 字段应正确传递");
+  assert.equal(internal.pkcAccessor, fakePkcAccessor, "pkcAccessor 字段应正确传递");
+});
+
+test("F18. handleEagBuildCommand 未注入 codingOrchestrator 时通知错误并标记 failed", async () => {
+  // 验证 handleEagBuildCommand 的依赖校验逻辑（session.ts §handleEagBuildCommand 步骤 1）：
+  // 未注入 codingOrchestrator → 通知用户配置缺失，更新 session 状态为 failed
+  const messages: string[] = [];
+  const manager = new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({ client: null, model: "test-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: (message: any) => messages.push(message.content),
+    // 不注入 codingOrchestrator
+  });
+
+  // 通过 any 访问私有方法
+  const internal = manager as any;
+
+  // 调用 handleEagBuildCommand
+  await internal.handleEagBuildCommand("test-session-id", { text: "/eag-build" }, new AbortController());
+
+  // 验证：通知消息含"未注入"字样
+  assert.ok(messages.length > 0, "应发送至少一条通知消息");
+  assert.ok(
+    messages.some((m) => m.includes("CODING Loop 编排器未注入")),
+    `通知消息应含"CODING Loop 编排器未注入"，实际为：${messages.join("\n")}`
+  );
+});
+
+test("F19. handleEagBuildCommand 未提供 CodingLoopRequest 时通知错误（§4.9.3）", async () => {
+  // 验证 handleEagBuildCommand 的请求装配逻辑（session.ts §handleEagBuildCommand 步骤 2）：
+  // 已注入 codingOrchestrator 但未通过 messageParams 提供 CodingLoopRequest → 通知用户配置缺失
+  const fakeOrchestrator = { run: () => ({}) } as any;
+  const fakePkcAccessor = {
+    queryL1GlobalView: () => ({}),
+    searchL2: () => [],
+    queryL3BusinessKnowledge: () => ({}),
+  } as any;
+  const messages: string[] = [];
+
+  const manager = new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({ client: null, model: "test-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: (message: any) => messages.push(message.content),
+    codingOrchestrator: fakeOrchestrator,
+    pkcAccessor: fakePkcAccessor,
+  });
+
+  const internal = manager as any;
+  // 不通过 messageParams 提供 CodingLoopRequest
+  await internal.handleEagBuildCommand("test-session-id", { text: "/eag-build" }, new AbortController());
+
+  // 验证：通知消息含"CodingLoopRequest 未提供"字样
+  assert.ok(messages.length > 0, "应发送至少一条通知消息");
+  assert.ok(
+    messages.some((m) => m.includes("CodingLoopRequest 未提供")),
+    `通知消息应含"CodingLoopRequest 未提供"，实际为：${messages.join("\n")}`
+  );
+});
+
+test("F20. extractCodingLoopRequest 正确提取并校验 CodingLoopRequest 字段", () => {
+  // 验证 extractCodingLoopRequest 的字段校验逻辑（session.ts §extractCodingLoopRequest）：
+  // 1. messageParams 为 undefined/null → 返回 undefined
+  // 2. messageParams.codingLoopRequest 缺失 → 返回 undefined
+  // 3. messageParams.codingLoopRequest 字段不完整 → 返回 undefined
+  // 4. messageParams.codingLoopRequest 字段完整 → 返回 CodingLoopRequest 对象
+  const manager = new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({ client: null, model: "test-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+  });
+  const internal = manager as any;
+
+  // 情况 1：messageParams 为 undefined
+  assert.equal(internal.extractCodingLoopRequest({ text: "/eag-build" }), undefined);
+  // 情况 1：messageParams 为 null
+  assert.equal(internal.extractCodingLoopRequest({ text: "/eag-build", messageParams: null }), undefined);
+  // 情况 1：messageParams 为空对象
+  assert.equal(internal.extractCodingLoopRequest({ text: "/eag-build", messageParams: {} }), undefined);
+  // 情况 2：codingLoopRequest 字段缺失
+  assert.equal(internal.extractCodingLoopRequest({ text: "/eag-build", messageParams: { other: "value" } }), undefined);
+  // 情况 3：codingLoopRequest 字段不完整（缺 projectRoot）
+  assert.equal(
+    internal.extractCodingLoopRequest({
+      text: "/eag-build",
+      messageParams: { codingLoopRequest: { specContent: "spec" } },
+    }),
+    undefined
+  );
+  // 情况 4：codingLoopRequest 字段完整 → 返回对象
+  const validRequest = createMinimalCodingLoopRequestPlaceholder();
+  const extracted = internal.extractCodingLoopRequest({
+    text: "/eag-build",
+    messageParams: { codingLoopRequest: validRequest },
+  });
+  assert.ok(extracted, "字段完整时应返回 CodingLoopRequest 对象");
+  assert.equal(extracted.projectRoot, "/test/project");
+  assert.equal(extracted.specContent, "spec");
+  assert.equal(extracted.maxIterations, 10);
+});
+
+test("F21. renderCodingLoopResult 正确渲染结果摘要（§4.9.3）", () => {
+  // 验证 renderCodingLoopResult 的渲染逻辑（session.ts §renderCodingLoopResult）：
+  // 1. 包含最终状态
+  // 2. 包含任务卡执行统计
+  // 3. 包含任务卡执行明细
+  // 4. 包含生成文件清单（前 10 个）
+  // 5. 包含失败原因（若存在）
+  const manager = new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({ client: null, model: "test-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+  });
+  const internal = manager as any;
+
+  // 构造测试用 CodingLoopResult
+  const result = Object.freeze({
+    taskResults: Object.freeze([
+      Object.freeze({
+        taskCardId: "T-001",
+        skeleton: { files: [], templateVariables: {}, fillPlaceholders: [], durationMs: 10 },
+        fill: { filledFiles: [], fillStatus: [], llmCallCount: 1, totalTokensUsed: 100, durationMs: 20 },
+        finalEvaluation: {
+          verdict: "pass",
+          redlineResults: [],
+          blockerCount: 0,
+          majorCount: 0,
+          warningCount: 0,
+          durationMs: 5,
+        },
+        status: "completed",
+        iterations: 1,
+      }),
+    ]),
+    allGeneratedFiles: Object.freeze([
+      {
+        relativePath: "src/domain/order/OrderAggregate.ts",
+        content: "...",
+        kind: "aggregate",
+        taskId: "T-001",
+        requirementId: "F-001",
+      },
+    ]),
+    totalIterations: 1,
+    totalLlmCallCount: 1,
+    totalTokensUsed: 100,
+    durationSec: 5,
+    finalStatus: "completed",
+    blockedReason: undefined,
+  });
+
+  const summary: string = internal.renderCodingLoopResult(result);
+
+  // 验证渲染内容
+  assert.ok(summary.includes("[EAG CODING Loop]"), "应包含标题");
+  assert.ok(summary.includes("最终状态: completed"), "应包含最终状态");
+  assert.ok(summary.includes("任务卡数: 1"), "应包含任务卡数量");
+  assert.ok(summary.includes("T-001"), "应包含任务卡 ID");
+  assert.ok(summary.includes("src/domain/order/OrderAggregate.ts"), "应包含生成文件路径");
+  // blockedReason 为 undefined 时不应渲染终止原因
+  assert.ok(!summary.includes("终止原因"), "blockedReason 为 undefined 时不应渲染终止原因");
+
+  // 验证失败场景：含 blockedReason
+  const failedResult = { ...result, finalStatus: "failed", blockedReason: "G-5 门禁失败" };
+  const failedSummary: string = internal.renderCodingLoopResult(failedResult);
+  assert.ok(failedSummary.includes("最终状态: failed"), "应渲染失败状态");
+  assert.ok(failedSummary.includes("终止原因: G-5 门禁失败"), "应渲染终止原因");
+});

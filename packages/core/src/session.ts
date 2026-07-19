@@ -64,6 +64,10 @@ import type {
   EvaluationReport,
   EvaluationVerdict,
 } from "./eag/evaluator/types";
+// EAG-P2 批次 9 S5 新增导入：CODING Loop 编排器外挂（§4.7 / §4.9）
+// 注：仅导入类型与类，未注入 codingOrchestrator 时零开销（向后兼容，§4.9.4）
+import type { CodingOrchestrator } from "./eag/coding";
+import type { CodingLoopRequest, CodingLoopResult, PkcAccessor } from "./eag/coding/types";
 
 export type { PermissionScope } from "./settings";
 export type {
@@ -343,6 +347,16 @@ export type UserPromptContent = {
   permissions?: UserToolPermission[];
   alwaysAllows?: PermissionScope[];
   planMode?: boolean;
+  /**
+   * EAG-P2 批次 9 S5：自定义元数据（可选，§4.9.3）
+   *
+   * 用于在 `/eag-build` 命令中透传 CodingLoopRequest 等编排参数。
+   * 调用方通过 `messageParams.codingLoopRequest` 传入预装配的请求。
+   *
+   * 注：此字段为通用元数据容器，不强制 schema 校验（由消费方自行校验字段）。
+   * 既有命令路径（/continue、/plan 等）不读取此字段，向后兼容。
+   */
+  messageParams?: Record<string, unknown> | null;
 };
 
 export type SkillInfo = {
@@ -414,6 +428,28 @@ type SessionManagerOptions = {
    * - RLIS 三层规则转换的红线（ruleStore.formatForEvaluator()，EAG-P0 起）
    */
   evaluatorRedlines?: ReadonlyArray<RedlineDefinition>;
+  /**
+   * EAG-P2 批次 9 S5：CODING Loop 编排器（可选注入，§4.7 / §4.9.2）
+   *
+   * 未注入时 `/eag-build` 命令不可用，主对话循环行为完全不变（向后兼容，§4.9.4）。
+   * 注入后，在主对话循环检测到 `/eag-build` 命令时外挂调用 handleEagBuildCommand，
+   * 路由到 CodingOrchestrator.run() 执行 Phase A → B → STRICT → FIX 完整闭环。
+   *
+   * 配套依赖：pkcAccessor 必须同时注入（CodingOrchestrator 通过 ContextAssembler 访问 PKC）。
+   *
+   * 不可变优先（§5.12.4 G-A6d）：构造后字段不可变，循环内不可被 LLM 修改。
+   */
+  codingOrchestrator?: CodingOrchestrator;
+  /**
+   * EAG-P2 批次 9 S5：PKC 知识库访问器（可选注入，§4.9.3）
+   *
+   * 未注入时 CODING Loop 不可用（CodingOrchestrator 构造需 ContextAssembler，
+   * ContextAssembler 需 PkcAccessor 注入）。
+   * 注入后，作为 CodingLoopRequest.pkcAccessor 传入编排器。
+   *
+   * 与 codingOrchestrator 配套使用，单独注入无效。
+   */
+  pkcAccessor?: PkcAccessor;
 };
 
 export type LlmStreamProgress = {
@@ -454,6 +490,9 @@ export class SessionManager {
   private readonly evaluator?: IndependentEvaluator;
   private readonly loopGuard?: LoopGuard;
   private readonly evaluatorRedlines?: ReadonlyArray<RedlineDefinition>;
+  // EAG-P2 批次 9 S5 外挂字段（可选注入，未注入时 /eag-build 命令不可用，§4.7 / §4.9）
+  private readonly codingOrchestrator?: CodingOrchestrator;
+  private readonly pkcAccessor?: PkcAccessor;
 
   constructor(options: SessionManagerOptions) {
     this.projectRoot = options.projectRoot;
@@ -476,6 +515,9 @@ export class SessionManager {
     this.evaluator = options.evaluator;
     this.loopGuard = options.loopGuard;
     this.evaluatorRedlines = options.evaluatorRedlines;
+    // EAG-P2 批次 9 S5 外挂字段赋值（可选注入，未注入时 /eag-build 命令不可用）
+    this.codingOrchestrator = options.codingOrchestrator;
+    this.pkcAccessor = options.pkcAccessor;
   }
 
   /**
@@ -1619,6 +1661,14 @@ ${agentInstructions}
       return;
     }
 
+    // EAG-P2 批次 9 S5：/eag-build 命令分支（§4.9.3 增量外挂）
+    // 未注入 codingOrchestrator 时回退到普通对话流程（向后兼容，§4.9.4）
+    if (this.isEagBuildPrompt(userPrompt)) {
+      this.activeSessionId = sessionId;
+      await this.handleEagBuildCommand(sessionId, userPrompt, controller);
+      return;
+    }
+
     this.reportNewPrompt();
 
     this.ensureFileHistorySession(sessionId);
@@ -1657,6 +1707,253 @@ ${agentInstructions}
       (!userPrompt.imageUrls || userPrompt.imageUrls.length === 0) &&
       (!userPrompt.skills || userPrompt.skills.length === 0)
     );
+  }
+
+  /**
+   * EAG-P2 批次 9 S5：判断用户输入是否为 `/eag-build` 命令（§4.9.3）
+   *
+   * 判定规则：
+   * - text 为字符串且 trim 后等于 `/eag-build`
+   * - 无图片附件
+   * - 无技能匹配
+   *
+   * 与 isContinuePrompt 风格保持一致（最小化命令判定，避免误触发）。
+   *
+   * @param userPrompt 用户输入内容
+   * @returns 是否为 /eag-build 命令
+   */
+  private isEagBuildPrompt(userPrompt: UserPromptContent): boolean {
+    return (
+      typeof userPrompt.text === "string" &&
+      userPrompt.text.trim() === "/eag-build" &&
+      (!userPrompt.imageUrls || userPrompt.imageUrls.length === 0) &&
+      (!userPrompt.skills || userPrompt.skills.length === 0)
+    );
+  }
+
+  /**
+   * EAG-P2 批次 9 S5：处理 `/eag-build` 命令，触发 CODING Loop 编排（§4.9.3）
+   *
+   * 算法（对齐 §4.9.3 伪代码 + 架构师关键修正"session.ts 改动最小化"）：
+   * 1. 校验外挂依赖：codingOrchestrator + pkcAccessor + loopGuard 必须同时注入
+   *    未注入 → 通过 onAssistantMessage 通知用户配置缺失，不抛异常（向后兼容）
+   * 2. 装配 CodingLoopRequest（从 userPrompt.alwaysAllows 等元数据透传，本批次最小化）
+   *    注：调用方需通过 SessionManagerOptions 注入 codingOrchestrator 时绑定默认请求工厂
+   *    本批次采用简化方案：将请求参数装配职责留给上层（设计文档 §4.9.3 伪代码仅供参考）
+   *    本方法仅接受 sessionId 与一个可选的 CodingLoopRequest（由调用方预装配）
+   *    未提供 request 时通知用户配置缺失
+   * 3. 调用 codingOrchestrator.run(request) 执行 CODING Loop
+   *    异常路径：catch 后通知用户错误，更新 session 状态为 failed
+   * 4. 渲染结果：通过 onAssistantMessage 发送结果摘要（含 finalStatus + 统计 + blockedReason）
+   * 5. 更新 session 状态为 completed/failed（依据 result.finalStatus）
+   *
+   * 不可变优先（§5.12.4 G-A6d）：
+   * - request 字段使用 Readonly 包裹
+   * - result 通过 Object.freeze 由 CodingOrchestrator 内部冻结
+   *
+   * @param sessionId 会话 ID
+   * @param userPrompt 用户输入（仅用于写入用户消息历史，不参与编排）
+   * @param controller 中断控制器（用于响应 abort 信号）
+   */
+  private async handleEagBuildCommand(
+    sessionId: string,
+    userPrompt: UserPromptContent,
+    controller?: AbortController
+  ): Promise<void> {
+    const signal = controller?.signal;
+    this.throwIfAborted(signal);
+
+    const now = new Date().toISOString();
+    // 记录用户输入到消息历史（保持会话上下文完整）
+    const userMessage = this.buildUserMessage(sessionId, userPrompt);
+    this.appendSessionMessage(sessionId, userMessage);
+
+    // 更新 session 状态为 processing
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: "processing",
+      failReason: null,
+      updateTime: now,
+    }));
+
+    // 步骤 1：校验外挂依赖
+    if (!this.codingOrchestrator) {
+      // 未注入 codingOrchestrator → 通知用户配置缺失，更新 session 状态为 failed
+      const errMsg =
+        "CODING Loop 编排器未注入：请在 SessionManagerOptions.codingOrchestrator 配置后重启（参考 §4.9.3）";
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: errMsg,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG CODING Loop] ${errMsg}`, null), false);
+      return;
+    }
+    if (!this.pkcAccessor) {
+      const errMsg = "PKC 知识库访问器未注入：请在 SessionManagerOptions.pkcAccessor 配置后重启（参考 §4.9.3）";
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: errMsg,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG CODING Loop] ${errMsg}`, null), false);
+      return;
+    }
+
+    // 步骤 2：装配 CodingLoopRequest
+    // 本方法采用最小化设计：通过 userPrompt.messageParams（自定义元数据）传入预装配的 request
+    // 调用方负责在创建会话时通过 messageParams 传入 CodingLoopRequest 实例
+    // 这种设计避免 session.ts 直接读取 spec.md/plan.md/tasks.md 等文件（保持职责单一）
+    const request = this.extractCodingLoopRequest(userPrompt);
+    if (!request) {
+      const errMsg =
+        "CodingLoopRequest 未提供：请通过 userPrompt.messageParams.codingLoopRequest 传入预装配的编排请求（参考 §4.9.3）";
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: errMsg,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG CODING Loop] ${errMsg}`, null), false);
+      return;
+    }
+
+    // 步骤 3：调用 codingOrchestrator.run(request) 执行 CODING Loop
+    let result: CodingLoopResult;
+    try {
+      result = await this.codingOrchestrator.run(request);
+    } catch (e) {
+      // 编排器异常 → 通知用户错误，更新 session 状态为 failed
+      const errMsg = e instanceof Error ? e.message : String(e);
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: `CODING Loop 编排异常：${errMsg}`,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(
+        this.buildAssistantMessage(
+          sessionId,
+          `[EAG CODING Loop] 编排异常：${errMsg}\n请检查依赖组件（SkeletonGenerator/ContextAssembler/LlmFiller/StrictEvaluator/FixLoop/GateG4Checker/GateG5Checker）配置是否正确。`,
+          null
+        ),
+        false
+      );
+      return;
+    }
+
+    // 步骤 4：渲染结果摘要（含 finalStatus + 统计 + blockedReason）
+    const summary = this.renderCodingLoopResult(result);
+    this.onAssistantMessage(this.buildAssistantMessage(sessionId, summary, null), false);
+
+    // 步骤 5：更新 session 状态（依据 result.finalStatus）
+    const isSuccess = result.finalStatus === "completed";
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: isSuccess ? "completed" : "failed",
+      failReason: isSuccess ? null : `CODING Loop 终止：${result.blockedReason ?? result.finalStatus}`,
+      updateTime: new Date().toISOString(),
+    }));
+  }
+
+  /**
+   * 从 userPrompt.messageParams 提取预装配的 CodingLoopRequest（§4.9.3）
+   *
+   * 设计原则：session.ts 不直接读取 spec.md/plan.md/tasks.md，保持职责单一。
+   * 调用方通过 userPrompt.messageParams.codingLoopRequest 传入预装配的请求。
+   *
+   * @param userPrompt 用户输入（含 messageParams 元数据）
+   * @returns 预装配的 CodingLoopRequest；未提供时返回 undefined
+   */
+  private extractCodingLoopRequest(userPrompt: UserPromptContent): CodingLoopRequest | undefined {
+    const params = userPrompt.messageParams as Record<string, unknown> | null | undefined;
+    if (!params || typeof params !== "object") {
+      return undefined;
+    }
+    const request = params.codingLoopRequest;
+    if (!request || typeof request !== "object") {
+      return undefined;
+    }
+    // 基本字段校验（避免类型断言误用）
+    const candidate = request as Partial<CodingLoopRequest>;
+    if (
+      typeof candidate.projectRoot === "string" &&
+      typeof candidate.specContent === "string" &&
+      typeof candidate.planContent === "string" &&
+      typeof candidate.tasksContent === "string" &&
+      candidate.taskDag &&
+      Array.isArray(candidate.taskDag.nodes) &&
+      Array.isArray(candidate.taskDag.topologicalOrder) &&
+      Array.isArray(candidate.taskCards) &&
+      Array.isArray(candidate.techStack) &&
+      typeof candidate.constitutionContent === "string" &&
+      candidate.llmClient &&
+      candidate.pkcAccessor &&
+      candidate.loopGuard &&
+      typeof candidate.maxIterations === "number" &&
+      typeof candidate.maxFixRounds === "number"
+    ) {
+      return candidate as CodingLoopRequest;
+    }
+    return undefined;
+  }
+
+  /**
+   * 渲染 CodingLoopResult 为可读的摘要文本（§4.9.3）
+   *
+   * 渲染内容：
+   * - 最终状态（completed/failed/human-checkpoint）
+   * - 任务卡执行统计（任务数、迭代次数、LLM 调用次数、token 消耗、耗时）
+   * - 各任务卡状态明细（taskCardId → status + verdict）
+   * - 失败原因（blockedReason，若存在）
+   *
+   * @param result CODING Loop 编排产出
+   * @returns 可读的摘要文本
+   */
+  private renderCodingLoopResult(result: Readonly<CodingLoopResult>): string {
+    const lines: string[] = [];
+    lines.push("[EAG CODING Loop] 编排完成");
+    lines.push(`最终状态: ${result.finalStatus}`);
+    lines.push(
+      `任务卡数: ${result.taskResults.length}，迭代次数: ${result.totalIterations}，` +
+        `LLM 调用次数: ${result.totalLlmCallCount}，token 消耗: ${result.totalTokensUsed}，耗时: ${result.durationSec}s`
+    );
+
+    // 各任务卡状态明细
+    if (result.taskResults.length > 0) {
+      lines.push("");
+      lines.push("任务卡执行明细:");
+      for (const taskResult of result.taskResults) {
+        const verdict = taskResult.finalEvaluation?.verdict ?? "n/a";
+        lines.push(
+          `  - ${taskResult.taskCardId}: status=${taskResult.status}, verdict=${verdict}, ` +
+            `iterations=${taskResult.iterations}`
+        );
+      }
+    }
+
+    // 生成文件清单（仅展示前 10 个，避免输出过长）
+    if (result.allGeneratedFiles.length > 0) {
+      lines.push("");
+      lines.push(`生成文件 (${result.allGeneratedFiles.length} 个):`);
+      const fileLimit = Math.min(result.allGeneratedFiles.length, 10);
+      for (let i = 0; i < fileLimit; i++) {
+        lines.push(`  - ${result.allGeneratedFiles[i].relativePath}`);
+      }
+      if (result.allGeneratedFiles.length > fileLimit) {
+        lines.push(`  ...（其余 ${result.allGeneratedFiles.length - fileLimit} 个文件已省略）`);
+      }
+    }
+
+    // 失败原因
+    if (result.blockedReason) {
+      lines.push("");
+      lines.push(`终止原因: ${result.blockedReason}`);
+    }
+
+    return lines.join("\n");
   }
 
   async activateSession(
@@ -2969,6 +3266,8 @@ ${agentInstructions}
       permissions: prompt.permissions ? prompt.permissions.map((permission) => ({ ...permission })) : undefined,
       alwaysAllows: prompt.alwaysAllows ? [...prompt.alwaysAllows] : undefined,
       planMode: prompt.planMode,
+      // EAG-P2 批次 9 S5：透传 messageParams 元数据（含 codingLoopRequest 等）
+      messageParams: prompt.messageParams ? { ...prompt.messageParams } : undefined,
     };
   }
 
