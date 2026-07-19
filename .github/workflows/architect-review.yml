@@ -1,0 +1,215 @@
+name: Architect Review
+
+# ==============================================================================
+# 架构师 adversarial-verify 自动触发工作流（EAG-P3 批次 12 C3）
+#
+# 触发条件（对齐设计文档 §5.1 D-C3-4 ~ D-C3-8 / §5.5）：
+#   1. PR 标签 `needs-architect-review`（人工显式触发）
+#   2. 修改 docs/enterprise/*.md 文件（架构设计文档变更必须审查）
+#   3. 修改 packages/core/src/eag/ 目录下文件 ≥10 个（大规模 EAG 代码改动）
+#   4. workflow_dispatch 手动触发（用于复审）
+#
+# 工作流行为：
+#   - 满足任一触发条件时，运行架构师 adversarial-verify
+#   - 输出 Markdown 报告作为 PR 评论（D-C3-15）
+#   - 若 npx deepcode architect-review 命令未实现，则 graceful degradation，
+#     仅输出触发原因摘要（不阻塞 PR 合并）
+# ==============================================================================
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - "docs/enterprise/*.md"
+      - "packages/core/src/eag/**"
+      - ".github/workflows/architect-review.yml"
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to review"
+        required: true
+        type: string
+
+jobs:
+  trigger-review:
+    name: Trigger Architect adversarial-verify
+    runs-on: ubuntu-latest
+    # 仅在满足触发条件时运行（具体判定在 Detect Trigger Condition step 中完成）
+    # workflow_dispatch 总是允许运行；pull_request 事件类型总是允许进入 workflow，
+    # 然后由 detect step 判定是否真正触发审查
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 获取完整 git 历史用于变更统计
+
+      # --------------------------------------------------------------------------
+      # Step 1: 检测触发条件
+      # --------------------------------------------------------------------------
+      # 输出 4 个 outputs：
+      #   - trigger:     'true' / 'false'（是否触发审查）
+      #   - reason:      触发原因（pr-label / docs-enterprise-changed / eag-large-change / manual）
+      #   - labels:      PR 标签列表
+      #   - docs_changes: docs/enterprise/ 变更文件数
+      #   - eag_changes:  packages/core/src/eag/ 变更文件数
+      - name: Detect Trigger Condition
+        id: detect
+        run: |
+          set +e
+          # ---------- 条件 1：PR 标签 needs-architect-review ----------
+          # 从 GitHub event payload 中提取 PR 标签列表
+          LABELS=""
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            LABELS=$(jq -r '.pull_request.labels[].name' "$GITHUB_EVENT_PATH" 2>/dev/null | tr '\n' ',')
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # workflow_dispatch 触发时，PR 标签无法直接获取，置空
+            LABELS=""
+          fi
+          # 标签尾部多余逗号去除
+          LABELS="${LABELS%,}"
+          echo "labels=${LABELS}" >> $GITHUB_OUTPUT
+
+          # ---------- 条件 2 & 3：变更文件统计 ----------
+          # 仅在 pull_request 事件中统计（workflow_dispatch 通常无对比基准）
+          DOCS_CHANGES=0
+          EAG_CHANGES=0
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # 使用 origin/main...HEAD 获取 PR 相对 main 的全部变更
+            DOCS_CHANGES=$(git diff --name-only origin/main...HEAD 2>/dev/null | grep -c "^docs/enterprise/.*\.md$" || true)
+            EAG_CHANGES=$(git diff --name-only origin/main...HEAD 2>/dev/null | grep -c "^packages/core/src/eag/" || true)
+          fi
+          echo "docs_changes=${DOCS_CHANGES}" >> $GITHUB_OUTPUT
+          echo "eag_changes=${EAG_CHANGES}" >> $GITHUB_OUTPUT
+
+          # ---------- 触发判定 ----------
+          TRIGGER="false"
+          REASON=""
+
+          # 条件 0：workflow_dispatch 手动触发
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TRIGGER="true"
+            REASON="manual"
+          # 条件 1：PR 标签 needs-architect-review
+          elif echo "${LABELS}" | grep -q "needs-architect-review"; then
+            TRIGGER="true"
+            REASON="pr-label"
+          # 条件 2：修改 docs/enterprise/*.md
+          elif [ "${DOCS_CHANGES}" -gt 0 ]; then
+            TRIGGER="true"
+            REASON="docs-enterprise-changed"
+          # 条件 3：修改 packages/core/src/eag/ ≥10 文件
+          elif [ "${EAG_CHANGES}" -ge 10 ]; then
+            TRIGGER="true"
+            REASON="eag-large-change"
+          fi
+
+          echo "trigger=${TRIGGER}" >> $GITHUB_OUTPUT
+          echo "reason=${REASON}" >> $GITHUB_OUTPUT
+
+          echo "===== 触发条件检测结果 ====="
+          echo "  event_name:    ${{ github.event_name }}"
+          echo "  labels:        ${LABELS}"
+          echo "  docs_changes:  ${DOCS_CHANGES}"
+          echo "  eag_changes:   ${EAG_CHANGES}"
+          echo "  trigger:       ${TRIGGER}"
+          echo "  reason:        ${REASON}"
+
+      # --------------------------------------------------------------------------
+      # Step 2: 运行架构师 adversarial-verify
+      # --------------------------------------------------------------------------
+      # 调用 npx deepcode architect-review 命令生成审查报告
+      # 若命令不存在则 graceful degradation，仅生成触发原因摘要报告
+      - name: Run Architect adversarial-verify
+        if: steps.detect.outputs.trigger == 'true'
+        run: |
+          set +e
+          REASON="${{ steps.detect.outputs.reason }}"
+          LABELS="${{ steps.detect.outputs.labels }}"
+          DOCS_CHANGES="${{ steps.detect.outputs.docs_changes }}"
+          EAG_CHANGES="${{ steps.detect.outputs.eag_changes }}"
+
+          echo "🏗️ 触发架构师审查"
+          echo "触发原因：${REASON}"
+          echo "PR 标签：${LABELS}"
+          echo "docs/enterprise/ 变更数：${DOCS_CHANGES}"
+          echo "packages/core/src/eag/ 变更数：${EAG_CHANGES}"
+
+          # 尝试调用 deepcode CLI 的 architect-review 子命令
+          # 若命令不存在则 graceful degradation（对齐 §5.9 风险表）
+          PR_NUMBER="${{ github.event.pull_request.number || github.event.inputs.pr_number }}"
+
+          if [ -z "${PR_NUMBER}" ]; then
+            echo "⚠️ 未获取到 PR 编号，跳过 architect-review 调用"
+            cat > architect-review-report.md <<EOF
+          # 🏗️ 架构师 adversarial-verify 报告（待人工审查）
+
+          - **触发原因**：${REASON}
+          - **PR 标签**：${LABELS}
+          - **docs/enterprise/ 变更数**：${DOCS_CHANGES}
+          - **packages/core/src/eag/ 变更数**：${EAG_CHANGES}
+
+          > ⚠️ 未获取到 PR 编号，无法自动调用 deepcode architect-review。
+          > 请人工运行：\`npx deepcode architect-review --pr <PR_NUMBER>\`
+          EOF
+          else
+            # 调用 deepcode CLI（graceful degradation：若命令不存在，仅生成摘要报告）
+            npx deepcode architect-review \
+              --pr "${PR_NUMBER}" \
+              --reason "${REASON}" \
+              --output-format markdown > architect-review-report.md 2> architect-review-error.log
+
+            CLI_EXIT=$?
+            if [ ${CLI_EXIT} -ne 0 ]; then
+              echo "⚠️ npx deepcode architect-review 调用失败（退出码 ${CLI_EXIT}），进入 graceful degradation 模式"
+              cat architect-review-error.log
+              cat > architect-review-report.md <<EOF
+          # 🏗️ 架构师 adversarial-verify 报告（待人工审查）
+
+          - **触发原因**：${REASON}
+          - **PR 标签**：${LABELS}
+          - **docs/enterprise/ 变更数**：${DOCS_CHANGES}
+          - **packages/core/src/eag/ 变更数**：${EAG_CHANGES}
+          - **PR 编号**：${PR_NUMBER}
+
+          > ⚠️ \`npx deepcode architect-review\` 命令调用失败（退出码 ${CLI_EXIT}）。
+          > 可能原因：deepcode CLI 未实现该子命令，或运行时异常。
+          > 请人工运行：\`npx deepcode architect-review --pr ${PR_NUMBER}\`，
+          > 或参照 \`docs/enterprise/EAG-P3-BATCH12-DESIGN.md\` 第 5 章进行手动审查。
+          EOF
+            fi
+          fi
+
+          echo "===== 架构师审查报告 ====="
+          cat architect-review-report.md
+
+      # --------------------------------------------------------------------------
+      # Step 3: 发布 PR 评论（对齐 D-C3-15）
+      # --------------------------------------------------------------------------
+      - name: Post Review as PR Comment
+        if: steps.detect.outputs.trigger == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('architect-review-report.md', 'utf-8');
+            const reason = '${{ steps.detect.outputs.reason }}';
+            const prNumber = context.payload.pull_request?.number
+              || parseInt(context.payload.inputs?.pr_number, 10);
+
+            if (!prNumber) {
+              core.warning('未获取到 PR 编号，跳过创建评论');
+              return;
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: `## 🏗️ 架构师 adversarial-verify 报告
+
+            触发原因：\`${reason}\`
+
+            ${report}`
+            });

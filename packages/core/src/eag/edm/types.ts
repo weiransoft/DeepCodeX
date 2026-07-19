@@ -278,50 +278,22 @@ export const EDM_REDLINE_SEVERITY_MAP: Readonly<Record<EdmRedlineId, EdmRedlineS
 });
 
 // ============================================================================
-// 6. 深度冻结辅助函数
+// 6. 深度冻结辅助函数（从 tcs/types re-export，统一类型源头）
 // ============================================================================
 
 /**
- * 深度冻结对象（递归冻结所有嵌套对象与数组）
+ * 深度冻结对象（递归冻结所有嵌套对象与数组）—— 从 tcs/types re-export
  *
  * Object.freeze 是浅冻结——仅冻结顶层属性，嵌套对象/数组仍可变。
  * EDM 域定义包含多层嵌套结构（aggregates/valueObjects/domainEvents/signalKeywords 等），
  * 必须深度冻结才能保证整个域定义树运行期不可变，对齐 §5.12.4 G-A6d 配置冻结原则。
  *
- * 算法：
- * 1. 遍历对象的所有自有属性
- * 2. 若属性值为对象或数组且未被冻结，递归调用 deepFreeze
- * 3. 调用 Object.freeze 冻结当前对象
- * 4. 返回冻结后的对象（与输入同引用，便于链式调用）
- *
- * 注意：
- * - 已冻结对象跳过递归，避免重复冻结（Object.freeze 对已冻结对象是幂等的，但递归浪费）
- * - 非对象（null/undefined/原始类型）直接返回，不冻结
- * - 不处理循环引用（EDM 域定义是树形结构，无循环引用）
- *
- * @param obj 待冻结的对象
- * @returns 冻结后的对象（与输入同引用）
+ * 改造说明（EAG-P3 批次 11 S2 D-S2-2）：
+ * - 原本 edm/types.ts 独立实现了 deepFreeze，与 tcs/types.ts 重复定义
+ * - tcs/types.ts 是 deepFreeze 的语义所有者（redline 冻结策略），EDM 应复用
+ * - tcs 版本更严格：即使父对象已冻结仍递归子属性，保证深度不可变
+ * - 改为 import + re-export，下游从 edm/types 导入路径不变
+ *   （edm-domains/*.ts 仍可通过 `import { deepFreeze } from "../types"` 引入）
  */
-export function deepFreeze<T>(obj: T): T {
-  // 非对象或 null 直接返回
-  if (obj === null || typeof obj !== "object") {
-    return obj;
-  }
-
-  // 已冻结对象跳过，避免重复递归
-  if (Object.isFrozen(obj)) {
-    return obj;
-  }
-
-  // 遍历所有自有属性，递归冻结嵌套对象/数组
-  const keys = Object.keys(obj as Record<string, unknown>);
-  for (const key of keys) {
-    const value = (obj as Record<string, unknown>)[key];
-    if (value !== null && typeof value === "object") {
-      deepFreeze(value);
-    }
-  }
-
-  // 冻结当前对象
-  return Object.freeze(obj);
-}
+import { deepFreeze } from "../tcs/types";
+export { deepFreeze };

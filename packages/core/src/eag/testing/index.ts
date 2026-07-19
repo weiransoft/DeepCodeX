@@ -159,6 +159,12 @@ export type { BrownfieldContractGuardErrorKind } from "./brownfield-contract-gua
 // ============================================================================
 // 6. TESTING Loop 编排器导出（testing-orchestrator.ts）
 // ============================================================================
+//
+// EAG-P3 批次 11 S1 改造（D-S1-1/D-S1-2/D-S1-6）：
+// - 原 testing-orchestrator.ts 内联的 GateG6Result / GateG7Result / GateG6Context / GateG7Context 已删除
+// - GateG6Context / GateG7Context 改为从 gate/gate-types re-export（统一类型源头）
+// - GateG6Result / GateG7Result 不再导出（已由权威的 GateResult 替代）
+// - 消费者应从 gate/gate-types 导入 GateResult 类型
 
 export {
   TestingOrchestrator,
@@ -166,13 +172,12 @@ export {
   createDefaultTestingOrchestrator,
 } from "./testing-orchestrator";
 
-export type {
-  TestingOrchestratorErrorKind,
-  GateG6Result,
-  GateG7Result,
-  GateG6Context,
-  GateG7Context,
-} from "./testing-orchestrator";
+export type { TestingOrchestratorErrorKind } from "./testing-orchestrator";
+
+// EAG-P3 批次 11 S1 改造：GateG6Context / GateG7Context 从 gate 模块 re-export（统一类型源头）
+// 设计依据：EAG-P3 批次 11 设计 §3 S1 D-S1-2/D-S1-6 + §4 S2 D-S2-7
+// gate/gate-types.ts 是门禁类型的权威来源，testing 模块作为消费者复用
+export type { GateG6Context, GateG7Context } from "../gate/gate-types";
 
 // ============================================================================
 // 7. 测试质量静态判定器导出（static-checkers/）

@@ -31,6 +31,7 @@
 // ============================================================================
 
 import type { LoopType, LoopEvent, LoopRunReport } from "../loop/models";
+import type { GateResult } from "../gate/gate-types";
 
 // ============================================================================
 // 2. RunState 长程任务状态
@@ -946,3 +947,286 @@ export const LONG_HORIZON_DEFAULTS: Readonly<{
  * 便于跨模块复用日志实现。
  */
 export type LogCallback = (message: string, level?: "info" | "warn" | "error") => void;
+
+// ============================================================================
+// 13. C1 阻塞分析增强类型（EAG-P3 批次 12 §3）
+// ============================================================================
+
+/**
+ * 阻塞类型字面量联合（5 类）
+ *
+ * 对齐 EAG-P3 批次 12 C1 设计目标：
+ * - circular-dependency：循环依赖（DAG 中存在环，A→B→C→A）
+ * - resource-contention：资源竞争（同一资源被多个并行任务访问）
+ * - deadlock-risk：死锁风险（循环等待，节点 A 等待 B 持有的资源，B 等待 A 持有的资源）
+ * - missing-dependency：缺失依赖（任务依赖的节点 ID 不存在于计划中）
+ * - gate-blocked：门禁阻塞（G-1~G-7 门禁未通过）
+ *
+ * 字面量联合而非 string，可在编译期防止拼写错误。
+ */
+export type BlockageType =
+  | "circular-dependency"
+  | "resource-contention"
+  | "deadlock-risk"
+  | "missing-dependency"
+  | "gate-blocked";
+
+/**
+ * BLOCKAGE_TYPES 全部合法值（用于运行时枚举与测试断言）
+ *
+ * 使用 Object.freeze 冻结。
+ */
+export const BLOCKAGE_TYPES: ReadonlyArray<BlockageType> = Object.freeze([
+  "circular-dependency",
+  "resource-contention",
+  "deadlock-risk",
+  "missing-dependency",
+  "gate-blocked",
+]);
+
+/**
+ * 阻塞严重性字面量联合（3 级）
+ *
+ * 与 gate/gate-types.ts 的 GateSeverity 同构，保持架构一致性：
+ * - blocker：阻塞（必须人工介入才能继续）
+ * - major：严重（影响执行效率但可继续）
+ * - warning：警告（潜在风险，建议关注）
+ *
+ * 字面量联合而非 string，可在编译期防止拼写错误。
+ */
+export type BlockageSeverity = "blocker" | "major" | "warning";
+
+/**
+ * BLOCKAGE_SEVERITIES 全部合法值（用于运行时枚举与测试断言）
+ *
+ * 使用 Object.freeze 冻结。按严重性从高到低排序。
+ */
+export const BLOCKAGE_SEVERITIES: ReadonlyArray<BlockageSeverity> = Object.freeze(["blocker", "major", "warning"]);
+
+/**
+ * 阻塞记录（单条结构化阻塞）
+ *
+ * 对应批次 12 C1 设计目标：每条记录描述一个识别出的阻塞点，
+ * 含类型、严重性、受影响节点、根因与缓解建议。
+ *
+ * 字段全部 readonly——记录一经生成即不可变。
+ *
+ * 范例：
+ *   {
+ *     blockageId: "blk-001",
+ *     type: "circular-dependency",
+ *     severity: "blocker",
+ *     affectedNodes: ["coding-1", "coding-2", "coding-3"],
+ *     rootCause: "CODING Loop 节点形成环：coding-1 → coding-2 → coding-3 → coding-1",
+ *     mitigation: "重新审视 spec.md 模块切分，移除 coding-3 对 coding-1 的依赖"
+ *   }
+ */
+export interface BlockageRecord {
+  /** 阻塞 ID（如 "blk-001"，在 BlockageAnalysisReport 内唯一） */
+  readonly blockageId: string;
+  /** 阻塞类型（5 类字面量联合） */
+  readonly type: BlockageType;
+  /** 严重性（blocker/major/warning） */
+  readonly severity: BlockageSeverity;
+  /** 受影响节点 ID 列表（DAG 中参与该阻塞的节点） */
+  readonly affectedNodes: ReadonlyArray<string>;
+  /** 根因描述（自然语言，含具体阻塞成因） */
+  readonly rootCause: string;
+  /** 缓解建议（自然语言，含具体操作步骤） */
+  readonly mitigation: string;
+}
+
+/**
+ * 建议动作优先级（字面量联合类型）
+ *
+ * - critical：紧急（必须立即执行，否则任务无法继续）
+ * - high：高（建议尽快执行）
+ * - medium：中（可在适当时机执行）
+ * - low：低（可选执行）
+ */
+export type ActionPriority = "critical" | "high" | "medium" | "low";
+
+/**
+ * ACTION_PRIORITIES 全部合法值
+ *
+ * 使用 Object.freeze 冻结。按优先级从高到低排序。
+ */
+export const ACTION_PRIORITIES: ReadonlyArray<ActionPriority> = Object.freeze(["critical", "high", "medium", "low"]);
+
+/**
+ * 建议动作实施成本（字面量联合类型）
+ *
+ * 与既有 SolutionCost 同构（low/medium/high），保持架构一致性。
+ */
+export type ActionEffort = "low" | "medium" | "high";
+
+/**
+ * ACTION_EFFORTS 全部合法值
+ *
+ * 使用 Object.freeze 冻结。按成本从低到高排序。
+ */
+export const ACTION_EFFORTS: ReadonlyArray<ActionEffort> = Object.freeze(["low", "medium", "high"]);
+
+/**
+ * 建议动作（针对单个 BlockageRecord 的缓解动作）
+ *
+ * 与既有 SuggestedSolution（根因维度建议）正交：
+ * - SuggestedSolution：基于根因假设的方案建议（如"放宽评估器规则"）
+ * - SuggestedAction：基于依赖图阻塞的动作建议（如"移除 coding-3 对 coding-1 的依赖"）
+ *
+ * 字段全部 readonly。
+ *
+ * 范例：
+ *   {
+ *     actionId: "act-001",
+ *     targetBlockageId: "blk-001",
+ *     action: "重新审视 spec.md 模块切分，移除 coding-3 对 coding-1 的依赖",
+ *     priority: "critical",
+ *     estimatedEffort: "medium"
+ *   }
+ */
+export interface SuggestedAction {
+  /** 动作 ID（如 "act-001"，在 BlockageAnalysisReport 内唯一） */
+  readonly actionId: string;
+  /** 关联的阻塞 ID（必须存在于 blockageRecords） */
+  readonly targetBlockageId: string;
+  /** 动作描述（自然语言，含具体操作步骤） */
+  readonly action: string;
+  /** 优先级（critical/high/medium/low） */
+  readonly priority: ActionPriority;
+  /** 预估实施成本（low/medium/high） */
+  readonly estimatedEffort: ActionEffort;
+}
+
+/**
+ * 门禁状态快照（G-1~G-7 各门禁的当前状态）
+ *
+ * 用于 PlanBlockageAnalyzer 的门禁阻塞检测维度。
+ * 复用 gate/gate-types.ts 的 GateResult 类型，避免重复定义。
+ *
+ * 字段全部 readonly。
+ */
+export interface GateStatusSnapshot {
+  /** 快照生成时间（ISO 8601 字符串） */
+  readonly snapshotAt: string;
+  /** 各门禁的最新检查结果（按 G-1~G-7 顺序） */
+  readonly gateResults: ReadonlyArray<Readonly<GateResult>>;
+}
+
+/**
+ * 资源访问模式字面量联合
+ *
+ * - read：只读
+ * - write：只写
+ * - read-write：读写
+ */
+export type ResourceAccessMode = "read" | "write" | "read-write";
+
+/**
+ * RESOURCE_ACCESS_MODES 全部合法值
+ *
+ * 使用 Object.freeze 冻结。
+ */
+export const RESOURCE_ACCESS_MODES: ReadonlyArray<ResourceAccessMode> = Object.freeze(["read", "write", "read-write"]);
+
+/**
+ * 单条资源访问记录
+ *
+ * 字段全部 readonly。
+ *
+ * 范例：
+ *   {
+ *     nodeId: "coding-1",
+ *     resourceId: "db:orders",
+ *     accessMode: "read-write",
+ *     accessDescription: "订单聚合根读写订单表"
+ *   }
+ */
+export interface ResourceAccessRecord {
+  /** 节点 ID（对应 MultiLoopNode.nodeId） */
+  readonly nodeId: string;
+  /** 资源 ID（如 "db:orders" / "/src/order/order.aggregate.ts"） */
+  readonly resourceId: string;
+  /** 访问模式（read 只读 / write 只写 / read-write 读写） */
+  readonly accessMode: ResourceAccessMode;
+  /** 访问描述（自然语言，便于人工理解） */
+  readonly accessDescription: string;
+}
+
+/**
+ * 资源访问图（描述各 Loop 节点对资源的访问关系）
+ *
+ * 用于资源竞争检测与死锁风险检测。
+ *
+ * 资源 ID 约定：
+ * - 文件路径资源：以 "/" 开头（如 "/src/order/order.aggregate.ts"）
+ * - 数据库表资源：以 "db:" 开头（如 "db:orders"）
+ * - 外部服务资源：以 "svc:" 开头（如 "svc:payment-gateway"）
+ *
+ * 字段全部 readonly。
+ */
+export interface ResourceAccessGraph {
+  /** 资源访问记录列表（每条记录描述一个节点对一个资源的访问） */
+  readonly accesses: ReadonlyArray<ResourceAccessRecord>;
+}
+
+/**
+ * 阻塞分析报告（扩展自既有 BlockageReport）
+ *
+ * 对应批次 12 C1 设计目标：在既有根因分析维度基础上，
+ * 新增依赖图分析维度（blockageRecords + overallBlocked + suggestedActions）。
+ *
+ * 向后兼容性（P-10）：
+ * - 继承 BlockageReport 的全部字段（runId / generatedAt / blockedLoop / blockedIteration /
+ *   rootCauseHypotheses / suggestedSolutions / requiredDecisions / relatedInterventions）
+ * - 新增 3 字段：blockageRecords / overallBlocked / suggestedActions
+ * - 既有 BlockageAnalyzer.analyze() 返回 BlockageReport，仍可被消费者使用
+ * - 新增 PlanBlockageAnalyzer.analyze() 返回 BlockageAnalysisReport
+ *
+ * 字段全部 readonly——报告一经生成即不可变。
+ *
+ * 范例：
+ *   {
+ *     runId: "a1b2c3d4e5f6",
+ *     generatedAt: "2026-07-19T11:00:00.000Z",
+ *     blockedLoop: "coding",
+ *     blockedIteration: 0,
+ *     rootCauseHypotheses: [],  // 既有维度（PlanBlockageAnalyzer 不填充，由 BlockageAnalyzer 填充）
+ *     suggestedSolutions: [],
+ *     requiredDecisions: [],
+ *     relatedInterventions: [],
+ *     blockageRecords: [
+ *       { blockageId: "blk-001", type: "circular-dependency", severity: "blocker", ... }
+ *     ],
+ *     overallBlocked: true,
+ *     suggestedActions: [
+ *       { actionId: "act-001", targetBlockageId: "blk-001", priority: "critical", ... }
+ *     ]
+ *   }
+ */
+export interface BlockageAnalysisReport extends BlockageReport {
+  /** 阻塞记录列表（依赖图分析维度产出） */
+  readonly blockageRecords: ReadonlyArray<BlockageRecord>;
+  /** 总体阻塞标记（任一 blockageRecord.severity === "blocker" 时为 true） */
+  readonly overallBlocked: boolean;
+  /** 建议动作列表（针对 blockageRecords 的缓解动作） */
+  readonly suggestedActions: ReadonlyArray<SuggestedAction>;
+}
+
+/**
+ * 依赖图分析请求（PlanBlockageAnalyzer.analyze 入参）
+ *
+ * 字段全部 readonly。
+ */
+export interface PlanBlockageAnalyzeRequest {
+  /** run-id（关联 RunState） */
+  readonly runId: string;
+  /** 多 Loop 计划（必填，DAG 拓扑来源） */
+  readonly plan: Readonly<MultiLoopPlan>;
+  /** 当前 RunState（必填，用于查询 currentLoop / currentIteration 等上下文） */
+  readonly runState: Readonly<RunState>;
+  /** 门禁状态快照（可选，未提供时跳过 gate-blocked 检测） */
+  readonly gateStatusSnapshot?: Readonly<GateStatusSnapshot>;
+  /** 资源访问图（可选，未提供时跳过 resource-contention 与 deadlock-risk 检测） */
+  readonly resourceAccessGraph?: Readonly<ResourceAccessGraph>;
+}

@@ -99,6 +99,13 @@ import type {
   EagStatusRequest,
   EagStatusResult,
 } from "./eag/long-horizon";
+// EAG-P3 批次 11 S3 新增导入：CLI 命令解析器（§5 S3 改进方案 D-S3-1 / D-S3-4）
+// 注：EagCommandParser 是无状态纯函数式解析器，构造零成本，默认注入保证向后兼容
+// - 负责判定 /eag-build /eag-design /eag-test /eag-run /eag-resume /eag-status 6 个命令
+// - 从 userPrompt.messageParams 提取预装配的请求对象
+// - 通过 SessionManagerOptions.eagCommandParser 可选注入（默认 new EagCommandParser()）
+import { EagCommandParser } from "./eag/cli";
+import type { EagCommand } from "./eag/cli";
 
 export type { PermissionScope } from "./settings";
 export type {
@@ -524,6 +531,22 @@ type SessionManagerOptions = {
    *   5. 推送确认请求 → 用户回复 `/rule-confirm <id>` 后由调用方调用 confirmCandidate
    */
   ruleLearner?: RuleLearner;
+  /**
+   * EAG-P3 批次 11 S3：CLI 命令解析器（可选注入，§5 S3 改进方案 D-S3-4）
+   *
+   * 未注入时使用默认 `new EagCommandParser()`，主对话循环行为完全不变（向后兼容）。
+   * 注入后，主对话循环通过 eagCommandParser.parse(userPrompt) 分发 6 个 EAG 命令：
+   *   - /eag-build → handleEagBuildCommand（CODING Loop 编排）
+   *   - /eag-design → handleEagDesignCommand（DESIGN Loop 编排）
+   *   - /eag-test → handleEagTestCommand（TESTING Loop 编排）
+   *   - /eag-run → handleEagRunCommand（长程自动化启动）
+   *   - /eag-resume → handleEagResumeCommand（长程自动化恢复）
+   *   - /eag-status → handleEagStatusCommand（长程进度查询）
+   *
+   * 测试缝合点：可通过注入自定义 EagCommandParser 实例替换默认解析器，
+   * 用于单元测试中模拟命令解析行为（不使用 mock 框架，符合用户规则 P-5）。
+   */
+  eagCommandParser?: EagCommandParser;
 };
 
 export type LlmStreamProgress = {
@@ -576,6 +599,11 @@ export class SessionManager {
   private readonly designOrchestrator?: DesignLoopOrchestrator;
   private readonly runStateStore?: RunStateStore;
   private readonly ruleLearner?: RuleLearner;
+  // EAG-P3 批次 11 S3：CLI 命令解析器（§5 S3 改进方案 D-S3-4）
+  // - 默认 new EagCommandParser()，保证向后兼容（未注入时主循环行为不变）
+  // - 负责判定 6 个 EAG 命令字符串并从 messageParams 提取预装配的请求对象
+  // - 替代原 session.ts 中的 6 个 isEagXxxPrompt + 6 个 extractXxxRequest 私有方法
+  private readonly eagCommandParser: EagCommandParser;
 
   constructor(options: SessionManagerOptions) {
     this.projectRoot = options.projectRoot;
@@ -606,6 +634,8 @@ export class SessionManager {
     this.designOrchestrator = options.designOrchestrator;
     this.runStateStore = options.runStateStore;
     this.ruleLearner = options.ruleLearner;
+    // EAG-P3 批次 11 S3：CLI 命令解析器赋值（默认 new EagCommandParser()，向后兼容）
+    this.eagCommandParser = options.eagCommandParser ?? new EagCommandParser();
   }
 
   /**
@@ -1749,41 +1779,38 @@ ${agentInstructions}
       return;
     }
 
-    // EAG-P2 批次 9 S5：/eag-build 命令分支（§4.9.3 增量外挂）
-    // 未注入 codingOrchestrator 时回退到普通对话流程（向后兼容，§4.9.4）
-    if (this.isEagBuildPrompt(userPrompt)) {
-      this.activeSessionId = sessionId;
-      await this.handleEagBuildCommand(sessionId, userPrompt, controller);
-      return;
-    }
-
-    // EAG-P3 批次 10：新增 5 个命令分支（§4.18.3 增量外挂）
+    // EAG-P3 批次 11 S3：统一通过 EagCommandParser 分发 6 个 EAG 命令（§5 S3 改进方案 D-S3-8）
+    // 替代原 6 个 isEagXxxPrompt 私有方法 + 6 个 if 分支
+    // discriminated union 让 TypeScript 在 switch 分支自动收窄类型，避免类型断言
+    // 命令字符串严格匹配（无参数），参数通过 messageParams 注入（D-S3-7）
     // 未注入对应 orchestrator 时各 handle 方法内部通知用户配置缺失（向后兼容）
-    // 判定规则与 isEagBuildPrompt 一致：text 严格匹配命令，无图片附件，无技能匹配
-    if (this.isEagDesignPrompt(userPrompt)) {
+    const eagCommand = this.eagCommandParser.parse(userPrompt);
+    if (eagCommand.kind !== "unknown") {
       this.activeSessionId = sessionId;
-      await this.handleEagDesignCommand(sessionId, userPrompt, controller);
-      return;
-    }
-    if (this.isEagTestPrompt(userPrompt)) {
-      this.activeSessionId = sessionId;
-      await this.handleEagTestCommand(sessionId, userPrompt, controller);
-      return;
-    }
-    if (this.isEagRunPrompt(userPrompt)) {
-      this.activeSessionId = sessionId;
-      await this.handleEagRunCommand(sessionId, userPrompt, controller);
-      return;
-    }
-    if (this.isEagResumePrompt(userPrompt)) {
-      this.activeSessionId = sessionId;
-      await this.handleEagResumeCommand(sessionId, userPrompt, controller);
-      return;
-    }
-    if (this.isEagStatusPrompt(userPrompt)) {
-      this.activeSessionId = sessionId;
-      await this.handleEagStatusCommand(sessionId, userPrompt, controller);
-      return;
+      switch (eagCommand.kind) {
+        case "eag-build":
+          await this.handleEagBuildCommand(sessionId, userPrompt, eagCommand.payload, controller);
+          return;
+        case "eag-design":
+          await this.handleEagDesignCommand(sessionId, userPrompt, eagCommand.payload, controller);
+          return;
+        case "eag-test":
+          await this.handleEagTestCommand(sessionId, userPrompt, eagCommand.payload, controller);
+          return;
+        case "eag-run":
+          await this.handleEagRunCommand(sessionId, userPrompt, eagCommand.payload, controller);
+          return;
+        case "eag-resume":
+          await this.handleEagResumeCommand(sessionId, userPrompt, eagCommand.payload, controller);
+          return;
+        case "eag-status":
+          await this.handleEagStatusCommand(sessionId, userPrompt, eagCommand.payload, controller);
+          return;
+        default:
+          // 理论不可达（eagCommand.kind !== "unknown" 已过滤兜底分支）
+          // 防御性编程：未知 kind 不做处理，落入下方非 EAG 流程
+          break;
+      }
     }
 
     // EAG-P3 批次 10：候选规则检测 Hook（§4.18.4 detectRuleCandidateHook）
@@ -1838,129 +1865,16 @@ ${agentInstructions}
   }
 
   /**
-   * EAG-P2 批次 9 S5：判断用户输入是否为 `/eag-build` 命令（§4.9.3）
-   *
-   * 判定规则：
-   * - text 为字符串且 trim 后等于 `/eag-build`
-   * - 无图片附件
-   * - 无技能匹配
-   *
-   * 与 isContinuePrompt 风格保持一致（最小化命令判定，避免误触发）。
-   *
-   * @param userPrompt 用户输入内容
-   * @returns 是否为 /eag-build 命令
-   */
-  private isEagBuildPrompt(userPrompt: UserPromptContent): boolean {
-    return (
-      typeof userPrompt.text === "string" &&
-      userPrompt.text.trim() === "/eag-build" &&
-      (!userPrompt.imageUrls || userPrompt.imageUrls.length === 0) &&
-      (!userPrompt.skills || userPrompt.skills.length === 0)
-    );
-  }
-
-  /**
-   * EAG-P3 批次 10：判断用户输入是否为 `/eag-design` 命令（§4.18.3）
-   *
-   * 判定规则与 isEagBuildPrompt 一致：text 严格匹配 `/eag-design`，无图片附件，无技能匹配。
-   * 严格匹配（无参数）—— 设计文档 §4.18.3 约定设计请求参数通过 messageParams 注入，
-   * 避免命令行参数解析的歧义（如 `/eag-design --paradigm cqrs-es` 改为通过 messageParams 传入）。
-   *
-   * @param userPrompt 用户输入内容
-   * @returns 是否为 /eag-design 命令
-   */
-  private isEagDesignPrompt(userPrompt: UserPromptContent): boolean {
-    return (
-      typeof userPrompt.text === "string" &&
-      userPrompt.text.trim() === "/eag-design" &&
-      (!userPrompt.imageUrls || userPrompt.imageUrls.length === 0) &&
-      (!userPrompt.skills || userPrompt.skills.length === 0)
-    );
-  }
-
-  /**
-   * EAG-P3 批次 10：判断用户输入是否为 `/eag-test` 命令（§4.18.3）
-   *
-   * 判定规则与 isEagBuildPrompt 一致：text 严格匹配 `/eag-test`，无图片附件，无技能匹配。
-   * 严格匹配（无参数）—— 测试请求参数通过 messageParams 注入。
-   *
-   * @param userPrompt 用户输入内容
-   * @returns 是否为 /eag-test 命令
-   */
-  private isEagTestPrompt(userPrompt: UserPromptContent): boolean {
-    return (
-      typeof userPrompt.text === "string" &&
-      userPrompt.text.trim() === "/eag-test" &&
-      (!userPrompt.imageUrls || userPrompt.imageUrls.length === 0) &&
-      (!userPrompt.skills || userPrompt.skills.length === 0)
-    );
-  }
-
-  /**
-   * EAG-P3 批次 10：判断用户输入是否为 `/eag-run` 命令（§4.18.3）
-   *
-   * 判定规则与 isEagBuildPrompt 一致：text 严格匹配 `/eag-run`，无图片附件，无技能匹配。
-   * 严格匹配（无参数）—— 长程自动化请求参数通过 messageParams 注入。
-   *
-   * @param userPrompt 用户输入内容
-   * @returns 是否为 /eag-run 命令
-   */
-  private isEagRunPrompt(userPrompt: UserPromptContent): boolean {
-    return (
-      typeof userPrompt.text === "string" &&
-      userPrompt.text.trim() === "/eag-run" &&
-      (!userPrompt.imageUrls || userPrompt.imageUrls.length === 0) &&
-      (!userPrompt.skills || userPrompt.skills.length === 0)
-    );
-  }
-
-  /**
-   * EAG-P3 批次 10：判断用户输入是否为 `/eag-resume` 命令（§4.18.3）
-   *
-   * 判定规则与 isEagBuildPrompt 一致：text 严格匹配 `/eag-resume`，无图片附件，无技能匹配。
-   * 严格匹配（无参数）—— 恢复请求参数（含 runId）通过 messageParams 注入。
-   *
-   * @param userPrompt 用户输入内容
-   * @returns 是否为 /eag-resume 命令
-   */
-  private isEagResumePrompt(userPrompt: UserPromptContent): boolean {
-    return (
-      typeof userPrompt.text === "string" &&
-      userPrompt.text.trim() === "/eag-resume" &&
-      (!userPrompt.imageUrls || userPrompt.imageUrls.length === 0) &&
-      (!userPrompt.skills || userPrompt.skills.length === 0)
-    );
-  }
-
-  /**
-   * EAG-P3 批次 10：判断用户输入是否为 `/eag-status` 命令（§4.18.3）
-   *
-   * 判定规则与 isEagBuildPrompt 一致：text 严格匹配 `/eag-status`，无图片附件，无技能匹配。
-   * 严格匹配（无参数）—— 状态查询参数（含 runId 或 recentCount）通过 messageParams 注入。
-   *
-   * @param userPrompt 用户输入内容
-   * @returns 是否为 /eag-status 命令
-   */
-  private isEagStatusPrompt(userPrompt: UserPromptContent): boolean {
-    return (
-      typeof userPrompt.text === "string" &&
-      userPrompt.text.trim() === "/eag-status" &&
-      (!userPrompt.imageUrls || userPrompt.imageUrls.length === 0) &&
-      (!userPrompt.skills || userPrompt.skills.length === 0)
-    );
-  }
-
-  /**
    * EAG-P2 批次 9 S5：处理 `/eag-build` 命令，触发 CODING Loop 编排（§4.9.3）
+   *
+   * EAG-P3 批次 11 S3 改造：request 参数由 EagCommandParser.parse() 预提取后注入（D-S3-7），
+   * 不再在本方法内部调用 extractCodingLoopRequest。payload 为 null 时通知用户配置缺失。
    *
    * 算法（对齐 §4.9.3 伪代码 + 架构师关键修正"session.ts 改动最小化"）：
    * 1. 校验外挂依赖：codingOrchestrator + pkcAccessor + loopGuard 必须同时注入
    *    未注入 → 通过 onAssistantMessage 通知用户配置缺失，不抛异常（向后兼容）
-   * 2. 装配 CodingLoopRequest（从 userPrompt.alwaysAllows 等元数据透传，本批次最小化）
-   *    注：调用方需通过 SessionManagerOptions 注入 codingOrchestrator 时绑定默认请求工厂
-   *    本批次采用简化方案：将请求参数装配职责留给上层（设计文档 §4.9.3 伪代码仅供参考）
-   *    本方法仅接受 sessionId 与一个可选的 CodingLoopRequest（由调用方预装配）
-   *    未提供 request 时通知用户配置缺失
+   * 2. 校验 CodingLoopRequest（由 EagCommandParser 预提取的 payload）
+   *    未提供 payload 时通知用户配置缺失
    * 3. 调用 codingOrchestrator.run(request) 执行 CODING Loop
    *    异常路径：catch 后通知用户错误，更新 session 状态为 failed
    * 4. 渲染结果：通过 onAssistantMessage 发送结果摘要（含 finalStatus + 统计 + blockedReason）
@@ -1972,11 +1886,13 @@ ${agentInstructions}
    *
    * @param sessionId 会话 ID
    * @param userPrompt 用户输入（仅用于写入用户消息历史，不参与编排）
+   * @param request 预装配的 CodingLoopRequest（由 EagCommandParser.parse() 提取，可空）
    * @param controller 中断控制器（用于响应 abort 信号）
    */
   private async handleEagBuildCommand(
     sessionId: string,
     userPrompt: UserPromptContent,
+    request: CodingLoopRequest | null,
     controller?: AbortController
   ): Promise<void> {
     const signal = controller?.signal;
@@ -2021,11 +1937,10 @@ ${agentInstructions}
       return;
     }
 
-    // 步骤 2：装配 CodingLoopRequest
-    // 本方法采用最小化设计：通过 userPrompt.messageParams（自定义元数据）传入预装配的 request
+    // 步骤 2：校验 CodingLoopRequest（EAG-P3 批次 11 S3：payload 由 EagCommandParser 预提取）
     // 调用方负责在创建会话时通过 messageParams 传入 CodingLoopRequest 实例
-    // 这种设计避免 session.ts 直接读取 spec.md/plan.md/tasks.md 等文件（保持职责单一）
-    const request = this.extractCodingLoopRequest(userPrompt);
+    // EagCommandParser.parse() 已从 userPrompt.messageParams.codingLoopRequest 提取并完成字段校验
+    // payload 为 null 时通知用户配置缺失（保持既有错误提示路径不丢失）
     if (!request) {
       const errMsg =
         "CodingLoopRequest 未提供：请通过 userPrompt.messageParams.codingLoopRequest 传入预装配的编排请求（参考 §4.9.3）";
@@ -2075,48 +1990,6 @@ ${agentInstructions}
       failReason: isSuccess ? null : `CODING Loop 终止：${result.blockedReason ?? result.finalStatus}`,
       updateTime: new Date().toISOString(),
     }));
-  }
-
-  /**
-   * 从 userPrompt.messageParams 提取预装配的 CodingLoopRequest（§4.9.3）
-   *
-   * 设计原则：session.ts 不直接读取 spec.md/plan.md/tasks.md，保持职责单一。
-   * 调用方通过 userPrompt.messageParams.codingLoopRequest 传入预装配的请求。
-   *
-   * @param userPrompt 用户输入（含 messageParams 元数据）
-   * @returns 预装配的 CodingLoopRequest；未提供时返回 undefined
-   */
-  private extractCodingLoopRequest(userPrompt: UserPromptContent): CodingLoopRequest | undefined {
-    const params = userPrompt.messageParams as Record<string, unknown> | null | undefined;
-    if (!params || typeof params !== "object") {
-      return undefined;
-    }
-    const request = params.codingLoopRequest;
-    if (!request || typeof request !== "object") {
-      return undefined;
-    }
-    // 基本字段校验（避免类型断言误用）
-    const candidate = request as Partial<CodingLoopRequest>;
-    if (
-      typeof candidate.projectRoot === "string" &&
-      typeof candidate.specContent === "string" &&
-      typeof candidate.planContent === "string" &&
-      typeof candidate.tasksContent === "string" &&
-      candidate.taskDag &&
-      Array.isArray(candidate.taskDag.nodes) &&
-      Array.isArray(candidate.taskDag.topologicalOrder) &&
-      Array.isArray(candidate.taskCards) &&
-      Array.isArray(candidate.techStack) &&
-      typeof candidate.constitutionContent === "string" &&
-      candidate.llmClient &&
-      candidate.pkcAccessor &&
-      candidate.loopGuard &&
-      typeof candidate.maxIterations === "number" &&
-      typeof candidate.maxFixRounds === "number"
-    ) {
-      return candidate as CodingLoopRequest;
-    }
-    return undefined;
   }
 
   /**
@@ -2182,11 +2055,14 @@ ${agentInstructions}
   /**
    * 处理 `/eag-design` 命令，触发 DESIGN Loop 编排（§4.18.3）
    *
+   * EAG-P3 批次 11 S3 改造：input 参数由 EagCommandParser.parse() 预提取后注入（D-S3-7），
+   * 不再在本方法内部调用 extractDesignLoopInput。payload 为 null 时通知用户配置缺失。
+   *
    * 算法（对齐 §4.18.3 + 复用 handleEagBuildCommand 既有模式）：
    * 1. 校验外挂依赖：designOrchestrator 必须注入
    *    未注入 → 通知用户配置缺失，更新 session 状态为 failed（向后兼容）
-   * 2. 装配 DesignLoopInput：通过 userPrompt.messageParams.designLoopRequest 传入预装配对象
-   *    未提供 → 通知用户配置缺失
+   * 2. 校验 DesignLoopInput（由 EagCommandParser 预提取的 payload）
+   *    未提供 payload → 通知用户配置缺失
    * 3. 调用 designOrchestrator.run(input) 执行 DESIGN Loop
    *    异常路径：catch 后通知用户错误，更新 session 状态为 failed
    * 4. 渲染结果：通过 onAssistantMessage 发送结果摘要（含 evaluationVerdict + iterations）
@@ -2198,11 +2074,13 @@ ${agentInstructions}
    *
    * @param sessionId 会话 ID
    * @param userPrompt 用户输入（仅用于写入用户消息历史，不参与编排）
+   * @param input 预装配的 DesignLoopInput（由 EagCommandParser.parse() 提取，可空）
    * @param controller 中断控制器（用于响应 abort 信号）
    */
   private async handleEagDesignCommand(
     sessionId: string,
     userPrompt: UserPromptContent,
+    input: DesignLoopInput | null,
     controller?: AbortController
   ): Promise<void> {
     const signal = controller?.signal;
@@ -2235,8 +2113,9 @@ ${agentInstructions}
       return;
     }
 
-    // 步骤 2：装配 DesignLoopInput
-    const input = this.extractDesignLoopInput(userPrompt);
+    // 步骤 2：校验 DesignLoopInput（EAG-P3 批次 11 S3：payload 由 EagCommandParser 预提取）
+    // EagCommandParser.parse() 已从 userPrompt.messageParams.designLoopInput 提取并完成字段校验
+    // payload 为 null 时通知用户配置缺失（保持既有错误提示路径不丢失）
     if (!input) {
       const errMsg =
         "DesignLoopInput 未提供：请通过 userPrompt.messageParams.designLoopInput 传入预装配的编排输入（参考 §4.18.3）";
@@ -2288,32 +2167,6 @@ ${agentInstructions}
   }
 
   /**
-   * 从 userPrompt.messageParams 提取预装配的 DesignLoopInput（§4.18.3）
-   *
-   * 设计原则：session.ts 不直接解析原始需求文本，保持职责单一。
-   * 调用方通过 userPrompt.messageParams.designLoopInput 传入预装配的输入。
-   *
-   * @param userPrompt 用户输入（含 messageParams 元数据）
-   * @returns 预装配的 DesignLoopInput；未提供或字段不完整时返回 undefined
-   */
-  private extractDesignLoopInput(userPrompt: UserPromptContent): DesignLoopInput | undefined {
-    const params = userPrompt.messageParams as Record<string, unknown> | null | undefined;
-    if (!params || typeof params !== "object") {
-      return undefined;
-    }
-    const input = params.designLoopInput;
-    if (!input || typeof input !== "object") {
-      return undefined;
-    }
-    // 基本字段校验（避免类型断言误用）
-    const candidate = input as Partial<DesignLoopInput>;
-    if (typeof candidate.rawRequirement === "string" && candidate.rawRequirement.trim().length > 0) {
-      return candidate as DesignLoopInput;
-    }
-    return undefined;
-  }
-
-  /**
    * 渲染 DesignLoopResult 为可读的摘要文本（§4.18.3）
    *
    * 渲染内容：
@@ -2359,11 +2212,14 @@ ${agentInstructions}
   /**
    * 处理 `/eag-test` 命令，触发 TESTING Loop 编排（§4.18.3）
    *
+   * EAG-P3 批次 11 S3 改造：request 参数由 EagCommandParser.parse() 预提取后注入（D-S3-7），
+   * 不再在本方法内部调用 extractTestingLoopRequest。payload 为 null 时通知用户配置缺失。
+   *
    * 算法（对齐 §4.18.3 + 复用 handleEagBuildCommand 既有模式）：
    * 1. 校验外挂依赖：testingOrchestrator 必须注入
    *    未注入 → 通知用户配置缺失，更新 session 状态为 failed（向后兼容）
-   * 2. 装配 TestingLoopRequest：通过 userPrompt.messageParams.testingLoopRequest 传入预装配对象
-   *    未提供 → 通知用户配置缺失
+   * 2. 校验 TestingLoopRequest（由 EagCommandParser 预提取的 payload）
+   *    未提供 payload → 通知用户配置缺失
    * 3. 调用 testingOrchestrator.run(request) 执行 TESTING Loop
    *    异常路径：catch 后通知用户错误，更新 session 状态为 failed
    * 4. 渲染结果：通过 onAssistantMessage 发送结果摘要（含 finalStatus + 测试文件清单 + 覆盖率报告）
@@ -2371,11 +2227,13 @@ ${agentInstructions}
    *
    * @param sessionId 会话 ID
    * @param userPrompt 用户输入（仅用于写入用户消息历史，不参与编排）
+   * @param request 预装配的 TestingLoopRequest（由 EagCommandParser.parse() 提取，可空）
    * @param controller 中断控制器（用于响应 abort 信号）
    */
   private async handleEagTestCommand(
     sessionId: string,
     userPrompt: UserPromptContent,
+    request: TestingLoopRequest | null,
     controller?: AbortController
   ): Promise<void> {
     const signal = controller?.signal;
@@ -2406,8 +2264,9 @@ ${agentInstructions}
       return;
     }
 
-    // 步骤 2：装配 TestingLoopRequest
-    const request = this.extractTestingLoopRequest(userPrompt);
+    // 步骤 2：校验 TestingLoopRequest（EAG-P3 批次 11 S3：payload 由 EagCommandParser 预提取）
+    // EagCommandParser.parse() 已从 userPrompt.messageParams.testingLoopRequest 提取并完成字段校验
+    // payload 为 null 时通知用户配置缺失（保持既有错误提示路径不丢失）
     if (!request) {
       const errMsg =
         "TestingLoopRequest 未提供：请通过 userPrompt.messageParams.testingLoopRequest 传入预装配的编排请求（参考 §4.18.3）";
@@ -2456,46 +2315,6 @@ ${agentInstructions}
       failReason: isSuccess ? null : `TESTING Loop 终止：${result.blockedReason ?? result.finalStatus}`,
       updateTime: new Date().toISOString(),
     }));
-  }
-
-  /**
-   * 从 userPrompt.messageParams 提取预装配的 TestingLoopRequest（§4.18.3）
-   *
-   * 设计原则：session.ts 不直接读取 spec.md/plan.md/tasks.md，保持职责单一。
-   * 调用方通过 userPrompt.messageParams.testingLoopRequest 传入预装配的请求。
-   *
-   * @param userPrompt 用户输入（含 messageParams 元数据）
-   * @returns 预装配的 TestingLoopRequest；未提供或字段不完整时返回 undefined
-   */
-  private extractTestingLoopRequest(userPrompt: UserPromptContent): TestingLoopRequest | undefined {
-    const params = userPrompt.messageParams as Record<string, unknown> | null | undefined;
-    if (!params || typeof params !== "object") {
-      return undefined;
-    }
-    const request = params.testingLoopRequest;
-    if (!request || typeof request !== "object") {
-      return undefined;
-    }
-    // 基本字段校验（避免类型断言误用）
-    const candidate = request as Partial<TestingLoopRequest>;
-    if (
-      typeof candidate.projectRoot === "string" &&
-      typeof candidate.specContent === "string" &&
-      typeof candidate.planContent === "string" &&
-      typeof candidate.tasksContent === "string" &&
-      typeof candidate.implementationRoot === "string" &&
-      candidate.taskDag &&
-      Array.isArray((candidate.taskDag as unknown as { nodes?: unknown[] }).nodes) &&
-      Array.isArray(candidate.acceptanceCriteria) &&
-      candidate.llmClient &&
-      candidate.pkcAccessor &&
-      candidate.loopGuard &&
-      candidate.coverageThreshold &&
-      typeof candidate.maxIterations === "number"
-    ) {
-      return candidate as TestingLoopRequest;
-    }
-    return undefined;
   }
 
   /**
@@ -2566,11 +2385,14 @@ ${agentInstructions}
   /**
    * 处理 `/eag-run` 命令，触发长程自动化多 Loop 串联编排（§4.18.3）
    *
+   * EAG-P3 批次 11 S3 改造：request 参数由 EagCommandParser.parse() 预提取后注入（D-S3-7），
+   * 不再在本方法内部调用 extractEagRunRequest。payload 为 null 时通知用户配置缺失。
+   *
    * 算法（对齐 §4.18.3 + 复用 handleEagBuildCommand 既有模式）：
    * 1. 校验外挂依赖：runStateStore 必须注入
    *    未注入 → 通知用户配置缺失，更新 session 状态为 failed（向后兼容）
-   * 2. 装配 EagRunRequest：通过 userPrompt.messageParams.eagRunRequest 传入预装配对象
-   *    未提供 → 通知用户配置缺失
+   * 2. 校验 EagRunRequest（由 EagCommandParser 预提取的 payload）
+   *    未提供 payload → 通知用户配置缺失
    * 3. 构造 EagRunHandler（内部 new MultiLoopPlanner / MilestoneTagger / BlockageAnalyzer，
    *    共享注入的 runStateStore 实例）
    * 4. 调用 handler.handle(request) 执行多 Loop 串联
@@ -2580,11 +2402,13 @@ ${agentInstructions}
    *
    * @param sessionId 会话 ID
    * @param userPrompt 用户输入（仅用于写入用户消息历史，不参与编排）
+   * @param request 预装配的 EagRunRequest（由 EagCommandParser.parse() 提取，可空）
    * @param controller 中断控制器（用于响应 abort 信号）
    */
   private async handleEagRunCommand(
     sessionId: string,
     userPrompt: UserPromptContent,
+    request: EagRunRequest | null,
     controller?: AbortController
   ): Promise<void> {
     const signal = controller?.signal;
@@ -2614,8 +2438,9 @@ ${agentInstructions}
       return;
     }
 
-    // 步骤 2：装配 EagRunRequest
-    const request = this.extractEagRunRequest(userPrompt);
+    // 步骤 2：校验 EagRunRequest（EAG-P3 批次 11 S3：payload 由 EagCommandParser 预提取）
+    // EagCommandParser.parse() 已从 userPrompt.messageParams.eagRunRequest 提取并完成字段校验
+    // payload 为 null 时通知用户配置缺失（保持既有错误提示路径不丢失）
     if (!request) {
       const errMsg =
         "EagRunRequest 未提供：请通过 userPrompt.messageParams.eagRunRequest 传入预装配的命令请求（参考 §4.18.3）";
@@ -2693,37 +2518,6 @@ ${agentInstructions}
   }
 
   /**
-   * 从 userPrompt.messageParams 提取预装配的 EagRunRequest（§4.18.3）
-   *
-   * 设计原则：session.ts 不直接组装 loopExecutors，保持职责单一。
-   * 调用方通过 userPrompt.messageParams.eagRunRequest 传入预装配的请求。
-   *
-   * @param userPrompt 用户输入（含 messageParams 元数据）
-   * @returns 预装配的 EagRunRequest；未提供或字段不完整时返回 undefined
-   */
-  private extractEagRunRequest(userPrompt: UserPromptContent): EagRunRequest | undefined {
-    const params = userPrompt.messageParams as Record<string, unknown> | null | undefined;
-    if (!params || typeof params !== "object") {
-      return undefined;
-    }
-    const request = params.eagRunRequest;
-    if (!request || typeof request !== "object") {
-      return undefined;
-    }
-    // 基本字段校验（避免类型断言误用）
-    const candidate = request as Partial<EagRunRequest>;
-    if (
-      typeof candidate.projectRoot === "string" &&
-      typeof candidate.userIntent === "string" &&
-      Array.isArray(candidate.loopExecutors) &&
-      candidate.loopExecutors.length > 0
-    ) {
-      return candidate as EagRunRequest;
-    }
-    return undefined;
-  }
-
-  /**
    * 渲染 EagRunResult 为可读的摘要文本（§4.18.3）
    *
    * 渲染内容：
@@ -2783,11 +2577,14 @@ ${agentInstructions}
   /**
    * 处理 `/eag-resume` 命令，从断点恢复长程自动化（§4.18.3）
    *
+   * EAG-P3 批次 11 S3 改造：request 参数由 EagCommandParser.parse() 预提取后注入（D-S3-7），
+   * 不再在本方法内部调用 extractEagResumeRequest。payload 为 null 时通知用户配置缺失。
+   *
    * 算法（对齐 §4.18.3 + 复用 handleEagRunCommand 既有模式）：
    * 1. 校验外挂依赖：runStateStore 必须注入
    *    未注入 → 通知用户配置缺失，更新 session 状态为 failed（向后兼容）
-   * 2. 装配 EagResumeRequest：通过 userPrompt.messageParams.eagResumeRequest 传入预装配对象
-   *    未提供 → 通知用户配置缺失
+   * 2. 校验 EagResumeRequest（由 EagCommandParser 预提取的 payload）
+   *    未提供 payload → 通知用户配置缺失
    * 3. 构造 EagResumeHandler（内部 new MultiLoopPlanner / MilestoneTagger / BlockageAnalyzer）
    * 4. 调用 handler.handle(request) 从断点恢复执行
    *    异常路径：catch 后通知用户错误，更新 session 状态为 failed
@@ -2796,11 +2593,13 @@ ${agentInstructions}
    *
    * @param sessionId 会话 ID
    * @param userPrompt 用户输入（仅用于写入用户消息历史，不参与编排）
+   * @param request 预装配的 EagResumeRequest（由 EagCommandParser.parse() 提取，可空）
    * @param controller 中断控制器（用于响应 abort 信号）
    */
   private async handleEagResumeCommand(
     sessionId: string,
     userPrompt: UserPromptContent,
+    request: EagResumeRequest | null,
     controller?: AbortController
   ): Promise<void> {
     const signal = controller?.signal;
@@ -2830,8 +2629,9 @@ ${agentInstructions}
       return;
     }
 
-    // 步骤 2：装配 EagResumeRequest
-    const request = this.extractEagResumeRequest(userPrompt);
+    // 步骤 2：校验 EagResumeRequest（EAG-P3 批次 11 S3：payload 由 EagCommandParser 预提取）
+    // EagCommandParser.parse() 已从 userPrompt.messageParams.eagResumeRequest 提取并完成字段校验
+    // payload 为 null 时通知用户配置缺失（保持既有错误提示路径不丢失）
     if (!request) {
       const errMsg =
         "EagResumeRequest 未提供：请通过 userPrompt.messageParams.eagResumeRequest 传入预装配的恢复请求（参考 §4.18.3）";
@@ -2906,36 +2706,6 @@ ${agentInstructions}
     }));
   }
 
-  /**
-   * 从 userPrompt.messageParams 提取预装配的 EagResumeRequest（§4.18.3）
-   *
-   * @param userPrompt 用户输入（含 messageParams 元数据）
-   * @returns 预装配的 EagResumeRequest；未提供或字段不完整时返回 undefined
-   */
-  private extractEagResumeRequest(userPrompt: UserPromptContent): EagResumeRequest | undefined {
-    const params = userPrompt.messageParams as Record<string, unknown> | null | undefined;
-    if (!params || typeof params !== "object") {
-      return undefined;
-    }
-    const request = params.eagResumeRequest;
-    if (!request || typeof request !== "object") {
-      return undefined;
-    }
-    // 基本字段校验
-    const candidate = request as Partial<EagResumeRequest>;
-    if (
-      typeof candidate.runId === "string" &&
-      candidate.runId.trim().length > 0 &&
-      typeof candidate.projectRoot === "string" &&
-      typeof candidate.userIntent === "string" &&
-      Array.isArray(candidate.loopExecutors) &&
-      candidate.loopExecutors.length > 0
-    ) {
-      return candidate as EagResumeRequest;
-    }
-    return undefined;
-  }
-
   // ============================================================================
   // EAG-P3 批次 10：/eag-status 命令处理（§4.18.3）
   // ============================================================================
@@ -2943,11 +2713,14 @@ ${agentInstructions}
   /**
    * 处理 `/eag-status` 命令，输出长程进度报告（§4.18.3）
    *
+   * EAG-P3 批次 11 S3 改造：request 参数由 EagCommandParser.parse() 预提取后注入（D-S3-7），
+   * 不再在本方法内部调用 extractEagStatusRequest。payload 为 null 时通知用户配置缺失。
+   *
    * 算法（对齐 §4.18.3）：
    * 1. 校验外挂依赖：runStateStore 必须注入
    *    未注入 → 通知用户配置缺失，更新 session 状态为 failed（向后兼容）
-   * 2. 装配 EagStatusRequest：通过 userPrompt.messageParams.eagStatusRequest 传入预装配对象
-   *    未提供 → 通知用户配置缺失
+   * 2. 校验 EagStatusRequest（由 EagCommandParser 预提取的 payload）
+   *    未提供 payload → 通知用户配置缺失
    * 3. 构造 EagStatusHandler（仅依赖 runStateStore）
    * 4. 调用 handler.handle(request) 生成 Markdown 报告
    *    异常路径：catch 后通知用户错误，更新 session 状态为 failed
@@ -2956,11 +2729,13 @@ ${agentInstructions}
    *
    * @param sessionId 会话 ID
    * @param userPrompt 用户输入（仅用于写入用户消息历史，不参与编排）
+   * @param request 预装配的 EagStatusRequest（由 EagCommandParser.parse() 提取，可空）
    * @param controller 中断控制器（用于响应 abort 信号）
    */
   private async handleEagStatusCommand(
     sessionId: string,
     userPrompt: UserPromptContent,
+    request: EagStatusRequest | null,
     controller?: AbortController
   ): Promise<void> {
     const signal = controller?.signal;
@@ -2990,8 +2765,9 @@ ${agentInstructions}
       return;
     }
 
-    // 步骤 2：装配 EagStatusRequest
-    const request = this.extractEagStatusRequest(userPrompt);
+    // 步骤 2：校验 EagStatusRequest（EAG-P3 批次 11 S3：payload 由 EagCommandParser 预提取）
+    // EagCommandParser.parse() 已从 userPrompt.messageParams.eagStatusRequest 提取并完成字段校验
+    // payload 为 null 时通知用户配置缺失（保持既有错误提示路径不丢失）
     if (!request) {
       const errMsg =
         "EagStatusRequest 未提供：请通过 userPrompt.messageParams.eagStatusRequest 传入预装配的查询请求（参考 §4.18.3）";
@@ -3040,29 +2816,6 @@ ${agentInstructions}
       failReason: null,
       updateTime: new Date().toISOString(),
     }));
-  }
-
-  /**
-   * 从 userPrompt.messageParams 提取预装配的 EagStatusRequest（§4.18.3）
-   *
-   * @param userPrompt 用户输入（含 messageParams 元数据）
-   * @returns 预装配的 EagStatusRequest；未提供或字段不完整时返回 undefined
-   */
-  private extractEagStatusRequest(userPrompt: UserPromptContent): EagStatusRequest | undefined {
-    const params = userPrompt.messageParams as Record<string, unknown> | null | undefined;
-    if (!params || typeof params !== "object") {
-      return undefined;
-    }
-    const request = params.eagStatusRequest;
-    if (!request || typeof request !== "object") {
-      return undefined;
-    }
-    // 基本字段校验（projectRoot 必填，runId 与 recentCount 二选一）
-    const candidate = request as Partial<EagStatusRequest>;
-    if (typeof candidate.projectRoot === "string" && candidate.projectRoot.trim().length > 0) {
-      return candidate as EagStatusRequest;
-    }
-    return undefined;
   }
 
   /**

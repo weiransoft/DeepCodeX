@@ -677,9 +677,10 @@ function createMinimalCodingLoopRequestPlaceholder(): Record<string, unknown> {
   };
 }
 
-test("F15. isEagBuildPrompt 对 /eag-build 命令返回 true（命令判定逻辑）", () => {
-  // 验证：isEagBuildPrompt 能正确识别 /eag-build 命令
-  // 通过构造 SessionManager 实例，调用其私有方法 isEagBuildPrompt
+test("F15. EagCommandParser 对 /eag-build 命令返回 eag-build kind（命令判定逻辑）", () => {
+  // EAG-P3 批次 11 S3：isEagBuildPrompt 已迁移至 EagCommandParser.parse() 统一入口
+  // 验证：EagCommandParser 能正确识别 /eag-build 命令（kind === "eag-build"）
+  // 通过构造 SessionManager 实例，访问其私有字段 eagCommandParser 调用 parse()
   const manager = new SessionManager({
     projectRoot: process.cwd(),
     createOpenAIClient: () => ({ client: null, model: "test-model", thinkingEnabled: false }),
@@ -687,22 +688,23 @@ test("F15. isEagBuildPrompt 对 /eag-build 命令返回 true（命令判定逻�
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
   });
-  // 通过 any 访问私有方法（与既有测试模式一致）
+  // 通过 any 访问私有字段 eagCommandParser（与既有测试模式一致）
   const internal = manager as any;
+  const parser = internal.eagCommandParser;
 
   // 正确命令格式
-  assert.equal(internal.isEagBuildPrompt({ text: "/eag-build" }), true);
-  assert.equal(internal.isEagBuildPrompt({ text: "  /eag-build  " }), true);
+  assert.equal(parser.parse({ text: "/eag-build" }).kind, "eag-build");
+  assert.equal(parser.parse({ text: "  /eag-build  " }).kind, "eag-build");
   // 非命令格式
-  assert.equal(internal.isEagBuildPrompt({ text: "请帮我执行 /eag-build" }), false);
-  assert.equal(internal.isEagBuildPrompt({ text: "/eag-build arg" }), false);
-  assert.equal(internal.isEagBuildPrompt({ text: "/eag-design" }), false);
-  assert.equal(internal.isEagBuildPrompt({ text: undefined }), false);
+  assert.equal(parser.parse({ text: "请帮我执行 /eag-build" }).kind, "unknown");
+  assert.equal(parser.parse({ text: "/eag-build arg" }).kind, "unknown");
+  assert.equal(parser.parse({ text: "/eag-design" }).kind, "eag-design");
+  assert.equal(parser.parse({ text: undefined }).kind, "unknown");
   // 含图片或技能时不识别为命令（避免误触发）
-  assert.equal(internal.isEagBuildPrompt({ text: "/eag-build", imageUrls: ["data:image/png;base64,..."] }), false);
+  assert.equal(parser.parse({ text: "/eag-build", imageUrls: ["data:image/png;base64,..."] }).kind, "unknown");
   assert.equal(
-    internal.isEagBuildPrompt({ text: "/eag-build", skills: [{ name: "test", path: "/", description: "" }] }),
-    false
+    parser.parse({ text: "/eag-build", skills: [{ name: "test", path: "/", description: "" }] }).kind,
+    "unknown"
   );
 });
 
@@ -767,7 +769,9 @@ test("F18. handleEagBuildCommand 未注入 codingOrchestrator 时通知错误并
   const internal = manager as any;
 
   // 调用 handleEagBuildCommand
-  await internal.handleEagBuildCommand("test-session-id", { text: "/eag-build" }, new AbortController());
+  // EAG-P3 批次 11 S3：handleEagBuildCommand 新增第三参数 request（由 EagCommandParser 预提取）
+  // 此测试验证未注入 codingOrchestrator 路径，request 传 null（依赖校验先于 request 校验）
+  await internal.handleEagBuildCommand("test-session-id", { text: "/eag-build" }, null, new AbortController());
 
   // 验证：通知消息含"未注入"字样
   assert.ok(messages.length > 0, "应发送至少一条通知消息");
@@ -799,8 +803,10 @@ test("F19. handleEagBuildCommand 未提供 CodingLoopRequest 时通知错误（�
   });
 
   const internal = manager as any;
+  // EAG-P3 批次 11 S3：handleEagBuildCommand 新增第三参数 request（由 EagCommandParser 预提取）
+  // 此测试验证未提供 CodingLoopRequest 路径，request 显式传 null 触发 "CodingLoopRequest 未提供" 错误
   // 不通过 messageParams 提供 CodingLoopRequest
-  await internal.handleEagBuildCommand("test-session-id", { text: "/eag-build" }, new AbortController());
+  await internal.handleEagBuildCommand("test-session-id", { text: "/eag-build" }, null, new AbortController());
 
   // 验证：通知消息含"CodingLoopRequest 未提供"字样
   assert.ok(messages.length > 0, "应发送至少一条通知消息");
@@ -810,12 +816,13 @@ test("F19. handleEagBuildCommand 未提供 CodingLoopRequest 时通知错误（�
   );
 });
 
-test("F20. extractCodingLoopRequest 正确提取并校验 CodingLoopRequest 字段", () => {
-  // 验证 extractCodingLoopRequest 的字段校验逻辑（session.ts §extractCodingLoopRequest）：
-  // 1. messageParams 为 undefined/null → 返回 undefined
-  // 2. messageParams.codingLoopRequest 缺失 → 返回 undefined
-  // 3. messageParams.codingLoopRequest 字段不完整 → 返回 undefined
-  // 4. messageParams.codingLoopRequest 字段完整 → 返回 CodingLoopRequest 对象
+test("F20. EagCommandParser 正确提取并校验 CodingLoopRequest 字段", () => {
+  // EAG-P3 批次 11 S3：extractCodingLoopRequest 已迁移至 EagCommandParser.parse() 内部 extractCodingLoopRequest
+  // 验证 EagCommandParser.parse() 的字段校验逻辑（payload 提取）：
+  // 1. messageParams 为 undefined/null → payload 为 null
+  // 2. messageParams.codingLoopRequest 缺失 → payload 为 null
+  // 3. messageParams.codingLoopRequest 字段不完整 → payload 为 null
+  // 4. messageParams.codingLoopRequest 字段完整 → payload 为 CodingLoopRequest 对象
   const manager = new SessionManager({
     projectRoot: process.cwd(),
     createOpenAIClient: () => ({ client: null, model: "test-model", thinkingEnabled: false }),
@@ -824,33 +831,34 @@ test("F20. extractCodingLoopRequest 正确提取并校验 CodingLoopRequest 字�
     onAssistantMessage: () => {},
   });
   const internal = manager as any;
+  const parser = internal.eagCommandParser;
 
   // 情况 1：messageParams 为 undefined
-  assert.equal(internal.extractCodingLoopRequest({ text: "/eag-build" }), undefined);
+  assert.equal(parser.parse({ text: "/eag-build" }).payload, null);
   // 情况 1：messageParams 为 null
-  assert.equal(internal.extractCodingLoopRequest({ text: "/eag-build", messageParams: null }), undefined);
+  assert.equal(parser.parse({ text: "/eag-build", messageParams: null }).payload, null);
   // 情况 1：messageParams 为空对象
-  assert.equal(internal.extractCodingLoopRequest({ text: "/eag-build", messageParams: {} }), undefined);
+  assert.equal(parser.parse({ text: "/eag-build", messageParams: {} }).payload, null);
   // 情况 2：codingLoopRequest 字段缺失
-  assert.equal(internal.extractCodingLoopRequest({ text: "/eag-build", messageParams: { other: "value" } }), undefined);
+  assert.equal(parser.parse({ text: "/eag-build", messageParams: { other: "value" } }).payload, null);
   // 情况 3：codingLoopRequest 字段不完整（缺 projectRoot）
   assert.equal(
-    internal.extractCodingLoopRequest({
+    parser.parse({
       text: "/eag-build",
       messageParams: { codingLoopRequest: { specContent: "spec" } },
-    }),
-    undefined
+    }).payload,
+    null
   );
   // 情况 4：codingLoopRequest 字段完整 → 返回对象
   const validRequest = createMinimalCodingLoopRequestPlaceholder();
-  const extracted = internal.extractCodingLoopRequest({
+  const parsed = parser.parse({
     text: "/eag-build",
     messageParams: { codingLoopRequest: validRequest },
   });
-  assert.ok(extracted, "字段完整时应返回 CodingLoopRequest 对象");
-  assert.equal(extracted.projectRoot, "/test/project");
-  assert.equal(extracted.specContent, "spec");
-  assert.equal(extracted.maxIterations, 10);
+  assert.ok(parsed.payload, "字段完整时应返回 CodingLoopRequest 对象");
+  assert.equal((parsed.payload as any).projectRoot, "/test/project");
+  assert.equal((parsed.payload as any).specContent, "spec");
+  assert.equal((parsed.payload as any).maxIterations, 10);
 });
 
 test("F21. renderCodingLoopResult 正确渲染结果摘要（§4.9.3）", () => {

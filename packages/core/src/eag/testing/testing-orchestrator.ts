@@ -47,6 +47,7 @@
 // ============================================================================
 
 import * as crypto from "node:crypto";
+import { spawn } from "node:child_process";
 import type { LoopEvent, LoopEventType } from "../loop/models";
 import type { TaskDag } from "../doc-driven/types";
 import type { LoopGuard } from "../../common/loop-guard";
@@ -55,6 +56,12 @@ import { E2eTestGenerator } from "./e2e-test-generator";
 import type { CoverageGate } from "./coverage-gate";
 import { BrownfieldContractGuard } from "./brownfield-contract-guard";
 import { DEFAULT_TEST_QUALITY_CHECKERS } from "./static-checkers";
+// EAG-P3 批次 11 S1 改造：从 gate 模块导入独立的 G-6/G-7 检查器与类型
+// 设计依据：EAG-P3 批次 11 设计 §3 S1 D-S1-2/D-S1-3——gate 模块是门禁类型的权威来源，
+// testing-orchestrator 作为消费者应复用，避免内联重复定义导致类型分叉。
+import { GateG6Checker } from "../gate/gate-g6-checker";
+import { GateG7Checker } from "../gate/gate-g7-checker";
+import type { GateG6Context, GateG7Context, GateResult, TestExecutionResult } from "../gate/gate-types";
 import type {
   AcceptanceCriterion,
   ContractCompatibilityReport,
@@ -144,82 +151,25 @@ export class TestingOrchestratorError extends Error {
 }
 
 // ============================================================================
-// 4. G-6/G-7 门禁检查结果类型（内联实现，不依赖 gate/ 模块）
+// 4. G-6/G-7 门禁类型与检查器（EAG-P3 批次 11 S1 改造后从 gate 模块导入）
 // ============================================================================
-
-/**
- * G-6 门禁检查结果（TESTING Loop 进入门禁）
- *
- * 对应设计文档 §4.8.2——本批次内联实现，P3 批次 11 可抽取为独立 GateG6Checker 类。
- *
- * 判定规则：
- * 1. CODING Loop 已退出（G-5 通过证据）：request.g5Passed=true
- * 2. 单测全过（通过 npm test 退出码 0 验证）：request.unitTestsPassed=true
- * 3. spec.md 文档状态 = approved：request.specStatus="approved"
- *
- * 任一失败 → passed=false, severity=blocker
- */
-export interface GateG6Result {
-  /** G-6 门禁 ID */
-  readonly gateId: "G-6";
-  /** 是否通过 */
-  readonly passed: boolean;
-  /** 未通过原因列表（passed=false 时填写） */
-  readonly failures: ReadonlyArray<string>;
-}
-
-/**
- * G-7 门禁检查结果（TESTING Loop 退出门禁）
- *
- * 对应设计文档 §4.8.3——本批次内联实现，P3 批次 11 可抽取为独立 GateG7Checker 类。
- *
- * 判定规则：
- * 1. 覆盖率达标：coverageReport.passed=true
- * 2. 契约测试全过：contractTests.length > 0 且无生成失败
- * 3. E2E 测试全过：e2eTests.length > 0 且无生成失败
- * 4. 合规证据完整（如启用 ICP）：compliancePackIds 非空时 complianceEvidence 必填
- * 5. PR 描述就绪：prDescription 非空
- *
- * 任一失败 → passed=false, severity=blocker
- */
-export interface GateG7Result {
-  /** G-7 门禁 ID */
-  readonly gateId: "G-7";
-  /** 是否通过 */
-  readonly passed: boolean;
-  /** 未通过原因列表（passed=false 时填写） */
-  readonly failures: ReadonlyArray<string>;
-}
-
-/**
- * G-6 门禁上下文（TestingOrchestrator 内部使用）
- */
-export interface GateG6Context {
-  /** G-5 是否已通过（CODING Loop 退出门禁通过证据） */
-  readonly g5Passed: boolean;
-  /** 单测是否全过 */
-  readonly unitTestsPassed: boolean;
-  /** spec.md 文档状态（draft/approved/rejected） */
-  readonly specStatus: "draft" | "approved" | "rejected";
-}
-
-/**
- * G-7 门禁上下文（TestingOrchestrator 内部使用）
- */
-export interface GateG7Context {
-  /** 覆盖率报告 */
-  readonly coverageReport: Readonly<CoverageReport>;
-  /** 契约测试文件列表 */
-  readonly contractTests: ReadonlyArray<GeneratedTestFile>;
-  /** E2E 测试文件列表 */
-  readonly e2eTests: ReadonlyArray<GeneratedTestFile>;
-  /** 合规证据（启用 ICP 时必填） */
-  readonly complianceEvidence?: Readonly<Record<string, unknown>>;
-  /** 启用的 ICP 合规包 ID 列表 */
-  readonly compliancePackIds?: ReadonlyArray<string>;
-  /** PR 描述 */
-  readonly prDescription: string;
-}
+//
+// 改造说明（对齐 EAG-P3 批次 11 设计 §3 S1 D-S1-1/D-S1-2/D-S1-3）：
+// - 原 L147~L234 内联声明的 4 个接口（GateG6Result / GateG7Result / GateG6Context / GateG7Context）
+//   已删除，改为从 gate/gate-types 导入权威类型
+// - 原 L768~L831 内联的 2 个私有方法（checkGateG6 / checkGateG7）已删除，
+//   改为通过构造期注入的 GateG6Checker / GateG7Checker 独立类委托执行
+// - 返回值由内联 GateG6Result / GateG7Result（failures 数组结构）
+//   切换为权威 GateResult（reason 字符串 + guidance + severity 结构）
+// - 与 GateG4Checker / GateG5Checker 在 CodingOrchestrator 中的注入方式同构
+//
+// 类型源头统一（与 S2 改进合并实施）：
+// - gate/gate-types.ts 是 GateG6Context / GateG7Context / GateResult / TestExecutionResult 的权威来源
+// - testing-orchestrator.ts 作为消费者复用，不再独立声明
+//
+// 向后兼容性：
+// - 既有测试中 import { GateG6Result, GateG7Result } 的代码需更新为 import type { GateResult }
+// - 事件流 payload 中 failures 字段改为 reason 字段（结构由数组变字符串）
 
 // ============================================================================
 // 5. TestingOrchestrator 主类
@@ -270,6 +220,22 @@ export class TestingOrchestrator {
   private readonly brownfieldContractGuard: BrownfieldContractGuard;
   /** 测试质量静态判定器注册表（依赖注入） */
   private readonly staticCheckers: ReadonlyMap<string, TestQualityChecker>;
+  /**
+   * G-6 门禁检查器（依赖注入，必填）
+   *
+   * EAG-P3 批次 11 S1 改造新增（D-S1-4）：
+   * 与 GateG4Checker / GateG5Checker 在 CodingOrchestrator 中的注入方式同构，
+   * 所有 7 道门禁均采用"独立类 + 构造期注入"模式，避免内联实现导致架构同构破坏。
+   */
+  private readonly gateG6Checker: GateG6Checker;
+  /**
+   * G-7 门禁检查器（依赖注入，必填）
+   *
+   * EAG-P3 批次 11 S1 改造新增（D-S1-4）：
+   * 与 GateG4Checker / GateG5Checker 在 CodingOrchestrator 中的注入方式同构，
+   * 所有 7 道门禁均采用"独立类 + 构造期注入"模式，避免内联实现导致架构同构破坏。
+   */
+  private readonly gateG7Checker: GateG7Checker;
   /** 日志回调 */
   private readonly logger: LogCallback;
 
@@ -280,26 +246,43 @@ export class TestingOrchestrator {
   /**
    * 初始化 TESTING Loop 编排器
    *
+   * EAG-P3 批次 11 S1 改造（D-S1-4）：新增 gateG6Checker / gateG7Checker 必填字段，
+   * 与 CodingOrchestrator 中 gateG4Checker / gateG5Checker 的注入方式同构。
+   *
    * @param options 注入选项
    * @param options.coverageGate 覆盖率门禁实例（必填——需注入 pkcAccessor）
+   * @param options.gateG6Checker G-6 门禁检查器（必填——TESTING Loop 进入门禁）
+   * @param options.gateG7Checker G-7 门禁检查器（必填——TESTING Loop 退出门禁）
    * @param options.contractTestGenerator 契约测试生成器（可选，默认 ContractTestGenerator）
    * @param options.e2eTestGenerator E2E 测试生成器（可选，默认 E2eTestGenerator）
    * @param options.brownfieldContractGuard 既有契约保护判定器（可选，默认 BrownfieldContractGuard）
    * @param options.staticCheckers 静态判定器注册表（可选，默认 DEFAULT_TEST_QUALITY_CHECKERS）
    * @param options.logger 日志回调（可选）
+   * @throws {TestingOrchestratorError} 当 coverageGate / gateG6Checker / gateG7Checker 缺失时抛出 request-invalid
    */
   constructor(options: {
     readonly coverageGate: CoverageGate;
+    readonly gateG6Checker: GateG6Checker;
+    readonly gateG7Checker: GateG7Checker;
     readonly contractTestGenerator?: ContractTestGenerator;
     readonly e2eTestGenerator?: E2eTestGenerator;
     readonly brownfieldContractGuard?: BrownfieldContractGuard;
     readonly staticCheckers?: ReadonlyMap<string, TestQualityChecker>;
     readonly logger?: LogCallback;
   }) {
+    // 构造期不变式校验（D-S1-4）：必填字段缺失时立即抛错，避免运行期 NPE
     if (!options || !options.coverageGate) {
       throw new TestingOrchestratorError("request-invalid", "coverageGate 必填（需注入 pkcAccessor）");
     }
+    if (!options.gateG6Checker) {
+      throw new TestingOrchestratorError("request-invalid", "gateG6Checker 必填（TESTING Loop 进入门禁检查器）");
+    }
+    if (!options.gateG7Checker) {
+      throw new TestingOrchestratorError("request-invalid", "gateG7Checker 必填（TESTING Loop 退出门禁检查器）");
+    }
     this.coverageGate = options.coverageGate;
+    this.gateG6Checker = options.gateG6Checker;
+    this.gateG7Checker = options.gateG7Checker;
     this.contractTestGenerator = options.contractTestGenerator ?? new ContractTestGenerator();
     this.e2eTestGenerator = options.e2eTestGenerator ?? new E2eTestGenerator();
     this.brownfieldContractGuard = options.brownfieldContractGuard ?? new BrownfieldContractGuard();
@@ -346,22 +329,28 @@ export class TestingOrchestrator {
     let coverageConsecutiveFailureCount = 0;
 
     // 3. G-6 门禁检查（TESTING Loop 进入门禁）
-    const g6Context: GateG6Context = {
-      g5Passed: true, // 默认假设 G-5 已通过（调用方需保证前置条件）
-      unitTestsPassed: true, // 默认假设单测已通过
-      specStatus: "approved", // 默认假设 spec 已批准
-    };
-    const g6Result = this.checkGateG6(g6Context);
+    // EAG-P3 批次 11 S1 改造（D-S1-5）：改为委托给注入的 GateG6Checker 独立类
+    // 构造完整的 GateG6Context（extends GateContext），从 request 派生基础字段 + 默认假设扩展字段
+    const g6Context: GateG6Context = this.buildGateG6Context(request);
+    const g6Result: GateResult = this.gateG6Checker.check(g6Context);
     events.push(this.buildEvent(runId, 0, "verification_started", { gateId: "G-6", result: g6Result }));
 
     if (!g6Result.passed) {
-      this.log(`G-6 门禁未通过：${g6Result.failures.join("; ")}`, "warn");
-      events.push(this.buildEvent(runId, 0, "human_checkpoint", { gateId: "G-6", failures: g6Result.failures }));
+      // D-S1-7：返回值由内联 GateG6Result（failures 数组）切换为权威 GateResult（reason 字符串）
+      // 调用方读取 g6Result.reason（字符串）而非 g6Result.failures（数组）
+      this.log(`G-6 门禁未通过：${g6Result.reason}`, "warn");
+      events.push(
+        this.buildEvent(runId, 0, "human_checkpoint", {
+          gateId: "G-6",
+          reason: g6Result.reason,
+          guidance: g6Result.guidance,
+        })
+      );
       return this.buildFailureResult(
         request,
         runId,
         "human_checkpoint",
-        `G-6 门禁未通过：${g6Result.failures.join("; ")}`,
+        `G-6 门禁未通过：${g6Result.reason}`,
         events,
         totalLlmCallCount,
         totalTokensUsed,
@@ -715,25 +704,51 @@ export class TestingOrchestrator {
     );
 
     // 11. G-7 门禁检查（TESTING Loop 退出门禁）
-    const g7Context: GateG7Context = {
+    // EAG-P3 批次 11 S1 改造（D-S1-5）：改为委托给注入的 GateG7Checker 独立类
+    // 真实运行测试文件，收集 TestExecutionResult[]（对齐 G-7 checker 的 contractTestResults/e2eTestResults 必填要求）
+    this.log("开始执行契约测试与 E2E 测试，收集 G-7 门禁所需执行结果", "info");
+    events.push(this.buildEvent(runId, 0, "verification_started", { gateId: "G-7", stage: "test-execution" }));
+    const contractTestResults: TestExecutionResult[] = await this.executeTestFiles(contractTests, request.projectRoot);
+    const e2eTestResults: TestExecutionResult[] = await this.executeTestFiles(e2eTests, request.projectRoot);
+    events.push(
+      this.buildEvent(runId, 0, "verification_passed", {
+        gateId: "G-7",
+        stage: "test-execution",
+        contractTestCount: contractTestResults.length,
+        e2eTestCount: e2eTestResults.length,
+      })
+    );
+
+    // 构造完整的 GateG7Context（extends GateContext），从 request 派生基础字段 + 真实测试执行结果
+    const g7Context: GateG7Context = this.buildGateG7Context(request, {
       coverageReport,
       contractTests,
+      contractTestResults,
       e2eTests,
+      e2eTestResults,
       complianceEvidence: undefined, // 本批次预留，不启用 ICP
       compliancePackIds: request.compliancePackIds,
       prDescription,
-    };
-    const g7Result = this.checkGateG7(g7Context);
+    });
+    const g7Result: GateResult = this.gateG7Checker.check(g7Context);
     events.push(this.buildEvent(runId, 0, "verification_started", { gateId: "G-7", result: g7Result }));
 
     if (!g7Result.passed) {
-      this.log(`G-7 门禁未通过：${g7Result.failures.join("; ")}`, "warn");
-      events.push(this.buildEvent(runId, 0, "human_checkpoint", { gateId: "G-7", failures: g7Result.failures }));
+      // D-S1-7：返回值由内联 GateG7Result（failures 数组）切换为权威 GateResult（reason 字符串）
+      // 调用方读取 g7Result.reason（字符串）而非 g7Result.failures（数组）
+      this.log(`G-7 门禁未通过：${g7Result.reason}`, "warn");
+      events.push(
+        this.buildEvent(runId, 0, "human_checkpoint", {
+          gateId: "G-7",
+          reason: g7Result.reason,
+          guidance: g7Result.guidance,
+        })
+      );
       return this.buildFailureResult(
         request,
         runId,
         "human_checkpoint",
-        `G-7 门禁未通过：${g7Result.failures.join("; ")}`,
+        `G-7 门禁未通过：${g7Result.reason}`,
         events,
         totalLlmCallCount,
         totalTokensUsed,
@@ -765,68 +780,293 @@ export class TestingOrchestrator {
   }
 
   // ----------------------------------------------------------------------
-  // 私有方法：G-6 / G-7 门禁检查（内联实现）
+  // 私有方法：G-6 / G-7 门禁上下文构造（EAG-P3 批次 11 S1 改造后新增）
   // ----------------------------------------------------------------------
+  //
+  // 改造说明（对齐 EAG-P3 批次 11 设计 §3 S1 D-S1-2/D-S1-5）：
+  // - 原 L768~L831 内联的 checkGateG6 / checkGateG7 私有方法已删除
+  // - 改为通过注入的 GateG6Checker / GateG7Checker 独立类委托执行
+  // - 新增 buildGateG6Context / buildGateG7Context 私有方法：
+  //   构造完整的 GateG6Context / GateG7Context（extends GateContext），
+  //   从 TestingLoopRequest 派生基础字段 + 真实测试执行结果
+  // - 新增 executeTestFiles 私有方法：真实运行测试文件，收集 TestExecutionResult[]
+  //   对齐 G-7 checker 的 contractTestResults / e2eTestResults 必填要求
 
   /**
-   * G-6 门禁检查（TESTING Loop 进入门禁）
+   * 构造 G-6 门禁上下文（TESTING Loop 进入门禁）
    *
-   * 对应设计文档 §4.8.2——本批次内联实现，P3 批次 11 抽取为独立 GateG6Checker 类。
+   * EAG-P3 批次 11 S1 改造新增（D-S1-5）：
+   * - 从 TestingLoopRequest 派生 GateContext 基础字段
+   * - 默认假设 G-5 已通过 / 单测全过 / spec.md 已批准（调用方需保证前置条件）
+   * - implementationRoot 来自 request.implementationRoot
    *
-   * @param context G-6 上下文
-   * @returns G-6 检查结果
+   * 字段派生策略：
+   * - projectId：从 projectRoot 派生（path.basename），G-6 checker 内部不使用
+   * - loopType：固定为 "testing"（TESTING Loop）
+   * - specStatus / planStatus：默认 "approved"（调用方需保证前置条件）
+   * - reviewRecords：空数组（G-6 checker 内部不使用）
+   * - userApproved：true（调用方需保证前置条件）
+   * - taskCard：从 request.taskDag.nodes[0] 派生（G-6 checker 内部不使用）
+   * - actualChanges：空数组（G-6 checker 内部不使用）
+   * - g5Passed / unitTestsPassed：默认 true（调用方需保证前置条件）
+   * - implementationRoot：来自 request.implementationRoot
+   *
+   * @param request TESTING Loop 编排请求
+   * @returns 完整的 GateG6Context 上下文
    */
-  private checkGateG6(context: Readonly<GateG6Context>): GateG6Result {
-    const failures: string[] = [];
-
-    if (!context.g5Passed) {
-      failures.push("G-5 门禁未通过（CODING Loop 未退出）");
-    }
-    if (!context.unitTestsPassed) {
-      failures.push("单元测试未全过");
-    }
-    if (context.specStatus !== "approved") {
-      failures.push(`spec.md 文档状态非 approved（当前：${context.specStatus}）`);
-    }
+  private buildGateG6Context(request: Readonly<TestingLoopRequest>): GateG6Context {
+    // 从 request.taskDag.nodes[0] 派生 TaskCard（G-6 checker 内部不使用，仅满足类型约束）
+    const firstNode = request.taskDag.nodes[0];
+    const taskCard = {
+      id: firstNode?.id ?? "T-000",
+      title: firstNode?.title ?? "默认任务",
+      requirementId: firstNode?.requirementId ?? "F-000",
+      dependencies: firstNode?.dependencies ?? [],
+      acceptanceCriteria: firstNode?.acceptanceCommand ? [firstNode.acceptanceCommand] : [],
+      status: "completed" as const,
+      declaredSymbols: firstNode?.declaredSymbols ?? [],
+    };
 
     return Object.freeze({
-      gateId: "G-6",
-      passed: failures.length === 0,
-      failures: Object.freeze(failures),
+      // GateContext 基础字段（从 request 派生或默认值）
+      projectId: crypto.createHash("sha1").update(request.projectRoot).digest("hex").slice(0, 8),
+      loopType: "testing" as const,
+      specStatus: "approved" as const,
+      planStatus: "approved" as const,
+      reviewRecords: Object.freeze([]),
+      userApproved: true,
+      taskCard: Object.freeze(taskCard),
+      actualChanges: Object.freeze([]),
+      // GateG6Context 扩展字段
+      g5Passed: true, // 默认假设 G-5 已通过（调用方需保证前置条件）
+      unitTestsPassed: true, // 默认假设单测已通过
+      implementationRoot: request.implementationRoot,
     });
   }
 
   /**
-   * G-7 门禁检查（TESTING Loop 退出门禁）
+   * 构造 G-7 门禁上下文（TESTING Loop 退出门禁）
    *
-   * 对应设计文档 §4.8.3——本批次内联实现，P3 批次 11 抽取为独立 GateG7Checker 类。
+   * EAG-P3 批次 11 S1 改造新增（D-S1-5）：
+   * - 从 TestingLoopRequest 派生 GateContext 基础字段
+   * - 从测试执行结果派生 contractTestResults / e2eTestResults（真实运行测试得到）
+   * - coverageReport / prDescription 从编排流程产出传入
    *
-   * @param context G-7 上下文
-   * @returns G-7 检查结果
+   * @param request TESTING Loop 编排请求
+   * @param overrides G-7 扩展字段（coverageReport / contractTests / contractTestResults / e2eTests / e2eTestResults / complianceEvidence / compliancePackIds / prDescription）
+   * @returns 完整的 GateG7Context 上下文
    */
-  private checkGateG7(context: Readonly<GateG7Context>): GateG7Result {
-    const failures: string[] = [];
-
-    if (!context.coverageReport.passed) {
-      failures.push(`覆盖率未达标（未通过维度：${context.coverageReport.failedDimensions.join(", ")}）`);
+  private buildGateG7Context(
+    request: Readonly<TestingLoopRequest>,
+    overrides: {
+      readonly coverageReport: Readonly<CoverageReport>;
+      readonly contractTests: ReadonlyArray<GeneratedTestFile>;
+      readonly contractTestResults: ReadonlyArray<TestExecutionResult>;
+      readonly e2eTests: ReadonlyArray<GeneratedTestFile>;
+      readonly e2eTestResults: ReadonlyArray<TestExecutionResult>;
+      readonly complianceEvidence?: Readonly<Record<string, unknown>>;
+      readonly compliancePackIds?: ReadonlyArray<string>;
+      readonly prDescription: string;
     }
-    if (context.contractTests.length === 0) {
-      failures.push("契约测试文件列表为空");
-    }
-    if (context.e2eTests.length === 0) {
-      failures.push("E2E 测试文件列表为空");
-    }
-    if (context.compliancePackIds && context.compliancePackIds.length > 0 && !context.complianceEvidence) {
-      failures.push("启用 ICP 但合规证据缺失");
-    }
-    if (typeof context.prDescription !== "string" || context.prDescription.trim().length === 0) {
-      failures.push("PR 描述未就绪");
-    }
+  ): GateG7Context {
+    // 从 request.taskDag.nodes[0] 派生 TaskCard（G-7 checker 内部不使用，仅满足类型约束）
+    const firstNode = request.taskDag.nodes[0];
+    const taskCard = {
+      id: firstNode?.id ?? "T-000",
+      title: firstNode?.title ?? "默认任务",
+      requirementId: firstNode?.requirementId ?? "F-000",
+      dependencies: firstNode?.dependencies ?? [],
+      acceptanceCriteria: firstNode?.acceptanceCommand ? [firstNode.acceptanceCommand] : [],
+      status: "completed" as const,
+      declaredSymbols: firstNode?.declaredSymbols ?? [],
+    };
 
     return Object.freeze({
-      gateId: "G-7",
-      passed: failures.length === 0,
-      failures: Object.freeze(failures),
+      // GateContext 基础字段（从 request 派生或默认值）
+      projectId: crypto.createHash("sha1").update(request.projectRoot).digest("hex").slice(0, 8),
+      loopType: "testing" as const,
+      specStatus: "approved" as const,
+      planStatus: "approved" as const,
+      reviewRecords: Object.freeze([]),
+      userApproved: true,
+      taskCard: Object.freeze(taskCard),
+      actualChanges: Object.freeze([]),
+      // GateG7Context 扩展字段（从编排流程产出传入）
+      coverageReport: overrides.coverageReport,
+      contractTests: overrides.contractTests,
+      contractTestResults: overrides.contractTestResults,
+      e2eTests: overrides.e2eTests,
+      e2eTestResults: overrides.e2eTestResults,
+      complianceEvidence: overrides.complianceEvidence,
+      compliancePackIds: overrides.compliancePackIds,
+      prDescription: overrides.prDescription,
+    });
+  }
+
+  /**
+   * 真实执行测试文件，收集 TestExecutionResult[]
+   *
+   * EAG-P3 批次 11 S1 改造新增（D-S1-5 配套）：
+   * - G-7 checker 要求 contractTestResults / e2eTestResults 必填
+   * - 本方法通过 child_process.spawn 调用 `node --test --test-reporter=json <file>`
+   *   真实运行每个测试文件，并解析 JSON 输出得到 TestExecutionResult
+   * - 与"严禁 mock/占位/简化"原则对齐：使用真实测试执行结果，不构造假数据
+   *
+   * 算法：
+   * 1. 对每个 GeneratedTestFile，构造 `node --test --test-reporter=json <filePath>` 命令
+   * 2. 在 projectRoot 目录下 spawn 子进程
+   * 3. 收集 stdout（JSON 报告）与 stderr（错误日志）
+   * 4. 检查退出码：0=全部通过 / 非 0=存在失败
+   * 5. 解析 JSON 报告，统计通过/失败用例数
+   * 6. 返回 TestExecutionResult（含 filePath / exitCode / durationMs / failedCount / passedCount）
+   *
+   * 错误处理：
+   * - spawn 本身失败（如 node 未安装）→ exitCode=-1, failedCount=1, passedCount=0
+   * - 测试文件不存在 → exitCode=-1, failedCount=1, passedCount=0
+   * - 测试执行超时（默认 30 秒）→ exitCode=-1, failedCount=1, passedCount=0
+   * - JSON 解析失败 → 退化为基于 exitCode 的简化统计
+   *
+   * @param files 测试文件列表（GeneratedTestFile[]）
+   * @param projectRoot 项目根目录（绝对路径）
+   * @returns 测试执行结果列表（TestExecutionResult[]，与 files 一一对应）
+   */
+  private async executeTestFiles(
+    files: ReadonlyArray<GeneratedTestFile>,
+    projectRoot: string
+  ): Promise<TestExecutionResult[]> {
+    // 无测试文件时返回空数组（G-7 checker 会校验非空，触发失败）
+    if (!files || files.length === 0) {
+      return [];
+    }
+
+    // 串行执行每个测试文件（避免并发资源竞争）
+    const results: TestExecutionResult[] = [];
+    for (const file of files) {
+      const result = await this.executeSingleTestFile(file.relativePath, projectRoot);
+      results.push(result);
+    }
+    return results;
+  }
+
+  /**
+   * 执行单个测试文件，返回 TestExecutionResult
+   *
+   * 算法：
+   * 1. 构造命令参数：`--test --test-reporter=json <filePath>`
+   * 2. 在 projectRoot 目录下 spawn node 子进程
+   * 3. 设置 30 秒超时（避免长时间挂起）
+   * 4. 收集 stdout（JSON 报告）与 stderr（错误日志）
+   * 5. 检查退出码：0=全部通过 / 非 0=存在失败
+   * 6. 解析 JSON 报告，统计通过/失败用例数
+   *
+   * @param filePath 测试文件相对路径（相对 projectRoot）
+   * @param projectRoot 项目根目录（绝对路径）
+   * @returns 测试执行结果
+   */
+  private executeSingleTestFile(filePath: string, projectRoot: string): Promise<TestExecutionResult> {
+    return new Promise<TestExecutionResult>((resolve) => {
+      const startTime = Date.now();
+      // 构造 node --test --test-reporter=json <filePath> 命令
+      // 使用 --import tsx 支持 TypeScript 测试文件直接执行（与 coverage-gate.ts 同构）
+      const args = ["--import", "tsx", "--test", "--test-reporter=json", filePath];
+      let child: ReturnType<typeof spawn>;
+      try {
+        child = spawn("node", args, {
+          cwd: projectRoot,
+          stdio: ["ignore", "pipe", "pipe"],
+          env: { ...process.env },
+        });
+      } catch (err) {
+        // spawn 本身失败（如 node 未安装）→ 返回失败结果
+        const durationMs = Date.now() - startTime;
+        resolve({
+          filePath,
+          exitCode: -1,
+          durationMs,
+          failedCount: 1,
+          passedCount: 0,
+        });
+        return;
+      }
+
+      let stdout = "";
+      let stderr = "";
+
+      child.stdout?.on("data", (data: Buffer | string) => {
+        stdout += data.toString();
+      });
+      child.stderr?.on("data", (data: Buffer | string) => {
+        stderr += data.toString();
+      });
+
+      // 30 秒超时保护（避免长时间挂起）
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        const durationMs = Date.now() - startTime;
+        resolve({
+          filePath,
+          exitCode: -1,
+          durationMs,
+          failedCount: 1,
+          passedCount: 0,
+        });
+      }, 30_000);
+
+      child.on("close", (code: number | null) => {
+        clearTimeout(timer);
+        const durationMs = Date.now() - startTime;
+        const exitCode = code ?? -1;
+
+        // 解析 JSON 报告，统计通过/失败用例数
+        // node --test 的 JSON 报告格式：{ tests: [{ name, status }, ...] }
+        // status 取值：pass / fail / skipped / todo
+        let passedCount = 0;
+        let failedCount = 0;
+        try {
+          const report = JSON.parse(stdout) as { tests?: Array<{ status?: string }> };
+          if (Array.isArray(report.tests)) {
+            for (const test of report.tests) {
+              const status = test?.status;
+              if (status === "pass") {
+                passedCount++;
+              } else if (status === "fail") {
+                failedCount++;
+              }
+            }
+          }
+        } catch {
+          // JSON 解析失败 → 退化为基于 exitCode 的简化统计
+          // exitCode=0 → 全部通过（passedCount=1, failedCount=0）
+          // exitCode≠0 → 全部失败（passedCount=0, failedCount=1）
+          if (exitCode === 0) {
+            passedCount = 1;
+            failedCount = 0;
+          } else {
+            passedCount = 0;
+            failedCount = 1;
+          }
+        }
+
+        resolve({
+          filePath,
+          exitCode,
+          durationMs,
+          failedCount,
+          passedCount,
+        });
+      });
+
+      child.on("error", () => {
+        clearTimeout(timer);
+        const durationMs = Date.now() - startTime;
+        resolve({
+          filePath,
+          exitCode: -1,
+          durationMs,
+          failedCount: 1,
+          passedCount: 0,
+        });
+      });
     });
   }
 
@@ -1257,9 +1497,12 @@ export class TestingOrchestrator {
 /**
  * 创建默认 TestingOrchestrator 实例
  *
+ * EAG-P3 批次 11 S1 改造（D-S1-4/D-S1-8）：注入默认的 GateG6Checker / GateG7Checker 独立类，
+ * 与 CodingOrchestrator 中 createDefaultCodingOrchestrator 的注入方式同构。
+ *
  * @param coverageGate 覆盖率门禁实例（必填——需注入 pkcAccessor）
  * @param logger 日志回调（可选）
- * @returns TestingOrchestrator 实例
+ * @returns TestingOrchestrator 实例（含默认注入的 G-6/G-7 门禁检查器）
  */
 export function createDefaultTestingOrchestrator(
   coverageGate: CoverageGate,
@@ -1267,6 +1510,9 @@ export function createDefaultTestingOrchestrator(
 ): TestingOrchestrator {
   return new TestingOrchestrator({
     coverageGate,
+    // EAG-P3 批次 11 S1 改造：注入默认的 G-6/G-7 门禁检查器（独立类，无外部依赖）
+    gateG6Checker: new GateG6Checker(),
+    gateG7Checker: new GateG7Checker(),
     logger,
   });
 }

@@ -51,12 +51,21 @@ export type PkcLayer = "L1" | "L2" | "L3" | "L4";
 export const PKC_LAYERS: ReadonlyArray<PkcLayer> = Object.freeze(["L1", "L2", "L3", "L4"]);
 
 /**
- * 当前批次实施的 PKC 层级（仅 L1）
+ * 当前已实施的 PKC 层级列表
  *
- * 本批次（P1 批次 5）只实施 L1 全局视野层，L2/L3/L4 由后续批次实施。
+ * EAG-P3 批次 11 §9.1.2 同步修正——随项目推进，PKC 各层级逐步实施完成，
+ * 此常量需反映"已实施层级"的真实状态，防止误用未实施的层级。
+ *
+ * 批次来源：
+ * - 批次 1（EAG-P1）：L1 全局视野层（Repo Map + 入口点 + 技术栈指纹 + 分层架构识别）
+ * - 批次 5/6（EAG-P1/P2）：L2 模块级知识（模块边界 + 依赖关系 + 接口契约 + 语义检索）
+ * - 批次 7（EAG-P2）：L3 函数级知识（函数签名 + 调用图 + 业务流程 + 副作用）
+ * - 批次 11（EAG-P3）：L4 符号级知识图谱（爆炸半径分析 + 变更影响传播）
+ *
+ * 使用 Object.freeze 冻结（§5.12.4 G-A6d 配置冻结）。
  * 此常量用于运行时校验，防止误用未实施的层级。
  */
-export const IMPLEMENTED_PKC_LAYERS: ReadonlyArray<PkcLayer> = Object.freeze(["L1"]);
+export const IMPLEMENTED_PKC_LAYERS: ReadonlyArray<PkcLayer> = Object.freeze(["L1", "L2", "L3", "L4"]);
 
 // ============================================================================
 // 2. 仓库地图（Repository Map）

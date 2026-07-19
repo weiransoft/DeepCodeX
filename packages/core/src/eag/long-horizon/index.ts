@@ -34,6 +34,12 @@ export type {
   SolutionCost,
   MultiLoopFinalStatus,
   MultiLoopNodeFinalStatus,
+  // C1 阻塞分析增强（批次 12）
+  BlockageType,
+  BlockageSeverity,
+  ActionPriority,
+  ActionEffort,
+  ResourceAccessMode,
 } from "./types";
 
 // 接口（数据模型）
@@ -54,6 +60,14 @@ export type {
   DagValidationResult,
   MultiLoopRunReport,
   MultiLoopNodeResult,
+  // C1 阻塞分析增强（批次 12）
+  BlockageRecord,
+  SuggestedAction,
+  GateStatusSnapshot,
+  ResourceAccessRecord,
+  ResourceAccessGraph,
+  BlockageAnalysisReport,
+  PlanBlockageAnalyzeRequest,
 } from "./types";
 
 // 常量
@@ -74,6 +88,12 @@ export {
   DEFAULT_MILESTONE_TAG_PREFIX,
   HEALTH_SCORE_WEIGHTS,
   LONG_HORIZON_DEFAULTS,
+  // C1 阻塞分析增强（批次 12）
+  BLOCKAGE_TYPES,
+  BLOCKAGE_SEVERITIES,
+  ACTION_PRIORITIES,
+  ACTION_EFFORTS,
+  RESOURCE_ACCESS_MODES,
 } from "./types";
 
 // 日志回调类型
@@ -165,3 +185,10 @@ export {
 
 export type { BlockageAnalyzerErrorKind, BlockageAnalyzeRequest } from "./blockage-analyzer";
 export { BlockageAnalyzerError, RootCauseRuleMatcher, BlockageAnalyzer } from "./blockage-analyzer";
+
+// ============================================================================
+// 9. 依赖图阻塞分析器（plan-blockage-analyzer.ts）—— EAG-P3 批次 12 C1
+// ============================================================================
+
+export type { PlanBlockageAnalyzerErrorKind } from "./plan-blockage-analyzer";
+export { PlanBlockageAnalyzerError, PlanBlockageAnalyzer } from "./plan-blockage-analyzer";

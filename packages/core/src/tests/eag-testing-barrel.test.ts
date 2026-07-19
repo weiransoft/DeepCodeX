@@ -105,6 +105,13 @@ import {
 // 6. TESTING Loop 编排器导出（testing-orchestrator.ts）
 import { TestingOrchestrator, TestingOrchestratorError, createDefaultTestingOrchestrator } from "../eag/testing";
 
+// EAG-P3 批次 11 S1 改造：注入独立 GateG6Checker / GateG7Checker（构造期必填）
+// 设计依据：EAG-P3 批次 11 设计 §3 S1 D-S1-4——所有 7 道门禁均采用"独立类 + 构造期注入"模式，
+// 与 GateG4Checker / GateG5Checker 在 CodingOrchestrator 中的注入方式同构。
+// 此处直接从 gate 模块导入，避免通过 testing barrel 二次中转（gate 模块才是权威来源）。
+import { GateG6Checker } from "../eag/gate/gate-g6-checker";
+import { GateG7Checker } from "../eag/gate/gate-g7-checker";
+
 // 7. 测试质量静态判定器导出（static-checkers/）
 import {
   AssertionDensityChecker,
@@ -688,7 +695,12 @@ test("T2d: BrownfieldContractGuard / BrownfieldContractGuardError 类导出", ()
 test("T2e: TestingOrchestrator / TestingOrchestratorError 类导出", () => {
   const pkcAccessor = new InMemoryPkcAccessor();
   const coverageGate = new CoverageGate(pkcAccessor);
-  const orchestrator = new TestingOrchestrator({ coverageGate });
+  // EAG-P3 批次 11 S1 改造：注入独立 GateG6Checker / GateG7Checker（构造期必填）
+  const orchestrator = new TestingOrchestrator({
+    coverageGate,
+    gateG6Checker: new GateG6Checker(),
+    gateG7Checker: new GateG7Checker(),
+  });
   assert.ok(orchestrator instanceof TestingOrchestrator);
 
   const error = new TestingOrchestratorError("request-invalid", "测试错误");
@@ -775,8 +787,11 @@ test("T3a: 从 barrel 导入 TestingOrchestrator + CoverageGate + InMemoryLLMCli
       []
     );
     const coverageGate = new CoverageGate(pkcAccessor);
+    // EAG-P3 批次 11 S1 改造：注入独立 GateG6Checker / GateG7Checker（构造期必填）
     const orchestrator = new TestingOrchestrator({
       coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
       // 注入 logger 以验证日志回调链路
       logger: (_msg: string, _level?: "info" | "warn" | "error") => {
         // 静默日志（不进行任何操作，仅验证 logger 注入链路）

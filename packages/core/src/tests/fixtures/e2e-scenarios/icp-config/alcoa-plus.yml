@@ -1,0 +1,62 @@
+# ALCOA+ 合规配置（引用真实 FDA Guidance 2018）
+#
+# 本文件作为 EAG-P3 批次 12 E2E 场景 3（TESTING Loop）的 ICP 合规配置 fixture。
+# 引用真实法规：
+# - FDA Guidance for Industry: Data Integrity and Compliance with Drug CGMP (2018)
+# - 21 CFR Part 11（电子记录与电子签名）
+# - ALCOA+ 原则：Attributable / Legible / Contemporaneous / Original / Accurate
+#   + Complete / Consistent / Enduring / Available
+#
+# 设计依据：
+# - EAG-P3 批次 12 设计文档 §4.4.3 icp-config/alcoa-plus.yml
+# - EAG-P3 批次 11 设计文档 §6.4 ALCOA+ 规则清单
+
+packId: ALCOA
+version: "1.0"
+description: ALCOA+ 数据完整性合规配置，引用 FDA Guidance 2018 §III.A~I
+rules:
+  - ruleId: ALCOA-01
+    description: "数据必须可归因（Attributable）—— 记录操作人与操作时间"
+    severity: blocker
+    regulationRef: "FDA Guidance 2018 §III.A / 21 CFR 211.68(b)"
+    checkKind: static
+  - ruleId: ALCOA-02
+    description: "数据必须清晰可读（Legible）—— 不可篡改或覆盖"
+    severity: blocker
+    regulationRef: "FDA Guidance 2018 §III.B / 21 CFR 211.180(d)"
+    checkKind: static
+  - ruleId: ALCOA-03
+    description: "数据必须同步记录（Contemporaneous）—— 操作时立即记录"
+    severity: blocker
+    regulationRef: "FDA Guidance 2018 §III.C / 21 CFR 211.100(b)"
+    checkKind: dynamic
+  - ruleId: ALCOA-04
+    description: "数据必须为原始记录（Original）—— 或经验证的真副本"
+    severity: blocker
+    regulationRef: "FDA Guidance 2018 §III.D / 21 CFR 211.180(a)"
+    checkKind: static
+  - ruleId: ALCOA-05
+    description: "数据必须准确（Accurate）—— 无错误与偏差"
+    severity: blocker
+    regulationRef: "FDA Guidance 2018 §III.E / 21 CFR 211.68(a)"
+    checkKind: dynamic
+  - ruleId: ALCOA-06
+    description: "数据必须完整（Complete）—— 含所有记录与元数据"
+    severity: major
+    regulationRef: "FDA Guidance 2018 §III.F / 21 CFR 211.180"
+    checkKind: static
+  - ruleId: ALCOA-07
+    description: "数据必须一致（Consistent）—— 顺序与时间戳一致"
+    severity: major
+    regulationRef: "FDA Guidance 2018 §III.G / 21 CFR 211.100"
+    checkKind: static
+  - ruleId: ALCOA-08
+    description: "数据必须持久（Enduring）—— 长期保存于受控媒介"
+    severity: major
+    regulationRef: "FDA Guidance 2018 §III.H / 21 CFR 211.180(c)"
+    checkKind: static
+  - ruleId: ALCOA-09
+    description: "数据必须可用（Available）—— 审计时可检索与展示"
+    severity: major
+    regulationRef: "FDA Guidance 2018 §III.I / 21 CFR 211.180(f)"
+    checkKind: dynamic

@@ -73,7 +73,13 @@ import {
   TestingOrchestratorError,
   createDefaultTestingOrchestrator,
 } from "../eag/testing/testing-orchestrator";
-import type { TestingOrchestratorErrorKind, GateG6Result, GateG7Result } from "../eag/testing/testing-orchestrator";
+import type { TestingOrchestratorErrorKind } from "../eag/testing/testing-orchestrator";
+// EAG-P3 批次 11 S1 改造：GateG6Result / GateG7Result 已删除，改用权威的 GateResult
+// 从 gate/gate-types 导入 GateResult 类型（如需类型断言或字段读取）
+import type { GateResult } from "../eag/gate/gate-types";
+// EAG-P3 批次 11 S1 改造：注入独立 GateG6Checker / GateG7Checker（构造期必填）
+import { GateG6Checker } from "../eag/gate/gate-g6-checker";
+import { GateG7Checker } from "../eag/gate/gate-g7-checker";
 import { CoverageGate } from "../eag/testing/coverage-gate";
 import { isC8Available } from "../eag/testing/coverage-gate";
 import { DEFAULT_TEST_QUALITY_CHECKERS } from "../eag/testing/static-checkers";
@@ -498,7 +504,11 @@ function createTestingLoopRequest(overrides: Partial<TestingLoopRequest> = {}): 
 test("T1a: 默认构造 → 实例化成功", () => {
   const pkcAccessor = new InMemoryPkcAccessor();
   const coverageGate = new CoverageGate(pkcAccessor);
-  const orchestrator = new TestingOrchestrator({ coverageGate });
+  const orchestrator = new TestingOrchestrator({
+    coverageGate,
+    gateG6Checker: new GateG6Checker(),
+    gateG7Checker: new GateG7Checker(),
+  });
   assert.ok(orchestrator, "应成功实例化");
   assert.equal(typeof orchestrator.run, "function", "应含 run 方法");
 });
@@ -510,7 +520,12 @@ test("T1b: 注入 logger → 实例化成功", () => {
   const logger = (message: string, level?: "info" | "warn" | "error") => {
     logs.push({ message, level });
   };
-  const orchestrator = new TestingOrchestrator({ coverageGate, logger });
+  const orchestrator = new TestingOrchestrator({
+    coverageGate,
+    gateG6Checker: new GateG6Checker(),
+    gateG7Checker: new GateG7Checker(),
+    logger,
+  });
   assert.ok(orchestrator, "应成功实例化");
 });
 
@@ -537,6 +552,37 @@ test("T2a: coverageGate 缺失 → 抛 TestingOrchestratorError (request-invalid
   );
 });
 
+// EAG-P3 批次 11 S1 改造新增：T2b/T2c 测试 gateG6Checker / gateG7Checker 缺失场景
+// 设计依据：EAG-P3 批次 11 设计 §3 S1 D-S1-4——构造期不变式校验（必填检查）
+
+test("T2b: gateG6Checker 缺失 → 抛 TestingOrchestratorError (request-invalid)", () => {
+  const pkcAccessor = new InMemoryPkcAccessor();
+  const coverageGate = new CoverageGate(pkcAccessor);
+  assert.throws(
+    () => new TestingOrchestrator({ coverageGate, gateG7Checker: new GateG7Checker() } as any),
+    (err: unknown) => {
+      assert.ok(err instanceof TestingOrchestratorError);
+      assert.equal((err as TestingOrchestratorError).kind, "request-invalid", "kind 应为 request-invalid");
+      assert.ok((err as TestingOrchestratorError).message.includes("gateG6Checker"), "错误消息应含 gateG6Checker");
+      return true;
+    }
+  );
+});
+
+test("T2c: gateG7Checker 缺失 → 抛 TestingOrchestratorError (request-invalid)", () => {
+  const pkcAccessor = new InMemoryPkcAccessor();
+  const coverageGate = new CoverageGate(pkcAccessor);
+  assert.throws(
+    () => new TestingOrchestrator({ coverageGate, gateG6Checker: new GateG6Checker() } as any),
+    (err: unknown) => {
+      assert.ok(err instanceof TestingOrchestratorError);
+      assert.equal((err as TestingOrchestratorError).kind, "request-invalid", "kind 应为 request-invalid");
+      assert.ok((err as TestingOrchestratorError).message.includes("gateG7Checker"), "错误消息应含 gateG7Checker");
+      return true;
+    }
+  );
+});
+
 // ============================================================================
 // T3. run() 请求校验失败路径
 // ============================================================================
@@ -544,7 +590,11 @@ test("T2a: coverageGate 缺失 → 抛 TestingOrchestratorError (request-invalid
 test("T3a: projectRoot 空 → 抛 TestingOrchestratorError (request-invalid)", async () => {
   const pkcAccessor = new InMemoryPkcAccessor();
   const coverageGate = new CoverageGate(pkcAccessor);
-  const orchestrator = new TestingOrchestrator({ coverageGate });
+  const orchestrator = new TestingOrchestrator({
+    coverageGate,
+    gateG6Checker: new GateG6Checker(),
+    gateG7Checker: new GateG7Checker(),
+  });
   const request = createTestingLoopRequest({ projectRoot: "" });
 
   await assert.rejects(
@@ -561,7 +611,11 @@ test("T3a: projectRoot 空 → 抛 TestingOrchestratorError (request-invalid)", 
 test("T3b: specContent 空 → 抛 TestingOrchestratorError (request-invalid)", async () => {
   const pkcAccessor = new InMemoryPkcAccessor();
   const coverageGate = new CoverageGate(pkcAccessor);
-  const orchestrator = new TestingOrchestrator({ coverageGate });
+  const orchestrator = new TestingOrchestrator({
+    coverageGate,
+    gateG6Checker: new GateG6Checker(),
+    gateG7Checker: new GateG7Checker(),
+  });
   const request = createTestingLoopRequest({ specContent: "" });
 
   await assert.rejects(
@@ -578,7 +632,11 @@ test("T3b: specContent 空 → 抛 TestingOrchestratorError (request-invalid)", 
 test("T3c: planContent 空 → 抛 TestingOrchestratorError (request-invalid)", async () => {
   const pkcAccessor = new InMemoryPkcAccessor();
   const coverageGate = new CoverageGate(pkcAccessor);
-  const orchestrator = new TestingOrchestrator({ coverageGate });
+  const orchestrator = new TestingOrchestrator({
+    coverageGate,
+    gateG6Checker: new GateG6Checker(),
+    gateG7Checker: new GateG7Checker(),
+  });
   const request = createTestingLoopRequest({ planContent: "" });
 
   await assert.rejects(
@@ -595,7 +653,11 @@ test("T3c: planContent 空 → 抛 TestingOrchestratorError (request-invalid)", 
 test("T3d: tasksContent 空 → 抛 TestingOrchestratorError (request-invalid)", async () => {
   const pkcAccessor = new InMemoryPkcAccessor();
   const coverageGate = new CoverageGate(pkcAccessor);
-  const orchestrator = new TestingOrchestrator({ coverageGate });
+  const orchestrator = new TestingOrchestrator({
+    coverageGate,
+    gateG6Checker: new GateG6Checker(),
+    gateG7Checker: new GateG7Checker(),
+  });
   const request = createTestingLoopRequest({ tasksContent: "" });
 
   await assert.rejects(
@@ -612,7 +674,11 @@ test("T3d: tasksContent 空 → 抛 TestingOrchestratorError (request-invalid)",
 test("T3f: taskDag 非对象（缺 nodes 数组） → 抛 TestingOrchestratorError (request-invalid)", async () => {
   const pkcAccessor = new InMemoryPkcAccessor();
   const coverageGate = new CoverageGate(pkcAccessor);
-  const orchestrator = new TestingOrchestrator({ coverageGate });
+  const orchestrator = new TestingOrchestrator({
+    coverageGate,
+    gateG6Checker: new GateG6Checker(),
+    gateG7Checker: new GateG7Checker(),
+  });
   // 构造非法 taskDag（缺 nodes 数组）
 
   const request = createTestingLoopRequest({ taskDag: { topologicalOrder: [] } as any });
@@ -631,7 +697,11 @@ test("T3f: taskDag 非对象（缺 nodes 数组） → 抛 TestingOrchestratorEr
 test("T3g: acceptanceCriteria 非数组 → 抛 TestingOrchestratorError (request-invalid)", async () => {
   const pkcAccessor = new InMemoryPkcAccessor();
   const coverageGate = new CoverageGate(pkcAccessor);
-  const orchestrator = new TestingOrchestrator({ coverageGate });
+  const orchestrator = new TestingOrchestrator({
+    coverageGate,
+    gateG6Checker: new GateG6Checker(),
+    gateG7Checker: new GateG7Checker(),
+  });
 
   const request = createTestingLoopRequest({ acceptanceCriteria: "invalid" as any });
 
@@ -649,7 +719,11 @@ test("T3g: acceptanceCriteria 非数组 → 抛 TestingOrchestratorError (reques
 test("T3h: llmClient 缺失 createMessage → 抛 TestingOrchestratorError (request-invalid)", async () => {
   const pkcAccessor = new InMemoryPkcAccessor();
   const coverageGate = new CoverageGate(pkcAccessor);
-  const orchestrator = new TestingOrchestrator({ coverageGate });
+  const orchestrator = new TestingOrchestrator({
+    coverageGate,
+    gateG6Checker: new GateG6Checker(),
+    gateG7Checker: new GateG7Checker(),
+  });
   // 构造非法 llmClient（缺 createMessage 方法）
 
   const request = createTestingLoopRequest({ llmClient: {} as any });
@@ -668,7 +742,11 @@ test("T3h: llmClient 缺失 createMessage → 抛 TestingOrchestratorError (requ
 test("T3i: pkcAccessor 缺失 queryBusinessFlows → 抛 TestingOrchestratorError (request-invalid)", async () => {
   const pkcAccessor = new InMemoryPkcAccessor();
   const coverageGate = new CoverageGate(pkcAccessor);
-  const orchestrator = new TestingOrchestrator({ coverageGate });
+  const orchestrator = new TestingOrchestrator({
+    coverageGate,
+    gateG6Checker: new GateG6Checker(),
+    gateG7Checker: new GateG7Checker(),
+  });
   // 构造非法 pkcAccessor（缺 queryBusinessFlows 方法）
 
   const request = createTestingLoopRequest({ pkcAccessor: {} as any });
@@ -687,7 +765,11 @@ test("T3i: pkcAccessor 缺失 queryBusinessFlows → 抛 TestingOrchestratorErro
 test("T3j: loopGuard 缺失 check → 抛 TestingOrchestratorError (request-invalid)", async () => {
   const pkcAccessor = new InMemoryPkcAccessor();
   const coverageGate = new CoverageGate(pkcAccessor);
-  const orchestrator = new TestingOrchestrator({ coverageGate });
+  const orchestrator = new TestingOrchestrator({
+    coverageGate,
+    gateG6Checker: new GateG6Checker(),
+    gateG7Checker: new GateG7Checker(),
+  });
   // 构造非法 loopGuard（缺 check 方法）
 
   const request = createTestingLoopRequest({ loopGuard: {} as any });
@@ -706,7 +788,11 @@ test("T3j: loopGuard 缺失 check → 抛 TestingOrchestratorError (request-inva
 test("T3k: maxIterations < 1 → 抛 TestingOrchestratorError (request-invalid)", async () => {
   const pkcAccessor = new InMemoryPkcAccessor();
   const coverageGate = new CoverageGate(pkcAccessor);
-  const orchestrator = new TestingOrchestrator({ coverageGate });
+  const orchestrator = new TestingOrchestrator({
+    coverageGate,
+    gateG6Checker: new GateG6Checker(),
+    gateG7Checker: new GateG7Checker(),
+  });
   const request = createTestingLoopRequest({ maxIterations: 0 });
 
   await assert.rejects(
@@ -723,7 +809,11 @@ test("T3k: maxIterations < 1 → 抛 TestingOrchestratorError (request-invalid)"
 test("T3l: maxIterations 超上限 → 抛 TestingOrchestratorError (request-invalid)", async () => {
   const pkcAccessor = new InMemoryPkcAccessor();
   const coverageGate = new CoverageGate(pkcAccessor);
-  const orchestrator = new TestingOrchestrator({ coverageGate });
+  const orchestrator = new TestingOrchestrator({
+    coverageGate,
+    gateG6Checker: new GateG6Checker(),
+    gateG7Checker: new GateG7Checker(),
+  });
   // 超过 DEFAULT_MAX_TESTING_ITERATIONS * 10 = 50
   const request = createTestingLoopRequest({
     maxIterations: DEFAULT_MAX_TESTING_ITERATIONS * 10 + 1,
@@ -757,7 +847,11 @@ test("T4a: G-6 默认通过（间接验证：后续阶段被执行）", async ()
 
     const pkcAccessor = new InMemoryPkcAccessor([createE2eTestSpec()], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     const request = createTestingLoopRequest({
       projectRoot,
@@ -790,7 +884,11 @@ test("T5a: LoopGuard 已 abort → finalStatus=stop_failure", async () => {
 
     const pkcAccessor = new InMemoryPkcAccessor([createE2eTestSpec()], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     // 构造已 abort 的 LoopGuard
     const loopGuard = new LoopGuard({ maxIterations: 5, maxTokens: 100_000 });
@@ -825,7 +923,11 @@ test("T6a: taskDag.nodes 为空 → contractTests 为空", async () => {
 
     const pkcAccessor = new InMemoryPkcAccessor([createE2eTestSpec()], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     const request = createTestingLoopRequest({
       projectRoot,
@@ -849,7 +951,11 @@ test("T6b: taskDag.nodes 含任务 → contractTests 非空", async () => {
 
     const pkcAccessor = new InMemoryPkcAccessor([createE2eTestSpec()], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     const request = createTestingLoopRequest({
       projectRoot,
@@ -883,7 +989,11 @@ test("T7a: PKC 返回 documented 流程 → 生成 E2E 测试", async () => {
     // 注入 documented 流程
     const pkcAccessor = new InMemoryPkcAccessor([createE2eTestSpec()], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     const request = createTestingLoopRequest({
       projectRoot,
@@ -917,7 +1027,11 @@ test("T7b: PKC 返回 inferred 流程 → humanCheckpointFlows 非空（事件�
     });
     const pkcAccessor = new InMemoryPkcAccessor([inferredFlow], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     const request = createTestingLoopRequest({
       projectRoot,
@@ -955,7 +1069,11 @@ test("T8a: 默认场景（既有契约文件不存在）→ 降级跳过（不�
     // 编排器应捕获错误并降级跳过，不阻断 Loop
     const pkcAccessor = new InMemoryPkcAccessor([createE2eTestSpec()], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     const request = createTestingLoopRequest({
       projectRoot,
@@ -991,7 +1109,11 @@ test("T9a: 默认注入 3 个 Checker（AssertionDensityChecker / TestNamingChec
 
     const pkcAccessor = new InMemoryPkcAccessor([createE2eTestSpec()], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     const request = createTestingLoopRequest({
       projectRoot,
@@ -1040,7 +1162,11 @@ test("T10a: c8 不可用 → finalStatus=human_checkpoint（覆盖率门禁执�
 
     const pkcAccessor = new InMemoryPkcAccessor([createE2eTestSpec()], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     const request = createTestingLoopRequest({
       projectRoot,
@@ -1074,7 +1200,11 @@ test("T11a: PR 描述含变更摘要 + 需求映射 + 测试报告", async () =>
 
     const pkcAccessor = new InMemoryPkcAccessor([createE2eTestSpec()], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     const request = createTestingLoopRequest({
       projectRoot,
@@ -1121,7 +1251,11 @@ test("T11b: c8 可用 - PR 描述含完整结构（test.skip：需 c8 安装）"
 
     const pkcAccessor = new InMemoryPkcAccessor([createE2eTestSpec()], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     const request = createTestingLoopRequest({
       projectRoot,
@@ -1160,7 +1294,11 @@ test("T12a: c8 可用 - 覆盖率未达标 → G-7 失败（test.skip：需 c8 �
 
     const pkcAccessor = new InMemoryPkcAccessor([createE2eTestSpec()], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     const request = createTestingLoopRequest({
       projectRoot,
@@ -1193,7 +1331,11 @@ test("T13a: 失败时 recordIteration 被调用（iterationsCompleted 递增）"
 
     const pkcAccessor = new InMemoryPkcAccessor([createE2eTestSpec()], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     const loopGuard = new LoopGuard({ maxIterations: 5, maxTokens: 100_000 });
     const initialIterations = loopGuard.getState().iterationsCompleted;
@@ -1225,7 +1367,11 @@ test("T14a: TestingLoopResult 冻结", async () => {
 
     const pkcAccessor = new InMemoryPkcAccessor([createE2eTestSpec()], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     const request = createTestingLoopRequest({
       projectRoot,
@@ -1246,7 +1392,11 @@ test("T14b: contractTests 数组冻结", async () => {
 
     const pkcAccessor = new InMemoryPkcAccessor([createE2eTestSpec()], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     const request = createTestingLoopRequest({
       projectRoot,
@@ -1268,7 +1418,11 @@ test("T14c: e2eTests 数组冻结", async () => {
 
     const pkcAccessor = new InMemoryPkcAccessor([createE2eTestSpec()], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     const request = createTestingLoopRequest({
       projectRoot,
@@ -1289,7 +1443,11 @@ test("T14d: events 数组冻结", async () => {
 
     const pkcAccessor = new InMemoryPkcAccessor([createE2eTestSpec()], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     const request = createTestingLoopRequest({
       projectRoot,
@@ -1310,7 +1468,11 @@ test("T14e: integrationTests 数组冻结", async () => {
 
     const pkcAccessor = new InMemoryPkcAccessor([createE2eTestSpec()], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     const request = createTestingLoopRequest({
       projectRoot,
@@ -1331,7 +1493,11 @@ test("T14f: complianceTests 数组冻结", async () => {
 
     const pkcAccessor = new InMemoryPkcAccessor([createE2eTestSpec()], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     const request = createTestingLoopRequest({
       projectRoot,
@@ -1429,7 +1595,11 @@ test("T17a: 完整流程集成测试（c8 不可用 → human_checkpoint）", as
 
     const pkcAccessor = new InMemoryPkcAccessor([createE2eTestSpec()], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     const request = createTestingLoopRequest({
       projectRoot,
@@ -1501,7 +1671,11 @@ test("T18a: 未提供 runId → 自动生成 runId", async () => {
 
     const pkcAccessor = new InMemoryPkcAccessor([createE2eTestSpec()], []);
     const coverageGate = new CoverageGate(pkcAccessor);
-    const orchestrator = new TestingOrchestrator({ coverageGate });
+    const orchestrator = new TestingOrchestrator({
+      coverageGate,
+      gateG6Checker: new GateG6Checker(),
+      gateG7Checker: new GateG7Checker(),
+    });
 
     const request = createTestingLoopRequest({
       projectRoot,

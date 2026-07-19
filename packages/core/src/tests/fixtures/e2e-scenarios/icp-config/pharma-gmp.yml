@@ -1,0 +1,47 @@
+# 药企 GMP 合规配置（引用真实法规）
+#
+# 本文件作为 EAG-P3 批次 12 E2E 场景 3（TESTING Loop）的 ICP 合规配置 fixture。
+# 引用真实法规：
+# - GMP 2010（中国药品生产质量管理规范，2010 年修订）
+# - 21 CFR Part 211（美国联邦法规第 21 卷第 211 部分，药品生产）
+# - ICH Q9（质量风险管理）
+# - ICH Q10（药品质量体系）
+#
+# 设计依据：
+# - EAG-P3 批次 12 设计文档 §4.4.3 icp-config/pharma-gmp.yml
+# - EAG-P3 批次 11 设计文档 §6.4 GMP 规则清单
+
+packId: GMP
+version: "1.0"
+description: 药企 GMP 合规配置，引用真实法规（GMP 2010 / 21 CFR Part 211 / ICH Q9 / ICH Q10）
+rules:
+  - ruleId: GMP-01
+    description: "关键工艺参数必须记录审计日志"
+    severity: blocker
+    regulationRef: "GMP 2010 第 25 条 / 21 CFR 211.110(a)"
+    checkKind: static
+  - ruleId: GMP-02
+    description: "批次记录必须不可篡改"
+    severity: blocker
+    regulationRef: "GMP 2010 第 63 条 / 21 CFR 211.100"
+    checkKind: static
+  - ruleId: GMP-03
+    description: "变更控制必须经过评审与批准"
+    severity: major
+    regulationRef: "ICH Q10 §13 / GMP 2010 第 60 条"
+    checkKind: static
+  - ruleId: GMP-04
+    description: "偏差处理必须记录并调查"
+    severity: major
+    regulationRef: "21 CFR 211.192 / GMP 2010 第 75 条"
+    checkKind: dynamic
+  - ruleId: GMP-05
+    description: "质量风险管理必须执行并记录"
+    severity: major
+    regulationRef: "ICH Q9 / GMP 2010 第 14 条"
+    checkKind: static
+  - ruleId: GMP-06
+    description: "物料管理必须可追溯"
+    severity: blocker
+    regulationRef: "21 CFR 211.80 / GMP 2010 第 50 条"
+    checkKind: dynamic

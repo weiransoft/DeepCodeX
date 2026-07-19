@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false
+  },
+  "include": ["src/tests/eag-e2e-handover.test.ts", "src/tests/eag-e2e-full-pipeline.test.ts"],
+  "exclude": ["node_modules", "dist"]
+}

@@ -6,8 +6,8 @@
  *   - T1a. PkcLayer 包含 4 个合法值（L1/L2/L3/L4）
  *   - T1b. PKC_LAYERS 常量顺序正确
  *   - T1c. PKC_LAYERS 常量已冻结
- * - T2. IMPLEMENTED_PKC_LAYERS 当前批次实施范围
- *   - T2a. 仅实施 L1
+ * - T2. IMPLEMENTED_PKC_LAYERS 当前已实施的层级范围
+ *   - T2a. 已实施全部 4 层（L1/L2/L3/L4，EAG-P3 批次 11 §9.1.2 同步修正）
  *   - T2b. 常量已冻结
  * - T3. RepositoryMap 接口字段完整性
  * - T4. DirectoryNode 接口字段完整性（含递归 children）
@@ -82,12 +82,15 @@ test("T1c. PKC_LAYERS 常量已冻结", () => {
 });
 
 // ============================================================================
-// T2. IMPLEMENTED_PKC_LAYERS 当前批次实施范围
+// T2. IMPLEMENTED_PKC_LAYERS 当前已实施的层级范围
 // ============================================================================
 
-test("T2a. IMPLEMENTED_PKC_LAYERS 仅实施 L1", () => {
-  assert.equal(IMPLEMENTED_PKC_LAYERS.length, 1);
+test("T2a. IMPLEMENTED_PKC_LAYERS 已实施全部 4 层（L1/L2/L3/L4，EAG-P3 批次 11 §9.1.2 同步修正）", () => {
+  assert.equal(IMPLEMENTED_PKC_LAYERS.length, 4);
   assert.equal(IMPLEMENTED_PKC_LAYERS[0], "L1");
+  assert.equal(IMPLEMENTED_PKC_LAYERS[1], "L2");
+  assert.equal(IMPLEMENTED_PKC_LAYERS[2], "L3");
+  assert.equal(IMPLEMENTED_PKC_LAYERS[3], "L4");
 });
 
 test("T2b. IMPLEMENTED_PKC_LAYERS 常量已冻结", () => {

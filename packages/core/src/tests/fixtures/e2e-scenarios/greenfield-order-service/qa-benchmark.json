@@ -1,0 +1,357 @@
+{
+  "version": "1.0",
+  "projectName": "greenfield-order-service",
+  "description": "EAG-P3 批次 12 E2E 场景 4（HANDOVER）50 条问答基准——40 条事实型 + 10 条推断型",
+  "facts": [
+    {
+      "id": "F-001",
+      "question": "订单状态机的终态有哪些？",
+      "expectedAnswer": "已完成、已取消、已退款",
+      "expectedSources": ["src/order/order.aggregate.ts"],
+      "category": "business-flow"
+    },
+    {
+      "id": "F-002",
+      "question": "用户登录使用什么认证方式？",
+      "expectedAnswer": "JWT 认证",
+      "expectedSources": ["src/user/user-controller.ts"],
+      "category": "api-contract"
+    },
+    {
+      "id": "F-003",
+      "question": "订单管理模块依赖哪些模块？",
+      "expectedAnswer": "用户管理与商品管理",
+      "expectedSources": ["docs/eag/spec.md"],
+      "category": "architecture"
+    },
+    {
+      "id": "F-004",
+      "question": "支付管理模块依赖哪个模块？",
+      "expectedAnswer": "订单管理",
+      "expectedSources": ["docs/eag/spec.md"],
+      "category": "architecture"
+    },
+    {
+      "id": "F-005",
+      "question": "订单状态机的初始状态是什么？",
+      "expectedAnswer": "待支付",
+      "expectedSources": ["src/order/order.aggregate.ts"],
+      "category": "business-flow"
+    },
+    {
+      "id": "F-006",
+      "question": "订单已支付后可以迁移到哪些状态？",
+      "expectedAnswer": "已发货",
+      "expectedSources": ["src/order/order.aggregate.ts"],
+      "category": "business-flow"
+    },
+    {
+      "id": "F-007",
+      "question": "P99 接口响应时间要求是多少？",
+      "expectedAnswer": "≤200ms",
+      "expectedSources": ["docs/eag/spec.md"],
+      "category": "api-contract"
+    },
+    {
+      "id": "F-008",
+      "question": "并发支持要求是多少 QPS？",
+      "expectedAnswer": "≥1000 QPS",
+      "expectedSources": ["docs/eag/spec.md"],
+      "category": "api-contract"
+    },
+    {
+      "id": "F-009",
+      "question": "数据一致性要求是什么？",
+      "expectedAnswer": "订单与支付最终一致",
+      "expectedSources": ["docs/eag/spec.md"],
+      "category": "architecture"
+    },
+    {
+      "id": "F-010",
+      "question": "用户注册需要哪些字段？",
+      "expectedAnswer": "邮箱与密码",
+      "expectedSources": ["docs/eag/spec.md"],
+      "category": "data-model"
+    },
+    {
+      "id": "F-011",
+      "question": "商品创建需要哪些字段？",
+      "expectedAnswer": "名称 / 价格 / 库存",
+      "expectedSources": ["docs/eag/spec.md"],
+      "category": "data-model"
+    },
+    {
+      "id": "F-012",
+      "question": "商品查询支持哪些方式？",
+      "expectedAnswer": "按 ID 查询与按名称模糊查询",
+      "expectedSources": ["docs/eag/spec.md"],
+      "category": "api-contract"
+    },
+    {
+      "id": "F-013",
+      "question": "创建订单需要哪些参数？",
+      "expectedAnswer": "用户 ID + 商品 ID + 数量",
+      "expectedSources": ["docs/eag/spec.md"],
+      "category": "api-contract"
+    },
+    {
+      "id": "F-014",
+      "question": "订单查询支持哪些方式？",
+      "expectedAnswer": "按用户 ID 与按状态查询",
+      "expectedSources": ["docs/eag/spec.md"],
+      "category": "api-contract"
+    },
+    {
+      "id": "F-015",
+      "question": "发起支付需要哪些参数？",
+      "expectedAnswer": "订单 ID + 支付方式",
+      "expectedSources": ["docs/eag/spec.md"],
+      "category": "api-contract"
+    },
+    {
+      "id": "F-016",
+      "question": "支付回调的处理方式是什么？",
+      "expectedAnswer": "异步通知",
+      "expectedSources": ["docs/eag/spec.md"],
+      "category": "business-flow"
+    },
+    {
+      "id": "F-017",
+      "question": "退款处理的触发时机是什么？",
+      "expectedAnswer": "用户发起退款请求后处理",
+      "expectedSources": ["src/payment/payment.aggregate.ts"],
+      "category": "business-flow"
+    },
+    {
+      "id": "F-018",
+      "question": "库存扣减的时机是什么？",
+      "expectedAnswer": "下单时扣减",
+      "expectedSources": ["src/product/product.aggregate.ts"],
+      "category": "business-flow"
+    },
+    {
+      "id": "F-019",
+      "question": "订单已发货后可以迁移到哪个状态？",
+      "expectedAnswer": "已完成",
+      "expectedSources": ["src/order/order.aggregate.ts"],
+      "category": "business-flow"
+    },
+    {
+      "id": "F-020",
+      "question": "库存不足时下单会怎样？",
+      "expectedAnswer": "返回错误，不创建订单",
+      "expectedSources": ["src/product/product.aggregate.ts"],
+      "category": "business-flow"
+    },
+    {
+      "id": "F-021",
+      "question": "项目采用什么架构范式？",
+      "expectedAnswer": "DDD 分层架构",
+      "expectedSources": ["docs/eag/spec.md"],
+      "category": "architecture"
+    },
+    {
+      "id": "F-022",
+      "question": "项目使用什么编程语言？",
+      "expectedAnswer": "TypeScript",
+      "expectedSources": ["package.json"],
+      "category": "architecture"
+    },
+    {
+      "id": "F-023",
+      "question": "项目使用什么测试框架？",
+      "expectedAnswer": "node:test + node:assert/strict",
+      "expectedSources": ["package.json"],
+      "category": "test-strategy"
+    },
+    {
+      "id": "F-024",
+      "question": "项目使用什么模块系统？",
+      "expectedAnswer": "ESM",
+      "expectedSources": ["package.json"],
+      "category": "architecture"
+    },
+    {
+      "id": "F-025",
+      "question": "跨聚合一致性通过什么机制实现？",
+      "expectedAnswer": "领域事件 + Saga 编排器",
+      "expectedSources": ["docs/eag/architecture.md"],
+      "category": "architecture"
+    },
+    {
+      "id": "F-026",
+      "question": "领域层不允许依赖哪些层？",
+      "expectedAnswer": "不依赖任何外层（应用层 / 基础设施层 / 接口层）",
+      "expectedSources": ["docs/eag/architecture.md"],
+      "category": "architecture"
+    },
+    {
+      "id": "F-027",
+      "question": "支付回调成功后订单状态如何迁移？",
+      "expectedAnswer": "自动迁移为已支付",
+      "expectedSources": ["src/payment/payment-callback-handler.ts"],
+      "category": "business-flow"
+    },
+    {
+      "id": "F-028",
+      "question": "退款处理完成后订单状态是什么？",
+      "expectedAnswer": "已退款",
+      "expectedSources": ["src/payment/payment.aggregate.ts"],
+      "category": "business-flow"
+    },
+    {
+      "id": "F-029",
+      "question": "用户登录后获取什么？",
+      "expectedAnswer": "JWT token",
+      "expectedSources": ["src/user/user-controller.ts"],
+      "category": "api-contract"
+    },
+    {
+      "id": "F-030",
+      "question": "JWT token 的用途是什么？",
+      "expectedAnswer": "后续请求鉴权",
+      "expectedSources": ["src/user/user-controller.ts"],
+      "category": "api-contract"
+    },
+    {
+      "id": "F-031",
+      "question": "订单状态机有几种状态？",
+      "expectedAnswer": "6 种：待支付 / 已支付 / 已发货 / 已完成 / 已取消 / 已退款",
+      "expectedSources": ["src/order/order.aggregate.ts"],
+      "category": "data-model"
+    },
+    {
+      "id": "F-032",
+      "question": "订单管理服务包含多少个模块？",
+      "expectedAnswer": "4 个：用户管理 / 商品管理 / 订单管理 / 支付管理",
+      "expectedSources": ["docs/eag/spec.md"],
+      "category": "architecture"
+    },
+    {
+      "id": "F-033",
+      "question": "商品管理模块的职责是什么？",
+      "expectedAnswer": "商品创建 / 查询 / 库存扣减",
+      "expectedSources": ["docs/eag/spec.md"],
+      "category": "business-flow"
+    },
+    {
+      "id": "F-034",
+      "question": "用户管理模块的职责是什么？",
+      "expectedAnswer": "用户注册 / 登录 / 信息查询",
+      "expectedSources": ["docs/eag/spec.md"],
+      "category": "business-flow"
+    },
+    {
+      "id": "F-035",
+      "question": "订单管理模块的职责是什么？",
+      "expectedAnswer": "订单创建 / 状态机迁移 / 查询",
+      "expectedSources": ["docs/eag/spec.md"],
+      "category": "business-flow"
+    },
+    {
+      "id": "F-036",
+      "question": "支付管理模块的职责是什么？",
+      "expectedAnswer": "发起支付 / 异步回调 / 退款",
+      "expectedSources": ["docs/eag/spec.md"],
+      "category": "business-flow"
+    },
+    {
+      "id": "F-037",
+      "question": "Node.js 版本要求是多少？",
+      "expectedAnswer": "Node.js 22+",
+      "expectedSources": ["package.json"],
+      "category": "architecture"
+    },
+    {
+      "id": "F-038",
+      "question": "项目业务背景是什么？",
+      "expectedAnswer": "某电商平台需要构建订单管理服务",
+      "expectedSources": ["docs/eag/spec.md"],
+      "category": "business-flow"
+    },
+    {
+      "id": "F-039",
+      "question": "订单已取消后可以再次迁移状态吗？",
+      "expectedAnswer": "不可以，已取消是终态",
+      "expectedSources": ["src/order/order.aggregate.ts"],
+      "category": "business-flow"
+    },
+    {
+      "id": "F-040",
+      "question": "订单已完成后可以再次迁移状态吗？",
+      "expectedAnswer": "不可以，已完成是终态",
+      "expectedSources": ["src/order/order.aggregate.ts"],
+      "category": "business-flow"
+    },
+    {
+      "id": "I-001",
+      "question": "为什么选择 DDD 分层架构而不是微服务架构？",
+      "expectedAnswer": "因为业务领域复杂度高但读写模式均衡，且当前阶段模块边界清晰，单体 DDD 更易维护",
+      "expectedSources": ["docs/eag/architecture.md"],
+      "category": "architecture"
+    },
+    {
+      "id": "I-002",
+      "question": "为什么订单与支付之间采用最终一致性而非强一致性？",
+      "expectedAnswer": "因为支付回调是异步通知，强一致性会阻塞用户下单流程；通过领域事件 + Saga 编排可保证最终一致",
+      "expectedSources": ["docs/eag/architecture.md"],
+      "category": "architecture"
+    },
+    {
+      "id": "I-003",
+      "question": "如果支付回调失败，应如何处理？",
+      "expectedAnswer": "通过 Saga 编排器重试支付回调，重试失败后触发 HUMAN_CHECKPOINT",
+      "expectedSources": ["src/payment/payment-callback-handler.ts"],
+      "category": "test-strategy"
+    },
+    {
+      "id": "I-004",
+      "question": "如何保证订单状态机不变式不被破坏？",
+      "expectedAnswer": "在 OrderAggregate 业务方法中校验当前状态，仅允许合法迁移；测试用例覆盖所有合法/非法迁移",
+      "expectedSources": ["src/order/order.aggregate.ts", "tests/unit/order.aggregate.test.ts"],
+      "category": "test-strategy"
+    },
+    {
+      "id": "I-005",
+      "question": "JWT token 的过期策略应该是什么？",
+      "expectedAnswer": "建议 24 小时过期，过期后用户需重新登录获取新 token",
+      "expectedSources": ["src/user/user-controller.ts"],
+      "category": "api-contract"
+    },
+    {
+      "id": "I-006",
+      "question": "库存扣减与订单创建如何保证原子性？",
+      "expectedAnswer": "通过 Saga 编排器在订单创建事务中同步扣减库存，若扣减失败则回滚订单创建",
+      "expectedSources": ["src/order/order-saga.ts"],
+      "category": "architecture"
+    },
+    {
+      "id": "I-007",
+      "question": "高并发场景下如何防止商品超卖？",
+      "expectedAnswer": "通过数据库乐观锁或 Redis 分布式锁保证库存扣减原子性，库存不足时拒绝下单",
+      "expectedSources": ["src/product/product.aggregate.ts"],
+      "category": "test-strategy"
+    },
+    {
+      "id": "I-008",
+      "question": "退款处理失败时应如何恢复？",
+      "expectedAnswer": "记录退款失败事件到审计日志，由 Saga 编排器重试；重试 3 次失败后触发人工介入",
+      "expectedSources": ["src/payment/payment.aggregate.ts"],
+      "category": "test-strategy"
+    },
+    {
+      "id": "I-009",
+      "question": "为什么用户注册需要邮箱 + 密码而非手机号？",
+      "expectedAnswer": "邮箱作为唯一标识便于跨平台使用，密码加盐哈希存储保证安全；手机号可作为后续扩展字段",
+      "expectedSources": ["docs/eag/spec.md"],
+      "category": "data-model"
+    },
+    {
+      "id": "I-010",
+      "question": "项目未来扩展为微服务架构的关键路径是什么？",
+      "expectedAnswer": "按聚合根拆分微服务（用户服务 / 商品服务 / 订单服务 / 支付服务），通过事件总线集成；领域事件已设计为可异步发布",
+      "expectedSources": ["docs/eag/architecture.md"],
+      "category": "architecture"
+    }
+  ]
+}

@@ -84,6 +84,10 @@ export { LdapPatternChecker } from "./ldap-pattern-checker";
 // TCS-SEC-01：依赖漏洞扫描（npm audit 输出 + 已知漏洞依赖版本）
 export { DependencyScanner } from "./dependency-scanner";
 
+// TCS-OSS-02/03：对象存储模式（签名 URL 过期时间 / 文件上传校验）
+// 批次 12 收尾补全：批次 9 设计 §4.5.4 应实现但遗漏，本批次补全
+export { OssPatternChecker } from "./oss-pattern-checker";
+
 // 棕地专属：既有 API 契约保护（复用 discovery/existing-contract-guard）
 export { ContractGuardChecker } from "./contract-guard-checker";
 
@@ -111,6 +115,7 @@ import { CachePatternChecker } from "./cache-pattern-checker";
 import { SqlPatternChecker } from "./sql-pattern-checker";
 import { LdapPatternChecker } from "./ldap-pattern-checker";
 import { DependencyScanner } from "./dependency-scanner";
+import { OssPatternChecker } from "./oss-pattern-checker";
 import { ContractGuardChecker } from "./contract-guard-checker";
 
 /**
@@ -120,20 +125,27 @@ import { ContractGuardChecker } from "./contract-guard-checker";
  * 维护 redlineId → StaticChecker 实例的映射。
  *
  * 注册规则（多对一映射）：
- * - E4 → ImportAnalyzer（依赖方向检查）
- * - TCS-OSS-01 → ImportAnalyzer（业务代码禁直连 OSS SDK）
- * - E6 → HardcodeSecretScanner（硬编码密钥扫描）
- * - TCS-SEC-02 → HardcodeSecretScanner（同 E6，gitleaks 规则集）
- * - E2 → IdempotencyChecker（幂等性检查）
  * - E1 → SagaDetector（事务边界检查）
+ * - E2 → IdempotencyChecker（幂等性检查）
  * - E3 → AuditEventMatcher（审计事件比对）
+ * - E4 → ImportAnalyzer（依赖方向检查）
  * - E5 → DtoValidatorChecker（DTO 输入校验）
+ * - E6 → HardcodeSecretScanner（硬编码密钥扫描）
  * - E7 → AnemicModelDetector（贫血模型检测）
  * - E8 → ContractExistenceChecker（API 契约存在性）
+ * - TCS-OSS-01 → ImportAnalyzer（业务代码禁直连 OSS SDK）
+ * - TCS-OSS-02 → OssPatternChecker（签名 URL 过期时间，批次 12 补全）
+ * - TCS-OSS-03 → OssPatternChecker（文件上传校验，批次 12 补全）
  * - TCS-CACHE-01/02/03 → CachePatternChecker（缓存三防设计）
  * - TCS-SQL-01/02/03 → SqlPatternChecker（SQL 优化三红线）
  * - TCS-LDAP-01/02 → LdapPatternChecker（LDAP 接入双红线）
  * - TCS-SEC-01 → DependencyScanner（依赖漏洞扫描）
+ * - TCS-SEC-02 → HardcodeSecretScanner（同 E6，gitleaks 规则集）
+ *
+ * 历史背景：TCS-OSS-02 / TCS-OSS-03 在批次 9 设计中应有但遗漏，
+ * 批次 12 C2 端到端测试发现 StrictEvaluator 对这两条红线返回 unknown
+ * 触发 decideVerdict 的 unknownBlockerOrMajor > 0 → human_checkpoint。
+ * 本批次补全 OssPatternChecker 后注册表覆盖全部 21 条 redlineId 映射。
  *
  * 注：ContractGuardChecker（棕地专属）未在此注册——
  * 该 Checker 由 StrictEvaluator 在棕地场景下按需实例化并注入既有 API 契约清单。
@@ -154,6 +166,9 @@ export const DEFAULT_STATIC_CHECKERS: ReadonlyMap<string, StaticChecker> = Objec
 
     // TCS 红线（13 条）
     ["TCS-OSS-01", new ImportAnalyzer()],
+    // 批次 12 补全：TCS-OSS-02/03 之前未注册，导致 StrictEvaluator 返回 unknown → human_checkpoint
+    ["TCS-OSS-02", new OssPatternChecker()],
+    ["TCS-OSS-03", new OssPatternChecker()],
     ["TCS-SEC-01", new DependencyScanner()],
     ["TCS-SEC-02", new HardcodeSecretScanner()],
     ["TCS-CACHE-01", new CachePatternChecker()],

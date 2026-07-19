@@ -175,25 +175,27 @@ function createTestManager(
 // G. /eag-design 命令测试（§4.18.3）
 // ============================================================================
 
-test("G1. isEagDesignPrompt 对 /eag-design 命令返回 true（命令判定逻辑）", () => {
-  // 验证：isEagDesignPrompt 能正确识别 /eag-design 命令
+test("G1. EagCommandParser 对 /eag-design 命令返回 eag-design kind（命令判定逻辑）", () => {
+  // EAG-P3 批次 11 S3：isEagDesignPrompt 已迁移至 EagCommandParser.parse() 统一入口
+  // 验证：EagCommandParser 能正确识别 /eag-design 命令（kind === "eag-design"）
   // 判定规则：text 严格匹配 /eag-design，无图片附件，无技能匹配
   const manager = createTestManager(() => {});
   const internal = manager as any;
+  const parser = internal.eagCommandParser;
 
   // 正确命令格式
-  assert.equal(internal.isEagDesignPrompt({ text: "/eag-design" }), true);
-  assert.equal(internal.isEagDesignPrompt({ text: "  /eag-design  " }), true);
+  assert.equal(parser.parse({ text: "/eag-design" }).kind, "eag-design");
+  assert.equal(parser.parse({ text: "  /eag-design  " }).kind, "eag-design");
   // 非命令格式
-  assert.equal(internal.isEagDesignPrompt({ text: "请帮我执行 /eag-design" }), false);
-  assert.equal(internal.isEagDesignPrompt({ text: "/eag-design arg" }), false);
-  assert.equal(internal.isEagDesignPrompt({ text: "/eag-build" }), false);
-  assert.equal(internal.isEagDesignPrompt({ text: undefined }), false);
+  assert.equal(parser.parse({ text: "请帮我执行 /eag-design" }).kind, "unknown");
+  assert.equal(parser.parse({ text: "/eag-design arg" }).kind, "unknown");
+  assert.equal(parser.parse({ text: "/eag-build" }).kind, "eag-build");
+  assert.equal(parser.parse({ text: undefined }).kind, "unknown");
   // 含图片或技能时不识别为命令（避免误触发）
-  assert.equal(internal.isEagDesignPrompt({ text: "/eag-design", imageUrls: ["data:image/png;base64,..."] }), false);
+  assert.equal(parser.parse({ text: "/eag-design", imageUrls: ["data:image/png;base64,..."] }).kind, "unknown");
   assert.equal(
-    internal.isEagDesignPrompt({ text: "/eag-design", skills: [{ name: "test", path: "/", description: "" }] }),
-    false
+    parser.parse({ text: "/eag-design", skills: [{ name: "test", path: "/", description: "" }] }).kind,
+    "unknown"
   );
 });
 
@@ -204,7 +206,9 @@ test("G2. handleEagDesignCommand 未注入 designOrchestrator 时通知错误并
   const manager = createTestManager((content) => messages.push(content));
 
   const internal = manager as any;
-  await internal.handleEagDesignCommand("test-session-design-1", { text: "/eag-design" }, new AbortController());
+  // EAG-P3 批次 11 S3：handleEagDesignCommand 新增第三参数 input（由 EagCommandParser 预提取）
+  // 此测试验证未注入 designOrchestrator 路径，input 传 null（依赖校验先于 input 校验）
+  await internal.handleEagDesignCommand("test-session-design-1", { text: "/eag-design" }, null, new AbortController());
 
   // 验证：通知消息含"DESIGN Loop 编排器未注入"字样
   assert.ok(messages.length > 0, "应发送至少一条通知消息");
@@ -215,17 +219,18 @@ test("G2. handleEagDesignCommand 未注入 designOrchestrator 时通知错误并
 });
 
 test("G3. handleEagDesignCommand 已注入但未提供 DesignLoopInput 时通知错误", async () => {
-  // 验证 handleEagDesignCommand 的请求装配逻辑（session.ts §handleEagDesignCommand 步骤 2）：
-  // 已注入 designOrchestrator 但未通过 messageParams 提供 DesignLoopInput → 通知用户配置缺失
+  // 验证 handleEagDesignCommand 的请求校验逻辑（session.ts §handleEagDesignCommand 步骤 2）：
+  // 已注入 designOrchestrator 但未提供 DesignLoopInput → 通知用户配置缺失
   const messages: string[] = [];
-  // 注：此测试只走到请求装配失败分支，不调用 orchestrator.run()
+  // 注：此测试只走到请求校验失败分支，不调用 orchestrator.run()
   // 使用最小真实对象（{ run: () => ({}) }）满足字段校验，与既有 F19 模式一致
   const fakeOrchestrator = { run: () => ({}) } as any;
   const manager = createTestManager((content) => messages.push(content), { designOrchestrator: fakeOrchestrator });
 
   const internal = manager as any;
-  // 不通过 messageParams 提供 DesignLoopInput
-  await internal.handleEagDesignCommand("test-session-design-2", { text: "/eag-design" }, new AbortController());
+  // EAG-P3 批次 11 S3：handleEagDesignCommand 新增第三参数 input（由 EagCommandParser 预提取）
+  // 此测试验证未提供 DesignLoopInput 路径，input 显式传 null 触发 "DesignLoopInput 未提供" 错误
+  await internal.handleEagDesignCommand("test-session-design-2", { text: "/eag-design" }, null, new AbortController());
 
   // 验证：通知消息含"DesignLoopInput 未提供"字样
   assert.ok(messages.length > 0, "应发送至少一条通知消息");
@@ -235,47 +240,49 @@ test("G3. handleEagDesignCommand 已注入但未提供 DesignLoopInput 时通知
   );
 });
 
-test("G4. extractDesignLoopInput 正确提取并校验 DesignLoopInput 字段", () => {
-  // 验证 extractDesignLoopInput 的字段校验逻辑：
-  // 1. messageParams 为 undefined/null/空对象 → 返回 undefined
-  // 2. designLoopInput 字段缺失 → 返回 undefined
-  // 3. designLoopInput.rawRequirement 缺失或为空 → 返回 undefined
-  // 4. designLoopInput.rawRequirement 非空 → 返回 DesignLoopInput 对象
+test("G4. EagCommandParser 正确提取并校验 DesignLoopInput 字段", () => {
+  // EAG-P3 批次 11 S3：extractDesignLoopInput 已迁移至 EagCommandParser.parse() 内部
+  // 验证 EagCommandParser.parse() 的字段校验逻辑（payload 提取）：
+  // 1. messageParams 为 undefined/null/空对象 → payload 为 null
+  // 2. designLoopInput 字段缺失 → payload 为 null
+  // 3. designLoopInput.rawRequirement 缺失或为空 → payload 为 null
+  // 4. designLoopInput.rawRequirement 非空 → payload 为 DesignLoopInput 对象
   const manager = createTestManager(() => {});
   const internal = manager as any;
+  const parser = internal.eagCommandParser;
 
   // 情况 1：messageParams 为 undefined
-  assert.equal(internal.extractDesignLoopInput({ text: "/eag-design" }), undefined);
+  assert.equal(parser.parse({ text: "/eag-design" }).payload, null);
   // 情况 1：messageParams 为 null
-  assert.equal(internal.extractDesignLoopInput({ text: "/eag-design", messageParams: null }), undefined);
+  assert.equal(parser.parse({ text: "/eag-design", messageParams: null }).payload, null);
   // 情况 1：messageParams 为空对象
-  assert.equal(internal.extractDesignLoopInput({ text: "/eag-design", messageParams: {} }), undefined);
+  assert.equal(parser.parse({ text: "/eag-design", messageParams: {} }).payload, null);
   // 情况 2：designLoopInput 字段缺失
-  assert.equal(internal.extractDesignLoopInput({ text: "/eag-design", messageParams: { other: "value" } }), undefined);
+  assert.equal(parser.parse({ text: "/eag-design", messageParams: { other: "value" } }).payload, null);
   // 情况 3：designLoopInput.rawRequirement 缺失
   assert.equal(
-    internal.extractDesignLoopInput({
+    parser.parse({
       text: "/eag-design",
       messageParams: { designLoopInput: { projectContext: {} } },
-    }),
-    undefined
+    }).payload,
+    null
   );
   // 情况 3：designLoopInput.rawRequirement 为空字符串
   assert.equal(
-    internal.extractDesignLoopInput({
+    parser.parse({
       text: "/eag-design",
       messageParams: { designLoopInput: { rawRequirement: "   " } },
-    }),
-    undefined
+    }).payload,
+    null
   );
   // 情况 4：designLoopInput.rawRequirement 非空 → 返回对象
   const validInput = createMinimalDesignLoopInput();
-  const extracted = internal.extractDesignLoopInput({
+  const parsed = parser.parse({
     text: "/eag-design",
     messageParams: { designLoopInput: validInput },
   });
-  assert.ok(extracted, "字段完整时应返回 DesignLoopInput 对象");
-  assert.equal(extracted.rawRequirement, validInput.rawRequirement);
+  assert.ok(parsed.payload, "字段完整时应返回 DesignLoopInput 对象");
+  assert.equal((parsed.payload as any).rawRequirement, validInput.rawRequirement);
 });
 
 test("G5. renderDesignLoopResult 正确渲染结果摘要（§4.18.3）", () => {
@@ -340,21 +347,23 @@ test("G5. renderDesignLoopResult 正确渲染结果摘要（§4.18.3）", () => 
 // H. /eag-test 命令测试（§4.18.3）
 // ============================================================================
 
-test("H1. isEagTestPrompt 对 /eag-test 命令返回 true（命令判定逻辑）", () => {
-  // 验证：isEagTestPrompt 能正确识别 /eag-test 命令
+test("H1. EagCommandParser 对 /eag-test 命令返回 eag-test kind（命令判定逻辑）", () => {
+  // EAG-P3 批次 11 S3：isEagTestPrompt 已迁移至 EagCommandParser.parse() 统一入口
+  // 验证：EagCommandParser 能正确识别 /eag-test 命令（kind === "eag-test"）
   const manager = createTestManager(() => {});
   const internal = manager as any;
+  const parser = internal.eagCommandParser;
 
-  assert.equal(internal.isEagTestPrompt({ text: "/eag-test" }), true);
-  assert.equal(internal.isEagTestPrompt({ text: "  /eag-test  " }), true);
-  assert.equal(internal.isEagTestPrompt({ text: "请帮我执行 /eag-test" }), false);
-  assert.equal(internal.isEagTestPrompt({ text: "/eag-test arg" }), false);
-  assert.equal(internal.isEagTestPrompt({ text: "/eag-build" }), false);
-  assert.equal(internal.isEagTestPrompt({ text: undefined }), false);
-  assert.equal(internal.isEagTestPrompt({ text: "/eag-test", imageUrls: ["data:image/png;base64,..."] }), false);
+  assert.equal(parser.parse({ text: "/eag-test" }).kind, "eag-test");
+  assert.equal(parser.parse({ text: "  /eag-test  " }).kind, "eag-test");
+  assert.equal(parser.parse({ text: "请帮我执行 /eag-test" }).kind, "unknown");
+  assert.equal(parser.parse({ text: "/eag-test arg" }).kind, "unknown");
+  assert.equal(parser.parse({ text: "/eag-build" }).kind, "eag-build");
+  assert.equal(parser.parse({ text: undefined }).kind, "unknown");
+  assert.equal(parser.parse({ text: "/eag-test", imageUrls: ["data:image/png;base64,..."] }).kind, "unknown");
   assert.equal(
-    internal.isEagTestPrompt({ text: "/eag-test", skills: [{ name: "test", path: "/", description: "" }] }),
-    false
+    parser.parse({ text: "/eag-test", skills: [{ name: "test", path: "/", description: "" }] }).kind,
+    "unknown"
   );
 });
 
@@ -365,7 +374,9 @@ test("H2. handleEagTestCommand 未注入 testingOrchestrator 时通知错误并�
   const manager = createTestManager((content) => messages.push(content));
 
   const internal = manager as any;
-  await internal.handleEagTestCommand("test-session-test-1", { text: "/eag-test" }, new AbortController());
+  // EAG-P3 批次 11 S3：handleEagTestCommand 新增第三参数 request（由 EagCommandParser 预提取）
+  // 此测试验证未注入 testingOrchestrator 路径，request 传 null（依赖校验先于 request 校验）
+  await internal.handleEagTestCommand("test-session-test-1", { text: "/eag-test" }, null, new AbortController());
 
   assert.ok(messages.length > 0, "应发送至少一条通知消息");
   assert.ok(
@@ -375,15 +386,17 @@ test("H2. handleEagTestCommand 未注入 testingOrchestrator 时通知错误并�
 });
 
 test("H3. handleEagTestCommand 已注入但未提供 TestingLoopRequest 时通知错误", async () => {
-  // 验证 handleEagTestCommand 的请求装配逻辑：
-  // 已注入 testingOrchestrator 但未通过 messageParams 提供 TestingLoopRequest → 通知用户配置缺失
+  // 验证 handleEagTestCommand 的请求校验逻辑：
+  // 已注入 testingOrchestrator 但未提供 TestingLoopRequest → 通知用户配置缺失
   const messages: string[] = [];
   // 使用最小真实对象满足字段校验（此路径不调用 run()）
   const fakeOrchestrator = { run: () => ({}) } as any;
   const manager = createTestManager((content) => messages.push(content), { testingOrchestrator: fakeOrchestrator });
 
   const internal = manager as any;
-  await internal.handleEagTestCommand("test-session-test-2", { text: "/eag-test" }, new AbortController());
+  // EAG-P3 批次 11 S3：handleEagTestCommand 新增第三参数 request（由 EagCommandParser 预提取）
+  // 此测试验证未提供 TestingLoopRequest 路径，request 显式传 null 触发 "TestingLoopRequest 未提供" 错误
+  await internal.handleEagTestCommand("test-session-test-2", { text: "/eag-test" }, null, new AbortController());
 
   assert.ok(messages.length > 0, "应发送至少一条通知消息");
   assert.ok(
@@ -392,32 +405,34 @@ test("H3. handleEagTestCommand 已注入但未提供 TestingLoopRequest 时通�
   );
 });
 
-test("H4. extractTestingLoopRequest 正确提取并校验 TestingLoopRequest 字段", () => {
-  // 验证 extractTestingLoopRequest 的字段校验逻辑：
-  // 1. messageParams 缺失/空 → undefined
-  // 2. testingLoopRequest 字段缺失 → undefined
-  // 3. testingLoopRequest 字段不完整（缺 projectRoot / specContent 等）→ undefined
-  // 4. testingLoopRequest 字段完整 → 返回对象
+test("H4. EagCommandParser 正确提取并校验 TestingLoopRequest 字段", () => {
+  // EAG-P3 批次 11 S3：extractTestingLoopRequest 已迁移至 EagCommandParser.parse() 内部
+  // 验证 EagCommandParser.parse() 的字段校验逻辑（payload 提取）：
+  // 1. messageParams 缺失/空 → payload 为 null
+  // 2. testingLoopRequest 字段缺失 → payload 为 null
+  // 3. testingLoopRequest 字段不完整（缺 projectRoot / specContent 等）→ payload 为 null
+  // 4. testingLoopRequest 字段完整 → payload 为 TestingLoopRequest 对象
   const manager = createTestManager(() => {});
   const internal = manager as any;
+  const parser = internal.eagCommandParser;
 
   // 情况 1：messageParams 为 undefined
-  assert.equal(internal.extractTestingLoopRequest({ text: "/eag-test" }), undefined);
+  assert.equal(parser.parse({ text: "/eag-test" }).payload, null);
   // 情况 1：messageParams 为空对象
-  assert.equal(internal.extractTestingLoopRequest({ text: "/eag-test", messageParams: {} }), undefined);
+  assert.equal(parser.parse({ text: "/eag-test", messageParams: {} }).payload, null);
   // 情况 2：testingLoopRequest 字段缺失
-  assert.equal(internal.extractTestingLoopRequest({ text: "/eag-test", messageParams: { other: "value" } }), undefined);
+  assert.equal(parser.parse({ text: "/eag-test", messageParams: { other: "value" } }).payload, null);
   // 情况 3：testingLoopRequest.projectRoot 缺失
   assert.equal(
-    internal.extractTestingLoopRequest({
+    parser.parse({
       text: "/eag-test",
       messageParams: { testingLoopRequest: { specContent: "spec" } },
-    }),
-    undefined
+    }).payload,
+    null
   );
   // 情况 3：testingLoopRequest.maxIterations 缺失（非 number）
   assert.equal(
-    internal.extractTestingLoopRequest({
+    parser.parse({
       text: "/eag-test",
       messageParams: {
         testingLoopRequest: {
@@ -435,19 +450,19 @@ test("H4. extractTestingLoopRequest 正确提取并校验 TestingLoopRequest 字
           // 缺 maxIterations
         },
       },
-    }),
-    undefined
+    }).payload,
+    null
   );
   // 情况 4：字段完整 → 返回对象
   const validRequest = createMinimalTestingLoopRequest();
-  const extracted = internal.extractTestingLoopRequest({
+  const parsed = parser.parse({
     text: "/eag-test",
     messageParams: { testingLoopRequest: validRequest },
   });
-  assert.ok(extracted, "字段完整时应返回 TestingLoopRequest 对象");
-  assert.equal(extracted.projectRoot, "/test/project");
-  assert.equal(extracted.specContent, validRequest.specContent);
-  assert.equal(extracted.maxIterations, 10);
+  assert.ok(parsed.payload, "字段完整时应返回 TestingLoopRequest 对象");
+  assert.equal((parsed.payload as any).projectRoot, "/test/project");
+  assert.equal((parsed.payload as any).specContent, validRequest.specContent);
+  assert.equal((parsed.payload as any).maxIterations, 10);
 });
 
 test("H5. renderTestingLoopResult 正确渲染结果摘要（§4.18.3）", () => {
@@ -527,20 +542,23 @@ test("H5. renderTestingLoopResult 正确渲染结果摘要（§4.18.3）", () =>
 // I. /eag-run 命令测试（§4.18.3）
 // ============================================================================
 
-test("I1. isEagRunPrompt 对 /eag-run 命令返回 true（命令判定逻辑）", () => {
+test("I1. EagCommandParser 对 /eag-run 命令返回 eag-run kind（命令判定逻辑）", () => {
+  // EAG-P3 批次 11 S3：isEagRunPrompt 已迁移至 EagCommandParser.parse() 统一入口
+  // 验证：EagCommandParser 能正确识别 /eag-run 命令（kind === "eag-run"）
   const manager = createTestManager(() => {});
   const internal = manager as any;
+  const parser = internal.eagCommandParser;
 
-  assert.equal(internal.isEagRunPrompt({ text: "/eag-run" }), true);
-  assert.equal(internal.isEagRunPrompt({ text: "  /eag-run  " }), true);
-  assert.equal(internal.isEagRunPrompt({ text: "请帮我执行 /eag-run" }), false);
-  assert.equal(internal.isEagRunPrompt({ text: "/eag-run arg" }), false);
-  assert.equal(internal.isEagRunPrompt({ text: "/eag-build" }), false);
-  assert.equal(internal.isEagRunPrompt({ text: undefined }), false);
-  assert.equal(internal.isEagRunPrompt({ text: "/eag-run", imageUrls: ["data:image/png;base64,..."] }), false);
+  assert.equal(parser.parse({ text: "/eag-run" }).kind, "eag-run");
+  assert.equal(parser.parse({ text: "  /eag-run  " }).kind, "eag-run");
+  assert.equal(parser.parse({ text: "请帮我执行 /eag-run" }).kind, "unknown");
+  assert.equal(parser.parse({ text: "/eag-run arg" }).kind, "unknown");
+  assert.equal(parser.parse({ text: "/eag-build" }).kind, "eag-build");
+  assert.equal(parser.parse({ text: undefined }).kind, "unknown");
+  assert.equal(parser.parse({ text: "/eag-run", imageUrls: ["data:image/png;base64,..."] }).kind, "unknown");
   assert.equal(
-    internal.isEagRunPrompt({ text: "/eag-run", skills: [{ name: "test", path: "/", description: "" }] }),
-    false
+    parser.parse({ text: "/eag-run", skills: [{ name: "test", path: "/", description: "" }] }).kind,
+    "unknown"
   );
 });
 
@@ -551,7 +569,9 @@ test("I2. handleEagRunCommand 未注入 runStateStore 时通知错误并标记 f
   const manager = createTestManager((content) => messages.push(content));
 
   const internal = manager as any;
-  await internal.handleEagRunCommand("test-session-run-1", { text: "/eag-run" }, new AbortController());
+  // EAG-P3 批次 11 S3：handleEagRunCommand 新增第三参数 request（由 EagCommandParser 预提取）
+  // 此测试验证未注入 runStateStore 路径，request 传 null（依赖校验先于 request 校验）
+  await internal.handleEagRunCommand("test-session-run-1", { text: "/eag-run" }, null, new AbortController());
 
   assert.ok(messages.length > 0, "应发送至少一条通知消息");
   assert.ok(
@@ -561,15 +581,17 @@ test("I2. handleEagRunCommand 未注入 runStateStore 时通知错误并标记 f
 });
 
 test("I3. handleEagRunCommand 已注入但未提供 EagRunRequest 时通知错误", async () => {
-  // 验证 handleEagRunCommand 的请求装配逻辑：
-  // 已注入 runStateStore 但未通过 messageParams 提供 EagRunRequest → 通知用户配置缺失
+  // 验证 handleEagRunCommand 的请求校验逻辑：
+  // 已注入 runStateStore 但未提供 EagRunRequest → 通知用户配置缺失
   const messages: string[] = [];
   // 使用真实 RunStateStore（构造零成本，无外部依赖）
   const runStateStore = new RunStateStore();
   const manager = createTestManager((content) => messages.push(content), { runStateStore });
 
   const internal = manager as any;
-  await internal.handleEagRunCommand("test-session-run-2", { text: "/eag-run" }, new AbortController());
+  // EAG-P3 批次 11 S3：handleEagRunCommand 新增第三参数 request（由 EagCommandParser 预提取）
+  // 此测试验证未提供 EagRunRequest 路径，request 显式传 null 触发 "EagRunRequest 未提供" 错误
+  await internal.handleEagRunCommand("test-session-run-2", { text: "/eag-run" }, null, new AbortController());
 
   assert.ok(messages.length > 0, "应发送至少一条通知消息");
   assert.ok(
@@ -578,56 +600,58 @@ test("I3. handleEagRunCommand 已注入但未提供 EagRunRequest 时通知错�
   );
 });
 
-test("I4. extractEagRunRequest 正确提取并校验 EagRunRequest 字段", () => {
-  // 验证 extractEagRunRequest 的字段校验逻辑：
-  // 1. messageParams 缺失/空 → undefined
-  // 2. eagRunRequest 字段缺失 → undefined
-  // 3. eagRunRequest 字段不完整（缺 projectRoot / userIntent / loopExecutors）→ undefined
-  // 4. eagRunRequest.loopExecutors 为空数组 → undefined
-  // 5. 字段完整 → 返回对象
+test("I4. EagCommandParser 正确提取并校验 EagRunRequest 字段", () => {
+  // EAG-P3 批次 11 S3：extractEagRunRequest 已迁移至 EagCommandParser.parse() 内部
+  // 验证 EagCommandParser.parse() 的字段校验逻辑（payload 提取）：
+  // 1. messageParams 缺失/空 → payload 为 null
+  // 2. eagRunRequest 字段缺失 → payload 为 null
+  // 3. eagRunRequest 字段不完整（缺 projectRoot / userIntent / loopExecutors）→ payload 为 null
+  // 4. eagRunRequest.loopExecutors 为空数组 → payload 为 null
+  // 5. 字段完整 → payload 为 EagRunRequest 对象
   const manager = createTestManager(() => {});
   const internal = manager as any;
+  const parser = internal.eagCommandParser;
 
   // 情况 1：messageParams 为 undefined
-  assert.equal(internal.extractEagRunRequest({ text: "/eag-run" }), undefined);
+  assert.equal(parser.parse({ text: "/eag-run" }).payload, null);
   // 情况 1：messageParams 为空对象
-  assert.equal(internal.extractEagRunRequest({ text: "/eag-run", messageParams: {} }), undefined);
+  assert.equal(parser.parse({ text: "/eag-run", messageParams: {} }).payload, null);
   // 情况 2：eagRunRequest 字段缺失
-  assert.equal(internal.extractEagRunRequest({ text: "/eag-run", messageParams: { other: "value" } }), undefined);
+  assert.equal(parser.parse({ text: "/eag-run", messageParams: { other: "value" } }).payload, null);
   // 情况 3：projectRoot 缺失
   assert.equal(
-    internal.extractEagRunRequest({
+    parser.parse({
       text: "/eag-run",
       messageParams: { eagRunRequest: { userIntent: "意图", loopExecutors: [{}] } },
-    }),
-    undefined
+    }).payload,
+    null
   );
   // 情况 3：userIntent 缺失
   assert.equal(
-    internal.extractEagRunRequest({
+    parser.parse({
       text: "/eag-run",
       messageParams: { eagRunRequest: { projectRoot: "/test", loopExecutors: [{}] } },
-    }),
-    undefined
+    }).payload,
+    null
   );
   // 情况 4：loopExecutors 为空数组
   assert.equal(
-    internal.extractEagRunRequest({
+    parser.parse({
       text: "/eag-run",
       messageParams: { eagRunRequest: { projectRoot: "/test", userIntent: "意图", loopExecutors: [] } },
-    }),
-    undefined
+    }).payload,
+    null
   );
   // 情况 5：字段完整 → 返回对象
   const validRequest = createMinimalEagRunRequest();
-  const extracted = internal.extractEagRunRequest({
+  const parsed = parser.parse({
     text: "/eag-run",
     messageParams: { eagRunRequest: validRequest },
   });
-  assert.ok(extracted, "字段完整时应返回 EagRunRequest 对象");
-  assert.equal(extracted.projectRoot, "/test/project");
-  assert.equal(extracted.userIntent, "我需要一个订单管理微服务");
-  assert.equal(extracted.loopExecutors.length, 2);
+  assert.ok(parsed.payload, "字段完整时应返回 EagRunRequest 对象");
+  assert.equal((parsed.payload as any).projectRoot, "/test/project");
+  assert.equal((parsed.payload as any).userIntent, "我需要一个订单管理微服务");
+  assert.equal((parsed.payload as any).loopExecutors.length, 2);
 });
 
 test("I5. renderEagRunResult 正确渲染结果摘要（§4.18.3）", () => {
@@ -718,20 +742,23 @@ test("I5. renderEagRunResult 正确渲染结果摘要（§4.18.3）", () => {
 // J. /eag-resume 命令测试（§4.18.3）
 // ============================================================================
 
-test("J1. isEagResumePrompt 对 /eag-resume 命令返回 true（命令判定逻辑）", () => {
+test("J1. EagCommandParser 对 /eag-resume 命令返回 eag-resume kind（命令判定逻辑）", () => {
+  // EAG-P3 批次 11 S3：isEagResumePrompt 已迁移至 EagCommandParser.parse() 统一入口
+  // 验证：EagCommandParser 能正确识别 /eag-resume 命令（kind === "eag-resume"）
   const manager = createTestManager(() => {});
   const internal = manager as any;
+  const parser = internal.eagCommandParser;
 
-  assert.equal(internal.isEagResumePrompt({ text: "/eag-resume" }), true);
-  assert.equal(internal.isEagResumePrompt({ text: "  /eag-resume  " }), true);
-  assert.equal(internal.isEagResumePrompt({ text: "请帮我执行 /eag-resume" }), false);
-  assert.equal(internal.isEagResumePrompt({ text: "/eag-resume arg" }), false);
-  assert.equal(internal.isEagResumePrompt({ text: "/eag-build" }), false);
-  assert.equal(internal.isEagResumePrompt({ text: undefined }), false);
-  assert.equal(internal.isEagResumePrompt({ text: "/eag-resume", imageUrls: ["data:image/png;base64,..."] }), false);
+  assert.equal(parser.parse({ text: "/eag-resume" }).kind, "eag-resume");
+  assert.equal(parser.parse({ text: "  /eag-resume  " }).kind, "eag-resume");
+  assert.equal(parser.parse({ text: "请帮我执行 /eag-resume" }).kind, "unknown");
+  assert.equal(parser.parse({ text: "/eag-resume arg" }).kind, "unknown");
+  assert.equal(parser.parse({ text: "/eag-build" }).kind, "eag-build");
+  assert.equal(parser.parse({ text: undefined }).kind, "unknown");
+  assert.equal(parser.parse({ text: "/eag-resume", imageUrls: ["data:image/png;base64,..."] }).kind, "unknown");
   assert.equal(
-    internal.isEagResumePrompt({ text: "/eag-resume", skills: [{ name: "test", path: "/", description: "" }] }),
-    false
+    parser.parse({ text: "/eag-resume", skills: [{ name: "test", path: "/", description: "" }] }).kind,
+    "unknown"
   );
 });
 
@@ -742,7 +769,9 @@ test("J2. handleEagResumeCommand 未注入 runStateStore 时通知错误并标�
   const manager = createTestManager((content) => messages.push(content));
 
   const internal = manager as any;
-  await internal.handleEagResumeCommand("test-session-resume-1", { text: "/eag-resume" }, new AbortController());
+  // EAG-P3 批次 11 S3：handleEagResumeCommand 新增第三参数 request（由 EagCommandParser 预提取）
+  // 此测试验证未注入 runStateStore 路径，request 传 null（依赖校验先于 request 校验）
+  await internal.handleEagResumeCommand("test-session-resume-1", { text: "/eag-resume" }, null, new AbortController());
 
   assert.ok(messages.length > 0, "应发送至少一条通知消息");
   assert.ok(
@@ -752,14 +781,16 @@ test("J2. handleEagResumeCommand 未注入 runStateStore 时通知错误并标�
 });
 
 test("J3. handleEagResumeCommand 已注入但未提供 EagResumeRequest 时通知错误", async () => {
-  // 验证 handleEagResumeCommand 的请求装配逻辑：
-  // 已注入 runStateStore 但未通过 messageParams 提供 EagResumeRequest → 通知用户配置缺失
+  // 验证 handleEagResumeCommand 的请求校验逻辑：
+  // 已注入 runStateStore 但未提供 EagResumeRequest → 通知用户配置缺失
   const messages: string[] = [];
   const runStateStore = new RunStateStore();
   const manager = createTestManager((content) => messages.push(content), { runStateStore });
 
   const internal = manager as any;
-  await internal.handleEagResumeCommand("test-session-resume-2", { text: "/eag-resume" }, new AbortController());
+  // EAG-P3 批次 11 S3：handleEagResumeCommand 新增第三参数 request（由 EagCommandParser 预提取）
+  // 此测试验证未提供 EagResumeRequest 路径，request 显式传 null 触发 "EagResumeRequest 未提供" 错误
+  await internal.handleEagResumeCommand("test-session-resume-2", { text: "/eag-resume" }, null, new AbortController());
 
   assert.ok(messages.length > 0, "应发送至少一条通知消息");
   assert.ok(
@@ -768,102 +799,107 @@ test("J3. handleEagResumeCommand 已注入但未提供 EagResumeRequest 时通�
   );
 });
 
-test("J4. extractEagResumeRequest 正确提取并校验 EagResumeRequest 字段", () => {
-  // 验证 extractEagResumeRequest 的字段校验逻辑：
-  // 1. messageParams 缺失/空 → undefined
-  // 2. eagResumeRequest 字段缺失 → undefined
-  // 3. eagResumeRequest.runId 缺失或为空 → undefined
-  // 4. eagResumeRequest.projectRoot 缺失 → undefined
-  // 5. eagResumeRequest.userIntent 缺失 → undefined
-  // 6. eagResumeRequest.loopExecutors 为空数组 → undefined
-  // 7. 字段完整 → 返回对象
+test("J4. EagCommandParser 正确提取并校验 EagResumeRequest 字段", () => {
+  // EAG-P3 批次 11 S3：extractEagResumeRequest 已迁移至 EagCommandParser.parse() 内部
+  // 验证 EagCommandParser.parse() 的字段校验逻辑（payload 提取）：
+  // 1. messageParams 缺失/空 → payload 为 null
+  // 2. eagResumeRequest 字段缺失 → payload 为 null
+  // 3. eagResumeRequest.runId 缺失或为空 → payload 为 null
+  // 4. eagResumeRequest.projectRoot 缺失 → payload 为 null
+  // 5. eagResumeRequest.userIntent 缺失 → payload 为 null
+  // 6. eagResumeRequest.loopExecutors 为空数组 → payload 为 null
+  // 7. 字段完整 → payload 为 EagResumeRequest 对象
   const manager = createTestManager(() => {});
   const internal = manager as any;
+  const parser = internal.eagCommandParser;
 
   // 情况 1：messageParams 为 undefined
-  assert.equal(internal.extractEagResumeRequest({ text: "/eag-resume" }), undefined);
+  assert.equal(parser.parse({ text: "/eag-resume" }).payload, null);
   // 情况 2：eagResumeRequest 字段缺失
-  assert.equal(internal.extractEagResumeRequest({ text: "/eag-resume", messageParams: { other: "value" } }), undefined);
+  assert.equal(parser.parse({ text: "/eag-resume", messageParams: { other: "value" } }).payload, null);
   // 情况 3：runId 缺失
   assert.equal(
-    internal.extractEagResumeRequest({
+    parser.parse({
       text: "/eag-resume",
       messageParams: {
         eagResumeRequest: { projectRoot: "/test", userIntent: "意图", loopExecutors: [{}] },
       },
-    }),
-    undefined
+    }).payload,
+    null
   );
   // 情况 3：runId 为空字符串
   assert.equal(
-    internal.extractEagResumeRequest({
+    parser.parse({
       text: "/eag-resume",
       messageParams: {
         eagResumeRequest: { runId: "   ", projectRoot: "/test", userIntent: "意图", loopExecutors: [{}] },
       },
-    }),
-    undefined
+    }).payload,
+    null
   );
   // 情况 4：projectRoot 缺失
   assert.equal(
-    internal.extractEagResumeRequest({
+    parser.parse({
       text: "/eag-resume",
       messageParams: {
         eagResumeRequest: { runId: "abc123", userIntent: "意图", loopExecutors: [{}] },
       },
-    }),
-    undefined
+    }).payload,
+    null
   );
   // 情况 5：userIntent 缺失
   assert.equal(
-    internal.extractEagResumeRequest({
+    parser.parse({
       text: "/eag-resume",
       messageParams: {
         eagResumeRequest: { runId: "abc123", projectRoot: "/test", loopExecutors: [{}] },
       },
-    }),
-    undefined
+    }).payload,
+    null
   );
   // 情况 6：loopExecutors 为空数组
   assert.equal(
-    internal.extractEagResumeRequest({
+    parser.parse({
       text: "/eag-resume",
       messageParams: {
         eagResumeRequest: { runId: "abc123", projectRoot: "/test", userIntent: "意图", loopExecutors: [] },
       },
-    }),
-    undefined
+    }).payload,
+    null
   );
   // 情况 7：字段完整 → 返回对象
   const validRequest = createMinimalEagResumeRequest();
-  const extracted = internal.extractEagResumeRequest({
+  const parsed = parser.parse({
     text: "/eag-resume",
     messageParams: { eagResumeRequest: validRequest },
   });
-  assert.ok(extracted, "字段完整时应返回 EagResumeRequest 对象");
-  assert.equal(extracted.runId, "abc123def456");
-  assert.equal(extracted.projectRoot, "/test/project");
-  assert.equal(extracted.userIntent, "我需要一个订单管理微服务");
+  assert.ok(parsed.payload, "字段完整时应返回 EagResumeRequest 对象");
+  assert.equal((parsed.payload as any).runId, "abc123def456");
+  assert.equal((parsed.payload as any).projectRoot, "/test/project");
+  assert.equal((parsed.payload as any).userIntent, "我需要一个订单管理微服务");
 });
 
 // ============================================================================
 // K. /eag-status 命令测试（§4.18.3）
 // ============================================================================
 
-test("K1. isEagStatusPrompt 对 /eag-status 命令返回 true（命令判定逻辑）", () => {
+test("K1. EagCommandParser 对 /eag-status 命令返回 eag-status kind（命令判定逻辑）", () => {
+  // EAG-P3 批次 11 S3：isEagStatusPrompt 已迁移至 EagCommandParser.parse() 统一入口
+  // 验证：EagCommandParser 能正确识别 /eag-status 命令（kind === "eag-status"）
   const manager = createTestManager(() => {});
   const internal = manager as any;
+  const parser = internal.eagCommandParser;
 
-  assert.equal(internal.isEagStatusPrompt({ text: "/eag-status" }), true);
-  assert.equal(internal.isEagStatusPrompt({ text: "  /eag-status  " }), true);
-  assert.equal(internal.isEagStatusPrompt({ text: "请帮我执行 /eag-status" }), false);
-  assert.equal(internal.isEagStatusPrompt({ text: "/eag-status arg" }), false);
-  assert.equal(internal.isEagStatusPrompt({ text: "/eag-build" }), false);
-  assert.equal(internal.isEagStatusPrompt({ text: undefined }), false);
-  assert.equal(internal.isEagStatusPrompt({ text: "/eag-status", imageUrls: ["data:image/png;base64,..."] }), false);
+  assert.equal(parser.parse({ text: "/eag-status" }).kind, "eag-status");
+  assert.equal(parser.parse({ text: "  /eag-status  " }).kind, "eag-status");
+  assert.equal(parser.parse({ text: "请帮我执行 /eag-status" }).kind, "unknown");
+  assert.equal(parser.parse({ text: "/eag-status arg" }).kind, "unknown");
+  assert.equal(parser.parse({ text: "/eag-build" }).kind, "eag-build");
+  assert.equal(parser.parse({ text: undefined }).kind, "unknown");
+  assert.equal(parser.parse({ text: "/eag-status", imageUrls: ["data:image/png;base64,..."] }).kind, "unknown");
   assert.equal(
-    internal.isEagStatusPrompt({ text: "/eag-status", skills: [{ name: "test", path: "/", description: "" }] }),
-    false
+    parser.parse({ text: "/eag-status", skills: [{ name: "test", path: "/", description: "" }] }).kind,
+    "unknown"
   );
 });
 
@@ -874,7 +910,9 @@ test("K2. handleEagStatusCommand 未注入 runStateStore 时通知错误并标�
   const manager = createTestManager((content) => messages.push(content));
 
   const internal = manager as any;
-  await internal.handleEagStatusCommand("test-session-status-1", { text: "/eag-status" }, new AbortController());
+  // EAG-P3 批次 11 S3：handleEagStatusCommand 新增第三参数 request（由 EagCommandParser 预提取）
+  // 此测试验证未注入 runStateStore 路径，request 传 null（依赖校验先于 request 校验）
+  await internal.handleEagStatusCommand("test-session-status-1", { text: "/eag-status" }, null, new AbortController());
 
   assert.ok(messages.length > 0, "应发送至少一条通知消息");
   assert.ok(
@@ -884,14 +922,16 @@ test("K2. handleEagStatusCommand 未注入 runStateStore 时通知错误并标�
 });
 
 test("K3. handleEagStatusCommand 已注入但未提供 EagStatusRequest 时通知错误", async () => {
-  // 验证 handleEagStatusCommand 的请求装配逻辑：
-  // 已注入 runStateStore 但未通过 messageParams 提供 EagStatusRequest → 通知用户配置缺失
+  // 验证 handleEagStatusCommand 的请求校验逻辑：
+  // 已注入 runStateStore 但未提供 EagStatusRequest → 通知用户配置缺失
   const messages: string[] = [];
   const runStateStore = new RunStateStore();
   const manager = createTestManager((content) => messages.push(content), { runStateStore });
 
   const internal = manager as any;
-  await internal.handleEagStatusCommand("test-session-status-2", { text: "/eag-status" }, new AbortController());
+  // EAG-P3 批次 11 S3：handleEagStatusCommand 新增第三参数 request（由 EagCommandParser 预提取）
+  // 此测试验证未提供 EagStatusRequest 路径，request 显式传 null 触发 "EagStatusRequest 未提供" 错误
+  await internal.handleEagStatusCommand("test-session-status-2", { text: "/eag-status" }, null, new AbortController());
 
   assert.ok(messages.length > 0, "应发送至少一条通知消息");
   assert.ok(
@@ -900,55 +940,57 @@ test("K3. handleEagStatusCommand 已注入但未提供 EagStatusRequest 时通�
   );
 });
 
-test("K4. extractEagStatusRequest 正确提取并校验 EagStatusRequest 字段", () => {
-  // 验证 extractEagStatusRequest 的字段校验逻辑：
-  // 1. messageParams 缺失/空 → undefined
-  // 2. eagStatusRequest 字段缺失 → undefined
-  // 3. eagStatusRequest.projectRoot 缺失或为空 → undefined
-  // 4. 字段完整（含 runId）→ 返回对象
-  // 5. 字段完整（含 recentCount 而非 runId）→ 返回对象
+test("K4. EagCommandParser 正确提取并校验 EagStatusRequest 字段", () => {
+  // EAG-P3 批次 11 S3：extractEagStatusRequest 已迁移至 EagCommandParser.parse() 内部
+  // 验证 EagCommandParser.parse() 的字段校验逻辑（payload 提取）：
+  // 1. messageParams 缺失/空 → payload 为 null
+  // 2. eagStatusRequest 字段缺失 → payload 为 null
+  // 3. eagStatusRequest.projectRoot 缺失或为空 → payload 为 null
+  // 4. 字段完整（含 runId）→ payload 为 EagStatusRequest 对象
+  // 5. 字段完整（含 recentCount 而非 runId）→ payload 为 EagStatusRequest 对象
   const manager = createTestManager(() => {});
   const internal = manager as any;
+  const parser = internal.eagCommandParser;
 
   // 情况 1：messageParams 为 undefined
-  assert.equal(internal.extractEagStatusRequest({ text: "/eag-status" }), undefined);
+  assert.equal(parser.parse({ text: "/eag-status" }).payload, null);
   // 情况 2：eagStatusRequest 字段缺失
-  assert.equal(internal.extractEagStatusRequest({ text: "/eag-status", messageParams: { other: "value" } }), undefined);
+  assert.equal(parser.parse({ text: "/eag-status", messageParams: { other: "value" } }).payload, null);
   // 情况 3：projectRoot 缺失
   assert.equal(
-    internal.extractEagStatusRequest({
+    parser.parse({
       text: "/eag-status",
       messageParams: { eagStatusRequest: { runId: "abc123" } },
-    }),
-    undefined
+    }).payload,
+    null
   );
   // 情况 3：projectRoot 为空字符串
   assert.equal(
-    internal.extractEagStatusRequest({
+    parser.parse({
       text: "/eag-status",
       messageParams: { eagStatusRequest: { projectRoot: "   ", runId: "abc123" } },
-    }),
-    undefined
+    }).payload,
+    null
   );
   // 情况 4：字段完整（含 runId）
   const validRequest1 = createMinimalEagStatusRequest();
-  const extracted1 = internal.extractEagStatusRequest({
+  const parsed1 = parser.parse({
     text: "/eag-status",
     messageParams: { eagStatusRequest: validRequest1 },
   });
-  assert.ok(extracted1, "字段完整时应返回 EagStatusRequest 对象");
-  assert.equal(extracted1.projectRoot, "/test/project");
-  assert.equal(extracted1.runId, "abc123def456");
+  assert.ok(parsed1.payload, "字段完整时应返回 EagStatusRequest 对象");
+  assert.equal((parsed1.payload as any).projectRoot, "/test/project");
+  assert.equal((parsed1.payload as any).runId, "abc123def456");
   // 情况 5：字段完整（含 recentCount 而非 runId）
-  const extracted2 = internal.extractEagStatusRequest({
+  const parsed2 = parser.parse({
     text: "/eag-status",
     messageParams: {
       eagStatusRequest: { projectRoot: "/test/project", recentCount: 5 },
     },
   });
-  assert.ok(extracted2, "仅含 recentCount 时也应返回对象");
-  assert.equal(extracted2.projectRoot, "/test/project");
-  assert.equal(extracted2.recentCount, 5);
+  assert.ok(parsed2.payload, "仅含 recentCount 时也应返回对象");
+  assert.equal((parsed2.payload as any).projectRoot, "/test/project");
+  assert.equal((parsed2.payload as any).recentCount, 5);
 });
 
 test("K5. renderEagStatusResult 正确渲染结果摘要（§4.18.3）", () => {

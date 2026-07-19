@@ -170,7 +170,7 @@ export interface FileChange {
 // ============================================================================
 
 /**
- * Loop 类型（字面量联合类型）
+ * Loop 类型（字面量联合类型）—— 从 loop/models re-export（统一类型源头）
  *
  * 对齐 EAG 三 Loop 编排：
  * - design：DESIGN Loop（产出 spec.md + CONSTITUTION.md）
@@ -183,15 +183,18 @@ export interface FileChange {
  * - testing：跳过 G-1/G-2/G-3（TESTING Loop 验证已实施代码，无方案门禁）
  *
  * 字面量联合而非 string，避免拼写错误。
- */
-export type LoopType = "design" | "coding" | "testing";
-
-/**
- * LoopType 全部合法值（用于运行时枚举与校验）
  *
- * 使用 Object.freeze 冻结。顺序对齐 EAG 三 Loop 编排自然顺序。
+ * 改造说明（EAG-P3 批次 11 S2 D-S2-1 + D-S2-4）：
+ * - 原本 gate/gate-types.ts 独立声明了 LoopType 与 LOOP_TYPES，与 loop/models.ts 重复定义
+ * - loop/models.ts 是 Loop 类型的权威来源（批次 1 落地），gate 模块作为消费者应复用
+ * - 改为 type-only re-export + value re-export，消除运行期重复定义
+ * - 本地通过 import type 引入 LoopType 供 GateContext.loopType 等字段使用
  */
-export const LOOP_TYPES: ReadonlyArray<LoopType> = Object.freeze(["design", "coding", "testing"]);
+// 本地 import type 供模块内部使用（GateContext.loopType / GateOrchestrationResult.loopType）
+import type { LoopType } from "../loop/models";
+// re-export 给外部消费者（统一类型源头，下游从 gate/gate-types 导入路径不变）
+export type { LoopType } from "../loop/models";
+export { LOOP_TYPES } from "../loop/models";
 
 // ============================================================================
 // 5. 门禁类型与结果

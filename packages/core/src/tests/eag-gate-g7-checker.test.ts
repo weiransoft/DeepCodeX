@@ -209,6 +209,38 @@ function createEnglishPrDescription(): string {
   ].join("\n");
 }
 
+/**
+ * 构造测试用的 PR 描述（中文四段结构 + 合规证据段含 packId/overallPassed 摘要）
+ *
+ * EAG-P3 批次 11 §9.2.3 要求启用 ICP 时 PR 描述 "## 合规证据" 段必须含
+ * packId 与 overallPassed 摘要。本辅助函数构造符合该要求的 PR 描述。
+ *
+ * @param packId 合规包 ID（如 "GMP"）
+ * @param overallPassed 整体通过状态（"true" / "false"）
+ * @returns 含合规证据摘要的 PR 描述
+ */
+function createPrDescriptionWithComplianceSummary(packId: string, overallPassed: string): string {
+  return [
+    "## 变更摘要",
+    "本次变更实现订单系统 TESTING Loop 退出。",
+    "",
+    "## 需求映射",
+    "- F-001 → OrderService",
+    "- F-002 → PaymentService",
+    "",
+    "## 测试报告",
+    "- 契约测试：5 个全过",
+    "- E2E 测试：2 个全过",
+    "- 覆盖率：行 85% / 分支 75%",
+    "",
+    "## 合规证据",
+    `- packId: ${packId}`,
+    `- overallPassed: ${overallPassed}`,
+    "- 合规证据报告：见 compliance-evidence.json",
+    "",
+  ].join("\n");
+}
+
 // ============================================================================
 // 辅助函数：构造 GateG7Context
 // ============================================================================
@@ -430,6 +462,11 @@ test("T12. 全部通过（无 ICP）→ passed=true", () => {
 
 // ============================================================================
 // T13. 全部通过（含 ICP + 合规证据）→ passed=true
+//
+// EAG-P3 批次 11 §9.2 修正：
+// - complianceEvidence 必须为 ComplianceEvidenceReport 结构（含 packId/runId/
+//   generatedAt/ruleResults/overallPassed），废弃旧结构 { overallVerdict, packs }
+// - PR 描述"## 合规证据"段必须含 packId 与 overallPassed 摘要
 // ============================================================================
 
 test("T13. 全部通过（含 ICP + 合规证据）→ passed=true", () => {
@@ -437,12 +474,29 @@ test("T13. 全部通过（含 ICP + 合规证据）→ passed=true", () => {
   const ctx = createG7Context({
     compliancePackIds: Object.freeze(["GMP", "CFR-21-Part-11"]),
     complianceEvidence: Object.freeze({
-      overallVerdict: "pass",
-      packs: [
-        { id: "GMP", verdict: "pass" },
-        { id: "CFR-21-Part-11", verdict: "pass" },
-      ],
+      packId: "GMP",
+      runId: "run-20260719-001",
+      generatedAt: "2026-07-19T10:00:00.000Z",
+      ruleResults: Object.freeze([
+        {
+          ruleId: "GMP-01",
+          passed: true,
+          severity: "blocker",
+          evidence: [],
+          reason: "工艺验证测试 5 条全部通过",
+        },
+        {
+          ruleId: "GMP-02",
+          passed: true,
+          severity: "major",
+          evidence: [],
+          reason: "偏差处理流程已配置",
+        },
+      ]),
+      overallPassed: true,
+      summary: "GMP 合规包 2 条规则全部通过",
     }),
+    prDescription: createPrDescriptionWithComplianceSummary("GMP", "true"),
   });
   const result = checker.check(ctx);
   assert.equal(result.passed, true);

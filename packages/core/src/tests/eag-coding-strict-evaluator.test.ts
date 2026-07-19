@@ -38,8 +38,8 @@
  *   - T7d. redlines 为空数组 → redlines-empty
  *   - T7e. redlines 非数组 → redlines-empty
  * - T8. 默认 staticCheckers（DEFAULT_STATIC_CHECKERS）行为
- *   - T8a. 默认注册 E1~E8 + TCS-* 共 19 条 redlineId 映射
- *   - T8b. 默认 getStaticCheckerCount === 19
+ *   - T8a. 默认注册 E1~E8 + TCS-* 共 21 条 redlineId 映射
+ *   - T8b. 默认 getStaticCheckerCount === 21
  *   - T8c. 默认 hasStaticChecker("E1") === true
  *   - T8d. 默认 hasStaticChecker("NON-EXISTENT") === false
  * - T9. 产出物收集
@@ -556,18 +556,23 @@ test("T7e. redlines 非数组 → redlines-empty", async () => {
 // T8. 默认 staticCheckers（DEFAULT_STATIC_CHECKERS）行为
 // ============================================================================
 
-test("T8a. 默认注册 E1~E8 + TCS-* 共 19 条 redlineId 映射", () => {
+test("T8a. 默认注册 E1~E8 + TCS-* 共 21 条 redlineId 映射", () => {
   const evaluator = new StrictEvaluator();
-  // DEFAULT_STATIC_CHECKERS 含 19 条映射（8 个 E1~E8 + 11 个 TCS-*）
-  // 实际数量：8 (E1~E8) + 11 (TCS-OSS-01, TCS-SEC-01, TCS-SEC-02, TCS-CACHE-01/02/03, TCS-SQL-01/02/03, TCS-LDAP-01/02)
-  assert.equal(evaluator.getStaticCheckerCount(), 19);
+  // DEFAULT_STATIC_CHECKERS 含 21 条映射（8 个 E1~E8 + 13 个 TCS-*）
+  // 实际数量：8 (E1~E8) + 13 (TCS-OSS-01/02/03, TCS-SEC-01, TCS-SEC-02,
+  //                  TCS-CACHE-01/02/03, TCS-SQL-01/02/03, TCS-LDAP-01/02)
+  // 批次 12 C1 补全：TCS-OSS-02/03 之前未注册（导致 StrictEvaluator 返回 unknown → human_checkpoint），
+  // 现已补全注册到 OssPatternChecker，总数从 19 扩展为 21
+  assert.equal(evaluator.getStaticCheckerCount(), 21);
   // 验证 E1~E8 全部注册
   for (let i = 1; i <= 8; i++) {
     assert.equal(evaluator.hasStaticChecker(`E${i}`), true, `E${i} 应已注册`);
   }
-  // 验证 TCS-* 全部注册
+  // 验证 TCS-* 全部注册（13 条，含批次 12 新增的 TCS-OSS-02/03）
   const tcsIds = [
     "TCS-OSS-01",
+    "TCS-OSS-02",
+    "TCS-OSS-03",
     "TCS-SEC-01",
     "TCS-SEC-02",
     "TCS-CACHE-01",
@@ -584,9 +589,10 @@ test("T8a. 默认注册 E1~E8 + TCS-* 共 19 条 redlineId 映射", () => {
   }
 });
 
-test("T8b. 默认 getStaticCheckerCount === 19", () => {
+test("T8b. 默认 getStaticCheckerCount === 21", () => {
   const evaluator = new StrictEvaluator();
-  assert.equal(evaluator.getStaticCheckerCount(), 19);
+  // 批次 12 C1 补全 TCS-OSS-02/03 后，总数从 19 扩展为 21
+  assert.equal(evaluator.getStaticCheckerCount(), 21);
 });
 
 test("T8c. 默认 hasStaticChecker(E1) === true", () => {

@@ -37,6 +37,12 @@ jobs:
       - name: TypeCheck + Lint + Format Check
         run: npm run check
 
+      # ★ 新增步骤 1：tsc 严格模式检查（对齐设计文档 §5.1 D-C3-1 / §5.3）
+      # 显式启用 strict 模式校验，防止开发者临时修改 tsconfig.json 关闭 strict
+      - name: TypeCheck Strict
+        run: npx tsc --noEmit --strict
+        working-directory: packages/core
+
       - name: Build Core
         run: npm run build --workspace=@vegamo/deepcode-core
 
@@ -46,5 +52,40 @@ jobs:
       - name: Build VSCode Extension
         run: npm run build:vscode
 
-      - name: Test
-        run: npm test
+      # ★ 新增步骤 2：测试覆盖率报告（对齐设计文档 §5.1 D-C3-2 / §5.4）
+      # 使用 Node.js 内置 --experimental-test-coverage flag，零新增依赖
+      # 同时输出 spec（控制台可读）+ lcov（机器可读）两种格式
+      - name: Test Coverage
+        run: |
+          node --import tsx --test \
+            --experimental-test-coverage \
+            --test-reporter=spec \
+            --test-reporter=lcov \
+            --test-reporter-destination=stdout \
+            --test-reporter-destination=coverage.lcov \
+            packages/core/src/tests/*.test.ts
+
+      # ★ 新增步骤 3：覆盖率阈值检查（对齐设计文档 §5.1 D-C3-3 / D-C3-13）
+      # 阈值：行 ≥80% / 分支 ≥70% / 函数 ≥85%，不达标时 CI fail
+      - name: Coverage Threshold Check
+        run: |
+          node scripts/check-coverage-threshold.js coverage.lcov \
+            --lines 80 \
+            --branches 70 \
+            --functions 85
+
+      # ★ 新增步骤 4：上传覆盖率报告（对齐设计文档 §5.1 D-C3-12）
+      # 通过 GitHub Actions artifact 下载查看详细覆盖率，不依赖外部服务
+      - name: Upload Coverage Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-${{ matrix.os }}-${{ matrix.node-version }}
+          path: coverage.lcov
+
+      # ★ 新增步骤 5：EAG 专属门禁（对齐设计文档 §5.1 D-C3-9 / D-C3-14 / §5.6）
+      # 仅在 ubuntu-latest + node 22 运行，避免矩阵重复执行
+      # 包含 4 步：fixtures 完整性 + 静态扫描 + 集成测试 + 全量回归
+      - name: EAG Gate
+        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '22'
+        run: bash tests/scripts/ci-eag-gate.sh

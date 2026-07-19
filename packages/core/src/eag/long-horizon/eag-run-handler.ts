@@ -39,11 +39,13 @@
 import * as crypto from "node:crypto";
 import type { LoopType } from "../loop/models";
 import type { BlockageReport, LogCallback, MilestoneRecord, MultiLoopNode, MultiLoopPlan, RunState } from "./types";
+import type { GateStatusSnapshot, ResourceAccessGraph, BlockageAnalysisReport } from "./types";
 import { BLOCKAGE_TRIGGER_HUMAN_INTERVENTION_THRESHOLD, DEFAULT_MAX_MULTI_LOOP_ITERATIONS } from "./types";
 import type { MultiLoopPlanner } from "./multi-loop-planner";
 import type { RunStateStore } from "./run-state-store";
 import type { MilestoneTagger } from "./milestone-tagger";
 import type { BlockageAnalyzer } from "./blockage-analyzer";
+import type { PlanBlockageAnalyzer } from "./plan-blockage-analyzer";
 
 // ============================================================================
 // 1. 常量定义
@@ -238,6 +240,20 @@ export interface EagRunRequest {
   readonly compliancePackIds?: ReadonlyArray<string>;
   /** run-id（可选，未提供时由 RunStateStore 自动生成 12 位 UUID 前缀） */
   readonly runId?: string;
+  /**
+   * 门禁状态快照（可选，EAG-P3 批次 12 C1 集成）
+   *
+   * 提供时由 PlanBlockageAnalyzer 用于门禁阻塞检测（detectGateBlockage）。
+   * 未提供时跳过门禁阻塞检测通道。
+   */
+  readonly gateStatusSnapshot?: Readonly<GateStatusSnapshot>;
+  /**
+   * 资源访问图（可选，EAG-P3 批次 12 C1 集成）
+   *
+   * 提供时由 PlanBlockageAnalyzer 用于资源竞争与死锁风险检测。
+   * 未提供时跳过这两个检测通道。
+   */
+  readonly resourceAccessGraph?: Readonly<ResourceAccessGraph>;
 }
 
 /**
@@ -262,6 +278,14 @@ export interface EagRunResult {
   readonly finalReport: string;
   /** 阻塞分析报告（finalStatus != completed 时填写） */
   readonly blockageReport?: Readonly<BlockageReport>;
+  /**
+   * 依赖图阻塞分析报告（EAG-P3 批次 12 C1）
+   *
+   * 当 EagRunHandler 注入了 PlanBlockageAnalyzer 且检测到 overallBlocked=true 时填写。
+   * 与 blockageReport 正交：blockageReport 来自 BlockageAnalyzer（根因维度），
+   * planBlockageReport 来自 PlanBlockageAnalyzer（依赖图维度）。
+   */
+  readonly planBlockageReport?: Readonly<BlockageAnalysisReport>;
   /** 总 LLM 调用次数（所有 Loop 汇总） */
   readonly totalLlmCallCount: number;
   /** 总 token 消耗（所有 Loop 汇总） */
@@ -312,6 +336,14 @@ export class EagRunHandler {
   private readonly milestoneTagger: MilestoneTagger;
   /** 阻塞分析器（依赖注入） */
   private readonly blockageAnalyzer: BlockageAnalyzer;
+  /**
+   * 依赖图阻塞分析器（可选依赖注入，EAG-P3 批次 12 C1）
+   *
+   * 未注入时跳过依赖图阻塞分析（向后兼容 P-10）。
+   * 注入时在 MultiLoopPlanner.plan() 完成后调用 analyze()，
+   * 若 overallBlocked=true 则触发 HUMAN_CHECKPOINT 提前返回。
+   */
+  private readonly planBlockageAnalyzer?: PlanBlockageAnalyzer;
   /** 默认 Loop 执行器列表（依赖注入，可被 request.loopExecutors 覆盖） */
   private readonly defaultLoopExecutors: ReadonlyMap<LoopType, LoopExecutor>;
   /** 日志回调 */
@@ -329,6 +361,7 @@ export class EagRunHandler {
    * @param options.runStateStore RunState 持久化存储（必填）
    * @param options.milestoneTagger 里程碑 tag 生成器（必填）
    * @param options.blockageAnalyzer 阻塞分析器（必填）
+   * @param options.planBlockageAnalyzer 依赖图阻塞分析器（可选，EAG-P3 批次 12 C1）
    * @param options.loopExecutors Loop 执行器列表（可选，可由 request.loopExecutors 覆盖）
    * @param options.logger 日志回调（可选）
    */
@@ -337,6 +370,7 @@ export class EagRunHandler {
     readonly runStateStore: RunStateStore;
     readonly milestoneTagger: MilestoneTagger;
     readonly blockageAnalyzer: BlockageAnalyzer;
+    readonly planBlockageAnalyzer?: PlanBlockageAnalyzer;
     readonly loopExecutors?: ReadonlyArray<LoopExecutor>;
     readonly logger?: LogCallback;
   }) {
@@ -358,6 +392,8 @@ export class EagRunHandler {
     this.runStateStore = options.runStateStore;
     this.milestoneTagger = options.milestoneTagger;
     this.blockageAnalyzer = options.blockageAnalyzer;
+    // 可选依赖：未注入时为 undefined，handle() 跳过依赖图阻塞分析（向后兼容）
+    this.planBlockageAnalyzer = options.planBlockageAnalyzer;
 
     // 将 loopExecutors 数组转为 Map<LoopType, LoopExecutor>，便于 O(1) 查找
     const executorMap = new Map<LoopType, LoopExecutor>();
@@ -449,6 +485,70 @@ export class EagRunHandler {
       });
     }
 
+    // ===== Step 5.5: 依赖图阻塞分析（EAG-P3 批次 12 C1 集成点） =====
+    //
+    // 设计依据：批次 12 设计文档 §3.5 EagRunHandler 集成点改造。
+    // 仅当构造时注入了 planBlockageAnalyzer 时执行（向后兼容 P-10）。
+    // 触发条件：plan 生成完成 + RunState 初始化完成 + Loop 执行尚未开始。
+    // 触发后行为：
+    //   - 若 overallBlocked=true → 追加 human-intervention 事件 + 设置 finalStatus=human-checkpoint
+    //     + 跳过 Step 6 直接进入 Step 7 生成最终报告（含 planBlockageReport）
+    //   - 若 overallBlocked=false → 仅记录日志，正常进入 Step 6
+    //   - analyze() 抛异常 → 仅记录 warn 日志，不阻断主流程（避免依赖图分析失败导致 Run 无法启动）
+    //
+    // 注意：finalStatus 与 failureReason 在此处提前声明，供 Step 5.5 与 Step 6 共享。
+    let finalStatus: EagRunResult["finalStatus"] = "completed";
+    let failureReason: string | undefined;
+    let planBlockageReport: BlockageAnalysisReport | undefined;
+    if (this.planBlockageAnalyzer) {
+      try {
+        this.logger(`触发依赖图阻塞分析：runId=${resolvedRunId}`, "info");
+        planBlockageReport = await this.planBlockageAnalyzer.analyze({
+          runId: resolvedRunId,
+          plan,
+          runState,
+          gateStatusSnapshot: request.gateStatusSnapshot,
+          resourceAccessGraph: request.resourceAccessGraph,
+        });
+
+        // 若 overallBlocked=true → 触发 HUMAN_CHECKPOINT 提前返回
+        if (planBlockageReport.overallBlocked) {
+          const blockedReason = `依赖图阻塞分析识别 ${planBlockageReport.blockageRecords.length} 条阻塞，overallBlocked=true`;
+          this.logger(`依赖图阻塞分析触发 HUMAN_CHECKPOINT：${blockedReason}`, "warn");
+
+          // 追加 human-intervention 事件（让 RunState 状态机反映真实情况）
+          try {
+            runState = await this.runStateStore.appendEvent(runState.runId, {
+              type: "human-intervention",
+              payload: {
+                loopType: runState.currentLoop,
+                reason: blockedReason,
+                decision: "pending",
+              },
+            });
+          } catch (err) {
+            this.logger(
+              `追加 human-intervention 事件失败：${err instanceof Error ? err.message : String(err)}`,
+              "warn"
+            );
+          }
+
+          // 设置终态为 human-checkpoint，跳过 Step 6 loop 执行
+          finalStatus = "human-checkpoint";
+          failureReason = blockedReason;
+        } else {
+          this.logger(
+            `依赖图阻塞分析通过：blockageRecords=${planBlockageReport.blockageRecords.length} overallBlocked=false`,
+            "info"
+          );
+        }
+      } catch (err) {
+        // 依赖图分析失败：仅记录 warn 日志，不阻断主流程
+        // 设计理由：依赖图分析是增强能力，失败时降级为 P-10 行为（不阻塞）
+        this.logger(`依赖图阻塞分析失败（已降级跳过）：${err instanceof Error ? err.message : String(err)}`, "warn");
+      }
+    }
+
     // ===== Step 6: 按拓扑序遍历执行各 Loop 节点 =====
     const completedLoops: LoopType[] = [];
     const milestones: MilestoneRecord[] = [];
@@ -459,216 +559,178 @@ export class EagRunHandler {
     let currentPlanContent = "";
     let currentTasksContent = "";
     let blockageReport: BlockageReport | undefined;
-    let finalStatus: EagRunResult["finalStatus"] = "completed";
-    let failureReason: string | undefined;
 
-    for (const node of plan.loops) {
-      // 5.1 检查节点依赖是否满足
-      if (!this.areDependenciesSatisfied(node, completedNodeIds)) {
-        // 依赖未满足：理论上 planner 已校验 DAG 合法性，此处仅作安全保护
-        failureReason = `节点 ${node.nodeId} 依赖未满足：${node.dependencies.join(", ")}`;
-        finalStatus = "failed";
-        this.logger(`节点依赖未满足：${node.nodeId}`, "error");
-        break;
-      }
+    // 仅当 Step 5.5 未触发 HUMAN_CHECKPOINT 时执行 Loop 节点
+    // 若 finalStatus 已被设置为 "human-checkpoint"，跳过 loop 执行直接进入 Step 7
+    if (finalStatus !== "human-checkpoint") {
+      for (const node of plan.loops) {
+        // 5.1 检查节点依赖是否满足
+        if (!this.areDependenciesSatisfied(node, completedNodeIds)) {
+          // 依赖未满足：理论上 planner 已校验 DAG 合法性，此处仅作安全保护
+          failureReason = `节点 ${node.nodeId} 依赖未满足：${node.dependencies.join(", ")}`;
+          finalStatus = "failed";
+          this.logger(`节点依赖未满足：${node.nodeId}`, "error");
+          break;
+        }
 
-      // 5.2 追加 loop-started 事件
-      try {
-        runState = await this.runStateStore.appendEvent(runState.runId, {
-          type: "loop-started",
-          payload: {
-            loopType: node.loopType,
-            iteration: 1,
-            nodeId: node.nodeId,
-          },
-        });
-      } catch (err) {
-        throw new EagRunHandlerError(
-          "run-state-error",
-          `追加 loop-started 事件失败：${err instanceof Error ? err.message : String(err)}`,
-          err
-        );
-      }
-
-      // 5.3 通过 LoopExecutor 协议调用对应 Loop 编排器
-      const executor = executorMap.get(node.loopType);
-      if (!executor) {
-        failureReason = `未找到 LoopType=${node.loopType} 的 LoopExecutor 实现`;
-        finalStatus = "failed";
-        this.logger(`未找到 LoopExecutor：${node.loopType}`, "error");
-        break;
-      }
-
-      const context: Readonly<LoopExecutionContext> = Object.freeze({
-        node,
-        runId: runState.runId,
-        projectRoot: request.projectRoot,
-        userIntent: request.userIntent,
-        specContent: currentSpecContent || undefined,
-        autoTransition: plan.autoTransition,
-        maxIterations: request.maxIterations ?? DEFAULT_MAX_MULTI_LOOP_ITERATIONS,
-        coverageThreshold: request.coverageThreshold,
-        compliancePackIds: request.compliancePackIds,
-        completedNodeIds: [...completedNodeIds],
-      });
-
-      let loopResult: Readonly<LoopExecutionResult>;
-      try {
-        this.logger(`执行 Loop 节点：${node.nodeId} (type=${node.loopType})`, "info");
-        loopResult = await executor.execute(context);
-      } catch (err) {
-        // Loop 执行抛出异常：视为 failed
-        failureReason = `Loop ${node.nodeId} 执行抛出异常：${err instanceof Error ? err.message : String(err)}`;
-        finalStatus = "failed";
-        this.logger(`Loop 执行异常：${node.nodeId} - ${failureReason}`, "error");
-
-        // 追加 human-intervention 事件
+        // 5.2 追加 loop-started 事件
         try {
           runState = await this.runStateStore.appendEvent(runState.runId, {
-            type: "human-intervention",
+            type: "loop-started",
             payload: {
               loopType: node.loopType,
-              reason: failureReason,
-              decision: "pending",
-            },
-          });
-        } catch (e) {
-          this.logger(`追加 human-intervention 事件失败：${e instanceof Error ? e.message : String(e)}`, "warn");
-        }
-
-        // 检查是否触发阻塞分析
-        if (runState.humanInterventionCount >= BLOCKAGE_TRIGGER_HUMAN_INTERVENTION_THRESHOLD) {
-          blockageReport = await this.triggerBlockageAnalysis(
-            runState.runId,
-            request.projectRoot,
-            node.loopType,
-            runState.currentIteration
-          );
-          finalStatus = "paused";
-          try {
-            runState = await this.runStateStore.appendEvent(runState.runId, {
-              type: "run-paused",
-              payload: { reason: "累计 3 次人工介入未解决" },
-            });
-          } catch (e) {
-            this.logger(`追加 run-paused 事件失败：${e instanceof Error ? e.message : String(e)}`, "warn");
-          }
-        }
-        break;
-      }
-
-      // 累计资源消耗
-      totalLlmCallCount += loopResult.llmCallCount;
-      totalTokensUsed += loopResult.tokensUsed;
-
-      // 5.4 处理 Loop 执行结果
-      if (loopResult.finalStatus === "completed") {
-        // Loop 成功：更新上下文 + 创建 milestone
-        if (loopResult.generatedArtifacts.spec) {
-          currentSpecContent = loopResult.generatedArtifacts.spec;
-        }
-        if (loopResult.generatedArtifacts.plan) {
-          currentPlanContent = loopResult.generatedArtifacts.plan;
-        }
-        if (loopResult.generatedArtifacts.tasks) {
-          currentTasksContent = loopResult.generatedArtifacts.tasks;
-        }
-
-        // 创建里程碑 tag
-        try {
-          const milestone = await this.milestoneTagger.tag({
-            runId: runState.runId,
-            projectRoot: request.projectRoot,
-            name: `${node.loopType.toUpperCase()} Loop 完成`,
-            loopType: node.loopType,
-          });
-          milestones.push(milestone);
-
-          // 追加 loop-completed + milestone-tagged 事件
-          runState = await this.runStateStore.appendEvent(runState.runId, {
-            type: "loop-completed",
-            payload: {
-              loopType: node.loopType,
+              iteration: 1,
               nodeId: node.nodeId,
-              milestone,
             },
           });
-          runState = await this.runStateStore.appendEvent(runState.runId, {
-            type: "milestone-tagged",
-            payload: { milestone },
-          });
-
-          completedLoops.push(node.loopType);
-          completedNodeIds.push(node.nodeId);
-
-          this.logger(`Loop 节点完成：${node.nodeId} milestone=${milestone.tagName}`, "info");
         } catch (err) {
           throw new EagRunHandlerError(
-            "milestone-error",
-            `里程碑 tag 创建失败：${err instanceof Error ? err.message : String(err)}`,
+            "run-state-error",
+            `追加 loop-started 事件失败：${err instanceof Error ? err.message : String(err)}`,
             err
           );
         }
-      } else if (loopResult.finalStatus === "human-checkpoint") {
-        // Loop 等待人工决策：返回 human-checkpoint
-        failureReason = loopResult.failureReason ?? `Loop ${node.nodeId} 等待人工决策`;
-        finalStatus = "human-checkpoint";
 
-        // 追加 human-intervention 事件
+        // 5.3 通过 LoopExecutor 协议调用对应 Loop 编排器
+        const executor = executorMap.get(node.loopType);
+        if (!executor) {
+          failureReason = `未找到 LoopType=${node.loopType} 的 LoopExecutor 实现`;
+          finalStatus = "failed";
+          this.logger(`未找到 LoopExecutor：${node.loopType}`, "error");
+          break;
+        }
+
+        const context: Readonly<LoopExecutionContext> = Object.freeze({
+          node,
+          runId: runState.runId,
+          projectRoot: request.projectRoot,
+          userIntent: request.userIntent,
+          specContent: currentSpecContent || undefined,
+          autoTransition: plan.autoTransition,
+          maxIterations: request.maxIterations ?? DEFAULT_MAX_MULTI_LOOP_ITERATIONS,
+          coverageThreshold: request.coverageThreshold,
+          compliancePackIds: request.compliancePackIds,
+          completedNodeIds: [...completedNodeIds],
+        });
+
+        let loopResult: Readonly<LoopExecutionResult>;
         try {
-          runState = await this.runStateStore.appendEvent(runState.runId, {
-            type: "human-intervention",
-            payload: {
-              loopType: node.loopType,
-              reason: failureReason,
-              decision: "pending",
-            },
-          });
+          this.logger(`执行 Loop 节点：${node.nodeId} (type=${node.loopType})`, "info");
+          loopResult = await executor.execute(context);
         } catch (err) {
-          this.logger(`追加 human-intervention 事件失败：${err instanceof Error ? err.message : String(err)}`, "warn");
-        }
-
-        // 检查是否触发阻塞分析
-        if (runState.humanInterventionCount >= BLOCKAGE_TRIGGER_HUMAN_INTERVENTION_THRESHOLD) {
-          blockageReport = await this.triggerBlockageAnalysis(
-            runState.runId,
-            request.projectRoot,
-            node.loopType,
-            runState.currentIteration
-          );
-          finalStatus = "paused";
-          try {
-            runState = await this.runStateStore.appendEvent(runState.runId, {
-              type: "run-paused",
-              payload: { reason: "累计 3 次人工介入未解决" },
-            });
-          } catch (err) {
-            this.logger(`追加 run-paused 事件失败：${err instanceof Error ? err.message : String(err)}`, "warn");
-          }
-        }
-
-        // 非自动流转或阻塞触发：跳出循环
-        break;
-      } else {
-        // Loop 失败：回滚到上一个 milestone + 追加 human-intervention 事件
-        failureReason = loopResult.failureReason ?? `Loop ${node.nodeId} 执行失败`;
-
-        try {
-          // 回滚到上一个 milestone（如有）
-          if (milestones.length > 0) {
-            await this.milestoneTagger.rollback(runState.runId, request.projectRoot);
-            this.logger(`已回滚到上一个 milestone：${milestones[milestones.length - 1].tagName}`, "warn");
-          }
+          // Loop 执行抛出异常：视为 failed
+          failureReason = `Loop ${node.nodeId} 执行抛出异常：${err instanceof Error ? err.message : String(err)}`;
+          finalStatus = "failed";
+          this.logger(`Loop 执行异常：${node.nodeId} - ${failureReason}`, "error");
 
           // 追加 human-intervention 事件
-          runState = await this.runStateStore.appendEvent(runState.runId, {
-            type: "human-intervention",
-            payload: {
+          try {
+            runState = await this.runStateStore.appendEvent(runState.runId, {
+              type: "human-intervention",
+              payload: {
+                loopType: node.loopType,
+                reason: failureReason,
+                decision: "pending",
+              },
+            });
+          } catch (e) {
+            this.logger(`追加 human-intervention 事件失败：${e instanceof Error ? e.message : String(e)}`, "warn");
+          }
+
+          // 检查是否触发阻塞分析
+          if (runState.humanInterventionCount >= BLOCKAGE_TRIGGER_HUMAN_INTERVENTION_THRESHOLD) {
+            blockageReport = await this.triggerBlockageAnalysis(
+              runState.runId,
+              request.projectRoot,
+              node.loopType,
+              runState.currentIteration
+            );
+            finalStatus = "paused";
+            try {
+              runState = await this.runStateStore.appendEvent(runState.runId, {
+                type: "run-paused",
+                payload: { reason: "累计 3 次人工介入未解决" },
+              });
+            } catch (e) {
+              this.logger(`追加 run-paused 事件失败：${e instanceof Error ? e.message : String(e)}`, "warn");
+            }
+          }
+          break;
+        }
+
+        // 累计资源消耗
+        totalLlmCallCount += loopResult.llmCallCount;
+        totalTokensUsed += loopResult.tokensUsed;
+
+        // 5.4 处理 Loop 执行结果
+        if (loopResult.finalStatus === "completed") {
+          // Loop 成功：更新上下文 + 创建 milestone
+          if (loopResult.generatedArtifacts.spec) {
+            currentSpecContent = loopResult.generatedArtifacts.spec;
+          }
+          if (loopResult.generatedArtifacts.plan) {
+            currentPlanContent = loopResult.generatedArtifacts.plan;
+          }
+          if (loopResult.generatedArtifacts.tasks) {
+            currentTasksContent = loopResult.generatedArtifacts.tasks;
+          }
+
+          // 创建里程碑 tag
+          try {
+            const milestone = await this.milestoneTagger.tag({
+              runId: runState.runId,
+              projectRoot: request.projectRoot,
+              name: `${node.loopType.toUpperCase()} Loop 完成`,
               loopType: node.loopType,
-              reason: failureReason,
-              decision: "pending",
-            },
-          });
+            });
+            milestones.push(milestone);
+
+            // 追加 loop-completed + milestone-tagged 事件
+            runState = await this.runStateStore.appendEvent(runState.runId, {
+              type: "loop-completed",
+              payload: {
+                loopType: node.loopType,
+                nodeId: node.nodeId,
+                milestone,
+              },
+            });
+            runState = await this.runStateStore.appendEvent(runState.runId, {
+              type: "milestone-tagged",
+              payload: { milestone },
+            });
+
+            completedLoops.push(node.loopType);
+            completedNodeIds.push(node.nodeId);
+
+            this.logger(`Loop 节点完成：${node.nodeId} milestone=${milestone.tagName}`, "info");
+          } catch (err) {
+            throw new EagRunHandlerError(
+              "milestone-error",
+              `里程碑 tag 创建失败：${err instanceof Error ? err.message : String(err)}`,
+              err
+            );
+          }
+        } else if (loopResult.finalStatus === "human-checkpoint") {
+          // Loop 等待人工决策：返回 human-checkpoint
+          failureReason = loopResult.failureReason ?? `Loop ${node.nodeId} 等待人工决策`;
+          finalStatus = "human-checkpoint";
+
+          // 追加 human-intervention 事件
+          try {
+            runState = await this.runStateStore.appendEvent(runState.runId, {
+              type: "human-intervention",
+              payload: {
+                loopType: node.loopType,
+                reason: failureReason,
+                decision: "pending",
+              },
+            });
+          } catch (err) {
+            this.logger(
+              `追加 human-intervention 事件失败：${err instanceof Error ? err.message : String(err)}`,
+              "warn"
+            );
+          }
 
           // 检查是否触发阻塞分析
           if (runState.humanInterventionCount >= BLOCKAGE_TRIGGER_HUMAN_INTERVENTION_THRESHOLD) {
@@ -687,21 +749,64 @@ export class EagRunHandler {
             } catch (err) {
               this.logger(`追加 run-paused 事件失败：${err instanceof Error ? err.message : String(err)}`, "warn");
             }
-          } else {
-            finalStatus = "human-checkpoint";
           }
-        } catch (err) {
-          throw new EagRunHandlerError(
-            "milestone-error",
-            `里程碑回滚失败：${err instanceof Error ? err.message : String(err)}`,
-            err
-          );
-        }
 
-        // 失败后跳出循环（除非自动流转且依赖满足，但本批次简化为失败即停止）
-        break;
+          // 非自动流转或阻塞触发：跳出循环
+          break;
+        } else {
+          // Loop 失败：回滚到上一个 milestone + 追加 human-intervention 事件
+          failureReason = loopResult.failureReason ?? `Loop ${node.nodeId} 执行失败`;
+
+          try {
+            // 回滚到上一个 milestone（如有）
+            if (milestones.length > 0) {
+              await this.milestoneTagger.rollback(runState.runId, request.projectRoot);
+              this.logger(`已回滚到上一个 milestone：${milestones[milestones.length - 1].tagName}`, "warn");
+            }
+
+            // 追加 human-intervention 事件
+            runState = await this.runStateStore.appendEvent(runState.runId, {
+              type: "human-intervention",
+              payload: {
+                loopType: node.loopType,
+                reason: failureReason,
+                decision: "pending",
+              },
+            });
+
+            // 检查是否触发阻塞分析
+            if (runState.humanInterventionCount >= BLOCKAGE_TRIGGER_HUMAN_INTERVENTION_THRESHOLD) {
+              blockageReport = await this.triggerBlockageAnalysis(
+                runState.runId,
+                request.projectRoot,
+                node.loopType,
+                runState.currentIteration
+              );
+              finalStatus = "paused";
+              try {
+                runState = await this.runStateStore.appendEvent(runState.runId, {
+                  type: "run-paused",
+                  payload: { reason: "累计 3 次人工介入未解决" },
+                });
+              } catch (err) {
+                this.logger(`追加 run-paused 事件失败：${err instanceof Error ? err.message : String(err)}`, "warn");
+              }
+            } else {
+              finalStatus = "human-checkpoint";
+            }
+          } catch (err) {
+            throw new EagRunHandlerError(
+              "milestone-error",
+              `里程碑回滚失败：${err instanceof Error ? err.message : String(err)}`,
+              err
+            );
+          }
+
+          // 失败后跳出循环（除非自动流转且依赖满足，但本批次简化为失败即停止）
+          break;
+        }
       }
-    }
+    } // 结束 if (finalStatus !== "human-checkpoint")
 
     // ===== Step 6: 追加终态事件（run-completed / run-failed） =====
     if (finalStatus === "completed") {
@@ -740,6 +845,7 @@ export class EagRunHandler {
       durationSec,
       failureReason,
       blockageReport,
+      planBlockageReport,
     });
 
     this.logger(
@@ -755,6 +861,7 @@ export class EagRunHandler {
       finalRunState: runState,
       finalReport,
       blockageReport,
+      planBlockageReport,
       totalLlmCallCount,
       totalTokensUsed,
       durationSec,
@@ -921,7 +1028,8 @@ export class EagRunHandler {
    * - 基本信息（run-id / 最终状态 / 总耗时 / 总 token）
    * - 完成度（已完成的 Loop 列表）
    * - 里程碑列表（序号 + 名称 + tag）
-   * - 阻塞点（如有）
+   * - 阻塞点（如有，来自 BlockageAnalyzer 的根因维度）
+   * - 依赖图阻塞（如有，来自 PlanBlockageAnalyzer 的依赖图维度，EAG-P3 批次 12 C1）
    *
    * @param data 报告数据
    * @returns Markdown 格式报告
@@ -936,6 +1044,8 @@ export class EagRunHandler {
     readonly durationSec: number;
     readonly failureReason?: string;
     readonly blockageReport?: BlockageReport;
+    /** 依赖图阻塞分析报告（EAG-P3 批次 12 C1） */
+    readonly planBlockageReport?: BlockageAnalysisReport;
   }): string {
     const parts: string[] = [];
 
@@ -980,7 +1090,7 @@ export class EagRunHandler {
     }
     parts.push("");
 
-    // ===== 章节 4：阻塞点（如有） =====
+    // ===== 章节 4：阻塞点（如有，根因维度） =====
     if (data.blockageReport) {
       parts.push("## 阻塞分析");
       parts.push("");
@@ -1004,6 +1114,46 @@ export class EagRunHandler {
       parts.push("");
       for (const d of data.blockageReport.requiredDecisions) {
         parts.push(`- **${d.decisionId}**: ${d.description} (推荐: ${d.recommendedOptionId})`);
+      }
+    }
+
+    // ===== 章节 5：依赖图阻塞（如有，依赖图维度，EAG-P3 批次 12 C1） =====
+    if (data.planBlockageReport) {
+      parts.push("## 依赖图阻塞分析");
+      parts.push("");
+      parts.push(`- **总体阻塞**: ${data.planBlockageReport.overallBlocked ? "是" : "否"}`);
+      parts.push(`- **阻塞记录数**: ${data.planBlockageReport.blockageRecords.length}`);
+      parts.push(`- **生成时间**: ${data.planBlockageReport.generatedAt}`);
+      parts.push("");
+      if (data.planBlockageReport.blockageRecords.length > 0) {
+        parts.push("### 阻塞记录");
+        parts.push("");
+        parts.push("| # | ID | 类型 | 严重性 | 受影响节点 | 根因 |");
+        parts.push("|---|----|------|--------|-----------|------|");
+        for (let i = 0; i < data.planBlockageReport.blockageRecords.length; i++) {
+          const r = data.planBlockageReport.blockageRecords[i];
+          const nodes = r.affectedNodes.length > 0 ? r.affectedNodes.join(", ") : "-";
+          // 转义 Markdown 表格中的 | 字符，避免破坏列分隔
+          const rootCause = r.rootCause.replace(/\|/g, "\\|");
+          parts.push(`| ${i + 1} | ${r.blockageId} | ${r.type} | ${r.severity} | ${nodes} | ${rootCause} |`);
+        }
+        parts.push("");
+        parts.push("### 建议动作");
+        parts.push("");
+        if (data.planBlockageReport.suggestedActions.length === 0) {
+          parts.push("- 无建议动作");
+        } else {
+          parts.push("| # | ID | 关联阻塞 | 优先级 | 成本 | 动作 |");
+          parts.push("|---|----|---------|--------|------|------|");
+          for (let i = 0; i < data.planBlockageReport.suggestedActions.length; i++) {
+            const a = data.planBlockageReport.suggestedActions[i];
+            // 转义 Markdown 表格中的 | 字符
+            const action = a.action.replace(/\|/g, "\\|");
+            parts.push(
+              `| ${i + 1} | ${a.actionId} | ${a.targetBlockageId} | ${a.priority} | ${a.estimatedEffort} | ${action} |`
+            );
+          }
+        }
       }
     }
 
