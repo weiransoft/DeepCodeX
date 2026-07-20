@@ -368,6 +368,35 @@ export * from "./testing/index";
 export * from "./long-horizon/index";
 
 // ============================================================================
+// 16. devops —— DevOps 第 6 角色 + DEPLOY 子阶段（§5.10.5，批次 13 新增）
+// ============================================================================
+//
+// DevOps 角色编排器 + IaC 模板生成 + G-8 部署门禁 + DEPLOY 子阶段编排器 +
+// PreDeploy/PostDeploy 检查器 + RollbackManager 接口。
+//
+// 本批次（批次 13 Phase 1）仅落地 D1-4 DevOpsTypes 类型定义 + NoOpRollbackManager 占位实现。
+// 后续 Phase 2~7 将逐步落地 GateG8Checker / IaC 生成器 / DeployStage / DevOpsOrchestrator /
+// CLI EagCommandParser v2 等。
+//
+// 公开 API（Phase 1 范围）：
+// - 类型：DevOpsContext / DevOpsResult / IaCTemplate / IaCGenerator / IaCGenerationContext /
+//         DeployStrategy / DeployContext / DeployResult / DeployedResource /
+//         HealthCheckResult / HealthEndpoint / SmokeTestResult / SmokeTestCase / SmokeTestRunner /
+//         DevOpsEvent / DevOpsEventEmitter / GateG8Context / GateG8Checker /
+//         PreDeployChecker / PreDeployCheckContext / PreDeployCheckResult /
+//         PostDeployChecker / PostDeployCheckContext / PostDeployCheckResult /
+//         RollbackManager / RollbackSnapshotContext / RollbackSnapshot / RollbackResult /
+//         DeployStageOptions / DeployStageResult / DeployStage / DevOpsOrchestratorOptions 等
+// - 类：NoOpRollbackManager（占位实现，批次 14 扩展 K8sRollbackManager / HelmRollbackManager）
+//
+// 命名冲突处理：
+// - devops/types.ts 中 DevOpsContext / GateG8Context 均继承 GateContext（来自 gate/gate-types.ts），
+//   不重新导出 GateContext / GateResult / GateId 等门禁类型，避免与 gate 模块冲突。
+// - devops/types.ts 中 DevOpsContext.loopType 固定为 "deploy" 字面量，不重新导出 LoopType 类型。
+// - devops 模块新增类型无与既有模块同名冲突，可安全 `export *`。
+export * from "./devops/index";
+
+// ============================================================================
 // 显式锁定命名冲突成员的权威来源
 // ============================================================================
 //

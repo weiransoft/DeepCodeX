@@ -57,12 +57,16 @@ import type { GateChecker, GateContext, GateId, GateOrchestrationResult, GateRes
 /**
  * LoopType → 是否启用门禁的映射表
  *
- * 对齐 EAG 三 Loop 编排策略：
+ * 对齐 EAG 四 Loop 编排策略：
  * - design：跳过（DESIGN Loop 是方案产出阶段，无门禁）
  * - coding：执行（CODING Loop 启动前依次执行 G-1~G-4，退出时执行 G-5）
  * - testing：执行（TESTING Loop 启动前执行 G-6，退出时执行 G-7）
+ * - deploy：跳过 GateOrchestrator 编排（DEPLOY Loop 的 G-8 门禁由 DevOpsOrchestrator 独立调用，
+ *   不通过 GateOrchestrator.run() 编排，因为 G-8 需要 IaC 模板 + 部署结果 + 健康检查 + 烟雾测试
+ *   等运行期数据，与 G-1~G-7 的静态文档门禁模型不同）
  *
  * 注意：批次 10 将 testing 从 false 改为 true（启用 TESTING Loop 门禁）。
+ * 注意：批次 13 新增 deploy 键，固定为 false（G-8 由 DevOpsOrchestrator 独立调用）。
  *
  * 使用 Object.freeze 冻结，防止运行期被 LLM 自改（对齐 §5.12.4 G-A6d）。
  */
@@ -70,6 +74,7 @@ const LOOP_GATE_STRATEGY: Readonly<Record<LoopType, boolean>> = Object.freeze({
   design: false, // false=跳过门禁
   coding: true, // true=执行门禁
   testing: true, // true=执行门禁（批次 10 修改：从 false 改为 true）
+  deploy: false, // false=跳过 GateOrchestrator 编排（批次 13 新增：G-8 由 DevOpsOrchestrator 独立调用）
 });
 
 /**
@@ -79,9 +84,13 @@ const LOOP_GATE_STRATEGY: Readonly<Record<LoopType, boolean>> = Object.freeze({
  * - design：[] → 跳过所有门禁
  * - coding：["G-1", "G-2", "G-3", "G-4", "G-5"] → CODING Loop 进入与退出门禁
  * - testing：["G-6", "G-7"] → TESTING Loop 进入与退出门禁
+ * - deploy：[] → 跳过 GateOrchestrator 编排（G-8 由 DevOpsOrchestrator 独立调用）
  *
  * 设计依据：§4.8.5 明确"testing：执行 G-6（进入） + G-7（退出）"，
  * 即 testing Loop 只执行 G-6/G-7，不执行 G-1~G-5。
+ *
+ * 设计依据：批次 13 §3.6 明确 G-8 由 DevOpsOrchestrator 在部署完成后独立调用，
+ * 不通过 GateOrchestrator.run() 编排，因此 deploy Loop 的 GateId 列表为空。
  *
  * 使用 Object.freeze 冻结，防止运行期被 LLM 自改。
  */
@@ -89,21 +98,34 @@ const LOOP_GATE_IDS: Readonly<Record<LoopType, ReadonlyArray<GateId>>> = Object.
   design: Object.freeze([] as GateId[]),
   coding: Object.freeze(["G-1", "G-2", "G-3", "G-4", "G-5"] as GateId[]),
   testing: Object.freeze(["G-6", "G-7"] as GateId[]),
+  deploy: Object.freeze([] as GateId[]), // 批次 13 新增：G-8 由 DevOpsOrchestrator 独立调用
 });
 
 /**
- * 门禁检查器执行顺序（按 G-1 → G-2 → G-3 → G-4 → G-5 → G-6 → G-7 顺序）
+ * 门禁检查器执行顺序（按 G-1 → G-2 → G-3 → G-4 → G-5 → G-6 → G-7 → G-8 顺序）
  *
- * 包含全部 7 道门禁的合法 ID，用于：
+ * 包含全部 8 道门禁的合法 ID，用于：
  * - 构造时校验自定义检查器的 gateId 是否合法
  * - 文档化门禁执行顺序
  *
  * 实际执行时，run() 会根据 LOOP_GATE_IDS[loopType] 过滤要执行的 checkers，
  * 此处仅用于协议校验。
  *
+ * 注意：G-8 不通过 GateOrchestrator.run() 编排（由 DevOpsOrchestrator 独立调用），
+ * 但仍纳入 GATE_EXECUTION_ORDER 用于协议校验与文档化。
+ *
  * 使用 Object.freeze 冻结，防止运行期被篡改顺序。
  */
-const GATE_EXECUTION_ORDER: ReadonlyArray<GateId> = Object.freeze(["G-1", "G-2", "G-3", "G-4", "G-5", "G-6", "G-7"]);
+const GATE_EXECUTION_ORDER: ReadonlyArray<GateId> = Object.freeze([
+  "G-1",
+  "G-2",
+  "G-3",
+  "G-4",
+  "G-5",
+  "G-6",
+  "G-7",
+  "G-8",
+]);
 
 // ============================================================================
 // 异常类型

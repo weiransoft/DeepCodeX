@@ -280,25 +280,28 @@ test("T14: EAG 根 barrel 导出 BlockageAnalyzer 类（来自 long-horizon/，�
 // T15. 主要类型导出验证（6 个子测试，type-only import 在编译期校验）
 // ============================================================================
 
-test("T15a: EAG 根 barrel 导出 LoopType 类型（字面量联合 'design' | 'coding' | 'testing'）", () => {
+test("T15a: EAG 根 barrel 导出 LoopType 类型（字面量联合 'design' | 'coding' | 'testing' | 'deploy'）", () => {
   // 编译期校验：LoopType 类型可用
   const sample: LoopType = "design";
-  // 运行期校验：LOOP_TYPES 常量应包含全部 3 个合法值
+  // 运行期校验：LOOP_TYPES 常量应包含全部 4 个合法值（批次 13 新增 'deploy'）
   assert.ok(Array.isArray(Eag.LOOP_TYPES), "LOOP_TYPES 应为数组");
-  assert.equal(Eag.LOOP_TYPES.length, 3, "LOOP_TYPES 应含 3 个 LoopType 合法值");
+  assert.equal(Eag.LOOP_TYPES.length, 4, "LOOP_TYPES 应含 4 个 LoopType 合法值（design/coding/testing/deploy）");
   assert.ok(Eag.LOOP_TYPES.includes(sample), "LOOP_TYPES 应包含 'design'");
   assert.ok(Eag.LOOP_TYPES.includes("coding"), "LOOP_TYPES 应包含 'coding'");
   assert.ok(Eag.LOOP_TYPES.includes("testing"), "LOOP_TYPES 应包含 'testing'");
+  assert.ok(Eag.LOOP_TYPES.includes("deploy" as LoopType), "LOOP_TYPES 应包含 'deploy'（批次 13 新增）");
 });
 
-test("T15b: EAG 根 barrel 导出 GateId 类型（G-1~G-7 七道门禁标识）", () => {
+test("T15b: EAG 根 barrel 导出 GateId 类型（G-1~G-8 八道门禁标识）", () => {
   // 编译期校验：GateId 类型可用
-  // 运行期校验：GATE_IDS 常量应包含全部 7 个门禁 ID
+  // 运行期校验：GATE_IDS 常量应包含全部 8 个门禁 ID（批次 13 新增 G-8）
   assert.ok(Array.isArray(Eag.GATE_IDS), "GATE_IDS 应为数组");
-  assert.equal(Eag.GATE_IDS.length, 7, "GATE_IDS 应含 7 个门禁 ID（G-1~G-7）");
+  assert.equal(Eag.GATE_IDS.length, 8, "GATE_IDS 应含 8 个门禁 ID（G-1~G-8）");
   // 验证 G-6 与 G-7 已纳入（批次 10 新增）
   assert.ok(Eag.GATE_IDS.includes("G-6" as GateId), "GATE_IDS 应包含 'G-6'（TESTING 进入门禁）");
   assert.ok(Eag.GATE_IDS.includes("G-7" as GateId), "GATE_IDS 应包含 'G-7'（TESTING 退出门禁）");
+  // 验证 G-8 已纳入（批次 13 新增：DEPLOY 退出门禁，由 DevOpsOrchestrator 独立调用）
+  assert.ok(Eag.GATE_IDS.includes("G-8" as GateId), "GATE_IDS 应包含 'G-8'（DEPLOY 退出门禁，批次 13 新增）");
 });
 
 test("T15c: EAG 根 barrel 导出 CodingLoopRequest 类型（CODING Loop 编排请求）", () => {
@@ -574,13 +577,13 @@ test("T27: EAG 根 barrel 导出 long-horizon 辅助类（HealthScoreCalculator 
 // ============================================================================
 
 test("T28: EAG 根 barrel 命名冲突解决验证（LOOP_TYPES / deepFreeze / LogCallback 权威来源）", () => {
-  // 1. LOOP_TYPES：应来自 loop/models（值 = ["design","coding","testing"]）
+  // 1. LOOP_TYPES：应来自 loop/models（值 = ["design","coding","testing","deploy"]，批次 13 新增 deploy）
   assert.ok(Array.isArray(Eag.LOOP_TYPES), "LOOP_TYPES 应为数组");
-  assert.equal(Eag.LOOP_TYPES.length, 3, "LOOP_TYPES 应含 3 个值");
+  assert.equal(Eag.LOOP_TYPES.length, 4, "LOOP_TYPES 应含 4 个值（批次 13 新增 deploy）");
   assert.deepEqual(
     [...Eag.LOOP_TYPES],
-    ["design", "coding", "testing"],
-    "LOOP_TYPES 值应为 ['design','coding','testing']"
+    ["design", "coding", "testing", "deploy"],
+    "LOOP_TYPES 值应为 ['design','coding','testing','deploy']"
   );
 
   // 2. deepFreeze：应来自 tcs/types（函数类型）

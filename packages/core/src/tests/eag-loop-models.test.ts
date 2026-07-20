@@ -61,8 +61,8 @@ import {
 // A. 枚举值完整性测试
 // ============================================================================
 
-test("A1. LOOP_TYPES 包含 design / coding / testing 三种类型", () => {
-  assert.deepEqual([...LOOP_TYPES], ["design", "coding", "testing"]);
+test("A1. LOOP_TYPES 包含 design / coding / testing / deploy 四种类型（批次 13 新增 deploy）", () => {
+  assert.deepEqual([...LOOP_TYPES], ["design", "coding", "testing", "deploy"]);
 });
 
 test("A2. DISCOVERY_MODES 包含 auto / manual / off 三种模式", () => {

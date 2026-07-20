@@ -201,7 +201,7 @@ export { LOOP_TYPES } from "../loop/models";
 // ============================================================================
 
 /**
- * 门禁 ID（字面量联合类型，对应七道门禁）
+ * 门禁 ID（字面量联合类型，对应八道门禁）
  *
  * - G-1：无已批准 spec/plan 禁入 CODING Loop
  * - G-2：方案必经多角色评审 + 用户批准
@@ -210,6 +210,7 @@ export { LOOP_TYPES } from "../loop/models";
  * - G-5：CODING Loop 退出门禁（任务卡全 completed + STRICT 通过 + git clean + gitleaks）
  * - G-6：TESTING Loop 进入门禁（G-5 通过 + 单测全过 + spec.md approved + implementationRoot 非空）
  * - G-7：TESTING Loop 退出门禁（覆盖率达标 + 契约测试全过 + E2E 测试全过 + 合规证据完整 + PR 描述就绪）
+ * - G-8：DEPLOY Loop 退出门禁（IaC 模板校验通过 + 部署成功 + 健康检查通过 + 烟雾测试通过 + 监控就绪 + 回滚预案存在）
  *
  * 字面量联合而非 string，避免拼写错误。
  *
@@ -217,8 +218,9 @@ export { LOOP_TYPES } from "../loop/models";
  * - G-1~G-3：EAG 方案 §5.12.1 方案先行门禁（批次 8 落地）
  * - G-4/G-5：EAG-P2 批次 9 §4.8 基于方案 §5.10.5 三 Loop 时序与 §5.12.2 里程碑检查点合理外推
  * - G-6/G-7：EAG-P3 批次 10 §4.8 TESTING Loop 进入与退出门禁（同构外推 G-4/G-5 设计）
+ * - G-8：EAG-P4 批次 13 §3.6 DEPLOY Loop 退出门禁（同构外推 G-5/G-7 设计）
  */
-export type GateId = "G-1" | "G-2" | "G-3" | "G-4" | "G-5" | "G-6" | "G-7";
+export type GateId = "G-1" | "G-2" | "G-3" | "G-4" | "G-5" | "G-6" | "G-7" | "G-8";
 
 /**
  * GateId 全部合法值（用于运行时枚举、测试断言）
@@ -228,8 +230,9 @@ export type GateId = "G-1" | "G-2" | "G-3" | "G-4" | "G-5" | "G-6" | "G-7";
  * - coding Loop 退出：G-5
  * - testing Loop 进入：G-6
  * - testing Loop 退出：G-7
+ * - deploy Loop 退出：G-8
  */
-export const GATE_IDS: ReadonlyArray<GateId> = Object.freeze(["G-1", "G-2", "G-3", "G-4", "G-5", "G-6", "G-7"]);
+export const GATE_IDS: ReadonlyArray<GateId> = Object.freeze(["G-1", "G-2", "G-3", "G-4", "G-5", "G-6", "G-7", "G-8"]);
 
 /**
  * 门禁严重性（与 RedlineSeverity 对齐，使用小写）

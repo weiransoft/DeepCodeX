@@ -38,11 +38,14 @@
  * - design：设计 Loop，产出或更新架构/需求/接口设计文档
  * - coding：编码 Loop，完成代码实现、测试、提交
  * - testing：测试 Loop，补充/运行/修复测试并提升覆盖率
+ * - deploy：部署 Loop（EAG-P4 批次 13 新增），完成 IaC 生成 + 部署执行 + 健康检查 + 烟雾测试 + G-8 门禁校验
+ *
+ * 设计依据：EAG-P4 批次 13 设计文档 §3.3.2 LoopType 扩展说明（B-10 修复）
  */
-export type LoopType = "design" | "coding" | "testing";
+export type LoopType = "design" | "coding" | "testing" | "deploy";
 
 /** LoopType 全部合法值（用于运行时枚举与测试断言） */
-export const LOOP_TYPES: ReadonlyArray<LoopType> = Object.freeze(["design", "coding", "testing"]);
+export const LOOP_TYPES: ReadonlyArray<LoopType> = Object.freeze(["design", "coding", "testing", "deploy"]);
 
 /**
  * Discovery 阶段工作模式

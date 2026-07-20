@@ -147,12 +147,12 @@ test("T5. FileChange 接口字段完整性", () => {
 // T6. LoopType 字面量联合完整性
 // ============================================================================
 
-test("T6a. LOOP_TYPES 包含 3 个 Loop", () => {
-  assert.equal(LOOP_TYPES.length, 3);
+test("T6a. LOOP_TYPES 包含 4 个 Loop（批次 13 新增 deploy）", () => {
+  assert.equal(LOOP_TYPES.length, 4);
 });
 
-test("T6b. LOOP_TYPES 顺序正确（design/coding/testing）", () => {
-  const expected: ReadonlyArray<LoopType> = ["design", "coding", "testing"];
+test("T6b. LOOP_TYPES 顺序正确（design/coding/testing/deploy）", () => {
+  const expected: ReadonlyArray<LoopType> = ["design", "coding", "testing", "deploy"];
   assert.deepEqual([...LOOP_TYPES], [...expected]);
 });
 
@@ -164,12 +164,12 @@ test("T6c. LOOP_TYPES 已冻结", () => {
 // T7. GateId 字面量联合完整性
 // ============================================================================
 
-test("T7a. GATE_IDS 包含 7 个门禁（G-1~G-7）", () => {
-  assert.equal(GATE_IDS.length, 7);
+test("T7a. GATE_IDS 包含 8 个门禁（G-1~G-8，批次 13 新增 G-8）", () => {
+  assert.equal(GATE_IDS.length, 8);
 });
 
-test("T7b. GATE_IDS 顺序正确（G-1/G-2/G-3/G-4/G-5/G-6/G-7）", () => {
-  const expected: ReadonlyArray<GateId> = ["G-1", "G-2", "G-3", "G-4", "G-5", "G-6", "G-7"];
+test("T7b. GATE_IDS 顺序正确（G-1/G-2/G-3/G-4/G-5/G-6/G-7/G-8）", () => {
+  const expected: ReadonlyArray<GateId> = ["G-1", "G-2", "G-3", "G-4", "G-5", "G-6", "G-7", "G-8"];
   assert.deepEqual([...GATE_IDS], [...expected]);
 });
 
