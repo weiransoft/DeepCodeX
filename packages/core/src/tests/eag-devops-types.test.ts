@@ -42,7 +42,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { NoOpRollbackManager } from "../eag/devops/rollback-manager";
-import { GATE_IDS, LOOP_TYPES } from "../eag/gate/gate-types";
+// 架构师审查 P2-3 修复 v1.4：LOOP_TYPES 权威来源是 loop/models.ts（gate-types.ts 仅 re-export）
+import { GATE_IDS } from "../eag/gate/gate-types";
+import { LOOP_TYPES } from "../eag/loop/models";
 import type {
   ContainerResources,
   DeployContext,
@@ -807,7 +809,9 @@ test("T17a. DeployStageOptions 接口字段完整性（含可选 rollbackManager
     },
     // rollbackManager 可选，未注入
   };
-  assert.equal(options.preDeployChecker.constructor, Object);
+  // 架构师审查 P2-4 修复 v1.4：原 assert.equal(options.preDeployChecker.constructor, Object)
+  // 不能验证接口约束，改为直接验证 check 方法存在（接口协议校验）
+  assert.equal(typeof options.preDeployChecker.check, "function");
   assert.equal(options.rollbackManager, undefined);
 });
 

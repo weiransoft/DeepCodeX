@@ -634,7 +634,8 @@ export interface GateG8Context extends GateContext {
  * 遵循 GateChecker 协议（gateId + check() 方法），但 gateId 固定为 "G-8"。
  *
  * Phase 2 在 devops/gate-g8-checker.ts 中实现 GateG8CheckerImpl 类
- * （或直接命名 GateG8Checker 类，与本接口同名但不冲突——TypeScript 允许类与接口同名）
+ * （架构师审查 P2-1 修复 v1.4：推荐接口与实现类不同名以避免声明合并混淆，
+ *  实现类命名为 GateG8CheckerImpl；TypeScript 虽允许类与接口同名（会产生声明合并），但不推荐使用）
  */
 export interface GateG8Checker {
   /** 门禁 ID（固定为 "G-8"） */
