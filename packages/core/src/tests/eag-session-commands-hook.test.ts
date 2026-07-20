@@ -1820,3 +1820,132 @@ test("N8. 未注入 devopsOrchestrator 时 SessionManager 正常构造（向后�
   const internal = manager as any;
   assert.equal(internal.devopsOrchestrator, undefined, "未注入时 devopsOrchestrator 应为 undefined");
 });
+
+test("N9. handleEagDeployCommand 编排异常时通知错误并标记 failed（P1-3 修复）", async () => {
+  // 验证 handleEagDeployCommand 步骤 4 的 catch 块（session.ts L3111-L3134）：
+  // devopsOrchestrator.run() 抛异常 → 通知用户错误，更新 session 状态为 failed
+  // P1-3 修复（架构师审查）：补充编排异常路径测试覆盖
+  const messages: string[] = [];
+  // 构造抛异常的 fakeOrchestrator（真实 Error，非 mock 框架，与既有 F19 模式一致）
+  const fakeOrchestrator = {
+    run: () => Promise.reject(new Error("IaC 生成器校验失败：terraform validate 异常")),
+  } as any;
+  const manager = createTestManager((content) => messages.push(content), { devopsOrchestrator: fakeOrchestrator });
+
+  const internal = manager as any;
+  const validRequest = createMinimalDeployRequest();
+  await internal.handleEagDeployCommand(
+    "test-session-deploy-err",
+    { text: "/eag-deploy" },
+    validRequest,
+    new AbortController()
+  );
+
+  // 验证：通知消息含"编排异常"字样（实际消息格式：[EAG DEPLOY Loop] 编排异常：...）
+  // 注：消息中 "DEPLOY Loop" 与 "编排异常" 之间有 "] " 分隔，故只匹配 "编排异常"
+  assert.ok(messages.length > 0, "应发送至少一条通知消息");
+  assert.ok(
+    messages.some((m) => m.includes("编排异常")),
+    `通知消息应含"编排异常"，实际为：${messages.join("\n")}`
+  );
+  // 验证：通知消息含异常详情（IaC 生成器校验失败）
+  assert.ok(
+    messages.some((m) => m.includes("IaC 生成器校验失败")),
+    `通知消息应含异常详情，实际为：${messages.join("\n")}`
+  );
+  // 验证：通知消息含依赖组件提示（帮助用户排查）
+  assert.ok(
+    messages.some((m) => m.includes("IaCGenerator") && m.includes("GateG8Checker")),
+    `通知消息应含依赖组件提示，实际为：${messages.join("\n")}`
+  );
+  // 注：session 状态通过 updateSessionEntry 更新（从磁盘 sessions.json 读取），
+  // 测试环境未创建 session entry 时 updateSessionEntry 返回 null，故不验证 session 状态
+  // （与既有 G2/G3/H2/H3 测试模式一致，仅验证通知消息）
+});
+
+test("N10. handleEagDeployCommand 入口前 abort 时抛 AbortError（P1-4 修复）", async () => {
+  // 验证 handleEagDeployCommand 入口 abort 检查（session.ts L2966 throwIfAborted）：
+  // controller.abort() 后调用 → throwIfAborted 抛 AbortError（name === "AbortError"）
+  // P1-4 修复（架构师审查）：补充 abort 中断场景测试覆盖
+  const messages: string[] = [];
+  // fakeOrchestrator.run() 不会被调用（入口 abort 检查先抛异常）
+  // 但仍需提供占位以满足 devopsOrchestrator 注入校验
+  const fakeOrchestrator = { run: () => Promise.resolve({}) } as any;
+  const manager = createTestManager((content) => messages.push(content), { devopsOrchestrator: fakeOrchestrator });
+
+  const internal = manager as any;
+  const controller = new AbortController();
+  controller.abort();
+
+  // 验证：入口 throwIfAborted 抛 AbortError，且错误类型正确
+  // 实际生产环境中，该异常由 processUserInput 主循环的 catch 捕获并标记 session 为 failed
+  let caughtError: Error | null = null;
+  try {
+    await internal.handleEagDeployCommand(
+      "test-session-deploy-abort",
+      { text: "/eag-deploy" },
+      createMinimalDeployRequest(),
+      controller
+    );
+  } catch (e) {
+    caughtError = e instanceof Error ? e : new Error(String(e));
+  }
+
+  // 验证：捕获到 AbortError
+  assert.ok(caughtError !== null, "应抛出异常（AbortError）");
+  assert.equal(caughtError?.name, "AbortError", `异常 name 应为 AbortError，实际为：${caughtError?.name}`);
+  assert.ok(caughtError?.message.includes("aborted"), `异常 message 应含 aborted，实际为：${caughtError?.message}`);
+
+  // 验证：abort 路径下未发送任何 assistant 消息（异常在 updateSessionEntry 之前抛出）
+  assert.equal(messages.length, 0, "abort 路径不应发送任何 assistant 消息");
+});
+
+test("N11. handleEagDeployCommand 渲染失败时降级为简单文本（P1-1 修复）", async () => {
+  // 验证 handleEagDeployCommand 步骤 5 的 try-catch（session.ts L3156-L3165）：
+  // DevOpsResult 字段异常导致 renderDevOpsResult 抛错 → 降级为简单文本摘要
+  // P1-1 修复（架构师审查）：渲染失败不阻塞 session 状态更新
+  const messages: string[] = [];
+  // 构造一个返回字段不完整 DevOpsResult 的 fakeOrchestrator
+  // - gateResult 缺失（renderDevOpsResult 访问 result.gateResult.passed 会抛错）
+  // - iacTemplates 元素缺少 hash 字段（renderDevOpsResult 访问 t.hash.slice 会抛错）
+  // 验证：渲染失败时降级为简单文本，session 状态仍正确更新
+  const incompleteResult = Object.freeze({
+    success: true,
+    runId: "deploy-run-render-err",
+    startedAt: "2026-07-20T10:00:00.000Z",
+    finishedAt: "2026-07-20T10:02:30.000Z",
+    duration: 150000,
+    iacTemplates: Object.freeze([
+      Object.freeze({ type: "helm-chart", filePath: "/tmp/Chart.yaml" }), // 缺少 hash 字段
+    ]),
+    // 故意省略 gateResult 字段，触发 renderDevOpsResult 抛错
+    errors: Object.freeze([]),
+  }) as DevOpsResult;
+  const fakeOrchestrator = {
+    run: () => Promise.resolve(incompleteResult),
+  } as any;
+  const manager = createTestManager((content) => messages.push(content), { devopsOrchestrator: fakeOrchestrator });
+
+  const internal = manager as any;
+  await internal.handleEagDeployCommand(
+    "test-session-deploy-render-err",
+    { text: "/eag-deploy" },
+    createMinimalDeployRequest(),
+    new AbortController()
+  );
+
+  // 验证：通知消息含降级文本（"结果渲染失败"）
+  assert.ok(messages.length > 0, "应发送至少一条通知消息");
+  assert.ok(
+    messages.some((m) => m.includes("结果渲染失败")),
+    `通知消息应含"结果渲染失败"字样，实际为：${messages.join("\n")}`
+  );
+  // 验证：降级文本含最终状态与 runId
+  assert.ok(
+    messages.some((m) => m.includes("最终状态: 成功") && m.includes("deploy-run-render-err")),
+    `降级文本应含最终状态与 runId，实际为：${messages.join("\n")}`
+  );
+  // 注：session 状态通过 updateSessionEntry 更新（从磁盘 sessions.json 读取），
+  // 测试环境未创建 session entry 时 updateSessionEntry 返回 null，故不验证 session 状态
+  // （与既有 G2/G3/H2/H3 测试模式一致，仅验证通知消息）
+});

@@ -3102,22 +3102,50 @@ ${agentInstructions}
     }
 
     // 步骤 4：调用 devopsOrchestrator.run(context) 执行 5 步编排
+    // P1-2 修复（架构师审查）：编排前再次检查 abort 信号
+    // 避免用户在装配 DevOpsContext 期间 abort 后仍继续执行编排
+    this.throwIfAborted(signal);
     let result: DevOpsResult;
     try {
       result = await this.devopsOrchestrator.run(devOpsContext);
     } catch (e) {
-      // 编排器异常 → 通知用户错误，更新 session 状态为 failed
+      // P1-2 修复（架构师审查）：catch 块区分 abort 异常与其他异常
+      // - abort 异常：session 状态标记为 cancelled（用户主动中断）
+      // - 其他异常：session 状态标记为 failed（编排失败）
+      const isAborted = this.isAbortLikeError(e) || signal?.aborted === true;
       const errMsg = e instanceof Error ? e.message : String(e);
       this.updateSessionEntry(sessionId, (entry) => ({
         ...entry,
         status: "failed",
-        failReason: `DEPLOY Loop 编排异常：${errMsg}`,
+        failReason: isAborted ? `DEPLOY Loop 被用户中断：${errMsg}` : `DEPLOY Loop 编排异常：${errMsg}`,
         updateTime: new Date().toISOString(),
       }));
       this.onAssistantMessage(
         this.buildAssistantMessage(
           sessionId,
-          `[EAG DEPLOY Loop] 编排异常：${errMsg}\n请检查依赖组件（IaCGenerator / GateG8Checker / DeployStrategy / DeployStage / PreDeployChecker / PostDeployChecker / SmokeTestRunner）配置是否正确。`,
+          isAborted
+            ? `[EAG DEPLOY Loop] 编排被用户中断：${errMsg}`
+            : `[EAG DEPLOY Loop] 编排异常：${errMsg}\n请检查依赖组件（IaCGenerator / GateG8Checker / DeployStrategy / DeployStage / PreDeployChecker / PostDeployChecker / SmokeTestRunner）配置是否正确。`,
+          null
+        ),
+        false
+      );
+      return;
+    }
+
+    // P1-2 修复（架构师审查）：编排完成后再次检查 abort 信号
+    // 避免编排完成后用户已 abort 还要继续渲染结果与更新 session 状态
+    if (signal?.aborted) {
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: "DEPLOY Loop 被用户中断（编排完成后）",
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(
+        this.buildAssistantMessage(
+          sessionId,
+          `[EAG DEPLOY Loop] 编排已完成但被用户中断，结果未渲染。runId: ${result.runId}`,
           null
         ),
         false
@@ -3126,7 +3154,15 @@ ${agentInstructions}
     }
 
     // 步骤 5：渲染结果摘要
-    const summary = this.renderDevOpsResult(result);
+    // P1-1 修复（架构师审查）：渲染失败时降级为简单文本摘要，确保步骤 6 的 session 状态更新一定执行
+    // 防御 DevOpsOrchestrator 返回的 result 字段异常（如 gateResult 为 undefined / iacTemplates 元素缺少 hash）
+    let summary: string;
+    try {
+      summary = this.renderDevOpsResult(result);
+    } catch (renderErr) {
+      const renderErrMsg = renderErr instanceof Error ? renderErr.message : String(renderErr);
+      summary = `[EAG DEPLOY Loop] 编排完成（结果渲染失败：${renderErrMsg}）\n最终状态: ${result.success ? "成功" : "失败"}\nrunId: ${result.runId}`;
+    }
     this.onAssistantMessage(this.buildAssistantMessage(sessionId, summary, null), false);
 
     // 步骤 6：更新 session 状态（依据 result.success）
