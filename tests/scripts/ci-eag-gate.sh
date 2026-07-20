@@ -6,7 +6,7 @@
 #   EAG 专属 CI 门禁，包含 4 步检查：
 #   1. fixtures 完整性校验（落地遗留 L-5：validateTcsFixtures() 纳入 CI）
 #   2. EAG 静态扫描（tsc --noEmit --strict）
-#   3. EAG 集成测试（批次 9/10/11/12 集成测试）
+#   3. EAG 集成测试（批次 9/10/11/12/13 集成测试）
 #   4. 全量回归测试（packages/core 全部单元测试）
 #
 # 退出码：
@@ -115,13 +115,15 @@ log "✅ EAG 静态扫描通过"
 # ---------- Step 3: EAG 集成测试 ----------
 log "Step 3: EAG 集成测试"
 
-# 按顺序调用批次 9/10/11/12 集成测试脚本（仅当脚本存在时）
+# 按顺序调用批次 9/10/11/12/13 集成测试脚本（仅当脚本存在时）
 # 设计文档 §5.6 示例仅包含 batch10/11/12，此处加入 batch9（L-6 闭环）
+# batch13 纳入 CI 门禁（EAG-P4 批次 13 收尾同步，对齐批次 12 收尾时纳入 batch12 的演进原则）
 for script in \
   eag-batch9-integration.sh \
   eag-batch10-integration.sh \
   eag-batch11-integration.sh \
-  eag-batch12-integration.sh; do
+  eag-batch12-integration.sh \
+  eag-batch13-integration.sh; do
 
   if [ -f "${SCRIPT_DIR}/${script}" ]; then
     log "运行 ${script}..."
