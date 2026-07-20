@@ -82,6 +82,11 @@ export class PreDeployCheckerImpl implements PreDeployChecker {
    * @returns 检查结果（含 4 项校验状态 + failures 失败项列表）
    */
   public async check(context: PreDeployCheckContext): Promise<PreDeployCheckResult> {
+    // P1-2 修复：environment 字段在批次 13 中未参与校验逻辑
+    // 批次 13 的 4 项校验（镜像/配置/依赖/配额）均不区分环境，environment 仅作为上下文元数据
+    // 批次 14 扩展计划：按环境路由到不同 registry 校验镜像 / 按环境应用不同配额策略
+    void context.environment;
+
     // 收集全部失败项（非短路求值，便于用户一次性修复）
     const failures: string[] = [];
 

@@ -373,6 +373,22 @@ test("T9b. 多个 deployedResources 时不影响校验", async () => {
   }
 });
 
+test("T9c. P1-1 修复：deployedResources 含 Failed 资源时 podsReady=false（预校验快速失败）", async () => {
+  const checker = new PostDeployCheckerImpl();
+  // 构造含 Failed 状态资源的 deployedResources（P1-1 修复：预校验快速失败）
+  const failedResources: ReadonlyArray<DeployedResource> = [
+    { kind: "Pod", name: "test-app-pod-0", namespace: "test-app", status: "Running" },
+    { kind: "Pod", name: "test-app-pod-1", namespace: "test-app", status: "Failed" },
+  ];
+  // 不修改 PATH，即使 kubectl 可用，预校验也会直接返回 false
+  const result = await checker.check(createContext({ deployedResources: failedResources }));
+  // P1-1 修复：deployedResources 含 Failed 资源时，podsReady 应为 false（预校验快速失败）
+  assert.equal(result.podsReady, false, "deployedResources 含 Failed 资源时 podsReady 应为 false");
+  // failures 应含 Pod 相关错误
+  const failuresStr = result.failures.join(" ");
+  assert.ok(failuresStr.includes("Pod"), `failures 应含"Pod"，实际：${failuresStr}`);
+});
+
 // ============================================================================
 // T10. 真实 CLI 调用（CLI 存在时）
 // ============================================================================
