@@ -594,13 +594,18 @@ export interface DevOpsResult {
  *
  * 继承 GateContext，扩展 DEPLOY Loop 退出门禁所需的字段。
  *
- * G-8 门禁校验 6 项部署就绪条件（对齐设计文档 §3.6）：
- * 1. IaC 模板校验通过（terraform validate / kubectl dry-run / helm lint）
- * 2. 部署成功（DeployResult.success=true）
- * 3. 健康检查通过（HealthCheckResult.healthy=true）
- * 4. 烟雾测试通过（SmokeTestResult.passed=true）
- * 5. 监控就绪（monitoringReady=true）
- * 6. 回滚预案存在（rollbackPlanExists=true）
+ * G-8 门禁校验 5 项部署就绪条件（对齐设计文档 §3.6 L2590）：
+ * 1. IaC 模板完整性（iacTemplates 数组非空，length > 0）
+ * 2. 健康检查就绪（HealthCheckResult.healthy=true）
+ * 3. 烟雾测试通过（SmokeTestResult.passed=true）
+ * 4. 监控就绪（monitoringReady=true，批次 13 暂固定为 true，批次 14 实现）
+ * 5. 回滚预案存在（rollbackPlanExists=true，批次 13 暂固定为 true，批次 14 实现）
+ *
+ * 说明：
+ * - IaC 模板的 CLI 校验（terraform validate / kubectl dry-run / helm lint）由
+ *   DevOpsOrchestrator 在 G-8 之前独立执行（设计文档 §3.5），G-8 仅校验模板完整性
+ * - DeployResult.success 不在 G-8 检查项中：部署失败会直接触发回滚（由 DeployStage 处理），
+ *   不会进入 G-8 门禁（G-8 是部署成功后的运行期数据门禁）
  *
  * 字段说明：
  * - loopType：固定为 "deploy"
