@@ -182,3 +182,37 @@ export { SmokeTestRunnerImpl } from "../deploy/smoke-test-runner";
  * M-1 修复：从 PostDeployCheckResult.endpoints 提取健康端点
  */
 export { DeployStageImpl } from "../deploy/deploy-stage";
+
+// ============================================================================
+// 角色编排器导出（Phase 6 D1-1，1 个编排器类）
+// ============================================================================
+
+/**
+ * DevOpsOrchestrator —— DevOps 第 6 角色编排器实现
+ *
+ * 编排 5 步流程：
+ * 1. 发射 devops-started 事件
+ * 2. 生成 IaC 模板（并行调用多个生成器）
+ * 3. 校验 IaC 模板（并行校验）
+ * 4. 委托 DeployStage.execute() 执行 4 步阶段（pre-deploy → deploy → post-deploy → smoke-test）
+ * 5. 调用 GateG8Checker 校验部署就绪状态，发射 devops-completed 事件
+ *
+ * 失败处理：任一步骤失败时发射 devops-failed 事件并提前返回
+ *
+ * B-4 修复：DevOpsOrchestrator 与 DeployStage 职责边界明确
+ * - DevOpsOrchestrator：角色编排器（IaC 生成 + 校验 + 委托 + G-8 门禁 + 事件发射）
+ * - DeployStage：阶段编排器（4 步阶段 + 失败时触发 RollbackManager）
+ *
+ * N-M-1 修复：DevOpsOrchestratorOptions 仅保留 DevOpsOrchestrator 自身使用的字段
+ * （iacGenerators / gateG8Checker / deployStrategy / deployStage / eventEmitter）
+ * PreDeployChecker / PostDeployChecker / SmokeTestRunner / RollbackManager 由 DeployStageOptions 持有
+ *
+ * N-M-4 修复：失败时仍从 deployStageResult.healthEndpoints 构造 healthCheckResult
+ *
+ * M-1/M-2 修复：healthCheckResult.endpoints 从 deployStageResult.healthEndpoints 填充
+ *
+ * M-5 修复：IaC 生成器并行调用（Promise.all）
+ *
+ * M-10 修复：duration 直接用毫秒相减，避免 ISO 字符串 parse 误差
+ */
+export { DevOpsOrchestrator } from "./devops-orchestrator";
