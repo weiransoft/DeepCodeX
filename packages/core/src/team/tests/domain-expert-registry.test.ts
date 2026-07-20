@@ -404,6 +404,53 @@ test("loadAll 二次调用全部命中缓存", async () => {
   assert.equal(loadCount, 8, "二次调用全部命中缓存，loader 不再被调用");
 });
 
+// P3-2 修复验证：loadAll 使用 Promise.allSettled 收集所有失败原因
+test("loadAll：P3-2 修复验证 - 部分类别失败时收集所有失败原因（Promise.allSettled）", async () => {
+  const buildSuccessLoader = () => () => Promise.resolve({ register: () => {} });
+  const buildFailLoader = (errorMsg: string) => () => Promise.reject(new Error(errorMsg));
+
+  const registry = new DomainExpertRegistry(undefined, {
+    product: buildSuccessLoader(),
+    "project-management": buildFailLoader("PM 加载失败"),
+    strategy: buildSuccessLoader(),
+    support: buildFailLoader("Support 加载失败"),
+    specialized: buildSuccessLoader(),
+    academic: buildSuccessLoader(),
+    marketing: buildSuccessLoader(),
+    sales: buildSuccessLoader(),
+  });
+
+  // P3-2 修复后：loadAll 应抛出 AggregateError，包含所有失败详情
+  await assert.rejects(
+    () => registry.loadAll(),
+    (err: unknown) => {
+      assert.ok(err instanceof AggregateError, "应抛出 AggregateError");
+      const aggErr = err as AggregateError;
+      // 应包含 2 个失败原因（project-management 和 support）
+      assert.equal(aggErr.errors.length, 2, "应收集 2 个失败原因");
+      const errorMessages = aggErr.errors.map((e: Error) => e.message);
+      assert.ok(
+        errorMessages.some((m: string) => m.includes("PM 加载失败")),
+        "应包含 PM 加载失败"
+      );
+      assert.ok(
+        errorMessages.some((m: string) => m.includes("Support 加载失败")),
+        "应包含 Support 加载失败"
+      );
+      return true;
+    }
+  );
+
+  // 验证成功类别已加载（Promise.allSettled 不短路，成功类别继续执行）
+  assert.ok(registry.listLoadedCategories().includes("product"), "成功类别 product 应已加载");
+  assert.ok(registry.listLoadedCategories().includes("strategy"), "成功类别 strategy 应已加载");
+  assert.ok(
+    !registry.listLoadedCategories().includes("project-management"),
+    "失败类别 project-management 不应标记为已加载"
+  );
+  assert.ok(!registry.listLoadedCategories().includes("support"), "失败类别 support 不应标记为已加载");
+});
+
 test("register 防御性：expertId 不符合 regex 时抛错", () => {
   const registry = new DomainExpertRegistry();
   // 通过 Object.defineProperty 绕过 schema 校验，构造非法 expertId

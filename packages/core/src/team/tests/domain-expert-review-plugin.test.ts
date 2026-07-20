@@ -870,6 +870,42 @@ test("before：phase=8 时也正常工作", async () => {
 });
 
 // ============================================================================
+// 第八部分补充：P2-2 修复验证测试（matches 条件 4 简化）
+// ============================================================================
+
+test("matches：P2-2 修复验证 - domainTags 非空时返回 true（title/description 长度不检查）", () => {
+  const registry = new DomainExpertRegistry();
+  const matcher = new DomainExpertMatcher(registry);
+  const plugin = new DomainExpertReviewPlugin(registry, matcher, makeTeamConfig());
+  // TaskRequirement schema 保证 title ≥3 字符 / description ≥10 字符，因此总是非空
+  // P2-2 修复后：只检查 domainTags.length > 0，不检查 title/description
+  const ctx = makeCtx({
+    currentPhase: 2,
+    task: makeTask({
+      title: "合法标题", // ≥3 字符
+      description: "合法描述内容（≥10 字符）", // ≥10 字符
+      domainTags: ["金融"], // 非空 domainTags
+    }),
+  });
+  assert.equal(plugin.matches(ctx), true, "domainTags 非空时应返回 true（P2-2 修复后行为）");
+});
+
+test("matches：P2-2 修复验证 - domainTags 为空时返回 false（即使 title/description 非空）", () => {
+  const registry = new DomainExpertRegistry();
+  const matcher = new DomainExpertMatcher(registry);
+  const plugin = new DomainExpertReviewPlugin(registry, matcher, makeTeamConfig());
+  const ctx = makeCtx({
+    currentPhase: 2,
+    task: makeTask({
+      title: "合法标题",
+      description: "合法描述内容（≥10 字符）",
+      domainTags: [], // 空 domainTags
+    }),
+  });
+  assert.equal(plugin.matches(ctx), false, "domainTags 为空时应返回 false（P2-2 修复后行为）");
+});
+
+// ============================================================================
 // 第九部分：execute() 钩子（10 个测试）
 // ============================================================================
 
@@ -1259,6 +1295,59 @@ test("execute：LLM 不返回 usage 时 tokensConsumed 降级为 0（兼容自�
   assert.equal(result.tokensConsumed.prompt, 0);
   assert.equal(result.tokensConsumed.completion, 0);
   assert.equal(result.tokensConsumed.total, 0);
+});
+
+// P3-1 修复验证：matchedRole 根据 currentPhase 动态选择
+test("execute：P3-1 修复验证 - currentPhase=2 时 matchedRole.roleId='architect'", async () => {
+  const registry = new DomainExpertRegistry();
+  const matcher = new DomainExpertMatcher(registry);
+  const validResponse = JSON.stringify({
+    opinion: "合法长度 review 意见内容测试。",
+    confidence: 0.85,
+    keyPoints: [],
+    risks: [],
+    recommendations: [],
+  });
+  const plugin = new DomainExpertReviewPlugin(registry, matcher, makeTeamConfig(), {
+    injectedClient: buildInjectedClient(validResponse),
+  });
+  const candidate = buildMatchResult();
+  const ctx = makeCtx({
+    currentPhase: 2, // 阶段 2（架构设计）
+    state: { [_internals.STATE_KEY_CANDIDATES]: [candidate] },
+  });
+
+  const result = await plugin.execute(ctx);
+  assert.equal(result.status, "succeeded");
+  // P3-1 修复后：currentPhase=2 应使用 "architect" 而非硬编码 "solo-coder"
+  assert.equal(result.matchedRole.roleId, "architect", "阶段 2 应使用 architect（P3-1 修复后行为）");
+  assert.ok(result.matchedRole.roleName.includes("architect"), "roleName 应包含 architect");
+});
+
+test("execute：P3-1 修复验证 - currentPhase=8 时 matchedRole.roleId='test-expert'", async () => {
+  const registry = new DomainExpertRegistry();
+  const matcher = new DomainExpertMatcher(registry);
+  const validResponse = JSON.stringify({
+    opinion: "合法长度 review 意见内容测试。",
+    confidence: 0.85,
+    keyPoints: [],
+    risks: [],
+    recommendations: [],
+  });
+  const plugin = new DomainExpertReviewPlugin(registry, matcher, makeTeamConfig(), {
+    injectedClient: buildInjectedClient(validResponse),
+  });
+  const candidate = buildMatchResult();
+  const ctx = makeCtx({
+    currentPhase: 8, // 阶段 8（发布评审）
+    state: { [_internals.STATE_KEY_CANDIDATES]: [candidate] },
+  });
+
+  const result = await plugin.execute(ctx);
+  assert.equal(result.status, "succeeded");
+  // P3-1 修复后：currentPhase=8 应使用 "test-expert" 而非硬编码 "solo-coder"
+  assert.equal(result.matchedRole.roleId, "test-expert", "阶段 8 应使用 test-expert（P3-1 修复后行为）");
+  assert.ok(result.matchedRole.roleName.includes("test-expert"), "roleName 应包含 test-expert");
 });
 
 // ============================================================================
@@ -1894,7 +1983,7 @@ test("综合场景：医疗任务匹配医疗专家并完成 review", async () =
   assert.ok(result.output?.includes("医疗合规专家"));
 });
 
-test("综合场景：空 domainTags 任务仍可触发 review（依赖 title/description 文本匹配）", async () => {
+test("综合场景：空 domainTags 任务不触发 review（P2-2 修复后行为）", async () => {
   const registry = new DomainExpertRegistry();
   registry.register(
     buildExpert({
@@ -1924,10 +2013,12 @@ test("综合场景：空 domainTags 任务仍可触发 review（依赖 title/des
     }),
   });
 
-  assert.equal(plugin.matches(ctx), true); // title 非空，匹配条件 4 通过
-  await plugin.before(ctx);
-  const candidates = ctx.state[_internals.STATE_KEY_CANDIDATES] as ReadonlyArray<DomainExpertMatchResult>;
-  assert.ok(candidates.length > 0);
+  // P2-2 修复后：空 domainTags 任务不再触发 review（matches 返回 false）
+  assert.equal(plugin.matches(ctx), false, "空 domainTags 任务不应触发 review（P2-2 修复后行为）");
+  // before 不应被调用（matches=false 时 dispatcher 不触发 before）
+  // 因此 candidates 应为 undefined（state 未设置）
+  const candidates = ctx.state[_internals.STATE_KEY_CANDIDATES] as ReadonlyArray<DomainExpertMatchResult> | undefined;
+  assert.equal(candidates, undefined, "matches=false 时 before 不应被调用，state 中无候选");
 });
 
 test("综合场景：phase=8 触发时汇总报告写入 upstreamContext 供下游消费", async () => {

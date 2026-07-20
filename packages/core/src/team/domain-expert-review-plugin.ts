@@ -367,9 +367,10 @@ export class DomainExpertReviewPlugin extends BasePlugin {
     }
 
     // 条件 4：任务包含业务信号（避免空任务无意义调用）
-    const hasDomainSignal =
-      ctx.task.domainTags.length > 0 || ctx.task.title.length > 0 || ctx.task.description.length > 0;
-    if (!hasDomainSignal) {
+    // P2-2 修复：简化逻辑，TaskRequirement schema 已保证 title ≥3 字符 / description ≥10 字符，
+    //           因此 title.length > 0 和 description.length > 0 总是为 true，无需检查。
+    //           只需检查 domainTags 是否非空（避免无业务标签的任务触发专家 review）。
+    if (ctx.task.domainTags.length === 0) {
       return false;
     }
 
@@ -516,12 +517,16 @@ export class DomainExpertReviewPlugin extends BasePlugin {
 
     // 构建 V3 契约 DispatchResult（dispatcher 消费）
     const status: DispatchStatus = opinions.length > 0 ? "succeeded" : "failed";
+    // P3-1 修复：根据 currentPhase 动态选择 roleId，避免硬编码 "solo-coder"
+    // 阶段 2（架构设计）→ "architect"，阶段 8（发布评审）→ "test-expert"
+    // 其他阶段（不应到达，matches 已过滤）→ "solo-coder" 兜底
+    const matchedRoleId = ctx.currentPhase === 2 ? "architect" : ctx.currentPhase === 8 ? "test-expert" : "solo-coder";
     const dispatchResultV3: DispatchResult = {
       taskId: ctx.task.taskId,
       dispatchId: ctx.dispatch.dispatchId,
       matchedRole: {
-        roleId: "solo-coder",
-        roleName: "领域专家 review",
+        roleId: matchedRoleId,
+        roleName: `领域专家 review（${matchedRoleId}）`,
         confidence: opinions.length > 0 ? opinions[0].confidence : 0,
         matchedCapabilities: [],
         matchedSkills: [],
@@ -701,6 +706,7 @@ export class DomainExpertReviewPlugin extends BasePlugin {
       // 注意：某些自定义 OpenAI 兼容端点可能不返回 usage，需做防御性检查
       usage = response.usage as { prompt_tokens: number; completion_tokens: number; total_tokens: number } | undefined;
     } catch (e) {
+      // P1-1 修复：catch 块中也要清理 timer，避免 parseExpertResponse 抛错时 timer 泄漏
       clearTimeout(timer);
       // 区分超时和其他错误
       const isTimeout = e instanceof Error && e.name === "AbortError";
@@ -710,11 +716,13 @@ export class DomainExpertReviewPlugin extends BasePlugin {
         isTimeout ? `LLM 调用超时（${timeoutMs}ms）` : `LLM 调用失败：${e instanceof Error ? e.message : String(e)}`,
         e instanceof Error ? e : undefined
       );
+    } finally {
+      // P1-1 修复：无论成功/失败/异常，都确保 timer 被清理
+      // 防止 parseExpertResponse 在 try 块外抛错时 timer 泄漏
+      clearTimeout(timer);
     }
 
-    clearTimeout(timer);
-
-    // 步骤 5：解析响应为 ExpertOpinion
+    // 步骤 5：解析响应为 ExpertOpinion（P1-1 修复后：此步骤在 finally 块外，timer 已确保清理）
     const opinion = parseExpertResponse(content, candidate);
 
     // 步骤 6：构造返回值（含 token 用量）

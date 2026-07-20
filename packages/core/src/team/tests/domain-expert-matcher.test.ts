@@ -220,6 +220,27 @@ test("computeKeywordOverlap：单字符中文关键词", () => {
   assert.equal(score, 1.0);
 });
 
+// P2-1 修复验证：中英文混合关键词拆分匹配
+test("computeKeywordOverlap：P2-1 修复验证 - 中英文混合关键词（如'金融 finance'）拆分匹配", () => {
+  // 修复前：混合词"金融 finance"会被视为英文关键词走 tokenSet.has(lowerKw)，但 tokenSet 不包含混合词，导致无法命中
+  // 修复后：混合词拆分为中文部分"金融"和英文部分"finance"，任一命中即算命中
+  const score1 = _internals.computeKeywordOverlap("金融场景", ["金融 finance"]);
+  // 中文部分"金融"在文本中出现 → 命中 1/1
+  assert.equal(score1, 1.0, "中文部分命中应算命中（P2-1 修复后行为）");
+
+  const score2 = _internals.computeKeywordOverlap("finance scenario", ["金融 finance"]);
+  // 英文部分"finance"在 tokenSet 中 → 命中 1/1
+  assert.equal(score2, 1.0, "英文部分命中应算命中（P2-1 修复后行为）");
+
+  const score3 = _internals.computeKeywordOverlap("金融 finance 风控", ["金融 finance"]);
+  // 中文部分"金融"命中（或英文部分"finance"命中）→ 命中 1/1
+  assert.equal(score3, 1.0, "中英文混合关键词应命中（P2-1 修复后行为）");
+
+  const score4 = _internals.computeKeywordOverlap("医疗 审计", ["金融 finance"]);
+  // 中文部分"金融"不在文本中，英文部分"finance"不在 tokenSet 中 → 未命中 0/1
+  assert.equal(score4, 0.0, "中文和英文部分都未命中时应返回 0");
+});
+
 // ============================================================================
 // 第三部分：computeCapabilityMatch（F1 分数，8 个测试）
 // ============================================================================

@@ -394,10 +394,17 @@ export class DomainExpertRegistry {
   /**
    * 全量加载（一次性加载所有 8 个类别）
    *
-   * 使用 Promise.all 并行加载多个类别，每个类别内部仍走 ensureLoaded 的 in-flight 保护
+   * 使用 Promise.allSettled 并行加载多个类别，每个类别内部仍走 ensureLoaded 的 in-flight 保护
+   *
+   * P3-2 修复：原实现使用 Promise.all，当任一类别加载失败时其他类别继续执行（不短路），
+   *            可能导致部分类别已注册但 loadAll 抛错，状态不一致。
+   *            修复后使用 Promise.allSettled，收集所有失败原因后统一抛出，
+   *            确保调用方能获知完整的失败信息。
    *
    * 性能基准（设计文档 §4.3）：
-   *   - 并发 8 类别同时加载：≤ 200ms（Promise.all 并行）
+   *   - 并发 8 类别同时加载：≤ 200ms（Promise.allSettled 并行）
+   *
+   * @throws {AggregateError} 当任一类别加载失败时，收集所有失败原因统一抛出
    */
   async loadAll(): Promise<void> {
     const allCategories: DomainCategory[] = [
@@ -410,7 +417,28 @@ export class DomainExpertRegistry {
       "marketing",
       "sales",
     ];
-    await Promise.all(allCategories.map((c) => this.ensureLoaded(c)));
+    // P3-2 修复：使用 Promise.allSettled 收集所有结果（成功/失败）
+    const results = await Promise.allSettled(allCategories.map((c) => this.ensureLoaded(c)));
+
+    // 收集所有失败原因
+    const failures: { category: DomainCategory; reason: string }[] = [];
+    results.forEach((result, index) => {
+      if (result.status === "rejected") {
+        const category = allCategories[index];
+        const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+        failures.push({ category, reason });
+      }
+    });
+
+    // 若有失败，统一抛出 AggregateError（包含所有失败详情）
+    if (failures.length > 0) {
+      const errorMessage = failures.map((f) => `${f.category}: ${f.reason}`).join("; ");
+      const aggregateError = new AggregateError(
+        failures.map((f) => new Error(`${f.category}: ${f.reason}`)),
+        `loadAll 失败：${failures.length}/${allCategories.length} 个类别加载失败 - ${errorMessage}`
+      );
+      throw aggregateError;
+    }
   }
 
   /**

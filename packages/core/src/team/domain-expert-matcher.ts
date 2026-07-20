@@ -42,6 +42,16 @@ import {
 import { createOpenAIClient } from "../common/openai-client.js";
 import type { DomainExpertRegistry } from "./domain-expert-registry.js";
 
+/**
+ * 浮点数比较精度阈值（P1-2 修复）
+ *
+ * 问题：原实现使用 Math.abs(scoreDiff) < 0.01 判断分数接近，
+ *       当 confidence 差值恰好为 0.005 时会错误触发 priority 兜底，导致排序不稳定。
+ * 修复：使用 Number.EPSILON（约 2.22e-16）作为精确比较阈值，
+ *       确保只有真正相等的浮点数才触发 priority 兜底。
+ */
+const FLOAT_COMPARE_EPSILON = Number.EPSILON;
+
 // ============================================================================
 // 第一部分：评分权重配置（v1.1 P1-3 4 维加权）
 // ============================================================================
@@ -132,6 +142,11 @@ export const AIDomainExpertMatchResponse = z.object({
  *
  * 算法：命中关键词数 / 关键词总数
  *
+ * P2-1 修复：中英文混合关键词（如"金融 finance"）拆分为中文和英文部分分别匹配
+ *            原实现将混合词视为英文关键词走 tokenSet.has(lowerKw) 路径，
+ *            但 tokenSet 只包含英文单词和单字中文字符，导致混合词无法命中。
+ *            修复后：混合词拆分为中文部分和英文部分，任一命中即算命中。
+ *
  * @param text 任务文本
  * @param keywords 专家关键词列表
  * @returns 重叠度 [0, 1]
@@ -148,10 +163,30 @@ function computeKeywordOverlap(text: string, keywords: ReadonlyArray<string>): n
   let hitCount = 0;
   for (const kw of keywords) {
     const lowerKw = kw.toLowerCase();
-    if (lowerKw.length > 1 && /[a-z0-9]/.test(lowerKw)) {
+    // 检测是否为纯英文关键词（长度 >1 且包含字母/数字）
+    const isPureEnglish = lowerKw.length > 1 && /^[a-z0-9+#.-]+$/.test(lowerKw);
+    if (isPureEnglish) {
+      // 纯英文：走 tokenSet 精确匹配
       if (tokenSet.has(lowerKw)) hitCount++;
     } else {
-      if (normalized.includes(lowerKw)) hitCount++;
+      // 中文或中英文混合：拆分为中文部分和英文部分分别匹配
+      const chinesePart = lowerKw.match(/[\u4e00-\u9fff]+/g)?.join("") ?? "";
+      const englishPart = lowerKw.match(/[a-z0-9+#.-]+/g)?.join("") ?? "";
+
+      let matched = false;
+      // 中文部分：检查是否在文本中出现（includes 匹配）
+      if (chinesePart.length > 0 && normalized.includes(chinesePart)) {
+        matched = true;
+      }
+      // 英文部分：检查是否在 tokenSet 中（精确匹配）
+      if (!matched && englishPart.length > 0 && tokenSet.has(englishPart)) {
+        matched = true;
+      }
+      // 单字符中文关键词：走 includes 逻辑（兼容原实现）
+      if (!matched && lowerKw.length === 1 && /[\u4e00-\u9fff]/.test(lowerKw)) {
+        if (normalized.includes(lowerKw)) matched = true;
+      }
+      if (matched) hitCount++;
     }
   }
   return hitCount / keywords.length;
@@ -460,9 +495,10 @@ async function matchByDomainHybrid(
   });
 
   // 步骤 2：keyword 排序（confidence 降序，priority 兜底）
+  // P1-2 修复：使用 FLOAT_COMPARE_EPSILON 替代 0.01，避免浮点数精度问题导致排序不稳定
   keywordScored.sort((a, b) => {
     const scoreDiff = b.confidence - a.confidence;
-    if (Math.abs(scoreDiff) < 0.01) {
+    if (Math.abs(scoreDiff) < FLOAT_COMPARE_EPSILON) {
       return b.expert.priority - a.expert.priority;
     }
     return scoreDiff;
@@ -714,9 +750,10 @@ export class DomainExpertMatcher {
     });
 
     // 排序：confidence 降序，priority 兜底
+    // P1-2 修复：使用 FLOAT_COMPARE_EPSILON 替代 0.01，避免浮点数精度问题
     scored.sort((a, b) => {
       const diff = b.confidence - a.confidence;
-      if (Math.abs(diff) < 0.01) {
+      if (Math.abs(diff) < FLOAT_COMPARE_EPSILON) {
         return b.expert.priority - a.expert.priority;
       }
       return diff;
