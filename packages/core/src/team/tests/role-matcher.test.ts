@@ -23,6 +23,8 @@ function buildTask(overrides: Partial<TaskRequirement> = {}): TaskRequirement {
     priority: "medium",
     timeoutMs: 0,
     createdAt: new Date().toISOString(),
+    // v1.1 新增：测试 fixture 默认空业务标签（与 TaskRequirement schema default 对齐）
+    domainTags: [],
     ...overrides,
   };
 }

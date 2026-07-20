@@ -106,6 +106,13 @@ export const TaskRequirement = z.object({
   timeoutMs: z.number().int().nonnegative().default(0),
   // 创建时间
   createdAt: z.string().datetime(),
+  /**
+   * v1.1 新增：任务业务标签（用于 DomainExpertMatcher 匹配）
+   * - 默认空数组，向后兼容（既有 TaskRequirement 实例不受影响）
+   * - 由调用方显式填充，如 ["金融", "风控", "合规"]
+   * - DomainExpertMatcher.computeDomainTagMatch 使用 Jaccard 相似度匹配
+   */
+  domainTags: z.array(z.string().min(1)).default([]),
 });
 export type TaskRequirement = z.infer<typeof TaskRequirement>;
 
@@ -119,6 +126,13 @@ export const ScoreBreakdown = z.object({
   keyword: z.number().min(0).max(1),
   // 优先级得分（0-1）
   priority: z.number().min(0).max(1),
+  /**
+   * v1.1 新增：业务领域标签匹配得分（0-1）
+   * - DomainExpertMatcher 使用时为必填（权重 40%）
+   * - RoleMatcher 不使用此字段（保持 undefined，向后兼容）
+   * - Jaccard 相似度算法：|任务标签 ∩ 专家标签| / |任务标签 ∪ 专家标签|
+   */
+  domainTag: z.number().min(0).max(1).optional(),
   // AI 语义得分（仅 AI 增强模式有值）
   semantic: z.number().min(0).max(1).optional(),
   // AI 置信度（仅 AI 增强模式有值）
@@ -377,6 +391,238 @@ export type VisualDiffResult = z.infer<typeof VisualDiffResult>;
 export const MatchStrategy = z.enum(["keyword", "ai", "hybrid"]);
 export type MatchStrategy = z.infer<typeof MatchStrategy>;
 
+// ============================================================================
+// 第 9.5 部分：领域专家（Domain Expert，v1.1 新增）
+//
+// 设计依据：DOMAIN_EXPERT_INTEGRATION_DESIGN.md v1.1.1
+// 与 RoleDefinition 平行，不修改 RoleDefinition，向后兼容
+// 专家来源：woagent builtin-agent-templates.yml（78 角色，14 部门，纳入 30 个）
+// ============================================================================
+
+/**
+ * 领域专家类别（按业务领域分类，与 woagent 14 个部门中的 8 个纳入部门对齐）
+ *
+ * v1.1 P0-2：与 DomainCategory 对齐 woagent 实际部门结构
+ */
+export const DomainCategory = z.enum([
+  "product", // 业务需求类（对应 woagent product 部门，4 个角色）
+  "project-management", // 业务流程类（对应 woagent project_management 部门，3 个角色）
+  "strategy", // 业务战略类（对应 woagent strategy 部门，4 个角色）
+  "support", // 业务支持类（对应 woagent support 部门，4 个角色）
+  "specialized", // 专业领域类（对应 woagent specialized 部门，5 个角色）
+  "academic", // 学术领域类（对应 woagent academic 部门，4 个角色）
+  "marketing", // 营销业务类（对应 woagent marketing 部门，选择性纳入 5 个）
+  "sales", // 销售业务类（对应 woagent sales 部门，选择性纳入 1 个）
+]);
+export type DomainCategory = z.infer<typeof DomainCategory>;
+
+/**
+ * 领域专家 ID（v1.1 P1-1：强制 domain- 前缀）
+ *
+ * 设计依据：
+ *   1. RoleId enum 为 ["architect", "product-manager", "solo-coder", "test-expert", "ui-designer"]
+ *   2. woagent 中也有 product-manager / cloud-architect / data-scientist 等同名角色
+ *   3. 通过 regex 强制前缀，类型层面确保 DomainExpert 与 RoleDefinition 命名空间隔离
+ *   4. runtime 由 DomainExpertRegistry.register 再做一道校验（P1-7 三道命名冲突检测）
+ */
+export const DomainExpertId = z
+  .string()
+  .regex(/^domain-[a-z][a-z0-9-]*$/, "expertId 必须以 'domain-' 开头，后接 kebab-case 字符串");
+export type DomainExpertId = z.infer<typeof DomainExpertId>;
+
+/**
+ * 领域专家定义（业务需求/review 阶段的领域专家）
+ *
+ * v1.1 P0-2 字段对齐 RoleDefinition：
+ *   - systemPromptSuffix：与 RoleDefinition.systemPromptSuffix 对齐，支持后置约束
+ *   - priority：与 RoleDefinition.priority 对齐，用于匹配排序兜底
+ *   - mutex：互斥专家 ID 列表（如 legal-compliance 与 finance-tracker 不可同时调用）
+ *   - dependsOn：依赖专家 ID 列表（如 blockchain-security-auditor 依赖 cloud-architect）
+ *   - sourceRef：woagent 源文件角色名或 commit hash，便于追溯
+ *   - version：专家定义版本号，semver 格式
+ */
+export const DomainExpert = z.object({
+  /** 专家 ID（强制 domain- 前缀，详见 P1-1） */
+  expertId: DomainExpertId,
+  /** 中文名 */
+  name: z.string().min(1),
+  /** 英文名 */
+  nameEn: z.string().min(1),
+  /** 业务类别 */
+  category: DomainCategory,
+  /** 专长（如"价值投资"、"医疗合规"） */
+  specialty: z.string().min(1),
+  /** 描述（≥10 字符） */
+  description: z.string().min(10),
+  /**
+   * 完整 system prompt 前缀（强制注入 Karpathy 4 原则 + Ponytail 16 红线，≥50 字符）
+   * 迁移自 woagent 角色 prompt，但必须注入 KARPATHY_PREAMBLE（与 RoleDefinition 一致）
+   */
+  systemPromptPrefix: z.string().min(50),
+  /** 后置 prompt（任务执行约束，与 RoleDefinition.systemPromptSuffix 对齐） */
+  systemPromptSuffix: z.string().default(""),
+  /** 能力列表（≥3 个） */
+  capabilities: z.array(RoleCapability).min(3),
+  /** 技能列表（≥3 个） */
+  skills: z.array(RoleSkill).min(3),
+  /** 匹配关键词（≥3 个） */
+  keywords: z.array(RoleKeyword).min(3),
+  /**
+   * 业务领域标签（用于动态匹配，如 ["金融", "医疗", "零售"]，≥1 个）
+   * DomainExpertMatcher.computeDomainTagMatch 使用 Jaccard 相似度匹配
+   */
+  domainTags: z.array(z.string().min(1)).min(1),
+  /** 优先级（0-10，用于匹配排序兜底，与 RoleDefinition.priority 对齐） */
+  priority: RolePriority.default(5),
+  /** 互斥专家 ID 列表（同一任务不可同时调用，默认空） */
+  mutex: z.array(DomainExpertId).default([]),
+  /** 依赖专家 ID 列表（调用本专家前必须先调用的专家，默认空） */
+  dependsOn: z.array(DomainExpertId).default([]),
+  /** 元数据 */
+  metadata: z.object({
+    /** 颜色（hex 格式） */
+    color: z.string().regex(/^#[0-9A-Fa-f]{6}$/),
+    /** 图标（emoji 或 icon 名称） */
+    icon: z.string().min(1),
+    /** 输出格式偏好 */
+    outputFormat: z.enum(["markdown", "code", "json", "mixed"]),
+    /** 是否默认开启（在 settings.json 中可关闭） */
+    enabledByDefault: z.boolean().default(true),
+    /** 来源标记（woagent 迁移 / custom 自定义） */
+    source: z.enum(["woagent", "custom"]),
+    /** 源引用（woagent 角色名或 commit hash，便于追溯，v1.1 P0-2 新增） */
+    sourceRef: z.string().optional(),
+    /** 专家定义版本号（semver，v1.1 P0-2 新增） */
+    version: z
+      .string()
+      .regex(/^\d+\.\d+\.\d+$/)
+      .default("1.0.0"),
+  }),
+});
+export type DomainExpert = z.infer<typeof DomainExpert>;
+
+/**
+ * 领域专家匹配结果
+ *
+ * 与 MatchResult 平行，但字段指向 DomainExpert 而非 RoleDefinition
+ * v1.1 P1-NEW-4：DomainExpertReviewPlugin.execute 使用此类型构建返回值
+ */
+export const DomainExpertMatchResult = z.object({
+  /** 匹配的专家定义 */
+  expert: DomainExpert,
+  /** 综合置信度（0-1，加权求和） */
+  confidence: z.number().min(0).max(1),
+  /** 评分明细（含 domainTag 字段） */
+  scoreBreakdown: ScoreBreakdown,
+  /** 匹配策略（与 MatchStrategy 对齐） */
+  strategy: MatchStrategy,
+  /** 匹配原因（中文，可解释 AI 决策） */
+  reasons: z.array(z.string()).min(1),
+  /** 命中的能力列表 */
+  matchedCapabilities: z.array(RoleCapability).default([]),
+  /** 命中的技能列表 */
+  matchedSkills: z.array(RoleSkill).default([]),
+  /** 命中的业务标签列表 */
+  matchedDomainTags: z.array(z.string()).default([]),
+});
+export type DomainExpertMatchResult = z.infer<typeof DomainExpertMatchResult>;
+
+/**
+ * 领域专家匹配选项（与 MatchOptions 对齐，但默认值不同）
+ */
+export const DomainMatchOptions = z.object({
+  /** 匹配策略（默认 hybrid：先 keyword 取 topK*2，再用 AI 重排序） */
+  strategy: MatchStrategy.default("hybrid"),
+  /** topK 匹配数（默认 3） */
+  topK: z.number().int().positive().default(3),
+  /** AI 增强阈值（置信度低于此值时回退 keyword，默认 0.3） */
+  aiFallbackThreshold: z.number().min(0).max(1).default(0.3),
+  /** 项目根目录（用于读取 .env 中的 OpenAI API Key） */
+  projectRoot: z.string().default(process.cwd()),
+  /** 注入的 OpenAI 客户端（用于单元测试，禁止 mock） */
+  injectedClient: z.unknown().optional(),
+  /** 单次 LLM 调用超时（毫秒，默认 30000） */
+  timeoutMs: z.number().int().positive().default(30000),
+});
+export type DomainMatchOptions = z.infer<typeof DomainMatchOptions>;
+
+/**
+ * 领域专家 Matcher 构造选项
+ */
+export const DomainMatcherOptions = z.object({
+  /** 启用的业务类别（与 TeamConfig.enabledCategories 对齐，默认空） */
+  enabledCategories: z.array(DomainCategory).default([]),
+  /** 默认匹配选项（未显式指定时使用） */
+  defaultMatchOptions: DomainMatchOptions.optional(),
+});
+export type DomainMatcherOptions = z.infer<typeof DomainMatcherOptions>;
+
+/**
+ * 专家意见（DomainExpertReviewPlugin 调用 LLM 后的产出）
+ *
+ * v1.1 P1-NEW-4：用于 DomainExpertReviewPlugin.execute 构建 DomainExpertDispatchResult
+ */
+export const ExpertOpinion = z.object({
+  /** 专家 ID */
+  expertId: DomainExpertId,
+  /** 专家中文名 */
+  expertName: z.string().min(1),
+  /** review 意见（markdown 格式，含关键观点、风险、建议） */
+  opinion: z.string().min(1),
+  /** 置信度（0-1，专家对自身意见的置信度） */
+  confidence: z.number().min(0).max(1),
+  /** 关键观点（结构化摘要，便于汇总） */
+  keyPoints: z.array(z.string()).default([]),
+  /** 风险提示（专家识别的业务风险） */
+  risks: z.array(z.string()).default([]),
+  /** 建议措施（专家给出的具体建议） */
+  recommendations: z.array(z.string()).default([]),
+});
+export type ExpertOpinion = z.infer<typeof ExpertOpinion>;
+
+/**
+ * 领域专家调度结果（v1.1 P1-NEW-4：扩展 DispatchResult 支持 DomainExpert）
+ *
+ * 设计依据：DispatchResult.matchedRole 类型为 MatchResult（含 roleId: RoleId），
+ * 与 DomainExpertMatchResult.expert 类型 DomainExpert（含 expertId: DomainExpertId）不兼容。
+ * 因此新增 DomainExpertDispatchResult 类型，平行于 DispatchResult。
+ */
+export const DomainExpertDispatchResult = z.object({
+  /** 任务 ID（与 DispatchResult.taskId 对齐） */
+  taskId: z.string().uuid(),
+  /** 调度 ID（与 DispatchResult.dispatchId 对齐） */
+  dispatchId: z.string().uuid(),
+  /** 匹配的专家列表（topK，与 DispatchResult.matchedRole 区别：支持多个专家） */
+  matchedExperts: z.array(DomainExpertMatchResult),
+  /** 调度状态（与 DispatchStatus 对齐） */
+  status: DispatchStatus,
+  /** 启动时间 */
+  startedAt: z.string().datetime(),
+  /** 完成时间 */
+  completedAt: z.string().datetime().optional(),
+  /** 执行耗时（毫秒） */
+  durationMs: z.number().int().nonnegative().default(0),
+  /** 专家意见汇总（markdown 格式，由 summarizeOpinions 生成） */
+  output: z.string().optional(),
+  /** 错误信息（单个专家失败不影响其他专家，汇总错误信息） */
+  error: z.string().optional(),
+  /** 产生的工件（文件路径列表） */
+  artifacts: z.array(z.string()).default([]),
+  /** 消耗的 token 数（所有专家累计） */
+  tokensConsumed: z
+    .object({
+      prompt: z.number().int().nonnegative(),
+      completion: z.number().int().nonnegative(),
+      total: z.number().int().nonnegative(),
+    })
+    .default({ prompt: 0, completion: 0, total: 0 }),
+  /** 缓存命中情况 */
+  cacheHit: z.boolean().default(false),
+  /** 重试次数 */
+  retryCount: z.number().int().nonnegative().default(0),
+});
+export type DomainExpertDispatchResult = z.infer<typeof DomainExpertDispatchResult>;
+
 /** 多角色团队配置（settings.json 中 team.* 段） */
 export const TeamConfig = z.object({
   // 是否启用多角色（默认 true）
@@ -409,6 +655,23 @@ export const TeamConfig = z.object({
       enableSleepGuard: z.boolean().default(true),
     })
     .optional(),
+  /**
+   * v1.1 新增：是否启用领域专家（默认 false，用户显式开启）
+   * 设计依据：用户原话"动态根据业务调用，非全部静态注册"
+   */
+  enableDomainExperts: z.boolean().default(false),
+  /** v1.1 新增：领域专家匹配 topK（默认 3） */
+  domainExpertTopK: z.number().int().positive().default(3),
+  /** v1.1 新增：领域专家置信度阈值（默认 0.3） */
+  domainExpertThreshold: z.number().min(0).max(1).default(0.3),
+  /**
+   * v1.1 P1-6 新增：启用的业务类别（默认空数组，由用户显式启用）
+   * 设计依据：用户原话"动态根据业务调用，非全部静态注册"
+   * 若 enabledCategories 为空且 enableDomainExperts=true，则提示用户配置
+   */
+  enabledCategories: z.array(DomainCategory).default([]),
+  /** v1.1 新增：领域专家匹配策略（与 matchStrategy 对齐，默认 hybrid） */
+  domainExpertMatchStrategy: MatchStrategy.default("hybrid"),
 });
 export type TeamConfig = z.infer<typeof TeamConfig>;
 
@@ -434,6 +697,15 @@ export const ALL_SCHEMAS = {
   UIUXIssue,
   VisualDiffResult,
   TeamConfig,
+  // v1.1 新增：领域专家相关 schema（DOMAIN_EXPERT_INTEGRATION_DESIGN.md §3.1）
+  DomainCategory,
+  DomainExpertId,
+  DomainExpert,
+  DomainExpertMatchResult,
+  DomainMatchOptions,
+  DomainMatcherOptions,
+  ExpertOpinion,
+  DomainExpertDispatchResult,
 } as const;
 
 // ============================================================================

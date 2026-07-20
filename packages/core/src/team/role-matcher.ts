@@ -507,6 +507,8 @@ export function matchRolesSync(taskTitle: string, taskDescription: string): Matc
     priority: "medium",
     timeoutMs: 0,
     createdAt: new Date().toISOString(),
+    // v1.1 新增：同步构造路径默认空业务标签（与 TaskRequirement schema default 对齐）
+    domainTags: [],
   };
   const scored = ROLE_REGISTRY.map((role) => {
     const sb = scoreByKeyword(task, role);

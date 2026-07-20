@@ -141,6 +141,22 @@ export interface PluginContext {
       writeFile?: (path: string, content: string) => Promise<void>;
     };
   };
+
+  // === v1.1 新增：领域专家集成 ===
+  /**
+   * 当前 multi-agent-team 阶段（1-8）
+   *
+   * 设计依据：DOMAIN_EXPERT_INTEGRATION_DESIGN.md §3.4.3
+   * 用途：DomainExpertReviewPlugin.matches() 判断当前是否处于阶段 2（架构设计）
+   *       或阶段 8（发布评审），决定是否触发领域专家 review
+   *
+   * 8 阶段定义（与 multi-agent-team skill 对齐）：
+   *   1 = 需求分析 / 2 = 架构设计 / 3 = 开发规划 / 4 = 编码实现
+   *   5 = 测试验证 / 6 = 集成交付 / 7 = 部署上线 / 8 = 发布评审
+   *
+   * 向后兼容：可选字段，未设置时 DomainExpertReviewPlugin.matches() 返回 false
+   */
+  currentPhase?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 }
 
 // ============================================================================
@@ -164,6 +180,8 @@ export interface BuildContextParams {
   deadlineMs?: number;
   log?: (message: string, level?: LogLevel) => void;
   extensions?: PluginContext["extensions"];
+  /** v1.1 新增：当前 multi-agent-team 阶段（1-8），用于 DomainExpertReviewPlugin */
+  currentPhase?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 }
 
 /**
@@ -222,6 +240,7 @@ export function buildPluginContext(params: BuildContextParams): PluginContext {
     deadlineMs: params.deadlineMs ?? 0,
     log: params.log ?? internalLog,
     extensions: params.extensions ?? {},
+    currentPhase: params.currentPhase,
   };
 }
 
@@ -392,5 +411,6 @@ export function clonePluginContext(ctx: PluginContext, overrides?: Partial<Build
     deadlineMs: overrides?.deadlineMs ?? ctx.deadlineMs,
     log: overrides?.log ?? ctx.log,
     extensions: overrides?.extensions ?? ctx.extensions,
+    currentPhase: overrides?.currentPhase ?? ctx.currentPhase,
   });
 }

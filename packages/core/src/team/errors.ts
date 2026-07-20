@@ -58,6 +58,13 @@ export const ErrorCode = {
   // 配置相关
   CONFIG_INVALID: "CONFIG_INVALID",
   CONFIG_FILE_NOT_FOUND: "CONFIG_FILE_NOT_FOUND",
+  // v1.1 新增：领域专家相关
+  DOMAIN_EXPERT_ALREADY_REGISTERED: "DOMAIN_EXPERT_ALREADY_REGISTERED",
+  DOMAIN_EXPERT_ROLE_ID_COLLISION: "DOMAIN_EXPERT_ROLE_ID_COLLISION",
+  DOMAIN_EXPERT_CATEGORY_UNKNOWN: "DOMAIN_EXPERT_CATEGORY_UNKNOWN",
+  DOMAIN_EXPERT_NOT_FOUND: "DOMAIN_EXPERT_NOT_FOUND",
+  // v1.1 Phase 5 新增：领域专家 review 插件调用相关
+  EXPERT_INVOCATION_FAILED: "EXPERT_INVOCATION_FAILED",
 } as const;
 export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];
 
@@ -417,5 +424,128 @@ export class ConfigFileNotFoundError extends TeamError {
   constructor(path: string) {
     super(ErrorCode.CONFIG_FILE_NOT_FOUND, `配置文件不存在：${path}`, { context: { path } });
     this.name = "ConfigFileNotFoundError";
+  }
+}
+
+// ============================================================================
+// 第十部分：领域专家错误（v1.1 新增）
+//
+// 设计依据：DOMAIN_EXPERT_INTEGRATION_DESIGN.md §3.2 P1-7 命名冲突检测增强
+// 错误类继承 TeamError（与项目惯例一致），同时保留设计文档要求的字段
+// ============================================================================
+
+/**
+ * 领域专家已注册错误
+ *
+ * 触发场景：DomainExpertRegistry.register 时 expertId 已存在
+ * 设计文档 §3.2 P1-7：register() 三道校验中的"自身重复"校验
+ */
+export class DomainExpertAlreadyRegisteredError extends TeamError {
+  /** 已注册的专家 ID */
+  readonly expertId: string;
+  constructor(expertId: string) {
+    super(ErrorCode.DOMAIN_EXPERT_ALREADY_REGISTERED, `领域专家已注册：${expertId}`, {
+      context: { expertId },
+    });
+    this.name = "DomainExpertAlreadyRegisteredError";
+    this.expertId = expertId;
+  }
+}
+
+/**
+ * 领域专家与角色 ID 命名冲突错误
+ *
+ * 触发场景：DomainExpertRegistry.register 时 expertId 去 domain- 前缀后与 RoleId 冲突
+ * 设计文档 §3.2 P1-7：register() 三道校验中的"跨系统冲突"校验
+ *
+ * 示例：expertId="domain-architect" 去 domain- 前缀后为 "architect"，与 RoleId="architect" 冲突
+ */
+export class DomainExpertRoleIdCollisionError extends TeamError {
+  /** 触发冲突的专家 ID */
+  readonly expertId: string;
+  /** 被冲突的角色 ID */
+  readonly collisionRoleId: string;
+  constructor(expertId: string, collisionRoleId: string) {
+    super(
+      ErrorCode.DOMAIN_EXPERT_ROLE_ID_COLLISION,
+      `领域专家 ID "${expertId}" 与角色 ID "${collisionRoleId}" 命名冲突（去 domain- 前缀后相同）`,
+      { context: { expertId, collisionRoleId } }
+    );
+    this.name = "DomainExpertRoleIdCollisionError";
+    this.expertId = expertId;
+    this.collisionRoleId = collisionRoleId;
+  }
+}
+
+/**
+ * 未知领域专家类别错误
+ *
+ * 触发场景：DomainExpertRegistry.ensureLoaded 接收到未知 category
+ * 设计文档 §4.3 loadByCategoryInternal：未在 moduleMap 中的类别
+ */
+export class DomainExpertCategoryUnknownError extends TeamError {
+  /** 未知类别名称 */
+  readonly category: string;
+  constructor(category: string) {
+    super(ErrorCode.DOMAIN_EXPERT_CATEGORY_UNKNOWN, `未知的领域专家类别：${category}`, {
+      context: { category },
+    });
+    this.name = "DomainExpertCategoryUnknownError";
+    this.category = category;
+  }
+}
+
+/**
+ * 领域专家未找到错误
+ *
+ * 触发场景：DomainExpertRegistry.unregister/getExpert 操作不存在的 expertId
+ * 注：getExpert 返回 undefined 而不抛错；unregister 返回 false 而不抛错
+ *     此错误类用于 registerAll 等批量操作中的内部失败场景
+ */
+export class DomainExpertNotFoundError extends TeamError {
+  /** 未找到的专家 ID */
+  readonly expertId: string;
+  constructor(expertId: string) {
+    super(ErrorCode.DOMAIN_EXPERT_NOT_FOUND, `领域专家未找到：${expertId}`, {
+      context: { expertId },
+    });
+    this.name = "DomainExpertNotFoundError";
+    this.expertId = expertId;
+  }
+}
+
+// ============================================================================
+// 第十一部分：领域专家 review 插件错误（v1.1 Phase 5 新增）
+//
+// 设计依据：DOMAIN_EXPERT_INTEGRATION_DESIGN.md §3.4.3 DomainExpertReviewPlugin
+// 触发场景：invokeExpertLLM 调用 LLM 失败（超时 / 网络错误 / 响应解析失败）
+// 异常处理：由 execute() 的 Promise.allSettled 捕获，单个专家失败不影响其他专家
+// ============================================================================
+
+/**
+ * 领域专家调用失败错误
+ *
+ * 触发场景（invokeExpertLLM 内部）：
+ *   1. LLM 客户端不可用（无 API Key）
+ *   2. LLM 调用超时（超过 expertTimeoutMs）
+ *   3. LLM 响应解析失败（非 JSON / schema 校验不通过）
+ *   4. LLM 返回空内容
+ *
+ * 设计：继承 TeamError，携带 expertId / phase / reason 三个字段
+ *       便于 dispatcher 在 Promise.allSettled rejection 中聚合错误信息
+ */
+export class ExpertInvocationError extends TeamError {
+  /** 触发失败的专家 ID */
+  readonly expertId: string;
+  /** 触发阶段（timeout / network / parse / empty / no-client） */
+  readonly phase: string;
+  constructor(expertId: string, phase: string, reason: string, cause?: Error) {
+    super(ErrorCode.EXPERT_INVOCATION_FAILED, `领域专家调用失败：${expertId}（阶段：${phase}，原因：${reason}）`, {
+      cause,
+      context: { expertId, phase, reason },
+    });
+    this.name = "ExpertInvocationError";
+    this.expertId = expertId;
+    this.phase = phase;
   }
 }

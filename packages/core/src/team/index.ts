@@ -41,6 +41,15 @@ export type {
   VisualDiffResult,
   MatchStrategy,
   TeamConfig,
+  // v1.1 新增：领域专家相关类型
+  DomainCategory,
+  DomainExpert,
+  DomainExpertId,
+  DomainExpertMatchResult,
+  DomainMatchOptions,
+  DomainMatcherOptions,
+  ExpertOpinion,
+  DomainExpertDispatchResult,
 } from "./types.js";
 
 // ============================================================================
@@ -104,6 +113,13 @@ export {
   RoleMatchInvalidError,
   ConfigInvalidError,
   ConfigFileNotFoundError,
+  // v1.1 新增：领域专家错误
+  DomainExpertAlreadyRegisteredError,
+  DomainExpertRoleIdCollisionError,
+  DomainExpertCategoryUnknownError,
+  DomainExpertNotFoundError,
+  // v1.1 Phase 5 新增：领域专家 review 插件错误
+  ExpertInvocationError,
 } from "./errors.js";
 export type { ErrorInfo } from "./errors.js";
 
@@ -223,6 +239,29 @@ export {
   ResumePlugin,
   CancelPlugin,
 } from "./plugins/index.js";
+
+// ============================================================================
+// 第十一部分补充：领域专家 review 插件（v1.1 Phase 5 新增）
+// ============================================================================
+
+export { DomainExpertReviewPlugin } from "./domain-expert-review-plugin.js";
+export type { DomainExpertReviewPluginOptions } from "./domain-expert-review-plugin.js";
+
+// ============================================================================
+// 第十一部分补充2：领域专家注册中心 + 匹配器 + 8 类专家注册（v1.1 Phase 2-4 新增）
+// ============================================================================
+
+export { DomainExpertRegistry } from "./domain-expert-registry.js";
+export type { RoleRegistryAdapter } from "./domain-expert-registry.js";
+export {
+  DomainExpertMatcher,
+  DOMAIN_MATCH_WEIGHTS,
+  DOMAIN_AI_MATCH_WEIGHTS,
+  DomainMatchOptionsSchema,
+  AIDomainExpertMatchRequest,
+  AIDomainExpertMatchResponse,
+} from "./domain-expert-matcher.js";
+export { registerAllExperts, EXPECTED_TOTAL_EXPERTS, ALL_DOMAIN_CATEGORIES } from "./domain-experts/index.js";
 
 // GoalState, BatchResult 是 type-only，重新导出时需要 export type
 export type { GoalState, BatchResult } from "./plugins/index.js";

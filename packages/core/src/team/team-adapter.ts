@@ -83,6 +83,8 @@ export function buildTask(params: {
   upstreamContext?: Record<string, unknown>;
   priority?: "low" | "medium" | "high" | "critical";
   timeoutMs?: number;
+  /** v1.1 新增：业务领域标签（可选，默认空数组，用于 DomainExpertMatcher 匹配） */
+  domainTags?: string[];
 }): TaskRequirement {
   return {
     taskId: crypto.randomUUID(),
@@ -96,6 +98,8 @@ export function buildTask(params: {
     priority: params.priority ?? "medium",
     timeoutMs: params.timeoutMs ?? 0,
     createdAt: new Date().toISOString(),
+    // v1.1 新增：业务领域标签默认空数组（与 TaskRequirement schema default 对齐）
+    domainTags: params.domainTags ?? [],
   };
 }
 

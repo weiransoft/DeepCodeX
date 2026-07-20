@@ -40,6 +40,8 @@ function makeTask(): TaskRequirement {
     priority: "medium",
     timeoutMs: 0,
     createdAt: new Date().toISOString(),
+    // v1.1 新增：测试 fixture 默认空业务标签
+    domainTags: [],
   };
 }
 
