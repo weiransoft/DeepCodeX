@@ -20,7 +20,8 @@
  *
  * 失败处理：
  * - 任一步骤失败时收集错误，根据是否已部署决定是否回滚
- * - 回滚仅触发一次（避免重复回滚）
+ * - 回滚仅触发一次（每个失败分支立即 return 保证流程顺序执行，避免重复回滚）
+ * - rollbackExecuted 标志位仅用于在返回结果中汇报"是否触发了回滚"，不参与控制流判断
  * - 回滚失败时把回滚错误追加到 errors
  *
  * 不可变优先（§5.12.4 G-A6d）：
@@ -132,7 +133,8 @@ export class DeployStageImpl implements DeployStage {
    * 失败处理策略：
    * - pre-deploy 失败：不触发回滚（尚未部署任何资源）
    * - deploy / post-deploy / smoke-test 失败：如果 rollbackManager 存在且快照创建成功，触发回滚
-   * - 回滚仅触发一次（通过 rollbackExecuted 标志位避免重复回滚）
+   * - 回滚仅触发一次（每个失败分支立即 return 保证流程顺序执行）
+   * - rollbackExecuted 标志位仅记录"是否触发了回滚"，供调用方 DevOpsOrchestrator 判断
    * - 回滚失败时把回滚错误追加到 errors（不阻塞返回结果）
    *
    * @param context DevOps 编排上下文（提供 projectName / environment / image / smokeTestCases 等）
@@ -168,7 +170,28 @@ export class DeployStageImpl implements DeployStage {
       image: context.iacGenerationContext.image, // 镜像来源（与 IaC 生成器一致）
       iacTemplates,
     };
-    const preDeployResult: PreDeployCheckResult = await this.options.preDeployChecker.check(preDeployContext);
+    // P1-1 修复：pre-deploy 检查可能因 docker/kubectl CLI 不可用等原因抛异常
+    // 抛异常时与 passed=false 同等处理（不触发回滚，直接返回）
+    // 与 Step 2/3/4 的异常处理对称（保持 4 步编排的异常处理一致性）
+    let preDeployResult: PreDeployCheckResult;
+    try {
+      preDeployResult = await this.options.preDeployChecker.check(preDeployContext);
+    } catch (err) {
+      // pre-deploy 抛异常：尚未部署任何资源，不触发回滚，直接返回
+      const errMsg = err instanceof Error ? err.message : String(err);
+      errors.push(`部署前检查异常：${errMsg}`);
+      return this.buildResult(
+        false,
+        false, // preDeployPassed = false（异常视为未通过）
+        deployResult,
+        false, // postDeployPassed = false（未执行到 post-deploy）
+        smokeTestResult,
+        healthEndpoints,
+        rollbackExecuted,
+        rollbackResult,
+        errors
+      );
+    }
     preDeployPassed = preDeployResult.passed;
     if (!preDeployPassed) {
       // pre-deploy 失败：尚未部署任何资源，不触发回滚，直接返回
@@ -216,12 +239,18 @@ export class DeployStageImpl implements DeployStage {
       if (!deployResult.success) {
         errors.push(...deployResult.errors);
         // deploy 失败：触发回滚（如果 rollbackManager 存在且快照创建成功）
+        // P1-2 修复：rollback() 调用用 try/catch 包裹，与异常路径保持一致
+        // rollback() 可能因 kubectl/helm CLI 不可用、权限不足等原因抛异常
         if (this.options.rollbackManager && snapshot) {
-          const rbResult = await this.options.rollbackManager.rollback(snapshot);
-          rollbackExecuted = true;
-          rollbackResult = rbResult;
-          if (!rbResult.success) {
-            errors.push(`回滚失败：${rbResult.errors.join("；")}`);
+          try {
+            const rbResult = await this.options.rollbackManager.rollback(snapshot);
+            rollbackExecuted = true;
+            rollbackResult = rbResult;
+            if (!rbResult.success) {
+              errors.push(`回滚失败：${rbResult.errors.join("；")}`);
+            }
+          } catch (rbErr) {
+            errors.push(`回滚执行异常：${rbErr instanceof Error ? rbErr.message : String(rbErr)}`);
           }
         }
         return this.buildResult(
@@ -317,12 +346,17 @@ export class DeployStageImpl implements DeployStage {
     if (!postDeployPassed) {
       errors.push(...postDeployResult.failures);
       // post-deploy 失败：触发回滚（如果 rollbackManager 存在且快照创建成功）
+      // P1-2 修复：rollback() 调用用 try/catch 包裹，与异常路径保持一致
       if (this.options.rollbackManager && snapshot) {
-        const rbResult = await this.options.rollbackManager.rollback(snapshot);
-        rollbackExecuted = true;
-        rollbackResult = rbResult;
-        if (!rbResult.success) {
-          errors.push(`回滚失败：${rbResult.errors.join("；")}`);
+        try {
+          const rbResult = await this.options.rollbackManager.rollback(snapshot);
+          rollbackExecuted = true;
+          rollbackResult = rbResult;
+          if (!rbResult.success) {
+            errors.push(`回滚失败：${rbResult.errors.join("；")}`);
+          }
+        } catch (rbErr) {
+          errors.push(`回滚执行异常：${rbErr instanceof Error ? rbErr.message : String(rbErr)}`);
         }
       }
       return this.buildResult(
@@ -347,12 +381,17 @@ export class DeployStageImpl implements DeployStage {
       if (!smokeTestResult.passed) {
         errors.push(`烟雾测试未通过（${smokeTestResult.failedTests}/${smokeTestResult.totalTests} 失败）`);
         // smoke-test 失败：触发回滚（如果 rollbackManager 存在且快照创建成功）
+        // P1-2 修复：rollback() 调用用 try/catch 包裹，与异常路径保持一致
         if (this.options.rollbackManager && snapshot) {
-          const rbResult = await this.options.rollbackManager.rollback(snapshot);
-          rollbackExecuted = true;
-          rollbackResult = rbResult;
-          if (!rbResult.success) {
-            errors.push(`回滚失败：${rbResult.errors.join("；")}`);
+          try {
+            const rbResult = await this.options.rollbackManager.rollback(snapshot);
+            rollbackExecuted = true;
+            rollbackResult = rbResult;
+            if (!rbResult.success) {
+              errors.push(`回滚失败：${rbResult.errors.join("；")}`);
+            }
+          } catch (rbErr) {
+            errors.push(`回滚执行异常：${rbErr instanceof Error ? rbErr.message : String(rbErr)}`);
           }
         }
         return this.buildResult(

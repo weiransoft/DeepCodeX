@@ -43,6 +43,13 @@
  *   - T10b. post-deploy 抛异常时 success=false
  *   - T10c. smoke-test 抛异常时 success=false
  *   - T10d. deploy 抛异常 + rollbackManager 存在时触发回滚
+ *   - T10e. pre-deploy 抛异常时 success=false 且不触发回滚（P1-1 修复验证）
+ *   - T10f. deploy 失败 + rollback() 抛异常时 errors 含回滚执行异常（P1-2 修复验证）
+ *   - T10g. post-deploy 失败 + rollback() 抛异常时 errors 含回滚执行异常（P1-2 修复验证）
+ *   - T10h. smoke-test 失败 + rollback() 抛异常时 errors 含回滚执行异常（P1-2 修复验证）
+ * - T11. 快照创建失败场景（P2-4 验证）
+ *   - T11a. 快照创建失败时不阻塞部署，errors 含"版本快照创建失败"
+ *   - T11b. 快照创建失败 + deploy 失败时不触发回滚（snapshot 为 undefined）
  *
  * 测试约定（遵循项目规则）：
  * - 使用 node:test + node:assert/strict
@@ -76,6 +83,7 @@ import type {
   SmokeTestRunner,
   SmokeTestCase,
   SmokeTestResult,
+  SmokeTestFailure,
   RollbackManager,
   RollbackSnapshotContext,
   RollbackSnapshot,
@@ -159,6 +167,9 @@ class AlwaysPassPostDeployChecker implements PostDeployChecker {
  *
  * 实现 PostDeployChecker 接口，check() 始终返回 passed=false。
  * 用于测试 DeployStage 的 Step 3 失败场景。
+ *
+ * P2-1 修复：返回非空 endpoints（含 1 个不健康的端点），用于真正验证 M-1 修复
+ * （从 PostDeployCheckResult.endpoints 提取健康端点）的填充逻辑。
  */
 class AlwaysFailPostDeployChecker implements PostDeployChecker {
   async check(_context: PostDeployCheckContext): Promise<PostDeployCheckResult> {
@@ -169,7 +180,15 @@ class AlwaysFailPostDeployChecker implements PostDeployChecker {
       serviceEndpointReachable: true,
       logsClean: true,
       metricsReporting: true,
-      endpoints: Object.freeze([]) as ReadonlyArray<HealthEndpoint>,
+      // P2-1 修复：返回非空 endpoints，验证 M-1 修复的填充逻辑
+      endpoints: Object.freeze([
+        Object.freeze({
+          url: "http://test-app.example.com/healthz",
+          statusCode: 503,
+          responseTimeMs: 100,
+          healthy: false, // 失败场景下端点不健康
+        }) as HealthEndpoint,
+      ]) as ReadonlyArray<HealthEndpoint>,
       failures: Object.freeze(["Pod 未就绪"]) as ReadonlyArray<string>,
     }) as PostDeployCheckResult;
   }
@@ -204,7 +223,7 @@ class AlwaysPassSmokeTestRunner implements SmokeTestRunner {
       passedTests: 1,
       failedTests: 0,
       duration: 100,
-      failures: Object.freeze([]) as ReadonlyArray<unknown> as ReadonlyArray<never>,
+      failures: Object.freeze([]) as ReadonlyArray<SmokeTestFailure>,
     }) as SmokeTestResult;
   }
 }
@@ -226,13 +245,13 @@ class AlwaysFailSmokeTestRunner implements SmokeTestRunner {
       failedTests: 1,
       duration: 100,
       failures: Object.freeze([
-        {
+        Object.freeze({
           testName: "T1",
           expected: "HTTP 200",
           actual: "HTTP 500",
           errorMessage: "内部错误",
-        },
-      ]) as ReadonlyArray<unknown> as ReadonlyArray<never>,
+        }) as SmokeTestFailure,
+      ]) as ReadonlyArray<SmokeTestFailure>,
     }) as SmokeTestResult;
   }
 }
@@ -328,6 +347,77 @@ class TrackingRollbackManager implements RollbackManager {
       version: "v1.0.0",
       resources: Object.freeze(["Deployment/test-app", "Service/test-app-service"]) as ReadonlyArray<string>,
     }) as RollbackSnapshot;
+  }
+
+  async rollback(_snapshot: RollbackSnapshot): Promise<RollbackResult> {
+    void _snapshot;
+    this.rollbackCallCount++;
+    return Object.freeze({
+      success: true,
+      rolledBackTo: "v0.9.0",
+      duration: 2000,
+      errors: Object.freeze([]) as ReadonlyArray<string>,
+    }) as RollbackResult;
+  }
+}
+
+/**
+ * ThrowingPreDeployChecker —— 抛出异常的 PreDeployChecker 测试替身
+ *
+ * 实现 PreDeployChecker 接口，check() 始终抛出异常。
+ * 用于测试 DeployStage 的 Step 1 异常处理场景（验证 P1-1 修复）。
+ */
+class ThrowingPreDeployChecker implements PreDeployChecker {
+  async check(_context: PreDeployCheckContext): Promise<PreDeployCheckResult> {
+    void _context;
+    throw new Error("PreDeployChecker 模拟异常");
+  }
+}
+
+/**
+ * ThrowingRollbackManager —— rollback() 抛异常的 RollbackManager 测试替身
+ *
+ * 实现 RollbackManager 接口，createSnapshot() 正常返回，rollback() 始终抛出异常。
+ * 用于测试 DeployStage 的回滚异常处理（验证 P1-2 修复：3 个非异常失败路径中
+ * rollback() 调用用 try/catch 包裹，异常不传播到 execute() 调用方）。
+ */
+class ThrowingRollbackManager implements RollbackManager {
+  public createSnapshotCallCount = 0;
+  public rollbackCallCount = 0;
+
+  async createSnapshot(_context: RollbackSnapshotContext): Promise<RollbackSnapshot> {
+    void _context;
+    this.createSnapshotCallCount++;
+    return Object.freeze({
+      snapshotId: `snap-${Date.now()}`,
+      createdAt: new Date().toISOString(),
+      version: "v1.0.0",
+      resources: Object.freeze(["Deployment/test-app", "Service/test-app-service"]) as ReadonlyArray<string>,
+    }) as RollbackSnapshot;
+  }
+
+  async rollback(_snapshot: RollbackSnapshot): Promise<RollbackResult> {
+    void _snapshot;
+    this.rollbackCallCount++;
+    throw new Error("RollbackManager.rollback 模拟异常");
+  }
+}
+
+/**
+ * ThrowingSnapshotRollbackManager —— createSnapshot() 抛异常的 RollbackManager 测试替身
+ *
+ * 实现 RollbackManager 接口，createSnapshot() 始终抛出异常，rollback() 正常返回。
+ * 用于测试 DeployStage 的快照创建失败场景（快照失败不阻塞部署，但 errors 含错误信息，
+ * 且后续 deploy/post-deploy/smoke-test 失败时不触发回滚，因为 snapshot 为 undefined）。
+ */
+class ThrowingSnapshotRollbackManager implements RollbackManager {
+  public createSnapshotCallCount = 0;
+  public rollbackCallCount = 0;
+
+  async createSnapshot(_context: RollbackSnapshotContext): Promise<RollbackSnapshot> {
+    void _context;
+    this.createSnapshotCallCount++;
+    throw new Error("RollbackManager.createSnapshot 模拟异常");
   }
 
   async rollback(_snapshot: RollbackSnapshot): Promise<RollbackResult> {
@@ -541,12 +631,15 @@ test("T5b. post-deploy 失败时 postDeployPassed=false", async () => {
   assert.equal(result.postDeployPassed, false);
 });
 
-test("T5c. post-deploy 失败时 healthEndpoints 已填充（B-2 修复）", async () => {
+test("T5c. post-deploy 失败时 healthEndpoints 已填充（B-2 修复 + M-1 修复）", async () => {
   const stage = new DeployStageImpl(createOptions({ postDeployChecker: new AlwaysFailPostDeployChecker() }));
   const result = await stage.execute(createContext(), createIacTemplates(), new SuccessDeployStrategy());
   // B-2 修复：即使 post-deploy 失败，healthEndpoints 也应从 PostDeployCheckResult.endpoints 填充
-  // AlwaysFailPostDeployChecker 返回空 endpoints 数组，验证字段存在即可
+  // P2-1 修复：AlwaysFailPostDeployChecker 返回 1 个非空 endpoint，真正验证 M-1 修复填充逻辑
   assert.ok(Array.isArray(result.healthEndpoints));
+  assert.equal(result.healthEndpoints.length, 1, "healthEndpoints 应含 1 个端点（M-1 修复填充）");
+  assert.equal(result.healthEndpoints[0].url, "http://test-app.example.com/healthz");
+  assert.equal(result.healthEndpoints[0].healthy, false, "失败场景下端点应不健康");
 });
 
 // ============================================================================
@@ -695,4 +788,112 @@ test("T10d. deploy 抛异常 + rollbackManager 存在时触发回滚", async () 
   const result = await stage.execute(createContext(), createIacTemplates(), new ThrowingDeployStrategy());
   assert.equal(result.rollbackExecuted, true);
   assert.equal(rollbackManager.rollbackCallCount, 1);
+});
+
+// ============================================================================
+// T10e~T10h. P1 修复验证场景（架构师审查 P1-1 + P1-2 修复）
+// ============================================================================
+
+test("T10e. pre-deploy 抛异常时 success=false 且不触发回滚（P1-1 修复）", async () => {
+  const rollbackManager = new TrackingRollbackManager();
+  const stage = new DeployStageImpl(
+    createOptions({
+      preDeployChecker: new ThrowingPreDeployChecker(),
+      rollbackManager,
+    })
+  );
+  const result = await stage.execute(createContext(), createIacTemplates(), new SuccessDeployStrategy());
+  // P1-1 修复：pre-deploy 抛异常与 passed=false 同等处理（不触发回滚，直接返回）
+  assert.equal(result.success, false, "pre-deploy 抛异常时 success 应为 false");
+  assert.equal(result.preDeployPassed, false, "pre-deploy 抛异常时 preDeployPassed 应为 false");
+  assert.equal(result.rollbackExecuted, false, "pre-deploy 抛异常时不触发回滚");
+  assert.equal(rollbackManager.rollbackCallCount, 0, "rollback() 不应被调用");
+  assert.equal(rollbackManager.createSnapshotCallCount, 0, "createSnapshot() 不应被调用");
+  // 异常信息应收集到 errors
+  const errorsStr = result.errors.join(" ");
+  assert.ok(errorsStr.includes("部署前检查异常"), `errors 应含"部署前检查异常"，实际：${errorsStr}`);
+  assert.ok(errorsStr.includes("PreDeployChecker 模拟异常"), `errors 应含原始异常信息，实际：${errorsStr}`);
+});
+
+test("T10f. deploy 失败 + rollback() 抛异常时 success=false 且 errors 含回滚执行异常（P1-2 修复）", async () => {
+  const rollbackManager = new ThrowingRollbackManager();
+  const stage = new DeployStageImpl(createOptions({ rollbackManager }));
+  const result = await stage.execute(createContext(), createIacTemplates(), new FailureDeployStrategy());
+  // P1-2 修复：非异常失败路径中 rollback() 用 try/catch 包裹，异常不传播
+  assert.equal(result.success, false, "deploy 失败时 success 应为 false");
+  assert.equal(rollbackManager.createSnapshotCallCount, 1, "createSnapshot 应被调用 1 次");
+  assert.equal(rollbackManager.rollbackCallCount, 1, "rollback 应被调用 1 次");
+  // errors 应同时含部署错误和回滚执行异常
+  const errorsStr = result.errors.join(" ");
+  assert.ok(errorsStr.includes("部署超时"), `errors 应含"部署超时"，实际：${errorsStr}`);
+  assert.ok(errorsStr.includes("回滚执行异常"), `errors 应含"回滚执行异常"，实际：${errorsStr}`);
+  assert.ok(errorsStr.includes("RollbackManager.rollback 模拟异常"), `errors 应含回滚异常原始信息，实际：${errorsStr}`);
+});
+
+test("T10g. post-deploy 失败 + rollback() 抛异常时 success=false 且 errors 含回滚执行异常（P1-2 修复）", async () => {
+  const rollbackManager = new ThrowingRollbackManager();
+  const stage = new DeployStageImpl(
+    createOptions({
+      postDeployChecker: new AlwaysFailPostDeployChecker(),
+      rollbackManager,
+    })
+  );
+  const result = await stage.execute(createContext(), createIacTemplates(), new SuccessDeployStrategy());
+  // P1-2 修复：post-deploy 非异常失败路径中 rollback() 用 try/catch 包裹
+  assert.equal(result.success, false, "post-deploy 失败时 success 应为 false");
+  assert.equal(rollbackManager.rollbackCallCount, 1, "rollback 应被调用 1 次");
+  const errorsStr = result.errors.join(" ");
+  assert.ok(errorsStr.includes("Pod 未就绪"), `errors 应含"Pod 未就绪"，实际：${errorsStr}`);
+  assert.ok(errorsStr.includes("回滚执行异常"), `errors 应含"回滚执行异常"，实际：${errorsStr}`);
+});
+
+test("T10h. smoke-test 失败 + rollback() 抛异常时 success=false 且 errors 含回滚执行异常（P1-2 修复）", async () => {
+  const rollbackManager = new ThrowingRollbackManager();
+  const stage = new DeployStageImpl(
+    createOptions({
+      smokeTestRunner: new AlwaysFailSmokeTestRunner(),
+      rollbackManager,
+    })
+  );
+  const result = await stage.execute(createContext(), createIacTemplates(), new SuccessDeployStrategy());
+  // P1-2 修复：smoke-test 非异常失败路径中 rollback() 用 try/catch 包裹
+  assert.equal(result.success, false, "smoke-test 失败时 success 应为 false");
+  assert.equal(rollbackManager.rollbackCallCount, 1, "rollback 应被调用 1 次");
+  const errorsStr = result.errors.join(" ");
+  assert.ok(errorsStr.includes("烟雾测试"), `errors 应含"烟雾测试"，实际：${errorsStr}`);
+  assert.ok(errorsStr.includes("回滚执行异常"), `errors 应含"回滚执行异常"，实际：${errorsStr}`);
+});
+
+// ============================================================================
+// T11. 快照创建失败场景（P2-4 验证）
+// ============================================================================
+
+test("T11a. 快照创建失败时不阻塞部署，errors 含'版本快照创建失败'（P2-4 验证）", async () => {
+  const rollbackManager = new ThrowingSnapshotRollbackManager();
+  const stage = new DeployStageImpl(createOptions({ rollbackManager }));
+  const result = await stage.execute(createContext(), createIacTemplates(), new SuccessDeployStrategy());
+  // P2-4 验证：快照创建失败不阻塞部署，4 步全部成功
+  assert.equal(result.success, true, "快照创建失败不阻塞部署，4 步全部成功");
+  assert.equal(rollbackManager.createSnapshotCallCount, 1, "createSnapshot 应被调用 1 次");
+  assert.equal(rollbackManager.rollbackCallCount, 0, "4 步全部成功时 rollback 不应被调用");
+  // errors 应含快照创建失败错误
+  const errorsStr = result.errors.join(" ");
+  assert.ok(errorsStr.includes("版本快照创建失败"), `errors 应含"版本快照创建失败"，实际：${errorsStr}`);
+  assert.ok(errorsStr.includes("createSnapshot 模拟异常"), `errors 应含快照异常原始信息，实际：${errorsStr}`);
+  // rollbackExecuted=false（快照未创建成功，即使后续失败也不会回滚）
+  assert.equal(result.rollbackExecuted, false, "快照创建失败时 rollbackExecuted 应为 false");
+});
+
+test("T11b. 快照创建失败 + deploy 失败时不触发回滚（snapshot 为 undefined）", async () => {
+  const rollbackManager = new ThrowingSnapshotRollbackManager();
+  const stage = new DeployStageImpl(createOptions({ rollbackManager }));
+  const result = await stage.execute(createContext(), createIacTemplates(), new FailureDeployStrategy());
+  // 快照创建失败 → snapshot 为 undefined → deploy 失败时不触发回滚
+  assert.equal(result.success, false, "deploy 失败时 success 应为 false");
+  assert.equal(result.rollbackExecuted, false, "snapshot 为 undefined 时不触发回滚");
+  assert.equal(rollbackManager.rollbackCallCount, 0, "rollback 不应被调用（snapshot 为 undefined）");
+  // errors 同时含快照创建失败和部署超时
+  const errorsStr = result.errors.join(" ");
+  assert.ok(errorsStr.includes("版本快照创建失败"), `errors 应含"版本快照创建失败"，实际：${errorsStr}`);
+  assert.ok(errorsStr.includes("部署超时"), `errors 应含"部署超时"，实际：${errorsStr}`);
 });

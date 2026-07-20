@@ -149,7 +149,7 @@ export { PreDeployCheckerImpl } from "../deploy/pre-deploy-checker";
 export { PostDeployCheckerImpl } from "../deploy/post-deploy-checker";
 
 /**
- * SmokeTestRunnerImpl —— 烟雾测试执行器实现（Phase 4 D2-4 补全）
+ * SmokeTestRunnerImpl —— 烟雾测试执行器实现（Phase 5 D2-4）
  *
  * 按 endpoints × testCases 笛卡尔积执行真实 HTTP 请求，验证部署后端点可用性：
  * - 使用 node:http / node:https 发起真实 HTTP 请求（根据 URL 协议自动选择）

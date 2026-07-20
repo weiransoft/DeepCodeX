@@ -1,5 +1,5 @@
 /**
- * EAG-P4 批次 13 Phase 4 单元测试：SmokeTestRunnerImpl（D2-4 补全）
+ * EAG-P4 批次 13 Phase 5 单元测试：SmokeTestRunnerImpl（D2-4）
  *
  * 测试范围（对齐设计文档 §6.2.1 D2-4 SmokeTestRunner 覆盖率 ≥ 85%）：
  * - T1. 实例化与接口契约
@@ -24,6 +24,13 @@
  *   - T8a. SmokeTestResult 已冻结
  *   - T8b. failures 已冻结
  *   - T8c. SmokeTestFailure 已冻结
+ * - T9. 多个 endpoints × 多个 testCases 笛卡尔积
+ *   - T9a. 2×2 笛卡尔积正确执行
+ * - T10. URL 解析失败场景
+ *   - T10a. URL 协议不支持时 passed=false
+ * - T11. HTTP 请求超时与响应流错误场景（P2-2 / P2-6 修复验证）
+ *   - T11a. HTTP 请求超时时 passed=false 且 failures 含 timeout 错误
+ *   - T11b. HTTP 响应流错误时 passed=false 且 failures 含响应流错误
  *
  * 测试约定（遵循项目规则）：
  * - 使用 node:test + node:assert/strict
@@ -425,4 +432,116 @@ test("T10a. URL 解析失败时 passed=false", async () => {
     failure.expected.includes("http") || failure.errorMessage.includes("协议"),
     `expected 或 errorMessage 应含协议信息，expected=${failure.expected}, errorMessage=${failure.errorMessage}`
   );
+});
+
+// ============================================================================
+// T11. HTTP 请求超时与响应流错误场景（P2-2 / P2-6 修复验证）
+// ============================================================================
+
+/**
+ * 启动慢响应 HTTP 服务器（响应延迟超过指定时间，用于触发超时）
+ *
+ * @param delayMs 响应延迟毫秒数
+ * @returns Promise，resolve 为 { server, baseUrl }
+ */
+function startSlowHttpServer(delayMs: number): Promise<{
+  server: http.Server;
+  baseUrl: string;
+}> {
+  return new Promise((resolve, reject) => {
+    const server = http.createServer((_req, res) => {
+      // 延迟 delayMs 毫秒后才响应，模拟慢服务器
+      setTimeout(() => {
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "text/plain");
+        res.end("OK");
+      }, delayMs);
+    });
+
+    server.on("error", (error: Error) => {
+      reject(error);
+    });
+
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address() as AddressInfo;
+      const baseUrl = `http://127.0.0.1:${address.port}`;
+      resolve({ server, baseUrl });
+    });
+  });
+}
+
+/**
+ * 启动不稳定 HTTP 服务器（写入部分响应数据后强制销毁连接，触发响应流错误）
+ *
+ * @returns Promise，resolve 为 { server, baseUrl }
+ */
+function startUnstableHttpServer(): Promise<{
+  server: http.Server;
+  baseUrl: string;
+}> {
+  return new Promise((resolve, reject) => {
+    const server = http.createServer((req, res) => {
+      // 写入响应头和部分响应数据
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.write("partial");
+      // 强制销毁底层 socket，触发 res.on("error") 事件
+      // 注：直接销毁 socket 是真实场景模拟（连接中途断开）
+      req.socket.destroy();
+    });
+
+    server.on("error", (error: Error) => {
+      reject(error);
+    });
+
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address() as AddressInfo;
+      const baseUrl = `http://127.0.0.1:${address.port}`;
+      resolve({ server, baseUrl });
+    });
+  });
+}
+
+test("T11a. HTTP 请求超时时 passed=false 且 failures 含 timeout 错误（P2-2 修复验证）", async () => {
+  // 启动一个慢响应服务器（响应延迟 200ms）
+  const { server, baseUrl } = await startSlowHttpServer(200);
+  try {
+    // 使用 50ms 超时，服务器响应需要 200ms，必然超时
+    const runner = new SmokeTestRunnerImpl(50);
+    const result = await runner.run([baseUrl], [createTestCase()]);
+
+    // 超时 → failedTests=1 → passed=false
+    assert.equal(result.passed, false, "超时应导致 passed=false");
+    assert.equal(result.failedTests, 1, "应有 1 个失败用例");
+    assert.equal(result.passedTests, 0);
+
+    // 验证 failure 内容：errorMessage 应含 "timeout"
+    const failure = result.failures[0];
+    assert.ok(failure.errorMessage.includes("timeout"), `errorMessage 应含 'timeout'，实际：${failure.errorMessage}`);
+    assert.ok(failure.errorMessage.includes("50"), `errorMessage 应含超时时长 '50'，实际：${failure.errorMessage}`);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("T11b. HTTP 响应流错误时 passed=false 且 failures 含响应流错误（P2-6 修复验证）", async () => {
+  // 启动一个不稳定服务器（响应中途销毁连接）
+  const { server, baseUrl } = await startUnstableHttpServer();
+  try {
+    const runner = new SmokeTestRunnerImpl();
+    const result = await runner.run([baseUrl], [createTestCase()]);
+
+    // 响应流错误 → failedTests=1 → passed=false
+    assert.equal(result.passed, false, "响应流错误应导致 passed=false");
+    assert.equal(result.failedTests, 1);
+    assert.equal(result.passedTests, 0);
+
+    // 验证 failure 内容：errorMessage 应含 "响应流错误"
+    const failure = result.failures[0];
+    assert.ok(
+      failure.errorMessage.includes("响应流错误") || failure.errorMessage.includes("请求错误"),
+      `errorMessage 应含 '响应流错误' 或 '请求错误'，实际：${failure.errorMessage}`
+    );
+  } finally {
+    await closeServer(server);
+  }
 });

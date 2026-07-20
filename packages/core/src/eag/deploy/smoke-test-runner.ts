@@ -1,5 +1,5 @@
 /**
- * SmokeTestRunner —— 烟雾测试执行器（EAG-P4 批次 13 Phase 4 D2-4 补全）
+ * SmokeTestRunner —— 烟雾测试执行器（EAG-P4 批次 13 Phase 5 D2-4）
  *
  * 核心职责：
  * - 按测试用例发起真实 HTTP 请求，验证部署后端点是否可用
@@ -209,7 +209,8 @@ export class SmokeTestRunnerImpl implements SmokeTestRunner {
   private async executeSingleTest(endpoint: string, testCase: SmokeTestCase): Promise<SmokeTestFailure | null> {
     // 拼接完整 URL（endpoint + testCase.path）
     // 注意：endpoint 可能以 / 结尾（如 http://host/），testCase.path 可能以 / 开头（如 /healthz）
-    // 此处采用简单拼接，URL 构造函数会规范化路径
+    // 简单拼接会产生 http://host//healthz（双斜杠），但 new URL() 构造函数会自动规范化为 /healthz
+    // 若未来需要更严格的 URL 规范化，可改用 new URL(testCase.path, endpoint).toString()
     const fullUrl = `${endpoint}${testCase.path}`;
 
     // 解析 URL，根据协议选择 http 或 https 模块
