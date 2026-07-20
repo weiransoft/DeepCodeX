@@ -9,8 +9,12 @@
  *   PostDeployChecker / RollbackManager / DeployStage / DevOpsOrchestratorOptions 等
  * - 实现类（rollback-manager.ts）：NoOpRollbackManager（占位实现，批次 14 扩展真实实现）
  *
- * 后续批次导出（Phase 2~7 完成后逐步添加）：
- * - gate-g8-checker.ts：GateG8Checker 类（Phase 2）
+ * 不在本模块导出的实现类（避免循环依赖）：
+ * - GateG8CheckerImpl 类：从 eag/gate/index.ts 导出（gate 模块是 G-1~G-8 检查器的自然归属）
+ *   理由：gate-g8-checker.ts 需从 devops/types.ts 导入 GateG8Context 类型（type-only），
+ *         若 devops/index.ts 再导出 GateG8CheckerImpl 会形成循环依赖
+ *
+ * 后续批次导出（Phase 3~7 完成后逐步添加）：
  * - iac-generators/*.ts：TerraformGenerator / K8sManifestGenerator / HelmChartGenerator 类（Phase 3）
  * - devops-orchestrator.ts：DevOpsOrchestrator 类（Phase 6）
  *
