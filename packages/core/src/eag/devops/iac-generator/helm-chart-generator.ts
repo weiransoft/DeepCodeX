@@ -221,18 +221,19 @@ export class HelmChartGenerator implements IaCGenerator {
       if (!fs.existsSync(targetDir)) {
         fs.mkdirSync(targetDir, { recursive: true });
       }
-      fs.writeFileSync(targetFile, template.content, "utf8");
+      // P1-1 修复（架构师审查）：临时文件权限 0o600，避免其他用户读取含敏感值的 Helm 模板
+      fs.writeFileSync(targetFile, template.content, { encoding: "utf8", mode: 0o600 });
 
       // Step 4: 写入最小 Chart.yaml 骨架（如果当前模板不是 Chart.yaml）
       // helm lint 要求 Chart 目录必须含 Chart.yaml
       if (template.filePath !== "Chart.yaml") {
         const chartYamlPath = path.join(chartDir, "Chart.yaml");
         if (!fs.existsSync(chartYamlPath)) {
-          fs.writeFileSync(
-            chartYamlPath,
-            'apiVersion: v2\nname: eag-chart\nversion: 0.1.0\nappVersion: "1.0"\n',
-            "utf8"
-          );
+          // P1-1 修复（架构师审查）：骨架文件同样使用 0o600 权限
+          fs.writeFileSync(chartYamlPath, 'apiVersion: v2\nname: eag-chart\nversion: 0.1.0\nappVersion: "1.0"\n', {
+            encoding: "utf8",
+            mode: 0o600,
+          });
         }
       }
 
@@ -353,23 +354,25 @@ maintainers:
     const { projectName, environment, replicas, image, port, resources, envVars, ingress } = context;
 
     // 环境变量段（envVars 为空时不生成）
+    // P1-3 修复（架构师审查）：env.name 用双引号包裹，避免含特殊字符（如 "." / "-" / 数字开头）时 YAML 解析失败
     const envVarsYaml =
       envVars.length > 0
         ? "\nenvVars:\n" +
           envVars
-            .map((env) => `  ${env.name}:\n    value: "${env.value}"\n    fromSecret: ${env.fromSecret ?? false}`)
+            .map((env) => `  "${env.name}":\n    value: "${env.value}"\n    fromSecret: ${env.fromSecret ?? false}`)
             .join("\n")
         : "";
 
     // Ingress 段（context.ingress 存在时启用，否则禁用）
+    // P2-4 修复（架构师审查）：host / path / tlsSecret 用双引号包裹，避免含特殊字符（如 IPv6 冒号）时 YAML 解析失败
     const ingressYaml = ingress
       ? `
 ingress:
   enabled: true
-  host: ${ingress.host}
-  path: ${ingress.path}
+  host: "${ingress.host}"
+  path: "${ingress.path}"
   port: ${ingress.port}
-  tlsSecret: ${ingress.tlsSecret ?? "null"}
+  tlsSecret: "${ingress.tlsSecret ?? ""}"
 `
       : "\ningress:\n  enabled: false\n";
 

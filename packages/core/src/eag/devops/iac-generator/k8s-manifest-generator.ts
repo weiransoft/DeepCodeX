@@ -190,7 +190,8 @@ export class K8sManifestGenerator implements IaCGenerator {
     try {
       // Step 2: 写入 .yaml 文件
       const targetFile = path.join(tmpDir, template.filePath);
-      fs.writeFileSync(targetFile, template.content, "utf8");
+      // P1-1 修复（架构师审查）：临时文件权限 0o600，避免其他用户读取含 base64 编码敏感值的 Secret YAML
+      fs.writeFileSync(targetFile, template.content, { encoding: "utf8", mode: 0o600 });
 
       // Step 3: 调用 kubectl apply --dry-run=client -f <file> -o json
       // --dry-run=client：仅在客户端校验，不发送到 API server

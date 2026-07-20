@@ -161,7 +161,8 @@ export class TerraformGenerator implements IaCGenerator {
       if (!fs.existsSync(targetDir)) {
         fs.mkdirSync(targetDir, { recursive: true });
       }
-      fs.writeFileSync(targetFile, template.content, "utf8");
+      // P1-1 修复（架构师审查）：临时文件权限 0o600，避免其他用户读取敏感 IaC 模板内容
+      fs.writeFileSync(targetFile, template.content, { encoding: "utf8", mode: 0o600 });
 
       // Step 3: 调用 terraform init -backend=false（初始化 provider，不使用远程 backend）
       // -input=false 避免交互式提示阻塞自动化流程

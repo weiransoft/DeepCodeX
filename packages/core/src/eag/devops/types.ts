@@ -161,8 +161,22 @@ export interface ResourceSpec {
  *
  * 字段说明：
  * - name：环境变量名（如 "DATABASE_URL"）
- * - value：环境变量值
- * - fromSecret：是否从 Secret 引用（true 时 value 字段是 Secret 的 key 名，而非明文值）
+ * - value：环境变量值（语义因生成器而异，详见下方"value 字段语义差异说明"）
+ * - fromSecret：是否从 Secret 引用（true 时该环境变量不写入 ConfigMap，而是从 Secret 引用）
+ *
+ * value 字段语义差异说明（P1-2 修复，架构师审查发现）：
+ * 不同 IaC 生成器对 fromSecret=true 时 value 字段的语义处理不同，调用方需根据目标生成器
+ * 填写正确的 value 值：
+ * - TerraformGenerator：value 是**既有 Secret 的名称**（用于 kubernetes_secret_v1 data source
+ *   引用集群中已存在的 Secret，secret_key_ref.name = env.value，secret_key_ref.key = env.name）
+ * - K8sManifestGenerator：value 是**真实敏感值**（生成器通过 Buffer.from(value).toString("base64")
+ *   编码后写入新建 Secret 的 data[env.name] 字段）
+ * - HelmChartGenerator：value 是**真实敏感值**（生成器在 secret.yaml 模板中通过 b64enc 编码后
+ *   写入新建 Secret 的 data[env.name] 字段）
+ *
+ * 设计差异原因：
+ * - Terraform 通常用于声明式管理长期资源，引用既有 Secret 符合 GitOps 模式
+ * - K8s Manifest / Helm Chart 通常用于应用部署包，需要自包含 Secret 定义
  *
  * 安全建议：敏感信息（密码 / Token / 密钥）必须设置 fromSecret=true，
  * 避免明文写入 deployment.yaml 环境变量段。
@@ -170,7 +184,11 @@ export interface ResourceSpec {
 export interface EnvVar {
   /** 环境变量名 */
   readonly name: string;
-  /** 环境变量值（fromSecret=true 时为 Secret 的 key 名） */
+  /**
+   * 环境变量值（语义因生成器而异，详见接口注释中的"value 字段语义差异说明"）
+   * - TerraformGenerator：既有 Secret 的名称
+   * - K8sManifestGenerator / HelmChartGenerator：真实敏感值（会被 base64 编码后写入新建 Secret）
+   */
   readonly value: string;
   /** 是否从 Secret 引用（默认 false） */
   readonly fromSecret?: boolean;

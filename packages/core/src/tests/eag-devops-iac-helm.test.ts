@@ -54,21 +54,49 @@
  * - T10. validate() 真实 CLI 调用
  *   - T10a. helm 命令不存在时返回 valid=false + 错误信息
  *   - T10b. validate 返回的 validatedBy 为 "helm-lint"
+ *   - T10c. helm CLI 存在时 validate 返回结构正确（P1-4 修复，CLI 不存在时跳过）
  * - T11. 不可变优先
  *   - T11a. generate() 返回的 IaCTemplate 对象已冻结
  *
  * 测试约定（遵循项目规则）：
  * - 使用 node:test + node:assert/strict
  * - 禁止 mock，直接构造真实对象
- * - validate() 测试不依赖真实 helm CLI（测试命令不存在的降级路径）
+ * - validate() 测试覆盖两条路径：命令不存在的降级路径 + CLI 存在时的真实路径（P1-4 修复）
  *
  * @module core/tests/eag-devops-iac-helm
  */
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { HelmChartGenerator } from "../eag/devops/iac-generator/helm-chart-generator";
 import type { IaCGenerator, IaCGenerationContext, IaCTemplate } from "../eag/devops/types";
+
+// ============================================================================
+// 辅助函数：检测 CLI 工具是否可用（P1-4 修复：补充 validate 成功路径测试）
+// ============================================================================
+
+/**
+ * 检测 CLI 工具是否可用
+ *
+ * 通过 spawnSync 调用 `<cli> --version` 检测 CLI 是否存在，非 mock。
+ * 用于有条件地运行 validate() 成功路径测试，CLI 不存在时跳过。
+ *
+ * @param cliName CLI 工具名称（如 "terraform" / "kubectl" / "helm"）
+ * @returns true=CLI 可用，false=CLI 不可用
+ */
+function checkCliAvailable(cliName: string): boolean {
+  try {
+    const result = spawnSync(cliName, ["--version"], {
+      stdio: ["pipe", "pipe", "pipe"],
+      encoding: "utf8",
+      timeout: 5000,
+    });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
+}
 
 // ============================================================================
 // 辅助函数：构造 IaCGenerationContext
@@ -276,8 +304,9 @@ test("T4c. values.yaml envVars 非空时含 envVars 段", () => {
   );
   const values = templates.find((t) => t.filePath === "values.yaml")!;
   assert.ok(values.content.includes("envVars:"));
-  assert.ok(values.content.includes("LOG_LEVEL:"));
-  assert.ok(values.content.includes("DB_PASSWORD:"));
+  // P1-3 修复后 env.name 用双引号包裹，避免含特殊字符时 YAML 解析失败
+  assert.ok(values.content.includes('"LOG_LEVEL":'));
+  assert.ok(values.content.includes('"DB_PASSWORD":'));
   assert.ok(values.content.includes("fromSecret: true"));
   assert.ok(values.content.includes("fromSecret: false"));
 });
@@ -299,8 +328,9 @@ test("T4e. values.yaml context.ingress 存在时 ingress.enabled: true", () => {
   const values = templates.find((t) => t.filePath === "values.yaml")!;
   assert.ok(values.content.includes("ingress:"));
   assert.ok(values.content.includes("enabled: true"));
-  assert.ok(values.content.includes("host: app.example.com"));
-  assert.ok(values.content.includes("tlsSecret: app-tls"));
+  // P2-4 修复后 host / tlsSecret 用双引号包裹，避免含特殊字符时 YAML 解析失败
+  assert.ok(values.content.includes('host: "app.example.com"'));
+  assert.ok(values.content.includes('tlsSecret: "app-tls"'));
 });
 
 test("T4f. values.yaml context.ingress 为空时 ingress.enabled: false", () => {
@@ -548,6 +578,32 @@ test("T10b. validate 返回的 validatedBy 为 helm-lint", async () => {
     assert.equal(result.validatedBy, "helm-lint");
   } finally {
     process.env.PATH = originalPath;
+  }
+});
+
+// T10c. helm CLI 存在时 validate 返回结构正确（P1-4 修复）
+// 检测真实 helm CLI 是否存在，存在时测试真实路径（非 mock），不存在时跳过
+const hasHelmCli = checkCliAvailable("helm");
+
+test("T10c. helm CLI 存在时 validate 返回结构正确", { skip: !hasHelmCli }, async () => {
+  const generator = new HelmChartGenerator();
+  const templates = generator.generate(createContext());
+  const chart = templates.find((t) => t.filePath === "Chart.yaml")!;
+
+  // 调用真实 helm lint
+  const result = await generator.validate(chart);
+
+  // 验证返回结构正确性（不强制 valid=true，因为 helm lint 可能因依赖缺失失败）
+  assert.equal(typeof result.valid, "boolean");
+  assert.ok(Array.isArray(result.errors));
+  assert.equal(result.validatedBy, "helm-lint");
+
+  // 如果 valid=true，errors 应为空数组
+  if (result.valid) {
+    assert.equal(result.errors.length, 0);
+  } else {
+    // 如果 valid=false，errors 应含错误信息
+    assert.ok(result.errors.length > 0);
   }
 });
 

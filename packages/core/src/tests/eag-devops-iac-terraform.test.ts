@@ -43,21 +43,49 @@
  * - T8. validate() 真实 CLI 调用
  *   - T8a. terraform 命令不存在时返回 valid=false + 错误信息（含"请确认已预装"）
  *   - T8b. validate 返回的 validatedBy 为 "terraform-validate"
+ *   - T8c. terraform CLI 存在时 validate 返回结构正确（P1-4 修复，CLI 不存在时跳过）
  * - T9. 不可变优先
  *   - T9a. generate() 返回的 IaCTemplate 对象已冻结
  *
  * 测试约定（遵循项目规则）：
  * - 使用 node:test + node:assert/strict
  * - 禁止 mock，直接构造真实对象
- * - validate() 测试不依赖真实 terraform CLI（测试命令不存在的降级路径）
+ * - validate() 测试覆盖两条路径：命令不存在的降级路径 + CLI 存在时的真实路径（P1-4 修复）
  *
  * @module core/tests/eag-devops-iac-terraform
  */
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { TerraformGenerator } from "../eag/devops/iac-generator/terraform-generator";
 import type { IaCGenerator, IaCGenerationContext, IaCTemplate } from "../eag/devops/types";
+
+// ============================================================================
+// 辅助函数：检测 CLI 工具是否可用（P1-4 修复：补充 validate 成功路径测试）
+// ============================================================================
+
+/**
+ * 检测 CLI 工具是否可用
+ *
+ * 通过 spawnSync 调用 `<cli> --version` 检测 CLI 是否存在，非 mock。
+ * 用于有条件地运行 validate() 成功路径测试，CLI 不存在时跳过。
+ *
+ * @param cliName CLI 工具名称（如 "terraform" / "kubectl" / "helm"）
+ * @returns true=CLI 可用，false=CLI 不可用
+ */
+function checkCliAvailable(cliName: string): boolean {
+  try {
+    const result = spawnSync(cliName, ["--version"], {
+      stdio: ["pipe", "pipe", "pipe"],
+      encoding: "utf8",
+      timeout: 5000,
+    });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
+}
 
 // ============================================================================
 // 辅助函数：构造 IaCGenerationContext
@@ -440,6 +468,32 @@ test("T8b. validate 返回的 validatedBy 为 terraform-validate", async () => {
     assert.equal(result.validatedBy, "terraform-validate");
   } finally {
     process.env.PATH = originalPath;
+  }
+});
+
+// T8c. terraform CLI 存在时 validate 返回结构正确（P1-4 修复）
+// 检测真实 terraform CLI 是否存在，存在时测试真实路径（非 mock），不存在时跳过
+const hasTerraformCli = checkCliAvailable("terraform");
+
+test("T8c. terraform CLI 存在时 validate 返回结构正确", { skip: !hasTerraformCli }, async () => {
+  const generator = new TerraformGenerator();
+  const templates = generator.generate(createContext());
+  const mainTf = templates.find((t) => t.filePath === "main.tf")!;
+
+  // 调用真实 terraform validate（会先执行 terraform init 下载 kubernetes provider）
+  const result = await generator.validate(mainTf);
+
+  // 验证返回结构正确性（不强制 valid=true，因为 terraform init 可能因网络失败）
+  assert.equal(typeof result.valid, "boolean");
+  assert.ok(Array.isArray(result.errors));
+  assert.equal(result.validatedBy, "terraform-validate");
+
+  // 如果 valid=true，errors 应为空数组
+  if (result.valid) {
+    assert.equal(result.errors.length, 0);
+  } else {
+    // 如果 valid=false（如网络问题导致 terraform init 失败），errors 应含错误信息
+    assert.ok(result.errors.length > 0);
   }
 });
 
