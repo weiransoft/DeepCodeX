@@ -147,3 +147,38 @@ export { PreDeployCheckerImpl } from "../deploy/pre-deploy-checker";
  * 真实 CLI 调用：kubectl（CLI 不存在时降级返回 false）
  */
 export { PostDeployCheckerImpl } from "../deploy/post-deploy-checker";
+
+/**
+ * SmokeTestRunnerImpl —— 烟雾测试执行器实现（Phase 4 D2-4 补全）
+ *
+ * 按 endpoints × testCases 笛卡尔积执行真实 HTTP 请求，验证部署后端点可用性：
+ * - 使用 node:http / node:https 发起真实 HTTP 请求（根据 URL 协议自动选择）
+ * - 超时控制默认 5000ms
+ * - 校验响应状态码 + 响应体包含字符串
+ * - 收集失败用例，返回结构化 SmokeTestResult
+ * - 不可变优先：返回对象和 failures 数组通过 Object.freeze 冻结
+ */
+export { SmokeTestRunnerImpl } from "../deploy/smoke-test-runner";
+
+// ============================================================================
+// 阶段编排器导出（Phase 5 D2-1，1 个编排器类）
+// ============================================================================
+
+/**
+ * DeployStageImpl —— DEPLOY 阶段编排器实现
+ *
+ * 编排 pre-deploy → deploy → post-deploy → smoke-test 四步阶段：
+ * 1. pre-deploy 检查：调用 PreDeployChecker.check()（镜像/配置/依赖/配额）
+ * 2. deploy 部署：调用 DeployStrategy.execute()（部署前创建版本快照）
+ * 3. post-deploy 检查：调用 PostDeployChecker.check()（Pod/Service/日志/指标）
+ * 4. smoke-test 烟雾测试：调用 SmokeTestRunner.run()（HTTP 请求验证端点）
+ *
+ * 失败处理：
+ * - pre-deploy 失败：不触发回滚（尚未部署任何资源）
+ * - deploy / post-deploy / smoke-test 失败：如果 rollbackManager 存在则触发回滚
+ * - 回滚仅触发一次（通过 rollbackExecuted 标志位避免重复回滚）
+ *
+ * B-2 修复：填充 healthEndpoints 字段供 DevOpsOrchestrator 构造 HealthCheckResult
+ * M-1 修复：从 PostDeployCheckResult.endpoints 提取健康端点
+ */
+export { DeployStageImpl } from "../deploy/deploy-stage";
