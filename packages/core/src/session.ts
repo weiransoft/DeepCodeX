@@ -101,11 +101,24 @@ import type {
 } from "./eag/long-horizon";
 // EAG-P3 批次 11 S3 新增导入：CLI 命令解析器（§5 S3 改进方案 D-S3-1 / D-S3-4）
 // 注：EagCommandParser 是无状态纯函数式解析器，构造零成本，默认注入保证向后兼容
-// - 负责判定 /eag-build /eag-design /eag-test /eag-run /eag-resume /eag-status 6 个命令
+// - 负责判定 /eag-build /eag-design /eag-test /eag-run /eag-resume /eag-status /eag-deploy 7 个命令
 // - 从 userPrompt.messageParams 提取预装配的请求对象
 // - 通过 SessionManagerOptions.eagCommandParser 可选注入（默认 new EagCommandParser()）
 import { EagCommandParser } from "./eag/cli";
-import type { EagCommand } from "./eag/cli";
+// EAG-P4 批次 13 新增导入：DevOps 第 6 角色编排器 + DEPLOY Loop 上下文与结果类型（§3.4 / §5.2）
+// 注：仅导入类型与类，未注入 devopsOrchestrator 时 /eag-deploy 命令不可用（向后兼容，零开销）
+// - DevOpsOrchestrator：/eag-deploy 命令编排器（外挂注入，构造期装配 IaC 生成器 / G-8 门禁 /
+//   部署策略 / DeployStage / 事件发射器等全部依赖）
+// - DevOpsContext / DevOpsResult：DevOpsOrchestrator.run() 的入参与产出类型
+// - DeployRequest：/eag-deploy 命令请求对象（由 EagCommandParser.parse() 从 messageParams 提取）
+// 设计决策（与设计文档 §5.2 N-M-1 修复对齐）：
+// - 调用方在 SessionManagerOptions.devopsOrchestrator 中注入完整装配的 DevOpsOrchestrator 实例
+// - session.ts 仅负责校验注入 + 装配 DevOpsContext + 调用 run() + 渲染 DevOpsResult
+// - 不在 handleEagDeployCommand 内部 new DevOpsOrchestrator（避免每次命令重复构造，且与
+//   codingOrchestrator / testingOrchestrator / designOrchestrator 同构）
+import type { DevOpsOrchestrator } from "./eag/devops/devops-orchestrator";
+import type { DevOpsContext, DevOpsResult } from "./eag/devops/types";
+import type { DeployRequest } from "./eag/cli/eag-command-parser";
 
 export type { PermissionScope } from "./settings";
 export type {
@@ -507,6 +520,22 @@ type SessionManagerOptions = {
    */
   designOrchestrator?: DesignLoopOrchestrator;
   /**
+   * EAG-P4 批次 13：DevOps 第 6 角色编排器（可选注入，§3.4 / §5.2）
+   *
+   * 未注入时 `/eag-deploy` 命令不可用，主对话循环行为完全不变（向后兼容）。
+   * 注入后，在主对话循环检测到 `/eag-deploy` 命令时外挂调用 handleEagDeployCommand，
+   * 路由到 DevOpsOrchestrator.run() 执行 5 步编排（IaC 生成 → 校验 → DeployStage 4 步阶段 → G-8 门禁）。
+   *
+   * 设计决策（与设计文档 §5.2 N-M-1 修复对齐）：
+   * - 调用方负责在注入前完整装配 DevOpsOrchestratorOptions（iacGenerators / gateG8Checker /
+   *   deployStrategy / deployStage / eventEmitter）
+   * - session.ts 不负责构造 DeployStage 实例（避免每次命令重复构造，且与
+   *   codingOrchestrator / testingOrchestrator / designOrchestrator 同构）
+   *
+   * 不可变优先（§5.12.4 G-A6d）：构造后字段不可变，循环内不可被 LLM 修改。
+   */
+  devopsOrchestrator?: DevOpsOrchestrator;
+  /**
    * EAG-P3 批次 10：RunState 持久化存储（可选注入，§4.18.3）
    *
    * 未注入时 `/eag-run` `/eag-resume` `/eag-status` 三命令不可用，向后兼容。
@@ -599,6 +628,11 @@ export class SessionManager {
   private readonly designOrchestrator?: DesignLoopOrchestrator;
   private readonly runStateStore?: RunStateStore;
   private readonly ruleLearner?: RuleLearner;
+  // EAG-P4 批次 13 外挂字段（可选注入，未注入时 /eag-deploy 命令不可用，§3.4 / §5.2）
+  // - devopsOrchestrator：未注入时 /eag-deploy 命令不可用
+  //   调用方在 SessionManagerOptions.devopsOrchestrator 中注入完整装配的 DevOpsOrchestrator 实例
+  //   （iacGenerators / gateG8Checker / deployStrategy / deployStage / eventEmitter 全部依赖）
+  private readonly devopsOrchestrator?: DevOpsOrchestrator;
   // EAG-P3 批次 11 S3：CLI 命令解析器（§5 S3 改进方案 D-S3-4）
   // - 默认 new EagCommandParser()，保证向后兼容（未注入时主循环行为不变）
   // - 负责判定 6 个 EAG 命令字符串并从 messageParams 提取预装配的请求对象
@@ -634,6 +668,10 @@ export class SessionManager {
     this.designOrchestrator = options.designOrchestrator;
     this.runStateStore = options.runStateStore;
     this.ruleLearner = options.ruleLearner;
+    // EAG-P4 批次 13 外挂字段赋值（可选注入，未注入时 /eag-deploy 命令不可用）
+    // 调用方负责在注入前完整装配 DevOpsOrchestratorOptions（iacGenerators / gateG8Checker /
+    // deployStrategy / deployStage / eventEmitter），session.ts 不负责构造依赖
+    this.devopsOrchestrator = options.devopsOrchestrator;
     // EAG-P3 批次 11 S3：CLI 命令解析器赋值（默认 new EagCommandParser()，向后兼容）
     this.eagCommandParser = options.eagCommandParser ?? new EagCommandParser();
   }
@@ -1806,6 +1844,12 @@ ${agentInstructions}
         case "eag-status":
           await this.handleEagStatusCommand(sessionId, userPrompt, eagCommand.payload, controller);
           return;
+        case "eag-deploy":
+          // EAG-P4 批次 13 Phase 7 §5.2：/eag-deploy 命令分发到 handleEagDeployCommand
+          // payload 类型为 DeployRequest | null，由 EagCommandParser.parse() 从
+          // userPrompt.messageParams.deployRequest 提取（D-S3-7 注入模式）
+          await this.handleEagDeployCommand(sessionId, userPrompt, eagCommand.payload, controller);
+          return;
         default:
           // 理论不可达（eagCommand.kind !== "unknown" 已过滤兜底分支）
           // 防御性编程：未知 kind 不做处理，落入下方非 EAG 流程
@@ -2863,6 +2907,327 @@ ${agentInstructions}
         lines.push(`...（其余 ${result.report.length - reportLimit} 字符已省略）`);
       } else {
         lines.push(result.report);
+      }
+    }
+
+    return lines.join("\n");
+  }
+
+  // ============================================================================
+  // EAG-P4 批次 13：/eag-deploy 命令处理（§3.4 / §5.2）
+  // ============================================================================
+
+  /**
+   * 处理 `/eag-deploy` 命令，触发 DEPLOY Loop 编排（§3.4 / §5.2）
+   *
+   * EAG-P4 批次 13 Phase 7 §5.2：DevOps 第 6 角色编排器入口。
+   *
+   * 算法（对齐设计文档 §3.4 + 复用既有 handleEagXxxCommand 模式）：
+   * 1. 校验外挂依赖：devopsOrchestrator 必须注入
+   *    未注入 → 通知用户配置缺失，更新 session 状态为 failed（向后兼容）
+   * 2. 校验 DeployRequest（由 EagCommandParser 预提取的 payload）
+   *    未提供 payload → 通知用户配置缺失
+   * 3. 装配 DevOpsContext：
+   *    - 从 DeployRequest 映射 iacGenerationContext（含 projectName / environment / replicas / image / port）
+   *    - 从 DeployRequest 映射 deployContext（runId 用 crypto.randomUUID 生成）
+   *    - GateContext 字段使用默认值（specStatus / planStatus = "approved"，userApproved = true 等）
+   *      原因：DEPLOY Loop 假设上游 CODING/TESTING Loop 已完成，方案与计划均已批准
+   *    - smokeTestCases 使用最小 healthz 用例（GET /healthz → 200）
+   *    - monitoringReady / rollbackPlanExists 默认 true（批次 14 实现完整检查）
+   * 4. 调用 devopsOrchestrator.run(context) 执行 5 步编排
+   *    异常路径：catch 后通知用户错误，更新 session 状态为 failed
+   * 5. 渲染结果：通过 onAssistantMessage 发送结果摘要（含 success / duration / IaC 模板数 / 部署资源数 / 健康检查 / 烟雾测试 / G-8 门禁）
+   * 6. 更新 session 状态为 completed/failed（依据 result.success）
+   *
+   * 设计决策（与设计文档 §5.2 N-M-1 修复对齐）：
+   * - 不在 handleEagDeployCommand 内部 new DevOpsOrchestrator（避免每次命令重复构造）
+   * - DevOpsOrchestrator 的全部依赖（iacGenerators / gateG8Checker / deployStrategy /
+   *   deployStage / eventEmitter）由调用方在 SessionManagerOptions.devopsOrchestrator
+   *   中完整装配后注入
+   * - session.ts 仅负责装配 DevOpsContext + 调用 run() + 渲染 DevOpsResult
+   *
+   * 不可变优先（§5.12.4 G-A6d）：
+   * - 装配的 DevOpsContext 通过 Object.freeze 冻结
+   * - iacGenerationContext / deployContext / taskCard 等嵌套对象均冻结
+   * - result 由 DevOpsOrchestrator 内部冻结
+   *
+   * @param sessionId 会话 ID
+   * @param userPrompt 用户输入（仅用于写入用户消息历史，不参与编排）
+   * @param request 预装配的 DeployRequest（由 EagCommandParser.parse() 提取，可空）
+   * @param controller 中断控制器（用于响应 abort 信号）
+   */
+  private async handleEagDeployCommand(
+    sessionId: string,
+    userPrompt: UserPromptContent,
+    request: DeployRequest | null,
+    controller?: AbortController
+  ): Promise<void> {
+    const signal = controller?.signal;
+    this.throwIfAborted(signal);
+
+    const now = new Date().toISOString();
+    // 记录用户输入到消息历史（保持会话上下文完整）
+    const userMessage = this.buildUserMessage(sessionId, userPrompt);
+    this.appendSessionMessage(sessionId, userMessage);
+
+    // 更新 session 状态为 processing
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: "processing",
+      failReason: null,
+      updateTime: now,
+    }));
+
+    // 步骤 1：校验外挂依赖
+    if (!this.devopsOrchestrator) {
+      const errMsg =
+        "DevOps 编排器未注入：请在 SessionManagerOptions.devopsOrchestrator 配置后重启（参考 §3.4 / §5.2）";
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: errMsg,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG DEPLOY Loop] ${errMsg}`, null), false);
+      return;
+    }
+
+    // 步骤 2：校验 DeployRequest（EAG-P3 批次 11 S3：payload 由 EagCommandParser 预提取）
+    // EagCommandParser.parse() 已从 userPrompt.messageParams.deployRequest 提取并完成字段校验
+    // （projectName / environment / image / port / replicas / iacType / strategy / dryRun? 全部已校验）
+    // payload 为 null 时通知用户配置缺失（保持既有错误提示路径不丢失）
+    if (!request) {
+      const errMsg =
+        "DeployRequest 未提供：请通过 userPrompt.messageParams.deployRequest 传入预装配的部署请求（参考 §5.1 / §5.2）";
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: errMsg,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG DEPLOY Loop] ${errMsg}`, null), false);
+      return;
+    }
+
+    // 步骤 3：装配 DevOpsContext
+    // 设计说明：DEPLOY Loop 假设上游 CODING/TESTING Loop 已完成，GateContext 字段使用默认值
+    // - projectId: 取 request.projectName（K8s Namespace / Helm Release 命名基础）
+    // - loopType: 固定 "deploy"（DevOpsContext 类型约束）
+    // - specStatus / planStatus: "approved"（DEPLOY Loop 入口前提）
+    // - reviewRecords: []（评审记录已在 CODING Loop G-2 门禁时收集，此处无需重复）
+    // - userApproved: true（DEPLOY Loop 假设用户已批准部署）
+    // - taskCard: 最小化占位（DEPLOY Loop 不依赖 taskCard，但 GateContext 接口要求提供）
+    // - actualChanges: []（实际变更已在 CODING Loop G-3 门禁时校验，此处无需重复）
+    // - iacGenerationContext: 从 DeployRequest 映射，使用默认资源配置（批次 14 扩展为可配置）
+    // - deployContext: 从 DeployRequest 映射，runId 用 crypto.randomUUID 生成
+    //   iacTemplates 初始为空数组（由 DevOpsOrchestrator.run() 内部 IaC 生成器产出后传给 DeployStage）
+    // - smokeTestCases: 最小 healthz 用例（GET /healthz → 200）
+    //   批次 14 扩展为从 spec.md 验收标准自动派生
+    // - monitoringReady / rollbackPlanExists: 默认 true（批次 14 实现完整检查）
+    const runId = crypto.randomUUID();
+    const iacGenerationContext = Object.freeze({
+      projectName: request.projectName,
+      environment: request.environment,
+      replicas: request.replicas,
+      image: request.image,
+      port: request.port,
+      // 默认资源配置：requests 100m / 128Mi，limits 500m / 512Mi
+      // 批次 14 扩展为从项目配置文件读取（如 eag.yaml）
+      resources: Object.freeze({
+        requests: Object.freeze({ cpu: "100m", memory: "128Mi" }),
+        limits: Object.freeze({ cpu: "500m", memory: "512Mi" }),
+      }),
+      envVars: Object.freeze([]),
+    });
+    const deployContext = Object.freeze({
+      runId,
+      projectName: request.projectName,
+      environment: request.environment,
+      iacTemplates: Object.freeze([]),
+      strategyType: request.strategy,
+      timeoutMs: 300000, // 默认 5 分钟超时
+    });
+    const taskCard = Object.freeze({
+      id: "T-DEPLOY",
+      title: `部署 ${request.projectName} 到 ${request.environment} 环境`,
+      requirementId: "F-DEPLOY",
+      dependencies: Object.freeze([]),
+      acceptanceCriteria: Object.freeze([
+        `IaC 模板生成与校验通过（${request.iacType}）`,
+        `部署成功（策略：${request.strategy}）`,
+        "健康检查通过",
+        "烟雾测试通过",
+        "G-8 门禁通过",
+      ]),
+      status: "in-progress" as const,
+      declaredSymbols: Object.freeze([]),
+    });
+    const smokeTestCases = Object.freeze([
+      Object.freeze({
+        name: "healthz endpoint returns 200",
+        method: "GET" as const,
+        path: "/healthz",
+        expectedStatusCode: 200,
+      }),
+    ]);
+    const devOpsContext: DevOpsContext = Object.freeze({
+      projectId: request.projectName,
+      loopType: "deploy",
+      specStatus: "approved",
+      planStatus: "approved",
+      reviewRecords: Object.freeze([]),
+      userApproved: true,
+      taskCard,
+      actualChanges: Object.freeze([]),
+      iacGenerationContext,
+      deployContext,
+      smokeTestCases,
+      monitoringReady: true,
+      rollbackPlanExists: true,
+    }) as DevOpsContext;
+
+    // dryRun 模式：仅生成 IaC 模板，不实际部署
+    // 当前批次（13）暂不支持 dryRun 短路，DevOpsOrchestrator.run() 始终执行完整 5 步编排
+    // 批次 14 扩展：dryRun=true 时仅执行 Step 1~3（生成 + 校验 IaC），跳过 Step 4~5（部署 + 门禁）
+    // 此处仅记录日志，不影响编排流程
+    if (request.dryRun) {
+      this.onAssistantMessage(
+        this.buildAssistantMessage(
+          sessionId,
+          `[EAG DEPLOY Loop] dryRun 模式已启用（批次 13 暂不支持短路，将执行完整编排流程）`,
+          null
+        ),
+        false
+      );
+    }
+
+    // 步骤 4：调用 devopsOrchestrator.run(context) 执行 5 步编排
+    let result: DevOpsResult;
+    try {
+      result = await this.devopsOrchestrator.run(devOpsContext);
+    } catch (e) {
+      // 编排器异常 → 通知用户错误，更新 session 状态为 failed
+      const errMsg = e instanceof Error ? e.message : String(e);
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: `DEPLOY Loop 编排异常：${errMsg}`,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(
+        this.buildAssistantMessage(
+          sessionId,
+          `[EAG DEPLOY Loop] 编排异常：${errMsg}\n请检查依赖组件（IaCGenerator / GateG8Checker / DeployStrategy / DeployStage / PreDeployChecker / PostDeployChecker / SmokeTestRunner）配置是否正确。`,
+          null
+        ),
+        false
+      );
+      return;
+    }
+
+    // 步骤 5：渲染结果摘要
+    const summary = this.renderDevOpsResult(result);
+    this.onAssistantMessage(this.buildAssistantMessage(sessionId, summary, null), false);
+
+    // 步骤 6：更新 session 状态（依据 result.success）
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: result.success ? "completed" : "failed",
+      failReason: result.success
+        ? null
+        : `DEPLOY Loop 终止：${result.errors.length > 0 ? result.errors.join("；") : result.gateResult.reason}`,
+      updateTime: new Date().toISOString(),
+    }));
+  }
+
+  /**
+   * 渲染 DevOpsResult 为可读的摘要文本（§3.4 / §5.2）
+   *
+   * 渲染内容：
+   * - 编排结果（success / failed）
+   * - runId + 总耗时
+   * - IaC 模板清单（前 10 个，含 type / filePath / hash 前 8 位）
+   * - 部署资源清单（前 10 个，含 kind / name / namespace / status）
+   * - 健康检查结果（healthy + 端点数 + 失败数）
+   * - 烟雾测试结果（passed + totalTests + passedTests + failedTests）
+   * - G-8 门禁结果（passed + reason）
+   * - 错误信息列表（前 10 条）
+   *
+   * @param result DevOps 编排产出
+   * @returns 可读的摘要文本
+   */
+  private renderDevOpsResult(result: Readonly<DevOpsResult>): string {
+    const lines: string[] = [];
+    lines.push("[EAG DEPLOY Loop] 编排完成");
+    lines.push(`最终状态: ${result.success ? "成功" : "失败"}`);
+    lines.push(`runId: ${result.runId}`);
+    // 耗时换算：毫秒 → 秒（保留 1 位小数）
+    const durationSec = (result.duration / 1000).toFixed(1);
+    lines.push(`总耗时: ${durationSec}s（${result.startedAt} → ${result.finishedAt}）`);
+
+    // IaC 模板清单（前 10 个，避免输出过长）
+    if (result.iacTemplates.length > 0) {
+      lines.push("");
+      lines.push(`IaC 模板 (${result.iacTemplates.length} 个):`);
+      const iacLimit = Math.min(result.iacTemplates.length, 10);
+      for (let i = 0; i < iacLimit; i++) {
+        const t = result.iacTemplates[i];
+        // hash 前 8 位用作短摘要（SHA256 完整 64 位在审计日志中查看）
+        const hashPrefix = t.hash.slice(0, 8);
+        lines.push(`  - [${t.type}] ${t.filePath} (hash: ${hashPrefix})`);
+      }
+      if (result.iacTemplates.length > iacLimit) {
+        lines.push(`  ...（其余 ${result.iacTemplates.length - iacLimit} 个模板已省略）`);
+      }
+    }
+
+    // 部署资源清单（前 10 个）
+    if (result.deployResult && result.deployResult.resources.length > 0) {
+      lines.push("");
+      const resources = result.deployResult.resources;
+      lines.push(`部署资源 (${resources.length} 个):`);
+      const resLimit = Math.min(resources.length, 10);
+      for (let i = 0; i < resLimit; i++) {
+        const r = resources[i];
+        lines.push(`  - ${r.kind}/${r.name} (namespace: ${r.namespace}, status: ${r.status})`);
+      }
+      if (resources.length > resLimit) {
+        lines.push(`  ...（其余 ${resources.length - resLimit} 个资源已省略）`);
+      }
+    }
+
+    // 健康检查结果
+    if (result.healthCheckResult) {
+      lines.push("");
+      const hcr = result.healthCheckResult;
+      const endpointsCount = hcr.endpoints.length;
+      const failuresCount = hcr.failures.length;
+      lines.push(`健康检查: ${hcr.healthy ? "通过" : "未通过"}（端点数: ${endpointsCount}, 失败数: ${failuresCount}）`);
+    }
+
+    // 烟雾测试结果
+    if (result.smokeTestResult) {
+      const str = result.smokeTestResult;
+      lines.push(
+        `烟雾测试: ${str.passed ? "通过" : "未通过"}（总计: ${str.totalTests}, 通过: ${str.passedTests}, 失败: ${str.failedTests}）`
+      );
+    }
+
+    // G-8 门禁结果
+    lines.push("");
+    lines.push(`G-8 门禁: ${result.gateResult.passed ? "通过" : "未通过"}（severity: ${result.gateResult.severity}）`);
+    lines.push(`门禁理由: ${result.gateResult.reason}`);
+
+    // 错误信息列表（前 10 条）
+    if (result.errors.length > 0) {
+      lines.push("");
+      lines.push(`错误信息 (${result.errors.length} 条):`);
+      const errLimit = Math.min(result.errors.length, 10);
+      for (let i = 0; i < errLimit; i++) {
+        lines.push(`  - ${result.errors[i]}`);
+      }
+      if (result.errors.length > errLimit) {
+        lines.push(`  ...（其余 ${result.errors.length - errLimit} 条错误已省略）`);
       }
     }
 

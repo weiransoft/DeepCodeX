@@ -4,9 +4,10 @@
  * 设计依据：EAG-P3 批次 11 §5 S3 改进方案（决策清单 D-S3-1 ~ D-S3-8）
  *
  * 职责：
- * - 判定用户输入是否为 EAG 命令（/eag-design、/eag-test、/eag-run、/eag-resume、/eag-status、/eag-build）
+ * - 判定用户输入是否为 EAG 命令（/eag-design、/eag-test、/eag-run、/eag-resume、/eag-status、/eag-build、/eag-deploy）
  * - 从 userPrompt.messageParams 提取预装配的请求对象
  * - 提供 parse() 统一入口，返回 discriminated union 类型 EagCommand
+ * - 提供 extractDeployRequestFromPrompt() 独立函数，解析 /eag-deploy 命令字符串（供 session.ts 构造 messageParams 时调用）
  *
  * 设计原则（对齐 Karpathy Simplicity First 与 §5.12.4 G-A6d 配置冻结）：
  * - 无状态：纯函数式，不持有 session / 不读取文件系统（D-S3-2 / D-S3-4）
@@ -27,6 +28,49 @@ import type { CodingLoopRequest } from "../coding/types";
 import type { DesignLoopInput } from "../design/design-models";
 import type { TestingLoopRequest } from "../testing/types";
 import type { EagRunRequest, EagResumeRequest, EagStatusRequest } from "../long-horizon";
+
+// ============================================================================
+// DeployRequest 接口定义（EAG-P4 批次 13 Phase 7 §5.1）
+// ============================================================================
+
+/**
+ * /eag-deploy 命令请求对象（EAG-P4 批次 13 Phase 7 §5.1）
+ *
+ * 用于描述一次部署任务的完整参数集合，由 extractDeployRequestFromPrompt()
+ * 从命令字符串解析后装配，再由 session.ts 注入到 userPrompt.messageParams.deployRequest。
+ *
+ * 字段说明（对齐设计文档 §5.1）：
+ * - projectName: 项目名称（用于 K8s namespace / Helm release 命名）
+ * - environment: 目标环境（dev / staging / prod）
+ * - image: 容器镜像引用（含 registry/repository:tag）
+ * - port: 容器监听端口（1-65535 正整数）
+ * - replicas: 副本数（1-100 正整数）
+ * - iacType: IaC 模板类型（terraform / k8s-manifest / helm-chart）
+ * - strategy: 部署策略（rolling / blue-green / canary）
+ * - dryRun: 可选，dry-run 模式（只生成 IaC 模板，不实际部署）
+ *
+ * 不可变优先原则（§5.12.4 G-A6d）：
+ * - 所有字段为 readonly
+ * - 实例由 extractDeployRequestFromPrompt() 通过 Object.freeze 冻结后返回
+ */
+export interface DeployRequest {
+  /** 项目名称（用于 K8s namespace / Helm release 命名，非空字符串） */
+  readonly projectName: string;
+  /** 目标环境（dev / staging / prod） */
+  readonly environment: "dev" | "staging" | "prod";
+  /** 容器镜像引用（含 registry/repository:tag，非空字符串） */
+  readonly image: string;
+  /** 容器监听端口（1-65535 正整数） */
+  readonly port: number;
+  /** 副本数（1-100 正整数） */
+  readonly replicas: number;
+  /** IaC 模板类型（terraform / k8s-manifest / helm-chart） */
+  readonly iacType: "terraform" | "k8s-manifest" | "helm-chart";
+  /** 部署策略（rolling / blue-green / canary） */
+  readonly strategy: "rolling" | "blue-green" | "canary";
+  /** 可选，dry-run 模式（只生成 IaC 模板，不实际部署） */
+  readonly dryRun?: boolean;
+}
 
 // ============================================================================
 // EagCommand 类型定义（discriminated union，D-S3-3）
@@ -53,13 +97,18 @@ export type EagCommand =
   | { readonly kind: "eag-run"; readonly payload: EagRunRequest | null }
   | { readonly kind: "eag-resume"; readonly payload: EagResumeRequest | null }
   | { readonly kind: "eag-status"; readonly payload: EagStatusRequest | null }
+  | { readonly kind: "eag-deploy"; readonly payload: DeployRequest | null }
   | { readonly kind: "unknown"; readonly payload: null };
 
 /**
  * EAG 命令字符串常量集合（D-S3-6）
  *
- * 6 个 EAG 命令的严格匹配字符串。使用 Object.freeze 冻结（§5.12.4 G-A6d 配置冻结）。
+ * 7 个 EAG 命令的严格匹配字符串。使用 Object.freeze 冻结（§5.12.4 G-A6d 配置冻结）。
  * 命令字符串严格匹配（无参数），参数通过 messageParams 注入（D-S3-7）。
+ *
+ * 注：/eag-deploy 的命令字符串本身亦为严格匹配（无参数），
+ * 参数解析由 extractDeployRequestFromPrompt() 独立函数在 session.ts 构造
+ * userPrompt.messageParams 时完成，与既有 6 个命令保持一致的注入模式。
  */
 export const EAG_COMMAND_STRINGS = Object.freeze({
   /** /eag-build 命令字符串（触发 CODING Loop 编排，§4.9.3） */
@@ -74,6 +123,8 @@ export const EAG_COMMAND_STRINGS = Object.freeze({
   EAG_RESUME: "/eag-resume",
   /** /eag-status 命令字符串（查询长程进度报告，§4.18.3） */
   EAG_STATUS: "/eag-status",
+  /** /eag-deploy 命令字符串（触发部署任务编排，EAG-P4 批次 13 Phase 7 §5.1） */
+  EAG_DEPLOY: "/eag-deploy",
 } as const);
 
 /**
@@ -142,7 +193,7 @@ export class EagCommandParser {
    * 内部命令解析逻辑（返回未冻结的 EagCommand）
    *
    * 此方法为 private，外部应通过 parse() 访问。parse() 会 Object.freeze 返回对象。
-   * 拆分原因：避免在 9 个 return 点重复写 Object.freeze，保持方法体简洁。
+   * 拆分原因：避免在多个 return 点重复写 Object.freeze，保持方法体简洁。
    *
    * @param userPrompt 用户输入内容（含 messageParams 元数据）
    * @returns EagCommand 类型联合（未冻结，由 parse() 负责冻结）
@@ -161,7 +212,7 @@ export class EagCommandParser {
       return { kind: "unknown", payload: null };
     }
 
-    // 步骤 3：严格匹配 6 个命令字符串（无参数，参数通过 messageParams 注入）
+    // 步骤 3：严格匹配 7 个命令字符串（无参数，参数通过 messageParams 注入）
     switch (text) {
       case EAG_COMMAND_STRINGS.EAG_BUILD:
         return { kind: "eag-build", payload: this.extractCodingLoopRequest(userPrompt) };
@@ -175,6 +226,8 @@ export class EagCommandParser {
         return { kind: "eag-resume", payload: this.extractEagResumeRequest(userPrompt) };
       case EAG_COMMAND_STRINGS.EAG_STATUS:
         return { kind: "eag-status", payload: this.extractEagStatusRequest(userPrompt) };
+      case EAG_COMMAND_STRINGS.EAG_DEPLOY:
+        return { kind: "eag-deploy", payload: this.extractDeployRequest(userPrompt) };
       default:
         // 未匹配任何 EAG 命令，返回 unknown 兜底分支
         return { kind: "unknown", payload: null };
@@ -279,6 +332,25 @@ export class EagCommandParser {
   parseEagStatusCommand(userPrompt: UserPromptContent): EagCommand {
     const cmd = this.parse(userPrompt);
     return cmd.kind === "eag-status" ? cmd : FROZEN_UNKNOWN_COMMAND;
+  }
+
+  /**
+   * 判定用户输入是否为 /eag-deploy 命令并提取 payload
+   *
+   * 判定规则（对齐 EAG-P4 批次 13 Phase 7 §5.1）：
+   * - text 为字符串且 trim 后等于 /eag-deploy
+   * - 无图片附件
+   * - 无技能匹配
+   *
+   * 注：命令字符串本身严格匹配（无参数），参数解析由独立函数
+   * extractDeployRequestFromPrompt() 在 session.ts 构造 messageParams 时完成。
+   *
+   * @param userPrompt 用户输入内容
+   * @returns EagCommand（kind 为 "eag-deploy" 或 "unknown"）
+   */
+  parseEagDeployCommand(userPrompt: UserPromptContent): EagCommand {
+    const cmd = this.parse(userPrompt);
+    return cmd.kind === "eag-deploy" ? cmd : FROZEN_UNKNOWN_COMMAND;
   }
 
   // ============================================================================
@@ -485,4 +557,288 @@ export class EagCommandParser {
     }
     return null;
   }
+
+  /**
+   * 从 userPrompt.messageParams 提取预装配的 DeployRequest（EAG-P4 批次 13 Phase 7 §5.1）
+   *
+   * 设计原则（对齐其他 6 个 extractXxxRequest）：
+   * - parser 不直接解析命令字符串（参数解析由 extractDeployRequestFromPrompt 独立函数完成）
+   * - 调用方通过 userPrompt.messageParams.deployRequest 传入预装配的请求
+   * - 字段校验不通过时返回 null（与 extractEagStatusRequest 等一致）
+   *
+   * 校验规则（对齐设计文档 §5.1 字段约束）：
+   * - projectName: 非空字符串
+   * - environment: "dev" | "staging" | "prod"
+   * - image: 非空字符串
+   * - port: 正整数 1-65535
+   * - replicas: 正整数 1-100
+   * - iacType: "terraform" | "k8s-manifest" | "helm-chart"
+   * - strategy: "rolling" | "blue-green" | "canary"
+   * - dryRun: 可选，为 boolean 类型
+   *
+   * @param userPrompt 用户输入（含 messageParams 元数据）
+   * @returns 预装配的 DeployRequest；未提供或字段不完整时返回 null
+   */
+  private extractDeployRequest(userPrompt: UserPromptContent): DeployRequest | null {
+    // 步骤 1：校验 messageParams 存在且为对象
+    const params = userPrompt.messageParams as Record<string, unknown> | null | undefined;
+    if (!params || typeof params !== "object") {
+      return null;
+    }
+    // 步骤 2：校验 deployRequest 字段存在且为对象
+    const request = params.deployRequest;
+    if (!request || typeof request !== "object") {
+      return null;
+    }
+    // 步骤 3：基本字段校验（避免类型断言误用，对齐其他 extractXxxRequest 校验风格）
+    const candidate = request as Partial<DeployRequest>;
+
+    // projectName 必须为非空字符串
+    if (typeof candidate.projectName !== "string" || candidate.projectName.trim().length === 0) {
+      return null;
+    }
+    // environment 必须为 "dev" | "staging" | "prod" 之一
+    if (candidate.environment !== "dev" && candidate.environment !== "staging" && candidate.environment !== "prod") {
+      return null;
+    }
+    // image 必须为非空字符串
+    if (typeof candidate.image !== "string" || candidate.image.trim().length === 0) {
+      return null;
+    }
+    // port 必须为正整数且在 1-65535 范围内
+    if (
+      typeof candidate.port !== "number" ||
+      !Number.isInteger(candidate.port) ||
+      candidate.port < 1 ||
+      candidate.port > 65535
+    ) {
+      return null;
+    }
+    // replicas 必须为正整数且在 1-100 范围内
+    if (
+      typeof candidate.replicas !== "number" ||
+      !Number.isInteger(candidate.replicas) ||
+      candidate.replicas < 1 ||
+      candidate.replicas > 100
+    ) {
+      return null;
+    }
+    // iacType 必须为 "terraform" | "k8s-manifest" | "helm-chart" 之一
+    if (
+      candidate.iacType !== "terraform" &&
+      candidate.iacType !== "k8s-manifest" &&
+      candidate.iacType !== "helm-chart"
+    ) {
+      return null;
+    }
+    // strategy 必须为 "rolling" | "blue-green" | "canary" 之一
+    if (candidate.strategy !== "rolling" && candidate.strategy !== "blue-green" && candidate.strategy !== "canary") {
+      return null;
+    }
+    // dryRun 可选，若提供则必须为 boolean
+    if (candidate.dryRun !== undefined && typeof candidate.dryRun !== "boolean") {
+      return null;
+    }
+    // 所有字段校验通过，返回 candidate（类型已收窄为 DeployRequest）
+    return candidate as DeployRequest;
+  }
+}
+
+// ============================================================================
+// 独立函数：extractDeployRequestFromPrompt（EAG-P4 批次 13 Phase 7 §5.1 L3637-L3731）
+// ============================================================================
+
+/**
+ * /eag-deploy 命令字符串参数解析的合法 environment 取值集合
+ *
+ * 用于校验 --env 参数取值，避免在多个分支重复书写字面量联合判断。
+ */
+const DEPLOY_ENV_VALUES = Object.freeze(["dev", "staging", "prod"] as const);
+
+/**
+ * /eag-deploy 命令字符串参数解析的合法 iacType 取值集合
+ *
+ * 用于校验 --iac 参数取值。
+ */
+const DEPLOY_IAC_TYPE_VALUES = Object.freeze(["terraform", "k8s-manifest", "helm-chart"] as const);
+
+/**
+ * /eag-deploy 命令字符串参数解析的合法 strategy 取值集合
+ *
+ * 用于校验 --strategy 参数取值。
+ */
+const DEPLOY_STRATEGY_VALUES = Object.freeze(["rolling", "blue-green", "canary"] as const);
+
+/**
+ * 从 /eag-deploy 命令字符串解析 DeployRequest（EAG-P4 批次 13 Phase 7 §5.1 L3637-L3731）
+ *
+ * 此函数为**导出的独立函数**（非 EagCommandParser 类方法），供 session.ts 在
+ * 构造 userPrompt.messageParams.deployRequest 时调用。
+ *
+ * 算法（对齐设计文档 §5.1）：
+ * 1. 校验 prompt 为非空字符串
+ * 2. 移除命令前缀 /eag-deploy（大小写不敏感，匹配后裁剪）
+ * 3. 用正则解析 --key value 形式参数（支持单引号 / 双引号包裹的值）
+ * 4. 解析 --dry-run flag（无值，存在即为 true）
+ * 5. 校验 7 个必填参数（--project / --env / --image / --port / --replicas / --iac / --strategy）
+ * 6. 校验 --env / --iac / --strategy 取值范围
+ * 7. 校验 --port 正整数 1-65535
+ * 8. 校验 --replicas 正整数 1-100
+ * 9. 装配 DeployRequest 对象并 Object.freeze 冻结
+ * 10. 任一校验失败抛 Error，错误信息含参数名与取值范围
+ *
+ * 不可变优先原则（§5.12.4 G-A6d）：
+ * - 返回的 DeployRequest 对象通过 Object.freeze 冻结
+ * - 函数内部使用的常量集合（DEPLOY_ENV_VALUES 等）亦被 Object.freeze 冻结
+ *
+ * @param prompt /eag-deploy 命令字符串（含命令前缀与参数）
+ * @returns 冻结的 DeployRequest 对象
+ * @throws {Error} 当 prompt 非字符串、命令前缀不匹配、必填参数缺失、取值范围非法时抛出
+ */
+export function extractDeployRequestFromPrompt(prompt: string): DeployRequest {
+  // 步骤 1：校验 prompt 为非空字符串
+  if (typeof prompt !== "string") {
+    throw new Error("extractDeployRequestFromPrompt: prompt 必须为非空字符串");
+  }
+  const trimmed = prompt.trim();
+  if (trimmed.length === 0) {
+    throw new Error("extractDeployRequestFromPrompt: prompt 不能为空字符串");
+  }
+
+  // 步骤 2：移除命令前缀 /eag-deploy（大小写不敏感）
+  // 使用正则匹配前缀（大小写不敏感），后跟空白字符或字符串结尾
+  const prefixMatch = /^\/eag-deploy(?:\s+|$)/i.exec(trimmed);
+  if (!prefixMatch) {
+    throw new Error(
+      `extractDeployRequestFromPrompt: 命令前缀不匹配，期望以 /eag-deploy 开头（大小写不敏感），实际为: ${trimmed}`
+    );
+  }
+  // 截取前缀之后的部分作为参数字符串
+  const argsPart = trimmed.slice(prefixMatch[0].length).trim();
+
+  // 步骤 3：用正则解析 --key value 形式参数
+  // 正则说明（关键设计：必须消费 key 与 value 之间的分隔符，且裸值必须用捕获组包裹）：
+  // - --([\w][\w-]*)                              匹配参数名（字母/下划线开头，可含字母数字下划线与连字符）→ 捕获组 1
+  // - (?:[=\s]+                                   分隔符（= 或空白，至少一个，必须消费以避免值丢失）
+  //   (?:"([^"]*)"                                双引号值 → 捕获组 2
+  //   |'([^']*)'                                  单引号值 → 捕获组 3
+  //   |(?!--)([^\s"']+)                           裸值（不以 -- 开头，避免误吞后续 flag）→ 捕获组 4
+  //   ))?                                         整个值组可选（?），支持 --dry-run flag（无值）形式
+  // - (?=\s|$)                                    前瞻断言：匹配结束位置必须是空白或字符串结尾
+  //
+  // 设计要点：
+  // - 分隔符 [=\s]+ 必须在值组内部，确保 --key value 形式的空格被消费（避免 value 丢失）
+  // - 裸值前的 (?!--) 负向前瞻，避免 --dry-run --env prod 中 --env 被误当作 --dry-run 的值
+  // - 裸值必须用 ([^\s"']+) 捕获组包裹，否则 match[4] 为 undefined（关键修复点）
+  // - 整个值组可选（?），支持 --dry-run flag（无值）形式
+  // - 前瞻 (?=\s|$) 确保匹配边界清晰，避免值尾部粘连
+  // - 全局匹配（g 标志），依次取出所有 --key value 对
+  const argPattern = /--([\w][\w-]*)(?:[=\s]+(?:"([^"]*)"|'([^']*)'|(?!--)([^\s"']+)))?(?=\s|$)/g;
+  const args: Record<string, string | true> = {};
+
+  // 注意：--dry-run 是 flag（无值），匹配时 value 部分为 undefined，记录为 true
+  // 注意：重复参数首次匹配生效（后续覆盖被跳过），与设计文档 §5.1 一致
+  let match: RegExpExecArray | null;
+  while ((match = argPattern.exec(argsPart)) !== null) {
+    const key = match[1];
+    // 三种值形式：双引号（match[2]）、单引号（match[3]）、裸值（match[4]）；均未匹配则为 flag（true）
+    const value = match[2] ?? match[3] ?? match[4] ?? true;
+    // 仅首次匹配生效（重复参数被跳过，对齐设计文档"首次匹配生效"约定）
+    if (!(key in args)) {
+      args[key] = value;
+    }
+  }
+
+  // 步骤 4：校验 7 个必填参数并提取值
+  // projectName: --project 参数
+  const projectName = args["project"];
+  if (projectName === undefined || projectName === true || String(projectName).trim().length === 0) {
+    throw new Error("extractDeployRequestFromPrompt: 缺少必填参数 --project 或值为空（期望非空字符串）");
+  }
+
+  // environment: --env 参数，取值范围 dev / staging / prod
+  const environmentRaw = args["env"];
+  if (environmentRaw === undefined || environmentRaw === true) {
+    throw new Error("extractDeployRequestFromPrompt: 缺少必填参数 --env（期望取值: dev | staging | prod）");
+  }
+  if (!DEPLOY_ENV_VALUES.includes(environmentRaw as "dev" | "staging" | "prod")) {
+    throw new Error(
+      `extractDeployRequestFromPrompt: --env 取值非法（期望 dev | staging | prod，实际为: ${environmentRaw}）`
+    );
+  }
+  const environment = environmentRaw as "dev" | "staging" | "prod";
+
+  // image: --image 参数
+  const image = args["image"];
+  if (image === undefined || image === true || String(image).trim().length === 0) {
+    throw new Error(
+      "extractDeployRequestFromPrompt: 缺少必填参数 --image 或值为空（期望非空字符串，格式 registry/repository:tag）"
+    );
+  }
+
+  // port: --port 参数，正整数 1-65535
+  const portRaw = args["port"];
+  if (portRaw === undefined || portRaw === true) {
+    throw new Error("extractDeployRequestFromPrompt: 缺少必填参数 --port（期望正整数 1-65535）");
+  }
+  const portNum = Number(portRaw);
+  if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+    throw new Error(`extractDeployRequestFromPrompt: --port 取值非法（期望正整数 1-65535，实际为: ${portRaw}）`);
+  }
+
+  // replicas: --replicas 参数，正整数 1-100
+  const replicasRaw = args["replicas"];
+  if (replicasRaw === undefined || replicasRaw === true) {
+    throw new Error("extractDeployRequestFromPrompt: 缺少必填参数 --replicas（期望正整数 1-100）");
+  }
+  const replicasNum = Number(replicasRaw);
+  if (!Number.isInteger(replicasNum) || replicasNum < 1 || replicasNum > 100) {
+    throw new Error(`extractDeployRequestFromPrompt: --replicas 取值非法（期望正整数 1-100，实际为: ${replicasRaw}）`);
+  }
+
+  // iacType: --iac 参数，取值范围 terraform / k8s-manifest / helm-chart
+  const iacTypeRaw = args["iac"];
+  if (iacTypeRaw === undefined || iacTypeRaw === true) {
+    throw new Error(
+      "extractDeployRequestFromPrompt: 缺少必填参数 --iac（期望取值: terraform | k8s-manifest | helm-chart）"
+    );
+  }
+  if (!DEPLOY_IAC_TYPE_VALUES.includes(iacTypeRaw as "terraform" | "k8s-manifest" | "helm-chart")) {
+    throw new Error(
+      `extractDeployRequestFromPrompt: --iac 取值非法（期望 terraform | k8s-manifest | helm-chart，实际为: ${iacTypeRaw}）`
+    );
+  }
+  const iacType = iacTypeRaw as "terraform" | "k8s-manifest" | "helm-chart";
+
+  // strategy: --strategy 参数，取值范围 rolling / blue-green / canary
+  const strategyRaw = args["strategy"];
+  if (strategyRaw === undefined || strategyRaw === true) {
+    throw new Error(
+      "extractDeployRequestFromPrompt: 缺少必填参数 --strategy（期望取值: rolling | blue-green | canary）"
+    );
+  }
+  if (!DEPLOY_STRATEGY_VALUES.includes(strategyRaw as "rolling" | "blue-green" | "canary")) {
+    throw new Error(
+      `extractDeployRequestFromPrompt: --strategy 取值非法（期望 rolling | blue-green | canary，实际为: ${strategyRaw}）`
+    );
+  }
+  const strategy = strategyRaw as "rolling" | "blue-green" | "canary";
+
+  // 步骤 5：解析 --dry-run flag（可选，存在即为 true）
+  const dryRunRaw = args["dry-run"];
+  // dryRun 应为 flag（true）或未提供（undefined）；若误传值（字符串），仍按存在即 true 处理
+  const dryRun: boolean | undefined = dryRunRaw !== undefined ? true : undefined;
+
+  // 步骤 6：装配 DeployRequest 对象并 Object.freeze 冻结
+  const request: DeployRequest = {
+    projectName: String(projectName).trim(),
+    environment,
+    image: String(image).trim(),
+    port: portNum,
+    replicas: replicasNum,
+    iacType,
+    strategy,
+    ...(dryRun !== undefined ? { dryRun } : {}),
+  };
+  return Object.freeze(request) as DeployRequest;
 }

@@ -1,7 +1,7 @@
 /**
- * EAG-P3 批次 10 单元测试：SessionManager 命令 Hook 集成（5 个命令 + 候选规则检测 Hook）
+ * EAG-P3 批次 10 单元测试：SessionManager 命令 Hook 集成（6 个命令 + 候选规则检测 Hook）
  *
- * 测试范围（对齐 EAG-P3 批次 10 设计 §4.18.3 / §4.18.4）：
+ * 测试范围（对齐 EAG-P3 批次 10 设计 §4.18.3 / §4.18.4 + EAG-P4 批次 13 §5.2）：
  * - G. /eag-design 命令：isEagDesignPrompt 判定 + handleEagDesignCommand 依赖校验 + extractDesignLoopInput + renderDesignLoopResult
  * - H. /eag-test 命令：isEagTestPrompt 判定 + handleEagTestCommand 依赖校验 + extractTestingLoopRequest + renderTestingLoopResult
  * - I. /eag-run 命令：isEagRunPrompt 判定 + handleEagRunCommand 依赖校验 + extractEagRunRequest + renderEagRunResult
@@ -9,6 +9,8 @@
  * - K. /eag-status 命令：isEagStatusPrompt 判定 + handleEagStatusCommand 依赖校验 + extractEagStatusRequest + renderEagStatusResult
  * - L. 候选规则检测 Hook（detectRuleCandidateHook，落地 L-4）：未注入跳过 / 非纠正模式 / 防误学红线（≥2 次才推送）
  * - M. SessionManagerOptions 新增字段（testingOrchestrator / designOrchestrator / runStateStore / ruleLearner）正确传递与向后兼容
+ * - N. /eag-deploy 命令（EAG-P4 批次 13 Phase 7 §5.2）：EagCommandParser 判定 + handleEagDeployCommand 依赖校验 +
+ *      extractDeployRequest + renderDevOpsResult + dryRun 模式 + devopsOrchestrator 字段传递
  *
  * 测试约定（严格遵循项目"禁止 mock"规则）：
  * - 使用 node:test + node:assert/strict
@@ -24,6 +26,8 @@
  * 设计依据：
  * - EAG-P3 批次 10 设计文档 §4.18.3 命令 Hook 集成
  * - EAG-P3 批次 10 设计文档 §4.18.4 候选规则检测 Hook（detectRuleCandidateHook，落地 L-4）
+ * - EAG-P4 批次 13 设计文档 §3.4 DevOpsOrchestrator 5 步编排
+ * - EAG-P4 批次 13 设计文档 §5.2 SessionManager 集成（handleEagDeployCommand 装配逻辑）
  * - EAG 方案 §5.5.4 防误学红线（learned 来源规则未经用户确认绝不生效，≥2 次才推送确认请求）
  * - EAG 方案 §5.12.4 G-A6d 配置冻结原则（不可变优先）
  * - session.ts isEagXPrompt / handleEagXCommand / extractXxx / renderXxx / detectRuleCandidateHook
@@ -45,6 +49,9 @@ import type {
   EagStatusRequest,
   EagStatusResult,
 } from "../eag/long-horizon";
+// EAG-P4 批次 13 Phase 7 新增导入：DevOps 编排结果类型 + /eag-deploy 命令请求对象类型（§3.4 / §5.2）
+import type { DevOpsResult } from "../eag/devops/types";
+import type { DeployRequest } from "../eag/cli/eag-command-parser";
 
 // ============================================================================
 // 测试辅助：构造最小请求 fixture（真实结构，非 mock）
@@ -149,6 +156,42 @@ function createMinimalEagStatusRequest(): EagStatusRequest {
     projectRoot: "/test/project",
     runId: "abc123def456",
   }) as EagStatusRequest;
+}
+
+/**
+ * 构造测试用最小 DeployRequest 占位对象（EAG-P4 批次 13 Phase 7 §5.1）
+ *
+ * 用于 extractDeployRequest 字段校验通过路径测试。
+ * 字段对齐设计文档 §5.1 中的 DeployRequest 接口定义。
+ */
+function createMinimalDeployRequest(): DeployRequest {
+  return Object.freeze({
+    projectName: "order-service",
+    environment: "prod",
+    image: "registry.example.com/order-service:v1.2.3",
+    port: 8080,
+    replicas: 3,
+    iacType: "helm-chart",
+    strategy: "blue-green",
+  }) as DeployRequest;
+}
+
+/**
+ * 构造测试用完整 DeployRequest 占位对象（含 dryRun flag）
+ *
+ * 用于 extractDeployRequest + handleEagDeployCommand 的 dryRun 路径测试。
+ */
+function createMinimalDeployRequestWithDryRun(): DeployRequest {
+  return Object.freeze({
+    projectName: "payment-service",
+    environment: "staging",
+    image: "registry.example.com/payment-service:v2.0.0",
+    port: 9090,
+    replicas: 5,
+    iacType: "terraform",
+    strategy: "canary",
+    dryRun: true,
+  }) as DeployRequest;
 }
 
 /**
@@ -1301,4 +1344,479 @@ test("M3. 注入 ruleLearner 后主对话循环可调用 detectRuleCandidateHook
   assert.ok(prompt.includes("必须测试先行再实现功能"), "确认请求应包含纠正内容");
   assert.ok(prompt.includes("process-gate"), "确认请求应包含推断的分类（process-gate，因输入含'测试先行'关键词）");
   assert.ok(prompt.includes("MAJOR"), "确认请求应包含推断的级别（MAJOR，因'必须'语气）");
+});
+
+// ============================================================================
+// N. /eag-deploy 命令测试（EAG-P4 批次 13 Phase 7 §3.4 / §5.2）
+// ============================================================================
+
+test("N1. EagCommandParser 对 /eag-deploy 命令返回 eag-deploy kind（命令判定逻辑）", () => {
+  // EAG-P4 批次 13 Phase 7 §5.1：/eag-deploy 命令由 EagCommandParser.parse() 统一入口判定
+  // 验证：EagCommandParser 能正确识别 /eag-deploy 命令（kind === "eag-deploy"）
+  // 判定规则：text 严格匹配 /eag-deploy，无图片附件，无技能匹配
+  const manager = createTestManager(() => {});
+  const internal = manager as any;
+  const parser = internal.eagCommandParser;
+
+  // 正确命令格式
+  assert.equal(parser.parse({ text: "/eag-deploy" }).kind, "eag-deploy");
+  assert.equal(parser.parse({ text: "  /eag-deploy  " }).kind, "eag-deploy");
+  // 非命令格式（严格匹配，不允许参数内嵌）
+  assert.equal(parser.parse({ text: "请帮我执行 /eag-deploy" }).kind, "unknown");
+  assert.equal(parser.parse({ text: "/eag-deploy --project order-service" }).kind, "unknown");
+  // 其他 EAG 命令不受影响
+  assert.equal(parser.parse({ text: "/eag-build" }).kind, "eag-build");
+  assert.equal(parser.parse({ text: "/eag-status" }).kind, "eag-status");
+  // 非字符串 / undefined 兜底
+  assert.equal(parser.parse({ text: undefined }).kind, "unknown");
+  assert.equal(parser.parse({ text: 123 as any }).kind, "unknown");
+  // 含图片或技能时不识别为命令（避免误触发）
+  assert.equal(parser.parse({ text: "/eag-deploy", imageUrls: ["data:image/png;base64,..."] }).kind, "unknown");
+  assert.equal(
+    parser.parse({ text: "/eag-deploy", skills: [{ name: "test", path: "/", description: "" }] }).kind,
+    "unknown"
+  );
+});
+
+test("N2. handleEagDeployCommand 未注入 devopsOrchestrator 时通知错误并标记 failed", async () => {
+  // 验证 handleEagDeployCommand 的依赖校验逻辑（session.ts §handleEagDeployCommand 步骤 1）：
+  // 未注入 devopsOrchestrator → 通知用户配置缺失，更新 session 状态为 failed
+  const messages: string[] = [];
+  const manager = createTestManager((content) => messages.push(content));
+
+  const internal = manager as any;
+  // handleEagDeployCommand 第三参数 request 由 EagCommandParser 预提取
+  // 此测试验证未注入 devopsOrchestrator 路径，request 传 null（依赖校验先于 request 校验）
+  await internal.handleEagDeployCommand("test-session-deploy-1", { text: "/eag-deploy" }, null, new AbortController());
+
+  // 验证：通知消息含"DevOps 编排器未注入"字样
+  assert.ok(messages.length > 0, "应发送至少一条通知消息");
+  assert.ok(
+    messages.some((m) => m.includes("DevOps 编排器未注入")),
+    `通知消息应含"DevOps 编排器未注入"，实际为：${messages.join("\n")}`
+  );
+});
+
+test("N3. handleEagDeployCommand 已注入但未提供 DeployRequest 时通知错误", async () => {
+  // 验证 handleEagDeployCommand 的请求校验逻辑（session.ts §handleEagDeployCommand 步骤 2）：
+  // 已注入 devopsOrchestrator 但未提供 DeployRequest → 通知用户配置缺失
+  const messages: string[] = [];
+  // 注：此测试只走到请求校验失败分支，不调用 orchestrator.run()
+  // 使用最小真实对象（{ run: () => ({}) }）满足字段校验，与既有 F19/G3/H3 模式一致
+  const fakeOrchestrator = { run: () => ({}) } as any;
+  const manager = createTestManager((content) => messages.push(content), { devopsOrchestrator: fakeOrchestrator });
+
+  const internal = manager as any;
+  // 此测试验证未提供 DeployRequest 路径，request 显式传 null 触发 "DeployRequest 未提供" 错误
+  await internal.handleEagDeployCommand("test-session-deploy-2", { text: "/eag-deploy" }, null, new AbortController());
+
+  // 验证：通知消息含"DeployRequest 未提供"字样
+  assert.ok(messages.length > 0, "应发送至少一条通知消息");
+  assert.ok(
+    messages.some((m) => m.includes("DeployRequest 未提供")),
+    `通知消息应含"DeployRequest 未提供"，实际为：${messages.join("\n")}`
+  );
+});
+
+test("N4. EagCommandParser 正确提取并校验 DeployRequest 字段", () => {
+  // EAG-P4 批次 13 Phase 7 §5.1：extractDeployRequest 已迁移至 EagCommandParser.parse() 内部
+  // 验证 EagCommandParser.parse() 的字段校验逻辑（payload 提取）：
+  // 1. messageParams 缺失/空 → payload 为 null
+  // 2. deployRequest 字段缺失 → payload 为 null
+  // 3. deployRequest 字段不完整（缺 projectName / image / port / replicas 等）→ payload 为 null
+  // 4. deployRequest 字段取值非法（environment / iacType / strategy）→ payload 为 null
+  // 5. deployRequest.port / replicas 超范围 → payload 为 null
+  // 6. deployRequest.dryRun 非 boolean → payload 为 null
+  // 7. deployRequest 字段完整且合法 → payload 为 DeployRequest 对象
+  const manager = createTestManager(() => {});
+  const internal = manager as any;
+  const parser = internal.eagCommandParser;
+
+  // 情况 1：messageParams 为 undefined
+  assert.equal(parser.parse({ text: "/eag-deploy" }).payload, null);
+  // 情况 1：messageParams 为 null
+  assert.equal(parser.parse({ text: "/eag-deploy", messageParams: null }).payload, null);
+  // 情况 1：messageParams 为空对象
+  assert.equal(parser.parse({ text: "/eag-deploy", messageParams: {} }).payload, null);
+  // 情况 2：deployRequest 字段缺失
+  assert.equal(parser.parse({ text: "/eag-deploy", messageParams: { other: "value" } }).payload, null);
+
+  // 情况 3：deployRequest.projectName 缺失
+  assert.equal(
+    parser.parse({
+      text: "/eag-deploy",
+      messageParams: {
+        deployRequest: {
+          environment: "prod",
+          image: "img",
+          port: 8080,
+          replicas: 3,
+          iacType: "helm-chart",
+          strategy: "rolling",
+        },
+      },
+    }).payload,
+    null
+  );
+  // 情况 3：deployRequest.image 缺失
+  assert.equal(
+    parser.parse({
+      text: "/eag-deploy",
+      messageParams: {
+        deployRequest: {
+          projectName: "svc",
+          environment: "prod",
+          port: 8080,
+          replicas: 3,
+          iacType: "helm-chart",
+          strategy: "rolling",
+        },
+      },
+    }).payload,
+    null
+  );
+
+  // 情况 4：environment 取值非法
+  assert.equal(
+    parser.parse({
+      text: "/eag-deploy",
+      messageParams: {
+        deployRequest: {
+          projectName: "svc",
+          environment: "qa",
+          image: "img",
+          port: 8080,
+          replicas: 3,
+          iacType: "helm-chart",
+          strategy: "rolling",
+        },
+      },
+    }).payload,
+    null
+  );
+  // 情况 4：iacType 取值非法
+  assert.equal(
+    parser.parse({
+      text: "/eag-deploy",
+      messageParams: {
+        deployRequest: {
+          projectName: "svc",
+          environment: "prod",
+          image: "img",
+          port: 8080,
+          replicas: 3,
+          iacType: "pulumi",
+          strategy: "rolling",
+        },
+      },
+    }).payload,
+    null
+  );
+  // 情况 4：strategy 取值非法
+  assert.equal(
+    parser.parse({
+      text: "/eag-deploy",
+      messageParams: {
+        deployRequest: {
+          projectName: "svc",
+          environment: "prod",
+          image: "img",
+          port: 8080,
+          replicas: 3,
+          iacType: "helm-chart",
+          strategy: "recreate",
+        },
+      },
+    }).payload,
+    null
+  );
+
+  // 情况 5：port 超范围（> 65535）
+  assert.equal(
+    parser.parse({
+      text: "/eag-deploy",
+      messageParams: {
+        deployRequest: {
+          projectName: "svc",
+          environment: "prod",
+          image: "img",
+          port: 70000,
+          replicas: 3,
+          iacType: "helm-chart",
+          strategy: "rolling",
+        },
+      },
+    }).payload,
+    null
+  );
+  // 情况 5：replicas 超范围（> 100）
+  assert.equal(
+    parser.parse({
+      text: "/eag-deploy",
+      messageParams: {
+        deployRequest: {
+          projectName: "svc",
+          environment: "prod",
+          image: "img",
+          port: 8080,
+          replicas: 200,
+          iacType: "helm-chart",
+          strategy: "rolling",
+        },
+      },
+    }).payload,
+    null
+  );
+
+  // 情况 6：dryRun 非 boolean（字符串）
+  assert.equal(
+    parser.parse({
+      text: "/eag-deploy",
+      messageParams: {
+        deployRequest: {
+          projectName: "svc",
+          environment: "prod",
+          image: "img",
+          port: 8080,
+          replicas: 3,
+          iacType: "helm-chart",
+          strategy: "rolling",
+          dryRun: "yes",
+        },
+      },
+    }).payload,
+    null
+  );
+
+  // 情况 7：字段完整且合法 → 返回对象
+  const validRequest = createMinimalDeployRequest();
+  const parsed = parser.parse({
+    text: "/eag-deploy",
+    messageParams: { deployRequest: validRequest },
+  });
+  assert.ok(parsed.payload, "字段完整时应返回 DeployRequest 对象");
+  assert.equal((parsed.payload as any).projectName, "order-service");
+  assert.equal((parsed.payload as any).environment, "prod");
+  assert.equal((parsed.payload as any).port, 8080);
+  assert.equal((parsed.payload as any).replicas, 3);
+  assert.equal((parsed.payload as any).iacType, "helm-chart");
+  assert.equal((parsed.payload as any).strategy, "blue-green");
+
+  // 情况 7（含 dryRun）：dryRun=true 应被正确提取
+  const validRequestWithDryRun = createMinimalDeployRequestWithDryRun();
+  const parsedDryRun = parser.parse({
+    text: "/eag-deploy",
+    messageParams: { deployRequest: validRequestWithDryRun },
+  });
+  assert.ok(parsedDryRun.payload, "含 dryRun 的 DeployRequest 应被正确提取");
+  assert.equal((parsedDryRun.payload as any).dryRun, true);
+});
+
+test("N5. renderDevOpsResult 正确渲染结果摘要（成功场景 + 失败场景，§3.4 / §5.2）", () => {
+  // 验证 renderDevOpsResult 的渲染逻辑：
+  // 1. 包含标题 [EAG DEPLOY Loop]
+  // 2. 包含最终状态（成功/失败）
+  // 3. 包含 runId 与总耗时
+  // 4. 包含 IaC 模板清单（前 10 个，含 type / filePath / hash 前 8 位）
+  // 5. 包含部署资源清单（前 10 个）
+  // 6. 包含健康检查结果
+  // 7. 包含烟雾测试结果
+  // 8. 包含 G-8 门禁结果（passed + reason + severity）
+  // 9. 包含错误信息列表（前 10 条）
+  const manager = createTestManager(() => {});
+  const internal = manager as any;
+
+  // 构造测试用 DevOpsResult（成功场景）
+  const successResult: DevOpsResult = Object.freeze({
+    success: true,
+    runId: "deploy-run-001",
+    startedAt: "2026-07-20T10:00:00.000Z",
+    finishedAt: "2026-07-20T10:02:30.000Z",
+    duration: 150000, // 150 秒
+    iacTemplates: Object.freeze([
+      Object.freeze({
+        type: "helm-chart",
+        content: "...",
+        filePath: "Chart.yaml",
+        hash: "abc123def4567890abcdef1234567890abcdef1234567890abcdef1234567890",
+        generatedAt: "2026-07-20T10:01:00.000Z",
+      }),
+      Object.freeze({
+        type: "helm-chart",
+        content: "...",
+        filePath: "values.yaml",
+        hash: "def4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        generatedAt: "2026-07-20T10:01:00.000Z",
+      }),
+    ]),
+    deployResult: Object.freeze({
+      success: true,
+      deployedAt: "2026-07-20T10:02:00.000Z",
+      duration: 60000,
+      resources: Object.freeze([
+        Object.freeze({
+          kind: "Deployment",
+          name: "order-service",
+          namespace: "prod",
+          status: "Running",
+        }),
+        Object.freeze({
+          kind: "Service",
+          name: "order-service-svc",
+          namespace: "prod",
+          status: "Running",
+        }),
+      ]),
+      errors: Object.freeze([]),
+    }),
+    healthCheckResult: Object.freeze({
+      healthy: true,
+      checkedAt: "2026-07-20T10:02:15.000Z",
+      endpoints: Object.freeze([
+        Object.freeze({
+          url: "http://order-service.prod.svc.cluster.local:8080/healthz",
+          statusCode: 200,
+          responseTimeMs: 50,
+          healthy: true,
+        }),
+      ]),
+      failures: Object.freeze([]),
+    }),
+    smokeTestResult: Object.freeze({
+      passed: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      duration: 2000,
+      failures: Object.freeze([]),
+    }),
+    gateResult: Object.freeze({
+      passed: true,
+      gate: "G-8",
+      reason: "全部部署就绪条件满足",
+      severity: "blocker",
+    }),
+    errors: Object.freeze([]),
+  }) as DevOpsResult;
+
+  const successSummary: string = internal.renderDevOpsResult(successResult);
+
+  // 验证渲染内容（成功场景）
+  assert.ok(successSummary.includes("[EAG DEPLOY Loop]"), "应包含标题");
+  assert.ok(successSummary.includes("最终状态: 成功"), "应包含最终状态（成功）");
+  assert.ok(successSummary.includes("runId: deploy-run-001"), "应包含 runId");
+  assert.ok(successSummary.includes("总耗时: 150.0s"), "应包含总耗时（秒）");
+  assert.ok(successSummary.includes("IaC 模板 (2 个)"), "应包含 IaC 模板数");
+  assert.ok(successSummary.includes("[helm-chart] Chart.yaml"), "应包含 Chart.yaml 模板");
+  assert.ok(successSummary.includes("[helm-chart] values.yaml"), "应包含 values.yaml 模板");
+  assert.ok(successSummary.includes("hash: abc123de"), "应包含 hash 前 8 位");
+  assert.ok(successSummary.includes("部署资源 (2 个)"), "应包含部署资源数");
+  assert.ok(successSummary.includes("Deployment/order-service"), "应包含 Deployment 资源");
+  assert.ok(successSummary.includes("健康检查: 通过"), "应包含健康检查结果（通过）");
+  assert.ok(successSummary.includes("端点数: 1"), "应包含端点数");
+  assert.ok(successSummary.includes("烟雾测试: 通过"), "应包含烟雾测试结果（通过）");
+  assert.ok(successSummary.includes("通过: 1"), "应包含烟雾测试通过数");
+  assert.ok(successSummary.includes("G-8 门禁: 通过"), "应包含 G-8 门禁结果（通过）");
+  assert.ok(successSummary.includes("全部部署就绪条件满足"), "应包含门禁理由");
+
+  // 验证失败场景：含 errors + G-8 未通过
+  const failedResult: DevOpsResult = Object.freeze({
+    ...successResult,
+    success: false,
+    runId: "deploy-run-002",
+    gateResult: Object.freeze({
+      passed: false,
+      gate: "G-8",
+      reason: "健康检查未通过：1 个端点不健康",
+      severity: "blocker",
+    }),
+    errors: Object.freeze(["G-8 门禁未通过：健康检查未通过：1 个端点不健康", "DeployStage 执行失败：smoke-test 超时"]),
+  }) as DevOpsResult;
+
+  const failedSummary: string = internal.renderDevOpsResult(failedResult);
+  assert.ok(failedSummary.includes("最终状态: 失败"), "应渲染失败状态");
+  assert.ok(failedSummary.includes("runId: deploy-run-002"), "应渲染失败的 runId");
+  assert.ok(failedSummary.includes("G-8 门禁: 未通过"), "应渲染 G-8 门禁未通过");
+  assert.ok(failedSummary.includes("健康检查未通过：1 个端点不健康"), "应渲染门禁失败理由");
+  assert.ok(failedSummary.includes("错误信息 (2 条)"), "应包含错误信息数");
+  assert.ok(failedSummary.includes("G-8 门禁未通过"), "应包含第一条错误");
+  assert.ok(failedSummary.includes("DeployStage 执行失败"), "应包含第二条错误");
+});
+
+test("N6. handleEagDeployCommand dryRun 模式启用时通知用户（§5.1）", async () => {
+  // 验证 handleEagDeployCommand 的 dryRun 模式通知逻辑：
+  // DeployRequest.dryRun=true → 在编排前通知用户"dryRun 模式已启用"
+  // 注：批次 13 暂不支持 dryRun 短路，DevOpsOrchestrator.run() 始终执行完整 5 步编排
+  // 此测试仅验证 dryRun 通知消息，不验证编排结果（编排由 devops-orchestrator.test.ts 覆盖）
+  const messages: string[] = [];
+  // 构造 fakeOrchestrator：run() 返回成功的 DevOpsResult，避免编排异常干扰测试
+  const fakeSuccessResult: DevOpsResult = Object.freeze({
+    success: true,
+    runId: "test-dry-run",
+    startedAt: "2026-07-20T10:00:00.000Z",
+    finishedAt: "2026-07-20T10:00:01.000Z",
+    duration: 1000,
+    iacTemplates: Object.freeze([]),
+    gateResult: Object.freeze({
+      passed: true,
+      gate: "G-8",
+      reason: "测试通过",
+      severity: "blocker",
+    }),
+    errors: Object.freeze([]),
+  }) as DevOpsResult;
+  const fakeOrchestrator = { run: () => Promise.resolve(fakeSuccessResult) } as any;
+  const manager = createTestManager((content) => messages.push(content), { devopsOrchestrator: fakeOrchestrator });
+
+  const internal = manager as any;
+  const dryRunRequest = createMinimalDeployRequestWithDryRun();
+  await internal.handleEagDeployCommand(
+    "test-session-deploy-dryrun",
+    { text: "/eag-deploy" },
+    dryRunRequest,
+    new AbortController()
+  );
+
+  // 验证：dryRun 通知消息存在
+  assert.ok(messages.length > 0, "应发送至少一条通知消息");
+  assert.ok(
+    messages.some((m) => m.includes("dryRun 模式已启用")),
+    `通知消息应含"dryRun 模式已启用"，实际为：${messages.join("\n")}`
+  );
+});
+
+test("N7. SessionManagerOptions.devopsOrchestrator 字段正确传递（§5.2）", () => {
+  // 验证：SessionManager 构造函数正确赋值 EAG-P4 批次 13 新增字段 devopsOrchestrator
+  // 对应 session.ts §this.devopsOrchestrator = options.devopsOrchestrator
+  const fakeDevOpsOrchestrator = { run: () => ({}) } as any;
+
+  const manager = new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({ client: null, model: "test-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+    // EAG-P4 批次 13 新增字段
+    devopsOrchestrator: fakeDevOpsOrchestrator,
+  });
+
+  const internal = manager as any;
+  assert.equal(internal.devopsOrchestrator, fakeDevOpsOrchestrator, "devopsOrchestrator 字段应正确传递");
+});
+
+test("N8. 未注入 devopsOrchestrator 时 SessionManager 正常构造（向后兼容，§5.2）", () => {
+  // 验证：EAG-P4 批次 13 字段 devopsOrchestrator 为可选，不注入时 SessionManager 正常构造
+  // （向后兼容保证，既有测试零回归）
+  const manager = new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({ client: null, model: "test-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+    // 不传入任何 EAG-P4 批次 13 字段
+  });
+
+  assert.ok(manager instanceof SessionManager, "SessionManager 应正常实例化");
+  const internal = manager as any;
+  assert.equal(internal.devopsOrchestrator, undefined, "未注入时 devopsOrchestrator 应为 undefined");
 });

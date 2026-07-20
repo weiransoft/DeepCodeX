@@ -6,12 +6,13 @@
  * 设计原则（§5.12.4 G-A6d）：
  * - 类型与值分离导出（type-only re-export 避免运行期循环依赖）
  * - 不可变优先：EAG_COMMAND_STRINGS 通过 Object.freeze 冻结
+ * - 独立函数 extractDeployRequestFromPrompt 供 session.ts 构造 messageParams 时调用
  *
  * @module eag/cli
  */
 
-// EagCommandParser 类（值导出，含运行期实现）
-export { EagCommandParser, EAG_COMMAND_STRINGS } from "./eag-command-parser";
+// EagCommandParser 类与独立函数（值导出，含运行期实现）
+export { EagCommandParser, EAG_COMMAND_STRINGS, extractDeployRequestFromPrompt } from "./eag-command-parser";
 
-// EagCommand 类型联合（类型导出，discriminated union）
-export type { EagCommand } from "./eag-command-parser";
+// EagCommand 类型联合与 DeployRequest 接口（类型导出，discriminated union）
+export type { EagCommand, DeployRequest } from "./eag-command-parser";
