@@ -217,13 +217,14 @@ export class DevOpsOrchestrator {
         // N-M-4 修复：失败时仍从 deployStageResult.healthEndpoints 构造 healthCheckResult
         // 当 DeployStage 在 smoke-test 阶段失败时，post-deploy 已执行成功，healthEndpoints 已有值
         // 不应丢失这些已采集的健康端点信息，便于用户定位失败时的健康端点状态
+        // P2-1 修复：healthCheckResult 对象通过 Object.freeze 冻结，符合 §5.12.4 G-A6d 不可变优先原则
         if (deployStageResult.healthEndpoints && deployStageResult.healthEndpoints.length > 0) {
-          healthCheckResult = {
+          healthCheckResult = Object.freeze({
             healthy: false, // 失败场景下标记为不健康
             checkedAt: new Date().toISOString(),
             endpoints: deployStageResult.healthEndpoints,
             failures: deployStageResult.errors,
-          };
+          }) as HealthCheckResult;
         }
         // 抛出错误以触发 catch 块的统一失败处理（发射 devops-failed 事件）
         throw new Error(`DeployStage 执行失败：${deployStageResult.errors.join("；")}`);
@@ -243,12 +244,13 @@ export class DevOpsOrchestrator {
       // M-1/M-2 修复：健康检查结果从 deployStageResult.healthEndpoints 填充
       // DeployStage 内部调用 PostDeployChecker，PostDeployCheckResult.endpoints 已填充
       // 此处从 deployStageResult.healthEndpoints 提取并构造 HealthCheckResult
-      healthCheckResult = {
+      // P2-1 修复：healthCheckResult 对象通过 Object.freeze 冻结，符合 §5.12.4 G-A6d 不可变优先原则
+      healthCheckResult = Object.freeze({
         healthy: deployStageResult.postDeployPassed,
         checkedAt: new Date().toISOString(),
         endpoints: deployStageResult.healthEndpoints,
         failures: deployStageResult.errors,
-      };
+      }) as HealthCheckResult;
 
       // 发射 smoke-test-passed 事件（4 步阶段全部成功，含 smoke-test 通过）
       // 注意：smokeTestResult 此处应有值，但为类型安全使用条件发射

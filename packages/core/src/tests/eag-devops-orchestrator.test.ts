@@ -928,6 +928,24 @@ test("T9c. iacTemplates 数组中每个模板已冻结", async () => {
   }
 });
 
+test("T9d. P2-1 修复：成功场景下 healthCheckResult 已冻结（§5.12.4 G-A6d 不可变优先）", async () => {
+  const orchestrator = new DevOpsOrchestrator(createOptions());
+  const result = await orchestrator.run(createContext());
+  // P2-1 修复：healthCheckResult 对象必须通过 Object.freeze 冻结
+  assert.ok(result.healthCheckResult !== undefined, "healthCheckResult 应有值");
+  assert.equal(Object.isFrozen(result.healthCheckResult), true, "成功场景下 healthCheckResult 应已冻结（P2-1 修复）");
+});
+
+test("T9e. P2-1 修复：失败场景下 healthCheckResult 已冻结（N-M-4 + P2-1 联合验证）", async () => {
+  // 使用 AlwaysFailDeployStage 触发失败场景，验证 N-M-4 修复构造的 healthCheckResult 也已冻结
+  const orchestrator = new DevOpsOrchestrator(createOptions({ deployStage: new AlwaysFailDeployStage() }));
+  const result = await orchestrator.run(createContext());
+  // N-M-4 修复：失败时仍构造 healthCheckResult
+  assert.ok(result.healthCheckResult !== undefined, "失败时 healthCheckResult 也应有值（N-M-4 修复）");
+  // P2-1 修复：失败场景下构造的 healthCheckResult 也必须冻结
+  assert.equal(Object.isFrozen(result.healthCheckResult), true, "失败场景下 healthCheckResult 应已冻结（P2-1 修复）");
+});
+
 // ============================================================================
 // T10. 多生成器并行调用
 // ============================================================================
