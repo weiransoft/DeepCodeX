@@ -53,6 +53,17 @@ Deep Code 推荐使用 `deepseek-v4-pro`，也支持 `deepseek-v4-flash`。创�
 
 也可以在项目目录中创建 `.deepcode/settings.json`，为当前项目单独设置模型、权限或 MCP。
 
+### 目录命名差异说明
+
+Deep Code 存在两套并存的目录命名约定，请勿混淆：
+
+- **`.deepcode/`**（无 x）：Deep Code CLI 主配置目录，存放 `settings.json`、`skills/`、`plugins/` 等
+  - 用户级：`~/.deepcode/settings.json`
+  - 项目级：`./.deepcode/settings.json`
+- **`.deepcodex/`**（带 x）：Team 模块 autonomous 编排专用目录，存放 `autonomous.yml`、`runs/`、`notes.md`
+  - 用户级：`~/.deepcodex/autonomous.yml`
+  - 项目级：`./.deepcodex/autonomous.yml`、`./.deepcodex/runs/`、`./.deepcodex/notes.md`
+
 更多 DeepSeek 官方配置说明可参考 [Deep Code 集成指南](https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/deepcode)。
 
 更多配置项请参考 [configuration.md](configuration.md)。
@@ -187,6 +198,42 @@ Deep Code 默认支持 YOLO 模式，可以更流畅地执行读写文件、运�
 如果希望 Deep Code 完成任务后通知你，可以配置通知脚本，例如发送 Slack、飞书、系统通知或终端提示。
 
 更多说明请参考 [notify.md](notify.md)。
+
+## Team Autonomous（可选）
+
+Deep Code CLI 内置 Team 模块，支持 Ralph 风格的 autonomous 自主编排模式（plan → dev → verify → fix 循环直到完成）。
+
+### 启动 autonomous run
+
+```bash
+deepcodex team autonomous --goal "为登录逻辑添加单元测试" --max-iter 10
+```
+
+### autonomous 4 阶段流程
+
+| 阶段    | 说明                                    |
+| :------ | :-------------------------------------- |
+| Plan    | 规划阶段：根据 goal 拆解任务，生成实施计划       |
+| Dev     | 开发阶段：按计划执行实施，调用 LLM 完成代码变更   |
+| Verify  | 验证阶段：运行测试或检查点，确认实施成果         |
+| Fix     | 修复阶段：根据验证结果修复问题，进入下一轮迭代     |
+
+LLM 在每个阶段输出时使用以下标题前缀作为 stage 识别契约：`# Plan 阶段` / `# Dev 阶段` / `# Verify 阶段` / `# Fix 阶段`。
+
+### 配置与状态文件路径
+
+| 路径                                  | 用途                              | 层级     |
+| :------------------------------------ | :-------------------------------- | :------- |
+| `~/.deepcode/settings.json`           | Deep Code 主配置（含 `env.API_KEY`） | 用户级   |
+| `./.deepcode/settings.json`           | Deep Code 项目级配置                | 项目级   |
+| `~/.deepcodex/autonomous.yml`         | autonomous 编排配置                 | 用户级   |
+| `./.deepcodex/autonomous.yml`         | autonomous 编排配置                 | 项目级   |
+| `./.deepcodex/runs/<runId>/state.json` | 单次运行状态持久化                  | 项目级   |
+| `./.deepcodex/notes.md`               | 跨轮记忆（多个 run 共享）           | 项目级   |
+
+启动前请确保 `~/.deepcode/settings.json` 的 `env.API_KEY` 字段已配置，否则 autonomous 模式会因缺少 API Key 直接退出。
+
+支持通过 `--resume-run <runId>` 断点续跑历史 run。
 
 ## 下一步
 

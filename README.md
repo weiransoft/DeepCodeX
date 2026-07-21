@@ -67,6 +67,70 @@ Skills 会按以下优先级扫描：
 - 通过使用[上下文缓存](https://api-docs.deepseek.com/guides/kv_cache)来降低成本。
 - 原生支持[思考模式](https://api-docs.deepseek.com/guides/thinking_mode)和思考强度控制。
 
+## Team 多角色协作
+
+Deep Code CLI 内置 Team 模块，提供基于多角色智能体的协作能力，支持 Ralph 风格的 autonomous 自主编排模式（plan → dev → verify → fix 循环直到完成）。
+
+### 目录命名差异说明
+
+Deep Code 存在两套并存的目录命名约定，请勿混淆：
+
+| 目录              | 用途                                         | 说明                          |
+| :---------------- | :------------------------------------------- | :---------------------------- |
+| `~/.deepcode/`    | 用户级 `settings.json`、`skills/`、`plugins/` 等 | Deep Code 主配置目录（无 x）   |
+| `./.deepcode/`    | 项目级 `settings.json`、`skills/`、`plugins/` 等 | Deep Code 主配置目录（无 x）   |
+| `./.deepcodex/`   | 项目级 `autonomous.yml`、`runs/`、`notes.md`  | Team autonomous 专用目录（带 x） |
+| `~/.deepcodex/`   | 用户级 `autonomous.yml`                       | Team autonomous 专用目录（带 x） |
+
+- **`.deepcode/`**（无 x）：Deep Code CLI 主配置目录，存放 `settings.json`、`skills/`、`plugins/` 等
+- **`.deepcodex/`**（带 x）：Team 模块 autonomous 编排目录，存放 `autonomous.yml`、`runs/`、`notes.md`
+
+### Autonomous 自主编排模式
+
+通过 `deepcodex team autonomous` 启动 Ralph 风格 4 阶段循环：
+
+```bash
+deepcodex team autonomous --goal "实现登录功能" --max-iter 10
+```
+
+**autonomous 4 阶段流程**（plan → dev → verify → fix 循环直到完成）：
+
+| 阶段    | 说明                                    |
+| :------ | :-------------------------------------- |
+| Plan    | 规划阶段：根据 goal 拆解任务，生成实施计划       |
+| Dev     | 开发阶段：按计划执行实施，调用 LLM 完成代码变更   |
+| Verify  | 验证阶段：运行测试或检查点，确认实施成果         |
+| Fix     | 修复阶段：根据验证结果修复问题，进入下一轮迭代     |
+
+**Stage 标题命名约定**：
+
+LLM 在每个阶段输出时使用以下标题前缀（作为 stage 识别契约，stage-handlers.ts 基于该前缀推断当前阶段）：
+
+- `# Plan 阶段` — Plan 阶段输出标题
+- `# Dev 阶段` — Dev 阶段输出标题
+- `# Verify 阶段` — Verify 阶段输出标题
+- `# Fix 阶段` — Fix 阶段输出标题
+
+### Autonomous 配置
+
+在项目根目录创建 `./.deepcodex/autonomous.yml`：
+
+```yaml
+max_iterations: 10
+confirmation: smart        # auto-approve | ask-user | fail-closed
+sleep_guard: true
+git:
+  auto_commit: true
+  branch_prefix: "autonomous/"
+```
+
+运行状态持久化路径：
+
+- `./.deepcodex/runs/<runId>/state.json` — 单次运行状态
+- `./.deepcodex/notes.md` — 项目级跨轮记忆（多个 run 共享）
+
+支持通过 `--resume-run <runId>` 断点续跑。
+
 ## 斜杠命令与按键功能
 
 | 斜杠命令        | 操作                               |
