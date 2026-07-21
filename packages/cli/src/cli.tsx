@@ -46,6 +46,8 @@ async function main(): Promise<void> {
       subcommand: subcommand as "list" | "match" | "dispatch" | "autonomous" | "full-lifecycle",
       role: opts["role"] as "architect" | "solo-coder" | "test-expert" | "ui-designer" | "product-manager" | undefined,
       task: opts["task"] as string | undefined,
+      // v2.1.1 E2E：透传 --task-file 选项（从文件读取任务描述，避免 shell 转义问题）
+      taskFile: opts["task-file"] as string | undefined,
       goal: goalRaw,
       keywords,
       maxIterations: typeof opts["max-iterations"] === "number" ? (opts["max-iterations"] as number) : undefined,
@@ -53,6 +55,13 @@ async function main(): Promise<void> {
       consensus: opts["consensus"] === true,
       failFast: opts["fail-fast"] === false ? false : true,
       projectRoot: (opts["project-root"] as string | undefined) ?? process.cwd(),
+      // v2.1 P5：透传 full-lifecycle 八阶段循环相关参数
+      // 这些参数在 team-cmd.ts 的 executeFullLifecycleCommand 中使用
+      useLoop: opts["use-loop"] === true,
+      prdPath: opts["prd-path"] as string | undefined,
+      architecturePath: opts["architecture-path"] as string | undefined,
+      testPlanPath: opts["test-plan-path"] as string | undefined,
+      testCommand: opts["test-command"] as string | undefined,
     });
     process.exit(exitCode);
   }

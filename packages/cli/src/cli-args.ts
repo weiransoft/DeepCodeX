@@ -146,6 +146,14 @@ async function configureYargs(argv?: string[]) {
             describe: `Target role id. Available: ${ROLE_REGISTRY.map((r) => r.roleId).join(", ")}`,
           })
           .option("task", { type: "string", describe: "Task description" })
+          // v2.1.1 E2E：新增 --task-file 选项，从文件读取任务描述
+          // 用途：当 task 描述包含 shell 特殊字符（<, >, ?, |, &, $, `, ", ' 等）或
+          //       内容超长（如嵌入完整 PRD/ARCHITECTURE 文档）时，避免命令行参数转义问题
+          // 优先级：--task-file 优先于 --task（同时指定时 --task-file 生效）
+          .option("task-file", {
+            type: "string",
+            describe: "Path to a file containing the task description (overrides --task; avoids shell escaping issues)",
+          })
           .option("goal", { type: "string", describe: "Goal / project name (autonomous / full-lifecycle)" })
           .option("project", { type: "string", describe: "Project name (full-lifecycle alias)" })
           .option("keywords", { type: "string", describe: "Comma-separated keywords for role matching" })
@@ -161,6 +169,33 @@ async function configureYargs(argv?: string[]) {
             type: "boolean",
             describe: "Resume the latest resumable autonomous run (autonomous subcommand only)",
             default: false,
+          })
+          // v2.1 P5：full-lifecycle 八阶段循环相关选项
+          // --use-loop：启用 WorkflowLoopController（审查失败时精准回退到 development/test_verification）
+          .option("use-loop", {
+            type: "boolean",
+            describe: "Enable WorkflowLoopController for 8-stage full-lifecycle (rollback on review failure)",
+            default: false,
+          })
+          // --prd-path：PRD 文档路径（阶段 8 文档对照代码审查输入）
+          .option("prd-path", {
+            type: "string",
+            describe: "PRD document path (stage 8 doc-code review input)",
+          })
+          // --architecture-path：架构设计文档路径（阶段 8 文档对照代码审查输入）
+          .option("architecture-path", {
+            type: "string",
+            describe: "Architecture document path (stage 8 doc-code review input)",
+          })
+          // --test-plan-path：测试计划文档路径（阶段 8 文档对照代码审查输入）
+          .option("test-plan-path", {
+            type: "string",
+            describe: "Test plan document path (stage 8 doc-code review input)",
+          })
+          // --test-command：测试命令（阶段 7 测试验证 + 阶段 8 D3 检查使用，如 "npm test"）
+          .option("test-command", {
+            type: "string",
+            describe: 'Test command for stage 7 verification and stage 8 D3 check (e.g. "npm test")',
           })
           .check((argv: { [x: string]: unknown }) => {
             const role = argv["role"];
@@ -298,9 +333,12 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     (parsed["rules"] as string | undefined);
   const teamOptions: Record<string, string | boolean | number | string[] | undefined> = {};
   if (teamRaw) {
+    // v2.1 P5：新增 use-loop / prd-path / architecture-path / test-plan-path / test-command
+    // 这 5 个选项专用于 full-lifecycle 子命令，需在此处提取以传递给 executeTeamCommand
     const optionKeys = [
       "role",
       "task",
+      "task-file", // v2.1.1 E2E：从文件读取任务描述
       "goal",
       "project",
       "keywords",
@@ -310,6 +348,12 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
       "fail-fast",
       "project-root",
       "resume-run",
+      // v2.1 P5：八阶段循环相关选项
+      "use-loop",
+      "prd-path",
+      "architecture-path",
+      "test-plan-path",
+      "test-command",
     ];
     for (const key of optionKeys) {
       const v = parsed[key];

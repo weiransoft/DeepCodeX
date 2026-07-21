@@ -547,6 +547,60 @@ export {
 } from "./team/index.js";
 
 // ============================================================================
+// v2.1 P5：八阶段工作流循环控制器 + 文档对照代码审查器
+//
+// 以下导出用于 team-cmd.ts 的 full-lifecycle 子命令：
+//   - WorkflowLoopController：循环模式控制器（--use-loop 启用）
+//   - DefaultStageExecutor：默认阶段执行器（调用 executeDispatch）
+//   - DocCodeConsistencyChecker：文档对照一致性检查器（D1~D6 六大维度）
+//   - WORKFLOW_STAGES / WorkflowStage：八阶段定义
+//   - summarizeWorkflowRunResult：运行结果汇总
+// ============================================================================
+export {
+  WorkflowStage,
+  WORKFLOW_STAGES,
+  findStage,
+  findStageByNumber,
+  getStageNumber,
+  getRoleName,
+  getOutputName,
+  toStageKind,
+  RollbackStrategy,
+  WorkflowLoopController,
+  DefaultStageExecutor,
+  summarizeWorkflowRunResult,
+} from "./team/index.js";
+export type {
+  WorkflowStageMeta,
+  StageExecutionResult,
+  WorkflowIterationRecord,
+  WorkflowRunResult,
+  StageExecutionContext,
+  StageExecutor,
+  WorkflowLogCallback,
+  DefaultStageExecutorOptions,
+} from "./team/index.js";
+
+// 文档对照一致性检查器（D1~D6 六大维度）
+export { DocCodeConsistencyChecker, DocParser, CodeScanner } from "./team/index.js";
+export type {
+  FeatureCheckItem,
+  IntegrationCheckItem,
+  TestCheckResult,
+  AcceptanceCheckItem,
+  TodoItem,
+  DeviationItem,
+  GapItem,
+  ConsistencyReport,
+  CodeSymbol,
+  ImportRelation,
+  ParsedFeature,
+  ParsedAcceptanceCriteria,
+  ParsedIntegrationRelation,
+  DocPaths,
+} from "./team/index.js";
+
+// ============================================================================
 // PKC (Project Knowledge Context) —— §5.11 项目知识上下文层
 // EAG-P1 批次 5 实施 L1 全局视野层；EAG-P2 批次 8 新增 L2 语义检索 + L3 业务知识
 // ============================================================================
