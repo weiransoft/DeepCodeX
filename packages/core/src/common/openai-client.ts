@@ -123,3 +123,62 @@ function getMachineId(): string | undefined {
     return undefined;
   }
 }
+
+// ============================================================================
+// v1.4 P0-2：OpenAIClientHandle 接口与类型守卫
+//
+// 设计目的：
+//   - 为 team-adapter.ts 的 executeDispatch 提供"注入客户端"能力
+//   - 单元测试通过 injectedClient 参数注入 stub client（非 mock，真实接口契约）
+//   - 生产环境通过 createOpenAIClient() 创建真实 client
+//
+// 与 createOpenAIClient 返回类型的区别：
+//   - createOpenAIClient 返回完整对象（含 reasoningEffort / debugLogEnabled 等字段）
+//   - OpenAIClientHandle 只保留 LLM 调用所需的 5 个核心字段，降低耦合
+//   - createOpenAIClient 返回值可安全赋值给 OpenAIClientHandle（超集 → 子集）
+// ============================================================================
+
+/**
+ * OpenAI 客户端句柄接口（team-adapter.executeDispatch 注入用）
+ *
+ * 5 个字段：
+ *   - client: OpenAI SDK 实例（unknown 类型，避免 OpenAI 类型耦合到 team 模块）
+ *   - model: 模型名称（如 "qwen-plus" / "deepseek-chat"）
+ *   - baseURL: API 基础 URL
+ *   - temperature: 采样温度（可选）
+ *   - thinkingEnabled: 是否启用思考模式（影响 system prompt 构建）
+ */
+export interface OpenAIClientHandle {
+  /** OpenAI SDK 客户端实例（unknown 类型，避免类型耦合） */
+  client: unknown;
+  /** 模型名称 */
+  model: string;
+  /** API 基础 URL */
+  baseURL: string;
+  /** 采样温度（可选） */
+  temperature?: number;
+  /** 是否启用思考模式 */
+  thinkingEnabled: boolean;
+}
+
+/**
+ * 类型守卫：检查对象是否符合 OpenAIClientHandle 接口
+ *
+ * 严格校验 4 个必填字段：client / model / baseURL / thinkingEnabled
+ * temperature 为可选字段，不强制校验。
+ *
+ * @param obj 待检查的对象
+ * @returns 是否符合 OpenAIClientHandle 接口
+ */
+export function isOpenAIClientHandle(obj: unknown): obj is OpenAIClientHandle {
+  if (obj === null || typeof obj !== "object") {
+    return false;
+  }
+  const o = obj as Record<string, unknown>;
+  // client 可以是任意类型（包括 null / undefined），但字段必须存在
+  if (!("client" in o)) return false;
+  if (typeof o.model !== "string") return false;
+  if (typeof o.baseURL !== "string") return false;
+  if (typeof o.thinkingEnabled !== "boolean") return false;
+  return true;
+}

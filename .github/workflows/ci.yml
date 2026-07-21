@@ -89,3 +89,10 @@ jobs:
       - name: EAG Gate
         if: matrix.os == 'ubuntu-latest' && matrix.node-version == '22'
         run: bash tests/scripts/ci-eag-gate.sh
+
+      # ★ 新增步骤 6：Team 模块专属门禁（对齐设计文档 §5.2.2 P0-3）
+      # 仅在 ubuntu-latest + node 22 运行，避免矩阵重复执行
+      # 包含 team 模块全部单元测试 + CLI team-cmd 集成测试
+      - name: Team Gate
+        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '22'
+        run: bash tests/scripts/ci-team-gate.sh

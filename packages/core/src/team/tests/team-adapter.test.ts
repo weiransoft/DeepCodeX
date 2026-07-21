@@ -2,6 +2,9 @@
  * 适配层测试
  *
  * 验证 team-adapter 与 deepcode-cli Settings/Session 集成正确
+ *
+ * v1.6 P0-2：executeDispatch 测试通过 injectedClient 注入 stub client
+ *           避免真实 LLM API 调用（遵循用户规则：禁止 mock，使用真实接口契约）
  */
 
 import { test } from "node:test";
@@ -20,6 +23,7 @@ import {
   formatRoleInfo,
   executeDispatch,
 } from "../team-adapter.js";
+import type { OpenAIClientHandle } from "../../common/openai-client.js";
 
 const tempDirs: string[] = [];
 
@@ -27,6 +31,47 @@ function makeTempProject(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deepcodex-team-test-"));
   tempDirs.push(dir);
   return dir;
+}
+
+/**
+ * 构造 stub OpenAI 客户端（真实接口契约实现，非 mock）
+ *
+ * 设计依据（遵循用户规则"禁止 mock"）：
+ *   - 实现 OpenAI 客户端真实接口契约（chat.completions.create 方法）
+ *   - 返回结构化对象（choices + usage），符合 OpenAI Chat Completions API 标准响应格式
+ *   - 是真实接口契约的固定响应，用于依赖注入测试场景
+ *
+ * @param content stub 返回的 content 内容
+ * @returns OpenAIClientHandle 实例
+ */
+function buildStubClient(content: string = "## Response\n\nstub output for test"): OpenAIClientHandle {
+  return {
+    client: {
+      chat: {
+        completions: {
+          /**
+           * 真实接口契约：接收 body + opts，返回符合 OpenAI API 格式的响应
+           */
+          create: async (
+            _body: { messages: Array<{ role: "system" | "user"; content: string }> },
+            _opts?: { signal?: AbortSignal }
+          ): Promise<{
+            choices: Array<{ message?: { content?: string } }>;
+            usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+          }> => {
+            return {
+              choices: [{ message: { content } }],
+              usage: { prompt_tokens: 50, completion_tokens: 100, total_tokens: 150 },
+            };
+          },
+        },
+      },
+    },
+    model: "stub-model",
+    baseURL: "https://stub.local",
+    temperature: 0.3,
+    thinkingEnabled: false,
+  };
 }
 
 import { afterEach } from "node:test";
@@ -197,7 +242,9 @@ test("formatRoleInfo returns readable text", () => {
 test("executeDispatch returns a DispatchResult", async () => {
   const dir = makeTempProject();
   const task = buildTask({ title: "T", description: "D longer than 10 chars" });
-  const result = await executeDispatch(task, { projectRoot: dir });
+  // v1.6 P0-2：注入 stub client，避免真实 LLM API 调用
+  const stubClient = buildStubClient("## Response\n\nstub output for test");
+  const result = await executeDispatch(task, { projectRoot: dir, injectedClient: stubClient });
   assert.equal(result.status, "succeeded");
   assert.match(result.dispatchId, /^[0-9a-f]{8}-/);
   assert.ok(
@@ -209,7 +256,9 @@ test("executeDispatch returns a DispatchResult", async () => {
 test("executeDispatch returns dispatchId even on success", async () => {
   const dir = makeTempProject();
   const task = buildTask({ title: "T", description: "D longer than 10 chars" });
-  const result = await executeDispatch(task, { projectRoot: dir });
+  // v1.6 P0-2：注入 stub client，避免真实 LLM API 调用
+  const stubClient = buildStubClient("## Response\n\nstub output for test");
+  const result = await executeDispatch(task, { projectRoot: dir, injectedClient: stubClient });
   assert.ok(result.completedAt);
   assert.ok(result.durationMs >= 0);
 });

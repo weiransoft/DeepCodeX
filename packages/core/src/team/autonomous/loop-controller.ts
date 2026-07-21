@@ -117,9 +117,15 @@ export function defaultIterationResult(): IterationResult {
   };
 }
 
-/** 阶段 Handler 接口 */
+/**
+ * 阶段 Handler 接口
+ *
+ * v1.4 P0-1.2：handle 返回类型改为 StageResult | Promise<StageResult>，
+ * 支持异步 handler（如调用 LLM / 执行 git 操作）。
+ * RalphLoopController.runOneIteration 使用 await handler.handle(ctx) 调用。
+ */
 export interface StageHandler {
-  handle(ctx: IterationContext): StageResult;
+  handle(ctx: IterationContext): StageResult | Promise<StageResult>;
 }
 
 /** RunState 抽象（duck typing） */
@@ -223,9 +229,12 @@ export class RalphLoopController {
   /**
    * 主循环入口
    *
+   * v1.4 P0-1.2：改为 async，支持异步 StageHandler（如调用 LLM / 执行 git 操作）。
+   * 调用方需使用 `await controller.run()`。
+   *
    * @returns 退出码（0=全部成功；1=部分失败；2=fatal abort；3=命中 stop_when）
    */
-  run(): number {
+  async run(): Promise<number> {
     this.log("info", `[RalphLoop] 启动 run_id=${this.runState.state.runId}`);
     this.runState.markRunning();
 
@@ -250,7 +259,8 @@ export class RalphLoopController {
         // 单次迭代
         let iterResult: IterationResult;
         try {
-          iterResult = this.runOneIteration(iterIndex);
+          // v1.4 P0-1.2：await 异步 runOneIteration（支持异步 StageHandler）
+          iterResult = await this.runOneIteration(iterIndex);
         } catch (err) {
           const errObj = err instanceof Error ? err : new Error(String(err));
           iterResult = {
@@ -289,7 +299,8 @@ export class RalphLoopController {
           }
           // 退避
           if (iterResult.kind === "retriable") {
-            this.backoffSleep(consecutiveFailures - 1);
+            // v1.4 P0-1.2：await 异步 backoffSleep（避免 BusyWait 阻塞 event loop）
+            await this.backoffSleep(consecutiveFailures - 1);
           }
         } else if (iterResult.kind === "fatal") {
           consecutiveFailures += 1;
@@ -364,8 +375,10 @@ export class RalphLoopController {
 
   /**
    * 公开 API：执行一次完整迭代
+   *
+   * v1.4 P0-1.2：改为 async，返回 Promise<IterationResult>。
    */
-  runOneIterationPublic(iterIndex: number): IterationResult {
+  async runOneIterationPublic(iterIndex: number): Promise<IterationResult> {
     return this.runOneIteration(iterIndex);
   }
 
@@ -389,8 +402,10 @@ export class RalphLoopController {
 
   /**
    * 执行一次完整迭代
+   *
+   * v1.4 P0-1.2：改为 async，支持异步 StageHandler.handle()。
    */
-  private runOneIteration(iterIndex: number): IterationResult {
+  private async runOneIteration(iterIndex: number): Promise<IterationResult> {
     // 构造 IterationContext
     const notesSnapshot = this.notesMemory ? this.notesMemory.load() : "";
     const iterCtx: IterationContext = {
@@ -416,7 +431,8 @@ export class RalphLoopController {
       const handler = this.stageHandlers.get(stageKind);
       if (!handler) continue;
       iterCtx.stage = stageKind;
-      const stageResult = handler.handle(iterCtx);
+      // v1.4 P0-1.2：await 异步 handler.handle()（支持 LLM 调用等异步操作）
+      const stageResult = await handler.handle(iterCtx);
 
       // 累计 token
       let token = 0;
@@ -552,8 +568,14 @@ export class RalphLoopController {
 
   /**
    * 指数退避 + jitter
+   *
+   * v1.4 P0-1.2：改为 async，使用 setTimeout Promise 替代 BusyWait 自旋。
+   * 原因：BusyWait 会阻塞 event loop，导致异步 StageHandler 无法正常调度。
+   * setTimeout Promise 让出 event loop，允许其他微任务/宏任务执行。
+   *
+   * @param attempt 退避尝试次数（0 表示第一次失败后立即重试）
    */
-  private backoffSleep(attempt: number): void {
+  private async backoffSleep(attempt: number): Promise<void> {
     const base = this.config.backoffBaseSec;
     const maxSec = this.config.backoffMaxSec;
     let sleepSec = Math.min(maxSec, base * Math.pow(2, Math.max(0, attempt)));
@@ -562,11 +584,10 @@ export class RalphLoopController {
     if (sleepSec > 0.1) {
       this.log("info", `[RalphLoop] 退避 ${sleepSec.toFixed(2)}s（attempt=${attempt}）`);
       const sleepMs = Math.floor(sleepSec * 1000);
-      const end = Date.now() + sleepMs;
-      // 同步睡眠（用 Atomics.wait / BusyWait 避免 event loop block）
-      while (Date.now() < end) {
-        // BusyWait 自旋：Ralph 循环要求同步退避，不让出 event loop
-      }
+      // 使用 setTimeout Promise 让出 event loop（替代 BusyWait 自旋）
+      await new Promise<void>((resolve) => {
+        setTimeout(() => resolve(), sleepMs);
+      });
     }
   }
 

@@ -111,6 +111,9 @@ export type { McpServerStatus } from "./mcp/mcp-manager";
 
 // Common utilities
 export { createOpenAIClient } from "./common/openai-client";
+// v1.6 P0-2：OpenAIClientHandle 接口与类型守卫（team-adapter.executeDispatch 注入用）
+export { isOpenAIClientHandle } from "./common/openai-client";
+export type { OpenAIClientHandle } from "./common/openai-client";
 export { buildThinkingRequestOptions } from "./common/openai-thinking";
 export { readTextFileWithMetadata, writeTextFile, buildDiffPreview, ensureParentDirectory } from "./common/file-utils";
 export { normalizeFilePath, getSnippet, clearSessionState, recordFileState, getFileState } from "./common/state";
@@ -459,6 +462,88 @@ export type {
   MatchStrategy,
   TeamConfig,
   TeamDispatchResult,
+} from "./team/index.js";
+
+// ============================================================================
+// Autonomous 模块 re-export（v1.6 P0-1.4 新增）
+//
+// 设计目的：
+//   - 将 autonomous 模块（Ralph 风格自主迭代主循环）通过 core 单入口暴露
+//   - CLI 层（team-cmd.ts）通过 `@vegamo/deepcode-core` 导入 RalphLoopController 等
+//   - autonomous/index.ts → team/index.ts → core/index.ts 三级 re-export 链路
+//
+// 注意：
+//   - autonomous 版 `RiskLevel` 已在 team/index.ts 中排除（与 cybernetics 版冲突）
+//   - 此处从 `./team/index.js` re-export，保持链路一致
+// ============================================================================
+
+// 配置加载
+export {
+  defaultAutonomousConfig,
+  userConfigPath,
+  projectConfigPath,
+  parseSimpleYaml,
+  loadAutonomousConfig,
+} from "./team/index.js";
+export type { AutonomousConfig } from "./team/index.js";
+
+// 运行状态
+export { RunState, listRuns, findLatestResumableRun } from "./team/index.js";
+export type { RunStateSchema, ResumeContext } from "./team/index.js";
+
+// Notes 记忆
+export { NotesMemory } from "./team/index.js";
+export type { NotesSection } from "./team/index.js";
+
+// Loop 控制器
+export { RalphLoopController, defaultLoopConfig, defaultIterationResult, generateRunId } from "./team/index.js";
+export type {
+  StageKind,
+  IterationKind,
+  LoopConfig,
+  IterationContext,
+  IterationResult,
+  StageResult,
+  StageHandler,
+  RunStateLike,
+  GitDriverLike,
+  SleepGuardLike,
+  LogCallback,
+} from "./team/index.js";
+
+// Git 操作
+export { GitDriver, defaultGitOpResult, defaultDiffStats } from "./team/index.js";
+export type { GitOpResult, DiffStats } from "./team/index.js";
+
+// Sleep 防护
+export { SleepGuard } from "./team/index.js";
+export type { SleepGuardMode, SleepGuardBackend, SleepGuardHandle, SleepGuardLogCallback } from "./team/index.js";
+
+// 智能确认（RiskLevel 已在 team/index.ts 排除，避免与 cybernetics 版冲突）
+export { SmartConfirmation, scoreToLevel } from "./team/index.js";
+export type { ConfirmationDecision, ConfirmationResult } from "./team/index.js";
+
+// 自动 skill 加载
+export { AutoSkillLoader, defaultSkillManifest } from "./team/index.js";
+export type { SkillManifest } from "./team/index.js";
+
+// Dispatcher 适配层
+export { DispatcherAdapter, defaultAdapterInvokeResult, defaultTaskArgs } from "./team/index.js";
+export type {
+  AdapterInvokeKind,
+  AdapterInvokeResult,
+  DispatcherTaskArgs,
+  FacadeLike,
+  AdapterLogCallback,
+} from "./team/index.js";
+
+// Stage Handlers（4 个具体实现 + 1 个工厂函数）
+export {
+  PlanStageHandler,
+  DevStageHandler,
+  VerifyStageHandler,
+  FixStageHandler,
+  createDefaultStageHandlers,
 } from "./team/index.js";
 
 // ============================================================================

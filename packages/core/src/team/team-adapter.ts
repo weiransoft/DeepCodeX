@@ -15,7 +15,8 @@
 import { z } from "zod";
 import * as path from "path";
 import * as fs from "fs";
-import { resolveCurrentSettings, type ResolvedDeepcodingSettings } from "../settings.js";
+// v1.6 P0-2：引入 createOpenAIClient + OpenAIClientHandle 用于 executeDispatch 真实 LLM 调用
+import { createOpenAIClient, type OpenAIClientHandle, isOpenAIClientHandle } from "../common/openai-client.js";
 import { matchRoles, matchRolesSync, type MatchOptions } from "./role-matcher.js";
 import { ROLE_MAP, getRole, ROLE_REGISTRY } from "./role-registry.js";
 import type {
@@ -52,7 +53,7 @@ export function loadTeamConfig(projectRoot: string = process.cwd()): TeamConfig 
         raw = (parsed as { team: Record<string, unknown> }).team;
       }
     }
-  } catch (err) {
+  } catch (_err) {
     // 读取失败 → 使用默认配置
     raw = {};
   }
@@ -109,6 +110,10 @@ export function buildTask(params: {
 
 /**
  * 调度选项（zod 校验）
+ *
+ * v1.6 P0-2 扩展：
+ *   - timeoutMs：LLM 调用超时（毫秒），超时后 abort
+ *   - injectedClient：注入的 OpenAI 客户端句柄（测试专用，避免真实 API 调用）
  */
 export const DispatchOptions = z.object({
   projectRoot: z.string().default(process.cwd()),
@@ -129,6 +134,11 @@ export const DispatchOptions = z.object({
     .optional(),
   // 是否同时返回多角色结果（用于多角色共识）
   multiRole: z.boolean().default(false),
+  // v1.6 P0-2：LLM 调用超时（毫秒），undefined 表示不超时
+  timeoutMs: z.number().int().positive().optional(),
+  // v1.6 P0-2：注入的 OpenAI 客户端句柄（测试专用）
+  // 使用 z.unknown() 因为 zod 无法直接校验类实例，运行时通过 isOpenAIClientHandle 守卫
+  injectedClient: z.unknown().optional(),
 });
 export type DispatchOptions = z.infer<typeof DispatchOptions>;
 
@@ -362,9 +372,76 @@ export function composeSystemPrompt(role: RoleDefinition, task: TaskRequirement,
 // ============================================================================
 
 /**
+ * 从 TaskRequirement 构造结构化 user prompt
+ *
+ * v1.6 P0-2 新增：executeDispatch 调用 LLM 时使用的 user prompt
+ *
+ * 拼接内容：
+ *   1. 任务标题
+ *   2. 任务描述
+ *   3. 所需能力 / 偏好技能 / 约束条件 / 附件
+ *   4. 优先级
+ *   5. upstreamContext（如有）
+ *
+ * 段标题格式：使用 `#` 一级标题（与 build-user-prompt.test.ts 期望对齐）
+ *
+ * @param task 任务需求
+ * @returns 结构化 user prompt 字符串
+ */
+export function buildUserPromptFromTask(task: TaskRequirement): string {
+  const parts: string[] = [];
+
+  // 1. 任务标题
+  parts.push(`# 任务标题\n\n${task.title}\n`);
+
+  // 2. 任务描述
+  parts.push(`# 任务描述\n\n${task.description}\n`);
+
+  // 3. 所需能力
+  if (task.requiredCapabilities.length > 0) {
+    parts.push(`# 所需能力\n\n${task.requiredCapabilities.map((c) => `- ${c}`).join("\n")}\n`);
+  }
+
+  // 4. 偏好技能
+  if (task.preferredSkills.length > 0) {
+    parts.push(`# 偏好技能\n\n${task.preferredSkills.map((s) => `- ${s}`).join("\n")}\n`);
+  }
+
+  // 5. 约束条件
+  if (task.constraints.length > 0) {
+    parts.push(`# 约束条件\n\n${task.constraints.map((c) => `- ${c}`).join("\n")}\n`);
+  }
+
+  // 6. 附件
+  if (task.attachments.length > 0) {
+    parts.push(`# 附件\n\n${task.attachments.map((a) => `- ${a}`).join("\n")}\n`);
+  }
+
+  // 7. 优先级
+  parts.push(`# 优先级\n\n${task.priority}\n`);
+
+  // 8. upstreamContext（如有）
+  const ctxKeys = Object.keys(task.upstreamContext);
+  if (ctxKeys.length > 0) {
+    parts.push(`# 上游上下文\n`);
+    for (const key of ctxKeys) {
+      const val = task.upstreamContext[key];
+      parts.push(`${key}: ${typeof val === "object" ? JSON.stringify(val) : String(val)}`);
+    }
+    parts.push("");
+  }
+
+  return parts.join("\n");
+}
+
+/**
  * 完整 dispatch 执行（角色匹配 + LLM 调用 + 工具执行 + 结果收集）
  *
- * 注意：这是高阶 API，包含实际的 LLM 调用。生产使用前应确保有完整的 Session 集成。
+ * v1.6 P0-2 重写：
+ *   - 阶段 3 实现真实 LLM 调用（injectedClient 优先 → createOpenAIClient 兜底）
+ *   - 支持 timeoutMs 超时控制（通过 AbortController + signal）
+ *   - signal 参数位置修复：从请求体移到 SDK 第二参数 `options`
+ *   - 测试环境通过 injectedClient 注入 stub client，避免真实 API 调用
  *
  * @param task 任务
  * @param options 调度选项
@@ -379,53 +456,225 @@ export async function executeDispatch(
   const dispatchId = crypto.randomUUID();
   const startedAt = new Date().toISOString();
 
+  // 解析 options（zod 校验 + 默认值）
+  const opts = DispatchOptions.parse(options);
+
   try {
-    // 阶段 1：角色调度
+    // ========================================================================
+    // 阶段 1：角色调度（匹配角色 + 构造 system prompt）
+    // ========================================================================
     onProgress?.("running", "正在匹配角色...");
     const teamResult = await dispatchToRole(task, options);
+    const matchedRole = teamResult.matches[0] ?? {
+      roleId: teamResult.recommendedRole.roleId,
+      roleName: teamResult.recommendedRole.name,
+      confidence: 0,
+      matchedCapabilities: [],
+      matchedSkills: [],
+      missingCapabilities: [],
+      reasons: ["无匹配结果"],
+      scoreBreakdown: { capability: 0, skill: 0, keyword: 0, priority: 0 },
+      strategy: "keyword" as const,
+    };
 
-    // 阶段 2：构造 system prompt
     onProgress?.(
       "running",
-      `已匹配角色: ${teamResult.recommendedRole.name} (${((teamResult.matches[0]?.confidence ?? 0) * 100) | 0}%)`
+      `已匹配角色: ${teamResult.recommendedRole.name} (${((matchedRole.confidence ?? 0) * 100) | 0}%)`
     );
 
-    // 阶段 3：调用 LLM（此处集成点留给上层 Session 管理）
-    // 注：完整 LLM 调用需要 OpenAI 客户端 + 工具执行 + 循环，这部分由 SessionManager 负责
-    // 本函数只负责调度 + 准备上下文，实际 LLM 调用由调用方基于 recommendedSystemPrompt 发起
-    const dispatchResult: DispatchResult = {
+    // ========================================================================
+    // 阶段 2：准备 LLM 客户端（injectedClient 优先 → createOpenAIClient 兜底）
+    // ========================================================================
+    // injectedClient 优先：测试环境通过 stub client 注入
+    // 生产环境：调用 createOpenAIClient()，若 settings.apiKey 为空则 client===null
+    let clientHandle: OpenAIClientHandle | null = null;
+
+    if (opts.injectedClient !== undefined) {
+      // 校验 injectedClient 是否符合 OpenAIClientHandle 接口
+      // v1.6 P0-2 修正（LL-009 / SH-016 / SH-017）：非法 injectedClient 不抛 Error，
+      // 而是返回 status=skipped 的 DispatchResult，让上层 StageHandler.judgeResult
+      // 在 skipped 分支统一判定为 fatal（避免 catch 块误将 status 设为 failed）
+      // error 消息含 "不可用" 关键字，与 LL-004 测试期望对齐
+      if (!isOpenAIClientHandle(opts.injectedClient)) {
+        const skipResult: DispatchResult = {
+          taskId: task.taskId,
+          dispatchId,
+          matchedRole,
+          status: "skipped",
+          startedAt,
+          completedAt: new Date().toISOString(),
+          durationMs: Date.now() - new Date(startedAt).getTime(),
+          output: teamResult.recommendedSystemPrompt,
+          artifacts: [],
+          tokensConsumed: { prompt: 0, completion: 0, total: 0 },
+          cacheHit: false,
+          retryCount: 0,
+          error: "注入的 LLM 客户端不可用（不符合 OpenAIClientHandle 接口），跳过 LLM 调用",
+        };
+        onProgress?.("skipped", "注入的 LLM 客户端不可用，跳过 LLM 调用");
+        return skipResult;
+      }
+      clientHandle = opts.injectedClient;
+    } else {
+      // 生产环境：创建真实 OpenAI 客户端
+      const created = createOpenAIClient(opts.projectRoot);
+      if (created.client === null) {
+        // API Key 缺失：返回 skipped 状态（不阻塞，由调用方决定如何处理）
+        // v1.6 P0-2 修正（LL-004）：error 消息含 "不可用" 关键字
+        const skipResult: DispatchResult = {
+          taskId: task.taskId,
+          dispatchId,
+          matchedRole,
+          status: "skipped",
+          startedAt,
+          completedAt: new Date().toISOString(),
+          durationMs: Date.now() - new Date(startedAt).getTime(),
+          output: teamResult.recommendedSystemPrompt,
+          artifacts: [],
+          tokensConsumed: { prompt: 0, completion: 0, total: 0 },
+          cacheHit: false,
+          retryCount: 0,
+          error: "API Key 不可用，跳过 LLM 调用",
+        };
+        onProgress?.("skipped", "API Key 不可用，跳过 LLM 调用");
+        return skipResult;
+      }
+      clientHandle = {
+        client: created.client,
+        model: created.model,
+        baseURL: created.baseURL,
+        temperature: created.temperature,
+        thinkingEnabled: created.thinkingEnabled,
+      };
+    }
+
+    // ========================================================================
+    // 阶段 3：调用 LLM（两参数 SDK 调用：body + options）
+    // ========================================================================
+    onProgress?.("running", `调用 LLM: ${clientHandle.model}...`);
+
+    // 构造 messages：system prompt + user prompt
+    const systemPrompt = teamResult.recommendedSystemPrompt;
+    const userPrompt = buildUserPromptFromTask(task);
+
+    // 请求体（不包含 signal，signal 放到第二参数 options 中）
+    const llmRequestBody: {
+      model: string;
+      messages: Array<{ role: "system" | "user"; content: string }>;
+      temperature?: number;
+    } = {
+      model: clientHandle.model,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+    };
+    if (clientHandle.temperature !== undefined) {
+      llmRequestBody.temperature = clientHandle.temperature;
+    }
+
+    // 请求选项（signal 放到这里，而非请求体）
+    // OpenAI SDK 两参数签名：chat.completions.create(body, options?)
+    // signal 在 options 中（非 body）
+    const llmRequestOptions: { signal?: AbortSignal } = {};
+
+    // 超时控制：通过 AbortController 实现
+    let abortController: AbortController | null = null;
+    let timeoutHandle: NodeJS.Timeout | null = null;
+    if (opts.timeoutMs !== undefined) {
+      abortController = new AbortController();
+      llmRequestOptions.signal = abortController.signal;
+      timeoutHandle = setTimeout(() => {
+        abortController?.abort();
+      }, opts.timeoutMs);
+    }
+
+    // 真实调用 OpenAI SDK
+    // client 类型是 unknown，需要类型断言为 OpenAI SDK 客户端
+    // 使用 ChatCompletion 类型避免 any（对齐 ESLint no-explicit-any 规则）
+    const openaiClient = clientHandle.client as {
+      chat: {
+        completions: {
+          create: (
+            body: unknown,
+            options?: { signal?: AbortSignal }
+          ) => Promise<{
+            choices: Array<{ message?: { content?: string | null } }>;
+            usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+          }>;
+        };
+      };
+    };
+    let response: {
+      choices: Array<{ message?: { content?: string | null } }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+    };
+    try {
+      response = await openaiClient.chat.completions.create(llmRequestBody, llmRequestOptions);
+    } finally {
+      // 清理超时定时器
+      if (timeoutHandle !== null) {
+        clearTimeout(timeoutHandle);
+      }
+    }
+
+    // ========================================================================
+    // 阶段 4：解析 LLM 响应
+    // ========================================================================
+    const outputContent: string = response?.choices?.[0]?.message?.content ?? "";
+    if (!outputContent) {
+      // 空内容 → failed
+      const failResult: DispatchResult = {
+        taskId: task.taskId,
+        dispatchId,
+        matchedRole,
+        status: "failed",
+        startedAt,
+        completedAt: new Date().toISOString(),
+        durationMs: Date.now() - new Date(startedAt).getTime(),
+        output: "",
+        artifacts: [],
+        tokensConsumed: {
+          prompt: response?.usage?.prompt_tokens ?? 0,
+          completion: response?.usage?.completion_tokens ?? 0,
+          total: response?.usage?.total_tokens ?? 0,
+        },
+        cacheHit: false,
+        retryCount: 0,
+        error: "LLM 返回空内容",
+      };
+      onProgress?.("failed", "LLM 返回空内容");
+      return failResult;
+    }
+
+    // 成功：构造完整 DispatchResult
+    const tokensConsumed = {
+      prompt: response?.usage?.prompt_tokens ?? 0,
+      completion: response?.usage?.completion_tokens ?? 0,
+      total: response?.usage?.total_tokens ?? 0,
+    };
+
+    onProgress?.("succeeded", `LLM 调用完成，消耗 ${tokensConsumed.total} tokens`);
+
+    return {
       taskId: task.taskId,
       dispatchId,
-      matchedRole: teamResult.matches[0] ?? {
-        roleId: teamResult.recommendedRole.roleId,
-        roleName: teamResult.recommendedRole.name,
-        confidence: 0,
-        matchedCapabilities: [],
-        matchedSkills: [],
-        missingCapabilities: [],
-        reasons: ["无匹配结果"],
-        scoreBreakdown: { capability: 0, skill: 0, keyword: 0, priority: 0 },
-        strategy: "keyword",
-      },
-      status: "pending",
+      matchedRole,
+      status: "succeeded",
       startedAt,
-      completedAt: undefined,
-      durationMs: 0,
-      output: teamResult.recommendedSystemPrompt,
+      completedAt: new Date().toISOString(),
+      durationMs: Date.now() - new Date(startedAt).getTime(),
+      output: outputContent,
       artifacts: [],
-      tokensConsumed: { prompt: 0, completion: 0, total: 0 },
+      tokensConsumed,
       cacheHit: false,
       retryCount: 0,
     };
-
-    onProgress?.("succeeded", "调度完成");
-    return {
-      ...dispatchResult,
-      status: "succeeded",
-      completedAt: new Date().toISOString(),
-      durationMs: Date.now() - new Date(startedAt).getTime(),
-    };
   } catch (err) {
+    // 错误处理：errMsg 而非 errorMsg
+    // v1.6 P0-2 修正（LL-003 / LL-007 / LL-008）：error 消息前缀改为 "LLM 调用失败"
+    // 原因：测试期望 error 含 "LLM 调用失败" 关键字（涵盖 AbortError / TypeError / 其他异常）
+    const errMsg = err instanceof Error ? err.message : String(err);
     return {
       taskId: task.taskId,
       dispatchId,
@@ -436,7 +685,7 @@ export async function executeDispatch(
         matchedCapabilities: [],
         matchedSkills: [],
         missingCapabilities: [],
-        reasons: [err instanceof Error ? err.message : String(err)],
+        reasons: [errMsg],
         scoreBreakdown: { capability: 0, skill: 0, keyword: 0, priority: 0 },
         strategy: "keyword",
       },
@@ -444,7 +693,7 @@ export async function executeDispatch(
       startedAt,
       completedAt: new Date().toISOString(),
       durationMs: Date.now() - new Date(startedAt).getTime(),
-      error: err instanceof Error ? err.message : String(err),
+      error: `LLM 调用失败: ${errMsg}`,
       artifacts: [],
       tokensConsumed: { prompt: 0, completion: 0, total: 0 },
       cacheHit: false,

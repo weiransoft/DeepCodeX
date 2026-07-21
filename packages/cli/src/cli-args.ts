@@ -131,12 +131,14 @@ async function configureYargs(argv?: string[]) {
     )
     .command(
       "team <subcommand>",
-      "Multi-role team dispatch (list / match / dispatch / autonomous / full-lifecycle)",
+      "Multi-role team dispatch (list / match / dispatch / autonomous / full-lifecycle / help)",
       (y: Argv) =>
         y
           .positional("subcommand", {
             type: "string",
-            choices: ["list", "match", "dispatch", "autonomous", "full-lifecycle"] as const,
+            // v1.6 P0-2 修正（TC-TEAM-12）：加入 "help" 选项，支持 `team help` 显示帮助
+            // cli.tsx 中 parsed.team === "help" 时调用 formatTeamHelp() 并 exit(0)
+            choices: ["list", "match", "dispatch", "autonomous", "full-lifecycle", "help"] as const,
             describe: "Team subcommand",
           })
           .option("role", {
@@ -152,6 +154,14 @@ async function configureYargs(argv?: string[]) {
           .option("consensus", { type: "boolean", describe: "Enable 5-role consensus review" })
           .option("fail-fast", { type: "boolean", describe: "Abort on first failure (default true)" })
           .option("project-root", { type: "string", describe: "Project root directory" })
+          // v1.6 P0-1.3：autonomous 子命令断点续跑开关
+          // 用法：deepcode team autonomous --resume-run
+          // 作用：查找最近一次可恢复的 run 并续跑，而不是创建新 run
+          .option("resume-run", {
+            type: "boolean",
+            describe: "Resume the latest resumable autonomous run (autonomous subcommand only)",
+            default: false,
+          })
           .check((argv: { [x: string]: unknown }) => {
             const role = argv["role"];
             if (typeof role === "string" && role.length > 0) {
@@ -243,6 +253,18 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
 
   const parsed = y.parseSync() as Record<string, unknown>;
 
+  // v1.6 P0-2 修正（TC-TEAM-12）：yargs 18 内置 help 机制会拦截 "help" 关键字，
+  // 导致 `team help` / `rules help` 时 yargs 自动输出 help 信息并清空 parsed._。
+  // 此处从原始 argv 中检测 "help" 作为第二个 positional，手动设置 team/rules = "help"。
+  // 原因：yargs 18 的 help 机制把 "help" 当成特殊命令，不传递给 .command() 的 positional
+  const rawArgv = argv ?? process.argv.slice(2);
+  const helpAsSecondPositional =
+    rawArgv.length >= 2 && rawArgv[0] === "team" && rawArgv[1] === "help"
+      ? "team"
+      : rawArgv.length >= 2 && rawArgv[0] === "rules" && rawArgv[1] === "help"
+        ? "rules"
+        : undefined;
+
   const resumeRaw = parsed.resume as string | undefined;
   let resume: ParsedCliArgs["resume"];
   if (resumeRaw === undefined) {
@@ -254,7 +276,26 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
   }
 
   // 提取 team 子命令及其选项
-  const teamRaw = parsed["team"] as string | undefined;
+  // v1.6 修正（P0-1.3 + yargs 18 bug 修复）：
+  // yargs 18 中 `.command("team <subcommand>")` 定义的命令，
+  //   - 命令名（"team"）出现在 `parsed._[0]`（positional 列表）
+  //   - 子命令名（positional 参数）出现在 `parsed["subcommand"]`
+  //   - `parsed["team"]` / `parsed["rules"]` 始终返回 undefined（yargs 17 旧行为已变更）
+  // 为了向后兼容旧版 yargs，保留 `parsed["team"]` 作为 fallback。
+  const positionalArgs: ReadonlyArray<unknown> = Array.isArray(parsed._) ? parsed._ : [];
+  const teamInvoked = positionalArgs[0] === "team" || helpAsSecondPositional === "team";
+  const rulesInvoked = positionalArgs[0] === "rules" || helpAsSecondPositional === "rules";
+  // v1.6 P0-2 修正（TC-TEAM-12）：yargs 18 把 "help" 当成内置 help 命令，
+  // 导致 `parsed["subcommand"]` 不被设置。此时从 `helpAsSecondPositional` 提取 "help"。
+  // 原因：yargs 18 的内置 help 机制会拦截 "help" 关键字，不将其作为 positional 传递
+  const teamRaw =
+    (teamInvoked ? (parsed["subcommand"] as string | undefined) : undefined) ??
+    (helpAsSecondPositional === "team" ? "help" : undefined) ??
+    (parsed["team"] as string | undefined);
+  const rulesRaw =
+    (rulesInvoked ? (parsed["subcommand"] as string | undefined) : undefined) ??
+    (helpAsSecondPositional === "rules" ? "help" : undefined) ??
+    (parsed["rules"] as string | undefined);
   const teamOptions: Record<string, string | boolean | number | string[] | undefined> = {};
   if (teamRaw) {
     const optionKeys = [
@@ -268,6 +309,7 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
       "consensus",
       "fail-fast",
       "project-root",
+      "resume-run",
     ];
     for (const key of optionKeys) {
       const v = parsed[key];
@@ -278,7 +320,7 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
   }
 
   // 提取 rules 子命令及其选项
-  const rulesRaw = parsed["rules"] as string | undefined;
+  // v1.6 P0-2 修正（TC-TEAM-12）：rulesRaw 已在上方提取（含 help fallback），此处直接使用
   const rulesOptions: Record<string, string | boolean | number | string[] | undefined> = {};
   if (rulesRaw) {
     const optionKeys = ["content", "rule-id", "severity", "layer", "project-root"];

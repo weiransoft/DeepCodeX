@@ -75,3 +75,14 @@ export type {
   FacadeLike,
   AdapterLogCallback,
 } from "./dispatcher-adapter.js";
+
+// v1.6 P0-1.4：Stage Handlers re-export
+// 4 个具体 StageHandler 实现 + 1 个工厂函数
+// 注意：BaseStageHandler 是 abstract class 未 export，故不 re-export
+export {
+  PlanStageHandler,
+  DevStageHandler,
+  VerifyStageHandler,
+  FixStageHandler,
+  createDefaultStageHandlers,
+} from "./stage-handlers.js";

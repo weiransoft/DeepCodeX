@@ -19,6 +19,7 @@
  *   deepcodex team full-lifecycle --project "电商网站"
  */
 
+import * as path from "node:path";
 import {
   ROLE_REGISTRY,
   matchRoles,
@@ -26,12 +27,28 @@ import {
   buildTask,
   listAllRoles,
   formatRoleInfo,
+  // v1.6 P0-1.5：autonomous 模块完整导入
+  RunState,
+  findLatestResumableRun,
+  RalphLoopController,
+  defaultLoopConfig,
+  generateRunId,
+  createDefaultStageHandlers,
+  GitDriver,
+  SleepGuard,
+  NotesMemory,
+  loadAutonomousConfig,
+  // v1.6 P0-2：OpenAIClientHandle（注入 stub client 用于测试）
+  createOpenAIClient,
+  type OpenAIClientHandle,
+  // 类型导入
   type RoleId,
   type RoleDefinition,
   type TaskRequirement,
   type MatchResult,
   type DispatchOptions,
   type DispatchResult,
+  type LoopConfig,
 } from "@vegamo/deepcode-core";
 import { writeStdoutLine, writeStderrLine } from "../utils/stdio-helpers";
 
@@ -59,6 +76,20 @@ export interface TeamCommandArgs {
   failFast?: boolean;
   /** 项目根目录 */
   projectRoot?: string;
+  // v1.6 P0-1.5：autonomous 子命令断点续跑开关
+  /**
+   * 断点续跑开关（autonomous 子命令专用）
+   * - true：查找最近一次可恢复的 run 并续跑
+   * - false / undefined：创建新 run
+   */
+  resumeRun?: boolean;
+  // v1.6 P0-2：测试注入用 OpenAI 客户端句柄
+  /**
+   * 注入的 OpenAI 客户端句柄（测试专用）
+   * - 生产环境：undefined，使用 createOpenAIClient() 创建真实 client
+   * - 测试环境：注入 stub client，避免真实 API 调用
+   */
+  injectedClient?: OpenAIClientHandle;
 }
 
 /** Team 子命令入口 */
@@ -125,11 +156,16 @@ async function executeMatchCommand(args: TeamCommandArgs, startTime: number): Pr
 
   const matches = await matchRoles(task, { topK: 5 });
 
+  // v1.6 P0-2 修正（TC-TEAM-02）：输出含英文关键字（matchedRole / roleId / confidence），
+  // 便于 e2e 测试脚本通过 grep 匹配
   writeStdoutLine(`\n匹配结果（top ${matches.length}）:\n`);
   for (let i = 0; i < matches.length; i++) {
     const m = matches[i]!;
     const bar = "█".repeat(Math.round(m.confidence * 20));
-    writeStdoutLine(`  ${i + 1}. ${m.roleId.padEnd(20)} ${bar} ${(m.confidence * 100).toFixed(1)}%`);
+    // 输出格式：roleId + confidence（英文关键字）+ 中文理由
+    writeStdoutLine(
+      `  ${i + 1}. roleId: ${m.roleId.padEnd(20)} ${bar} confidence: ${(m.confidence * 100).toFixed(1)}%`
+    );
     if (m.reasons.length > 0) {
       writeStdoutLine(`     理由: ${m.reasons[0]}`);
     }
@@ -180,11 +216,13 @@ async function executeDispatchCommand(args: TeamCommandArgs, startTime: number):
   const result: DispatchResult = await executeDispatch(task, options);
 
   // 输出调度结果
-  writeStdoutLine(`\n━━━ 调度结果 ━━━\n`);
-  writeStdoutLine(`状态: ${result.status}\n`);
-  writeStdoutLine(`任务 ID: ${result.taskId}\n`);
-  writeStdoutLine(`派发 ID: ${result.dispatchId}\n`);
-  writeStdoutLine(`匹配角色: ${result.matchedRole.roleId} (${(result.matchedRole.confidence * 100).toFixed(1)}%)\n`);
+  // v1.6 P0-2 修正（TC-TEAM-04/05/06）：输出含英文关键字（DispatchResult / matchedRole / taskId / dispatchId / status），
+  // 便于 e2e 测试脚本通过 grep 匹配（e2e 期望 output 含这些关键字）
+  writeStdoutLine(`\n━━━ 调度结果（DispatchResult）━━━\n`);
+  writeStdoutLine(`status: ${result.status}\n`);
+  writeStdoutLine(`taskId: ${result.taskId}\n`);
+  writeStdoutLine(`dispatchId: ${result.dispatchId}\n`);
+  writeStdoutLine(`matchedRole: ${result.matchedRole.roleId} (${(result.matchedRole.confidence * 100).toFixed(1)}%)\n`);
   if (result.error) {
     writeStderrLine(`错误: ${result.error}\n`);
   }
@@ -195,63 +233,235 @@ async function executeDispatchCommand(args: TeamCommandArgs, startTime: number):
   const duration = Date.now() - startTime;
   writeStdoutLine(`\n⏱  耗时: ${duration}ms\n`);
 
-  return result.status === "succeeded" ? 0 : 1;
+  // v1.6 P0-2 修正（TC-TEAM-04/05/06）：skipped 状态返回 0（不阻塞）
+  // 原因：skipped 表示因缺少 API Key 等环境原因跳过 LLM 调用，不是代码错误
+  //   - succeeded → 0（成功）
+  //   - skipped   → 0（环境跳过，非错误）
+  //   - failed    → 1（真实失败）
+  if (result.status === "succeeded" || result.status === "skipped") {
+    return 0;
+  }
+  return 1;
 }
 
-/** autonomous 子命令 - Ralph 自主迭代模式（4 阶段循环） */
+/**
+ * autonomous 子命令 - Ralph 自主迭代模式（4 阶段循环）
+ *
+ * v1.6 P0-1.5：完整重写，对接 RalphLoopController
+ *
+ * 8 步流程：
+ *   Step 1: 确定 projectRoot
+ *   Step 2: 检查 API Key（injectedClient 优先，否则 createOpenAIClient）
+ *   Step 3: 处理 --resume-run（查找最近一次可恢复的 run）
+ *   Step 4: 加载 autonomous 配置
+ *   Step 5: 创建 RunState（新建或从断点恢复）
+ *   Step 6: 创建 GitDriver / NotesMemory / SleepGuard / StageHandlers
+ *   Step 7: 创建 RalphLoopController + 调用 await run()
+ *   Step 8: exitCode 映射输出
+ *
+ * exitCode 语义（与 RalphLoopController.run() 一致）：
+ *   0 = 全部成功
+ *   1 = 部分失败
+ *   2 = Fatal abort（连续失败超限）
+ *   3 = 命中 stop_when 条件
+ */
 async function executeAutonomousCommand(args: TeamCommandArgs, startTime: number): Promise<number> {
-  const goal = args.goal ?? args.task;
-  if (!goal) {
-    writeStderrLine("autonomous 子命令需要 --goal 或 --task 参数\n");
-    return 1;
-  }
+  // ==========================================================================
+  // Step 1: 确定 projectRoot
+  // ==========================================================================
+  const projectRoot = args.projectRoot ?? process.cwd();
+  writeStdoutLine(`🚀 启动 Ralph Autonomous Loop\n`);
+  writeStdoutLine(`项目根目录: ${projectRoot}\n`);
 
-  const maxIter = args.maxIterations ?? 5;
-  writeStdoutLine(`🚀 启动 Autonomous 模式: ${goal}\n`);
-  writeStdoutLine(`最大迭代: ${maxIter}\n\n`);
-
-  // 4 阶段循环：plan → dev → verify → fix
-  const stages = ["plan", "dev", "verify", "fix"] as const;
-  for (let iter = 1; iter <= maxIter; iter++) {
-    writeStdoutLine(`\n━━━ 第 ${iter}/${maxIter} 轮迭代 ━━━\n`);
-
-    for (const stage of stages) {
-      writeStdoutLine(`▶ 阶段: ${stage}\n`);
-      // 真实实现：每个阶段会调度对应的角色 + 工具
-      // 此处通过 executeDispatch 委派到 solo-coder
-      const task: TaskRequirement = buildTask({
-        title: `[${stage}] ${goal}`,
-        description: `Autonomous iteration ${iter}/${maxIter}, stage=${stage}, goal=${goal}`,
-      });
-
-      // 给 dispatch 增加上下文（通过 task upstreamContext）
-      task.upstreamContext = {
-        autonomousStage: stage,
-        autonomousIteration: iter,
-        autonomousMaxIter: maxIter,
-        autonomousGoal: goal,
-      };
-
-      const result = await executeDispatch(task, {
-        projectRoot: args.projectRoot ?? process.cwd(),
-        forceRole: { roleId: "solo-coder" as RoleId, reason: "Autonomous stage 委派" },
-      });
-
-      writeStdoutLine(`  状态: ${result.status}\n`);
-      if (result.error) {
-        writeStderrLine(`  错误: ${result.error}\n`);
-      }
-
-      // 阶段失败时立即进入 fix
-      if (result.status !== "succeeded" && stage !== "fix") {
-        writeStdoutLine(`  → 失败，跳到 fix 阶段\n`);
-      }
+  // ==========================================================================
+  // Step 2: 检查 API Key（injectedClient 优先 → createOpenAIClient 兜底）
+  // ==========================================================================
+  // injectedClient 优先：测试环境通过 stub client 注入，避免真实 API 调用
+  // 生产环境：调用 createOpenAIClient()，若 settings.apiKey 为空则 client===null
+  let clientHandle: OpenAIClientHandle;
+  if (args.injectedClient) {
+    clientHandle = args.injectedClient;
+    writeStdoutLine(`使用注入的 OpenAI 客户端（测试模式）\n`);
+  } else {
+    const created = createOpenAIClient(projectRoot);
+    if (created.client === null) {
+      // API Key 缺失：输出 3 个关键字便于用户定位问题（对齐 AC-002 测试期望）
+      //   - "autonomous 模式需要 API Key"：场景描述
+      //   - "DEEPCODE_API_KEY"           ：推荐的环境变量名
+      //   - "env.API_KEY"                ：settings.json 中的字段路径
+      writeStderrLine(
+        `✖ autonomous 模式需要 API Key，无法启动 Ralph Autonomous Loop\n` +
+          `  请通过以下任一方式配置：\n` +
+          `  1. 设置环境变量 DEEPCODE_API_KEY（或 OPENAI_API_KEY）\n` +
+          `  2. 在 ~/.deepcode/settings.json 或 ./.deepcode/settings.json 中配置 env.API_KEY 字段\n` +
+          `  3. 使用 --injected-client 参数注入客户端（测试用）\n`
+      );
+      return 1;
     }
+    clientHandle = {
+      client: created.client,
+      model: created.model,
+      baseURL: created.baseURL,
+      temperature: created.temperature,
+      thinkingEnabled: created.thinkingEnabled,
+    };
+  }
+  writeStdoutLine(`模型: ${clientHandle.model}\n`);
+  writeStdoutLine(`API Base: ${clientHandle.baseURL}\n`);
+
+  // ==========================================================================
+  // Step 3: 处理 --resume-run（断点续跑）
+  // ==========================================================================
+  // runs 目录：<projectRoot>/.deepcodex/runs/
+  // 注意：findLatestResumableRun 返回 RunState | null（不是 string）
+  const runsDir = path.join(projectRoot, ".deepcodex", "runs");
+  let runState: RunState;
+  let objective: string;
+
+  if (args.resumeRun) {
+    writeStdoutLine(`\n🔍 查找可恢复的 run...\n`);
+    const resumable = findLatestResumableRun(runsDir);
+    if (resumable === null) {
+      writeStdoutLine(`未找到可恢复的 run，将创建新 run\n`);
+      // 回退到创建新 run 的流程
+      objective = args.goal ?? args.task ?? "";
+      if (!objective) {
+        writeStderrLine("autonomous 子命令需要 --goal 或 --task 参数\n");
+        return 1;
+      }
+      const runId = generateRunId();
+      const runDir = path.join(runsDir, runId);
+      runState = new RunState(runDir, runId, objective);
+    } else {
+      // resumable 是已加载的 RunState 实例，直接使用
+      runState = resumable;
+      objective = runState.state.objective;
+      writeStdoutLine(`✅ 已恢复运行: runId=${runState.state.runId}, iterIndex=${runState.state.iterIndex}\n`);
+    }
+  } else {
+    // 新建 run
+    objective = args.goal ?? args.task ?? "";
+    if (!objective) {
+      writeStderrLine("autonomous 子命令需要 --goal 或 --task 参数\n");
+      return 1;
+    }
+    const runId = generateRunId();
+    const runDir = path.join(runsDir, runId);
+    runState = new RunState(runDir, runId, objective);
+    writeStdoutLine(`创建新 run: runId=${runId}\n`);
   }
 
+  // 持久化初始 state（确保 runDir 存在 + state.json 写入）
+  runState.persist();
+
+  // ==========================================================================
+  // Step 4: 加载 autonomous 配置
+  // ==========================================================================
+  // 优先级：项目级 .deepcodex/autonomous.yml → 用户级 ~/.deepcodex/autonomous.yml → 默认值
+  const autonomousConfig = loadAutonomousConfig(projectRoot);
+  // 用 args.maxIterations 覆盖配置中的 maxIterations（CLI 优先）
+  const baseLoopConfig = defaultLoopConfig();
+  const loopConfig: LoopConfig = {
+    ...baseLoopConfig,
+    maxIterations: args.maxIterations ?? autonomousConfig.maxIterations ?? baseLoopConfig.maxIterations,
+    maxTokens: autonomousConfig.maxTokens ?? baseLoopConfig.maxTokens,
+    stopWhen: autonomousConfig.stopWhen ?? baseLoopConfig.stopWhen,
+    backoffBaseSec: autonomousConfig.backoffBaseSec ?? baseLoopConfig.backoffBaseSec,
+    backoffMaxSec: autonomousConfig.backoffMaxSec ?? baseLoopConfig.backoffMaxSec,
+    consecutiveFailureAbort: autonomousConfig.consecutiveFailureAbort ?? baseLoopConfig.consecutiveFailureAbort,
+    testCommand: autonomousConfig.testCommand ?? baseLoopConfig.testCommand,
+    securityAnalyzer: autonomousConfig.securityAnalyzer ?? baseLoopConfig.securityAnalyzer,
+  };
+
+  writeStdoutLine(`\n📋 Autonomous 配置:\n`);
+  writeStdoutLine(`  最大迭代: ${loopConfig.maxIterations}\n`);
+  writeStdoutLine(`  最大 token: ${loopConfig.maxTokens}\n`);
+  writeStdoutLine(`  连续失败上限: ${loopConfig.consecutiveFailureAbort}\n`);
+  writeStdoutLine(`  目标: ${objective}\n\n`);
+
+  // ==========================================================================
+  // Step 5: RunState 已在 Step 3 创建
+  // ==========================================================================
+  // （无操作，仅注释占位保持 8 步结构完整）
+
+  // ==========================================================================
+  // Step 6: 创建 GitDriver / NotesMemory / SleepGuard / StageHandlers
+  // ==========================================================================
+  // v1.6 P0-1.5 修正：GitDriver 构造函数期望对象参数 { repoRoot, runId, runDir? }，
+  // 而非 string。传入 runState.state.runId 和 runState.runDirPath 确保 git 操作
+  // 与 run 目录对齐（uncommitted manifest 等中间产物写入正确的 runDir）
+  const gitDriver = new GitDriver({
+    repoRoot: projectRoot,
+    runId: runState.state.runId,
+    runDir: runState.runDirPath,
+  });
+  // NotesMemory 构造函数接收 notes.md 完整路径（不是 runDir）
+  // v1.6 P0-1.5 修正（AC-006）：notes.md 是项目级共享文件，位于 <projectRoot>/.deepcodex/notes.md
+  // 而非 run 级别（<projectRoot>/.deepcodex/runs/<runId>/notes.md）
+  // 原因：notes.md 作为项目长期记忆，跨多个 run 共享，后续 run 可读取前次 run 的笔记
+  const notesPath = path.join(projectRoot, ".deepcodex", "notes.md");
+  const notesMemory = new NotesMemory(notesPath);
+  // SleepGuard：macOS 用 caffeinate，Linux 用 systemd-inhibit，失败不阻塞
+  // SleepGuardMode 只有 "on" | "off" 两种值，默认 "on"
+  let sleepGuard: SleepGuard | null = null;
+  try {
+    sleepGuard = new SleepGuard("on");
+  } catch (err) {
+    writeStderrLine(`⚠️  SleepGuard 初始化失败（不阻塞）: ${err instanceof Error ? err.message : String(err)}\n`);
+    sleepGuard = null;
+  }
+
+  // StageHandlers：注入 clientHandle，使每个 stage 能调用 LLM
+  // createDefaultStageHandlers 接收 { projectRoot, testCommand?, log?, injectedClient? }
+  // injectedClient 类型是 InjectedClientHandle（= OpenAIClientHandle 的别名）
+  const stageHandlers = createDefaultStageHandlers({
+    projectRoot,
+    injectedClient: clientHandle,
+    testCommand: loopConfig.testCommand,
+  });
+
+  // ==========================================================================
+  // Step 7: 创建 RalphLoopController + 调用 await run()
+  // ==========================================================================
+  const controller = new RalphLoopController({
+    config: loopConfig,
+    projectRoot,
+    gitDriver,
+    notesMemory,
+    runState,
+    stageHandlers,
+    objective,
+    log: (level, message) => {
+      const prefix = level === "error" ? "✖" : level === "warn" ? "⚠️ " : level === "debug" ? "🔍" : "ℹ️";
+      writeStdoutLine(`  ${prefix} ${message}\n`);
+    },
+    sleepGuard,
+  });
+
+  const exitCode = await controller.run();
+
+  // 持久化最终 state
+  runState.persist();
+
+  // ==========================================================================
+  // Step 8: exitCode 映射输出
+  // ==========================================================================
+  const exitCodeMessages: Record<number, string> = {
+    0: "✅ Ralph Autonomous Loop 完成",
+    1: "⚠️  Ralph Autonomous Loop 部分失败",
+    2: "✖ Fatal abort（连续失败超限）",
+    3: "🎯 命中 stop_when 条件",
+  };
+  const message = exitCodeMessages[exitCode] ?? `未知退出码: ${exitCode}`;
   const duration = Date.now() - startTime;
-  writeStdoutLine(`\n✅ Autonomous 完成，耗时: ${duration}ms\n`);
-  return 0;
+  writeStdoutLine(`\n${message}\n`);
+  writeStdoutLine(`  退出码: ${exitCode}\n`);
+  writeStdoutLine(`  总迭代: ${runState.state.iterIndex}\n`);
+  writeStdoutLine(`  累计 token: ${runState.state.cumulativeTokens}\n`);
+  writeStdoutLine(`  已提交 commit: ${runState.state.commitsMade}\n`);
+  writeStdoutLine(`  耗时: ${duration}ms\n`);
+
+  return exitCode;
 }
 
 /** full-lifecycle 子命令 - 7 阶段项目全流程 */

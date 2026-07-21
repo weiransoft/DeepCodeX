@@ -15,11 +15,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-  DomainExpertReviewPlugin,
-  _internals,
-  type DomainExpertReviewPluginOptions,
-} from "../domain-expert-review-plugin.js";
+import { DomainExpertReviewPlugin, _internals } from "../domain-expert-review-plugin.js";
 import { DomainExpertRegistry } from "../domain-expert-registry.js";
 import { DomainExpertMatcher } from "../domain-expert-matcher.js";
 import { ExpertInvocationError } from "../errors.js";
@@ -40,6 +36,8 @@ import {
   ExpertOpinion as ExpertOpinionSchema,
   TeamConfig as TeamConfigSchema,
 } from "../types.js";
+// v1.6 P0-2：环境隔离工具，确保测试运行时无 OPENAI_API_KEY 等环境变量干扰
+import { isolateOpenAIEnv } from "./utils/env-isolation.js";
 
 // ============================================================================
 // 测试 fixture：构造合法对象
@@ -343,6 +341,7 @@ function buildMatchResult(
 /**
  * 构造测试用 ExpertOpinion
  */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function buildOpinion(overrides: Partial<ExpertOpinion> = {}): ExpertOpinion {
   return ExpertOpinionSchema.parse({
     expertId: "domain-test-expert",
@@ -1854,18 +1853,26 @@ test("集成流程：多专家并行调用全部成功", async () => {
 // ============================================================================
 
 test("DomainExpertReviewPluginOptions：未提供 options 时使用默认值", async () => {
-  const registry = new DomainExpertRegistry();
-  const matcher = new DomainExpertMatcher(registry);
-  const plugin = new DomainExpertReviewPlugin(registry, matcher, makeTeamConfig());
-  const ctx = makeCtx({
-    currentPhase: 2,
-    state: { [_internals.STATE_KEY_CANDIDATES]: [buildMatchResult()] },
-  });
+  // v1.6 P0-2：隔离 OPENAI_API_KEY 等环境变量，确保测试可重复
+  // 原因：开发机可能已设置 OPENAI_API_KEY，导致 createOpenAIClient 返回非 null client，
+  //       测试期望 "no-client" 错误将无法触发
+  const restore = isolateOpenAIEnv();
+  try {
+    const registry = new DomainExpertRegistry();
+    const matcher = new DomainExpertMatcher(registry);
+    const plugin = new DomainExpertReviewPlugin(registry, matcher, makeTeamConfig());
+    const ctx = makeCtx({
+      currentPhase: 2,
+      state: { [_internals.STATE_KEY_CANDIDATES]: [buildMatchResult()] },
+    });
 
-  // 无 options 时 invokeExpertLLM 会调用 createOpenAIClient（无 API Key）→ 抛 ExpertInvocationError
-  const result = await plugin.execute(ctx);
-  assert.equal(result.status, "failed");
-  assert.ok(result.error?.includes("no-client"));
+    // 无 options 时 invokeExpertLLM 会调用 createOpenAIClient（无 API Key）→ 抛 ExpertInvocationError
+    const result = await plugin.execute(ctx);
+    assert.equal(result.status, "failed");
+    assert.ok(result.error?.includes("no-client"));
+  } finally {
+    restore();
+  }
 });
 
 test("DomainExpertReviewPluginOptions：expertTimeoutMs 覆盖默认超时", async () => {
