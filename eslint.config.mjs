@@ -80,8 +80,19 @@ export default tseslint.config(
     },
   },
   // Script files: Node.js environment
+  // 覆盖范围：
+  //   - 根目录 scripts/ 下的 JS/MJS 脚本
+  //   - 各 package 下的 scripts/ JS 脚本
+  //   - v2/tests/scripts/ 下的 MJS 性能基准/基线脚本（如 cm-12-large-bench.mjs、perf-baseline.mjs）
+  //     这些脚本是独立运行的 Node.js 程序，使用 process/console 全局变量
   {
-    files: ["./scripts/**/*.js", "./scripts/**/*.mjs", "packages/*/scripts/**/*.js"],
+    files: [
+      "./scripts/**/*.js",
+      "./scripts/**/*.mjs",
+      "packages/*/scripts/**/*.js",
+      "packages/*/scripts/**/*.mjs",
+      "packages/*/src/v2/tests/scripts/**/*.mjs",
+    ],
     languageOptions: {
       globals: {
         process: "readonly",

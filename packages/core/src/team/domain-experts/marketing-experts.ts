@@ -263,7 +263,7 @@ const xiaohongshuOperatorExpert: DomainExpert = {
     "viral-content-formula",
   ],
   skills: ["小红书", "笔记创作", "KOL运营", "数据分析", "Z世代洞察", "种草营销", "评论区运营", "私域引流"],
-  keywords: ["小红书", "笔记", "KOL", "种草", "Z世代", "社区", "xiaohongshu", "KOL", "seeding", "red"],
+  keywords: ["小红书", "笔记", "KOL", "种草", "Z世代", "社区", "xiaohongshu", "social-commerce", "seeding", "red"],
   domainTags: ["小红书运营", "社交媒体", "KOL营销", "种草营销"],
   priority: 5,
   mutex: [],

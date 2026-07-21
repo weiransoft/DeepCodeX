@@ -714,3 +714,15 @@ export { GateG1Checker } from "./eag/gate";
 export { GateG2Checker } from "./eag/gate";
 export { GateG3Checker } from "./eag/gate";
 export { GateOrchestrator, GateOrchestratorError } from "./eag/gate";
+
+// ============================================================================
+// V2 上下文记忆体系（v2.8，V2-P0a/P0b/P1/P2/P3 五阶段全部完成）
+//
+// 架构师审查建议（2026-07-21）：
+//   - 通过 v2/index.ts 中间聚合层 re-export，与 team/index.ts 风格一致
+//   - 区分 `export`（值）与 `export type`（类型），.js 扩展名（ESM 约定）
+//   - 8 子模块：context / memory / codemap / understanding / diff / approval / integration / observability
+//
+// 导出范围：白名单导出（仅 public API），避免内部实现泄露
+// ============================================================================
+export * from "./v2/index.js";
