@@ -119,6 +119,20 @@ import { EagCommandParser } from "./eag/cli";
 import type { DevOpsOrchestrator } from "./eag/devops/devops-orchestrator";
 import type { DevOpsContext, DevOpsResult } from "./eag/devops/types";
 import type { DeployRequest } from "./eag/cli/eag-command-parser";
+// EAG-P5 Phase 5.4 TASK-P5-5.4-002 新增导入：EAG-P5 无人值守编排器 + /eag-autonomous 命令处理器
+// 注：仅导入类型与类，未注入 autonomousOrchestrator 时 /eag-autonomous 命令不可用（向后兼容，零开销）
+// - AutonomousOrchestrator：/eag-autonomous 命令编排器（外挂注入，构造期装配 LoopExecutor /
+//   RunStateStore / NotesMemory / GuardChain / SmartConfirmation 全部依赖）
+// - EagAutonomousCommandHandler：命令处理器类，负责装配 AutonomousRunRequest + 调用 run() + 渲染结果
+// - extractEagAutonomousRequestFromPrompt：独立函数，从命令字符串解析参数（用于错误回显）
+// - EagAutonomousRequest：/eag-autonomous 命令请求对象类型
+// 设计决策（对齐 EAG-P4 批次 13 §5.2 N-M-1 修复 + Karpathy Simplicity First）：
+// - 调用方在 SessionManagerOptions.autonomousOrchestrator 中注入完整装配的 AutonomousOrchestrator 实例
+// - session.ts 仅负责校验注入 + 装配请求 + 调用 handler.execute() + 渲染结果
+// - 不在 handleEagAutonomousCommand 内部 new AutonomousOrchestrator（避免每次命令重复构造）
+import type { AutonomousOrchestrator } from "./eag/p5/autonomous-orchestrator";
+import { EagAutonomousCommandHandler, extractEagAutonomousRequestFromPrompt } from "./eag/cli";
+import type { EagAutonomousRequest, EagAutonomousCommandResult } from "./eag/cli";
 
 export type { PermissionScope } from "./settings";
 export type {
@@ -536,6 +550,22 @@ type SessionManagerOptions = {
    */
   devopsOrchestrator?: DevOpsOrchestrator;
   /**
+   * EAG-P5 Phase 5.4：无人值守编排器（可选注入，§4.1 / §5 CLI 命令规范）
+   *
+   * 未注入时 `/eag-autonomous` 命令不可用，主对话循环行为完全不变（向后兼容）。
+   * 注入后，在主对话循环检测到 `/eag-autonomous` 命令时外挂调用 handleEagAutonomousCommand，
+   * 路由到 AutonomousOrchestrator.run() 执行 4 阶段循环（plan → dev → verify → fix）。
+   *
+   * 设计决策（对齐 EAG-P4 批次 13 §5.2 N-M-1 修复 + Karpathy Simplicity First）：
+   * - 调用方负责在注入前完整装配 AutonomousOrchestratorOptions（loopExecutor /
+   *   runStateStore / notesMemory / guardChain / smartConfirmation 全部依赖）
+   * - session.ts 不负责构造这些依赖（避免每次命令重复构造，且与
+   *   codingOrchestrator / testingOrchestrator / designOrchestrator / devopsOrchestrator 同构）
+   *
+   * 不可变优先（§5.12.4 G-A6d）：构造后字段不可变，循环内不可被 LLM 修改。
+   */
+  autonomousOrchestrator?: AutonomousOrchestrator;
+  /**
    * EAG-P3 批次 10：RunState 持久化存储（可选注入，§4.18.3）
    *
    * 未注入时 `/eag-run` `/eag-resume` `/eag-status` 三命令不可用，向后兼容。
@@ -633,6 +663,11 @@ export class SessionManager {
   //   调用方在 SessionManagerOptions.devopsOrchestrator 中注入完整装配的 DevOpsOrchestrator 实例
   //   （iacGenerators / gateG8Checker / deployStrategy / deployStage / eventEmitter 全部依赖）
   private readonly devopsOrchestrator?: DevOpsOrchestrator;
+  // EAG-P5 Phase 5.4 外挂字段（可选注入，未注入时 /eag-autonomous 命令不可用，§4.1 / §5 CLI 命令规范）
+  // - autonomousOrchestrator：未注入时 /eag-autonomous 命令不可用
+  //   调用方在 SessionManagerOptions.autonomousOrchestrator 中注入完整装配的 AutonomousOrchestrator 实例
+  //   （loopExecutor / runStateStore / notesMemory / guardChain / smartConfirmation 全部依赖）
+  private readonly autonomousOrchestrator?: AutonomousOrchestrator;
   // EAG-P3 批次 11 S3：CLI 命令解析器（§5 S3 改进方案 D-S3-4）
   // - 默认 new EagCommandParser()，保证向后兼容（未注入时主循环行为不变）
   // - 负责判定 6 个 EAG 命令字符串并从 messageParams 提取预装配的请求对象
@@ -672,6 +707,10 @@ export class SessionManager {
     // 调用方负责在注入前完整装配 DevOpsOrchestratorOptions（iacGenerators / gateG8Checker /
     // deployStrategy / deployStage / eventEmitter），session.ts 不负责构造依赖
     this.devopsOrchestrator = options.devopsOrchestrator;
+    // EAG-P5 Phase 5.4 外挂字段赋值（可选注入，未注入时 /eag-autonomous 命令不可用）
+    // 调用方负责在注入前完整装配 AutonomousOrchestratorOptions（loopExecutor / runStateStore /
+    // notesMemory / guardChain / smartConfirmation），session.ts 不负责构造依赖
+    this.autonomousOrchestrator = options.autonomousOrchestrator;
     // EAG-P3 批次 11 S3：CLI 命令解析器赋值（默认 new EagCommandParser()，向后兼容）
     this.eagCommandParser = options.eagCommandParser ?? new EagCommandParser();
   }
@@ -1849,6 +1888,13 @@ ${agentInstructions}
           // payload 类型为 DeployRequest | null，由 EagCommandParser.parse() 从
           // userPrompt.messageParams.deployRequest 提取（D-S3-7 注入模式）
           await this.handleEagDeployCommand(sessionId, userPrompt, eagCommand.payload, controller);
+          return;
+        case "eag-autonomous":
+          // EAG-P5 Phase 5.4 TASK-P5-5.4-002：/eag-autonomous 命令分发到 handleEagAutonomousCommand
+          // payload 类型为 EagAutonomousRequest | null，由 EagCommandParser.parse() 通过
+          // 前缀匹配识别后从 userPrompt.messageParams.autonomousRunRequest 提取（D-S3-7 注入模式）
+          // 或从命令字符串内联参数解析（extractEagAutonomousRequestFromPrompt）
+          await this.handleEagAutonomousCommand(sessionId, userPrompt, eagCommand.payload, controller);
           return;
         default:
           // 理论不可达（eagCommand.kind !== "unknown" 已过滤兜底分支）
@@ -3268,6 +3314,190 @@ ${agentInstructions}
     }
 
     return lines.join("\n");
+  }
+
+  // ============================================================================
+  // EAG-P5 Phase 5.4 TASK-P5-5.4-002：/eag-autonomous 命令处理器
+  // ============================================================================
+
+  /**
+   * 处理 /eag-autonomous 命令（EAG-P5 Phase 5.4 TASK-P5-5.4-002）
+   *
+   * 职责（对齐架构师审查 §4.1 + §5 CLI 命令规范 + handleEagDeployCommand 同构模式）：
+   * 1. 记录用户输入到消息历史（保持会话上下文完整）
+   * 2. 更新 session 状态为 processing
+   * 3. 校验外挂依赖 autonomousOrchestrator（未注入时 fail-closed 通知用户）
+   * 4. 校验 EagAutonomousRequest payload（null 时从命令字符串重新解析以获取错误详情）
+   * 5. 创建 EagAutonomousCommandHandler 实例并调用 execute(request, projectRoot)
+   * 6. 通过 onAssistantMessage 渲染 markdownReport（成功 / 失败两条路径）
+   * 7. 更新 session 状态为 completed / failed（依据 result.success）
+   *
+   * 设计决策（对齐 §5.2 N-M-1 修复 + Karpathy Simplicity First）：
+   * - 不在方法内部 new AutonomousOrchestrator（避免每次命令重复构造）
+   * - AutonomousOrchestrator 的全部依赖（loopExecutor / runStateStore / notesMemory /
+   *   guardChain / smartConfirmation）由调用方在 SessionManagerOptions.autonomousOrchestrator
+   *   中完整装配后注入
+   * - EagAutonomousCommandHandler 负责具体装配 AutonomousRunRequest + 调用 run() + 渲染结果
+   * - session.ts 仅负责校验注入 + 装配请求 + 调用 handler.execute() + 渲染结果
+   *
+   * 错误处理策略（对齐 handleEagDeployCommand 模式）：
+   * - 依赖未注入：fail-closed，session 标记 failed
+   * - payload null：尝试重新解析命令字符串获取错误详情，fail-closed
+   * - handler.execute() 抛异常：捕获异常，session 标记 failed
+   * - abort 信号：在装配前 / handler 调用前 / handler 调用后三个检查点响应中断
+   *
+   * 不可变优先（§5.12.4 G-A6d）：
+   * - EagAutonomousRequest 由 EagCommandParser.parse() 冻结后传入
+   * - EagAutonomousCommandResult 由 handler.execute() 内部冻结后返回
+   * - 不修改任何外部状态，所有副作用通过 onAssistantMessage / updateSessionEntry 路由
+   *
+   * @param sessionId 会话 ID
+   * @param userPrompt 用户输入（仅用于写入用户消息历史，不参与编排）
+   * @param request 预装配的 EagAutonomousRequest（由 EagCommandParser.parse() 提取，可空）
+   * @param controller 中断控制器（用于响应 abort 信号）
+   */
+  private async handleEagAutonomousCommand(
+    sessionId: string,
+    userPrompt: UserPromptContent,
+    request: EagAutonomousRequest | null,
+    controller?: AbortController
+  ): Promise<void> {
+    const signal = controller?.signal;
+    this.throwIfAborted(signal);
+
+    const now = new Date().toISOString();
+    // 步骤 1：记录用户输入到消息历史（保持会话上下文完整）
+    const userMessage = this.buildUserMessage(sessionId, userPrompt);
+    this.appendSessionMessage(sessionId, userMessage);
+
+    // 步骤 2：更新 session 状态为 processing
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: "processing",
+      failReason: null,
+      updateTime: now,
+    }));
+
+    // 步骤 3：校验外挂依赖 autonomousOrchestrator（未注入时 fail-closed）
+    if (!this.autonomousOrchestrator) {
+      const errMsg =
+        "AutonomousOrchestrator 未注入：请在 SessionManagerOptions.autonomousOrchestrator 配置后重启（参考 §4.1 / §5 CLI 命令规范）";
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: errMsg,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG Autonomous Loop] ${errMsg}`, null), false);
+      return;
+    }
+
+    // 步骤 4：校验 EagAutonomousRequest payload
+    // EagCommandParser.parse() 已通过两种路径提取 payload：
+    //   路径 A：从 userPrompt.messageParams.autonomousRunRequest 提取（UI 表单模式）
+    //   路径 B：从命令字符串内联参数解析（CLI 模式，extractEagAutonomousRequestFromPrompt）
+    // payload 为 null 时表示两种路径均失败：
+    //   - 命令字符串前缀匹配成功（/eag-autonomous）
+    //   - 但参数解析抛异常（如缺少 --goal / --max-iterations 取值非法）
+    // 此时重新调用 extractEagAutonomousRequestFromPrompt(userPrompt.text) 以获取具体错误信息
+    let validatedRequest: EagAutonomousRequest;
+    if (request) {
+      validatedRequest = request;
+    } else {
+      // payload null：尝试从命令字符串重新解析以获取错误详情
+      // 注：进入此分支前置条件为 EagCommandParser.parse() 返回 kind="eag-autonomous"，
+      // 即 userPrompt.text 已通过 typeof string 校验（见 eag-command-parser.ts L218）。
+      // 此处使用 String() 强制转换以消除 TS 的 string|undefined 不确定提示。
+      let parseErrorMsg: string;
+      try {
+        // 重新解析以触发异常并获取错误详情
+        extractEagAutonomousRequestFromPrompt(String(userPrompt.text ?? ""));
+        // 理论不可达：若 parser 已返回 null，重新解析应该抛异常
+        // 此处兜底：若未抛异常，使用通用错误消息
+        parseErrorMsg =
+          "EagAutonomousRequest 解析返回 null 但未抛异常（理论不可达，请检查 EagCommandParser.extractEagAutonomousRequest 实现）";
+      } catch (parseErr) {
+        parseErrorMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+      }
+      const errMsg = `EagAutonomousRequest 解析失败：${parseErrorMsg}（期望格式：/eag-autonomous --goal "<目标>" --max-iterations 10 --confirmation smart）`;
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: errMsg,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG Autonomous Loop] ${errMsg}`, null), false);
+      return;
+    }
+
+    // 步骤 5：创建 EagAutonomousCommandHandler 实例并调用 execute()
+    // 设计说明：handler 内部完成 AutonomousRunRequest 装配 + orchestrator.run() 调用 +
+    // Markdown 报告渲染 + 异常兜底，session.ts 仅需调用 execute() 即可
+    // 装配前再次检查 abort 信号（对齐 handleEagDeployCommand 的 P1-2 修复）
+    this.throwIfAborted(signal);
+    const handler = new EagAutonomousCommandHandler(this.autonomousOrchestrator);
+    let result: Readonly<EagAutonomousCommandResult>;
+    try {
+      result = await handler.execute(validatedRequest, this.projectRoot);
+    } catch (e) {
+      // 异常兜底：handler.execute() 内部已 try/catch orchestrator.run()，
+      // 此处捕获的是 handler 自身的异常（如 validateRequest 抛错、formatSuccessReport 异常）
+      const isAborted = this.isAbortLikeError(e) || signal?.aborted === true;
+      const errMsg = e instanceof Error ? e.message : String(e);
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: isAborted ? `Autonomous Loop 被用户中断：${errMsg}` : `Autonomous Loop 执行异常：${errMsg}`,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(
+        this.buildAssistantMessage(
+          sessionId,
+          isAborted
+            ? `[EAG Autonomous Loop] 编排被用户中断：${errMsg}`
+            : `[EAG Autonomous Loop] 编排异常：${errMsg}\n请检查 AutonomousOrchestrator 的 5 个核心依赖（loopExecutor / runStateStore / notesMemory / guardChain / smartConfirmation）配置是否正确。`,
+          null
+        ),
+        false
+      );
+      return;
+    }
+
+    // handler.execute() 完成后再次检查 abort 信号
+    // 避免 handler 完成后用户已 abort 还要继续渲染结果
+    if (signal?.aborted) {
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: "Autonomous Loop 被用户中断（编排完成后）",
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(
+        this.buildAssistantMessage(
+          sessionId,
+          `[EAG Autonomous Loop] 编排已完成但被用户中断，结果未渲染。success: ${result.success}`,
+          null
+        ),
+        false
+      );
+      return;
+    }
+
+    // 步骤 6：渲染结果摘要
+    // result.markdownReport 已由 handler.formatSuccessReport / formatErrorReport 装配，
+    // session.ts 直接通过 onAssistantMessage 推送给用户
+    this.onAssistantMessage(this.buildAssistantMessage(sessionId, result.markdownReport, null), false);
+
+    // 步骤 7：更新 session 状态（依据 result.success）
+    // - success=true：session 标记 completed（包括 finalStatus=completed / stop_when / aborted，
+    //   因为 handler.execute() 已捕获 orchestrator 异常并返回 success=false）
+    // - success=false：session 标记 failed，failReason 取 errorMessage
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: result.success ? "completed" : "failed",
+      failReason: result.success ? null : `Autonomous Loop 终止：${result.errorMessage}`,
+      updateTime: new Date().toISOString(),
+    }));
   }
 
   // ============================================================================

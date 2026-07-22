@@ -103,6 +103,44 @@ export class ToolExecutor {
     this.toolHandlers.set("WebSearch", handleWebSearchTool);
   }
 
+  /**
+   * 注册外部工具 handler（公开 API，供 V2 / Phase 4 等扩展模块注入工具）
+   *
+   * 与私有 registerToolHandlers() 区分：
+   * - registerToolHandlers()：私有，构造时批量注册内置工具（bash/read/write/edit 等）
+   * - registerToolHandler(name, handler)：公开，运行期动态注册外部工具
+   *
+   * 使用场景：
+   * - V2-P6 Phase 4 codemap 工具注册（codemap_query / impact_analysis /
+   *   flow_trace / risk_scan，通过 registerCodemapTools() 调用本方法）
+   * - MCP 工具以外的自定义工具扩展
+   * - 测试场景注入临时工具 handler
+   *
+   * 重复注册行为：
+   * - 同名工具重复注册时，新 handler 覆盖旧 handler（与 Map.set 语义一致）
+   * - 调用方应避免意外覆盖内置工具（bash/read/write/edit 等）
+   *
+   * 兼容性保证（向后兼容 Phase 1-3）：
+   * - 本方法仅追加，不修改现有内置工具注册逻辑
+   * - 不影响现有工具调度（executeToolCall 优先查询 toolHandlers Map）
+   *
+   * @param name 工具名称（与 LLM function calling 的 name 一致）
+   * @param handler 工具 handler（(args, context) => Promise<ToolExecutionResult>）
+   */
+  readonly registerToolHandler = (name: string, handler: ToolHandler): void => {
+    // 参数校验：name 必须为非空字符串，handler 必须为函数
+    if (typeof name !== "string" || name.length === 0) {
+      throw new Error(
+        "registerToolHandler 失败：name 必须为非空字符串（Tool handler name must be a non-empty string）"
+      );
+    }
+    if (typeof handler !== "function") {
+      throw new Error("registerToolHandler 失败：handler 必须为函数（Tool handler must be a function）");
+    }
+    // 注册 handler（同名覆盖，与 Map.set 语义一致）
+    this.toolHandlers.set(name, handler);
+  };
+
   private parseToolCall(toolCall: unknown): ToolCall | null {
     if (!toolCall || typeof toolCall !== "object") {
       return null;

@@ -1,0 +1,49 @@
+
+🧠 DeepCodeX Team - list
+可用角色（5 个）:
+# 产品经理 (Product Manager)
+
+负责需求分析、PRD 编写、用户研究、竞品分析。定义用户价值清晰、需求明确、可落地、可验收的产品。
+
+**优先级**: 10/10
+**能力** (8): requirement-analysis, prd-writing, user-research, competitor-analysis, product-planning, user-story-mapping, mvp-design, metrics-definition
+**技能** (12): PRD, User Story, User Journey, Persona, Figma, Miro, Notion, Mixpanel, Amplitude, A/B Testing, OKR, Kano Model
+**关键词** (10): 需求, 产品, PRD, 用户, 功能, 验收, 痛点, 用户故事, MVP, 竞品
+
+# 架构师 (Architect)
+
+负责系统架构设计、技术选型、架构评审与性能优化。系统性、前瞻性、可落地、可验证的架构方案。
+
+**优先级**: 9/10
+**能力** (8): system-architecture-design, tech-selection, architecture-review, performance-optimization, security-design, scalability-design, adr-writing, risk-assessment
+**技能** (13): TypeScript, Node.js, Python, Rust, PostgreSQL, Redis, Kafka, gRPC, Microservices, Distributed Systems, DDD, Event Sourcing, CQRS
+**关键词** (10): 架构, 系统设计, 技术选型, 微服务, 性能, 瓶颈, 接口, 模块, 部署, ADR
+
+# 独立开发者 (Solo Coder)
+
+负责代码实现、功能开发、单元测试、重构。编写完整、高质量、可维护、可测试的代码。
+
+**优先级**: 8/10
+**能力** (8): code-implementation, feature-development, unit-testing, integration-testing, refactoring, bug-fixing, performance-tuning, documentation
+**技能** (12): TypeScript, Python, Rust, Go, Java, Spring Boot, React, Node.js, PostgreSQL, Git, Docker, Vitest
+**关键词** (10): 开发, 代码, 实现, 功能, 编程, 重构, bug, 修复, 测试, 单元测试
+
+# 测试专家 (Test Expert)
+
+负责测试设计、测试执行、缺陷跟踪、质量评估。确保全面、深入、自动化、可量化的质量保障。
+
+**优先级**: 7/10
+**能力** (8): test-design, test-execution, bug-tracking, quality-assessment, automation-testing, performance-testing, security-testing, regression-testing
+**技能** (12): Vitest, Jest, pytest, Playwright, Cypress, Selenium, JMeter, k6, OWASP ZAP, Postman, Newman, Coverage
+**关键词** (10): 测试, 质量, bug, 验证, 用例, E2E, 回归, 性能测试, 覆盖率, 缺陷
+
+# UI 设计师 (UI Designer)
+
+负责界面设计、交互设计、视觉设计、原型设计。创建独特、生产级 UI，避免 AI slop 美学。
+
+**优先级**: 6/10
+**能力** (8): ui-design, interaction-design, visual-design, prototyping, design-system, responsive-design, accessibility, motion-design
+**技能** (12): Figma, Sketch, Adobe XD, Photoshop, Illustrator, Framer, Principle, Webflow, CSS, Tailwind, Design Tokens, WCAG 2.1
+**关键词** (9): UI, 界面设计, 交互设计, 视觉设计, 用户体验, 原型, Figma, 美化, 设计系统
+
+⏱  耗时: 0ms

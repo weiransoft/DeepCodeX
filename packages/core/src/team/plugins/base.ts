@@ -263,6 +263,9 @@ export abstract class BasePlugin implements GoalCommandPlugin {
       tokensConsumed: { prompt: 0, completion: 0, total: 0 },
       cacheHit: false,
       retryCount: 0,
+      // v2.1.3 新增字段：插件路径默认未触发 LLM 续写
+      continueCount: 0,
+      isPartial: false,
     };
   }
 
@@ -293,6 +296,9 @@ export abstract class BasePlugin implements GoalCommandPlugin {
       tokensConsumed: { prompt: 0, completion: 0, total: 0 },
       cacheHit: false,
       retryCount: 0,
+      // v2.1.3 新增字段：插件路径默认未触发 LLM 续写
+      continueCount: 0,
+      isPartial: false,
     };
   }
 

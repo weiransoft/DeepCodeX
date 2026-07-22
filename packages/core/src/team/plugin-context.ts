@@ -342,6 +342,13 @@ export function toDispatchResult(
     tokensConsumed?: { prompt: number; completion: number; total: number };
     cacheHit?: boolean;
     retryCount?: number;
+    /**
+     * v2.1.3 新增：续写次数（LLM 输出被 maxTokens 截断时的自动续写次数）
+     * 默认 0（插件路径通常不触发续写）
+     */
+    continueCount?: number;
+    /** v2.1.3 新增：是否为部分输出（截断后续写未完成） */
+    isPartial?: boolean;
   }
 ): DispatchResult {
   return {
@@ -368,6 +375,9 @@ export function toDispatchResult(
     tokensConsumed: options?.tokensConsumed ?? { prompt: 0, completion: 0, total: 0 },
     cacheHit: options?.cacheHit ?? false,
     retryCount: options?.retryCount ?? 0,
+    // v2.1.3 新增字段：插件路径默认未触发 LLM 续写
+    continueCount: options?.continueCount ?? 0,
+    isPartial: options?.isPartial ?? false,
   };
 }
 

@@ -313,6 +313,9 @@ async function executeDispatchCommand(args: TeamCommandArgs, startTime: number):
   writeStdoutLine(`taskId: ${result.taskId}\n`);
   writeStdoutLine(`dispatchId: ${result.dispatchId}\n`);
   writeStdoutLine(`matchedRole: ${result.matchedRole.roleId} (${(result.matchedRole.confidence * 100).toFixed(1)}%)\n`);
+  // v2.1.3 新增：输出续写信息，便于诊断 LLM 输出截断问题
+  writeStdoutLine(`continueCount: ${result.continueCount}\n`);
+  writeStdoutLine(`isPartial: ${result.isPartial}\n`);
   if (result.error) {
     writeStderrLine(`错误: ${result.error}\n`);
   }

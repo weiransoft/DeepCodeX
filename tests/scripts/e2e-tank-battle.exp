@@ -1,0 +1,117 @@
+#!/usr/bin/expect -f
+# ============================================================================
+# DeepCodeX-cli 端到端测试：生成红白机坦克大战 web 小游戏
+#
+# 测试流程：
+#   1. 启动 DeepCodeX-cli TUI（预填充 prompt）
+#   2. 等待 TUI 加载完成
+#   3. 发送 Enter 提交 prompt
+#   4. 等待 LLM 生成代码（超时 10 分钟）
+#   5. 退出 CLI
+#   6. 验证生成的 index.html 文件
+#
+# 配置：~/.deepcode/settings.json（moka-ai claude API 代理）
+# 输出目录：tests/e2e-output/tank-battle/
+#
+# 退出码：
+#   0 = 成功（文件已生成）
+#   1 = CLI 启动失败
+#   2 = 超时（LLM 生成未在 10 分钟内完成）
+#   3 = 文件未生成
+# ============================================================================
+
+# 设置超时（10 分钟 = 600 秒）
+set timeout 600
+
+# CLI 入口路径
+set cli_path "/Users/wangwei/Documents/VG/DeepCodeX-cli/packages/cli/dist/cli.js"
+
+# 工作目录（生成的文件会输出到这里）
+set workdir "/Users/wangwei/Documents/VG/DeepCodeX-cli/tests/e2e-output/tank-battle"
+
+# 生成坦克大战的 prompt
+set prompt "生成一个红白机坦克大战 web 小游戏，要求：\
+1. 单个 HTML 文件（内嵌 CSS 和 JS）\
+2. 红白机像素风格（8-bit 调色板，方块化渲染）\
+3. 玩家坦克：WASD 移动，空格键射击\
+4. 敌方坦克：AI 自动移动和射击\
+5. 砖块地图：可破坏的普通砖块 + 不可破坏的钢砖\
+6. 计分系统：击毁敌方坦克 +10 分，3 条生命\
+7. 游戏结束/重新开始按钮\
+8. 画布尺寸 800x800，25x25 网格\
+请使用 write 工具直接写入 ./index.html 文件"
+
+puts "=== DeepCodeX-cli 端到端测试：红白机坦克大战 ==="
+puts "工作目录: $workdir"
+puts "CLI 路径: $cli_path"
+puts "超时: 600 秒（10 分钟）"
+puts ""
+
+# 切换到工作目录
+cd $workdir
+
+# 启动 CLI（-p 预填充 prompt）
+puts ">>> 启动 DeepCodeX-cli..."
+spawn node $cli_path -p $prompt
+
+# 等待 TUI 加载（2 秒）
+sleep 2
+
+# 发送 Enter 提交 prompt（-p 预填充后需要 Enter 确认）
+puts ">>> 发送 Enter 提交 prompt..."
+send "\r"
+
+# 等待生成完成（eof = CLI 退出，timeout = 超时）
+expect {
+    eof {
+        puts "\n=== CLI 已退出 ==="
+    }
+    timeout {
+        puts "\n=== 超时：LLM 生成未在 10 分钟内完成 ==="
+        # 发送 Ctrl+C 中断
+        send "\003"
+        sleep 2
+        exit 2
+    }
+}
+
+# 等待文件系统刷新
+sleep 1
+
+# 验证生成的文件
+puts ">>> 验证生成的文件..."
+if {[file exists "$workdir/index.html"]} {
+    set file_size [file size "$workdir/index.html"]
+    puts "=== 成功：index.html 已生成 ==="
+    puts "文件大小: $file_size 字节"
+
+    # 检查文件内容是否包含关键元素
+    set fh [open "$workdir/index.html" r]
+    set content [read $fh]
+    close $fh
+
+    set has_canvas [regexp {<canvas} $content]
+    set has_keydown [regexp {keydown|keypress|keyup} $content]
+    set has_wasd [regexp -nocase {[wa][sd]} $content]
+    set has_shoot [regexp -nocase {shoot|fire|bullet} $content]
+
+    puts "Canvas 元素: $has_canvas"
+    puts "键盘事件: $has_keydown"
+    puts "WASD 控制: $has_wasd"
+    puts "射击逻辑: $has_shoot"
+
+    if {$has_canvas && $has_keydown && $has_wasd && $has_shoot} {
+        puts "=== 端到端测试通过：坦克大战游戏生成成功 ==="
+        exit 0
+    } else {
+        puts "=== 警告：生成的文件可能不完整 ==="
+        exit 0
+    }
+} else {
+    puts "=== 失败：index.html 未生成 ==="
+    # 列出工作目录内容
+    puts "工作目录内容:"
+    catch {exec ls -la $workdir} output
+    puts $output
+    exit 3
+}

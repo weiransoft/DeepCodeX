@@ -1,0 +1,16 @@
+
+🧠 DeepCodeX Team - match
+
+匹配结果（top 5）:
+  1. roleId: test-expert          █████████ confidence: 44.0%
+     理由: 综合置信度 44.0%
+  2. roleId: solo-coder           ████████ confidence: 42.0%
+     理由: 综合置信度 42.0%
+  3. roleId: product-manager      ████████ confidence: 40.0%
+     理由: 综合置信度 40.0%
+  4. roleId: architect            ████████ confidence: 40.0%
+     理由: 综合置信度 40.0%
+  5. roleId: ui-designer          ████████ confidence: 40.0%
+     理由: 综合置信度 40.0%
+
+⏱  耗时: 929ms

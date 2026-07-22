@@ -1,0 +1,493 @@
+{
+  "project_name": "enterprise-app",
+  "check_time": "2026-07-21T09:32:06.514482+00:00",
+  "feature_checks": [
+    {
+      "feature_id": "F-001",
+      "feature_name": "JWT 用户认证",
+      "feature_desc": "",
+      "doc_source": "PRD.md §2.1 功能点清单",
+      "code_location": "",
+      "status": "missing",
+      "evidence": ""
+    },
+    {
+      "feature_id": "F-002",
+      "feature_name": "商品创建",
+      "feature_desc": "",
+      "doc_source": "PRD.md §2.1 功能点清单",
+      "code_location": "",
+      "status": "missing",
+      "evidence": ""
+    },
+    {
+      "feature_id": "F-003",
+      "feature_name": "商品查询（单个）",
+      "feature_desc": "",
+      "doc_source": "PRD.md §2.1 功能点清单",
+      "code_location": "",
+      "status": "missing",
+      "evidence": ""
+    },
+    {
+      "feature_id": "F-004",
+      "feature_name": "商品列表查询",
+      "feature_desc": "",
+      "doc_source": "PRD.md §2.1 功能点清单",
+      "code_location": "",
+      "status": "missing",
+      "evidence": ""
+    },
+    {
+      "feature_id": "F-005",
+      "feature_name": "商品更新",
+      "feature_desc": "",
+      "doc_source": "PRD.md §2.1 功能点清单",
+      "code_location": "",
+      "status": "missing",
+      "evidence": ""
+    },
+    {
+      "feature_id": "F-006",
+      "feature_name": "商品删除",
+      "feature_desc": "",
+      "doc_source": "PRD.md §2.1 功能点清单",
+      "code_location": "",
+      "status": "missing",
+      "evidence": ""
+    },
+    {
+      "feature_id": "F-007",
+      "feature_name": "订单创建",
+      "feature_desc": "",
+      "doc_source": "PRD.md §2.1 功能点清单",
+      "code_location": "",
+      "status": "missing",
+      "evidence": ""
+    },
+    {
+      "feature_id": "F-008",
+      "feature_name": "订单查询（单个）",
+      "feature_desc": "",
+      "doc_source": "PRD.md §2.1 功能点清单",
+      "code_location": "",
+      "status": "missing",
+      "evidence": ""
+    },
+    {
+      "feature_id": "F-009",
+      "feature_name": "订单取消",
+      "feature_desc": "",
+      "doc_source": "PRD.md §2.1 功能点清单",
+      "code_location": "",
+      "status": "missing",
+      "evidence": ""
+    },
+    {
+      "feature_id": "F-010",
+      "feature_name": "库存扣减",
+      "feature_desc": "",
+      "doc_source": "PRD.md §2.1 功能点清单",
+      "code_location": "",
+      "status": "missing",
+      "evidence": ""
+    },
+    {
+      "feature_id": "F-011",
+      "feature_name": "库存恢复",
+      "feature_desc": "",
+      "doc_source": "PRD.md §2.1 功能点清单",
+      "code_location": "",
+      "status": "missing",
+      "evidence": ""
+    },
+    {
+      "feature_id": "F-012",
+      "feature_name": "库存查询",
+      "feature_desc": "",
+      "doc_source": "PRD.md §2.1 功能点清单",
+      "code_location": "",
+      "status": "missing",
+      "evidence": ""
+    }
+  ],
+  "integration_checks": [
+    {
+      "integration_desc": "Router→Service",
+      "doc_source": "ARCHITECTURE.md §1.1 设计原则",
+      "code_location": "tests/inventory.test.ts: import ../src/inventory/inventory-service.js",
+      "status": "connected"
+    },
+    {
+      "integration_desc": "任一扣减失败→回滚已扣减的库存",
+      "doc_source": "ARCHITECTURE.md §3.3 OrdersModule（订单模块）",
+      "code_location": "",
+      "status": "missing"
+    },
+    {
+      "integration_desc": "全部扣减成功→创建订单记录",
+      "doc_source": "ARCHITECTURE.md §3.3 OrdersModule（订单模块）",
+      "code_location": "",
+      "status": "missing"
+    },
+    {
+      "integration_desc": "AuthMiddleware→所有受保护路由",
+      "doc_source": "ARCHITECTURE.md §4.2 集成关系清单",
+      "code_location": "",
+      "status": "missing"
+    },
+    {
+      "integration_desc": "OrderService→ProductService",
+      "doc_source": "ARCHITECTURE.md §4.2 集成关系清单",
+      "code_location": "",
+      "status": "missing"
+    },
+    {
+      "integration_desc": "OrderService→InventoryService",
+      "doc_source": "ARCHITECTURE.md §4.2 集成关系清单",
+      "code_location": "",
+      "status": "missing"
+    },
+    {
+      "integration_desc": "ProductService→InventoryService",
+      "doc_source": "ARCHITECTURE.md §4.2 集成关系清单",
+      "code_location": "",
+      "status": "missing"
+    },
+    {
+      "integration_desc": "Service→Repository",
+      "doc_source": "ARCHITECTURE.md §4.2 集成关系清单",
+      "code_location": "src/products/product-service.ts: import ../utils/repository.js",
+      "status": "connected"
+    },
+    {
+      "integration_desc": "所有模块→Logger",
+      "doc_source": "ARCHITECTURE.md §4.2 集成关系清单",
+      "code_location": "src/products/product-service.ts: import ../utils/logger.js",
+      "status": "connected"
+    },
+    {
+      "integration_desc": "OrderRouter→OrderService",
+      "doc_source": "ARCHITECTURE.md §订单创建数据流（F-007）",
+      "code_location": "",
+      "status": "missing"
+    }
+  ],
+  "test_result": {
+    "test_command": "cd /Users/wangwei/Documents/VG/DeepCodeX-cli/tests/fixtures/enterprise-app && npm test 2>&1",
+    "passed": 0,
+    "failed": 0,
+    "skipped": 0,
+    "covered_features": ["F-002", "F-005", "F-006", "F-007", "F-009", "F-010", "F-011", "F-012"],
+    "uncovered_features": ["F-001", "F-003", "F-004", "F-008"],
+    "test_output_tail": "   at new SafePromise (node:internal/per_context/primordials:435:3)\n      at node:internal/per_context/primordials:466:9\n      at Array.map (<anonymous>) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: TypeError: this.repository.exists is not a function\n        at ProductService.delete (/Users/wangwei/Documents/VG/DeepCodeX-cli/tests/fixtures/enterprise-app/src/products/product-service.ts:192:26)\n        at <anonymous> (/Users/wangwei/Documents/VG/DeepCodeX-cli/tests/fixtures/enterprise-app/tests/products.test.ts:228:30)\n        at getActual (node:assert:611:5)\n        at strict.throws (node:assert:759:24)\n        at TestContext.<anonymous> (/Users/wangwei/Documents/VG/DeepCodeX-cli/tests/fixtures/enterprise-app/tests/products.test.ts:227:14)\n        at Test.runInAsyncScope (node:async_hooks:227:14)\n        at Test.run (node:internal/test_runner/test:1306:25)\n        at Test.start (node:internal/test_runner/test:1177:17)\n        at node:internal/test_runner/test:1769:71\n        at node:internal/per_context/primordials:466:82,\n    operator: 'throws',\n    diff: 'simple'\n  }\n\ntest at tests/products.test.ts:1:7286\n✖ create 后 delete，再 inventoryService.getStock(id)，断言抛 NotFoundError (0.080125ms)\n  TypeError: this.repository.save is not a function\n      at ProductService.create (/Users/wangwei/Documents/VG/DeepCodeX-cli/tests/fixtures/enterprise-app/src/products/product-service.ts:69:21)\n      at TestContext.<anonymous> (/Users/wangwei/Documents/VG/DeepCodeX-cli/tests/fixtures/enterprise-app/tests/products.test.ts:239:38)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1306:25)\n      at Test.start (node:internal/test_runner/test:1177:17)\n      at node:internal/test_runner/test:1769:71\n      at node:internal/per_context/primordials:466:82\n      at new Promise (<anonymous>)\n      at new SafePromise (node:internal/per_context/primordials:435:3)\n      at node:internal/per_context/primordials:466:9\n\n",
+    "duration_sec": 0.32602405548095703
+  },
+  "acceptance_checks": [
+    {
+      "criteria_id": "AC-001",
+      "criteria_desc": "正确用户名密码登录返回 JWT token，错误密码返回 401",
+      "doc_source": "PRD.md §3. 验收标准",
+      "verification": "code",
+      "status": "satisfied"
+    },
+    {
+      "criteria_id": "AC-002",
+      "criteria_desc": "无 token 访问受保护接口返回 401",
+      "doc_source": "PRD.md §3. 验收标准",
+      "verification": "code",
+      "status": "satisfied"
+    }
+  ],
+  "todo_items": [],
+  "deviation_items": [
+    {
+      "dimension": "技术选型",
+      "doc_intent": "文档要求使用 jest",
+      "code_reality": "代码中未发现 jest 的使用",
+      "severity": "medium"
+    },
+    {
+      "dimension": "模块划分",
+      "doc_intent": "文档定义了模块 Router",
+      "code_reality": "代码中未发现 Router 相关文件或符号",
+      "severity": "low"
+    },
+    {
+      "dimension": "模块划分",
+      "doc_intent": "文档定义了模块 任一扣减失败",
+      "code_reality": "代码中未发现 任一扣减失败 相关文件或符号",
+      "severity": "low"
+    },
+    {
+      "dimension": "模块划分",
+      "doc_intent": "文档定义了模块 回滚已扣减的库存",
+      "code_reality": "代码中未发现 回滚已扣减的库存 相关文件或符号",
+      "severity": "low"
+    },
+    {
+      "dimension": "模块划分",
+      "doc_intent": "文档定义了模块 全部扣减成功",
+      "code_reality": "代码中未发现 全部扣减成功 相关文件或符号",
+      "severity": "low"
+    },
+    {
+      "dimension": "模块划分",
+      "doc_intent": "文档定义了模块 创建订单记录",
+      "code_reality": "代码中未发现 创建订单记录 相关文件或符号",
+      "severity": "low"
+    },
+    {
+      "dimension": "模块划分",
+      "doc_intent": "文档定义了模块 所有受保护路由",
+      "code_reality": "代码中未发现 所有受保护路由 相关文件或符号",
+      "severity": "low"
+    },
+    {
+      "dimension": "模块划分",
+      "doc_intent": "文档定义了模块 所有模块",
+      "code_reality": "代码中未发现 所有模块 相关文件或符号",
+      "severity": "low"
+    },
+    {
+      "dimension": "模块划分",
+      "doc_intent": "文档定义了模块 OrderRouter",
+      "code_reality": "代码中未发现 OrderRouter 相关文件或符号",
+      "severity": "low"
+    }
+  ],
+  "overall_passed": false,
+  "gap_list": [
+    {
+      "dimension": "D1 功能完成度",
+      "description": "功能 F-001(JWT 用户认证) 未实现",
+      "feature_id": "F-001",
+      "priority": "P0",
+      "suggestion": "实现功能 JWT 用户认证，参考 PRD.md §2.1 功能点清单"
+    },
+    {
+      "dimension": "D1 功能完成度",
+      "description": "功能 F-002(商品创建) 未实现",
+      "feature_id": "F-002",
+      "priority": "P0",
+      "suggestion": "实现功能 商品创建，参考 PRD.md §2.1 功能点清单"
+    },
+    {
+      "dimension": "D1 功能完成度",
+      "description": "功能 F-003(商品查询（单个）) 未实现",
+      "feature_id": "F-003",
+      "priority": "P0",
+      "suggestion": "实现功能 商品查询（单个），参考 PRD.md §2.1 功能点清单"
+    },
+    {
+      "dimension": "D1 功能完成度",
+      "description": "功能 F-004(商品列表查询) 未实现",
+      "feature_id": "F-004",
+      "priority": "P0",
+      "suggestion": "实现功能 商品列表查询，参考 PRD.md §2.1 功能点清单"
+    },
+    {
+      "dimension": "D1 功能完成度",
+      "description": "功能 F-005(商品更新) 未实现",
+      "feature_id": "F-005",
+      "priority": "P0",
+      "suggestion": "实现功能 商品更新，参考 PRD.md §2.1 功能点清单"
+    },
+    {
+      "dimension": "D1 功能完成度",
+      "description": "功能 F-006(商品删除) 未实现",
+      "feature_id": "F-006",
+      "priority": "P0",
+      "suggestion": "实现功能 商品删除，参考 PRD.md §2.1 功能点清单"
+    },
+    {
+      "dimension": "D1 功能完成度",
+      "description": "功能 F-007(订单创建) 未实现",
+      "feature_id": "F-007",
+      "priority": "P0",
+      "suggestion": "实现功能 订单创建，参考 PRD.md §2.1 功能点清单"
+    },
+    {
+      "dimension": "D1 功能完成度",
+      "description": "功能 F-008(订单查询（单个）) 未实现",
+      "feature_id": "F-008",
+      "priority": "P0",
+      "suggestion": "实现功能 订单查询（单个），参考 PRD.md §2.1 功能点清单"
+    },
+    {
+      "dimension": "D1 功能完成度",
+      "description": "功能 F-009(订单取消) 未实现",
+      "feature_id": "F-009",
+      "priority": "P0",
+      "suggestion": "实现功能 订单取消，参考 PRD.md §2.1 功能点清单"
+    },
+    {
+      "dimension": "D1 功能完成度",
+      "description": "功能 F-010(库存扣减) 未实现",
+      "feature_id": "F-010",
+      "priority": "P0",
+      "suggestion": "实现功能 库存扣减，参考 PRD.md §2.1 功能点清单"
+    },
+    {
+      "dimension": "D1 功能完成度",
+      "description": "功能 F-011(库存恢复) 未实现",
+      "feature_id": "F-011",
+      "priority": "P0",
+      "suggestion": "实现功能 库存恢复，参考 PRD.md §2.1 功能点清单"
+    },
+    {
+      "dimension": "D1 功能完成度",
+      "description": "功能 F-012(库存查询) 未实现",
+      "feature_id": "F-012",
+      "priority": "P0",
+      "suggestion": "实现功能 库存查询，参考 PRD.md §2.1 功能点清单"
+    },
+    {
+      "dimension": "D2 集成完整性",
+      "description": "集成关系 任一扣减失败→回滚已扣减的库存 缺失",
+      "feature_id": "",
+      "priority": "P0",
+      "suggestion": "添加 任一扣减失败→回滚已扣减的库存 的 import/调用关系，参考 ARCHITECTURE.md §3.3 OrdersModule（订单模块）"
+    },
+    {
+      "dimension": "D2 集成完整性",
+      "description": "集成关系 全部扣减成功→创建订单记录 缺失",
+      "feature_id": "",
+      "priority": "P0",
+      "suggestion": "添加 全部扣减成功→创建订单记录 的 import/调用关系，参考 ARCHITECTURE.md §3.3 OrdersModule（订单模块）"
+    },
+    {
+      "dimension": "D2 集成完整性",
+      "description": "集成关系 AuthMiddleware→所有受保护路由 缺失",
+      "feature_id": "",
+      "priority": "P0",
+      "suggestion": "添加 AuthMiddleware→所有受保护路由 的 import/调用关系，参考 ARCHITECTURE.md §4.2 集成关系清单"
+    },
+    {
+      "dimension": "D2 集成完整性",
+      "description": "集成关系 OrderService→ProductService 缺失",
+      "feature_id": "",
+      "priority": "P0",
+      "suggestion": "添加 OrderService→ProductService 的 import/调用关系，参考 ARCHITECTURE.md §4.2 集成关系清单"
+    },
+    {
+      "dimension": "D2 集成完整性",
+      "description": "集成关系 OrderService→InventoryService 缺失",
+      "feature_id": "",
+      "priority": "P0",
+      "suggestion": "添加 OrderService→InventoryService 的 import/调用关系，参考 ARCHITECTURE.md §4.2 集成关系清单"
+    },
+    {
+      "dimension": "D2 集成完整性",
+      "description": "集成关系 ProductService→InventoryService 缺失",
+      "feature_id": "",
+      "priority": "P0",
+      "suggestion": "添加 ProductService→InventoryService 的 import/调用关系，参考 ARCHITECTURE.md §4.2 集成关系清单"
+    },
+    {
+      "dimension": "D2 集成完整性",
+      "description": "集成关系 OrderRouter→OrderService 缺失",
+      "feature_id": "",
+      "priority": "P0",
+      "suggestion": "添加 OrderRouter→OrderService 的 import/调用关系，参考 ARCHITECTURE.md §订单创建数据流（F-007）"
+    },
+    {
+      "dimension": "D3 测试正确性",
+      "description": "无测试执行结果（可能未配置测试命令或测试为空）",
+      "feature_id": "",
+      "priority": "P1",
+      "suggestion": "配置并执行测试命令"
+    },
+    {
+      "dimension": "D3 测试正确性",
+      "description": "功能 F-001 未被测试覆盖",
+      "feature_id": "F-001",
+      "priority": "P1",
+      "suggestion": "为功能 F-001 添加测试用例"
+    },
+    {
+      "dimension": "D3 测试正确性",
+      "description": "功能 F-003 未被测试覆盖",
+      "feature_id": "F-003",
+      "priority": "P1",
+      "suggestion": "为功能 F-003 添加测试用例"
+    },
+    {
+      "dimension": "D3 测试正确性",
+      "description": "功能 F-004 未被测试覆盖",
+      "feature_id": "F-004",
+      "priority": "P1",
+      "suggestion": "为功能 F-004 添加测试用例"
+    },
+    {
+      "dimension": "D3 测试正确性",
+      "description": "功能 F-008 未被测试覆盖",
+      "feature_id": "F-008",
+      "priority": "P1",
+      "suggestion": "为功能 F-008 添加测试用例"
+    },
+    {
+      "dimension": "D6 文档意图",
+      "description": "技术选型 偏离：文档要求使用 jest（实际：代码中未发现 jest 的使用）",
+      "feature_id": "",
+      "priority": "P1",
+      "suggestion": "对齐 技术选型：文档要求使用 jest"
+    },
+    {
+      "dimension": "D6 文档意图",
+      "description": "模块划分 偏离：文档定义了模块 Router（实际：代码中未发现 Router 相关文件或符号）",
+      "feature_id": "",
+      "priority": "P2",
+      "suggestion": "对齐 模块划分：文档定义了模块 Router"
+    },
+    {
+      "dimension": "D6 文档意图",
+      "description": "模块划分 偏离：文档定义了模块 任一扣减失败（实际：代码中未发现 任一扣减失败 相关文件或符号）",
+      "feature_id": "",
+      "priority": "P2",
+      "suggestion": "对齐 模块划分：文档定义了模块 任一扣减失败"
+    },
+    {
+      "dimension": "D6 文档意图",
+      "description": "模块划分 偏离：文档定义了模块 回滚已扣减的库存（实际：代码中未发现 回滚已扣减的库存 相关文件或符号）",
+      "feature_id": "",
+      "priority": "P2",
+      "suggestion": "对齐 模块划分：文档定义了模块 回滚已扣减的库存"
+    },
+    {
+      "dimension": "D6 文档意图",
+      "description": "模块划分 偏离：文档定义了模块 全部扣减成功（实际：代码中未发现 全部扣减成功 相关文件或符号）",
+      "feature_id": "",
+      "priority": "P2",
+      "suggestion": "对齐 模块划分：文档定义了模块 全部扣减成功"
+    },
+    {
+      "dimension": "D6 文档意图",
+      "description": "模块划分 偏离：文档定义了模块 创建订单记录（实际：代码中未发现 创建订单记录 相关文件或符号）",
+      "feature_id": "",
+      "priority": "P2",
+      "suggestion": "对齐 模块划分：文档定义了模块 创建订单记录"
+    },
+    {
+      "dimension": "D6 文档意图",
+      "description": "模块划分 偏离：文档定义了模块 所有受保护路由（实际：代码中未发现 所有受保护路由 相关文件或符号）",
+      "feature_id": "",
+      "priority": "P2",
+      "suggestion": "对齐 模块划分：文档定义了模块 所有受保护路由"
+    },
+    {
+      "dimension": "D6 文档意图",
+      "description": "模块划分 偏离：文档定义了模块 所有模块（实际：代码中未发现 所有模块 相关文件或符号）",
+      "feature_id": "",
+      "priority": "P2",
+      "suggestion": "对齐 模块划分：文档定义了模块 所有模块"
+    },
+    {
+      "dimension": "D6 文档意图",
+      "description": "模块划分 偏离：文档定义了模块 OrderRouter（实际：代码中未发现 OrderRouter 相关文件或符号）",
+      "feature_id": "",
+      "priority": "P2",
+      "suggestion": "对齐 模块划分：文档定义了模块 OrderRouter"
+    }
+  ]
+}

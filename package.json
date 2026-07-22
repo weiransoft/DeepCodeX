@@ -29,7 +29,11 @@
     "release:version": "node scripts/version.js",
     "prepare:package": "node scripts/prepare-package.js",
     "prepare:vscode": "node scripts/prepare-vscode.js",
-    "prepare": "husky && npm run build && npm run bundle"
+    "prepare": "husky && npm run build && npm run bundle",
+    "rebuild:sqlite": "bash scripts/install-better-sqlite3.sh"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.0.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

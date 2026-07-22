@@ -1,0 +1,17 @@
+{
+  "provider": "anthropic",
+  "env": {
+    "API_KEY": "sk-AYGb8HrZfUhme7dc2Ed67IPfsdCeqV4r2BYUIEOM3a0Wqrr2",
+    "BASE_URL": "https://api2.moka-ai.com/v1",
+    "MODEL": "moka/claude-sonnet-4-6"
+  },
+  "model": "moka/claude-sonnet-4-6",
+  "thinkingEnabled": true,
+  "reasoningEffort": "high",
+  "anthropic": {
+    "maxTokens": 16384,
+    "betaFeatures": ["extended-thinking"]
+  },
+  "debugLogEnabled": false,
+  "telemetryEnabled": false
+}
