@@ -519,12 +519,12 @@ export class RalphLoopController {
    * 判断是否应停止（短路求值）
    */
   private shouldStop(): boolean {
-    // 1. max_iterations
-    if (this.runState.state.iterIndex >= this.config.maxIterations) {
+    // 1. max_iterations（0 = 不限制，与 LoopEngineeringConfig.max_tokens 语义对齐）
+    if (this.config.maxIterations > 0 && this.runState.state.iterIndex >= this.config.maxIterations) {
       return true;
     }
-    // 2. max_tokens
-    if (this.runState.state.cumulativeTokens >= this.config.maxTokens) {
+    // 2. max_tokens（0 = 不限制，与姊妹项目 MyFlow 的 0=unlimited 约定一致）
+    if (this.config.maxTokens > 0 && this.runState.state.cumulativeTokens >= this.config.maxTokens) {
       return true;
     }
     // 3. RunState.status
