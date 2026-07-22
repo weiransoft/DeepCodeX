@@ -1,5 +1,5 @@
 /**
- * EAG-P5 Phase 5.4 /eag-autonomous CLI 命令处理器（TASK-P5-5.4-001）
+ * EAG-P5 Phase 5.3 /eag-autonomous CLI 命令处理器（TASK-P5-3.1-005）
  *
  * 本模块实现 `/eag-autonomous` 命令的参数解析与执行调度，是 EAG-P5 无人值守编排器
  * 对接 session.ts 主对话循环的入口。
@@ -120,7 +120,7 @@ const EAG_AUTONOMOUS_DEFAULT_CONSECUTIVE_FAILURE_ABORT = 3 as const;
 // ============================================================================
 
 /**
- * /eag-autonomous 命令请求对象（TASK-P5-5.4-001）
+ * /eag-autonomous 命令请求对象（TASK-P5-3.1-005）
  *
  * 由 extractEagAutonomousRequestFromPrompt() 从命令字符串解析后装配，
  * 再由 session.ts 注入到 userPrompt.messageParams.autonomousRunRequest。
@@ -159,7 +159,7 @@ export interface EagAutonomousRequest {
 }
 
 /**
- * /eag-autonomous 命令执行结果（TASK-P5-5.4-001）
+ * /eag-autonomous 命令执行结果（TASK-P5-3.1-005）
  *
  * 由 EagAutonomousCommandHandler.execute() 返回，包含：
  * - 原始 AutonomousRunResult（不可变）
@@ -185,7 +185,7 @@ export interface EagAutonomousCommandResult {
 // ============================================================================
 
 /**
- * 从 /eag-autonomous 命令字符串解析请求对象（TASK-P5-5.4-001）
+ * 从 /eag-autonomous 命令字符串解析请求对象（TASK-P5-3.1-005）
  *
  * 此函数为**导出的独立函数**（非类方法），供 session.ts 在
  * 构造 userPrompt.messageParams.autonomousRunRequest 时调用。
@@ -385,7 +385,7 @@ export function extractEagAutonomousRequestFromPrompt(prompt: string): EagAutono
 // ============================================================================
 
 /**
- * /eag-autonomous 命令处理器（TASK-P5-5.4-001）
+ * /eag-autonomous 命令处理器（TASK-P5-3.1-005）
  *
  * 职责：
  * 1. 接收 EagAutonomousRequest（已由 extractEagAutonomousRequestFromPrompt 解析）
@@ -458,7 +458,7 @@ export class EagAutonomousCommandHandler {
     // - testTimeoutSec ← request.testTimeoutSec
     // - consecutiveFailureAbort ← request.consecutiveFailureAbort
     // 注：confirmation 字段由 SmartConfirmation 内部处理，此处不直接映射到 AutonomousRunRequest
-    //     （Phase 5.3 decideWithContext 通过 context 传入，Phase 5.4 暂不启用扩展数据源）
+    //     （Phase 5.3 decideWithContext 通过 context 传入，Phase 5.3 暂不启用扩展数据源）
     const runRequest: AutonomousRunRequest = Object.freeze({
       projectRoot,
       objective: request.goal,
@@ -663,4 +663,151 @@ export class EagAutonomousCommandHandler {
     lines.push("- 查看 RunState 持久化文件（.eag/p5/run-state/<runId>.jsonl）了解失败位置");
     return lines.join("\n");
   }
+}
+
+// ============================================================================
+// 5. /eag-autonomous-status 与 /eag-autonomous-stop 命令请求类型与参数解析
+//    （EAG-P5 TASK-P5-3.1-005/006 验收标准 3、4，设计文档 v1.1 §3.5）
+// ============================================================================
+
+/**
+ * /eag-autonomous-status 命令请求对象（设计文档 v1.1 §3.5）
+ *
+ * 用于查询一次 autonomous 运行的状态，包含从命令字符串解析出的 runId。
+ * projectRoot 不在此请求对象中，由 session.ts 在调用 orchestrator.status() 时
+ * 通过 SessionManagerOptions.projectRoot 注入（保持请求对象的纯字符串语义）。
+ *
+ * 字段全部 readonly——请求一经解析即不可变。
+ */
+export interface EagAutonomousStatusRequest {
+  /** 运行 ID（必填，非空字符串，由用户在命令中指定） */
+  readonly runId: string;
+}
+
+/**
+ * /eag-autonomous-stop 命令请求对象（设计文档 v1.1 §3.5）
+ *
+ * 用于中止一次正在运行的 autonomous 会话或回滚已完成的会话。
+ * 同 EagAutonomousStatusRequest，projectRoot 由 session.ts 注入。
+ *
+ * 字段全部 readonly——请求一经解析即不可变。
+ */
+export interface EagAutonomousStopRequest {
+  /** 运行 ID（必填，非空字符串，由用户在命令中指定） */
+  readonly runId: string;
+}
+
+/**
+ * 从 /eag-autonomous-status 命令字符串解析 EagAutonomousStatusRequest
+ * （设计文档 v1.1 §3.5）
+ *
+ * 命令格式：
+ * ```
+ * /eag-autonomous-status <run-id>
+ * ```
+ *
+ * 解析规则：
+ * - runId 为位置参数（紧跟命令前缀之后，不支持 --run-id 形式，保持简洁）
+ * - runId 必须为非空字符串，不包含空白字符（防止粘贴时夹带多字段）
+ * - 命令前缀大小写不敏感
+ *
+ * 算法：
+ * 1. 校验 prompt 为非空字符串
+ * 2. 移除命令前缀 /eag-autonomous-status（大小写不敏感）
+ * 3. 提取首个空白分隔后的 token 作为 runId
+ * 4. 校验 runId 非空且无空白字符
+ * 5. 装配 EagAutonomousStatusRequest 对象并 Object.freeze 冻结
+ *
+ * 不可变优先原则（§5.12.4 G-A6d）：返回对象通过 Object.freeze 冻结。
+ *
+ * @param prompt /eag-autonomous-status <run-id> 命令字符串
+ * @returns 冻结的 EagAutonomousStatusRequest 对象
+ * @throws {Error} 当 prompt 非字符串、命令前缀不匹配、runId 缺失或含空白字符时抛出
+ */
+export function extractEagAutonomousStatusRequestFromPrompt(prompt: string): EagAutonomousStatusRequest {
+  // 步骤 1：校验 prompt 为非空字符串
+  if (typeof prompt !== "string") {
+    throw new Error("extractEagAutonomousStatusRequestFromPrompt: prompt 必须为非空字符串");
+  }
+  const trimmed = prompt.trim();
+  if (trimmed.length === 0) {
+    throw new Error("extractEagAutonomousStatusRequestFromPrompt: prompt 不能为空字符串");
+  }
+
+  // 步骤 2：移除命令前缀 /eag-autonomous-status（大小写不敏感）
+  // 正则匹配前缀（大小写不敏感），后跟空白字符或字符串结尾
+  const prefixMatch = /^\/eag-autonomous-status(?:\s+|$)/i.exec(trimmed);
+  if (!prefixMatch) {
+    throw new Error(
+      `extractEagAutonomousStatusRequestFromPrompt: 命令前缀不匹配，期望以 /eag-autonomous-status 开头（大小写不敏感），实际为: ${trimmed}`
+    );
+  }
+  const argsPart = trimmed.slice(prefixMatch[0].length).trim();
+
+  // 步骤 3：提取首个 token 作为 runId（不支持多字段，runId 必须为单个 token）
+  if (argsPart.length === 0) {
+    throw new Error(
+      "extractEagAutonomousStatusRequestFromPrompt: 缺少必填参数 <run-id>（期望格式：/eag-autonomous-status <run-id>）"
+    );
+  }
+  // 取首个空白分隔的 token，避免用户误粘贴带空格的多字段
+  const runId = argsPart.split(/\s+/)[0];
+  if (runId.length === 0) {
+    throw new Error("extractEagAutonomousStatusRequestFromPrompt: <run-id> 不能为空字符串（期望非空字符串）");
+  }
+
+  // 步骤 4：装配 EagAutonomousStatusRequest 对象并 Object.freeze 冻结
+  const request: EagAutonomousStatusRequest = { runId };
+  return Object.freeze(request) as EagAutonomousStatusRequest;
+}
+
+/**
+ * 从 /eag-autonomous-stop 命令字符串解析 EagAutonomousStopRequest
+ * （设计文档 v1.1 §3.5）
+ *
+ * 命令格式：
+ * ```
+ * /eag-autonomous-stop <run-id>
+ * ```
+ *
+ * 解析规则与 extractEagAutonomousStatusRequestFromPrompt 完全一致，
+ * 仅命令前缀不同（/eag-autonomous-stop vs /eag-autonomous-status）。
+ *
+ * @param prompt /eag-autonomous-stop <run-id> 命令字符串
+ * @returns 冻结的 EagAutonomousStopRequest 对象
+ * @throws {Error} 当 prompt 非字符串、命令前缀不匹配、runId 缺失或含空白字符时抛出
+ */
+export function extractEagAutonomousStopRequestFromPrompt(prompt: string): EagAutonomousStopRequest {
+  // 步骤 1：校验 prompt 为非空字符串
+  if (typeof prompt !== "string") {
+    throw new Error("extractEagAutonomousStopRequestFromPrompt: prompt 必须为非空字符串");
+  }
+  const trimmed = prompt.trim();
+  if (trimmed.length === 0) {
+    throw new Error("extractEagAutonomousStopRequestFromPrompt: prompt 不能为空字符串");
+  }
+
+  // 步骤 2：移除命令前缀 /eag-autonomous-stop（大小写不敏感）
+  const prefixMatch = /^\/eag-autonomous-stop(?:\s+|$)/i.exec(trimmed);
+  if (!prefixMatch) {
+    throw new Error(
+      `extractEagAutonomousStopRequestFromPrompt: 命令前缀不匹配，期望以 /eag-autonomous-stop 开头（大小写不敏感），实际为: ${trimmed}`
+    );
+  }
+  const argsPart = trimmed.slice(prefixMatch[0].length).trim();
+
+  // 步骤 3：提取首个 token 作为 runId
+  if (argsPart.length === 0) {
+    throw new Error(
+      "extractEagAutonomousStopRequestFromPrompt: 缺少必填参数 <run-id>（期望格式：/eag-autonomous-stop <run-id>）"
+    );
+  }
+  const runId = argsPart.split(/\s+/)[0];
+  if (runId.length === 0) {
+    throw new Error("extractEagAutonomousStopRequestFromPrompt: <run-id> 不能为空字符串（期望非空字符串）");
+  }
+
+  // 步骤 4：装配 EagAutonomousStopRequest 对象并 Object.freeze 冻结
+  const request: EagAutonomousStopRequest = { runId };
+  return Object.freeze(request) as EagAutonomousStopRequest;
 }

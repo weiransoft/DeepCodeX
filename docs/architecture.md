@@ -47,3 +47,53 @@ Deep Code 的会话架构正是围绕这一特性设计的，而且不需要用�
 ## 基准测试
 
 Deep Code 的优势并非来自某个单点妙招，而是源自一系列决策的叠加效应。[deepcode-qrcode-benchmark](https://github.com/qorzj/deepcode-qrcode-benchmark)项目展示了在一个真实且有难度的Python需求上，Deep Code+DeepSeek+`/plan`模式的组合总是能够胜过Claude Code+DeepSeek的组合。
+
+## V2 模块群：上下文记忆与可控执行扩展
+
+V2 模块群是 Deep Code 在四项核心设计（snippet 编辑、缓存感知上下文、Agent Skills、副作用权限）之上构建的扩展层，位于 `packages/core/src/v2/` 目录下，由 `v2/index.ts` 作为公共 API 聚合层统一对外导出。它的设计目标不是替代 V1，而是补充 V1 在长任务记忆、复杂项目理解、高风险操作审批、上下文动态供给等方面的能力。V2 全部模块通过 `integration` 子模块与 V1 集成，遵循"V2 模块引用 V1 依赖的唯一入口是 `v1-adapters.ts`"的边界约束（由 eslint `no-restricted-imports` 强制），不修改 V1 核心逻辑。V2 路线分 P0a/P0b/P1/P2/P3 五个阶段落地，全部完成且测试全绿；其上又叠加了 EAG-P6 的四个 Phase（SymbolGraphAdapter 降级层、DynamicWindowManager、五段式 Prompt 组装、codemap 工具集）。
+
+### 子模块职责
+
+**context（上下文记忆核心）**：提供全局上下文（GlobalContext）、双层上下文管理器（DualLayerContextManager）、滑动窗口（SlidingWindowManager）、渐进式加载（ProgressiveContextLoader）、相关性评分（RelevanceScorer）、上下文同步器（ContextSynchronizer）和任务上下文管理器（TaskContextManager）。任务上下文（TaskContext）封装任务定义、任务状态、工作记忆和技能上下文，是单任务生命周期的完整状态单元；滑动窗口与渐进式加载负责在有限 Token 预算内动态取舍上下文；相关性评分器以关注点（focusPoints）为距离源点集计算文件相关性。该模块还包含 EAG-P6 Phase 1 的 SymbolGraphAdapter 适配层及其降级实现（DefaultSymbolGraphAdapter / StaticSymbolGraph），在图谱模块未实施时静默降级返回空结果。
+
+**memory（记忆持久化与隐私管理）**：提供记忆存储（MemoryStore）、项目记忆（ProjectMemoryManager）、用户全局记忆（UserGlobalMemoryManager）、隐私管理（MemoryPrivacyManager）、内容摘要器（DeepSeek / RuleBased 双实现 + Factory）、经验推荐器（ExperienceRecommender）、.gitignore 过滤器、敏感信息脱敏（SensitiveInfoRedactor）和 `/memory` 命令处理器。摘要器支持 DeepSeek 模型与规则兜底两套实现，脱敏模块作为隐私红线贯穿所有落盘路径。
+
+**codemap（代码地图生成与监视）**：通过正则 AST 分析器（RegexASTAnalyzer）扫描项目，由 CodeMapGenerator 构建包含文件列表、同文件调用关系、跨文件依赖关系、循环依赖检测、项目技术栈与架构信息的代码地图；CodeMapFileWatcher 提供增量更新能力；Markdown 渲染器将 CodeMap 转为可读文档。支持 TypeScript/JavaScript/Python/Java/Rust/Go 多语言。
+
+**understanding（项目理解与业务领域建模）**：ProjectUnderstandingService 在 CodeMap 基线之上识别项目结构、技术栈、架构类型并生成 AGENTS.md 文档；DomainModeler 负责业务领域建模，产出领域概念、关系与规则。项目理解服务复用 CodeMap 检测能力避免双源真相，CodeMap 失败时降级为仅做清单文件识别，不向上抛错。
+
+**diff（Myers diff 与补丁应用）**：实现 Myers diff 算法、模糊匹配补丁应用器（ApplyPatch，参考 DeepSeek-TUI）、补丁摘要生成器（PatchSummaryGenerator）和 Diff 预览增强（enhanceDiffPreview）。ApplyPatch 支持精确匹配、空白容错、滑动搜索与 bigram 相似度评分，覆盖 7 种失败原因映射与 Top-5 候选位置返回，是 V2 对 V1 snippet 编辑的补充编辑路径。
+
+**approval（审批门 / 命令安全 / Side Git / 工具路由）**：ApprovalGate 基于副作用分类做出"自动批准 / 询问用户 / 拒绝"三态决策；CommandSafety 与 ArityClassifier 提供命令安全评分与黑白名单检查；SideGitManager 提供 turn 级快照与回滚能力；ToolRouter 统一路由工具执行并串联审批与快照。审批模式（suggest/auto/never）与应用模式（plan/agent/yolo）正交组合，黑名单检查始终先于模式判断（安全关键）。
+
+**integration（V1/V2 集成 Hook）**：是 V2 与 V1 集成的唯一边界。SessionContextHook 实现"两阶段缓存模式"（异步预计算 + 同步供给），在 buildMessages 热路径上以同步快照注入上下文；approval-hook 与 edit-handler-hook 将 V2 审批与编辑增强挂接到 V1 工具执行生命周期；settings-bridge 实现四层配置合并（内置默认 → 用户设置 → 环境变量 → CLI 参数）；v1-adapters 作为 V2 引用 V1 依赖的唯一入口，全量 re-export V2 需要消费的 V1 公开 API。
+
+**observability（V2 事件日志）**：V2EventLogger 统一记录 4 类日志事件（approval/compression/retrieval/snapshot），所有事件落盘前经 SensitiveInfoRedactor 脱敏，以 JSON Lines 格式追加到 `~/.deepcode/logs/v2-<YYYY-MM-DD>.log`。
+
+**prompt（五段式 prompt 组装与角色定制）**：FiveStagePromptAssembler 按 SystemConstraint(10%) / TaskContext(15%) / CodeMapSnippet(50%) / HistoricalExperience(15%) / OutputRequirement(10%) 五段式组装 prompt（默认 4000 Token 预算，对齐 multi-agent-team skill Token 经济学）；RoleSignalDetector 通过关键词 + 语义匹配（embedder/TFIDF/Hashing 三级降级链）+ 任务类型推断检测角色信号；RolePromptCustomizer 注入角色身份与阶段知识切片（5 角色 × 4 阶段 = 20 个切片）。
+
+**tools（codemap 工具集）**：提供 4 个 codemap 工具（codemap_query / impact_analysis / flow_trace / risk_scan）注册到 V1 ToolExecutor，对应动态窗口的 DW-2/DW-3/DW-4 供给策略。impact_analysis 使用方向感知 BFS（深度 ≤3）+ 独立 DFS 循环检测（深度 ≤10）；flow_trace 使用方向感知 DFS 路径枚举（路径数 ≤20）；risk_scan 扫描高风险符号 Top-N。全部工具在图谱不可用时静默降级返回空结果（NFR-4 零回归）。
+
+### 模块间依赖关系
+
+V2 模块群内部依赖呈分层结构：
+
+- **基础层**：`memory`（记忆存储/脱敏/gitignore）与 `codemap`（代码地图）为底层基础模块，被上层模块消费
+- **上下文层**：`context` 依赖 `memory`（经验归档）与 `codemap`（CodeMap 提供文件视图），`understanding` 依赖 `codemap`（复用检测能力）
+- **执行层**：`approval` 与 `diff` 相对独立，`approval` 的 SideGit 依赖 V1 git 驱动（经 v1-adapters）
+- **工具层**：`tools` 的 4 个 codemap 工具依赖 `context` 的 SymbolGraphAdapter 与 CodeMapSnippetProvider
+- **prompt 层**：`prompt` 依赖 `context`（DynamicWindowResult）与 `memory`（历史经验）
+- **集成层**：`integration` 依赖上述所有模块，是 V1 调用 V2 的统一入口
+- **横切层**：`observability` 被 approval/context/memory 等模块调用记录事件
+
+### 与 V1 模块的集成点
+
+V2 通过 `integration` 子模块与 V1 集成，关键集成点如下：
+
+- **v1-adapters.ts**：V2 模块引用 V1 依赖（语义嵌入、文件工具、智能确认、git 驱动、模式执行器、反馈控制环、Karpathy 原则、Ponytail 决策梯）的唯一入口，由 eslint `no-restricted-imports` 强制约束
+- **settings-bridge.ts**：V2 配置经四层合并后注入 V1 配置体系，V2Config 作为 V1 settings 的 `v2` 子树存在
+- **session-hook.ts**：SessionContextHook 挂接到 V1 OpenAIMessageConverter 的 buildMessages 热路径，以同步快照方式注入 V2 上下文片段
+- **approval-hook.ts / edit-handler-hook.ts**：将 V2 审批门与编辑增强挂接到 V1 ToolExecutor 的 before/after execution 生命周期
+- **tool-executor-registry.ts**：将 4 个 codemap 工具注册到 V1 ToolExecutor，与 bash/read/write/edit 等内置工具并列调度
+
+所有集成点遵循"不修改 V1 核心逻辑"原则，V2 能力可通过配置（V2Config.*.enabled）逐项启停，关闭时行为与 V1 完全一致（零回归）。

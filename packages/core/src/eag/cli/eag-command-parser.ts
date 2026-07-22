@@ -4,7 +4,7 @@
  * 设计依据：EAG-P3 批次 11 §5 S3 改进方案（决策清单 D-S3-1 ~ D-S3-8）
  *
  * 职责：
- * - 判定用户输入是否为 EAG 命令（/eag-design、/eag-test、/eag-run、/eag-resume、/eag-status、/eag-build、/eag-deploy）
+ * - 判定用户输入是否为 EAG 命令（/eag-design、/eag-test、/eag-run、/eag-resume、/eag-status、/eag-build、/eag-deploy、/eag-autonomous、/eag-autonomous-status、/eag-autonomous-stop）
  * - 从 userPrompt.messageParams 提取预装配的请求对象
  * - 提供 parse() 统一入口，返回 discriminated union 类型 EagCommand
  * - 提供 extractDeployRequestFromPrompt() 独立函数，解析 /eag-deploy 命令字符串（供 session.ts 构造 messageParams 时调用）
@@ -20,6 +20,12 @@
  * - parser 通过 userPrompt.messageParams 字段访问预装配的请求对象
  * - parser 不直接访问 SessionManager 内部状态（架构师审查 B3-M4 修复）
  *
+ * EAG-P5 TASK-P5-3.1-005/006 v1.1 新增（设计文档 §3.5）：
+ * - /eag-autonomous-status <run-id>：查询 autonomous 运行状态
+ * - /eag-autonomous-stop <run-id>：中止/回滚 autonomous 运行
+ * - 命令总数从 8 扩展至 10，新增 2 个 EagCommand kind
+ * - parser 优先匹配 status/stop 前缀（在 autonomous 之前），避免 /eag-autonomous-status 被误吞为 /eag-autonomous
+ *
  * @module eag/cli/eag-command-parser
  */
 
@@ -28,12 +34,22 @@ import type { CodingLoopRequest } from "../coding/types";
 import type { DesignLoopInput } from "../design/design-models";
 import type { TestingLoopRequest } from "../testing/types";
 import type { EagRunRequest, EagResumeRequest, EagStatusRequest } from "../long-horizon";
-// EAG-P5 Phase 5.4 TASK-P5-5.4-002：导入 /eag-autonomous 命令参数解析函数与请求类型
+// EAG-P5 Phase 5.3 TASK-P5-3.1-006：导入 /eag-autonomous 命令参数解析函数与请求类型
 // - extractEagAutonomousRequestFromPrompt：独立函数，从命令字符串解析参数
 // - EagAutonomousRequest：/eag-autonomous 命令请求对象类型
 // 注：eag-autonomous-command.ts 不依赖本模块，无循环依赖风险
 import { extractEagAutonomousRequestFromPrompt } from "./eag-autonomous-command";
 import type { EagAutonomousRequest } from "./eag-autonomous-command";
+// EAG-P5 TASK-P5-3.1-005/006 v1.1 新增（设计文档 §3.5）：
+// 导入 /eag-autonomous-status 与 /eag-autonomous-stop 命令参数解析函数与请求类型
+// - extractEagAutonomousStatusRequestFromPrompt：从命令字符串解析 runId
+// - extractEagAutonomousStopRequestFromPrompt：从命令字符串解析 runId
+// - EagAutonomousStatusRequest / EagAutonomousStopRequest：请求对象类型
+import {
+  extractEagAutonomousStatusRequestFromPrompt,
+  extractEagAutonomousStopRequestFromPrompt,
+} from "./eag-autonomous-command";
+import type { EagAutonomousStatusRequest, EagAutonomousStopRequest } from "./eag-autonomous-command";
 
 // ============================================================================
 // DeployRequest 接口定义（EAG-P4 批次 13 Phase 7 §5.1）
@@ -105,17 +121,29 @@ export type EagCommand =
   | { readonly kind: "eag-status"; readonly payload: EagStatusRequest | null }
   | { readonly kind: "eag-deploy"; readonly payload: DeployRequest | null }
   | { readonly kind: "eag-autonomous"; readonly payload: EagAutonomousRequest | null }
+  | { readonly kind: "eag-autonomous-status"; readonly payload: EagAutonomousStatusRequest | null }
+  | { readonly kind: "eag-autonomous-stop"; readonly payload: EagAutonomousStopRequest | null }
   | { readonly kind: "unknown"; readonly payload: null };
 
 /**
  * EAG 命令字符串常量集合（D-S3-6）
  *
- * 7 个 EAG 命令的严格匹配字符串。使用 Object.freeze 冻结（§5.12.4 G-A6d 配置冻结）。
- * 命令字符串严格匹配（无参数），参数通过 messageParams 注入（D-S3-7）。
+ * 10 个 EAG 命令的匹配字符串。使用 Object.freeze 冻结（§5.12.4 G-A6d 配置冻结）。
+ *
+ * 命令匹配模式（两种）：
+ * - 严格匹配（无参数）：/eag-build /eag-design /eag-test /eag-run /eag-resume /eag-status /eag-deploy
+ *   参数通过 messageParams 注入（D-S3-7）
+ * - 前缀匹配（含参数）：/eag-autonomous /eag-autonomous-status /eag-autonomous-stop
+ *   命令本身携带参数，由独立的 extractXxxFromPrompt 函数解析
  *
  * 注：/eag-deploy 的命令字符串本身亦为严格匹配（无参数），
  * 参数解析由 extractDeployRequestFromPrompt() 独立函数在 session.ts 构造
  * userPrompt.messageParams 时完成，与既有 6 个命令保持一致的注入模式。
+ *
+ * EAG-P5 TASK-P5-3.1-005/006 v1.1 新增（设计文档 §3.5）：
+ * - /eag-autonomous-status <run-id>：查询 autonomous 运行状态
+ * - /eag-autonomous-stop <run-id>：中止/回滚 autonomous 运行
+ * - 两者均使用前缀匹配，命令总数从 8 扩展至 10
  */
 export const EAG_COMMAND_STRINGS = Object.freeze({
   /** /eag-build 命令字符串（触发 CODING Loop 编排，§4.9.3） */
@@ -133,13 +161,31 @@ export const EAG_COMMAND_STRINGS = Object.freeze({
   /** /eag-deploy 命令字符串（触发部署任务编排，EAG-P4 批次 13 Phase 7 §5.1） */
   EAG_DEPLOY: "/eag-deploy",
   /**
-   * /eag-autonomous 命令前缀字符串（触发 EAG-P5 无人值守编排，TASK-P5-5.4-001）
+   * /eag-autonomous 命令前缀字符串（触发 EAG-P5 无人值守编排，TASK-P5-3.1-005）
    *
    * 注：与其他 7 个命令不同，/eag-autonomous 使用前缀匹配（非严格匹配），
    * 因为命令本身携带参数（--goal / --max-iterations / --confirmation 等）。
    * 参数解析由 extractEagAutonomousRequestFromPrompt() 独立函数完成。
    */
   EAG_AUTONOMOUS: "/eag-autonomous",
+  /**
+   * /eag-autonomous-status 命令前缀字符串（查询 autonomous 运行状态，TASK-P5-3.1-005/006 v1.1）
+   *
+   * 命令格式：/eag-autonomous-status <run-id>
+   * 使用前缀匹配（非严格匹配），runId 由 extractEagAutonomousStatusRequestFromPrompt() 解析。
+   *
+   * parser 优先匹配此命令（在 /eag-autonomous 之前），避免 /eag-autonomous-status 被误吞为 /eag-autonomous。
+   */
+  EAG_AUTONOMOUS_STATUS: "/eag-autonomous-status",
+  /**
+   * /eag-autonomous-stop 命令前缀字符串（中止/回滚 autonomous 运行，TASK-P5-3.1-005/006 v1.1）
+   *
+   * 命令格式：/eag-autonomous-stop <run-id>
+   * 使用前缀匹配（非严格匹配），runId 由 extractEagAutonomousStopRequestFromPrompt() 解析。
+   *
+   * parser 优先匹配此命令（在 /eag-autonomous 之前），避免 /eag-autonomous-stop 被误吞为 /eag-autonomous。
+   */
+  EAG_AUTONOMOUS_STOP: "/eag-autonomous-stop",
 } as const);
 
 /**
@@ -227,15 +273,48 @@ export class EagCommandParser {
       return { kind: "unknown", payload: null };
     }
 
-    // 步骤 2.1：EAG-P5 Phase 5.4 /eag-autonomous 前缀匹配（TASK-P5-5.4-002）
+    // 步骤 2.1（EAG-P5 v1.1 新增，设计文档 §3.5）：
+    // /eag-autonomous-status 前缀匹配（必须优先于 /eag-autonomous，避免被误吞）
+    // 匹配规则（大小写不敏感）：
+    // - text === "/eag-autonomous-status"（理论无参数形式，但 runId 必填，实际不会出现）
+    // - text 以 "/eag-autonomous-status " 开头（含 runId 参数形式）
+    // 参数解析委托 extractEagAutonomousStatusRequestFromPrompt 独立函数完成
+    const autonomousStatusPrefix = EAG_COMMAND_STRINGS.EAG_AUTONOMOUS_STATUS;
+    const textLower = text.toLowerCase();
+    const autonomousStatusLower = autonomousStatusPrefix.toLowerCase();
+    if (textLower === autonomousStatusLower || textLower.startsWith(autonomousStatusLower + " ")) {
+      return {
+        kind: "eag-autonomous-status",
+        payload: this.extractEagAutonomousStatusRequest(text),
+      };
+    }
+
+    // 步骤 2.2（EAG-P5 v1.1 新增，设计文档 §3.5）：
+    // /eag-autonomous-stop 前缀匹配（必须优先于 /eag-autonomous，避免被误吞）
+    // 匹配规则（大小写不敏感）：
+    // - text === "/eag-autonomous-stop"
+    // - text 以 "/eag-autonomous-stop " 开头
+    // 参数解析委托 extractEagAutonomousStopRequestFromPrompt 独立函数完成
+    const autonomousStopPrefix = EAG_COMMAND_STRINGS.EAG_AUTONOMOUS_STOP;
+    const autonomousStopLower = autonomousStopPrefix.toLowerCase();
+    if (textLower === autonomousStopLower || textLower.startsWith(autonomousStopLower + " ")) {
+      return {
+        kind: "eag-autonomous-stop",
+        payload: this.extractEagAutonomousStopRequest(text),
+      };
+    }
+
+    // 步骤 2.3：EAG-P5 Phase 5.3 /eag-autonomous 前缀匹配（TASK-P5-3.1-006）
     // 与其他 7 个命令不同，/eag-autonomous 使用前缀匹配（非严格匹配），
     // 因为命令本身携带参数（--goal / --max-iterations / --confirmation 等）。
     // 匹配规则（大小写不敏感）：
     // - text === "/eag-autonomous"（无参数形式，payload 从 messageParams 提取）
     // - text 以 "/eag-autonomous " 开头（含参数形式，payload 从命令字符串解析）
     // 参数解析委托 extractEagAutonomousRequestFromPrompt 独立函数完成
+    //
+    // 注：此步骤必须在 2.1/2.2 之后，否则 /eag-autonomous-status / /eag-autonomous-stop
+    //     会被 /eag-autonomous 前缀误吞（见设计文档 v1.1 P0-1）
     const autonomousPrefix = EAG_COMMAND_STRINGS.EAG_AUTONOMOUS;
-    const textLower = text.toLowerCase();
     const prefixLower = autonomousPrefix.toLowerCase();
     if (textLower === prefixLower || textLower.startsWith(prefixLower + " ")) {
       return { kind: "eag-autonomous", payload: this.extractEagAutonomousRequest(userPrompt, text) };
@@ -383,9 +462,9 @@ export class EagCommandParser {
   }
 
   /**
-   * 判定用户输入是否为 /eag-autonomous 命令并提取 payload（TASK-P5-5.4-002）
+   * 判定用户输入是否为 /eag-autonomous 命令并提取 payload（TASK-P5-3.1-006）
    *
-   * 判定规则（对齐 EAG-P5 Phase 5.4 §5 CLI 命令规范）：
+   * 判定规则（对齐 EAG-P5 Phase 5.3 §5 CLI 命令规范）：
    * - text 为字符串且以 /eag-autonomous 开头（前缀匹配，大小写不敏感）
    * - text === "/eag-autonomous" 或 text 以 "/eag-autonomous " 开头
    * - 无图片附件
@@ -402,6 +481,47 @@ export class EagCommandParser {
   parseEagAutonomousCommand(userPrompt: UserPromptContent): EagCommand {
     const cmd = this.parse(userPrompt);
     return cmd.kind === "eag-autonomous" ? cmd : FROZEN_UNKNOWN_COMMAND;
+  }
+
+  /**
+   * 判定用户输入是否为 /eag-autonomous-status 命令并提取 payload
+   * （EAG-P5 TASK-P5-3.1-005/006 v1.1 新增，设计文档 §3.5）
+   *
+   * 判定规则（对齐 EAG-P5 v1.1 §5 CLI 命令规范）：
+   * - text 为字符串且以 /eag-autonomous-status 开头（前缀匹配，大小写不敏感）
+   * - text === "/eag-autonomous-status" 或 text 以 "/eag-autonomous-status " 开头
+   * - 无图片附件
+   * - 无技能匹配
+   *
+   * 与 /eag-autonomous 的差异：
+   * - /eag-autonomous-status 仅需位置参数 <run-id>，无需 --key value 形式
+   * - parser 优先匹配此命令（在 /eag-autonomous 之前），避免被 /eag-autonomous 前缀误吞
+   * - payload 仅含 runId，projectRoot 由 session.ts 在调用 orchestrator.status() 时注入
+   *
+   * @param userPrompt 用户输入内容
+   * @returns EagCommand（kind 为 "eag-autonomous-status" 或 "unknown"）
+   */
+  parseEagAutonomousStatusCommand(userPrompt: UserPromptContent): EagCommand {
+    const cmd = this.parse(userPrompt);
+    return cmd.kind === "eag-autonomous-status" ? cmd : FROZEN_UNKNOWN_COMMAND;
+  }
+
+  /**
+   * 判定用户输入是否为 /eag-autonomous-stop 命令并提取 payload
+   * （EAG-P5 TASK-P5-3.1-005/006 v1.1 新增，设计文档 §3.5）
+   *
+   * 判定规则（同 parseEagAutonomousStatusCommand，仅命令前缀不同）：
+   * - text 为字符串且以 /eag-autonomous-stop 开头（前缀匹配，大小写不敏感）
+   * - text === "/eag-autonomous-stop" 或 text 以 "/eag-autonomous-stop " 开头
+   * - 无图片附件
+   * - 无技能匹配
+   *
+   * @param userPrompt 用户输入内容
+   * @returns EagCommand（kind 为 "eag-autonomous-stop" 或 "unknown"）
+   */
+  parseEagAutonomousStopCommand(userPrompt: UserPromptContent): EagCommand {
+    const cmd = this.parse(userPrompt);
+    return cmd.kind === "eag-autonomous-stop" ? cmd : FROZEN_UNKNOWN_COMMAND;
   }
 
   // ============================================================================
@@ -695,7 +815,7 @@ export class EagCommandParser {
   }
 
   /**
-   * 从 userPrompt.messageParams 或命令字符串提取 EagAutonomousRequest（TASK-P5-5.4-002）
+   * 从 userPrompt.messageParams 或命令字符串提取 EagAutonomousRequest（TASK-P5-3.1-006）
    *
    * 提取优先级：
    * 1. 优先从 messageParams.autonomousRunRequest 提取（调用方预解析模式）
@@ -744,6 +864,54 @@ export class EagCommandParser {
     } catch {
       // 参数解析失败：返回 null，session.ts 将通知用户具体错误
       // 注：错误详情由 session.ts 重新调用 extractEagAutonomousRequestFromPrompt 获取
+      return null;
+    }
+  }
+
+  /**
+   * 从命令字符串提取 EagAutonomousStatusRequest
+   * （EAG-P5 TASK-P5-3.1-005/006 v1.1 新增，设计文档 §3.5 + P2-N1）
+   *
+   * 与 extractEagAutonomousRequest（L839，支持 messageParams 注入 + CLI 字符串回退两种模式）不同，
+   * 本方法**仅从命令字符串解析**，不支持 messageParams 注入模式。
+   *
+   * 设计理由（对齐 Karpathy Simplicity First）：
+   * - EagAutonomousStatusRequest 只有 runId 一个字段，UI 表单场景无意义
+   *   （用户直接在 CLI 输入 `/eag-autonomous-status <run-id>` 即可）
+   * - 保持实现简洁，避免引入不必要的 messageParams 注入路径
+   *
+   * 算法：
+   * 1. 委托 extractEagAutonomousStatusRequestFromPrompt 独立函数解析命令字符串
+   * 2. 解析成功 → 返回冻结的 EagAutonomousStatusRequest
+   * 3. 解析失败（抛异常）→ 返回 null，由 session.ts 重新调用以获取错误详情
+   *
+   * @param text 用户输入的命令字符串（已 trim）
+   * @returns EagAutonomousStatusRequest；解析失败时返回 null
+   */
+  private extractEagAutonomousStatusRequest(text: string): EagAutonomousStatusRequest | null {
+    try {
+      return extractEagAutonomousStatusRequestFromPrompt(text);
+    } catch {
+      // 参数解析失败：返回 null，session.ts 将重新调用以获取错误详情
+      return null;
+    }
+  }
+
+  /**
+   * 从命令字符串提取 EagAutonomousStopRequest
+   * （EAG-P5 TASK-P5-3.1-005/006 v1.1 新增，设计文档 §3.5 + P2-N1）
+   *
+   * 同 extractEagAutonomousStatusRequest，仅从命令字符串解析，不支持 messageParams 注入。
+   * 设计理由同上：EagAutonomousStopRequest 只有 runId 一个字段，UI 表单场景无意义。
+   *
+   * @param text 用户输入的命令字符串（已 trim）
+   * @returns EagAutonomousStopRequest；解析失败时返回 null
+   */
+  private extractEagAutonomousStopRequest(text: string): EagAutonomousStopRequest | null {
+    try {
+      return extractEagAutonomousStopRequestFromPrompt(text);
+    } catch {
+      // 参数解析失败：返回 null，session.ts 将重新调用以获取错误详情
       return null;
     }
   }
