@@ -61,6 +61,7 @@ import {
   extractEagAutonomousStatusRequestFromPrompt,
   extractEagAutonomousStopRequestFromPrompt,
 } from "../eag/cli/eag-autonomous-command";
+import { SessionManager } from "../session";
 
 // ============================================================================
 // 1. 测试辅助函数
@@ -245,7 +246,15 @@ test("TC-STATUS-03. status() 查询不存在的 runId", async () => {
     const result = await orchestrator.status("nonexistent-run-id", projectRoot);
 
     assert.equal(result.found, false);
-    assert.ok(result.report.includes("未找到") || result.report.includes("not found") || result.report.length > 0);
+    // P2-4 修复：加强弱断言——既有实现仅检查 report.length > 0，无法区分"未找到"与"查询成功但报告为空"
+    // 改为精确检查 report 含"未找到"关键词，并验证 found=false 时其他字段为占位默认值（对齐 P2-12 JSDoc 说明）
+    assert.ok(result.report.includes("未找到"), "report 应含'未找到'提示");
+    // 验证占位默认值（found=false 时其他字段不代表真实状态）
+    assert.equal(result.status, "failed");
+    assert.equal(result.iterIndex, 0);
+    assert.equal(result.maxIterations, 0);
+    assert.equal(result.totalTokensUsed, 0);
+    assert.equal(result.totalLlmCallCount, 0);
   } finally {
     cleanupTempProject(projectRoot);
   }
@@ -267,8 +276,10 @@ test("TC-STATUS-04. status() 报告含迭代次数", async () => {
 
     assert.equal(result.iterIndex, 3);
     assert.equal(result.maxIterations, 10);
-    // 报告应含 "3 / 10" 格式的迭代次数
-    assert.ok(result.report.includes("3") && result.report.includes("10"));
+    // P2-4 修复：加强弱断言——既有实现仅检查 report 含 "3" 和 "10"，
+    // 可能匹配到其他字段（如 token 统计、时间戳中的数字）。
+    // 改为精确检查 "3 / 10" 格式的迭代次数字符串
+    assert.ok(result.report.includes("3 / 10"), "report 应含 '3 / 10' 格式的迭代次数");
   } finally {
     cleanupTempProject(projectRoot);
   }
@@ -311,7 +322,11 @@ test("TC-STATUS-06. status() 报告含当前阶段", async () => {
     const result = await orchestrator.status(runId, projectRoot);
 
     assert.equal(result.currentStage, "verify");
-    assert.ok(result.report.includes("verify"));
+    // P2-4 修复：加强弱断言——既有实现仅检查 report 含 "verify"，
+    // 可能匹配到其他字段（如 stop_when 条件、阻塞阶段名）。
+    // 改为同时检查 "当前阶段" 标签 + "verify" 值，确保匹配的是状态报告中的阶段字段
+    assert.ok(result.report.includes("当前阶段"), "report 应含'当前阶段'标签");
+    assert.ok(result.report.includes("verify"), "report 应含 'verify' 阶段值");
   } finally {
     cleanupTempProject(projectRoot);
   }
@@ -444,7 +459,11 @@ test("TC-STOP-06. stop() 不存在的 runId", async () => {
     const result = await orchestrator.stop("nonexistent-run-id", projectRoot);
 
     assert.equal(result.success, false);
-    assert.ok(result.report.length > 0);
+    // P2-4 修复：加强弱断言——既有实现仅检查 report.length > 0，无法区分"未找到"与"操作成功但报告为空"
+    // 改为精确检查 report 含"未找到"关键词，并验证 action="not-found"（对齐 P1-2 修复）
+    assert.ok(result.report.includes("未找到"), "report 应含'未找到'提示");
+    // P1-2 修复验证：action 应为 "not-found"（而非旧实现的 "abort"）
+    assert.equal(result.action, "not-found");
   } finally {
     cleanupTempProject(projectRoot);
   }
@@ -499,6 +518,10 @@ test("TC-STOP-08. stop() 回滚时列出未提交改动", async () => {
     // 验证包含创建的文件
     const hasUncommittedFile = result.uncommittedFiles!.some((f) => f.includes("uncommitted-file.ts"));
     assert.ok(hasUncommittedFile, "未提交清单应包含 src/uncommitted-file.ts");
+    // P2-11 修复：验证 uncommittedFiles 不可变性（Object.freeze 冻结）
+    // 不可变优先原则要求所有返回的数组字段通过 Object.freeze 冻结，
+    // 调用方尝试 push/splice 应静默失败（严格模式下抛 TypeError）
+    assert.ok(Object.isFrozen(result.uncommittedFiles), "uncommittedFiles 应被 Object.freeze 冻结");
   } finally {
     cleanupTempProject(projectRoot);
   }
@@ -629,42 +652,135 @@ test("TC-STOP-15. status() 入参校验（runId 为空字符串）", async () =>
   await assert.rejects(() => orchestrator.status("", "/some/path"), /runId 必须为非空字符串/);
 });
 
+test("TC-STOP-16. stop()→run() 跨方法集成测试（P1-4 新增）", async () => {
+  // P1-4 新增：验证 stop() 创建的 abort 文件能被 run() 检测到并中止
+  // 与 TC-RUN-04 的区别：TC-RUN-04 手动创建 abort 文件，本测试通过 stop() API 创建
+  const projectRoot = createTempProject();
+  try {
+    // 创建 tasks.md（让 plan 阶段能解析任务卡）
+    const tasksFilePath = path.join(projectRoot, ".eag", "p5", "tasks.md");
+    fs.writeFileSync(
+      tasksFilePath,
+      ["# EAG-P5 任务清单", "", "## T-001 测试任务", "- requirement: F-001", "- status: pending", ""].join("\n"),
+      "utf8"
+    );
+    createDeclaredFileForTest(projectRoot, "src/services/Service1.ts");
+
+    const orchestrator = buildOrchestrator();
+    const store = new P5RunStateStore();
+    const runId = "test-stop-16-integration";
+
+    // 步骤 1：初始化 RunState（status="running"，模拟 run() 正在运行）
+    await initializeAndSaveState(store, projectRoot, runId, { status: "running" });
+
+    // 步骤 2：调用 stop() 创建 abort 标志文件
+    const stopResult = await orchestrator.stop(runId, projectRoot);
+    assert.equal(stopResult.action, "abort");
+    assert.equal(stopResult.success, true);
+
+    // 验证 abort 文件已创建
+    const abortFilePath = path.join(projectRoot, ".eag", "p5", "abort-flags", `${runId}.abort`);
+    assert.ok(fs.existsSync(abortFilePath), "stop() 应创建 abort 标志文件");
+
+    // 步骤 3：调用 run()——应在首次迭代检测到 abort 文件并中止
+    // 注：run() 内部会调用 store.initialize()，但该 runId 已存在 RunState 文件，
+    //     会抛 already-exists 错误。为避免此问题，先删除既有 RunState 文件。
+    //     （实际场景中 stop() 在 run() 运行期间调用，不会出现 initialize 冲突；
+    //      此处是测试环境的模拟，通过删除 RunState 文件模拟"run() 首次启动"场景）
+    const runStateDir = path.join(projectRoot, ".eag", "p5", "run-state");
+    const runStateFile = path.join(runStateDir, `${runId}.jsonl`);
+    if (fs.existsSync(runStateFile)) {
+      fs.unlinkSync(runStateFile);
+    }
+
+    const runResult = await orchestrator.run({
+      projectRoot,
+      objective: "测试 stop()→run() 跨方法集成",
+      runId,
+      maxIterations: 3,
+      testCommand: "echo 'Tests: 1 passed, 0 failed'",
+      testTimeoutSec: 30,
+    });
+
+    // 验证 run() 因 abort 文件而中止
+    assert.equal(runResult.finalStatus, "aborted");
+    assert.equal(runResult.exitCode, 2);
+
+    // 验证 abort 文件已被 run() finally 块清理
+    assert.ok(!fs.existsSync(abortFilePath), "abort 文件应已被 run() finally 块清理");
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
+});
+
+test("TC-STOP-17. stop() runId 路径遍历校验（P2-2 新增）", async () => {
+  // P2-2 新增：验证 stop() 入参 runId 路径遍历校验
+  // runId 含路径分隔符（如 ../）应抛错，防止路径遍历攻击
+  const orchestrator = buildOrchestrator();
+  await assert.rejects(() => orchestrator.stop("../etc/passwd", "/some/path"), /runId 格式非法/);
+});
+
+test("TC-STOP-18. status() runId 路径遍历校验（P2-2 新增）", async () => {
+  // P2-2 新增：验证 status() 入参 runId 路径遍历校验
+  const orchestrator = buildOrchestrator();
+  await assert.rejects(() => orchestrator.status("../etc/passwd", "/some/path"), /runId 格式非法/);
+});
+
 // ============================================================================
 // C. run() 循环 abort 检查测试（TC-RUN-01 ~ 04）
 // ============================================================================
 
 test("TC-RUN-01. run() 正常完成后清理 abort 文件", async () => {
+  // P1-3 修复：改为真正调用 run()，而非直接调用 cleanupAbortFlag 私有方法
+  // 既有实现通过反射调用 cleanupAbortFlag，仅测试清理逻辑本身，
+  // 未覆盖 run() finally 块的实际清理行为（可能存在 finally 块未执行等集成问题）
   const projectRoot = createTempProject();
   try {
-    const orchestrator = buildOrchestrator();
-    const store = new P5RunStateStore();
-    const runId = "test-run-01";
-    await initializeAndSaveState(store, projectRoot, runId, { status: "running" });
+    // 创建 tasks.md（让 plan 阶段能解析任务卡）
+    const tasksFilePath = path.join(projectRoot, ".eag", "p5", "tasks.md");
+    fs.writeFileSync(
+      tasksFilePath,
+      ["# EAG-P5 任务清单", "", "## T-001 测试任务", "- requirement: F-001", "- status: pending", ""].join("\n"),
+      "utf8"
+    );
+    createDeclaredFileForTest(projectRoot, "src/services/Service1.ts");
 
-    // 预先创建 abort 文件（模拟 stop() 已调用）
+    const orchestrator = buildOrchestrator();
+    const runId = "test-run-01-cleanup";
+
+    // 预先创建 abort 文件（模拟 stop() 在 run() 启动前已调用）
+    // run() 在首次迭代顶部检测到 abort 文件后中止，finally 块应清理该文件
     const abortFlagsDir = path.join(projectRoot, ".eag", "p5", "abort-flags");
     fs.mkdirSync(abortFlagsDir, { recursive: true });
     const abortFilePath = path.join(abortFlagsDir, `${runId}.abort`);
     fs.writeFileSync(abortFilePath, "", "utf-8");
     assert.ok(fs.existsSync(abortFilePath), "前置：abort 文件应存在");
 
-    // 手动调用 cleanupAbortFlag（模拟 run() finally 块清理）
-    // 注：通过反射调用私有方法（测试专用，避免为了测试暴露私有方法）
-    const cleanupMethod = (
-      orchestrator as unknown as {
-        cleanupAbortFlag: (runId: string, projectRoot: string) => void;
-      }
-    ).cleanupAbortFlag;
-    cleanupMethod.call(orchestrator, runId, projectRoot);
+    // 调用 run()——应在首次迭代检测到 abort 文件并中止，finally 块清理 abort 文件
+    const result = await orchestrator.run({
+      projectRoot,
+      objective: "测试 abort 中止后清理 abort 文件",
+      runId,
+      maxIterations: 3,
+      testCommand: "echo 'Tests: 1 passed, 0 failed'",
+      testTimeoutSec: 30,
+    });
 
-    // 验证 abort 文件已被清理
-    assert.ok(!fs.existsSync(abortFilePath), "abort 文件应已被清理");
+    // 验证 run() 因 abort 文件而中止
+    assert.equal(result.finalStatus, "aborted");
+    // 验证 abort 文件已被 finally 块清理
+    assert.ok(!fs.existsSync(abortFilePath), "abort 文件应已被 finally 块清理");
   } finally {
     cleanupTempProject(projectRoot);
   }
 });
 
 test("TC-RUN-02. cleanupAbortFlag 文件不存在时静默跳过", async () => {
+  // 注：此测试直接调用 cleanupAbortFlag 私有方法（通过反射），
+  // 因为"文件不存在时静默跳过"是 cleanupAbortFlag 的边界条件，
+  // 通过 run() 难以触发（run() 退出时 abort 文件要么存在要么不存在，
+  // 不存在时 cleanupAbortFlag 本就静默跳过，无法区分"正常跳过"与"从未创建"）。
+  // P1-3 改造仅覆盖 TC-RUN-01（主流程），边界条件保留直接调用私有方法。
   const projectRoot = createTempProject();
   try {
     const orchestrator = buildOrchestrator();
@@ -687,6 +803,10 @@ test("TC-RUN-02. cleanupAbortFlag 文件不存在时静默跳过", async () => {
 });
 
 test("TC-RUN-03. cleanupAbortFlag 清理失败不抛异常（projectRoot 不存在）", async () => {
+  // 注：此测试直接调用 cleanupAbortFlag 私有方法（通过反射），
+  // 因为"清理失败不抛异常"是 cleanupAbortFlag 的容错边界条件，
+  // 通过 run() 难以触发（run() 使用已 resolve 的 projectRoot，理论不会不存在）。
+  // P1-3 改造仅覆盖 TC-RUN-01（主流程），边界条件保留直接调用私有方法。
   const orchestrator = buildOrchestrator();
   const runId = "test-run-03";
   // 使用不存在的 projectRoot 路径
@@ -940,5 +1060,260 @@ test("TC-CLI-23. EagCommand union 的 discriminated union 类型收窄", () => {
       break;
     default:
       assert.fail("不应进入 default 分支");
+  }
+});
+
+// ============================================================================
+// E. SessionManager 集成测试（TC-SESSION-01 ~ 03，P0-1 补全）
+// ============================================================================
+// 设计依据：设计文档 v1.2 §6.1 测试计划 TC-SESSION-01/02/03
+// 测试目标：验证 handleEagAutonomousStatusCommand / handleEagAutonomousStopCommand
+//          在 SessionManager 上下文中的完整集成路径（公共前置 + orchestrator 调用 + 渲染 + 状态更新）
+// 测试约束（对齐用户规则）：禁止使用 mock，使用真实 AutonomousOrchestrator + 真实文件系统
+// ============================================================================
+
+/**
+ * 构造测试用 SessionManager 实例（最小依赖，注入真实 AutonomousOrchestrator）
+ *
+ * 参考 eag-session-commands-hook.test.ts 的 createTestManager 模式，
+ * 但 projectRoot 可定制（用于与 AutonomousOrchestrator 共享临时目录）。
+ *
+ * 设计决策（对齐用户规则：禁止使用 mock）：
+ * - 注入真实的 AutonomousOrchestrator 实例（通过 buildOrchestrator 构造）
+ * - createOpenAIClient 返回 client:null（不触发真实 LLM 调用，handler 不依赖 LLM）
+ * - onAssistantMessage 回调直接捕获 message.content 到 messages 数组
+ *
+ * @param projectRoot 项目根目录（用于定位 RunStateStore 和 sessions index）
+ * @param onMessage 消息回调（接收 assistant 消息内容）
+ * @param orchestrator 真实的 AutonomousOrchestrator 实例（可选，未注入时测试 fail-closed）
+ * @returns SessionManager 实例
+ */
+function createTestSessionManager(
+  projectRoot: string,
+  onMessage: (content: string) => void,
+  orchestrator?: AutonomousOrchestrator
+): SessionManager {
+  return new SessionManager({
+    projectRoot,
+    createOpenAIClient: () => ({ client: null, model: "test-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text: string) => text,
+    onAssistantMessage: (message: any) => onMessage(message.content),
+    autonomousOrchestrator: orchestrator,
+  } as any);
+}
+
+/**
+ * 预注入 session entry 到 sessions index（用于验证 session 状态更新）
+ *
+ * handleEagAutonomousStatusCommand / handleEagAutonomousStopCommand 内部调用
+ * updateSessionEntry 更新 session 状态。若 session 不存在，updateSessionEntry
+ * 返回 null（静默忽略），无法验证状态更新。此 helper 通过直接操作 sessions
+ * index 预注入 session entry，使测试能验证 status 从 pending → completed/failed。
+ *
+ * @param manager SessionManager 实例
+ * @param sessionId 预注入的 session ID
+ */
+function injectSessionEntry(manager: SessionManager, sessionId: string): void {
+  const internal = manager as any;
+  const index = internal.loadSessionsIndex();
+  const now = new Date().toISOString();
+  index.entries.push({
+    id: sessionId,
+    summary: "test session",
+    assistantReply: null,
+    assistantThinking: null,
+    assistantRefusal: null,
+    toolCalls: null,
+    status: "pending",
+    failReason: null,
+    usage: null,
+    usagePerModel: null,
+    activeTokens: 0,
+    createTime: now,
+    updateTime: now,
+    processes: null,
+    planMode: false,
+  });
+  internal.saveSessionsIndex(index);
+}
+
+/**
+ * 读取 session entry 的当前状态（用于验证 handler 执行后 session 状态更新）
+ *
+ * @param manager SessionManager 实例
+ * @param sessionId 目标 session ID
+ * @returns session entry 的 status 字段，若 session 不存在返回 null
+ */
+function getSessionStatus(manager: SessionManager, sessionId: string): string | null {
+  const internal = manager as any;
+  const index = internal.loadSessionsIndex();
+  const entry = index.entries.find((e: any) => e.id === sessionId);
+  return entry ? entry.status : null;
+}
+
+test("TC-SESSION-01. handleEagAutonomousStatusCommand 集成测试（P0-1 新增）", async () => {
+  // 验证 handleEagAutonomousStatusCommand 的完整集成路径：
+  // 1. 公共前置逻辑（记录用户输入 / 更新 processing / 校验依赖 / 校验 payload）
+  // 2. 调用 orchestrator.status(runId, projectRoot)
+  // 3. 通过 onAssistantMessage 渲染 Markdown 报告
+  // 4. 更新 session 状态为 completed
+  //
+  // 设计决策（对齐用户规则：禁止使用 mock）：
+  // - 使用真实的 AutonomousOrchestrator 实例（通过 buildOrchestrator 构造）
+  // - 使用真实的 P5RunStateStore 初始化 RunState 数据
+  // - 使用真实的文件系统（临时目录）
+  const projectRoot = createTempProject();
+  try {
+    // 步骤 1：初始化 RunState 数据（status="running"）
+    const store = new P5RunStateStore();
+    const runId = "test-session-01";
+    await initializeAndSaveState(store, projectRoot, runId, { status: "running" });
+
+    // 步骤 2：构造真实 AutonomousOrchestrator 实例
+    const orchestrator = buildOrchestrator();
+
+    // 步骤 3：构造 SessionManager，注入 orchestrator，projectRoot 指向临时目录
+    const messages: string[] = [];
+    const manager = createTestSessionManager(projectRoot, (content) => messages.push(content), orchestrator);
+
+    // 步骤 4：预注入 session entry（用于验证 session 状态更新）
+    const sessionId = "test-session-status-01";
+    injectSessionEntry(manager, sessionId);
+
+    // 步骤 5：构造 EagAutonomousStatusRequest
+    const request = extractEagAutonomousStatusRequestFromPrompt(`/eag-autonomous-status ${runId}`);
+
+    // 步骤 6：调用 handleEagAutonomousStatusCommand（通过 internal 访问私有方法）
+    const internal = manager as any;
+    await internal.handleEagAutonomousStatusCommand(
+      sessionId,
+      { text: `/eag-autonomous-status ${runId}` },
+      request,
+      new AbortController()
+    );
+
+    // 验证 1：onAssistantMessage 渲染了 status report
+    assert.ok(messages.length > 0, "应发送至少一条 assistant 消息");
+    assert.ok(
+      messages.some((m) => m.includes("Autonomous Run Status")),
+      `消息应含 'Autonomous Run Status' 标题，实际为：${messages.join("\n")}`
+    );
+    assert.ok(
+      messages.some((m) => m.includes(runId)),
+      `消息应含 runId '${runId}'，实际为：${messages.join("\n")}`
+    );
+
+    // 验证 2：session 状态更新为 completed（status 查询是只读操作，无论 found=true/false 都视为 completed）
+    const finalStatus = getSessionStatus(manager, sessionId);
+    assert.equal(finalStatus, "completed", "session 状态应为 completed");
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
+});
+
+test("TC-SESSION-02. handleEagAutonomousStopCommand 集成测试（P0-1 新增）", async () => {
+  // 验证 handleEagAutonomousStopCommand 的完整集成路径：
+  // 1. 公共前置逻辑（记录用户输入 / 更新 processing / 校验依赖 / 校验 payload）
+  // 2. 调用 orchestrator.stop(runId, projectRoot)
+  // 3. 通过 onAssistantMessage 渲染 Markdown 报告
+  // 4. 更新 session 状态（依据 result.success）
+  //
+  // 设计决策（对齐用户规则：禁止使用 mock）：
+  // - 使用真实的 AutonomousOrchestrator 实例
+  // - RunState status="running"，stop() 将创建 abort 标志文件并返回 action="abort"
+  const projectRoot = createTempProject();
+  try {
+    // 步骤 1：初始化 RunState 数据（status="running"）
+    const store = new P5RunStateStore();
+    const runId = "test-session-02";
+    await initializeAndSaveState(store, projectRoot, runId, { status: "running" });
+
+    // 步骤 2：构造真实 AutonomousOrchestrator 实例
+    const orchestrator = buildOrchestrator();
+
+    // 步骤 3：构造 SessionManager，注入 orchestrator
+    const messages: string[] = [];
+    const manager = createTestSessionManager(projectRoot, (content) => messages.push(content), orchestrator);
+
+    // 步骤 4：预注入 session entry
+    const sessionId = "test-session-stop-02";
+    injectSessionEntry(manager, sessionId);
+
+    // 步骤 5：构造 EagAutonomousStopRequest
+    const request = extractEagAutonomousStopRequestFromPrompt(`/eag-autonomous-stop ${runId}`);
+
+    // 步骤 6：调用 handleEagAutonomousStopCommand
+    const internal = manager as any;
+    await internal.handleEagAutonomousStopCommand(
+      sessionId,
+      { text: `/eag-autonomous-stop ${runId}` },
+      request,
+      new AbortController()
+    );
+
+    // 验证 1：onAssistantMessage 渲染了 stop report
+    assert.ok(messages.length > 0, "应发送至少一条 assistant 消息");
+    assert.ok(
+      messages.some((m) => m.includes("Autonomous Run Stop")),
+      `消息应含 'Autonomous Run Stop' 标题，实际为：${messages.join("\n")}`
+    );
+
+    // 验证 2：abort 标志文件已创建（stop() 对 running 状态创建 abort 文件）
+    const abortFilePath = path.join(projectRoot, ".eag", "p5", "abort-flags", `${runId}.abort`);
+    assert.ok(fs.existsSync(abortFilePath), "abort 标志文件应已创建");
+
+    // 验证 3：session 状态更新为 completed（stop 操作成功，session 标记 completed）
+    const finalStatus = getSessionStatus(manager, sessionId);
+    assert.equal(finalStatus, "completed", "session 状态应为 completed（stop 操作成功）");
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
+});
+
+test("TC-SESSION-03. handleEagAutonomousStatusCommand 未注入 orchestrator 时 fail-closed（P0-1 新增）", async () => {
+  // 验证 handleEagAutonomousStatusCommand 的依赖校验逻辑（fail-closed）：
+  // - autonomousOrchestrator 未注入（undefined）
+  // - 通知用户配置缺失（"AutonomousOrchestrator 未注入"）
+  // - session 标记 failed
+  //
+  // 测试设计（对齐设计文档 §3.6 fail-closed 语义）：
+  // - 不注入 autonomousOrchestrator
+  // - 预注入 session entry，验证 status 从 pending → failed
+  const projectRoot = createTempProject();
+  try {
+    // 步骤 1：构造 SessionManager，不注入 orchestrator
+    const messages: string[] = [];
+    const manager = createTestSessionManager(
+      projectRoot,
+      (content) => messages.push(content)
+      // 不传入 orchestrator，测试 fail-closed
+    );
+
+    // 步骤 2：预注入 session entry
+    const sessionId = "test-session-fail-closed-03";
+    injectSessionEntry(manager, sessionId);
+
+    // 步骤 3：调用 handleEagAutonomousStatusCommand（request 为 null，依赖校验先于 request 校验）
+    const internal = manager as any;
+    await internal.handleEagAutonomousStatusCommand(
+      sessionId,
+      { text: "/eag-autonomous-status some-run-id" },
+      null, // request 为 null，但依赖校验先执行，不会到达 request 校验
+      new AbortController()
+    );
+
+    // 验证 1：onAssistantMessage 渲染了错误消息
+    assert.ok(messages.length > 0, "应发送至少一条通知消息");
+    assert.ok(
+      messages.some((m) => m.includes("AutonomousOrchestrator 未注入")),
+      `消息应含 'AutonomousOrchestrator 未注入' 错误提示，实际为：${messages.join("\n")}`
+    );
+
+    // 验证 2：session 状态更新为 failed（fail-closed）
+    const finalStatus = getSessionStatus(manager, sessionId);
+    assert.equal(finalStatus, "failed", "session 状态应为 failed（fail-closed）");
+  } finally {
+    cleanupTempProject(projectRoot);
   }
 });

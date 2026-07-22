@@ -725,38 +725,13 @@ export interface EagAutonomousStopRequest {
  * @throws {Error} 当 prompt 非字符串、命令前缀不匹配、runId 缺失或含空白字符时抛出
  */
 export function extractEagAutonomousStatusRequestFromPrompt(prompt: string): EagAutonomousStatusRequest {
-  // 步骤 1：校验 prompt 为非空字符串
-  if (typeof prompt !== "string") {
-    throw new Error("extractEagAutonomousStatusRequestFromPrompt: prompt 必须为非空字符串");
-  }
-  const trimmed = prompt.trim();
-  if (trimmed.length === 0) {
-    throw new Error("extractEagAutonomousStatusRequestFromPrompt: prompt 不能为空字符串");
-  }
-
-  // 步骤 2：移除命令前缀 /eag-autonomous-status（大小写不敏感）
-  // 正则匹配前缀（大小写不敏感），后跟空白字符或字符串结尾
-  const prefixMatch = /^\/eag-autonomous-status(?:\s+|$)/i.exec(trimmed);
-  if (!prefixMatch) {
-    throw new Error(
-      `extractEagAutonomousStatusRequestFromPrompt: 命令前缀不匹配，期望以 /eag-autonomous-status 开头（大小写不敏感），实际为: ${trimmed}`
-    );
-  }
-  const argsPart = trimmed.slice(prefixMatch[0].length).trim();
-
-  // 步骤 3：提取首个 token 作为 runId（不支持多字段，runId 必须为单个 token）
-  if (argsPart.length === 0) {
-    throw new Error(
-      "extractEagAutonomousStatusRequestFromPrompt: 缺少必填参数 <run-id>（期望格式：/eag-autonomous-status <run-id>）"
-    );
-  }
-  // 取首个空白分隔的 token，避免用户误粘贴带空格的多字段
-  const runId = argsPart.split(/\s+/)[0];
-  if (runId.length === 0) {
-    throw new Error("extractEagAutonomousStatusRequestFromPrompt: <run-id> 不能为空字符串（期望非空字符串）");
-  }
-
-  // 步骤 4：装配 EagAutonomousStatusRequest 对象并 Object.freeze 冻结
+  // P2-8 修复：抽取公共解析逻辑到 extractRunIdFromEagAutonomousSubcommand，
+  //           避免与 extractEagAutonomousStopRequestFromPrompt 重复约 40 行代码
+  const runId = extractRunIdFromEagAutonomousSubcommand(
+    prompt,
+    "/eag-autonomous-status",
+    "extractEagAutonomousStatusRequestFromPrompt"
+  );
   const request: EagAutonomousStatusRequest = { runId };
   return Object.freeze(request) as EagAutonomousStatusRequest;
 }
@@ -778,36 +753,63 @@ export function extractEagAutonomousStatusRequestFromPrompt(prompt: string): Eag
  * @throws {Error} 当 prompt 非字符串、命令前缀不匹配、runId 缺失或含空白字符时抛出
  */
 export function extractEagAutonomousStopRequestFromPrompt(prompt: string): EagAutonomousStopRequest {
+  // P2-8 修复：抽取公共解析逻辑到 extractRunIdFromEagAutonomousSubcommand
+  const runId = extractRunIdFromEagAutonomousSubcommand(
+    prompt,
+    "/eag-autonomous-stop",
+    "extractEagAutonomousStopRequestFromPrompt"
+  );
+  const request: EagAutonomousStopRequest = { runId };
+  return Object.freeze(request) as EagAutonomousStopRequest;
+}
+
+/**
+ * 从 /eag-autonomous-{status|stop} 子命令字符串提取 runId（P2-8 抽取的公共逻辑）
+ *
+ * /eag-autonomous-status 与 /eag-autonomous-stop 的参数解析逻辑完全一致：
+ * 1. 校验 prompt 为非空字符串
+ * 2. 移除命令前缀（大小写不敏感）
+ * 3. 提取首个空白分隔后的 token 作为 runId
+ * 4. 校验 runId 非空
+ *
+ * 此函数将公共逻辑集中维护，避免两个 export 函数重复约 40 行代码，
+ * 后续若需调整解析规则（如支持 --run-id 形式），仅需修改此函数。
+ *
+ * @param prompt 命令字符串
+ * @param commandPrefix 命令前缀（如 "/eag-autonomous-status"）
+ * @param callerName 调用方函数名（用于错误消息定位）
+ * @returns 解析出的 runId
+ * @throws {Error} 当 prompt 非字符串、命令前缀不匹配、runId 缺失时抛出
+ */
+function extractRunIdFromEagAutonomousSubcommand(prompt: string, commandPrefix: string, callerName: string): string {
   // 步骤 1：校验 prompt 为非空字符串
   if (typeof prompt !== "string") {
-    throw new Error("extractEagAutonomousStopRequestFromPrompt: prompt 必须为非空字符串");
+    throw new Error(`${callerName}: prompt 必须为非空字符串`);
   }
   const trimmed = prompt.trim();
   if (trimmed.length === 0) {
-    throw new Error("extractEagAutonomousStopRequestFromPrompt: prompt 不能为空字符串");
+    throw new Error(`${callerName}: prompt 不能为空字符串`);
   }
 
-  // 步骤 2：移除命令前缀 /eag-autonomous-stop（大小写不敏感）
-  const prefixMatch = /^\/eag-autonomous-stop(?:\s+|$)/i.exec(trimmed);
+  // 步骤 2：移除命令前缀（大小写不敏感）
+  // 正则匹配前缀（大小写不敏感），后跟空白字符或字符串结尾
+  // 使用 new RegExp 动态构造正则，对 commandPrefix 中的 / 进行转义（虽然 / 在正则中无需转义，但保持严谨）
+  const prefixPattern = new RegExp(`^${commandPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s+|$)`, "i");
+  const prefixMatch = prefixPattern.exec(trimmed);
   if (!prefixMatch) {
-    throw new Error(
-      `extractEagAutonomousStopRequestFromPrompt: 命令前缀不匹配，期望以 /eag-autonomous-stop 开头（大小写不敏感），实际为: ${trimmed}`
-    );
+    throw new Error(`${callerName}: 命令前缀不匹配，期望以 ${commandPrefix} 开头（大小写不敏感），实际为: ${trimmed}`);
   }
   const argsPart = trimmed.slice(prefixMatch[0].length).trim();
 
-  // 步骤 3：提取首个 token 作为 runId
+  // 步骤 3：提取首个 token 作为 runId（不支持多字段，runId 必须为单个 token）
   if (argsPart.length === 0) {
-    throw new Error(
-      "extractEagAutonomousStopRequestFromPrompt: 缺少必填参数 <run-id>（期望格式：/eag-autonomous-stop <run-id>）"
-    );
+    throw new Error(`${callerName}: 缺少必填参数 <run-id>（期望格式：${commandPrefix} <run-id>）`);
   }
+  // 取首个空白分隔的 token，避免用户误粘贴带空格的多字段
   const runId = argsPart.split(/\s+/)[0];
   if (runId.length === 0) {
-    throw new Error("extractEagAutonomousStopRequestFromPrompt: <run-id> 不能为空字符串（期望非空字符串）");
+    throw new Error(`${callerName}: <run-id> 不能为空字符串（期望非空字符串）`);
   }
 
-  // 步骤 4：装配 EagAutonomousStopRequest 对象并 Object.freeze 冻结
-  const request: EagAutonomousStopRequest = { runId };
-  return Object.freeze(request) as EagAutonomousStopRequest;
+  return runId;
 }

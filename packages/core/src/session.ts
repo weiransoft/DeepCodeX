@@ -3538,38 +3538,43 @@ ${agentInstructions}
   // ============================================================================
 
   /**
-   * 处理 /eag-autonomous-status 命令（设计文档 v1.1 §3.6）
+   * 准备 /eag-autonomous-{status|stop} 子命令的公共前置逻辑（P2-8 抽取）
    *
-   * 职责：
-   * 1. 记录用户输入到消息历史（保持会话上下文完整）
+   * handleEagAutonomousStatusCommand 与 handleEagAutonomousStopCommand 的步骤 1-4
+   * 逻辑完全一致，仅命令标签和请求类型不同。此方法将公共逻辑集中维护：
+   * 1. 记录用户输入到消息历史
    * 2. 更新 session 状态为 processing
-   * 3. 校验外挂依赖 autonomousOrchestrator（未注入时 fail-closed 通知用户）
-   * 4. 校验 EagAutonomousStatusRequest payload（null 时从命令字符串重新解析以获取错误详情）
-   * 5. 调用 orchestrator.status(runId, projectRoot)
-   * 6. 通过 onAssistantMessage 渲染 Markdown 报告
-   * 7. 更新 session 状态为 completed
+   * 3. 校验外挂依赖 autonomousOrchestrator（未注入时 fail-closed）
+   * 4. 校验 request payload（null 时从命令字符串重新解析以获取错误详情）
    *
-   * 设计决策（对齐设计文档 v1.1 §4.7 P1-N2）：
-   * - 不新增 handler 类，由 session.ts 私有方法直接处理
-   * - 与 handleEagAutonomousCommand 的差异：无需装配 AutonomousRunRequest，无复杂报告渲染
-   * - 仅调用 orchestrator.status() + 渲染 result.report
-   *
-   * 不可变优先原则：
-   * - EagAutonomousStatusRequest 由 EagCommandParser.parse() 冻结后传入
-   * - AutonomousStatusResult 由 orchestrator.status() 内部冻结后返回
-   * - 不修改任何外部状态，所有副作用通过 onAssistantMessage / updateSessionEntry 路由
+   * 设计决策（对齐 Karpathy Simplicity First）：
+   * - 仅抽取步骤 1-4，步骤 5-7（调用 orchestrator + 渲染结果 + 更新状态）
+   *   因调用方法（status vs stop）和状态更新逻辑差异较大，保留在各 handler 中
+   * - 使用泛型 TRequest 处理 EagAutonomousStatusRequest / EagAutonomousStopRequest 类型差异
+   * - 返回联合类型：成功时返回 { request, orchestrator }，失败时返回 { handled: true }
+   *   调用方通过 "handled" in result 判断是否已处理错误（已处理则直接 return）
    *
    * @param sessionId 会话 ID
-   * @param userPrompt 用户输入（仅用于写入用户消息历史 + 错误回显时的命令字符串）
-   * @param request 预装配的 EagAutonomousStatusRequest（由 EagCommandParser.parse() 提取，可空）
-   * @param controller 中断控制器（用于响应 abort 信号）
+   * @param userPrompt 用户输入
+   * @param request 预装配的请求对象（可空）
+   * @param commandLabel 命令标签（如 "[EAG Autonomous Status]"，用于错误消息前缀）
+   * @param expectedFormat 期望的命令格式（如 "/eag-autonomous-status <run-id>"）
+   * @param parseErrorLabel 解析错误标签（如 "EagAutonomousStatusRequest"）
+   * @param reparseFn 重新解析函数（payload 为 null 时调用以获取错误详情）
+   * @param controller 中断控制器
+   * @returns 成功时返回 { request: TRequest, orchestrator: AutonomousOrchestrator }，
+   *          失败时返回 { handled: true }（调用方应直接 return）
    */
-  private async handleEagAutonomousStatusCommand(
+  private async prepareEagAutonomousSubcommand<TRequest>(
     sessionId: string,
     userPrompt: UserPromptContent,
-    request: EagAutonomousStatusRequest | null,
+    request: TRequest | null,
+    commandLabel: string,
+    expectedFormat: string,
+    parseErrorLabel: string,
+    reparseFn: (prompt: string) => TRequest,
     controller?: AbortController
-  ): Promise<void> {
+  ): Promise<{ request: TRequest; orchestrator: AutonomousOrchestrator } | { handled: true }> {
     const signal = controller?.signal;
     this.throwIfAborted(signal);
 
@@ -3596,37 +3601,87 @@ ${agentInstructions}
         failReason: errMsg,
         updateTime: new Date().toISOString(),
       }));
-      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG Autonomous Status] ${errMsg}`, null), false);
-      return;
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `${commandLabel} ${errMsg}`, null), false);
+      return { handled: true };
     }
 
-    // 步骤 4：校验 EagAutonomousStatusRequest payload
+    // 步骤 4：校验 request payload
     // EagCommandParser.parse() 已通过命令字符串解析 payload，但解析失败时 payload 为 null
-    // 此时重新调用 extractEagAutonomousStatusRequestFromPrompt(userPrompt.text) 以获取具体错误信息
-    let validatedRequest: EagAutonomousStatusRequest;
+    // 此时重新调用 reparseFn(userPrompt.text) 以获取具体错误信息
+    let validatedRequest: TRequest;
     if (request) {
       validatedRequest = request;
     } else {
       // payload null：尝试从命令字符串重新解析以获取错误详情
       let parseErrorMsg: string;
       try {
-        extractEagAutonomousStatusRequestFromPrompt(String(userPrompt.text ?? ""));
+        reparseFn(String(userPrompt.text ?? ""));
         // 理论不可达：若 parser 已返回 null，重新解析应该抛异常
-        parseErrorMsg =
-          "EagAutonomousStatusRequest 解析返回 null 但未抛异常（理论不可达，请检查 EagCommandParser.extractEagAutonomousStatusRequest 实现）";
+        parseErrorMsg = `${parseErrorLabel} 解析返回 null 但未抛异常（理论不可达，请检查 EagCommandParser 实现）`;
       } catch (parseErr) {
         parseErrorMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
       }
-      const errMsg = `EagAutonomousStatusRequest 解析失败：${parseErrorMsg}（期望格式：/eag-autonomous-status <run-id>）`;
+      const errMsg = `${parseErrorLabel} 解析失败：${parseErrorMsg}（期望格式：${expectedFormat}）`;
       this.updateSessionEntry(sessionId, (entry) => ({
         ...entry,
         status: "failed",
         failReason: errMsg,
         updateTime: new Date().toISOString(),
       }));
-      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG Autonomous Status] ${errMsg}`, null), false);
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `${commandLabel} ${errMsg}`, null), false);
+      return { handled: true };
+    }
+
+    return { request: validatedRequest, orchestrator: this.autonomousOrchestrator };
+  }
+
+  /**
+   * 处理 /eag-autonomous-status 命令（设计文档 v1.1 §3.6）
+   *
+   * 职责：
+   * 1. [公共前置] 记录用户输入 / 更新 processing / 校验依赖 / 校验 payload（P2-8 抽取到 prepareEagAutonomousSubcommand）
+   * 2. 调用 orchestrator.status(runId, projectRoot)
+   * 3. 通过 onAssistantMessage 渲染 Markdown 报告
+   * 4. 更新 session 状态为 completed
+   *
+   * 设计决策（对齐设计文档 v1.1 §4.7 P1-N2）：
+   * - 不新增 handler 类，由 session.ts 私有方法直接处理
+   * - 与 handleEagAutonomousCommand 的差异：无需装配 AutonomousRunRequest，无复杂报告渲染
+   * - 仅调用 orchestrator.status() + 渲染 result.report
+   *
+   * 不可变优先原则：
+   * - EagAutonomousStatusRequest 由 EagCommandParser.parse() 冻结后传入
+   * - AutonomousStatusResult 由 orchestrator.status() 内部冻结后返回
+   * - 不修改任何外部状态，所有副作用通过 onAssistantMessage / updateSessionEntry 路由
+   *
+   * @param sessionId 会话 ID
+   * @param userPrompt 用户输入（仅用于写入用户消息历史 + 错误回显时的命令字符串）
+   * @param request 预装配的 EagAutonomousStatusRequest（由 EagCommandParser.parse() 提取，可空）
+   * @param controller 中断控制器（用于响应 abort 信号）
+   */
+  private async handleEagAutonomousStatusCommand(
+    sessionId: string,
+    userPrompt: UserPromptContent,
+    request: EagAutonomousStatusRequest | null,
+    controller?: AbortController
+  ): Promise<void> {
+    const signal = controller?.signal;
+
+    // 步骤 1-4：公共前置逻辑（P2-8 抽取到 prepareEagAutonomousSubcommand）
+    const prepared = await this.prepareEagAutonomousSubcommand(
+      sessionId,
+      userPrompt,
+      request,
+      "[EAG Autonomous Status]",
+      "/eag-autonomous-status <run-id>",
+      "EagAutonomousStatusRequest",
+      extractEagAutonomousStatusRequestFromPrompt,
+      controller
+    );
+    if ("handled" in prepared) {
       return;
     }
+    const { request: validatedRequest, orchestrator } = prepared;
 
     // 步骤 5：调用 orchestrator.status(runId, projectRoot)
     // 设计说明：status() 内部从 RunStateStore 加载最新状态快照并格式化为 Markdown 报告
@@ -3634,7 +3689,7 @@ ${agentInstructions}
     this.throwIfAborted(signal);
     let result: Awaited<ReturnType<AutonomousOrchestrator["status"]>>;
     try {
-      result = await this.autonomousOrchestrator.status(validatedRequest.runId, this.projectRoot);
+      result = await orchestrator.status(validatedRequest.runId, this.projectRoot);
     } catch (e) {
       // 异常兜底：orchestrator.status() 内部异常（如文件系统错误）
       const isAborted = this.isAbortLikeError(e) || signal?.aborted === true;
@@ -3692,13 +3747,10 @@ ${agentInstructions}
    * 处理 /eag-autonomous-stop 命令（设计文档 v1.1 §3.6）
    *
    * 职责：
-   * 1. 记录用户输入到消息历史（保持会话上下文完整）
-   * 2. 更新 session 状态为 processing
-   * 3. 校验外挂依赖 autonomousOrchestrator（未注入时 fail-closed 通知用户）
-   * 4. 校验 EagAutonomousStopRequest payload（null 时从命令字符串重新解析以获取错误详情）
-   * 5. 调用 orchestrator.stop(runId, projectRoot)
-   * 6. 通过 onAssistantMessage 渲染 Markdown 报告
-   * 7. 更新 session 状态（依据 result.success）
+   * 1. [公共前置] 记录用户输入 / 更新 processing / 校验依赖 / 校验 payload（P2-8 抽取到 prepareEagAutonomousSubcommand）
+   * 2. 调用 orchestrator.stop(runId, projectRoot)
+   * 3. 通过 onAssistantMessage 渲染 Markdown 报告
+   * 4. 更新 session 状态（依据 result.success）
    *
    * 设计决策（对齐设计文档 v1.1 §4.7 P1-N2）：
    * - 不新增 handler 类，由 session.ts 私有方法直接处理
@@ -3717,59 +3769,22 @@ ${agentInstructions}
     controller?: AbortController
   ): Promise<void> {
     const signal = controller?.signal;
-    this.throwIfAborted(signal);
 
-    const now = new Date().toISOString();
-    // 步骤 1：记录用户输入到消息历史（保持会话上下文完整）
-    const userMessage = this.buildUserMessage(sessionId, userPrompt);
-    this.appendSessionMessage(sessionId, userMessage);
-
-    // 步骤 2：更新 session 状态为 processing
-    this.updateSessionEntry(sessionId, (entry) => ({
-      ...entry,
-      status: "processing",
-      failReason: null,
-      updateTime: now,
-    }));
-
-    // 步骤 3：校验外挂依赖 autonomousOrchestrator（未注入时 fail-closed）
-    if (!this.autonomousOrchestrator) {
-      const errMsg =
-        "AutonomousOrchestrator 未注入：请在 SessionManagerOptions.autonomousOrchestrator 配置后重启（参考设计文档 v1.1 §3.6 / §5 CLI 命令规范）";
-      this.updateSessionEntry(sessionId, (entry) => ({
-        ...entry,
-        status: "failed",
-        failReason: errMsg,
-        updateTime: new Date().toISOString(),
-      }));
-      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG Autonomous Stop] ${errMsg}`, null), false);
+    // 步骤 1-4：公共前置逻辑（P2-8 抽取到 prepareEagAutonomousSubcommand）
+    const prepared = await this.prepareEagAutonomousSubcommand(
+      sessionId,
+      userPrompt,
+      request,
+      "[EAG Autonomous Stop]",
+      "/eag-autonomous-stop <run-id>",
+      "EagAutonomousStopRequest",
+      extractEagAutonomousStopRequestFromPrompt,
+      controller
+    );
+    if ("handled" in prepared) {
       return;
     }
-
-    // 步骤 4：校验 EagAutonomousStopRequest payload
-    let validatedRequest: EagAutonomousStopRequest;
-    if (request) {
-      validatedRequest = request;
-    } else {
-      // payload null：尝试从命令字符串重新解析以获取错误详情
-      let parseErrorMsg: string;
-      try {
-        extractEagAutonomousStopRequestFromPrompt(String(userPrompt.text ?? ""));
-        parseErrorMsg =
-          "EagAutonomousStopRequest 解析返回 null 但未抛异常（理论不可达，请检查 EagCommandParser.extractEagAutonomousStopRequest 实现）";
-      } catch (parseErr) {
-        parseErrorMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
-      }
-      const errMsg = `EagAutonomousStopRequest 解析失败：${parseErrorMsg}（期望格式：/eag-autonomous-stop <run-id>）`;
-      this.updateSessionEntry(sessionId, (entry) => ({
-        ...entry,
-        status: "failed",
-        failReason: errMsg,
-        updateTime: new Date().toISOString(),
-      }));
-      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG Autonomous Stop] ${errMsg}`, null), false);
-      return;
-    }
+    const { request: validatedRequest, orchestrator } = prepared;
 
     // 步骤 5：调用 orchestrator.stop(runId, projectRoot)
     // 设计说明：stop() 根据 RunState.status 决定行为：
@@ -3778,7 +3793,7 @@ ${agentInstructions}
     this.throwIfAborted(signal);
     let result: Awaited<ReturnType<AutonomousOrchestrator["stop"]>>;
     try {
-      result = await this.autonomousOrchestrator.stop(validatedRequest.runId, this.projectRoot);
+      result = await orchestrator.stop(validatedRequest.runId, this.projectRoot);
     } catch (e) {
       // 异常兜底：orchestrator.stop() 内部异常（如文件系统错误 / git 命令执行失败）
       const isAborted = this.isAbortLikeError(e) || signal?.aborted === true;
