@@ -28,6 +28,12 @@ import type { CodingLoopRequest } from "../coding/types";
 import type { DesignLoopInput } from "../design/design-models";
 import type { TestingLoopRequest } from "../testing/types";
 import type { EagRunRequest, EagResumeRequest, EagStatusRequest } from "../long-horizon";
+// EAG-P5 Phase 5.4 TASK-P5-5.4-002：导入 /eag-autonomous 命令参数解析函数与请求类型
+// - extractEagAutonomousRequestFromPrompt：独立函数，从命令字符串解析参数
+// - EagAutonomousRequest：/eag-autonomous 命令请求对象类型
+// 注：eag-autonomous-command.ts 不依赖本模块，无循环依赖风险
+import { extractEagAutonomousRequestFromPrompt } from "./eag-autonomous-command";
+import type { EagAutonomousRequest } from "./eag-autonomous-command";
 
 // ============================================================================
 // DeployRequest 接口定义（EAG-P4 批次 13 Phase 7 §5.1）
@@ -98,6 +104,7 @@ export type EagCommand =
   | { readonly kind: "eag-resume"; readonly payload: EagResumeRequest | null }
   | { readonly kind: "eag-status"; readonly payload: EagStatusRequest | null }
   | { readonly kind: "eag-deploy"; readonly payload: DeployRequest | null }
+  | { readonly kind: "eag-autonomous"; readonly payload: EagAutonomousRequest | null }
   | { readonly kind: "unknown"; readonly payload: null };
 
 /**
@@ -125,6 +132,14 @@ export const EAG_COMMAND_STRINGS = Object.freeze({
   EAG_STATUS: "/eag-status",
   /** /eag-deploy 命令字符串（触发部署任务编排，EAG-P4 批次 13 Phase 7 §5.1） */
   EAG_DEPLOY: "/eag-deploy",
+  /**
+   * /eag-autonomous 命令前缀字符串（触发 EAG-P5 无人值守编排，TASK-P5-5.4-001）
+   *
+   * 注：与其他 7 个命令不同，/eag-autonomous 使用前缀匹配（非严格匹配），
+   * 因为命令本身携带参数（--goal / --max-iterations / --confirmation 等）。
+   * 参数解析由 extractEagAutonomousRequestFromPrompt() 独立函数完成。
+   */
+  EAG_AUTONOMOUS: "/eag-autonomous",
 } as const);
 
 /**
@@ -210,6 +225,20 @@ export class EagCommandParser {
     const hasSkills = !!userPrompt.skills && userPrompt.skills.length > 0;
     if (hasImages || hasSkills) {
       return { kind: "unknown", payload: null };
+    }
+
+    // 步骤 2.1：EAG-P5 Phase 5.4 /eag-autonomous 前缀匹配（TASK-P5-5.4-002）
+    // 与其他 7 个命令不同，/eag-autonomous 使用前缀匹配（非严格匹配），
+    // 因为命令本身携带参数（--goal / --max-iterations / --confirmation 等）。
+    // 匹配规则（大小写不敏感）：
+    // - text === "/eag-autonomous"（无参数形式，payload 从 messageParams 提取）
+    // - text 以 "/eag-autonomous " 开头（含参数形式，payload 从命令字符串解析）
+    // 参数解析委托 extractEagAutonomousRequestFromPrompt 独立函数完成
+    const autonomousPrefix = EAG_COMMAND_STRINGS.EAG_AUTONOMOUS;
+    const textLower = text.toLowerCase();
+    const prefixLower = autonomousPrefix.toLowerCase();
+    if (textLower === prefixLower || textLower.startsWith(prefixLower + " ")) {
+      return { kind: "eag-autonomous", payload: this.extractEagAutonomousRequest(userPrompt, text) };
     }
 
     // 步骤 3：严格匹配 7 个命令字符串（无参数，参数通过 messageParams 注入）
@@ -351,6 +380,28 @@ export class EagCommandParser {
   parseEagDeployCommand(userPrompt: UserPromptContent): EagCommand {
     const cmd = this.parse(userPrompt);
     return cmd.kind === "eag-deploy" ? cmd : FROZEN_UNKNOWN_COMMAND;
+  }
+
+  /**
+   * 判定用户输入是否为 /eag-autonomous 命令并提取 payload（TASK-P5-5.4-002）
+   *
+   * 判定规则（对齐 EAG-P5 Phase 5.4 §5 CLI 命令规范）：
+   * - text 为字符串且以 /eag-autonomous 开头（前缀匹配，大小写不敏感）
+   * - text === "/eag-autonomous" 或 text 以 "/eag-autonomous " 开头
+   * - 无图片附件
+   * - 无技能匹配
+   *
+   * 与其他 7 个命令的差异：
+   * - 其他命令使用严格匹配（text === "/eag-xxx"）
+   * - /eag-autonomous 使用前缀匹配，因为命令本身携带参数
+   * - 参数解析由 extractEagAutonomousRequestFromPrompt() 独立函数完成
+   *
+   * @param userPrompt 用户输入内容
+   * @returns EagCommand（kind 为 "eag-autonomous" 或 "unknown"）
+   */
+  parseEagAutonomousCommand(userPrompt: UserPromptContent): EagCommand {
+    const cmd = this.parse(userPrompt);
+    return cmd.kind === "eag-autonomous" ? cmd : FROZEN_UNKNOWN_COMMAND;
   }
 
   // ============================================================================
@@ -641,6 +692,60 @@ export class EagCommandParser {
     }
     // 所有字段校验通过，返回 candidate（类型已收窄为 DeployRequest）
     return candidate as DeployRequest;
+  }
+
+  /**
+   * 从 userPrompt.messageParams 或命令字符串提取 EagAutonomousRequest（TASK-P5-5.4-002）
+   *
+   * 提取优先级：
+   * 1. 优先从 messageParams.autonomousRunRequest 提取（调用方预解析模式）
+   *    - 适用于 UI 表单场景：用户分别填写 goal/maxIterations 等字段
+   *    - 调用方在构造 userPrompt 时通过 messageParams.autonomousRunRequest 注入
+   * 2. 回退到从命令字符串解析（CLI 内联参数模式）
+   *    - 适用于 CLI 场景：用户输入 `/eag-autonomous --goal "..." --max-iterations 10`
+   *    - 委托 extractEagAutonomousRequestFromPrompt 独立函数完成解析
+   *    - 解析失败时返回 null（session.ts 通知用户参数错误）
+   *
+   * 设计原则（对齐 extractDeployRequest 模式 + CLI 内联参数扩展）：
+   * - parser 不直接读取文件系统（保持职责单一）
+   * - 调用方可以通过 messageParams 注入预装配的请求（与 extractDeployRequest 一致）
+   * - 调用方也可以通过命令字符串内联参数（extractDeployRequest 不支持，本方法扩展支持）
+   * - 任一提取失败返回 null，由 session.ts 通知用户错误
+   *
+   * @param userPrompt 用户输入（含 messageParams 元数据）
+   * @param text 用户输入的命令字符串（用于回退解析）
+   * @returns 预装配的 EagAutonomousRequest；未提供或解析失败时返回 null
+   */
+  private extractEagAutonomousRequest(userPrompt: UserPromptContent, text: string): EagAutonomousRequest | null {
+    // 步骤 1：优先从 messageParams.autonomousRunRequest 提取（调用方预解析模式）
+    const params = userPrompt.messageParams as Record<string, unknown> | null | undefined;
+    if (params && typeof params === "object") {
+      const request = params.autonomousRunRequest;
+      if (request && typeof request === "object") {
+        const candidate = request as Partial<EagAutonomousRequest>;
+        // 基本字段校验（goal 必须为非空字符串，其他字段由 extractEagAutonomousRequestFromPrompt 保证）
+        if (
+          typeof candidate.goal === "string" &&
+          candidate.goal.trim().length > 0 &&
+          typeof candidate.maxIterations === "number" &&
+          typeof candidate.confirmation === "string" &&
+          typeof candidate.testCommand === "string"
+        ) {
+          return candidate as EagAutonomousRequest;
+        }
+      }
+    }
+
+    // 步骤 2：回退到从命令字符串解析（CLI 内联参数模式）
+    // 委托 extractEagAutonomousRequestFromPrompt 独立函数完成解析
+    // 解析失败（抛异常）时返回 null，由 session.ts 通知用户参数错误
+    try {
+      return extractEagAutonomousRequestFromPrompt(text);
+    } catch {
+      // 参数解析失败：返回 null，session.ts 将通知用户具体错误
+      // 注：错误详情由 session.ts 重新调用 extractEagAutonomousRequestFromPrompt 获取
+      return null;
+    }
   }
 }
 

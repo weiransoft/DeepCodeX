@@ -17,6 +17,12 @@ import * as path from "path";
 import * as fs from "fs";
 // v1.6 P0-2：引入 createOpenAIClient + OpenAIClientHandle 用于 executeDispatch 真实 LLM 调用
 import { createOpenAIClient, type OpenAIClientHandle, isOpenAIClientHandle } from "../common/openai-client.js";
+// v1.6 P1-1：引入 buildThinkingRequestOptions 用于在 executeDispatch 中传递 thinking 参数
+// 修复点：之前 executeDispatch 构造 LLM 请求体时未传 thinking / reasoning_effort 参数，
+// 即使 settings.json 设置 thinkingEnabled=true，API 端也不会启用 thinking 模式。
+// 通过 buildThinkingRequestOptions 与 session.ts 主对话流程保持一致的请求语义。
+import { buildThinkingRequestOptions } from "../common/openai-thinking.js";
+import type { ReasoningEffort } from "../settings.js";
 import { matchRoles, matchRolesSync, type MatchOptions } from "./role-matcher.js";
 import { ROLE_MAP, getRole, ROLE_REGISTRY } from "./role-registry.js";
 import type {
@@ -139,6 +145,17 @@ export const DispatchOptions = z.object({
   // v1.6 P0-2：注入的 OpenAI 客户端句柄（测试专用）
   // 使用 z.unknown() 因为 zod 无法直接校验类实例，运行时通过 isOpenAIClientHandle 守卫
   injectedClient: z.unknown().optional(),
+  /**
+   * 最大续写次数（v2.1.3 新增）
+   *
+   * 含义：LLM 输出被 maxTokens 截断（finish_reason="length"）时，自动发送续写请求的最大次数
+   * - 0 = 禁用续写（截断后直接返回部分输出，isPartial=true）
+   * - 3 = 默认值，最多续写 3 次（总输出可达 4 × maxTokens）
+   * - 10 = 上限，防止无限循环
+   *
+   * 用途：企业应用代码生成等长输出场景，避免因 maxTokens 限制导致代码截断
+   */
+  maxContinueCount: z.number().int().min(0).max(10).optional(),
 });
 export type DispatchOptions = z.infer<typeof DispatchOptions>;
 
@@ -448,6 +465,78 @@ export function buildUserPromptFromTask(task: TaskRequirement): string {
  * @param onProgress 进度回调
  * @returns 完整 DispatchResult
  */
+// ============================================================================
+// v1.1 新增：LLM 主动停止+继续关键字检测
+// ============================================================================
+
+/**
+ * 继续意图关键字列表（v1.1 新增）
+ *
+ * 当 LLM 输出末尾包含这些关键字时，表示 LLM 主动停止但仍有内容需要输出。
+ * 检测范围：输出末尾 200 字符（避免正文中的"继续"误判）
+ *
+ * 设计依据：
+ * - 实际 E2E 测试中 LLM 输出"由于输出较长,我将继续在下一条消息中完成..."
+ * - 覆盖中英文常见表达方式
+ */
+const CONTINUE_INTENTION_KEYWORDS: readonly string[] = [
+  "将继续",
+  "继续在下一条消息",
+  "继续输出",
+  "请继续",
+  "未完待续",
+  "继续完成",
+  "will continue",
+  "continue in the next",
+] as const;
+
+/**
+ * 检测 LLM 输出末尾是否包含继续意图关键字（v1.1 新增）
+ *
+ * 当 finish_reason="stop" 但输出末尾包含"将继续"等关键字时，
+ * 表示 LLM 主动停止但仍有内容需要输出，应触发续写。
+ *
+ * @param content LLM 输出内容
+ * @param tailLength 检测末尾字符数（默认 200）
+ * @returns true 表示检测到继续意图，应触发续写
+ */
+export function detectContinueIntention(content: string, tailLength: number = 200): boolean {
+  if (!content || content.length === 0) {
+    return false;
+  }
+  // 取输出末尾 tailLength 字符作为检测范围
+  const tail = content.length > tailLength ? content.slice(-tailLength) : content;
+  // 转小写进行大小写不敏感匹配（覆盖英文关键字）
+  const tailLower = tail.toLowerCase();
+  // 子串匹配：任一关键字出现即认为有继续意图
+  return CONTINUE_INTENTION_KEYWORDS.some((kw) => tailLower.includes(kw.toLowerCase()));
+}
+
+/**
+ * 判断是否应该继续续写（v1.1 新增）
+ *
+ * 续写触发条件（满足任一即可）：
+ * 1. finish_reason === "length"（输出被 maxTokens 截断）
+ * 2. finish_reason === "stop" && detectContinueIntention(content)（LLM 主动停止但表示要继续）
+ *
+ * @param finishReason 当前响应的 finish_reason
+ * @param content 当前累计的完整输出内容
+ * @returns true 表示应该继续续写
+ */
+export function shouldContinue(finishReason: string | null, content: string): boolean {
+  if (finishReason === "length") {
+    return true;
+  }
+  if (finishReason === "stop" && detectContinueIntention(content)) {
+    return true;
+  }
+  return false;
+}
+
+// ============================================================================
+// 第五部分：完整 dispatch 执行（带 tool execution）
+// ============================================================================
+
 export async function executeDispatch(
   task: TaskRequirement,
   options: Partial<DispatchOptions> = {},
@@ -509,6 +598,9 @@ export async function executeDispatch(
           tokensConsumed: { prompt: 0, completion: 0, total: 0 },
           cacheHit: false,
           retryCount: 0,
+          // v2.1.3 新增字段：skipped 状态下未触发续写
+          continueCount: 0,
+          isPartial: false,
           error: "注入的 LLM 客户端不可用（不符合 OpenAIClientHandle 接口），跳过 LLM 调用",
         };
         onProgress?.("skipped", "注入的 LLM 客户端不可用，跳过 LLM 调用");
@@ -534,6 +626,9 @@ export async function executeDispatch(
           tokensConsumed: { prompt: 0, completion: 0, total: 0 },
           cacheHit: false,
           retryCount: 0,
+          // v2.1.3 新增字段：skipped 状态下未触发续写
+          continueCount: 0,
+          isPartial: false,
           error: "API Key 不可用，跳过 LLM 调用",
         };
         onProgress?.("skipped", "API Key 不可用，跳过 LLM 调用");
@@ -545,85 +640,176 @@ export async function executeDispatch(
         baseURL: created.baseURL,
         temperature: created.temperature,
         thinkingEnabled: created.thinkingEnabled,
+        // v1.6 P1-1：传递 reasoningEffort，让 buildThinkingRequestOptions 在 thinkingEnabled=true 时
+        // 能正确构造 extra_body.reasoning_effort 参数（与 session.ts 主对话流程对齐）
+        reasoningEffort: created.reasoningEffort,
       };
     }
 
     // ========================================================================
-    // 阶段 3：调用 LLM（两参数 SDK 调用：body + options）
+    // 阶段 3：调用 LLM（v2.1.3 重构：提取 callLlmOnce + 续写循环）
     // ========================================================================
-    onProgress?.("running", `调用 LLM: ${clientHandle.model}...`);
+    // v2.1.3 修复（架构评审 P1-1）：在闭包外做非空断言并赋值给 const 变量
+    // 这样 TypeScript 能正确推断后续引用（包括 callLlmOnce 闭包）中 clientHandle 非空
+    if (clientHandle === null) {
+      // 理论上不会到达此分支（前面已检查），但为类型安全和防御性编程保留
+      throw new Error("clientHandle 不可为 null（已达阶段 3）");
+    }
+    const handle: OpenAIClientHandle = clientHandle;
+
+    onProgress?.("running", `调用 LLM: ${handle.model}...`);
 
     // 构造 messages：system prompt + user prompt
     const systemPrompt = teamResult.recommendedSystemPrompt;
     const userPrompt = buildUserPromptFromTask(task);
 
-    // 请求体（不包含 signal，signal 放到第二参数 options 中）
-    const llmRequestBody: {
-      model: string;
-      messages: Array<{ role: "system" | "user"; content: string }>;
-      temperature?: number;
-    } = {
-      model: clientHandle.model,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-    };
-    if (clientHandle.temperature !== undefined) {
-      llmRequestBody.temperature = clientHandle.temperature;
-    }
-
-    // 请求选项（signal 放到这里，而非请求体）
-    // OpenAI SDK 两参数签名：chat.completions.create(body, options?)
-    // signal 在 options 中（非 body）
-    const llmRequestOptions: { signal?: AbortSignal } = {};
-
-    // 超时控制：通过 AbortController 实现
-    let abortController: AbortController | null = null;
-    let timeoutHandle: NodeJS.Timeout | null = null;
-    if (opts.timeoutMs !== undefined) {
-      abortController = new AbortController();
-      llmRequestOptions.signal = abortController.signal;
-      timeoutHandle = setTimeout(() => {
-        abortController?.abort();
-      }, opts.timeoutMs);
-    }
+    // thinking 参数（v1.6 P1-1：与 session.ts 主对话流程保持一致）
+    // v2.1.3：thinkingOptions 在 callLlmOnce 中复用，保持首次调用和续写调用的 thinking 模式一致
+    const thinkingOptions = buildThinkingRequestOptions(
+      handle.thinkingEnabled,
+      handle.baseURL,
+      handle.reasoningEffort ?? "high"
+    );
 
     // 真实调用 OpenAI SDK
     // client 类型是 unknown，需要类型断言为 OpenAI SDK 客户端
     // 使用 ChatCompletion 类型避免 any（对齐 ESLint no-explicit-any 规则）
-    const openaiClient = clientHandle.client as {
+    // v1.6 P1-1 扩展：message 中增加 reasoning_content 字段（thinking 模式产出）
+    // 部分 moka-ai / DeepSeek / Qwen3 模型在 thinkingEnabled=true 时，
+    // 思考过程放在 reasoning_content 字段，最终答案放在 content 字段；
+    // 但个别模型在 thinking 模式下可能将最终答案也放入 reasoning_content（content 为空）。
+    // 因此响应解析需要支持 reasoning_content 作为 fallback，与 session.ts:3527-3528 保持一致。
+    //
+    // v2.1.3 扩展：新增 finish_reason 字段解析
+    // OpenAI Chat Completions API 响应中，finish_reason="length" 表示输出被 maxTokens 截断。
+    // 检测到此值时触发自动续写机制，让 LLM 从中断处继续输出。
+    // 取值：stop（正常结束）/ length（截断）/ tool_calls（工具调用）/ content_filter（内容过滤）
+    //
+    // v2.1.3 修复（架构评审 P1-1）：openaiClient 从 handle.client 提取（handle 已断言非空）
+    const openaiClient = handle.client as {
       chat: {
         completions: {
           create: (
             body: unknown,
             options?: { signal?: AbortSignal }
           ) => Promise<{
-            choices: Array<{ message?: { content?: string | null } }>;
+            choices: Array<{
+              message?: {
+                content?: string | null;
+                reasoning_content?: string | null;
+              };
+              /** v2.1.3 新增：结束原因（stop/length/tool_calls/content_filter） */
+              finish_reason?: string | null;
+            }>;
             usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
           }>;
         };
       };
     };
-    let response: {
-      choices: Array<{ message?: { content?: string | null } }>;
-      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
-    };
-    try {
-      response = await openaiClient.chat.completions.create(llmRequestBody, llmRequestOptions);
-    } finally {
-      // 清理超时定时器
-      if (timeoutHandle !== null) {
-        clearTimeout(timeoutHandle);
+
+    // ========================================================================
+    // 阶段 3+4：调用 LLM + 解析响应 + 自动续写（v2.1.3 重构）
+    // ========================================================================
+    //
+    // v2.1.3 改造说明：
+    // - 提取 callLlmOnce 内部函数，封装单次 LLM 调用 + 响应解析 + 超时控制
+    // - 新增续写循环：检测 finish_reason="length" 时自动续写，最多 maxContinueCount 次
+    // - 续写消息：[system, user, assistant(已有部分), user(续写指令)]
+    // - 续写时保持 thinking 参数和 reasoning_content fallback 逻辑（架构评审 P0-2/P0-3）
+
+    /**
+     * 单次 LLM 调用 + 响应解析（v2.1.3 新增）
+     *
+     * 封装 executeDispatch 中阶段 3（LLM 调用）+ 阶段 4（响应解析）的重复逻辑，
+     * 供首次调用和续写循环复用。
+     *
+     * v2.1.3 修复（架构评审 P1-1）：clientHandle 作为参数显式传入，
+     * 避免 TypeScript 在闭包中无法推断外部空值检查的 "possibly null" 错误。
+     *
+     * @param handle 非空的 OpenAIClientHandle（调用方负责 null 检查）
+     * @param messages 消息数组（system + user + 可选 assistant + 可选续写 user）
+     * @param timeoutMs 超时毫秒数（undefined 表示不超时）
+     * @returns 解析后的响应：content（content || reasoning_content fallback）+ finishReason + usage
+     */
+    async function callLlmOnce(
+      handle: OpenAIClientHandle,
+      messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+      timeoutMs?: number
+    ): Promise<{
+      content: string;
+      finishReason: string | null;
+      usage: { promptTokens: number; completionTokens: number; totalTokens: number };
+    }> {
+      // 构建请求体（v2.1.3：复用外部 thinkingOptions，保持 thinking 模式一致）
+      const requestBody: {
+        model: string;
+        messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
+        temperature?: number;
+        thinking?: { type: "enabled" | "disabled" };
+        extra_body?: { reasoning_effort?: ReasoningEffort };
+      } = {
+        model: handle.model,
+        messages,
+        ...thinkingOptions,
+      };
+      if (handle.temperature !== undefined) {
+        requestBody.temperature = handle.temperature;
+      }
+
+      // 请求选项（signal 放到这里，而非请求体）
+      const requestOptions: { signal?: AbortSignal } = {};
+
+      // 超时控制（v2.1.3：每次调用独立超时，避免单次续写卡死）
+      let abortController: AbortController | null = null;
+      let timeoutHandle: NodeJS.Timeout | null = null;
+      if (timeoutMs !== undefined) {
+        abortController = new AbortController();
+        requestOptions.signal = abortController.signal;
+        timeoutHandle = setTimeout(() => {
+          abortController?.abort();
+        }, timeoutMs);
+      }
+
+      try {
+        const response = await openaiClient.chat.completions.create(requestBody, requestOptions);
+
+        // 解析响应（v1.6 P1-1：content → reasoning_content fallback）
+        const messageObj = response?.choices?.[0]?.message;
+        const rawContent: string = messageObj?.content ?? "";
+        const rawReasoning: string = messageObj?.reasoning_content ?? "";
+        const content: string = rawContent || rawReasoning;
+
+        // v2.1.3 新增：解析 finish_reason
+        const finishReason: string | null = response?.choices?.[0]?.finish_reason ?? null;
+
+        const usage = {
+          promptTokens: response?.usage?.prompt_tokens ?? 0,
+          completionTokens: response?.usage?.completion_tokens ?? 0,
+          totalTokens: response?.usage?.total_tokens ?? 0,
+        };
+
+        return { content, finishReason, usage };
+      } finally {
+        // 清理超时定时器
+        if (timeoutHandle !== null) {
+          clearTimeout(timeoutHandle);
+        }
       }
     }
 
-    // ========================================================================
-    // 阶段 4：解析 LLM 响应
-    // ========================================================================
-    const outputContent: string = response?.choices?.[0]?.message?.content ?? "";
-    if (!outputContent) {
-      // 空内容 → failed
+    // --- 首次调用 LLM ---
+    onProgress?.("running", `调用 LLM: ${handle.model}...`);
+    const firstResult = await callLlmOnce(
+      handle,
+      [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      opts.timeoutMs
+    );
+
+    // 空内容 → failed
+    if (!firstResult.content) {
       const failResult: DispatchResult = {
         taskId: task.taskId,
         dispatchId,
@@ -635,26 +821,118 @@ export async function executeDispatch(
         output: "",
         artifacts: [],
         tokensConsumed: {
-          prompt: response?.usage?.prompt_tokens ?? 0,
-          completion: response?.usage?.completion_tokens ?? 0,
-          total: response?.usage?.total_tokens ?? 0,
+          prompt: firstResult.usage.promptTokens,
+          completion: firstResult.usage.completionTokens,
+          total: firstResult.usage.totalTokens,
         },
         cacheHit: false,
         retryCount: 0,
+        continueCount: 0,
+        isPartial: false,
         error: "LLM 返回空内容",
       };
       onProgress?.("failed", "LLM 返回空内容");
       return failResult;
     }
 
-    // 成功：构造完整 DispatchResult
-    const tokensConsumed = {
-      prompt: response?.usage?.prompt_tokens ?? 0,
-      completion: response?.usage?.completion_tokens ?? 0,
-      total: response?.usage?.total_tokens ?? 0,
+    // --- v2.1.3 新增：自动续写循环 ---
+    // 当 finish_reason="length"（输出被 maxTokens 截断）时，自动发送续写请求
+    // 续写消息：[system, user, assistant(已有部分), user(续写指令)]
+    // 续写时保持 thinking 参数和 reasoning_content fallback（架构评审 P0-2/P0-3）
+
+    /** 续写指令：让 LLM 从中断处继续输出，不重复已输出内容 */
+    const CONTINUE_PROMPT = "请从中断处继续输出，不要重复已输出的内容。直接从中断的代码块内部继续，不要添加额外说明。";
+
+    /** 最大续写次数（默认 3，可通过 DispatchOptions.maxContinueCount 配置） */
+    const maxContinueCount = opts.maxContinueCount ?? 3;
+
+    /** 累计的完整输出内容（首次内容 + 续写内容拼接） */
+    let fullContent = firstResult.content;
+
+    /** 累计的 token 用量（首次 + 所有续写） */
+    const totalUsage = {
+      prompt: firstResult.usage.promptTokens,
+      completion: firstResult.usage.completionTokens,
+      total: firstResult.usage.totalTokens,
     };
 
-    onProgress?.("succeeded", `LLM 调用完成，消耗 ${tokensConsumed.total} tokens`);
+    /** 续写次数 */
+    let continueCount = 0;
+
+    /** 是否为部分输出（截断后续写未完成） */
+    let isPartial = false;
+
+    /** 部分输出时的警告信息 */
+    let partialError: string | undefined;
+
+    /** 当前 finish_reason（用于续写循环条件判断） */
+    let currentFinishReason = firstResult.finishReason;
+
+    // 续写循环：shouldContinue 返回 true 且未达到最大续写次数时继续
+    // v2.1.3 修正：continueCount 在 try 块开头自增，反映"尝试的续写次数"（无论成功失败）
+    // 这样 TC-CONT-04（续写失败）和 TC-CONT-05（续写返回空）都能正确记录 continueCount=1
+    //
+    // v1.1 扩展：续写触发条件从单一的 finish_reason="length" 扩展为 shouldContinue()：
+    // 1. finish_reason="length"（maxTokens 截断）
+    // 2. finish_reason="stop" && detectContinueIntention(content)（LLM 主动停止但表示要继续）
+    while (shouldContinue(currentFinishReason, fullContent) && continueCount < maxContinueCount) {
+      // 先自增 continueCount，表示"开始尝试第 N 次续写"
+      continueCount++;
+      onProgress?.("running", `LLM 输出被截断，正在续写 ${continueCount}/${maxContinueCount}...`);
+
+      try {
+        // 构建续写消息：system + user(原始) + assistant(已有部分) + user(续写指令)
+        const continueResult = await callLlmOnce(
+          handle,
+          [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt },
+            { role: "assistant", content: fullContent },
+            { role: "user", content: CONTINUE_PROMPT },
+          ],
+          opts.timeoutMs
+        );
+
+        // 续写返回空内容：停止续写，警告但不标记为 partial
+        if (!continueResult.content) {
+          partialError = `续写 ${continueCount} 返回空内容，已停止续写`;
+          break;
+        }
+
+        // 拼接续写内容（直接拼接，不添加分隔符）
+        fullContent += continueResult.content;
+
+        // 累加 token 用量
+        totalUsage.prompt += continueResult.usage.promptTokens;
+        totalUsage.completion += continueResult.usage.completionTokens;
+        totalUsage.total += continueResult.usage.totalTokens;
+
+        currentFinishReason = continueResult.finishReason;
+
+        // 续写完成（不需要继续续写）
+        if (!shouldContinue(currentFinishReason, fullContent)) {
+          break;
+        }
+      } catch (continueErr) {
+        // 续写 API 错误：停止续写，标记为 partial
+        const continueErrMsg = continueErr instanceof Error ? continueErr.message : String(continueErr);
+        partialError = `续写 ${continueCount} 失败: ${continueErrMsg}`;
+        isPartial = true;
+        break;
+      }
+    }
+
+    // 达到最大续写次数仍需续写：标记为 partial
+    if (shouldContinue(currentFinishReason, fullContent) && continueCount === maxContinueCount) {
+      isPartial = true;
+      partialError = `输出可能不完整（达到最大续写次数 ${maxContinueCount}）`;
+    }
+
+    // --- 构造最终 DispatchResult ---
+    const successMsg = isPartial
+      ? `LLM 调用完成（续写 ${continueCount} 次，输出可能不完整），消耗 ${totalUsage.total} tokens`
+      : `LLM 调用完成（续写 ${continueCount} 次），消耗 ${totalUsage.total} tokens`;
+    onProgress?.("succeeded", successMsg);
 
     return {
       taskId: task.taskId,
@@ -664,11 +942,14 @@ export async function executeDispatch(
       startedAt,
       completedAt: new Date().toISOString(),
       durationMs: Date.now() - new Date(startedAt).getTime(),
-      output: outputContent,
+      output: fullContent,
       artifacts: [],
-      tokensConsumed,
+      tokensConsumed: totalUsage,
       cacheHit: false,
       retryCount: 0,
+      continueCount,
+      isPartial,
+      error: partialError,
     };
   } catch (err) {
     // 错误处理：errMsg 而非 errorMsg
@@ -698,6 +979,9 @@ export async function executeDispatch(
       tokensConsumed: { prompt: 0, completion: 0, total: 0 },
       cacheHit: false,
       retryCount: 0,
+      // v2.1.3 新增字段：异常路径下未触发续写
+      continueCount: 0,
+      isPartial: false,
     };
   }
 }

@@ -548,6 +548,9 @@ export class DomainExpertReviewPlugin extends BasePlugin {
       tokensConsumed: { ...aggregatedUsage },
       cacheHit: false,
       retryCount: 0,
+      // v2.1.3 新增字段：领域专家 review 路径未触发 LLM 续写
+      continueCount: 0,
+      isPartial: false,
     };
 
     this.log(

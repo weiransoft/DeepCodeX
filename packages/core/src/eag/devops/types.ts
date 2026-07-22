@@ -532,18 +532,24 @@ export interface DevOpsEventEmitter {
 }
 
 /**
- * DevOps 编排上下文
+ * DevOps 编排上下文（批次 14 扩展，向后兼容）
  *
  * 继承 GateContext（提供 projectId / specStatus / planStatus 等门禁字段），
  * 扩展 DevOps 编排所需的 IaC 生成上下文 + 部署上下文 + 烟雾测试用例 + 监控/回滚标记。
  *
- * 字段说明：
+ * 字段说明（批次 13 既有字段）：
  * - loopType：固定为 "deploy"（DevOps 编排器仅在 DEPLOY Loop 中调用）
  * - iacGenerationContext：IaC 生成上下文（含项目名 / 环境 / 镜像 / 端口 / 资源配置等）
  * - deployContext：部署上下文（含 runId / 项目名 / IaC 模板 / 策略类型 / 超时）
  * - smokeTestCases：烟雾测试用例列表
  * - monitoringReady：监控告警就位标记（可选，默认 true；批次 14 实现完整监控就绪检查）
  * - rollbackPlanExists：回滚预案存在标记（可选，默认 true；批次 14 实现完整回滚预案检查）
+ *
+ * 字段说明（批次 14 新增可选字段，向后兼容）：
+ * - monitoringCheckContext：监控检查上下文（注入时 DevOpsOrchestrator 调用真实检查器）
+ * - rollbackPlanCheckContext：回滚预案检查上下文（注入时 DevOpsOrchestrator 调用真实检查器）
+ * - projectRoot：项目根目录（供 RollbackPlanChecker 拼接文件路径）
+ * - runId：运行 ID（供 RollbackPlanChecker 拼接文件名）
  */
 export interface DevOpsContext extends GateContext {
   /** Loop 类型（固定为 "deploy"） */
@@ -558,6 +564,14 @@ export interface DevOpsContext extends GateContext {
   readonly monitoringReady?: boolean;
   /** 回滚预案存在标记（可选，默认 true） */
   readonly rollbackPlanExists?: boolean;
+  /** 监控检查上下文（可选，批次 14 新增，注入时 DevOpsOrchestrator 调用真实检查器） */
+  readonly monitoringCheckContext?: MonitoringCheckContext;
+  /** 回滚预案检查上下文（可选，批次 14 新增，注入时 DevOpsOrchestrator 调用真实检查器） */
+  readonly rollbackPlanCheckContext?: RollbackPlanCheckContext;
+  /** 项目根目录（可选，批次 14 新增，供 RollbackPlanChecker 拼接文件路径） */
+  readonly projectRoot?: string;
+  /** 运行 ID（可选，批次 14 新增，供 RollbackPlanChecker 拼接文件名） */
+  readonly runId?: string;
 }
 
 /**
@@ -608,7 +622,7 @@ export interface DevOpsResult {
 // ============================================================================
 
 /**
- * G-8 门禁上下文
+ * G-8 门禁上下文（批次 14 扩展，向后兼容）
  *
  * 继承 GateContext，扩展 DEPLOY Loop 退出门禁所需的字段。
  *
@@ -625,7 +639,7 @@ export interface DevOpsResult {
  * - DeployResult.success 不在 G-8 检查项中：部署失败会直接触发回滚（由 DeployStage 处理），
  *   不会进入 G-8 门禁（G-8 是部署成功后的运行期数据门禁）
  *
- * 字段说明：
+ * 字段说明（批次 13 既有字段）：
  * - loopType：固定为 "deploy"
  * - iacTemplates：本次部署使用的 IaC 模板列表
  * - deployResult：部署结果
@@ -633,6 +647,17 @@ export interface DevOpsResult {
  * - smokeTestResult：烟雾测试结果
  * - monitoringReady：监控就绪标记
  * - rollbackPlanExists：回滚预案存在标记
+ *
+ * 字段说明（批次 14 新增可选字段，向后兼容）：
+ * - monitoringCheckContext：监控检查上下文（注入时 GateG8CheckerImpl 调用真实检查器）
+ * - rollbackPlanCheckContext：回滚预案检查上下文（注入时 GateG8CheckerImpl 调用真实检查器）
+ * - projectRoot：项目根目录（供 RollbackPlanChecker 拼接文件路径）
+ * - runId：运行 ID（供 RollbackPlanChecker 拼接文件名）
+ *
+ * 禁用模式（向后兼容）：
+ * - monitoringReady=true 显式传入时跳过真实校验
+ * - rollbackPlanExists=true 显式传入时跳过真实校验
+ * - 既有测试用例显式传入 true，保持行为不变
  */
 export interface GateG8Context extends GateContext {
   /** Loop 类型（固定为 "deploy"） */
@@ -649,6 +674,14 @@ export interface GateG8Context extends GateContext {
   readonly monitoringReady: boolean;
   /** 回滚预案存在标记 */
   readonly rollbackPlanExists: boolean;
+  /** 监控检查上下文（可选，批次 14 新增，注入时 GateG8CheckerImpl 调用真实检查器） */
+  readonly monitoringCheckContext?: MonitoringCheckContext;
+  /** 回滚预案检查上下文（可选，批次 14 新增，注入时 GateG8CheckerImpl 调用真实检查器） */
+  readonly rollbackPlanCheckContext?: RollbackPlanCheckContext;
+  /** 项目根目录（可选，批次 14 新增，供 RollbackPlanChecker 拼接文件路径） */
+  readonly projectRoot?: string;
+  /** 运行 ID（可选，批次 14 新增，供 RollbackPlanChecker 拼接文件名） */
+  readonly runId?: string;
 }
 
 /**
@@ -838,12 +871,30 @@ export interface RollbackManager {
 }
 
 /**
- * 快照上下文
+ * 回滚策略类型联合（批次 14 Phase 3 新增，与 DeployStrategyType 对齐）
+ *
+ * 三种回滚策略对应不同的 kubectl 命令：
+ * - rolling：`kubectl rollout undo deployment/<name>`（默认）
+ * - blue-green：切换 Service selector 回上一个 version 标签
+ * - canary：降级 traffic 分流（scale canary deployment 至 0）
+ *
+ * 字面量联合而非 string，避免拼写错误。
+ */
+export type RollbackStrategyType = "rolling" | "blue-green" | "canary";
+
+/**
+ * 快照上下文（批次 14 扩展，向后兼容）
+ *
+ * 批次 14 新增可选字段 projectRoot / runId，供回滚预案文件生成。
+ * Phase 3 新增可选字段 rollbackStrategy，供回滚时选择对应策略。
  *
  * 字段说明：
- * - projectName：项目名称
+ * - projectName：项目名称（K8s Deployment 名 / Helm Release 名）
  * - namespace：K8s 命名空间
  * - previousVersion：上一个稳定版本号（可选，首次部署时无）
+ * - projectRoot：项目根目录（可选，批次 14 新增，用于生成回滚预案文件路径）
+ * - runId：运行 ID（可选，批次 14 新增，用于回滚预案文件名唯一性）
+ * - rollbackStrategy：回滚策略（可选，Phase 3 新增，默认 "rolling"）
  */
 export interface RollbackSnapshotContext {
   /** 项目名称 */
@@ -852,16 +903,38 @@ export interface RollbackSnapshotContext {
   readonly namespace: string;
   /** 上一个稳定版本号（可选） */
   readonly previousVersion?: string;
+  /** 项目根目录（可选，批次 14 新增，用于回滚预案文件路径） */
+  readonly projectRoot?: string;
+  /** 运行 ID（可选，批次 14 新增，用于回滚预案文件名唯一性） */
+  readonly runId?: string;
+  /** 回滚策略（可选，Phase 3 新增，默认 "rolling"） */
+  readonly rollbackStrategy?: RollbackStrategyType;
 }
 
 /**
- * 版本快照
+ * 版本快照（批次 14 扩展，M-14-2 修复，Phase 3 扩展，向后兼容）
+ *
+ * 批次 13 既有字段（snapshotId / createdAt / version / resources）零改动，
+ * 批次 14 新增可选字段 rollbackPlanFilePath，供 RollbackPlanChecker 校验。
+ * Phase 3 新增可选字段 rollbackStrategy / snapshotDataPath，供回滚执行与快照数据文件引用。
  *
  * 字段说明：
  * - snapshotId：快照唯一 ID（用于回滚时引用）
  * - createdAt：创建时间戳（ISO 8601）
- * - version：版本号
+ * - version：版本号（kubectl rollout history REVISION / helm history REVISION）
  * - resources：快照包含的资源列表（如 ["deployment/myapp", "service/myapp"]）
+ * - rollbackPlanFilePath：回滚预案文件路径（M-14-2 修复，可选，批次 14 新增）
+ *   - 文件生成成功时为绝对路径（如 "/project/deploy/rollback-plan-xxx.md"）
+ *   - 文件生成失败时为 undefined
+ *   - NoOpRollbackManager 不返回此字段（向后兼容）
+ *   - RollbackPlanChecker 校验此字段是否非空 + 文件是否存在
+ * - rollbackStrategy：回滚策略（可选，Phase 3 新增，默认 "rolling"）
+ *   - 在 createSnapshot 时从 context.rollbackStrategy 捕获
+ *   - 在 rollback 时根据此字段选择对应策略的 kubectl 命令
+ * - snapshotDataPath：快照数据文件路径（可选，Phase 3 新增）
+ *   - K8s：`<projectRoot>/rollback-snapshots/<runId>/<deploymentName>.yaml`（kubectl get deployment -o yaml 原始输出）
+ *   - Helm：`<projectRoot>/rollback-snapshots/<runId>/<release>.yaml`（helm history --output yaml 原始输出）
+ *   - NoOpRollbackManager 不返回此字段（向后兼容）
  */
 export interface RollbackSnapshot {
   /** 快照唯一 ID */
@@ -872,6 +945,16 @@ export interface RollbackSnapshot {
   readonly version: string;
   /** 快照包含的资源列表 */
   readonly resources: ReadonlyArray<string>;
+  /** 回滚预案文件路径（M-14-2 修复，可选，批次 14 新增） */
+  readonly rollbackPlanFilePath?: string;
+  /** 回滚策略（可选，Phase 3 新增，默认 "rolling"） */
+  readonly rollbackStrategy?: RollbackStrategyType;
+  /** 快照数据文件路径（可选，Phase 3 新增，保存 kubectl/helm 原始输出） */
+  readonly snapshotDataPath?: string;
+  /** 项目名称（可选，Phase 3 新增，rollback 时引用 deployment/release 名） */
+  readonly projectName?: string;
+  /** K8s 命名空间（可选，Phase 3 新增，rollback 时引用 namespace） */
+  readonly namespace?: string;
 }
 
 /**
@@ -1006,7 +1089,7 @@ export interface DeployStage {
 // ============================================================================
 
 /**
- * DevOps 编排器选项（N-M-1 修复：删除与 DeployStageOptions 重复的 4 个字段）
+ * DevOps 编排器选项（N-M-1 修复：删除与 DeployStageOptions 重复的 4 个字段；批次 14 扩展：新增监控/回滚预案检查器可选注入）
  *
  * 修复原因：
  * - 原设计在 DevOpsOrchestratorOptions 与 DeployStageOptions 中重复注入 preDeployChecker /
@@ -1017,6 +1100,11 @@ export interface DeployStage {
  *          （iacGenerators / gateG8Checker / deployStrategy / deployStage / eventEmitter）
  *          这 4 个字段由 DeployStageOptions 独占，session.ts 装配时分别注入两个 options
  *
+ * 批次 14 扩展（向后兼容）：
+ * - 新增可选字段 monitoringReadinessChecker / rollbackPlanChecker
+ * - 注入时 DevOpsOrchestrator 在构造 GateG8Context 时调用真实检查器获取 monitoringReady / rollbackPlanExists 值
+ * - 未注入时降级为 context.monitoringReady / context.rollbackPlanExists 字段值校验（向后兼容批次 13 行为）
+ *
  * 字段说明：
  * - iacGenerators：IaC 生成器列表（至少 1 个，并行调用产出不同类型的 IaC 模板）
  * - gateG8Checker：G-8 部署门禁检查器
@@ -1024,6 +1112,8 @@ export interface DeployStage {
  * - deployStage：DEPLOY 子阶段编排器（DevOpsOrchestrator 委托 pre-deploy→deploy→post-deploy→smoke-test 四步给 DeployStage；
  *   PreDeployChecker / PostDeployChecker / SmokeTestRunner / RollbackManager 由 DeployStage 自身的 options 持有）
  * - eventEmitter：事件发射器（可选，与既有 orchestrator 一致）
+ * - monitoringReadinessChecker：监控就绪检查器（可选，批次 14 新增，注入时调用真实检查器）
+ * - rollbackPlanChecker：回滚预案检查器（可选，批次 14 新增，注入时调用真实检查器）
  *
  * 构造函数注入，必填字段无默认值（与 TestingOrchestratorOptions 同构，批次 11 S1 改进）
  */
@@ -1038,4 +1128,445 @@ export interface DevOpsOrchestratorOptions {
   readonly deployStage: DeployStage;
   /** 事件发射器（可选） */
   readonly eventEmitter?: DevOpsEventEmitter;
+  /** 监控就绪检查器（可选，批次 14 新增，注入时 DevOpsOrchestrator 调用真实检查器获取 monitoringReady 值） */
+  readonly monitoringReadinessChecker?: MonitoringReadinessChecker;
+  /** 回滚预案检查器（可选，批次 14 新增，注入时 DevOpsOrchestrator 调用真实检查器获取 rollbackPlanExists 值） */
+  readonly rollbackPlanChecker?: RollbackPlanChecker;
+}
+
+// ============================================================================
+// 10. 监控就绪检查器相关类型（批次 14 §4.3.1 FR-12，Phase 4 实现 MonitoringReadinessCheckerImpl）
+// ============================================================================
+
+/**
+ * 监控就绪检查器接口（FR-12）
+ *
+ * Phase 4 在 devops/monitoring-readiness-checker.ts 中实现 MonitoringReadinessCheckerImpl 类。
+ *
+ * 校验 3 项（K-4 决策：Alertmanager 规则校验首版不实现）：
+ * 1. ServiceMonitor / PodMonitor 资源存在（kubectl get servicemonitor -n <ns>）
+ * 2. /metrics 端点可达（HTTP GET 返回 200）
+ * 3. Prometheus scrape 配置含目标服务（读取 ServiceMonitor selector 或 Prometheus config）
+ *
+ * 真实调用 kubectl 与 HTTP 请求（禁止 mock）。
+ */
+export interface MonitoringReadinessChecker {
+  /**
+   * 执行监控就绪检查
+   *
+   * @param context 监控检查上下文
+   * @returns MonitoringCheckResult，被 Object.freeze 冻结
+   */
+  check(context: MonitoringCheckContext): Promise<MonitoringCheckResult>;
+}
+
+/**
+ * 监控检查上下文
+ *
+ * 字段说明：
+ * - projectName：项目名称
+ * - namespace：K8s 命名空间
+ * - serviceName：Service 名称（用于 /metrics 端点拼接）
+ * - metricsEndpoint：/metrics 端点完整 URL（如 "http://myapp.default.svc.cluster.local:8080/metrics"）
+ * - prometheusConfigPath：Prometheus 配置文件路径（可选，未提供时仅校验 ServiceMonitor）
+ */
+export interface MonitoringCheckContext {
+  /** 项目名称 */
+  readonly projectName: string;
+  /** K8s 命名空间 */
+  readonly namespace: string;
+  /** Service 名称（用于 /metrics 端点拼接） */
+  readonly serviceName: string;
+  /** /metrics 端点完整 URL（如 "http://myapp.default.svc.cluster.local:8080/metrics"） */
+  readonly metricsEndpoint: string;
+  /** Prometheus 配置文件路径（可选，未提供时仅校验 ServiceMonitor） */
+  readonly prometheusConfigPath?: string;
+}
+
+/**
+ * 监控检查结果
+ *
+ * 字段说明：
+ * - ready：监控是否就绪（3 项全过才为 true）
+ * - checkedItems：各项检查结果列表
+ * - failures：失败原因列表（ready=true 时为空数组）
+ */
+export interface MonitoringCheckResult {
+  /** 监控是否就绪（3 项全过才为 true） */
+  readonly ready: boolean;
+  /** 各项检查结果 */
+  readonly checkedItems: ReadonlyArray<MonitoringCheckedItem>;
+  /** 失败原因列表（ready=true 时为空数组） */
+  readonly failures: ReadonlyArray<string>;
+}
+
+/**
+ * 单项检查结果
+ *
+ * 字段说明：
+ * - name：检查项名称（serviceMonitorExists / metricsEndpointReachable / prometheusScrapeConfig）
+ * - passed：是否通过
+ * - detail：详情（如 ServiceMonitor 名称 / HTTP 状态码 / Prometheus 配置路径）
+ */
+export interface MonitoringCheckedItem {
+  /** 检查项名称（serviceMonitorExists / metricsEndpointReachable / prometheusScrapeConfig） */
+  readonly name: string;
+  /** 是否通过 */
+  readonly passed: boolean;
+  /** 详情（如 ServiceMonitor 名称 / HTTP 状态码 / Prometheus 配置路径） */
+  readonly detail: string;
+}
+
+// ============================================================================
+// 11. 回滚预案检查器相关类型（批次 14 §4.3.2 FR-13，Phase 4 实现 RollbackPlanCheckerImpl）
+// ============================================================================
+
+/**
+ * 回滚预案检查器接口（FR-13）
+ *
+ * Phase 4 在 devops/rollback-plan-checker.ts 中实现 RollbackPlanCheckerImpl 类。
+ *
+ * 校验 2 项：
+ * 1. 回滚预案文件存在于指定路径（<projectRoot>/deploy/rollback-plan-<runId>.md）
+ * 2. 文件内容含 5 个必需章节（目标版本号 / 回滚命令 / 资源清单 / 创建时间戳 / runId）
+ *
+ * 真实读取文件系统（fs.readFile，禁止 mock）。
+ */
+export interface RollbackPlanChecker {
+  /**
+   * 执行回滚预案检查
+   *
+   * @param context 检查上下文
+   * @returns RollbackPlanCheckResult，被 Object.freeze 冻结
+   */
+  check(context: RollbackPlanCheckContext): Promise<RollbackPlanCheckResult>;
+}
+
+/**
+ * 回滚预案检查上下文
+ *
+ * 字段说明：
+ * - projectRoot：项目根目录（用于拼接文件路径 <projectRoot>/deploy/rollback-plan-<runId>.md）
+ * - runId：运行 ID（用于拼接文件名 rollback-plan-<runId>.md）
+ */
+export interface RollbackPlanCheckContext {
+  /** 项目根目录 */
+  readonly projectRoot: string;
+  /** 运行 ID（用于拼接文件名 rollback-plan-<runId>.md） */
+  readonly runId: string;
+}
+
+/**
+ * 回滚预案检查结果
+ *
+ * 字段说明：
+ * - exists：文件是否存在
+ * - valid：文件内容是否有效（5 个章节齐全）
+ * - filePath：文件路径（exists=true 时为绝对路径，false 时为预期路径）
+ * - failures：失败原因列表（exists=true 且 valid=true 时为空数组）
+ */
+export interface RollbackPlanCheckResult {
+  /** 文件是否存在 */
+  readonly exists: boolean;
+  /** 文件内容是否有效（5 个章节齐全） */
+  readonly valid: boolean;
+  /** 文件路径（exists=true 时为绝对路径，false 时为预期路径） */
+  readonly filePath: string;
+  /** 失败原因列表（exists=true 且 valid=true 时为空数组） */
+  readonly failures: ReadonlyArray<string>;
+}
+
+/**
+ * 回滚预案文件 schema（5 个固定章节，K-1 决策）
+ *
+ * 文件格式：
+ * # 回滚预案
+ *
+ * ## 目标版本号
+ * <version>
+ *
+ * ## 回滚命令
+ * ```bash
+ * kubectl rollout undo deployment/<name> -n <ns> --to-revision=<N>
+ * ```
+ *
+ * ## 资源清单
+ * - deployment/<name>
+ * - service/<name>
+ *
+ * ## 创建时间戳
+ * <ISO 8601>
+ *
+ * ## runId
+ * <runId>
+ *
+ * 不可变优先：通过 Object.freeze 冻结为只读元组，防止运行时篡改章节名。
+ */
+export const ROLLBACK_PLAN_SECTIONS = Object.freeze([
+  "目标版本号",
+  "回滚命令",
+  "资源清单",
+  "创建时间戳",
+  "runId",
+] as const) as ReadonlyArray<string>;
+
+// ============================================================================
+// 12. 发布策略配置选项（批次 14 §4.1.6/§4.1.7/§4.1.8 FR-5/FR-6 + B-14-1，Phase 2 实现 RollingStrategy/BlueGreenStrategy/CanaryStrategy）
+// ============================================================================
+
+/**
+ * RollingStrategy 配置选项（B-14-1 修复）
+ *
+ * 字段说明：
+ * - timeoutMs：部署命令超时（毫秒），默认 300000（5 分钟）
+ *
+ * 不可变优先：所有字段 readonly。
+ */
+export interface RollingStrategyOptions {
+  /** 部署命令超时（毫秒），默认 300000（5 分钟） */
+  readonly timeoutMs?: number;
+}
+
+/**
+ * BlueGreenStrategy 配置选项（FR-5）
+ *
+ * 字段说明：
+ * - timeoutMs：部署命令超时（毫秒），默认 300000（5 分钟）
+ * - keepBlue：是否保留 Blue Deployment 兜底（默认 false，清理 Blue）
+ *
+ * 不可变优先：所有字段 readonly。
+ */
+export interface BlueGreenStrategyOptions {
+  /** 部署命令超时（毫秒），默认 300000（5 分钟） */
+  readonly timeoutMs?: number;
+  /** 是否保留 Blue Deployment 兜底（默认 false，清理 Blue） */
+  readonly keepBlue?: boolean;
+}
+
+/**
+ * 金丝雀发布基础配置（FR-6）
+ *
+ * 仅包含金丝雀发布的最小配置：流量阶梯数组。
+ * CanaryStrategyOptions 扩展此接口，新增运行时健康检查相关参数。
+ *
+ * 字段说明：
+ * - canarySteps：流量阶梯数组（百分比，0~100，结尾必须为 100）
+ *   - 数组长度至少 1（仅 [100] 表示一次性全量切换）
+ *   - 每个元素为正整数，范围 0~100
+ *   - 最后一个元素必须为 100（最终全量）
+ *
+ * 不可变优先：所有字段 readonly，数组 ReadonlyArray<number>。
+ */
+export interface CanaryConfig {
+  /** 流量阶梯数组（百分比，0~100，结尾必须为 100） */
+  readonly canarySteps: ReadonlyArray<number>;
+}
+
+/**
+ * CanaryStrategy 配置选项（FR-6）
+ *
+ * 扩展 CanaryConfig，新增运行时健康检查相关参数。
+ *
+ * 字段说明：
+ * - canarySteps：流量阶梯数组（百分比，0~100，结尾必须为 100）—— 继承自 CanaryConfig
+ * - healthCheckTimeoutMs：单阶梯健康检查超时（毫秒），默认 60000
+ * - healthCheckPath：健康检查端点路径，默认 "/healthz"
+ *
+ * 不可变优先：所有字段 readonly，数组 ReadonlyArray<number>。
+ */
+export interface CanaryStrategyOptions extends CanaryConfig {
+  /** 单阶梯健康检查超时（毫秒），默认 60000 */
+  readonly healthCheckTimeoutMs?: number;
+  /** 健康检查端点路径，默认 "/healthz" */
+  readonly healthCheckPath?: string;
+}
+
+// ============================================================================
+// 13. Phase 3 回滚管理器扩展类型（K8sRollbackManager / HelmRollbackManager 完整实现所需）
+// ============================================================================
+
+/**
+ * 回滚执行错误（Phase 3 新增，kubectl/helm 命令执行失败时抛出）
+ *
+ * 当 K8sRollbackManager / HelmRollbackManager 调用 kubectl/helm 命令失败
+ * （退出码非 0 / 进程启动失败 / 超时）时抛出此错误。
+ *
+ * 与 RollingStrategy 的"错误内化"模式不同，RollbackManager 采用"错误外抛"模式：
+ * - RollingStrategy 在 DeployResult.errors 中收集错误，不抛异常（部署阶段可降级）
+ * - RollbackManager 在命令失败时直接抛 RollbackExecutionError（回滚阶段不可降级，必须明确失败）
+ *
+ * 字段说明：
+ * - command：执行的命令名称（如 "kubectl rollout undo" / "helm rollback"）
+ * - stderr：命令的标准错误输出（含 kubectl/helm 的错误诊断信息）
+ * - exitCode：退出码（null 表示进程被信号终止或启动失败）
+ *
+ * 不可变优先：错误实例通过 Object.freeze 冻结，防止运行时篡改错误信息。
+ */
+export class RollbackExecutionError extends Error {
+  /** 执行的命令名称（如 "kubectl rollout undo" / "helm rollback"） */
+  public readonly stderr: string;
+  /** 命令的标准错误输出（含 kubectl/helm 的错误诊断信息） */
+  public readonly command: string;
+  /** 退出码（null 表示进程被信号终止或启动失败） */
+  public readonly exitCode: number | null;
+
+  /**
+   * 构造函数
+   *
+   * @param command 执行的命令名称（如 "kubectl rollout undo"）
+   * @param stderr 命令的标准错误输出
+   * @param exitCode 退出码（null 表示进程被信号终止或启动失败）
+   */
+  constructor(command: string, stderr: string, exitCode: number | null) {
+    // 构造清晰的错误消息，包含命令名称、退出码与 stderr 输出
+    super(`回滚命令执行失败：${command}（exitCode=${exitCode}）：${stderr}`);
+    this.name = "RollbackExecutionError";
+    this.command = command;
+    this.stderr = stderr;
+    this.exitCode = exitCode;
+    // 维持原型链（TypeScript 编译到 ES5 时继承 Error 的已知问题）
+    Object.setPrototypeOf(this, RollbackExecutionError.prototype);
+    // 冻结实例：防止运行时修改错误信息（对齐 P-1 不可变优先原则）
+    Object.freeze(this);
+  }
+}
+
+/**
+ * K8s 回滚快照数据（Phase 3 新增，描述 K8sRollbackManager.createSnapshot 的数据结构）
+ *
+ * 此类型描述 createSnapshot 方法捕获的 K8s Deployment 快照数据，包含：
+ * - deploymentYaml：`kubectl get deployment <name> -o yaml` 的完整输出
+ * - revision：Deployment 的 revision 号（来自 `kubectl rollout history`）
+ * - labels：Deployment 的 labels（用于 blue-green 回滚时切换 Service selector）
+ *
+ * 数据持久化：
+ * - deploymentYaml 保存到 `<projectRoot>/rollback-snapshots/<runId>/<deploymentName>.yaml`
+ * - revision 写入 RollbackSnapshot.version 字段（字符串形式）
+ * - labels 用于 rollback 时构造 kubectl patch 命令
+ *
+ * 不可变优先：所有字段 readonly，labels 为 Readonly<Record>。
+ */
+export interface K8sRollbackSnapshotData {
+  /** `kubectl get deployment <name> -o yaml` 的完整输出（原始 YAML 字符串） */
+  readonly deploymentYaml: string;
+  /** Deployment 的 revision 号（来自 `kubectl rollout history`，数值形式） */
+  readonly revision: number;
+  /** Deployment 的 labels（用于 blue-green 回滚时切换 Service selector） */
+  readonly labels: Readonly<Record<string, string>>;
+}
+
+/**
+ * Helm 回滚快照数据（Phase 3 新增，描述 HelmRollbackManager.createSnapshot 的数据结构）
+ *
+ * 此类型描述 createSnapshot 方法捕获的 Helm Release 快照数据，包含：
+ * - revisions：`helm history <release> --output yaml` 解析后的最近 3 个 revision 记录
+ * - chartVersion：Chart 版本号（来自最近一次 revision 的 chart 字段）
+ * - namespace：Helm Release 所在的命名空间
+ *
+ * 数据持久化：
+ * - 原始 helm history 输出保存到 `<projectRoot>/rollback-snapshots/<runId>/<release>.yaml`
+ * - 最近一次 revision 号写入 RollbackSnapshot.version 字段（字符串形式）
+ *
+ * 不可变优先：所有字段 readonly，revisions 为 ReadonlyArray。
+ */
+export interface HelmRollbackSnapshotData {
+  /** `helm history <release> --output yaml` 解析后的最近 3 个 revision 记录 */
+  readonly revisions: ReadonlyArray<{
+    /** Revision 号 */
+    readonly revision: number;
+    /** Revision 状态（deployed / superseded / failed 等） */
+    readonly status: string;
+    /** Chart 名称与版本（如 "myapp-0.1.0"） */
+    readonly chart: string;
+    /** App 版本号 */
+    readonly appVersion: string;
+    /** Revision 描述（如 "Install complete"） */
+    readonly description: string;
+    /** 更新时间戳 */
+    readonly updated: string;
+  }>;
+  /** Chart 版本号（来自最近一次 revision 的 chart 字段） */
+  readonly chartVersion: string;
+  /** Helm Release 所在的命名空间 */
+  readonly namespace: string;
+}
+
+/**
+ * 回滚验证结果（Phase 3 新增，verifyRollback 方法的返回值）
+ *
+ * 描述回滚后对资源状态的验证结果，用于确认回滚是否真正生效。
+ *
+ * K8s 验证语义：
+ * - currentReplicas：`kubectl rollout status` 返回的当前可用副本数
+ * - expectedReplicas：Deployment spec.replicas 期望副本数
+ * - success：currentReplicas >= expectedReplicas
+ *
+ * Helm 验证语义：
+ * - currentReplicas：当前 revision 号（helm history 的最新 revision）
+ * - expectedReplicas：目标 revision 号（snapshot.version 解析）
+ * - success：currentReplicas === expectedReplicas
+ *
+ * 不可变优先：所有字段 readonly。
+ */
+export interface RollbackVerificationResult {
+  /** 验证是否成功（K8s: 副本数达标；Helm: revision 匹配） */
+  readonly success: boolean;
+  /** 当前副本数（K8s: 可用副本数；Helm: 当前 revision 号） */
+  readonly currentReplicas: number;
+  /** 期望副本数（K8s: 期望副本数；Helm: 目标 revision 号） */
+  readonly expectedReplicas: number;
+  /** 验证消息（含人类可读的诊断信息） */
+  readonly message: string;
+}
+
+/**
+ * 回滚预案步骤（Phase 3 新增，RollbackPlanWriter 使用的步骤定义）
+ *
+ * 描述回滚预案中的单个步骤，包含步骤号、动作描述与执行的命令。
+ *
+ * 字段说明：
+ * - step：步骤序号（从 1 开始递增）
+ * - action：动作描述（如 "执行 kubectl rollout undo" / "切换 Service selector"）
+ * - command：实际执行的命令（如 "kubectl rollout undo deployment/myapp -n default --to-revision=5"）
+ *
+ * 不可变优先：所有字段 readonly。
+ */
+export interface RollbackPlanStep {
+  /** 步骤序号（从 1 开始递增） */
+  readonly step: number;
+  /** 动作描述（如 "执行 kubectl rollout undo"） */
+  readonly action: string;
+  /** 实际执行的命令（如 "kubectl rollout undo deployment/myapp -n default --to-revision=5"） */
+  readonly command: string;
+}
+
+/**
+ * 回滚预案（Phase 3 新增，RollbackPlanWriter 序列化/反序列化的数据结构）
+ *
+ * 描述完整的回滚预案，包含目标版本号、回滚命令、资源清单、创建时间戳、runId 与步骤列表。
+ * 与 ROLLBACK_PLAN_SECTIONS（Markdown 格式的 5 章节）对齐，但采用 YAML 格式便于机器解析。
+ *
+ * 字段说明（与 ROLLBACK_PLAN_SECTIONS 5 章节对齐）：
+ * - targetVersion：目标版本号（对应"目标版本号"章节）
+ * - rollbackCommand：回滚命令（对应"回滚命令"章节）
+ * - resources：资源清单（对应"资源清单"章节）
+ * - createdAt：创建时间戳（对应"创建时间戳"章节，ISO 8601）
+ * - runId：运行 ID（对应"runId"章节）
+ * - steps：回滚步骤列表（新增，描述多步骤回滚流程）
+ *
+ * 不可变优先：所有字段 readonly，resources / steps 为 ReadonlyArray。
+ */
+export interface RollbackPlan {
+  /** 目标版本号（对应 ROLLBACK_PLAN_SECTIONS "目标版本号" 章节） */
+  readonly targetVersion: string;
+  /** 回滚命令（对应 ROLLBACK_PLAN_SECTIONS "回滚命令" 章节） */
+  readonly rollbackCommand: string;
+  /** 资源清单（对应 ROLLBACK_PLAN_SECTIONS "资源清单" 章节） */
+  readonly resources: ReadonlyArray<string>;
+  /** 创建时间戳（对应 ROLLBACK_PLAN_SECTIONS "创建时间戳" 章节，ISO 8601） */
+  readonly createdAt: string;
+  /** 运行 ID（对应 ROLLBACK_PLAN_SECTIONS "runId" 章节） */
+  readonly runId: string;
+  /** 回滚步骤列表（新增，描述多步骤回滚流程，至少 1 个步骤） */
+  readonly steps: ReadonlyArray<RollbackPlanStep>;
 }

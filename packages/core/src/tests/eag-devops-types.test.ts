@@ -30,6 +30,16 @@
  * - T21. GateId 扩展 "G-8" 验证
  *   - T21a. GATE_IDS 包含 "G-8"
  *   - T21b. GATE_IDS 已冻结
+ * - T22. 批次 14 Phase 1 类型扩展验证（TASK-14-1-1 验收）
+ *   - T22a. RollbackSnapshot 含可选 rollbackPlanFilePath 字段（M-14-2 修复）
+ *   - T22b. RollbackSnapshotContext 含可选 projectRoot / runId 字段
+ *   - T22c. MonitoringReadinessChecker / MonitoringCheckContext / MonitoringCheckResult / MonitoringCheckedItem 接口完整性
+ *   - T22d. RollbackPlanChecker / RollbackPlanCheckContext / RollbackPlanCheckResult 接口完整性
+ *   - T22e. ROLLBACK_PLAN_SECTIONS 常量含 5 个固定章节 + Object.freeze
+ *   - T22f. CanaryConfig / CanaryStrategyOptions / BlueGreenStrategyOptions / RollingStrategyOptions 接口完整性
+ *   - T22g. GateG8Context 含可选 monitoringCheckContext / rollbackPlanCheckContext / projectRoot / runId 字段
+ *   - T22h. DevOpsContext 含可选 monitoringCheckContext / rollbackPlanCheckContext / projectRoot / runId 字段
+ *   - T22i. DevOpsOrchestratorOptions 含可选 monitoringReadinessChecker / rollbackPlanChecker 字段
  *
  * 测试约定（遵循项目规则）：
  * - 使用 node:test + node:assert/strict
@@ -45,7 +55,12 @@ import { NoOpRollbackManager } from "../eag/devops/rollback-manager";
 // 架构师审查 P2-3 修复 v1.4：LOOP_TYPES 权威来源是 loop/models.ts（gate-types.ts 仅 re-export）
 import { GATE_IDS } from "../eag/gate/gate-types";
 import { LOOP_TYPES } from "../eag/loop/models";
+// 批次 14 新增：ROLLBACK_PLAN_SECTIONS 是 const 常量，需要 value import（非 type-only）
+import { ROLLBACK_PLAN_SECTIONS } from "../eag/devops/types";
 import type {
+  BlueGreenStrategyOptions,
+  CanaryConfig,
+  CanaryStrategyOptions,
   ContainerResources,
   DeployContext,
   DeployResult,
@@ -71,6 +86,10 @@ import type {
   IaCType,
   IaCValidationResult,
   IngressConfig,
+  MonitoringCheckContext,
+  MonitoringCheckResult,
+  MonitoringCheckedItem,
+  MonitoringReadinessChecker,
   PostDeployCheckContext,
   PostDeployCheckResult,
   PostDeployChecker,
@@ -79,9 +98,13 @@ import type {
   PreDeployChecker,
   ResourceSpec,
   RollbackManager,
+  RollbackPlanCheckContext,
+  RollbackPlanCheckResult,
+  RollbackPlanChecker,
   RollbackResult,
   RollbackSnapshot,
   RollbackSnapshotContext,
+  RollingStrategyOptions,
   SmokeTestCase,
   SmokeTestFailure,
   SmokeTestResult,
@@ -1060,4 +1083,403 @@ test('T21a. GATE_IDS 包含 "G-8"（批次 13 扩展）', () => {
 
 test("T21b. GATE_IDS 已冻结", () => {
   assert.equal(Object.isFrozen(GATE_IDS), true);
+});
+
+// ============================================================================
+// T22. 批次 14 Phase 1 类型扩展验证（TASK-14-1-1 验收）
+// ============================================================================
+
+test("T22a. RollbackSnapshot 含可选 rollbackPlanFilePath 字段（M-14-2 修复，向后兼容）", () => {
+  // 验证 1：不提供 rollbackPlanFilePath（向后兼容，批次 13 NoOpRollbackManager 行为）
+  const snapshotWithoutPlan: RollbackSnapshot = Object.freeze({
+    snapshotId: "snap-001",
+    createdAt: "2026-07-21T10:00:00.000Z",
+    version: "v1.0.0",
+    resources: Object.freeze(["deployment/myapp"]) as ReadonlyArray<string>,
+  });
+  assert.equal(snapshotWithoutPlan.rollbackPlanFilePath, undefined);
+  assert.equal(snapshotWithoutPlan.snapshotId, "snap-001");
+
+  // 验证 2：提供 rollbackPlanFilePath（批次 14 新增字段）
+  const snapshotWithPlan: RollbackSnapshot = Object.freeze({
+    snapshotId: "snap-002",
+    createdAt: "2026-07-21T11:00:00.000Z",
+    version: "v1.1.0",
+    resources: Object.freeze(["deployment/myapp", "service/myapp"]) as ReadonlyArray<string>,
+    rollbackPlanFilePath: "/project/deploy/rollback-plan-run-001.md",
+  });
+  assert.equal(snapshotWithPlan.rollbackPlanFilePath, "/project/deploy/rollback-plan-run-001.md");
+  assert.equal(Object.isFrozen(snapshotWithPlan), true);
+});
+
+test("T22b. RollbackSnapshotContext 含可选 projectRoot / runId 字段（向后兼容）", () => {
+  // 验证 1：不提供 projectRoot / runId（向后兼容，批次 13 行为）
+  const ctxLegacy: RollbackSnapshotContext = {
+    projectName: "myapp",
+    namespace: "default",
+    previousVersion: "v1.0.0",
+  };
+  assert.equal(ctxLegacy.projectRoot, undefined);
+  assert.equal(ctxLegacy.runId, undefined);
+
+  // 验证 2：提供 projectRoot / runId（批次 14 新增字段）
+  const ctxExtended: RollbackSnapshotContext = {
+    projectName: "myapp",
+    namespace: "default",
+    previousVersion: "v1.0.0",
+    projectRoot: "/path/to/project",
+    runId: "run-001",
+  };
+  assert.equal(ctxExtended.projectRoot, "/path/to/project");
+  assert.equal(ctxExtended.runId, "run-001");
+});
+
+test("T22c. MonitoringReadinessChecker / MonitoringCheckContext / MonitoringCheckResult / MonitoringCheckedItem 接口完整性", async () => {
+  // 验证 MonitoringCheckContext 接口字段完整性
+  const monCtx: MonitoringCheckContext = {
+    projectName: "myapp",
+    namespace: "default",
+    serviceName: "myapp-svc",
+    metricsEndpoint: "http://myapp.default.svc.cluster.local:8080/metrics",
+    prometheusConfigPath: "/etc/prometheus/prometheus.yml",
+  };
+  assert.equal(monCtx.projectName, "myapp");
+  assert.equal(monCtx.metricsEndpoint, "http://myapp.default.svc.cluster.local:8080/metrics");
+  assert.equal(monCtx.prometheusConfigPath, "/etc/prometheus/prometheus.yml");
+
+  // 验证 MonitoringCheckedItem 接口字段完整性
+  const item: MonitoringCheckedItem = Object.freeze({
+    name: "serviceMonitorExists",
+    passed: true,
+    detail: "ServiceMonitor/myapp-monitor found in namespace default",
+  });
+  assert.equal(item.name, "serviceMonitorExists");
+  assert.equal(item.passed, true);
+  assert.equal(item.detail, "ServiceMonitor/myapp-monitor found in namespace default");
+
+  // 验证 MonitoringCheckResult 接口字段完整性
+  const monResult: MonitoringCheckResult = Object.freeze({
+    ready: true,
+    checkedItems: Object.freeze([item]) as ReadonlyArray<MonitoringCheckedItem>,
+    failures: Object.freeze([]) as ReadonlyArray<string>,
+  });
+  assert.equal(monResult.ready, true);
+  assert.equal(monResult.checkedItems.length, 1);
+  assert.equal(monResult.failures.length, 0);
+  assert.equal(Object.isFrozen(monResult), true);
+
+  // 验证 MonitoringReadinessChecker 接口约束（实现类需提供 check 方法）
+  const checker: MonitoringReadinessChecker = {
+    async check(context: MonitoringCheckContext): Promise<MonitoringCheckResult> {
+      return Object.freeze({
+        ready: context.metricsEndpoint.length > 0,
+        checkedItems: Object.freeze([
+          { name: "metricsEndpointReachable", passed: true, detail: `HTTP 200 from ${context.metricsEndpoint}` },
+        ]) as ReadonlyArray<MonitoringCheckedItem>,
+        failures: Object.freeze([]) as ReadonlyArray<string>,
+      });
+    },
+  };
+  assert.equal(typeof checker.check, "function");
+  const result = await checker.check(monCtx);
+  assert.equal(result.ready, true);
+});
+
+test("T22d. RollbackPlanChecker / RollbackPlanCheckContext / RollbackPlanCheckResult 接口完整性", async () => {
+  // 验证 RollbackPlanCheckContext 接口字段完整性
+  const planCtx: RollbackPlanCheckContext = {
+    projectRoot: "/path/to/project",
+    runId: "run-001",
+  };
+  assert.equal(planCtx.projectRoot, "/path/to/project");
+  assert.equal(planCtx.runId, "run-001");
+
+  // 验证 RollbackPlanCheckResult 接口字段完整性
+  const planResult: RollbackPlanCheckResult = Object.freeze({
+    exists: true,
+    valid: true,
+    filePath: "/path/to/project/deploy/rollback-plan-run-001.md",
+    failures: Object.freeze([]) as ReadonlyArray<string>,
+  });
+  assert.equal(planResult.exists, true);
+  assert.equal(planResult.valid, true);
+  assert.equal(planResult.filePath, "/path/to/project/deploy/rollback-plan-run-001.md");
+  assert.equal(planResult.failures.length, 0);
+  assert.equal(Object.isFrozen(planResult), true);
+
+  // 验证 RollbackPlanChecker 接口约束（实现类需提供 check 方法）
+  const checker: RollbackPlanChecker = {
+    async check(context: RollbackPlanCheckContext): Promise<RollbackPlanCheckResult> {
+      return Object.freeze({
+        exists: context.projectRoot.length > 0,
+        valid: context.runId.length > 0,
+        filePath: `${context.projectRoot}/deploy/rollback-plan-${context.runId}.md`,
+        failures: Object.freeze([]) as ReadonlyArray<string>,
+      });
+    },
+  };
+  assert.equal(typeof checker.check, "function");
+  const result = await checker.check(planCtx);
+  assert.equal(result.exists, true);
+  assert.equal(result.filePath, "/path/to/project/deploy/rollback-plan-run-001.md");
+});
+
+test("T22e. ROLLBACK_PLAN_SECTIONS 常量含 5 个固定章节 + Object.freeze", () => {
+  // 验证常量被 Object.freeze 冻结
+  assert.equal(Object.isFrozen(ROLLBACK_PLAN_SECTIONS), true);
+  // 验证含 5 个章节
+  assert.equal(ROLLBACK_PLAN_SECTIONS.length, 5);
+  // 验证章节内容（K-1 决策：目标版本号 / 回滚命令 / 资源清单 / 创建时间戳 / runId）
+  assert.equal(ROLLBACK_PLAN_SECTIONS[0], "目标版本号");
+  assert.equal(ROLLBACK_PLAN_SECTIONS[1], "回滚命令");
+  assert.equal(ROLLBACK_PLAN_SECTIONS[2], "资源清单");
+  assert.equal(ROLLBACK_PLAN_SECTIONS[3], "创建时间戳");
+  assert.equal(ROLLBACK_PLAN_SECTIONS[4], "runId");
+  // 验证包含全部 5 个章节（顺序无关检查）
+  assert.ok(ROLLBACK_PLAN_SECTIONS.includes("目标版本号"));
+  assert.ok(ROLLBACK_PLAN_SECTIONS.includes("回滚命令"));
+  assert.ok(ROLLBACK_PLAN_SECTIONS.includes("资源清单"));
+  assert.ok(ROLLBACK_PLAN_SECTIONS.includes("创建时间戳"));
+  assert.ok(ROLLBACK_PLAN_SECTIONS.includes("runId"));
+});
+
+test("T22f. CanaryConfig / CanaryStrategyOptions / BlueGreenStrategyOptions / RollingStrategyOptions 接口完整性", () => {
+  // 验证 RollingStrategyOptions 接口字段完整性（含可选 timeoutMs）
+  const rollingOpts: RollingStrategyOptions = { timeoutMs: 300000 };
+  assert.equal(rollingOpts.timeoutMs, 300000);
+  const rollingOptsDefault: RollingStrategyOptions = {};
+  assert.equal(rollingOptsDefault.timeoutMs, undefined);
+
+  // 验证 BlueGreenStrategyOptions 接口字段完整性（含可选 timeoutMs / keepBlue）
+  const blueGreenOpts: BlueGreenStrategyOptions = { timeoutMs: 300000, keepBlue: true };
+  assert.equal(blueGreenOpts.timeoutMs, 300000);
+  assert.equal(blueGreenOpts.keepBlue, true);
+  const blueGreenOptsDefault: BlueGreenStrategyOptions = {};
+  assert.equal(blueGreenOptsDefault.keepBlue, undefined);
+
+  // 验证 CanaryConfig 接口字段完整性（必填 canarySteps）
+  const canaryCfg: CanaryConfig = {
+    canarySteps: Object.freeze([25, 50, 100]) as ReadonlyArray<number>,
+  };
+  assert.equal(canaryCfg.canarySteps.length, 3);
+  assert.equal(canaryCfg.canarySteps[2], 100);
+
+  // 验证 CanaryStrategyOptions 扩展 CanaryConfig（含 canarySteps + healthCheckTimeoutMs + healthCheckPath）
+  const canaryOpts: CanaryStrategyOptions = {
+    canarySteps: Object.freeze([10, 50, 100]) as ReadonlyArray<number>,
+    healthCheckTimeoutMs: 60000,
+    healthCheckPath: "/healthz",
+  };
+  assert.equal(canaryOpts.canarySteps.length, 3);
+  assert.equal(canaryOpts.healthCheckTimeoutMs, 60000);
+  assert.equal(canaryOpts.healthCheckPath, "/healthz");
+
+  // 验证 CanaryStrategyOptions 可省略可选字段（仅 canarySteps 必填）
+  const canaryOptsMinimal: CanaryStrategyOptions = {
+    canarySteps: Object.freeze([100]) as ReadonlyArray<number>,
+  };
+  assert.equal(canaryOptsMinimal.canarySteps.length, 1);
+  assert.equal(canaryOptsMinimal.healthCheckTimeoutMs, undefined);
+  assert.equal(canaryOptsMinimal.healthCheckPath, undefined);
+});
+
+test("T22g. GateG8Context 含可选 monitoringCheckContext / rollbackPlanCheckContext / projectRoot / runId 字段（向后兼容）", () => {
+  // 构造测试 TaskCard（GateContext 必填字段）
+  const taskCard = createTestTaskCard();
+
+  // 验证 1：批次 13 既有字段（不提供批次 14 新增可选字段，向后兼容）
+  const ctxLegacy: GateG8Context = {
+    projectId: "myapp",
+    loopType: "deploy",
+    specStatus: "approved",
+    planStatus: "approved",
+    reviewRecords: [],
+    userApproved: true,
+    taskCard,
+    actualChanges: [],
+    iacTemplates: Object.freeze([]) as ReadonlyArray<IaCTemplate>,
+    deployResult: {
+      success: true,
+      deployedAt: "2026-07-21T10:00:00.000Z",
+      duration: 30000,
+      resources: Object.freeze([]) as ReadonlyArray<DeployedResource>,
+      errors: Object.freeze([]) as ReadonlyArray<string>,
+    },
+    healthCheckResult: {
+      healthy: true,
+      checkedAt: "2026-07-21T10:00:30.000Z",
+      endpoints: Object.freeze([]) as ReadonlyArray<HealthEndpoint>,
+      failures: Object.freeze([]) as ReadonlyArray<string>,
+    },
+    smokeTestResult: {
+      passed: true,
+      totalTests: 1,
+      passedTests: 1,
+      failedTests: 0,
+      duration: 500,
+      failures: Object.freeze([]) as ReadonlyArray<SmokeTestFailure>,
+    },
+    monitoringReady: true,
+    rollbackPlanExists: true,
+  };
+  assert.equal(ctxLegacy.monitoringCheckContext, undefined);
+  assert.equal(ctxLegacy.rollbackPlanCheckContext, undefined);
+  assert.equal(ctxLegacy.projectRoot, undefined);
+  assert.equal(ctxLegacy.runId, undefined);
+
+  // 验证 2：批次 14 新增可选字段（提供全部新字段）
+  const ctxExtended: GateG8Context = {
+    ...ctxLegacy,
+    monitoringCheckContext: {
+      projectName: "myapp",
+      namespace: "default",
+      serviceName: "myapp-svc",
+      metricsEndpoint: "http://myapp.default.svc.cluster.local:8080/metrics",
+    },
+    rollbackPlanCheckContext: {
+      projectRoot: "/path/to/project",
+      runId: "run-001",
+    },
+    projectRoot: "/path/to/project",
+    runId: "run-001",
+  };
+  assert.equal(ctxExtended.monitoringCheckContext?.serviceName, "myapp-svc");
+  assert.equal(ctxExtended.rollbackPlanCheckContext?.runId, "run-001");
+  assert.equal(ctxExtended.projectRoot, "/path/to/project");
+  assert.equal(ctxExtended.runId, "run-001");
+});
+
+test("T22h. DevOpsContext 含可选 monitoringCheckContext / rollbackPlanCheckContext / projectRoot / runId 字段（向后兼容）", () => {
+  // 构造测试 TaskCard（GateContext 必填字段）
+  const taskCard = createTestTaskCard();
+
+  // 验证 1：批次 13 既有字段（不提供批次 14 新增可选字段，向后兼容）
+  const ctxLegacy: DevOpsContext = {
+    projectId: "myapp",
+    loopType: "deploy",
+    specStatus: "approved",
+    planStatus: "approved",
+    reviewRecords: [],
+    userApproved: true,
+    taskCard,
+    actualChanges: [],
+    iacGenerationContext: {
+      projectName: "myapp",
+      environment: "prod",
+      replicas: 3,
+      image: "registry.example.com/myapp:v1.0.0",
+      port: 8080,
+      resources: { requests: { cpu: "100m", memory: "128Mi" }, limits: { cpu: "500m", memory: "256Mi" } },
+      envVars: [],
+    },
+    deployContext: {
+      runId: "run-001",
+      projectName: "myapp",
+      environment: "prod",
+      iacTemplates: Object.freeze([]) as ReadonlyArray<IaCTemplate>,
+      strategyType: "rolling",
+      timeoutMs: 300000,
+    },
+    smokeTestCases: Object.freeze([]) as ReadonlyArray<SmokeTestCase>,
+  };
+  assert.equal(ctxLegacy.monitoringCheckContext, undefined);
+  assert.equal(ctxLegacy.rollbackPlanCheckContext, undefined);
+  assert.equal(ctxLegacy.projectRoot, undefined);
+  assert.equal(ctxLegacy.runId, undefined);
+
+  // 验证 2：批次 14 新增可选字段（提供全部新字段）
+  const ctxExtended: DevOpsContext = {
+    ...ctxLegacy,
+    monitoringCheckContext: {
+      projectName: "myapp",
+      namespace: "default",
+      serviceName: "myapp-svc",
+      metricsEndpoint: "http://myapp.default.svc.cluster.local:8080/metrics",
+    },
+    rollbackPlanCheckContext: {
+      projectRoot: "/path/to/project",
+      runId: "run-001",
+    },
+    projectRoot: "/path/to/project",
+    runId: "run-001",
+  };
+  assert.equal(ctxExtended.monitoringCheckContext?.namespace, "default");
+  assert.equal(ctxExtended.rollbackPlanCheckContext?.projectRoot, "/path/to/project");
+  assert.equal(ctxExtended.projectRoot, "/path/to/project");
+  assert.equal(ctxExtended.runId, "run-001");
+});
+
+test("T22i. DevOpsOrchestratorOptions 含可选 monitoringReadinessChecker / rollbackPlanChecker 字段（向后兼容）", () => {
+  // 构造辅助 mock-free 占位实现（与 NoOpRollbackManager 同样的占位模式，仅用于类型校验）
+  const gateG8Checker: GateG8Checker = {
+    gateId: "G-8",
+    check(): import("../eag/gate/gate-types").GateResult {
+      return Object.freeze({
+        passed: true,
+        gate: "G-8",
+        reason: "全部 5 项部署就绪条件已满足",
+        severity: "blocker",
+      }) as import("../eag/gate/gate-types").GateResult;
+    },
+  };
+  const deployStrategy: DeployStrategy = {
+    strategyType: "rolling",
+    async execute(): Promise<DeployResult> {
+      return Object.freeze({
+        success: true,
+        deployedAt: "2026-07-21T10:00:00.000Z",
+        duration: 30000,
+        resources: Object.freeze([]) as ReadonlyArray<DeployedResource>,
+        errors: Object.freeze([]) as ReadonlyArray<string>,
+      }) as DeployResult;
+    },
+  };
+  const deployStage: DeployStage = {
+    async execute(): Promise<DeployStageResult> {
+      return Object.freeze({
+        success: true,
+        preDeployPassed: true,
+        postDeployPassed: true,
+        healthEndpoints: Object.freeze([]) as ReadonlyArray<HealthEndpoint>,
+        rollbackExecuted: false,
+        errors: Object.freeze([]) as ReadonlyArray<string>,
+      }) as DeployStageResult;
+    },
+  };
+
+  // 验证 1：批次 13 既有字段（不提供批次 14 新增可选字段，向后兼容）
+  const optsLegacy: DevOpsOrchestratorOptions = {
+    iacGenerators: Object.freeze([]) as ReadonlyArray<IaCGenerator>,
+    gateG8Checker,
+    deployStrategy,
+    deployStage,
+  };
+  assert.equal(optsLegacy.monitoringReadinessChecker, undefined);
+  assert.equal(optsLegacy.rollbackPlanChecker, undefined);
+
+  // 验证 2：批次 14 新增可选字段（提供全部新字段）
+  const optsExtended: DevOpsOrchestratorOptions = {
+    ...optsLegacy,
+    monitoringReadinessChecker: {
+      async check(): Promise<MonitoringCheckResult> {
+        return Object.freeze({
+          ready: true,
+          checkedItems: Object.freeze([]) as ReadonlyArray<MonitoringCheckedItem>,
+          failures: Object.freeze([]) as ReadonlyArray<string>,
+        }) as MonitoringCheckResult;
+      },
+    },
+    rollbackPlanChecker: {
+      async check(): Promise<RollbackPlanCheckResult> {
+        return Object.freeze({
+          exists: true,
+          valid: true,
+          filePath: "/path/to/project/deploy/rollback-plan-run-001.md",
+          failures: Object.freeze([]) as ReadonlyArray<string>,
+        }) as RollbackPlanCheckResult;
+      },
+    },
+  };
+  assert.equal(typeof optsExtended.monitoringReadinessChecker?.check, "function");
+  assert.equal(typeof optsExtended.rollbackPlanChecker?.check, "function");
 });

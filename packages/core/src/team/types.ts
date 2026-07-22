@@ -198,6 +198,26 @@ export const DispatchResult = z.object({
   cacheHit: z.boolean().default(false),
   // 重试次数
   retryCount: z.number().int().nonnegative().default(0),
+  /**
+   * 续写次数（v2.1.3 新增）
+   *
+   * 含义：LLM 输出被 maxTokens 截断时自动续写的次数
+   * - 0 = 未触发续写（正常完成或未启用续写）
+   * - >0 = 触发了 N 次续写
+   *
+   * 用途：E2E 测试和监控可据此判断 LLM 输出是否因 token 限制被截断
+   */
+  continueCount: z.number().int().nonnegative().default(0),
+  /**
+   * 是否为部分输出（v2.1.3 新增）
+   *
+   * 含义：true 表示输出被 maxTokens 截断且续写未完成（达到最大续写次数或续写失败）
+   * - false = 输出完整（未截断，或截断后续写成功）
+   * - true = 输出不完整（截断后续写未完成，output 字段包含已有的部分内容）
+   *
+   * 用途：上层调用者可据此判断是否需要提示用户"输出可能不完整"
+   */
+  isPartial: z.boolean().default(false),
 });
 export type DispatchResult = z.infer<typeof DispatchResult>;
 

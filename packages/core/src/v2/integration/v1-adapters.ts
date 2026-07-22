@@ -31,7 +31,14 @@
 // ============================================================================
 // V2 钩子（edit-handler-hook / approval-hook）需要 ToolExecutionResult /
 // ToolExecutionHooks 类型签名与 V1 ToolExecutor 契约对齐。
-export type { ToolExecutionResult, ToolExecutionHooks, ToolExecutionContext, ToolCall } from "../../common/tool-types";
+// ToolHandler 供 v2/tools/tool-executor-registry 注册 codemap 工具 handler 使用。
+export type {
+  ToolExecutionResult,
+  ToolExecutionHooks,
+  ToolExecutionContext,
+  ToolCall,
+  ToolHandler,
+} from "../../common/tool-types";
 
 // ============================================================================
 // 2. common/file-utils（文件读写与 diff 预览基础工具）
@@ -172,3 +179,10 @@ export type { SessionMessage } from "../../session";
 // V2 memory 模块（deepseek-summarizer）需要 DEFAULT_BASE_URL 作为 DeepSeek API
 // 默认基址。V2 模块禁止直接 import V1 文件（P1-05 单一入口约束），经此 re-export。
 export { DEFAULT_BASE_URL } from "../../settings";
+
+// ============================================================================
+// 12. team/karpathy-preamble（Karpathy 原则 prompt 前导文本）
+// ============================================================================
+// V2 prompt 模块（role-prompt-customizer）需要 KARPATHY_PREAMBLE 常量拼接角色
+// prompt。V2 模块禁止直接 import V1 文件（P1-05 单一入口约束），经此 re-export。
+export { KARPATHY_PREAMBLE } from "../../team/karpathy-preamble";
