@@ -33,6 +33,14 @@ packages/vscode-ide-companion/templates/
 
 # Runtime feedback data (agent 反馈数据，运行时生成不应入库)
 packages/core/feedback_data/
+feedback_data/
+
+# Runtime state dir (.deepcodex 运行时状态，不应入库)
+.deepcodex/
+
+# E2E 测试运行产物 (运行时生成，不应入库)
+tests/e2e-output/
+tests/e2e-reports/
 
 # Backup files (开发过程备份文件，不应入库)
 *.bak
