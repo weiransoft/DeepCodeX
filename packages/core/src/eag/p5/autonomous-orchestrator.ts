@@ -52,7 +52,7 @@ import { execFileSync } from "node:child_process";
 import type { BlockerGuardChain } from "./guards/blocker-guard-chain";
 import type { GuardRecord } from "./guards/types";
 import type { TaskCard } from "./guards/types";
-import type { P5RunStateStore, P5RunState, P5LoopType } from "./run-state-store";
+import type { P5RunStateStore, P5RunState, P5LoopType, P5RunStateStatus } from "./run-state-store";
 import type { P5NotesMemory } from "./notes-memory";
 import type { P5SmartConfirmation } from "./smart-confirmation";
 import type { P5LoopExecutor } from "./loop-executor";
@@ -343,8 +343,8 @@ export interface AutonomousStatusResult {
 export interface AutonomousStopResult {
   /** run-id */
   readonly runId: string;
-  /** 操作类型：abort（中止正在运行）或 rollback（回滚已完成） */
-  readonly action: "abort" | "rollback";
+  /** 操作类型：abort（中止正在运行）/ rollback（回滚已完成）/ not-found（runId 不存在） */
+  readonly action: "abort" | "rollback" | "not-found";
   /** 操作是否成功 */
   readonly success: boolean;
   /** stop 操作时的 RunState 状态快照 */
@@ -563,22 +563,9 @@ export class AutonomousOrchestrator {
       "info"
     );
 
-    // 3. 初始化 RunState 持久化存储
-    const initialState = await this.runStateStore.initialize({
-      projectRoot,
-      objective,
-      runId: request.runId,
-      initialLoop,
-      maxIterations,
-      maxTokens,
-      stopWhen,
-    });
-
-    const runId = initialState.runId;
-    this.log(`AutonomousOrchestrator.run 已初始化 RunState：runId=${runId}`, "info");
-
-    // 4. 初始化累计统计变量
-    let currentRunState: Readonly<P5RunState> = initialState;
+    // 3. 初始化累计统计变量（在 try 块之前声明，确保 finally 块可访问 runId 用于清理）
+    let currentRunState: Readonly<P5RunState> | null = null;
+    let runId = request.runId ?? "";
     let consecutiveFailures = 0;
     let totalLlmCallCount = 0;
     let totalTokensUsed = 0;
@@ -598,8 +585,31 @@ export class AutonomousOrchestrator {
     // 5. 主循环（包装在 try/finally 中，finally 块清理 abort 标志文件）
     // 设计理由：无论 run() 以何种方式退出（成功/失败/中止/异常），都需清理 abort 标志文件，
     // 避免遗留文件影响后续运行（虽然 runId 是 UUID 前缀，理论不会重复）
+    // 注：initialize() 也移入 try 块内，确保即使 initialize 失败，finally 块也能
+    //     清理可能存在的 abort 文件（如用户预先创建的 abort 文件）
     let result: AutonomousRunResult;
     try {
+      // 3a. 初始化 RunState 持久化存储（移入 try 块，确保 finally 覆盖）
+      const initialState = await this.runStateStore.initialize({
+        projectRoot,
+        objective,
+        runId: request.runId,
+        initialLoop,
+        maxIterations,
+        maxTokens,
+        stopWhen,
+      });
+
+      currentRunState = initialState;
+      runId = initialState.runId;
+      this.log(`AutonomousOrchestrator.run 已初始化 RunState：runId=${runId}`, "info");
+
+      // 类型守卫：确保 currentRunState 非空（后续 while 循环内安全使用）
+      // 此处 currentRunState 已通过 L603 赋值，理论上不可能为 null
+      if (currentRunState === null) {
+        throw new Error("AutonomousOrchestrator.run 内部错误：initialize 后 currentRunState 仍为 null");
+      }
+
       while (iterIndex < maxIterations && status === "running") {
         // 新增：检查 abort 标志文件（循环顶部，进入迭代逻辑之前）
         // 使用已 resolve 的 projectRoot 局部变量（L550），而非 request.projectRoot
@@ -609,6 +619,27 @@ export class AutonomousOrchestrator {
           this.log(`检测到 abort 标志文件，中止运行: ${runId}`, "warn");
           status = "aborted";
           finalStatus = "aborted";
+          // P1-1 修复：break 之前持久化 status="aborted" 到 RunState
+          // 否则 status/stop 查询会读到过期的 "running" 状态，导致：
+          // 1. /eag-autonomous-status 返回错误的 running 状态
+          // 2. /eag-autonomous-stop 读到 running 走 abort 分支，创建孤儿 abort 文件
+          if (currentRunState !== null) {
+            const abortedState = await this.safeSaveRunState(currentRunState, {
+              iterIndex,
+              currentStage: this.getLastExecutedStage([]) ?? "plan",
+              completedStages: [],
+              completedLoops: Object.freeze([...completedLoops]),
+              totalLlmCallCount,
+              totalTokensUsed,
+              consecutiveFailures,
+              lastGuardTriggered:
+                triggeredGuards.length > 0 ? triggeredGuards[triggeredGuards.length - 1]!.ruleId : null,
+              status: "aborted" as P5RunStateStatus,
+            });
+            if (abortedState !== null) {
+              currentRunState = abortedState;
+            }
+          }
           break;
         }
 
@@ -784,6 +815,24 @@ export class AutonomousOrchestrator {
         status = "failed";
         finalStatus = "failed";
         this.log(`AutonomousOrchestrator.run 迭代次数用尽（${maxIterations}），finalStatus=failed`, "warn");
+        // P1-1 修复：迭代用尽时持久化 status="failed" 到 RunState
+        // 否则 status/stop 查询会读到过期的 "running" 状态
+        // 注：此时 currentRunState 已在上次迭代的 5g 步骤保存为 status="running"，
+        //     需要额外保存一次 status="failed" 反映最终状态
+        const failedState = await this.safeSaveRunState(currentRunState, {
+          iterIndex,
+          currentStage: this.getLastExecutedStage([]) ?? "plan",
+          completedStages: [],
+          completedLoops: Object.freeze([...completedLoops]),
+          totalLlmCallCount,
+          totalTokensUsed,
+          consecutiveFailures,
+          lastGuardTriggered: triggeredGuards.length > 0 ? triggeredGuards[triggeredGuards.length - 1]!.ruleId : null,
+          status: "failed" as P5RunStateStatus,
+        });
+        if (failedState !== null) {
+          currentRunState = failedState;
+        }
       }
 
       // 7. 构造 AutonomousRunResult
@@ -861,9 +910,18 @@ export class AutonomousOrchestrator {
    * 因此 AutonomousStatusResult 也不返回 milestones。如需查询里程碑，
    * 请在 run() 完成后从 AutonomousRunResult.milestones 获取。
    *
-   * @param runId 运行 ID
+   * found=false 时的字段语义（P2-12）：
+   * - 当 RunState 文件不存在或加载失败时，本方法返回 found=false 的结果，
+   *   此时除 runId / found / report 外的其他字段（status / iterIndex / currentStage /
+   *   completedLoops / totalTokensUsed / totalLlmCallCount / consecutiveFailures /
+   *   maxIterations / stopWhen / startedAt / updatedAt）均为占位默认值
+   *   （status="failed"、iterIndex=0、currentStage="plan"、各数值为 0、各字符串为空），
+   *   不代表真实运行状态，调用方应优先判断 found 字段，仅在 found=true 时使用其他字段。
+   *
+   * @param runId 运行 ID（必须符合 ^[a-zA-Z0-9_-]+$ 格式，防止路径遍历攻击）
    * @param projectRoot 项目根目录（用于定位 RunStateStore）
    * @returns 状态查询结果（含 Markdown 报告，冻结对象）
+   * @throws Error runId 格式非法（含路径分隔符或非允许字符）时抛出
    */
   async status(runId: string, projectRoot: string): Promise<Readonly<AutonomousStatusResult>> {
     // 1. 校验入参
@@ -873,6 +931,10 @@ export class AutonomousOrchestrator {
     if (typeof projectRoot !== "string" || projectRoot.trim().length === 0) {
       throw new Error("AutonomousOrchestrator.status 失败：projectRoot 必须为非空字符串");
     }
+    // P2-2 修复：校验 runId 格式，防止路径遍历攻击
+    // （runId 用于构造 .eag/p5/run-state/<runId>.jsonl 等文件路径，
+    //  必须禁止含 / \ .. 等路径字符，避免逃逸出目标目录）
+    this.validateRunId(runId);
 
     const projectRootAbs = path.resolve(projectRoot);
     this.log(`AutonomousOrchestrator.status 查询：runId=${runId} projectRoot=${projectRootAbs}`, "info");
@@ -932,6 +994,7 @@ export class AutonomousOrchestrator {
    * 行为取决于运行状态：
    * - status="running"/"paused"：创建 abort 标志文件，run() 在下次迭代时检测并中止
    * - status="completed"/"failed"/"aborted"：返回回滚所需信息（HEAD SHA + 未提交清单）
+   * - runId 不存在（RunState 文件加载失败）：返回 action="not-found"，success=false
    *
    * Phase 5.2 版的回滚信息：
    * - 不返回 git tag（run() 不创建 tag，P5RunState 无 commitSha 字段）
@@ -939,9 +1002,18 @@ export class AutonomousOrchestrator {
    * - 返回未提交改动文件清单（通过 git status --porcelain 获取）
    * - 由用户手动执行 git reset --hard <sha> 完成回滚
    *
-   * @param runId 运行 ID
+   * TOCTOU 竞态说明（P2-5）：
+   * - stop() 的 load → createAbortFlag 之间存在 TOCTOU（Time-of-Check-to-Time-of-Use）竞态：
+   *   若 run() 在 load 与 createAbortFlag 之间恰好完成并清理 RunState 文件，
+   *   createAbortFlag 创建的 abort 文件将成为孤儿（run() 已退出不会再清理）。
+   * - 缓解措施：① abort 文件以 runId 命名，理论不会重复；② 孤儿 abort 文件不影响后续不同 runId 的运行；
+   *   ③ 用户可手动删除 .eag/p5/abort-flags/ 下的孤儿文件。
+   * - 此竞态在 Phase 5.2 文件系统实现下无法完全消除，Phase 5.3 引入进程级锁后可解决。
+   *
+   * @param runId 运行 ID（必须符合 ^[a-zA-Z0-9_-]+$ 格式，防止路径遍历攻击）
    * @param projectRoot 项目根目录
    * @returns 中止/回滚结果（含 Markdown 报告，冻结对象）
+   * @throws Error runId 格式非法（含路径分隔符或非允许字符）时抛出
    */
   async stop(runId: string, projectRoot: string): Promise<Readonly<AutonomousStopResult>> {
     // 1. 校验入参
@@ -951,6 +1023,10 @@ export class AutonomousOrchestrator {
     if (typeof projectRoot !== "string" || projectRoot.trim().length === 0) {
       throw new Error("AutonomousOrchestrator.stop 失败：projectRoot 必须为非空字符串");
     }
+    // P2-2 修复：校验 runId 格式，防止路径遍历攻击
+    // （runId 用于构造 .eag/p5/abort-flags/<runId>.abort 等文件路径，
+    //  必须禁止含 / \ .. 等路径字符，避免逃逸出目标目录）
+    this.validateRunId(runId);
 
     const projectRootAbs = path.resolve(projectRoot);
     this.log(`AutonomousOrchestrator.stop 请求：runId=${runId} projectRoot=${projectRootAbs}`, "info");
@@ -960,13 +1036,17 @@ export class AutonomousOrchestrator {
     try {
       runState = await this.runStateStore.load(runId, projectRootAbs);
     } catch (err) {
-      // 加载失败（文件不存在 / 校验失败）：返回 success=false 的结果
+      // 加载失败（文件不存在 / 校验失败）：返回 action="not-found" / success=false 的结果
+      // P1-2 修复：action 语义从 "abort" 改为 "not-found"，避免误导调用方
+      //   既有实现返回 action="abort" + success=false，调用方若仅依 action 分流，
+      //   会误以为是"中止失败"而非"runId 不存在"，进而执行错误的回滚逻辑。
+      //   改为 action="not-found" 后，调用方可明确区分"中止失败"与"runId 不存在"。
       const errMsg = err instanceof Error ? err.message : String(err);
       this.log(`AutonomousOrchestrator.stop 加载 RunState 失败：${errMsg}`, "warn");
       const notFoundReport = this.formatStopNotFoundReport(runId, errMsg);
       return Object.freeze({
         runId,
-        action: "abort" as const,
+        action: "not-found" as const,
         success: false,
         runStatus: "failed" as P5RunState["status"],
         report: notFoundReport,
@@ -1106,19 +1186,28 @@ export class AutonomousOrchestrator {
   ): Promise<Readonly<AutonomousStopResult>> {
     let headSha = "";
     let uncommittedFiles: string[] = [];
-    let gitError: string | null = null;
+    // P2-9 修复：使用错误数组记录所有 git 命令失败信息，全部透传到 report
+    // 既有实现仅记录第一次错误（if gitError === null），第二次失败被吞掉，
+    // 用户在 report 中看不到第二次失败原因，无法完整排查。
+    // 改为数组后，所有失败信息都会出现在 report 中，便于用户诊断。
+    const gitErrors: string[] = [];
 
     try {
       // 1. 获取当前 HEAD SHA
+      // P2-7 修复：设置 maxBuffer=10MB，避免大仓库输出溢出 execFileSync 默认 1MB 限制
+      //   （git rev-parse HEAD 输出仅 40 字符，理论不会溢出，但显式设置 maxBuffer
+      //    与下方 git status 保持一致，便于维护与未来扩展）
       const headShaRaw = execFileSync("git", ["rev-parse", "HEAD"], {
         cwd: projectRootAbs,
         encoding: "utf-8",
         timeout: 10_000,
+        maxBuffer: 10 * 1024 * 1024,
       }).trim();
       headSha = headShaRaw;
     } catch (err) {
-      gitError = err instanceof Error ? err.message : String(err);
-      this.log(`获取 HEAD SHA 失败：${gitError}`, "warn");
+      const msg = err instanceof Error ? err.message : String(err);
+      gitErrors.push(`git rev-parse HEAD 失败：${msg}`);
+      this.log(`获取 HEAD SHA 失败：${msg}`, "warn");
     }
 
     try {
@@ -1128,31 +1217,50 @@ export class AutonomousOrchestrator {
       //     确保回滚清单完整（用户据此手动 git reset 后能完整评估影响范围）。
       //     使用长格式 --untracked-files=all 而非 -u all，避免 shell 参数分割歧义
       //     （-u all 在某些 shell 中会被解析为 -u + 路径参数 "all"，导致输出为空）
+      // P2-7 修复：设置 maxBuffer=10MB，避免大仓库 git status 输出溢出默认 1MB 限制
+      //   （大型 monorepo 的未提交清单可达数 MB，默认 maxBuffer 会抛 ERR_CHILD_PROCESS_STDIO_MAXBUFFER）
       const statusOutput = execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], {
         cwd: projectRootAbs,
         encoding: "utf-8",
         timeout: 10_000,
+        maxBuffer: 10 * 1024 * 1024,
       }).trim();
       // 解析 porcelain 输出：每行前 3 字符为状态码（2 字符状态 + 1 字符空格），后续为文件路径
       // 注意：对于含空格/特殊字符的文件名，git 会用双引号包裹并 C 转义，
       //       此处仅做 trim 去除首尾空白，不剥离引号（保持与 git 输出一致，便于用户识别）
+      // P2-1 修复：正确处理 R/C 重命名格式（"R  old.js -> new.js"）
+      //   git status --porcelain 对重命名/复制的输出格式为 "<XY> <old> -> <new>"，
+      //   既有实现直接 slice(3).trim() 会得到 "old.js -> new.js" 整串，
+      //   用户难以快速识别实际影响的文件。改为：检测 " -> " 分隔符，取分隔符后的新文件名，
+      //   与 git status 默认展示行为一致（显示重命名后的目标路径）。
       if (statusOutput.length > 0) {
         uncommittedFiles = statusOutput
           .split("\n")
-          .map((line) => line.slice(3).trim())
+          .map((line) => {
+            const filePathPart = line.slice(3).trim();
+            // 检测重命名/复制格式："old.js -> new.js"
+            // git porcelain 重命名格式：R  old.js -> new.js（R 后跟空格，再跟原文件名 -> 新文件名）
+            // 使用 " -> " 作为分隔符（前后各一个空格），避免误匹配文件名中含 "->" 的边界情况
+            const renameSep = " -> ";
+            const renameIdx = filePathPart.indexOf(renameSep);
+            if (renameIdx >= 0) {
+              // 重命名/复制：取分隔符后的新文件名
+              return filePathPart.slice(renameIdx + renameSep.length).trim();
+            }
+            // 普通改动：直接使用文件路径
+            return filePathPart;
+          })
           .filter((filePath) => filePath.length > 0);
       }
     } catch (err) {
-      // 如果 HEAD SHA 也失败了，不再重复记录；否则记录此次失败
+      // P2-9 修复：所有 git 命令失败信息都记录到 gitErrors 数组，全部透传到 report
       const msg = err instanceof Error ? err.message : String(err);
-      if (gitError === null) {
-        gitError = msg;
-      }
+      gitErrors.push(`git status --porcelain 失败：${msg}`);
       this.log(`获取未提交清单失败：${msg}`, "warn");
     }
 
-    // 3. 构造 Markdown 报告
-    const report = this.formatRollbackReport(runId, runState, headSha, uncommittedFiles, gitError);
+    // 3. 构造 Markdown 报告（gitErrors 数组通过 formatRollbackReport 透传到 report）
+    const report = this.formatRollbackReport(runId, runState, headSha, uncommittedFiles, gitErrors);
 
     return Object.freeze({
       runId,
@@ -1219,7 +1327,7 @@ export class AutonomousOrchestrator {
    * @param runState 最新 RunState 快照
    * @param headSha 当前 HEAD SHA（可能为空）
    * @param uncommittedFiles 未提交改动文件清单
-   * @param gitError git 命令错误信息（无错误时为 null）
+   * @param gitErrors git 命令错误信息数组（无错误时为空数组，P2-9 修复：透传所有失败信息）
    * @returns Markdown 格式的回滚报告
    */
   private formatRollbackReport(
@@ -1227,7 +1335,7 @@ export class AutonomousOrchestrator {
     runState: Readonly<P5RunState>,
     headSha: string,
     uncommittedFiles: ReadonlyArray<string>,
-    gitError: string | null
+    gitErrors: ReadonlyArray<string>
   ): string {
     const lines: string[] = [];
     lines.push("## Autonomous Run Stop (Rollback Info)");
@@ -1238,10 +1346,14 @@ export class AutonomousOrchestrator {
     lines.push(`- **最终迭代**：${runState.iterIndex} / ${runState.maxIterations}`);
     lines.push("");
 
-    if (gitError !== null) {
-      lines.push(`**⚠️ Git 命令执行失败**：${gitError}`);
+    // P2-9 修复：透传所有 git 命令失败信息（而非仅第一次）
+    if (gitErrors.length > 0) {
+      lines.push(`**⚠️ Git 命令执行失败**（${gitErrors.length} 个）：`);
+      for (const err of gitErrors) {
+        lines.push(`  - ${err}`);
+      }
       lines.push("");
-      lines.push("可能原因：projectRoot 不是 git 仓库，或 git 不可用");
+      lines.push("可能原因：projectRoot 不是 git 仓库，或 git 不可用，或 maxBuffer 不足");
       lines.push("");
     }
 
@@ -1326,6 +1438,25 @@ export class AutonomousOrchestrator {
   // ------------------------------------------------------------------------
 
   /**
+   * 校验 runId 格式（防止路径遍历攻击）
+   *
+   * runId 用于构造文件路径（如 abort-flags/<runId>.abort、run-state/<runId>.jsonl），
+   * 必须禁止包含路径分隔符（/、\）和目录跳转符（..），防止攻击者通过 runId 逃逸出目标目录。
+   *
+   * 允许的字符集：字母、数字、下划线、连字符（与 RunStateStore 生成的 UUID 前缀格式一致）
+   *
+   * @param runId 待校验的 runId
+   * @throws Error runId 含非法字符时抛出
+   */
+  private validateRunId(runId: string): void {
+    // 校验 runId 仅含字母、数字、下划线、连字符
+    // 禁止 / \ .. 等路径字符，防止路径遍历攻击
+    if (!/^[a-zA-Z0-9_-]+$/.test(runId)) {
+      throw new Error(`AutonomousOrchestrator runId 格式非法：${runId}（仅允许字母、数字、下划线、连字符）`);
+    }
+  }
+
+  /**
    * 校验运行请求
    *
    * @param request 运行请求
@@ -1340,6 +1471,10 @@ export class AutonomousOrchestrator {
     }
     if (typeof request.objective !== "string" || request.objective.trim().length === 0) {
       throw new Error("AutonomousRunRequest.objective 必须为非空字符串");
+    }
+    // P2-2 修复：校验 runId 格式（防止路径遍历攻击）
+    if (request.runId !== undefined) {
+      this.validateRunId(request.runId);
     }
   }
 
