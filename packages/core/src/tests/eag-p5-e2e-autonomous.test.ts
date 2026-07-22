@@ -41,7 +41,7 @@
  *   - .eag/p5/run-state/<runId>.jsonl 文件写入
  *   - SHA256 校验和验证
  * - I. NotesMemory 跨轮记忆（FR-7 验证）
- *   - .eag/p5/notes/notes.md 文件写入
+ *   - .eag/p5/notes/<runId>.md 文件写入（按 run 隔离）
  *   - DECISION 标签段落
  * - J. GuardChain 15 条 BLOCKER（DOD-2 验证）
  *   - G-A1a 路径牢笼（越界写入 DENY）
@@ -147,7 +147,7 @@ import type { UserPromptContent } from "../session";
 /**
  * 通过测试命令（真实 child_process 执行，输出 Jest 格式）
  *
- * 命令：node -e 'console.log("Tests: 1 passed, 0 failed")'
+ * 命令：echo Tests: 1 passed, 0 failed
  * 输出：Tests: 1 passed, 0 failed
  * 退出码：0
  * 解析结果：{ passed: 1, failed: 0, skipped: 0, total: 1, parser: "jest" }
@@ -156,18 +156,31 @@ import type { UserPromptContent } from "../session";
  * - 黑名单不命中（无危险模式）
  * - 白名单不命中
  * - 风险分=0 → auto-approve
+ *
+ * 设计说明（R1 修复）：
+ * - 旧版本使用 node -e 'console.log("...")'，内层双引号与 CLI 参数外层双引号冲突
+ * - CLI 参数解析正则 /--([\w][\w-]*)(?:[=\s]+(?:"([^"]*)"|'([^']*)'|...))/g 中
+ *   双引号捕获组 "([^"]*)" 不支持内层双引号嵌套，导致 --test-command 值被截断
+ * - 改用 echo 命令，不含任何引号，同时满足 CLI 解析和 verify-stage-handler 输出格式要求
  */
-const PASS_TEST_CMD = `node -e 'console.log("Tests: 1 passed, 0 failed")'`;
+const PASS_TEST_CMD = `echo Tests: 1 passed, 0 failed`;
 
 /**
  * 失败测试命令（真实 child_process 执行，输出 Jest 格式 + 非零退出码）
  *
- * 命令：node -e 'console.log("Tests: 0 passed, 1 failed"); process.exit(1)'
+ * 命令：echo Tests: 0 passed, 1 failed; false
  * 输出：Tests: 0 passed, 1 failed
- * 退出码：1
+ * 退出码：1（false 命令产生非零退出码）
  * 解析结果：{ passed: 0, failed: 1, skipped: 0, total: 1, parser: "jest" }
+ *
+ * SmartConfirmation 判定：同 PASS_TEST_CMD，auto-approve
+ *
+ * 设计说明（R1 修复）：
+ * - 旧版本使用 node -e 'console.log("..."); process.exit(1)'，内层双引号冲突
+ * - 改用 echo 输出测试格式 + false 产生非零退出码，不含任何引号
+ * - shell 中 ; 为命令分隔符，echo 先执行输出，false 后执行产生退出码 1
  */
-const FAIL_TEST_CMD = `node -e 'console.log("Tests: 0 passed, 1 failed"); process.exit(1)'`;
+const FAIL_TEST_CMD = `echo Tests: 0 passed, 1 failed; false`;
 
 // ============================================================================
 // 2. 测试辅助函数
@@ -751,7 +764,11 @@ test("E1. 4 阶段循环完整执行（plan → dev → verify → fix，finalSt
 test("E2. stop_when 终止条件（finalStatus=stop_when, exitCode=3）", async () => {
   const projectRoot = createTempProject();
   try {
-    createTasksFile(projectRoot, 1, "completed");
+    // R2 修复：使用 "pending" 状态的任务卡，让 stop_when 条件先于 completed 触发
+    // 若使用 "completed"，plan 阶段直接完成，orchestrator 返回 finalStatus=completed 而非 stop_when
+    // 使用 "pending" 时，测试命令通过（PASS_TEST_CMD）满足 stopWhen="all tests pass" 条件
+    // orchestrator 检测到 stop_when 条件满足后返回 finalStatus=stop_when
+    createTasksFile(projectRoot, 1, "pending");
     createDeclaredFile(projectRoot, "src/services/Service1.ts");
 
     const orchestrator = buildOrchestrator();
@@ -938,8 +955,11 @@ test("F3. AutonomousRunRequest 不可变性（G-A6d Object.freeze）", async () 
 test("G1. SmartConfirmation 三态决策：auto-approve（白名单命令 npm test）", () => {
   const smartConfirmation = new P5SmartConfirmation();
   // 构造 PASS verdict（GuardChain 通过）
+  // R3 修复：GuardDecision 类型为 "PASS" | "DENY" | "ASK"（大写字面量联合类型）
+  // 旧版本使用小写 "pass" 违反类型契约，虽然 decide() 仅检查 "DENY" 不影响 G1 结果，
+  // 但为正确性应使用大写 "PASS"
   const passVerdict: GuardVerdict = Object.freeze({
-    decision: "pass",
+    decision: "PASS",
     severity: "none",
     ruleId: "",
     reason: "通过",
@@ -955,8 +975,9 @@ test("G1. SmartConfirmation 三态决策：auto-approve（白名单命令 npm te
 test("G2. SmartConfirmation 三态决策：fail-closed（黑名单命令 rm -rf ~）", () => {
   const smartConfirmation = new P5SmartConfirmation();
   // 构造 PASS verdict（GuardChain 通过，但 SmartConfirmation 黑名单命中）
+  // R3 修复：decision 使用大写 "PASS" 对齐 GuardDecision 类型契约
   const passVerdict: GuardVerdict = Object.freeze({
-    decision: "pass",
+    decision: "PASS",
     severity: "none",
     ruleId: "",
     reason: "通过",
@@ -972,8 +993,11 @@ test("G2. SmartConfirmation 三态决策：fail-closed（黑名单命令 rm -rf 
 test("G3. SmartConfirmation 三态决策：guard DENY 短路 → fail-closed", () => {
   const smartConfirmation = new P5SmartConfirmation();
   // 构造 DENY verdict（GuardChain 拒绝）
+  // R3 修复：decision 必须使用大写 "DENY"（GuardDecision 类型契约）
+  // 旧版本使用小写 "deny"，decide() 检查 verdict.decision === "DENY" 不匹配，
+  // 导致 DENY 短路逻辑未触发，返回 auto-approve 而非 fail-closed
   const denyVerdict: GuardVerdict = Object.freeze({
-    decision: "deny",
+    decision: "DENY",
     severity: "blocker",
     ruleId: "G-A1a",
     reason: "路径牢笼拦截：越界写入 $HOME",
@@ -987,8 +1011,9 @@ test("G3. SmartConfirmation 三态决策：guard DENY 短路 → fail-closed", (
 
 test("G4. SmartConfirmation decideWithContext 扩展数据源（基础 fail-closed 短路）", async () => {
   const smartConfirmation = new P5SmartConfirmation();
+  // R3 修复：decision 使用大写 "DENY" 对齐 GuardDecision 类型契约
   const denyVerdict: GuardVerdict = Object.freeze({
-    decision: "deny",
+    decision: "DENY",
     severity: "blocker",
     ruleId: "G-A1a",
     reason: "路径牢笼拦截",
@@ -997,30 +1022,39 @@ test("G4. SmartConfirmation decideWithContext 扩展数据源（基础 fail-clos
 
   // 构造扩展上下文（含 historyStore / symbolGraphStore / taskCard）
   const historyStore = createDefaultP5ConfirmationHistoryStore();
-  const context: P5SmartConfirmationContext = Object.freeze({
-    command: "rm -rf ~",
-    runId: "test-run-001",
-    iterIndex: 0,
-    stage: "dev",
-    historyStore,
-    symbolGraphStore: null,
-    taskCard: null,
-  }) as P5SmartConfirmationContext;
+  // R4 修复：P5SmartConfirmationContext 必填 projectRoot 字段
+  // validateContext() 校验 projectRoot 必须为非空字符串，缺失时抛出异常
+  const projectRoot = createTempProject();
+  try {
+    const context: P5SmartConfirmationContext = Object.freeze({
+      command: "rm -rf ~",
+      runId: "test-run-001",
+      projectRoot,
+      iterIndex: 0,
+      stage: "dev",
+      historyStore,
+      symbolGraphStore: null,
+      taskCard: null,
+    }) as P5SmartConfirmationContext;
 
-  // 基础决策已为 fail-closed → 应短路返回（不查询扩展数据源）
-  const result = await smartConfirmation.decideWithContext(denyVerdict, context);
+    // 基础决策已为 fail-closed → 应短路返回（不查询扩展数据源）
+    const result = await smartConfirmation.decideWithContext(denyVerdict, context);
 
-  assert.equal(result.baseDecision, "fail-closed");
-  assert.equal(result.finalDecision, "fail-closed");
-  assert.equal(result.dataSourceContributions.length, 1);
-  assert.equal(result.dataSourceContributions[0].action, "none");
-  assert.ok(Object.isFrozen(result), "P5ExtendedConfirmationResult 应被冻结");
+    assert.equal(result.baseDecision, "fail-closed");
+    assert.equal(result.finalDecision, "fail-closed");
+    assert.equal(result.dataSourceContributions.length, 1);
+    assert.equal(result.dataSourceContributions[0].action, "none");
+    assert.ok(Object.isFrozen(result), "P5ExtendedConfirmationResult 应被冻结");
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
 });
 
 test("G5. SmartConfirmation decideWithContext 扩展数据源（auto-approve + 历史决策贡献）", async () => {
   const smartConfirmation = new P5SmartConfirmation();
+  // R3 修复：decision 使用大写 "PASS" 对齐 GuardDecision 类型契约
   const passVerdict: GuardVerdict = Object.freeze({
-    decision: "pass",
+    decision: "PASS",
     severity: "none",
     ruleId: "",
     reason: "通过",
@@ -1033,7 +1067,8 @@ test("G5. SmartConfirmation decideWithContext 扩展数据源（auto-approve + �
     const historyStore = createDefaultP5ConfirmationHistoryStore();
 
     // 写入一条历史决策记录（auto-approve，让历史数据源不触发升级）
-    historyStore.record(projectRoot, {
+    // R7 修复：record() 是 async 方法，必须 await 确保记录写入完成后再查询
+    await historyStore.record(projectRoot, {
       runId: "test-run-001",
       iterIndex: 0,
       stage: "dev",
@@ -1047,9 +1082,12 @@ test("G5. SmartConfirmation decideWithContext 扩展数据源（auto-approve + �
       timestamp: new Date().toISOString(),
     });
 
+    // R4 修复：P5SmartConfirmationContext 必填 projectRoot 字段
+    // 旧版本创建了 projectRoot 变量但未放入 context 对象，导致 validateContext() 抛异常
     const context: P5SmartConfirmationContext = Object.freeze({
       command: "npm test",
       runId: "test-run-001",
+      projectRoot,
       iterIndex: 1,
       stage: "dev",
       historyStore,
@@ -1121,14 +1159,17 @@ test("H1. RunState 持久化文件写入（.eag/p5/run-state/<runId>.jsonl）", 
 // I. NotesMemory 跨轮记忆测试（FR-7）
 // ============================================================================
 
-test("I1. NotesMemory 文件写入（.eag/p5/notes/notes.md）", async () => {
+test("I1. NotesMemory 文件写入（.eag/p5/notes/<runId>.md）", async () => {
   const projectRoot = createTempProject();
   try {
     createTasksFile(projectRoot, 1, "completed");
     createDeclaredFile(projectRoot, "src/services/Service1.ts");
 
     const orchestrator = buildOrchestrator();
-    await orchestrator.run({
+    // R5 修复：NotesMemory 路径契约为 <projectRoot>/.eag/p5/notes/<runId>.md（按 run 隔离）
+    // 旧版本期望固定文件名 notes.md，实际路径为 <runId>.md
+    // 需要从 orchestrator.run() 返回结果获取 runId，构造正确的文件路径
+    const result = await orchestrator.run({
       projectRoot,
       objective: "NotesMemory 测试",
       maxIterations: 1,
@@ -1136,13 +1177,13 @@ test("I1. NotesMemory 文件写入（.eag/p5/notes/notes.md）", async () => {
       testTimeoutSec: 10,
     });
 
-    // 验证 notes.md 文件存在
-    const notesFile = path.join(projectRoot, ".eag", "p5", "notes", "notes.md");
-    assert.ok(fs.existsSync(notesFile), `notes.md 文件应存在：${notesFile}`);
+    // 验证 <runId>.md 文件存在（路径布局：<projectRoot>/.eag/p5/notes/<runId>.md）
+    const notesFile = path.join(projectRoot, ".eag", "p5", "notes", `${result.runId}.md`);
+    assert.ok(fs.existsSync(notesFile), `notes 文件应存在：${notesFile}`);
 
     // 验证文件内容非空
     const content = fs.readFileSync(notesFile, "utf8");
-    assert.ok(content.length > 0, "notes.md 内容应非空");
+    assert.ok(content.length > 0, "notes 文件内容应非空");
   } finally {
     cleanupTempProject(projectRoot);
   }
@@ -1154,69 +1195,68 @@ test("I1. NotesMemory 文件写入（.eag/p5/notes/notes.md）", async () => {
 
 test("J1. G-A1a 路径牢笼：越界写入 $HOME 拦截", () => {
   const guardChain = createDefaultBlockerGuardChain({ throwOnDeny: false });
-  // 构造越界写入命令
+  // R6 修复：
+  // - GuardContext 使用 pendingCommand（非 command），guards 通过 context.pendingCommand 读取命令
+  // - GuardContext 必填 loopType 字段
+  // - 移除 changedFiles/declaredFiles/declaredSymbols（非 GuardContext 字段）
+  // - guardChain.check() 不存在，改用 executeSync()（所有 guard 的 check() 都是同步的）
+  // - result.verdicts 不存在，改用 result.allVerdicts（GuardChainResult 接口字段）
+  // - v.decision === "deny"/"ask" 改为大写 "DENY"/"ASK"（GuardDecision 类型契约）
   const guardContext: GuardContext = Object.freeze({
-    command: "echo test > $HOME/.bashrc",
-    projectRoot: "/tmp/test-project",
-    worktreePath: "/tmp/test-project",
+    runId: "test-run-001",
     iterIndex: 0,
     stage: "dev",
-    runId: "test-run-001",
-    changedFiles: Object.freeze([]),
-    taskCard: null,
-    declaredFiles: Object.freeze([]),
-    declaredSymbols: Object.freeze([]),
+    loopType: "coding",
+    projectRoot: "/tmp/test-project",
+    worktreePath: "/tmp/test-project",
+    pendingCommand: "echo test > $HOME/.bashrc",
   }) as GuardContext;
 
-  const result = guardChain.check(guardContext);
+  const result = guardChain.executeSync(guardContext);
   // 验证 GuardChain 拦截（DENY 或 ASK）
   assert.ok(
-    result.verdicts.some((v) => v.decision === "deny" || v.decision === "ask"),
+    result.allVerdicts.some((v) => v.decision === "DENY" || v.decision === "ASK"),
     "越界写入 $HOME 应被 GuardChain 拦截"
   );
 });
 
 test("J2. G-A2a 黑名单命令：rm -rf ~ 拦截", () => {
   const guardChain = createDefaultBlockerGuardChain({ throwOnDeny: false });
+  // R6 修复：同 J1，修正 GuardContext 字段名和 GuardChain API
   const guardContext: GuardContext = Object.freeze({
-    command: "rm -rf ~",
-    projectRoot: "/tmp/test-project",
-    worktreePath: "/tmp/test-project",
+    runId: "test-run-001",
     iterIndex: 0,
     stage: "dev",
-    runId: "test-run-001",
-    changedFiles: Object.freeze([]),
-    taskCard: null,
-    declaredFiles: Object.freeze([]),
-    declaredSymbols: Object.freeze([]),
+    loopType: "coding",
+    projectRoot: "/tmp/test-project",
+    worktreePath: "/tmp/test-project",
+    pendingCommand: "rm -rf ~",
   }) as GuardContext;
 
-  const result = guardChain.check(guardContext);
+  const result = guardChain.executeSync(guardContext);
   // 验证 GuardChain 拦截
   assert.ok(
-    result.verdicts.some((v) => v.decision === "deny"),
+    result.allVerdicts.some((v) => v.decision === "DENY"),
     "rm -rf ~ 应被黑名单拦截（DENY）"
   );
 });
 
 test("J3. G-A2a 黑名单命令：git push --force 拦截", () => {
   const guardChain = createDefaultBlockerGuardChain({ throwOnDeny: false });
+  // R6 修复：同 J1，修正 GuardContext 字段名和 GuardChain API
   const guardContext: GuardContext = Object.freeze({
-    command: "git push --force origin main",
-    projectRoot: "/tmp/test-project",
-    worktreePath: "/tmp/test-project",
+    runId: "test-run-001",
     iterIndex: 0,
     stage: "dev",
-    runId: "test-run-001",
-    changedFiles: Object.freeze([]),
-    taskCard: null,
-    declaredFiles: Object.freeze([]),
-    declaredSymbols: Object.freeze([]),
+    loopType: "coding",
+    projectRoot: "/tmp/test-project",
+    worktreePath: "/tmp/test-project",
+    pendingCommand: "git push --force origin main",
   }) as GuardContext;
 
-  const result = guardChain.check(guardContext);
+  const result = guardChain.executeSync(guardContext);
   assert.ok(
-    result.verdicts.some((v) => v.decision === "deny" || v.decision === "ask"),
+    result.allVerdicts.some((v) => v.decision === "DENY" || v.decision === "ASK"),
     "git push --force 应被拦截"
   );
 });
@@ -1241,24 +1281,25 @@ test("J4. G-A6d 上限冻结：AUTONOMOUS_DEFAULT_* 常量被 Object.freeze 冻�
 
 test("J5. GuardChain 完整执行返回 GuardChainResult", () => {
   const guardChain = createDefaultBlockerGuardChain({ throwOnDeny: false });
+  // R6 修复：同 J1，修正 GuardContext 字段名和 GuardChain API
+  // - result.verdicts → result.allVerdicts
+  // - result.passed → result.overallDecision === "PASS"（GuardChainResult 无 passed 字段）
   const guardContext: GuardContext = Object.freeze({
-    command: "npm test",
-    projectRoot: "/tmp/test-project",
-    worktreePath: "/tmp/test-project",
+    runId: "test-run-001",
     iterIndex: 0,
     stage: "verify",
-    runId: "test-run-001",
-    changedFiles: Object.freeze([]),
-    taskCard: null,
-    declaredFiles: Object.freeze([]),
-    declaredSymbols: Object.freeze([]),
+    loopType: "testing",
+    projectRoot: "/tmp/test-project",
+    worktreePath: "/tmp/test-project",
+    pendingCommand: "npm test",
   }) as GuardContext;
 
-  const result = guardChain.check(guardContext);
+  const result = guardChain.executeSync(guardContext);
   // 验证 GuardChainResult 结构完整性
   assert.ok(result, "GuardChainResult 应非 null");
-  assert.ok(Array.isArray(result.verdicts), "verdicts 应为数组");
-  assert.equal(typeof result.passed, "boolean", "passed 应为 boolean");
+  assert.ok(Array.isArray(result.allVerdicts), "allVerdicts 应为数组");
+  assert.equal(typeof result.overallDecision, "string", "overallDecision 应为 string");
+  assert.ok(["PASS", "DENY", "ASK"].includes(result.overallDecision), "overallDecision 应为 PASS/DENY/ASK 之一");
   assert.equal(typeof result.durationMs, "number", "durationMs 应为 number");
 });
 
@@ -1266,7 +1307,8 @@ test("J5. GuardChain 完整执行返回 GuardChainResult", () => {
 // K. ConfirmationHistoryStore 测试（TASK-P5-5.3-002）
 // ============================================================================
 
-test("K1. P5ConfirmationHistoryStore record() 写入历史决策", () => {
+test("K1. P5ConfirmationHistoryStore record() 写入历史决策", async () => {
+  // R7 修复：record() 是 async 方法，测试函数改为 async 并 await record() 调用
   const projectRoot = createTempProject();
   try {
     const store = createDefaultP5ConfirmationHistoryStore();
@@ -1284,8 +1326,8 @@ test("K1. P5ConfirmationHistoryStore record() 写入历史决策", () => {
       timestamp: new Date().toISOString(),
     });
 
-    // 写入不应抛异常
-    store.record(projectRoot, entry);
+    // 写入不应抛异常（await 确保异步写入完成）
+    await store.record(projectRoot, entry);
 
     // 验证文件已创建
     const historyDir = path.join(projectRoot, ".eag", "p5", "confirmation-history");
@@ -1295,7 +1337,8 @@ test("K1. P5ConfirmationHistoryStore record() 写入历史决策", () => {
   }
 });
 
-test("K2. P5ConfirmationHistoryStore query() 多维度查询", () => {
+test("K2. P5ConfirmationHistoryStore query() 多维度查询", async () => {
+  // R7 修复：record() / query() 均为 async 方法，测试函数改为 async 并 await 所有调用
   const projectRoot = createTempProject();
   try {
     const store = createDefaultP5ConfirmationHistoryStore();
@@ -1344,35 +1387,37 @@ test("K2. P5ConfirmationHistoryStore query() 多维度查询", () => {
       }),
     ]);
 
+    // 逐条 await record() 确保写入顺序
     for (const entry of entries) {
-      store.record(projectRoot, entry);
+      await store.record(projectRoot, entry);
     }
 
-    // 按 runId 查询
-    const run001Results = store.query(projectRoot, { runId: "run-001" });
+    // 按 runId 查询（await query()）
+    const run001Results = await store.query(projectRoot, { runId: "run-001" });
     assert.ok(run001Results.length >= 2, "run-001 应至少有 2 条记录");
 
     // 按 decision 查询
-    const failClosedResults = store.query(projectRoot, { decision: "fail-closed" });
+    const failClosedResults = await store.query(projectRoot, { decision: "fail-closed" });
     assert.ok(failClosedResults.length >= 1, "应至少有 1 条 fail-closed 记录");
 
     // 按 stage 查询
-    const verifyResults = store.query(projectRoot, { stage: "verify" });
+    const verifyResults = await store.query(projectRoot, { stage: "verify" });
     assert.ok(verifyResults.length >= 1, "应至少有 1 条 verify 阶段记录");
 
     // 按 commandSubstring 查询
-    const npmResults = store.query(projectRoot, { commandSubstring: "npm" });
+    const npmResults = await store.query(projectRoot, { commandSubstring: "npm" });
     assert.ok(npmResults.length >= 2, "应至少有 2 条 npm 命令记录");
 
     // 按 guardRuleId 查询
-    const guardResults = store.query(projectRoot, { guardRuleId: "G-A2a" });
+    const guardResults = await store.query(projectRoot, { guardRuleId: "G-A2a" });
     assert.ok(guardResults.length >= 1, "应至少有 1 条 G-A2a 规则记录");
   } finally {
     cleanupTempProject(projectRoot);
   }
 });
 
-test("K3. P5ConfirmationHistoryStore getStats() 聚合统计", () => {
+test("K3. P5ConfirmationHistoryStore getStats() 聚合统计", async () => {
+  // R7 修复：record() / getStats() 均为 async 方法，测试函数改为 async 并 await 所有调用
   const projectRoot = createTempProject();
   try {
     const store = createDefaultP5ConfirmationHistoryStore();
@@ -1422,11 +1467,11 @@ test("K3. P5ConfirmationHistoryStore getStats() 聚合统计", () => {
     ]);
 
     for (const entry of entries) {
-      store.record(projectRoot, entry);
+      await store.record(projectRoot, entry);
     }
 
-    // 获取统计
-    const stats = store.getStats(projectRoot);
+    // 获取统计（await getStats()）
+    const stats = await store.getStats(projectRoot);
 
     // 验证统计字段
     assert.ok(stats.totalEntries >= 3, "总记录数应 >= 3");
@@ -1444,12 +1489,13 @@ test("K3. P5ConfirmationHistoryStore getStats() 聚合统计", () => {
   }
 });
 
-test("K4. P5ConfirmationHistoryStore JSONL 持久化（文件可解析）", () => {
+test("K4. P5ConfirmationHistoryStore JSONL 持久化（文件可解析）", async () => {
+  // R7 修复：record() 是 async 方法，测试函数改为 async 并 await record() 调用
   const projectRoot = createTempProject();
   try {
     const store = createDefaultP5ConfirmationHistoryStore();
 
-    store.record(
+    await store.record(
       projectRoot,
       Object.freeze({
         runId: "run-persist-001",
@@ -1490,13 +1536,14 @@ test("K4. P5ConfirmationHistoryStore JSONL 持久化（文件可解析）", () =
   }
 });
 
-test("K5. P5ConfirmationHistoryStore clear() 清理历史记录", () => {
+test("K5. P5ConfirmationHistoryStore clear() 清理历史记录", async () => {
+  // R7 修复：record() / getStats() / clear() 均为 async 方法，测试函数改为 async 并 await 所有调用
   const projectRoot = createTempProject();
   try {
     const store = createDefaultP5ConfirmationHistoryStore();
 
     // 写入记录
-    store.record(
+    await store.record(
       projectRoot,
       Object.freeze({
         runId: "run-clear-001",
@@ -1514,26 +1561,27 @@ test("K5. P5ConfirmationHistoryStore clear() 清理历史记录", () => {
     );
 
     // 验证记录存在
-    const beforeStats = store.getStats(projectRoot);
+    const beforeStats = await store.getStats(projectRoot);
     assert.ok(beforeStats.totalEntries >= 1, "清理前应有记录");
 
     // 清理
-    store.clear(projectRoot);
+    await store.clear(projectRoot);
 
     // 验证记录已清理
-    const afterStats = store.getStats(projectRoot);
+    const afterStats = await store.getStats(projectRoot);
     assert.equal(afterStats.totalEntries, 0, "清理后总记录数应为 0");
   } finally {
     cleanupTempProject(projectRoot);
   }
 });
 
-test("K6. P5ConfirmationHistoryStore 不可变性（返回冻结对象）", () => {
+test("K6. P5ConfirmationHistoryStore 不可变性（返回冻结对象）", async () => {
+  // R7 修复：record() / query() / getStats() 均为 async 方法，测试函数改为 async 并 await 所有调用
   const projectRoot = createTempProject();
   try {
     const store = createDefaultP5ConfirmationHistoryStore();
 
-    store.record(
+    await store.record(
       projectRoot,
       Object.freeze({
         runId: "run-immutable-001",
@@ -1550,15 +1598,15 @@ test("K6. P5ConfirmationHistoryStore 不可变性（返回冻结对象）", () =
       })
     );
 
-    // query 返回的条目应被冻结
-    const results = store.query(projectRoot, { runId: "run-immutable-001" });
+    // query 返回的条目应被冻结（await query()）
+    const results = await store.query(projectRoot, { runId: "run-immutable-001" });
     assert.ok(results.length > 0, "应至少有 1 条记录");
     for (const entry of results) {
       assert.ok(Object.isFrozen(entry), "历史记录条目应被冻结");
     }
 
-    // getStats 返回的统计应被冻结
-    const stats = store.getStats(projectRoot);
+    // getStats 返回的统计应被冻结（await getStats()）
+    const stats = await store.getStats(projectRoot);
     assert.ok(Object.isFrozen(stats), "统计对象应被冻结");
   } finally {
     cleanupTempProject(projectRoot);
@@ -1607,8 +1655,9 @@ test("L1. 端到端完整流程：CLI 解析 → handler.execute → AutonomousO
     assert.ok(fs.existsSync(runStateDir), "RunState 目录应存在");
 
     // 步骤 7：验证 NotesMemory 持久化
-    const notesFile = path.join(projectRoot, ".eag", "p5", "notes", "notes.md");
-    assert.ok(fs.existsSync(notesFile), "notes.md 应存在");
+    // R5 修复：NotesMemory 路径契约为 <projectRoot>/.eag/p5/notes/<runId>.md（按 run 隔离，非固定 notes.md）
+    const notesFile = path.join(projectRoot, ".eag", "p5", "notes", `${result.runResult!.runId}.md`);
+    assert.ok(fs.existsSync(notesFile), `notes 文件应存在：${notesFile}`);
 
     // 步骤 8：验证结果不可变性
     assert.ok(Object.isFrozen(result), "EagAutonomousCommandResult 应被冻结");

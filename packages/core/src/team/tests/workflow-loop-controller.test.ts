@@ -911,8 +911,9 @@ test("WC-024: WorkflowLoopController 非审查阶段失败终止当前迭代", (
 
     // 断言：审查未通过（因为未执行）
     assert.equal(result.iterations[0].reviewPassed, false);
-    // 断言：无回退目标（因为审查未执行，未产生缺口）
-    assert.equal(result.iterations[0].rollbackTo, null);
+    // 断言：回退目标为失败阶段 development（P2-2 修复：阶段失败时记录回退目标，
+    // 使下次迭代从失败阶段续跑，而非从审查阶段重启）
+    assert.equal(result.iterations[0].rollbackTo, "development");
   } finally {
     rmTmpDir(dir);
   }

@@ -272,9 +272,10 @@ test("A2. EagCommandParser 无状态（多次 parse 互不影响）", () => {
 // B. EAG_COMMAND_STRINGS 常量与冻结语义测试
 // ============================================================================
 
-test("B3. EAG_COMMAND_STRINGS 包含 7 个 EAG 命令字符串", () => {
-  // 验证：EAG_COMMAND_STRINGS 常量包含 7 个 EAG 命令字符串（D-S3-6）
+test("B3. EAG_COMMAND_STRINGS 包含 8 个 EAG 命令字符串", () => {
+  // 验证：EAG_COMMAND_STRINGS 常量包含 8 个 EAG 命令字符串（D-S3-6）
   // 注：EAG-P4 批次 13 Phase 7 新增 /eag-deploy 命令，命令总数从 6 扩展至 7
+  // 注：EAG-P5 Phase 5.4 新增 /eag-autonomous 命令（无人值守 4 阶段循环），命令总数从 7 扩展至 8
   assert.equal(EAG_COMMAND_STRINGS.EAG_BUILD, "/eag-build");
   assert.equal(EAG_COMMAND_STRINGS.EAG_DESIGN, "/eag-design");
   assert.equal(EAG_COMMAND_STRINGS.EAG_TEST, "/eag-test");
@@ -282,8 +283,9 @@ test("B3. EAG_COMMAND_STRINGS 包含 7 个 EAG 命令字符串", () => {
   assert.equal(EAG_COMMAND_STRINGS.EAG_RESUME, "/eag-resume");
   assert.equal(EAG_COMMAND_STRINGS.EAG_STATUS, "/eag-status");
   assert.equal(EAG_COMMAND_STRINGS.EAG_DEPLOY, "/eag-deploy");
+  assert.equal(EAG_COMMAND_STRINGS.EAG_AUTONOMOUS, "/eag-autonomous");
   // 验证总字段数（防止未来误新增）
-  assert.equal(Object.keys(EAG_COMMAND_STRINGS).length, 7, "应有 7 个 EAG 命令字符串");
+  assert.equal(Object.keys(EAG_COMMAND_STRINGS).length, 8, "应有 8 个 EAG 命令字符串");
 });
 
 test("B4. EAG_COMMAND_STRINGS 被 Object.freeze 冻结（不可变优先 §5.12.4 G-A6d）", () => {

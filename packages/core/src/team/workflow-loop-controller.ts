@@ -709,7 +709,8 @@ export class WorkflowLoopController {
     const prevIteration = this._iterations[this._iterations.length - 1];
     const prevRollback = prevIteration?.rollbackTo ?? null;
     if (prevRollback === null) {
-      // 没有回退目标，从审查阶段重新开始（最后阶段索引）
+      // 没有回退目标（所有阶段成功但审查未通过且 _handleReviewResult 未设置回退目标），
+      // 从审查阶段重新开始（最后阶段索引）
       return this._stageOrder.length - 1;
     }
 
@@ -752,6 +753,9 @@ export class WorkflowLoopController {
       // 如果阶段失败且不是审查阶段，终止本次迭代
       if (!result.success && stage !== "doc_code_review") {
         this._log("WARN", `  阶段 ${stageNumber} 失败: ${result.error}`);
+        // P2-2 修复：记录失败阶段为回退目标，使下次迭代从失败阶段续跑，
+        // 而非从审查阶段重启（避免浪费迭代额度产生针对破损代码的误导性审查报告）
+        iterationRecord.rollbackTo = stage;
         break;
       }
 

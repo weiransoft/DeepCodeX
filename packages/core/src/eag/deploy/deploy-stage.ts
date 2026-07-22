@@ -223,13 +223,22 @@ export class DeployStageImpl implements DeployStage {
     // 部署前创建版本快照（如果 rollbackManager 存在）
     if (this.options.rollbackManager) {
       try {
+        // P1-1 修复：透传 runId 和 rollbackStrategy，确保非 rolling 部署失败时
+        // 回滚策略与部署策略一致（blue-green 切回 selector / canary 缩容），
+        // 且多次运行的快照文件按 runId 隔离，避免互相覆盖
         const snapshotContext: RollbackSnapshotContext = {
           projectName: context.deployContext.projectName,
           namespace: context.deployContext.projectName, // 批次 13 namespace 与 projectName 一致
+          runId: context.deployContext.runId,
+          rollbackStrategy: deployStrategy.strategyType,
         };
         snapshot = await this.options.rollbackManager.createSnapshot(snapshotContext);
       } catch (err) {
         // 快照创建失败不阻塞部署，但记录错误（批次 14 实现完整重试逻辑）
+        // P2-3 修复：发射 WARN 级日志，提示运维方本次部署无回滚安全网
+        console.warn(
+          `[DeployStage] WARN: 版本快照创建失败，本次部署无回滚安全网：${err instanceof Error ? err.message : String(err)}`
+        );
         errors.push(`版本快照创建失败：${err instanceof Error ? err.message : String(err)}`);
       }
     }
