@@ -1,7 +1,7 @@
 /**
  * executeDispatch 输出截断检测与自动续写测试（v2.1.3 验证）
  *
- * 设计文档 §6.1：13 个测试用例（TC-CONT-01 ~ TC-CONT-13）
+ * 设计文档 §6.1：15 个测试用例（TC-CONT-01 ~ TC-CONT-15）
  *   - TC-CONT-01: finish_reason="stop" 不触发续写（continueCount=0, isPartial=false）
  *   - TC-CONT-02: finish_reason="length" 触发续写（第一次 length，第二次 stop）
  *   - TC-CONT-03: 达到最大续写次数（始终 length → continueCount=3, isPartial=true）
@@ -15,6 +15,8 @@
  *   - TC-CONT-11: finish_reason=stop + 无继续关键字不触发续写（v1.1）
  *   - TC-CONT-12: 继续关键字在正文中间不触发续写（v1.1）
  *   - TC-CONT-13: stop+关键字触发 + 续写返回空内容（isPartial=false，token 计入）
+ *   - TC-CONT-14: 短续写块（<200 字符）不误触发续写（v1.3 ARCH-08 回归）
+ *   - TC-CONT-15: maxContinueCount=1 + stop+关键字 + 空续写（v1.3 ARCH-09 回归）
  *
  * 严格遵循用户规则：
  *   - 禁止 mock：stub client 是真实接口契约的固定响应
@@ -731,6 +733,108 @@ test("TC-CONT-13: stop+关键字触发 + 续写返回空内容（isPartial=false
     assert.equal(calls.length, 2, "应调用 2 次 LLM");
     // 断言 7：空续写消耗的 token 也计入（100 + 50 = 150）
     assert.equal(result.tokensConsumed.total, 150, "空续写的 token 也应计入总量");
+  } finally {
+    restoreEnv();
+  }
+});
+
+/**
+ * TC-CONT-14: 短续写块（<200 字符）不误触发续写（ARCH-08 回归）
+ *
+ * 场景（架构师动态复现的真实 bug）：
+ *   第一次 finish_reason="stop" 且末尾含继续关键字（283 字符），触发续写；
+ *   第二次续写返回短内容"（完）"（4 字符）+ stop——收尾块正常结束。
+ *
+ * 修复前行为（检测累计 fullContent）：
+ *   拼接后 fullContent 末尾 200 字符内仍含首次块的继续关键字，
+ *   shouldContinue 误判 true → 多余续写 + "（完）"被重复拼接 + isPartial 误标记
+ *   （实测调用 4 次、continueCount=3、isPartial=true）。
+ *
+ * 期望（ARCH-08 修复后：意图检测针对 lastChunk 最近响应块）：
+ *   - 共调用 2 次 LLM（不误触发第 3 次）
+ *   - continueCount=1
+ *   - isPartial=false
+ *   - output = firstContent + "（完）"（无重复拼接）
+ */
+test("TC-CONT-14: 短续写块（<200 字符）不误触发续写（ARCH-08 回归）", async () => {
+  const restoreEnv = isolateOpenAIEnv();
+  try {
+    const task = buildTask({ title: "测试", description: "描述" });
+
+    // 首次：stop + 末尾含继续关键字（283 字符）
+    const firstContent = "a".repeat(250) + "\n\n由于输出较长,我将继续在下一条消息中完成剩余内容";
+    // 续写：短收尾块（4 字符）+ stop——正常结束
+    const secondContent = "（完）";
+
+    const { handle, calls } = buildSequenceStubClient([
+      { content: firstContent, finishReason: "stop", usage: { total_tokens: 100 } },
+      { content: secondContent, finishReason: "stop", usage: { total_tokens: 50 } },
+      // 若误判触发第 3 次续写，stub 会越界复用第 2 个响应（finishReason=stop 无关键字），
+      // 通过 calls.length 断言可捕获多余调用
+    ]);
+
+    const result = await executeDispatch(task, { injectedClient: handle });
+
+    // 断言 1：status=succeeded
+    assert.equal(result.status, "succeeded");
+    // 断言 2：共调用 2 次 LLM（ARCH-08 修复核心：不误触发第 3 次续写）
+    assert.equal(calls.length, 2, "短续写块正常 stop 后不应再触发续写");
+    // 断言 3：continueCount=1
+    assert.equal(result.continueCount, 1, "应只记录 1 次续写");
+    // 断言 4：isPartial=false
+    assert.equal(result.isPartial, false, "正常完成不应标记 partial");
+    // 断言 5：output 无重复拼接（"（完）"只出现一次）
+    assert.equal(result.output, firstContent + secondContent, "短收尾块不应被重复拼接");
+    // 断言 6：token 累加正确（100 + 50 = 150）
+    assert.equal(result.tokensConsumed.total, 150);
+  } finally {
+    restoreEnv();
+  }
+});
+
+/**
+ * TC-CONT-15: maxContinueCount=1 + stop+关键字触发 + 空续写（ARCH-09 回归）
+ *
+ * 场景（边界组合）：
+ *   maxContinueCount=1，首次 stop+关键字触发续写，续写恰好返回空内容——
+ *   空内容 break 发生在最后一次允许的尝试上。
+ *
+ * 修复前行为：
+ *   循环后"达到最大续写次数"检查不区分退出原因，将 ARCH-01 的
+ *   isPartial=false 语义覆盖为 true，且"空内容"警告被替换为通用文案。
+ *
+ * 期望（ARCH-09 修复后：!partialError 前置，保留已有精确语义）：
+ *   - continueCount=1
+ *   - isPartial=false（ARCH-01 语义不被循环后检查推翻）
+ *   - error 含"空内容"警告（不被"达到最大续写次数"覆盖）
+ *   - 空续写 token 计入
+ */
+test("TC-CONT-15: maxContinueCount=1 + stop+关键字 + 空续写（ARCH-09 回归）", async () => {
+  const restoreEnv = isolateOpenAIEnv();
+  try {
+    const task = buildTask({ title: "测试", description: "描述" });
+
+    const firstContent = "a".repeat(250) + "\n\n由于输出较长,我将继续在下一条消息中完成剩余内容";
+
+    const { handle, calls } = buildSequenceStubClient([
+      { content: firstContent, finishReason: "stop", usage: { total_tokens: 100 } },
+      { content: "", finishReason: "stop", usage: { total_tokens: 50 } },
+    ]);
+
+    const result = await executeDispatch(task, { injectedClient: handle, maxContinueCount: 1 });
+
+    // 断言 1：status=succeeded
+    assert.equal(result.status, "succeeded");
+    // 断言 2：continueCount=1
+    assert.equal(result.continueCount, 1);
+    // 断言 3：isPartial=false（ARCH-09 核心：空续写语义不被"达到最大次数"覆盖）
+    assert.equal(result.isPartial, false, "stop 触发 + 空续写不应被覆盖为 partial");
+    // 断言 4：error 保留"空内容"精确警告（不被通用文案替换）
+    assert.ok(result.error?.includes("空内容"), `error 应保留 "空内容" 警告，实际: ${result.error}`);
+    // 断言 5：共调用 2 次 LLM
+    assert.equal(calls.length, 2);
+    // 断言 6：token 计入（100 + 50 = 150）
+    assert.equal(result.tokensConsumed.total, 150);
   } finally {
     restoreEnv();
   }

@@ -192,6 +192,16 @@ run_case "TC-E2E-A04" \
 # ==============================================================================
 stage_log "Stage B: 多角色团队真实调用 LLM 产出代码"
 
+# SEC-01 预检：API Key 必须经环境变量注入（多角色审查安全修复）
+# fixture 的 .deepcode/settings.json 中 API_KEY 为占位符（真实密钥禁止入库），
+# DEEPCODE_API_KEY 经 collectDeepcodeEnv 剥离前缀后优先级高于配置文件（systemEnv > projectEnv）
+if [ -z "${DEEPCODE_API_KEY:-}" ]; then
+  fail_log "未设置 DEEPCODE_API_KEY 环境变量（Stage B 需要真实 LLM 调用）"
+  fail_log "用法: DEEPCODE_API_KEY=<your-key> bash tests/scripts/e2e-enterprise-app.sh"
+  exit 2
+fi
+log "✅ DEEPCODE_API_KEY 已设置（经环境变量注入，覆盖 fixture 占位符）"
+
 # 设置 API Key 超时
 # v2.1.3 调整：从 300 秒（5 分钟）调整为 1200 秒（20 分钟）
 # 原因：续写机制启用后，单次 dispatch 可能触发最多 3 次续写（首次 + 3 次 = 4 次 LLM 调用）
