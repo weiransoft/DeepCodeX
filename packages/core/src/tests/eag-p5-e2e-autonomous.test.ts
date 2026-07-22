@@ -1,25 +1,25 @@
 /**
- * EAG-P5 Phase 5.4 TASK-P5-5.4-003：E2E 集成测试
+ * EAG-P5 Phase 5.4 TASK-P5-4.1-008：E2E 集成测试
  *
  * 测试范围（对齐任务说明 + EAG-P5-TEST-CASES.md TC-E2E-RUN 系列）：
- * - A. extractEagAutonomousRequestFromPrompt 参数解析（TASK-P5-5.4-001 验证）
+ * - A. extractEagAutonomousRequestFromPrompt 参数解析（TASK-P5-3.1-005 验证）
  *   - 完整参数解析（--goal / --max-iterations / --confirmation / --test-command / --stop-when 等）
  *   - 必填参数缺失拒绝（--goal 缺失 / 空字符串）
  *   - 取值范围非法拒绝（--max-iterations 超界 / --confirmation 非法值）
  *   - 默认值应用（未提供参数时使用默认值）
  *   - 不可变优先（Object.freeze 冻结）
- * - B. EagAutonomousCommandHandler 命令处理器（TASK-P5-5.4-001 验证）
+ * - B. EagAutonomousCommandHandler 命令处理器（TASK-P5-3.1-005 验证）
  *   - 构造校验（orchestrator 必填）
  *   - execute() 成功路径（real AutonomousOrchestrator + 真实文件系统）
  *   - execute() 失败路径（orchestrator.run() 抛异常 → success=false）
  *   - execute() 入参校验（projectRoot / request 必填）
  *   - 返回结果不可变性（Object.freeze）
- * - C. EagCommandParser /eag-autonomous 命令识别（TASK-P5-5.4-002 验证）
+ * - C. EagCommandParser /eag-autonomous 命令识别（TASK-P5-3.1-006 验证）
  *   - 前缀匹配（大小写不敏感）
  *   - 无参数形式（/eag-autonomous）
  *   - 含参数形式（/eag-autonomous --goal "..."）
  *   - 其他命令严格匹配不冲突
- * - D. session.ts handleEagAutonomousCommand 集成（TASK-P5-5.4-002 验证）
+ * - D. session.ts handleEagAutonomousCommand 集成（TASK-P5-3.1-006 验证）
  *   - AutonomousOrchestrator 未注入时 fail-closed
  *   - payload null 时重新解析获取错误详情
  *   - 完整成功路径（orchestrator 注入 + payload 有效 + 执行成功）
@@ -67,7 +67,7 @@
  * 设计依据：
  * - 需求文档 §3 FR-1 无人值守 4 阶段循环 + FR-4 /eag-autonomous 命令 + FR-7 NotesMemory
  * - 架构师审查 §4.1 AutonomousOrchestrator 接口契约 + §4.2 BlockerGuardChain 接口契约
- * - 任务说明 TASK-P5-5.3-001/002 + TASK-P5-5.4-001~004
+ * - 任务说明 TASK-P5-5.3-001/002 + TASK-P5-3.1-005/006 + TASK-P5-4.1-008/009
  * - NFR-8 不可变优先 + NFR-9 禁止 mock + NFR-10 中文详细注释
  *
  * @module core/tests/eag-p5-e2e-autonomous
@@ -79,7 +79,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 
-// EagCommandParser + 命令处理器导入（TASK-P5-5.4-001/002 验证）
+// EagCommandParser + 命令处理器导入（TASK-P5-3.1-005/006 验证）
 import { EagCommandParser, EAG_COMMAND_STRINGS } from "../eag/cli/eag-command-parser";
 import type { EagCommand } from "../eag/cli/eag-command-parser";
 import {

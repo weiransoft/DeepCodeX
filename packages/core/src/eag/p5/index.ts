@@ -385,6 +385,8 @@ export {
 export type {
   AutonomousRunRequest,
   AutonomousRunResult,
+  AutonomousStatusResult,
+  AutonomousStopResult,
   P5MilestoneRecord,
   P5BlockageReport,
   AutonomousOrchestratorOptions,

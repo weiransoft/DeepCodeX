@@ -46,6 +46,8 @@
  */
 
 import * as path from "node:path";
+import * as fs from "node:fs";
+import { execFileSync } from "node:child_process";
 
 import type { BlockerGuardChain } from "./guards/blocker-guard-chain";
 import type { GuardRecord } from "./guards/types";
@@ -125,6 +127,23 @@ const DEFAULT_TASKS_FILENAME = "tasks.md" as const;
  * 默认 tasks.md 目录（相对 projectRoot）
  */
 const DEFAULT_TASKS_DIR = ".eag/p5" as const;
+
+/**
+ * abort 标志文件目录（相对 projectRoot，存放在 .eag/p5/abort-flags/）
+ *
+ * 用于跨 session/跨进程中止 run() 循环：
+ * - stop(runId) 创建 <projectRoot>/.eag/p5/abort-flags/<runId>.abort 文件
+ * - run() 每次迭代开始时检查该文件是否存在，存在则中止循环
+ * - run() 退出时在 finally 块中清理该文件
+ */
+const ABORT_FLAGS_DIR = ".eag/p5/abort-flags" as const;
+
+/**
+ * abort 标志文件扩展名
+ *
+ * 使用 .abort 后缀，避免与其他文件类型混淆。
+ */
+const ABORT_FILE_EXTENSION = ".abort" as const;
 
 // ============================================================================
 // 2. 类型定义（不可变优先，所有字段 readonly）
@@ -262,6 +281,80 @@ export interface P5BlockageReport {
   readonly suggestedSolutions: ReadonlyArray<string>;
   /** 阻塞原因摘要 */
   readonly summary: string;
+}
+
+/**
+ * 状态查询结果（TASK-P5-3.1-005 验收标准 3）
+ *
+ * 由 AutonomousOrchestrator.status() 返回，包含从 RunStateStore 加载的最新状态快照
+ * 和格式化的 Markdown 进度报告。
+ *
+ * 注意：P5RunState 不含 milestones 字段（milestones 是 run() 内部局部变量），
+ * 因此 AutonomousStatusResult 也不返回 milestones。如需查询里程碑，
+ * 请在 run() 完成后从 AutonomousRunResult.milestones 获取。
+ *
+ * 字段全部 readonly——结果一经产出即不可变。
+ */
+export interface AutonomousStatusResult {
+  /** run-id */
+  readonly runId: string;
+  /** 当前状态（running / paused / completed / failed / aborted） */
+  readonly status: P5RunState["status"];
+  /** 已完成迭代数 */
+  readonly iterIndex: number;
+  /** 当前阶段（plan / dev / verify / fix） */
+  readonly currentStage: P5RunState["currentStage"];
+  /** 已完成的 Loop 列表 */
+  readonly completedLoops: ReadonlyArray<P5LoopType>;
+  /** 累计 Token 消耗 */
+  readonly totalTokensUsed: number;
+  /** 累计 LLM 调用次数 */
+  readonly totalLlmCallCount: number;
+  /** 连续失败次数 */
+  readonly consecutiveFailures: number;
+  /** 最大迭代次数 */
+  readonly maxIterations: number;
+  /** stop_when 条件（如已设置） */
+  readonly stopWhen: string;
+  /** 启动时间（ISO 8601） */
+  readonly startedAt: string;
+  /** 最近更新时间（ISO 8601） */
+  readonly updatedAt: string;
+  /** Markdown 格式的进度报告 */
+  readonly report: string;
+  /** 是否找到了该 runId 的状态文件 */
+  readonly found: boolean;
+}
+
+/**
+ * 中止/回滚结果（TASK-P5-3.1-006 验收标准 1）
+ *
+ * 由 AutonomousOrchestrator.stop() 返回，根据运行状态返回不同信息：
+ * - status="running"/"paused"：创建 abort 标志文件，action="abort"
+ * - status="completed"/"failed"/"aborted"：返回回滚信息，action="rollback"
+ *
+ * Phase 5.2 版的回滚信息（不返回 git tag，仅返回 HEAD SHA + 未提交清单）：
+ * - headSha：当前 HEAD SHA（通过 git rev-parse HEAD 获取）
+ * - uncommittedFiles：未提交改动文件清单（通过 git status --porcelain 获取）
+ * - 由用户手动执行 git reset --hard <sha> 完成回滚
+ *
+ * 字段全部 readonly——结果一经产出即不可变。
+ */
+export interface AutonomousStopResult {
+  /** run-id */
+  readonly runId: string;
+  /** 操作类型：abort（中止正在运行）或 rollback（回滚已完成） */
+  readonly action: "abort" | "rollback";
+  /** 操作是否成功 */
+  readonly success: boolean;
+  /** stop 操作时的 RunState 状态快照 */
+  readonly runStatus: P5RunState["status"];
+  /** 当前 HEAD SHA（action="rollback" 时填写，用户据此手动 git reset） */
+  readonly headSha?: string;
+  /** 未提交改动文件清单（action="rollback" 时填写） */
+  readonly uncommittedFiles?: ReadonlyArray<string>;
+  /** Markdown 格式的操作报告 */
+  readonly report: string;
 }
 
 /**
@@ -502,233 +595,730 @@ export class AutonomousOrchestrator {
     const triggeredGuards: GuardRecord[] = [];
     const completedLoops: P5LoopType[] = [];
 
-    // 5. 主循环
-    while (iterIndex < maxIterations && status === "running") {
-      this.log(`AutonomousOrchestrator.run 进入迭代 ${iterIndex}/${maxIterations}（runId=${runId}）`, "info");
-
-      // 5a. 加载 notesSnapshot（跨轮记忆）
-      const notesSnapshot = await this.safeLoadNotes(runId, projectRoot);
-
-      // 5b. 顺序执行 4 阶段
-      const iterationResults: P5StageResult[] = [];
-      let iterationFailed = false;
-      let iterationFatal = false;
-      let planTaskCard: TaskCard | null = null;
-
-      for (const stage of P5_STAGE_ORDER) {
-        // 5b-1. 构造 P5StageContext
-        const ctx = this.buildStageContext({
-          runId,
-          iterIndex,
-          stage,
-          projectRoot,
-          worktreePath: projectRoot,
-          objective,
-          currentPlan: this.extractCurrentPlan(iterationResults, planTaskCard),
-          notesSnapshot,
-          prevResults: Object.freeze([...iterationResults]),
-          runState: currentRunState,
-          tasksFilePath,
-          testCommand,
-          testTimeoutSec,
-          loopType: initialLoop,
-        });
-
-        // 5b-2. 调用 loopExecutor.execute(stage, ctx)
-        const result = await this.loopExecutor.execute(stage, ctx);
-        iterationResults.push(result as P5StageResult);
-
-        // 5b-3. 累加统计（guardRecords / tokensUsed / llmCallCount）
-        for (const gr of result.guardRecords) {
-          triggeredGuards.push(gr);
-        }
-        totalTokensUsed += result.tokensUsed;
-        // llmCallCount 近似估算：tokensUsed > 0 表示发生了 LLM 调用
-        if (result.tokensUsed > 0) {
-          totalLlmCallCount += 1;
-        }
-
-        // 5b-4. 提取 plan 阶段产出的任务卡
-        if (stage === "plan" && result.kind === "success") {
-          planTaskCard = (result.artifacts["taskCard"] as TaskCard | null) ?? null;
-        }
-
-        // 5b-5. fatal → 立即中止内层循环
-        if (result.kind === "fatal") {
-          iterationFatal = true;
-          lastFatalStage = stage;
-          lastFatalReason = result.error ?? result.summary;
-          this.log(`AutonomousOrchestrator.run 迭代 ${iterIndex} 阶段 ${stage} fatal：${lastFatalReason}`, "error");
+    // 5. 主循环（包装在 try/finally 中，finally 块清理 abort 标志文件）
+    // 设计理由：无论 run() 以何种方式退出（成功/失败/中止/异常），都需清理 abort 标志文件，
+    // 避免遗留文件影响后续运行（虽然 runId 是 UUID 前缀，理论不会重复）
+    let result: AutonomousRunResult;
+    try {
+      while (iterIndex < maxIterations && status === "running") {
+        // 新增：检查 abort 标志文件（循环顶部，进入迭代逻辑之前）
+        // 使用已 resolve 的 projectRoot 局部变量（L550），而非 request.projectRoot
+        // 否则相对路径会导致 stop() 创建的 abort 文件（绝对路径）与 run() 检测的路径不一致
+        const abortFilePath = path.join(projectRoot, ABORT_FLAGS_DIR, `${runId}${ABORT_FILE_EXTENSION}`);
+        if (fs.existsSync(abortFilePath)) {
+          this.log(`检测到 abort 标志文件，中止运行: ${runId}`, "warn");
+          status = "aborted";
+          finalStatus = "aborted";
           break;
         }
 
-        // 5b-6. failed/retriable → 累加 consecutiveFailures，但继续下一阶段
-        //       （允许 fix 阶段尝试修复 verify 的失败）
-        if (result.kind === "failed" || result.kind === "retriable") {
-          iterationFailed = true;
+        this.log(`AutonomousOrchestrator.run 进入迭代 ${iterIndex}/${maxIterations}（runId=${runId}）`, "info");
+
+        // 5a. 加载 notesSnapshot（跨轮记忆）
+        const notesSnapshot = await this.safeLoadNotes(runId, projectRoot);
+
+        // 5b. 顺序执行 4 阶段
+        const iterationResults: P5StageResult[] = [];
+        let iterationFailed = false;
+        let iterationFatal = false;
+        let planTaskCard: TaskCard | null = null;
+
+        for (const stage of P5_STAGE_ORDER) {
+          // 5b-1. 构造 P5StageContext
+          const ctx = this.buildStageContext({
+            runId,
+            iterIndex,
+            stage,
+            projectRoot,
+            worktreePath: projectRoot,
+            objective,
+            currentPlan: this.extractCurrentPlan(iterationResults, planTaskCard),
+            notesSnapshot,
+            prevResults: Object.freeze([...iterationResults]),
+            runState: currentRunState,
+            tasksFilePath,
+            testCommand,
+            testTimeoutSec,
+            loopType: initialLoop,
+          });
+
+          // 5b-2. 调用 loopExecutor.execute(stage, ctx)
+          const result = await this.loopExecutor.execute(stage, ctx);
+          iterationResults.push(result as P5StageResult);
+
+          // 5b-3. 累加统计（guardRecords / tokensUsed / llmCallCount）
+          for (const gr of result.guardRecords) {
+            triggeredGuards.push(gr);
+          }
+          totalTokensUsed += result.tokensUsed;
+          // llmCallCount 近似估算：tokensUsed > 0 表示发生了 LLM 调用
+          if (result.tokensUsed > 0) {
+            totalLlmCallCount += 1;
+          }
+
+          // 5b-4. 提取 plan 阶段产出的任务卡
+          if (stage === "plan" && result.kind === "success") {
+            planTaskCard = (result.artifacts["taskCard"] as TaskCard | null) ?? null;
+          }
+
+          // 5b-5. fatal → 立即中止内层循环
+          if (result.kind === "fatal") {
+            iterationFatal = true;
+            lastFatalStage = stage;
+            lastFatalReason = result.error ?? result.summary;
+            this.log(`AutonomousOrchestrator.run 迭代 ${iterIndex} 阶段 ${stage} fatal：${lastFatalReason}`, "error");
+            break;
+          }
+
+          // 5b-6. failed/retriable → 累加 consecutiveFailures，但继续下一阶段
+          //       （允许 fix 阶段尝试修复 verify 的失败）
+          if (result.kind === "failed" || result.kind === "retriable") {
+            iterationFailed = true;
+            this.log(
+              `AutonomousOrchestrator.run 迭代 ${iterIndex} 阶段 ${stage} ${result.kind}：${result.summary}`,
+              "warn"
+            );
+            // 不 break：让 fix 阶段有机会修复 verify 的失败
+          }
+        }
+
+        // 5c. 4 阶段全 success → 重置 consecutiveFailures，记录 milestone
+        if (!iterationFatal && !iterationFailed) {
+          consecutiveFailures = 0;
+
+          // 记录里程碑
+          const milestone: P5MilestoneRecord = Object.freeze({
+            index: milestones.length + 1,
+            name: `Iter ${iterIndex} 完成（4 阶段全绿）`,
+            loopType: initialLoop,
+            completedAt: new Date().toISOString(),
+            iterIndex,
+            summary: this.formatIterationSummary(iterationResults, true),
+          });
+          milestones.push(milestone);
+
+          // 若 initialLoop 尚未在 completedLoops 中，加入
+          if (!completedLoops.includes(initialLoop)) {
+            completedLoops.push(initialLoop);
+          }
+
+          this.log(`AutonomousOrchestrator.run 迭代 ${iterIndex} 全绿，记录 milestone #${milestone.index}`, "info");
+        } else if (iterationFatal) {
+          // fatal → 累加 consecutiveFailures
+          consecutiveFailures += 1;
+        } else if (iterationFailed) {
+          // failed → 累加 consecutiveFailures
+          consecutiveFailures += 1;
+        }
+
+        // 5d. plan 返回 taskCard=null → finalStatus="completed"，中止外层循环
+        if (!iterationFatal && planTaskCard === null) {
+          // 注：只有当 plan 阶段 success 且 taskCard=null 才视为"全部任务完成"
+          const planResult = iterationResults.find((r) => r.stage === "plan");
+          if (planResult && planResult.kind === "success") {
+            status = "completed";
+            finalStatus = "completed";
+            this.log(
+              `AutonomousOrchestrator.run 迭代 ${iterIndex} 检测到 plan 返回 taskCard=null，全部任务完成`,
+              "info"
+            );
+          }
+        }
+
+        // 5e. verify 通过 + stopWhen 命中 → finalStatus="stop_when"，中止外层循环
+        if (status === "running" && !iterationFatal && !iterationFailed) {
+          if (this.checkStopWhenHit(stopWhen, iterationResults)) {
+            status = "stop_when";
+            finalStatus = "stop_when";
+            this.log(`AutonomousOrchestrator.run 迭代 ${iterIndex} 命中 stop_when 条件：${stopWhen}`, "info");
+          }
+        }
+
+        // 5f. consecutiveFailures >= abort 阈值 → finalStatus="aborted"
+        if (status === "running" && consecutiveFailures >= consecutiveFailureAbort) {
+          status = "aborted";
+          finalStatus = "aborted";
           this.log(
-            `AutonomousOrchestrator.run 迭代 ${iterIndex} 阶段 ${stage} ${result.kind}：${result.summary}`,
-            "warn"
+            `AutonomousOrchestrator.run 迭代 ${iterIndex} 连续失败 ${consecutiveFailures} 次达到阈值 ${consecutiveFailureAbort}，触发 abort`,
+            "error"
           );
-          // 不 break：让 fix 阶段有机会修复 verify 的失败
         }
-      }
 
-      // 5c. 4 阶段全 success → 重置 consecutiveFailures，记录 milestone
-      if (!iterationFatal && !iterationFailed) {
-        consecutiveFailures = 0;
-
-        // 记录里程碑
-        const milestone: P5MilestoneRecord = Object.freeze({
-          index: milestones.length + 1,
-          name: `Iter ${iterIndex} 完成（4 阶段全绿）`,
-          loopType: initialLoop,
-          completedAt: new Date().toISOString(),
-          iterIndex,
-          summary: this.formatIterationSummary(iterationResults, true),
+        // 5g. 保存 RunState 快照（每次迭代后）
+        const nextIterIndex = status === "running" ? iterIndex + 1 : iterIndex;
+        const nextStage: "plan" | "dev" | "verify" | "fix" =
+          status === "running" ? "plan" : (this.getLastExecutedStage(iterationResults) ?? "plan");
+        const updatedRunState = await this.safeSaveRunState(currentRunState, {
+          iterIndex: nextIterIndex,
+          currentStage: nextStage,
+          completedStages: this.computeCompletedStages(iterationResults, status),
+          completedLoops: Object.freeze([...completedLoops]),
+          totalLlmCallCount,
+          totalTokensUsed,
+          consecutiveFailures,
+          lastGuardTriggered: triggeredGuards.length > 0 ? triggeredGuards[triggeredGuards.length - 1]!.ruleId : null,
+          status: status === "running" ? "running" : this.mapToRunStateStatus(status),
         });
-        milestones.push(milestone);
-
-        // 若 initialLoop 尚未在 completedLoops 中，加入
-        if (!completedLoops.includes(initialLoop)) {
-          completedLoops.push(initialLoop);
+        if (updatedRunState !== null) {
+          currentRunState = updatedRunState;
         }
 
-        this.log(`AutonomousOrchestrator.run 迭代 ${iterIndex} 全绿，记录 milestone #${milestone.index}`, "info");
-      } else if (iterationFatal) {
-        // fatal → 累加 consecutiveFailures
-        consecutiveFailures += 1;
-      } else if (iterationFailed) {
-        // failed → 累加 consecutiveFailures
-        consecutiveFailures += 1;
+        // 5h. 追加 notes 段落（每次迭代后）
+        await this.safeAppendNotes(runId, projectRoot, {
+          iterIndex,
+          iterationResults,
+          iterationFatal,
+          iterationFailed,
+          status,
+          finalStatus,
+        });
+
+        // 5i. iterIndex++（用于 RunState 恢复定位）
+        //     iterationsExecuted++（用于结果统计，无论 status 是否变化都递增）
+        iterIndex = nextIterIndex;
+        iterationsExecuted += 1;
       }
 
-      // 5d. plan 返回 taskCard=null → finalStatus="completed"，中止外层循环
-      if (!iterationFatal && planTaskCard === null) {
-        // 注：只有当 plan 阶段 success 且 taskCard=null 才视为"全部任务完成"
-        const planResult = iterationResults.find((r) => r.stage === "plan");
-        if (planResult && planResult.kind === "success") {
-          status = "completed";
-          finalStatus = "completed";
-          this.log(`AutonomousOrchestrator.run 迭代 ${iterIndex} 检测到 plan 返回 taskCard=null，全部任务完成`, "info");
-        }
+      // 6. 迭代次数用尽 → finalStatus="failed"
+      if (status === "running") {
+        status = "failed";
+        finalStatus = "failed";
+        this.log(`AutonomousOrchestrator.run 迭代次数用尽（${maxIterations}），finalStatus=failed`, "warn");
       }
 
-      // 5e. verify 通过 + stopWhen 命中 → finalStatus="stop_when"，中止外层循环
-      if (status === "running" && !iterationFatal && !iterationFailed) {
-        if (this.checkStopWhenHit(stopWhen, iterationResults)) {
-          status = "stop_when";
-          finalStatus = "stop_when";
-          this.log(`AutonomousOrchestrator.run 迭代 ${iterIndex} 命中 stop_when 条件：${stopWhen}`, "info");
-        }
-      }
-
-      // 5f. consecutiveFailures >= abort 阈值 → finalStatus="aborted"
-      if (status === "running" && consecutiveFailures >= consecutiveFailureAbort) {
-        status = "aborted";
-        finalStatus = "aborted";
-        this.log(
-          `AutonomousOrchestrator.run 迭代 ${iterIndex} 连续失败 ${consecutiveFailures} 次达到阈值 ${consecutiveFailureAbort}，触发 abort`,
-          "error"
-        );
-      }
-
-      // 5g. 保存 RunState 快照（每次迭代后）
-      const nextIterIndex = status === "running" ? iterIndex + 1 : iterIndex;
-      const nextStage: "plan" | "dev" | "verify" | "fix" =
-        status === "running" ? "plan" : (this.getLastExecutedStage(iterationResults) ?? "plan");
-      const updatedRunState = await this.safeSaveRunState(currentRunState, {
-        iterIndex: nextIterIndex,
-        currentStage: nextStage,
-        completedStages: this.computeCompletedStages(iterationResults, status),
-        completedLoops: Object.freeze([...completedLoops]),
+      // 7. 构造 AutonomousRunResult
+      const durationSec = Math.floor((Date.now() - startTime) / 1000);
+      const exitCode = this.computeExitCode(finalStatus);
+      const finalReport = this.generateFinalReport({
+        runId,
+        objective,
+        finalStatus,
+        exitCode,
+        totalIterations: iterationsExecuted,
         totalLlmCallCount,
         totalTokensUsed,
+        durationSec,
+        milestones,
+        triggeredGuards,
         consecutiveFailures,
-        lastGuardTriggered: triggeredGuards.length > 0 ? triggeredGuards[triggeredGuards.length - 1]!.ruleId : null,
-        status: status === "running" ? "running" : this.mapToRunStateStatus(status),
+        maxIterations,
+        lastFatalStage,
+        lastFatalReason,
       });
-      if (updatedRunState !== null) {
-        currentRunState = updatedRunState;
-      }
 
-      // 5h. 追加 notes 段落（每次迭代后）
-      await this.safeAppendNotes(runId, projectRoot, {
-        iterIndex,
-        iterationResults,
-        iterationFatal,
-        iterationFailed,
-        status,
+      const blockageReport =
+        finalStatus === "aborted" || finalStatus === "failed"
+          ? this.generateBlockageReport({
+              runId,
+              iterIndex: iterationsExecuted > 0 ? iterationsExecuted - 1 : 0,
+              loopType: initialLoop,
+              lastFatalStage,
+              lastFatalReason,
+              consecutiveFailures,
+              triggeredGuards,
+            })
+          : undefined;
+
+      result = Object.freeze({
+        runId,
         finalStatus,
+        exitCode,
+        completedLoops: Object.freeze([...completedLoops]),
+        milestones: Object.freeze([...milestones]),
+        totalIterations: iterationsExecuted,
+        totalLlmCallCount,
+        totalTokensUsed,
+        durationSec,
+        finalReport,
+        blockageReport,
+        triggeredGuards: Object.freeze([...triggeredGuards]),
       });
 
-      // 5i. iterIndex++（用于 RunState 恢复定位）
-      //     iterationsExecuted++（用于结果统计，无论 status 是否变化都递增）
-      iterIndex = nextIterIndex;
-      iterationsExecuted += 1;
+      this.log(
+        `AutonomousOrchestrator.run 结束：runId=${runId} finalStatus=${finalStatus} exitCode=${exitCode} iterations=${iterationsExecuted} duration=${durationSec}s`,
+        "info"
+      );
+    } finally {
+      // 无论 run() 以何种方式退出（成功/失败/中止/异常），清理 abort 标志文件
+      // 避免遗留的 abort 文件影响下次同 runId 的运行
+      this.cleanupAbortFlag(runId, projectRoot);
     }
-
-    // 6. 迭代次数用尽 → finalStatus="failed"
-    if (status === "running") {
-      status = "failed";
-      finalStatus = "failed";
-      this.log(`AutonomousOrchestrator.run 迭代次数用尽（${maxIterations}），finalStatus=failed`, "warn");
-    }
-
-    // 7. 构造 AutonomousRunResult
-    const durationSec = Math.floor((Date.now() - startTime) / 1000);
-    const exitCode = this.computeExitCode(finalStatus);
-    const finalReport = this.generateFinalReport({
-      runId,
-      objective,
-      finalStatus,
-      exitCode,
-      totalIterations: iterationsExecuted,
-      totalLlmCallCount,
-      totalTokensUsed,
-      durationSec,
-      milestones,
-      triggeredGuards,
-      consecutiveFailures,
-      maxIterations,
-      lastFatalStage,
-      lastFatalReason,
-    });
-
-    const blockageReport =
-      finalStatus === "aborted" || finalStatus === "failed"
-        ? this.generateBlockageReport({
-            runId,
-            iterIndex: iterationsExecuted > 0 ? iterationsExecuted - 1 : 0,
-            loopType: initialLoop,
-            lastFatalStage,
-            lastFatalReason,
-            consecutiveFailures,
-            triggeredGuards,
-          })
-        : undefined;
-
-    const result: AutonomousRunResult = Object.freeze({
-      runId,
-      finalStatus,
-      exitCode,
-      completedLoops: Object.freeze([...completedLoops]),
-      milestones: Object.freeze([...milestones]),
-      totalIterations: iterationsExecuted,
-      totalLlmCallCount,
-      totalTokensUsed,
-      durationSec,
-      finalReport,
-      blockageReport,
-      triggeredGuards: Object.freeze([...triggeredGuards]),
-    });
-
-    this.log(
-      `AutonomousOrchestrator.run 结束：runId=${runId} finalStatus=${finalStatus} exitCode=${exitCode} iterations=${iterationsExecuted} duration=${durationSec}s`,
-      "info"
-    );
 
     return result;
+  }
+
+  // ------------------------------------------------------------------------
+  // 公共 API：status() / stop()（TASK-P5-3.1-005 / 006）
+  // ------------------------------------------------------------------------
+
+  /**
+   * 查询运行状态（TASK-P5-3.1-005 验收标准 3）
+   *
+   * 从 RunStateStore 加载 runId 的最新状态快照，格式化为 Markdown 进度报告。
+   * 支持查询正在运行和已完成的运行。
+   *
+   * 注意：P5RunState 不含 milestones 字段（milestones 是 run() 内部局部变量），
+   * 因此 AutonomousStatusResult 也不返回 milestones。如需查询里程碑，
+   * 请在 run() 完成后从 AutonomousRunResult.milestones 获取。
+   *
+   * @param runId 运行 ID
+   * @param projectRoot 项目根目录（用于定位 RunStateStore）
+   * @returns 状态查询结果（含 Markdown 报告，冻结对象）
+   */
+  async status(runId: string, projectRoot: string): Promise<Readonly<AutonomousStatusResult>> {
+    // 1. 校验入参
+    if (typeof runId !== "string" || runId.trim().length === 0) {
+      throw new Error("AutonomousOrchestrator.status 失败：runId 必须为非空字符串");
+    }
+    if (typeof projectRoot !== "string" || projectRoot.trim().length === 0) {
+      throw new Error("AutonomousOrchestrator.status 失败：projectRoot 必须为非空字符串");
+    }
+
+    const projectRootAbs = path.resolve(projectRoot);
+    this.log(`AutonomousOrchestrator.status 查询：runId=${runId} projectRoot=${projectRootAbs}`, "info");
+
+    // 2. 尝试从 RunStateStore 加载最新状态
+    let runState: P5RunState;
+    try {
+      runState = await this.runStateStore.load(runId, projectRootAbs);
+    } catch (err) {
+      // 加载失败（文件不存在 / 校验失败）：返回 found=false 的结果
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this.log(`AutonomousOrchestrator.status 加载 RunState 失败：${errMsg}`, "warn");
+      const notFoundReport = this.formatStatusNotFoundReport(runId, errMsg);
+      return Object.freeze({
+        runId,
+        status: "failed" as P5RunState["status"],
+        iterIndex: 0,
+        currentStage: "plan" as P5RunState["currentStage"],
+        completedLoops: Object.freeze([]),
+        totalTokensUsed: 0,
+        totalLlmCallCount: 0,
+        consecutiveFailures: 0,
+        maxIterations: 0,
+        stopWhen: "",
+        startedAt: "",
+        updatedAt: "",
+        report: notFoundReport,
+        found: false,
+      });
+    }
+
+    // 3. 格式化 Markdown 报告
+    const report = this.formatStatusReport(runState);
+
+    // 4. 构造并返回冻结的结果对象
+    return Object.freeze({
+      runId,
+      status: runState.status,
+      iterIndex: runState.iterIndex,
+      currentStage: runState.currentStage,
+      completedLoops: runState.completedLoops,
+      totalTokensUsed: runState.totalTokensUsed,
+      totalLlmCallCount: runState.totalLlmCallCount,
+      consecutiveFailures: runState.consecutiveFailures,
+      maxIterations: runState.maxIterations,
+      stopWhen: runState.stopWhen,
+      startedAt: runState.startedAt,
+      updatedAt: runState.updatedAt,
+      report,
+      found: true,
+    });
+  }
+
+  /**
+   * 中止运行或返回回滚所需信息（TASK-P5-3.1-006 验收标准 1）
+   *
+   * 行为取决于运行状态：
+   * - status="running"/"paused"：创建 abort 标志文件，run() 在下次迭代时检测并中止
+   * - status="completed"/"failed"/"aborted"：返回回滚所需信息（HEAD SHA + 未提交清单）
+   *
+   * Phase 5.2 版的回滚信息：
+   * - 不返回 git tag（run() 不创建 tag，P5RunState 无 commitSha 字段）
+   * - 仅返回当前 HEAD SHA（通过 git rev-parse HEAD 获取）
+   * - 返回未提交改动文件清单（通过 git status --porcelain 获取）
+   * - 由用户手动执行 git reset --hard <sha> 完成回滚
+   *
+   * @param runId 运行 ID
+   * @param projectRoot 项目根目录
+   * @returns 中止/回滚结果（含 Markdown 报告，冻结对象）
+   */
+  async stop(runId: string, projectRoot: string): Promise<Readonly<AutonomousStopResult>> {
+    // 1. 校验入参
+    if (typeof runId !== "string" || runId.trim().length === 0) {
+      throw new Error("AutonomousOrchestrator.stop 失败：runId 必须为非空字符串");
+    }
+    if (typeof projectRoot !== "string" || projectRoot.trim().length === 0) {
+      throw new Error("AutonomousOrchestrator.stop 失败：projectRoot 必须为非空字符串");
+    }
+
+    const projectRootAbs = path.resolve(projectRoot);
+    this.log(`AutonomousOrchestrator.stop 请求：runId=${runId} projectRoot=${projectRootAbs}`, "info");
+
+    // 2. 尝试从 RunStateStore 加载最新状态
+    let runState: P5RunState;
+    try {
+      runState = await this.runStateStore.load(runId, projectRootAbs);
+    } catch (err) {
+      // 加载失败（文件不存在 / 校验失败）：返回 success=false 的结果
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this.log(`AutonomousOrchestrator.stop 加载 RunState 失败：${errMsg}`, "warn");
+      const notFoundReport = this.formatStopNotFoundReport(runId, errMsg);
+      return Object.freeze({
+        runId,
+        action: "abort" as const,
+        success: false,
+        runStatus: "failed" as P5RunState["status"],
+        report: notFoundReport,
+      });
+    }
+
+    // 3. 根据运行状态分流
+    if (runState.status === "running" || runState.status === "paused") {
+      // 3a. 正在运行或暂停：创建 abort 标志文件
+      return await this.createAbortFlag(runId, projectRootAbs, runState);
+    } else {
+      // 3b. 已完成/失败/中止：返回回滚信息（HEAD SHA + 未提交清单）
+      return await this.collectRollbackInfo(runId, projectRootAbs, runState);
+    }
+  }
+
+  // ------------------------------------------------------------------------
+  // 私有方法：status() 辅助方法
+  // ------------------------------------------------------------------------
+
+  /**
+   * 格式化状态查询的 Markdown 报告
+   *
+   * @param runState 最新 RunState 快照
+   * @returns Markdown 格式的状态报告
+   */
+  private formatStatusReport(runState: Readonly<P5RunState>): string {
+    const lines: string[] = [];
+    lines.push("## Autonomous Run Status");
+    lines.push("");
+    lines.push("| 字段 | 值 |");
+    lines.push("|------|-----|");
+    lines.push(`| Run ID | ${runState.runId} |`);
+    lines.push(`| 状态 | ${runState.status} |`);
+    lines.push(`| 当前阶段 | ${runState.currentStage} |`);
+    lines.push(`| 迭代次数 | ${runState.iterIndex} / ${runState.maxIterations} |`);
+    lines.push(`| 完成 Loops | ${runState.completedLoops.join(", ") || "（无）"} |`);
+    lines.push(`| Token 消耗 | ${runState.totalTokensUsed} |`);
+    lines.push(`| LLM 调用 | ${runState.totalLlmCallCount} |`);
+    lines.push(`| 连续失败 | ${runState.consecutiveFailures} |`);
+    lines.push(`| 启动时间 | ${runState.startedAt} |`);
+    lines.push(`| 最近更新 | ${runState.updatedAt} |`);
+    lines.push(`| stop_when | ${runState.stopWhen || "（未设置）"} |`);
+    return lines.join("\n");
+  }
+
+  /**
+   * 格式化状态查询"未找到"的 Markdown 报告
+   *
+   * @param runId 运行 ID
+   * @param errMsg 错误信息
+   * @returns Markdown 格式的错误报告
+   */
+  private formatStatusNotFoundReport(runId: string, errMsg: string): string {
+    const lines: string[] = [];
+    lines.push("## Autonomous Run Status");
+    lines.push("");
+    lines.push(`**未找到 runId=${runId} 的状态文件**`);
+    lines.push("");
+    lines.push(`错误详情：${errMsg}`);
+    lines.push("");
+    lines.push("可能原因：");
+    lines.push("- runId 拼写错误");
+    lines.push("- 运行尚未启动");
+    lines.push("- 状态文件已被清理");
+    return lines.join("\n");
+  }
+
+  // ------------------------------------------------------------------------
+  // 私有方法：stop() 辅助方法
+  // ------------------------------------------------------------------------
+
+  /**
+   * 创建 abort 标志文件（中止正在运行的会话）
+   *
+   * @param runId 运行 ID
+   * @param projectRootAbs 项目根目录（绝对路径）
+   * @param runState 最新 RunState 快照
+   * @returns 中止结果（含 Markdown 报告，冻结对象）
+   */
+  private async createAbortFlag(
+    runId: string,
+    projectRootAbs: string,
+    runState: Readonly<P5RunState>
+  ): Promise<Readonly<AutonomousStopResult>> {
+    try {
+      // 1. 确保 abort-flags 目录存在
+      const abortFlagsDir = path.join(projectRootAbs, ABORT_FLAGS_DIR);
+      if (!fs.existsSync(abortFlagsDir)) {
+        fs.mkdirSync(abortFlagsDir, { recursive: true });
+        this.log(`已创建 abort 标志目录：${abortFlagsDir}`, "info");
+      }
+
+      // 2. 创建 abort 标志文件（空文件，仅作为存在性标志）
+      const abortFilePath = path.join(abortFlagsDir, `${runId}${ABORT_FILE_EXTENSION}`);
+      // 幂等性：文件已存在时不报错，覆盖写入即可
+      fs.writeFileSync(abortFilePath, "", { encoding: "utf-8" });
+      this.log(`已创建 abort 标志文件：${abortFilePath}`, "info");
+
+      // 3. 构造 Markdown 报告
+      const report = this.formatAbortReport(runId, runState);
+
+      return Object.freeze({
+        runId,
+        action: "abort" as const,
+        success: true,
+        runStatus: runState.status,
+        report,
+      });
+    } catch (err) {
+      // 创建 abort 文件失败：返回 success=false 的结果
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this.log(`创建 abort 标志文件失败：${errMsg}`, "error");
+      const report = this.formatAbortFailureReport(runId, runState, errMsg);
+      return Object.freeze({
+        runId,
+        action: "abort" as const,
+        success: false,
+        runStatus: runState.status,
+        report,
+      });
+    }
+  }
+
+  /**
+   * 收集回滚信息（HEAD SHA + 未提交清单）
+   *
+   * @param runId 运行 ID
+   * @param projectRootAbs 项目根目录（绝对路径）
+   * @param runState 最新 RunState 快照
+   * @returns 回滚结果（含 Markdown 报告，冻结对象）
+   */
+  private async collectRollbackInfo(
+    runId: string,
+    projectRootAbs: string,
+    runState: Readonly<P5RunState>
+  ): Promise<Readonly<AutonomousStopResult>> {
+    let headSha = "";
+    let uncommittedFiles: string[] = [];
+    let gitError: string | null = null;
+
+    try {
+      // 1. 获取当前 HEAD SHA
+      const headShaRaw = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: projectRootAbs,
+        encoding: "utf-8",
+        timeout: 10_000,
+      }).trim();
+      headSha = headShaRaw;
+    } catch (err) {
+      gitError = err instanceof Error ? err.message : String(err);
+      this.log(`获取 HEAD SHA 失败：${gitError}`, "warn");
+    }
+
+    try {
+      // 2. 获取未提交改动文件清单
+      // 注：使用 --untracked-files=all 展开未跟踪目录下的所有文件，
+      //     避免默认行为将未跟踪目录折叠为 "?? src/" 而丢失具体文件路径，
+      //     确保回滚清单完整（用户据此手动 git reset 后能完整评估影响范围）。
+      //     使用长格式 --untracked-files=all 而非 -u all，避免 shell 参数分割歧义
+      //     （-u all 在某些 shell 中会被解析为 -u + 路径参数 "all"，导致输出为空）
+      const statusOutput = execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], {
+        cwd: projectRootAbs,
+        encoding: "utf-8",
+        timeout: 10_000,
+      }).trim();
+      // 解析 porcelain 输出：每行前 3 字符为状态码（2 字符状态 + 1 字符空格），后续为文件路径
+      // 注意：对于含空格/特殊字符的文件名，git 会用双引号包裹并 C 转义，
+      //       此处仅做 trim 去除首尾空白，不剥离引号（保持与 git 输出一致，便于用户识别）
+      if (statusOutput.length > 0) {
+        uncommittedFiles = statusOutput
+          .split("\n")
+          .map((line) => line.slice(3).trim())
+          .filter((filePath) => filePath.length > 0);
+      }
+    } catch (err) {
+      // 如果 HEAD SHA 也失败了，不再重复记录；否则记录此次失败
+      const msg = err instanceof Error ? err.message : String(err);
+      if (gitError === null) {
+        gitError = msg;
+      }
+      this.log(`获取未提交清单失败：${msg}`, "warn");
+    }
+
+    // 3. 构造 Markdown 报告
+    const report = this.formatRollbackReport(runId, runState, headSha, uncommittedFiles, gitError);
+
+    return Object.freeze({
+      runId,
+      action: "rollback" as const,
+      success: true,
+      runStatus: runState.status,
+      ...(headSha.length > 0 ? { headSha } : {}),
+      ...(uncommittedFiles.length > 0 ? { uncommittedFiles: Object.freeze([...uncommittedFiles]) } : {}),
+      report,
+    });
+  }
+
+  /**
+   * 格式化中止成功的 Markdown 报告
+   *
+   * @param runId 运行 ID
+   * @param runState 最新 RunState 快照
+   * @returns Markdown 格式的中止报告
+   */
+  private formatAbortReport(runId: string, runState: Readonly<P5RunState>): string {
+    const lines: string[] = [];
+    lines.push("## Autonomous Run Stop (Abort)");
+    lines.push("");
+    lines.push(`- **Run ID**：${runId}`);
+    lines.push(`- **操作**：已创建 abort 标志文件`);
+    lines.push(`- **当前状态**：${runState.status}`);
+    lines.push(`- **当前迭代**：${runState.iterIndex} / ${runState.maxIterations}`);
+    lines.push(`- **当前阶段**：${runState.currentStage}`);
+    lines.push("");
+    lines.push("**说明**：");
+    lines.push("- abort 标志文件已创建，run() 将在下次迭代开始时检测并中止");
+    lines.push("- 如果当前迭代正在执行长耗时操作（如 LLM 调用），中止可能延迟");
+    lines.push("- run() 中止后会自动清理 abort 标志文件");
+    return lines.join("\n");
+  }
+
+  /**
+   * 格式化中止失败的 Markdown 报告
+   *
+   * @param runId 运行 ID
+   * @param runState 最新 RunState 快照
+   * @param errMsg 错误信息
+   * @returns Markdown 格式的失败报告
+   */
+  private formatAbortFailureReport(runId: string, runState: Readonly<P5RunState>, errMsg: string): string {
+    const lines: string[] = [];
+    lines.push("## Autonomous Run Stop (Abort Failed)");
+    lines.push("");
+    lines.push(`- **Run ID**：${runId}`);
+    lines.push(`- **操作**：创建 abort 标志文件失败`);
+    lines.push(`- **当前状态**：${runState.status}`);
+    lines.push(`- **错误信息**：${errMsg}`);
+    lines.push("");
+    lines.push("**建议排查方向**：");
+    lines.push("- 检查 projectRoot 是否有写入权限");
+    lines.push("- 检查 .eag/p5/abort-flags/ 目录是否可创建");
+    return lines.join("\n");
+  }
+
+  /**
+   * 格式化回滚信息的 Markdown 报告
+   *
+   * @param runId 运行 ID
+   * @param runState 最新 RunState 快照
+   * @param headSha 当前 HEAD SHA（可能为空）
+   * @param uncommittedFiles 未提交改动文件清单
+   * @param gitError git 命令错误信息（无错误时为 null）
+   * @returns Markdown 格式的回滚报告
+   */
+  private formatRollbackReport(
+    runId: string,
+    runState: Readonly<P5RunState>,
+    headSha: string,
+    uncommittedFiles: ReadonlyArray<string>,
+    gitError: string | null
+  ): string {
+    const lines: string[] = [];
+    lines.push("## Autonomous Run Stop (Rollback Info)");
+    lines.push("");
+    lines.push(`- **Run ID**：${runId}`);
+    lines.push(`- **操作**：返回回滚信息`);
+    lines.push(`- **运行状态**：${runState.status}`);
+    lines.push(`- **最终迭代**：${runState.iterIndex} / ${runState.maxIterations}`);
+    lines.push("");
+
+    if (gitError !== null) {
+      lines.push(`**⚠️ Git 命令执行失败**：${gitError}`);
+      lines.push("");
+      lines.push("可能原因：projectRoot 不是 git 仓库，或 git 不可用");
+      lines.push("");
+    }
+
+    if (headSha.length > 0) {
+      lines.push(`- **当前 HEAD SHA**：\`${headSha}\``);
+    } else {
+      lines.push("- **当前 HEAD SHA**：（获取失败）");
+    }
+
+    if (uncommittedFiles.length > 0) {
+      lines.push(`- **未提交改动文件**（${uncommittedFiles.length} 个）：`);
+      for (const file of uncommittedFiles) {
+        lines.push(`  - ${file}`);
+      }
+    } else {
+      lines.push("- **未提交改动文件**：（无）");
+    }
+
+    lines.push("");
+    lines.push("**手动回滚命令**（请确认后执行）：");
+    if (headSha.length > 0) {
+      lines.push("```bash");
+      lines.push(`git reset --hard ${headSha}`);
+      lines.push("```");
+    } else {
+      lines.push("（无法获取 HEAD SHA，请手动检查 git log 确定回滚目标）");
+    }
+    return lines.join("\n");
+  }
+
+  /**
+   * 格式化 stop() "未找到"的 Markdown 报告
+   *
+   * @param runId 运行 ID
+   * @param errMsg 错误信息
+   * @returns Markdown 格式的错误报告
+   */
+  private formatStopNotFoundReport(runId: string, errMsg: string): string {
+    const lines: string[] = [];
+    lines.push("## Autonomous Run Stop (Not Found)");
+    lines.push("");
+    lines.push(`**未找到 runId=${runId} 的状态文件**`);
+    lines.push("");
+    lines.push(`错误详情：${errMsg}`);
+    lines.push("");
+    lines.push("可能原因：");
+    lines.push("- runId 拼写错误");
+    lines.push("- 运行尚未启动");
+    lines.push("- 状态文件已被清理");
+    return lines.join("\n");
+  }
+
+  /**
+   * 清理 abort 标志文件（私有方法）
+   *
+   * 在 run() 的 finally 块中调用，确保无论 run() 以何种方式退出，
+   * abort 标志文件都被清理，避免遗留文件影响后续运行。
+   *
+   * 容错策略：
+   * - 文件不存在：静默跳过（无需日志）
+   * - 删除失败：仅记录 WARN 日志，不抛异常（避免影响 run() 的正常退出）
+   *
+   * @param runId 运行 ID
+   * @param projectRoot 项目根目录（已 resolve 的绝对路径）
+   */
+  private cleanupAbortFlag(runId: string, projectRoot: string): void {
+    try {
+      const abortFilePath = path.join(projectRoot, ABORT_FLAGS_DIR, `${runId}${ABORT_FILE_EXTENSION}`);
+      if (fs.existsSync(abortFilePath)) {
+        fs.unlinkSync(abortFilePath);
+        this.log(`已清理 abort 标志文件: ${abortFilePath}`, "info");
+      }
+    } catch (err) {
+      // 清理失败不影响 run() 退出，仅记录 WARN
+      const msg = err instanceof Error ? err.message : String(err);
+      this.log(`清理 abort 标志文件失败（不影响运行结果）: ${msg}`, "warn");
+    }
   }
 
   // ------------------------------------------------------------------------
