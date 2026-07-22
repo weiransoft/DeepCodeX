@@ -86,9 +86,10 @@ import { CONTEXT_SNIPPET_TYPE as UserMemorySnippetType } from "../memory/user-gl
 import { CONTEXT_SNIPPET_TYPE as ExperienceSnippetType } from "../memory/experience-recommender";
 import { CONTEXT_SNIPPET_TYPE as DomainSnippetType } from "../understanding/domain-modeler";
 // EAG-P0 新增导入：RLIS RuleStore（规则注入 directRetainSnippets 通道，§5.5.3）
-import type { RuleStore } from "../../eag/rlis/rule-store";
 // EAG-P1 批次 6 新增导入：RuleInjector（规则格式化注入，§5.5.3）
-import { RuleInjector } from "../../eag/rlis/rule-injector";
+// 多角色审查 ARCH-07 修复：eag 依赖改经 v1-adapters 单一入口导入（P1-05 约束）
+import type { RuleStore } from "../integration/v1-adapters";
+import { RuleInjector } from "../integration/v1-adapters";
 
 // ============================================================================
 // 类型定义

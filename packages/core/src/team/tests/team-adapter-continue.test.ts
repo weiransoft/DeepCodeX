@@ -1,15 +1,20 @@
 /**
  * executeDispatch 输出截断检测与自动续写测试（v2.1.3 验证）
  *
- * 设计文档 §6.1：8 个测试用例（TC-CONT-01 ~ TC-CONT-08）
+ * 设计文档 §6.1：13 个测试用例（TC-CONT-01 ~ TC-CONT-13）
  *   - TC-CONT-01: finish_reason="stop" 不触发续写（continueCount=0, isPartial=false）
  *   - TC-CONT-02: finish_reason="length" 触发续写（第一次 length，第二次 stop）
  *   - TC-CONT-03: 达到最大续写次数（始终 length → continueCount=3, isPartial=true）
  *   - TC-CONT-04: 续写 API 错误（第二次抛异常 → continueCount=1, isPartial=true）
- *   - TC-CONT-05: 续写返回空内容（第二次 content="" → continueCount=1, isPartial=false）
+ *   - TC-CONT-05: 续写返回空内容·length 触发（第二次 content="" → continueCount=1, isPartial=true）
  *   - TC-CONT-06: maxContinueCount=0 禁用续写（length → continueCount=0, isPartial=true）
  *   - TC-CONT-07: 续写内容拼接正确性（"part1" + "part2" = "part1part2"）
  *   - TC-CONT-08: token 用量累加（两次各 100 tokens → total=200）
+ *   - TC-CONT-09: 续写消息包含完整上下文（system+user+assistant+user 4 条）
+ *   - TC-CONT-10: finish_reason=stop + 继续关键字触发续写（v1.1）
+ *   - TC-CONT-11: finish_reason=stop + 无继续关键字不触发续写（v1.1）
+ *   - TC-CONT-12: 继续关键字在正文中间不触发续写（v1.1）
+ *   - TC-CONT-13: stop+关键字触发 + 续写返回空内容（isPartial=false，token 计入）
  *
  * 严格遵循用户规则：
  *   - 禁止 mock：stub client 是真实接口契约的固定响应
@@ -287,15 +292,18 @@ test("TC-CONT-04: 续写 API 错误", async () => {
 });
 
 /**
- * TC-CONT-05: 续写返回空内容
+ * TC-CONT-05: 续写返回空内容（length 截断触发）
  *
- * 场景：第一次返回 length，第二次续写返回 content=""
- * 期望：continueCount=1, isPartial=false（不再续写但不算 partial）, error 警告
+ * 场景：第一次返回 length（确定截断），第二次续写返回 content=""
+ * 期望：continueCount=1, isPartial=true（确定截断+续写未完成）, error 警告, token 计入
  *
  * v2.1.3 修正：continueCount 在 try 块开头自增，所以续写返回空内容时 continueCount=1
- * 注意：续写返回空内容时不标记为 isPartial（因为有可能是 LLM 主动停止）
+ * 多角色审查 ARCH-01/TEST-02 修正：
+ * - length 触发 + 空续写 → 输出确定不完整，isPartial=true（与 types.ts 契约一致）；
+ *   stop+关键字触发 + 空续写 → 可能 LLM 主动停止，isPartial=false（见 TC-CONT-13）
+ * - 空续写消耗的 token 也必须累加进 tokensConsumed（调用已实际发生）
  */
-test("TC-CONT-05: 续写返回空内容", async () => {
+test("TC-CONT-05: 续写返回空内容（length 触发，isPartial=true）", async () => {
   const restoreEnv = isolateOpenAIEnv();
   try {
     const task = buildTask({ title: "测试", description: "描述" });
@@ -318,14 +326,16 @@ test("TC-CONT-05: 续写返回空内容", async () => {
     assert.equal(result.status, "succeeded");
     // 断言 2：尝试了 1 次续写（虽然返回空内容）
     assert.equal(result.continueCount, 1, "应记录 1 次续写尝试");
-    // 断言 3：isPartial=false（空内容不算 partial，只是停止续写）
-    assert.equal(result.isPartial, false, "续写返回空内容时 isPartial 应为 false");
+    // 断言 3：isPartial=true（length 确定截断 + 续写未完成）
+    assert.equal(result.isPartial, true, "length 截断 + 空续写时 isPartial 应为 true");
     // 断言 4：error 包含警告信息
     assert.ok(result.error?.includes("空内容"), `error 应含 "空内容" 警告，实际: ${result.error}`);
     // 断言 5：output 保留首次内容
     assert.equal(result.output, "partial content", "应保留首次调用的输出");
     // 断言 6：共调用 2 次 LLM
     assert.equal(calls.length, 2, "应调用 2 次 LLM");
+    // 断言 7：空续写消耗的 token 也计入（100 + 50 = 150）
+    assert.equal(result.tokensConsumed.total, 150, "空续写的 token 也应计入总量");
   } finally {
     restoreEnv();
   }
@@ -662,6 +672,65 @@ test("TC-CONT-12: 继续关键字在正文中间不触发续写", async () => {
     assert.equal(calls.length, 1, "不应触发续写调用");
     // 断言 5：output 为完整内容
     assert.equal(result.output, content, "output 应为完整的单次调用内容");
+  } finally {
+    restoreEnv();
+  }
+});
+
+/**
+ * TC-CONT-13: stop+继续关键字触发续写 + 续写返回空内容（isPartial=false）
+ *
+ * 场景：第一次 finish_reason="stop" 但末尾含继续关键字（触发续写），
+ *       第二次续写返回 content=""（可能为 LLM 主动停止，输出未必截断）
+ *
+ * 期望（多角色审查 ARCH-01 语义边界锁定）：
+ *   - continueCount=1（记录了续写尝试）
+ *   - isPartial=false（stop 触发 + 空续写 ≠ 确定截断，不标记 partial）
+ *   - error 含"空内容"警告
+ *   - output 保留首次内容
+ *   - 空续写消耗的 token 也计入 tokensConsumed（TEST-02 修复锁定）
+ *
+ * 与 TC-CONT-05 的语义对照：
+ *   TC-CONT-05 是 length（确定截断）触发 + 空续写 → isPartial=true；
+ *   本用例是 stop+关键字（推测截断）触发 + 空续写 → isPartial=false。
+ */
+test("TC-CONT-13: stop+关键字触发 + 续写返回空内容（isPartial=false）", async () => {
+  const restoreEnv = isolateOpenAIEnv();
+  try {
+    const task = buildTask({ title: "测试", description: "描述" });
+
+    // 第一次：stop 但末尾含继续关键字（>200 字符确保关键字在末尾 200 内）
+    const firstContent = "a".repeat(250) + "\n\n由于输出较长,我将继续在下一条消息中完成剩余内容";
+
+    const { handle, calls } = buildSequenceStubClient([
+      {
+        content: firstContent,
+        finishReason: "stop",
+        usage: { total_tokens: 100 },
+      },
+      {
+        content: "", // 续写返回空内容
+        finishReason: "stop",
+        usage: { total_tokens: 50 },
+      },
+    ]);
+
+    const result = await executeDispatch(task, { injectedClient: handle });
+
+    // 断言 1：status=succeeded
+    assert.equal(result.status, "succeeded");
+    // 断言 2：记录了 1 次续写尝试
+    assert.equal(result.continueCount, 1, "应记录 1 次续写尝试");
+    // 断言 3：isPartial=false（stop 触发 + 空续写，可能为 LLM 主动停止）
+    assert.equal(result.isPartial, false, "stop 触发 + 空续写时 isPartial 应为 false");
+    // 断言 4：error 含"空内容"警告
+    assert.ok(result.error?.includes("空内容"), `error 应含 "空内容" 警告，实际: ${result.error}`);
+    // 断言 5：output 保留首次内容
+    assert.equal(result.output, firstContent, "应保留首次调用的输出");
+    // 断言 6：共调用 2 次 LLM
+    assert.equal(calls.length, 2, "应调用 2 次 LLM");
+    // 断言 7：空续写消耗的 token 也计入（100 + 50 = 150）
+    assert.equal(result.tokensConsumed.total, 150, "空续写的 token 也应计入总量");
   } finally {
     restoreEnv();
   }

@@ -56,7 +56,16 @@ export default tseslint.config(
         {
           patterns: [
             {
-              group: ["../../team/*", "../../common/*", "../../tools/*", "../../session*", "../../settings*"],
+              // 多角色审查 ARCH-07 修复：补 "../../eag/*"——
+              // dual-layer-manager 曾直接 import ../../eag/rlis/* 绕过单一入口门禁
+              group: [
+                "../../team/*",
+                "../../common/*",
+                "../../tools/*",
+                "../../session*",
+                "../../settings*",
+                "../../eag/*",
+              ],
               message:
                 "V2 模块禁止直接 import V1 文件（V2.3 P1-05 单一入口约束）。请从 ../../integration/v1-adapters 导入 V1 能力；若依赖缺失，请在 v1-adapters.ts 中补充 re-export。",
             },

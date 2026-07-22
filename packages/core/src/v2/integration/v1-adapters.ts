@@ -186,3 +186,13 @@ export { DEFAULT_BASE_URL } from "../../settings";
 // V2 prompt 模块（role-prompt-customizer）需要 KARPATHY_PREAMBLE 常量拼接角色
 // prompt。V2 模块禁止直接 import V1 文件（P1-05 单一入口约束），经此 re-export。
 export { KARPATHY_PREAMBLE } from "../../team/karpathy-preamble";
+
+// ============================================================================
+// 13. eag/rlis（规则注入：RuleStore 类型 + RuleInjector）
+// ============================================================================
+// V2 context 模块（dual-layer-manager）需要 RuleStore 契约做规则存储注入、
+// RuleInjector 做规则格式化注入（§5.5.3 directRetainSnippets 通道）。
+// 多角色审查 ARCH-07 修复：eag 依赖同样纳入单一入口约束（eslint 门禁已补
+// "../../eag/*" 模式），V2 模块禁止直接 import eag 文件，经此 re-export。
+export { RuleInjector } from "../../eag/rlis/rule-injector";
+export type { RuleStore } from "../../eag/rlis/rule-store";
