@@ -1,7 +1,7 @@
 {
   "provider": "anthropic",
   "env": {
-    "API_KEY": "sk-AYGb8HrZfUhme7dc2Ed67IPfsdCeqV4r2BYUIEOM3a0Wqrr2",
+    "API_KEY": "<placeholder: 由 DEEPCODE_API_KEY 环境变量注入（systemEnv 优先级高于本配置文件），禁止将真实密钥写入本文件>",
     "BASE_URL": "https://api2.moka-ai.com/v1",
     "MODEL": "moka/claude-sonnet-4-6"
   },

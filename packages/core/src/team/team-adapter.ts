@@ -849,6 +849,17 @@ export async function executeDispatch(
     /** 累计的完整输出内容（首次内容 + 续写内容拼接） */
     let fullContent = firstResult.content;
 
+    /**
+     * 最近一次 LLM 响应的内容块（多角色审查 ARCH-08 修复）
+     *
+     * 续写意图检测只针对最近一次响应的内容块，而非拼接后的累计内容——
+     * 若检测 fullContent，短续写块（<200 字符）会让前一块末尾的继续关键字
+     * "滞留"在检测窗口内，shouldContinue 误判为 true，导致：
+     * 多余续写调用 + 相同收尾内容被重复拼接 + isPartial 被误标记。
+     * 初始值为首次响应内容；每次续写成功（内容非空）后更新为本次续写块。
+     */
+    let lastChunk = firstResult.content;
+
     /** 累计的 token 用量（首次 + 所有续写） */
     const totalUsage = {
       prompt: firstResult.usage.promptTokens,
@@ -875,7 +886,9 @@ export async function executeDispatch(
     // v1.1 扩展：续写触发条件从单一的 finish_reason="length" 扩展为 shouldContinue()：
     // 1. finish_reason="length"（maxTokens 截断）
     // 2. finish_reason="stop" && detectContinueIntention(content)（LLM 主动停止但表示要继续）
-    while (shouldContinue(currentFinishReason, fullContent) && continueCount < maxContinueCount) {
+    //
+    // ARCH-08 修正：意图检测针对 lastChunk（最近一次响应块）而非 fullContent（累计内容）
+    while (shouldContinue(currentFinishReason, lastChunk) && continueCount < maxContinueCount) {
       // 先自增 continueCount，表示"开始尝试第 N 次续写"
       continueCount++;
       onProgress?.("running", `LLM 输出被截断，正在续写 ${continueCount}/${maxContinueCount}...`);
@@ -917,10 +930,14 @@ export async function executeDispatch(
         // 拼接续写内容（直接拼接，不添加分隔符）
         fullContent += continueResult.content;
 
+        // ARCH-08：更新最近响应块——后续意图检测针对该块，
+        // 避免前序块末尾的继续关键字在短块场景下"滞留"检测窗口导致误判
+        lastChunk = continueResult.content;
+
         currentFinishReason = continueResult.finishReason;
 
         // 续写完成（不需要继续续写）
-        if (!shouldContinue(currentFinishReason, fullContent)) {
+        if (!shouldContinue(currentFinishReason, lastChunk)) {
           break;
         }
       } catch (continueErr) {
@@ -933,7 +950,13 @@ export async function executeDispatch(
     }
 
     // 达到最大续写次数仍需续写：标记为 partial
-    if (shouldContinue(currentFinishReason, fullContent) && continueCount === maxContinueCount) {
+    // 多角色审查 ARCH-09 修复：!partialError 前置——
+    // 若循环因空内容/API 错误经 break 退出（partialError 已设置精确语义），
+    // 不覆盖为通用文案（如空续写恰好发生在最后一次尝试时，
+    // 保留"返回空内容"警告及 ARCH-01 的 isPartial 区分语义，
+    // 且续写失败的具体错误原因不被替换、诊断信息不丢失）；
+    // 仅在循环因次数耗尽自然退出（partialError 未设置）时才标记 partial。
+    if (!partialError && shouldContinue(currentFinishReason, lastChunk) && continueCount === maxContinueCount) {
       isPartial = true;
       partialError = `输出可能不完整（达到最大续写次数 ${maxContinueCount}）`;
     }
