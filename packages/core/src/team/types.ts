@@ -203,7 +203,8 @@ export const DispatchResult = z.object({
    *
    * 含义：LLM 输出被 maxTokens 截断时自动续写的次数
    * - 0 = 未触发续写（正常完成或未启用续写）
-   * - >0 = 触发了 N 次续写
+   * - >0 = 尝试了 N 次续写（含失败/返回空内容的尝试——continueCount 在
+   *   try 块开头自增，反映"尝试次数"而非"成功次数"）
    *
    * 用途：E2E 测试和监控可据此判断 LLM 输出是否因 token 限制被截断
    */
@@ -211,7 +212,12 @@ export const DispatchResult = z.object({
   /**
    * 是否为部分输出（v2.1.3 新增）
    *
-   * 含义：true 表示输出被 maxTokens 截断且续写未完成（达到最大续写次数或续写失败）
+   * 含义：true 表示输出被 maxTokens 截断且续写未完成。具体触发路径：
+   * - 达到最大续写次数仍需续写
+   * - 续写 API 调用失败
+   * - 续写由 finish_reason="length"（确定截断）触发且续写返回空内容
+   * 例外：续写由 stop+继续关键字触发且返回空内容时不标记（可能为 LLM 主动停止），
+   * 仅在 error 字段携带警告。
    * - false = 输出完整（未截断，或截断后续写成功）
    * - true = 输出不完整（截断后续写未完成，output 字段包含已有的部分内容）
    *

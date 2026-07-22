@@ -57,7 +57,10 @@ const diffConfigSchema = z.object({
 /** Approval Gate 配置 schema（高风险，默认关闭） */
 const approvalConfigSchema = z.object({
   enabled: z.boolean().default(false),
-  approvalMode: z.enum(["suggest", "auto-approve", "fail-closed"]).default("suggest"),
+  // 多角色审查 DOC-D2-01 修复：approvalMode 枚举必须与 v2/approval/types.ts 的
+  // ApprovalMode（"suggest" | "auto" | "never"）及技术设计文档 §4.2.1 对齐，
+  // 否则配置层通过的合法值在 ApprovalGate.evaluate 中永不命中对应分支
+  approvalMode: z.enum(["suggest", "auto", "never"]).default("suggest"),
   appMode: z.enum(["agent", "yolo", "plan"]).default("agent"),
   arityDictionaryPath: z.string().optional(),
 });
@@ -248,7 +251,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /**
  * 从 ZodSchema 中提取 ZodObject（unwrap ZodDefault / ZodOptional / ZodNullable 等包裹）
  *
- * zod 6 中 .default({}) / .optional() / .nullable() 会包裹原 schema，
+ * zod 4 中 .default({}) / .prefault({}) / .optional() / .nullable() 会包裹原 schema，
  * 需要逐层 unwrap 才能获取底层的 ZodObject 以读取其 shape。
  *
  * @param schema 待解包的 ZodSchema

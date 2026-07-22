@@ -893,19 +893,29 @@ export async function executeDispatch(
           opts.timeoutMs
         );
 
-        // 续写返回空内容：停止续写，警告但不标记为 partial
+        // 先累加 token 用量（多角色审查 TEST-02 修复）：
+        // 无论续写内容是否为空，本次 API 调用已实际消耗 token，必须计入账单/配额统计
+        totalUsage.prompt += continueResult.usage.promptTokens;
+        totalUsage.completion += continueResult.usage.completionTokens;
+        totalUsage.total += continueResult.usage.totalTokens;
+
+        // 续写返回空内容：停止续写
         if (!continueResult.content) {
           partialError = `续写 ${continueCount} 返回空内容，已停止续写`;
+          // 多角色审查 ARCH-01 修复：空内容的 isPartial 语义按续写触发原因区分——
+          // 1. 若本次续写由确定截断（finish_reason="length"）触发：输出确定不完整，
+          //    必须标记 isPartial=true（与 types.ts 契约"截断且续写未完成"一致）；
+          // 2. 若由 stop+继续关键字触发：可能是 LLM 主动停止（输出未必截断），
+          //    维持仅警告不标记 isPartial。
+          // 注意：此处 currentFinishReason 仍是触发本次续写的原因（尚未被本次结果覆盖）
+          if (currentFinishReason === "length") {
+            isPartial = true;
+          }
           break;
         }
 
         // 拼接续写内容（直接拼接，不添加分隔符）
         fullContent += continueResult.content;
-
-        // 累加 token 用量
-        totalUsage.prompt += continueResult.usage.promptTokens;
-        totalUsage.completion += continueResult.usage.completionTokens;
-        totalUsage.total += continueResult.usage.totalTokens;
 
         currentFinishReason = continueResult.finishReason;
 

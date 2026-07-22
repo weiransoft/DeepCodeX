@@ -190,7 +190,10 @@ test("elapsedMs returns positive number", async () => {
     dispatcher,
   });
   await new Promise((r) => setTimeout(r, 10));
-  assert.ok(elapsedMs(ctx) >= 10);
+  // 多角色审查 TEST-01 修复：Node 计时器存在约 1ms 级提前触发/取整误差，
+  // 高负载并行运行时 setTimeout(10) 实际耗时可能为 9.x ms，断言阈值放宽为 >= 9
+  // 消除 CI 偶发假红（flaky）
+  assert.ok(elapsedMs(ctx) >= 9);
 });
 
 test("toDispatchResult creates standard result", () => {

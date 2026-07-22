@@ -165,7 +165,7 @@ v1.1 续写机制扩展已覆盖 LLM 主动停止场景：
 |------|---------|------|
 | `packages/core/src/team/team-adapter.ts` | 新增函数 + 修改循环 | 新增 `detectContinueIntention` 和 `shouldContinue` 导出函数；续写循环条件改为 `shouldContinue()` |
 | `packages/core/src/team/tests/team-adapter-continue.test.ts` | 新增测试用例 | 追加 TC-CONT-10/11/12 三个测试用例 |
-| `docs/fusion/V2_OUTPUT_TRUNCATION_DESIGN.md` | 文档更新 | §3.1/§3.2/§3.4.5/§6.1/§9 更新 |
+| `docs/fusion/V2_OUTPUT_TRUNCATION_DESIGN.md` | 文档更新 | §3.1/§3.2/§3.4.4(v1.2 重编号)/§6.1/§9 更新 |
 | `tests/fixtures/enterprise-app/reports/e2e-final-report.md` | 报告更新 | 本文件 |
 
 ### v1.1 新增测试用例

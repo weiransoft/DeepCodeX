@@ -234,7 +234,7 @@ test("CFG-10: 类型错误抛 V2ConfigError（含 keyPath 与 sourceLayer）", (
 });
 
 test("CFG-11: 非法枚举值抛 V2ConfigError", () => {
-  // approval.approvalMode 只接受 "suggest" | "auto-approve" | "fail-closed"
+  // approval.approvalMode 只接受 "suggest" | "auto" | "never"（与 v2/approval/types.ts 对齐）
   assert.throws(
     () => {
       mergeV2Config(
