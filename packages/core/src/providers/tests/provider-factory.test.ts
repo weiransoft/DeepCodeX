@@ -46,6 +46,7 @@ function makeSettings(provider: "openai" | "anthropic", apiKey = "sk-test"): Res
     anthropic: provider === "anthropic" ? { betaFeatures: [], maxTokens: 8192 } : undefined,
     thinkingEnabled: false,
     reasoningEffort: "max",
+    timeout: 600,
     debugLogEnabled: false,
     telemetryEnabled: false,
     permissions: {} as ResolvedDeepcodingSettings["permissions"],
