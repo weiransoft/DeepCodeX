@@ -28,6 +28,7 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 | -------------------- | --------- | ------------------------------------------------------------------- |
 | `env`                | object    | 环境变量分组（见下方子字段表）                                       |
 | `model`              | string    | 模型名称。优先级高于 `env.MODEL`                                    |
+| `provider`           | string    | LLM 提供商声明，可选 `"openai"` 或 `"anthropic"`（详见 [provider 章节](#provider--llm-提供商)） |
 | `thinkingEnabled`    | boolean   | 是否启用思考模式（DeepSeek V4 系列默认启用）                         |
 | `reasoningEffort`    | string    | 推理强度，可选 `"high"` 或 `"max"`（默认 `"max"`）                  |
 | `debugLogEnabled`    | boolean   | 是否启用调试日志输出（默认 `false`）                                 |
@@ -43,15 +44,67 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 
 | 字段       | 类型   | 说明                                                               |
 | ---------- | ------ | ------------------------------------------------------------------ |
-| `MODEL`    | string | 模型名称。例如 `"deepseek-v4-pro"`、`"deepseek-v4-flash"`          |
+| `MODEL`    | string | 模型名称。例如 `"deepseek-v4-pro"`、`"deepseek-v4-flash"`、`"claude-sonnet-4-6"` |
 | `BASE_URL` | string | API 请求的基础 URL。例如 `"https://api.deepseek.com"`              |
 | `API_KEY`  | string | API 密钥                                                          |
-| `TEMPERATURE`  | string | Chat Completions 采样温度，范围 `"0"` 到 `"2"`              |
+| `PROVIDER` | string | LLM 提供商声明，可选 `"openai"` 或 `"anthropic"`（优先级低于 `provider` 顶层字段） |
+| `LLM_PROVIDER` | string | `PROVIDER` 的别名（当 `PROVIDER` 未设置时生效） |
+| `ANTHROPIC_BETA` | string | Anthropic beta 特性列表，逗号分隔（如 `"extended-thinking,prompt-caching"`） |
+| `ANTHROPIC_MAX_TOKENS` | string | Claude 最大输出 token 数（默认 `8192`） |
+| `ANTHROPIC_THINKING_BUDGET` | string | Claude extended thinking 预算 token 数（默认 `4096`） |
+| `TEMPERATURE`  | string | Chat Completions 采样温度，范围 `"0"` 到 `"2"`（仅 openai provider 生效） |
 | `THINKING_ENABLED`  | string | 是否启用思考模式                                         |
 | `REASONING_EFFORT`  | string | 推理强度                                                |
 | `DEBUG_LOG_ENABLED`  | string | 是否启用调试日志输出                                     |
 | `TELEMETRY_ENABLED`  | string | 是否启用匿名使用数据上报                                   |
 | `<其他任意KEY>` | string | 自定义环境变量 |
+
+#### `provider` — LLM 提供商
+
+Deep Code 支持多种 LLM 提供商，通过 `provider` 字段显式声明，或通过环境变量、模型名称前缀自动推断。
+
+**支持的 provider**：
+
+| provider 值 | 说明 | 默认模型 | 默认 baseURL |
+| ------------ | ---- | -------- | ------------ |
+| `"openai"` | OpenAI 兼容 API（默认，支持 DeepSeek 等） | `deepseek-v4-pro` | `https://api.deepseek.com` |
+| `"anthropic"` | Anthropic Claude 原生 API | `claude-sonnet-4-6` | `https://api.anthropic.com` |
+
+**解析优先级（高 → 低）**：
+
+1. `settings.provider`（顶层字段显式声明）
+2. `env.PROVIDER` / `env.LLM_PROVIDER`（环境变量）
+3. 按 `model` 前缀推断：`claude-*` → `anthropic`；其余 → `openai`
+4. 默认 `"openai"`（保持向后兼容）
+
+**Anthropic Claude 配置示例**：
+
+```json
+{
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "env": {
+    "API_KEY": "sk-ant-...",
+    "BASE_URL": "https://api.anthropic.com",
+    "ANTHROPIC_BETA": "extended-thinking,prompt-caching"
+  }
+}
+```
+
+**Anthropic 专属环境变量**：
+
+| 环境变量 | 说明 | 默认值 |
+|----------|------|--------|
+| `ANTHROPIC_BETA` | beta 特性列表，逗号分隔（如 `extended-thinking,prompt-caching`） | 空 |
+| `ANTHROPIC_MAX_TOKENS` | Claude 最大输出 token 数 | `8192` |
+| `ANTHROPIC_THINKING_BUDGET` | extended thinking 预算 token 数 | `4096` |
+
+**校验规则**：
+
+- `provider=anthropic` 时，`env.API_KEY` 必须存在且以 `sk-ant-` 开头（格式校验，非密钥有效性校验）
+- `MODEL` 未设置时，按 provider 给默认：`anthropic` → `claude-sonnet-4-6`；`openai` → `deepseek-v4-pro`
+- `temperature` 仅在 `openai` provider 下生效；Claude 使用 `top_p`/`top_k`，配置 `temperature` 时告警并忽略
+- 无自动降级：provider 由用户显式配置，故障时明确报错而非静默切换
 
 #### `thinkingEnabled` — 思考模式
 

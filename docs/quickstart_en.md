@@ -57,6 +57,34 @@ For DeepSeek's official setup notes, see the [Deep Code integration guide](https
 
 For all configuration options, see [configuration_en.md](configuration_en.md).
 
+## Using Anthropic Claude
+
+Deep Code also supports the Anthropic Claude native API. Set `provider` to `"anthropic"` and provide your Claude API key:
+
+```json
+{
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "env": {
+    "API_KEY": "sk-ant-...",
+    "BASE_URL": "https://api.anthropic.com",
+    "ANTHROPIC_BETA": "extended-thinking,prompt-caching"
+  }
+}
+```
+
+Common fields:
+
+| Field | Description |
+| ----- | ----------- |
+| `provider` | LLM provider; set to `"anthropic"` to enable Claude |
+| `model` | Claude model name, e.g. `claude-sonnet-4-6` |
+| `env.API_KEY` | Claude API key; must start with `sk-ant-` |
+| `env.BASE_URL` | Claude API endpoint, default `https://api.anthropic.com` |
+| `env.ANTHROPIC_BETA` | Beta feature list, e.g. `extended-thinking,prompt-caching` |
+
+> If `model` starts with `claude-`, the provider is automatically inferred as `anthropic` even without setting `provider`. See [configuration_en.md](configuration_en.md#provider--llm-provider) for details.
+
 ## Start
 
 Open your project directory:

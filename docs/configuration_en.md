@@ -28,6 +28,7 @@ The following are all the top-level fields supported in `settings.json`, along w
 | ------------------ | ------- | --------------------------------------------------------------------------- |
 | `env`              | object  | Group of environment variables (see sub-field table below)                 |
 | `model`            | string  | Model name. Takes precedence over `env.MODEL`                              |
+| `provider`         | string  | LLM provider declaration, either `"openai"` or `"anthropic"` (see [provider section](#provider--llm-provider)) |
 | `thinkingEnabled`  | boolean | Whether to enable thinking mode (enabled by default for DeepSeek V4 series)|
 | `reasoningEffort`  | string  | Reasoning intensity, either `"high"` or `"max"` (default `"max"`)          |
 | `debugLogEnabled`  | boolean | Enable debug log output (default `false`)                                   |
@@ -43,15 +44,67 @@ The following are all the top-level fields supported in `settings.json`, along w
 
 | Field             | Type   | Description                                                      |
 | ----------------- | ------ | ---------------------------------------------------------------- |
-| `MODEL`           | string | Model name, e.g. `"deepseek-v4-pro"`, `"deepseek-v4-flash"`     |
+| `MODEL`           | string | Model name, e.g. `"deepseek-v4-pro"`, `"deepseek-v4-flash"`, `"claude-sonnet-4-6"` |
 | `BASE_URL`        | string | Base URL for API requests, e.g. `"https://api.deepseek.com"`    |
 | `API_KEY`         | string | API key                                                         |
-| `TEMPERATURE`     | string | Sampling temperature for chat completions, from `"0"` to `"2"`  |
+| `PROVIDER`              | string | LLM provider declaration, either `"openai"` or `"anthropic"` (lower priority than `provider` top-level field) |
+| `LLM_PROVIDER`          | string | Alias for `PROVIDER` (used when `PROVIDER` is not set) |
+| `ANTHROPIC_BETA`        | string | Anthropic beta features, comma-separated (e.g., `"extended-thinking,prompt-caching"`) |
+| `ANTHROPIC_MAX_TOKENS`  | string | Claude max output tokens (default `8192`) |
+| `ANTHROPIC_THINKING_BUDGET` | string | Claude extended thinking budget tokens (default `4096`) |
+| `TEMPERATURE`     | string | Sampling temperature for chat completions, from `"0"` to `"2"` (only effective for openai provider) |
 | `THINKING_ENABLED`| string | Enable thinking mode                                            |
 | `REASONING_EFFORT`| string | Reasoning intensity                                             |
 | `DEBUG_LOG_ENABLED`| string| Enable debug log output                                         |
 | `TELEMETRY_ENABLED`| string| Enable anonymous usage reporting                                |
 | `<any other KEY>` | string | Custom environment variable                                     |
+
+#### `provider` — LLM Provider
+
+Deep Code supports multiple LLM providers, declared explicitly via the `provider` field, or automatically inferred from environment variables or model name prefixes.
+
+**Supported providers**:
+
+| provider value | Description | Default model | Default baseURL |
+| -------------- | ----------- | -------------- | --------------- |
+| `"openai"` | OpenAI-compatible API (default, supports DeepSeek etc.) | `deepseek-v4-pro` | `https://api.deepseek.com` |
+| `"anthropic"` | Anthropic Claude native API | `claude-sonnet-4-6` | `https://api.anthropic.com` |
+
+**Resolution priority (high → low)**:
+
+1. `settings.provider` (explicit top-level field declaration)
+2. `env.PROVIDER` / `env.LLM_PROVIDER` (environment variables)
+3. Inferred from `model` prefix: `claude-*` → `anthropic`; otherwise → `openai`
+4. Default `"openai"` (backward compatible)
+
+**Anthropic Claude configuration example**:
+
+```json
+{
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "env": {
+    "API_KEY": "sk-ant-...",
+    "BASE_URL": "https://api.anthropic.com",
+    "ANTHROPIC_BETA": "extended-thinking,prompt-caching"
+  }
+}
+```
+
+**Anthropic-specific environment variables**:
+
+| Environment variable | Description | Default value |
+|----------------------|-------------|---------------|
+| `ANTHROPIC_BETA` | Beta feature list, comma-separated (e.g. `extended-thinking,prompt-caching`) | empty |
+| `ANTHROPIC_MAX_TOKENS` | Claude max output tokens | `8192` |
+| `ANTHROPIC_THINKING_BUDGET` | Extended thinking budget tokens | `4096` |
+
+**Validation rules**:
+
+- When `provider=anthropic`, `env.API_KEY` must exist and start with `sk-ant-` (format validation, not key validity validation)
+- When `MODEL` is not set, a default is chosen by provider: `anthropic` → `claude-sonnet-4-6`; `openai` → `deepseek-v4-pro`
+- `temperature` only takes effect under the `openai` provider; Claude uses `top_p`/`top_k`, so configuring `temperature` triggers a warning and is ignored
+- No automatic fallback: the provider is explicitly configured by the user, and failures produce explicit errors rather than silent switching
 
 #### `thinkingEnabled` — Thinking Mode
 
