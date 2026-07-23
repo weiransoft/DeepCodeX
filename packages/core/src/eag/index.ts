@@ -12,7 +12,7 @@
  * 导出范围（按 EAG 方案子模块顺序）：
  * 1. evaluator       —— 评估器协议（§5.4 IndependentEvaluator + EvaluationReport + decideVerdict/buildReport）
  * 2. redlines        —— 企业红线 E1~E8（§5.1.3 ENTERPRISE_REDLINES + 查询函数）
- * 3. loop            —— Loop Engineering 五步闭环（§5.2 LoopKernel + LoopScheduler + 4 协议 + 数据模型）
+ * 3. loop            —— Loop Engineering 五步闭环（§5.2 LoopScheduler + 数据模型；LoopKernel 及 4 协议已删除，死代码清理）
  * 4. rlis            —— 三层规则存储（§5.5 RuleStore + RuleInjector + RuleLearner + 10 条种子规则）
  * 5. eak             —— 企业架构范式库（§5.6 4 范式 + Skill 元数据注册表 + 范式锁定）
  * 6. etsb            —— 技术栈选择（§5.7 矩阵 + 蓝图 + TechStackSelector + SEED-06 锁定）
@@ -43,7 +43,8 @@
  * 3. LogCallback（类型冲突，结构不同）：loop/models.ts、testing/types.ts、long-horizon/types.ts 均导出
  *    - loop/models.ts：`((message: string, level: "INFO" | "WARN") => void) | null`（大写级别 + 可空）
  *    - testing/long-horizon：`(message: string, level?: "info" | "warn" | "error") => void`（小写级别 + 可选）
- *    - 权威来源：loop/models.ts（LoopKernel 构造函数使用，含 `| null` 语义匹配 log 入参）
+ *    - 权威来源：loop/models.ts（EAG §5.2 数据模型层，含 `| null` 语义匹配 log 入参；
+ *      注：原 LoopKernel 已删除，但 loop/models.ts 的 LogCallback 类型定义保留供其他模块复用）
  *    - 处理：显式 `export type { LogCallback } from "./loop/models"`
  *
  * 4. LoopType（类型冲突，结构相同但来自不同模块）：loop/models.ts 与 gate/gate-types.ts 均导出
@@ -111,23 +112,21 @@ export * from "./redlines/enterprise-rules";
 // 3. loop —— Loop Engineering 五步闭环（§5.2）
 // ============================================================================
 //
-// LoopKernel 是 EAG 五步闭环编排核心：Discovery → Handoff → Verification → Persistence → Scheduling。
-// 通过 Protocol 组合 DiscoveryProbe / HandoffAdapter / IndependentEvaluator / UnifiedMemoryLayer / Scheduler
-// 五大可注入组件，支持单 Loop（run）与多 Loop 串联（scheduleMultiLoop，批次 10 新增）两种执行模式。
+// 死代码清理记录：
+// - 原 loop/protocols.ts、loop/kernel.ts 已删除（4 个协议接口无生产实现，LoopKernel 依赖这 4 协议
+//   导致其无法被实例化，成为死代码）
+// - 保留下来的 LoopScheduler（loop/scheduler.ts）与数据模型（loop/models.ts）仍有生产使用
+//   （被 P5 复用），继续从根 barrel 导出
 //
-// 公开 API：
+// 公开 API（死代码清理后）：
 // - 数据模型：LoopType / DiscoveryMode / EvaluatorMode / LoopEventType / SchedulingAction /
 //             LoopEngineeringConfig / DiscoveryResult / HandoffItem / LoopEvaluationVerdict /
 //             LoopEvent / SchedulingDecision / LoopCycleResult / LoopRunReport 等
-// - 协议接口：DiscoveryProbeProtocol / HandoffAdapterProtocol /
-//             IndependentEvaluatorProtocol / UnifiedMemoryLayerProtocol
-// - 类：LoopKernel（五步闭环编排器）/ LoopScheduler（调度决策器）
+// - 类：LoopScheduler（调度决策器）
 // - 工厂函数：createLoopEngineeringConfig
 // - 常量：LOOP_TYPES / DISCOVERY_MODES / EVALUATOR_MODES / LOOP_EVENT_TYPES /
 //         SCHEDULING_ACTIONS / DEFAULT_LOOP_ENGINEERING_CONFIG 等
 export * from "./loop/models";
-export * from "./loop/protocols";
-export * from "./loop/kernel";
 export * from "./loop/scheduler";
 
 // ============================================================================
@@ -268,17 +267,19 @@ export * from "./gate/index";
 // 11. design —— DESIGN Loop（§5.10.5）
 // ============================================================================
 //
-// DESIGN Loop 三角色编排（PM / Architect / DesignEvaluator）+ 文档 schema 渲染器/校验器 +
-// StaticDesignEvaluator 真实判定实现 + DesignLoopOrchestrator 编排器。
+// 死代码清理记录：
+// - 原 design-orchestrator.ts（DesignLoopOrchestrator）已删除：依赖 PM/Architect 协议无生产实现，
+//   导致编排器无法被实例化，成为死代码
+// - 原 design-protocols.ts 已删除：ProductManagerProtocol / ArchitectProtocol 无生产实现，
+//   DesignEvaluatorProtocol 已迁移至 design-evaluator.ts（与唯一实现 StaticDesignEvaluator 共置）
 //
-// 公开 API：
+// 死代码清理后保留的公开 API：
 // - 类型：DesignLoopInput / ProjectContext / UserStory / StructuredRequirement /
 //         ArchitectureDocument / DomainModelDocument / DesignArtifacts / DesignEvaluationVerdict 等
 // - 常量：DEFAULT_DESIGN_LOOP_CONFIG / ARCHITECTURE_MD_SECTIONS / DOMAIN_MODEL_MD_SECTIONS
-// - 协议接口：ProductManagerProtocol / ArchitectProtocol / DesignEvaluatorProtocol
+// - 协议接口：DesignEvaluatorProtocol（从 design-evaluator.ts 导出）
 // - 渲染器与校验器：renderArchitectureMd / renderDomainModelMd / validateArchitectureMd / validateDomainModelMd
 // - 评估器实现：StaticDesignEvaluator
-// - 编排器：DesignLoopOrchestrator
 export * from "./design/index";
 
 // ============================================================================
@@ -414,7 +415,8 @@ export { LOOP_TYPES } from "./loop/models";
 //    （已在第 8 节 tcs 模块下方显式导出，此处不再重复）
 
 // 3. LogCallback（类型冲突，结构不同）：loop/models.ts 为权威来源
-//    （EAG §5.2 Loop Engineering 核心数据模型，被 LoopKernel 构造函数使用，含 `| null` 语义匹配 log 入参）
+//    （EAG §5.2 Loop Engineering 核心数据模型，含 `| null` 语义匹配 log 入参；
+//     注：原 LoopKernel 已删除，但 loop/models.ts 的 LogCallback 类型定义保留供其他模块复用）
 //    - testing/types.ts 与 long-horizon/types.ts 的 LogCallback 结构不同（小写级别 + 可选 level）
 //    - 消费者如需 testing/long-horizon 风格的 LogCallback，请从子模块直接导入：
 //      `import type { LogCallback } from "../eag/testing"` 或 `"../eag/long-horizon"`
