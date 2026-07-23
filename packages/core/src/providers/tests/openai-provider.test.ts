@@ -45,6 +45,7 @@ function makeSettings(): ResolvedDeepcodingSettings {
     provider: "openai",
     thinkingEnabled: true,
     reasoningEffort: "max",
+    timeout: 600,
     debugLogEnabled: false,
     telemetryEnabled: false,
     permissions: {} as ResolvedDeepcodingSettings["permissions"],

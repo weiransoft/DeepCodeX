@@ -62,6 +62,7 @@ function makeSettings(): ResolvedDeepcodingSettings {
     anthropic: { betaFeatures: ["extended-thinking", "prompt-caching"], maxTokens: 8192, thinkingBudgetTokens: 4096 },
     thinkingEnabled: true,
     reasoningEffort: "max",
+    timeout: 600,
     debugLogEnabled: false,
     telemetryEnabled: false,
     permissions: {} as ResolvedDeepcodingSettings["permissions"],
