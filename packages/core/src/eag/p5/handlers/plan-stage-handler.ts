@@ -31,6 +31,15 @@ import * as path from "node:path";
 import type { P5StageContext, P5StageHandler, P5StageResult } from "./types";
 import { buildGuardContext, createSuccessStageResult, createFailedStageResult, toGuardRecords } from "./types";
 import type { TaskCard } from "../guards/types";
+// 领域专家匹配器集成：plan 阶段为任务卡匹配最合适的领域专家（可选增强）
+// 注：DomainExpertMatchResult 类型定义在 team/types.ts，需从正确路径导入
+import type { DomainExpertMatchResult } from "../../../team/types.js";
+import { DomainExpertMatcher } from "../../../team/domain-expert-matcher";
+import { DomainExpertRegistry } from "../../../team/domain-expert-registry";
+import { registerAllExperts } from "../../../team/domain-experts";
+// GuardCoordinator 集成：plan 阶段接入 team/cybernetics 守护协调器（可选增强）
+import { GuardCoordinator } from "../../../team/cybernetics/guard-coordinator";
+import type { ValidationResult } from "../../../team/cybernetics/guard-coordinator";
 
 // ============================================================================
 // 1. 常量定义
@@ -120,6 +129,96 @@ type MutableParsedTaskCard = {
  * }
  * ```
  */
+
+// ============================================================================
+// 3. 领域专家匹配器惰性初始化（模块级单例）
+// ============================================================================
+
+/**
+ * 惰性初始化的领域专家匹配器（模块级单例，跨多次 handle 调用复用）
+ *
+ * 设计依据：DomainExpertRegistry 需要异步加载 30 个专家文件（8 个类别），
+ * 每次 handle 调用都重新加载会严重影响性能。
+ * 使用模块级单例 + Promise 缓存，确保只加载一次，并发 handle 调用复用同一 Promise。
+ *
+ * 降级策略（Ponytail R-02：必须显式错误处理）：
+ * - 领域专家加载失败（如文件缺失/解析异常）→ 返回 null
+ * - plan 阶段主流程不受影响（领域专家匹配是增强能力，非必需）
+ *
+ * 线程安全：Node.js 单线程事件循环，Promise 缓存模式无竞态条件
+ */
+let cachedMatcher: DomainExpertMatcher | null = null;
+let matcherInitPromise: Promise<DomainExpertMatcher | null> | null = null;
+
+/**
+ * 获取领域专家匹配器单例（惰性初始化 + 并发安全）
+ *
+ * @returns DomainExpertMatcher 实例，加载失败时返回 null
+ */
+async function getDomainExpertMatcher(): Promise<DomainExpertMatcher | null> {
+  // 已缓存 → 直接返回（快速路径）
+  if (cachedMatcher !== null) return cachedMatcher;
+  // 正在加载 → 等待已有 Promise（避免并发重复加载）
+  if (matcherInitPromise !== null) return matcherInitPromise;
+  // 首次加载 → 创建 Promise 并缓存
+  matcherInitPromise = (async () => {
+    try {
+      const registry = new DomainExpertRegistry();
+      // 并行加载 8 个类别共 30 个领域专家文件
+      await registerAllExperts(registry);
+      cachedMatcher = new DomainExpertMatcher(registry);
+      return cachedMatcher;
+    } catch {
+      // 领域专家加载失败时降级，返回 null（不影响 plan 阶段主流程）
+      return null;
+    }
+  })();
+  return matcherInitPromise;
+}
+
+// ============================================================================
+// 4. GuardCoordinator 惰性初始化（模块级单例）
+// ============================================================================
+
+/**
+ * 惰性初始化的 GuardCoordinator 实例（模块级单例）
+ *
+ * 设计依据：team/cybernetics/guard-coordinator.ts 的 GuardCoordinator 提供
+ * 执行前验证（preExecuteValidation）、实时监控（monitorExecution）、执行后审查
+ * （postExecuteReview）三阶段守护协调能力。
+ * plan 阶段在 guardChain.execute() PASS 后调用 preExecuteValidation，
+ * 进行基于 Karpathy 4 原则的预验证（占位代码/投机代码/空假设等检测）。
+ *
+ * 降级策略（Ponytail R-02：必须显式错误处理）：
+ * - GuardCoordinator 初始化失败 → 返回 null，plan 阶段主流程不受影响
+ * - preExecuteValidation 调用失败 → 降级，不影响 plan 阶段主流程
+ *
+ * AI 增强：ai_provider 不提供时使用降级模式（无 AI 增强风险评估，
+ * 仅依赖预置的 Karpathy 4 原则规则库）
+ */
+let cachedGuardCoordinator: GuardCoordinator | null = null;
+
+/**
+ * 获取 GuardCoordinator 单例（惰性初始化）
+ *
+ * @returns GuardCoordinator 实例，初始化失败时返回 null
+ */
+function getGuardCoordinator(): GuardCoordinator | null {
+  // 已缓存 → 直接返回（快速路径）
+  if (cachedGuardCoordinator !== null) return cachedGuardCoordinator;
+  // 首次初始化 → 创建实例并缓存
+  try {
+    cachedGuardCoordinator = new GuardCoordinator({
+      agent_id: "eag-p5-plan-stage",
+      // ai_provider 不提供，使用降级模式（仅依赖预置规则库，无 AI 增强风险评估）
+    });
+    return cachedGuardCoordinator;
+  } catch {
+    // GuardCoordinator 初始化失败时降级，返回 null（不影响 plan 阶段主流程）
+    return null;
+  }
+}
+
 export class P5PlanStageHandler implements P5StageHandler {
   /**
    * 执行 plan 阶段处理
@@ -253,7 +352,40 @@ export class P5PlanStageHandler implements P5StageHandler {
         );
       }
 
-      // 8. 护栏 PASS → 返回 success + 任务卡信息
+      // 8. 领域专家匹配（可选增强，失败不影响主流程）
+      // 为当前任务卡匹配最合适的领域专家，供 dev/verify/fix 阶段参考
+      // 匹配维度：domainTag 40% / keyword 30% / capability 20% / skill 10%
+      let domainExperts: ReadonlyArray<DomainExpertMatchResult> = [];
+      try {
+        const matcher = await getDomainExpertMatcher();
+        if (matcher !== null) {
+          // 使用任务卡标题和需求 ID 作为匹配输入
+          domainExperts = matcher.matchExpertsSync(taskCard.title, taskCard.requirementId);
+        }
+      } catch {
+        // 领域专家匹配失败时降级，不影响 plan 阶段主流程
+      }
+
+      // 9. GuardCoordinator 执行前验证（可选增强，失败不影响主流程）
+      // 基于 Karpathy 4 原则的预验证：检测占位代码/投机代码/空假设等风险
+      // 接入 team/cybernetics 守护协调器，与 EAG P5 的 6 层 BLOCKER 护栏形成双层防护
+      let guardCoordinatorResult: ValidationResult | null = null;
+      try {
+        const coordinator = getGuardCoordinator();
+        if (coordinator !== null) {
+          // 构造验证上下文：任务卡信息 + 用户目标
+          guardCoordinatorResult = await coordinator.preExecuteValidation({
+            task_id: taskCard.id,
+            task_title: taskCard.title,
+            declared_files: [...taskCard.declaredFiles],
+            objective: ctx.objective,
+          });
+        }
+      } catch {
+        // GuardCoordinator 验证失败时降级，不影响 plan 阶段主流程
+      }
+
+      // 10. 护栏 PASS → 返回 success + 任务卡信息 + 领域专家 + GuardCoordinator 验证结果
       return createSuccessStageResult(
         "plan",
         `选取下一任务卡：${nextTask.id} ${nextTask.title}（依赖已满足，范围锁预检通过）`,
@@ -264,6 +396,8 @@ export class P5PlanStageHandler implements P5StageHandler {
           completedCards: completedIds.size,
           pendingCards: taskCards.length - completedIds.size,
           guardDecision: "PASS",
+          domainExperts, // 领域专家匹配结果（可选增强，供后续阶段参考）
+          guardCoordinatorResult, // GuardCoordinator 执行前验证结果（可选增强）
         },
         guardRecords,
         0,
