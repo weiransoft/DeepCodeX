@@ -36,6 +36,7 @@ import { ProviderFactory } from "./providers/provider-factory";
 import type { LLMClient, LLMResponse, LLMToolDefinition, LLMUsage } from "./providers/llm-provider";
 import { logApiError } from "./common/error-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./common/debug-logger";
+import { describeLlmError, getLlmErrorDetails } from "./common/llm-error";
 import { killProcessTree } from "./common/process-tree";
 import { GitFileHistory, type FileHistoryCheckpointResult } from "./common/file-history";
 import { clearSessionState, getSnippet, rebuildSessionStateFromHistory } from "./common/state";
@@ -929,11 +930,7 @@ export class SessionManager {
         requestId,
         sessionId,
         model: typeof request.model === "string" ? request.model : undefined,
-        error: {
-          name: error instanceof Error ? error.name : "UnknownError",
-          message: error instanceof Error ? error.message : String(error),
-          stack: error instanceof Error ? error.stack : undefined,
-        },
+        error: getLlmErrorDetails(error),
         request: streamRequest,
       });
       this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "end", sessionId);
@@ -1063,11 +1060,7 @@ export class SessionManager {
         requestId,
         sessionId,
         model: typeof request.model === "string" ? request.model : undefined,
-        error: {
-          name: error instanceof Error ? error.name : "UnknownError",
-          message: error instanceof Error ? error.message : String(error),
-          stack: error instanceof Error ? error.stack : undefined,
-        },
+        error: getLlmErrorDetails(error),
         request: streamRequest,
       });
       throw error;
@@ -4217,7 +4210,7 @@ ${agentInstructions}
         false
       );
     } catch (error) {
-      const errMessage = error instanceof Error ? error.message : String(error);
+      const errMessage = describeLlmError(error);
       const aborted = this.isAbortLikeError(error) || sessionController.signal.aborted;
       this.updateSessionEntry(sessionId, (entry) => ({
         ...entry,
