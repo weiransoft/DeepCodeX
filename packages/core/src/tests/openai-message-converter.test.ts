@@ -487,7 +487,7 @@ test("Qwen3 模型：对话中间的 system 消息被转换为 user 消息", () 
   assert.equal(flattened!.role, "user", "对话中间的 system 消息应转换为 user 角色");
 });
 
-test("Qwen3 模型：开头连续多条 system 消息全部保持 system 角色", () => {
+test("Qwen3 模型：开头连续多条 system 消息合并为一条", () => {
   const c = converter();
   const messages: SessionMessage[] = [
     msg({ id: "s1", role: "system", content: "System prompt." }),
@@ -502,12 +502,13 @@ test("Qwen3 模型：开头连续多条 system 消息全部保持 system 角色"
     content: string;
   }>;
 
-  // 前三条 system 消息都应保持 system 角色
-  assert.equal(result[0].role, "system", "第一条 system 保持不变");
-  assert.equal(result[1].role, "system", "第二条 system 保持不变");
-  assert.equal(result[2].role, "system", "第三条 system 保持不变");
-  assert.equal(result[3].role, "user", "user 消息保持不变");
-  assert.equal(result[4].role, "assistant", "assistant 消息保持不变");
+  // 三条 system 消息合并为一条（内容用双换行分隔）
+  assert.equal(result[0].role, "system", "合并后首条应为 system");
+  assert.equal(result[0].content, "System prompt.\n\nSkill prompt.\n\nRuntime context.", "三条 system 内容应合并");
+  // 合并后应为 3 条消息（1 system + 1 user + 1 assistant），而非原来的 5 条
+  assert.equal(result.length, 3, "合并后应减少为 3 条消息");
+  assert.equal(result[1].role, "user", "user 消息保持不变");
+  assert.equal(result[2].role, "assistant", "assistant 消息保持不变");
 });
 
 test("Qwen3 模型：没有中间 system 消息时行为不变", () => {
