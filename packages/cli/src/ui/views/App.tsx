@@ -745,7 +745,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
     const model = settings.model || "";
     const thinkingEnabled = settings.thinkingEnabled;
     const reasoningEffort = settings.reasoningEffort;
-    const maxContextTokens = getCompactPromptTokenThreshold(model);
+    const maxContextTokens = getCompactPromptTokenThreshold(model, settings.contextWindow);
     if (!activeSessionId) {
       return {
         activeSessionId: null,

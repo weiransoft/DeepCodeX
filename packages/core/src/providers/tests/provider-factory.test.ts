@@ -47,6 +47,7 @@ function makeSettings(provider: "openai" | "anthropic", apiKey = "sk-test"): Res
     thinkingEnabled: false,
     reasoningEffort: "max",
     timeout: 600,
+    contextWindow: 131072,
     debugLogEnabled: false,
     telemetryEnabled: false,
     permissions: {} as ResolvedDeepcodingSettings["permissions"],

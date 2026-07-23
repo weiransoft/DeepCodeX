@@ -46,6 +46,7 @@ function makeSettings(): ResolvedDeepcodingSettings {
     thinkingEnabled: true,
     reasoningEffort: "max",
     timeout: 600,
+    contextWindow: 131072,
     debugLogEnabled: false,
     telemetryEnabled: false,
     permissions: {} as ResolvedDeepcodingSettings["permissions"],

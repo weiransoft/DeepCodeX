@@ -73,19 +73,22 @@ import type {
 // 注：仅导入类型与类，未注入 codingOrchestrator 时零开销（向后兼容，§4.9.4）
 import type { CodingOrchestrator } from "./eag/coding";
 import type { CodingLoopRequest, CodingLoopResult, PkcAccessor } from "./eag/coding/types";
-// EAG-P3 批次 10 新增导入：TESTING Loop + 长程自动化 + DESIGN Loop 命令 Hook + RLIS 规则学习器
+// EAG-P3 批次 10 新增导入：TESTING Loop + 长程自动化 + RLIS 规则学习器
 // 注：仅导入类型与类，未注入对应 orchestrator 时零开销（向后兼容，§4.18.5）
 // 设计依据：EAG-P3 批次 10 设计文档 §4.9.3 / §4.18.3 / §4.18.4
 // - TestingOrchestrator：/eag-test 命令编排器（外挂注入，未注入时命令不可用）
-// - DesignLoopOrchestrator：/eag-design 命令编排器（外挂注入，未注入时命令不可用）
 // - RunStateStore：/eag-run /eag-resume /eag-status 共享依赖（外挂注入，未注入时三命令不可用）
 // - RuleLearner：候选规则检测 Hook 依赖（外挂注入，未注入时 Hook 跳过）
 // - EagRunHandler/EagResumeHandler/EagStatusHandler：长程自动化命令处理器
 //   注：在 handle 方法内部按需构造（依赖 MultiLoopPlanner/MilestoneTagger/BlockageAnalyzer）
-import type { TestingOrchestrator } from "./eag/testing";
-import type { TestingLoopRequest, TestingLoopResult } from "./eag/testing/types";
+//
+// 死代码清理记录：
+// - DesignLoopOrchestrator（from ./eag/design/design-orchestrator）保留，/eag-design 命令仍在使用
+// - DesignLoopInput / DesignLoopResult 类型（from ./eag/design/design-models）保留，handleEagDesignCommand 仍在使用
 import type { DesignLoopOrchestrator } from "./eag/design/design-orchestrator";
 import type { DesignLoopInput, DesignLoopResult } from "./eag/design/design-models";
+import type { TestingOrchestrator } from "./eag/testing";
+import type { TestingLoopRequest, TestingLoopResult } from "./eag/testing/types";
 import type { RunStateStore } from "./eag/long-horizon/run-state-store";
 import type { RuleLearner } from "./eag/rlis/rule-learner";
 import type { RuleCandidate } from "./eag/rlis/types";
@@ -192,10 +195,26 @@ type ChatCompletionDebugOptions = {
   params?: Record<string, unknown>;
 };
 
-export function getCompactPromptTokenThreshold(model: string): number {
-  return DEEPSEEK_V4_MODELS.has(model)
-    ? DEEPSEEK_V4_COMPACT_PROMPT_TOKEN_THRESHOLD
-    : DEFAULT_COMPACT_PROMPT_TOKEN_THRESHOLD;
+/**
+ * 获取 compact 阈值（token 数）
+ *
+ * 优先使用 contextWindow * 0.8（预留 20% 给 output + tool 结果），
+ * 避免上下文窗口刚好满载时 API 返回 400 超限错误。
+ *
+ * DeepSeek V4 系列保留原 512K 阈值（模型支持 1M 上下文，不受 128K 限制）。
+ *
+ * @param model 模型名称（用于 DeepSeek V4 特殊处理）
+ * @param contextWindow 模型上下文窗口大小（token 数），默认 131072
+ * @returns compact 阈值（超过此值时触发会话压缩）
+ */
+export function getCompactPromptTokenThreshold(model: string, contextWindow: number = 131072): number {
+  // DeepSeek V4 系列保留原阈值（512K，模型支持 1M 上下文）
+  if (DEEPSEEK_V4_MODELS.has(model)) {
+    return DEEPSEEK_V4_COMPACT_PROMPT_TOKEN_THRESHOLD;
+  }
+  // 其他模型：contextWindow * 0.8（预留 20% 给 output + tool 结果）
+  // 确保在 API 调用前 compact，避免超限 400 错误
+  return Math.floor(contextWindow * 0.8);
 }
 
 // Keep project storage paths short enough for Git's internal files on Windows.
@@ -553,9 +572,16 @@ type SessionManagerOptions = {
   /**
    * EAG-P3 批次 10：DESIGN Loop 编排器（可选注入，§4.18.3）
    *
-   * 未注入时 `/eag-design` 命令不可用，向后兼容。
+   * 未注入时 `/eag-design` 命令不可用，主对话循环行为完全不变（向后兼容）。
    * 注入后，在主对话循环检测到 `/eag-design` 命令时外挂调用 handleEagDesignCommand，
-   * 路由到 DesignLoopOrchestrator.run() 执行 PM→架构师→评估器完整闭环。
+   * 路由到 DesignLoopOrchestrator.run() 执行 DESIGN Loop 闭环。
+   *
+   * 设计决策（对齐设计文档 §5.2 N-M-1 修复 + Karpathy Simplicity First）：
+   * - 调用方负责在注入前完整装配 DesignLoopOrchestratorOptions
+   * - session.ts 不负责构造 DesignLoopOrchestrator 实例（避免每次命令重复构造，且与
+   *   codingOrchestrator / testingOrchestrator / devopsOrchestrator 同构）
+   *
+   * 不可变优先（§5.12.4 G-A6d）：构造后字段不可变，循环内不可被 LLM 修改。
    */
   designOrchestrator?: DesignLoopOrchestrator;
   /**
@@ -569,7 +595,7 @@ type SessionManagerOptions = {
    * - 调用方负责在注入前完整装配 DevOpsOrchestratorOptions（iacGenerators / gateG8Checker /
    *   deployStrategy / deployStage / eventEmitter）
    * - session.ts 不负责构造 DeployStage 实例（避免每次命令重复构造，且与
-   *   codingOrchestrator / testingOrchestrator / designOrchestrator 同构）
+   *   codingOrchestrator / testingOrchestrator 同构）
    *
    * 不可变优先（§5.12.4 G-A6d）：构造后字段不可变，循环内不可被 LLM 修改。
    */
@@ -585,7 +611,7 @@ type SessionManagerOptions = {
    * - 调用方负责在注入前完整装配 AutonomousOrchestratorOptions（loopExecutor /
    *   runStateStore / notesMemory / guardChain / smartConfirmation 全部依赖）
    * - session.ts 不负责构造这些依赖（避免每次命令重复构造，且与
-   *   codingOrchestrator / testingOrchestrator / designOrchestrator / devopsOrchestrator 同构）
+   *   codingOrchestrator / testingOrchestrator / devopsOrchestrator 同构）
    *
    * 不可变优先（§5.12.4 G-A6d）：构造后字段不可变，循环内不可被 LLM 修改。
    */
@@ -4034,7 +4060,10 @@ ${agentInstructions}
           }
         }
 
-        const compactPromptTokenThreshold = getCompactPromptTokenThreshold(model);
+        const compactPromptTokenThreshold = getCompactPromptTokenThreshold(
+          model,
+          resolveCurrentSettings(this.projectRoot).contextWindow
+        );
         if (session.activeTokens > compactPromptTokenThreshold) {
           const message = this.buildAssistantMessage(
             sessionId,
