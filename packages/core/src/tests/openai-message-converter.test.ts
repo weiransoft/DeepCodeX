@@ -458,6 +458,131 @@ test("OpenAIMessageConverter.getTrailingPendingToolCallMessage returns empty whe
   assert.deepEqual(result.toolCalls, []);
 });
 
+// ---------------------------------------------------------------------------
+// Qwen3 兼容：对话中间 system 消息转换为 user 消息
+// ---------------------------------------------------------------------------
+
+test("Qwen3 模型：对话中间的 system 消息被转换为 user 消息", () => {
+  const c = converter();
+  const messages: SessionMessage[] = [
+    msg({ id: "s1", role: "system", content: "You are a helpful assistant." }),
+    msg({ id: "u1", role: "user", content: "hello" }),
+    msg({ id: "a1", role: "assistant", content: "hi" }),
+    // 对话中间的 system 消息（如 plan mode 切换通知）
+    msg({ id: "s2", role: "system", content: "Plan mode activated." }),
+    msg({ id: "u2", role: "user", content: "check env" }),
+  ];
+
+  const result = c.buildMessages(messages, false, "Qwen/Qwen3.6-27B") as Array<{
+    role: string;
+    content: string;
+  }>;
+
+  // 首条 system 消息保持不变
+  assert.equal(result[0].role, "system", "首条 system 消息应保持 system 角色");
+  assert.equal(result[0].content, "You are a helpful assistant.");
+  // 中间的 system 消息应转换为 user
+  const flattened = result.find((m) => m.content === "Plan mode activated.");
+  assert.ok(flattened, "应找到 plan mode 消息");
+  assert.equal(flattened!.role, "user", "对话中间的 system 消息应转换为 user 角色");
+});
+
+test("Qwen3 模型：开头连续多条 system 消息全部保持 system 角色", () => {
+  const c = converter();
+  const messages: SessionMessage[] = [
+    msg({ id: "s1", role: "system", content: "System prompt." }),
+    msg({ id: "s2", role: "system", content: "Skill prompt." }),
+    msg({ id: "s3", role: "system", content: "Runtime context." }),
+    msg({ id: "u1", role: "user", content: "hello" }),
+    msg({ id: "a1", role: "assistant", content: "hi" }),
+  ];
+
+  const result = c.buildMessages(messages, false, "qwen3-32b") as Array<{
+    role: string;
+    content: string;
+  }>;
+
+  // 前三条 system 消息都应保持 system 角色
+  assert.equal(result[0].role, "system", "第一条 system 保持不变");
+  assert.equal(result[1].role, "system", "第二条 system 保持不变");
+  assert.equal(result[2].role, "system", "第三条 system 保持不变");
+  assert.equal(result[3].role, "user", "user 消息保持不变");
+  assert.equal(result[4].role, "assistant", "assistant 消息保持不变");
+});
+
+test("Qwen3 模型：没有中间 system 消息时行为不变", () => {
+  const c = converter();
+  const messages: SessionMessage[] = [
+    msg({ id: "s1", role: "system", content: "System prompt." }),
+    msg({ id: "u1", role: "user", content: "hello" }),
+    msg({ id: "a1", role: "assistant", content: "hi there" }),
+  ];
+
+  const result = c.buildMessages(messages, false, "Qwen/Qwen3.6-27B") as Array<{
+    role: string;
+    content: string;
+  }>;
+
+  assert.deepEqual(
+    result.map((m) => m.role),
+    ["system", "user", "assistant"]
+  );
+});
+
+test("非 Qwen3 模型：对话中间的 system 消息保持不变（向后兼容）", () => {
+  const c = converter();
+  const messages: SessionMessage[] = [
+    msg({ id: "s1", role: "system", content: "System prompt." }),
+    msg({ id: "u1", role: "user", content: "hello" }),
+    msg({ id: "a1", role: "assistant", content: "hi" }),
+    msg({ id: "s2", role: "system", content: "Context update." }),
+    msg({ id: "u2", role: "user", content: "ok" }),
+  ];
+
+  // DeepSeek 模型 — 中间 system 消息应保持不变
+  const deepseekResult = c.buildMessages(messages, false, "deepseek-v4-pro") as Array<{
+    role: string;
+    content: string;
+  }>;
+  const deepseekMid = deepseekResult.find((m) => m.content === "Context update.");
+  assert.equal(deepseekMid?.role, "system", "DeepSeek 模型应保持 system 角色");
+
+  // GPT 模型 — 中间 system 消息应保持不变
+  const gptResult = c.buildMessages(messages, false, "gpt-4") as Array<{
+    role: string;
+    content: string;
+  }>;
+  const gptMid = gptResult.find((m) => m.content === "Context update.");
+  assert.equal(gptMid?.role, "system", "GPT 模型应保持 system 角色");
+});
+
+test("Qwen3 模型：tool 消息中的 system 消息不影响 tool 消息配对", () => {
+  const c = converter();
+  const messages: SessionMessage[] = [
+    msg({ id: "s1", role: "system", content: "System prompt." }),
+    msg({ id: "u1", role: "user", content: "run tool" }),
+    assistantMsg("a1", [{ id: "call-1", type: "function", function: { name: "bash", arguments: "{}" } }]),
+    toolMsg("t1", "call-1", "result"),
+    // tool 结果后的 system 消息
+    msg({ id: "s2", role: "system", content: "Post-tool context." }),
+    msg({ id: "u2", role: "user", content: "continue" }),
+  ];
+
+  const result = c.buildMessages(messages, false, "Qwen/Qwen3.6-27B") as Array<{
+    role: string;
+    content: string;
+  }>;
+
+  // 验证 tool 消息仍然正确配对
+  assert.ok(
+    result.some((m) => m.role === "tool"),
+    "应包含 tool 角色消息"
+  );
+  // 验证 post-tool system 消息被转换为 user
+  const flattened = result.find((m) => m.content === "Post-tool context.");
+  assert.equal(flattened?.role, "user", "tool 后的 system 消息应转换为 user");
+});
+
 test("OpenAIMessageConverter.getTrailingPendingToolCallMessage skips compacted messages", () => {
   const c = converter();
   const messages: SessionMessage[] = [

@@ -1,5 +1,5 @@
 import type { ChatCompletionMessageParam, ChatCompletionContentPart } from "openai/resources/chat/completions";
-import { supportsMultimodal } from "./model-capabilities";
+import { supportsMultimodal, isQwen3Model } from "./model-capabilities";
 import type { SessionMessage } from "../session";
 import type { SessionContextHook, ContextSnippet } from "../v2/integration/session-hook";
 
@@ -86,7 +86,47 @@ export class OpenAIMessageConverter {
       }
     }
 
+    // Qwen3 兼容处理：vLLM 部署的 Qwen3 严格要求 system 消息只能在消息列表开头，
+    // 对话中间的 system 消息（如 plan mode 切换、上下文更新）会导致 HTTP 400 错误。
+    // 将首条非 system 消息之后的 system 消息转换为 user 消息，保持兼容。
+    if (isQwen3Model(model)) {
+      return this.flattenMidConversationSystemMessages(openAIMessages);
+    }
+
     return openAIMessages;
+  }
+
+  /**
+   * Qwen3 兼容：将对话中间的 system 消息转换为 user 消息
+   *
+   * Qwen3 vLLM 部署的 chat_template 严格要求 system 角色消息只能出现在消息列表开头，
+   * 中间出现 system 消息会触发 "System message must be at the beginning" HTTP 400 错误。
+   *
+   * 处理策略：
+   * 1. 遍历消息列表，找到第一条非 system 消息的位置
+   * 2. 该位置之前的 system 消息保持不变（合法的开头 system 消息）
+   * 3. 该位置之后的 system 消息，role 改为 "user"（内容不变，语义等价）
+   *
+   * @param messages 原始 OpenAI 消息列表
+   * @returns 兼容 Qwen3 的消息列表（system 消息仅出现在开头）
+   */
+  private flattenMidConversationSystemMessages(messages: ChatCompletionMessageParam[]): ChatCompletionMessageParam[] {
+    let seenNonSystem = false;
+    const result: ChatCompletionMessageParam[] = [];
+    for (const msg of messages) {
+      if (msg.role === "system") {
+        if (seenNonSystem) {
+          // 对话中间的 system 消息 → 转换为 user 消息
+          result.push({ ...msg, role: "user" } as ChatCompletionMessageParam);
+        } else {
+          result.push(msg);
+        }
+      } else {
+        seenNonSystem = true;
+        result.push(msg);
+      }
+    }
+    return result;
   }
 
   /**
