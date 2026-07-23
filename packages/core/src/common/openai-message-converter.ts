@@ -86,9 +86,9 @@ export class OpenAIMessageConverter {
       }
     }
 
-    // Qwen3 兼容处理：vLLM 部署的 Qwen3 严格要求 system 消息只能在消息列表开头，
-    // 对话中间的 system 消息（如 plan mode 切换、上下文更新）会导致 HTTP 400 错误。
-    // 将首条非 system 消息之后的 system 消息转换为 user 消息，保持兼容。
+    // Qwen3 兼容处理：vLLM 部署的 Qwen3 chat_template 只允许 messages[0] 为 system，
+    // 后续任何 system 消息（包括开头的第 2、3、4 条）都会触发 HTTP 400 错误。
+    // 处理策略：合并开头连续的 system 消息为一条，对话中间的 system 消息转为 user。
     if (isQwen3Model(model)) {
       return this.flattenMidConversationSystemMessages(openAIMessages);
     }
@@ -97,36 +97,85 @@ export class OpenAIMessageConverter {
   }
 
   /**
-   * Qwen3 兼容：将对话中间的 system 消息转换为 user 消息
+   * Qwen3 兼容：合并开头多条 system 消息 + 转换对话中间 system 消息为 user
    *
-   * Qwen3 vLLM 部署的 chat_template 严格要求 system 角色消息只能出现在消息列表开头，
-   * 中间出现 system 消息会触发 "System message must be at the beginning" HTTP 400 错误。
+   * Qwen3 vLLM 部署的 chat_template 只提取 messages[0] 作为 system 消息，
+   * 后续任何 role="system" 的消息会触发 "System message must be at the beginning" HTTP 400 错误。
+   *
+   * DeepCodeX 在会话开头插入多条 system 消息（主 prompt + skill prompt + runtime context +
+   * agent instructions），在对话中间也插入 system 消息（plan mode 切换、上下文更新）。
    *
    * 处理策略：
-   * 1. 遍历消息列表，找到第一条非 system 消息的位置
-   * 2. 该位置之前的 system 消息保持不变（合法的开头 system 消息）
-   * 3. 该位置之后的 system 消息，role 改为 "user"（内容不变，语义等价）
+   * 1. 开头连续的 system 消息：提取文本内容，合并为一条 system 消息（内容用双换行分隔）
+   * 2. 对话中间的 system 消息：role 改为 "user"（内容不变，语义等价）
    *
    * @param messages 原始 OpenAI 消息列表
-   * @returns 兼容 Qwen3 的消息列表（system 消息仅出现在开头）
+   * @returns 兼容 Qwen3 的消息列表（仅 messages[0] 为 system，其余 system 已合并或转换）
    */
   private flattenMidConversationSystemMessages(messages: ChatCompletionMessageParam[]): ChatCompletionMessageParam[] {
-    let seenNonSystem = false;
     const result: ChatCompletionMessageParam[] = [];
+    const leadingSystemTexts: string[] = [];
+    let seenNonSystem = false;
+
     for (const msg of messages) {
       if (msg.role === "system") {
         if (seenNonSystem) {
           // 对话中间的 system 消息 → 转换为 user 消息
           result.push({ ...msg, role: "user" } as ChatCompletionMessageParam);
         } else {
-          result.push(msg);
+          // 开头的 system 消息 → 收集文本内容，稍后合并为一条
+          const text = this.extractSystemMessageText(msg);
+          if (text) {
+            leadingSystemTexts.push(text);
+          }
         }
       } else {
+        // 遇到第一条非 system 消息时，flush 合并的 system 消息
+        if (!seenNonSystem && leadingSystemTexts.length > 0) {
+          result.push({
+            role: "system",
+            content: leadingSystemTexts.join("\n\n"),
+          } as ChatCompletionMessageParam);
+        }
         seenNonSystem = true;
         result.push(msg);
       }
     }
+
+    // 边界情况：所有消息都是 system（无 user/assistant），在末尾 flush
+    if (!seenNonSystem && leadingSystemTexts.length > 0) {
+      result.push({
+        role: "system",
+        content: leadingSystemTexts.join("\n\n"),
+      } as ChatCompletionMessageParam);
+    }
+
     return result;
+  }
+
+  /**
+   * 从 OpenAI 格式的 system 消息中提取纯文本内容
+   *
+   * system 消息的 content 可能是字符串或 ChatCompletionContentPart[]（多模态），
+   * 本方法统一提取文本部分：
+   * - 字符串：直接返回
+   * - 数组：拼接所有 type="text" 的 part 的 text 字段
+   *
+   * @param msg OpenAI 格式消息
+   * @returns 纯文本内容（无文本时返回空字符串）
+   */
+  private extractSystemMessageText(msg: ChatCompletionMessageParam): string {
+    const content = (msg as { content: unknown }).content;
+    if (typeof content === "string") {
+      return content;
+    }
+    if (Array.isArray(content)) {
+      return content
+        .filter((part) => (part as { type?: string }).type === "text")
+        .map((part) => (part as { text?: string }).text ?? "")
+        .join("\n");
+    }
+    return "";
   }
 
   /**
