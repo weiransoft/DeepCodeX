@@ -409,7 +409,7 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
       thinkingEnabled: settings.thinkingEnabled,
       reasoningEffort: settings.reasoningEffort,
       activeTokens: session?.activeTokens ?? 0,
-      compactPromptTokenThreshold: getCompactPromptTokenThreshold(settings.model),
+      compactPromptTokenThreshold: getCompactPromptTokenThreshold(settings.model, settings.contextWindow),
       usage: session?.usage ?? null,
     };
   }

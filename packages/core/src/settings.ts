@@ -129,6 +129,12 @@ export type ResolvedDeepcodingSettings = {
   reasoningEffort: ReasoningEffort;
   /** v1.1 新增：LLM 请求超时（秒），来自 env.TIMEOUT / env.LLM_TIMEOUT，默认 600（10 分钟） */
   timeout: number;
+  /**
+   * v1.2 新增：模型上下文窗口大小（token 数）
+   * 来自 env.CONTEXT_WINDOW / env.LLM_CONTEXT_WINDOW，默认 131072（128K）
+   * 用途：计算 compact 阈值（contextWindow * 0.8），预留 20% 给 output + tool 结果
+   */
+  contextWindow: number;
   debugLogEnabled: boolean;
   telemetryEnabled: boolean;
   notify?: string;
@@ -621,6 +627,10 @@ export function resolveSettingsSources(
   // 默认 600 秒（10 分钟），与 OpenAI SDK 默认超时保持一致，确保向后兼容
   const timeout = Number(trimString(env.TIMEOUT) || trimString(env.LLM_TIMEOUT)) || 600;
 
+  // v1.2 新增：contextWindow 解析（无前缀优先：CONTEXT_WINDOW 优先于 LLM_CONTEXT_WINDOW）
+  // 默认 131072（128K），用于计算 compact 阈值，避免上下文超限
+  const contextWindow = Number(trimString(env.CONTEXT_WINDOW) || trimString(env.LLM_CONTEXT_WINDOW)) || 131072;
+
   return {
     env,
     apiKey: trimString(env.API_KEY) || undefined,
@@ -632,6 +642,7 @@ export function resolveSettingsSources(
     thinkingEnabled,
     reasoningEffort,
     timeout,
+    contextWindow,
     debugLogEnabled,
     telemetryEnabled,
     notify: notify || undefined,

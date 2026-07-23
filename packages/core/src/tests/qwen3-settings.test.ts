@@ -215,9 +215,9 @@ test("用户完整参数集成测试（LLM_BASE_URL + LLM_API_KEY + LLM_MODEL + 
   assert.equal(resolved.provider, "openai", "Qwen3 应使用 openai provider（OpenAI 兼容 API）");
 });
 
-test("LLM_CONTEXT_WINDOW 别名不影响现有配置（v1.1 暂未实现 contextWindow 字段）", () => {
-  // 设计文档 §8 S4：contextWindow 配置字段暂不实现（无消费方）
-  // 但 LLM_CONTEXT_WINDOW 环境变量不应导致解析错误
+test("LLM_CONTEXT_WINDOW 解析为 contextWindow 字段（v1.2 已实现，用于 compact 阈值计算）", () => {
+  // v1.2 变更：contextWindow 字段已实现（S4 推迟的，现在有消费方：getCompactPromptTokenThreshold）
+  // LLM_CONTEXT_WINDOW 环境变量解析为 contextWindow 字段，用于计算 compact 阈值
   const resolved = resolveSettingsSources(
     {
       env: {
@@ -234,8 +234,42 @@ test("LLM_CONTEXT_WINDOW 别名不影响现有配置（v1.1 暂未实现 context
   // 确保解析成功，不抛异常
   assert.equal(resolved.model, "Qwen/Qwen3.6-27B");
   assert.equal(resolved.baseURL, "http://localhost:8000/v1");
-  // contextWindow 字段不存在于 ResolvedDeepcodingSettings（暂未实现）
-  assert.ok(!("contextWindow" in resolved), "contextWindow 字段暂未实现，不应出现在 resolved settings 中");
+  // v1.2：contextWindow 字段应正确解析
+  assert.equal(resolved.contextWindow, 131072, "LLM_CONTEXT_WINDOW=131072 应解析为 contextWindow=131072");
+});
+
+test("contextWindow 默认值为 131072（未设置 LLM_CONTEXT_WINDOW 时）", () => {
+  const resolved = resolveSettingsSources(
+    {
+      env: {
+        BASE_URL: "http://localhost:8000/v1",
+        API_KEY: "sk-test",
+        MODEL: "gpt-4",
+      },
+    },
+    null,
+    DEFAULTS,
+    {}
+  );
+  assert.equal(resolved.contextWindow, 131072, "未设置 LLM_CONTEXT_WINDOW 时默认 131072");
+});
+
+test("CONTEXT_WINDOW 无前缀优先于 LLM_CONTEXT_WINDOW", () => {
+  const resolved = resolveSettingsSources(
+    {
+      env: {
+        CONTEXT_WINDOW: "65536",
+        LLM_CONTEXT_WINDOW: "131072",
+        BASE_URL: "http://localhost:8000/v1",
+        API_KEY: "sk-test",
+        MODEL: "gpt-4",
+      },
+    },
+    null,
+    DEFAULTS,
+    {}
+  );
+  assert.equal(resolved.contextWindow, 65536, "CONTEXT_WINDOW 优先于 LLM_CONTEXT_WINDOW");
 });
 
 test("resolveSettings 顶层入口函数也支持 LLM_ 前缀别名", () => {
