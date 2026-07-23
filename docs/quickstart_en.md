@@ -85,6 +85,34 @@ Common fields:
 
 > If `model` starts with `claude-`, the provider is automatically inferred as `anthropic` even without setting `provider`. See [configuration_en.md](configuration_en.md#provider--llm-provider) for details.
 
+## Using Qwen3
+
+Deep Code supports Qwen3 series models (deployed via vLLM, compatible with OpenAI API format). Configure using `LLM_` prefix environment variables:
+
+```json
+{
+  "env": {
+    "LLM_BASE_URL": "http://47.95.252.237:8003/v1",
+    "LLM_API_KEY": "sk-your-api-key",
+    "LLM_MODEL": "Qwen/Qwen3.6-27B",
+    "LLM_TIMEOUT": "1200"
+  }
+}
+```
+
+Common fields:
+
+| Field | Description |
+| ---- | ---- |
+| `env.LLM_BASE_URL` | vLLM-deployed Qwen3 API address |
+| `env.LLM_API_KEY` | API key |
+| `env.LLM_MODEL` | Qwen3 model name, e.g. `Qwen/Qwen3.6-27B`, `qwen3-32b`, `qwen3.7-max` |
+| `env.LLM_TIMEOUT` | Request timeout in seconds, `1200`+ recommended for thinking mode |
+
+> Qwen3 models have thinking mode enabled by default, with reasoning content returned via the `reasoning_content` field. Deep Code automatically selects the correct thinking parameter format (`chat_template_kwargs.enable_thinking`) based on the model name — no manual configuration needed.
+
+> `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` / `LLM_TIMEOUT` are aliases for `BASE_URL` / `API_KEY` / `MODEL` / `TIMEOUT`, for unified prefix configuration. Non-prefixed versions take higher priority.
+
 ## Start
 
 Open your project directory:

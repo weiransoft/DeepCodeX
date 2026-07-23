@@ -4051,7 +4051,8 @@ ${agentInstructions}
           thinkingEnabled,
           model
         );
-        const thinkingOptions = buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort);
+        // v1.1 修改：传入 model 参数，支持 Qwen3 的 chat_template_kwargs.enable_thinking 格式
+        const thinkingOptions = buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort, model);
         // 仅流式调用一处三元分支，前后逻辑共享（2026-07-18 设计 §3 调用点形态）；
         // OpenAI 分支保持原样，Anthropic 分支聚合产物与 OpenAI 形态契约完全一致，
         // 主循环消费面（content/tool_calls/reasoning_content/refusal/usage）零改动。

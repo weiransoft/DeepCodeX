@@ -44,11 +44,16 @@ The following are all the top-level fields supported in `settings.json`, along w
 
 | Field             | Type   | Description                                                      |
 | ----------------- | ------ | ---------------------------------------------------------------- |
-| `MODEL`           | string | Model name, e.g. `"deepseek-v4-pro"`, `"deepseek-v4-flash"`, `"claude-sonnet-4-6"` |
+| `MODEL`           | string | Model name, e.g. `"deepseek-v4-pro"`, `"deepseek-v4-flash"`, `"claude-sonnet-4-6"`, `"Qwen/Qwen3.6-27B"` |
 | `BASE_URL`        | string | Base URL for API requests, e.g. `"https://api.deepseek.com"`    |
 | `API_KEY`         | string | API key                                                         |
 | `PROVIDER`              | string | LLM provider declaration, either `"openai"` or `"anthropic"` (lower priority than `provider` top-level field) |
 | `LLM_PROVIDER`          | string | Alias for `PROVIDER` (used when `PROVIDER` is not set) |
+| `LLM_BASE_URL`          | string | Alias for `BASE_URL` (used when `BASE_URL` is not set, for unified `LLM_` prefix config) |
+| `LLM_API_KEY`           | string | Alias for `API_KEY` (used when `API_KEY` is not set) |
+| `LLM_MODEL`             | string | Alias for `MODEL` (used when `MODEL` is not set) |
+| `TIMEOUT`               | string | LLM request timeout in seconds, default `600` (10 min). Takes priority over `LLM_TIMEOUT` |
+| `LLM_TIMEOUT`           | string | Alias for `TIMEOUT` (used when `TIMEOUT` is not set) |
 | `ANTHROPIC_BETA`        | string | Anthropic beta features, comma-separated (e.g., `"extended-thinking,prompt-caching"`) |
 | `ANTHROPIC_MAX_TOKENS`  | string | Claude max output tokens (default `8192`) |
 | `ANTHROPIC_THINKING_BUDGET` | string | Claude extended thinking budget tokens (default `4096`) |
@@ -58,6 +63,10 @@ The following are all the top-level fields supported in `settings.json`, along w
 | `DEBUG_LOG_ENABLED`| string| Enable debug log output                                         |
 | `TELEMETRY_ENABLED`| string| Enable anonymous usage reporting                                |
 | `<any other KEY>` | string | Custom environment variable                                     |
+
+> **LLM_ Prefix Aliases**: `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` / `LLM_TIMEOUT` are aliases for their non-prefixed counterparts, only effective when the non-prefixed version is not set. This allows users to configure all LLM-related parameters with a unified `LLM_` prefix.
+
+> **TIMEOUT Configuration**: `TIMEOUT` and `LLM_TIMEOUT` control the LLM HTTP request timeout (in seconds), default `600` seconds. For models with long reasoning times (e.g., Qwen3 thinking mode, DeepSeek V4), it is recommended to set `1200` or higher.
 
 #### `provider` — LLM Provider
 
@@ -106,12 +115,42 @@ Deep Code supports multiple LLM providers, declared explicitly via the `provider
 - `temperature` only takes effect under the `openai` provider; Claude uses `top_p`/`top_k`, so configuring `temperature` triggers a warning and is ignored
 - No automatic fallback: the provider is explicitly configured by the user, and failures produce explicit errors rather than silent switching
 
+**Qwen3 Model Configuration Example**:
+
+Qwen3 series models are deployed via vLLM and are compatible with the OpenAI API format. Use `provider=openai` (default) and configure via `LLM_` prefix environment variables:
+
+```json
+{
+  "env": {
+    "LLM_BASE_URL": "http://47.95.252.237:8003/v1",
+    "LLM_API_KEY": "sk-your-api-key",
+    "LLM_MODEL": "Qwen/Qwen3.6-27B",
+    "LLM_TIMEOUT": "1200"
+  }
+}
+```
+
+Qwen3 thinking parameter format:
+
+| Model Series | Thinking Enable Parameter Format | Reasoning Return Field |
+|--------------|----------------------------------|----------------------|
+| Qwen3 | `chat_template_kwargs: { enable_thinking: true }` (top-level request body field) | `reasoning_content` |
+| DeepSeek V4 | `thinking: { type: "enabled" }` + `extra_body: { reasoning_effort }` | `reasoning_content` |
+| Anthropic Claude | `thinking: { type: "enabled", budget_tokens: N }` | `thinking` block |
+
+> Qwen3's `chat_template_kwargs` is a vLLM standard parameter that must be passed as a top-level request body field (not wrapped in `extra_body`).
+
+> Qwen3 model name identification: case-insensitive, starts with `qwen3` or `qwen/qwen3`. Covers Qwen3-8B / Qwen3-32B / Qwen3-30B-A3B / Qwen/Qwen3.6-27B / qwen3.6-plus / qwen3.7-max, etc.
+
 #### `thinkingEnabled` — Thinking Mode
 
-Whether to enable DeepSeek thinking mode. Set to `true` to enable, `false` to disable.
+Whether to enable thinking mode. Set to `true` to enable, `false` to disable.
 
 - For `deepseek-v4-pro` and `deepseek-v4-flash`, thinking mode is **enabled by default**.
+- For Qwen3 series models (starting with `qwen3` / `qwen/qwen3`), thinking mode is **enabled by default**.
 - For other models, thinking mode is **disabled by default**.
+
+> Qwen3 uses the `chat_template_kwargs.enable_thinking` parameter to control thinking mode, which differs from DeepSeek's `thinking.type` format. Deep Code automatically selects the correct parameter format based on the model name.
 
 #### `reasoningEffort` — Reasoning Intensity
 

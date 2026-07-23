@@ -12,6 +12,16 @@ export type DeepcodingEnv = Record<string, string | undefined> & {
   REASONING_EFFORT?: string;
   DEBUG_LOG_ENABLED?: string;
   TELEMETRY_ENABLED?: string;
+  /** v1.1 新增：LLM_ 前缀环境变量别名（无前缀版本优先，LLM_ 前缀作为后备） */
+  LLM_BASE_URL?: string;
+  LLM_API_KEY?: string;
+  LLM_MODEL?: string;
+  LLM_TIMEOUT?: string;
+  LLM_CONTEXT_WINDOW?: string;
+  /** v1.1 新增：超时配置（优先级高于 LLM_TIMEOUT） */
+  TIMEOUT?: string;
+  /** v1.1 新增：上下文窗口配置（预留，当前无消费方） */
+  CONTEXT_WINDOW?: string;
 };
 
 export type ReasoningEffort = "high" | "max";
@@ -117,6 +127,8 @@ export type ResolvedDeepcodingSettings = {
   temperature?: number;
   thinkingEnabled: boolean;
   reasoningEffort: ReasoningEffort;
+  /** v1.1 新增：LLM 请求超时（秒），来自 env.TIMEOUT / env.LLM_TIMEOUT，默认 600（10 分钟） */
+  timeout: number;
   debugLogEnabled: boolean;
   telemetryEnabled: boolean;
   notify?: string;
@@ -489,12 +501,33 @@ export function resolveSettingsSources(
     ...systemEnv,
   };
 
+  // v1.1 新增：LLM_ 前缀环境变量别名解析
+  // 无前缀版本（BASE_URL / API_KEY / MODEL）优先，LLM_ 前缀作为后备
+  // 用户可通过 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL 等环境变量配置，
+  // 与无前缀版本等价，降低配置心智成本
+  const llmBaseUrl = trimString(env.LLM_BASE_URL);
+  if (llmBaseUrl && !trimString(env.BASE_URL)) {
+    env.BASE_URL = llmBaseUrl;
+  }
+  const llmApiKey = trimString(env.LLM_API_KEY);
+  if (llmApiKey && !trimString(env.API_KEY)) {
+    env.API_KEY = llmApiKey;
+  }
+  const llmModel = trimString(env.LLM_MODEL);
+  if (llmModel && !trimString(env.MODEL)) {
+    env.MODEL = llmModel;
+  }
+
   const model =
     trimString(systemEnv.MODEL) ||
     trimString(projectSettings?.model) ||
     trimString(projectEnv.MODEL) ||
     trimString(userSettings?.model) ||
     trimString(userEnv.MODEL) ||
+    // v1.1 新增：LLM_MODEL 别名回退
+    // LLM_ 前缀别名解析后 env.MODEL 可能被填充（仅当无前缀 MODEL 未设置时），
+    // 需要加入解析链，否则 LLM_MODEL 环境变量无法生效
+    trimString(env.MODEL) ||
     defaults.model;
 
   const thinkingEnabled =
@@ -584,6 +617,10 @@ export function resolveSettingsSources(
   // - provider=openai 时保持 defaults.baseURL 现状（DeepSeek 默认，零回归）。
   const defaultBaseURL = provider === "anthropic" ? "https://api.anthropic.com" : defaults.baseURL;
 
+  // v1.1 新增：timeout 解析（无前缀优先：TIMEOUT 优先于 LLM_TIMEOUT）
+  // 默认 600 秒（10 分钟），与 OpenAI SDK 默认超时保持一致，确保向后兼容
+  const timeout = Number(trimString(env.TIMEOUT) || trimString(env.LLM_TIMEOUT)) || 600;
+
   return {
     env,
     apiKey: trimString(env.API_KEY) || undefined,
@@ -594,6 +631,7 @@ export function resolveSettingsSources(
     temperature,
     thinkingEnabled,
     reasoningEffort,
+    timeout,
     debugLogEnabled,
     telemetryEnabled,
     notify: notify || undefined,
