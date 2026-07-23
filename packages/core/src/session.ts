@@ -4456,10 +4456,17 @@ ${agentInstructions}
       sessionMessages[i] = { ...sessionMessages[i], compacted: true, updateTime: now };
     }
 
+    // Qwen3 兼容修复：summaryMessage 使用 role: "user" 而非 "system"
+    // 原因：compact 后 summaryMessage 紧跟原始 system 消息（中间 compacted 消息被过滤），
+    // 若 role 为 "system"，Qwen3 的 flattenMidConversationSystemMessages 会将其合并到
+    // 开头 system 消息中，导致消息列表变为 [system, assistant, ...]，缺少 user query，
+    // 触发 Qwen3 vLLM chat_template 的 "No user query found in messages" HTTP 400 错误。
+    // 语义上 summary 替代了被压缩的对话（含 user 消息），用 user role 合理；
+    // visible:false 保证不影响用户视图。
     const summaryMessage: SessionMessage = {
       id: crypto.randomUUID(),
       sessionId,
-      role: "system",
+      role: "user",
       content: `There are earlier parts of the conversation. Here is a summary: \n\n${compactedSummary}`,
       contentParams: null,
       messageParams: null,
