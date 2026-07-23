@@ -80,6 +80,16 @@ export const DEFAULT_BACKOFF_MAX_SEC = 60.0;
 export const DEFAULT_BACKOFF_JITTER_RATIO = 0.1;
 
 /**
+ * 默认值：stopWhen 为空字符串时是否视为"通过即停止"
+ *
+ * - true（默认）：对齐 eag/loop/ 母本语义，空 stopWhen 时单轮通过即 STOP_SUCCESS
+ * - false：对齐 P5 语义，空 stopWhen 时不停止，依赖调用方自行判定完成条件
+ *
+ * 通过 config.extra.stop_when_empty_means_stop 可覆盖默认值（向后兼容）。
+ */
+export const DEFAULT_STOP_WHEN_EMPTY_MEANS_STOP = true;
+
+/**
  * stop_when 关键词列表（用于朴素匹配，未来可替换为 LLM 语义判断）
  *
  * 当 config.stopWhen 包含任一关键词时，若最近轮次验证通过则视为满足停止条件。
@@ -123,6 +133,33 @@ export class LoopScheduler {
   private readonly config: Readonly<LoopEngineeringConfig>;
   /** 日志回调函数（null 表示不输出日志） */
   private readonly log: LogCallback;
+  /**
+   * 可配置：连续失败 → HUMAN_CHECKPOINT 阈值
+   *
+   * 从 config.extra.consecutive_failures_human_checkpoint 读取，
+   * 缺省时使用 CONSECUTIVE_FAILURES_HUMAN_CHECKPOINT_THRESHOLD（向后兼容）。
+   *
+   * P5 集成时注入 P5 的 consecutiveFailureAbort 值，使 scheduler 阈值与 P5 一致。
+   */
+  private readonly humanCheckpointThreshold: number;
+  /**
+   * 可配置：连续失败 → STOP_FAILURE 阈值
+   *
+   * 从 config.extra.consecutive_failures_stop_failure 读取，
+   * 缺省时使用 CONSECUTIVE_FAILURES_STOP_FAILURE_THRESHOLD（向后兼容）。
+   *
+   * P5 集成时注入 consecutiveFailureAbort + 1，确保 STOP_FAILURE 在 HUMAN_CHECKPOINT 之后触发。
+   */
+  private readonly stopFailureThreshold: number;
+  /**
+   * 可配置：stopWhen 为空字符串时是否视为"通过即停止"
+   *
+   * 从 config.extra.stop_when_empty_means_stop 读取，
+   * 缺省时使用 DEFAULT_STOP_WHEN_EMPTY_MEANS_STOP=true（向后兼容）。
+   *
+   * P5 集成时传入 false，对齐 P5 的"空 stopWhen 不停止"语义。
+   */
+  private readonly stopWhenEmptyMeansStop: boolean;
 
   /**
    * 构造调度器
@@ -133,6 +170,19 @@ export class LoopScheduler {
   constructor(config: Readonly<LoopEngineeringConfig>, log: LogCallback = null) {
     this.config = config;
     this.log = log;
+    // 从 config.extra 读取可配置阈值（向后兼容：缺省时使用硬编码默认值）
+    this.humanCheckpointThreshold = this.readExtraNumber(
+      "consecutive_failures_human_checkpoint",
+      CONSECUTIVE_FAILURES_HUMAN_CHECKPOINT_THRESHOLD
+    );
+    this.stopFailureThreshold = this.readExtraNumber(
+      "consecutive_failures_stop_failure",
+      CONSECUTIVE_FAILURES_STOP_FAILURE_THRESHOLD
+    );
+    this.stopWhenEmptyMeansStop = this.readExtraBoolean(
+      "stop_when_empty_means_stop",
+      DEFAULT_STOP_WHEN_EMPTY_MEANS_STOP
+    );
   }
 
   /**
@@ -198,12 +248,13 @@ export class LoopScheduler {
 
     // 4. 验证未通过 → 按连续失败次数升级处理
     // consecutiveFailures+1 表示包含本轮失败的等效失败次数
+    // 阈值从 config.extra 读取（可配置），缺省时使用硬编码默认值（向后兼容）
     const effectiveFailures = consecutiveFailures + 1;
-    if (effectiveFailures >= CONSECUTIVE_FAILURES_STOP_FAILURE_THRESHOLD) {
+    if (effectiveFailures >= this.stopFailureThreshold) {
       this.info(`连续失败 ${effectiveFailures} 次，终止 Loop`);
       return this.makeDecision("stop_failure", `连续失败 ${effectiveFailures} 次，终止 Loop`);
     }
-    if (effectiveFailures >= CONSECUTIVE_FAILURES_HUMAN_CHECKPOINT_THRESHOLD) {
+    if (effectiveFailures >= this.humanCheckpointThreshold) {
       this.info(`连续失败 ${effectiveFailures} 次，触发人类检查点`);
       return this.makeDecision("human_checkpoint", `连续失败 ${effectiveFailures} 次，需要人类确认`, true);
     }
@@ -272,9 +323,11 @@ export class LoopScheduler {
    * @returns 是否满足停止条件
    */
   private shouldStopWhen(memoryEvents: ReadonlyArray<LoopEvent>): boolean {
-    // 1. 无显式 stop_when：默认 pass 即停止（对齐 K1 单轮通过即停止语义）
+    // 1. 无显式 stop_when：根据 stopWhenEmptyMeansStop 配置决定行为
+    // - true（默认，对齐 eag/loop/ 母本）：空 stopWhen 时单轮通过即 STOP_SUCCESS
+    // - false（P5 集成用）：空 stopWhen 时不停止，依赖调用方自行判定完成条件
     if (!this.config.stopWhen) {
-      return true;
+      return this.stopWhenEmptyMeansStop;
     }
 
     // 2. 基于关键词的朴素匹配（未来可替换为 LLM 语义判断）
@@ -300,6 +353,21 @@ export class LoopScheduler {
   private readExtraNumber(key: string, defaultValue: number): number {
     const raw = this.config.extra[key];
     if (typeof raw === "number" && !Number.isNaN(raw)) {
+      return raw;
+    }
+    return defaultValue;
+  }
+
+  /**
+   * 从 config.extra 读取布尔参数（带类型守卫）
+   *
+   * @param key extra 中的字段名
+   * @param defaultValue 缺省值（当字段不存在或类型不符时使用）
+   * @returns 读取到的布尔值
+   */
+  private readExtraBoolean(key: string, defaultValue: boolean): boolean {
+    const raw = this.config.extra[key];
+    if (typeof raw === "boolean") {
       return raw;
     }
     return defaultValue;

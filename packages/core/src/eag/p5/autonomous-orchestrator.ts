@@ -59,6 +59,20 @@ import type { P5LoopExecutor } from "./loop-executor";
 import type { P5StageContext, P5StageResult, P5StageKind } from "./handlers/types";
 import { P5_STAGE_ORDER } from "./run-state-store";
 
+// eag/loop/ 集成（方案 A：P5 复用 eag/loop/）
+// 复用范围（架构师 D2 建议的分层复用）：
+// - 调度层：LoopScheduler + LoopEngineeringConfig —— P5 用 scheduler.decideNext() 替代内联 5f 终止条件
+// - 数据层：LoopEvaluationVerdict / SchedulingDecision / LoopEvent —— P5 事件流使用 eag/loop/ 数据模型
+// 注：不创建 4 个 Protocol 适配器（架构师 D2.5 建议删除，避免死代码）
+import { LoopScheduler } from "../loop/scheduler";
+import {
+  createLoopEngineeringConfig,
+  type LoopEngineeringConfig,
+  type LoopEvaluationVerdict,
+  type SchedulingDecision,
+  type LoopEvent,
+} from "../loop/models";
+
 // ============================================================================
 // 1. 常量定义（不可变，Object.freeze 冻结）
 // ============================================================================
@@ -558,6 +572,26 @@ export class AutonomousOrchestrator {
     const consecutiveFailureAbort = request.consecutiveFailureAbort ?? this.defaultConsecutiveFailureAbort;
     const tasksFilePath = this.resolveTasksFilePath(request.tasksFilePath, projectRoot);
 
+    // 2a. 构造 eag/loop/ 集成组件（方案 A：P5 复用 eag/loop/）
+    // 设计依据：架构师 D2 建议 —— 分层复用（调度层 + 数据层）
+    // - LoopEngineeringConfig：从 P5 配置映射，extra 注入可配置阈值
+    //   - consecutive_failures_human_checkpoint = consecutiveFailureAbort（对齐 P5 abort 阈值）
+    //   - consecutive_failures_stop_failure = consecutiveFailureAbort + 1（确保 STOP_FAILURE 在 HUMAN_CHECKPOINT 之后触发）
+    //   - stop_when_empty_means_stop = false（对齐 P5 语义：空 stopWhen 不停止，依赖 5d/5e 判定）
+    // - LoopScheduler：复用 eag/loop/ 调度决策器，替代内联 5f 终止条件
+    // - loopEvents：缓存本轮及历史 LoopEvent，供 scheduler.shouldStopWhen 关键词匹配
+    const loopConfig = this.buildLoopEngineeringConfig({
+      projectRoot,
+      maxIterations,
+      maxTokens,
+      stopWhen,
+      testCommand,
+      testTimeoutSec,
+      consecutiveFailureAbort,
+    });
+    const loopScheduler = new LoopScheduler(loopConfig);
+    const loopEvents: LoopEvent[] = [];
+
     this.log(
       `AutonomousOrchestrator.run 启动：projectRoot=${projectRoot} objective="${objective}" maxIterations=${maxIterations}`,
       "info"
@@ -713,6 +747,57 @@ export class AutonomousOrchestrator {
           }
         }
 
+        // 5b.7 eag/loop/ 集成：构造 LoopEvaluationVerdict + LoopEvent，调用 LoopScheduler（方案 A）
+        // 设计依据：架构师 D2 建议 —— 复用 eag/loop/ 调度层替代内联 5f 终止条件
+        // 调用时机：在 5c 累加前调用，传入不含本轮失败的 consecutiveFailures，
+        //          对齐 scheduler 参数语义（scheduler 内部 +1 得到 effectiveFailures）
+        // 注：此步骤仅做调度决策，不改变 consecutiveFailures（由 5c 负责）
+        if (status === "running") {
+          const loopVerdict = this.buildLoopEvaluationVerdict(iterationResults, iterationFatal, iterationFailed);
+          const loopEvent = this.buildLoopEvent(runId, iterIndex, loopVerdict);
+          loopEvents.push(loopEvent);
+
+          const schedulingDecision = loopScheduler.decideNext(
+            iterIndex,
+            loopVerdict,
+            loopEvents,
+            totalTokensUsed,
+            consecutiveFailures // 不含本轮失败（5c 尚未执行）
+          );
+
+          this.log(
+            `AutonomousOrchestrator.run 迭代 ${iterIndex} LoopScheduler 决策：action=${schedulingDecision.action} reason=${schedulingDecision.reason}`,
+            "info"
+          );
+
+          // 映射 SchedulingDecision → P5 status（替代原 5f 终止条件）
+          // - human_checkpoint → aborted（P5 无人值守，不等待人工，直接 abort）
+          // - stop_failure（非最大迭代次数）→ aborted（连续失败或 Token 耗尽）
+          // - stop_failure（最大迭代次数）→ 不处理，由步骤 6 统一设为 failed（保持向后兼容）
+          // - stop_success / continue / fix → 不改变 status（由 5d/5e/while 循环条件处理）
+          if (schedulingDecision.action === "human_checkpoint") {
+            status = "aborted";
+            finalStatus = "aborted";
+            this.log(
+              `AutonomousOrchestrator.run 迭代 ${iterIndex} LoopScheduler 触发 human_checkpoint，status=aborted`,
+              "error"
+            );
+          } else if (schedulingDecision.action === "stop_failure") {
+            // 区分"最大迭代次数触发"与"连续失败/Token 耗尽触发"
+            // 最大迭代次数 → 由步骤 6 统一设为 failed（向后兼容）
+            // 其他原因 → 设为 aborted
+            const isMaxIterationsReached = iterIndex + 1 >= maxIterations;
+            if (!isMaxIterationsReached) {
+              status = "aborted";
+              finalStatus = "aborted";
+              this.log(
+                `AutonomousOrchestrator.run 迭代 ${iterIndex} LoopScheduler 触发 stop_failure（${schedulingDecision.reason}），status=aborted`,
+                "error"
+              );
+            }
+          }
+        }
+
         // 5c. 4 阶段全 success → 重置 consecutiveFailures，记录 milestone
         if (!iterationFatal && !iterationFailed) {
           consecutiveFailures = 0;
@@ -765,15 +850,8 @@ export class AutonomousOrchestrator {
           }
         }
 
-        // 5f. consecutiveFailures >= abort 阈值 → finalStatus="aborted"
-        if (status === "running" && consecutiveFailures >= consecutiveFailureAbort) {
-          status = "aborted";
-          finalStatus = "aborted";
-          this.log(
-            `AutonomousOrchestrator.run 迭代 ${iterIndex} 连续失败 ${consecutiveFailures} 次达到阈值 ${consecutiveFailureAbort}，触发 abort`,
-            "error"
-          );
-        }
+        // 注：原 5f（consecutiveFailures >= abort 阈值 → aborted）已由 5b.7 的 LoopScheduler 替代
+        //     方案 A 集成：P5 复用 eag/loop/ 的 LoopScheduler 做调度决策
 
         // 5g. 保存 RunState 快照（每次迭代后）
         const nextIterIndex = status === "running" ? iterIndex + 1 : iterIndex;
@@ -1608,6 +1686,143 @@ export class AutonomousOrchestrator {
     // 简化判定：verify 通过即视为命中 stop_when（保守策略）
     // Phase 5.3 完整版应解析表达式并做客观指标匹配
     return true;
+  }
+
+  // ------------------------------------------------------------------------
+  // 私有方法：eag/loop/ 集成（方案 A：P5 复用 eag/loop/）
+  // ------------------------------------------------------------------------
+
+  /**
+   * 构造 LoopEngineeringConfig（从 P5 配置映射）
+   *
+   * 设计依据：架构师 D2.2 建议 —— P5 通过 extra 注入可配置阈值，使 scheduler 与 P5 语义一致
+   *
+   * 映射规则：
+   * - maxIterations / maxTokens / stopWhen / testCommand / testTimeoutSec / projectRoot → 直接映射
+   * - loopType: "coding"（P5 默认 Loop 类型）
+   * - extra.consecutive_failures_human_checkpoint = consecutiveFailureAbort（对齐 P5 abort 阈值）
+   * - extra.consecutive_failures_stop_failure = consecutiveFailureAbort + 1（确保 stop_failure 在 human_checkpoint 之后触发）
+   * - extra.stop_when_empty_means_stop = false（对齐 P5 语义：空 stopWhen 不停止，依赖 5d/5e 判定）
+   *
+   * @param args P5 配置参数
+   * @returns 冻结的 LoopEngineeringConfig 实例
+   */
+  private buildLoopEngineeringConfig(args: {
+    projectRoot: string;
+    maxIterations: number;
+    maxTokens: number;
+    stopWhen: string;
+    testCommand: string;
+    testTimeoutSec: number;
+    consecutiveFailureAbort: number;
+  }): Readonly<LoopEngineeringConfig> {
+    return createLoopEngineeringConfig({
+      loopType: "coding",
+      discoveryMode: "auto",
+      evaluatorMode: "strict",
+      maxIterations: args.maxIterations,
+      maxTokens: args.maxTokens,
+      humanCheckpointEvery: 0, // P5 不使用此字段（由 scheduler 的 consecutive_failures_human_checkpoint 替代）
+      samplingReadRatio: 0.1,
+      stopWhen: args.stopWhen,
+      stageOrder: ["plan", "dev", "verify", "fix"],
+      projectRoot: args.projectRoot,
+      runDir: ".eag/p5",
+      notesPath: ".eag/p5/notes.md",
+      testCommand: args.testCommand,
+      testTimeoutSec: args.testTimeoutSec,
+      securityAnalyzer: "builtin",
+      autoCommit: false, // P5 不自动 commit（由用户手动 commit）
+      extra: {
+        // 可配置阈值（架构师 D2.2 建议）
+        consecutive_failures_human_checkpoint: args.consecutiveFailureAbort,
+        consecutive_failures_stop_failure: args.consecutiveFailureAbort + 1,
+        // 空 stopWhen 不停止（对齐 P5 语义）
+        stop_when_empty_means_stop: false,
+      },
+    });
+  }
+
+  /**
+   * 从 P5 iterationResults 构造 LoopEvaluationVerdict
+   *
+   * 映射规则：
+   * - 4 阶段全 success → passed=true, severity="info"
+   * - 存在 failed/retriable（非 fatal）→ passed=false, severity="warning"
+   * - 存在 fatal → passed=false, severity="blocker"
+   * - findings ← 收集各阶段的 error/summary
+   * - evaluatorId ← "p5-autonomous-orchestrator"
+   *
+   * @param iterationResults 当前迭代的 4 阶段结果
+   * @param iterationFatal 是否存在 fatal 阶段
+   * @param iterationFailed 是否存在 failed/retriable 阶段
+   * @returns LoopEvaluationVerdict 实例
+   */
+  private buildLoopEvaluationVerdict(
+    iterationResults: ReadonlyArray<Readonly<P5StageResult>>,
+    iterationFatal: boolean,
+    iterationFailed: boolean
+  ): LoopEvaluationVerdict {
+    // 判定 passed 和 severity
+    const passed = !iterationFatal && !iterationFailed;
+    const severity: "info" | "warning" | "blocker" = iterationFatal ? "blocker" : iterationFailed ? "warning" : "info";
+
+    // 收集 findings（各阶段的 error/summary）
+    const findings: string[] = [];
+    for (const result of iterationResults) {
+      if (result.kind === "fatal" || result.kind === "failed" || result.kind === "retriable") {
+        const detail = result.error ?? result.summary;
+        findings.push(`[${result.stage}] ${result.kind}: ${detail}`);
+      }
+    }
+
+    // 构造 reason
+    const reason = passed
+      ? "所有 4 阶段均成功"
+      : iterationFatal
+        ? `存在 fatal 阶段：${findings.join("; ")}`
+        : `存在失败阶段：${findings.join("; ")}`;
+
+    return {
+      passed,
+      evaluatorId: "p5-autonomous-orchestrator",
+      reason,
+      findings: Object.freeze(findings),
+      severity,
+      suggestedFix: passed ? "" : "检查失败阶段的错误信息并修复",
+      sampledArtifacts: Object.freeze([]),
+    };
+  }
+
+  /**
+   * 从 P5 iterationResults 构造 LoopEvent
+   *
+   * 事件类型映射：
+   * - verdict.passed=true → eventType="verification_passed"
+   * - verdict.passed=false → eventType="verification_rejected"
+   *
+   * 用途：供 LoopScheduler.shouldStopWhen() 检查 memoryEvents 是否含 verification_passed 事件
+   *
+   * @param runId 运行 ID
+   * @param iterIndex 迭代索引
+   * @param verdict 本轮验证结论
+   * @returns LoopEvent 实例
+   */
+  private buildLoopEvent(runId: string, iterIndex: number, verdict: LoopEvaluationVerdict): LoopEvent {
+    return {
+      eventId: `${runId}-iter-${iterIndex}-${Date.now()}`,
+      eventType: verdict.passed ? "verification_passed" : "verification_rejected",
+      phase: "verification",
+      runId,
+      iterIndex,
+      payload: Object.freeze({
+        passed: verdict.passed,
+        severity: verdict.severity,
+        reason: verdict.reason,
+        findings: verdict.findings,
+      }),
+      timestamp: new Date().toISOString(),
+    };
   }
 
   /**

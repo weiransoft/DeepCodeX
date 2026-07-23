@@ -85,6 +85,15 @@
  *            AUTONOMOUS_DEFAULT_TEST_COMMAND（"npm test"）/
  *            AUTONOMOUS_DEFAULT_TEST_TIMEOUT_SEC（600）等
  *
+ * 10. eag/loop/ 集成类型（方案 A：P5 复用 eag/loop/）：
+ *     - 类：LoopScheduler
+ *     - 工厂：createLoopEngineeringConfig
+ *     - 类型：LoopEngineeringConfig / LoopEvaluationVerdict / SchedulingDecision /
+ *             SchedulingAction / LoopEvent / LoopEventType / LoopType
+ *     - 常量：CONSECUTIVE_FAILURES_HUMAN_CHECKPOINT_THRESHOLD /
+ *             CONSECUTIVE_FAILURES_STOP_FAILURE_THRESHOLD /
+ *             DEFAULT_STOP_WHEN_EMPTY_MEANS_STOP
+ *
  * 使用方式：
  * ```typescript
  * import {
@@ -392,3 +401,34 @@ export type {
   AutonomousOrchestratorOptions,
   AutonomousOrchestratorLogCallback,
 } from "./autonomous-orchestrator";
+
+// ============================================================================
+// 12. eag/loop/ 集成类型导出（方案 A：P5 复用 eag/loop/）
+// ============================================================================
+
+// 设计依据：架构师 D2 建议 —— P5 复用 eag/loop/ 调度层和数据层
+// 此处导出 eag/loop/ 的关键类型，建立 P5 对 eag/loop/ 的显式依赖关系
+// 注：不导出 4 个 Protocol 适配器（架构师 D2.5 建议，避免死代码）
+
+export { LoopScheduler } from "../loop/scheduler";
+export {
+  CONSECUTIVE_FAILURES_HUMAN_CHECKPOINT_THRESHOLD,
+  CONSECUTIVE_FAILURES_STOP_FAILURE_THRESHOLD,
+  DEFAULT_STOP_WHEN_EMPTY_MEANS_STOP,
+} from "../loop/scheduler";
+
+export {
+  createLoopEngineeringConfig,
+  DEFAULT_LOOP_ENGINEERING_CONFIG,
+  LoopEngineeringConfigError,
+} from "../loop/models";
+
+export type {
+  LoopEngineeringConfig,
+  LoopEvaluationVerdict,
+  SchedulingDecision,
+  SchedulingAction,
+  LoopEvent,
+  LoopEventType,
+  LoopType,
+} from "../loop/models";
