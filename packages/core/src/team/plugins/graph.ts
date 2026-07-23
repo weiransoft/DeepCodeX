@@ -238,15 +238,10 @@ export class GraphPlugin extends BasePlugin {
       return history[idx]?.result ? 0 : 1;
     }
 
-    // 函数表达式
-    if (condition.startsWith("fn:")) {
-      try {
-        const fn = new Function("ctx", "history", `return (${condition.slice(3)})`);
-        return fn(ctx, history) ? 0 : 1;
-      } catch {
-        return 0;
-      }
-    }
+    // v2.0 安全修复：移除 fn: 表达式分支（RCE 风险）
+    // 原实现使用 new Function() 动态求值，存在远程代码执行风险。
+    // 复杂条件逻辑请通过 eag/graph/PredicateRegistry 注册谓词函数实现。
+    // 未匹配任何预定义条件时默认返回 0（选择第一个分支）
 
     return 0;
   }

@@ -157,18 +157,10 @@ async function evaluateExit(
     return iteration >= parseInt(afterMatch[1]!, 10);
   }
 
-  // 函数表达式（动态求值）
-  if (exitWhen.startsWith("fn:")) {
-    try {
-      // 注意：eval 在严格模式下可用
-
-      const fn = new Function("result", "iteration", "history", `return (${exitWhen.slice(3)})`);
-      return Boolean(fn(lastResult, iteration, history));
-    } catch (err) {
-      // eval 失败不算退出
-      return false;
-    }
-  }
+  // v2.0 安全修复：移除 fn: 表达式分支（RCE 风险）
+  // 原实现使用 new Function() 动态求值，存在远程代码执行风险。
+  // 复杂退出条件请通过 eag/graph/PredicateRegistry 注册谓词函数实现。
+  // 未匹配任何预定义条件时默认不退出（返回 false）
 
   return false;
 }
