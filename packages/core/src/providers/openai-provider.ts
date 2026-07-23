@@ -56,6 +56,8 @@ export class OpenAILLMClient implements LLMClient {
       this.sdk = new OpenAI({
         apiKey: this.settings.apiKey,
         baseURL: this.settings.baseURL || undefined,
+        // v1.1 新增：注入 timeout（秒 → 毫秒），来自 env.TIMEOUT / env.LLM_TIMEOUT
+        timeout: this.settings.timeout * 1000,
       });
     }
     return this.sdk;
@@ -85,7 +87,7 @@ export class OpenAILLMClient implements LLMClient {
             })),
           }
         : {}),
-      ...buildThinkingRequestOptions(request.thinkingEnabled, this.baseURL, this.settings.reasoningEffort),
+      ...buildThinkingRequestOptions(request.thinkingEnabled, this.baseURL, this.settings.reasoningEffort, this.model),
     } as OpenAI.ChatCompletionCreateParamsNonStreaming;
     const completion = await client.chat.completions.create(params, { signal: request.signal ?? undefined });
 
@@ -146,6 +148,15 @@ export class OpenAILLMClient implements LLMClient {
                 })),
               }
             : {}),
+          // v1.1 新增：流式请求也传递 thinking 参数（与 createMessage 对齐）
+          // 之前 createMessageStream 不传 thinking 参数，导致 Qwen3/DeepSeek 的
+          // thinking 模式在流式路径下静默失效
+          ...buildThinkingRequestOptions(
+            request.thinkingEnabled,
+            this.baseURL,
+            this.settings.reasoningEffort,
+            this.model
+          ),
         },
         { signal: request.signal ?? undefined }
       );

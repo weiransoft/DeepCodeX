@@ -287,7 +287,9 @@ test("LL-010: thinking 参数传递（thinkingEnabled=true 时请求体含 think
         },
       },
     },
-    model: "stub-thinking-model",
+    // v1.1 修订：使用真实 DeepSeek 模型名，确保 buildThinkingRequestOptions 生成 DeepSeek 格式
+    // （非-thinking 模型名如 "stub-thinking-model" 在 v1.1 后返回 {}，不传 thinking 参数）
+    model: "deepseek-v4-pro",
     baseURL: "https://stub.local",
     temperature: 0.3,
     thinkingEnabled: true,
@@ -324,7 +326,7 @@ test("LL-010: thinking 参数传递（thinkingEnabled=true 时请求体含 think
   // 使用显式类型断言避免 TypeScript 控制流分析将 capturedRequest 收窄为 never
   const req = capturedRequest as Record<string, unknown> | null;
   assert.ok(req !== null, "capturedRequest 不应为 null");
-  assert.equal(req!.model, "stub-thinking-model");
+  assert.equal(req!.model, "deepseek-v4-pro");
   assert.ok(Array.isArray(req!.messages), "请求体应包含 messages 数组");
   assert.equal((req as { temperature?: number }).temperature, 0.3);
 });
@@ -349,7 +351,9 @@ test("LL-010b: thinking 参数传递（thinkingEnabled=false 时请求体含 thi
         },
       },
     },
-    model: "stub-model",
+    // v1.1 修订：使用真实 DeepSeek 模型名，确保 thinkingEnabled=false 时生成 thinking.type=disabled
+    // （非-thinking 模型名在 v1.1 后返回 {}，不传 thinking 参数，无法验证 disabled 行为）
+    model: "deepseek-v4-pro",
     baseURL: "https://stub.local",
     thinkingEnabled: false,
   };

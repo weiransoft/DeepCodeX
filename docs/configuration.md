@@ -44,11 +44,16 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 
 | 字段       | 类型   | 说明                                                               |
 | ---------- | ------ | ------------------------------------------------------------------ |
-| `MODEL`    | string | 模型名称。例如 `"deepseek-v4-pro"`、`"deepseek-v4-flash"`、`"claude-sonnet-4-6"` |
+| `MODEL`    | string | 模型名称。例如 `"deepseek-v4-pro"`、`"deepseek-v4-flash"`、`"claude-sonnet-4-6"`、`"Qwen/Qwen3.6-27B"` |
 | `BASE_URL` | string | API 请求的基础 URL。例如 `"https://api.deepseek.com"`              |
 | `API_KEY`  | string | API 密钥                                                          |
 | `PROVIDER` | string | LLM 提供商声明，可选 `"openai"` 或 `"anthropic"`（优先级低于 `provider` 顶层字段） |
 | `LLM_PROVIDER` | string | `PROVIDER` 的别名（当 `PROVIDER` 未设置时生效） |
+| `LLM_BASE_URL` | string | `BASE_URL` 的别名（当 `BASE_URL` 未设置时生效，便于 `LLM_` 前缀统一配置） |
+| `LLM_API_KEY` | string | `API_KEY` 的别名（当 `API_KEY` 未设置时生效） |
+| `LLM_MODEL` | string | `MODEL` 的别名（当 `MODEL` 未设置时生效） |
+| `TIMEOUT` | string | LLM 请求超时（秒），默认 `600`（10 分钟）。无前缀优先于 `LLM_TIMEOUT` |
+| `LLM_TIMEOUT` | string | `TIMEOUT` 的别名（当 `TIMEOUT` 未设置时生效） |
 | `ANTHROPIC_BETA` | string | Anthropic beta 特性列表，逗号分隔（如 `"extended-thinking,prompt-caching"`） |
 | `ANTHROPIC_MAX_TOKENS` | string | Claude 最大输出 token 数（默认 `8192`） |
 | `ANTHROPIC_THINKING_BUDGET` | string | Claude extended thinking 预算 token 数（默认 `4096`） |
@@ -58,6 +63,10 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 | `DEBUG_LOG_ENABLED`  | string | 是否启用调试日志输出                                     |
 | `TELEMETRY_ENABLED`  | string | 是否启用匿名使用数据上报                                   |
 | `<其他任意KEY>` | string | 自定义环境变量 |
+
+> **LLM_ 前缀别名**：`LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` / `LLM_TIMEOUT` 是对应无前缀字段的别名，仅在无前缀版本未设置时生效。这样用户可以使用统一的 `LLM_` 前缀配置所有 LLM 相关参数，降低配置心智成本。
+
+> **TIMEOUT 配置**：`TIMEOUT` 和 `LLM_TIMEOUT` 控制 LLM HTTP 请求的超时时间（单位：秒），默认 `600` 秒。对于推理时间较长的模型（如 Qwen3 thinking 模式、DeepSeek V4），建议设置为 `1200` 或更高。
 
 #### `provider` — LLM 提供商
 
@@ -106,12 +115,42 @@ Deep Code 支持多种 LLM 提供商，通过 `provider` 字段显式声明，�
 - `temperature` 仅在 `openai` provider 下生效；Claude 使用 `top_p`/`top_k`，配置 `temperature` 时告警并忽略
 - 无自动降级：provider 由用户显式配置，故障时明确报错而非静默切换
 
+**Qwen3 模型配置示例**：
+
+Qwen3 系列模型通过 vLLM 部署，兼容 OpenAI API 格式。使用 `provider=openai`（默认），通过 `LLM_` 前缀环境变量统一配置：
+
+```json
+{
+  "env": {
+    "LLM_BASE_URL": "http://47.95.252.237:8003/v1",
+    "LLM_API_KEY": "sk-your-api-key",
+    "LLM_MODEL": "Qwen/Qwen3.6-27B",
+    "LLM_TIMEOUT": "1200"
+  }
+}
+```
+
+Qwen3 thinking 参数格式说明：
+
+| 模型系列 | 启用 thinking 参数格式 | reasoning 返回字段 |
+|----------|----------------------|-------------------|
+| Qwen3 | `chat_template_kwargs: { enable_thinking: true }`（请求体顶层字段） | `reasoning_content` |
+| DeepSeek V4 | `thinking: { type: "enabled" }` + `extra_body: { reasoning_effort }` | `reasoning_content` |
+| Anthropic Claude | `thinking: { type: "enabled", budget_tokens: N }` | `thinking` 块 |
+
+> Qwen3 的 `chat_template_kwargs` 是 vLLM 标准参数，必须作为请求体顶层字段传递（不包装在 `extra_body` 中）。
+
+> Qwen3 模型名识别规则：大小写不敏感，以 `qwen3` 或 `qwen/qwen3` 开头。覆盖 Qwen3-8B / Qwen3-32B / Qwen3-30B-A3B / Qwen/Qwen3.6-27B / qwen3.6-plus / qwen3.7-max 等。
+
 #### `thinkingEnabled` — 思考模式
 
-是否启用 DeepSeek 思考模式。设置为 `true` 启用、`false` 禁用。
+是否启用思考模式。设置为 `true` 启用、`false` 禁用。
 
 - 对于 `deepseek-v4-pro` 和 `deepseek-v4-flash`，思考模式**默认启用**。
+- 对于 Qwen3 系列模型（以 `qwen3` / `qwen/qwen3` 开头），思考模式**默认启用**。
 - 对于其他模型，思考模式**默认关闭**。
+
+> Qwen3 使用 `chat_template_kwargs.enable_thinking` 参数控制 thinking 模式，与 DeepSeek 的 `thinking.type` 格式不同。Deep Code 会根据模型名自动选择正确的参数格式。
 
 #### `reasoningEffort` — 推理强度
 

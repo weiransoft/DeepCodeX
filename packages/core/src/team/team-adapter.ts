@@ -665,10 +665,12 @@ export async function executeDispatch(
 
     // thinking 参数（v1.6 P1-1：与 session.ts 主对话流程保持一致）
     // v2.1.3：thinkingOptions 在 callLlmOnce 中复用，保持首次调用和续写调用的 thinking 模式一致
+    // v1.1 修改：传入 handle.model 参数，支持 Qwen3 的 chat_template_kwargs.enable_thinking 格式
     const thinkingOptions = buildThinkingRequestOptions(
       handle.thinkingEnabled,
       handle.baseURL,
-      handle.reasoningEffort ?? "high"
+      handle.reasoningEffort ?? "high",
+      handle.model
     );
 
     // 真实调用 OpenAI SDK

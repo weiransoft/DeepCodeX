@@ -51,7 +51,8 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
     };
   }
 
-  const cacheKey = `${settings.apiKey}::${settings.baseURL}`;
+  // v1.1 修改：缓存 key 包含 timeout，确保 timeout 配置变更后重建客户端
+  const cacheKey = `${settings.apiKey}::${settings.baseURL}::${settings.timeout}`;
   if (cachedOpenAI && cachedOpenAIKey === cacheKey) {
     return {
       client: cachedOpenAI,
@@ -72,6 +73,9 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
   cachedOpenAI = new OpenAI({
     apiKey: settings.apiKey,
     baseURL: settings.baseURL || undefined,
+    // v1.1 新增：注入 timeout（秒 → 毫秒），来自 env.TIMEOUT / env.LLM_TIMEOUT
+    // 默认 600 秒（10 分钟），与 OpenAI SDK 默认超时一致
+    timeout: settings.timeout * 1000,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     fetch: (url: any, init: any) => undiciFetch(url, { ...init, dispatcher: keepAliveAgent }),
   });

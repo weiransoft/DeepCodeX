@@ -81,6 +81,34 @@ Deep Code 也支持 Anthropic Claude 原生 API。将 `provider` 设为 `"anthro
 
 > 如果 `model` 以 `claude-` 开头，即使不设 `provider` 也会自动推断为 `anthropic`。详见 [configuration.md](configuration.md#provider--llm-提供商)。
 
+## 使用 Qwen3
+
+Deep Code 支持 Qwen3 系列模型（通过 vLLM 部署，兼容 OpenAI API 格式）。使用 `LLM_` 前缀环境变量统一配置：
+
+```json
+{
+  "env": {
+    "LLM_BASE_URL": "http://47.95.252.237:8003/v1",
+    "LLM_API_KEY": "sk-your-api-key",
+    "LLM_MODEL": "Qwen/Qwen3.6-27B",
+    "LLM_TIMEOUT": "1200"
+  }
+}
+```
+
+常用字段：
+
+| 字段 | 说明 |
+| ---- | ---- |
+| `env.LLM_BASE_URL` | vLLM 部署的 Qwen3 API 地址 |
+| `env.LLM_API_KEY` | API 密钥 |
+| `env.LLM_MODEL` | Qwen3 模型名称，如 `Qwen/Qwen3.6-27B`、`qwen3-32b`、`qwen3.7-max` |
+| `env.LLM_TIMEOUT` | 请求超时（秒），thinking 模式建议 `1200` 以上 |
+
+> Qwen3 模型默认启用 thinking 模式，推理内容通过 `reasoning_content` 字段返回。Deep Code 会根据模型名自动选择正确的 thinking 参数格式（`chat_template_kwargs.enable_thinking`），无需手动配置。
+
+> `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` / `LLM_TIMEOUT` 是 `BASE_URL` / `API_KEY` / `MODEL` / `TIMEOUT` 的别名，便于使用统一前缀配置。无前缀版本优先级更高。
+
 ### 目录命名差异说明
 
 Deep Code 存在两套并存的目录命名约定，请勿混淆：
