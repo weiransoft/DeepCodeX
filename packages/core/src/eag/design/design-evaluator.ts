@@ -28,6 +28,13 @@
  *
  * 输出 DesignEvaluationVerdict（passed/reason/severity/findings/suggestedFix）。
  *
+ * 接口迁移说明（死代码清理）：
+ * - 原 `design-protocols.ts` 中定义的 `DesignEvaluatorProtocol` 接口已迁移至本文件
+ *   （DesignEvaluatorProtocol 仅有 StaticDesignEvaluator 一个生产实现，迁移后与实现同文件，
+ *    避免 design-protocols.ts 中其他无实现的接口（PM/Architect）成为死代码）
+ * - 原 `design-protocols.ts` 及其 `ProductManagerProtocol`/`ArchitectProtocol` 接口因无生产实现，
+ *   一并删除（详见 EAG 死代码清理任务）
+ *
  * @module eag/design/evaluator
  */
 
@@ -38,7 +45,50 @@ import type {
   DesignVerdictSeverity,
   DesignEvaluationMode,
 } from "./design-models";
-import type { DesignEvaluatorProtocol } from "./design-protocols";
+
+// ============================================================================
+// DESIGN Loop 评估器协议接口（从 design-protocols.ts 迁移而来）
+// ============================================================================
+//
+// 迁移原因（死代码清理）：
+// - design-protocols.ts 中仅 DesignEvaluatorProtocol 有生产实现（StaticDesignEvaluator）
+// - ProductManagerProtocol / ArchitectProtocol 无生产实现，属"接口先行实现后置"的死代码
+// - 将 DesignEvaluatorProtocol 迁移至其唯一实现所在文件，与 StaticDesignEvaluator 共置，
+//   然后删除 design-protocols.ts 文件
+//
+// 协议设计原则（保留原 design-protocols.ts 风格）：
+// - 协议为 TS interface，实现方通过结构子类型匹配，无需显式 implements
+// - 协议仅描述对外契约，不约束内部实现
+// - 异步接口（Promise）以适配未来真实 LLM 调用场景
+
+/**
+ * DESIGN Loop 评估器协议：设计产出 → 评估判定
+ *
+ * 对应 EAG 方案 §5.2.2 评估器判定 + §5.3 独立评估器角色：
+ * - 唤起知识：红线清单（E1~E8）+ 依赖规则 + 客观指标
+ * - 产出契约：EvaluationVerdict（passed/reason/severity）
+ *
+ * 判定项（对齐 §5.2.2 评估器判定）：
+ * 1. 范式一致性：架构师产出的 layering/dependencyRules 必须与所选 paradigm 的 dependencyRules 一致
+ * 2. 设计完整性：每个 UserStory 必须有至少一个 Aggregate 承载
+ *    （聚合名出现在 userStory 关联的 domainEventCandidates 的 publisher 中）
+ * 3. 反模式零命中：架构师产出的 Aggregate/Entity 不得违反范式 antiPatterns 的静态可判规则
+ * 4. signalEvidence 证据强制：自主选择范式时（非锁定）signalEvidence 必须非空且引用需求原文
+ *
+ * 与 Generator/Evaluator 分离原则（§5.2.1）：
+ * - 架构师是 Generator 角色（产出设计文档），不得自行评估
+ * - 本协议由独立评估器实现，对架构师产出做客观判定
+ */
+export interface DesignEvaluatorProtocol {
+  /**
+   * 对设计产出进行独立评估并返回判定
+   *
+   * @param artifacts 设计产出（PM 产出 + 架构师产出）
+   * @param paradigm 选中的范式定义（评估器据此判定范式一致性）
+   * @returns 评估判定结果（passed/reason/severity/findings/suggestedFix）
+   */
+  evaluate(artifacts: DesignArtifacts, paradigm: ArchitectureParadigm): Promise<DesignEvaluationVerdict>;
+}
 
 // ============================================================================
 // 严重级别优先级辅助
