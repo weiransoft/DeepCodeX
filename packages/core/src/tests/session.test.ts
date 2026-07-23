@@ -3226,11 +3226,14 @@ test("SessionManager compactSession writes summary message and marks earlier mes
   // 此处使用非空断言告知 TS 类型已收窄（避免 possibly undefined 编译错误）
   assert.ok(compactPromptContent!.includes("large reply"), "compact 提示词应包含会话内容");
 
-  // 持久化语义：生成 isSummary 系统消息；其之前的消息全部标记 compacted
+  // 持久化语义：生成 isSummary 用户消息；其之前的消息全部标记 compacted
+  // Qwen3 兼容修复：summaryMessage role 为 "user"（非 "system"），
+  // 避免 flattenMidConversationSystemMessages 将其合并到开头 system 导致缺少 user query
   const messages = manager.listSessionMessages(sessionId);
   const summaryIndex = messages.findIndex((message) => message.meta?.isSummary === true);
   assert.ok(summaryIndex > 0, "应插入 summary 消息");
   assert.ok(messages[summaryIndex]?.content?.includes("对话要点总结"), "summary 消息携带 LLM 总结文本");
+  assert.equal(messages[summaryIndex]?.role, "user", "summary 消息 role 应为 user（Qwen3 兼容）");
   for (let i = 0; i < summaryIndex; i += 1) {
     const message = messages[i];
     if (message.role === "system" && !message.meta?.isSummary) {
