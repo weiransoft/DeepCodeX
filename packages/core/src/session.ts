@@ -37,6 +37,10 @@ import type { LLMClient, LLMResponse, LLMToolDefinition, LLMUsage } from "./prov
 import { logApiError } from "./common/error-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./common/debug-logger";
 import { describeLlmError, getLlmErrorDetails } from "./common/llm-error";
+// V2 codemap 工具注入：将 codemap_query / impact_analysis / flow_trace / risk_scan
+// 4 个工具注册到 ToolExecutor，图谱不可用时降级返回空结果（NFR-4 零回归）
+import { registerCodemapTools } from "./v2/tools/tool-executor-registry";
+import { DefaultSymbolGraphAdapter } from "./v2/context/default-symbol-graph-adapter";
 import { killProcessTree } from "./common/process-tree";
 import { GitFileHistory, type FileHistoryCheckpointResult } from "./common/file-history";
 import { clearSessionState, getSnippet, rebuildSessionStateFromHistory } from "./common/state";
@@ -708,6 +712,9 @@ export class SessionManager {
     this.toolExecutor = new ToolExecutor(this.projectRoot, this.createOpenAIClient, this.mcpManager, () =>
       this.createLLMClient()
     );
+    // V2 codemap 工具注入：将 codemap_query / impact_analysis / flow_trace / risk_scan
+    // 4 个工具注册到 ToolExecutor，图谱不可用时降级返回空结果（NFR-4 零回归）
+    registerCodemapTools(this.toolExecutor, new DefaultSymbolGraphAdapter());
     this.mcpManager.prepare(this.getResolvedSettings().mcpServers);
     this.messageConverter = new OpenAIMessageConverter({
       renderInitPrompt: () => this.renderInitCommandPrompt(),
