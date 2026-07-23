@@ -53,6 +53,34 @@ Deep Code 推荐使用 `deepseek-v4-pro`，也支持 `deepseek-v4-flash`。创�
 
 也可以在项目目录中创建 `.deepcode/settings.json`，为当前项目单独设置模型、权限或 MCP。
 
+## 使用 Anthropic Claude
+
+Deep Code 也支持 Anthropic Claude 原生 API。将 `provider` 设为 `"anthropic"`，并填入你的 Claude API Key：
+
+```json
+{
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "env": {
+    "API_KEY": "sk-ant-...",
+    "BASE_URL": "https://api.anthropic.com",
+    "ANTHROPIC_BETA": "extended-thinking,prompt-caching"
+  }
+}
+```
+
+常用字段：
+
+| 字段 | 说明 |
+| ---- | ---- |
+| `provider` | LLM 提供商，设为 `"anthropic"` 启用 Claude |
+| `model` | Claude 模型名称，如 `claude-sonnet-4-6` |
+| `env.API_KEY` | Claude API Key，需以 `sk-ant-` 开头 |
+| `env.BASE_URL` | Claude API 地址，默认 `https://api.anthropic.com` |
+| `env.ANTHROPIC_BETA` | beta 特性列表，如 `extended-thinking,prompt-caching` |
+
+> 如果 `model` 以 `claude-` 开头，即使不设 `provider` 也会自动推断为 `anthropic`。详见 [configuration.md](configuration.md#provider--llm-提供商)。
+
 ### 目录命名差异说明
 
 Deep Code 存在两套并存的目录命名约定，请勿混淆：
