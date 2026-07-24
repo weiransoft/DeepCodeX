@@ -180,6 +180,36 @@ const MAX_USER_RULE_SNIPPETS = 1;
 const USER_RULE_TOKEN_BUDGET = 4000;
 
 // ============================================================================
+// V2-Graph 图级片段常量（§13.8.2 新增，对齐多角色评审共识 M-6）
+// ============================================================================
+
+/**
+ * 图级片段总 Token 预算上限（架构师 M-6）
+ *
+ * 图级片段（project_goal / shared_artifact / node_summary / experience / bulletin）
+ * 的总 Token 上限。超预算时按 relevance 降序截断，project_goal 永不丢弃。
+ */
+const GRAPH_SNIPPET_TOKEN_BUDGET = 4000;
+
+/** 项目目标片段条数上限（仅 1 条，图编排目标唯一） */
+const MAX_GRAPH_PROJECT_GOAL_SNIPPETS = 1;
+
+/** 前序节点摘要片段条数上限（最近 5 个，按 completedAt 降序） */
+const MAX_GRAPH_NODE_SUMMARY_SNIPPETS = 5;
+
+/** 前序经验片段条数上限（最近 5 条，排除自身） */
+const MAX_GRAPH_EXPERIENCE_SNIPPETS = 5;
+
+/** 动向广播片段条数上限（汇总为 1 条，包含最近 5 条通知） */
+const MAX_GRAPH_BULLETIN_SNIPPETS = 1;
+
+/** 共享产物片段条数上限（最多 5 个 key） */
+const MAX_GRAPH_SHARED_ARTIFACT_SNIPPETS = 5;
+
+/** 动向广播条目内联数量（汇总时取最近 5 条通知） */
+const MAX_BULLETIN_INLINE = 5;
+
+// ============================================================================
 // DualLayerContextManager 实现
 // ============================================================================
 
@@ -302,13 +332,38 @@ export class DualLayerContextManager {
    * - CodeMap 获取失败：仅返回全局层 + 任务层 + PCL 片段（文件层降级为空）
    * - GlobalContext 加载失败：globalManager 内部已降级返回默认空上下文
    * - PCL 加载失败：try-catch 捕获，降级为无 PCL 片段（不中断流程）
+   * - 图级片段收集失败：try-catch 捕获，降级为无图级片段（不中断流程，§13.8.2 新增）
+   *
+   * V2-Graph 集成（§13.8.2 新增）：
+   * - 第三参数改为 options 对象，新增 graphGlobalContext / currentNodeId 字段
+   * - 步骤 4.9 插入图级片段收集（两条通道：directRetain + scoringCandidates）
+   * - 图级片段 Token 预算控制：GRAPH_SNIPPET_TOKEN_BUDGET = 4000
    *
    * @param userId 用户 ID
    * @param taskId 任务 ID
-   * @param maxTokens 可选的 Token 预算覆盖（默认使用 config.defaultTokenBudget）
+   * @param options 可选的扩展选项（maxTokens / graphGlobalContext / currentNodeId）
    * @returns 优化后的上下文片段列表（session-hook 形态，含压缩摘要）
    */
-  async buildOptimizedContext(userId: string, taskId: string, maxTokens?: number): Promise<ContextSnippet[]> {
+  async buildOptimizedContext(
+    userId: string,
+    taskId: string,
+    options?: {
+      /** Token 预算上限（可选，覆盖 config.defaultTokenBudget） */
+      maxTokens?: number;
+      /**
+       * 图级全局上下文（§13.8.2 新增，unknown 类型避免 v2/context → eag/graph 反向依赖）
+       * 由 GraphLoopOrchestrator 注入，类型断言在 collectGraphContextSnippets 内部完成。
+       */
+      graphGlobalContext?: unknown;
+      /** 当前节点 ID（用于排除自身节点摘要和经验） */
+      currentNodeId?: string;
+    }
+  ): Promise<ContextSnippet[]> {
+    // 统一提取 options 字段
+    const maxTokens = options?.maxTokens;
+    const graphGlobalContext = options?.graphGlobalContext;
+    const currentNodeId = options?.currentNodeId;
+
     // ---- 1. 加载 TaskContext（任务层）----
     const taskContext = this.taskManager.get(taskId);
     if (!taskContext) {
@@ -412,7 +467,33 @@ export class DualLayerContextManager {
       // 注意：这意味着 LLM 将失去 BLOCKER 级硬约束注入，应在日志中告警（P1+ 增强）
     }
 
-    // 4.8 文件层：从 CodeMap.files 提取 focusPoints 文件内容片段（参与评分）
+    // 4.9 V2-Graph 图级片段层（§13.8.2 新增，对齐多角色评审共识 B-2 / B-6 / M-6）
+    // 当 graphGlobalContext 和 currentNodeId 同时提供时，收集图级上下文片段：
+    // - directRetain 通道（必注入）：project_goal / shared_artifact
+    // - scoringCandidates 通道（参与评分）：node_summary / experience / bulletin
+    // 图级片段收集失败时降级为无图级片段（不中断整体流程）
+    if (graphGlobalContext && currentNodeId) {
+      try {
+        const graphSnippets = this.collectGraphContextSnippets(graphGlobalContext, currentNodeId);
+        // 分流到两条通道（测试专家 B2）
+        for (const snippet of graphSnippets) {
+          if (snippet.type === "graph_project_goal" || snippet.type === "graph_shared_artifact") {
+            // directRetain 通道：必注入，不参与评分
+            directRetainSnippets.push(snippet);
+          } else {
+            // scoringCandidates 通道：参与 Top-K 评分
+            scoringCandidates.push(snippet);
+          }
+        }
+      } catch (err) {
+        // 图级片段收集失败：降级为无图级片段（不中断整体流程）
+        // v4-H4 修复：增加 console.warn 日志保证降级路径可观测（生产环境故障可定位）
+        console.warn("[DualLayerContextManager] collectGraphContextSnippets 失败，降级为无图级片段:", err);
+      }
+    }
+
+    // 4.10 文件层：从 CodeMap.files 提取 focusPoints 文件内容片段（参与评分）
+    // 注释编号修正：原 4.8（重复）→ 4.10（§13.8.2 插入 4.9 后顺延）
     if (codeMap) {
       const fileSnippets = this.collectFileSnippets(taskContext, codeMap);
       scoringCandidates.push(...fileSnippets);
@@ -453,6 +534,183 @@ export class DualLayerContextManager {
       totalChars += s.content.length;
     }
     return Math.ceil(totalChars / charsPerToken);
+  }
+
+  // ------------------------------------------------------------------------
+  // 私有方法：V2-Graph 图级片段收集（§13.8.2 新增）
+  // ------------------------------------------------------------------------
+
+  /**
+   * 收集图级上下文片段（§13.8.2，对齐多角色评审共识 B-2 / B-6 / M-6）
+   *
+   * 依赖反转（架构师 B-2）：
+   * - graphGlobalContext 类型为 unknown（非 GraphGlobalContext）
+   * - 避免 v2/context → eag/graph 反向依赖
+   * - 类型断言在本方法内部完成（unknown → 结构化访问）
+   *
+   * 两条通道分工（测试专家 B2）：
+   * - directRetainSnippets（必注入）：project_goal + shared_artifact
+   * - scoringCandidates（参与 Top-K 评分）：node_summary + experience + bulletin
+   *
+   * Token 预算控制（架构师 M-6）：
+   * - 总 Token 上限 GRAPH_SNIPPET_TOKEN_BUDGET = 4000
+   * - 超预算时按 relevance 降序截断
+   * - project_goal 永不丢弃（最高优先级）
+   *
+   * @param graphGlobalContext 图级全局上下文（unknown 类型，由外部注入）
+   * @param currentNodeId 当前节点 ID（用于排除自身节点摘要和经验）
+   * @returns 图级片段数组（混合两条通道，由调用方分流到 directRetain 或 scoringCandidates）
+   */
+  private collectGraphContextSnippets(graphGlobalContext: unknown, currentNodeId: string): ContextSnippet[] {
+    // 类型断言在 v2/context 侧完成（unknown → 结构化访问）
+    // 注意：此处不 import GraphGlobalContext 类型，避免反向依赖
+    const ctx = graphGlobalContext as {
+      projectGoal?: string;
+      globalConstraints?: string[];
+      // v4-M4 修复：对齐 NodeSummary 接口定义（因依赖方向约束不能 import 接口，仅结构化同步）
+      nodeSummaries?: Map<
+        string,
+        {
+          nodeId: string;
+          nodeType: string;
+          label: string;
+          status: string;
+          outputSummary: string;
+          keyDecisions: string[];
+          completedAt: string;
+        }
+      >;
+      collectedExperiences?: Array<{
+        experienceId: string;
+        sourceNodeId: string;
+        type: "success" | "failure";
+        taskType: string;
+        description: string;
+        solution?: string;
+        failureReason?: string;
+        lessonLearned?: string;
+        createdAt: string;
+      }>;
+      // v4-M4 修复：对齐 BulletinEntry 接口的联合类型定义（因依赖方向约束不能 import 接口）
+      bulletinBoard?: Array<{
+        entryId: string;
+        sourceNodeId: string;
+        type: "decision" | "milestone" | "blocker" | "discovery";
+        summary: string;
+        details?: string;
+        timestamp: string;
+      }>;
+      sharedArtifacts?: Record<string, unknown>;
+    } | null;
+
+    if (!ctx) return [];
+
+    const directRetainSnippets: ContextSnippet[] = [];
+    const scoringSnippets: ContextSnippet[] = [];
+
+    // ===== directRetain 通道（必注入，不参与评分）=====
+
+    // 1. 项目目标片段（最高优先级，必注入，永不丢弃）
+    if (ctx.projectGoal) {
+      directRetainSnippets.push({
+        type: "graph_project_goal",
+        content: `[图编排目标] ${ctx.projectGoal}\n约束: ${(ctx.globalConstraints ?? []).join("; ")}`,
+        source: "graph:project_goal",
+        relevance: 1.0, // directRetain 通道下 relevance 不参与评分，仅用于超预算时截断排序
+      });
+    }
+
+    // 2. 共享产物片段（前序节点产出供当前节点使用，最多 5 条）
+    if (ctx.sharedArtifacts) {
+      const artifactEntries = Object.entries(ctx.sharedArtifacts).slice(0, MAX_GRAPH_SHARED_ARTIFACT_SNIPPETS);
+      for (const [key, value] of artifactEntries) {
+        directRetainSnippets.push({
+          type: "graph_shared_artifact",
+          content: `[共享产物] ${key}: ${typeof value === "string" ? value : JSON.stringify(value).slice(0, 500)}`,
+          source: `graph:shared_artifact:${key}`,
+          relevance: 0.9,
+        });
+      }
+    }
+
+    // ===== scoringCandidates 通道（参与 Top-K 评分）=====
+
+    // 3. 前序节点摘要片段（按完成时间倒序，最近 5 个，排除自身）
+    if (ctx.nodeSummaries) {
+      const recentSummaries = [...ctx.nodeSummaries.values()]
+        .filter((s) => s.nodeId !== currentNodeId)
+        .sort((a, b) => b.completedAt.localeCompare(a.completedAt))
+        .slice(0, MAX_GRAPH_NODE_SUMMARY_SNIPPETS);
+      for (const summary of recentSummaries) {
+        scoringSnippets.push({
+          type: "graph_node_summary",
+          content: `[前序节点] ${summary.label} (${summary.status})\n产出: ${summary.outputSummary}\n决策: ${summary.keyDecisions.join("; ")}`,
+          source: `graph:node_summary:${summary.nodeId}`,
+          relevance: 0.8, // 初始 relevance，实际由 RelevanceScorer 重新计算
+        });
+      }
+    }
+
+    // 4. 前序节点经验片段（排除自身，按 createdAt 降序取最近 5 条）
+    // v4-L2 修复：与 recallExperiences 排序逻辑保持一致（按 createdAt 降序），
+    //            原 slice(-5) 依赖数组插入顺序，在合并/重排后可能取错。
+    if (ctx.collectedExperiences) {
+      const experiences = ctx.collectedExperiences
+        .filter((e) => e.sourceNodeId !== currentNodeId)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .slice(0, MAX_GRAPH_EXPERIENCE_SNIPPETS);
+      for (const exp of experiences) {
+        const content =
+          exp.type === "success"
+            ? `[前序成功经验] ${exp.taskType}: ${exp.description}\n方案: ${exp.solution ?? ""}`
+            : `[前序失败教训] ${exp.taskType}: ${exp.description}\n原因: ${exp.failureReason ?? ""}\n教训: ${exp.lessonLearned ?? ""}`;
+        scoringSnippets.push({
+          type: "graph_experience",
+          content,
+          source: `graph:experience:${exp.experienceId}`,
+          relevance: 0.85,
+        });
+      }
+    }
+
+    // 5. 动向广播片段（汇总为单条，最近 5 条通知）
+    if (ctx.bulletinBoard && ctx.bulletinBoard.length > 0) {
+      const bulletins = ctx.bulletinBoard.slice(-MAX_BULLETIN_INLINE);
+      const bulletinText = bulletins.map((b) => `- [${b.type}] ${b.sourceNodeId}: ${b.summary}`).join("\n");
+      scoringSnippets.push({
+        type: "graph_bulletin",
+        content: `[动向广播]\n${bulletinText}`,
+        source: "graph:bulletin_board",
+        relevance: 0.75,
+      });
+    }
+
+    // ===== Token 预算控制（架构师 M-6）=====
+    const allSnippets = [...directRetainSnippets, ...scoringSnippets];
+    const totalTokens = this.estimateTokens(allSnippets);
+    if (totalTokens <= GRAPH_SNIPPET_TOKEN_BUDGET) {
+      return allSnippets;
+    }
+
+    // 超预算时：project_goal 永不丢弃，其余按 relevance 降序保留
+    const projectGoalSnippet = directRetainSnippets.filter((s) => s.type === "graph_project_goal");
+    const otherSnippets = [
+      ...directRetainSnippets.filter((s) => s.type !== "graph_project_goal"),
+      ...scoringSnippets,
+    ].sort((a, b) => (b.relevance ?? 0) - (a.relevance ?? 0));
+
+    const projectGoalTokens = this.estimateTokens(projectGoalSnippet);
+    let usedTokens = projectGoalTokens;
+    const retained: ContextSnippet[] = [...projectGoalSnippet];
+
+    for (const s of otherSnippets) {
+      const t = this.estimateTokens([s]);
+      if (usedTokens + t > GRAPH_SNIPPET_TOKEN_BUDGET) break;
+      retained.push(s);
+      usedTokens += t;
+    }
+
+    return retained;
   }
 
   // ------------------------------------------------------------------------

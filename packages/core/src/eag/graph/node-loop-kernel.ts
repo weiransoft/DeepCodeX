@@ -38,9 +38,13 @@ import type {
   NodeLoopConfig,
   /** 节点字段契约 */
   NodeFieldContract,
+  /** 经验案例 */
+  ExperienceCase,
   /** 图日志记录器接口 */
   GraphLogger,
 } from "./graph-loop-models";
+// 协议接口导入：ExperienceStoreProtocol（Phase 4 经验召回集成）
+import type { ExperienceStoreProtocol } from "./graph-loop-protocols";
 // 类型导入：复用 eag/loop/ 的数据模型和 LoopScheduler（方案 C）
 import type {
   /** Loop Engineering 配置（复用） */
@@ -122,6 +126,7 @@ export type LoopEvaluatorCallback = (
  * - evaluator：验证回调（Verification 阶段调用）
  *
  * 可选组件：
+ * - experienceStore：经验存储（Phase 4 集成，配合 context.config.enableExperienceRecall 启用召回）
  * - logger：日志记录器（默认使用 console）
  */
 export interface NodeLoopKernelOptions {
@@ -135,6 +140,16 @@ export interface NodeLoopKernelOptions {
   readonly executor: LoopExecutorCallback;
   /** 验证回调（Verification 阶段调用，返回 LoopEvaluationVerdict） */
   readonly evaluator: LoopEvaluatorCallback;
+  /**
+   * 经验存储（可选，Phase 4 集成）
+   *
+   * 当此字段存在且 context.config.enableExperienceRecall === true 时，
+   * NodeLoopKernel 在 Discovery 阶段前调用 recallSimilar() 查询相似案例，
+   * 并将结果存入 context.globalState.__experienceRecall 供 executor 读取。
+   *
+   * 召回失败不影响主流程（仅记录警告日志）。
+   */
+  readonly experienceStore?: ExperienceStoreProtocol;
   /** 日志记录器（可选，默认使用 console） */
   readonly logger?: GraphLogger;
 }
@@ -180,6 +195,8 @@ export class NodeLoopKernel {
   private readonly evaluator: LoopEvaluatorCallback;
   /** 日志记录器 */
   private readonly logger: GraphLogger;
+  /** 经验存储（可选，Phase 4 集成，配合 context.config.enableExperienceRecall 启用召回） */
+  private readonly experienceStore?: ExperienceStoreProtocol;
 
   /** Loop Engineering 配置（从 node.loopConfig 映射，复用 eag/loop/models） */
   private readonly loopConfig: Readonly<LoopEngineeringConfig>;
@@ -198,11 +215,19 @@ export class NodeLoopKernel {
   private lastVerdict: LoopEvaluationVerdict | null = null;
   /** 运行开始时间戳（毫秒） */
   private readonly startedAtMs: number;
+  /**
+   * 经验召回的相似案例列表（Phase 4 集成）
+   *
+   * 在 run() 主循环开始前由 runExperienceRecall() 填充，
+   * 供 runDiscovery() 在每轮 Discovery 阶段引用，避免重复召回。
+   * 空数组表示未启用召回或召回无结果。
+   */
+  private recalledCases: ReadonlyArray<ExperienceCase> = [];
 
   /**
    * 构造节点内循环内核
    *
-   * @param options 构造选项（含节点定义、输入数据、上下文、执行回调、验证回调）
+   * @param options 构造选项（含节点定义、输入数据、上下文、执行回调、验证回调、可选经验存储）
    * @throws {Error} 当 node.loopConfig 缺失（loop 节点必填）时抛出
    * @throws {Error} 当 inputContract 校验失败时抛出
    */
@@ -212,6 +237,8 @@ export class NodeLoopKernel {
     this.context = options.context;
     this.executor = options.executor;
     this.evaluator = options.evaluator;
+    // 经验存储（可选，Phase 4 集成）
+    this.experienceStore = options.experienceStore;
     // 日志记录器缺省使用 console
     this.logger = options.logger ?? createConsoleLogger();
     this.startedAtMs = Date.now();
@@ -268,6 +295,11 @@ export class NodeLoopKernel {
     let failureReason: string | undefined;
 
     try {
+      // 经验召回（Phase 4 集成，对齐 §12.3）
+      // 在主循环开始前查询 ExperienceStore 获取相似案例，供 Discovery 阶段和 executor 引用
+      // 召回失败不影响主流程（仅记录警告日志），recalledCases 保持空数组
+      await this.runExperienceRecall();
+
       // 主循环
       while (iteration < this.loopConfig.maxIterations) {
         // 1. 检查取消信号
@@ -397,13 +429,15 @@ export class NodeLoopKernel {
    * - 输入数据：this.input（来自 EdgeResolver）
    * - 全局状态：context.globalState（图级共享状态）
    * - 反馈信息：上一轮验证反馈（修复轮使用）
+   * - 召回案例：this.recalledCases（Phase 4 集成，由 runExperienceRecall 填充）
    *
    * @param iteration 当前迭代轮次
-   * @returns Discovery 结果（含本轮目标和反馈）
+   * @returns Discovery 结果（含本轮目标、反馈、召回案例）
    */
   private runDiscovery(iteration: number): {
     objective: string;
     feedback: LoopEvaluationVerdict | undefined;
+    recalledCases: ReadonlyArray<ExperienceCase>;
   } {
     // 首轮无反馈，修复轮使用上一轮验证反馈
     const feedback = iteration > 1 && this.lastVerdict ? this.lastVerdict : undefined;
@@ -411,7 +445,133 @@ export class NodeLoopKernel {
     return {
       objective: this.node.task,
       feedback,
+      // 经验召回的相似案例（Phase 4 集成，对齐 §12.3）
+      // 由 run() 主循环开始前的 runExperienceRecall() 填充
+      recalledCases: this.recalledCases,
     };
+  }
+
+  /**
+   * 经验召回（Phase 4 集成，对齐 §12.3）
+   *
+   * 在主循环开始前查询 ExperienceStore 获取相似案例，供 Discovery 阶段和 executor 引用。
+   *
+   * 启用条件（两者必须同时满足）：
+   * 1. context.config.enableExperienceRecall === true（图级配置开关）
+   * 2. this.experienceStore 存在（依赖注入）
+   *
+   * 召回流程：
+   * 1. 提取任务特征（extractTaskFeatures）
+   * 2. 调用 experienceStore.recallSimilar(features, 5) 查询相似案例
+   * 3. 将结果存入 this.recalledCases（供 runDiscovery 引用）
+   * 4. 同步写入 context.globalState.__experienceRecall（供 executor 读取）
+   *
+   * 容错策略：
+   * - 召回异常时不影响主流程（仅记录警告日志），recalledCases 保持空数组
+   * - 未启用召回时直接返回（recalledCases 保持空数组）
+   *
+   * @returns Promise<void>（无返回值，结果存入 this.recalledCases）
+   */
+  private async runExperienceRecall(): Promise<void> {
+    // 1. 检查启用条件：图级配置开关 + 经验存储注入
+    if (!this.context.config.enableExperienceRecall) {
+      this.logger.debug(`[NodeLoopKernel:${this.node.nodeId}] 经验召回未启用（config.enableExperienceRecall=false）`);
+      return;
+    }
+    if (!this.experienceStore) {
+      this.logger.warn(`[NodeLoopKernel:${this.node.nodeId}] 经验召回已启用但未注入 experienceStore，跳过召回`);
+      return;
+    }
+
+    // 2. 提取任务特征
+    const taskFeatures = this.extractTaskFeatures();
+    this.logger.info(`[NodeLoopKernel:${this.node.nodeId}] 开始经验召回`, {
+      taskFeatures,
+    });
+
+    try {
+      // 3. 查询相似案例（对齐 §14.1 召回策略：取前 K=5 个）
+      const RECALL_LIMIT = 5;
+      const cases = await this.experienceStore.recallSimilar(taskFeatures, RECALL_LIMIT);
+
+      // 4. 存入 recalledCases（供 runDiscovery 引用）
+      this.recalledCases = cases;
+
+      // 5. 同步写入 context.globalState.__experienceRecall（供 executor 读取）
+      //    使用 Object.freeze 浅冻结数组防止 executor push/pop/splice；
+      //    ExperienceCase 接口字段均为 readonly，浅冻结 + readonly 字段共同保证不可变性
+      this.context.globalState["__experienceRecall"] = Object.freeze([...cases]);
+
+      this.logger.info(`[NodeLoopKernel:${this.node.nodeId}] 经验召回完成：返回 ${cases.length} 个相似案例`, {
+        caseIds: cases.map((c) => c.caseId),
+        similarities: cases.map((c) => ({
+          caseId: c.caseId,
+          taskType: c.taskType,
+          success: c.success,
+        })),
+      });
+    } catch (err) {
+      // 容错：召回异常不影响主流程，recalledCases 保持空数组
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`[NodeLoopKernel:${this.node.nodeId}] 经验召回异常，跳过召回：${errMsg}`);
+      this.recalledCases = [];
+      // 清理可能残留的全局状态
+      delete this.context.globalState["__experienceRecall"];
+    }
+  }
+
+  /**
+   * 提取任务特征（Phase 4 集成，对齐 §14.1）
+   *
+   * 从节点定义和输入数据中提取用于相似度匹配的任务特征。
+   *
+   * 特征提取策略：
+   * 1. 必填特征：
+   *    - taskType：从 node.loopConfig.loopType 提取（如 "coding" / "design" / "testing"）
+   *    - nodeType：节点类型（如 "loop" / "task"）
+   * 2. 可选特征（从 node.overrides 合并）：
+   *    - 跳过以 __ 开头的内部字段
+   *    - 保留所有基本类型和对象类型字段
+   *    - 设计意图：overrides 是用户显式配置的任务特征，应完整保留
+   * 3. 可选特征（从 input 合并）：
+   *    - 跳过以 __ 开头的内部字段
+   *    - 只保留基本类型（string / number / boolean），避免复杂对象污染特征空间
+   *    - 设计意图：input 是隐式数据流（可能含文件内容、配置对象等复杂结构），
+   *      保留所有类型会污染特征空间，因此仅保留基本类型
+   *
+   * overrides vs input 类型策略差异说明：
+   * - overrides 保留所有类型：因为 overrides 是用户显式声明的特征配置，对象类型字段
+   *   （如 { tags: ["a", "b"] }）可能是有效的特征
+   * - input 仅保留基本类型：因为 input 是数据流，复杂对象（如文件内容、大配置对象）
+   *   不应作为相似度匹配的特征
+   *
+   * @returns 任务特征字典（键值对形式，供 computeSimilarity 计算）
+   */
+  private extractTaskFeatures(): Record<string, unknown> {
+    const features: Record<string, unknown> = {};
+
+    // 1. 必填特征：taskType / nodeType
+    features["taskType"] = this.node.loopConfig?.loopType ?? "unknown";
+    features["nodeType"] = this.node.nodeType;
+
+    // 2. 合并 node.overrides 中的特征字段（跳过内部字段）
+    if (this.node.overrides) {
+      for (const [key, value] of Object.entries(this.node.overrides)) {
+        if (key.startsWith("__")) continue;
+        features[key] = value;
+      }
+    }
+
+    // 3. 合并 input 中的基本类型特征字段（跳过内部字段）
+    //    只保留 string / number / boolean，避免复杂对象污染特征空间
+    for (const [key, value] of Object.entries(this.input)) {
+      if (key.startsWith("__")) continue;
+      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+        features[key] = value;
+      }
+    }
+
+    return features;
   }
 
   /**
@@ -466,17 +626,22 @@ export class NodeLoopKernel {
    * - 审计和调试（事件序列可追溯每轮执行过程）
    *
    * @param iteration 当前迭代轮次
-   * @param discovery Discovery 阶段结果
+   * @param discovery Discovery 阶段结果（含目标、反馈、召回案例）
    * @param generatorResult Handoff 阶段产出的结果
    * @param verdict Verification 阶段的判定结果
    */
   private runPersistence(
     iteration: number,
-    discovery: { objective: string; feedback: LoopEvaluationVerdict | undefined },
+    discovery: {
+      objective: string;
+      feedback: LoopEvaluationVerdict | undefined;
+      recalledCases: ReadonlyArray<ExperienceCase>;
+    },
     generatorResult: GeneratorResult,
     verdict: LoopEvaluationVerdict
   ): void {
     // 构造 LoopEvent 并写入 events 数组（对齐 eag/loop/models LoopEvent 接口）
+    // payload 中包含 recalledCases（Phase 4 集成），便于审计追溯召回案例对每轮执行的影响
     const event: LoopEvent = {
       eventId: `${this.context.runId}-${this.node.nodeId}-${iteration}`,
       eventType: verdict.passed ? "verification_passed" : "verification_rejected",
@@ -487,6 +652,8 @@ export class NodeLoopKernel {
         objective: discovery.objective,
         generatorResult,
         verdict,
+        // 经验召回的相似案例（Phase 4 集成，对齐 §12.3）
+        recalledCases: discovery.recalledCases,
       }),
       timestamp: new Date().toISOString(),
     };
@@ -728,6 +895,17 @@ export class NodeLoopKernel {
    */
   getCumulativeTokens(): number {
     return this.cumulativeTokens;
+  }
+
+  /**
+   * 获取经验召回的相似案例列表（Phase 4 集成，用于测试和审计）
+   *
+   * 在 run() 执行前返回空数组，run() 执行后返回召回结果（可能为空数组）。
+   *
+   * @returns 召回案例列表的只读快照
+   */
+  getRecalledCases(): ReadonlyArray<ExperienceCase> {
+    return [...this.recalledCases];
   }
 }
 

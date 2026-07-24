@@ -81,16 +81,15 @@ function assertTypeAccessible<T>(_typeMarker?: T): boolean {
 }
 
 // ============================================================================
-// T1. LoopKernel 类导出
+// T1. Loop 模块核心导出（LoopKernel 已作为死代码清理，保留 LoopScheduler 与默认配置）
 // ============================================================================
 
-test("T1: EAG 根 barrel 导出 LoopKernel 类（来自 loop/kernel）", () => {
-  // LoopKernel 是类，typeof 应为 "function"
-  assert.equal(typeof Eag.LoopKernel, "function", "LoopKernel 应为 class（function 类型）");
-  // 类应有 prototype 属性，可被 new 调用
-  assert.ok(Eag.LoopKernel.prototype, "LoopKernel 应有 prototype 属性（可被 new 调用）");
-  // 类名应为 "LoopKernel"
-  assert.equal(Eag.LoopKernel.name, "LoopKernel", "类名应为 'LoopKernel'");
+test("T1: EAG 根 barrel 导出 loop 模块默认配置（DEFAULT_LOOP_ENGINEERING_CONFIG）", () => {
+  // LoopKernel 已随 loop/protocols.ts、loop/kernel.ts 死代码清理删除，
+  // 本测试改为验证 loop 模块保留的核心常量导出。
+  assert.ok(Eag.DEFAULT_LOOP_ENGINEERING_CONFIG, "DEFAULT_LOOP_ENGINEERING_CONFIG 应可访问");
+  assert.equal(typeof Eag.DEFAULT_LOOP_ENGINEERING_CONFIG, "object", "DEFAULT_LOOP_ENGINEERING_CONFIG 应为对象");
+  assert.ok(Object.isFrozen(Eag.DEFAULT_LOOP_ENGINEERING_CONFIG), "DEFAULT_LOOP_ENGINEERING_CONFIG 应已冻结");
 });
 
 // ============================================================================
@@ -173,13 +172,15 @@ test("T6: EAG 根 barrel 导出 TestingOrchestrator 类（来自 testing/，批�
 });
 
 // ============================================================================
-// T7. DesignLoopOrchestrator 类导出
+// T7. Design 模块核心导出（DesignLoopOrchestrator 已作为死代码清理，保留 StaticDesignEvaluator）
 // ============================================================================
 
-test("T7: EAG 根 barrel 导出 DesignLoopOrchestrator 类（来自 design/）", () => {
-  assert.equal(typeof Eag.DesignLoopOrchestrator, "function", "DesignLoopOrchestrator 应为 class");
-  assert.ok(Eag.DesignLoopOrchestrator.prototype, "DesignLoopOrchestrator 应有 prototype 属性");
-  assert.equal(Eag.DesignLoopOrchestrator.name, "DesignLoopOrchestrator", "类名应为 'DesignLoopOrchestrator'");
+test("T7: EAG 根 barrel 导出 StaticDesignEvaluator 类（来自 design/）", () => {
+  // DesignLoopOrchestrator 已随 design-orchestrator.ts、design-protocols.ts 死代码清理删除，
+  // 本测试改为验证 design 模块保留的静态评估器实现导出。
+  assert.equal(typeof Eag.StaticDesignEvaluator, "function", "StaticDesignEvaluator 应为 class");
+  assert.ok(Eag.StaticDesignEvaluator.prototype, "StaticDesignEvaluator 应有 prototype 属性");
+  assert.equal(Eag.StaticDesignEvaluator.name, "StaticDesignEvaluator", "类名应为 'StaticDesignEvaluator'");
 });
 
 // ============================================================================

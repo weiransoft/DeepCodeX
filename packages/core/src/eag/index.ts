@@ -452,5 +452,20 @@ export type { DagValidationResult } from "./doc-driven/task-decomposition";
 
 // 9. ModuleSplit（类型冲突，结构相似但独立声明）：doc-driven/types.ts 为权威来源
 //    - doc-driven/types.ts 与 long-horizon/multi-loop-planner.ts 都独立声明了 `export interface ModuleSplit`
-//    - 显式从 doc-driven/types 导出，long-horizon/multi-loop-planner 的 ModuleSplit 不参与根 barrel 导出
+//    - 显式从 doc-driven/types 导出，long-horizon 的 ModuleSplit 不参与根 barrel 导出
 export type { ModuleSplit } from "./doc-driven/types";
+
+// ============================================================================
+// 17. dynamic —— LLM 动态编排建议层（新增）
+// ============================================================================
+//
+// 根据用户自然语言目标，动态识别任务粒度并给出最合适的 EAG 命令建议。
+// 第一阶段只做建议（direct_chat / suggest_command / suggest_autonomous / suggest_graph /
+// ask_clarification），不自动执行任何命令，不自动生成 WorkGraph，不注册新工具。
+//
+// 公开 API：
+// - 类：EagDynamicSuggester
+// - 类型：EagCommandKind / EagClarificationOption / EagDynamicSuggestion /
+//         EagDynamicSuggesterOptions / EagDynamicContext / EagSuggestionPromptContext
+// - 函数：createEagDynamicSuggester / buildEagSuggestionPrompt
+export * from "./dynamic/index";

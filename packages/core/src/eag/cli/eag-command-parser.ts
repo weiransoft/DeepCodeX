@@ -50,6 +50,12 @@ import {
   extractEagAutonomousStopRequestFromPrompt,
 } from "./eag-autonomous-command";
 import type { EagAutonomousStatusRequest, EagAutonomousStopRequest } from "./eag-autonomous-command";
+// Loop-Graph 融合方案 Phase 5：导入 /eag-graph 命令参数解析函数与请求类型
+// - extractEagGraphRequestFromPrompt：独立函数，从命令字符串解析参数（--graph-file / --inline-graph 等）
+// - EagGraphRequest：/eag-graph 命令请求对象类型
+// 注：eag-graph-command.ts 不依赖本模块，无循环依赖风险
+import { extractEagGraphRequestFromPrompt } from "./eag-graph-command";
+import type { EagGraphRequest } from "./eag-graph-command";
 
 // ============================================================================
 // DeployRequest 接口定义（EAG-P4 批次 13 Phase 7 §5.1）
@@ -123,6 +129,7 @@ export type EagCommand =
   | { readonly kind: "eag-autonomous"; readonly payload: EagAutonomousRequest | null }
   | { readonly kind: "eag-autonomous-status"; readonly payload: EagAutonomousStatusRequest | null }
   | { readonly kind: "eag-autonomous-stop"; readonly payload: EagAutonomousStopRequest | null }
+  | { readonly kind: "eag-graph"; readonly payload: EagGraphRequest | null }
   | { readonly kind: "unknown"; readonly payload: null };
 
 /**
@@ -186,6 +193,16 @@ export const EAG_COMMAND_STRINGS = Object.freeze({
    * parser 优先匹配此命令（在 /eag-autonomous 之前），避免 /eag-autonomous-stop 被误吞为 /eag-autonomous。
    */
   EAG_AUTONOMOUS_STOP: "/eag-autonomous-stop",
+  /**
+   * /eag-graph 命令前缀字符串（触发 Loop-Graph 融合编排，Phase 5）
+   *
+   * 命令格式：/eag-graph --graph-file <path> 或 /eag-graph --inline-graph <json> [配置参数...]
+   * 使用前缀匹配（非严格匹配），因为命令本身携带参数。
+   * 参数解析由 extractEagGraphRequestFromPrompt() 独立函数完成。
+   *
+   * 与 /eag-autonomous 系列同属前缀匹配命令，但前缀互不冲突（/eag-graph vs /eag-autonomous）。
+   */
+  EAG_GRAPH: "/eag-graph",
 } as const);
 
 /**
@@ -318,6 +335,19 @@ export class EagCommandParser {
     const prefixLower = autonomousPrefix.toLowerCase();
     if (textLower === prefixLower || textLower.startsWith(prefixLower + " ")) {
       return { kind: "eag-autonomous", payload: this.extractEagAutonomousRequest(userPrompt, text) };
+    }
+
+    // 步骤 2.4（Loop-Graph 融合方案 Phase 5 新增）：
+    // /eag-graph 前缀匹配（触发图编排，对齐设计文档 §12.2 / §14 Phase 5）
+    // 与 /eag-autonomous 系列同属前缀匹配命令，但前缀互不冲突（/eag-graph vs /eag-autonomous）。
+    // 匹配规则（大小写不敏感）：
+    // - text === "/eag-graph"（无参数形式，payload 从 messageParams 提取）
+    // - text 以 "/eag-graph " 开头（含参数形式，payload 从命令字符串解析）
+    // 参数解析委托 extractEagGraphRequestFromPrompt 独立函数完成
+    const graphPrefix = EAG_COMMAND_STRINGS.EAG_GRAPH;
+    const graphPrefixLower = graphPrefix.toLowerCase();
+    if (textLower === graphPrefixLower || textLower.startsWith(graphPrefixLower + " ")) {
+      return { kind: "eag-graph", payload: this.extractEagGraphRequest(userPrompt, text) };
     }
 
     // 步骤 3：严格匹配 7 个命令字符串（无参数，参数通过 messageParams 注入）
@@ -864,6 +894,53 @@ export class EagCommandParser {
     } catch {
       // 参数解析失败：返回 null，session.ts 将通知用户具体错误
       // 注：错误详情由 session.ts 重新调用 extractEagAutonomousRequestFromPrompt 获取
+      return null;
+    }
+  }
+
+  /**
+   * 从 userPrompt 提取 EagGraphRequest（Loop-Graph 融合方案 Phase 5 新增）
+   *
+   * 与 extractEagAutonomousRequest 同构，支持两种 payload 来源：
+   * 1. 优先从 messageParams.graphRequest 提取（UI 表单预解析模式）
+   * 2. 回退到从命令字符串解析（CLI 内联参数模式，extractEagGraphRequestFromPrompt）
+   *
+   * 设计理由（对齐 §5 CLI 命令规范 D-S3-7 注入模式）：
+   * - UI 表单场景：调用方在构造 userPrompt 时预解析命令字符串并注入 messageParams.graphRequest
+   * - CLI 场景：用户直接输入 /eag-graph --graph-file ... 命令字符串，由本方法回退解析
+   * - 解析失败（抛异常）时返回 null，由 session.ts 通知用户参数错误详情
+   *
+   * @param userPrompt 用户输入内容（含 messageParams 元数据）
+   * @param text 已 trim 的命令字符串（用于 CLI 内联参数回退解析）
+   * @returns EagGraphRequest 对象，或 null（解析失败时）
+   */
+  private extractEagGraphRequest(userPrompt: UserPromptContent, text: string): EagGraphRequest | null {
+    // 步骤 1：优先从 messageParams.graphRequest 提取（调用方预解析模式）
+    const params = userPrompt.messageParams as Record<string, unknown> | null | undefined;
+    if (params && typeof params === "object") {
+      const request = params.graphRequest;
+      if (request && typeof request === "object") {
+        const candidate = request as Partial<EagGraphRequest>;
+        // 基本字段校验：graphFile 或 inlineGraph 至少有一个为非空字符串（或两者都未提供，由 handler 校验）
+        // 其他配置字段为可选，此处不严格校验类型（由 handler.validateRequest 负责）
+        if (
+          (typeof candidate.graphFile === "string" && candidate.graphFile.trim().length > 0) ||
+          (typeof candidate.inlineGraph === "string" && candidate.inlineGraph.trim().length > 0) ||
+          (candidate.graphFile === undefined && candidate.inlineGraph === undefined)
+        ) {
+          return candidate as EagGraphRequest;
+        }
+      }
+    }
+
+    // 步骤 2：回退到从命令字符串解析（CLI 内联参数模式）
+    // 委托 extractEagGraphRequestFromPrompt 独立函数完成解析
+    // 解析失败（抛异常）时返回 null，由 session.ts 通知用户参数错误
+    try {
+      return extractEagGraphRequestFromPrompt(text);
+    } catch {
+      // 参数解析失败：返回 null，session.ts 将通知用户具体错误
+      // 注：错误详情由 session.ts 重新调用 extractEagGraphRequestFromPrompt 获取
       return null;
     }
   }

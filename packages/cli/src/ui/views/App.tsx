@@ -50,6 +50,13 @@ import type {
 } from "@vegamo/deepcode-core";
 import { SessionManager } from "@vegamo/deepcode-core";
 import { getCompactPromptTokenThreshold } from "@vegamo/deepcode-core";
+import {
+  createEagDynamicSuggester,
+  ProviderFactory,
+  type DynamicCommandDescriptor,
+  type EagDynamicSuggester,
+} from "@vegamo/deepcode-core";
+import { buildDynamicCommandDescriptors } from "../core/dynamic-commands";
 import { writeStdout, writeStdoutLine } from "../../utils/stdio-helpers";
 
 type View = "chat" | "session-list" | "undo" | "mcp-status";
@@ -142,11 +149,34 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
   messagesRef.current = messages;
 
   const sessionManager = useMemo(() => {
+    // 构造全局动态编排建议层
+    // - createDecisionLLMClient 复用项目级 LLM 客户端
+    // - 动态命令描述符由 CLI 层从真实命令来源（team/rules/slash）构造后注入
+    const eagDynamicSuggester: EagDynamicSuggester = createEagDynamicSuggester({
+      createDecisionLLMClient: () => {
+        // 复用项目级 LLM 客户端：与 session.ts createLLMClient 同源
+        // 通过 resolveCurrentSettings 解析 settings，再由 ProviderFactory 路由创建 LLMClient
+        const settings = resolveCurrentSettings(projectRoot);
+        if (!settings.apiKey) {
+          return null;
+        }
+        return ProviderFactory.create(settings);
+      },
+      enabled: true,
+      confidenceThreshold: 0.6,
+      maxDecisionTokens: 2048,
+    });
+
+    // 构造外部命令描述符（team/rules/slash），注入 SessionManager
+    const dynamicCommandDescriptors: ReadonlyArray<DynamicCommandDescriptor> = buildDynamicCommandDescriptors();
+
     return new SessionManager({
       projectRoot,
       createOpenAIClient: () => createOpenAIClient(projectRoot),
       getResolvedSettings: () => resolveCurrentSettings(projectRoot),
       renderMarkdown: (text) => text,
+      eagDynamicSuggester,
+      dynamicCommandDescriptors,
       onAssistantMessage: (message: SessionMessage) => {
         setMessages((prev) => [...prev, message]);
         if (rawModeRef.current === RawMode.Raw) {

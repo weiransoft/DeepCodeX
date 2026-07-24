@@ -272,12 +272,13 @@ test("A2. EagCommandParser 无状态（多次 parse 互不影响）", () => {
 // B. EAG_COMMAND_STRINGS 常量与冻结语义测试
 // ============================================================================
 
-test("B3. EAG_COMMAND_STRINGS 包含 10 个 EAG 命令字符串", () => {
-  // 验证：EAG_COMMAND_STRINGS 常量包含 10 个 EAG 命令字符串（D-S3-6）
+test("B3. EAG_COMMAND_STRINGS 包含 11 个 EAG 命令字符串", () => {
+  // 验证：EAG_COMMAND_STRINGS 常量包含 11 个 EAG 命令字符串（D-S3-6）
   // 注：EAG-P4 批次 13 Phase 7 新增 /eag-deploy 命令，命令总数从 6 扩展至 7
   // 注：EAG-P5 Phase 5.4 新增 /eag-autonomous 命令（无人值守 4 阶段循环），命令总数从 7 扩展至 8
   // 注：EAG-P5 Phase 5.5 新增 /eag-autonomous-status 与 /eag-autonomous-stop 命令
   //     （无人值守状态查询 + 中止/回滚），命令总数从 8 扩展至 10
+  // 注：Loop-Graph 融合方案 Phase 5 新增 /eag-graph 命令（图编排入口），命令总数从 10 扩展至 11
   assert.equal(EAG_COMMAND_STRINGS.EAG_BUILD, "/eag-build");
   assert.equal(EAG_COMMAND_STRINGS.EAG_DESIGN, "/eag-design");
   assert.equal(EAG_COMMAND_STRINGS.EAG_TEST, "/eag-test");
@@ -288,8 +289,9 @@ test("B3. EAG_COMMAND_STRINGS 包含 10 个 EAG 命令字符串", () => {
   assert.equal(EAG_COMMAND_STRINGS.EAG_AUTONOMOUS, "/eag-autonomous");
   assert.equal(EAG_COMMAND_STRINGS.EAG_AUTONOMOUS_STATUS, "/eag-autonomous-status");
   assert.equal(EAG_COMMAND_STRINGS.EAG_AUTONOMOUS_STOP, "/eag-autonomous-stop");
+  assert.equal(EAG_COMMAND_STRINGS.EAG_GRAPH, "/eag-graph");
   // 验证总字段数（防止未来误新增）
-  assert.equal(Object.keys(EAG_COMMAND_STRINGS).length, 10, "应有 10 个 EAG 命令字符串");
+  assert.equal(Object.keys(EAG_COMMAND_STRINGS).length, 11, "应有 11 个 EAG 命令字符串");
 });
 
 test("B4. EAG_COMMAND_STRINGS 被 Object.freeze 冻结（不可变优先 §5.12.4 G-A6d）", () => {

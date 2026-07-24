@@ -53,6 +53,19 @@ import type { BlockerGuardChain } from "./guards/blocker-guard-chain";
 import type { GuardRecord } from "./guards/types";
 import type { TaskCard } from "./guards/types";
 import type { P5RunStateStore, P5RunState, P5LoopType, P5RunStateStatus } from "./run-state-store";
+// Loop-Graph 融合方案 Phase 5 §12.4：runAsGraphNode() 适配方法
+// 依赖方向约束：eag/graph/ → eag/p5/（仅类型导入），禁止反向依赖
+// 此处仅导入类型（import type），不导入运行时值，确保依赖方向正确
+import type {
+  /** 图节点定义（runAsGraphNode 的入参） */
+  GraphNodeDef,
+  /** 图节点执行结果（runAsGraphNode 的返回值） */
+  GraphNodeResult,
+  /** 图运行上下文（runAsGraphNode 的入参，含取消信号、token 累加器等） */
+  GraphRunContext,
+  /** 节点内 Loop 配置（从 node.loopConfig 读取） */
+  NodeLoopConfig,
+} from "../graph/graph-loop-models";
 import type { P5NotesMemory } from "./notes-memory";
 import type { P5SmartConfirmation } from "./smart-confirmation";
 import type { P5LoopExecutor } from "./loop-executor";
@@ -1139,6 +1152,318 @@ export class AutonomousOrchestrator {
       // 3b. 已完成/失败/中止：返回回滚信息（HEAD SHA + 未提交清单）
       return await this.collectRollbackInfo(runId, projectRootAbs, runState);
     }
+  }
+
+  // ------------------------------------------------------------------------
+  // 公共 API：runAsGraphNode()（Loop-Graph 融合方案 Phase 5 §12.4）
+  // ------------------------------------------------------------------------
+
+  /**
+   * 以图节点身份执行 4 阶段循环（Loop-Graph 融合方案 Phase 5 §12.4 方式 B）
+   *
+   * 本方法是 AutonomousOrchestrator 与 GraphLoopOrchestrator 集成的适配器，
+   * 允许 GraphLoopOrchestrator 通过 NodeExecutorProtocol 调用 AutonomousOrchestrator，
+   * 在图节点内执行完整的 4 阶段循环（plan → dev → verify → fix）。
+   *
+   * 设计原则（对齐 §12.4）：
+   * 1. AutonomousOrchestrator 不被替代，现有 run() 接口不变
+   * 2. 本方法通过协议注入方式被 Graph 节点调用（方式 B）
+   * 3. 依赖方向严格为 eag/graph/ → eag/p5/（仅类型导入），禁止反向依赖
+   * 4. 简单任务仍直接使用 run()，不强制走 Graph
+   *
+   * 与 run() 的差异：
+   * - run() 是顶层入口，创建独立的 RunState 和 notes.md
+   * runAsGraphNode() 是图节点内的适配调用，复用 GraphRunContext 的取消信号和 token 累加器
+   * - run() 返回 AutonomousRunResult（含 runId / finalStatus / milestones 等）
+   * runAsGraphNode() 返回 GraphNodeResult（含 status / output / loopReport 等，符合图节点契约）
+   * - runAsGraphNode() 在执行前检查 context.cancelled，执行后将 token 消耗累加到 context.totalTokensUsed
+   *
+   * 适配逻辑：
+   * 1. 从 node.task 提取 objective（图节点任务描述作为 4 阶段循环的目标）
+   * 2. 从 node.loopConfig 提取 Loop 配置（maxIterations / maxTokens / stopWhen 等）
+   * 3. 从 input 或 node.overrides 提取 projectRoot（项目根目录）
+   * 4. 从 input 提取 testCommand / testTimeoutSec（可选，覆盖默认值）
+   * 5. 检查 context.cancelled，若已取消直接返回 skipped 状态
+   * 6. 调用 this.run() 执行 4 阶段循环
+   * 7. 将 AutonomousRunResult 转换为 GraphNodeResult：
+   *    - status：completed/failed → completed/failed（stop_when 视为 completed）
+   *    - output：提取 finalReport 和关键统计字段
+   *    - loopReport：将 AutonomousRunResult 转换为 LoopRunReport 格式（供 GraphScheduler 参考）
+   *    - durationSec：直接使用 runResult.durationSec
+   *    - failureReason：失败时填写 lastFatalReason 或 blockageReport.summary
+   *    - retryCount：0（图级重试由 GraphScheduler 控制，本方法不处理重试）
+   * 8. 累加 token 消耗到 context.totalTokensUsed（供图级 token 预算检查）
+   *
+   * @param node 图节点定义（含 task / loopConfig / overrides 等）
+   * @param input 输入数据（已通过 EdgeResolver 解析边契约后得到）
+   * @param context 图运行上下文（含取消信号、token 累加器、全局状态等）
+   * @returns 图节点执行结果（符合 GraphNodeResult 契约）
+   */
+  async runAsGraphNode(
+    node: Readonly<GraphNodeDef>,
+    input: Readonly<Record<string, unknown>>,
+    context: Readonly<GraphRunContext>
+  ): Promise<GraphNodeResult> {
+    const nodeStartTime = Date.now();
+
+    // 1. 检查取消信号（图级取消优先级最高）
+    if (context.cancelled) {
+      this.log(`AutonomousOrchestrator.runAsGraphNode 节点 ${node.nodeId} 执行前检测到取消信号，跳过执行`, "warn");
+      return Object.freeze({
+        nodeId: node.nodeId,
+        nodeType: node.nodeType,
+        status: "skipped",
+        output: Object.freeze({ reason: "图执行已被用户取消" }),
+        durationSec: 0,
+        retryCount: 0,
+      }) as GraphNodeResult;
+    }
+
+    // 2. 从 node.task 提取 objective（图节点任务描述作为 4 阶段循环的目标）
+    const objective = node.task;
+    if (!objective || objective.trim().length === 0) {
+      this.log(`AutonomousOrchestrator.runAsGraphNode 节点 ${node.nodeId} 的 task 字段为空，无法执行`, "error");
+      return Object.freeze({
+        nodeId: node.nodeId,
+        nodeType: node.nodeType,
+        status: "failed",
+        output: {},
+        durationSec: (Date.now() - nodeStartTime) / 1000,
+        failureReason: "节点 task 字段为空，无法作为 4 阶段循环的 objective",
+        retryCount: 0,
+      }) as GraphNodeResult;
+    }
+
+    // 3. 从 input 或 node.overrides 提取 projectRoot（项目根目录）
+    // 优先级：input.projectRoot > node.overrides.projectRoot > context.globalState.projectRoot
+    // 若三者均无，则返回 failed（无法定位项目根目录）
+    const projectRoot =
+      this.extractStringField(input, "projectRoot") ??
+      this.extractStringField(node.overrides as Record<string, unknown> | undefined, "projectRoot") ??
+      this.extractStringField(context.globalState as Record<string, unknown>, "projectRoot");
+
+    if (!projectRoot) {
+      this.log(
+        `AutonomousOrchestrator.runAsGraphNode 节点 ${node.nodeId} 无法定位 projectRoot（input/overrides/globalState 均未提供）`,
+        "error"
+      );
+      return Object.freeze({
+        nodeId: node.nodeId,
+        nodeType: node.nodeType,
+        status: "failed",
+        output: {},
+        durationSec: (Date.now() - nodeStartTime) / 1000,
+        failureReason: "无法定位 projectRoot（input/overrides/globalState 均未提供）",
+        retryCount: 0,
+      }) as GraphNodeResult;
+    }
+
+    // 4. 从 node.loopConfig 提取 Loop 配置（maxIterations / maxTokens / stopWhen 等）
+    // 若 node.loopConfig 不存在，使用默认值（对齐 DEFAULT_MAX_ITERATIONS / DEFAULT_MAX_TOKENS 等）
+    const loopConfig = node.loopConfig;
+    const maxIterations = loopConfig?.maxIterations ?? this.defaultMaxIterations;
+    const maxTokens = loopConfig?.maxTokens ?? this.defaultMaxTokens;
+    const stopWhen = loopConfig?.stopWhen ?? DEFAULT_STOP_WHEN;
+
+    // 5. 从 input 提取 testCommand / testTimeoutSec（可选，覆盖默认值）
+    const testCommand = this.extractStringField(input, "testCommand") ?? this.defaultTestCommand;
+    const testTimeoutSecRaw = this.extractNumberField(input, "testTimeoutSec") ?? this.defaultTestTimeoutSec;
+
+    // 6. 构造 AutonomousRunRequest（复用现有 run() 入口）
+    const runRequest: AutonomousRunRequest = Object.freeze({
+      projectRoot,
+      objective,
+      maxIterations,
+      maxTokens,
+      stopWhen,
+      testCommand,
+      testTimeoutSec: testTimeoutSecRaw,
+      // runId 不指定，由 RunStateStore 自动生成 12 位 UUID 前缀
+      // initialLoop 不指定，使用默认值 "coding"
+    });
+
+    this.log(
+      `AutonomousOrchestrator.runAsGraphNode 节点 ${node.nodeId} 启动 4 阶段循环：objective="${objective}" projectRoot=${projectRoot} maxIterations=${maxIterations}`,
+      "info"
+    );
+
+    // 7. 调用 this.run() 执行 4 阶段循环
+    // 注：run() 内部会处理 abort 标志文件、RunState 持久化、notes.md 追加等完整生命周期
+    let runResult: Readonly<AutonomousRunResult>;
+    try {
+      runResult = await this.run(runRequest);
+    } catch (err) {
+      // run() 抛异常（如 RunStateStore.initialize 失败 / 校验失败等）：构造 failed 结果
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      this.log(`AutonomousOrchestrator.runAsGraphNode 节点 ${node.nodeId} 执行 4 阶段循环异常：${errorMsg}`, "error");
+      return Object.freeze({
+        nodeId: node.nodeId,
+        nodeType: node.nodeType,
+        status: "failed",
+        output: {},
+        durationSec: (Date.now() - nodeStartTime) / 1000,
+        failureReason: `4 阶段循环执行异常：${errorMsg}`,
+        retryCount: 0,
+      }) as GraphNodeResult;
+    }
+
+    // 8. 累加 token 消耗到 context.totalTokensUsed（供图级 token 预算检查）
+    // 注：context.totalTokensUsed 是可变字段（GraphRunContext 声明为非 readonly），直接累加
+    // 此处修改 context 字段是 GraphRunContext 协议约定的合法行为（对齐 §7.6 GraphRunContext 文档）
+    (context as GraphRunContext).totalTokensUsed += runResult.totalTokensUsed;
+
+    // 9. 将 AutonomousRunResult 转换为 GraphNodeResult
+    // - status：completed/stop_when → completed；failed/aborted → failed
+    // - output：提取 finalReport 和关键统计字段，供下游节点和 EdgeResolver 使用
+    // - loopReport：将 AutonomousRunResult 转换为 LoopRunReport 格式（供 GraphScheduler 参考）
+    // - durationSec：直接使用 runResult.durationSec
+    // - failureReason：失败时填写 blockageReport?.summary 或 lastFatalReason
+    // - retryCount：0（图级重试由 GraphScheduler 控制，本方法不处理重试）
+    const nodeStatus: "completed" | "failed" =
+      runResult.finalStatus === "completed" || runResult.finalStatus === "stop_when" ? "completed" : "failed";
+
+    const failureReason =
+      nodeStatus === "failed"
+        ? (runResult.blockageReport?.summary ??
+          `4 阶段循环最终状态：${runResult.finalStatus}（退出码 ${runResult.exitCode}）`)
+        : undefined;
+
+    // 构造节点输出数据（供下游边的 dataMapping 引用）
+    const output: Record<string, unknown> = {
+      finalStatus: runResult.finalStatus,
+      exitCode: runResult.exitCode,
+      totalIterations: runResult.totalIterations,
+      totalLlmCallCount: runResult.totalLlmCallCount,
+      totalTokensUsed: runResult.totalTokensUsed,
+      durationSec: runResult.durationSec,
+      finalReport: runResult.finalReport,
+      // 里程碑列表（供下游节点查询任务完成进度）
+      milestones: runResult.milestones,
+      // 触发的护栏记录（供下游节点查询执行过程中的护栏事件）
+      triggeredGuards: runResult.triggeredGuards,
+    };
+
+    // 若存在阻塞分析报告，也加入输出（供下游节点查询失败原因）
+    if (runResult.blockageReport) {
+      output.blockageReport = runResult.blockageReport;
+    }
+
+    // 构造 LoopRunReport（供 GraphScheduler 在 decideNext 中参考节点内 Loop 的执行情况）
+    // 注：LoopRunReport 是 eag/loop/models.ts 中的数据模型，此处通过对象字面量构造
+    // 字段对齐 LoopRunReport 接口定义（runId / loopType / objective / totalIterations / finalStatus / 等）
+    const loopReport = this.convertToLoopRunReport(runResult, objective);
+
+    this.log(
+      `AutonomousOrchestrator.runAsGraphNode 节点 ${node.nodeId} 4 阶段循环结束：finalStatus=${runResult.finalStatus} exitCode=${runResult.exitCode} iterations=${runResult.totalIterations} duration=${runResult.durationSec}s`,
+      "info"
+    );
+
+    return Object.freeze({
+      nodeId: node.nodeId,
+      nodeType: node.nodeType,
+      status: nodeStatus,
+      output: Object.freeze(output),
+      loopReport,
+      durationSec: runResult.durationSec,
+      ...(failureReason !== undefined ? { failureReason } : {}),
+      retryCount: 0,
+    }) as GraphNodeResult;
+  }
+
+  /**
+   * 从输入对象中提取字符串字段（私有辅助方法）
+   *
+   * @param source 源对象（可能为 undefined）
+   * @param fieldName 字段名
+   * @returns 字符串值（若字段存在且为非空字符串）；否则 undefined
+   */
+  private extractStringField(
+    source: Readonly<Record<string, unknown>> | undefined,
+    fieldName: string
+  ): string | undefined {
+    if (!source) {
+      return undefined;
+    }
+    const value = source[fieldName];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value;
+    }
+    return undefined;
+  }
+
+  /**
+   * 从输入对象中提取数字字段（私有辅助方法）
+   *
+   * @param source 源对象（可能为 undefined）
+   * @param fieldName 字段名
+   * @returns 数字值（若字段存在且为正整数）；否则 undefined
+   */
+  private extractNumberField(
+    source: Readonly<Record<string, unknown>> | undefined,
+    fieldName: string
+  ): number | undefined {
+    if (!source) {
+      return undefined;
+    }
+    const value = source[fieldName];
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      return value;
+    }
+    return undefined;
+  }
+
+  /**
+   * 将 AutonomousRunResult 转换为 LoopRunReport 格式（私有辅助方法）
+   *
+   * LoopRunReport 是 eag/loop/models.ts 中的数据模型，用于描述一次 Loop Engineering 运行的完整结果。
+   * 本方法将 AutonomousRunResult 的字段映射到 LoopRunReport，供 GraphScheduler 在 decideNext 中参考。
+   *
+   * 字段映射规则：
+   * - runId：直接使用 runResult.runId
+   * - loopType：使用 "coding"（P5 默认 Loop 类型，对齐 DEFAULT_INITIAL_LOOP）
+   * - objective：使用传入的 objective（节点 task 字段）
+   * - totalIterations：直接使用 runResult.totalIterations
+   * - finalStatus：completed/stop_when → "completed"；failed → "failed"；aborted → "aborted"
+   * - events：空数组（P5 不维护 LoopEvent 列表，events 由 eag/loop/ 内部维护）
+   * - tokenUsed：直接使用 runResult.totalTokensUsed
+   * - durationSec：直接使用 runResult.durationSec
+   * - committedCount：0（P5 不自动 commit，对齐 autoCommit=false）
+   * - humanCheckpoints：空数组（P5 无人值守，不触发人类检查点）
+   * - finalSummary：使用 runResult.finalReport 的前 500 字符（避免过长）
+   *
+   * @param runResult AutonomousRunResult 实例
+   * @param objective 节点任务描述（作为 LoopRunReport.objective）
+   * @returns LoopRunReport 实例（冻结对象）
+   */
+  private convertToLoopRunReport(
+    runResult: Readonly<AutonomousRunResult>,
+    objective: string
+  ): Readonly<import("../loop/models").LoopRunReport> {
+    // 映射 finalStatus：completed/stop_when → "completed"；failed → "failed"；aborted → "aborted"
+    const loopFinalStatus: "completed" | "failed" | "aborted" =
+      runResult.finalStatus === "completed" || runResult.finalStatus === "stop_when"
+        ? "completed"
+        : runResult.finalStatus === "failed"
+          ? "failed"
+          : "aborted";
+
+    // finalSummary：截取 finalReport 前 500 字符（避免 LoopRunReport.finalSummary 过长）
+    const finalSummary =
+      runResult.finalReport.length > 500 ? runResult.finalReport.slice(0, 500) + "..." : runResult.finalReport;
+
+    return Object.freeze({
+      runId: runResult.runId,
+      loopType: "coding" as const,
+      objective,
+      totalIterations: runResult.totalIterations,
+      finalStatus: loopFinalStatus,
+      events: Object.freeze([]),
+      tokenUsed: runResult.totalTokensUsed,
+      durationSec: runResult.durationSec,
+      committedCount: 0,
+      humanCheckpoints: Object.freeze([]),
+      finalSummary,
+    });
   }
 
   // ------------------------------------------------------------------------

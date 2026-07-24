@@ -390,6 +390,8 @@ export interface GraphNodeResult {
   readonly output: Readonly<Record<string, unknown>>;
   /** 如果节点包含 Loop，记录 Loop 运行报告；否则为 undefined */
   readonly loopReport?: Readonly<LoopRunReport>;
+  /** 节点 LLM 调用次数（由 NodeExecutor 累加；无 Loop 或不统计时为 undefined） */
+  readonly llmCallCount?: number;
   /** 执行耗时（秒） */
   readonly durationSec: number;
   /** 失败原因（status=failed 时填写，其他状态为 undefined） */
@@ -635,6 +637,50 @@ export interface GraphGuardCheckResult {
 }
 
 /**
+ * 安全护栏自定义规则触发阶段（TOP-3 安全护栏可配置化）
+ *
+ * - validate：图结构校验阶段（validateGraph 调用时触发）
+ * - pre：节点执行前阶段（checkPreExecution 调用时触发）
+ * - post：节点执行后阶段（checkPostExecution 调用时触发）
+ */
+export type GraphGuardCustomRulePhase = "validate" | "pre" | "post";
+
+/**
+ * 安全护栏自定义规则签名（TOP-3 安全护栏可配置化）
+ *
+ * 由调用方提供的自定义校验函数，在指定 phase 触发。
+ * 返回 pass=false 时，护栏将其作为 error 级别处理，建议动作 stop_failure。
+ *
+ * @param graph 工作图定义（validate 阶段可用，pre/post 阶段也可读）
+ * @param context 图运行上下文（pre/post 阶段可用，validate 阶段可能为 undefined）
+ * @returns 校验结果：pass 表示是否通过，message 为可选失败原因
+ */
+export type GraphGuardCustomRule = (
+  graph: Readonly<WorkGraph>,
+  context?: Readonly<GraphRunContext>
+) => { pass: boolean; message?: string };
+
+/**
+ * 安全护栏配置（TOP-3 安全护栏可配置化）
+ *
+ * 支持运行时配置 GraphGuardImpl 的校验行为，默认全部开启，保持与当前行为完全兼容。
+ */
+export interface GraphGuardConfig {
+  /** 输出契约验证级别：strict=严格校验类型和必填性，lenient=仅校验字段存在 */
+  readonly outputContractValidationLevel?: "strict" | "lenient";
+  /** 是否启用 token 预算检查（默认 true） */
+  readonly enableTokenBudgetCheck?: boolean;
+  /** 是否启用图深度检查（默认 true） */
+  readonly enableDepthCheck?: boolean;
+  /** 是否启用单节点耗时检查（默认 true） */
+  readonly enablePostExecutionDurationCheck?: boolean;
+  /** 自定义校验规则注册表（ruleId → { phase, rule }） */
+  readonly customRules?: Readonly<
+    Record<string, Readonly<{ phase: GraphGuardCustomRulePhase; rule: GraphGuardCustomRule }>>
+  >;
+}
+
+/**
  * 图级护栏记录（v2.0 补充定义）
  *
  * 记录一次图执行中触发的所有护栏事件，用于审计和事后分析。
@@ -653,6 +699,104 @@ export interface GraphGuardRecord {
   readonly result: Readonly<GraphGuardCheckResult>;
   /** 触发时间戳（ISO 字符串） */
   readonly triggeredAt: string;
+}
+
+// ============================================================================
+// §7.7 图调试数据模型（TOP-5 图调试工具与运行时文档）
+// ============================================================================
+
+/**
+ * 图调试事件阶段
+ *
+ * 描述调试事件在图执行生命周期中的触发时机：
+ * - start：节点开始执行
+ * - complete：节点执行完成
+ * - fork：fork 节点并行派发或分支执行
+ * - merge：merge 节点汇聚上游结果
+ * - failure：节点执行失败（含执行异常、guard 拦截、边解析失败）
+ * - guard：护栏检查（pre/post/validate）
+ */
+export type GraphDebugEventPhase = "start" | "complete" | "fork" | "merge" | "failure" | "guard";
+
+/**
+ * 图调试追踪级别
+ *
+ * - off：关闭调试事件生成与输出（等效于未注入 debugger）
+ * - info：仅记录关键事件（节点完成、失败、guard 失败/警告、fork/merge 汇总）
+ * - debug：记录所有节点 start/complete 和 guard 结果
+ * - trace：最详细，包含输入输出快照（需 includeNodeSnapshots=true 才保留原始数据）
+ */
+export type GraphDebugLogLevel = "off" | "info" | "debug" | "trace";
+
+/**
+ * 图调试事件（TOP-5）
+ *
+ * 记录图执行过程中的一个关键观测点，用于执行追踪、快照生成和事后分析。
+ * 所有字段只读，运行期由 DefaultGraphDebugger 构造并冻结后入队。
+ *
+ * 设计约束：
+ * - 事件必须携带 runId，支持跨运行隔离和日志聚合
+ * - nodeId 在 guard 的 validate 阶段可能为空（图级事件）
+ * - metadata 中不会直接存放原始 input/output（由 includeNodeSnapshots 控制）
+ */
+export interface GraphDebugEvent {
+  /** 事件唯一标识（UUID） */
+  readonly eventId: string;
+  /** 所属运行 ID（与 GraphRunContext.runId 一致） */
+  readonly runId: string;
+  /** 事件时间戳（ISO 字符串） */
+  readonly timestamp: string;
+  /** 关联节点 ID（validate 阶段等图级事件可为 undefined） */
+  readonly nodeId?: string;
+  /** 事件阶段 */
+  readonly phase: GraphDebugEventPhase;
+  /** 事件描述（人类可读，已做敏感词脱敏） */
+  readonly message: string;
+  /** 事件附加元数据（只读，可能包含快照摘要、guard 结果、分支 ID 等） */
+  readonly metadata?: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * 图调试选项（TOP-5）
+ *
+ * 配置 DefaultGraphDebugger 的行为与输出详细程度。
+ * 所有字段在 configure() 调用时冻结，运行期不可变。
+ */
+export interface GraphDebugOptions {
+  /** 追踪级别（默认 off，关闭时不生成任何调试事件） */
+  readonly logLevel: GraphDebugLogLevel;
+  /** 是否包含节点输入/输出快照（默认 false，生产环境建议关闭以避免泄露敏感数据） */
+  readonly includeNodeSnapshots?: boolean;
+  /** 是否记录 guard 通过事件（默认 false，仅记录失败/警告） */
+  readonly includeGuardPassedEvents?: boolean;
+  /** 事件环形缓冲区上限（默认 1000，超过后按 FIFO 丢弃最旧事件，防止内存泄漏） */
+  readonly maxEvents?: number;
+}
+
+/**
+ * 图执行快照（TOP-5）
+ *
+ * 由 GraphDebuggerProtocol.getExecutionSnapshot() 返回，描述一次图运行的当前观测状态。
+ * 返回对象经 deepClone + deepFreeze 处理，保证不可变。
+ *
+ * 注意：
+ * - currentNodeId 表示主循环当前节点；fork 并行分支期间主循环停留在 fork 节点，
+ *   分支节点事件会单独记录，可通过 events 按 runId/branchId 关联
+ * - completedNodes / failedNodes 基于当前已记录的 nodeResults 视图构建
+ */
+export interface GraphExecutionSnapshot {
+  /** 运行 ID */
+  readonly runId: string;
+  /** 图定义 ID */
+  readonly graphId: string;
+  /** 主循环当前节点 ID（图执行完成后或尚未开始时为 undefined） */
+  readonly currentNodeId?: string;
+  /** 已完成节点 ID 列表（按事件顺序，可能包含 failed/isolated/skipped） */
+  readonly completedNodes: ReadonlyArray<string>;
+  /** 失败节点 ID 列表 */
+  readonly failedNodes: ReadonlyArray<string>;
+  /** 当前缓冲区中的所有调试事件（只读，按时间顺序） */
+  readonly events: ReadonlyArray<GraphDebugEvent>;
 }
 
 /**
@@ -783,3 +927,150 @@ export function createRetrySuppressionConfig(
     ...overrides,
   });
 }
+
+// ============================================================================
+// §13.4.1 图级全局上下文（Layer 0）—— 多角色评审共识 B-5 / B-1
+// ============================================================================
+//
+// 设计原则（对齐设计文档 §13.4.1）：
+// - 保留 GraphRunContext.globalState: Record<string, unknown> 类型不变
+// - GraphGlobalContext 定义为可选字段访问接口，兼容降级路径（未初始化时访问不抛错）
+// - 通过 getGraphGlobalContext() 工具函数访问，提供类型安全断言
+// - 运行期写入时通过 deepFreeze() 冻结每条条目，保证不可变优先
+// - 所有字段均为可选（?:），兼容现有 globalState 字符串索引式访问
+//   （__experienceRecall / $state.<field> / Object.assign 等模式）
+// ============================================================================
+
+/**
+ * 节点执行摘要（供其他节点了解前序节点动态）
+ *
+ * 对齐设计文档 §13.4.1：每个节点执行完成后，由经验上送器生成摘要并写入
+ * GraphGlobalContext.nodeSummaries，供后续节点在构建任务上下文时读取。
+ */
+export interface NodeSummary {
+  /** 节点 ID（在图中唯一） */
+  readonly nodeId: string;
+  /** 节点类型（loop / task / decision / merge / fork / end） */
+  readonly nodeType: string;
+  /** 节点标签（人类可读） */
+  readonly label: string;
+  /** 执行状态（completed / failed / skipped / isolated） */
+  readonly status: "completed" | "failed" | "skipped" | "isolated";
+  /** 输出摘要（输出数据的精简描述，非完整输出，用于上下文片段） */
+  readonly outputSummary: string;
+  /** 关键决策列表（该节点在执行过程中做出的重要决策） */
+  readonly keyDecisions: ReadonlyArray<string>;
+  /** 执行完成时间戳（ISO 字符串，用于排序） */
+  readonly completedAt: string;
+}
+
+/**
+ * 图级经验条目（节点上送的经验）
+ *
+ * 对齐设计文档 §13.4.1：节点执行完成后，通过 NodeExperienceUploader 协议
+ * 将本节点积累的经验上送到 GraphGlobalContext.collectedExperiences，
+ * 供后续节点在 Discovery 阶段召回复用。
+ */
+export interface GraphExperienceEntry {
+  /** 经验 ID（唯一标识，用于去重） */
+  readonly experienceId: string;
+  /** 来源节点 ID（图执行产生）或 "historical"（跨图历史经验） */
+  readonly sourceNodeId: string;
+  /** 经验类型：success（成功经验）/ failure（失败教训） */
+  readonly type: "success" | "failure";
+  /** 任务类型（与 LoopType 对齐，或扩展自定义类型） */
+  readonly taskType: string;
+  /** 经验描述（任务场景的精简描述） */
+  readonly description: string;
+  /** 解决方案（成功经验时填写，描述采用的策略） */
+  readonly solution?: string;
+  /** 失败原因（失败经验时填写，描述失败根因） */
+  readonly failureReason?: string;
+  /** 教训（失败经验时填写，描述应避免的陷阱） */
+  readonly lessonLearned?: string;
+  /** 产生时间（ISO 字符串，用于排序和滑动窗口截断） */
+  readonly createdAt: string;
+}
+
+/**
+ * 动向广播条目（节点间的消息板通知）
+ *
+ * 对齐设计文档 §13.4.1：节点在执行过程中通过 AgentBulletinBoard 模式
+ * 写入 GraphGlobalContext.bulletinBoard，通知其他节点本节点的关键决策/产出。
+ * 滑动窗口保留最近 20 条（MAX_BULLETIN_ENTRIES）。
+ */
+export interface BulletinEntry {
+  /** 条目 ID（唯一标识） */
+  readonly entryId: string;
+  /** 来源节点 ID */
+  readonly sourceNodeId: string;
+  /** 通知类型：decision（决策）/ milestone（里程碑）/ blocker（阻塞）/ discovery（发现） */
+  readonly type: "decision" | "milestone" | "blocker" | "discovery";
+  /** 通知内容摘要（精简描述，用于上下文片段） */
+  readonly summary: string;
+  /** 详细信息（可选，用于深入排查） */
+  readonly details?: string;
+  /** 时间戳（ISO 字符串，用于排序和滑动窗口截断） */
+  readonly timestamp: string;
+}
+
+/**
+ * 图级全局上下文（Layer 0）
+ *
+ * 对齐设计文档 §13.4.1：作为 GraphRunContext.globalState 的可选字段视图，
+ * 承载项目目标、全局约束、跨节点共享数据、经验汇总池和动向广播板。
+ *
+ * 访问方式：
+ * - 通过 getGraphGlobalContext(ctx) 获取类型安全视图
+ * - 通过 isGraphGlobalContextInitialized(ctx) 判断是否已初始化
+ *
+ * 不可变性（对齐 §13.4.1 多角色评审共识 M-4）：
+ * - 溯源字段（projectRoot / projectGoal / globalConstraints / runId / graphId / createdAt）
+ *   声明为 readonly，图启动时注入后全程不变
+ * - 集合字段（sharedArtifacts / nodeSummaries / collectedExperiences / bulletinBoard）
+ *   引用可写（允许 push / 重新赋值以支持滑动窗口截断），但每条条目
+ *   在写入时通过 deepFreeze() 递归冻结，保证元素不可变
+ * - lastUpdatedAt 每次 uploadExperiences 后刷新
+ *
+ * 降级语义：
+ * - 当 GraphGlobalContext 未初始化时，getGraphGlobalContext() 返回空对象
+ * - isGraphGlobalContextInitialized() 返回 false，节点执行降级为直接执行模式
+ */
+export interface GraphGlobalContext {
+  // ---- 项目级信息（图启动时注入，全程不变，readonly）----
+  /** 项目根目录（用于文件读写定位） */
+  readonly projectRoot?: string;
+  /** 项目目标（用户意图，图编排的终极目标，作为 directRetain 通道必注入片段） */
+  readonly projectGoal?: string;
+  /** 全局约束（如代码规范、安全策略、技术栈约束，初始化后不变） */
+  readonly globalConstraints?: ReadonlyArray<string>;
+
+  // ---- 跨节点共享数据（节点可读写，集合引用可写但元素 deepFreeze 冻结）----
+  /** 共享产物（前序节点产出供后续节点使用，如设计文档、API 规范） */
+  sharedArtifacts?: Record<string, unknown>;
+  /** 已访问节点摘要（nodeId → NodeSummary，用于动向感知） */
+  nodeSummaries?: Map<string, NodeSummary>;
+
+  // ---- 经验汇总池（节点上送，后续节点复用，引用可写以支持滑动窗口截断）----
+  /** 已收集的经验列表（成功 + 失败，按时间顺序，滑动窗口截断） */
+  collectedExperiences?: GraphExperienceEntry[];
+
+  // ---- 动向广播板（节点写入，其他节点读取，引用可写以支持 FIFO 截断）----
+  /** 动向广播板（最近 N 条关键决策/产出通知，默认保留 20 条） */
+  bulletinBoard?: BulletinEntry[];
+
+  // ---- 溯源字段（readonly，图启动时注入后不变）----
+  /** 图运行 ID（与 GraphRunContext.runId 一致，便于快照追溯） */
+  readonly runId?: string;
+  /** 图定义 ID（与 GraphRunContext.graphId 一致） */
+  readonly graphId?: string;
+  /** 全局上下文创建时间戳（ISO 字符串） */
+  readonly createdAt?: string;
+  /** 全局上下文最后更新时间戳（每次 uploadExperiences 后刷新） */
+  lastUpdatedAt?: string;
+}
+
+// TOP-4 上下文拼接工具函数统一化：
+// getGraphGlobalContext / isGraphGlobalContextInitialized 实现已迁移到 graph-context-utils.ts，
+// 本模块通过 re-export 保持外部 API 完全不变。
+export { getGraphGlobalContext, isGraphGlobalContextInitialized } from "./graph-context-utils";

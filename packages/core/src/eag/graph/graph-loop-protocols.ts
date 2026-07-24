@@ -52,6 +52,18 @@ import type {
   PredicateRegistry,
   /** 图日志记录器接口 */
   GraphLogger,
+  /** 安全护栏配置（TOP-3） */
+  GraphGuardConfig,
+  /** 安全护栏自定义规则触发阶段（TOP-3） */
+  GraphGuardCustomRulePhase,
+  /** 安全护栏自定义规则（TOP-3） */
+  GraphGuardCustomRule,
+  /** 图调试事件（TOP-5） */
+  GraphDebugEvent,
+  /** 图调试选项（TOP-5） */
+  GraphDebugOptions,
+  /** 图执行快照（TOP-5） */
+  GraphExecutionSnapshot,
 } from "./graph-loop-models";
 
 // ============================================================================
@@ -218,6 +230,32 @@ export interface GraphGuardProtocol {
     result: Readonly<GraphNodeResult>,
     context: Readonly<GraphRunContext>
   ): GraphGuardCheckResult;
+
+  /**
+   * 配置护栏行为（TOP-3 安全护栏可配置化）
+   *
+   * 运行时动态更新护栏检查开关与自定义规则注册表。
+   * 默认所有检查开启，调用方可选择关闭特定检查以适配特殊场景。
+   *
+   * @param config 安全护栏配置（GraphGuardConfig 类型定义见 graph-loop-models.ts）
+   */
+  configure(config: Readonly<GraphGuardConfig>): void;
+
+  /**
+   * 注册自定义校验规则（TOP-3 安全护栏可配置化）
+   *
+   * 自定义规则在指定 phase 触发：
+   * - "validate"：图结构校验阶段（validateGraph 调用时）
+   * - "pre"：节点执行前阶段（checkPreExecution 调用时）
+   * - "post"：节点执行后阶段（checkPostExecution 调用时）
+   *
+   * 自定义规则执行异常时，护栏将其作为 error 级别处理，建议动作 stop_failure。
+   *
+   * @param ruleId 规则唯一标识（重复注册覆盖旧规则）
+   * @param phase 规则触发阶段
+   * @param rule 自定义校验函数
+   */
+  registerCustomRule(ruleId: string, phase: GraphGuardCustomRulePhase, rule: GraphGuardCustomRule): void;
 }
 
 // ============================================================================
@@ -311,6 +349,244 @@ export interface ExperienceStoreProtocol {
 }
 
 // ============================================================================
+// §13.6.2 NodeExperienceUploader：节点经验上送协议（多角色评审共识 B-3）
+// ============================================================================
+//
+// 设计目的（对齐 §13.6.2）：
+// - 解耦 GraphLoopOrchestrator 与 eag/p5 模块（架构约束：eag/graph 禁止依赖 eag/p5）
+// - 允许调用方自定义经验来源（如从 loopReport 提取，或从外部 NotesMemory 提取）
+// - 便于单元测试注入真实闭包实现（项目规则：不使用 mock 框架）
+//
+// 实现责任：
+// - 从 nodeResult.loopReport.events 提取成功/失败事件 → GraphExperienceEntry
+// - 从 nodeResult.loopReport 中提取决策事件 → BulletinEntry
+// - 从 nodeResult.output 提取摘要 → NodeSummary
+// - 将上述条目写入 context.globalState 的 GraphGlobalContext 字段
+// - 仅 status="completed" 的节点经验持久化到 ExperienceStore（由实现方注入）
+//
+// 默认实现：DefaultNodeExperienceUploader（在 graph-context-helpers.ts 中提供）
+// ============================================================================
+
+/**
+ * 节点经验上送协议（对齐 §13.6.2）
+ *
+ * 由外部注入实现（如调用方封装 P5NotesMemory + ExperienceStore 的组合），
+ * GraphLoopOrchestrator 仅调用此协议，不直接依赖 eag/p5 或具体的 ExperienceStore 实现。
+ */
+export interface NodeExperienceUploader {
+  /**
+   * 上送节点执行经验到全局上下文
+   *
+   * 副作用：
+   * - 写入 context.globalState.collectedExperiences（新增经验条目）
+   * - 写入 context.globalState.bulletinBoard（新增动向通知）
+   * - 写入 context.globalState.nodeSummaries（新增节点摘要）
+   * - 更新 context.globalState.lastUpdatedAt
+   * - 若注入了 ExperienceStore，将 completed 节点经验持久化
+   *
+   * @param nodeId 节点 ID
+   * @param nodeResult 节点执行结果（含 loopReport，从中提取经验）
+   * @param context 图运行上下文（写入 globalState 的 GraphGlobalContext 字段）
+   * @returns 无返回值，所有副作用通过 context.globalState 体现
+   */
+  uploadExperiences(nodeId: string, nodeResult: GraphNodeResult, context: GraphRunContext): Promise<void>;
+}
+
+// ============================================================================
+// §13.9.1 DualLayerContextManagerProtocol：双层上下文管理器协议（Layer 2 滑动窗口）
+// ============================================================================
+//
+// 设计目的（对齐 §13.13.2 B-2 共识）：
+// - 定义此协议接口而非直接依赖 DualLayerContextManager 具体类
+// - 避免 eag/graph/graph-loop-protocols.ts 依赖 v2/context 模块（保持 protocols.ts 纯净）
+// - DualLayerContextManager（v2/context/dual-layer-manager.ts）通过结构化类型匹配实现此协议
+// - buildOptimizedContext 第三参数 options 扩展（graphGlobalContext / currentNodeId / maxTokens）
+//   使 Layer 2 滑动窗口能感知图级全局上下文，实现三层上下文有机集成
+// ============================================================================
+
+/**
+ * 双层上下文管理器协议（Layer 2 滑动窗口，对齐 §13.9.1）
+ *
+ * DualLayerContextManager 实现此协议（结构化类型匹配，无需 implements 关键字）。
+ * GraphLoopOrchestrator 通过此协议调用 buildOptimizedContext，不感知具体实现。
+ */
+export interface DualLayerContextManagerProtocol {
+  /**
+   * 构建优化上下文（Layer 2 滑动窗口）
+   *
+   * 集成图级片段（对齐 §13.8）：
+   * - 当 options.graphGlobalContext 和 options.currentNodeId 提供时，
+   *   调用 collectGraphContextSnippets 收集图级片段
+   * - 图级片段分两条通道：
+   *   - directRetain（必注入）：project_goal / shared_artifact
+   *   - scoringCandidates（参与评分）：node_summary / experience / bulletin
+   * - 超过 GRAPH_SNIPPET_TOKEN_BUDGET 时按 relevance 降序截断（project_goal 永不丢弃）
+   *
+   * @param userId 用户 ID
+   * @param taskId 任务 ID
+   * @param options 扩展选项（graphGlobalContext / currentNodeId / maxTokens）
+   * @returns 优化后的上下文片段数组
+   */
+  buildOptimizedContext(
+    userId: string,
+    taskId: string,
+    options?: {
+      /** Token 预算上限（可选） */
+      maxTokens?: number;
+      /** 图级全局上下文（unknown 类型，避免反向依赖，类型断言在 v2/context 侧完成） */
+      graphGlobalContext?: unknown;
+      /** 当前节点 ID（用于排除自身经验） */
+      currentNodeId?: string;
+    }
+  ): Promise<ReadonlyArray<unknown>>;
+}
+
+// ============================================================================
+// §7.6 GraphDebuggerProtocol：图调试器协议（TOP-5）
+// ============================================================================
+
+/**
+ * 图调试器协议（TOP-5 图调试工具与运行时文档）
+ *
+ * 提供图执行过程的旁路观测能力，支持执行追踪日志、执行快照和运行时配置。
+ * 调试器与现有 GraphLogger 完全独立：GraphLogger 用于业务日志输出，
+ * GraphDebuggerProtocol 用于结构化调试事件收集与快照生成。
+ *
+ * 设计约束：
+ * - 所有方法参数和返回类型遵循不可变优先原则（Readonly<T>）
+ * - 实现类必须保证自身异常不中断主流程（编排器通过 safeTrace 二次保护）
+ * - 调试器应支持跨运行隔离：每次 run() 前调用 reset(runId) 清空上一运行事件
+ * - 默认注入 NoOpDebugger，未启用调试时零开销
+ */
+export interface GraphDebuggerProtocol {
+  /**
+   * 配置调试器选项
+   *
+   * 运行时动态更新调试行为。logLevel="off" 时停止生成事件。
+   * 调用方传入的 options 会被实现类冻结后保存。
+   *
+   * @param options 调试选项（logLevel / includeNodeSnapshots / includeGuardPassedEvents / maxEvents）
+   */
+  configure(options: Readonly<GraphDebugOptions>): void;
+
+  /**
+   * 重置调试器状态以开始新的图运行
+   *
+   * 在 GraphLoopOrchestrator.run() 开始时调用，确保上一运行的事件不会串扰到本次快照。
+   * 实现类应清空内部事件缓冲，并记录当前 runId。
+   *
+   * @param runId 新的运行 ID
+   */
+  reset(runId: string): void;
+
+  /**
+   * 追踪节点开始执行
+   *
+   * @param node 当前节点定义
+   * @param input 节点输入数据（已通过 EdgeResolver 解析）
+   * @param context 图运行上下文
+   */
+  traceNodeStart(
+    node: Readonly<GraphNodeDef>,
+    input: Readonly<Record<string, unknown>>,
+    context: Readonly<GraphRunContext>
+  ): void;
+
+  /**
+   * 追踪节点执行完成
+   *
+   * @param node 当前节点定义
+   * @param result 节点执行结果
+   * @param context 图运行上下文
+   */
+  traceNodeComplete(
+    node: Readonly<GraphNodeDef>,
+    result: Readonly<GraphNodeResult>,
+    context: Readonly<GraphRunContext>
+  ): void;
+
+  /**
+   * 追踪 fork 节点并行派发开始
+   *
+   * @param forkNode fork 节点定义
+   * @param branchNodeIds 分支节点 ID 列表
+   * @param context 图运行上下文
+   */
+  traceForkStart(
+    forkNode: Readonly<GraphNodeDef>,
+    branchNodeIds: ReadonlyArray<string>,
+    context: Readonly<GraphRunContext>
+  ): void;
+
+  /**
+   * 追踪 fork 节点并行派发完成
+   *
+   * @param forkNode fork 节点定义
+   * @param branchResults 各分支执行结果
+   * @param context 图运行上下文
+   */
+  traceForkComplete(
+    forkNode: Readonly<GraphNodeDef>,
+    branchResults: ReadonlyArray<GraphNodeResult>,
+    context: Readonly<GraphRunContext>
+  ): void;
+
+  /**
+   * 追踪 merge 节点汇聚上游结果
+   *
+   * @param mergeNode merge 节点定义
+   * @param upstreamResults 上游节点结果列表
+   * @param context 图运行上下文
+   */
+  traceMerge(
+    mergeNode: Readonly<GraphNodeDef>,
+    upstreamResults: ReadonlyArray<GraphNodeResult>,
+    context: Readonly<GraphRunContext>
+  ): void;
+
+  /**
+   * 追踪节点失败
+   *
+   * 在节点执行失败（status=failed）时调用，与 traceNodeComplete 配套使用。
+   * 失败原因、重试次数等信息从 result 中读取。
+   *
+   * @param node 失败节点定义
+   * @param result 节点执行结果（status 必为 failed）
+   * @param context 图运行上下文
+   */
+  traceFailure(
+    node: Readonly<GraphNodeDef>,
+    result: Readonly<GraphNodeResult>,
+    context: Readonly<GraphRunContext>
+  ): void;
+
+  /**
+   * 追踪护栏检查结果
+   *
+   * @param node 关联节点（validate 阶段为图级事件，可传 undefined）
+   * @param guardResult 护栏检查结果
+   * @param phase 护栏触发阶段
+   * @param context 图运行上下文
+   */
+  traceGuard(
+    node: Readonly<GraphNodeDef> | undefined,
+    guardResult: Readonly<GraphGuardCheckResult>,
+    phase: "pre" | "post" | "validate",
+    context: Readonly<GraphRunContext>
+  ): void;
+
+  /**
+   * 获取当前执行快照
+   *
+   * 返回对象经深拷贝并冻结，调用方无法修改内部事件缓冲。
+   * 若当前无运行（未调用 reset），返回空事件列表。
+   *
+   * @returns 不可变的图执行快照
+   */
+  getExecutionSnapshot(): GraphExecutionSnapshot;
+}
+
+// ============================================================================
 // §7.6 GraphLoopOrchestratorOptions：编排器构造选项
 // ============================================================================
 
@@ -357,6 +633,44 @@ export interface GraphLoopOrchestratorOptions {
   readonly predicateRegistry: PredicateRegistry;
   /** 经验存储（可选，Layer 3 集成时启用，Phase 4 实现） */
   readonly experienceStore?: ExperienceStoreProtocol;
+  /**
+   * 节点经验上送器（可选，对齐 §13.6.2 多角色评审共识 B-3）
+   *
+   * 未注入时跳过经验上送，降级为无图级上下文积累。
+   * 默认实现：DefaultNodeExperienceUploader（graph-context-helpers.ts）。
+   */
+  readonly experienceUploader?: NodeExperienceUploader;
+  /**
+   * 双层上下文管理器（可选，对齐 §13.9.1 多角色评审共识 B-6）
+   *
+   * V2-Graph 集成时启用 Layer 2 滑动窗口。
+   * 未注入时降级为无优化上下文（不调用 buildOptimizedContext）。
+   * DualLayerContextManager（v2/context）通过结构化类型匹配实现 DualLayerContextManagerProtocol。
+   */
+  readonly dualLayerManager?: DualLayerContextManagerProtocol;
+  /**
+   * 当前用户 ID（可选，对齐 §13.9.1）
+   *
+   * dualLayerManager 启用时必填，用于 buildOptimizedContext 的用户级上下文隔离。
+   * 未提供时跳过 buildOptimizedContext 调用（降级）。
+   */
+  readonly userId?: string;
+  /**
+   * 项目根目录（可选，对齐 §13.9.1 多角色评审共识 v3）
+   *
+   * 用于 initializeGraphGlobalContext 注入到 GraphGlobalContext.projectRoot，
+   * 供节点执行器在需要时定位文件读写路径。
+   * 未注入时 projectRoot 字段为 undefined，不影响图执行。
+   */
+  readonly projectRoot?: string;
+  /**
+   * 图调试器（可选，TOP-5）
+   *
+   * 未注入时默认使用 NoOpDebugger，保证零开销和向后兼容。
+   * 注入后 GraphLoopOrchestrator 会在 run() 开始时调用 debugger.reset(runId)，
+   * 并在节点执行、fork/merge、guard、失败等关键路径调用对应 trace 方法。
+   */
+  readonly debugger?: GraphDebuggerProtocol;
   /** 日志记录器（可选，默认使用 console） */
   readonly logger?: Readonly<GraphLogger>;
 }
