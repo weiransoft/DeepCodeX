@@ -44,3 +44,16 @@ export type {
   EagAutonomousStatusRequest,
   EagAutonomousStopRequest,
 } from "./eag-autonomous-command";
+
+// Loop-Graph 融合方案 Phase 5：/eag-graph CLI 命令处理器（值导出，含运行期实现）
+// - EagGraphCommandHandler：命令处理器类，接收 GraphLoopOrchestrator 实例并执行图遍历
+// - extractEagGraphRequestFromPrompt：独立函数，从命令字符串解析参数
+// - EAG_GRAPH_COMMAND_PREFIX：命令前缀常量
+export {
+  EagGraphCommandHandler,
+  extractEagGraphRequestFromPrompt,
+  EAG_GRAPH_COMMAND_PREFIX,
+} from "./eag-graph-command";
+
+// Loop-Graph 融合方案 Phase 5：/eag-graph 命令相关类型（类型导出）
+export type { EagGraphRequest, EagGraphCommandResult } from "./eag-graph-command";

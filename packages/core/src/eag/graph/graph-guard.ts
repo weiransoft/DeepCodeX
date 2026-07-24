@@ -45,6 +45,12 @@ import type {
   NodeFieldContract,
   /** 图级调度动作 */
   GraphSchedulingAction,
+  /** 安全护栏配置（TOP-3） */
+  GraphGuardConfig,
+  /** 安全护栏自定义规则（TOP-3） */
+  GraphGuardCustomRule,
+  /** 安全护栏自定义规则触发阶段（TOP-3） */
+  GraphGuardCustomRulePhase,
 } from "./graph-loop-models";
 import type { GraphGuardProtocol } from "./graph-loop-protocols";
 
@@ -59,6 +65,20 @@ import type { GraphGuardProtocol } from "./graph-loop-protocols";
  * 当 config.timeoutSec > 0 且 result.durationSec > config.timeoutSec * 0.5 时告警。
  */
 const SINGLE_NODE_DURATION_RATIO_THRESHOLD = 0.5;
+
+/**
+ * 默认安全护栏配置（TOP-3）
+ *
+ * 所有内置检查默认开启，保持与 v2.0 行为完全兼容。
+ * 输出契约验证默认 strict（严格校验类型和必填性）。
+ */
+const DEFAULT_GUARD_CONFIG: Readonly<Required<GraphGuardConfig>> = Object.freeze({
+  outputContractValidationLevel: "strict",
+  enableTokenBudgetCheck: true,
+  enableDepthCheck: true,
+  enablePostExecutionDurationCheck: true,
+  customRules: Object.freeze({}),
+});
 
 // ============================================================================
 // GraphGuardImpl 实现类
@@ -93,6 +113,59 @@ const SINGLE_NODE_DURATION_RATIO_THRESHOLD = 0.5;
  * ```
  */
 export class GraphGuardImpl implements GraphGuardProtocol {
+  /** 当前护栏配置（TOP-3，运行时可通过 configure() 更新） */
+  private config: Required<GraphGuardConfig>;
+
+  /** 自定义校验规则注册表（ruleId → { phase, rule }，TOP-3） */
+  private readonly customRules: Map<string, Readonly<{ phase: GraphGuardCustomRulePhase; rule: GraphGuardCustomRule }>>;
+
+  /**
+   * 当前校验的图定义（TOP-3）
+   *
+   * validateGraph 调用时缓存，供 pre/post 阶段自定义规则读取。
+   * 注意：GraphGuardImpl 原设计为无状态单次检查，但自定义规则需要访问图定义，
+   * 因此引入此字段；编排器应保证单实例串行执行图。
+   */
+  private currentGraph?: Readonly<WorkGraph>;
+
+  /**
+   * 构造图级护栏实例
+   *
+   * @param initialConfig 初始护栏配置（缺省字段使用 DEFAULT_GUARD_CONFIG）
+   */
+  constructor(initialConfig?: Readonly<GraphGuardConfig>) {
+    this.config = this.mergeConfig(initialConfig);
+    this.customRules = new Map();
+    this.loadCustomRulesFromConfig(this.config.customRules);
+  }
+
+  /**
+   * 配置护栏行为（TOP-3 安全护栏可配置化）
+   *
+   * 运行时动态更新内置检查开关与自定义规则注册表。
+   * 传入的 config 会覆盖当前配置中的对应字段，未提供字段保持当前值。
+   *
+   * @param config 安全护栏配置
+   */
+  configure(config: Readonly<GraphGuardConfig>): void {
+    this.config = this.mergeConfig(config, this.config);
+    if (config.customRules !== undefined) {
+      this.customRules.clear();
+      this.loadCustomRulesFromConfig(config.customRules);
+    }
+  }
+
+  /**
+   * 注册自定义校验规则（TOP-3 安全护栏可配置化）
+   *
+   * @param ruleId 规则唯一标识（重复注册覆盖旧规则）
+   * @param phase 规则触发阶段
+   * @param rule 自定义校验函数
+   */
+  registerCustomRule(ruleId: string, phase: GraphGuardCustomRulePhase, rule: GraphGuardCustomRule): void {
+    this.customRules.set(ruleId, Object.freeze({ phase, rule }));
+  }
+
   /**
    * 检查图结构完整性（构造时调用一次）
    *
@@ -108,6 +181,9 @@ export class GraphGuardImpl implements GraphGuardProtocol {
    * @returns 校验结果（valid / errors / warnings / isCyclic / unreachableNodes）
    */
   validateGraph(graph: Readonly<WorkGraph>): GraphValidationResult {
+    // 缓存当前图定义，供 pre/post 阶段自定义规则使用（TOP-3）
+    this.currentGraph = graph;
+
     const errors: string[] = [];
     const warnings: string[] = [];
 
@@ -159,6 +235,17 @@ export class GraphGuardImpl implements GraphGuardProtocol {
       warnings.push("图包含环（isCyclic=true），运行时需依赖 GraphRunContext.visited 进行环路检测防止无限遍历");
     }
 
+    // 6. 执行 validate 阶段自定义规则（TOP-3 安全护栏可配置化）
+    for (const [ruleId, registration] of this.customRules.entries()) {
+      if (registration.phase !== "validate") {
+        continue;
+      }
+      const customResult = this.executeCustomRule(ruleId, registration.phase, graph);
+      if (!customResult.pass) {
+        errors.push(`自定义规则 ${ruleId} 校验失败：${customResult.message ?? "未提供原因"}`);
+      }
+    }
+
     return {
       valid: errors.length === 0,
       errors: Object.freeze(errors),
@@ -193,8 +280,12 @@ export class GraphGuardImpl implements GraphGuardProtocol {
       };
     }
 
-    // 2. 检查图级 token 预算（maxTokens > 0 时启用）
-    if (context.config.maxTokens > 0 && context.totalTokensUsed >= context.config.maxTokens) {
+    // 2. 检查图级 token 预算（maxTokens > 0 且 enableTokenBudgetCheck 开启时启用）
+    if (
+      this.config.enableTokenBudgetCheck &&
+      context.config.maxTokens > 0 &&
+      context.totalTokensUsed >= context.config.maxTokens
+    ) {
       return {
         passed: false,
         reason: `图级 token 预算耗尽：totalTokensUsed=${context.totalTokensUsed} >= maxTokens=${context.config.maxTokens}`,
@@ -203,8 +294,8 @@ export class GraphGuardImpl implements GraphGuardProtocol {
       };
     }
 
-    // 3. 检查当前遍历深度（防死循环）
-    if (context.currentDepth >= context.config.maxDepth) {
+    // 3. 检查当前遍历深度（enableDepthCheck 开启时启用，防死循环）
+    if (this.config.enableDepthCheck && context.currentDepth >= context.config.maxDepth) {
       return {
         passed: false,
         reason: `达到最大遍历深度：currentDepth=${context.currentDepth} >= maxDepth=${context.config.maxDepth}`,
@@ -223,7 +314,26 @@ export class GraphGuardImpl implements GraphGuardProtocol {
       };
     }
 
-    // 5. 所有检查通过
+    // 5. 执行 pre 阶段自定义规则（TOP-3 安全护栏可配置化）
+    for (const [ruleId, registration] of this.customRules.entries()) {
+      if (registration.phase !== "pre") {
+        continue;
+      }
+      if (!this.currentGraph) {
+        continue;
+      }
+      const customResult = this.executeCustomRule(ruleId, registration.phase, this.currentGraph, context);
+      if (!customResult.pass) {
+        return {
+          passed: false,
+          reason: `自定义规则 ${ruleId} 前置校验失败：${customResult.message ?? "未提供原因"}`,
+          suggestedAction: "stop_failure" as GraphSchedulingAction,
+          severity: "error",
+        };
+      }
+    }
+
+    // 6. 所有检查通过
     return {
       passed: true,
       reason: `节点 ${node.nodeId} 前置条件检查通过`,
@@ -269,8 +379,8 @@ export class GraphGuardImpl implements GraphGuardProtocol {
       };
     }
 
-    // 3. 节点成功（status=completed）：校验输出契约
-    const contractError = this.validateOutputContract(node, result);
+    // 3. 节点成功（status=completed）：校验输出契约（受 outputContractValidationLevel 控制）
+    const contractError = this.validateOutputContract(node, result, this.config.outputContractValidationLevel);
     if (contractError) {
       return {
         passed: false,
@@ -280,8 +390,8 @@ export class GraphGuardImpl implements GraphGuardProtocol {
       };
     }
 
-    // 4. 检查节点耗时是否异常（timeoutSec > 0 时启用）
-    if (context.config.timeoutSec > 0) {
+    // 4. 检查节点耗时是否异常（enablePostExecutionDurationCheck 开启且 timeoutSec > 0 时启用）
+    if (this.config.enablePostExecutionDurationCheck && context.config.timeoutSec > 0) {
       const durationThreshold = context.config.timeoutSec * SINGLE_NODE_DURATION_RATIO_THRESHOLD;
       if (result.durationSec > durationThreshold) {
         return {
@@ -292,7 +402,26 @@ export class GraphGuardImpl implements GraphGuardProtocol {
       }
     }
 
-    // 5. 所有检查通过
+    // 5. 执行 post 阶段自定义规则（TOP-3 安全护栏可配置化）
+    for (const [ruleId, registration] of this.customRules.entries()) {
+      if (registration.phase !== "post") {
+        continue;
+      }
+      if (!this.currentGraph) {
+        continue;
+      }
+      const customResult = this.executeCustomRule(ruleId, registration.phase, this.currentGraph, context);
+      if (!customResult.pass) {
+        return {
+          passed: false,
+          reason: `自定义规则 ${ruleId} 后置校验失败：${customResult.message ?? "未提供原因"}`,
+          suggestedAction: "stop_failure" as GraphSchedulingAction,
+          severity: "error",
+        };
+      }
+    }
+
+    // 6. 所有检查通过
     return {
       passed: true,
       reason: `节点 ${node.nodeId} 后置条件检查通过`,
@@ -429,28 +558,38 @@ export class GraphGuardImpl implements GraphGuardProtocol {
    * 校验节点输出是否符合 outputContract
    *
    * 校验规则：
-   * - required=true 但字段缺失 → 返回错误信息
-   * - 字段存在时执行类型校验（type !== "any" 时）
+   * - strict 级别：required=true 但字段缺失 → 返回错误信息；字段存在时执行类型校验
+   * - lenient 级别：仅校验字段存在（不校验类型），对齐 GraphGuardConfig.outputContractValidationLevel
    *
    * @param node 节点定义（含 outputContract）
    * @param result 节点执行结果（含 output 数据）
+   * @param validationLevel 验证级别（"strict" 或 "lenient"，默认 strict）
    * @returns 错误信息（null 表示校验通过）
    */
-  private validateOutputContract(node: Readonly<GraphNodeDef>, result: Readonly<GraphNodeResult>): string | null {
+  private validateOutputContract(
+    node: Readonly<GraphNodeDef>,
+    result: Readonly<GraphNodeResult>,
+    validationLevel: "strict" | "lenient" = "strict"
+  ): string | null {
     for (const contract of node.outputContract) {
       const hasField = Object.prototype.hasOwnProperty.call(result.output, contract.name);
       const value = result.output[contract.name];
 
-      // 必填字段缺失
+      // 必填字段缺失（strict / lenient 均检查存在性）
       if (!hasField || value === undefined) {
         if (contract.required) {
           return `必填输出字段 "${contract.name}" 缺失（required=true）`;
         }
-        // 非必填字段缺失：跳过类型校验
+        // 非必填字段缺失：跳过后续校验
         continue;
       }
 
-      // 类型校验（type !== "any" 时）
+      // lenient 级别：仅校验字段存在，不校验类型
+      if (validationLevel === "lenient") {
+        continue;
+      }
+
+      // strict 级别：类型校验（type !== "any" 时）
       if (contract.type !== "any") {
         const typeError = this.checkFieldType(contract.name, value, contract.type);
         if (typeError) {
@@ -496,6 +635,75 @@ export class GraphGuardImpl implements GraphGuardProtocol {
       return `字段 "${fieldName}" 类型不匹配，期望=${expectedType}，实际=${actualType}`;
     }
     return null;
+  }
+
+  /**
+   * 合并护栏配置（TOP-3）
+   *
+   * 将传入配置与基准配置合并，缺省字段使用基准值，保证返回 Required<GraphGuardConfig>。
+   *
+   * @param config 传入配置（可选）
+   * @param base 基准配置（可选，默认 DEFAULT_GUARD_CONFIG）
+   * @returns 合并后的完整配置
+   */
+  private mergeConfig(
+    config?: Readonly<GraphGuardConfig>,
+    base: Readonly<Required<GraphGuardConfig>> = DEFAULT_GUARD_CONFIG
+  ): Required<GraphGuardConfig> {
+    return {
+      outputContractValidationLevel: config?.outputContractValidationLevel ?? base.outputContractValidationLevel,
+      enableTokenBudgetCheck: config?.enableTokenBudgetCheck ?? base.enableTokenBudgetCheck,
+      enableDepthCheck: config?.enableDepthCheck ?? base.enableDepthCheck,
+      enablePostExecutionDurationCheck:
+        config?.enablePostExecutionDurationCheck ?? base.enablePostExecutionDurationCheck,
+      customRules: config?.customRules ?? base.customRules,
+    };
+  }
+
+  /**
+   * 从配置加载自定义规则到内部注册表（TOP-3）
+   *
+   * @param customRules 配置中的自定义规则注册表
+   */
+  private loadCustomRulesFromConfig(
+    customRules: Readonly<Record<string, Readonly<{ phase: GraphGuardCustomRulePhase; rule: GraphGuardCustomRule }>>>
+  ): void {
+    for (const [ruleId, registration] of Object.entries(customRules)) {
+      this.customRules.set(ruleId, Object.freeze(registration));
+    }
+  }
+
+  /**
+   * 执行单个自定义规则（TOP-3）
+   *
+   * 自定义规则执行异常时，返回 pass=false，message 包含异常信息，
+   * 对应建议动作为 stop_failure，severity 为 error。
+   *
+   * @param ruleId 规则 ID
+   * @param phase 规则触发阶段
+   * @param graph 当前图定义
+   * @param context 图运行上下文（pre/post 阶段传入，validate 阶段不传）
+   * @returns 规则执行结果
+   */
+  private executeCustomRule(
+    ruleId: string,
+    phase: GraphGuardCustomRulePhase,
+    graph: Readonly<WorkGraph>,
+    context?: Readonly<GraphRunContext>
+  ): { pass: boolean; message?: string } {
+    const registration = this.customRules.get(ruleId);
+    if (!registration || registration.phase !== phase) {
+      return { pass: true };
+    }
+    try {
+      return registration.rule(graph, context);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      return {
+        pass: false,
+        message: `自定义规则 ${ruleId} 执行异常：${errorMessage}`,
+      };
+    }
   }
 }
 

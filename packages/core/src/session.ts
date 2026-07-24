@@ -161,6 +161,27 @@ import type {
   EagAutonomousStatusRequest,
   EagAutonomousStopRequest,
 } from "./eag/cli";
+// Loop-Graph 融合方案 Phase 5（设计文档 §12.2 / §14）：
+// - GraphLoopOrchestrator：图级编排器，协调 NodeExecutor / EdgeResolver / GraphScheduler / GraphGuard
+// - EagGraphCommandHandler：/eag-graph 命令处理器，构造 WorkGraph + 调用 run() + 渲染 GraphRunReport
+// - extractEagGraphRequestFromPrompt：独立函数，从命令字符串解析参数（用于错误回显）
+// - EagGraphRequest / EagGraphCommandResult：请求与结果类型
+import type { GraphLoopOrchestratorOptions } from "./eag/graph/graph-loop-protocols";
+import { EagGraphCommandHandler, extractEagGraphRequestFromPrompt } from "./eag/cli";
+import type { EagGraphRequest, EagGraphCommandResult } from "./eag/cli";
+// EAG LLM 动态编排建议层（2026-07-24 新增）：
+// - EagDynamicSuggester：根据用户自然语言目标给出全局命令建议
+// - 覆盖 EAG/Team/Rules/slash 全部命令体系，第一阶段只做建议不自动执行
+// - 通过 SessionManagerOptions.eagDynamicSuggester 可选注入，未注入时零回归
+// - 通过 SessionManagerOptions.dynamicCommandDescriptors 注入非 EAG 命令描述符
+//   （team/rules/slash），由 CLI 层构造，避免 core 反向依赖 cli 包
+import type {
+  EagDynamicSuggester,
+  EagDynamicSuggestion,
+  EagCommandKind,
+  EagClarificationOption,
+  DynamicCommandDescriptor,
+} from "./eag/dynamic";
 
 export type { PermissionScope } from "./settings";
 export type {
@@ -617,6 +638,22 @@ type SessionManagerOptions = {
    */
   autonomousOrchestrator?: AutonomousOrchestrator;
   /**
+   * Loop-Graph 融合方案 Phase 5：图级编排器（可选注入，§12.2 / §14 Phase 5）
+   *
+   * 未注入时 `/eag-graph` 命令不可用，主对话循环行为完全不变（向后兼容）。
+   * 注入后，在主对话循环检测到 `/eag-graph` 命令时外挂调用 handleEagGraphCommand，
+   * 路由到 GraphLoopOrchestrator.run() 执行图遍历（DAG 拓扑 + 节点内 Loop）。
+   *
+   * 设计决策（对齐 §5.2 N-M-1 修复 + Karpathy Simplicity First）：
+   * - 调用方负责在注入前完整装配 GraphLoopOrchestratorOptions（nodeExecutor /
+   *   edgeResolver / graphScheduler / graphGuard / predicateRegistry / experienceStore 全部依赖）
+   * - session.ts 不负责构造这些依赖（避免每次命令重复构造，且与
+   *   autonomousOrchestrator / devopsOrchestrator 同构）
+   *
+   * 不可变优先（§5.12.4 G-A6d）：构造后字段不可变，循环内不可被 LLM 修改。
+   */
+  graphLoopOrchestratorOptions?: Readonly<GraphLoopOrchestratorOptions>;
+  /**
    * EAG-P3 批次 10：RunState 持久化存储（可选注入，§4.18.3）
    *
    * 未注入时 `/eag-run` `/eag-resume` `/eag-status` 三命令不可用，向后兼容。
@@ -657,6 +694,30 @@ type SessionManagerOptions = {
    * 用于单元测试中模拟命令解析行为（不使用 mock 框架，符合用户规则 P-5）。
    */
   eagCommandParser?: EagCommandParser;
+  /**
+   * EAG LLM 动态编排建议层（可选注入，2026-07-24 新增）
+   *
+   * 未注入时自然语言输入直接进入 LLM 主对话，行为完全不变（向后兼容，零回归）。
+   * 注入后，当用户输入不是显式 /eag-xxx 命令时，调用 EagDynamicSuggester.suggest()
+   * 判断任务粒度并给出建议：
+   *   - direct_chat：进入 LLM 主对话
+   *   - suggest_command / suggest_autonomous / suggest_graph：通过 assistant message 展示建议
+   *   - ask_clarification：通过 AskUserQuestion 向用户展示选项，确认后再 refine 建议
+   *
+   * 第一阶段约束：只做建议，不自动执行任何命令，不自动生成 WorkGraph，不注册新工具。
+   */
+  eagDynamicSuggester?: EagDynamicSuggester;
+  /**
+   * 外部命令描述符注入（可选，2026-07-24 v1.4 新增）
+   *
+   * 由 CLI 层构造，包含 team/rules/slash 等非 EAG 命令的描述符。
+   * session.ts 在构建建议层上下文时，将这些描述符与 EAG 命令描述符合并，
+   * 使 LLM 能建议全部命令体系的命令。
+   *
+   * 设计原因：避免 core 包反向依赖 cli 包（cli 包依赖 core，不能反向）。
+   * 未注入时，建议层只能看到 EAG 命令（向后兼容）。
+   */
+  dynamicCommandDescriptors?: ReadonlyArray<DynamicCommandDescriptor>;
 };
 
 export type LlmStreamProgress = {
@@ -667,6 +728,28 @@ export type LlmStreamProgress = {
   formattedTokens: string;
   phase: "start" | "update" | "end";
 };
+
+/**
+ * EAG 动态建议层待澄清状态
+ *
+ * 当 LLM 返回 ask_clarification 时，SessionManager 将问题与选项暂存，
+ * 等待用户下一轮回复后解析答案并回注到 suggester 进行 refine。
+ */
+type EagClarificationPending = {
+  /** 澄清问题文本 */
+  readonly question: string;
+  /** 选项清单 */
+  readonly options: ReadonlyArray<EagClarificationOption>;
+  /** 是否支持多选 */
+  readonly multiSelect: boolean;
+  /** 触发本轮澄清的原始用户目标 */
+  readonly originalGoal: string;
+  /** 当前澄清轮次（从 1 开始，最多 3 轮） */
+  readonly round: number;
+};
+
+/** 最大澄清轮次，防止无限澄清循环 */
+const MAX_EAG_CLARIFICATION_ROUNDS = 3;
 
 export class SessionManager {
   private readonly projectRoot: string;
@@ -719,11 +802,30 @@ export class SessionManager {
   //   调用方在 SessionManagerOptions.autonomousOrchestrator 中注入完整装配的 AutonomousOrchestrator 实例
   //   （loopExecutor / runStateStore / notesMemory / guardChain / smartConfirmation 全部依赖）
   private readonly autonomousOrchestrator?: AutonomousOrchestrator;
+  // Loop-Graph 融合方案 Phase 5 外挂字段（可选注入，未注入时 /eag-graph 命令不可用，§12.2 / §14 Phase 5）
+  // - graphLoopOrchestratorOptions：未注入时 /eag-graph 命令不可用
+  //   调用方在 SessionManagerOptions.graphLoopOrchestratorOptions 中注入完整装配的 GraphLoopOrchestratorOptions
+  //   （nodeExecutor / edgeResolver / graphScheduler / graphGuard / predicateRegistry / experienceStore 全部依赖）
+  // TOP-1 修订：session.ts 不再持有 GraphLoopOrchestrator 实例，改为注入构造选项，
+  // 由 EagGraphCommandHandler 内部通过 GraphLifecycleManager 统一初始化与执行。
+  private readonly graphLoopOrchestratorOptions?: Readonly<GraphLoopOrchestratorOptions>;
   // EAG-P3 批次 11 S3：CLI 命令解析器（§5 S3 改进方案 D-S3-4）
   // - 默认 new EagCommandParser()，保证向后兼容（未注入时主循环行为不变）
   // - 负责判定 6 个 EAG 命令字符串并从 messageParams 提取预装配的请求对象
   // - 替代原 session.ts 中的 6 个 isEagXxxPrompt + 6 个 extractXxxRequest 私有方法
   private readonly eagCommandParser: EagCommandParser;
+  // EAG LLM 动态编排建议层（2026-07-24 新增）
+  // - 可选注入，未注入时自然语言输入直接进入 LLM 主对话（零回归）
+  // - 负责在显式命令未命中时，根据用户目标给出全局命令建议或要求澄清
+  private readonly eagDynamicSuggester?: EagDynamicSuggester;
+  // 外部命令描述符（team/rules/slash，由 CLI 层注入）
+  // - 与 EAG 命令描述符合并后供建议层使用
+  // - 未注入时建议层只能看到 EAG 命令（向后兼容）
+  private readonly dynamicCommandDescriptors?: ReadonlyArray<DynamicCommandDescriptor>;
+  // EAG 动态建议层待澄清状态（内存级，key = sessionId）
+  // - 当 LLM 返回 ask_clarification 时写入
+  // - 用户下一轮回复命中时解析答案并回注 clarification，随后清除
+  private readonly pendingEagClarifications = new Map<string, EagClarificationPending>();
 
   constructor(options: SessionManagerOptions) {
     this.projectRoot = options.projectRoot;
@@ -765,8 +867,17 @@ export class SessionManager {
     // 调用方负责在注入前完整装配 AutonomousOrchestratorOptions（loopExecutor / runStateStore /
     // notesMemory / guardChain / smartConfirmation），session.ts 不负责构造依赖
     this.autonomousOrchestrator = options.autonomousOrchestrator;
+    // Loop-Graph 融合方案 Phase 5 外挂字段赋值（可选注入，未注入时 /eag-graph 命令不可用）
+    // 调用方负责在注入前完整装配 GraphLoopOrchestratorOptions（nodeExecutor / edgeResolver /
+    // graphScheduler / graphGuard / predicateRegistry / experienceStore），session.ts 不负责构造依赖
+    // TOP-1 修订：保存 options，由 EagGraphCommandHandler 内部创建 GraphLifecycleManager 并初始化编排器
+    this.graphLoopOrchestratorOptions = options.graphLoopOrchestratorOptions;
     // EAG-P3 批次 11 S3：CLI 命令解析器赋值（默认 new EagCommandParser()，向后兼容）
     this.eagCommandParser = options.eagCommandParser ?? new EagCommandParser();
+    // EAG LLM 动态编排建议层赋值（可选注入，未注入时保持 undefined）
+    this.eagDynamicSuggester = options.eagDynamicSuggester;
+    // 外部命令描述符赋值（可选注入，未注入时保持 undefined，建议层只能看到 EAG 命令）
+    this.dynamicCommandDescriptors = options.dynamicCommandDescriptors;
   }
 
   /**
@@ -1954,11 +2065,33 @@ ${agentInstructions}
           // 前缀匹配（优先于 /eag-autonomous）识别后从命令字符串解析 runId
           await this.handleEagAutonomousStopCommand(sessionId, userPrompt, eagCommand.payload, controller);
           return;
+        case "eag-graph":
+          // Loop-Graph 融合方案 Phase 5（设计文档 §12.2 / §14）：/eag-graph 命令分发
+          // payload 类型为 EagGraphRequest | null，由 EagCommandParser.parse() 通过
+          // 前缀匹配识别后从 userPrompt.messageParams.graphRequest 提取（D-S3-7 注入模式）
+          // 或从命令字符串内联参数解析（extractEagGraphRequestFromPrompt）
+          await this.handleEagGraphCommand(sessionId, userPrompt, eagCommand.payload, controller);
+          return;
         default:
           // 理论不可达（eagCommand.kind !== "unknown" 已过滤兜底分支）
           // 防御性编程：未知 kind 不做处理，落入下方非 EAG 流程
           break;
       }
+    }
+
+    // EAG LLM 动态编排建议层（2026-07-24 新增）
+    // 仅当显式命令未命中、建议层已注入、用户输入非空且非 /continue 时触发
+    // 第一阶段只做建议，不自动执行任何 EAG 命令
+    if (
+      this.eagDynamicSuggester &&
+      this.eagDynamicSuggester.isEnabled() &&
+      typeof userPrompt.text === "string" &&
+      userPrompt.text.trim().length > 0 &&
+      !this.isContinuePrompt(userPrompt)
+    ) {
+      await this.handleEagDynamicSuggestion(sessionId, userPrompt, controller);
+      // handleEagDynamicSuggestion 内部已决定返回或继续主对话
+      return;
     }
 
     // EAG-P3 批次 10：候选规则检测 Hook（§4.18.4 detectRuleCandidateHook）
@@ -2010,6 +2143,348 @@ ${agentInstructions}
       (!userPrompt.imageUrls || userPrompt.imageUrls.length === 0) &&
       (!userPrompt.skills || userPrompt.skills.length === 0)
     );
+  }
+
+  /**
+   * EAG LLM 动态编排建议层入口（2026-07-24 新增）
+   *
+   * 在显式 EAG 命令未命中时，调用 EagDynamicSuggester 判断任务粒度并给出建议。
+   * 第一阶段只做建议，不自动执行任何 EAG 命令。
+   *
+   * 算法：
+   * 1. 记录用户输入到消息历史。
+   * 2. 若存在待澄清问题，解析用户回复为选项值数组（clarification）。
+   * 3. 调用 suggester.suggest() 获取建议（携带 clarification 时以原始目标重新 refine）。
+   * 4. ask_clarification：展示单选/多选问题与选项，并记录 pending 状态等待下一轮回复。
+   * 5. suggest_*：通过 onAssistantMessage 展示建议文本。
+   * 6. direct_chat：落入下方 LLM 主对话（追加用户消息后返回 false，由调用方继续）。
+   *
+   * @param sessionId 会话 ID
+   * @param userPrompt 用户输入
+   * @param controller 中断控制器
+   * @returns 是否已处理（true 表示已发送建议并应结束当前 turn，false 表示应继续主对话）
+   */
+  private async handleEagDynamicSuggestion(
+    sessionId: string,
+    userPrompt: UserPromptContent,
+    controller?: AbortController
+  ): Promise<boolean> {
+    const signal = controller?.signal;
+    this.throwIfAborted(signal);
+
+    // 步骤 1：记录用户输入到消息历史
+    const userMessage = this.buildUserMessage(sessionId, userPrompt);
+    this.appendSessionMessage(sessionId, userMessage);
+
+    try {
+      // 步骤 2：检测是否存在待澄清问题
+      const pending = this.pendingEagClarifications.get(sessionId);
+      let goal = userPrompt.text ?? "";
+      let clarification: ReadonlyArray<string> | undefined;
+
+      if (pending && pending.round > 0) {
+        const answers = this.parseClarificationAnswer(goal, pending);
+        if (answers.length > 0) {
+          clarification = Object.freeze([...answers]);
+          goal = pending.originalGoal;
+        }
+        // 答案无效时继续以当前输入作为目标，让 LLM 自行处理或再次澄清
+      }
+
+      // 步骤 3：调用建议器（携带 clarification 时即为 refine 流程）
+      // 传入合并后的全部命令描述符（EAG + team/rules/slash），使 LLM 能建议全部命令体系
+      const suggestion = await this.eagDynamicSuggester!.suggest({
+        sessionId,
+        projectRoot: this.projectRoot,
+        goal,
+        recentMessages: this.getRecentSessionMessages(sessionId, 10),
+        availableCommands: this.listAvailableCommands(),
+        clarification,
+      });
+
+      // 无论新建议是什么，先清除旧的 pending 状态（避免重复命中）
+      this.pendingEagClarifications.delete(sessionId);
+
+      // 步骤 4：direct_chat 建议 → 继续 LLM 主对话
+      if (suggestion.type === "direct_chat") {
+        return false;
+      }
+
+      // 步骤 5：ask_clarification → 展示单选/多选问题与选项，并记录 pending 状态
+      if (suggestion.type === "ask_clarification") {
+        const nextRound = pending ? pending.round + 1 : 1;
+        if (nextRound > MAX_EAG_CLARIFICATION_ROUNDS) {
+          // 超过最大澄清轮次，安全降级，避免无限循环
+          const fallbackMessage =
+            "已经澄清了多次仍无法确定最佳方案，我先按当前理解给出建议。你可以直接告诉我更具体的需求，或运行对应的 /eag-xxx 命令。";
+          const assistantMessage = this.buildAssistantMessage(sessionId, fallbackMessage, null);
+          this.onAssistantMessage(assistantMessage, false);
+          this.updateSessionEntry(sessionId, (entry) => ({
+            ...entry,
+            status: "completed",
+            updateTime: new Date().toISOString(),
+          }));
+          return true;
+        }
+
+        this.pendingEagClarifications.set(sessionId, {
+          question: suggestion.question,
+          options: suggestion.options,
+          multiSelect: suggestion.multiSelect,
+          originalGoal: goal,
+          round: nextRound,
+        });
+
+        const clarificationMessage = this.buildClarificationMessage(suggestion);
+        const assistantMessage = this.buildAssistantMessage(sessionId, clarificationMessage, null);
+        this.onAssistantMessage(assistantMessage, false);
+        this.updateSessionEntry(sessionId, (entry) => ({
+          ...entry,
+          status: "completed",
+          updateTime: new Date().toISOString(),
+        }));
+        return true;
+      }
+
+      // 步骤 6：suggest_command / suggest_autonomous / suggest_graph → 展示建议
+      const assistantMessage = this.buildAssistantMessage(sessionId, suggestion.messageToUser, null);
+      this.onAssistantMessage(assistantMessage, false);
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "completed",
+        updateTime: new Date().toISOString(),
+      }));
+      return true;
+    } catch (error) {
+      // 失败安全：建议层异常时不阻塞主对话
+      this.pendingEagClarifications.delete(sessionId);
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error(`handleEagDynamicSuggestion 异常：${reason}`);
+      return false;
+    }
+  }
+
+  /**
+   * 构建澄清问题的展示文本
+   *
+   * 在 CLI/对话场景下，通过 assistant message 向用户展示问题与选项。
+   * 调用方可根据此文本让用户回复选项序号或 value；支持单选与多选。
+   *
+   * @param suggestion ask_clarification 建议
+   * @returns 展示给用户的 Markdown 文本
+   */
+  private buildClarificationMessage(suggestion: Extract<EagDynamicSuggestion, { type: "ask_clarification" }>): string {
+    const lines: string[] = [suggestion.question, ""];
+    suggestion.options.forEach((opt, index) => {
+      lines.push(`${index + 1}. **${opt.label}**${opt.description ? ` — ${opt.description}` : ""}`);
+    });
+    lines.push("");
+    lines.push(suggestion.multiSelect ? "可多选，回复选项序号（如：1,3）或选项值" : "请回复选项序号（如：1）或选项值");
+    return lines.join("\n");
+  }
+
+  /**
+   * 解析用户对澄清问题的回复
+   *
+   * 支持以下输入格式：
+   * - 单选："1"、"OAuth"、"1. OAuth"
+   * - 多选："1,3"、"1 3"、"OAuth, JWT"
+   * - 混合："1, JWT"
+   *
+   * 解析规则：
+   * 1. 先按逗号/空格/分号/顿号分割输入。
+   * 2. 若片段为纯数字且落在选项序号范围内，映射为对应 option.value。
+   * 3. 否则尝试直接与某个 option.value 或 option.label 匹配（大小写不敏感）。
+   * 4. 单选时只取第一个有效选项；多选时收集所有有效选项并去重。
+   *
+   * @param text 用户回复文本
+   * @param pending 待澄清状态
+   * @returns 选中的 option.value 数组
+   */
+  private parseClarificationAnswer(text: string, pending: Readonly<EagClarificationPending>): ReadonlyArray<string> {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return Object.freeze([]);
+    }
+
+    // 按常见分隔符拆分：逗号、空格、分号、顿号、竖线
+    const segments = trimmed
+      .split(/[,，;；、|\s]+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+
+    const selected = new Set<string>();
+    for (const segment of segments) {
+      // 去除可能的前缀序号标记，如 "1."、"1)"
+      const stripped = segment.replace(/^\d+[..)]\s*/, "");
+      const candidate = stripped || segment;
+      const lower = candidate.toLowerCase();
+
+      // 尝试按序号匹配
+      const indexMatch = /^\d+$/.test(candidate) ? parseInt(candidate, 10) - 1 : -1;
+      if (indexMatch >= 0 && indexMatch < pending.options.length) {
+        selected.add(pending.options[indexMatch].value);
+        continue;
+      }
+
+      // 尝试按 value 或 label 匹配（大小写不敏感）
+      const matched = pending.options.find(
+        (opt) => opt.value.toLowerCase() === lower || opt.label.toLowerCase() === lower
+      );
+      if (matched) {
+        selected.add(matched.value);
+      }
+    }
+
+    const result = Array.from(selected);
+    if (!pending.multiSelect && result.length > 1) {
+      // 单选场景下只保留第一个有效选择
+      return Object.freeze([result[0]]);
+    }
+    return Object.freeze(result);
+  }
+
+  /**
+   * 获取当前环境实际支持的 EAG 命令清单
+   *
+   * 根据已注入的 orchestrator 返回可用命令列表，用于建议层 prompt。
+   *
+   * @returns EagCommandKind 数组
+   */
+  private listAvailableEagCommands(): EagCommandKind[] {
+    const commands: EagCommandKind[] = [];
+    if (this.designOrchestrator) commands.push("eag-design");
+    if (this.codingOrchestrator) commands.push("eag-build");
+    if (this.testingOrchestrator) commands.push("eag-test");
+    if (this.runStateStore) {
+      commands.push("eag-run", "eag-resume", "eag-status");
+    }
+    if (this.devopsOrchestrator) commands.push("eag-deploy");
+    if (this.autonomousOrchestrator) {
+      commands.push("eag-autonomous", "eag-autonomous-status", "eag-autonomous-stop");
+    }
+    if (this.graphLoopOrchestratorOptions) commands.push("eag-graph");
+    return commands;
+  }
+
+  /**
+   * EAG 命令描述符映射表
+   *
+   * 将 EagCommandKind 映射为 DynamicCommandDescriptor，供 listAvailableCommands() 使用。
+   * 描述文本注入 LLM prompt，帮助 LLM 理解每个 EAG 命令的用途和前置条件。
+   */
+  private static readonly EAG_COMMAND_DESCRIPTOR_MAP: Readonly<Record<EagCommandKind, DynamicCommandDescriptor>> =
+    Object.freeze({
+      "eag-build": Object.freeze({
+        category: "eag",
+        id: "eag-build",
+        name: "/eag-build",
+        description: "编码实现阶段。需要已提供 spec.md / plan.md / tasks.md 或任务分解结果，不建议凭空使用。",
+      }),
+      "eag-design": Object.freeze({
+        category: "eag",
+        id: "eag-design",
+        name: "/eag-design",
+        description: "设计阶段。接受原始需求描述，生成架构/领域模型/任务分解。",
+      }),
+      "eag-test": Object.freeze({
+        category: "eag",
+        id: "eag-test",
+        name: "/eag-test",
+        description: "测试阶段。需要已提供被测代码或测试计划。",
+      }),
+      "eag-run": Object.freeze({
+        category: "eag",
+        id: "eag-run",
+        name: "/eag-run",
+        description: "继续执行一次已存在的 run。",
+      }),
+      "eag-resume": Object.freeze({
+        category: "eag",
+        id: "eag-resume",
+        name: "/eag-resume",
+        description: "恢复一个已暂停/中断的 run。",
+      }),
+      "eag-status": Object.freeze({
+        category: "eag",
+        id: "eag-status",
+        name: "/eag-status",
+        description: "查询当前或指定 run 的状态。",
+      }),
+      "eag-deploy": Object.freeze({
+        category: "eag",
+        id: "eag-deploy",
+        name: "/eag-deploy",
+        description: "部署阶段。需要已完成构建产物和部署配置。",
+      }),
+      "eag-autonomous": Object.freeze({
+        category: "eag",
+        id: "eag-autonomous",
+        name: "/eag-autonomous",
+        description: "多阶段自动循环（plan → dev → verify → fix）。适合需求模糊、需要自动设计并实现的功能。",
+      }),
+      "eag-autonomous-status": Object.freeze({
+        category: "eag",
+        id: "eag-autonomous-status",
+        name: "/eag-autonomous-status",
+        description: "查询无人值守 run 的状态。",
+      }),
+      "eag-autonomous-stop": Object.freeze({
+        category: "eag",
+        id: "eag-autonomous-stop",
+        name: "/eag-autonomous-stop",
+        description: "中止或回滚无人值守 run。",
+      }),
+      "eag-graph": Object.freeze({
+        category: "eag",
+        id: "eag-graph",
+        name: "/eag-graph",
+        description: "显式图编排入口。需要用户已提供图定义 JSON 文件，或明确需要 DAG、并行分支、条件路由。",
+      }),
+    } as const);
+
+  /**
+   * 获取全部可用命令描述符（EAG + team/rules/slash）
+   *
+   * 将 listAvailableEagCommands() 返回的 EAG 命令转换为 DynamicCommandDescriptor，
+   * 再与外部注入的 dynamicCommandDescriptors（team/rules/slash）合并，
+   * 供建议层 prompt 使用，使 LLM 能建议全部命令体系的命令。
+   *
+   * @returns 合并后的 DynamicCommandDescriptor 数组
+   */
+  private listAvailableCommands(): ReadonlyArray<DynamicCommandDescriptor> {
+    // 步骤 1：将可用的 EAG 命令转换为描述符
+    const eagCommands = this.listAvailableEagCommands();
+    const eagDescriptors: DynamicCommandDescriptor[] = eagCommands.map(
+      (kind) => SessionManager.EAG_COMMAND_DESCRIPTOR_MAP[kind]
+    );
+
+    // 步骤 2：合并外部注入的描述符（team/rules/slash）
+    const externalDescriptors = this.dynamicCommandDescriptors ?? [];
+
+    // 步骤 3：合并并返回（EAG 命令优先，外部命令在后）
+    return Object.freeze([...eagDescriptors, ...externalDescriptors]);
+  }
+
+  /**
+   * 获取会话最近 N 条用户/助手消息
+   *
+   * 用于 EAG 动态建议层 prompt 注入，仅保留 role 与 content 两个字段。
+   *
+   * @param sessionId 会话 ID
+   * @param limit 最大返回条数
+   * @returns 最近消息数组（role/content 形态）
+   */
+  private getRecentSessionMessages(
+    sessionId: string,
+    limit: number
+  ): Array<{ role: "user" | "assistant"; content: string }> {
+    return this.listSessionMessages(sessionId)
+      .filter((message): message is SessionMessage & { role: "user" | "assistant" } =>
+        ["user", "assistant"].includes(message.role)
+      )
+      .slice(-limit)
+      .map((message) => ({ role: message.role, content: message.content ?? "" }));
   }
 
   /**
@@ -3870,6 +4345,189 @@ ${agentInstructions}
       ...entry,
       status: result.success ? "completed" : "failed",
       failReason: result.success ? null : `Autonomous Stop 失败：${result.report}`,
+      updateTime: new Date().toISOString(),
+    }));
+  }
+
+  // ============================================================================
+  // Loop-Graph 融合方案 Phase 5（设计文档 §12.2 / §14）：
+  // /eag-graph 命令处理器
+  // ============================================================================
+
+  /**
+   * 处理 /eag-graph 命令（Loop-Graph 融合方案 Phase 5）
+   *
+   * 职责（对齐设计文档 §12.2 + §14 Phase 5 + handleEagAutonomousCommand 同构模式）：
+   * 1. 记录用户输入到消息历史（保持会话上下文完整）
+   * 2. 更新 session 状态为 processing
+   * 3. 校验外挂依赖 graphLoopOrchestratorOptions（未注入时 fail-closed 通知用户）
+   * 4. 校验 EagGraphRequest payload（null 时从命令字符串重新解析以获取错误详情）
+   * 5. 创建 EagGraphCommandHandler 实例并调用 execute(request, projectRoot)
+   * 6. 通过 onAssistantMessage 渲染 markdownReport（成功 / 失败两条路径）
+   * 7. 更新 session 状态为 completed / failed（依据 result.success）
+   *
+   * 设计决策（对齐 §5.2 N-M-1 修复 + Karpathy Simplicity First + TOP-1）：
+   * - 不在方法内部 new GraphLoopOrchestrator（避免每次命令重复构造）
+   * - GraphLoopOrchestrator 的全部依赖（nodeExecutor / edgeResolver / graphScheduler /
+   *   graphGuard / predicateRegistry / experienceStore）由调用方在
+   *   SessionManagerOptions.graphLoopOrchestratorOptions 中完整装配后注入
+   * - EagGraphCommandHandler 内部通过 GraphLifecycleManager 统一初始化、启动、管理生命周期
+   * - session.ts 仅负责校验注入 + 装配请求 + 调用 handler.execute() + 渲染结果
+   *
+   * 错误处理策略（对齐 handleEagAutonomousCommand 模式）：
+   * - 依赖未注入：fail-closed，session 标记 failed
+   * - payload null：尝试重新解析命令字符串获取错误详情，fail-closed
+   * - handler.execute() 抛异常：捕获异常，session 标记 failed
+   * - abort 信号：在装配前 / handler 调用前 / handler 调用后三个检查点响应中断
+   *
+   * 不可变优先（§5.12.4 G-A6d）：
+   * - EagGraphRequest 由 EagCommandParser.parse() 冻结后传入
+   * - EagGraphCommandResult 由 handler.execute() 内部冻结后返回
+   * - 不修改任何外部状态，所有副作用通过 onAssistantMessage / updateSessionEntry 路由
+   *
+   * @param sessionId 会话 ID
+   * @param userPrompt 用户输入（仅用于写入用户消息历史，不参与编排）
+   * @param request 预装配的 EagGraphRequest（由 EagCommandParser.parse() 提取，可空）
+   * @param controller 中断控制器（用于响应 abort 信号）
+   */
+  private async handleEagGraphCommand(
+    sessionId: string,
+    userPrompt: UserPromptContent,
+    request: EagGraphRequest | null,
+    controller?: AbortController
+  ): Promise<void> {
+    const signal = controller?.signal;
+    this.throwIfAborted(signal);
+
+    const now = new Date().toISOString();
+    // 步骤 1：记录用户输入到消息历史（保持会话上下文完整）
+    const userMessage = this.buildUserMessage(sessionId, userPrompt);
+    this.appendSessionMessage(sessionId, userMessage);
+
+    // 步骤 2：更新 session 状态为 processing
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: "processing",
+      failReason: null,
+      updateTime: now,
+    }));
+
+    // 步骤 3：校验外挂依赖 graphLoopOrchestratorOptions（未注入时 fail-closed）
+    if (!this.graphLoopOrchestratorOptions) {
+      const errMsg =
+        "GraphLoopOrchestratorOptions 未注入：请在 SessionManagerOptions.graphLoopOrchestratorOptions 配置后重启（参考 §12.2 / §14 Phase 5 + TOP-1）";
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: errMsg,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG Graph Loop] ${errMsg}`, null), false);
+      return;
+    }
+
+    // 步骤 4：校验 EagGraphRequest payload
+    // EagCommandParser.parse() 已通过两种路径提取 payload：
+    //   路径 A：从 userPrompt.messageParams.graphRequest 提取（UI 表单模式）
+    //   路径 B：从命令字符串内联参数解析（CLI 模式，extractEagGraphRequestFromPrompt）
+    // payload 为 null 时表示两种路径均失败：
+    //   - 命令字符串前缀匹配成功（/eag-graph）
+    //   - 但参数解析抛异常（如 --graph-file 与 --inline-graph 互斥冲突 / --max-depth 取值非法）
+    // 此时重新调用 extractEagGraphRequestFromPrompt(userPrompt.text) 以获取具体错误信息
+    let validatedRequest: EagGraphRequest;
+    if (request) {
+      validatedRequest = request;
+    } else {
+      // payload null：尝试从命令字符串重新解析以获取错误详情
+      // 注：进入此分支前置条件为 EagCommandParser.parse() 返回 kind="eag-graph"，
+      // 即 userPrompt.text 已通过 typeof string 校验。
+      let parseErrorMsg: string;
+      try {
+        // 重新解析以触发异常并获取错误详情
+        extractEagGraphRequestFromPrompt(String(userPrompt.text ?? ""));
+        // 理论不可达：若 parser 已返回 null，重新解析应该抛异常
+        // 此处兜底：若未抛异常，使用通用错误消息
+        parseErrorMsg =
+          "EagGraphRequest 解析返回 null 但未抛异常（理论不可达，请检查 EagCommandParser.extractEagGraphRequest 实现）";
+      } catch (parseErr) {
+        parseErrorMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+      }
+      const errMsg = `EagGraphRequest 解析失败：${parseErrorMsg}（期望格式：/eag-graph --graph-file <路径> 或 /eag-graph --inline-graph <JSON> [--enable-experience-recall] [--max-depth 50]）`;
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: errMsg,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(this.buildAssistantMessage(sessionId, `[EAG Graph Loop] ${errMsg}`, null), false);
+      return;
+    }
+
+    // 步骤 5：创建 EagGraphCommandHandler 实例并调用 execute()
+    // 设计说明：handler 内部完成 WorkGraph 构造 + GraphLifecycleManager 生命周期管理 +
+    // Markdown 报告渲染 + 异常兜底，session.ts 仅需调用 execute() 即可
+    // 装配前再次检查 abort 信号（对齐 handleEagAutonomousCommand 的设计）
+    this.throwIfAborted(signal);
+    const handler = new EagGraphCommandHandler(this.graphLoopOrchestratorOptions);
+    let result: Readonly<EagGraphCommandResult>;
+    try {
+      result = await handler.execute(validatedRequest, this.projectRoot);
+    } catch (e) {
+      // 异常兜底：handler.execute() 内部已 try/catch orchestrator.run()，
+      // 此处捕获的是 handler 自身的异常（如 validateRequest 抛错、loadGraphJson 异常）
+      const isAborted = this.isAbortLikeError(e) || signal?.aborted === true;
+      const errMsg = e instanceof Error ? e.message : String(e);
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: isAborted ? `Graph Loop 被用户中断：${errMsg}` : `Graph Loop 执行异常：${errMsg}`,
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(
+        this.buildAssistantMessage(
+          sessionId,
+          isAborted
+            ? `[EAG Graph Loop] 编排被用户中断：${errMsg}`
+            : `[EAG Graph Loop] 编排异常：${errMsg}\n请检查 GraphLoopOrchestrator 的 5 个核心依赖（nodeExecutor / edgeResolver / graphScheduler / graphGuard / predicateRegistry）配置是否正确，以及图定义 JSON 格式是否合法。`,
+          null
+        ),
+        false
+      );
+      return;
+    }
+
+    // handler.execute() 完成后再次检查 abort 信号
+    // 避免 handler 完成后用户已 abort 还要继续渲染结果
+    if (signal?.aborted) {
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: "Graph Loop 被用户中断（编排完成后）",
+        updateTime: new Date().toISOString(),
+      }));
+      this.onAssistantMessage(
+        this.buildAssistantMessage(
+          sessionId,
+          `[EAG Graph Loop] 编排已完成但被用户中断，结果未渲染。success: ${result.success}`,
+          null
+        ),
+        false
+      );
+      return;
+    }
+
+    // 步骤 6：渲染结果摘要
+    // result.markdownReport 已由 handler.formatSuccessReport / formatErrorReport 装配，
+    // session.ts 直接通过 onAssistantMessage 推送给用户
+    this.onAssistantMessage(this.buildAssistantMessage(sessionId, result.markdownReport, null), false);
+
+    // 步骤 7：更新 session 状态（依据 result.success）
+    // - success=true：session 标记 completed（包括 finalStatus=completed / aborted）
+    // - success=false：session 标记 failed，failReason 取 errorMessage
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: result.success ? "completed" : "failed",
+      failReason: result.success ? null : `Graph Loop 终止：${result.errorMessage}`,
       updateTime: new Date().toISOString(),
     }));
   }

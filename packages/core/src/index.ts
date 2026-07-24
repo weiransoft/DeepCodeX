@@ -772,6 +772,31 @@ export { GateG3Checker } from "./eag/gate";
 export { GateOrchestrator, GateOrchestratorError } from "./eag/gate";
 
 // ============================================================================
+// EAG LLM 动态编排建议层（2026-07-24 新增）
+//
+// 根据用户自然语言目标，动态识别任务粒度并给出全局命令建议。
+// 覆盖 EAG/Team/Rules/slash 全部命令体系，第一阶段只做建议不自动执行。
+//
+// 公开 API：
+// - 类：EagDynamicSuggester
+// - 类型：DynamicCommandCategory / DynamicCommandDescriptor / EagCommandKind /
+//         EagClarificationOption / EagDynamicSuggestion / EagDynamicSuggesterOptions /
+//         EagDynamicContext / EagSuggestionPromptContext
+// - 函数：createEagDynamicSuggester / buildEagSuggestionPrompt
+export { EagDynamicSuggester, createEagDynamicSuggester } from "./eag/dynamic/eag-dynamic-suggester";
+export type {
+  DynamicCommandCategory,
+  DynamicCommandDescriptor,
+  EagCommandKind,
+  EagClarificationOption,
+  EagDynamicSuggestion,
+  EagDynamicSuggesterOptions,
+  EagDynamicContext,
+} from "./eag/dynamic/eag-dynamic-suggester";
+export { buildEagSuggestionPrompt } from "./eag/dynamic/prompts/eag-suggestion-prompt";
+export type { EagSuggestionPromptContext } from "./eag/dynamic/prompts/eag-suggestion-prompt";
+
+// ============================================================================
 // V2 上下文记忆体系（v2.8，V2-P0a/P0b/P1/P2/P3 五阶段全部完成）
 //
 // 架构师审查建议（2026-07-21）：

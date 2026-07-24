@@ -912,8 +912,8 @@ test("TC-CLI-04. /eag-autonomous-stop 缺少 runId 抛错", () => {
   assert.throws(() => extractEagAutonomousStopRequestFromPrompt("/eag-autonomous-stop"), /缺少必填参数 <run-id>/);
 });
 
-test("TC-CLI-05. EAG_COMMAND_STRINGS 包含 10 个命令", () => {
-  // 验证：EAG_COMMAND_STRINGS 常量包含 10 个 EAG 命令字符串
+test("TC-CLI-05. EAG_COMMAND_STRINGS 包含 11 个命令", () => {
+  // 验证：EAG_COMMAND_STRINGS 常量包含 11 个 EAG 命令字符串
   assert.equal(EAG_COMMAND_STRINGS.EAG_BUILD, "/eag-build");
   assert.equal(EAG_COMMAND_STRINGS.EAG_DESIGN, "/eag-design");
   assert.equal(EAG_COMMAND_STRINGS.EAG_TEST, "/eag-test");
@@ -925,8 +925,10 @@ test("TC-CLI-05. EAG_COMMAND_STRINGS 包含 10 个命令", () => {
   // 新增的 2 个命令
   assert.equal(EAG_COMMAND_STRINGS.EAG_AUTONOMOUS_STATUS, "/eag-autonomous-status");
   assert.equal(EAG_COMMAND_STRINGS.EAG_AUTONOMOUS_STOP, "/eag-autonomous-stop");
+  // Loop-Graph 融合方案 Phase 5 新增 /eag-graph 命令
+  assert.equal(EAG_COMMAND_STRINGS.EAG_GRAPH, "/eag-graph");
   // 验证总字段数
-  assert.equal(Object.keys(EAG_COMMAND_STRINGS).length, 10, "应有 10 个 EAG 命令字符串");
+  assert.equal(Object.keys(EAG_COMMAND_STRINGS).length, 11, "应有 11 个 EAG 命令字符串");
 });
 
 test("TC-CLI-06. parser 优先匹配 status 而非 autonomous", () => {
