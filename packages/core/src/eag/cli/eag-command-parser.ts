@@ -101,6 +101,104 @@ export interface DeployRequest {
 }
 
 // ============================================================================
+// ADR-DI-001 动态指令注入与后台子 Agent 命令 payload 类型定义
+//
+// 设计依据：ADR-DI-001 §7.4.1 EagCommandParser 扩展
+// 设计原则（对齐 Karpathy Simplicity First + 不可变优先 §5.12.4 G-A6d）：
+// - 所有字段 readonly，实例由解析函数 Object.freeze 冻结
+// - payload 类型简单（仅含字符串/布尔字段），不依赖外部复杂类型
+// - 解析逻辑与 /eag-autonomous-status 同构（从命令字符串提取位置参数）
+// ============================================================================
+
+/**
+ * /inject 命令请求对象（ADR-DI-001 §5.1）
+ *
+ * 命令格式：/inject <指令文本>
+ * 字段说明：
+ * - text: 注入指令文本（用户在 /inject 后输入的全部内容，不能为空）
+ */
+export interface InjectCommandRequest {
+  /** 注入指令文本（非空字符串） */
+  readonly text: string;
+}
+
+/**
+ * /bg 命令请求对象（ADR-DI-001 §5.2）
+ *
+ * 命令格式：/bg <指令文本> [--kind chat|autonomous]
+ * 字段说明：
+ * - prompt: 后台任务初始 prompt（非空字符串）
+ * - kind: 任务类型（可选，默认 "chat"，Phase 1 仅支持 chat）
+ */
+export interface BgCommandRequest {
+  /** 后台任务初始 prompt（非空字符串） */
+  readonly prompt: string;
+  /** 任务类型（可选，默认 "chat"） */
+  readonly kind?: "chat" | "autonomous";
+}
+
+/**
+ * /tasks 命令请求对象（ADR-DI-001 §5.3.1）
+ *
+ * 命令格式：/tasks [--status running|paused|...] [--history]
+ * 字段说明：
+ * - status: 按状态过滤（可选，单值）
+ * - includeHistory: 是否包含历史任务（可选，默认 false）
+ */
+export interface TasksCommandRequest {
+  /** 按状态过滤（可选，未指定时返回全部状态） */
+  readonly status?: string;
+  /** 是否包含历史任务（可选，默认 false） */
+  readonly includeHistory?: boolean;
+}
+
+/**
+ * /fg 命令请求对象（ADR-DI-001 §5.3.2）
+ *
+ * 命令格式：/fg <task-id>
+ * 字段说明：
+ * - taskId: 要切换为前台的任务 ID（非空字符串）
+ */
+export interface FgCommandRequest {
+  /** 任务 ID（非空字符串） */
+  readonly taskId: string;
+}
+
+/**
+ * /cancel 命令请求对象（ADR-DI-001 §5.3.3）
+ *
+ * 命令格式：/cancel <task-id> [--reason <原因>]
+ * 字段说明：
+ * - taskId: 要取消的任务 ID（非空字符串）
+ * - reason: 取消原因（可选）
+ */
+export interface CancelCommandRequest {
+  /** 任务 ID（非空字符串） */
+  readonly taskId: string;
+  /** 取消原因（可选） */
+  readonly reason?: string;
+}
+
+/**
+ * /pause 命令请求对象（ADR-DI-001 §5.4.1）
+ *
+ * 命令格式：/pause（无参数）
+ * 注：pause 命令无 payload 字段，payload 类型为 null
+ */
+
+/**
+ * /resume 命令请求对象（ADR-DI-001 §5.4.2）
+ *
+ * 命令格式：/resume <task-id>
+ * 字段说明：
+ * - taskId: 要恢复的任务 ID（非空字符串）
+ */
+export interface ResumeCommandRequest {
+  /** 任务 ID（非空字符串） */
+  readonly taskId: string;
+}
+
+// ============================================================================
 // EagCommand 类型定义（discriminated union，D-S3-3）
 // ============================================================================
 
@@ -130,6 +228,17 @@ export type EagCommand =
   | { readonly kind: "eag-autonomous-status"; readonly payload: EagAutonomousStatusRequest | null }
   | { readonly kind: "eag-autonomous-stop"; readonly payload: EagAutonomousStopRequest | null }
   | { readonly kind: "eag-graph"; readonly payload: EagGraphRequest | null }
+  // ADR-DI-001 §7.4.1 新增 7 个动态指令注入与后台子 Agent 命令 kind
+  // 设计约束：payload 类型为对应的 CommandRequest | null
+  // - 命令字符串匹配但参数解析失败时 payload 为 null（由 session.ts 通知用户错误）
+  // - /pause 命令无 payload，payload 类型为 null（命令本身无参数）
+  | { readonly kind: "inject"; readonly payload: InjectCommandRequest | null }
+  | { readonly kind: "bg"; readonly payload: BgCommandRequest | null }
+  | { readonly kind: "tasks"; readonly payload: TasksCommandRequest | null }
+  | { readonly kind: "fg"; readonly payload: FgCommandRequest | null }
+  | { readonly kind: "cancel"; readonly payload: CancelCommandRequest | null }
+  | { readonly kind: "pause"; readonly payload: null }
+  | { readonly kind: "resume"; readonly payload: ResumeCommandRequest | null }
   | { readonly kind: "unknown"; readonly payload: null };
 
 /**
@@ -203,6 +312,29 @@ export const EAG_COMMAND_STRINGS = Object.freeze({
    * 与 /eag-autonomous 系列同属前缀匹配命令，但前缀互不冲突（/eag-graph vs /eag-autonomous）。
    */
   EAG_GRAPH: "/eag-graph",
+  // ============================================================================
+  // ADR-DI-001 §7.4.1 新增 7 个动态指令注入与后台子 Agent 命令字符串
+  //
+  // 设计约束（对齐 ADR-DI-001 §7.4.1 + Karpathy Surgical Changes）：
+  // - 全部使用前缀匹配（非严格匹配），因为命令本身携带参数
+  // - 命令前缀互不冲突（/inject /bg /tasks /fg /cancel /pause /resume）
+  // - 参数解析由各自的 extractXxxRequest 私有方法完成
+  // - 大小写不敏感匹配（对齐 /eag-autonomous 系列的匹配规则）
+  // ============================================================================
+  /** /inject 命令前缀字符串（注入指令到当前会话中断队列，ADR-DI-001 §5.1） */
+  INJECT: "/inject",
+  /** /bg 命令前缀字符串（启动后台子 agent，ADR-DI-001 §5.2） */
+  BG: "/bg",
+  /** /tasks 命令前缀字符串（列出全部任务，ADR-DI-001 §5.3.1） */
+  TASKS: "/tasks",
+  /** /fg 命令前缀字符串（切换前台任务，ADR-DI-001 §5.3.2） */
+  FG: "/fg",
+  /** /cancel 命令前缀字符串（取消指定任务，ADR-DI-001 §5.3.3） */
+  CANCEL: "/cancel",
+  /** /pause 命令字符串（暂停当前前台任务，ADR-DI-001 §5.4.1，无参数） */
+  PAUSE: "/pause",
+  /** /resume 命令前缀字符串（恢复指定任务，ADR-DI-001 §5.4.2） */
+  RESUME: "/resume",
 } as const);
 
 /**
@@ -348,6 +480,71 @@ export class EagCommandParser {
     const graphPrefixLower = graphPrefix.toLowerCase();
     if (textLower === graphPrefixLower || textLower.startsWith(graphPrefixLower + " ")) {
       return { kind: "eag-graph", payload: this.extractEagGraphRequest(userPrompt, text) };
+    }
+
+    // ============================================================================
+    // 步骤 2.5（ADR-DI-001 §7.4.1 新增）：动态指令注入与后台子 Agent 命令匹配
+    //
+    // 7 个新命令全部使用前缀匹配（非严格匹配），因为命令本身携带参数。
+    // 命令前缀互不冲突（/inject /bg /tasks /fg /cancel /pause /resume），
+    // 且与既有 /eag-* 命令前缀不冲突，可安全在此顺序匹配。
+    //
+    // 匹配规则（大小写不敏感，对齐 /eag-autonomous 系列）：
+    // - text === "/xxx"（无参数形式，仅 /pause 合法，其他命令参数必填时 payload 为 null）
+    // - text 以 "/xxx " 开头（含参数形式，payload 从命令字符串解析）
+    //
+    // 设计约束（Karpathy Surgical Changes）：
+    // - 每个命令独立 if 块，匹配后立即 return（避免后续无效匹配）
+    // - 参数解析委托各自的 extractXxxRequest 私有方法完成
+    // - /pause 无参数，匹配后直接返回 payload=null
+    // ============================================================================
+
+    // /inject <指令文本>：注入指令到当前会话中断队列
+    const injectPrefix = EAG_COMMAND_STRINGS.INJECT;
+    const injectPrefixLower = injectPrefix.toLowerCase();
+    if (textLower === injectPrefixLower || textLower.startsWith(injectPrefixLower + " ")) {
+      return { kind: "inject", payload: this.extractInjectRequest(text) };
+    }
+
+    // /bg <指令文本> [--kind chat|autonomous]：启动后台子 agent
+    const bgPrefix = EAG_COMMAND_STRINGS.BG;
+    const bgPrefixLower = bgPrefix.toLowerCase();
+    if (textLower === bgPrefixLower || textLower.startsWith(bgPrefixLower + " ")) {
+      return { kind: "bg", payload: this.extractBgRequest(text) };
+    }
+
+    // /tasks [--status running|paused|...] [--history]：列出全部任务
+    const tasksPrefix = EAG_COMMAND_STRINGS.TASKS;
+    const tasksPrefixLower = tasksPrefix.toLowerCase();
+    if (textLower === tasksPrefixLower || textLower.startsWith(tasksPrefixLower + " ")) {
+      return { kind: "tasks", payload: this.extractTasksRequest(text) };
+    }
+
+    // /fg <task-id>：切换前台任务
+    const fgPrefix = EAG_COMMAND_STRINGS.FG;
+    const fgPrefixLower = fgPrefix.toLowerCase();
+    if (textLower === fgPrefixLower || textLower.startsWith(fgPrefixLower + " ")) {
+      return { kind: "fg", payload: this.extractFgRequest(text) };
+    }
+
+    // /cancel <task-id> [--reason <原因>]：取消指定任务
+    const cancelPrefix = EAG_COMMAND_STRINGS.CANCEL;
+    const cancelPrefixLower = cancelPrefix.toLowerCase();
+    if (textLower === cancelPrefixLower || textLower.startsWith(cancelPrefixLower + " ")) {
+      return { kind: "cancel", payload: this.extractCancelRequest(text) };
+    }
+
+    // /pause：暂停当前前台任务（无参数，严格匹配）
+    // 注：/pause 是唯一无参数的动态指令注入命令，使用严格匹配
+    if (textLower === EAG_COMMAND_STRINGS.PAUSE.toLowerCase()) {
+      return { kind: "pause", payload: null };
+    }
+
+    // /resume <task-id>：恢复指定任务
+    const resumePrefix = EAG_COMMAND_STRINGS.RESUME;
+    const resumePrefixLower = resumePrefix.toLowerCase();
+    if (textLower === resumePrefixLower || textLower.startsWith(resumePrefixLower + " ")) {
+      return { kind: "resume", payload: this.extractResumeRequest(text) };
     }
 
     // 步骤 3：严格匹配 7 个命令字符串（无参数，参数通过 messageParams 注入）
@@ -552,6 +749,135 @@ export class EagCommandParser {
   parseEagAutonomousStopCommand(userPrompt: UserPromptContent): EagCommand {
     const cmd = this.parse(userPrompt);
     return cmd.kind === "eag-autonomous-stop" ? cmd : FROZEN_UNKNOWN_COMMAND;
+  }
+
+  // ============================================================================
+  // ADR-DI-001 §7.4.1 新增公开判定方法（动态指令注入与后台子 Agent 命令）
+  //
+  // 设计原则（对齐既有 parseEagXxxCommand 模式）：
+  // - 每个方法调用 this.parse(userPrompt) 获取解析结果
+  // - 匹配对应 kind 时返回 cmd，不匹配时返回 FROZEN_UNKNOWN_COMMAND
+  // - 方法签名与既有 10 个 parseEagXxxCommand 完全一致
+  // ============================================================================
+
+  /**
+   * 判定用户输入是否为 /inject 命令并提取 payload（ADR-DI-001 §5.1）
+   *
+   * 判定规则：
+   * - text 为字符串且以 /inject 开头（前缀匹配，大小写不敏感）
+   * - text === "/inject" 或 text 以 "/inject " 开头
+   * - 无图片附件
+   * - 无技能匹配
+   *
+   * @param userPrompt 用户输入内容
+   * @returns EagCommand（kind 为 "inject" 或 "unknown"）
+   */
+  parseInjectCommand(userPrompt: UserPromptContent): EagCommand {
+    const cmd = this.parse(userPrompt);
+    return cmd.kind === "inject" ? cmd : FROZEN_UNKNOWN_COMMAND;
+  }
+
+  /**
+   * 判定用户输入是否为 /bg 命令并提取 payload（ADR-DI-001 §5.2）
+   *
+   * 判定规则：
+   * - text 为字符串且以 /bg 开头（前缀匹配，大小写不敏感）
+   * - text === "/bg" 或 text 以 "/bg " 开头
+   * - 无图片附件
+   * - 无技能匹配
+   *
+   * @param userPrompt 用户输入内容
+   * @returns EagCommand（kind 为 "bg" 或 "unknown"）
+   */
+  parseBgCommand(userPrompt: UserPromptContent): EagCommand {
+    const cmd = this.parse(userPrompt);
+    return cmd.kind === "bg" ? cmd : FROZEN_UNKNOWN_COMMAND;
+  }
+
+  /**
+   * 判定用户输入是否为 /tasks 命令并提取 payload（ADR-DI-001 §5.3.1）
+   *
+   * 判定规则：
+   * - text 为字符串且以 /tasks 开头（前缀匹配，大小写不敏感）
+   * - text === "/tasks" 或 text 以 "/tasks " 开头
+   * - 无图片附件
+   * - 无技能匹配
+   *
+   * @param userPrompt 用户输入内容
+   * @returns EagCommand（kind 为 "tasks" 或 "unknown"）
+   */
+  parseTasksCommand(userPrompt: UserPromptContent): EagCommand {
+    const cmd = this.parse(userPrompt);
+    return cmd.kind === "tasks" ? cmd : FROZEN_UNKNOWN_COMMAND;
+  }
+
+  /**
+   * 判定用户输入是否为 /fg 命令并提取 payload（ADR-DI-001 §5.3.2）
+   *
+   * 判定规则：
+   * - text 为字符串且以 /fg 开头（前缀匹配，大小写不敏感）
+   * - text === "/fg" 或 text 以 "/fg " 开头
+   * - 无图片附件
+   * - 无技能匹配
+   *
+   * @param userPrompt 用户输入内容
+   * @returns EagCommand（kind 为 "fg" 或 "unknown"）
+   */
+  parseFgCommand(userPrompt: UserPromptContent): EagCommand {
+    const cmd = this.parse(userPrompt);
+    return cmd.kind === "fg" ? cmd : FROZEN_UNKNOWN_COMMAND;
+  }
+
+  /**
+   * 判定用户输入是否为 /cancel 命令并提取 payload（ADR-DI-001 §5.3.3）
+   *
+   * 判定规则：
+   * - text 为字符串且以 /cancel 开头（前缀匹配，大小写不敏感）
+   * - text === "/cancel" 或 text 以 "/cancel " 开头
+   * - 无图片附件
+   * - 无技能匹配
+   *
+   * @param userPrompt 用户输入内容
+   * @returns EagCommand（kind 为 "cancel" 或 "unknown"）
+   */
+  parseCancelCommand(userPrompt: UserPromptContent): EagCommand {
+    const cmd = this.parse(userPrompt);
+    return cmd.kind === "cancel" ? cmd : FROZEN_UNKNOWN_COMMAND;
+  }
+
+  /**
+   * 判定用户输入是否为 /pause 命令（ADR-DI-001 §5.4.1）
+   *
+   * 判定规则：
+   * - text 为字符串且严格等于 /pause（大小写不敏感，无参数）
+   * - 无图片附件
+   * - 无技能匹配
+   *
+   * 注：/pause 是唯一无参数的动态指令注入命令，使用严格匹配（非前缀匹配）。
+   *
+   * @param userPrompt 用户输入内容
+   * @returns EagCommand（kind 为 "pause" 或 "unknown"）
+   */
+  parsePauseCommand(userPrompt: UserPromptContent): EagCommand {
+    const cmd = this.parse(userPrompt);
+    return cmd.kind === "pause" ? cmd : FROZEN_UNKNOWN_COMMAND;
+  }
+
+  /**
+   * 判定用户输入是否为 /resume 命令并提取 payload（ADR-DI-001 §5.4.2）
+   *
+   * 判定规则：
+   * - text 为字符串且以 /resume 开头（前缀匹配，大小写不敏感）
+   * - text === "/resume" 或 text 以 "/resume " 开头
+   * - 无图片附件
+   * - 无技能匹配
+   *
+   * @param userPrompt 用户输入内容
+   * @returns EagCommand（kind 为 "resume" 或 "unknown"）
+   */
+  parseResumeCommand(userPrompt: UserPromptContent): EagCommand {
+    const cmd = this.parse(userPrompt);
+    return cmd.kind === "resume" ? cmd : FROZEN_UNKNOWN_COMMAND;
   }
 
   // ============================================================================
@@ -991,6 +1317,218 @@ export class EagCommandParser {
       // 参数解析失败：返回 null，session.ts 将重新调用以获取错误详情
       return null;
     }
+  }
+
+  // ============================================================================
+  // ADR-DI-001 §7.4.1 新增私有提取方法（动态指令注入与后台子 Agent 命令参数解析）
+  //
+  // 设计原则（对齐 Karpathy Simplicity First）：
+  // - 每个方法仅从命令字符串提取位置参数（不读取文件系统）
+  // - 解析失败时返回 null，由 session.ts 通知用户错误
+  // - 返回值通过 Object.freeze 冻结（不可变优先 §5.12.4 G-A6d）
+  // ============================================================================
+
+  /**
+   * 从 /inject 命令字符串提取 InjectCommandRequest
+   *
+   * 命令格式：/inject <指令文本>
+   * 解析规则：
+   * - 移除命令前缀 /inject（大小写不敏感）
+   * - 剩余部分作为 text 字段（trim 后不能为空）
+   *
+   * @param text 用户输入的命令字符串（已 trim）
+   * @returns InjectCommandRequest；text 为空时返回 null
+   */
+  private extractInjectRequest(text: string): InjectCommandRequest | null {
+    // 移除命令前缀 /inject（大小写不敏感，匹配前缀 + 一个空白字符）
+    const prefixPattern = /^\/inject\s+/i;
+    const match = prefixPattern.exec(text);
+    if (!match) {
+      // text === "/inject"（无参数形式），指令文本为空
+      return null;
+    }
+    // 提取命令前缀之后的全部内容作为指令文本
+    const instructionText = text.slice(match[0].length).trim();
+    if (instructionText.length === 0) {
+      // 指令文本为空（用户输入 "/inject   "，仅有空白）
+      return null;
+    }
+    return Object.freeze({ text: instructionText }) as InjectCommandRequest;
+  }
+
+  /**
+   * 从 /bg 命令字符串提取 BgCommandRequest
+   *
+   * 命令格式：/bg <指令文本> [--kind chat|autonomous]
+   * 解析规则：
+   * - 移除命令前缀 /bg（大小写不敏感）
+   * - 解析 --kind 参数（可选，默认 "chat"）
+   * - 剩余部分作为 prompt 字段（trim 后不能为空）
+   *
+   * @param text 用户输入的命令字符串（已 trim）
+   * @returns BgCommandRequest；prompt 为空时返回 null
+   */
+  private extractBgRequest(text: string): BgCommandRequest | null {
+    // 移除命令前缀 /bg（大小写不敏感，匹配前缀 + 一个空白字符）
+    const prefixPattern = /^\/bg\s+/i;
+    const prefixMatch = prefixPattern.exec(text);
+    if (!prefixMatch) {
+      // text === "/bg"（无参数形式），prompt 为空
+      return null;
+    }
+    const argsPart = text.slice(prefixMatch[0].length).trim();
+    if (argsPart.length === 0) {
+      // 参数部分为空
+      return null;
+    }
+    // 解析 --kind 参数（可选）
+    // 正则：--kind\s+(chat|autonomous)，捕获组 1 为 kind 值
+    const kindPattern = /--kind\s+(chat|autonomous)/i;
+    const kindMatch = kindPattern.exec(argsPart);
+    let kind: "chat" | "autonomous" | undefined;
+    let prompt = argsPart;
+    if (kindMatch) {
+      kind = kindMatch[1].toLowerCase() as "chat" | "autonomous";
+      // 从 prompt 中移除 --kind 参数（含其值）
+      prompt = argsPart.replace(kindMatch[0], "").trim();
+    }
+    if (prompt.length === 0) {
+      // 移除 --kind 后 prompt 为空
+      return null;
+    }
+    const request: BgCommandRequest = kind ? { prompt, kind } : { prompt };
+    return Object.freeze(request) as BgCommandRequest;
+  }
+
+  /**
+   * 从 /tasks 命令字符串提取 TasksCommandRequest
+   *
+   * 命令格式：/tasks [--status running|paused|...] [--history]
+   * 解析规则：
+   * - 移除命令前缀 /tasks（大小写不敏感）
+   * - 解析 --status 参数（可选，单值）
+   * - 解析 --history flag（可选，存在即为 true）
+   * - 无参数时返回空 request（status=undefined, includeHistory=undefined）
+   *
+   * @param text 用户输入的命令字符串（已 trim）
+   * @returns TasksCommandRequest（始终返回，无参数时字段全为 undefined）
+   */
+  private extractTasksRequest(text: string): TasksCommandRequest | null {
+    // 移除命令前缀 /tasks（大小写不敏感，匹配前缀 + 零个或多个空白字符）
+    const prefixPattern = /^\/tasks(?:\s+|$)/i;
+    const prefixMatch = prefixPattern.exec(text);
+    if (!prefixMatch) {
+      // 理论不会到达（resolveCommand 已做前缀匹配），防御性返回 null
+      return null;
+    }
+    const argsPart = text.slice(prefixMatch[0].length).trim();
+    // 无参数时返回空 request
+    if (argsPart.length === 0) {
+      return Object.freeze({}) as TasksCommandRequest;
+    }
+    // 解析 --status 参数（可选，值为非空白字符串）
+    const statusPattern = /--status\s+(\S+)/i;
+    const statusMatch = statusPattern.exec(argsPart);
+    const status = statusMatch ? statusMatch[1] : undefined;
+    // 解析 --history flag（可选，存在即为 true）
+    const includeHistory = /--history/i.test(argsPart);
+    const request: TasksCommandRequest = {
+      ...(status !== undefined ? { status } : {}),
+      ...(includeHistory ? { includeHistory: true } : {}),
+    };
+    return Object.freeze(request) as TasksCommandRequest;
+  }
+
+  /**
+   * 从 /fg 命令字符串提取 FgCommandRequest
+   *
+   * 命令格式：/fg <task-id>
+   * 解析规则：
+   * - 移除命令前缀 /fg（大小写不敏感）
+   * - 剩余部分作为 taskId 字段（trim 后不能为空）
+   *
+   * @param text 用户输入的命令字符串（已 trim）
+   * @returns FgCommandRequest；taskId 为空时返回 null
+   */
+  private extractFgRequest(text: string): FgCommandRequest | null {
+    const prefixPattern = /^\/fg\s+/i;
+    const match = prefixPattern.exec(text);
+    if (!match) {
+      // text === "/fg"（无参数形式），taskId 为空
+      return null;
+    }
+    const taskId = text.slice(match[0].length).trim();
+    if (taskId.length === 0) {
+      return null;
+    }
+    return Object.freeze({ taskId }) as FgCommandRequest;
+  }
+
+  /**
+   * 从 /cancel 命令字符串提取 CancelCommandRequest
+   *
+   * 命令格式：/cancel <task-id> [--reason <原因>]
+   * 解析规则：
+   * - 移除命令前缀 /cancel（大小写不敏感）
+   * - 解析 --reason 参数（可选，支持引号包裹的值）
+   * - 剩余部分作为 taskId 字段（trim 后不能为空）
+   *
+   * @param text 用户输入的命令字符串（已 trim）
+   * @returns CancelCommandRequest；taskId 为空时返回 null
+   */
+  private extractCancelRequest(text: string): CancelCommandRequest | null {
+    const prefixPattern = /^\/cancel\s+/i;
+    const prefixMatch = prefixPattern.exec(text);
+    if (!prefixMatch) {
+      // text === "/cancel"（无参数形式），taskId 为空
+      return null;
+    }
+    const argsPart = text.slice(prefixMatch[0].length).trim();
+    if (argsPart.length === 0) {
+      return null;
+    }
+    // 解析 --reason 参数（可选，支持双引号或单引号包裹的值）
+    // 正则：--reason\s+("([^"]*)"|'([^']*)'|(\S+))，捕获组 2/3/4 为 reason 值
+    const reasonPattern = /--reason\s+(?:"([^"]*)"|'([^']*)'|(\S+))/i;
+    const reasonMatch = reasonPattern.exec(argsPart);
+    let reason: string | undefined;
+    let taskId = argsPart;
+    if (reasonMatch) {
+      reason = reasonMatch[1] ?? reasonMatch[2] ?? reasonMatch[3];
+      // 从 taskId 部分移除 --reason 参数
+      taskId = argsPart.replace(reasonMatch[0], "").trim();
+    }
+    if (taskId.length === 0) {
+      // 移除 --reason 后 taskId 为空
+      return null;
+    }
+    const request: CancelCommandRequest = reason ? { taskId, reason } : { taskId };
+    return Object.freeze(request) as CancelCommandRequest;
+  }
+
+  /**
+   * 从 /resume 命令字符串提取 ResumeCommandRequest
+   *
+   * 命令格式：/resume <task-id>
+   * 解析规则：
+   * - 移除命令前缀 /resume（大小写不敏感）
+   * - 剩余部分作为 taskId 字段（trim 后不能为空）
+   *
+   * @param text 用户输入的命令字符串（已 trim）
+   * @returns ResumeCommandRequest；taskId 为空时返回 null
+   */
+  private extractResumeRequest(text: string): ResumeCommandRequest | null {
+    const prefixPattern = /^\/resume\s+/i;
+    const match = prefixPattern.exec(text);
+    if (!match) {
+      // text === "/resume"（无参数形式），taskId 为空
+      return null;
+    }
+    const taskId = text.slice(match[0].length).trim();
+    if (taskId.length === 0) {
+      return null;
+    }
+    return Object.freeze({ taskId }) as ResumeCommandRequest;
   }
 }
 
