@@ -104,6 +104,13 @@ export { handleUpdatePlanTool } from "./tools/update-plan-handler";
 export { handleWebSearchTool } from "./tools/web-search-handler";
 export { handleAskUserQuestionTool } from "./tools/ask-user-question-handler";
 
+// P1-T2：Visualization 模块 —— PureShowWidget 工具与渲染器
+// 提供 LLM 调用 pure_show_widget(widget_code, widget_type) 渲染内联可视化 widget 的能力，
+// 由 dynamic-ui skill 驱动；生成的自包含 HTML 写入 .deepcodex/widgets/，由 CLI MessageView 提示用户打开。
+export { handlePureShowWidget, pureShowWidgetToolDefinition } from "./visualization/widget-tool";
+export { renderWidget, saveWidget, isValidWidgetType } from "./visualization/renderer";
+export type { WidgetType, RenderWidgetResult } from "./visualization/renderer";
+
 // MCP
 export { McpManager } from "./mcp/mcp-manager";
 export { McpClient } from "./mcp/mcp-client";

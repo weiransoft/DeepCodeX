@@ -1,0 +1,17 @@
+data_type,scenario,recommended_chart,pptxgenjs_type,description
+trend,time_series,line,pptx.ChartType.line,时间序列趋势：折线图展示随时间变化
+comparison,categorical,bar,pptx.ChartType.bar,类别对比：柱状图横向比较
+comparison_ranking,ordered,bar_horizontal,pptx.ChartType.bar,排序对比：横向柱状图按大小排列
+distribution,percentage,pie,pptx.ChartType.pie,占比分布：饼图显示各部分占比
+distribution_multi,parts_of_whole,doughnut,pptx.ChartType.doughnut,环形图：多层占比，中心可放总数
+correlation,relationship,scatter,pptx.ChartType.scatter,散点关系：两个变量的相关性
+composition,stacked,bar_stacked,pptx.ChartType.bar,堆叠柱状图：各部分叠加显示总量
+multidimensional,multi_axis,radar,pptx.ChartType.radar,雷达图：多维数据对比
+financial,ohlc,candlestick,pptx.ChartType.bar,金融 K 线：开高低收（用 bar 模拟）
+ranking,top_n,bar_horizontal,pptx.ChartType.bar,Top N：横向柱状图突出排名
+deviation,difference_from_baseline,bar,pptx.ChartType.bar,偏差对比：基准线 vs 实际值
+flow,process,funnel,pptx.ChartType.bar,漏斗图：阶段转化（用 bar 模拟）
+geographic,map,heatmap,pptx.ChartType.bar,地理热力图（用表格代替）
+single_value,kpi,big_number,N/A,大数字：单一关键指标，无需图表
+multi_series,group_comparison,bar_grouped,pptx.ChartType.bar,分组柱状图：多组对比
+area_chart,volume_over_time,area,pptx.ChartType.area,面积图：累计趋势

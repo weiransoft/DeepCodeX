@@ -5,6 +5,8 @@ import { handleReadTool } from "./read-handler";
 import { handleUpdatePlanTool } from "./update-plan-handler";
 import { handleWebSearchTool } from "./web-search-handler";
 import { handleWriteTool } from "./write-handler";
+// P1-T2：PureShowWidget 工具 handler（dynamic-ui skill 的执行入口）
+import { handlePureShowWidget } from "../visualization/widget-tool";
 import type { McpManager } from "../mcp/mcp-manager";
 import type {
   CreateOpenAIClient,
@@ -101,6 +103,15 @@ export class ToolExecutor {
     this.toolHandlers.set("AskUserQuestion", handleAskUserQuestionTool);
     this.toolHandlers.set("UpdatePlan", handleUpdatePlanTool);
     this.toolHandlers.set("WebSearch", handleWebSearchTool);
+    // P1-T2：PureShowWidget 工具 handler 注册
+    //
+    // 说明：handler 与 tool definition 的启用条件可能不一致：
+    //   - tool definition：由 getTools(options) 根据 enabledSkills["dynamic-ui"] 条件加入
+    //   - handler：始终注册（与 tool definition 解耦）
+    // 当 tool 未注册时 LLM 不会发起调用，handler 注册不会产生副作用；
+    // 当 tool 已注册时 handler 必须存在，否则会触发 "Unknown tool" 错误。
+    // 这里采用「始终注册 handler」策略，简化条件管理，与 V2-P6 codemap 工具扩展模式一致。
+    this.toolHandlers.set("pure_show_widget", handlePureShowWidget);
   }
 
   /**

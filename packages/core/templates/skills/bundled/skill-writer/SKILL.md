@@ -113,22 +113,28 @@ description: Brief description of what this does and when to use it
 
 ### Step 5: Write effective descriptions
 
-The description is critical for AI agents to discover your Skill.
+The description is critical for AI agents to discover your Skill. **Max 1024 characters** — keep it within this limit (consistent with the frontmatter `description` field in Step 4).
 
 **Formula**: `[What it does] + [When to use it] + [Key triggers]`
 
 **Examples**:
 
-✅ **Good**:
+✅ **Good** ("Use when..." pattern):
 
 ```yaml
 description: Extract text and tables from PDF files, fill forms, merge documents. Use when working with PDF files or when the user mentions PDFs, forms, or document extraction.
 ```
 
-✅ **Good**:
+✅ **Good** ("Use when..." pattern, with file extensions):
 
 ```yaml
 description: Analyze Excel spreadsheets, create pivot tables, and generate charts. Use when working with Excel files, spreadsheets, or analyzing tabular data in .xlsx format.
+```
+
+✅ **Good** ("For..." pattern):
+
+```yaml
+description: Generate PowerPoint presentations with cover slides, content layouts, and speaker notes. For creating .pptx files, building slide decks, or designing presentation templates.
 ```
 
 ❌ **Too vague**:
@@ -136,14 +142,31 @@ description: Analyze Excel spreadsheets, create pivot tables, and generate chart
 ```yaml
 description: Helps with documents
 description: For data analysis
+description: Skill for processing files
+description: Handles documents
 ```
 
 **Tips**:
 
-- Include specific file extensions (.pdf, .xlsx, .json)
+- Include specific file extensions (.pdf, .xlsx, .json, .pptx)
 - Mention common user phrases ("analyze", "extract", "generate")
 - List concrete operations (not generic verbs)
 - Add context clues ("Use when...", "For...")
+
+**Anti-patterns** (avoid these):
+
+- **Overly abstract verbs** — "handles", "processes", "manages" without context
+  - ❌ `Handles document files` → ✅ `Convert .docx to PDF and extract text from Word documents`
+- **Missing file extensions** — omitting concrete types weakens discovery
+  - ❌ `Works with spreadsheets` → ✅ `Works with .xlsx, .xls, and .csv files`
+- **Missing trigger words** — no user-facing phrases to match queries
+  - ❌ `A tool for files` → ✅ `Use when the user asks to merge PDFs or extract form fields`
+- **Description too long** — exceeding 1024 characters breaks parsing
+  - Keep descriptions under 1024 chars; split detail into SKILL.md body
+
+**Name ↔ description consistency**:
+
+The `description` should include keywords consistent with the `name` field so AI agents can correlate them. For example, when `name: pdf`, the description must mention "PDF"; when `name: excel-analyzer`, it should mention "Excel" and "analyze". Avoid descriptions that share no keywords with the `name` — this confuses discovery and ranking.
 
 ### Step 6: Structure the Skill content
 

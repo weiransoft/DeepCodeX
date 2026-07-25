@@ -8,6 +8,8 @@ import { fileURLToPath } from "url";
 import type { SessionMessage } from "./session";
 import { findGitBashPath, resolveShellPath } from "./common/shell-utils";
 import { supportsMultimodal } from "./common/model-capabilities";
+// P1-T2：PureShowWidget 工具定义（条件注册，受 enabledSkills["dynamic-ui"] 控制）
+import { pureShowWidgetToolDefinition } from "./visualization/widget-tool";
 
 const COMPACT_PROMPT_BASE = `Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
 This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
@@ -98,13 +100,33 @@ const SYSTEM_PROMPT_BASE = `你是名叫Deep Code的交互式CLI工具，帮助�
 type PromptToolOptions = {
   model?: string;
   webSearchEnabled?: boolean;
+  /**
+   * 已启用的 skill 映射表（与 settings.enabledSkills 同源）
+   *
+   * 用途：
+   *   - 控制 dynamic-ui 等 skill 关联工具的注册（如 PureShowWidget）
+   *   - 键为 skill 名称（如 "dynamic-ui"），值为 true/false
+   *   - 未在表中出现的键视为默认启用（与 readDefaultSkillDocs 语义一致）
+   *
+   * 例如：
+   *   { "dynamic-ui": false }  // 显式禁用 dynamic-ui，不注册 PureShowWidget 工具
+   *   { }                       // 默认全部启用
+   */
+  enabledSkills?: Record<string, boolean>;
 };
 
 type DefaultSkillPromptOptions = {
   enabledSkills?: Record<string, boolean>;
 };
 
-const DEFAULT_SKILL_TEMPLATES = ["karpathy-guidelines.md"];
+// 默认 skill 模板列表：这些 skill 会通过 readDefaultSkillDocs() 自动注入到系统提示
+// 影响所有用户的基础体验，新增/删除需谨慎评估（E6 增强方案）
+const DEFAULT_SKILL_TEMPLATES = [
+  "karpathy-guidelines.md", // Karpathy 四大核心原则（代码质量基础）
+  "design-aesthetics.md", // 设计美学原则（反 AI slop，视觉质量）
+  "ui-ux-best-practices.md", // UI/UX 最佳实践（可访问性 + 交互质量）
+  "code-quality-guidelines.md", // 代码质量指南（类型安全 + 错误处理 + 测试覆盖）
+];
 const DEFAULT_SKILL_RESOURCE_FILE_LIMIT = 50;
 const SKILL_RESOURCE_EXCLUDED_DIRS = new Set([
   ".cache",
@@ -458,7 +480,7 @@ export type ToolDefinition = {
   };
 };
 
-export function getTools(_options: PromptToolOptions = {}, externalTools: ToolDefinition[] = []): ToolDefinition[] {
+export function getTools(options: PromptToolOptions = {}, externalTools: ToolDefinition[] = []): ToolDefinition[] {
   const tools: ToolDefinition[] = [
     {
       type: "function",
@@ -693,6 +715,20 @@ export function getTools(_options: PromptToolOptions = {}, externalTools: ToolDe
       },
     },
   });
+
+  // P1-T2：PureShowWidget 工具条件注册
+  //
+  // 启用条件：enabledSkills["dynamic-ui"] 未被显式设为 false（默认启用）
+  // 禁用行为：当用户在 settings.enabledSkills 中将 "dynamic-ui" 设为 false 时，
+  //           工具不在 tools 列表中注册，LLM 不会发起 pure_show_widget 调用
+  //
+  // 与 dynamic-ui skill 的关系：
+  //   - 工具是 skill 的执行入口（skill 描述何时调用，工具执行渲染）
+  //   - skill 文档加载由 getDefaultSkillPrompt() 控制（独立于工具注册）
+  //   - 用户禁用 skill 后，工具与文档都应不出现（保证一致性）
+  if (options.enabledSkills?.["dynamic-ui"] !== false) {
+    tools.push(pureShowWidgetToolDefinition);
+  }
 
   for (const tool of externalTools) {
     tools.push(tool);
