@@ -1,0 +1,315 @@
+<style>
+/* ===== Token 定义（亮色默认 + 暗色覆盖）=====
+   置于 <style> 顶部，组件样式之前；默认紫色主题。 */
+:root {
+  color-scheme: light;
+  --surface: #F7F7F8;
+  --surface-muted: #EFEFF2;
+  --text: #171717;
+  --text-muted: #52525B;
+  --border: rgba(23, 23, 23, 0.12);
+  --brand: #4B3FE3;
+  --brand-soft: #F2F7FF;
+  --brand-soft-strong: #E5EAFF;
+  --brand-text: #1A1759;
+  --brand-on: #FFFFFF;
+  --chart-series-1: #3C2ECA;
+  --chart-series-2: #A9AEFF;
+  --chart-series-3: #6F6FFF;
+  --chart-series-4: #22A5F7;
+  --chart-other: #D3D4DA;
+  --success: #1DC981;
+  --warning: #EFAA17;
+  --danger: #E8463A;
+  --radius: 8px;
+  --radius-card: 12px;
+  --radius-full: 999px;
+  --spacer-4: 4px;
+  --spacer-8: 8px;
+  --spacer-12: 12px;
+  --spacer-16: 16px;
+  --spacer-20: 20px;
+  --spacer-24: 24px;
+  --font-sans: "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-metric: "Inter", "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-strong: 600;
+  --text-caption: 12px/18px;
+  --text-body: 14px/20px;
+  --text-title: 16px/24px;
+  --text-code: 13px/20px;
+}
+/* 暗色主题覆盖：默认紫色 brand 暗色阶 */
+:root[data-widget-theme="dark"] {
+  color-scheme: dark;
+  --surface: #171717;
+  --surface-muted: #262626;
+  --text: #E5E5E5;
+  --text-muted: #A1A1AA;
+  --border: rgba(229, 229, 229, 0.12);
+  --brand: #6054F1;
+  --brand-soft: #1A1759;
+  --brand-soft-strong: #3C2ECA;
+  --brand-text: #CFD8FF;
+  --chart-series-1: #4B3FE3;
+}
+/* 独立打开时跟随系统暗色（可选降级） */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-widget-theme="light"]) {
+    --surface: #171717;
+    --surface-muted: #262626;
+    --text: #E5E5E5;
+    --text-muted: #A1A1AA;
+    --border: rgba(229, 229, 229, 0.12);
+    --brand: #6054F1;
+    --brand-soft: #1A1759;
+    --brand-soft-strong: #3C2ECA;
+    --brand-text: #CFD8FF;
+    --chart-series-1: #4B3FE3;
+  }
+}
+
+/* ===== 组件样式 ===== */
+.hm-widget {
+  color: var(--text);
+  background: transparent;
+  font: var(--weight-regular) var(--text-body) var(--font-sans);
+  letter-spacing: 0;
+}
+.hm-head { margin: 0 0 var(--spacer-16); }
+.hm-head__title { font: var(--weight-medium) var(--text-title) var(--font-sans); color: var(--text); margin: 0; }
+.hm-head__sub { font: var(--weight-regular) var(--text-caption) var(--font-sans); color: var(--text-muted); margin: var(--spacer-4) 0 0; }
+/* SVG 容器：显式高度 + position: relative 满足提示框定位 */
+.hm-chart-wrap { position: relative; height: clamp(260px, 34vw, 380px); max-height: 600px; }
+.hm-chart-wrap svg { width: 100%; height: 100%; display: block; }
+/* SVG 内文本与图形样式：通过 currentColor 与 var() 引用 token */
+.hm-col-label { fill: var(--text-muted); font: var(--weight-medium) var(--text-caption) var(--font-sans); }
+.hm-row-label { fill: var(--text-muted); font: var(--weight-medium) var(--text-caption) var(--font-sans); }
+.hm-cell-value { font: var(--weight-medium) var(--text-code) var(--font-mono); font-variant-numeric: tabular-nums; }
+.hm-cell { transition: stroke-width 100ms ease; cursor: default; }
+.hm-legend-label { fill: var(--text-muted); font: var(--weight-regular) var(--text-caption) var(--font-sans); }
+/* 可见降级表格：JS 执行前可见，SVG 渲染成功后隐藏 */
+.hm-fallback { border: 1px solid var(--border); border-radius: var(--radius-card); overflow: hidden; }
+.hm-fallback table { width: 100%; border-collapse: collapse; }
+.hm-fallback th, .hm-fallback td { padding: var(--spacer-8) var(--spacer-12); text-align: right; font: var(--weight-regular) var(--text-code) var(--font-mono); color: var(--text); border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+.hm-fallback th:first-child, .hm-fallback td:first-child { text-align: left; font-family: var(--font-sans); }
+.hm-fallback th { background: var(--surface-muted); font: var(--weight-medium) var(--text-caption) var(--font-sans); color: var(--text-muted); }
+.hm-fallback tr:last-child td { border-bottom: none; }
+/* HTML 提示框：Shadcn 风格，widget 根内绝对定位 */
+.hm-tooltip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--spacer-12); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08); font: var(--weight-regular) var(--text-caption) var(--font-sans); color: var(--text); z-index: 10; min-width: 150px; transition: opacity 100ms ease; }
+.hm-tooltip[hidden] { opacity: 0; }
+.hm-tooltip__title { font: var(--weight-medium) var(--text-body) var(--font-sans); color: var(--text); margin: 0 0 var(--spacer-4); }
+.hm-tooltip__row { display: flex; justify-content: space-between; gap: var(--spacer-12); margin: var(--spacer-4) 0; }
+.hm-tooltip__label { color: var(--text-muted); }
+.hm-tooltip__value { font: var(--weight-medium) var(--text-code) var(--font-mono); color: var(--text); font-variant-numeric: tabular-nums; }
+</style>
+
+<div data-dynamic-ui-widget data-template="heatmap-chart" class="hm-widget">
+  <!-- 紧凑标题：场景定位，不含分析结论 -->
+  <div class="hm-head">
+    <h3 class="hm-head__title">项目提交贡献热力图</h3>
+    <p class="hm-head__sub">5 个项目 × 6 个月提交密度 · 单位：提交数</p>
+  </div>
+
+  <!-- 可见降级：HTML 表格，JS 执行前可见 -->
+  <div class="hm-fallback" data-fallback>
+    <table>
+      <thead>
+        <tr><th>项目</th><th>1月</th><th>2月</th><th>3月</th><th>4月</th><th>5月</th><th>6月</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>前端</td><td>142</td><td>168</td><td>155</td><td>210</td><td>189</td><td>232</td></tr>
+        <tr><td>后端</td><td>198</td><td>215</td><td>187</td><td>245</td><td>268</td><td>290</td></tr>
+        <tr><td>算法</td><td>89</td><td>124</td><td>156</td><td>178</td><td>165</td><td>201</td></tr>
+        <tr><td>平台</td><td>125</td><td>142</td><td>138</td><td>167</td><td>159</td><td>184</td></tr>
+        <tr><td>移动端</td><td>78</td><td>95</td><td>112</td><td>134</td><td>128</td><td>156</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- SVG 容器：显式高度 + position: relative -->
+  <div class="hm-chart-wrap" data-chart-wrap hidden>
+    <!-- SVG 由 JS 填充单元格；壳含坐标轴标签 -->
+    <svg viewBox="0 0 480 300" preserveAspectRatio="xMidYMid meet" role="img" aria-label="项目提交贡献热力图">
+      <g id="hm-cells"></g>
+      <g id="hm-labels"></g>
+    </svg>
+    <!-- HTML 提示框容器，widget 根内 -->
+    <div class="hm-tooltip" data-tooltip hidden></div>
+  </div>
+</div>
+
+<script>
+/* 根选择器初始化：限定在根元素内，绑定前设 data-mounted 防止重复挂载 */
+(function () {
+  var root = document.querySelector('[data-dynamic-ui-widget][data-template="heatmap-chart"]:not([data-mounted])');
+  if (!root) { return; }
+  root.setAttribute('data-mounted', 'true');
+
+  /* 数据：5 项目 × 6 月提交矩阵 */
+  var rows = ['前端', '后端', '算法', '平台', '移动端'];
+  var cols = ['1月', '2月', '3月', '4月', '5月', '6月'];
+  var values = [
+    [142, 168, 155, 210, 189, 232],
+    [198, 215, 187, 245, 268, 290],
+    [89, 124, 156, 178, 165, 201],
+    [125, 142, 138, 167, 159, 184],
+    [78, 95, 112, 134, 128, 156]
+  ];
+
+  /* 计算极值与焦点格（最大值），用于强度映射与焦点强调 */
+  var allVals = values.reduce(function (a, b) { return a.concat(b); }, []);
+  var minVal = Math.min.apply(null, allVals);
+  var maxVal = Math.max.apply(null, allVals);
+  var focusRow = 0, focusCol = 0;
+  values.forEach(function (r, i) {
+    r.forEach(function (v, j) {
+      if (v === maxVal) { focusRow = i; focusCol = j; }
+    });
+  });
+
+  /* SVG 几何参数：字面数值，非 token（契约允许） */
+  var cellW = 56, cellH = 40;
+  var gridX = 80, gridY = 36;
+  var svgNS = 'http://www.w3.org/2000/svg';
+
+  /* 读取 token：所有颜色来自 widget 根的 CSS 变量，禁硬编码 */
+  var cs = getComputedStyle(root);
+  var brand = cs.getPropertyValue('--brand').trim();
+  var surface = cs.getPropertyValue('--surface').trim();
+  var brandOn = cs.getPropertyValue('--brand-on').trim();
+  var textMain = cs.getPropertyValue('--text').trim();
+  var textMuted = cs.getPropertyValue('--text-muted').trim();
+  var border = cs.getPropertyValue('--border').trim();
+
+  var cellsG = root.querySelector('#hm-cells');
+  var labelsG = root.querySelector('#hm-labels');
+  if (!cellsG || !labelsG) { return; }
+
+  /* 强度映射函数：X = 12 + (v - min) / (max - min) * 76，范围 12%-88% */
+  function intensity(v) {
+    if (maxVal === minVal) { return 50; }
+    return 12 + (v - minVal) / (maxVal - minVal) * 76;
+  }
+
+  /* 渲染列标签（顶部）与行标签（左侧） */
+  cols.forEach(function (c, j) {
+    var t = document.createElementNS(svgNS, 'text');
+    t.setAttribute('class', 'hm-col-label');
+    t.setAttribute('x', gridX + j * cellW + cellW / 2);
+    t.setAttribute('y', gridY - 10);
+    t.setAttribute('text-anchor', 'middle');
+    t.textContent = c;
+    labelsG.appendChild(t);
+  });
+  rows.forEach(function (r, i) {
+    var t = document.createElementNS(svgNS, 'text');
+    t.setAttribute('class', 'hm-row-label');
+    t.setAttribute('x', gridX - 8);
+    t.setAttribute('y', gridY + i * cellH + cellH / 2 + 4);
+    t.setAttribute('text-anchor', 'end');
+    t.textContent = r;
+    labelsG.appendChild(t);
+  });
+
+  /* 渲染强度图例（底部）：5 阶色块 + 标签 */
+  var legendY = gridY + rows.length * cellH + 24;
+  var legendSteps = [12, 30, 50, 70, 88];
+  var legendStartX = gridX;
+  legendSteps.forEach(function (pct, k) {
+    var r = document.createElementNS(svgNS, 'rect');
+    r.setAttribute('x', legendStartX + k * 28);
+    r.setAttribute('y', legendY);
+    r.setAttribute('width', 24);
+    r.setAttribute('height', 12);
+    r.setAttribute('rx', 2);
+    r.style.fill = 'color-mix(in srgb, var(--brand) ' + pct + '%, var(--surface))';
+    cellsG.appendChild(r);
+  });
+  var loLabel = document.createElementNS(svgNS, 'text');
+  loLabel.setAttribute('class', 'hm-legend-label');
+  loLabel.setAttribute('x', legendStartX - 8);
+  loLabel.setAttribute('y', legendY + 10);
+  loLabel.setAttribute('text-anchor', 'end');
+  loLabel.textContent = '少';
+  cellsG.appendChild(loLabel);
+  var hiLabel = document.createElementNS(svgNS, 'text');
+  hiLabel.setAttribute('class', 'hm-legend-label');
+  hiLabel.setAttribute('x', legendStartX + legendSteps.length * 28 + 4);
+  hiLabel.setAttribute('y', legendY + 10);
+  hiLabel.setAttribute('text-anchor', 'start');
+  hiLabel.textContent = '多';
+  cellsG.appendChild(hiLabel);
+
+  /* 渲染单元格：rect（color-mix 填充）+ value 文本；焦点格加 brand 描边 */
+  var tooltipEl = root.querySelector('[data-tooltip]');
+  values.forEach(function (rowVals, i) {
+    rowVals.forEach(function (v, j) {
+      var x = gridX + j * cellW;
+      var y = gridY + i * cellH;
+      var pct = intensity(v);
+      var isFocus = (i === focusRow && j === focusCol);
+
+      /* 单元格矩形：颜色强度 color-mix(in srgb, var(--brand) X%, var(--surface)) */
+      var rect = document.createElementNS(svgNS, 'rect');
+      rect.setAttribute('class', 'hm-cell');
+      rect.setAttribute('x', x + 1);
+      rect.setAttribute('y', y + 1);
+      rect.setAttribute('width', cellW - 2);
+      rect.setAttribute('height', cellH - 2);
+      rect.setAttribute('rx', 4);
+      rect.style.fill = 'color-mix(in srgb, var(--brand) ' + pct + '%, var(--surface))';
+      if (isFocus) {
+        rect.setAttribute('stroke', 'var(--brand)');
+        rect.setAttribute('stroke-width', '2');
+      } else {
+        rect.setAttribute('stroke', 'var(--border)');
+        rect.setAttribute('stroke-width', '0.5');
+      }
+      rect.setAttribute('data-row', i);
+      rect.setAttribute('data-col', j);
+      cellsG.appendChild(rect);
+
+      /* 单元格数值文本：对比度自适应，pct > 45 用浅色文本 */
+      var txt = document.createElementNS(svgNS, 'text');
+      txt.setAttribute('class', 'hm-cell-value');
+      txt.setAttribute('x', x + cellW / 2);
+      txt.setAttribute('y', y + cellH / 2 + 4);
+      txt.setAttribute('text-anchor', 'middle');
+      txt.style.fill = pct > 45 ? brandOn : textMain;
+      txt.textContent = v;
+      cellsG.appendChild(txt);
+
+      /* 提示框交互：mouseenter 显示，mouseleave 隐藏 */
+      rect.addEventListener('mouseenter', function (event) {
+        var ri = parseInt(rect.getAttribute('data-row'), 10);
+        var cj = parseInt(rect.getAttribute('data-col'), 10);
+        var val = values[ri][cj];
+        var pctOfMax = (val / maxVal * 100).toFixed(0);
+        tooltipEl.innerHTML =
+          '<div class="hm-tooltip__title">' + rows[ri] + ' · ' + cols[cj] + '</div>' +
+          '<div class="hm-tooltip__row"><span class="hm-tooltip__label">提交数</span><span class="hm-tooltip__value">' + val + '</span></div>' +
+          '<div class="hm-tooltip__row"><span class="hm-tooltip__label">占峰值</span><span class="hm-tooltip__value">' + pctOfMax + '%</span></div>';
+        var wrap = root.querySelector('[data-chart-wrap]');
+        var wrapRect = wrap.getBoundingClientRect();
+        var tipX = event.offsetX + 12;
+        var tipY = event.offsetY + 12;
+        if (tipX + 170 > wrapRect.width) { tipX = event.offsetX - 182; }
+        if (tipY + 80 > wrapRect.height) { tipY = event.offsetY - 92; }
+        tooltipEl.style.left = tipX + 'px';
+        tooltipEl.style.top = tipY + 'px';
+        tooltipEl.hidden = false;
+      });
+      rect.addEventListener('mouseleave', function () {
+        tooltipEl.hidden = true;
+      });
+    });
+  });
+
+  /* SVG 渲染成功后隐藏降级表格，显示 SVG */
+  root.querySelector('[data-fallback]').style.display = 'none';
+  root.querySelector('[data-chart-wrap]').hidden = false;
+})();
+</script>

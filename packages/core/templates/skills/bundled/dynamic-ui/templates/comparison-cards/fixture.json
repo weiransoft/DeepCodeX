@@ -1,0 +1,59 @@
+{
+  "title": "前端框架选型对比",
+  "description": "React、Vue、Svelte 三个候选框架在性能、生态、学习曲线维度上的对比，React 为推荐选项",
+  "data": {
+    "options": [
+      {
+        "name": "React",
+        "subtitle": "Meta · MIT 许可",
+        "recommended": true,
+        "metric": {
+          "label": "生态评分 / 100",
+          "value": 92,
+          "max": 100,
+          "series": "chart-series-1"
+        },
+        "tags": ["成熟生态", "灵活组合"],
+        "rows": [
+          { "label": "运行性能", "value": "良好" },
+          { "label": "学习曲线", "value": "中等" },
+          { "label": "社区规模", "value": "极大" }
+        ]
+      },
+      {
+        "name": "Vue",
+        "subtitle": "Evan You · MIT 许可",
+        "recommended": false,
+        "metric": {
+          "label": "生态评分 / 100",
+          "value": 85,
+          "max": 100,
+          "series": "chart-series-2"
+        },
+        "tags": ["易上手", "文档完善"],
+        "rows": [
+          { "label": "运行性能", "value": "良好" },
+          { "label": "学习曲线", "value": "平缓" },
+          { "label": "社区规模", "value": "中大型" }
+        ]
+      },
+      {
+        "name": "Svelte",
+        "subtitle": "Svelte Team · MIT 许可",
+        "recommended": false,
+        "metric": {
+          "label": "生态评分 / 100",
+          "value": 78,
+          "max": 100,
+          "series": "chart-series-3"
+        },
+        "tags": ["编译优化", "体积小"],
+        "rows": [
+          { "label": "运行性能", "value": "优秀" },
+          { "label": "学习曲线", "value": "平缓" },
+          { "label": "社区规模", "value": "中型" }
+        ]
+      }
+    ]
+  }
+}

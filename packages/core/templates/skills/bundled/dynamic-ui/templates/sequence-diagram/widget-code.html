@@ -1,0 +1,202 @@
+<style>
+/* ===== Token 定义（亮色默认 + 暗色覆盖）===== */
+:root {
+  color-scheme: light;
+  --surface: #F7F7F8;
+  --surface-muted: #EFEFF2;
+  --text: #171717;
+  --text-muted: #52525B;
+  --border: rgba(23, 23, 23, 0.12);
+
+  --brand: #4B3FE3;
+  --brand-soft: #F2F7FF;
+  --brand-soft-strong: #E5EAFF;
+  --brand-text: #1A1759;
+  --brand-on: #FFFFFF;
+  --chart-series-1: #3C2ECA;
+  --chart-series-2: #A9AEFF;
+  --chart-series-3: #6F6FFF;
+  --chart-series-4: #22A5F7;
+  --chart-other: #D3D4DA;
+
+  --success: #1DC981;
+  --warning: #EFAA17;
+  --danger: #E8463A;
+
+  --radius: 8px;
+  --radius-card: 12px;
+  --radius-full: 999px;
+  --spacer-4: 4px;
+  --spacer-8: 8px;
+  --spacer-12: 12px;
+  --spacer-16: 16px;
+  --spacer-20: 20px;
+  --spacer-24: 24px;
+  --font-sans: "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-metric: "Inter", "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-strong: 600;
+  --text-caption: 12px/18px;
+  --text-body: 14px/20px;
+  --text-title: 16px/24px;
+  --text-code: 13px/20px;
+}
+:root[data-widget-theme="dark"] {
+  color-scheme: dark;
+  --surface: #171717;
+  --surface-muted: #262626;
+  --text: #E5E5E5;
+  --text-muted: #A1A1AA;
+  --border: rgba(229, 229, 229, 0.12);
+  --brand: #6054F1;
+  --brand-soft: #1A1759;
+  --brand-soft-strong: #3C2ECA;
+  --brand-text: #CFD8FF;
+  --chart-series-1: #4B3FE3;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-widget-theme="light"]) {
+    --surface: #171717;
+    --surface-muted: #262626;
+    --text: #E5E5E5;
+    --text-muted: #A1A1AA;
+    --border: rgba(229, 229, 229, 0.12);
+    --brand: #6054F1;
+    --brand-soft: #1A1759;
+    --brand-soft-strong: #3C2ECA;
+    --brand-text: #CFD8FF;
+    --chart-series-1: #4B3FE3;
+  }
+}
+
+/* ===== 组件样式 ===== */
+.sd-widget {
+  color: var(--text);
+  background: transparent;
+  font: var(--weight-regular) var(--text-body) var(--font-sans);
+}
+.sd-head { margin: 0 0 var(--spacer-12); }
+.sd-head__title {
+  font: var(--weight-medium) var(--text-title) var(--font-sans);
+  color: var(--text);
+  margin: 0;
+}
+.sd-head__sub {
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text-muted);
+  margin: var(--spacer-4) 0 0;
+}
+.sd-svg { display: block; width: 100%; height: auto; }
+
+/* 参与者头：c-brand 类（brand-soft 填充 + brand 描边） */
+g.c-brand > rect { fill: var(--brand-soft); stroke: var(--brand); stroke-width: 1.5; }
+.c-brand > .pt { fill: var(--brand-text); font: var(--weight-medium) var(--text-body) var(--font-sans); }
+
+/* 生命线：垂直虚线，stroke-dasharray 4 4 */
+.life { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 4 4; }
+
+/* 消息线：fill=none，round join/cap */
+.msg { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.msg-sync { stroke: var(--text-muted); stroke-width: 1.5; }
+.msg-sync-brand { stroke: var(--brand); stroke-width: 2; }
+.msg-return { stroke: var(--text-muted); stroke-width: 1.5; stroke-dasharray: 6 4; }
+
+/* 消息标签：caption，居中于参与者间 */
+.msg-label { fill: var(--text); font: var(--weight-medium) var(--text-caption) var(--font-sans); }
+.msg-label-muted { fill: var(--text-muted); font: var(--weight-regular) var(--text-caption) var(--font-sans); }
+</style>
+
+<div data-dynamic-ui-widget data-template="sequence-diagram" class="sd-widget">
+  <div class="sd-head">
+    <h3 class="sd-head__title">登录流程时序</h3>
+    <p class="sd-head__sub">客户端经网关调用认证与用户服务的请求链，焦点路径为登录与令牌校验</p>
+  </div>
+
+  <svg class="sd-svg" viewBox="0 0 720 510" role="img" aria-label="登录流程时序图，四参与者间六条有序消息">
+    <defs>
+      <!-- 同步消息：实心三角箭头（neutral 与 brand 两套） -->
+      <marker id="sd-arrow-solid" viewBox="0 0 10 10" refX="9" refY="5"
+              markerWidth="8" markerHeight="8" orient="auto" markerUnits="userSpaceOnUse">
+        <path d="M0,0 L10,5 L0,10 Z" fill="var(--text-muted)"/>
+      </marker>
+      <marker id="sd-arrow-solid-brand" viewBox="0 0 10 10" refX="9" refY="5"
+              markerWidth="8" markerHeight="8" orient="auto" markerUnits="userSpaceOnUse">
+        <path d="M0,0 L10,5 L0,10 Z" fill="var(--brand)"/>
+      </marker>
+      <!-- 异步/返回消息：开放 V 形箭头 -->
+      <marker id="sd-arrow-open" viewBox="0 0 10 10" refX="9" refY="5"
+              markerWidth="8" markerHeight="8" orient="auto" markerUnits="userSpaceOnUse">
+        <path d="M0,0 L10,5 L0,10" fill="none" stroke="var(--text-muted)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+      </marker>
+    </defs>
+
+    <!-- 生命线（垂直虚线，4 条） -->
+    <line class="life" x1="90" y1="56" x2="90" y2="500"/>
+    <line class="life" x1="270" y1="56" x2="270" y2="500"/>
+    <line class="life" x1="450" y1="56" x2="450" y2="500"/>
+    <line class="life" x1="630" y1="56" x2="630" y2="500"/>
+
+    <!-- 参与者头部（c-brand，固定列） -->
+    <g class="c-brand">
+      <rect x="35" y="20" width="110" height="36" rx="8" ry="8"/>
+      <text class="pt" x="90" y="43" text-anchor="middle">Client</text>
+    </g>
+    <g class="c-brand">
+      <rect x="215" y="20" width="110" height="36" rx="8" ry="8"/>
+      <text class="pt" x="270" y="43" text-anchor="middle">Gateway</text>
+    </g>
+    <g class="c-brand">
+      <rect x="395" y="20" width="110" height="36" rx="8" ry="8"/>
+      <text class="pt" x="450" y="43" text-anchor="middle">AuthService</text>
+    </g>
+    <g class="c-brand">
+      <rect x="575" y="20" width="110" height="36" rx="8" ry="8"/>
+      <text class="pt" x="630" y="43" text-anchor="middle">UserService</text>
+    </g>
+
+    <!-- ===== 有序消息（行距 72 单位） ===== -->
+
+    <!-- 1. Client → Gateway：POST /login（同步，brand 焦点路径起点） -->
+    <text class="msg-label" x="180" y="96" text-anchor="middle">POST /login</text>
+    <path class="msg msg-sync-brand" d="M90,110 L270,110" marker-end="url(#sd-arrow-solid-brand)"/>
+
+    <!-- 2. Gateway → Gateway：validate input（自调用，半圆回环） -->
+    <text class="msg-label-muted" x="320" y="186">validate input</text>
+    <path class="msg msg-sync" d="M270,174 L300,174 A8,8 0 0 1 300,190 L270,190" marker-end="url(#sd-arrow-solid)"/>
+
+    <!-- 3. Gateway → AuthService：verifyToken（同步，brand 焦点路径） -->
+    <text class="msg-label" x="360" y="240" text-anchor="middle">verifyToken</text>
+    <path class="msg msg-sync-brand" d="M270,254 L450,254" marker-end="url(#sd-arrow-solid-brand)"/>
+
+    <!-- 4. AuthService → Gateway：claims（返回，虚线 + 开放箭头，标签下方） -->
+    <path class="msg msg-return" d="M450,326 L270,326" marker-end="url(#sd-arrow-open)"/>
+    <text class="msg-label-muted" x="360" y="340" text-anchor="middle">claims</text>
+
+    <!-- 5. Gateway → UserService：getProfile（同步） -->
+    <text class="msg-label-muted" x="450" y="384" text-anchor="middle">getProfile</text>
+    <path class="msg msg-sync" d="M270,398 L630,398" marker-end="url(#sd-arrow-solid)"/>
+
+    <!-- 6. UserService → Gateway：profile + 200（返回，虚线 + 开放箭头，标签下方） -->
+    <path class="msg msg-return" d="M630,470 L270,470" marker-end="url(#sd-arrow-open)"/>
+    <text class="msg-label-muted" x="450" y="484" text-anchor="middle">profile + 200</text>
+  </svg>
+</div>
+
+<script>
+/* 根选择器初始化：限定在根元素内，绑定前设 data-mounted 防止重复挂载 */
+(function () {
+  var root = document.querySelector('[data-dynamic-ui-widget][data-template="sequence-diagram"]:not([data-mounted])');
+  if (!root) { return; }
+  root.setAttribute('data-mounted', 'true');
+
+  /* 参与者与消息检视：键盘可达，焦点时切换 data-examined 供 CSS/辅助技术强调 */
+  var actors = root.querySelectorAll('g.c-brand');
+  actors.forEach(function (actor) {
+    actor.setAttribute('tabindex', '0');
+    actor.addEventListener('focus', function () { actor.setAttribute('data-examined', 'true'); });
+    actor.addEventListener('blur', function () { actor.removeAttribute('data-examined'); });
+  });
+})();
+</script>

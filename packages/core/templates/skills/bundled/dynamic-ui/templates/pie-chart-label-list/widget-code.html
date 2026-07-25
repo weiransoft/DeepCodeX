@@ -1,0 +1,365 @@
+<style>
+/* ===== Token 定义（亮色默认 + 暗色覆盖）=====
+   置于 <style> 顶部，组件样式之前；默认紫色主题。 */
+:root {
+  color-scheme: light;
+  --surface: #F7F7F8; --surface-muted: #EFEFF2;
+  --text: #171717; --text-muted: #52525B;
+  --border: rgba(23, 23, 23, 0.12);
+  --brand: #4B3FE3; --brand-soft: #F2F7FF; --brand-soft-strong: #E5EAFF;
+  --brand-text: #1A1759; --brand-on: #FFFFFF;
+  --chart-series-1: #3C2ECA; --chart-series-2: #A9AEFF;
+  --chart-series-3: #6F6FFF; --chart-series-4: #22A5F7;
+  --chart-other: #D3D4DA;
+  --success: #1DC981; --warning: #EFAA17; --danger: #E8463A;
+  --radius: 8px; --radius-card: 12px; --radius-full: 999px;
+  --spacer-4: 4px; --spacer-8: 8px; --spacer-12: 12px;
+  --spacer-16: 16px; --spacer-20: 20px; --spacer-24: 24px;
+  --font-sans: "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-metric: "Inter", "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --weight-regular: 400; --weight-medium: 500; --weight-strong: 600;
+  --text-caption: 12px/18px; --text-body: 14px/20px;
+  --text-title: 16px/24px; --text-code: 13px/20px;
+}
+/* 暗色主题覆盖：默认紫色 brand 暗色阶 */
+:root[data-widget-theme="dark"] {
+  color-scheme: dark;
+  --surface: #171717; --surface-muted: #262626;
+  --text: #E5E5E5; --text-muted: #A1A1AA;
+  --border: rgba(229, 229, 229, 0.12);
+  --brand: #6054F1; --brand-soft: #1A1759; --brand-soft-strong: #3C2ECA;
+  --brand-text: #CFD8FF; --chart-series-1: #4B3FE3;
+}
+/* 独立打开时跟随系统暗色（可选降级） */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-widget-theme="light"]) {
+    --surface: #171717; --surface-muted: #262626;
+    --text: #E5E5E5; --text-muted: #A1A1AA;
+    --border: rgba(229, 229, 229, 0.12);
+    --brand: #6054F1; --brand-soft: #1A1759; --brand-soft-strong: #3C2ECA;
+    --brand-text: #CFD8FF; --chart-series-1: #4B3FE3;
+  }
+}
+
+/* ===== 组件样式 ===== */
+.pcl-widget {
+  color: var(--text); background: transparent;
+  font: var(--weight-regular) var(--text-body) var(--font-sans); letter-spacing: 0;
+}
+.pcl-head { margin: 0 0 var(--spacer-16); }
+.pcl-head__title {
+  font: var(--weight-medium) var(--text-title) var(--font-sans);
+  color: var(--text); margin: 0;
+}
+.pcl-head__sub {
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text-muted); margin: var(--spacer-4) 0 0;
+}
+/* 主体布局：左侧饼图 + 右侧标签列表；窄屏堆叠 */
+.pcl-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: var(--spacer-20);
+  align-items: center;
+}
+@media (max-width: 560px) {
+  .pcl-body { grid-template-columns: 1fr; }
+}
+/* 图表面板：中性表面 + 普通边框 + 显式高度 + position: relative */
+.pcl-panel {
+  position: relative; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius-card);
+  padding: var(--spacer-16); height: clamp(220px, 32vw, 360px);
+}
+.pcl-canvas-wrap { position: relative; width: 100%; height: 100%; }
+/* 可见降级表格：JS 执行前可见，Chart.js 创建成功后隐藏 */
+.pcl-fallback { width: 100%; border-collapse: collapse; }
+.pcl-fallback caption {
+  font: var(--weight-medium) var(--text-caption) var(--font-sans);
+  color: var(--text-muted); text-align: left; padding-bottom: var(--spacer-8);
+}
+.pcl-fallback th, .pcl-fallback td {
+  padding: var(--spacer-8) var(--spacer-12);
+  border-bottom: 1px solid var(--border);
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text); text-align: right; font-variant-numeric: tabular-nums;
+}
+.pcl-fallback th { color: var(--text-muted); font-weight: var(--weight-medium); }
+.pcl-fallback td:first-child, .pcl-fallback th:first-child { text-align: left; }
+/* 侧标签列表（HTML/CSS 图例替代 Chart.js legend） */
+.pcl-list {
+  display: flex; flex-direction: column; gap: var(--spacer-8);
+  padding: var(--spacer-4) 0;
+}
+.pcl-list__item {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: var(--spacer-12);
+  padding: var(--spacer-8) var(--spacer-12);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text);
+  transition: border-color 100ms ease;
+}
+.pcl-list__item--focus {
+  border-color: var(--brand);
+  border-width: 1.5px;
+}
+.pcl-list__dot {
+  width: 10px; height: 10px; border-radius: var(--radius-full); flex-shrink: 0;
+}
+.pcl-list__name {
+  color: var(--text); font-weight: var(--weight-medium);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pcl-list__pct {
+  font: var(--weight-medium) var(--text-code) var(--font-mono);
+  color: var(--text-muted); font-variant-numeric: tabular-nums;
+}
+.pcl-list__val {
+  font: var(--weight-regular) var(--text-code) var(--font-mono);
+  color: var(--text-muted); font-variant-numeric: tabular-nums;
+  min-width: 56px; text-align: right;
+}
+/* HTML 提示框（Shadcn 风格）：默认隐藏，由 external 处理器定位 */
+.pcl-tooltip {
+  position: absolute; pointer-events: none; opacity: 0;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: var(--spacer-8) var(--spacer-12);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text); transition: opacity 100ms ease;
+  white-space: nowrap; z-index: 10; min-width: 140px;
+}
+.pcl-tooltip__row {
+  display: flex; align-items: center; gap: var(--spacer-8);
+}
+.pcl-tooltip__dot {
+  width: 8px; height: 8px; border-radius: var(--radius-full); flex-shrink: 0;
+}
+.pcl-tooltip__name { color: var(--text-muted); }
+.pcl-tooltip__value {
+  margin-left: auto;
+  font: var(--weight-medium) var(--text-code) var(--font-mono);
+  color: var(--text); font-variant-numeric: tabular-nums;
+}
+.pcl-tooltip__pct {
+  margin-top: var(--spacer-4);
+  font: var(--weight-strong) var(--text-code) var(--font-mono);
+  color: var(--text); font-variant-numeric: tabular-nums;
+}
+</style>
+
+<div data-dynamic-ui-widget data-template="pie-chart-label-list" class="pcl-widget">
+  <!-- 紧凑标题：场景定位，不含分析结论 -->
+  <div class="pcl-head">
+    <h3 class="pcl-head__title">设备类型占比</h3>
+    <p class="pcl-head__sub">2024 年 Q4 用户访问设备分布（单位：万人）</p>
+  </div>
+
+  <!-- 主体：左侧饼图 + 右侧标签列表 -->
+  <div class="pcl-body">
+    <!-- 图表面板：含可见降级表格与 canvas 容器 -->
+    <div class="pcl-panel">
+      <!-- 可见降级：JS 执行前展示数据表，Chart.js 创建成功后由脚本隐藏 -->
+      <table class="pcl-fallback" data-pcl-fallback>
+        <caption>设备类型分布（万人）</caption>
+        <thead><tr><th>设备</th><th>数值</th><th>占比</th></tr></thead>
+        <tbody>
+          <tr><td>桌面端</td><td>4200</td><td>49.7%</td></tr>
+          <tr><td>移动端</td><td>2800</td><td>33.1%</td></tr>
+          <tr><td>平板</td><td>950</td><td>11.2%</td></tr>
+          <tr><td>智能电视</td><td>320</td><td>3.8%</td></tr>
+          <tr><td>其他</td><td>180</td><td>2.1%</td></tr>
+        </tbody>
+      </table>
+
+      <!-- canvas 容器：显式高度 + position: relative，初始隐藏直至 Chart.js 加载 -->
+      <div class="pcl-canvas-wrap" data-pcl-canvas-wrap style="display:none;">
+        <canvas data-pcl-canvas aria-label="设备类型占比饼图"></canvas>
+      </div>
+
+      <!-- HTML 提示框容器：由 external 处理器定位 -->
+      <div class="pcl-tooltip" data-pcl-tooltip role="tooltip" aria-hidden="true">
+        <div class="pcl-tooltip__row">
+          <span class="pcl-tooltip__dot" data-pcl-tooltip-dot></span>
+          <span class="pcl-tooltip__name" data-pcl-tooltip-name></span>
+          <span class="pcl-tooltip__value" data-pcl-tooltip-value></span>
+        </div>
+        <div class="pcl-tooltip__pct" data-pcl-tooltip-pct></div>
+      </div>
+    </div>
+
+    <!-- 侧标签列表：HTML/CSS 实现，与切片色一一对应；由脚本动态填充 -->
+    <div class="pcl-list" data-pcl-list></div>
+  </div>
+</div>
+
+<!-- Chart.js UMD 加载：仅允许的 CDN，widget 底部 -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script>
+/* 根选择器初始化：限定在根元素内，绑定前设 data-mounted 防止重复挂载 */
+(function () {
+  var root = document.querySelector('[data-dynamic-ui-widget][data-template="pie-chart-label-list"]:not([data-mounted])');
+  if (!root) { return; }
+  root.setAttribute('data-mounted', 'true');
+
+  /* 数据集：与 fixture.json 保持一致；focusSlice 标记唯一焦点（桌面端占比最高） */
+  var slices = [
+    { name: '桌面端', value: 4200 },
+    { name: '移动端', value: 2800 },
+    { name: '平板', value: 950 },
+    { name: '智能电视', value: 320 },
+    { name: '其他', value: 180 }
+  ];
+  var focusSlice = '桌面端';   /* 唯一可见焦点 */
+  var unit = '万人';
+  var total = slices.reduce(function (s, sl) { return s + sl.value; }, 0);
+
+  /* 读取 token：从根元素计算样式取 chart-series 颜色，避免硬编码 */
+  var cs = getComputedStyle(root);
+  var COLORS = [
+    cs.getPropertyValue('--chart-series-1').trim() || '#3C2ECA',
+    cs.getPropertyValue('--chart-series-2').trim() || '#A9AEFF',
+    cs.getPropertyValue('--chart-series-3').trim() || '#6F6FFF',
+    cs.getPropertyValue('--chart-series-4').trim() || '#22A5F7'
+  ];
+  var COLOR_OTHER = cs.getPropertyValue('--chart-other').trim() || '#D3D4DA';
+  var COLOR_BRAND = cs.getPropertyValue('--brand').trim() || '#4B3FE3';
+  var COLOR_BORDER = cs.getPropertyValue('--border').trim() || 'rgba(23,23,23,.12)';
+  var COLOR_TEXT = cs.getPropertyValue('--text').trim() || '#171717';
+  var COLOR_TEXT_MUTED = cs.getPropertyValue('--text-muted').trim() || '#52525B';
+
+  /**
+   * 取切片颜色：前 4 个按序用 chart-series-1..4，第 5 个或余项用 chart-other
+   * @param {number} idx 切片下标
+   * @returns {string} 颜色 token 值
+   */
+  function sliceColor(idx) { return idx < COLORS.length ? COLORS[idx] : COLOR_OTHER; }
+
+  /* 渲染侧标签列表：色块 + 名称 + 百分比 + 数值，与切片色一一对应 */
+  var listEl = root.querySelector('[data-pcl-list]');
+  slices.forEach(function (sl, i) {
+    var pct = total > 0 ? (sl.value / total * 100) : 0;
+    var item = document.createElement('div');
+    item.className = 'pcl-list__item';
+    if (sl.name === focusSlice) { item.classList.add('pcl-list__item--focus'); }
+    item.innerHTML =
+      '<span class="pcl-list__dot" style="background:' + sliceColor(i) + '"></span>' +
+      '<span class="pcl-list__name">' + sl.name + '</span>' +
+      '<span class="pcl-list__pct">' + pct.toFixed(1) + '%</span>' +
+      '<span class="pcl-list__val">' + sl.value + ' ' + unit + '</span>';
+    listEl.appendChild(item);
+  });
+
+  /* 降级表格与 canvas 容器引用：仅 Chart.js 创建成功后才隐藏降级 */
+  var fallbackEl = root.querySelector('[data-pcl-fallback]');
+  var canvasWrap = root.querySelector('[data-pcl-canvas-wrap]');
+  var canvas = root.querySelector('[data-pcl-canvas]');
+
+  /* 降级门槛 1：Chart.js 未加载 → 保留可见表格（侧标签列表仍可见） */
+  if (typeof window.Chart === 'undefined') { return; }
+  /* 降级门槛 2：canvas 不可用 → 保留可见表格 */
+  if (!canvas || !canvas.getContext) { return; }
+
+  /* 构造 Chart.js 数据集：单 dataset，backgroundColor 为颜色数组 */
+  var backgroundColors = slices.map(function (_, i) { return sliceColor(i); });
+  /* 焦点切片：偏移与描边 */
+  var offsets = slices.map(function (sl) { return sl.name === focusSlice ? 12 : 0; });
+  var borderColors = slices.map(function (sl) {
+    return sl.name === focusSlice ? COLOR_BRAND : COLOR_BORDER;
+  });
+  var borderWidths = slices.map(function (sl) {
+    return sl.name === focusSlice ? 2 : 1;
+  });
+
+  /* HTML 提示框元素引用：external 处理器更新其内容与位置 */
+  var tooltipEl = root.querySelector('[data-pcl-tooltip]');
+  var tooltipDot = root.querySelector('[data-pcl-tooltip-dot]');
+  var tooltipName = root.querySelector('[data-pcl-tooltip-name]');
+  var tooltipValue = root.querySelector('[data-pcl-tooltip-value]');
+  var tooltipPct = root.querySelector('[data-pcl-tooltip-pct]');
+
+  /**
+   * external 提示框处理器：渲染 Shadcn 风格 HTML 提示
+   * 禁用 Chart.js 内建 canvas 提示，所有定位约束在图表面板内
+   */
+  function externalTooltipHandler(context) {
+    var chart = context.chart;
+    var tooltip = chart.tooltip;
+    if (tooltip.opacity === 0) {
+      tooltipEl.style.opacity = '0';
+      tooltipEl.setAttribute('aria-hidden', 'true');
+      return;
+    }
+    if (tooltip.dataPoints && tooltip.dataPoints.length > 0) {
+      var dp = tooltip.dataPoints[0];
+      var idx = dp.dataIndex;
+      var sl = slices[idx];
+      var pct = total > 0 ? (sl.value / total * 100) : 0;
+      tooltipDot.style.background = sliceColor(idx);
+      tooltipName.textContent = sl.name;
+      tooltipValue.textContent = sl.value + ' ' + unit;
+      tooltipPct.textContent = pct.toFixed(1) + '%';
+    }
+    /* 定位：基于图表面板相对坐标，避免溢出 */
+    var panel = root.querySelector('.pcl-panel');
+    var panelRect = panel.getBoundingClientRect();
+    var canvasRect = chart.canvas.getBoundingClientRect();
+    var tooltipWidth = tooltipEl.offsetWidth;
+    var left = canvasRect.left - panelRect.left + tooltip.caretX + 12;
+    if (left + tooltipWidth > panelRect.width - 8) {
+      left = canvasRect.left - panelRect.left + tooltip.caretX - tooltipWidth - 12;
+    }
+    var top = canvasRect.top - panelRect.top + tooltip.caretY - 12;
+    tooltipEl.style.left = left + 'px';
+    tooltipEl.style.top = top + 'px';
+    tooltipEl.style.opacity = '1';
+    tooltipEl.setAttribute('aria-hidden', 'false');
+  }
+
+  try {
+    /* 创建 Chart.js 实例：responsive + maintainAspectRatio: false + 显式容器高度 */
+    var chart = new window.Chart(canvas, {
+      type: 'pie',
+      data: {
+        labels: slices.map(function (sl) { return sl.name; }),
+        datasets: [{
+          data: slices.map(function (sl) { return sl.value; }),
+          backgroundColor: backgroundColors,
+          borderColor: borderColors,
+          borderWidth: borderWidths,
+          offset: offsets,
+          hoverOffset: 8
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        animation: { duration: 180 },          /* 首次渲染 120-220ms */
+        hover: { mode: 'nearest', intersect: true },
+        interaction: { mode: 'nearest', intersect: true },
+        plugins: {
+          legend: { display: false },           /* 禁用内建 legend，由侧标签列表承担 */
+          tooltip: {
+            enabled: false,                    /* 禁用内建 canvas 提示 */
+            external: externalTooltipHandler   /* 用 HTML 处理器渲染 */
+          }
+        }
+      }
+    });
+
+    /* 创建成功：隐藏可见降级表格，显示 canvas */
+    fallbackEl.style.display = 'none';
+    canvasWrap.style.display = 'block';
+  } catch (err) {
+    /* 创建失败：保留可见降级表格，不抛错（用户仍可读数据） */
+    if (typeof console !== 'undefined' && console.warn) {
+      console.warn('[pie-chart-label-list] Chart.js 初始化失败，保留降级表格', err);
+    }
+  }
+})();
+</script>

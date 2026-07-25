@@ -1,0 +1,47 @@
+{
+  "title": "微服务依赖树",
+  "description": "API 网关到下游认证与订单服务的调用依赖层级，主路径为网关 → 订单 → 支付",
+  "data": {
+    "root": {
+      "id": "gateway",
+      "title": "API Gateway",
+      "subtitle": "入口",
+      "focus": true,
+      "children": [
+        {
+          "id": "auth",
+          "title": "Auth Svc",
+          "subtitle": "认证",
+          "children": [
+            {
+              "id": "user-db",
+              "title": "User DB",
+              "subtitle": "用户库",
+              "children": []
+            }
+          ]
+        },
+        {
+          "id": "order",
+          "title": "Order Svc",
+          "subtitle": "订单",
+          "children": [
+            {
+              "id": "payment",
+              "title": "Payment",
+              "subtitle": "支付",
+              "children": []
+            },
+            {
+              "id": "inventory",
+              "title": "Inventory",
+              "subtitle": "库存",
+              "children": []
+            }
+          ]
+        }
+      ]
+    },
+    "mainPath": ["gateway", "order", "payment"]
+  }
+}

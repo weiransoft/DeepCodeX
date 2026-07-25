@@ -1,0 +1,19 @@
+{
+  "title": "渠道收入构成",
+  "description": "5 个渠道收入占比围绕总收入头条指标，展示份额构成与焦点渠道",
+  "data": {
+    "unit": "万元",
+    "total": 1240.0,
+    "centerLabel": "总收入",
+    "centerValue": "1,240.0",
+    "headlineSlice": "自然搜索",
+    "headlinePct": 38.0,
+    "slices": [
+      { "name": "自然搜索", "value": 471.2 },
+      { "name": "付费广告", "value": 347.2 },
+      { "name": "直接访问", "value": 223.2 },
+      { "name": "社交媒体", "value": 136.4 },
+      { "name": "其他", "value": 62.0 }
+    ]
+  }
+}

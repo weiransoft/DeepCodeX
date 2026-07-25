@@ -1,0 +1,30 @@
+{
+  "title": "用户流量路径分布",
+  "description": "来源 → 互动 → 结果 三阶段加权流动，展示流量分配与转化路径量级",
+  "data": {
+    "unit": "用户数",
+    "stages": ["来源", "互动", "结果"],
+    "focusNode": "完成购买",
+    "nodes": [
+      { "name": "自然搜索", "color": "chart-series-1" },
+      { "name": "付费广告", "color": "chart-series-2" },
+      { "name": "直接访问", "color": "chart-series-3" },
+      { "name": "浏览详情", "color": "chart-series-1" },
+      { "name": "加入购物车", "color": "chart-series-4" },
+      { "name": "完成购买", "color": "success" },
+      { "name": "流失", "color": "chart-other" }
+    ],
+    "flows": [
+      { "from": "自然搜索", "to": "浏览详情", "flow": 4200 },
+      { "from": "自然搜索", "to": "加入购物车", "flow": 800 },
+      { "from": "付费广告", "to": "浏览详情", "flow": 3100 },
+      { "from": "付费广告", "to": "加入购物车", "flow": 600 },
+      { "from": "直接访问", "to": "浏览详情", "flow": 1800 },
+      { "from": "直接访问", "to": "加入购物车", "flow": 700 },
+      { "from": "浏览详情", "to": "完成购买", "flow": 1200 },
+      { "from": "浏览详情", "to": "流失", "flow": 7900 },
+      { "from": "加入购物车", "to": "完成购买", "flow": 1500 },
+      { "from": "加入购物车", "to": "流失", "flow": 600 }
+    ]
+  }
+}

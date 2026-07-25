@@ -1,0 +1,350 @@
+<style>
+/* ===== Token 定义（亮色默认 + 暗色覆盖）=====
+   置于 <style> 顶部，组件样式之前；默认紫色主题。 */
+:root {
+  color-scheme: light;
+  --surface: #F7F7F8;
+  --surface-muted: #EFEFF2;
+  --text: #171717;
+  --text-muted: #52525B;
+  --border: rgba(23, 23, 23, 0.12);
+
+  --brand: #4B3FE3;
+  --brand-soft: #F2F7FF;
+  --brand-soft-strong: #E5EAFF;
+  --brand-text: #1A1759;
+  --brand-on: #FFFFFF;
+  --chart-series-1: #3C2ECA;
+  --chart-series-2: #A9AEFF;
+  --chart-series-3: #6F6FFF;
+  --chart-series-4: #22A5F7;
+  --chart-other: #D3D4DA;
+
+  --success: #1DC981;
+  --warning: #EFAA17;
+  --danger: #E8463A;
+
+  --radius: 8px;
+  --radius-card: 12px;
+  --radius-full: 999px;
+  --spacer-4: 4px;
+  --spacer-8: 8px;
+  --spacer-12: 12px;
+  --spacer-16: 16px;
+  --spacer-20: 20px;
+  --spacer-24: 24px;
+  --font-sans: "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-metric: "Inter", "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-strong: 600;
+  --text-caption: 12px/18px;
+  --text-body: 14px/20px;
+  --text-title: 16px/24px;
+  --text-code: 13px/20px;
+}
+/* 暗色主题覆盖：默认紫色 brand 暗色阶 */
+:root[data-widget-theme="dark"] {
+  color-scheme: dark;
+  --surface: #171717;
+  --surface-muted: #262626;
+  --text: #E5E5E5;
+  --text-muted: #A1A1AA;
+  --border: rgba(229, 229, 229, 0.12);
+
+  --brand: #6054F1;
+  --brand-soft: #1A1759;
+  --brand-soft-strong: #3C2ECA;
+  --brand-text: #CFD8FF;
+  --chart-series-1: #4B3FE3;
+}
+/* 独立打开时跟随系统暗色（可选降级） */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-widget-theme="light"]) {
+    --surface: #171717;
+    --surface-muted: #262626;
+    --text: #E5E5E5;
+    --text-muted: #A1A1AA;
+    --border: rgba(229, 229, 229, 0.12);
+    --brand: #6054F1;
+    --brand-soft: #1A1759;
+    --brand-soft-strong: #3C2ECA;
+    --brand-text: #CFD8FF;
+    --chart-series-1: #4B3FE3;
+  }
+}
+
+/* ===== 组件样式 ===== */
+.cc-widget {
+  color: var(--text);
+  background: transparent;
+  font: var(--weight-regular) var(--text-body) var(--font-sans);
+  letter-spacing: 0;
+}
+/* 顶部紧凑标题：仅一句话，不承载洞察/结论 */
+.cc-head {
+  margin: 0 0 var(--spacer-16);
+}
+.cc-head__title {
+  font: var(--weight-medium) var(--text-title) var(--font-sans);
+  color: var(--text);
+  margin: 0;
+}
+.cc-head__sub {
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text-muted);
+  margin: var(--spacer-4) 0 0;
+}
+/* 卡片网格：宽屏并排，窄屏自动换行/堆叠 */
+.cc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+  gap: var(--spacer-16);
+}
+/* 单张选项卡：中性表面 + 普通边框；圆角 --radius-card，内边距 --spacer-20 */
+.cc-card {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: var(--spacer-20);
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+/* 推荐选项：仅 --brand 边框强调，不填充背景 */
+.cc-card--recommended {
+  border-color: var(--brand);
+  border-width: 1.5px;
+}
+/* 悬停/聚焦检视态：轻微强调，≤120ms */
+.cc-card:focus-within,
+.cc-card:hover {
+  border-color: var(--brand);
+}
+/* 推荐徽章：右上角胶囊，brand 文字 */
+.cc-badge {
+  position: absolute;
+  top: var(--spacer-12);
+  right: var(--spacer-12);
+  display: inline-flex;
+  align-items: center;
+  padding: var(--spacer-4) var(--spacer-12);
+  border-radius: var(--radius-full);
+  background: var(--brand-soft-strong);
+  color: var(--brand-text);
+  font: var(--weight-medium) var(--text-caption) var(--font-sans);
+}
+/* 卡标题：--text-title + medium；唯一头条 */
+.cc-card__title {
+  font: var(--weight-medium) var(--text-title) var(--font-sans);
+  color: var(--text);
+  margin: 0;
+  padding-right: var(--spacer-24); /* 避让徽章 */
+}
+/* 副标题/元数据：caption + muted */
+.cc-card__meta {
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text-muted);
+  margin: var(--spacer-4) 0 0;
+}
+/* 每卡至多一个头条数值（KPI 强调） */
+.cc-kpi {
+  margin: var(--spacer-16) 0 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--spacer-8);
+}
+.cc-kpi__value {
+  font: var(--weight-strong) var(--text-title) var(--font-metric);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.cc-card--recommended .cc-kpi__value {
+  color: var(--brand); /* 推荐卡焦点数值 */
+}
+.cc-kpi__label {
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text-muted);
+}
+/* 紧凑评分条：用 chart-series 表达分数，非装饰色 */
+.cc-bar {
+  margin-top: var(--spacer-8);
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--surface-muted);
+  overflow: hidden;
+}
+.cc-bar__fill {
+  height: 100%;
+  border-radius: var(--radius-full);
+  background: var(--chart-series-1);
+}
+/* 分隔行：维度 + 右对齐值，用 --border 分隔 */
+.cc-rows {
+  margin-top: var(--spacer-16);
+  border-top: 1px solid var(--border);
+}
+.cc-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--spacer-12) 0;
+  border-bottom: 1px solid var(--border);
+  gap: var(--spacer-12);
+}
+.cc-row:last-child {
+  border-bottom: none;
+}
+.cc-row__label {
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text-muted);
+}
+.cc-row__value {
+  font: var(--weight-medium) var(--text-body) var(--font-sans);
+  color: var(--text);
+  text-align: right;
+}
+/* 标签胶囊：至多 2 个 */
+.cc-tags {
+  margin-top: var(--spacer-16);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacer-8);
+}
+.cc-tag {
+  padding: var(--spacer-4) var(--spacer-12);
+  border-radius: var(--radius-full);
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font: var(--weight-medium) var(--text-caption) var(--font-sans);
+}
+</style>
+
+<div data-dynamic-ui-widget data-template="comparison-cards" class="cc-widget">
+  <!-- 紧凑标题：场景 + 一句话定位，不含推荐理由 -->
+  <div class="cc-head">
+    <h3 class="cc-head__title">前端框架选型对比</h3>
+    <p class="cc-head__sub">三个候选框架在性能、生态、学习曲线维度上的对比</p>
+  </div>
+
+  <!-- 选项卡网格：3 张，推荐卡用 brand 边框 -->
+  <div class="cc-grid">
+    <!-- 选项 1：React（推荐） -->
+    <article class="cc-card cc-card--recommended" tabindex="0" aria-label="React 选项，推荐">
+      <span class="cc-badge">推荐</span>
+      <h4 class="cc-card__title">React</h4>
+      <p class="cc-card__meta">Meta · MIT 许可</p>
+      <!-- 每卡至多一个头条数值：生态评分 -->
+      <div class="cc-kpi">
+        <span class="cc-kpi__value">92</span>
+        <span class="cc-kpi__label">生态评分 / 100</span>
+      </div>
+      <div class="cc-bar" aria-hidden="true">
+        <div class="cc-bar__fill" style="width: 92%"></div>
+      </div>
+      <!-- 分隔行：共享维度 -->
+      <div class="cc-rows">
+        <div class="cc-row">
+          <span class="cc-row__label">运行性能</span>
+          <span class="cc-row__value">良好</span>
+        </div>
+        <div class="cc-row">
+          <span class="cc-row__label">学习曲线</span>
+          <span class="cc-row__value">中等</span>
+        </div>
+        <div class="cc-row">
+          <span class="cc-row__label">社区规模</span>
+          <span class="cc-row__value">极大</span>
+        </div>
+      </div>
+      <!-- 至多 2 标签 -->
+      <div class="cc-tags">
+        <span class="cc-tag">成熟生态</span>
+        <span class="cc-tag">灵活组合</span>
+      </div>
+    </article>
+
+    <!-- 选项 2：Vue（非推荐，中性表面） -->
+    <article class="cc-card" tabindex="0" aria-label="Vue 选项">
+      <h4 class="cc-card__title">Vue</h4>
+      <p class="cc-card__meta">Evan You · MIT 许可</p>
+      <div class="cc-kpi">
+        <span class="cc-kpi__value">85</span>
+        <span class="cc-kpi__label">生态评分 / 100</span>
+      </div>
+      <div class="cc-bar" aria-hidden="true">
+        <div class="cc-bar__fill" style="width: 85%; background: var(--chart-series-2);"></div>
+      </div>
+      <div class="cc-rows">
+        <div class="cc-row">
+          <span class="cc-row__label">运行性能</span>
+          <span class="cc-row__value">良好</span>
+        </div>
+        <div class="cc-row">
+          <span class="cc-row__label">学习曲线</span>
+          <span class="cc-row__value">平缓</span>
+        </div>
+        <div class="cc-row">
+          <span class="cc-row__label">社区规模</span>
+          <span class="cc-row__value">中大型</span>
+        </div>
+      </div>
+      <div class="cc-tags">
+        <span class="cc-tag">易上手</span>
+        <span class="cc-tag">文档完善</span>
+      </div>
+    </article>
+
+    <!-- 选项 3：Svelte（非推荐，中性表面） -->
+    <article class="cc-card" tabindex="0" aria-label="Svelte 选项">
+      <h4 class="cc-card__title">Svelte</h4>
+      <p class="cc-card__meta">Svelte Team · MIT 许可</p>
+      <div class="cc-kpi">
+        <span class="cc-kpi__value">78</span>
+        <span class="cc-kpi__label">生态评分 / 100</span>
+      </div>
+      <div class="cc-bar" aria-hidden="true">
+        <div class="cc-bar__fill" style="width: 78%; background: var(--chart-series-3);"></div>
+      </div>
+      <div class="cc-rows">
+        <div class="cc-row">
+          <span class="cc-row__label">运行性能</span>
+          <span class="cc-row__value">优秀</span>
+        </div>
+        <div class="cc-row">
+          <span class="cc-row__label">学习曲线</span>
+          <span class="cc-row__value">平缓</span>
+        </div>
+        <div class="cc-row">
+          <span class="cc-row__label">社区规模</span>
+          <span class="cc-row__value">中型</span>
+        </div>
+      </div>
+      <div class="cc-tags">
+        <span class="cc-tag">编译优化</span>
+        <span class="cc-tag">体积小</span>
+      </div>
+    </article>
+  </div>
+</div>
+
+<script>
+/* 根选择器初始化：限定在根元素内，绑定前设 data-mounted 防止重复挂载 */
+(function () {
+  var root = document.querySelector('[data-dynamic-ui-widget][data-template="comparison-cards"]:not([data-mounted])');
+  if (!root) { return; }
+  root.setAttribute('data-mounted', 'true');
+
+  /* 卡片键盘可达性：Enter/Space 触发检视态强调（与 :hover/:focus-within 一致） */
+  var cards = root.querySelectorAll('.cc-card');
+  cards.forEach(function (card) {
+    /* 仅在键盘激活时切换 data-examined，便于辅助技术识别当前检视卡 */
+    card.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        card.focus();
+      }
+    });
+  });
+})();
+</script>
