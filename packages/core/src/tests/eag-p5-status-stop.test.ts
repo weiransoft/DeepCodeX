@@ -912,8 +912,10 @@ test("TC-CLI-04. /eag-autonomous-stop 缺少 runId 抛错", () => {
   assert.throws(() => extractEagAutonomousStopRequestFromPrompt("/eag-autonomous-stop"), /缺少必填参数 <run-id>/);
 });
 
-test("TC-CLI-05. EAG_COMMAND_STRINGS 包含 11 个命令", () => {
-  // 验证：EAG_COMMAND_STRINGS 常量包含 11 个 EAG 命令字符串
+test("TC-CLI-05. EAG_COMMAND_STRINGS 包含 18 个命令", () => {
+  // 验证：EAG_COMMAND_STRINGS 常量包含 18 个 EAG 命令字符串
+  // 注：ADR-DI-001 §7.4.1 新增 7 个动态指令注入与后台子 Agent 命令
+  //     （/inject /bg /tasks /fg /cancel /pause /resume），命令总数从 11 扩展至 18
   assert.equal(EAG_COMMAND_STRINGS.EAG_BUILD, "/eag-build");
   assert.equal(EAG_COMMAND_STRINGS.EAG_DESIGN, "/eag-design");
   assert.equal(EAG_COMMAND_STRINGS.EAG_TEST, "/eag-test");
@@ -927,8 +929,16 @@ test("TC-CLI-05. EAG_COMMAND_STRINGS 包含 11 个命令", () => {
   assert.equal(EAG_COMMAND_STRINGS.EAG_AUTONOMOUS_STOP, "/eag-autonomous-stop");
   // Loop-Graph 融合方案 Phase 5 新增 /eag-graph 命令
   assert.equal(EAG_COMMAND_STRINGS.EAG_GRAPH, "/eag-graph");
+  // ADR-DI-001 §7.4.1 新增 7 个动态指令注入与后台子 Agent 命令字符串
+  assert.equal(EAG_COMMAND_STRINGS.INJECT, "/inject");
+  assert.equal(EAG_COMMAND_STRINGS.BG, "/bg");
+  assert.equal(EAG_COMMAND_STRINGS.TASKS, "/tasks");
+  assert.equal(EAG_COMMAND_STRINGS.FG, "/fg");
+  assert.equal(EAG_COMMAND_STRINGS.CANCEL, "/cancel");
+  assert.equal(EAG_COMMAND_STRINGS.PAUSE, "/pause");
+  assert.equal(EAG_COMMAND_STRINGS.RESUME, "/resume");
   // 验证总字段数
-  assert.equal(Object.keys(EAG_COMMAND_STRINGS).length, 11, "应有 11 个 EAG 命令字符串");
+  assert.equal(Object.keys(EAG_COMMAND_STRINGS).length, 18, "应有 18 个 EAG 命令字符串");
 });
 
 test("TC-CLI-06. parser 优先匹配 status 而非 autonomous", () => {

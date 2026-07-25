@@ -104,6 +104,94 @@ export { handleUpdatePlanTool } from "./tools/update-plan-handler";
 export { handleWebSearchTool } from "./tools/web-search-handler";
 export { handleAskUserQuestionTool } from "./tools/ask-user-question-handler";
 
+// ============================================================================
+// ADR-DI-001 动态指令注入与后台子 Agent 模块（interrupts）
+//
+// 设计目的：
+//   - 将 interrupts 模块（中断队列 / 后台任务 / 任务注册表 / 4 个 LLM 工具）
+//     通过 core 单入口暴露给 CLI 层与 VSCode companion
+//   - CLI 层（App.tsx / session.ts）通过 `@vegamo/deepcode-core` 导入
+//     registerInterruptTools / InterruptibleSessionManager 等
+//   - interrupts/index.ts → core/index.ts 二级 re-export 链路
+//
+// 导出范围：
+//   - 数据类型：TaskStatus / TaskKind / InjectedInstruction / TaskStats / TaskSnapshot / TaskListFilter
+//   - 错误类：QueueOverflowError / TaskLimitExceededError / InvalidStateTransitionError / InjectInterruptError
+//   - 工具常量：BACKGROUND_TASK_TOOL_NAME / LIST_TASKS_TOOL_NAME / CANCEL_TASK_TOOL_NAME / INJECT_MESSAGE_TOOL_NAME
+//   - LLM 工具：registerInterruptTools / InterruptToolRegistry / createInterruptToolHandlers
+//   - 工具定义：INTERRUPT_TOOL_DEFINITIONS / INTERRUPT_TOOL_METADATA
+//   - handler 工厂：createBackgroundTaskHandler / createListTasksHandler / createCancelTaskHandler / createInjectMessageHandler
+//   - 抽象接口：InterruptibleSessionManager / BackgroundTaskLike / TaskRegistryLike / BackgroundRunnerLike /
+//             InterruptToolHandlerContext / InterruptToolMetadata / InterruptToolDefinition / ToolExecutorRegistrar
+//   - 实现类：InterruptQueue / BackgroundTask / TaskRegistry / BackgroundTaskRunner
+//   - 实现类 Options 类型：BackgroundTaskOptions / TaskRegistryOptions / BackgroundTaskRunnerOptions /
+//                       SessionHandle / SessionManagerFactory / SharedSessionOptions / TaskStoreLike
+// ============================================================================
+
+// 共享类型与错误类
+export type {
+  InjectSource,
+  InjectedInstruction,
+  InterruptQueueOptions,
+  TaskKind,
+  TaskListFilter,
+  TaskSnapshot,
+  TaskStats,
+  TaskStatus,
+} from "./interrupts/types";
+export {
+  BACKGROUND_TASK_TOOL_NAME,
+  CANCEL_TASK_TOOL_NAME,
+  INJECT_MESSAGE_TOOL_NAME,
+  InjectInterruptError,
+  InvalidStateTransitionError,
+  LIST_TASKS_TOOL_NAME,
+  QueueOverflowError,
+  TaskLimitExceededError,
+} from "./interrupts/types";
+
+// LLM 工具定义、handler 工厂与抽象接口
+export {
+  INTERRUPT_TOOL_DEFINITIONS,
+  INTERRUPT_TOOL_METADATA,
+  createBackgroundTaskHandler,
+  createCancelTaskHandler,
+  createInjectMessageHandler,
+  createListTasksHandler,
+} from "./interrupts/llm-tools";
+export type {
+  BackgroundRunnerLike,
+  BackgroundTaskLike,
+  InterruptToolDefinition,
+  InterruptToolHandlerContext,
+  InterruptToolMetadata,
+  InterruptibleSessionManager,
+  TaskRegistryLike,
+  ToolExecutorRegistrar,
+} from "./interrupts/llm-tools";
+
+// 工具注册入口
+export {
+  InterruptToolRegistry,
+  createInterruptToolHandlers,
+  registerInterruptTools,
+} from "./interrupts/register-tools";
+
+// 实现类（供 SessionManager 类型导入与运行期注入，ADR-DI-001 §7.1 E1 扩展点）
+export { InterruptQueue } from "./interrupts/interrupt-queue";
+export { BackgroundTask } from "./interrupts/background-task";
+export type { BackgroundTaskOptions } from "./interrupts/background-task";
+export { TaskRegistry } from "./interrupts/task-registry";
+export type { TaskRegistryOptions } from "./interrupts/task-registry";
+export { BackgroundTaskRunner } from "./interrupts/background-runner";
+export type {
+  BackgroundTaskRunnerOptions,
+  SessionHandle,
+  SessionManagerFactory,
+  SharedSessionOptions,
+  TaskStoreLike,
+} from "./interrupts/background-runner";
+
 // P1-T2：Visualization 模块 —— PureShowWidget 工具与渲染器
 // 提供 LLM 调用 pure_show_widget(widget_code, widget_type) 渲染内联可视化 widget 的能力，
 // 由 dynamic-ui skill 驱动；生成的自包含 HTML 写入 .deepcodex/widgets/，由 CLI MessageView 提示用户打开。

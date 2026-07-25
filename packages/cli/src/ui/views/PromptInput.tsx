@@ -73,7 +73,21 @@ export type PromptSubmission = {
   permissions?: UserToolPermission[];
   alwaysAllows?: PermissionScope[];
   planMode?: boolean;
-  command?: "new" | "resume" | "continue" | "undo" | "mcp" | "rules" | "exit";
+  command?:
+    | "new"
+    | "resume"
+    | "continue"
+    | "undo"
+    | "mcp"
+    | "rules"
+    | "exit"
+    // ===== ADR-DI-001 动态注入与后台子 Agent 命令 =====
+    | "inject"
+    | "bg"
+    | "tasks"
+    | "fg"
+    | "cancel"
+    | "pause";
 };
 
 export type PromptDraft = {
@@ -710,7 +724,9 @@ export const PromptInput = React.memo(function PromptInput({
       return;
     }
     if (item.kind === "resume") {
-      onSubmit({ text: "", imageUrls: [], command: "resume" });
+      // ADR-DI-001：传递完整文本（包含 /resume <taskId> 参数），
+      // 由 App.tsx 通过 isResumeTaskCommand 区分"恢复会话" vs "恢复暂停任务"
+      onSubmit({ text: buffer.text.trim(), imageUrls: [], command: "resume" });
       resetPromptInput();
       return;
     }
@@ -732,6 +748,45 @@ export const PromptInput = React.memo(function PromptInput({
     if (item.kind === "rules") {
       // /rules <subcommand> [args] —— 透传完整文本，由 App 层调用 executeRulesCommand
       onSubmit({ text: "/rules", imageUrls: [], command: "rules" });
+      resetPromptInput();
+      return;
+    }
+    // ===== ADR-DI-001 动态注入与后台子 Agent 命令 =====
+    // 对于需要参数的命令（inject/bg/fg/cancel），传递完整 buffer 文本（包含参数）
+    // 对于无参数命令（tasks/pause），传递命令本身
+    if (item.kind === "inject") {
+      // /inject <指令文本> —— 透传完整文本，由 App 层提取参数并调用 injectInstruction
+      onSubmit({ text: buffer.text.trim(), imageUrls: [], command: "inject" });
+      resetPromptInput();
+      return;
+    }
+    if (item.kind === "bg") {
+      // /bg <任务描述> —— 透传完整文本，由 App 层提取参数并调用 startBackgroundTask
+      onSubmit({ text: buffer.text.trim(), imageUrls: [], command: "bg" });
+      resetPromptInput();
+      return;
+    }
+    if (item.kind === "tasks") {
+      // /tasks —— 无参数命令，列出所有任务
+      onSubmit({ text: "/tasks", imageUrls: [], command: "tasks" });
+      resetPromptInput();
+      return;
+    }
+    if (item.kind === "fg") {
+      // /fg <taskId> —— 透传完整文本，由 App 层提取参数并调用 setForegroundTask
+      onSubmit({ text: buffer.text.trim(), imageUrls: [], command: "fg" });
+      resetPromptInput();
+      return;
+    }
+    if (item.kind === "cancel") {
+      // /cancel <taskId> —— 透传完整文本，由 App 层提取参数并调用 cancelTask
+      onSubmit({ text: buffer.text.trim(), imageUrls: [], command: "cancel" });
+      resetPromptInput();
+      return;
+    }
+    if (item.kind === "pause") {
+      // /pause —— 无参数命令，暂停当前前台任务
+      onSubmit({ text: "/pause", imageUrls: [], command: "pause" });
       resetPromptInput();
       return;
     }

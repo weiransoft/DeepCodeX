@@ -16,7 +16,17 @@
 export { EagCommandParser, EAG_COMMAND_STRINGS, extractDeployRequestFromPrompt } from "./eag-command-parser";
 
 // EagCommand 类型联合与 DeployRequest 接口（类型导出，discriminated union）
-export type { EagCommand, DeployRequest } from "./eag-command-parser";
+// ADR-DI-001 §7.4.1 新增：7 个动态指令注入命令 payload 类型
+export type {
+  EagCommand,
+  DeployRequest,
+  InjectCommandRequest,
+  BgCommandRequest,
+  TasksCommandRequest,
+  FgCommandRequest,
+  CancelCommandRequest,
+  ResumeCommandRequest,
+} from "./eag-command-parser";
 
 // EAG-P5 Phase 5.3 TASK-P5-3.1-005：/eag-autonomous CLI 命令处理器（值导出，含运行期实现）
 // - EagAutonomousCommandHandler：命令处理器类，接收 AutonomousOrchestrator 实例并执行 4 阶段循环

@@ -41,6 +41,11 @@ import { describeLlmError, getLlmErrorDetails } from "./common/llm-error";
 // 4 个工具注册到 ToolExecutor，图谱不可用时降级返回空结果（NFR-4 零回归）
 import { registerCodemapTools } from "./v2/tools/tool-executor-registry";
 import { DefaultSymbolGraphAdapter } from "./v2/context/default-symbol-graph-adapter";
+// ADR-DI-001 中断管理 LLM 工具注入：将 background_task / list_tasks / cancel_task /
+// inject_message 4 个工具注册到 ToolExecutor，未注入 taskRegistry 时降级返回
+// "feature unavailable" 错误（与 codemap 工具同构，§7.3 LLM 工具注册）
+import { registerInterruptTools } from "./interrupts/register-tools";
+import type { InterruptibleSessionManager } from "./interrupts/llm-tools";
 import { killProcessTree } from "./common/process-tree";
 import { GitFileHistory, type FileHistoryCheckpointResult } from "./common/file-history";
 import { clearSessionState, getSnippet, rebuildSessionStateFromHistory } from "./common/state";
@@ -182,6 +187,37 @@ import type {
   EagClarificationOption,
   DynamicCommandDescriptor,
 } from "./eag/dynamic";
+// ADR-DI-001 动态指令注入与后台子 Agent（2026-07-25 新增）：
+// - InterruptQueue：/inject <指令> 队列（FIFO），主循环 LLM 调用前 drain
+// - TaskRegistry：/tasks /fg /cancel 中央注册表
+// - BackgroundTaskRunner：/bg 后台任务启动器（独立 SessionManager 实例）
+// - BackgroundTask：任务抽象（含 cancel / pause / resume / inject 控制方法）
+// - TaskKind / TaskStatus / TaskListFilter / InjectedInstruction：共享类型
+//
+// 设计约束（对齐 ADR-DI-001 §7.1 + Karpathy Surgical Changes）：
+// - 仅 type 导入，避免运行期循环依赖（interrupts 模块不反向依赖 session.ts）
+// - 所有字段可选注入，未注入时 SessionManager 行为完全不变（零回归）
+// - 主前台会话默认 isForeground=true，后台任务中创建的 SessionManager 设为 false
+//
+// 与现有架构的集成点（ADR-DI-001 §7）：
+// - E1：SessionManagerOptions 新增 4 个可选注入字段（本处）
+// - E2：activateSession 主循环 LLM 调用前 drain InterruptQueue
+// - E3：createChatCompletionStream 流式 chunk 之间检查中断队列
+// - E4：新增 7 个委托方法（injectInstruction / startBackgroundTask / ...）
+import type {
+  InterruptQueue,
+  TaskRegistry,
+  BackgroundTaskRunner,
+  BackgroundTask,
+  TaskKind,
+  TaskStatus,
+  TaskListFilter,
+  InjectedInstruction,
+  InjectSource,
+} from "./interrupts";
+// InjectInterruptError 是值（错误类），需要值导入而非 type 导入
+// 用于 createChatCompletionStream 抛出 + activateSession catch 块 instanceof 判定
+import { InjectInterruptError } from "./interrupts";
 
 export type { PermissionScope } from "./settings";
 export type {
@@ -718,6 +754,70 @@ type SessionManagerOptions = {
    * 未注入时，建议层只能看到 EAG 命令（向后兼容）。
    */
   dynamicCommandDescriptors?: ReadonlyArray<DynamicCommandDescriptor>;
+  /**
+   * 中断指令队列（可选注入，ADR-DI-001 §7.1 E1 扩展点）
+   *
+   * 未注入时 `/inject <指令>` 命令不可用，主循环行为完全不变（向后兼容，零回归）。
+   * 注入后，主循环每次迭代头部（LLM 调用前）调用 `drain()` 消费队列中的指令，
+   * 合成为 system 消息追加到会话消息流；同时 `createChatCompletionStream` 流式
+   * chunk 之间检查队列非空，触发 `InjectInterruptError` 中断当前流，让主循环
+   * 进入下一轮迭代消费指令。
+   *
+   * 设计约束（对齐 ADR-DI-001 §3.1 + §5.1）：
+   * - 仅内存对象，不持久化（崩溃恢复由 TaskRegistry 维护任务级状态）
+   * - FIFO 顺序保证指令按用户输入顺序被消费
+   * - 容量上限保护（InterruptQueue.MAX_QUEUE_SIZE = 64）
+   *
+   * 不可变优先（§5.12.4 G-A6d）：构造后字段不可变，循环内不可被 LLM 修改。
+   */
+  interruptQueue?: InterruptQueue;
+  /**
+   * 后台任务注册表（可选注入，ADR-DI-001 §7.1 E1 扩展点）
+   *
+   * 未注入时 `/tasks` `/fg <id>` `/cancel <id>` `/pause` `/resume <id>`
+   * 五个命令不可用，主对话循环行为完全不变（向后兼容，零回归）。
+   * 注入后，所有前台 + 后台任务通过此注册表统一管理，提供：
+   * - `register` / `unregister` / `get` / `list`：任务增删查改
+   * - `setForeground` / `getForegroundId`：前台切换
+   * - `notifyTaskStateChanged`：状态变更事件回调
+   *
+   * 并发上限保护：TaskRegistry.MAX_CONCURRENT_TASKS = 8（R-5 风险缓解）。
+   *
+   * 不可变优先（§5.12.4 G-A6d）：构造后字段不可变，循环内不可被 LLM 修改。
+   */
+  taskRegistry?: TaskRegistry;
+  /**
+   * 后台任务执行器（可选注入，ADR-DI-001 §7.1 E1 扩展点）
+   *
+   * 未注入时 `/bg <指令>` 命令不可用，主对话循环行为完全不变（向后兼容，零回归）。
+   * 注入后，`/bg` 命令通过此执行器创建后台任务：
+   * - 内部通过 sessionManagerFactory 创建独立 SessionManager 实例（D-1 决策）
+   * - 独立 AbortController（取消不影响前台）
+   * - 独立 InterruptQueue（支持对后台任务也 /inject）
+   * - 异步启动，立即返回 { taskId, sessionId }
+   *
+   * 依赖关系（ADR-DI-001 §5.2.2）：
+   * - 必须同时注入 taskRegistry（taskRegistry 未注入时本字段无效）
+   * - 必须同时注入 sessionManagerFactory（由 BackgroundTaskRunner 内部持有）
+   *
+   * 不可变优先（§5.12.4 G-A6d）：构造后字段不可变，循环内不可被 LLM 修改。
+   */
+  backgroundRunner?: BackgroundTaskRunner;
+  /**
+   * 是否为主前台会话（可选，默认 true，ADR-DI-001 §7.1 E1 扩展点）
+   *
+   * - `true`（默认）：当前 SessionManager 作为主前台会话运行，用户输入直接作用于
+   *   此会话；主循环每次迭代头部检查 interruptQueue（若注入）
+   * - `false`：当前 SessionManager 作为后台子 agent 运行（由
+   *   BackgroundTaskRunner.sessionManagerFactory 创建），不直接消费用户输入，
+   *   主循环行为与前台一致但通过 task.cancel / task.inject 控制方向
+   *
+   * 设计约束：
+   * - 默认值 `true` 保证现有调用方（不传此字段）行为零变化（向后兼容）
+   * - 后台任务中创建的 SessionManager 必须显式传 `isForeground: false`
+   * - 本字段主要供 UI 层判断是否启用 `/inject` `/bg` 等命令的快捷键
+   */
+  isForeground?: boolean;
 };
 
 export type LlmStreamProgress = {
@@ -822,6 +922,19 @@ export class SessionManager {
   // - 与 EAG 命令描述符合并后供建议层使用
   // - 未注入时建议层只能看到 EAG 命令（向后兼容）
   private readonly dynamicCommandDescriptors?: ReadonlyArray<DynamicCommandDescriptor>;
+  // ADR-DI-001 动态指令注入与后台子 Agent 外挂字段（可选注入，未注入时对应命令不可用）
+  // - interruptQueue：未注入时 /inject 命令不可用，主循环行为完全不变（零回归）
+  //   注入后主循环 LLM 调用前 drain，合成为 system 消息追加到会话消息流
+  // - taskRegistry：未注入时 /tasks /fg /cancel /pause /resume 命令不可用
+  //   注入后所有前台 + 后台任务通过此注册表统一管理
+  // - backgroundRunner：未注入时 /bg 命令不可用
+  //   注入后通过此执行器创建后台任务（独立 SessionManager + 独立 AbortController）
+  // - isForeground：默认 true，标识当前 SessionManager 是否为主前台会话
+  //   后台任务中创建的 SessionManager 设为 false（由 BackgroundTaskRunner 注入）
+  private readonly interruptQueue?: InterruptQueue;
+  private readonly taskRegistry?: TaskRegistry;
+  private readonly backgroundRunner?: BackgroundTaskRunner;
+  private readonly isForeground: boolean;
   // EAG 动态建议层待澄清状态（内存级，key = sessionId）
   // - 当 LLM 返回 ask_clarification 时写入
   // - 用户下一轮回复命中时解析答案并回注 clarification，随后清除
@@ -843,6 +956,15 @@ export class SessionManager {
     // V2 codemap 工具注入：将 codemap_query / impact_analysis / flow_trace / risk_scan
     // 4 个工具注册到 ToolExecutor，图谱不可用时降级返回空结果（NFR-4 零回归）
     registerCodemapTools(this.toolExecutor, new DefaultSymbolGraphAdapter());
+    // ADR-DI-001 中断管理 LLM 工具注入（§7.3）：
+    // 将 background_task / list_tasks / cancel_task / inject_message 4 个工具注册到 ToolExecutor。
+    //
+    // 注意：this 此时可能还未具备 InterruptibleSessionManager 的全部方法（taskRegistry /
+    // backgroundRunner / 7 个扩展方法由另一个子代理通过可选注入实现）。
+    // registerInterruptTools 内部 handler 延迟绑定——调用时才检查方法是否存在，
+    // 未注入时返回 "feature unavailable" 错误（与 codemap 工具降级语义一致）。
+    // 因此此处安全注册，不影响现有行为（NFR-4 零回归）。
+    registerInterruptTools(this.toolExecutor, this as unknown as InterruptibleSessionManager);
     this.mcpManager.prepare(this.getResolvedSettings().mcpServers);
     this.messageConverter = new OpenAIMessageConverter({
       renderInitPrompt: () => this.renderInitCommandPrompt(),
@@ -878,6 +1000,16 @@ export class SessionManager {
     this.eagDynamicSuggester = options.eagDynamicSuggester;
     // 外部命令描述符赋值（可选注入，未注入时保持 undefined，建议层只能看到 EAG 命令）
     this.dynamicCommandDescriptors = options.dynamicCommandDescriptors;
+    // ADR-DI-001 动态指令注入与后台子 Agent 外挂字段赋值（可选注入，未注入时对应命令不可用）
+    // - interruptQueue：未注入时主循环不检查队列，行为零变化（向后兼容）
+    // - taskRegistry：未注入时 /tasks /fg /cancel /pause /resume 命令不可用
+    // - backgroundRunner：未注入时 /bg 命令不可用
+    // - isForeground：默认 true，保证现有调用方行为零变化（向后兼容）
+    //   后台任务中创建的 SessionManager 由 BackgroundTaskRunner 显式传 false
+    this.interruptQueue = options.interruptQueue;
+    this.taskRegistry = options.taskRegistry;
+    this.backgroundRunner = options.backgroundRunner;
+    this.isForeground = options.isForeground ?? true;
   }
 
   /**
@@ -1122,6 +1254,25 @@ export class SessionManager {
 
     try {
       for await (const chunk of response as AsyncIterable<Record<string, unknown>>) {
+        // E3 扩展点（ADR-DI-001 §5.1.3）：流式 chunk 之间检查中断队列
+        //
+        // 设计约束（Karpathy Surgical Changes）：
+        // - 仅在 interruptQueue 注入时生效，未注入时流式行为完全不变（零回归）
+        // - 每接收一个 chunk 检查一次队列非空
+        // - 队列非空时抛 InjectInterruptError，由 activateSession catch 块识别
+        // - catch 块不设置 status="failed"，而是 continue 进入下一轮迭代
+        // - 下一轮迭代头部（E2 扩展点）drain 队列，合成 system 消息
+        //
+        // 不破坏现有 stream 错误处理：
+        // - InjectInterruptError 走 catch 块 finally 路径，emitLlmStreamProgress 仍正常触发
+        // - logChatCompletionDebug / logApiError 不会被 InjectInterruptError 触发（异常路径由
+        //   activateSession catch 块单独识别，本 catch 块重新 throw 让上层处理）
+        // - 不调用 controller.abort()（避免与 cancel/pause 信号混淆）
+        if (this.interruptQueue && this.interruptQueue.size > 0) {
+          // 抛出 InjectInterruptError，由 activateSession catch 块识别并 continue 进入下一轮迭代
+          // 注：pendingCount 字段携带当前队列长度，便于日志与 UI 展示
+          throw new InjectInterruptError(this.interruptQueue.size);
+        }
         if (debug?.enabled) {
           responseChunks.push(chunk);
         }
@@ -1185,6 +1336,16 @@ export class SessionManager {
         }
       }
     } catch (error) {
+      // E3 扩展点（ADR-DI-001 §5.1.3）：InjectInterruptError 是流控制信号，不是错误
+      //
+      // 设计约束：
+      // - 不记录 logApiError（避免污染 API 错误日志，这是用户主动注入指令的正常流程）
+      // - 不记录 logChatCompletionDebug（流被中断是预期行为，非调试关注点）
+      // - 直接 re-throw，由 activateSession 主循环 catch 块识别并 continue 进入下一轮迭代
+      // - finally 块的 emitLlmStreamProgress("end") 仍正常触发（保证 UI 流式进度闭环）
+      if (error instanceof InjectInterruptError) {
+        throw error;
+      }
       this.logChatCompletionDebug(debug, {
         timestamp: new Date().toISOString(),
         location: debug?.location ?? "SessionManager.createChatCompletionStream:stream",
@@ -1337,6 +1498,17 @@ export class SessionManager {
         thinkingEnabled: request.thinkingEnabled,
         signal: request.signal ?? null,
       })) {
+        // E3 扩展点（ADR-DI-001 §5.1.3）：流式事件之间检查中断队列
+        //
+        // 与 OpenAI 通路（createChatCompletionStream）完全对等：
+        // - 仅在 interruptQueue 注入时生效，未注入时流式行为完全不变（零回归）
+        // - 每接收一个事件检查一次队列非空
+        // - 队列非空时抛 InjectInterruptError，由 activateSession catch 块识别并 continue
+        // - 不调用 controller.abort()（避免与 cancel/pause 信号混淆）
+        if (this.interruptQueue && this.interruptQueue.size > 0) {
+          // 抛出 InjectInterruptError，由 activateSession catch 块识别并 continue 进入下一轮迭代
+          throw new InjectInterruptError(this.interruptQueue.size);
+        }
         if (debug?.enabled) {
           responseChunks.push(event);
         }
@@ -1391,6 +1563,16 @@ export class SessionManager {
         }
       }
     } catch (error) {
+      // E3 扩展点（ADR-DI-001 §5.1.3）：InjectInterruptError 是流控制信号，不是错误
+      //
+      // 与 OpenAI 通路（createChatCompletionStream）catch 块完全对等：
+      // - 不记录 logApiError（避免污染 API 错误日志，这是用户主动注入指令的正常流程）
+      // - 不记录 logChatCompletionDebug（流被中断是预期行为，非调试关注点）
+      // - 直接 re-throw，由 activateSession 主循环 catch 块识别并 continue 进入下一轮迭代
+      // - finally 块的 emitLlmStreamProgress("end") 仍正常触发（保证 UI 流式进度闭环）
+      if (error instanceof InjectInterruptError) {
+        throw error;
+      }
       this.logChatCompletionDebug(debug, {
         timestamp: new Date().toISOString(),
         location: debug?.location ?? "SessionManager.createLlmMessageStream",
@@ -4733,6 +4915,40 @@ ${agentInstructions}
           await this.compactSession(sessionId, sessionController.signal);
         }
 
+        // E2 扩展点（ADR-DI-001 §5.1.2）：检查中断队列，drain 并合成为 system 消息
+        //
+        // 设计约束（Karpathy Surgical Changes）：
+        // - 仅在 interruptQueue 注入时生效，未注入时主循环行为完全不变（零回归）
+        // - 每次迭代头部检查（LLM 调用前），保证指令在下一轮 LLM 调用前被消费
+        // - FIFO 顺序合并为单条 system 消息（避免多次追加污染上下文）
+        // - visible=true 让用户在 UI 中看到注入被消费（§5.1.4 可见性语义）
+        // - drain 后队列清空，不会重复消费（§5.1.4 不重放语义）
+        //
+        // 与 E3 的协作：
+        // - E3 在流式 chunk 之间检查队列非空，抛 InjectInterruptError 中断当前流
+        // - activateSession catch 块识别 InjectInterruptError，不设 failed，continue
+        // - 下一轮迭代头部本处 drain 队列，合成 system 消息
+        // - LLM 看到 system 消息自然调整方向（§5.1.1 数据流）
+        if (this.interruptQueue && this.interruptQueue.size > 0) {
+          // drain 取出全部待处理指令（FIFO 顺序，返回不可变数组）
+          const instructions = this.interruptQueue.drain();
+          if (instructions.length > 0) {
+            // 合并为单条 system 消息追加到会话（含时间戳与原文，便于 LLM 理解上下文）
+            // 格式：[<入队时间戳>] 用户注入：<指令文本>
+            const combined = instructions.map((i) => `[${i.enqueuedAt}] 用户注入：${i.text}`).join("\n\n");
+            // 构建 system 消息：告知 LLM 用户在中途追加了指令，需在后续步骤中纳入考虑
+            const injectMessage = this.buildSystemMessage(
+              sessionId,
+              `[用户在任务执行中追加了以下指令，请在下一步动作中考虑：]\n\n${combined}`,
+              null,
+              true // visible=true，让用户看到注入被消费（§5.1.4 可见性语义）
+            );
+            this.appendSessionMessage(sessionId, injectMessage);
+            // 通知 UI：注入已被消费（onAssistantMessage 第二参数 false 表示不连接流）
+            this.onAssistantMessage(injectMessage, false);
+          }
+        }
+
         const messages = this.messageConverter.buildMessages(
           this.listSessionMessages(sessionId),
           thinkingEnabled,
@@ -4746,44 +4962,67 @@ ${agentInstructions}
         // 请求构建按 §6.1：messages 直接传 SessionMessage[]（converter 原生消费，不绕行 OpenAI 形态）；
         // tools 为 getTools 产物的纯字段提取；maxTokens/temperature 省略（client 回落 settings
         // 单一配置源，避免 Claude 侧每次调用产生误导性告警噪声）；signal 与 OpenAI 分支同源。
-        const response = anthropicClient
-          ? await this.createLlmMessageStream(
-              anthropicClient,
-              {
-                messages: this.listSessionMessages(sessionId),
-                tools: getTools(this.getPromptToolOptions(), this.mcpToolDefinitions).map((tool) => ({
-                  name: tool.function.name,
-                  description: tool.function.description,
-                  parameters: tool.function.parameters,
-                })),
-                thinkingEnabled,
-                signal: sessionController.signal,
-              },
-              sessionId,
-              {
-                enabled: debugLogEnabled,
-                location: "SessionManager.activateSession",
-                params: { iteration, temperature, thinkingEnabled, reasoningEffort },
-              }
-            )
-          : await this.createChatCompletionStream(
-              client,
-              {
-                model,
-                ...(temperature !== undefined ? { temperature } : {}),
-                messages,
-                tools: getTools(this.getPromptToolOptions(), this.mcpToolDefinitions),
-                ...thinkingOptions,
-              },
-              { signal: sessionController.signal },
-              sessionId,
-              {
-                enabled: debugLogEnabled,
-                location: "SessionManager.activateSession",
-                baseURL,
-                params: { iteration, temperature, thinkingEnabled, reasoningEffort },
-              }
-            );
+        // E3 扩展点（ADR-DI-001 §5.1.3）：LLM 调用包裹 try/catch 识别 InjectInterruptError
+        //
+        // 设计约束（Karpathy Surgical Changes）：
+        // - InjectInterruptError 是流控制信号（用户主动 /inject 触发），不是错误
+        // - 捕获后不设置 session 状态为 failed/interrupted，直接 continue 进入下一轮迭代
+        // - 下一轮迭代头部（E2 扩展点，L4887）drain 队列，合成 system 消息追加到会话
+        // - LLM 看到 system 消息自然调整方向（§5.1.1 数据流）
+        // - 其他错误向上抛给 activateSession 外层 catch（保持现有错误处理行为不变，零回归）
+        // - 未注入 interruptQueue 时，createChatCompletionStream / createLlmMessageStream
+        //   不会抛 InjectInterruptError，本 try/catch 等价于直通（零回归）
+        let response: { choices?: Array<{ message?: Record<string, unknown> }>; usage?: ModelUsage | null };
+        try {
+          response = anthropicClient
+            ? await this.createLlmMessageStream(
+                anthropicClient,
+                {
+                  messages: this.listSessionMessages(sessionId),
+                  tools: getTools(this.getPromptToolOptions(), this.mcpToolDefinitions).map((tool) => ({
+                    name: tool.function.name,
+                    description: tool.function.description,
+                    parameters: tool.function.parameters,
+                  })),
+                  thinkingEnabled,
+                  signal: sessionController.signal,
+                },
+                sessionId,
+                {
+                  enabled: debugLogEnabled,
+                  location: "SessionManager.activateSession",
+                  params: { iteration, temperature, thinkingEnabled, reasoningEffort },
+                }
+              )
+            : await this.createChatCompletionStream(
+                client,
+                {
+                  model,
+                  ...(temperature !== undefined ? { temperature } : {}),
+                  messages,
+                  tools: getTools(this.getPromptToolOptions(), this.mcpToolDefinitions),
+                  ...thinkingOptions,
+                },
+                { signal: sessionController.signal },
+                sessionId,
+                {
+                  enabled: debugLogEnabled,
+                  location: "SessionManager.activateSession",
+                  baseURL,
+                  params: { iteration, temperature, thinkingEnabled, reasoningEffort },
+                }
+              );
+        } catch (error) {
+          // E3 扩展点：识别 InjectInterruptError（流式 chunk 之间抛出的中断信号）
+          // - 不设置 session 状态为 failed/interrupted
+          // - 不通知用户失败（这是正常的中断注入流程）
+          // - continue 进入下一轮迭代，由 E2 drain 队列并合成 system 消息
+          if (error instanceof InjectInterruptError) {
+            continue;
+          }
+          // 其他错误向上抛给 activateSession 外层 catch（保持现有错误处理行为不变）
+          throw error;
+        }
 
         const message = response.choices?.[0]?.message;
         const rawContent = message?.content;
@@ -4923,6 +5162,234 @@ ${agentInstructions}
       }
       this.maybeNotifyTaskCompletion(sessionId, notify, startedAt, env);
     }
+  }
+
+  // ============================================================================
+  // ADR-DI-001 §7.1 E4 扩展点：7 个委托方法（动态指令注入与后台子 Agent）
+  //
+  // 设计约束（Karpathy Surgical Changes + Simplicity First）：
+  // - 每个方法仅委托给注入的组件（interruptQueue / taskRegistry / backgroundRunner）
+  // - 未注入对应组件时抛错（提示用户命令不可用），不静默忽略
+  // - 方法签名与 ADR-DI-001 §7.1 改动点 5 完全一致
+  // - 不改变 SessionManager 现有公开 API（零回归）
+  // ============================================================================
+
+  /**
+   * 注入指令到当前会话的中断队列（/inject 命令入口）
+   *
+   * ADR-DI-001 §5.1.1 数据流：
+   * 用户输入 /inject <指令> → injectInstruction → interruptQueue.enqueue
+   * → 主循环下次迭代头部（E2 扩展点）drain → 合成 system 消息追加到会话
+   *
+   * 设计约束：
+   * - 未注入 interruptQueue 时抛错（命令不可用，向后兼容）
+   * - text 不能为空字符串（InterruptQueue.enqueue 内部校验）
+   * - source 默认 "user"（来自用户 /inject 命令），LLM 工具注入时传 "llm"
+   * - 入队后由主循环 drain 消费，本方法不直接触发 LLM 调用
+   *
+   * @param text 注入指令文本（不能为空）
+   * @param source 注入来源（默认 "user"，LLM 工具注入时传 "llm"）
+   * @throws {Error} 当 interruptQueue 未注入时
+   * @throws {Error} 当 text 为空字符串时
+   * @throws {QueueOverflowError} 当队列已满（size >= MAX_QUEUE_SIZE）时
+   */
+  injectInstruction(text: string, source: InjectSource = "user"): void {
+    if (!this.interruptQueue) {
+      throw new Error("SessionManager.injectInstruction 失败：interruptQueue 未注入，/inject 命令不可用");
+    }
+    // 构造不可变的 InjectedInstruction 实例
+    const instruction: InjectedInstruction = {
+      id: crypto.randomUUID(),
+      text,
+      enqueuedAt: new Date().toISOString(),
+      source,
+    };
+    // 委托给 InterruptQueue.enqueue（内部校验 text 非空 + 容量上限 + 触发 onEnqueue 回调）
+    this.interruptQueue.enqueue(instruction);
+  }
+
+  /**
+   * 启动后台任务（/bg 命令入口）
+   *
+   * ADR-DI-001 §5.2.1 数据流：
+   * 用户输入 /bg <指令> → startBackgroundTask → backgroundRunner.start
+   * → 构造 BackgroundTask → 注册到 TaskRegistry → 异步启动 → 返回 taskId
+   *
+   * 设计约束（D-1 决策）：
+   * - 后台任务使用独立的 SessionManager 实例（由 backgroundRunner.sessionManagerFactory 创建）
+   * - 独立 AbortController（取消不影响前台）
+   * - 独立 InterruptQueue（支持对后台任务也 /inject）
+   * - 立即返回 taskId，任务在后台异步执行（fire-and-steer 模式）
+   *
+   * Phase 1 限制：
+   * - 仅支持 kind="chat"（autonomous kind 留待 Phase 3）
+   *
+   * @param prompt 初始 prompt 文本（不能为空）
+   * @param kind 任务类型（默认 "chat"，Phase 1 仅支持 chat）
+   * @returns { taskId: string } 任务 ID（前缀 `t-` + UUID）
+   * @throws {Error} 当 backgroundRunner 未注入时
+   * @throws {Error} 当 prompt 为空字符串时
+   * @throws {Error} 当 kind 不为 "chat" 时（Phase 1 限制）
+   * @throws {TaskLimitExceededError} 当任务数已达上限（MAX_CONCURRENT_TASKS）时
+   */
+  async startBackgroundTask(prompt: string, kind: TaskKind = "chat"): Promise<{ taskId: string }> {
+    if (!this.backgroundRunner) {
+      throw new Error("SessionManager.startBackgroundTask 失败：backgroundRunner 未注入，/bg 命令不可用");
+    }
+    // 委托给 BackgroundTaskRunner.start（内部校验 prompt 非空 + kind + 创建 task + 注册 + 启动）
+    return this.backgroundRunner.start(prompt, kind);
+  }
+
+  /**
+   * 列出全部任务（/tasks 命令入口）
+   *
+   * ADR-DI-001 §5.3.1 数据流：
+   * 用户输入 /tasks → listTasks → taskRegistry.list → 返回 readonly BackgroundTask[]
+   *
+   * 设计约束：
+   * - 未注入 taskRegistry 时抛错（命令不可用，向后兼容）
+   * - 返回不可变 readonly array（防止外部修改）
+   * - 默认仅返回活跃区任务（includeHistory=false）
+   * - 支持按 status / kind / includeHistory 过滤
+   *
+   * @param filter 过滤选项（可选，未提供时返回全部活跃任务）
+   * @returns 不可变任务数组（活跃区 + 历史区，按过滤条件筛选）
+   * @throws {Error} 当 taskRegistry 未注入时
+   */
+  listTasks(filter?: TaskListFilter): readonly BackgroundTask[] {
+    if (!this.taskRegistry) {
+      throw new Error("SessionManager.listTasks 失败：taskRegistry 未注入，/tasks 命令不可用");
+    }
+    // 委托给 TaskRegistry.list（内部按 filter 过滤活跃区 + 历史区）
+    return this.taskRegistry.list(filter);
+  }
+
+  /**
+   * 切换前台任务（/fg 命令入口）
+   *
+   * ADR-DI-001 §5.3.2 数据流：
+   * 用户输入 /fg <taskId> → setForegroundTask → taskRegistry.setForeground
+   * → 切换 UI 关注焦点（不中断其他后台任务）
+   *
+   * 设计约束：
+   * - 未注入 taskRegistry 时抛错（命令不可用，向后兼容）
+   * - taskId 必须在活跃区（不在活跃区抛错）
+   * - 仅切换 UI 关注焦点，不中断其他后台任务
+   * - 切换后用户输入直接作用于新的前台任务
+   *
+   * @param taskId 任务 ID（必须在活跃区）
+   * @throws {Error} 当 taskRegistry 未注入时
+   * @throws {Error} 当 taskId 不在活跃区时
+   */
+  setForegroundTask(taskId: string): void {
+    if (!this.taskRegistry) {
+      throw new Error("SessionManager.setForegroundTask 失败：taskRegistry 未注入，/fg 命令不可用");
+    }
+    // 委托给 TaskRegistry.setForeground（内部校验 taskId 在活跃区）
+    this.taskRegistry.setForeground(taskId);
+  }
+
+  /**
+   * 取消指定任务（/cancel 命令入口）
+   *
+   * ADR-DI-001 §5.3.3 数据流：
+   * 用户输入 /cancel <taskId> → cancelTask → task.cancel
+   * → controller.abort("cancel") → setState("cancelled")
+   *
+   * 设计约束：
+   * - 未注入 taskRegistry 时抛错（命令不可用，向后兼容）
+   * - taskId 必须在活跃区（不在活跃区抛错）
+   * - cancel 内部触发 controller.abort（中止 LLM 流 + 杀进程）
+   * - cancel 是终态操作，不可恢复（与 pause 区分）
+   *
+   * @param taskId 任务 ID（必须在活跃区）
+   * @param reason 取消原因（可选，记录到 task.error 字段）
+   * @throws {Error} 当 taskRegistry 未注入时
+   * @throws {Error} 当 taskId 不在活跃区时
+   * @throws {InvalidStateTransitionError} 当任务状态为终态或 injecting 时
+   */
+  async cancelTask(taskId: string, reason?: string): Promise<void> {
+    if (!this.taskRegistry) {
+      throw new Error("SessionManager.cancelTask 失败：taskRegistry 未注入，/cancel 命令不可用");
+    }
+    const task = this.taskRegistry.get(taskId);
+    if (!task) {
+      throw new Error(`SessionManager.cancelTask 失败：task.id=${taskId} 不在活跃区`);
+    }
+    // 委托给 BackgroundTask.cancel（内部校验状态 + abort + setState("cancelled")）
+    task.cancel(reason);
+    // 等待一个事件循环，让 onStateChange 中的 setTimeout(0) unregister 执行
+    // 注：BackgroundTaskRunner.onStateChange 回调中检测终态后 setTimeout(0) unregister，
+    //     这里等待一个事件循环确保 unregister 完成（与 BackgroundTaskRunner.stop 行为一致）
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 0);
+    });
+  }
+
+  /**
+   * 暂停当前前台任务（/pause 命令入口）
+   *
+   * ADR-DI-001 §5.4.1 数据流：
+   * 用户输入 /pause → pauseActiveTask → task.pause
+   * → controller.abort("pause") → setState("paused")
+   *
+   * 设计约束：
+   * - 未注入 taskRegistry 时抛错（命令不可用，向后兼容）
+   * - 仅暂停当前前台任务（taskRegistry.getForegroundId 获取）
+   * - 无前台任务时静默返回（不抛错，允许用户在无任务时 /pause）
+   * - pause 与 cancel 的区别：pause 转 paused（可 resume），cancel 转 cancelled（终态）
+   * - pause 内部触发 controller.abort("pause")，主循环 catch 块识别 pause 信号
+   *
+   * @throws {Error} 当 taskRegistry 未注入时
+   * @throws {InvalidStateTransitionError} 当前台任务状态不为 running 时
+   */
+  pauseActiveTask(): void {
+    if (!this.taskRegistry) {
+      throw new Error("SessionManager.pauseActiveTask 失败：taskRegistry 未注入，/pause 命令不可用");
+    }
+    const foregroundId = this.taskRegistry.getForegroundId();
+    if (!foregroundId) {
+      // 无前台任务时静默返回（允许用户在无任务时 /pause，不报错）
+      return;
+    }
+    const task = this.taskRegistry.get(foregroundId);
+    if (!task) {
+      // 前台任务不在活跃区（理论上不应发生，防御性处理）
+      return;
+    }
+    // 委托给 BackgroundTask.pause（内部校验状态 + abort + setState("paused")）
+    task.pause();
+  }
+
+  /**
+   * 恢复指定任务（/resume 命令入口）
+   *
+   * ADR-DI-001 §5.4.2 数据流：
+   * 用户输入 /resume <taskId> → resumeTask → task.resume
+   * → onResume 回调重建 controller → setState("running")
+   *
+   * 设计约束：
+   * - 未注入 taskRegistry 时抛错（命令不可用，向后兼容）
+   * - taskId 必须在活跃区且状态为 paused（不在活跃区或状态不对抛错）
+   * - resume 内部调用 onResume 回调（由 BackgroundTaskRunner 注入）
+   * - onResume 回调负责重建 AbortController 并重新启动 LLM 流
+   *
+   * @param taskId 任务 ID（必须在活跃区且状态为 paused）
+   * @throws {Error} 当 taskRegistry 未注入时
+   * @throws {Error} 当 taskId 不在活跃区时
+   * @throws {InvalidStateTransitionError} 当任务状态不为 paused 时
+   * @throws {Error} 当 onResume 回调抛错时（状态保持 paused）
+   */
+  async resumeTask(taskId: string): Promise<void> {
+    if (!this.taskRegistry) {
+      throw new Error("SessionManager.resumeTask 失败：taskRegistry 未注入，/resume 命令不可用");
+    }
+    const task = this.taskRegistry.get(taskId);
+    if (!task) {
+      throw new Error(`SessionManager.resumeTask 失败：task.id=${taskId} 不在活跃区`);
+    }
+    // 委托给 BackgroundTask.resume（内部校验状态 + 调用 onResume 回调 + setState("running")）
+    await task.resume();
   }
 
   /**

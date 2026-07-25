@@ -38,6 +38,8 @@ import { useStatusLine } from "../hooks";
 import type { SessionInfo } from "../statusline";
 import { isCollapsedThinking } from "../core/thinking-state";
 import { ANSI_CLEAR_SCREEN } from "../constants";
+// ADR-DI-001 动态注入与后台子 Agent 命令辅助函数
+import { extractCommandArgument, isResumeTaskCommand } from "../core/slash-commands";
 import type {
   LlmStreamProgress,
   MessageMeta,
@@ -60,6 +62,42 @@ import { buildDynamicCommandDescriptors } from "../core/dynamic-commands";
 import { writeStdout, writeStdoutLine } from "../../utils/stdio-helpers";
 
 type View = "chat" | "session-list" | "undo" | "mcp-status";
+
+/**
+ * ADR-DI-001 中断能力扩展接口（SessionManager 的可选能力）
+ *
+ * SessionManager 通过可选注入 InterruptQueue / TaskRegistry / BackgroundTaskRunner
+ * 获得这些能力（§7.1 改动 1-3）。未注入对应组件时方法不存在，App 层需做防御性检查。
+ *
+ * 具体实现由 `packages/core/src/session.ts` 的 SessionManager 类扩展（另一个子代理实现）。
+ * 此接口在 CLI 层本地定义，避免与 core 内部类型耦合（仅声明 CLI 所需的最小方法集）。
+ */
+interface InterruptibleSession {
+  /** 向当前任务追加指令（/inject 入口） */
+  injectInstruction?(text: string, source?: "user" | "llm"): void;
+  /** 后台启动新子 agent（/bg + background_task 工具入口） */
+  startBackgroundTask?(
+    prompt: { text?: string },
+    kind?: "chat" | "autonomous"
+  ): Promise<{ taskId: string; sessionId: string }>;
+  /** 列出所有任务（/tasks + list_tasks 工具入口） */
+  listTasks?(filter?: { includeHistory?: boolean }): ReadonlyArray<{
+    id: string;
+    kind: "chat" | "autonomous";
+    state: string;
+    progress: number;
+    stats: { durationMs: number };
+    initialPromptText: string;
+  }>;
+  /** 切换前台关注（/fg 入口） */
+  setForegroundTask?(taskId: string): void;
+  /** 取消指定任务（/cancel + cancel_task 工具入口） */
+  cancelTask?(taskId: string, reason?: string): void;
+  /** 暂停当前前台任务（/pause 入口） */
+  pauseActiveTask?(): void;
+  /** 恢复暂停的任务（/resume <taskId> 入口） */
+  resumeTask?(taskId: string): Promise<void>;
+}
 
 const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -373,6 +411,32 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
         return;
       }
       if (submission.command === "resume") {
+        // ADR-DI-001：检查是否为恢复暂停任务的场景（/resume <taskId>）
+        if (isResumeTaskCommand(submission.text)) {
+          const taskId = extractCommandArgument(submission.text, "resume");
+          if (!taskId) {
+            setErrorLine("✖ /resume <taskId> 缺少任务 ID 参数");
+            return;
+          }
+          try {
+            const interruptible = sessionManager as unknown as InterruptibleSession;
+            if (typeof interruptible.resumeTask !== "function") {
+              setErrorLine("✖ 任务恢复功能未启用（SessionManager 未注入 taskRegistry）");
+              return;
+            }
+            await interruptible.resumeTask(taskId);
+            setMessages((prev) => [
+              ...prev,
+              buildSyntheticUserMessage(submission.text, submission.imageUrls.length),
+              buildSyntheticAssistantMessage(`[resume] Task ${taskId} resumed`),
+            ]);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            setErrorLine(`✖ 恢复任务失败：${message}`);
+          }
+          return;
+        }
+        // 原有行为：显示会话列表，选择恢复之前的对话
         refreshSessionsList();
         navigateToSubView("session-list");
         return;
@@ -406,6 +470,160 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
           buildSyntheticUserMessage(submission.text, submission.imageUrls.length),
           buildSyntheticAssistantMessage(rulesResult),
         ]);
+        return;
+      }
+      // ===== ADR-DI-001 动态注入与后台子 Agent 命令处理 =====
+      // 所有命令通过 InterruptibleSession 接口调用 SessionManager 的扩展方法。
+      // 未注入对应组件时方法不存在，给出明确的 "功能未启用" 错误提示。
+      const interruptible = sessionManager as unknown as InterruptibleSession;
+      if (submission.command === "inject") {
+        // /inject <指令文本> —— 向当前正在执行的任务追加指令（软中断）
+        const instructionText = extractCommandArgument(submission.text, "inject");
+        if (!instructionText) {
+          setErrorLine("✖ /inject <指令文本> 缺少指令文本参数\n用法: /inject 在认证失败时返回 401");
+          return;
+        }
+        if (typeof interruptible.injectInstruction !== "function") {
+          setErrorLine("✖ 指令注入功能未启用（SessionManager 未注入 interruptQueue）");
+          return;
+        }
+        try {
+          interruptible.injectInstruction(instructionText, "user");
+          setMessages((prev) => [
+            ...prev,
+            buildSyntheticUserMessage(submission.text, submission.imageUrls.length),
+            buildSyntheticAssistantMessage(`[inject] Added 1 instruction to queue`),
+          ]);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setErrorLine(`✖ 注入指令失败：${message}`);
+        }
+        return;
+      }
+      if (submission.command === "bg") {
+        // /bg <任务描述> —— 后台启动新子 agent 执行独立任务
+        const taskPrompt = extractCommandArgument(submission.text, "bg");
+        if (!taskPrompt) {
+          setErrorLine("✖ /bg <任务描述> 缺少任务描述参数\n用法: /bg 调研 React 19 新特性");
+          return;
+        }
+        if (typeof interruptible.startBackgroundTask !== "function") {
+          setErrorLine("✖ 后台任务功能未启用（SessionManager 未注入 backgroundRunner）");
+          return;
+        }
+        try {
+          const result = await interruptible.startBackgroundTask({ text: taskPrompt }, "chat");
+          setMessages((prev) => [
+            ...prev,
+            buildSyntheticUserMessage(submission.text, submission.imageUrls.length),
+            buildSyntheticAssistantMessage(`[bg] Started task ${result.taskId}, use /tasks to check status`),
+          ]);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setErrorLine(`✖ 启动后台任务失败：${message}`);
+        }
+        return;
+      }
+      if (submission.command === "tasks") {
+        // /tasks —— 列出所有运行中和已完成的任务
+        if (typeof interruptible.listTasks !== "function") {
+          setErrorLine("✖ 任务列表功能未启用（SessionManager 未注入 taskRegistry）");
+          return;
+        }
+        try {
+          const tasks = interruptible.listTasks({ includeHistory: true });
+          if (tasks.length === 0) {
+            setMessages((prev) => [
+              ...prev,
+              buildSyntheticUserMessage("/tasks", 0),
+              buildSyntheticAssistantMessage("📋 No tasks found."),
+            ]);
+            return;
+          }
+          // 格式化任务列表为可读文本表格
+          const lines = tasks.map((task) => {
+            const progress = `${Math.round(task.progress * 100)}%`;
+            const duration = formatDuration(task.stats.durationMs);
+            const text = truncateText(task.initialPromptText, 30);
+            return `  ${task.id}  [${task.kind}/${task.state}]  ${progress}  ${duration}  ${text}`;
+          });
+          const table = `📋 Task List (${tasks.length} tasks):\n${lines.join("\n")}`;
+          setMessages((prev) => [
+            ...prev,
+            buildSyntheticUserMessage("/tasks", 0),
+            buildSyntheticAssistantMessage(table),
+          ]);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setErrorLine(`✖ 查询任务列表失败：${message}`);
+        }
+        return;
+      }
+      if (submission.command === "fg") {
+        // /fg <taskId> —— 切换前台关注到指定任务
+        const taskId = extractCommandArgument(submission.text, "fg");
+        if (!taskId) {
+          setErrorLine("✖ /fg <taskId> 缺少任务 ID 参数\n用法: /fg t-abc123");
+          return;
+        }
+        if (typeof interruptible.setForegroundTask !== "function") {
+          setErrorLine("✖ 前台切换功能未启用（SessionManager 未注入 taskRegistry）");
+          return;
+        }
+        try {
+          interruptible.setForegroundTask(taskId);
+          setMessages((prev) => [
+            ...prev,
+            buildSyntheticUserMessage(submission.text, submission.imageUrls.length),
+            buildSyntheticAssistantMessage(`[fg] Switched foreground to task ${taskId}`),
+          ]);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setErrorLine(`✖ 切换前台任务失败：${message}`);
+        }
+        return;
+      }
+      if (submission.command === "cancel") {
+        // /cancel <taskId> —— 取消指定任务（硬中断）
+        const taskId = extractCommandArgument(submission.text, "cancel");
+        if (!taskId) {
+          setErrorLine("✖ /cancel <taskId> 缺少任务 ID 参数\n用法: /cancel t-abc123");
+          return;
+        }
+        if (typeof interruptible.cancelTask !== "function") {
+          setErrorLine("✖ 任务取消功能未启用（SessionManager 未注入 taskRegistry）");
+          return;
+        }
+        try {
+          interruptible.cancelTask(taskId, "user cancelled");
+          setMessages((prev) => [
+            ...prev,
+            buildSyntheticUserMessage(submission.text, submission.imageUrls.length),
+            buildSyntheticAssistantMessage(`[cancel] Task ${taskId} cancelled`),
+          ]);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setErrorLine(`✖ 取消任务失败：${message}`);
+        }
+        return;
+      }
+      if (submission.command === "pause") {
+        // /pause —— 暂停当前前台任务
+        if (typeof interruptible.pauseActiveTask !== "function") {
+          setErrorLine("✖ 任务暂停功能未启用（SessionManager 未注入 taskRegistry）");
+          return;
+        }
+        try {
+          interruptible.pauseActiveTask();
+          setMessages((prev) => [
+            ...prev,
+            buildSyntheticUserMessage("/pause", 0),
+            buildSyntheticAssistantMessage("[pause] Task paused, use /resume <id> to continue"),
+          ]);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setErrorLine(`✖ 暂停任务失败：${message}`);
+        }
         return;
       }
 
@@ -1152,6 +1370,52 @@ async function handleRulesSlashCommand(text: string): Promise<string> {
   // 合并 stdout + stderr（stderr 用红色标记）
   const output = [result.stdout, result.stderr].filter(Boolean).join("\n");
   return output;
+}
+
+// ============================================================================
+// ADR-DI-001 辅助函数（/tasks 命令的表格格式化）
+// ============================================================================
+
+/**
+ * 格式化任务时长（毫秒 → 人类可读）
+ *
+ * 例如：
+ * - 5000 → "5s"
+ * - 65000 → "1m 5s"
+ * - 3725000 → "1h 2m 5s"
+ *
+ * @param durationMs 时长（毫秒）
+ * @returns 人类可读的时长字符串
+ */
+function formatDuration(durationMs: number): string {
+  if (durationMs < 1000) {
+    return `${durationMs}ms`;
+  }
+  const totalSeconds = Math.floor(durationMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${seconds}s`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
+}
+
+/**
+ * 截断文本到指定长度（超出部分用 "..." 表示）
+ *
+ * @param text 原始文本
+ * @param maxLength 最大长度（含 "..." 后缀）
+ * @returns 截断后的文本
+ */
+function truncateText(text: string, maxLength: number): string {
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
 export default App;
