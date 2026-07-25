@@ -1,0 +1,18 @@
+layout_name,use_case,description,elements
+title_slide,opening,标题页：深色背景 + 居中大标题 + 副标题,background:title;title:center-large;subtitle:center-small
+agenda,overview,目录页：纵向编号列表 + 主题色高亮,numbers:large;list:vertical;accent-color:numbers
+title_content,standard,标题 + 内容：左标题右内容，标准结构,title:left-top;body:left-below
+two_column,comparison,两列对比：左右并列对比两个主题,left-text:50%;right-visual:50%
+image_left,right_text,左图右文：图片占据左半，文字在右半,image:left-50%;text:right-50%
+image_right,left_text,左文右图：文字在左，图片在右,text:left-50%;image:right-50%
+full_bleed,impact,全屏图片 + 文字覆盖：背景图占满，文字叠加,image:full-bleed;overlay:text
+big_number,stat_callout,大数字 + 小标签：突出单一关键数据,number:72pt;label:14pt-below
+quote,pull_quote,引言页：大字号引言 + 作者署名,quote:large-center;author:small-below
+timeline,process,时间线：横向步骤 + 箭头连接,steps:horizontal;arrows:connectors
+grid_2x3,feature_grid,2x3 网格：6 个特性卡片（图标 + 标题 + 描述）,icon:top;title:middle;desc:bottom
+grid_3x2,comparison_grid,3x2 网格：6 个对比项,rows:3;cols:2;header:top
+section_divider,chapter,章节分隔：深色背景 + 大章节编号,number:large;title:below
+conclusion,closing,结论页：深色背景 + "谢谢" + 联系方式,thanks:center;contact:below
+chart_full,data_viz,全宽图表：图表占满 + 标题在上,chart:full-width;title:top
+chart_with_text,insight,图表 + 文字洞察：左图右文,chart:left-60%;insight:right-40%
+process_steps,workflow,横向流程步骤：4-5 个步骤 + 箭头,steps:horizontal-4;arrows:between

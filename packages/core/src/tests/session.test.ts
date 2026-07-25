@@ -641,6 +641,23 @@ test("SessionManager excludes disabled skills by resolved skill name", async () 
         "eag-saga-orchestration": false,
         "eag-acl": false,
         "eag-verify-enterprise": false,
+        // Builtin Skills 增强方案（v1.4）新增的 4 个 bundled skill
+        // 同样需显式禁用以保持测试范围隔离
+        "web-dev": false,
+        "web-artisan": false,
+        "code-mode-orchestrator": false,
+        "browser-automation": false,
+        // Builtin Skills 增强方案（v1.5）P1+P2 阶段新增的 7 个 bundled skill
+        // P1: dynamic-ui / html-deck / html-report
+        // P2: docx / pdf / pptx / xlsx
+        // 同样需显式禁用以保持测试范围隔离
+        "dynamic-ui": false,
+        "html-deck": false,
+        "html-report": false,
+        docx: false,
+        pdf: false,
+        pptx: false,
+        xlsx: false,
         "enabled-skill": true,
       },
     }),
@@ -1165,7 +1182,14 @@ test("createSession skips disabled default skills", async () => {
     }),
     getResolvedSettings: () => ({
       model: "test-model",
-      enabledSkills: { "karpathy-guidelines": false },
+      // 禁用全部 4 个默认 skill（v1.4 新增 3 个），
+      // 验证禁用后默认 skill 内容不进入系统消息
+      enabledSkills: {
+        "karpathy-guidelines": false,
+        "design-aesthetics": false,
+        "ui-ux-best-practices": false,
+        "code-quality-guidelines": false,
+      },
     }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},

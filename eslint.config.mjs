@@ -134,6 +134,26 @@ export default tseslint.config(
       },
     },
   },
+  // Skill 模板资源：bundled skill 中的浏览器运行时脚本
+  // 覆盖范围：packages/*/templates/skills/bundled/*/assets/**/*.js
+  // 这些文件是 skill 模板自带的浏览器侧运行时（如 html-deck/assets/runtime.js），
+  // 使用 window/document/setTimeout/location 等 browser globals，不属于 Node.js 源码
+  {
+    files: ["packages/*/templates/skills/bundled/*/assets/**/*.js"],
+    languageOptions: {
+      globals: {
+        window: "readonly",
+        document: "readonly",
+        console: "readonly",
+        setTimeout: "readonly",
+        clearTimeout: "readonly",
+        requestAnimationFrame: "readonly",
+        localStorage: "readonly",
+        history: "readonly",
+        location: "readonly",
+      },
+    },
+  },
   // Prettier config: disable conflicting ESLint rules, MUST be last
   prettierConfig
 );

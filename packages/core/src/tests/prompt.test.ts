@@ -95,10 +95,40 @@ test("getDefaultSkillPrompt loads the default skill template", () => {
   assert.equal(prompt.includes('path="templates/skills/'), false);
 });
 
+test("getDefaultSkillPrompt loads all four default skills", () => {
+  const prompt = getDefaultSkillPrompt();
+
+  // 验证 4 个默认 skill 全部加载（E6 增强：新增 3 个默认 skill）
+  assert.equal(prompt.includes("<karpathy-guidelines-skill>"), true);
+  assert.equal(prompt.includes("<design-aesthetics-skill>"), true);
+  assert.equal(prompt.includes("<ui-ux-best-practices-skill>"), true);
+  assert.equal(prompt.includes("<code-quality-guidelines-skill>"), true);
+});
+
 test("getDefaultSkillPrompt skips disabled default skills", () => {
-  const prompt = getDefaultSkillPrompt({ enabledSkills: { "karpathy-guidelines": false } });
+  // 禁用所有 4 个默认 skill 后应为空字符串
+  const prompt = getDefaultSkillPrompt({
+    enabledSkills: {
+      "karpathy-guidelines": false,
+      "design-aesthetics": false,
+      "ui-ux-best-practices": false,
+      "code-quality-guidelines": false,
+    },
+  });
 
   assert.equal(prompt, "");
+});
+
+test("getDefaultSkillPrompt can disable individual default skills", () => {
+  // 仅禁用 karpathy-guidelines，其他 3 个仍应加载
+  const prompt = getDefaultSkillPrompt({
+    enabledSkills: { "karpathy-guidelines": false },
+  });
+
+  assert.equal(prompt.includes("<karpathy-guidelines-skill>"), false);
+  assert.equal(prompt.includes("<design-aesthetics-skill>"), true);
+  assert.equal(prompt.includes("<ui-ux-best-practices-skill>"), true);
+  assert.equal(prompt.includes("<code-quality-guidelines-skill>"), true);
 });
 
 test("getPlanModePrompt loads the dedicated Plan Mode template", () => {

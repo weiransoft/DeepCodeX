@@ -5140,10 +5140,13 @@ ${agentInstructions}
     this.saveSessionMessages(sessionId, sessionMessages);
   }
 
-  private getPromptToolOptions(): { model: string; webSearchEnabled: boolean } {
+  private getPromptToolOptions(): { model: string; webSearchEnabled: boolean; enabledSkills: Record<string, boolean> } {
     return {
       model: this.getResolvedSettings().model,
       webSearchEnabled: true,
+      // P1-T2：传递 enabledSkills 给 getTools()，
+      // 用于控制 PureShowWidget 等 skill 关联工具的条件注册
+      enabledSkills: this.getResolvedSettings().enabledSkills ?? {},
     };
   }
 

@@ -1,0 +1,322 @@
+/* html-deck :: base.css — 设计 tokens + 重置 + 布局原语 + 组件
+ *
+ * 本文件定义幻灯片系统的基础样式，由所有 deck 共享，禁止按 deck 修改。
+ * 主题文件（themes/*.css）通过覆盖 :root 变量切换视觉风格。
+ * runtime.js 通过 .is-active 类控制单页显隐，禁止覆盖 .slide 的 position/opacity。
+ */
+
+/* ================= 设计 tokens（默认值，主题可覆盖） ================= */
+:root {
+  /* 背景与表面 */
+  --bg: #ffffff;
+  --bg-soft: #f7f7f8;
+  --surface: #ffffff;
+  --surface-2: #f2f2f4;
+  /* 边框 */
+  --border: rgba(0, 0, 0, .08);
+  --border-strong: rgba(0, 0, 0, .16);
+  /* 文字层级 */
+  --text-1: #111216;
+  --text-2: #55596a;
+  --text-3: #8a8f9e;
+  /* 主题色 */
+  --accent: #3b6cff;
+  --accent-2: #7a5cff;
+  --accent-3: #ff5c8a;
+  /* 语义色 */
+  --good: #1aaf6c;
+  --warn: #f5a524;
+  --bad: #e0445a;
+  /* 渐变 */
+  --grad: linear-gradient(135deg, #3b6cff, #7a5cff 55%, #ff5c8a);
+  --grad-soft: linear-gradient(135deg, #eef2ff, #f5ecff 55%, #ffeef5);
+  /* 圆角 */
+  --radius: 18px;
+  --radius-sm: 12px;
+  --radius-lg: 26px;
+  /* 阴影 */
+  --shadow: 0 10px 30px rgba(18, 24, 40, .08), 0 2px 6px rgba(18, 24, 40, .04);
+  --shadow-lg: 0 24px 60px rgba(18, 24, 40, .14), 0 6px 16px rgba(18, 24, 40, .06);
+  /* 字体 */
+  --font-sans: 'Inter', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, Helvetica, Arial, sans-serif;
+  --font-serif: 'Playfair Display', 'Noto Serif SC', Georgia, serif;
+  --font-mono: 'JetBrains Mono', 'IBM Plex Mono', SFMono-Regular, Menlo, monospace;
+  --font-display: var(--font-sans);
+  /* 字距 */
+  --letter-tight: -.03em;
+  --letter-normal: -.01em;
+  /* 缓动函数 */
+  --ease: cubic-bezier(.4, 0, .2, 1);
+  /* 背景纹理（主题可覆盖，叠加于 --bg 之上） */
+  --bg-texture: none;
+}
+
+/* ================= 重置 ================= */
+*, *::before, *::after { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text-1);
+  font-family: var(--font-sans);
+  font-weight: 400;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: var(--letter-normal);
+}
+img, svg, video { max-width: 100%; display: block; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, kbd, pre, samp { font-family: var(--font-mono); }
+
+/* ================= 幻灯片系统 ================= */
+/* .deck 为全屏容器，.slide 绝对定位重叠，runtime.js 通过 .is-active 切换显隐 */
+.deck {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--bg);
+}
+.slide {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 72px 96px;
+  box-sizing: border-box;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .5s var(--ease), transform .5s var(--ease);
+  transform: translateX(30px);
+  overflow: hidden;
+  /* 背景纹理叠加于纯色 --bg 之上 */
+  background: var(--bg-texture), var(--bg);
+}
+.slide.is-active {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+  z-index: 2;
+}
+.slide.is-prev { transform: translateX(-30px); }
+
+/* 单页独立预览（模板文件直接打开时） */
+body.single .slide {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+
+/* ================= 排版 ================= */
+.eyebrow { font-size: 13px; font-weight: 500; letter-spacing: .16em; text-transform: uppercase; color: var(--text-3); }
+.kicker { font-size: 14px; font-weight: 600; color: var(--accent); letter-spacing: .08em; text-transform: uppercase; }
+.h1, h1.title {
+  font-family: var(--font-display);
+  font-size: 72px;
+  line-height: 1.05;
+  font-weight: 800;
+  letter-spacing: var(--letter-tight);
+  margin: 0 0 18px;
+  color: var(--text-1);
+}
+.h2, h2.title {
+  font-family: var(--font-display);
+  font-size: 54px;
+  line-height: 1.1;
+  font-weight: 700;
+  letter-spacing: var(--letter-tight);
+  margin: 0 0 14px;
+}
+.h3, h3 { font-size: 32px; line-height: 1.2; font-weight: 600; letter-spacing: var(--letter-normal); margin: 0 0 10px; }
+.h4, h4 { font-size: 22px; line-height: 1.3; font-weight: 600; margin: 0 0 8px; }
+.lede { font-size: 22px; line-height: 1.55; color: var(--text-2); font-weight: 300; max-width: 62ch; }
+.dim { color: var(--text-2); }
+.dim2 { color: var(--text-3); }
+.mono { font-family: var(--font-mono); }
+.serif { font-family: var(--font-serif); }
+.gradient-text {
+  background: var(--grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+/* ================= 布局原语 ================= */
+.stack > * + * { margin-top: 14px; }
+.row { display: flex; gap: 24px; align-items: center; }
+.row.wrap { flex-wrap: wrap; }
+.grid { display: grid; gap: 24px; }
+.g2 { grid-template-columns: repeat(2, 1fr); }
+.g3 { grid-template-columns: repeat(3, 1fr); }
+.g4 { grid-template-columns: repeat(4, 1fr); }
+.center { display: flex; align-items: center; justify-content: center; text-align: center; }
+.tc { text-align: center; }
+.fill { flex: 1; }
+.sp-t { padding-top: 24px; }
+.sp-b { padding-bottom: 24px; }
+.mt-s { margin-top: 8px; }
+.mt-m { margin-top: 18px; }
+.mt-l { margin-top: 32px; }
+.mb-s { margin-bottom: 8px; }
+.mb-m { margin-bottom: 18px; }
+.mb-l { margin-bottom: 32px; }
+
+/* ================= 组件 ================= */
+/* 卡片 */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  box-shadow: var(--shadow);
+}
+.card .ic { font-size: 32px; margin-bottom: 8px; }
+.card h4 { margin: 0 0 6px; }
+.card p { margin: 0; color: var(--text-2); font-size: 14px; }
+
+/* 标签胶囊 */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  background: var(--surface-2);
+  color: var(--text-2);
+  border: 1px solid var(--border);
+}
+
+/* 流程节点 */
+.flow { display: flex; align-items: center; gap: 16px; margin-top: 40px; }
+.flow .node {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px;
+  text-align: center;
+  box-shadow: var(--shadow);
+}
+.flow .node .ic { font-size: 32px; margin-bottom: 6px; }
+.flow .node h4 { font-size: 16px; margin: 0 0 4px; }
+.flow .node p { font-size: 12px; color: var(--text-3); margin: 0; }
+.flow .arr { color: var(--text-3); font-size: 28px; flex-shrink: 0; }
+.flow .node.hl {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent), var(--shadow);
+}
+
+/* 页脚与页码 */
+.deck-footer {
+  position: absolute;
+  bottom: 32px;
+  left: 96px;
+  right: 96px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  color: var(--text-3);
+}
+.deck-header {
+  position: absolute;
+  top: 32px;
+  left: 96px;
+  right: 96px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  color: var(--text-3);
+}
+.slide-number { font-variant-numeric: tabular-nums; }
+
+/* 演讲者备注（默认隐藏，runtime.js 通过 N 键显示） */
+.notes {
+  display: none;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 16px 24px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  font-size: 14px;
+  color: var(--text-2);
+  z-index: 100;
+  max-height: 30vh;
+  overflow: auto;
+}
+.notes.visible { display: block; }
+
+/* 进度条（runtime.js 自动管理） */
+.progress-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 3px;
+  background: var(--accent);
+  z-index: 50;
+  transition: width .3s var(--ease);
+}
+
+/* ================= 动画基础 ================= */
+/* data-anim 属性触发入场动画，runtime.js 在 .is-active 时添加 .anim-playing */
+.anim-fade-up { animation: fade-up .6s var(--ease) both; }
+.anim-fade-down { animation: fade-down .6s var(--ease) both; }
+.anim-fade-left { animation: fade-left .6s var(--ease) both; }
+.anim-fade-right { animation: fade-right .6s var(--ease) both; }
+.anim-zoom-pop { animation: zoom-pop .5s var(--ease) both; }
+.anim-blur-in { animation: blur-in .6s var(--ease) both; }
+.anim-stagger-list > * { animation: fade-up .5s var(--ease) both; }
+.anim-stagger-list > *:nth-child(1) { animation-delay: .05s; }
+.anim-stagger-list > *:nth-child(2) { animation-delay: .15s; }
+.anim-stagger-list > *:nth-child(3) { animation-delay: .25s; }
+.anim-stagger-list > *:nth-child(4) { animation-delay: .35s; }
+.anim-stagger-list > *:nth-child(5) { animation-delay: .45s; }
+.anim-stagger-list > *:nth-child(6) { animation-delay: .55s; }
+
+@keyframes fade-up { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: none; } }
+@keyframes fade-down { from { opacity: 0; transform: translateY(-24px); } to { opacity: 1; transform: none; } }
+@keyframes fade-left { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: none; } }
+@keyframes fade-right { from { opacity: 0; transform: translateX(-24px); } to { opacity: 1; transform: none; } }
+@keyframes zoom-pop { 0% { opacity: 0; transform: scale(.92); } 60% { opacity: 1; transform: scale(1.02); } 100% { transform: scale(1); } }
+@keyframes blur-in { from { opacity: 0; filter: blur(12px); } to { opacity: 1; filter: blur(0); } }
+
+/* ================= 总览模式（O 键） ================= */
+.overview .deck {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px;
+  padding: 24px;
+  height: auto;
+  overflow: auto;
+  background: var(--bg-soft);
+}
+.overview .slide {
+  position: relative;
+  width: 100%;
+  height: 180px;
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+  cursor: pointer;
+  font-size: 9px;
+  padding: 18px 24px;
+}
+.overview .slide.is-active { box-shadow: 0 0 0 3px var(--accent), var(--shadow-lg); }
+.overview .slide .h1 { font-size: 16px; }
+.overview .slide .h2 { font-size: 14px; }
+.overview .slide .lede { font-size: 9px; }
+.overview .slide .notes { display: none !important; }
+.overview .slide .deck-footer,
+.overview .slide .deck-header { display: none; }

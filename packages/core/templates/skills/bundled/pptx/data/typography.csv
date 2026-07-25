@@ -1,0 +1,13 @@
+style,ascii_font,cjk_font,title_size,body_size,description
+modern,Inter,PingFang SC,44,18,现代：Inter 几何感强，PingFang SC 现代简洁
+classic,Georgia,Songti SC,40,18,经典：Georgia 衬线优雅，宋体端庄
+tech,Menlo,Source Han Code,40,18,科技感：等宽字体突出代码与数据
+minimal,Helvetica,Helvetica Neue,48,20,极简：Helvetica 中性，避免干扰内容
+corporate,Arial,Microsoft YaHei,40,18,企业级：跨平台兼容性最佳
+editorial,Playfair Display,Songti SC,48,18,编辑设计：Playfair 装饰衬线 + 宋体
+friendly,Poppins,Noto Sans SC,42,20,友好：Poppins 圆润现代 + Noto Sans
+bold,Impact,PingFang SC,52,18,大胆：Impact 厚重抓眼
+elegant,Cormorant Garamond,Songti SC,40,18,优雅：Cormorant 细衬线 + 宋体
+geometric,Futura,Futura,44,18,几何：Futura 圆形几何
+sans_serif,Roboto,Noto Sans SC,40,18,无衬线：Roboto 现代简洁
+serif,Lora,Source Han Serif,42,18,衬线：Lora 可读性强 + 思源宋体

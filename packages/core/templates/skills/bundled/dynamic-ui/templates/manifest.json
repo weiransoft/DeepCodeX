@@ -1,0 +1,144 @@
+{
+  "version": 1,
+  "templateRoot": "templates",
+  "outputFile": "widget-code.html",
+  "description": "dynamic-ui 模板清单。每个模板对应 templates/<id>/ 目录，含 template.md（材料说明）、widget-code.html（完整可用示例）、fixture.json（样例数据）。status=ready 表示模板已物化可直接适配；status=planned 表示模板文件尚未物化，此时按 SKILL.md 与对应场景文件的降级原语生成。新增/重命名/移除模板时须同步更新本文件、对应 scenes/*.md 引用与 templates/<id>/ 目录。",
+  "fallbackPrimitives": [
+    "chart-card",
+    "metric-strip-chart",
+    "node-flow",
+    "decision-cards",
+    "compact-table-visual",
+    "explanation-panel"
+  ],
+  "templates": [
+    {
+      "id": "line-trend",
+      "status": "planned",
+      "kind": "chart",
+      "scene": "data-visualization",
+      "intent": "trend_over_time",
+      "description": "折线趋势图：展示有序时间点上的连续变化，支持斜率、拐点与多系列对比"
+    },
+    {
+      "id": "bar-chart-multiple",
+      "status": "planned",
+      "kind": "chart",
+      "scene": "data-visualization",
+      "intent": "grouped_bar_comparison",
+      "description": "分组柱状图：两个同辈系列跨同类目并排对比量级"
+    },
+    {
+      "id": "scatter-chart",
+      "status": "planned",
+      "kind": "chart",
+      "scene": "data-visualization",
+      "intent": "correlation_scatterplot",
+      "description": "散点图：两数值维度的相关性、聚类、离群点或可选气泡大小对比"
+    },
+    {
+      "id": "gantt-chart",
+      "status": "planned",
+      "kind": "chart",
+      "scene": "architecture-and-flow",
+      "intent": "project_schedule_gantt",
+      "description": "甘特图：时间线 + 条形布局，展示任务/里程碑排期与关键路径"
+    },
+    {
+      "id": "funnel-bar-chart",
+      "status": "planned",
+      "kind": "chart",
+      "scene": "data-visualization",
+      "intent": "pipeline_conversion_funnel_bar",
+      "description": "漏斗柱状图：有序阶段的流失与基线转化上下文"
+    },
+    {
+      "id": "sankey-chart",
+      "status": "planned",
+      "kind": "chart",
+      "scene": "data-visualization",
+      "intent": "flow_magnitude_sankey",
+      "description": "桑基图：分阶段节点间加权流动的路径量级与节点/链路检视"
+    },
+    {
+      "id": "heatmap-chart",
+      "status": "planned",
+      "kind": "chart",
+      "scene": "data-visualization",
+      "intent": "contribution_heatmap",
+      "description": "热力图：按行/列密度、日历格或贡献强度扫描数值"
+    },
+    {
+      "id": "pie-donut-text",
+      "status": "planned",
+      "kind": "chart",
+      "scene": "data-visualization",
+      "intent": "composition_with_center_metric",
+      "description": "环形图带中心指标：类别份额围绕一个有意义的总量或头条百分比"
+    },
+    {
+      "id": "bar-stacked-legend",
+      "status": "planned",
+      "kind": "chart",
+      "scene": "data-visualization",
+      "intent": "stacked_part_to_whole",
+      "description": "堆叠柱状图带图例：各部分贡献于类别总量，总量与构成均重要"
+    },
+    {
+      "id": "pie-chart-label-list",
+      "status": "planned",
+      "kind": "chart",
+      "scene": "data-visualization",
+      "intent": "part_to_whole_label_list",
+      "description": "饼图带标签列表：小类别集需切片标签 + 紧凑侧标签列表"
+    },
+    {
+      "id": "radar-chart-legend",
+      "status": "planned",
+      "kind": "chart",
+      "scene": "data-visualization",
+      "intent": "radar_profile_comparison",
+      "description": "雷达图带图例：两个同辈来源以填充形状跨同维度集对比画像"
+    },
+    {
+      "id": "radar-chart-lines-only",
+      "status": "planned",
+      "kind": "chart",
+      "scene": "data-visualization",
+      "intent": "radar_profile_lines_only",
+      "description": "极简雷达轮廓：两同辈来源无填充轮廓跨同维度集对比"
+    },
+    {
+      "id": "comparison-cards",
+      "status": "planned",
+      "kind": "comparison",
+      "scene": "comparison-and-decision",
+      "intent": "multi_option_comparison_cards",
+      "description": "对比卡片：2-4 张独立选项卡，含分隔行、紧凑条、至多 2 标签与可选推荐徽章"
+    },
+    {
+      "id": "tree-flow",
+      "status": "planned",
+      "kind": "diagram",
+      "scene": "architecture-and-flow",
+      "intent": "horizontal_node_tree_flow",
+      "description": "水平节点树流：≤4 层的依赖/层级关系树形布局"
+    },
+    {
+      "id": "architecture-elements",
+      "status": "planned",
+      "kind": "diagram",
+      "scene": "architecture-and-flow",
+      "intent": "architecture_element_palette",
+      "description": "架构元素原语：提供中性/brand/边界/外部块样式 + 连接线样式集合"
+    },
+    {
+      "id": "sequence-diagram",
+      "status": "planned",
+      "kind": "diagram",
+      "scene": "architecture-and-flow",
+      "intent": "sequence_diagram_call_chain",
+      "description": "时序图：ZenUML 风格参与者/生命线/消息布局，适用于 3-5 参与者、4-8 有序消息"
+    }
+  ]
+}

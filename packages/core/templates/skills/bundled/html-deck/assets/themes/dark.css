@@ -1,0 +1,45 @@
+/* theme: dark — 深色夜空，技术氛围
+ * 适用场景：技术分享、长时间观看、基础设施、开发者受众
+ * 字体：Inter + Noto Sans SC，柔和暗色，蓝紫 accent
+ */
+:root {
+  /* 背景与表面：深邃夜空色 */
+  --bg: #0f1117;
+  --bg-soft: #16181f;
+  --surface: #1c1f29;
+  --surface-2: #252936;
+  /* 边框：低对比度，保持层次 */
+  --border: rgba(200, 210, 240, .1);
+  --border-strong: rgba(200, 210, 240, .22);
+  /* 文字层级：高对比度保证可读性 */
+  --text-1: #e8ecf4;
+  --text-2: #b4bccf;
+  --text-3: #6b7388;
+  /* 主题色：蓝紫夜光 */
+  --accent: #7aa2f7;
+  --accent-2: #bb9af7;
+  --accent-3: #7dcfff;
+  /* 语义色 */
+  --good: #9ece6a;
+  --warn: #e0af68;
+  --bad: #f7768e;
+  /* 渐变：三色蓝紫渐变 */
+  --grad: linear-gradient(135deg, #7aa2f7, #bb9af7 55%, #f7768e);
+  --grad-soft: linear-gradient(135deg, #1c1f29, #252936);
+  /* 圆角 */
+  --radius: 14px;
+  --radius-sm: 8px;
+  --radius-lg: 22px;
+  /* 阴影：深色背景需更强阴影体现层次 */
+  --shadow: 0 10px 30px rgba(0, 0, 0, .5), 0 2px 8px rgba(0, 0, 0, .3);
+  --shadow-lg: 0 24px 62px rgba(0, 0, 0, .65);
+  /* 字体 */
+  --font-sans: 'Inter', 'Noto Sans SC', sans-serif;
+  --font-display: 'Inter', 'Noto Sans SC', sans-serif;
+  /* 字距 */
+  --letter-tight: -.035em;
+  /* 背景纹理：双径向光晕，营造夜空氛围 */
+  --bg-texture:
+    radial-gradient(ellipse at 70% 20%, rgba(122, 162, 247, .1), transparent 55%),
+    radial-gradient(ellipse at 20% 80%, rgba(187, 154, 247, .07), transparent 55%);
+}

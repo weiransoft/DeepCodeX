@@ -1,0 +1,17 @@
+industry,mood,primary,secondary,accent,background,description
+fintech,trust,1A365D,2B6CB0,F6AD55,F7FAFC,金融科技：深蓝主色传递专业可靠，橙色强调行动按钮
+fintech,modern,0F172A,3B82F6,10B981,FFFFFF,金融科技现代化：深邃黑蓝 + 亮蓝 + 翠绿强调增长
+healthcare,calm,1E3A5F,3182CE,FBB6CE,F0F9FF,医疗健康：冷色调传递安全洁净，粉色点缀温暖关怀
+healthtech,innovation,064E3B,10B981,A78BFA,FAFAFA,医疗科技：深绿主色 + 翠绿 + 紫色强调科技感
+ecommerce,vibrant,7C2D12,EA580C,FACC15,FFFBEB,电商：暖橙主色营造活跃，黄色突出促销
+ecommerce,premium,18181B,71717A,FCD34D,FAFAFA,电商高端：黑色主调 + 灰 + 金色强调品质
+education,friendly,1E40AF,3B82F6,FBBF24,FFF7ED,教育：蓝色传递知识 + 黄色激发兴趣
+education,professional,1F2937,6366F1,EC4899,FFFFFF,教育专业：深灰 + 靛蓝 + 粉色强调创意
+saas,tech,0F172A,3B82F6,8B5CF6,F8FAFC,SaaS：深蓝黑 + 亮蓝 + 紫色强调科技与智能
+saas,playful,7C3AED,EC4899,FBBF24,FFFBEB,SaaS 活泼：紫色 + 粉色 + 黄色突出年轻化
+enterprise,serious,1E293B,475569,EF4444,FFFFFF,企业级：深灰 + 中灰 + 红色强调警示
+startup,bold,18181B,DC2626,F59E0B,FFFBEB,初创公司：黑红黄营造激进与活力
+nature,organic,14532D,16A34A,FED7AA,F0FDF4,自然有机：深绿 + 鲜绿 + 暖橙强调生命力
+creative,artistic,4C1D95,DB2777,FBBF24,FFF7ED,创意艺术：紫粉黄高对比彰显个性
+minimalist,clean,000000,525252,E5E5E5,FFFFFF,极简主义：黑白灰三色，无强调色
+darkmode,premium,0F172A,1E293B,FBBF24,1E1E1E,暗色模式：深色背景 + 金色强调高级感
