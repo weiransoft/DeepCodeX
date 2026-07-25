@@ -1,0 +1,20 @@
+{
+  "title": "各季度产品销量对比",
+  "description": "2024 年产品 A 与产品 B 在四个季度的销量对比，Q4 为焦点类目",
+  "data": {
+    "categories": ["Q1", "Q2", "Q3", "Q4"],
+    "series": [
+      {
+        "name": "产品 A",
+        "values": [320, 385, 420, 510]
+      },
+      {
+        "name": "产品 B",
+        "values": [280, 312, 345, 398]
+      }
+    ],
+    "yLabel": "销量 / 万件",
+    "yUnit": "万件",
+    "focusCategory": "Q4"
+  }
+}

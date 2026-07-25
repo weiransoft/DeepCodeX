@@ -1,0 +1,22 @@
+{
+  "title": "产品上线排期",
+  "description": "12 周交付计划，6 个任务含 4 个关键路径任务与 2 个里程碑",
+  "data": {
+    "tasks": [
+      { "name": "需求分析", "start": 0, "end": 1, "critical": true },
+      { "name": "架构设计", "start": 2, "end": 3, "critical": true },
+      { "name": "UI 设计", "start": 2, "end": 4, "critical": false },
+      { "name": "前端开发", "start": 4, "end": 7, "critical": true },
+      { "name": "后端开发", "start": 4, "end": 7, "critical": false },
+      { "name": "测试与上线", "start": 8, "end": 11, "critical": true }
+    ],
+    "milestones": [
+      { "name": "设计评审", "at": 3 },
+      { "name": "上线", "at": 11 }
+    ],
+    "timeStart": 0,
+    "timeEnd": 11,
+    "timeUnit": "周",
+    "timeLabels": ["W1", "W2", "W3", "W4", "W5", "W6", "W7", "W8", "W9", "W10", "W11", "W12"]
+  }
+}

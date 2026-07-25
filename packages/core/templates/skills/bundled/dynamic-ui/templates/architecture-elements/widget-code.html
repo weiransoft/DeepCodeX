@@ -1,0 +1,247 @@
+<style>
+/* ===== Token 定义（亮色默认 + 暗色覆盖）===== */
+:root {
+  color-scheme: light;
+  --surface: #F7F7F8;
+  --surface-muted: #EFEFF2;
+  --text: #171717;
+  --text-muted: #52525B;
+  --border: rgba(23, 23, 23, 0.12);
+
+  --brand: #4B3FE3;
+  --brand-soft: #F2F7FF;
+  --brand-soft-strong: #E5EAFF;
+  --brand-text: #1A1759;
+  --brand-on: #FFFFFF;
+  --chart-series-1: #3C2ECA;
+  --chart-series-2: #A9AEFF;
+  --chart-series-3: #6F6FFF;
+  --chart-series-4: #22A5F7;
+  --chart-other: #D3D4DA;
+
+  --success: #1DC981;
+  --warning: #EFAA17;
+  --danger: #E8463A;
+
+  --radius: 8px;
+  --radius-card: 12px;
+  --radius-full: 999px;
+  --spacer-4: 4px;
+  --spacer-8: 8px;
+  --spacer-12: 12px;
+  --spacer-16: 16px;
+  --spacer-20: 20px;
+  --spacer-24: 24px;
+  --font-sans: "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-metric: "Inter", "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-strong: 600;
+  --text-caption: 12px/18px;
+  --text-body: 14px/20px;
+  --text-title: 16px/24px;
+  --text-code: 13px/20px;
+}
+:root[data-widget-theme="dark"] {
+  color-scheme: dark;
+  --surface: #171717;
+  --surface-muted: #262626;
+  --text: #E5E5E5;
+  --text-muted: #A1A1AA;
+  --border: rgba(229, 229, 229, 0.12);
+  --brand: #6054F1;
+  --brand-soft: #1A1759;
+  --brand-soft-strong: #3C2ECA;
+  --brand-text: #CFD8FF;
+  --chart-series-1: #4B3FE3;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-widget-theme="light"]) {
+    --surface: #171717;
+    --surface-muted: #262626;
+    --text: #E5E5E5;
+    --text-muted: #A1A1AA;
+    --border: rgba(229, 229, 229, 0.12);
+    --brand: #6054F1;
+    --brand-soft: #1A1759;
+    --brand-soft-strong: #3C2ECA;
+    --brand-text: #CFD8FF;
+    --chart-series-1: #4B3FE3;
+  }
+}
+
+/* ===== 组件样式 ===== */
+.ae-widget {
+  color: var(--text);
+  background: transparent;
+  font: var(--weight-regular) var(--text-body) var(--font-sans);
+}
+.ae-head { margin: 0 0 var(--spacer-12); }
+.ae-head__title {
+  font: var(--weight-medium) var(--text-title) var(--font-sans);
+  color: var(--text);
+  margin: 0;
+}
+.ae-head__sub {
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text-muted);
+  margin: var(--spacer-4) 0 0;
+}
+.ae-svg { display: block; width: 100%; height: auto; }
+
+/* 文字角色类 */
+.th { fill: var(--text); font: var(--weight-medium) var(--text-body) var(--font-sans); }
+.ts { fill: var(--text-muted); font: var(--weight-regular) var(--text-caption) var(--font-sans); }
+.tl { fill: var(--text-muted); font: var(--weight-medium) var(--text-caption) var(--font-sans); }
+
+/* === 块类型样式 === */
+/* neutral：普通模块 — c-neutral 类，surface 填充 + border 描边 */
+g.blk-neutral > rect { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
+/* brand：核心模块 — c-brand 类，brand-soft 填充 + brand 描边（唯一焦点） */
+g.blk-brand > rect { fill: var(--brand-soft); stroke: var(--brand); stroke-width: 2; }
+.blk-brand > .th { fill: var(--brand-text); }
+.blk-brand > .ts { fill: var(--brand); }
+/* external：外部系统 — 用现有 token 表达结构角色，不发明新色 */
+g.blk-external > rect { fill: var(--surface-muted); stroke: var(--text-muted); stroke-width: 1.5; }
+/* boundary：逻辑边界容器 — 虚线边框，无填充 */
+g.blk-boundary > rect { fill: none; stroke: var(--text-muted); stroke-width: 1.5; stroke-dasharray: 6 4; }
+
+/* === 连接线类型样式 === */
+/* 通用：fill=none，round join/cap */
+.ln { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+/* neutral solid：标准调用 */
+.ln-neutral { stroke: var(--text-muted); stroke-width: 1.5; }
+/* brand dashed：高亮数据流（主路径） */
+.ln-brand-dashed { stroke: var(--brand); stroke-width: 2; stroke-dasharray: 6 4; }
+/* neutral dashed：弱依赖 */
+.ln-neutral-dashed { stroke: var(--text-muted); stroke-width: 1.5; stroke-dasharray: 4 4; }
+/* 边注标签 */
+.ln-label { fill: var(--text-muted); font: var(--weight-medium) var(--text-caption) var(--font-sans); }
+
+/* 图例分隔线 */
+.ae-legend-rule { stroke: var(--border); stroke-width: 1; }
+</style>
+
+<div data-dynamic-ui-widget data-template="architecture-elements" class="ae-widget">
+  <div class="ae-head">
+    <h3 class="ae-head__title">架构元素原语</h3>
+    <p class="ae-head__sub">四类块样式（neutral/brand/boundary/external）与四类连接线（实线/brand 虚线/弱依赖虚线/带注解边）的示例组合</p>
+  </div>
+
+  <svg class="ae-svg" viewBox="0 0 720 460" role="img" aria-label="架构元素原语示例图与图例">
+    <defs>
+      <!-- 箭头标记：neutral 与 brand，orient=auto / markerUnits=userSpaceOnUse / 约 8×8 -->
+      <marker id="ae-arrow-neutral" viewBox="0 0 10 10" refX="9" refY="5"
+              markerWidth="8" markerHeight="8" orient="auto" markerUnits="userSpaceOnUse">
+        <path d="M0,0 L10,5 L0,10 Z" fill="var(--text-muted)"/>
+      </marker>
+      <marker id="ae-arrow-brand" viewBox="0 0 10 10" refX="9" refY="5"
+              markerWidth="8" markerHeight="8" orient="auto" markerUnits="userSpaceOnUse">
+        <path d="M0,0 L10,5 L0,10 Z" fill="var(--brand)"/>
+      </marker>
+    </defs>
+
+    <!-- ===== 示例架构图 ===== -->
+    <!-- boundary：逻辑边界容器 "Web Cluster" -->
+    <g class="blk-boundary">
+      <rect x="150" y="50" width="420" height="240" rx="12" ry="12"/>
+      <text class="tl" x="160" y="70">Web Cluster</text>
+    </g>
+
+    <!-- 连接线（先画，置于节点下层） -->
+    <!-- Client → API Gateway：neutral solid（标准调用） -->
+    <path class="ln ln-neutral" d="M120,158 L175,158" marker-end="url(#ae-arrow-neutral)"/>
+    <!-- API Gateway → Core Service：brand dashed（高亮数据流，主路径） -->
+    <path class="ln ln-brand-dashed" d="M295,158 L330,158" marker-end="url(#ae-arrow-brand)"/>
+    <!-- Core Service → Database：labeled edge（带注解 "SQL"） -->
+    <path class="ln ln-neutral" d="M450,158 L600,158" marker-end="url(#ae-arrow-neutral)"/>
+    <text class="ln-label" x="525" y="150" text-anchor="middle">SQL</text>
+    <!-- API Gateway → Cache：neutral dashed（弱依赖） -->
+    <path class="ln ln-neutral-dashed" d="M235,186 C235,238 280,238 330,238" marker-end="url(#ae-arrow-neutral)"/>
+
+    <!-- external：Client（外部系统） -->
+    <g class="blk-external">
+      <rect x="30" y="130" width="90" height="56" rx="8" ry="8"/>
+      <text class="th" x="75" y="153" text-anchor="middle">Client</text>
+      <text class="ts" x="75" y="171" text-anchor="middle">外部</text>
+    </g>
+
+    <!-- neutral：API Gateway（普通模块） -->
+    <g class="blk-neutral">
+      <rect x="175" y="130" width="120" height="56" rx="8" ry="8"/>
+      <text class="th" x="235" y="153" text-anchor="middle">API Gateway</text>
+      <text class="ts" x="235" y="171" text-anchor="middle">网关</text>
+    </g>
+
+    <!-- brand：Core Service（核心模块，唯一焦点） -->
+    <g class="blk-brand">
+      <rect x="330" y="130" width="120" height="56" rx="8" ry="8"/>
+      <text class="th" x="390" y="153" text-anchor="middle">Core Service</text>
+      <text class="ts" x="390" y="171" text-anchor="middle">核心</text>
+    </g>
+
+    <!-- neutral：Cache（普通模块，弱依赖目标） -->
+    <g class="blk-neutral">
+      <rect x="330" y="210" width="100" height="56" rx="8" ry="8"/>
+      <text class="th" x="380" y="233" text-anchor="middle">Cache</text>
+      <text class="ts" x="380" y="251" text-anchor="middle">缓存</text>
+    </g>
+
+    <!-- external：Database（外部系统） -->
+    <g class="blk-external">
+      <rect x="600" y="130" width="90" height="56" rx="8" ry="8"/>
+      <text class="th" x="645" y="153" text-anchor="middle">Database</text>
+      <text class="ts" x="645" y="171" text-anchor="middle">外部</text>
+    </g>
+
+    <!-- ===== 图例 ===== -->
+    <line class="ae-legend-rule" x1="40" y1="310" x2="680" y2="310"/>
+    <text class="tl" x="40" y="332" style="font-weight: var(--weight-medium);">块类型</text>
+    <text class="tl" x="380" y="332" style="font-weight: var(--weight-medium);">连接线类型</text>
+
+    <!-- 左列：块类型图例 -->
+    <g class="blk-neutral"><rect x="40" y="346" width="24" height="14" rx="3" ry="3"/></g>
+    <text class="ts" x="72" y="357">neutral · 普通模块</text>
+
+    <g class="blk-brand"><rect x="40" y="371" width="24" height="14" rx="3" ry="3"/></g>
+    <text class="ts" x="72" y="382">brand · 核心模块（焦点）</text>
+
+    <g class="blk-boundary"><rect x="40" y="396" width="24" height="14" rx="3" ry="3"/></g>
+    <text class="ts" x="72" y="407">boundary · 逻辑边界容器</text>
+
+    <g class="blk-external"><rect x="40" y="421" width="24" height="14" rx="3" ry="3"/></g>
+    <text class="ts" x="72" y="432">external · 外部系统</text>
+
+    <!-- 右列：连接线类型图例 -->
+    <path class="ln ln-neutral" d="M380,353 L420,353" marker-end="url(#ae-arrow-neutral)"/>
+    <text class="ts" x="428" y="357">neutral solid · 标准调用</text>
+
+    <path class="ln ln-brand-dashed" d="M380,378 L420,378" marker-end="url(#ae-arrow-brand)"/>
+    <text class="ts" x="428" y="382">brand dashed · 高亮数据流</text>
+
+    <path class="ln ln-neutral-dashed" d="M380,403 L420,403" marker-end="url(#ae-arrow-neutral)"/>
+    <text class="ts" x="428" y="407">neutral dashed · 弱依赖</text>
+
+    <path class="ln ln-neutral" d="M380,428 L420,428" marker-end="url(#ae-arrow-neutral)"/>
+    <text class="ln-label" x="400" y="423" text-anchor="middle">label</text>
+    <text class="ts" x="428" y="432">labeled edge · 带注解连接</text>
+  </svg>
+</div>
+
+<script>
+/* 根选择器初始化：限定在根元素内，绑定前设 data-mounted 防止重复挂载 */
+(function () {
+  var root = document.querySelector('[data-dynamic-ui-widget][data-template="architecture-elements"]:not([data-mounted])');
+  if (!root) { return; }
+  root.setAttribute('data-mounted', 'true');
+
+  /* 块与连接线检视：键盘可达，焦点时切换 data-examined 供 CSS/辅助技术强调 */
+  var items = root.querySelectorAll('g.blk-neutral, g.blk-brand, g.blk-external, g.blk-boundary');
+  items.forEach(function (item) {
+    item.setAttribute('tabindex', '0');
+    item.addEventListener('focus', function () { item.setAttribute('data-examined', 'true'); });
+    item.addEventListener('blur', function () { item.removeAttribute('data-examined'); });
+  });
+})();
+</script>

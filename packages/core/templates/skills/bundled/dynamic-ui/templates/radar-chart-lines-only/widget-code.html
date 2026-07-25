@@ -1,0 +1,351 @@
+<style>
+/* ===== Token 定义（亮色默认 + 暗色覆盖）=====
+   置于 <style> 顶部，组件样式之前；默认紫色主题。 */
+:root {
+  color-scheme: light;
+  --surface: #F7F7F8; --surface-muted: #EFEFF2;
+  --text: #171717; --text-muted: #52525B;
+  --border: rgba(23, 23, 23, 0.12);
+  --brand: #4B3FE3; --brand-soft: #F2F7FF; --brand-soft-strong: #E5EAFF;
+  --brand-text: #1A1759; --brand-on: #FFFFFF;
+  --chart-series-1: #3C2ECA; --chart-series-2: #A9AEFF;
+  --chart-series-3: #6F6FFF; --chart-series-4: #22A5F7;
+  --chart-other: #D3D4DA;
+  --success: #1DC981; --warning: #EFAA17; --danger: #E8463A;
+  --radius: 8px; --radius-card: 12px; --radius-full: 999px;
+  --spacer-4: 4px; --spacer-8: 8px; --spacer-12: 12px;
+  --spacer-16: 16px; --spacer-20: 20px; --spacer-24: 24px;
+  --font-sans: "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-metric: "Inter", "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --weight-regular: 400; --weight-medium: 500; --weight-strong: 600;
+  --text-caption: 12px/18px; --text-body: 14px/20px;
+  --text-title: 16px/24px; --text-code: 13px/20px;
+}
+/* 暗色主题覆盖：默认紫色 brand 暗色阶 */
+:root[data-widget-theme="dark"] {
+  color-scheme: dark;
+  --surface: #171717; --surface-muted: #262626;
+  --text: #E5E5E5; --text-muted: #A1A1AA;
+  --border: rgba(229, 229, 229, 0.12);
+  --brand: #6054F1; --brand-soft: #1A1759; --brand-soft-strong: #3C2ECA;
+  --brand-text: #CFD8FF; --chart-series-1: #4B3FE3;
+}
+/* 独立打开时跟随系统暗色（可选降级） */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-widget-theme="light"]) {
+    --surface: #171717; --surface-muted: #262626;
+    --text: #E5E5E5; --text-muted: #A1A1AA;
+    --border: rgba(229, 229, 229, 0.12);
+    --brand: #6054F1; --brand-soft: #1A1759; --brand-soft-strong: #3C2ECA;
+    --brand-text: #CFD8FF; --chart-series-1: #4B3FE3;
+  }
+}
+
+/* ===== 组件样式 ===== */
+.rlo-widget {
+  color: var(--text); background: transparent;
+  font: var(--weight-regular) var(--text-body) var(--font-sans); letter-spacing: 0;
+}
+.rlo-head { margin: 0 0 var(--spacer-16); }
+.rlo-head__title {
+  font: var(--weight-medium) var(--text-title) var(--font-sans);
+  color: var(--text); margin: 0;
+}
+.rlo-head__sub {
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text-muted); margin: var(--spacer-4) 0 0;
+}
+/* 图表面板：中性表面 + 普通边框 + 显式高度 + position: relative */
+.rlo-panel {
+  position: relative; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius-card);
+  padding: var(--spacer-16); height: clamp(240px, 32vw, 380px);
+}
+.rlo-canvas-wrap { position: relative; width: 100%; height: 100%; }
+/* 可见降级表格：JS 执行前可见，Chart.js 创建成功后隐藏 */
+.rlo-fallback { width: 100%; border-collapse: collapse; }
+.rlo-fallback caption {
+  font: var(--weight-medium) var(--text-caption) var(--font-sans);
+  color: var(--text-muted); text-align: left; padding-bottom: var(--spacer-8);
+}
+.rlo-fallback th, .rlo-fallback td {
+  padding: var(--spacer-8) var(--spacer-12);
+  border-bottom: 1px solid var(--border);
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text); text-align: right; font-variant-numeric: tabular-nums;
+}
+.rlo-fallback th { color: var(--text-muted); font-weight: var(--weight-medium); }
+.rlo-fallback td:first-child, .rlo-fallback th:first-child { text-align: left; }
+/* HTML 图例（线段示意，替代 Chart.js 内建 legend 色块） */
+.rlo-legend {
+  display: flex; flex-wrap: wrap; gap: var(--spacer-16);
+  padding: 0 var(--spacer-4) var(--spacer-12);
+  font: var(--weight-medium) var(--text-caption) var(--font-sans);
+  color: var(--text-muted);
+}
+.rlo-legend__item { display: flex; align-items: center; gap: var(--spacer-8); }
+.rlo-legend__line {
+  display: inline-block; width: 18px; height: 0;
+  border-top: 2px solid var(--chart-series-1);
+}
+.rlo-legend__line--2 { border-top-color: var(--chart-series-2); }
+.rlo-legend__name { color: var(--text-muted); }
+/* HTML 提示框（Shadcn 风格）：默认隐藏，由 external 处理器定位 */
+.rlo-tooltip {
+  position: absolute; pointer-events: none; opacity: 0;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: var(--spacer-8) var(--spacer-12);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text); transition: opacity 100ms ease;
+  white-space: nowrap; z-index: 10; min-width: 160px;
+}
+.rlo-tooltip__title {
+  font: var(--weight-medium) var(--text-body) var(--font-sans);
+  color: var(--text); margin-bottom: var(--spacer-8);
+}
+.rlo-tooltip__row {
+  display: flex; align-items: center;
+  gap: var(--spacer-8); margin-top: var(--spacer-4);
+}
+.rlo-tooltip__line {
+  display: inline-block; width: 14px; height: 0;
+  border-top: 2px solid var(--chart-series-1); flex-shrink: 0;
+}
+.rlo-tooltip__line--2 { border-top-color: var(--chart-series-2); }
+.rlo-tooltip__name { color: var(--text-muted); }
+.rlo-tooltip__value {
+  margin-left: auto;
+  font: var(--weight-medium) var(--text-code) var(--font-mono);
+  color: var(--text); font-variant-numeric: tabular-nums;
+}
+</style>
+
+<div data-dynamic-ui-widget data-template="radar-chart-lines-only" class="rlo-widget">
+  <!-- 紧凑标题：场景定位，不含分析结论 -->
+  <div class="rlo-head">
+    <h3 class="rlo-head__title">版本性能基线轮廓对比</h3>
+    <p class="rlo-head__sub">v1.4 与 v1.5 在 6 项性能维度上的中位数（单位：ms，越低越好）</p>
+  </div>
+
+  <!-- HTML 图例：线段示意，与无填充轮廓风格一致 -->
+  <div class="rlo-legend" data-rlo-legend>
+    <div class="rlo-legend__item">
+      <span class="rlo-legend__line"></span>
+      <span class="rlo-legend__name">v1.4</span>
+    </div>
+    <div class="rlo-legend__item">
+      <span class="rlo-legend__line rlo-legend__line--2"></span>
+      <span class="rlo-legend__name">v1.5</span>
+    </div>
+  </div>
+
+  <!-- 图表面板：含可见降级表格与 canvas 容器 -->
+  <div class="rlo-panel">
+    <!-- 可见降级：JS 执行前展示数据表，Chart.js 创建成功后由脚本隐藏 -->
+    <table class="rlo-fallback" data-rlo-fallback>
+      <caption>性能维度中位数（ms）</caption>
+      <thead><tr><th>维度</th><th>v1.4</th><th>v1.5</th></tr></thead>
+      <tbody>
+        <tr><td>冷启动</td><td>320</td><td>245</td></tr>
+        <tr><td>首屏渲染</td><td>180</td><td>132</td></tr>
+        <tr><td>接口响应</td><td>95</td><td>78</td></tr>
+        <tr><td>列表滚动</td><td>42</td><td>36</td></tr>
+        <tr><td>动画帧率</td><td>58</td><td>48</td></tr>
+        <tr><td>内存峰值</td><td>210</td><td>195</td></tr>
+      </tbody>
+    </table>
+
+    <!-- canvas 容器：显式高度 + position: relative，初始隐藏直至 Chart.js 加载 -->
+    <div class="rlo-canvas-wrap" data-rlo-canvas-wrap style="display:none;">
+      <canvas data-rlo-canvas aria-label="版本性能基线雷达轮廓图"></canvas>
+    </div>
+
+    <!-- HTML 提示框容器：由 external 处理器定位 -->
+    <div class="rlo-tooltip" data-rlo-tooltip role="tooltip" aria-hidden="true">
+      <div class="rlo-tooltip__title" data-rlo-tooltip-title></div>
+      <div data-rlo-tooltip-body></div>
+    </div>
+  </div>
+</div>
+
+<!-- Chart.js UMD 加载：仅允许的 CDN，widget 底部 -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script>
+/* 根选择器初始化：限定在根元素内，绑定前设 data-mounted 防止重复挂载 */
+(function () {
+  var root = document.querySelector('[data-dynamic-ui-widget][data-template="radar-chart-lines-only"]:not([data-mounted])');
+  if (!root) { return; }
+  root.setAttribute('data-mounted', 'true');
+
+  /* 数据集：与 fixture.json 保持一致；focusDimension 标记唯一焦点（冷启动降幅最大） */
+  var dimensions = ['冷启动', '首屏渲染', '接口响应', '列表滚动', '动画帧率', '内存峰值'];
+  var series = [
+    { name: 'v1.4', values: [320, 180, 95, 42, 58, 210] },
+    { name: 'v1.5', values: [245, 132, 78, 36, 48, 195] }
+  ];
+  var focusDimension = '冷启动';   /* 唯一可见焦点 */
+  var maxValue = 360;              /* 雷达轴上限，覆盖最大值并保留余量 */
+  var unit = 'ms';
+
+  /* 读取 token：从根元素计算样式取 chart-series 颜色，避免硬编码 */
+  var cs = getComputedStyle(root);
+  var COLOR_SERIES_1 = cs.getPropertyValue('--chart-series-1').trim() || '#3C2ECA';
+  var COLOR_SERIES_2 = cs.getPropertyValue('--chart-series-2').trim() || '#A9AEFF';
+  var COLOR_BRAND = cs.getPropertyValue('--brand').trim() || '#4B3FE3';
+  var COLOR_BORDER = cs.getPropertyValue('--border').trim() || 'rgba(23,23,23,.12)';
+  var COLOR_TEXT_MUTED = cs.getPropertyValue('--text-muted').trim() || '#52525B';
+
+  /* 降级表格与 canvas 容器引用：仅 Chart.js 创建成功后才隐藏降级 */
+  var fallbackEl = root.querySelector('[data-rlo-fallback]');
+  var canvasWrap = root.querySelector('[data-rlo-canvas-wrap]');
+  var canvas = root.querySelector('[data-rlo-canvas]');
+
+  /* 降级门槛 1：Chart.js 未加载 → 保留可见表格（HTML 图例仍可见） */
+  if (typeof window.Chart === 'undefined') { return; }
+  /* 降级门槛 2：canvas 不可用 → 保留可见表格 */
+  if (!canvas || !canvas.getContext) { return; }
+
+  /* 构造 Chart.js 数据集：两系列均 fill: false，仅描边轮廓，无填充叠加 */
+  var seriesColors = [COLOR_SERIES_1, COLOR_SERIES_2];
+  var datasets = series.map(function (s, idx) {
+    var color = seriesColors[idx];
+    return {
+      label: s.name,
+      data: s.values,
+      backgroundColor: 'transparent',     /* 无填充 */
+      borderColor: color,
+      borderWidth: 2,
+      pointBackgroundColor: color,
+      pointBorderColor: color,
+      pointRadius: 3,
+      pointHoverRadius: 5,
+      fill: false                          /* 仅描边轮廓，与 radar-chart-legend 区分 */
+    };
+  });
+
+  /* 焦点维度轴插件：在 focusDimension 维度轴上叠加 brand 描边 */
+  var focusAxisPlugin = {
+    id: 'rloFocusAxis',
+    afterDatasetsDraw: function (chart) {
+      var focusIdx = dimensions.indexOf(focusDimension);
+      if (focusIdx < 0) { return; }
+      var scale = chart.scales.r;
+      if (!scale) { return; }
+      var point = scale.getPointPositionForValue(focusIdx, maxValue);
+      var center = scale.xCenter !== undefined
+        ? { x: scale.xCenter, y: scale.yCenter }
+        : { x: scale.x, y: scale.y };
+      var ctx = chart.ctx;
+      ctx.save();
+      ctx.strokeStyle = COLOR_BRAND;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(center.x, center.y);
+      ctx.lineTo(point.x, point.y);
+      ctx.stroke();
+      ctx.restore();
+    }
+  };
+
+  /* HTML 提示框元素引用：external 处理器更新其内容与位置 */
+  var tooltipEl = root.querySelector('[data-rlo-tooltip]');
+  var tooltipTitle = root.querySelector('[data-rlo-tooltip-title]');
+  var tooltipBody = root.querySelector('[data-rlo-tooltip-body]');
+
+  /**
+   * external 提示框处理器：渲染 Shadcn 风格 HTML 提示
+   * 禁用 Chart.js 内建 canvas 提示，所有定位约束在图表面板内
+   */
+  function externalTooltipHandler(context) {
+    var chart = context.chart;
+    var tooltip = chart.tooltip;
+    if (tooltip.opacity === 0) {
+      tooltipEl.style.opacity = '0';
+      tooltipEl.setAttribute('aria-hidden', 'true');
+      return;
+    }
+    if (tooltip.body) {
+      /* 标题：当前维度标签 */
+      var idx = tooltip.dataPoints[0].dataIndex;
+      tooltipTitle.textContent = dimensions[idx];
+      /* 正文：每个系列一行，用线段示意（与无填充风格一致），含名称与数值 */
+      var bodyHtml = series.map(function (s, i) {
+        var lineClass = i === 0 ? 'rlo-tooltip__line' : 'rlo-tooltip__line rlo-tooltip__line--2';
+        return '<div class="rlo-tooltip__row">'
+          + '<span class="' + lineClass + '"></span>'
+          + '<span class="rlo-tooltip__name">' + s.name + '</span>'
+          + '<span class="rlo-tooltip__value">' + s.values[idx] + ' ' + unit + '</span>'
+          + '</div>';
+      }).join('');
+      tooltipBody.innerHTML = bodyHtml;
+    }
+    /* 定位：基于图表面板相对坐标，避免溢出 */
+    var panel = root.querySelector('.rlo-panel');
+    var panelRect = panel.getBoundingClientRect();
+    var canvasRect = chart.canvas.getBoundingClientRect();
+    var tooltipWidth = tooltipEl.offsetWidth;
+    var left = canvasRect.left - panelRect.left + tooltip.caretX + 12;
+    if (left + tooltipWidth > panelRect.width - 8) {
+      left = canvasRect.left - panelRect.left + tooltip.caretX - tooltipWidth - 12;
+    }
+    var top = canvasRect.top - panelRect.top + tooltip.caretY - 12;
+    tooltipEl.style.left = left + 'px';
+    tooltipEl.style.top = top + 'px';
+    tooltipEl.style.opacity = '1';
+    tooltipEl.setAttribute('aria-hidden', 'false');
+  }
+
+  try {
+    /* 创建 Chart.js 实例：responsive + maintainAspectRatio: false + 显式容器高度 */
+    var chart = new window.Chart(canvas, {
+      type: 'radar',
+      data: { labels: dimensions, datasets: datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        animation: { duration: 180 },          /* 首次渲染 120-220ms */
+        hover: { mode: 'index', intersect: false },
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },           /* 禁用内建 legend，由 HTML 线段图例承担 */
+          tooltip: {
+            enabled: false,                    /* 禁用内建 canvas 提示 */
+            external: externalTooltipHandler,  /* 用 HTML 处理器渲染 */
+            mode: 'index', intersect: false
+          }
+        },
+        scales: {
+          r: {
+            beginAtZero: true,
+            min: 0, max: maxValue,
+            grid: { color: COLOR_BORDER },
+            angleLines: { color: COLOR_BORDER },
+            pointLabels: {
+              color: COLOR_TEXT_MUTED,
+              font: { family: 'SF Pro Text, PingFang SC, system-ui, sans-serif', size: 12 }
+            },
+            ticks: {
+              color: COLOR_TEXT_MUTED,
+              backdropColor: 'transparent',
+              font: { size: 11 },
+              stepSize: 60
+            }
+          }
+        }
+      },
+      plugins: [focusAxisPlugin]
+    });
+
+    /* 创建成功：隐藏可见降级表格，显示 canvas */
+    fallbackEl.style.display = 'none';
+    canvasWrap.style.display = 'block';
+  } catch (err) {
+    /* 创建失败：保留可见降级表格，不抛错（用户仍可读数据） */
+    if (typeof console !== 'undefined' && console.warn) {
+      console.warn('[radar-chart-lines-only] Chart.js 初始化失败，保留降级表格', err);
+    }
+  }
+})();
+</script>

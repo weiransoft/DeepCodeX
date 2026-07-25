@@ -1,0 +1,72 @@
+{
+  "title": "架构元素原语",
+  "description": "四类块样式与四类连接线的示例组合：Web 集群边界内的网关、核心服务与缓存，及外部客户端与数据库",
+  "data": {
+    "boundary": {
+      "id": "web-cluster",
+      "label": "Web Cluster",
+      "x": 150,
+      "y": 50,
+      "width": 420,
+      "height": 240
+    },
+    "blocks": [
+      {
+        "id": "client",
+        "type": "external",
+        "title": "Client",
+        "subtitle": "外部",
+        "x": 30,
+        "y": 130,
+        "width": 90,
+        "height": 56
+      },
+      {
+        "id": "gateway",
+        "type": "neutral",
+        "title": "API Gateway",
+        "subtitle": "网关",
+        "x": 175,
+        "y": 130,
+        "width": 120,
+        "height": 56
+      },
+      {
+        "id": "core",
+        "type": "brand",
+        "title": "Core Service",
+        "subtitle": "核心",
+        "x": 330,
+        "y": 130,
+        "width": 120,
+        "height": 56
+      },
+      {
+        "id": "cache",
+        "type": "neutral",
+        "title": "Cache",
+        "subtitle": "缓存",
+        "x": 330,
+        "y": 210,
+        "width": 100,
+        "height": 56
+      },
+      {
+        "id": "db",
+        "type": "external",
+        "title": "Database",
+        "subtitle": "外部",
+        "x": 600,
+        "y": 130,
+        "width": 90,
+        "height": 56
+      }
+    ],
+    "edges": [
+      { "from": "client", "to": "gateway", "type": "neutral-solid" },
+      { "from": "gateway", "to": "core", "type": "brand-dashed" },
+      { "from": "core", "to": "db", "type": "labeled", "label": "SQL" },
+      { "from": "gateway", "to": "cache", "type": "neutral-dashed" }
+    ]
+  }
+}

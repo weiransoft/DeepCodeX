@@ -1,0 +1,317 @@
+<style>
+/* ===== Token 定义（亮色默认 + 暗色覆盖）=====
+   置于 <style> 顶部，组件样式之前；默认紫色主题。 */
+:root {
+  color-scheme: light;
+  --surface: #F7F7F8;
+  --surface-muted: #EFEFF2;
+  --text: #171717;
+  --text-muted: #52525B;
+  --border: rgba(23, 23, 23, 0.12);
+  --brand: #4B3FE3;
+  --brand-soft: #F2F7FF;
+  --brand-soft-strong: #E5EAFF;
+  --brand-text: #1A1759;
+  --brand-on: #FFFFFF;
+  --chart-series-1: #3C2ECA;
+  --chart-series-2: #A9AEFF;
+  --chart-series-3: #6F6FFF;
+  --chart-series-4: #22A5F7;
+  --chart-other: #D3D4DA;
+  --success: #1DC981;
+  --warning: #EFAA17;
+  --danger: #E8463A;
+  --radius: 8px;
+  --radius-card: 12px;
+  --radius-full: 999px;
+  --spacer-4: 4px;
+  --spacer-8: 8px;
+  --spacer-12: 12px;
+  --spacer-16: 16px;
+  --spacer-20: 20px;
+  --spacer-24: 24px;
+  --font-sans: "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-metric: "Inter", "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-strong: 600;
+  --text-caption: 12px/18px;
+  --text-body: 14px/20px;
+  --text-title: 16px/24px;
+  --text-code: 13px/20px;
+}
+/* 暗色主题覆盖：默认紫色 brand 暗色阶 */
+:root[data-widget-theme="dark"] {
+  color-scheme: dark;
+  --surface: #171717;
+  --surface-muted: #262626;
+  --text: #E5E5E5;
+  --text-muted: #A1A1AA;
+  --border: rgba(229, 229, 229, 0.12);
+  --brand: #6054F1;
+  --brand-soft: #1A1759;
+  --brand-soft-strong: #3C2ECA;
+  --brand-text: #CFD8FF;
+  --chart-series-1: #4B3FE3;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-widget-theme="light"]) {
+    --surface: #171717; --surface-muted: #262626;
+    --text: #E5E5E5; --text-muted: #A1A1AA;
+    --border: rgba(229, 229, 229, 0.12);
+    --brand: #6054F1; --brand-soft: #1A1759;
+    --brand-soft-strong: #3C2ECA; --brand-text: #CFD8FF;
+    --chart-series-1: #4B3FE3;
+  }
+}
+
+/* ===== 组件样式 ===== */
+.gn-widget {
+  color: var(--text);
+  background: transparent;
+  font: var(--weight-regular) var(--text-body) var(--font-sans);
+}
+.gn-head { margin: 0 0 var(--spacer-16); }
+.gn-head__title {
+  font: var(--weight-medium) var(--text-title) var(--font-sans);
+  color: var(--text); margin: 0;
+}
+.gn-head__sub {
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text-muted); margin: var(--spacer-4) 0 0;
+}
+/* SVG 画布：响应式 + 显式高度 */
+.gn-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+}
+/* SVG 文本类（与 tokens/visual-tokens.md 图示色板一致） */
+.gn-svg .t { fill: var(--text); font: var(--weight-regular) var(--text-body) var(--font-sans); }
+.gn-svg .th { fill: var(--text); font: var(--weight-medium) var(--text-body) var(--font-sans); }
+.gn-svg .ts { fill: var(--text-muted); font: var(--weight-regular) var(--text-caption) var(--font-sans); }
+.gn-svg .tm { fill: var(--text-muted); font: var(--weight-regular) var(--text-caption) var(--font-mono); font-variant-numeric: tabular-nums; }
+/* 网格线 */
+.gn-svg .grid { stroke: var(--border); stroke-width: 1; fill: none; }
+/* 任务条：默认 chart-series-1；关键路径用 brand */
+.gn-svg .bar { rx: 4; ry: 4; transition: opacity 100ms ease; }
+.gn-svg .bar:hover { opacity: 0.85; }
+.gn-svg .bar-critical { fill: var(--brand); }
+.gn-svg .bar-normal-1 { fill: var(--chart-series-1); }
+.gn-svg .bar-normal-2 { fill: var(--chart-series-2); }
+.gn-svg .bar-normal-3 { fill: var(--chart-series-3); }
+.gn-svg .bar-normal-4 { fill: var(--chart-series-4); }
+/* 里程碑菱形 */
+.gn-svg .milestone { fill: var(--brand); stroke: var(--brand-soft); stroke-width: 1.5; }
+.gn-svg .milestone-stem { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; fill: none; }
+/* 图例 */
+.gn-legend {
+  display: flex; flex-wrap: wrap; gap: var(--spacer-12);
+  margin-top: var(--spacer-12);
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text-muted);
+}
+.gn-legend__item { display: flex; align-items: center; gap: var(--spacer-8); }
+.gn-legend__swatch {
+  width: 12px; height: 12px; border-radius: var(--radius);
+  display: inline-block;
+}
+.gn-legend__swatch--diamond {
+  border-radius: 0; transform: rotate(45deg);
+  width: 10px; height: 10px;
+}
+</style>
+
+<div data-dynamic-ui-widget data-template="gantt-chart" class="gn-widget">
+  <div class="gn-head">
+    <h3 class="gn-head__title">产品上线排期</h3>
+    <p class="gn-head__sub">12 周交付计划，关键路径任务用 brand 色标记，含 2 个里程碑</p>
+  </div>
+
+  <!--
+    SVG 甘特图：viewBox 720×440，width=100% height=auto
+    布局：标题 0-50 / 时间轴 50-90 / 任务区 90-378（6 任务 × 48）/ 里程碑 378-416 / 底部 416-440
+    任务名列 24-160，时间轴 160-688（12 周，每周 44 单位）
+  -->
+  <svg class="gn-svg" viewBox="0 0 720 440" role="img" aria-label="产品上线 12 周甘特图">
+    <!-- 标题区：场景标题（紧凑，单行） -->
+    <text x="24" y="32" class="th">任务 / 时间轴（周）</text>
+
+    <!-- 时间轴标签：每周一个，使用 caption 字号 -->
+    <g>
+      <text x="160" y="72" class="ts" text-anchor="middle">W1</text>
+      <text x="204" y="72" class="ts" text-anchor="middle">W2</text>
+      <text x="248" y="72" class="ts" text-anchor="middle">W3</text>
+      <text x="292" y="72" class="ts" text-anchor="middle">W4</text>
+      <text x="336" y="72" class="ts" text-anchor="middle">W5</text>
+      <text x="380" y="72" class="ts" text-anchor="middle">W6</text>
+      <text x="424" y="72" class="ts" text-anchor="middle">W7</text>
+      <text x="468" y="72" class="ts" text-anchor="middle">W8</text>
+      <text x="512" y="72" class="ts" text-anchor="middle">W9</text>
+      <text x="556" y="72" class="ts" text-anchor="middle">W10</text>
+      <text x="600" y="72" class="ts" text-anchor="middle">W11</text>
+      <text x="644" y="72" class="ts" text-anchor="middle">W12</text>
+    </g>
+
+    <!-- 垂直网格线：每周一条，使用 --border 中性色 -->
+    <g class="grid">
+      <line x1="160" y1="90" x2="160" y2="416"/>
+      <line x1="204" y1="90" x2="204" y2="416"/>
+      <line x1="248" y1="90" x2="248" y2="416"/>
+      <line x1="292" y1="90" x2="292" y2="416"/>
+      <line x1="336" y1="90" x2="336" y2="416"/>
+      <line x1="380" y1="90" x2="380" y2="416"/>
+      <line x1="424" y1="90" x2="424" y2="416"/>
+      <line x1="468" y1="90" x2="468" y2="416"/>
+      <line x1="512" y1="90" x2="512" y2="416"/>
+      <line x1="556" y1="90" x2="556" y2="416"/>
+      <line x1="600" y1="90" x2="600" y2="416"/>
+      <line x1="644" y1="90" x2="644" y2="416"/>
+      <line x1="688" y1="90" x2="688" y2="416"/>
+    </g>
+
+    <!-- 任务 1：需求分析（W1-W2，关键路径，brand 色） -->
+    <g>
+      <text x="24" y="118" class="t">需求分析</text>
+      <rect class="bar bar-critical" x="160" y="104" width="88" height="24" rx="4" ry="4">
+        <title>需求分析：W1 - W2（关键路径）</title>
+      </rect>
+    </g>
+
+    <!-- 任务 2：架构设计（W3-W4，关键路径，brand 色） -->
+    <g>
+      <text x="24" y="166" class="t">架构设计</text>
+      <rect class="bar bar-critical" x="248" y="152" width="88" height="24" rx="4" ry="4">
+        <title>架构设计：W3 - W4（关键路径）</title>
+      </rect>
+    </g>
+
+    <!-- 任务 3：UI 设计（W3-W5，普通任务，chart-series-2） -->
+    <g>
+      <text x="24" y="214" class="t">UI 设计</text>
+      <rect class="bar bar-normal-2" x="248" y="200" width="132" height="24" rx="4" ry="4">
+        <title>UI 设计：W3 - W5</title>
+      </rect>
+    </g>
+
+    <!-- 任务 4：前端开发（W5-W8，关键路径，brand 色） -->
+    <g>
+      <text x="24" y="262" class="t">前端开发</text>
+      <rect class="bar bar-critical" x="336" y="248" width="176" height="24" rx="4" ry="4">
+        <title>前端开发：W5 - W8（关键路径）</title>
+      </rect>
+    </g>
+
+    <!-- 任务 5：后端开发（W5-W8，普通任务，chart-series-3） -->
+    <g>
+      <text x="24" y="310" class="t">后端开发</text>
+      <rect class="bar bar-normal-3" x="336" y="296" width="176" height="24" rx="4" ry="4">
+        <title>后端开发：W5 - W8</title>
+      </rect>
+    </g>
+
+    <!-- 任务 6：测试与上线（W9-W12，关键路径，brand 色） -->
+    <g>
+      <text x="24" y="358" class="t">测试与上线</text>
+      <rect class="bar bar-critical" x="512" y="344" width="176" height="24" rx="4" ry="4">
+        <title>测试与上线：W9 - W12（关键路径）</title>
+      </rect>
+    </g>
+
+    <!-- 里程碑 1：设计评审（W4 末，菱形） -->
+    <g>
+      <line class="milestone-stem" x1="336" y1="90" x2="336" y2="396"/>
+      <polygon class="milestone" points="336,388 344,396 336,404 328,396"/>
+      <text x="352" y="400" class="ts">设计评审（W4）</text>
+    </g>
+
+    <!-- 里程碑 2：上线（W12 末，菱形） -->
+    <g>
+      <line class="milestone-stem" x1="688" y1="90" x2="688" y2="396"/>
+      <polygon class="milestone" points="688,388 696,396 688,404 680,396"/>
+      <text x="676" y="400" class="ts" text-anchor="end">上线（W12）</text>
+    </g>
+  </svg>
+
+  <!-- 图例：标识关键路径、普通任务、里程碑 -->
+  <div class="gn-legend">
+    <span class="gn-legend__item">
+      <span class="gn-legend__swatch" style="background: var(--brand);"></span>
+      关键路径任务
+    </span>
+    <span class="gn-legend__item">
+      <span class="gn-legend__swatch" style="background: var(--chart-series-2);"></span>
+      普通任务（设计）
+    </span>
+    <span class="gn-legend__item">
+      <span class="gn-legend__swatch" style="background: var(--chart-series-3);"></span>
+      普通任务（开发）
+    </span>
+    <span class="gn-legend__item">
+      <span class="gn-legend__swatch gn-legend__swatch--diamond" style="background: var(--brand);"></span>
+      里程碑
+    </span>
+  </div>
+
+  <!-- 可见降级表格：SVG 不可用时提供精确数据 -->
+  <noscript>
+    <table style="width:100%; margin-top: var(--spacer-16); border-collapse: collapse; font: var(--weight-regular) var(--text-caption) var(--font-sans);">
+      <thead>
+        <tr>
+          <th style="padding: var(--spacer-8); border-bottom: 1px solid var(--border); text-align: left; color: var(--text-muted);">任务</th>
+          <th style="padding: var(--spacer-8); border-bottom: 1px solid var(--border); text-align: left; color: var(--text-muted);">起止（周）</th>
+          <th style="padding: var(--spacer-8); border-bottom: 1px solid var(--border); text-align: left; color: var(--text-muted);">关键路径</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td style="padding: var(--spacer-8); border-bottom: 1px solid var(--border);">需求分析</td><td style="padding: var(--spacer-8); border-bottom: 1px solid var(--border);">W1 - W2</td><td style="padding: var(--spacer-8); border-bottom: 1px solid var(--border);">是</td></tr>
+        <tr><td style="padding: var(--spacer-8); border-bottom: 1px solid var(--border);">架构设计</td><td style="padding: var(--spacer-8); border-bottom: 1px solid var(--border);">W3 - W4</td><td style="padding: var(--spacer-8); border-bottom: 1px solid var(--border);">是</td></tr>
+        <tr><td style="padding: var(--spacer-8); border-bottom: 1px solid var(--border);">UI 设计</td><td style="padding: var(--spacer-8); border-bottom: 1px solid var(--border);">W3 - W5</td><td style="padding: var(--spacer-8); border-bottom: 1px solid var(--border);">否</td></tr>
+        <tr><td style="padding: var(--spacer-8); border-bottom: 1px solid var(--border);">前端开发</td><td style="padding: var(--spacer-8); border-bottom: 1px solid var(--border);">W5 - W8</td><td style="padding: var(--spacer-8); border-bottom: 1px solid var(--border);">是</td></tr>
+        <tr><td style="padding: var(--spacer-8); border-bottom: 1px solid var(--border);">后端开发</td><td style="padding: var(--spacer-8); border-bottom: 1px solid var(--border);">W5 - W8</td><td style="padding: var(--spacer-8); border-bottom: 1px solid var(--border);">否</td></tr>
+        <tr><td style="padding: var(--spacer-8); border-bottom: 1px solid var(--border);">测试与上线</td><td style="padding: var(--spacer-8); border-bottom: 1px solid var(--border);">W9 - W12</td><td style="padding: var(--spacer-8); border-bottom: 1px solid var(--border);">是</td></tr>
+      </tbody>
+    </table>
+  </noscript>
+</div>
+
+<script>
+/* 根选择器初始化：限定在根元素内，绑定前设 data-mounted 防止重复挂载
+   gantt-chart 不依赖 Chart.js，SVG 直接渲染；本脚本仅处理悬停可达性增强 */
+(function () {
+  var root = document.querySelector('[data-dynamic-ui-widget][data-template="gantt-chart"]:not([data-mounted])');
+  if (!root) { return; }
+  root.setAttribute('data-mounted', 'true');
+
+  /* 任务条悬停：聚焦时加强调，移开时还原；
+     使用 addEventListener 而非内联事件处理器（遵循安全规则） */
+  var bars = root.querySelectorAll('.gn-svg .bar');
+  bars.forEach(function (bar) {
+    /* 鼠标悬停：添加 brand 描边强调 */
+    bar.addEventListener('mouseenter', function () {
+      bar.setAttribute('stroke', 'var(--brand)');
+      bar.setAttribute('stroke-width', '2');
+    });
+    bar.addEventListener('mouseleave', function () {
+      bar.removeAttribute('stroke');
+      bar.removeAttribute('stroke-width');
+    });
+    /* 键盘可达性：Tab 可聚焦，Enter/Space 触发 title 提示 */
+    bar.setAttribute('tabindex', '0');
+    bar.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        var title = bar.querySelector('title');
+        if (title && typeof title.textContent === 'string') {
+          /* 简短提示：仅触发原生 title 行为，不弹额外 DOM */
+          bar.focus();
+        }
+      }
+    });
+  });
+})();
+</script>

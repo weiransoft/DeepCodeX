@@ -1,0 +1,16 @@
+{
+  "title": "设备类型占比",
+  "description": "2024 年 Q4 用户访问设备分布，桌面端为占比焦点",
+  "data": {
+    "slices": [
+      { "name": "桌面端", "value": 4200 },
+      { "name": "移动端", "value": 2800 },
+      { "name": "平板", "value": 950 },
+      { "name": "智能电视", "value": 320 },
+      { "name": "其他", "value": 180 }
+    ],
+    "unit": "万人",
+    "totalLabel": "总访问用户",
+    "focusSlice": "桌面端"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "title": "登录流程时序",
+  "description": "客户端经网关调用认证与用户服务的请求链，焦点路径为登录与令牌校验",
+  "data": {
+    "participants": [
+      { "name": "Client", "x": 90 },
+      { "name": "Gateway", "x": 270 },
+      { "name": "AuthService", "x": 450 },
+      { "name": "UserService", "x": 630 }
+    ],
+    "messages": [
+      { "from": "Client", "to": "Gateway", "label": "POST /login", "kind": "sync", "focus": true },
+      { "from": "Gateway", "to": "Gateway", "label": "validate input", "kind": "self" },
+      { "from": "Gateway", "to": "AuthService", "label": "verifyToken", "kind": "sync", "focus": true },
+      { "from": "AuthService", "to": "Gateway", "label": "claims", "kind": "return" },
+      { "from": "Gateway", "to": "UserService", "label": "getProfile", "kind": "sync" },
+      { "from": "UserService", "to": "Gateway", "label": "profile + 200", "kind": "return" }
+    ]
+  }
+}

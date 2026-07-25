@@ -1,0 +1,278 @@
+<style>
+/* ===== Token 定义（亮色默认 + 暗色覆盖）=====
+   置于 <style> 顶部，组件样式之前；默认紫色主题。 */
+:root {
+  color-scheme: light;
+  --surface: #F7F7F8;
+  --surface-muted: #EFEFF2;
+  --text: #171717;
+  --text-muted: #52525B;
+  --border: rgba(23, 23, 23, 0.12);
+  --brand: #4B3FE3;
+  --brand-soft: #F2F7FF;
+  --brand-soft-strong: #E5EAFF;
+  --brand-text: #1A1759;
+  --brand-on: #FFFFFF;
+  --chart-series-1: #3C2ECA;
+  --chart-series-2: #A9AEFF;
+  --chart-series-3: #6F6FFF;
+  --chart-series-4: #22A5F7;
+  --chart-other: #D3D4DA;
+  --success: #1DC981;
+  --warning: #EFAA17;
+  --danger: #E8463A;
+  --radius: 8px;
+  --radius-card: 12px;
+  --radius-full: 999px;
+  --spacer-4: 4px;
+  --spacer-8: 8px;
+  --spacer-12: 12px;
+  --spacer-16: 16px;
+  --spacer-20: 20px;
+  --spacer-24: 24px;
+  --font-sans: "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-metric: "Inter", "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-strong: 600;
+  --text-caption: 12px/18px;
+  --text-body: 14px/20px;
+  --text-title: 16px/24px;
+  --text-code: 13px/20px;
+}
+/* 暗色主题覆盖：默认紫色 brand 暗色阶 */
+:root[data-widget-theme="dark"] {
+  color-scheme: dark;
+  --surface: #171717;
+  --surface-muted: #262626;
+  --text: #E5E5E5;
+  --text-muted: #A1A1AA;
+  --border: rgba(229, 229, 229, 0.12);
+  --brand: #6054F1;
+  --brand-soft: #1A1759;
+  --brand-soft-strong: #3C2ECA;
+  --brand-text: #CFD8FF;
+  --chart-series-1: #4B3FE3;
+}
+/* 独立打开时跟随系统暗色（可选降级） */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-widget-theme="light"]) {
+    --surface: #171717;
+    --surface-muted: #262626;
+    --text: #E5E5E5;
+    --text-muted: #A1A1AA;
+    --border: rgba(229, 229, 229, 0.12);
+    --brand: #6054F1;
+    --brand-soft: #1A1759;
+    --brand-soft-strong: #3C2ECA;
+    --brand-text: #CFD8FF;
+    --chart-series-1: #4B3FE3;
+  }
+}
+
+/* ===== 组件样式 ===== */
+.pd-widget {
+  color: var(--text);
+  background: transparent;
+  font: var(--weight-regular) var(--text-body) var(--font-sans);
+  letter-spacing: 0;
+}
+.pd-head { margin: 0 0 var(--spacer-16); }
+.pd-head__title { font: var(--weight-medium) var(--text-title) var(--font-sans); color: var(--text); margin: 0; }
+.pd-head__sub { font: var(--weight-regular) var(--text-caption) var(--font-sans); color: var(--text-muted); margin: var(--spacer-4) 0 0; }
+/* 主体网格：环形图 + 右侧图例；窄屏堆叠 */
+.pd-body { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: var(--spacer-24); align-items: center; }
+@media (max-width: 520px) { .pd-body { grid-template-columns: 1fr; } }
+/* 环形图容器：显式高度 + position: relative 满足 Chart.js 与中心叠加定位 */
+.pd-chart-wrap { position: relative; height: clamp(220px, 30vw, 320px); max-height: 600px; }
+/* 中心头条指标叠加：绝对定位居中，仅一个头条数值 */
+.pd-center {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  pointer-events: none;
+}
+.pd-center__label { font: var(--weight-regular) var(--text-caption) var(--font-sans); color: var(--text-muted); margin: 0; }
+.pd-center__value { font: var(--weight-strong) var(--text-title) var(--font-metric); color: var(--text); margin: var(--spacer-4) 0 0; font-variant-numeric: tabular-nums; }
+.pd-center__sub { font: var(--weight-medium) var(--text-caption) var(--font-sans); color: var(--brand); margin: var(--spacer-4) 0 0; }
+/* 右侧图例列表：色点 + 标签 + 数值 + 占比 */
+.pd-legend { display: flex; flex-direction: column; gap: var(--spacer-8); }
+.pd-legend__item { display: grid; grid-template-columns: auto 1fr auto auto; align-items: center; gap: var(--spacer-12); padding: var(--spacer-4) 0; }
+.pd-legend__dot { width: 10px; height: 10px; border-radius: var(--radius-full); }
+.pd-legend__name { font: var(--weight-regular) var(--text-body) var(--font-sans); color: var(--text); }
+.pd-legend__value { font: var(--weight-medium) var(--text-code) var(--font-mono); color: var(--text); font-variant-numeric: tabular-nums; }
+.pd-legend__pct { font: var(--weight-medium) var(--text-code) var(--font-mono); color: var(--text-muted); font-variant-numeric: tabular-nums; min-width: 48px; text-align: right; }
+/* 可见降级表格：JS 执行前可见，Chart.js 创建成功后隐藏 */
+.pd-fallback { border: 1px solid var(--border); border-radius: var(--radius-card); overflow: hidden; }
+.pd-fallback table { width: 100%; border-collapse: collapse; }
+.pd-fallback th, .pd-fallback td { padding: var(--spacer-12); text-align: left; font: var(--weight-regular) var(--text-body) var(--font-sans); color: var(--text); border-bottom: 1px solid var(--border); }
+.pd-fallback th { background: var(--surface-muted); font: var(--weight-medium) var(--text-caption) var(--font-sans); color: var(--text-muted); }
+.pd-fallback td:last-child, .pd-fallback th:last-child { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); }
+.pd-fallback tr:last-child td { border-bottom: none; }
+/* HTML 提示框：Shadcn 风格，widget 根内绝对定位 */
+.pd-tooltip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--spacer-12); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08); font: var(--weight-regular) var(--text-caption) var(--font-sans); color: var(--text); z-index: 10; min-width: 160px; transition: opacity 100ms ease; }
+.pd-tooltip[hidden] { opacity: 0; }
+.pd-tooltip__title { font: var(--weight-medium) var(--text-body) var(--font-sans); color: var(--text); margin: 0 0 var(--spacer-4); }
+.pd-tooltip__row { display: flex; justify-content: space-between; gap: var(--spacer-12); margin: var(--spacer-4) 0; }
+.pd-tooltip__label { color: var(--text-muted); }
+.pd-tooltip__value { font: var(--weight-medium) var(--text-code) var(--font-mono); color: var(--text); font-variant-numeric: tabular-nums; }
+</style>
+
+<div data-dynamic-ui-widget data-template="pie-donut-text" class="pd-widget">
+  <!-- 紧凑标题：场景定位，不含分析结论 -->
+  <div class="pd-head">
+    <h3 class="pd-head__title">渠道收入构成</h3>
+    <p class="pd-head__sub">5 个渠道收入占比 · 单位：万元</p>
+  </div>
+
+  <!-- 可见降级：HTML 表格，JS 执行前可见；头条总量作为首行 -->
+  <div class="pd-fallback" data-fallback>
+    <table>
+      <thead><tr><th>渠道</th><th>收入</th><th>占比</th></tr></thead>
+      <tbody>
+        <tr><td>总收入</td><td>1,240.0</td><td>100.0%</td></tr>
+        <tr><td>自然搜索</td><td>471.2</td><td>38.0%</td></tr>
+        <tr><td>付费广告</td><td>347.2</td><td>28.0%</td></tr>
+        <tr><td>直接访问</td><td>223.2</td><td>18.0%</td></tr>
+        <tr><td>社交媒体</td><td>136.4</td><td>11.0%</td></tr>
+        <tr><td>其他</td><td>62.0</td><td>5.0%</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- 主体：环形图 + 中心指标 + 右侧图例 -->
+  <div class="pd-body" data-body hidden>
+    <!-- 环形图容器：显式高度 + position: relative -->
+    <div class="pd-chart-wrap" data-chart-wrap>
+      <canvas></canvas>
+      <!-- 中心头条指标叠加：总量数值 + 头条类别副行 -->
+      <div class="pd-center">
+        <p class="pd-center__label">总收入</p>
+        <p class="pd-center__value">1,240.0</p>
+        <p class="pd-center__sub">自然搜索 38.0%</p>
+      </div>
+      <!-- HTML 提示框容器，widget 根内 -->
+      <div class="pd-tooltip" data-tooltip hidden></div>
+    </div>
+    <!-- 右侧图例列表：由 JS 渲染 -->
+    <div class="pd-legend" data-legend></div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script>
+/* 根选择器初始化：限定在根元素内，绑定前设 data-mounted 防止重复挂载 */
+(function () {
+  var root = document.querySelector('[data-dynamic-ui-widget][data-template="pie-donut-text"]:not([data-mounted])');
+  if (!root) { return; }
+  root.setAttribute('data-mounted', 'true');
+
+  /* 数据：5 渠道收入份额，自然搜索为头条焦点 */
+  var slices = [
+    { name: '自然搜索', value: 471.2 },
+    { name: '付费广告', value: 347.2 },
+    { name: '直接访问', value: 223.2 },
+    { name: '社交媒体', value: 136.4 },
+    { name: '其他', value: 62.0 }
+  ];
+  var total = slices.reduce(function (s, sl) { return s + sl.value; }, 0);
+
+  /* 读取 token：同辈份额按序 chart-series-1..4，余项用 chart-other */
+  var cs = getComputedStyle(root);
+  var colors = [
+    cs.getPropertyValue('--chart-series-1').trim(),
+    cs.getPropertyValue('--chart-series-2').trim(),
+    cs.getPropertyValue('--chart-series-3').trim(),
+    cs.getPropertyValue('--chart-series-4').trim(),
+    cs.getPropertyValue('--chart-other').trim()
+  ];
+  var textMuted = cs.getPropertyValue('--text-muted').trim();
+  var border = cs.getPropertyValue('--border').trim();
+  var surface = cs.getPropertyValue('--surface').trim();
+
+  /* 渲染右侧图例：色点 + 名称 + 数值 + 占比 */
+  var legendEl = root.querySelector('[data-legend]');
+  slices.forEach(function (sl, i) {
+    var pct = (sl.value / total * 100).toFixed(1);
+    var item = document.createElement('div');
+    item.className = 'pd-legend__item';
+    item.innerHTML =
+      '<span class="pd-legend__dot" style="background:' + colors[i] + '"></span>' +
+      '<span class="pd-legend__name">' + sl.name + '</span>' +
+      '<span class="pd-legend__value">' + sl.value.toFixed(1) + '</span>' +
+      '<span class="pd-legend__pct">' + pct + '%</span>';
+    legendEl.appendChild(item);
+  });
+
+  /* Chart.js 不可用时保留降级表格，跳过图表初始化 */
+  if (typeof Chart === 'undefined') { return; }
+
+  var canvas = root.querySelector('canvas');
+  var ctx = canvas.getContext('2d');
+  if (!ctx) { return; }
+
+  /* 外部 HTML 提示框处理器：禁用 canvas 内建 tooltip */
+  var tooltipEl = root.querySelector('[data-tooltip]');
+  function externalTooltip(context) {
+    var tt = context.tooltip;
+    if (!tt || tt.opacity === 0 || !tt.dataPoints || !tt.dataPoints.length) {
+      tooltipEl.hidden = true;
+      return;
+    }
+    var dp = tt.dataPoints[0];
+    var idx = dp.dataIndex;
+    var sl = slices[idx];
+    var pct = (sl.value / total * 100).toFixed(1);
+    tooltipEl.innerHTML =
+      '<div class="pd-tooltip__title">' + sl.name + '</div>' +
+      '<div class="pd-tooltip__row"><span class="pd-tooltip__label">收入</span><span class="pd-tooltip__value">' + sl.value.toFixed(1) + ' 万元</span></div>' +
+      '<div class="pd-tooltip__row"><span class="pd-tooltip__label">占比</span><span class="pd-tooltip__value">' + pct + '%</span></div>' +
+      '<div class="pd-tooltip__row"><span class="pd-tooltip__label">vs 总量</span><span class="pd-tooltip__value">' + total.toFixed(1) + '</span></div>';
+    /* 提示框定位约束在图表边界内 */
+    var wrap = root.querySelector('[data-chart-wrap]');
+    var wrapRect = wrap.getBoundingClientRect();
+    var x = tt.caretX + 12;
+    var y = tt.caretY;
+    if (x + 180 > wrapRect.width) { x = tt.caretX - 192; }
+    tooltipEl.style.left = x + 'px';
+    tooltipEl.style.top = y + 'px';
+    tooltipEl.hidden = false;
+  }
+
+  /* Chart 实例：doughnut，cutout 68% 留出中心空间承载头条指标 */
+  var chart = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: slices.map(function (sl) { return sl.name; }),
+      datasets: [{
+        data: slices.map(function (sl) { return sl.value; }),
+        backgroundColor: colors,
+        borderColor: surface,
+        borderWidth: 2,
+        hoverOffset: 4,
+        spacing: 1
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 180 },
+      cutout: '68%',
+      interaction: { mode: 'nearest', intersect: true },
+      plugins: {
+        legend: { display: false },
+        tooltip: { enabled: false, external: externalTooltip }
+      }
+    }
+  });
+
+  /* 图表创建成功后隐藏降级表格，显示主体 */
+  if (chart) {
+    root.querySelector('[data-fallback]').style.display = 'none';
+    root.querySelector('[data-body]').hidden = false;
+  }
+})();
+</script>

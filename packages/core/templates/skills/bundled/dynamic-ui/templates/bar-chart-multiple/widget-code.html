@@ -1,0 +1,380 @@
+<style>
+/* ===== Token 定义（亮色默认 + 暗色覆盖）=====
+   置于 <style> 顶部，组件样式之前；默认紫色主题。 */
+:root {
+  color-scheme: light;
+  --surface: #F7F7F8;
+  --surface-muted: #EFEFF2;
+  --text: #171717;
+  --text-muted: #52525B;
+  --border: rgba(23, 23, 23, 0.12);
+
+  --brand: #4B3FE3;
+  --brand-soft: #F2F7FF;
+  --brand-soft-strong: #E5EAFF;
+  --brand-text: #1A1759;
+  --brand-on: #FFFFFF;
+  --chart-series-1: #3C2ECA;
+  --chart-series-2: #A9AEFF;
+  --chart-series-3: #6F6FFF;
+  --chart-series-4: #22A5F7;
+  --chart-other: #D3D4DA;
+
+  --success: #1DC981;
+  --warning: #EFAA17;
+  --danger: #E8463A;
+
+  --radius: 8px;
+  --radius-card: 12px;
+  --radius-full: 999px;
+  --spacer-4: 4px;
+  --spacer-8: 8px;
+  --spacer-12: 12px;
+  --spacer-16: 16px;
+  --spacer-20: 20px;
+  --spacer-24: 24px;
+  --font-sans: "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-metric: "Inter", "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-strong: 600;
+  --text-caption: 12px/18px;
+  --text-body: 14px/20px;
+  --text-title: 16px/24px;
+  --text-code: 13px/20px;
+}
+/* 暗色主题覆盖：默认紫色 brand 暗色阶 */
+:root[data-widget-theme="dark"] {
+  color-scheme: dark;
+  --surface: #171717;
+  --surface-muted: #262626;
+  --text: #E5E5E5;
+  --text-muted: #A1A1AA;
+  --border: rgba(229, 229, 229, 0.12);
+
+  --brand: #6054F1;
+  --brand-soft: #1A1759;
+  --brand-soft-strong: #3C2ECA;
+  --brand-text: #CFD8FF;
+  --chart-series-1: #4B3FE3;
+}
+/* 独立打开时跟随系统暗色（可选降级） */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-widget-theme="light"]) {
+    --surface: #171717;
+    --surface-muted: #262626;
+    --text: #E5E5E5;
+    --text-muted: #A1A1AA;
+    --border: rgba(229, 229, 229, 0.12);
+    --brand: #6054F1;
+    --brand-soft: #1A1759;
+    --brand-soft-strong: #3C2ECA;
+    --brand-text: #CFD8FF;
+    --chart-series-1: #4B3FE3;
+  }
+}
+
+/* ===== 组件样式 ===== */
+.bm-widget {
+  color: var(--text);
+  background: transparent;
+  font: var(--weight-regular) var(--text-body) var(--font-sans);
+  letter-spacing: 0;
+}
+.bm-head { margin: 0 0 var(--spacer-16); }
+.bm-head__title {
+  font: var(--weight-medium) var(--text-title) var(--font-sans);
+  color: var(--text);
+  margin: 0;
+}
+.bm-head__sub {
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text-muted);
+  margin: var(--spacer-4) 0 0;
+}
+.bm-panel {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: var(--spacer-16);
+  height: clamp(220px, 32vw, 360px);
+}
+.bm-canvas-wrap {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+/* 可见降级表格 */
+.bm-fallback { width: 100%; border-collapse: collapse; }
+.bm-fallback caption {
+  font: var(--weight-medium) var(--text-caption) var(--font-sans);
+  color: var(--text-muted);
+  text-align: left;
+  padding-bottom: var(--spacer-8);
+}
+.bm-fallback th, .bm-fallback td {
+  padding: var(--spacer-8) var(--spacer-12);
+  border-bottom: 1px solid var(--border);
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text);
+  text-align: right;
+}
+.bm-fallback th { color: var(--text-muted); font-weight: var(--weight-medium); }
+.bm-fallback td:first-child, .bm-fallback th:first-child { text-align: left; }
+/* HTML 提示框（Shadcn 风格） */
+.bm-tooltip {
+  position: absolute;
+  pointer-events: none;
+  opacity: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--spacer-8) var(--spacer-12);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text);
+  transition: opacity 100ms ease;
+  white-space: nowrap;
+  z-index: 10;
+}
+.bm-tooltip__title {
+  font: var(--weight-medium) var(--text-caption) var(--font-sans);
+  color: var(--text-muted);
+  margin-bottom: var(--spacer-4);
+}
+.bm-tooltip__row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacer-8);
+  margin-top: var(--spacer-4);
+}
+.bm-tooltip__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+}
+.bm-tooltip__name { color: var(--text-muted); }
+.bm-tooltip__value {
+  margin-left: auto;
+  font: var(--weight-medium) var(--text-code) var(--font-mono);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+</style>
+
+<div data-dynamic-ui-widget data-template="bar-chart-multiple" class="bm-widget">
+  <div class="bm-head">
+    <h3 class="bm-head__title">各季度产品销量对比</h3>
+    <p class="bm-head__sub">2024 年产品 A 与产品 B 在四个季度的销量对比（单位：万件）</p>
+  </div>
+
+  <div class="bm-panel">
+    <!-- 可见降级表格：JS 执行前展示数据，Chart.js 创建成功后由脚本隐藏 -->
+    <table class="bm-fallback" data-bm-fallback>
+      <caption>各季度销量（万件）</caption>
+      <thead>
+        <tr>
+          <th>产品</th>
+          <th>Q1</th><th>Q2</th><th>Q3</th><th>Q4</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th>产品 A</th>
+          <td>320</td><td>385</td><td>420</td><td>510</td>
+        </tr>
+        <tr>
+          <th>产品 B</th>
+          <td>280</td><td>312</td><td>345</td><td>398</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="bm-canvas-wrap" data-bm-canvas-wrap style="display:none;">
+      <canvas data-bm-canvas aria-label="各季度产品销量分组柱状图"></canvas>
+    </div>
+
+    <div class="bm-tooltip" data-bm-tooltip role="tooltip" aria-hidden="true">
+      <div class="bm-tooltip__title" data-bm-tooltip-title></div>
+      <div data-bm-tooltip-body></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script>
+/* 根选择器初始化：限定在根元素内，绑定前设 data-mounted 防止重复挂载 */
+(function () {
+  var root = document.querySelector('[data-dynamic-ui-widget][data-template="bar-chart-multiple"]:not([data-mounted])');
+  if (!root) { return; }
+  root.setAttribute('data-mounted', 'true');
+
+  /* 数据集：与 fixture.json 一致；focusCategory 标记唯一焦点（Q4 峰值类目） */
+  var categories = ['Q1', 'Q2', 'Q3', 'Q4'];
+  var series = [
+    { name: '产品 A', values: [320, 385, 420, 510] },
+    { name: '产品 B', values: [280, 312, 345, 398] }
+  ];
+  var focusCategory = 'Q4';   /* 唯一可见焦点类目 */
+  var yUnit = '万件';
+
+  /* 读取 token：从根元素计算样式取 chart-series 颜色，避免硬编码 */
+  var cs = getComputedStyle(root);
+  var COLOR_SERIES_1 = cs.getPropertyValue('--chart-series-1').trim() || '#3C2ECA';
+  var COLOR_SERIES_2 = cs.getPropertyValue('--chart-series-2').trim() || '#A9AEFF';
+  var COLOR_BRAND = cs.getPropertyValue('--brand').trim() || '#4B3FE3';
+  var COLOR_BORDER = cs.getPropertyValue('--border').trim() || 'rgba(23,23,23,.12)';
+  var COLOR_TEXT_MUTED = cs.getPropertyValue('--text-muted').trim() || '#52525B';
+
+  var fallbackEl = root.querySelector('[data-bm-fallback]');
+  var canvasWrap = root.querySelector('[data-bm-canvas-wrap]');
+  var canvas = root.querySelector('[data-bm-canvas]');
+
+  /* 降级门槛 1：Chart.js 未加载 → 保留可见表格 */
+  if (typeof window.Chart === 'undefined') { return; }
+  /* 降级门槛 2：canvas 不可用 → 保留可见表格 */
+  if (!canvas || !canvas.getContext) { return; }
+
+  /* 构造数据集：每系列一个 dataset，按序绑定 chart-series 色；
+     focusCategory 处的柱组用 brand 边框强调 */
+  var datasets = series.map(function (s, idx) {
+    var color = idx === 0 ? COLOR_SERIES_1 : COLOR_SERIES_2;
+    return {
+      label: s.name,
+      data: s.values,
+      backgroundColor: color,
+      borderColor: color,
+      borderWidth: function (ctx) {
+        var cat = categories[ctx.dataIndex];
+        return cat === focusCategory ? 2 : 0;
+      },
+      borderColorFn: null,
+      hoverBackgroundColor: color,
+      borderRadius: 4,
+      borderSkipped: false
+    };
+  });
+  /* 焦点柱组描边色：用 brand 强调，其他保持透明 */
+  datasets.forEach(function (ds) {
+    ds.borderColor = function (ctx) {
+      var cat = categories[ctx.dataIndex];
+      return cat === focusCategory ? COLOR_BRAND : 'transparent';
+    };
+  });
+
+  /* HTML 提示框元素引用 */
+  var tooltipEl = root.querySelector('[data-bm-tooltip]');
+  var tooltipTitle = root.querySelector('[data-bm-tooltip-title]');
+  var tooltipBody = root.querySelector('[data-bm-tooltip-body]');
+
+  /**
+   * external 提示框处理器：渲染 Shadcn 风格 HTML 提示
+   * 禁用 Chart.js 内建 canvas 提示
+   */
+  function externalTooltipHandler(context) {
+    var chart = context.chart;
+    var tooltip = chart.tooltip;
+    if (tooltip.opacity === 0) {
+      tooltipEl.style.opacity = '0';
+      tooltipEl.setAttribute('aria-hidden', 'true');
+      return;
+    }
+    if (tooltip.body) {
+      var title = chart.data.labels[tooltip.dataPoints[0].dataIndex];
+      tooltipTitle.textContent = title;
+      var bodyHtml = tooltip.dataPoints.map(function (dp) {
+        var seriesColor = dp.dataset.backgroundColor;
+        var valueText = String(dp.parsed.y) + ' ' + yUnit;
+        return '<div class="bm-tooltip__row">'
+          + '<span class="bm-tooltip__dot" style="background:' + seriesColor + '"></span>'
+          + '<span class="bm-tooltip__name">' + dp.dataset.label + '</span>'
+          + '<span class="bm-tooltip__value">' + valueText + '</span>'
+          + '</div>';
+      }).join('');
+      tooltipBody.innerHTML = bodyHtml;
+    }
+    /* 定位：基于图表面板相对坐标，避免溢出 */
+    var panel = root.querySelector('.bm-panel');
+    var panelRect = panel.getBoundingClientRect();
+    var canvasRect = chart.canvas.getBoundingClientRect();
+    var tooltipWidth = tooltipEl.offsetWidth;
+    var left = canvasRect.left - panelRect.left + tooltip.caretX + 12;
+    if (left + tooltipWidth > panelRect.width - 8) {
+      left = canvasRect.left - panelRect.left + tooltip.caretX - tooltipWidth - 12;
+    }
+    var top = canvasRect.top - panelRect.top + tooltip.caretY - 12;
+    tooltipEl.style.left = left + 'px';
+    tooltipEl.style.top = top + 'px';
+    tooltipEl.style.opacity = '1';
+    tooltipEl.setAttribute('aria-hidden', 'false');
+  }
+
+  try {
+    var chart = new window.Chart(canvas, {
+      type: 'bar',
+      data: { labels: categories, datasets: datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 180 },
+        hover: { mode: 'index', intersect: false },
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: {
+            position: 'top',
+            align: 'end',
+            labels: {
+              color: COLOR_TEXT_MUTED,
+              font: { family: 'SF Pro Text, PingFang SC, system-ui, sans-serif', size: 12 },
+              boxWidth: 12,
+              boxHeight: 12,
+              usePointStyle: true,
+              padding: 12
+            }
+          },
+          tooltip: {
+            enabled: false,
+            external: externalTooltipHandler,
+            mode: 'index',
+            intersect: false
+          }
+        },
+        scales: {
+          x: {
+            grid: { display: false },
+            border: { color: COLOR_BORDER },
+            ticks: { color: COLOR_TEXT_MUTED, font: { size: 12 } }
+          },
+          y: {
+            beginAtZero: true,            /* Y 轴从 0 起，避免视觉误导 */
+            grid: { color: COLOR_BORDER, drawTicks: false },
+            border: { color: COLOR_BORDER },
+            ticks: {
+              color: COLOR_TEXT_MUTED,
+              font: { size: 12 },
+              callback: function (value) { return value + ' ' + yUnit; }
+            }
+          }
+        },
+        datasets: {
+          bar: {
+            categoryPercentage: 0.7,     /* 类目组宽度占比 */
+            barPercentage: 0.85          /* 组内柱宽占比 */
+          }
+        }
+      }
+    });
+
+    /* 创建成功：隐藏可见降级表格，显示 canvas */
+    fallbackEl.style.display = 'none';
+    canvasWrap.style.display = 'block';
+  } catch (err) {
+    if (typeof console !== 'undefined' && console.warn) {
+      console.warn('[bar-chart-multiple] Chart.js 初始化失败，保留降级表格', err);
+    }
+  }
+})();
+</script>

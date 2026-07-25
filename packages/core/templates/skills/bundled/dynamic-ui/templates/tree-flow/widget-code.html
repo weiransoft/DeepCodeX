@@ -1,0 +1,211 @@
+<style>
+/* ===== Token 定义（亮色默认 + 暗色覆盖）=====
+   置于 <style> 顶部；默认紫色主题。 */
+:root {
+  color-scheme: light;
+  --surface: #F7F7F8;
+  --surface-muted: #EFEFF2;
+  --text: #171717;
+  --text-muted: #52525B;
+  --border: rgba(23, 23, 23, 0.12);
+
+  --brand: #4B3FE3;
+  --brand-soft: #F2F7FF;
+  --brand-soft-strong: #E5EAFF;
+  --brand-text: #1A1759;
+  --brand-on: #FFFFFF;
+  --chart-series-1: #3C2ECA;
+  --chart-series-2: #A9AEFF;
+  --chart-series-3: #6F6FFF;
+  --chart-series-4: #22A5F7;
+  --chart-other: #D3D4DA;
+
+  --success: #1DC981;
+  --warning: #EFAA17;
+  --danger: #E8463A;
+
+  --radius: 8px;
+  --radius-card: 12px;
+  --radius-full: 999px;
+  --spacer-4: 4px;
+  --spacer-8: 8px;
+  --spacer-12: 12px;
+  --spacer-16: 16px;
+  --spacer-20: 20px;
+  --spacer-24: 24px;
+  --font-sans: "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-metric: "Inter", "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-strong: 600;
+  --text-caption: 12px/18px;
+  --text-body: 14px/20px;
+  --text-title: 16px/24px;
+  --text-code: 13px/20px;
+}
+:root[data-widget-theme="dark"] {
+  color-scheme: dark;
+  --surface: #171717;
+  --surface-muted: #262626;
+  --text: #E5E5E5;
+  --text-muted: #A1A1AA;
+  --border: rgba(229, 229, 229, 0.12);
+
+  --brand: #6054F1;
+  --brand-soft: #1A1759;
+  --brand-soft-strong: #3C2ECA;
+  --brand-text: #CFD8FF;
+  --chart-series-1: #4B3FE3;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-widget-theme="light"]) {
+    --surface: #171717;
+    --surface-muted: #262626;
+    --text: #E5E5E5;
+    --text-muted: #A1A1AA;
+    --border: rgba(229, 229, 229, 0.12);
+    --brand: #6054F1;
+    --brand-soft: #1A1759;
+    --brand-soft-strong: #3C2ECA;
+    --brand-text: #CFD8FF;
+    --chart-series-1: #4B3FE3;
+  }
+}
+
+/* ===== 组件样式 ===== */
+.tf-widget {
+  color: var(--text);
+  background: transparent;
+  font: var(--weight-regular) var(--text-body) var(--font-sans);
+}
+.tf-head { margin: 0 0 var(--spacer-12); }
+.tf-head__title {
+  font: var(--weight-medium) var(--text-title) var(--font-sans);
+  color: var(--text);
+  margin: 0;
+}
+.tf-head__sub {
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text-muted);
+  margin: var(--spacer-4) 0 0;
+}
+.tf-svg { display: block; width: 100%; height: auto; }
+
+/* 文字角色类：标题 .th（medium），副标题 .ts（caption + muted） */
+.th { fill: var(--text); font: var(--weight-medium) var(--text-body) var(--font-sans); }
+.ts { fill: var(--text-muted); font: var(--weight-regular) var(--text-caption) var(--font-sans); }
+
+/* 图示色板：c-neutral 普通节点，c-brand 焦点节点 */
+g.c-neutral > rect { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
+g.c-brand > rect { fill: var(--brand-soft); stroke: var(--brand); stroke-width: 2; }
+.c-brand > .th { fill: var(--brand-text); }
+.c-brand > .ts { fill: var(--brand); }
+
+/* 连接线类：arr 普通（muted），arr-brand 主路径（brand） */
+.arr { stroke: var(--text-muted); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+.arr-brand { stroke: var(--brand); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+
+/* 节点悬停强调：≤120ms，仅描边加粗 */
+g.c-neutral > rect,
+g.c-brand > rect { transition: stroke-width 120ms ease; }
+g.c-neutral:hover > rect,
+g.c-brand:hover > rect { stroke-width: 2.5; }
+</style>
+
+<div data-dynamic-ui-widget data-template="tree-flow" class="tf-widget">
+  <div class="tf-head">
+    <h3 class="tf-head__title">微服务依赖树</h3>
+    <p class="tf-head__sub">API 网关到下游服务的调用依赖层级，主路径为网关 → 订单 → 支付</p>
+  </div>
+
+  <!-- 水平节点树：viewBox 0 0 720 340，width=100% + height=auto 响应式缩放 -->
+  <svg class="tf-svg" viewBox="0 0 720 340" role="img" aria-label="微服务依赖树，从 API 网关到下游认证与订单服务的调用层级">
+    <!-- 箭头标记：neutral 与 brand 两套，orient=auto / markerUnits=userSpaceOnUse / 约 8×8 -->
+    <defs>
+      <marker id="tf-arrow-neutral" viewBox="0 0 10 10" refX="9" refY="5"
+              markerWidth="8" markerHeight="8" orient="auto" markerUnits="userSpaceOnUse">
+        <path d="M0,0 L10,5 L0,10 Z" fill="var(--text-muted)"/>
+      </marker>
+      <marker id="tf-arrow-brand" viewBox="0 0 10 10" refX="9" refY="5"
+              markerWidth="8" markerHeight="8" orient="auto" markerUnits="userSpaceOnUse">
+        <path d="M0,0 L10,5 L0,10 Z" fill="var(--brand)"/>
+      </marker>
+    </defs>
+
+    <!-- 连接线（先画，确保在节点下层）：fill=none，stroke，round join/cap -->
+    <!-- Gateway → Auth：普通依赖 -->
+    <path class="arr" d="M152,143 C216,143 216,68 280,68" marker-end="url(#tf-arrow-neutral)"/>
+    <!-- Gateway → Order：主路径（brand） -->
+    <path class="arr-brand" d="M152,143 C216,143 216,218 280,218" marker-end="url(#tf-arrow-brand)"/>
+    <!-- Auth → User DB：普通依赖（水平） -->
+    <path class="arr" d="M368,68 L540,68" marker-end="url(#tf-arrow-neutral)"/>
+    <!-- Order → Payment：主路径（brand） -->
+    <path class="arr-brand" d="M376,218 C458,218 458,168 540,168" marker-end="url(#tf-arrow-brand)"/>
+    <!-- Order → Inventory：普通依赖 -->
+    <path class="arr" d="M376,218 C458,218 458,268 540,268" marker-end="url(#tf-arrow-neutral)"/>
+
+    <!-- L0：API Gateway（焦点根节点，c-brand） -->
+    <g class="c-brand">
+      <rect x="40" y="115" width="112" height="56" rx="8" ry="8"/>
+      <text class="th" x="96" y="138" text-anchor="middle">API Gateway</text>
+      <text class="ts" x="96" y="156" text-anchor="middle">入口</text>
+    </g>
+
+    <!-- L1：Auth Service（普通节点，c-neutral） -->
+    <g class="c-neutral">
+      <rect x="280" y="40" width="88" height="56" rx="8" ry="8"/>
+      <text class="th" x="324" y="63" text-anchor="middle">Auth Svc</text>
+      <text class="ts" x="324" y="81" text-anchor="middle">认证</text>
+    </g>
+
+    <!-- L1：Order Service（普通节点，c-neutral，主路径中转） -->
+    <g class="c-neutral">
+      <rect x="280" y="190" width="96" height="56" rx="8" ry="8"/>
+      <text class="th" x="328" y="213" text-anchor="middle">Order Svc</text>
+      <text class="ts" x="328" y="231" text-anchor="middle">订单</text>
+    </g>
+
+    <!-- L2：User DB（普通叶子节点） -->
+    <g class="c-neutral">
+      <rect x="540" y="40" width="80" height="56" rx="8" ry="8"/>
+      <text class="th" x="580" y="63" text-anchor="middle">User DB</text>
+      <text class="ts" x="580" y="81" text-anchor="middle">用户库</text>
+    </g>
+
+    <!-- L2：Payment（普通叶子节点，主路径终点） -->
+    <g class="c-neutral">
+      <rect x="540" y="140" width="80" height="56" rx="8" ry="8"/>
+      <text class="th" x="580" y="163" text-anchor="middle">Payment</text>
+      <text class="ts" x="580" y="181" text-anchor="middle">支付</text>
+    </g>
+
+    <!-- L2：Inventory（普通叶子节点） -->
+    <g class="c-neutral">
+      <rect x="540" y="240" width="96" height="56" rx="8" ry="8"/>
+      <text class="th" x="588" y="263" text-anchor="middle">Inventory</text>
+      <text class="ts" x="588" y="281" text-anchor="middle">库存</text>
+    </g>
+  </svg>
+</div>
+
+<script>
+/* 根选择器初始化：限定在根元素内，绑定前设 data-mounted 防止重复挂载 */
+(function () {
+  var root = document.querySelector('[data-dynamic-ui-widget][data-template="tree-flow"]:not([data-mounted])');
+  if (!root) { return; }
+  root.setAttribute('data-mounted', 'true');
+
+  /* 节点检视交互：键盘可达，焦点/失焦切换 data-examined 便于辅助技术与 CSS 强调 */
+  var nodes = root.querySelectorAll('g.c-neutral, g.c-brand');
+  nodes.forEach(function (node) {
+    node.setAttribute('tabindex', '0');
+    node.addEventListener('focus', function () {
+      node.setAttribute('data-examined', 'true');
+    });
+    node.addEventListener('blur', function () {
+      node.removeAttribute('data-examined');
+    });
+  });
+})();
+</script>

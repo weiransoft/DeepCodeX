@@ -1,0 +1,23 @@
+{
+  "title": "注册转化漏斗",
+  "description": "用户从访问首页到完成支付的 5 阶段转化漏斗，叠加行业基准对比",
+  "data": {
+    "baselineLabel": "行业基准",
+    "unit": "用户数",
+    "baselineConversion": 7.3,
+    "stages": [
+      { "name": "访问首页", "value": 12580 },
+      { "name": "查看产品", "value": 8240 },
+      { "name": "加入购物车", "value": 4150 },
+      { "name": "进入结算", "value": 1860 },
+      { "name": "完成支付", "value": 920 }
+    ],
+    "baseline": [
+      { "name": "访问首页", "value": 12580 },
+      { "name": "查看产品", "value": 9800 },
+      { "name": "加入购物车", "value": 5290 },
+      { "name": "进入结算", "value": 2510 },
+      { "name": "完成支付", "value": 1380 }
+    ]
+  }
+}

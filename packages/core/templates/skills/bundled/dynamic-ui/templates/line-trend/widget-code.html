@@ -1,0 +1,392 @@
+<style>
+/* ===== Token 定义（亮色默认 + 暗色覆盖）=====
+   置于 <style> 顶部，组件样式之前；默认紫色主题。 */
+:root {
+  color-scheme: light;
+  --surface: #F7F7F8;
+  --surface-muted: #EFEFF2;
+  --text: #171717;
+  --text-muted: #52525B;
+  --border: rgba(23, 23, 23, 0.12);
+
+  --brand: #4B3FE3;
+  --brand-soft: #F2F7FF;
+  --brand-soft-strong: #E5EAFF;
+  --brand-text: #1A1759;
+  --brand-on: #FFFFFF;
+  --chart-series-1: #3C2ECA;
+  --chart-series-2: #A9AEFF;
+  --chart-series-3: #6F6FFF;
+  --chart-series-4: #22A5F7;
+  --chart-other: #D3D4DA;
+
+  --success: #1DC981;
+  --warning: #EFAA17;
+  --danger: #E8463A;
+
+  --radius: 8px;
+  --radius-card: 12px;
+  --radius-full: 999px;
+  --spacer-4: 4px;
+  --spacer-8: 8px;
+  --spacer-12: 12px;
+  --spacer-16: 16px;
+  --spacer-20: 20px;
+  --spacer-24: 24px;
+  --font-sans: "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-metric: "Inter", "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-strong: 600;
+  --text-caption: 12px/18px;
+  --text-body: 14px/20px;
+  --text-title: 16px/24px;
+  --text-code: 13px/20px;
+}
+/* 暗色主题覆盖：默认紫色 brand 暗色阶 */
+:root[data-widget-theme="dark"] {
+  color-scheme: dark;
+  --surface: #171717;
+  --surface-muted: #262626;
+  --text: #E5E5E5;
+  --text-muted: #A1A1AA;
+  --border: rgba(229, 229, 229, 0.12);
+
+  --brand: #6054F1;
+  --brand-soft: #1A1759;
+  --brand-soft-strong: #3C2ECA;
+  --brand-text: #CFD8FF;
+  --chart-series-1: #4B3FE3;
+}
+/* 独立打开时跟随系统暗色（可选降级） */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-widget-theme="light"]) {
+    --surface: #171717;
+    --surface-muted: #262626;
+    --text: #E5E5E5;
+    --text-muted: #A1A1AA;
+    --border: rgba(229, 229, 229, 0.12);
+    --brand: #6054F1;
+    --brand-soft: #1A1759;
+    --brand-soft-strong: #3C2ECA;
+    --brand-text: #CFD8FF;
+    --chart-series-1: #4B3FE3;
+  }
+}
+
+/* ===== 组件样式 ===== */
+.lt-widget {
+  color: var(--text);
+  background: transparent;
+  font: var(--weight-regular) var(--text-body) var(--font-sans);
+  letter-spacing: 0;
+}
+/* 紧凑标题：仅一句话定位，不含洞察/结论 */
+.lt-head { margin: 0 0 var(--spacer-16); }
+.lt-head__title {
+  font: var(--weight-medium) var(--text-title) var(--font-sans);
+  color: var(--text);
+  margin: 0;
+}
+.lt-head__sub {
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text-muted);
+  margin: var(--spacer-4) 0 0;
+}
+/* 图表面板：中性表面 + 普通边框 + 显式高度 + position: relative */
+.lt-panel {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: var(--spacer-16);
+  height: clamp(220px, 32vw, 360px);
+}
+.lt-canvas-wrap {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+/* 可见降级表格：JS 执行前可见，Chart.js 创建成功后隐藏 */
+.lt-fallback { width: 100%; border-collapse: collapse; }
+.lt-fallback caption {
+  font: var(--weight-medium) var(--text-caption) var(--font-sans);
+  color: var(--text-muted);
+  text-align: left;
+  padding-bottom: var(--spacer-8);
+}
+.lt-fallback th, .lt-fallback td {
+  padding: var(--spacer-8) var(--spacer-12);
+  border-bottom: 1px solid var(--border);
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text);
+  text-align: right;
+}
+.lt-fallback th { color: var(--text-muted); font-weight: var(--weight-medium); }
+.lt-fallback td:first-child, .lt-fallback th:first-child { text-align: left; }
+/* HTML 提示框（Shadcn 风格）：默认隐藏，由 external 处理器定位 */
+.lt-tooltip {
+  position: absolute;
+  pointer-events: none;
+  opacity: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--spacer-8) var(--spacer-12);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+  color: var(--text);
+  transition: opacity 100ms ease;
+  white-space: nowrap;
+  z-index: 10;
+}
+.lt-tooltip__title {
+  font: var(--weight-medium) var(--text-caption) var(--font-sans);
+  color: var(--text-muted);
+  margin-bottom: var(--spacer-4);
+}
+.lt-tooltip__row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacer-8);
+  margin-top: var(--spacer-4);
+}
+.lt-tooltip__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+}
+.lt-tooltip__name { color: var(--text-muted); }
+.lt-tooltip__value {
+  margin-left: auto;
+  font: var(--weight-medium) var(--text-code) var(--font-mono);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+</style>
+
+<div data-dynamic-ui-widget data-template="line-trend" class="lt-widget">
+  <!-- 紧凑标题：场景 + 一句话定位，不含洞察/结论 -->
+  <div class="lt-head">
+    <h3 class="lt-head__title">月度活跃用户趋势</h3>
+    <p class="lt-head__sub">2024 年 1-12 月产品 A 与产品 B 的活跃用户对比（单位：万）</p>
+  </div>
+
+  <!-- 图表面板：含可见降级表格与 canvas 容器 -->
+  <div class="lt-panel">
+    <!-- 可见降级：JS 执行前展示数据表，Chart.js 创建成功后由脚本隐藏 -->
+    <table class="lt-fallback" data-lt-fallback>
+      <caption>月度活跃用户（万）</caption>
+      <thead>
+        <tr>
+          <th>月份</th>
+          <th>1月</th><th>2月</th><th>3月</th><th>4月</th><th>5月</th><th>6月</th>
+          <th>7月</th><th>8月</th><th>9月</th><th>10月</th><th>11月</th><th>12月</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th>产品 A</th>
+          <td>120</td><td>135</td><td>148</td><td>142</td><td>156</td><td>168</td>
+          <td>182</td><td>210</td><td>225</td><td>238</td><td>246</td><td>260</td>
+        </tr>
+        <tr>
+          <th>产品 B</th>
+          <td>88</td><td>92</td><td>98</td><td>105</td><td>110</td><td>118</td>
+          <td>125</td><td>132</td><td>140</td><td>148</td><td>155</td><td>162</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <!-- canvas 容器：显式高度 + position: relative，初始隐藏直至 Chart.js 加载 -->
+    <div class="lt-canvas-wrap" data-lt-canvas-wrap style="display:none;">
+      <canvas data-lt-canvas aria-label="月度活跃用户折线趋势图"></canvas>
+    </div>
+
+    <!-- HTML 提示框容器：由 external 处理器定位 -->
+    <div class="lt-tooltip" data-lt-tooltip role="tooltip" aria-hidden="true">
+      <div class="lt-tooltip__title" data-lt-tooltip-title></div>
+      <div data-lt-tooltip-body></div>
+    </div>
+  </div>
+</div>
+
+<!-- Chart.js UMD 加载：仅允许的 CDN，widget 底部 -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script>
+/* 根选择器初始化：限定在根元素内，绑定前设 data-mounted 防止重复挂载 */
+(function () {
+  var root = document.querySelector('[data-dynamic-ui-widget][data-template="line-trend"]:not([data-mounted])');
+  if (!root) { return; }
+  root.setAttribute('data-mounted', 'true');
+
+  /* 数据集：与 fixture.json 保持一致；focusIndex 标记唯一焦点（8 月拐点） */
+  var labels = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
+  var series = [
+    { name: '产品 A', values: [120, 135, 148, 142, 156, 168, 182, 210, 225, 238, 246, 260] },
+    { name: '产品 B', values: [88, 92, 98, 105, 110, 118, 125, 132, 140, 148, 155, 162] }
+  ];
+  var focusIndex = 7;       /* 8 月拐点：唯一可见焦点 */
+  var yUnit = '万';
+
+  /* 读取 token：从根元素计算样式取 chart-series 颜色，避免硬编码 */
+  var cs = getComputedStyle(root);
+  var COLOR_SERIES_1 = cs.getPropertyValue('--chart-series-1').trim() || '#3C2ECA';
+  var COLOR_SERIES_2 = cs.getPropertyValue('--chart-series-2').trim() || '#A9AEFF';
+  var COLOR_BRAND = cs.getPropertyValue('--brand').trim() || '#4B3FE3';
+  var COLOR_BORDER = cs.getPropertyValue('--border').trim() || 'rgba(23,23,23,.12)';
+  var COLOR_TEXT_MUTED = cs.getPropertyValue('--text-muted').trim() || '#52525B';
+  var COLOR_TEXT = cs.getPropertyValue('--text').trim() || '#171717';
+
+  /* 降级表格与 canvas 容器引用：仅 Chart.js 创建成功后才隐藏降级 */
+  var fallbackEl = root.querySelector('[data-lt-fallback]');
+  var canvasWrap = root.querySelector('[data-lt-canvas-wrap]');
+  var canvas = root.querySelector('[data-lt-canvas]');
+
+  /* 降级门槛 1：Chart.js 未加载 → 保留可见表格 */
+  if (typeof window.Chart === 'undefined') { return; }
+  /* 降级门槛 2：canvas 不可用 → 保留可见表格 */
+  if (!canvas || !canvas.getContext) { return; }
+
+  /* 构造 Chart.js 数据集：每系列一个 dataset，按序绑定 chart-series 色 */
+  var datasets = series.map(function (s, idx) {
+    var color = idx === 0 ? COLOR_SERIES_1 : COLOR_SERIES_2;
+    return {
+      label: s.name,
+      data: s.values,
+      borderColor: color,
+      backgroundColor: color,
+      /* 焦点处理：focusIndex 处放大半径 + brand 描边，其他点保持等大 */
+      pointRadius: function (ctx) {
+        return ctx.dataIndex === focusIndex ? 6 : 3;
+      },
+      pointHoverRadius: function (ctx) {
+        return ctx.dataIndex === focusIndex ? 7 : 5;
+      },
+      pointBorderWidth: function (ctx) {
+        return ctx.dataIndex === focusIndex ? 2 : 1;
+      },
+      pointBorderColor: function (ctx) {
+        return ctx.dataIndex === focusIndex ? COLOR_BRAND : color;
+      },
+      pointBackgroundColor: color,
+      borderWidth: 2,
+      tension: 0.25,             /* 轻微平滑，避免视觉噪声 */
+      spanGaps: false,           /* null 保留可见缺口，不静默转零 */
+      fill: false
+    };
+  });
+
+  /* HTML 提示框元素引用：external 处理器更新其内容与位置 */
+  var tooltipEl = root.querySelector('[data-lt-tooltip]');
+  var tooltipTitle = root.querySelector('[data-lt-tooltip-title]');
+  var tooltipBody = root.querySelector('[data-lt-tooltip-body]');
+
+  /**
+   * external 提示框处理器：渲染 Shadcn 风格 HTML 提示
+   * 禁用 Chart.js 内建 canvas 提示，所有定位约束在图表面板内
+   */
+  function externalTooltipHandler(context) {
+    var chart = context.chart;
+    var tooltip = chart.tooltip;
+    if (tooltip.opacity === 0) {
+      tooltipEl.style.opacity = '0';
+      tooltipEl.setAttribute('aria-hidden', 'true');
+      return;
+    }
+    if (tooltip.body) {
+      /* 标题：当前 X 轴标签 */
+      var title = chart.data.labels[tooltip.dataPoints[0].dataIndex];
+      tooltipTitle.textContent = title;
+      /* 正文：每个数据点一行，含色块、名称与数值 */
+      var bodyHtml = tooltip.dataPoints.map(function (dp) {
+        var seriesColor = dp.dataset.borderColor;
+        var raw = dp.parsed.y;
+        var valueText = (raw === null || raw === undefined) ? '—' : String(raw) + ' ' + yUnit;
+        return '<div class="lt-tooltip__row">'
+          + '<span class="lt-tooltip__dot" style="background:' + seriesColor + '"></span>'
+          + '<span class="lt-tooltip__name">' + dp.dataset.label + '</span>'
+          + '<span class="lt-tooltip__value">' + valueText + '</span>'
+          + '</div>';
+      }).join('');
+      tooltipBody.innerHTML = bodyHtml;
+    }
+    /* 定位：基于图表面板相对坐标，避免溢出 */
+    var panel = root.querySelector('.lt-panel');
+    var panelRect = panel.getBoundingClientRect();
+    var canvasRect = chart.canvas.getBoundingClientRect();
+    var tooltipWidth = tooltipEl.offsetWidth;
+    var left = canvasRect.left - panelRect.left + tooltip.caretX + 12;
+    if (left + tooltipWidth > panelRect.width - 8) {
+      left = canvasRect.left - panelRect.left + tooltip.caretX - tooltipWidth - 12;
+    }
+    var top = canvasRect.top - panelRect.top + tooltip.caretY - 12;
+    tooltipEl.style.left = left + 'px';
+    tooltipEl.style.top = top + 'px';
+    tooltipEl.style.opacity = '1';
+    tooltipEl.setAttribute('aria-hidden', 'false');
+  }
+
+  try {
+    /* 创建 Chart.js 实例：responsive + maintainAspectRatio: false + 显式容器高度 */
+    var chart = new window.Chart(canvas, {
+      type: 'line',
+      data: { labels: labels, datasets: datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 180 },          /* 首次渲染 120-220ms */
+        hover: { mode: 'index', intersect: false },
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: {
+            position: 'top',
+            align: 'end',
+            labels: {
+              color: COLOR_TEXT_MUTED,
+              font: { family: 'SF Pro Text, PingFang SC, system-ui, sans-serif', size: 12 },
+              boxWidth: 12,
+              boxHeight: 12,
+              usePointStyle: true,
+              padding: 12
+            }
+          },
+          tooltip: {
+            enabled: false,                    /* 禁用内建 canvas 提示 */
+            external: externalTooltipHandler,  /* 用 HTML 处理器渲染 */
+            mode: 'index',
+            intersect: false
+          }
+        },
+        scales: {
+          x: {
+            grid: { color: COLOR_BORDER, drawTicks: false },
+            border: { color: COLOR_BORDER },
+            ticks: { color: COLOR_TEXT_MUTED, font: { size: 12 } }
+          },
+          y: {
+            grid: { color: COLOR_BORDER, drawTicks: false },
+            border: { color: COLOR_BORDER },
+            ticks: {
+              color: COLOR_TEXT_MUTED,
+              font: { size: 12 },
+              callback: function (value) { return value + ' ' + yUnit; }
+            }
+          }
+        }
+      }
+    });
+
+    /* 创建成功：隐藏可见降级表格，显示 canvas */
+    fallbackEl.style.display = 'none';
+    canvasWrap.style.display = 'block';
+  } catch (err) {
+    /* 创建失败：保留可见降级表格，不抛错（用户仍可读数据） */
+    if (typeof console !== 'undefined' && console.warn) {
+      console.warn('[line-trend] Chart.js 初始化失败，保留降级表格', err);
+    }
+  }
+})();
+</script>
