@@ -67,6 +67,37 @@ Skills 会按以下优先级扫描：
 - 通过使用[上下文缓存](https://api-docs.deepseek.com/guides/kv_cache)来降低成本。
 - 原生支持[思考模式](https://api-docs.deepseek.com/guides/thinking_mode)和思考强度控制。
 
+## DeepCodeX 新特性
+
+DeepCodeX 在 Deep Code CLI 基础上完成了**多角色融合**与**企业级应用生成能力（EAG）**两大跃迁，并补充了动态指令注入、AskUserQuestion 自动衔接、V2 上下文记忆、Loop-Graph 融合编排等多项新特性。
+
+完整文档：[docs/new-features.md](docs/new-features.md) ｜ [English](docs/new-features_en.md)
+
+| 能力域 | 关键能力 | 主要入口 |
+|--------|---------|---------|
+| **A. 多角色协作** | 5 核心角色（架构师/PM/独立开发者/测试专家/UI 设计师）+ 30 领域专家 + 智能匹配 + 八阶段标准流程 | `/team` |
+| **B. 自主编排** | Ralph 4 阶段循环（plan→dev→verify→fix）+ Cybernetics 控制论 + 6 大工作流模式 + 15 条 BLOCKER 安全护栏 | `/team autonomous` |
+| **C. EAG 企业级应用生成** | 三 Loop（设计/编码/测试）+ 红线独立评估 + 范式唤起 + P5 无人值守引擎 + P6 CodeMap 动态窗口 | `/eag-autonomous` |
+| **D. Loop-Graph 融合** | DAG 拓扑编排（6 节点类型）+ 节点内 Loop 闭环 + 谓词路由（消除 RCE）+ 图级护栏 + 三层配置合并 | `/eag-graph` |
+| **E. V2 上下文记忆** | 双层上下文（Global+Task）+ 滑动窗口 + Diff 预览 + 双轴审批（AppMode × ApprovalMode）+ side-git 回滚 + 7 维度动态记忆 + 经验 RAG | 自动启用 |
+| **F. 动态中断与后台任务** | InterruptQueue FIFO 队列 + 后台子 Agent + 11 状态任务机 + AbortController 跨进程中断 + 持久化恢复 | `/inject` `/bg` `/tasks` |
+| **G. AskUserQuestion 自动衔接** | 三层白名单（核心层 + CLI 层 + `/` 前缀校验）+ suggestedCommand + 合并方案避免并发竞态 | LLM 触发 |
+| **H. Builtin Skills 增强** | 4 个 bundled（web-dev/web-artisan/code-mode-orchestrator/browser-automation）+ 3 默认 + 4 文档处理（docx/pdf/pptx/xlsx 真实 Python 脚本） | `/skills` |
+| **I. 日志与可观测性** | 日志轮转（10MB/3 备份）+ 错误类型保留（APIUserAbortError 等）+ 中断事件日志（interrupts.log） | 自动启用 |
+| **J. 多模型 Provider** | Anthropic 原生（Claude 3.5/3.7）+ OpenAI 兼容（DeepSeek/Doubao）+ Qwen3 推理模型 `reasoning` 字段独立提取 | `settings.json` |
+
+**核心设计原则**：
+- [Karpathy 四大原则](docs/fusion/KARPATHY_PRINCIPLES.md)（Think Before Coding / Simplicity First / Surgical Changes / Goal-Driven）
+- [Ponytail 决策梯](docs/fusion/PONYTAIL_RULES.md)（YAGNI → 标准库 → 平台原生 → 复用 → 一行优先 → 最小可行）
+
+**关键设计文档**：
+- 融合方案：[docs/fusion/DEEPCODEX_FUSION_PLAN.md](docs/fusion/DEEPCODEX_FUSION_PLAN.md)
+- EAG 企业应用生成：[docs/enterprise/ENTERPRISE_APP_GENERATION_DESIGN.md](docs/enterprise/ENTERPRISE_APP_GENERATION_DESIGN.md)
+- Loop-Graph 融合：[docs/enterprise/LOOP-GRAPH-FUSION-DESIGN.md](docs/enterprise/LOOP-GRAPH-FUSION-DESIGN.md)
+- V2 上下文记忆：[docs/fusion/V2_CONTEXT_MEMORY_PRD.md](docs/fusion/V2_CONTEXT_MEMORY_PRD.md)
+- 领域专家集成：[docs/enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md](docs/enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md)
+- Builtin Skills 增强：[docs/enterprise/BUILTIN-SKILLS-ENHANCEMENT-DESIGN.md](docs/enterprise/BUILTIN-SKILLS-ENHANCEMENT-DESIGN.md)
+
 ## 斜杠命令与按键功能
 
 | 斜杠命令        | 操作                               |
@@ -82,6 +113,17 @@ Skills 会按以下优先级扫描：
 | `/mcp`      | 查看 MCP 服务器状态和可用工具                |
 | `/undo`     | 将代码和/或对话恢复到之前的状态                 |
 | `/exit`     | 退出（也可用连续 `Ctrl+D`）               |
+| `/team`     | 多角色团队调度（dispatch / consensus / autonomous / full-lifecycle） |
+| `/eag-autonomous` | 启动 EAG 无人值守循环（plan→dev→verify→fix） |
+| `/eag-graph` | 启动 Loop-Graph 图编排执行（DAG 拓扑 + 谓词路由） |
+| `/inject`   | 向当前任务追加指令（动态中断）               |
+| `/bg`       | 后台启动子 Agent（独立 SessionManager） |
+| `/tasks`    | 列出所有任务（含后台子 Agent）             |
+| `/fg`       | 切换前台关注的任务                      |
+| `/cancel`   | 取消指定任务                          |
+| `/pause`    | 暂停当前前台任务                         |
+| `/resume <taskId>` | 恢复暂停的后台任务（注意：无参数的 `/resume` 仍表示恢复历史对话） |
+| `/plan`     | 进入规划模式（仅生成实施计划，不执行代码变更）       |
 
 | 按键            | 操作                 |
 |---------------|--------------------|
