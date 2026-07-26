@@ -2,13 +2,32 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import type { LlmErrorDetails } from "./llm-error";
+// D-2 修复：导入统一日志轮转工具，替代历史"读全文 + slice + 重写"反模式
+import { rotateLogIfNeeded } from "./log-rotation";
 
-const LOG_DIR = path.join(os.homedir(), ".deepcode", "logs");
-const ERROR_LOG_PATH = path.join(LOG_DIR, "error.log");
+/** error.log 文件名常量 */
+const ERROR_LOG_FILE = "error.log";
 
-function ensureLogDir(): void {
-  if (!fs.existsSync(LOG_DIR)) {
-    fs.mkdirSync(LOG_DIR, { recursive: true });
+/**
+ * 获取 error.log 完整路径。
+ *
+ * 与 debug-logger.ts 的 getDebugLogPath 保持一致的设计：每次调用都重新读取
+ * os.homedir()，确保测试通过切换 process.env.HOME 能实现日志隔离。
+ * 若改为模块级常量，模块加载时路径即固定，测试将无法通过 HOME 切换隔离。
+ */
+export function getErrorLogPath(): string {
+  return path.join(os.homedir(), ".deepcode", "logs", ERROR_LOG_FILE);
+}
+
+/**
+ * 确保日志目录存在。
+ *
+ * @param logPath 日志文件完整路径（从中提取目录）
+ */
+function ensureLogDir(logPath: string): void {
+  const logDir = path.dirname(logPath);
+  if (!fs.existsSync(logDir)) {
+    fs.mkdirSync(logDir, { recursive: true });
   }
 }
 
@@ -89,7 +108,8 @@ export type ApiErrorLogEntry = {
  */
 export function logApiError(entry: ApiErrorLogEntry): void {
   try {
-    ensureLogDir();
+    const logPath = getErrorLogPath();
+    ensureLogDir(logPath);
 
     const logLine: Record<string, unknown> = {
       timestamp: entry.timestamp,
@@ -107,15 +127,14 @@ export function logApiError(entry: ApiErrorLogEntry): void {
     }
 
     const newLine = JSON.stringify(logLine) + "\n";
-    fs.appendFileSync(ERROR_LOG_PATH, newLine, "utf8");
-
-    // Keep only the last N entries
-    const MAX_ENTRIES = 20;
-    const raw = fs.readFileSync(ERROR_LOG_PATH, "utf8");
-    const lines = raw.split("\n").filter((line) => line.trim().length > 0);
-    if (lines.length > MAX_ENTRIES) {
-      fs.writeFileSync(ERROR_LOG_PATH, lines.slice(-MAX_ENTRIES).join("\n") + "\n", "utf8");
+    // D-2 修复：写入前调用日志轮转（按文件大小 10MB 滚动备份，保留 3 个备份）
+    // 失败时降级为直接 append，不阻塞主流程
+    try {
+      rotateLogIfNeeded(logPath);
+    } catch {
+      // 轮转失败不阻塞写入
     }
+    fs.appendFileSync(logPath, newLine, "utf8");
   } catch {
     // Silently ignore logging failures to avoid disrupting the main flow
   }

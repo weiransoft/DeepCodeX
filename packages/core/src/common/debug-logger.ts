@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { rotateLogIfNeeded } from "./log-rotation";
 
 const DEBUG_LOG_FILE = "debug.log";
 
@@ -27,6 +28,13 @@ export function logOpenAIChatCompletionDebug(entry: OpenAIChatCompletionDebugEnt
   try {
     const logPath = getDebugLogPath();
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    // D-2 修复：写入前调用日志轮转（按文件大小 10MB 滚动备份，保留 3 个备份）
+    // 失败时降级为直接 append，不阻塞主流程
+    try {
+      rotateLogIfNeeded(logPath);
+    } catch {
+      // 轮转失败不阻塞写入
+    }
     fs.appendFileSync(logPath, `${JSON.stringify(toSerializable(entry))}\n`, "utf8");
   } catch {
     // Debug logging must never affect CLI behavior.
