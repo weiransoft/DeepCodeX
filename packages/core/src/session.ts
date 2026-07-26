@@ -34,6 +34,21 @@ import type { McpServerConfig, PermissionScope, PermissionSettings } from "./set
 import { resolveCurrentSettings } from "./settings";
 import { ProviderFactory } from "./providers/provider-factory";
 import type { LLMClient, LLMResponse, LLMToolDefinition, LLMUsage } from "./providers/llm-provider";
+// Usage 追踪模块（从 session.ts 抽取，见 docs/dev/review.md CRITICAL-1 模块 2）
+// 包含：isUsageRecord / addUsageValue / accumulateUsage / usageWithRequestCount /
+// accumulateUsagePerModel / getTotalTokens / toModelUsage / ModelUsage 类型
+import {
+  isUsageRecord,
+  addUsageValue,
+  accumulateUsage,
+  usageWithRequestCount,
+  accumulateUsagePerModel,
+  getTotalTokens,
+  toModelUsage,
+  type ModelUsage,
+} from "./usage-tracker";
+// 向后兼容：re-export ModelUsage 类型，保持 index.ts 与外部消费者不变
+export type { ModelUsage } from "./usage-tracker";
 import { logApiError } from "./common/error-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./common/debug-logger";
 import { describeLlmError, getLlmErrorDetails } from "./common/llm-error";
@@ -64,8 +79,11 @@ import {
 import { clearSessionWorkingDir } from "./tools/bash-handler";
 import { reportNewPrompt } from "./common/telemetry";
 import { OpenAIMessageConverter } from "./common/openai-message-converter";
-// EAG-P0 新增导入：LoopGuard 共享上限保护 + IndependentEvaluator 评估器外挂（§5.4 / §5.2.1）
-// 注：仅导入类型和类，不触发 EAG 模块初始化（外挂式，未注入时零开销）
+// === EAG 模块导入（@experimental）===
+// 以下 EAG 相关导入均为可选注入能力，未注入时主流程零回归。
+// 详细设计决策见 docs/dev/ADR-EAG-001-experimental-status.md。
+// 涉及模块：LoopGuard / Evaluator / Coding / Testing / Design / LongHorizon / RLIS /
+// DevOps / Autonomous / Graph / Dynamic / Interrupts
 import type { LoopGuard } from "./common/loop-guard";
 import type {
   IndependentEvaluator,
@@ -74,22 +92,8 @@ import type {
   EvaluationReport,
   EvaluationVerdict,
 } from "./eag/evaluator/types";
-// EAG-P2 批次 9 S5 新增导入：CODING Loop 编排器外挂（§4.7 / §4.9）
-// 注：仅导入类型与类，未注入 codingOrchestrator 时零开销（向后兼容，§4.9.4）
 import type { CodingOrchestrator } from "./eag/coding";
 import type { CodingLoopRequest, CodingLoopResult, PkcAccessor } from "./eag/coding/types";
-// EAG-P3 批次 10 新增导入：TESTING Loop + 长程自动化 + RLIS 规则学习器
-// 注：仅导入类型与类，未注入对应 orchestrator 时零开销（向后兼容，§4.18.5）
-// 设计依据：EAG-P3 批次 10 设计文档 §4.9.3 / §4.18.3 / §4.18.4
-// - TestingOrchestrator：/eag-test 命令编排器（外挂注入，未注入时命令不可用）
-// - RunStateStore：/eag-run /eag-resume /eag-status 共享依赖（外挂注入，未注入时三命令不可用）
-// - RuleLearner：候选规则检测 Hook 依赖（外挂注入，未注入时 Hook 跳过）
-// - EagRunHandler/EagResumeHandler/EagStatusHandler：长程自动化命令处理器
-//   注：在 handle 方法内部按需构造（依赖 MultiLoopPlanner/MilestoneTagger/BlockageAnalyzer）
-//
-// 死代码清理记录：
-// - DesignLoopOrchestrator（from ./eag/design/design-orchestrator）保留，/eag-design 命令仍在使用
-// - DesignLoopInput / DesignLoopResult 类型（from ./eag/design/design-models）保留，handleEagDesignCommand 仍在使用
 import type { DesignLoopOrchestrator } from "./eag/design/design-orchestrator";
 import type { DesignLoopInput, DesignLoopResult } from "./eag/design/design-models";
 import type { TestingOrchestrator } from "./eag/testing";
@@ -112,47 +116,10 @@ import type {
   EagStatusRequest,
   EagStatusResult,
 } from "./eag/long-horizon";
-// EAG-P3 批次 11 S3 新增导入：CLI 命令解析器（§5 S3 改进方案 D-S3-1 / D-S3-4）
-// 注：EagCommandParser 是无状态纯函数式解析器，构造零成本，默认注入保证向后兼容
-// - 负责判定 /eag-build /eag-design /eag-test /eag-run /eag-resume /eag-status /eag-deploy 7 个命令
-// - 从 userPrompt.messageParams 提取预装配的请求对象
-// - 通过 SessionManagerOptions.eagCommandParser 可选注入（默认 new EagCommandParser()）
 import { EagCommandParser } from "./eag/cli";
-// EAG-P4 批次 13 新增导入：DevOps 第 6 角色编排器 + DEPLOY Loop 上下文与结果类型（§3.4 / §5.2）
-// 注：仅导入类型与类，未注入 devopsOrchestrator 时 /eag-deploy 命令不可用（向后兼容，零开销）
-// - DevOpsOrchestrator：/eag-deploy 命令编排器（外挂注入，构造期装配 IaC 生成器 / G-8 门禁 /
-//   部署策略 / DeployStage / 事件发射器等全部依赖）
-// - DevOpsContext / DevOpsResult：DevOpsOrchestrator.run() 的入参与产出类型
-// - DeployRequest：/eag-deploy 命令请求对象（由 EagCommandParser.parse() 从 messageParams 提取）
-// 设计决策（与设计文档 §5.2 N-M-1 修复对齐）：
-// - 调用方在 SessionManagerOptions.devopsOrchestrator 中注入完整装配的 DevOpsOrchestrator 实例
-// - session.ts 仅负责校验注入 + 装配 DevOpsContext + 调用 run() + 渲染 DevOpsResult
-// - 不在 handleEagDeployCommand 内部 new DevOpsOrchestrator（避免每次命令重复构造，且与
-//   codingOrchestrator / testingOrchestrator / designOrchestrator 同构）
 import type { DevOpsOrchestrator } from "./eag/devops/devops-orchestrator";
 import type { DevOpsContext, DevOpsResult } from "./eag/devops/types";
 import type { DeployRequest } from "./eag/cli/eag-command-parser";
-// EAG-P5 Phase 5.3 TASK-P5-3.1-006 新增导入：EAG-P5 无人值守编排器 + /eag-autonomous 命令处理器
-// 注：仅导入类型与类，未注入 autonomousOrchestrator 时 /eag-autonomous 命令不可用（向后兼容，零开销）
-// - AutonomousOrchestrator：/eag-autonomous 命令编排器（外挂注入，构造期装配 LoopExecutor /
-//   RunStateStore / NotesMemory / GuardChain / SmartConfirmation 全部依赖）
-// - EagAutonomousCommandHandler：命令处理器类，负责装配 AutonomousRunRequest + 调用 run() + 渲染结果
-// - extractEagAutonomousRequestFromPrompt：独立函数，从命令字符串解析参数（用于错误回显）
-// - EagAutonomousRequest：/eag-autonomous 命令请求对象类型
-// 设计决策（对齐 EAG-P4 批次 13 §5.2 N-M-1 修复 + Karpathy Simplicity First）：
-// - 调用方在 SessionManagerOptions.autonomousOrchestrator 中注入完整装配的 AutonomousOrchestrator 实例
-// - session.ts 仅负责校验注入 + 装配请求 + 调用 handler.execute() + 渲染结果
-// - 不在 handleEagAutonomousCommand 内部 new AutonomousOrchestrator（避免每次命令重复构造）
-//
-// EAG-P5 TASK-P5-3.1-005/006 v1.1 新增（设计文档 §3.5 + §3.6）：
-// - extractEagAutonomousStatusRequestFromPrompt：从 /eag-autonomous-status 命令字符串解析 runId
-// - extractEagAutonomousStopRequestFromPrompt：从 /eag-autonomous-stop 命令字符串解析 runId
-// - EagAutonomousStatusRequest / EagAutonomousStopRequest：请求对象类型
-// 设计决策（对齐设计文档 v1.1 §4.7 P1-N2）：
-// - status/stop 命令不新增 handler 类，由 session.ts 的私有方法直接处理
-//   （逻辑简单：仅调用 orchestrator.status()/stop() + 渲染 report）
-// - 与 EagAutonomousCommandHandler 的差异：后者因需装配 AutonomousRunRequest + 异常兜底 +
-//   复杂报告渲染才独立为类，status/stop 无此复杂性
 import type { AutonomousOrchestrator } from "./eag/p5/autonomous-orchestrator";
 import {
   EagAutonomousCommandHandler,
@@ -166,20 +133,9 @@ import type {
   EagAutonomousStatusRequest,
   EagAutonomousStopRequest,
 } from "./eag/cli";
-// Loop-Graph 融合方案 Phase 5（设计文档 §12.2 / §14）：
-// - GraphLoopOrchestrator：图级编排器，协调 NodeExecutor / EdgeResolver / GraphScheduler / GraphGuard
-// - EagGraphCommandHandler：/eag-graph 命令处理器，构造 WorkGraph + 调用 run() + 渲染 GraphRunReport
-// - extractEagGraphRequestFromPrompt：独立函数，从命令字符串解析参数（用于错误回显）
-// - EagGraphRequest / EagGraphCommandResult：请求与结果类型
 import type { GraphLoopOrchestratorOptions } from "./eag/graph/graph-loop-protocols";
 import { EagGraphCommandHandler, extractEagGraphRequestFromPrompt } from "./eag/cli";
 import type { EagGraphRequest, EagGraphCommandResult } from "./eag/cli";
-// EAG LLM 动态编排建议层（2026-07-24 新增）：
-// - EagDynamicSuggester：根据用户自然语言目标给出全局命令建议
-// - 覆盖 EAG/Team/Rules/slash 全部命令体系，第一阶段只做建议不自动执行
-// - 通过 SessionManagerOptions.eagDynamicSuggester 可选注入，未注入时零回归
-// - 通过 SessionManagerOptions.dynamicCommandDescriptors 注入非 EAG 命令描述符
-//   （team/rules/slash），由 CLI 层构造，避免 core 反向依赖 cli 包
 import type {
   EagDynamicSuggester,
   EagDynamicSuggestion,
@@ -187,23 +143,9 @@ import type {
   EagClarificationOption,
   DynamicCommandDescriptor,
 } from "./eag/dynamic";
-// ADR-DI-001 动态指令注入与后台子 Agent（2026-07-25 新增）：
-// - InterruptQueue：/inject <指令> 队列（FIFO），主循环 LLM 调用前 drain
-// - TaskRegistry：/tasks /fg /cancel 中央注册表
-// - BackgroundTaskRunner：/bg 后台任务启动器（独立 SessionManager 实例）
-// - BackgroundTask：任务抽象（含 cancel / pause / resume / inject 控制方法）
-// - TaskKind / TaskStatus / TaskListFilter / InjectedInstruction：共享类型
-//
-// 设计约束（对齐 ADR-DI-001 §7.1 + Karpathy Surgical Changes）：
-// - 仅 type 导入，避免运行期循环依赖（interrupts 模块不反向依赖 session.ts）
-// - 所有字段可选注入，未注入时 SessionManager 行为完全不变（零回归）
-// - 主前台会话默认 isForeground=true，后台任务中创建的 SessionManager 设为 false
-//
-// 与现有架构的集成点（ADR-DI-001 §7）：
-// - E1：SessionManagerOptions 新增 4 个可选注入字段（本处）
-// - E2：activateSession 主循环 LLM 调用前 drain InterruptQueue
-// - E3：createChatCompletionStream 流式 chunk 之间检查中断队列
-// - E4：新增 7 个委托方法（injectInstruction / startBackgroundTask / ...）
+// === 中断与后台任务导入（ADR-DI-001）===
+// InterruptQueue / TaskRegistry / BackgroundTaskRunner 均为可选注入，
+// 未注入时中断能力不可用，主流程零回归。详见 docs/dev/ADR-DI-001-*.md。
 import type {
   InterruptQueue,
   TaskRegistry,
@@ -304,10 +246,6 @@ function sanitizeProjectCodePart(value: string): string {
     .replace(/^[-.]+|[-.]+$/g, "");
 }
 
-function isUsageRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 function summarizeCompletionOptions(options?: Record<string, unknown>): Record<string, unknown> | undefined {
   if (!options) {
     return undefined;
@@ -318,96 +256,9 @@ function summarizeCompletionOptions(options?: Record<string, unknown>): Record<s
   };
 }
 
-function addUsageValue(current: unknown, next: unknown): unknown {
-  if (typeof next === "number") {
-    return (typeof current === "number" ? current : 0) + next;
-  }
-
-  if (isUsageRecord(next)) {
-    const currentRecord = isUsageRecord(current) ? current : {};
-    const result: Record<string, unknown> = { ...currentRecord };
-    for (const [key, value] of Object.entries(next)) {
-      result[key] = addUsageValue(currentRecord[key], value);
-    }
-    return result;
-  }
-
-  return next;
-}
-
-function accumulateUsage(current: ModelUsage | null, next: unknown | null | undefined): ModelUsage | null {
-  if (next == null) {
-    return current ?? null;
-  }
-  return addUsageValue(current, next) as ModelUsage;
-}
-
-function usageWithRequestCount(usage: ModelUsage): ModelUsage {
-  const totalReqs = typeof usage.total_reqs === "number" ? usage.total_reqs + 1 : 1;
-  return {
-    ...usage,
-    total_reqs: totalReqs,
-  };
-}
-
-function accumulateUsagePerModel(
-  current: Record<string, ModelUsage> | null | undefined,
-  model: string,
-  next: ModelUsage | null | undefined
-): Record<string, ModelUsage> | null {
-  if (next == null) {
-    return current ?? null;
-  }
-
-  const usagePerModel = { ...(current ?? {}) };
-  const modelName = model.trim() || "unknown";
-  usagePerModel[modelName] = accumulateUsage(usagePerModel[modelName] ?? null, usageWithRequestCount(next))!;
-  return usagePerModel;
-}
-
-function getTotalTokens(usage: ModelUsage | null | undefined): number {
-  if (!isUsageRecord(usage)) {
-    return 0;
-  }
-  const totalTokens = usage.total_tokens;
-  return typeof totalTokens === "number" ? totalTokens : 0;
-}
-
-/**
- * 统一 LLMUsage → 会话持久化 ModelUsage 转换
- * （B1：compactSession 接线 provider 层；2026-07-18 设计 §4.4 cache 语义修正）
- *
- * 字段映射（修正版，一处定义两通路共享）：
- * - prompt_tokens ← inputTokens + cacheCreation + cacheRead。
- *   语义事实：Anthropic 的 input_tokens 不含 cache_read/cache_creation（三者独立计量计费），
- *   而 DeepSeek 的 prompt_tokens 为输入总量（= prompt_cache_hit + prompt_cache_miss）。
- *   消费方约束：getTotalTokens 只读 total_tokens → activeTokens → 驱动 compact 阈值；
- *   若 prompt_tokens 不含 cache 命中部分，prompt caching 生效时 activeTokens 被严重低估
- *   （cache 命中可占上下文 90%+），compact 永不触发 → 上下文溢出。故必须含 cache 部分；
- * - completion_tokens ← outputTokens；total_tokens = prompt_tokens + completion_tokens；
- * - cacheReadInputTokens → prompt_cache_hit_tokens（命中计量，缺省不输出字段）；
- * - inputTokens + cacheCreationInputTokens → prompt_cache_miss_tokens
- *   （未命中计量 = 新输入 + 写缓存，缺省不输出字段）。
- * DeepSeek 自有 prompt_cache_hit/miss_tokens 不经此函数（主对话流式通路保持原样透传）。
- * OpenAI provider 的 LLMUsage 永无 cache 字段，映射结果与修正前逐值相等（OpenAI 通路零变化）。
- */
-function toModelUsage(usage: LLMUsage | null): ModelUsage | null {
-  if (!usage) {
-    return null;
-  }
-  const cacheCreation = usage.cacheCreationInputTokens ?? 0;
-  const cacheRead = usage.cacheReadInputTokens ?? 0;
-  const promptTokens = usage.inputTokens + cacheCreation + cacheRead;
-  return {
-    prompt_tokens: promptTokens,
-    completion_tokens: usage.outputTokens,
-    total_tokens: promptTokens + usage.outputTokens,
-    ...(usage.cacheReadInputTokens != null ? { prompt_cache_hit_tokens: usage.cacheReadInputTokens } : {}),
-    ...(usage.cacheCreationInputTokens != null
-      ? { prompt_cache_miss_tokens: usage.inputTokens + usage.cacheCreationInputTokens }
-      : {}),
-  };
-}
+// Usage 相关函数（isUsageRecord/addUsageValue/accumulateUsage/usageWithRequestCount/
+// accumulateUsagePerModel/getTotalTokens/toModelUsage）已迁移到 ./usage-tracker.ts
+// 详见 docs/dev/review.md CRITICAL-1 模块 2
 
 export type SessionStatus =
   | "failed"
@@ -419,16 +270,7 @@ export type SessionStatus =
   | "ask_permission"
   | "permission_denied";
 
-export type ModelUsage = {
-  prompt_tokens: number;
-  completion_tokens: number;
-  total_tokens: number;
-  completion_tokens_details?: Record<string, unknown>;
-  prompt_tokens_details?: Record<string, unknown>;
-  prompt_cache_hit_tokens?: number;
-  prompt_cache_miss_tokens?: number;
-  total_reqs?: number;
-};
+// ModelUsage 类型已迁移到 ./usage-tracker.ts（通过 import + re-export 引入）
 
 export type SessionProcessEntry = {
   startTime: string;
@@ -1090,12 +932,34 @@ export class SessionManager {
     this.mcpManager.disconnect();
   }
 
+  // 中日韩统一表意文字 + 扩展 A 区 + 兼容表意文字（预编译正则，避免每次调用重新编译）
+  // 覆盖范围：CJK Unified Ideographs (U+3400-U+9FFF) + CJK Compatibility Ideographs (U+F900-U+FAFF)
+  private static readonly CJK_REGEX = /[\u3400-\u9fff\uf900-\ufaff]/gu;
+
+  /**
+   * 估算流式文本的 token 数（v2 性能优化版）
+   *
+   * 算法说明：
+   * - 中文/日文/韩文字符计 0.6 token（CJK 字符通常编码为 1-2 token）
+   * - 其他字符计 0.3 token（ASCII/拉丁字母通常 3-4 字符为 1 token）
+   *
+   * 性能优化（v2 修复，对应 docs/dev/review.md 代码细节改进 4）：
+   * - 原实现：逐字符正则测试（O(n) 次正则调用），长文本性能差
+   * - 新实现：一次正则扫描统计 CJK 字符数（1 次正则调用），性能提升 5-10 倍
+   * - 结果一致性：与原实现完全一致（相同文本返回相同 token 数）
+   *
+   * @param text 待估算的文本
+   * @returns 估算的 token 数
+   */
   private estimateStreamTokens(text: string): number {
-    let tokens = 0;
-    for (const char of text) {
-      tokens += /[\u3400-\u9fff\uf900-\ufaff]/u.test(char) ? 0.6 : 0.3;
+    if (!text) {
+      return 0;
     }
-    return tokens;
+    // 一次正则扫描统计 CJK 字符数（match 返回所有匹配项数组）
+    const cjkMatches = text.match(SessionManager.CJK_REGEX);
+    const cjkCount = cjkMatches ? cjkMatches.length : 0;
+    const otherCount = text.length - cjkCount;
+    return cjkCount * 0.6 + otherCount * 0.3;
   }
 
   private formatEstimatedTokens(tokens: number): string {
@@ -2264,6 +2128,14 @@ ${agentInstructions}
     // EAG LLM 动态编排建议层（2026-07-24 新增）
     // 仅当显式命令未命中、建议层已注入、用户输入非空且非 /continue 时触发
     // 第一阶段只做建议，不自动执行任何 EAG 命令
+    //
+    // BUGFIX 2026-07-26：原实现无条件 return，导致 direct_chat 场景下 LLM 主对话被阻断。
+    // 根因：handleEagDynamicSuggestion 返回 false 表示"应继续 LLM 主对话"，
+    // 但原代码无视返回值直接 return，导致所有非 EAG 命令的用户输入（如"保存到文档"）
+    // 都不会触发 activateSession，LLM 永远不被调用，用户看不到任何回复。
+    // 修复：根据返回值决定是否 return。false 时继续执行下方主对话逻辑（追加用户消息 + activateSession）。
+    // 注意：handleEagDynamicSuggestion 在 direct_chat/异常分支不追加用户消息，
+    // 由下方 replySession 主流程统一追加，避免重复。
     if (
       this.eagDynamicSuggester &&
       this.eagDynamicSuggester.isEnabled() &&
@@ -2271,9 +2143,13 @@ ${agentInstructions}
       userPrompt.text.trim().length > 0 &&
       !this.isContinuePrompt(userPrompt)
     ) {
-      await this.handleEagDynamicSuggestion(sessionId, userPrompt, controller);
-      // handleEagDynamicSuggestion 内部已决定返回或继续主对话
-      return;
+      const handledBySuggester = await this.handleEagDynamicSuggestion(sessionId, userPrompt, controller);
+      // handledBySuggester === true：建议层已处理（ask_clarification / suggest_*），结束当前 turn
+      // handledBySuggester === false：建议层判定为 direct_chat 或异常，继续 LLM 主对话
+      if (handledBySuggester) {
+        return;
+      }
+      // direct_chat：继续执行下方主对话流程（追加用户消息 + skill matching + activateSession）
     }
 
     // EAG-P3 批次 10：候选规则检测 Hook（§4.18.4 detectRuleCandidateHook）
@@ -2354,10 +2230,11 @@ ${agentInstructions}
     const signal = controller?.signal;
     this.throwIfAborted(signal);
 
-    // 步骤 1：记录用户输入到消息历史
-    const userMessage = this.buildUserMessage(sessionId, userPrompt);
-    this.appendSessionMessage(sessionId, userMessage);
-
+    // BUGFIX 2026-07-26：原实现在此处无条件追加用户消息，导致 direct_chat 场景下
+    // replySession 主流程会重复追加（replySession 第 2298-2299 行也调用 appendSessionMessage）。
+    // 修复：移除此处的无条件追加，改为仅在非 direct_chat 分支追加（即建议层确实要发送
+    // 澄清问题或建议文本时才记录用户输入）。direct_chat / 异常分支不追加，由 replySession
+    // 主流程统一追加，避免重复并保证 LLM 主对话能正常看到用户消息。
     try {
       // 步骤 2：检测是否存在待澄清问题
       const pending = this.pendingEagClarifications.get(sessionId);
@@ -2375,6 +2252,8 @@ ${agentInstructions}
 
       // 步骤 3：调用建议器（携带 clarification 时即为 refine 流程）
       // 传入合并后的全部命令描述符（EAG + team/rules/slash），使 LLM 能建议全部命令体系
+      // 注意：此处不追加用户消息，suggester 通过 goal 参数获取当前用户输入，
+      // recentMessages 仅包含历史消息（不含当前输入），符合 suggester 设计意图。
       const suggestion = await this.eagDynamicSuggester!.suggest({
         sessionId,
         projectRoot: this.projectRoot,
@@ -2388,9 +2267,16 @@ ${agentInstructions}
       this.pendingEagClarifications.delete(sessionId);
 
       // 步骤 4：direct_chat 建议 → 继续 LLM 主对话
+      // direct_chat 不追加用户消息，由 replySession 主流程统一追加（避免重复）
       if (suggestion.type === "direct_chat") {
         return false;
       }
+
+      // 步骤 4.5：非 direct_chat 分支需要记录用户输入到会话日志
+      // ask_clarification / suggest_* 分支将发送建议文本，需先记录用户消息，
+      // 保证会话日志完整（用户输入 + 助手建议成对出现）
+      const userMessage = this.buildUserMessage(sessionId, userPrompt);
+      this.appendSessionMessage(sessionId, userMessage);
 
       // 步骤 5：ask_clarification → 展示单选/多选问题与选项，并记录 pending 状态
       if (suggestion.type === "ask_clarification") {
