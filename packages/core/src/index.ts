@@ -180,6 +180,7 @@ export {
 } from "./interrupts/register-tools";
 
 // 实现类（供 SessionManager 类型导入与运行期注入，ADR-DI-001 §7.1 E1 扩展点）
+// @experimental — 中断与后台任务能力，CLI 层未默认注入，详见 docs/dev/ADR-EAG-001-experimental-status.md
 export { InterruptQueue } from "./interrupts/interrupt-queue";
 export { BackgroundTask } from "./interrupts/background-task";
 export type { BackgroundTaskOptions } from "./interrupts/background-task";
@@ -258,8 +259,17 @@ export type { FileReadMetadata } from "./common/file-utils";
 export { DEFAULT_LOOP_GUARD_CONFIG, INITIAL_LOOP_GUARD_STATE, LoopGuard } from "./common/loop-guard";
 export type { LoopGuardConfig, LoopGuardState, GuardCheckResult, GuardStopReason } from "./common/loop-guard";
 
+// ============================================================================
 // EAG (Enterprise App Generation) module —— 企业级应用生成能力
-// EAG 方案 §5.1~§5.13：Generator/Evaluator 分离 + 共享 LoopGuard + RLIS 规则注入
+// ============================================================================
+// @experimental
+// 重要提示：以下 EAG 相关 export 均为实验性 API，CLI 层未默认注入。
+// - 已启用：EagDynamicSuggester（动态建议）、EagCommandParser（命令解析）
+// - 未启用：所有 EAG orchestrator（CodingOrchestrator/TestingOrchestrator/DesignLoopOrchestrator/
+//   DevOpsOrchestrator/AutonomousOrchestrator/GraphLoopOrchestrator）及 InterruptQueue/
+//   TaskRegistry/BackgroundTaskRunner
+// 启用方式详见 docs/dev/ADR-EAG-001-experimental-status.md
+// ============================================================================
 export { decideVerdict, buildReport } from "./eag/evaluator/types";
 export type {
   EvaluationMode,
