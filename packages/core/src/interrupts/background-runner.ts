@@ -30,6 +30,8 @@ import type { TaskRegistry } from "./task-registry";
 import type { InjectedInstruction, TaskKind, TaskSnapshot } from "./types";
 // 导入 UserPromptContent 类型（用于 startBackground 适配 BackgroundRunnerLike 接口）
 import type { UserPromptContent } from "../session";
+// D-4 修复：导入中断事件日志记录器，记录任务启动 / 终态 / 注入事件
+import { logInterruptEvent } from "../common/interrupt-logger";
 
 // ============================================================================
 // 1. SessionHandle 接口（最小契约）
@@ -319,6 +321,28 @@ export class BackgroundTaskRunner {
         }
         // 4. 终态触发 onTaskComplete + 异步 unregister
         if (t.state === "succeeded" || t.state === "failed" || t.state === "cancelled") {
+          // D-4：记录任务终态事件（失败不影响主流程）
+          // 注：BackgroundTask 没有 cancelReason / failureReason 字段，统一通过 error getter 暴露
+          //     startedAt 为 ISO 8601 字符串，需 new Date() 转换后计算 durationMs
+          try {
+            const eventType =
+              t.state === "succeeded" ? "task.succeeded" : t.state === "failed" ? "task.failed" : "task.cancelled";
+            logInterruptEvent({
+              timestamp: new Date().toISOString(),
+              eventType,
+              taskId: t.id,
+              taskKind: t.kind,
+              taskStatus: t.state,
+              sessionId: t.sessionId ?? undefined,
+              durationMs: Date.now() - new Date(t.startedAt).getTime(),
+              reason: t.error ?? undefined,
+            });
+          } catch (err) {
+            console.error(
+              `[BackgroundTaskRunner] logInterruptEvent 抛错（已忽略）：`,
+              err instanceof Error ? err.message : String(err)
+            );
+          }
           // 触发外部 onTaskComplete 回调
           if (onTaskComplete) {
             try {
@@ -343,6 +367,24 @@ export class BackgroundTaskRunner {
     // 调用 task.start()（内部会调用 onStart 回调）
     // 注：start() 抛错时 task.state 已在 start 内部转为 failed，错误直接传播
     await task.start();
+    // D-4：记录后台任务启动事件（M3 修订：必须在 await task.start() 成功返回后记录）
+    // - 此时 task.state 已为 running（或已被 markSucceeded/markFailed 转换为终态）
+    // - start() 抛错时不会执行到此日志，符合"task.started"语义
+    // - taskStatus 字段使用 t.state 反映任务实际状态（而非硬编码 "running"）
+    try {
+      logInterruptEvent({
+        timestamp: new Date().toISOString(),
+        eventType: "task.started",
+        taskId,
+        taskKind: kind,
+        taskStatus: task.state,
+      });
+    } catch (err) {
+      console.error(
+        `[BackgroundTaskRunner] logInterruptEvent 抛错（已忽略）：`,
+        err instanceof Error ? err.message : String(err)
+      );
+    }
     return { taskId };
   }
 
@@ -396,5 +438,22 @@ export class BackgroundTaskRunner {
       throw new Error(`BackgroundTaskRunner.inject 失败：task.id=${taskId} 不存在`);
     }
     task.inject(instruction);
+    // D-4：记录指令注入到任务事件（失败不影响主流程）
+    try {
+      logInterruptEvent({
+        timestamp: new Date().toISOString(),
+        eventType: "task.injected",
+        taskId,
+        taskKind: task.kind,
+        taskStatus: task.state,
+        instructionText: instruction.text,
+        instructionSource: instruction.source,
+      });
+    } catch (err) {
+      console.error(
+        `[BackgroundTaskRunner] logInterruptEvent 抛错（已忽略）：`,
+        err instanceof Error ? err.message : String(err)
+      );
+    }
   }
 }

@@ -103,6 +103,8 @@ export { handleEditTool } from "./tools/edit-handler";
 export { handleUpdatePlanTool } from "./tools/update-plan-handler";
 export { handleWebSearchTool } from "./tools/web-search-handler";
 export { handleAskUserQuestionTool } from "./tools/ask-user-question-handler";
+// AskUserQuestion suggestedCommand 类型（供 CLI 层 ask-user-question.ts 共享同构类型）
+export type { SuggestedCommand } from "./tools/ask-user-question-handler";
 
 // ============================================================================
 // ADR-DI-001 动态指令注入与后台子 Agent 模块（interrupts）

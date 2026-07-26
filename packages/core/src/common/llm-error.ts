@@ -66,7 +66,9 @@ export function getLlmErrorDetails(error: unknown): LlmErrorDetails {
 function getErrorDetails(error: unknown, depth: number, seen: Set<object>): LlmErrorDetails {
   const record = isRecord(error) ? error : null;
   const name = safeText(record?.name) ?? (error instanceof Error ? error.name : "UnknownError");
-  const message = safeText(record?.message) ?? safeText(error) ?? "Unknown error";
+  // 修复 D-1：当 message 为空字符串时（如 APIUserAbortError 未传 message），
+  // 应回退到 name（如 "APIUserAbortError"）而非 "Unknown error"，保留原始错误类型信息
+  const message = safeText(record?.message) ?? safeText(error) ?? name;
   const details: LlmErrorDetails = { name, message };
 
   const status = record?.status;

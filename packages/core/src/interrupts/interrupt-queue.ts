@@ -28,6 +28,8 @@
 
 import type { InjectedInstruction, InterruptQueueOptions } from "./types";
 import { QueueOverflowError } from "./types";
+// D-4 修复：导入中断事件日志记录器，记录指令入队 / 消费事件
+import { logInterruptEvent } from "../common/interrupt-logger";
 
 // ============================================================================
 // InterruptQueue 类实现
@@ -111,6 +113,21 @@ export class InterruptQueue {
     this.isMutating = true;
     try {
       this.queue.push(instruction);
+      // D-4：记录指令入队事件（失败不影响主流程）
+      try {
+        logInterruptEvent({
+          timestamp: new Date().toISOString(),
+          eventType: "interrupt.enqueued",
+          instructionText: instruction.text,
+          instructionSource: instruction.source,
+          queueSize: this.queue.length,
+        });
+      } catch (err) {
+        console.error(
+          `[InterruptQueue] logInterruptEvent 抛错（已忽略）：`,
+          err instanceof Error ? err.message : String(err)
+        );
+      }
       if (this.onEnqueueCallback) {
         try {
           this.onEnqueueCallback();
@@ -144,6 +161,21 @@ export class InterruptQueue {
   drain(): readonly InjectedInstruction[] {
     // splice(0) 取出全部并清空原数组
     const snapshot = this.queue.splice(0);
+    // D-4：记录指令消费事件（仅在实际消费时记录，失败不影响主流程）
+    if (snapshot.length > 0) {
+      try {
+        logInterruptEvent({
+          timestamp: new Date().toISOString(),
+          eventType: "interrupt.drained",
+          queueSize: this.queue.length,
+        });
+      } catch (err) {
+        console.error(
+          `[InterruptQueue] logInterruptEvent 抛错（已忽略）：`,
+          err instanceof Error ? err.message : String(err)
+        );
+      }
+    }
     // 冻结返回值，防止外部修改
     return Object.freeze(snapshot) as readonly InjectedInstruction[];
   }
