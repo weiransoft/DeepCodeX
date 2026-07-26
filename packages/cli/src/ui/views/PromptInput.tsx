@@ -80,6 +80,7 @@ export type PromptSubmission = {
     | "undo"
     | "mcp"
     | "rules"
+    | "team"
     | "exit"
     // ===== ADR-DI-001 动态注入与后台子 Agent 命令 =====
     | "inject"
@@ -748,6 +749,24 @@ export const PromptInput = React.memo(function PromptInput({
     if (item.kind === "rules") {
       // /rules <subcommand> [args] —— 透传完整文本，由 App 层调用 executeRulesCommand
       onSubmit({ text: "/rules", imageUrls: [], command: "rules" });
+      resetPromptInput();
+      return;
+    }
+    // ===== DeepCodeX 多角色团队命令（/team /architect /pm /coder /tester /ui） =====
+    // 统一映射为 command: "team"，由 App 层根据文本内容解析具体子命令与角色参数。
+    // 不在此处区分 architect/pm/coder/tester/ui 等 kind，统一走 team 路由，
+    // 简化 PromptSubmission.command 枚举宽度，避免每个角色都新增一个枚举值。
+    if (
+      item.kind === "team" ||
+      item.kind === "architect" ||
+      item.kind === "pm" ||
+      item.kind === "coder" ||
+      item.kind === "tester" ||
+      item.kind === "ui"
+    ) {
+      // /team <subcommand> [args] 或 /<role> <task description> —— 透传完整文本，
+      // 由 App 层调用 handleTeamSlashCommand 解析并执行 executeTeamCommand
+      onSubmit({ text: buffer.text.trim(), imageUrls: [], command: "team" });
       resetPromptInput();
       return;
     }

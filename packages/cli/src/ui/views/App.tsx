@@ -39,7 +39,7 @@ import type { SessionInfo } from "../statusline";
 import { isCollapsedThinking } from "../core/thinking-state";
 import { ANSI_CLEAR_SCREEN } from "../constants";
 // ADR-DI-001 动态注入与后台子 Agent 命令辅助函数
-import { extractCommandArgument, isResumeTaskCommand } from "../core/slash-commands";
+import { extractCommandArgument, isResumeTaskCommand, BUILTIN_SLASH_COMMANDS } from "../core/slash-commands";
 import type {
   LlmStreamProgress,
   MessageMeta,
@@ -60,6 +60,9 @@ import {
 } from "@vegamo/deepcode-core";
 import { buildDynamicCommandDescriptors } from "../core/dynamic-commands";
 import { writeStdout, writeStdoutLine } from "../../utils/stdio-helpers";
+// 导入 TeamCommandArgs 类型，用于 parseTeamArgs 返回值类型标注
+// 注意：仅导入类型（import type），不导入运行时值，避免增加启动开销
+import type { TeamCommandArgs, TeamSubcommand } from "../../team/team-cmd";
 
 type View = "chat" | "session-list" | "undo" | "mcp-status";
 
@@ -469,6 +472,19 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
           ...prev,
           buildSyntheticUserMessage(submission.text, submission.imageUrls.length),
           buildSyntheticAssistantMessage(rulesResult),
+        ]);
+        return;
+      }
+      if (submission.command === "team") {
+        // /team <subcommand> [args] 或 /<role> <task> —— 解析并调用 executeTeamCommand
+        // 将输出作为合成助手消息展示在会话中（不走完整 LLM 流程）。
+        // 该入口承接 PromptInput.handleSlashSelection 中所有 team/architect/pm/coder/tester/ui
+        // kind 统一映射的 command: "team" 提交，避免每个角色单独建分支。
+        const teamResult = await handleTeamSlashCommand(submission.text);
+        setMessages((prev) => [
+          ...prev,
+          buildSyntheticUserMessage(submission.text, submission.imageUrls.length),
+          buildSyntheticAssistantMessage(teamResult),
         ]);
         return;
       }
@@ -1113,12 +1129,33 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
 
   const handleQuestionAnswers = useCallback(
     (answers: AskUserQuestionAnswers) => {
-      void handlePrompt({
-        text: formatAskUserQuestionAnswers(answers),
-        imageUrls: [],
-      });
+      const answerText = formatAskUserQuestionAnswers(answers);
+      const suggestedCommand = pendingQuestion?.suggestedCommand;
+      if (suggestedCommand) {
+        // 有 suggestedCommand：解析命令种类（如 "/team dispatch ..." → command: "team"）
+        // 合并方案：直接以 slash 命令方式调用 handlePrompt，
+        // command 字段让 handlePrompt 路由到 team 分支，text 用于显示和参数解析。
+        // 这避免了原实现中"先发送回答 + queueMicrotask 异步注入命令"导致的：
+        //   1. SessionManager 状态机竞态（两次并发 handlePrompt 调用）
+        //   2. slash 命令不被路由（command 字段未传，走默认 LLM 流程）
+        const commandKind = parseSlashCommandKind(suggestedCommand.command);
+        if (commandKind) {
+          // 在状态栏显示自动执行提示，让用户感知到命令注入
+          setStatusLine(`▶ 自动执行：${suggestedCommand.command}`);
+          void handlePrompt({
+            text: suggestedCommand.command,
+            imageUrls: [],
+            command: commandKind,
+          });
+          return;
+        }
+        // 解析失败降级：仅发送回答，不自动执行（安全失败）
+        // suggestedCommand.command 不在 BUILTIN_SLASH_COMMANDS 中，可能是 LLM 幻觉
+      }
+      // 无 suggestedCommand 或解析失败：保持现有行为（仅发送回答文本）
+      void handlePrompt({ text: answerText, imageUrls: [] });
     },
-    [handlePrompt]
+    [handlePrompt, pendingQuestion, setStatusLine]
   );
 
   const handleQuestionCancel = useCallback(() => {
@@ -1373,8 +1410,421 @@ async function handleRulesSlashCommand(text: string): Promise<string> {
 }
 
 // ============================================================================
-// ADR-DI-001 辅助函数（/tasks 命令的表格格式化）
+// /team 命令处理（TUI slash 命令模式）
 // ============================================================================
+
+/**
+ * 解析并执行 /team slash 命令
+ *
+ * 支持的格式（与 packages/cli/src/team/team-cmd.ts 对齐）：
+ * - /team                                → 等价于 /team list
+ * - /team list                           → 列出所有可用角色
+ * - /team match --keywords <kw1,kw2>     → 关键词匹配角色
+ * - /team dispatch --task <task>         → 分派任务（自动匹配或 --role 强制）
+ * - /team dispatch --task-file <path>    → 从文件读取任务描述
+ * - /team autonomous --goal <goal>       → 启动 Ralph 自主迭代
+ * - /team full-lifecycle --project <name>→ 8 阶段全流程
+ *
+ * 此外也承接 /architect /pm /coder /tester /ui 等角色快捷命令，
+ * 它们在 PromptInput.handleSlashSelection 中已被统一映射为 command: "team"，
+ * 文本形如 "/architect <task>"，本函数会将其重写为 "/team dispatch --role <role> --task <task>"。
+ *
+ * 解析逻辑：
+ * 1. 去除前导 "/"
+ * 2. 按空白拆分，首段为命令名（team / architect / pm / coder / tester / ui）
+ * 3. 若首段不是 team，则转换为 team dispatch --role <roleId> 形式
+ * 4. 调用 executeTeamCommand 执行（拦截 stdout/stderr 捕获输出，不在 TUI 中直接打印）
+ *
+ * @param text 用户输入的完整文本（如 "/team list" 或 "/architect 设计用户认证模块"）
+ * @returns 命令输出文本（合并 stdout + stderr）
+ */
+async function handleTeamSlashCommand(text: string): Promise<string> {
+  // 动态导入避免启动开销，且避免与 CLI 入口（cli.tsx）的 team 命令处理耦合
+  const { executeTeamCommand } = await import("../../team/team-cmd.js");
+  const trimmed = text.trim();
+
+  // 去除前导 "/" 得到 "team list" 等
+  const body = trimmed.startsWith("/") ? trimmed.slice(1) : trimmed;
+  const tokens = body.split(/\s+/).filter(Boolean);
+
+  if (tokens.length === 0) {
+    return `无效的 /team 命令: ${text}`;
+  }
+
+  // 解析命令名与参数：处理 /architect /pm /coder /tester /ui 等角色快捷命令
+  const commandName = tokens[0]!;
+  let args: TeamCommandArgs;
+
+  if (commandName === "team") {
+    // /team <subcommand> [args] 形式，直接解析 tokens[1:] 作为 TeamCommandArgs
+    args = parseTeamArgs(tokens.slice(1));
+  } else {
+    // /<role> <task description> 形式，转换为 dispatch 子命令
+    const roleId = teamShortcutToRoleId(commandName);
+    if (roleId === null) {
+      return `未知的 /team 子命令或角色快捷命令: ${commandName}\n可用: /team list | /team match | /team dispatch | /team autonomous | /team full-lifecycle | /architect | /pm | /coder | /tester | /ui`;
+    }
+    // /<role> 后续 tokens 拼接为 task 描述
+    const taskDescription = tokens.slice(1).join(" ");
+    if (!taskDescription) {
+      return `✖ /${commandName} 需要 <任务描述> 参数\n用法: /${commandName} 设计用户认证模块`;
+    }
+    args = {
+      subcommand: "dispatch",
+      role: roleId,
+      task: taskDescription,
+      forceRole: true,
+    };
+  }
+
+  // executeTeamCommand 直接调用 writeStdoutLine/writeStderrLine 写入 process.stdout/stderr，
+  // 在 TUI 模式下会破坏 Ink 渲染。这里通过临时拦截 process.stdout.write / process.stderr.write
+  // 将输出重定向到内存缓冲，调用结束后恢复原始方法。
+  // 注意：handlePrompt 已通过 setBusy(true) 阻塞后续输入，此处不存在并发竞态。
+  const stdoutChunks: string[] = [];
+  const stderrChunks: string[] = [];
+  const originalStdoutWrite = process.stdout.write.bind(process.stdout);
+  const originalStderrWrite = process.stderr.write.bind(process.stderr);
+  // 类型安全的 write 拦截器：捕获字符串/Buffer/Uint8Array 输出
+  const interceptedStdoutWrite = (
+    chunk: string | Uint8Array,
+    encoding?: BufferEncoding | ((err?: Error | null) => void),
+    callback?: (err?: Error | null) => void
+  ): boolean => {
+    const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf-8");
+    stdoutChunks.push(text);
+    // 兼容 Node.js write 三种重载：(chunk, cb) / (chunk, encoding, cb) / (chunk, encoding, fd, cb)
+    if (typeof encoding === "function") {
+      encoding(null);
+    } else if (typeof callback === "function") {
+      callback(null);
+    }
+    return true;
+  };
+  const interceptedStderrWrite = (
+    chunk: string | Uint8Array,
+    encoding?: BufferEncoding | ((err?: Error | null) => void),
+    callback?: (err?: Error | null) => void
+  ): boolean => {
+    const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf-8");
+    stderrChunks.push(text);
+    if (typeof encoding === "function") {
+      encoding(null);
+    } else if (typeof callback === "function") {
+      callback(null);
+    }
+    return true;
+  };
+
+  process.stdout.write = interceptedStdoutWrite as typeof process.stdout.write;
+  process.stderr.write = interceptedStderrWrite as typeof process.stderr.write;
+
+  let exitCode: number;
+  try {
+    // args 已是 TeamCommandArgs 类型（parseTeamArgs 返回值），无需类型断言
+    exitCode = await executeTeamCommand(args);
+  } catch (err) {
+    exitCode = 1;
+    stderrChunks.push(`✖ 执行 /team 命令失败：${err instanceof Error ? err.message : String(err)}\n`);
+  } finally {
+    // 必须在 finally 中恢复原始 write，避免泄漏影响后续渲染
+    process.stdout.write = originalStdoutWrite;
+    process.stderr.write = originalStderrWrite;
+  }
+
+  // 合并捕获的输出，附带退出码作为前缀（失败时显式标注）
+  const stdout = stdoutChunks.join("");
+  const stderr = stderrChunks.join("");
+  const parts: string[] = [];
+  if (stdout) {
+    parts.push(stdout);
+  }
+  if (stderr) {
+    parts.push(stderr);
+  }
+  if (exitCode !== 0 && parts.length === 0) {
+    parts.push(`✖ /team 命令失败（退出码 ${exitCode}）`);
+  } else if (exitCode !== 0) {
+    parts.push(`\n[退出码: ${exitCode}]`);
+  }
+  return parts.join("\n").trim() || "(无输出)";
+}
+
+/**
+ * 从命令字符串解析 slash 命令种类
+ *
+ * 用于 handleQuestionAnswers 自动注入 suggestedCommand 时，识别命令种类。
+ * 例如 "/team dispatch --role architect" → "team"，"/architect 设计模块" → "architect"。
+ *
+ * 识别逻辑：
+ * 1. 命令必须以 "/" 开头
+ * 2. 提取首个 token（如 "/team"），去除 "/" 得到命令名（如 "team"）
+ * 3. 在 BUILTIN_SLASH_COMMANDS 中查找匹配的 kind
+ *
+ * 注意：返回的 kind 是 PromptSubmission.command 联合类型的成员。
+ * 对于 architect/pm/coder/tester/ui 等角色快捷命令，返回对应的 kind 字符串，
+ * 但由于 PromptSubmission.command 中只有 "team"，调用方（handleQuestionAnswers）
+ * 需要在传给 handlePrompt 前将其统一转换为 "team"。
+ * 此处先返回原始 kind，由调用方决定是否转换。
+ *
+ * @param commandText 命令字符串（如 "/team dispatch ..." 或 "/architect 设计模块"）
+ * @returns slash 命令 kind（如 "team"、"architect"、"rules"），或 undefined（无法识别）
+ */
+function parseSlashCommandKind(commandText: string): PromptSubmission["command"] | undefined {
+  const trimmed = commandText.trim();
+  if (!trimmed.startsWith("/")) {
+    return undefined;
+  }
+  // 提取首个 token（如 "/team"）
+  const firstToken = trimmed.split(/\s+/, 1)[0];
+  if (!firstToken) {
+    return undefined;
+  }
+  // 去除前导 "/" 得到命令名（如 "team"）
+  const commandName = firstToken.slice(1);
+  if (!commandName) {
+    return undefined;
+  }
+  // 在 BUILTIN_SLASH_COMMANDS 中查找对应的 kind
+  const item = BUILTIN_SLASH_COMMANDS.find((cmd) => cmd.name === commandName);
+  if (!item) {
+    return undefined;
+  }
+  // 将 SlashCommandKind 映射为 PromptSubmission.command 联合类型成员
+  // 多角色团队命令（team/architect/pm/coder/tester/ui）统一映射为 "team"
+  // 其他命令（rules/exit/new/undo/mcp/inject/bg/tasks/fg/cancel/pause/resume/continue）保持原值
+  switch (item.kind) {
+    case "team":
+    case "architect":
+    case "pm":
+    case "coder":
+    case "tester":
+    case "ui":
+      return "team";
+    case "rules":
+      return "rules";
+    case "exit":
+      return "exit";
+    case "new":
+      return "new";
+    case "undo":
+      return "undo";
+    case "mcp":
+      return "mcp";
+    case "inject":
+      return "inject";
+    case "bg":
+      return "bg";
+    case "tasks":
+      return "tasks";
+    case "fg":
+      return "fg";
+    case "cancel":
+      return "cancel";
+    case "pause":
+      return "pause";
+    case "resume":
+      return "resume";
+    case "continue":
+      return "continue";
+    // 以下 kind 不是 PromptSubmission.command 的成员，无法自动执行
+    // （skill/skills/model/plan/init/raw/memory 等），返回 undefined 让调用方降级
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * 将 /<role> 角色快捷命令名映射为 RoleId
+ *
+ * 与 packages/cli/src/ui/core/slash-commands.ts 中的 teamCommandToRoleId 保持一致。
+ * 此处独立实现一份，避免在 App.tsx 顶部新增对 slash-commands 模块的导入。
+ *
+ * @param commandName 命令名（不含 "/"，如 "architect" / "pm" / "coder" / "tester" / "ui"）
+ * @returns 对应的 RoleId，或 null（不是角色快捷命令）
+ */
+function teamShortcutToRoleId(commandName: string): import("@vegamo/deepcode-core").RoleId | null {
+  switch (commandName) {
+    case "architect":
+      return "architect";
+    case "pm":
+      return "product-manager";
+    case "coder":
+      return "solo-coder";
+    case "tester":
+      return "test-expert";
+    case "ui":
+      return "ui-designer";
+    default:
+      return null;
+  }
+}
+
+/**
+ * 解析 /team 命令参数为 TeamCommandArgs 对象
+ *
+ * 支持的参数：
+ * - subcommand（位置参数）：list / match / dispatch / autonomous / full-lifecycle（默认 list）
+ * - --role <roleId>          强制指定角色
+ * - --task <text>            任务描述
+ * - --task-file <path>       任务文件路径
+ * - --goal <text>             项目目标
+ * - --keywords <kw1,kw2,...>  关键词（match 模式，逗号分隔）
+ * - --max-iterations <n>      最大迭代次数
+ * - --force-role              禁用自动匹配
+ * - --consensus               共识模式
+ * - --fail-fast                失败时中止
+ * - --project-root <path>     项目根目录
+ * - --resume-run               断点续跑
+ * - --use-loop                 启用循环模式
+ * - --prd-path <path>          PRD 文档路径
+ * - --architecture-path <path> 架构文档路径
+ * - --test-plan-path <path>    测试计划路径
+ * - --test-command <cmd>       测试命令
+ *
+ * @param tokens 命令 tokens（去除 "team" 前缀后的参数数组）
+ * @returns TeamCommandArgs 对象（subcommand 必填，其他字段按需填充）
+ */
+function parseTeamArgs(tokens: string[]): TeamCommandArgs {
+  // 使用 Record<string, unknown> 中间存储，最后构造 TeamCommandArgs
+  const raw: Record<string, unknown> = {};
+
+  // 第一个 token 是子命令（默认 "list"）
+  let subcommand: TeamSubcommand = "list";
+  if (tokens.length > 0 && !tokens[0]!.startsWith("--")) {
+    const first = tokens[0]!;
+    // 校验子命令合法性（与 team-cmd.ts 的 TeamSubcommand 类型对齐）
+    if (
+      first === "list" ||
+      first === "match" ||
+      first === "dispatch" ||
+      first === "autonomous" ||
+      first === "full-lifecycle"
+    ) {
+      subcommand = first;
+      tokens = tokens.slice(1);
+    } else {
+      // 未知子命令，仍保留原值让 executeTeamCommand 报错（exhaustiveness check）
+      subcommand = first as TeamSubcommand;
+      tokens = tokens.slice(1);
+    }
+  }
+  raw.subcommand = subcommand;
+
+  // 解析 --key value 参数
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]!;
+    if (token.startsWith("--")) {
+      const key = token.slice(2);
+      const nextToken = tokens[i + 1];
+      if (nextToken && !nextToken.startsWith("--")) {
+        // 值参数
+        raw[key] = nextToken;
+        i++;
+      } else {
+        // 布尔参数
+        raw[key] = true;
+      }
+    }
+  }
+
+  // --keywords 逗号分隔转数组（match 子命令使用）
+  if (typeof raw.keywords === "string") {
+    raw.keywords = (raw.keywords as string)
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  // --max-iterations 字符串转数字
+  if (typeof raw.maxIterations === "string") {
+    const n = Number.parseInt(raw.maxIterations as string, 10);
+    if (!Number.isNaN(n)) {
+      raw.maxIterations = n;
+    } else {
+      delete raw.maxIterations;
+    }
+  }
+
+  // camelCase 转换：CLI 风格参数名转 TeamCommandArgs 字段名
+  // --task-file → taskFile, --max-iterations → maxIterations（已转）,
+  // --force-role → forceRole, --fail-fast → failFast,
+  // --project-root → projectRoot, --resume-run → resumeRun,
+  // --use-loop → useLoop, --prd-path → prdPath, --architecture-path → architecturePath,
+  // --test-plan-path → testPlanPath, --test-command → testCommand
+  const kebabToCamelMap: Record<string, string> = {
+    "task-file": "taskFile",
+    "force-role": "forceRole",
+    "fail-fast": "failFast",
+    "project-root": "projectRoot",
+    "resume-run": "resumeRun",
+    "use-loop": "useLoop",
+    "prd-path": "prdPath",
+    "architecture-path": "architecturePath",
+    "test-plan-path": "testPlanPath",
+    "test-command": "testCommand",
+  };
+  for (const [kebab, camel] of Object.entries(kebabToCamelMap)) {
+    if (raw[kebab] !== undefined) {
+      raw[camel] = raw[kebab];
+      delete raw[kebab];
+    }
+  }
+
+  // 构造 TeamCommandArgs 对象（仅包含已解析的字段，避免 undefined 字段污染）
+  // 注意：此处使用对象展开 + 条件包含，确保类型安全
+  const args: TeamCommandArgs = { subcommand };
+  if (typeof raw.role === "string") {
+    args.role = raw.role as TeamCommandArgs["role"];
+  }
+  if (typeof raw.task === "string") {
+    args.task = raw.task;
+  }
+  if (typeof raw.taskFile === "string") {
+    args.taskFile = raw.taskFile;
+  }
+  if (typeof raw.goal === "string") {
+    args.goal = raw.goal;
+  }
+  if (Array.isArray(raw.keywords)) {
+    args.keywords = raw.keywords as string[];
+  }
+  if (typeof raw.maxIterations === "number") {
+    args.maxIterations = raw.maxIterations;
+  }
+  if (raw.forceRole === true) {
+    args.forceRole = true;
+  }
+  if (raw.consensus === true) {
+    args.consensus = true;
+  }
+  if (raw.failFast === true) {
+    args.failFast = true;
+  }
+  if (typeof raw.projectRoot === "string") {
+    args.projectRoot = raw.projectRoot;
+  }
+  if (raw.resumeRun === true) {
+    args.resumeRun = true;
+  }
+  if (raw.useLoop === true) {
+    args.useLoop = true;
+  }
+  if (typeof raw.prdPath === "string") {
+    args.prdPath = raw.prdPath;
+  }
+  if (typeof raw.architecturePath === "string") {
+    args.architecturePath = raw.architecturePath;
+  }
+  if (typeof raw.testPlanPath === "string") {
+    args.testPlanPath = raw.testPlanPath;
+  }
+  if (typeof raw.testCommand === "string") {
+    args.testCommand = raw.testCommand;
+  }
+
+  return args;
+}
 
 /**
  * 格式化任务时长（毫秒 → 人类可读）
