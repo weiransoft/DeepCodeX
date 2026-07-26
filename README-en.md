@@ -68,6 +68,37 @@ Skills are discovered from these locations, in priority order:
 - Reduce costs by using [Context Caching](https://api-docs.deepseek.com/guides/kv_cache).
 - Natively supports [Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode) and Effort Control.
 
+## DeepCodeX New Features
+
+DeepCodeX builds upon Deep Code CLI to deliver two major leaps — **multi-role fusion** and **Enterprise Application Generation (EAG)** — along with dynamic instruction injection, AskUserQuestion auto-dispatch, V2 context memory, Loop-Graph fusion orchestration, and many more.
+
+Full documentation: [docs/new-features_en.md](docs/new-features_en.md) ｜ [中文](docs/new-features.md)
+
+| Domain | Key Capability | Main Entry |
+|--------|---------------|-----------|
+| **A. Multi-Role Collaboration** | 5 core roles (Architect / PM / Solo Coder / Test Expert / UI Designer) + 30 domain experts + smart matching + 8-stage workflow | `/team` |
+| **B. Autonomous Orchestration** | Ralph 4-stage loop (plan→dev→verify→fix) + Cybernetics + 6 workflow patterns + 15 BLOCKER safety guards | `/team autonomous` |
+| **C. EAG Enterprise App Generation** | 3 loops (design/code/test) + red-line eval + paradigm recall + P5 unattended engine + P6 CodeMap dynamic window | `/eag-autonomous` |
+| **D. Loop-Graph Fusion** | DAG topology (6 node types) + intra-node Loop closure + predicate routing (eliminates RCE) + graph guards + 3-layer config merge | `/eag-graph` |
+| **E. V2 Context Memory** | Dual-layer context (Global+Task) + sliding window + diff preview + dual-axis approval (AppMode × ApprovalMode) + side-git rollback + 7-dimension dynamic memory + experience RAG | Auto-enabled |
+| **F. Dynamic Interrupt & Background Tasks** | InterruptQueue FIFO + background sub-agent + 11-state task machine + AbortController cross-process interrupt + persistence & recovery | `/inject` `/bg` `/tasks` |
+| **G. AskUserQuestion Auto-Dispatch** | Three-layer whitelist (core + CLI + `/` prefix) + suggestedCommand + merge strategy to avoid concurrency races | LLM-triggered |
+| **H. Builtin Skills Enhancement** | 4 bundled (web-dev / web-artisan / code-mode-orchestrator / browser-automation) + 3 default + 4 document-processing (docx/pdf/pptx/xlsx — real Python scripts) | `/skills` |
+| **I. Logging & Observability** | Log rotation (10MB / 3 backups) + error-type preservation (APIUserAbortError etc.) + interrupt event log (interrupts.log) | Auto-enabled |
+| **J. Multi-Model Provider** | Anthropic native (Claude 3.5/3.7) + OpenAI-compatible (DeepSeek/Doubao) + Qwen3 reasoning model `reasoning` field independent extraction | `settings.json` |
+
+**Core Design Principles**:
+- [Karpathy's Four Principles](docs/fusion/KARPATHY_PRINCIPLES.md) (Think Before Coding / Simplicity First / Surgical Changes / Goal-Driven)
+- [Ponytail Decision Ladder](docs/fusion/PONYTAIL_RULES.md) (YAGNI → Standard Library → Platform-Native → Reuse → One-Liner First → Minimum Viable)
+
+**Key Design Documents**:
+- Fusion Plan: [docs/fusion/DEEPCODEX_FUSION_PLAN.md](docs/fusion/DEEPCODEX_FUSION_PLAN.md)
+- EAG Enterprise App Generation: [docs/enterprise/ENTERPRISE_APP_GENERATION_DESIGN.md](docs/enterprise/ENTERPRISE_APP_GENERATION_DESIGN.md)
+- Loop-Graph Fusion: [docs/enterprise/LOOP-GRAPH-FUSION-DESIGN.md](docs/enterprise/LOOP-GRAPH-FUSION-DESIGN.md)
+- V2 Context Memory: [docs/fusion/V2_CONTEXT_MEMORY_PRD.md](docs/fusion/V2_CONTEXT_MEMORY_PRD.md)
+- Domain Expert Integration: [docs/enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md](docs/enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md)
+- Builtin Skills Enhancement: [docs/enterprise/BUILTIN-SKILLS-ENHANCEMENT-DESIGN.md](docs/enterprise/BUILTIN-SKILLS-ENHANCEMENT-DESIGN.md)
+
 ## Slash Commands & Keyboard Shortcuts
 
 | Slash Command    | Action                                                  |
@@ -83,6 +114,17 @@ Skills are discovered from these locations, in priority order:
 | `/mcp`           | View MCP server status and available tools              |
 | `/undo`          | Restore code and/or conversation to a previous point    |
 | `/exit`          | Quit (also `Ctrl+D` twice)                              |
+| `/team`          | Multi-role team dispatch (dispatch / consensus / autonomous / full-lifecycle) |
+| `/eag-autonomous` | Launch EAG unattended loop (plan→dev→verify→fix)      |
+| `/eag-graph`     | Launch Loop-Graph orchestration (DAG topology + predicate routing) |
+| `/inject`        | Append instruction to current task (dynamic interrupt)  |
+| `/bg`            | Launch background sub-agent (independent SessionManager) |
+| `/tasks`         | List all tasks (including background sub-agents)        |
+| `/fg`            | Switch foreground focus                                  |
+| `/cancel`        | Cancel specified task                                    |
+| `/pause`         | Pause current foreground task                            |
+| `/resume <taskId>` | Resume a paused background task (note: `/resume` without args still resumes a previous conversation) |
+| `/plan`          | Enter Plan Mode (only generate implementation plan; no code changes) |
 
 | Key              | Action                                                   |
 |------------------|----------------------------------------------------------|
