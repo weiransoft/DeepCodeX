@@ -49,6 +49,19 @@ import {
 } from "./usage-tracker";
 // 向后兼容：re-export ModelUsage 类型，保持 index.ts 与外部消费者不变
 export type { ModelUsage } from "./usage-tracker";
+// SkillManager 技能管理模块（从 session.ts 抽取，见 docs/dev/review.md CRITICAL-1 模块 3）
+// 包含：getSkillScanRoots / getBundledSkillsRoot / listSkills / resolveSkillPath /
+// buildSkillPrompt / readSkillInfo / getSkillKey / getSkillKeyByName /
+// getLoadedSkillKeys / dedupeSkills / normalizeSkills
+import { SkillManager } from "./skill-manager";
+// StreamAggregator 流式聚合工具模块（从 session.ts 抽取，见 docs/dev/review.md CRITICAL-1 模块 1）
+// 包含：estimateStreamTokens / formatEstimatedTokens / isAbortLikeError / throwIfAborted / CJK_REGEX
+import {
+  estimateStreamTokens as estimateStreamTokensImpl,
+  formatEstimatedTokens as formatEstimatedTokensImpl,
+  isAbortLikeError as isAbortLikeErrorImpl,
+  throwIfAborted as throwIfAbortedImpl,
+} from "./stream-aggregator";
 import { logApiError } from "./common/error-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./common/debug-logger";
 import { describeLlmError, getLlmErrorDetails } from "./common/llm-error";
@@ -711,6 +724,8 @@ export class SessionManager {
   private readonly onProcessStdout?: (pid: number, chunk: string) => void;
   private activeSessionId: string | null = null;
   private activePromptController: AbortController | null = null;
+  // SkillManager 实例（技能扫描/解析/去重/归一化，见 docs/dev/review.md CRITICAL-1 模块 3）
+  private readonly skillManager: SkillManager;
   private readonly sessionControllers = new Map<string, AbortController>();
   private readonly processTimeoutControls = new Map<string, ProcessTimeoutControl>();
   private readonly liveProcessKeys = new Set<string>();
@@ -808,6 +823,13 @@ export class SessionManager {
     // 因此此处安全注册，不影响现有行为（NFR-4 零回归）。
     registerInterruptTools(this.toolExecutor, this as unknown as InterruptibleSessionManager);
     this.mcpManager.prepare(this.getResolvedSettings().mcpServers);
+    // SkillManager 初始化（最小依赖注入：projectRoot / getResolvedSettings / listSessionMessages）
+    // listSessionMessages 绑定到 this，确保 SkillManager 能访问当前会话消息
+    this.skillManager = new SkillManager({
+      projectRoot: this.projectRoot,
+      getResolvedSettings: () => this.getResolvedSettings(),
+      listSessionMessages: (sessionId: string) => this.listSessionMessages(sessionId),
+    });
     this.messageConverter = new OpenAIMessageConverter({
       renderInitPrompt: () => this.renderInitCommandPrompt(),
     });
@@ -932,55 +954,13 @@ export class SessionManager {
     this.mcpManager.disconnect();
   }
 
-  // 中日韩统一表意文字 + 扩展 A 区 + 兼容表意文字（预编译正则，避免每次调用重新编译）
-  // 覆盖范围：CJK Unified Ideographs (U+3400-U+9FFF) + CJK Compatibility Ideographs (U+F900-U+FAFF)
-  private static readonly CJK_REGEX = /[\u3400-\u9fff\uf900-\ufaff]/gu;
-
-  /**
-   * 估算流式文本的 token 数（v2 性能优化版）
-   *
-   * 算法说明：
-   * - 中文/日文/韩文字符计 0.6 token（CJK 字符通常编码为 1-2 token）
-   * - 其他字符计 0.3 token（ASCII/拉丁字母通常 3-4 字符为 1 token）
-   *
-   * 性能优化（v2 修复，对应 docs/dev/review.md 代码细节改进 4）：
-   * - 原实现：逐字符正则测试（O(n) 次正则调用），长文本性能差
-   * - 新实现：一次正则扫描统计 CJK 字符数（1 次正则调用），性能提升 5-10 倍
-   * - 结果一致性：与原实现完全一致（相同文本返回相同 token 数）
-   *
-   * @param text 待估算的文本
-   * @returns 估算的 token 数
-   */
+  // Token 估算与格式化（已迁移到 ./stream-aggregator.ts，见 docs/dev/review.md CRITICAL-1 模块 1）
   private estimateStreamTokens(text: string): number {
-    if (!text) {
-      return 0;
-    }
-    // 一次正则扫描统计 CJK 字符数（match 返回所有匹配项数组）
-    const cjkMatches = text.match(SessionManager.CJK_REGEX);
-    const cjkCount = cjkMatches ? cjkMatches.length : 0;
-    const otherCount = text.length - cjkCount;
-    return cjkCount * 0.6 + otherCount * 0.3;
+    return estimateStreamTokensImpl(text);
   }
 
   private formatEstimatedTokens(tokens: number): string {
-    if (tokens <= 0) {
-      return "0";
-    }
-
-    const roundedTokens = Math.round(tokens);
-    if (roundedTokens <= 0) {
-      return "0";
-    }
-
-    if (roundedTokens < 100) {
-      return String(roundedTokens);
-    }
-
-    if (roundedTokens < 10000) {
-      return `${Number((roundedTokens / 1000).toFixed(1))}k`;
-    }
-
-    return `${Math.round(roundedTokens / 1000)}k`;
+    return formatEstimatedTokensImpl(tokens);
   }
 
   private emitLlmStreamProgress(
@@ -1001,21 +981,11 @@ export class SessionManager {
   }
 
   private isAbortLikeError(error: unknown): boolean {
-    if (!(error instanceof Error)) {
-      return false;
-    }
-
-    return error.name === "AbortError" || error.constructor.name === "APIUserAbortError";
+    return isAbortLikeErrorImpl(error);
   }
 
   private throwIfAborted(signal?: AbortSignal | null): void {
-    if (!signal?.aborted) {
-      return;
-    }
-
-    const error = new Error("Request was aborted.");
-    error.name = "AbortError";
-    throw error;
+    throwIfAbortedImpl(signal);
   }
 
   private async createChatCompletionStream(
@@ -1638,239 +1608,47 @@ ${agentInstructions}
   }
 
   private getSkillScanRoots(): Array<{ root: string; displayRoot: string }> {
-    const homeDir = os.homedir();
-    return [
-      { root: path.join(this.projectRoot, ".deepcode", "skills"), displayRoot: "./.deepcode/skills" },
-      { root: path.join(this.projectRoot, ".agents", "skills"), displayRoot: "./.agents/skills" },
-      { root: path.join(homeDir, ".deepcode", "skills"), displayRoot: "~/.deepcode/skills" },
-      { root: path.join(homeDir, ".agents", "skills"), displayRoot: "~/.agents/skills" },
-      { root: this.getBundledSkillsRoot(), displayRoot: "bundled:" },
-    ];
+    return this.skillManager.getSkillScanRoots();
   }
 
   private getBundledSkillsRoot(): string {
-    const extensionRoot = getExtensionRoot();
-    const sourceRoot = path.join(extensionRoot, "templates", "skills", "bundled");
-
-    // Source check keeps local development/tests on the checked-in templates.
-    if (fs.existsSync(path.join(extensionRoot, "src", "session.ts")) && fs.existsSync(sourceRoot)) {
-      return sourceRoot;
-    }
-
-    // In the published bundle, getExtensionRoot() resolves to dist/ and
-    // bundled skills are copied to dist/bundled/ (not dist/templates/skills/bundled/).
-    const distRoot = path.join(extensionRoot, "bundled");
-    return fs.existsSync(distRoot) ? distRoot : sourceRoot;
+    return this.skillManager.getBundledSkillsRoot();
   }
 
   async listSkills(sessionId?: string): Promise<SkillInfo[]> {
-    const skillRoots = this.getSkillScanRoots();
-    const enabledSkills = this.getResolvedSettings().enabledSkills ?? {};
-    const skillsByName = new Map<string, SkillInfo>();
-
-    const collectSkills = (root: string, displayRoot: string): SkillInfo[] => {
-      if (!fs.existsSync(root)) {
-        return [];
-      }
-      let entries: fs.Dirent[];
-      try {
-        entries = fs.readdirSync(root, { withFileTypes: true });
-      } catch {
-        return [];
-      }
-
-      const results: SkillInfo[] = [];
-      for (const entry of entries) {
-        if (!entry.isDirectory() && !entry.isSymbolicLink()) {
-          continue;
-        }
-        const skillName = entry.name;
-        const skillPath = path.join(root, skillName, "SKILL.md");
-        try {
-          if (!fs.existsSync(skillPath)) {
-            continue;
-          }
-          const stat = fs.statSync(skillPath);
-          if (!stat.isFile()) {
-            continue;
-          }
-        } catch {
-          continue;
-        }
-        const displayPath =
-          displayRoot === "bundled:" ? `bundled:${skillName}/SKILL.md` : `${displayRoot}/${skillName}/SKILL.md`;
-        const skill = this.readSkillInfo(skillPath, displayPath, skillName);
-        if (enabledSkills[skill.name] === false) {
-          continue;
-        }
-        results.push(skill);
-      }
-      return results;
-    };
-
-    for (const { root, displayRoot } of skillRoots) {
-      for (const skill of collectSkills(root, displayRoot)) {
-        if (!skillsByName.has(skill.name)) {
-          skillsByName.set(skill.name, skill);
-        }
-      }
-    }
-
-    if (sessionId) {
-      const loadedSkillKeys = this.getLoadedSkillKeys(sessionId);
-      for (const skill of skillsByName.values()) {
-        if (loadedSkillKeys.has(this.getSkillKey(skill)) || loadedSkillKeys.has(this.getSkillKeyByName(skill.name))) {
-          skill.isLoaded = true;
-        }
-      }
-    }
-
-    return Array.from(skillsByName.values()).sort((a, b) => a.name.localeCompare(b.name));
+    return this.skillManager.listSkills(sessionId);
   }
 
   private resolveSkillPath(skillPath: string): string {
-    if (skillPath.startsWith("bundled:")) {
-      const relativePath = skillPath.slice("bundled:".length);
-      const root = this.getBundledSkillsRoot();
-      const resolvedPath = path.resolve(root, relativePath);
-      const resolvedRoot = path.resolve(root);
-      if (resolvedPath === resolvedRoot || !resolvedPath.startsWith(`${resolvedRoot}${path.sep}`)) {
-        return path.join(root, "__invalid_bundled_skill__");
-      }
-      return resolvedPath;
-    }
-    if (skillPath.startsWith("~/")) {
-      return path.join(os.homedir(), skillPath.slice(2));
-    }
-    if (skillPath.startsWith("~\\")) {
-      return path.join(os.homedir(), skillPath.slice(2));
-    }
-    if (skillPath.startsWith("./")) {
-      return path.join(this.projectRoot, skillPath.slice(2));
-    }
-    if (skillPath.startsWith(".\\")) {
-      return path.join(this.projectRoot, skillPath.slice(2));
-    }
-    if (path.isAbsolute(skillPath)) {
-      return skillPath;
-    }
-    return path.join(os.homedir(), skillPath);
+    return this.skillManager.resolveSkillPath(skillPath);
   }
 
   private buildSkillPrompt(skill: SkillInfo): string {
-    const skillPath = this.resolveSkillPath(skill.path);
-    return buildSkillDocumentsPrompt([
-      {
-        name: skill.name,
-        content: fs.readFileSync(skillPath, "utf8"),
-        path: skillPath,
-        skillFilePath: skillPath,
-      },
-    ]);
+    return this.skillManager.buildSkillPrompt(skill);
   }
 
   private readSkillInfo(skillPath: string, displayPath: string, fallbackName: string): SkillInfo {
-    const fallbackSkill: SkillInfo = {
-      name: fallbackName.replace(/_/g, "-"),
-      path: displayPath,
-      description: "",
-    };
-
-    try {
-      const skillMd = fs.readFileSync(skillPath, "utf8");
-      const parsed = matter(skillMd);
-      const metadata = parsed.data.metadata;
-      const allowImplicitInvocation =
-        metadata &&
-        typeof metadata === "object" &&
-        !Array.isArray(metadata) &&
-        (metadata as Record<string, unknown>)["allow-implicit-invocation"] === false
-          ? false
-          : undefined;
-      return {
-        name:
-          typeof parsed.data.name === "string" && parsed.data.name.trim()
-            ? parsed.data.name.trim()
-            : fallbackSkill.name,
-        path: displayPath,
-        description: typeof parsed.data.description === "string" ? parsed.data.description.trim() : "",
-        allowImplicitInvocation,
-      };
-    } catch {
-      return fallbackSkill;
-    }
+    return this.skillManager.readSkillInfo(skillPath, displayPath, fallbackName);
   }
 
   private getSkillKey(skill: Pick<SkillInfo, "path">): string {
-    return `path:${skill.path}`;
+    return this.skillManager.getSkillKey(skill);
   }
 
   private getSkillKeyByName(name: string): string {
-    return `name:${name}`;
+    return this.skillManager.getSkillKeyByName(name);
   }
 
   private getLoadedSkillKeys(sessionId: string): Set<string> {
-    const loadedSkillKeys = new Set<string>();
-    for (const message of this.listSessionMessages(sessionId)) {
-      if (message.role !== "system" || !message.meta?.skill) {
-        continue;
-      }
-      loadedSkillKeys.add(this.getSkillKey(message.meta.skill));
-      loadedSkillKeys.add(this.getSkillKeyByName(message.meta.skill.name));
-    }
-    return loadedSkillKeys;
+    return this.skillManager.getLoadedSkillKeys(sessionId);
   }
 
   private dedupeSkills(skills?: SkillInfo[]): SkillInfo[] | undefined {
-    if (!skills || skills.length === 0) {
-      return undefined;
-    }
-
-    const dedupedSkills = new Map<string, SkillInfo>();
-    for (const skill of skills) {
-      if (!skill?.name || !skill?.path) {
-        continue;
-      }
-      const key = this.getSkillKey(skill);
-      const existingSkill = dedupedSkills.get(key);
-      dedupedSkills.set(key, {
-        ...existingSkill,
-        ...skill,
-        description: skill.description ?? existingSkill?.description ?? "",
-        isLoaded: Boolean(existingSkill?.isLoaded || skill.isLoaded),
-      });
-    }
-
-    return Array.from(dedupedSkills.values());
+    return this.skillManager.dedupeSkills(skills);
   }
 
   private async normalizeSkills(skills?: SkillInfo[], sessionId?: string): Promise<SkillInfo[] | undefined> {
-    const dedupedSkills = this.dedupeSkills(skills);
-    if (!dedupedSkills || dedupedSkills.length === 0) {
-      return undefined;
-    }
-
-    const availableSkills = await this.listSkills(sessionId);
-    const availableSkillsByKey = new Map<string, SkillInfo>();
-    for (const skill of availableSkills) {
-      availableSkillsByKey.set(this.getSkillKey(skill), skill);
-      availableSkillsByKey.set(this.getSkillKeyByName(skill.name), skill);
-    }
-
-    return dedupedSkills.map((skill) => {
-      const matchedSkill =
-        availableSkillsByKey.get(this.getSkillKey(skill)) ??
-        availableSkillsByKey.get(this.getSkillKeyByName(skill.name));
-      if (!matchedSkill) {
-        return skill;
-      }
-      return {
-        ...matchedSkill,
-        ...skill,
-        description: matchedSkill.description || skill.description,
-        isLoaded: Boolean(matchedSkill.isLoaded || skill.isLoaded),
-      };
-    });
+    return this.skillManager.normalizeSkills(skills, sessionId);
   }
 
   private appendSkillMessages(sessionId: string, skills?: SkillInfo[]): void {
@@ -2202,6 +1980,18 @@ ${agentInstructions}
       (!userPrompt.skills || userPrompt.skills.length === 0)
     );
   }
+
+  // ============================================================================
+  // EAG 命令分发区域（@experimental）
+  // ============================================================================
+  // 重要提示：以下方法为 EAG 命令分发逻辑，CLI 层未默认注入任何 EAG orchestrator。
+  // - 已启用：handleEagDynamicSuggestion（通过 EagDynamicSuggester 工厂函数注入）
+  // - 未启用：handleEagBuildCommand / handleEagDesignCommand / handleEagTestCommand /
+  //   handleEagRunCommand / handleEagResumeCommand / handleEagStatusCommand /
+  //   handleEagDeployCommand / handleEagAutonomousCommand / handleEagGraphCommand
+  //   （需要通过 SessionManagerOptions 注入对应 orchestrator 才能启用）
+  // 启用方式详见 docs/dev/ADR-EAG-001-experimental-status.md
+  // ============================================================================
 
   /**
    * EAG LLM 动态编排建议层入口（2026-07-24 新增）
