@@ -488,6 +488,18 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
         ]);
         return;
       }
+      if (submission.command === "quality-check") {
+        // /quality-check <subcommand> [args] —— 解析并调用 executeQualityCommand
+        // 将输出作为合成助手消息展示在会话中（不走完整 LLM 流程）。
+        // 子命令：codemap / uiux / visual / all / help
+        const qualityResult = await handleQualitySlashCommand(submission.text);
+        setMessages((prev) => [
+          ...prev,
+          buildSyntheticUserMessage(submission.text, submission.imageUrls.length),
+          buildSyntheticAssistantMessage(qualityResult),
+        ]);
+        return;
+      }
       // ===== ADR-DI-001 动态注入与后台子 Agent 命令处理 =====
       // 所有命令通过 InterruptibleSession 接口调用 SessionManager 的扩展方法。
       // 未注入对应组件时方法不存在，给出明确的 "功能未启用" 错误提示。
@@ -1551,6 +1563,62 @@ async function handleTeamSlashCommand(text: string): Promise<string> {
 }
 
 /**
+ * /quality-check 命令包装函数
+ *
+ * 在 TUI 模式下承接 App.tsx 的 submission.command === "quality-check" 分支，
+ * 解析用户输入并调用 executeQualityCommand 执行。
+ *
+ * 与 handleTeamSlashCommand 的区别：
+ *   - executeQualityCommand 已通过返回值（exitCode + stdout + stderr）设计为
+ *     可被 TUI 调用，不需要拦截 process.stdout.write
+ *   - 直接使用 dynamic import 加载 quality-cmd 模块，避免启动开销
+ *
+ * 流程：
+ *   1. 动态导入 executeQualityCommand + parseQualityArgs
+ *   2. 去除前导 "/" 并 split tokens
+ *   3. 调用 parseQualityArgs 解析参数
+ *   4. 调用 executeQualityCommand（printToTerminal=false，避免破坏 Ink 渲染）
+ *   5. 合并 stdout + stderr + 退出码作为合成消息返回
+ *
+ * @param text 用户输入的完整文本（如 "/quality-check codemap ./path"）
+ * @returns 合成消息文本（包含报告内容 + 退出码）
+ */
+async function handleQualitySlashCommand(text: string): Promise<string> {
+  // 动态导入避免启动开销，且避免与 CLI 入口的 quality 命令处理耦合
+  const { executeQualityCommand, parseQualityArgs } = await import("../../quality/quality-cmd.js");
+  const trimmed = text.trim();
+
+  // 去除前导 "/" 得到 "quality-check codemap ./path" 等
+  const body = trimmed.startsWith("/") ? trimmed.slice(1) : trimmed;
+  const tokens = body.split(/\s+/).filter(Boolean);
+
+  if (tokens.length === 0 || tokens[0] !== "quality-check") {
+    return `无效的 /quality-check 命令: ${text}`;
+  }
+
+  // 解析参数（tokens[0] 是 "quality-check"，去除后传入 parseQualityArgs）
+  const args = parseQualityArgs(tokens.slice(1));
+
+  // 执行（TUI 模式不直接打印，由调用方作为合成消息展示）
+  const result = await executeQualityCommand(args, undefined, false);
+
+  // 合并输出，附带退出码作为前缀（失败时显式标注）
+  const parts: string[] = [];
+  if (result.stdout) {
+    parts.push(result.stdout);
+  }
+  if (result.stderr) {
+    parts.push(result.stderr);
+  }
+  if (result.exitCode !== 0 && parts.length === 0) {
+    parts.push(`✖ /quality-check 命令失败（退出码 ${result.exitCode}）`);
+  } else if (result.exitCode !== 0) {
+    parts.push(`\n[退出码: ${result.exitCode}]`);
+  }
+  return parts.join("\n").trim() || "(无输出)";
+}
+
+/**
  * 从命令字符串解析 slash 命令种类
  *
  * 用于 handleQuestionAnswers 自动注入 suggestedCommand 时，识别命令种类。
@@ -1623,6 +1691,8 @@ function parseSlashCommandKind(commandText: string): PromptSubmission["command"]
       return "cancel";
     case "pause":
       return "pause";
+    case "quality-check":
+      return "quality-check";
     case "resume":
       return "resume";
     case "continue":

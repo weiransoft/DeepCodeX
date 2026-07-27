@@ -18,6 +18,8 @@ import type { SkillInfo } from "@vegamo/deepcode-core";
  *   - cancel: 取消指定任务
  *   - pause: 暂停前台任务
  *   - resume: 恢复暂停的任务（复用现有 "resume" kind，通过参数区分场景）
+ * DeepCodeX Quality Gate 扩展：新增 quality-check 命令
+ *   - quality-check: 质量门禁（codemap / uiux / visual / all）
  */
 export type SlashCommandKind =
   | "skill"
@@ -47,7 +49,9 @@ export type SlashCommandKind =
   | "tasks"
   | "fg"
   | "cancel"
-  | "pause";
+  | "pause"
+  // ===== DeepCodeX Quality Gate 命令 =====
+  | "quality-check";
 
 export type SlashCommandItem = {
   kind: SlashCommandKind;
@@ -185,6 +189,15 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
     label: "/rules",
     args: ["<subcommand>"],
     description: "RLIS rule management (list/add/remove/show/path)",
+  },
+  // ===== DeepCodeX Quality Gate 质量门禁命令 =====
+  // 子命令：codemap / uiux / visual / all / help
+  {
+    kind: "quality-check",
+    name: "quality-check",
+    label: "/quality-check",
+    args: ["<subcommand>", "[options]"],
+    description: "Quality gate: code map / UI-UX audit / visual regression (subcommands: codemap|uiux|visual|all|help)",
   },
   // ===== ADR-DI-001 动态注入与后台子 Agent 命令 =====
   // 设计依据：ADR-DI-001 §7.4.2 SlashCommandKind 扩展
