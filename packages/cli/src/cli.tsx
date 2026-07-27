@@ -62,6 +62,9 @@ async function main(): Promise<void> {
       architecturePath: opts["architecture-path"] as string | undefined,
       testPlanPath: opts["test-plan-path"] as string | undefined,
       testCommand: opts["test-command"] as string | undefined,
+      // v2.1.1 E2E：透传 --resume-run 选项（autonomous 模式断点续跑）
+      // team-cmd.ts 的 executeAutonomousCommand 会读取此字段查找最近一次可恢复的 run
+      resumeRun: opts["resume-run"] === true,
     });
     process.exit(exitCode);
   }
@@ -90,6 +93,43 @@ async function main(): Promise<void> {
       })
     ).exitCode;
     process.exit(exitCode);
+  }
+
+  // quality-check 子命令路由：质量门禁 CLI 模式（非 TUI 模式）
+  // 用法：deepcode quality-check <subcommand> [target] [options]
+  // 复用 packages/cli/src/quality/quality-cmd.ts 中 executeQualityCommand 函数
+  // printToTerminal=true 时直接输出到 stdout/stderr，退出码通过 process.exit 传递
+  if (parsed.qualityCheck) {
+    const { executeQualityCommand, parseQualityArgs, formatQualityHelp } = await import("./quality/quality-cmd.js");
+    if (parsed.qualityCheck === "help") {
+      process.stdout.write(formatQualityHelp());
+      process.exit(0);
+    }
+    const opts = parsed.qualityCheckOptions;
+    // 构造 tokens 数组，复用 parseQualityArgs 解析逻辑（与 TUI 模式保持一致）
+    // tokens 结构：[subcommand, target?, --opt, val, ...]
+    const tokens: string[] = [parsed.qualityCheck];
+    if (parsed.qualityCheckPositional) {
+      tokens.push(parsed.qualityCheckPositional);
+    }
+    for (const [key, value] of Object.entries(opts)) {
+      if (value === undefined || value === null) continue;
+      // boolean 选项只 push key（如 --quiet）
+      if (typeof value === "boolean") {
+        if (value) tokens.push(`--${key}`);
+      } else if (Array.isArray(value)) {
+        // 数组选项：逗号分隔转字符串（如 --skip-dirs a,b,c）
+        tokens.push(`--${key}`, value.join(","));
+      } else {
+        // string / number 选项：push key + value
+        tokens.push(`--${key}`, String(value));
+      }
+    }
+    // parseQualityArgs 接受 tokens 数组与默认 projectRoot
+    const args = parseQualityArgs(tokens, (opts["project-root"] as string | undefined) ?? process.cwd());
+    // CLI 模式：printToTerminal=true，直接输出到 stdout/stderr
+    const result = await executeQualityCommand(args, undefined, true);
+    process.exit(result.exitCode);
   }
 
   // Configure Windows shell AFTER --version/--help handling.

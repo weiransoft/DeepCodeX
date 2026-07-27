@@ -50,7 +50,22 @@ export interface ParsedCliArgs {
   rules: string | undefined;
   /** Rules subcommand options (key-value pairs) */
   rulesOptions: Record<string, string | boolean | number | string[] | undefined>;
+  /**
+   * Quality-check 子命令参数。
+   * - `undefined` — 未调用 quality-check 子命令
+   * - `string`    — quality-check 子命令名（codemap / uiux / visual / all / help）
+   */
+  qualityCheck: string | undefined;
+  /** Quality-check 子命令选项（key-value 对） */
+  qualityCheckOptions: Record<string, string | boolean | number | string[] | undefined>;
+  /**
+   * Quality-check 子命令的位置参数（如 codemap 的 targetPath）
+   * yargs 18 中位置参数会出现在 parsed._ 中，这里单独提取以便清晰传递
+   */
+  qualityCheckPositional: string | undefined;
 }
+
+const QUALITY_CHECK_SUBCOMMANDS = ["codemap", "uiux", "visual", "all", "help"] as const;
 
 const EPILOG = [
   "Configuration:",
@@ -83,6 +98,7 @@ const EPILOG = [
   "  /mcp             Show MCP server status and available tools",
   "  /raw             Toggle display mode for viewing or collapsing reasoning content",
   "  /rules           RLIS rule management (list/add/remove/show/path)",
+  "  /quality-check   Quality gate: code map / UI-UX audit / visual regression",
   "  /exit            Quit",
   "  ctrl+d twice     Quit",
 ].join("\n");
@@ -256,6 +272,70 @@ async function configureYargs(argv?: string[]) {
           return true;
         })
     )
+    // quality-check 子命令：质量门禁 CLI 模式（非 TUI 模式）
+    // 用法：deepcode quality-check <subcommand> [targetPath] [options]
+    // 子命令：codemap / uiux / visual / all / help
+    // 选项与 packages/cli/src/quality/quality-cmd.ts 中 parseQualityArgs 完全对齐
+    .command(
+      "quality-check <subcommand> [target]",
+      "Quality gate: code map / UI-UX audit / visual regression (codemap|uiux|visual|all|help)",
+      (y: Argv) =>
+        y
+          .positional("subcommand", {
+            type: "string",
+            choices: QUALITY_CHECK_SUBCOMMANDS,
+            describe: "Quality-check subcommand",
+          })
+          .positional("target", {
+            type: "string",
+            describe: "Target path (codemap subcommand optional positional)",
+          })
+          // codemap 通用选项
+          .option("scope", { type: "string", describe: "Scope directory (codemap)" })
+          .option("skip-dirs", {
+            type: "string",
+            describe: "Comma-separated directories to skip (codemap)",
+          })
+          .option("max-files", { type: "number", describe: "Max files to scan (codemap)" })
+          .option("max-lines", {
+            type: "number",
+            describe: "Max lines per file (codemap, default 2000)",
+          })
+          // uiux 子命令选项
+          .option("dom-file", { type: "string", describe: "DOM audit JSON file (uiux)" })
+          .option("contrast-file", { type: "string", describe: "Contrast samples JSON file (uiux)" })
+          // visual 子命令选项
+          .option("baseline", { type: "string", describe: "Baseline image dir (visual)" })
+          .option("current", { type: "string", describe: "Current screenshot path (visual)" })
+          .option("test-id", { type: "string", describe: "Test ID (visual)" })
+          .option("step", { type: "string", describe: "Step name (visual)" })
+          .option("pixel-threshold", {
+            type: "number",
+            describe: "Pixel diff threshold (visual, default 0.01)",
+          })
+          .option("ssim-threshold", {
+            type: "number",
+            describe: "SSIM threshold (visual, default 0.95)",
+          })
+          .option("dom-signals-file", {
+            type: "string",
+            describe: "DOM signals JSON file (visual)",
+          })
+          // 通用选项
+          .option("output", { type: "string", describe: "Output file path" })
+          .option("format", {
+            type: "string",
+            choices: ["text", "json", "markdown"] as const,
+            describe: "Output format (codemap default markdown, others default text)",
+          })
+          .option("threshold", { type: "string", describe: "Pass threshold" })
+          .option("project-root", { type: "string", describe: "Project root directory" })
+          .option("quiet", {
+            type: "boolean",
+            describe: "Quiet mode (no stdout)",
+            default: false,
+          })
+    )
     .example("deepcode", "Launch the interactive TUI in the current directory")
     .example("deepcode -p <prompt>", "Launch with a pre-filled prompt")
     .example("deepcode -r, --resume [sessionId]", "Resume a session or show session picker")
@@ -292,13 +372,16 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
   // 导致 `team help` / `rules help` 时 yargs 自动输出 help 信息并清空 parsed._。
   // 此处从原始 argv 中检测 "help" 作为第二个 positional，手动设置 team/rules = "help"。
   // 原因：yargs 18 的 help 机制把 "help" 当成特殊命令，不传递给 .command() 的 positional
+  // quality-check 同样适用此机制，支持 `deepcode quality-check help` 显示帮助
   const rawArgv = argv ?? process.argv.slice(2);
   const helpAsSecondPositional =
     rawArgv.length >= 2 && rawArgv[0] === "team" && rawArgv[1] === "help"
       ? "team"
       : rawArgv.length >= 2 && rawArgv[0] === "rules" && rawArgv[1] === "help"
         ? "rules"
-        : undefined;
+        : rawArgv.length >= 2 && rawArgv[0] === "quality-check" && rawArgv[1] === "help"
+          ? "quality-check"
+          : undefined;
 
   const resumeRaw = parsed.resume as string | undefined;
   let resume: ParsedCliArgs["resume"];
@@ -320,6 +403,8 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
   const positionalArgs: ReadonlyArray<unknown> = Array.isArray(parsed._) ? parsed._ : [];
   const teamInvoked = positionalArgs[0] === "team" || helpAsSecondPositional === "team";
   const rulesInvoked = positionalArgs[0] === "rules" || helpAsSecondPositional === "rules";
+  // quality-check 命令检测：positional[0] === "quality-check" 或通过 help fallback
+  const qualityCheckInvoked = positionalArgs[0] === "quality-check" || helpAsSecondPositional === "quality-check";
   // v1.6 P0-2 修正（TC-TEAM-12）：yargs 18 把 "help" 当成内置 help 命令，
   // 导致 `parsed["subcommand"]` 不被设置。此时从 `helpAsSecondPositional` 提取 "help"。
   // 原因：yargs 18 的内置 help 机制会拦截 "help" 关键字，不将其作为 positional 传递
@@ -331,6 +416,14 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     (rulesInvoked ? (parsed["subcommand"] as string | undefined) : undefined) ??
     (helpAsSecondPositional === "rules" ? "help" : undefined) ??
     (parsed["rules"] as string | undefined);
+  // quality-check 子命令提取：与 team/rules 同样的三段式 fallback
+  const qualityCheckRaw =
+    (qualityCheckInvoked ? (parsed["subcommand"] as string | undefined) : undefined) ??
+    (helpAsSecondPositional === "quality-check" ? "help" : undefined) ??
+    (parsed["quality-check"] as string | undefined);
+  // quality-check 的第二个位置参数 target（codemap 子命令可选）
+  // yargs 18 中 positional "target" 会出现在 parsed["target"]
+  const qualityCheckTarget = qualityCheckInvoked ? (parsed["target"] as string | undefined) : undefined;
   const teamOptions: Record<string, string | boolean | number | string[] | undefined> = {};
   if (teamRaw) {
     // v2.1 P5：新增 use-loop / prd-path / architecture-path / test-plan-path / test-command
@@ -376,6 +469,38 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     }
   }
 
+  // 提取 quality-check 子命令的选项
+  // 选项清单与 packages/cli/src/quality/quality-cmd.ts 中 parseQualityArgs 完全对齐
+  const qualityCheckOptions: Record<string, string | boolean | number | string[] | undefined> = {};
+  if (qualityCheckRaw) {
+    const optionKeys = [
+      "scope",
+      "skip-dirs",
+      "max-files",
+      "max-lines",
+      "dom-file",
+      "contrast-file",
+      "baseline",
+      "current",
+      "test-id",
+      "step",
+      "pixel-threshold",
+      "ssim-threshold",
+      "dom-signals-file",
+      "output",
+      "format",
+      "threshold",
+      "project-root",
+      "quiet",
+    ];
+    for (const key of optionKeys) {
+      const v = parsed[key];
+      if (v !== undefined) {
+        qualityCheckOptions[key] = v as string | boolean | number | string[];
+      }
+    }
+  }
+
   return {
     prompt: parsed.prompt as string | undefined,
     resume,
@@ -385,5 +510,8 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     teamOptions,
     rules: rulesRaw,
     rulesOptions,
+    qualityCheck: qualityCheckRaw,
+    qualityCheckOptions,
+    qualityCheckPositional: qualityCheckTarget,
   };
 }

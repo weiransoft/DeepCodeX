@@ -42,6 +42,15 @@ test("buildSlashCommands prefixes skills before built-ins", () => {
     "memory",
     // DeepCodeX EAG 规则管理命令
     "rules",
+    // DeepCodeX Quality Gate 质量门禁命令
+    "quality-check",
+    // DeepCodeX ADR-DI-001 动态注入与后台子 Agent 命令
+    "inject",
+    "bg",
+    "tasks",
+    "fg",
+    "cancel",
+    "pause",
   ]);
 });
 

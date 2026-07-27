@@ -88,7 +88,9 @@ export type PromptSubmission = {
     | "tasks"
     | "fg"
     | "cancel"
-    | "pause";
+    | "pause"
+    // ===== DeepCodeX Quality Gate 命令 =====
+    | "quality-check";
 };
 
 export type PromptDraft = {
