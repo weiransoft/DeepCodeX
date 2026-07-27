@@ -1,4 +1,20 @@
-// Core library public API — used by both CLI and VSCode companion.
+// ============================================================================
+// Core library API — used by both CLI and VSCode companion.
+// ============================================================================
+// API 稳定性分级（详见 docs/dev/review.md MEDIUM-2）：
+//
+// @public       — 稳定 API，对外契约，breaking change 需 semver major
+//                 包含：Settings / SessionManager / Providers / Tools / Common
+//
+// @internal     — 内部 API，可能变更，不建议外部直接使用
+//                 包含：StreamAggregator / SkillManager / UsageTracker
+//
+// @experimental — 实验性 API，不保证兼容，CLI 层未默认启用
+//                 包含：EAG orchestrator / InterruptQueue / TaskRegistry / BackgroundTaskRunner
+//                 详见 docs/dev/ADR-EAG-001-experimental-status.md
+// ============================================================================
+
+// === @public API ===
 
 // Settings
 export {
