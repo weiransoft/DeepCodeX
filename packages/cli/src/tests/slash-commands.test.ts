@@ -44,6 +44,8 @@ test("buildSlashCommands prefixes skills before built-ins", () => {
     "rules",
     // DeepCodeX Quality Gate 质量门禁命令
     "quality-check",
+    // DeepCodeX Review 代码审查命令（工具验证优先）
+    "review",
     // DeepCodeX ADR-DI-001 动态注入与后台子 Agent 命令
     "inject",
     "bg",
@@ -139,6 +141,14 @@ test("findExactSlashCommand returns the matching skill", () => {
   assert.ok(item);
   assert.equal(item?.kind, "skill");
   assert.equal(item?.skill?.name, "code-review");
+});
+
+test("findExactSlashCommand returns built-in /review", () => {
+  const items = buildSlashCommands(skills);
+  const item = findExactSlashCommand(items, "/review");
+  assert.ok(item);
+  assert.equal(item?.kind, "review");
+  assert.equal(item?.description.includes("Code review"), true);
 });
 
 test("formatSlashCommandDescription keeps descriptions on one line", () => {

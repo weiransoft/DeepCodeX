@@ -63,9 +63,24 @@ export interface ParsedCliArgs {
    * yargs 18 中位置参数会出现在 parsed._ 中，这里单独提取以便清晰传递
    */
   qualityCheckPositional: string | undefined;
+  /**
+   * Review 子命令参数。
+   * - `undefined` — 未调用 review 子命令
+   * - `string`    — review 子命令名（typecheck / lint / format / full / help）
+   */
+  review: string | undefined;
+  /** Review 子命令选项（key-value 对） */
+  reviewOptions: Record<string, string | boolean | number | string[] | undefined>;
 }
 
 const QUALITY_CHECK_SUBCOMMANDS = ["codemap", "uiux", "visual", "all", "help"] as const;
+
+/**
+ * Review 子命令合法值
+ *
+ * 与 packages/cli/src/review/review-cmd.ts 中 ReviewSubcommand 类型对齐。
+ */
+const REVIEW_SUBCOMMANDS = ["typecheck", "lint", "format", "full", "help"] as const;
 
 const EPILOG = [
   "Configuration:",
@@ -99,6 +114,7 @@ const EPILOG = [
   "  /raw             Toggle display mode for viewing or collapsing reasoning content",
   "  /rules           RLIS rule management (list/add/remove/show/path)",
   "  /quality-check   Quality gate: code map / UI-UX audit / visual regression",
+  "  /review          Code review with forced tool verification (typecheck/lint/format/full/help)",
   "  /exit            Quit",
   "  ctrl+d twice     Quit",
 ].join("\n");
@@ -336,6 +352,39 @@ async function configureYargs(argv?: string[]) {
             default: false,
           })
     )
+    // review 子命令：代码审查 CLI 模式（非 TUI 模式）
+    // 用法：deepcode review [subcommand] [options]
+    // 子命令：typecheck / lint / format / full / help（默认 full）
+    // 选项与 packages/cli/src/review/review-cmd.ts 中 parseReviewArgs 完全对齐
+    // 设计说明：
+    //   - [subcommand] 为可选（非 <subcommand>），未提供时默认 "full"
+    //   - 不在 yargs 层做 choices 校验，由 parseReviewArgs 统一处理
+    //     原因：yargs choices 校验失败时退出码为 1，而语义应为 2（参数错误）
+    //     交给 parseReviewArgs 抛 ReviewArgsError，cli.tsx 捕获后 exit(2)
+    .command(
+      "review [subcommand]",
+      "Code review with forced tool verification (typecheck|lint|format|full|help)",
+      (y: Argv) =>
+        y
+          .positional("subcommand", {
+            type: "string",
+            describe: "Review subcommand (default: full)",
+          })
+          .option("quiet", {
+            type: "boolean",
+            describe: "Quiet mode (conclusions only, no details)",
+            default: false,
+          })
+          .option("format", {
+            type: "string",
+            choices: ["markdown", "text", "json"] as const,
+            describe: "Output format (default markdown)",
+          })
+          .option("project-root", {
+            type: "string",
+            describe: "Project root directory (default process.cwd())",
+          })
+    )
     .example("deepcode", "Launch the interactive TUI in the current directory")
     .example("deepcode -p <prompt>", "Launch with a pre-filled prompt")
     .example("deepcode -r, --resume [sessionId]", "Resume a session or show session picker")
@@ -381,7 +430,9 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
         ? "rules"
         : rawArgv.length >= 2 && rawArgv[0] === "quality-check" && rawArgv[1] === "help"
           ? "quality-check"
-          : undefined;
+          : rawArgv.length >= 2 && rawArgv[0] === "review" && rawArgv[1] === "help"
+            ? "review"
+            : undefined;
 
   const resumeRaw = parsed.resume as string | undefined;
   let resume: ParsedCliArgs["resume"];
@@ -405,6 +456,8 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
   const rulesInvoked = positionalArgs[0] === "rules" || helpAsSecondPositional === "rules";
   // quality-check 命令检测：positional[0] === "quality-check" 或通过 help fallback
   const qualityCheckInvoked = positionalArgs[0] === "quality-check" || helpAsSecondPositional === "quality-check";
+  // review 命令检测：positional[0] === "review" 或通过 help fallback
+  const reviewInvoked = positionalArgs[0] === "review" || helpAsSecondPositional === "review";
   // v1.6 P0-2 修正（TC-TEAM-12）：yargs 18 把 "help" 当成内置 help 命令，
   // 导致 `parsed["subcommand"]` 不被设置。此时从 `helpAsSecondPositional` 提取 "help"。
   // 原因：yargs 18 的内置 help 机制会拦截 "help" 关键字，不将其作为 positional 传递
@@ -421,6 +474,16 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     (qualityCheckInvoked ? (parsed["subcommand"] as string | undefined) : undefined) ??
     (helpAsSecondPositional === "quality-check" ? "help" : undefined) ??
     (parsed["quality-check"] as string | undefined);
+  // review 子命令提取：与 quality-check 类似的三段式 fallback
+  // 修复（2026-07-27 RV-02/RV-08）：
+  //   - 之前第三段 fallback 为 `parsed["review"]`，但 yargs 在 `[subcommand]` 可选模式下
+  //     会把命令名 "review" 赋给 `parsed["review"]`，导致 `reviewRaw = "review"`（非合法子命令）
+  //   - 现在改为：review 被调用但未提供子命令时，默认为 "full"
+  //     与 parseReviewArgs([], cwd) 的默认行为一致
+  const reviewRaw =
+    (reviewInvoked ? (parsed["subcommand"] as string | undefined) : undefined) ??
+    (helpAsSecondPositional === "review" ? "help" : undefined) ??
+    (reviewInvoked ? "full" : undefined);
   // quality-check 的第二个位置参数 target（codemap 子命令可选）
   // yargs 18 中 positional "target" 会出现在 parsed["target"]
   const qualityCheckTarget = qualityCheckInvoked ? (parsed["target"] as string | undefined) : undefined;
@@ -501,6 +564,19 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     }
   }
 
+  // 提取 review 子命令的选项
+  // 选项清单与 packages/cli/src/review/review-cmd.ts 中 parseReviewArgs 完全对齐
+  const reviewOptions: Record<string, string | boolean | number | string[] | undefined> = {};
+  if (reviewRaw) {
+    const optionKeys = ["quiet", "format", "project-root"];
+    for (const key of optionKeys) {
+      const v = parsed[key];
+      if (v !== undefined) {
+        reviewOptions[key] = v as string | boolean | number | string[];
+      }
+    }
+  }
+
   return {
     prompt: parsed.prompt as string | undefined,
     resume,
@@ -513,5 +589,7 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     qualityCheck: qualityCheckRaw,
     qualityCheckOptions,
     qualityCheckPositional: qualityCheckTarget,
+    review: reviewRaw,
+    reviewOptions,
   };
 }

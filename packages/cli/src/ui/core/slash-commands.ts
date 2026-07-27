@@ -20,6 +20,8 @@ import type { SkillInfo } from "@vegamo/deepcode-core";
  *   - resume: 恢复暂停的任务（复用现有 "resume" kind，通过参数区分场景）
  * DeepCodeX Quality Gate 扩展：新增 quality-check 命令
  *   - quality-check: 质量门禁（codemap / uiux / visual / all）
+ * DeepCodeX Review 扩展：新增 review 命令
+ *   - review: 代码审查（typecheck / lint / format / full / help）— 工具验证优先
  */
 export type SlashCommandKind =
   | "skill"
@@ -51,7 +53,9 @@ export type SlashCommandKind =
   | "cancel"
   | "pause"
   // ===== DeepCodeX Quality Gate 命令 =====
-  | "quality-check";
+  | "quality-check"
+  // ===== DeepCodeX Review 命令（工具验证优先） =====
+  | "review";
 
 export type SlashCommandItem = {
   kind: SlashCommandKind;
@@ -198,6 +202,17 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
     label: "/quality-check",
     args: ["<subcommand>", "[options]"],
     description: "Quality gate: code map / UI-UX audit / visual regression (subcommands: codemap|uiux|visual|all|help)",
+  },
+  // ===== DeepCodeX Review 代码审查命令（工具验证优先） =====
+  // 子命令：typecheck / lint / format / full / help
+  // 关联事件：docs/code-review-process-incident.md（原始 review 报告失实事件）
+  // 设计文档：docs/dev/code-review-builtin-cmd-design.md
+  {
+    kind: "review",
+    name: "review",
+    label: "/review",
+    args: ["<subcommand>", "[options]"],
+    description: "Code review with forced tool verification (subcommands: typecheck|lint|format|full|help)",
   },
   // ===== ADR-DI-001 动态注入与后台子 Agent 命令 =====
   // 设计依据：ADR-DI-001 §7.4.2 SlashCommandKind 扩展

@@ -80,6 +80,24 @@ test("getSystemPrompt includes Bash background guidance", () => {
   assert.equal(prompt.includes("stop background tasks that has not reported a completed state"), true);
 });
 
+test("getSystemPrompt includes tool-verification-first constraints for reports (A1)", () => {
+  // A1 改进（2026-07-27）：System Prompt 强化，要求报告类内容必须工具验证
+  // 关联事件：docs/code-review-process-incident.md
+  const prompt = getSystemPrompt("/tmp/project");
+  // 必须包含工具验证优先约束段
+  assert.equal(prompt.includes("报告类内容的工具验证优先约束"), true);
+  // 必须包含三档置信度标注
+  assert.equal(prompt.includes("[已验证]"), true);
+  assert.equal(prompt.includes("[未验证]"), true);
+  assert.equal(prompt.includes("[不确定]"), true);
+  // 必须包含具体命令示例（typecheck / eslint / prettier）
+  assert.equal(prompt.includes("npm run typecheck"), true);
+  assert.equal(prompt.includes("npx eslint"), true);
+  assert.equal(prompt.includes("npx prettier --check"), true);
+  // 必须包含禁止编造约束
+  assert.equal(prompt.includes("禁止编造"), true);
+});
+
 test("getSystemPrompt does not include runtime context", () => {
   const prompt = getSystemPrompt("/tmp/project");
   assert.equal(prompt.includes("# Local Workspace Environment"), false);

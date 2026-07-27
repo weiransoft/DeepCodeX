@@ -500,6 +500,18 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
         ]);
         return;
       }
+      if (submission.command === "review") {
+        // /review <subcommand> [args] —— 解析并调用 executeReviewCommand
+        // 工具验证优先：所有数字必须有真实命令输出作为证据
+        // 子命令：typecheck / lint / format / full / help
+        const reviewResult = await handleReviewSlashCommand(submission.text);
+        setMessages((prev) => [
+          ...prev,
+          buildSyntheticUserMessage(submission.text, submission.imageUrls.length),
+          buildSyntheticAssistantMessage(reviewResult),
+        ]);
+        return;
+      }
       // ===== ADR-DI-001 动态注入与后台子 Agent 命令处理 =====
       // 所有命令通过 InterruptibleSession 接口调用 SessionManager 的扩展方法。
       // 未注入对应组件时方法不存在，给出明确的 "功能未启用" 错误提示。
@@ -1619,6 +1631,78 @@ async function handleQualitySlashCommand(text: string): Promise<string> {
 }
 
 /**
+ * /review 命令包装函数
+ *
+ * 在 TUI 模式下承接 App.tsx 的 submission.command === "review" 分支，
+ * 解析用户输入并调用 executeReviewCommand 执行。
+ *
+ * 与 handleQualitySlashCommand 的区别：
+ *   - /review 强制工具验证优先，所有数字必须有真实命令输出作为证据
+ *   - 直接使用 dynamic import 加载 review-cmd 模块，避免启动开销
+ *
+ * 流程：
+ *   1. 动态导入 executeReviewCommand + parseReviewArgs
+ *   2. 去除前导 "/" 并 split tokens
+ *   3. 调用 parseReviewArgs 解析参数（捕获 ReviewArgsError 返回 exitCode=2）
+ *   4. 调用 executeReviewCommand（printToTerminal=false，避免破坏 Ink 渲染）
+ *   5. 合并 stdout + stderr + 退出码作为合成消息返回
+ *
+ * @param text 用户输入的完整文本（如 "/review typecheck" 或 "/review full --quiet"）
+ * @returns 合成消息文本（包含报告内容 + 退出码）
+ */
+async function handleReviewSlashCommand(text: string): Promise<string> {
+  // 动态导入避免启动开销，且避免与 CLI 入口的 review 命令处理耦合
+  const { executeReviewCommand, parseReviewArgs, ReviewArgsError, formatReviewHelp } =
+    await import("../../review/review-cmd.js");
+  const trimmed = text.trim();
+
+  // 去除前导 "/" 得到 "review typecheck" 等
+  const body = trimmed.startsWith("/") ? trimmed.slice(1) : trimmed;
+  const tokens = body.split(/\s+/).filter(Boolean);
+
+  if (tokens.length === 0 || tokens[0] !== "review") {
+    return `无效的 /review 命令: ${text}`;
+  }
+
+  // 去除 "review" 前缀，剩余 tokens 传给 parseReviewArgs
+  const remainingTokens = tokens.slice(1);
+
+  // help 子命令直接返回帮助文本（不走 parseReviewArgs，避免无子命令时默认 full）
+  if (remainingTokens[0] === "help") {
+    return formatReviewHelp();
+  }
+
+  // 解析参数（捕获 ReviewArgsError 返回参数错误提示）
+  let args;
+  try {
+    args = parseReviewArgs(remainingTokens);
+  } catch (error) {
+    if (error instanceof ReviewArgsError) {
+      return `✖ 参数错误：${error.message}\n\n使用 /review help 查看帮助`;
+    }
+    throw error;
+  }
+
+  // 执行（TUI 模式不直接打印，由调用方作为合成消息展示）
+  const result = await executeReviewCommand(args, undefined, false);
+
+  // 合并输出，附带退出码作为前缀（失败时显式标注）
+  const parts: string[] = [];
+  if (result.stdout) {
+    parts.push(result.stdout);
+  }
+  if (result.stderr) {
+    parts.push(result.stderr);
+  }
+  if (result.exitCode !== 0 && parts.length === 0) {
+    parts.push(`✖ /review 命令失败（退出码 ${result.exitCode}）`);
+  } else if (result.exitCode !== 0) {
+    parts.push(`\n[退出码: ${result.exitCode}]`);
+  }
+  return parts.join("\n").trim() || "(无输出)";
+}
+
+/**
  * 从命令字符串解析 slash 命令种类
  *
  * 用于 handleQuestionAnswers 自动注入 suggestedCommand 时，识别命令种类。
@@ -1693,6 +1777,8 @@ function parseSlashCommandKind(commandText: string): PromptSubmission["command"]
       return "pause";
     case "quality-check":
       return "quality-check";
+    case "review":
+      return "review";
     case "resume":
       return "resume";
     case "continue":

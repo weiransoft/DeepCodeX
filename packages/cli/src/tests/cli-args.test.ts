@@ -209,3 +209,87 @@ test("parseArguments exits on invalid --resume session ID", async () => {
     assert.ok(exitSpy.calls.length >= 1);
   });
 });
+
+// ── parseArguments: review 子命令解析（架构师审查 L4 修复，2026-07-27） ────────
+// 覆盖 review 命令的参数解析路径，包括子命令提取、默认值、选项解析
+
+test("parseArguments 解析 review typecheck 子命令", async () => {
+  const r = await parseArguments(["review", "typecheck"]);
+  assert.ok(!("message" in r));
+  assert.equal(r.review, "typecheck");
+});
+
+test("parseArguments 解析 review lint 子命令", async () => {
+  const r = await parseArguments(["review", "lint"]);
+  assert.ok(!("message" in r));
+  assert.equal(r.review, "lint");
+});
+
+test("parseArguments 解析 review format 子命令", async () => {
+  const r = await parseArguments(["review", "format"]);
+  assert.ok(!("message" in r));
+  assert.equal(r.review, "format");
+});
+
+test("parseArguments 解析 review full 子命令", async () => {
+  const r = await parseArguments(["review", "full"]);
+  assert.ok(!("message" in r));
+  assert.equal(r.review, "full");
+});
+
+test("parseArguments 解析 review help 子命令", async () => {
+  const r = await parseArguments(["review", "help"]);
+  assert.ok(!("message" in r));
+  assert.equal(r.review, "help");
+});
+
+test("parseArguments review 无子命令时默认为 full（RV-02 修复）", async () => {
+  // 验证 RV-02 修复：review 不带子命令时应默认为 "full" 而非报错
+  const r = await parseArguments(["review"]);
+  assert.ok(!("message" in r));
+  assert.equal(r.review, "full");
+});
+
+test("parseArguments review --quiet 选项解析", async () => {
+  const r = await parseArguments(["review", "typecheck", "--quiet"]);
+  assert.ok(!("message" in r));
+  assert.equal(r.review, "typecheck");
+  assert.equal(r.reviewOptions.quiet, true);
+});
+
+test("parseArguments review --format json 选项解析", async () => {
+  const r = await parseArguments(["review", "full", "--format", "json"]);
+  assert.ok(!("message" in r));
+  assert.equal(r.review, "full");
+  assert.equal(r.reviewOptions.format, "json");
+});
+
+test("parseArguments review --project-root 选项解析", async () => {
+  const r = await parseArguments(["review", "typecheck", "--project-root", "/custom/path"]);
+  assert.ok(!("message" in r));
+  assert.equal(r.review, "typecheck");
+  assert.equal(r.reviewOptions["project-root"], "/custom/path");
+});
+
+test("parseArguments review 组合选项 --quiet --format text", async () => {
+  const r = await parseArguments(["review", "full", "--quiet", "--format", "text"]);
+  assert.ok(!("message" in r));
+  assert.equal(r.review, "full");
+  assert.equal(r.reviewOptions.quiet, true);
+  assert.equal(r.reviewOptions.format, "text");
+});
+
+test("parseArguments review 无子命令时带 --quiet 默认 full", async () => {
+  // 验证 RV-02 修复：review 不带子命令但带选项时应默认为 "full"
+  const r = await parseArguments(["review", "--quiet"]);
+  assert.ok(!("message" in r));
+  assert.equal(r.review, "full");
+  assert.equal(r.reviewOptions.quiet, true);
+});
+
+test("parseArguments 未调用 review 时 parsed.review 为 undefined", async () => {
+  // 验证非 review 命令不会误设置 review 字段
+  const r = await parseArguments(["--version"]);
+  assert.ok(!("message" in r));
+  assert.equal(r.review, undefined);
+});

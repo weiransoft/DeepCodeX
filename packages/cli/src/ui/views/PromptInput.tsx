@@ -90,7 +90,9 @@ export type PromptSubmission = {
     | "cancel"
     | "pause"
     // ===== DeepCodeX Quality Gate 命令 =====
-    | "quality-check";
+    | "quality-check"
+    // ===== DeepCodeX Review 命令（工具验证优先） =====
+    | "review";
 };
 
 export type PromptDraft = {
@@ -751,6 +753,13 @@ export const PromptInput = React.memo(function PromptInput({
     if (item.kind === "rules") {
       // /rules <subcommand> [args] —— 透传完整文本，由 App 层调用 executeRulesCommand
       onSubmit({ text: "/rules", imageUrls: [], command: "rules" });
+      resetPromptInput();
+      return;
+    }
+    if (item.kind === "review") {
+      // /review <subcommand> [args] —— 透传完整文本，由 App 层调用 executeReviewCommand
+      // 工具验证优先：所有数字必须有真实命令输出作为证据
+      onSubmit({ text: buffer.text.trim(), imageUrls: [], command: "review" });
       resetPromptInput();
       return;
     }
