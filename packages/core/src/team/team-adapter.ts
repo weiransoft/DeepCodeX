@@ -22,6 +22,14 @@ import { createOpenAIClient, type OpenAIClientHandle, isOpenAIClientHandle } fro
 // 即使 settings.json 设置 thinkingEnabled=true，API 端也不会启用 thinking 模式。
 // 通过 buildThinkingRequestOptions 与 session.ts 主对话流程保持一致的请求语义。
 import { buildThinkingRequestOptions } from "../common/openai-thinking.js";
+// v2.1.2 修复：引入日志函数，使 executeDispatch 路径也能记录 debug.log 和 error.log
+// 之前只有 SessionManager.createChatCompletionStream 路径记录日志，team 模式 LLM 调用无日志
+import { logOpenAIChatCompletionDebug } from "../common/debug-logger.js";
+import { logApiError } from "../common/error-logger.js";
+// v2.1.2 修复（架构师审查 B-01）：使用 getLlmErrorDetails 而非 normalizeDebugError
+// 原因：ApiErrorLogEntry.error 字段类型是 LlmErrorDetails（含 status/code/type 等丰富字段），
+// 而 normalizeDebugError 只返回 { name, message, stack }，类型不匹配会导致编译失败
+import { getLlmErrorDetails } from "../common/llm-error.js";
 import type { ReasoningEffort } from "../settings.js";
 import { matchRoles, matchRolesSync, type MatchOptions } from "./role-matcher.js";
 import { ROLE_MAP, getRole, ROLE_REGISTRY } from "./role-registry.js";
@@ -643,6 +651,10 @@ export async function executeDispatch(
         // v1.6 P1-1：传递 reasoningEffort，让 buildThinkingRequestOptions 在 thinkingEnabled=true 时
         // 能正确构造 extra_body.reasoning_effort 参数（与 session.ts 主对话流程对齐）
         reasoningEffort: created.reasoningEffort,
+        // v2.1.2 修复（架构师审查 B-02）：传递 debugLogEnabled
+        // 使 team dispatch / team full-lifecycle 模式也能记录 debug.log 和 error.log
+        // 之前遗漏此字段导致 handle.debugLogEnabled 永远 undefined，日志记录条件不满足
+        debugLogEnabled: created.debugLogEnabled,
       };
     }
 
@@ -731,12 +743,18 @@ export async function executeDispatch(
      * @param handle 非空的 OpenAIClientHandle（调用方负责 null 检查）
      * @param messages 消息数组（system + user + 可选 assistant + 可选续写 user）
      * @param timeoutMs 超时毫秒数（undefined 表示不超时）
+     * @param callLabel 调用标签（M-03：区分首次调用 "first" 和续写调用 "continue-N"）
+     * @param requestId 请求 ID（M-02：与 SessionManager 对齐，关联 debug.log 和 error.log）
      * @returns 解析后的响应：content（content || reasoning_content fallback）+ finishReason + usage
      */
     async function callLlmOnce(
       handle: OpenAIClientHandle,
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
-      timeoutMs?: number
+      timeoutMs: number | undefined,
+      // v2.1.2 新增（M-03）：callLabel 区分首次调用和续写调用，用于日志定位
+      callLabel: string,
+      // v2.1.2 新增（M-02）：requestId 关联同一请求的 debug.log 和 error.log 条目
+      requestId: string
     ): Promise<{
       content: string;
       finishReason: string | null;
@@ -772,6 +790,11 @@ export async function executeDispatch(
         }, timeoutMs);
       }
 
+      // v2.1.2 新增：日志记录上下文（与 SessionManager 路径格式对齐）
+      const startTime = Date.now();
+      const location = `executeDispatch.callLlmOnce.${callLabel}`;
+      const debugLogEnabled = handle.debugLogEnabled === true;
+
       try {
         const response = await openaiClient.chat.completions.create(requestBody, requestOptions);
 
@@ -790,7 +813,47 @@ export async function executeDispatch(
           totalTokens: response?.usage?.total_tokens ?? 0,
         };
 
+        // v2.1.2 新增：记录 debug.log（仅当 debugLogEnabled=true）
+        // 失败安全：日志写入异常不阻塞主流程（与 SessionManager.logChatCompletionDebug 一致）
+        if (debugLogEnabled) {
+          try {
+            logOpenAIChatCompletionDebug({
+              timestamp: new Date().toISOString(),
+              location,
+              requestId,
+              model: handle.model,
+              baseURL: handle.baseURL,
+              durationMs: Date.now() - startTime,
+              request: requestBody as Record<string, unknown>,
+              response: response as unknown,
+            });
+          } catch {
+            // 日志记录失败不阻塞 LLM 调用主流程
+          }
+        }
+
         return { content, finishReason, usage };
+      } catch (error) {
+        // v2.1.2 新增：记录 error.log（仅当 debugLogEnabled=true）
+        // 架构师审查 B-01：使用 getLlmErrorDetails 而非 normalizeDebugError
+        // 原因：ApiErrorLogEntry.error 字段类型是 LlmErrorDetails（含 status/code/type 等字段）
+        // 失败安全：日志写入异常不阻塞错误传播
+        if (debugLogEnabled) {
+          try {
+            logApiError({
+              timestamp: new Date().toISOString(),
+              location,
+              requestId,
+              model: handle.model,
+              baseURL: handle.baseURL,
+              error: getLlmErrorDetails(error),
+              request: requestBody as Record<string, unknown>,
+            });
+          } catch {
+            // 日志记录失败不阻塞错误传播
+          }
+        }
+        throw error;
       } finally {
         // 清理超时定时器
         if (timeoutHandle !== null) {
@@ -800,6 +863,10 @@ export async function executeDispatch(
     }
 
     // --- 首次调用 LLM ---
+    // v2.1.2 新增（M-02）：生成 requestId，关联同一请求的 debug.log 和 error.log 条目
+    // 与 SessionManager.createChatCompletionStream 路径格式对齐（session.ts:1037 等）
+    const requestId = crypto.randomUUID();
+
     onProgress?.("running", `调用 LLM: ${handle.model}...`);
     const firstResult = await callLlmOnce(
       handle,
@@ -807,7 +874,10 @@ export async function executeDispatch(
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-      opts.timeoutMs
+      opts.timeoutMs,
+      // v2.1.2 新增（M-03）：callLabel="first" 标识首次调用，用于日志定位
+      "first",
+      requestId
     );
 
     // 空内容 → failed
@@ -905,7 +975,10 @@ export async function executeDispatch(
             { role: "assistant", content: fullContent },
             { role: "user", content: CONTINUE_PROMPT },
           ],
-          opts.timeoutMs
+          opts.timeoutMs,
+          // v2.1.2 新增（M-03）：callLabel="continue-N" 标识第 N 次续写，用于日志定位
+          `continue-${continueCount}`,
+          requestId
         );
 
         // 先累加 token 用量（多角色审查 TEST-02 修复）：

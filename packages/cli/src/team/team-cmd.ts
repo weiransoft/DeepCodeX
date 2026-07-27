@@ -399,6 +399,9 @@ async function executeAutonomousCommand(args: TeamCommandArgs, startTime: number
       thinkingEnabled: created.thinkingEnabled,
       // v1.6 P1-1：传递 reasoningEffort（与 team-adapter.ts executeDispatch 保持一致）
       reasoningEffort: created.reasoningEffort,
+      // v2.1.2 修复：传递 debugLogEnabled，使 executeDispatch 路径能记录 debug.log 和 error.log
+      // 之前遗漏此字段导致 autonomous 模式 LLM 调用无日志可观测性
+      debugLogEnabled: created.debugLogEnabled,
     };
   }
   writeStdoutLine(`模型: ${clientHandle.model}\n`);
