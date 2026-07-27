@@ -157,6 +157,11 @@ function getMachineId(): string | undefined {
  *   - 之前 executeDispatch 构造 LLM 请求体时未传 reasoning_effort 参数
  *   - 通过 reasoningEffort 字段将 settings.reasoningEffort 传递给 buildThinkingRequestOptions
  *   - 与 session.ts:3476 主对话流程的 thinkingOptions 构造保持一致
+ *
+ * v2.1.2 扩展：新增 debugLogEnabled 可选字段
+ *   - 用于 executeDispatch 等非 SessionManager 路径记录 debug.log 和 error.log
+ *   - 可选字段，保持向后兼容（现有调用方无需修改）
+ *   - 类型守卫 isOpenAIClientHandle 不强制校验此字段
  */
 export interface OpenAIClientHandle {
   /** OpenAI SDK 客户端实例（unknown 类型，避免类型耦合） */
@@ -171,6 +176,18 @@ export interface OpenAIClientHandle {
   thinkingEnabled: boolean;
   /** 推理强度（可选，thinkingEnabled=true 时生效，默认 "high"） */
   reasoningEffort?: "high" | "max";
+  /**
+   * 是否启用调试日志（可选）
+   *
+   * 用于 executeDispatch 等非 SessionManager 路径：
+   * - true：调用 logOpenAIChatCompletionDebug 记录请求/响应到 debug.log
+   * - true：调用 logApiError 记录错误到 error.log
+   * - false / undefined：不记录日志（默认，保持向后兼容）
+   *
+   * 字段来源：createOpenAIClient 返回值的 created.debugLogEnabled
+   * 传递链：createOpenAIClient → executeAutonomousCommand/executeDispatch → callLlmOnce
+   */
+  debugLogEnabled?: boolean;
 }
 
 /**
