@@ -132,6 +132,50 @@ async function main(): Promise<void> {
     process.exit(result.exitCode);
   }
 
+  // review 子命令路由：代码审查 CLI 模式（非 TUI 模式）
+  // 用法：deepcode review <subcommand> [options]
+  // 复用 packages/cli/src/review/review-cmd.ts 中 executeReviewCommand 函数
+  // printToTerminal=true 时直接输出到 stdout/stderr，退出码通过 process.exit 传递
+  if (parsed.review) {
+    const { executeReviewCommand, parseReviewArgs, ReviewArgsError, formatReviewHelp } =
+      await import("./review/review-cmd.js");
+    if (parsed.review === "help") {
+      process.stdout.write(formatReviewHelp());
+      process.exit(0);
+    }
+    const opts = parsed.reviewOptions;
+    // 构造 tokens 数组，复用 parseReviewArgs 解析逻辑（与 TUI 模式保持一致）
+    // tokens 结构：[subcommand, --opt, val, ...]
+    const tokens: string[] = [parsed.review];
+    for (const [key, value] of Object.entries(opts)) {
+      if (value === undefined || value === null) continue;
+      // boolean 选项只 push key（如 --quiet）
+      if (typeof value === "boolean") {
+        if (value) tokens.push(`--${key}`);
+      } else {
+        // string / number 选项：push key + value
+        tokens.push(`--${key}`, String(value));
+      }
+    }
+    // parseReviewArgs 接受 tokens 数组（已去除 "review" 子命令前缀的 yargs positional）
+    // 注意：tokens[0] 仍是 review 子命令名（typecheck/lint/format/full），
+    //       parseReviewArgs 期望第一个 token 是子命令（或 --option）
+    // 修复（2026-07-27）：之前错误使用 tokens.slice(1) 导致子命令被丢弃、永远回退到默认 full
+    let args;
+    try {
+      args = parseReviewArgs(tokens, (opts["project-root"] as string | undefined) ?? process.cwd());
+    } catch (error) {
+      if (error instanceof ReviewArgsError) {
+        process.stderr.write(`✖ 参数错误：${error.message}\n`);
+        process.exit(2);
+      }
+      throw error;
+    }
+    // CLI 模式：printToTerminal=true，直接输出到 stdout/stderr
+    const result = await executeReviewCommand(args, undefined, true);
+    process.exit(result.exitCode);
+  }
+
   // Configure Windows shell AFTER --version/--help handling.
   // On Windows without Git Bash, setShellIfWindows() throws and calls process.exit(1).
   // If called before argument parsing, --help and --version would fail on those machines.

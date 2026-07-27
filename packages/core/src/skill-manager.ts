@@ -76,17 +76,31 @@ export class SkillManager {
    * 2. 项目级 .agents/skills（兼容 .agents 目录结构）
    * 3. 用户级 ~/.deepcode/skills（用户全局技能）
    * 4. 用户级 ~/.agents/skills（兼容 .agents 目录结构）
-   * 5. bundled:（内置技能，随扩展发布）
+   * 5. Trae IDE builtin_skills（~/.trae-cn/builtin_skills，复用平台成熟 skill）
+   * 6. bundled:（内置技能，随扩展发布）
+   *
+   * A3.1 改进（2026-07-27）：新增第 5 个根 ~/.trae-cn/builtin_skills
+   *   - 关联事件：docs/code-review-process-incident.md（原始 review 报告失实事件）
+   *   - 动机：DeepCodeX-cli 作为独立 CLI 工具，需复用 Trae IDE 平台已有的
+   *     TRAE-code-review / TRAE-security-review 等成熟 skill，避免重复造轮子
+   *   - 优先级：低于用户自定义 skill（~/.deepcode/skills、~/.agents/skills），
+   *     但高于 DeepCodeX-cli bundled skills，允许用户覆盖
    *
    * @returns 技能根目录数组，每项包含 root（绝对路径）和 displayRoot（展示路径）
    */
   getSkillScanRoots(): Array<{ root: string; displayRoot: string }> {
     const homeDir = os.homedir();
     return [
+      // 项目级（最高优先级）
       { root: path.join(this.context.projectRoot, ".deepcode", "skills"), displayRoot: "./.deepcode/skills" },
       { root: path.join(this.context.projectRoot, ".agents", "skills"), displayRoot: "./.agents/skills" },
+      // 用户级
       { root: path.join(homeDir, ".deepcode", "skills"), displayRoot: "~/.deepcode/skills" },
       { root: path.join(homeDir, ".agents", "skills"), displayRoot: "~/.agents/skills" },
+      // Trae IDE builtin_skills（用户级，平台提供，复用成熟 skill）
+      // 优先级低于用户自定义 skill，但高于 DeepCodeX-cli bundled skills
+      { root: path.join(homeDir, ".trae-cn", "builtin_skills"), displayRoot: "~/.trae-cn/builtin_skills" },
+      // DeepCodeX-cli 内置 bundled skills（最低优先级，可被用户覆盖）
       { root: this.getBundledSkillsRoot(), displayRoot: "bundled:" },
     ];
   }

@@ -96,6 +96,31 @@ test("resolveSettings defaults telemetryEnabled to true", () => {
   assert.equal(resolved.telemetryEnabled, true);
 });
 
+test("resolveSettings defaults debugLogEnabled to true (A2 改进 2026-07-27)", () => {
+  // A2 改进：默认启用 debugLogEnabled=true，便于追溯 LLM 工具调用历史
+  // 关联事件：docs/code-review-process-incident.md
+  const resolved = resolveSettings(
+    {},
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  assert.equal(resolved.debugLogEnabled, true);
+});
+
+test("resolveSettings allows DEBUG_LOG_ENABLED=false to override default true (A2)", () => {
+  // A2：默认 true，但用户仍可通过 env 显式禁用
+  const resolved = resolveSettings(
+    {
+      env: {
+        DEBUG_LOG_ENABLED: "false",
+      },
+    },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  assert.equal(resolved.debugLogEnabled, false);
+});
+
 test("resolveSettings reads TELEMETRY_ENABLED from env", () => {
   const resolved = resolveSettings(
     { env: { TELEMETRY_ENABLED: "0" } },
