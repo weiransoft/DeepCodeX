@@ -12,9 +12,9 @@
  *   - help                显示帮助
  *
  * 用法（CLI 模式）：
- *   deepcodex quality-check codemap ./packages/quality
- *   deepcodex quality-check uiux --dom-file ./dom.json
- *   deepcodex quality-check visual --baseline ./a.png --current ./b.png
+ *   deepcode quality-check codemap ./packages/quality
+ *   deepcode quality-check uiux --dom-file ./dom.json
+ *   deepcode quality-check visual --baseline ./a.png --current ./b.png
  *
  * 用法（TUI 模式，由 App.tsx 调用）：
  *   /quality-check codemap

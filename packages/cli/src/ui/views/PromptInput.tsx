@@ -92,7 +92,11 @@ export type PromptSubmission = {
     // ===== DeepCodeX Quality Gate 命令 =====
     | "quality-check"
     // ===== DeepCodeX Review 命令（工具验证优先） =====
-    | "review";
+    | "review"
+    // ===== DeepCodeX V2 记忆管理命令 =====
+    | "memory"
+    // ===== DeepCodeX 帮助命令（FIX-06） =====
+    | "help";
 };
 
 export type PromptDraft = {
@@ -760,6 +764,20 @@ export const PromptInput = React.memo(function PromptInput({
       // /review <subcommand> [args] —— 透传完整文本，由 App 层调用 executeReviewCommand
       // 工具验证优先：所有数字必须有真实命令输出作为证据
       onSubmit({ text: buffer.text.trim(), imageUrls: [], command: "review" });
+      resetPromptInput();
+      return;
+    }
+    if (item.kind === "memory") {
+      // /memory <subcommand> [args] —— 透传完整文本，由 App 层调用 handleMemoryCommand
+      // 子命令：list / delete / delete-all / review / export / help
+      // 设计依据：V2 PRD §US-MEM-001（用户可直接管理自己的记忆，命令不发送给 LLM）
+      onSubmit({ text: buffer.text.trim(), imageUrls: [], command: "memory" });
+      resetPromptInput();
+      return;
+    }
+    if (item.kind === "help") {
+      // /help —— 显示全部内置命令清单（FIX-06：与 CLI --help EPILOG 同一数据源）
+      onSubmit({ text: "/help", imageUrls: [], command: "help" });
       resetPromptInput();
       return;
     }

@@ -24,8 +24,13 @@ if (testFiles.length === 0) {
 console.log(`Running ${testFiles.length} test file(s) from ${teamRoot}:`);
 for (const f of testFiles) console.log(`  - ${f}`);
 
-const result = spawnSync(process.execPath, ["--import", "tsx", "--test", ...testFiles], {
-  stdio: "inherit",
-  cwd: teamRoot,
-});
+const result = spawnSync(
+  process.execPath,
+  // 透传 CLI 参数（如 --test-reporter=tap），修复 FIX-03：之前 npm test -- <args> 被静默忽略
+  ["--import", "tsx", "--test", ...process.argv.slice(2), ...testFiles],
+  {
+    stdio: "inherit",
+    cwd: teamRoot,
+  }
+);
 process.exit(result.status ?? 1);

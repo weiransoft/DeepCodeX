@@ -81,6 +81,7 @@ export {
   buildSlashCommands,
   filterSlashCommands,
   findExactSlashCommand,
+  formatBuiltinCommandList,
   formatSlashCommandDescription,
   formatSlashCommandLabel,
   type SlashCommandKind,

@@ -12,12 +12,12 @@
  *   - team full-lifecycle  8 阶段项目全流程（v2.1 P5：含文档对照代码审查 + 循环回退）
  *
  * 用法：
- *   deepcodex team list
- *   deepcodex team match "设计微服务架构"
- *   deepcodex team dispatch --role architect --task "设计用户认证模块"
- *   deepcodex team autonomous --goal "实现 OAuth2 登录" --max-iter 5
- *   deepcodex team full-lifecycle --project "电商网站"
- *   deepcodex team full-lifecycle --project "电商网站" --use-loop --prd-path docs/prd.md
+ *   deepcode team list
+ *   deepcode team match "设计微服务架构"
+ *   deepcode team dispatch --role architect --task "设计用户认证模块"
+ *   deepcode team autonomous --goal "实现 OAuth2 登录" --max-iter 5
+ *   deepcode team full-lifecycle --project "电商网站"
+ *   deepcode team full-lifecycle --project "电商网站" --use-loop --prd-path docs/prd.md
  */
 
 import * as path from "node:path";
@@ -212,6 +212,22 @@ async function executeMatchCommand(args: TeamCommandArgs, startTime: number): Pr
 }
 
 /**
+ * 任务描述解析结果（v2.1.1 E2E + FIX-10 2026-07-29）
+ *
+ * 为了区分以下三种失败场景并返回不同退出码：
+ *   - ok：成功解析到 task 描述
+ *   - missing：未提供 --task 与 --task-file（dispatch 模式属于参数错误，退出码 2；
+ *              autonomous / full-lifecycle 可回退到 --goal）
+ *   - task-file-empty：--task-file 存在但内容为空（属于执行失败，退出码 1）
+ *   - task-file-read-error：--task-file 读取失败（属于执行失败，退出码 1）
+ */
+type ResolveTaskDescriptionResult =
+  | { status: "ok"; task: string }
+  | { status: "missing" }
+  | { status: "task-file-empty" }
+  | { status: "task-file-read-error"; message: string };
+
+/**
  * 解析任务描述（v2.1.1 E2E 新增）
  *
  * 优先级：taskFile > task
@@ -221,15 +237,16 @@ async function executeMatchCommand(args: TeamCommandArgs, startTime: number): Pr
  * @param args Team 命令参数
  * @param subcommandName 子命令名称（用于错误提示）
  * @param allowMissing 是否允许 task 和 taskFile 都缺失
- *   - false（默认，dispatch 模式）：缺失时报错并返回 null
- *   - true（autonomous / full-lifecycle 模式）：缺失时返回 null 不报错（允许用 goal 代替）
- * @returns 解析后的 task 描述，若缺失则返回 null
+ *   - false（默认，dispatch 模式）：缺失时返回 { status: "missing" }
+ *   - true（autonomous / full-lifecycle 模式）：缺失时返回 { status: "missing" }，
+ *     由调用方决定是否回退到 goal
+ * @returns 解析结果，包含成功或失败原因
  */
 function resolveTaskDescription(
   args: TeamCommandArgs,
   subcommandName: string,
   allowMissing: boolean = false
-): string | null {
+): ResolveTaskDescriptionResult {
   // 优先使用 taskFile：从文件读取任务描述
   if (args.taskFile) {
     try {
@@ -237,36 +254,57 @@ function resolveTaskDescription(
       const content = fs.readFileSync(args.taskFile, "utf-8");
       if (content.trim().length === 0) {
         writeStderrLine(`✖ --task-file 指定的文件为空: ${args.taskFile}\n`);
-        return null;
+        return { status: "task-file-empty" };
       }
-      return content;
+      return { status: "ok", task: content };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       writeStderrLine(`✖ 读取 --task-file 失败: ${args.taskFile} - ${message}\n`);
-      return null;
+      return { status: "task-file-read-error", message };
     }
   }
 
   // 回退到 task 字段
   if (args.task) {
-    return args.task;
+    return { status: "ok", task: args.task };
   }
 
   // 允许缺失（autonomous / full-lifecycle 模式可以用 goal）
   if (allowMissing) {
-    return null;
+    return { status: "missing" };
   }
 
   writeStderrLine(`${subcommandName} 子命令需要 --task 或 --task-file 参数\n`);
-  return null;
+  return { status: "missing" };
 }
 
 /** dispatch 子命令 - 分派任务到指定角色 */
 async function executeDispatchCommand(args: TeamCommandArgs, startTime: number): Promise<number> {
   // v2.1.1 E2E：支持 --task-file（避免 shell 转义问题）
-  const taskDescription = resolveTaskDescription(args, "dispatch");
-  if (taskDescription === null) {
+  const resolvedTask = resolveTaskDescription(args, "dispatch");
+  if (resolvedTask.status !== "ok") {
+    // FIX-10（多角色审查 2026-07-29）：参数缺失属于参数错误，退出码 2；
+    // task-file 存在但读取失败/为空属于执行失败，退出码 1。
+    if (resolvedTask.status === "missing") {
+      writeStderrLine("用法: deepcode team dispatch --task <task> [--role <role-id>] [--project-root <path>]\n");
+      writeStderrLine("      deepcode team dispatch --task-file <path> [--role <role-id>] [--project-root <path>]\n");
+      return 2;
+    }
     return 1;
+  }
+  const taskDescription = resolvedTask.task;
+
+  // FIX-04（多角色审查 2026-07-29）：--consensus 互斥校验
+  // 原因：共识评审本质是"同一任务并行派发全部 5 角色"，
+  //       与 --role/--force-role（强制单角色）语义冲突，必须显式拒绝而非静默忽略其一
+  if (args.consensus && (args.role || args.forceRole)) {
+    writeStderrLine("✖ --consensus 与 --role/--force-role 互斥：共识评审固定派发全部 5 角色，不可强制单角色\n");
+    return 1;
+  }
+
+  // FIX-04：--consensus 真实实现——并行派发 5 核心角色评审同一任务并聚合结论
+  if (args.consensus) {
+    return await executeConsensusReview(taskDescription, args, startTime);
   }
 
   // 构造 TaskRequirement
@@ -335,6 +373,219 @@ async function executeDispatchCommand(args: TeamCommandArgs, startTime: number):
     return 0;
   }
   return 1;
+}
+
+// ============================================================================
+// FIX-04 共识评审（--consensus）实现（多角色审查 2026-07-29）
+// ============================================================================
+
+/**
+ * 参与共识评审的 5 核心角色
+ *
+ * 与 RoleId 枚举（types.ts L40）对齐：
+ *   architect / product-manager / solo-coder / test-expert / ui-designer
+ *
+ * 角色视角分工（评审同一任务时产出互补意见）：
+ *   - architect       架构合理性与技术选型
+ *   - product-manager 用户价值与验收标准
+ *   - solo-coder      实现可行性与代码质量
+ *   - test-expert     可测试性与质量风险
+ *   - ui-designer     交互体验与可用性
+ */
+const CONSENSUS_ROLE_IDS: ReadonlyArray<RoleId> = Object.freeze([
+  "architect",
+  "product-manager",
+  "solo-coder",
+  "test-expert",
+  "ui-designer",
+]);
+
+/**
+ * 聚合阶段单角色输出嵌入上限（字符数）
+ *
+ * 原因：聚合（synthesis）任务需把 5 份角色评审意见嵌入同一 prompt，
+ *       若无上限，超长输出会导致聚合 LLM 调用上下文溢出。
+ * 取值依据：5 角色 × 4000 字符 ≈ 20K 字符（约 10K token），
+ *           加上聚合指令本身，仍在主流模型上下文窗口安全范围内。
+ * 截断策略：保留开头（角色结论通常前置），追加显式截断标记，避免静默丢信息。
+ */
+const CONSENSUS_SYNTHESIS_OUTPUT_CAP = 4000;
+
+/**
+ * 共识评审整体状态
+ *
+ * - succeeded：全部 5 角色评审成功，且聚合结论生成成功
+ * - partial：  部分角色评审成功（聚合结论基于成功角色产出）
+ * - skipped：  全部角色因环境原因（缺 API Key）跳过，未产出真实评审
+ * - failed：   全部角色评审失败
+ */
+type ConsensusStatus = "succeeded" | "partial" | "skipped" | "failed";
+
+/**
+ * 截断单角色输出用于聚合嵌入
+ *
+ * @param output 角色评审原始输出
+ * @returns 截断后的文本（超限时追加显式标记）
+ */
+function capRoleOutputForSynthesis(output: string): string {
+  if (output.length <= CONSENSUS_SYNTHESIS_OUTPUT_CAP) {
+    return output;
+  }
+  return `${output.slice(0, CONSENSUS_SYNTHESIS_OUTPUT_CAP)}\n...[输出过长已截断，原文 ${output.length} 字符]`;
+}
+
+/**
+ * 执行 5 角色共识评审
+ *
+ * 流程（真实实现，无 mock/占位）：
+ *   1. 并行派发：同一任务以 forceRole 方式派发全部 5 核心角色（Promise.all 并行）
+ *   2. 状态统计：汇总 succeeded/failed/skipped 计数，判定 consensusStatus
+ *   3. 聚合结论：存在成功角色产出时，将各角色意见嵌入聚合任务，
+ *      再次通过 executeDispatch（forceRole=architect）调用 LLM 生成
+ *      「共识点 / 分歧点 / 最终建议」三段式结论；
+ *      全部 skipped（无 API Key）时跳过聚合调用并显式标注"未聚合"
+ *   4. 结构化输出：打印 ConsensusResult 报告（含各角色意见原文 + 聚合结论）
+ *
+ * 退出码语义（与 executeDispatchCommand 单角色模式一致）：
+ *   - succeeded / partial / skipped → 0（ skipped 为环境原因，非代码错误）
+ *   - failed → 1
+ *
+ * @param taskDescription 任务描述文本
+ * @param args Team 子命令参数（透传 projectRoot / injectedClient）
+ * @param startTime 命令开始时间（用于耗时统计）
+ * @returns 退出码
+ */
+async function executeConsensusReview(
+  taskDescription: string,
+  args: TeamCommandArgs,
+  startTime: number
+): Promise<number> {
+  writeStdoutLine(`\n📋 任务: ${taskDescription}\n`);
+  writeStdoutLine(`🤝 模式: 5 角色共识评审（并行派发 + LLM 聚合）\n\n`);
+
+  // ==========================================================================
+  // 步骤 1：并行派发 5 角色评审
+  // ==========================================================================
+  // 每个角色独立 executeDispatch（forceRole 指定），复用现有 LLM 调用链
+  // （含 debug 日志、续写、错误处理），不引入新的调用路径
+  const reviewTask: TaskRequirement = buildTask({
+    title: `【共识评审】${taskDescription}`,
+    description: `请从你角色的专业视角评审以下任务，输出你的评审意见（优点、风险、建议）：\n\n` + taskDescription,
+  });
+
+  const baseOptions: Partial<DispatchOptions> = {
+    projectRoot: args.projectRoot ?? process.cwd(),
+    ...(args.injectedClient ? { injectedClient: args.injectedClient } : {}),
+  };
+
+  const roleResults: Array<{ roleId: RoleId; result: DispatchResult }> = await Promise.all(
+    CONSENSUS_ROLE_IDS.map(async (roleId) => {
+      const result = await executeDispatch(reviewTask, {
+        ...baseOptions,
+        forceRole: { roleId, reason: "共识评审（--consensus）" },
+      });
+      return { roleId, result };
+    })
+  );
+
+  // ==========================================================================
+  // 步骤 2：状态统计与整体状态判定
+  // ==========================================================================
+  const succeededCount = roleResults.filter((r) => r.result.status === "succeeded").length;
+  const failedCount = roleResults.filter((r) => r.result.status === "failed").length;
+  const skippedCount = roleResults.filter((r) => r.result.status === "skipped").length;
+
+  let consensusStatus: ConsensusStatus;
+  if (succeededCount === CONSENSUS_ROLE_IDS.length) {
+    consensusStatus = "succeeded";
+  } else if (skippedCount === CONSENSUS_ROLE_IDS.length) {
+    consensusStatus = "skipped";
+  } else if (failedCount === CONSENSUS_ROLE_IDS.length) {
+    consensusStatus = "failed";
+  } else {
+    consensusStatus = "partial";
+  }
+
+  // ==========================================================================
+  // 步骤 3：聚合结论（LLM synthesis，复用 executeDispatch 调用链）
+  // ==========================================================================
+  // 仅当存在成功角色产出时才发起聚合调用；
+  // 全部 skipped（无 API Key）时聚合调用必然同样 skipped，直接显式标注"未聚合"，
+  // 避免无意义的环境报错
+  let synthesisOutput: string | null = null;
+  let synthesisNote: string | null = null;
+  const successfulReviews = roleResults.filter((r) => r.result.status === "succeeded" && r.result.output);
+
+  if (successfulReviews.length > 0) {
+    // 构造聚合任务：嵌入各成功角色的评审意见（超限截断），要求三段式结论
+    const embeddedReviews = successfulReviews
+      .map(({ roleId, result }) => `### ${roleId} 的评审意见\n${capRoleOutputForSynthesis(result.output ?? "")}`)
+      .join("\n\n");
+    const synthesisTask: TaskRequirement = buildTask({
+      title: `【共识聚合】${taskDescription}`,
+      description:
+        `以下是 ${successfulReviews.length} 个角色对同一任务的评审意见。\n` +
+        `请聚合输出以下三段式结论（使用中文，每段以对应标题开头）：\n` +
+        `1. 共识点：各角色一致认可的观点\n` +
+        `2. 分歧点：角色间存在冲突或不同侧重的观点\n` +
+        `3. 最终建议：综合权衡后的可执行建议\n\n` +
+        `原始任务：${taskDescription}\n\n${embeddedReviews}`,
+    });
+
+    const synthesisResult = await executeDispatch(synthesisTask, {
+      ...baseOptions,
+      forceRole: { roleId: "architect", reason: "共识评审聚合（--consensus synthesis）" },
+    });
+
+    if (synthesisResult.status === "succeeded" && synthesisResult.output) {
+      synthesisOutput = synthesisResult.output;
+    } else if (synthesisResult.status === "skipped") {
+      synthesisNote = "聚合阶段因环境原因跳过（缺 API Key），未生成聚合结论";
+    } else {
+      synthesisNote = `聚合阶段失败：${synthesisResult.error ?? "未知错误"}，请直接参考各角色评审意见`;
+    }
+  } else {
+    synthesisNote = "无成功角色产出，未执行聚合";
+  }
+
+  // ==========================================================================
+  // 步骤 4：结构化输出 ConsensusResult 报告
+  // ==========================================================================
+  // 输出含英文关键字（ConsensusResult / consensusStatus / roles / succeeded），
+  // 便于 E2E 测试通过 grep 断言共识产物结构（对齐审查裁决：TA-06 改断言共识产物结构）
+  writeStdoutLine(`\n━━━ 共识评审结果（ConsensusResult）━━━\n`);
+  writeStdoutLine(`consensusStatus: ${consensusStatus}\n`);
+  writeStdoutLine(`roles: ${CONSENSUS_ROLE_IDS.length}\n`);
+  writeStdoutLine(`succeeded: ${succeededCount}\n`);
+  writeStdoutLine(`failed: ${failedCount}\n`);
+  writeStdoutLine(`skipped: ${skippedCount}\n`);
+
+  writeStdoutLine(`\n【各角色评审意见】\n`);
+  for (const { roleId, result } of roleResults) {
+    writeStdoutLine(`\n--- ${roleId} (${result.status}) ---\n`);
+    if (result.output) {
+      writeStdoutLine(`${result.output}\n`);
+    }
+    if (result.error) {
+      writeStderrLine(`错误: ${result.error}\n`);
+    }
+    if (!result.output && !result.error) {
+      writeStdoutLine(`(无输出，status=${result.status})\n`);
+    }
+  }
+
+  writeStdoutLine(`\n━━━ 聚合结论 ━━━\n`);
+  if (synthesisOutput) {
+    writeStdoutLine(`${synthesisOutput}\n`);
+  } else {
+    writeStdoutLine(`（未聚合：${synthesisNote ?? "未知原因"}）\n`);
+  }
+
+  const duration = Date.now() - startTime;
+  writeStdoutLine(`\n⏱  耗时: ${duration}ms\n`);
+
+  // 退出码语义：failed（全部失败）→ 1；其余（含 partial/skipped）→ 0
+  return consensusStatus === "failed" ? 1 : 0;
 }
 
 /**
@@ -421,13 +672,19 @@ async function executeAutonomousCommand(args: TeamCommandArgs, startTime: number
   // allowMissing=true：autonomous 模式允许 task 缺失（可用 goal 代替）
   const resolvedTask = resolveTaskDescription(args, "autonomous", true);
 
+  // FIX-10（多角色审查 2026-07-29）：显式提供 taskFile 但读取失败/为空时，
+  // 不应静默回退到 goal，应作为执行失败返回退出码 1。
+  if (resolvedTask.status === "task-file-empty" || resolvedTask.status === "task-file-read-error") {
+    return 1;
+  }
+
   if (args.resumeRun) {
     writeStdoutLine(`\n🔍 查找可恢复的 run...\n`);
     const resumable = findLatestResumableRun(runsDir);
     if (resumable === null) {
       writeStdoutLine(`未找到可恢复的 run，将创建新 run\n`);
       // 回退到创建新 run 的流程
-      objective = args.goal ?? resolvedTask ?? "";
+      objective = args.goal ?? (resolvedTask.status === "ok" ? resolvedTask.task : "") ?? "";
       if (!objective) {
         writeStderrLine("autonomous 子命令需要 --goal 或 --task 参数\n");
         return 1;
@@ -443,7 +700,7 @@ async function executeAutonomousCommand(args: TeamCommandArgs, startTime: number
     }
   } else {
     // 新建 run
-    objective = args.goal ?? resolvedTask ?? "";
+    objective = args.goal ?? (resolvedTask.status === "ok" ? resolvedTask.task : "") ?? "";
     if (!objective) {
       writeStderrLine("autonomous 子命令需要 --goal 或 --task 参数\n");
       return 1;
@@ -594,7 +851,14 @@ async function executeFullLifecycleCommand(args: TeamCommandArgs, startTime: num
   // 优先级：taskFile > task > goal
   // allowMissing=true：full-lifecycle 模式允许 task 缺失（可用 goal 代替）
   const resolvedTask = resolveTaskDescription(args, "full-lifecycle", true);
-  const project = args.goal ?? resolvedTask;
+
+  // FIX-10（多角色审查 2026-07-29）：显式提供 taskFile 但读取失败/为空时，
+  // 不应静默回退到 goal，应作为执行失败返回退出码 1。
+  if (resolvedTask.status === "task-file-empty" || resolvedTask.status === "task-file-read-error") {
+    return 1;
+  }
+
+  const project = args.goal ?? (resolvedTask.status === "ok" ? resolvedTask.task : undefined);
   if (!project) {
     writeStderrLine("full-lifecycle 子命令需要 --goal 或 --task 参数\n");
     return 1;
@@ -658,6 +922,9 @@ async function executeFullLifecycleLinear(
     const result = await executeDispatch(task, {
       projectRoot,
       forceRole: { roleId: stage.role, reason: `8 阶段全流程 - 阶段 ${i + 1}: ${stage.title}` },
+      // v2.1.1 E2E 修复（TF-007）：full-lifecycle 线性模式必须透传 injectedClient，
+      // 否则测试环境会重复调用 createOpenAIClient 检测 API Key，导致阶段 1-7 极慢（实测 38 分钟）
+      ...(args.injectedClient ? { injectedClient: args.injectedClient } : {}),
     });
 
     writeStdoutLine(`  角色: ${result.matchedRole.roleId}\n`);
@@ -904,7 +1171,7 @@ export function formatTeamHelp(): string {
 DeepCodeX Team - 多角色协同调度
 
 用法:
-  deepcodex team <subcommand> [options]
+  deepcode team <subcommand> [options]
 
 子命令:
   list                              列出所有可用角色
@@ -922,7 +1189,8 @@ ${roleList}
   --task <text>                     任务描述（dispatch / autonomous / full-lifecycle）
   --task-file <path>                任务文件路径（v2.1.1：从文件读取，避免 shell 转义问题）
   --force-role                      禁用自动匹配（需要 --role）
-  --consensus                       启用 5 角色联合评审
+  --consensus                       启用 5 角色联合评审（并行派发 + LLM 聚合共识点/分歧点/最终建议；
+                                    与 --role/--force-role 互斥）
   --fail-fast                       失败时立即中止
   --max-iterations <n>              最大迭代次数（autonomous / full-lifecycle --use-loop，默认 5/3）
   --project-root <path>             项目根目录（默认当前目录）
@@ -935,16 +1203,23 @@ v2.1 P5 full-lifecycle 专属选项:
   --test-plan-path <path>           测试计划文档路径（阶段 8 输入）
   --test-command <cmd>              测试命令（阶段 7 + 阶段 8 D3 检查使用）
 
+退出码:
+  0  成功（命令正常完成，审查/检查通过）
+  1  执行失败（命令运行完成但结果未通过，如审查发现缺陷、测试失败）
+  2  参数错误（缺少必填参数、参数格式非法、未知子命令/选项）
+  4  运行时异常（未捕获的异常、依赖缺失、I/O 错误等无法继续执行的情况）
+
 示例:
-  deepcodex team list
-  deepcodex team match --keywords "微服务,架构,API"
-  deepcodex team dispatch --task "设计用户认证模块"
-  deepcodex team dispatch --role architect --task "系统架构评审"
-  deepcodex team dispatch --role solo-coder --task-file ./task.txt
-  deepcodex team autonomous --goal "实现 OAuth2 登录"
-  deepcodex team full-lifecycle --project "电商网站"
-  deepcodex team full-lifecycle --project "电商网站" --use-loop --max-iterations 3
-  deepcodex team full-lifecycle --project "电商网站" \\
+  deepcode team list
+  deepcode team match --keywords "微服务,架构,API"
+  deepcode team dispatch --task "设计用户认证模块"
+  deepcode team dispatch --role architect --task "系统架构评审"
+  deepcode team dispatch --task "用户登录方案" --consensus
+  deepcode team dispatch --role solo-coder --task-file ./task.txt
+  deepcode team autonomous --goal "实现 OAuth2 登录"
+  deepcode team full-lifecycle --project "电商网站"
+  deepcode team full-lifecycle --project "电商网站" --use-loop --max-iterations 3
+  deepcode team full-lifecycle --project "电商网站" \\
     --prd-path docs/prd.md \\
     --architecture-path docs/architecture.md \\
     --test-command "npm test"

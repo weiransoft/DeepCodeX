@@ -5,6 +5,36 @@ import { rotateLogIfNeeded } from "./log-rotation";
 
 const DEBUG_LOG_FILE = "debug.log";
 
+// ============================================================================
+// FIX-08（多角色审查 2026-07-29）：日志密钥脱敏
+//
+// 背景：logOpenAIChatCompletionDebug 会将完整 params/request 对象落盘到
+// ~/.deepcode/logs/debug.log。若对象中携带 apiKey / Authorization 头等凭据，
+// 密钥将以明文持久化，任何可读取该文件的进程均可窃取。
+//
+// 策略（与 graph-context-utils.ts 的 SENSITIVE_KEY_PATTERN 对齐）：
+//   1. 键名命中敏感模式 → 值整体替换为 [REDACTED]
+//   2. 字符串值形如密钥（sk-*/Bearer */Slack/GitHub token）→ 替换为 [REDACTED]
+// ============================================================================
+
+/**
+ * 敏感字段名模式：大小写不敏感，包含任一关键词即视为敏感字段
+ * （在 graph-context-utils 的 key|token|secret|password|credential 基础上
+ *  追加 authorization，覆盖 HTTP Authorization 头字段名）
+ */
+const SENSITIVE_KEY_PATTERN = /key|token|secret|password|credential|authorization/i;
+
+/**
+ * 敏感值模式：即使键名不敏感，值本身形如密钥时也脱敏
+ * 覆盖：sk-xxx（OpenAI/DeepSeek 兼容服务）、Bearer xxx、
+ *       xox[baprs]-xxx（Slack）、ghp_/gho_/github_pat_（GitHub）
+ */
+const SENSITIVE_VALUE_PATTERN =
+  /^(sk-[A-Za-z0-9_-]{8,}|Bearer\s+\S+|xox[baprs]-\S+|ghp_[A-Za-z0-9]{16,}|gho_[A-Za-z0-9]{16,}|github_pat_\S+)$/;
+
+/** 脱敏替换标记（与 graph-context-utils.ts 保持一致） */
+const REDACTED = "[REDACTED]";
+
 export type OpenAIChatCompletionDebugEntry = {
   timestamp: string;
   location: string;
@@ -70,6 +100,10 @@ function toSerializable(value: unknown): unknown {
       return normalizeDebugError(current);
     }
     if (!current || typeof current !== "object") {
+      // FIX-08：字符串值形如密钥时脱敏（即使键名不敏感）
+      if (typeof current === "string" && SENSITIVE_VALUE_PATTERN.test(current)) {
+        return REDACTED;
+      }
       return current;
     }
     if (seen.has(current)) {
@@ -81,6 +115,11 @@ function toSerializable(value: unknown): unknown {
     }
     const result: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(current)) {
+      // FIX-08：敏感字段名命中时整体脱敏，防止凭据写入 debug.log
+      if (SENSITIVE_KEY_PATTERN.test(key)) {
+        result[key] = REDACTED;
+        continue;
+      }
       result[key] = walk(val);
     }
     return result;

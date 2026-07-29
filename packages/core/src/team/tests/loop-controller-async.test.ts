@@ -282,6 +282,75 @@ test("LC-004: backoffSleep 不阻塞 event loop（setTimeout 回调能执行）"
 });
 
 // ============================================================================
+// LC-006: backoffSleep 响应外部 abort（FIX-14，多角色审查 2026-07-29）
+//
+// 场景：某阶段返回 retriable 后进入 backoffSleep（base=5s）。
+// 在退避期间从外部调用 runState.markAborted()，验证 backoffSleep 立即退出，
+// 而不是等待完整的 5s。若 FIX-14 未生效，本测试将耗时 ~5s 并断言失败。
+// ============================================================================
+
+test("LC-006: backoffSleep 在 RunState 被 abort 时立即退出", async () => {
+  const dir = makeTmpDir();
+  try {
+    const runState = new RunState(dir, "r-lc-006", "测试");
+    const config = defaultLoopConfig();
+
+    // 构造 retriable StageHandler，让循环触发 backoffSleep
+    const retriableHandler: StageHandler = {
+      handle(_ctx: IterationContext): StageResult {
+        return {
+          kind: "retriable",
+          summary: "test retriable",
+          artifacts: { tokens: 0 },
+          error: "test error",
+        };
+      },
+    };
+
+    const controller = new RalphLoopController({
+      config: {
+        ...config,
+        maxIterations: 2,
+        consecutiveFailureAbort: 2,
+        // 退避时间设长，若 FIX-14 未生效，测试会明显超时
+        backoffBaseSec: 5.0,
+        backoffMaxSec: 5.0,
+      },
+      projectRoot: dir,
+      gitDriver: makeStubGitDriver(),
+      notesMemory: null,
+      runState,
+      stageHandlers: {
+        plan: retriableHandler,
+        dev: retriableHandler,
+        verify: retriableHandler,
+        fix: retriableHandler,
+      },
+      log: () => {},
+      sleepGuard: null,
+    });
+
+    const runPromise = controller.run();
+
+    // 等待第一次迭代完成并进入 backoffSleep（stub handler 是同步的，100ms 足够）
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+    // 从外部触发 abort
+    runState.markAborted("external abort");
+
+    const abortAt = Date.now();
+    await runPromise;
+    const elapsedAfterAbort = Date.now() - abortAt;
+
+    // 响应 abort 后应在 1.5s 内完成（正常 5s 退避的 1s 分片检查机制）
+    assert.ok(elapsedAfterAbort < 1500, `backoffSleep 应在 abort 后立即退出，实际 abort 后耗时 ${elapsedAfterAbort}ms`);
+    assert.equal(runState.state.status, "aborted", "RunState 状态应为 aborted");
+  } finally {
+    rmTmpDir(dir);
+  }
+});
+
+// ============================================================================
 // LC-005: runOneIterationPublic async
 // ============================================================================
 

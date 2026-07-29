@@ -2,8 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildLoadingText } from "../ui";
 
-test("buildLoadingText returns plain Thinking... when no progress", () => {
-  assert.equal(buildLoadingText({ progress: null, now: Date.now() }), "Thinking...");
+test("buildLoadingText returns plain 思考中... when no progress", () => {
+  assert.equal(buildLoadingText({ progress: null, now: Date.now() }), "思考中...");
 });
 
 test("buildLoadingText shows running process elapsed time before thinking progress", () => {
@@ -31,7 +31,7 @@ test("buildLoadingText formats long-running process time with minutes", () => {
   assert.equal(buildLoadingText({ processes, progress: null, now }), "(1m5s) WebSearch: latest node release");
 });
 
-test("buildLoadingText returns plain Thinking... while elapsed below 3s", () => {
+test("buildLoadingText returns plain 思考中... while elapsed below 3s", () => {
   const startedAt = "2026-04-28T00:00:00.000Z";
   const now = Date.parse(startedAt) + 1500;
   const text = buildLoadingText({
@@ -44,7 +44,7 @@ test("buildLoadingText returns plain Thinking... while elapsed below 3s", () => 
     },
     now,
   });
-  assert.equal(text, "Thinking...");
+  assert.equal(text, "思考中...");
 });
 
 test("buildLoadingText shows elapsed seconds and tokens once past the threshold", () => {
@@ -60,7 +60,23 @@ test("buildLoadingText shows elapsed seconds and tokens once past the threshold"
     },
     now,
   });
-  assert.equal(text, "Thinking... (5s) · ↓ 850 tokens");
+  assert.equal(text, "思考中... (5s) · ↓ 850 tokens");
+});
+
+test("buildLoadingText formats tokens with thousands separator", () => {
+  const startedAt = "2026-04-28T00:00:00.000Z";
+  const now = Date.parse(startedAt) + 4_000;
+  const text = buildLoadingText({
+    progress: {
+      requestId: "r",
+      startedAt,
+      estimatedTokens: 1_234_567,
+      formattedTokens: "1234567",
+      phase: "update",
+    },
+    now,
+  });
+  assert.equal(text, "思考中... (4s) · ↓ 1,234,567 tokens");
 });
 
 test("buildLoadingText falls back to '0' when formattedTokens is missing", () => {
@@ -76,10 +92,10 @@ test("buildLoadingText falls back to '0' when formattedTokens is missing", () =>
     },
     now,
   });
-  assert.equal(text, "Thinking... (4s) · ↓ 0 tokens");
+  assert.equal(text, "思考中... (4s) · ↓ 0 tokens");
 });
 
-test("buildLoadingText falls back to Thinking... when timestamp is unparseable", () => {
+test("buildLoadingText falls back to 思考中... when timestamp is unparseable", () => {
   const text = buildLoadingText({
     progress: {
       requestId: "r",
@@ -90,5 +106,5 @@ test("buildLoadingText falls back to Thinking... when timestamp is unparseable",
     },
     now: Date.now(),
   });
-  assert.equal(text, "Thinking...");
+  assert.equal(text, "思考中...");
 });

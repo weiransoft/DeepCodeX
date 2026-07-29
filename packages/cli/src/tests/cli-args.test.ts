@@ -97,17 +97,26 @@ test("parseArguments detects -v", async () => {
   assert.equal(r.version, true);
 });
 
-test("parseArguments detects --help", async () => {
-  const r = await parseArguments(["--help"]);
-  assert.ok(!("message" in r));
-  assert.equal(r.help, true);
-  assert.equal(r.version, false);
+test("parseArguments --help triggers process.exit(0)", async () => {
+  await withMockedExit(async (exitSpy) => {
+    try {
+      await parseArguments(["--help"]);
+    } catch {
+      /* expected: process.exit throws */
+    }
+    assert.deepEqual(exitSpy.calls, [0]);
+  });
 });
 
-test("parseArguments detects -h", async () => {
-  const r = await parseArguments(["-h"]);
-  assert.ok(!("message" in r));
-  assert.equal(r.help, true);
+test("parseArguments -h triggers process.exit(0)", async () => {
+  await withMockedExit(async (exitSpy) => {
+    try {
+      await parseArguments(["-h"]);
+    } catch {
+      /* expected: process.exit throws */
+    }
+    assert.deepEqual(exitSpy.calls, [0]);
+  });
 });
 
 test("parseArguments version and help are false when not passed", async () => {
@@ -140,11 +149,45 @@ test("parseArguments handles -p before --resume <id>", async () => {
   assert.equal(r.prompt, "hello");
 });
 
-test("parseArguments --version takes precedence over --help", async () => {
-  const r = await parseArguments(["--version", "--help"]);
-  assert.ok(!("message" in r));
-  assert.equal(r.version, true);
-  assert.equal(r.help, true);
+test("parseArguments --version --help exits 0 via help path", async () => {
+  // FIX-15：--help 现在由 parseArguments 手动处理并 exit(0)，
+  // 与 --version 同时存在时两者都被解析，但最终走 help 退出路径。
+  await withMockedExit(async (exitSpy) => {
+    try {
+      await parseArguments(["--version", "--help"]);
+    } catch {
+      /* expected: process.exit throws */
+    }
+    assert.deepEqual(exitSpy.calls, [0]);
+  });
+});
+
+// ── FIX-15: team help / rules help 不应触发 yargs 内置 help ─────────────────
+// 这些子命令的 help 是 positional 参数，应被解析为对应子命令，
+// parsed.help 保持 false，避免与 cli.tsx 自定义中文帮助重复输出。
+
+test("parseArguments team help 解析为 team 子命令 help（非 --help）", async () => {
+  const r = await parseArguments(["team", "help"]);
+  assert.equal(r.team, "help");
+  assert.equal(r.help, false);
+});
+
+test("parseArguments rules help 解析为 rules 子命令 help（非 --help）", async () => {
+  const r = await parseArguments(["rules", "help"]);
+  assert.equal(r.rules, "help");
+  assert.equal(r.help, false);
+});
+
+test("parseArguments quality-check help 解析为 quality-check 子命令 help（非 --help）", async () => {
+  const r = await parseArguments(["quality-check", "help"]);
+  assert.equal(r.qualityCheck, "help");
+  assert.equal(r.help, false);
+});
+
+test("parseArguments review help 解析为 review 子命令 help（非 --help）", async () => {
+  const r = await parseArguments(["review", "help"]);
+  assert.equal(r.review, "help");
+  assert.equal(r.help, false);
 });
 
 // ── parseArguments: error cases (mock process.exit) ────────────────────────────

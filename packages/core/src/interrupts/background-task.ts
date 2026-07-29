@@ -181,8 +181,14 @@ export class BackgroundTask {
   private _state: TaskStatus = "queued";
   /** 关联的 sessionId */
   private _sessionId: string | null;
-  /** 创建时间（ISO 8601） */
-  private readonly _startedAt: string;
+  /**
+   * 创建时间（ISO 8601）
+   *
+   * 正常生命周期内不变（构造时赋值一次）；
+   * 不声明 readonly 的原因：fromSnapshot 崩溃恢复路径需要将其恢复为快照值，
+   * 否则恢复后任务的 startedAt 会被错误地重置为恢复时刻（TC-BT-009 回归）。
+   */
+  private _startedAt: string;
   /** 最后更新时间（ISO 8601） */
   private _updatedAt: string;
   /** 完成时间（ISO 8601，未完成为 null） */
@@ -772,6 +778,8 @@ export class BackgroundTask {
     });
     // 直接设置内部状态（绕过状态机校验，因为是从持久化恢复）
     task._state = snapshot.status;
+    // 恢复创建时间：缺省时回退为 updatedAt，保证不为构造函数写入的恢复时刻
+    task._startedAt = snapshot.startedAt ?? snapshot.updatedAt;
     task._updatedAt = snapshot.updatedAt;
     task._completedAt = snapshot.completedAt;
     task._result = snapshot.result;

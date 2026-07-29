@@ -6,6 +6,8 @@ import {
   findExactSlashCommand,
   formatSlashCommandDescription,
   formatSlashCommandLabel,
+  formatBuiltinCommandList,
+  BUILTIN_SLASH_COMMANDS,
 } from "../ui";
 import type { SkillInfo } from "@vegamo/deepcode-core";
 
@@ -20,6 +22,8 @@ test("buildSlashCommands prefixes skills before built-ins", () => {
   assert.equal(items[0].name, "skill-writer");
   const builtinNames = items.filter((i) => i.kind !== "skill").map((i) => i.name);
   assert.deepEqual(builtinNames, [
+    // FIX-06（多角色审查 2026-07-29）：/help 内置命令（渲染同源命令清单）
+    "help",
     "skills",
     "model",
     "plan",
@@ -163,4 +167,67 @@ test("formatSlashCommandLabel marks loaded skills", () => {
 
   assert.equal(formatSlashCommandLabel(items[0]), "/loaded ✓");
   assert.equal(formatSlashCommandLabel(items[1]), "/fresh");
+});
+
+// ============================================================================
+// FIX-06（多角色审查 2026-07-29）：/help 命令与 formatBuiltinCommandList
+// ============================================================================
+
+test("findExactSlashCommand returns built-in /help", () => {
+  const items = buildSlashCommands(skills);
+  const item = findExactSlashCommand(items, "/help");
+  assert.ok(item, "/help 应注册为内置命令");
+  assert.equal(item?.kind, "help");
+});
+
+test("findExactSlashCommand returns built-in /memory", () => {
+  const items = buildSlashCommands(skills);
+  const item = findExactSlashCommand(items, "/memory");
+  assert.ok(item, "/memory 应注册为内置命令");
+  assert.equal(item?.kind, "memory");
+});
+
+test("formatBuiltinCommandList renders every registered builtin command", () => {
+  const list = formatBuiltinCommandList();
+  const lines = list.split("\n");
+
+  // 行数与注册表条目数一致（一命令一行）
+  assert.equal(lines.length, BUILTIN_SLASH_COMMANDS.length, "清单行数应与注册表条目数一致");
+
+  // 每条命令的 label 与 description 均出现在对应行中
+  for (const item of BUILTIN_SLASH_COMMANDS) {
+    // 精确匹配：行前缀为 "  <label>  "，避免 /memory 描述里的 "review" 被误判为 /review
+    const line = lines.find((l) => l.startsWith(`  ${item.label}  `));
+    assert.ok(line, `清单应包含 ${item.label}`);
+    assert.ok(line!.includes(item.description), `${item.label} 行应包含描述文本`);
+  }
+
+  // 关键命令必须出现在清单中（FIX-06 审查发现的 EPILOG 缺失项）
+  for (const required of [
+    "/help",
+    "/team",
+    "/memory",
+    "/rules",
+    "/quality-check",
+    "/review",
+    "/inject",
+    "/bg",
+    "/tasks",
+  ]) {
+    assert.ok(list.includes(required), `清单应包含 ${required}`);
+  }
+});
+
+test("formatBuiltinCommandList aligns label column", () => {
+  const lines = formatBuiltinCommandList().split("\n");
+  // 所有行的 label 结束位置（description 起始列）应一致
+  const maxLabelLen = Math.max(...BUILTIN_SLASH_COMMANDS.map((i) => i.label.length));
+  for (const line of lines) {
+    // 行格式：2 空格 + label.padEnd(maxLabelLen) + 2 空格 + description
+    // description 起始索引 = 2 + maxLabelLen + 2
+    const descStartCol = 2 + maxLabelLen + 2;
+    // 该行在 descStartCol 之前应只包含 label + 空格（无描述文本混入）
+    const prefix = line.slice(0, descStartCol);
+    assert.ok(/^ {2}\/\S+ +$/.test(prefix), `行 "${line}" 的 label 列未对齐到第 ${descStartCol} 列`);
+  }
 });

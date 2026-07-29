@@ -19,6 +19,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import chalk from "chalk";
 import {
   formatCodeMapReport,
   formatUIUXReport,
@@ -408,10 +409,10 @@ test("formatUIUXReport: text 格式包含评分与问题列表", () => {
 test("formatUIUXReport: text 格式按严重级别排序（HIGH > MEDIUM > LOW）", () => {
   const report = makeMultiCategoryUIUXReport();
   const output = formatUIUXReport(report, "text");
-  // 找到每个 severity 在输出中的位置
-  const highIdx = output.indexOf("[HIGH]");
-  const mediumIdx = output.indexOf("[MEDIUM]");
-  const lowIdx = output.indexOf("[LOW]");
+  // 找到每个 severity 在输出中的位置（FIX-17：严重级别文本已带 chalk 颜色）
+  const highIdx = output.indexOf(chalk.red("HIGH"));
+  const mediumIdx = output.indexOf(chalk.yellow("MEDIUM"));
+  const lowIdx = output.indexOf(chalk.gray("LOW"));
   // 验证顺序：HIGH 在 MEDIUM 之前，MEDIUM 在 LOW 之前
   assert.ok(highIdx > -1, "应包含 HIGH 问题");
   assert.ok(mediumIdx > -1, "应包含 MEDIUM 问题");
@@ -473,6 +474,15 @@ test("formatUIUXReport: markdown 格式转义表格中的 | 字符", () => {
   assert.ok(output.includes("div\\|cls"));
   assert.ok(output.includes("msg\\|with\\|pipe"));
   assert.ok(output.includes("fix\\|it"));
+});
+
+test("formatUIUXReport: text / markdown 严重级别带颜色语义", () => {
+  const report = makeMinimalUIUXReport();
+  const textOutput = formatUIUXReport(report, "text");
+  const markdownOutput = formatUIUXReport(report, "markdown");
+  // HIGH 应渲染为红色
+  assert.ok(textOutput.includes(chalk.red("HIGH")), "text 输出中 HIGH 应为红色");
+  assert.ok(markdownOutput.includes(chalk.red("HIGH")), "markdown 输出中 HIGH 应为红色");
 });
 
 // ============================================================================
@@ -547,7 +557,9 @@ test("formatVisualReport: text 格式渲染变化区域、数据显示不全、�
   assert.ok(output.includes("(10, 20)"));
   assert.ok(output.includes("100x50"));
   assert.ok(output.includes("变化像素: 5000"));
-  assert.ok(output.includes("级别: HIGH"));
+  // FIX-17：严重级别文本带 chalk 颜色
+  assert.ok(output.includes(`级别: ${chalk.red("HIGH")}`));
+  assert.ok(output.includes(`级别: ${chalk.yellow("MEDIUM")}`));
   assert.ok(output.includes("数据显示不全 (2 项)"));
   assert.ok(output.includes("表格行被截断"));
   assert.ok(output.includes("显示错误 (2 项)"));
@@ -569,7 +581,8 @@ test("formatVisualReport: markdown 格式输出表格化的变化区域", () => 
   assert.ok(output.includes("| SSIM 评分 | 0.8500 |"));
   assert.ok(output.includes("## 变化区域 (2 个)"));
   assert.ok(output.includes("| 序号 | X | Y | 宽度 | 高度 | 变化像素 | 级别 |"));
-  assert.ok(output.includes("| 1 | 10 | 20 | 100 | 50 | 5000 | HIGH |"));
+  // FIX-17：markdown 表格中严重级别带 chalk 颜色
+  assert.ok(output.includes(`| 1 | 10 | 20 | 100 | 50 | 5000 | ${chalk.red("HIGH")} |`));
   assert.ok(output.includes("## 数据显示不全 (2 项)"));
   assert.ok(output.includes("## 显示错误 (2 项)"));
 });

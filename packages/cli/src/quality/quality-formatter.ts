@@ -16,6 +16,7 @@
 
 import type { CodeMap, UIUXReport } from "@deepcodex/quality";
 import type { VisualDiffResult } from "@vegamo/deepcode-core";
+import chalk from "chalk";
 
 // ============================================================================
 // 通用工具
@@ -23,6 +24,30 @@ import type { VisualDiffResult } from "@vegamo/deepcode-core";
 
 /** 支持的报告格式 */
 export type ReportFormat = "json" | "text" | "markdown";
+
+/**
+ * 根据严重级别返回带 chalk 颜色的文本。
+ *
+ * - HIGH  → 红色（高风险，需要优先处理）
+ * - MEDIUM → 黄色（中风险）
+ * - LOW   → 灰色（低风险，提示性）
+ * - 其他  → 原样返回（容错）
+ *
+ * @param severity 严重级别字符串
+ * @returns 带 ANSI 颜色的字符串
+ */
+function colorSeverity(severity: string): string {
+  switch (severity) {
+    case "HIGH":
+      return chalk.red(severity);
+    case "MEDIUM":
+      return chalk.yellow(severity);
+    case "LOW":
+      return chalk.gray(severity);
+    default:
+      return severity;
+  }
+}
 
 /**
  * 将数字保留指定小数位
@@ -162,7 +187,8 @@ function formatUIUXText(report: UIUXReport): string {
     });
     for (let i = 0; i < sorted.length; i++) {
       const issue = sorted[i]!;
-      lines.push(`  ${i + 1}. [${issue.severity}] ${issue.category}/${issue.rule}: ${issue.message}`);
+      // FIX-17（多角色审查 2026-07-29）：严重级别文本增加颜色语义
+      lines.push(`  ${i + 1}. [${colorSeverity(issue.severity)}] ${issue.category}/${issue.rule}: ${issue.message}`);
       lines.push(`     元素: ${issue.element}`);
       lines.push(`     建议: ${issue.fix}`);
     }
@@ -214,8 +240,9 @@ function formatUIUXMarkdown(report: UIUXReport): string {
     for (const issue of issues) {
       // 转义 markdown 表格中的 | 字符
       const escapeCell = (s: string): string => s.replace(/\|/g, "\\|").replace(/\n/g, " ");
+      // FIX-17（多角色审查 2026-07-29）：markdown 表格中的严重级别同样增加颜色语义
       lines.push(
-        `| ${issue.severity} | ${escapeCell(issue.rule)} | ${escapeCell(issue.element)} | ${escapeCell(
+        `| ${colorSeverity(issue.severity)} | ${escapeCell(issue.rule)} | ${escapeCell(issue.element)} | ${escapeCell(
           issue.message
         )} | ${escapeCell(issue.fix)} |`
       );
@@ -285,7 +312,7 @@ function formatVisualText(result: VisualDiffResult): string {
       lines.push(
         `  ${i + 1}. 位置: (${region.x}, ${region.y}) 尺寸: ${region.width}x${region.height} 变化像素: ${
           region.pixelCount
-        } 级别: ${region.severity}`
+        } 级别: ${colorSeverity(region.severity)}`
       );
     }
   }
@@ -345,7 +372,9 @@ function formatVisualMarkdown(result: VisualDiffResult): string {
     for (let i = 0; i < result.changedRegions.length; i++) {
       const region = result.changedRegions[i]!;
       lines.push(
-        `| ${i + 1} | ${region.x} | ${region.y} | ${region.width} | ${region.height} | ${region.pixelCount} | ${region.severity} |`
+        `| ${i + 1} | ${region.x} | ${region.y} | ${region.width} | ${region.height} | ${region.pixelCount} | ${colorSeverity(
+          region.severity
+        )} |`
       );
     }
     lines.push("");

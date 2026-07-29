@@ -10,7 +10,7 @@
  * - path：显示规则文件路径
  *
  * 调用方：
- * - packages/cli/src/cli.tsx —— 非 TUI 模式（deepcodex rules list）
+ * - packages/cli/src/cli.tsx —— 非 TUI 模式（deepcode rules list）
  * - packages/cli/src/ui/views/App.tsx —— TUI 模式（/rules list）
  *
  * 设计原则：
@@ -362,7 +362,7 @@ function generateRuleId(store: RuleStore, layer: "user" | "project"): string {
  */
 export function formatRulesHelp(): string {
   return [
-    "用法: deepcodex rules <subcommand> [options]",
+    "用法: deepcode rules <subcommand> [options]",
     "      /rules <subcommand> [args]          # TUI 模式",
     "",
     "RLIS 规则学习与注入系统：管理三层规则（种子 / 用户 / 项目）",
@@ -380,11 +380,11 @@ export function formatRulesHelp(): string {
     "  --project-root <路径>               项目根目录（默认当前目录）",
     "",
     "示例：",
-    "  deepcodex rules list",
-    '  deepcodex rules add --content "禁止使用 var 声明变量" --severity BLOCKER',
-    "  deepcodex rules remove --rule-id USER-001",
-    "  deepcodex rules show --rule-id SEED-01",
-    "  deepcodex rules path",
+    "  deepcode rules list",
+    '  deepcode rules add --content "禁止使用 var 声明变量" --severity BLOCKER',
+    "  deepcode rules remove --rule-id USER-001",
+    "  deepcode rules show --rule-id SEED-01",
+    "  deepcode rules path",
     "",
   ].join("\n");
 }
@@ -487,7 +487,7 @@ function executeList(store: RuleStore, buffer: OutputBuffer): void {
 function executeAdd(args: RulesCommandArgs, store: RuleStore, buffer: OutputBuffer): number {
   // 校验 content 参数
   if (!args.content || args.content.trim().length === 0) {
-    buffer.writeStderr("✖ /rules add 需要 --content 参数\n用法: deepcodex rules add --content <内容>\n");
+    buffer.writeStderr("✖ /rules add 需要 --content 参数\n用法: deepcode rules add --content <内容>\n");
     return 1;
   }
 
@@ -563,7 +563,7 @@ function executeAdd(args: RulesCommandArgs, store: RuleStore, buffer: OutputBuff
 function executeRemove(args: RulesCommandArgs, _store: RuleStore, buffer: OutputBuffer): number {
   // 校验 ruleId 参数
   if (!args.ruleId || args.ruleId.trim().length === 0) {
-    buffer.writeStderr("✖ /rules remove 需要 --rule-id 参数\n用法: deepcodex rules remove --rule-id <ID>\n");
+    buffer.writeStderr("✖ /rules remove 需要 --rule-id 参数\n用法: deepcode rules remove --rule-id <ID>\n");
     return 1;
   }
 
@@ -600,7 +600,7 @@ function executeRemove(args: RulesCommandArgs, _store: RuleStore, buffer: Output
 function executeShow(args: RulesCommandArgs, store: RuleStore, buffer: OutputBuffer): number {
   // 校验 ruleId 参数
   if (!args.ruleId || args.ruleId.trim().length === 0) {
-    buffer.writeStderr("✖ /rules show 需要 --rule-id 参数\n用法: deepcodex rules show --rule-id <ID>\n");
+    buffer.writeStderr("✖ /rules show 需要 --rule-id 参数\n用法: deepcode rules show --rule-id <ID>\n");
     return 1;
   }
 
