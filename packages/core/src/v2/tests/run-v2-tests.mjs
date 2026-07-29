@@ -24,9 +24,14 @@ console.log(`发现 ${testFiles.length} 个 V2 测试文件:`);
 testFiles.forEach((f) => console.log(`  - ${f}`));
 console.log("");
 
-const result = spawnSync(process.execPath, ["--import", "tsx", "--test", ...testFiles], {
-  stdio: "inherit",
-  cwd: __dirname,
-});
+const result = spawnSync(
+  process.execPath,
+  // 透传 CLI 参数（如 --test-reporter=tap），修复 FIX-03：之前 npm test -- <args> 被静默忽略
+  ["--import", "tsx", "--test", ...process.argv.slice(2), ...testFiles],
+  {
+    stdio: "inherit",
+    cwd: __dirname,
+  }
+);
 
 process.exit(result.status ?? 1);

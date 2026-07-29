@@ -10,6 +10,24 @@ export type LoadingTextInput = {
 
 const STALL_THRESHOLD_MS = 3000;
 
+/**
+ * 将数字字符串格式化为带千分位分隔符的字符串。
+ *
+ * 例如："1234567" → "1,234,567"；"850" → "850"。
+ * 输入为空或非数字时返回 "0"。
+ *
+ * @param value 原始 token 数字字符串
+ * @returns 带千分位分隔符的字符串
+ */
+function formatTokens(value: string | undefined): string {
+  const raw = value?.trim() ?? "";
+  const num = Number(raw);
+  if (raw === "" || !Number.isFinite(num)) {
+    return "0";
+  }
+  return num.toLocaleString("en-US");
+}
+
 export function buildLoadingText(input: LoadingTextInput): string {
   const { progress, processes, now } = input;
   const processText = buildProcessLoadingText(processes, now);
@@ -18,22 +36,22 @@ export function buildLoadingText(input: LoadingTextInput): string {
   }
 
   if (!progress) {
-    return "Thinking...";
+    return "思考中...";
   }
 
   const startedAt = parseTimestamp(progress.startedAt);
   if (startedAt === null) {
-    return "Thinking...";
+    return "思考中...";
   }
 
   const elapsedMs = Math.max(0, now - startedAt);
   if (elapsedMs < STALL_THRESHOLD_MS) {
-    return "Thinking...";
+    return "思考中...";
   }
 
   const elapsedSeconds = Math.floor(elapsedMs / 1000);
-  const tokens = progress.formattedTokens || "0";
-  return `Thinking... (${elapsedSeconds}s) · ↓ ${tokens} tokens`;
+  const tokens = formatTokens(progress.formattedTokens);
+  return `思考中... (${elapsedSeconds}s) · ↓ ${tokens} tokens`;
 }
 
 function buildProcessLoadingText(processes: RunningProcesses | undefined, now: number): string | null {

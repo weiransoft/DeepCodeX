@@ -7,8 +7,9 @@ import { sanitizeStatusText, STATUS_SEGMENT_MAX_LENGTH } from "../ui/statusline/
 import { validateModulePath, loadModuleProvider } from "../ui/statusline/module-provider";
 import { createCommandStatusProvider } from "../ui/statusline/command-provider";
 import { StatusLineManager } from "../ui/statusline/manager";
+import { buildStatusLine } from "../ui/utils";
 import { resolveSettings, resolveSettingsSources } from "@vegamo/deepcode-core";
-import type { ResolvedStatusLineSettings } from "@vegamo/deepcode-core";
+import type { ResolvedStatusLineSettings, SessionEntry } from "@vegamo/deepcode-core";
 
 test("sanitizeStatusText returns empty for null/undefined/empty", () => {
   assert.equal(sanitizeStatusText(undefined), "");
@@ -309,4 +310,95 @@ test("StatusLineManager isolates a failing provider from succeeding ones", async
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ============================================================================
+// buildStatusLine 状态栏文本（FIX-19，多角色审查 2026-07-29）
+// ============================================================================
+
+function makeSessionEntry(overrides: Partial<SessionEntry> = {}): SessionEntry {
+  return {
+    id: "test-session",
+    summary: null,
+    assistantReply: null,
+    assistantThinking: null,
+    assistantRefusal: null,
+    toolCalls: null,
+    status: "pending",
+    failReason: null,
+    usage: null,
+    usagePerModel: {},
+    activeTokens: 0,
+    createTime: new Date().toISOString(),
+    updateTime: new Date().toISOString(),
+    processes: null,
+    ...overrides,
+  };
+}
+
+test("buildStatusLine 包含状态、模型名、token 占比", () => {
+  const entry = makeSessionEntry({
+    status: "processing",
+    activeTokens: 4096,
+  });
+  const line = buildStatusLine(entry, { model: "deepseek-v4-pro", maxContextTokens: 8192 });
+  assert.ok(line.includes("status: processing"));
+  assert.ok(line.includes("model: deepseek-v4-pro"));
+  assert.ok(line.includes("tokens: 4,096 / 8,192 (50.0%)"));
+});
+
+test("buildStatusLine 无 maxContextTokens 时只显示 token 数", () => {
+  const entry = makeSessionEntry({
+    status: "pending",
+    activeTokens: 1234,
+  });
+  const line = buildStatusLine(entry, { model: "deepseek-v4-flash" });
+  assert.ok(line.includes("status: pending"));
+  assert.ok(line.includes("model: deepseek-v4-flash"));
+  assert.ok(line.includes("tokens: 1,234"));
+  assert.ok(!line.includes("/"));
+});
+
+test("buildStatusLine 从 usagePerModel 推断单模型名", () => {
+  const entry = makeSessionEntry({
+    status: "pending",
+    activeTokens: 100,
+    usagePerModel: {
+      "deepseek-v4-pro": { prompt_tokens: 60, completion_tokens: 40, total_tokens: 100 },
+    },
+  });
+  const line = buildStatusLine(entry);
+  assert.ok(line.includes("model: deepseek-v4-pro"));
+});
+
+test("buildStatusLine 多模型时显示 multi 计数", () => {
+  const entry = makeSessionEntry({
+    status: "pending",
+    activeTokens: 100,
+    usagePerModel: {
+      "model-a": { prompt_tokens: 50, completion_tokens: 50, total_tokens: 100 },
+      "model-b": { prompt_tokens: 50, completion_tokens: 50, total_tokens: 100 },
+    },
+  });
+  const line = buildStatusLine(entry);
+  assert.ok(line.includes("model: multi(2)"));
+});
+
+test("buildStatusLine 包含 fail 原因", () => {
+  const entry = makeSessionEntry({
+    status: "failed",
+    failReason: "api error",
+  });
+  const line = buildStatusLine(entry);
+  assert.ok(line.includes("status: failed"));
+  assert.ok(line.includes("fail: api error"));
+});
+
+test("buildStatusLine token 占比上限为 100%", () => {
+  const entry = makeSessionEntry({
+    status: "processing",
+    activeTokens: 10_000,
+  });
+  const line = buildStatusLine(entry, { maxContextTokens: 8192 });
+  assert.ok(line.includes("(100.0%)"));
 });

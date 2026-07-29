@@ -246,7 +246,7 @@ test("A3. formatRulesHelp 包含用法说明", () => {
   const help = formatRulesHelp();
   // 用法说明应包含 "用法" 关键字与子命令格式示例
   assert.match(help, /用法/, "help 应包含'用法'关键字");
-  assert.match(help, /deepcodex rules/, "help 应包含命令格式示例");
+  assert.match(help, /deepcode rules/, "help 应包含命令格式示例");
 });
 
 // ============================================================================

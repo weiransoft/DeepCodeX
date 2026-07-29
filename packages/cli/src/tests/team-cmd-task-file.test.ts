@@ -476,6 +476,9 @@ test("TF-007: full-lifecycle --task-file 指定有效文件 → project 从文�
       !cap.stderr.includes("需要 --goal 或 --task"),
       `stderr 不应含 "需要 --goal 或 --task"（说明 task-file 已生效），实际: ${cap.stderr}`
     );
+
+    // FIX-09（多角色审查 2026-07-29）：full-lifecycle 应成功完成 8 阶段线性流程
+    assert.equal(exitCode, 0, `full-lifecycle 应成功完成，exitCode 应为 0，实际: ${exitCode}`);
   } finally {
     cap.restore();
     rmTempProject(tmpDir);
@@ -486,7 +489,7 @@ test("TF-007: full-lifecycle --task-file 指定有效文件 → project 从文�
 // TF-008: dispatch 无 --task 也无 --task-file
 // ============================================================================
 
-test("TF-008: dispatch 无 --task 也无 --task-file → exitCode=1, stderr 含 '需要 --task 或 --task-file'", async () => {
+test("TF-008: dispatch 无 --task 也无 --task-file → exitCode=2, stderr 含 '需要 --task 或 --task-file'", async () => {
   const tmpDir = makeTempProject("tf008");
   const cap = captureOutput();
   try {
@@ -498,11 +501,13 @@ test("TF-008: dispatch 无 --task 也无 --task-file → exitCode=1, stderr 含 
       injectedClient: buildCapturingStubClient("不应被调用", { request: null }),
     });
 
-    assert.equal(exitCode, 1, `exitCode 应为 1，实际: ${exitCode}`);
+    // FIX-10（多角色审查 2026-07-29）：team 参数错误统一退出码 2，与 quality/review 语义一致
+    assert.equal(exitCode, 2, `exitCode 应为 2，实际: ${exitCode}`);
     assert.ok(
       cap.stderr.includes("需要 --task 或 --task-file"),
       `stderr 应含 "需要 --task 或 --task-file"，实际: ${cap.stderr}`
     );
+    assert.ok(cap.stderr.includes("deepcode team dispatch --task"), `stderr 应含用法示例，实际: ${cap.stderr}`);
   } finally {
     cap.restore();
     rmTempProject(tmpDir);

@@ -22,6 +22,8 @@ import type { SkillInfo } from "@vegamo/deepcode-core";
  *   - quality-check: 质量门禁（codemap / uiux / visual / all）
  * DeepCodeX Review 扩展：新增 review 命令
  *   - review: 代码审查（typecheck / lint / format / full / help）— 工具验证优先
+ * DeepCodeX 帮助扩展（FIX-06，多角色审查 2026-07-29）：新增 help 命令
+ *   - help: 显示全部内置命令清单（与 CLI --help EPILOG 同一数据源）
  */
 export type SlashCommandKind =
   | "skill"
@@ -36,6 +38,7 @@ export type SlashCommandKind =
   | "mcp"
   | "raw"
   | "exit"
+  | "help"
   | "team"
   | "architect"
   | "pm"
@@ -67,6 +70,12 @@ export type SlashCommandItem = {
 };
 
 export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
+  {
+    kind: "help",
+    name: "help",
+    label: "/help",
+    description: "List all built-in commands with descriptions",
+  },
   {
     kind: "skills",
     name: "skills",
@@ -353,6 +362,26 @@ export function isInterruptCommand(kind: SlashCommandKind): boolean {
   return (
     kind === "inject" || kind === "bg" || kind === "tasks" || kind === "fg" || kind === "cancel" || kind === "pause"
   );
+}
+
+/**
+ * 渲染内置命令清单文本（FIX-06，多角色审查 2026-07-29）
+ *
+ * 单一数据源原则：CLI `--help` EPILOG 与 TUI `/help` 命令共用此函数渲染命令清单，
+ * 避免两处硬编码清单随命令注册表演进而漂移（审查发现 EPILOG 缺 11+ 已注册命令）。
+ *
+ * 渲染格式（每行一条命令，label 列对齐）：
+ *   /help            List all built-in commands with descriptions
+ *   /skills          List available skills
+ *   ...
+ *
+ * 对齐宽度：取全部命令 label 的最大长度 + 2 空格间距，保证列整齐。
+ *
+ * @returns 多行命令清单文本（不含首尾空行）
+ */
+export function formatBuiltinCommandList(): string {
+  const labelWidth = Math.max(...BUILTIN_SLASH_COMMANDS.map((item) => item.label.length));
+  return BUILTIN_SLASH_COMMANDS.map((item) => `  ${item.label.padEnd(labelWidth)}  ${item.description}`).join("\n");
 }
 
 /**

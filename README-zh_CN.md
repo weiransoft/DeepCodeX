@@ -114,6 +114,15 @@ DeepCodeX 在 Deep Code CLI 基础上完成了**多角色融合**与**企业级�
 | `/undo`     | 将代码和/或对话恢复到之前的状态                 |
 | `/exit`     | 退出（也可用连续 `Ctrl+D`）               |
 | `/team`     | 多角色团队调度（dispatch / consensus / autonomous / full-lifecycle） |
+| `/architect` | 强制分派给架构师角色（系统设计、技术选型、ADR） |
+| `/pm`       | 强制分派给产品经理角色（PRD、用户故事、验收标准） |
+| `/coder`    | 强制分派给独立开发者角色（实现、重构、单元测试） |
+| `/tester`   | 强制分派给测试专家角色（测试设计、E2E、覆盖率） |
+| `/ui`       | 强制分派给 UI 设计师角色（UI/UX、无障碍、设计系统） |
+| `/memory`   | 记忆管理（list / review / delete / export） |
+| `/rules`    | RLIS 规则管理（list / add / remove / show / path） |
+| `/quality-check` | 质量门禁（codemap / uiux / visual / all / help） |
+| `/review`   | 代码审查（typecheck / lint / format / full / help） |
 | `/eag-autonomous` | 启动 EAG 无人值守循环（plan→dev→verify→fix） |
 | `/eag-graph` | 启动 Loop-Graph 图编排执行（DAG 拓扑 + 谓词路由） |
 | `/inject`   | 向当前任务追加指令（动态中断）               |
@@ -124,6 +133,7 @@ DeepCodeX 在 Deep Code CLI 基础上完成了**多角色融合**与**企业级�
 | `/pause`    | 暂停当前前台任务                         |
 | `/resume <taskId>` | 恢复暂停的后台任务（注意：无参数的 `/resume` 仍表示恢复历史对话） |
 | `/plan`     | 进入规划模式（仅生成实施计划，不执行代码变更）       |
+| `/help`     | 显示全部内置命令清单                      |
 
 | 按键            | 操作                 |
 |---------------|--------------------|
@@ -132,6 +142,17 @@ DeepCodeX 在 Deep Code CLI 基础上完成了**多角色融合**与**企业级�
 | `Ctrl+V`      | 从剪贴板粘贴图片           |
 | `Esc`         | 中断当前模型回复           |
 | 连续 `Ctrl+D`   | 退出                 |
+
+## 退出码约定
+
+CLI 子命令统一使用以下退出码，便于脚本集成与 CI 流水线判断结果：
+
+| 退出码 | 含义 | 典型场景 |
+|--------|------|----------|
+| `0`    | 成功 | 命令正常完成，审查/检查通过 |
+| `1`    | 执行失败 | 命令运行完成但结果未通过（如审查发现缺陷、测试失败） |
+| `2`    | 参数错误 | 缺少必填参数、参数格式非法、未知子命令/选项 |
+| `4`    | 运行时异常 | 未捕获的异常、依赖缺失、I/O 错误等无法继续执行的情况 |
 
 ## 支持的模型
 

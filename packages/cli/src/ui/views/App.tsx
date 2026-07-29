@@ -153,6 +153,8 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
   const resumeSessionIdRef = useRef(false);
   const startupDoneRef = useRef(false);
   const processStdoutRef = useRef<Map<number, string>>(new Map());
+  // FIX-12（多角色审查 2026-07-29）：记录已追加截断提示的进程 PID，避免重复提示
+  const truncatedPidsRef = useRef<Set<number>>(new Set());
   const rawModeRef = useRef<RawMode>(mode);
   const writeRef = useRef(write);
   const lastRenderedColumnsRef = useRef<number | null>(null);
@@ -180,6 +182,13 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
   const [showWelcome, setShowWelcome] = useState(true);
   const [welcomeNonce, setWelcomeNonce] = useState(0);
   const [resolvedSettings, setResolvedSettings] = useState(() => resolveCurrentSettings(projectRoot));
+  // FIX-19（多角色审查 2026-07-29）：缓存当前模型与最大上下文窗口，
+  // 用于 buildStatusLine 生成带模型名 + token 占比的状态栏。
+  const statusLineOptions = useMemo(() => {
+    const model = resolvedSettings.model || "";
+    const maxContextTokens = getCompactPromptTokenThreshold(model, resolvedSettings.contextWindow);
+    return { model, maxContextTokens };
+  }, [resolvedSettings]);
   const [nowTick, setNowTick] = useState(0);
   const [mcpStatuses, setMcpStatuses] = useState<ReturnType<typeof sessionManager.getMcpStatus>>([]);
   const [showProcessStdout, setShowProcessStdout] = useState(false);
@@ -226,7 +235,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
         }
       },
       onSessionEntryUpdated: (entry) => {
-        setStatusLine(buildStatusLine(entry));
+        setStatusLine(buildStatusLine(entry, statusLineOptions));
         setRunningProcesses(entry.processes);
         setActiveStatus(entry.status);
         setActiveAskPermissions(entry.askPermissions);
@@ -249,6 +258,11 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
         // on noisy or long-running commands like `yes` or verbose builds.
         const MAX_STDOUT_BUFFER = 1_000_000;
         if (current.length >= MAX_STDOUT_BUFFER) {
+          // FIX-12（多角色审查 2026-07-29）：超限时追加一次截断提示，避免静默丢弃
+          if (!truncatedPidsRef.current.has(pid)) {
+            truncatedPidsRef.current.add(pid);
+            buf.set(pid, current + "\n... [输出超 1MB 已截断]\n");
+          }
           return;
         }
         const text = typeof chunk === "string" ? chunk : String(chunk);
@@ -509,6 +523,28 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
           ...prev,
           buildSyntheticUserMessage(submission.text, submission.imageUrls.length),
           buildSyntheticAssistantMessage(reviewResult),
+        ]);
+        return;
+      }
+      if (submission.command === "memory") {
+        // /memory <subcommand> [args] —— 解析并调用 V2 记忆体系 handleMemoryCommand
+        // 子命令：list / delete / delete-all / review / export / help
+        // 设计依据：V2 PRD §US-MEM-001（用户可直接管理自己的记忆，命令不发送给 LLM）
+        const memoryResult = await handleMemorySlashCommand(submission.text, projectRoot);
+        setMessages((prev) => [
+          ...prev,
+          buildSyntheticUserMessage(submission.text, submission.imageUrls.length),
+          buildSyntheticAssistantMessage(memoryResult),
+        ]);
+        return;
+      }
+      if (submission.command === "help") {
+        // /help —— 渲染内置命令清单（FIX-06：与 CLI --help EPILOG 同一数据源 BUILTIN_SLASH_COMMANDS）
+        const { formatBuiltinCommandList } = await import("../core/slash-commands.js");
+        setMessages((prev) => [
+          ...prev,
+          buildSyntheticUserMessage(submission.text, submission.imageUrls.length),
+          buildSyntheticAssistantMessage(`可用命令：\n${formatBuiltinCommandList()}`),
         ]);
         return;
       }
@@ -845,7 +881,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
       // Clear first so <Static> resets its index to 0.
       await resetStaticView(loadVisibleMessages(sessionManager, sessionId), { clearScreen: true });
       const session = sessionManager.getSession(sessionId);
-      setStatusLine(session ? buildStatusLine(session) : "");
+      setStatusLine(session ? buildStatusLine(session, statusLineOptions) : "");
       setRunningProcesses(session?.processes ?? null);
       setActiveStatus(session?.status ?? null);
       setActiveAskPermissions(session?.askPermissions);
@@ -1257,7 +1293,8 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
       {(busy || statusLine) && !isExiting ? <StatusLine busy={busy} text={statusLine} /> : null}
       {errorLine ? (
         <Box>
-          <Text color="red">Error: {errorLine}</Text>
+          {/* FIX-11（多角色审查 2026-07-29）：errorLine 写入处已自带 ✖ 前缀，渲染层不再重复加 "Error: " */}
+          <Text color="red">{errorLine}</Text>
         </Box>
       ) : null}
       {showProcessStdout ? (
@@ -1703,6 +1740,71 @@ async function handleReviewSlashCommand(text: string): Promise<string> {
 }
 
 /**
+ * /memory 命令包装函数（FIX-05，多角色审查 2026-07-29）
+ *
+ * 在 TUI 模式下承接 App.tsx 的 submission.command === "memory" 分支，
+ * 接线 V2 记忆体系的 handleMemoryCommand（core v2/memory/memory-commands.ts）。
+ *
+ * 设计依据：
+ *   - V2 PRD §US-MEM-001：用户可查看和管理自己的记忆
+ *   - V2 PRD §US-PRIV-002：用户可删除全部记忆（需二次确认）
+ *   - 该命令在 CLI 层处理，不发送给 LLM（用户隐私）
+ *
+ * 流程：
+ *   1. 动态导入 MemoryStore / MemoryPrivacyManager / handleMemoryCommand，避免启动开销
+ *   2. 构造 MemoryStore（聚合 ~/.deepcode/memory/ 全局记忆 + <projectRoot>/.deepcode/memory/ 项目记忆）
+ *   3. 构造 MemoryPrivacyManager（用于 delete-all 物理删除全部记忆文件）
+ *   4. 去除 "/memory" 前缀得到子命令参数串，调用 handleMemoryCommand
+ *   5. 返回格式化的处理结果文本（失败时带 ✖ 前缀）
+ *
+ * @param text 用户输入的完整文本（如 "/memory list" 或 "/memory delete <id>"）
+ * @param projectRoot 项目根目录（用于定位项目级记忆目录）
+ * @returns 合成消息文本
+ */
+async function handleMemorySlashCommand(text: string, projectRoot: string): Promise<string> {
+  // 动态导入避免启动开销；MemoryStore / MemoryPrivacyManager / handleMemoryCommand
+  // 均为 core v2 公开导出（见 packages/core/src/v2/index.ts）
+  const [{ MemoryStore, MemoryPrivacyManager, handleMemoryCommand }, nodePath, nodeOs] = await Promise.all([
+    import("@vegamo/deepcode-core"),
+    import("node:path"),
+    import("node:os"),
+  ]);
+
+  const trimmed = text.trim();
+  // 去除前导 "/" 得到 "memory list" 等
+  const body = trimmed.startsWith("/") ? trimmed.slice(1) : trimmed;
+  const tokens = body.split(/\s+/).filter(Boolean);
+
+  if (tokens.length === 0 || tokens[0] !== "memory") {
+    return `无效的 /memory 命令: ${text}`;
+  }
+
+  // 去除 "memory" 前缀，剩余部分作为子命令参数串（如 "list user_global"）
+  const argsText = tokens.slice(1).join(" ");
+
+  // 记忆目录布局（与 MemoryStore / MemoryPrivacyManager 内部约定一致）：
+  //   全局记忆目录：~/.deepcode/memory/
+  //   项目记忆目录：<projectRoot>/.deepcode/memory/
+  const globalMemoryDir = nodePath.join(nodeOs.homedir(), ".deepcode", "memory");
+  const projectMemoryDir = nodePath.join(projectRoot, ".deepcode", "memory");
+
+  const store = new MemoryStore(projectRoot);
+  const privacyManager = new MemoryPrivacyManager(globalMemoryDir, projectMemoryDir);
+
+  try {
+    const result = await handleMemoryCommand(argsText, store, privacyManager);
+    if (result.success) {
+      return result.output;
+    }
+    return `✖ ${result.output}`;
+  } catch (error) {
+    // delete-all 之外的未知错误（如磁盘 I/O 异常）不应静默吞掉
+    const message = error instanceof Error ? error.message : String(error);
+    return `✖ /memory 命令执行失败：${message}`;
+  }
+}
+
+/**
  * 从命令字符串解析 slash 命令种类
  *
  * 用于 handleQuestionAnswers 自动注入 suggestedCommand 时，识别命令种类。
@@ -1779,12 +1881,18 @@ function parseSlashCommandKind(commandText: string): PromptSubmission["command"]
       return "quality-check";
     case "review":
       return "review";
+    // FIX-05（多角色审查 2026-07-29）：/memory 命令接线，不再 fallthrough 为 undefined
+    case "memory":
+      return "memory";
+    // FIX-06（多角色审查 2026-07-29）：/help 命令接线，渲染内置命令清单
+    case "help":
+      return "help";
     case "resume":
       return "resume";
     case "continue":
       return "continue";
     // 以下 kind 不是 PromptSubmission.command 的成员，无法自动执行
-    // （skill/skills/model/plan/init/raw/memory 等），返回 undefined 让调用方降级
+    // （skill/skills/model/plan/init/raw 等），返回 undefined 让调用方降级
     default:
       return undefined;
   }

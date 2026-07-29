@@ -321,6 +321,15 @@ export class RalphLoopController {
         this.appendNotesForIter(iterIndex, iterResult);
         this.prevResults.push(iterResult);
 
+        // FIX-14（多角色审查 2026-07-29）：退避期间或外部触发 abort 后，
+        // 立即识别 RunState 的 aborted 状态并退出循环，避免被当作自然停止而 markFailed。
+        if (this.runState.state.status === "aborted") {
+          this.log("error", "[RalphLoop] RunState 已 abort，退出循环");
+          exitCode = 2;
+          stopReason = "consecutive-failure";
+          break;
+        }
+
         // 连续失败 abort
         if (consecutiveFailures >= this.config.consecutiveFailureAbort) {
           this.log("error", `[RalphLoop] 连续失败 ${consecutiveFailures} 次，abort`);
@@ -581,13 +590,28 @@ export class RalphLoopController {
     let sleepSec = Math.min(maxSec, base * Math.pow(2, Math.max(0, attempt)));
     // ± 10% jitter
     sleepSec *= 0.9 + Math.random() * 0.2;
-    if (sleepSec > 0.1) {
-      this.log("info", `[RalphLoop] 退避 ${sleepSec.toFixed(2)}s（attempt=${attempt}）`);
-      const sleepMs = Math.floor(sleepSec * 1000);
+    if (sleepSec <= 0.1) {
+      return;
+    }
+
+    this.log("info", `[RalphLoop] 退避 ${sleepSec.toFixed(2)}s（attempt=${attempt}）`);
+    const sleepMs = Math.floor(sleepSec * 1000);
+
+    // FIX-14（多角色审查 2026-07-29）：退避期间按 1s 粒度检查 RunState.status，
+    // 当外部调用 markAborted() 时立即退出，避免最长 60s 无法响应 abort。
+    const chunkMs = 1000;
+    let remainingMs = sleepMs;
+    while (remainingMs > 0) {
+      if (this.runState.state.status === "aborted") {
+        this.log("info", "[RalphLoop] 退避期间检测到 abort，立即退出");
+        return;
+      }
+      const waitMs = Math.min(chunkMs, remainingMs);
       // 使用 setTimeout Promise 让出 event loop（替代 BusyWait 自旋）
       await new Promise<void>((resolve) => {
-        setTimeout(() => resolve(), sleepMs);
+        setTimeout(() => resolve(), waitMs);
       });
+      remainingMs -= waitMs;
     }
   }
 

@@ -301,3 +301,122 @@ test("TC-DR-004: 多次轮转后保留 3 个备份", () => {
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
+
+// ============================================================================
+// FIX-08 密钥脱敏测试（多角色审查 2026-07-29）
+// 测试目标：
+//   - 敏感字段名（apiKey/Authorization/token 等）命中时，值整体替换为 [REDACTED]
+//   - 字符串值形如密钥（sk-*/Bearer */ghp_*）时，即使键名不敏感也脱敏
+//   - 非敏感字段内容不受影响（不误伤）
+//   - 嵌套对象与数组中的敏感字段同样脱敏
+// ============================================================================
+
+// TC-RS-001：敏感字段名的值整体脱敏
+test("TC-RS-001: 敏感字段名（apiKey/authorization/token）的值脱敏为 [REDACTED]", () => {
+  const originalHome = process.env.HOME;
+  const originalUserProfile = process.env.USERPROFILE;
+  const { home } = setupTempHome("redact-key");
+  try {
+    logOpenAIChatCompletionDebug({
+      timestamp: "2026-01-01T00:00:00.000Z",
+      location: "test.redact.key",
+      requestId: "redact-req-1",
+      request: {
+        model: "test-model",
+        apiKey: "sk-live-secret-key-123456",
+        Authorization: "Bearer sk-live-secret-key-123456",
+        access_token: "oauth-token-abc",
+        userPassword: "p@ssw0rd",
+        awsCredentials: { ak: "AKIA..." },
+        messages: [{ role: "user", content: "正常内容" }],
+      },
+    });
+
+    const raw = fs.readFileSync(getDebugLogPath(), "utf8");
+    const parsed = JSON.parse(raw.trim()) as Record<string, any>;
+    assert.equal(parsed.request.apiKey, "[REDACTED]", "apiKey 应脱敏");
+    assert.equal(parsed.request.Authorization, "[REDACTED]", "Authorization 应脱敏");
+    assert.equal(parsed.request.access_token, "[REDACTED]", "access_token 应脱敏");
+    assert.equal(parsed.request.userPassword, "[REDACTED]", "userPassword 应脱敏");
+    assert.equal(parsed.request.awsCredentials, "[REDACTED]", "awsCredentials 应整体脱敏");
+    assert.equal(parsed.request.messages[0].content, "正常内容", "非敏感字段不受影响");
+    assert.equal(parsed.request.model, "test-model", "model 字段不受影响");
+    // 原始密钥绝不出现在日志中
+    assert.ok(!raw.includes("sk-live-secret-key-123456"), "日志不得包含原始密钥");
+  } finally {
+    restoreHome(originalHome, originalUserProfile);
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// TC-RS-002：键名不敏感但值形如密钥时脱敏
+test("TC-RS-002: 值形如密钥（sk-*/Bearer */ghp_*）时脱敏", () => {
+  const originalHome = process.env.HOME;
+  const originalUserProfile = process.env.USERPROFILE;
+  const { home } = setupTempHome("redact-value");
+  try {
+    logOpenAIChatCompletionDebug({
+      timestamp: "2026-01-01T00:00:00.000Z",
+      location: "test.redact.value",
+      requestId: "redact-req-2",
+      request: {
+        model: "test-model",
+        endpoint: "sk-proj-abcdef1234567890",
+        note: "Bearer eyJhbGciOiJIUzI1NiIs",
+        upstream: "ghp_1234567890abcdefgh",
+        description: "这是一段普通中文描述，不应脱敏",
+        url: "https://api.example.com/v1/chat",
+      },
+    });
+
+    const raw = fs.readFileSync(getDebugLogPath(), "utf8");
+    const parsed = JSON.parse(raw.trim()) as Record<string, any>;
+    assert.equal(parsed.request.endpoint, "[REDACTED]", "sk- 前缀值应脱敏");
+    assert.equal(parsed.request.note, "[REDACTED]", "Bearer 值应脱敏");
+    assert.equal(parsed.request.upstream, "[REDACTED]", "ghp_ 值应脱敏");
+    assert.equal(parsed.request.description, "这是一段普通中文描述，不应脱敏", "普通中文不脱敏");
+    assert.equal(parsed.request.url, "https://api.example.com/v1/chat", "URL 不脱敏");
+  } finally {
+    restoreHome(originalHome, originalUserProfile);
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// TC-RS-003：嵌套对象与数组中的敏感字段递归脱敏
+test("TC-RS-003: 嵌套对象与数组中的敏感字段递归脱敏", () => {
+  const originalHome = process.env.HOME;
+  const originalUserProfile = process.env.USERPROFILE;
+  const { home } = setupTempHome("redact-nested");
+  try {
+    logOpenAIChatCompletionDebug({
+      timestamp: "2026-01-01T00:00:00.000Z",
+      location: "test.redact.nested",
+      requestId: "redact-req-3",
+      request: {
+        model: "test-model",
+        config: {
+          nested: {
+            clientSecret: "deep-nested-secret",
+            safe: "保留我",
+          },
+        },
+        providers: [
+          { name: "a", apiToken: "token-in-array" },
+          { name: "b", safe: 1 },
+        ],
+      },
+    });
+
+    const raw = fs.readFileSync(getDebugLogPath(), "utf8");
+    const parsed = JSON.parse(raw.trim()) as Record<string, any>;
+    assert.equal(parsed.request.config.nested.clientSecret, "[REDACTED]", "嵌套 secret 应脱敏");
+    assert.equal(parsed.request.config.nested.safe, "保留我", "嵌套非敏感字段保留");
+    assert.equal(parsed.request.providers[0].apiToken, "[REDACTED]", "数组元素内 token 应脱敏");
+    assert.equal(parsed.request.providers[1].safe, 1, "数组元素内非敏感字段保留");
+    assert.ok(!raw.includes("deep-nested-secret"), "日志不得包含嵌套密钥");
+    assert.ok(!raw.includes("token-in-array"), "日志不得包含数组内密钥");
+  } finally {
+    restoreHome(originalHome, originalUserProfile);
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});

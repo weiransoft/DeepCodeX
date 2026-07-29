@@ -9,6 +9,9 @@ import { getCliVersion } from "./utils/version";
 import { writeStderrLine } from "./utils/stdio-helpers";
 import { hideBin } from "yargs/helpers";
 import { ROLE_REGISTRY } from "@vegamo/deepcode-core";
+// FIX-06（多角色审查 2026-07-29）：EPILOG 命令清单从 BUILTIN_SLASH_COMMANDS 单一数据源生成，
+// 消除与 slash-commands.ts 注册表的双份维护漂移（审查发现 EPILOG 缺 11+ 已注册命令）
+import { formatBuiltinCommandList } from "./ui/core/slash-commands";
 
 // UUID v4 regex pattern for validation
 const SESSION_ID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -82,6 +85,12 @@ const QUALITY_CHECK_SUBCOMMANDS = ["codemap", "uiux", "visual", "all", "help"] a
  */
 const REVIEW_SUBCOMMANDS = ["typecheck", "lint", "format", "full", "help"] as const;
 
+/**
+ * CLI --help 底部附加说明（EPILOG）
+ *
+ * FIX-06（多角色审查 2026-07-29）：命令清单段从 BUILTIN_SLASH_COMMANDS 单一数据源生成。
+ * 键盘快捷键段保持静态（不属于斜杠命令注册表，无数据源可生成）。
+ */
 const EPILOG = [
   "Configuration:",
   "  ~/.deepcode/settings.json    User-level API key, model, base URL",
@@ -102,20 +111,8 @@ const EPILOG = [
   "  ctrl+x           Clear pasted images",
   "  esc              Interrupt the current model turn",
   "  /                Open the skills/commands menu",
-  "  /skills          List available skills",
-  "  /model           Select model, thinking mode and effort control",
-  "  /plan            Switch the input to Plan Mode",
-  "  /new             Start a fresh conversation",
-  "  /init            Initialize an AGENTS.md file with instructions for LLM",
-  "  /resume          Pick a previous conversation to continue",
-  "  /continue        Continue the active conversation, or resume one if empty",
-  "  /undo            Restore code and/or conversation to a previous point",
-  "  /mcp             Show MCP server status and available tools",
-  "  /raw             Toggle display mode for viewing or collapsing reasoning content",
-  "  /rules           RLIS rule management (list/add/remove/show/path)",
-  "  /quality-check   Quality gate: code map / UI-UX audit / visual regression",
-  "  /review          Code review with forced tool verification (typecheck/lint/format/full/help)",
-  "  /exit            Quit",
+  // 命令清单：由 BUILTIN_SLASH_COMMANDS 生成（单一数据源，与 TUI /help 一致）
+  formatBuiltinCommandList(),
   "  ctrl+d twice     Quit",
 ].join("\n");
 
@@ -392,11 +389,19 @@ async function configureYargs(argv?: string[]) {
     .strict()
     .demandCommand(0, 0)
     .wrap(Math.min(process.stdout.columns || 80, 120));
+  // FIX-15（多角色审查 2026-07-29）：不再调用 yargs 内置 .help()，避免 `team help` /
+  // `rules help` 等子命令把 help 当作内置 help 关键字而自动输出英文 Options，
+  // 导致与自定义中文帮助重复打印。改为手动注册 --help / -h 布尔选项，
+  // 由 parseArguments 在检测到 parsed.help 时统一调用 showHelp()。
   yargsInstance
     .version(await getCliVersion())
     .alias("v", "version")
-    .help()
-    .alias("h", "help");
+    .option("help", {
+      alias: "h",
+      type: "boolean",
+      describe: "Show help",
+      default: false,
+    });
   yargsInstance.wrap(yargsInstance.terminalWidth());
   return yargsInstance;
 }
@@ -416,6 +421,15 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
   });
 
   const parsed = y.parseSync() as Record<string, unknown>;
+
+  // FIX-15（多角色审查 2026-07-29）：由于禁用了 yargs 内置 .help()，
+  // --help / -h 现在只是普通布尔选项；检测到后手动输出 yargs 帮助并退出。
+  // 注意：team help / rules help 等子命令的 help 是 positional 参数，不会进入此分支，
+  // 因此不会与 cli.tsx 中的自定义中文帮助重复输出。
+  if (parsed.help === true) {
+    y.showHelp();
+    process.exit(0);
+  }
 
   // v1.6 P0-2 修正（TC-TEAM-12）：yargs 18 内置 help 机制会拦截 "help" 关键字，
   // 导致 `team help` / `rules help` 时 yargs 自动输出 help 信息并清空 parsed._。
