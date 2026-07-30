@@ -73,21 +73,20 @@ export class SharpImageAdapterError extends Error {
  */
 export class SharpImageAdapter implements ImageAdapter {
   /**
-   * sharp 模块实例
+   * sharp 构造函数（SharpConstructor 类型）
    *
-   * 通过 dynamic import 加载，类型为 typeof import("sharp")。
-   * 由于 sharp 没有官方 @types，这里使用 any 类型避免类型冲突。
-   * 实际使用时通过 SharpImageAdapter 的方法封装，对外提供类型安全的接口。
+   * sharp 0.35.x 使用 ES module 导出：`export const sharp: SharpConstructor` 和 `export default sharp`。
+   * 我们只持有 SharpConstructor，而不是整个模块。
    */
-  private readonly sharpModule: typeof import("sharp");
+  private readonly sharp: typeof import("sharp").sharp;
 
   /**
    * 私有构造函数（使用 create() 异步工厂方法构造）
    *
-   * @param sharpModule 已加载的 sharp 模块实例
+   * @param sharpConstructor 已加载的 sharp SharpConstructor 实例
    */
-  private constructor(sharpModule: typeof import("sharp")) {
-    this.sharpModule = sharpModule;
+  private constructor(sharpConstructor: typeof import("sharp").sharp) {
+    this.sharp = sharpConstructor;
   }
 
   /**
@@ -101,19 +100,17 @@ export class SharpImageAdapter implements ImageAdapter {
    * @throws {SharpImageAdapterError} sharp 未安装或加载失败
    */
   static async create(): Promise<SharpImageAdapter> {
-    let sharpModule: typeof import("sharp");
+    let sharpConstructor: typeof import("sharp").sharp;
     try {
       // dynamic import 懒加载 sharp
       // 当 sharp 在 optionalDependencies 中且未安装时，import() 会抛出 MODULE_NOT_FOUND
-      // 注意：sharp 模块通过 `export = sharp` 导出（CommonJS 风格），ESM import 时
-      //   返回的 Module 对象形状为 { default: sharpFn, [ModuleSymbol]: ..., 'module.exports': sharpFn }
-      //   TypeScript 的 `typeof import("sharp")` 推断为 sharp 函数类型本身，
-      //   但运行时 imported 不是函数，必须通过 .default 提取 sharp 函数
+      // sharp 0.35.x 使用 ES module 导出：`export const sharp: SharpConstructor` 和 `export default sharp`
       const imported = await import("sharp");
-      // 优先使用 default 属性（ESM 互操作时 default 指向 sharp 函数），
-      // fallback 到模块本身（兼容 CommonJS 直接返回函数的场景）
-      const maybeDefault = (imported as { default?: typeof import("sharp") }).default;
-      sharpModule = maybeDefault ?? (imported as unknown as typeof import("sharp"));
+      // sharp 0.35.x 同时提供 named export 和 default export
+      // 优先使用 default（兼容性更好）
+      sharpConstructor =
+        (imported as { default?: typeof import("sharp").sharp }).default ??
+        (imported as unknown as typeof import("sharp").sharp);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       throw new SharpImageAdapterError(
@@ -122,7 +119,7 @@ export class SharpImageAdapter implements ImageAdapter {
           `视觉回归子命令需要 sharp 依赖：请在 packages/cli 目录执行 \`npm install sharp\` 或 \`npm install --include=optional sharp\``
       );
     }
-    return new SharpImageAdapter(sharpModule);
+    return new SharpImageAdapter(sharpConstructor);
   }
 
   /**
@@ -137,9 +134,8 @@ export class SharpImageAdapter implements ImageAdapter {
    */
   async load(path: string): Promise<ImageData> {
     try {
-      const sharp = this.sharpModule;
       // 获取图像元数据
-      const metadata = await sharp(path).metadata();
+      const metadata = await this.sharp(path).metadata();
       const width = metadata.width ?? 0;
       const height = metadata.height ?? 0;
       if (width === 0 || height === 0) {
@@ -149,7 +145,7 @@ export class SharpImageAdapter implements ImageAdapter {
         );
       }
       // 提取 RGBA 像素数据（确保 4 通道）
-      const { data } = await sharp(path).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+      const { data } = await this.sharp(path).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
       return {
         width,
         height,
@@ -180,8 +176,7 @@ export class SharpImageAdapter implements ImageAdapter {
    */
   async getSize(path: string): Promise<{ width: number; height: number }> {
     try {
-      const sharp = this.sharpModule;
-      const metadata = await sharp(path).metadata();
+      const metadata = await this.sharp(path).metadata();
       const width = metadata.width ?? 0;
       const height = metadata.height ?? 0;
       if (width === 0 || height === 0) {
@@ -214,7 +209,6 @@ export class SharpImageAdapter implements ImageAdapter {
    */
   async save(path: string, data: ImageData): Promise<void> {
     try {
-      const sharp = this.sharpModule;
       // 将 Uint8ClampedArray 转换为 Buffer
       const buffer = Buffer.from(data.pixels);
       // 自动创建父目录（sharp.toFile 不会自动创建目录，否则会抛出 ENOENT）
@@ -222,7 +216,7 @@ export class SharpImageAdapter implements ImageAdapter {
       const nodeFs = await import("node:fs/promises");
       await nodeFs.mkdir(nodePath.dirname(path), { recursive: true });
       // 使用 sharp 从原始像素数据构造图像并输出为 PNG
-      await sharp(buffer, {
+      await this.sharp(buffer, {
         raw: {
           width: data.width,
           height: data.height,
