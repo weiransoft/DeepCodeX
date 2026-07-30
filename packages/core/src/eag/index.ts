@@ -455,6 +455,13 @@ export type { DagValidationResult } from "./doc-driven/task-decomposition";
 //    - 显式从 doc-driven/types 导出，long-horizon 的 ModuleSplit 不参与根 barrel 导出
 export type { ModuleSplit } from "./doc-driven/types";
 
+// 10. TaskCard（类型冲突，独立声明）：doc-driven/types.ts 为权威来源
+//     - doc-driven/types.ts 导出 tasks.md 任务卡片类型（EAG §5.10 文档驱动开发）
+//     - p5/guards/types.ts 独立声明 BLOCKER 守护链任务卡片类型（EAG-P5）
+//     - 显式从 doc-driven/types 导出，p5 的 TaskCard 不参与根 barrel 导出
+//     - 消费者如需 p5 风格的 TaskCard，请从 `../eag/p5` 直接导入
+export type { TaskCard } from "./doc-driven/types";
+
 // ============================================================================
 // 17. dynamic —— LLM 动态编排建议层（新增）
 // ============================================================================
@@ -469,3 +476,21 @@ export type { ModuleSplit } from "./doc-driven/types";
 //         EagDynamicSuggesterOptions / EagDynamicContext / EagSuggestionPromptContext
 // - 函数：createEagDynamicSuggester / buildEagSuggestionPrompt
 export * from "./dynamic/index";
+
+// ============================================================================
+// 18. p5 —— EAG-P5 Phase 5.1/5.2 符号图谱 + BLOCKER 守护链 + 自主编排器
+// ============================================================================
+//
+// EAG-P5 子系统统一入口：符号图谱存储（SymbolGraphStore / EdgeResolver / ImpactBFS）、
+// 6 层 15 条 BLOCKER 守护链（EnvBoundaryGuard / DangerousCommandGuard 等）、
+// RunState 持久化、NotesMemory、SmartConfirmation、StageHandler、LoopExecutor、
+// AutonomousOrchestrator 以及复用 eag/loop/ 的调度层类型。
+//
+// 命名冲突处理：
+// - p5/index.ts 复用 eag/loop/ 的 LoopScheduler / createLoopEngineeringConfig /
+//   LoopType / LoopEvent 等符号，与 eag/index.ts 第 3 节 loop 模块导出同名。
+//   按 TypeScript `export *` 规范，同名成员在根 barrel 中变得"模糊"（ambiguous），
+//   不会被自动 re-export；消费者可从 `eag/loop` 子模块直接导入这些符号。
+// - 其余 P5 专属符号（如 AutonomousOrchestrator / P5RunStateStore / BlockerGuardChain 等）
+//   无同名冲突，正常参与根 barrel 导出。
+export * from "./p5/index";

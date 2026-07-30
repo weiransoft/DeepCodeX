@@ -37,7 +37,7 @@ import {
   P5NotesMemory,
   // 类型
   type AutonomousRunResult,
-} from "../eag/p5";
+} from "../eag/p5/index";
 
 // 命令处理导入（R 组三命令链路用）
 import {

@@ -32,7 +32,7 @@
 
 import type { GateChecker, GateContext, GateResult, GateG4Context } from "./gate-types";
 import type { TemplateRegistry, GeneratedFileKind } from "../coding/types";
-import { DEFAULT_TEMPLATE_REGISTRY } from "../coding/templates";
+import { DEFAULT_TEMPLATE_REGISTRY } from "../coding/templates/index";
 
 // ============================================================================
 // 常量

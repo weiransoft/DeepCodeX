@@ -51,7 +51,7 @@ import type {
 } from "../evaluator/types";
 import { buildReport } from "../evaluator/types";
 import type { StaticChecker } from "./types";
-import { DEFAULT_STATIC_CHECKERS } from "./static-checkers";
+import { DEFAULT_STATIC_CHECKERS } from "./static-checkers/index";
 
 // ============================================================================
 // 常量与配置

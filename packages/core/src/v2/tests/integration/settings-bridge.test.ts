@@ -27,7 +27,10 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mergeV2Config, V2Config, V2ConfigError } from "../../integration/settings-bridge";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
+import { buildV2Config, mergeV2Config, V2Config, V2ConfigError } from "../../integration/settings-bridge";
 
 // ============================================================================
 // CFG-01 ~ CFG-15 测试用例
@@ -382,4 +385,137 @@ test("CFG-18: V2ConfigError 是 Error 子类", () => {
   assert.equal(err.message, "test message");
   assert.equal(err.keyPath, "test.path");
   assert.equal(err.sourceLayer, "testLayer");
+});
+
+// ============================================================================
+// buildV2Config 集成测试（repair-plan.md §3.1）
+// ============================================================================
+
+/**
+ * 创建临时项目目录，并在其下生成 .deepcode/settings.json
+ *
+ * @param v2 v2 配置子树
+ * @returns 项目根目录路径
+ */
+function createTempProjectWithV2(v2: Record<string, unknown>): string {
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "build-v2-config-test-"));
+  const deepcodeDir = path.join(projectRoot, ".deepcode");
+  fs.mkdirSync(deepcodeDir, { recursive: true });
+  fs.writeFileSync(path.join(deepcodeDir, "settings.json"), JSON.stringify({ v2 }, null, 2));
+  return projectRoot;
+}
+
+/**
+ * 清理临时项目目录
+ */
+function cleanupTempProject(projectRoot: string): void {
+  try {
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  } catch {
+    // 忽略清理失败
+  }
+}
+
+test("BVC-01: 无 settings.json 且无环境变量时返回 V2 默认值", () => {
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "build-v2-config-empty-"));
+  // 备份并清空相关环境变量，避免开发者本地环境干扰
+  const originalEnabled = process.env.DEEPCODEX_V2_ENABLED;
+  const originalContextEnabled = process.env.DEEPCODEX_V2_CONTEXT__ENABLED;
+  delete process.env.DEEPCODEX_V2_ENABLED;
+  delete process.env.DEEPCODEX_V2_CONTEXT__ENABLED;
+
+  try {
+    const result = buildV2Config(projectRoot);
+    assert.equal(result.enabled, false, "V2 总开关默认关闭");
+    assert.equal(result.context.enabled, false, "V2 上下文默认关闭");
+    assert.equal(result.diff.enabled, true, "diff 增强默认启用");
+    assert.equal(result.codemap.maxFileSizeKb, 100, "codemap 默认值保留");
+  } finally {
+    cleanupTempProject(projectRoot);
+    if (originalEnabled !== undefined) process.env.DEEPCODEX_V2_ENABLED = originalEnabled;
+    if (originalContextEnabled !== undefined) process.env.DEEPCODEX_V2_CONTEXT__ENABLED = originalContextEnabled;
+  }
+});
+
+test("BVC-02: 项目级 settings.json 的 v2 子树覆盖默认值", () => {
+  const projectRoot = createTempProjectWithV2({
+    context: { enabled: true, tokenBudget: 50000 },
+    codemap: { maxFileSizeKb: 200 },
+  });
+
+  try {
+    const result = buildV2Config(projectRoot);
+    assert.equal(result.context.enabled, true, "项目级 settings 启用 V2 上下文");
+    assert.equal(result.context.tokenBudget, 50000, "项目级 settings 覆盖 tokenBudget");
+    assert.equal(result.codemap.maxFileSizeKb, 200, "项目级 settings 覆盖 codemap.maxFileSizeKb");
+    assert.equal(result.enabled, false, "未覆盖字段保留默认");
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
+});
+
+test("BVC-03: DEEPCODEX_V2_* 环境变量覆盖项目级 settings", () => {
+  const projectRoot = createTempProjectWithV2({
+    context: { enabled: false },
+  });
+
+  // 备份环境变量
+  const originalEnabled = process.env.DEEPCODEX_V2_ENABLED;
+  const originalContextEnabled = process.env.DEEPCODEX_V2_CONTEXT__ENABLED;
+  process.env.DEEPCODEX_V2_ENABLED = "true";
+  process.env.DEEPCODEX_V2_CONTEXT__ENABLED = "true";
+
+  try {
+    const result = buildV2Config(projectRoot);
+    assert.equal(result.enabled, true, "环境变量覆盖 V2 总开关");
+    assert.equal(result.context.enabled, true, "环境变量覆盖 context.enabled");
+  } finally {
+    cleanupTempProject(projectRoot);
+    if (originalEnabled !== undefined) process.env.DEEPCODEX_V2_ENABLED = originalEnabled;
+    else delete process.env.DEEPCODEX_V2_ENABLED;
+    if (originalContextEnabled !== undefined) process.env.DEEPCODEX_V2_CONTEXT__ENABLED = originalContextEnabled;
+    else delete process.env.DEEPCODEX_V2_CONTEXT__ENABLED;
+  }
+});
+
+test("BVC-04: 项目级与用户级 v2 子树深度合并（项目级覆盖用户级）", () => {
+  // 构造临时 HOME 目录，使 readSettings 读取用户级 settings.json
+  const originalHome = process.env.HOME;
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "build-v2-config-home-"));
+  const userDeepcodeDir = path.join(tempHome, ".deepcode");
+  fs.mkdirSync(userDeepcodeDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(userDeepcodeDir, "settings.json"),
+    JSON.stringify(
+      {
+        v2: {
+          context: { enabled: false, tokenBudget: 100000, topKFiles: 10 },
+          diff: { contextLines: 5 },
+        },
+      },
+      null,
+      2
+    )
+  );
+  process.env.HOME = tempHome;
+
+  const projectRoot = createTempProjectWithV2({
+    context: { enabled: true, topKFiles: 30 },
+  });
+
+  try {
+    const result = buildV2Config(projectRoot);
+    // 项目级覆盖用户级
+    assert.equal(result.context.enabled, true, "项目级覆盖 context.enabled");
+    assert.equal(result.context.topKFiles, 30, "项目级覆盖 topKFiles");
+    // 用户级保留（项目级未提供）
+    assert.equal(result.context.tokenBudget, 100000, "用户级 tokenBudget 保留");
+    assert.equal(result.diff.contextLines, 5, "用户级 diff.contextLines 保留");
+  } finally {
+    cleanupTempProject(projectRoot);
+    // 恢复 HOME
+    if (originalHome !== undefined) process.env.HOME = originalHome;
+    else delete process.env.HOME;
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
 });

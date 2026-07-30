@@ -30,7 +30,7 @@ import type { DeployRequest } from "../eag/cli/eag-command-parser";
 import type { CodingLoopRequest } from "../eag/coding/types";
 import type { DesignLoopInput } from "../eag/design/design-models";
 import type { TestingLoopRequest } from "../eag/testing/types";
-import type { EagRunRequest, EagResumeRequest, EagStatusRequest } from "../eag/long-horizon";
+import type { EagRunRequest, EagResumeRequest, EagStatusRequest } from "../eag/long-horizon/index";
 import {
   createMinimalCodingLoopRequest,
   createMinimalDesignLoopInput,

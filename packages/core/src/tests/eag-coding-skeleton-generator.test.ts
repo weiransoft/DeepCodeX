@@ -77,7 +77,7 @@ import type {
   TemplateRegistry,
   TemplateVariableSchema,
 } from "../eag/coding/types";
-import { DEFAULT_TEMPLATE_REGISTRY } from "../eag/coding/templates";
+import { DEFAULT_TEMPLATE_REGISTRY } from "../eag/coding/templates/index";
 import type { TaskDag, TaskNode } from "../eag/doc-driven/types";
 
 // ============================================================================

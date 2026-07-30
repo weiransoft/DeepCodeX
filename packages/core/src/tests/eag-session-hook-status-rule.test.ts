@@ -32,7 +32,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { RuleLearner } from "../eag/rlis/rule-learner";
 import { RunStateStore } from "../eag/long-horizon/run-state-store";
-import type { EagStatusResult } from "../eag/long-horizon";
+import type { EagStatusResult } from "../eag/long-horizon/index";
 import { createMinimalEagStatusRequest, createTestManager } from "./fixtures/eag-command-fixtures";
 
 // ============================================================================

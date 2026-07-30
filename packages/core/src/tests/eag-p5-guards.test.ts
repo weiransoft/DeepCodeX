@@ -52,7 +52,7 @@ import {
   type TaskCard,
   type ChangeDiff,
   type CompletionEvidence,
-} from "../eag/p5";
+} from "../eag/p5/index";
 
 // ============================================================================
 // 测试辅助：构造 GuardContext 的工厂函数
@@ -424,9 +424,88 @@ test("B15. TC-GUARD-A2c-005：白名单收敛 ASK 转人工（npm testX 误匹�
     pendingCommand: "npm testX",
   });
   const verdict = guard.check(ctx);
-  // npm testX 不应匹配 "npm test" 前缀（下一个字符不是空格/分号/管道/&）
+  // npm testX 不应匹配 "npm test" 前缀（下一个字符不是空格或命令结束）
   assert.equal(verdict.decision, "ASK");
   assert.equal(verdict.ruleId, "G-A2c");
+});
+
+test("B16. TC-GUARD-A2a-006：黑名单永禁 eval", () => {
+  const guard = new DangerousCommandGuard();
+  const ctx = createContext({
+    pendingCommand: "node -e 'eval(process.argv[1])'",
+  });
+  const verdict = guard.check(ctx);
+  assert.equal(verdict.decision, "DENY");
+  assert.equal(verdict.ruleId, "G-A2a");
+  assert.match(verdict.reason, /eval/);
+});
+
+test("B17. TC-GUARD-A2a-007：黑名单永禁反引号命令替换", () => {
+  const guard = new DangerousCommandGuard();
+  const ctx = createContext({
+    pendingCommand: "echo `whoami`",
+  });
+  const verdict = guard.check(ctx);
+  assert.equal(verdict.decision, "DENY");
+  assert.equal(verdict.ruleId, "G-A2a");
+  assert.match(verdict.reason, /反引号/);
+});
+
+test("B18. TC-GUARD-A2a-008：黑名单永禁 $() 命令替换", () => {
+  const guard = new DangerousCommandGuard();
+  const ctx = createContext({
+    pendingCommand: "echo $(cat /etc/passwd)",
+  });
+  const verdict = guard.check(ctx);
+  assert.equal(verdict.decision, "DENY");
+  assert.equal(verdict.ruleId, "G-A2a");
+  assert.match(verdict.reason, /\$\(\)/);
+});
+
+test("B19. TC-GUARD-A2a-009：黑名单永禁 Base64 解码管道执行", () => {
+  const guard = new DangerousCommandGuard();
+  const ctx = createContext({
+    pendingCommand: "echo 'cm0gLXJmIC8=' | base64 -d | sh",
+  });
+  const verdict = guard.check(ctx);
+  assert.equal(verdict.decision, "DENY");
+  assert.equal(verdict.ruleId, "G-A2a");
+  assert.match(verdict.reason, /Base64/);
+});
+
+test("B20. TC-GUARD-A2a-010：黑名单永禁 python -c 一行代码", () => {
+  const guard = new DangerousCommandGuard();
+  const ctx = createContext({
+    pendingCommand: "python -c 'import os; os.system(\"rm -rf /\")'",
+  });
+  const verdict = guard.check(ctx);
+  assert.equal(verdict.decision, "DENY");
+  assert.equal(verdict.ruleId, "G-A2a");
+  assert.match(verdict.reason, /python/);
+});
+
+test("B21. TC-GUARD-A2c-006：白名单前缀命中但含 ; 链 fail-closed 转人工", () => {
+  const guard = new DangerousCommandGuard();
+  const ctx = createContext({
+    pendingCommand: "npm test; echo leaked",
+  });
+  const verdict = guard.check(ctx);
+  // 前半段命中 npm test 白名单，但 ; 引入后半段任意命令，fail-closed 转人工
+  assert.equal(verdict.decision, "ASK");
+  assert.equal(verdict.ruleId, "G-A2c");
+  assert.match(verdict.reason, /shell 元字符/);
+});
+
+test("B22. TC-GUARD-A2c-007：白名单前缀命中但含 | 管道 fail-closed 转人工", () => {
+  const guard = new DangerousCommandGuard();
+  const ctx = createContext({
+    pendingCommand: "npm test | cat",
+  });
+  const verdict = guard.check(ctx);
+  // | 管道使后半段可替换为任意命令，fail-closed 转人工
+  assert.equal(verdict.decision, "ASK");
+  assert.equal(verdict.ruleId, "G-A2c");
+  assert.match(verdict.reason, /shell 元字符/);
 });
 
 // ============================================================================

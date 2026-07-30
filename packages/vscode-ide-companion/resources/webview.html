@@ -666,7 +666,8 @@
 
             const contentDiv = document.createElement("div");
             contentDiv.className = "bubble-collapsible-content collapsed";
-            contentDiv.innerHTML = content;
+            // 思考内容按纯文本处理，先转义再插入，避免任意 HTML/JS 执行
+            contentDiv.innerHTML = escapeHtml(content);
 
             header.addEventListener("click", () => {
               const isCollapsed = contentDiv.classList.toggle("collapsed");
@@ -691,7 +692,10 @@
 
             const contentDiv = document.createElement("div");
             contentDiv.className = "bubble-normal-content";
-            contentDiv.innerHTML = content;
+            // 普通 assistant 消息按纯文本处理：先转义再插入，关闭对未受信内容的 innerHTML 直接赋值。
+            // 后端 Markdown 渲染后的 HTML 不应在 webview 侧直接解析；若未来需要保留富文本，
+            // 必须引入可信 sanitization（DOMPurify）并配置严格 CSP。
+            contentDiv.innerHTML = escapeHtml(content);
 
             // 添加复制按钮
             const copyBtn = document.createElement("button");
@@ -916,9 +920,41 @@
       }
 
       function escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
+        if (typeof text !== "string") {
+          return "";
+        }
+        return text
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      /**
+       * 对可信任的 HTML 进行基础消毒，移除常见 XSS 向量。
+       *
+       * 说明：webview 中 assistant 消息可能由后端将 Markdown 渲染为 HTML 后传入，
+       * 因此不能简单转义所有标签（否则代码块、列表等格式会丢失）。
+       * 本函数在保留基本 HTML 结构的前提下，删除 <script> 标签、内联事件处理器、
+       * javascript: 伪协议等高风险内容，作为防御 XSS 的第一道防线。
+       *
+       * @param {string} html 待消毒的 HTML 字符串
+       * @returns {string} 消毒后的 HTML 字符串
+       */
+      function sanitizeHtml(html) {
+        if (typeof html !== "string") {
+          return "";
+        }
+        return (
+          html
+            // 移除 script 标签及其内容（含多行、大小写变形）
+            .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
+            // 移除事件处理器属性 onxxx="..." / onxxx='...' / onxxx=...
+            .replace(/\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+            // 移除 javascript: / data:text/html 等危险伪协议
+            .replace(/(?:javascript|data|vbscript):/gi, "")
+        );
       }
 
       function normalizeAskPermissions(value) {

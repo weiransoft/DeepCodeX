@@ -255,6 +255,47 @@ const DANGEROUS_COMMAND_PATTERNS: ReadonlyArray<
     name: "umount-root",
     description: "卸载根文件系统",
   },
+  // === 代码执行绕过构造 ===
+  {
+    pattern: /(^|[^\w])eval\s*\(/,
+    name: "eval-execution",
+    description: "eval 执行任意字符串代码",
+  },
+  {
+    pattern: /(^|[^\w])new\s+Function\s*\(/,
+    name: "new-function-execution",
+    description: "new Function 动态编译执行任意代码",
+  },
+  {
+    pattern: /`[^`]*`/,
+    name: "backtick-command-substitution",
+    description: "反引号命令替换（可隐藏恶意命令）",
+  },
+  {
+    pattern: /\$\s*\([^)]+\)/,
+    name: "dollar-paren-command-substitution",
+    description: "$() 命令替换（可嵌套执行任意 shell）",
+  },
+  {
+    pattern: /\b(echo|printf|cat)\s+[^|]*\|\s*base64\s+-d\s*\|\s*(sh|bash|zsh)/i,
+    name: "base64-decode-pipe-shell",
+    description: "Base64 解码后通过管道执行 shell（常见绕过手段）",
+  },
+  {
+    pattern: /\bpython\s+-c\s+['"`]/i,
+    name: "python-one-liner",
+    description: "python -c 执行任意 Python 代码",
+  },
+  {
+    pattern: /\bperl\s+-e\s+['"`]/i,
+    name: "perl-one-liner",
+    description: "perl -e 执行任意 Perl 代码",
+  },
+  {
+    pattern: /\bruby\s+-e\s+['"`]/i,
+    name: "ruby-one-liner",
+    description: "ruby -e 执行任意 Ruby 代码",
+  },
 ]);
 
 // ============================================================================
@@ -729,16 +770,33 @@ export class DangerousCommandGuard implements GuardRule {
   // ===========================================================================
 
   /**
+   * 危险 shell 元字符/构造正则集合（用于 fail-closed 预检）
+   *
+   * 匹配可能将单个命令拆分为多段执行的构造：
+   * - 命令替换：反引号、`$()`
+   * - 命令链：`;`、`&&`、`||`、`|`
+   *
+   * 注意：这些构造本身不一定是恶意的（如 `npm test && npm run build`），
+   * 但在 AUTO 模式下，它们允许前半段命中白名单、后半段执行任意命令，
+   * 因此必须 fail-closed：检测到此类构造后，仅当剩余部分仍完全落在
+   * 同一白名单命令的合法参数空间时才允许；否则转人工。
+   */
+  private static readonly SHELL_METACHARACTER_PATTERN = /[;|`]|\|\||&&|\$\s*\(/;
+
+  /**
    * G-A2c 白名单收敛检查
    *
    * 判定逻辑：
    * - 若 pendingCommand 不在 AUTO 允许白名单内 → ASK 转人工
-   * - 若在白名单内 → PASS
+   * - 若在白名单内，但包含命令链/替换等 shell 元字符导致后半段可能逃逸白名单 → ASK 转人工
+   * - 否则 → PASS
    *
    * 实现细节：
    * - 使用前缀匹配（startsWith）覆盖子命令变体
    * - 严格收敛：仅允许预定义的安全命令子集
    * - 即使前缀匹配，仍会被 G-A2a 黑名单优先拦截（短路原则）
+   * - fail-closed：前缀匹配后，若命令剩余部分包含 `; | & \` $()` 等构造，
+   *   说明存在命令链或命令替换，必须转人工确认，防止 "npm test; rm -rf /" 类绕过
    *
    * @param context 判定上下文
    * @returns 判定结果（PASS / ASK）
@@ -753,14 +811,28 @@ export class DangerousCommandGuard implements GuardRule {
     const trimmedCmd = cmd.trim();
 
     // 遍历白名单，检查前缀匹配
-    for (const { prefix, description } of AUTO_ALLOWLIST) {
+    for (const { prefix } of AUTO_ALLOWLIST) {
       if (trimmedCmd.startsWith(prefix)) {
-        // 前缀匹配后，下一个字符必须是空格、分号、管道、& 或命令结束
-        // 防止 "npm testX" 误匹配 "npm test"
+        // 前缀匹配后，下一个字符必须是空格、命令结束，或者是 shell 元字符/构造
+        // 防止 "npm testX" 误匹配 "npm test"，但允许识别 "npm test; echo leaked" 等绕过
         const nextChar = trimmedCmd.charAt(prefix.length);
-        if (nextChar === "" || nextChar === " " || nextChar === ";" || nextChar === "|" || nextChar === "&") {
-          return createPassVerdict();
+        const isShellBoundary = /[;|&`$]/.test(nextChar);
+        if (nextChar !== "" && nextChar !== " " && !isShellBoundary) {
+          continue;
         }
+
+        // fail-closed：检查匹配后的剩余部分是否包含危险 shell 元字符
+        const remainder = trimmedCmd.slice(prefix.length).trim();
+        if (remainder.length > 0 && DangerousCommandGuard.SHELL_METACHARACTER_PATTERN.test(remainder)) {
+          return createAskVerdict(
+            "G-A2c",
+            "BLOCKER",
+            `白名单收敛违规：命令 "${trimmedCmd.substring(0, 50)}${trimmedCmd.length > 50 ? "..." : ""}" 命中白名单但包含 shell 元字符/构造，存在绕过风险`,
+            "转人工确认复合命令，或拆分为多个单一安全命令"
+          );
+        }
+
+        return createPassVerdict();
       }
     }
 

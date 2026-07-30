@@ -31,7 +31,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 // P5 核心组件导入（E 组 / F 组类型）
-import type { AutonomousRunRequest } from "../eag/p5";
+import type { AutonomousRunRequest } from "../eag/p5/index";
 
 // P5 默认配置常量导入（F2 用）
 import {
@@ -40,7 +40,7 @@ import {
   AUTONOMOUS_DEFAULT_CONSECUTIVE_FAILURE_ABORT,
   AUTONOMOUS_DEFAULT_TEST_COMMAND,
   AUTONOMOUS_DEFAULT_TEST_TIMEOUT_SEC,
-} from "../eag/p5";
+} from "../eag/p5/index";
 
 // 共享夹具导入
 import {

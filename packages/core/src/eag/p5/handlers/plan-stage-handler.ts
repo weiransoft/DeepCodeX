@@ -36,7 +36,7 @@ import type { TaskCard } from "../guards/types";
 import type { DomainExpertMatchResult } from "../../../team/types.js";
 import { DomainExpertMatcher } from "../../../team/domain-expert-matcher";
 import { DomainExpertRegistry } from "../../../team/domain-expert-registry";
-import { registerAllExperts } from "../../../team/domain-experts";
+import { registerAllExperts } from "../../../team/domain-experts/index";
 // GuardCoordinator 集成：plan 阶段接入 team/cybernetics 守护协调器（可选增强）
 import { GuardCoordinator } from "../../../team/cybernetics/guard-coordinator";
 import type { ValidationResult } from "../../../team/cybernetics/guard-coordinator";

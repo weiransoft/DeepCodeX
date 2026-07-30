@@ -106,6 +106,12 @@ export type DeepcodingSettings = {
   permissions?: PermissionSettings;
   enabledSkills?: EnabledSkillsSettings;
   statusline?: StatusLineSettings;
+  /**
+   * V2 上下文记忆体系配置子树（v2.8）
+   * 对应 V2_CONTEXT_MEMORY_TECH_DESIGN.md §9.4 的 V2Config，由 buildV2Config 消费。
+   * 使用 Record<string, unknown> 以兼容 schema 演进，实际校验在 mergeV2Config 中进行。
+   */
+  v2?: Record<string, unknown>;
 };
 
 export type ResolvedDeepcodingSettings = {

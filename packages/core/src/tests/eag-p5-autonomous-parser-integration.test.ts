@@ -37,7 +37,7 @@ import { EagCommandParser, EAG_COMMAND_STRINGS } from "../eag/cli/eag-command-pa
 import { EagAutonomousCommandHandler, extractEagAutonomousRequestFromPrompt } from "../eag/cli/eag-autonomous-command";
 
 // P5 核心组件类型导入（用于 D 组类型断言）
-import type { AutonomousOrchestrator } from "../eag/p5";
+import type { AutonomousOrchestrator } from "../eag/p5/index";
 
 // 共享夹具导入
 import {

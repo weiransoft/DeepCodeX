@@ -67,7 +67,7 @@ import {
   createContractTestSpec,
   createE2eTestSpec,
   createGeneratedTestFile,
-} from "../eag/testing";
+} from "../eag/testing/index";
 
 // 2. 契约测试生成器导出（contract-test-generator.ts）
 import {
@@ -79,10 +79,10 @@ import {
   createOpenApiSpecParser,
   createTsSignatureExtractor,
   DEFAULT_CONTRACT_TEST_TEMPLATES,
-} from "../eag/testing";
+} from "../eag/testing/index";
 
 // 3. E2E 测试生成器导出（e2e-test-generator.ts）
-import { E2eTestGenerator, E2eTestGeneratorError, createDefaultE2eTestGenerator } from "../eag/testing";
+import { E2eTestGenerator, E2eTestGeneratorError, createDefaultE2eTestGenerator } from "../eag/testing/index";
 
 // 4. 覆盖率门禁导出（coverage-gate.ts）
 import {
@@ -92,7 +92,7 @@ import {
   createDefaultCoverageGate,
   createC8ReportParser,
   isC8Available,
-} from "../eag/testing";
+} from "../eag/testing/index";
 
 // 5. 既有契约保护判定器导出（brownfield-contract-guard.ts）
 import {
@@ -100,10 +100,10 @@ import {
   BrownfieldContractGuardError,
   createDefaultBrownfieldContractGuard,
   DEFAULT_EXISTING_CONTRACTS_RELATIVE_PATH,
-} from "../eag/testing";
+} from "../eag/testing/index";
 
 // 6. TESTING Loop 编排器导出（testing-orchestrator.ts）
-import { TestingOrchestrator, TestingOrchestratorError, createDefaultTestingOrchestrator } from "../eag/testing";
+import { TestingOrchestrator, TestingOrchestratorError, createDefaultTestingOrchestrator } from "../eag/testing/index";
 
 // EAG-P3 批次 11 S1 改造：注入独立 GateG6Checker / GateG7Checker（构造期必填）
 // 设计依据：EAG-P3 批次 11 设计 §3 S1 D-S1-4——所有 7 道门禁均采用"独立类 + 构造期注入"模式，
@@ -121,7 +121,7 @@ import {
   getRegisteredCheckerIds,
   getCheckerById,
   runAllCheckers,
-} from "../eag/testing";
+} from "../eag/testing/index";
 
 // 跨模块导入（InMemoryLLMClient 来自 coding 模块）
 import { InMemoryLLMClient } from "../eag/coding/llm-filler";
@@ -169,7 +169,7 @@ import type {
   GateG7Result,
   GateG6Context,
   GateG7Context,
-} from "../eag/testing";
+} from "../eag/testing/index";
 
 // ============================================================================
 // 辅助函数：构造测试 fixture

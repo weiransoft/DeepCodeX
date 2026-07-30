@@ -58,6 +58,17 @@ import {
   type DynamicCommandDescriptor,
   type EagDynamicSuggester,
 } from "@vegamo/deepcode-core";
+// ADR-DI-001 动态指令注入与后台子 Agent 组件 + V2 上下文钩子工厂
+import {
+  InterruptQueue,
+  TaskRegistry,
+  BackgroundTaskRunner,
+  DefaultSessionContextHook,
+  createDualLayerContextHook,
+  buildV2Config,
+} from "@vegamo/deepcode-core";
+// V2 上下文钩子相关类型
+import type { SessionContextHook, V2Config } from "@vegamo/deepcode-core";
 import { buildDynamicCommandDescriptors } from "../core/dynamic-commands";
 import { writeStdout, writeStdoutLine } from "../../utils/stdio-helpers";
 // 导入 TeamCommandArgs 类型，用于 parseTeamArgs 返回值类型标注
@@ -220,6 +231,64 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
     // 构造外部命令描述符（team/rules/slash），注入 SessionManager
     const dynamicCommandDescriptors: ReadonlyArray<DynamicCommandDescriptor> = buildDynamicCommandDescriptors();
 
+    // V2 Session 上下文钩子：根据 settings.json 与环境变量构造 DualLayerContextHook
+    // 未启用 V2 总开关或上下文子开关时，createDualLayerContextHook 内部降级为
+    // DefaultSessionContextHook，preBuildContext 返回空数组，行为与 v1 完全一致（零回归）
+    const v2Config = buildV2Config(projectRoot);
+    const contextHook: SessionContextHook = createDualLayerContextHook(projectRoot, v2Config);
+
+    // ADR-DI-001 动态指令注入与后台子 Agent 组件
+    // 所有组件均为可选注入；未注入时对应命令不可用，主对话循环行为完全不变（零回归）
+    const taskRegistry = new TaskRegistry({
+      onTaskStateChanged: () => {
+        // 任务状态变更时刷新 UI 中的任务列表（如未来支持任务视图）
+        // 当前最小实现：仅触发一次状态更新以确保 React 捕获变更
+        setNowTick((tick) => tick + 1);
+      },
+    });
+    const interruptQueue = new InterruptQueue();
+    const backgroundRunner = new BackgroundTaskRunner({
+      sharedSessionOptions: {
+        sessionManagerFactory: (_taskId, _controller) => {
+          // 后台任务使用独立的 SessionManager 实例（D-1 决策）
+          // 独立 InterruptQueue / AbortController / contextHook，避免影响前台
+          // 注意：_controller 由 BackgroundTaskRunner 提供，当前 SessionManager.handleUserPrompt
+          // 内部自行创建 AbortController，因此此处暂不将外部 controller 接入主循环取消链路
+          // （后续可在 SessionManager 增加外部 controller 注入点以完善后台任务取消语义）
+          const bgInterruptQueue = new InterruptQueue();
+          const bgContextHook = new DefaultSessionContextHook();
+          const bgManager = new SessionManager({
+            projectRoot,
+            createOpenAIClient: () => createOpenAIClient(projectRoot),
+            getResolvedSettings: () => resolveCurrentSettings(projectRoot),
+            renderMarkdown: (text) => text,
+            isForeground: false,
+            interruptQueue: bgInterruptQueue,
+            taskRegistry,
+            contextHook: bgContextHook,
+            onAssistantMessage: () => {
+              // 后台任务的助手消息不写入前台 UI，由 TaskRegistry 状态间接反映进度
+            },
+            onSessionEntryUpdated: () => {
+              // 后台任务会话状态变更不刷新前台状态栏
+            },
+            onLlmStreamProgress: () => {
+              // 后台任务流式进度不展示到前台
+            },
+          });
+          return {
+            handleUserPrompt: async (prompt: string) => {
+              await bgManager.handleUserPrompt({ text: prompt });
+            },
+          };
+        },
+      },
+      registry: taskRegistry,
+      onTaskStateChange: () => {
+        setNowTick((tick) => tick + 1);
+      },
+    });
+
     return new SessionManager({
       projectRoot,
       createOpenAIClient: () => createOpenAIClient(projectRoot),
@@ -227,6 +296,12 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
       renderMarkdown: (text) => text,
       eagDynamicSuggester,
       dynamicCommandDescriptors,
+      // V2 Session 上下文钩子注入
+      contextHook,
+      // ADR-DI-001 动态指令注入与后台子 Agent 注入
+      interruptQueue,
+      taskRegistry,
+      backgroundRunner,
       onAssistantMessage: (message: SessionMessage) => {
         setMessages((prev) => [...prev, message]);
         if (rawModeRef.current === RawMode.Raw) {

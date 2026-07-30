@@ -92,6 +92,8 @@ import {
 import { clearSessionWorkingDir } from "./tools/bash-handler";
 import { reportNewPrompt } from "./common/telemetry";
 import { OpenAIMessageConverter } from "./common/openai-message-converter";
+// V2 Session 上下文钩子：可选注入，未注入时 OpenAIMessageConverter 行为与 v1 一致
+import type { SessionContextHook } from "./v2/integration/session-hook";
 // === EAG 模块导入（@experimental）===
 // 以下 EAG 相关导入均为可选注入能力，未注入时主流程零回归。
 // 详细设计决策见 docs/dev/ADR-EAG-001-experimental-status.md。
@@ -105,11 +107,11 @@ import type {
   EvaluationReport,
   EvaluationVerdict,
 } from "./eag/evaluator/types";
-import type { CodingOrchestrator } from "./eag/coding";
+import type { CodingOrchestrator } from "./eag/coding/index";
 import type { CodingLoopRequest, CodingLoopResult, PkcAccessor } from "./eag/coding/types";
 import type { DesignLoopOrchestrator } from "./eag/design/design-orchestrator";
 import type { DesignLoopInput, DesignLoopResult } from "./eag/design/design-models";
-import type { TestingOrchestrator } from "./eag/testing";
+import type { TestingOrchestrator } from "./eag/testing/index";
 import type { TestingLoopRequest, TestingLoopResult } from "./eag/testing/types";
 import type { RunStateStore } from "./eag/long-horizon/run-state-store";
 import type { RuleLearner } from "./eag/rlis/rule-learner";
@@ -121,15 +123,15 @@ import {
   MultiLoopPlanner,
   MilestoneTagger,
   BlockageAnalyzer,
-} from "./eag/long-horizon";
+} from "./eag/long-horizon/index";
 import type {
   EagRunRequest,
   EagRunResult,
   EagResumeRequest,
   EagStatusRequest,
   EagStatusResult,
-} from "./eag/long-horizon";
-import { EagCommandParser } from "./eag/cli";
+} from "./eag/long-horizon/index";
+import { EagCommandParser } from "./eag/cli/index";
 import type { DevOpsOrchestrator } from "./eag/devops/devops-orchestrator";
 import type { DevOpsContext, DevOpsResult } from "./eag/devops/types";
 import type { DeployRequest } from "./eag/cli/eag-command-parser";
@@ -139,23 +141,23 @@ import {
   extractEagAutonomousRequestFromPrompt,
   extractEagAutonomousStatusRequestFromPrompt,
   extractEagAutonomousStopRequestFromPrompt,
-} from "./eag/cli";
+} from "./eag/cli/index";
 import type {
   EagAutonomousRequest,
   EagAutonomousCommandResult,
   EagAutonomousStatusRequest,
   EagAutonomousStopRequest,
-} from "./eag/cli";
+} from "./eag/cli/index";
 import type { GraphLoopOrchestratorOptions } from "./eag/graph/graph-loop-protocols";
-import { EagGraphCommandHandler, extractEagGraphRequestFromPrompt } from "./eag/cli";
-import type { EagGraphRequest, EagGraphCommandResult } from "./eag/cli";
+import { EagGraphCommandHandler, extractEagGraphRequestFromPrompt } from "./eag/cli/index";
+import type { EagGraphRequest, EagGraphCommandResult } from "./eag/cli/index";
 import type {
   EagDynamicSuggester,
   EagDynamicSuggestion,
   EagCommandKind,
   EagClarificationOption,
   DynamicCommandDescriptor,
-} from "./eag/dynamic";
+} from "./eag/dynamic/index";
 // === 中断与后台任务导入（ADR-DI-001）===
 // InterruptQueue / TaskRegistry / BackgroundTaskRunner 均为可选注入，
 // 未注入时中断能力不可用，主流程零回归。详见 docs/dev/ADR-DI-001-*.md。
@@ -169,10 +171,10 @@ import type {
   TaskListFilter,
   InjectedInstruction,
   InjectSource,
-} from "./interrupts";
+} from "./interrupts/index";
 // InjectInterruptError 是值（错误类），需要值导入而非 type 导入
 // 用于 createChatCompletionStream 抛出 + activateSession catch 块 instanceof 判定
-import { InjectInterruptError } from "./interrupts";
+import { InjectInterruptError } from "./interrupts/index";
 
 export type { PermissionScope } from "./settings";
 export type {
@@ -673,6 +675,20 @@ type SessionManagerOptions = {
    * - 本字段主要供 UI 层判断是否启用 `/inject` `/bg` 等命令的快捷键
    */
   isForeground?: boolean;
+  /**
+   * V2 Session 上下文钩子（可选注入，§9.1）
+   *
+   * 未注入时 OpenAIMessageConverter 行为与 v1 完全一致（向后兼容，零回归）。
+   * 注入后，buildMessages 在每轮 LLM 请求前同步调用 contextHook.preBuildContext，
+   * 将缓存的上下文片段注入到首条 system message 末尾的 "## V2 Context" 区块。
+   *
+   * 配套使用：
+   * - V2-P0a：DefaultSessionContextHook 提供基于 Map 的进程内存缓存与 TTL 过期
+   * - V2-P1：DualLayerContextManager 在 turn 入口调用 refreshContextAsync 预计算上下文
+   *
+   * 不可变优先（§5.12.4 G-A6d）：构造后字段不可变，循环内不可被 LLM 修改。
+   */
+  contextHook?: SessionContextHook;
 };
 
 export type LlmStreamProgress = {
@@ -792,6 +808,10 @@ export class SessionManager {
   private readonly taskRegistry?: TaskRegistry;
   private readonly backgroundRunner?: BackgroundTaskRunner;
   private readonly isForeground: boolean;
+  // V2 Session 上下文钩子（可选注入，§9.1）
+  // - 未注入时 messageConverter 行为与 v1 一致
+  // - 注入后 buildMessages 同步调用 preBuildContext 注入上下文片段
+  private readonly contextHook?: SessionContextHook;
   // EAG 动态建议层待澄清状态（内存级，key = sessionId）
   // - 当 LLM 返回 ask_clarification 时写入
   // - 用户下一轮回复命中时解析答案并回注 clarification，随后清除
@@ -830,8 +850,12 @@ export class SessionManager {
       getResolvedSettings: () => this.getResolvedSettings(),
       listSessionMessages: (sessionId: string) => this.listSessionMessages(sessionId),
     });
+    // V2 上下文钩子注入：构造时传入 OpenAIMessageConverter
+    // 未注入 contextHook 时行为与 v1 完全一致（向后兼容）
+    this.contextHook = options.contextHook;
     this.messageConverter = new OpenAIMessageConverter({
       renderInitPrompt: () => this.renderInitCommandPrompt(),
+      contextHook: this.contextHook,
     });
     // EAG-P0 外挂字段赋值（可选注入，未注入时为 undefined，主循环行为不变）
     this.evaluator = options.evaluator;
@@ -1686,6 +1710,22 @@ ${agentInstructions}
     this.activePromptController = controller;
 
     try {
+      // V2 上下文缓存刷新：必须在 createSession / replySession 之前调用。
+      // createSession 会构建 system message 并调用 buildMessages；只有提前刷新，
+      // preBuildContext 才能在该轮首次 buildMessages 时命中上下文片段，
+      // 否则 V2 上下文会延迟一整轮才生效。
+      // 刷新结果写入进程内存缓存，preBuildContext 在 buildMessages 热路径上同步读取，
+      // 保证 buildMessages 同步签名不变。未注入 contextHook 或 V2 未启用时为空操作。
+      // 注意：仅在 turn 入口调用一次，LLM 流式循环内禁止重复调用。
+      // 上下文刷新失败属于辅助能力降级，不应阻塞主对话流程，因此单独捕获并静默 swallow。
+      if (this.activeSessionId) {
+        try {
+          await this.contextHook?.refreshContextAsync(this.activeSessionId);
+        } catch {
+          // 降级 swallow：V2 上下文预计算失败时保持主对话继续，保证零回归。
+        }
+      }
+
       if (!this.activeSessionId || !this.getSession(this.activeSessionId)) {
         await this.createSession(userPrompt, controller);
       } else {

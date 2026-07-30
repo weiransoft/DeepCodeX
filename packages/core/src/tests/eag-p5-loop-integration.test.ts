@@ -55,7 +55,7 @@ import {
   type LoopEvent,
   // 默认配置常量
   AUTONOMOUS_DEFAULT_CONSECUTIVE_FAILURE_ABORT,
-} from "../eag/p5";
+} from "../eag/p5/index";
 
 // ============================================================================
 // 1. 测试常量

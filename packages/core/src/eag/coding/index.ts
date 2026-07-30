@@ -113,7 +113,7 @@ export {
 // ============================================================================
 
 // 2.1 模板注册表与便捷函数
-export { DEFAULT_TEMPLATE_REGISTRY, getTemplate } from "./templates";
+export { DEFAULT_TEMPLATE_REGISTRY, getTemplate } from "./templates/index";
 
 // 2.2 模板字符串常量（供需要直接访问的调用方使用）
 export {
@@ -130,7 +130,7 @@ export {
   EVENT_HANDLER_TEMPLATE,
   TEST_SPEC_TEMPLATE,
   MODULE_INDEX_TEMPLATE,
-} from "./templates";
+} from "./templates/index";
 
 // 注：TemplateRegistry 与 TemplateVariableSchema 类型已在 1.1 节从 ./types 导出，
 // templates/index.ts 仅作为内部模块使用，无需再次重新导出。

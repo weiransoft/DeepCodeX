@@ -7,7 +7,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 function run(command, args, label) {
   console.log(`\n[${label}] ${command} ${args.join(" ")}`);
-  const result = spawnSync(command, args, { stdio: "inherit", cwd: root, shell: true });
+  // 禁用 shell:true，避免不必要的 shell 注入面；command 与 args 均为内部硬编码值。
+  const result = spawnSync(command, args, { stdio: "inherit", cwd: root });
   if (result.status !== 0) {
     process.exit(result.status ?? 1);
   }

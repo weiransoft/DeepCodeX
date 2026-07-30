@@ -7,7 +7,8 @@ const root = join(__dirname, "..");
 
 function run(command, args, label) {
   process.stdout.write(`\n[${label}] ${command} ${args.join(" ")}\n`);
-  const result = spawnSync(command, args, { stdio: "inherit", cwd: root, shell: true });
+  // 禁用 shell:true，避免不必要的 shell 注入面；command 与 args 均为内部硬编码值。
+  const result = spawnSync(command, args, { stdio: "inherit", cwd: root });
   if (result.status !== 0) {
     process.exit(result.status ?? 1);
   }

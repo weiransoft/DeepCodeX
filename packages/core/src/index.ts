@@ -286,6 +286,17 @@ export type { LoopGuardConfig, LoopGuardState, GuardCheckResult, GuardStopReason
 //   TaskRegistry/BackgroundTaskRunner
 // 启用方式详见 docs/dev/ADR-EAG-001-experimental-status.md
 // ============================================================================
+
+// EAG 统一命名空间导出（repair-plan.md §3.2）
+// - Eag：包含 eag/index.ts 聚合的全部公共 API（evaluator / redlines / loop / coding /
+//   testing / long-horizon / devops / dynamic / p5 等），供 CLI 层通过
+//   `import { Eag } from "@vegamo/deepcode-core"` 一次性访问全部 EAG 能力。
+// - EagP5：p5 子系统的独立命名空间，供需要直接使用符号图谱 / BLOCKER 守护链 /
+//   AutonomousOrchestrator 的消费者使用。
+// 命名空间导出与下方零散具名导出共存，保持向后兼容。
+export * as Eag from "./eag/index.js";
+export * as EagP5 from "./eag/p5/index.js";
+
 export { decideVerdict, buildReport } from "./eag/evaluator/types";
 export type {
   EvaluationMode,
@@ -422,7 +433,7 @@ export type {
   VulnerabilityScanPort,
   // 统计类型
   TcsRedlineStats,
-} from "./eag/tcs";
+} from "./eag/tcs/index";
 export {
   // 基础常量
   TCS_REDLINE_IDS,
@@ -509,7 +520,7 @@ export {
   getFixturesByKind,
   getTcsFixtureCount,
   validateTcsFixtures,
-} from "./eag/tcs";
+} from "./eag/tcs/index";
 
 // Team (multi-role) module — DeepCodeX multi-agent team integration
 export {
@@ -742,23 +753,23 @@ export type {
   LayeredArchitecture,
   LayeredArchitectureParadigm,
   L1GlobalView,
-} from "./eag/pkc";
+} from "./eag/pkc/index";
 export {
   PKC_LAYERS,
   IMPLEMENTED_PKC_LAYERS,
   ENTRY_POINT_TYPES,
   DEFAULT_IGNORED_DIRECTORIES,
   DEFAULT_IGNORED_EXTENSIONS,
-} from "./eag/pkc";
-export { L1GlobalViewBuilder, L1GlobalViewError } from "./eag/pkc";
-export { EntryPointDetector } from "./eag/pkc";
-export { TechStackFingerprintExtractor } from "./eag/pkc";
+} from "./eag/pkc/index";
+export { L1GlobalViewBuilder, L1GlobalViewError } from "./eag/pkc/index";
+export { EntryPointDetector } from "./eag/pkc/index";
+export { TechStackFingerprintExtractor } from "./eag/pkc/index";
 export type {
   PackageJsonParseResult,
   PomXmlParseResult,
   RequirementsTxtParseResult,
   GoModParseResult,
-} from "./eag/pkc";
+} from "./eag/pkc/index";
 
 // PKC L2 语义检索层（l2-types / semantic-searcher / symbol-indexer）—— EAG-P2 批次 8 新增
 export type {
@@ -770,7 +781,7 @@ export type {
   GitDiffFile,
   GitDiff,
   ReindexResult,
-} from "./eag/pkc";
+} from "./eag/pkc/index";
 export {
   SYMBOL_KINDS,
   DEFAULT_KIND_BOOST,
@@ -779,10 +790,10 @@ export {
   FOCUS_POINT_BOOST,
   SMALL_CHANGE_FILE_THRESHOLD,
   SMALL_CHANGE_IMPACTED_THRESHOLD,
-} from "./eag/pkc";
-export { SemanticSearcher, SemanticSearcherError } from "./eag/pkc";
-export { SymbolIndexer, SymbolIndexerError } from "./eag/pkc";
-export type { Embedder } from "./eag/pkc";
+} from "./eag/pkc/index";
+export { SemanticSearcher, SemanticSearcherError } from "./eag/pkc/index";
+export { SymbolIndexer, SymbolIndexerError } from "./eag/pkc/index";
+export type { Embedder } from "./eag/pkc/index";
 
 // PKC L3 业务知识层（K2 业务流程 / K3 数据库结构 / K4 业务数据 / K5 周边系统）—— EAG-P2 批次 8 新增
 export type {
@@ -812,11 +823,11 @@ export type {
   InteractionMatrixEntry,
   ConfigInventoryEntry,
   PeripheralAnalysisResult,
-} from "./eag/pkc";
-export { BusinessFlowDiscoverer, BusinessFlowDiscovererError } from "./eag/pkc";
-export { DatabaseSchemaAnalyzer, DatabaseSchemaAnalyzerError } from "./eag/pkc";
-export { DataDictionaryExtractor, DataDictionaryExtractorError } from "./eag/pkc";
-export { PeripheralSystemAnalyzer, PeripheralSystemAnalyzerError } from "./eag/pkc";
+} from "./eag/pkc/index";
+export { BusinessFlowDiscoverer, BusinessFlowDiscovererError } from "./eag/pkc/index";
+export { DatabaseSchemaAnalyzer, DatabaseSchemaAnalyzerError } from "./eag/pkc/index";
+export { DataDictionaryExtractor, DataDictionaryExtractorError } from "./eag/pkc/index";
+export { PeripheralSystemAnalyzer, PeripheralSystemAnalyzerError } from "./eag/pkc/index";
 
 // ============================================================================
 // Doc-Driven (文档驱动开发 Loop) —— §5.10 文档驱动开发 Loop
@@ -836,7 +847,7 @@ export type {
   ConstitutionInput,
   NonNegotiableItems,
   WorkflowValidationResult,
-} from "./eag/doc-driven";
+} from "./eag/doc-driven/index";
 export {
   DOCUMENT_TYPES,
   DOCUMENT_STATES,
@@ -845,22 +856,28 @@ export {
   DEFAULT_GIT_PROCESS_CONFIG,
   createDefaultGitProcessConfig,
   GitProcessConfigError,
-} from "./eag/doc-driven";
-export { DocumentStateMachine, DocumentStateMachineError, createInitialDocument } from "./eag/doc-driven";
-export { TaskDecomposer, TaskDecompositionError } from "./eag/doc-driven";
-export type { DagValidationResult } from "./eag/doc-driven";
-export { GitProcessManager, GitProcessError } from "./eag/doc-driven";
-export type { PrDescription } from "./eag/doc-driven";
-export { buildConstitution, ConstitutionBuilderError } from "./eag/doc-driven";
+} from "./eag/doc-driven/index";
+export { DocumentStateMachine, DocumentStateMachineError, createInitialDocument } from "./eag/doc-driven/index";
+export { TaskDecomposer, TaskDecompositionError } from "./eag/doc-driven/index";
+export type { DagValidationResult } from "./eag/doc-driven/index";
+export { GitProcessManager, GitProcessError } from "./eag/doc-driven/index";
+export type { PrDescription } from "./eag/doc-driven/index";
+export { buildConstitution, ConstitutionBuilderError } from "./eag/doc-driven/index";
 
 // plan.md 生成器（EAG-P2 批次 8 新增）
-export { PlanGenerator, PlanGeneratorError } from "./eag/doc-driven";
-export type { PlanGenerationInput, ModuleSplit, InterfaceContract, DataMigration, RiskItem } from "./eag/doc-driven";
+export { PlanGenerator, PlanGeneratorError } from "./eag/doc-driven/index";
+export type {
+  PlanGenerationInput,
+  ModuleSplit,
+  InterfaceContract,
+  DataMigration,
+  RiskItem,
+} from "./eag/doc-driven/index";
 
 // tasks.md 生成器（EAG-P2 批次 8 新增）
-export { TasksGenerator, TasksGeneratorError } from "./eag/doc-driven";
-export type { TasksGenerationInput, TaskCard, TaskCardStatus } from "./eag/doc-driven";
-export { TASK_CARD_STATUSES } from "./eag/doc-driven";
+export { TasksGenerator, TasksGeneratorError } from "./eag/doc-driven/index";
+export type { TasksGenerationInput, TaskCard, TaskCardStatus } from "./eag/doc-driven/index";
+export { TASK_CARD_STATUSES } from "./eag/doc-driven/index";
 
 // ============================================================================
 // Gate (方案先行门禁) —— §5.12.1 方案先行门禁（Spec-First Gate）
@@ -880,7 +897,7 @@ export type {
   GateResult,
   GateOrchestrationResult,
   GateChecker,
-} from "./eag/gate";
+} from "./eag/gate/index";
 export {
   REVIEW_ROLES,
   LOOP_TYPES,
@@ -888,11 +905,11 @@ export {
   G2_MIN_REVIEW_ROLES,
   G2_FULL_REVIEW_ROLES,
   G3_DEVIATION_THRESHOLD,
-} from "./eag/gate";
-export { GateG1Checker } from "./eag/gate";
-export { GateG2Checker } from "./eag/gate";
-export { GateG3Checker } from "./eag/gate";
-export { GateOrchestrator, GateOrchestratorError } from "./eag/gate";
+} from "./eag/gate/index";
+export { GateG1Checker } from "./eag/gate/index";
+export { GateG2Checker } from "./eag/gate/index";
+export { GateG3Checker } from "./eag/gate/index";
+export { GateOrchestrator, GateOrchestratorError } from "./eag/gate/index";
 
 // ============================================================================
 // EAG LLM 动态编排建议层（2026-07-24 新增）
@@ -918,6 +935,101 @@ export type {
 } from "./eag/dynamic/eag-dynamic-suggester";
 export { buildEagSuggestionPrompt } from "./eag/dynamic/prompts/eag-suggestion-prompt";
 export type { EagSuggestionPromptContext } from "./eag/dynamic/prompts/eag-suggestion-prompt";
+
+// ============================================================================
+// EAG Graph（Loop-Graph 融合方案 Phase 5）
+// ============================================================================
+// @experimental
+// 导出图级编排器、图生命周期管理器、核心协议、数据模型、工厂函数与实现类，
+// 供 CLI 层（App.tsx）装配 GraphLoopOrchestratorOptions 并注入 SessionManager。
+// 未注入 graphLoopOrchestratorOptions 时 /eag-graph 命令不可用，主流程零回归。
+// ============================================================================
+
+// 图级编排器与生命周期管理器
+export { GraphLoopOrchestrator } from "./eag/graph/index.js";
+export { GraphLifecycleManager } from "./eag/graph/index.js";
+
+// 核心数据模型类型
+export type {
+  GraphNodeType,
+  PredicateFunction,
+  WorkGraph,
+  WorkGraphConfig,
+  NodeFieldContract,
+  GraphNodeDef,
+  GraphEdgeDef,
+  NodeLoopConfig,
+  GraphNodeResult,
+  GraphRunReport,
+  PredicateRegistry,
+  GraphLogger,
+  GraphRunContext,
+  GraphValidationResult,
+  GraphSchedulingAction,
+  GraphSchedulingDecision,
+  GraphGuardCheckResult,
+  GraphGuardRecord,
+  GraphRunStatus,
+  ExperienceCase,
+  RetrySuppressionConfig,
+} from "./eag/graph/index.js";
+
+export {
+  GRAPH_NODE_TYPES,
+  GRAPH_SCHEDULING_ACTIONS,
+  DEFAULT_WORK_GRAPH_CONFIG,
+  DEFAULT_NODE_LOOP_CONFIG,
+  createRetrySuppressionConfig,
+} from "./eag/graph/index.js";
+
+// 核心协议接口
+export type {
+  NodeExecutorProtocol,
+  LoopHandoffAdapter,
+  EdgeResolverProtocol,
+  GraphGuardProtocol,
+  GraphSchedulerProtocol,
+  ExperienceStoreProtocol,
+  GraphLoopOrchestratorOptions,
+  NodeExperienceUploader,
+  DualLayerContextManagerProtocol,
+  GraphDebuggerProtocol,
+} from "./eag/graph/index.js";
+
+// 图定义构造器
+export type { WorkGraphJson, GraphNodeDefJson, GraphEdgeDefJson } from "./eag/graph/index.js";
+export { GraphBuilder } from "./eag/graph/index.js";
+
+// 边解析器、图级护栏、图级调度器、谓词注册表、经验存储
+export {
+  EdgeResolverImpl,
+  createEdgeResolver,
+  GraphGuardImpl,
+  createGraphGuard,
+  GraphSchedulerImpl,
+  createGraphScheduler,
+  PredicateRegistryImpl,
+  createPredicateRegistry,
+  ExperienceStoreImpl,
+  createExperienceStore,
+  computeSimilarity,
+} from "./eag/graph/index.js";
+
+// 节点内循环内核
+export type { LoopExecutorCallback, LoopEvaluatorCallback, NodeLoopKernelOptions } from "./eag/graph/index.js";
+export { NodeLoopKernel } from "./eag/graph/index.js";
+
+// 节点执行器
+export type { NodeExecutorImplOptions } from "./eag/graph/index.js";
+export { NodeExecutorImpl, createNodeExecutor } from "./eag/graph/index.js";
+
+// 图生命周期相关类型
+export type {
+  GraphLifecycleState,
+  GraphLifecycleManagerProtocol,
+  GraphLifecycleStateChangeEvent,
+  GraphLifecycleStateChangeListener,
+} from "./eag/graph/index.js";
 
 // ============================================================================
 // V2 上下文记忆体系（v2.8，V2-P0a/P0b/P1/P2/P3 五阶段全部完成）

@@ -33,7 +33,7 @@ import {
   validateFixtureManifest,
   FIXTURE_MANIFEST,
 } from "./fixtures/eag-redline/index";
-import { DEFAULT_STATIC_CHECKERS, createContractGuardChecker } from "../eag/coding/static-checkers";
+import { DEFAULT_STATIC_CHECKERS, createContractGuardChecker } from "../eag/coding/static-checkers/index";
 import type { StaticChecker } from "../eag/coding/types";
 import type { RedlineDefinition } from "../eag/evaluator/types";
 import { ENTERPRISE_REDLINES } from "../eag/redlines/enterprise-rules";

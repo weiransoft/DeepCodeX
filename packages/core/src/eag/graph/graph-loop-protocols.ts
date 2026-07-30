@@ -65,6 +65,13 @@ import type {
   /** 图执行快照（TOP-5） */
   GraphExecutionSnapshot,
 } from "./graph-loop-models";
+// Loop 节点 Handoff 回调类型（仅类型导入，避免运行期循环依赖）
+import type {
+  /** Loop 执行器回调 */
+  LoopExecutorCallback,
+  /** Loop 评估器回调 */
+  LoopEvaluatorCallback,
+} from "./node-loop-kernel";
 
 // ============================================================================
 // §8.1 NodeExecutorProtocol：节点执行器协议
@@ -102,6 +109,62 @@ export interface NodeExecutorProtocol {
     input: Readonly<Record<string, unknown>>,
     context: Readonly<GraphRunContext>
   ): Promise<GraphNodeResult>;
+}
+
+// ============================================================================
+// §8.1.1 LoopHandoffAdapter：Loop 节点 Handoff 回调适配器协议
+// ============================================================================
+
+/**
+ * Loop 节点 Handoff 回调适配器协议（v2.0 新增）
+ *
+ * 设计目的：
+ * - 将 NodeLoopKernel 所需的 executor / evaluator 回调构造逻辑从 NodeExecutorImpl 中解耦，
+ *   使 NodeExecutorImpl 不直接依赖 LLM 客户端、测试框架或具体业务实现。
+ * - 调用方（如 CLI 层或测试）注入真实适配器，由适配器根据节点定义、输入数据和图上下文
+ *   决定如何生成 Loop 的 Handoff 执行回调和 Verification 评估回调。
+ * - 便于单元测试：测试可注入固定返回值的适配器，避免依赖真实 LLM / 测试运行器。
+ *
+ * 实现责任：
+ * - createLoopExecutor：返回一个 LoopExecutorCallback，负责在 NodeLoopKernel 的 Handoff 阶段
+ *   实际执行任务（如 LLM 调用、plugin 调用、代码生成等）。
+ * - createLoopEvaluator：返回一个 LoopEvaluatorCallback，负责在 NodeLoopKernel 的 Verification
+ *   阶段验证 executor 产出（如运行测试、lint 检查、契约校验等）。
+ *
+ * 调用契约：
+ * - 调用方：NodeExecutorImpl（执行 loop 节点前）
+ * - 输入：node（loop 节点定义）+ input（边解析后的输入数据）+ context（图运行上下文）
+ * - 输出：构造好的 LoopExecutorCallback / LoopEvaluatorCallback
+ * - 副作用：无（回调本身可在运行期产生副作用，但适配器构造过程应为纯函数）
+ */
+export interface LoopHandoffAdapter {
+  /**
+   * 构造 Loop 执行器回调（Handoff 阶段调用）
+   *
+   * @param node 当前 loop 节点定义（含 loopConfig / task / inputContract / outputContract）
+   * @param input 节点输入数据（来自 EdgeResolver，符合 inputContract）
+   * @param context 图运行上下文（含全局状态、取消信号、谓词注册表等）
+   * @returns Loop 执行器回调
+   */
+  createLoopExecutor(
+    node: Readonly<GraphNodeDef>,
+    input: Readonly<Record<string, unknown>>,
+    context: Readonly<GraphRunContext>
+  ): LoopExecutorCallback;
+
+  /**
+   * 构造 Loop 评估器回调（Verification 阶段调用）
+   *
+   * @param node 当前 loop 节点定义
+   * @param input 节点输入数据
+   * @param context 图运行上下文
+   * @returns Loop 评估器回调
+   */
+  createLoopEvaluator(
+    node: Readonly<GraphNodeDef>,
+    input: Readonly<Record<string, unknown>>,
+    context: Readonly<GraphRunContext>
+  ): LoopEvaluatorCallback;
 }
 
 // ============================================================================

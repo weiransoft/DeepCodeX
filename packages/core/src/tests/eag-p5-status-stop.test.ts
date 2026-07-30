@@ -42,7 +42,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { execSync, execFileSync } from "node:child_process";
 
-import type { P5LoopExecutor } from "../eag/p5";
+import type { P5LoopExecutor } from "../eag/p5/index";
 import {
   AutonomousOrchestrator,
   P5RunStateStore,
@@ -55,7 +55,7 @@ import {
   P5VerifyStageHandler,
   P5FixStageHandler,
   type P5RunState,
-} from "../eag/p5";
+} from "../eag/p5/index";
 import { EagCommandParser, EAG_COMMAND_STRINGS } from "../eag/cli/eag-command-parser";
 import {
   extractEagAutonomousStatusRequestFromPrompt,

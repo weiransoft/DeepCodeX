@@ -50,7 +50,7 @@ import {
   type TaskCard,
   type ChangeDiff,
   type CompletionEvidence,
-} from "../eag/p5";
+} from "../eag/p5/index";
 
 // 共享夹具导入（临时目录 / tasks.md / StageContext / TaskCard 等）
 import {

@@ -66,7 +66,7 @@ import {
   AUTONOMOUS_DEFAULT_CONSECUTIVE_FAILURE_ABORT,
   AUTONOMOUS_DEFAULT_TEST_COMMAND,
   AUTONOMOUS_DEFAULT_TEST_TIMEOUT_SEC,
-} from "../eag/p5";
+} from "../eag/p5/index";
 
 // 命令处理导入（P4 用）
 import { EagAutonomousCommandHandler, extractEagAutonomousRequestFromPrompt } from "../eag/cli/eag-autonomous-command";

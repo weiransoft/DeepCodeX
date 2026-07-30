@@ -42,7 +42,7 @@ import { StrictEvaluator } from "../eag/coding/strict-evaluator";
 import { FixLoop } from "../eag/coding/fix-loop";
 import { GateG4Checker } from "../eag/gate/gate-g4-checker";
 import { GateG5Checker } from "../eag/gate/gate-g5-checker";
-import { DEFAULT_TEMPLATE_REGISTRY } from "../eag/coding/templates";
+import { DEFAULT_TEMPLATE_REGISTRY } from "../eag/coding/templates/index";
 import { TCS_REDLINES } from "../eag/tcs/tcs-redlines";
 import { ENTERPRISE_REDLINES } from "../eag/redlines/enterprise-rules";
 import { RuleStore } from "../eag/rlis/rule-store";

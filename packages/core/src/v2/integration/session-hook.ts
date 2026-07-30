@@ -22,6 +22,16 @@
  */
 
 import type { SessionMessage } from "./v1-adapters";
+import type { V2Config } from "./settings-bridge.js";
+import { DualLayerContextManager, type CodeMapProvider } from "../context/dual-layer-manager.js";
+import { GlobalContextManager } from "../context/global-context.js";
+import { TaskContextManager } from "../context/task-context-manager.js";
+import type { TaskDefinition } from "../context/types.js";
+import { CodeMapGenerator, type CodeMap } from "../codemap/generator.js";
+import { ProgressiveContextLoader } from "../context/progressive-loader.js";
+import { RelevanceScorer } from "../context/relevance-scorer.js";
+import { SlidingWindowManager } from "../context/sliding-window.js";
+import { createSummarizer } from "../memory/summarizer-factory.js";
 
 /**
  * 上下文片段：注入到 system message 的上下文数据
@@ -66,7 +76,7 @@ export interface SessionContextHook {
    * NP-02 修复：参数仅为 messages（从 messages 中提取会话信息），
    *           不需要 sessionId/userId/taskId（由 V2 模块内部通过自身 session 管理器获取）
    *
-   * @param messages 当前会话的 SessionMessage 列表（用于提取 sessionId）
+   * @param messages 当前会话的 SessionMessage 列表
    * @returns 缓存的上下文片段列表；未命中或过期时返回空数组
    */
   preBuildContext(messages: SessionMessage[]): ContextSnippet[];
@@ -216,4 +226,146 @@ export class DefaultSessionContextHook implements SessionContextHook {
       expiresAt: Date.now() + this.ttlMs,
     });
   }
+}
+
+/**
+ * 创建基于 DualLayerContextManager 的 SessionContextHook（V2-P1 集成入口）
+ *
+ * 设计目标：
+ * - 当 V2 总开关（v2Config.enabled）与上下文开关（v2Config.context.enabled）
+ *   均未开启时，返回 DefaultSessionContextHook，行为与 v1 完全一致（零回归）；
+ * - 当 V2 上下文启用时，内部构造最小化的 DualLayerContextManager 依赖链，
+ *   在 refreshContextAsync 中异步预计算上下文片段并写入缓存；
+ * - preBuildContext 保持同步读缓存，buildMessages 同步签名不变。
+ *
+ * 最小依赖链构造说明：
+ * - GlobalContextManager：默认存储路径 ~/.deepcode/global-context.json；
+ * - TaskContextManager：内存级，按 sessionId 自动创建最小任务上下文；
+ * - CodeMapProvider：基于 CodeMapGenerator 的会话级缓存实现，每 projectRoot 复用；
+ * - RelevanceScorer / SlidingWindowManager / ProgressiveContextLoader / RuleBasedSummarizer：
+ *   使用默认配置，不调用外部 LLM，保证 CI/离线环境可用。
+ *
+ * @param projectRoot 项目根目录
+ * @param v2Config V2 配置（可选；未提供时使用默认配置，V2 默认关闭）
+ * @param ttlMs 缓存 TTL（毫秒，可选；默认 30 分钟）
+ * @returns SessionContextHook 实例
+ */
+export function createDualLayerContextHook(
+  projectRoot: string,
+  v2Config?: V2Config,
+  ttlMs?: number
+): SessionContextHook {
+  // V2 总开关与上下文子开关必须同时为 true 才启用 DualLayerContextManager
+  // 任一未开启时降级为 DefaultSessionContextHook，refreshContextAsync 为空操作
+  const enabled = v2Config?.enabled === true && v2Config?.context?.enabled === true;
+  if (!enabled) {
+    return new DefaultSessionContextHook(ttlMs);
+  }
+
+  // 基础缓存 hook，用于同步供给 preBuildContext
+  const hook = new DefaultSessionContextHook(ttlMs);
+
+  // 全局上下文管理器：加载 ~/.deepcode/global-context.json，文件缺失时降级返回默认空上下文
+  const globalManager = new GlobalContextManager();
+
+  // 任务上下文管理器：内存级，进程结束即销毁
+  const taskManager = new TaskContextManager();
+
+  // CodeMap 提供者：基于 CodeMapGenerator 的会话级缓存
+  // 同一 projectRoot 在 hook 生命周期内复用同一个 generator 实例
+  const codeMapGenerator = new CodeMapGenerator({
+    projectRoot,
+    extensions: [],
+    excludeDirs: v2Config.codemap?.excludeDirs ?? ["node_modules", ".git", "dist", "build"],
+    maxFileSizeKb: v2Config.codemap?.maxFileSizeKb ?? 100,
+    incremental: v2Config.codemap?.incremental ?? true,
+    outputPath: ".deepcode/codemap.json",
+  });
+  const codeMapProvider: CodeMapProvider = {
+    async getCodeMap(_root: string): Promise<CodeMap> {
+      return codeMapGenerator.generateFullMap();
+    },
+  };
+
+  // 相关性评分器与滑动窗口管理器：使用默认配置，不依赖外部 LLM
+  const scorer = new RelevanceScorer();
+  const progressiveLoader = new ProgressiveContextLoader();
+  const summarizer = createSummarizer({ llm: { enabled: false } });
+  const window = new SlidingWindowManager({}, scorer, progressiveLoader, summarizer);
+
+  // 双层上下文管理器：V2-P1 集成入口
+  const manager = new DualLayerContextManager(
+    {
+      projectRoot,
+      window: {},
+      scoring: {},
+      defaultTokenBudget: v2Config.context?.tokenBudget ?? 100_000,
+    },
+    globalManager,
+    taskManager,
+    codeMapProvider,
+    scorer,
+    window,
+    progressiveLoader,
+    summarizer
+  );
+
+  /**
+   * 为 sessionId 确保存在对应的任务上下文
+   *
+   * DualLayerContextManager.buildOptimizedContext 要求 taskId 对应的 TaskContext 存在，
+   * 否则按设计约定返回空数组。此处将会话 ID 直接映射为任务 ID，并创建一个最小化的
+   * 聊天任务定义，使上下文预计算能够正常执行。
+   *
+   * @param sessionId 会话 ID
+   */
+  function ensureTaskContext(sessionId: string): void {
+    if (taskManager.get(sessionId) !== null) {
+      return;
+    }
+    const taskDefinition: TaskDefinition = {
+      description: "用户对话任务",
+      goals: ["理解用户意图", "提供高质量回复"],
+      constraints: [],
+      taskType: "chat",
+      expectedOutput: "assistant_reply",
+    };
+    taskManager.create(sessionId, taskDefinition);
+  }
+
+  return {
+    /**
+     * 同步读取缓存的上下文片段
+     *
+     * 直接委托给 DefaultSessionContextHook.preBuildContext，保持同步签名。
+     */
+    preBuildContext(messages: SessionMessage[]): ContextSnippet[] {
+      return hook.preBuildContext(messages);
+    },
+
+    /**
+     * 异步刷新上下文缓存
+     *
+     * turn 入口调用：确保任务上下文存在后，调用 DualLayerContextManager.buildOptimizedContext
+     * 计算上下文片段，再经 setSnippets 写入缓存。任何步骤失败均降级为空缓存，不抛错，
+     * 避免影响主对话流程。
+     */
+    async refreshContextAsync(sessionId: string): Promise<void> {
+      if (!sessionId) {
+        return;
+      }
+      try {
+        ensureTaskContext(sessionId);
+        const userId = "default";
+        const snippets = await manager.buildOptimizedContext(userId, sessionId);
+        hook.setSnippets(sessionId, snippets);
+      } catch (err) {
+        // 预计算失败：清空该会话缓存，降级为无 V2 上下文注入，不阻塞主循环
+        const message = err instanceof Error ? err.message : String(err);
+
+        console.error(`[V2 Context] refreshContextAsync failed for ${sessionId}: ${message}`);
+        hook.setSnippets(sessionId, []);
+      }
+    },
+  };
 }

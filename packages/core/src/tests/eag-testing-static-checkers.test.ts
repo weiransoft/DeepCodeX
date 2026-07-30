@@ -50,7 +50,7 @@ import {
   getRegisteredCheckerIds,
   getCheckerById,
   runAllCheckers,
-} from "../eag/testing/static-checkers";
+} from "../eag/testing/static-checkers/index";
 import type { GeneratedTestFile, TestQualityContext, UncoveredSymbol } from "../eag/testing/types";
 
 // ============================================================================

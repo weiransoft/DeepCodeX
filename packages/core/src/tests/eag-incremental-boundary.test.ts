@@ -35,7 +35,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { execSync } from "node:child_process";
-import { GitDiffAnalyzer, BlastRadiusBfs, RiskScorer, IncrementalTestSelector } from "../eag/testing/incremental";
+import { GitDiffAnalyzer, BlastRadiusBfs, RiskScorer, IncrementalTestSelector } from "../eag/testing/incremental/index";
 import type { IncrementalTestSelection } from "../eag/testing/incremental/types";
 
 // ============================================================================

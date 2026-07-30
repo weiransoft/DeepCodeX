@@ -49,7 +49,7 @@ import {
 
 import { DomainExpertRegistry } from "../team/domain-expert-registry";
 import { DomainExpertMatcher, DOMAIN_MATCH_WEIGHTS } from "../team/domain-expert-matcher";
-import { registerAllExperts, EXPECTED_TOTAL_EXPERTS, ALL_DOMAIN_CATEGORIES } from "../team/domain-experts";
+import { registerAllExperts, EXPECTED_TOTAL_EXPERTS, ALL_DOMAIN_CATEGORIES } from "../team/domain-experts/index";
 import type { DomainExpert, DomainCategory } from "../team/types";
 
 // ============================================================================

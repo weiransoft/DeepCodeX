@@ -15,7 +15,7 @@ import type { DeployRequest } from "../../eag/cli/eag-command-parser";
 import type { CodingLoopRequest } from "../../eag/coding/types";
 import type { DesignLoopInput } from "../../eag/design/design-models";
 import type { TestingLoopRequest } from "../../eag/testing/types";
-import type { EagRunRequest, EagResumeRequest, EagStatusRequest } from "../../eag/long-horizon";
+import type { EagRunRequest, EagResumeRequest, EagStatusRequest } from "../../eag/long-horizon/index";
 
 // ============================================================================
 // 测试辅助：构造最小请求 fixture（真实结构，非 mock）
