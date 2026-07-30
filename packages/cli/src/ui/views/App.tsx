@@ -115,6 +115,42 @@ interface InterruptibleSession {
 
 const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/**
+ * 判断当前 busy 状态下提交是否可立即执行而不进入队列。
+ *
+ * 原则：
+ * - 纯 UI/控制类命令（退出、新建、恢复、撤销、MCP 面板、规则/团队命令、任务管理等）立即执行，
+ *   不占用 LLM 回合。
+ * - 可能触发新 LLM 调用的命令（如 /init、非空会话的 /continue、未识别的文本等）排入队列，
+ *   等待当前回复结束后再发送。
+ */
+function isImmediateWhileBusy(
+  submission: { command?: string; text?: string },
+  sessionManager: SessionManager
+): boolean {
+  const IMMEDIATE_COMMANDS = new Set([
+    "exit",
+    "new",
+    "resume",
+    "undo",
+    "mcp",
+    "rules",
+    "team",
+    "inject",
+    "bg",
+    "tasks",
+    "fg",
+    "cancel",
+    "pause",
+  ]);
+  const cmd = submission.command;
+  if (!cmd) return false;
+  if (cmd === "continue") {
+    return isCurrentSessionEmpty(sessionManager);
+  }
+  return IMMEDIATE_COMMANDS.has(cmd);
+}
+
 type AppProps = {
   projectRoot: string;
   initialPrompt?: string;
@@ -205,6 +241,11 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
   const [showProcessStdout, setShowProcessStdout] = useState(false);
   const [planMode, setPlanMode] = useState(false);
   const [pendingPlanImplementation, setPendingPlanImplementation] = useState<string | null>(null);
+  // 处理期间输入队列：允许用户在 LLM 回复过程中继续打字/回车，消息排入队列并在当前回合结束后自动连续发送
+  const pendingQueueRef = useRef<PromptSubmission[]>([]);
+  const [queuedCount, setQueuedCount] = useState(0);
+  const isProcessingRef = useRef(false);
+  const handlePromptRef = useRef<(submission: PromptSubmission) => Promise<void>>(async () => {});
 
   rawModeRef.current = mode;
   messagesRef.current = messages;
@@ -806,6 +847,8 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
         setMessages((prev) => [...prev, buildSyntheticUserMessage(userDisplayContent, submission.imageUrls.length)]);
       }
 
+      // 从此处开始进入真正的 LLM 回合，设置处理中标记以阻塞新的并发 LLM 调用
+      isProcessingRef.current = true;
       setBusy(true);
       setErrorLine(null);
       const activeProcesses = activeSessionId ? (sessionManager.getSession(activeSessionId)?.processes ?? null) : null;
@@ -837,6 +880,14 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
         setRunningProcesses(
           finalActiveSessionId ? (sessionManager.getSession(finalActiveSessionId)?.processes ?? null) : null
         );
+        // 当前 LLM 回合结束，自动消费队列中的下一条消息
+        const next = pendingQueueRef.current.shift();
+        if (next) {
+          setQueuedCount(pendingQueueRef.current.length);
+          await handlePromptRef.current(next);
+        } else {
+          isProcessingRef.current = false;
+        }
       }
     },
     [
@@ -851,6 +902,9 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
       planMode,
     ]
   );
+
+  // 将 memoized handlePrompt 暴露给 ref，供队列递归调用，避免 useCallback 自引用依赖循环
+  handlePromptRef.current = handlePrompt;
 
   const handleInterrupt = useCallback(() => {
     sessionManager.interruptActiveSession();
@@ -915,9 +969,16 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
 
   const handleSubmit = useCallback(
     (submission: PromptSubmission) => {
-      void handlePrompt(submission);
+      // 当前有 LLM 回合正在执行时，非即时命令排入队列，当前回合结束后自动连续发送；
+      // 控制类命令（如 /exit /pause /tasks 等）仍立即执行。
+      if (isProcessingRef.current && !isImmediateWhileBusy(submission, sessionManager)) {
+        pendingQueueRef.current.push(submission);
+        setQueuedCount(pendingQueueRef.current.length);
+        return;
+      }
+      void handlePromptRef.current(submission);
     },
-    [handlePrompt]
+    [sessionManager]
   );
 
   const handlePlanImplementationChoice = useCallback(
@@ -1442,6 +1503,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
           modelConfig={resolvedSettings}
           promptHistory={promptHistory}
           busy={busy}
+          queuedCount={queuedCount}
           cursorLayoutKey={promptCursorLayoutKey}
           loadingText={loadingText}
           runningProcesses={runningProcesses}

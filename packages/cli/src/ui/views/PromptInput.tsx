@@ -112,6 +112,7 @@ type Props = {
   screenWidth: number;
   promptHistory: string[];
   busy: boolean;
+  queuedCount?: number;
   cursorLayoutKey?: string;
   loadingText?: string | null;
   disabled?: boolean;
@@ -147,6 +148,7 @@ export const PromptInput = React.memo(function PromptInput({
   screenWidth,
   promptHistory,
   busy,
+  queuedCount,
   cursorLayoutKey,
   loadingText,
   disabled,
@@ -227,10 +229,11 @@ export const PromptInput = React.memo(function PromptInput({
       : hasExpandedRegions
         ? " · ctrl+o collapse"
         : "";
+  const queueHint = queuedCount && queuedCount > 0 ? ` · queued ${queuedCount}` : "";
   const busyStatusText =
     loadingText && loadingText.trim()
-      ? `${loadingText}${processOrPasteHint}`
-      : `esc to interrupt · ctrl+c to cancel input${processOrPasteHint}`;
+      ? `${loadingText}${processOrPasteHint}${queueHint}`
+      : `esc to interrupt · ctrl+c to cancel input${processOrPasteHint}${queueHint}`;
   const footerText = statusMessage
     ? statusMessage
     : busy
@@ -487,11 +490,6 @@ export const PromptInput = React.memo(function PromptInput({
         }
       }
 
-      if (busy && isPlainReturn) {
-        setStatusMessage("wait for the current response or press esc to interrupt");
-        return;
-      }
-
       if (returnAction === "newline") {
         updateBuffer((s) => insertText(s, "\n"));
         return;
@@ -690,11 +688,6 @@ export const PromptInput = React.memo(function PromptInput({
   }
 
   function handleSlashSelection(item: SlashCommandItem): void {
-    if (busy && item.kind !== "exit") {
-      setStatusMessage("wait for the current response or press esc to interrupt");
-      return;
-    }
-
     if (item.kind === "skill" && item.skill) {
       addSelectedSkill(item.skill);
       clearSlashToken();
@@ -847,11 +840,6 @@ export const PromptInput = React.memo(function PromptInput({
   }
 
   function submitCurrentBuffer(): void {
-    if (busy) {
-      setStatusMessage("wait for the current response or press esc to interrupt");
-      return;
-    }
-
     const trimmed = buffer.text.trim();
     if (!trimmed && imageUrls.length === 0 && selectedSkills.length === 0) {
       return;
