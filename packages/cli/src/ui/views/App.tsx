@@ -116,15 +116,16 @@ interface InterruptibleSession {
 const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /**
- * 判断当前 busy 状态下提交是否可立即执行而不进入队列。
+ * 当前 LLM 正在执行时，判断提交是否属于“控制类命令”。
  *
- * 原则：
- * - 纯 UI/控制类命令（退出、新建、恢复、撤销、MCP 面板、规则/团队命令、任务管理等）立即执行，
- *   不占用 LLM 回合。
- * - 可能触发新 LLM 调用的命令（如 /init、非空会话的 /continue、未识别的文本等）排入队列，
- *   等待当前回复结束后再发送。
+ * 这类命令不占用 LLM 回合，可以直接执行：
+ * - exit / new / resume / undo / mcp / rules / team
+ * - 任务管理：inject / bg / tasks / fg / cancel / pause
+ *
+ * 可能触发新 LLM 调用的命令（/init、非空会话的 /continue 等）以及普通文本默认不通过这里判断，
+ * 而是由 isUrgentIntervention 进一步决定是插队中断还是排队。
  */
-function isImmediateWhileBusy(
+function isImmediateControlCommand(
   submission: { command?: string; text?: string },
   sessionManager: SessionManager
 ): boolean {
@@ -149,6 +150,75 @@ function isImmediateWhileBusy(
     return isCurrentSessionEmpty(sessionManager);
   }
   return IMMEDIATE_COMMANDS.has(cmd);
+}
+
+/**
+ * 判断提交是否属于对当前正在运行的 LLM 回合的“紧急干预”。
+ *
+ * 当 LLM 正在思考/执行但明显出错，或用户需要立即纠正、停止、重试时，
+ * 应当立刻中断当前回合，并用该消息重新驱动。
+ *
+ * 命中规则包括（中英混合，不区分大小写）：
+ * - 停止/取消：stop / cancel / abort / halt / quit / enough、别 / 停 / 取消 / 停止 / 放弃 / 终止 / 够了 / 不要
+ * - 纠正/重试：wrong / incorrect / mistake / fix / retry / redo / rewind / rethink、
+ *   错了 / 不对 / 不正确 / 有误 / 改一下 / 修改 / 修正 / 纠正 / 重新 / 重来 / 重试 / 应该 / 不是 / 要用 / 改为 / 换成 / check / think again / 反思
+ * - 紧急优先：urgent / immediate / asap、马上 / 立即 / 立刻 / 优先
+ */
+function isUrgentIntervention(submission: { command?: string; text?: string }): boolean {
+  if (submission.command === "inject") return true;
+  const text = submission.text?.trim().toLowerCase() ?? "";
+  if (!text) return false;
+  const URGENT_PATTERNS = [
+    "stop",
+    "cancel",
+    "abort",
+    "halt",
+    "quit",
+    "enough",
+    "别",
+    "停",
+    "取消",
+    "停止",
+    "放弃",
+    "终止",
+    "够了",
+    "不要",
+    "wrong",
+    "incorrect",
+    "mistake",
+    "fix",
+    "retry",
+    "redo",
+    "rewind",
+    "rethink",
+    "错了",
+    "不对",
+    "不正确",
+    "有误",
+    "改一下",
+    "修改",
+    "修正",
+    "纠正",
+    "重新",
+    "重来",
+    "重试",
+    "应该",
+    "不是",
+    "要用",
+    "改为",
+    "换成",
+    "check",
+    "think again",
+    "反思",
+    "urgent",
+    "immediate",
+    "asap",
+    "马上",
+    "立即",
+    "立刻",
+    "优先",
+  ];
+  return URGENT_PATTERNS.some((pattern) => text.includes(pattern));
 }
 
 type AppProps = {
@@ -969,14 +1039,30 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
 
   const handleSubmit = useCallback(
     (submission: PromptSubmission) => {
-      // 当前有 LLM 回合正在执行时，非即时命令排入队列，当前回合结束后自动连续发送；
-      // 控制类命令（如 /exit /pause /tasks 等）仍立即执行。
-      if (isProcessingRef.current && !isImmediateWhileBusy(submission, sessionManager)) {
-        pendingQueueRef.current.push(submission);
-        setQueuedCount(pendingQueueRef.current.length);
+      // 当前没有 LLM 回合时直接发送
+      if (!isProcessingRef.current) {
+        void handlePromptRef.current(submission);
         return;
       }
-      void handlePromptRef.current(submission);
+
+      // 1. 控制类命令不占用 LLM 回合，可直接执行（例如 /exit /pause /tasks /inject 等）
+      if (isImmediateControlCommand(submission, sessionManager)) {
+        void handlePromptRef.current(submission);
+        return;
+      }
+
+      // 2. 紧急干预：用户明显在纠正当前运行中的错误、要求停止/重试/立即修改时，
+      //    将消息插到队列最前面，并立即中断当前 LLM 回合，让该消息优先执行
+      if (isUrgentIntervention(submission)) {
+        pendingQueueRef.current.unshift(submission);
+        setQueuedCount(pendingQueueRef.current.length);
+        sessionManager.interruptActiveSession();
+        return;
+      }
+
+      // 3. 普通后续指令排队，当前回合结束后自动连续发送
+      pendingQueueRef.current.push(submission);
+      setQueuedCount(pendingQueueRef.current.length);
     },
     [sessionManager]
   );
