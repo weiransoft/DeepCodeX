@@ -1,8 +1,14 @@
 # OS metadata
 .DS_Store
 Thumbs.db
-# Fusion docs
+# 已从 Git 历史移除的文档子目录，防止误重新提交
+docs/dev/
+docs/enterprise/
 docs/fusion/
+docs/reports/
+docs/research/
+docs/superpowers/
+docs/visualizers/
 # Dependency directory
 node_modules/
 # Ignore built ts files
