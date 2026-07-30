@@ -47,7 +47,7 @@ import { SkeletonGenerator } from "../eag/coding/skeleton-generator";
 import { ContextAssembler } from "../eag/coding/context-assembler";
 import { LlmFiller, InMemoryLLMClient } from "../eag/coding/llm-filler";
 import { StrictEvaluator } from "../eag/coding/strict-evaluator";
-import { getRegisteredRedlineIds } from "../eag/coding/static-checkers";
+import { getRegisteredRedlineIds } from "../eag/coding/static-checkers/index";
 import { GateG4Checker } from "../eag/gate/gate-g4-checker";
 import { GateG5Checker } from "../eag/gate/gate-g5-checker";
 import { ENTERPRISE_REDLINES } from "../eag/redlines/enterprise-rules";

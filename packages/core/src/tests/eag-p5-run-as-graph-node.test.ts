@@ -59,7 +59,7 @@ import {
   // 类型
   type AutonomousRunRequest,
   type AutonomousRunResult,
-} from "../eag/p5";
+} from "../eag/p5/index";
 
 // graph 模块类型（仅用于构造测试 fixture，不导入运行时值）
 import type {

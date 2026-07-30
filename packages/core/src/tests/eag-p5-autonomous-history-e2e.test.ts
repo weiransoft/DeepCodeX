@@ -59,7 +59,7 @@ import {
   createDefaultP5ConfirmationHistoryStore,
   // 类型
   type P5ConfirmationDecision,
-} from "../eag/p5";
+} from "../eag/p5/index";
 
 // 共享夹具导入
 import {

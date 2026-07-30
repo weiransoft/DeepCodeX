@@ -33,7 +33,7 @@ import type { UserPromptContent } from "../../session";
 import type { CodingLoopRequest } from "../coding/types";
 import type { DesignLoopInput } from "../design/design-models";
 import type { TestingLoopRequest } from "../testing/types";
-import type { EagRunRequest, EagResumeRequest, EagStatusRequest } from "../long-horizon";
+import type { EagRunRequest, EagResumeRequest, EagStatusRequest } from "../long-horizon/index";
 // EAG-P5 Phase 5.3 TASK-P5-3.1-006：导入 /eag-autonomous 命令参数解析函数与请求类型
 // - extractEagAutonomousRequestFromPrompt：独立函数，从命令字符串解析参数
 // - EagAutonomousRequest：/eag-autonomous 命令请求对象类型

@@ -178,7 +178,7 @@ export type { SessionMessage } from "../../session";
 // ============================================================================
 // V2 memory 模块（deepseek-summarizer）需要 DEFAULT_BASE_URL 作为 DeepSeek API
 // 默认基址。V2 模块禁止直接 import V1 文件（P1-05 单一入口约束），经此 re-export。
-export { DEFAULT_BASE_URL } from "../../settings";
+export { DEFAULT_BASE_URL, readSettings, readProjectSettings } from "../../settings";
 
 // ============================================================================
 // 12. team/karpathy-preamble（Karpathy 原则 prompt 前导文本）

@@ -90,13 +90,13 @@ import * as os from "node:os";
 import http from "node:http";
 import { spawnSync } from "node:child_process";
 
-import { MonitoringReadinessCheckerImpl, RollbackPlanCheckerImpl } from "../eag/devops";
+import { MonitoringReadinessCheckerImpl, RollbackPlanCheckerImpl } from "../eag/devops/index";
 import type {
   MonitoringCheckContext,
   MonitoringCheckResult,
   RollbackPlanCheckContext,
   RollbackPlanCheckResult,
-} from "../eag/devops";
+} from "../eag/devops/index";
 
 // ============================================================================
 // 辅助函数：检测 kubectl CLI 是否可用

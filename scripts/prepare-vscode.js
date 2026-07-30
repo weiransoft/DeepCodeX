@@ -50,10 +50,10 @@ function run(cmd, args, opts = {}) {
     log(`  (dry-run) ${label}`);
     return { status: 0, stdout: "" };
   }
+  // 禁用 shell:true，避免不必要的 shell 注入面；cmd 与 args 均为内部硬编码值。
   const result = spawnSync(cmd, args, {
     stdio: opts.stdio ?? "inherit",
     cwd: opts.cwd ?? root,
-    shell: true,
     env: { ...process.env, ...opts.env },
   });
   if (result.status !== 0) {
@@ -138,7 +138,6 @@ step(1, TOTAL_STEPS, "Checking git state...");
 const gitStatus = spawnSync("git", ["status", "--porcelain"], {
   cwd: root,
   encoding: "utf-8",
-  shell: true,
 });
 if (gitStatus.stdout.trim()) {
   fail("Working tree is not clean. Commit or stash changes first.");
@@ -149,7 +148,6 @@ if (!force) {
   const gitBranch = spawnSync("git", ["branch", "--show-current"], {
     cwd: root,
     encoding: "utf-8",
-    shell: true,
   });
   const branch = gitBranch.stdout.trim();
   if (branch !== "main") {

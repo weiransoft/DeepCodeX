@@ -15,6 +15,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { QualityGateIdType, GateExecutorLike, GateResult, GateFinding } from "../../principles/quality-gates.js";
 import {
   QualityGateId,
@@ -329,16 +332,37 @@ test("DefaultPassExecutor returns pass", async () => {
   assert.equal(result.metadata?.["executor"], "default-pass");
 });
 
-test("QualityGateManager default runAll passes (default executor)", async () => {
-  const manager = new QualityGateManager("/tmp/test");
-  const report = await manager.runAll();
-  // 默认 7 个门禁全部 enabled，默认 executor 全部 PASS
-  assert.equal(report.totalGates, 6);
-  assert.equal(report.passedGates, 6);
-  assert.equal(report.failedGates, 0);
-  assert.equal(report.overallPassed, true);
-  assert.equal(report.overallScore, 1.0);
-  assert.equal(report.criticalFindings, 0);
+test("QualityGateManager default runAll passes on clean project", async () => {
+  // 创建受控临时项目：包含 1 个源码文件 + 1 个测试文件（比例 1:1），
+  // 使 test-coverage 代理指标满分；同时避免调试代码、硬编码密钥、占位符等，
+  // 确保其他真实 executor 不产生 findings。
+  const cleanDir = fs.mkdtempSync(path.join(os.tmpdir(), "quality-gates-clean-"));
+  try {
+    fs.mkdirSync(path.join(cleanDir, "src"), { recursive: true });
+    fs.mkdirSync(path.join(cleanDir, "tests"), { recursive: true });
+    fs.writeFileSync(
+      path.join(cleanDir, "src", "index.ts"),
+      `// 加法函数\nexport function add(a: number, b: number): number {\n  return a + b;\n}\n`,
+      "utf-8"
+    );
+    fs.writeFileSync(
+      path.join(cleanDir, "tests", "index.test.ts"),
+      `import { test } from "node:test";\nimport assert from "node:assert/strict";\nimport { add } from "../src/index.js";\ntest("add", () => {\n  assert.equal(add(1, 2), 3);\n});\n`,
+      "utf-8"
+    );
+
+    const manager = new QualityGateManager(cleanDir);
+    const report = await manager.runAll();
+    // UIUX_VISUAL 默认 disabled，因此只执行 6 个 gate
+    assert.equal(report.totalGates, 6);
+    assert.equal(report.passedGates, 6);
+    assert.equal(report.failedGates, 0);
+    assert.equal(report.overallPassed, true);
+    assert.equal(report.overallScore, 1.0);
+    assert.equal(report.criticalFindings, 0);
+  } finally {
+    fs.rmSync(cleanDir, { recursive: true, force: true });
+  }
 });
 
 test("QualityGateManager.setEnabled toggles gate", async () => {

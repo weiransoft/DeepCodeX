@@ -193,4 +193,4 @@ export {
   getRegisteredCheckerIds,
   getCheckerById,
   runAllCheckers,
-} from "./static-checkers";
+} from "./static-checkers/index";

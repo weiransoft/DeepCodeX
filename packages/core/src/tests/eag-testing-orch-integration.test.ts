@@ -27,7 +27,7 @@ import { TestingOrchestrator } from "../eag/testing/testing-orchestrator";
 import { GateG6Checker } from "../eag/gate/gate-g6-checker";
 import { GateG7Checker } from "../eag/gate/gate-g7-checker";
 import { CoverageGate } from "../eag/testing/coverage-gate";
-import { DEFAULT_TEST_QUALITY_CHECKERS } from "../eag/testing/static-checkers";
+import { DEFAULT_TEST_QUALITY_CHECKERS } from "../eag/testing/static-checkers/index";
 import { InMemoryLLMClient } from "../eag/coding/llm-filler";
 import {
   InMemoryPkcAccessor,

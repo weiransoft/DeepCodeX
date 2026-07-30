@@ -26,7 +26,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EagCommandParser } from "../eag/cli/eag-command-parser";
 import type { TestingLoopRequest } from "../eag/testing/types";
-import type { EagRunRequest, EagResumeRequest, EagStatusRequest } from "../eag/long-horizon";
+import type { EagRunRequest, EagResumeRequest, EagStatusRequest } from "../eag/long-horizon/index";
 import {
   createMinimalTestingLoopRequest,
   createMinimalEagRunRequest,

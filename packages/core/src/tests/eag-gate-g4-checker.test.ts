@@ -35,7 +35,7 @@ import { GateG4Checker } from "../eag/gate/gate-g4-checker";
 import type { GateChecker, GateContext, GateG4Context, GateResult } from "../eag/gate/gate-types";
 import type { DocumentState } from "../eag/doc-driven/types";
 import type { GeneratedFileKind } from "../eag/coding/types";
-import { DEFAULT_TEMPLATE_REGISTRY } from "../eag/coding/templates";
+import { DEFAULT_TEMPLATE_REGISTRY } from "../eag/coding/templates/index";
 import type { TemplateRegistry } from "../eag/coding/types";
 
 // ============================================================================

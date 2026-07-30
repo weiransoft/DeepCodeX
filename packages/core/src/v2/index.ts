@@ -322,9 +322,9 @@ export { ToolRouter } from "./approval/tool-router.js";
 // 7. integration 子模块 - V1/V2 集成 Hook
 // ============================================================================
 
-// 会话上下文 Hook（DefaultSessionContextHook）
+// 会话上下文 Hook（DefaultSessionContextHook + DualLayerContextManager 工厂）
 export type { ContextSnippet, SessionContextHook } from "./integration/session-hook.js";
-export { DefaultSessionContextHook } from "./integration/session-hook.js";
+export { DefaultSessionContextHook, createDualLayerContextHook } from "./integration/session-hook.js";
 
 // 审批 Hook 工厂函数
 export { createApprovalBeforeExecutionHook, createToolRouterBeforeExecutionHook } from "./integration/approval-hook.js";
@@ -332,8 +332,8 @@ export { createApprovalBeforeExecutionHook, createToolRouterBeforeExecutionHook 
 // 编辑处理器 Hook 工厂函数
 export { createEditHandlerAfterExecutionHook } from "./integration/edit-handler-hook.js";
 
-// V2 配置桥接（V2Config + mergeV2Config + V2ConfigError）
-export { V2Config, V2ConfigError, mergeV2Config } from "./integration/settings-bridge.js";
+// V2 配置桥接（V2Config + mergeV2Config + buildV2Config + V2ConfigError）
+export { V2Config, V2ConfigError, mergeV2Config, buildV2Config } from "./integration/settings-bridge.js";
 
 // ============================================================================
 // 8. observability 子模块 - V2 事件日志

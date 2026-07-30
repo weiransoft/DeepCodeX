@@ -448,13 +448,29 @@ function isValidGraphDebugLevel(value: string): value is GraphDebugLogLevel {
  *
  * 使用方式：
  * ```typescript
+ * // 1. 装配 plugin 注册表与 GoalDispatcher（task 节点需要）
+ * const pluginRegistry = new PluginRegistry();
+ * pluginRegistry.register(myPlugin);
+ * const goalDispatcher = new GoalDispatcher(pluginRegistry, { maxParallel: 4 });
+ *
+ * // 2. 装配 NodeExecutorImpl（loop 节点需要 LoopHandoffAdapter）
+ * const nodeExecutor = new NodeExecutorImpl({
+ *   goalDispatcher,
+ *   loopHandoffAdapter: myLoopHandoffAdapter,
+ *   experienceStore,
+ *   logger,
+ * });
+ *
+ * // 3. 装配其他图级组件
  * const options = {
- *   nodeExecutor: new NodeExecutorImpl(...),
+ *   nodeExecutor,
  *   edgeResolver: new EdgeResolverImpl(),
  *   graphScheduler: new GraphSchedulerImpl(...),
  *   graphGuard: new GraphGuardImpl(),
  *   predicateRegistry: createPredicateRegistry(),
  * };
+ *
+ * // 4. 创建 handler 并执行
  * const handler = new EagGraphCommandHandler(options);
  * const request = extractEagGraphRequestFromPrompt(
  *   '/eag-graph --graph-file path/to/graph.json --enable-experience-recall'

@@ -42,7 +42,7 @@ import type {
   SkeletonGenerationResult,
   TemplateRegistry,
 } from "./types";
-import { DEFAULT_TEMPLATE_REGISTRY } from "./templates";
+import { DEFAULT_TEMPLATE_REGISTRY } from "./templates/index";
 import type { InterfaceContract, ModuleSplit, TaskNode } from "../doc-driven/types";
 
 // ============================================================================

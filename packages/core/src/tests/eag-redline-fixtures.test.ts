@@ -40,7 +40,7 @@ import {
   getFixturesByKind,
   getTcsFixtureCount,
   validateTcsFixtures,
-} from "../eag/tcs/fixtures";
+} from "../eag/tcs/fixtures/index";
 import type { TcsRedlineId } from "../eag/tcs/types";
 
 // ============================================================================

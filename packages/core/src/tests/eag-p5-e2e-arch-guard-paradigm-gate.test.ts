@@ -51,7 +51,7 @@ import {
   type GuardVerdict,
   type GuardRuleId,
   type GuardLayer,
-} from "../eag/p5";
+} from "../eag/p5/index";
 
 // ============================================================================
 // U 组：企业架构核心机制端到端验证（v2.1 新增）—— U3 架构范式 + paradigm_lock 导入
@@ -72,7 +72,7 @@ import { GateG1Checker } from "../eag/gate/gate-g1-checker";
 import { GateG4Checker } from "../eag/gate/gate-g4-checker";
 import { GateG7Checker } from "../eag/gate/gate-g7-checker";
 import type { GateContext, GateResult, GateG4Context, GateG7Context } from "../eag/gate/gate-types";
-import { DEFAULT_TEMPLATE_REGISTRY } from "../eag/coding/templates";
+import { DEFAULT_TEMPLATE_REGISTRY } from "../eag/coding/templates/index";
 import type { TemplateRegistry } from "../eag/coding/types";
 
 // 共享夹具导入（临时目录管理）

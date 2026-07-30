@@ -55,7 +55,7 @@ import {
   // GuardChain 类型
   type GuardVerdict,
   type GuardContext,
-} from "../eag/p5";
+} from "../eag/p5/index";
 
 // 共享夹具导入
 import {

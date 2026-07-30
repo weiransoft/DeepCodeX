@@ -58,7 +58,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { StrictEvaluator, StrictEvaluatorError } from "../eag/coding/strict-evaluator";
 import type { StaticChecker } from "../eag/coding/types";
-import { DEFAULT_STATIC_CHECKERS } from "../eag/coding/static-checkers";
+import { DEFAULT_STATIC_CHECKERS } from "../eag/coding/static-checkers/index";
 import type {
   EvaluationContext,
   EvaluationReport,

@@ -24,6 +24,7 @@
  */
 
 import { z } from "zod";
+import { readSettings, readProjectSettings } from "./v1-adapters.js";
 
 // ============================================================================
 // 1. V2Config zod schema 定义（§9.4 V2Config）
@@ -563,4 +564,51 @@ function hasPath(obj: Record<string, unknown>, path: string): boolean {
     current = (current as Record<string, unknown>)[part];
   }
   return true;
+}
+
+// ============================================================================
+// 7. buildV2Config：从 settings.json 与环境变量构造 V2Config
+// ============================================================================
+
+/**
+ * 从用户设置、项目设置与环境变量构造完整 V2Config
+ *
+ * 设计依据：V2_CONTEXT_MEMORY_TECH_DESIGN.md §9.4.1 与 repair-plan.md §3.1
+ * 配置源优先级（低 → 高）：
+ *   1. 内置默认值（V2Config schema .default）
+ *   2. 用户设置文件（~/.deepcode/settings.json 的 v2 子树）
+ *   3. 项目设置文件（<projectRoot>/.deepcode/settings.json 的 v2 子树）
+ *   4. 环境变量（DEEPCODEX_V2_* 前缀）
+ *
+ * 注意：CLI --v2-* 参数由调用方通过 mergeV2Config 第 4 层注入；
+ * App.tsx 当前未使用 CLI 参数，因此 buildV2Config 只合并前三层 + 环境变量。
+ *
+ * @param projectRoot 项目根目录
+ * @returns 合并并校验通过的完整 V2Config
+ * @throws V2ConfigError 配置未知键 / 类型不匹配 / 非法枚举值（信息含键路径与来源层）
+ */
+export function buildV2Config(projectRoot: string): V2Config {
+  // 第 2 层：用户级 settings.json 的 v2 子树
+  const userSettings = readSettings();
+  const userV2 = (userSettings?.v2 as Record<string, unknown> | undefined) ?? {};
+
+  // 第 3 层：项目级 settings.json 的 v2 子树（覆盖用户级）
+  const projectSettings = readProjectSettings(projectRoot);
+  const projectV2 = (projectSettings?.v2 as Record<string, unknown> | undefined) ?? {};
+
+  // 合并用户级与项目级 v2 子树（项目级覆盖用户级，对象递归合并）
+  const mergedUserJson = deepMerge(userV2, projectV2);
+
+  // 第 4 层（当前留空）：CLI --v2-* 参数
+  const cliArgs: Record<string, unknown> = {};
+
+  // 过滤 DEEPCODEX_V2_* 环境变量（mergeV2Config 内部会再次解析）
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key.startsWith("DEEPCODEX_V2_") && value !== undefined) {
+      env[key] = value;
+    }
+  }
+
+  return mergeV2Config(mergedUserJson, env, cliArgs);
 }

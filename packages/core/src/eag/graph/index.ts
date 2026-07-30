@@ -11,6 +11,7 @@
  * - graph-guard.ts：图级护栏（GraphGuardImpl）
  * - graph-scheduler.ts：图级调度器（GraphSchedulerImpl）
  * - node-loop-kernel.ts：节点内循环内核（NodeLoopKernel）
+ * - node-executor.ts：节点执行器实现（NodeExecutorImpl）
  * - predicate-registry.ts：谓词注册表（PredicateRegistryImpl）
  * - graph-loop-orchestrator.ts：图级编排器（GraphLoopOrchestrator）
  *
@@ -90,6 +91,8 @@ export {
 export type {
   /** 节点执行器协议 */
   NodeExecutorProtocol,
+  /** Loop 节点 Handoff 回调适配器协议 */
+  LoopHandoffAdapter,
   /** 边解析器协议 */
   EdgeResolverProtocol,
   /** 图级护栏协议 */
@@ -98,6 +101,12 @@ export type {
   GraphSchedulerProtocol,
   /** 经验存储协议 */
   ExperienceStoreProtocol,
+  /** 节点经验上送协议 */
+  NodeExperienceUploader,
+  /** 双层上下文管理器协议 */
+  DualLayerContextManagerProtocol,
+  /** 图调试器协议 */
+  GraphDebuggerProtocol,
   /** 编排器构造选项 */
   GraphLoopOrchestratorOptions,
 } from "./graph-loop-protocols";
@@ -172,6 +181,22 @@ export {
 } from "./node-loop-kernel";
 
 // ============================================================================
+// 节点执行器（node-executor.ts）
+// ============================================================================
+
+export type {
+  /** 节点执行器实现类构造选项 */
+  NodeExecutorImplOptions,
+} from "./node-executor";
+
+export {
+  /** 节点执行器实现类 */
+  NodeExecutorImpl,
+  /** 创建节点执行器实例（工厂函数） */
+  createNodeExecutor,
+} from "./node-executor";
+
+// ============================================================================
 // 谓词注册表（predicate-registry.ts）
 // ============================================================================
 
@@ -203,3 +228,28 @@ export {
   /** 计算任务特征相似度（加权 Jaccard + 归一化欧氏距离） */
   computeSimilarity,
 } from "./experience-store";
+
+// ============================================================================
+// 图生命周期管理器（graph-lifecycle-manager.ts / graph-lifecycle-models.ts）
+// ============================================================================
+
+export type {
+  /** 图生命周期状态 */
+  GraphLifecycleState,
+  /** 图生命周期状态变更事件 */
+  GraphLifecycleStateChangeEvent,
+  /** 图生命周期状态变更监听器 */
+  GraphLifecycleStateChangeListener,
+  /** 图生命周期管理器协议 */
+  GraphLifecycleManagerProtocol,
+} from "./graph-lifecycle-models";
+
+export {
+  /** 图生命周期状态机全部合法值 */
+  GRAPH_LIFECYCLE_STATES,
+} from "./graph-lifecycle-models";
+
+export {
+  /** 图生命周期管理器实现类 */
+  GraphLifecycleManager,
+} from "./graph-lifecycle-manager";

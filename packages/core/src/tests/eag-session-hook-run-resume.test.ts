@@ -28,7 +28,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { RunStateStore } from "../eag/long-horizon/run-state-store";
-import type { EagRunResult } from "../eag/long-horizon";
+import type { EagRunResult } from "../eag/long-horizon/index";
 import {
   createMinimalEagRunRequest,
   createMinimalEagResumeRequest,

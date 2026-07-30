@@ -254,4 +254,4 @@ export {
   getFixturesByKind,
   getTcsFixtureCount,
   validateTcsFixtures,
-} from "./fixtures";
+} from "./fixtures/index";

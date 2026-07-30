@@ -55,7 +55,7 @@ import { ContractTestGenerator } from "./contract-test-generator";
 import { E2eTestGenerator } from "./e2e-test-generator";
 import type { CoverageGate } from "./coverage-gate";
 import { BrownfieldContractGuard } from "./brownfield-contract-guard";
-import { DEFAULT_TEST_QUALITY_CHECKERS } from "./static-checkers";
+import { DEFAULT_TEST_QUALITY_CHECKERS } from "./static-checkers/index";
 // EAG-P3 批次 11 S1 改造：从 gate 模块导入独立的 G-6/G-7 检查器与类型
 // 设计依据：EAG-P3 批次 11 设计 §3 S1 D-S1-2/D-S1-3——gate 模块是门禁类型的权威来源，
 // testing-orchestrator 作为消费者应复用，避免内联重复定义导致类型分叉。
