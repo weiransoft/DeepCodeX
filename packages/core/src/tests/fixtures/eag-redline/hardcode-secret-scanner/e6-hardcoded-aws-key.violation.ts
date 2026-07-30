@@ -27,7 +27,7 @@ export class AwsConfig {
   // 违规点：硬编码 GitHub Token
   static readonly GITHUB_TOKEN = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
 
-  // 违规点：硬编码 API Key
+  // 违规点：硬编码 API Key（已替换为无害占位符，避免 GitHub Secret Scanning 误报）
   static readonly API_KEY = "sk_live_REDACTED_PLACEHOLDER";
 }
 `,
