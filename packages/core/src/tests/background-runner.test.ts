@@ -339,6 +339,47 @@ test("TC-BR-005: 任务完成后 onTaskComplete 回调", async () => {
 });
 
 // ============================================================================
+// TC-BR-005b: 任务超时后 state = timeout 并触发 onTaskComplete
+// ============================================================================
+
+test("TC-BR-005b: 任务超时后 state = timeout 并触发 onTaskComplete", async () => {
+  const completeTasks: { id: string; state: string }[] = [];
+  const { runner, registry } = createRunner("long-running", {
+    onTaskComplete: (t) => completeTasks.push(t),
+  });
+
+  const { taskId } = await runner.start("会超时的任务", "chat");
+  const task = registry.get(taskId);
+  assert.ok(task, "任务应存在");
+  assert.equal(task!.state, "running", "初始状态应为 running");
+
+  // 模拟外部超时检测机制调用 markTimeout
+  task!.markTimeout("执行时间超过阈值");
+  assert.equal(task!.state, "timeout", "markTimeout 后状态应为 timeout");
+  assert.equal(task!.error, "执行时间超过阈值", "error 应记录超时原因");
+  assert.ok(task!.controller.signal.aborted, "timeout 后 controller 应被 abort");
+
+  // 等待 setTimeout(0) unregister 执行
+  await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+  // 验证 onTaskComplete 被调用
+  assert.equal(completeTasks.length, 1, "onTaskComplete 应被调用 1 次");
+  assert.equal(completeTasks[0].id, taskId);
+  assert.equal(completeTasks[0].state, "timeout", "完成状态应为 timeout");
+
+  // 验证任务已从活跃区移到历史区
+  assert.equal(registry.get(taskId), null, "timeout 后 get 应返回 null");
+  assert.equal(registry.size, 0, "活跃区应为 0");
+  assert.equal(registry.historySize, 1, "历史区应为 1");
+
+  // 验证历史区任务状态
+  const list = registry.list({ includeHistory: true });
+  assert.equal(list.length, 1);
+  assert.equal(list[0].id, taskId);
+  assert.equal(list[0].state, "timeout");
+});
+
+// ============================================================================
 // TC-BR-006: 多任务并行（同时 3 个 task）
 // ============================================================================
 

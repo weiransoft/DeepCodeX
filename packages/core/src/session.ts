@@ -402,6 +402,7 @@ type SessionManagerOptions = {
   createLLMClient?: CreateLLMClient;
   getResolvedSettings: () => {
     model: string;
+    timeout?: number;
     webSearchTool?: string;
     mcpServers?: Record<string, McpServerConfig>;
     permissions?: Required<PermissionSettings>;
@@ -728,6 +729,7 @@ export class SessionManager {
   private readonly createLLMClientOverride?: CreateLLMClient;
   private readonly getResolvedSettings: () => {
     model: string;
+    timeout?: number;
     webSearchTool?: string;
     mcpServers?: Record<string, McpServerConfig>;
     permissions?: Required<PermissionSettings>;
@@ -1028,6 +1030,41 @@ export class SessionManager {
     let estimatedTokens = 0;
     this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "start", sessionId);
 
+    // 提取流式安全控制参数（非 OpenAI SDK 标准字段，需在传给 SDK 前过滤）
+    const rawSignal =
+      options && typeof options.signal === "object" && options.signal instanceof AbortSignal
+        ? options.signal
+        : undefined;
+    const maxReasoningLength =
+      options && typeof (options as Record<string, unknown>).maxReasoningLength === "number"
+        ? ((options as Record<string, unknown>).maxReasoningLength as number)
+        : undefined;
+    const streamTimeoutMs =
+      options && typeof (options as Record<string, unknown>).streamTimeoutMs === "number"
+        ? ((options as Record<string, unknown>).streamTimeoutMs as number)
+        : undefined;
+
+    // 构造统一的安全控制器：聚合外部 signal、超时 signal 与内部主动中断。
+    // 通过 AbortController 管理，确保需要主动中断（如 reasoning 超长）时可调用 abort()。
+    const safetyController = new AbortController();
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const propagateAbort = () => {
+      safetyController.abort();
+    };
+    if (rawSignal) {
+      if (rawSignal.aborted) {
+        safetyController.abort();
+      } else {
+        rawSignal.addEventListener("abort", propagateAbort, { once: true });
+      }
+    }
+    if (streamTimeoutMs && streamTimeoutMs > 0) {
+      timeoutHandle = setTimeout(() => safetyController.abort(), streamTimeoutMs);
+    }
+
+    // 构造 SDK 选项：只保留 SDK 认识的 signal
+    const sdkOptions: Record<string, unknown> = { signal: safetyController.signal };
+
     const streamRequest = {
       ...request,
       stream: true,
@@ -1044,7 +1081,7 @@ export class SessionManager {
           body: Record<string, unknown>,
           options?: Record<string, unknown>
         ) => Promise<unknown>
-      )(streamRequest, options);
+      )(streamRequest, sdkOptions);
     } catch (error) {
       this.logChatCompletionDebug(debug, {
         timestamp: new Date().toISOString(),
@@ -1155,6 +1192,13 @@ export class SessionManager {
           if (typeof reasoningDelta === "string") {
             reasoningContent += reasoningDelta;
             trackText(reasoningDelta);
+            // Skill matching 等短输出场景防护：reasoning 模型（如 Qwen3）可能在 thinking
+            // 过程中陷入循环，产生超长 reasoning 内容。超过阈值时立即 abort 并抛错，
+            // 由上层 catch 安全降级（如 identifyMatchingSkillNames 返回空数组）。
+            if (maxReasoningLength && reasoningContent.length > maxReasoningLength) {
+              safetyController.abort();
+              throw new Error(`reasoning content exceeded safety limit (${maxReasoningLength} chars)`);
+            }
           }
 
           if (typeof delta.refusal === "string") {
@@ -1228,6 +1272,12 @@ export class SessionManager {
       });
       throw error;
     } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+      if (rawSignal) {
+        rawSignal.removeEventListener("abort", propagateAbort);
+      }
       this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "end", sessionId);
     }
 
@@ -1301,6 +1351,7 @@ export class SessionManager {
       thinkingEnabled: boolean;
       signal?: AbortSignal | null;
     },
+    options?: Record<string, unknown>,
     sessionId?: string,
     debug?: ChatCompletionDebugOptions
   ): Promise<{
@@ -1317,6 +1368,34 @@ export class SessionManager {
     this.throwIfAborted(request.signal);
 
     this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "start", sessionId);
+
+    // 提取流式安全控制参数（非 LLMClient 标准字段，传给 provider 前过滤）
+    const rawSignal: AbortSignal | null | undefined =
+      options && typeof options.signal === "object" && options.signal instanceof AbortSignal
+        ? options.signal
+        : request.signal;
+    const maxReasoningLength: number | undefined =
+      options && typeof options.maxReasoningLength === "number" ? options.maxReasoningLength : undefined;
+    const streamTimeoutMs: number | undefined =
+      options && typeof options.streamTimeoutMs === "number" ? options.streamTimeoutMs : undefined;
+
+    // 构造统一的安全控制器：聚合外部 signal、超时 signal 与内部主动中断。
+    // 通过 AbortController 管理，确保需要主动中断（如 reasoning 超长）时可调用 abort()。
+    const safetyController = new AbortController();
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const propagateAbort = () => {
+      safetyController.abort();
+    };
+    if (rawSignal) {
+      if (rawSignal.aborted) {
+        safetyController.abort();
+      } else {
+        rawSignal.addEventListener("abort", propagateAbort, { once: true });
+      }
+    }
+    if (streamTimeoutMs && streamTimeoutMs > 0) {
+      timeoutHandle = setTimeout(() => safetyController.abort(), streamTimeoutMs);
+    }
 
     // debug/error 日志共用的请求快照：不含 signal（对齐 OpenAI 侧 request 不含 signal 的现状）
     const logRequest: Record<string, unknown> = {
@@ -1354,7 +1433,7 @@ export class SessionManager {
         messages: request.messages,
         tools: request.tools,
         thinkingEnabled: request.thinkingEnabled,
-        signal: request.signal ?? null,
+        signal: safetyController.signal,
       })) {
         // E3 扩展点（ADR-DI-001 §5.1.3）：流式事件之间检查中断队列
         //
@@ -1378,6 +1457,12 @@ export class SessionManager {
           case "thinking_delta":
             reasoningContent += event.thinking;
             trackText(event.thinking);
+            // 主对话 reasoning 超长防护：与 OpenAI 通路对齐，超过阈值时立即 abort 并抛错，
+            // 由 activateSession catch 块识别后安全降级为 failed 状态，避免用户无响应等待。
+            if (maxReasoningLength && reasoningContent.length > maxReasoningLength) {
+              safetyController.abort();
+              throw new Error(`reasoning content exceeded safety limit (${maxReasoningLength} chars)`);
+            }
             break;
           case "tool_call_start":
             toolCallBuckets.set(event.id, {
@@ -1459,6 +1544,12 @@ export class SessionManager {
       });
       throw error;
     } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+      if (rawSignal) {
+        rawSignal.removeEventListener("abort", propagateAbort);
+      }
       // finally 进度 end 照发（对齐 OpenAI 路径正常/异常/abort 均发 end 的行为）
       this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "end", sessionId);
     }
@@ -1585,24 +1676,43 @@ ${agentInstructions}
         this.throwIfAborted(options?.signal);
         content = llmResponse.content;
       } else if (client) {
+        // Skill matching 是短输出分类任务：禁用 thinking/reasoning，限制最大 token，
+        // 并设置流式超时与 reasoning 长度上限，防止 reasoning 模型（如 Qwen3）陷入循环。
+        const skillMatchingMaxTokens = 1024;
+        const skillMatchingMaxReasoningLength = 4096;
+        const skillMatchingStreamTimeoutMs = 15000;
         const response = await this.createChatCompletionStream(
           client,
           {
             model,
             temperature: 0.1,
+            max_tokens: skillMatchingMaxTokens,
             messages: [
               { role: "system", content: systemPrompt },
               { role: "user", content: userPrompt },
             ],
             response_format: { type: "json_object" },
+            // 显式禁用 thinking/reasoning，避免 Qwen3 / DeepSeek-R1 等模型在 skill
+            // 选择阶段产生冗长且可能循环的 reasoning 内容。
+            ...buildThinkingRequestOptions(false, baseURL, "max", model),
           },
-          options?.signal ? { signal: options.signal } : undefined,
+          {
+            ...(options?.signal ? { signal: options.signal } : {}),
+            maxReasoningLength: skillMatchingMaxReasoningLength,
+            streamTimeoutMs: skillMatchingStreamTimeoutMs,
+          },
           options?.sessionId,
           {
             enabled: debugLogEnabled,
             location: "SessionManager.identifyMatchingSkillNames",
             baseURL,
-            params: { purpose: "skill-matching", temperature: 0.1 },
+            params: {
+              purpose: "skill-matching",
+              temperature: 0.1,
+              max_tokens: skillMatchingMaxTokens,
+              maxReasoningLength: skillMatchingMaxReasoningLength,
+              streamTimeoutMs: skillMatchingStreamTimeoutMs,
+            },
           }
         );
         this.throwIfAborted(options?.signal);
@@ -1710,13 +1820,15 @@ ${agentInstructions}
     this.activePromptController = controller;
 
     try {
-      // V2 上下文缓存刷新：必须在 createSession / replySession 之前调用。
-      // createSession 会构建 system message 并调用 buildMessages；只有提前刷新，
-      // preBuildContext 才能在该轮首次 buildMessages 时命中上下文片段，
+      // V2 上下文缓存刷新：
+      // createSession / replySession 会构建 system message 并调用 buildMessages；
+      // 只有提前刷新，preBuildContext 才能在该轮首次 buildMessages 时命中上下文片段，
       // 否则 V2 上下文会延迟一整轮才生效。
+      // - 已有 activeSessionId 时，在 turn 入口先刷新旧会话缓存（覆盖 replySession 场景）；
+      // - 新会话无 activeSessionId 时，由 createSession 在生成 sessionId 后刷新（覆盖 T1）。
       // 刷新结果写入进程内存缓存，preBuildContext 在 buildMessages 热路径上同步读取，
       // 保证 buildMessages 同步签名不变。未注入 contextHook 或 V2 未启用时为空操作。
-      // 注意：仅在 turn 入口调用一次，LLM 流式循环内禁止重复调用。
+      // 注意：每 turn 仅刷新一次目标会话，LLM 流式循环内禁止重复调用。
       // 上下文刷新失败属于辅助能力降级，不应阻塞主对话流程，因此单独捕获并静默 swallow。
       if (this.activeSessionId) {
         try {
@@ -1749,6 +1861,18 @@ ${agentInstructions}
 
     const sessionId = crypto.randomUUID();
     this.ensureFileHistorySession(sessionId);
+
+    // V2 上下文缓存刷新（新会话场景）：
+    // 在 buildSystemMessage / buildMessages 之前刷新，确保首条 system message 能命中 preBuildContext 缓存。
+    // 失败降级 swallow，避免阻塞主对话流程。
+    if (this.contextHook?.refreshContextAsync) {
+      try {
+        await this.contextHook.refreshContextAsync(sessionId);
+      } catch {
+        // 降级 swallow：V2 上下文预计算失败时保持主对话继续，保证零回归。
+      }
+    }
+
     const now = new Date().toISOString();
     const index = this.loadSessionsIndex();
     const entry: SessionEntry = {
@@ -4532,6 +4656,14 @@ ${agentInstructions}
       return;
     }
 
+    // 主对话流式安全参数：与 settings.timeout 对齐，防止 LLM 长期无响应或 reasoning 无限增长。
+    // OpenAI 路径当前依赖 SDK 请求级 timeout（默认 600s），此处额外提供流式整体超时；
+    // Anthropic 路径在 createLlmMessageStream 中通过 AbortController 实现，因 Anthropic SDK 未配置 timeout。
+    const settings = this.getResolvedSettings();
+    const settingsTimeout = settings.timeout ?? 0;
+    const streamTimeoutMs = settingsTimeout > 0 ? settingsTimeout * 1000 : undefined;
+    const maxReasoningLength = 100_000;
+
     this.updateSessionEntry(sessionId, (entry) => ({
       ...entry,
       status: "processing",
@@ -4703,6 +4835,7 @@ ${agentInstructions}
                   thinkingEnabled,
                   signal: sessionController.signal,
                 },
+                { signal: sessionController.signal, streamTimeoutMs, maxReasoningLength },
                 sessionId,
                 {
                   enabled: debugLogEnabled,
@@ -4719,7 +4852,7 @@ ${agentInstructions}
                   tools: getTools(this.getPromptToolOptions(), this.mcpToolDefinitions),
                   ...thinkingOptions,
                 },
-                { signal: sessionController.signal },
+                { signal: sessionController.signal, streamTimeoutMs, maxReasoningLength },
                 sessionId,
                 {
                   enabled: debugLogEnabled,

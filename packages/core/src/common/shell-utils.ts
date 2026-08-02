@@ -154,13 +154,47 @@ export function toNativeCwd(shellCwd: string): string {
   return posixPathToWindowsPath(shellCwd);
 }
 
+/**
+ * 子 shell 环境变量敏感键黑名单（大小写不敏感、子串匹配）。
+ *
+ * P0 安全修复：避免 API Key、密码、私钥、SSH Agent 等凭据随 process.env 全量透传给
+ * bash 子进程。该黑名单在合并 process.env + extraEnv 后应用，命中即删除。
+ */
+const SENSITIVE_ENV_KEY_PATTERNS: ReadonlyArray<RegExp> = Object.freeze([
+  /API_KEY/i,
+  /SECRET/i,
+  /TOKEN/i,
+  /PASSWORD/i,
+  /PRIVATE_KEY/i,
+  /SSH_AUTH_SOCK/i,
+  /DEEPCODE_/i,
+]);
+
+/**
+ * 判断环境变量键是否命中敏感黑名单。
+ *
+ * @param key 环境变量键
+ * @returns 是否敏感
+ */
+function isSensitiveEnvKey(key: string): boolean {
+  return SENSITIVE_ENV_KEY_PATTERNS.some((pattern) => pattern.test(key));
+}
+
 export function buildShellEnv(shellPath: string, extraEnv: Record<string, string> = {}): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {
+  const rawEnv: NodeJS.ProcessEnv = {
     ...process.env,
     ...extraEnv,
     SHELL: shellPath,
     GIT_EDITOR: "true",
   };
+
+  // P0 安全修复：过滤敏感环境变量，避免 API Key / SSH Agent / 密码等泄露给子 shell。
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(rawEnv)) {
+    if (!isSensitiveEnvKey(key)) {
+      env[key] = value;
+    }
+  }
 
   if (process.platform === "win32") {
     const tmpdir = windowsPathToPosixPath(os.tmpdir());

@@ -30,6 +30,7 @@ import {
   getMaxStderrChars,
   ReviewArgsError,
   formatReviewHelp,
+  extractReviewNaturalLanguageTask,
   type ReviewHandlerContext,
   type ToolCommandRecord,
   type RunToolCommandOptions,
@@ -115,6 +116,48 @@ test("parseReviewArgs --format 非法值抛 ReviewArgsError", () => {
       return true;
     }
   );
+});
+
+// ============================================================================
+// extractReviewNaturalLanguageTask 测试
+// ============================================================================
+
+test("extractReviewNaturalLanguageTask 空 /review 返回 undefined（工具模式）", () => {
+  assert.equal(extractReviewNaturalLanguageTask("/review"), undefined);
+  assert.equal(extractReviewNaturalLanguageTask("  /review  "), undefined);
+});
+
+test("extractReviewNaturalLanguageTask 合法子命令返回 undefined（工具模式）", () => {
+  assert.equal(extractReviewNaturalLanguageTask("/review typecheck"), undefined);
+  assert.equal(extractReviewNaturalLanguageTask("/review lint"), undefined);
+  assert.equal(extractReviewNaturalLanguageTask("/review format"), undefined);
+  assert.equal(extractReviewNaturalLanguageTask("/review full"), undefined);
+  assert.equal(extractReviewNaturalLanguageTask("/review help"), undefined);
+});
+
+test("extractReviewNaturalLanguageTask 子命令加已知选项返回 undefined（工具模式）", () => {
+  assert.equal(extractReviewNaturalLanguageTask("/review full --quiet"), undefined);
+  assert.equal(extractReviewNaturalLanguageTask("/review full --format json"), undefined);
+  assert.equal(extractReviewNaturalLanguageTask("/review full --project-root /tmp/project --quiet"), undefined);
+  // 默认 full 时也可以直接以选项开头
+  assert.equal(extractReviewNaturalLanguageTask("/review --quiet"), undefined);
+  assert.equal(extractReviewNaturalLanguageTask("/review --format markdown"), undefined);
+});
+
+test("extractReviewNaturalLanguageTask 自然语言请求返回任务描述", () => {
+  const task = "当前项目全部代码，并对照 gold comments，对比当前 review 的准确率和召回率。";
+  assert.equal(extractReviewNaturalLanguageTask(`/review ${task}`), task);
+});
+
+test("extractReviewNaturalLanguageTask /review full 后跟自然语言返回任务描述", () => {
+  const task = "当前项目全部代码，并对照 gold comments，对比当前 review 的准确率和召回率。";
+  assert.equal(extractReviewNaturalLanguageTask(`/review full ${task}`), task);
+});
+
+test("extractReviewNaturalLanguageTask 非 /review 输入返回 undefined", () => {
+  assert.equal(extractReviewNaturalLanguageTask("review something"), undefined);
+  assert.equal(extractReviewNaturalLanguageTask("/team dispatch"), undefined);
+  assert.equal(extractReviewNaturalLanguageTask(""), undefined);
 });
 
 // ============================================================================

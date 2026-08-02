@@ -1294,9 +1294,8 @@ test("TC-E2E-018: 完整生命周期（start → inject → pause → resume →
   assert.equal(task.result, "completed", "result 应为 completed");
   assert.ok(task.completedAt, "completedAt 应已填充");
 
-  // 4. 验证状态变更序列
-  assert.ok(stateSequence.includes("running"), "状态序列应包含 running");
-  assert.ok(stateSequence.includes("succeeded"), "状态序列应包含 succeeded");
+  // 4. 验证状态变更序列（start 路径：queued → pending → running → succeeded）
+  assert.deepEqual(stateSequence, ["pending", "running", "succeeded"], "状态序列应为 pending → running → succeeded");
 
   // 5. 验证终态不可转换
   assert.throws(

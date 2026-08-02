@@ -682,8 +682,16 @@ async function inferOldStringNotFoundReasonWithLLM(
   if (!llmClient) {
     return null;
   }
-  // thinking 开关取自统一 settings 解析链（与旧 createOpenAIClient 返回值同源）
-  const { thinkingEnabled } = resolveCurrentSettings(context.projectRoot);
+  // thinking 开关取自统一 settings 解析链（与旧 createOpenAIClient 返回值同源）。
+  // 若用户配置中的 baseURL 等字段非法（如 SSRF 校验失败），thinking 仅降级为 false，
+  // 不再阻断 LLM 调用：createLLMClient 已注入说明调用链已就绪，应保持增强能力可用。
+  let thinkingEnabled = false;
+  try {
+    const settings = resolveCurrentSettings(context.projectRoot);
+    thinkingEnabled = settings.thinkingEnabled ?? false;
+  } catch {
+    thinkingEnabled = false;
+  }
 
   const contextLineLimit = Math.max(1, oldString.split(/\r?\n/).length);
   const snippetText = raw.slice(scope.startOffset, scope.endOffset);
@@ -766,8 +774,16 @@ async function correctEscapedStringsWithLLM(
   if (!llmClient) {
     return null;
   }
-  // thinking 开关取自统一 settings 解析链（与旧 createOpenAIClient 返回值同源）
-  const { thinkingEnabled } = resolveCurrentSettings(context.projectRoot);
+  // thinking 开关取自统一 settings 解析链（与旧 createOpenAIClient 返回值同源）。
+  // 若用户配置中的 baseURL 等字段非法（如 SSRF 校验失败），thinking 仅降级为 false，
+  // 不再阻断 LLM 调用：createLLMClient 已注入说明调用链已就绪，应保持增强能力可用。
+  let thinkingEnabled = false;
+  try {
+    const settings = resolveCurrentSettings(context.projectRoot);
+    thinkingEnabled = settings.thinkingEnabled ?? false;
+  } catch {
+    thinkingEnabled = false;
+  }
 
   try {
     // 提示词保持原有内容不变，仅换成合成 SessionMessage 形态适配 provider 统一转换入口

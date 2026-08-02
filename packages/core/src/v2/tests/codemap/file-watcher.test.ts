@@ -55,10 +55,35 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * 等待去抖窗口（默认 300ms 去抖 + 50ms 缓冲）
+ * 等待去抖窗口（默认 300ms 去抖 + 200ms 缓冲）
  */
 async function waitForDebounce(debounceMs = 300): Promise<void> {
   await sleep(debounceMs + 200);
+}
+
+/**
+ * 轮询等待直到事件收集器满足断言条件。
+ *
+ * 并发套件运行时，fs.watch 事件可能因事件循环竞争而延迟到达；
+ * 通过轮询而非固定等待，既能在事件快速到达时立即通过，
+ * 又能在高负载下提供最多 2 秒的容错窗口。
+ *
+ * @param collector 事件收集器
+ * @param predicate 事件断言
+ * @param timeoutMs 最大等待时间（毫秒）
+ */
+async function waitForEvents(
+  collector: { events: FileWatchEvent[] },
+  predicate: (events: FileWatchEvent[]) => boolean,
+  timeoutMs = 2000
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (predicate(collector.events)) {
+      return;
+    }
+    await sleep(50);
+  }
 }
 
 /**
@@ -102,10 +127,10 @@ test("FW-01: 启动监听并接收文件修改事件", async () => {
   // 修改文件
   fs.writeFileSync(filePath, "modified content\n", "utf8");
 
-  await waitForDebounce(100);
+  // 轮询等待事件到达，避免并发套件下 fs.watch 事件延迟导致 flaky
+  await waitForEvents(collector, (events) => events.some((e) => e.path === "test-file.ts"));
   await watcher.stop();
 
-  assert.ok(collector.events.length > 0, "应至少收到一个事件");
   const modifyEvent = collector.events.find((e) => e.path === "test-file.ts");
   assert.ok(modifyEvent, "应包含 test-file.ts 的事件");
   assert.equal(modifyEvent?.type, "modified");
@@ -271,7 +296,8 @@ test("FW-06: gitignore 过滤（.gitignore 中的文件不触发事件）", asyn
   const normalFile = path.join(tempProject, "normal.ts");
   fs.writeFileSync(normalFile, "normal\n", "utf8");
 
-  await waitForDebounce(100);
+  // 轮询等待正常文件事件到达，同时确保 gitignored 文件未产生事件
+  await waitForEvents(collector, (events) => events.some((e) => e.path === "normal.ts"), 2000);
   await watcher.stop();
 
   // 验证：gitignored 文件不应触发事件

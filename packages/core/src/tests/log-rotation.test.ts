@@ -25,6 +25,8 @@ import * as path from "path";
 import {
   rotateLogIfNeeded,
   getBackupFilePaths,
+  getDeepCodeXLogDir,
+  getLegacyLogDir,
   DEFAULT_MAX_LOG_SIZE_BYTES,
   DEFAULT_MAX_BACKUP_COUNT,
 } from "../common/log-rotation";
@@ -377,4 +379,42 @@ test("TC-LR-013: 默认常量值正确", () => {
   // 常量类型应为 number
   assert.equal(typeof DEFAULT_MAX_LOG_SIZE_BYTES, "number");
   assert.equal(typeof DEFAULT_MAX_BACKUP_COUNT, "number");
+});
+
+// TC-LR-014：getDeepCodeXLogDir 返回 ~/.deepcodex/logs
+test("TC-LR-014: getDeepCodeXLogDir 返回 DeepCodeX 日志目录", () => {
+  const originalHome = process.env.HOME;
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "deepcode-log-dir-home-"));
+  process.env.HOME = home;
+  try {
+    const logDir = getDeepCodeXLogDir();
+    assert.equal(logDir, path.join(home, ".deepcodex", "logs"), "应返回 $HOME/.deepcodex/logs");
+    assert.ok(path.isAbsolute(logDir), "日志目录应为绝对路径");
+  } finally {
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// TC-LR-015：getLegacyLogDir 返回 ~/.deepcode/logs（只读兼容）
+test("TC-LR-015: getLegacyLogDir 返回旧版日志目录（只读兼容）", () => {
+  const originalHome = process.env.HOME;
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "deepcode-legacy-log-dir-home-"));
+  process.env.HOME = home;
+  try {
+    const logDir = getLegacyLogDir();
+    assert.equal(logDir, path.join(home, ".deepcode", "logs"), "应返回 $HOME/.deepcode/logs");
+    assert.ok(path.isAbsolute(logDir), "旧版日志目录应为绝对路径");
+  } finally {
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });

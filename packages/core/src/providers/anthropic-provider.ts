@@ -60,6 +60,8 @@ export class AnthropicLLMClient implements LLMClient {
   private readonly betaFeatures: string[];
   private readonly maxTokens: number;
   private readonly thinkingBudgetTokens: number;
+  /** 请求/流式调用超时（毫秒），与 OpenAI 侧 settings.timeout 对齐 */
+  private readonly timeout: number;
   private readonly converter = new AnthropicMessageConverter();
   /** 测试注入点：非流式 transport（生产环境为 null，走 SDK） */
   private transport: CreateTransport | null = null;
@@ -73,6 +75,9 @@ export class AnthropicLLMClient implements LLMClient {
     this.betaFeatures = settings.anthropic?.betaFeatures ?? [];
     this.maxTokens = settings.anthropic?.maxTokens ?? 8192;
     this.thinkingBudgetTokens = settings.anthropic?.thinkingBudgetTokens ?? 4096;
+    // settings.timeout 单位为秒，Anthropic SDK timeout 字段单位为毫秒；
+    // 缺省时与 OpenAI 侧默认 600s 保持一致，避免无 timeout 导致 LLM 长期无响应。
+    this.timeout = settings.timeout > 0 ? settings.timeout * 1000 : 600_000;
   }
 
   /** 测试专用：注入非流式 transport 桩（验证解析逻辑，绕开网络） */
@@ -242,6 +247,7 @@ export class AnthropicLLMClient implements LLMClient {
         apiKey: this.apiKey,
         baseURL: this.baseURL,
         defaultHeaders: headers,
+        timeout: this.timeout,
       });
     }
     return this.sdk;

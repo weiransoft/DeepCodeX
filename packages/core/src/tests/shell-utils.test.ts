@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildDisableExtglobCommand,
+  buildShellEnv,
   buildShellInitCommand,
   getShellKind,
   posixPathToWindowsPath,
@@ -116,4 +117,81 @@ test("File tool absolute checks accept Git Bash drive paths but reject root-rela
   assert.equal(isAbsoluteFilePath("D:/IdeaProjects/guesswho-api/API_DOCUMENTATION.md", "win32"), true);
   assert.equal(isAbsoluteFilePath("/dev/null", "win32"), false);
   assert.equal(isAbsoluteFilePath("./API_DOCUMENTATION.md", "win32"), false);
+});
+
+// ============================================================================
+// buildShellEnv 敏感环境变量过滤
+// ============================================================================
+
+function withEnv<T>(overrides: Record<string, string | undefined>, fn: () => T): T {
+  const original: Record<string, string | undefined> = {};
+  for (const key of Object.keys(overrides)) {
+    original[key] = process.env[key];
+    if (overrides[key] === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = overrides[key];
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
+test("buildShellEnv 过滤 API_KEY 等敏感环境变量", () => {
+  const env = withEnv(
+    {
+      API_KEY: "sk-secret",
+      LLM_API_KEY: "sk-llm",
+      ANTHROPIC_API_KEY: "sk-ant",
+      OPENAI_API_KEY: "sk-openai",
+      SECRET_TOKEN: "token",
+      PASSWORD: "pwd",
+      PRIVATE_KEY: "key",
+      SSH_AUTH_SOCK: "/tmp/ssh",
+      DEEPCODE_DEBUG: "1",
+    },
+    () => buildShellEnv("/bin/bash")
+  );
+
+  assert.equal(env.API_KEY, undefined);
+  assert.equal(env.LLM_API_KEY, undefined);
+  assert.equal(env.ANTHROPIC_API_KEY, undefined);
+  assert.equal(env.OPENAI_API_KEY, undefined);
+  assert.equal(env.SECRET_TOKEN, undefined);
+  assert.equal(env.PASSWORD, undefined);
+  assert.equal(env.PRIVATE_KEY, undefined);
+  assert.equal(env.SSH_AUTH_SOCK, undefined);
+  assert.equal(env.DEEPCODE_DEBUG, undefined);
+});
+
+test("buildShellEnv 保留 PATH/HOME/USER/SHELL 等基础变量", () => {
+  const env = withEnv(
+    {
+      PATH: "/usr/bin:/bin",
+      HOME: "/home/user",
+      USER: "user",
+      SHELL: "/bin/zsh",
+    },
+    () => buildShellEnv("/bin/bash")
+  );
+
+  assert.equal(env.PATH, "/usr/bin:/bin");
+  assert.equal(env.HOME, "/home/user");
+  assert.equal(env.USER, "user");
+  assert.equal(env.SHELL, "/bin/bash");
+});
+
+test("buildShellEnv 黑名单优先于 extraEnv", () => {
+  const env = buildShellEnv("/bin/bash", { API_KEY: "sk-extra", PATH: "/extra" });
+  assert.equal(env.API_KEY, undefined);
+  assert.equal(env.PATH, "/extra");
 });

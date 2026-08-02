@@ -50,6 +50,7 @@ function makeSettings(provider: "openai" | "anthropic", apiKey = "sk-test"): Res
     contextWindow: 131072,
     debugLogEnabled: false,
     telemetryEnabled: false,
+    allowPrivateBaseURL: false,
     permissions: {} as ResolvedDeepcodingSettings["permissions"],
     enabledSkills: {},
     statusline: {} as ResolvedDeepcodingSettings["statusline"],

@@ -374,3 +374,124 @@ test("TC-22: 含 suggestedCommand 时 questions 仍能正常解析（多问题�
   assert.equal(pending?.suggestedCommand?.command, "/team dispatch --role architect");
   assert.equal(pending?.suggestedCommand?.reason, "自动派发");
 });
+
+// ============================================================================
+// TC-23 ~ TC-27：CLI 层 suggestedCommand 参数沙箱校验
+//
+// 测试目标：
+// - 验证 CLI 层 normalizeSuggestedCommand 对非法参数的降级行为
+// - CLI 层无 projectRoot，因此任何绝对路径都应被拒绝
+// - 验证 shell 元字符、路径穿越、~ 展开被拦截
+//
+// 安全策略：CLI 层作为核心层之后的第二道防线，无项目上下文时采取更严格的拒绝策略。
+// ============================================================================
+
+// TC-23：command 包含 shell 元字符
+// 期望：pending.suggestedCommand === undefined
+test("TC-23: CLI 层 suggestedCommand 包含 shell 元字符时应被拒绝", () => {
+  const pending = findPendingAskUserQuestion(
+    [
+      message({
+        ok: true,
+        name: "AskUserQuestion",
+        awaitUserResponse: true,
+        metadata: {
+          kind: "ask_user_question",
+          questions: [{ question: "Proceed?", options: [{ label: "Yes" }] }],
+          suggestedCommand: { command: "/team dispatch; cat /etc/passwd" },
+        },
+      }),
+    ],
+    "waiting_for_user"
+  );
+
+  assert.equal(pending?.suggestedCommand, undefined);
+});
+
+// TC-24：--task-file 使用绝对路径
+// 期望：pending.suggestedCommand === undefined（CLI 层无 projectRoot，拒绝所有绝对路径）
+test("TC-24: CLI 层 --task-file 使用绝对路径时应被拒绝", () => {
+  const pending = findPendingAskUserQuestion(
+    [
+      message({
+        ok: true,
+        name: "AskUserQuestion",
+        awaitUserResponse: true,
+        metadata: {
+          kind: "ask_user_question",
+          questions: [{ question: "Proceed?", options: [{ label: "Yes" }] }],
+          suggestedCommand: { command: "/team dispatch --task-file /tmp/task.json" },
+        },
+      }),
+    ],
+    "waiting_for_user"
+  );
+
+  assert.equal(pending?.suggestedCommand, undefined);
+});
+
+// TC-25：参数包含路径穿越 ".."
+// 期望：pending.suggestedCommand === undefined
+test("TC-25: CLI 层 suggestedCommand 参数包含 .. 时应被拒绝", () => {
+  const pending = findPendingAskUserQuestion(
+    [
+      message({
+        ok: true,
+        name: "AskUserQuestion",
+        awaitUserResponse: true,
+        metadata: {
+          kind: "ask_user_question",
+          questions: [{ question: "Proceed?", options: [{ label: "Yes" }] }],
+          suggestedCommand: { command: "/team dispatch --task-file ../package.json" },
+        },
+      }),
+    ],
+    "waiting_for_user"
+  );
+
+  assert.equal(pending?.suggestedCommand, undefined);
+});
+
+// TC-26：参数包含 ~ home 目录展开
+// 期望：pending.suggestedCommand === undefined
+test("TC-26: CLI 层 suggestedCommand 参数包含 ~ 时应被拒绝", () => {
+  const pending = findPendingAskUserQuestion(
+    [
+      message({
+        ok: true,
+        name: "AskUserQuestion",
+        awaitUserResponse: true,
+        metadata: {
+          kind: "ask_user_question",
+          questions: [{ question: "Proceed?", options: [{ label: "Yes" }] }],
+          suggestedCommand: { command: "/team dispatch --task-file ~/.bashrc" },
+        },
+      }),
+    ],
+    "waiting_for_user"
+  );
+
+  assert.equal(pending?.suggestedCommand, undefined);
+});
+
+// TC-27：合法相对路径参数
+// 期望：pending.suggestedCommand 保留（CLI 层允许无 .. 的相对路径）
+test("TC-27: CLI 层 suggestedCommand 使用合法相对路径时应被允许", () => {
+  const pending = findPendingAskUserQuestion(
+    [
+      message({
+        ok: true,
+        name: "AskUserQuestion",
+        awaitUserResponse: true,
+        metadata: {
+          kind: "ask_user_question",
+          questions: [{ question: "Proceed?", options: [{ label: "Yes" }] }],
+          suggestedCommand: { command: "/team dispatch --task-file docs/design.md" },
+        },
+      }),
+    ],
+    "waiting_for_user"
+  );
+
+  assert.equal(pending?.suggestedCommand?.command, "/team dispatch --task-file docs/design.md");
+});

@@ -1,15 +1,28 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Box, Text } from "ink";
-import type { AskUserQuestionAnswers, AskUserQuestionItem } from "../core/ask-user-question";
-import { useTerminalInput } from "../hooks";
+import type { AskUserQuestionAnswers, AskUserQuestionItem, SuggestedCommand } from "../core/ask-user-question";
+import { useTerminalInput, type InputKey } from "../hooks";
 
-type Props = {
+export type Props = {
   questions: AskUserQuestionItem[];
-  onSubmit: (answers: AskUserQuestionAnswers) => void;
+  /** 可选：用户回答后自动执行的建议命令 */
+  suggestedCommand?: SuggestedCommand;
+  /**
+   * 用户完成所有问题（并确认/跳过了 suggestedCommand）后的回调。
+   * @param answers 用户回答
+   * @param allowSuggestedCommand 用户是否允许自动执行 suggestedCommand
+   */
+  onSubmit: (answers: AskUserQuestionAnswers, allowSuggestedCommand: boolean) => void;
   onCancel: () => void;
 };
 
 const OTHER_VALUE = "__other__";
+
+/** 二次确认阶段的可选项 */
+const CONFIRM_OPTIONS = [
+  { label: "执行建议命令", value: "execute", allow: true },
+  { label: "跳过，仅提交回答", value: "skip", allow: false },
+];
 
 type OptionEntry = {
   label: string;
@@ -18,9 +31,19 @@ type OptionEntry = {
   isOther?: boolean;
 };
 
-export function AskUserQuestionPrompt({ questions, onSubmit, onCancel }: Props): React.ReactElement | null {
+/** 当前交互阶段 */
+type Phase = "questions" | "confirm";
+
+export function AskUserQuestionPrompt({
+  questions,
+  suggestedCommand,
+  onSubmit,
+  onCancel,
+}: Props): React.ReactElement | null {
+  const [phase, setPhase] = useState<Phase>("questions");
   const [questionIndex, setQuestionIndex] = useState(0);
   const [cursorIndex, setCursorIndex] = useState(0);
+  const [confirmIndex, setConfirmIndex] = useState(0);
   const [answers, setAnswers] = useState<AskUserQuestionAnswers>({});
   const [selectedValues, setSelectedValues] = useState<Record<number, string[]>>({});
   const [otherTexts, setOtherTexts] = useState<Record<number, string>>({});
@@ -41,8 +64,10 @@ export function AskUserQuestionPrompt({ questions, onSubmit, onCancel }: Props):
   }, [statusMessage]);
 
   useEffect(() => {
+    setPhase("questions");
     setQuestionIndex(0);
     setCursorIndex(0);
+    setConfirmIndex(0);
     setAnswers({});
     setSelectedValues({});
     setOtherTexts({});
@@ -56,17 +81,33 @@ export function AskUserQuestionPrompt({ questions, onSubmit, onCancel }: Props):
   }, [cursorIndex, options.length]);
 
   useTerminalInput((input, key) => {
-    if (!question) {
-      return;
-    }
-
+    // 全局取消/跳过快捷键
     if (key.escape) {
-      onCancel();
+      if (phase === "confirm") {
+        // 二次确认阶段：Esc 视为跳过建议命令，仍提交回答
+        onSubmit(answers, false);
+      } else {
+        onCancel();
+      }
       return;
     }
 
     if (key.ctrl && (input === "c" || input === "C")) {
-      onCancel();
+      if (phase === "confirm") {
+        // Ctrl+C 在确认阶段同样视为跳过建议命令
+        onSubmit(answers, false);
+      } else {
+        onCancel();
+      }
+      return;
+    }
+
+    if (phase === "confirm") {
+      handleConfirmInput(input, key);
+      return;
+    }
+
+    if (!question) {
       return;
     }
 
@@ -121,6 +162,37 @@ export function AskUserQuestionPrompt({ questions, onSubmit, onCancel }: Props):
     return null;
   }
 
+  function handleConfirmInput(input: string, key: InputKey): void {
+    if (key.upArrow) {
+      setConfirmIndex((index) => Math.max(0, index - 1));
+      return;
+    }
+
+    if (key.downArrow) {
+      setConfirmIndex((index) => Math.min(CONFIRM_OPTIONS.length - 1, index + 1));
+      return;
+    }
+
+    if (key.return) {
+      submitConfirmation(CONFIRM_OPTIONS[confirmIndex]?.allow ?? false);
+      return;
+    }
+
+    if (input === "y" || input === "Y") {
+      submitConfirmation(true);
+      return;
+    }
+
+    if (input === "n" || input === "N") {
+      submitConfirmation(false);
+      return;
+    }
+  }
+
+  function submitConfirmation(allowSuggestedCommand: boolean): void {
+    onSubmit(answers, allowSuggestedCommand);
+  }
+
   function toggleCurrentOption(): void {
     const value = options[cursorIndex]?.value;
     if (value) {
@@ -154,12 +226,53 @@ export function AskUserQuestionPrompt({ questions, onSubmit, onCancel }: Props):
     setAnswers(nextAnswers);
 
     if (questionIndex >= questions.length - 1) {
-      onSubmit(nextAnswers);
+      if (suggestedCommand) {
+        // 进入 suggestedCommand 二次确认阶段，而不是立即提交
+        setPhase("confirm");
+        setConfirmIndex(0);
+        return;
+      }
+      onSubmit(nextAnswers, false);
       return;
     }
 
     setQuestionIndex((index) => index + 1);
     setCursorIndex(0);
+  }
+
+  // 二次确认阶段 UI：展示 suggestedCommand 并让用户选择执行或跳过
+  if (phase === "confirm" && suggestedCommand) {
+    return (
+      <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1} marginY={1}>
+        <Box marginBottom={1}>
+          <Text color="yellow" bold>
+            Confirm suggested command
+          </Text>
+        </Box>
+        {suggestedCommand.reason ? (
+          <Box marginBottom={1}>
+            <Text dimColor>{suggestedCommand.reason}</Text>
+          </Box>
+        ) : null}
+        <Box borderStyle="single" borderColor="gray" paddingX={1} marginY={1}>
+          <Text color="cyan">{suggestedCommand.command}</Text>
+        </Box>
+        <Box flexDirection="column" marginTop={1}>
+          {CONFIRM_OPTIONS.map((option, index) => {
+            const isCursor = index === confirmIndex;
+            return (
+              <Text key={option.value} color={isCursor ? "cyanBright" : undefined}>
+                {isCursor ? "> " : "  "}
+                {option.label}
+              </Text>
+            );
+          })}
+        </Box>
+        <Box marginTop={1}>
+          <Text dimColor>↑/↓ move · Enter/Y execute · N/Esc skip</Text>
+        </Box>
+      </Box>
+    );
   }
 
   return (

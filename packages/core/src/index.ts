@@ -239,6 +239,8 @@ export { DEEPSEEK_V4_MODELS, supportsMultimodal, defaultsToThinkingMode } from "
 export { findGitBashPath, resolveShellPath, setShellIfWindows } from "./common/shell-utils";
 export { logApiError } from "./common/error-logger";
 export { logOpenAIChatCompletionDebug } from "./common/debug-logger";
+// 统一日志目录入口：CLI 与核心库共用 ~/.deepcodex/logs，旧版 ~/.deepcode/logs 仅只读兼容
+export { getDeepCodeXLogDir, getLegacyLogDir } from "./common/log-rotation";
 export { describeLlmError, getLlmErrorDetails } from "./common/llm-error";
 export type { LlmErrorDetails } from "./common/llm-error";
 export {
@@ -737,6 +739,28 @@ export type {
 } from "./team/index.js";
 
 // ============================================================================
+// Goal 调度器与生产插件（FIX-2a，2026-07-31 新特性集成审查）
+//
+// 背景：GoalDispatcher / PluginRegistry / 6 个生产插件类此前仅经 team/index.ts
+// 导出，未 re-export 到根入口，导致 CLI 层（@vegamo/deepcode-core 仅暴露根入口）
+// 无法装配图编排（/eag-graph）的 NodeExecutorImpl 依赖。
+// 此处补齐根导出，使 CLI 装配模块可真实构建 GoalDispatcher + 插件注册表。
+// ============================================================================
+export {
+  GoalDispatcher,
+  PluginRegistry,
+  makeGoal,
+  makeBatch,
+  AutonomousPlugin,
+  MultiGoalPlugin,
+  GraphPlugin,
+  LoopPlugin,
+  ResumePlugin,
+  CancelPlugin,
+} from "./team/index.js";
+export type { BatchResult, GoalState } from "./team/index.js";
+
+// ============================================================================
 // PKC (Project Knowledge Context) —— §5.11 项目知识上下文层
 // EAG-P1 批次 5 实施 L1 全局视野层；EAG-P2 批次 8 新增 L2 语义检索 + L3 业务知识
 // ============================================================================
@@ -999,6 +1023,13 @@ export type {
 // 图定义构造器
 export type { WorkGraphJson, GraphNodeDefJson, GraphEdgeDefJson } from "./eag/graph/index.js";
 export { GraphBuilder } from "./eag/graph/index.js";
+
+// EAG P5 自主编排器（FIX-1，2026-07-31 新特性集成审查）
+// 背景：AutonomousOrchestrator 类此前仅经 EagP5 命名空间导出（L298），
+// CLI 装配模块注入 SessionManagerOptions.autonomousOrchestrator 时需要同名类型。
+// 此处补充根导出（值 + 类型），与 GraphLoopOrchestratorOptions 的扁平导出风格一致。
+export { AutonomousOrchestrator } from "./eag/p5/index.js";
+export type { AutonomousOrchestratorOptions } from "./eag/p5/index.js";
 
 // 边解析器、图级护栏、图级调度器、谓词注册表、经验存储
 export {

@@ -17,6 +17,20 @@
  */
 
 import type { ImageAdapter, ImageData } from "@deepcodex/quality";
+import type * as SharpNamespace from "sharp";
+
+// ============================================================================
+// 类型别名
+// ============================================================================
+
+/**
+ * sharp 模块整体类型（即默认导出的构造函数 + 命名空间）
+ *
+ * sharp 0.33.x 使用 CommonJS `export = sharp` 导出，因此 `typeof SharpNamespace`
+ * 即表示 callable 的 sharp 构造函数本身，可直接用于 `sharp(path)` / `sharp(buffer, opts)`。
+ * 避免使用 `typeof import("sharp").sharp`，因为该命名空间下并不存在 `sharp` 成员。
+ */
+type SharpModule = typeof SharpNamespace;
 
 // ============================================================================
 // 错误类型
@@ -73,19 +87,19 @@ export class SharpImageAdapterError extends Error {
  */
 export class SharpImageAdapter implements ImageAdapter {
   /**
-   * sharp 构造函数（SharpConstructor 类型）
+   * sharp 构造函数（SharpModule 类型）
    *
-   * sharp 0.35.x 使用 ES module 导出：`export const sharp: SharpConstructor` 和 `export default sharp`。
-   * 我们只持有 SharpConstructor，而不是整个模块。
+   * sharp 0.33.x 使用 CommonJS `export = sharp` 导出，模块对象本身就是 callable 的构造函数。
+   * 此处持有整个模块类型，可直接调用 `sharp(path)` / `sharp(buffer, opts)`。
    */
-  private readonly sharp: typeof import("sharp").sharp;
+  private readonly sharp: SharpModule;
 
   /**
    * 私有构造函数（使用 create() 异步工厂方法构造）
    *
-   * @param sharpConstructor 已加载的 sharp SharpConstructor 实例
+   * @param sharpConstructor 已加载的 sharp 构造函数实例
    */
-  private constructor(sharpConstructor: typeof import("sharp").sharp) {
+  private constructor(sharpConstructor: SharpModule) {
     this.sharp = sharpConstructor;
   }
 
@@ -100,17 +114,15 @@ export class SharpImageAdapter implements ImageAdapter {
    * @throws {SharpImageAdapterError} sharp 未安装或加载失败
    */
   static async create(): Promise<SharpImageAdapter> {
-    let sharpConstructor: typeof import("sharp").sharp;
+    let sharpConstructor: SharpModule;
     try {
       // dynamic import 懒加载 sharp
       // 当 sharp 在 optionalDependencies 中且未安装时，import() 会抛出 MODULE_NOT_FOUND
-      // sharp 0.35.x 使用 ES module 导出：`export const sharp: SharpConstructor` 和 `export default sharp`
+      // sharp 0.33.x 使用 CommonJS `export = sharp` 导出：import() 返回的模块对象本身就是
+      // callable 的 sharp 构造函数；同时 default 导入可能存在于 interop 包装中。
       const imported = await import("sharp");
-      // sharp 0.35.x 同时提供 named export 和 default export
-      // 优先使用 default（兼容性更好）
-      sharpConstructor =
-        (imported as { default?: typeof import("sharp").sharp }).default ??
-        (imported as unknown as typeof import("sharp").sharp);
+      // 优先使用 default 导出（ES module interop 场景），否则直接使用模块对象本身
+      sharpConstructor = (imported as { default?: SharpModule }).default ?? (imported as unknown as SharpModule);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       throw new SharpImageAdapterError(

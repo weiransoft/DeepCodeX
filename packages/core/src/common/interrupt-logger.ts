@@ -2,14 +2,14 @@
  * 中断事件日志记录器（D-4 修复）
  *
  * 为动态指令注入与后台子 Agent 特性（ADR-DI-001）提供独立的日志记录机制，
- * 记录 7 种关键事件到 ~/.deepcode/logs/interrupts.log。
+ * 记录 7 种关键事件到 ~/.deepcodex/logs/interrupts.log。
  *
  * 设计依据：
  * - 架构师审查意见：模块位置放 common/（与 debug-logger.ts、error-logger.ts 同目录）
  * - 与 debug-logger.ts 共享 log-rotation.ts 轮转机制
  * - 失败安全：所有日志操作在 try/catch 中，异常不影响 CLI 主流程
  *
- * 7 种事件类型（与设计文档 §3.4 对齐）：
+ * 8 种事件类型（与设计文档 §3.4 对齐）：
  * | 事件类型           | 触发位置                              | 说明           |
  * |-------------------|--------------------------------------|---------------|
  * | interrupt.enqueued | InterruptQueue.enqueue 成功后         | 指令入队       |
@@ -18,15 +18,15 @@
  * | task.succeeded     | BackgroundTask onStateChange 终态分支 | 任务成功完成   |
  * | task.failed        | BackgroundTask onStateChange 终态分支 | 任务失败       |
  * | task.cancelled     | BackgroundTask onStateChange 终态分支 | 任务被取消     |
+ * | task.timeout       | BackgroundTask onStateChange 终态分支 | 任务执行超时   |
  * | task.injected      | BackgroundTask.inject 成功后         | 指令注入到任务 |
  *
  * @module common/interrupt-logger
  */
 
 import * as fs from "fs";
-import * as os from "os";
 import * as path from "path";
-import { rotateLogIfNeeded } from "./log-rotation";
+import { rotateLogIfNeeded, getDeepCodeXLogDir } from "./log-rotation";
 import type { TaskKind, TaskStatus } from "../interrupts/types";
 
 // ============================================================================
@@ -43,7 +43,7 @@ const INSTRUCTION_TEXT_MAX_LENGTH = 200;
 // 类型定义
 // ============================================================================
 
-/** 中断事件类型（7 种，与设计文档 §3.4 对齐） */
+/** 中断事件类型（8 种，与设计文档 §3.4 对齐） */
 export type InterruptEventType =
   | "interrupt.enqueued"
   | "interrupt.drained"
@@ -51,6 +51,7 @@ export type InterruptEventType =
   | "task.succeeded"
   | "task.failed"
   | "task.cancelled"
+  | "task.timeout"
   | "task.injected";
 
 /** 中断事件日志条目 */
@@ -86,10 +87,10 @@ export interface InterruptEvent {
 /**
  * 获取中断事件日志文件路径
  *
- * @returns 日志文件绝对路径（~/.deepcode/logs/interrupts.log）
+ * @returns 日志文件绝对路径（~/.deepcodex/logs/interrupts.log）
  */
 export function getInterruptLogPath(): string {
-  return path.join(os.homedir(), ".deepcode", "logs", INTERRUPT_LOG_FILE);
+  return path.join(getDeepCodeXLogDir(), INTERRUPT_LOG_FILE);
 }
 
 /**

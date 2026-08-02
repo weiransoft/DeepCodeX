@@ -331,7 +331,19 @@ export const INTERRUPT_TOOL_DEFINITIONS: ReadonlyArray<InterruptToolDefinition> 
         properties: {
           status: {
             type: "string",
-            enum: ["queued", "running", "paused", "injecting", "succeeded", "failed", "cancelled"],
+            enum: [
+              "queued",
+              "pending",
+              "running",
+              "pausing",
+              "paused",
+              "retrying",
+              "injecting",
+              "timeout",
+              "succeeded",
+              "failed",
+              "cancelled",
+            ],
             description: "Filter tasks by status",
           },
           include_history: {
@@ -505,9 +517,13 @@ export function createListTasksHandler(context: InterruptToolHandlerContext): To
       const rawStatus = args.status;
       const validStatuses: readonly TaskStatus[] = [
         "queued",
+        "pending",
         "running",
+        "pausing",
         "paused",
+        "retrying",
         "injecting",
+        "timeout",
         "succeeded",
         "failed",
         "cancelled",

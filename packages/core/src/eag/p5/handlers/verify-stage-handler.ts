@@ -35,7 +35,7 @@
  * @module eag/p5/handlers/verify-stage-handler
  */
 
-import * as childProcess from "node:child_process";
+import { spawnSync } from "node:child_process";
 
 import type { P5StageContext, P5StageHandler, P5StageResult } from "./types";
 import { buildGuardContext, createSuccessStageResult, createFailedStageResult, toGuardRecords } from "./types";
@@ -72,6 +72,132 @@ const TEST_OUTPUT_PATTERNS: ReadonlyArray<Readonly<[RegExp, string]>> = Object.f
   // 通用 PASS/FAIL 格式："N passed, M failed"
   [/(\d+)\s+passed(?:,\s*(\d+)\s+failed)?/i, "generic-pass-fail"],
 ]);
+
+/**
+ * 测试命令允许执行的程序白名单。
+ *
+ * P0 安全修复：移除 shell:true 后，必须限制可执行程序，防止 testCommand 中注入
+ * 任意系统命令。白名单覆盖常见 Node/Python 测试框架，使用 path.basename 兼容绝对路径。
+ */
+const ALLOWED_TEST_PROGRAMS: ReadonlySet<string> = new Set<string>([
+  "npm",
+  "node",
+  "npx",
+  "pnpm",
+  "yarn",
+  "tsc",
+  "vitest",
+  "jest",
+  "mocha",
+  "python",
+  "python3",
+  "pytest",
+]);
+
+/**
+ * 解析测试命令字符串为 [程序, ...参数] 数组。
+ *
+ * P0 安全修复：
+ * 1. 先按 shell 引号规则 tokenize，再对未被引号包裹的 token 做安全校验；
+ * 2. 拒绝独立的 shell 操作符（; && || | < >）以及命令替换 $(...) / `...` / $VAR；
+ * 3. 被引号包裹的元字符视为普通参数内容，允许合法 JS/Python 表达式使用 () 等；
+ * 4. 程序必须命中 ALLOWED_TEST_PROGRAMS 白名单。
+ *
+ * 设计理由：移除 shell:true 后，spawnSync(program, args, { shell: false }) 不会调用 shell
+ * 解释器，因此引号内的 shell 元字符对系统无害，只需阻止真正的命令链/重定向/替换。
+ *
+ * @param command 原始命令字符串（如 "npm test"）
+ * @returns 解析后的 [program, ...args]
+ * @throws 含 shell 元字符、解析失败或程序不在白名单时抛出 Error
+ */
+function parseShellCommand(command: string): { program: string; args: string[] } {
+  const trimmed = command.trim();
+  if (!trimmed) {
+    throw new Error("测试命令不能为空");
+  }
+
+  type Token = { value: string; quoted: boolean };
+  const tokens: Token[] = [];
+  let current = "";
+  let quote: '"' | "'" | null = null;
+  let currentQuoted = false;
+
+  for (let index = 0; index < trimmed.length; index += 1) {
+    const char = trimmed[index];
+
+    if (quote) {
+      if (char === quote) {
+        // 引号关闭时立即将已收集内容作为独立 token 推入，
+        // 防止后续非空白字符（如 ; && ||）被追加到 quoted token 中，
+        // 导致 shell 操作符被错误地视为参数内容而绕过安全检查。
+        quote = null;
+        if (current.length > 0) {
+          tokens.push({ value: current, quoted: currentQuoted });
+          current = "";
+          currentQuoted = false;
+        }
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      currentQuoted = true;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (current.length > 0) {
+        tokens.push({ value: current, quoted: currentQuoted });
+        current = "";
+        currentQuoted = false;
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (quote !== null) {
+    throw new Error("测试命令引号未闭合");
+  }
+  if (current.length > 0) {
+    tokens.push({ value: current, quoted: currentQuoted });
+  }
+
+  if (tokens.length === 0) {
+    throw new Error("无法解析测试命令");
+  }
+
+  // 仅对未加引号的 token 进行 shell 安全检查
+  const shellOperators = new Set([";", "&&", "||", "|", "<", ">"]);
+  for (const token of tokens) {
+    if (token.quoted) {
+      continue;
+    }
+    const value = token.value;
+    if (shellOperators.has(value)) {
+      throw new Error(`测试命令包含非法 shell 操作符：${value}`);
+    }
+    if (/^\$\(.*\)$/.test(value) || /^`.*`$/.test(value) || value.startsWith("$")) {
+      throw new Error(`测试命令包含非法 shell 替换：${value}`);
+    }
+    // 反斜杠在 Windows 路径或转义中较常见，但未加引号时仍可能用于转义注入，拒绝。
+    if (/\\/.test(value)) {
+      throw new Error(`测试命令包含非法反斜杠转义：${value}`);
+    }
+  }
+
+  const programWithPath = tokens[0].value;
+  const program = programWithPath.replace(/\\/g, "/").split("/").pop() ?? programWithPath;
+  if (!ALLOWED_TEST_PROGRAMS.has(program)) {
+    throw new Error(`测试命令程序不在白名单中：${program}`);
+  }
+
+  return { program: programWithPath, args: tokens.slice(1).map((token) => token.value) };
+}
 
 // ============================================================================
 // 2. 类型定义
@@ -354,10 +480,11 @@ export class P5VerifyStageHandler implements P5StageHandler {
     const startTime = Date.now();
     const timeoutMs = Math.max(1000, ctx.testTimeoutSec * 1000);
 
-    // spawnSync 执行命令（shell: true 支持 "npm test" 等复合命令）
-    const result = childProcess.spawnSync(command, [], {
+    // P0 安全修复：使用 parseShellCommand 解析命令并移除 shell:true，防止命令注入
+    const parsed = parseShellCommand(command);
+    const result = spawnSync(parsed.program, parsed.args, {
       cwd: ctx.projectRoot,
-      shell: true,
+      shell: false,
       timeout: timeoutMs,
       encoding: "utf8",
       maxBuffer: 10 * 1024 * 1024, // 10MB，防止超大输出导致内存溢出

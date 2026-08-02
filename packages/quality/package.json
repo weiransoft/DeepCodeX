@@ -16,6 +16,6 @@
     "typecheck": "tsc -p ./ --noEmit"
   },
   "dependencies": {
-    "@vegamo/deepcode-core": "workspace:*"
+    "@vegamo/deepcode-core": "*"
   }
 }

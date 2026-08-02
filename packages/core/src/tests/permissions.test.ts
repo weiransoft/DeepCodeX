@@ -48,16 +48,17 @@ test("evaluatePermissionScopes applies deny, ask, allow, and default mode preced
   assert.equal(evaluatePermissionScopes(["unknown"], settings), "ask");
 });
 
-test("evaluatePermissionScopes allows unknown when defaultMode is allowAll", () => {
+test("evaluatePermissionScopes treats unknown as ask even when defaultMode is allowAll", () => {
+  // P0 安全修复：unknown scope 在 allowAll 模式下也必须 ask，防止 LLM 通过构造非法 sideEffects 绕过权限。
   const allowAllSettings: Required<PermissionSettings> = {
     allow: [] as PermissionScope[],
     deny: [] as PermissionScope[],
     ask: [] as PermissionScope[],
     defaultMode: "allowAll",
   };
-  assert.equal(evaluatePermissionScopes(["unknown"], allowAllSettings), "allow");
+  assert.equal(evaluatePermissionScopes(["unknown"], allowAllSettings), "ask");
 
-  // unknown + other scopes that would otherwise trigger ask should still ask for those scopes
+  // unknown + 其他会触发 ask 的 scope 仍然返回 ask，且结果一致
   const askNetworkSettings: Required<PermissionSettings> = {
     allow: [] as PermissionScope[],
     deny: [] as PermissionScope[],
@@ -67,7 +68,8 @@ test("evaluatePermissionScopes allows unknown when defaultMode is allowAll", () 
   assert.equal(evaluatePermissionScopes(["unknown", "network"], askNetworkSettings), "ask");
 });
 
-test("getPermissionScopesRequiringAsk excludes unknown when defaultMode is allowAll", () => {
+test("getPermissionScopesRequiringAsk includes unknown when defaultMode is allowAll", () => {
+  // P0 安全修复：unknown scope 无条件需要用户确认，与 evaluatePermissionScopes 保持 fail-safe 一致。
   const allowAllSettings: Required<PermissionSettings> = {
     allow: [] as PermissionScope[],
     deny: [] as PermissionScope[],
@@ -75,7 +77,7 @@ test("getPermissionScopesRequiringAsk excludes unknown when defaultMode is allow
     defaultMode: "allowAll",
   };
   const result = getPermissionScopesRequiringAsk(["unknown", "network"], allowAllSettings);
-  assert.deepEqual(result, ["network"]);
+  assert.deepEqual(result, ["unknown", "network"]);
 });
 
 test("getPermissionScopesRequiringAsk includes unknown when defaultMode is askAll", () => {

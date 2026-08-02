@@ -7,7 +7,7 @@
  * - 定义 4 类 V2 日志事件接口（approval/compression/retrieval/snapshot）
  * - 提供 V2EventLogger 统一日志记录器
  * - 所有事件落盘前经 SensitiveInfoRedactor 脱敏（隐私红线）
- * - JSON Lines 格式追加到 ~/.deepcode/logs/v2-<YYYY-MM-DD>.log
+ * - JSON Lines 格式追加到 ~/.deepcodex/logs/v2-<YYYY-MM-DD>.log
  *
  * 4 类事件：
  * 1. ApprovalEvent：审批决策事件（每次 ApprovalGate.evaluate / ToolRouter.route 后写入）
@@ -25,8 +25,8 @@
 
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import * as os from "node:os";
 import { SensitiveInfoRedactor } from "../memory/redaction";
+import { getDeepCodeXLogDir } from "../integration/v1-adapters";
 
 // ============================================================================
 // 1. 公共事件基座（§12.1）
@@ -128,9 +128,9 @@ export type V2LogEvent = ApprovalEvent | CompressionEvent | RetrievalEvent | Sna
 // ============================================================================
 
 /**
- * 默认日志目录：~/.deepcode/logs/
+ * 默认日志目录：~/.deepcodex/logs/
  */
-const DEFAULT_LOG_DIR = path.join(os.homedir(), ".deepcode", "logs");
+const DEFAULT_LOG_DIR = getDeepCodeXLogDir();
 
 /**
  * V2 事件日志记录器
@@ -162,7 +162,7 @@ export class V2EventLogger {
   /**
    * 创建 V2 事件日志记录器
    *
-   * @param logDir 日志目录（默认 ~/.deepcode/logs/，测试注入临时目录）
+   * @param logDir 日志目录（默认 ~/.deepcodex/logs/，测试注入临时目录）
    * @param redactor 敏感信息过滤器（默认使用内置 11 条规则）
    */
   constructor(logDir: string = DEFAULT_LOG_DIR, redactor: SensitiveInfoRedactor = new SensitiveInfoRedactor()) {
@@ -235,7 +235,7 @@ export class V2EventLogger {
    * 实现步骤：
    * 1. 先对事件对象递归脱敏（redactMemory）——保护字符串 value，不破坏 JSON 结构；
    * 2. 将脱敏后的事件对象序列化为 JSON 字符串；
-   * 3. 追加到 ~/.deepcode/logs/v2-<YYYY-MM-DD>.log（JSON Lines，每行一条）；
+   * 3. 追加到 ~/.deepcodex/logs/v2-<YYYY-MM-DD>.log（JSON Lines，每行一条）；
    * 4. DEEPCODEX_DEBUG=1 时同步输出 stderr。
    *
    * 关键设计（脱敏顺序）：

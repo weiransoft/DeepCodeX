@@ -1,9 +1,8 @@
 import * as fs from "fs";
 import * as path from "path";
-import * as os from "os";
 import type { LlmErrorDetails } from "./llm-error";
 // D-2 修复：导入统一日志轮转工具，替代历史"读全文 + slice + 重写"反模式
-import { rotateLogIfNeeded } from "./log-rotation";
+import { rotateLogIfNeeded, getDeepCodeXLogDir } from "./log-rotation";
 
 /** error.log 文件名常量 */
 const ERROR_LOG_FILE = "error.log";
@@ -14,9 +13,11 @@ const ERROR_LOG_FILE = "error.log";
  * 与 debug-logger.ts 的 getDebugLogPath 保持一致的设计：每次调用都重新读取
  * os.homedir()，确保测试通过切换 process.env.HOME 能实现日志隔离。
  * 若改为模块级常量，模块加载时路径即固定，测试将无法通过 HOME 切换隔离。
+ *
+ * 日志目录已迁移到 ~/.deepcodex/logs，旧版 ~/.deepcode/logs 仅保留只读兼容。
  */
 export function getErrorLogPath(): string {
-  return path.join(os.homedir(), ".deepcode", "logs", ERROR_LOG_FILE);
+  return path.join(getDeepCodeXLogDir(), ERROR_LOG_FILE);
 }
 
 /**
@@ -104,7 +105,7 @@ export type ApiErrorLogEntry = {
 };
 
 /**
- * Write an API error log entry to ~/.deepcode/logs/error.log.
+ * Write an API error log entry to ~/.deepcodex/logs/error.log.
  */
 export function logApiError(entry: ApiErrorLogEntry): void {
   try {
