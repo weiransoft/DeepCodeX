@@ -1,3 +1,5 @@
+import * as path from "node:path";
+import { isPathInProject } from "../common/permissions";
 import type { ToolExecutionContext, ToolExecutionResult } from "./executor";
 
 type AskUserQuestionOption = {
@@ -17,6 +19,7 @@ type AskUserQuestionItem = {
  * 安全约束：
  * - command 必须以 "/" 开头（仅允许 slash 命令）
  * - command 首个 token 必须命中 ALLOWED_SUGGESTED_COMMAND_NAMES 白名单
+ * - command 参数必须通过 validateSuggestedCommandArgs 沙箱校验
  * - reason 为可选说明，用于 UI 显示
  *
  * 类型已导出（export type），便于 CLI 层（ask-user-question.ts）共享同构类型。
@@ -65,6 +68,21 @@ const ALLOWED_SUGGESTED_COMMAND_NAMES = new Set<string>([
   "eag-deploy",
 ]);
 
+/**
+ * 参数级路径选项黑名单。
+ *
+ * P0 安全修复：禁止 LLM 通过 suggestedCommand 的参数把文件路径指向项目外，
+ * 例如 `--task-file /etc/passwd` 或 `--project-root /tmp`。
+ */
+const FORBIDDEN_PATH_OPTION_NAMES = new Set<string>(["--task-file", "--task_file", "--project-root", "--project_root"]);
+
+/**
+ * Shell 元字符黑名单。
+ *
+ * 禁止出现在 suggestedCommand 中，防止通过 shell 解释器执行任意命令。
+ */
+const SHELL_METACHAR_PATTERN = /[;&|<>()`$\\]/;
+
 export async function handleAskUserQuestionTool(
   args: Record<string, unknown>,
   _context: ToolExecutionContext
@@ -78,8 +96,8 @@ export async function handleAskUserQuestionTool(
     };
   }
 
-  // 解析可选的 suggestedCommand 字段（格式错误时降级为 undefined）
-  const suggestedCommand = parseSuggestedCommand(args.suggestedCommand);
+  // 解析可选的 suggestedCommand 字段（格式错误、白名单失败或参数沙箱失败时降级为 undefined）
+  const suggestedCommand = parseSuggestedCommand(args.suggestedCommand, _context.projectRoot);
 
   const metadata: AskUserQuestionMetadata = {
     kind: "ask_user_question",
@@ -106,12 +124,15 @@ export async function handleAskUserQuestionTool(
  * - command 必须以 "/" 开头（仅允许 slash 命令，防止任意命令注入）
  * - command 首个 token 必须命中 ALLOWED_SUGGESTED_COMMAND_NAMES 白名单
  *   （防止 LLM 注入 exit/undo/new/inject/bg 等会话控制类命令）
+ * - command 参数必须通过 validateSuggestedCommandArgs 沙箱校验
+ *   （禁止 --task-file/--project-root 指向项目外、绝对路径、~ 展开、路径穿越等）
  * - reason 是可选字符串
  *
  * @param raw 原始输入值
- * @returns 解析后的 SuggestedCommand，或 undefined（格式错误或不在白名单时降级）
+ * @param projectRoot 当前项目根目录，用于校验相对路径是否落在项目内
+ * @returns 解析后的 SuggestedCommand，或 undefined（格式错误、不在白名单或参数沙箱失败时降级）
  */
-function parseSuggestedCommand(raw: unknown): SuggestedCommand | undefined {
+function parseSuggestedCommand(raw: unknown, projectRoot?: string): SuggestedCommand | undefined {
   // 非对象或数组直接拒绝
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return undefined;
@@ -139,12 +160,197 @@ function parseSuggestedCommand(raw: unknown): SuggestedCommand | undefined {
     // 命令不在白名单中（如 "/exit"、"/undo"、"/inject" 等），拒绝自动执行
     return undefined;
   }
+
+  // P0 安全修复：参数级沙箱校验
+  const sandbox = validateSuggestedCommandArgs(trimmedCommand, projectRoot);
+  if (!sandbox.ok) {
+    return undefined;
+  }
+
   const reason = (raw as { reason?: unknown }).reason;
   const trimmedReason = typeof reason === "string" ? reason.trim() : "";
   return {
     command: trimmedCommand,
     ...(trimmedReason.length > 0 ? { reason: trimmedReason } : {}),
   };
+}
+
+/**
+ * 将命令字符串拆分为 token 数组（支持单/双引号）。
+ *
+ * @param command 原始命令字符串
+ * @returns token 数组；引号未闭合时返回 null
+ */
+function tokenizeCommand(command: string): string[] | null {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | null = null;
+
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index];
+
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (current.length > 0) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (quote !== null) {
+    return null;
+  }
+
+  if (current.length > 0) {
+    tokens.push(current);
+  }
+
+  return tokens;
+}
+
+/**
+ * 去除字符串首尾的成对引号。
+ *
+ * @param value 原始 token
+ * @returns 去除引号后的值
+ */
+function stripQuotes(value: string): string {
+  if (value.length >= 2) {
+    const first = value[0];
+    const last = value[value.length - 1];
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return value.slice(1, -1);
+    }
+  }
+  return value;
+}
+
+/**
+ * 校验单个路径参数是否合法。
+ *
+ * 规则：
+ * - 禁止含 ".." 的路径穿越
+ * - 禁止以 "~" 开头的 home 目录展开
+ * - 绝对路径必须在 projectRoot 子树内（无 projectRoot 时直接拒绝绝对路径）
+ * - 相对路径在提供 projectRoot 时必须解析到 projectRoot 子树内
+ *
+ * @param value 路径字符串
+ * @param projectRoot 当前项目根目录（可选）
+ * @returns 非法时返回原因，否则返回 null
+ */
+function checkPathValue(value: string, projectRoot?: string): string | null {
+  if (value.length === 0) {
+    return "路径不能为空";
+  }
+  if (value.includes("..")) {
+    return "路径包含 ..（路径穿越）";
+  }
+  if (value.startsWith("~")) {
+    return "路径以 ~ 开头（home 目录展开）";
+  }
+
+  if (path.isAbsolute(value)) {
+    if (!projectRoot) {
+      return "绝对路径不被允许";
+    }
+    if (!isPathInProject(projectRoot, value)) {
+      return "绝对路径超出项目根目录";
+    }
+    return null;
+  }
+
+  if (projectRoot) {
+    if (!isPathInProject(projectRoot, value)) {
+      return "相对路径解析后超出项目根目录";
+    }
+  }
+
+  return null;
+}
+
+/**
+ * suggestedCommand 参数沙箱校验。
+ *
+ * P0 安全修复：
+ * - 拒绝含 shell 元字符的命令字符串
+ * - 拒绝 FORBIDDEN_PATH_OPTION_NAMES 中列出的选项指向项目外路径
+ * - 拒绝任何以 "/"、"~" 开头或含 ".." 的参数 token
+ *
+ * @param command 已 trim 的命令字符串
+ * @param projectRoot 当前项目根目录（可选，用于路径边界校验）
+ * @returns 校验结果，失败时携带原因
+ */
+function validateSuggestedCommandArgs(
+  command: string,
+  projectRoot?: string
+): { ok: true } | { ok: false; reason: string } {
+  if (SHELL_METACHAR_PATTERN.test(command)) {
+    return { ok: false, reason: "命令包含非法 shell 元字符" };
+  }
+
+  const tokens = tokenizeCommand(command);
+  if (tokens === null) {
+    return { ok: false, reason: "命令引号未闭合" };
+  }
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    const rawValue = stripQuotes(token);
+
+    // 跳过命令名本身（首个 token，如 "/team"）
+    if (index === 0) {
+      continue;
+    }
+
+    // 处理 --option=value 形式
+    let optionName = rawValue;
+    let value: string | undefined;
+    const eqIndex = rawValue.indexOf("=");
+    if (eqIndex !== -1) {
+      optionName = rawValue.slice(0, eqIndex);
+      value = rawValue.slice(eqIndex + 1);
+    }
+
+    if (FORBIDDEN_PATH_OPTION_NAMES.has(optionName)) {
+      const pathValue = value !== undefined ? value : tokens[index + 1];
+      if (pathValue === undefined) {
+        return { ok: false, reason: `选项 ${optionName} 缺少值` };
+      }
+      const pathError = checkPathValue(stripQuotes(pathValue), projectRoot);
+      if (pathError) {
+        return { ok: false, reason: `${optionName} 指向非法路径：${pathError}` };
+      }
+      // 若值在下一个 token，跳过该 token
+      if (value === undefined) {
+        index += 1;
+      }
+      continue;
+    }
+
+    // 全局拒绝任何看起来像绝对路径、home 展开或路径穿越的 token
+    if (rawValue.startsWith("/") || rawValue.startsWith("~") || rawValue.includes("..")) {
+      return { ok: false, reason: `命令参数包含非法路径：${rawValue}` };
+    }
+  }
+
+  return { ok: true };
 }
 
 function parseQuestions(raw: unknown): { ok: true; value: AskUserQuestionItem[] } | { ok: false; error: string } {

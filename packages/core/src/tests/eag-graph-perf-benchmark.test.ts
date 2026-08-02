@@ -419,51 +419,66 @@ test("P2. 并行 fan-out 延迟（4 分支）应 < 串行版本的 40%", async (
   const fanOutExecutor = new BenchmarkNodeExecutor(100, nodeDelayMs);
   const fanOutOrchestrator = createOrchestrator(fanOutExecutor, fanOutGraph.config);
 
-  // 预热执行（不使用延迟，消除 JIT 编译开销）
-  const warmupExecutor = new BenchmarkNodeExecutor(100, 0);
-  const warmupOrchestrator = createOrchestrator(warmupExecutor, fanOutGraph.config);
-  await warmupOrchestrator.run(fanOutGraph);
-
-  // 正式计时并行 fan-out 执行（带延迟）
-  const fanOutStart = process.hrtime.bigint();
-  const fanOutReport = await fanOutOrchestrator.run(fanOutGraph);
-  const fanOutEnd = process.hrtime.bigint();
-  const fanOutMs = Number(fanOutEnd - fanOutStart) / 1_000_000;
-
-  assert.equal(fanOutReport.finalStatus, "completed", "并行图应成功完成");
-
   // 构造等价规模的串行图（4 个 task 节点串行）作为对比基线
   const serialGraph = createSerialDagGraph(4);
   const serialExecutor = new BenchmarkNodeExecutor(100, nodeDelayMs);
   const serialOrchestrator = createOrchestrator(serialExecutor, serialGraph.config);
 
-  // 预热执行（不使用延迟）
-  const serialWarmupExecutor = new BenchmarkNodeExecutor(100, 0);
-  const serialWarmupOrchestrator = createOrchestrator(serialWarmupExecutor, serialGraph.config);
-  await serialWarmupOrchestrator.run(serialGraph);
+  // 预热执行（不使用延迟，消除 JIT 编译开销）
+  const warmupFanOutExecutor = new BenchmarkNodeExecutor(100, 0);
+  const warmupFanOutOrchestrator = createOrchestrator(warmupFanOutExecutor, fanOutGraph.config);
+  await warmupFanOutOrchestrator.run(fanOutGraph);
 
-  // 正式计时串行执行（带延迟）
-  const serialStart = process.hrtime.bigint();
-  const serialReport = await serialOrchestrator.run(serialGraph);
-  const serialEnd = process.hrtime.bigint();
-  const serialMs = Number(serialEnd - serialStart) / 1_000_000;
+  const warmupSerialExecutor = new BenchmarkNodeExecutor(100, 0);
+  const warmupSerialOrchestrator = createOrchestrator(warmupSerialExecutor, serialGraph.config);
+  await warmupSerialOrchestrator.run(serialGraph);
 
-  assert.equal(serialReport.finalStatus, "completed", "串行图应成功完成");
+  /**
+   * 采样 3 次取中位数，降低并发负载下的抖动。
+   *
+   * 并发套件运行时，setTimeout 精度与事件循环调度会引入显著噪音；
+   * 单次数值可能失真（例如并行分支因竞争反而比串行长）。
+   * 通过多次采样取中位数，既能排除偶发抖动，又不取最好值掩盖真实性能退化。
+   */
+  const sampleCount = 3;
+  const ratios: number[] = [];
 
-  // 计算加速比
-  const speedupRatio = serialMs > 0 ? fanOutMs / serialMs : 1;
+  for (let i = 0; i < sampleCount; i++) {
+    // 正式计时并行 fan-out 执行（带延迟）
+    const fanOutStart = process.hrtime.bigint();
+    const fanOutReport = await fanOutOrchestrator.run(fanOutGraph);
+    const fanOutEnd = process.hrtime.bigint();
+    const fanOutMs = Number(fanOutEnd - fanOutStart) / 1_000_000;
 
-  console.log(
-    `  P2 结果：并行 ${fanOutMs.toFixed(2)}ms vs 串行 ${serialMs.toFixed(2)}ms，` +
-      `比率 ${(speedupRatio * 100).toFixed(1)}%（目标 < 40%，节点延迟 ${nodeDelayMs}ms）`
-  );
+    assert.equal(fanOutReport.finalStatus, "completed", `第 ${i + 1} 次并行图应成功完成`);
+
+    // 正式计时串行执行（带延迟）
+    const serialStart = process.hrtime.bigint();
+    const serialReport = await serialOrchestrator.run(serialGraph);
+    const serialEnd = process.hrtime.bigint();
+    const serialMs = Number(serialEnd - serialStart) / 1_000_000;
+
+    assert.equal(serialReport.finalStatus, "completed", `第 ${i + 1} 次串行图应成功完成`);
+
+    const speedupRatio = serialMs > 0 ? fanOutMs / serialMs : 1;
+    ratios.push(speedupRatio);
+
+    console.log(
+      `  P2 第 ${i + 1} 次结果：并行 ${fanOutMs.toFixed(2)}ms vs 串行 ${serialMs.toFixed(2)}ms，` +
+        `比率 ${(speedupRatio * 100).toFixed(1)}%（目标 < 40%，节点延迟 ${nodeDelayMs}ms）`
+    );
+  }
+
+  ratios.sort((a, b) => a - b);
+  const medianRatio = ratios[Math.floor(sampleCount / 2)];
+
+  console.log(`  P2 中位数比率：${(medianRatio * 100).toFixed(1)}%（目标 < 40%，CI 宽松 < 60%）`);
 
   // 验证并行版本 < 串行版本的 40%（设计文档 §14.2 目标值）
-  // 使用 10ms 节点延迟模拟真实 LLM 调用耗时，确保并行 Promise.all 的加速效果可测量
   // CI 环境使用 60% 作为宽松上限避免 flaky（setTimeout 精度受事件循环影响）
   assert.ok(
-    speedupRatio < 0.6,
-    `并行 fan-out 延迟比率应 < 60%（CI 宽松上限，目标 40%），实际为 ${(speedupRatio * 100).toFixed(1)}%`
+    medianRatio < 0.6,
+    `并行 fan-out 延迟中位数比率应 < 60%（CI 宽松上限，目标 40%），实际为 ${(medianRatio * 100).toFixed(1)}%`
   );
 });
 

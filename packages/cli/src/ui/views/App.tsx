@@ -1,7 +1,10 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Box, Static, Text, useApp, useStdout, useWindowSize } from "ink";
 import chalk from "chalk";
-import { createOpenAIClient } from "@vegamo/deepcode-core";
+import * as nodeFs from "node:fs";
+import * as nodeOs from "node:os";
+import * as nodePath from "node:path";
+import { createOpenAIClient, getDeepCodeXLogDir } from "@vegamo/deepcode-core";
 import type { PermissionScope } from "@vegamo/deepcode-core";
 import { type ModelConfigSelection } from "@vegamo/deepcode-core";
 import { type PromptDraft, PromptInput, type PromptSubmission } from "./PromptInput";
@@ -69,6 +72,14 @@ import {
 } from "@vegamo/deepcode-core";
 // V2 上下文钩子相关类型
 import type { SessionContextHook, V2Config } from "@vegamo/deepcode-core";
+// EAG P5 编排器装配（2026-07-31 新特性集成审查 FIX-1/FIX-2）：
+// 真实构造 AutonomousOrchestrator 与 GraphLoopOrchestratorOptions 并注入 SessionManager，
+// 使 /eag-autonomous 三命令与 /eag-graph 在生产 CLI 可用（此前从未接线，命令 fail-closed）
+import {
+  buildAutonomousOrchestrator,
+  buildGraphLoopOrchestratorOptions,
+  type AssemblyLogCallback,
+} from "../core/eag-orchestrator-assembly";
 import { buildDynamicCommandDescriptors } from "../core/dynamic-commands";
 import { writeStdout, writeStdoutLine } from "../../utils/stdio-helpers";
 // 导入 TeamCommandArgs 类型，用于 parseTeamArgs 返回值类型标注
@@ -348,6 +359,15 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
     const v2Config = buildV2Config(projectRoot);
     const contextHook: SessionContextHook = createDualLayerContextHook(projectRoot, v2Config);
 
+    // EAG P5 编排器装配（2026-07-31 新特性集成审查 FIX-1/FIX-2）
+    // 真实构造 AutonomousOrchestrator 与 GraphLoopOrchestratorOptions，
+    // 注入主 SessionManager 使 /eag-autonomous 三命令与 /eag-graph 生产可用。
+    // 失败安全：装配异常时返回 undefined，session.ts 维持 fail-closed 降级（命令报"未注入"），
+    // 主对话循环行为完全不变（零回归），装配失败详情见 ~/.deepcodex/logs/eag-assembly.log。
+    const eagAssemblyLog = createEagAssemblyLogger();
+    const autonomousOrchestrator = buildAutonomousOrchestrator(eagAssemblyLog);
+    const graphLoopOrchestratorOptions = buildGraphLoopOrchestratorOptions(projectRoot, eagAssemblyLog);
+
     // ADR-DI-001 动态指令注入与后台子 Agent 组件
     // 所有组件均为可选注入；未注入时对应命令不可用，主对话循环行为完全不变（零回归）
     const taskRegistry = new TaskRegistry({
@@ -377,6 +397,12 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
             interruptQueue: bgInterruptQueue,
             taskRegistry,
             contextHook: bgContextHook,
+            // EAG P5 编排器注入（2026-07-31 FIX-1/FIX-2）：
+            // 后台任务共享前台已装配的编排器实例——AutonomousOrchestrator 按 runId
+            // 隔离运行状态（P5RunStateStore JSONL 持久化），GraphLoopOrchestratorOptions
+            // 为不可变装配配置，二者均可安全跨会话共享
+            autonomousOrchestrator,
+            graphLoopOrchestratorOptions,
             onAssistantMessage: () => {
               // 后台任务的助手消息不写入前台 UI，由 TaskRegistry 状态间接反映进度
             },
@@ -409,6 +435,10 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
       dynamicCommandDescriptors,
       // V2 Session 上下文钩子注入
       contextHook,
+      // EAG P5 编排器注入（2026-07-31 FIX-1/FIX-2）：
+      // /eag-autonomous 三命令与 /eag-graph 的生产执行体（此前未注入，命令 fail-closed）
+      autonomousOrchestrator,
+      graphLoopOrchestratorOptions,
       // ADR-DI-001 动态指令注入与后台子 Agent 注入
       interruptQueue,
       taskRegistry,
@@ -425,6 +455,13 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
         setRunningProcesses(entry.processes);
         setActiveStatus(entry.status);
         setActiveAskPermissions(entry.askPermissions);
+        // FIX：当会话进入 ask_permission 状态时，需要把 busy 置为 false，
+        // 否则 PermissionPrompt 的渲染条件包含 !busy，会导致权限确认框无法显示，
+        // 从而阻塞 handleUserPrompt 的返回，形成死锁。
+        if (entry.status === "ask_permission") {
+          setBusy(false);
+          setStreamProgress(null);
+        }
       },
       onLlmStreamProgress: (progress) => {
         if (progress.phase === "end") {
@@ -701,16 +738,27 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
         return;
       }
       if (submission.command === "review") {
-        // /review <subcommand> [args] —— 解析并调用 executeReviewCommand
-        // 工具验证优先：所有数字必须有真实命令输出作为证据
-        // 子命令：typecheck / lint / format / full / help
-        const reviewResult = await handleReviewSlashCommand(submission.text);
-        setMessages((prev) => [
-          ...prev,
-          buildSyntheticUserMessage(submission.text, submission.imageUrls.length),
-          buildSyntheticAssistantMessage(reviewResult),
-        ]);
-        return;
+        // /review 命令同时支持两种语义：
+        //   1. 工具验证模式：/review [typecheck|lint|format|full|help] [options]
+        //   2. 自然语言审查请求：/review 当前项目全部代码，并对照 gold comments ...
+        // 对于自然语言请求，应交回 LLM 主流程；否则调用 executeReviewCommand 执行工具检查。
+        const { extractReviewNaturalLanguageTask } = await import("../../review/review-cmd.js");
+        const nlTask = extractReviewNaturalLanguageTask(submission.text);
+        if (nlTask !== undefined) {
+          // 将自然语言请求转换为结构化提示，继续走下方 LLM 主流程
+          submission.text = `请作为代码审查助手，基于项目目录 ${projectRoot} 执行以下审查任务：\n\n${nlTask}`;
+        } else {
+          // 工具验证模式：解析并调用 executeReviewCommand
+          // 工具验证优先：所有数字必须有真实命令输出作为证据
+          // 子命令：typecheck / lint / format / full / help
+          const reviewResult = await handleReviewSlashCommand(submission.text);
+          setMessages((prev) => [
+            ...prev,
+            buildSyntheticUserMessage(submission.text, submission.imageUrls.length),
+            buildSyntheticAssistantMessage(reviewResult),
+          ]);
+          return;
+        }
       }
       if (submission.command === "memory") {
         // /memory <subcommand> [args] —— 解析并调用 V2 记忆体系 handleMemoryCommand
@@ -1410,9 +1458,9 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
   ]);
 
   const handleQuestionAnswers = useCallback(
-    (answers: AskUserQuestionAnswers) => {
+    (answers: AskUserQuestionAnswers, allowSuggestedCommand: boolean) => {
       const answerText = formatAskUserQuestionAnswers(answers);
-      const suggestedCommand = pendingQuestion?.suggestedCommand;
+      const suggestedCommand = allowSuggestedCommand ? pendingQuestion?.suggestedCommand : undefined;
       if (suggestedCommand) {
         // 有 suggestedCommand：解析命令种类（如 "/team dispatch ..." → command: "team"）
         // 合并方案：直接以 slash 命令方式调用 handlePrompt，
@@ -1434,7 +1482,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
         // 解析失败降级：仅发送回答，不自动执行（安全失败）
         // suggestedCommand.command 不在 BUILTIN_SLASH_COMMANDS 中，可能是 LLM 幻觉
       }
-      // 无 suggestedCommand 或解析失败：保持现有行为（仅发送回答文本）
+      // 无 suggestedCommand、用户选择跳过或解析失败：保持现有行为（仅发送回答文本）
       void handlePrompt({ text: answerText, imageUrls: [] });
     },
     [handlePrompt, pendingQuestion, setStatusLine]
@@ -1566,6 +1614,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
       ) : shouldShowQuestionPrompt && pendingQuestion && !busy ? (
         <AskUserQuestionPrompt
           questions={pendingQuestion.questions}
+          suggestedCommand={pendingQuestion.suggestedCommand}
           onSubmit={handleQuestionAnswers}
           onCancel={handleQuestionCancel}
         />
@@ -1960,6 +2009,28 @@ async function handleReviewSlashCommand(text: string): Promise<string> {
     parts.push(`\n[退出码: ${result.exitCode}]`);
   }
   return parts.join("\n").trim() || "(无输出)";
+}
+
+/**
+ * 创建 EAG 编排器装配日志器（2026-07-31 FIX-1/FIX-2）
+ *
+ * 装配期日志（尤其装配失败）需要可观测，但 Ink TUI 下 console 输出会破屏，
+ * 因此写入独立日志文件 ~/.deepcodex/logs/eag-assembly.log。
+ * 日志写入本身失败时静默降级（装配流程不受日志故障影响）。
+ *
+ * @returns AssemblyLogCallback 装配日志回调
+ */
+function createEagAssemblyLogger(): AssemblyLogCallback {
+  return (message, level = "info") => {
+    try {
+      const logDir = getDeepCodeXLogDir();
+      nodeFs.mkdirSync(logDir, { recursive: true });
+      const line = `[${new Date().toISOString()}] [${level}] ${message}\n`;
+      nodeFs.appendFileSync(nodePath.join(logDir, "eag-assembly.log"), line, "utf8");
+    } catch {
+      // 日志写入失败静默降级：装配可观测性不阻断主流程
+    }
+  };
 }
 
 /**

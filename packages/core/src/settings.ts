@@ -107,6 +107,11 @@ export type DeepcodingSettings = {
   enabledSkills?: EnabledSkillsSettings;
   statusline?: StatusLineSettings;
   /**
+   * 是否放行本地/私有/元数据 baseURL（本地 Ollama/vLLM 等场景）。
+   * 优先级低于环境变量 DEEPCODE_ALLOW_PRIVATE_BASE_URL。
+   */
+  allowPrivateBaseURL?: boolean;
+  /**
    * V2 上下文记忆体系配置子树（v2.8）
    * 对应 V2_CONTEXT_MEMORY_TECH_DESIGN.md §9.4 的 V2Config，由 buildV2Config 消费。
    * 使用 Record<string, unknown> 以兼容 schema 演进，实际校验在 mergeV2Config 中进行。
@@ -143,6 +148,11 @@ export type ResolvedDeepcodingSettings = {
   contextWindow: number;
   debugLogEnabled: boolean;
   telemetryEnabled: boolean;
+  /**
+   * 是否放行本地/私有/元数据 baseURL。
+   * 由 settings.json / env 合并得到，供 sanitizeBaseURL 使用。
+   */
+  allowPrivateBaseURL: boolean;
   notify?: string;
   webSearchTool?: string;
   mcpServers?: Record<string, McpServerConfig>;
@@ -584,6 +594,17 @@ export function resolveSettingsSources(
     parseBoolean(userEnv.TELEMETRY_ENABLED) ??
     true;
 
+  // P0 安全：允许通过 settings.json 或环境变量放行本地/私有 baseURL。
+  // 进程环境变量 DEEPCODE_ALLOW_PRIVATE_BASE_URL=true 优先级最高，便于 CI/脚本覆盖；
+  // 其次读取 settings.json 中的 allowPrivateBaseURL 字段。
+  const allowPrivateBaseURL =
+    parseBoolean(processEnv.DEEPCODE_ALLOW_PRIVATE_BASE_URL) ??
+    parseBoolean(projectSettings?.allowPrivateBaseURL) ??
+    parseBoolean(projectEnv.DEEPCODE_ALLOW_PRIVATE_BASE_URL) ??
+    parseBoolean(userSettings?.allowPrivateBaseURL) ??
+    parseBoolean(userEnv.DEEPCODE_ALLOW_PRIVATE_BASE_URL) ??
+    false;
+
   const notify =
     trimString(systemEnv.NOTIFY) || trimString(projectSettings?.notify) || trimString(userSettings?.notify) || "";
   const webSearchTool =
@@ -640,10 +661,16 @@ export function resolveSettingsSources(
   // 默认 131072（128K），用于计算 compact 阈值，避免上下文超限
   const contextWindow = Number(trimString(env.CONTEXT_WINDOW) || trimString(env.LLM_CONTEXT_WINDOW)) || 131072;
 
+  // P0 安全修复：对 baseURL 做 SSRF 校验，防御 file://、ftp://、私网/回环/元数据地址。
+  // 默认 URL（官方端点）也过校验，形成防御纵深；本地 Ollama 等场景可通过
+  // settings.json 的 allowPrivateBaseURL 或 DEEPCODE_ALLOW_PRIVATE_BASE_URL=true 显式放行。
+  const rawBaseURL = trimString(env.BASE_URL) || defaultBaseURL;
+  const baseURL = sanitizeBaseURL(rawBaseURL, processEnv, allowPrivateBaseURL);
+
   return {
     env,
     apiKey: trimString(env.API_KEY) || undefined,
-    baseURL: trimString(env.BASE_URL) || defaultBaseURL,
+    baseURL,
     model,
     provider,
     anthropic,
@@ -654,6 +681,7 @@ export function resolveSettingsSources(
     contextWindow,
     debugLogEnabled,
     telemetryEnabled,
+    allowPrivateBaseURL,
     notify: notify || undefined,
     webSearchTool: webSearchTool || undefined,
     mcpServers: mergeMcpServers(userSettings, projectSettings, userEnv, projectEnv, systemEnv),
@@ -708,6 +736,138 @@ export function applyModelConfigSelection(
 export const DEFAULT_MODEL = "deepseek-v4-pro";
 export const DEFAULT_BASE_URL = "https://api.deepseek.com";
 
+/**
+ * 判断 IPv4 地址是否属于私有/本地/链路本地/元数据地址。
+ *
+ * 拦截范围（SSRF 防御）：
+ * - 127.0.0.0/8 回环地址
+ * - 10.0.0.0/8、172.16.0.0/12、192.168.0.0/16 私有地址
+ * - 169.254.0.0/16 链路本地地址（含云厂商元数据 169.254.169.254）
+ * - 100.64.0.0/10 CGNAT 地址
+ * - 0.0.0.0
+ *
+ * @param ip 点分十进制 IPv4 地址
+ * @returns 是否为需拦截的地址
+ */
+function isPrivateOrLocalIPv4(ip: string): boolean {
+  const parts = ip.split(".");
+  if (parts.length !== 4) {
+    return false;
+  }
+  const nums = parts.map((part) => parseInt(part, 10));
+  if (nums.some((num) => Number.isNaN(num) || num < 0 || num > 255)) {
+    return false;
+  }
+  const [a, b, c, d] = nums;
+  if (a === 127) return true;
+  if (a === 10) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  if (a === 0 && b === 0 && c === 0 && d === 0) return true;
+  // 云厂商元数据地址精确拦截
+  if (a === 169 && b === 254 && c === 169 && d === 254) return true;
+  return false;
+}
+
+/**
+ * 判断主机名是否为 SSRF 高风险目标。
+ *
+ * 拦截范围：
+ * - localhost / ip6-localhost / ip6-loopback
+ * - IPv6 回环 ::1
+ * - IPv4 私有/本地/链路本地地址
+ * - 含用户信息的 URL（user:pass@host）
+ *
+ * @param hostname URL 主机名
+ * @returns 是否应拦截
+ */
+function isForbiddenBaseURLHost(hostname: string): boolean {
+  const lower = hostname.toLowerCase().trim();
+  if (!lower) {
+    return true;
+  }
+  if (lower === "localhost" || lower === "ip6-localhost" || lower === "ip6-loopback") {
+    return true;
+  }
+  if (lower === "::1" || lower === "::") {
+    return true;
+  }
+  // IPv6 唯一本地地址（ULA）fc00::/7
+  if (lower.startsWith("fc") || lower.startsWith("fd")) {
+    return true;
+  }
+  // IPv6 链路本地地址 fe80::/10
+  if (lower.startsWith("fe80:")) {
+    return true;
+  }
+  // IPv4-mapped IPv6 回环/私有地址，如 ::ffff:127.0.0.1
+  const mappedMatch = lower.match(/^\[?::ffff:([\d.]+)\]?$/);
+  if (mappedMatch && isPrivateOrLocalIPv4(mappedMatch[1])) {
+    return true;
+  }
+  if (isPrivateOrLocalIPv4(lower)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 校验并规范化 LLM baseURL（SSRF 防御）。
+ *
+ * 规则：
+ * 1. 必须是合法 URL；
+ * 2. 仅允许 http:// 或 https:// 协议；
+ * 3. 禁止 file://、ftp:// 等非网络协议；
+ * 4. 禁止 localhost、回环、私有地址、链路本地地址、云元数据地址；
+ * 5. 禁止 URL 中携带用户名/密码（避免凭据泄露与意外身份）；
+ * 6. 允许通过 settings.json 的 allowPrivateBaseURL 或 DEEPCODE_ALLOW_PRIVATE_BASE_URL=true
+ *    显式放行私有地址（本地 Ollama/vLLM 等调试场景）。
+ *
+ * @param baseURL 待校验的 baseURL 字符串
+ * @param processEnv 进程环境变量（用于读取放行开关，当 allowPrivate 未显式传入时）
+ * @param allowPrivate 是否显式放行私有地址；未传入时回退到环境变量
+ * @returns 规范化后的 baseURL 字符串
+ * @throws 校验失败时抛出 Error，错误信息中不包含敏感配置值
+ */
+export function sanitizeBaseURL(
+  baseURL: string,
+  processEnv: SettingsProcessEnv = process.env,
+  allowPrivate?: boolean
+): string {
+  const trimmed = trimString(baseURL);
+  if (!trimmed) {
+    throw new Error("baseURL 不能为空");
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error("baseURL 不是合法的 URL");
+  }
+
+  const protocol = parsed.protocol.toLowerCase();
+  if (protocol !== "http:" && protocol !== "https:") {
+    throw new Error(`baseURL 协议不被允许：仅支持 http(s)`);
+  }
+
+  if (parsed.username || parsed.password) {
+    throw new Error("baseURL 不允许携带用户名或密码");
+  }
+
+  const allowPrivateFlag =
+    typeof allowPrivate === "boolean"
+      ? allowPrivate
+      : trimString(processEnv.DEEPCODE_ALLOW_PRIVATE_BASE_URL) === "true";
+  if (!allowPrivateFlag && isForbiddenBaseURLHost(parsed.hostname)) {
+    throw new Error("baseURL 指向本地、私有或元数据地址，存在 SSRF 风险");
+  }
+
+  return parsed.toString();
+}
+
 // ---------------------------------------------------------------------------
 // Settings file I/O
 // ---------------------------------------------------------------------------
@@ -740,9 +900,41 @@ export function readProjectSettings(projectRoot: string = process.cwd()): Deepco
   return readSettingsFile(getProjectSettingsPath(projectRoot));
 }
 
+/**
+ * 写入 settings.json 前必须从顶层 env 中脱敏的敏感键。
+ *
+ * 这些键代表真实凭证，不应明文持久化到磁盘；用户应改用环境变量或系统密钥链。
+ * 注意：BASE_URL / LLM_BASE_URL 不属于凭证，不在这里脱敏，避免本地端点配置失效。
+ */
+const SENSITIVE_ENV_KEYS = new Set<string>(["API_KEY", "LLM_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]);
+
+/**
+ * 返回一份 env 已被脱敏的 settings 副本，不修改原始对象。
+ *
+ * @param settings 待写入的 settings
+ * @returns 脱敏后的副本
+ */
+function maskSensitiveEnv(settings: DeepcodingSettings): DeepcodingSettings {
+  if (!settings.env) {
+    return settings;
+  }
+  const maskedEnv: Record<string, string> = {};
+  for (const [key, value] of Object.entries(settings.env)) {
+    if (typeof value === "string" && !SENSITIVE_ENV_KEYS.has(key)) {
+      maskedEnv[key] = value;
+    }
+  }
+  return {
+    ...settings,
+    env: maskedEnv,
+  };
+}
+
 function writeSettingsFile(settingsPath: string, settings: DeepcodingSettings): void {
   fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-  fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  // P0 安全修复：写入前对 env 做密钥脱敏，避免 API_KEY 等明文落盘。
+  const safeSettings = maskSensitiveEnv(settings);
+  fs.writeFileSync(settingsPath, `${JSON.stringify(safeSettings, null, 2)}\n`, "utf8");
 }
 
 export function writeSettings(settings: DeepcodingSettings): void {

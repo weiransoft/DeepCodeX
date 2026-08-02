@@ -14,12 +14,51 @@
  */
 
 import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
+
+/** DeepCodeX 统一日志根目录名（~/.deepcodex） */
+const DEEPCODEX_LOG_DIR_NAME = ".deepcodex";
+
+/** 旧版 Deep Code CLI 日志根目录名（~/.deepcode）
+ *
+ * 仅保留只读兼容：新代码禁止向该目录写入，仅用于读取历史日志或迁移场景。
+ */
+const LEGACY_LOG_DIR_NAME = ".deepcode";
+
+/** 日志子目录名 */
+const LOGS_SUBDIR = "logs";
 
 /** 默认日志文件大小上限（10MB） */
 export const DEFAULT_MAX_LOG_SIZE_BYTES = 10 * 1024 * 1024;
 
 /** 默认保留备份文件数量（3 个：.log.1 / .log.2 / .log.3） */
 export const DEFAULT_MAX_BACKUP_COUNT = 3;
+
+/**
+ * 获取 DeepCodeX 统一日志目录路径（~/.deepcodex/logs）。
+ *
+ * 所有新日志写入均应使用此目录。函数在调用时实时读取 os.homedir()，
+ * 便于测试通过切换 process.env.HOME 实现目录隔离。
+ *
+ * @returns 日志目录绝对路径
+ */
+export function getDeepCodeXLogDir(): string {
+  return path.join(os.homedir(), DEEPCODEX_LOG_DIR_NAME, LOGS_SUBDIR);
+}
+
+/**
+ * 获取旧版 Deep Code CLI 日志目录路径（~/.deepcode/logs）。
+ *
+ * 仅用于只读兼容：
+ * - 新日志写入禁止使用此目录
+ * - 仅用于读取历史日志、迁移或兼容展示
+ *
+ * @returns 旧版日志目录绝对路径
+ */
+export function getLegacyLogDir(): string {
+  return path.join(os.homedir(), LEGACY_LOG_DIR_NAME, LOGS_SUBDIR);
+}
 
 /** 轮转选项 */
 export interface RotateLogOptions {

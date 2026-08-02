@@ -42,24 +42,43 @@ export type TaskKind = "chat" | "autonomous";
 // ============================================================================
 
 /**
- * 任务状态枚举
+ * 任务状态枚举（11 状态，对齐 docs/new-features.md §F.2）
  *
- * 状态转换图见 ADR-DI-001 §6.1，转换表见 §6.2。
+ * 状态转换图：
+ * queued → pending → running ⇄ pausing ⇄ paused
+ *                           ↓
+ *                       retrying → running
+ *                           ↓
+ *            timeout / failed / succeeded / cancelled
+ *                           ↑
+ *                       injecting（动态注入指令）
  *
- * 不变式（§6.3 运行时校验）：
- * - `injecting` 状态必须瞬时（drain 完成立即转回 running），不允许停留
- * - `cancelled` / `succeeded` / `failed` 是终态，不可转换
- * - `paused → running` 必须经 `resume()`，不允许直接转换
+ * 不变式（运行时校验）：
+ * - `injecting` / `pausing` / `retrying` / `pending` 为中间状态，不允许长期停留
+ * - `cancelled` / `succeeded` / `failed` / `timeout` 是终态，不可转换
+ * - `paused → running` 必须经 `resume()`（路径：paused → pausing → running）
+ * - `pause()` 路径：running → pausing → paused
  * - `running` 状态下 `controller.signal.aborted` 必须为 `false`
  */
 export type TaskStatus =
-  | "queued" // 已创建未启动
+  | "queued" // 已创建，等待进入 pending
+  | "pending" // 已提交调度，等待真正开始执行
   | "running" // 执行中
+  | "pausing" // 正在暂停（中间状态，完成后转 paused）
   | "paused" // 已暂停（可恢复）
+  | "retrying" // 正在重试（中间状态）
   | "injecting" // 正在处理注入指令（瞬时状态，drain 后转回 running）
-  | "succeeded" // 成功完成
-  | "failed" // 失败终止
-  | "cancelled"; // 用户取消
+  | "timeout" // 执行超时（终态）
+  | "failed" // 失败终止（终态）
+  | "succeeded" // 成功完成（终态）
+  | "cancelled"; // 用户取消（终态）
+
+/**
+ * 终态集合
+ *
+ * 用于 BackgroundTask、BackgroundTaskRunner 等模块统一判断任务是否已结束。
+ */
+export const TERMINAL_STATUSES: readonly TaskStatus[] = Object.freeze(["succeeded", "failed", "cancelled", "timeout"]);
 
 // ============================================================================
 // 3. InjectSource 注入来源枚举

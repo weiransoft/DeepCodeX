@@ -191,7 +191,9 @@ class StubSessionManager implements InterruptibleSessionManager {
         }
         // includeHistory=false 时过滤掉已完成任务（默认行为）
         if (!filter?.includeHistory) {
-          result = result.filter((t) => t.state !== "succeeded" && t.state !== "failed" && t.state !== "cancelled");
+          result = result.filter(
+            (t) => t.state !== "succeeded" && t.state !== "failed" && t.state !== "cancelled" && t.state !== "timeout"
+          );
         }
         return result;
       },

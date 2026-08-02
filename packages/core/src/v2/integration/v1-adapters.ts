@@ -196,3 +196,10 @@ export { KARPATHY_PREAMBLE } from "../../team/karpathy-preamble";
 // "../../eag/*" 模式），V2 模块禁止直接 import eag 文件，经此 re-export。
 export { RuleInjector } from "../../eag/rlis/rule-injector";
 export type { RuleStore } from "../../eag/rlis/rule-store";
+
+// ============================================================================
+// 14. common/log-rotation（日志目录查询）
+// ============================================================================
+// V2 可观测性模块（v2-events）需要 getDeepCodeXLogDir 定位日志落盘目录。
+// V2 模块禁止直接 import V1 文件（P1-05 单一入口约束），经此 re-export。
+export { getDeepCodeXLogDir } from "../../common/log-rotation";

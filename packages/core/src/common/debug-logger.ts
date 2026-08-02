@@ -1,7 +1,6 @@
 import * as fs from "fs";
-import * as os from "os";
 import * as path from "path";
-import { rotateLogIfNeeded } from "./log-rotation";
+import { rotateLogIfNeeded, getDeepCodeXLogDir } from "./log-rotation";
 
 const DEBUG_LOG_FILE = "debug.log";
 
@@ -9,7 +8,7 @@ const DEBUG_LOG_FILE = "debug.log";
 // FIX-08（多角色审查 2026-07-29）：日志密钥脱敏
 //
 // 背景：logOpenAIChatCompletionDebug 会将完整 params/request 对象落盘到
-// ~/.deepcode/logs/debug.log。若对象中携带 apiKey / Authorization 头等凭据，
+// ~/.deepcodex/logs/debug.log。若对象中携带 apiKey / Authorization 头等凭据，
 // 密钥将以明文持久化，任何可读取该文件的进程均可窃取。
 //
 // 策略（与 graph-context-utils.ts 的 SENSITIVE_KEY_PATTERN 对齐）：
@@ -72,7 +71,7 @@ export function logOpenAIChatCompletionDebug(entry: OpenAIChatCompletionDebugEnt
 }
 
 export function getDebugLogPath(): string {
-  return path.join(os.homedir(), ".deepcode", "logs", DEBUG_LOG_FILE);
+  return path.join(getDeepCodeXLogDir(), DEBUG_LOG_FILE);
 }
 
 export function normalizeDebugError(error: unknown): { name: string; message: string; stack?: string } {

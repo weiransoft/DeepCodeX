@@ -5,7 +5,7 @@
  *
  * 核心职责（对齐 ADR-DI-001 §3.2 + §6）：
  * 1. 持有任务元数据（id / kind / prompt / sessionId / 时间戳）
- * 2. 维护状态机（queued → running ⇄ paused ⇄ injecting → succeeded / failed / cancelled）
+ * 2. 维护状态机（queued → pending → running ⇄ pausing ⇄ paused，running ⇄ retrying / injecting → 终态）
  * 3. 提供 pause / resume / cancel / inject 等控制 API
  * 4. 通过回调与外部协作（onStart / onPause / onResume / onCancel / onComplete / onStateChange / onStatsUpdate / onInject）
  * 5. 序列化为 TaskSnapshot（持久化用，不含 controller / functions）
@@ -22,17 +22,18 @@
  * - kind = "autonomous"：onStart 回调内部调用 AutonomousOrchestrator.run()
  * - Phase 1 MVP 仅实现 chat kind，autonomous kind 留待 Phase 3
  *
- * 状态机不变式（§6.3 运行时校验）：
- * - `injecting` 状态必须瞬时（drain 完成立即转回 running），不允许停留
- * - `cancelled` / `succeeded` / `failed` 是终态，不可转换
- * - `paused → running` 必须经 `resume()`，不允许直接转换
+ * 状态机不变式（运行时校验）：
+ * - `injecting` / `pausing` / `retrying` / `pending` 为中间状态，不允许长期停留
+ * - `cancelled` / `succeeded` / `failed` / `timeout` 是终态，不可转换
+ * - `paused → running` 必须经 `resume()`（路径：paused → pausing → running）
+ * - `pause()` 路径：running → pausing → paused
  * - `running` 状态下 `controller.signal.aborted` 必须为 `false`
  *
  * @module interrupts/background-task
  */
 
 import type { InjectedInstruction, TaskKind, TaskSnapshot, TaskStats, TaskStatus } from "./types";
-import { InvalidStateTransitionError } from "./types";
+import { InvalidStateTransitionError, TERMINAL_STATUSES } from "./types";
 
 // ============================================================================
 // 1. BackgroundTaskOptions 构造选项
@@ -93,27 +94,38 @@ export interface BackgroundTaskOptions {
 // ============================================================================
 
 /**
- * 合法状态转换表
+ * 合法状态转换表（11 状态，对齐 docs/new-features.md §F.2）
  *
  * key = 起始状态，value = 允许的目标状态列表。
- * 终态（succeeded / failed / cancelled）的 value 为空数组，禁止任何转换。
+ * 终态（succeeded / failed / cancelled / timeout）的 value 为空数组，禁止任何转换。
  *
- * 来源：ADR-DI-001 §6.2 状态转换表 + Phase 1 实施补充
- *
- * 补充说明（Phase 1 实施发现）：
- * - `queued → failed`：onStart 回调同步抛错时，start() catch 块需要从 queued 直接转 failed
- * - `queued → succeeded`：onStart 回调内部立即调用 markSucceeded（如快速成功的会话）
- * - `queued → cancelled`：start 前用户取消
- *
- * 这三个转换符合 ADR-DI-001 §6.3 不变式（终态不可转换、paused→running 必须经 resume）。
+ * 核心路径：
+ * - queued → pending → running
+ * - running → pausing → paused（pause）
+ * - paused → pausing → running（resume）
+ * - running → retrying → running
+ * - running ⇄ injecting
+ * - pending / running / pausing / retrying / injecting → timeout
  */
 const VALID_TRANSITIONS: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = Object.freeze({
-  queued: Object.freeze(["running", "cancelled", "failed", "succeeded"] as readonly TaskStatus[]),
-  running: Object.freeze(["paused", "injecting", "succeeded", "failed", "cancelled"] as readonly TaskStatus[]),
-  paused: Object.freeze(["running", "cancelled"] as readonly TaskStatus[]),
-  injecting: Object.freeze(["running", "failed", "cancelled"] as readonly TaskStatus[]),
-  succeeded: Object.freeze([] as readonly TaskStatus[]),
+  queued: Object.freeze(["pending", "running", "cancelled", "failed", "succeeded"] as readonly TaskStatus[]),
+  pending: Object.freeze(["running", "cancelled", "failed", "timeout"] as readonly TaskStatus[]),
+  running: Object.freeze([
+    "pausing",
+    "injecting",
+    "retrying",
+    "succeeded",
+    "failed",
+    "cancelled",
+    "timeout",
+  ] as readonly TaskStatus[]),
+  pausing: Object.freeze(["paused", "running", "failed", "cancelled", "timeout"] as readonly TaskStatus[]),
+  paused: Object.freeze(["pausing", "cancelled"] as readonly TaskStatus[]),
+  retrying: Object.freeze(["running", "failed", "cancelled", "timeout", "succeeded"] as readonly TaskStatus[]),
+  injecting: Object.freeze(["running", "succeeded", "failed", "cancelled", "timeout"] as readonly TaskStatus[]),
+  timeout: Object.freeze([] as readonly TaskStatus[]),
   failed: Object.freeze([] as readonly TaskStatus[]),
+  succeeded: Object.freeze([] as readonly TaskStatus[]),
   cancelled: Object.freeze([] as readonly TaskStatus[]),
 });
 
@@ -142,7 +154,7 @@ function isValidTransition(from: TaskStatus, to: TaskStatus): boolean {
  * 每个 BackgroundTask 拥有：
  * - 独立的 sessionId（与主前台 session 隔离）
  * - 独立的 AbortController（取消不影响前台）
- * - 独立的状态机（queued → running ⇄ paused ⇄ injecting → 终态）
+ * - 独立的状态机（queued → pending → running ⇄ pausing ⇄ paused，running ⇄ retrying / injecting → 终态）
  * - 累计统计（iterations / durationMs / tokensUsed）
  *
  * 使用示例：
@@ -285,10 +297,11 @@ export class BackgroundTask {
    * 实现 `BackgroundTaskLike.progress` 契约：
    * - `list_tasks` LLM 工具在任务列表展示时读取此字段
    *
-   * Phase 1 MVP 实现策略（基于状态机粗粒度映射）：
-   * - queued / failed / cancelled: 0（未开始或被中断）
-   * - running / paused / injecting: 0.5（进行中，无迭代计数器）
+   * 11 状态粗粒度映射策略：
    * - succeeded: 1（已完成）
+   * - running / injecting / retrying / pausing / paused: 0.5（处理中）
+   * - pending: 0.1（已调度，未真正执行）
+   * - queued / failed / cancelled / timeout: 0（未开始或已终止）
    *
    * 注：Phase 3 引入 autonomous 4 阶段循环后，可基于阶段索引细化进度
    */
@@ -297,12 +310,17 @@ export class BackgroundTask {
       case "succeeded":
         return 1;
       case "running":
-      case "paused":
       case "injecting":
+      case "retrying":
+      case "pausing":
+      case "paused":
         return 0.5;
+      case "pending":
+        return 0.1;
       case "queued":
       case "failed":
       case "cancelled":
+      case "timeout":
       default:
         return 0;
     }
@@ -347,12 +365,14 @@ export class BackgroundTask {
    *
    * 流程：
    * 1. 校验状态（必须为 queued）
-   * 2. setState("running")（先转为 running，让 onStart 内部能调用 markSucceeded/markFailed）
-   * 3. 调用 onStart 回调（可能抛错）
+   * 2. setState("pending")（已提交调度）
+   * 3. setState("running")（让 onStart 内部能调用 markSucceeded/markFailed/markTimeout 等）
+   * 4. 调用 onStart 回调（可能抛错）
    *    - 同步抛错：catch 块 setState("failed")，重新抛出错误
    *    - 异步抛错：onStart 返回 Promise，await 时捕获，setState("failed")
    *
-   * 设计决策（先转 running 再调 onStart）：
+   * 设计决策（queued → pending → running 再调 onStart）：
+   * - 符合 docs/new-features.md §F.2 的 11 状态路径
    * - onStart 内部可能立即调用 markSucceeded（如快速成功的会话）
    * - onStart 内部可能异步启动会话（void handle.handleUserPrompt().then(...)）
    *   .then 微任务可能在 await 恢复前执行，此时 state 必须已是 running
@@ -360,20 +380,22 @@ export class BackgroundTask {
    *
    * 注：onStart 内部可异步启动会话（不等待 handleUserPrompt 完成），
    * 这种情况下 start() 返回时状态为 running，后续会话完成时通过
-   * markSucceeded / markFailed 转换状态。
+   * markSucceeded / markFailed / markTimeout 转换状态。
    *
-   * @throws {InvalidStateTransitionError} 当状态不为 queued 时
+   * @throws {InvalidStateTransitionError} 当状态不为 queued  时
    * @throws {Error} 当 onStart 回调抛错时（已 setState("failed")）
    */
   async start(): Promise<void> {
     if (this._state !== "queued") {
       throw new InvalidStateTransitionError(
         this._state,
-        "running",
+        "pending",
         `start() 仅允许从 queued 状态调用，当前状态：${this._state}`
       );
     }
-    // 先转为 running，让 onStart 内部能调用 markSucceeded/markFailed
+    // 步骤 1：进入 pending（已提交调度，等待真正执行）
+    this.setState("pending");
+    // 步骤 2：进入 running，让 onStart 内部能调用 markSucceeded/markFailed/markTimeout 等
     this.setState("running");
     try {
       if (this.callbacks.onStart) {
@@ -383,10 +405,10 @@ export class BackgroundTask {
     } catch (err) {
       // onStart 抛错时转为 failed
       this._error = err instanceof Error ? err.message : String(err);
-      // 状态可能是 running / succeeded / failed / cancelled（onStart 内部可能已转换）
+      // 状态可能是 running / succeeded / failed / cancelled / timeout（onStart 内部可能已转换）
       // 使用类型断言避免 TypeScript 控制流缩窄（setState 修改 _state 后 TS 不更新缩窄）
       const currentState: TaskStatus = this._state as TaskStatus;
-      if (currentState !== "failed" && currentState !== "cancelled" && currentState !== "succeeded") {
+      if (isValidTransition(currentState, "failed")) {
         this.setState("failed");
       }
       throw err;
@@ -401,7 +423,7 @@ export class BackgroundTask {
    * 2. 累加已执行时长到 accumulatedDurationMs
    * 3. controller.abort("pause")（触发 AbortController 信号）
    * 4. 调用 onPause 回调（异步回调不等待，错误吞掉记录到 stderr）
-   * 5. setState("paused")
+   * 5. setState("pausing") → setState("paused")
    *
    * 注：controller.abort 后 signal.aborted = true，
    * 后续 resume 时需由调用方创建新 controller（Phase 1 中由 onResume 回调处理）。
@@ -412,7 +434,7 @@ export class BackgroundTask {
     if (this._state !== "running") {
       throw new InvalidStateTransitionError(
         this._state,
-        "paused",
+        "pausing",
         `pause() 仅允许从 running 状态调用，当前状态：${this._state}`
       );
     }
@@ -424,6 +446,8 @@ export class BackgroundTask {
     }
     // 调用回调（同步调用，异步回调不等待）
     this.invokeSyncCallback("onPause", this.callbacks.onPause, this);
+    // 状态流转：running → pausing → paused
+    this.setState("pausing");
     this.setState("paused");
   }
 
@@ -433,37 +457,41 @@ export class BackgroundTask {
    * 流程：
    * 1. 校验状态（必须为 paused）
    * 2. 重置时长起点（durationStartMs = Date.now()）
-   * 3. 调用 onResume 回调（异步等待完成）
+   * 3. setState("pausing")
+   * 4. 调用 onResume 回调（异步等待完成）
    *    - 回调内部应重建 AbortController 并重新启动 LLM 流
-   * 4. setState("running")
+   * 5. setState("running")
    *
    * 注：原 controller 已 abort，onResume 回调内部需创建新 controller。
    * 但由于 controller 是 readonly 字段，Phase 1 中由 BackgroundTaskRunner
    * 在 onResume 中替换整个 BackgroundTask 实例（或通过闭包持有外部 controller 引用）。
    *
    * @throws {InvalidStateTransitionError} 当状态不为 paused 时
-   * @throws {Error} 当 onResume 回调抛错时（状态保持 paused）
+   * @throws {Error} 当 onResume 回调抛错时（状态回退到 paused）
    */
   async resume(): Promise<void> {
     if (this._state !== "paused") {
       throw new InvalidStateTransitionError(
         this._state,
-        "running",
+        "pausing",
         `resume() 仅允许从 paused 状态调用，当前状态：${this._state}`
       );
     }
     // 重置时长起点
     this.durationStartMs = Date.now();
+    // 状态流转：paused → pausing
+    this.setState("pausing");
     // 调用回调（异步等待）
     if (this.callbacks.onResume) {
       try {
         await this.callbacks.onResume(this);
       } catch (err) {
-        // onResume 抛错时状态保持 paused，记录到 stderr
+        // onResume 抛错时回退到 paused，允许再次 resume
         console.error(
-          `[BackgroundTask ${this.id}] onResume 回调抛错（状态保持 paused）：`,
+          `[BackgroundTask ${this.id}] onResume 回调抛错（状态回退到 paused）：`,
           err instanceof Error ? err.message : String(err)
         );
+        this.setState("paused");
         throw err;
       }
     }
@@ -474,28 +502,29 @@ export class BackgroundTask {
    * 取消任务
    *
    * 流程：
-   * 1. 校验状态（必须为 running 或 paused）
+   * 1. 校验状态（不能为终态）
    * 2. 累加已执行时长（如果是 running 状态）
    * 3. controller.abort("cancel")（如未已 abort）
    * 4. 调用 onCancel 回调（异步回调不等待，错误吞掉记录到 stderr）
    * 5. setState("cancelled")
    *
    * 注：cancel 与 pause 的区别：
-   * - pause：从 running 转 paused，可 resume
-   * - cancel：从 running / paused 转 cancelled（终态），不可恢复
+   * - pause：从 running 转 paused（路径 running → pausing → paused），可 resume
+   * - cancel：从任意非终态转 cancelled（终态），不可恢复
    *
    * @param reason 取消原因（可选，记录到 error 字段）
-   * @throws {InvalidStateTransitionError} 当状态为终态或 injecting 时
+   * @throws {InvalidStateTransitionError} 当状态为终态时
    */
   cancel(reason?: string): void {
-    if (this._state !== "running" && this._state !== "paused") {
+    // 终态禁止再次 cancel
+    if (TERMINAL_STATUSES.includes(this._state)) {
       throw new InvalidStateTransitionError(
         this._state,
         "cancelled",
-        `cancel() 仅允许从 running / paused 状态调用，当前状态：${this._state}`
+        `cancel() 不允许从终态调用，当前状态：${this._state}`
       );
     }
-    // 累加已执行时长（如果是 running 状态）
+    // 累加已执行时长（仅 running 状态需要累加）
     if (this._state === "running") {
       this.accumulatedDurationMs += Date.now() - this.durationStartMs;
     }
@@ -560,11 +589,12 @@ export class BackgroundTask {
    * @throws {InvalidStateTransitionError} 当状态为终态时
    */
   markSucceeded(result?: string): void {
-    if (this._state !== "queued" && this._state !== "running" && this._state !== "injecting") {
+    const allowed: readonly TaskStatus[] = ["queued", "running", "injecting", "retrying"];
+    if (!allowed.includes(this._state)) {
       throw new InvalidStateTransitionError(
         this._state,
         "succeeded",
-        `markSucceeded() 不允许从终态调用，当前状态：${this._state}`
+        `markSucceeded() 仅允许从 ${allowed.join(" / ")} 状态调用，当前状态：${this._state}`
       );
     }
     // 累加已执行时长（仅 running 状态需要累加）
@@ -591,11 +621,20 @@ export class BackgroundTask {
    * @throws {InvalidStateTransitionError} 当状态为终态时
    */
   markFailed(error: string): void {
-    if (this._state === "succeeded" || this._state === "failed" || this._state === "cancelled") {
+    // 终态不可转换
+    if (TERMINAL_STATUSES.includes(this._state)) {
       throw new InvalidStateTransitionError(
         this._state,
         "failed",
         `markFailed() 不允许从终态调用，当前状态：${this._state}`
+      );
+    }
+    // paused 状态没有到 failed 的合法转换
+    if (this._state === "paused") {
+      throw new InvalidStateTransitionError(
+        this._state,
+        "failed",
+        `markFailed() 不允许从 paused 状态调用，当前状态：${this._state}`
       );
     }
     // 累加已执行时长（如果是 running 状态）
@@ -606,6 +645,55 @@ export class BackgroundTask {
     this.setState("failed");
   }
 
+  /**
+   * 标记任务进入重试状态
+   *
+   * 由 onStart 回调内部或重试策略调用，将任务从 running 转为 retrying。
+   * retrying 为中间状态，完成后应转回 running 或进入终态。
+   *
+   * @throws {InvalidStateTransitionError} 当状态不为 running 时
+   */
+  markRetrying(): void {
+    if (this._state !== "running") {
+      throw new InvalidStateTransitionError(
+        this._state,
+        "retrying",
+        `markRetrying() 仅允许从 running 状态调用，当前状态：${this._state}`
+      );
+    }
+    this.setState("retrying");
+  }
+
+  /**
+   * 标记任务超时
+   *
+   * 由外部超时检测机制调用，将任务从 pending / running / pausing / retrying / injecting
+   * 转为 timeout 终态。
+   *
+   * @param error 超时原因（可选，默认 "任务执行超时"）
+   * @throws {InvalidStateTransitionError} 当当前状态不允许转 timeout 时
+   */
+  markTimeout(error?: string): void {
+    const allowed: readonly TaskStatus[] = ["pending", "running", "pausing", "retrying", "injecting"];
+    if (!allowed.includes(this._state)) {
+      throw new InvalidStateTransitionError(
+        this._state,
+        "timeout",
+        `markTimeout() 仅允许从 ${allowed.join(" / ")} 状态调用，当前状态：${this._state}`
+      );
+    }
+    // 累加已执行时长（仅 running 状态需要累加）
+    if (this._state === "running") {
+      this.accumulatedDurationMs += Date.now() - this.durationStartMs;
+    }
+    // 触发 abort 信号（超时信号）
+    if (!this.controller.signal.aborted) {
+      this.controller.abort("timeout");
+    }
+    this._error = error ?? "任务执行超时";
+    this.setState("timeout");
+  }
+
   // ============================================================================
   // 3.4 内部状态管理（setState / updateStats / setSessionId）
   // ============================================================================
@@ -613,12 +701,15 @@ export class BackgroundTask {
   /**
    * 状态转换（public，但建议仅在回调内部使用）
    *
-   * 校验状态机不变式（ADR-DI-001 §6.2 状态转换表）：
-   * - queued → running / cancelled ✓
-   * - running → paused / injecting / succeeded / failed / cancelled ✓
-   * - paused → running / cancelled ✓
-   * - injecting → running / failed / cancelled ✓
-   * - succeeded / failed / cancelled：终态，禁止任何转换
+   * 校验状态机不变式（docs/new-features.md §F.2）：
+   * - queued → pending / running / cancelled / failed / succeeded ✓
+   * - pending → running / cancelled / failed / timeout ✓
+   * - running → pausing / injecting / retrying / succeeded / failed / cancelled / timeout ✓
+   * - pausing → paused / running / failed / cancelled / timeout ✓
+   * - paused → pausing / cancelled ✓
+   * - retrying → running / failed / cancelled / timeout / succeeded ✓
+   * - injecting → running / succeeded / failed / cancelled / timeout ✓
+   * - succeeded / failed / cancelled / timeout：终态，禁止任何转换
    *
    * 转换成功后：
    * 1. 更新 _state / _updatedAt
@@ -636,7 +727,7 @@ export class BackgroundTask {
     this._state = next;
     this._updatedAt = new Date().toISOString();
     // 终态设置完成时间
-    if (next === "succeeded" || next === "failed" || next === "cancelled") {
+    if (TERMINAL_STATUSES.includes(next)) {
       this._completedAt = this._updatedAt;
     }
     // 触发 onStateChange 回调
@@ -652,7 +743,7 @@ export class BackgroundTask {
       }
     }
     // 终态触发 onComplete 回调（异步回调不等待）
-    if (next === "succeeded" || next === "failed" || next === "cancelled") {
+    if (TERMINAL_STATUSES.includes(next)) {
       if (this.callbacks.onComplete) {
         const result = this.callbacks.onComplete(this);
         if (result instanceof Promise) {
@@ -743,7 +834,7 @@ export class BackgroundTask {
    * 重建 BackgroundTask 实例，状态保持快照中的状态（不转为 running）。
    *
    * 重建后的实例：
-   * - 创建新的 AbortController（如快照状态为 cancelled，立即 abort）
+   * - 创建新的 AbortController（如快照状态为 cancelled / timeout / failed，立即 abort）
    * - 注入新的回调集合
    * - 内部状态直接设置（绕过状态机校验，因为是从持久化恢复）
    * - 不调用 start()（用户需显式调用 resume() 或 start()）
@@ -757,9 +848,9 @@ export class BackgroundTask {
     callbacks: Omit<BackgroundTaskOptions, "id" | "kind" | "prompt" | "sessionId" | "controller">
   ): BackgroundTask {
     const controller = new AbortController();
-    // 如果快照状态是 cancelled，恢复时立即 abort
-    if (snapshot.status === "cancelled") {
-      controller.abort("cancel");
+    // 如果快照状态是 cancelled / timeout / failed，恢复时立即 abort
+    if (snapshot.status === "cancelled" || snapshot.status === "timeout" || snapshot.status === "failed") {
+      controller.abort(snapshot.status);
     }
     const task = new BackgroundTask({
       id: snapshot.id,

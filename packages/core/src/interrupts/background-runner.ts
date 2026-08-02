@@ -27,11 +27,13 @@
 import * as crypto from "node:crypto";
 import { BackgroundTask } from "./background-task";
 import type { TaskRegistry } from "./task-registry";
+import { TERMINAL_STATUSES } from "./types";
 import type { InjectedInstruction, TaskKind, TaskSnapshot } from "./types";
 // 导入 UserPromptContent 类型（用于 startBackground 适配 BackgroundRunnerLike 接口）
 import type { UserPromptContent } from "../session";
 // D-4 修复：导入中断事件日志记录器，记录任务启动 / 终态 / 注入事件
 import { logInterruptEvent } from "../common/interrupt-logger";
+import type { InterruptEventType } from "../common/interrupt-logger";
 
 // ============================================================================
 // 1. SessionHandle 接口（最小契约）
@@ -283,14 +285,14 @@ export class BackgroundTaskRunner {
         void handle
           .handleUserPrompt(t.prompt)
           .then(() => {
-            // 会话成功完成（仅在 running 状态下转为 succeeded）
-            if (t.state === "running") {
+            // 会话成功完成（在 running / retrying 状态下转为 succeeded）
+            if (t.state === "running" || t.state === "retrying") {
               t.markSucceeded("completed");
             }
           })
           .catch((err) => {
-            // 会话失败（仅在 running / injecting 状态下转为 failed）
-            if (t.state === "running" || t.state === "injecting") {
+            // 会话失败（在 running / injecting / retrying 状态下转为 failed）
+            if (t.state === "running" || t.state === "injecting" || t.state === "retrying") {
               t.markFailed(err instanceof Error ? err.message : String(err));
             }
           });
@@ -320,13 +322,29 @@ export class BackgroundTaskRunner {
           });
         }
         // 4. 终态触发 onTaskComplete + 异步 unregister
-        if (t.state === "succeeded" || t.state === "failed" || t.state === "cancelled") {
+        if (TERMINAL_STATUSES.includes(t.state)) {
           // D-4：记录任务终态事件（失败不影响主流程）
           // 注：BackgroundTask 没有 cancelReason / failureReason 字段，统一通过 error getter 暴露
           //     startedAt 为 ISO 8601 字符串，需 new Date() 转换后计算 durationMs
           try {
-            const eventType =
-              t.state === "succeeded" ? "task.succeeded" : t.state === "failed" ? "task.failed" : "task.cancelled";
+            let eventType: InterruptEventType;
+            switch (t.state) {
+              case "succeeded":
+                eventType = "task.succeeded";
+                break;
+              case "failed":
+                eventType = "task.failed";
+                break;
+              case "cancelled":
+                eventType = "task.cancelled";
+                break;
+              case "timeout":
+                eventType = "task.timeout";
+                break;
+              default:
+                // 理论上不会到达：TERMINAL_STATUSES 仅包含上述 4 种终态
+                throw new Error(`未知终态：${t.state}`);
+            }
             logInterruptEvent({
               timestamp: new Date().toISOString(),
               eventType,

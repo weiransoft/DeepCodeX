@@ -837,6 +837,22 @@ export const PromptInput = React.memo(function PromptInput({
       clearUndoRedoStacks();
       return;
     }
+    // ===== EAG P5 编排命令（2026-07-31 FIX-3） =====
+    // 4 个 EAG 命令均需要（或可选）参数：选中后不立即提交，
+    // 而是将命令前缀填充到输入框，由用户补齐参数后按 Enter 提交。
+    // 提交后文本经 App 层通用 prompt 路径透传至 core session.ts 的
+    // EagCommandParser 前缀解析分发（与 /eag-build 等 C 域命令同款模式），
+    // 因此此处不扩展 PromptSubmission.command 枚举。
+    if (
+      item.kind === "eag-autonomous" ||
+      item.kind === "eag-autonomous-status" ||
+      item.kind === "eag-autonomous-stop" ||
+      item.kind === "eag-graph"
+    ) {
+      clearSlashToken();
+      updateBuffer(() => ({ text: `${item.label} `, cursor: item.label.length + 1 }));
+      return;
+    }
   }
 
   function submitCurrentBuffer(): void {

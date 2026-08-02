@@ -303,6 +303,11 @@ test("TC-HELP-001: deepcode --help 输出包含由注册表生成的全部命令
     "/fg",
     "/cancel",
     "/pause",
+    // EAG P5 编排命令（2026-07-31 FIX-3 集成验证）
+    "/eag-autonomous",
+    "/eag-autonomous-status",
+    "/eag-autonomous-stop",
+    "/eag-graph",
   ]) {
     assert.ok(output.includes(required), `--help 输出应包含 ${required}`);
   }

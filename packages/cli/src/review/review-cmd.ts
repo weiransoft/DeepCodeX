@@ -265,6 +265,87 @@ function parsePositiveInt(value: string | undefined, defaultValue: number): numb
 // ============================================================================
 
 /**
+ * 工具验证型 /review 命令已知的选项集合
+ *
+ * 用于 extractReviewNaturalLanguageTask 判断用户输入是否仍属于工具检查模式，
+ * 还是已经进入自然语言任务描述。
+ */
+const KNOWN_REVIEW_OPTIONS: ReadonlySet<string> = Object.freeze(new Set(["--quiet", "--format", "--project-root"]));
+
+/**
+ * 从 /review 输入中提取自然语言任务描述
+ *
+ * 设计背景：
+ *   /review 同时承担两种语义：
+ *     1. 工具验证命令：/review [typecheck|lint|format|full|help] [options]
+ *     2. 自然语言审查请求：/review 当前项目全部代码，并对照 gold comments ...
+ *   原 parseReviewArgs 只要首 token 不是合法子命令就抛错，导致用户按直觉输入
+ *   自然语言时报“非法的子命令”；即便使用 /review full 也会被当成项目根目录，
+ *   在 benchmark 等无 package.json 的目录下报“无法识别项目类型”。
+ *
+ * 判定规则（按 token 顺序扫描）：
+ *   - 空内容（仅 /review）=> 工具模式（默认 full），返回 undefined
+ *   - 首 token 是合法子命令，后续 token 全部是已知选项或其参数 => 工具模式
+ *   - 首 token 是已知选项（如 --quiet）=> 工具模式（默认 full）
+ *   - 任何非选项 token 出现在子命令/选项之后 => 自然语言，返回 /review 后的原文
+ *
+ * 返回值：
+ *   - undefined：输入应走工具验证模式（由 handleReviewSlashCommand 处理）
+ *   - string：自然语言任务描述（不含前导 "/review"），应交回 LLM 流程
+ *
+ * @param text 用户输入的完整文本（如 "/review 当前工程代码"）
+ * @returns 自然语言任务描述，或 undefined 表示工具模式
+ */
+export function extractReviewNaturalLanguageTask(text: string): string | undefined {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("/review")) {
+    return undefined;
+  }
+
+  const body = trimmed.slice("/review".length).trim();
+  if (body === "") {
+    // 仅输入 /review，按工具模式默认 full 处理
+    return undefined;
+  }
+
+  const tokens = body.split(/\s+/).filter(Boolean);
+  const firstToken = tokens[0] ?? "";
+  const firstIsSubcommand = VALID_SUBCOMMANDS.includes(firstToken as ReviewSubcommand);
+
+  let i = firstIsSubcommand ? 1 : 0;
+  while (i < tokens.length) {
+    const token = tokens[i];
+    if (!token) {
+      i++;
+      continue;
+    }
+
+    if (token.startsWith("--")) {
+      // 未知选项视为自然语言（可能是任务描述中的文字）
+      if (!KNOWN_REVIEW_OPTIONS.has(token)) {
+        return firstIsSubcommand ? tokens.slice(1).join(" ") : body;
+      }
+      // --format / --project-root 需要下一个 token 作为参数
+      if (token === "--format" || token === "--project-root") {
+        if (i + 1 >= tokens.length) {
+          return firstIsSubcommand ? tokens.slice(1).join(" ") : body;
+        }
+        i += 2;
+      } else {
+        i++;
+      }
+    } else {
+      // 非选项 token 出现在子命令之后，说明是自然语言任务描述
+      // 返回去掉子命令前缀后的任务描述，避免把 "full" 等词混入任务文本
+      return firstIsSubcommand ? tokens.slice(1).join(" ") : body;
+    }
+  }
+
+  // 所有 token 都被工具模式消费完毕
+  return undefined;
+}
+
+/**
  * 解析 /review 命令参数
  *
  * 与 parseQualityArgs 设计对齐：接受 tokens 数组，返回 ReviewCommandArgs。
@@ -863,6 +944,7 @@ export function formatReviewHelp(): string {
 
 用法：
   /review [subcommand] [options]
+  /review <自然语言审查任务>
   deepcode review [subcommand] [options]
 
 子命令：
@@ -871,6 +953,11 @@ export function formatReviewHelp(): string {
   format       仅运行格式化检查（npx prettier --check . / ruff format --check 等）
   full         运行所有可用检查（默认子命令）
   help         显示此帮助
+
+自然语言模式：
+  当 /review 后的内容不是合法子命令或仅包含工具选项时，系统会将其视为自然语言
+  代码审查任务，直接交给 LLM 处理。例如：
+    /review 当前项目全部代码，并对照 gold comments 评估准确率与召回率
 
 选项：
   --quiet                 静默模式（仅输出结论，不输出明细）
@@ -897,6 +984,8 @@ export function formatReviewHelp(): string {
   /review format                   # 仅格式化检查
   /review full --quiet             # 运行所有检查，仅输出结论
   /review full --format json       # JSON 格式输出
+  /review 当前项目全部代码，并对照 gold comments 评估准确率与召回率
+                                   # 自然语言代码审查任务（不走工具检查）
   deepcode review help             # CLI 模式显示帮助
 
 设计原则：

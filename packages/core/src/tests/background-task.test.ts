@@ -31,7 +31,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as crypto from "node:crypto";
 import { BackgroundTask } from "../interrupts/background-task";
-import { InvalidStateTransitionError } from "../interrupts/types";
+import { InvalidStateTransitionError, TERMINAL_STATUSES } from "../interrupts/types";
 import type { BackgroundTaskOptions } from "../interrupts/background-task";
 import type { InjectedInstruction, TaskSnapshot } from "../interrupts/types";
 
@@ -167,8 +167,12 @@ test("TC-BT-003: pause + resume 完整流程 state 流转 running→paused→run
   assert.equal(task.state, "running", "resume 后状态应为 running");
   assert.equal(onResumeCalled, true, "onResume 回调应被调用");
 
-  // 验证状态变更顺序
-  assert.deepEqual(stateChanges, ["running", "paused", "running"], "状态变更顺序应为 running→paused→running");
+  // 验证状态变更顺序：queued → pending → running → pausing → paused → pausing → running
+  assert.deepEqual(
+    stateChanges,
+    ["pending", "running", "pausing", "paused", "pausing", "running"],
+    "状态变更顺序应为 queued → pending → running → pausing → paused → pausing → running"
+  );
 });
 
 // ============================================================================
@@ -631,4 +635,344 @@ test("额外测试：inject 在终态抛错", async () => {
   assert.equal(task.state, "succeeded");
 
   assert.throws(() => task.inject(createInstruction("终态注入")), InvalidStateTransitionError, "终态 inject 应抛错");
+});
+
+// ============================================================================
+// TC-BT-011: start 状态流转 queued → pending → running
+// ============================================================================
+
+test("TC-BT-011: start 状态流转 queued → pending → running", async () => {
+  const stateChanges: string[] = [];
+  const task = new BackgroundTask({
+    id: "t-pending-001",
+    kind: "chat",
+    prompt: "测试 pending 状态",
+    controller: new AbortController(),
+    onStart: async () => {
+      // 模拟启动
+    },
+    onStateChange: (t) => {
+      stateChanges.push(t.state);
+    },
+  });
+
+  assert.equal(task.state, "queued");
+  await task.start();
+  assert.equal(task.state, "running");
+
+  // start 过程中应依次经过 pending、running
+  assert.deepEqual(stateChanges, ["pending", "running"], "start 应先转 pending 再转 running");
+});
+
+// ============================================================================
+// TC-BT-012: pause 状态流转 running → pausing → paused
+// ============================================================================
+
+test("TC-BT-012: pause 状态流转 running → pausing → paused", async () => {
+  const stateChanges: string[] = [];
+  const task = new BackgroundTask({
+    id: "t-pausing-001",
+    kind: "chat",
+    prompt: "测试 pausing 状态",
+    controller: new AbortController(),
+    onStart: async () => {},
+    onStateChange: (t) => {
+      stateChanges.push(t.state);
+    },
+  });
+
+  await task.start();
+  stateChanges.length = 0; // 清空 start 产生的 pending / running
+
+  task.pause();
+  assert.equal(task.state, "paused");
+  assert.deepEqual(stateChanges, ["pausing", "paused"], "pause 应先转 pausing 再转 paused");
+});
+
+// ============================================================================
+// TC-BT-013: resume 状态流转 paused → pausing → running，失败回退 paused
+// ============================================================================
+
+test("TC-BT-013: resume 状态流转 paused → pausing → running，失败回退 paused", async () => {
+  const stateChanges: string[] = [];
+  const task = new BackgroundTask({
+    id: "t-resume-pausing-001",
+    kind: "chat",
+    prompt: "测试 resume 路径",
+    controller: new AbortController(),
+    onStart: async () => {},
+    onResume: async () => {
+      // 正常恢复
+    },
+    onStateChange: (t) => {
+      stateChanges.push(t.state);
+    },
+  });
+
+  await task.start();
+  task.pause();
+  stateChanges.length = 0; // 清空前面状态
+
+  await task.resume();
+  assert.equal(task.state, "running");
+  assert.deepEqual(stateChanges, ["pausing", "running"], "resume 应先转 pausing 再转 running");
+
+  // resume 失败时回退到 paused
+  const failingTask = new BackgroundTask({
+    id: "t-resume-fail-001",
+    kind: "chat",
+    prompt: "测试 resume 失败回退",
+    controller: new AbortController(),
+    onStart: async () => {},
+    onResume: async () => {
+      throw new Error("恢复失败");
+    },
+  });
+  await failingTask.start();
+  failingTask.pause();
+  await assert.rejects(
+    () => failingTask.resume(),
+    (err) => {
+      assert.ok(err instanceof Error);
+      assert.equal(err.message, "恢复失败");
+      return true;
+    },
+    "onResume 抛错应传播"
+  );
+  assert.equal(failingTask.state, "paused", "resume 失败后状态应回退到 paused");
+});
+
+// ============================================================================
+// TC-BT-014: markRetrying running → retrying
+// ============================================================================
+
+test("TC-BT-014: markRetrying running → retrying", async () => {
+  const task = new BackgroundTask({
+    id: "t-retrying-001",
+    kind: "chat",
+    prompt: "测试重试状态",
+    controller: new AbortController(),
+    onStart: async () => {},
+  });
+
+  await task.start();
+  assert.equal(task.state, "running");
+
+  task.markRetrying();
+  assert.equal(task.state, "retrying", "markRetrying 后状态应为 retrying");
+
+  // retrying 可回到 running
+  task.setState("running");
+  assert.equal(task.state, "running");
+
+  // 非 running 状态调用 markRetrying 应抛错
+  task.pause();
+  assert.throws(() => task.markRetrying(), InvalidStateTransitionError, "paused 状态 markRetrying 应抛错");
+});
+
+// ============================================================================
+// TC-BT-015: markTimeout 转入 timeout 终态
+// ============================================================================
+
+test("TC-BT-015: markTimeout 转入 timeout 终态", async () => {
+  const task = new BackgroundTask({
+    id: "t-timeout-001",
+    kind: "chat",
+    prompt: "测试超时状态",
+    controller: new AbortController(),
+    onStart: async () => {},
+    onComplete: (t) => {
+      assert.equal(t.state, "timeout");
+    },
+  });
+
+  await task.start();
+  assert.equal(task.state, "running");
+
+  task.markTimeout("执行时间超过阈值");
+  assert.equal(task.state, "timeout", "markTimeout 后状态应为 timeout");
+  assert.equal(task.error, "执行时间超过阈值", "error 应记录超时原因");
+  assert.ok(task.completedAt, "completedAt 应被设置");
+  assert.ok(task.controller.signal.aborted, "timeout 后 controller 应被 abort");
+
+  // timeout 是终态，不可再转换
+  assert.throws(() => task.pause(), InvalidStateTransitionError, "timeout 后 pause 应抛错");
+  assert.throws(() => task.cancel(), InvalidStateTransitionError, "timeout 后 cancel 应抛错");
+});
+
+// ============================================================================
+// TC-BT-016: timeout 属于终态集合
+// ============================================================================
+
+test("TC-BT-016: timeout 属于终态集合", () => {
+  assert.ok(TERMINAL_STATUSES.includes("timeout"), "timeout 应为终态");
+  assert.ok(TERMINAL_STATUSES.includes("succeeded"));
+  assert.ok(TERMINAL_STATUSES.includes("failed"));
+  assert.ok(TERMINAL_STATUSES.includes("cancelled"));
+  assert.equal(TERMINAL_STATUSES.length, 4, "终态应有 4 个");
+});
+
+// ============================================================================
+// TC-BT-018: injecting 状态转换 running → injecting → running
+// ============================================================================
+
+test("TC-BT-018: injecting 状态转换 running → injecting → running", async () => {
+  const stateChanges: string[] = [];
+  const task = new BackgroundTask({
+    id: "t-injecting-001",
+    kind: "chat",
+    prompt: "测试 injecting 状态",
+    controller: new AbortController(),
+    onStart: async () => {},
+    onStateChange: (t) => {
+      stateChanges.push(t.state);
+    },
+  });
+
+  await task.start();
+  stateChanges.length = 0; // 清空 start 产生的 pending / running
+
+  // running → injecting（模拟动态注入处理）
+  task.setState("injecting");
+  assert.equal(task.state, "injecting", "setState 后状态应为 injecting");
+
+  // injecting 可回到 running
+  task.setState("running");
+  assert.equal(task.state, "running", "注入处理完成后应回到 running");
+
+  // injecting 也可直接进入 succeeded / failed / cancelled / timeout
+  const task2 = new BackgroundTask({
+    id: "t-injecting-002",
+    kind: "chat",
+    prompt: "测试 injecting 直接到终态",
+    controller: new AbortController(),
+    onStart: async () => {},
+  });
+  await task2.start();
+  task2.setState("injecting");
+  task2.setState("succeeded");
+  assert.equal(task2.state, "succeeded", "injecting 可直接转 succeeded");
+
+  assert.deepEqual(stateChanges, ["injecting", "running"], "状态变更序列应为 injecting → running");
+});
+
+// ============================================================================
+// TC-BT-019: progress 映射覆盖 11 状态
+// ============================================================================
+
+test("TC-BT-019: progress 映射覆盖 11 状态", async () => {
+  // running / injecting / retrying / pausing
+  const progressHalfDirectStates: TaskStatus[] = ["running", "injecting", "retrying", "pausing"];
+  for (const state of progressHalfDirectStates) {
+    const t = new BackgroundTask({
+      id: `t-progress-${state}`,
+      kind: "chat",
+      prompt: `测试 ${state} progress`,
+      controller: new AbortController(),
+      onStart: async () => {},
+    });
+    await t.start();
+    if (state !== "running") {
+      t.setState(state);
+    }
+    assert.equal(t.progress, 0.5, `${state} progress 应为 0.5`);
+  }
+
+  // paused 需通过 pause() 进入（running → pausing → paused）
+  const pausedTask = new BackgroundTask({
+    id: "t-progress-paused",
+    kind: "chat",
+    prompt: "测试 paused progress",
+    controller: new AbortController(),
+    onStart: async () => {},
+  });
+  await pausedTask.start();
+  pausedTask.pause();
+  assert.equal(pausedTask.progress, 0.5, "paused progress 应为 0.5");
+
+  // pending
+  const pendingTask = new BackgroundTask({
+    id: "t-progress-pending",
+    kind: "chat",
+    prompt: "测试 pending progress",
+    controller: new AbortController(),
+  });
+  pendingTask.setState("pending");
+  assert.equal(pendingTask.progress, 0.1, "pending progress 应为 0.1");
+
+  // queued / failed / cancelled / timeout / succeeded
+  const progressZeroStates: TaskStatus[] = ["queued", "failed", "cancelled", "timeout"];
+  for (const state of progressZeroStates) {
+    const t = new BackgroundTask({
+      id: `t-progress-${state}`,
+      kind: "chat",
+      prompt: `测试 ${state} progress`,
+      controller: new AbortController(),
+      onStart: async () => {},
+    });
+    if (state !== "queued") {
+      await t.start();
+      if (state === "failed") {
+        t.markFailed("模拟失败");
+      } else if (state === "cancelled") {
+        t.cancel("模拟取消");
+      } else if (state === "timeout") {
+        t.markTimeout("模拟超时");
+      }
+    }
+    assert.equal(t.progress, 0, `${state} progress 应为 0`);
+  }
+
+  // succeeded
+  const succeededTask = new BackgroundTask({
+    id: "t-progress-succeeded",
+    kind: "chat",
+    prompt: "测试 succeeded progress",
+    controller: new AbortController(),
+    onStart: async () => {},
+  });
+  await succeededTask.start();
+  succeededTask.markSucceeded();
+  assert.equal(succeededTask.progress, 1, "succeeded progress 应为 1");
+});
+
+// ============================================================================
+// TC-BT-017: fromSnapshot 恢复 timeout / failed 后 controller 已 abort
+// ============================================================================
+
+test("TC-BT-017: fromSnapshot 恢复 timeout / failed 后 controller 已 abort", () => {
+  const now = new Date().toISOString();
+  const timeoutSnapshot: TaskSnapshot = Object.freeze({
+    id: "t-timeout-restore",
+    kind: "chat",
+    status: "timeout",
+    prompt: "超时任务",
+    sessionId: null,
+    startedAt: now,
+    updatedAt: now,
+    completedAt: now,
+    result: null,
+    error: "执行超时",
+    stats: Object.freeze({ iterations: 0, durationMs: 0, tokensUsed: 0 }),
+  });
+  const restoredTimeout = BackgroundTask.fromSnapshot(timeoutSnapshot, {});
+  assert.equal(restoredTimeout.state, "timeout");
+  assert.equal(restoredTimeout.controller.signal.aborted, true, "timeout 快照重建后 controller 应已 abort");
+
+  const failedSnapshot: TaskSnapshot = Object.freeze({
+    id: "t-failed-restore",
+    kind: "chat",
+    status: "failed",
+    prompt: "失败任务",
+    sessionId: null,
+    startedAt: now,
+    updatedAt: now,
+    completedAt: now,
+    result: null,
+    error: "模拟失败",
+    stats: Object.freeze({ iterations: 0, durationMs: 0, tokensUsed: 0 }),
+  });
+  const restoredFailed = BackgroundTask.fromSnapshot(failedSnapshot, {});
+  assert.equal(restoredFailed.state, "failed");
+  assert.equal(restoredFailed.controller.signal.aborted, true, "failed 快照重建后 controller 应已 abort");
 });

@@ -4,6 +4,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { DEFAULT_BASH_TIMEOUT_MS, clampBashTimeoutMs } from "../common/bash-timeout";
+import { isPathInProject } from "../common/permissions";
 import { killProcessTree } from "../common/process-tree";
 import type { ProcessTimeoutControl, ProcessTimeoutInfo, ToolExecutionContext, ToolExecutionResult } from "./executor";
 import {
@@ -42,6 +43,39 @@ type ToolCommandResult = {
   deadlineAt?: string;
 };
 
+/**
+ * 基础危险命令黑名单（ToolExecutor 未注入守卫时的 fail-closed 兜底）。
+ *
+ * 与 EAG-P5 DangerousCommandGuard 的关系：
+ * - EAG 场景使用完整 6 层 BlockerGuardChain；
+ * - 此列表仅作为 bash-handler 的最后一道防线，防止调用方绕过 ToolExecutor 的
+ *   onBeforeToolExecution 钩子直接执行 rm -rf / 等明显灾难性命令。
+ */
+const BUILTIN_DANGEROUS_PATTERNS: ReadonlyArray<{ pattern: RegExp; reason: string }> = Object.freeze([
+  { pattern: /\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f*|--recursive)\s+(-[a-zA-Z]*\s+)*\/(\s|$)/, reason: "禁止 rm -rf /" },
+  { pattern: /\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f*|--recursive)\s+(-[a-zA-Z]*\s+)*\/\*/, reason: "禁止 rm -rf /*" },
+  { pattern: /\bmkfs\b/, reason: "禁止格式化磁盘" },
+  { pattern: /\b(dd|fdisk|parted)\b/, reason: "禁止磁盘分区/覆写" },
+  { pattern: /\b(shutdown|reboot|halt|poweroff)\b/, reason: "禁止系统关机/重启" },
+  { pattern: /[>|>]\s*\/dev\/sda/, reason: "禁止覆写块设备" },
+  { pattern: /\biptables\s+-F\b/, reason: "禁止清空防火墙" },
+]);
+
+/**
+ * 检查命令是否命中内置危险模式。
+ *
+ * @param command 待检查命令
+ * @returns 命中时返回拦截原因，否则返回 null
+ */
+function checkBuiltinDangerousCommand(command: string): string | null {
+  for (const { pattern, reason } of BUILTIN_DANGEROUS_PATTERNS) {
+    if (pattern.test(command)) {
+      return reason;
+    }
+  }
+  return null;
+}
+
 export async function handleBashTool(
   args: Record<string, unknown>,
   context: ToolExecutionContext
@@ -54,6 +88,16 @@ export async function handleBashTool(
       ok: false,
       name: "bash",
       error: 'Missing required "command" string.',
+    };
+  }
+
+  // P0 安全修复：bash-handler 自身做危险命令 fail-closed 拦截，避免调用方绕过 ToolExecutor 守卫。
+  const dangerReason = checkBuiltinDangerousCommand(command);
+  if (dangerReason) {
+    return {
+      ok: false,
+      name: "bash",
+      error: `Command blocked by built-in guard: ${dangerReason}`,
     };
   }
 
@@ -77,14 +121,16 @@ export async function handleBashTool(
     execution.timeoutMs,
     execution.deadlineAtMs
   );
-  updateSessionCwd(context.sessionId, startCwd, result.cwd);
+  // P0 安全修复：CWD 必须位于 projectRoot 子树内，防止命令输出伪造 marker 行将 session CWD 切换到项目外。
+  const safeCwd = validateCwdWithinProjectRoot(result.cwd, context.projectRoot, startCwd);
+  updateSessionCwd(context.sessionId, startCwd, safeCwd);
 
   if (execution.error || result.exitCode !== 0 || result.signal !== null) {
     const errorMessage = buildErrorMessage(result.exitCode, result.signal, execution.error, execution.timedOut);
-    return formatResult({ ...result, ok: false }, "bash", errorMessage);
+    return formatResult({ ...result, ok: false, cwd: safeCwd }, "bash", errorMessage);
   }
 
-  return formatResult(result, "bash");
+  return formatResult({ ...result, cwd: safeCwd }, "bash");
 }
 
 function isTrue(value: unknown): boolean {
@@ -329,7 +375,9 @@ function startBackgroundShellCommand(
       shellPath,
       cwd
     );
-    updateSessionCwd(context.sessionId, cwd, result.cwd);
+    // P0 安全修复：后台任务同样需要做 CWD 边界校验。
+    const safeCwd = validateCwdWithinProjectRoot(result.cwd, context.projectRoot, cwd);
+    updateSessionCwd(context.sessionId, cwd, safeCwd);
     writeFinalBackgroundOutput(outputPath, finalOutput);
     if (typeof pid === "number") {
       context.onProcessExit?.(pid);
@@ -401,9 +449,36 @@ function appendChunk(existing: string, chunk: string | Buffer): string {
   return `${existing}${text.slice(0, remaining)}`;
 }
 
+/**
+ * 生成不可预测的 CWD marker，用于从子 shell 输出中解析当前工作目录。
+ *
+ * P0 安全修复：使用 CSPRNG（randomUUID）替代 Math.random，防止攻击者猜测或伪造 marker 行。
+ */
 function buildMarker(): string {
-  const token = Math.random().toString(36).slice(2);
+  const token = randomUUID();
   return `__DEEPCODE_PWD__${token}__`;
+}
+
+/**
+ * 校验 shell 解析出的 cwd 是否仍位于项目根目录子树内。
+ *
+ * 如果命令输出被污染并包含伪造的 marker 行，可能导致 session CWD 被篡改为 /etc 等目录。
+ * 此函数作为 fail-safe：越界时返回 fallbackCwd，不更新 session CWD。
+ *
+ * @param cwd shell 解析出的候选 cwd
+ * @param projectRoot 项目根目录
+ * @param fallbackCwd 校验失败时的回退 cwd
+ * @returns 安全 cwd
+ */
+function validateCwdWithinProjectRoot(cwd: string | null, projectRoot: string, fallbackCwd: string): string | null {
+  if (!cwd) {
+    return cwd;
+  }
+  if (isPathInProject(projectRoot, cwd)) {
+    return cwd;
+  }
+  // CWD 越界：保留回退值，避免 session 逃逸到项目外。
+  return fallbackCwd;
 }
 
 function buildToolCommandResult(

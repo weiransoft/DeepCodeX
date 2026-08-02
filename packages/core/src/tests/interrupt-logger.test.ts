@@ -469,7 +469,7 @@ test("TC-IL-009: 指令文本等于 200 字符时不截断", async () => {
 
 test("TC-IL-010: 日志文件不存在时自动创建目录", async () => {
   await withTempHome(async () => {
-    // 验证初始状态：~/.deepcode/logs/ 目录不存在
+    // 验证初始状态：~/.deepcodex/logs/ 目录不存在
     const logPath = getInterruptLogPath();
     const logDir = path.dirname(logPath);
     assert.ok(!fs.existsSync(logDir), "测试开始前日志目录应不存在");
@@ -745,8 +745,8 @@ test("TC-IL-016: Error 对象正确序列化为 {name, message, stack}", async (
 test("TC-IL-017: getInterruptLogPath 返回正确路径", async () => {
   await withTempHome(async (home) => {
     const logPath = getInterruptLogPath();
-    const expectedPath = path.join(home, ".deepcode", "logs", "interrupts.log");
-    assert.equal(logPath, expectedPath, "日志路径应为 $HOME/.deepcode/logs/interrupts.log");
+    const expectedPath = path.join(home, ".deepcodex", "logs", "interrupts.log");
+    assert.equal(logPath, expectedPath, "日志路径应为 $HOME/.deepcodex/logs/interrupts.log");
     // 验证路径是绝对路径
     assert.ok(path.isAbsolute(logPath), "日志路径应为绝对路径");
     // 验证文件名正确

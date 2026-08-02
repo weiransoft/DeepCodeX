@@ -24,6 +24,13 @@ import type { SkillInfo } from "@vegamo/deepcode-core";
  *   - review: 代码审查（typecheck / lint / format / full / help）— 工具验证优先
  * DeepCodeX 帮助扩展（FIX-06，多角色审查 2026-07-29）：新增 help 命令
  *   - help: 显示全部内置命令清单（与 CLI --help EPILOG 同一数据源）
+ * DeepCodeX EAG P5 扩展（2026-07-31 新特性集成审查 FIX-3）：新增 4 个 EAG 编排命令
+ *   - eag-autonomous: 启动 Ralph 风格无人值守 4 阶段循环（plan/dev/verify/fix）
+ *   - eag-autonomous-status: 查询自主运行状态（断点续跑证据）
+ *   - eag-autonomous-stop: 熔断中止自主运行
+ *   - eag-graph: 执行 Loop-Graph 融合工作图
+ *   说明：命令执行统一走 core session.ts 的 EagCommandParser 前缀解析分发，
+ *         此处注册仅解决可发现性（Tab 补全 / /help 展示 / inline 参数提示）。
  */
 export type SlashCommandKind =
   | "skill"
@@ -58,7 +65,12 @@ export type SlashCommandKind =
   // ===== DeepCodeX Quality Gate 命令 =====
   | "quality-check"
   // ===== DeepCodeX Review 命令（工具验证优先） =====
-  | "review";
+  | "review"
+  // ===== EAG P5 编排命令（2026-07-31 FIX-3） =====
+  | "eag-autonomous"
+  | "eag-autonomous-status"
+  | "eag-autonomous-stop"
+  | "eag-graph";
 
 export type SlashCommandItem = {
   kind: SlashCommandKind;
@@ -214,14 +226,16 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
   },
   // ===== DeepCodeX Review 代码审查命令（工具验证优先） =====
   // 子命令：typecheck / lint / format / full / help
+  // 自然语言：/review <任务描述> 可直接交给 LLM 进行代码审查
   // 关联事件：docs/code-review-process-incident.md（原始 review 报告失实事件）
   // 设计文档：docs/dev/code-review-builtin-cmd-design.md
   {
     kind: "review",
     name: "review",
     label: "/review",
-    args: ["<subcommand>", "[options]"],
-    description: "Code review with forced tool verification (subcommands: typecheck|lint|format|full|help)",
+    args: ["<subcommand|task>", "[options]"],
+    description:
+      "Code review: tool mode (typecheck|lint|format|full|help) or natural language task (e.g., /review evaluate current code)",
   },
   // ===== ADR-DI-001 动态注入与后台子 Agent 命令 =====
   // 设计依据：ADR-DI-001 §7.4.2 SlashCommandKind 扩展
@@ -274,6 +288,37 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
   // 注意：/resume <taskId> 复用现有 "resume" kind，通过参数区分场景：
   //   - /resume（无参数）→ 显示会话列表，选择恢复之前的对话
   //   - /resume <taskId> → 恢复暂停的后台任务
+  // ===== EAG P5 编排命令（2026-07-31 FIX-3） =====
+  // 执行路径：选中后填充命令前缀供用户补参数，提交后经裸文本透传至
+  // core session.ts 的 EagCommandParser 统一解析分发（与 C 域 6 命令同款模式）。
+  {
+    kind: "eag-autonomous",
+    name: "eag-autonomous",
+    label: "/eag-autonomous",
+    args: ["<goal>", "[--max-iterations <n>]", "[--project-root <path>]", "[--confirmation <mode>]"],
+    description: "Start unattended Ralph loop (plan/dev/verify/fix) for a goal",
+  },
+  {
+    kind: "eag-autonomous-status",
+    name: "eag-autonomous-status",
+    label: "/eag-autonomous-status",
+    args: ["[runId]"],
+    description: "Query autonomous run status and resume evidence (latest run if runId omitted)",
+  },
+  {
+    kind: "eag-autonomous-stop",
+    name: "eag-autonomous-stop",
+    label: "/eag-autonomous-stop",
+    args: ["[runId]"],
+    description: "Circuit-break an autonomous run (latest run if runId omitted)",
+  },
+  {
+    kind: "eag-graph",
+    name: "eag-graph",
+    label: "/eag-graph",
+    args: ["--graph-file <path>", "[--max-parallel <n>]", "[--node-retry-limit <n>]"],
+    description: "Execute a Loop-Graph fusion work graph (loop/task/decision/merge/fork/end nodes)",
+  },
 ];
 
 export function buildSlashCommands(skills: SkillInfo[]): SlashCommandItem[] {

@@ -320,3 +320,95 @@ test("TC-14: /inject 命令不在白名单时应被拒绝", async () => {
   const metadata = result.metadata as { suggestedCommand?: unknown } | undefined;
   assert.equal(metadata?.suggestedCommand, undefined);
 });
+
+// ============================================================================
+// TC-15 ~ TC-19：suggestedCommand 参数沙箱校验
+//
+// 测试目标：
+// - 验证 shell 元字符被拦截
+// - 验证 --task-file/--project-root 等路径选项指向项目外时被拦截
+// - 验证绝对路径、~ 展开、路径穿越等非法参数被拦截
+// - 验证项目内合法路径参数可通过
+//
+// 安全策略：参数沙箱是白名单之外的第二道防线，防止 LLM 通过命令参数逃逸。
+// ============================================================================
+
+// TC-15：command 包含 shell 元字符
+// 期望：metadata.suggestedCommand === undefined
+test("TC-15: suggestedCommand 包含 shell 元字符时应被拒绝", async () => {
+  const result = await handleAskUserQuestionTool(
+    {
+      questions: sampleQuestions(),
+      suggestedCommand: { command: "/team dispatch; rm -rf /" },
+    },
+    createContext("tc-15", "/tmp")
+  );
+
+  assert.equal(result.ok, true);
+  const metadata = result.metadata as { suggestedCommand?: unknown } | undefined;
+  assert.equal(metadata?.suggestedCommand, undefined);
+});
+
+// TC-16：--task-file 指向项目外绝对路径
+// 期望：metadata.suggestedCommand === undefined
+test("TC-16: --task-file 指向项目外绝对路径时应被拒绝", async () => {
+  const result = await handleAskUserQuestionTool(
+    {
+      questions: sampleQuestions(),
+      suggestedCommand: { command: "/team dispatch --task-file /etc/passwd" },
+    },
+    createContext("tc-16", "/tmp")
+  );
+
+  assert.equal(result.ok, true);
+  const metadata = result.metadata as { suggestedCommand?: unknown } | undefined;
+  assert.equal(metadata?.suggestedCommand, undefined);
+});
+
+// TC-17：--task-file 指向项目内绝对路径
+// 期望：metadata.suggestedCommand 保留（项目内路径合法）
+test("TC-17: --task-file 指向项目内绝对路径时应被允许", async () => {
+  const result = await handleAskUserQuestionTool(
+    {
+      questions: sampleQuestions(),
+      suggestedCommand: { command: "/team dispatch --task-file /tmp/tasks/design.json" },
+    },
+    createContext("tc-17", "/tmp")
+  );
+
+  assert.equal(result.ok, true);
+  const metadata = result.metadata as { suggestedCommand?: { command?: string } } | undefined;
+  assert.equal(metadata?.suggestedCommand?.command, "/team dispatch --task-file /tmp/tasks/design.json");
+});
+
+// TC-18：参数包含路径穿越 ".."
+// 期望：metadata.suggestedCommand === undefined
+test("TC-18: 参数包含 .. 路径穿越时应被拒绝", async () => {
+  const result = await handleAskUserQuestionTool(
+    {
+      questions: sampleQuestions(),
+      suggestedCommand: { command: "/team dispatch --role ../evil" },
+    },
+    createContext("tc-18", "/tmp")
+  );
+
+  assert.equal(result.ok, true);
+  const metadata = result.metadata as { suggestedCommand?: unknown } | undefined;
+  assert.equal(metadata?.suggestedCommand, undefined);
+});
+
+// TC-19：参数包含 ~ home 目录展开
+// 期望：metadata.suggestedCommand === undefined
+test("TC-19: 参数包含 ~ home 目录展开时应被拒绝", async () => {
+  const result = await handleAskUserQuestionTool(
+    {
+      questions: sampleQuestions(),
+      suggestedCommand: { command: "/team dispatch --task-file ~/.ssh/id_rsa" },
+    },
+    createContext("tc-19", "/tmp")
+  );
+
+  assert.equal(result.ok, true);
+  const metadata = result.metadata as { suggestedCommand?: unknown } | undefined;
+  assert.equal(metadata?.suggestedCommand, undefined);
+});

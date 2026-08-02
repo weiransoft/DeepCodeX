@@ -57,6 +57,11 @@ test("buildSlashCommands prefixes skills before built-ins", () => {
     "fg",
     "cancel",
     "pause",
+    // DeepCodeX EAG P5 编排命令（2026-07-31 FIX-3，与 slash-commands.ts 注册顺序对齐）
+    "eag-autonomous",
+    "eag-autonomous-status",
+    "eag-autonomous-stop",
+    "eag-graph",
   ]);
 });
 

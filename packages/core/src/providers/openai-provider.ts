@@ -44,6 +44,11 @@ export class OpenAILLMClient implements LLMClient {
   private readonly converter = new OpenAIMessageConverter();
 
   constructor(settings: ResolvedDeepcodingSettings) {
+    // P0 安全修复：与 Anthropic 路径保持一致，构造时 fail-fast 校验 apiKey，
+    // 避免无 key 客户端运行到请求阶段才报错，便于用户尽早发现配置问题。
+    if (!settings.apiKey) {
+      throw new Error("OpenAI provider 需要 env.API_KEY，请检查 settings.json 配置");
+    }
     this.settings = settings;
     this.model = settings.model;
     this.baseURL = settings.baseURL;

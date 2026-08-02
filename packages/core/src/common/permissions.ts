@@ -301,7 +301,9 @@ export function evaluatePermissionScopes(
     defaultMode: "allowAll",
   }
 ): PermissionDecision {
-  if (scopes.includes("unknown") && settings.defaultMode !== "allowAll") {
+  // P0 安全修复：只要 scopes 中包含 "unknown"（例如非法 sideEffects 被降级为 unknown），
+  // 即使在 allowAll 默认策略下也返回 ask，防止 LLM 通过构造非法 sideEffects 绕过权限检查。
+  if (scopes.includes("unknown")) {
     return "ask";
   }
   if (scopes.length === 0) {
@@ -331,10 +333,9 @@ export function getPermissionScopesRequiringAsk(
 ): AskPermissionScope[] {
   const result: AskPermissionScope[] = [];
   for (const scope of scopes) {
+    // P0 安全修复：unknown scope 无条件需要用户确认，与 evaluatePermissionScopes 保持一致。
     if (scope === "unknown") {
-      if (settings.defaultMode !== "allowAll") {
-        result.push(scope);
-      }
+      result.push(scope);
       continue;
     }
     if (settings.deny.includes(scope)) {
