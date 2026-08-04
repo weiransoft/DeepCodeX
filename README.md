@@ -87,10 +87,10 @@ Deep Code 存在两套并存的目录命名约定，请勿混淆：
 
 ### Autonomous 自主编排模式
 
-通过 `deepcodex team autonomous` 启动 Ralph 风格 4 阶段循环：
+通过 `deepcode team autonomous` 启动 Ralph 风格 4 阶段循环：
 
 ```bash
-deepcodex team autonomous --goal "实现登录功能" --max-iter 10
+deepcode team autonomous --goal "实现登录功能" --max-iterations 10
 ```
 
 **autonomous 4 阶段流程**（plan → dev → verify → fix 循环直到完成）：
@@ -129,7 +129,7 @@ git:
 - `./.deepcodex/runs/<runId>/state.json` — 单次运行状态
 - `./.deepcodex/notes.md` — 项目级跨轮记忆（多个 run 共享）
 
-支持通过 `--resume-run <runId>` 断点续跑。
+支持通过 `--resume-run` 断点续跑（布尔开关，自动恢复最近一次可恢复的 run）。
 
 ## DeepCodeX 新特性总览
 
@@ -150,13 +150,14 @@ DeepCodeX 在 Deep Code CLI 基础上完成了**多角色融合**与**企业级�
 | **I. 日志与可观测性** | 日志轮转（10MB/3 备份）+ 错误类型保留 + 中断事件日志 | 自动启用 |
 | **J. 多模型 Provider** | Anthropic 原生 + OpenAI 兼容 + Qwen3 推理模型兼容 | `settings.json` |
 
-**核心设计原则**：[Karpathy 四大原则](docs/fusion/KARPATHY_PRINCIPLES.md) + [Ponytail 决策梯](docs/fusion/PONYTAIL_RULES.md)
+**核心设计原则**：[Karpathy 四大原则](docs/fusion/KARPATHY_PRINCIPLES.md) + [Ponytail 决策梯](docs/fusion/PONYTAIL_RULES.md)（`docs/fusion/` 为本地设计文档，未入库）
 
 ## 斜杠命令与按键功能
 
 | 斜杠命令        | 操作                               |
 |-------------|----------------------------------|
 | `/`         | 打开 skills / 命令菜单                 |
+| `/help`     | 列出全部内置命令及说明                     |
 | `/new`      | 开始新对话                            |
 | `/resume`   | 选择历史对话继续                         |
 | `/continue` | 继续当前对话，或选择历史对话恢复                 |
@@ -167,8 +168,15 @@ DeepCodeX 在 Deep Code CLI 基础上完成了**多角色融合**与**企业级�
 | `/mcp`      | 查看 MCP 服务器状态和可用工具                |
 | `/undo`     | 将代码和/或对话恢复到之前的状态                 |
 | `/exit`     | 退出（也可用连续 `Ctrl+D`）               |
-| `/team`     | 多角色团队调度（dispatch / consensus / autonomous / full-lifecycle） |
+| `/team`     | 多角色团队调度（自动匹配最合适角色） |
+| `/architect` `/pm` `/coder` `/tester` `/ui` | 强制分派到指定角色（架构师/产品经理/独立开发者/测试专家/UI 设计师） |
+| `/memory`   | 记忆管理（list / delete / review / export） |
+| `/rules`    | RLIS 规则管理（list / add / remove / show / path） |
+| `/quality-check` | 质量门禁（codemap / uiux / visual / all） |
+| `/review`   | 代码审查（typecheck / lint / format / full，或直接跟自然语言任务） |
 | `/eag-autonomous` | 启动 EAG 无人值守循环（plan→dev→verify→fix） |
+| `/eag-autonomous-status` | 查询 EAG 自主运行状态（位置参数 `<runId>`，省略取最近 run） |
+| `/eag-autonomous-stop` | 熔断中止 EAG 自主运行（位置参数 `<runId>`，省略取最近 run） |
 | `/eag-graph` | 启动 Loop-Graph 图编排执行（DAG 拓扑 + 谓词路由） |
 | `/inject`   | 向当前任务追加指令（动态中断）               |
 | `/bg`       | 后台启动子 Agent（独立 SessionManager） |
@@ -178,6 +186,8 @@ DeepCodeX 在 Deep Code CLI 基础上完成了**多角色融合**与**企业级�
 | `/pause`    | 暂停当前前台任务                         |
 | `/resume <taskId>` | 恢复暂停的后台任务（注意：无参数的 `/resume` 仍表示恢复历史对话） |
 | `/plan`     | 进入规划模式（仅生成实施计划，不执行代码变更）       |
+
+> Team 模块同时提供 CLI 子命令：`deepcode team list / match / dispatch / autonomous / full-lifecycle`（共识评审通过 `deepcode team dispatch --consensus` 启用）。
 
 | 按键            | 操作                 |
 |---------------|--------------------|

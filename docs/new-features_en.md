@@ -1,17 +1,20 @@
 # DeepCodeX New Features Overview
 
-> **Version**: v1.0
-> **Date**: 2026-07-26
-> **Status**: ✅ Implemented
-> **Related Documents**:
+> **Version**: v1.1
+> **Date**: 2026-07-26 (v1.0); 2026-08-04 (v1.1 doc-vs-code consistency revision)
+> **Status**: ✅ Implemented (exceptions: F.4 background-task persistence and C.4 `.deepcode/eag.yml` file loading are planned but not wired — see the notes in those sections)
+> **Related Documents** (`docs/fusion/` contains local design docs that are not committed; links work only on this machine):
 > - Fusion Plan: [docs/fusion/DEEPCODEX_FUSION_PLAN.md](fusion/DEEPCODEX_FUSION_PLAN.md)
-> - Enterprise EAG: [docs/enterprise/ENTERPRISE_APP_GENERATION_DESIGN.md](enterprise/ENTERPRISE_APP_GENERATION_DESIGN.md)
-> - Loop-Graph Fusion: [docs/enterprise/LOOP-GRAPH-FUSION-DESIGN.md](enterprise/LOOP-GRAPH-FUSION-DESIGN.md)
 > - V2 Context Memory: [docs/fusion/V2_CONTEXT_MEMORY_PRD.md](fusion/V2_CONTEXT_MEMORY_PRD.md)
-> - Domain Experts: [docs/enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md](enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md)
-> - Builtin Skills: [docs/enterprise/BUILTIN-SKILLS-ENHANCEMENT-DESIGN.md](enterprise/BUILTIN-SKILLS-ENHANCEMENT-DESIGN.md)
-> - New Features Supplement: [docs/enterprise/EAG-NEW-FEATURES-2026-07.md](enterprise/EAG-NEW-FEATURES-2026-07.md)
-> - `/eag-graph` Manual: [docs/enterprise/EAG-GRAPH-LOOP-MANUAL.md](enterprise/EAG-GRAPH-LOOP-MANUAL.md)
+> - EAG Usage Guide: [docs/eag-autonomous_en.md](eag-autonomous_en.md)
+> - Historical review records (archived): [docs/archive/](archive/)
+>
+> **v1.1 Revision Notes (2026-08-04)**: After a role-by-role doc-vs-code audit by the multi-role team, the following mismatches were corrected:
+> command name `deepcodex` → `deepcode`; `--max-iter` → `--max-iterations`; `--agent` → `--role` (the CLI has no `--explain`/`--match-strategy` options);
+> `/eag-autonomous-status|stop` take a positional argument (not `--run-id`); the EAG-P5 RunState path is actually `.eag/p5/run-state/<runId>.jsonl`;
+> `/inject` is actually `/inject <instruction text>` (no taskId parameter); F.4 background-task persistence is not wired yet (Phase 2 plan);
+> `/team consensus` is actually the `team dispatch --consensus` flag. The previously referenced `docs/enterprise/*.md` and two `docs/dev/*.md`
+> design docs were never committed; they have been removed from navigation and replaced with code paths. Historical review/incident/fix-plan docs are archived under [docs/archive/](archive/).
 
 ---
 
@@ -63,7 +66,7 @@ To bridge the business-domain perspective, DeepCodeX incorporates 30 domain expe
 | marketing (selective) | 5 | growth-hacker / content-creator / seo-specialist / xiaohongshu-operator / cross-border-ecomm |
 | sales (selective) | 1 | solution-strategist |
 
-> Detailed inclusion list and matching weights: [docs/enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md §2.2](enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md)
+> Detailed inclusion list and matching weights: see code `packages/core/src/team/domain-experts/` (design doc never committed)
 
 ### A.3 Smart Matching Strategies
 
@@ -75,13 +78,13 @@ To bridge the business-domain perspective, DeepCodeX incorporates 30 domain expe
 
 ```bash
 # Explicit role
-deepcodex team dispatch --task "Design microservice architecture" --agent architect
+deepcode team dispatch --task "Design microservice architecture" --role architect
 
-# AI auto-match
-deepcodex team dispatch --task "Design microservice architecture" --agent auto --explain
+# AI auto-match (default when --role is omitted)
+deepcode team dispatch --task "Design microservice architecture"
 
-# Keyword matching (backward compat)
-deepcodex team dispatch --task "Write unit tests" --agent test-expert --match-strategy keyword
+# Keyword matching is the built-in default strategy of role-matcher.ts;
+# semantic / ai strategies are selected programmatically (no CLI flag)
 ```
 
 ### A.4 Eight-Stage Standard Workflow
@@ -102,7 +105,7 @@ Stage 8: Doc-vs-Code Review (multi-role)  ★ v2.8
 On Stage 8 failure, precisely roll back to the relevant stage based on the gap dimension. Max iterations default to 3.
 
 ```bash
-deepcodex team full-lifecycle --task "Launch project: secure browser ad-block feature"
+deepcode team full-lifecycle --task "Launch project: secure browser ad-block feature"
 ```
 
 ---
@@ -136,21 +139,24 @@ In unattended mode, every command must pass the 6-Guard chain:
 ### B.3 Three-Command Complete Chain
 
 ```bash
-# Launch unattended loop
-deepcodex team autonomous --goal "Implement login feature" --max-iter 10
+# Launch unattended loop (inside TUI)
+/eag-autonomous --goal "Implement login feature" --max-iterations 10
 
-# Query run status
-/eag-autonomous-status --run-id <runId>
+# Query run status (positional arg; defaults to the most recent run when omitted)
+/eag-autonomous-status <runId>
 
 # Break + rollback (cross-process stop via abort-flag file)
-/eag-autonomous-stop --run-id <runId>
+/eag-autonomous-stop <runId>
 ```
+
+> The Team module also provides the CLI subcommand `deepcode team autonomous --goal "..." --max-iterations 10` (independent of the EAG-P5 engine).
 
 ### B.4 Persistence & Cross-Run Memory
 
-- **RunState JSONL**: `<projectRoot>/.eag/p5/runs/<runId>/state.jsonl`, one JSON object per line, with `localChecksum` / `cumulativeChecksum` SHA256 verification
+- **RunState JSONL** (EAG-P5): `<projectRoot>/.eag/p5/run-state/<runId>.jsonl`, one JSON object per line, with `localChecksum` / `cumulativeChecksum` SHA256 verification and file locking
+- **RunState JSON** (Team autonomous CLI): `./.deepcodex/runs/<runId>/state.json` — a separate store from EAG-P5
 - **NotesMemory**: `./.deepcodex/notes.md`, cross-run memory shared by multiple runs
-- **Resume**: `--resume-run <runId>`
+- **Resume**: Team autonomous uses `--resume-run` (boolean flag that resumes the most recent resumable run); EAG-P5 exposes resume evidence via `/eag-autonomous-status`
 
 ### B.5 Configuration
 
@@ -188,7 +194,7 @@ Inspired by Qian Xuesen's engineering cybernetics and ICLR 2026 Profile-Aware Ma
 
 ## C. EAG Enterprise Application Generation
 
-> Full design: [docs/enterprise/ENTERPRISE_APP_GENERATION_DESIGN.md](enterprise/ENTERPRISE_APP_GENERATION_DESIGN.md)
+> Code: `packages/core/src/eag/` (gate / graph / loop / coding / testing / design / p5 subsystems). Usage guide: [docs/eag-autonomous_en.md](eag-autonomous_en.md)
 
 ### C.1 Core Philosophy
 
@@ -209,7 +215,7 @@ Three paradigm shifts:
 | Lines | 16,159 |
 | Tests | 52 E2E cases (L-U group, 4,346 test lines) |
 
-For component details see [docs/enterprise/EAG-NEW-FEATURES-2026-07.md §2](enterprise/EAG-NEW-FEATURES-2026-07.md).
+For component details see the code under `packages/core/src/eag/p5/` (design doc never committed).
 
 ### C.3 EAG-P6 CodeMap Dynamic Window
 
@@ -217,18 +223,19 @@ Symbol-level code graph (CALLS / INHERITS / IMPLEMENTS / TESTED_BY) + dynamic co
 
 ### C.4 Paradigm Lock (Org Standards)
 
-Configure `paradigm_lock` in `.deepcode/eag.yml`; the Architect role then skips paradigm selection and strictly follows organizational standards:
+The paradigm-lock mechanism is implemented (`eak/paradigm-registry.ts`: when locked, the Architect role skips paradigm-signal evaluation and strictly follows organizational standards). The lock is passed in via `DesignLoopInput.paradigmLock`:
 
 ```yaml
 paradigm_lock: "ddd"  # ddd | clean-architecture | cqrs | microservice | ...
 ```
 
+> ⚠️ **Not wired (verified 2026-08-04)**: reading and YAML-parsing of the `.deepcode/eag.yml` file is not implemented in the repo; config-file loading is the caller's responsibility before invocation (see the comment in `design-models.ts`). Currently `paradigmLock` can only be passed through the API.
+
 ---
 
 ## D. Loop-Graph Fusion Architecture
 
-> Full design: [docs/enterprise/LOOP-GRAPH-FUSION-DESIGN.md](enterprise/LOOP-GRAPH-FUSION-DESIGN.md)
-> Command manual: [docs/enterprise/EAG-GRAPH-LOOP-MANUAL.md](enterprise/EAG-GRAPH-LOOP-MANUAL.md)
+> Code: `packages/core/src/eag/graph/` (graph-builder / graph-loop-orchestrator / predicate-registry / node-loop-kernel, etc.); command parsing: `packages/core/src/eag/cli/eag-graph-command.ts`
 
 ### D.1 Core Capabilities
 
@@ -276,7 +283,7 @@ Model complex tasks as **DAG topology**, with node contracts and conditional rou
 
 ## E. V2 Context Memory & Diff/Approval
 
-> Full design: [docs/fusion/V2_CONTEXT_MEMORY_PRD.md](fusion/V2_CONTEXT_MEMORY_PRD.md)
+> Full design: [docs/fusion/V2_CONTEXT_MEMORY_PRD.md](fusion/V2_CONTEXT_MEMORY_PRD.md) (local doc, not committed)
 
 ### E.1 Dual-Layer Context
 
@@ -356,7 +363,7 @@ queued → pending → running ⇄ pausing ⇄ paused
 
 | Command | Purpose |
 |---------|---------|
-| `/inject <taskId> <message>` | Append instruction to current task |
+| `/inject <instruction text>` | Append an instruction to the currently running task (soft interrupt, consumed at the next LLM call) |
 | `/bg <prompt>` | Launch background sub-agent (independent SessionManager instance) |
 | `/tasks` | List all tasks |
 | `/fg <taskId>` | Switch foreground focus |
@@ -366,7 +373,7 @@ queued → pending → running ⇄ pausing ⇄ paused
 
 ### F.4 Persistence & Recovery
 
-Task state persists to `.deepcodex/tasks/`. After a crash, the state auto-recovers to `paused`, awaiting manual `/resume`.
+> ⚠️ **Not wired (verified 2026-08-04; Phase 2 plan)**: task-snapshot serialization (`TaskSnapshot` / `toSnapshot` / `fromSnapshot`) and the `TaskStoreLike` interface are defined, but the repo has no `TaskStoreLike` implementation, and the CLI assembly layer does not inject a taskStore when creating `BackgroundTaskRunner`. Task state is currently in-memory only — it does NOT auto-transition to `paused` after a crash, and `.deepcodex/tasks/` is never written. On the LLM-tool side, `inject_message(task_id, message)` can target a specific background task.
 
 ### F.5 LLM Tool Integration
 
@@ -386,7 +393,7 @@ Four new LLM-callable tools:
 
 ## G. AskUserQuestion Auto-Dispatch
 
-> Full design: [docs/dev/ASK-USER-QUESTION-AUTO-DISPATCH.md](dev/ASK-USER-QUESTION-AUTO-DISPATCH.md)
+> Code: `packages/core/src/common/` (core-layer `parseSuggestedCommand` whitelist) and `packages/cli/src/ui/core/ask-user-question.ts` (CLI-layer `normalizeSuggestedCommand` secondary validation)
 
 ### G.1 Background
 
@@ -420,7 +427,7 @@ To avoid racing the SessionManager state machine with concurrent `handlePrompt` 
 
 ## H. Builtin Skills Enhancement
 
-> Full design: [docs/enterprise/BUILTIN-SKILLS-ENHANCEMENT-DESIGN.md](enterprise/BUILTIN-SKILLS-ENHANCEMENT-DESIGN.md)
+> Code: `packages/core/src/skill-manager.ts` (scan & load) and `packages/core/templates/skills/` (skill templates)
 
 ### H.1 New Bundled Skills (4)
 
@@ -463,7 +470,7 @@ Backed by real Python scripts (no mock / placeholder / simplification):
 
 ### I.1 Log Rotation
 
-> Full design: [docs/dev/CLI-LOG-FIX-DESIGN.md](dev/CLI-LOG-FIX-DESIGN.md)
+> Code: `packages/core/src/common/log-rotation.ts`
 
 Rotates by file size (**10MB**), keeping **3 backups** — replaces the legacy "read full file + slice + rewrite" performance anti-pattern.
 
@@ -547,14 +554,11 @@ See: [docs/plan-mode.md](plan-mode_en.md)
 
 | Command | Purpose | Module |
 |---------|---------|--------|
-| `/team` | Multi-role team dispatch | Team |
-| `/team autonomous` | Launch Ralph 4-stage autonomous loop | Autonomous |
-| `/team full-lifecycle` | Launch 8-stage full project pipeline | Eight-Stage Loop |
-| `/team dispatch` | Dispatch to a specific role | Team |
-| `/team consensus` | Multi-role consensus decision | Team |
+| `/team` | Multi-role team dispatch (TUI slash command, auto role matching) | Team |
+| `/architect` `/pm` `/coder` `/tester` `/ui` | Force dispatch to a specific role | Team |
 | `/eag-autonomous` | Launch EAG unattended loop | EAG-P5 |
-| `/eag-autonomous-status` | Query EAG run status | EAG-P5 |
-| `/eag-autonomous-stop` | Break + rollback EAG | EAG-P5 |
+| `/eag-autonomous-status` | Query EAG run status (positional `<runId>`) | EAG-P5 |
+| `/eag-autonomous-stop` | Break + rollback EAG (positional `<runId>`) | EAG-P5 |
 | `/eag-graph` | Launch graph orchestration | Loop-Graph |
 | `/inject` | Append instruction to current task | Dynamic Interrupt |
 | `/bg` | Launch background sub-agent | Background Task |
@@ -564,6 +568,13 @@ See: [docs/plan-mode.md](plan-mode_en.md)
 | `/pause` | Pause current task | Background Task |
 | `/resume` | Resume a paused task | Background Task |
 | `/plan` | Enter Plan Mode | Plan Mode |
+| `/memory` | Memory management (list/delete/review/export) | V2 Memory |
+| `/rules` | RLIS rule management | EAG-RLIS |
+| `/quality-check` | Quality gate (codemap/uiux/visual/all) | Quality Gate |
+| `/review` | Code review (tool-verification first) | Review |
+| `/help` | List all builtin commands | Help |
+
+> Team module CLI subcommands (not slash commands): `deepcode team list / match / dispatch / autonomous / full-lifecycle`; consensus review is enabled via `deepcode team dispatch --consensus`; the eight-stage loop is enabled via `deepcode team full-lifecycle --use-loop`.
 
 ---
 
@@ -635,6 +646,8 @@ See: [docs/plan-mode.md](plan-mode_en.md)
 
 ### Design Documents (by capability domain)
 
+> Note: the `docs/fusion/` directory contains local design docs that are not committed (excluded via .gitignore); the fusion links below work only on this machine.
+
 | Domain | Document |
 |--------|----------|
 | Fusion Plan | [docs/fusion/DEEPCODEX_FUSION_PLAN.md](fusion/DEEPCODEX_FUSION_PLAN.md) |
@@ -643,19 +656,13 @@ See: [docs/plan-mode.md](plan-mode_en.md)
 | V2 Context Memory PRD | [docs/fusion/V2_CONTEXT_MEMORY_PRD.md](fusion/V2_CONTEXT_MEMORY_PRD.md) |
 | V2 Context Memory Tech Design | [docs/fusion/V2_CONTEXT_MEMORY_TECH_DESIGN.md](fusion/V2_CONTEXT_MEMORY_TECH_DESIGN.md) |
 | Output Truncation Design | [docs/fusion/V2_OUTPUT_TRUNCATION_DESIGN.md](fusion/V2_OUTPUT_TRUNCATION_DESIGN.md) |
-| EAG Enterprise App Generation | [docs/enterprise/ENTERPRISE_APP_GENERATION_DESIGN.md](enterprise/ENTERPRISE_APP_GENERATION_DESIGN.md) |
-| EAG Gap Analysis | [docs/enterprise/ENTERPRISE_EAG_GAP_ANALYSIS.md](enterprise/ENTERPRISE_EAG_GAP_ANALYSIS.md) |
-| EAG New Features (2026-07) | [docs/enterprise/EAG-NEW-FEATURES-2026-07.md](enterprise/EAG-NEW-FEATURES-2026-07.md) |
-| EAG-P5 Architecture | [docs/enterprise/EAG-P5-ARCHITECTURE.md](enterprise/EAG-P5-ARCHITECTURE.md) |
-| EAG-P5 Requirements | [docs/enterprise/EAG-P5-REQUIREMENTS.md](enterprise/EAG-P5-REQUIREMENTS.md) |
-| EAG-P6 Requirements | [docs/enterprise/EAG-P6-REQUIREMENTS.md](enterprise/EAG-P6-REQUIREMENTS.md) |
-| Loop-Graph Fusion Design | [docs/enterprise/LOOP-GRAPH-FUSION-DESIGN.md](enterprise/LOOP-GRAPH-FUSION-DESIGN.md) |
-| EAG-Graph Command Manual | [docs/enterprise/EAG-GRAPH-LOOP-MANUAL.md](enterprise/EAG-GRAPH-LOOP-MANUAL.md) |
-| Domain Expert Integration | [docs/enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md](enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md) |
-| Builtin Skills Enhancement | [docs/enterprise/BUILTIN-SKILLS-ENHANCEMENT-DESIGN.md](enterprise/BUILTIN-SKILLS-ENHANCEMENT-DESIGN.md) |
-| Team Integration Fix | [docs/enterprise/TEAM_INTEGRATION_FIX_DESIGN.md](enterprise/TEAM_INTEGRATION_FIX_DESIGN.md) |
-| AskUserQuestion Auto-Dispatch | [docs/dev/ASK-USER-QUESTION-AUTO-DISPATCH.md](dev/ASK-USER-QUESTION-AUTO-DISPATCH.md) |
-| Logging Fix Design | [docs/dev/CLI-LOG-FIX-DESIGN.md](dev/CLI-LOG-FIX-DESIGN.md) |
+| EAG Enterprise App Generation | Design doc never committed; see code `packages/core/src/eag/` |
+| Loop-Graph Fusion Design | Design doc never committed; see code `packages/core/src/eag/graph/` |
+| Domain Expert Integration | Design doc never committed; see code `packages/core/src/team/domain-experts/` |
+| Builtin Skills Enhancement | Design doc never committed; see code `packages/core/templates/skills/` and `packages/core/src/skill-manager.ts` |
+| AskUserQuestion Auto-Dispatch | Design doc never committed; see code `packages/cli/src/ui/core/ask-user-question.ts` |
+| Logging Fix Design | Design doc never committed; see code `packages/core/src/common/log-rotation.ts` |
+| Historical review / incident / fix-plan records (archived) | [docs/archive/](archive/) |
 
 ### User Documentation
 

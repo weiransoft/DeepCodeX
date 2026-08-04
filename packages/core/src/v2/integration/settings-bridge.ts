@@ -573,7 +573,7 @@ function hasPath(obj: Record<string, unknown>, path: string): boolean {
 /**
  * 从用户设置、项目设置与环境变量构造完整 V2Config
  *
- * 设计依据：V2_CONTEXT_MEMORY_TECH_DESIGN.md §9.4.1 与 repair-plan.md §3.1
+ * 设计依据：V2_CONTEXT_MEMORY_TECH_DESIGN.md §9.4.1 与 docs/archive/repair-plan.md §3.1
  * 配置源优先级（低 → 高）：
  *   1. 内置默认值（V2Config schema .default）
  *   2. 用户设置文件（~/.deepcode/settings.json 的 v2 子树）

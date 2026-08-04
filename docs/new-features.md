@@ -1,17 +1,20 @@
 # DeepCodeX 新特性总览
 
-> **版本**：v1.0
-> **日期**：2026-07-26
-> **状态**：✅ 已实施完成
-> **关联文档**：
+> **版本**：v1.1
+> **日期**：2026-07-26（v1.0）；2026-08-04（v1.1 文档对照代码一致性核查修订）
+> **状态**：✅ 已实施完成（例外：F.4 后台任务持久化、C.4 `.deepcode/eag.yml` 文件加载为已规划未接线，详见对应章节标注）
+> **关联文档**（`docs/fusion/` 为本地设计文档，未入库，链接仅本机有效）：
 > - 设计蓝图：[docs/fusion/DEEPCODEX_FUSION_PLAN.md](fusion/DEEPCODEX_FUSION_PLAN.md)
-> - 企业级 EAG：[docs/enterprise/ENTERPRISE_APP_GENERATION_DESIGN.md](enterprise/ENTERPRISE_APP_GENERATION_DESIGN.md)
-> - Loop-Graph 融合：[docs/enterprise/LOOP-GRAPH-FUSION-DESIGN.md](enterprise/LOOP-GRAPH-FUSION-DESIGN.md)
 > - V2 上下文记忆：[docs/fusion/V2_CONTEXT_MEMORY_PRD.md](fusion/V2_CONTEXT_MEMORY_PRD.md)
-> - 领域专家：[docs/enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md](enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md)
-> - Builtin Skills：[docs/enterprise/BUILTIN-SKILLS-ENHANCEMENT-DESIGN.md](enterprise/BUILTIN-SKILLS-ENHANCEMENT-DESIGN.md)
-> - 新特性补充：[docs/enterprise/EAG-NEW-FEATURES-2026-07.md](enterprise/EAG-NEW-FEATURES-2026-07.md)
-> - `/eag-graph` 手册：[docs/enterprise/EAG-GRAPH-LOOP-MANUAL.md](enterprise/EAG-GRAPH-LOOP-MANUAL.md)
+> - EAG 使用指南：[docs/eag-autonomous.md](eag-autonomous.md)
+> - 历史审查记录（已归档）：[docs/archive/](archive/)
+>
+> **v1.1 修订说明（2026-08-04）**：经多角色团队对照代码逐项核查，修正了以下与实现不符的内容：
+> 命令名 `deepcodex` → `deepcode`；`--max-iter` → `--max-iterations`；`--agent` → `--role`（CLI 无 `--explain`/`--match-strategy` 选项）；
+> `/eag-autonomous-status|stop` 参数为位置参数（非 `--run-id`）；EAG-P5 RunState 实际路径为 `.eag/p5/run-state/<runId>.jsonl`；
+> `/inject` 实际格式为 `/inject <指令文本>`（无 taskId 参数）；F.4 后台任务持久化尚未接线（Phase 2 规划）；
+> `/team consensus` 实为 `team dispatch --consensus` flag。原引用的 `docs/enterprise/*.md` 与两篇 `docs/dev/*.md` 设计文档未入库，
+> 已从导航中移除并改指代码路径；历史审查/事故/修复计划文档已归档至 [docs/archive/](archive/)。
 
 ---
 
@@ -63,11 +66,11 @@ DeepCodeX 内置 5 个软件开发技术执行链路角色，每个角色拥有�
 | marketing（选择性纳入） | 5 | growth-hacker / content-creator / seo-specialist / xiaohongshu-operator / cross-border-ecomm |
 | sales（选择性纳入） | 1 | solution-strategist |
 
-> 详细纳入清单与匹配权重：[docs/enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md §2.2](enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md)
+> 详细纳入清单与匹配权重见代码实现：`packages/core/src/team/domain-experts/`（30 个领域专家定义）与 `packages/core/src/team/domain-expert-matcher.ts`（匹配权重）。
 
 ### A.3 智能匹配策略
 
-`role-matcher.ts` 提供三种匹配策略：
+`role-matcher.ts` 提供三种匹配策略（CLI 通过关键词命中自动选择，宿主 LLM 场景可在提示词层显式指定）：
 
 - **keyword**（默认）：基于关键词命中
 - **semantic**：基于 TFIDF/Hashing 本地 embedder 的余弦相似度
@@ -75,13 +78,13 @@ DeepCodeX 内置 5 个软件开发技术执行链路角色，每个角色拥有�
 
 ```bash
 # 显式指定角色
-deepcodex team dispatch --task "设计微服务架构" --agent architect
+deepcode team dispatch --task "设计微服务架构" --role architect
 
-# AI 自动匹配
-deepcodex team dispatch --task "设计微服务架构" --agent auto --explain
+# 自动匹配（省略 --role 即按关键词自动匹配）
+deepcode team dispatch --task "设计微服务架构"
 
-# 关键词匹配（向后兼容）
-deepcodex team dispatch --task "编写单元测试" --agent test-expert --match-strategy keyword
+# 强制关闭自动匹配，直接派单
+deepcode team dispatch --task "编写单元测试" --role test-expert --force-role
 ```
 
 ### A.4 八阶段标准工作流
@@ -102,7 +105,7 @@ deepcodex team dispatch --task "编写单元测试" --agent test-expert --match-
 阶段 8 审查失败时根据缺口维度精准回退到对应阶段修复，最大迭代次数默认 3 次。
 
 ```bash
-deepcodex team full-lifecycle --task "启动项目：安全浏览器广告拦截功能"
+deepcode team full-lifecycle --goal "启动项目：安全浏览器广告拦截功能"
 ```
 
 ---
@@ -136,21 +139,24 @@ deepcodex team full-lifecycle --task "启动项目：安全浏览器广告拦截
 ### B.3 三命令完整链路
 
 ```bash
-# 启动无人值守循环
-deepcodex team autonomous --goal "实现登录功能" --max-iter 10
+# 启动无人值守循环（TUI 内）
+/eag-autonomous --goal "实现登录功能" --max-iterations 10
 
-# 查询运行状态
-/eag-autonomous-status --run-id <runId>
+# 查询运行状态（位置参数，省略时取最近一次 run）
+/eag-autonomous-status <runId>
 
 # 熔断回滚（通过 abort flag 文件实现跨进程 stop）
-/eag-autonomous-stop --run-id <runId>
+/eag-autonomous-stop <runId>
 ```
+
+> Team 模块另提供 CLI 子命令 `deepcode team autonomous --goal "..." --max-iterations 10`（独立于 EAG-P5 引擎）。
 
 ### B.4 持久化与跨轮记忆
 
-- **RunState JSONL**：`<projectRoot>/.eag/p5/runs/<runId>/state.jsonl`，每行一个 JSON 对象，含 `localChecksum` / `cumulativeChecksum` SHA256 校验
+- **RunState JSONL**（EAG-P5）：`<projectRoot>/.eag/p5/run-state/<runId>.jsonl`，每行一个 JSON 对象，含 `localChecksum` / `cumulativeChecksum` SHA256 校验与文件锁
+- **RunState JSON**（Team autonomous CLI）：`./.deepcodex/runs/<runId>/state.json`，与 EAG-P5 为两套独立存储
 - **NotesMemory**：`./.deepcodex/notes.md`，跨轮记忆，多个 run 共享
-- **断点续跑**：`--resume-run <runId>`
+- **断点续跑**：Team autonomous 使用 `--resume-run`（布尔开关，恢复最近一次可恢复 run）；EAG-P5 通过 `/eag-autonomous-status` 查询续跑证据
 
 ### B.5 配置文件
 
@@ -188,7 +194,7 @@ git:
 
 ## C. EAG 企业级应用生成
 
-> 完整设计：[docs/enterprise/ENTERPRISE_APP_GENERATION_DESIGN.md](enterprise/ENTERPRISE_APP_GENERATION_DESIGN.md)
+> 代码实现：`packages/core/src/eag/`（gate / graph / loop / coding / testing / design / p5 等子系统）。使用指南：[docs/eag-autonomous.md](eag-autonomous.md)
 
 ### C.1 核心理念
 
@@ -209,7 +215,7 @@ git:
 | 代码行数 | 16159 行 |
 | 测试用例 | 52 个 E2E 测试（L-U 组，4346 行测试代码） |
 
-详细组件清单见 [docs/enterprise/EAG-NEW-FEATURES-2026-07.md §2](enterprise/EAG-NEW-FEATURES-2026-07.md)。
+详细组件清单见代码 `packages/core/src/eag/p5/`（设计文档未入库）。
 
 ### C.3 EAG-P6 CodeMap 动态窗口
 
@@ -217,18 +223,19 @@ git:
 
 ### C.4 范式锁定（组织规范）
 
-通过 `.deepcode/eag.yml` 配置 `paradigm_lock`，架构师角色跳过范式选择，严格遵循组织规范：
+范式锁定机制已实现（`eak/paradigm-registry.ts`：锁定时架构师角色跳过范式信号判定，严格遵循组织规范）。锁定配置通过 `DesignLoopInput.paradigmLock` 传入：
 
 ```yaml
 paradigm_lock: "ddd"  # ddd | clean-architecture | cqrs | microservice | ...
 ```
 
+> ⚠️ **未接线（2026-08-04 核查）**：`.deepcode/eag.yml` 文件的读取与 YAML 解析尚未在仓库内实现，配置文件加载责任由调用方在调用前合并（见 `design-models.ts` 注释）。当前仅支持通过 API 传入 `paradigmLock`。
+
 ---
 
 ## D. Loop-Graph 融合架构
 
-> 完整设计：[docs/enterprise/LOOP-GRAPH-FUSION-DESIGN.md](enterprise/LOOP-GRAPH-FUSION-DESIGN.md)
-> 命令手册：[docs/enterprise/EAG-GRAPH-LOOP-MANUAL.md](enterprise/EAG-GRAPH-LOOP-MANUAL.md)
+> 代码实现：`packages/core/src/eag/graph/`（graph-builder / graph-loop-orchestrator / predicate-registry / node-loop-kernel 等）；命令解析：`packages/core/src/eag/cli/eag-graph-command.ts`
 
 ### D.1 核心能力
 
@@ -276,7 +283,7 @@ paradigm_lock: "ddd"  # ddd | clean-architecture | cqrs | microservice | ...
 
 ## E. V2 上下文记忆与 Diff/Approval
 
-> 完整设计：[docs/fusion/V2_CONTEXT_MEMORY_PRD.md](fusion/V2_CONTEXT_MEMORY_PRD.md)
+> 完整设计：[docs/fusion/V2_CONTEXT_MEMORY_PRD.md](fusion/V2_CONTEXT_MEMORY_PRD.md)（本地文档未入库）
 
 ### E.1 双层上下文
 
@@ -356,7 +363,7 @@ queued → pending → running ⇄ pausing ⇄ paused
 
 | 命令 | 用途 |
 |------|------|
-| `/inject <taskId> <message>` | 向当前任务追加指令 |
+| `/inject <指令文本>` | 向当前正在执行的任务追加指令（软中断，下一轮 LLM 调用消费） |
 | `/bg <prompt>` | 后台启动子 Agent（独立 SessionManager 实例） |
 | `/tasks` | 列出所有任务 |
 | `/fg <taskId>` | 切换前台关注 |
@@ -366,7 +373,7 @@ queued → pending → running ⇄ pausing ⇄ paused
 
 ### F.4 持久化与恢复
 
-任务状态持久化到 `.deepcodex/tasks/` 目录，崩溃后自动转为 `paused` 状态，支持手动 `/resume`。
+> ⚠️ **未接线（2026-08-04 核查，Phase 2 规划）**：任务快照序列化（`TaskSnapshot` / `toSnapshot` / `fromSnapshot`）与 `TaskStoreLike` 接口已定义，但仓库内尚无 `TaskStoreLike` 实现类，CLI 装配层创建 `BackgroundTaskRunner` 时未注入 taskStore。当前任务状态仅内存管理，进程崩溃后不会自动转为 `paused`，`.deepcodex/tasks/` 目录不会写入。LLM 工具侧可使用 `inject_message(task_id, message)` 面向指定后台任务注入消息。
 
 ### F.5 LLM 工具集成
 
@@ -386,7 +393,7 @@ queued → pending → running ⇄ pausing ⇄ paused
 
 ## G. AskUserQuestion 自动衔接执行
 
-> 完整设计：[docs/dev/ASK-USER-QUESTION-AUTO-DISPATCH.md](dev/ASK-USER-QUESTION-AUTO-DISPATCH.md)
+> 代码实现：`packages/core/src/common/`（核心层 `parseSuggestedCommand` 白名单）与 `packages/cli/src/ui/core/ask-user-question.ts`（CLI 层 `normalizeSuggestedCommand` 二次校验）
 
 ### G.1 问题背景
 
@@ -420,7 +427,7 @@ LLM 通过 AskUserQuestion 工具向用户提问后，用户回答仅作为消�
 
 ## H. Builtin Skills 增强
 
-> 完整设计：[docs/enterprise/BUILTIN-SKILLS-ENHANCEMENT-DESIGN.md](enterprise/BUILTIN-SKILLS-ENHANCEMENT-DESIGN.md)
+> 代码实现：`packages/core/src/skill-manager.ts`（扫描与加载）与 `packages/cli/dist/templates/skills/`（bundled skills 模板）
 
 ### H.1 新增 bundled skills（4 个）
 
@@ -463,7 +470,7 @@ LLM 通过 AskUserQuestion 工具向用户提问后，用户回答仅作为消�
 
 ### I.1 日志轮转
 
-> 完整设计：[docs/dev/CLI-LOG-FIX-DESIGN.md](dev/CLI-LOG-FIX-DESIGN.md)
+> 代码实现：`packages/core/src/common/log-rotation.ts`
 
 按文件大小（**10MB**）轮转，保留 **3 个备份**，替代历史"读全文 + slice + 重写"的性能反模式。
 
@@ -547,14 +554,11 @@ LLM 通过 AskUserQuestion 工具向用户提问后，用户回答仅作为消�
 
 | 命令 | 用途 | 模块 |
 |------|------|------|
-| `/team` | 多角色团队调度 | Team |
-| `/team autonomous` | 启动 Ralph 4 阶段自主循环 | Autonomous |
-| `/team full-lifecycle` | 启动 8 阶段完整项目流程 | 八阶段 Loop |
-| `/team dispatch` | 派单到指定角色 | Team |
-| `/team consensus` | 多角色共识决策 | Team |
+| `/team` | 多角色团队调度（TUI 斜杠命令，自动匹配角色） | Team |
+| `/architect` `/pm` `/coder` `/tester` `/ui` | 强制分派到指定角色 | Team |
 | `/eag-autonomous` | 启动 EAG 无人值守循环 | EAG-P5 |
-| `/eag-autonomous-status` | 查询 EAG 运行状态 | EAG-P5 |
-| `/eag-autonomous-stop` | 熔断 EAG 回滚 | EAG-P5 |
+| `/eag-autonomous-status` | 查询 EAG 运行状态（位置参数 `<runId>`） | EAG-P5 |
+| `/eag-autonomous-stop` | 熔断 EAG 回滚（位置参数 `<runId>`） | EAG-P5 |
 | `/eag-graph` | 启动图编排执行 | Loop-Graph |
 | `/inject` | 向当前任务追加指令 | 动态中断 |
 | `/bg` | 后台启动子 Agent | 后台任务 |
@@ -564,6 +568,13 @@ LLM 通过 AskUserQuestion 工具向用户提问后，用户回答仅作为消�
 | `/pause` | 暂停当前任务 | 后台任务 |
 | `/resume` | 恢复暂停的任务 | 后台任务 |
 | `/plan` | 进入规划模式 | Plan Mode |
+| `/memory` | 记忆管理（list/delete/review/export） | V2 记忆 |
+| `/rules` | RLIS 规则管理 | EAG-RLIS |
+| `/quality-check` | 质量门禁（codemap/uiux/visual/all） | Quality Gate |
+| `/review` | 代码审查（工具验证优先） | Review |
+| `/help` | 列出全部内置命令 | 帮助 |
+
+> Team 模块的 CLI 子命令（非斜杠命令）：`deepcode team list / match / dispatch / autonomous / full-lifecycle`；共识评审通过 `deepcode team dispatch --consensus` 启用；八阶段循环通过 `deepcode team full-lifecycle --use-loop` 启用。
 
 ---
 
@@ -635,6 +646,8 @@ LLM 通过 AskUserQuestion 工具向用户提问后，用户回答仅作为消�
 
 ### 设计文档（按能力域分组）
 
+> 注：`docs/fusion/` 目录为本地设计文档，未入库（被 .gitignore 排除），表中 fusion 链接仅在本机有效。
+
 | 能力域 | 文档 |
 |--------|------|
 | 融合方案 | [docs/fusion/DEEPCODEX_FUSION_PLAN.md](fusion/DEEPCODEX_FUSION_PLAN.md) |
@@ -643,19 +656,13 @@ LLM 通过 AskUserQuestion 工具向用户提问后，用户回答仅作为消�
 | V2 上下文记忆 PRD | [docs/fusion/V2_CONTEXT_MEMORY_PRD.md](fusion/V2_CONTEXT_MEMORY_PRD.md) |
 | V2 上下文记忆技术方案 | [docs/fusion/V2_CONTEXT_MEMORY_TECH_DESIGN.md](fusion/V2_CONTEXT_MEMORY_TECH_DESIGN.md) |
 | 输出截断设计 | [docs/fusion/V2_OUTPUT_TRUNCATION_DESIGN.md](fusion/V2_OUTPUT_TRUNCATION_DESIGN.md) |
-| EAG 企业应用生成 | [docs/enterprise/ENTERPRISE_APP_GENERATION_DESIGN.md](enterprise/ENTERPRISE_APP_GENERATION_DESIGN.md) |
-| EAG 能力差距分析 | [docs/enterprise/ENTERPRISE_EAG_GAP_ANALYSIS.md](enterprise/ENTERPRISE_EAG_GAP_ANALYSIS.md) |
-| EAG 新特性（2026-07） | [docs/enterprise/EAG-NEW-FEATURES-2026-07.md](enterprise/EAG-NEW-FEATURES-2026-07.md) |
-| EAG-P5 架构 | [docs/enterprise/EAG-P5-ARCHITECTURE.md](enterprise/EAG-P5-ARCHITECTURE.md) |
-| EAG-P5 需求 | [docs/enterprise/EAG-P5-REQUIREMENTS.md](enterprise/EAG-P5-REQUIREMENTS.md) |
-| EAG-P6 需求 | [docs/enterprise/EAG-P6-REQUIREMENTS.md](enterprise/EAG-P6-REQUIREMENTS.md) |
-| Loop-Graph 融合设计 | [docs/enterprise/LOOP-GRAPH-FUSION-DESIGN.md](enterprise/LOOP-GRAPH-FUSION-DESIGN.md) |
-| EAG-Graph 命令手册 | [docs/enterprise/EAG-GRAPH-LOOP-MANUAL.md](enterprise/EAG-GRAPH-LOOP-MANUAL.md) |
-| 领域专家集成 | [docs/enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md](enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md) |
-| Builtin Skills 增强 | [docs/enterprise/BUILTIN-SKILLS-ENHANCEMENT-DESIGN.md](enterprise/BUILTIN-SKILLS-ENHANCEMENT-DESIGN.md) |
-| Team 集成修复 | [docs/enterprise/TEAM_INTEGRATION_FIX_DESIGN.md](enterprise/TEAM_INTEGRATION_FIX_DESIGN.md) |
-| AskUserQuestion 自动衔接 | [docs/dev/ASK-USER-QUESTION-AUTO-DISPATCH.md](dev/ASK-USER-QUESTION-AUTO-DISPATCH.md) |
-| 日志修复设计 | [docs/dev/CLI-LOG-FIX-DESIGN.md](dev/CLI-LOG-FIX-DESIGN.md) |
+| EAG 企业应用生成 | 设计文档未入库，见代码 `packages/core/src/eag/` |
+| Loop-Graph 融合设计 | 设计文档未入库，见代码 `packages/core/src/eag/graph/` |
+| 领域专家集成 | 设计文档未入库，见代码 `packages/core/src/team/domain-experts/` |
+| Builtin Skills 增强 | 设计文档未入库，见代码 `packages/core/templates/skills/` 与 `packages/core/src/skill-manager.ts` |
+| AskUserQuestion 自动衔接 | 设计文档未入库，见代码 `packages/cli/src/ui/core/ask-user-question.ts` |
+| 日志修复设计 | 设计文档未入库，见代码 `packages/core/src/common/log-rotation.ts` |
+| 历史审查/事故/修复记录（已归档） | [docs/archive/](archive/) |
 
 ### 用户文档
 

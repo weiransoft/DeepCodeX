@@ -82,7 +82,7 @@ test("getSystemPrompt includes Bash background guidance", () => {
 
 test("getSystemPrompt includes tool-verification-first constraints for reports (A1)", () => {
   // A1 改进（2026-07-27）：System Prompt 强化，要求报告类内容必须工具验证
-  // 关联事件：docs/code-review-process-incident.md
+  // 关联事件：docs/archive/code-review-process-incident.md
   const prompt = getSystemPrompt("/tmp/project");
   // 必须包含工具验证优先约束段
   assert.equal(prompt.includes("报告类内容的工具验证优先约束"), true);

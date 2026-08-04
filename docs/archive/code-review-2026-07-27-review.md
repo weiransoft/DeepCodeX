@@ -1,7 +1,7 @@
 # DeepCodeX-cli 代码审查报告 — 多角色 Review 报告
 
 > Review 日期：2026-07-27 | Review 方式：多角色团队（架构师 + 测试专家 + 独立开发者）fan-out-aggregate 拓扑
-> 被审查报告：`docs/code-review-2026-07-27.md`
+> 被审查报告：`docs/archive/code-review-2026-07-27.md`（已归档）
 > 验证原则：结合最新代码（含 commit `183df9f` 之前的 7 个新提交）真实执行，禁用 mock/占位
 
 ---
@@ -345,7 +345,7 @@ bash scripts/install-better-sqlite3.sh
 
 ## 六、总结
 
-原报告 `docs/code-review-2026-07-27.md` 在 CRIT-2 / CRIT-3 / MED-2 / MED-6 等架构维度准确，但在 CRIT-1（低估 12 倍）、HIGH-1（夸大 22 倍）、HIGH-3（完全失实）、HIGH-6（误判）、MED-4（误报）等维度存在严重失实。
+原报告 `docs/archive/code-review-2026-07-27.md` 在 CRIT-2 / CRIT-3 / MED-2 / MED-6 等架构维度准确，但在 CRIT-1（低估 12 倍）、HIGH-1（夸大 22 倍）、HIGH-3（完全失实）、HIGH-6（误判）、MED-4（误报）等维度存在严重失实。
 
 **核心建议**：
 1. **立即执行 P0**：修复 170 个类型错误 + ESLint ignores 配置（最高收益）

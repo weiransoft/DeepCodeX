@@ -477,8 +477,8 @@ test_au10() {
   return 1
 }
 
-# AU-11: autonomous --max-iter 0
-# 验证：--max-iter 0 在 RalphLoopController 中语义为"不限制迭代次数"（见 loop-controller.ts shouldStop 注释）
+# AU-11: autonomous --max-iterations 0
+# 验证：--max-iterations 0 在 RalphLoopController 中语义为"不限制迭代次数"（见 loop-controller.ts shouldStop 注释）
 # 在假 API Key 测试环境下，会因连续失败触发 consecutiveFailureAbort 返回 2（Fatal abort）
 # 因此本用例验证：参数被正确接受（进入循环，输出 "Ralph Autonomous Loop"），退出码可为 0/1/2
 test_au11() {
@@ -486,7 +486,7 @@ test_au11() {
   project_root="$(create_test_project au11 with-key)"
 
   run_cli "$project_root" with-key team autonomous --goal "test goal" --max-iterations 0
-  # max-iter 0 = 不限制迭代（loop-controller.ts: shouldStop 注释明确）
+  # max-iterations 0 = 不限制迭代（loop-controller.ts: shouldStop 注释明确）
   # 退出码可为 0（成功）/ 1（部分失败）/ 2（Fatal abort，连续失败超限）
   # 但不应是参数错误（实际行为是进入循环）
   if [[ "$LAST_EXIT_CODE" != "0" && "$LAST_EXIT_CODE" != "1" && "$LAST_EXIT_CODE" != "2" ]]; then
@@ -569,7 +569,7 @@ run_test "AU-07: state.json contains runId and objective" test_au07
 run_test "AU-08: autonomous writes notes.md" test_au08
 run_test "AU-09: --resume-run no resumable run" test_au09
 run_test "AU-10: --resume-run restores existing run" test_au10
-run_test "AU-11: autonomous --max-iter 0" test_au11
+run_test "AU-11: autonomous --max-iterations 0" test_au11
 run_test "AU-12: autonomous exit code 0=success" test_au12
 run_test "AU-13: autonomous exit code 1=partial failure" test_au13
 run_test "AU-14: autonomous exit code 2=Fatal abort" test_au14

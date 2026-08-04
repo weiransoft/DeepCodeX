@@ -3,7 +3,7 @@
  *
  * 验证 `SessionManager.handleUserPrompt` 在 turn 入口调用
  * `contextHook.refreshContextAsync(sessionId)`，将 V2 上下文缓存刷新
- * 接入主对话循环（repair-plan.md §3.1）。
+ * 接入主对话循环（docs/archive/repair-plan.md §3.1）。
  *
  * 测试范围：
  * - T1. handleUserPrompt 创建新会话后调用 refreshContextAsync

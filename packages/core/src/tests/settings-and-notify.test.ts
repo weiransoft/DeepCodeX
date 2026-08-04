@@ -98,7 +98,7 @@ test("resolveSettings defaults telemetryEnabled to true", () => {
 
 test("resolveSettings defaults debugLogEnabled to true (A2 改进 2026-07-27)", () => {
   // A2 改进：默认启用 debugLogEnabled=true，便于追溯 LLM 工具调用历史
-  // 关联事件：docs/code-review-process-incident.md
+  // 关联事件：docs/archive/code-review-process-incident.md
   const resolved = resolveSettings(
     {},
     { model: "default-model", baseURL: "https://default.example.com" },

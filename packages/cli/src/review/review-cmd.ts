@@ -1,7 +1,7 @@
 /**
  * Review 子命令 - 代码审查 CLI 入口
  *
- * 来源：docs/code-review-process-incident.md 行动项 A3
+ * 来源：docs/archive/code-review-process-incident.md 行动项 A3
  * 严格遵循 user rules：禁止 mock/占位/简化
  *
  * 支持的子命令：

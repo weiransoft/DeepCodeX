@@ -16,7 +16,7 @@
 #   - memory/（11 文件）：UserGlobal/Experience/Redaction/Privacy
 #   - understanding/（2 文件）：DomainModeler/ProjectUnderstanding
 #
-# 设计依据：
+# 设计依据（docs/fusion/ 为本地设计文档，未入库）：
 # - docs/fusion/V2_CONTEXT_MEMORY_TECH_DESIGN.md（V2 主技术方案 v2.6）
 # - docs/fusion/V2_CONTEXT_MEMORY_TEST_PLAN.md（V2 测试方案 v2.1）
 # - docs/fusion/V2_P0B_ARCHITECT_REVIEW.md（Side-Git 架构师审查）

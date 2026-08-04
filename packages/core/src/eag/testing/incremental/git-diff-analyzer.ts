@@ -16,7 +16,7 @@
  *   * macOS Apple Git 在合并选项时仅输出 name-status，丢失 numstat 数据
  *   * 设计文档 §8.4 职责描述明确分两次调用（第 1923-1925 行）
  *
- * P0 安全修复（PHASE2_SECURITY_FIX_PLAN_2026-07-31 §P0-8）：
+ * P0 安全修复（docs/archive/PHASE2_SECURITY_FIX_PLAN_2026-07-31.md §P0-8）：
  * - 使用 `execFileSync` 以数组参数调用 git，避免启动 shell 解释器
  * - 对 `base` / `head` 做白名单校验，拒绝含 shell 元字符、路径穿越、绝对路径的非法 ref
  * - 不再使用字符串模板拼接命令

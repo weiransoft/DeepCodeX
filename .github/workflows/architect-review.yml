@@ -5,7 +5,9 @@ name: Architect Review
 #
 # 触发条件（对齐设计文档 §5.1 D-C3-4 ~ D-C3-8 / §5.5）：
 #   1. PR 标签 `needs-architect-review`（人工显式触发）
-#   2. 修改 docs/enterprise/*.md 文件（架构设计文档变更必须审查）
+#   2. 修改 docs/*.md 顶层文档（架构/特性文档变更必须审查；
+#      注：原条件为 docs/enterprise/*.md，该目录已被 .gitignore 排除永不入库，
+#      属死触发器，2026-08-04 修复为实际入库的顶层文档路径）
 #   3. 修改 packages/core/src/eag/ 目录下文件 ≥10 个（大规模 EAG 代码改动）
 #   4. workflow_dispatch 手动触发（用于复审）
 #
@@ -20,7 +22,9 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
-      - "docs/enterprise/*.md"
+      # 顶层文档（architecture / new-features / eag-autonomous 等）；
+      # glob 不匹配子目录，docs/archive/ 变更不会触发
+      - "docs/*.md"
       - "packages/core/src/eag/**"
       - ".github/workflows/architect-review.yml"
   workflow_dispatch:
@@ -50,9 +54,9 @@ jobs:
       # --------------------------------------------------------------------------
       # 输出 4 个 outputs：
       #   - trigger:     'true' / 'false'（是否触发审查）
-      #   - reason:      触发原因（pr-label / docs-enterprise-changed / eag-large-change / manual）
+      #   - reason:      触发原因（pr-label / docs-changed / eag-large-change / manual）
       #   - labels:      PR 标签列表
-      #   - docs_changes: docs/enterprise/ 变更文件数
+      #   - docs_changes: docs/*.md 顶层文档变更文件数
       #   - eag_changes:  packages/core/src/eag/ 变更文件数
       - name: Detect Trigger Condition
         id: detect
@@ -77,7 +81,8 @@ jobs:
           EAG_CHANGES=0
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             # 使用 origin/main...HEAD 获取 PR 相对 main 的全部变更
-            DOCS_CHANGES=$(git diff --name-only origin/main...HEAD 2>/dev/null | grep -c "^docs/enterprise/.*\.md$" || true)
+            # 仅统计顶层 docs/*.md（[^/]* 排除 archive/ 等子目录）
+            DOCS_CHANGES=$(git diff --name-only origin/main...HEAD 2>/dev/null | grep -c "^docs/[^/]*\.md$" || true)
             EAG_CHANGES=$(git diff --name-only origin/main...HEAD 2>/dev/null | grep -c "^packages/core/src/eag/" || true)
           fi
           echo "docs_changes=${DOCS_CHANGES}" >> $GITHUB_OUTPUT
@@ -95,10 +100,10 @@ jobs:
           elif echo "${LABELS}" | grep -q "needs-architect-review"; then
             TRIGGER="true"
             REASON="pr-label"
-          # 条件 2：修改 docs/enterprise/*.md
+          # 条件 2：修改 docs/*.md 顶层文档
           elif [ "${DOCS_CHANGES}" -gt 0 ]; then
             TRIGGER="true"
-            REASON="docs-enterprise-changed"
+            REASON="docs-changed"
           # 条件 3：修改 packages/core/src/eag/ ≥10 文件
           elif [ "${EAG_CHANGES}" -ge 10 ]; then
             TRIGGER="true"
@@ -133,7 +138,7 @@ jobs:
           echo "🏗️ 触发架构师审查"
           echo "触发原因：${REASON}"
           echo "PR 标签：${LABELS}"
-          echo "docs/enterprise/ 变更数：${DOCS_CHANGES}"
+          echo "docs/*.md 变更数：${DOCS_CHANGES}"
           echo "packages/core/src/eag/ 变更数：${EAG_CHANGES}"
 
           # 尝试调用 deepcode CLI 的 architect-review 子命令
@@ -147,7 +152,7 @@ jobs:
 
           - **触发原因**：${REASON}
           - **PR 标签**：${LABELS}
-          - **docs/enterprise/ 变更数**：${DOCS_CHANGES}
+          - **docs/*.md 变更数**：${DOCS_CHANGES}
           - **packages/core/src/eag/ 变更数**：${EAG_CHANGES}
 
           > ⚠️ 未获取到 PR 编号，无法自动调用 deepcode architect-review。
@@ -169,14 +174,14 @@ jobs:
 
           - **触发原因**：${REASON}
           - **PR 标签**：${LABELS}
-          - **docs/enterprise/ 变更数**：${DOCS_CHANGES}
+          - **docs/*.md 变更数**：${DOCS_CHANGES}
           - **packages/core/src/eag/ 变更数**：${EAG_CHANGES}
           - **PR 编号**：${PR_NUMBER}
 
           > ⚠️ \`npx deepcode architect-review\` 命令调用失败（退出码 ${CLI_EXIT}）。
           > 可能原因：deepcode CLI 未实现该子命令，或运行时异常。
           > 请人工运行：\`npx deepcode architect-review --pr ${PR_NUMBER}\`，
-          > 或参照 \`docs/enterprise/EAG-P3-BATCH12-DESIGN.md\` 第 5 章进行手动审查。
+          > 或参照 \`docs/architecture.md\` 与 \`docs/new-features.md\` 进行手动审查。
           EOF
             fi
           fi

@@ -80,7 +80,7 @@ export class SkillManager {
    * 6. bundled:（内置技能，随扩展发布）
    *
    * A3.1 改进（2026-07-27）：新增第 5 个根 ~/.trae-cn/builtin_skills
-   *   - 关联事件：docs/code-review-process-incident.md（原始 review 报告失实事件）
+   *   - 关联事件：docs/archive/code-review-process-incident.md（原始 review 报告失实事件）
    *   - 动机：DeepCodeX-cli 作为独立 CLI 工具，需复用 Trae IDE 平台已有的
    *     TRAE-code-review / TRAE-security-review 等成熟 skill，避免重复造轮子
    *   - 优先级：低于用户自定义 skill（~/.deepcode/skills、~/.agents/skills），

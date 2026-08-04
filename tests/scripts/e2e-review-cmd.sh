@@ -2,7 +2,7 @@
 # =============================================================================
 # e2e-review-cmd.sh - /review 命令 E2E 测试（RV-01~RV-15）
 #
-# 测试目标（对齐 docs/dev/code-review-builtin-cmd-design.md §5.8.2）：
+# 测试目标（对齐 docs/archive/code-review-process-incident.md 行动项 A3 的 /review 内置命令设计）：
 #   验证 DeepCodeX-cli 的 /review 内置命令在 CLI 模式下的端到端行为：
 #     - help 子命令返回退出码 0 + 帮助文本
 #     - 各子命令（typecheck / lint / format / full）正确路由

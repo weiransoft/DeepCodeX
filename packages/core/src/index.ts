@@ -286,10 +286,10 @@ export type { LoopGuardConfig, LoopGuardState, GuardCheckResult, GuardStopReason
 // - 未启用：所有 EAG orchestrator（CodingOrchestrator/TestingOrchestrator/DesignLoopOrchestrator/
 //   DevOpsOrchestrator/AutonomousOrchestrator/GraphLoopOrchestrator）及 InterruptQueue/
 //   TaskRegistry/BackgroundTaskRunner
-// 启用方式详见 docs/dev/ADR-EAG-001-experimental-status.md
+// 启用方式：由调用方在装配层显式注入对应 orchestrator（历史上曾记录于已归档的 ADR-EAG-001 文档）
 // ============================================================================
 
-// EAG 统一命名空间导出（repair-plan.md §3.2）
+// EAG 统一命名空间导出（docs/archive/repair-plan.md §3.2）
 // - Eag：包含 eag/index.ts 聚合的全部公共 API（evaluator / redlines / loop / coding /
 //   testing / long-horizon / devops / dynamic / p5 等），供 CLI 层通过
 //   `import { Eag } from "@vegamo/deepcode-core"` 一次性访问全部 EAG 能力。
