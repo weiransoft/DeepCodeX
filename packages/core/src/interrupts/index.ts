@@ -98,3 +98,7 @@ export type {
   SharedSessionOptions,
   TaskStoreLike,
 } from "./background-runner";
+
+// TaskStore 类与其 Options 类型（值导出 + 类型导出，ADR-DI-001 §5.5 任务持久化）
+export { TaskStore } from "./task-store";
+export type { TaskStoreOptions } from "./task-store";
