@@ -87,17 +87,15 @@ Full documentation: [docs/new-features_en.md](docs/new-features_en.md) ｜ [中�
 | **I. Logging & Observability** | Log rotation (10MB / 3 backups) + error-type preservation (APIUserAbortError etc.) + interrupt event log (interrupts.log) | Auto-enabled |
 | **J. Multi-Model Provider** | Anthropic native (Claude 3.5/3.7) + OpenAI-compatible (DeepSeek/Doubao) + Qwen3 reasoning model `reasoning` field independent extraction | `settings.json` |
 
-**Core Design Principles**:
+**Core Design Principles** (`docs/fusion/` contains local design docs that are not committed to the repo; links work only on this machine):
 - [Karpathy's Four Principles](docs/fusion/KARPATHY_PRINCIPLES.md) (Think Before Coding / Simplicity First / Surgical Changes / Goal-Driven)
 - [Ponytail Decision Ladder](docs/fusion/PONYTAIL_RULES.md) (YAGNI → Standard Library → Platform-Native → Reuse → One-Liner First → Minimum Viable)
 
-**Key Design Documents**:
+**Key Design Documents** (also local-only, not committed):
 - Fusion Plan: [docs/fusion/DEEPCODEX_FUSION_PLAN.md](docs/fusion/DEEPCODEX_FUSION_PLAN.md)
-- EAG Enterprise App Generation: [docs/enterprise/ENTERPRISE_APP_GENERATION_DESIGN.md](docs/enterprise/ENTERPRISE_APP_GENERATION_DESIGN.md)
-- Loop-Graph Fusion: [docs/enterprise/LOOP-GRAPH-FUSION-DESIGN.md](docs/enterprise/LOOP-GRAPH-FUSION-DESIGN.md)
 - V2 Context Memory: [docs/fusion/V2_CONTEXT_MEMORY_PRD.md](docs/fusion/V2_CONTEXT_MEMORY_PRD.md)
-- Domain Expert Integration: [docs/enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md](docs/enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md)
-- Builtin Skills Enhancement: [docs/enterprise/BUILTIN-SKILLS-ENHANCEMENT-DESIGN.md](docs/enterprise/BUILTIN-SKILLS-ENHANCEMENT-DESIGN.md)
+
+> Note: The design docs for EAG Enterprise App Generation, Loop-Graph Fusion, Domain Expert Integration, and Builtin Skills Enhancement (formerly `docs/enterprise/*.md`) were never committed to the repo. Refer to the source code under `packages/core/src/eag/`, `packages/core/src/team/domain-experts/`, and `packages/core/templates/skills/` for implementation details.
 
 ## Slash Commands & Keyboard Shortcuts
 

@@ -262,7 +262,7 @@ Deep Code CLI 内置 Team 模块，支持 Ralph 风格的 autonomous 自主编�
 ### 启动 autonomous run
 
 ```bash
-deepcodex team autonomous --goal "为登录逻辑添加单元测试" --max-iter 10
+deepcode team autonomous --goal "为登录逻辑添加单元测试" --max-iterations 10
 ```
 
 ### autonomous 4 阶段流程
@@ -289,7 +289,7 @@ LLM 在每个阶段输出时使用以下标题前缀作为 stage 识别契约：
 
 启动前请确保 `~/.deepcode/settings.json` 的 `env.API_KEY` 字段已配置，否则 autonomous 模式会因缺少 API Key 直接退出。
 
-支持通过 `--resume-run <runId>` 断点续跑历史 run。
+支持通过 `--resume-run`（布尔开关）断点续跑最近一次可恢复的历史 run。
 
 ## 下一步
 

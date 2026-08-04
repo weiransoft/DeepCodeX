@@ -2,7 +2,7 @@
  * review-cmd 单元测试
  *
  * 验证 A3 改进（2026-07-27）：添加 /review 内置命令
- * 关联事件：docs/code-review-process-incident.md
+ * 关联事件：docs/archive/code-review-process-incident.md
  *
  * 测试覆盖：
  *   - parseReviewArgs 解析各子命令

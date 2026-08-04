@@ -1,7 +1,7 @@
 # 原始 review 报告失实事件检讨
 
 > 检讨日期：2026-07-27
-> 事件：原始报告 `docs/code-review-2026-07-27.md` 与多角色团队 review 验证结果差异巨大
+> 事件：原始报告 `docs/archive/code-review-2026-07-27.md`（已归档）与多角色团队 review 验证结果差异巨大
 > 涉及组件：DeepCodeX-cli TUI 对话模式 + Qwen3.6-27B LLM
 
 ---
@@ -14,9 +14,9 @@
 |------|------|------|------|
 | ① | 2026-07-27 早 | 用户在 DeepCodeX-cli TUI 中输入 `/review 当前工程代码` | `/review` 既非内置命令也无对应 skill，系统**完全未识别为命令**，作为普通对话消息送给 LLM |
 | ② | 同上 | SessionManager 调用 Qwen3.6-27B 生成响应 | 输出原始报告（CRIT-1/2/3 + HIGH-1~6 + MED-1~6 + LOW-1~3） |
-| ③ | 同上 | 用户保存为 `docs/code-review-2026-07-27.md` | 报告入库 |
+| ③ | 同上 | 用户保存为 `docs/archive/code-review-2026-07-27.md` | 报告入库 |
 | ④ | 2026-07-27 晚 | 多角色团队 fan-out-aggregate 验证 | 发现 5 项失实/误报，1 项严重低估，1 项严重夸大 |
-| ⑤ | 同上 | 输出 `docs/code-review-2026-07-27-review.md` | 357 行检讨报告 |
+| ⑤ | 同上 | 输出 `docs/archive/code-review-2026-07-27-review.md` | 357 行检讨报告 |
 | ⑥ | 2026-07-27 晚 | 用户质疑"cli 里也没有 code-review 命令" | 重新核实发现 v1 检讨报告「缺陷 1」将测试 mock 误当成实际功能，修正为：`/review` 与 `/code-review` 均不存在，bundled skills 中也无 `code-review` skill |
 
 ### 1.2 差异规模

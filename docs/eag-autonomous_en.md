@@ -230,7 +230,5 @@ Prerequisites:
 ## Related Documents
 
 - [configuration.md](configuration.md) — Deep Code configuration guide (including LLM provider configuration)
-- [EAG-P5 Requirements](enterprise/EAG-P5-REQUIREMENTS.md) — Full requirements specification
-- [EAG-P5 Architecture](enterprise/EAG-P5-ARCHITECTURE.md) — Technical architecture design
-- [EAG-P5 Loop Integration Design](enterprise/EAG-P5-LOOP-INTEGRATION-DESIGN.md) — P5 reuse of eag/loop/ Plan A design
-- [EAG-P5 End-to-End Capability Verification](enterprise/EAG-P5-E2E-CAPABILITY-VERIFICATION-DESIGN.md) — 52-test-case verification suite
+- [new-features_en.md](new-features_en.md) — DeepCodeX new features overview (including the EAG-P5 capability matrix)
+- The EAG-P5 requirements / architecture / loop-integration / E2E-verification design docs were never committed; see the code under `packages/core/src/eag/p5/` (including the 52 E2E test cases)

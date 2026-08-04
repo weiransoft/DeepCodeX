@@ -26,8 +26,8 @@
 #   bash tests/scripts/run-e2e-tests.sh --no-v2    # 跳过 V2 测试套件
 #
 # 设计依据：
-# - docs/enterprise/*.md（9 个 EAG 设计文档）
-# - docs/fusion/*.md（17 个 V2 + 融合方案设计文档）
+# - docs/enterprise/*.md（9 个 EAG 设计文档，本地文档未入库）
+# - docs/fusion/*.md（17 个 V2 + 融合方案设计文档，本地文档未入库）
 # - multi-agent-team 测试专家报告 22 维度 160+ 用例
 # - 用户规则 C-9（测试 shell 脚本归位 tests/scripts/）
 # ==============================================================================

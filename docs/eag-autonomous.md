@@ -230,7 +230,5 @@ EAG-P5 的运行时参数通过命令行参数配置（见 [参数说明](#参�
 ## 相关文档
 
 - [configuration.md](configuration.md) — Deep Code 配置说明（含 LLM provider 配置）
-- [EAG-P5 需求文档](enterprise/EAG-P5-REQUIREMENTS.md) — 完整需求规格
-- [EAG-P5 架构文档](enterprise/EAG-P5-ARCHITECTURE.md) — 技术架构设计
-- [EAG-P5 Loop 集成设计](enterprise/EAG-P5-LOOP-INTEGRATION-DESIGN.md) — P5 复用 eag/loop/ 方案 A 设计
-- [EAG-P5 端到端能力验证](enterprise/EAG-P5-E2E-CAPABILITY-VERIFICATION-DESIGN.md) — 52 测试用例验证套件
+- [new-features.md](new-features.md) — DeepCodeX 新特性总览（含 EAG-P5 能力矩阵）
+- EAG-P5 需求/架构/Loop 集成/端到端验证等设计文档未入库，实现细节见代码 `packages/core/src/eag/p5/`（含 52 个 E2E 测试用例）

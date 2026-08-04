@@ -86,17 +86,15 @@ DeepCodeX 在 Deep Code CLI 基础上完成了**多角色融合**与**企业级�
 | **I. 日志与可观测性** | 日志轮转（10MB/3 备份）+ 错误类型保留（APIUserAbortError 等）+ 中断事件日志（interrupts.log） | 自动启用 |
 | **J. 多模型 Provider** | Anthropic 原生（Claude 3.5/3.7）+ OpenAI 兼容（DeepSeek/Doubao）+ Qwen3 推理模型 `reasoning` 字段独立提取 | `settings.json` |
 
-**核心设计原则**：
+**核心设计原则**（`docs/fusion/` 为本地设计文档，未入库，链接仅本机有效）：
 - [Karpathy 四大原则](docs/fusion/KARPATHY_PRINCIPLES.md)（Think Before Coding / Simplicity First / Surgical Changes / Goal-Driven）
 - [Ponytail 决策梯](docs/fusion/PONYTAIL_RULES.md)（YAGNI → 标准库 → 平台原生 → 复用 → 一行优先 → 最小可行）
 
-**关键设计文档**：
+**关键设计文档**（同为本地文档，未入库）：
 - 融合方案：[docs/fusion/DEEPCODEX_FUSION_PLAN.md](docs/fusion/DEEPCODEX_FUSION_PLAN.md)
-- EAG 企业应用生成：[docs/enterprise/ENTERPRISE_APP_GENERATION_DESIGN.md](docs/enterprise/ENTERPRISE_APP_GENERATION_DESIGN.md)
-- Loop-Graph 融合：[docs/enterprise/LOOP-GRAPH-FUSION-DESIGN.md](docs/enterprise/LOOP-GRAPH-FUSION-DESIGN.md)
 - V2 上下文记忆：[docs/fusion/V2_CONTEXT_MEMORY_PRD.md](docs/fusion/V2_CONTEXT_MEMORY_PRD.md)
-- 领域专家集成：[docs/enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md](docs/enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md)
-- Builtin Skills 增强：[docs/enterprise/BUILTIN-SKILLS-ENHANCEMENT-DESIGN.md](docs/enterprise/BUILTIN-SKILLS-ENHANCEMENT-DESIGN.md)
+
+> 注：EAG 企业应用生成、Loop-Graph 融合、领域专家集成、Builtin Skills 增强等能力的设计文档（原 `docs/enterprise/*.md`）未入库，实现细节请直接参阅 `packages/core/src/eag/`、`packages/core/src/team/domain-experts/` 与 `packages/core/templates/skills/` 源码。
 
 ## 斜杠命令与按键功能
 

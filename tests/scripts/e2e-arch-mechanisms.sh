@@ -19,10 +19,10 @@
 #  14. multi-agent-team 5 角色 + 30 领域专家
 #
 # 设计依据：
-# - docs/fusion/DEEPCODEX_FUSION_PLAN.md
-# - docs/fusion/KARPATHY_PRINCIPLES.md
-# - docs/fusion/PONYTAIL_RULES.md
-# - docs/enterprise/DOMAIN_EXPERT_INTEGRATION_DESIGN.md
+# - docs/fusion/DEEPCODEX_FUSION_PLAN.md（本地文档未入库）
+# - docs/fusion/KARPATHY_PRINCIPLES.md（本地文档未入库）
+# - docs/fusion/PONYTAIL_RULES.md（本地文档未入库）
+# - packages/core/src/team/domain-experts/（领域专家实现，原设计文档未入库）
 # ==============================================================================
 
 set -uo pipefail

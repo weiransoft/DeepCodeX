@@ -582,7 +582,7 @@ export function resolveSettingsSources(
     parseBoolean(userSettings?.debugLogEnabled) ??
     parseBoolean(userEnv.DEBUG_LOG_ENABLED) ??
     // A2 改进（2026-07-27）：默认启用 debug 日志，便于追溯 LLM 工具调用历史
-    // 关联事件：docs/code-review-process-incident.md（原始 review 报告失实事件）
+    // 关联事件：docs/archive/code-review-process-incident.md（原始 review 报告失实事件）
     // 用户仍可通过 DEBUG_LOG_ENABLED=false 或 settings.json 显式禁用
     true;
 

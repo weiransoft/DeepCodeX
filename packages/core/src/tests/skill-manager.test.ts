@@ -2,7 +2,7 @@
  * SkillManager 单元测试
  *
  * 验证 A3.1 改进（2026-07-27）：扩展 getSkillScanRoots 扫描 ~/.trae-cn/builtin_skills
- * 关联事件：docs/code-review-process-incident.md
+ * 关联事件：docs/archive/code-review-process-incident.md
  *
  * 测试覆盖：
  *   - getSkillScanRoots 返回 6 个根（之前 5 个）

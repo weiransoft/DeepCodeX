@@ -23,7 +23,7 @@
 #     US-ERR-002: 记忆文件损坏降级
 #     US-ERR-003: CodeMap 单文件解析失败跳过
 #
-# 设计依据：
+# 设计依据（docs/fusion/ 为本地设计文档，未入库）：
 # - docs/fusion/V2_CONTEXT_MEMORY_TECH_DESIGN.md（V2 主技术方案 v2.6）
 # - docs/fusion/V2_P0B_ARCHITECT_REVIEW.md（Side-Git 架构师审查 25 项）
 # - docs/fusion/V2_P0B_FIX_PLAN.md（Side-Git 修复计划）

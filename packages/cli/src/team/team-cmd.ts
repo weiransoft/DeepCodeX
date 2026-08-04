@@ -15,7 +15,7 @@
  *   deepcode team list
  *   deepcode team match "设计微服务架构"
  *   deepcode team dispatch --role architect --task "设计用户认证模块"
- *   deepcode team autonomous --goal "实现 OAuth2 登录" --max-iter 5
+ *   deepcode team autonomous --goal "实现 OAuth2 登录" --max-iterations 5
  *   deepcode team full-lifecycle --project "电商网站"
  *   deepcode team full-lifecycle --project "电商网站" --use-loop --prd-path docs/prd.md
  */

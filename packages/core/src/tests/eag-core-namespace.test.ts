@@ -1,5 +1,5 @@
 /**
- * EAG 公共 API 命名空间导出测试（repair-plan.md §3.2）
+ * EAG 公共 API 命名空间导出测试（docs/archive/repair-plan.md §3.2）
  *
  * 验证 `packages/core/src/index.ts` 通过 `Eag` / `EagP5` 命名空间
  * 完整导出 EAG 能力，供 CLI 层通过 `@vegamo/deepcode-core` 单一入口访问。

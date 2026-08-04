@@ -8,11 +8,11 @@
 #   3. team dispatch --role architect — 强制派发
 #   4. team dispatch --task "..." — 自动匹配派发
 #   5. team help — 显示帮助
-#   6. team autonomous --goal --max-iter — Autonomous 模式
+#   6. team autonomous --goal --max-iterations — Autonomous 模式
 #   7. team full-lifecycle --goal — 完整生命周期
 #
 # 设计依据：
-# - docs/fusion/DEEPCODEX_FUSION_PLAN.md（multi-agent-team 移植方案）
+# - docs/fusion/DEEPCODEX_FUSION_PLAN.md（multi-agent-team 移植方案，本地文档未入库）
 # - packages/cli/src/team/team-cmd.ts（team 子命令实现）
 # - packages/core/src/team/（核心模块）
 # ==============================================================================
