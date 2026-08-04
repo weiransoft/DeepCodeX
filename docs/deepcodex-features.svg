@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e"/>
+      <stop offset="100%" style="stop-color:#16213e"/>
+    </linearGradient>
+    <linearGradient id="accent1" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#e94560"/>
+      <stop offset="100%" style="stop-color:#ff6b6b"/>
+    </linearGradient>
+    <linearGradient id="accent2" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#0f3460"/>
+      <stop offset="100%" style="stop-color:#533483"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  
+  <!-- Background -->
+  <rect width="800" height="600" fill="url(#bg)"/>
+  
+  <!-- Title -->
+  <text x="400" y="60" text-anchor="middle" font-size="36" font-weight="bold" fill="#fff" filter="url(#glow)">
+    DeepCodeX
+  </text>
+  <text x="400" y="90" text-anchor="middle" font-size="16" fill="#a0a0a0">
+    AI 编程助手 · 让 AI 真正干活
+  </text>
+  
+  <!-- Feature Cards -->
+  <!-- Card 1: Multi-Role -->
+  <g transform="translate(80, 140)">
+    <rect width="180" height="140" rx="12" fill="url(#accent2)" opacity="0.9"/>
+    <circle cx="90" cy="45" r="25" fill="url(#accent1)"/>
+    <text x="90" y="52" text-anchor="middle" font-size="20" fill="#fff">👥</text>
+    <text x="90" y="85" text-anchor="middle" font-size="14" font-weight="bold" fill="#fff">多角色协作</text>
+    <text x="90" y="105" text-anchor="middle" font-size="11" fill="#ccc">5 个专业角色</text>
+    <text x="90" y="120" text-anchor="middle" font-size="11" fill="#ccc">团队共识评审</text>
+  </g>
+  
+  <!-- Card 2: Autonomous -->
+  <g transform="translate(310, 140)">
+    <rect width="180" height="140" rx="12" fill="url(#accent2)" opacity="0.9"/>
+    <circle cx="90" cy="45" r="25" fill="url(#accent1)"/>
+    <text x="90" y="52" text-anchor="middle" font-size="20" fill="#fff">🔄</text>
+    <text x="90" y="85" text-anchor="middle" font-size="14" font-weight="bold" fill="#fff">自主循环</text>
+    <text x="90" y="105" text-anchor="middle" font-size="11" fill="#ccc">规划→开发→验证→修复</text>
+    <text x="90" y="120" text-anchor="middle" font-size="11" fill="#ccc">自动迭代优化</text>
+  </g>
+  
+  <!-- Card 3: Full Lifecycle -->
+  <g transform="translate(540, 140)">
+    <rect width="180" height="140" rx="12" fill="url(#accent2)" opacity="0.9"/>
+    <circle cx="90" cy="45" r="25" fill="url(#accent1)"/>
+    <text x="90" y="52" text-anchor="middle" font-size="20" fill="#fff">📋</text>
+    <text x="90" y="85" text-anchor="middle" font-size="14" font-weight="bold" fill="#fff">八阶段流程</text>
+    <text x="90" y="105" text-anchor="middle" font-size="11" fill="#ccc">需求→设计→开发→测试</text>
+    <text x="90" y="120" text-anchor="middle" font-size="11" fill="#ccc">文档对照审查</text>
+  </g>
+  
+  <!-- Card 4: EAG -->
+  <g transform="translate(80, 320)">
+    <rect width="180" height="140" rx="12" fill="url(#accent2)" opacity="0.9"/>
+    <circle cx="90" cy="45" r="25" fill="url(#accent1)"/>
+    <text x="90" y="52" text-anchor="middle" font-size="20" fill="#fff">🏢</text>
+    <text x="90" y="85" text-anchor="middle" font-size="14" font-weight="bold" fill="#fff">企业级生成</text>
+    <text x="90" y="105" text-anchor="middle" font-size="11" fill="#ccc">EAG 引擎</text>
+    <text x="90" y="120" text-anchor="middle" font-size="11" fill="#ccc">范式锁定 · 跨 run 记忆</text>
+  </g>
+  
+  <!-- Card 5: Commands -->
+  <g transform="translate(310, 320)">
+    <rect width="180" height="140" rx="12" fill="url(#accent2)" opacity="0.9"/>
+    <circle cx="90" cy="45" r="25" fill="url(#accent1)"/>
+    <text x="90" y="52" text-anchor="middle" font-size="20" fill="#fff">⚡</text>
+    <text x="90" y="85" text-anchor="middle" font-size="14" font-weight="bold" fill="#fff">斜杠命令</text>
+    <text x="90" y="105" text-anchor="middle" font-size="11" fill="#ccc">/inject /bg /tasks</text>
+    <text x="90" y="120" text-anchor="middle" font-size="11" fill="#ccc">终端工作台</text>
+  </g>
+  
+  <!-- Card 6: Consistency -->
+  <g transform="translate(540, 320)">
+    <rect width="180" height="140" rx="12" fill="url(#accent2)" opacity="0.9"/>
+    <circle cx="90" cy="45" r="25" fill="url(#accent1)"/>
+    <text x="90" y="52" text-anchor="middle" font-size="20" fill="#fff">✓</text>
+    <text x="90" y="85" text-anchor="middle" font-size="14" font-weight="bold" fill="#fff">文档一致</text>
+    <text x="90" y="105" text-anchor="middle" font-size="11" fill="#ccc">代码与文档同步</text>
+    <text x="90" y="120" text-anchor="middle" font-size="11" fill="#ccc">强迫症的胜利</text>
+  </g>
+  
+  <!-- Bottom CTA -->
+  <rect x="200" y="500" width="400" height="50" rx="25" fill="url(#accent1)" opacity="0.9"/>
+  <text x="400" y="532" text-anchor="middle" font-size="16" font-weight="bold" fill="#fff">
+    让 AI 从"辅助"变成"主力"
+  </text>
+  
+  <!-- Decorative dots -->
+  <circle cx="50" cy="50" r="3" fill="#e94560" opacity="0.5"/>
+  <circle cx="750" cy="50" r="3" fill="#e94560" opacity="0.5"/>
+  <circle cx="50" cy="550" r="3" fill="#e94560" opacity="0.5"/>
+  <circle cx="750" cy="550" r="3" fill="#e94560" opacity="0.5"/>
+</svg>
