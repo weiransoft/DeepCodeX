@@ -8,7 +8,7 @@ This is an **npm workspaces monorepo**. Packages live under `packages/`.
 packages/
 ├── core/src/               # LLM session, tool execution, shared utilities
 │   ├── common/             # File I/O, permissions, telemetry, OpenAI client, shell utils, etc.
-│   ├── tools/              # 7 built-in handlers (bash, read, write, edit, web-search, ask-user-question, update-plan)
+│   ├── tools/              # 8 built-in handlers (bash, read, write, edit, web-search, ask-user-question, update-plan, understand-image)
 │   ├── mcp/                # MCP client & manager (JSON-RPC lifecycle)
 │   ├── session.ts          # SessionManager — LLM loop, compaction, tool orchestration
 │   ├── prompt.ts           # System prompt builder & tool definitions
@@ -115,25 +115,25 @@ Run the CLI locally for manual testing: `node packages/cli/dist/cli.js` (after `
 
 ## Architecture Overview
 
-The CLI (`@vegamo/deepcode-cli`) renders a terminal UI using [Ink](https://github.com/vadimdemedes/ink) (React for terminals). `SessionManager` (in `@vegamo/deepcode-core`) drives the LLM interaction loop: it builds system prompts, sends user messages with optional skills/images, streams responses, executes tool calls via `ToolExecutor`, and compacts context when token thresholds are exceeded (512K for DeepSeek V4 models, 128K for others). OpenAI client connectivity is managed by `createOpenAIClient()` with a 180-second keep-alive timeout. API errors are normalized through `describeLlmError()` in `packages/core/src/common/llm-error.ts`, which produces credential-safe, structured error details.
+The CLI (`@vegamo/deepcode-cli`) renders a terminal UI using [Ink](https://github.com/vadimdemedes/ink) (React for terminals). `SessionManager` (in `@vegamo/deepcode-core`) drives the LLM interaction loop: it builds system prompts, sends user messages with optional skills/images, streams responses, executes tool calls via `ToolExecutor`, and compacts context when token thresholds are exceeded (configurable via the `contextWindow` and `autoCompactWindow` settings). OpenAI client connectivity is managed by `createOpenAIClient()` with a 180-second keep-alive timeout; `resolveOpenAIConnection()` falls back to the DeepCode Plus endpoint when no API key is set but a DeepCode Plus key is available. API errors are normalized through `describeLlmError()` in `packages/core/src/common/llm-error.ts`, which produces credential-safe, structured error details.
 
-Seven built-in tools are available to the LLM: `bash`, `read`, `write`, `edit`, `AskUserQuestion`, `UpdatePlan`, and `WebSearch`. The `read` tool returns a `snippet_id` that must be passed to subsequent `edit` calls, ensuring edits always operate on a known, session-local file snapshot. Tool definitions are registered in `packages/core/src/tools/executor.ts` and described to the LLM via `packages/core/src/prompt.ts`.
+Eight built-in tools are available to the LLM: `bash`, `read`, `write`, `edit`, `AskUserQuestion`, `UpdatePlan`, `UnderstandImage`, and `WebSearch`. `UnderstandImage` and `WebSearch` are plugin-backed and normalize rate-limit responses; `WebSearch` is driven by the DeepSeek Responses API. The `read` tool returns a `snippet_id` that must be passed to subsequent `edit` calls, ensuring edits always operate on a known, session-local file snapshot. Tool definitions are registered in `packages/core/src/tools/executor.ts` and described to the LLM via `packages/core/src/prompt.ts`.
 
 A **permission system** (`packages/core/src/common/permissions.ts`) controls tool execution scopes (read/write/delete/network/git-log, etc.) with configurable allow/deny/ask decisions.
 
 A **file history system** (`packages/core/src/common/file-history.ts`) provides undo/checkpoint support via lightweight Git branches.
 
-**Slash commands**: `/skills`, `/model`, `/plan`, `/new`, `/init`, `/resume`, `/continue`, `/undo`, `/mcp`, `/raw`, `/exit`, plus dynamic `/skill-name` for each loaded skill.
+**Slash commands**: `/skills`, `/model`, `/plan`, `/new`, `/init`, `/resume`, `/fork`, `/continue`, `/undo`, `/mcp`, `/raw`, `/exit`, plus dynamic `/skill-name` for each loaded skill.
 
 **Plan Mode** (`/plan` or `Shift+Tab`): Restricts the agent to read-only operations on the first turn and requires it to produce a task plan via `<proposed_plan>` for user approval before any file writes, deletions, or git mutations. When enabled, write/delete/mutate-git-log permissions are force-asked regardless of user settings.
 
 **Key UI features**: `@` file mentions in the prompt input, `Ctrl+O` to view live process stdout, `Ctrl+V` to paste images, `Ctrl+X` to clear images, Shift+Enter for newlines, `Shift+Tab` to toggle Plan Mode, pluggable statusline, MCP server status display, undo selector, and permission prompts.
 
-**CLI flags**: `-p <prompt>` / `--prompt` to auto-submit a prompt on launch, `-r [sessionId]` / `--resume [sessionId]` to resume a session or show the session picker, `-v` / `--version`, `-h` / `--help`.
+**CLI flags**: `-p <prompt>` / `--prompt` to auto-submit a prompt on launch, `-x` / `--exec` to run a prompt non-interactively, `-r [sessionId]` / `--resume [sessionId]` to resume a session or show the session picker, `-f [sessionId]` / `--fork` to fork a session, `-l` / `--last` to resume the most recent session, `-v` / `--version`, `-h` / `--help`.
 
 ## Agent-Specific Instructions
 
 - **AGENTS.md loading**: The CLI loads agent instructions from `./AGENTS.md`, `./.deepcode/AGENTS.md`, or `~/.deepcode/AGENTS.md` (first found wins).
 - **Skills**: Place skill definitions in `~/.agents/skills/<name>/SKILL.md` (user-level) or `./.agents/skills/<name>/SKILL.md` (project-level). Legacy path `./.deepcode/skills/` is also supported. Each SKILL.md uses YAML frontmatter with `name` and `description` fields.
-- **Built-in skills**: Four bundled skills ship with the CLI — `plan` (task planning workflow), `deepcode-self-refer` (Deep Code CLI documentation), `skill-digester` (digest & install skills), `skill-writer` (create & debug skills). Additionally, `karpathy-guidelines` (behavioral guidelines to reduce LLM coding mistakes) is injected as a default skill template.
+- **Built-in skills**: Four bundled skills ship with the CLI — `deepcode-self-refer` (Deep Code CLI documentation), `image-generator` (text-to-image generation & editing), `skill-digester` (digest & install skills), `skill-writer` (create & debug skills). Additionally, `karpathy-guidelines` (behavioral guidelines to reduce LLM coding mistakes) is injected as a default skill template.
 - **Prompt file references**: Use `@path/to/file` syntax in prompts to load file contents through the read tool.
