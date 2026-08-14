@@ -13,13 +13,15 @@ import {
   type SkillInfo,
   type UserPromptContent,
   type UserToolPermission,
+  readDeepcodePlusApiKey,
+  resolveOpenAIConnection,
   resolveSettingsSources,
   type DeepcodingSettings,
   type ReasoningEffort,
   type ResolvedDeepcodingSettings,
   setShellIfWindows,
 } from "@vegamo/deepcode-core";
-import { getNonce } from "./utils.js";
+import { getNonce, isAllowedExternalUrl } from "./utils.js";
 import { handleWebviewMessage } from "./provider.js";
 
 const DEFAULT_MODEL = "deepseek-v4-pro";
@@ -70,6 +72,7 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
           type: "sessionStatus",
           sessionId: entry.id,
           status: entry.status,
+          pluginRateLimitedTool: entry.pluginRateLimitedTool ?? null,
           askPermissions: entry.askPermissions,
           processes: this.serializeProcesses(entry.processes),
           tokenTelemetry: this.buildTokenTelemetry(entry),
@@ -111,6 +114,13 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
         const line = Number(msg.line || 1);
         if (filePath) {
           await this.openFileInEditor(filePath, line);
+        }
+        return;
+      }
+
+      if (msg?.type === "openExternal") {
+        if (isAllowedExternalUrl(msg.url)) {
+          await vscode.env.openExternal(vscode.Uri.parse(msg.url));
         }
         return;
       }
@@ -181,6 +191,7 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
       sessionId,
       summary: session.summary || "Untitled",
       status: session.status,
+      pluginRateLimitedTool: session.pluginRateLimitedTool ?? null,
       askPermissions: session.askPermissions,
       processes: this.serializeProcesses(session.processes),
       tokenTelemetry: this.buildTokenTelemetry(session),
@@ -296,6 +307,7 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
           type: "sessionStatus",
           sessionId: activeSessionId,
           status: activeSession.status,
+          pluginRateLimitedTool: activeSession.pluginRateLimitedTool ?? null,
           askPermissions: activeSession.askPermissions,
           processes: this.serializeProcesses(activeSession.processes),
           tokenTelemetry: this.buildTokenTelemetry(activeSession),
@@ -334,6 +346,7 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
         type: "sessionStatus",
         sessionId,
         status: session.status,
+        pluginRateLimitedTool: session.pluginRateLimitedTool ?? null,
         askPermissions: session.askPermissions,
         processes: this.serializeProcesses(session.processes),
         tokenTelemetry: this.buildTokenTelemetry(session),
@@ -353,11 +366,14 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
     webSearchTool?: string;
     env?: Record<string, string>;
     machineId?: string;
+    plusApiKey?: string;
   } {
     const settings = this.resolveCurrentSettings();
+    const plusApiKey = readDeepcodePlusApiKey();
+    const connection = resolveOpenAIConnection(settings, plusApiKey);
 
-    const { apiKey, baseURL, model, thinkingEnabled, reasoningEffort, debugLogEnabled, notify, webSearchTool, env } =
-      settings;
+    const { model, thinkingEnabled, reasoningEffort, debugLogEnabled, notify, webSearchTool, env } = settings;
+    const { apiKey, baseURL } = connection;
     const machineId = vscode.env.machineId;
 
     if (!apiKey) {
@@ -372,6 +388,7 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
         webSearchTool,
         env,
         machineId,
+        plusApiKey,
       };
     }
 
@@ -391,6 +408,7 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
       webSearchTool,
       env,
       machineId,
+      plusApiKey,
     };
   }
 

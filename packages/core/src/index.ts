@@ -14,6 +14,7 @@ export {
   modelConfigKey,
   getUserSettingsPath,
   getProjectSettingsPath,
+  readDeepcodePlusApiKey,
   getDefaultContextWindow,
   getDefaultAutoCompactWindow,
   DEFAULT_MODEL,
@@ -98,7 +99,7 @@ export { McpClient } from "./mcp/mcp-client";
 export type { McpServerStatus } from "./mcp/mcp-manager";
 
 // Common utilities
-export { createOpenAIClient } from "./common/openai-client";
+export { createOpenAIClient, resolveOpenAIConnection, DEEPCODE_PLUS_BASE_URL } from "./common/openai-client";
 export { buildThinkingRequestOptions } from "./common/openai-thinking";
 export { readTextFileWithMetadata, writeTextFile, buildDiffPreview, ensureParentDirectory } from "./common/file-utils";
 export { normalizeFilePath, getSnippet, clearSessionState, recordFileState, getFileState } from "./common/state";
