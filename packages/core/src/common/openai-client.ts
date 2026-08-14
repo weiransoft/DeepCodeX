@@ -19,6 +19,21 @@ const keepAliveAgent = new Agent({ keepAliveTimeout: 180_000 });
 let cachedOpenAI: OpenAI | null = null;
 let cachedOpenAIKey = "";
 
+export const DEEPCODE_PLUS_BASE_URL = "https://deepcode.vegamo.cn/plugin/openai";
+
+export function resolveOpenAIConnection(
+  settings: { apiKey?: string; baseURL: string },
+  plusApiKey?: string
+): { apiKey?: string; baseURL: string } {
+  if (settings.apiKey) {
+    return { apiKey: settings.apiKey, baseURL: settings.baseURL };
+  }
+  if (plusApiKey) {
+    return { apiKey: plusApiKey, baseURL: DEEPCODE_PLUS_BASE_URL };
+  }
+  return { apiKey: undefined, baseURL: settings.baseURL };
+}
+
 export function createOpenAIClient(projectRoot: string = process.cwd()): {
   client: OpenAI | null;
   model: string;
@@ -36,11 +51,12 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
 } {
   const settings = resolveCurrentSettings(projectRoot);
   const plusApiKey = readDeepcodePlusApiKey();
-  if (!settings.apiKey) {
+  const connection = resolveOpenAIConnection(settings, plusApiKey);
+  if (!connection.apiKey) {
     return {
       client: null,
       model: settings.model,
-      baseURL: settings.baseURL,
+      baseURL: connection.baseURL,
       temperature: settings.temperature,
       thinkingEnabled: settings.thinkingEnabled,
       reasoningEffort: settings.reasoningEffort,
@@ -54,12 +70,12 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
     };
   }
 
-  const cacheKey = `${settings.apiKey}::${settings.baseURL}`;
+  const cacheKey = `${connection.apiKey}::${connection.baseURL}`;
   if (cachedOpenAI && cachedOpenAIKey === cacheKey) {
     return {
       client: cachedOpenAI,
       model: settings.model,
-      baseURL: settings.baseURL,
+      baseURL: connection.baseURL,
       temperature: settings.temperature,
       thinkingEnabled: settings.thinkingEnabled,
       reasoningEffort: settings.reasoningEffort,
@@ -74,8 +90,8 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
   }
 
   cachedOpenAI = new OpenAI({
-    apiKey: settings.apiKey,
-    baseURL: settings.baseURL || undefined,
+    apiKey: connection.apiKey,
+    baseURL: connection.baseURL || undefined,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     fetch: (url: any, init: any) => undiciFetch(url, { ...init, dispatcher: keepAliveAgent }),
   });
@@ -97,7 +113,7 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
   return {
     client: cachedOpenAI,
     model: settings.model,
-    baseURL: settings.baseURL,
+    baseURL: connection.baseURL,
     temperature: settings.temperature,
     thinkingEnabled: settings.thinkingEnabled,
     reasoningEffort: settings.reasoningEffort,

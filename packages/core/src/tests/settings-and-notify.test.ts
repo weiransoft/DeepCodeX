@@ -288,6 +288,7 @@ test("resolveSettingsSources applies user, project, and DEEPCODE environment pre
       baseURL: "https://default.example.com",
     },
     {
+      DEEPCODE_API_KEY: "system-key",
       DEEPCODE_MODEL: "system-model",
       DEEPCODE_THINKING_ENABLED: "false",
       DEEPCODE_REASONING_EFFORT: "high",
@@ -299,7 +300,7 @@ test("resolveSettingsSources applies user, project, and DEEPCODE environment pre
   );
 
   assert.equal(resolved.model, "system-model");
-  assert.equal(resolved.apiKey, "project-key");
+  assert.equal(resolved.apiKey, "system-key");
   assert.equal(resolved.thinkingEnabled, false);
   assert.equal(resolved.reasoningEffort, "high");
   assert.equal(resolved.temperature, 1.2);
