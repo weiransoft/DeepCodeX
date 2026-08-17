@@ -44,7 +44,7 @@ npm install -g @vegamo/deepcode-cli
 }
 ```
 
-配置文件与 [Deep Code VSCode 插件](https://github.com/lessweb/deepcode) 共享，无需重复配置。
+配置文件与 [Deep Code VSCode 插件](https://github.com/lessweb/deepcode-cli) 共享，无需重复配置。
 
 完整配置说明（多层级优先级、环境变量等）请参阅 [docs/configuration.md](docs/configuration.md)。
 

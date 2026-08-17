@@ -83,12 +83,12 @@ Deep Code内置免费可用的图片理解工具，可使用ctrl+v从剪贴板�
 ```
 
 ## 获取帮助
-- 在 GitHub Issues 上报告错误或请求功能 (https://github.com/lessweb/deepcode/issues)
+- 在 GitHub Issues 上报告错误或请求功能 (https://github.com/lessweb/deepcode-cli/issues)
 
 ## 支持我们
 
 如果你觉得这个插件对你有帮助，请考虑通过以下方式支持我们：
 
-- 在 GitHub 上给我们一个 Star (https://github.com/lessweb/deepcode)
+- 在 GitHub 上给我们一个 Star (https://github.com/lessweb/deepcode-cli)
 - 向我们提交反馈和建议
 - 分享给你的朋友和同事

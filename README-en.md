@@ -45,7 +45,7 @@ Create `~/.deepcode/settings.json`:
 }
 ```
 
-The configuration file is shared with the [Deep Code VSCode extension](https://github.com/lessweb/deepcode) — configure once, use everywhere.
+The configuration file is shared with the [Deep Code VSCode extension](https://github.com/lessweb/deepcode-cli) — configure once, use everywhere.
 
 For complete configuration details (multi-level priority, environment variables, etc.), see [docs/configuration.md](docs/configuration.md).
 
