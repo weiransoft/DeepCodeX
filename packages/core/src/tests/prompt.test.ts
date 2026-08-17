@@ -4,7 +4,14 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { fileURLToPath } from "url";
-import { buildSkillDocumentsPrompt, getPlanModePrompt, getRuntimeContext, getSystemPrompt, getTools } from "../prompt";
+import {
+  buildSkillCatalogPrompt,
+  buildSkillDocumentsPrompt,
+  getPlanModePrompt,
+  getRuntimeContext,
+  getSystemPrompt,
+  getTools,
+} from "../prompt";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const tempDirs: string[] = [];
@@ -68,6 +75,34 @@ test("getTools includes UpdatePlan with string plan schema", () => {
   assert.ok(tool);
   assert.deepEqual(tool.function.parameters.required, ["plan"]);
   assert.equal((tool.function.parameters.properties.plan as { type?: unknown }).type, "string");
+});
+
+test("getTools includes skill with the exact load-skill schema", () => {
+  const tool = getTools().find((candidate) => candidate.function.name === "skill");
+  assert.ok(tool);
+  assert.equal(
+    tool.function.description,
+    "Load the full instructions for an available skill. Call this with the exact skill name from the session skill catalog before acting on a task that names or clearly matches that skill."
+  );
+  assert.deepEqual(tool.function.parameters.required, ["name"]);
+  assert.equal((tool.function.parameters.properties.name as { type?: unknown }).type, "string");
+  assert.equal(
+    (tool.function.parameters.properties.name as { description?: unknown }).description,
+    "The exact skill name from the available skills list."
+  );
+});
+
+test("buildSkillCatalogPrompt renders previous and new preloaded skills", () => {
+  const prompt = buildSkillCatalogPrompt([
+    { name: "skill-writer", description: "Write a SKILL.md" },
+    { name: "code-review", description: "Review code" },
+  ]);
+
+  assert.match(prompt, /<available_skills>/);
+  assert.match(prompt, /- `skill-writer`: Write a SKILL\.md/);
+  assert.match(prompt, /- `code-review`: Review code/);
+  assert.match(prompt, /call the `skill` tool with the exact skill name/);
+  assert.match(prompt, /A user may also invoke a skill directly/);
 });
 
 test("getTools requires bash sideEffects permission scopes", () => {
@@ -157,7 +192,7 @@ test("buildSkillDocumentsPrompt lists skill resources", () => {
     { name: "pdf", content: "# PDF Skill", path: skillPath, skillFilePath: skillPath },
   ]);
 
-  assert.equal(prompt.includes(`<pdf-skill path="${skillPath}">`), true);
+  assert.equal(prompt.includes(`<skill_content name="pdf" path="${skillPath}">`), true);
   assert.equal(prompt.includes("<skill_resources>"), true);
   assert.equal(prompt.includes("<file>scripts/extract.py</file>"), true);
   assert.equal(prompt.includes("<file>scripts/merge.py</file>"), true);

@@ -24,21 +24,21 @@ Deep Code uses the `settings.json` file for persistent configuration, supporting
 
 The following are all the top-level fields supported in `settings.json`, along with the sub-fields inside `env`:
 
-| Field              | Type    | Description                                                                            |
-| ------------------ | ------- | -------------------------------------------------------------------------------------- |
-| `env`              | object  | Group of environment variables (see sub-field table below)                             |
-| `contextWindow`   | number/string | Context-window limit as an exact token count or `128K`/`1M` value              |
-| `autoCompactWindow` | number/string | Auto-compaction threshold; defaults to 50% of the final context window       |
-| `model`            | string  | Model name. Takes precedence over `env.MODEL`                                          |
-| `thinkingEnabled`  | boolean | Whether to enable thinking mode (enabled by default for DeepSeek V4 series)            |
-| `reasoningEffort`  | string  | Reasoning intensity, either `"high"` or `"max"` (default `"max"`)                      |
-| `debugLogEnabled`  | boolean | Enable debug log output (default `false`)                                              |
-| `telemetryEnabled` | boolean | Enable anonymous usage reporting (default `true`)                                      |
-| `notify`           | string  | Full path to a task-completion notification script (e.g., Slack notification script)   |
-| `webSearchTool`    | string  | Full path to a custom web search script                                                |
-| `mcpServers`       | object  | MCP server configurations (keys are service names, values are McpServerConfig objects) |
-| `temperature`      | number  | Sampling temperature for LLM, from `0` to `2`                                          |
-| `enabledSkills`    | object  | Per-skill enable/disable map, keyed by skill name                                      |
+| Field               | Type          | Description                                                                            |
+| ------------------- | ------------- | -------------------------------------------------------------------------------------- |
+| `env`               | object        | Group of environment variables (see sub-field table below)                             |
+| `contextWindow`     | number/string | Context-window limit as an exact token count or `128K`/`1M` value                      |
+| `autoCompactWindow` | number/string | Auto-compaction threshold; defaults to 50% of the final context window                 |
+| `model`             | string        | Model name. Takes precedence over `env.MODEL`                                          |
+| `thinkingEnabled`   | boolean       | Whether to enable thinking mode (enabled by default for DeepSeek V4 series)            |
+| `reasoningEffort`   | string        | Reasoning intensity, either `"high"` or `"max"` (default `"max"`)                      |
+| `debugLogEnabled`   | boolean       | Enable debug log output (default `false`)                                              |
+| `telemetryEnabled`  | boolean       | Enable anonymous usage reporting (default `true`)                                      |
+| `notify`            | string        | Full path to a task-completion notification script (e.g., Slack notification script)   |
+| `webSearchTool`     | string        | Full path to a custom web search script                                                |
+| `mcpServers`        | object        | MCP server configurations (keys are service names, values are McpServerConfig objects) |
+| `temperature`       | number        | Sampling temperature for LLM, from `0` to `2`                                          |
+| `enabledSkills`     | object        | Per-skill enable/disable map, keyed by skill name                                      |
 
 #### `env` Sub-fields
 

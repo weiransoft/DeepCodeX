@@ -41,6 +41,7 @@ export type ToolExecutionContext = {
   onBeforeFileMutation?: (filePath: string) => void;
   onAfterFileMutation?: (filePath: string) => void;
   onPluginRateLimitExceeded?: (tool: PluginRateLimitedTool) => void;
+  onLoadSkill?: (skillName: string) => Promise<ToolExecutionResult>;
   bashTimeoutMs?: number;
   bashMinTimeoutMs?: number;
 };
@@ -54,6 +55,7 @@ export type ToolExecutionHooks = {
   onBeforeFileMutation?: (filePath: string) => void;
   onAfterFileMutation?: (filePath: string) => void;
   onPluginRateLimitExceeded?: (tool: PluginRateLimitedTool) => void;
+  onLoadSkill?: (skillName: string) => Promise<ToolExecutionResult>;
   shouldStop?: () => boolean;
 };
 

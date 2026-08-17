@@ -8,6 +8,7 @@ import type { BackgroundProcessCompletion, ProcessTimeoutControl, ToolExecutionC
 import { handleBashTool } from "../tools/bash-handler";
 import { handleEditTool } from "../tools/edit-handler";
 import { handleReadTool } from "../tools/read-handler";
+import { handleSkillTool } from "../tools/skill-handler";
 import { handleUpdatePlanTool } from "../tools/update-plan-handler";
 import { handleWriteTool } from "../tools/write-handler";
 
@@ -238,6 +239,38 @@ test("UpdatePlan rejects non-string plan payloads", async () => {
   assert.equal(result.ok, false);
   assert.equal(result.name, "UpdatePlan");
   assert.match(result.error ?? "", /InputValidationError/);
+});
+
+test("Skill delegates loading through the onLoadSkill hook", async () => {
+  const workspace = createTempWorkspace();
+  const loaded: string[] = [];
+
+  const result = await handleSkillTool(
+    { name: "skill-writer" },
+    createContext("skill-load", workspace, {
+      onLoadSkill: async (skillName) => {
+        loaded.push(skillName);
+        return { ok: true, name: "skill", output: `Loaded skill: ${skillName}.` };
+      },
+    })
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.name, "skill");
+  assert.equal(result.output, "Loaded skill: skill-writer.");
+  assert.deepEqual(loaded, ["skill-writer"]);
+});
+
+test("Skill rejects empty names and reports missing hooks", async () => {
+  const workspace = createTempWorkspace();
+
+  const invalid = await handleSkillTool({ name: "  " }, createContext("skill-invalid", workspace));
+  assert.equal(invalid.ok, false);
+  assert.match(invalid.error ?? "", /InputValidationError/);
+
+  const missingHook = await handleSkillTool({ name: "skill-writer" }, createContext("skill-no-hook", workspace));
+  assert.equal(missingHook.ok, false);
+  assert.match(missingHook.error ?? "", /Skill loading is not available in this context/);
 });
 
 test("Read returns snippet metadata and Edit can scope replacements by snippet_id", async () => {
