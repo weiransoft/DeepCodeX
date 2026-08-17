@@ -7,6 +7,14 @@ description: Generate or edit images from text and local files, image URLs, or d
 
 通过 `scripts/image_generator.py` 试算积分并生成无水印 PNG。支持纯文本生图、多参考图融合，以及依据图片中标记区域进行局部编辑。
 
+## Language / 语言
+
+Always respond in the user's language, not the language of this document.
+
+- If the user's latest message or the ongoing conversation is in English (for example `Generate a picture of a baby panda`), use English for ALL user-facing text: assistant explanations, `AskUserQuestion` questions, option labels and descriptions, confirmation prompts, and final result reports.
+- If the user writes in Chinese, use Chinese for all of the above.
+- When presenting ratio or resolution options, translate the direction labels into the user's language (for example `1:1 Square`, `3:4 Portrait`, `4:3 Landscape` in English; `1:1 正方形`, `3:4 竖屏`, `4:3 横屏` in Chinese). Do not mix both languages in a single option label.
+
 ## 执行流程
 
 严格按以下顺序执行。不得在用户明确确认积分消耗前调用图片生成接口。
