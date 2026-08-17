@@ -167,13 +167,25 @@ export function buildSkillDocumentsPrompt(skills: SkillPromptDocument[]): string
   return `Use the skill documents below to assist the user:\n${blocks.join("\n\n")}`;
 }
 
+export function buildSkillCatalogPrompt(skills: Array<{ name: string; description: string }>): string {
+  const entries = skills.map((skill) => `- \`${skill.name}\`: ${skill.description}`).join("\n");
+  return `A skill is a reusable set of task-specific instructions. The following skills are available in this session:
+
+<available_skills>
+${entries}
+</available_skills>
+
+If the user names a skill, or the task clearly matches a skill's description, call the \`skill\` tool with the exact skill name before taking task actions. Load all applicable skills, then follow their full instructions. This catalog contains summaries only; do not infer or follow a skill's instructions until it has been loaded.
+A user may also invoke a skill directly; its <skill_content> block then appears in this conversation. Follow it, and do not call the \`skill\` tool again for that skill.`;
+}
+
 function renderSkillDocumentBlock(skill: SkillPromptDocument): string {
   const pathAttribute = skill.path ? ` path="${escapeXml(skill.path)}"` : "";
   const resources = renderSkillResources(skill.skillFilePath);
   const content = stripSkillPromptMetadata(skill.content);
-  return `<${skill.name}-skill${pathAttribute}>
+  return `<skill_content name="${skill.name}"${pathAttribute}>
 ${content}${resources}
-</${skill.name}-skill>`;
+</skill_content>`;
 }
 
 function stripSkillPromptMetadata(content: string): string {
@@ -546,6 +558,24 @@ export function getTools(_options: PromptToolOptions = {}, externalTools: ToolDe
           },
           required: ["plan"],
           additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "skill",
+        description:
+          "Load the full instructions for an available skill. Call this with the exact skill name from the session skill catalog before acting on a task that names or clearly matches that skill.",
+        parameters: {
+          type: "object",
+          properties: {
+            name: {
+              type: "string",
+              description: "The exact skill name from the available skills list.",
+            },
+          },
+          required: ["name"],
         },
       },
     },

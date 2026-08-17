@@ -24,21 +24,21 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 
 以下是 `settings.json` 支持的全部顶层字段，以及 `env` 内部支持的子字段：
 
-| 字段               | 类型    | 说明                                                    |
-| ------------------ | ------- | ------------------------------------------------------- |
-| `env`              | object  | 环境变量分组（见下方子字段表）                          |
-| `contextWindow`   | number/string | 上下文窗口上限，可使用精确 token 数或 `128K`、`1M` 等格式 |
-| `autoCompactWindow` | number/string | 自动压缩阈值，默认取最终上下文窗口的 50%              |
-| `model`            | string  | 模型名称。优先级高于 `env.MODEL`                        |
-| `thinkingEnabled`  | boolean | 是否启用思考模式（DeepSeek V4 系列默认启用）            |
-| `reasoningEffort`  | string  | 推理强度，可选 `"high"` 或 `"max"`（默认 `"max"`）      |
-| `debugLogEnabled`  | boolean | 是否启用调试日志输出（默认 `false`）                    |
-| `telemetryEnabled` | boolean | 是否启用匿名使用数据上报（默认 `true`）                 |
-| `notify`           | string  | 任务完成通知脚本的完整路径（如 Slack 通知脚本）         |
-| `webSearchTool`    | string  | 自定义联网搜索脚本的完整路径                            |
-| `mcpServers`       | object  | MCP 服务器配置（键为服务名，值为 McpServerConfig 对象） |
-| `temperature`      | number  | 模型采样温度，范围 `0` 到 `2`                           |
-| `enabledSkills`    | object  | 按 skill 名称启用或禁用 skill 的配置                    |
+| 字段                | 类型          | 说明                                                      |
+| ------------------- | ------------- | --------------------------------------------------------- |
+| `env`               | object        | 环境变量分组（见下方子字段表）                            |
+| `contextWindow`     | number/string | 上下文窗口上限，可使用精确 token 数或 `128K`、`1M` 等格式 |
+| `autoCompactWindow` | number/string | 自动压缩阈值，默认取最终上下文窗口的 50%                  |
+| `model`             | string        | 模型名称。优先级高于 `env.MODEL`                          |
+| `thinkingEnabled`   | boolean       | 是否启用思考模式（DeepSeek V4 系列默认启用）              |
+| `reasoningEffort`   | string        | 推理强度，可选 `"high"` 或 `"max"`（默认 `"max"`）        |
+| `debugLogEnabled`   | boolean       | 是否启用调试日志输出（默认 `false`）                      |
+| `telemetryEnabled`  | boolean       | 是否启用匿名使用数据上报（默认 `true`）                   |
+| `notify`            | string        | 任务完成通知脚本的完整路径（如 Slack 通知脚本）           |
+| `webSearchTool`     | string        | 自定义联网搜索脚本的完整路径                              |
+| `mcpServers`        | object        | MCP 服务器配置（键为服务名，值为 McpServerConfig 对象）   |
+| `temperature`       | number        | 模型采样温度，范围 `0` 到 `2`                             |
+| `enabledSkills`     | object        | 按 skill 名称启用或禁用 skill 的配置                      |
 
 #### `env` 子字段
 

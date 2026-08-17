@@ -561,7 +561,7 @@ test("SessionManager resolves bundled skill prompts", () => {
     description: "Write skills",
   });
 
-  assert.match(prompt, /<skill-writer-skill/);
+  assert.match(prompt, /<skill_content name="skill-writer"/);
   assert.match(prompt, /# Skill Writer/);
 });
 
@@ -712,7 +712,7 @@ test("SessionManager keeps implicit opt-out skills available for manual invocati
     .filter((message) => message.role === "system" && message.meta?.skill?.name === "manual-only");
 
   assert.equal(skillMessages.length, 1);
-  assert.match(skillMessages[0]?.content ?? "", /<manual-only-skill/);
+  assert.match(skillMessages[0]?.content ?? "", /<skill_content name="manual-only"/);
   assert.doesNotMatch(skillMessages[0]?.content ?? "", /allow-implicit-invocation/);
 });
 
@@ -756,8 +756,197 @@ test("SessionManager excludes implicit opt-out skills from automatic matching ca
 
   assert.match(matchingPrompt, /"name": "auto-skill"/);
   assert.doesNotMatch(matchingPrompt, /"name": "manual-only"/);
-  assert.equal(countLoadedSkillMessages(manager.listSessionMessages(sessionId), "auto-skill"), 1);
+  assert.equal(countLoadedSkillMessages(manager.listSessionMessages(sessionId), "auto-skill"), 0);
   assert.equal(countLoadedSkillMessages(manager.listSessionMessages(sessionId), "manual-only"), 0);
+  const catalogMessages = manager
+    .listSessionMessages(sessionId)
+    .filter((message) => message.role === "system" && Array.isArray(message.meta?.skillCatalog));
+  assert.equal(catalogMessages.length, 1);
+  const catalogNames = catalogMessages[0]?.meta?.skillCatalog?.map((entry) => entry.name) ?? [];
+  assert.deepEqual(catalogNames, ["auto-skill"]);
+  assert.equal(catalogMessages[0]?.visible, false);
+  assert.match(catalogMessages[0]?.content ?? "", /<available_skills>/);
+  assert.match(catalogMessages[0]?.content ?? "", /`auto-skill`/);
+});
+
+test("replySession appends the skill catalog only when content changes", async () => {
+  const workspace = createTempDir("deepcode-skill-catalog-change-workspace-");
+  const home = createTempDir("deepcode-skill-catalog-change-home-");
+  setHomeDir(home);
+  globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
+
+  const matchingNames: string[][] = [["skill-writer"], [], ["image-generator"]];
+  const client = {
+    chat: {
+      completions: {
+        create: async (request: any) => {
+          if (isSkillMatchingRequest(request)) {
+            return createSkillMatchingResponse(matchingNames.shift() ?? []);
+          }
+          return createChatResponse("done", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 });
+        },
+      },
+    },
+  };
+  const manager = createMockedClientSessionManagerWithClient(workspace, client);
+  (manager as any).activateSession = async () => {};
+
+  const sessionId = await manager.createSession({ text: "first turn" });
+  const listCatalogMessages = () =>
+    manager
+      .listSessionMessages(sessionId)
+      .filter((message) => message.role === "system" && Array.isArray(message.meta?.skillCatalog));
+
+  assert.equal(listCatalogMessages().length, 1);
+
+  await manager.replySession(sessionId, { text: "second turn with no new skill" });
+  assert.equal(listCatalogMessages().length, 1);
+
+  await manager.replySession(sessionId, { text: "third turn matches another skill" });
+  const catalogs = listCatalogMessages();
+  assert.equal(catalogs.length, 2);
+  assert.deepEqual(catalogs[1]?.meta?.skillCatalog?.map((entry) => entry.name) ?? [], [
+    "skill-writer",
+    "image-generator",
+  ]);
+  assert.match(catalogs[1]?.content ?? "", /`skill-writer`/);
+  assert.match(catalogs[1]?.content ?? "", /`image-generator`/);
+});
+
+test("loadSkillByName loads the full skill and notifies the assistant callback", async () => {
+  const workspace = createTempDir("deepcode-skill-load-by-name-workspace-");
+  const home = createTempDir("deepcode-skill-load-by-name-home-");
+  setHomeDir(home);
+
+  const assistantMessages: SessionMessage[] = [];
+  const manager = new SessionManager({
+    projectRoot: workspace,
+    createOpenAIClient: () => ({
+      client: null,
+      model: "test-model",
+      baseURL: "https://api.deepseek.com",
+      thinkingEnabled: false,
+      machineId: "machine-id-skill-load-by-name",
+    }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: (message) => {
+      assistantMessages.push(message);
+    },
+  });
+
+  const sessionId = await manager.createSession({ text: "" });
+  const result = await (manager as any).loadSkillByName(sessionId, "skill-writer");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.name, "skill");
+  assert.match(result.output ?? "", /Loaded skill: skill-writer/);
+  assert.equal(
+    manager.listSessionMessages(sessionId).some((message) => message.meta?.skill?.name === "skill-writer"),
+    true
+  );
+  assert.equal(
+    assistantMessages.some((message) => message.meta?.skill?.name === "skill-writer"),
+    true
+  );
+  assert.equal(
+    assistantMessages.some((message) => message.role === "system" && message.meta?.skillCatalog),
+    false
+  );
+
+  const missing = await (manager as any).loadSkillByName(sessionId, "not-a-real-skill");
+  assert.equal(missing.ok, false);
+  assert.match(missing.error ?? "", /Unknown skill: not-a-real-skill/);
+});
+
+test("compactSession does not mark skill catalog messages compacted", async () => {
+  const workspace = createTempDir("deepcode-skill-catalog-compact-workspace-");
+  const home = createTempDir("deepcode-skill-catalog-compact-home-");
+  setHomeDir(home);
+  globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
+
+  const client = {
+    chat: {
+      completions: {
+        create: async (request: any) => {
+          if (isSkillMatchingRequest(request)) {
+            return createSkillMatchingResponse([]);
+          }
+          return createChatResponse("<analysis>x</analysis>\ncompact summary", {
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            total_tokens: 2,
+          });
+        },
+      },
+    },
+  };
+  const manager = createMockedClientSessionManagerWithClient(workspace, client);
+  (manager as any).activateSession = async () => {};
+
+  const sessionId = await manager.createSession({ text: "hello" });
+  const now = new Date().toISOString();
+  const append = (message: Record<string, unknown>) => (manager as any).appendSessionMessage(sessionId, message);
+  append({
+    id: "catalog",
+    sessionId,
+    role: "system",
+    content: "catalog content",
+    contentParams: null,
+    messageParams: null,
+    compacted: false,
+    visible: false,
+    createTime: now,
+    updateTime: now,
+    meta: { skillCatalog: [{ name: "skill-writer", description: "Write skills" }] },
+  });
+  append({
+    id: "assistant-1",
+    sessionId,
+    role: "assistant",
+    content: "first reply",
+    contentParams: null,
+    messageParams: null,
+    compacted: false,
+    visible: true,
+    createTime: now,
+    updateTime: now,
+  });
+  append({
+    id: "tool-1",
+    sessionId,
+    role: "tool",
+    content: "tool result",
+    contentParams: null,
+    messageParams: { tool_call_id: "call-1" },
+    compacted: false,
+    visible: true,
+    createTime: now,
+    updateTime: now,
+  });
+  append({
+    id: "assistant-2",
+    sessionId,
+    role: "assistant",
+    content: "final reply",
+    contentParams: null,
+    messageParams: null,
+    compacted: false,
+    visible: true,
+    createTime: now,
+    updateTime: now,
+  });
+
+  await (manager as any).compactSession(sessionId);
+
+  const messages = manager.listSessionMessages(sessionId);
+  const catalogMessage = messages.find((message) => message.id === "catalog");
+  const assistantMessage = messages.find((message) => message.id === "assistant-1");
+  const toolMessage = messages.find((message) => message.id === "tool-1");
+
+  assert.equal(catalogMessage?.compacted, false);
+  assert.equal(assistantMessage?.compacted, true);
+  assert.equal(toolMessage?.compacted, true);
 });
 
 test("SessionManager dispose disconnects MCP servers", async () => {

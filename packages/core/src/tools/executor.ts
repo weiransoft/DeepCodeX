@@ -2,6 +2,7 @@ import { handleAskUserQuestionTool } from "./ask-user-question-handler";
 import { handleBashTool } from "./bash-handler";
 import { handleEditTool } from "./edit-handler";
 import { handleReadTool } from "./read-handler";
+import { handleSkillTool } from "./skill-handler";
 import { handleUpdatePlanTool } from "./update-plan-handler";
 import { handleUnderstandImageTool } from "./understand-image-handler";
 import { handleWebSearchTool } from "./web-search-handler";
@@ -83,6 +84,7 @@ export class ToolExecutor {
     this.toolHandlers.set("read", handleReadTool);
     this.toolHandlers.set("write", handleWriteTool);
     this.toolHandlers.set("edit", handleEditTool);
+    this.toolHandlers.set("skill", handleSkillTool);
     this.toolHandlers.set("AskUserQuestion", handleAskUserQuestionTool);
     this.toolHandlers.set("UpdatePlan", handleUpdatePlanTool);
     this.toolHandlers.set("UnderstandImage", handleUnderstandImageTool);
@@ -169,6 +171,7 @@ export class ToolExecutor {
         onBeforeFileMutation: hooks?.onBeforeFileMutation,
         onAfterFileMutation: hooks?.onAfterFileMutation,
         onPluginRateLimitExceeded: hooks?.onPluginRateLimitExceeded,
+        onLoadSkill: hooks?.onLoadSkill,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

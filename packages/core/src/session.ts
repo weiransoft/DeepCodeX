@@ -9,6 +9,7 @@ import { launchNotifyScript } from "./common/notify";
 import { buildThinkingRequestOptions } from "./common/openai-thinking";
 import { readTextFileWithMetadata } from "./common/file-utils";
 import {
+  buildSkillCatalogPrompt,
   buildSkillDocumentsPrompt,
   getCompactPrompt,
   getExtensionRoot,
@@ -26,6 +27,7 @@ import {
   type PluginRateLimitedTool,
   type ToolCallExecution,
   type ToolExecutionHooks,
+  type ToolExecutionResult,
 } from "./tools/executor";
 import { McpManager } from "./mcp/mcp-manager";
 import {
@@ -282,6 +284,7 @@ export type MessageMeta = {
   isSummary?: boolean;
   isModelChange?: boolean;
   skill?: SkillInfo;
+  skillCatalog?: Array<{ name: string; description: string }>;
   permissions?: MessageToolPermission[];
   userPrompt?: UserPromptContent;
 };
@@ -1093,6 +1096,85 @@ ${agentInstructions}
     }
   }
 
+  private listPreloadedSkillCatalog(sessionId: string): Array<{ name: string; description: string }> {
+    const entries = new Map<string, { name: string; description: string }>();
+    for (const message of this.listSessionMessages(sessionId)) {
+      if (message.role !== "system") {
+        continue;
+      }
+      const catalog = message.meta?.skillCatalog;
+      if (!Array.isArray(catalog)) {
+        continue;
+      }
+      for (const entry of catalog) {
+        if (!entry || typeof entry.name !== "string" || !entry.name || entries.has(entry.name)) {
+          continue;
+        }
+        entries.set(entry.name, {
+          name: entry.name,
+          description: typeof entry.description === "string" ? entry.description : "",
+        });
+      }
+    }
+    return Array.from(entries.values());
+  }
+
+  private mergeSkillCatalog(
+    previous: Array<{ name: string; description: string }>,
+    next: Array<{ name: string; description: string }>
+  ): Array<{ name: string; description: string }> {
+    const merged = [...previous];
+    const seen = new Set(previous.map((entry) => entry.name));
+    for (const entry of next) {
+      if (seen.has(entry.name)) {
+        continue;
+      }
+      seen.add(entry.name);
+      merged.push(entry);
+    }
+    return merged;
+  }
+
+  private appendSkillCatalogMessage(sessionId: string, skills: Array<{ name: string; description: string }>): void {
+    if (skills.length === 0) {
+      return;
+    }
+    const content = buildSkillCatalogPrompt(skills);
+    const lastCatalogMessage = [...this.listSessionMessages(sessionId)]
+      .reverse()
+      .find((message) => message.role === "system" && Array.isArray(message.meta?.skillCatalog));
+    if (lastCatalogMessage?.content === content) {
+      return;
+    }
+    const message = this.buildSystemMessage(sessionId, content, null, false, { skillCatalog: skills });
+    this.appendSessionMessage(sessionId, message);
+  }
+
+  async loadSkillByName(sessionId: string, skillName: string): Promise<ToolExecutionResult> {
+    const skills = await this.listSkills(sessionId);
+    const skill = skills.find((candidate) => candidate.name === skillName);
+    if (!skill) {
+      return {
+        ok: false,
+        name: "skill",
+        error: `Unknown skill: ${skillName}. Check the available skills catalog for exact skill names.`,
+      };
+    }
+    if (skill.isLoaded) {
+      return {
+        ok: true,
+        name: "skill",
+        output: `Skill already loaded: ${skill.name}.`,
+      };
+    }
+    this.appendSkillMessages(sessionId, [skill]);
+    return {
+      ok: true,
+      name: "skill",
+      output: `Loaded skill: ${skill.name}.`,
+    };
+  }
+
   getActiveSessionId(): string | null {
     return this.activeSessionId;
   }
@@ -1200,22 +1282,25 @@ ${agentInstructions}
     const userMessage = this.buildUserMessage(sessionId, userPrompt);
     this.appendSessionMessage(sessionId, userMessage);
 
+    let matchedSkills: SkillInfo[] = [];
     if (userPrompt.text) {
       const skills = await this.listSkills();
       const skillNames = await this.identifyMatchingSkillNames(skills, userPrompt.text, { signal });
       this.throwIfAborted(signal);
       const skillSet = new Set(skillNames);
-      const matchedSkill = skills.filter((skill) => skillSet.has(skill.name));
-      if (Array.isArray(userPrompt.skills)) {
-        userPrompt.skills.push(...matchedSkill);
-      } else if (matchedSkill.length > 0) {
-        userPrompt.skills = matchedSkill;
-      }
+      matchedSkills = skills.filter((skill) => skillSet.has(skill.name));
     }
     userPrompt.skills = await this.normalizeSkills(userPrompt.skills);
     this.throwIfAborted(signal);
 
     this.appendSkillMessages(sessionId, userPrompt.skills);
+    this.appendSkillCatalogMessage(
+      sessionId,
+      this.mergeSkillCatalog(
+        this.listPreloadedSkillCatalog(sessionId),
+        matchedSkills.map((skill) => ({ name: skill.name, description: skill.description }))
+      )
+    );
 
     this.activeSessionId = sessionId;
     await this.activateSession(sessionId, controller);
@@ -1272,22 +1357,25 @@ ${agentInstructions}
     const userMessage = this.buildUserMessage(sessionId, userPrompt);
     this.appendSessionMessage(sessionId, userMessage);
 
+    let matchedSkills: SkillInfo[] = [];
     if (userPrompt.text) {
       const skills = await this.listSkills(sessionId);
       const skillNames = await this.identifyMatchingSkillNames(skills, userPrompt.text, { signal, sessionId });
       this.throwIfAborted(signal);
       const skillSet = new Set(skillNames);
-      const matchedSkill = skills.filter((skill) => skillSet.has(skill.name));
-      if (Array.isArray(userPrompt.skills)) {
-        userPrompt.skills.push(...matchedSkill);
-      } else if (matchedSkill.length > 0) {
-        userPrompt.skills = matchedSkill;
-      }
+      matchedSkills = skills.filter((skill) => skillSet.has(skill.name));
     }
     userPrompt.skills = await this.normalizeSkills(userPrompt.skills, sessionId);
     this.throwIfAborted(signal);
 
     this.appendSkillMessages(sessionId, userPrompt.skills);
+    this.appendSkillCatalogMessage(
+      sessionId,
+      this.mergeSkillCatalog(
+        this.listPreloadedSkillCatalog(sessionId),
+        matchedSkills.map((skill) => ({ name: skill.name, description: skill.description }))
+      )
+    );
     this.activeSessionId = sessionId;
     await this.activateSession(sessionId, controller);
   }
@@ -1618,6 +1706,9 @@ ${agentInstructions}
     }));
 
     for (let i = startIndex; i < endIndex; i += 1) {
+      if (sessionMessages[i].meta?.skillCatalog) {
+        continue;
+      }
       sessionMessages[i] = { ...sessionMessages[i], compacted: true, updateTime: now };
     }
 
@@ -2542,6 +2633,7 @@ ${agentInstructions}
       onBeforeFileMutation: (filePath) => this.prepareFileMutationCheckpoint(sessionId, filePath),
       onAfterFileMutation: (filePath) => this.recordFileMutationCheckpoint(sessionId, filePath),
       onPluginRateLimitExceeded: (tool) => this.recordPluginRateLimitExceeded(sessionId, tool),
+      onLoadSkill: (skillName) => this.loadSkillByName(sessionId, skillName),
       shouldStop: () => this.isInterrupted(sessionId),
     };
     const parsedToolCalls = toolCalls
@@ -2627,21 +2719,24 @@ ${agentInstructions}
     const signal = controller.signal;
     const userMessage = this.buildUserMessage(sessionId, userPrompt);
     this.appendSessionMessage(sessionId, userMessage);
+    let matchedSkills: SkillInfo[] = [];
     if (userPrompt.text) {
       const skills = await this.listSkills(sessionId);
       const skillNames = await this.identifyMatchingSkillNames(skills, userPrompt.text, { signal, sessionId });
       this.throwIfAborted(signal);
       const skillSet = new Set(skillNames);
-      const matchedSkill = skills.filter((skill) => skillSet.has(skill.name));
-      if (Array.isArray(userPrompt.skills)) {
-        userPrompt.skills.push(...matchedSkill);
-      } else if (matchedSkill.length > 0) {
-        userPrompt.skills = matchedSkill;
-      }
+      matchedSkills = skills.filter((skill) => skillSet.has(skill.name));
     }
     userPrompt.skills = await this.normalizeSkills(userPrompt.skills, sessionId);
     this.throwIfAborted(signal);
     this.appendSkillMessages(sessionId, userPrompt.skills);
+    this.appendSkillCatalogMessage(
+      sessionId,
+      this.mergeSkillCatalog(
+        this.listPreloadedSkillCatalog(sessionId),
+        matchedSkills.map((skill) => ({ name: skill.name, description: skill.description }))
+      )
+    );
   }
 
   private buildToolParamsSnippet(toolFunction: unknown | null): string {
