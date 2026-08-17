@@ -26,7 +26,7 @@ npm install -g @vegamo/deepcode-cli
 
 在任意项目目录下运行 `deepcode` 即可启动。
 
-![intro2](resources/intro2.png)
+![intro2](resources/intro3.png)
 
 ## 配置
 
