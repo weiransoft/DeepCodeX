@@ -107,13 +107,12 @@ def build_payload(args: argparse.Namespace) -> dict[str, object]:
 def request_json(
     url: str,
     payload: dict[str, object],
-    api_key: str,
+    api_key: str | None,
     timeout: int,
 ) -> dict[str, Any]:
-    headers = {
-        'Content-Type': 'application/json',
-        'PLUS-API-KEY': api_key,
-    }
+    headers = {'Content-Type': 'application/json'}
+    if api_key:
+        headers['PLUS-API-KEY'] = api_key
     if machine_id := get_machine_id():
         headers['Token'] = machine_id
 
@@ -150,11 +149,11 @@ def request_json(
     return response_data
 
 
-def calculate_cost(payload: dict[str, object], api_key: str) -> int:
+def calculate_cost(payload: dict[str, object]) -> int:
     response_data = request_json(
         CALC_IMAGE_GEN_COST_URL,
         payload,
-        api_key,
+        None,
         timeout=30,
     )
     result = response_data.get('result')
@@ -246,9 +245,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run(args: argparse.Namespace) -> dict[str, object]:
-    api_key = load_plus_api_key(args.settings.expanduser())
     payload = build_payload(args)
-    credits = calculate_cost(payload, api_key)
+    credits = calculate_cost(payload)
 
     if args.command == 'cost':
         return {'credits': credits}
@@ -260,6 +258,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             'Ask the user to confirm the new cost before generating.'
         )
 
+    api_key = load_plus_api_key(args.settings.expanduser())
     image_url = generate_image(payload, api_key)
     result: dict[str, object] = {
         'credits': credits,

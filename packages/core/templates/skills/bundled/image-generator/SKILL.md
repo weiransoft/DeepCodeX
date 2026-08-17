@@ -79,7 +79,7 @@ python3 scripts/image_generator.py generate \
 
 ## 凭据配置
 
-脚本从 `~/.deepcode-plus/settings.json` 读取 `env.PLUS_API_KEY`：
+积分试算允许匿名调用，不需要配置 Key。生成图片时，脚本从 `~/.deepcode-plus/settings.json` 读取 `env.PLUS_API_KEY`：
 
 ```json
 {
@@ -93,7 +93,7 @@ python3 scripts/image_generator.py generate \
 
 ## 错误处理
 
-- 配置缺失时，给出上述配置路径和字段，不要尝试生成。
+- 生成时配置缺失，给出上述配置路径和字段，不要尝试生成；积分试算不受影响。
 - 本地参考图不存在、不是图片、超过 10 张或接口试算失败时，修正问题后重新试算。
 - 接口返回 `success=false` 时，原样转述安全的 `reason`，不要声称已经生成。
 - 不要通过直接请求接口、修改脚本或伪造 `--confirmed-credits` 绕过试算与用户确认。
