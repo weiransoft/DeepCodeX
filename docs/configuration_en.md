@@ -32,6 +32,7 @@ The following are all the top-level fields supported in `settings.json`, along w
 | `model`            | string  | Model name. Takes precedence over `env.MODEL`                              |
 | `thinkingEnabled`  | boolean | Whether to enable thinking mode (enabled by default for DeepSeek V4 series)|
 | `reasoningEffort`  | string  | Reasoning intensity, either `"high"` or `"max"` (default `"max"`)          |
+| `multimodal`       | string  | Multimodal (image) capability override: `"default"`, `"on"`, or `"off"` (default `"default"`) |
 | `debugLogEnabled`  | boolean | Enable debug log output (default `false`)                                   |
 | `telemetryEnabled` | boolean | Enable anonymous usage reporting (default `true`)                           |
 | `notify`           | string  | Full path to a task-completion notification script (e.g., Slack notification script) |
@@ -51,6 +52,7 @@ The following are all the top-level fields supported in `settings.json`, along w
 | `TEMPERATURE`     | string | Sampling temperature for chat completions, from `"0"` to `"2"`  |
 | `THINKING_ENABLED`| string | Enable thinking mode                                            |
 | `REASONING_EFFORT`| string | Reasoning intensity                                             |
+| `MULTIMODAL`      | string | Multimodal (image) capability override: `"default"`, `"on"`, or `"off"` |
 | `DEBUG_LOG_ENABLED`| string| Enable debug log output                                         |
 | `TELEMETRY_ENABLED`| string| Enable anonymous usage reporting                                |
 | `<any other KEY>` | string | Custom environment variable                                     |
@@ -83,6 +85,18 @@ When thinking mode is enabled, controls the depth of the model’s reasoning:
 | ------ | --------------------------------------------------------- |
 | `max`  | Maximum reasoning depth (default)                         |
 | `high` | Higher reasoning depth with relatively lower token usage  |
+
+#### `multimodal` — Multimodal (Image) Capability
+
+Controls whether the current model is treated as a multimodal model that accepts image input:
+
+| Value     | Description                                                                 |
+| --------- | --------------------------------------------------------------------------- |
+| `default` | Inferred from the built-in known-model list (default)                       |
+| `on`      | Always treat the model as multimodal, images are sent inline as `image_url` |
+| `off`     | Always treat the model as non-multimodal, images are read on demand via UnderstandImage tool |
+
+Use this to override the default detection when your model is not in the known-model list, or when its actual capability differs from the default.
 
 #### `notify` — Task Completion Notification
 

@@ -32,6 +32,7 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 | `model`              | string    | 模型名称。优先级高于 `env.MODEL`                                    |
 | `thinkingEnabled`    | boolean   | 是否启用思考模式（DeepSeek V4 系列默认启用）                         |
 | `reasoningEffort`    | string    | 推理强度，可选 `"high"` 或 `"max"`（默认 `"max"`）                  |
+| `multimodal`         | string    | 多模态（图片）能力开关，可选 `"default"`、`"on"` 或 `"off"`（默认 `"default"`） |
 | `debugLogEnabled`    | boolean   | 是否启用调试日志输出（默认 `false`）                                 |
 | `telemetryEnabled`   | boolean   | 是否启用匿名使用数据上报（默认 `true`）                              |
 | `notify`             | string    | 任务完成通知脚本的完整路径（如 Slack 通知脚本）                      |
@@ -51,6 +52,7 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 | `TEMPERATURE`  | string | Chat Completions 采样温度，范围 `"0"` 到 `"2"`              |
 | `THINKING_ENABLED`  | string | 是否启用思考模式                                         |
 | `REASONING_EFFORT`  | string | 推理强度                                                |
+| `MULTIMODAL`  | string | 多模态（图片）能力开关，可选 `"default"`、`"on"` 或 `"off"`         |
 | `DEBUG_LOG_ENABLED`  | string | 是否启用调试日志输出                                     |
 | `TELEMETRY_ENABLED`  | string | 是否启用匿名使用数据上报                                   |
 | `<其他任意KEY>` | string | 自定义环境变量 |
@@ -83,6 +85,18 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 | ------ | --------------------------------- |
 | `max`  | 最大推理深度（默认值）              |
 | `high` | 较高推理深度，token消耗相对较小      |
+
+#### `multimodal` — 多模态（图片）能力
+
+控制是否将当前模型视为支持图片输入的多模态模型：
+
+| 值         | 说明                                                         |
+| ---------- | ------------------------------------------------------------ |
+| `default`  | 按内置模型列表自动判定（默认值）                              |
+| `on`       | 强制视为多模态模型，图片以 `image_url` 形式直接内联发送        |
+| `off`      | 强制视为非多模态模型，由模型通过识图工具按需读取      |
+
+当使用的模型未内置在已知模型列表中、或其实际能力与默认判定不符时，可通过该配置覆盖。
 
 #### `notify` — 任务完成通知
 

@@ -8,6 +8,7 @@ import { GitFileHistory } from "../common/file-history";
 import { clearSessionState } from "../common/state";
 import { getSystemPrompt } from "../prompt";
 import { getProjectCode, SessionManager, type SessionMessage } from "../session";
+import type { MultimodalMode } from "../common/model-capabilities";
 
 const originalFetch = globalThis.fetch;
 const originalConsoleWarn = console.warn;
@@ -4115,7 +4116,7 @@ function createSessionManager(projectRoot: string, machineId: string): SessionMa
 function createSessionManagerForModel(
   projectRoot: string,
   model: string,
-  multimodal: "default" | "on" | "off" = "default"
+  multimodal: MultimodalMode = "default"
 ): SessionManager {
   return new SessionManager({
     projectRoot,
