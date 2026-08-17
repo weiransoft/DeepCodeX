@@ -7,7 +7,7 @@ import matter from "gray-matter";
 import { fileURLToPath } from "url";
 import type { SessionMessage } from "./session";
 import { findGitBashPath, resolveShellPath } from "./common/shell-utils";
-import { supportsMultimodal } from "./common/model-capabilities";
+import { supportsMultimodal, type MultimodalMode } from "./common/model-capabilities";
 
 const COMPACT_PROMPT_BASE = `Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
 This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
@@ -95,6 +95,7 @@ const SYSTEM_PROMPT_BASE = `You are a helpful software engineer assistant.`;
 
 export type PromptToolOptions = {
   model?: string;
+  multimodal?: MultimodalMode;
   webSearchEnabled?: boolean;
   nonInteractive?: boolean;
 };
@@ -140,7 +141,7 @@ function readToolDocs(extensionRoot: string, options: PromptToolOptions = {}): s
       try {
         const template = fs.readFileSync(fullPath, "utf8");
         const content = entry.endsWith(".ejs")
-          ? ejs.render(template, { supportsMultimodal: supportsMultimodal(options.model ?? "") })
+          ? ejs.render(template, { supportsMultimodal: supportsMultimodal(options.model ?? "", options.multimodal) })
           : template;
         return content.trim();
       } catch {
@@ -695,7 +696,7 @@ export function getTools(_options: PromptToolOptions = {}, externalTools: ToolDe
     },
   });
 
-  if (!supportsMultimodal(_options.model ?? "")) {
+  if (!supportsMultimodal(_options.model ?? "", _options.multimodal)) {
     tools.push({
       type: "function",
       function: {

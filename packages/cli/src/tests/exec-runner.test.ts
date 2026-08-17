@@ -31,6 +31,7 @@ function createSettings(
     reasoningEffort: "high",
     debugLogEnabled: false,
     telemetryEnabled: false,
+    multimodal: "default",
     permissions,
     enabledSkills: {},
     statusline: { enabled: false, refreshMs: 1000, separator: " | ", providers: [] },

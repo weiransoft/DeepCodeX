@@ -1,4 +1,4 @@
-import { DEEPSEEK_V4_MODELS, defaultsToThinkingMode } from "./common/model-capabilities";
+import { DEEPSEEK_V4_MODELS, defaultsToThinkingMode, type MultimodalMode } from "./common/model-capabilities";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -12,6 +12,7 @@ export type DeepcodingEnv = Record<string, string | undefined> & {
   REASONING_EFFORT?: string;
   DEBUG_LOG_ENABLED?: string;
   TELEMETRY_ENABLED?: string;
+  MULTIMODAL?: string;
 };
 
 export type ReasoningEffort = "high" | "max";
@@ -92,6 +93,7 @@ export type DeepcodingSettings = {
   telemetryEnabled?: boolean;
   notify?: string;
   webSearchTool?: string;
+  multimodal?: MultimodalMode;
   mcpServers?: Record<string, McpServerConfig>;
   permissions?: PermissionSettings;
   enabledSkills?: EnabledSkillsSettings;
@@ -112,6 +114,7 @@ export type ResolvedDeepcodingSettings = {
   telemetryEnabled: boolean;
   notify?: string;
   webSearchTool?: string;
+  multimodal: MultimodalMode;
   mcpServers?: Record<string, McpServerConfig>;
   permissions: Required<PermissionSettings>;
   enabledSkills: EnabledSkillsSettings;
@@ -167,6 +170,17 @@ function firstTokenWindow(...values: unknown[]): number | undefined {
 
 function resolveReasoningEffort(value: unknown): ReasoningEffort | undefined {
   return value === "high" || value === "max" ? value : undefined;
+}
+
+function resolveMultimodalMode(value: unknown): MultimodalMode | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "default" || normalized === "on" || normalized === "off") {
+    return normalized;
+  }
+  return undefined;
 }
 
 function parseBoolean(value: unknown): boolean | undefined {
@@ -585,6 +599,14 @@ export function resolveSettingsSources(
     trimString(userSettings?.webSearchTool) ||
     "";
 
+  const multimodal =
+    resolveMultimodalMode(systemEnv.MULTIMODAL) ??
+    resolveMultimodalMode(projectSettings?.multimodal) ??
+    resolveMultimodalMode(projectEnv.MULTIMODAL) ??
+    resolveMultimodalMode(userSettings?.multimodal) ??
+    resolveMultimodalMode(userEnv.MULTIMODAL) ??
+    "default";
+
   return {
     env,
     apiKey: trimString(env.API_KEY) || undefined,
@@ -599,6 +621,7 @@ export function resolveSettingsSources(
     telemetryEnabled,
     notify: notify || undefined,
     webSearchTool: webSearchTool || undefined,
+    multimodal,
     mcpServers: mergeMcpServers(userSettings, projectSettings, userEnv, projectEnv, systemEnv),
     permissions: mergePermissions(userSettings, projectSettings),
     enabledSkills: mergeEnabledSkills(userSettings, projectSettings),

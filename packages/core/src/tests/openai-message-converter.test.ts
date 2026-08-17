@@ -110,6 +110,28 @@ test("OpenAIMessageConverter filters image content for non-multimodal models", (
   assert.deepEqual(result[0]?.content, [{ type: "text", text: "Loaded pixel.png" }]);
 });
 
+test("OpenAIMessageConverter multimodal config overrides model-based filtering", () => {
+  const c = converter();
+  const messages: SessionMessage[] = [
+    msg({
+      role: "system",
+      content: "Loaded pixel.png",
+      contentParams: [{ type: "image_url", image_url: { url: "data:image/png;base64,abc" } }],
+    }),
+  ];
+
+  // "off" drops image content even for a multimodal model.
+  const off = c.buildMessages(messages, false, "gpt-4o", "off") as Array<{ content: unknown }>;
+  assert.deepEqual(off[0]?.content, [{ type: "text", text: "Loaded pixel.png" }]);
+
+  // "on" keeps image content even for a non-multimodal model.
+  const on = c.buildMessages(messages, false, "deepseek-chat", "on") as Array<{ content: unknown }>;
+  assert.deepEqual(on[0]?.content, [
+    { type: "text", text: "Loaded pixel.png" },
+    { type: "image_url", image_url: { url: "data:image/png;base64,abc" } },
+  ]);
+});
+
 test("OpenAIMessageConverter injects reasoning_content in thinking mode", () => {
   const c = converter();
   const messages: SessionMessage[] = [msg({ role: "assistant", content: "Final answer", messageParams: null })];

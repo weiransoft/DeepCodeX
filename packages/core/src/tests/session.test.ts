@@ -3733,6 +3733,38 @@ test("native multimodal sessions keep pasted images inline without persisting th
   assert.equal(Array.isArray(userMessage?.contentParams), true);
 });
 
+test("multimodal off forces non-multimodal image handling for a multimodal model", async () => {
+  const workspace = createTempDir("deepcode-multimodal-off-workspace-");
+  const home = createTempDir("deepcode-multimodal-off-home-");
+  setHomeDir(home);
+  const manager = createSessionManagerForModel(workspace, "gpt-4o", "off");
+  (manager as any).activateSession = async () => {};
+
+  const sessionId = await manager.createSession({ imageUrls: ["data:image/png;base64,aGVsbG8="] });
+  const imagesDir = path.join(home, ".deepcode", "projects", getProjectCode(workspace), "images", sessionId);
+  const userMessage = manager.listSessionMessages(sessionId).find((message) => message.role === "user");
+
+  assert.equal(fs.existsSync(imagesDir), true);
+  assert.match(userMessage?.content ?? "", /<images>/);
+  assert.match(userMessage?.content ?? "", /name="\[Image #1\]"/);
+});
+
+test("multimodal on keeps images inline for a non-multimodal model", async () => {
+  const workspace = createTempDir("deepcode-multimodal-on-workspace-");
+  const home = createTempDir("deepcode-multimodal-on-home-");
+  setHomeDir(home);
+  const manager = createSessionManagerForModel(workspace, "deepseek-chat", "on");
+  (manager as any).activateSession = async () => {};
+
+  const sessionId = await manager.createSession({ imageUrls: ["data:image/png;base64,aGVsbG8="] });
+  const imagesDir = path.join(home, ".deepcode", "projects", getProjectCode(workspace), "images", sessionId);
+  const userMessage = manager.listSessionMessages(sessionId).find((message) => message.role === "user");
+
+  assert.equal(fs.existsSync(imagesDir), false);
+  assert.equal(userMessage?.content, "");
+  assert.equal(Array.isArray(userMessage?.contentParams), true);
+});
+
 test("non-multimodal sessions reject unsupported pasted images before creating a session", async () => {
   const workspace = createTempDir("deepcode-invalid-image-workspace-");
   const home = createTempDir("deepcode-invalid-image-home-");
@@ -4080,7 +4112,11 @@ function createSessionManager(projectRoot: string, machineId: string): SessionMa
   });
 }
 
-function createSessionManagerForModel(projectRoot: string, model: string): SessionManager {
+function createSessionManagerForModel(
+  projectRoot: string,
+  model: string,
+  multimodal: "default" | "on" | "off" = "default"
+): SessionManager {
   return new SessionManager({
     projectRoot,
     createOpenAIClient: () => ({
@@ -4089,7 +4125,7 @@ function createSessionManagerForModel(projectRoot: string, model: string): Sessi
       thinkingEnabled: false,
       machineId: "machine-id-image-test",
     }),
-    getResolvedSettings: () => ({ model }),
+    getResolvedSettings: () => ({ model, multimodal }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
   });

@@ -57,7 +57,7 @@ import {
 import { clearSessionWorkingDir } from "./tools/bash-handler";
 import { reportNewPrompt } from "./common/telemetry";
 import { OpenAIMessageConverter } from "./common/openai-message-converter";
-import { supportsMultimodal } from "./common/model-capabilities";
+import { supportsMultimodal, type MultimodalMode } from "./common/model-capabilities";
 
 export type { PermissionScope } from "./settings";
 export type {
@@ -338,6 +338,7 @@ export type SessionManagerOptions = {
   createOpenAIClient: CreateOpenAIClient;
   getResolvedSettings: () => {
     model: string;
+    multimodal?: MultimodalMode;
     contextWindow?: number;
     autoCompactWindow?: number;
     webSearchTool?: string;
@@ -368,6 +369,7 @@ export class SessionManager {
   private readonly createOpenAIClient: CreateOpenAIClient;
   private readonly getResolvedSettings: () => {
     model: string;
+    multimodal?: MultimodalMode;
     contextWindow?: number;
     autoCompactWindow?: number;
     webSearchTool?: string;
@@ -415,9 +417,10 @@ export class SessionManager {
   buildOpenAIMessages(
     messages: SessionMessage[],
     thinkingEnabled: boolean,
-    model: string
+    model: string,
+    multimodal?: MultimodalMode
   ): ChatCompletionMessageParam[] {
-    return this.messageConverter.buildMessages(messages, thinkingEnabled, model);
+    return this.messageConverter.buildMessages(messages, thinkingEnabled, model, multimodal);
   }
 
   async initMcpServers(servers?: Record<string, McpServerConfig>): Promise<void> {
@@ -1494,7 +1497,8 @@ ${agentInstructions}
         const messages = this.messageConverter.buildMessages(
           this.prepareSessionMessagesForRequest(this.listSessionMessages(sessionId)),
           thinkingEnabled,
-          model
+          model,
+          this.getResolvedSettings().multimodal
         );
         const thinkingOptions = buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort);
         const response = await this.createChatCompletionStream(
@@ -1731,9 +1735,15 @@ ${agentInstructions}
     this.saveSessionMessages(sessionId, sessionMessages);
   }
 
-  private getPromptToolOptions(): { model: string; webSearchEnabled: boolean; nonInteractive: boolean } {
+  private getPromptToolOptions(): {
+    model: string;
+    multimodal?: MultimodalMode;
+    webSearchEnabled: boolean;
+    nonInteractive: boolean;
+  } {
     return {
       model: this.getResolvedSettings().model,
+      multimodal: this.getResolvedSettings().multimodal,
       webSearchEnabled: true,
       nonInteractive: this.nonInteractive,
     };
@@ -2327,7 +2337,7 @@ ${agentInstructions}
   }
 
   private preparePromptImages(sessionId: string, prompt: UserPromptContent): UserPromptContent {
-    if (supportsMultimodal(this.getResolvedSettings().model)) {
+    if (supportsMultimodal(this.getResolvedSettings().model, this.getResolvedSettings().multimodal)) {
       return prompt;
     }
 

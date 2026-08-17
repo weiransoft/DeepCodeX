@@ -43,6 +43,24 @@ test("UnderstandImage is available only to non-multimodal models", () => {
   assert.equal(getSystemPrompt("/tmp/project", { model: "gpt-4o" }).includes("## UnderstandImage"), false);
 });
 
+test("multimodal config overrides model-based multimodal detection", () => {
+  // "off" forces non-multimodal behavior even for a multimodal model.
+  const forcedOffTools = getTools({ model: "gpt-4o", multimodal: "off" }).map((tool) => tool.function.name);
+  assert.equal(forcedOffTools.includes("UnderstandImage"), true);
+  assert.equal(
+    getSystemPrompt("/tmp/project", { model: "gpt-4o", multimodal: "off" }).includes("## UnderstandImage"),
+    true
+  );
+
+  // "on" forces multimodal behavior even for a non-multimodal model.
+  const forcedOnTools = getTools({ model: "deepseek-chat", multimodal: "on" }).map((tool) => tool.function.name);
+  assert.equal(forcedOnTools.includes("UnderstandImage"), false);
+  assert.equal(
+    getSystemPrompt("/tmp/project", { model: "deepseek-chat", multimodal: "on" }).includes("## UnderstandImage"),
+    false
+  );
+});
+
 test("interactive prompt and tools include AskUserQuestion", () => {
   assert.equal(getSystemPrompt("/tmp/project").includes("## AskUserQuestion"), true);
   assert.equal(

@@ -73,6 +73,80 @@ test("resolveSettings reads top-level thinkingEnabled, notify, and webSearchTool
   assert.equal(resolved.webSearchTool, "/tmp/web-search.sh");
 });
 
+test("resolveSettings defaults multimodal to default", () => {
+  const resolved = resolveSettings(
+    {},
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  assert.equal(resolved.multimodal, "default");
+});
+
+test("resolveSettings reads top-level multimodal and ignores invalid values", () => {
+  const on = resolveSettings(
+    { multimodal: "on" },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  const off = resolveSettings(
+    { multimodal: "off" },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  const invalid = resolveSettings(
+    { multimodal: "sometimes" as never },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+
+  assert.equal(on.multimodal, "on");
+  assert.equal(off.multimodal, "off");
+  assert.equal(invalid.multimodal, "default");
+});
+
+test("resolveSettings reads MULTIMODAL from env", () => {
+  const resolved = resolveSettings(
+    { env: { MULTIMODAL: "off" } },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  assert.equal(resolved.multimodal, "off");
+});
+
+test("resolveSettings gives top-level multimodal priority over env MULTIMODAL", () => {
+  const resolved = resolveSettings(
+    {
+      multimodal: "off",
+      env: { MULTIMODAL: "on" },
+    },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  assert.equal(resolved.multimodal, "off");
+});
+
+test("resolveSettingsSources applies multimodal source precedence", () => {
+  const resolved = resolveSettingsSources(
+    {
+      env: { MULTIMODAL: "on" },
+      multimodal: "off",
+    },
+    {
+      env: { MULTIMODAL: "on" },
+      multimodal: "off",
+    },
+    {
+      model: "default-model",
+      baseURL: "https://default.example.com",
+    },
+    {
+      DEEPCODE_MULTIMODAL: "on",
+    }
+  );
+
+  assert.equal(resolved.multimodal, "on");
+});
+
 test("resolveSettings gives top-level model priority over env MODEL", () => {
   const resolved = resolveSettings(
     {
