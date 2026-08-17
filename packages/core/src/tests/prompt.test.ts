@@ -4,14 +4,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { fileURLToPath } from "url";
-import {
-  buildSkillDocumentsPrompt,
-  getDefaultSkillPrompt,
-  getPlanModePrompt,
-  getRuntimeContext,
-  getSystemPrompt,
-  getTools,
-} from "../prompt";
+import { buildSkillDocumentsPrompt, getPlanModePrompt, getRuntimeContext, getSystemPrompt, getTools } from "../prompt";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const tempDirs: string[] = [];
@@ -121,21 +114,6 @@ test("getSystemPrompt does not include runtime context", () => {
   const prompt = getSystemPrompt("/tmp/project");
   assert.equal(prompt.includes("# Local Workspace Environment"), false);
   assert.equal(prompt.includes('"root path": "/tmp/project"'), false);
-});
-
-test("getDefaultSkillPrompt loads the default skill template", () => {
-  const prompt = getDefaultSkillPrompt();
-
-  assert.equal(prompt.includes("<karpathy-guidelines-skill>"), true);
-  assert.equal(prompt.includes("# Karpathy Guidelines"), true);
-  assert.equal(prompt.includes("Use the skill documents below to assist the user:"), true);
-  assert.equal(prompt.includes('path="templates/skills/'), false);
-});
-
-test("getDefaultSkillPrompt skips disabled default skills", () => {
-  const prompt = getDefaultSkillPrompt({ enabledSkills: { "karpathy-guidelines": false } });
-
-  assert.equal(prompt, "");
 });
 
 test("getPlanModePrompt loads the dedicated Plan Mode template", () => {
@@ -256,7 +234,6 @@ test("runtime prompt assets live under templates", () => {
   assert.equal(fs.existsSync(path.join(repoRoot, "templates", "tools", "web-search.md")), true);
   assert.equal(fs.existsSync(path.join(repoRoot, "templates", "tools", "read.md.ejs")), true);
   assert.equal(fs.existsSync(path.join(repoRoot, "templates", "prompts", "init_command.md.ejs")), true);
-  assert.equal(fs.existsSync(path.join(repoRoot, "templates", "skills", "karpathy-guidelines.md")), true);
   assert.equal(fs.existsSync(path.join(repoRoot, "templates", "tools", "read.md")), false);
   assert.equal(fs.existsSync(path.join(repoRoot, "docs", "tools")), false);
   assert.equal(fs.existsSync(path.join(repoRoot, "docs", "prompts")), false);

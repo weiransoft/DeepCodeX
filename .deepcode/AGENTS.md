@@ -135,5 +135,5 @@ A **file history system** (`packages/core/src/common/file-history.ts`) provides 
 
 - **AGENTS.md loading**: The CLI loads agent instructions from `./AGENTS.md`, `./.deepcode/AGENTS.md`, or `~/.deepcode/AGENTS.md` (first found wins).
 - **Skills**: Place skill definitions in `~/.agents/skills/<name>/SKILL.md` (user-level) or `./.agents/skills/<name>/SKILL.md` (project-level). Legacy path `./.deepcode/skills/` is also supported. Each SKILL.md uses YAML frontmatter with `name` and `description` fields.
-- **Built-in skills**: Four bundled skills ship with the CLI — `deepcode-self-refer` (Deep Code CLI documentation), `image-generator` (text-to-image generation & editing), `skill-digester` (digest & install skills), `skill-writer` (create & debug skills). Additionally, `karpathy-guidelines` (behavioral guidelines to reduce LLM coding mistakes) is injected as a default skill template.
+- **Built-in skills**: Four bundled skills ship with the CLI — `deepcode-self-refer` (Deep Code CLI documentation), `image-generator` (text-to-image generation & editing), `skill-digester` (digest & install skills), `skill-writer` (create & debug skills).
 - **Prompt file references**: Use `@path/to/file` syntax in prompts to load file contents through the read tool.

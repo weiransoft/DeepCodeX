@@ -91,9 +91,7 @@ Here's an example of how your output should be structured:
 
 </summary>`;
 
-const SYSTEM_PROMPT_BASE = `你是名叫Deep Code的交互式CLI工具，帮助用户完成软件工程任务。 Use the instructions below and the tools available to you to assist the user.
-
-重要：严禁编造任何非编程相关的 URL。对于编程链接，仅限使用：1) 用户提供的上下文；2) 你确定的官方文档主域名。在输出前，必须自查该链接是否存在于你的上下文记忆中；若不存在，请明确说明无法提供。`;
+const SYSTEM_PROMPT_BASE = `You are a helpful software engineer assistant.`;
 
 export type PromptToolOptions = {
   model?: string;
@@ -101,11 +99,6 @@ export type PromptToolOptions = {
   nonInteractive?: boolean;
 };
 
-type DefaultSkillPromptOptions = {
-  enabledSkills?: Record<string, boolean>;
-};
-
-const DEFAULT_SKILL_TEMPLATES = ["karpathy-guidelines.md"];
 const DEFAULT_SKILL_RESOURCE_FILE_LIMIT = 50;
 const SKILL_RESOURCE_EXCLUDED_DIRS = new Set([
   ".cache",
@@ -157,37 +150,6 @@ function readToolDocs(extensionRoot: string, options: PromptToolOptions = {}): s
     .filter((content) => content.length > 0);
 
   return docs.join("\n\n");
-}
-
-function readDefaultSkillDocs(
-  extensionRoot: string,
-  enabledSkills: Record<string, boolean> = {}
-): Array<{ name: string; content: string }> {
-  const skillsDir = path.join(extensionRoot, "templates", "skills");
-  return DEFAULT_SKILL_TEMPLATES.map((entry) => {
-    const fullPath = path.join(skillsDir, entry);
-    const name = path.basename(entry, ".md");
-    if (enabledSkills[name] === false) {
-      return null;
-    }
-    try {
-      return {
-        name,
-        content: fs.readFileSync(fullPath, "utf8").trim(),
-      };
-    } catch {
-      return null;
-    }
-  }).filter((skill): skill is { name: string; content: string } => Boolean(skill?.content));
-}
-
-export function getDefaultSkillPrompt(options: DefaultSkillPromptOptions = {}): string {
-  const skillDocs = readDefaultSkillDocs(getExtensionRoot(), options.enabledSkills);
-  if (skillDocs.length === 0) {
-    return "";
-  }
-
-  return buildSkillDocumentsPrompt(skillDocs);
 }
 
 /** Read the dedicated prompt used when a submitted turn enters Plan Mode. */
