@@ -94,6 +94,9 @@ export default tseslint.config(
   //   - 各 package 下的 scripts/ JS 脚本
   //   - v2/tests/scripts/ 下的 MJS 性能基准/基线脚本（如 cm-12-large-bench.mjs、perf-baseline.mjs）
   //     这些脚本是独立运行的 Node.js 程序，使用 process/console 全局变量
+  //   - 根目录 tests/*.mjs 测试入口 runner（S1-D2：tests/run-tests.mjs）
+  //   - 各 package 根层 *.mjs 测试汇总 runner（如 packages/core/run-all-tests.mjs，
+  //     位于包根而非 src/tests/，S1 测试基建统一新增）
   {
     files: [
       "./scripts/**/*.js",
@@ -101,6 +104,8 @@ export default tseslint.config(
       "packages/*/scripts/**/*.js",
       "packages/*/scripts/**/*.mjs",
       "packages/*/src/v2/tests/scripts/**/*.mjs",
+      "./tests/*.mjs",
+      "packages/*/*.mjs",
     ],
     languageOptions: {
       globals: {

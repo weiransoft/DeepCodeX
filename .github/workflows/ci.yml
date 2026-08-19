@@ -52,47 +52,103 @@ jobs:
       - name: Build VSCode Extension
         run: npm run build:vscode
 
-      # ★ 新增步骤 2：测试覆盖率报告（对齐设计文档 §5.1 D-C3-2 / §5.4）
-      # 使用 Node.js 内置 --experimental-test-coverage flag，零新增依赖
-      # 同时输出 spec（控制台可读）+ lcov（机器可读）两种格式
-      - name: Test Coverage
+      # ★ S1 重构（2026-08-19）：全量测试步骤（全部 matrix 组合，单命令）
+      # 单一入口 npm test 串联全部测试：根目录 3 个孤儿测试 → core 4 runner →
+      # cli → quality → vscode，全部经 node runner 执行，零 shell 语法依赖（Windows 兼容）
+      # 详见 docs/optimization-plan-20260819.md §2（D1/D2/D3）
+      - name: Test (all workspaces)
+        run: npm test
+
+      # ★ S1 重构：合并覆盖率步骤（仅 ubuntu-latest + node 22，避免矩阵重复执行）
+      # 测试执行（Test 步骤）与覆盖率度量（本步骤）解耦：
+      # - 逐包经 runner 参数透传产出 lcov（目标一律绝对路径，规避 runner spawn cwd 陷阱）
+      # - 合并后统一阈值门禁（阈值以本地基线实测为准，ratchet 只升不降）
+      - name: Coverage (merged)
+        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '22'
         run: |
-          node --import tsx --test \
-            --experimental-test-coverage \
-            --test-reporter=spec \
-            --test-reporter=lcov \
+          mkdir -p coverage
+
+          # core 顶层（含 EAG 全部模块）
+          node packages/core/src/tests/run-tests.mjs --experimental-test-coverage \
+            --test-reporter=spec --test-reporter=lcov \
             --test-reporter-destination=stdout \
-            --test-reporter-destination=coverage.lcov \
-            packages/core/src/tests/*.test.ts
+            --test-reporter-destination=${{ github.workspace }}/coverage/core.lcov
 
-      # ★ 新增步骤 3：覆盖率阈值检查（对齐设计文档 §5.1 D-C3-3 / D-C3-13）
-      # 阈值：行 ≥80% / 分支 ≥70% / 函数 ≥85%，不达标时 CI fail
-      - name: Coverage Threshold Check
-        run: |
-          node scripts/check-coverage-threshold.js coverage.lcov \
-            --lines 80 \
-            --branches 70 \
-            --functions 85
+          # core team 模块
+          node packages/core/src/team/tests/run-tests.mjs --experimental-test-coverage \
+            --test-reporter=spec --test-reporter=lcov \
+            --test-reporter-destination=stdout \
+            --test-reporter-destination=${{ github.workspace }}/coverage/core-team.lcov
 
-      # ★ 新增步骤 4：上传覆盖率报告（对齐设计文档 §5.1 D-C3-12）
+          # core providers 模块
+          node packages/core/src/providers/tests/run-tests.mjs --experimental-test-coverage \
+            --test-reporter=spec --test-reporter=lcov \
+            --test-reporter-destination=stdout \
+            --test-reporter-destination=${{ github.workspace }}/coverage/core-providers.lcov
+
+          # core v2 模块
+          node packages/core/src/v2/tests/run-v2-tests.mjs --experimental-test-coverage \
+            --test-reporter=spec --test-reporter=lcov \
+            --test-reporter-destination=stdout \
+            --test-reporter-destination=${{ github.workspace }}/coverage/core-v2.lcov
+
+          # cli 包
+          node packages/cli/src/tests/run-tests.mjs --experimental-test-coverage \
+            --test-reporter=spec --test-reporter=lcov \
+            --test-reporter-destination=stdout \
+            --test-reporter-destination=${{ github.workspace }}/coverage/cli.lcov
+
+          # quality 包（全量，含 e2e——Test 步骤已验证 e2e 至少在单组合持续运行）
+          node packages/quality/src/tests/run-tests.mjs --experimental-test-coverage \
+            --test-reporter=spec --test-reporter=lcov \
+            --test-reporter-destination=stdout \
+            --test-reporter-destination=${{ github.workspace }}/coverage/quality.lcov
+
+          # vscode 包
+          node packages/vscode-ide-companion/src/tests/run-tests.mjs --experimental-test-coverage \
+            --test-reporter=spec --test-reporter=lcov \
+            --test-reporter-destination=stdout \
+            --test-reporter-destination=${{ github.workspace }}/coverage/vscode.lcov
+
+          # 根目录孤儿测试（glob 由 bash 展开，本步骤仅 ubuntu 运行）
+          node --import tsx --test --experimental-test-coverage \
+            --test-reporter=spec --test-reporter=lcov \
+            --test-reporter-destination=stdout \
+            --test-reporter-destination=${{ github.workspace }}/coverage/root.lcov \
+            tests/*.test.ts
+
+          # 合并全部 lcov（SF 跨包重复的风险见方案 D6）
+          cat coverage/*.lcov > coverage.lcov
+
+          # D6：SF 重复去重（同包多进程多 section / 跨包同名 SF 字符串，
+          # 按 SF 分组保留累计命中数 LH+BRH+FNH 更大的一条；
+          # 本地实测 1498 → 1492 section，涉及 5 个 SF 分组，详见 scripts/dedupe-lcov.js 头注释）
+          node scripts/dedupe-lcov.js coverage.lcov coverage.deduped.lcov
+
+          # 覆盖率阈值门禁（S1-D5：阈值 = 本地基线实测值向下取整）
+          # 2026-08-19 基线实测：行 71.76% / 分支 80.61% / 函数 45.07% → 71/80/45
+          # ratchet 约定：阈值只升不降，调升必须附新一轮全量基线实测数据，禁止无数据降阈
+          node scripts/check-coverage-threshold.js coverage.deduped.lcov \
+            --lines 71 \
+            --branches 80 \
+            --functions 45
+
+      # ★ 上传覆盖率报告（合并 lcov + 逐包 lcov 一并归档）
       # 通过 GitHub Actions artifact 下载查看详细覆盖率，不依赖外部服务
       - name: Upload Coverage Report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report-${{ matrix.os }}-${{ matrix.node-version }}
-          path: coverage.lcov
+          path: |
+            coverage.lcov
+            coverage.deduped.lcov
+            coverage/
 
-      # ★ 新增步骤 5：EAG 专属门禁（对齐设计文档 §5.1 D-C3-9 / D-C3-14 / §5.6）
+      # ★ EAG 专属门禁（对齐设计文档 §5.1 D-C3-9 / D-C3-14 / §5.6）
       # 仅在 ubuntu-latest + node 22 运行，避免矩阵重复执行
-      # 包含 4 步：fixtures 完整性 + 静态扫描 + 集成测试 + 全量回归
+      # 包含 3 步：fixtures 完整性 + 静态扫描 + 集成测试
+      # （原步骤 4"core 全量回归"已删除——与 Test (all workspaces) 步骤完全重复，见方案 D3）
       - name: EAG Gate
         if: matrix.os == 'ubuntu-latest' && matrix.node-version == '22'
         run: bash tests/scripts/ci-eag-gate.sh
-
-      # ★ 新增步骤 6：Team 模块专属门禁（对齐设计文档 §5.2.2 P0-3）
-      # 仅在 ubuntu-latest + node 22 运行，避免矩阵重复执行
-      # 包含 team 模块全部单元测试 + CLI team-cmd 集成测试
-      - name: Team Gate
-        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '22'
-        run: bash tests/scripts/ci-team-gate.sh

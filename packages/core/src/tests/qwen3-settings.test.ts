@@ -16,6 +16,19 @@ import { resolveSettings, resolveSettingsSources } from "../settings";
 
 const DEFAULTS = { model: "default-model", baseURL: "https://default.example.com" };
 
+// ============================================================================
+// 本地 baseURL 放行开关
+//
+// 测试用 BASE_URL=http://localhost:8000/v1 模拟本地 LLM 端点（Ollama/vLLM/MLX 等），
+// 需通过 DEEPCODE_ALLOW_PRIVATE_BASE_URL=true 显式放行（settings.ts P0 安全设计：
+// 默认拦截私网/回环地址防 SSRF，本地端点须显式开启）。
+// SSRF 阻断与放行语义已由 provider-security.test.ts 专项覆盖，
+// 本文件专注别名解析，统一携带放行开关避免与安全校验耦合。
+// ============================================================================
+const LOCAL_LLM_ENV = {
+  DEEPCODE_ALLOW_PRIVATE_BASE_URL: "true",
+} as const;
+
 test("LLM_BASE_URL 别名解析为 baseURL", () => {
   const resolved = resolveSettingsSources(
     {
@@ -35,6 +48,7 @@ test("LLM_API_KEY 别名解析为 apiKey", () => {
   const resolved = resolveSettingsSources(
     {
       env: {
+        ...LOCAL_LLM_ENV,
         LLM_API_KEY: "sk-7314d75a1e774abda07aa9c797b72326",
         BASE_URL: "http://localhost:8000/v1",
       },
@@ -50,6 +64,7 @@ test("LLM_MODEL 别名解析为 model", () => {
   const resolved = resolveSettingsSources(
     {
       env: {
+        ...LOCAL_LLM_ENV,
         LLM_MODEL: "Qwen/Qwen3.6-27B",
         BASE_URL: "http://localhost:8000/v1",
         API_KEY: "sk-test",
@@ -82,6 +97,7 @@ test("无前缀版本优先于 LLM_ 前缀（API_KEY 优先于 LLM_API_KEY）", 
   const resolved = resolveSettingsSources(
     {
       env: {
+        ...LOCAL_LLM_ENV,
         API_KEY: "sk-primary",
         LLM_API_KEY: "sk-fallback",
         BASE_URL: "http://localhost:8000/v1",
@@ -98,6 +114,7 @@ test("无前缀版本优先于 LLM_ 前缀（MODEL 优先于 LLM_MODEL）", () =
   const resolved = resolveSettingsSources(
     {
       env: {
+        ...LOCAL_LLM_ENV,
         MODEL: "primary-model",
         LLM_MODEL: "fallback-model",
         BASE_URL: "http://localhost:8000/v1",
@@ -115,6 +132,7 @@ test("LLM_TIMEOUT=1200 解析为 timeout=1200（秒）", () => {
   const resolved = resolveSettingsSources(
     {
       env: {
+        ...LOCAL_LLM_ENV,
         LLM_TIMEOUT: "1200",
         BASE_URL: "http://localhost:8000/v1",
         API_KEY: "sk-test",
@@ -131,6 +149,7 @@ test("TIMEOUT 优先于 LLM_TIMEOUT（无前缀优先原则）", () => {
   const resolved = resolveSettingsSources(
     {
       env: {
+        ...LOCAL_LLM_ENV,
         TIMEOUT: "300",
         LLM_TIMEOUT: "1200",
         BASE_URL: "http://localhost:8000/v1",
@@ -148,6 +167,7 @@ test("timeout 默认值 600 秒（未设置任何 timeout 环境变量时）", (
   const resolved = resolveSettingsSources(
     {
       env: {
+        ...LOCAL_LLM_ENV,
         BASE_URL: "http://localhost:8000/v1",
         API_KEY: "sk-test",
       },
@@ -163,6 +183,7 @@ test("timeout 无效值回退到默认 600 秒", () => {
   const resolved = resolveSettingsSources(
     {
       env: {
+        ...LOCAL_LLM_ENV,
         LLM_TIMEOUT: "not-a-number",
         BASE_URL: "http://localhost:8000/v1",
         API_KEY: "sk-test",
@@ -221,6 +242,7 @@ test("LLM_CONTEXT_WINDOW 解析为 contextWindow 字段（v1.2 已实现，用�
   const resolved = resolveSettingsSources(
     {
       env: {
+        ...LOCAL_LLM_ENV,
         LLM_CONTEXT_WINDOW: "131072",
         LLM_BASE_URL: "http://localhost:8000/v1",
         LLM_API_KEY: "sk-test",
@@ -242,6 +264,7 @@ test("contextWindow 默认值为 131072（未设置 LLM_CONTEXT_WINDOW 时）", 
   const resolved = resolveSettingsSources(
     {
       env: {
+        ...LOCAL_LLM_ENV,
         BASE_URL: "http://localhost:8000/v1",
         API_KEY: "sk-test",
         MODEL: "gpt-4",
@@ -258,6 +281,7 @@ test("CONTEXT_WINDOW 无前缀优先于 LLM_CONTEXT_WINDOW", () => {
   const resolved = resolveSettingsSources(
     {
       env: {
+        ...LOCAL_LLM_ENV,
         CONTEXT_WINDOW: "65536",
         LLM_CONTEXT_WINDOW: "131072",
         BASE_URL: "http://localhost:8000/v1",

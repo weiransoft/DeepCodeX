@@ -156,7 +156,9 @@ type DefaultSkillPromptOptions = {
 
 // 默认 skill 模板列表：这些 skill 会通过 readDefaultSkillDocs() 自动注入到系统提示
 // 影响所有用户的基础体验，新增/删除需谨慎评估（E6 增强方案）
-const DEFAULT_SKILL_TEMPLATES = [
+// 导出说明（S5.2，2026-08-19）：导出供测试直接断言运行时导出面
+// （default-skills.test.ts 测试组 3 原以读源码文本方式断言，属表面测试，已改为 import 常量断言）
+export const DEFAULT_SKILL_TEMPLATES = [
   "karpathy-guidelines.md", // Karpathy 四大核心原则（代码质量基础）
   "design-aesthetics.md", // 设计美学原则（反 AI slop，视觉质量）
   "ui-ux-best-practices.md", // UI/UX 最佳实践（可访问性 + 交互质量）

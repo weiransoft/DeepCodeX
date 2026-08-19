@@ -55,13 +55,6 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * 等待去抖窗口（默认 300ms 去抖 + 200ms 缓冲）
- */
-async function waitForDebounce(debounceMs = 300): Promise<void> {
-  await sleep(debounceMs + 200);
-}
-
-/**
  * 轮询等待直到事件收集器满足断言条件。
  *
  * 并发套件运行时，fs.watch 事件可能因事件循环竞争而延迟到达；
@@ -155,7 +148,8 @@ test("FW-02: 启动监听并接收文件创建事件", async () => {
   const filePath = path.join(tempProject, "new-file.py");
   fs.writeFileSync(filePath, "print('hello')\n", "utf8");
 
-  await waitForDebounce(100);
+  // 轮询等待事件到达（固定等待在并发套件高负载下会漏收事件导致 flaky）
+  await waitForEvents(collector, (events) => events.some((e) => e.path === "new-file.py"));
   await watcher.stop();
 
   // 注意：fs.watch 在 macOS 上创建文件可能表现为 'modified'（取决于平台）
@@ -187,7 +181,8 @@ test("FW-03: 启动监听并接收文件删除事件", async () => {
   // 删除文件
   fs.unlinkSync(filePath);
 
-  await waitForDebounce(100);
+  // 轮询等待事件到达（固定等待在并发套件高负载下会漏收事件导致 flaky）
+  await waitForEvents(collector, (events) => events.some((e) => e.path === "to-delete.ts"));
   await watcher.stop();
 
   assert.ok(collector.events.length > 0, "应至少收到一个事件");
@@ -219,7 +214,9 @@ test("FW-04: 300ms 去抖聚合（同路径多次事件合并为一次回调）"
     await sleep(20); // 间隔 20ms，全部在 300ms 去抖窗口内
   }
 
-  await waitForDebounce(300);
+  // 轮询等待去抖回调触发（事件仅在 300ms 去抖窗口结束后聚合发出一次；
+  // 写入在回调前已全部完成，首个事件到达后不会再有第二个回调）
+  await waitForEvents(collector, (events) => events.some((e) => e.path === "debounce-test.ts"));
   await watcher.stop();
 
   // 验证：同路径的事件应聚合为 1 次（去抖窗口内只回调一次）
@@ -253,7 +250,9 @@ test("FW-05: excludeDirs 排除目录（node_modules 等不触发事件）", asy
   const normalFile = path.join(tempProject, "normal.ts");
   fs.writeFileSync(normalFile, "normal\n", "utf8");
 
-  await waitForDebounce(100);
+  // 轮询等待对照文件事件到达（事件已流转后，excluded 文件"零事件"断言才有确定性；
+  // 与 FW-06 相同模式：正向事件作为负向断言的时间锚点）
+  await waitForEvents(collector, (events) => events.some((e) => e.path === "normal.ts"), 2000);
   await watcher.stop();
 
   // 验证：excluded 路径不应触发事件
@@ -362,7 +361,9 @@ test("FW-08: macOS 非递归 + 手动子目录监听（新建子目录自动挂�
   const nestedFile = path.join(nestedDir, "helper.ts");
   fs.writeFileSync(nestedFile, "export const x = 1;\n", "utf8");
 
-  await waitForDebounce(100);
+  // 轮询等待事件到达（固定等待在并发套件高负载下会漏收事件导致 flaky；
+  // 动态挂载子目录 watcher 存在竞态，事件可能不达——超时后走下方宽松验证分支）
+  await waitForEvents(collector, (events) => events.some((e) => e.path === "src/utils/helper.ts"));
   await watcher.stop();
 
   // 验证：新建子目录中的文件事件应被捕获
@@ -396,7 +397,12 @@ test("FW-09: .deepcode 自身目录排除", async () => {
   const deepcodeFile = path.join(deepcodeDir, "codemap.json");
   fs.writeFileSync(deepcodeFile, "{}\n", "utf8");
 
-  await waitForDebounce(100);
+  // 对照：正常文件事件作为"事件已流转"的确定性时间锚点
+  // （纯负向断言在并发负载下不可判定：事件未到可能是被排除、也可能是尚未送达）
+  fs.writeFileSync(path.join(tempProject, "control.ts"), "control\n", "utf8");
+
+  // 轮询等待对照事件到达（固定等待在并发套件高负载下会漏收事件导致 flaky）
+  await waitForEvents(collector, (events) => events.some((e) => e.path === "control.ts"));
   await watcher.stop();
 
   // 验证：.deepcode 目录中的文件不应触发事件
@@ -428,7 +434,11 @@ test("FW-10: 语言检测（从扩展名推断 language 字段）", async () => 
   fs.writeFileSync(path.join(tempProject, "g.java"), "java\n", "utf8");
   fs.writeFileSync(path.join(tempProject, "h.unknown"), "unknown\n", "utf8");
 
-  await waitForDebounce(100);
+  // 轮询等待全部 8 个文件的事件到达（固定等待在并发套件高负载下会漏收事件导致 flaky）
+  const expectedPaths = ["a.ts", "b.tsx", "c.js", "d.py", "e.go", "f.rs", "g.java", "h.unknown"];
+  await waitForEvents(collector, (events) =>
+    expectedPaths.every((expected) => events.some((e) => e.path === expected))
+  );
   await watcher.stop();
 
   // 验证 language 字段
@@ -489,7 +499,9 @@ test("FW-12: 事件路径为相对 projectRoot 的 POSIX 风格", async () => {
   // 在嵌套目录中创建文件
   fs.writeFileSync(path.join(nestedDir, "file.ts"), "content\n", "utf8");
 
-  await waitForDebounce(100);
+  // 轮询等待事件到达（固定 100ms 等待在并发套件高负载下会漏收事件导致 flaky，
+  // 与 FW-01 一致改用轮询：事件快速到达时立即通过，高负载下最多容错 2 秒）
+  await waitForEvents(collector, (events) => events.some((e) => e.path.endsWith("file.ts")));
   await watcher.stop();
 
   // 验证：path 应为 POSIX 风格相对路径（正斜杠）

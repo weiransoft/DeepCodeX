@@ -380,17 +380,18 @@ test_fl01() {
   return 0
 }
 
-# FL-02: full-lifecycle 无 --task/--task-file 应失败（参数错误，exit_code=1）
-# 验证：有 API Key 但无 --goal/--task/--task-file 时，返回 exitCode=1
+# FL-02: full-lifecycle 无 --task/--task-file 应失败（参数错误，exit_code=2）
+# 验证：有 API Key 但无 --goal/--task/--task-file 时，返回 exitCode=2
 # 实现：executeFullLifecycleCommand 调用 resolveTaskDescription(allowMissing=true)，
-#   若 task/taskFile 都缺失返回 null，再检查 goal，若 goal 也缺失则报错 return 1
+#   若 task/taskFile 都缺失返回 null，再检查 goal，若 goal 也缺失则报错 return 2
+# S2 退出码修正（2026-08-19）：缺少必填参数属参数错误，退出码 1 → 2
 # 模式：with-key（确保不是因 API Key 缺失而失败）
 test_fl02() {
   local project_root
   project_root="$(create_test_project fl02 with-key)"
 
   run_cli "$project_root" with-key team full-lifecycle
-  assert_equal "$LAST_EXIT_CODE" "1" "exit_code" || return 1
+  assert_equal "$LAST_EXIT_CODE" "2" "exit_code" || return 1
   # 验证 stderr 含参数错误提示（对齐 team-cmd.ts:596 实现）
   assert_contains "$LAST_STDERR" "需要 --goal 或 --task" "stderr" || return 1
   return 0

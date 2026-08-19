@@ -2,7 +2,8 @@
  * team-cmd-autonomous.test.ts - autonomous 子命令集成测试（P0-1 验证）
  *
  * 设计文档 §7.4：9 个 AC 用例（AC-001~AC-009）
- *   - AC-001: autonomous 无 --goal 参数 → exitCode=1, stderr 含 "需要 --goal"
+ *   - AC-001: autonomous 无 --goal 参数 → exitCode=2（S2 退出码修正：参数缺失属参数错误）,
+ *             stderr 含 "需要 --goal"
  *   - AC-002: autonomous 无 API Key → exitCode=1, stderr 含 3 个关键字
  *   - AC-003: autonomous 成功完成 1 轮迭代 → exitCode=0, stdout 含 "Ralph Autonomous Loop"
  *   - AC-004: autonomous 连续失败 abort → exitCode=2, stdout 含 "Fatal abort" 或 "连续失败"
@@ -275,7 +276,7 @@ function createResumableRun(projectRoot: string, runId: string, objective: strin
 // AC-001: autonomous 无 --goal 参数
 // ============================================================================
 
-test("AC-001: autonomous 无 --goal 参数 → exitCode=1, stderr 含 '需要 --goal'", async () => {
+test("AC-001: autonomous 无 --goal 参数 → exitCode=2（S2 参数错误）, stderr 含 '需要 --goal'", async () => {
   // 使用临时目录作为 projectRoot，避免污染当前工作目录
   const tmpDir = makeTempProject("ac001");
   const cap = captureOutput();
@@ -289,7 +290,9 @@ test("AC-001: autonomous 无 --goal 参数 → exitCode=1, stderr 含 '需要 --
       projectRoot: tmpDir,
       injectedClient: buildStubClientReturningValidOutput(),
     });
-    assert.equal(exitCode, 1, `exitCode 应为 1，实际: ${exitCode}`);
+    // S2 退出码修正（2026-08-19）：缺少必填参数（--goal/--task）属于参数错误 → exit 2
+    // （此前返回 1，与帮助文本 "2 = 参数错误（缺少必填参数）" 声明不符）
+    assert.equal(exitCode, 2, `exitCode 应为 2，实际: ${exitCode}`);
     assert.ok(cap.stderr.includes("需要 --goal"), `stderr 应含 "需要 --goal"，实际: ${cap.stderr}`);
   } finally {
     cap.restore();

@@ -151,12 +151,17 @@ test("E16. parseEagDesignCommand 对其他 EAG 命令返回 unknown", () => {
   assert.equal(parser.parseEagDesignCommand({ text: "/eag-status" }).kind, "unknown");
 });
 
-test("E17. parseEagDesignCommand 对非命令文本返回 unknown", () => {
+test("E17. parseEagDesignCommand 对非命令文本返回 unknown（带参数文本前缀匹配为命令）", () => {
   // 验证 parseEagDesignCommand()：对非命令文本返回 unknown
   const parser = new EagCommandParser();
   assert.equal(parser.parseEagDesignCommand({ text: "请帮我执行 /eag-design" }).kind, "unknown");
-  assert.equal(parser.parseEagDesignCommand({ text: "/eag-design arg" }).kind, "unknown");
   assert.equal(parser.parseEagDesignCommand({ text: undefined }).kind, "unknown");
+  // S3.2 前缀匹配（2026-08-19 评审必改项 5）：/eag-design 开头的带参数文本
+  // 识别为命令（非 --key=value 形式的裸参数 payload 为 null，参数解析由
+  // extractDesignLoopInputFromPrompt 处理，详见 eag-design-command.test.ts）
+  const withArg = parser.parseEagDesignCommand({ text: "/eag-design arg" });
+  assert.equal(withArg.kind, "eag-design");
+  assert.equal(withArg.payload, null);
 });
 
 test("E18. parseEagDesignCommand 对 /eag-design 含技能匹配返回 unknown", () => {

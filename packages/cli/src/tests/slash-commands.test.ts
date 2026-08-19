@@ -62,7 +62,24 @@ test("buildSlashCommands prefixes skills before built-ins", () => {
     "eag-autonomous-status",
     "eag-autonomous-stop",
     "eag-graph",
+    // DeepCodeX EAG DESIGN Loop 命令（2026-08-19 S3.2 接线，注册在末尾）
+    "eag-design",
   ]);
+});
+
+// S3.2（2026-08-19 DESIGN Loop 接线）：/eag-design 精确匹配与参数提示
+test("findExactSlashCommand returns built-in /eag-design with paradigm hint", () => {
+  const items = buildSlashCommands(skills);
+  const item = findExactSlashCommand(items, "/eag-design");
+  assert.ok(item);
+  assert.equal(item?.kind, "eag-design");
+  // 参数提示必须覆盖必填 --requirement 与可选 --paradigm（4 个合法范式 ID）
+  assert.ok(item?.args?.some((a) => a.includes("--requirement")));
+  const paradigmArg = item?.args?.find((a) => a.includes("--paradigm"));
+  assert.ok(paradigmArg, "--paradigm 参数提示应存在");
+  for (const id of ["ddd-layered", "clean-architecture", "cqrs-es", "microservice"]) {
+    assert.ok(paradigmArg?.includes(id), `--paradigm 提示应包含合法范式 ${id}`);
+  }
 });
 
 test("filterSlashCommands matches partial prefixes", () => {

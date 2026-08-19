@@ -39,6 +39,13 @@ import {
   GraphGuardImpl,
   createPredicateRegistry,
   createRetrySuppressionConfig,
+  // S3.2（2026-08-19）：DESIGN Loop 三角色装配组件（/eag-design 接线批次）
+  LlmProductManager,
+  LlmArchitect,
+  FeedbackAwareArchitect,
+  FeedbackCapturingEvaluator,
+  StaticDesignEvaluator,
+  DesignLoopOrchestrator,
 } from "@vegamo/deepcode-core";
 import type {
   AutonomousOrchestrator,
@@ -50,6 +57,7 @@ import type {
   GraphRunContext,
   GraphLogger,
   TaskRequirement,
+  LLMClient,
 } from "@vegamo/deepcode-core";
 
 /** 装配日志回调（与 core P5LogCallback / AutonomousOrchestratorLogCallback 签名对齐） */
@@ -423,6 +431,76 @@ export function buildGraphLoopOrchestratorOptions(
     // 失败安全：装配失败不阻断 CLI 启动，/eag-graph 维持 fail-closed 降级
     const reason = err instanceof Error ? err.message : String(err);
     log(`EAG GraphLoopOrchestratorOptions 装配失败（命令将不可用）：${reason}`, "error");
+    return undefined;
+  }
+}
+
+// ============================================================================
+// S3.2（2026-08-19）：DesignLoopOrchestrator 装配（/eag-design）
+// ============================================================================
+
+/**
+ * DESIGN Loop LLM 客户端工厂签名
+ *
+ * 与 App.tsx 中 eagDynamicSuggester 的 createDecisionLLMClient 同源：
+ * 每次角色调用时惰性解析当前 settings 并经 ProviderFactory 路由创建客户端，
+ * 返回 null 表示无可用凭据（角色将抛 DesignRoleError，由 session.ts 通知用户）。
+ */
+export type DesignLlmClientFactory = () => LLMClient | null;
+
+/**
+ * 真实构造完整装配的 DesignLoopOrchestrator 实例（/eag-design 命令执行体）
+ *
+ * 装配依赖（全部为 core 生产组件，无任何 mock）：
+ * - PM：LlmProductManager（原始需求 → StructuredRequirement，LLM 驱动）
+ * - 架构师：FeedbackAwareArchitect 包装 LlmArchitect
+ *   （评估失败时携带 verdict 反馈重试，反馈与 requirement 对象引用绑定实现跨轮隔离）
+ * - 评估器：FeedbackCapturingEvaluator 包装 StaticDesignEvaluator
+ *   （真实静态判定：范式一致性 / 设计完整性 / 反模式零命中 / signalEvidence 证据强制；
+ *   判定结果旁路回调给 FeedbackAwareArchitect 构成重试闭环）
+ * - 编排器：DesignLoopOrchestrator（PM → 架构师 → 评估器 → 失败重试 → HUMAN_CHECKPOINT）
+ *
+ * StaticDesignEvaluator 默认参数说明（strict + 非锁定）：
+ * - 评估模式 strict：任一判定项失败即打回，符合 DESIGN Loop 质量门禁定位
+ * - paradigmLocked=false：signalEvidence 证据强制判定启用。锁定场景（--paradigm）
+ *   下架构师 prompt 仍强制填写 signalEvidence（供审计），因此该判定在两种场景
+ *   均可正常通过，不会误判
+ *
+ * 状态共享安全性（对齐 session.ts §4.18.3 契约"避免每次命令重复构造"）：
+ * - DesignLoopOrchestrator.run() 入口重置运行时状态（iterations / checkpoint 标志）
+ * - FeedbackAwareArchitect.lastFeedback 与 requirement 对象引用绑定，
+ *   新一轮 run() 的 requirement 是新对象，旧反馈不会跨命令泄漏
+ *
+ * @param createLLMClient LLM 客户端工厂（与 session.ts createLLMClient 同源）
+ * @param log 装配日志回调（可选，默认空操作）
+ * @returns 装配完成的 DesignLoopOrchestrator；任一组件构造失败返回 undefined（失败安全）
+ */
+export function buildDesignOrchestrator(
+  createLLMClient: DesignLlmClientFactory,
+  log: AssemblyLogCallback = () => {}
+): DesignLoopOrchestrator | undefined {
+  try {
+    // 1. PM 角色：LLM 驱动的需求结构化（用户故事 / 验收标准 / 领域词汇表 / 非功能需求）
+    const pm = new LlmProductManager({ createLLMClient });
+
+    // 2. 架构师角色：FeedbackAwareArchitect 包装 LlmArchitect，
+    //    使评估失败重试时能携带上轮 verdict 的 reason/findings/suggestedFix
+    const feedbackArchitect = new FeedbackAwareArchitect(new LlmArchitect({ createLLMClient }));
+
+    // 3. 评估器角色：FeedbackCapturingEvaluator 包装 StaticDesignEvaluator（真实静态判定），
+    //    每次评估后将判定回调给 feedbackArchitect，构成"失败 → 带反馈重试"闭环
+    const evaluator = new FeedbackCapturingEvaluator(new StaticDesignEvaluator(), (requirement, verdict) =>
+      feedbackArchitect.recordVerdict(requirement, verdict)
+    );
+
+    // 4. 三角色编排器（config 省略 → 使用 createDefaultDesignLoopConfig() 默认配置）
+    const orchestrator = new DesignLoopOrchestrator(pm, feedbackArchitect, evaluator);
+    log("EAG DesignLoopOrchestrator 装配完成", "info");
+    return orchestrator;
+  } catch (err) {
+    // 失败安全：装配失败不阻断 CLI 启动，/eag-design 维持 fail-closed 降级
+    const reason = err instanceof Error ? err.message : String(err);
+    log(`EAG DesignLoopOrchestrator 装配失败（命令将不可用）：${reason}`, "error");
     return undefined;
   }
 }

@@ -19,7 +19,7 @@
  * 7. edm             —— 企业域模型（§5.8 5 个公共内核域 + 信号检测 + 3 条红线）
  * 8. tcs             —— 技术组件规范（§5.9 5 组件 + 13 红线 + 26 fixtures）
  * 9. doc-driven      —— 文档驱动开发（§5.10 三文档契约 + 状态机 + 任务分解 + Git 过程）
- * 10. gate           —— 方案先行门禁（§5.12.1 G-1~G-7 七道门禁 + 编排器）
+ * 10. gate           —— 方案先行门禁（§5.12.1 G-1~G-8 八道门禁 + 编排器）
  * 11. design         —— DESIGN Loop（§5.10.5 PM/架构师/评估器三角色编排）
  * 12. discovery      —— 棕地 Discovery（§5.11 BrownfieldDiscovery + ChangeClassifier + ExistingContractGuard）
  * 13. coding         —— CODING Loop（§5.10.5 Phase A 骨架 + Phase B LLM 填充 + STRICT 评估 + FIX 回灌）
@@ -166,6 +166,9 @@ export * from "./eak/index";
 // ETSB（Enterprise Tech Stack Blueprint）维护 4 语言 × 10 层技术选型矩阵 + 3 套部署蓝图 +
 // TechStackSelector 选型决策器 + SEED-06 技术栈锁定（变更须用户显式批准）。
 //
+// @experimental 待接线：SEED-06 锁定等待 G-4 门禁升级接入（类型与选型逻辑已就绪，
+// 运行时锁定链路尚未在 CLI 装配中激活，接线债务由 optimization-plan-20260819 跟踪）。
+//
 // 公开 API：
 // - 类型：TechLanguage / TechLayer / TechStackOption / TechStackMatrix / TechStackDecision /
 //         DeploymentBlueprint / TechStackLock / TechStackSelectionInput 等
@@ -182,6 +185,20 @@ export * from "./etsb/index";
 //
 // EDM（Enterprise Data Model）维护 5 个公共内核域预定义模型（用户/组织/角色/功能权限/数据权限）+
 // EdmSignalDetector 信号检测器 + 3 条 EDM 专属红线（EDM-01/02/03）。
+//
+// @experimental 待接线：等待 DESIGN Loop 接入（域模型检测能力已就绪，
+// DESIGN Loop 编排链路尚未在 CLI 装配中消费，接线债务由 optimization-plan-20260819 跟踪）。
+//
+// ---------------------------------------------------------------------------
+// 附：icp（Industry Compliance Pack，行业合规包）状态说明（不经根 barrel 导出）
+// ---------------------------------------------------------------------------
+// @experimental 待接线：
+// - icp 模块（eag/icp/）不经本根 barrel 导出，外部消费走子模块路径（eag/icp/index）
+// - 类型层已被 G-7 门禁消费（gate-g7-checker.ts import type ComplianceEvidenceReport /
+//   ComplianceRuleResult from "../icp/types"）
+// - 运行时层等待 TestingOrchestrator CLI 装配（testing-orchestrator.ts:729
+//   complianceEvidence: undefined 预留接口，本批次不启用 ICP）
+// ---------------------------------------------------------------------------
 //
 // 公开 API：
 // - 类型：EdmDomainId / EdmDomainDefinition / EdmDetectionResult / EdmRedlineViolation 等
@@ -239,7 +256,7 @@ export * from "./doc-driven/index";
 // 10. gate —— 方案先行门禁（§5.12.1）
 // ============================================================================
 //
-// 七道门禁（G-1~G-7）+ GateOrchestrator 编排器：
+// 八道门禁（G-1~G-8，权威来源 gate/index.ts）+ GateOrchestrator 编排器：
 // - G-1：无已批准 spec/plan 禁入 CODING Loop
 // - G-2：方案必经多角色评审 + 用户批准
 // - G-3：方案偏离检测（≥3 符号级偏离触发 HUMAN_CHECKPOINT）
@@ -247,6 +264,12 @@ export * from "./doc-driven/index";
 // - G-5：CODING Loop 退出门禁（任务卡全 completed + STRICT 通过 + git clean + gitleaks）
 // - G-6：TESTING Loop 进入门禁（G-5 通过 + 单测全过 + spec.md approved）（批次 10 新增）
 // - G-7：TESTING Loop 退出门禁（覆盖率达标 + 契约/E2E 全过 + 合规证据 + PR 描述就绪）（批次 10 新增）
+// - G-8：DEPLOY Loop 退出门禁（IaC 完整 + 健康就绪 + 烟雾通过 + 监控就位 + 回滚预案存在）（批次 13 新增）
+//
+// G-8 编排差异（重要，与 G-1~G-7 不同）：
+// - G-1~G-7 由 GateOrchestrator.run() 编排（静态文档门禁）
+// - G-8 不通过 GateOrchestrator.run() 编排（运行期数据门禁），由 DevOpsOrchestrator
+//   在部署完成后独立调用（详见 gate/index.ts 头注释）
 //
 // 公开 API：
 // - 类型：GateId / GateSeverity / GateContext / GateResult / GateOrchestrationResult /
@@ -267,17 +290,21 @@ export * from "./gate/index";
 // 11. design —— DESIGN Loop（§5.10.5）
 // ============================================================================
 //
-// 死代码清理记录：
-// - 原 design-orchestrator.ts（DesignLoopOrchestrator）已删除：依赖 PM/Architect 协议无生产实现，
-//   导致编排器无法被实例化，成为死代码
-// - 原 design-protocols.ts 已删除：ProductManagerProtocol / ArchitectProtocol 无生产实现，
-//   DesignEvaluatorProtocol 已迁移至 design-evaluator.ts（与唯一实现 StaticDesignEvaluator 共置）
+// 接线状态说明（2026-08-19 S3.2 接线完成后更新）：
+// - design-orchestrator.ts 与 design-protocols.ts 文件存在于 design/ 目录
+// - PM/Architect 协议已有 LLM 驱动生产实现（design-roles-llm.ts）：
+//   LlmProductManager / LlmArchitect / FeedbackAwareArchitect / FeedbackCapturingEvaluator
+// - CLI 侧经 eag-orchestrator-assembly.ts buildDesignOrchestrator() 装配并注入
+//   SessionManager（App.tsx），/eag-design 命令生产可用
 //
-// 死代码清理后保留的公开 API：
+// 根 barrel 实际导出的公开 API：
 // - 类型：DesignLoopInput / ProjectContext / UserStory / StructuredRequirement /
 //         ArchitectureDocument / DomainModelDocument / DesignArtifacts / DesignEvaluationVerdict 等
 // - 常量：DEFAULT_DESIGN_LOOP_CONFIG / ARCHITECTURE_MD_SECTIONS / DOMAIN_MODEL_MD_SECTIONS
-// - 协议接口：DesignEvaluatorProtocol（从 design-evaluator.ts 导出）
+// - 协议接口：ProductManagerProtocol / ArchitectProtocol / DesignEvaluatorProtocol
+// - 编排器：DesignLoopOrchestrator
+// - LLM 角色生产实现：LlmProductManager / LlmArchitect / FeedbackAwareArchitect /
+//   FeedbackCapturingEvaluator / DesignRoleError
 // - 渲染器与校验器：renderArchitectureMd / renderDomainModelMd / validateArchitectureMd / validateDomainModelMd
 // - 评估器实现：StaticDesignEvaluator
 export * from "./design/index";

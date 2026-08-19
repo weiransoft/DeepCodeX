@@ -75,7 +75,7 @@ import { DefaultSymbolGraphAdapter } from "./v2/context/default-symbol-graph-ada
 import { registerInterruptTools } from "./interrupts/register-tools";
 import type { InterruptibleSessionManager } from "./interrupts/llm-tools";
 import { killProcessTree } from "./common/process-tree";
-import { GitFileHistory, type FileHistoryCheckpointResult } from "./common/file-history";
+import { FileHistoryCoordinator } from "./file-history-coordinator";
 import { clearSessionState, getSnippet, rebuildSessionStateFromHistory } from "./common/state";
 import {
   appendProjectPermissionAllows,
@@ -744,6 +744,9 @@ export class SessionManager {
   private activePromptController: AbortController | null = null;
   // SkillManager 实例（技能扫描/解析/去重/归一化，见 docs/dev/review.md CRITICAL-1 模块 3）
   private readonly skillManager: SkillManager;
+  // FileHistoryCoordinator 实例（undo/file-history 域协调器，S4 首阶段拆分，
+  // 抽取模式见 file-history-coordinator.ts 模块头注释，供后续域拆分复用）
+  private readonly fileHistoryCoordinator: FileHistoryCoordinator;
   private readonly sessionControllers = new Map<string, AbortController>();
   private readonly processTimeoutControls = new Map<string, ProcessTimeoutControl>();
   private readonly liveProcessKeys = new Set<string>();
@@ -851,6 +854,17 @@ export class SessionManager {
       projectRoot: this.projectRoot,
       getResolvedSettings: () => this.getResolvedSettings(),
       listSessionMessages: (sessionId: string) => this.listSessionMessages(sessionId),
+    });
+    // FileHistoryCoordinator 初始化（最小依赖注入：projectRoot / getProjectStorage /
+    // listSessionMessages / saveSessionMessages，对齐 SkillManager 回调注入模式）。
+    // getProjectStorage 返回 projectDir（file-history git 目录在其下解析）；
+    // 消息读写回调绑定 this，hash 回写链路（updateLatestUserCheckpointHash）依赖二者。
+    this.fileHistoryCoordinator = new FileHistoryCoordinator({
+      projectRoot: this.projectRoot,
+      getProjectStorage: () => this.getProjectStorage().projectDir,
+      listSessionMessages: (sessionId: string) => this.listSessionMessages(sessionId),
+      saveSessionMessages: (sessionId: string, messages: SessionMessage[]) =>
+        this.saveSessionMessages(sessionId, messages),
     });
     // V2 上下文钩子注入：构造时传入 OpenAIMessageConverter
     // 未注入 contextHook 时行为与 v1 完全一致（向后兼容）
@@ -1860,7 +1874,7 @@ ${agentInstructions}
     this.throwIfAborted(signal);
 
     const sessionId = crypto.randomUUID();
-    this.ensureFileHistorySession(sessionId);
+    this.fileHistoryCoordinator.ensureFileHistorySession(sessionId);
 
     // V2 上下文缓存刷新（新会话场景）：
     // 在 buildSystemMessage / buildMessages 之前刷新，确保首条 system message 能命中 preBuildContext 缓存。
@@ -1938,7 +1952,7 @@ ${agentInstructions}
 
     this.appendPlanModeTransitionMessages(sessionId, false, Boolean(userPrompt.planMode));
 
-    this.recordUserPromptCheckpoint(sessionId);
+    this.fileHistoryCoordinator.recordUserPromptCheckpoint(sessionId);
     const userMessage = this.buildUserMessage(sessionId, userPrompt);
     this.appendSessionMessage(sessionId, userMessage);
 
@@ -2107,8 +2121,8 @@ ${agentInstructions}
 
     this.reportNewPrompt();
 
-    this.ensureFileHistorySession(sessionId);
-    const checkpoint = this.recordUserPromptCheckpoint(sessionId);
+    this.fileHistoryCoordinator.ensureFileHistorySession(sessionId);
+    const checkpoint = this.fileHistoryCoordinator.recordUserPromptCheckpoint(sessionId);
     if (checkpoint.changedFilePaths.length) {
       const content = `Note that the user manually modified these files:\n${checkpoint.changedFilePaths.join("\n")}`;
       this.appendSessionMessage(sessionId, this.buildSystemMessage(sessionId, content));
@@ -5652,12 +5666,13 @@ ${agentInstructions}
   listUndoTargets(sessionId: string): UndoTarget[] {
     return this.listSessionMessages(sessionId)
       .map((message, index) => ({ message, index }))
-      .filter(({ message }) => this.isUndoTargetMessage(message))
+      .filter(({ message }) => this.fileHistoryCoordinator.isUndoTargetMessage(message))
       .map(({ message, index }) => ({
         message,
         index,
         canRestoreCode: Boolean(
-          message.checkpointHash && this.canRestoreCheckpointHash(sessionId, message.checkpointHash)
+          message.checkpointHash &&
+          this.fileHistoryCoordinator.canRestoreCheckpointHash(sessionId, message.checkpointHash)
         ),
       }));
   }
@@ -5701,7 +5716,7 @@ ${agentInstructions}
     if (!message.checkpointHash) {
       throw new Error("Selected message has no code checkpoint.");
     }
-    this.restoreCheckpointHash(sessionId, message.checkpointHash);
+    this.fileHistoryCoordinator.restoreCheckpointHash(sessionId, message.checkpointHash);
   }
 
   private normalizeSessionMessage(message: SessionMessage): SessionMessage {
@@ -5738,77 +5753,13 @@ ${agentInstructions}
     return { projectCode, projectDir, sessionsIndexPath };
   }
 
-  private getFileHistory(): GitFileHistory {
-    return new GitFileHistory(this.projectRoot, this.getFileHistoryGitDir());
-  }
-
-  private getFileHistoryGitDir(): string {
-    const { projectDir } = this.getProjectStorage();
-    return path.join(projectDir, "file-history", ".git");
-  }
-
-  private ensureFileHistorySession(sessionId: string): string | undefined {
-    return this.getFileHistory().ensureSession(sessionId);
-  }
-
-  private getCurrentCheckpointHash(sessionId: string): string | undefined {
-    return this.getFileHistory().getCurrentCheckpointHash(sessionId);
-  }
-
-  private recordUserPromptCheckpoint(sessionId: string): FileHistoryCheckpointResult {
-    return this.getFileHistory().recordTrackedFilesCheckpoint(sessionId, "User prompt checkpoint");
-  }
-
-  private prepareFileMutationCheckpoint(sessionId: string, filePath: string): void {
-    const fileHistory = this.getFileHistory();
-    const previousHash = fileHistory.ensureSession(sessionId);
-    if (!previousHash) {
-      return;
-    }
-    this.updateLatestUserCheckpointHash(sessionId, undefined, previousHash);
-    const nextHash = fileHistory.recordCheckpoint(sessionId, [filePath], "Pre-mutation checkpoint");
-    if (nextHash && nextHash !== previousHash) {
-      this.updateLatestUserCheckpointHash(sessionId, previousHash, nextHash);
-    }
-  }
-
-  private recordFileMutationCheckpoint(sessionId: string, filePath: string): void {
-    const fileHistory = this.getFileHistory();
-    fileHistory.ensureSession(sessionId);
-    fileHistory.recordCheckpoint(sessionId, [filePath], "File mutation checkpoint");
-  }
-
-  private updateLatestUserCheckpointHash(sessionId: string, previousHash: string | undefined, nextHash: string): void {
-    const messages = this.listSessionMessages(sessionId);
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const message = messages[index];
-      if (!message || !this.isUndoTargetMessage(message)) {
-        continue;
-      }
-      if (message.checkpointHash && message.checkpointHash !== previousHash) {
-        return;
-      }
-      messages[index] = {
-        ...message,
-        checkpointHash: nextHash,
-        updateTime: new Date().toISOString(),
-      };
-      this.saveSessionMessages(sessionId, messages);
-      return;
-    }
-  }
-
-  private canRestoreCheckpointHash(sessionId: string, checkpointHash: string): boolean {
-    return this.getFileHistory().canRestore(sessionId, checkpointHash);
-  }
-
-  private restoreCheckpointHash(sessionId: string, checkpointHash: string): void {
-    this.getFileHistory().restore(sessionId, checkpointHash);
-  }
-
-  private isUndoTargetMessage(message: SessionMessage): boolean {
-    return message.role === "user" && message.visible && !message.compacted;
-  }
+  // S4 拆分说明（2026-08-19）：以下 undo/file-history 域的 11 个私有方法已整体迁移至
+  // FileHistoryCoordinator（getFileHistory / getFileHistoryGitDir / ensureFileHistorySession /
+  // getCurrentCheckpointHash / recordUserPromptCheckpoint / prepareFileMutationCheckpoint /
+  // recordFileMutationCheckpoint / updateLatestUserCheckpointHash / canRestoreCheckpointHash /
+  // restoreCheckpointHash / isUndoTargetMessage），类内调用点改为
+  // this.fileHistoryCoordinator.*；公开组合层（listUndoTargets / restoreSessionConversation /
+  // restoreSessionCode）保留在本类。抽取模式见 file-history-coordinator.ts 模块头注释。
 
   private ensureProjectDir(): string {
     const { projectDir } = this.getProjectStorage();
@@ -5947,7 +5898,7 @@ ${agentInstructions}
       createTime: now,
       updateTime: now,
       meta: { userPrompt: this.cloneUserPromptForMeta(prompt) },
-      checkpointHash: this.getCurrentCheckpointHash(sessionId),
+      checkpointHash: this.fileHistoryCoordinator.getCurrentCheckpointHash(sessionId),
     };
   }
 
@@ -6167,8 +6118,9 @@ ${agentInstructions}
       onProcessStdout: (pid, chunk) => this.onProcessStdout?.(Number(pid), chunk),
       onProcessTimeoutControl: (pid, control) => this.setSessionProcessTimeoutControl(sessionId, pid, control),
       onBackgroundProcessComplete: (completion) => this.addBackgroundProcessCompletionMessage(sessionId, completion),
-      onBeforeFileMutation: (filePath) => this.prepareFileMutationCheckpoint(sessionId, filePath),
-      onAfterFileMutation: (filePath) => this.recordFileMutationCheckpoint(sessionId, filePath),
+      onBeforeFileMutation: (filePath) =>
+        this.fileHistoryCoordinator.prepareFileMutationCheckpoint(sessionId, filePath),
+      onAfterFileMutation: (filePath) => this.fileHistoryCoordinator.recordFileMutationCheckpoint(sessionId, filePath),
       shouldStop: () => this.isInterrupted(sessionId),
     };
     const parsedToolCalls = toolCalls

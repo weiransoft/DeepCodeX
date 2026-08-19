@@ -92,7 +92,14 @@ export interface TeamCommandArgs {
   forceRole?: boolean;
   /** 共识模式（5 角色联合评审） */
   consensus?: boolean;
-  /** 失败时中止（fail-fast） */
+  /**
+   * 失败时中止（fail-fast）
+   * S2 语义消费（2026-08-19）：统一判定 failFast !== false（默认 true）
+   *   - consensus 模式：任一角色评审失败 → 跳过聚合阶段并返回退出码 1
+   *   - full-lifecycle 线性模式：任一阶段失败 → 立即中止（默认行为保持）
+   *   - false（--no-fail-fast）：部分失败时继续执行并汇总，最终仍有失败 → 返回 1
+   *   - dispatch 单角色 / autonomous / full-lifecycle --use-loop 模式不适用
+   */
   failFast?: boolean;
   /** 项目根目录 */
   projectRoot?: string;
@@ -154,7 +161,10 @@ export async function executeTeamCommand(args: TeamCommandArgs): Promise<number>
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     writeStderrLine(`\n✖ Team 命令执行失败: ${message}\n`);
-    return 1;
+    // S2 退出码修正（2026-08-19）：未捕获异常属于运行时异常，返回 4
+    // （此前返回 1 与帮助文本"4 = 运行时异常"声明不符，对齐 quality-cmd.ts 先例：
+    //   业务失败 = 1，参数错误 = 2，未捕获异常 = 4）
+    return 4;
   }
 }
 
@@ -179,7 +189,9 @@ function executeListCommand(startTime: number): number {
 async function executeMatchCommand(args: TeamCommandArgs, startTime: number): Promise<number> {
   if (!args.keywords || args.keywords.length === 0) {
     writeStderrLine("match 子命令需要 --keywords 参数\n");
-    return 1;
+    // S2 退出码修正（2026-08-19）：缺少必填参数属于参数错误，返回 2
+    // （此前返回 1 与帮助文本"2 = 参数错误（缺少必填参数）"声明不符）
+    return 2;
   }
 
   // 构造 TaskRequirement（注意：priority 是字符串字面量）
@@ -446,8 +458,9 @@ function capRoleOutputForSynthesis(output: string): string {
  *      全部 skipped（无 API Key）时跳过聚合调用并显式标注"未聚合"
  *   4. 结构化输出：打印 ConsensusResult 报告（含各角色意见原文 + 聚合结论）
  *
- * 退出码语义（与 executeDispatchCommand 单角色模式一致）：
- *   - succeeded / partial / skipped → 0（ skipped 为环境原因，非代码错误）
+ * 退出码语义（S2 fail-fast 修订，2026-08-19）：
+ *   - failFast=true（默认）且任一角色 failed → 1（跳过聚合阶段，快速失败）
+ *   - succeeded / partial / skipped → 0（skipped 为环境原因，非代码错误）
  *   - failed → 1
  *
  * @param taskDescription 任务描述文本
@@ -507,6 +520,18 @@ async function executeConsensusReview(
   }
 
   // ==========================================================================
+  // S2 fail-fast 语义消费（2026-08-19）
+  // ==========================================================================
+  // 统一判定：failFast = args.failFast !== false（默认 true，--no-fail-fast 显式关闭）
+  //   - failFast=true：任一角色评审 failed → 跳过聚合（synthesis）阶段，
+  //     快速失败直接以退出码 1 结束（部分失败不再返回 partial 的 0）
+  //   - failFast=false：保持原有行为——全部角色执行完后聚合成功角色产出，
+  //     partial 状态返回 0
+  // 注：全部 skipped（无 API Key）时 failedCount=0，fail-fast 不触发（E2E TA-06 依赖）
+  const failFast = args.failFast !== false;
+  const abortByFailFast = failFast && failedCount > 0;
+
+  // ==========================================================================
   // 步骤 3：聚合结论（LLM synthesis，复用 executeDispatch 调用链）
   // ==========================================================================
   // 仅当存在成功角色产出时才发起聚合调用；
@@ -516,7 +541,10 @@ async function executeConsensusReview(
   let synthesisNote: string | null = null;
   const successfulReviews = roleResults.filter((r) => r.result.status === "succeeded" && r.result.output);
 
-  if (successfulReviews.length > 0) {
+  if (abortByFailFast) {
+    // fail-fast 生效：跳过聚合调用（聚合耗时且结论基于不完整输入，快速失败语义下无意义）
+    synthesisNote = `fail-fast 生效：${failedCount} 个角色评审失败，跳过聚合阶段`;
+  } else if (successfulReviews.length > 0) {
     // 构造聚合任务：嵌入各成功角色的评审意见（超限截断），要求三段式结论
     const embeddedReviews = successfulReviews
       .map(({ roleId, result }) => `### ${roleId} 的评审意见\n${capRoleOutputForSynthesis(result.output ?? "")}`)
@@ -584,7 +612,14 @@ async function executeConsensusReview(
   const duration = Date.now() - startTime;
   writeStdoutLine(`\n⏱  耗时: ${duration}ms\n`);
 
-  // 退出码语义：failed（全部失败）→ 1；其余（含 partial/skipped）→ 0
+  // 退出码语义（S2 fail-fast 修订，2026-08-19）：
+  //   - failFast=true 且任一角色 failed → 1（部分失败也快速失败，目的性变更：
+  //     修复"帮助文本宣传 fail-fast 但实际零消费"的不一致）
+  //   - failed（全部失败）→ 1
+  //   - 其余（succeeded / partial / skipped）→ 0
+  if (abortByFailFast) {
+    return 1;
+  }
   return consensusStatus === "failed" ? 1 : 0;
 }
 
@@ -616,6 +651,26 @@ async function executeAutonomousCommand(args: TeamCommandArgs, startTime: number
   const projectRoot = args.projectRoot ?? process.cwd();
   writeStdoutLine(`🚀 启动 Ralph Autonomous Loop\n`);
   writeStdoutLine(`项目根目录: ${projectRoot}\n`);
+
+  // ==========================================================================
+  // Step 1.5: 必填参数前置校验（S2 补充修正，2026-08-19 e2e 实测暴露）
+  // ==========================================================================
+  // 缺少必填参数（--goal / --task / --task-file 全部缺失）必须在 Step 2 的
+  // API Key 环境检查之前判定为参数错误并返回退出码 2。
+  // 原因：此前参数校验位于 Step 3（API Key 检查之后），无 Key 环境下
+  // "team autonomous"（缺参）会先命中 API Key 缺失路径返回 1，参数错误被
+  // 环境错误掩盖——与 dispatch（参数校验最先执行）和 full-lifecycle
+  // （goal 校验先于 API Key 检查）的校验顺序不一致。
+  // 边界排除（AC-008 实测约束）：--resume-run 场景 objective 可从已保存的
+  // RunState 恢复，此时缺 --goal/--task 不属于参数错误——前置校验必须放行，
+  // 由 Step 3 的 resume 分支判定（找到可恢复 run 则正常续跑；找不到且无
+  // goal 才在 API Key 检查之后返回 2）。
+  // 注：--task-file 已提供但读取失败/为空的场景仍由 Step 3 的 FIX-10
+  // 路径处理（退出码 1），本前置校验不改变其语义。
+  if (!args.resumeRun && !args.goal && !args.task && !args.taskFile) {
+    writeStderrLine("autonomous 子命令需要 --goal 或 --task 参数\n");
+    return 2;
+  }
 
   // ==========================================================================
   // Step 2: 检查 API Key（injectedClient 优先 → createOpenAIClient 兜底）
@@ -687,7 +742,8 @@ async function executeAutonomousCommand(args: TeamCommandArgs, startTime: number
       objective = args.goal ?? (resolvedTask.status === "ok" ? resolvedTask.task : "") ?? "";
       if (!objective) {
         writeStderrLine("autonomous 子命令需要 --goal 或 --task 参数\n");
-        return 1;
+        // S2 退出码修正（2026-08-19）：缺少必填参数属于参数错误，返回 2
+        return 2;
       }
       const runId = generateRunId();
       const runDir = path.join(runsDir, runId);
@@ -703,7 +759,8 @@ async function executeAutonomousCommand(args: TeamCommandArgs, startTime: number
     objective = args.goal ?? (resolvedTask.status === "ok" ? resolvedTask.task : "") ?? "";
     if (!objective) {
       writeStderrLine("autonomous 子命令需要 --goal 或 --task 参数\n");
-      return 1;
+      // S2 退出码修正（2026-08-19）：缺少必填参数属于参数错误，返回 2
+      return 2;
     }
     const runId = generateRunId();
     const runDir = path.join(runsDir, runId);
@@ -861,7 +918,8 @@ async function executeFullLifecycleCommand(args: TeamCommandArgs, startTime: num
   const project = args.goal ?? (resolvedTask.status === "ok" ? resolvedTask.task : undefined);
   if (!project) {
     writeStderrLine("full-lifecycle 子命令需要 --goal 或 --task 参数\n");
-    return 1;
+    // S2 退出码修正（2026-08-19）：缺少必填参数属于参数错误，返回 2
+    return 2;
   }
 
   const projectRoot = args.projectRoot ?? process.cwd();
@@ -879,7 +937,12 @@ async function executeFullLifecycleCommand(args: TeamCommandArgs, startTime: num
  * 线性模式：8 阶段顺序执行
  *
  * 每个阶段通过 executeDispatch 调度到对应角色，阶段 8 调用 DocCodeConsistencyChecker。
- * 任一阶段失败即中止并返回 1。
+ *
+ * fail-fast 语义（S2 消费，2026-08-19，统一判定 failFast = args.failFast !== false）：
+ *   - failFast=true（默认）：任一阶段失败即中止并返回 1（原有行为保持）
+ *   - failFast=false（--no-fail-fast）：失败阶段记入 failedStages 并继续执行后续阶段，
+ *     全部阶段执行完毕后 failedStages 非空 → 汇总输出并返回 1（对齐 quality-cmd all 模式先例）
+ *   - skipped 不视为失败（原有条件保持，E2E TC-LOOP-01~08 依赖）
  */
 async function executeFullLifecycleLinear(
   args: TeamCommandArgs,
@@ -898,6 +961,10 @@ async function executeFullLifecycleLinear(
     { role: "test-expert", title: "测试验证", artifact: "tests/" },
     { role: "solo-coder", title: "文档对照代码审查", artifact: "DOC_CODE_REVIEW.md" },
   ];
+
+  // S2 fail-fast：--no-fail-fast 模式下记录失败阶段，最终统一汇总判定
+  const failFast = args.failFast !== false;
+  const failedStages: Array<{ index: number; title: string; error?: string }> = [];
 
   writeStdoutLine(`\n🎬 启动 8 阶段全流程（线性模式）: ${project}\n`);
   writeStdoutLine(`项目根: ${projectRoot}\n\n`);
@@ -932,11 +999,20 @@ async function executeFullLifecycleLinear(
     writeStdoutLine(`  产物: ${stage.artifact}\n`);
 
     if (result.status !== "succeeded" && result.status !== "skipped") {
-      writeStderrLine(`\n✖ 阶段 ${i + 1} (${stage.title}) 失败，中止全流程\n`);
+      if (failFast) {
+        // 默认快速失败：立即中止全流程（原有行为保持）
+        writeStderrLine(`\n✖ 阶段 ${i + 1} (${stage.title}) 失败，中止全流程\n`);
+        if (result.error) {
+          writeStderrLine(`  错误: ${result.error}\n`);
+        }
+        return 1;
+      }
+      // --no-fail-fast：记录失败阶段并继续执行后续阶段
+      writeStderrLine(`\n✖ 阶段 ${i + 1} (${stage.title}) 失败（--no-fail-fast，继续执行后续阶段）\n`);
       if (result.error) {
         writeStderrLine(`  错误: ${result.error}\n`);
       }
-      return 1;
+      failedStages.push({ index: i + 1, title: stage.title, error: result.error });
     }
   }
 
@@ -956,6 +1032,19 @@ async function executeFullLifecycleLinear(
   const reviewExitCode = executeDocCodeReviewStage(projectRoot, docPaths, args.testCommand);
   if (reviewExitCode !== 0) {
     writeStderrLine(`\n✖ 阶段 8 (${stage8.title}) 审查未通过，全流程失败\n`);
+    if (failFast) {
+      return 1;
+    }
+    // --no-fail-fast：阶段 8 为最终阶段（无后续可继续），计入失败汇总统一判定
+    failedStages.push({ index: 8, title: stage8.title });
+  }
+
+  // S2 最终判定：--no-fail-fast 模式下汇总全部失败阶段
+  if (failedStages.length > 0) {
+    const failedSummary = failedStages
+      .map((s) => `阶段${s.index}(${s.title})${s.error ? `: ${s.error}` : ""}`)
+      .join("、");
+    writeStderrLine(`\n✖ 全流程执行完毕，但 ${failedStages.length} 个阶段失败: ${failedSummary}\n`);
     return 1;
   }
 
@@ -1191,7 +1280,8 @@ ${roleList}
   --force-role                      禁用自动匹配（需要 --role）
   --consensus                       启用 5 角色联合评审（并行派发 + LLM 聚合共识点/分歧点/最终建议；
                                     与 --role/--force-role 互斥）
-  --fail-fast                       失败时立即中止
+  --fail-fast                       失败时立即中止（默认开启；仅 consensus 与 full-lifecycle
+                                    线性模式生效；--no-fail-fast 部分失败时继续执行并汇总）
   --max-iterations <n>              最大迭代次数（autonomous / full-lifecycle --use-loop，默认 5/3）
   --project-root <path>             项目根目录（默认当前目录）
   --resume-run                      断点续跑（autonomous 模式）

@@ -29,6 +29,8 @@ import type { SkillInfo } from "@vegamo/deepcode-core";
  *   - eag-autonomous-status: 查询自主运行状态（断点续跑证据）
  *   - eag-autonomous-stop: 熔断中止自主运行
  *   - eag-graph: 执行 Loop-Graph 融合工作图
+ * DeepCodeX EAG S3.2 扩展（2026-08-19 DESIGN Loop 接线）：新增 1 个 EAG 编排命令
+ *   - eag-design: 执行 DESIGN Loop（PM 结构化需求 → 架构师设计 → 评估器判定 → 失败带反馈重试）
  *   说明：命令执行统一走 core session.ts 的 EagCommandParser 前缀解析分发，
  *         此处注册仅解决可发现性（Tab 补全 / /help 展示 / inline 参数提示）。
  */
@@ -70,7 +72,9 @@ export type SlashCommandKind =
   | "eag-autonomous"
   | "eag-autonomous-status"
   | "eag-autonomous-stop"
-  | "eag-graph";
+  | "eag-graph"
+  // ===== EAG DESIGN Loop 命令（2026-08-19 S3.2 接线） =====
+  | "eag-design";
 
 export type SlashCommandItem = {
   kind: SlashCommandKind;
@@ -317,6 +321,18 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
     label: "/eag-graph",
     args: ["--graph-file <path>", "[--max-parallel <n>]", "[--node-retry-limit <n>]"],
     description: "Execute a Loop-Graph fusion work graph (loop/task/decision/merge/fork/end nodes)",
+  },
+  // ===== EAG DESIGN Loop 命令（2026-08-19 S3.2 接线） =====
+  // 执行路径与上方 EAG P5 命令同款：选中后填充命令前缀供用户补参数，
+  // 提交后经裸文本透传至 core session.ts 的 EagCommandParser 统一解析
+  // （eag-design 前缀匹配 → extractDesignLoopInputFromPrompt 提取
+  //   --requirement / --paradigm 参数 → DesignLoopOrchestrator.run()）。
+  {
+    kind: "eag-design",
+    name: "eag-design",
+    label: "/eag-design",
+    args: ["--requirement <text>", "[--paradigm <ddd-layered|clean-architecture|cqrs-es|microservice>]"],
+    description: "Run DESIGN Loop (PM structures requirement, architect designs, evaluator gates with feedback retry)",
   },
 ];
 

@@ -206,12 +206,14 @@ test("S6. ci.yml 关键步骤存在性校验", () => {
   assert.match(content, /name:\s*TypeCheck Strict/, "ci.yml 应含 TypeCheck Strict 步骤");
   assert.match(content, /npx tsc --noEmit --strict/, "ci.yml 应含 tsc --strict 命令");
 
-  // 校验新增的 Test Coverage 步骤
-  assert.match(content, /name:\s*Test Coverage/, "ci.yml 应含 Test Coverage 步骤");
+  // S1 重构（2026-08-19）：Test Coverage（core only）拆分为
+  // Test (all workspaces)（全量测试）+ Coverage (merged)（合并覆盖率门禁）
+  assert.match(content, /name:\s*Test \(all workspaces\)/, "ci.yml 应含 Test (all workspaces) 步骤");
+  assert.match(content, /npm test/, "ci.yml Test 步骤应调用 npm test 单一入口");
+  assert.match(content, /name:\s*Coverage \(merged\)/, "ci.yml 应含 Coverage (merged) 步骤");
   assert.match(content, /--experimental-test-coverage/, "ci.yml 应含 --experimental-test-coverage flag");
 
-  // 校验新增的 Coverage Threshold Check 步骤
-  assert.match(content, /name:\s*Coverage Threshold Check/, "ci.yml 应含 Coverage Threshold Check 步骤");
+  // 覆盖率阈值门禁保留（合并 lcov 后统一计算）
   assert.match(content, /check-coverage-threshold\.js/, "ci.yml 应调用 check-coverage-threshold.js");
 
   // 校验新增的 Upload Coverage Report 步骤
@@ -221,6 +223,11 @@ test("S6. ci.yml 关键步骤存在性校验", () => {
   // 校验新增的 EAG Gate 步骤
   assert.match(content, /name:\s*EAG Gate/, "ci.yml 应含 EAG Gate 步骤");
   assert.match(content, /ci-eag-gate\.sh/, "ci.yml 应调用 ci-eag-gate.sh");
+
+  // S1 重构：Team Gate 步骤已删除（内容被 Test (all workspaces) 覆盖），
+  // ci-team-gate.sh 文件一并删除，ci.yml 不应再引用
+  assert.doesNotMatch(content, /ci-team-gate\.sh/, "ci.yml 不应再引用 ci-team-gate.sh（Team Gate 已删除）");
+  assert.doesNotMatch(content, /name:\s*Team Gate/, "ci.yml 不应再含 Team Gate 步骤");
 });
 
 // ============================================================================
@@ -261,7 +268,10 @@ test("S8. ci-eag-gate.sh 头部注释完整性", () => {
   assert.match(head, /fixtures 完整性校验/, "应含 fixtures 完整性校验步骤描述");
   assert.match(head, /EAG 静态扫描/, "应含 EAG 静态扫描步骤描述");
   assert.match(head, /EAG 集成测试/, "应含 EAG 集成测试步骤描述");
-  assert.match(head, /全量回归测试/, "应含全量回归测试步骤描述");
+  // S1 重构（2026-08-19）：步骤 4"全量回归测试"已删除（与 CI Test 步骤重复），
+  // 头部应说明 3 步检查与删除原因，不再声明执行全量回归
+  assert.match(head, /3 步检查/, "应声明 3 步检查（原 4 步已删除全量回归）");
+  assert.doesNotMatch(head, /4 步检查/, "不应再声明 4 步检查");
 });
 
 // ============================================================================
@@ -291,12 +301,18 @@ test("S10. ci-eag-gate.sh 关键步骤调用校验", () => {
   // Step 2: tsc --noEmit --strict
   assert.match(content, /npx tsc --noEmit --strict/, "应执行 tsc --noEmit --strict");
 
-  // Step 3: 批次集成测试脚本调用
+  // Step 3: 批次集成测试脚本调用（S1 重构后保留的核心检查）
   assert.match(content, /eag-batch9-integration\.sh/, "应调用 eag-batch9-integration.sh");
   assert.match(content, /eag-batch10-integration\.sh/, "应调用 eag-batch10-integration.sh");
 
-  // Step 4: 全量回归测试
-  assert.match(content, /node --import tsx --test src\/tests\/\*\.test\.ts/, "应执行全量回归测试");
+  // S1 重构（2026-08-19）：原 Step 4 全量回归命令断言已删除
+  // （该命令已从 gate 脚本移除，全量回归由 CI Test (all workspaces) 步骤覆盖），
+  // 改为断言 gate 脚本不再包含全量回归命令
+  assert.doesNotMatch(
+    content,
+    /node --import tsx --test src\/tests\/\*\.test\.ts/,
+    "不应再执行 core 顶层全量回归（已由 CI Test 步骤覆盖）"
+  );
 });
 
 // ============================================================================

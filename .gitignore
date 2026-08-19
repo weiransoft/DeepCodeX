@@ -48,6 +48,11 @@ feedback_data/
 tests/e2e-output/
 tests/e2e-reports/
 
+# 覆盖率运行产物 (本地 Coverage 步骤等价实测生成，CI 中经 artifact 归档，不应入库)
+coverage/
+coverage.lcov
+coverage.deduped.lcov
+
 # Backup files (开发过程备份文件，不应入库)
 *.bak
 *.bak2

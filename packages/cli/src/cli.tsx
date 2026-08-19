@@ -117,11 +117,10 @@ async function main(): Promise<void> {
       // boolean 选项只 push key（如 --quiet）
       if (typeof value === "boolean") {
         if (value) tokens.push(`--${key}`);
-      } else if (Array.isArray(value)) {
-        // 数组选项：逗号分隔转字符串（如 --skip-dirs a,b,c）
-        tokens.push(`--${key}`, value.join(","));
       } else {
         // string / number 选项：push key + value
+        // 注：cli-args.ts 全部选项声明为 string/number/boolean（无 array 类型，
+        // --skip-dirs 等"多值"选项以逗号分隔 string 形式传入），无数组分支
         tokens.push(`--${key}`, String(value));
       }
     }

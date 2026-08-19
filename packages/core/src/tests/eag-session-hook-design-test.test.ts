@@ -43,7 +43,9 @@ import {
 test("G1. EagCommandParser 对 /eag-design 命令返回 eag-design kind（命令判定逻辑）", () => {
   // EAG-P3 批次 11 S3：isEagDesignPrompt 已迁移至 EagCommandParser.parse() 统一入口
   // 验证：EagCommandParser 能正确识别 /eag-design 命令（kind === "eag-design"）
-  // 判定规则：text 严格匹配 /eag-design，无图片附件，无技能匹配
+  // 判定规则（S3.2 前缀匹配，2026-08-19）：裸命令或以 /eag-design 开头带参数
+  // 的文本均识别为命令（--requirement/--paradigm 经 extractDesignLoopInputFromPrompt
+  // 解析）；无图片附件，无技能匹配
   const manager = createTestManager(() => {});
   const internal = manager as any;
   const parser = internal.eagCommandParser;
@@ -51,9 +53,13 @@ test("G1. EagCommandParser 对 /eag-design 命令返回 eag-design kind（命令
   // 正确命令格式
   assert.equal(parser.parse({ text: "/eag-design" }).kind, "eag-design");
   assert.equal(parser.parse({ text: "  /eag-design  " }).kind, "eag-design");
+  // S3.2 前缀匹配：带参数文本识别为命令；非 --key=value 形式的裸参数
+  // 无法解析出 DesignLoopInput → payload 为 null（fail-closed 由 session 层提示）
+  const withBareArg = parser.parse({ text: "/eag-design arg" });
+  assert.equal(withBareArg.kind, "eag-design");
+  assert.equal(withBareArg.payload, null);
   // 非命令格式
   assert.equal(parser.parse({ text: "请帮我执行 /eag-design" }).kind, "unknown");
-  assert.equal(parser.parse({ text: "/eag-design arg" }).kind, "unknown");
   assert.equal(parser.parse({ text: "/eag-build" }).kind, "eag-build");
   assert.equal(parser.parse({ text: undefined }).kind, "unknown");
   // 含图片或技能时不识别为命令（避免误触发）

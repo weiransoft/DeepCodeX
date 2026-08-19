@@ -140,8 +140,10 @@ test("HK-02: onBeforeToolExecution 钩子拒绝黑名单命令（F-07 安全修�
 
   // 验证：即使 YOLO+Auto，黑名单命令也被拒绝
   assert.equal(result[0].result.ok, false);
-  // error 信息应包含"拒绝"或"denied"
-  assert.match(result[0].result.error ?? "", /拒绝|denied/i);
+  // error 信息应包含"拒绝"/"denied"（审批门控钩子拦截）或"blocked"
+  // （executor 的 P0 fail-closed 守卫在钩子之前拦截，形成纵深防御；
+  // 两层防线都正确拒绝了黑名单命令，消息措辞依拦截层级而定）
+  assert.match(result[0].result.error ?? "", /拒绝|denied|blocked/i);
 });
 
 test("HK-03: onBeforeToolExecution 钩子放行白名单命令", async () => {

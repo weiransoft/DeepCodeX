@@ -202,9 +202,14 @@ test("C9. parse() 对不匹配任何命令的文本返回 unknown", () => {
   // 普通对话文本
   assert.equal(parser.parse({ text: "请帮我实现一个订单系统" }).kind, "unknown");
   assert.equal(parser.parse({ text: "今天天气不错" }).kind, "unknown");
-  // 带参数的命令（设计规定命令无参数，参数通过 messageParams 注入 D-S3-7）
+  // 带参数的命令（严格匹配命令无参数，参数通过 messageParams 注入 D-S3-7）
   assert.equal(parser.parse({ text: "/eag-build --force" }).kind, "unknown");
-  assert.equal(parser.parse({ text: "/eag-design order" }).kind, "unknown");
+  // 例外（S3.2 前缀匹配，2026-08-19）：/eag-design 改为前缀匹配以支持 CLI 内联参数，
+  // 带参数文本识别为 eag-design 命令；非 --key=value 形式的裸参数无法解析出
+  // DesignLoopInput → payload 为 null（fail-closed 由 session 层提示用户补充参数）
+  const designWithBareArg = parser.parse({ text: "/eag-design order" });
+  assert.equal(designWithBareArg.kind, "eag-design");
+  assert.equal(designWithBareArg.payload, null);
   assert.equal(parser.parse({ text: "/eag-test all" }).kind, "unknown");
   // 包含命令字符串但非严格匹配
   assert.equal(parser.parse({ text: "请帮我执行 /eag-build" }).kind, "unknown");
