@@ -29,7 +29,7 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 | `env`               | object        | 环境变量分组（见下方子字段表）                            |
 | `contextWindow`     | number/string | 上下文窗口上限，可使用精确 token 数或 `128K`、`1M` 等格式 |
 | `autoCompactWindow` | number/string | 自动压缩阈值，默认取最终上下文窗口的 50%                  |
-| `model`             | string        | 模型名称。优先级高于 `env.MODEL`                          |
+| `model`             | string        | 模型名称。默认 `deepseek-v4-flash`，优先级高于 `env.MODEL` |
 | `thinkingEnabled`   | boolean       | 是否启用思考模式（DeepSeek V4 系列默认启用）              |
 | `reasoningEffort`   | string        | 推理强度，可选 `"high"` 或 `"max"`（默认 `"max"`）        |
 | `debugLogEnabled`   | boolean       | 是否启用调试日志输出（默认 `false`）                      |

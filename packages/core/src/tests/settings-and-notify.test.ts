@@ -11,6 +11,7 @@ import {
   type NotifySpawn,
 } from "../common/notify";
 import {
+  DEFAULT_MODEL,
   applyModelConfigSelection,
   readDeepcodePlusApiKey,
   resolveSettings,
@@ -512,17 +513,18 @@ test("resolveSettings defaults DeepSeek v4 models to thinking mode", () => {
   assert.equal(resolved.thinkingEnabled, true);
 });
 
-test("resolveSettings applies thinking defaults to the fallback model", () => {
+test("resolveSettings applies thinking defaults to the default model", () => {
   const resolved = resolveSettings(
     {},
     {
-      model: "deepseek-v4-pro",
+      model: DEFAULT_MODEL,
       baseURL: "https://default.example.com",
     },
     TEST_PROCESS_ENV
   );
 
-  assert.equal(resolved.model, "deepseek-v4-pro");
+  assert.equal(DEFAULT_MODEL, "deepseek-v4-flash");
+  assert.equal(resolved.model, DEFAULT_MODEL);
   assert.equal(resolved.thinkingEnabled, true);
 });
 
