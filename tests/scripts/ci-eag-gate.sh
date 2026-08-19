@@ -3,11 +3,12 @@
 # EAG-P3 批次 12 CI EAG 门禁脚本（C3 CI 强化）
 #
 # 功能（对齐设计文档 §5.6 / §5.1 D-C3-9 / D-C3-14）：
-#   EAG 专属 CI 门禁，包含 4 步检查：
+#   EAG 专属 CI 门禁，包含 3 步检查（S1 重构 2026-08-19）：
 #   1. fixtures 完整性校验（落地遗留 L-5：validateTcsFixtures() 纳入 CI）
 #   2. EAG 静态扫描（tsc --noEmit --strict）
 #   3. EAG 集成测试（批次 9/10/11/12/13 集成测试）
-#   4. 全量回归测试（packages/core 全部单元测试）
+#   （原步骤 4"全量回归测试（packages/core 全部单元测试）"已删除——
+#    与 CI 的 Test (all workspaces) 步骤完全重复，见 docs/optimization-plan-20260819.md D3）
 #
 # 退出码：
 #   0 = 全部检查通过
@@ -15,7 +16,6 @@
 #   2 = fixtures 完整性失败
 #   3 = EAG 静态扫描失败
 #   4 = EAG 集成测试失败
-#   5 = 全量回归测试失败
 #
 # 使用方式：
 #   bash tests/scripts/ci-eag-gate.sh
@@ -141,29 +141,11 @@ for script in \
 done
 log "✅ EAG 集成测试通过"
 
-# ---------- Step 4: 全量回归测试 ----------
-log "Step 4: 全量回归测试（packages/core 全部单元测试）"
-
-# 使用 node --import tsx --test 运行 packages/core 下全部 *.test.ts
-# 不使用 mock（对齐用户规则 C-6）
-set +e
-(
-  cd "${CORE_DIR}"
-  node --import tsx --test src/tests/*.test.ts 2>&1
-)
-REGRESSION_EXIT_CODE=$?
-set -e
-
-if [ "${REGRESSION_EXIT_CODE}" -ne 0 ]; then
-  fail "全量回归测试失败（退出码 = ${REGRESSION_EXIT_CODE}）" 5
-fi
-log "✅ 全量回归测试通过"
-
 # ---------- 摘要 ----------
 log "🎉 EAG 门禁全部通过"
 log "  - fixtures 完整性：✅"
 log "  - EAG 静态扫描：✅"
 log "  - EAG 集成测试：✅"
-log "  - 全量回归测试：✅"
+log "  （全量回归已由 CI Test (all workspaces) 步骤覆盖，本门禁不再重复执行）"
 
 exit 0

@@ -28,12 +28,12 @@
  *
  * 输出 DesignEvaluationVerdict（passed/reason/severity/findings/suggestedFix）。
  *
- * 接口迁移说明（死代码清理）：
+ * 接口迁移说明（2026-08-19 如实修正）：
  * - 原 `design-protocols.ts` 中定义的 `DesignEvaluatorProtocol` 接口已迁移至本文件
- *   （DesignEvaluatorProtocol 仅有 StaticDesignEvaluator 一个生产实现，迁移后与实现同文件，
- *    避免 design-protocols.ts 中其他无实现的接口（PM/Architect）成为死代码）
- * - 原 `design-protocols.ts` 及其 `ProductManagerProtocol`/`ArchitectProtocol` 接口因无生产实现，
- *   一并删除（详见 EAG 死代码清理任务）
+ *   （DesignEvaluatorProtocol 仅有 StaticDesignEvaluator 一个生产实现，迁移后与实现同文件）
+ * - `design-protocols.ts` 文件仍存在（定义 PM/Architect 协议，被 design-orchestrator.ts
+ *   与 3 个测试文件消费），并非已删除；PM/Architect 协议无生产实现，
+ *   接线债务由 optimization-plan-20260819 S3.2 跟踪
  *
  * @module eag/design/evaluator
  */
@@ -50,11 +50,12 @@ import type {
 // DESIGN Loop 评估器协议接口（从 design-protocols.ts 迁移而来）
 // ============================================================================
 //
-// 迁移原因（死代码清理）：
+// 迁移原因（2026-08-19 如实修正）：
 // - design-protocols.ts 中仅 DesignEvaluatorProtocol 有生产实现（StaticDesignEvaluator）
-// - ProductManagerProtocol / ArchitectProtocol 无生产实现，属"接口先行实现后置"的死代码
-// - 将 DesignEvaluatorProtocol 迁移至其唯一实现所在文件，与 StaticDesignEvaluator 共置，
-//   然后删除 design-protocols.ts 文件
+// - 将 DesignEvaluatorProtocol 迁移至其唯一实现所在文件，与 StaticDesignEvaluator 共置
+// - design-protocols.ts 文件仍存在（PM/Architect 协议被 design-orchestrator.ts 与
+//   3 个测试文件消费，未删除）；PM/Architect 无生产实现，
+//   接线债务由 optimization-plan-20260819 S3.2 跟踪
 //
 // 协议设计原则（保留原 design-protocols.ts 风格）：
 // - 协议为 TS interface，实现方通过结构子类型匹配，无需显式 implements

@@ -162,9 +162,10 @@ run_case "TC-TEAM-06" \
   "${CLI_CMD} team dispatch --task 实现登录功能"
 
 # TC-TEAM-07: team dispatch 无 --task 应失败
+# S2 退出码修正（2026-08-19）：缺少必填参数属参数错误，退出码 1 → 2
 run_case "TC-TEAM-07" \
   "team dispatch 无 --task 应失败" \
-  1 \
+  2 \
   "" \
   "${CLI_CMD} team dispatch"
 
@@ -176,9 +177,10 @@ run_case "TC-TEAM-08" \
   "${CLI_CMD} team dispatch --force-role --task test"
 
 # TC-TEAM-09: team autonomous 缺 --goal 应失败
+# S2 退出码修正（2026-08-19）：缺少必填参数属参数错误，退出码 1 → 2
 run_case "TC-TEAM-09" \
   "team autonomous 缺 --goal 应失败" \
-  1 \
+  2 \
   "" \
   "${CLI_CMD} team autonomous"
 
@@ -192,9 +194,10 @@ run_case "TC-TEAM-10" \
   "${CLI_CMD} team autonomous --goal 测试目标 --max-iterations 1 2>&1 | head -50"
 
 # TC-TEAM-11: team full-lifecycle 缺 --goal 应失败
+# S2 退出码修正（2026-08-19）：缺少必填参数属参数错误，退出码 1 → 2
 run_case "TC-TEAM-11" \
   "team full-lifecycle 缺 --goal 应失败" \
-  1 \
+  2 \
   "" \
   "${CLI_CMD} team full-lifecycle"
 

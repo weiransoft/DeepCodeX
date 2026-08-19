@@ -905,7 +905,14 @@ export { TASK_CARD_STATUSES } from "./eag/doc-driven/index";
 
 // ============================================================================
 // Gate (方案先行门禁) —— §5.12.1 方案先行门禁（Spec-First Gate）
-// EAG-P2 批次 8 新增：G-1/G-2/G-3 三道门禁 + GateOrchestrator 编排器
+// 门禁体系共 G-1~G-8 八道门禁（权威来源：eag/gate/index.ts 头注释）：
+// - G-1~G-3：方案先行基础门禁（批次 8）
+// - G-4/G-5：CODING Loop 进入/退出门禁（批次 9）
+// - G-6/G-7：TESTING Loop 进入/退出门禁（批次 10）
+// - G-8：DEPLOY Loop 退出门禁（批次 13，不经 GateOrchestrator.run() 编排，
+//   由 DevOpsOrchestrator 在部署完成后独立调用）
+// 本区块仅显式导出 G-1~G-3 Checker 与编排器核心；G-4~G-8 Checker 经 Eag 命名空间
+// （export * as Eag from "./eag/index.js"，见本文件上方）可达。
 // ============================================================================
 
 export type {
@@ -1030,6 +1037,27 @@ export { GraphBuilder } from "./eag/graph/index.js";
 // 此处补充根导出（值 + 类型），与 GraphLoopOrchestratorOptions 的扁平导出风格一致。
 export { AutonomousOrchestrator } from "./eag/p5/index.js";
 export type { AutonomousOrchestratorOptions } from "./eag/p5/index.js";
+
+// EAG DESIGN Loop 三角色编排（S3.2，2026-08-19 DESIGN Loop 接线批次）
+// 背景：DESIGN Loop 组件（编排器 / LLM 角色生产实现 / 评估器）此前仅经
+// Eag 命名空间（L299）可达；CLI 装配模块 eag-orchestrator-assembly.ts 的
+// buildDesignOrchestrator() 构造三角色并注入 SessionManagerOptions.designOrchestrator
+// 时需要顶层同名符号（与 AutonomousOrchestrator 补根导出同款先例）。
+// - DesignLoopOrchestrator：PM → 架构师 → 评估器 → 失败带反馈重试 → HUMAN_CHECKPOINT
+// - LlmProductManager / LlmArchitect：PM / 架构师协议的 LLM 驱动生产实现
+// - FeedbackAwareArchitect / FeedbackCapturingEvaluator：评估失败重试反馈闭环包装器
+// - StaticDesignEvaluator：独立静态评估器（范式一致性 / 完整性 / 反模式零命中 / 信号证据）
+// - DesignRoleError：角色执行错误（LLM 不可用 / 输出解析失败等，fail-closed）
+export {
+  DesignLoopOrchestrator,
+  LlmProductManager,
+  LlmArchitect,
+  FeedbackAwareArchitect,
+  FeedbackCapturingEvaluator,
+  StaticDesignEvaluator,
+  DesignRoleError,
+} from "./eag/design/index.js";
+export type { LlmDesignRoleOptions } from "./eag/design/index.js";
 
 // 边解析器、图级护栏、图级调度器、谓词注册表、经验存储
 export {

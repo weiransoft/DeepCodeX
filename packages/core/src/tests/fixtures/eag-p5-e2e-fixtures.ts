@@ -59,40 +59,47 @@ import {
 /**
  * 通过测试命令（真实 child_process 执行，输出 Jest 格式）
  *
- * 命令：echo Tests: 1 passed, 0 failed
+ * 命令：node -e 'console.log(process.argv[1])' 'Tests: 1 passed, 0 failed'
  * 输出：Tests: 1 passed, 0 failed
  * 退出码：0
  * 解析结果：{ passed: 1, failed: 0, skipped: 0, total: 1, parser: "jest" }
  *
  * SmartConfirmation 判定：
- * - 黑名单不命中（无危险模式）
+ * - 黑名单不命中（无 rm/sudo/shutdown 等危险模式）
  * - 白名单不命中
  * - 风险分=0 → auto-approve
  *
- * 设计说明（R1 修复）：
- * - 旧版本使用 node -e 'console.log("...")'，内层双引号与 CLI 参数外层双引号冲突
- * - CLI 参数解析正则 /--([\w][\w-]*)(?:[=\s]+(?:"([^"]*)"|'([^']*)'|...))/g 中
- *   双引号捕获组 "([^"]*)" 不支持内层双引号嵌套，导致 --test-command 值被截断
- * - 改用 echo 命令，不含任何引号，同时满足 CLI 解析和 verify-stage-handler 输出格式要求
+ * 设计说明（R2 修复：echo → node，兼容 verify-stage-handler 程序白名单）：
+ * - verify-stage-handler 的 P0 安全修复引入 ALLOWED_TEST_PROGRAMS 白名单
+ *   （npm/node/npx/pnpm/yarn/tsc/vitest/jest/mocha/python/python3/pytest），
+ *   旧版 echo 命令不在白名单内，导致 verify 阶段 fatal（测试命令程序不在白名单中：echo）
+ * - 程序改为白名单内的 node；输出文本经 process.argv[1] 以独立参数传入，
+ *   避免在 JS 代码内书写字符串字面量（否则需要嵌套引号）
+ * - 整条命令不含双引号：CLI 参数解析正则的 "([^"]*)" 捕获组不支持嵌套双引号
+ *   （R1 已实测），单引号内容可完整保留，--test-command 值不会被截断
+ * - 引号内 token（含 ; () 等元字符）经 parseShellCommand 引号语义豁免，
+ *   不触发 shell 操作符/替换拦截
  */
-export const PASS_TEST_CMD = `echo Tests: 1 passed, 0 failed`;
+export const PASS_TEST_CMD = `node -e 'console.log(process.argv[1])' 'Tests: 1 passed, 0 failed'`;
 
 /**
  * 失败测试命令（真实 child_process 执行，输出 Jest 格式 + 非零退出码）
  *
- * 命令：echo Tests: 0 passed, 1 failed; false
+ * 命令：node -e 'console.log(process.argv[1]);process.exit(1)' 'Tests: 0 passed, 1 failed'
  * 输出：Tests: 0 passed, 1 failed
- * 退出码：1（false 命令产生非零退出码）
+ * 退出码：1（process.exit(1) 产生非零退出码）
  * 解析结果：{ passed: 0, failed: 1, skipped: 0, total: 1, parser: "jest" }
  *
  * SmartConfirmation 判定：同 PASS_TEST_CMD，auto-approve
  *
- * 设计说明（R1 修复）：
- * - 旧版本使用 node -e 'console.log("..."); process.exit(1)'，内层双引号冲突
- * - 改用 echo 输出测试格式 + false 产生非零退出码，不含任何引号
- * - shell 中 ; 为命令分隔符，echo 先执行输出，false 后执行产生退出码 1
+ * 设计说明（R2 修复，同 PASS_TEST_CMD）：
+ * - 旧版 echo ...; false 的 echo/false 均不在程序白名单内，且未加引号的
+ *   ; 会被 parseShellCommand 判定为非法 shell 操作符（双重失败）
+ * - 改用 node + process.exit(1) 在同一条 JS 表达式内完成"输出格式 + 非零退出码"，
+ *   ; 位于单引号 token 内部，不触发操作符拦截
+ * - 不含双引号，CLI 解析（--test-command 嵌入场景）不受影响
  */
-export const FAIL_TEST_CMD = `echo Tests: 0 passed, 1 failed; false`;
+export const FAIL_TEST_CMD = `node -e 'console.log(process.argv[1]);process.exit(1)' 'Tests: 0 passed, 1 failed'`;
 
 /**
  * 默认配置常量重新导出（便于拆分文件统一引用）

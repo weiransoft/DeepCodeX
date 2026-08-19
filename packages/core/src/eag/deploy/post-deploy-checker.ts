@@ -26,6 +26,13 @@
  * - kubectl 命令不存在时（spawn error），对应校验项返回 false
  * - 不抛异常，保证 check() 始终返回结构化结果
  *
+ * 超时保护（2026-08-19 回归实测修复）：
+ * - 全部 4 处 kubectl spawn 均无超时——当集群不可达（如本机 kubectl 指向
+ *   已停止的 kind 集群）时，kubectl 无限等待导致 check() 的 Promise 永不
+ *   resolve，部署后检查器永久挂起
+ * - 修复：每处 spawn 均增加 KUBECTL_COMMAND_TIMEOUT_MS 超时强杀（SIGKILL），
+ *   超时后按对应校验项的失败值返回（false / null），保证 check() 有界返回
+ *
  * 设计依据：
  * - EAG-P4 批次 13 设计文档 §4.4 PostDeployChecker 实现
  * - §3.7.2 PostDeployChecker 接口定义（types.ts）
@@ -45,6 +52,16 @@ import type {
   HealthEndpoint,
   DeployedResource,
 } from "../devops/types";
+
+/**
+ * 单条 kubectl 命令的超时时间（毫秒）
+ *
+ * 设计说明：
+ * - 正常集群下 kubectl get/logs 均在 1 秒内返回，10 秒上限留足余量
+ * - 集群不可达时 kubectl 会无限等待（无内置超时），必须由调用方强杀
+ * - check() 顺序执行 4 项校验，最坏情况总耗时约 4 × 10 秒 = 40 秒（有界）
+ */
+const KUBECTL_COMMAND_TIMEOUT_MS = 10_000;
 
 // ============================================================================
 // PostDeployCheckerImpl 类
@@ -190,6 +207,12 @@ export class PostDeployCheckerImpl implements PostDeployChecker {
         env: process.env,
       });
 
+      // 超时保护：集群不可达时 kubectl 无限等待，超时强杀并按"未就绪"处理
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        resolve(false);
+      }, KUBECTL_COMMAND_TIMEOUT_MS);
+
       let stdout = "";
       // 捕获 stdout 输出（JSON 格式）
       child.stdout?.on("data", (chunk: Buffer) => {
@@ -198,6 +221,7 @@ export class PostDeployCheckerImpl implements PostDeployChecker {
 
       // 子进程正常退出
       child.on("close", (code: number | null) => {
+        clearTimeout(timer);
         if (code !== 0) {
           // kubectl 失败或 namespace 不存在
           resolve(false);
@@ -223,6 +247,7 @@ export class PostDeployCheckerImpl implements PostDeployChecker {
 
       // 子进程启动失败（如 kubectl 命令不存在）：返回 false
       child.on("error", () => {
+        clearTimeout(timer);
         resolve(false);
       });
     });
@@ -329,6 +354,12 @@ export class PostDeployCheckerImpl implements PostDeployChecker {
         env: process.env,
       });
 
+      // 超时保护：集群不可达时 kubectl 无限等待，超时强杀并按"Service 不存在"处理
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        resolve(null);
+      }, KUBECTL_COMMAND_TIMEOUT_MS);
+
       let stdout = "";
       // 捕获 stdout 输出（JSON 格式）
       child.stdout?.on("data", (chunk: Buffer) => {
@@ -337,6 +368,7 @@ export class PostDeployCheckerImpl implements PostDeployChecker {
 
       // 子进程正常退出
       child.on("close", (code: number | null) => {
+        clearTimeout(timer);
         if (code !== 0) {
           // Service 不存在
           resolve(null);
@@ -362,6 +394,7 @@ export class PostDeployCheckerImpl implements PostDeployChecker {
 
       // 子进程启动失败（如 kubectl 命令不存在）：返回 null
       child.on("error", () => {
+        clearTimeout(timer);
         resolve(null);
       });
     });
@@ -392,6 +425,12 @@ export class PostDeployCheckerImpl implements PostDeployChecker {
         env: process.env,
       });
 
+      // 超时保护：集群不可达时 kubectl 无限等待，超时强杀并按"日志检查失败"处理
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        resolve(false);
+      }, KUBECTL_COMMAND_TIMEOUT_MS);
+
       let stdout = "";
       // 捕获 stdout 输出（日志内容）
       child.stdout?.on("data", (chunk: Buffer) => {
@@ -400,6 +439,7 @@ export class PostDeployCheckerImpl implements PostDeployChecker {
 
       // 子进程正常退出
       child.on("close", (code: number | null) => {
+        clearTimeout(timer);
         if (code !== 0) {
           // kubectl 失败或 namespace 不存在
           resolve(false);
@@ -411,6 +451,7 @@ export class PostDeployCheckerImpl implements PostDeployChecker {
 
       // 子进程启动失败（如 kubectl 命令不存在）：返回 false
       child.on("error", () => {
+        clearTimeout(timer);
         resolve(false);
       });
     });
@@ -454,13 +495,21 @@ export class PostDeployCheckerImpl implements PostDeployChecker {
         env: process.env,
       });
 
+      // 超时保护：集群不可达时 kubectl 无限等待，超时强杀并按"指标端点不可达"处理
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        resolve(false);
+      }, KUBECTL_COMMAND_TIMEOUT_MS);
+
       // 子进程正常退出：退出码 0 = 指标端点可达
       child.on("close", (code: number | null) => {
+        clearTimeout(timer);
         resolve(code === 0);
       });
 
       // 子进程启动失败（如 kubectl 命令不存在）：返回 false
       child.on("error", () => {
+        clearTimeout(timer);
         resolve(false);
       });
     });

@@ -103,7 +103,7 @@ test("resolveSettingsSources 对 env.BASE_URL 做 SSRF 校验", () => {
 
 test("resolveSettingsSources 默认官方端点可通过校验", () => {
   const resolved = resolveSettingsSources(null, null, { model: DEFAULT_MODEL, baseURL: DEFAULT_BASE_URL }, {});
-  assert.equal(resolved.baseURL, "https://api.deepseek.com/");
+  assert.equal(resolved.baseURL, "https://api.deepseek.com");
 });
 
 test("resolveSettingsSources 在 DEEPCODE_ALLOW_PRIVATE_BASE_URL=true 时使用本地 baseURL", () => {

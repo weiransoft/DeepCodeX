@@ -56,6 +56,11 @@ import type { EagAutonomousStatusRequest, EagAutonomousStopRequest } from "./eag
 // 注：eag-graph-command.ts 不依赖本模块，无循环依赖风险
 import { extractEagGraphRequestFromPrompt } from "./eag-graph-command";
 import type { EagGraphRequest } from "./eag-graph-command";
+// EAG-P1 S3.2 接线批次：导入 /eag-design 命令参数解析函数
+// - extractDesignLoopInputFromPrompt：独立函数，从命令字符串解析
+//   --requirement / --paradigm 参数构造 DesignLoopInput（CLI 内联参数模式）
+// 注：eag-design-command.ts 不依赖本模块，无循环依赖风险
+import { extractDesignLoopInputFromPrompt } from "./eag-design-command";
 
 // ============================================================================
 // DeployRequest 接口定义（EAG-P4 批次 13 Phase 7 §5.1）
@@ -482,6 +487,19 @@ export class EagCommandParser {
       return { kind: "eag-graph", payload: this.extractEagGraphRequest(userPrompt, text) };
     }
 
+    // 步骤 2.4b（EAG-P1 S3.2 接线批次新增）：/eag-design 前缀匹配
+    // 此前 /eag-design 使用严格匹配（裸命令），payload 完全依赖
+    // messageParams.designLoopInput 预装配——生产 CLI 无装配路径导致命令不可用。
+    // 现改为前缀匹配（对齐 /eag-autonomous 模式），支持 CLI 内联参数：
+    // - text === "/eag-design"（无参数形式，payload 从 messageParams 提取）
+    // - text 以 "/eag-design " 开头（含参数形式，payload 回退解析 --requirement/--paradigm）
+    // 参数解析优先级见 extractDesignLoopInput（messageParams 优先 + 命令字符串回退）
+    const designPrefix = EAG_COMMAND_STRINGS.EAG_DESIGN;
+    const designPrefixLower = designPrefix.toLowerCase();
+    if (textLower === designPrefixLower || textLower.startsWith(designPrefixLower + " ")) {
+      return { kind: "eag-design", payload: this.extractDesignLoopInput(userPrompt, text) };
+    }
+
     // ============================================================================
     // 步骤 2.5（ADR-DI-001 §7.4.1 新增）：动态指令注入与后台子 Agent 命令匹配
     //
@@ -547,12 +565,11 @@ export class EagCommandParser {
       return { kind: "resume", payload: this.extractResumeRequest(text) };
     }
 
-    // 步骤 3：严格匹配 7 个命令字符串（无参数，参数通过 messageParams 注入）
+    // 步骤 3：严格匹配 6 个命令字符串（无参数，参数通过 messageParams 注入）
+    // 注：/eag-design 已改为前缀匹配（步骤 2.4b，S3.2 接线批次支持 CLI 内联参数）
     switch (text) {
       case EAG_COMMAND_STRINGS.EAG_BUILD:
         return { kind: "eag-build", payload: this.extractCodingLoopRequest(userPrompt) };
-      case EAG_COMMAND_STRINGS.EAG_DESIGN:
-        return { kind: "eag-design", payload: this.extractDesignLoopInput(userPrompt) };
       case EAG_COMMAND_STRINGS.EAG_TEST:
         return { kind: "eag-test", payload: this.extractTestingLoopRequest(userPrompt) };
       case EAG_COMMAND_STRINGS.EAG_RUN:
@@ -592,8 +609,10 @@ export class EagCommandParser {
   /**
    * 判定用户输入是否为 /eag-design 命令并提取 payload
    *
-   * 判定规则（迁移自 session.ts L1872 isEagDesignPrompt）：
-   * - text 为字符串且 trim 后等于 /eag-design
+   * 判定规则（S3.2 前缀匹配，2026-08-19 评审必改项 5）：
+   * - text 为字符串且 trim 后等于 /eag-design，或以 /eag-design 开头带参数
+   *   （参数经 extractDesignLoopInputFromPrompt 解析：--requirement 必填 /
+   *    --paradigm 可选；messageParams.designLoopInput 注入优先）
    * - 无图片附件
    * - 无技能匹配
    *
@@ -929,31 +948,43 @@ export class EagCommandParser {
   }
 
   /**
-   * 从 userPrompt.messageParams 提取预装配的 DesignLoopInput（§4.18.3）
+   * 从 userPrompt.messageParams 或命令字符串提取 DesignLoopInput（§4.18.3，S3.2 扩展）
    *
-   * 迁移自 session.ts L2299 extractDesignLoopInput。
-   *
-   * 设计原则：parser 不直接解析原始需求文本，保持职责单一。
-   * 调用方通过 userPrompt.messageParams.designLoopInput 传入预装配的输入。
+   * 提取优先级（对齐 extractEagAutonomousRequest 模式）：
+   * 1. 优先从 messageParams.designLoopInput 提取（调用方预解析模式）
+   *    - 适用于 UI 表单 / 程序化调用场景：调用方构造 userPrompt 时预装配输入
+   * 2. 回退到从命令字符串解析（CLI 内联参数模式，S3.2 新增）
+   *    - 适用于 CLI 场景：用户输入 `/eag-design --requirement "..." [--paradigm <id>]`
+   *    - 委托 extractDesignLoopInputFromPrompt 独立函数完成解析
+   *    - 解析失败（含裸 /eag-design 无参数）返回 null，session.ts 通知用户参数错误
    *
    * @param userPrompt 用户输入（含 messageParams 元数据）
-   * @returns 预装配的 DesignLoopInput；未提供或字段不完整时返回 null
+   * @param text 已 trim 的命令字符串（用于 CLI 内联参数回退解析）
+   * @returns DesignLoopInput；未提供或解析失败时返回 null
    */
-  private extractDesignLoopInput(userPrompt: UserPromptContent): DesignLoopInput | null {
+  private extractDesignLoopInput(userPrompt: UserPromptContent, text: string): DesignLoopInput | null {
+    // 步骤 1：优先从 messageParams.designLoopInput 提取（调用方预解析模式）
     const params = userPrompt.messageParams as Record<string, unknown> | null | undefined;
-    if (!params || typeof params !== "object") {
+    if (params && typeof params === "object") {
+      const input = params.designLoopInput;
+      if (input && typeof input === "object") {
+        // 基本字段校验（避免类型断言误用，对齐 session.ts 既有校验逻辑）
+        const candidate = input as Partial<DesignLoopInput>;
+        if (typeof candidate.rawRequirement === "string" && candidate.rawRequirement.trim().length > 0) {
+          return candidate as DesignLoopInput;
+        }
+      }
+    }
+
+    // 步骤 2：回退到从命令字符串解析（CLI 内联参数模式）
+    // 解析失败（抛异常）时返回 null，session.ts 将通知用户具体错误
+    try {
+      return extractDesignLoopInputFromPrompt(text);
+    } catch {
+      // 裸 /eag-design（无参数）或参数非法：返回 null
+      // 注：错误详情由 session.ts 重新调用 extractDesignLoopInputFromPrompt 获取（对齐既有模式）
       return null;
     }
-    const input = params.designLoopInput;
-    if (!input || typeof input !== "object") {
-      return null;
-    }
-    // 基本字段校验（避免类型断言误用，对齐 session.ts 既有校验逻辑）
-    const candidate = input as Partial<DesignLoopInput>;
-    if (typeof candidate.rawRequirement === "string" && candidate.rawRequirement.trim().length > 0) {
-      return candidate as DesignLoopInput;
-    }
-    return null;
   }
 
   /**

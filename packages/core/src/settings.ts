@@ -814,7 +814,7 @@ function isForbiddenBaseURLHost(hostname: string): boolean {
 }
 
 /**
- * 校验并规范化 LLM baseURL（SSRF 防御）。
+ * 校验 LLM baseURL（SSRF 防御）。
  *
  * 规则：
  * 1. 必须是合法 URL；
@@ -825,10 +825,18 @@ function isForbiddenBaseURLHost(hostname: string): boolean {
  * 6. 允许通过 settings.json 的 allowPrivateBaseURL 或 DEEPCODE_ALLOW_PRIVATE_BASE_URL=true
  *    显式放行私有地址（本地 Ollama/vLLM 等调试场景）。
  *
+ * 本函数只做校验、不改写字符串形态：返回去除首尾空白后的原始字符串，
+ * 不做 URL 序列化规范化（如补尾部斜杠）。原因：
+ * - 解析语义上 "https://api.deepseek.com" 与 "https://api.deepseek.com/"
+ *   在标准 WHATWG URL 解析器下等价（pathname 均为 "/"），校验结论不受影响；
+ * - 下游消费方（OpenAI SDK）对两种形态等价处理；
+ * - 改写字符串会破坏 settings-provider.test.ts 的"零回归"契约
+ *   （resolved.baseURL 必须与配置原值逐字符一致）。
+ *
  * @param baseURL 待校验的 baseURL 字符串
  * @param processEnv 进程环境变量（用于读取放行开关，当 allowPrivate 未显式传入时）
  * @param allowPrivate 是否显式放行私有地址；未传入时回退到环境变量
- * @returns 规范化后的 baseURL 字符串
+ * @returns 校验通过的 baseURL 字符串（仅去除首尾空白，形态不变）
  * @throws 校验失败时抛出 Error，错误信息中不包含敏感配置值
  */
 export function sanitizeBaseURL(
@@ -865,7 +873,8 @@ export function sanitizeBaseURL(
     throw new Error("baseURL 指向本地、私有或元数据地址，存在 SSRF 风险");
   }
 
-  return parsed.toString();
+  // 仅返回去除首尾空白后的原始字符串，不改写形态（详见函数头注释）
+  return trimmed;
 }
 
 // ---------------------------------------------------------------------------

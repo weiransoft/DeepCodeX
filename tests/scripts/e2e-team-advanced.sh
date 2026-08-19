@@ -13,7 +13,7 @@
 # 设计原则（遵循用户规则）：
 #   - 禁止 mock：所有测试通过真实 CLI 进程执行
 #   - 真实环境隔离：独立临时目录 + HOME 重定向 + API Key 清空
-#   - 退出码语义：0=成功，1=失败/参数错误
+#   - 退出码语义（S2 修正后）：0=成功，1=业务失败，2=参数错误（缺少必填参数），4=运行时异常
 #   - 输出分离：stdout 与 stderr 独立捕获
 #
 # 用法：
@@ -355,8 +355,12 @@ test_ta06() {
   run_cli team dispatch --task "设计用户认证模块" --consensus
   # 验证退出码为 0（succeeded 或 skipped）
   assert_equal "$LAST_EXIT_CODE" "0" "退出码" || return 1
-  # 验证输出含 DispatchResult 关键字
-  assert_contains_any "$LAST_STDOUT" "输出" "DispatchResult" "taskId" "matchedRole" || return 1
+  # 验证输出含共识模式关键字
+  # 2026-08-19 修正：原断言 "DispatchResult|taskId|matchedRole" 系 FIX-04
+  # 共识评审真实实现之前的旧文案——共识模式输出为 ConsensusResult 格式
+  # （consensusStatus / succeeded / failed 统计），旧断言自 FIX-04 落地起
+  # 历史性失败（经 git show HEAD 核对输出格式在本批次前已存在，与本批次无关）
+  assert_contains_any "$LAST_STDOUT" "输出" "ConsensusResult" "consensusStatus" "共识评审" || return 1
   return 0
 }
 

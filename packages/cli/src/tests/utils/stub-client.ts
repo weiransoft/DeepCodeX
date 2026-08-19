@@ -163,3 +163,130 @@ export function buildStubClientAlwaysThrows(error: Error = new Error("stub error
     thinkingEnabled: false,
   };
 }
+
+// ============================================================================
+// S2 fail-fast 测试专用（2026-08-19）：role-aware / stage-aware stub 工厂
+// ============================================================================
+
+/**
+ * role-aware / stage-aware stub 行为配置
+ *
+ * - failRoles：system prompt 含 "# ROLE: <英文名>"（如 "Architect"）的请求抛错，
+ *   用于构造 consensus 模式下"指定角色评审失败"场景
+ * - failStages：user prompt 标题含 "[阶段N]"（N 在列表中）的请求抛错，
+ *   用于构造 full-lifecycle 线性模式"指定阶段失败"场景
+ *   （与 autonomous 的 "# Plan 阶段" 标题是两套体系，full-lifecycle 阶段任务
+ *   title 由 team-cmd.ts executeFullLifecycleLinear 构造为 "[阶段N] <title> - <project>"）
+ * - responseContent：正常请求固定返回的 content
+ */
+export interface AwareStubOptions {
+  failRoles?: string[];
+  failStages?: number[];
+  responseContent?: string;
+}
+
+/**
+ * 从 LLM 请求中提取指定 role 的消息内容
+ *
+ * @param req chat.completions.create 的请求对象
+ * @param role 消息角色（"system" / "user"）
+ * @returns 首个匹配角色的消息内容（无则返回空字符串）
+ */
+function extractMessageContent(req: unknown, role: string): string {
+  const messages = (req as { messages?: Array<{ role: string; content: unknown }> }).messages;
+  if (!Array.isArray(messages)) {
+    return "";
+  }
+  const matched = messages.find((m) => m && m.role === role);
+  if (!matched || typeof matched.content !== "string") {
+    return "";
+  }
+  return matched.content;
+}
+
+/**
+ * 构造 role-aware / stage-aware stub client（S2 fail-fast 测试专用）
+ *
+ * 与 buildStubClientReturningValidOutput（autonomous stage-aware）的区别：
+ *   - 前者按 autonomous 的 "# Plan 阶段" 等标题返回差异化 content（配合 judgeResult 校验）
+ *   - 本工厂按 consensus 的角色标识 / full-lifecycle 的阶段编号选择性抛错，
+ *     用于构造"部分失败"场景验证 fail-fast 语义消费
+ *
+ * 行为（每次 chat.completions.create 调用）：
+ *   1. 记录请求到 requestsRef（供断言调用次数与 prompt 内容，含抛错的请求）
+ *   2. 识别聚合请求（user prompt 含 "共识聚合"，team-cmd.ts 构造的 synthesisTask
+ *      title 前缀）→ 始终正常返回（放行），使 fail-fast=false 场景可验证聚合真实发生
+ *   3. failStages 命中 user prompt 的 "[阶段N]" → 抛错（executeDispatch 内部
+ *      try/catch 捕获后该阶段 status=failed）
+ *   4. failRoles 命中 system prompt 的 "# ROLE: <英文名>" → 抛错（同上）
+ *   5. 其余请求正常返回 responseContent
+ *
+ * @param requestsRef 用于记录全部 LLM 请求的数组（通过引用传递捕获结果）
+ * @param options stub 行为配置
+ * @returns OpenAIClientHandle（注入 executeTeamCommand 的 injectedClient）
+ */
+export function buildAwareStubClient(requestsRef: unknown[], options: AwareStubOptions): OpenAIClientHandle {
+  const { failRoles = [], failStages = [], responseContent = "stub 评审意见：方案可行" } = options;
+
+  return {
+    client: {
+      chat: {
+        completions: {
+          create: async (
+            req: unknown,
+            _opts?: { signal?: AbortSignal }
+          ): Promise<{
+            choices: Array<{ message?: { content?: string } }>;
+            usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+          }> => {
+            // 1. 记录每一次请求（含抛错的请求），供测试断言调用次数
+            requestsRef.push(req);
+
+            const systemContent = extractMessageContent(req, "system");
+            const userContent = extractMessageContent(req, "user");
+
+            // 2. 聚合请求放行：fail-fast=false 的场景需要聚合调用真实发生
+            if (userContent.includes("共识聚合")) {
+              return {
+                choices: [{ message: { content: responseContent } }],
+                usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+              };
+            }
+
+            // 3. 阶段感知抛错：user prompt 标题 "[阶段N] <title> - <project>"
+            if (failStages.length > 0) {
+              const stageMatch = /\[阶段(\d+)\]/.exec(userContent);
+              if (stageMatch) {
+                const stageNum = Number.parseInt(stageMatch[1]!, 10);
+                if (failStages.includes(stageNum)) {
+                  throw new Error(`stub: 阶段 ${stageNum} 评审失败（failStages 注入）`);
+                }
+              }
+            }
+
+            // 4. 角色感知抛错：system prompt 首部 "# ROLE: <英文名>（<中文名>）"
+            //    （5 核心角色标识见 role-registry.ts L50/130/210/291/372：
+            //     Architect / Product Manager / Solo Coder / Test Expert / UI Designer）
+            if (failRoles.length > 0) {
+              for (const roleName of failRoles) {
+                if (systemContent.includes(`# ROLE: ${roleName}`)) {
+                  throw new Error(`stub: 角色 ${roleName} 评审失败（failRoles 注入）`);
+                }
+              }
+            }
+
+            // 5. 正常返回
+            return {
+              choices: [{ message: { content: responseContent } }],
+              usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+            };
+          },
+        },
+      },
+    },
+    model: "stub-aware-model",
+    baseURL: "https://stub.local",
+    temperature: 0.3,
+    thinkingEnabled: false,
+  };
+}

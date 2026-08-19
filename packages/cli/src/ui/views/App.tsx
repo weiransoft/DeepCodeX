@@ -75,16 +75,23 @@ import type { SessionContextHook, V2Config } from "@vegamo/deepcode-core";
 // EAG P5 编排器装配（2026-07-31 新特性集成审查 FIX-1/FIX-2）：
 // 真实构造 AutonomousOrchestrator 与 GraphLoopOrchestratorOptions 并注入 SessionManager，
 // 使 /eag-autonomous 三命令与 /eag-graph 在生产 CLI 可用（此前从未接线，命令 fail-closed）
+// S3.2（2026-08-19）：追加 buildDesignOrchestrator，装配 DESIGN Loop 三角色编排器
+// （LlmProductManager + FeedbackAwareArchitect + FeedbackCapturingEvaluator），
+// 使 /eag-design 命令在生产 CLI 可用（此前 PM/Architect 协议无生产实现，命令 fail-closed）
 import {
   buildAutonomousOrchestrator,
   buildGraphLoopOrchestratorOptions,
+  buildDesignOrchestrator,
   type AssemblyLogCallback,
 } from "../core/eag-orchestrator-assembly";
 import { buildDynamicCommandDescriptors } from "../core/dynamic-commands";
 import { writeStdout, writeStdoutLine } from "../../utils/stdio-helpers";
-// 导入 TeamCommandArgs 类型，用于 parseTeamArgs 返回值类型标注
+// 导入 TeamCommandArgs 类型，用于 team 命令调用参数类型标注
 // 注意：仅导入类型（import type），不导入运行时值，避免增加启动开销
-import type { TeamCommandArgs, TeamSubcommand } from "../../team/team-cmd";
+import type { TeamCommandArgs } from "../../team/team-cmd";
+// S2（2026-08-19）：parseTeamArgs 从本文件抽取到 ui/core/parse-team-args.ts，
+// 使 TUI 参数解析可独立单测，并修复 failFast 三态语义（--no-fail-fast 此前不可达）
+import { parseTeamArgs } from "../core/parse-team-args";
 
 type View = "chat" | "session-list" | "undo" | "mcp-status";
 
@@ -278,7 +285,6 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
   const { columns, rows } = useWindowSize();
   const { mode, setMode } = useRawModeContext();
   const initialPromptSubmittedRef = useRef(false);
-  const resumeSessionIdRef = useRef(false);
   const startupDoneRef = useRef(false);
   const processStdoutRef = useRef<Map<number, string>>(new Map());
   // FIX-12（多角色审查 2026-07-29）：记录已追加截断提示的进程 PID，避免重复提示
@@ -367,6 +373,18 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
     const eagAssemblyLog = createEagAssemblyLogger();
     const autonomousOrchestrator = buildAutonomousOrchestrator(eagAssemblyLog);
     const graphLoopOrchestratorOptions = buildGraphLoopOrchestratorOptions(projectRoot, eagAssemblyLog);
+    // S3.2（2026-08-19）：DESIGN Loop 三角色编排器装配（/eag-design 执行体）。
+    // LLM 客户端工厂与 eagDynamicSuggester.createDecisionLLMClient 同源：
+    // 每次角色调用时惰性解析 settings 并经 ProviderFactory 路由创建，
+    // 无凭据时返回 null（角色抛 DesignRoleError，session.ts 通知用户后标记 failed）。
+    // 失败安全：装配异常时返回 undefined，/eag-design 维持 fail-closed 降级。
+    const designOrchestrator = buildDesignOrchestrator(() => {
+      const settings = resolveCurrentSettings(projectRoot);
+      if (!settings.apiKey) {
+        return null;
+      }
+      return ProviderFactory.create(settings);
+    }, eagAssemblyLog);
 
     // ADR-DI-001 动态指令注入与后台子 Agent 组件
     // 所有组件均为可选注入；未注入时对应命令不可用，主对话循环行为完全不变（零回归）
@@ -401,8 +419,11 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
             // 后台任务共享前台已装配的编排器实例——AutonomousOrchestrator 按 runId
             // 隔离运行状态（P5RunStateStore JSONL 持久化），GraphLoopOrchestratorOptions
             // 为不可变装配配置，二者均可安全跨会话共享
+            // S3.2（2026-08-19）：designOrchestrator 同样可跨会话共享——run() 入口
+            // 重置运行时状态，FeedbackAwareArchitect 反馈与 requirement 对象引用绑定
             autonomousOrchestrator,
             graphLoopOrchestratorOptions,
+            designOrchestrator,
             onAssistantMessage: () => {
               // 后台任务的助手消息不写入前台 UI，由 TaskRegistry 状态间接反映进度
             },
@@ -437,8 +458,11 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
       contextHook,
       // EAG P5 编排器注入（2026-07-31 FIX-1/FIX-2）：
       // /eag-autonomous 三命令与 /eag-graph 的生产执行体（此前未注入，命令 fail-closed）
+      // S3.2（2026-08-19）：designOrchestrator 为 /eag-design 的生产执行体
+      // （DESIGN Loop：PM 结构化需求 → 架构师设计 → 评估器判定 → 失败带反馈重试）
       autonomousOrchestrator,
       graphLoopOrchestratorOptions,
+      designOrchestrator,
       // ADR-DI-001 动态指令注入与后台子 Agent 注入
       interruptQueue,
       taskRegistry,
@@ -1178,7 +1202,6 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
     async function run() {
       // Step 1: Resume session if requested
       if (resumeSessionId) {
-        resumeSessionIdRef.current = true;
         if (resumeSessionId === true) {
           // Bare --resume — show session picker; prompt makes no sense here
           refreshSessionsList();
@@ -2218,171 +2241,8 @@ function teamShortcutToRoleId(commandName: string): import("@vegamo/deepcode-cor
   }
 }
 
-/**
- * 解析 /team 命令参数为 TeamCommandArgs 对象
- *
- * 支持的参数：
- * - subcommand（位置参数）：list / match / dispatch / autonomous / full-lifecycle（默认 list）
- * - --role <roleId>          强制指定角色
- * - --task <text>            任务描述
- * - --task-file <path>       任务文件路径
- * - --goal <text>             项目目标
- * - --keywords <kw1,kw2,...>  关键词（match 模式，逗号分隔）
- * - --max-iterations <n>      最大迭代次数
- * - --force-role              禁用自动匹配
- * - --consensus               共识模式
- * - --fail-fast                失败时中止
- * - --project-root <path>     项目根目录
- * - --resume-run               断点续跑
- * - --use-loop                 启用循环模式
- * - --prd-path <path>          PRD 文档路径
- * - --architecture-path <path> 架构文档路径
- * - --test-plan-path <path>    测试计划路径
- * - --test-command <cmd>       测试命令
- *
- * @param tokens 命令 tokens（去除 "team" 前缀后的参数数组）
- * @returns TeamCommandArgs 对象（subcommand 必填，其他字段按需填充）
- */
-function parseTeamArgs(tokens: string[]): TeamCommandArgs {
-  // 使用 Record<string, unknown> 中间存储，最后构造 TeamCommandArgs
-  const raw: Record<string, unknown> = {};
-
-  // 第一个 token 是子命令（默认 "list"）
-  let subcommand: TeamSubcommand = "list";
-  if (tokens.length > 0 && !tokens[0]!.startsWith("--")) {
-    const first = tokens[0]!;
-    // 校验子命令合法性（与 team-cmd.ts 的 TeamSubcommand 类型对齐）
-    if (
-      first === "list" ||
-      first === "match" ||
-      first === "dispatch" ||
-      first === "autonomous" ||
-      first === "full-lifecycle"
-    ) {
-      subcommand = first;
-      tokens = tokens.slice(1);
-    } else {
-      // 未知子命令，仍保留原值让 executeTeamCommand 报错（exhaustiveness check）
-      subcommand = first as TeamSubcommand;
-      tokens = tokens.slice(1);
-    }
-  }
-  raw.subcommand = subcommand;
-
-  // 解析 --key value 参数
-  for (let i = 0; i < tokens.length; i++) {
-    const token = tokens[i]!;
-    if (token.startsWith("--")) {
-      const key = token.slice(2);
-      const nextToken = tokens[i + 1];
-      if (nextToken && !nextToken.startsWith("--")) {
-        // 值参数
-        raw[key] = nextToken;
-        i++;
-      } else {
-        // 布尔参数
-        raw[key] = true;
-      }
-    }
-  }
-
-  // --keywords 逗号分隔转数组（match 子命令使用）
-  if (typeof raw.keywords === "string") {
-    raw.keywords = (raw.keywords as string)
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-  }
-
-  // --max-iterations 字符串转数字
-  if (typeof raw.maxIterations === "string") {
-    const n = Number.parseInt(raw.maxIterations as string, 10);
-    if (!Number.isNaN(n)) {
-      raw.maxIterations = n;
-    } else {
-      delete raw.maxIterations;
-    }
-  }
-
-  // camelCase 转换：CLI 风格参数名转 TeamCommandArgs 字段名
-  // --task-file → taskFile, --max-iterations → maxIterations（已转）,
-  // --force-role → forceRole, --fail-fast → failFast,
-  // --project-root → projectRoot, --resume-run → resumeRun,
-  // --use-loop → useLoop, --prd-path → prdPath, --architecture-path → architecturePath,
-  // --test-plan-path → testPlanPath, --test-command → testCommand
-  const kebabToCamelMap: Record<string, string> = {
-    "task-file": "taskFile",
-    "force-role": "forceRole",
-    "fail-fast": "failFast",
-    "project-root": "projectRoot",
-    "resume-run": "resumeRun",
-    "use-loop": "useLoop",
-    "prd-path": "prdPath",
-    "architecture-path": "architecturePath",
-    "test-plan-path": "testPlanPath",
-    "test-command": "testCommand",
-  };
-  for (const [kebab, camel] of Object.entries(kebabToCamelMap)) {
-    if (raw[kebab] !== undefined) {
-      raw[camel] = raw[kebab];
-      delete raw[kebab];
-    }
-  }
-
-  // 构造 TeamCommandArgs 对象（仅包含已解析的字段，避免 undefined 字段污染）
-  // 注意：此处使用对象展开 + 条件包含，确保类型安全
-  const args: TeamCommandArgs = { subcommand };
-  if (typeof raw.role === "string") {
-    args.role = raw.role as TeamCommandArgs["role"];
-  }
-  if (typeof raw.task === "string") {
-    args.task = raw.task;
-  }
-  if (typeof raw.taskFile === "string") {
-    args.taskFile = raw.taskFile;
-  }
-  if (typeof raw.goal === "string") {
-    args.goal = raw.goal;
-  }
-  if (Array.isArray(raw.keywords)) {
-    args.keywords = raw.keywords as string[];
-  }
-  if (typeof raw.maxIterations === "number") {
-    args.maxIterations = raw.maxIterations;
-  }
-  if (raw.forceRole === true) {
-    args.forceRole = true;
-  }
-  if (raw.consensus === true) {
-    args.consensus = true;
-  }
-  if (raw.failFast === true) {
-    args.failFast = true;
-  }
-  if (typeof raw.projectRoot === "string") {
-    args.projectRoot = raw.projectRoot;
-  }
-  if (raw.resumeRun === true) {
-    args.resumeRun = true;
-  }
-  if (raw.useLoop === true) {
-    args.useLoop = true;
-  }
-  if (typeof raw.prdPath === "string") {
-    args.prdPath = raw.prdPath;
-  }
-  if (typeof raw.architecturePath === "string") {
-    args.architecturePath = raw.architecturePath;
-  }
-  if (typeof raw.testPlanPath === "string") {
-    args.testPlanPath = raw.testPlanPath;
-  }
-  if (typeof raw.testCommand === "string") {
-    args.testCommand = raw.testCommand;
-  }
-
-  return args;
-}
+// parseTeamArgs 已于 S2（2026-08-19）抽取至 ui/core/parse-team-args.ts（含 failFast
+// 三态归一修正），本文件经顶部 import 使用；此处不再保留内联实现
 
 /**
  * 格式化任务时长（毫秒 → 人类可读）

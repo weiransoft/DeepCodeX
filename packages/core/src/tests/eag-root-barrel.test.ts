@@ -172,12 +172,33 @@ test("T6: EAG 根 barrel 导出 TestingOrchestrator 类（来自 testing/，批�
 });
 
 // ============================================================================
-// T7. Design 模块核心导出（DesignLoopOrchestrator 已作为死代码清理，保留 StaticDesignEvaluator）
+// T7. Design 模块核心导出（编排器 + LLM 角色生产实现 + 静态评估器）
 // ============================================================================
 
-test("T7: EAG 根 barrel 导出 StaticDesignEvaluator 类（来自 design/）", () => {
-  // DesignLoopOrchestrator 已随 design-orchestrator.ts、design-protocols.ts 死代码清理删除，
-  // 本测试改为验证 design 模块保留的静态评估器实现导出。
+test("T7: EAG 根 barrel 导出 DesignLoopOrchestrator / LLM 角色实现 / StaticDesignEvaluator（来自 design/）", () => {
+  // 2026-08-19 S3.2 接线完成：design barrel 补导出 DesignLoopOrchestrator 与
+  // PM/Architect 协议及 LLM 驱动生产实现（LlmProductManager / LlmArchitect /
+  // FeedbackAwareArchitect / FeedbackCapturingEvaluator / DesignRoleError），
+  // CLI 装配（eag-orchestrator-assembly.buildDesignOrchestrator）经根 barrel 消费。
+  assert.equal(typeof Eag.DesignLoopOrchestrator, "function", "DesignLoopOrchestrator 应为 class");
+  assert.ok(Eag.DesignLoopOrchestrator.prototype, "DesignLoopOrchestrator 应有 prototype 属性");
+  assert.equal(Eag.DesignLoopOrchestrator.name, "DesignLoopOrchestrator", "类名应为 'DesignLoopOrchestrator'");
+
+  // LLM 角色生产实现（S3.2 新增导出）
+  assert.equal(typeof Eag.LlmProductManager, "function", "LlmProductManager 应为 class");
+  assert.equal(Eag.LlmProductManager.name, "LlmProductManager", "类名应为 'LlmProductManager'");
+  assert.equal(typeof Eag.LlmArchitect, "function", "LlmArchitect 应为 class");
+  assert.equal(Eag.LlmArchitect.name, "LlmArchitect", "类名应为 'LlmArchitect'");
+  assert.equal(typeof Eag.FeedbackAwareArchitect, "function", "FeedbackAwareArchitect 应为 class");
+  assert.equal(typeof Eag.FeedbackCapturingEvaluator, "function", "FeedbackCapturingEvaluator 应为 class");
+  assert.equal(typeof Eag.DesignRoleError, "function", "DesignRoleError 应为 class");
+  // DesignRoleError 真实抛出验证（非 mock，验证 error.role 标识与 message 前缀）
+  const roleErr = new Eag.DesignRoleError("pm", "测试错误");
+  assert.ok(roleErr instanceof Error, "DesignRoleError 应为 Error 子类");
+  assert.equal(roleErr.role, "pm", "DesignRoleError.role 应为 'pm'");
+  assert.ok(roleErr.message.includes("产品经理"), "DesignRoleError message 应含角色中文名");
+
+  // 静态评估器实现（既有导出，回归断言）
   assert.equal(typeof Eag.StaticDesignEvaluator, "function", "StaticDesignEvaluator 应为 class");
   assert.ok(Eag.StaticDesignEvaluator.prototype, "StaticDesignEvaluator 应有 prototype 属性");
   assert.equal(Eag.StaticDesignEvaluator.name, "StaticDesignEvaluator", "类名应为 'StaticDesignEvaluator'");

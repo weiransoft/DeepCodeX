@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
-import { getDefaultSkillPrompt } from "../prompt";
+import { getDefaultSkillPrompt, DEFAULT_SKILL_TEMPLATES } from "../prompt";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -27,15 +27,6 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../
 function readDefaultSkill(skillName: string): string {
   const skillPath = path.join(repoRoot, `templates/skills/${skillName}.md`);
   return fs.readFileSync(skillPath, "utf-8");
-}
-
-/**
- * 读取 prompt.ts 源码，用于验证 DEFAULT_SKILL_TEMPLATES
- * @returns prompt.ts 文件内容字符串
- */
-function readPromptSource(): string {
-  const promptPath = path.join(repoRoot, "src/prompt.ts");
-  return fs.readFileSync(promptPath, "utf-8");
 }
 
 // ============================================================================
@@ -80,11 +71,13 @@ test("P0-T9: 所有默认 skill frontmatter 格式正确", () => {
 });
 
 // ============================================================================
-// 测试组 3：DEFAULT_SKILL_TEMPLATES 列表
+// 测试组 3：DEFAULT_SKILL_TEMPLATES 列表（S5.2 改造：import 运行时导出断言，
+// 取代原 readPromptSource() 读源码文本的表面测试方式）
 // ============================================================================
 
-test("P0-T9: DEFAULT_SKILL_TEMPLATES 包含全部 4 个默认 skill", () => {
-  const promptSource = readPromptSource();
+test("P0-T9: DEFAULT_SKILL_TEMPLATES 运行时导出且包含全部 4 个默认 skill", () => {
+  // 断言运行时导出为数组（源码文本断言无法验证导出行为）
+  assert.ok(Array.isArray(DEFAULT_SKILL_TEMPLATES), "DEFAULT_SKILL_TEMPLATES 应为数组");
 
   const expectedTemplates = [
     "karpathy-guidelines.md",
@@ -93,8 +86,14 @@ test("P0-T9: DEFAULT_SKILL_TEMPLATES 包含全部 4 个默认 skill", () => {
     "code-quality-guidelines.md",
   ];
 
+  assert.equal(
+    DEFAULT_SKILL_TEMPLATES.length,
+    expectedTemplates.length,
+    `DEFAULT_SKILL_TEMPLATES 长度应为 ${expectedTemplates.length}，实际: ${DEFAULT_SKILL_TEMPLATES.length}`
+  );
+
   for (const template of expectedTemplates) {
-    assert.equal(promptSource.includes(`"${template}"`), true, `DEFAULT_SKILL_TEMPLATES 应包含: ${template}`);
+    assert.equal(DEFAULT_SKILL_TEMPLATES.includes(template), true, `DEFAULT_SKILL_TEMPLATES 应包含: ${template}`);
   }
 });
 
