@@ -12,7 +12,8 @@ const entry = join(vscodeRoot, "src", "extension.ts");
 const outDir = join(vscodeRoot, "out");
 const outfile = join(outDir, "extension.js");
 const resolveFromExtension = createRequire(join(vscodeRoot, "package.json"));
-const sharpPackage = JSON.parse(readFileSync(resolveFromExtension.resolve("sharp/package.json"), "utf8"));
+const sharpEntry = resolveFromExtension.resolve("sharp");
+const sharpPackage = JSON.parse(readFileSync(join(dirname(sharpEntry), "..", "package.json"), "utf8"));
 
 rmSync(outDir, { recursive: true, force: true });
 

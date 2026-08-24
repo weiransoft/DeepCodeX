@@ -8,6 +8,7 @@ import { TENCENT_MIRROR_REGISTRY } from "@vegamo/deepcode-core";
 import { buildSharpInstallArgs, createSharpLoader, type SharpInstallProgress } from "../sharp-loader.js";
 
 const tempDirs: string[] = [];
+const SHARP_VERSION = "0.35.3";
 
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
@@ -23,7 +24,7 @@ test("Sharp loader reuses a CLI installation without notifying or installing", a
     {
       workspaceRoot: storageRoot,
       storageRoot,
-      sharpVersion: "0.34.5",
+      sharpVersion: SHARP_VERSION,
       notifyInstalling: async (task) => {
         notificationCount += 1;
         return await task(() => {});
@@ -53,7 +54,7 @@ test("Sharp loader installs once for concurrent first calls and reuses the cache
     {
       workspaceRoot: storageRoot,
       storageRoot,
-      sharpVersion: "0.34.5",
+      sharpVersion: SHARP_VERSION,
       notifyInstalling: async (task) => {
         notificationCount += 1;
         return await task((progress) => progressUpdates.push(progress));
@@ -93,7 +94,7 @@ test("Sharp loader retries installation after a failure", async () => {
     {
       workspaceRoot: storageRoot,
       storageRoot,
-      sharpVersion: "0.34.5",
+      sharpVersion: SHARP_VERSION,
       notifyInstalling: async (task) => await task(() => {}),
     },
     {
@@ -115,9 +116,19 @@ test("Sharp loader retries installation after a failure", async () => {
 });
 
 test("Sharp install uses the npm mirror", () => {
-  const args = buildSharpInstallArgs("/tmp/sharp", "0.34.5");
+  const args = buildSharpInstallArgs("/tmp/sharp", SHARP_VERSION);
 
-  assert.deepEqual(args.slice(-5), ["--registry", TENCENT_MIRROR_REGISTRY, "--prefix", "/tmp/sharp", "sharp@0.34.5"]);
+  assert.deepEqual(args.slice(-5), [
+    "--registry",
+    TENCENT_MIRROR_REGISTRY,
+    "--prefix",
+    "/tmp/sharp",
+    `sharp@${SHARP_VERSION}`,
+  ]);
+});
+
+test("Sharp tests run against the declared dependency version", () => {
+  assert.equal(sharp.versions.sharp, SHARP_VERSION);
 });
 
 function createTempDir(prefix: string): string {
