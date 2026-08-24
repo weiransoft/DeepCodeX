@@ -15,7 +15,7 @@ export type DeepcodingEnv = Record<string, string | undefined> & {
   MULTIMODAL?: string;
 };
 
-export type ReasoningEffort = "high" | "max";
+export type ReasoningEffort = "low" | "high" | "max";
 
 export type McpServerConfig = {
   command: string;
@@ -169,7 +169,7 @@ function firstTokenWindow(...values: unknown[]): number | undefined {
 }
 
 function resolveReasoningEffort(value: unknown): ReasoningEffort | undefined {
-  return value === "high" || value === "max" ? value : undefined;
+  return value === "low" || value === "high" || value === "max" ? value : undefined;
 }
 
 function resolveMultimodalMode(value: unknown): MultimodalMode | undefined {

@@ -578,6 +578,21 @@ test("resolveSettings defaults invalid reasoning effort to max", () => {
   assert.equal(resolved.reasoningEffort, "max");
 });
 
+test("resolveSettings accepts low reasoning effort", () => {
+  const resolved = resolveSettings(
+    {
+      reasoningEffort: "low",
+    },
+    {
+      model: "default-model",
+      baseURL: "https://default.example.com",
+    },
+    TEST_PROCESS_ENV
+  );
+
+  assert.equal(resolved.reasoningEffort, "low");
+});
+
 test("resolveSettings ignores invalid temperature values", () => {
   const resolved = resolveSettings(
     {
