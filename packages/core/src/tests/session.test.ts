@@ -814,7 +814,7 @@ test("replySession appends the skill catalog only when content changes", async (
   assert.match(catalogs[1]?.content ?? "", /`image-generator`/);
 });
 
-test("loadSkillByName loads the full skill and notifies the assistant callback", async () => {
+test("skill tool stores the full document and metadata in its tool message", async () => {
   const workspace = createTempDir("deepcode-skill-load-by-name-workspace-");
   const home = createTempDir("deepcode-skill-load-by-name-home-");
   setHomeDir(home);
@@ -837,19 +837,37 @@ test("loadSkillByName loads the full skill and notifies the assistant callback",
   });
 
   const sessionId = await manager.createSession({ text: "" });
-  const result = await (manager as any).loadSkillByName(sessionId, "skill-writer");
+  (manager as any).sessionControllers.set(sessionId, new AbortController());
+  await (manager as any).appendToolMessages(sessionId, [
+    {
+      id: "call-skill",
+      type: "function",
+      function: { name: "skill", arguments: JSON.stringify({ name: "skill-writer" }) },
+    },
+  ]);
+  (manager as any).sessionControllers.delete(sessionId);
 
+  const toolMessage = manager
+    .listSessionMessages(sessionId)
+    .find((message) => message.role === "tool" && message.meta?.skill?.name === "skill-writer");
+  assert.ok(toolMessage);
+  const result = JSON.parse(toolMessage.content ?? "{}");
   assert.equal(result.ok, true);
   assert.equal(result.name, "skill");
-  assert.match(result.output ?? "", /Loaded skill: skill-writer/);
+  assert.match(result.output ?? "", /<skill_content name="skill-writer"/);
+  assert.equal(result.metadata?.skill?.isLoaded, true);
+  assert.equal(toolMessage.meta?.skill?.isLoaded, true);
   assert.equal(
-    manager.listSessionMessages(sessionId).some((message) => message.meta?.skill?.name === "skill-writer"),
-    true
+    manager
+      .listSessionMessages(sessionId)
+      .some((message) => message.role === "system" && message.meta?.skill?.name === "skill-writer"),
+    false
   );
   assert.equal(
-    assistantMessages.some((message) => message.meta?.skill?.name === "skill-writer"),
+    assistantMessages.some((message) => message.id === toolMessage.id),
     true
   );
+  assert.equal((await manager.listSkills(sessionId)).find((skill) => skill.name === "skill-writer")?.isLoaded, true);
   assert.equal(
     assistantMessages.some((message) => message.role === "system" && message.meta?.skillCatalog),
     false
@@ -858,6 +876,34 @@ test("loadSkillByName loads the full skill and notifies the assistant callback",
   const missing = await (manager as any).loadSkillByName(sessionId, "not-a-real-skill");
   assert.equal(missing.ok, false);
   assert.match(missing.error ?? "", /Unknown skill: not-a-real-skill/);
+});
+
+test("skill tool avoids duplicate loads within the same tool call batch", async () => {
+  const workspace = createTempDir("deepcode-skill-batch-dedupe-workspace-");
+  const home = createTempDir("deepcode-skill-batch-dedupe-home-");
+  setHomeDir(home);
+
+  const manager = createSessionManager(workspace, "machine-id-skill-batch-dedupe");
+  const sessionId = await manager.createSession({ text: "" });
+  (manager as any).sessionControllers.set(sessionId, new AbortController());
+  await (manager as any).appendToolMessages(
+    sessionId,
+    ["first", "second"].map((id) => ({
+      id,
+      type: "function",
+      function: { name: "skill", arguments: JSON.stringify({ name: "skill-writer" }) },
+    }))
+  );
+  (manager as any).sessionControllers.delete(sessionId);
+
+  const results = manager
+    .listSessionMessages(sessionId)
+    .filter((message) => message.role === "tool")
+    .map((message) => JSON.parse(message.content ?? "{}"));
+  assert.equal(results.length, 2);
+  assert.match(results[0]?.output ?? "", /<skill_content name="skill-writer"/);
+  assert.equal(results[1]?.output, "Skill already loaded: skill-writer.");
+  assert.equal(countLoadedSkillMessages(manager.listSessionMessages(sessionId), "skill-writer"), 1);
 });
 
 test("compactSession does not mark skill catalog messages compacted", async () => {
@@ -4133,7 +4179,9 @@ function createSessionManagerForModel(
 }
 
 function countLoadedSkillMessages(messages: SessionMessage[], skillName: string): number {
-  return messages.filter((message) => message.role === "system" && message.meta?.skill?.name === skillName).length;
+  return messages.filter(
+    (message) => ["system", "tool"].includes(message.role) && message.meta?.skill?.name === skillName
+  ).length;
 }
 
 function createNotifyingSessionManager(

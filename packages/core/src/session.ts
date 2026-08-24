@@ -1022,7 +1022,7 @@ ${agentInstructions}
   private getLoadedSkillKeys(sessionId: string): Set<string> {
     const loadedSkillKeys = new Set<string>();
     for (const message of this.listSessionMessages(sessionId)) {
-      if (message.role !== "system" || !message.meta?.skill) {
+      if ((message.role !== "system" && message.role !== "tool") || !message.meta?.skill) {
         continue;
       }
       loadedSkillKeys.add(this.getSkillKey(message.meta.skill));
@@ -1170,11 +1170,11 @@ ${agentInstructions}
         output: `Skill already loaded: ${skill.name}.`,
       };
     }
-    this.appendSkillMessages(sessionId, [skill]);
     return {
       ok: true,
       name: "skill",
-      output: `Loaded skill: ${skill.name}.`,
+      output: this.buildSkillPrompt(skill),
+      metadata: { skill: { ...skill, isLoaded: true } },
     };
   }
 
@@ -2601,12 +2601,14 @@ ${agentInstructions}
     sessionId: string,
     toolCallId: string,
     content: string,
-    toolFunction: unknown | null
+    toolFunction: unknown | null,
+    resultMetadata?: Record<string, unknown>
   ): SessionMessage {
     const now = new Date().toISOString();
     const paramsMd = this.buildToolParamsSnippet(toolFunction);
     const resultMd = this.buildToolResultSnippet(content);
     const isInvisibleExecution = this.isInvisibleExecution(content);
+    const skill = this.getToolResultSkill(resultMetadata);
     return {
       id: crypto.randomUUID(),
       sessionId,
@@ -2622,8 +2624,46 @@ ${agentInstructions}
         function: toolFunction ?? undefined,
         paramsMd,
         resultMd,
+        skill,
       },
     };
+  }
+
+  private getToolResultSkill(metadata?: Record<string, unknown>): SkillInfo | undefined {
+    const skill = metadata?.skill;
+    if (!skill || typeof skill !== "object" || Array.isArray(skill)) {
+      return undefined;
+    }
+    const candidate = skill as Partial<SkillInfo>;
+    if (
+      typeof candidate.name !== "string" ||
+      typeof candidate.path !== "string" ||
+      typeof candidate.description !== "string"
+    ) {
+      return undefined;
+    }
+    return {
+      name: candidate.name,
+      path: candidate.path,
+      description: candidate.description,
+      isLoaded: candidate.isLoaded === true ? true : undefined,
+      allowImplicitInvocation: candidate.allowImplicitInvocation === false ? false : undefined,
+    };
+  }
+
+  private async loadSkillForToolBatch(
+    sessionId: string,
+    skillName: string,
+    loadedSkillNames: Set<string>
+  ): Promise<ToolExecutionResult> {
+    if (loadedSkillNames.has(skillName)) {
+      return { ok: true, name: "skill", output: `Skill already loaded: ${skillName}.` };
+    }
+    const result = await this.loadSkillByName(sessionId, skillName);
+    if (this.getToolResultSkill(result.metadata)) {
+      loadedSkillNames.add(skillName);
+    }
+    return result;
   }
 
   private async appendToolMessages(
@@ -2634,6 +2674,7 @@ ${agentInstructions}
       messagePermissions?: MessageToolPermission[];
     } = {}
   ): Promise<{ waitingForUser: boolean }> {
+    const loadedSkillNames = new Set<string>();
     const hooks: ToolExecutionHooks = {
       onProcessStart: (pid, command) => this.addSessionProcess(sessionId, pid, command),
       onProcessExit: (pid) => this.removeSessionProcess(sessionId, pid),
@@ -2643,7 +2684,7 @@ ${agentInstructions}
       onBeforeFileMutation: (filePath) => this.prepareFileMutationCheckpoint(sessionId, filePath),
       onAfterFileMutation: (filePath) => this.recordFileMutationCheckpoint(sessionId, filePath),
       onPluginRateLimitExceeded: (tool) => this.recordPluginRateLimitExceeded(sessionId, tool),
-      onLoadSkill: (skillName) => this.loadSkillByName(sessionId, skillName),
+      onLoadSkill: (skillName) => this.loadSkillForToolBatch(sessionId, skillName, loadedSkillNames),
       shouldStop: () => this.isInterrupted(sessionId),
     };
     const parsedToolCalls = toolCalls
@@ -2672,7 +2713,13 @@ ${agentInstructions}
         waitingForUser = true;
       }
       const toolFunction = this.messageConverter.findToolFunction(toolCalls, execution.toolCallId);
-      const toolMessage = this.buildToolMessage(sessionId, execution.toolCallId, execution.content, toolFunction);
+      const toolMessage = this.buildToolMessage(
+        sessionId,
+        execution.toolCallId,
+        execution.content,
+        toolFunction,
+        execution.result.name === "skill" ? execution.result.metadata : undefined
+      );
       this.appendSessionMessage(sessionId, toolMessage);
       this.onAssistantMessage(toolMessage, true);
 

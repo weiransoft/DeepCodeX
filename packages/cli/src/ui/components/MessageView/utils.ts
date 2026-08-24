@@ -243,6 +243,10 @@ export function renderMessageToStdout(message: SessionMessage, mode: RawMode): s
     return `${chalk("✦")} ${content}`;
   }
 
+  if ((message.role === "system" || message.role === "tool") && message.meta?.skill) {
+    return chalk(`⚡ Loaded skill: ${message.meta.skill.name}`);
+  }
+
   if (message.role === "tool") {
     const summary = buildToolSummary(message);
     const params = formatToolStatusParams(summary);
@@ -263,10 +267,6 @@ export function renderMessageToStdout(message: SessionMessage, mode: RawMode): s
   if (message.role === "system") {
     if (message.meta?.isModelChange) {
       return chalk(`> ${message.content}`);
-    }
-    if (message.meta?.skill && typeof message.meta.skill === "object") {
-      const skillName = (message.meta.skill as { name?: unknown }).name;
-      return chalk(`⚡ Loaded skill: ${typeof skillName === "string" ? skillName : ""}`);
     }
     if (message.meta?.isSummary) {
       return chalk.dim.italic("(conversation summary inserted)");

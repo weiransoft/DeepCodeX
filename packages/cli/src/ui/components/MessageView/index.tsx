@@ -85,6 +85,14 @@ export function MessageView({ message, collapsed, width = 80 }: MessageViewProps
     );
   }
 
+  if ((message.role === "system" || message.role === "tool") && message.meta?.skill) {
+    return (
+      <Box marginY={0} marginLeft={1} marginBottom={1}>
+        <Text color="magenta">⚡ Loaded skill: {message.meta.skill.name}</Text>
+      </Box>
+    );
+  }
+
   if (message.role === "tool") {
     const summary = buildToolSummary(message);
     const diffLines = getToolDiffPreviewLines(summary);
@@ -109,13 +117,6 @@ export function MessageView({ message, collapsed, width = 80 }: MessageViewProps
       return <PromptEchoLine text={message.content || ""} width={width} />;
     }
 
-    if (message.meta?.skill) {
-      return (
-        <Box marginY={0} marginLeft={1} marginBottom={1}>
-          <Text color="magenta">⚡ Loaded skill: {message.meta.skill.name}</Text>
-        </Box>
-      );
-    }
     if (message.meta?.isSummary) {
       return (
         <Box marginY={0} marginLeft={1} marginBottom={1}>

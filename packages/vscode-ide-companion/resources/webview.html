@@ -791,8 +791,8 @@
             bubble.appendChild(contentDiv);
             bubble.appendChild(copyBtn);
           }
-        } else if (role === "system") {
-          // system 类型气泡（可折叠，显示 Skills）
+        } else if (role === "system" || (role === "tool" && meta?.skill)) {
+          // skill 气泡（可折叠）
           const header = document.createElement("div");
           header.className = "bubble-collapsible-header";
           const dotClass = shouldConnectToPrev ? "bubble-dot connect-to-prev" : "bubble-dot";

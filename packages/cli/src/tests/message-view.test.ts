@@ -269,6 +269,19 @@ test("renderMessageToStdout renders system skill load messages", () => {
   assert.ok(output.includes("⚡ Loaded skill: code-review"));
 });
 
+test("MessageView renders tool skill load messages with the existing skill status", () => {
+  const msg = makeSessionMessage({
+    role: "tool",
+    content: JSON.stringify({ ok: true, name: "skill", output: "full skill document" }),
+    meta: { skill: { name: "code-review", path: "", description: "" } },
+  });
+  const output = renderToString(React.createElement(MessageView, { message: msg }), { columns: 80 });
+
+  assert.ok(output.includes("⚡ Loaded skill: code-review"));
+  assert.equal(renderMessageToStdout(msg, RawMode.Raw).includes("⚡ Loaded skill: code-review"), true);
+  assert.equal(output.includes("full skill document"), false);
+});
+
 test("renderMessageToStdout renders system summary messages", () => {
   const msg = makeSessionMessage({
     role: "system",
