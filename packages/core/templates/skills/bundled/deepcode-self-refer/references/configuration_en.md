@@ -31,7 +31,7 @@ The following are all the top-level fields supported in `settings.json`, along w
 | `autoCompactWindow` | number/string | Auto-compaction threshold; defaults to 50% of the final context window                 |
 | `model`             | string        | Model name. Defaults to `deepseek-v4-flash` and takes precedence over `env.MODEL`      |
 | `thinkingEnabled`   | boolean       | Whether to enable thinking mode (enabled by default for DeepSeek V4 series)            |
-| `reasoningEffort`   | string        | Reasoning intensity: `"low"`, `"high"`, or `"max"` (default `"max"`)                |
+| `reasoningEffort`   | string        | Reasoning intensity: `"low"`, `"high"`, or `"max"` (default `"max"`)                   |
 | `debugLogEnabled`   | boolean       | Enable debug log output (default `false`)                                              |
 | `telemetryEnabled`  | boolean       | Enable anonymous usage reporting (default `true`)                                      |
 | `notify`            | string        | Full path to a task-completion notification script (e.g., Slack notification script)   |
