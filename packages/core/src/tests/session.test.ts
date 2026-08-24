@@ -3855,6 +3855,166 @@ test("multimodal on keeps images inline for a non-multimodal model", async () =>
   assert.equal(Array.isArray(userMessage?.contentParams), true);
 });
 
+test("Files API mode keeps non-multimodal images inline and sends file references", async () => {
+  const workspace = createTempDir("deepcode-files-session-workspace-");
+  const home = createTempDir("deepcode-files-session-home-");
+  setHomeDir(home);
+  let request: any;
+  const client = {
+    chat: {
+      completions: {
+        create: async (body: any) => {
+          request = body;
+          return createChatResponse("done", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 });
+        },
+      },
+    },
+  };
+  const manager = new SessionManager({
+    projectRoot: workspace,
+    createOpenAIClient: () => ({
+      client: client as any,
+      apiKey: "sk-files-test",
+      model: "deepseek-chat",
+      baseURL: "https://api.deepseek.com",
+      thinkingEnabled: false,
+    }),
+    getResolvedSettings: () => ({ model: "deepseek-chat", filesApiEnabled: true }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+  });
+  (manager as any).deepSeekFiles = {
+    ensureUploaded: async () => ({ fileId: "file-image-1", imageHash: "a".repeat(64), bytes: 5 }),
+    invalidate: () => {},
+  };
+
+  const sessionId = await manager.createSession({ imageUrls: ["data:image/png;base64,aGVsbG8="] });
+  const imagesDir = path.join(home, ".deepcode", "projects", getProjectCode(workspace), "images", sessionId);
+  const userMessage = manager.listSessionMessages(sessionId).find((message) => message.role === "user");
+  const requestUserMessage = request.messages.find((message: any) => message.role === "user");
+
+  assert.equal(fs.existsSync(imagesDir), false);
+  assert.equal(Array.isArray(userMessage?.contentParams), true);
+  assert.deepEqual(requestUserMessage.content, [{ type: "file", file_id: "file-image-1" }]);
+});
+
+test("Files API mode fails the session when image upload fails", async () => {
+  const workspace = createTempDir("deepcode-files-failure-workspace-");
+  const home = createTempDir("deepcode-files-failure-home-");
+  setHomeDir(home);
+  const client = { chat: { completions: { create: async () => assert.fail("chat request must not start") } } };
+  const manager = new SessionManager({
+    projectRoot: workspace,
+    createOpenAIClient: () => ({
+      client: client as any,
+      apiKey: "sk-files-test",
+      model: "deepseek-chat",
+      baseURL: "https://api.deepseek.com",
+      thinkingEnabled: false,
+    }),
+    getResolvedSettings: () => ({ model: "deepseek-chat", filesApiEnabled: true }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+  });
+  (manager as any).deepSeekFiles = {
+    ensureUploaded: async () => {
+      throw new Error("upload unavailable");
+    },
+    invalidate: () => {},
+  };
+
+  const sessionId = await manager.createSession({ imageUrls: ["data:image/png;base64,aGVsbG8="] });
+
+  assert.equal(manager.getSession(sessionId)?.status, "failed");
+  assert.match(manager.getSession(sessionId)?.failReason ?? "", /upload unavailable/);
+});
+
+test("Files API mode invalidates a rejected file ID and uploads it once more", async () => {
+  const workspace = createTempDir("deepcode-files-stale-workspace-");
+  const home = createTempDir("deepcode-files-stale-home-");
+  setHomeDir(home);
+  const requests: any[] = [];
+  const rejected = Object.assign(new Error("file_id expired"), { status: 400 });
+  const client = {
+    chat: {
+      completions: {
+        create: async (body: any) => {
+          requests.push(body);
+          if (requests.length === 1) {
+            throw rejected;
+          }
+          return createChatResponse("done", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 });
+        },
+      },
+    },
+  };
+  const manager = new SessionManager({
+    projectRoot: workspace,
+    createOpenAIClient: () => ({
+      client: client as any,
+      apiKey: "sk-files-test",
+      model: "deepseek-chat",
+      baseURL: "https://api.deepseek.com",
+      thinkingEnabled: false,
+    }),
+    getResolvedSettings: () => ({ model: "deepseek-chat", filesApiEnabled: true }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+  });
+  let uploads = 0;
+  let invalidations = 0;
+  (manager as any).deepSeekFiles = {
+    ensureUploaded: async () => {
+      uploads += 1;
+      return { fileId: `file-image-${uploads}`, imageHash: "a".repeat(64), bytes: 5 };
+    },
+    invalidate: () => {
+      invalidations += 1;
+    },
+  };
+
+  const sessionId = await manager.createSession({ imageUrls: ["data:image/png;base64,aGVsbG8="] });
+
+  assert.equal(manager.getSession(sessionId)?.status, "completed");
+  assert.equal(invalidations, 1);
+  assert.equal(uploads, 2);
+  const retriedUserMessage = requests[1].messages.find((message: any) => message.role === "user");
+  assert.deepEqual(retriedUserMessage.content, [{ type: "file", file_id: "file-image-2" }]);
+});
+
+test("Files API mode checks the aggregate request limit before uploading", async () => {
+  const workspace = createTempDir("deepcode-files-limit-workspace-");
+  const home = createTempDir("deepcode-files-limit-home-");
+  setHomeDir(home);
+  const client = { chat: { completions: { create: async () => assert.fail("chat request must not start") } } };
+  const manager = new SessionManager({
+    projectRoot: workspace,
+    createOpenAIClient: () => ({
+      client: client as any,
+      apiKey: "sk-files-test",
+      model: "deepseek-chat",
+      baseURL: "https://api.deepseek.com",
+      thinkingEnabled: false,
+    }),
+    getResolvedSettings: () => ({
+      model: "deepseek-chat",
+      filesApiEnabled: true,
+      maxRequestFilesBytes: 4,
+    }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+  });
+  (manager as any).deepSeekFiles = {
+    ensureUploaded: async () => assert.fail("upload must not start"),
+    invalidate: () => {},
+  };
+
+  const sessionId = await manager.createSession({ imageUrls: ["data:image/png;base64,aGVsbG8="] });
+
+  assert.equal(manager.getSession(sessionId)?.status, "failed");
+  assert.match(manager.getSession(sessionId)?.failReason ?? "", /configured 4-byte/);
+});
+
 test("non-multimodal sessions reject unsupported pasted images before creating a session", async () => {
   const workspace = createTempDir("deepcode-invalid-image-workspace-");
   const home = createTempDir("deepcode-invalid-image-home-");

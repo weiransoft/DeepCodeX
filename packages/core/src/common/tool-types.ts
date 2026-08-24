@@ -4,6 +4,7 @@ import type { ReasoningEffort } from "../settings";
 
 export type CreateOpenAIClient = () => {
   client: OpenAI | null;
+  apiKey?: string;
   model: string;
   baseURL?: string;
   temperature?: number;

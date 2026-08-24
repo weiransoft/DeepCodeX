@@ -33,6 +33,11 @@ import {
 } from "./tools/executor";
 import { McpManager } from "./mcp/mcp-manager";
 import {
+  DEFAULT_FILE_EXPIRES_AFTER_SECONDS,
+  DEFAULT_FILE_QUOTA_CLEANUP_BATCH,
+  DEFAULT_FILE_REFRESH_MARGIN_SECONDS,
+  DEFAULT_FILES_API_TIMEOUT_MS,
+  DEFAULT_MAX_REQUEST_FILES_BYTES,
   getDefaultAutoCompactWindow,
   type McpServerConfig,
   type PermissionScope,
@@ -60,6 +65,12 @@ import { clearSessionWorkingDir } from "./tools/bash-handler";
 import { reportNewPrompt } from "./common/telemetry";
 import { OpenAIMessageConverter } from "./common/openai-message-converter";
 import { supportsMultimodal, type MultimodalMode } from "./common/model-capabilities";
+import {
+  decodeDeepSeekImageDataUrl,
+  DeepSeekFileStore,
+  type DeepSeekFileReference,
+  type DeepSeekFilesPolicy,
+} from "./common/deepseek-files";
 
 export type { PermissionScope } from "./settings";
 export type {
@@ -341,6 +352,12 @@ export type SessionManagerOptions = {
   getResolvedSettings: () => {
     model: string;
     multimodal?: MultimodalMode;
+    filesApiEnabled?: boolean;
+    filesApiTimeoutMs?: number;
+    fileExpiresAfterSeconds?: number;
+    fileRefreshMarginSeconds?: number;
+    fileQuotaCleanupBatch?: number;
+    maxRequestFilesBytes?: number;
     contextWindow?: number;
     autoCompactWindow?: number;
     webSearchTool?: string;
@@ -373,6 +390,12 @@ export class SessionManager {
   private readonly getResolvedSettings: () => {
     model: string;
     multimodal?: MultimodalMode;
+    filesApiEnabled?: boolean;
+    filesApiTimeoutMs?: number;
+    fileExpiresAfterSeconds?: number;
+    fileRefreshMarginSeconds?: number;
+    fileQuotaCleanupBatch?: number;
+    maxRequestFilesBytes?: number;
     contextWindow?: number;
     autoCompactWindow?: number;
     webSearchTool?: string;
@@ -395,6 +418,7 @@ export class SessionManager {
   private readonly mcpManager = new McpManager();
   private mcpToolDefinitions: ToolDefinition[] = [];
   private readonly messageConverter: OpenAIMessageConverter;
+  private readonly deepSeekFiles = new DeepSeekFileStore();
 
   constructor(options: SessionManagerOptions) {
     this.projectRoot = options.projectRoot;
@@ -526,6 +550,89 @@ export class SessionManager {
     const error = new Error("Request was aborted.");
     error.name = "AbortError";
     throw error;
+  }
+
+  private getDeepSeekFilesSettings(): {
+    enabled: boolean;
+    maxRequestFilesBytes: number;
+    policy: DeepSeekFilesPolicy;
+  } {
+    const settings = this.getResolvedSettings();
+    return {
+      enabled: settings.filesApiEnabled === true,
+      maxRequestFilesBytes: settings.maxRequestFilesBytes ?? DEFAULT_MAX_REQUEST_FILES_BYTES,
+      policy: {
+        timeoutMs: settings.filesApiTimeoutMs ?? DEFAULT_FILES_API_TIMEOUT_MS,
+        expiresAfterSeconds: settings.fileExpiresAfterSeconds ?? DEFAULT_FILE_EXPIRES_AFTER_SECONDS,
+        refreshMarginSeconds: settings.fileRefreshMarginSeconds ?? DEFAULT_FILE_REFRESH_MARGIN_SECONDS,
+        quotaCleanupBatch: settings.fileQuotaCleanupBatch ?? DEFAULT_FILE_QUOTA_CLEANUP_BATCH,
+      },
+    };
+  }
+
+  private async buildMessagesWithDeepSeekFiles(
+    messages: SessionMessage[],
+    thinkingEnabled: boolean,
+    model: string,
+    apiKey: string,
+    signal: AbortSignal
+  ): Promise<{ messages: ChatCompletionMessageParam[]; references: DeepSeekFileReference[] }> {
+    const settings = this.getDeepSeekFilesSettings();
+    const converted = this.messageConverter.buildMessages(messages, thinkingEnabled, model, "on");
+    const images: Array<{
+      messageIndex: number;
+      contentIndex: number;
+      image: ReturnType<typeof decodeDeepSeekImageDataUrl>;
+    }> = [];
+    let totalBytes = 0;
+
+    for (let messageIndex = 0; messageIndex < converted.length; messageIndex += 1) {
+      const content = (converted[messageIndex] as { content?: unknown }).content;
+      if (!Array.isArray(content)) {
+        continue;
+      }
+      for (let contentIndex = 0; contentIndex < content.length; contentIndex += 1) {
+        const part = content[contentIndex] as { type?: unknown; image_url?: { url?: unknown } };
+        if (part.type !== "image_url" || typeof part.image_url?.url !== "string") {
+          continue;
+        }
+        const image = decodeDeepSeekImageDataUrl(part.image_url.url, images.length);
+        totalBytes += image.buffer.byteLength;
+        if (totalBytes > settings.maxRequestFilesBytes) {
+          throw new Error(
+            `Images in this request exceed the configured ${settings.maxRequestFilesBytes}-byte Files API limit.`
+          );
+        }
+        images.push({ messageIndex, contentIndex, image });
+      }
+    }
+
+    const references = await Promise.all(
+      images.map(({ image }) => this.deepSeekFiles.ensureUploaded(image, apiKey, settings.policy, signal))
+    );
+    const result = converted.map((message) => {
+      const content = (message as { content?: unknown }).content;
+      return Array.isArray(content) ? ({ ...message, content: [...content] } as ChatCompletionMessageParam) : message;
+    });
+    for (let index = 0; index < images.length; index += 1) {
+      const image = images[index];
+      const content = (result[image.messageIndex] as { content: unknown[] }).content;
+      content[image.contentIndex] = { type: "file", file_id: references[index].fileId };
+    }
+    return { messages: result, references };
+  }
+
+  private isRejectedDeepSeekFile(error: unknown): boolean {
+    const status = (error as { status?: unknown } | null)?.status;
+    if (status !== 400) {
+      return false;
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    const file = /\bfile(?:[_ -]?(?:id|api|not[_ -]?found|deleted|expired))?/i.test(detail);
+    const missing =
+      /(?:expired|not[_ -]?found|deleted|do(?:es)? not exist|not created under (?:this|your) account)/i.test(detail);
+    const invalidId = /(?:invalid.{0,20}file[_ -]?(?:id|api)|file[_ -]?(?:id|api).{0,20}invalid)/i.test(detail);
+    return file && (missing || invalidId);
   }
 
   private async createChatCompletionStream(
@@ -1401,8 +1508,18 @@ ${agentInstructions}
     permissionPrompt?: UserPromptContent
   ): Promise<void> {
     const startedAt = Date.now();
-    const { client, model, baseURL, temperature, thinkingEnabled, reasoningEffort, debugLogEnabled, notify, env } =
-      this.createOpenAIClient();
+    const {
+      client,
+      apiKey,
+      model,
+      baseURL,
+      temperature,
+      thinkingEnabled,
+      reasoningEffort,
+      debugLogEnabled,
+      notify,
+      env,
+    } = this.createOpenAIClient();
     const now = new Date().toISOString();
     rebuildSessionStateFromHistory(sessionId, this.listSessionMessages(sessionId));
 
@@ -1497,31 +1614,67 @@ ${agentInstructions}
           await this.compactSession(sessionId, sessionController.signal);
         }
 
-        const messages = this.messageConverter.buildMessages(
-          this.prepareSessionMessagesForRequest(this.listSessionMessages(sessionId)),
-          thinkingEnabled,
-          model,
-          this.getResolvedSettings().multimodal
-        );
+        const sessionMessages = this.prepareSessionMessagesForRequest(this.listSessionMessages(sessionId));
+        const filesSettings = this.getDeepSeekFilesSettings();
+        if (filesSettings.enabled && !apiKey) {
+          throw new Error("Files API is enabled, but no API key is available for uploads.");
+        }
+        let prepared = filesSettings.enabled
+          ? await this.buildMessagesWithDeepSeekFiles(
+              sessionMessages,
+              thinkingEnabled,
+              model,
+              apiKey!,
+              sessionController.signal
+            )
+          : {
+              messages: this.messageConverter.buildMessages(
+                sessionMessages,
+                thinkingEnabled,
+                model,
+                this.getResolvedSettings().multimodal
+              ),
+              references: [] as DeepSeekFileReference[],
+            };
         const thinkingOptions = buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort);
-        const response = await this.createChatCompletionStream(
-          client,
-          {
-            model,
-            ...(temperature !== undefined ? { temperature } : {}),
-            messages,
-            tools: getTools(this.getPromptToolOptions(), this.mcpToolDefinitions),
-            ...thinkingOptions,
-          },
-          { signal: sessionController.signal },
-          sessionId,
-          {
-            enabled: debugLogEnabled,
-            location: "SessionManager.activateSession",
-            baseURL,
-            params: { iteration, temperature, thinkingEnabled, reasoningEffort },
+        const request = () =>
+          this.createChatCompletionStream(
+            client,
+            {
+              model,
+              ...(temperature !== undefined ? { temperature } : {}),
+              messages: prepared.messages,
+              tools: getTools(this.getPromptToolOptions(), this.mcpToolDefinitions),
+              ...thinkingOptions,
+            },
+            { signal: sessionController.signal },
+            sessionId,
+            {
+              enabled: debugLogEnabled,
+              location: "SessionManager.activateSession",
+              baseURL,
+              params: { iteration, temperature, thinkingEnabled, reasoningEffort },
+            }
+          );
+        let response: Awaited<ReturnType<typeof request>>;
+        try {
+          response = await request();
+        } catch (error) {
+          if (!filesSettings.enabled || prepared.references.length === 0 || !this.isRejectedDeepSeekFile(error)) {
+            throw error;
           }
-        );
+          for (const reference of prepared.references) {
+            this.deepSeekFiles.invalidate(reference, apiKey!);
+          }
+          prepared = await this.buildMessagesWithDeepSeekFiles(
+            sessionMessages,
+            thinkingEnabled,
+            model,
+            apiKey!,
+            sessionController.signal
+          );
+          response = await request();
+        }
 
         const message = response.choices?.[0]?.message;
         const rawContent = message?.content;
@@ -2340,6 +2493,9 @@ ${agentInstructions}
   }
 
   private preparePromptImages(sessionId: string, prompt: UserPromptContent): UserPromptContent {
+    if (this.getDeepSeekFilesSettings().enabled) {
+      return prompt;
+    }
     if (supportsMultimodal(this.getResolvedSettings().model, this.getResolvedSettings().multimodal)) {
       return prompt;
     }

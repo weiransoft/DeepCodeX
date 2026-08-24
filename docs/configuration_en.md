@@ -33,6 +33,12 @@ The following are all the top-level fields supported in `settings.json`, along w
 | `thinkingEnabled`  | boolean | Whether to enable thinking mode (enabled by default for DeepSeek V4 series)|
 | `reasoningEffort`  | string  | Reasoning intensity: `"low"`, `"high"`, or `"max"` (default `"max"`)    |
 | `multimodal`       | string  | Multimodal (image) capability override: `"default"`, `"on"`, or `"off"` (default `"default"`) |
+| `filesApiEnabled`  | boolean | Send images through the DeepSeek Files API (default `false`)               |
+| `filesApiTimeoutMs` | number | Per-image Files API timeout; defaults to `60000`, maximum `600000` ms       |
+| `fileExpiresAfterSeconds` | number | Remote file lifetime, default `604800` seconds                       |
+| `fileRefreshMarginSeconds` | number | Refresh cached IDs below this remaining lifetime, default `3600` seconds |
+| `fileQuotaCleanupBatch` | number | Oldest Deep Code files removed during quota recovery, default `100`    |
+| `maxRequestFilesBytes` | number | Raw image byte limit per request, default `134217728` (128 MiB)          |
 | `debugLogEnabled`  | boolean | Enable debug log output (default `false`)                                   |
 | `telemetryEnabled` | boolean | Enable anonymous usage reporting (default `true`)                           |
 | `notify`           | string  | Full path to a task-completion notification script (e.g., Slack notification script) |
@@ -98,6 +104,23 @@ Controls whether the current model is treated as a multimodal model that accepts
 | `off`     | Always treat the model as non-multimodal, images are read on demand via UnderstandImage tool |
 
 Use this to override the default detection when your model is not in the known-model list, or when its actual capability differs from the default.
+
+#### DeepSeek Files API
+
+With `filesApiEnabled: true`, Deep Code uploads images to the fixed `https://api.deepseek.com/files` endpoint and sends `file_id` references in chat requests. An upload or cache-refresh failure fails the request; disabling the setting preserves the existing image path.
+
+```json
+{
+  "filesApiEnabled": true,
+  "filesApiTimeoutMs": 60000,
+  "fileExpiresAfterSeconds": 604800,
+  "fileRefreshMarginSeconds": 3600,
+  "fileQuotaCleanupBatch": 100,
+  "maxRequestFilesBytes": 134217728
+}
+```
+
+Each file is limited to 64 MiB, and the upload timeout cannot exceed DeepSeek's 10-minute limit. Remote IDs are cached in `~/.deepcode/files-api-cache.json` without storing the plaintext API key. On a remote storage-quota error, only the oldest files whose names start with `deepcode-` are removed before one retry.
 
 #### `notify` — Task Completion Notification
 

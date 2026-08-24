@@ -94,6 +94,12 @@ export type DeepcodingSettings = {
   notify?: string;
   webSearchTool?: string;
   multimodal?: MultimodalMode;
+  filesApiEnabled?: boolean;
+  filesApiTimeoutMs?: number;
+  fileExpiresAfterSeconds?: number;
+  fileRefreshMarginSeconds?: number;
+  fileQuotaCleanupBatch?: number;
+  maxRequestFilesBytes?: number;
   mcpServers?: Record<string, McpServerConfig>;
   permissions?: PermissionSettings;
   enabledSkills?: EnabledSkillsSettings;
@@ -115,6 +121,12 @@ export type ResolvedDeepcodingSettings = {
   notify?: string;
   webSearchTool?: string;
   multimodal: MultimodalMode;
+  filesApiEnabled: boolean;
+  filesApiTimeoutMs: number;
+  fileExpiresAfterSeconds: number;
+  fileRefreshMarginSeconds: number;
+  fileQuotaCleanupBatch: number;
+  maxRequestFilesBytes: number;
   mcpServers?: Record<string, McpServerConfig>;
   permissions: Required<PermissionSettings>;
   enabledSkills: EnabledSkillsSettings;
@@ -131,6 +143,12 @@ export type SettingsProcessEnv = Record<string, string | undefined>;
 
 const DEFAULT_CONTEXT_WINDOW = 256 * 1024;
 const DEEPSEEK_V4_CONTEXT_WINDOW = 1024 * 1024;
+export const DEFAULT_FILES_API_TIMEOUT_MS = 60_000;
+export const DEFAULT_FILE_EXPIRES_AFTER_SECONDS = 7 * 24 * 60 * 60;
+export const DEFAULT_FILE_REFRESH_MARGIN_SECONDS = 60 * 60;
+export const DEFAULT_FILE_QUOTA_CLEANUP_BATCH = 100;
+export const DEFAULT_MAX_REQUEST_FILES_BYTES = 128 * 1024 * 1024;
+export const MAX_FILES_API_TIMEOUT_MS = 10 * 60 * 1000;
 
 export function getDefaultContextWindow(model: string): number {
   return DEEPSEEK_V4_MODELS.has(model) ? DEEPSEEK_V4_CONTEXT_WINDOW : DEFAULT_CONTEXT_WINDOW;
@@ -207,6 +225,22 @@ function parseTemperature(value: unknown): number | undefined {
     return undefined;
   }
   return raw;
+}
+
+function parseIntegerInRange(value: unknown, minimum: number, maximum: number): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= minimum && value <= maximum
+    ? value
+    : undefined;
+}
+
+function firstIntegerInRange(minimum: number, maximum: number, ...values: unknown[]): number | undefined {
+  for (const value of values) {
+    const parsed = parseIntegerInRange(value, minimum, maximum);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+  }
+  return undefined;
 }
 
 function trimString(value: unknown): string {
@@ -607,6 +641,40 @@ export function resolveSettingsSources(
     resolveMultimodalMode(userEnv.MULTIMODAL) ??
     "default";
 
+  const filesApiEnabled =
+    parseBoolean(projectSettings?.filesApiEnabled) ?? parseBoolean(userSettings?.filesApiEnabled) ?? false;
+  const filesApiTimeoutMs =
+    firstIntegerInRange(
+      1,
+      MAX_FILES_API_TIMEOUT_MS,
+      projectSettings?.filesApiTimeoutMs,
+      userSettings?.filesApiTimeoutMs
+    ) ?? DEFAULT_FILES_API_TIMEOUT_MS;
+  const fileExpiresAfterSeconds =
+    firstIntegerInRange(
+      3_600,
+      2_592_000,
+      projectSettings?.fileExpiresAfterSeconds,
+      userSettings?.fileExpiresAfterSeconds
+    ) ?? DEFAULT_FILE_EXPIRES_AFTER_SECONDS;
+  const fileRefreshMarginSeconds =
+    firstIntegerInRange(
+      0,
+      fileExpiresAfterSeconds - 1,
+      projectSettings?.fileRefreshMarginSeconds,
+      userSettings?.fileRefreshMarginSeconds
+    ) ?? Math.min(DEFAULT_FILE_REFRESH_MARGIN_SECONDS, fileExpiresAfterSeconds - 1);
+  const fileQuotaCleanupBatch =
+    firstIntegerInRange(1, 1_000, projectSettings?.fileQuotaCleanupBatch, userSettings?.fileQuotaCleanupBatch) ??
+    DEFAULT_FILE_QUOTA_CLEANUP_BATCH;
+  const maxRequestFilesBytes =
+    firstIntegerInRange(
+      1,
+      Number.MAX_SAFE_INTEGER,
+      projectSettings?.maxRequestFilesBytes,
+      userSettings?.maxRequestFilesBytes
+    ) ?? DEFAULT_MAX_REQUEST_FILES_BYTES;
+
   return {
     env,
     apiKey: trimString(env.API_KEY) || undefined,
@@ -622,6 +690,12 @@ export function resolveSettingsSources(
     notify: notify || undefined,
     webSearchTool: webSearchTool || undefined,
     multimodal,
+    filesApiEnabled,
+    filesApiTimeoutMs,
+    fileExpiresAfterSeconds,
+    fileRefreshMarginSeconds,
+    fileQuotaCleanupBatch,
+    maxRequestFilesBytes,
     mcpServers: mergeMcpServers(userSettings, projectSettings, userEnv, projectEnv, systemEnv),
     permissions: mergePermissions(userSettings, projectSettings),
     enabledSkills: mergeEnabledSkills(userSettings, projectSettings),
