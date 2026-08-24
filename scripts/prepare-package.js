@@ -326,9 +326,7 @@ for (const file of ["README.md", "LICENSE"]) {
   }
 }
 
-// Write a new package.json for publishing with empty dependencies.
-// All runtime code (including @vegamo/deepcode-core and its deps) is already
-// bundled into dist/cli.js by esbuild with packages: "bundle".
+// Native modules stay external so npm can install the correct binary for the host platform.
 const distPackageJson = {
   name: cliPkg.name,
   version: version,
@@ -341,13 +339,15 @@ const distPackageJson = {
   },
   files: ["cli.js", "chunks/**", "templates/**", "bundled/**", "README.md", "LICENSE"],
   engines: cliPkg.engines,
-  dependencies: {},
+  dependencies: {
+    sharp: corePkg.dependencies.sharp,
+  },
 };
 
 if (!dryRun) {
   writeJson(join(distDir, "package.json"), distPackageJson);
 }
-log("  Written dist/package.json with dependencies: {}");
+log(`  Written dist/package.json with sharp dependency: ${corePkg.dependencies.sharp}`);
 
 if (!dryRun) {
   validatePacklist(

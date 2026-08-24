@@ -219,12 +219,12 @@ export function describeToolPermissionRequest(options: {
   const name = options.toolCall.function.name;
   const args = parseToolArgumentsForPermissions(options.toolCall.function.arguments);
 
-  if (name === "read" || name === "Read") {
+  if (name === "read" || name === "Read" || name === "ReadImage") {
     const filePath = typeof args.file_path === "string" ? args.file_path : "";
     return {
       toolCallId: options.toolCall.id,
       name,
-      command: formatToolPathCommand("read", filePath),
+      command: formatToolPathCommand(name === "ReadImage" ? "read-image" : "read", filePath),
       scopes:
         filePath && !isPathInAnyDirectory(options.projectRoot, filePath, options.readPermissionExemptPaths)
           ? [isPathInProject(options.projectRoot, filePath) ? "read-in-cwd" : "read-out-cwd"]

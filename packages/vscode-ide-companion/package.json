@@ -32,7 +32,7 @@
   "icon": "resources/deepcoding_icon.png",
   "activationEvents": [],
   "files": [
-    "out/extension.js",
+    "out/**",
     "resources/**",
     "templates/**",
     "README.md",
@@ -83,12 +83,13 @@
     "typecheck": "tsc -p ./ --noEmit",
     "build": "node ../../scripts/esbuild-vscode.config.js",
     "prepublishOnly": "npm run build",
-    "package": "vsce package --no-dependencies",
+    "package": "node ../../scripts/package-vscode.js",
     "test": "node src/tests/run-tests.mjs"
   },
   "dependencies": {
     "@vegamo/deepcode-core": "file:../core",
-    "markdown-it": "^14.2.0"
+    "markdown-it": "^14.2.0",
+    "sharp": "^0.34.5"
   },
   "devDependencies": {
     "@types/markdown-it": "^14.1.1",

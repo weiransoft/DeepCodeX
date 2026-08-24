@@ -85,6 +85,7 @@ export type {
 // Tool handlers
 export { handleBashTool, clearSessionWorkingDir } from "./tools/bash-handler";
 export { handleReadTool } from "./tools/read-handler";
+export { handleReadImageTool } from "./tools/read-image-handler";
 export { handleWriteTool } from "./tools/write-handler";
 export { handleEditTool } from "./tools/edit-handler";
 export { handleUpdatePlanTool } from "./tools/update-plan-handler";

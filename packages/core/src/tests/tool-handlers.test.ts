@@ -1197,7 +1197,7 @@ test("Edit preserves CRLF line endings for existing files", async () => {
   assert.equal(fs.readFileSync(filePath, "utf8"), "alpha\r\ngamma\r\n");
 });
 
-test("Read returns an acknowledgement for images and attaches the image as a hidden user message", async () => {
+test("Read rejects images without attaching their contents", async () => {
   const workspace = createTempWorkspace();
   const filePath = path.join(workspace, "pixel.png");
   fs.writeFileSync(
@@ -1210,23 +1210,9 @@ test("Read returns an acknowledgement for images and attaches the image as a hid
 
   const readResult = await handleReadTool({ file_path: filePath }, createContext("image-read", workspace));
 
-  assert.equal(readResult.ok, true);
-  assert.equal(readResult.output, "File loaded.");
-  assert.equal(readResult.metadata?.mime, "image/png");
-  assert.equal(Array.isArray(readResult.followUpMessages), true);
-  assert.equal(readResult.followUpMessages?.length, 1);
-
-  const followUpMessage = readResult.followUpMessages?.[0];
-  assert.equal(followUpMessage?.role, "user");
-  assert.equal(followUpMessage?.visible, false);
-  assert.match(followUpMessage?.content ?? "", /pixel\.png/);
-  const contentParams = Array.isArray(followUpMessage?.contentParams) ? followUpMessage.contentParams : [];
-  assert.equal(contentParams.length, 1);
-  assert.equal((contentParams[0] as { type?: unknown }).type, "image_url");
-  assert.match(
-    String((contentParams[0] as { image_url?: { url?: unknown } }).image_url?.url ?? ""),
-    /^data:image\/png;base64,/
-  );
+  assert.equal(readResult.ok, false);
+  assert.match(readResult.error ?? "", /not supported by read/);
+  assert.equal(readResult.followUpMessages, undefined);
 });
 
 test("Read reports PDFs as binary without attaching their contents", async () => {

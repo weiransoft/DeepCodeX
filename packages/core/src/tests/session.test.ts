@@ -3133,6 +3133,23 @@ test("UnderstandImage tool params show image_path instead of prompt", () => {
   assert.equal(toolMessage.meta?.paramsMd, imagePath);
 });
 
+test("ReadImage tool params show a workspace-relative file path", () => {
+  const manager = createSessionManager(process.cwd(), "machine-id-read-image-params");
+  const imagePath = path.join(process.cwd(), "images", "screenshot.png");
+
+  const toolMessage = (manager as any).buildToolMessage(
+    "session-1",
+    "call-read-image-1",
+    JSON.stringify({ ok: true, name: "ReadImage", output: "Image loaded." }),
+    {
+      name: "ReadImage",
+      arguments: JSON.stringify({ file_path: imagePath }),
+    }
+  ) as SessionMessage;
+
+  assert.equal(toolMessage.meta?.paramsMd, path.join("images", "screenshot.png"));
+});
+
 test("LLM tool calls without ids receive generated 32 character ids", async () => {
   const workspace = createTempDir("deepcode-tool-call-id-workspace-");
   const home = createTempDir("deepcode-tool-call-id-home-");

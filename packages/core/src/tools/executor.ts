@@ -1,6 +1,7 @@
 import { handleAskUserQuestionTool } from "./ask-user-question-handler";
 import { handleBashTool } from "./bash-handler";
 import { handleEditTool } from "./edit-handler";
+import { handleReadImageTool } from "./read-image-handler";
 import { handleReadTool } from "./read-handler";
 import { handleSkillTool } from "./skill-handler";
 import { handleUpdatePlanTool } from "./update-plan-handler";
@@ -82,6 +83,7 @@ export class ToolExecutor {
   private registerToolHandlers(): void {
     this.toolHandlers.set("bash", handleBashTool);
     this.toolHandlers.set("read", handleReadTool);
+    this.toolHandlers.set("ReadImage", handleReadImageTool);
     this.toolHandlers.set("write", handleWriteTool);
     this.toolHandlers.set("edit", handleEditTool);
     this.toolHandlers.set("skill", handleSkillTool);

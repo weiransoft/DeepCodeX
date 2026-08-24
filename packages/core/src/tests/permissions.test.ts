@@ -353,6 +353,43 @@ test("UnderstandImage requires network and exempts only configured image directo
   );
 });
 
+test("ReadImage uses filesystem read permissions without network access", () => {
+  const projectRoot = createTempDir("deepcode-permissions-read-image-workspace-");
+  const home = createTempDir("deepcode-permissions-read-image-home-");
+  const projectImage = path.join(projectRoot, "project.png");
+  const outsideImage = path.join(home, "outside.png");
+  const plan = computeToolCallPermissions({
+    sessionId: "session-1",
+    projectRoot,
+    settings: {
+      allow: [] as PermissionScope[],
+      deny: [] as PermissionScope[],
+      ask: [] as PermissionScope[],
+      defaultMode: "askAll" as const,
+    },
+    toolCalls: [
+      {
+        id: "call-project",
+        type: "function",
+        function: { name: "ReadImage", arguments: JSON.stringify({ file_path: projectImage }) },
+      },
+      {
+        id: "call-outside",
+        type: "function",
+        function: { name: "ReadImage", arguments: JSON.stringify({ file_path: outsideImage }) },
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    plan.askPermissions.map((item) => ({ id: item.toolCallId, scopes: item.scopes })),
+    [
+      { id: "call-project", scopes: ["read-in-cwd"] },
+      { id: "call-outside", scopes: ["read-out-cwd"] },
+    ]
+  );
+});
+
 test("isPathInAnyDirectory matches absolute and project-relative directories without sibling leaks", () => {
   const projectRoot = createTempDir("deepcode-permissions-directory-match-workspace-");
   const home = createTempDir("deepcode-permissions-directory-match-home-");

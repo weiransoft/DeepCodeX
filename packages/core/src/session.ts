@@ -2869,7 +2869,7 @@ ${agentInstructions}
 
     const value = args[firstKey];
     const text = typeof value === "string" ? value : JSON.stringify(value);
-    if (toolName === "read" && text.startsWith(this.projectRoot)) {
+    if ((toolName === "read" || toolName === "ReadImage") && text.startsWith(this.projectRoot)) {
       return text.slice(this.projectRoot.length).replace(/^[\\/]/, "");
     }
     return text;
