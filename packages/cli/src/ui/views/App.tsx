@@ -26,6 +26,7 @@ import { RawMode, useRawModeContext } from "../contexts";
 import { renderMessageToStdout } from "../components/MessageView/utils";
 import {
   buildPromptDraftFromSessionMessage,
+  buildPromptHistory,
   buildStatusLine,
   buildSyntheticUserMessage,
   formatModelConfig,
@@ -832,12 +833,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
     };
   }, [sessionManager, projectRoot]);
   const statusLineSegments = useStatusLine(resolvedSettings.statusline, projectRoot, getSessionInfo);
-  const promptHistory = useMemo(() => {
-    return messages
-      .filter((message) => message.role === "user" && typeof message.content === "string")
-      .map((message) => (message.content ?? "").trim())
-      .filter((content) => content.length > 0);
-  }, [messages]);
+  const promptHistory = useMemo(() => buildPromptHistory(messages), [messages]);
   const expandedThinkingId = findExpandedThinkingId(messages);
   const pendingQuestion = useMemo(() => findPendingAskUserQuestion(messages, activeStatus), [activeStatus, messages]);
   const shouldShowQuestionPrompt = Boolean(pendingQuestion && !dismissedQuestionIds.has(pendingQuestion.messageId));

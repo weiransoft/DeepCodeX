@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import type { DeepcodingSettings, PermissionScope, PermissionSettings } from "../settings";
+import type { ToolExecutionFollowUpMessage } from "./tool-types";
 import { isAbsoluteFilePath, normalizeFilePath } from "./state";
 
 export type BashPermissionScope = Exclude<PermissionScope, "mcp"> | "unknown";
@@ -46,7 +47,7 @@ export type PermissionToolExecution = {
     error?: string;
     metadata?: Record<string, unknown>;
     awaitUserResponse?: boolean;
-    followUpMessages?: Array<{ role: "system"; content: string; contentParams?: unknown | null }>;
+    followUpMessages?: ToolExecutionFollowUpMessage[];
   };
 };
 

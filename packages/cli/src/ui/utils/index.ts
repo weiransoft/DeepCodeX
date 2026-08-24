@@ -48,6 +48,13 @@ export function buildSyntheticUserMessage(content: string, imageCount: number): 
   };
 }
 
+export function buildPromptHistory(messages: SessionMessage[]): string[] {
+  return messages
+    .filter((message) => message.role === "user" && message.visible && typeof message.content === "string")
+    .map((message) => (message.content ?? "").trim())
+    .filter((content) => content.length > 0);
+}
+
 export function buildPromptDraftFromSessionMessage(message: SessionMessage, nonce: number): PromptDraft {
   return {
     nonce,

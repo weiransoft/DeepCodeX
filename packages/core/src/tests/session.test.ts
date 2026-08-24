@@ -63,7 +63,7 @@ test("getProjectCode shortens long project roots for Windows-compatible storage 
   assert.notEqual(projectCode, longRoot.replace(/[\\/]/g, "-").replace(/:/g, ""));
 });
 
-test("SessionManager preserves structured system content when building OpenAI messages", () => {
+test("SessionManager preserves structured user content when building OpenAI messages", () => {
   const manager = new SessionManager({
     projectRoot: process.cwd(),
     createOpenAIClient: () => ({
@@ -78,9 +78,9 @@ test("SessionManager preserves structured system content when building OpenAI me
 
   const messages: SessionMessage[] = [
     {
-      id: "system-image",
+      id: "user-image",
       sessionId: "session-1",
-      role: "system",
+      role: "user",
       content: "The read tool has loaded `pixel.png`.",
       contentParams: [
         {
@@ -102,7 +102,7 @@ test("SessionManager preserves structured system content when building OpenAI me
   }>;
 
   assert.equal(openAIMessages.length, 1);
-  assert.equal(openAIMessages[0]?.role, "system");
+  assert.equal(openAIMessages[0]?.role, "user");
   assert.deepEqual(openAIMessages[0]?.content, [
     { type: "text", text: "The read tool has loaded `pixel.png`." },
     {
@@ -110,6 +110,32 @@ test("SessionManager preserves structured system content when building OpenAI me
       image_url: { url: "data:image/png;base64,abc123" },
     },
   ]);
+});
+
+test("SessionManager builds hidden user messages for image follow-ups", () => {
+  const manager = new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({
+      client: null,
+      model: "test-model",
+      thinkingEnabled: false,
+    }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+  });
+
+  const message = (manager as any).buildFollowUpMessage("session-1", {
+    role: "user",
+    content: "The read tool has loaded `pixel.png`.",
+    contentParams: [{ type: "image_url", image_url: { url: "data:image/png;base64,abc123" } }],
+    visible: false,
+  });
+
+  assert.equal(message.role, "user");
+  assert.equal(message.visible, false);
+  assert.equal(message.meta, undefined);
+  assert.equal(message.checkpointHash, undefined);
 });
 
 test("non-interactive SessionManager removes AskUserQuestion docs from restored requests", () => {

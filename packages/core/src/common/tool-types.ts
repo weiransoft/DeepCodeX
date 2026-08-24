@@ -97,9 +97,10 @@ export type ToolExecutionResult = {
 };
 
 export type ToolExecutionFollowUpMessage = {
-  role: "system";
+  role: "system" | "user";
   content: string;
   contentParams?: unknown | null;
+  visible?: boolean;
 };
 
 export type ToolHandler = (

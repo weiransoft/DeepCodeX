@@ -27,6 +27,7 @@ import {
   type PluginRateLimitedTool,
   type ToolCallExecution,
   type ToolExecutionHooks,
+  type ToolExecutionFollowUpMessage,
   type ToolExecutionResult,
 } from "./tools/executor";
 import { McpManager } from "./mcp/mcp-manager";
@@ -2522,6 +2523,22 @@ ${agentInstructions}
     };
   }
 
+  private buildFollowUpMessage(sessionId: string, message: ToolExecutionFollowUpMessage): SessionMessage {
+    const now = new Date().toISOString();
+    return {
+      id: crypto.randomUUID(),
+      sessionId,
+      role: message.role,
+      content: message.content,
+      contentParams: message.contentParams ?? null,
+      messageParams: null,
+      compacted: false,
+      visible: message.visible ?? false,
+      createTime: now,
+      updateTime: now,
+    };
+  }
+
   private buildSkillMessage(sessionId: string, content: string, skill: SkillInfo): SessionMessage {
     const now = new Date().toISOString();
     return {
@@ -2724,12 +2741,7 @@ ${agentInstructions}
       this.onAssistantMessage(toolMessage, true);
 
       for (const followUpMessage of execution.result.followUpMessages ?? []) {
-        if (followUpMessage.role !== "system") {
-          continue;
-        }
-        followUpMessages.push(
-          this.buildSystemMessage(sessionId, followUpMessage.content, followUpMessage.contentParams ?? null)
-        );
+        followUpMessages.push(this.buildFollowUpMessage(sessionId, followUpMessage));
       }
     }
 

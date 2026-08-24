@@ -459,7 +459,7 @@ function getImageMimeType(ext: string): string {
 function buildImageFollowUpMessage(filePath: string, mime: string, buffer: Buffer): ToolExecutionFollowUpMessage {
   const fileName = path.basename(filePath);
   return {
-    role: "system",
+    role: "user",
     content:
       `The read tool has loaded \`${fileName}\`. ` + "Use the attached image content to answer the original request.",
     contentParams: [
@@ -470,6 +470,7 @@ function buildImageFollowUpMessage(filePath: string, mime: string, buffer: Buffe
         },
       },
     ],
+    visible: false,
   };
 }
 
