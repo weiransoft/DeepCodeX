@@ -84,7 +84,10 @@ test("OpenAIMessageConverter preserves image content for multimodal models", () 
     }),
   ];
 
-  const result = c.buildMessages(messages, false, "gpt-4o") as Array<{ role: string; content: unknown }>;
+  const result = c.buildMessages(messages, false, "deepseek-v4-flash-vision-exp") as Array<{
+    role: string;
+    content: unknown;
+  }>;
 
   assert.equal(result.length, 1);
   assert.equal(result[0]?.role, "system");

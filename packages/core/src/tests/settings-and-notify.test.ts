@@ -223,7 +223,7 @@ test("resolveSettings derives model-specific context window defaults", () => {
     TEST_PROCESS_ENV
   );
   const deepseekV4 = resolveSettings(
-    { model: "deepseek-v4-pro" },
+    { model: "deepseek-v4-flash-vision-exp" },
     { model: "default-model", baseURL: "https://default.example.com" },
     TEST_PROCESS_ENV
   );
@@ -550,7 +550,7 @@ test("resolveSettings defaults DeepSeek v4 models to thinking mode", () => {
   const resolved = resolveSettings(
     {
       env: {
-        MODEL: "deepseek-v4-flash",
+        MODEL: "deepseek-v4-flash-vision-exp",
       },
     },
     {
