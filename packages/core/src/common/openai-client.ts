@@ -36,6 +36,7 @@ export function resolveOpenAIConnection(
 
 export function createOpenAIClient(projectRoot: string = process.cwd()): {
   client: OpenAI | null;
+  apiKey?: string;
   model: string;
   baseURL: string;
   temperature?: number;
@@ -55,6 +56,7 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
   if (!connection.apiKey) {
     return {
       client: null,
+      apiKey: undefined,
       model: settings.model,
       baseURL: connection.baseURL,
       temperature: settings.temperature,
@@ -74,6 +76,7 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
   if (cachedOpenAI && cachedOpenAIKey === cacheKey) {
     return {
       client: cachedOpenAI,
+      apiKey: connection.apiKey,
       model: settings.model,
       baseURL: connection.baseURL,
       temperature: settings.temperature,
@@ -112,6 +115,7 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
 
   return {
     client: cachedOpenAI,
+    apiKey: connection.apiKey,
     model: settings.model,
     baseURL: connection.baseURL,
     temperature: settings.temperature,

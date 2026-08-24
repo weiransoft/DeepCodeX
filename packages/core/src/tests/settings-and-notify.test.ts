@@ -11,6 +11,11 @@ import {
   type NotifySpawn,
 } from "../common/notify";
 import {
+  DEFAULT_FILE_EXPIRES_AFTER_SECONDS,
+  DEFAULT_FILE_QUOTA_CLEANUP_BATCH,
+  DEFAULT_FILE_REFRESH_MARGIN_SECONDS,
+  DEFAULT_FILES_API_TIMEOUT_MS,
+  DEFAULT_MAX_REQUEST_FILES_BYTES,
   DEFAULT_MODEL,
   applyModelConfigSelection,
   readDeepcodePlusApiKey,
@@ -81,6 +86,51 @@ test("resolveSettings defaults multimodal to default", () => {
     TEST_PROCESS_ENV
   );
   assert.equal(resolved.multimodal, "default");
+});
+
+test("resolveSettings applies Files API defaults", () => {
+  const resolved = resolveSettings(
+    {},
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+
+  assert.equal(resolved.filesApiEnabled, false);
+  assert.equal(resolved.filesApiTimeoutMs, DEFAULT_FILES_API_TIMEOUT_MS);
+  assert.equal(resolved.fileExpiresAfterSeconds, DEFAULT_FILE_EXPIRES_AFTER_SECONDS);
+  assert.equal(resolved.fileRefreshMarginSeconds, DEFAULT_FILE_REFRESH_MARGIN_SECONDS);
+  assert.equal(resolved.fileQuotaCleanupBatch, DEFAULT_FILE_QUOTA_CLEANUP_BATCH);
+  assert.equal(resolved.maxRequestFilesBytes, DEFAULT_MAX_REQUEST_FILES_BYTES);
+});
+
+test("resolveSettingsSources validates Files API settings and uses project precedence", () => {
+  const resolved = resolveSettingsSources(
+    {
+      filesApiEnabled: true,
+      filesApiTimeoutMs: 120_000,
+      fileExpiresAfterSeconds: 86_400,
+      fileRefreshMarginSeconds: 7_200,
+      fileQuotaCleanupBatch: 50,
+      maxRequestFilesBytes: 10_000,
+    },
+    {
+      filesApiEnabled: false,
+      filesApiTimeoutMs: 600_001,
+      fileExpiresAfterSeconds: 7_200,
+      fileRefreshMarginSeconds: 7_200,
+      fileQuotaCleanupBatch: 200,
+      maxRequestFilesBytes: 20_000,
+    },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+
+  assert.equal(resolved.filesApiEnabled, false);
+  assert.equal(resolved.filesApiTimeoutMs, 120_000);
+  assert.equal(resolved.fileExpiresAfterSeconds, 7_200);
+  assert.equal(resolved.fileRefreshMarginSeconds, DEFAULT_FILE_REFRESH_MARGIN_SECONDS);
+  assert.equal(resolved.fileQuotaCleanupBatch, 200);
+  assert.equal(resolved.maxRequestFilesBytes, 20_000);
 });
 
 test("resolveSettings reads top-level multimodal and ignores invalid values", () => {

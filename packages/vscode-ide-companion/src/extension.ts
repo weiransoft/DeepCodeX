@@ -381,6 +381,7 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
 
   private createOpenAIClient(): {
     client: OpenAI | null;
+    apiKey?: string;
     model: string;
     baseURL: string;
     thinkingEnabled: boolean;
@@ -403,6 +404,7 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
     if (!apiKey) {
       return {
         client: null,
+        apiKey: undefined,
         model,
         baseURL,
         thinkingEnabled,
@@ -423,6 +425,7 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
 
     return {
       client,
+      apiKey,
       model,
       baseURL,
       thinkingEnabled,

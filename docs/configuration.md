@@ -33,6 +33,12 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 | `thinkingEnabled`    | boolean   | 是否启用思考模式（DeepSeek V4 系列默认启用）                         |
 | `reasoningEffort`    | string    | 推理强度，可选 `"low"`、`"high"` 或 `"max"`（默认 `"max"`）        |
 | `multimodal`         | string    | 多模态（图片）能力开关，可选 `"default"`、`"on"` 或 `"off"`（默认 `"default"`） |
+| `filesApiEnabled`    | boolean   | 是否通过 DeepSeek Files API 发送图片（默认 `false`）                       |
+| `filesApiTimeoutMs`  | number    | 单张图片 Files API 处理超时，默认 `60000`，最大 `600000` 毫秒              |
+| `fileExpiresAfterSeconds` | number | 远端文件有效期，默认 `604800` 秒                                      |
+| `fileRefreshMarginSeconds` | number | 剩余有效期低于该值时刷新缓存，默认 `3600` 秒                         |
+| `fileQuotaCleanupBatch` | number | 配额不足时清理的最旧 Deep Code 文件数，默认 `100`                         |
+| `maxRequestFilesBytes` | number | 单次请求内图片原始字节总上限，默认 `134217728`（128 MiB）                    |
 | `debugLogEnabled`    | boolean   | 是否启用调试日志输出（默认 `false`）                                 |
 | `telemetryEnabled`   | boolean   | 是否启用匿名使用数据上报（默认 `true`）                              |
 | `notify`             | string    | 任务完成通知脚本的完整路径（如 Slack 通知脚本）                      |
@@ -98,6 +104,23 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 | `off`      | 强制视为非多模态模型，由模型通过识图工具按需读取      |
 
 当使用的模型未内置在已知模型列表中、或其实际能力与默认判定不符时，可通过该配置覆盖。
+
+#### DeepSeek Files API
+
+设置 `filesApiEnabled: true` 后，Deep Code 会将图片上传到固定的 `https://api.deepseek.com/files`，并在聊天请求中使用 `file_id`。上传或缓存刷新失败时，本次请求直接失败；关闭开关时图片处理逻辑保持不变。
+
+```json
+{
+  "filesApiEnabled": true,
+  "filesApiTimeoutMs": 60000,
+  "fileExpiresAfterSeconds": 604800,
+  "fileRefreshMarginSeconds": 3600,
+  "fileQuotaCleanupBatch": 100,
+  "maxRequestFilesBytes": 134217728
+}
+```
+
+单个文件最大 64 MiB，上传超时不能超过 DeepSeek 规定的 10 分钟。远端文件 ID 会缓存在 `~/.deepcode/files-api-cache.json`；缓存不保存明文 API Key。遇到远端存储配额错误时，只会清理文件名以 `deepcode-` 开头的最旧文件，然后重试一次。
 
 #### `notify` — 任务完成通知
 
