@@ -25,6 +25,7 @@ import {
   type ProcessTimeoutControl,
   type ProcessTimeoutInfo,
   type PluginRateLimitedTool,
+  type SharpLoader,
   type ToolCallExecution,
   type ToolExecutionHooks,
   type ToolExecutionFollowUpMessage,
@@ -353,6 +354,7 @@ export type SessionManagerOptions = {
   onLlmStreamProgress?: (progress: LlmStreamProgress) => void;
   onMcpStatusChanged?: () => void;
   onProcessStdout?: (pid: number, chunk: string) => void;
+  loadSharp?: SharpLoader;
   nonInteractive?: boolean;
 };
 
@@ -404,7 +406,7 @@ export class SessionManager {
     this.onMcpStatusChanged = options.onMcpStatusChanged;
     this.onProcessStdout = options.onProcessStdout;
     this.nonInteractive = options.nonInteractive === true;
-    this.toolExecutor = new ToolExecutor(this.projectRoot, this.createOpenAIClient, this.mcpManager);
+    this.toolExecutor = new ToolExecutor(this.projectRoot, this.createOpenAIClient, this.mcpManager, options.loadSharp);
     this.mcpManager.prepare(this.getResolvedSettings().mcpServers);
     this.messageConverter = new OpenAIMessageConverter({
       renderInitPrompt: () => this.renderInitCommandPrompt(),
@@ -2869,7 +2871,7 @@ ${agentInstructions}
 
     const value = args[firstKey];
     const text = typeof value === "string" ? value : JSON.stringify(value);
-    if (toolName === "read" && text.startsWith(this.projectRoot)) {
+    if ((toolName === "read" || toolName === "ReadImage") && text.startsWith(this.projectRoot)) {
       return text.slice(this.projectRoot.length).replace(/^[\\/]/, "");
     }
     return text;

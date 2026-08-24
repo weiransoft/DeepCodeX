@@ -33,20 +33,25 @@ test("getTools always includes WebSearch", () => {
   assert.equal(names.includes("WebSearch"), true);
 });
 
-test("UnderstandImage is available only to non-multimodal models", () => {
+test("image tools match the current model's multimodal capability", () => {
   const nonMultimodalTools = getTools({ model: "deepseek-chat" }).map((tool) => tool.function.name);
   const multimodalTools = getTools({ model: "gpt-4o" }).map((tool) => tool.function.name);
 
   assert.equal(nonMultimodalTools.includes("UnderstandImage"), true);
+  assert.equal(nonMultimodalTools.includes("ReadImage"), false);
   assert.equal(multimodalTools.includes("UnderstandImage"), false);
+  assert.equal(multimodalTools.includes("ReadImage"), true);
   assert.equal(getSystemPrompt("/tmp/project", { model: "deepseek-chat" }).includes("## UnderstandImage"), true);
+  assert.equal(getSystemPrompt("/tmp/project", { model: "deepseek-chat" }).includes("## ReadImage"), false);
   assert.equal(getSystemPrompt("/tmp/project", { model: "gpt-4o" }).includes("## UnderstandImage"), false);
+  assert.equal(getSystemPrompt("/tmp/project", { model: "gpt-4o" }).includes("## ReadImage"), true);
 });
 
 test("multimodal config overrides model-based multimodal detection", () => {
   // "off" forces non-multimodal behavior even for a multimodal model.
   const forcedOffTools = getTools({ model: "gpt-4o", multimodal: "off" }).map((tool) => tool.function.name);
   assert.equal(forcedOffTools.includes("UnderstandImage"), true);
+  assert.equal(forcedOffTools.includes("ReadImage"), false);
   assert.equal(
     getSystemPrompt("/tmp/project", { model: "gpt-4o", multimodal: "off" }).includes("## UnderstandImage"),
     true
@@ -55,6 +60,7 @@ test("multimodal config overrides model-based multimodal detection", () => {
   // "on" forces multimodal behavior even for a non-multimodal model.
   const forcedOnTools = getTools({ model: "deepseek-chat", multimodal: "on" }).map((tool) => tool.function.name);
   assert.equal(forcedOnTools.includes("UnderstandImage"), false);
+  assert.equal(forcedOnTools.includes("ReadImage"), true);
   assert.equal(
     getSystemPrompt("/tmp/project", { model: "deepseek-chat", multimodal: "on" }).includes("## UnderstandImage"),
     false
@@ -279,13 +285,14 @@ test("getRuntimeContext includes current date and model guidance", () => {
 
 test("getSystemPrompt renders Read docs for non-multimodal models", () => {
   const prompt = getSystemPrompt("/tmp/project", { model: "deepseek-chat" });
-  assert.equal(prompt.includes("the current model is not multimodal"), true);
+  assert.equal(prompt.includes("This tool does not read image files"), true);
   assert.equal(prompt.includes("the contents are presented visually"), false);
 });
 
 test("runtime prompt assets live under templates", () => {
   assert.equal(fs.existsSync(path.join(repoRoot, "templates", "tools", "web-search.md")), true);
   assert.equal(fs.existsSync(path.join(repoRoot, "templates", "tools", "read.md.ejs")), true);
+  assert.equal(fs.existsSync(path.join(repoRoot, "templates", "tools", "read-image.md.ejs")), true);
   assert.equal(fs.existsSync(path.join(repoRoot, "templates", "prompts", "init_command.md.ejs")), true);
   assert.equal(fs.existsSync(path.join(repoRoot, "templates", "tools", "read.md")), false);
   assert.equal(fs.existsSync(path.join(repoRoot, "docs", "tools")), false);

@@ -1,6 +1,7 @@
 import { handleAskUserQuestionTool } from "./ask-user-question-handler";
 import { handleBashTool } from "./bash-handler";
 import { handleEditTool } from "./edit-handler";
+import { handleReadImageTool } from "./read-image-handler";
 import { handleReadTool } from "./read-handler";
 import { handleSkillTool } from "./skill-handler";
 import { handleUpdatePlanTool } from "./update-plan-handler";
@@ -10,6 +11,7 @@ import { handleWriteTool } from "./write-handler";
 import type { McpManager } from "../mcp/mcp-manager";
 import type {
   CreateOpenAIClient,
+  SharpLoader,
   ToolCall,
   ToolExecutionHooks,
   ToolExecutionResult,
@@ -19,6 +21,7 @@ import type {
 
 export type {
   CreateOpenAIClient,
+  SharpLoader,
   ToolCall,
   ToolExecutionContext,
   ToolExecutionHooks,
@@ -43,12 +46,19 @@ export class ToolExecutor {
   private readonly projectRoot: string;
   private readonly createOpenAIClient?: CreateOpenAIClient;
   private readonly mcpManager?: McpManager;
+  private readonly loadSharp?: SharpLoader;
   private readonly toolHandlers = new Map<string, ToolHandler>();
 
-  constructor(projectRoot: string, createOpenAIClient?: CreateOpenAIClient, mcpManager?: McpManager) {
+  constructor(
+    projectRoot: string,
+    createOpenAIClient?: CreateOpenAIClient,
+    mcpManager?: McpManager,
+    loadSharp?: SharpLoader
+  ) {
     this.projectRoot = projectRoot;
     this.createOpenAIClient = createOpenAIClient;
     this.mcpManager = mcpManager;
+    this.loadSharp = loadSharp;
     this.registerToolHandlers();
   }
 
@@ -82,6 +92,7 @@ export class ToolExecutor {
   private registerToolHandlers(): void {
     this.toolHandlers.set("bash", handleBashTool);
     this.toolHandlers.set("read", handleReadTool);
+    this.toolHandlers.set("ReadImage", handleReadImageTool);
     this.toolHandlers.set("write", handleWriteTool);
     this.toolHandlers.set("edit", handleEditTool);
     this.toolHandlers.set("skill", handleSkillTool);
@@ -163,6 +174,7 @@ export class ToolExecutor {
         projectRoot: this.projectRoot,
         toolCall,
         createOpenAIClient: this.createOpenAIClient,
+        loadSharp: this.loadSharp,
         onProcessStart: hooks?.onProcessStart,
         onProcessExit: hooks?.onProcessExit,
         onProcessStdout: hooks?.onProcessStdout,

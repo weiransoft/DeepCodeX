@@ -584,7 +584,7 @@ export function getTools(_options: PromptToolOptions = {}, externalTools: ToolDe
       type: "function",
       function: {
         name: "read",
-        description: "Read files from the filesystem (text, images, notebooks).",
+        description: "Read text files and notebooks from the filesystem. Image files require a dedicated image tool.",
         parameters: {
           type: "object",
           properties: {
@@ -696,7 +696,27 @@ export function getTools(_options: PromptToolOptions = {}, externalTools: ToolDe
     },
   });
 
-  if (!supportsMultimodal(_options.model ?? "", _options.multimodal)) {
+  if (supportsMultimodal(_options.model ?? "", _options.multimodal)) {
+    tools.push({
+      type: "function",
+      function: {
+        name: "ReadImage",
+        description:
+          "Read a PNG, JPEG, WebP, or GIF file and return the image itself. Large images are validated and downscaled before the next model request.",
+        parameters: {
+          type: "object",
+          properties: {
+            file_path: {
+              type: "string",
+              description: "The absolute path of the PNG, JPEG, WebP, or GIF image to read.",
+            },
+          },
+          required: ["file_path"],
+          additionalProperties: false,
+        },
+      },
+    });
+  } else {
     tools.push({
       type: "function",
       function: {
