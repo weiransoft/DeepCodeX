@@ -74,23 +74,6 @@ function isValidSemver(v) {
   return /^\d+\.\d+\.\d+(-[\w.]+)?(\+[\w.]+)?$/.test(v);
 }
 
-function getVscodeTarget() {
-  const targets = {
-    "darwin-arm64": "darwin-arm64",
-    "darwin-x64": "darwin-x64",
-    "linux-arm64": "linux-arm64",
-    "linux-x64": "linux-x64",
-    "win32-arm64": "win32-arm64",
-    "win32-x64": "win32-x64",
-  };
-  const key = `${process.platform}-${process.arch}`;
-  const target = targets[key];
-  if (!target) {
-    fail(`Unsupported VSCode packaging target: ${key}`);
-  }
-  return target;
-}
-
 // ── Parse args ───────────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
@@ -235,8 +218,7 @@ ok("VSCode extension built");
 step(7, TOTAL_STEPS, "Publishing deepcode-vscode to marketplace...");
 
 const vscodeRoot = join(root, "packages", "vscode-ide-companion");
-const vscodeTarget = getVscodeTarget();
-const vsceArgs = ["vsce", "publish", version, "--no-dependencies", "--target", vscodeTarget];
+const vsceArgs = ["vsce", "publish", version, "--no-dependencies"];
 if (dryRun) vsceArgs.splice(2, 0, "--dry-run");
 
 run("npx", vsceArgs, {

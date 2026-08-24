@@ -131,6 +131,27 @@ test("ReadImage enforces decoded dimension limits", async () => {
   assert.match(result.error ?? "", /8192px per-side limit/);
 });
 
+test("ReadImage loads Sharp only when image normalization starts", async () => {
+  const workspace = createTempDir("deepcode-read-image-loader-");
+  const filePath = path.join(workspace, "pixel.png");
+  await sharp({ create: { width: 1, height: 1, channels: 3, background: "red" } })
+    .png()
+    .toFile(filePath);
+  let loadCount = 0;
+  const context = createContext(workspace);
+  context.loadSharp = async () => {
+    loadCount += 1;
+    return sharp;
+  };
+
+  const unsupported = await handleReadImageTool({ file_path: path.join(workspace, "pixel.bmp") }, context);
+  const result = await handleReadImageTool({ file_path: filePath }, context);
+
+  assert.equal(unsupported.ok, false);
+  assert.equal(loadCount, 1);
+  assert.equal(result.ok, true, result.error);
+});
+
 function createContext(projectRoot: string): ToolExecutionContext {
   return {
     sessionId: "read-image-test",

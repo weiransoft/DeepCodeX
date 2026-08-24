@@ -46,7 +46,8 @@ export async function handleReadImageTool(
 
   try {
     const source = await fs.promises.readFile(filePath);
-    const image = await normalizeImage(source, declaredMediaType);
+    const sharp = context.loadSharp ? await context.loadSharp() : (await import("sharp")).default;
+    const image = await normalizeImage(source, declaredMediaType, sharp);
     markFileRead(context.sessionId, filePath, {
       content: "",
       timestamp: Math.floor(stat.mtimeMs),

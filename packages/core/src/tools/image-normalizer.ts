@@ -1,4 +1,7 @@
-import sharp, { type Metadata, type Sharp } from "sharp";
+import type sharp from "sharp";
+import type { Metadata, Sharp } from "sharp";
+
+type SharpModule = typeof sharp;
 
 export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 export const MAX_IMAGE_PIXELS = 64_000_000;
@@ -39,8 +42,12 @@ const NORMALIZATION_QUALITIES = [85, 80, 75] as const;
 const LOW_COLOR_SAMPLE_EDGE = 128;
 const LOW_COLOR_LIMIT = 256;
 
-export async function normalizeImage(data: Buffer, declaredMediaType: ImageMediaType): Promise<NormalizedImage> {
-  const detected = await detectImage(data);
+export async function normalizeImage(
+  data: Buffer,
+  declaredMediaType: ImageMediaType,
+  sharp: SharpModule
+): Promise<NormalizedImage> {
+  const detected = await detectImage(data, sharp);
   if (detected.mediaType !== declaredMediaType) {
     throw new Error("The file extension does not match the image data.");
   }
@@ -58,10 +65,10 @@ export async function normalizeImage(data: Buffer, declaredMediaType: ImageMedia
   let width = Math.max(1, Math.round(detected.width * initialScale));
   let height = Math.max(1, Math.round(detected.height * initialScale));
   const sample = sharp(data, { failOn: "error", limitInputPixels: false }).rotate().toColourspace("srgb");
-  const lowColor = await hasLowColorCount(sample);
+  const lowColor = await hasLowColorCount(sample, sharp);
 
   for (;;) {
-    const attempts = encodingAttempts(data, width, height, detected.hasAlpha, lowColor);
+    const attempts = encodingAttempts(data, width, height, detected.hasAlpha, lowColor, sharp);
     let smallest: Omit<NormalizedImage, "originalDimensions"> | null = null;
     for (const attempt of attempts) {
       const image = await attempt();
@@ -82,7 +89,7 @@ export async function normalizeImage(data: Buffer, declaredMediaType: ImageMedia
   }
 }
 
-async function detectImage(data: Buffer): Promise<DetectedImage> {
+async function detectImage(data: Buffer, sharp: SharpModule): Promise<DetectedImage> {
   try {
     const image = sharp(data, { failOn: "error", limitInputPixels: false });
     const metadata = await image.metadata();
@@ -145,7 +152,7 @@ function canPassThrough(data: Buffer, detected: DetectedImage): boolean {
   );
 }
 
-async function hasLowColorCount(pipeline: Sharp): Promise<boolean> {
+async function hasLowColorCount(pipeline: Sharp, sharp: SharpModule): Promise<boolean> {
   const { data, info } = await pipeline
     .clone()
     .resize({
@@ -177,7 +184,8 @@ function encodingAttempts(
   width: number,
   height: number,
   hasAlpha: boolean,
-  lowColor: boolean
+  lowColor: boolean,
+  sharp: SharpModule
 ): EncodingAttempt[] {
   const prepared = sharp(data, { failOn: "error", limitInputPixels: false })
     .rotate()

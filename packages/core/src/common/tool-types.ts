@@ -1,4 +1,5 @@
 import type OpenAI from "openai";
+import type sharp from "sharp";
 import type { ReasoningEffort } from "../settings";
 
 export type CreateOpenAIClient = () => {
@@ -28,11 +29,14 @@ export type ToolCall = {
 
 export type PluginRateLimitedTool = "UnderstandImage" | "WebSearch";
 
+export type SharpLoader = () => Promise<typeof sharp>;
+
 export type ToolExecutionContext = {
   sessionId: string;
   projectRoot: string;
   toolCall: ToolCall;
   createOpenAIClient?: CreateOpenAIClient;
+  loadSharp?: SharpLoader;
   onProcessStart?: (processId: string | number, command: string) => void;
   onProcessExit?: (processId: string | number) => void;
   onProcessStdout?: (processId: string | number, chunk: string) => void;

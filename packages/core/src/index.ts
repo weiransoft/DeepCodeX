@@ -80,6 +80,7 @@ export type {
   BackgroundProcessCompletion,
   ToolExecutionFollowUpMessage,
   PluginRateLimitedTool,
+  SharpLoader,
 } from "./common/tool-types";
 
 // Tool handlers
@@ -105,6 +106,7 @@ export { readTextFileWithMetadata, writeTextFile, buildDiffPreview, ensureParent
 export { normalizeFilePath, getSnippet, clearSessionState, recordFileState, getFileState } from "./common/state";
 export { GitFileHistory } from "./common/file-history";
 export { killProcessTree } from "./common/process-tree";
+export { TENCENT_MIRROR_REGISTRY } from "./common/npm-registry";
 export { launchNotifyScript } from "./common/notify";
 export { reportNewPrompt } from "./common/telemetry";
 export { DEEPSEEK_V4_MODELS, supportsMultimodal, defaultsToThinkingMode } from "./common/model-capabilities";

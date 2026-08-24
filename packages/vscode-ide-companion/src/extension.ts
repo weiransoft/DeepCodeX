@@ -23,6 +23,7 @@ import {
 } from "@vegamo/deepcode-core";
 import { getNonce, isAllowedExternalUrl } from "./utils.js";
 import { handleWebviewMessage } from "./provider.js";
+import { createSharpLoader } from "./sharp-loader.js";
 
 const DEFAULT_MODEL = "deepseek-v4-pro";
 const DEFAULT_BASE_URL = "https://api.deepseek.com";
@@ -48,6 +49,29 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
     });
     this.sessionManager = new SessionManager({
       projectRoot: this.getWorkspaceRoot(),
+      loadSharp: createSharpLoader({
+        workspaceRoot: this.getWorkspaceRoot(),
+        storageRoot: context.globalStorageUri.fsPath,
+        sharpVersion: __DEEPCODE_SHARP_VERSION__,
+        notifyInstalling: async (task) =>
+          await vscode.window.withProgress(
+            {
+              location: vscode.ProgressLocation.Notification,
+              title: "Deep Code: Installing ReadImage dependencies",
+            },
+            async (progress) => {
+              let reportedPercent = 0;
+              return await task(({ percent, message }) => {
+                const nextPercent = Math.max(reportedPercent, Math.min(100, Math.round(percent)));
+                progress.report({
+                  increment: nextPercent - reportedPercent,
+                  message: `${nextPercent}% - ${message}`,
+                });
+                reportedPercent = nextPercent;
+              });
+            }
+          ),
+      }),
       createOpenAIClient: () => this.createOpenAIClient(),
       getResolvedSettings: () => this.resolveCurrentSettings(),
       renderMarkdown: (text) => this.md.render(text),
