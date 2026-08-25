@@ -53,6 +53,22 @@ function writeJson(filePath, data) {
   writeFileSync(filePath, JSON.stringify(data, null, 2) + "\n", "utf-8");
 }
 
+function updateLockfileVersions(packageVersions, dryRun) {
+  const lockPath = join(root, "package-lock.json");
+  const lockfile = readJson(lockPath);
+  const missing = packageVersions.filter(({ path }) => !lockfile.packages?.[path]).map(({ path }) => path);
+  if (missing.length > 0) {
+    fail(`package-lock.json is missing workspace entries:\n  - ${missing.join("\n  - ")}`);
+  }
+
+  if (dryRun) return;
+
+  for (const { path, version } of packageVersions) {
+    lockfile.packages[path].version = version;
+  }
+  writeJson(lockPath, lockfile);
+}
+
 function isValidSemver(v) {
   return /^\d+\.\d+\.\d+(-[\w.]+)?(\+[\w.]+)?$/.test(v);
 }
@@ -252,11 +268,14 @@ if (!dryRun) {
   log(`  (dry-run) packages/cli:  ${oldVersion} → ${version}`);
 }
 
-run("npm", ["install", "--package-lock-only", "--ignore-scripts"], {
-  dryRun,
-  label: "npm install --package-lock-only --ignore-scripts",
-});
-ok("package-lock.json is up to date");
+updateLockfileVersions(
+  [
+    { path: "packages/core", version },
+    { path: "packages/cli", version },
+  ],
+  dryRun
+);
+ok(dryRun ? "package-lock.json workspace versions would be updated" : "package-lock.json workspace versions updated");
 
 // ── 4. Quality checks ────────────────────────────────────────────────────────
 
