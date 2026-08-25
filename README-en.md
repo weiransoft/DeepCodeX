@@ -97,6 +97,7 @@ Skills are discovered from these locations, in priority order:
 
 - `deepseek-v4-pro` (Recommended)
 - `deepseek-v4-flash`
+- `deepseek-v4-flash-vision-exp`
 - Any other OpenAI-compatible model
 
 ## Architecture and Benchmarks
@@ -115,7 +116,11 @@ Yes. Deep Code offers a full-featured VSCode extension, available on the [VSCode
 
 ### Does Deep Code support understanding images?
 
-Deep Code includes a free built-in image understanding tool, and you can paste images from the clipboard with `Ctrl+V`. Deep Code itself supports multimodal input, but the `deepseek-v4` model family does not yet support multimodal input.
+Yes. The `deepseek-v4-flash-vision-exp` model can read local images directly, or you can paste images from the clipboard with `Ctrl+V`, so the model can see the image content directly.
+
+Non-multimodal models such as `deepseek-v4-pro` and `deepseek-v4-flash` continue to use the `UnderstandImage` image-understanding tool. Deep Code detects model capabilities automatically; you can also override the detection with the `multimodal` setting.
+
+By default, images are sent inline as base64. With `filesApiEnabled`, Deep Code uploads images through the DeepSeek Files API and reuses the `file_id` in subsequent requests. See [docs/configuration_en.md](docs/configuration_en.md#deepseek-files-api).
 
 ### How to automatically send a Slack message after a task completes?
 

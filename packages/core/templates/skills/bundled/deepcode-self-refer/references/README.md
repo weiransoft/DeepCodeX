@@ -108,7 +108,11 @@ Skills 会按以下优先级扫描：
 
 ### Deep Code 是否支持理解图片？
 
-Deep Code 内置免费可用的图片理解工具，可使用ctrl+v从剪贴板粘贴图片。Deep Code 本身支持多模态，但目前 deepseek-v4 系列模型还不支持多模态。
+支持。`deepseek-v4-flash-vision-exp` 模型支持直接读取本地图片或使用`ctrl+v`从剪贴板粘贴图片，让模型直接看到图片内容。
+
+`deepseek-v4-pro`、`deepseek-v4-flash` 等非多模态模型仍会使用 `UnderstandImage` 识图工具。Deep Code 会自动判断模型能力，也可通过 `multimodal` 配置项手动覆盖。
+
+默认情况下，图片会以 base64 内联发送给模型。启用 `filesApiEnabled` 后，Deep Code 会使用 DeepSeek Files API 上传图片并在请求中复用 `file_id`。
 
 ### 怎样在任务完成后自动给 Slack 发消息？
 
