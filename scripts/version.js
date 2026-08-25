@@ -182,7 +182,7 @@ for (let i = 0; i < args.length; i++) {
     log(`
 Usage: npm run release:version -- <newversion | bump-type> [--preid <id>]
 
-Bumps all workspace package.json files and updates their package-lock.json entries.
+Bumps the root package and all workspace package.json files, then updates their package-lock.json entries.
 Works like npm version but for the entire monorepo.
 
 Bump types:
@@ -249,37 +249,46 @@ log(`  Deep Code — Bump Version`);
 log(`  ${currentVersion} → ${version}`);
 log("=========================================\n");
 
-// ── Find all workspace package.json ──────────────────────────────────────────
+// ── Find root and workspace package.json files ───────────────────────────────
 
+const rootPkgPath = join(root, "package.json");
 const pkgPaths = globSync("packages/*/package.json", { cwd: root, absolute: true });
 
 if (pkgPaths.length === 0) {
   fail("No workspace packages found under packages/");
 }
 
+const packageEntries = [
+  { path: "", pkgPath: rootPkgPath },
+  ...pkgPaths.map((pkgPath) => ({
+    path: dirname(pkgPath).replace(root + "/", ""),
+    pkgPath,
+  })),
+];
+
 // ── Update versions ──────────────────────────────────────────────────────────
 
 log("Updating package.json files:\n");
 
-for (const pkgPath of pkgPaths) {
+for (const { path, pkgPath } of packageEntries) {
   const pkg = readJson(pkgPath);
   const oldVersion = pkg.version;
   pkg.version = version;
   writeJson(pkgPath, pkg);
-  const short = pkgPath.replace(root + "/", "");
+  const short = path || "package.json";
   log(`  ${short}: ${oldVersion} → ${version}`);
 }
 
 // ── Update lockfile ──────────────────────────────────────────────────────────
 
-log("\nUpdating package-lock.json workspace versions...\n");
+log("\nUpdating package-lock.json package versions...\n");
 updateLockfileVersions(
-  pkgPaths.map((pkgPath) => ({
-    path: dirname(pkgPath).replace(root + "/", ""),
+  packageEntries.map(({ path }) => ({
+    path,
     version,
   }))
 );
-ok("package-lock.json workspace versions updated");
+ok("package-lock.json package versions updated");
 
 // ── Done ─────────────────────────────────────────────────────────────────────
 
@@ -287,7 +296,7 @@ console.log("\n=========================================");
 log(`  🎉  Version bumped to v${version}`);
 console.log("=========================================");
 console.log(`
-  Updated ${pkgPaths.length} packages. Next steps:
+  Updated ${packageEntries.length} package.json files. Next steps:
     git add -A && git commit -m "chore(release): v${version}"
     git tag v${version}
     git push && git push --tags
