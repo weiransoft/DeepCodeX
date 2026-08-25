@@ -217,7 +217,7 @@ test("WebSearch matches rate limit errors case-sensitively", async () => {
   assert.deepEqual(rateLimitedTools, []);
 });
 
-test("WebSearch uses DeepSeek Responses API with the required model", async () => {
+test("WebSearch accepts a completed DeepSeek response with partial web search failures", async () => {
   const workspace = createTempWorkspace();
   const starts: Array<{ id: string | number; command: string }> = [];
   const exits: Array<string | number> = [];
@@ -252,7 +252,10 @@ test("WebSearch uses DeepSeek Responses API with the required model", async () =
         responseRequests.push(request);
         return {
           status: "completed",
-          output: [{ type: "web_search_call", status: "completed" }],
+          output: [
+            { type: "web_search_call", status: "completed" },
+            { type: "web_search_call", status: "failed" },
+          ],
           output_text: "Node.js 24 is the latest release.",
         };
       },
@@ -288,12 +291,54 @@ test("WebSearch uses DeepSeek Responses API with the required model", async () =
   assert.deepEqual(exits, [starts[0].id]);
 });
 
-test("WebSearch rejects invalid DeepSeek web search responses", async () => {
+test("WebSearch treats an incomplete empty DeepSeek response as a successful empty result", async () => {
+  const workspace = createTempWorkspace();
+  const fakeClient = {
+    chat: {
+      completions: {
+        create: async () => ({
+          choices: [
+            {
+              message: {
+                content: '{"dominant_language":"en","reason":"English sources are more useful."}',
+              },
+            },
+          ],
+        }),
+      },
+    },
+    responses: {
+      create: async () => ({
+        status: "incomplete",
+        output: [],
+        output_text: "  ",
+      }),
+    },
+  } as unknown as OpenAI;
+
+  const result = await handleWebSearchTool(
+    { query: "latest node release" },
+    createContext(workspace, {
+      client: fakeClient,
+      baseURL: "https://api.deepseek.com",
+    })
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "No web search results were returned.");
+});
+
+test("WebSearch rejects DeepSeek request and provider failures", async () => {
   const responseCases = [
     {
       response: null,
       requestError: new Error("network unavailable"),
       error: "WebSearch default mode failed: network unavailable",
+    },
+    {
+      response: null,
+      requestError: new Error("429 rate limit exceeded"),
+      error: "WebSearch default mode failed: 429 rate limit exceeded",
     },
     {
       response: {
@@ -302,30 +347,6 @@ test("WebSearch rejects invalid DeepSeek web search responses", async () => {
         output_text: "A failed response.",
       },
       error: "WebSearch default mode failed: DeepSeek Responses API returned status failed.",
-    },
-    {
-      response: {
-        status: "completed",
-        output: [],
-        output_text: "An answer without a search call.",
-      },
-      error: "WebSearch default mode failed: DeepSeek Responses API did not perform a web search.",
-    },
-    {
-      response: {
-        status: "completed",
-        output: [{ type: "web_search_call", status: "failed" }],
-        output_text: "An answer from an incomplete search.",
-      },
-      error: "WebSearch default mode failed: DeepSeek Responses API returned an incomplete web search call.",
-    },
-    {
-      response: {
-        status: "completed",
-        output: [{ type: "web_search_call", status: "completed" }],
-        output_text: "  ",
-      },
-      error: "WebSearch default mode failed: The DeepSeek web search response was empty.",
     },
   ];
 

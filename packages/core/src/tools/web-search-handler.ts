@@ -9,6 +9,7 @@ const WEB_SEARCH_TOOL_ACTIVITY_PREFIX = "WebSearch:";
 const DEFAULT_WEB_SEARCH_API_URL = "https://deepcode.vegamo.cn/api/plugin/web-search";
 const DEEPSEEK_BASE_URL = "https://api.deepseek.com";
 const DEEPSEEK_WEB_SEARCH_MODEL = "deepseek-v4-flash";
+const EMPTY_DEEPSEEK_WEB_SEARCH_OUTPUT = "No web search results were returned.";
 
 type SearchLanguage = "en" | "zh";
 
@@ -399,23 +400,12 @@ async function runDeepSeekWebSearchRequest(
       tool_choice: "required",
     });
 
-    if (response.status !== "completed") {
+    if (response.status === "failed") {
       throw new Error(`DeepSeek Responses API returned status ${response.status}.`);
     }
 
-    const searchCalls = response.output.filter((item) => item.type === "web_search_call");
-    if (searchCalls.length === 0) {
-      throw new Error("DeepSeek Responses API did not perform a web search.");
-    }
-    if (searchCalls.some((call) => call.status !== "completed")) {
-      throw new Error("DeepSeek Responses API returned an incomplete web search call.");
-    }
-
     const output = response.output_text.trim();
-    if (!output) {
-      throw new Error("The DeepSeek web search response was empty.");
-    }
-    return output;
+    return output || EMPTY_DEEPSEEK_WEB_SEARCH_OUTPUT;
   } finally {
     context.onProcessExit?.(activityId);
   }
