@@ -96,8 +96,9 @@ Skills 会按以下优先级扫描：
 
 ## 支持的模型
 
-- `deepseek-v4-pro`（推荐使用）
-- `deepseek-v4-flash`
+- `deepseek-v4-pro`
+- `deepseek-v4-flash`（推荐使用）
+- `deepseek-v4-flash-vision-exp`
 - 任何其他 OpenAI 兼容模型
 
 ## 常见问题

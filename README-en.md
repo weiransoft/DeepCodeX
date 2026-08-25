@@ -95,8 +95,8 @@ Skills are discovered from these locations, in priority order:
 
 ## Supported Models
 
-- `deepseek-v4-pro` (Recommended)
-- `deepseek-v4-flash`
+- `deepseek-v4-pro`
+- `deepseek-v4-flash` (Recommended)
 - `deepseek-v4-flash-vision-exp`
 - Any other OpenAI-compatible model
 

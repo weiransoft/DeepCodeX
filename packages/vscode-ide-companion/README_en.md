@@ -33,8 +33,8 @@ Deep Code supports agent skills that allows you to extend the assistant's capabi
 
 ## Supported Models
 
-- `deepseek-v4-pro` (Recommended)
-- `deepseek-v4-flash`
+- `deepseek-v4-pro`
+- `deepseek-v4-flash` (Recommended)
 - `deepseek-v4-flash-vision-exp`
 - `deepseek-chat`
 - Any other OpenAI-compatible model

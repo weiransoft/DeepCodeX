@@ -33,8 +33,8 @@ Deep Code 支持 agent skills，允许您扩展助手的能力：
 
 ## 支持的模型
 
-- `deepseek-v4-pro`（推荐使用）
-- `deepseek-v4-flash`
+- `deepseek-v4-pro`
+- `deepseek-v4-flash`（推荐使用）
 - `deepseek-v4-flash-vision-exp`
 - 任何其他 OpenAI 兼容模型
 
