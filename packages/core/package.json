@@ -1,6 +1,6 @@
 {
   "name": "@vegamo/deepcode-core",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Deep Code core library — LLM session management, tool execution, and shared utilities",
   "license": "MIT",
   "type": "module",
