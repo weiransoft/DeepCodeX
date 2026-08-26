@@ -135,6 +135,53 @@ test("OpenAIMessageConverter multimodal config overrides model-based filtering",
   ]);
 });
 
+test("OpenAIMessageConverter appends image metadata after multimodal content", () => {
+  const c = converter();
+  const images = ["/tmp/session/image-1.png", "/tmp/session/image-2.webp"];
+  const messages: SessionMessage[] = [
+    msg({
+      role: "user",
+      content: "Inspect these images",
+      contentParams: [{ type: "image_url", image_url: { url: "data:image/png;base64,abc" } }],
+      meta: { images },
+    }),
+  ];
+
+  const result = c.buildMessages(messages, false, "gpt-4o") as Array<{ content: unknown }>;
+
+  assert.deepEqual(result[0]?.content, [
+    { type: "text", text: "Inspect these images" },
+    { type: "image_url", image_url: { url: "data:image/png;base64,abc" } },
+    {
+      type: "text",
+      text: `<message_meta>\n${JSON.stringify({ images }, null, 2)}\n</message_meta>`,
+    },
+  ]);
+  assert.equal(messages[0]?.content, "Inspect these images");
+});
+
+test("OpenAIMessageConverter appends image metadata when image content is filtered", () => {
+  const c = converter();
+  const images = ["/tmp/session/image-1.png"];
+  const messages: SessionMessage[] = [
+    msg({
+      role: "user",
+      content: "",
+      contentParams: [{ type: "image_url", image_url: { url: "data:image/png;base64,abc" } }],
+      meta: { images },
+    }),
+  ];
+
+  const result = c.buildMessages(messages, false, "deepseek-chat") as Array<{ content: unknown }>;
+
+  assert.deepEqual(result[0]?.content, [
+    {
+      type: "text",
+      text: `<message_meta>\n${JSON.stringify({ images }, null, 2)}\n</message_meta>`,
+    },
+  ]);
+});
+
 test("OpenAIMessageConverter appends an answers system message after tagged user messages", () => {
   const c = converter();
   const messages: SessionMessage[] = [

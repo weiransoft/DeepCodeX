@@ -3800,7 +3800,7 @@ test("SessionManager.deleteSession removes the messages file", () => {
   assert.equal(fs.existsSync(messagePath), false);
 });
 
-test("non-multimodal sessions persist pasted images, append paths, and clean them on delete", async () => {
+test("non-multimodal sessions persist pasted images in metadata without changing user content", async () => {
   const workspace = createTempDir("deepcode-session-image-workspace-");
   const home = createTempDir("deepcode-session-image-home-");
   setHomeDir(home);
@@ -3808,6 +3808,7 @@ test("non-multimodal sessions persist pasted images, append paths, and clean the
   (manager as any).activateSession = async () => {};
 
   const sessionId = await manager.createSession({
+    text: "Inspect these images",
     imageUrls: ["data:image/png;base64,aGVsbG8=", "data:image/webp;base64,d29ybGQ="],
   });
   const imagesDir = path.join(home, ".deepcode", "projects", getProjectCode(workspace), "images", sessionId);
@@ -3816,16 +3817,22 @@ test("non-multimodal sessions persist pasted images, append paths, and clean the
 
   assert.equal(imageFiles.length, 2);
   assert.deepEqual(imageFiles.map((file) => path.extname(file)).sort(), [".png", ".webp"]);
-  assert.match(userMessage?.content ?? "", /<images>/);
-  assert.match(userMessage?.content ?? "", /name="\[Image #1\]"/);
-  assert.match(userMessage?.content ?? "", new RegExp(escapeRegExp(imagesDir)));
+  assert.equal(userMessage?.content, "Inspect these images");
+  assert.deepEqual(
+    userMessage?.meta?.images?.map((imagePath) => path.dirname(imagePath)),
+    [imagesDir, imagesDir]
+  );
+  assert.deepEqual(
+    userMessage?.meta?.images?.map((imagePath) => path.extname(imagePath)),
+    [".png", ".webp"]
+  );
   assert.equal(Array.isArray(userMessage?.contentParams), true);
 
   manager.deleteSession(sessionId);
   assert.equal(fs.existsSync(imagesDir), false);
 });
 
-test("native multimodal sessions keep pasted images inline without persisting them", async () => {
+test("native multimodal sessions keep pasted images inline and persist their metadata paths", async () => {
   const workspace = createTempDir("deepcode-native-image-workspace-");
   const home = createTempDir("deepcode-native-image-home-");
   setHomeDir(home);
@@ -3836,9 +3843,10 @@ test("native multimodal sessions keep pasted images inline without persisting th
   const imagesDir = path.join(home, ".deepcode", "projects", getProjectCode(workspace), "images", sessionId);
   const userMessage = manager.listSessionMessages(sessionId).find((message) => message.role === "user");
 
-  assert.equal(fs.existsSync(imagesDir), false);
+  assert.equal(fs.existsSync(imagesDir), true);
   assert.equal(userMessage?.content, "");
   assert.equal(Array.isArray(userMessage?.contentParams), true);
+  assert.deepEqual(userMessage?.meta?.images, [path.join(imagesDir, fs.readdirSync(imagesDir)[0])]);
 });
 
 test("multimodal off forces non-multimodal image handling for a multimodal model", async () => {
@@ -3853,11 +3861,11 @@ test("multimodal off forces non-multimodal image handling for a multimodal model
   const userMessage = manager.listSessionMessages(sessionId).find((message) => message.role === "user");
 
   assert.equal(fs.existsSync(imagesDir), true);
-  assert.match(userMessage?.content ?? "", /<images>/);
-  assert.match(userMessage?.content ?? "", /name="\[Image #1\]"/);
+  assert.equal(userMessage?.content, "");
+  assert.deepEqual(userMessage?.meta?.images, [path.join(imagesDir, fs.readdirSync(imagesDir)[0])]);
 });
 
-test("multimodal on keeps images inline for a non-multimodal model", async () => {
+test("multimodal on keeps images inline and persists their metadata paths", async () => {
   const workspace = createTempDir("deepcode-multimodal-on-workspace-");
   const home = createTempDir("deepcode-multimodal-on-home-");
   setHomeDir(home);
@@ -3868,9 +3876,10 @@ test("multimodal on keeps images inline for a non-multimodal model", async () =>
   const imagesDir = path.join(home, ".deepcode", "projects", getProjectCode(workspace), "images", sessionId);
   const userMessage = manager.listSessionMessages(sessionId).find((message) => message.role === "user");
 
-  assert.equal(fs.existsSync(imagesDir), false);
+  assert.equal(fs.existsSync(imagesDir), true);
   assert.equal(userMessage?.content, "");
   assert.equal(Array.isArray(userMessage?.contentParams), true);
+  assert.deepEqual(userMessage?.meta?.images, [path.join(imagesDir, fs.readdirSync(imagesDir)[0])]);
 });
 
 test("Files API mode keeps non-multimodal images inline and sends file references", async () => {
@@ -3911,9 +3920,17 @@ test("Files API mode keeps non-multimodal images inline and sends file reference
   const userMessage = manager.listSessionMessages(sessionId).find((message) => message.role === "user");
   const requestUserMessage = request.messages.find((message: any) => message.role === "user");
 
-  assert.equal(fs.existsSync(imagesDir), false);
+  assert.equal(fs.existsSync(imagesDir), true);
   assert.equal(Array.isArray(userMessage?.contentParams), true);
-  assert.deepEqual(requestUserMessage.content, [{ type: "file", file_id: "file-image-1" }]);
+  const imagePath = userMessage?.meta?.images?.[0];
+  assert.equal(typeof imagePath, "string");
+  assert.deepEqual(requestUserMessage.content, [
+    { type: "file", file_id: "file-image-1" },
+    {
+      type: "text",
+      text: `<message_meta>\n${JSON.stringify({ images: [imagePath] }, null, 2)}\n</message_meta>`,
+    },
+  ]);
 });
 
 test("Files API mode fails the session when image upload fails", async () => {
@@ -3996,8 +4013,16 @@ test("Files API mode invalidates a rejected file ID and uploads it once more", a
   assert.equal(manager.getSession(sessionId)?.status, "completed");
   assert.equal(invalidations, 1);
   assert.equal(uploads, 2);
+  const userMessage = manager.listSessionMessages(sessionId).find((message) => message.role === "user");
+  const imagePath = userMessage?.meta?.images?.[0];
   const retriedUserMessage = requests[1].messages.find((message: any) => message.role === "user");
-  assert.deepEqual(retriedUserMessage.content, [{ type: "file", file_id: "file-image-2" }]);
+  assert.deepEqual(retriedUserMessage.content, [
+    { type: "file", file_id: "file-image-2" },
+    {
+      type: "text",
+      text: `<message_meta>\n${JSON.stringify({ images: [imagePath] }, null, 2)}\n</message_meta>`,
+    },
+  ]);
 });
 
 test("Files API mode checks the aggregate request limit before uploading", async () => {
@@ -4033,11 +4058,11 @@ test("Files API mode checks the aggregate request limit before uploading", async
   assert.match(manager.getSession(sessionId)?.failReason ?? "", /configured 4-byte/);
 });
 
-test("non-multimodal sessions reject unsupported pasted images before creating a session", async () => {
+test("multimodal sessions reject unsupported pasted images before creating a session", async () => {
   const workspace = createTempDir("deepcode-invalid-image-workspace-");
   const home = createTempDir("deepcode-invalid-image-home-");
   setHomeDir(home);
-  const manager = createSessionManagerForModel(workspace, "deepseek-chat");
+  const manager = createSessionManagerForModel(workspace, "gpt-4o");
   (manager as any).activateSession = async () => {};
 
   await assert.rejects(
@@ -4064,8 +4089,9 @@ test("forkSession copies image resources and rewrites stored paths", async () =>
   const forkedUserMessage = manager.listSessionMessages(forkedSessionId).find((message) => message.role === "user");
 
   assert.equal(fs.readdirSync(forkedDir).length, 1);
-  assert.equal(forkedUserMessage?.content?.includes(forkedDir), true);
-  assert.equal(forkedUserMessage?.content?.includes(sourceDir), false);
+  assert.equal(forkedUserMessage?.content, "");
+  assert.equal(forkedUserMessage?.meta?.images?.[0]?.startsWith(forkedDir), true);
+  assert.equal(forkedUserMessage?.meta?.images?.[0]?.startsWith(sourceDir), false);
 
   manager.deleteSession(sourceSessionId);
   assert.equal(fs.existsSync(sourceDir), false);
