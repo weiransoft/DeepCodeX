@@ -622,6 +622,24 @@ test("SessionManager persists Plan Mode and appends prompts only on mode transit
   assert.equal(messages.filter((message) => message.content === PLAN_MODE_OFF_STATUS_MESSAGE).length, 1);
 });
 
+test("SessionManager tags AskUserQuestion answer messages", async () => {
+  const workspace = createTempDir("deepcode-answers-workspace-");
+  const home = createTempDir("deepcode-answers-home-");
+  setHomeDir(home);
+
+  const manager = createMockedClientSessionManager(workspace, [
+    createChatResponse("continued", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }),
+  ]);
+  const sessionId = await manager.createSession({
+    text: "Questions 1/1 answered\n - `Continue?`\n   answer: Yes",
+    isAnswers: true,
+  });
+  const message = manager.listSessionMessages(sessionId).find((item) => item.role === "user");
+
+  assert.equal(message?.meta?.isAnswers, true);
+  assert.equal(message?.meta?.userPrompt?.isAnswers, true);
+});
+
 test("SessionManager excludes the former bundled plan skill and defaults legacy sessions to Default mode", async () => {
   const workspace = createTempDir("deepcode-plan-legacy-workspace-");
   const home = createTempDir("deepcode-plan-legacy-home-");

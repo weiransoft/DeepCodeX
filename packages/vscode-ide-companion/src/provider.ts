@@ -86,6 +86,7 @@ export async function handleWebviewMessage(message: unknown, deps: ProviderDeps)
     await handlePrompt(prompt, skills, images, sessionManager, postMessage, renderMarkdown, {
       permissions: permissions.length > 0 ? permissions : undefined,
       alwaysAllows: alwaysAllows.length > 0 ? alwaysAllows : undefined,
+      isAnswers: msg.isAnswers === true ? true : undefined,
     });
     return true;
   }
@@ -238,7 +239,7 @@ async function handlePrompt(
   sessionManager: ProviderDeps["sessionManager"],
   postMessage: PostMessageFn,
   renderMarkdown: (text: string) => string,
-  options: { permissions?: UserToolPermission[]; alwaysAllows?: PermissionScope[] } = {}
+  options: { permissions?: UserToolPermission[]; alwaysAllows?: PermissionScope[]; isAnswers?: boolean } = {}
 ): Promise<void> {
   const normalizedImages = imageUrls.filter(Boolean);
   const displayPrompt = prompt || (normalizedImages.length > 0 ? "粘贴的图像" : "");
@@ -260,6 +261,7 @@ async function handlePrompt(
       imageUrls: normalizedImages,
       permissions: options.permissions,
       alwaysAllows: options.alwaysAllows,
+      isAnswers: options.isAnswers,
     });
     await sendSkillsList(sessionManager, postMessage);
 

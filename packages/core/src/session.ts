@@ -294,6 +294,7 @@ export type MessageMeta = {
   paramsMd?: string;
   resultMd?: string;
   asThinking?: boolean;
+  isAnswers?: boolean;
   isSummary?: boolean;
   isModelChange?: boolean;
   skill?: SkillInfo;
@@ -331,6 +332,7 @@ export type UserPromptContent = {
   permissions?: UserToolPermission[];
   alwaysAllows?: PermissionScope[];
   planMode?: boolean;
+  isAnswers?: boolean;
 };
 
 type PersistedPromptImage = {
@@ -2487,7 +2489,10 @@ ${agentInstructions}
       visible: true,
       createTime: now,
       updateTime: now,
-      meta: { userPrompt: this.cloneUserPromptForMeta(prompt) },
+      meta: {
+        userPrompt: this.cloneUserPromptForMeta(prompt),
+        isAnswers: prompt.isAnswers,
+      },
       checkpointHash: this.getCurrentCheckpointHash(sessionId),
     };
   }
@@ -2917,6 +2922,7 @@ ${agentInstructions}
       permissions: prompt.permissions ? prompt.permissions.map((permission) => ({ ...permission })) : undefined,
       alwaysAllows: prompt.alwaysAllows ? [...prompt.alwaysAllows] : undefined,
       planMode: prompt.planMode,
+      isAnswers: prompt.isAnswers,
     };
   }
 

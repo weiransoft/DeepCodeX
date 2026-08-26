@@ -406,6 +406,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
         permissions: submission.permissions,
         alwaysAllows: submission.alwaysAllows,
         planMode: submission.planMode ?? planMode,
+        isAnswers: submission.isAnswers,
       };
       const activeSessionId = sessionManager.getActiveSessionId();
       const permissionReply =
@@ -902,6 +903,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
       void handlePrompt({
         text: formatAskUserQuestionAnswers(answers),
         imageUrls: [],
+        isAnswers: true,
       });
     },
     [handlePrompt]

@@ -541,7 +541,7 @@
       }
 
       function buildAskUserQuestionReply(questions, form) {
-        const lines = ["Answer to AskUserQuestion:"];
+        const lines = [`Questions ${questions.length}/${questions.length} answered`];
 
         for (let index = 0; index < questions.length; index += 1) {
           const question = questions[index];
@@ -558,14 +558,12 @@
             };
           }
 
-          lines.push("");
-          lines.push(`${index + 1}. ${question.question}`);
-          if (selectedOptions.length > 0) {
-            lines.push(`- Selected: ${selectedOptions.join(", ")}`);
-          }
+          const answers = [...selectedOptions];
           if (otherText) {
-            lines.push(`- Other: ${otherText}`);
+            answers.push(otherText);
           }
+          lines.push(` - \`${String(question.question || "").replace(/`/g, "\\`")}\``);
+          lines.push(`   answer: ${answers.join(", ")}`);
         }
 
         return {
@@ -680,7 +678,7 @@
           }
           errorMessage.textContent = "";
           setAskUserQuestionFormState(form, false);
-          sendUserPromptText(reply.text);
+          sendUserPromptText(reply.text, undefined, [], { isAnswers: true });
         });
 
         wrapper.appendChild(form);
@@ -1997,6 +1995,7 @@
         const normalizedImages = Array.isArray(imageUrls) ? imageUrls.filter(Boolean) : [];
         const permissions = Array.isArray(options.permissions) ? options.permissions : undefined;
         const alwaysAllows = Array.isArray(options.alwaysAllows) ? options.alwaysAllows : undefined;
+        const isAnswers = options.isAnswers === true;
         const hasPermissionPayload = Boolean(
           (permissions && permissions.length > 0) || (alwaysAllows && alwaysAllows.length > 0)
         );
@@ -2014,7 +2013,8 @@
           skills: skills && skills.length > 0 ? skills : undefined,
           images: normalizedImages.length > 0 ? normalizedImages : undefined,
           permissions,
-          alwaysAllows
+          alwaysAllows,
+          isAnswers: isAnswers || undefined
         });
         return true;
       }

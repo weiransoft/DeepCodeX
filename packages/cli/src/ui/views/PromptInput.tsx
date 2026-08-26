@@ -73,6 +73,7 @@ export type PromptSubmission = {
   permissions?: UserToolPermission[];
   alwaysAllows?: PermissionScope[];
   planMode?: boolean;
+  isAnswers?: boolean;
   command?: "new" | "resume" | "fork" | "continue" | "undo" | "mcp" | "exit";
 };
 

@@ -287,6 +287,26 @@ test("userPrompt passes multiple image urls to the session manager", async () =>
   assert.deepEqual(submittedPrompt?.imageUrls, ["data:image/png;base64,abc", "data:image/jpeg;base64,def"]);
 });
 
+test("userPrompt passes the AskUserQuestion answer marker to the session manager", async () => {
+  const deps = createDeps();
+  let submittedPrompt: any = null;
+  (deps.sessionManager as any).handleUserPrompt = (prompt: any) => {
+    submittedPrompt = prompt;
+    return Promise.resolve();
+  };
+
+  await handleWebviewMessage(
+    {
+      type: "userPrompt",
+      prompt: "Questions 1/1 answered\n - `Continue?`\n   answer: Yes",
+      isAnswers: true,
+    },
+    deps
+  );
+
+  assert.equal(submittedPrompt?.isAnswers, true);
+});
+
 test("userPrompt with permissions (continue) does not send userMessage", async () => {
   const deps = createDeps();
   await handleWebviewMessage(

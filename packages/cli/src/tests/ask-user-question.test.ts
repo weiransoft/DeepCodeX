@@ -102,7 +102,20 @@ test("formatAskUserQuestionAnswers creates model-readable answer text", () => {
       "Which package manager?": "yarn",
       "Any notes?": "Use the existing lockfile",
     }),
-    'User has answered your questions: "Which package manager?"="yarn", "Any notes?"="Use the existing lockfile". You can now continue with the user\'s answers in mind.'
+    [
+      "Questions 2/2 answered",
+      " - `Which package manager?`",
+      "   answer: yarn",
+      " - `Any notes?`",
+      "   answer: Use the existing lockfile",
+    ].join("\n")
+  );
+});
+
+test("formatAskUserQuestionAnswers normalizes multiline answers and escapes question backticks", () => {
+  assert.equal(
+    formatAskUserQuestionAnswers({ "Which `mode`?": "Use fast\nmode" }),
+    ["Questions 1/1 answered", " - `Which \\`mode\\`?`", "   answer: Use fast mode"].join("\n")
   );
 });
 

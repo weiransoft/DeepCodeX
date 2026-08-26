@@ -2,6 +2,9 @@ import type { ChatCompletionMessageParam, ChatCompletionContentPart } from "open
 import { supportsMultimodal, type MultimodalMode } from "./model-capabilities";
 import type { SessionMessage } from "../session";
 
+const ANSWERS_SYSTEM_MESSAGE =
+  "User has answered your questions. You can now continue with the user's answers in mind.";
+
 export type OpenAIMessageConverterOptions = {
   /** Optional callback to render the /init command prompt template. */
   renderInitPrompt?: () => string;
@@ -40,6 +43,11 @@ export class OpenAIMessageConverter {
       }
 
       openAIMessages.push(this.convertMessage(message, thinkingEnabled, model, multimodal));
+      if (message.role === "user" && message.meta?.isAnswers) {
+        openAIMessages.push(
+          this.convertMessage(this.buildAnswersSystemMessage(message), thinkingEnabled, model, multimodal)
+        );
+      }
 
       const toolCalls = this.getAssistantToolCalls(message);
       if (toolCalls.length === 0) {
@@ -146,6 +154,21 @@ export class OpenAIMessageConverter {
       return this.options.renderInitPrompt?.() ?? "";
     }
     return message.content ?? "";
+  }
+
+  private buildAnswersSystemMessage(message: SessionMessage): SessionMessage {
+    return {
+      id: `${message.id}:answers`,
+      sessionId: message.sessionId,
+      role: "system",
+      content: ANSWERS_SYSTEM_MESSAGE,
+      contentParams: null,
+      messageParams: null,
+      compacted: false,
+      visible: false,
+      createTime: message.createTime,
+      updateTime: message.updateTime,
+    };
   }
 
   private pairToolMessages(messages: SessionMessage[]): Map<string, number> {
