@@ -190,7 +190,7 @@ export function loadSession(
         role: m.role,
         content: m.content,
         html:
-          m.role !== "tool"
+          m.role !== "tool" && (m.role !== "user" || m.meta?.isAnswers)
             ? renderMarkdown(
                 m.content || (m.messageParams as { reasoning_content?: string } | null)?.reasoning_content || ""
               )
@@ -249,7 +249,12 @@ async function handlePrompt(
     ((options.permissions?.length ?? 0) > 0 || (options.alwaysAllows?.length ?? 0) > 0);
 
   if (displayPrompt && !isPermissionContinue) {
-    postMessage({ type: "userMessage", content: displayPrompt });
+    postMessage({
+      type: "userMessage",
+      content: displayPrompt,
+      html: options.isAnswers ? renderMarkdown(displayPrompt) : undefined,
+      meta: options.isAnswers ? { isAnswers: true } : undefined,
+    });
   }
 
   postMessage({ type: "loading", value: true });

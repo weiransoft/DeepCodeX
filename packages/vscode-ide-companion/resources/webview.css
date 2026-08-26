@@ -733,6 +733,10 @@ body {
   max-width: 80%;
 }
 
+.bubble.user.answers {
+  white-space: normal;
+}
+
 .bubble.system {
   background: transparent;
   border-color: transparent;

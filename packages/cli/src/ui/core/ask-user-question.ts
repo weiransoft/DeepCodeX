@@ -50,8 +50,8 @@ export function formatAskUserQuestionAnswers(answers: AskUserQuestionAnswers): s
   const entries = Object.entries(answers);
   const lines = [`Questions ${entries.length}/${entries.length} answered`];
   for (const [question, answer] of entries) {
-    lines.push(` - \`${formatQuestion(question)}\``);
-    lines.push(`   answer: ${formatAnswer(answer)}`);
+    lines.push(` - ${formatAnswerPart(question)}`);
+    lines.push(`   answer: ${formatAnswerPart(answer)}`);
   }
   return lines.join("\n");
 }
@@ -131,10 +131,6 @@ function normalizeOption(raw: unknown): AskUserQuestionOption | null {
   };
 }
 
-function formatQuestion(value: string): string {
-  return value.replace(/`/g, "\\`").replace(/\s+/g, " ").trim();
-}
-
-function formatAnswer(value: string): string {
+function formatAnswerPart(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }

@@ -562,8 +562,10 @@
           if (otherText) {
             answers.push(otherText);
           }
-          lines.push(` - \`${String(question.question || "").replace(/`/g, "\\`")}\``);
-          lines.push(`   answer: ${answers.join(", ")}`);
+          const questionText = String(question.question || "").replace(/\s+/g, " ").trim();
+          const answerText = answers.join(", ").replace(/\s+/g, " ").trim();
+          lines.push(` - ${questionText}`);
+          lines.push(`   answer: ${answerText}`);
         }
 
         return {
@@ -698,8 +700,13 @@
         }
 
         if (role === "user") {
-          // 普通用户气泡
-          bubble.textContent = content;
+          if (meta && meta.isAnswers) {
+            bubble.classList.add("answers");
+            bubble.innerHTML = content;
+          } else {
+            // 普通用户气泡
+            bubble.textContent = content;
+          }
         } else if (role === "assistant") {
           if (meta && meta.asThinking === true) {
             // 思考气泡（可折叠）
@@ -2168,7 +2175,7 @@
         if (msg.role === "system") {
           addBubble(msg.content, "system", msg.meta, shouldConnect);
         } else if (msg.role === "user") {
-          addBubble(msg.content, "user", msg.meta, false);
+          addBubble(msg.meta?.isAnswers ? msg.html || msg.content : msg.content, "user", msg.meta, false);
         } else if (msg.role === "assistant") {
           addBubble(msg.html || msg.content, "assistant", msg.meta, shouldConnect, msg.content || "");
         } else if (msg.role === "tool") {
@@ -2327,8 +2334,12 @@
           }
           updateThinkingBubbleContent();
         } else if (message.type === "userMessage") {
-          // 显示用户消息（纯文本）
-          addBubble(message.content || "", "user", message.meta, false);
+          addBubble(
+            message.meta?.isAnswers ? message.html || message.content || "" : message.content || "",
+            "user",
+            message.meta,
+            false
+          );
 
           // Record user message into history
           if (typeof message.content === "string") {

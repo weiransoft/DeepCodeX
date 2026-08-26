@@ -424,7 +424,14 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
         (submission.imageUrls.length > 0 ? "[Image]" : "");
 
       if (userDisplayContent && submission.command !== "continue") {
-        setMessages((prev) => [...prev, buildSyntheticUserMessage(userDisplayContent, submission.imageUrls.length)]);
+        setMessages((prev) => [
+          ...prev,
+          buildSyntheticUserMessage(
+            userDisplayContent,
+            submission.imageUrls.length,
+            submission.isAnswers ? { isAnswers: true } : undefined
+          ),
+        ]);
       }
 
       setBusy(true);

@@ -631,7 +631,7 @@ test("SessionManager tags AskUserQuestion answer messages", async () => {
     createChatResponse("continued", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }),
   ]);
   const sessionId = await manager.createSession({
-    text: "Questions 1/1 answered\n - `Continue?`\n   answer: Yes",
+    text: "Questions 1/1 answered\n - Continue?\n   answer: Yes",
     isAnswers: true,
   });
   const message = manager.listSessionMessages(sessionId).find((item) => item.role === "user");

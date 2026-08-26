@@ -5,6 +5,7 @@ import type { PromptDraft } from "../views/PromptInput";
 import type { ModelConfigSelection } from "@vegamo/deepcode-core";
 import type { SessionEntry, SessionMessage } from "@vegamo/deepcode-core";
 import type { SessionManager } from "@vegamo/deepcode-core";
+import type { MessageMeta } from "@vegamo/deepcode-core";
 
 /**
  * Render all messages directly to stdout for Raw mode display.
@@ -26,7 +27,7 @@ export function renderRawModeMessages(allMessages: SessionMessage[], mode: strin
   }
 }
 
-export function buildSyntheticUserMessage(content: string, imageCount: number): SessionMessage {
+export function buildSyntheticUserMessage(content: string, imageCount: number, meta?: MessageMeta): SessionMessage {
   const now = new Date().toISOString();
   return {
     id: `local-${Math.random().toString(36).slice(2)}`,
@@ -45,6 +46,7 @@ export function buildSyntheticUserMessage(content: string, imageCount: number): 
     visible: true,
     createTime: now,
     updateTime: now,
+    meta,
   };
 }
 

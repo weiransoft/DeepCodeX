@@ -104,18 +104,18 @@ test("formatAskUserQuestionAnswers creates model-readable answer text", () => {
     }),
     [
       "Questions 2/2 answered",
-      " - `Which package manager?`",
+      " - Which package manager?",
       "   answer: yarn",
-      " - `Any notes?`",
+      " - Any notes?",
       "   answer: Use the existing lockfile",
     ].join("\n")
   );
 });
 
-test("formatAskUserQuestionAnswers normalizes multiline answers and escapes question backticks", () => {
+test("formatAskUserQuestionAnswers normalizes multiline questions and answers", () => {
   assert.equal(
-    formatAskUserQuestionAnswers({ "Which `mode`?": "Use fast\nmode" }),
-    ["Questions 1/1 answered", " - `Which \\`mode\\`?`", "   answer: Use fast mode"].join("\n")
+    formatAskUserQuestionAnswers({ "Which\nmode?": "Use fast\nmode" }),
+    ["Questions 1/1 answered", " - Which mode?", "   answer: Use fast mode"].join("\n")
   );
 });
 
