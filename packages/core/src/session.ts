@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
+import { fileURLToPath, pathToFileURL } from "url";
 import matter from "gray-matter";
 import ejs from "ejs";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
@@ -71,6 +72,7 @@ import {
   type DeepSeekFileReference,
   type DeepSeekFilesPolicy,
 } from "./common/deepseek-files";
+import { loadImageFile } from "./tools/image-file";
 
 export type { PermissionScope } from "./settings";
 export type {
@@ -337,7 +339,7 @@ export type UserPromptContent = {
 
 type PersistedPromptImage = {
   buffer: Buffer;
-  extension: ".jpg" | ".png" | ".webp";
+  extension: ".gif" | ".jpg" | ".png" | ".webp";
 };
 
 export type SkillInfo = {
@@ -417,6 +419,7 @@ export class SessionManager {
   private readonly processTimeoutControls = new Map<string, ProcessTimeoutControl>();
   private readonly liveProcessKeys = new Set<string>();
   private readonly toolExecutor: ToolExecutor;
+  private readonly loadSharp?: SharpLoader;
   private readonly mcpManager = new McpManager();
   private mcpToolDefinitions: ToolDefinition[] = [];
   private readonly messageConverter: OpenAIMessageConverter;
@@ -432,6 +435,7 @@ export class SessionManager {
     this.onMcpStatusChanged = options.onMcpStatusChanged;
     this.onProcessStdout = options.onProcessStdout;
     this.nonInteractive = options.nonInteractive === true;
+    this.loadSharp = options.loadSharp;
     this.toolExecutor = new ToolExecutor(this.projectRoot, this.createOpenAIClient, this.mcpManager, options.loadSharp);
     this.mcpManager.prepare(this.getResolvedSettings().mcpServers);
     this.messageConverter = new OpenAIMessageConverter({
@@ -587,6 +591,7 @@ export class SessionManager {
       image: ReturnType<typeof decodeDeepSeekImageDataUrl>;
     }> = [];
     let totalBytes = 0;
+    const uniqueImages = new Map<string, ReturnType<typeof decodeDeepSeekImageDataUrl>>();
 
     for (let messageIndex = 0; messageIndex < converted.length; messageIndex += 1) {
       const content = (converted[messageIndex] as { content?: unknown }).content;
@@ -599,19 +604,24 @@ export class SessionManager {
           continue;
         }
         const image = decodeDeepSeekImageDataUrl(part.image_url.url, images.length);
-        totalBytes += image.buffer.byteLength;
-        if (totalBytes > settings.maxRequestFilesBytes) {
-          throw new Error(
-            `Images in this request exceed the configured ${settings.maxRequestFilesBytes}-byte Files API limit.`
-          );
+        if (!uniqueImages.has(image.hash)) {
+          totalBytes += image.buffer.byteLength;
+          if (totalBytes > settings.maxRequestFilesBytes) {
+            throw new Error(
+              `Images in this request exceed the configured ${settings.maxRequestFilesBytes}-byte Files API limit.`
+            );
+          }
+          uniqueImages.set(image.hash, image);
         }
         images.push({ messageIndex, contentIndex, image });
       }
     }
 
+    const uniqueImageList = [...uniqueImages.values()];
     const references = await Promise.all(
-      images.map(({ image }) => this.deepSeekFiles.ensureUploaded(image, apiKey, settings.policy, signal))
+      uniqueImageList.map((image) => this.deepSeekFiles.ensureUploaded(image, apiKey, settings.policy, signal))
     );
+    const referencesByHash = new Map(uniqueImageList.map((image, index) => [image.hash, references[index]] as const));
     const result = converted.map((message) => {
       const content = (message as { content?: unknown }).content;
       return Array.isArray(content) ? ({ ...message, content: [...content] } as ChatCompletionMessageParam) : message;
@@ -619,7 +629,7 @@ export class SessionManager {
     for (let index = 0; index < images.length; index += 1) {
       const image = images[index];
       const content = (result[image.messageIndex] as { content: unknown[] }).content;
-      content[image.contentIndex] = { type: "file", file_id: references[index].fileId };
+      content[image.contentIndex] = { type: "file", file_id: referencesByHash.get(image.image.hash)!.fileId };
     }
     return { messages: result, references };
   }
@@ -1616,7 +1626,11 @@ ${agentInstructions}
           await this.compactSession(sessionId, sessionController.signal);
         }
 
-        const sessionMessages = this.prepareSessionMessagesForRequest(this.listSessionMessages(sessionId));
+        const sessionMessages = await this.attachPromptImagesForRequest(
+          this.prepareSessionMessagesForRequest(this.listSessionMessages(sessionId)),
+          model,
+          this.getResolvedSettings().multimodal
+        );
         const filesSettings = this.getDeepSeekFilesSettings();
         if (filesSettings.enabled && !apiKey) {
           throw new Error("Files API is enabled, but no API key is available for uploads.");
@@ -1925,6 +1939,71 @@ ${agentInstructions}
       content: getSystemPrompt(this.projectRoot, this.getPromptToolOptions()),
     };
     return prepared;
+  }
+
+  private async attachPromptImagesForRequest(
+    messages: SessionMessage[],
+    model: string,
+    multimodal: MultimodalMode = "default"
+  ): Promise<SessionMessage[]> {
+    const includeImageContent = supportsMultimodal(model, multimodal);
+    const prepared = await Promise.all(
+      messages.map(async (message) => {
+        const imageUrls = message.role === "user" ? message.meta?.userPrompt?.imageUrls : undefined;
+        const promptImages: Array<{ source: "file" | "url"; value: string }> = [];
+        for (const imageUrl of imageUrls ?? []) {
+          const filePath = this.getLocalPromptImagePath(imageUrl);
+          if (filePath) {
+            promptImages.push({ source: "file", value: filePath });
+          } else if (/^https?:\/\//i.test(imageUrl)) {
+            promptImages.push({ source: "url", value: imageUrl });
+          }
+        }
+        if (promptImages.length === 0) {
+          return message;
+        }
+
+        const contentParams = Array.isArray(message.contentParams)
+          ? [...message.contentParams]
+          : message.contentParams
+            ? [message.contentParams]
+            : [];
+        if (includeImageContent) {
+          const imageParts = await Promise.all(
+            promptImages.map(async ({ source, value }) => {
+              if (source === "url") {
+                return { type: "image_url", image_url: { url: value } };
+              }
+              const { image } = await loadImageFile(value, this.loadSharp);
+              return {
+                type: "image_url",
+                image_url: { url: `data:${image.mediaType};base64,${image.data.toString("base64")}` },
+              };
+            })
+          );
+          for (const imagePart of imageParts) {
+            contentParams.push(imagePart);
+          }
+        }
+        if (!includeImageContent) {
+          contentParams.push({
+            type: "text",
+            text: `<message_meta>\n${JSON.stringify({ images: promptImages.map(({ value }) => value) }, null, 2)}\n</message_meta>`,
+          });
+        }
+        return { ...message, contentParams };
+      })
+    );
+    return prepared;
+  }
+
+  private getLocalPromptImagePath(imageUrl: string): string | null {
+    try {
+      const url = new URL(imageUrl);
+      return url.protocol === "file:" ? fileURLToPath(url) : null;
+    } catch {
+      return null;
+    }
   }
 
   private reportNewPrompt(): void {
@@ -2470,20 +2549,13 @@ ${agentInstructions}
 
   private buildUserMessage(sessionId: string, prompt: UserPromptContent): SessionMessage {
     const now = new Date().toISOString();
-    const imageParams =
-      prompt.imageUrls
-        ?.filter((url) => Boolean(url))
-        .map((url) => ({
-          type: "image_url",
-          image_url: { url },
-        })) ?? [];
 
     return {
       id: crypto.randomUUID(),
       sessionId,
       role: "user",
       content: prompt.text ?? "",
-      contentParams: imageParams.length > 0 ? imageParams : null,
+      contentParams: null,
       messageParams: null,
       compacted: false,
       visible: true,
@@ -2498,27 +2570,34 @@ ${agentInstructions}
   }
 
   private preparePromptImages(sessionId: string, prompt: UserPromptContent): UserPromptContent {
-    if (this.getDeepSeekFilesSettings().enabled) {
-      return prompt;
-    }
-    if (supportsMultimodal(this.getResolvedSettings().model, this.getResolvedSettings().multimodal)) {
-      return prompt;
-    }
-
     const imageUrls = prompt.imageUrls?.filter(Boolean) ?? [];
     if (imageUrls.length === 0) {
       return prompt;
     }
 
-    const images = imageUrls.map((dataUrl, index) => this.decodePersistedPromptImage(dataUrl, index));
+    const preparedUrls: string[] = [];
     const imagesDir = this.getSessionImagesDir(sessionId);
     const createdPaths: string[] = [];
     try {
-      fs.mkdirSync(imagesDir, { recursive: true });
-      for (const image of images) {
+      for (let index = 0; index < imageUrls.length; index += 1) {
+        const imageUrl = imageUrls[index];
+        if (!imageUrl.startsWith("data:")) {
+          if (imageUrl.startsWith("file:")) {
+            const url = new URL(imageUrl);
+            fileURLToPath(url);
+            preparedUrls.push(url.href);
+          } else {
+            preparedUrls.push(imageUrl);
+          }
+          continue;
+        }
+
+        const image = this.decodePersistedPromptImage(imageUrl, index);
+        fs.mkdirSync(imagesDir, { recursive: true });
         const imagePath = path.join(imagesDir, `${crypto.randomUUID()}${image.extension}`);
         fs.writeFileSync(imagePath, image.buffer, { flag: "wx", mode: 0o600 });
         createdPaths.push(imagePath);
+        preparedUrls.push(pathToFileURL(imagePath).href);
       }
     } catch (error) {
       for (const imagePath of createdPaths) {
@@ -2537,28 +2616,29 @@ ${agentInstructions}
       throw new Error(`Failed to save pasted image: ${message}`);
     }
 
-    const imageXml = [
-      "<images>",
-      ...createdPaths.map((imagePath, index) => `  <image name="[Image #${index + 1}]" path="${imagePath}" />`),
-      "</images>",
-    ].join("\n");
-    const text = prompt.text?.trimEnd() ?? "";
     return {
       ...prompt,
-      text: text ? `${text}\n\n${imageXml}` : imageXml,
+      imageUrls: preparedUrls,
     };
   }
 
   private decodePersistedPromptImage(dataUrl: string, index: number): PersistedPromptImage {
-    const match = /^data:(image\/(?:jpeg|jpg|png|webp));base64,([A-Za-z0-9+/=\r\n]+)$/i.exec(dataUrl);
+    const match = /^data:(image\/(?:gif|jpeg|jpg|png|webp));base64,([A-Za-z0-9+/=\r\n]+)$/i.exec(dataUrl);
     if (!match) {
-      throw new Error(`Image #${index + 1} is invalid or unsupported. Only JPEG, PNG, and WebP are supported.`);
+      throw new Error(`Image #${index + 1} is invalid or unsupported. Only GIF, JPEG, PNG, and WebP are supported.`);
     }
 
     const payload = match[2].replace(/[\r\n]/g, "");
     const buffer = Buffer.from(payload, "base64");
     const mimeType = match[1].toLowerCase();
-    const extension = mimeType === "image/png" ? ".png" : mimeType === "image/webp" ? ".webp" : ".jpg";
+    const extension =
+      mimeType === "image/gif"
+        ? ".gif"
+        : mimeType === "image/png"
+          ? ".png"
+          : mimeType === "image/webp"
+            ? ".webp"
+            : ".jpg";
     return { buffer, extension };
   }
 
@@ -2576,7 +2656,12 @@ ${agentInstructions}
     try {
       fs.mkdirSync(path.dirname(targetDir), { recursive: true });
       fs.cpSync(sourceDir, targetDir, { recursive: true, errorOnExist: true });
-      return replaceStringValues(messages, sourceDir, targetDir) as SessionMessage[];
+      const replacedPaths = replaceStringValues(messages, sourceDir, targetDir);
+      return replaceStringValues(
+        replacedPaths,
+        pathToFileURL(sourceDir).href,
+        pathToFileURL(targetDir).href
+      ) as SessionMessage[];
     } catch (error) {
       try {
         fs.rmSync(targetDir, { recursive: true, force: true });
