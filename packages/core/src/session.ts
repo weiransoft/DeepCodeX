@@ -301,12 +301,6 @@ export type MessageMeta = {
   skillCatalog?: Array<{ name: string; description: string }>;
   permissions?: MessageToolPermission[];
   userPrompt?: UserPromptContent;
-  images?: string[];
-};
-
-type PreparedUserPrompt = {
-  content: UserPromptContent;
-  images: string[];
 };
 
 export type SessionMessage = {
@@ -1338,8 +1332,7 @@ ${agentInstructions}
 
     const sessionId = crypto.randomUUID();
     const originalSummary = userPrompt.text ? userPrompt.text.slice(0, 100) : "[Image Prompt]";
-    const preparedPrompt = this.preparePromptImages(sessionId, userPrompt);
-    userPrompt = preparedPrompt.content;
+    userPrompt = this.preparePromptImages(sessionId, userPrompt);
     this.ensureFileHistorySession(sessionId);
     const now = new Date().toISOString();
     const index = this.loadSessionsIndex();
@@ -1401,7 +1394,7 @@ ${agentInstructions}
     this.appendPlanModeTransitionMessages(sessionId, false, Boolean(userPrompt.planMode));
 
     this.recordUserPromptCheckpoint(sessionId);
-    const userMessage = this.buildUserMessage(sessionId, userPrompt, preparedPrompt.images);
+    const userMessage = this.buildUserMessage(sessionId, userPrompt);
     this.appendSessionMessage(sessionId, userMessage);
 
     let matchedSkills: SkillInfo[] = [];
@@ -1436,8 +1429,7 @@ ${agentInstructions}
       await this.createSession(userPrompt, controller);
       return;
     }
-    const preparedPrompt = this.preparePromptImages(sessionId, userPrompt);
-    userPrompt = preparedPrompt.content;
+    userPrompt = this.preparePromptImages(sessionId, userPrompt);
     appendProjectPermissionAllows(this.projectRoot, userPrompt.alwaysAllows, {
       inheritedPermissions: this.getResolvedSettings().permissions,
     });
@@ -1459,13 +1451,13 @@ ${agentInstructions}
 
     if (hasUserPermissionReplies(userPrompt) && this.hasTrailingPendingToolCalls(sessionId)) {
       this.activeSessionId = sessionId;
-      await this.activateSession(sessionId, controller, userPrompt, preparedPrompt.images);
+      await this.activateSession(sessionId, controller, userPrompt);
       return;
     }
 
     if (this.isContinuePrompt(userPrompt)) {
       this.activeSessionId = sessionId;
-      await this.activateSession(sessionId, controller, userPrompt, preparedPrompt.images);
+      await this.activateSession(sessionId, controller, userPrompt);
       return;
     }
 
@@ -1477,7 +1469,7 @@ ${agentInstructions}
       const content = `Note that the user manually modified these files:\n${checkpoint.changedFilePaths.join("\n")}`;
       this.appendSessionMessage(sessionId, this.buildSystemMessage(sessionId, content));
     }
-    const userMessage = this.buildUserMessage(sessionId, userPrompt, preparedPrompt.images);
+    const userMessage = this.buildUserMessage(sessionId, userPrompt);
     this.appendSessionMessage(sessionId, userMessage);
 
     let matchedSkills: SkillInfo[] = [];
@@ -1515,8 +1507,7 @@ ${agentInstructions}
   async activateSession(
     sessionId: string,
     controller?: AbortController,
-    permissionPrompt?: UserPromptContent,
-    permissionPromptImages: string[] = []
+    permissionPrompt?: UserPromptContent
   ): Promise<void> {
     const startedAt = Date.now();
     const {
@@ -1595,12 +1586,7 @@ ${agentInstructions}
             permissionOverrides: permissionPrompt?.permissions,
             messagePermissions: pendingToolCallMessage.message?.meta?.permissions,
           });
-          await this.appendDeferredPermissionPrompt(
-            sessionId,
-            permissionPrompt,
-            permissionPromptImages,
-            sessionController
-          );
+          await this.appendDeferredPermissionPrompt(sessionId, permissionPrompt, sessionController);
           // Permission replies are one-shot: do not reuse decisions or append the deferred user prompt again on later tool-call batches.
           permissionPrompt = undefined;
           if (this.isInterrupted(sessionId)) {
@@ -2482,7 +2468,7 @@ ${agentInstructions}
     return updated;
   }
 
-  private buildUserMessage(sessionId: string, prompt: UserPromptContent, images: string[] = []): SessionMessage {
+  private buildUserMessage(sessionId: string, prompt: UserPromptContent): SessionMessage {
     const now = new Date().toISOString();
     const imageParams =
       prompt.imageUrls
@@ -2506,16 +2492,22 @@ ${agentInstructions}
       meta: {
         userPrompt: this.cloneUserPromptForMeta(prompt),
         isAnswers: prompt.isAnswers,
-        images: images.length > 0 ? [...images] : undefined,
       },
       checkpointHash: this.getCurrentCheckpointHash(sessionId),
     };
   }
 
-  private preparePromptImages(sessionId: string, prompt: UserPromptContent): PreparedUserPrompt {
+  private preparePromptImages(sessionId: string, prompt: UserPromptContent): UserPromptContent {
+    if (this.getDeepSeekFilesSettings().enabled) {
+      return prompt;
+    }
+    if (supportsMultimodal(this.getResolvedSettings().model, this.getResolvedSettings().multimodal)) {
+      return prompt;
+    }
+
     const imageUrls = prompt.imageUrls?.filter(Boolean) ?? [];
     if (imageUrls.length === 0) {
-      return { content: prompt, images: [] };
+      return prompt;
     }
 
     const images = imageUrls.map((dataUrl, index) => this.decodePersistedPromptImage(dataUrl, index));
@@ -2545,7 +2537,16 @@ ${agentInstructions}
       throw new Error(`Failed to save pasted image: ${message}`);
     }
 
-    return { content: prompt, images: createdPaths };
+    const imageXml = [
+      "<images>",
+      ...createdPaths.map((imagePath, index) => `  <image name="[Image #${index + 1}]" path="${imagePath}" />`),
+      "</images>",
+    ].join("\n");
+    const text = prompt.text?.trimEnd() ?? "";
+    return {
+      ...prompt,
+      text: text ? `${text}\n\n${imageXml}` : imageXml,
+    };
   }
 
   private decodePersistedPromptImage(dataUrl: string, index: number): PersistedPromptImage {
@@ -2934,7 +2935,6 @@ ${agentInstructions}
   private async appendDeferredPermissionPrompt(
     sessionId: string,
     userPrompt: UserPromptContent | undefined,
-    images: string[],
     controller: AbortController
   ): Promise<void> {
     if (!userPrompt || this.isContinuePrompt(userPrompt)) {
@@ -2950,7 +2950,7 @@ ${agentInstructions}
     }
     this.reportNewPrompt();
     const signal = controller.signal;
-    const userMessage = this.buildUserMessage(sessionId, userPrompt, images);
+    const userMessage = this.buildUserMessage(sessionId, userPrompt);
     this.appendSessionMessage(sessionId, userMessage);
     let matchedSkills: SkillInfo[] = [];
     if (userPrompt.text) {
