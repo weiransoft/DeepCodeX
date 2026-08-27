@@ -70,10 +70,10 @@ test("SessionManager preserves structured user content when building OpenAI mess
     projectRoot: process.cwd(),
     createOpenAIClient: () => ({
       client: null,
-      model: "test-model",
+      model: "test-vision-model",
       thinkingEnabled: false,
     }),
-    getResolvedSettings: () => ({ model: "test-model" }),
+    getResolvedSettings: () => ({ model: "test-vision-model" }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
   });
@@ -98,7 +98,7 @@ test("SessionManager preserves structured user content when building OpenAI mess
     },
   ];
 
-  const openAIMessages = (manager as any).buildOpenAIMessages(messages, false, "test-model") as Array<{
+  const openAIMessages = (manager as any).buildOpenAIMessages(messages, false, "test-vision-model") as Array<{
     role: string;
     content: unknown;
   }>;
@@ -3836,7 +3836,7 @@ test("native multimodal sessions persist pasted images without storing inline co
   const workspace = createTempDir("deepcode-native-image-workspace-");
   const home = createTempDir("deepcode-native-image-home-");
   setHomeDir(home);
-  const manager = createSessionManagerForModel(workspace, "gpt-4o");
+  const manager = createSessionManagerForModel(workspace, "custom-vision-model");
   (manager as any).activateSession = async () => {};
 
   const sessionId = await manager.createSession({ imageUrls: ["data:image/png;base64,aGVsbG8="] });
@@ -3853,7 +3853,7 @@ test("multimodal off forces non-multimodal image handling for a multimodal model
   const workspace = createTempDir("deepcode-multimodal-off-workspace-");
   const home = createTempDir("deepcode-multimodal-off-home-");
   setHomeDir(home);
-  const manager = createSessionManagerForModel(workspace, "gpt-4o", "off");
+  const manager = createSessionManagerForModel(workspace, "custom-vision-model", "off");
   (manager as any).activateSession = async () => {};
 
   const sessionId = await manager.createSession({ imageUrls: ["data:image/png;base64,aGVsbG8="] });
@@ -3901,8 +3901,8 @@ test("multimodal requests send normalized image content without path metadata", 
   };
   const manager = new SessionManager({
     projectRoot: workspace,
-    createOpenAIClient: () => ({ client: client as any, model: "gpt-4o", thinkingEnabled: false }),
-    getResolvedSettings: () => ({ model: "gpt-4o" }),
+    createOpenAIClient: () => ({ client: client as any, model: "custom-vision-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "custom-vision-model" }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
     loadSharp: async () => sharp,
@@ -4005,11 +4005,11 @@ test("Files API mode reuses one upload for duplicate images without path metadat
     createOpenAIClient: () => ({
       client: client as any,
       apiKey: "sk-files-test",
-      model: "gpt-4o",
+      model: "custom-vision-model",
       baseURL: "https://api.deepseek.com",
       thinkingEnabled: false,
     }),
-    getResolvedSettings: () => ({ model: "gpt-4o", filesApiEnabled: true }),
+    getResolvedSettings: () => ({ model: "custom-vision-model", filesApiEnabled: true }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
     loadSharp: async () => sharp,
@@ -4052,11 +4052,11 @@ test("Files API mode fails the session when image upload fails", async () => {
     createOpenAIClient: () => ({
       client: client as any,
       apiKey: "sk-files-test",
-      model: "gpt-4o",
+      model: "custom-vision-model",
       baseURL: "https://api.deepseek.com",
       thinkingEnabled: false,
     }),
-    getResolvedSettings: () => ({ model: "gpt-4o", filesApiEnabled: true }),
+    getResolvedSettings: () => ({ model: "custom-vision-model", filesApiEnabled: true }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
     loadSharp: async () => sharp,
@@ -4098,11 +4098,11 @@ test("Files API mode invalidates a rejected file ID and uploads it once more", a
     createOpenAIClient: () => ({
       client: client as any,
       apiKey: "sk-files-test",
-      model: "gpt-4o",
+      model: "custom-vision-model",
       baseURL: "https://api.deepseek.com",
       thinkingEnabled: false,
     }),
-    getResolvedSettings: () => ({ model: "gpt-4o", filesApiEnabled: true }),
+    getResolvedSettings: () => ({ model: "custom-vision-model", filesApiEnabled: true }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
     loadSharp: async () => sharp,
@@ -4138,12 +4138,12 @@ test("Files API mode checks the aggregate request limit before uploading", async
     createOpenAIClient: () => ({
       client: client as any,
       apiKey: "sk-files-test",
-      model: "gpt-4o",
+      model: "custom-vision-model",
       baseURL: "https://api.deepseek.com",
       thinkingEnabled: false,
     }),
     getResolvedSettings: () => ({
-      model: "gpt-4o",
+      model: "custom-vision-model",
       filesApiEnabled: true,
       maxRequestFilesBytes: 4,
     }),

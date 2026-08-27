@@ -124,7 +124,7 @@ test("OpenAIMessageConverter multimodal config overrides model-based filtering",
   ];
 
   // "off" drops image content even for a multimodal model.
-  const off = c.buildMessages(messages, false, "gpt-4o", "off") as Array<{ content: unknown }>;
+  const off = c.buildMessages(messages, false, "custom-vision-model", "off") as Array<{ content: unknown }>;
   assert.deepEqual(off[0]?.content, [{ type: "text", text: "Loaded pixel.png" }]);
 
   // "on" keeps image content even for a non-multimodal model.
