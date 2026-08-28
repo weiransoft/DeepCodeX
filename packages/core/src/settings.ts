@@ -574,6 +574,7 @@ export function resolveSettingsSources(
     trimString(userSettings?.model) ||
     trimString(userEnv.MODEL) ||
     defaults.model;
+  const baseURL = trimString(env.BASE_URL) || defaults.baseURL;
 
   const contextWindow =
     firstTokenWindow(systemEnv.CONTEXT_WINDOW, projectSettings?.contextWindow, userSettings?.contextWindow) ??
@@ -642,7 +643,8 @@ export function resolveSettingsSources(
     "default";
 
   const filesApiEnabled =
-    parseBoolean(projectSettings?.filesApiEnabled) ?? parseBoolean(userSettings?.filesApiEnabled) ?? false;
+    baseURL === DEFAULT_BASE_URL &&
+    (parseBoolean(projectSettings?.filesApiEnabled) ?? parseBoolean(userSettings?.filesApiEnabled) ?? false);
   const filesApiTimeoutMs =
     firstIntegerInRange(
       1,
@@ -678,7 +680,7 @@ export function resolveSettingsSources(
   return {
     env,
     apiKey: trimString(env.API_KEY) || undefined,
-    baseURL: trimString(env.BASE_URL) || defaults.baseURL,
+    baseURL,
     model,
     contextWindow,
     autoCompactWindow,

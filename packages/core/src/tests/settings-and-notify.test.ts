@@ -103,6 +103,22 @@ test("resolveSettings applies Files API defaults", () => {
   assert.equal(resolved.maxRequestFilesBytes, DEFAULT_MAX_REQUEST_FILES_BYTES);
 });
 
+test("resolveSettings enables Files API only for the DeepSeek API base URL", () => {
+  const deepSeek = resolveSettings(
+    { filesApiEnabled: true },
+    { model: "default-model", baseURL: "https://api.deepseek.com" },
+    TEST_PROCESS_ENV
+  );
+  const custom = resolveSettings(
+    { env: { BASE_URL: "https://example.com/v1" }, filesApiEnabled: true },
+    { model: "default-model", baseURL: "https://api.deepseek.com" },
+    TEST_PROCESS_ENV
+  );
+
+  assert.equal(deepSeek.filesApiEnabled, true);
+  assert.equal(custom.filesApiEnabled, false);
+});
+
 test("resolveSettingsSources validates Files API settings and uses project precedence", () => {
   const resolved = resolveSettingsSources(
     {

@@ -107,7 +107,7 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 
 #### DeepSeek Files API
 
-设置 `filesApiEnabled: true` 后，Deep Code 会将图片上传到固定的 `https://api.deepseek.com/files`，并在聊天请求中使用 `file_id`。上传或缓存刷新失败时，本次请求直接失败；关闭开关时图片处理逻辑保持不变。
+当 `BASE_URL` 为 `https://api.deepseek.com` 时，设置 `filesApiEnabled: true` 后，Deep Code 会将图片上传到固定的 `https://api.deepseek.com/files`，并在聊天请求中使用 `file_id`。其他 API 地址不会启用该功能。上传或缓存刷新失败时，本次请求直接失败；关闭开关时图片处理逻辑保持不变。
 
 ```json
 {
