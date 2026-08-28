@@ -4,6 +4,8 @@ import { execFileSync } from "node:child_process";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import sharp from "sharp";
 import { GitFileHistory } from "../common/file-history";
 import { clearSessionState } from "../common/state";
 import { getSystemPrompt } from "../prompt";
@@ -68,10 +70,10 @@ test("SessionManager preserves structured user content when building OpenAI mess
     projectRoot: process.cwd(),
     createOpenAIClient: () => ({
       client: null,
-      model: "test-model",
+      model: "test-vision-model",
       thinkingEnabled: false,
     }),
-    getResolvedSettings: () => ({ model: "test-model" }),
+    getResolvedSettings: () => ({ model: "test-vision-model" }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
   });
@@ -96,7 +98,7 @@ test("SessionManager preserves structured user content when building OpenAI mess
     },
   ];
 
-  const openAIMessages = (manager as any).buildOpenAIMessages(messages, false, "test-model") as Array<{
+  const openAIMessages = (manager as any).buildOpenAIMessages(messages, false, "test-vision-model") as Array<{
     role: string;
     content: unknown;
   }>;
@@ -3800,7 +3802,7 @@ test("SessionManager.deleteSession removes the messages file", () => {
   assert.equal(fs.existsSync(messagePath), false);
 });
 
-test("non-multimodal sessions persist pasted images in metadata without changing user content", async () => {
+test("sessions persist pasted images as file URLs without changing user content", async () => {
   const workspace = createTempDir("deepcode-session-image-workspace-");
   const home = createTempDir("deepcode-session-image-home-");
   setHomeDir(home);
@@ -3818,25 +3820,23 @@ test("non-multimodal sessions persist pasted images in metadata without changing
   assert.equal(imageFiles.length, 2);
   assert.deepEqual(imageFiles.map((file) => path.extname(file)).sort(), [".png", ".webp"]);
   assert.equal(userMessage?.content, "Inspect these images");
+  assert.equal(userMessage?.contentParams, null);
+  const storedImageUrls = userMessage?.meta?.userPrompt?.imageUrls ?? [];
+  assert.equal(storedImageUrls.length, 2);
   assert.deepEqual(
-    userMessage?.meta?.images?.map((imagePath) => path.dirname(imagePath)),
+    storedImageUrls.map((url) => path.dirname(fileURLToPath(url))),
     [imagesDir, imagesDir]
   );
-  assert.deepEqual(
-    userMessage?.meta?.images?.map((imagePath) => path.extname(imagePath)),
-    [".png", ".webp"]
-  );
-  assert.equal(Array.isArray(userMessage?.contentParams), true);
 
   manager.deleteSession(sessionId);
   assert.equal(fs.existsSync(imagesDir), false);
 });
 
-test("native multimodal sessions keep pasted images inline and persist their metadata paths", async () => {
+test("native multimodal sessions persist pasted images without storing inline content", async () => {
   const workspace = createTempDir("deepcode-native-image-workspace-");
   const home = createTempDir("deepcode-native-image-home-");
   setHomeDir(home);
-  const manager = createSessionManagerForModel(workspace, "gpt-4o");
+  const manager = createSessionManagerForModel(workspace, "custom-vision-model");
   (manager as any).activateSession = async () => {};
 
   const sessionId = await manager.createSession({ imageUrls: ["data:image/png;base64,aGVsbG8="] });
@@ -3845,15 +3845,15 @@ test("native multimodal sessions keep pasted images inline and persist their met
 
   assert.equal(fs.existsSync(imagesDir), true);
   assert.equal(userMessage?.content, "");
-  assert.equal(Array.isArray(userMessage?.contentParams), true);
-  assert.deepEqual(userMessage?.meta?.images, [path.join(imagesDir, fs.readdirSync(imagesDir)[0])]);
+  assert.equal(userMessage?.contentParams, null);
+  assert.equal(userMessage?.meta?.userPrompt?.imageUrls?.[0]?.startsWith("file://"), true);
 });
 
 test("multimodal off forces non-multimodal image handling for a multimodal model", async () => {
   const workspace = createTempDir("deepcode-multimodal-off-workspace-");
   const home = createTempDir("deepcode-multimodal-off-home-");
   setHomeDir(home);
-  const manager = createSessionManagerForModel(workspace, "gpt-4o", "off");
+  const manager = createSessionManagerForModel(workspace, "custom-vision-model", "off");
   (manager as any).activateSession = async () => {};
 
   const sessionId = await manager.createSession({ imageUrls: ["data:image/png;base64,aGVsbG8="] });
@@ -3862,10 +3862,10 @@ test("multimodal off forces non-multimodal image handling for a multimodal model
 
   assert.equal(fs.existsSync(imagesDir), true);
   assert.equal(userMessage?.content, "");
-  assert.deepEqual(userMessage?.meta?.images, [path.join(imagesDir, fs.readdirSync(imagesDir)[0])]);
+  assert.equal(userMessage?.contentParams, null);
 });
 
-test("multimodal on keeps images inline and persists their metadata paths", async () => {
+test("multimodal on persists images for a non-multimodal model", async () => {
   const workspace = createTempDir("deepcode-multimodal-on-workspace-");
   const home = createTempDir("deepcode-multimodal-on-home-");
   setHomeDir(home);
@@ -3878,19 +3878,64 @@ test("multimodal on keeps images inline and persists their metadata paths", asyn
 
   assert.equal(fs.existsSync(imagesDir), true);
   assert.equal(userMessage?.content, "");
-  assert.equal(Array.isArray(userMessage?.contentParams), true);
-  assert.deepEqual(userMessage?.meta?.images, [path.join(imagesDir, fs.readdirSync(imagesDir)[0])]);
+  assert.equal(userMessage?.contentParams, null);
 });
 
-test("Files API mode keeps non-multimodal images inline and sends file references", async () => {
-  const workspace = createTempDir("deepcode-files-session-workspace-");
-  const home = createTempDir("deepcode-files-session-home-");
+test("multimodal requests send normalized image content without path metadata", async () => {
+  const workspace = createTempDir("deepcode-multimodal-payload-workspace-");
+  const home = createTempDir("deepcode-multimodal-payload-home-");
   setHomeDir(home);
   let request: any;
   const client = {
     chat: {
       completions: {
         create: async (body: any) => {
+          if (isSkillMatchingRequest(body)) {
+            return createSkillMatchingResponse();
+          }
+          request = body;
+          return createChatResponse("done", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 });
+        },
+      },
+    },
+  };
+  const manager = new SessionManager({
+    projectRoot: workspace,
+    createOpenAIClient: () => ({ client: client as any, model: "custom-vision-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "custom-vision-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+    loadSharp: async () => sharp,
+  });
+
+  const sessionId = await manager.createSession({
+    text: "Describe this image",
+    imageUrls: [await createOnePixelPngDataUrl()],
+  });
+  const userMessage = manager.listSessionMessages(sessionId).find((message) => message.role === "user");
+  const requestUserMessage = request.messages.find((message: any) => message.role === "user");
+
+  assert.equal(userMessage?.contentParams, null);
+  assert.deepEqual(requestUserMessage.content[0], { type: "text", text: "Describe this image" });
+  assert.match(requestUserMessage.content[1].image_url.url, /^data:image\/(?:png|jpeg|webp);base64,/);
+  assert.equal(requestUserMessage.content.length, 2);
+});
+
+test("non-multimodal requests send text and image metadata without loading Sharp", async () => {
+  const workspace = createTempDir("deepcode-non-multimodal-payload-workspace-");
+  const home = createTempDir("deepcode-non-multimodal-payload-home-");
+  setHomeDir(home);
+  const imagePath = path.join(workspace, "local image.png");
+  fs.writeFileSync(imagePath, "not decoded for non-multimodal requests");
+  let request: any;
+  let sharpLoads = 0;
+  const client = {
+    chat: {
+      completions: {
+        create: async (body: any) => {
+          if (isSkillMatchingRequest(body)) {
+            return createSkillMatchingResponse();
+          }
           request = body;
           return createChatResponse("done", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 });
         },
@@ -3903,33 +3948,97 @@ test("Files API mode keeps non-multimodal images inline and sends file reference
       client: client as any,
       apiKey: "sk-files-test",
       model: "deepseek-chat",
-      baseURL: "https://api.deepseek.com",
       thinkingEnabled: false,
     }),
     getResolvedSettings: () => ({ model: "deepseek-chat", filesApiEnabled: true }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
+    loadSharp: async () => {
+      sharpLoads += 1;
+      return sharp;
+    },
   });
   (manager as any).deepSeekFiles = {
-    ensureUploaded: async () => ({ fileId: "file-image-1", imageHash: "a".repeat(64), bytes: 5 }),
+    ensureUploaded: async () => assert.fail("non-multimodal images must not be uploaded"),
     invalidate: () => {},
   };
 
-  const sessionId = await manager.createSession({ imageUrls: ["data:image/png;base64,aGVsbG8="] });
+  const sessionId = await manager.createSession({
+    text: "Describe this image",
+    imageUrls: [pathToFileURL(imagePath).href],
+  });
+  const userMessage = manager.listSessionMessages(sessionId).find((message) => message.role === "user");
+  const requestUserMessage = request.messages.find((message: any) => message.role === "user");
+
+  assert.equal(sharpLoads, 0);
+  assert.equal(userMessage?.contentParams, null);
+  assert.deepEqual(userMessage?.meta?.userPrompt?.imageUrls, [pathToFileURL(imagePath).href]);
+  assert.deepEqual(requestUserMessage.content, [
+    { type: "text", text: "Describe this image" },
+    {
+      type: "text",
+      text: `<message_meta>\n${JSON.stringify({ images: [imagePath] }, null, 2)}\n</message_meta>`,
+    },
+  ]);
+});
+
+test("Files API mode reuses one upload for duplicate images without path metadata", async () => {
+  const workspace = createTempDir("deepcode-files-session-workspace-");
+  const home = createTempDir("deepcode-files-session-home-");
+  setHomeDir(home);
+  let request: any;
+  const client = {
+    chat: {
+      completions: {
+        create: async (body: any) => {
+          if (isSkillMatchingRequest(body)) {
+            return createSkillMatchingResponse();
+          }
+          request = body;
+          return createChatResponse("done", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 });
+        },
+      },
+    },
+  };
+  const manager = new SessionManager({
+    projectRoot: workspace,
+    createOpenAIClient: () => ({
+      client: client as any,
+      apiKey: "sk-files-test",
+      model: "custom-vision-model",
+      baseURL: "https://api.deepseek.com",
+      thinkingEnabled: false,
+    }),
+    getResolvedSettings: () => ({ model: "custom-vision-model", filesApiEnabled: true }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+    loadSharp: async () => sharp,
+  });
+  let uploads = 0;
+  (manager as any).deepSeekFiles = {
+    ensureUploaded: async () => {
+      uploads += 1;
+      return { fileId: "file-image-1", imageHash: "a".repeat(64), bytes: 5 };
+    },
+    invalidate: () => {},
+  };
+
+  const imageDataUrl = await createOnePixelPngDataUrl();
+  const sessionId = await manager.createSession({
+    text: "Describe this image",
+    imageUrls: [imageDataUrl, imageDataUrl],
+  });
   const imagesDir = path.join(home, ".deepcode", "projects", getProjectCode(workspace), "images", sessionId);
   const userMessage = manager.listSessionMessages(sessionId).find((message) => message.role === "user");
   const requestUserMessage = request.messages.find((message: any) => message.role === "user");
 
   assert.equal(fs.existsSync(imagesDir), true);
-  assert.equal(Array.isArray(userMessage?.contentParams), true);
-  const imagePath = userMessage?.meta?.images?.[0];
-  assert.equal(typeof imagePath, "string");
+  assert.equal(userMessage?.contentParams, null);
+  assert.equal(uploads, 1);
   assert.deepEqual(requestUserMessage.content, [
+    { type: "text", text: "Describe this image" },
     { type: "file", file_id: "file-image-1" },
-    {
-      type: "text",
-      text: `<message_meta>\n${JSON.stringify({ images: [imagePath] }, null, 2)}\n</message_meta>`,
-    },
+    { type: "file", file_id: "file-image-1" },
   ]);
 });
 
@@ -3943,13 +4052,14 @@ test("Files API mode fails the session when image upload fails", async () => {
     createOpenAIClient: () => ({
       client: client as any,
       apiKey: "sk-files-test",
-      model: "deepseek-chat",
+      model: "custom-vision-model",
       baseURL: "https://api.deepseek.com",
       thinkingEnabled: false,
     }),
-    getResolvedSettings: () => ({ model: "deepseek-chat", filesApiEnabled: true }),
+    getResolvedSettings: () => ({ model: "custom-vision-model", filesApiEnabled: true }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
+    loadSharp: async () => sharp,
   });
   (manager as any).deepSeekFiles = {
     ensureUploaded: async () => {
@@ -3958,7 +4068,7 @@ test("Files API mode fails the session when image upload fails", async () => {
     invalidate: () => {},
   };
 
-  const sessionId = await manager.createSession({ imageUrls: ["data:image/png;base64,aGVsbG8="] });
+  const sessionId = await manager.createSession({ imageUrls: [await createOnePixelPngDataUrl()] });
 
   assert.equal(manager.getSession(sessionId)?.status, "failed");
   assert.match(manager.getSession(sessionId)?.failReason ?? "", /upload unavailable/);
@@ -3988,13 +4098,14 @@ test("Files API mode invalidates a rejected file ID and uploads it once more", a
     createOpenAIClient: () => ({
       client: client as any,
       apiKey: "sk-files-test",
-      model: "deepseek-chat",
+      model: "custom-vision-model",
       baseURL: "https://api.deepseek.com",
       thinkingEnabled: false,
     }),
-    getResolvedSettings: () => ({ model: "deepseek-chat", filesApiEnabled: true }),
+    getResolvedSettings: () => ({ model: "custom-vision-model", filesApiEnabled: true }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
+    loadSharp: async () => sharp,
   });
   let uploads = 0;
   let invalidations = 0;
@@ -4008,21 +4119,13 @@ test("Files API mode invalidates a rejected file ID and uploads it once more", a
     },
   };
 
-  const sessionId = await manager.createSession({ imageUrls: ["data:image/png;base64,aGVsbG8="] });
+  const sessionId = await manager.createSession({ imageUrls: [await createOnePixelPngDataUrl()] });
 
   assert.equal(manager.getSession(sessionId)?.status, "completed");
   assert.equal(invalidations, 1);
   assert.equal(uploads, 2);
-  const userMessage = manager.listSessionMessages(sessionId).find((message) => message.role === "user");
-  const imagePath = userMessage?.meta?.images?.[0];
   const retriedUserMessage = requests[1].messages.find((message: any) => message.role === "user");
-  assert.deepEqual(retriedUserMessage.content, [
-    { type: "file", file_id: "file-image-2" },
-    {
-      type: "text",
-      text: `<message_meta>\n${JSON.stringify({ images: [imagePath] }, null, 2)}\n</message_meta>`,
-    },
-  ]);
+  assert.deepEqual(retriedUserMessage.content, [{ type: "file", file_id: "file-image-2" }]);
 });
 
 test("Files API mode checks the aggregate request limit before uploading", async () => {
@@ -4035,39 +4138,40 @@ test("Files API mode checks the aggregate request limit before uploading", async
     createOpenAIClient: () => ({
       client: client as any,
       apiKey: "sk-files-test",
-      model: "deepseek-chat",
+      model: "custom-vision-model",
       baseURL: "https://api.deepseek.com",
       thinkingEnabled: false,
     }),
     getResolvedSettings: () => ({
-      model: "deepseek-chat",
+      model: "custom-vision-model",
       filesApiEnabled: true,
       maxRequestFilesBytes: 4,
     }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
+    loadSharp: async () => sharp,
   });
   (manager as any).deepSeekFiles = {
     ensureUploaded: async () => assert.fail("upload must not start"),
     invalidate: () => {},
   };
 
-  const sessionId = await manager.createSession({ imageUrls: ["data:image/png;base64,aGVsbG8="] });
+  const sessionId = await manager.createSession({ imageUrls: [await createOnePixelPngDataUrl()] });
 
   assert.equal(manager.getSession(sessionId)?.status, "failed");
   assert.match(manager.getSession(sessionId)?.failReason ?? "", /configured 4-byte/);
 });
 
-test("multimodal sessions reject unsupported pasted images before creating a session", async () => {
+test("sessions reject unsupported pasted image data before creating a session", async () => {
   const workspace = createTempDir("deepcode-invalid-image-workspace-");
   const home = createTempDir("deepcode-invalid-image-home-");
   setHomeDir(home);
-  const manager = createSessionManagerForModel(workspace, "gpt-4o");
+  const manager = createSessionManagerForModel(workspace, "deepseek-chat");
   (manager as any).activateSession = async () => {};
 
   await assert.rejects(
-    manager.createSession({ imageUrls: ["data:image/gif;base64,aGVsbG8="] }),
-    /Only JPEG, PNG, and WebP/
+    manager.createSession({ imageUrls: ["data:image/bmp;base64,aGVsbG8="] }),
+    /Only GIF, JPEG, PNG, and WebP/
   );
   assert.equal(manager.listSessions().length, 0);
 });
@@ -4089,9 +4193,9 @@ test("forkSession copies image resources and rewrites stored paths", async () =>
   const forkedUserMessage = manager.listSessionMessages(forkedSessionId).find((message) => message.role === "user");
 
   assert.equal(fs.readdirSync(forkedDir).length, 1);
-  assert.equal(forkedUserMessage?.content, "");
-  assert.equal(forkedUserMessage?.meta?.images?.[0]?.startsWith(forkedDir), true);
-  assert.equal(forkedUserMessage?.meta?.images?.[0]?.startsWith(sourceDir), false);
+  const forkedImageUrl = forkedUserMessage?.meta?.userPrompt?.imageUrls?.[0] ?? "";
+  assert.equal(fileURLToPath(forkedImageUrl).startsWith(forkedDir), true);
+  assert.equal(fileURLToPath(forkedImageUrl).startsWith(sourceDir), false);
 
   manager.deleteSession(sourceSessionId);
   assert.equal(fs.existsSync(sourceDir), false);
@@ -4619,6 +4723,13 @@ function createTempDir(prefix: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   tempDirs.push(dir);
   return dir;
+}
+
+async function createOnePixelPngDataUrl(): Promise<string> {
+  const image = await sharp({ create: { width: 1, height: 1, channels: 3, background: "red" } })
+    .png()
+    .toBuffer();
+  return `data:image/png;base64,${image.toString("base64")}`;
 }
 
 function createNotifyRecorderScript(dir: string): string {

@@ -216,6 +216,33 @@ test("buildPromptDraftFromSessionMessage restores text and image urls", () => {
   });
 });
 
+test("buildPromptDraftFromSessionMessage prefers stored prompt image urls", () => {
+  const message: SessionMessage = {
+    id: "user-with-stored-images",
+    sessionId: "session-1",
+    role: "user",
+    content: "revise this prompt",
+    contentParams: null,
+    messageParams: null,
+    compacted: false,
+    visible: true,
+    createTime: "2026-01-01T00:00:00.000Z",
+    updateTime: "2026-01-01T00:00:00.000Z",
+    meta: {
+      userPrompt: {
+        text: "revise this prompt",
+        imageUrls: ["file:///tmp/image.png"],
+      },
+    },
+  };
+
+  assert.deepEqual(buildPromptDraftFromSessionMessage(message, 8), {
+    nonce: 8,
+    text: "revise this prompt",
+    imageUrls: ["file:///tmp/image.png"],
+  });
+});
+
 test("parseTerminalInput recognizes terminal focus events", () => {
   const focusIn = parseTerminalInput("\u001B[I");
   const focusOut = parseTerminalInput("\u001B[O");

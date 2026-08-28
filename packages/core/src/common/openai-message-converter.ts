@@ -130,27 +130,20 @@ export class OpenAIMessageConverter {
       (base as { reasoning_content?: string }).reasoning_content = "";
     }
 
-    const images = message.role === "user" ? message.meta?.images : undefined;
-    if ((message.role === "user" || message.role === "system") && (message.contentParams || images?.length)) {
+    if ((message.role === "user" || message.role === "system") && message.contentParams) {
       const contentParts: ChatCompletionContentPart[] = [];
       if (content) {
         contentParts.push({ type: "text", text: content });
       }
-      if (message.contentParams) {
-        const params = Array.isArray(message.contentParams) ? message.contentParams : [message.contentParams];
-        for (const param of params) {
-          const part = param as ChatCompletionContentPart;
-          if (part && (part.type !== "image_url" || supportsMultimodal(model, multimodal))) {
-            contentParts.push(part);
-          }
+      const params = Array.isArray(message.contentParams) ? message.contentParams : [message.contentParams];
+      for (const param of params) {
+        const part = param as ChatCompletionContentPart;
+        if (part && (part.type !== "image_url" || supportsMultimodal(model, multimodal))) {
+          contentParts.push(part);
         }
       }
-      if (images?.length) {
-        const messageMeta = `<message_meta>\n${JSON.stringify({ images }, null, 2)}\n</message_meta>`;
-        contentParts.push({ type: "text", text: messageMeta });
-      }
-      (base as { content: string | ChatCompletionContentPart[] }).content =
-        contentParts.length > 0 ? contentParts : content;
+      const contentValue: string | ChatCompletionContentPart[] = contentParts.length > 0 ? contentParts : content;
+      (base as { content: string | ChatCompletionContentPart[] }).content = contentValue;
     }
 
     return base;

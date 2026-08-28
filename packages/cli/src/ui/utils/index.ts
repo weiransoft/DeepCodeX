@@ -58,10 +58,13 @@ export function buildPromptHistory(messages: SessionMessage[]): string[] {
 }
 
 export function buildPromptDraftFromSessionMessage(message: SessionMessage, nonce: number): PromptDraft {
+  const storedImageUrls = message.meta?.userPrompt?.imageUrls;
   return {
     nonce,
     text: typeof message.content === "string" ? message.content : "",
-    imageUrls: extractImageUrlsFromContentParams(message.contentParams),
+    imageUrls: Array.isArray(storedImageUrls)
+      ? storedImageUrls.filter((url): url is string => typeof url === "string" && url.length > 0)
+      : extractImageUrlsFromContentParams(message.contentParams),
   };
 }
 

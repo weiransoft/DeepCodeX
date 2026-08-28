@@ -1,17 +1,9 @@
-import * as fs from "fs";
 import * as path from "path";
 import type { ToolExecutionContext, ToolExecutionFollowUpMessage, ToolExecutionResult } from "./executor";
 import { markFileRead } from "../common/state";
-import { MAX_IMAGE_BYTES, normalizeImage, type ImageMediaType, type NormalizedImage } from "./image-normalizer";
+import type { NormalizedImage } from "./image-normalizer";
+import { loadImageFile } from "./image-file";
 import { resolveReadFilePath } from "./read-handler";
-
-const MIME_TYPE_BY_EXTENSION = new Map<string, ImageMediaType>([
-  [".png", "image/png"],
-  [".jpg", "image/jpeg"],
-  [".jpeg", "image/jpeg"],
-  [".webp", "image/webp"],
-  [".gif", "image/gif"],
-]);
 
 export async function handleReadImageTool(
   args: Record<string, unknown>,
@@ -22,32 +14,9 @@ export async function handleReadImageTool(
     return toolError(resolved.error);
   }
   const filePath = resolved.filePath;
-  const declaredMediaType = MIME_TYPE_BY_EXTENSION.get(path.extname(filePath).toLowerCase());
-  if (!declaredMediaType) {
-    return toolError("Unsupported image format. Only PNG, JPEG, WebP, and GIF are supported.");
-  }
-
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(filePath);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return toolError(`Failed to stat image: ${message}`);
-  }
-  if (!stat.isFile()) {
-    return toolError('"file_path" must point to a regular file.');
-  }
-  if (stat.size === 0) {
-    return toolError("Image file must not be empty.");
-  }
-  if (stat.size > MAX_IMAGE_BYTES) {
-    return toolError("Image file exceeds the 20 MiB source limit.");
-  }
 
   try {
-    const source = await fs.promises.readFile(filePath);
-    const sharp = context.loadSharp ? await context.loadSharp() : (await import("sharp")).default;
-    const image = await normalizeImage(source, declaredMediaType, sharp);
+    const { image, stat } = await loadImageFile(filePath, context.loadSharp);
     markFileRead(context.sessionId, filePath, {
       content: "",
       timestamp: Math.floor(stat.mtimeMs),

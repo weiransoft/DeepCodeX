@@ -34,26 +34,34 @@ test("getTools always includes WebSearch", () => {
 });
 
 test("image tools match the current model's multimodal capability", () => {
-  const nonMultimodalTools = getTools({ model: "deepseek-chat" }).map((tool) => tool.function.name);
-  const multimodalTools = getTools({ model: "gpt-4o" }).map((tool) => tool.function.name);
+  const nonMultimodalTools = getTools({ model: "gpt-4o" }).map((tool) => tool.function.name);
+  const multimodalTools = getTools({ model: "deepseek-v4-flash-vision-exp" }).map((tool) => tool.function.name);
 
   assert.equal(nonMultimodalTools.includes("UnderstandImage"), true);
   assert.equal(nonMultimodalTools.includes("ReadImage"), false);
   assert.equal(multimodalTools.includes("UnderstandImage"), false);
   assert.equal(multimodalTools.includes("ReadImage"), true);
-  assert.equal(getSystemPrompt("/tmp/project", { model: "deepseek-chat" }).includes("## UnderstandImage"), true);
-  assert.equal(getSystemPrompt("/tmp/project", { model: "deepseek-chat" }).includes("## ReadImage"), false);
-  assert.equal(getSystemPrompt("/tmp/project", { model: "gpt-4o" }).includes("## UnderstandImage"), false);
-  assert.equal(getSystemPrompt("/tmp/project", { model: "gpt-4o" }).includes("## ReadImage"), true);
+  assert.equal(getSystemPrompt("/tmp/project", { model: "gpt-4o" }).includes("## UnderstandImage"), true);
+  assert.equal(getSystemPrompt("/tmp/project", { model: "gpt-4o" }).includes("## ReadImage"), false);
+  assert.equal(
+    getSystemPrompt("/tmp/project", { model: "deepseek-v4-flash-vision-exp" }).includes("## UnderstandImage"),
+    false
+  );
+  assert.equal(
+    getSystemPrompt("/tmp/project", { model: "deepseek-v4-flash-vision-exp" }).includes("## ReadImage"),
+    true
+  );
 });
 
 test("multimodal config overrides model-based multimodal detection", () => {
   // "off" forces non-multimodal behavior even for a multimodal model.
-  const forcedOffTools = getTools({ model: "gpt-4o", multimodal: "off" }).map((tool) => tool.function.name);
+  const forcedOffTools = getTools({ model: "custom-vision-model", multimodal: "off" }).map(
+    (tool) => tool.function.name
+  );
   assert.equal(forcedOffTools.includes("UnderstandImage"), true);
   assert.equal(forcedOffTools.includes("ReadImage"), false);
   assert.equal(
-    getSystemPrompt("/tmp/project", { model: "gpt-4o", multimodal: "off" }).includes("## UnderstandImage"),
+    getSystemPrompt("/tmp/project", { model: "custom-vision-model", multimodal: "off" }).includes("## UnderstandImage"),
     true
   );
 

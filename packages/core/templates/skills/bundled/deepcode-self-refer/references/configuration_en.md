@@ -92,7 +92,7 @@ When thinking mode is enabled, controls the depth of the model’s reasoning:
 
 #### DeepSeek Files API
 
-With `filesApiEnabled: true`, Deep Code uploads images to the fixed `https://api.deepseek.com/files` endpoint and sends `file_id` references in chat requests. An upload or cache-refresh failure fails the request; disabling the setting preserves the existing image path.
+When `BASE_URL` is `https://api.deepseek.com`, enabling `filesApiEnabled` uploads images to the fixed `https://api.deepseek.com/files` endpoint and sends `file_id` references in chat requests. Other API endpoints do not enable this feature. An upload or cache-refresh failure fails the request; disabling the setting preserves the existing image path.
 
 ```json
 {
