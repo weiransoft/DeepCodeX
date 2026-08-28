@@ -1631,6 +1631,9 @@ ${agentInstructions}
           model,
           this.getResolvedSettings().multimodal
         );
+        if (this.isInterrupted(sessionId)) {
+          return;
+        }
         const filesSettings = this.getDeepSeekFilesSettings();
         if (filesSettings.enabled && !apiKey) {
           throw new Error("Files API is enabled, but no API key is available for uploads.");
