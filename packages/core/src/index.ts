@@ -56,6 +56,7 @@ export type {
   SessionProcessEntry,
   BashTimeoutAdjustment,
   LlmStreamProgress,
+  LlmRetryEvent,
   SessionManagerOptions,
 } from "./session";
 

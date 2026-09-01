@@ -7,6 +7,7 @@ import MarkdownIt from "markdown-it";
 import type { SessionMessage } from "@vegamo/deepcode-core";
 import {
   SessionManager,
+  type LlmRetryEvent,
   type LlmStreamProgress,
   type PermissionScope,
   type SessionEntry,
@@ -109,6 +110,15 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
         this.webviewView.webview.postMessage({
           type: "llmStreamProgress",
           progress,
+        });
+      },
+      onLlmRetry: (event: LlmRetryEvent) => {
+        if (!this.webviewView) {
+          return;
+        }
+        this.webviewView.webview.postMessage({
+          type: "llmRetry",
+          event,
         });
       },
     });

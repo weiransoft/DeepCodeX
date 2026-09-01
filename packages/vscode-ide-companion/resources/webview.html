@@ -1621,6 +1621,7 @@
       }
 
       let currentThinkingBubbleElement = null; // 当前 thinking 气泡 DOM 元素
+      let currentLlmRetry = null;
 
       function getThinkingContentText() {
         if (currentRunningProcesses && Object.keys(currentRunningProcesses).length > 0) {
@@ -1628,6 +1629,10 @@
           const process = currentRunningProcesses[firstPid];
           const elapsed = formatElapsedTime(process.startTime);
           return `(${elapsed}) ${process.command}`;
+        }
+
+        if (currentLlmRetry) {
+          return `Reconnecting... ${currentLlmRetry.attempt}/${currentLlmRetry.maxRetries} (esc to interrupt)`;
         }
 
         if (currentLlmStreamProgress && currentLlmStreamProgress.startedAt) {
@@ -1699,6 +1704,7 @@
         }
         if (!isLoading) {
           currentLlmStreamProgress = null;
+          currentLlmRetry = null;
         }
 
         // 清除旧的计时器
@@ -1959,11 +1965,21 @@
         }
       });
 
-      // 按 Escape 关闭下拉框
+      // 按 Escape 关闭下拉框或中断当前请求
       document.addEventListener("keydown", (event) => {
-        if (event.key === "Escape" && sessionDropdown.classList.contains("show")) {
+        if (event.key !== "Escape") {
+          return;
+        }
+        if (sessionDropdown.classList.contains("show")) {
           sessionDropdown.classList.remove("show");
           sessionSelector.classList.remove("open");
+          return;
+        }
+        if (isProcessing()) {
+          event.preventDefault();
+          vscode.postMessage({ type: "interrupt" });
+          currentSessionStatus = "interrupted";
+          setLoading(false, currentSessionStatus);
         }
       });
 
@@ -2330,8 +2346,19 @@
               currentLlmStreamProgress = null;
             }
           } else {
+            currentLlmRetry = null;
             currentLlmStreamProgress = progress;
           }
+          updateThinkingBubbleContent();
+        } else if (message.type === "llmRetry") {
+          const event = message.event || null;
+          if (!event || !event.attempt || !event.maxRetries) {
+            return;
+          }
+          if (event.sessionId && currentSessionId && event.sessionId !== currentSessionId) {
+            return;
+          }
+          currentLlmRetry = event;
           updateThinkingBubbleContent();
         } else if (message.type === "userMessage") {
           addBubble(
