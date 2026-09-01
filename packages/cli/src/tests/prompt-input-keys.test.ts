@@ -82,6 +82,26 @@ test("parseTerminalInput recognizes word navigation modifiers", () => {
   assert.equal(metaRight.key.meta, true);
 });
 
+test("parseTerminalInput recognizes application cursor mode arrows", () => {
+  const left = parseTerminalInput("\u001BOD");
+  const right = parseTerminalInput("\u001BOC");
+  assert.equal(left.key.leftArrow, true);
+  assert.equal(left.key.meta, false);
+  assert.equal(right.key.rightArrow, true);
+  assert.equal(right.key.meta, false);
+});
+
+test("parseTerminalInput recognizes ctrl+home and ctrl+end", () => {
+  const home = parseTerminalInput("\u001B[1;5H");
+  const end = parseTerminalInput("\u001B[1;5F");
+  assert.equal(home.key.home, true);
+  assert.equal(home.key.ctrl, true);
+  assert.equal(home.key.meta, false);
+  assert.equal(end.key.end, true);
+  assert.equal(end.key.ctrl, true);
+  assert.equal(end.key.meta, false);
+});
+
 test("parseTerminalInput keeps DEL payload for meta+backspace", () => {
   const { input, key } = parseTerminalInput("\u001B\u007F");
   assert.equal(input, "\u007F");
