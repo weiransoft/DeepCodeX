@@ -92,6 +92,28 @@ Skills are discovered from these locations, in priority order:
 | `Ctrl+V`         | Paste an image from the clipboard                        |
 | `Esc`            | Interrupt the current model turn                         |
 | `Ctrl+D` twice   | Quit Deep Code                                           |
+| `←` / `→`        | Move the cursor one character                            |
+| `Alt+←` / `Alt+→` (or `Ctrl+←` / `Ctrl+→`) | Move by word                  |
+| `Home` / `End` (or `Ctrl+A` / `Ctrl+E`) | Jump to line start / end                 |
+| `Ctrl+B` / `Ctrl+F` | Move left / right one character                        |
+| `Alt+B` / `Alt+F` | Move back / forward by word                              |
+| `Ctrl+W`         | Delete the word before the cursor                        |
+| `Alt+Backspace`  | Delete the word before the cursor (macOS)                |
+| `Alt+D`          | Delete the word after the cursor                         |
+| `Ctrl+K`         | Delete to the end of the line                            |
+| `Ctrl+U`         | Clear the input                                          |
+| `Backspace` / `Delete` | Delete the previous / next character                |
+
+These editing keys also apply to the "Other" free-text answer in AI question prompts.
+
+### Terminal key mapping notes
+
+`Cmd` (macOS) and `Win` (Windows) key combinations are reserved by the operating system and are never delivered to terminal apps — map them in your terminal emulator instead:
+
+- **Linux + Bash**: use `Ctrl+A` / `Ctrl+E` or `Home` / `End` for line start/end; `Alt+B` / `Alt+F` or `Ctrl+←` / `Ctrl+→` for words.
+- **macOS Terminal.app**: use `Ctrl+A` / `Ctrl+E` for line start/end and `Fn+←` / `Fn+→` as Home/End. Enable *Settings → Profiles → Keyboard → Use Option as Meta key* so `Option+B` / `Option+F` move by word.
+- **macOS iTerm2**: map `Cmd+←` / `Cmd+→` under *Settings → Profiles → Keys* to send the Home/End escape sequences (`ESC[H` / `ESC[F`) or hex `0x01` / `0x05` (`Ctrl+A` / `Ctrl+E`).
+- **Windows Terminal (PowerShell / WSL)**: `Win+←` / `Win+→` is OS window snapping and cannot be used. Use `Home` / `End` or `Ctrl+A` / `Ctrl+E` for line start/end, and `Ctrl+←` / `Ctrl+→` for word movement.
 
 ## Supported Models
 

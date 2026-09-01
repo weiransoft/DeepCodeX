@@ -14,7 +14,7 @@ export {
   resolvePromptTerminalCursorPosition,
 } from "./hooks/cursor";
 export { default as AppContainer } from "./views/AppContainer";
-export { AskUserQuestionPrompt } from "./views/AskUserQuestionPrompt";
+export { AskUserQuestionPrompt, applyOtherAnswerEdit } from "./views/AskUserQuestionPrompt";
 export {
   PlanImplementationPrompt,
   extractProposedPlan,
