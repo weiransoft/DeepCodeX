@@ -45,6 +45,7 @@ The following are all the top-level fields supported in `settings.json`, along w
 | `webSearchTool`    | string  | Full path to a custom web search script                                     |
 | `mcpServers`       | object  | MCP server configurations (keys are service names, values are McpServerConfig objects) |
 | `temperature`      | number  | Sampling temperature for LLM, from `0` to `2`                 |
+| `permissions`      | object  | Permission policy and additional `addWorkingDirs` workspace roots (see [permission_en.md](./permission_en.md)) |
 | `enabledSkills`    | object  | Per-skill enable/disable map, keyed by skill name                           |
 | `statusline`       | object  | Status line plugins (see [statusline_en.md](./statusline_en.md))            |
 

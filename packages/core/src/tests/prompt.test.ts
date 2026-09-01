@@ -146,6 +146,8 @@ test("getTools requires bash sideEffects permission scopes", () => {
     items?: { enum?: unknown[] };
   };
   assert.equal(sideEffects.type, "array");
+  assert.equal(sideEffects.items?.enum?.includes("read-in-tmp"), true);
+  assert.equal(sideEffects.items?.enum?.includes("write-in-tmp"), true);
   assert.equal(sideEffects.items?.enum?.includes("write-out-cwd"), true);
   assert.equal(sideEffects.items?.enum?.includes("unknown"), true);
   const runInBackground = tool.function.parameters.properties.run_in_background as { type?: unknown };
@@ -281,14 +283,16 @@ test("getSystemPrompt does not include current date guidance", () => {
   assert.equal(prompt.includes(expected), false);
 });
 
-test("getRuntimeContext includes current date and model guidance", () => {
+test("getRuntimeContext includes current date, model guidance, and additional working directories", () => {
   const now = new Date();
   const expectedDate = `今天是${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日。随着对话的进行，时间在流逝。`;
-  const prompt = getRuntimeContext("/tmp/project", "deepseek-v4-pro");
+  const prompt = getRuntimeContext("/tmp/project", "deepseek-v4-pro", ["../shared", "/opt/project"]);
   assert.equal(prompt.includes(expectedDate), true);
   assert.equal(prompt.includes("当前LLM模型为deepseek-v4-pro，对话中可通过/model命令切换模型。"), true);
   assert.equal(prompt.includes("# Local Workspace Environment"), true);
   assert.equal(prompt.includes('"root path": "/tmp/project"'), true);
+  assert.equal(prompt.includes(JSON.stringify(path.resolve("/tmp/project", "../shared"))), true);
+  assert.equal(prompt.includes(JSON.stringify(path.resolve("/tmp/project", "/opt/project"))), true);
 });
 
 test("getSystemPrompt renders Read docs for non-multimodal models", () => {

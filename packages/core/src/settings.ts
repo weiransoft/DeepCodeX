@@ -25,8 +25,10 @@ export type McpServerConfig = {
 
 export type PermissionScope =
   | "read-in-cwd"
+  | "read-in-tmp"
   | "read-out-cwd"
   | "write-in-cwd"
+  | "write-in-tmp"
   | "write-out-cwd"
   | "delete-in-cwd"
   | "delete-out-cwd"
@@ -42,6 +44,7 @@ export type PermissionSettings = {
   deny?: PermissionScope[];
   ask?: PermissionScope[];
   defaultMode?: PermissionDefaultMode;
+  addWorkingDirs?: string[];
 };
 
 export type EnabledSkillsSettings = Record<string, boolean>;
@@ -249,8 +252,10 @@ function trimString(value: unknown): string {
 
 const VALID_PERMISSION_SCOPES = new Set<PermissionScope>([
   "read-in-cwd",
+  "read-in-tmp",
   "read-out-cwd",
   "write-in-cwd",
+  "write-in-tmp",
   "write-out-cwd",
   "delete-in-cwd",
   "delete-out-cwd",
@@ -289,6 +294,20 @@ function mergePermissionLists(...lists: Array<PermissionScope[] | undefined>): P
   return result;
 }
 
+function normalizeWorkingDirectories(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const result: string[] = [];
+  for (const item of value) {
+    const directory = trimString(item);
+    if (directory && !result.includes(directory)) {
+      result.push(directory);
+    }
+  }
+  return result;
+}
+
 function normalizePermissionDefaultMode(value: unknown): PermissionDefaultMode | undefined {
   return value === "allowAll" || value === "askAll" ? value : undefined;
 }
@@ -299,6 +318,7 @@ function normalizePermissions(settings: PermissionSettings | null | undefined): 
     deny: normalizePermissionList(settings?.deny),
     ask: normalizePermissionList(settings?.ask),
     defaultMode: normalizePermissionDefaultMode(settings?.defaultMode) ?? "allowAll",
+    addWorkingDirs: normalizeWorkingDirectories(settings?.addWorkingDirs),
   };
 }
 
@@ -312,6 +332,7 @@ function mergePermissions(
     allow: mergePermissionLists(userPermissions.allow, projectPermissions.allow),
     deny: mergePermissionLists(userPermissions.deny, projectPermissions.deny),
     ask: mergePermissionLists(userPermissions.ask, projectPermissions.ask),
+    addWorkingDirs: [...new Set([...userPermissions.addWorkingDirs, ...projectPermissions.addWorkingDirs])],
     defaultMode: projectSettings?.permissions
       ? projectPermissions.defaultMode
       : userSettings?.permissions

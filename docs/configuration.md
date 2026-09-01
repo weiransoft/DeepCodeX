@@ -45,6 +45,7 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 | `webSearchTool`      | string    | 自定义联网搜索脚本的完整路径                                         |
 | `mcpServers`         | object    | MCP 服务器配置（键为服务名，值为 McpServerConfig 对象）              |
 | `temperature`        | number    | 模型采样温度，范围 `0` 到 `2`                           |
+| `permissions`        | object    | 权限策略及 `addWorkingDirs` 额外工作目录配置（参见 [permission.md](./permission.md)） |
 | `enabledSkills`      | object    | 按 skill 名称启用或禁用 skill 的配置                                 |
 | `statusline`         | object    | 状态栏插件配置(参见 [statusline.md](./statusline.md))               |
 

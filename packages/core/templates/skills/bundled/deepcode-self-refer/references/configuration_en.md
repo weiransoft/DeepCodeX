@@ -24,27 +24,28 @@ Deep Code uses the `settings.json` file for persistent configuration, supporting
 
 The following are all the top-level fields supported in `settings.json`, along with the sub-fields inside `env`:
 
-| Field                      | Type          | Description                                                                            |
-| -------------------------- | ------------- | -------------------------------------------------------------------------------------- |
-| `env`                      | object        | Group of environment variables (see sub-field table below)                             |
-| `contextWindow`            | number/string | Context-window limit as an exact token count or `128K`/`1M` value                      |
-| `autoCompactWindow`        | number/string | Auto-compaction threshold; defaults to 50% of the final context window                 |
-| `model`                    | string        | Model name. Defaults to `deepseek-v4-flash` and takes precedence over `env.MODEL`      |
-| `thinkingEnabled`          | boolean       | Whether to enable thinking mode (enabled by default for DeepSeek V4 series)            |
-| `reasoningEffort`          | string        | Reasoning intensity: `"low"`, `"high"`, or `"max"` (default `"max"`)                   |
-| `filesApiEnabled`          | boolean       | Send images through the DeepSeek Files API (default `false`)                           |
-| `filesApiTimeoutMs`        | number        | Per-image Files API timeout; defaults to `60000`, maximum `600000` ms                  |
-| `fileExpiresAfterSeconds`  | number        | Remote file lifetime, default `604800` seconds                                         |
-| `fileRefreshMarginSeconds` | number        | Refresh cached IDs below this remaining lifetime, default `3600` seconds               |
-| `fileQuotaCleanupBatch`    | number        | Oldest Deep Code files removed during quota recovery, default `100`                    |
-| `maxRequestFilesBytes`     | number        | Raw image byte limit per request, default `134217728` (128 MiB)                        |
-| `debugLogEnabled`          | boolean       | Enable debug log output (default `false`)                                              |
-| `telemetryEnabled`         | boolean       | Enable anonymous usage reporting (default `true`)                                      |
-| `notify`                   | string        | Full path to a task-completion notification script (e.g., Slack notification script)   |
-| `webSearchTool`            | string        | Full path to a custom web search script                                                |
-| `mcpServers`               | object        | MCP server configurations (keys are service names, values are McpServerConfig objects) |
-| `temperature`              | number        | Sampling temperature for LLM, from `0` to `2`                                          |
-| `enabledSkills`            | object        | Per-skill enable/disable map, keyed by skill name                                      |
+| Field                      | Type          | Description                                                                                                    |
+| -------------------------- | ------------- | -------------------------------------------------------------------------------------------------------------- |
+| `env`                      | object        | Group of environment variables (see sub-field table below)                                                     |
+| `contextWindow`            | number/string | Context-window limit as an exact token count or `128K`/`1M` value                                              |
+| `autoCompactWindow`        | number/string | Auto-compaction threshold; defaults to 50% of the final context window                                         |
+| `model`                    | string        | Model name. Defaults to `deepseek-v4-flash` and takes precedence over `env.MODEL`                              |
+| `thinkingEnabled`          | boolean       | Whether to enable thinking mode (enabled by default for DeepSeek V4 series)                                    |
+| `reasoningEffort`          | string        | Reasoning intensity: `"low"`, `"high"`, or `"max"` (default `"max"`)                                           |
+| `filesApiEnabled`          | boolean       | Send images through the DeepSeek Files API (default `false`)                                                   |
+| `filesApiTimeoutMs`        | number        | Per-image Files API timeout; defaults to `60000`, maximum `600000` ms                                          |
+| `fileExpiresAfterSeconds`  | number        | Remote file lifetime, default `604800` seconds                                                                 |
+| `fileRefreshMarginSeconds` | number        | Refresh cached IDs below this remaining lifetime, default `3600` seconds                                       |
+| `fileQuotaCleanupBatch`    | number        | Oldest Deep Code files removed during quota recovery, default `100`                                            |
+| `maxRequestFilesBytes`     | number        | Raw image byte limit per request, default `134217728` (128 MiB)                                                |
+| `debugLogEnabled`          | boolean       | Enable debug log output (default `false`)                                                                      |
+| `telemetryEnabled`         | boolean       | Enable anonymous usage reporting (default `true`)                                                              |
+| `notify`                   | string        | Full path to a task-completion notification script (e.g., Slack notification script)                           |
+| `webSearchTool`            | string        | Full path to a custom web search script                                                                        |
+| `mcpServers`               | object        | MCP server configurations (keys are service names, values are McpServerConfig objects)                         |
+| `temperature`              | number        | Sampling temperature for LLM, from `0` to `2`                                                                  |
+| `permissions`              | object        | Permission policy and additional `addWorkingDirs` workspace roots (see [permission_en.md](./permission_en.md)) |
+| `enabledSkills`            | object        | Per-skill enable/disable map, keyed by skill name                                                              |
 
 #### `env` Sub-fields
 
