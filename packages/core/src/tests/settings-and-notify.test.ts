@@ -457,6 +457,7 @@ test("resolveSettingsSources merges permission settings", () => {
         allow: ["read-in-cwd", "network"],
         ask: ["write-out-cwd"],
         defaultMode: "askAll",
+        addWorkingDirs: ["../shared", "/opt/user-project", "", 42 as never],
       },
     },
     {
@@ -464,6 +465,7 @@ test("resolveSettingsSources merges permission settings", () => {
         allow: ["write-in-cwd", "read-in-cwd"],
         deny: ["delete-out-cwd"],
         defaultMode: "allowAll",
+        addWorkingDirs: ["../shared", " /opt/project "],
       },
     },
     {
@@ -477,6 +479,7 @@ test("resolveSettingsSources merges permission settings", () => {
   assert.deepEqual(resolved.permissions.ask, ["write-out-cwd"]);
   assert.deepEqual(resolved.permissions.deny, ["delete-out-cwd"]);
   assert.equal(resolved.permissions.defaultMode, "allowAll");
+  assert.deepEqual(resolved.permissions.addWorkingDirs, ["../shared", "/opt/user-project", "/opt/project"]);
 });
 
 test("resolveSettingsSources merges enabledSkills with project precedence", () => {

@@ -1511,7 +1511,11 @@ ${agentInstructions}
 
     const runtimeContextMessage = this.buildSystemMessage(
       sessionId,
-      getRuntimeContext(this.projectRoot, promptToolOptions.model)
+      getRuntimeContext(
+        this.projectRoot,
+        promptToolOptions.model,
+        this.getResolvedSettings().permissions?.addWorkingDirs
+      )
     );
     this.appendSessionMessage(sessionId, runtimeContextMessage);
 
