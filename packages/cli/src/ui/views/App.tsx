@@ -40,6 +40,7 @@ import { isCollapsedThinking } from "../core/thinking-state";
 import { ANSI_CLEAR_SCREEN } from "../constants";
 import type {
   LlmStreamProgress,
+  LlmRetryEvent,
   MessageMeta,
   SessionEntry,
   SessionMessage,
@@ -119,6 +120,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
   const [statusLine, setStatusLine] = useState<string>("");
   const [errorLine, setErrorLine] = useState<string | null>(null);
   const [streamProgress, setStreamProgress] = useState<LlmStreamProgress | null>(null);
+  const [retryEvent, setRetryEvent] = useState<LlmRetryEvent | null>(null);
   const [runningProcesses, setRunningProcesses] = useState<SessionEntry["processes"]>(null);
   const [activeStatus, setActiveStatus] = useState<SessionStatus | null>(null);
   const [activeAskPermissions, setActiveAskPermissions] = useState<SessionEntry["askPermissions"]>(undefined);
@@ -161,11 +163,15 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
         setActiveAskPermissions(entry.askPermissions);
       },
       onLlmStreamProgress: (progress) => {
+        setRetryEvent(null);
         if (progress.phase === "end") {
           setStreamProgress(null);
           return;
         }
         setStreamProgress(progress);
+      },
+      onLlmRetry: (event) => {
+        setRetryEvent(event);
       },
       onMcpStatusChanged: () => {
         // 当 MCP 状态变更时，如果当前正在查看 MCP 状态页面，则更新显示
@@ -436,6 +442,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
 
       setBusy(true);
       setErrorLine(null);
+      setRetryEvent(null);
       const activeProcesses = activeSessionId ? (sessionManager.getSession(activeSessionId)?.processes ?? null) : null;
       setRunningProcesses(activeProcesses);
       setShowProcessStdout(false);
@@ -461,6 +468,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
       } finally {
         setBusy(false);
         setStreamProgress(null);
+        setRetryEvent(null);
         const finalActiveSessionId = sessionManager.getActiveSessionId();
         setRunningProcesses(
           finalActiveSessionId ? (sessionManager.getSession(finalActiveSessionId)?.processes ?? null) : null
@@ -846,9 +854,17 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
   const pendingQuestion = useMemo(() => findPendingAskUserQuestion(messages, activeStatus), [activeStatus, messages]);
   const shouldShowQuestionPrompt = Boolean(pendingQuestion && !dismissedQuestionIds.has(pendingQuestion.messageId));
   const loadingText = useMemo(
-    () => (busy ? buildLoadingText({ progress: streamProgress, processes: runningProcesses, now: Date.now() }) : null),
+    () =>
+      busy
+        ? buildLoadingText({
+            progress: streamProgress,
+            retry: retryEvent,
+            processes: runningProcesses,
+            now: Date.now(),
+          })
+        : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps -- nowTick forces periodic recalculation for spinner animation
-    [busy, streamProgress, runningProcesses, nowTick]
+    [busy, streamProgress, retryEvent, runningProcesses, nowTick]
   );
 
   const welcomeItem: SessionMessage = useMemo(

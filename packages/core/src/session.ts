@@ -73,6 +73,16 @@ import {
   type DeepSeekFilesPolicy,
 } from "./common/deepseek-files";
 import { loadImageFile } from "./tools/image-file";
+import {
+  getLlmRetryDelayMs,
+  getLlmRetryAfterMs,
+  isRetryableLlmError,
+  LLM_STREAM_IDLE_TIMEOUT_MS,
+  LlmStreamDisconnectedError,
+  LlmStreamIdleTimeoutError,
+  MAX_LLM_RETRIES,
+  waitForLlmRetry,
+} from "./common/llm-retry";
 
 export type { PermissionScope } from "./settings";
 export type {
@@ -373,6 +383,7 @@ export type SessionManagerOptions = {
   onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   onSessionEntryUpdated?: (entry: SessionEntry) => void;
   onLlmStreamProgress?: (progress: LlmStreamProgress) => void;
+  onLlmRetry?: (event: LlmRetryEvent) => void;
   onMcpStatusChanged?: () => void;
   onProcessStdout?: (pid: number, chunk: string) => void;
   loadSharp?: SharpLoader;
@@ -386,6 +397,15 @@ export type LlmStreamProgress = {
   estimatedTokens: number;
   formattedTokens: string;
   phase: "start" | "update" | "end";
+};
+
+export type LlmRetryEvent = {
+  requestId: string;
+  sessionId?: string;
+  error: string;
+  attempt: number;
+  maxRetries: number;
+  delayMs: number;
 };
 
 export class SessionManager {
@@ -410,6 +430,7 @@ export class SessionManager {
   private readonly onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   private readonly onSessionEntryUpdated?: (entry: SessionEntry) => void;
   private readonly onLlmStreamProgress?: (progress: LlmStreamProgress) => void;
+  private readonly onLlmRetry?: (event: LlmRetryEvent) => void;
   private readonly onMcpStatusChanged?: () => void;
   private readonly onProcessStdout?: (pid: number, chunk: string) => void;
   private readonly nonInteractive: boolean;
@@ -432,6 +453,7 @@ export class SessionManager {
     this.onAssistantMessage = options.onAssistantMessage;
     this.onSessionEntryUpdated = options.onSessionEntryUpdated;
     this.onLlmStreamProgress = options.onLlmStreamProgress;
+    this.onLlmRetry = options.onLlmRetry;
     this.onMcpStatusChanged = options.onMcpStatusChanged;
     this.onProcessStdout = options.onProcessStdout;
     this.nonInteractive = options.nonInteractive === true;
@@ -658,10 +680,85 @@ export class SessionManager {
     usage?: ModelUsage | null;
   }> {
     const requestId = crypto.randomUUID();
+    const signal = options?.signal as AbortSignal | undefined;
+    for (let retryCount = 0; ; retryCount += 1) {
+      try {
+        return await this.createChatCompletionStreamAttempt(client, request, options, sessionId, debug, requestId);
+      } catch (error) {
+        if (signal?.aborted || retryCount >= MAX_LLM_RETRIES || !isRetryableLlmError(error)) {
+          throw error;
+        }
+        const attempt = retryCount + 1;
+        const delayMs = getLlmRetryAfterMs(error) ?? getLlmRetryDelayMs(attempt);
+        const errorMessage = describeLlmError(error);
+        if (sessionId) {
+          this.onAssistantMessage(
+            this.buildAssistantMessage(sessionId, `Request failed: ${errorMessage}`, null),
+            false
+          );
+        }
+        this.onLlmRetry?.({
+          requestId,
+          sessionId,
+          error: errorMessage,
+          attempt,
+          maxRetries: MAX_LLM_RETRIES,
+          delayMs,
+        });
+        await waitForLlmRetry(delayMs, signal);
+      }
+    }
+  }
+
+  private async createChatCompletionStreamAttempt(
+    client: NonNullable<ReturnType<CreateOpenAIClient>["client"]>,
+    request: Record<string, unknown>,
+    options: Record<string, unknown> | undefined,
+    sessionId: string | undefined,
+    debug: ChatCompletionDebugOptions | undefined,
+    requestId: string
+  ): Promise<{
+    choices?: Array<{ message?: Record<string, unknown> }>;
+    usage?: ModelUsage | null;
+  }> {
     const startedAt = new Date().toISOString();
     const startedAtMs = Date.now();
     let estimatedTokens = 0;
     this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "start", sessionId);
+
+    const outerSignal = options?.signal as AbortSignal | undefined;
+    const attemptController = new AbortController();
+    let idleTimedOut = false;
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    let idleTimeoutPromise: Promise<never>;
+    const forwardAbort = () => attemptController.abort(outerSignal?.reason);
+    const clearAttempt = () => {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+      }
+      outerSignal?.removeEventListener("abort", forwardAbort);
+    };
+    const resetIdleTimer = () => {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
+      idleTimeoutPromise = new Promise((_, reject) => {
+        idleTimer = setTimeout(() => {
+          idleTimedOut = true;
+          const error = new LlmStreamIdleTimeoutError();
+          attemptController.abort(error);
+          reject(error);
+        }, LLM_STREAM_IDLE_TIMEOUT_MS);
+      });
+    };
+    if (outerSignal?.aborted) {
+      forwardAbort();
+    } else {
+      outerSignal?.addEventListener("abort", forwardAbort, { once: true });
+    }
+    resetIdleTimer();
+    const attemptOptions = { ...options, signal: attemptController.signal, maxRetries: 0 };
 
     const streamRequest = {
       ...request,
@@ -674,13 +771,17 @@ export class SessionManager {
 
     let response: unknown;
     try {
-      response = await (
-        client.chat.completions.create as unknown as (
-          body: Record<string, unknown>,
-          options?: Record<string, unknown>
-        ) => Promise<unknown>
-      )(streamRequest, options);
+      response = await Promise.race([
+        (
+          client.chat.completions.create as unknown as (
+            body: Record<string, unknown>,
+            options?: Record<string, unknown>
+          ) => Promise<unknown>
+        )(streamRequest, attemptOptions),
+        idleTimeoutPromise!,
+      ]);
     } catch (error) {
+      const requestError = idleTimedOut ? new LlmStreamIdleTimeoutError() : error;
       this.logChatCompletionDebug(debug, {
         timestamp: new Date().toISOString(),
         location: debug?.location ?? "SessionManager.createChatCompletionStream:create",
@@ -689,9 +790,9 @@ export class SessionManager {
         model: typeof request.model === "string" ? request.model : undefined,
         baseURL: debug?.baseURL,
         durationMs: Date.now() - startedAtMs,
-        params: { ...debug?.params, options: summarizeCompletionOptions(options) },
+        params: { ...debug?.params, options: summarizeCompletionOptions(attemptOptions) },
         request: streamRequest,
-        error: normalizeDebugError(error),
+        error: normalizeDebugError(requestError),
       });
       logApiError({
         timestamp: new Date().toISOString(),
@@ -699,14 +800,16 @@ export class SessionManager {
         requestId,
         sessionId,
         model: typeof request.model === "string" ? request.model : undefined,
-        error: getLlmErrorDetails(error),
+        error: getLlmErrorDetails(requestError),
         request: streamRequest,
       });
+      clearAttempt();
       this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "end", sessionId);
-      throw error;
+      throw requestError;
     }
 
     if (!response || typeof (response as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] !== "function") {
+      clearAttempt();
       this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "end", sessionId);
       this.logChatCompletionDebug(debug, {
         timestamp: new Date().toISOString(),
@@ -716,7 +819,7 @@ export class SessionManager {
         model: typeof request.model === "string" ? request.model : undefined,
         baseURL: debug?.baseURL,
         durationMs: Date.now() - startedAtMs,
-        params: { ...debug?.params, options: summarizeCompletionOptions(options) },
+        params: { ...debug?.params, options: summarizeCompletionOptions(attemptOptions) },
         request: streamRequest,
         response,
       });
@@ -727,6 +830,7 @@ export class SessionManager {
     let reasoningContent = "";
     let refusal: string | null = null;
     let usage: ModelUsage | null = null;
+    let streamCompleted = false;
     const responseChunks: unknown[] = [];
     const toolCallsByIndex = new Map<
       number,
@@ -746,16 +850,27 @@ export class SessionManager {
     };
 
     try {
-      for await (const chunk of response as AsyncIterable<Record<string, unknown>>) {
+      const iterator = (response as AsyncIterable<Record<string, unknown>>)[Symbol.asyncIterator]();
+      for (;;) {
+        const item = await Promise.race([iterator.next(), idleTimeoutPromise!]);
+        if (item.done) {
+          break;
+        }
+        const chunk = item.value;
+        resetIdleTimer();
         if (debug?.enabled) {
           responseChunks.push(chunk);
         }
         if ("usage" in chunk && chunk.usage != null) {
           usage = chunk.usage as ModelUsage;
+          streamCompleted = true;
         }
 
         const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
         for (const choice of choices) {
+          if (isUsageRecord(choice) && choice.finish_reason != null) {
+            streamCompleted = true;
+          }
           const delta = isUsageRecord(choice) && isUsageRecord(choice.delta) ? choice.delta : null;
           if (!delta) {
             continue;
@@ -809,7 +924,11 @@ export class SessionManager {
           }
         }
       }
+      if (!streamCompleted) {
+        throw new LlmStreamDisconnectedError();
+      }
     } catch (error) {
+      const streamError = idleTimedOut ? new LlmStreamIdleTimeoutError() : error;
       this.logChatCompletionDebug(debug, {
         timestamp: new Date().toISOString(),
         location: debug?.location ?? "SessionManager.createChatCompletionStream:stream",
@@ -818,10 +937,10 @@ export class SessionManager {
         model: typeof request.model === "string" ? request.model : undefined,
         baseURL: debug?.baseURL,
         durationMs: Date.now() - startedAtMs,
-        params: { ...debug?.params, options: summarizeCompletionOptions(options) },
+        params: { ...debug?.params, options: summarizeCompletionOptions(attemptOptions) },
         request: streamRequest,
         responseChunks,
-        error: normalizeDebugError(error),
+        error: normalizeDebugError(streamError),
       });
       logApiError({
         timestamp: new Date().toISOString(),
@@ -829,11 +948,12 @@ export class SessionManager {
         requestId,
         sessionId,
         model: typeof request.model === "string" ? request.model : undefined,
-        error: getLlmErrorDetails(error),
+        error: getLlmErrorDetails(streamError),
         request: streamRequest,
       });
-      throw error;
+      throw streamError;
     } finally {
+      clearAttempt();
       this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "end", sessionId);
     }
 
@@ -864,7 +984,7 @@ export class SessionManager {
       model: typeof request.model === "string" ? request.model : undefined,
       baseURL: debug?.baseURL,
       durationMs: Date.now() - startedAtMs,
-      params: { ...debug?.params, options: summarizeCompletionOptions(options) },
+      params: { ...debug?.params, options: summarizeCompletionOptions(attemptOptions) },
       request: streamRequest,
       responseChunks,
       response: finalResponse,

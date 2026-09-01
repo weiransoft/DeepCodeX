@@ -6,6 +6,23 @@ test("buildLoadingText returns plain Thinking... when no progress", () => {
   assert.equal(buildLoadingText({ progress: null, now: Date.now() }), "Thinking...");
 });
 
+test("buildLoadingText shows reconnect attempt before stream progress", () => {
+  assert.equal(
+    buildLoadingText({
+      progress: null,
+      retry: {
+        requestId: "request-1",
+        error: "HTTP 502: Bad Gateway",
+        attempt: 2,
+        maxRetries: 5,
+        delayMs: 1600,
+      },
+      now: Date.now(),
+    }),
+    "Reconnecting... 2/5 (esc to interrupt)"
+  );
+});
+
 test("buildLoadingText shows running process elapsed time before thinking progress", () => {
   const startedAt = "2026-04-28T00:00:00.000Z";
   const now = Date.parse(startedAt) + 5_750;

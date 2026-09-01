@@ -1,9 +1,10 @@
-import type { LlmStreamProgress, SessionEntry } from "@vegamo/deepcode-core";
+import type { LlmRetryEvent, LlmStreamProgress, SessionEntry } from "@vegamo/deepcode-core";
 
 type RunningProcesses = SessionEntry["processes"];
 
 export type LoadingTextInput = {
   progress: LlmStreamProgress | null;
+  retry?: LlmRetryEvent | null;
   processes?: RunningProcesses;
   now: number;
 };
@@ -11,10 +12,14 @@ export type LoadingTextInput = {
 const STALL_THRESHOLD_MS = 3000;
 
 export function buildLoadingText(input: LoadingTextInput): string {
-  const { progress, processes, now } = input;
+  const { progress, retry, processes, now } = input;
   const processText = buildProcessLoadingText(processes, now);
   if (processText) {
     return processText;
+  }
+
+  if (retry) {
+    return `Reconnecting... ${retry.attempt}/${retry.maxRetries} (esc to interrupt)`;
   }
 
   if (!progress) {

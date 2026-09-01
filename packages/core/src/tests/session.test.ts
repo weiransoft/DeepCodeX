@@ -3525,10 +3525,11 @@ test("SessionManager streams chat completions and counts reasoning progress", as
   const client = {
     chat: {
       completions: {
-        create: async (request: Record<string, unknown>) => {
+        create: async (request: Record<string, unknown>, options?: Record<string, unknown>) => {
           assert.equal(request.stream, true);
           assert.deepEqual(request.stream_options, { include_usage: true });
           assert.equal(request.temperature, 0.25);
+          assert.equal(options?.maxRetries, 0);
           return createChatStreamResponse([
             { choices: [{ delta: { reasoning_content: "思考" } }] },
             { choices: [{ delta: { content: "hello" } }] },
@@ -3579,6 +3580,234 @@ test("SessionManager streams chat completions and counts reasoning progress", as
   );
   assert.equal(progressEvents[1]?.estimatedTokens, 1);
   assert.equal(progressEvents[2]?.formattedTokens, "3");
+});
+
+test("SessionManager retries a disconnected stream and discards the partial response", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.method(Math, "random", () => 0.5);
+  let calls = 0;
+  let notifyRetry!: () => void;
+  const retryNotified = new Promise<void>((resolve) => {
+    notifyRetry = resolve;
+  });
+  const retryEvents: Array<{ attempt: number; error: string }> = [];
+  const assistantMessages: SessionMessage[] = [];
+  const client = {
+    chat: {
+      completions: {
+        create: async () => {
+          calls += 1;
+          if (calls === 1) {
+            return (async function* () {
+              yield { choices: [{ delta: { content: "partial" } }] };
+              throw Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+            })();
+          }
+          return createChatStreamResponse([
+            { choices: [{ delta: { content: "complete" }, finish_reason: "stop" }] },
+            { choices: [], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+          ]);
+        },
+      },
+    },
+  };
+  const manager = new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({ client: client as any, model: "test-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: (message) => assistantMessages.push(message),
+    onLlmRetry: (event) => {
+      retryEvents.push({ attempt: event.attempt, error: event.error });
+      notifyRetry();
+    },
+  });
+
+  const responsePromise = (manager as any).createChatCompletionStream(
+    client,
+    { model: "test-model" },
+    undefined,
+    "retry-session"
+  );
+  await retryNotified;
+  t.mock.timers.tick(800);
+  const response = await responsePromise;
+
+  assert.equal(calls, 2);
+  assert.deepEqual(retryEvents, [{ attempt: 1, error: "read ECONNRESET" }]);
+  assert.equal(assistantMessages[0]?.content, "Request failed: read ECONNRESET");
+  assert.equal(assistantMessages[0]?.sessionId, "retry-session");
+  assert.equal(response.choices[0].message.content, "complete");
+});
+
+test("SessionManager stops after five retries", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.method(Math, "random", () => 0.5);
+  let calls = 0;
+  let notifyRetry!: () => void;
+  let retryNotified = new Promise<void>((resolve) => {
+    notifyRetry = resolve;
+  });
+  const retryEvents: Array<{ attempt: number; delayMs: number }> = [];
+  const client = {
+    chat: {
+      completions: {
+        create: async () => {
+          calls += 1;
+          throw Object.assign(new Error("Bad Gateway"), { status: 502 });
+        },
+      },
+    },
+  };
+  const manager = new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({ client: client as any, model: "test-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+    onLlmRetry: (event) => {
+      retryEvents.push({ attempt: event.attempt, delayMs: event.delayMs });
+      notifyRetry();
+    },
+  });
+
+  const responsePromise = (manager as any).createChatCompletionStream(client, { model: "test-model" });
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    await retryNotified;
+    const event = retryEvents.at(-1)!;
+    assert.equal(event.attempt, attempt);
+    retryNotified = new Promise<void>((resolve) => {
+      notifyRetry = resolve;
+    });
+    t.mock.timers.tick(event.delayMs);
+  }
+
+  await assert.rejects(responsePromise, (error: Error & { status?: number }) => error.status === 502);
+  assert.equal(calls, 6);
+  assert.deepEqual(
+    retryEvents.map((event) => event.attempt),
+    [1, 2, 3, 4, 5]
+  );
+});
+
+test("SessionManager honors Retry-After when scheduling a retry", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let calls = 0;
+  let retryDelayMs = 0;
+  let notifyRetry!: () => void;
+  const retryNotified = new Promise<void>((resolve) => {
+    notifyRetry = resolve;
+  });
+  const client = {
+    chat: {
+      completions: {
+        create: async () => {
+          calls += 1;
+          if (calls === 1) {
+            throw Object.assign(new Error("Rate limited"), {
+              status: 429,
+              headers: new Headers({ "retry-after": "60" }),
+            });
+          }
+          return createChatStreamResponse([
+            { choices: [{ delta: { content: "complete" }, finish_reason: "stop" }] },
+            { choices: [], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+          ]);
+        },
+      },
+    },
+  };
+  const manager = new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({ client: client as any, model: "test-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+    onLlmRetry: (event) => {
+      retryDelayMs = event.delayMs;
+      notifyRetry();
+    },
+  });
+
+  const responsePromise = (manager as any).createChatCompletionStream(client, { model: "test-model" });
+  await retryNotified;
+  assert.equal(retryDelayMs, 60_000);
+  t.mock.timers.tick(retryDelayMs);
+  const response = await responsePromise;
+
+  assert.equal(calls, 2);
+  assert.equal(response.choices[0].message.content, "complete");
+});
+
+test("SessionManager treats a clean EOF without a terminal chunk as a disconnected stream", async () => {
+  const controller = new AbortController();
+  let retryError = "";
+  const client = {
+    chat: {
+      completions: {
+        create: async () => createChatStreamResponse([{ choices: [{ delta: { content: "partial" } }] }]),
+      },
+    },
+  };
+  const manager = new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({ client: client as any, model: "test-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+    onLlmRetry: (event) => {
+      retryError = event.error;
+      controller.abort();
+    },
+  });
+
+  await assert.rejects(
+    (manager as any).createChatCompletionStream(client, { model: "test-model" }, { signal: controller.signal }),
+    (error: Error) => error.name === "AbortError"
+  );
+  assert.equal(retryError, "Model stream disconnected before completion.");
+});
+
+test("SessionManager retries a stream after sixty seconds without data", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const controller = new AbortController();
+  let retryError = "";
+  const client = {
+    chat: {
+      completions: {
+        create: async () => ({
+          [Symbol.asyncIterator]() {
+            return this;
+          },
+          next() {
+            return new Promise<IteratorResult<unknown>>(() => {});
+          },
+        }),
+      },
+    },
+  };
+  const manager = new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({ client: client as any, model: "test-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+    onLlmRetry: (event) => {
+      retryError = event.error;
+      controller.abort();
+    },
+  });
+
+  const responsePromise = (manager as any).createChatCompletionStream(
+    client,
+    { model: "test-model" },
+    { signal: controller.signal }
+  );
+  await Promise.resolve();
+  t.mock.timers.tick(60_000);
+
+  await assert.rejects(responsePromise, (error: Error) => error.name === "AbortError");
+  assert.equal(retryError, "Model stream was idle for 60 seconds.");
 });
 
 test("SessionManager persists session and user message before skill matching is cancelled", async () => {
