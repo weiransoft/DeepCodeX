@@ -36,8 +36,8 @@ Usage notes:
 - Before your final response, stop background tasks that has not reported a completed state, unless the user explicitly asks to keep it running.
 - To stop a background command, use the `stopCommand` returned in the tool result metadata.
 - Use `sideEffects: []` only for commands that do not read, write, delete, query Git history, mutate Git history, or access the network, such as `date` or `node --version`.
-- Use `*-out-cwd` when the command accesses paths outside the current workspace. For example, `cat /etc/hosts` requires `["read-out-cwd"]`.
-- Treat the root path and additional working dirs from the runtime context as cwd.
+- Use `*-out-cwd` when the command accesses paths outside the current workspace and additional working dirs. For example, `cat /etc/hosts` requires `["read-out-cwd"]`.
+- Treat the root path and additional working dirs from the runtime context as `*-cwd`.
 - Use `*-in-tmp` for system temporary directories: `/tmp` and `/private/tmp`.
 - Use `query-git-log` for commands such as `git log`, `git show HEAD`, `git blame`, or history diffs. Use `mutate-git-log` for commands such as `git commit`, `git reset`, `git rebase`, `git merge`, `git cherry-pick`, or `git tag`.
 - Use `["unknown"]` when you cannot classify the command safely.
