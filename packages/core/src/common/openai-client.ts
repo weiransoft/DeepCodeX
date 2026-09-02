@@ -3,7 +3,7 @@ import * as os from "os";
 import * as path from "path";
 import OpenAI from "openai";
 import { Agent, fetch as undiciFetch } from "undici";
-import { resolveCurrentSettings } from "../settings";
+import { readDeepcodePlusApiKey, resolveCurrentSettings, type ReasoningEffort } from "../settings";
 
 // Custom undici Agent with a 180-second keepAlive timeout.  The default
 // global fetch (undici) only keeps connections alive for 4 seconds, which
@@ -19,26 +19,60 @@ const keepAliveAgent = new Agent({ keepAliveTimeout: 180_000 });
 let cachedOpenAI: OpenAI | null = null;
 let cachedOpenAIKey = "";
 
+/** 上游 v0.3.1 新增：DeepCode Plus 插件通道的固定 baseURL（PLUS_API_KEY 场景） */
+export const DEEPCODE_PLUS_BASE_URL = "https://deepcode.vegamo.cn/plugin/openai";
+
+/**
+ * 上游 v0.3.1 新增：解析实际生效的 API 连接信息。
+ *
+ * 优先级：用户自配 apiKey（任意 baseURL）> plusApiKey（走 DeepCode Plus 通道）。
+ * 这样 PLUS_API_KEY 可以作为"无自配 Key 时"的兜底凭据。
+ *
+ * @param settings 当前解析出的设置（apiKey / baseURL）
+ * @param plusApiKey PLUS_API_KEY 环境变量读取结果
+ * @returns 实际使用的 apiKey + baseURL 组合
+ */
+export function resolveOpenAIConnection(
+  settings: { apiKey?: string; baseURL: string },
+  plusApiKey?: string
+): { apiKey?: string; baseURL: string } {
+  if (settings.apiKey) {
+    return { apiKey: settings.apiKey, baseURL: settings.baseURL };
+  }
+  if (plusApiKey) {
+    return { apiKey: plusApiKey, baseURL: DEEPCODE_PLUS_BASE_URL };
+  }
+  return { apiKey: undefined, baseURL: settings.baseURL };
+}
+
 export function createOpenAIClient(projectRoot: string = process.cwd()): {
   client: OpenAI | null;
+  /** 上游 v0.3.1 新增：实际生效的 apiKey（plusApiKey 兜底后可能来自 PLUS_API_KEY） */
+  apiKey?: string;
   model: string;
   baseURL: string;
   temperature?: number;
   thinkingEnabled: boolean;
-  reasoningEffort: "high" | "max";
+  // 上游 v0.3.1：reasoningEffort 采用 ReasoningEffort 类型，支持新增的 "low" 档
+  reasoningEffort: ReasoningEffort;
   debugLogEnabled: boolean;
   telemetryEnabled: boolean;
   notify?: string;
   webSearchTool?: string;
   env: Record<string, string>;
   machineId?: string;
+  /** 上游 v0.3.1 新增：透传 PLUS_API_KEY，供调用方区分计费通道 */
+  plusApiKey?: string;
 } {
   const settings = resolveCurrentSettings(projectRoot);
-  if (!settings.apiKey) {
+  const plusApiKey = readDeepcodePlusApiKey();
+  const connection = resolveOpenAIConnection(settings, plusApiKey);
+  if (!connection.apiKey) {
     return {
       client: null,
+      apiKey: undefined,
       model: settings.model,
-      baseURL: settings.baseURL,
+      baseURL: connection.baseURL,
       temperature: settings.temperature,
       thinkingEnabled: settings.thinkingEnabled,
       reasoningEffort: settings.reasoningEffort,
@@ -48,16 +82,19 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
       webSearchTool: settings.webSearchTool,
       env: settings.env,
       machineId: getMachineId(),
+      plusApiKey,
     };
   }
 
   // v1.1 修改：缓存 key 包含 timeout，确保 timeout 配置变更后重建客户端
-  const cacheKey = `${settings.apiKey}::${settings.baseURL}::${settings.timeout}`;
+  // 语义合并：连接信息改用上游的 connection（plusApiKey 兜底），并保留 fork 的 timeout 维度
+  const cacheKey = `${connection.apiKey}::${connection.baseURL}::${settings.timeout}`;
   if (cachedOpenAI && cachedOpenAIKey === cacheKey) {
     return {
       client: cachedOpenAI,
+      apiKey: connection.apiKey,
       model: settings.model,
-      baseURL: settings.baseURL,
+      baseURL: connection.baseURL,
       temperature: settings.temperature,
       thinkingEnabled: settings.thinkingEnabled,
       reasoningEffort: settings.reasoningEffort,
@@ -67,12 +104,14 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
       webSearchTool: settings.webSearchTool,
       env: settings.env,
       machineId: getMachineId(),
+      // 上游 v0.3.1 新增：缓存命中路径同样透传 plusApiKey
+      plusApiKey,
     };
   }
 
   cachedOpenAI = new OpenAI({
-    apiKey: settings.apiKey,
-    baseURL: settings.baseURL || undefined,
+    apiKey: connection.apiKey,
+    baseURL: connection.baseURL || undefined,
     // v1.1 新增：注入 timeout（秒 → 毫秒），来自 env.TIMEOUT / env.LLM_TIMEOUT
     // 默认 600 秒（10 分钟），与 OpenAI SDK 默认超时一致
     timeout: settings.timeout * 1000,
@@ -96,8 +135,9 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
 
   return {
     client: cachedOpenAI,
+    apiKey: connection.apiKey,
     model: settings.model,
-    baseURL: settings.baseURL,
+    baseURL: connection.baseURL,
     temperature: settings.temperature,
     thinkingEnabled: settings.thinkingEnabled,
     reasoningEffort: settings.reasoningEffort,
@@ -107,6 +147,8 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
     webSearchTool: settings.webSearchTool,
     env: settings.env,
     machineId: getMachineId(),
+    // 上游 v0.3.1 新增：透传 PLUS_API_KEY，供调用方区分计费通道
+    plusApiKey,
   };
 }
 
@@ -127,7 +169,6 @@ function getMachineId(): string | undefined {
     return undefined;
   }
 }
-
 // ============================================================================
 // v1.4 P0-2：OpenAIClientHandle 接口与类型守卫
 //
@@ -151,17 +192,20 @@ function getMachineId(): string | undefined {
  *   - baseURL: API 基础 URL
  *   - temperature: 采样温度（可选）
  *   - thinkingEnabled: 是否启用思考模式（影响 system prompt 构建）
- *   - reasoningEffort: 推理强度（"high" / "max"，可选；thinkingEnabled=true 时生效）
+ *   - reasoningEffort: 推理强度（可选；thinkingEnabled=true 时生效）
  *
  * v1.6 P1-1 扩展：新增 reasoningEffort 字段
  *   - 之前 executeDispatch 构造 LLM 请求体时未传 reasoning_effort 参数
  *   - 通过 reasoningEffort 字段将 settings.reasoningEffort 传递给 buildThinkingRequestOptions
- *   - 与 session.ts:3476 主对话流程的 thinkingOptions 构造保持一致
+ *   - 与 session.ts 主对话流程的 thinkingOptions 构造保持一致
  *
  * v2.1.2 扩展：新增 debugLogEnabled 可选字段
  *   - 用于 executeDispatch 等非 SessionManager 路径记录 debug.log 和 error.log
  *   - 可选字段，保持向后兼容（现有调用方无需修改）
  *   - 类型守卫 isOpenAIClientHandle 不强制校验此字段
+ *
+ * v0.3.1 合并扩展：reasoningEffort 类型从 "high" | "max" 放宽为 ReasoningEffort，
+ *   以兼容上游新增的 "low" 档，保证 createOpenAIClient 返回值仍可整体赋给句柄。
  */
 export interface OpenAIClientHandle {
   /** OpenAI SDK 客户端实例（unknown 类型，避免类型耦合） */
@@ -174,8 +218,8 @@ export interface OpenAIClientHandle {
   temperature?: number;
   /** 是否启用思考模式 */
   thinkingEnabled: boolean;
-  /** 推理强度（可选，thinkingEnabled=true 时生效，默认 "high"） */
-  reasoningEffort?: "high" | "max";
+  /** 推理强度（可选，thinkingEnabled=true 时生效，默认 "high"；v0.3.1 起支持 "low" 档） */
+  reasoningEffort?: ReasoningEffort;
   /**
    * 是否启用调试日志（可选）
    *
@@ -209,8 +253,13 @@ export function isOpenAIClientHandle(obj: unknown): obj is OpenAIClientHandle {
   if (typeof o.model !== "string") return false;
   if (typeof o.baseURL !== "string") return false;
   if (typeof o.thinkingEnabled !== "boolean") return false;
-  // reasoningEffort 为可选字段，仅当存在时校验类型
-  if (o.reasoningEffort !== undefined && o.reasoningEffort !== "high" && o.reasoningEffort !== "max") {
+  // reasoningEffort 为可选字段，仅当存在时校验类型（v0.3.1 起支持 "low" 档）
+  if (
+    o.reasoningEffort !== undefined &&
+    o.reasoningEffort !== "low" &&
+    o.reasoningEffort !== "high" &&
+    o.reasoningEffort !== "max"
+  ) {
     return false;
   }
   return true;

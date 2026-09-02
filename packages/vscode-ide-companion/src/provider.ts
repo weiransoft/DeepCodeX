@@ -179,6 +179,7 @@ export function loadSession(
     sessionId,
     summary: session.summary || "Untitled",
     status: session.status,
+    pluginRateLimitedTool: session.pluginRateLimitedTool ?? null,
     askPermissions: session.askPermissions,
     processes: serializeProcesses(session.processes),
     sessions: toSessionList(sessions),
@@ -269,6 +270,7 @@ async function handlePrompt(
         type: "sessionStatus",
         sessionId: activeSessionId,
         status: activeSession.status,
+        pluginRateLimitedTool: activeSession.pluginRateLimitedTool ?? null,
         askPermissions: activeSession.askPermissions,
         processes: serializeProcesses(activeSession.processes),
       });
@@ -302,6 +304,7 @@ function handlePermissionDenied(
       type: "sessionStatus",
       sessionId,
       status: session.status,
+      pluginRateLimitedTool: session.pluginRateLimitedTool ?? null,
       askPermissions: session.askPermissions,
       processes: serializeProcesses(session.processes),
     });

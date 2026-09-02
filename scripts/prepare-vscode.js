@@ -50,10 +50,12 @@ function run(cmd, args, opts = {}) {
     log(`  (dry-run) ${label}`);
     return { status: 0, stdout: "" };
   }
-  // 禁用 shell:true，避免不必要的 shell 注入面；cmd 与 args 均为内部硬编码值。
+  // 跨平台兼容 + 安全加固：Windows 上 npm/npx 是 .cmd shim，必须 shell:true 才能直接 spawn；
+  // 非 Windows 平台保持无 shell 调用（cmd 与 args 均为内部硬编码值，避免不必要的 shell 注入面）。
   const result = spawnSync(cmd, args, {
     stdio: opts.stdio ?? "inherit",
     cwd: opts.cwd ?? root,
+    shell: process.platform === "win32",
     env: { ...process.env, ...opts.env },
   });
   if (result.status !== 0) {

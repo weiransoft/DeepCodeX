@@ -305,10 +305,12 @@ test("userPrompt with permissions (continue) does not send userMessage", async (
 
 test("userPrompt sends sessionStatus after handling", async () => {
   const deps = createDeps();
+  (deps.sessionManager.getSession("session-1") as any).pluginRateLimitedTool = "WebSearch";
   await handleWebviewMessage({ type: "userPrompt", prompt: "hello" }, deps);
 
-  const types = deps.messages.map((m: any) => m.type);
-  assert.ok(types.includes("sessionStatus"), `Expected sessionStatus, got: ${types.join(", ")}`);
+  const status = deps.messages.find((m: any) => m.type === "sessionStatus") as any;
+  assert.ok(status, "Expected sessionStatus");
+  assert.equal(status.pluginRateLimitedTool, "WebSearch");
 });
 
 test("userPrompt sends showSessionsList after handling", async () => {
@@ -357,8 +359,25 @@ test("loadSession sends loadSession with correct fields", () => {
   assert.equal(msg.sessionId, "session-1");
   assert.equal(msg.summary, "Test Session");
   assert.equal(msg.status, "idle");
+  assert.equal(msg.pluginRateLimitedTool, null);
   assert.ok(Array.isArray(msg.sessions), "sessions should be an array");
   assert.ok(Array.isArray(msg.messages), "messages should be an array");
+});
+
+test("loadSession includes the persisted plugin rate limit", () => {
+  const sessionManager = createMockSessionManager();
+  (sessionManager.getSession("session-1") as any).pluginRateLimitedTool = "UnderstandImage";
+  const messages: unknown[] = [];
+
+  loadSession(
+    "session-1",
+    sessionManager,
+    (msg) => messages.push(msg),
+    (t) => t
+  );
+
+  const msg = messages.find((item: any) => item.type === "loadSession") as any;
+  assert.equal(msg.pluginRateLimitedTool, "UnderstandImage");
 });
 
 test("loadSession with non-existent session does nothing", () => {

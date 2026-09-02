@@ -1,3 +1,4 @@
+// fork：cli.tsx 中使用 JSX（<AppContainer />），必须显式引入 React
 import React from "react";
 import { render } from "ink";
 import { readFileSync } from "node:fs";
@@ -10,6 +11,8 @@ import { parseArguments } from "./cli-args";
 import { writeStderrLine, writeStdoutLine } from "./utils/stdio-helpers";
 import { getPackageJson } from "./utils/package";
 import { CLI_VERSION } from "./generated/git-commit";
+// 上游 v0.3.1 新增：--exec 非交互模式运行器（exec-runner.ts / exec-input.ts）
+import { runExecMode } from "./exec-runner";
 
 void main();
 
@@ -23,6 +26,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  // ===== fork 扩展：team / rules / quality-check / review 子命令路由（非 TUI 模式，保留全部） =====
   // team 子命令路由：多角色协同 CLI 模式（非 TUI 模式）
   if (parsed.team) {
     // 延迟导入避免启动开销
@@ -182,7 +186,58 @@ async function main(): Promise<void> {
 
   let initialPrompt = parsed.prompt;
   let resumeSessionId = parsed.resume;
+  // 上游 v0.3.1 新增：--fork 会话与 --exec 非交互模式
+  let forkSessionId = parsed.fork;
   const projectRoot = process.cwd();
+
+  // 上游 v0.3.1：--last 解析为当前项目最近一次会话 ID
+  if (parsed.last) {
+    const projectCode = getProjectCode(projectRoot);
+    const indexPath = join(homedir(), ".deepcode", "projects", projectCode, "sessions-index.json");
+    try {
+      const index = JSON.parse(readFileSync(indexPath, "utf-8"));
+      const entries: { id: string; updateTime: string }[] = Array.isArray(index?.entries) ? index.entries : [];
+      if (entries.length === 0) {
+        writeStderrLine("No previous sessions found for the current project.\n");
+        process.exit(1);
+      }
+      const mostRecent = entries.reduce((a, b) => (a.updateTime > b.updateTime ? a : b));
+      resumeSessionId = mostRecent.id;
+    } catch {
+      writeStderrLine("No previous sessions found for the current project.\n");
+      process.exit(1);
+    }
+  }
+
+  // 上游 v0.3.1：裸 --fork（无 ID）解析为当前项目最近一次会话 ID
+  if (forkSessionId === true) {
+    const projectCode = getProjectCode(projectRoot);
+    const indexPath = join(homedir(), ".deepcode", "projects", projectCode, "sessions-index.json");
+    try {
+      const index = JSON.parse(readFileSync(indexPath, "utf-8"));
+      const entries: { id: string; updateTime: string }[] = Array.isArray(index?.entries) ? index.entries : [];
+      if (entries.length === 0) {
+        writeStderrLine("No previous sessions found for the current project.\n");
+        process.exit(1);
+      }
+      const mostRecent = entries.reduce((a, b) => (a.updateTime > b.updateTime ? a : b));
+      forkSessionId = mostRecent.id;
+    } catch {
+      writeStderrLine("No previous sessions found for the current project.\n");
+      process.exit(1);
+    }
+  }
+
+  // 上游 v0.3.1：--exec 非交互模式，运行单个 prompt 后退出（不进入 TUI）
+  if (parsed.exec) {
+    process.exitCode = await runExecMode({
+      prompt: parsed.prompt!,
+      projectRoot,
+      resumeSessionId: typeof resumeSessionId === "string" ? resumeSessionId : undefined,
+      forkSessionId: typeof forkSessionId === "string" ? forkSessionId : undefined,
+    });
+    return;
+  }
 
   if (!process.stdin.isTTY) {
     writeStderrLine("deepcode requires an interactive terminal (TTY). Re-run from a real terminal session.\n");
@@ -207,6 +262,23 @@ async function main(): Promise<void> {
     }
   }
 
+  // 上游 v0.3.1：--fork <sessionId> 校验会话存在性
+  if (typeof forkSessionId === "string") {
+    const projectCode = getProjectCode(projectRoot);
+    const indexPath = join(homedir(), ".deepcode", "projects", projectCode, "sessions-index.json");
+    try {
+      const index = JSON.parse(readFileSync(indexPath, "utf-8"));
+      const found = Array.isArray(index?.entries) && index.entries.some((e: { id: string }) => e.id === forkSessionId);
+      if (!found) {
+        writeStderrLine(`No saved session found with ID "${forkSessionId}".\n`);
+        process.exit(1);
+      }
+    } catch {
+      writeStderrLine(`No saved session found with ID "${forkSessionId}".\n`);
+      process.exit(1);
+    }
+  }
+
   const updatePromptResult = await promptForPendingUpdate(packageInfo);
   if (updatePromptResult.installed) {
     process.exit(0);
@@ -220,12 +292,17 @@ async function main(): Promise<void> {
     initialPrompt = undefined;
     const appResumeSessionId = resumeSessionId;
     resumeSessionId = undefined;
+    // 上游 v0.3.1：一次性消费 forkSessionId
+    const appForkSessionId = forkSessionId;
+    forkSessionId = undefined;
     const inkInstance = render(
       <AppContainer
         projectRoot={projectRoot}
         version={packageInfo?.version ?? CLI_VERSION}
         initialPrompt={appInitialPrompt}
         resumeSessionId={appResumeSessionId}
+        // 上游 v0.3.1：透传 forkSessionId（仅接受字符串形式）
+        forkSessionId={typeof appForkSessionId === "string" ? appForkSessionId : undefined}
         onRestart={() => restartRef.current?.()}
       />,
       { exitOnCtrlC: false }

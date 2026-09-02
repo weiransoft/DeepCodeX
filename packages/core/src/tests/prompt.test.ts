@@ -5,6 +5,8 @@ import * as os from "os";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import {
+  // 融合两侧：上游新增 buildSkillCatalogPrompt（skill 工具目录提示），fork 保留 getDefaultSkillPrompt（默认 skill 注入）
+  buildSkillCatalogPrompt,
   buildSkillDocumentsPrompt,
   getDefaultSkillPrompt,
   getPlanModePrompt,
@@ -33,11 +35,102 @@ test("getTools always includes WebSearch", () => {
   assert.equal(names.includes("WebSearch"), true);
 });
 
+// 上游 v0.3.1 新增用例：多模态能力驱动的图像工具切换
+test("image tools match the current model's multimodal capability", () => {
+  const nonMultimodalTools = getTools({ model: "deepseek-chat" }).map((tool) => tool.function.name);
+  const multimodalTools = getTools({ model: "gpt-4o" }).map((tool) => tool.function.name);
+
+  assert.equal(nonMultimodalTools.includes("UnderstandImage"), true);
+  assert.equal(nonMultimodalTools.includes("ReadImage"), false);
+  assert.equal(multimodalTools.includes("UnderstandImage"), false);
+  assert.equal(multimodalTools.includes("ReadImage"), true);
+  assert.equal(getSystemPrompt("/tmp/project", { model: "deepseek-chat" }).includes("## UnderstandImage"), true);
+  assert.equal(getSystemPrompt("/tmp/project", { model: "deepseek-chat" }).includes("## ReadImage"), false);
+  assert.equal(getSystemPrompt("/tmp/project", { model: "gpt-4o" }).includes("## UnderstandImage"), false);
+  assert.equal(getSystemPrompt("/tmp/project", { model: "gpt-4o" }).includes("## ReadImage"), true);
+});
+
+test("multimodal config overrides model-based multimodal detection", () => {
+  // "off" forces non-multimodal behavior even for a multimodal model.
+  const forcedOffTools = getTools({ model: "gpt-4o", multimodal: "off" }).map((tool) => tool.function.name);
+  assert.equal(forcedOffTools.includes("UnderstandImage"), true);
+  assert.equal(forcedOffTools.includes("ReadImage"), false);
+  assert.equal(
+    getSystemPrompt("/tmp/project", { model: "gpt-4o", multimodal: "off" }).includes("## UnderstandImage"),
+    true
+  );
+
+  // "on" forces multimodal behavior even for a non-multimodal model.
+  const forcedOnTools = getTools({ model: "deepseek-chat", multimodal: "on" }).map((tool) => tool.function.name);
+  assert.equal(forcedOnTools.includes("UnderstandImage"), false);
+  assert.equal(forcedOnTools.includes("ReadImage"), true);
+  assert.equal(
+    getSystemPrompt("/tmp/project", { model: "deepseek-chat", multimodal: "on" }).includes("## UnderstandImage"),
+    false
+  );
+});
+
+test("interactive prompt and tools include AskUserQuestion", () => {
+  assert.equal(getSystemPrompt("/tmp/project").includes("## AskUserQuestion"), true);
+  assert.equal(
+    getTools().some((tool) => tool.function.name === "AskUserQuestion"),
+    true
+  );
+});
+
+test("non-interactive prompt and tools exclude only AskUserQuestion", () => {
+  const externalTool = {
+    type: "function" as const,
+    function: {
+      name: "mcp_example",
+      description: "MCP example",
+      parameters: { type: "object" as const, properties: {} },
+    },
+  };
+  const prompt = getSystemPrompt("/tmp/project", { nonInteractive: true });
+  const names = getTools({ nonInteractive: true }, [externalTool]).map((tool) => tool.function.name);
+
+  assert.equal(prompt.includes("## AskUserQuestion"), false);
+  assert.equal(prompt.includes("## Bash"), true);
+  assert.equal(names.includes("AskUserQuestion"), false);
+  assert.equal(names.includes("bash"), true);
+  assert.equal(names.includes("mcp_example"), true);
+});
+
 test("getTools includes UpdatePlan with string plan schema", () => {
   const tool = getTools().find((candidate) => candidate.function.name === "UpdatePlan");
   assert.ok(tool);
   assert.deepEqual(tool.function.parameters.required, ["plan"]);
   assert.equal((tool.function.parameters.properties.plan as { type?: unknown }).type, "string");
+});
+
+// 上游 v0.3.1 新增用例：skill 工具的精确 schema
+test("getTools includes skill with the exact load-skill schema", () => {
+  const tool = getTools().find((candidate) => candidate.function.name === "skill");
+  assert.ok(tool);
+  assert.equal(
+    tool.function.description,
+    "Load the full instructions for an available skill. Call this with the exact skill name from the session skill catalog before acting on a task that names or clearly matches that skill."
+  );
+  assert.deepEqual(tool.function.parameters.required, ["name"]);
+  assert.equal((tool.function.parameters.properties.name as { type?: unknown }).type, "string");
+  assert.equal(
+    (tool.function.parameters.properties.name as { description?: unknown }).description,
+    "The exact skill name from the available skills list."
+  );
+});
+
+test("buildSkillCatalogPrompt renders previous and new preloaded skills", () => {
+  const prompt = buildSkillCatalogPrompt([
+    { name: "skill-writer", description: "Write a SKILL.md" },
+    { name: "code-review", description: "Review code" },
+  ]);
+
+  assert.match(prompt, /<available_skills>/);
+  assert.match(prompt, /- `skill-writer`: Write a SKILL\.md/);
+  assert.match(prompt, /- `code-review`: Review code/);
+  assert.match(prompt, /call the `skill` tool with the exact skill name/);
+  assert.match(prompt, /A user may also invoke a skill directly/);
 });
 
 test("getTools requires bash sideEffects permission scopes", () => {
@@ -80,9 +173,8 @@ test("getSystemPrompt includes Bash background guidance", () => {
   assert.equal(prompt.includes("stop background tasks that has not reported a completed state"), true);
 });
 
+// fork 保留用例：A1 改进（2026-07-27）System Prompt 强化，要求报告类内容必须工具验证
 test("getSystemPrompt includes tool-verification-first constraints for reports (A1)", () => {
-  // A1 改进（2026-07-27）：System Prompt 强化，要求报告类内容必须工具验证
-  // 关联事件：docs/archive/code-review-process-incident.md
   const prompt = getSystemPrompt("/tmp/project");
   // 必须包含工具验证优先约束段
   assert.equal(prompt.includes("报告类内容的工具验证优先约束"), true);
@@ -104,10 +196,13 @@ test("getSystemPrompt does not include runtime context", () => {
   assert.equal(prompt.includes('"root path": "/tmp/project"'), false);
 });
 
+// fork 保留用例：默认 skill 文档注入（E6 增强共 4 个默认 skill）
+// 行为矛盾裁定（合并后）：skill 文档标签统一为上游 v0.3.1 的 <skill_content name="..."> 格式，
+// 替代 fork 旧版 <karpathy-guidelines-skill> 标签，断言随之更新
 test("getDefaultSkillPrompt loads the default skill template", () => {
   const prompt = getDefaultSkillPrompt();
 
-  assert.equal(prompt.includes("<karpathy-guidelines-skill>"), true);
+  assert.equal(prompt.includes('<skill_content name="karpathy-guidelines">'), true);
   assert.equal(prompt.includes("# Karpathy Guidelines"), true);
   assert.equal(prompt.includes("Use the skill documents below to assist the user:"), true);
   assert.equal(prompt.includes('path="templates/skills/'), false);
@@ -116,11 +211,11 @@ test("getDefaultSkillPrompt loads the default skill template", () => {
 test("getDefaultSkillPrompt loads all four default skills", () => {
   const prompt = getDefaultSkillPrompt();
 
-  // 验证 4 个默认 skill 全部加载（E6 增强：新增 3 个默认 skill）
-  assert.equal(prompt.includes("<karpathy-guidelines-skill>"), true);
-  assert.equal(prompt.includes("<design-aesthetics-skill>"), true);
-  assert.equal(prompt.includes("<ui-ux-best-practices-skill>"), true);
-  assert.equal(prompt.includes("<code-quality-guidelines-skill>"), true);
+  // 验证 4 个默认 skill 全部加载（E6 增强：新增 3 个默认 skill；合并后标签为 <skill_content name="...">）
+  assert.equal(prompt.includes('<skill_content name="karpathy-guidelines">'), true);
+  assert.equal(prompt.includes('<skill_content name="design-aesthetics">'), true);
+  assert.equal(prompt.includes('<skill_content name="ui-ux-best-practices">'), true);
+  assert.equal(prompt.includes('<skill_content name="code-quality-guidelines">'), true);
 });
 
 test("getDefaultSkillPrompt skips disabled default skills", () => {
@@ -143,10 +238,10 @@ test("getDefaultSkillPrompt can disable individual default skills", () => {
     enabledSkills: { "karpathy-guidelines": false },
   });
 
-  assert.equal(prompt.includes("<karpathy-guidelines-skill>"), false);
-  assert.equal(prompt.includes("<design-aesthetics-skill>"), true);
-  assert.equal(prompt.includes("<ui-ux-best-practices-skill>"), true);
-  assert.equal(prompt.includes("<code-quality-guidelines-skill>"), true);
+  assert.equal(prompt.includes('<skill_content name="karpathy-guidelines">'), false);
+  assert.equal(prompt.includes('<skill_content name="design-aesthetics">'), true);
+  assert.equal(prompt.includes('<skill_content name="ui-ux-best-practices">'), true);
+  assert.equal(prompt.includes('<skill_content name="code-quality-guidelines">'), true);
 });
 
 test("getPlanModePrompt loads the dedicated Plan Mode template", () => {
@@ -190,7 +285,8 @@ test("buildSkillDocumentsPrompt lists skill resources", () => {
     { name: "pdf", content: "# PDF Skill", path: skillPath, skillFilePath: skillPath },
   ]);
 
-  assert.equal(prompt.includes(`<pdf-skill path="${skillPath}">`), true);
+  // 上游 v0.3.1 统一采用 <skill_content name="..."> 标签格式（与 skill 工具加载格式、DSH 对齐）
+  assert.equal(prompt.includes(`<skill_content name="pdf" path="${skillPath}">`), true);
   assert.equal(prompt.includes("<skill_resources>"), true);
   assert.equal(prompt.includes("<file>scripts/extract.py</file>"), true);
   assert.equal(prompt.includes("<file>scripts/merge.py</file>"), true);
@@ -259,6 +355,7 @@ test("getRuntimeContext includes current date and model guidance", () => {
 
 test("getSystemPrompt renders Read docs for non-multimodal models", () => {
   const prompt = getSystemPrompt("/tmp/project", { model: "deepseek-chat" });
+  // fork 保留断言：合并后的 read.md.ejs 非多模态分支使用 "the current model is not multimodal" 文案
   assert.equal(prompt.includes("the current model is not multimodal"), true);
   assert.equal(prompt.includes("the contents are presented visually"), false);
 });
@@ -266,6 +363,8 @@ test("getSystemPrompt renders Read docs for non-multimodal models", () => {
 test("runtime prompt assets live under templates", () => {
   assert.equal(fs.existsSync(path.join(repoRoot, "templates", "tools", "web-search.md")), true);
   assert.equal(fs.existsSync(path.join(repoRoot, "templates", "tools", "read.md.ejs")), true);
+  // 融合两侧：fork 保留默认 skill 模板检查，上游新增 ReadImage 模板检查
+  assert.equal(fs.existsSync(path.join(repoRoot, "templates", "tools", "read-image.md.ejs")), true);
   assert.equal(fs.existsSync(path.join(repoRoot, "templates", "prompts", "init_command.md.ejs")), true);
   assert.equal(fs.existsSync(path.join(repoRoot, "templates", "skills", "karpathy-guidelines.md")), true);
   assert.equal(fs.existsSync(path.join(repoRoot, "templates", "tools", "read.md")), false);

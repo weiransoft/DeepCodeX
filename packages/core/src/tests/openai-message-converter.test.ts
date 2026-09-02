@@ -84,11 +84,20 @@ test("OpenAIMessageConverter preserves image content for multimodal models", () 
     }),
   ];
 
-  const result = c.buildMessages(messages, false, "gpt-4o") as Array<{ role: string; content: unknown }>;
+  // 融合两侧：fork 用 gpt-4o，上游用 deepseek-v4-flash-vision-exp，两者均为多模态模型，一并覆盖
+  const gptResult = c.buildMessages(messages, false, "gpt-4o") as Array<{ role: string; content: unknown }>;
+  const visionResult = c.buildMessages(messages, false, "deepseek-v4-flash-vision-exp") as Array<{
+    role: string;
+    content: unknown;
+  }>;
 
-  assert.equal(result.length, 1);
-  assert.equal(result[0]?.role, "system");
-  assert.deepEqual(result[0]?.content, [
+  assert.equal(gptResult.length, 1);
+  assert.equal(gptResult[0]?.role, "system");
+  assert.deepEqual(gptResult[0]?.content, [
+    { type: "text", text: "Loaded pixel.png" },
+    { type: "image_url", image_url: { url: "data:image/png;base64,abc" } },
+  ]);
+  assert.deepEqual(visionResult[0]?.content, [
     { type: "text", text: "Loaded pixel.png" },
     { type: "image_url", image_url: { url: "data:image/png;base64,abc" } },
   ]);
@@ -108,6 +117,29 @@ test("OpenAIMessageConverter filters image content for non-multimodal models", (
 
   assert.equal(result.length, 1);
   assert.deepEqual(result[0]?.content, [{ type: "text", text: "Loaded pixel.png" }]);
+});
+
+// 上游 v0.3.1 新增用例：multimodal 显式配置覆盖模型列表推断
+test("OpenAIMessageConverter multimodal config overrides model-based filtering", () => {
+  const c = converter();
+  const messages: SessionMessage[] = [
+    msg({
+      role: "system",
+      content: "Loaded pixel.png",
+      contentParams: [{ type: "image_url", image_url: { url: "data:image/png;base64,abc" } }],
+    }),
+  ];
+
+  // "off" drops image content even for a multimodal model.
+  const off = c.buildMessages(messages, false, "gpt-4o", "off") as Array<{ content: unknown }>;
+  assert.deepEqual(off[0]?.content, [{ type: "text", text: "Loaded pixel.png" }]);
+
+  // "on" keeps image content even for a non-multimodal model.
+  const on = c.buildMessages(messages, false, "deepseek-chat", "on") as Array<{ content: unknown }>;
+  assert.deepEqual(on[0]?.content, [
+    { type: "text", text: "Loaded pixel.png" },
+    { type: "image_url", image_url: { url: "data:image/png;base64,abc" } },
+  ]);
 });
 
 test("OpenAIMessageConverter injects reasoning_content in thinking mode", () => {
@@ -459,7 +491,7 @@ test("OpenAIMessageConverter.getTrailingPendingToolCallMessage returns empty whe
 });
 
 // ---------------------------------------------------------------------------
-// Qwen3 兼容：对话中间 system 消息转换为 user 消息
+// fork 保留用例：Qwen3 兼容 —— 对话中间 system 消息转换为 user 消息
 // ---------------------------------------------------------------------------
 
 test("Qwen3 模型：对话中间的 system 消息被转换为 user 消息", () => {

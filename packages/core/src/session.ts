@@ -7,9 +7,12 @@ import ejs from "ejs";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { launchNotifyScript } from "./common/notify";
 import { buildThinkingRequestOptions } from "./common/openai-thinking";
+// 合并说明：DEEPSEEK_V4_MODELS 为 fork 侧 compact 阈值特判所需；buildSkillCatalogPrompt
+// 为上游 v0.3.1 技能目录提示词所需；getDefaultSkillPrompt 为 fork 侧默认技能所需，全部保留
 import { DEEPSEEK_V4_MODELS } from "./common/model-capabilities";
 import { readTextFileWithMetadata } from "./common/file-utils";
 import {
+  buildSkillCatalogPrompt,
   buildSkillDocumentsPrompt,
   getCompactPrompt,
   getDefaultSkillPrompt,
@@ -23,15 +26,32 @@ import {
 import {
   ToolExecutor,
   type CreateOpenAIClient,
+  // 合并说明：CreateLLMClient 为 fork 侧 B1 统一 LLM 工厂类型；PluginRateLimitedTool /
+  // SharpLoader / ToolExecutionFollowUpMessage / ToolExecutionResult 为上游 v0.3.1
+  // 多模态与限流插件所需类型，两侧类型全部保留
   type CreateLLMClient,
+  type PluginRateLimitedTool,
   type ProcessTimeoutControl,
   type ProcessTimeoutInfo,
+  type SharpLoader,
   type ToolCallExecution,
+  type ToolExecutionFollowUpMessage,
   type ToolExecutionHooks,
+  type ToolExecutionResult,
 } from "./tools/executor";
 import { McpManager } from "./mcp/mcp-manager";
 import type { McpServerConfig, PermissionScope, PermissionSettings } from "./settings";
 import { resolveCurrentSettings } from "./settings";
+// 上游 v0.3.1：Files API 默认值与自动 compact 窗口计算，供 filesApi / autoCompactWindow 消费
+import {
+  DEFAULT_FILE_EXPIRES_AFTER_SECONDS,
+  DEFAULT_FILE_QUOTA_CLEANUP_BATCH,
+  DEFAULT_FILE_REFRESH_MARGIN_SECONDS,
+  DEFAULT_FILES_API_TIMEOUT_MS,
+  DEFAULT_MAX_REQUEST_FILES_BYTES,
+  getDefaultAutoCompactWindow,
+} from "./settings";
+// fork 侧 B1：ProviderFactory 统一 LLM provider 路由（openai/anthropic）
 import { ProviderFactory } from "./providers/provider-factory";
 import type { LLMClient, LLMResponse, LLMToolDefinition, LLMUsage } from "./providers/llm-provider";
 // Usage 追踪模块（从 session.ts 抽取，见 docs/dev/review.md CRITICAL-1 模块 2）
@@ -75,7 +95,10 @@ import { DefaultSymbolGraphAdapter } from "./v2/context/default-symbol-graph-ada
 import { registerInterruptTools } from "./interrupts/register-tools";
 import type { InterruptibleSessionManager } from "./interrupts/llm-tools";
 import { killProcessTree } from "./common/process-tree";
+// fork 侧：文件历史协调器（会话文件历史记录）
 import { FileHistoryCoordinator } from "./file-history-coordinator";
+// 上游 v0.3.1：基于 git 的文件历史检查点，供多模态/文件历史回滚场景消费
+import { GitFileHistory, type FileHistoryCheckpointResult } from "./common/file-history";
 import { clearSessionState, getSnippet, rebuildSessionStateFromHistory } from "./common/state";
 import {
   appendProjectPermissionAllows,
@@ -175,6 +198,14 @@ import type {
 // InjectInterruptError 是值（错误类），需要值导入而非 type 导入
 // 用于 createChatCompletionStream 抛出 + activateSession catch 块 instanceof 判定
 import { InjectInterruptError } from "./interrupts/index";
+// 上游 v0.3.1：多模态能力判定（图片消息是否启用）与 DeepSeek Files API 文件存储
+import { supportsMultimodal, type MultimodalMode } from "./common/model-capabilities";
+import {
+  decodeDeepSeekImageDataUrl,
+  DeepSeekFileStore,
+  type DeepSeekFileReference,
+  type DeepSeekFilesPolicy,
+} from "./common/deepseek-files";
 
 export type { PermissionScope } from "./settings";
 export type {
@@ -190,7 +221,8 @@ const MAX_SESSION_ENTRIES = 50;
 const MAX_PROJECT_CODE_LENGTH = 64;
 const PROJECT_CODE_HASH_LENGTH = 16;
 const BACKGROUND_FAILURE_LOG_TAIL_CHARS = 4000;
-const DEFAULT_COMPACT_PROMPT_TOKEN_THRESHOLD = 128 * 1024;
+// DeepSeek V4 系列 compact 阈值固定 512K（模型支持 1M 上下文）
+// 注：与上游 getDefaultAutoCompactWindow("deepseek-v4-*") = 1M/2 数值一致，两侧语义等价
 const DEEPSEEK_V4_COMPACT_PROMPT_TOKEN_THRESHOLD = 512 * 1024;
 const PLAN_MODE_ON_STATUS_MESSAGE = "  └ Set Plan Mode on. Awaiting <proposed_plan>.";
 const PLAN_MODE_OFF_STATUS_MESSAGE = "  └ Set Plan Mode off.";
@@ -212,23 +244,28 @@ type ChatCompletionDebugOptions = {
 /**
  * 获取 compact 阈值（token 数）
  *
- * 优先使用 contextWindow * 0.8（预留 20% 给 output + tool 结果），
- * 避免上下文窗口刚好满载时 API 返回 400 超限错误。
- *
- * DeepSeek V4 系列保留原 512K 阈值（模型支持 1M 上下文，不受 128K 限制）。
+ * 融合语义（fork + 上游 v0.3.1）：
+ * 1. DeepSeek V4 系列固定 512K（fork 常量，与上游 getDefaultAutoCompactWindow 的 1M/2 数值一致）；
+ * 2. 显式传入 contextWindow 时采用 fork 语义：contextWindow * 0.8（预留 20% 给 output + tool 结果），
+ *    避免上下文窗口刚好满载时 API 返回 400 超限错误；
+ * 3. 未传入 contextWindow 时采用上游语义：按模型推断默认 autoCompact 窗口的一半
+ *    （DeepSeek V4 = 1M/2，其余模型 256K/2 = 128K）。
  *
  * @param model 模型名称（用于 DeepSeek V4 特殊处理）
- * @param contextWindow 模型上下文窗口大小（token 数），默认 131072
+ * @param contextWindow 模型上下文窗口大小（token 数），可选；未传时按模型默认值推断
  * @returns compact 阈值（超过此值时触发会话压缩）
  */
-export function getCompactPromptTokenThreshold(model: string, contextWindow: number = 131072): number {
+export function getCompactPromptTokenThreshold(model: string, contextWindow?: number): number {
   // DeepSeek V4 系列保留原阈值（512K，模型支持 1M 上下文）
   if (DEEPSEEK_V4_MODELS.has(model)) {
     return DEEPSEEK_V4_COMPACT_PROMPT_TOKEN_THRESHOLD;
   }
-  // 其他模型：contextWindow * 0.8（预留 20% 给 output + tool 结果）
-  // 确保在 API 调用前 compact，避免超限 400 错误
-  return Math.floor(contextWindow * 0.8);
+  // 显式传入 contextWindow：预留 20% 给 output + tool 结果，确保在 API 调用前 compact
+  if (typeof contextWindow === "number" && contextWindow > 0) {
+    return Math.floor(contextWindow * 0.8);
+  }
+  // 未传入 contextWindow：采用上游 v0.3.1 语义（按模型推断默认窗口的一半）
+  return getDefaultAutoCompactWindow(model);
 }
 
 // Keep project storage paths short enough for Git's internal files on Windows.
@@ -261,6 +298,31 @@ function sanitizeProjectCodePart(value: string): string {
     .replace(/^[-.]+|[-.]+$/g, "");
 }
 
+/**
+ * 递归替换字符串值（上游 v0.3.1）：用于会话消息中源目录 → 目标目录的路径重写
+ * （session fork/恢复到新目录时，把历史消息里的旧绝对路径批量替换为新路径）。
+ *
+ * @param value 任意 JSON 兼容值（字符串/数组/对象/其他）
+ * @param search 待替换的子串（旧路径）
+ * @param replacement 替换后的子串（新路径）
+ * @returns 替换后的新值（不修改原值）
+ */
+function replaceStringValues(value: unknown, search: string, replacement: string): unknown {
+  if (typeof value === "string") {
+    return value.split(search).join(replacement);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => replaceStringValues(item, search, replacement));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, replaceStringValues(item, search, replacement)])
+    );
+  }
+  return value;
+}
+// 注：上游在此处还定义了本地 isUsageRecord（判断普通对象），与 fork 侧已迁移到
+// ./usage-tracker.ts 的同名函数冲突，此处统一采用 usage-tracker 导入版本，避免重复定义
 function summarizeCompletionOptions(options?: Record<string, unknown>): Record<string, unknown> | undefined {
   if (!options) {
     return undefined;
@@ -274,6 +336,7 @@ function summarizeCompletionOptions(options?: Record<string, unknown>): Record<s
 // Usage 相关函数（isUsageRecord/addUsageValue/accumulateUsage/usageWithRequestCount/
 // accumulateUsagePerModel/getTotalTokens/toModelUsage）已迁移到 ./usage-tracker.ts
 // 详见 docs/dev/review.md CRITICAL-1 模块 2
+// 注：上游 v0.3.1 在此处内联定义了同名函数，两侧实现等价，统一采用 usage-tracker 模块版本
 
 export type SessionStatus =
   | "failed"
@@ -286,6 +349,7 @@ export type SessionStatus =
   | "permission_denied";
 
 // ModelUsage 类型已迁移到 ./usage-tracker.ts（通过 import + re-export 引入）
+// 注：上游 v0.3.1 在此处内联定义了该类型，字段集与 usage-tracker 版本一致
 
 export type SessionProcessEntry = {
   startTime: string;
@@ -319,6 +383,13 @@ export type SessionEntry = {
   processes: Map<string, SessionProcessEntry> | null; // {pid: process info}
   askPermissions?: AskPermissionRequest[];
   planMode?: boolean;
+  // 上游 v0.3.1：限流插件命中的工具信息（供 CLI 渲染限流提示）
+  pluginRateLimitedTool?: PluginRateLimitedTool;
+  // 上游 v0.3.1：会话 fork 来源（session fork/恢复到新目录时的溯源信息）
+  forkedFrom?: {
+    sessionId: string;
+    messageId: string;
+  };
 };
 
 export type SessionsIndex = {
@@ -337,6 +408,8 @@ export type MessageMeta = {
   isSummary?: boolean;
   isModelChange?: boolean;
   skill?: SkillInfo;
+  // 上游 v0.3.1：技能目录快照（技能列表变化时随消息持久化，供恢复会话后重建目录提示）
+  skillCatalog?: Array<{ name: string; description: string }>;
   permissions?: MessageToolPermission[];
   userPrompt?: UserPromptContent;
 };
@@ -382,6 +455,12 @@ export type UserPromptContent = {
   messageParams?: Record<string, unknown> | null;
 };
 
+// 上游 v0.3.1：多模态持久化图片（粘贴/拖拽图片在会话存储中的二进制表示）
+type PersistedPromptImage = {
+  buffer: Buffer;
+  extension: ".jpg" | ".png" | ".webp";
+};
+
 export type SkillInfo = {
   name: string;
   path: string;
@@ -390,7 +469,13 @@ export type SkillInfo = {
   allowImplicitInvocation?: boolean;
 };
 
-type SessionManagerOptions = {
+/**
+ * 会话管理器选项（fork + 上游 v0.3.1 融合）
+ *
+ * - fork 侧：createLLMClient 统一 LLM 工厂、EAG 系列可选注入、中断/后台任务注入、V2 上下文钩子；
+ * - 上游侧：multimodal / filesApi* / contextWindow / autoCompactWindow 等新设置字段。
+ */
+export type SessionManagerOptions = {
   projectRoot: string;
   createOpenAIClient: CreateOpenAIClient;
   /**
@@ -402,6 +487,17 @@ type SessionManagerOptions = {
   createLLMClient?: CreateLLMClient;
   getResolvedSettings: () => {
     model: string;
+    // 上游 v0.3.1：多模态开关与 Files API 配置
+    multimodal?: MultimodalMode;
+    filesApiEnabled?: boolean;
+    filesApiTimeoutMs?: number;
+    fileExpiresAfterSeconds?: number;
+    fileRefreshMarginSeconds?: number;
+    fileQuotaCleanupBatch?: number;
+    maxRequestFilesBytes?: number;
+    // 上游 v0.3.1：上下文窗口与自动 compact 窗口（token 数）
+    contextWindow?: number;
+    autoCompactWindow?: number;
     timeout?: number;
     webSearchTool?: string;
     mcpServers?: Record<string, McpServerConfig>;
@@ -690,6 +786,11 @@ type SessionManagerOptions = {
    * 不可变优先（§5.12.4 G-A6d）：构造后字段不可变，循环内不可被 LLM 修改。
    */
   contextHook?: SessionContextHook;
+  // 上游 v0.3.1：sharp 图片库懒加载工厂（可选注入，ReadImage/UnderstandImage 图片工具依赖，
+  // 未注入时图片工具按上游原语义降级处理）
+  loadSharp?: SharpLoader;
+  // 上游 v0.3.1：非交互模式标志（exec/headless 场景抑制交互式提示，默认 false）
+  nonInteractive?: boolean;
 };
 
 export type LlmStreamProgress = {
@@ -726,9 +827,22 @@ const MAX_EAG_CLARIFICATION_ROUNDS = 3;
 export class SessionManager {
   private readonly projectRoot: string;
   private readonly createOpenAIClient: CreateOpenAIClient;
+  // B1：统一 LLM 客户端工厂注入（可选，测试缝合点；未注入时走 resolveCurrentSettings + ProviderFactory）
   private readonly createLLMClientOverride?: CreateLLMClient;
   private readonly getResolvedSettings: () => {
     model: string;
+    // 上游 v0.3.1：多模态开关与 Files API 配置
+    multimodal?: MultimodalMode;
+    filesApiEnabled?: boolean;
+    filesApiTimeoutMs?: number;
+    fileExpiresAfterSeconds?: number;
+    fileRefreshMarginSeconds?: number;
+    fileQuotaCleanupBatch?: number;
+    maxRequestFilesBytes?: number;
+    // 上游 v0.3.1：上下文窗口与自动 compact 窗口（token 数）
+    contextWindow?: number;
+    autoCompactWindow?: number;
+    // fork 侧：LLM 请求超时（毫秒）
     timeout?: number;
     webSearchTool?: string;
     mcpServers?: Record<string, McpServerConfig>;
@@ -740,6 +854,8 @@ export class SessionManager {
   private readonly onLlmStreamProgress?: (progress: LlmStreamProgress) => void;
   private readonly onMcpStatusChanged?: () => void;
   private readonly onProcessStdout?: (pid: number, chunk: string) => void;
+  // 上游 v0.3.1：非交互模式标志（exec/headless 场景抑制交互式提示）
+  private readonly nonInteractive: boolean;
   private activeSessionId: string | null = null;
   private activePromptController: AbortController | null = null;
   // SkillManager 实例（技能扫描/解析/去重/归一化，见 docs/dev/review.md CRITICAL-1 模块 3）
@@ -821,19 +937,30 @@ export class SessionManager {
   // - 当 LLM 返回 ask_clarification 时写入
   // - 用户下一轮回复命中时解析答案并回注 clarification，随后清除
   private readonly pendingEagClarifications = new Map<string, EagClarificationPending>();
+  // 上游 v0.3.1：DeepSeek Files API 文件存储（图片上传/file_id 引用/配额清理）
+  private readonly deepSeekFiles = new DeepSeekFileStore();
 
   constructor(options: SessionManagerOptions) {
     this.projectRoot = options.projectRoot;
     this.createOpenAIClient = options.createOpenAIClient;
+    // B1：统一 LLM 工厂注入（未注入时走默认 resolveCurrentSettings + ProviderFactory 路由）
     this.createLLMClientOverride = options.createLLMClient;
+    // 上游 v0.3.1：非交互模式标志赋值（exec/headless 场景）
+    this.nonInteractive = options.nonInteractive === true;
     this.getResolvedSettings = options.getResolvedSettings;
     this.onAssistantMessage = options.onAssistantMessage;
     this.onSessionEntryUpdated = options.onSessionEntryUpdated;
     this.onLlmStreamProgress = options.onLlmStreamProgress;
     this.onMcpStatusChanged = options.onMcpStatusChanged;
     this.onProcessStdout = options.onProcessStdout;
-    this.toolExecutor = new ToolExecutor(this.projectRoot, this.createOpenAIClient, this.mcpManager, () =>
-      this.createLLMClient()
+    // 合并说明：ToolExecutor 第 4 参保持 fork 侧 createLLMClient 工厂（B1 统一 LLM 路由），
+    // 第 5 参采纳上游 v0.3.1 的 loadSharp（sharp 图片库懒加载，ReadImage/UnderstandImage 依赖）
+    this.toolExecutor = new ToolExecutor(
+      this.projectRoot,
+      this.createOpenAIClient,
+      this.mcpManager,
+      () => this.createLLMClient(),
+      options.loadSharp
     );
     // V2 codemap 工具注入：将 codemap_query / impact_analysis / flow_trace / risk_scan
     // 4 个工具注册到 ToolExecutor，图谱不可用时降级返回空结果（NFR-4 零回归）
@@ -951,9 +1078,11 @@ export class SessionManager {
   buildOpenAIMessages(
     messages: SessionMessage[],
     thinkingEnabled: boolean,
-    model: string
+    model: string,
+    // 上游 v0.3.1：多模态模式（可选，默认 "default" 保持 v1 行为，向后兼容）
+    multimodal?: MultimodalMode
   ): ChatCompletionMessageParam[] {
-    return this.messageConverter.buildMessages(messages, thinkingEnabled, model);
+    return this.messageConverter.buildMessages(messages, thinkingEnabled, model, multimodal);
   }
 
   async initMcpServers(servers?: Record<string, McpServerConfig>): Promise<void> {
@@ -995,6 +1124,7 @@ export class SessionManager {
   }
 
   // Token 估算与格式化（已迁移到 ./stream-aggregator.ts，见 docs/dev/review.md CRITICAL-1 模块 1）
+  // 注：上游 v0.3.1 在此处内联了同语义实现（CJK 0.6/其他 0.3 加权、k 格式化），两侧等价
   private estimateStreamTokens(text: string): number {
     return estimateStreamTokensImpl(text);
   }
@@ -1020,12 +1150,133 @@ export class SessionManager {
     });
   }
 
+  // 中断类错误判定与中断抛出（已迁移到 ./stream-aggregator.ts，见 CRITICAL-1 模块 1）
+  // 注：上游 v0.3.1 内联实现（AbortError/APIUserAbortError 判定）与模块版语义等价
   private isAbortLikeError(error: unknown): boolean {
     return isAbortLikeErrorImpl(error);
   }
 
   private throwIfAborted(signal?: AbortSignal | null): void {
     throwIfAbortedImpl(signal);
+  }
+
+  /**
+   * 解析 DeepSeek Files API 设置（上游 v0.3.1 新增）
+   *
+   * 从 resolved settings 中读取 filesApiEnabled 与各文件生命周期参数，
+   * 未配置时回退到 settings.ts 导出的默认值（超时 60s / 过期 7 天 /
+   * 刷新余量 1h / 配额清理批量 100 / 单请求上限 128MB）。
+   *
+   * @returns enabled 是否启用 Files API、maxRequestFilesBytes 单请求字节上限、policy 上传策略
+   */
+  private getDeepSeekFilesSettings(): {
+    enabled: boolean;
+    maxRequestFilesBytes: number;
+    policy: DeepSeekFilesPolicy;
+  } {
+    const settings = this.getResolvedSettings();
+    return {
+      enabled: settings.filesApiEnabled === true,
+      maxRequestFilesBytes: settings.maxRequestFilesBytes ?? DEFAULT_MAX_REQUEST_FILES_BYTES,
+      policy: {
+        timeoutMs: settings.filesApiTimeoutMs ?? DEFAULT_FILES_API_TIMEOUT_MS,
+        expiresAfterSeconds: settings.fileExpiresAfterSeconds ?? DEFAULT_FILE_EXPIRES_AFTER_SECONDS,
+        refreshMarginSeconds: settings.fileRefreshMarginSeconds ?? DEFAULT_FILE_REFRESH_MARGIN_SECONDS,
+        quotaCleanupBatch: settings.fileQuotaCleanupBatch ?? DEFAULT_FILE_QUOTA_CLEANUP_BATCH,
+      },
+    };
+  }
+
+  /**
+   * 构建带 DeepSeek Files API 文件引用的消息列表（上游 v0.3.1 新增）
+   *
+   * 多模态启用时，把消息中的 data URL 图片抽取出来上传到 DeepSeek Files API，
+   * 并将 image_url 占位替换为 { type: "file", file_id } 引用，
+   * 避免大图直接内联到请求体（受 maxRequestFilesBytes 上限保护）。
+   *
+   * @param messages 会话消息列表
+   * @param thinkingEnabled 是否启用思考模式
+   * @param model 模型名称
+   * @param apiKey DeepSeek API Key（上传文件用）
+   * @param signal 中断信号
+   * @returns 转换后的消息列表与上传得到的文件引用列表
+   */
+  private async buildMessagesWithDeepSeekFiles(
+    messages: SessionMessage[],
+    thinkingEnabled: boolean,
+    model: string,
+    apiKey: string,
+    signal: AbortSignal
+  ): Promise<{ messages: ChatCompletionMessageParam[]; references: DeepSeekFileReference[] }> {
+    const settings = this.getDeepSeekFilesSettings();
+    const converted = this.messageConverter.buildMessages(messages, thinkingEnabled, model, "on");
+    const images: Array<{
+      messageIndex: number;
+      contentIndex: number;
+      image: ReturnType<typeof decodeDeepSeekImageDataUrl>;
+    }> = [];
+    let totalBytes = 0;
+
+    // 遍历转换后的消息，收集全部 image_url 内容块并校验总字节上限
+    for (let messageIndex = 0; messageIndex < converted.length; messageIndex += 1) {
+      const content = (converted[messageIndex] as { content?: unknown }).content;
+      if (!Array.isArray(content)) {
+        continue;
+      }
+      for (let contentIndex = 0; contentIndex < content.length; contentIndex += 1) {
+        const part = content[contentIndex] as { type?: unknown; image_url?: { url?: unknown } };
+        if (part.type !== "image_url" || typeof part.image_url?.url !== "string") {
+          continue;
+        }
+        const image = decodeDeepSeekImageDataUrl(part.image_url.url, images.length);
+        totalBytes += image.buffer.byteLength;
+        if (totalBytes > settings.maxRequestFilesBytes) {
+          throw new Error(
+            `Images in this request exceed the configured ${settings.maxRequestFilesBytes}-byte Files API limit.`
+          );
+        }
+        images.push({ messageIndex, contentIndex, image });
+      }
+    }
+
+    // 并行上传全部图片，拿到 file_id 引用
+    const references = await Promise.all(
+      images.map(({ image }) => this.deepSeekFiles.ensureUploaded(image, apiKey, settings.policy, signal))
+    );
+    // 浅拷贝含数组 content 的消息，避免原地修改缓存数据
+    const result = converted.map((message) => {
+      const content = (message as { content?: unknown }).content;
+      return Array.isArray(content) ? ({ ...message, content: [...content] } as ChatCompletionMessageParam) : message;
+    });
+    // 将 image_url 占位替换为 file 引用
+    for (let index = 0; index < images.length; index += 1) {
+      const image = images[index];
+      const content = (result[image.messageIndex] as { content: unknown[] }).content;
+      content[image.contentIndex] = { type: "file", file_id: references[index].fileId };
+    }
+    return { messages: result, references };
+  }
+
+  /**
+   * 判定错误是否为 DeepSeek Files API 拒绝文件引用错误（上游 v0.3.1 新增）
+   *
+   * 仅识别 HTTP 400 且错误消息同时命中「file 相关词」与「缺失/无效描述」的场景，
+   * 用于上传引用失效时的降级重试（如文件已过期/删除/不属于当前账号）。
+   *
+   * @param error 捕获到的错误对象
+   * @returns 是否为可降级的文件引用被拒错误
+   */
+  private isRejectedDeepSeekFile(error: unknown): boolean {
+    const status = (error as { status?: unknown } | null)?.status;
+    if (status !== 400) {
+      return false;
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    const file = /\bfile(?:[_ -]?(?:id|api|not[_ -]?found|deleted|expired))?/i.test(detail);
+    const missing =
+      /(?:expired|not[_ -]?found|deleted|do(?:es)? not exist|not created under (?:this|your) account)/i.test(detail);
+    const invalidId = /(?:invalid.{0,20}file[_ -]?(?:id|api)|file[_ -]?(?:id|api).{0,20}invalid)/i.test(detail);
+    return file && (missing || invalidId);
   }
 
   private async createChatCompletionStream(
@@ -1095,7 +1346,11 @@ export class SessionManager {
           body: Record<string, unknown>,
           options?: Record<string, unknown>
         ) => Promise<unknown>
-      )(streamRequest, sdkOptions);
+      )(
+        // fork 侧：传 sdkOptions（仅含安全控制器的 signal），非 SDK 标准字段已在上方过滤
+        streamRequest,
+        sdkOptions
+      );
     } catch (error) {
       this.logChatCompletionDebug(debug, {
         timestamp: new Date().toISOString(),
@@ -1286,6 +1541,7 @@ export class SessionManager {
       });
       throw error;
     } finally {
+      // fork 侧：清理超时定时器与外部 signal 监听器，避免泄漏
       if (timeoutHandle) {
         clearTimeout(timeoutHandle);
       }
@@ -1660,6 +1916,10 @@ ${agentInstructions}
     systemPrompt += "```\n" + JSON.stringify(simpleSkills, null, 2) + "\n```";
 
     try {
+      // 合并说明：保留 fork 侧实现——相比上游增加了三重防护：
+      // 1) provider 路由（anthropic 走 createMessage，openai 走 createChatCompletionStream）
+      // 2) max_tokens 限制 + 显式禁用 thinking（避免 Qwen3/DeepSeek-R1 循环 reasoning）
+      // 3) maxReasoningLength/streamTimeoutMs 流式安全参数
       let content = "";
       if (anthropicClient) {
         // Anthropic 通路：非流式 createMessage（结果被整体 JSON.parse，无增量消费，流式零价值）；
@@ -1755,6 +2015,8 @@ ${agentInstructions}
     }
   }
 
+  // 技能扫描根目录/技能列表/路径解析/提示词构建等（已迁移到 ./skill-manager.ts，
+  // 见 docs/dev/review.md CRITICAL-1 模块 3；上游 v0.3.1 内联实现与 SkillManager 语义一致）
   private getSkillScanRoots(): Array<{ root: string; displayRoot: string }> {
     return this.skillManager.getSkillScanRoots();
   }
@@ -1813,6 +2075,115 @@ ${agentInstructions}
       this.appendSessionMessage(sessionId, skillMessage);
       this.onAssistantMessage(skillMessage, true);
     }
+  }
+
+  // === 上游 v0.3.1：技能目录（skillCatalog）辅助方法 ===
+  // 随 MessageMeta.skillCatalog 字段一并采纳：会话恢复后可重建技能目录提示，
+  // 且技能列表变化时仅在目录内容变化时追加新的 system 消息。
+
+  /**
+   * 从会话历史中提取最近一次记录的技能目录快照（system 消息 meta.skillCatalog）。
+   *
+   * @param sessionId 会话 ID
+   * @returns 去重后的技能目录条目（name + description）
+   */
+  private listPreloadedSkillCatalog(sessionId: string): Array<{ name: string; description: string }> {
+    const entries = new Map<string, { name: string; description: string }>();
+    for (const message of this.listSessionMessages(sessionId)) {
+      if (message.role !== "system") {
+        continue;
+      }
+      const catalog = message.meta?.skillCatalog;
+      if (!Array.isArray(catalog)) {
+        continue;
+      }
+      for (const entry of catalog) {
+        if (!entry || typeof entry.name !== "string" || !entry.name || entries.has(entry.name)) {
+          continue;
+        }
+        entries.set(entry.name, {
+          name: entry.name,
+          description: typeof entry.description === "string" ? entry.description : "",
+        });
+      }
+    }
+    return Array.from(entries.values());
+  }
+
+  /**
+   * 合并两个技能目录快照：以 previous 为基，追加 next 中未出现过的条目（按 name 去重）。
+   *
+   * @param previous 既有目录快照
+   * @param next 新目录快照
+   * @returns 合并后的目录快照
+   */
+  private mergeSkillCatalog(
+    previous: Array<{ name: string; description: string }>,
+    next: Array<{ name: string; description: string }>
+  ): Array<{ name: string; description: string }> {
+    const merged = [...previous];
+    const seen = new Set(previous.map((entry) => entry.name));
+    for (const entry of next) {
+      if (seen.has(entry.name)) {
+        continue;
+      }
+      seen.add(entry.name);
+      merged.push(entry);
+    }
+    return merged;
+  }
+
+  /**
+   * 追加技能目录 system 消息（内容与最近一条目录消息相同时跳过，避免重复刷屏）。
+   *
+   * @param sessionId 会话 ID
+   * @param skills 技能目录条目列表
+   */
+  private appendSkillCatalogMessage(sessionId: string, skills: Array<{ name: string; description: string }>): void {
+    if (skills.length === 0) {
+      return;
+    }
+    const content = buildSkillCatalogPrompt(skills);
+    const lastCatalogMessage = [...this.listSessionMessages(sessionId)]
+      .reverse()
+      .find((message) => message.role === "system" && Array.isArray(message.meta?.skillCatalog));
+    if (lastCatalogMessage?.content === content) {
+      return;
+    }
+    const message = this.buildSystemMessage(sessionId, content, null, false, { skillCatalog: skills });
+    this.appendSessionMessage(sessionId, message);
+  }
+
+  /**
+   * 按名称加载技能（上游 v0.3.1：供 LLM skill 工具调用）。
+   *
+   * @param sessionId 会话 ID
+   * @param skillName 技能名称
+   * @returns 工具执行结果（未找到/已加载/返回技能提示词三种情形）
+   */
+  async loadSkillByName(sessionId: string, skillName: string): Promise<ToolExecutionResult> {
+    const skills = await this.listSkills(sessionId);
+    const skill = skills.find((candidate) => candidate.name === skillName);
+    if (!skill) {
+      return {
+        ok: false,
+        name: "skill",
+        error: `Unknown skill: ${skillName}. Check the available skills catalog for exact skill names.`,
+      };
+    }
+    if (skill.isLoaded) {
+      return {
+        ok: true,
+        name: "skill",
+        output: `Skill already loaded: ${skill.name}.`,
+      };
+    }
+    return {
+      ok: true,
+      name: "skill",
+      output: this.buildSkillPrompt(skill),
+      metadata: { skill: { ...skill, isLoaded: true } },
+    };
   }
 
   getActiveSessionId(): string | null {
@@ -1874,6 +2245,8 @@ ${agentInstructions}
     this.throwIfAborted(signal);
 
     const sessionId = crypto.randomUUID();
+    // fork 侧：文件历史协调器初始化会话分支（coordinator 与上游内联方法操作同一
+    // <projectDir>/file-history/.git 仓库，此处用 coordinator 版本避免重复初始化）
     this.fileHistoryCoordinator.ensureFileHistorySession(sessionId);
 
     // V2 上下文缓存刷新（新会话场景）：
@@ -1887,11 +2260,17 @@ ${agentInstructions}
       }
     }
 
+    // 上游 v0.3.1：多模态图片持久化（preparePromptImages 把 data URL 图片落盘为
+    // PersistedPromptImage 并替换 userPrompt 中的图片引用）；摘要在图片处理前捕获，
+    // 保证含图提示词的会话摘要仍取自原始文本
+    const originalSummary = userPrompt.text ? userPrompt.text.slice(0, 100) : "[Image Prompt]";
+    userPrompt = this.preparePromptImages(sessionId, userPrompt);
     const now = new Date().toISOString();
     const index = this.loadSessionsIndex();
     const entry: SessionEntry = {
       id: sessionId,
-      summary: userPrompt.text ? userPrompt.text.slice(0, 100) : "[Image Prompt]",
+      // 上游 v0.3.1：使用图片处理前捕获的原始摘要
+      summary: originalSummary,
       assistantReply: null,
       assistantThinking: null,
       assistantRefusal: null,
@@ -1932,6 +2311,7 @@ ${agentInstructions}
     const systemMessage = this.buildSystemMessage(sessionId, systemPrompt);
     this.appendSessionMessage(sessionId, systemMessage);
 
+    // fork 侧：默认技能提示词（getDefaultSkillPrompt，含 enabledSkills 过滤）
     const defaultSkillPrompt = getDefaultSkillPrompt({ enabledSkills: this.getResolvedSettings().enabledSkills });
     if (defaultSkillPrompt) {
       const defaultSkillMessage = this.buildSystemMessage(sessionId, defaultSkillPrompt);
@@ -1952,26 +2332,36 @@ ${agentInstructions}
 
     this.appendPlanModeTransitionMessages(sessionId, false, Boolean(userPrompt.planMode));
 
+    // fork 侧：用户提示检查点经 coordinator 记录（与上游 this.recordUserPromptCheckpoint
+    // 语义一致，统一走 coordinator 保持 fork 既有调用链）
     this.fileHistoryCoordinator.recordUserPromptCheckpoint(sessionId);
     const userMessage = this.buildUserMessage(sessionId, userPrompt);
     this.appendSessionMessage(sessionId, userMessage);
 
+    // 上游 v0.3.1：记录本轮匹配到的技能，供 skillCatalog 快照合并使用。
+    // 采纳上游语义：匹配到的技能仅记入技能目录快照（LLM 经 skill 工具按需加载），
+    // 不再自动注入技能消息——fork 旧的"匹配即注入"链路与目录快照设计冲突，
+    // 会导致同一技能既注入全文又出现在目录中，浪费上下文且违背 0.3.1 的按需加载设计
+    let matchedSkills: SkillInfo[] = [];
     if (userPrompt.text) {
       const skills = await this.listSkills();
       const skillNames = await this.identifyMatchingSkillNames(skills, userPrompt.text, { signal });
       this.throwIfAborted(signal);
       const skillSet = new Set(skillNames);
-      const matchedSkill = skills.filter((skill) => skillSet.has(skill.name));
-      if (Array.isArray(userPrompt.skills)) {
-        userPrompt.skills.push(...matchedSkill);
-      } else if (matchedSkill.length > 0) {
-        userPrompt.skills = matchedSkill;
-      }
+      matchedSkills = skills.filter((skill) => skillSet.has(skill.name));
     }
     userPrompt.skills = await this.normalizeSkills(userPrompt.skills);
     this.throwIfAborted(signal);
 
     this.appendSkillMessages(sessionId, userPrompt.skills);
+    // 上游 v0.3.1：追加技能目录快照消息（合并历史目录与本轮匹配技能，内容变化才追加）
+    this.appendSkillCatalogMessage(
+      sessionId,
+      this.mergeSkillCatalog(
+        this.listPreloadedSkillCatalog(sessionId),
+        matchedSkills.map((skill) => ({ name: skill.name, description: skill.description }))
+      )
+    );
 
     this.activeSessionId = sessionId;
     await this.activateSession(sessionId, controller);
@@ -1981,6 +2371,13 @@ ${agentInstructions}
   async replySession(sessionId: string, userPrompt: UserPromptContent, controller?: AbortController): Promise<void> {
     const signal = controller?.signal;
     this.throwIfAborted(signal);
+    // 上游 v0.3.1：会话不存在时兜底创建新会话；回复路径同样需要图片持久化
+    // （preparePromptImages 把 data URL 图片落盘并替换 userPrompt 中的图片引用）
+    if (!this.getSession(sessionId)) {
+      await this.createSession(userPrompt, controller);
+      return;
+    }
+    userPrompt = this.preparePromptImages(sessionId, userPrompt);
     appendProjectPermissionAllows(this.projectRoot, userPrompt.alwaysAllows, {
       inheritedPermissions: this.getResolvedSettings().permissions,
     });
@@ -1996,6 +2393,7 @@ ${agentInstructions}
       updateTime: now,
     }));
 
+    // fork 侧：会话条目更新失败（竞态下被清理）时兜底创建新会话，保持 fork 既有行为
     if (!updated) {
       await this.createSession(userPrompt, controller);
       return;
@@ -2020,6 +2418,9 @@ ${agentInstructions}
     // discriminated union 让 TypeScript 在 switch 分支自动收窄类型，避免类型断言
     // 命令字符串严格匹配（无参数），参数通过 messageParams 注入（D-S3-7）
     // 未注入对应 orchestrator 时各 handle 方法内部通知用户配置缺失（向后兼容）
+    // 合并冲突修复说明：此处原为错误拼接的重复 checkpoint 块（if 语句缺失方法体导致
+    // 大括号不平衡、eagCommand 声明丢失），已按 fork 版 replySession 顺序重建：
+    // EAG 命令分发 → 动态建议层 → 规则学习 Hook → reportNewPrompt → 检查点 → 用户消息
     const eagCommand = this.eagCommandParser.parse(userPrompt);
     if (eagCommand.kind !== "unknown") {
       this.activeSessionId = sessionId;
@@ -2122,6 +2523,9 @@ ${agentInstructions}
     this.reportNewPrompt();
 
     this.fileHistoryCoordinator.ensureFileHistorySession(sessionId);
+    // fork 侧：检查点统一走 fileHistoryCoordinator（与上游 this.ensureFileHistorySession/
+    // this.recordUserPromptCheckpoint 语义一致，操作同一 file-history git 仓库）；
+    // 用户手动改动文件时注入系统提示，告知 LLM 存在会话外修改
     const checkpoint = this.fileHistoryCoordinator.recordUserPromptCheckpoint(sessionId);
     if (checkpoint.changedFilePaths.length) {
       const content = `Note that the user manually modified these files:\n${checkpoint.changedFilePaths.join("\n")}`;
@@ -2130,22 +2534,29 @@ ${agentInstructions}
     const userMessage = this.buildUserMessage(sessionId, userPrompt);
     this.appendSessionMessage(sessionId, userMessage);
 
+    // 上游 v0.3.1：命中技能列表（用于下方技能目录消息合并）。
+    // 采纳上游语义：匹配技能仅记入目录快照（LLM 经 skill 工具按需加载），
+    // 不再自动注入技能消息（与 createSession 的语义调整保持一致）
+    let matchedSkills: SkillInfo[] = [];
     if (userPrompt.text) {
       const skills = await this.listSkills(sessionId);
       const skillNames = await this.identifyMatchingSkillNames(skills, userPrompt.text, { signal, sessionId });
       this.throwIfAborted(signal);
       const skillSet = new Set(skillNames);
-      const matchedSkill = skills.filter((skill) => skillSet.has(skill.name));
-      if (Array.isArray(userPrompt.skills)) {
-        userPrompt.skills.push(...matchedSkill);
-      } else if (matchedSkill.length > 0) {
-        userPrompt.skills = matchedSkill;
-      }
+      matchedSkills = skills.filter((skill) => skillSet.has(skill.name));
     }
     userPrompt.skills = await this.normalizeSkills(userPrompt.skills, sessionId);
     this.throwIfAborted(signal);
 
     this.appendSkillMessages(sessionId, userPrompt.skills);
+    // 上游 v0.3.1：追加技能目录消息（合并预加载目录与本次命中技能，去重后输出给 LLM）
+    this.appendSkillCatalogMessage(
+      sessionId,
+      this.mergeSkillCatalog(
+        this.listPreloadedSkillCatalog(sessionId),
+        matchedSkills.map((skill) => ({ name: skill.name, description: skill.description }))
+      )
+    );
     this.activeSessionId = sessionId;
     await this.activateSession(sessionId, controller);
   }
@@ -4627,9 +5038,20 @@ ${agentInstructions}
     permissionPrompt?: UserPromptContent
   ): Promise<void> {
     const startedAt = Date.now();
-    const { client, model, baseURL, temperature, thinkingEnabled, reasoningEffort, debugLogEnabled, notify, env } =
-      this.createOpenAIClient();
+    const {
+      client,
+      apiKey,
+      model,
+      baseURL,
+      temperature,
+      thinkingEnabled,
+      reasoningEffort,
+      debugLogEnabled,
+      notify,
+      env,
+    } = this.createOpenAIClient();
     // Claude 主对话流式接入（2026-07-18 设计 §3）：方法开头一次性解析统一 LLM 客户端，循环内复用。
+    // 上游 v0.3.1：解构出 apiKey，供 DeepSeek Files API 上传使用。
     // provider 判定取 llmClient.providerName 而非 settings.provider——单一事实源，
     // 且测试可经 createLLMClient 注入桩（B1 缝合点），无需改写 settings 文件。
     // provider=anthropic 且 apiKey 缺失时 createOpenAIClient() 与 createLLMClient() 同时返回空：
@@ -4762,10 +5184,12 @@ ${agentInstructions}
           }
         }
 
-        const compactPromptTokenThreshold = getCompactPromptTokenThreshold(
-          model,
-          resolveCurrentSettings(this.projectRoot).contextWindow
-        );
+        // 自动 compact 阈值：以上游 v0.3.1 语义为准——优先用户显式配置的 autoCompactWindow；
+        // 未配置时回落 getCompactPromptTokenThreshold（fork 增强版：传入 contextWindow，
+        // 按 contextWindow*0.8 计算，DeepSeek V4 系列保留 512K 特殊阈值）
+        const resolvedSettings = this.getResolvedSettings();
+        const compactPromptTokenThreshold =
+          resolvedSettings.autoCompactWindow ?? getCompactPromptTokenThreshold(model, resolvedSettings.contextWindow);
         if (session.activeTokens > compactPromptTokenThreshold) {
           const message = this.buildAssistantMessage(
             sessionId,
@@ -4811,10 +5235,32 @@ ${agentInstructions}
           }
         }
 
+        // 上游 v0.3.1：请求前预处理会话消息（多模态图片消息等转换为请求所需形态）
+        const sessionMessages = this.prepareSessionMessagesForRequest(this.listSessionMessages(sessionId));
+        // 上游 v0.3.1：DeepSeek Files API 设置（启用时大文件上传至 Files API，消息中仅保留引用）
+        const filesSettings = this.getDeepSeekFilesSettings();
+        if (filesSettings.enabled && !apiKey) {
+          throw new Error("Files API is enabled, but no API key is available for uploads.");
+        }
+        // 上游 v0.3.1：Files API 启用时构建「引用替换后」的消息（大文件上传并替换为引用）；
+        // 未启用时引用列表为空，消息体由下方 OpenAI 分支经 converter 构建（V2 上下文 hook + 多模态）
+        let prepared = filesSettings.enabled
+          ? await this.buildMessagesWithDeepSeekFiles(
+              sessionMessages,
+              thinkingEnabled,
+              model,
+              apiKey!,
+              sessionController.signal
+            )
+          : {
+              messages: [] as ChatCompletionMessageParam[],
+              references: [] as DeepSeekFileReference[],
+            };
         const messages = this.messageConverter.buildMessages(
-          this.listSessionMessages(sessionId),
+          sessionMessages,
           thinkingEnabled,
-          model
+          model,
+          this.getResolvedSettings().multimodal
         );
         // v1.1 修改：传入 model 参数，支持 Qwen3 的 chat_template_kwargs.enable_thinking 格式
         const thinkingOptions = buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort, model);
@@ -4829,7 +5275,7 @@ ${agentInstructions}
         // 设计约束（Karpathy Surgical Changes）：
         // - InjectInterruptError 是流控制信号（用户主动 /inject 触发），不是错误
         // - 捕获后不设置 session 状态为 failed/interrupted，直接 continue 进入下一轮迭代
-        // - 下一轮迭代头部（E2 扩展点，L4887）drain 队列，合成 system 消息追加到会话
+        // - 下一轮迭代头部（E2 扩展点）drain 队列，合成 system 消息追加到会话
         // - LLM 看到 system 消息自然调整方向（§5.1.1 数据流）
         // - 其他错误向上抛给 activateSession 外层 catch（保持现有错误处理行为不变，零回归）
         // - 未注入 interruptQueue 时，createChatCompletionStream / createLlmMessageStream
@@ -4840,7 +5286,7 @@ ${agentInstructions}
             ? await this.createLlmMessageStream(
                 anthropicClient,
                 {
-                  messages: this.listSessionMessages(sessionId),
+                  messages: sessionMessages,
                   tools: getTools(this.getPromptToolOptions(), this.mcpToolDefinitions).map((tool) => ({
                     name: tool.function.name,
                     description: tool.function.description,
@@ -4862,7 +5308,8 @@ ${agentInstructions}
                 {
                   model,
                   ...(temperature !== undefined ? { temperature } : {}),
-                  messages,
+                  // 上游 v0.3.1：Files API 启用时使用上传后带引用的消息；未启用时使用 converter 构建的多模态消息
+                  messages: filesSettings.enabled ? prepared.messages : messages,
                   tools: getTools(this.getPromptToolOptions(), this.mcpToolDefinitions),
                   ...thinkingOptions,
                 },
@@ -4883,8 +5330,40 @@ ${agentInstructions}
           if (error instanceof InjectInterruptError) {
             continue;
           }
-          // 其他错误向上抛给 activateSession 外层 catch（保持现有错误处理行为不变）
-          throw error;
+          // 上游 v0.3.1：Files API 引用被模型拒绝（4xx 拒收）时，失效相关文件缓存并重建引用后重试；
+          // 非 Files API 场景或其他错误向上抛给 activateSession 外层 catch（保持现有错误处理行为不变）
+          if (!filesSettings.enabled || prepared.references.length === 0 || !this.isRejectedDeepSeekFile(error)) {
+            throw error;
+          }
+          for (const reference of prepared.references) {
+            this.deepSeekFiles.invalidate(reference, apiKey!);
+          }
+          prepared = await this.buildMessagesWithDeepSeekFiles(
+            sessionMessages,
+            thinkingEnabled,
+            model,
+            apiKey!,
+            sessionController.signal
+          );
+          // 重试：与首次 OpenAI 分支同参（Files API 引用已重建），超时控制与调试上下文保持一致
+          response = await this.createChatCompletionStream(
+            client,
+            {
+              model,
+              ...(temperature !== undefined ? { temperature } : {}),
+              messages: prepared.messages,
+              tools: getTools(this.getPromptToolOptions(), this.mcpToolDefinitions),
+              ...thinkingOptions,
+            },
+            { signal: sessionController.signal, streamTimeoutMs, maxReasoningLength },
+            sessionId,
+            {
+              enabled: debugLogEnabled,
+              location: "SessionManager.activateSession",
+              baseURL,
+              params: { iteration, temperature, thinkingEnabled, reasoningEffort },
+            }
+          );
         }
 
         const message = response.choices?.[0]?.message;
@@ -4908,7 +5387,8 @@ ${agentInstructions}
               toolCalls,
               settings: this.getResolvedSettings().permissions,
               forceAskScopes: this.getSession(sessionId)?.planMode ? PLAN_MODE_FORCE_ASK_SCOPES : undefined,
-              readPermissionExemptPaths: this.getSkillScanRoots().map((entry) => entry.root),
+              // 上游 v0.3.1：免读权限路径 = 技能扫描根目录 + 会话图片目录（多模态 ReadImage 读取所需）
+              readPermissionExemptPaths: this.getReadPermissionExemptPaths(sessionId),
               resolveSnippetPath: (id, snippetId) => getSnippet(id, snippetId)?.filePath,
             })
           : null;
@@ -5441,6 +5921,10 @@ ${agentInstructions}
     }));
 
     for (let i = startIndex; i < endIndex; i += 1) {
+      // 上游 v0.3.1：skillCatalog 目录快照消息不参与 compact（保持技能目录信息始终可见）
+      if (sessionMessages[i].meta?.skillCatalog) {
+        continue;
+      }
       sessionMessages[i] = { ...sessionMessages[i], compacted: true, updateTime: now };
     }
 
@@ -5470,14 +5954,48 @@ ${agentInstructions}
     this.saveSessionMessages(sessionId, sessionMessages);
   }
 
-  private getPromptToolOptions(): { model: string; webSearchEnabled: boolean; enabledSkills: Record<string, boolean> } {
+  // 工具注册选项（融合双方字段）：model/multimodal/nonInteractive 为上游 v0.3.1 新增，
+  // enabledSkills 为 fork P1-T2 新增（PureShowWidget 等 skill 关联工具的条件注册）
+  private getPromptToolOptions(): {
+    model: string;
+    multimodal?: MultimodalMode;
+    webSearchEnabled: boolean;
+    nonInteractive: boolean;
+    enabledSkills: Record<string, boolean>;
+  } {
     return {
       model: this.getResolvedSettings().model,
+      // 上游 v0.3.1：多模态模式（auto/on/off），决定注册 ReadImage 还是 UnderstandImage
+      multimodal: this.getResolvedSettings().multimodal,
       webSearchEnabled: true,
+      // 上游 v0.3.1：非交互模式（如 exec/headless），移除 AskUserQuestion 工具与对应文档
+      nonInteractive: this.nonInteractive,
       // P1-T2：传递 enabledSkills 给 getTools()，
       // 用于控制 PureShowWidget 等 skill 关联工具的条件注册
       enabledSkills: this.getResolvedSettings().enabledSkills ?? {},
     };
+  }
+
+  // 上游 v0.3.1：请求前预处理会话消息——非交互模式（exec/headless）下
+  // 系统提示词需按 nonInteractive 选项重建（移除 AskUserQuestion 文档等）
+  private prepareSessionMessagesForRequest(messages: SessionMessage[]): SessionMessage[] {
+    if (!this.nonInteractive) {
+      return messages;
+    }
+
+    const systemPromptIndex = messages.findIndex(
+      (message) => message.role === "system" && message.content?.includes("# Available Tools")
+    );
+    if (systemPromptIndex === -1) {
+      return messages;
+    }
+
+    const prepared = messages.slice();
+    prepared[systemPromptIndex] = {
+      ...prepared[systemPromptIndex],
+      content: getSystemPrompt(this.projectRoot, this.getPromptToolOptions()),
+    };
+    return prepared;
   }
 
   private reportNewPrompt(): void {
@@ -5598,6 +6116,80 @@ ${agentInstructions}
     return index.entries.find((entry) => entry.id === sessionId) ?? null;
   }
 
+  // 上游 v0.3.1 新增：会话分叉——以指定会话的最后一条消息为基准创建新会话，
+  // 复制消息与图片（copySessionImagesForFork）、继承文件历史（GitFileHistory.forkSession），
+  // 新会话条目记录 forkedFrom 来源，便于 UI 展示分叉链路
+  forkSession(sourceSessionId: string): string {
+    const source = this.getSession(sourceSessionId);
+    if (!source) {
+      throw new Error(`No saved session found with ID "${sourceSessionId}".`);
+    }
+
+    const sourceMessages = this.listSessionMessages(sourceSessionId);
+    const sourceMessage = sourceMessages.at(-1);
+    if (!sourceMessage || typeof sourceMessage.id !== "string" || !sourceMessage.id) {
+      throw new Error(`Session "${sourceSessionId}" has no messages to fork.`);
+    }
+
+    const sessionId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const entry: SessionEntry = {
+      id: sessionId,
+      summary: source.summary,
+      assistantReply: source.assistantReply,
+      assistantThinking: source.assistantThinking,
+      assistantRefusal: null,
+      toolCalls: null,
+      status: "completed",
+      failReason: null,
+      usage: null,
+      usagePerModel: null,
+      activeTokens: source.activeTokens,
+      createTime: now,
+      updateTime: now,
+      processes: null,
+      planMode: source.planMode,
+      forkedFrom: {
+        sessionId: sourceSessionId,
+        messageId: sourceMessage.id,
+      },
+    };
+
+    // 复制分叉引用的图片文件到新会话图片目录，避免源会话删除后图片失效
+    const forkedMessages = this.copySessionImagesForFork(sourceSessionId, sessionId, sourceMessages).map((message) => ({
+      ...message,
+      sessionId,
+    }));
+    this.saveSessionMessages(sessionId, forkedMessages);
+    // 文件历史同步分叉：新会话的 checkpoint 哈希可继续追溯源会话的文件版本
+    this.getFileHistory().forkSession(sourceSessionId, sessionId);
+
+    // 会话条目按更新时间降序写入索引，超出上限（MAX_SESSION_ENTRIES）时淘汰最旧条目并清理资源
+    const index = this.loadSessionsIndex();
+    index.entries.push(entry);
+    const sortedEntries = index.entries.slice().sort((a, b) => {
+      const aTime = Date.parse(a.updateTime);
+      const bTime = Date.parse(b.updateTime);
+      if (Number.isNaN(aTime) || Number.isNaN(bTime)) {
+        return b.updateTime.localeCompare(a.updateTime);
+      }
+      return bTime - aTime;
+    });
+    const keptEntries = sortedEntries.slice(0, MAX_SESSION_ENTRIES);
+    const keptIds = new Set(keptEntries.map((item) => item.id));
+    const droppedEntries = sortedEntries.filter((item) => !keptIds.has(item.id));
+    index.entries = keptEntries;
+    this.saveSessionsIndex(index);
+    for (const dropped of droppedEntries) {
+      this.cleanupSessionResources(dropped.id, {
+        removeMessages: true,
+        processIds: this.getProcessIds(dropped.processes ?? null),
+      });
+    }
+
+    return sessionId;
+  }
+
   /**
    * Delete a session by its ID.
    * Removes the session entry from the index and cleans up associated resources
@@ -5664,17 +6256,21 @@ ${agentInstructions}
   }
 
   listUndoTargets(sessionId: string): UndoTarget[] {
-    return this.listSessionMessages(sessionId)
-      .map((message, index) => ({ message, index }))
-      .filter(({ message }) => this.fileHistoryCoordinator.isUndoTargetMessage(message))
-      .map(({ message, index }) => ({
-        message,
-        index,
-        canRestoreCode: Boolean(
-          message.checkpointHash &&
-          this.fileHistoryCoordinator.canRestoreCheckpointHash(sessionId, message.checkpointHash)
-        ),
-      }));
+    return (
+      this.listSessionMessages(sessionId)
+        .map((message, index) => ({ message, index }))
+        // fork：undo 目标判定走 FileHistoryCoordinator（fork 会话恢复链路统一入口）
+        .filter(({ message }) => this.fileHistoryCoordinator.isUndoTargetMessage(message))
+        .map(({ message, index }) => ({
+          message,
+          index,
+          canRestoreCode: Boolean(
+            // fork：checkpoint 哈希可恢复性判定走 FileHistoryCoordinator（与 undo 链路同源）
+            message.checkpointHash &&
+            this.fileHistoryCoordinator.canRestoreCheckpointHash(sessionId, message.checkpointHash)
+          ),
+        }))
+    );
   }
 
   restoreSessionConversation(sessionId: string, messageId: string): SessionMessage[] {
@@ -5716,6 +6312,7 @@ ${agentInstructions}
     if (!message.checkpointHash) {
       throw new Error("Selected message has no code checkpoint.");
     }
+    // fork：代码 checkpoint 恢复走 FileHistoryCoordinator（fork 会话恢复链路统一入口）
     this.fileHistoryCoordinator.restoreCheckpointHash(sessionId, message.checkpointHash);
   }
 
@@ -5753,13 +6350,83 @@ ${agentInstructions}
     return { projectCode, projectDir, sessionsIndexPath };
   }
 
-  // S4 拆分说明（2026-08-19）：以下 undo/file-history 域的 11 个私有方法已整体迁移至
-  // FileHistoryCoordinator（getFileHistory / getFileHistoryGitDir / ensureFileHistorySession /
-  // getCurrentCheckpointHash / recordUserPromptCheckpoint / prepareFileMutationCheckpoint /
-  // recordFileMutationCheckpoint / updateLatestUserCheckpointHash / canRestoreCheckpointHash /
-  // restoreCheckpointHash / isUndoTargetMessage），类内调用点改为
-  // this.fileHistoryCoordinator.*；公开组合层（listUndoTargets / restoreSessionConversation /
-  // restoreSessionCode）保留在本类。抽取模式见 file-history-coordinator.ts 模块头注释。
+  // S4 拆分说明（2026-08-19）：fork 侧已将 undo/file-history 域的 11 个私有方法整体迁移至
+  // FileHistoryCoordinator（fork 调用链统一走 this.fileHistoryCoordinator.*；公开组合层
+  // listUndoTargets / restoreSessionConversation / restoreSessionCode 保留在本类）。
+  // v0.3.1 合并说明：上游在本类内保留同名私有方法作为基础设施，forkSession（上游新增）、
+  // restoreSessionConversation 等上游链路依赖它们；两套入口操作同一 file-history git 仓库
+  // （.deepcode/projects/<code>/file-history/.git），语义一致、互不冲突，故双方均保留。
+  private getFileHistory(): GitFileHistory {
+    return new GitFileHistory(this.projectRoot, this.getFileHistoryGitDir());
+  }
+
+  private getFileHistoryGitDir(): string {
+    const { projectDir } = this.getProjectStorage();
+    return path.join(projectDir, "file-history", ".git");
+  }
+
+  private ensureFileHistorySession(sessionId: string): string | undefined {
+    return this.getFileHistory().ensureSession(sessionId);
+  }
+
+  private getCurrentCheckpointHash(sessionId: string): string | undefined {
+    return this.getFileHistory().getCurrentCheckpointHash(sessionId);
+  }
+
+  private recordUserPromptCheckpoint(sessionId: string): FileHistoryCheckpointResult {
+    return this.getFileHistory().recordTrackedFilesCheckpoint(sessionId, "User prompt checkpoint");
+  }
+
+  private prepareFileMutationCheckpoint(sessionId: string, filePath: string): void {
+    const fileHistory = this.getFileHistory();
+    const previousHash = fileHistory.ensureSession(sessionId);
+    if (!previousHash) {
+      return;
+    }
+    this.updateLatestUserCheckpointHash(sessionId, undefined, previousHash);
+    const nextHash = fileHistory.recordCheckpoint(sessionId, [filePath], "Pre-mutation checkpoint");
+    if (nextHash && nextHash !== previousHash) {
+      this.updateLatestUserCheckpointHash(sessionId, previousHash, nextHash);
+    }
+  }
+
+  private recordFileMutationCheckpoint(sessionId: string, filePath: string): void {
+    const fileHistory = this.getFileHistory();
+    fileHistory.ensureSession(sessionId);
+    fileHistory.recordCheckpoint(sessionId, [filePath], "File mutation checkpoint");
+  }
+
+  private updateLatestUserCheckpointHash(sessionId: string, previousHash: string | undefined, nextHash: string): void {
+    const messages = this.listSessionMessages(sessionId);
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (!message || !this.isUndoTargetMessage(message)) {
+        continue;
+      }
+      if (message.checkpointHash && message.checkpointHash !== previousHash) {
+        return;
+      }
+      messages[index] = {
+        ...message,
+        checkpointHash: nextHash,
+        updateTime: new Date().toISOString(),
+      };
+      this.saveSessionMessages(sessionId, messages);
+      return;
+    }
+  }
+
+  private canRestoreCheckpointHash(sessionId: string, checkpointHash: string): boolean {
+    return this.getFileHistory().canRestore(sessionId, checkpointHash);
+  }
+
+  private restoreCheckpointHash(sessionId: string, checkpointHash: string): void {
+    this.getFileHistory().restore(sessionId, checkpointHash);
+  }
+
+  private isUndoTargetMessage(message: SessionMessage): boolean {
+    return message.role === "user" && message.visible && !message.compacted;
+  }
 
   private ensureProjectDir(): string {
     const { projectDir } = this.getProjectStorage();
@@ -5810,6 +6477,17 @@ ${agentInstructions}
     return path.join(projectDir, `${sessionId}.jsonl`);
   }
 
+  // 上游 v0.3.1：会话图片目录（多模态图片存储位置）与免读权限路径（技能根目录 + 图片目录，
+  // 供 ReadImage 等工具免确认读取）
+  private getSessionImagesDir(sessionId: string): string {
+    const { projectDir } = this.getProjectStorage();
+    return path.join(projectDir, "images", sessionId);
+  }
+
+  private getReadPermissionExemptPaths(sessionId: string): string[] {
+    return [...this.getSkillScanRoots().map((entry) => entry.root), this.getSessionImagesDir(sessionId)];
+  }
+
   private removeSessionMessages(sessionIds: string[]): void {
     for (const sessionId of sessionIds) {
       const messagePath = this.getSessionMessagesPath(sessionId);
@@ -5846,6 +6524,12 @@ ${agentInstructions}
     this.sessionControllers.delete(sessionId);
     if (options.removeMessages) {
       this.removeSessionMessages([sessionId]);
+      // 上游 v0.3.1：消息删除时同步清理会话图片目录（多模态图片持久化配套，尽力而为）
+      try {
+        fs.rmSync(this.getSessionImagesDir(sessionId), { recursive: true, force: true });
+      } catch {
+        // Ignore cleanup failures, matching message cleanup behavior.
+      }
     }
   }
 
@@ -5898,8 +6582,110 @@ ${agentInstructions}
       createTime: now,
       updateTime: now,
       meta: { userPrompt: this.cloneUserPromptForMeta(prompt) },
+      // fork：checkpoint 哈希经 coordinator 读取（与上游 this.getCurrentCheckpointHash
+      // 语义一致，操作同一 file-history git 仓库）
       checkpointHash: this.fileHistoryCoordinator.getCurrentCheckpointHash(sessionId),
     };
+  }
+
+  // 上游 v0.3.1：多模态图片持久化——当 Files API 未启用且模型不支持原生多模态时，
+  // 把粘贴的 data URL 图片解码落盘到会话图片目录，并在文本末尾追加 <images> XML
+  // （标注本地路径与编号），供 ReadImage 工具按路径读取
+  private preparePromptImages(sessionId: string, prompt: UserPromptContent): UserPromptContent {
+    if (this.getDeepSeekFilesSettings().enabled) {
+      return prompt;
+    }
+    if (supportsMultimodal(this.getResolvedSettings().model, this.getResolvedSettings().multimodal)) {
+      return prompt;
+    }
+
+    const imageUrls = prompt.imageUrls?.filter(Boolean) ?? [];
+    if (imageUrls.length === 0) {
+      return prompt;
+    }
+
+    const images = imageUrls.map((dataUrl, index) => this.decodePersistedPromptImage(dataUrl, index));
+    const imagesDir = this.getSessionImagesDir(sessionId);
+    const createdPaths: string[] = [];
+    try {
+      fs.mkdirSync(imagesDir, { recursive: true });
+      for (const image of images) {
+        const imagePath = path.join(imagesDir, `${crypto.randomUUID()}${image.extension}`);
+        fs.writeFileSync(imagePath, image.buffer, { flag: "wx", mode: 0o600 });
+        createdPaths.push(imagePath);
+      }
+    } catch (error) {
+      // 写盘失败时回滚本次已创建的图片文件（尽力而为），保留历史会话的图片目录
+      for (const imagePath of createdPaths) {
+        try {
+          fs.unlinkSync(imagePath);
+        } catch {
+          // Best-effort rollback of this submission only.
+        }
+      }
+      try {
+        fs.rmdirSync(imagesDir);
+      } catch {
+        // Preserve directories containing images from earlier prompts.
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to save pasted image: ${message}`);
+    }
+
+    // 以 XML 形式把图片路径注入 prompt 文本（ReadImage 工具按 name/path 读取）
+    const imageXml = [
+      "<images>",
+      ...createdPaths.map((imagePath, index) => `  <image name="[Image #${index + 1}]" path="${imagePath}" />`),
+      "</images>",
+    ].join("\n");
+    const text = prompt.text?.trimEnd() ?? "";
+    return {
+      ...prompt,
+      text: text ? `${text}\n\n${imageXml}` : imageXml,
+    };
+  }
+
+  // 上游 v0.3.1：解码 data URL 图片（仅支持 JPEG/PNG/WebP），返回二进制与扩展名
+  private decodePersistedPromptImage(dataUrl: string, index: number): PersistedPromptImage {
+    const match = /^data:(image\/(?:jpeg|jpg|png|webp));base64,([A-Za-z0-9+/=\r\n]+)$/i.exec(dataUrl);
+    if (!match) {
+      throw new Error(`Image #${index + 1} is invalid or unsupported. Only JPEG, PNG, and WebP are supported.`);
+    }
+
+    const payload = match[2].replace(/[\r\n]/g, "");
+    const buffer = Buffer.from(payload, "base64");
+    const mimeType = match[1].toLowerCase();
+    const extension = mimeType === "image/png" ? ".png" : mimeType === "image/webp" ? ".webp" : ".jpg";
+    return { buffer, extension };
+  }
+
+  // 上游 v0.3.1：会话分叉时复制源会话引用的图片到目标会话目录，
+  // 并把消息中的源图片路径替换为目标路径（forkSession 依赖）
+  private copySessionImagesForFork(
+    sourceSessionId: string,
+    targetSessionId: string,
+    messages: SessionMessage[]
+  ): SessionMessage[] {
+    const sourceDir = this.getSessionImagesDir(sourceSessionId);
+    if (!fs.existsSync(sourceDir)) {
+      return messages;
+    }
+
+    const targetDir = this.getSessionImagesDir(targetSessionId);
+    try {
+      fs.mkdirSync(path.dirname(targetDir), { recursive: true });
+      fs.cpSync(sourceDir, targetDir, { recursive: true, errorOnExist: true });
+      return replaceStringValues(messages, sourceDir, targetDir) as SessionMessage[];
+    } catch (error) {
+      // 复制失败时清理目标目录（避免残留半成品），保留原始错误信息
+      try {
+        fs.rmSync(targetDir, { recursive: true, force: true });
+      } catch {
+        // Keep the original copy error.
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to copy session images while forking: ${message}`);
+    }
   }
 
   private appendPlanModeTransitionMessages(sessionId: string, wasEnabled: boolean, isEnabled: boolean): void {
@@ -6000,6 +6786,23 @@ ${agentInstructions}
     };
   }
 
+  // 上游 v0.3.1：工具执行后续消息（follow-up）构建——工具执行器产出的补充说明消息
+  private buildFollowUpMessage(sessionId: string, message: ToolExecutionFollowUpMessage): SessionMessage {
+    const now = new Date().toISOString();
+    return {
+      id: crypto.randomUUID(),
+      sessionId,
+      role: message.role,
+      content: message.content,
+      contentParams: message.contentParams ?? null,
+      messageParams: null,
+      compacted: false,
+      visible: message.visible ?? false,
+      createTime: now,
+      updateTime: now,
+    };
+  }
+
   private buildSkillMessage(sessionId: string, content: string, skill: SkillInfo): SessionMessage {
     const now = new Date().toISOString();
     return {
@@ -6079,12 +6882,16 @@ ${agentInstructions}
     sessionId: string,
     toolCallId: string,
     content: string,
-    toolFunction: unknown | null
+    toolFunction: unknown | null,
+    // 上游 v0.3.1：工具执行结果元数据（可携带 skill 信息，用于技能自动加载标记）
+    resultMetadata?: Record<string, unknown>
   ): SessionMessage {
     const now = new Date().toISOString();
     const paramsMd = this.buildToolParamsSnippet(toolFunction);
     const resultMd = this.buildToolResultSnippet(content);
     const isInvisibleExecution = this.isInvisibleExecution(content);
+    // 上游 v0.3.1：从结果元数据提取 skill 信息（load_skill 工具执行成功时标记）
+    const skill = this.getToolResultSkill(resultMetadata);
     return {
       id: crypto.randomUUID(),
       sessionId,
@@ -6100,8 +6907,48 @@ ${agentInstructions}
         function: toolFunction ?? undefined,
         paramsMd,
         resultMd,
+        skill,
       },
     };
+  }
+
+  // 上游 v0.3.1：从工具执行结果元数据中提取并校验 skill 信息（防止非法结构注入 meta）
+  private getToolResultSkill(metadata?: Record<string, unknown>): SkillInfo | undefined {
+    const skill = metadata?.skill;
+    if (!skill || typeof skill !== "object" || Array.isArray(skill)) {
+      return undefined;
+    }
+    const candidate = skill as Partial<SkillInfo>;
+    if (
+      typeof candidate.name !== "string" ||
+      typeof candidate.path !== "string" ||
+      typeof candidate.description !== "string"
+    ) {
+      return undefined;
+    }
+    return {
+      name: candidate.name,
+      path: candidate.path,
+      description: candidate.description,
+      isLoaded: candidate.isLoaded === true ? true : undefined,
+      allowImplicitInvocation: candidate.allowImplicitInvocation === false ? false : undefined,
+    };
+  }
+
+  // 上游 v0.3.1：批量工具执行中按需加载技能（同批次去重——已加载的技能直接短路返回）
+  private async loadSkillForToolBatch(
+    sessionId: string,
+    skillName: string,
+    loadedSkillNames: Set<string>
+  ): Promise<ToolExecutionResult> {
+    if (loadedSkillNames.has(skillName)) {
+      return { ok: true, name: "skill", output: `Skill already loaded: ${skillName}.` };
+    }
+    const result = await this.loadSkillByName(sessionId, skillName);
+    if (this.getToolResultSkill(result.metadata)) {
+      loadedSkillNames.add(skillName);
+    }
+    return result;
   }
 
   private async appendToolMessages(
@@ -6112,15 +6959,21 @@ ${agentInstructions}
       messagePermissions?: MessageToolPermission[];
     } = {}
   ): Promise<{ waitingForUser: boolean }> {
+    // 上游 v0.3.1：记录本批次已加载的技能名（避免同批次重复加载）
+    const loadedSkillNames = new Set<string>();
     const hooks: ToolExecutionHooks = {
       onProcessStart: (pid, command) => this.addSessionProcess(sessionId, pid, command),
       onProcessExit: (pid) => this.removeSessionProcess(sessionId, pid),
       onProcessStdout: (pid, chunk) => this.onProcessStdout?.(Number(pid), chunk),
       onProcessTimeoutControl: (pid, control) => this.setSessionProcessTimeoutControl(sessionId, pid, control),
       onBackgroundProcessComplete: (completion) => this.addBackgroundProcessCompletionMessage(sessionId, completion),
+      // fork：文件变更检查点经 coordinator 记录（与上游私有方法语义一致，操作同一 file-history 仓库）
       onBeforeFileMutation: (filePath) =>
         this.fileHistoryCoordinator.prepareFileMutationCheckpoint(sessionId, filePath),
       onAfterFileMutation: (filePath) => this.fileHistoryCoordinator.recordFileMutationCheckpoint(sessionId, filePath),
+      // 上游 v0.3.1 新增 hooks：插件限流记录 + 批内技能按需加载
+      onPluginRateLimitExceeded: (tool) => this.recordPluginRateLimitExceeded(sessionId, tool),
+      onLoadSkill: (skillName) => this.loadSkillForToolBatch(sessionId, skillName, loadedSkillNames),
       shouldStop: () => this.isInterrupted(sessionId),
     };
     const parsedToolCalls = toolCalls
@@ -6149,17 +7002,20 @@ ${agentInstructions}
         waitingForUser = true;
       }
       const toolFunction = this.messageConverter.findToolFunction(toolCalls, execution.toolCallId);
-      const toolMessage = this.buildToolMessage(sessionId, execution.toolCallId, execution.content, toolFunction);
+      // 上游 v0.3.1：技能加载结果（name === "skill"）携带 metadata，供 buildToolMessage 提取 skill 标记
+      const toolMessage = this.buildToolMessage(
+        sessionId,
+        execution.toolCallId,
+        execution.content,
+        toolFunction,
+        execution.result.name === "skill" ? execution.result.metadata : undefined
+      );
       this.appendSessionMessage(sessionId, toolMessage);
       this.onAssistantMessage(toolMessage, true);
 
       for (const followUpMessage of execution.result.followUpMessages ?? []) {
-        if (followUpMessage.role !== "system") {
-          continue;
-        }
-        followUpMessages.push(
-          this.buildSystemMessage(sessionId, followUpMessage.content, followUpMessage.contentParams ?? null)
-        );
+        // 上游 v0.3.1：follow-up 消息支持任意 role（executor 侧已约束），统一走 buildFollowUpMessage
+        followUpMessages.push(this.buildFollowUpMessage(sessionId, followUpMessage));
       }
     }
 
@@ -6208,21 +7064,29 @@ ${agentInstructions}
     const signal = controller.signal;
     const userMessage = this.buildUserMessage(sessionId, userPrompt);
     this.appendSessionMessage(sessionId, userMessage);
+
+    // 上游 v0.3.1：命中技能列表（用于下方技能目录消息合并）。
+    // 采纳上游语义：匹配技能仅记入目录快照（LLM 经 skill 工具按需加载），
+    // 不再自动注入技能消息（与 createSession 的语义调整保持一致）
+    let matchedSkills: SkillInfo[] = [];
     if (userPrompt.text) {
       const skills = await this.listSkills(sessionId);
       const skillNames = await this.identifyMatchingSkillNames(skills, userPrompt.text, { signal, sessionId });
       this.throwIfAborted(signal);
       const skillSet = new Set(skillNames);
-      const matchedSkill = skills.filter((skill) => skillSet.has(skill.name));
-      if (Array.isArray(userPrompt.skills)) {
-        userPrompt.skills.push(...matchedSkill);
-      } else if (matchedSkill.length > 0) {
-        userPrompt.skills = matchedSkill;
-      }
+      matchedSkills = skills.filter((skill) => skillSet.has(skill.name));
     }
     userPrompt.skills = await this.normalizeSkills(userPrompt.skills, sessionId);
     this.throwIfAborted(signal);
     this.appendSkillMessages(sessionId, userPrompt.skills);
+    // 上游 v0.3.1：追加技能目录消息（合并预加载目录与本次命中技能，去重后输出给 LLM）
+    this.appendSkillCatalogMessage(
+      sessionId,
+      this.mergeSkillCatalog(
+        this.listPreloadedSkillCatalog(sessionId),
+        matchedSkills.map((skill) => ({ name: skill.name, description: skill.description }))
+      )
+    );
   }
 
   private buildToolParamsSnippet(toolFunction: unknown | null): string {
@@ -6269,6 +7133,9 @@ ${agentInstructions}
       return typeof args.explanation === "string" ? args.explanation.trim() : "";
     } else if (toolName === "write") {
       return typeof args.file_path === "string" ? args.file_path.trim() : "";
+      // 上游 v0.3.1：图片理解工具的参数摘要（显示图片路径）
+    } else if (toolName === "UnderstandImage") {
+      return typeof args.image_path === "string" ? args.image_path.trim() : "";
     } else if (toolName === "edit") {
       const filePath = typeof args.file_path === "string" ? args.file_path.trim() : "";
       if (filePath) {
@@ -6284,7 +7151,8 @@ ${agentInstructions}
 
     const value = args[firstKey];
     const text = typeof value === "string" ? value : JSON.stringify(value);
-    if (toolName === "read" && text.startsWith(this.projectRoot)) {
+    // 上游 v0.3.1：ReadImage 路径同样做项目根目录缩略显示（与 read 工具一致）
+    if ((toolName === "read" || toolName === "ReadImage") && text.startsWith(this.projectRoot)) {
       return text.slice(this.projectRoot.length).replace(/^[\\/]/, "");
     }
     return text;
@@ -6455,6 +7323,16 @@ ${agentInstructions}
     return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
   }
 
+  // 上游 v0.3.1：记录插件限流工具（UnderstandImage/WebSearch 触发限流时标记到会话条目，
+  // UI 据此提示降级；已标记 UnderstandImage 时不被 WebSearch 覆盖）
+  private recordPluginRateLimitExceeded(sessionId: string, tool: PluginRateLimitedTool): void {
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      pluginRateLimitedTool: entry.pluginRateLimitedTool === "UnderstandImage" ? entry.pluginRateLimitedTool : tool,
+      updateTime: new Date().toISOString(),
+    }));
+  }
+
   private removeSessionProcess(sessionId: string, processId: string | number): void {
     const now = new Date().toISOString();
     const processControlKey = this.getProcessControlKey(sessionId, processId);
@@ -6586,6 +7464,34 @@ ${agentInstructions}
       processes: this.deserializeProcesses(value.processes),
       askPermissions: normalizeAskPermissions(value.askPermissions),
       planMode: value.planMode === true,
+      // 上游 v0.3.1：插件限流标记与会话分叉来源（反序列化时做结构校验）
+      pluginRateLimitedTool: this.normalizePluginRateLimitedTool(value.pluginRateLimitedTool),
+      forkedFrom: this.normalizeForkedFrom(value.forkedFrom),
+    };
+  }
+
+  // 上游 v0.3.1：插件限流工具字段校验（仅接受 UnderstandImage / WebSearch 两个合法值）
+  private normalizePluginRateLimitedTool(value: unknown): PluginRateLimitedTool | undefined {
+    return value === "UnderstandImage" || value === "WebSearch" ? value : undefined;
+  }
+
+  // 上游 v0.3.1：会话分叉来源字段校验（sessionId/messageId 均须为非空字符串）
+  private normalizeForkedFrom(value: unknown): SessionEntry["forkedFrom"] {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return undefined;
+    }
+    const forkedFrom = value as Record<string, unknown>;
+    if (
+      typeof forkedFrom.sessionId !== "string" ||
+      !forkedFrom.sessionId ||
+      typeof forkedFrom.messageId !== "string" ||
+      !forkedFrom.messageId
+    ) {
+      return undefined;
+    }
+    return {
+      sessionId: forkedFrom.sessionId,
+      messageId: forkedFrom.messageId,
     };
   }
 

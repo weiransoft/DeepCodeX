@@ -243,6 +243,11 @@ export function renderMessageToStdout(message: SessionMessage, mode: RawMode): s
     return `${chalk("✦")} ${content}`;
   }
 
+  // 上游 v0.3.1：skill 加载消息增强 —— system / tool 角色的 skill 消息统一输出加载提示
+  if ((message.role === "system" || message.role === "tool") && message.meta?.skill) {
+    return chalk(`⚡ Loaded skill: ${message.meta.skill.name}`);
+  }
+
   if (message.role === "tool") {
     const summary = buildToolSummary(message);
     const params = formatToolStatusParams(summary);
@@ -264,10 +269,7 @@ export function renderMessageToStdout(message: SessionMessage, mode: RawMode): s
     if (message.meta?.isModelChange) {
       return chalk(`> ${message.content}`);
     }
-    if (message.meta?.skill && typeof message.meta.skill === "object") {
-      const skillName = (message.meta.skill as { name?: unknown }).name;
-      return chalk(`⚡ Loaded skill: ${typeof skillName === "string" ? skillName : ""}`);
-    }
+    // skill 消息已在上方统一处理（上游 v0.3.1），此处仅保留其余 system 消息分支
     if (message.meta?.isSummary) {
       return chalk.dim.italic("(conversation summary inserted)");
     }

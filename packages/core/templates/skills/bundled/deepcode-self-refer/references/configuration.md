@@ -24,19 +24,27 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 
 以下是 `settings.json` 支持的全部顶层字段，以及 `env` 内部支持的子字段：
 
-| 字段               | 类型    | 说明                                                    |
-| ------------------ | ------- | ------------------------------------------------------- |
-| `env`              | object  | 环境变量分组（见下方子字段表）                          |
-| `model`            | string  | 模型名称。优先级高于 `env.MODEL`                        |
-| `thinkingEnabled`  | boolean | 是否启用思考模式（DeepSeek V4 系列默认启用）            |
-| `reasoningEffort`  | string  | 推理强度，可选 `"high"` 或 `"max"`（默认 `"max"`）      |
-| `debugLogEnabled`  | boolean | 是否启用调试日志输出（默认 `false`）                    |
-| `telemetryEnabled` | boolean | 是否启用匿名使用数据上报（默认 `true`）                 |
-| `notify`           | string  | 任务完成通知脚本的完整路径（如 Slack 通知脚本）         |
-| `webSearchTool`    | string  | 自定义联网搜索脚本的完整路径                            |
-| `mcpServers`       | object  | MCP 服务器配置（键为服务名，值为 McpServerConfig 对象） |
-| `temperature`      | number  | 模型采样温度，范围 `0` 到 `2`                           |
-| `enabledSkills`    | object  | 按 skill 名称启用或禁用 skill 的配置                    |
+| 字段                       | 类型          | 说明                                                          |
+| -------------------------- | ------------- | ------------------------------------------------------------- |
+| `env`                      | object        | 环境变量分组（见下方子字段表）                                |
+| `contextWindow`            | number/string | 上下文窗口上限，可使用精确 token 数或 `128K`、`1M` 等格式     |
+| `autoCompactWindow`        | number/string | 自动压缩阈值，默认取最终上下文窗口的 50%                      |
+| `model`                    | string        | 模型名称。默认 `deepseek-v4-flash`，优先级高于 `env.MODEL`    |
+| `thinkingEnabled`          | boolean       | 是否启用思考模式（DeepSeek V4 系列默认启用）                  |
+| `reasoningEffort`          | string        | 推理强度，可选 `"low"`、`"high"` 或 `"max"`（默认 `"max"`）   |
+| `filesApiEnabled`          | boolean       | 是否通过 DeepSeek Files API 发送图片（默认 `false`）          |
+| `filesApiTimeoutMs`        | number        | 单张图片 Files API 处理超时，默认 `60000`，最大 `600000` 毫秒 |
+| `fileExpiresAfterSeconds`  | number        | 远端文件有效期，默认 `604800` 秒                              |
+| `fileRefreshMarginSeconds` | number        | 剩余有效期低于该值时刷新缓存，默认 `3600` 秒                  |
+| `fileQuotaCleanupBatch`    | number        | 配额不足时清理的最旧 Deep Code 文件数，默认 `100`             |
+| `maxRequestFilesBytes`     | number        | 单次请求图片原始字节总上限，默认 `134217728`（128 MiB）       |
+| `debugLogEnabled`          | boolean       | 是否启用调试日志输出（默认 `false`）                          |
+| `telemetryEnabled`         | boolean       | 是否启用匿名使用数据上报（默认 `true`）                       |
+| `notify`                   | string        | 任务完成通知脚本的完整路径（如 Slack 通知脚本）               |
+| `webSearchTool`            | string        | 自定义联网搜索脚本的完整路径                                  |
+| `mcpServers`               | object        | MCP 服务器配置（键为服务名，值为 McpServerConfig 对象）       |
+| `temperature`              | number        | 模型采样温度，范围 `0` 到 `2`                                 |
+| `enabledSkills`            | object        | 按 skill 名称启用或禁用 skill 的配置                          |
 
 #### `env` 子字段
 
@@ -51,6 +59,19 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 | `DEBUG_LOG_ENABLED` | string | 是否启用调试日志输出                                      |
 | `TELEMETRY_ENABLED` | string | 是否启用匿名使用数据上报                                  |
 | `<其他任意KEY>`     | string | 自定义环境变量                                            |
+
+#### 上下文窗口
+
+`contextWindow` 和 `autoCompactWindow` 是 `settings.json` 的顶层字段。number 必须是正整数，表示精确 token 数；string 使用大小写不敏感的 `K` 或 `M` 后缀，按 `1K = 1024`、`1M = 1024²` 换算：
+
+```json
+{
+  "contextWindow": "1M",
+  "autoCompactWindow": "512K"
+}
+```
+
+普通模型的默认上下文窗口为 `256K`，DeepSeek V4 系列为 `1M`。未设置自动压缩阈值时取最终上下文窗口的 50%；无效值会被忽略，自动压缩阈值超过上下文窗口时会限制为上下文窗口。
 
 #### `thinkingEnabled` — 思考模式
 
@@ -67,6 +88,24 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 | ------ | ------------------------------- |
 | `max`  | 最大推理深度（默认值）          |
 | `high` | 较高推理深度，token消耗相对较小 |
+| `low`  | 较低推理深度，token消耗更少     |
+
+#### DeepSeek Files API
+
+设置 `filesApiEnabled: true` 后，Deep Code 会将图片上传到固定的 `https://api.deepseek.com/files`，并在聊天请求中使用 `file_id`。上传或缓存刷新失败时，本次请求直接失败；关闭开关时图片处理逻辑保持不变。
+
+```json
+{
+  "filesApiEnabled": true,
+  "filesApiTimeoutMs": 60000,
+  "fileExpiresAfterSeconds": 604800,
+  "fileRefreshMarginSeconds": 3600,
+  "fileQuotaCleanupBatch": 100,
+  "maxRequestFilesBytes": 134217728
+}
+```
+
+单个文件最大 64 MiB，上传超时不能超过 10 分钟。远端文件 ID 缓存在 `~/.deepcode/files-api-cache.json`，其中不保存明文 API Key。配额不足时只清理文件名以 `deepcode-` 开头的最旧文件，然后重试一次。
 
 #### `notify` — 任务完成通知
 
@@ -92,7 +131,9 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 
 #### `webSearchTool` — 自定义联网搜索
 
-Deep Code 内置免费可用的 Web Search 工具。如果需要自定义搜索逻辑，可将 `webSearchTool` 设为一个可执行脚本的完整路径：
+未配置 `webSearchTool` 时，如果 `BASE_URL` 是 `https://api.deepseek.com`，Deep Code 会调用 DeepSeek Responses API 的 `web_search` 工具，并固定使用 `deepseek-v4-flash`，不受 `MODEL` 配置影响。其他 API 地址仍使用 Deep Code Web Search API。
+
+如果需要自定义搜索逻辑，可将 `webSearchTool` 设为一个可执行脚本的完整路径。自定义脚本始终优先于内置搜索：
 
 ```json
 {

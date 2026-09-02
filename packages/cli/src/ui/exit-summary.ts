@@ -150,3 +150,24 @@ export function buildResumeHintText(sessionId?: string): string | null {
   }
   return chalk.dim(`To continue this session, run `) + chalk.hex("#229ac3")(`deepcode --resume ${sessionId}`);
 }
+
+/**
+ * 上游 v0.3.1 新增：构造插件限流提示文本。
+ *
+ * 当会话中刚触发过插件工具限流（pluginRateLimitedTool 非空）时，
+ * 在退出时给出详情链接提示；未触发限流时返回 null。
+ *
+ * @param session 会话条目
+ * @returns 限流提示文本，未触发限流时返回 null
+ */
+export function buildPluginRateLimitHintText(session: SessionEntry | null): string | null {
+  const tool = session?.pluginRateLimitedTool;
+  if (!tool) {
+    return null;
+  }
+  return (
+    chalk.dim(`This conversation just exceeded the ${tool} tool rate limit. Visit `) +
+    chalk.hex("#229ac3")("https://deepcode.vegamo.cn/plus/packages") +
+    chalk.dim(" for more details.")
+  );
+}

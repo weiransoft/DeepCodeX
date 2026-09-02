@@ -260,7 +260,7 @@ test("LLM_CONTEXT_WINDOW 解析为 contextWindow 字段（v1.2 已实现，用�
   assert.equal(resolved.contextWindow, 131072, "LLM_CONTEXT_WINDOW=131072 应解析为 contextWindow=131072");
 });
 
-test("contextWindow 默认值为 131072（未设置 LLM_CONTEXT_WINDOW 时）", () => {
+test("contextWindow 默认值按模型推断（gpt-4 为 262144）", () => {
   const resolved = resolveSettingsSources(
     {
       env: {
@@ -274,7 +274,9 @@ test("contextWindow 默认值为 131072（未设置 LLM_CONTEXT_WINDOW 时）", 
     DEFAULTS,
     {}
   );
-  assert.equal(resolved.contextWindow, 131072, "未设置 LLM_CONTEXT_WINDOW 时默认 131072");
+  // 合并上游 0.3.1 后默认值语义变更：不再硬编码 131072，改为按模型推断
+  // （DeepSeek V4 系列 = 1M，其余模型 = 256K，见 getDefaultContextWindow）
+  assert.equal(resolved.contextWindow, 262144, "未设置 CONTEXT_WINDOW 时 gpt-4 默认 262144（256K）");
 });
 
 test("CONTEXT_WINDOW 无前缀优先于 LLM_CONTEXT_WINDOW", () => {

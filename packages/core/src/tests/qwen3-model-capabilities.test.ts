@@ -109,10 +109,12 @@ test("isDeepSeekThinkingModel 拒绝非 V4 系列", () => {
   assert.ok(!isDeepSeekThinkingModel(""), "空字符串不应识别为 DeepSeek thinking 模型");
 });
 
-test("DEEPSEEK_V4_MODELS 集合包含预期的两个模型", () => {
-  assert.equal(DEEPSEEK_V4_MODELS.size, 2, "DEEPSEEK_V4_MODELS 应包含 2 个模型");
+test("DEEPSEEK_V4_MODELS 集合包含预期的三个模型", () => {
+  // 合并上游 0.3.1 后新增多模态实验模型 deepseek-v4-flash-vision-exp（共 3 个）
+  assert.equal(DEEPSEEK_V4_MODELS.size, 3, "DEEPSEEK_V4_MODELS 应包含 3 个模型");
   assert.ok(DEEPSEEK_V4_MODELS.has("deepseek-v4-pro"), "应包含 deepseek-v4-pro");
   assert.ok(DEEPSEEK_V4_MODELS.has("deepseek-v4-flash"), "应包含 deepseek-v4-flash");
+  assert.ok(DEEPSEEK_V4_MODELS.has("deepseek-v4-flash-vision-exp"), "应包含 deepseek-v4-flash-vision-exp");
 });
 
 test("NON_MULTIMODAL_MODELS 集合包含 DeepSeek 系列（非多模态）", () => {

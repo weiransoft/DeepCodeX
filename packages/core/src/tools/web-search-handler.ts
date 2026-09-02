@@ -7,6 +7,9 @@ const MAX_OUTPUT_CHARS = 30000;
 const MAX_CAPTURE_CHARS = 10 * 1024 * 1024;
 const WEB_SEARCH_TOOL_ACTIVITY_PREFIX = "WebSearch:";
 const DEFAULT_WEB_SEARCH_API_URL = "https://deepcode.vegamo.cn/api/plugin/web-search";
+const DEEPSEEK_BASE_URL = "https://api.deepseek.com";
+const DEEPSEEK_WEB_SEARCH_MODEL = "deepseek-v4-flash";
+const EMPTY_DEEPSEEK_WEB_SEARCH_OUTPUT = "No web search results were returned.";
 
 type SearchLanguage = "en" | "zh";
 
@@ -24,11 +27,13 @@ type SearchPreparation = {
 type LLMClientContext = {
   client: OpenAI;
   model: string;
+  baseURL?: string;
   thinkingEnabled: boolean;
   notify?: string;
   webSearchTool?: string;
   env?: Record<string, string>;
   machineId?: string;
+  plusApiKey?: string;
 };
 
 export async function handleWebSearchTool(
@@ -126,7 +131,17 @@ async function executeDefaultWebSearch(
 ): Promise<ToolExecutionResult> {
   try {
     const prepared = await prepareSearchQuery(query, llmContext);
-    const output = await runDefaultWebSearchRequest(prepared.resolvedQuery, llmContext.machineId, context);
+    // 上游 v0.3.1 新增：DeepSeek 官方 baseURL 分流（Responses API web_search 工具）
+    // 与 plusApiKey 透传（默认 API 请求头携带 PLUS-API-KEY）
+    const output =
+      llmContext.baseURL === DEEPSEEK_BASE_URL
+        ? await runDeepSeekWebSearchRequest(prepared.resolvedQuery, llmContext.client, context)
+        : await runDefaultWebSearchRequest(
+            prepared.resolvedQuery,
+            llmContext.machineId,
+            llmContext.plusApiKey,
+            context
+          );
 
     return {
       ok: true,
@@ -322,6 +337,7 @@ function stripCodeFence(text: string): string {
 async function runDefaultWebSearchRequest(
   query: string,
   machineId: string | undefined,
+  plusApiKey: string | undefined,
   context: ToolExecutionContext
 ): Promise<string> {
   if (!machineId) {
@@ -336,6 +352,8 @@ async function runDefaultWebSearchRequest(
       headers: {
         "Content-Type": "application/json",
         Token: machineId,
+        // 上游 v0.3.1 新增：plusApiKey 透传（PLUS-API-KEY 请求头）
+        ...(plusApiKey ? { "PLUS-API-KEY": plusApiKey } : {}),
       },
       body: JSON.stringify({ query }),
     });
@@ -348,7 +366,19 @@ async function runDefaultWebSearchRequest(
     const payload = (await response.json()) as {
       success?: unknown;
       result?: unknown;
+      reason?: unknown;
     };
+
+    // 上游 v0.3.1 新增：success 语义校验；限流时回调 onPluginRateLimitExceeded
+    // （由 session/CLI 层提示用户插件配额耗尽）
+    if (payload.success !== true) {
+      const reason =
+        typeof payload.reason === "string" && payload.reason.trim() ? payload.reason.trim() : "Unknown error";
+      if (reason.includes("rate limit exceeded")) {
+        context.onPluginRateLimitExceeded?.("WebSearch");
+      }
+      throw new Error(`WebSearch API failed: ${reason}`);
+    }
 
     if (typeof payload.result === "string" && payload.result.trim()) {
       return payload.result.trim();
@@ -358,6 +388,32 @@ async function runDefaultWebSearchRequest(
   }
 
   throw new Error("The web search response was empty.");
+}
+
+async function runDeepSeekWebSearchRequest(
+  query: string,
+  client: OpenAI,
+  context: ToolExecutionContext
+): Promise<string> {
+  const activityId = `web-search-${randomUUID()}`;
+  context.onProcessStart?.(activityId, formatWebSearchActivityLabel(query));
+  try {
+    const response = await client.responses.create({
+      model: DEEPSEEK_WEB_SEARCH_MODEL,
+      input: query,
+      tools: [{ type: "web_search" }],
+      tool_choice: "required",
+    });
+
+    if (response.status === "failed") {
+      throw new Error(`DeepSeek Responses API returned status ${response.status}.`);
+    }
+
+    const output = response.output_text.trim();
+    return output || EMPTY_DEEPSEEK_WEB_SEARCH_OUTPUT;
+  } finally {
+    context.onProcessExit?.(activityId);
+  }
 }
 
 function appendChunk(existing: string, chunk: string | Buffer): string {

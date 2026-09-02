@@ -4,6 +4,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { DEFAULT_BASH_TIMEOUT_MS, clampBashTimeoutMs } from "../common/bash-timeout";
+// P0 安全修复依赖：isPathInProject 用于 CWD 越界校验（上游无此安全机制，保留 fork 侧导入）
 import { isPathInProject } from "../common/permissions";
 import { killProcessTree } from "../common/process-tree";
 import type { ProcessTimeoutControl, ProcessTimeoutInfo, ToolExecutionContext, ToolExecutionResult } from "./executor";
@@ -91,7 +92,7 @@ export async function handleBashTool(
     };
   }
 
-  // P0 安全修复：bash-handler 自身做危险命令 fail-closed 拦截，避免调用方绕过 ToolExecutor 守卫。
+  // P0 安全修复（fork）：bash-handler 自身做危险命令 fail-closed 拦截，避免调用方绕过 ToolExecutor 守卫。
   const dangerReason = checkBuiltinDangerousCommand(command);
   if (dangerReason) {
     return {
@@ -121,7 +122,7 @@ export async function handleBashTool(
     execution.timeoutMs,
     execution.deadlineAtMs
   );
-  // P0 安全修复：CWD 必须位于 projectRoot 子树内，防止命令输出伪造 marker 行将 session CWD 切换到项目外。
+  // P0 安全修复（fork）：CWD 必须位于 projectRoot 子树内，防止命令输出伪造 marker 行将 session CWD 切换到项目外。
   const safeCwd = validateCwdWithinProjectRoot(result.cwd, context.projectRoot, startCwd);
   updateSessionCwd(context.sessionId, startCwd, safeCwd);
 
@@ -375,7 +376,7 @@ function startBackgroundShellCommand(
       shellPath,
       cwd
     );
-    // P0 安全修复：后台任务同样需要做 CWD 边界校验。
+    // P0 安全修复（fork）：后台任务同样需要做 CWD 边界校验。
     const safeCwd = validateCwdWithinProjectRoot(result.cwd, context.projectRoot, cwd);
     updateSessionCwd(context.sessionId, cwd, safeCwd);
     writeFinalBackgroundOutput(outputPath, finalOutput);
@@ -452,7 +453,7 @@ function appendChunk(existing: string, chunk: string | Buffer): string {
 /**
  * 生成不可预测的 CWD marker，用于从子 shell 输出中解析当前工作目录。
  *
- * P0 安全修复：使用 CSPRNG（randomUUID）替代 Math.random，防止攻击者猜测或伪造 marker 行。
+ * P0 安全修复（fork）：使用 CSPRNG（randomUUID）替代 Math.random，防止攻击者猜测或伪造 marker 行。
  */
 function buildMarker(): string {
   const token = randomUUID();

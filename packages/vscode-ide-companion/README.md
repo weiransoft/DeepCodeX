@@ -61,7 +61,7 @@ npm install -g @vegamo/deepcode-cli
 
 ### Deep Code是否支持理解图片？
 
-Deep Code支持多模态，但目前deepseek-v4不支持多模态。有些模型虽然有多模态能力，但对多轮对话请求的限制太严。目前多模态输入推荐使用火山方舟的Doubao-Seed-2.0-pro模型，适配效果最好。
+Deep Code内置免费可用的图片理解工具，可使用ctrl+v从剪贴板粘贴图片。Deep Code本身支持多模态，但目前deepseek-v4系列模型还不支持多模态。
 
 ### 怎样在任务完成后自动给Slack发消息？
 
@@ -83,12 +83,12 @@ Deep Code支持多模态，但目前deepseek-v4不支持多模态。有些模型
 ```
 
 ## 获取帮助
-- 在 GitHub Issues 上报告错误或请求功能 (https://github.com/lessweb/deepcode/issues)
+- 在 GitHub Issues 上报告错误或请求功能 (https://github.com/lessweb/deepcode-cli/issues)
 
 ## 支持我们
 
 如果你觉得这个插件对你有帮助，请考虑通过以下方式支持我们：
 
-- 在 GitHub 上给我们一个 Star (https://github.com/lessweb/deepcode)
+- 在 GitHub 上给我们一个 Star (https://github.com/lessweb/deepcode-cli)
 - 向我们提交反馈和建议
 - 分享给你的朋友和同事

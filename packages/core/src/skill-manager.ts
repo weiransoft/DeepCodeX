@@ -371,7 +371,9 @@ export class SkillManager {
   getLoadedSkillKeys(sessionId: string): Set<string> {
     const loadedSkillKeys = new Set<string>();
     for (const message of this.context.listSessionMessages(sessionId)) {
-      if (message.role !== "system" || !message.meta?.skill) {
+      // 合并上游 0.3.1 后，skill 工具把已加载文档记录在 tool 消息的 meta.skill 中
+      // （不再写入独立的 system 消息），因此扫描需同时覆盖 system 与 tool 两类消息
+      if (!message.meta?.skill) {
         continue;
       }
       loadedSkillKeys.add(this.getSkillKey(message.meta.skill));

@@ -27,10 +27,19 @@ The following are all the top-level fields supported in `settings.json`, along w
 | Field              | Type    | Description                                                                 |
 | ------------------ | ------- | --------------------------------------------------------------------------- |
 | `env`              | object  | Group of environment variables (see sub-field table below)                 |
+| `contextWindow`   | number/string | Context-window limit as an exact token count or `128K`/`1M` value   |
+| `autoCompactWindow` | number/string | Auto-compaction threshold; defaults to 50% of the final context window |
 | `model`            | string  | Model name. Takes precedence over `env.MODEL`                              |
 | `provider`         | string  | LLM provider declaration, either `"openai"` or `"anthropic"` (see [provider section](#provider--llm-provider)) |
 | `thinkingEnabled`  | boolean | Whether to enable thinking mode (enabled by default for DeepSeek V4 series)|
-| `reasoningEffort`  | string  | Reasoning intensity, either `"high"` or `"max"` (default `"max"`)          |
+| `reasoningEffort`  | string  | Reasoning intensity: `"low"`, `"high"`, or `"max"` (default `"max"`)    |
+| `multimodal`       | string  | Multimodal (image) capability override: `"default"`, `"on"`, or `"off"` (default `"default"`) |
+| `filesApiEnabled`  | boolean | Send images through the DeepSeek Files API (default `false`)               |
+| `filesApiTimeoutMs` | number | Per-image Files API timeout; defaults to `60000`, maximum `600000` ms       |
+| `fileExpiresAfterSeconds` | number | Remote file lifetime, default `604800` seconds                       |
+| `fileRefreshMarginSeconds` | number | Refresh cached IDs below this remaining lifetime, default `3600` seconds |
+| `fileQuotaCleanupBatch` | number | Oldest Deep Code files removed during quota recovery, default `100`    |
+| `maxRequestFilesBytes` | number | Raw image byte limit per request, default `134217728` (128 MiB)          |
 | `debugLogEnabled`  | boolean | Enable debug log output (default `false`)                                   |
 | `telemetryEnabled` | boolean | Enable anonymous usage reporting (default `true`)                           |
 | `notify`           | string  | Full path to a task-completion notification script (e.g., Slack notification script) |
@@ -60,6 +69,7 @@ The following are all the top-level fields supported in `settings.json`, along w
 | `TEMPERATURE`     | string | Sampling temperature for chat completions, from `"0"` to `"2"` (only effective for openai provider) |
 | `THINKING_ENABLED`| string | Enable thinking mode                                            |
 | `REASONING_EFFORT`| string | Reasoning intensity                                             |
+| `MULTIMODAL`      | string | Multimodal (image) capability override: `"default"`, `"on"`, or `"off"` |
 | `DEBUG_LOG_ENABLED`| string| Enable debug log output                                         |
 | `TELEMETRY_ENABLED`| string| Enable anonymous usage reporting                                |
 | `<any other KEY>` | string | Custom environment variable                                     |
@@ -67,6 +77,19 @@ The following are all the top-level fields supported in `settings.json`, along w
 > **LLM_ Prefix Aliases**: `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` / `LLM_TIMEOUT` are aliases for their non-prefixed counterparts, only effective when the non-prefixed version is not set. This allows users to configure all LLM-related parameters with a unified `LLM_` prefix.
 
 > **TIMEOUT Configuration**: `TIMEOUT` and `LLM_TIMEOUT` control the LLM HTTP request timeout (in seconds), default `600` seconds. For models with long reasoning times (e.g., Qwen3 thinking mode, DeepSeek V4), it is recommended to set `1200` or higher.
+
+#### Context Windows
+
+`contextWindow` and `autoCompactWindow` are top-level `settings.json` fields. A number must be a positive integer and represents an exact token count. A string uses a case-insensitive `K` or `M` suffix, with `1K = 1024` and `1M = 1024²`:
+
+```json
+{
+  "contextWindow": "1M",
+  "autoCompactWindow": "512K"
+}
+```
+
+The default context window is `256K` for regular models and `1M` for DeepSeek V4 models. If the auto-compaction threshold is omitted, it is 50% of the final context window. Invalid values are ignored, and an auto-compaction threshold larger than the context window is capped at the context window.
 
 #### `provider` — LLM Provider
 
@@ -160,6 +183,36 @@ When thinking mode is enabled, controls the depth of the model’s reasoning:
 | ------ | --------------------------------------------------------- |
 | `max`  | Maximum reasoning depth (default)                         |
 | `high` | Higher reasoning depth with relatively lower token usage  |
+| `low`  | Lower reasoning depth with lower token usage              |
+
+#### `multimodal` — Multimodal (Image) Capability
+
+Controls whether the current model is treated as a multimodal model that accepts image input:
+
+| Value     | Description                                                                 |
+| --------- | --------------------------------------------------------------------------- |
+| `default` | Inferred from the built-in known-model list (default)                       |
+| `on`      | Always treat the model as multimodal, images are sent inline as `image_url` |
+| `off`     | Always treat the model as non-multimodal, images are read on demand via UnderstandImage tool |
+
+Use this to override the default detection when your model is not in the known-model list, or when its actual capability differs from the default.
+
+#### DeepSeek Files API
+
+With `filesApiEnabled: true`, Deep Code uploads images to the fixed `https://api.deepseek.com/files` endpoint and sends `file_id` references in chat requests. An upload or cache-refresh failure fails the request; disabling the setting preserves the existing image path.
+
+```json
+{
+  "filesApiEnabled": true,
+  "filesApiTimeoutMs": 60000,
+  "fileExpiresAfterSeconds": 604800,
+  "fileRefreshMarginSeconds": 3600,
+  "fileQuotaCleanupBatch": 100,
+  "maxRequestFilesBytes": 134217728
+}
+```
+
+Each file is limited to 64 MiB, and the upload timeout cannot exceed DeepSeek's 10-minute limit. Remote IDs are cached in `~/.deepcode/files-api-cache.json` without storing the plaintext API key. On a remote storage-quota error, only the oldest files whose names start with `deepcode-` are removed before one retry.
 
 #### `notify` — Task Completion Notification
 
@@ -185,7 +238,9 @@ The following context is injected as environment variables when the notify scrip
 
 #### `webSearchTool` — Custom Web Search
 
-Deep Code has a built-in, free-to-use Web Search tool. If you need custom search logic, set `webSearchTool` to the full path of an executable script:
+When `webSearchTool` is not configured and `BASE_URL` is `https://api.deepseek.com`, Deep Code calls the `web_search` tool through the DeepSeek Responses API with the fixed `deepseek-v4-flash` model, regardless of the `MODEL` setting. Other API endpoints continue to use the Deep Code Web Search API.
+
+For custom search logic, set `webSearchTool` to the full path of an executable script. A custom script always takes precedence over the built-in search:
 
 ```json
 {

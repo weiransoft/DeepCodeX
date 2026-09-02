@@ -1,4 +1,5 @@
 import type { ReasoningEffort } from "../settings";
+// 本仓库 Qwen3 支持保留：Qwen3 系列使用独立的 thinking 参数格式（v1.1 变更）
 import { isQwen3Model, isDeepSeekThinkingModel } from "./model-capabilities";
 
 type ThinkingConfig = {
@@ -38,7 +39,7 @@ type ThinkingRequestOptions = {
  *
  * @param thinkingEnabled 是否启用 thinking 模式
  * @param _baseURL API 基础 URL（保留参数，当前未使用）
- * @param reasoningEffort 推理强度（"high" / "max"），仅 DeepSeek 系列生效
+ * @param reasoningEffort 推理强度（"low" / "high" / "max"），仅 DeepSeek 系列生效
  * @param model 模型名称（用于判断 thinking 参数格式），默认空字符串
  * @returns thinking 请求参数对象（通过类型拓宽注入 OpenAI SDK 请求体）
  */

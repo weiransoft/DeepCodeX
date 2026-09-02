@@ -189,7 +189,7 @@ test("SessionManager resolves bundled skill prompts", () => {
     description: "Write skills",
   });
 
-  assert.match(prompt, /<skill-writer-skill/);
+  assert.match(prompt, /<skill_content name="skill-writer"/);
   assert.match(prompt, /# Skill Writer/);
 });
 
@@ -299,6 +299,7 @@ test("SessionManager excludes disabled skills by resolved skill name", async () 
         "skill-writer": false,
         "renamed-disabled": false,
         "deepcode-self-refer": false,
+        "image-generator": false,
         "skill-digester": false,
         plan: false,
         // 批次 2 新增的 6 个 EAK 模式 Skill 包——本测试只验证 enabled-skill 的发现，
@@ -364,7 +365,7 @@ test("SessionManager keeps implicit opt-out skills available for manual invocati
     .filter((message) => message.role === "system" && message.meta?.skill?.name === "manual-only");
 
   assert.equal(skillMessages.length, 1);
-  assert.match(skillMessages[0]?.content ?? "", /<manual-only-skill/);
+  assert.match(skillMessages[0]?.content ?? "", /<skill_content name="manual-only"/);
   assert.doesNotMatch(skillMessages[0]?.content ?? "", /allow-implicit-invocation/);
 });
 
@@ -408,6 +409,8 @@ test("SessionManager excludes implicit opt-out skills from automatic matching ca
 
   assert.match(matchingPrompt, /"name": "auto-skill"/);
   assert.doesNotMatch(matchingPrompt, /"name": "manual-only"/);
-  assert.equal(countLoadedSkillMessages(manager.listSessionMessages(sessionId), "auto-skill"), 1);
+  // 合并上游 0.3.1 后采纳目录快照语义：匹配技能不再自动注入全文消息，
+  // 仅写入 skillCatalog 快照，由 LLM 经 skill 工具按需加载
+  assert.equal(countLoadedSkillMessages(manager.listSessionMessages(sessionId), "auto-skill"), 0);
   assert.equal(countLoadedSkillMessages(manager.listSessionMessages(sessionId), "manual-only"), 0);
 });

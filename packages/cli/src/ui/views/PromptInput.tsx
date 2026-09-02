@@ -73,9 +73,12 @@ export type PromptSubmission = {
   permissions?: UserToolPermission[];
   alwaysAllows?: PermissionScope[];
   planMode?: boolean;
+  // fork：扩展命令集合（动态注入/后台任务/质量门禁/评审/记忆/帮助），
+  // 并采纳上游 v0.3.1 新增的 "fork"（会话分叉）命令
   command?:
     | "new"
     | "resume"
+    | "fork"
     | "continue"
     | "undo"
     | "mcp"
@@ -112,6 +115,7 @@ type Props = {
   screenWidth: number;
   promptHistory: string[];
   busy: boolean;
+  // fork：LLM 处理期间排队输入的数量，用于 busy 状态下的状态栏提示
   queuedCount?: number;
   cursorLayoutKey?: string;
   loadingText?: string | null;
@@ -229,6 +233,7 @@ export const PromptInput = React.memo(function PromptInput({
       : hasExpandedRegions
         ? " · ctrl+o collapse"
         : "";
+  // fork：排队输入提示（queued N），叠加在 loading 文案与 interrupt 提示之后
   const queueHint = queuedCount && queuedCount > 0 ? ` · queued ${queuedCount}` : "";
   const busyStatusText =
     loadingText && loadingText.trim()
@@ -490,6 +495,9 @@ export const PromptInput = React.memo(function PromptInput({
         }
       }
 
+      // fork：busy 时回车不拦截，交由 submitCurrentBuffer 按队列语义排队处理
+      // （上游 v0.3.1 在此处直接提示等待，与 fork 的输入队列机制冲突，故不采纳）
+
       if (returnAction === "newline") {
         updateBuffer((s) => insertText(s, "\n"));
         return;
@@ -688,6 +696,8 @@ export const PromptInput = React.memo(function PromptInput({
   }
 
   function handleSlashSelection(item: SlashCommandItem): void {
+    // fork：busy 时不拦截 slash 命令，交由 App.tsx 队列语义处理
+    // （上游 v0.3.1 在此处提示等待，与 fork 的输入队列机制冲突，故不采纳）
     if (item.kind === "skill" && item.skill) {
       addSelectedSkill(item.skill);
       clearSlashToken();
@@ -729,6 +739,12 @@ export const PromptInput = React.memo(function PromptInput({
       // ADR-DI-001：传递完整文本（包含 /resume <taskId> 参数），
       // 由 App.tsx 通过 isResumeTaskCommand 区分"恢复会话" vs "恢复暂停任务"
       onSubmit({ text: buffer.text.trim(), imageUrls: [], command: "resume" });
+      resetPromptInput();
+      return;
+    }
+    if (item.kind === "fork") {
+      // 上游 v0.3.1 新增：/fork 会话分叉命令
+      onSubmit({ text: "", imageUrls: [], command: "fork" });
       resetPromptInput();
       return;
     }
@@ -856,6 +872,8 @@ export const PromptInput = React.memo(function PromptInput({
     }
   }
 
+  // fork：busy 时不拦截提交，交由 App.tsx 的输入队列排队处理
+  // （上游 v0.3.1 在此处直接提示等待，与 fork 的排队语义冲突，故不采纳）
   function submitCurrentBuffer(): void {
     const trimmed = buffer.text.trim();
     if (!trimmed && imageUrls.length === 0 && selectedSkills.length === 0) {

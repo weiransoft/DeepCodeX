@@ -39,6 +39,23 @@
       <div class="chat-container" id="chatContainer">
         <div class="messages" id="messages"></div>
         <div class="composer">
+          <div class="plugin-rate-limit-notice" id="pluginRateLimitNotice" role="status" hidden>
+            <div class="plugin-rate-limit-text">
+              <span id="pluginRateLimitPrefix"></span>
+              <a href="https://deepcode.vegamo.cn/plus/packages" id="pluginRateLimitLink"
+                >Visit https://deepcode.vegamo.cn/plus/packages</a
+              ><span> for more details.</span>
+            </div>
+            <button
+              class="plugin-rate-limit-close"
+              id="pluginRateLimitClose"
+              type="button"
+              title="Dismiss"
+              aria-label="Dismiss rate limit notice"
+            >
+              &times;
+            </button>
+          </div>
           <!-- Skills Popup -->
           <div class="skills-popup" id="skillsPopup">
             <div class="skills-popup-header">Select Skills</div>
@@ -109,6 +126,10 @@
       const contextMeter = document.getElementById("contextMeter");
       const contextMeterRing = document.getElementById("contextMeterRing");
       const contextMeterTooltip = document.getElementById("contextMeterTooltip");
+      const pluginRateLimitNotice = document.getElementById("pluginRateLimitNotice");
+      const pluginRateLimitPrefix = document.getElementById("pluginRateLimitPrefix");
+      const pluginRateLimitLink = document.getElementById("pluginRateLimitLink");
+      const pluginRateLimitClose = document.getElementById("pluginRateLimitClose");
 
       const attachmentManager = typeof window.createPromptAttachmentManager === "function"
         ? window.createPromptAttachmentManager({
@@ -151,6 +172,8 @@
       let currentAskPermissions = [];
       let permissionPromptState = null;
       let pendingPermissionReply = null;
+      let currentPluginRateLimitedTool = null;
+      const dismissedPluginRateLimitSessions = new Set();
 
       function isBusyStatus(status) {
         return status === "processing" || status === "pending";
@@ -159,6 +182,33 @@
       function isProcessing() {
         return isBusyStatus(currentSessionStatus);
       }
+
+      function normalizePluginRateLimitedTool(value) {
+        return value === "UnderstandImage" || value === "WebSearch" ? value : null;
+      }
+
+      function renderPluginRateLimitNotice() {
+        const dismissed = currentSessionId && dismissedPluginRateLimitSessions.has(currentSessionId);
+        if (!currentPluginRateLimitedTool || dismissed) {
+          pluginRateLimitNotice.hidden = true;
+          return;
+        }
+        pluginRateLimitPrefix.textContent =
+          `This conversation just exceeded the ${currentPluginRateLimitedTool} tool rate limit. `;
+        pluginRateLimitNotice.hidden = false;
+      }
+
+      pluginRateLimitClose?.addEventListener("click", () => {
+        if (currentSessionId) {
+          dismissedPluginRateLimitSessions.add(currentSessionId);
+        }
+        pluginRateLimitNotice.hidden = true;
+      });
+
+      pluginRateLimitLink?.addEventListener("click", (event) => {
+        event.preventDefault();
+        vscode.postMessage({ type: "openExternal", url: pluginRateLimitLink.href });
+      });
 
       function getPromptLineHeight() {
         const styles = window.getComputedStyle(promptInput);
@@ -198,11 +248,11 @@
 
       function getTokenUsagePercent(telemetry) {
         const activeTokens = Number(telemetry?.activeTokens || 0);
-        const threshold = Number(telemetry?.compactPromptTokenThreshold || 0);
-        if (!Number.isFinite(activeTokens) || !Number.isFinite(threshold) || threshold <= 0) {
+        const contextWindow = Number(telemetry?.contextWindow || 0);
+        if (!Number.isFinite(activeTokens) || !Number.isFinite(contextWindow) || contextWindow <= 0) {
           return 0;
         }
-        return Math.trunc(0.5 * activeTokens / threshold * 100);
+        return Math.round(activeTokens / contextWindow * 100);
       }
 
       function formatTokenCount(value) {
@@ -278,6 +328,12 @@
         addTooltipRow(contextMeterTooltip, "thinking enabled", telemetry?.thinkingEnabled ? "true" : "false");
         addTooltipRow(contextMeterTooltip, "reasoning effort", telemetry?.reasoningEffort || "max");
         addTooltipRow(contextMeterTooltip, "activeTokens", formatTokenCount(telemetry?.activeTokens));
+        addTooltipRow(contextMeterTooltip, "contextWindow", formatTokenCount(telemetry?.contextWindow));
+        addTooltipRow(
+          contextMeterTooltip,
+          "autoCompactWindow",
+          formatTokenCount(telemetry?.compactPromptTokenThreshold)
+        );
 
         const usageRows = flattenUsageFields(telemetry?.usage);
         if (usageRows.length > 0) {
@@ -666,7 +722,8 @@
 
             const contentDiv = document.createElement("div");
             contentDiv.className = "bubble-collapsible-content collapsed";
-            // 思考内容按纯文本处理，先转义再插入，避免任意 HTML/JS 执行
+            // 安全加固（沿用本仓库 2026-07 安全修复）：思考内容按纯文本处理，先转义再插入，
+            // 避免任意 HTML/JS 执行（XSS）。若未来需要富文本，须引入 DOMPurify + 严格 CSP。
             contentDiv.innerHTML = escapeHtml(content);
 
             header.addEventListener("click", () => {
@@ -692,9 +749,8 @@
 
             const contentDiv = document.createElement("div");
             contentDiv.className = "bubble-normal-content";
-            // 普通 assistant 消息按纯文本处理：先转义再插入，关闭对未受信内容的 innerHTML 直接赋值。
-            // 后端 Markdown 渲染后的 HTML 不应在 webview 侧直接解析；若未来需要保留富文本，
-            // 必须引入可信 sanitization（DOMPurify）并配置严格 CSP。
+            // 安全加固（沿用本仓库 2026-07 安全修复）：assistant 消息按纯文本转义后再插入，
+            // 关闭对未受信内容的 innerHTML 直接赋值，防 XSS。
             contentDiv.innerHTML = escapeHtml(content);
 
             // 添加复制按钮
@@ -739,8 +795,8 @@
             bubble.appendChild(contentDiv);
             bubble.appendChild(copyBtn);
           }
-        } else if (role === "system") {
-          // system 类型气泡（可折叠，显示 Skills）
+        } else if (role === "system" || (role === "tool" && meta?.skill)) {
+          // skill 气泡（可折叠）
           const header = document.createElement("div");
           header.className = "bubble-collapsible-header";
           const dotClass = shouldConnectToPrev ? "bubble-dot connect-to-prev" : "bubble-dot";
@@ -920,41 +976,9 @@
       }
 
       function escapeHtml(text) {
-        if (typeof text !== "string") {
-          return "";
-        }
-        return text
-          .replace(/&/g, "&amp;")
-          .replace(/</g, "&lt;")
-          .replace(/>/g, "&gt;")
-          .replace(/"/g, "&quot;")
-          .replace(/'/g, "&#39;");
-      }
-
-      /**
-       * 对可信任的 HTML 进行基础消毒，移除常见 XSS 向量。
-       *
-       * 说明：webview 中 assistant 消息可能由后端将 Markdown 渲染为 HTML 后传入，
-       * 因此不能简单转义所有标签（否则代码块、列表等格式会丢失）。
-       * 本函数在保留基本 HTML 结构的前提下，删除 <script> 标签、内联事件处理器、
-       * javascript: 伪协议等高风险内容，作为防御 XSS 的第一道防线。
-       *
-       * @param {string} html 待消毒的 HTML 字符串
-       * @returns {string} 消毒后的 HTML 字符串
-       */
-      function sanitizeHtml(html) {
-        if (typeof html !== "string") {
-          return "";
-        }
-        return (
-          html
-            // 移除 script 标签及其内容（含多行、大小写变形）
-            .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
-            // 移除事件处理器属性 onxxx="..." / onxxx='...' / onxxx=...
-            .replace(/\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "")
-            // 移除 javascript: / data:text/html 等危险伪协议
-            .replace(/(?:javascript|data|vbscript):/gi, "")
-        );
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
       }
 
       function normalizeAskPermissions(value) {
@@ -2167,11 +2191,13 @@
           currentSessionId = null;
           currentSessionStatus = message.status || null;
           currentAskPermissions = [];
+          currentPluginRateLimitedTool = null;
           permissionPromptState = null;
           pendingPermissionReply = null;
           updateContextMeter(message.tokenTelemetry);
           attachmentManager?.clear();
           setLoading(false, currentSessionStatus);
+          renderPluginRateLimitNotice();
 
           // Reset history for new conversation
           inputHistory = [];
@@ -2188,6 +2214,7 @@
           // 加载已有对话
           currentSessionId = message.sessionId;
           currentSessionStatus = message.status || null;
+          currentPluginRateLimitedTool = normalizePluginRateLimitedTool(message.pluginRateLimitedTool);
           currentAskPermissions = normalizeAskPermissions(message.askPermissions);
           permissionPromptState = null;
           pendingPermissionReply = null;
@@ -2250,6 +2277,7 @@
           const isCurrentlyProcessing = isBusyStatus(currentSessionStatus);
           setLoading(isCurrentlyProcessing, currentSessionStatus);
           renderPermissionPrompt();
+          renderPluginRateLimitNotice();
 
           // 如果消息中包含sessions，更新下拉框
           if (message.sessions && Array.isArray(message.sessions)) {
@@ -2265,6 +2293,12 @@
             return;
           }
           const nextStatus = message.status || null;
+          if (!currentSessionId && message.sessionId) {
+            currentSessionId = message.sessionId;
+          }
+          if ('pluginRateLimitedTool' in message) {
+            currentPluginRateLimitedTool = normalizePluginRateLimitedTool(message.pluginRateLimitedTool);
+          }
           if ('askPermissions' in message) {
             currentAskPermissions = normalizeAskPermissions(message.askPermissions);
             if (nextStatus !== "ask_permission") {
@@ -2279,6 +2313,7 @@
           }
           setLoading(isBusyStatus(nextStatus), nextStatus);
           renderPermissionPrompt();
+          renderPluginRateLimitNotice();
         } else if (message.type === "llmStreamProgress") {
           const progress = message.progress || null;
           if (!progress || !progress.requestId) {

@@ -23,7 +23,6 @@ const CONFIRM_OPTIONS = [
   { label: "执行建议命令", value: "execute", allow: true },
   { label: "跳过，仅提交回答", value: "skip", allow: false },
 ];
-
 type OptionEntry = {
   label: string;
   description?: string;
@@ -162,6 +161,7 @@ export function AskUserQuestionPrompt({
     return null;
   }
 
+  // suggestedCommand 二次确认阶段的键盘处理：↑/↓ 选择、Enter/Y 执行、N 跳过
   function handleConfirmInput(input: string, key: InputKey): void {
     if (key.upArrow) {
       setConfirmIndex((index) => Math.max(0, index - 1));

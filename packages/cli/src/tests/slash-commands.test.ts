@@ -6,6 +6,7 @@ import {
   findExactSlashCommand,
   formatSlashCommandDescription,
   formatSlashCommandLabel,
+  // fork 扩展（FIX-06）：/help 命令清单渲染所需的导出
   formatBuiltinCommandList,
   BUILTIN_SLASH_COMMANDS,
 } from "../ui";
@@ -30,6 +31,8 @@ test("buildSlashCommands prefixes skills before built-ins", () => {
     "new",
     "init",
     "resume",
+    // 上游 v0.3.1 新增：/fork 会话派生命令（注册于 resume 之后）
+    "fork",
     "continue",
     "undo",
     "mcp",
@@ -169,6 +172,7 @@ test("findExactSlashCommand returns the matching skill", () => {
   assert.equal(item?.skill?.name, "code-review");
 });
 
+// fork 扩展：/review 命令精确匹配（DeepCodeX Review 代码审查命令）
 test("findExactSlashCommand returns built-in /review", () => {
   const items = buildSlashCommands(skills);
   const item = findExactSlashCommand(items, "/review");

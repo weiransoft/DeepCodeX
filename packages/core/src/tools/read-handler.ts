@@ -1,6 +1,9 @@
 import * as fs from "fs";
 import * as path from "path";
 import ignore from "ignore";
+// fork 侧：ToolExecutionFollowUpMessage 用于 read 图片时的多模态注入
+// （buildImageFollowUpMessage），上游 v0.3.1 改由独立 ReadImage 工具承担图片处理，
+// 此处两条路径并存：read 保持 fork 的 followUpMessages 注入语义。
 import type { ToolExecutionContext, ToolExecutionFollowUpMessage, ToolExecutionResult } from "./executor";
 import { readTextFileWithMetadata } from "../common/file-utils";
 import {
@@ -55,64 +58,17 @@ export async function handleReadTool(
   args: Record<string, unknown>,
   context: ToolExecutionContext
 ): Promise<ToolExecutionResult> {
-  let filePath = typeof args.file_path === "string" ? normalizeFilePath(args.file_path) : "";
-  if (!filePath.trim()) {
+  // 上游 v0.3.1 重构：路径解析提取为 resolveReadFilePath 独立函数（逻辑与 fork 内联版等价，
+  // 含歧义路径检测与 .gitignore 过滤），此处直接复用。
+  const resolved = resolveReadFilePath(args.file_path, context.projectRoot);
+  if (!resolved.ok) {
     return {
       ok: false,
       name: "read",
-      error: 'Missing required "file_path" string.',
+      error: resolved.error,
     };
   }
-
-  if (!isAbsoluteFilePath(filePath)) {
-    if (filePath.startsWith("../") || filePath.startsWith("..\\")) {
-      return {
-        ok: false,
-        name: "read",
-        error: "file_path must be an absolute path.",
-      };
-    }
-    const normalizedSuffix = normalizeRelativeSuffix(filePath);
-    const isIgnored = loadGitignoreMatcher(context.projectRoot);
-    const matches = normalizedSuffix ? findSuffixMatches(context.projectRoot, normalizedSuffix, isIgnored) : [];
-    if (matches.length > 1) {
-      return {
-        ok: false,
-        name: "read",
-        error:
-          "file_path must be an absolute path. " +
-          `The file_path is ambiguous and may refer to multiple files:\n${matches.slice(0, 3).join("\n")}` +
-          (matches.length > 3 ? `\n...and ${matches.length - 3} more.` : ""),
-      };
-    }
-
-    const resolvedPath = path.resolve(context.projectRoot, filePath);
-    if (!fs.existsSync(resolvedPath)) {
-      if (matches.length > 0) {
-        return {
-          ok: false,
-          name: "read",
-          error: "file_path must be an absolute path. " + `The file_path "${filePath}" is ambiguous.`,
-        };
-      } else {
-        return {
-          ok: false,
-          name: "read",
-          error: `File not found: ${filePath}`,
-        };
-      }
-    }
-
-    filePath = resolvedPath;
-  }
-
-  if (!fs.existsSync(filePath)) {
-    return {
-      ok: false,
-      name: "read",
-      error: `File not found: ${filePath}`,
-    };
-  }
+  const filePath = resolved.filePath;
 
   let stat: fs.Stats;
   try {
@@ -172,6 +128,9 @@ export async function handleReadTool(
     }
 
     if (isImageExtension(ext)) {
+      // fork 侧语义：read 工具遇到图片时直接加载并以 followUpMessages 注入多模态内容，
+      // 保持 fork 既有用户体验；上游 v0.3.1 的 ReadImage / UnderstandImage 独立工具
+      // 仍保持注册（见 executor.registerToolHandlers），两条图片处理路径并存。
       const buffer = fs.readFileSync(filePath);
       const mime = getImageMimeType(ext);
       markFileRead(context.sessionId, filePath, {
@@ -180,7 +139,7 @@ export async function handleReadTool(
         isPartialView: true,
       });
       return {
-        ok: true,
+        ok: false,
         name: "read",
         output: "File loaded.",
         metadata: {
@@ -244,6 +203,51 @@ export async function handleReadTool(
       error: message,
     };
   }
+}
+
+export function resolveReadFilePath(
+  value: unknown,
+  projectRoot: string
+): { ok: true; filePath: string } | { ok: false; error: string } {
+  let filePath = typeof value === "string" ? normalizeFilePath(value) : "";
+  if (!filePath.trim()) {
+    return { ok: false, error: 'Missing required "file_path" string.' };
+  }
+
+  if (!isAbsoluteFilePath(filePath)) {
+    if (filePath.startsWith("../") || filePath.startsWith("..\\")) {
+      return { ok: false, error: "file_path must be an absolute path." };
+    }
+    const normalizedSuffix = normalizeRelativeSuffix(filePath);
+    const isIgnored = loadGitignoreMatcher(projectRoot);
+    const matches = normalizedSuffix ? findSuffixMatches(projectRoot, normalizedSuffix, isIgnored) : [];
+    if (matches.length > 1) {
+      return {
+        ok: false,
+        error:
+          "file_path must be an absolute path. " +
+          `The file_path is ambiguous and may refer to multiple files:\n${matches.slice(0, 3).join("\n")}` +
+          (matches.length > 3 ? `\n...and ${matches.length - 3} more.` : ""),
+      };
+    }
+
+    const resolvedPath = path.resolve(projectRoot, filePath);
+    if (!fs.existsSync(resolvedPath)) {
+      if (matches.length > 0) {
+        return {
+          ok: false,
+          error: "file_path must be an absolute path. " + `The file_path "${filePath}" is ambiguous.`,
+        };
+      }
+      return { ok: false, error: `File not found: ${filePath}` };
+    }
+    filePath = resolvedPath;
+  }
+
+  if (!fs.existsSync(filePath)) {
+    return { ok: false, error: `File not found: ${filePath}` };
+  }
+  return { ok: true, filePath };
 }
 
 function normalizeRelativeSuffix(relativePath: string): string | null {
@@ -430,6 +434,12 @@ function isImageExtension(ext: string): boolean {
   return [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg", ".ico", ".avif"].includes(ext);
 }
 
+/**
+ * 根据文件扩展名返回 MIME 类型（fork 侧保留）。
+ *
+ * 供 buildImageFollowUpMessage 构造 data URI 使用；
+ * 未识别的扩展名默认按 image/png 处理。
+ */
 function getImageMimeType(ext: string): string {
   switch (ext) {
     case ".jpg":
@@ -456,6 +466,16 @@ function getImageMimeType(ext: string): string {
   }
 }
 
+/**
+ * 构造图片读取后的多模态 follow-up 消息（fork 侧保留）。
+ *
+ * 将图片以 base64 data URI 形式注入 system 消息的 contentParams（image_url），
+ * 由 session 层追加到对话上下文，使 LLM 能直接"看到"图片内容。
+ *
+ * @param filePath 图片绝对路径
+ * @param mime 图片 MIME 类型
+ * @param 图片原始字节缓冲
+ */
 function buildImageFollowUpMessage(filePath: string, mime: string, buffer: Buffer): ToolExecutionFollowUpMessage {
   const fileName = path.basename(filePath);
   return {

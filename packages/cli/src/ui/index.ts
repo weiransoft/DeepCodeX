@@ -81,6 +81,7 @@ export {
   buildSlashCommands,
   filterSlashCommands,
   findExactSlashCommand,
+  // fork 特有：格式化内置命令完整列表（/review、/quality 等帮助文本）
   formatBuiltinCommandList,
   formatSlashCommandDescription,
   formatSlashCommandLabel,
@@ -97,4 +98,5 @@ export {
   type FileMentionToken,
 } from "./core/file-mentions";
 export { findExpandedThinkingId, isCollapsedThinking } from "./core/thinking-state";
-export { buildExitSummaryText, buildResumeHintText } from "./exit-summary";
+// 上游 v0.3.1 新增 buildPluginRateLimitHintText：插件限流提示文本
+export { buildExitSummaryText, buildPluginRateLimitHintText, buildResumeHintText } from "./exit-summary";

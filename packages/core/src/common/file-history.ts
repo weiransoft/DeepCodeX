@@ -69,6 +69,35 @@ export class GitFileHistory {
     }
   }
 
+  /**
+   * 从既有会话分叉出新的检查点会话（上游 v0.3.1 新增，供会话 fork/恢复流程使用）。
+   *
+   * 将源会话当前检查点哈希直接指向目标会话分支，实现"复制"语义：
+   * - 源会话不存在检查点时，退化为为目标会话初始化空清单；
+   * - 源会话存在时，目标分支引用与源分支指向同一提交，后续记录互不影响。
+   *
+   * @param sourceSessionId 源会话 ID
+   * @param targetSessionId 目标会话 ID
+   * @returns 分叉后的检查点提交哈希；失败时返回 undefined
+   */
+  forkSession(sourceSessionId: string, targetSessionId: string): string | undefined {
+    const targetRef = this.getSessionBranchRef(targetSessionId);
+    if (!targetRef) {
+      return undefined;
+    }
+
+    try {
+      const sourceHash = this.getCurrentCheckpointHash(sourceSessionId);
+      if (!sourceHash) {
+        return this.ensureSession(targetSessionId);
+      }
+      this.runGit(["update-ref", targetRef, sourceHash]);
+      return sourceHash;
+    } catch {
+      return undefined;
+    }
+  }
+
   recordCheckpoint(sessionId: string, filePaths: string[], message: string): string | undefined {
     const branchRef = this.getSessionBranchRef(sessionId);
     if (!branchRef) {

@@ -49,7 +49,7 @@ Deep Code 推荐使用 `deepseek-v4-pro`，也支持 `deepseek-v4-flash`。创�
 | `env.BASE_URL` | DeepSeek API 地址，默认 `https://api.deepseek.com` |
 | `env.API_KEY` | DeepSeek API Key |
 | `thinkingEnabled` | 是否启用思考模式 |
-| `reasoningEffort` | 推理强度，常用 `"high"` 或 `"max"` |
+| `reasoningEffort` | 推理强度，可选 `"low"`、`"high"` 或 `"max"` |
 
 也可以在项目目录中创建 `.deepcode/settings.json`，为当前项目单独设置模型、权限或 MCP。
 
@@ -187,6 +187,7 @@ deepcode -p "总结这个项目"
 | ---- | ---- |
 | `/new` | 开始新对话 |
 | `/resume` | 选择历史对话继续 |
+| `/fork` | 从当前对话创建独立的新会话 |
 | `/continue` | 继续当前对话，或恢复最近的对话 |
 | `/model` | 切换模型、思考模式和推理强度 |
 | `/init` | 为当前项目生成 `AGENTS.md` 指令文件 |
