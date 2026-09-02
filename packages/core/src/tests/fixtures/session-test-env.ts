@@ -301,16 +301,75 @@ export function createNotifyingSessionManager(
 }
 
 /**
+ * 将测试用 raw OpenAI client（chat.completions.create 形态）适配为 B1 LLMClient 接口
+ *
+ * 背景：合并上游 0.3.1 后，compact 非流式调用在 fork 中改经 createLLMClient
+ * （provider 抽象层）发起；上游测试假定 compact 与主对话消费同一 raw client 队列。
+ * 此适配器让未显式注入 createLLMClient 桩的测试自动获得与上游一致的语义：
+ * compact 非流式调用与主对话流式调用共用同一响应队列。
+ *
+ * @param rawClient 测试用 raw OpenAI client（含 chat.completions.create）
+ * @param model 模型名（默认 test-model）
+ * @param baseURL API 端点（默认与主对话桩一致）
+ */
+export function createRawClientLLMClient(
+  rawClient: unknown,
+  model = "test-model",
+  baseURL = "https://api.deepseek.com"
+): LLMClient {
+  return {
+    providerName: "openai",
+    model,
+    baseURL,
+    supportsThinking: false,
+    supportsPromptCaching: false,
+    /**
+     * 非流式调用：把统一 LLMRequest（SessionMessage 形态）降级为 OpenAI
+     * chat.completions.create 所需的最小消息形态（role + content），透传 temperature；
+     * 响应映射回统一 LLMResponse（usage 按 prompt/completion tokens 对齐）。
+     */
+    createMessage: async (request: LLMRequest): Promise<LLMResponse> => {
+      const response = (await (rawClient as any).chat.completions.create({
+        model,
+        messages: request.messages.map((message) => ({ role: message.role, content: message.content })),
+        ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
+      })) as any;
+      const choice = response?.choices?.[0]?.message;
+      const usage = response?.usage ?? null;
+      return {
+        content: typeof choice?.content === "string" ? choice.content : "",
+        thinking: "",
+        toolCalls: [],
+        stopReason: "stop",
+        // OpenAI usage（prompt_tokens/completion_tokens）→ 统一 LLMUsage（inputTokens/outputTokens）
+        usage:
+          usage != null
+            ? {
+                inputTokens: Number(usage.prompt_tokens ?? 0),
+                outputTokens: Number(usage.completion_tokens ?? 0),
+              }
+            : null,
+      };
+    },
+    // 非流式测试场景不消费流式接口，返回空事件流即可（接口完整性要求实现）
+    createMessageStream: async function* () {},
+  };
+}
+
+/**
  * 构造一个 Mocked OpenAI Client 的 SessionManager（用于主对话流式通路测试）
  *
  * @param projectRoot 项目根目录
  * @param responses OpenAI 队列响应列表
- * @param createLLMClient B1 compact 非流式调用的 LLMClient 工厂（可选，null 表示无凭据）
+ * @param options 第三参数兼容两种形态（合并上游 0.3.1 后的兼容处理）：
+ *   - 函数：B1 compact 非流式调用的 LLMClient 工厂（fork 语义，null 表示无凭据静默跳过）
+ *   - 数字：autoCompactWindow 阈值（上游 0.3.1 测试语义，如 500）
+ *   未注入函数时自动把 raw client 适配为 LLMClient，使 compact 消费同一响应队列（对齐上游）。
  */
 export function createMockedClientSessionManager(
   projectRoot: string,
   responses: unknown[],
-  createLLMClient?: () => LLMClient | null
+  options?: (() => LLMClient | null) | number
 ): SessionManager {
   const client = {
     chat: {
@@ -328,6 +387,10 @@ export function createMockedClientSessionManager(
     },
   };
 
+  // 第三参数按类型分流：函数 → createLLMClient 桩；数字 → autoCompactWindow 阈值
+  const createLLMClient = typeof options === "function" ? options : undefined;
+  const autoCompactWindow = typeof options === "number" ? options : undefined;
+
   return new SessionManager({
     projectRoot,
     createOpenAIClient: () => ({
@@ -336,9 +399,13 @@ export function createMockedClientSessionManager(
       baseURL: "https://api.deepseek.com",
       thinkingEnabled: false,
     }),
-    // B1：compact 非流式调用走 createLLMClient（provider 路由缝合点），测试经此注入桩实现
-    ...(createLLMClient ? { createLLMClient } : {}),
-    getResolvedSettings: () => ({ model: "test-model" }),
+    // B1：compact 非流式调用走 createLLMClient（provider 路由缝合点）；
+    // 未显式注入时回退为 raw client 适配器（compact 与主对话共用队列，对齐上游语义）
+    createLLMClient: createLLMClient ?? (() => createRawClientLLMClient(client)),
+    getResolvedSettings: () => ({
+      model: "test-model",
+      ...(autoCompactWindow !== undefined ? { autoCompactWindow } : {}),
+    }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},
   });
@@ -432,6 +499,10 @@ export function createPermissionSessionManager(
 
 /**
  * 构造一个使用外部传入 client 的 SessionManager（用于需要自定义 client 行为的测试）
+ *
+ * 合并上游 0.3.1 后，compact 非流式调用在 fork 中经 createLLMClient（provider 抽象层）
+ * 发起；此处自动把外部 raw client 适配为 LLMClient，保持上游语义
+ * （compact 与主对话/技能匹配消费同一 client 队列）。
  */
 export function createMockedClientSessionManagerWithClient(projectRoot: string, client: unknown): SessionManager {
   return new SessionManager({
@@ -442,6 +513,8 @@ export function createMockedClientSessionManagerWithClient(projectRoot: string, 
       baseURL: "https://api.deepseek.com",
       thinkingEnabled: false,
     }),
+    // B1 缝合点：raw client 自动适配为 LLMClient，compact 调用与主对话共用同一队列
+    createLLMClient: () => createRawClientLLMClient(client),
     getResolvedSettings: () => ({ model: "test-model" }),
     renderMarkdown: (text) => text,
     onAssistantMessage: () => {},

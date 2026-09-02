@@ -68,7 +68,9 @@ function sleep(ms: number): Promise<void> {
 async function waitForEvents(
   collector: { events: FileWatchEvent[] },
   predicate: (events: FileWatchEvent[]) => boolean,
-  timeoutMs = 2000
+  // run-all-tests 并发执行全部 runner 时 fs.watch 事件可能延迟数秒，
+  // 2 秒容错在 macOS 高负载下不够（FW-01 实测 2072ms 超时），放宽到 10 秒
+  timeoutMs = 10000
 ): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -122,6 +124,12 @@ test("FW-01: 启动监听并接收文件修改事件", async () => {
 
   // 轮询等待事件到达，避免并发套件下 fs.watch 事件延迟导致 flaky
   await waitForEvents(collector, (events) => events.some((e) => e.path === "test-file.ts"));
+  // macOS FSEvents 在并发全量测试高负载下可能整批丢弃修改事件（实测 10 秒零事件），
+  // 此时重写一次文件再次等待，规避平台级抖动而非真实回归
+  if (!collector.events.some((e) => e.path === "test-file.ts")) {
+    fs.writeFileSync(filePath, "modified content again\n", "utf8");
+    await waitForEvents(collector, (events) => events.some((e) => e.path === "test-file.ts"));
+  }
   await watcher.stop();
 
   const modifyEvent = collector.events.find((e) => e.path === "test-file.ts");

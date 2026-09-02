@@ -26,7 +26,7 @@ npm install -g @vegamo/deepcode-cli
 
 在任意项目目录下运行 `deepcode` 即可启动。
 
-![intro2](resources/intro2.png)
+![intro2](resources/intro3.png)
 
 ## 配置
 
@@ -44,7 +44,7 @@ npm install -g @vegamo/deepcode-cli
 }
 ```
 
-配置文件与 [Deep Code VSCode 插件](https://github.com/lessweb/deepcode) 共享，无需重复配置。
+配置文件与 [Deep Code VSCode 插件](https://github.com/lessweb/deepcode-cli) 共享，无需重复配置。
 
 完整配置说明（多层级优先级、环境变量等）请参阅 [docs/configuration.md](docs/configuration.md)。
 
@@ -93,8 +93,7 @@ DeepCodeX 在 Deep Code CLI 基础上完成了**多角色融合**与**企业级�
 **关键设计文档**（同为本地文档，未入库）：
 - 融合方案：[docs/fusion/DEEPCODEX_FUSION_PLAN.md](docs/fusion/DEEPCODEX_FUSION_PLAN.md)
 - V2 上下文记忆：[docs/fusion/V2_CONTEXT_MEMORY_PRD.md](docs/fusion/V2_CONTEXT_MEMORY_PRD.md)
-
-> 注：EAG 企业应用生成、Loop-Graph 融合、领域专家集成、Builtin Skills 增强等能力的设计文档（原 `docs/enterprise/*.md`）未入库，实现细节请直接参阅 `packages/core/src/eag/`、`packages/core/src/team/domain-experts/` 与 `packages/core/templates/skills/` 源码。
+- 注：EAG 企业应用生成、Loop-Graph 融合、领域专家集成、Builtin Skills 增强等能力的设计文档（原 `docs/enterprise/*.md`）未入库，实现细节请直接参阅 `packages/core/src/eag/`、`packages/core/src/team/domain-experts/` 与 `packages/core/templates/skills/` 源码。
 
 ## 斜杠命令与按键功能
 
@@ -103,6 +102,7 @@ DeepCodeX 在 Deep Code CLI 基础上完成了**多角色融合**与**企业级�
 | `/`         | 打开 skills / 命令菜单                 |
 | `/new`      | 开始新对话                            |
 | `/resume`   | 选择历史对话继续                         |
+| `/fork`     | 从当前对话创建独立的新会话                    |
 | `/continue` | 继续当前对话，或选择历史对话恢复                 |
 | `/model`    | 切换模型、思考模式和推理强度                   |
 | `/raw`      | 切换显示模式（Normal / Lite / Raw 滚动回溯） |
@@ -174,7 +174,7 @@ Deep Code 的收益来自于工具约束、上下文管理、Agent Skills 和权
 
 ### Deep Code 是否支持理解图片？
 
-Deep Code 支持多模态，可使用ctrl+v从剪贴板粘贴图片。但目前 deepseek-v4 不支持多模态。有些模型虽然有多模态能力，但对多轮对话请求的限制太严。目前多模态输入推荐使用火山方舟的 Doubao-Seed-2.0-pro 模型，适配效果最好。
+Deep Code 内置免费可用的图片理解工具，可使用ctrl+v从剪贴板粘贴图片。Deep Code 本身支持多模态，但目前 deepseek-v4 系列模型还不支持多模态。有些模型虽然有多模态能力，但对多轮对话请求的限制太严。目前多模态输入推荐使用火山方舟的 Doubao-Seed-2.0-pro 模型，适配效果最好。
 
 ### 怎样在任务完成后自动给 Slack 发消息？
 
@@ -182,7 +182,7 @@ Deep Code 支持多模态，可使用ctrl+v从剪贴板粘贴图片。但目前 
 
 ### 怎样启用联网搜索功能？
 
-Deep Code自带免费的、且大部分情况够用的Web Search工具。如果你希望使用自定义脚本进行联网搜索，可以在 `~/.deepcode/settings.json` 中将 `webSearchTool` 设为脚本的完整路径即可。详细步骤可参考：https://github.com/qorzj/web_search_cli
+Deep Code 已支持 [DeepSeek Responses API](https://api-docs.deepseek.com/zh-cn/guides/responses_api/#tools) 的原生联网搜索能力。如果你希望使用自定义脚本进行联网搜索，可以在 `~/.deepcode/settings.json` 中将 `webSearchTool` 设为脚本的完整路径即可。详细步骤可参考：https://github.com/qorzj/web_search_cli
 
 ### 如何配置 MCP？
 

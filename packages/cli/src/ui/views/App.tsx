@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Box, Static, Text, useApp, useStdout, useWindowSize } from "ink";
 import chalk from "chalk";
+// fork：保留 node 内置模块与 getDeepCodeXLogDir 依赖（动态注入/后台任务/团队命令需要）
 import * as nodeFs from "node:fs";
 import * as nodeOs from "node:os";
 import * as nodePath from "node:path";
@@ -24,11 +25,14 @@ import {
 } from "../core/ask-user-question";
 import { PermissionPrompt, type PermissionPromptResult } from "./PermissionPrompt";
 import { PlanImplementationPrompt, extractProposedPlan, getImplementationPrompt } from "./PlanImplementationPrompt";
-import { buildExitSummaryText, buildResumeHintText } from "../exit-summary";
+// 上游 v0.3.1 新增 buildPluginRateLimitHintText：插件工具限流（429）退出提示
+import { buildExitSummaryText, buildPluginRateLimitHintText, buildResumeHintText } from "../exit-summary";
 import { RawMode, useRawModeContext } from "../contexts";
 import { renderMessageToStdout } from "../components/MessageView/utils";
 import {
   buildPromptDraftFromSessionMessage,
+  // fork：buildSyntheticAssistantMessage 用于注入类合成消息；上游新增 buildPromptHistory（exec 模式历史构建）
+  buildPromptHistory,
   buildStatusLine,
   buildSyntheticAssistantMessage,
   buildSyntheticUserMessage,
@@ -41,7 +45,7 @@ import { useStatusLine } from "../hooks";
 import type { SessionInfo } from "../statusline";
 import { isCollapsedThinking } from "../core/thinking-state";
 import { ANSI_CLEAR_SCREEN } from "../constants";
-// ADR-DI-001 动态注入与后台子 Agent 命令辅助函数
+// ADR-DI-001 动态注入与后台子 Agent 命令辅助函数（fork 特有，保留）
 import { extractCommandArgument, isResumeTaskCommand, BUILTIN_SLASH_COMMANDS } from "../core/slash-commands";
 import type {
   LlmStreamProgress,
@@ -54,6 +58,7 @@ import type {
   UserPromptContent,
 } from "@vegamo/deepcode-core";
 import { SessionManager } from "@vegamo/deepcode-core";
+// fork：以下大段为 fork 特有依赖（动态注入/后台任务/EAG 编排/团队命令），整体保留
 import { getCompactPromptTokenThreshold } from "@vegamo/deepcode-core";
 import {
   createEagDynamicSuggester,
@@ -243,6 +248,8 @@ type AppProps = {
   projectRoot: string;
   initialPrompt?: string;
   resumeSessionId?: string | true;
+  // 上游 v0.3.1 新增：/fork 会话分叉的源会话 ID
+  forkSessionId?: string;
   onRestart?: () => void;
 };
 
@@ -279,12 +286,15 @@ const StatusLine = React.memo(function StatusLine({
   );
 });
 
-function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProps): React.ReactElement {
+// 上游 v0.3.1：函数签名新增 forkSessionId（会话分叉）
+function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRestart }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout, write } = useStdout();
   const { columns, rows } = useWindowSize();
   const { mode, setMode } = useRawModeContext();
   const initialPromptSubmittedRef = useRef(false);
+  // 上游 v0.3.1 新增：resume 会话去重标记；fork 保留截断提示去重（FIX-12）
+  const resumeSessionIdRef = useRef(false);
   const startupDoneRef = useRef(false);
   const processStdoutRef = useRef<Map<number, string>>(new Map());
   // FIX-12（多角色审查 2026-07-29）：记录已追加截断提示的进程 PID，避免重复提示
@@ -317,7 +327,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
   const [welcomeNonce, setWelcomeNonce] = useState(0);
   const [resolvedSettings, setResolvedSettings] = useState(() => resolveCurrentSettings(projectRoot));
   // FIX-19（多角色审查 2026-07-29）：缓存当前模型与最大上下文窗口，
-  // 用于 buildStatusLine 生成带模型名 + token 占比的状态栏。
+  // 用于 buildStatusLine 生成带模型名 + token 占比的状态栏（fork 特有，保留）
   const statusLineOptions = useMemo(() => {
     const model = resolvedSettings.model || "";
     const maxContextTokens = getCompactPromptTokenThreshold(model, resolvedSettings.contextWindow);
@@ -328,7 +338,8 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
   const [showProcessStdout, setShowProcessStdout] = useState(false);
   const [planMode, setPlanMode] = useState(false);
   const [pendingPlanImplementation, setPendingPlanImplementation] = useState<string | null>(null);
-  // 处理期间输入队列：允许用户在 LLM 回复过程中继续打字/回车，消息排入队列并在当前回合结束后自动连续发送
+  // fork：处理期间输入队列——允许用户在 LLM 回复过程中继续打字/回车，
+  // 消息排入队列并在当前回合结束后自动连续发送（核心特性，保留）
   const pendingQueueRef = useRef<PromptSubmission[]>([]);
   const [queuedCount, setQueuedCount] = useState(0);
   const isProcessingRef = useRef(false);
@@ -447,11 +458,14 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
       },
     });
 
+    // fork：以上为动态注入/后台任务/EAG 编排装配逻辑，整体保留
     return new SessionManager({
       projectRoot,
       createOpenAIClient: () => createOpenAIClient(projectRoot),
       getResolvedSettings: () => resolveCurrentSettings(projectRoot),
       renderMarkdown: (text) => text,
+      // fork：EAG 动态建议层、外部命令描述符、V2 上下文钩子、EAG 编排器与
+      // ADR-DI-001 动态注入/后台子 Agent 组件注入（fork 特有，保留）
       eagDynamicSuggester,
       dynamicCommandDescriptors,
       // V2 Session 上下文钩子注入
@@ -475,6 +489,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
         }
       },
       onSessionEntryUpdated: (entry) => {
+        // fork：使用带模型名 + token 占比的状态栏（FIX-19），并处理 ask_permission 死锁
         setStatusLine(buildStatusLine(entry, statusLineOptions));
         setRunningProcesses(entry.processes);
         setActiveStatus(entry.status);
@@ -505,7 +520,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
         // on noisy or long-running commands like `yes` or verbose builds.
         const MAX_STDOUT_BUFFER = 1_000_000;
         if (current.length >= MAX_STDOUT_BUFFER) {
-          // FIX-12（多角色审查 2026-07-29）：超限时追加一次截断提示，避免静默丢弃
+          // FIX-12（多角色审查 2026-07-29）：超限时追加一次截断提示，避免静默丢弃（fork 特有，保留）
           if (!truncatedPidsRef.current.has(pid)) {
             truncatedPidsRef.current.add(pid);
             buf.set(pid, current + "\n... [输出超 1MB 已截断]\n");
@@ -636,6 +651,8 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
         const activeSessionId = sessionManager.getActiveSessionId();
         const session = activeSessionId ? sessionManager.getSession(activeSessionId) : null;
         const resumeHint = buildResumeHintText(activeSessionId ?? undefined);
+        // 上游 v0.3.1 新增：插件工具限流（429）提示文本
+        const rateLimitHint = buildPluginRateLimitHintText(session);
 
         writeStdoutLine("\n");
         if (showCommand) {
@@ -649,6 +666,10 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
         }
         if (resumeHint) {
           writeStdoutLine(resumeHint);
+          // 上游 v0.3.1 新增：存在限流提示时追加输出
+          if (rateLimitHint) {
+            writeStdoutLine(rateLimitHint);
+          }
           writeStdoutLine("\n");
         }
 
@@ -705,6 +726,34 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
         navigateToSubView("session-list");
         return;
       }
+      // 上游 v0.3.1 新增：/fork 会话分叉命令——基于当前会话创建可独立演进的新会话
+      if (submission.command === "fork") {
+        const sourceSessionId = sessionManager.getActiveSessionId();
+        if (!sourceSessionId) {
+          setErrorLine("No active session to fork.");
+          return;
+        }
+        try {
+          const sessionId = sessionManager.forkSession(sourceSessionId);
+          sessionManager.setActiveSessionId(sessionId);
+          await resetStaticView(loadVisibleMessages(sessionManager, sessionId), { clearScreen: true });
+          const session = sessionManager.getSession(sessionId);
+          // fork：状态栏使用带模型名 + token 占比的 statusLineOptions（FIX-19）
+          setStatusLine(session ? buildStatusLine(session, statusLineOptions) : "");
+          setRunningProcesses(null);
+          setActiveStatus(session?.status ?? null);
+          setActiveAskPermissions(undefined);
+          setPlanMode(session?.planMode === true);
+          setPendingPlanImplementation(null);
+          setPendingPermissionReply(null);
+          setErrorLine(null);
+          refreshSessionsList();
+          await refreshSkills(sessionId);
+        } catch (error) {
+          setErrorLine(error instanceof Error ? error.message : String(error));
+        }
+        return;
+      }
       if (submission.command === "continue" && isCurrentSessionEmpty(sessionManager)) {
         refreshSessionsList();
         navigateToSubView("session-list");
@@ -725,6 +774,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
         navigateToSubView("mcp-status");
         return;
       }
+      // ===== fork 特有命令处理（rules/team/quality-check/review/memory/help + ADR-DI-001 注入/后台任务）=====
       if (submission.command === "rules") {
         // /rules <subcommand> [args] —— 解析并调用 executeRulesCommand
         // 将输出作为合成助手消息展示在会话中（不走完整 LLM 流程）
@@ -989,7 +1039,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
         setMessages((prev) => [...prev, buildSyntheticUserMessage(userDisplayContent, submission.imageUrls.length)]);
       }
 
-      // 从此处开始进入真正的 LLM 回合，设置处理中标记以阻塞新的并发 LLM 调用
+      // fork：从此处开始进入真正的 LLM 回合，设置处理中标记以阻塞新的并发 LLM 调用
       isProcessingRef.current = true;
       setBusy(true);
       setErrorLine(null);
@@ -1022,7 +1072,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
         setRunningProcesses(
           finalActiveSessionId ? (sessionManager.getSession(finalActiveSessionId)?.processes ?? null) : null
         );
-        // 当前 LLM 回合结束，自动消费队列中的下一条消息
+        // fork：当前 LLM 回合结束，自动消费队列中的下一条消息（连续排队发送）
         const next = pendingQueueRef.current.shift();
         if (next) {
           setQueuedCount(pendingQueueRef.current.length);
@@ -1041,11 +1091,14 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
       refreshSessionsList,
       navigateToSubView,
       resetToWelcome,
+      // 上游 v0.3.1：/fork 分支引入 resetStaticView 与 projectRoot 依赖
+      resetStaticView,
       planMode,
+      projectRoot,
     ]
   );
 
-  // 将 memoized handlePrompt 暴露给 ref，供队列递归调用，避免 useCallback 自引用依赖循环
+  // fork：将 memoized handlePrompt 暴露给 ref，供队列递归调用，避免 useCallback 自引用依赖循环
   handlePromptRef.current = handlePrompt;
 
   const handleInterrupt = useCallback(() => {
@@ -1084,6 +1137,9 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
 
       if (activeSessionId) {
         sessionManager.addSessionSystemMessage(activeSessionId, content, true, meta);
+        // 上游 v0.3.1 新增：模型切换后立即刷新状态栏
+        const activeSession = sessionManager.getSession(activeSessionId);
+        setStatusLine(activeSession ? buildStatusLine(activeSession, next) : "");
       } else {
         const now = new Date().toISOString();
         setMessages((prev) => [
@@ -1111,6 +1167,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
 
   const handleSubmit = useCallback(
     (submission: PromptSubmission) => {
+      // fork：LLM 处理期间的输入队列语义（核心特性，替代上游的简单直发）
       // 当前没有 LLM 回合时直接发送
       if (!isProcessingRef.current) {
         void handlePromptRef.current(submission);
@@ -1175,6 +1232,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
       // Clear first so <Static> resets its index to 0.
       await resetStaticView(loadVisibleMessages(sessionManager, sessionId), { clearScreen: true });
       const session = sessionManager.getSession(sessionId);
+      // fork：使用带模型名 + token 占比的状态栏（FIX-19）
       setStatusLine(session ? buildStatusLine(session, statusLineOptions) : "");
       setRunningProcesses(session?.processes ?? null);
       setActiveStatus(session?.status ?? null);
@@ -1186,7 +1244,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
       }
       await refreshSkills(sessionId);
     },
-    [sessionManager, resetStaticView, pendingPermissionReply, refreshSkills]
+    [sessionManager, resetStaticView, pendingPermissionReply, refreshSkills, statusLineOptions]
   );
 
   /**
@@ -1200,30 +1258,49 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
     startupDoneRef.current = true;
 
     async function run() {
-      // Step 1: Resume session if requested
-      if (resumeSessionId) {
-        if (resumeSessionId === true) {
-          // Bare --resume — show session picker; prompt makes no sense here
-          refreshSessionsList();
-          navigateToSubView("session-list");
-          return;
+      // 上游 v0.3.1：启动时优先处理 --fork（会话分叉），再处理 --resume，并用 try/catch 捕获启动错误
+      try {
+        // Step 1: Resume or fork a session if requested
+        if (forkSessionId) {
+          const sessionId = sessionManager.forkSession(forkSessionId);
+          await handleSelectSession(sessionId);
+        } else if (resumeSessionId) {
+          resumeSessionIdRef.current = true;
+          if (resumeSessionId === true) {
+            // Bare --resume — show session picker; prompt makes no sense here
+            refreshSessionsList();
+            navigateToSubView("session-list");
+            return;
+          }
+          await handleSelectSession(resumeSessionId);
         }
-        await handleSelectSession(resumeSessionId);
-      }
 
-      // Step 2: Submit prompt if provided
-      if (initialPrompt && initialPrompt.trim()) {
-        initialPromptSubmittedRef.current = true;
-        handleSubmit({
-          text: initialPrompt,
-          imageUrls: [],
-          selectedSkills: undefined,
-        });
+        // Step 2: Submit prompt if provided
+        if (initialPrompt && initialPrompt.trim()) {
+          initialPromptSubmittedRef.current = true;
+          handleSubmit({
+            text: initialPrompt,
+            imageUrls: [],
+            selectedSkills: undefined,
+          });
+        }
+      } catch (error) {
+        setErrorLine(error instanceof Error ? error.message : String(error));
       }
     }
 
     void run();
-  }, [handleSubmit, handleSelectSession, initialPrompt, navigateToSubView, refreshSessionsList, resumeSessionId]);
+    // 上游 v0.3.1：依赖数组新增 forkSessionId 与 sessionManager
+  }, [
+    forkSessionId,
+    handleSubmit,
+    handleSelectSession,
+    initialPrompt,
+    navigateToSubView,
+    refreshSessionsList,
+    resumeSessionId,
+    sessionManager,
+  ]);
 
   const handleDeleteSession = useCallback(
     async (id: string): Promise<void> => {
@@ -1362,6 +1439,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
     const model = settings.model || "";
     const thinkingEnabled = settings.thinkingEnabled;
     const reasoningEffort = settings.reasoningEffort;
+    // fork：使用压缩阈值计算有效上下文窗口（与状态栏 token 占比一致）
     const maxContextTokens = getCompactPromptTokenThreshold(model, settings.contextWindow);
     if (!activeSessionId) {
       return {
@@ -1411,12 +1489,8 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
     };
   }, [sessionManager, projectRoot]);
   const statusLineSegments = useStatusLine(resolvedSettings.statusline, projectRoot, getSessionInfo);
-  const promptHistory = useMemo(() => {
-    return messages
-      .filter((message) => message.role === "user" && typeof message.content === "string")
-      .map((message) => (message.content ?? "").trim())
-      .filter((content) => content.length > 0);
-  }, [messages]);
+  // 上游 v0.3.1：promptHistory 改用共享 buildPromptHistory（支持 exec 模式历史构建）
+  const promptHistory = useMemo(() => buildPromptHistory(messages), [messages]);
   const expandedThinkingId = findExpandedThinkingId(messages);
   const pendingQuestion = useMemo(() => findPendingAskUserQuestion(messages, activeStatus), [activeStatus, messages]);
   const shouldShowQuestionPrompt = Boolean(pendingQuestion && !dismissedQuestionIds.has(pendingQuestion.messageId));
@@ -1481,6 +1555,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
   ]);
 
   const handleQuestionAnswers = useCallback(
+    // fork：保留 suggestedCommand 二次确认与自动执行流程（含安全校验降级）
     (answers: AskUserQuestionAnswers, allowSuggestedCommand: boolean) => {
       const answerText = formatAskUserQuestionAnswers(answers);
       const suggestedCommand = allowSuggestedCommand ? pendingQuestion?.suggestedCommand : undefined;
@@ -1586,7 +1661,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
       {(busy || statusLine) && !isExiting ? <StatusLine busy={busy} text={statusLine} /> : null}
       {errorLine ? (
         <Box>
-          {/* FIX-11（多角色审查 2026-07-29）：errorLine 写入处已自带 ✖ 前缀，渲染层不再重复加 "Error: " */}
+          {/* fork FIX-11（多角色审查 2026-07-29）：errorLine 写入处已自带 ✖ 前缀，渲染层不再重复加 "Error: " */}
           <Text color="red">{errorLine}</Text>
         </Box>
       ) : null}
@@ -1637,6 +1712,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
       ) : shouldShowQuestionPrompt && pendingQuestion && !busy ? (
         <AskUserQuestionPrompt
           questions={pendingQuestion.questions}
+          // fork：传递建议命令（带安全校验），由 AskUserQuestionPrompt 二次确认
           suggestedCommand={pendingQuestion.suggestedCommand}
           onSubmit={handleQuestionAnswers}
           onCancel={handleQuestionCancel}
@@ -1661,6 +1737,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
           modelConfig={resolvedSettings}
           promptHistory={promptHistory}
           busy={busy}
+          // fork：排队输入数量，busy 状态栏显示 queued N 提示
           queuedCount={queuedCount}
           cursorLayoutKey={promptCursorLayoutKey}
           loadingText={loadingText}
@@ -1682,7 +1759,8 @@ function App({ projectRoot, initialPrompt, resumeSessionId, onRestart }: AppProp
     </Box>
   );
 }
-
+// fork：以下为 TUI slash 命令的解析与执行辅助函数（rules/team/quality/review/memory/inject 等），
+// 均为 fork 特有实现，上游 v0.3.1 无对应内容，整体保留
 // ============================================================================
 // /rules 命令处理（TUI slash 命令模式）
 // ============================================================================

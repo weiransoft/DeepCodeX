@@ -54,14 +54,12 @@ test("debug logger appends full entries without rotation", () => {
   }
 });
 
-// ============================================================================
-// D-2 集成测试：debug-logger 与 log-rotation 联动（追加 4 个用例）
+// fork 保留：D-2 集成测试 —— debug-logger 与 log-rotation 联动（追加 4 个用例）
 // 测试目标：
 //   - 验证 logOpenAIChatCompletionDebug 在写入前正确调用 rotateLogIfNeeded
 //   - 验证轮转失败时降级为直接 append，不阻塞主流程
 //   - 验证多次轮转后保留 maxBackupCount=3 个备份
 // 严禁 mock：所有 fs 操作使用真实文件系统，使用临时 HOME 目录隔离
-// ============================================================================
 
 /**
  * 创建临时 HOME 目录并切换 process.env.HOME，返回 { home, restore } 辅助对象。
@@ -420,3 +418,5 @@ test("TC-RS-003: 嵌套对象与数组中的敏感字段递归脱敏", () => {
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
+// 合并裁定：完整保留 fork 版 debug-logger 测试（含 rotateLogIfNeeded 日志轮转与脱敏）；
+// 上游 v0.3.1 的"仅保留最近 20 条"截断逻辑不予采纳，无对应测试需要融合

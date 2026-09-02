@@ -1,4 +1,4 @@
-export const DEEPSEEK_V4_MODELS = new Set(["deepseek-v4-flash", "deepseek-v4-pro"]);
+export const DEEPSEEK_V4_MODELS = new Set(["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp"]);
 
 export const NON_MULTIMODAL_MODELS = new Set([
   "deepseek-v4-pro",
@@ -8,10 +8,18 @@ export const NON_MULTIMODAL_MODELS = new Set([
 ]);
 
 /**
+ * 多模态解析模式（上游 0.3.1 引入）：
+ * - "default"：按已知模型列表推断
+ * - "on"：强制视为多模态模型
+ * - "off"：强制视为非多模态模型
+ */
+export type MultimodalMode = "default" | "on" | "off";
+
+/**
  * 判断模型是否默认启用 thinking 模式
  *
  * 支持的 thinking 模型：
- * - DeepSeek V4 系列（deepseek-v4-pro / deepseek-v4-flash）
+ * - DeepSeek V4 系列（deepseek-v4-pro / deepseek-v4-flash / vision-exp）
  * - Qwen3 系列（所有以 qwen3 开头的模型，含 "Qwen/Qwen3" 前缀格式）
  *
  * v1.1 变更：
@@ -59,6 +67,20 @@ export function isDeepSeekThinkingModel(model: string): boolean {
   return DEEPSEEK_V4_MODELS.has(model.trim().toLowerCase());
 }
 
-export function supportsMultimodal(model: string): boolean {
+/**
+ * 判断模型是否支持多模态（图片）内容
+ *
+ * @param model 模型名称
+ * @param mode 多模态解析模式（settings.multimodal 解析结果，上游 0.3.1 引入）
+ * @returns 是否支持多模态
+ */
+export function supportsMultimodal(model: string, mode: MultimodalMode = "default"): boolean {
+  // 显式配置优先：on/off 直接覆盖模型列表推断
+  if (mode === "on") {
+    return true;
+  }
+  if (mode === "off") {
+    return false;
+  }
   return !NON_MULTIMODAL_MODELS.has(model.trim());
 }

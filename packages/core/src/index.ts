@@ -30,8 +30,18 @@ export {
   modelConfigKey,
   getUserSettingsPath,
   getProjectSettingsPath,
+  // 上游 v0.3.1 新增：Deepcode Plus API Key 读取 + 上下文窗口默认值 + Files API 常量
+  readDeepcodePlusApiKey,
+  getDefaultContextWindow,
+  getDefaultAutoCompactWindow,
   DEFAULT_MODEL,
   DEFAULT_BASE_URL,
+  DEFAULT_FILES_API_TIMEOUT_MS,
+  DEFAULT_FILE_EXPIRES_AFTER_SECONDS,
+  DEFAULT_FILE_REFRESH_MARGIN_SECONDS,
+  DEFAULT_FILE_QUOTA_CLEANUP_BATCH,
+  DEFAULT_MAX_REQUEST_FILES_BYTES,
+  MAX_FILES_API_TIMEOUT_MS,
 } from "./settings";
 export type {
   DeepcodingSettings,
@@ -63,6 +73,8 @@ export type {
   SessionProcessEntry,
   BashTimeoutAdjustment,
   LlmStreamProgress,
+  // 上游 v0.3.1 新增：SessionManager 构造选项类型（CLI 装配层注入 orchestrator 用）
+  SessionManagerOptions,
 } from "./session";
 
 // Provider 抽象层导出（原生 Claude API 支持）
@@ -87,13 +99,15 @@ export {
   getSystemPrompt,
   getCompactPrompt,
   getRuntimeContext,
+  // fork 保留：默认 skill 模板提示词（DEFAULT_SKILL_TEMPLATES 聚合）
   getDefaultSkillPrompt,
   getPlanModePrompt,
   getExtensionRoot,
   getTools,
   buildSkillDocumentsPrompt,
 } from "./prompt";
-export type { ToolDefinition, SkillPromptDocument } from "./prompt";
+// 上游 v0.3.1 新增：PromptToolOptions（getTools 多模态/skill 选项类型）
+export type { ToolDefinition, SkillPromptDocument, PromptToolOptions } from "./prompt";
 
 // Tools
 export { ToolExecutor } from "./tools/executor";
@@ -109,11 +123,17 @@ export type {
   ProcessTimeoutControl,
   BackgroundProcessCompletion,
   ToolExecutionFollowUpMessage,
+  // 上游 v0.3.1 新增：插件限流工具名单 + sharp 图片库懒加载器类型
+  PluginRateLimitedTool,
+  SharpLoader,
 } from "./common/tool-types";
 
 // Tool handlers
 export { handleBashTool, clearSessionWorkingDir } from "./tools/bash-handler";
 export { handleReadTool } from "./tools/read-handler";
+// 上游 v0.3.1 新增：ReadImage（多模态模型直读图片）与 UnderstandImage（LLM 降级理解图片）
+export { handleReadImageTool } from "./tools/read-image-handler";
+export { handleUnderstandImageTool } from "./tools/understand-image-handler";
 export { handleWriteTool } from "./tools/write-handler";
 export { handleEditTool } from "./tools/edit-handler";
 export { handleUpdatePlanTool } from "./tools/update-plan-handler";
@@ -224,18 +244,23 @@ export { McpClient } from "./mcp/mcp-client";
 export type { McpServerStatus } from "./mcp/mcp-manager";
 
 // Common utilities
-export { createOpenAIClient } from "./common/openai-client";
-// v1.6 P0-2：OpenAIClientHandle 接口与类型守卫（team-adapter.executeDispatch 注入用）
-export { isOpenAIClientHandle } from "./common/openai-client";
+// fork v1.6 P0-2：OpenAIClientHandle 接口与类型守卫（team-adapter.executeDispatch 注入用）
+export { createOpenAIClient, isOpenAIClientHandle } from "./common/openai-client";
 export type { OpenAIClientHandle } from "./common/openai-client";
+// 上游 v0.3.1 新增：Plus 专线连接解析与默认 Plus 网关地址
+export { resolveOpenAIConnection, DEEPCODE_PLUS_BASE_URL } from "./common/openai-client";
 export { buildThinkingRequestOptions } from "./common/openai-thinking";
 export { readTextFileWithMetadata, writeTextFile, buildDiffPreview, ensureParentDirectory } from "./common/file-utils";
 export { normalizeFilePath, getSnippet, clearSessionState, recordFileState, getFileState } from "./common/state";
 export { GitFileHistory } from "./common/file-history";
 export { killProcessTree } from "./common/process-tree";
+// 上游 v0.3.1 新增：腾讯 npm 镜像源常量
+export { TENCENT_MIRROR_REGISTRY } from "./common/npm-registry";
 export { launchNotifyScript } from "./common/notify";
 export { reportNewPrompt } from "./common/telemetry";
 export { DEEPSEEK_V4_MODELS, supportsMultimodal, defaultsToThinkingMode } from "./common/model-capabilities";
+// 上游 v0.3.1 新增：多模态能力级别类型（default/on/off，决定 ReadImage 与 UnderstandImage 取舍）
+export type { MultimodalMode } from "./common/model-capabilities";
 export { findGitBashPath, resolveShellPath, setShellIfWindows } from "./common/shell-utils";
 export { logApiError } from "./common/error-logger";
 export { logOpenAIChatCompletionDebug } from "./common/debug-logger";

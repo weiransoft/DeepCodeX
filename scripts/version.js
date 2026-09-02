@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { globSync } from "glob";
@@ -32,24 +32,26 @@ function writeJson(filePath, data) {
   writeFileSync(filePath, JSON.stringify(data, null, 2) + "\n", "utf-8");
 }
 
+function updateLockfileVersions(packageVersions) {
+  const lockPath = join(root, "package-lock.json");
+  const lockfile = readJson(lockPath);
+  const missing = packageVersions.filter(({ path }) => !lockfile.packages?.[path]).map(({ path }) => path);
+  if (missing.length > 0) {
+    fail(`package-lock.json is missing workspace entries:\n  - ${missing.join("\n  - ")}`);
+  }
+
+  for (const { path, version } of packageVersions) {
+    lockfile.packages[path].version = version;
+  }
+  writeJson(lockPath, lockfile);
+}
+
 function isValidSemver(v) {
   return /^\d+\.\d+\.\d+(-[\w.]+)?(\+[\w.]+)?$/.test(v);
 }
 
 function isBumpType(v) {
   return BUMP_TYPES.includes(v);
-}
-
-function run(cmd, args, opts = {}) {
-  const result = spawnSync(cmd, args, {
-    stdio: opts.stdio ?? "inherit",
-    cwd: opts.cwd ?? root,
-    shell: true,
-  });
-  if (result.status !== 0) {
-    fail(`Command failed: ${cmd} ${args.join(" ")}`);
-  }
-  return result;
 }
 
 function runSilent(cmd, args) {
@@ -180,7 +182,7 @@ for (let i = 0; i < args.length; i++) {
     log(`
 Usage: npm run release:version -- <newversion | bump-type> [--preid <id>]
 
-Bumps all workspace package.json files and regenerates package-lock.json.
+Bumps all workspace package.json files and updates their package-lock.json entries.
 Works like npm version but for the entire monorepo.
 
 Bump types:
@@ -268,20 +270,16 @@ for (const pkgPath of pkgPaths) {
   log(`  ${short}: ${oldVersion} → ${version}`);
 }
 
-// ── Regenerate lockfile ──────────────────────────────────────────────────────
+// ── Update lockfile ──────────────────────────────────────────────────────────
 
-log("\nRegenerating package-lock.json...\n");
-
-const lockPath = join(root, "package-lock.json");
-try {
-  unlinkSync(lockPath);
-  log("  Removed old package-lock.json");
-} catch {
-  // lockfile may not exist, that's fine
-}
-
-run("npm", ["install", "--package-lock-only"]);
-ok("package-lock.json regenerated");
+log("\nUpdating package-lock.json workspace versions...\n");
+updateLockfileVersions(
+  pkgPaths.map((pkgPath) => ({
+    path: dirname(pkgPath).replace(root + "/", ""),
+    version,
+  }))
+);
+ok("package-lock.json workspace versions updated");
 
 // ── Done ─────────────────────────────────────────────────────────────────────
 

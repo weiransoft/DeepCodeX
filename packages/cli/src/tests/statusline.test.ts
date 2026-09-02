@@ -7,6 +7,7 @@ import { sanitizeStatusText, STATUS_SEGMENT_MAX_LENGTH } from "../ui/statusline/
 import { validateModulePath, loadModuleProvider } from "../ui/statusline/module-provider";
 import { createCommandStatusProvider } from "../ui/statusline/command-provider";
 import { StatusLineManager } from "../ui/statusline/manager";
+// fork 扩展（FIX-19）：buildStatusLine 状态栏文本测试所需的导入
 import { buildStatusLine } from "../ui/utils";
 import { resolveSettings, resolveSettingsSources } from "@vegamo/deepcode-core";
 import type { ResolvedStatusLineSettings, SessionEntry } from "@vegamo/deepcode-core";
@@ -311,11 +312,11 @@ test("StatusLineManager isolates a failing provider from succeeding ones", async
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
-
 // ============================================================================
 // buildStatusLine 状态栏文本（FIX-19，多角色审查 2026-07-29）
 // ============================================================================
 
+// 构造最小可用的 SessionEntry，供 buildStatusLine 断言使用
 function makeSessionEntry(overrides: Partial<SessionEntry> = {}): SessionEntry {
   return {
     id: "test-session",

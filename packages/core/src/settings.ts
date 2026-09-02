@@ -1,4 +1,5 @@
-import { defaultsToThinkingMode } from "./common/model-capabilities";
+// 保留 fork defaultsToThinkingMode（Qwen3 识别），采纳上游 DEEPSEEK_V4_MODELS 与 MultimodalMode
+import { DEEPSEEK_V4_MODELS, defaultsToThinkingMode, type MultimodalMode } from "./common/model-capabilities";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -12,6 +13,10 @@ export type DeepcodingEnv = Record<string, string | undefined> & {
   REASONING_EFFORT?: string;
   DEBUG_LOG_ENABLED?: string;
   TELEMETRY_ENABLED?: string;
+  /** 上游 0.3.1 新增：多模态开关（default | on | off） */
+  MULTIMODAL?: string;
+  /** 上游 0.3.1 新增：自动 compact 阈值（token 窗口，支持 "128k" 形式） */
+  AUTO_COMPACT_WINDOW?: string;
   /** v1.1 新增：LLM_ 前缀环境变量别名（无前缀版本优先，LLM_ 前缀作为后备） */
   LLM_BASE_URL?: string;
   LLM_API_KEY?: string;
@@ -24,7 +29,8 @@ export type DeepcodingEnv = Record<string, string | undefined> & {
   CONTEXT_WINDOW?: string;
 };
 
-export type ReasoningEffort = "high" | "max";
+// 采纳上游 0.3.1：新增 "low" 推理档位
+export type ReasoningEffort = "low" | "high" | "max";
 
 export type McpServerConfig = {
   command: string;
@@ -92,6 +98,10 @@ export type ResolvedStatusLineSettings = {
 
 export type DeepcodingSettings = {
   env?: DeepcodingEnv;
+  /** 上游 0.3.1 新增：上下文窗口（token 数，支持 "128k" 字符串形式） */
+  contextWindow?: number | string;
+  /** 上游 0.3.1 新增：自动 compact 阈值窗口 */
+  autoCompactWindow?: number | string;
   model?: string;
   /** LLM provider 显式声明（最高优先级），未设置时按 env/model 前缀推断 */
   provider?: "openai" | "anthropic";
@@ -102,6 +112,14 @@ export type DeepcodingSettings = {
   telemetryEnabled?: boolean;
   notify?: string;
   webSearchTool?: string;
+  /** 上游 0.3.1 新增：多模态与 DeepSeek Files API 配置 */
+  multimodal?: MultimodalMode;
+  filesApiEnabled?: boolean;
+  filesApiTimeoutMs?: number;
+  fileExpiresAfterSeconds?: number;
+  fileRefreshMarginSeconds?: number;
+  fileQuotaCleanupBatch?: number;
+  maxRequestFilesBytes?: number;
   mcpServers?: Record<string, McpServerConfig>;
   permissions?: PermissionSettings;
   enabledSkills?: EnabledSkillsSettings;
@@ -141,11 +159,13 @@ export type ResolvedDeepcodingSettings = {
   /** v1.1 新增：LLM 请求超时（秒），来自 env.TIMEOUT / env.LLM_TIMEOUT，默认 600（10 分钟） */
   timeout: number;
   /**
-   * v1.2 新增：模型上下文窗口大小（token 数）
-   * 来自 env.CONTEXT_WINDOW / env.LLM_CONTEXT_WINDOW，默认 131072（128K）
-   * 用途：计算 compact 阈值（contextWindow * 0.8），预留 20% 给 output + tool 结果
+   * 上下文窗口大小（token 数）。
+   * 上游 0.3.1 语义：来自 settings.contextWindow / env.CONTEXT_WINDOW，
+   * 未设置时按模型推断（DeepSeek V4 = 1M，其余 256K）。
    */
   contextWindow: number;
+  /** 上游 0.3.1 新增：自动 compact 阈值窗口（默认 contextWindow/2，不超过 contextWindow） */
+  autoCompactWindow: number;
   debugLogEnabled: boolean;
   telemetryEnabled: boolean;
   /**
@@ -155,6 +175,14 @@ export type ResolvedDeepcodingSettings = {
   allowPrivateBaseURL: boolean;
   notify?: string;
   webSearchTool?: string;
+  /** 上游 0.3.1 新增：多模态解析模式与 DeepSeek Files API 配置 */
+  multimodal: MultimodalMode;
+  filesApiEnabled: boolean;
+  filesApiTimeoutMs: number;
+  fileExpiresAfterSeconds: number;
+  fileRefreshMarginSeconds: number;
+  fileQuotaCleanupBatch: number;
+  maxRequestFilesBytes: number;
   mcpServers?: Record<string, McpServerConfig>;
   permissions: Required<PermissionSettings>;
   enabledSkills: EnabledSkillsSettings;
@@ -169,8 +197,80 @@ export type ModelConfigSelection = {
 
 export type SettingsProcessEnv = Record<string, string | undefined>;
 
+// ── 上游 0.3.1：上下文窗口常量与 Files API 默认值 ─────────────────────────────
+const DEFAULT_CONTEXT_WINDOW = 256 * 1024;
+const DEEPSEEK_V4_CONTEXT_WINDOW = 1024 * 1024;
+export const DEFAULT_FILES_API_TIMEOUT_MS = 60_000;
+export const DEFAULT_FILE_EXPIRES_AFTER_SECONDS = 7 * 24 * 60 * 60;
+export const DEFAULT_FILE_REFRESH_MARGIN_SECONDS = 60 * 60;
+export const DEFAULT_FILE_QUOTA_CLEANUP_BATCH = 100;
+export const DEFAULT_MAX_REQUEST_FILES_BYTES = 128 * 1024 * 1024;
+export const MAX_FILES_API_TIMEOUT_MS = 10 * 60 * 1000;
+
+/** 按模型推断默认上下文窗口：DeepSeek V4 系列 = 1M，其余 256K */
+export function getDefaultContextWindow(model: string): number {
+  return DEEPSEEK_V4_MODELS.has(model) ? DEEPSEEK_V4_CONTEXT_WINDOW : DEFAULT_CONTEXT_WINDOW;
+}
+
+/** 按模型推断默认自动 compact 阈值窗口（contextWindow 的一半） */
+export function getDefaultAutoCompactWindow(model: string): number {
+  return getDefaultContextWindow(model) / 2;
+}
+
+/**
+ * 解析 token 窗口值。
+ *
+ * 兼容三种形式（合并策略：上游 0.3.1 的 "128k"/"1m" 后缀形式 + fork v1.2 的纯数字字符串形式）：
+ * - 正整数（number）：直接返回；
+ * - 纯数字字符串（如 "131072"）：按字面 token 数解析（fork LLM_CONTEXT_WINDOW 契约）；
+ * - 带后缀字符串（如 "128k" / "1m"）：按 k=1024 / m=1024^2 换算（上游语义）。
+ */
+function parseTokenWindow(value: unknown): number | undefined {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  // 后缀可选：无后缀时按纯数字（fork 契约），k/m 后缀按上游语义换算
+  const match = /^(\d+)([km])?$/i.exec(value.trim());
+  if (!match) {
+    return undefined;
+  }
+  const amount = Number(match[1]);
+  const suffix = match[2]?.toLowerCase();
+  const multiplier = suffix === "m" ? 1024 * 1024 : suffix === "k" ? 1024 : 1;
+  const tokens = amount * multiplier;
+  return Number.isSafeInteger(tokens) && tokens > 0 ? tokens : undefined;
+}
+
+/** 依次尝试解析多个候选 token 窗口值，返回第一个有效值 */
+function firstTokenWindow(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    const parsed = parseTokenWindow(value);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+  }
+  return undefined;
+}
+
+// 采纳上游 0.3.1：reasoning effort 支持 "low" 档位
 function resolveReasoningEffort(value: unknown): ReasoningEffort | undefined {
-  return value === "high" || value === "max" ? value : undefined;
+  return value === "low" || value === "high" || value === "max" ? value : undefined;
+}
+
+/** 解析多模态模式：default | on | off（大小写不敏感） */
+function resolveMultimodalMode(value: unknown): MultimodalMode | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "default" || normalized === "on" || normalized === "off") {
+    return normalized;
+  }
+  return undefined;
 }
 
 function parseBoolean(value: unknown): boolean | undefined {
@@ -197,6 +297,23 @@ function parseTemperature(value: unknown): number | undefined {
     return undefined;
   }
   return raw;
+}
+
+// ── 上游 0.3.1：整数范围校验工具（Files API 配置解析用） ─────────────────────
+function parseIntegerInRange(value: unknown, minimum: number, maximum: number): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= minimum && value <= maximum
+    ? value
+    : undefined;
+}
+
+function firstIntegerInRange(minimum: number, maximum: number, ...values: unknown[]): number | undefined {
+  for (const value of values) {
+    const parsed = parseIntegerInRange(value, minimum, maximum);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+  }
+  return undefined;
 }
 
 function trimString(value: unknown): string {
@@ -552,6 +669,23 @@ export function resolveSettingsSources(
     trimString(env.MODEL) ||
     defaults.model;
 
+  // 上游 0.3.1：上下文窗口解析（settings.contextWindow 优先，其次 env 别名，最后按模型推断）
+  // 合并 fork 的 LLM_CONTEXT_WINDOW 别名（env 已包含 systemEnv，无需重复读取）
+  const contextWindow =
+    firstTokenWindow(
+      env.CONTEXT_WINDOW,
+      env.LLM_CONTEXT_WINDOW,
+      projectSettings?.contextWindow,
+      userSettings?.contextWindow
+    ) ?? getDefaultContextWindow(model);
+  // 上游 0.3.1：自动 compact 阈值窗口（默认 contextWindow/2，且不超过 contextWindow）
+  const configuredAutoCompactWindow = firstTokenWindow(
+    systemEnv.AUTO_COMPACT_WINDOW,
+    projectSettings?.autoCompactWindow,
+    userSettings?.autoCompactWindow
+  );
+  const defaultAutoCompactWindow = Math.max(1, Math.floor(contextWindow / 2));
+  const autoCompactWindow = Math.min(configuredAutoCompactWindow ?? defaultAutoCompactWindow, contextWindow);
   const thinkingEnabled =
     parseBoolean(systemEnv.THINKING_ENABLED) ??
     parseBoolean(projectSettings?.thinkingEnabled) ??
@@ -657,15 +791,55 @@ export function resolveSettingsSources(
   // 默认 600 秒（10 分钟），与 OpenAI SDK 默认超时保持一致，确保向后兼容
   const timeout = Number(trimString(env.TIMEOUT) || trimString(env.LLM_TIMEOUT)) || 600;
 
-  // v1.2 新增：contextWindow 解析（无前缀优先：CONTEXT_WINDOW 优先于 LLM_CONTEXT_WINDOW）
-  // 默认 131072（128K），用于计算 compact 阈值，避免上下文超限
-  const contextWindow = Number(trimString(env.CONTEXT_WINDOW) || trimString(env.LLM_CONTEXT_WINDOW)) || 131072;
-
   // P0 安全修复：对 baseURL 做 SSRF 校验，防御 file://、ftp://、私网/回环/元数据地址。
   // 默认 URL（官方端点）也过校验，形成防御纵深；本地 Ollama 等场景可通过
   // settings.json 的 allowPrivateBaseURL 或 DEEPCODE_ALLOW_PRIVATE_BASE_URL=true 显式放行。
   const rawBaseURL = trimString(env.BASE_URL) || defaultBaseURL;
   const baseURL = sanitizeBaseURL(rawBaseURL, processEnv, allowPrivateBaseURL);
+
+  // 上游 0.3.1：多模态模式解析（default | on | off）
+  const multimodal =
+    resolveMultimodalMode(systemEnv.MULTIMODAL) ??
+    resolveMultimodalMode(projectSettings?.multimodal) ??
+    resolveMultimodalMode(projectEnv.MULTIMODAL) ??
+    resolveMultimodalMode(userSettings?.multimodal) ??
+    resolveMultimodalMode(userEnv.MULTIMODAL) ??
+    "default";
+
+  // 上游 0.3.1：DeepSeek Files API 相关配置
+  const filesApiEnabled =
+    parseBoolean(projectSettings?.filesApiEnabled) ?? parseBoolean(userSettings?.filesApiEnabled) ?? false;
+  const filesApiTimeoutMs =
+    firstIntegerInRange(
+      1,
+      MAX_FILES_API_TIMEOUT_MS,
+      projectSettings?.filesApiTimeoutMs,
+      userSettings?.filesApiTimeoutMs
+    ) ?? DEFAULT_FILES_API_TIMEOUT_MS;
+  const fileExpiresAfterSeconds =
+    firstIntegerInRange(
+      3_600,
+      2_592_000,
+      projectSettings?.fileExpiresAfterSeconds,
+      userSettings?.fileExpiresAfterSeconds
+    ) ?? DEFAULT_FILE_EXPIRES_AFTER_SECONDS;
+  const fileRefreshMarginSeconds =
+    firstIntegerInRange(
+      0,
+      fileExpiresAfterSeconds - 1,
+      projectSettings?.fileRefreshMarginSeconds,
+      userSettings?.fileRefreshMarginSeconds
+    ) ?? Math.min(DEFAULT_FILE_REFRESH_MARGIN_SECONDS, fileExpiresAfterSeconds - 1);
+  const fileQuotaCleanupBatch =
+    firstIntegerInRange(1, 1_000, projectSettings?.fileQuotaCleanupBatch, userSettings?.fileQuotaCleanupBatch) ??
+    DEFAULT_FILE_QUOTA_CLEANUP_BATCH;
+  const maxRequestFilesBytes =
+    firstIntegerInRange(
+      1,
+      Number.MAX_SAFE_INTEGER,
+      projectSettings?.maxRequestFilesBytes,
+      userSettings?.maxRequestFilesBytes
+    ) ?? DEFAULT_MAX_REQUEST_FILES_BYTES;
 
   return {
     env,
@@ -674,16 +848,24 @@ export function resolveSettingsSources(
     model,
     provider,
     anthropic,
+    contextWindow,
+    autoCompactWindow,
     temperature,
     thinkingEnabled,
     reasoningEffort,
     timeout,
-    contextWindow,
     debugLogEnabled,
     telemetryEnabled,
     allowPrivateBaseURL,
     notify: notify || undefined,
     webSearchTool: webSearchTool || undefined,
+    multimodal,
+    filesApiEnabled,
+    filesApiTimeoutMs,
+    fileExpiresAfterSeconds,
+    fileRefreshMarginSeconds,
+    fileQuotaCleanupBatch,
+    maxRequestFilesBytes,
     mcpServers: mergeMcpServers(userSettings, projectSettings, userEnv, projectEnv, systemEnv),
     permissions: mergePermissions(userSettings, projectSettings),
     enabledSkills: mergeEnabledSkills(userSettings, projectSettings),
@@ -885,8 +1067,24 @@ export function getUserSettingsPath(): string {
   return path.join(os.homedir(), ".deepcode", "settings.json");
 }
 
+export function getDeepcodePlusSettingsPath(): string {
+  return path.join(os.homedir(), ".deepcode-plus", "settings.json");
+}
+
 export function getProjectSettingsPath(projectRoot: string): string {
   return path.join(projectRoot, ".deepcode", "settings.json");
+}
+
+export function readDeepcodePlusApiKey(settingsPath: string = getDeepcodePlusSettingsPath()): string | undefined {
+  try {
+    const raw = fs.readFileSync(settingsPath, "utf8");
+    const settings = JSON.parse(raw) as { env?: { PLUS_API_KEY?: unknown } } | null;
+    return typeof settings?.env?.PLUS_API_KEY === "string"
+      ? trimString(settings.env.PLUS_API_KEY) || undefined
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function readSettingsFile(settingsPath: string): DeepcodingSettings | null {

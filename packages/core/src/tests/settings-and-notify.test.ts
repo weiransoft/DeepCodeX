@@ -1,5 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+// 上游 v0.3.1：readDeepcodePlusApiKey 测试需要 fs/os/path
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import {
   buildNotifyEnv,
   formatDurationSeconds,
@@ -7,9 +11,43 @@ import {
   type NotifyContext,
   type NotifySpawn,
 } from "../common/notify";
-import { applyModelConfigSelection, resolveSettings, resolveSettingsSources } from "../settings";
+// 融合两侧：fork 保留 applyModelConfigSelection 等核心导入，上游新增 Files API 常量与 readDeepcodePlusApiKey
+import {
+  DEFAULT_FILE_EXPIRES_AFTER_SECONDS,
+  DEFAULT_FILE_QUOTA_CLEANUP_BATCH,
+  DEFAULT_FILE_REFRESH_MARGIN_SECONDS,
+  DEFAULT_FILES_API_TIMEOUT_MS,
+  DEFAULT_MAX_REQUEST_FILES_BYTES,
+  DEFAULT_MODEL,
+  applyModelConfigSelection,
+  readDeepcodePlusApiKey,
+  resolveSettings,
+  resolveSettingsSources,
+} from "../settings";
 
 const TEST_PROCESS_ENV = {};
+
+// 上游 v0.3.1 新增用例：DeepCode Plus API Key 读取
+test("readDeepcodePlusApiKey reads only a non-empty env key", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "deepcode-plus-settings-"));
+  const settingsPath = path.join(tempDir, "settings.json");
+
+  try {
+    fs.writeFileSync(settingsPath, JSON.stringify({ env: { PLUS_API_KEY: "  sk-plus-test  " } }));
+    assert.equal(readDeepcodePlusApiKey(settingsPath), "sk-plus-test");
+
+    for (const settings of [{}, { env: {} }, { env: { PLUS_API_KEY: "   " } }, { env: { PLUS_API_KEY: 123 } }]) {
+      fs.writeFileSync(settingsPath, JSON.stringify(settings));
+      assert.equal(readDeepcodePlusApiKey(settingsPath), undefined);
+    }
+
+    fs.writeFileSync(settingsPath, "not json");
+    assert.equal(readDeepcodePlusApiKey(settingsPath), undefined);
+    assert.equal(readDeepcodePlusApiKey(path.join(tempDir, "missing.json")), undefined);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
 
 test("resolveSettings reads top-level thinkingEnabled, notify, and webSearchTool", () => {
   const resolved = resolveSettings(
@@ -44,6 +82,126 @@ test("resolveSettings reads top-level thinkingEnabled, notify, and webSearchTool
   assert.equal(resolved.webSearchTool, "/tmp/web-search.sh");
 });
 
+// 上游 v0.3.1 新增用例组：multimodal 模式与 Files API 配置解析
+test("resolveSettings defaults multimodal to default", () => {
+  const resolved = resolveSettings(
+    {},
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  assert.equal(resolved.multimodal, "default");
+});
+
+test("resolveSettings applies Files API defaults", () => {
+  const resolved = resolveSettings(
+    {},
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+
+  assert.equal(resolved.filesApiEnabled, false);
+  assert.equal(resolved.filesApiTimeoutMs, DEFAULT_FILES_API_TIMEOUT_MS);
+  assert.equal(resolved.fileExpiresAfterSeconds, DEFAULT_FILE_EXPIRES_AFTER_SECONDS);
+  assert.equal(resolved.fileRefreshMarginSeconds, DEFAULT_FILE_REFRESH_MARGIN_SECONDS);
+  assert.equal(resolved.fileQuotaCleanupBatch, DEFAULT_FILE_QUOTA_CLEANUP_BATCH);
+  assert.equal(resolved.maxRequestFilesBytes, DEFAULT_MAX_REQUEST_FILES_BYTES);
+});
+
+test("resolveSettingsSources validates Files API settings and uses project precedence", () => {
+  const resolved = resolveSettingsSources(
+    {
+      filesApiEnabled: true,
+      filesApiTimeoutMs: 120_000,
+      fileExpiresAfterSeconds: 86_400,
+      fileRefreshMarginSeconds: 7_200,
+      fileQuotaCleanupBatch: 50,
+      maxRequestFilesBytes: 10_000,
+    },
+    {
+      filesApiEnabled: false,
+      filesApiTimeoutMs: 600_001,
+      fileExpiresAfterSeconds: 7_200,
+      fileRefreshMarginSeconds: 7_200,
+      fileQuotaCleanupBatch: 200,
+      maxRequestFilesBytes: 20_000,
+    },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+
+  assert.equal(resolved.filesApiEnabled, false);
+  assert.equal(resolved.filesApiTimeoutMs, 120_000);
+  assert.equal(resolved.fileExpiresAfterSeconds, 7_200);
+  assert.equal(resolved.fileRefreshMarginSeconds, DEFAULT_FILE_REFRESH_MARGIN_SECONDS);
+  assert.equal(resolved.fileQuotaCleanupBatch, 200);
+  assert.equal(resolved.maxRequestFilesBytes, 20_000);
+});
+
+test("resolveSettings reads top-level multimodal and ignores invalid values", () => {
+  const on = resolveSettings(
+    { multimodal: "on" },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  const off = resolveSettings(
+    { multimodal: "off" },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  const invalid = resolveSettings(
+    { multimodal: "sometimes" as never },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+
+  assert.equal(on.multimodal, "on");
+  assert.equal(off.multimodal, "off");
+  assert.equal(invalid.multimodal, "default");
+});
+
+test("resolveSettings reads MULTIMODAL from env", () => {
+  const resolved = resolveSettings(
+    { env: { MULTIMODAL: "off" } },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  assert.equal(resolved.multimodal, "off");
+});
+
+test("resolveSettings gives top-level multimodal priority over env MULTIMODAL", () => {
+  const resolved = resolveSettings(
+    {
+      multimodal: "off",
+      env: { MULTIMODAL: "on" },
+    },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  assert.equal(resolved.multimodal, "off");
+});
+
+test("resolveSettingsSources applies multimodal source precedence", () => {
+  const resolved = resolveSettingsSources(
+    {
+      env: { MULTIMODAL: "on" },
+      multimodal: "off",
+    },
+    {
+      env: { MULTIMODAL: "on" },
+      multimodal: "off",
+    },
+    {
+      model: "default-model",
+      baseURL: "https://default.example.com",
+    },
+    {
+      DEEPCODE_MULTIMODAL: "on",
+    }
+  );
+
+  assert.equal(resolved.multimodal, "on");
+});
+
 test("resolveSettings gives top-level model priority over env MODEL", () => {
   const resolved = resolveSettings(
     {
@@ -60,6 +218,95 @@ test("resolveSettings gives top-level model priority over env MODEL", () => {
   );
 
   assert.equal(resolved.model, "deepseek-v4-flash");
+});
+
+// 上游 v0.3.1 新增用例组：contextWindow / autoCompactWindow 解析（支持 "128k"/"1m" 字符串）
+test("resolveSettings derives model-specific context window defaults", () => {
+  const regular = resolveSettings(
+    {},
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  const deepseekV4 = resolveSettings(
+    { model: "deepseek-v4-flash-vision-exp" },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+
+  assert.equal(regular.contextWindow, 256 * 1024);
+  assert.equal(regular.autoCompactWindow, 128 * 1024);
+  assert.equal(deepseekV4.contextWindow, 1024 * 1024);
+  assert.equal(deepseekV4.autoCompactWindow, 512 * 1024);
+});
+
+test("resolveSettings parses numeric and K/M context window settings", () => {
+  const resolved = resolveSettings(
+    {
+      contextWindow: " 2m ",
+      autoCompactWindow: 300_000,
+    },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+
+  assert.equal(resolved.contextWindow, 2 * 1024 * 1024);
+  assert.equal(resolved.autoCompactWindow, 300_000);
+});
+
+test("resolveSettings derives auto compact window from the configured context window", () => {
+  const resolved = resolveSettings(
+    { contextWindow: "512K" },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+
+  assert.equal(resolved.contextWindow, 512 * 1024);
+  assert.equal(resolved.autoCompactWindow, 256 * 1024);
+});
+
+test("resolveSettings ignores invalid windows and caps auto compact window at context window", () => {
+  const invalid = resolveSettings(
+    { contextWindow: "1G", autoCompactWindow: 1.5 },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  const capped = resolveSettings(
+    { contextWindow: "128k", autoCompactWindow: "1M" },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+
+  assert.equal(invalid.contextWindow, 256 * 1024);
+  assert.equal(invalid.autoCompactWindow, 128 * 1024);
+  assert.equal(capped.contextWindow, 128 * 1024);
+  assert.equal(capped.autoCompactWindow, 128 * 1024);
+});
+
+test("resolveSettingsSources applies context window source precedence", () => {
+  const resolved = resolveSettingsSources(
+    { contextWindow: "256K", autoCompactWindow: "64K" },
+    { contextWindow: "512K", autoCompactWindow: "128K" },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    {
+      DEEPCODE_CONTEXT_WINDOW: "1M",
+      DEEPCODE_AUTO_COMPACT_WINDOW: "256k",
+    }
+  );
+
+  assert.equal(resolved.contextWindow, 1024 * 1024);
+  assert.equal(resolved.autoCompactWindow, 256 * 1024);
+});
+
+test("resolveSettingsSources skips invalid higher-priority context window values", () => {
+  const resolved = resolveSettingsSources(
+    { contextWindow: "256K" },
+    { contextWindow: "512K" },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    { DEEPCODE_CONTEXT_WINDOW: "invalid" }
+  );
+
+  assert.equal(resolved.contextWindow, 512 * 1024);
+  assert.equal(resolved.autoCompactWindow, 256 * 1024);
 });
 
 test("resolveSettings reads TEMPERATURE, THINKING_ENABLED, REASONING_EFFORT, and DEBUG_LOG_ENABLED from env", () => {
@@ -96,9 +343,8 @@ test("resolveSettings defaults telemetryEnabled to true", () => {
   assert.equal(resolved.telemetryEnabled, true);
 });
 
+// fork 保留用例（A2 改进 2026-07-27）：debugLogEnabled 默认 true，可被 DEBUG_LOG_ENABLED=false 显式禁用
 test("resolveSettings defaults debugLogEnabled to true (A2 改进 2026-07-27)", () => {
-  // A2 改进：默认启用 debugLogEnabled=true，便于追溯 LLM 工具调用历史
-  // 关联事件：docs/archive/code-review-process-incident.md
   const resolved = resolveSettings(
     {},
     { model: "default-model", baseURL: "https://default.example.com" },
@@ -108,7 +354,6 @@ test("resolveSettings defaults debugLogEnabled to true (A2 改进 2026-07-27)", 
 });
 
 test("resolveSettings allows DEBUG_LOG_ENABLED=false to override default true (A2)", () => {
-  // A2：默认 true，但用户仍可通过 env 显式禁用
   const resolved = resolveSettings(
     {
       env: {
@@ -196,6 +441,8 @@ test("resolveSettingsSources applies user, project, and DEEPCODE environment pre
       baseURL: "https://default.example.com",
     },
     {
+      // 上游 v0.3.1：DEEPCODE_ 前缀进程环境变量（优先级最高）
+      DEEPCODE_API_KEY: "system-key",
       DEEPCODE_MODEL: "system-model",
       DEEPCODE_THINKING_ENABLED: "false",
       DEEPCODE_REASONING_EFFORT: "high",
@@ -207,7 +454,8 @@ test("resolveSettingsSources applies user, project, and DEEPCODE environment pre
   );
 
   assert.equal(resolved.model, "system-model");
-  assert.equal(resolved.apiKey, "project-key");
+  // 合并后实现：DEEPCODE_ 前缀系统环境变量优先级最高（systemEnv 合并在 env 链最末），覆盖 project API_KEY
+  assert.equal(resolved.apiKey, "system-key");
   assert.equal(resolved.thinkingEnabled, false);
   assert.equal(resolved.reasoningEffort, "high");
   assert.equal(resolved.temperature, 1.2);
@@ -329,33 +577,39 @@ test("resolveSettingsSources merges MCP env with documented priority", () => {
 });
 
 test("resolveSettings defaults DeepSeek v4 models to thinking mode", () => {
-  const resolved = resolveSettings(
-    {
-      env: {
-        MODEL: "deepseek-v4-flash",
+  // 融合两侧：fork 用 deepseek-v4-flash，上游新增 deepseek-v4-flash-vision-exp，均在 V4 系列内
+  for (const model of ["deepseek-v4-flash", "deepseek-v4-flash-vision-exp"]) {
+    const resolved = resolveSettings(
+      {
+        env: {
+          MODEL: model,
+        },
       },
-    },
-    {
-      model: "default-model",
-      baseURL: "https://default.example.com",
-    },
-    TEST_PROCESS_ENV
-  );
+      {
+        model: "default-model",
+        baseURL: "https://default.example.com",
+      },
+      TEST_PROCESS_ENV
+    );
 
-  assert.equal(resolved.thinkingEnabled, true);
+    assert.equal(resolved.thinkingEnabled, true, `模型 ${model} 应默认启用 thinking`);
+  }
 });
 
-test("resolveSettings applies thinking defaults to the fallback model", () => {
+// 融合两侧：采用上游测试结构（引用 DEFAULT_MODEL 常量），但断言遵循 fork 契约（DEFAULT_MODEL = "deepseek-v4-pro"）
+test("resolveSettings applies thinking defaults to the default model", () => {
   const resolved = resolveSettings(
     {},
     {
-      model: "deepseek-v4-pro",
+      model: DEFAULT_MODEL,
       baseURL: "https://default.example.com",
     },
     TEST_PROCESS_ENV
   );
 
-  assert.equal(resolved.model, "deepseek-v4-pro");
+  // fork 决策：默认模型为 deepseek-v4-pro（上游为 deepseek-v4-flash）
+  assert.equal(DEFAULT_MODEL, "deepseek-v4-pro");
+  assert.equal(resolved.model, DEFAULT_MODEL);
   assert.equal(resolved.thinkingEnabled, true);
 });
 
@@ -407,6 +661,22 @@ test("resolveSettings defaults invalid reasoning effort to max", () => {
   );
 
   assert.equal(resolved.reasoningEffort, "max");
+});
+
+// 上游 v0.3.1 新增用例：reasoning effort 支持 "low" 档位
+test("resolveSettings accepts low reasoning effort", () => {
+  const resolved = resolveSettings(
+    {
+      reasoningEffort: "low",
+    },
+    {
+      model: "default-model",
+      baseURL: "https://default.example.com",
+    },
+    TEST_PROCESS_ENV
+  );
+
+  assert.equal(resolved.reasoningEffort, "low");
 });
 
 test("resolveSettings ignores invalid temperature values", () => {

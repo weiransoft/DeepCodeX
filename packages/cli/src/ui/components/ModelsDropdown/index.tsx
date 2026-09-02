@@ -11,11 +11,14 @@ type ThinkingModeOption = {
   reasoningEffort?: ReasoningEffort;
 };
 
-export const MODEL_COMMAND_MODELS = ["deepseek-v4-pro", "deepseek-v4-flash"] as const;
+// 上游 v0.3.1：模型下拉新增 deepseek-v4-flash-vision-exp 视觉实验模型
+export const MODEL_COMMAND_MODELS = ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"] as const;
 
 export const MODEL_COMMAND_THINKING_OPTIONS: ThinkingModeOption[] = [
   { label: "Thinking mode [max]", thinkingEnabled: true, reasoningEffort: "max" },
   { label: "Thinking mode [high]", thinkingEnabled: true, reasoningEffort: "high" },
+  // 上游 v0.3.1：新增 low 档位思考强度选项
+  { label: "Thinking mode [low]", thinkingEnabled: true, reasoningEffort: "low" },
   { label: "No thinking", thinkingEnabled: false },
 ];
 

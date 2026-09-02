@@ -49,7 +49,7 @@ Common fields:
 | `env.BASE_URL` | DeepSeek API endpoint, default `https://api.deepseek.com` |
 | `env.API_KEY` | DeepSeek API key |
 | `thinkingEnabled` | Whether to enable thinking mode |
-| `reasoningEffort` | Reasoning effort, commonly `"high"` or `"max"` |
+| `reasoningEffort` | Reasoning effort: `"low"`, `"high"`, or `"max"` |
 
 You can also create `.deepcode/settings.json` inside a project to customize the model, permissions, or MCP settings for that project only.
 
@@ -176,6 +176,7 @@ Type `/` in the input box to open the command menu.
 | ------- | ------ |
 | `/new` | Start a new conversation |
 | `/resume` | Choose a previous conversation to continue |
+| `/fork` | Fork the current conversation |
 | `/continue` | Continue the current conversation or resume the latest one |
 | `/model` | Switch model, thinking mode, and reasoning effort |
 | `/init` | Create an `AGENTS.md` instruction file for the current project |

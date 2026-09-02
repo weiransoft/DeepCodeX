@@ -1,3 +1,5 @@
+// fork 侧安全修复依赖：path 与 isPathInProject 用于 suggestedCommand 参数沙箱的
+// 路径边界校验（禁止 LLM 通过参数把路径指向项目外）
 import * as path from "node:path";
 import { isPathInProject } from "../common/permissions";
 import type { ToolExecutionContext, ToolExecutionResult } from "./executor";
@@ -14,7 +16,7 @@ type AskUserQuestionItem = {
 };
 
 /**
- * 建议命令（用户回答 AskUserQuestion 后自动注入执行）
+ * 建议命令（用户回答 AskUserQuestion 后自动注入执行）（fork 侧特性）
  *
  * 安全约束：
  * - command 必须以 "/" 开头（仅允许 slash 命令）
@@ -39,7 +41,7 @@ type AskUserQuestionMetadata = {
 };
 
 /**
- * 允许的 suggestedCommand 命令名白名单
+ * 允许的 suggestedCommand 命令名白名单（fork 侧安全修复）
  *
  * 安全策略：只允许"读取/调度类"命令自动执行，禁止"会话控制类"命令。
  * - 允许：team 系列（多角色调度，只读 + 子任务派发）
@@ -69,15 +71,15 @@ const ALLOWED_SUGGESTED_COMMAND_NAMES = new Set<string>([
 ]);
 
 /**
- * 参数级路径选项黑名单。
+ * 参数级路径选项黑名单（fork 侧 P0 安全修复）。
  *
- * P0 安全修复：禁止 LLM 通过 suggestedCommand 的参数把文件路径指向项目外，
+ * 禁止 LLM 通过 suggestedCommand 的参数把文件路径指向项目外，
  * 例如 `--task-file /etc/passwd` 或 `--project-root /tmp`。
  */
 const FORBIDDEN_PATH_OPTION_NAMES = new Set<string>(["--task-file", "--task_file", "--project-root", "--project_root"]);
 
 /**
- * Shell 元字符黑名单。
+ * Shell 元字符黑名单（fork 侧安全修复）。
  *
  * 禁止出现在 suggestedCommand 中，防止通过 shell 解释器执行任意命令。
  */
@@ -117,7 +119,7 @@ export async function handleAskUserQuestionTool(
 }
 
 /**
- * 解析并校验 suggestedCommand 字段
+ * 解析并校验 suggestedCommand 字段（fork 侧安全修复）
  *
  * 安全约束：
  * - command 必须是字符串且非空
@@ -439,7 +441,7 @@ function parseQuestions(raw: unknown): { ok: true; value: AskUserQuestionItem[] 
 }
 
 /**
- * 构建工具输出的摘要文本
+ * 构建工具输出的摘要文本（fork 侧保留）
  *
  * 注意：suggestedCommand 信息仅通过 metadata 传递给 UI 层（PendingAskUserQuestion.suggestedCommand），
  * 由 UI 层在用户回答后通过 handleQuestionAnswers 自动执行。

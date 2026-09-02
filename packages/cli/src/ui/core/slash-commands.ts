@@ -33,6 +33,7 @@ import type { SkillInfo } from "@vegamo/deepcode-core";
  *   - eag-design: 执行 DESIGN Loop（PM 结构化需求 → 架构师设计 → 评估器判定 → 失败带反馈重试）
  *   说明：命令执行统一走 core session.ts 的 EagCommandParser 前缀解析分发，
  *         此处注册仅解决可发现性（Tab 补全 / /help 展示 / inline 参数提示）。
+ * 上游 v0.3.1 新增：fork 命令（从当前会话派生新会话）
  */
 export type SlashCommandKind =
   | "skill"
@@ -42,6 +43,7 @@ export type SlashCommandKind =
   | "new"
   | "init"
   | "resume"
+  | "fork" // 上游 v0.3.1 新增
   | "continue"
   | "undo"
   | "mcp"
@@ -86,6 +88,7 @@ export type SlashCommandItem = {
 };
 
 export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
+  // fork 帮助扩展（FIX-06）：/help 与 CLI --help EPILOG 共用命令清单数据源
   {
     kind: "help",
     name: "help",
@@ -127,6 +130,13 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
     name: "resume",
     label: "/resume",
     description: "Pick a previous conversation to continue",
+  },
+  // 上游 v0.3.1 新增：/fork 从当前会话派生新会话
+  {
+    kind: "fork",
+    name: "fork",
+    label: "/fork",
+    description: "Fork the current conversation",
   },
   {
     kind: "continue",

@@ -7,8 +7,9 @@ import matter from "gray-matter";
 import { fileURLToPath } from "url";
 import type { SessionMessage } from "./session";
 import { findGitBashPath, resolveShellPath } from "./common/shell-utils";
-import { supportsMultimodal } from "./common/model-capabilities";
-// P1-T2：PureShowWidget 工具定义（条件注册，受 enabledSkills["dynamic-ui"] 控制）
+// 上游 v0.3.1：MultimodalMode 用于区分多模态能力级别（支持 ReadImage 或降级 UnderstandImage）
+import { supportsMultimodal, type MultimodalMode } from "./common/model-capabilities";
+// P1-T2（fork）：PureShowWidget 工具定义（条件注册，受 enabledSkills["dynamic-ui"] 控制）
 import { pureShowWidgetToolDefinition } from "./visualization/widget-tool";
 
 const COMPACT_PROMPT_BASE = `Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
@@ -93,6 +94,9 @@ Here's an example of how your output should be structured:
 
 </summary>`;
 
+// fork 侧：保留中文详细系统提示词（含报告类工具验证优先约束、防编造 URL 等安全要求）。
+// 上游 v0.3.1 将其简化为一句英文（DSH 对齐），但会丢失 fork 的防幻觉安全约束，
+// 故此处保留 fork 版本；上游的提示词调整以 skill 工具 / <skill_content> 格式等形式并入。
 const SYSTEM_PROMPT_BASE = `你是名叫Deep Code的交互式CLI工具，帮助用户完成软件工程任务。 Use the instructions below and the tools available to you to assist the user.
 
 重要：严禁编造任何非编程相关的 URL。对于编程链接，仅限使用：1) 用户提供的上下文；2) 你确定的官方文档主域名。在输出前，必须自查该链接是否存在于你的上下文记忆中；若不存在，请明确说明无法提供。
@@ -132,11 +136,17 @@ const SYSTEM_PROMPT_BASE = `你是名叫Deep Code的交互式CLI工具，帮助�
 5. **失败优先级**：工具调用失败时，不得用幻觉补全；应优先选择"明确报告失败"而非"提供看似合理的猜测数字"。
 `;
 
-type PromptToolOptions = {
+// 合并说明：PromptToolOptions 按 v0.3.1 改为导出类型，并合并双方字段——
+//   multimodal / nonInteractive 为上游新增；enabledSkills 为 fork 新增（PureShowWidget 条件注册）
+export type PromptToolOptions = {
   model?: string;
+  /** 上游 v0.3.1：多模态能力模式（auto/on/off），决定注册 ReadImage 还是 UnderstandImage */
+  multimodal?: MultimodalMode;
   webSearchEnabled?: boolean;
+  /** 上游 v0.3.1：非交互模式（如 exec/headless），移除 AskUserQuestion 工具与对应文档 */
+  nonInteractive?: boolean;
   /**
-   * 已启用的 skill 映射表（与 settings.enabledSkills 同源）
+   * fork 侧：已启用的 skill 映射表（与 settings.enabledSkills 同源）
    *
    * 用途：
    *   - 控制 dynamic-ui 等 skill 关联工具的注册（如 PureShowWidget）
@@ -150,11 +160,12 @@ type PromptToolOptions = {
   enabledSkills?: Record<string, boolean>;
 };
 
+// fork 侧：默认 skill 提示选项（getDefaultSkillPrompt 使用）
 type DefaultSkillPromptOptions = {
   enabledSkills?: Record<string, boolean>;
 };
 
-// 默认 skill 模板列表：这些 skill 会通过 readDefaultSkillDocs() 自动注入到系统提示
+// fork 侧：默认 skill 模板列表：这些 skill 会通过 readDefaultSkillDocs() 自动注入到系统提示
 // 影响所有用户的基础体验，新增/删除需谨慎评估（E6 增强方案）
 // 导出说明（S5.2，2026-08-19）：导出供测试直接断言运行时导出面
 // （default-skills.test.ts 测试组 3 原以读源码文本方式断言，属表面测试，已改为 import 常量断言）
@@ -198,13 +209,16 @@ function readToolDocs(extensionRoot: string, options: PromptToolOptions = {}): s
   const entries = fs.readdirSync(toolsDir);
   const docs = entries
     .filter((entry) => entry.endsWith(".md") || entry.endsWith(".md.ejs"))
+    // 上游 v0.3.1：非交互模式（exec/headless）下排除 ask-user-question 文档（无 UI 可承接提问）
+    .filter((entry) => options.nonInteractive !== true || entry !== "ask-user-question.md")
     .sort()
     .map((entry) => {
       const fullPath = path.join(toolsDir, entry);
       try {
         const template = fs.readFileSync(fullPath, "utf8");
         const content = entry.endsWith(".ejs")
-          ? ejs.render(template, { supportsMultimodal: supportsMultimodal(options.model ?? "") })
+          ? // 上游 v0.3.1：multimodal 模式透传给模板（read.md.ejs 按 multimodal 分支渲染）
+            ejs.render(template, { supportsMultimodal: supportsMultimodal(options.model ?? "", options.multimodal) })
           : template;
         return content.trim();
       } catch {
@@ -216,6 +230,7 @@ function readToolDocs(extensionRoot: string, options: PromptToolOptions = {}): s
   return docs.join("\n\n");
 }
 
+// fork 侧：默认 skill 文档读取（受 enabledSkills 过滤，禁用的 skill 不注入系统提示）
 function readDefaultSkillDocs(
   extensionRoot: string,
   enabledSkills: Record<string, boolean> = {}
@@ -238,6 +253,7 @@ function readDefaultSkillDocs(
   }).filter((skill): skill is { name: string; content: string } => Boolean(skill?.content));
 }
 
+// fork 侧：构建默认 skill 提示（供外部按需注入系统提示）
 export function getDefaultSkillPrompt(options: DefaultSkillPromptOptions = {}): string {
   const skillDocs = readDefaultSkillDocs(getExtensionRoot(), options.enabledSkills);
   if (skillDocs.length === 0) {
@@ -262,13 +278,29 @@ export function buildSkillDocumentsPrompt(skills: SkillPromptDocument[]): string
   return `Use the skill documents below to assist the user:\n${blocks.join("\n\n")}`;
 }
 
+// 上游 v0.3.1 新增：skill 目录提示（配合 skill 工具与 session 层 skill catalog 使用，
+// 引导 LLM 通过 skill 工具按名加载完整 skill 指令）
+export function buildSkillCatalogPrompt(skills: Array<{ name: string; description: string }>): string {
+  const entries = skills.map((skill) => `- \`${skill.name}\`: ${skill.description}`).join("\n");
+  return `A skill is a reusable set of task-specific instructions. The following skills are available in this session:
+
+<available_skills>
+${entries}
+</available_skills>
+
+If the user names a skill, or the task clearly matches a skill's description, call the \`skill\` tool with the exact skill name before taking task actions. Load all applicable skills, then follow their full instructions. This catalog contains summaries only; do not infer or follow a skill's instructions until it has been loaded.
+A user may also invoke a skill directly; its <skill_content> block then appears in this conversation. Follow it, and do not call the \`skill\` tool again for that skill.`;
+}
+
 function renderSkillDocumentBlock(skill: SkillPromptDocument): string {
   const pathAttribute = skill.path ? ` path="${escapeXml(skill.path)}"` : "";
   const resources = renderSkillResources(skill.skillFilePath);
   const content = stripSkillPromptMetadata(skill.content);
-  return `<${skill.name}-skill${pathAttribute}>
+  // 上游 v0.3.1：统一采用 <skill_content name="..."> 标签（与 skill 工具加载格式、DSH 对齐），
+  // 替代 fork 旧版 <${skill.name}-skill> 标签
+  return `<skill_content name="${skill.name}"${pathAttribute}>
 ${content}${resources}
-</${skill.name}-skill>`;
+</skill_content>`;
 }
 
 function stripSkillPromptMetadata(content: string): string {
@@ -517,6 +549,9 @@ export type ToolDefinition = {
   };
 };
 
+// 合并说明：保留 fork 的 options 参数名（非 _options）——fork 的 PureShowWidget
+// 条件注册（options.enabledSkills）依赖该参数；上游的 nonInteractive/multimodal
+// 判断同样通过 options 读取
 export function getTools(options: PromptToolOptions = {}, externalTools: ToolDefinition[] = []): ToolDefinition[] {
   const tools: ToolDefinition[] = [
     {
@@ -647,6 +682,26 @@ export function getTools(options: PromptToolOptions = {}, externalTools: ToolDef
     {
       type: "function",
       function: {
+        // 上游 v0.3.1 新增：skill 工具（按名加载 bundled/用户 skill 的完整指令）
+        name: "skill",
+        description:
+          "Load the full instructions for an available skill. Call this with the exact skill name from the session skill catalog before acting on a task that names or clearly matches that skill.",
+        parameters: {
+          type: "object",
+          properties: {
+            name: {
+              type: "string",
+              description: "The exact skill name from the available skills list.",
+            },
+          },
+          required: ["name"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        // fork 侧：read 保留图片加载能力（followUpMessages 多模态注入），描述保留 fork 版
         name: "read",
         description: "Read files from the filesystem (text, images, notebooks).",
         parameters: {
@@ -733,6 +788,14 @@ export function getTools(options: PromptToolOptions = {}, externalTools: ToolDef
     },
   ];
 
+  // 上游 v0.3.1：非交互模式（exec/headless）下移除 AskUserQuestion（无 UI 承接用户回答）
+  if (options.nonInteractive === true) {
+    const askUserQuestionIndex = tools.findIndex((tool) => tool.function.name === "AskUserQuestion");
+    if (askUserQuestionIndex !== -1) {
+      tools.splice(askUserQuestionIndex, 1);
+    }
+  }
+
   tools.push({
     type: "function",
     function: {
@@ -753,7 +816,55 @@ export function getTools(options: PromptToolOptions = {}, externalTools: ToolDef
     },
   });
 
-  // P1-T2：PureShowWidget 工具条件注册
+  // 上游 v0.3.1 新增：按多模态能力注册图片工具——
+  //   模型支持多模态 → ReadImage（图片直接注入上下文）
+  //   模型不支持多模态 → UnderstandImage（经独立 LLM 分析图片后返回文本）
+  if (supportsMultimodal(options.model ?? "", options.multimodal)) {
+    tools.push({
+      type: "function",
+      function: {
+        name: "ReadImage",
+        description:
+          "Read a PNG, JPEG, WebP, or GIF file and return the image itself. Large images are validated and downscaled before the next model request.",
+        parameters: {
+          type: "object",
+          properties: {
+            file_path: {
+              type: "string",
+              description: "The absolute path of the PNG, JPEG, WebP, or GIF image to read.",
+            },
+          },
+          required: ["file_path"],
+          additionalProperties: false,
+        },
+      },
+    });
+  } else {
+    tools.push({
+      type: "function",
+      function: {
+        name: "UnderstandImage",
+        description: "Analyze or extract information from a local JPEG, PNG, or WebP image.",
+        parameters: {
+          type: "object",
+          properties: {
+            prompt: {
+              type: "string",
+              description: "A clear instruction describing what to analyze or extract from the image.",
+            },
+            image_path: {
+              type: "string",
+              description: "The absolute path of the JPEG, PNG, or WebP image to analyze.",
+            },
+          },
+          required: ["prompt", "image_path"],
+          additionalProperties: false,
+        },
+      },
+    });
+  }
+
+  // P1-T2（fork）：PureShowWidget 工具条件注册
   //
   // 启用条件：enabledSkills["dynamic-ui"] 未被显式设为 false（默认启用）
   // 禁用行为：当用户在 settings.enabledSkills 中将 "dynamic-ui" 设为 false 时，

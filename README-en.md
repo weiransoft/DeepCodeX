@@ -27,7 +27,7 @@ npm install -g @vegamo/deepcode-cli
 
 Run `deepcode` inside any project directory to get started.
 
-![intro2](resources/intro2.png)
+![intro2](resources/intro3.png)
 
 ## Configuration
 
@@ -45,7 +45,7 @@ Create `~/.deepcode/settings.json`:
 }
 ```
 
-The configuration file is shared with the [Deep Code VSCode extension](https://github.com/lessweb/deepcode) — configure once, use everywhere.
+The configuration file is shared with the [Deep Code VSCode extension](https://github.com/lessweb/deepcode-cli) — configure once, use everywhere.
 
 For complete configuration details (multi-level priority, environment variables, etc.), see [docs/configuration.md](docs/configuration.md).
 
@@ -104,6 +104,7 @@ Full documentation: [docs/new-features_en.md](docs/new-features_en.md) ｜ [中�
 | `/`              | Open the skills / commands menu                         |
 | `/new`           | Start a fresh conversation                              |
 | `/resume`        | Choose a previous conversation to continue              |
+| `/fork`          | Fork the current conversation     |
 | `/continue`      | Continue the active conversation or pick one to resume  |
 | `/model`         | Switch model, thinking mode, and reasoning effort       |
 | `/raw`           | Toggle display mode (Normal / Lite / Raw scrollback)    |
@@ -154,7 +155,7 @@ Yes. Deep Code offers a full-featured VSCode extension, available on the [VSCode
 
 ### Does Deep Code support understanding images?
 
-Deep Code supports multimodal input — you can paste images from the clipboard with `Ctrl+V`. However, `deepseek-v4` does not support multimodal yet. Some models have multimodal capabilities but impose strict limits on multi-turn dialogue requests. For multimodal input, we recommend using the Volcano Ark `Doubao-Seed-2.0-pro` model, which has the best integration.
+Deep Code includes a free built-in image understanding tool, and you can paste images from the clipboard with `Ctrl+V`. Deep Code itself supports multimodal input, but the `deepseek-v4` model family does not yet support multimodal input. Some models have multimodal capabilities but impose strict limits on multi-turn dialogue requests. For multimodal input, we recommend using the Volcano Ark `Doubao-Seed-2.0-pro` model, which has the best integration.
 
 ### How to automatically send a Slack message after a task completes?
 
@@ -162,7 +163,7 @@ Write a shell notification script that calls a Slack webhook, then set the `noti
 
 ### How do I enable web search?
 
-Deep Code comes with a built-in, free Web Search tool that works well for most use cases. If you prefer to use a custom script for web search, set the `webSearchTool` field in `~/.deepcode/settings.json` to the full path of your script. For detailed steps, refer to: https://github.com/qorzj/web_search_cli
+Deep Code now supports native web search through the [DeepSeek Responses API](https://api-docs.deepseek.com/guides/responses_api/#tools). If you prefer to use a custom script for web search, set the `webSearchTool` field in `~/.deepcode/settings.json` to the full path of your script. For detailed steps, refer to: https://github.com/qorzj/web_search_cli
 
 ### Does it support Coding Plan?
 

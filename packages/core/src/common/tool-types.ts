@@ -1,9 +1,12 @@
 import type OpenAI from "openai";
+import type sharp from "sharp";
 import type { ReasoningEffort } from "../settings";
 import type { LLMClient } from "../providers/llm-provider";
 
 export type CreateOpenAIClient = () => {
   client: OpenAI | null;
+  /** 上游 v0.3.1 新增：当前生效的 API Key（供调用方区分主 Key 与 plusApiKey 场景） */
+  apiKey?: string;
   model: string;
   baseURL?: string;
   temperature?: number;
@@ -15,6 +18,8 @@ export type CreateOpenAIClient = () => {
   webSearchTool?: string;
   env?: Record<string, string>;
   machineId?: string;
+  /** 上游 v0.3.1 新增：PLUS_API_KEY 对应的备用密钥（插件增强能力专用） */
+  plusApiKey?: string;
 };
 
 /**
@@ -34,6 +39,12 @@ export type ToolCall = {
   };
 };
 
+/** 上游 v0.3.1 新增：受插件限流影响的工具名单（图片理解 / 网络搜索） */
+export type PluginRateLimitedTool = "UnderstandImage" | "WebSearch";
+
+/** 上游 v0.3.1 新增：sharp 模块懒加载器（图片工具按需加载，避免 CLI 启动期强依赖） */
+export type SharpLoader = () => Promise<typeof sharp>;
+
 export type ToolExecutionContext = {
   sessionId: string;
   projectRoot: string;
@@ -41,6 +52,8 @@ export type ToolExecutionContext = {
   createOpenAIClient?: CreateOpenAIClient;
   /** B1：统一 LLM 客户端工厂（provider 路由），edit-handler 等 LLM 辅助调用经此发起 */
   createLLMClient?: CreateLLMClient;
+  /** 上游 v0.3.1 新增：sharp 懒加载器，ReadImage/UnderstandImage 图片工具使用 */
+  loadSharp?: SharpLoader;
   onProcessStart?: (processId: string | number, command: string) => void;
   onProcessExit?: (processId: string | number) => void;
   onProcessStdout?: (processId: string | number, chunk: string) => void;
@@ -48,6 +61,10 @@ export type ToolExecutionContext = {
   onBackgroundProcessComplete?: (completion: BackgroundProcessCompletion) => void;
   onBeforeFileMutation?: (filePath: string) => void;
   onAfterFileMutation?: (filePath: string) => void;
+  /** 上游 v0.3.1 新增：插件限流触发回调（UnderstandImage/WebSearch 命中限流时通知 UI） */
+  onPluginRateLimitExceeded?: (tool: PluginRateLimitedTool) => void;
+  /** 上游 v0.3.1 新增：技能加载回调，skill-handler 通过它按需加载技能内容 */
+  onLoadSkill?: (skillName: string) => Promise<ToolExecutionResult>;
   bashTimeoutMs?: number;
   bashMinTimeoutMs?: number;
 };
@@ -60,6 +77,10 @@ export type ToolExecutionHooks = {
   onBackgroundProcessComplete?: (completion: BackgroundProcessCompletion) => void;
   onBeforeFileMutation?: (filePath: string) => void;
   onAfterFileMutation?: (filePath: string) => void;
+  /** 上游 v0.3.1 新增：插件限流触发回调（UnderstandImage/WebSearch 命中限流时通知 UI） */
+  onPluginRateLimitExceeded?: (tool: PluginRateLimitedTool) => void;
+  /** 上游 v0.3.1 新增：技能加载回调，skill-handler 通过它按需加载技能内容 */
+  onLoadSkill?: (skillName: string) => Promise<ToolExecutionResult>;
   shouldStop?: () => boolean;
   /**
    * V2 新增：工具执行前的审批钩子
@@ -148,9 +169,11 @@ export type ToolExecutionResult = {
 };
 
 export type ToolExecutionFollowUpMessage = {
-  role: "system";
+  // 上游 v0.3.1 扩展：role 放宽为 "system" | "user"，新增 visible 控制是否对用户可见
+  role: "system" | "user";
   content: string;
   contentParams?: unknown | null;
+  visible?: boolean;
 };
 
 export type ToolHandler = (

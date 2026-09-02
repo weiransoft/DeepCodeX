@@ -26,6 +26,8 @@ export function isValidSessionId(value: string): boolean {
 export interface ParsedCliArgs {
   /** Prompt text from -p / --prompt */
   prompt: string | undefined;
+  /** 上游 v0.3.1 新增：Run one prompt without starting the interactive TUI. */
+  exec: boolean;
   /**
    * Resume session identifier:
    *   - `undefined` — --resume was not used
@@ -33,10 +35,14 @@ export interface ParsedCliArgs {
    *   - `string`     — --resume <sessionId> was used
    */
   resume: string | true | undefined;
+  /** 上游 v0.3.1 新增：Fork source session. Bare --fork selects the most recent project session. */
+  fork: string | true | undefined;
   /** True when --version / -v was passed */
   version: boolean;
   /** True when --help / -h was passed */
   help: boolean;
+  /** 上游 v0.3.1 新增：True when --last / -l was passed (resume the most recent session for the current project) */
+  last: boolean;
   /**
    * Team subcommand arguments.
    * - `undefined` — no team subcommand was invoked
@@ -111,7 +117,8 @@ const EPILOG = [
   "  ctrl+x           Clear pasted images",
   "  esc              Interrupt the current model turn",
   "  /                Open the skills/commands menu",
-  // 命令清单：由 BUILTIN_SLASH_COMMANDS 生成（单一数据源，与 TUI /help 一致）
+  // 命令清单：由 BUILTIN_SLASH_COMMANDS 生成（单一数据源，与 TUI /help 一致，
+  // 已包含上游 v0.3.1 新增的 /fork 命令）
   formatBuiltinCommandList(),
   "  ctrl+d twice     Quit",
 ].join("\n");
@@ -121,9 +128,8 @@ async function configureYargs(argv?: string[]) {
   const yargsInstance = Yargs(rawArgv)
     .locale("en")
     .scriptName("deepcode")
-    .usage(
-      "Usage: $0 [options] [command]\n\nDeep Code - Launch an interactive CLI, use -p/--prompt for non-interactive mode"
-    )
+    // 上游 v0.3.1：usage 文案更新，体现 --exec 非交互模式
+    .usage("Usage: $0 [options] [command]\n\nDeep Code - Launch the interactive CLI or run one prompt with --exec")
     .command("$0 [query..]", "Launch Deep Code CLI", (yargsInstance: Argv) =>
       yargsInstance
         .option("prompt", {
@@ -131,29 +137,72 @@ async function configureYargs(argv?: string[]) {
           type: "string",
           describe: "Submit a prompt on launch",
         })
+        // 上游 v0.3.1 新增：--exec / -x 非交互执行单个 prompt
+        .option("exec", {
+          alias: "x",
+          type: "boolean",
+          default: false,
+          describe: "Run one prompt non-interactively (requires --prompt)",
+        })
         .option("resume", {
           alias: "r",
           type: "string",
           describe: "Resume a specific session by its ID. Use without an ID to show session picker.",
         })
+        // 上游 v0.3.1 新增：--fork / -f 从指定会话派生新会话（无 ID 时取最近会话）
+        .option("fork", {
+          alias: "f",
+          type: "string",
+          describe: "Fork a specific session by its ID. Use without an ID to fork the most recent session.",
+        })
+        // 上游 v0.3.1 新增：--last / -l 恢复当前项目最近一次会话
+        .option("last", {
+          alias: "l",
+          type: "boolean",
+          default: false,
+          describe: "Resume the most recent session for the current project directory.",
+        })
         .check((argv: { [x: string]: unknown }) => {
           const query = argv["query"] as string | string[] | undefined;
           const hasPositionalQuery = Array.isArray(query) ? query.length > 0 : !!query;
+          const prompt = argv["prompt"] as string | undefined;
+          const exec = argv["exec"] === true;
 
-          if (argv["prompt"] && hasPositionalQuery) {
+          if (prompt && hasPositionalQuery) {
             return "Cannot use both a positional prompt and the --prompt (-p) flag together";
           }
           // bare --resume conflicts with --prompt
-          if (argv["resume"] === "" && argv["prompt"]) {
+          if (argv["resume"] === "" && prompt) {
             return "Cannot use --resume without a session ID together with --prompt.\nUse --resume <sessionId> -p <prompt> to resume a session and send a prompt.";
+          }
+          // 上游 v0.3.1：--last 与 --resume / --fork 互斥
+          if (argv["last"] === true && argv["resume"] !== undefined) {
+            return "Cannot use --last together with --resume. Use --last to resume the most recent session, or --resume <sessionId> for a specific session.";
+          }
+          if (argv["fork"] !== undefined && argv["resume"] !== undefined) {
+            return "Cannot use --fork together with --resume.";
+          }
+          if (argv["last"] === true && argv["fork"] !== undefined) {
+            return "Cannot use --last together with --fork.";
           }
           // validate --resume <sessionId> format if provided
           if (argv["resume"] && argv["resume"] !== "" && !isValidSessionId(argv["resume"] as string)) {
             return `Invalid session ID: "${argv["resume"]}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
           }
-          // empty prompt is meaningless
-          if (argv["prompt"] === "") {
+          // 上游 v0.3.1：--fork 会话 ID 格式校验
+          if (argv["fork"] && argv["fork"] !== "" && !isValidSessionId(argv["fork"] as string)) {
+            return `Invalid session ID: "${argv["fork"]}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
+          }
+          // empty prompt is meaningless（上游 v0.3.1：改为 trim 校验，覆盖纯空白输入）
+          if (prompt !== undefined && prompt.trim() === "") {
             return "--prompt / -p requires a non-empty value.";
+          }
+          // 上游 v0.3.1：--exec 必须搭配非空 --prompt
+          if (exec && (prompt === undefined || prompt.trim() === "")) {
+            return "--exec / -x requires a non-empty --prompt / -p value.";
+          }
+          if (exec && argv["resume"] === "") {
+            return "--exec cannot use --resume without a session ID.\nUse --exec --resume <sessionId> --prompt <prompt>.";
           }
           return true;
         })
@@ -285,6 +334,7 @@ async function configureYargs(argv?: string[]) {
           return true;
         })
     )
+    // ===== fork 扩展：quality-check / review 子命令（保留全部） =====
     // quality-check 子命令：质量门禁 CLI 模式（非 TUI 模式）
     // 用法：deepcode quality-check <subcommand> [targetPath] [options]
     // 子命令：codemap / uiux / visual / all / help
@@ -382,9 +432,13 @@ async function configureYargs(argv?: string[]) {
             describe: "Project root directory (default process.cwd())",
           })
     )
+    // 上游 v0.3.1：examples 扩充（--exec 非交互、--fork、管道 stdin）
     .example("deepcode", "Launch the interactive TUI in the current directory")
-    .example("deepcode -p <prompt>", "Launch with a pre-filled prompt")
+    .example("deepcode -p <prompt>", "Launch the TUI and submit a prompt")
+    .example("deepcode -x -p <prompt>", "Run one prompt without launching the TUI")
     .example("deepcode -r, --resume [sessionId]", "Resume a session or show session picker")
+    .example("deepcode -f, --fork [sessionId]", "Fork a session or the most recent session")
+    .example('cat error.log | deepcode -x -p "Explain this error"', "Use piped stdin as additional context")
     .epilog(EPILOG)
     .strict()
     .demandCommand(0, 0)
@@ -591,11 +645,27 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     }
   }
 
+  // 上游 v0.3.1：解析 --fork 参数（无值时为 true，表示取最近会话；有值为会话 ID）
+  const forkRaw = parsed.fork as string | undefined;
+  let fork: ParsedCliArgs["fork"];
+  if (forkRaw === undefined) {
+    fork = undefined;
+  } else if (forkRaw === "") {
+    fork = true;
+  } else {
+    fork = forkRaw;
+  }
+
   return {
     prompt: parsed.prompt as string | undefined,
+    // 上游 v0.3.1 新增字段
+    exec: parsed.exec === true,
     resume,
+    fork,
     version: parsed.version === true,
     help: parsed.help === true,
+    last: parsed.last === true,
+    // fork 扩展字段：team / rules / quality-check / review 子命令
     team: teamRaw,
     teamOptions,
     rules: rulesRaw,

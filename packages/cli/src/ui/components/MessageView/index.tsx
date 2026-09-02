@@ -85,6 +85,15 @@ export function MessageView({ message, collapsed, width = 80 }: MessageViewProps
     );
   }
 
+  // 上游 v0.3.1：skill 加载消息增强 —— system / tool 角色的 skill 消息统一显示为加载提示
+  if ((message.role === "system" || message.role === "tool") && message.meta?.skill) {
+    return (
+      <Box marginY={0} marginLeft={1} marginBottom={1}>
+        <Text color="magenta">⚡ Loaded skill: {message.meta.skill.name}</Text>
+      </Box>
+    );
+  }
+
   if (message.role === "tool") {
     const summary = buildToolSummary(message);
     const diffLines = getToolDiffPreviewLines(summary);
@@ -109,13 +118,7 @@ export function MessageView({ message, collapsed, width = 80 }: MessageViewProps
       return <PromptEchoLine text={message.content || ""} width={width} />;
     }
 
-    if (message.meta?.skill) {
-      return (
-        <Box marginY={0} marginLeft={1} marginBottom={1}>
-          <Text color="magenta">⚡ Loaded skill: {message.meta.skill.name}</Text>
-        </Box>
-      );
-    }
+    // skill 消息已在上方统一处理（上游 v0.3.1），此处仅保留其余 system 消息分支
     if (message.meta?.isSummary) {
       return (
         <Box marginY={0} marginLeft={1} marginBottom={1}>

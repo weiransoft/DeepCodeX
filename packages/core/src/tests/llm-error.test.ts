@@ -41,13 +41,8 @@ test("LLM error details stop at circular causes and redact credentials", () => {
   assert.equal(details.causes?.[0]?.causes?.[0]?.causes, undefined);
 });
 
-// ============================================================================
-// D-1 修复回归测试：message 为空时回退到 name 而非 "Unknown error"
-// 参考 llm-error.ts:68-71 fallback 链：
-//   name    = safeText(record?.name) ?? (error instanceof Error ? error.name : "UnknownError")
-//   message = safeText(record?.message) ?? safeText(error) ?? name
-// safeText 对空字符串（trim 后为空）返回 undefined，因此空 message 会回退到 name
-// ============================================================================
+// fork 保留用例：D-1 修复回归测试 —— message 为空时回退到 name 而非 "Unknown error"
+// 参考 llm-error.ts fallback 链：safeText 对空字符串返回 undefined，因此空 message 回退到 name
 
 /**
  * 模拟 SDK 中 APIUserAbortError 的真实形态：构造时未传 message（super("")），

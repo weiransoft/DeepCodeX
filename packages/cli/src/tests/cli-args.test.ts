@@ -20,6 +20,21 @@ test("parseArguments returns prompt after -p", async () => {
   const r = await parseArguments(["-p", "hello world"]);
   assert.ok(!("message" in r));
   assert.equal(r.prompt, "hello world");
+  // 上游 v0.3.1：exec 默认为 false
+  assert.equal(r.exec, false);
+});
+
+// 上游 v0.3.1 新增：--exec / -x 非交互模式
+test("parseArguments enables exec mode with -x", async () => {
+  const r = await parseArguments(["-x", "-p", "hello world"]);
+  assert.equal(r.exec, true);
+  assert.equal(r.prompt, "hello world");
+});
+
+test("parseArguments enables exec mode with --exec", async () => {
+  const r = await parseArguments(["--exec", "--prompt", "hello world"]);
+  assert.equal(r.exec, true);
+  assert.equal(r.prompt, "hello world");
 });
 
 test("parseArguments returns prompt after --prompt", async () => {
@@ -52,6 +67,24 @@ test("parseArguments returns undefined resume when not present", async () => {
   assert.equal(r.resume, undefined);
 });
 
+// 上游 v0.3.1 新增：--fork / -f 会话派生
+test("parseArguments returns true when --fork has no value", async () => {
+  const r = await parseArguments(["--fork"]);
+  assert.equal(r.fork, true);
+});
+
+test("parseArguments returns a session ID after -f", async () => {
+  const r = await parseArguments(["-f", "0a5cb7a5-c39d-4c39-a11b-05f8b22b8df6"]);
+  assert.equal(r.fork, "0a5cb7a5-c39d-4c39-a11b-05f8b22b8df6");
+});
+
+test("parseArguments allows bare --fork with exec and prompt", async () => {
+  const r = await parseArguments(["--fork", "--exec", "--prompt", "continue"]);
+  assert.equal(r.fork, true);
+  assert.equal(r.exec, true);
+  assert.equal(r.prompt, "continue");
+});
+
 test("parseArguments returns defaults for empty args", async () => {
   const r = await parseArguments([]);
   assert.ok(!("message" in r));
@@ -59,6 +92,43 @@ test("parseArguments returns defaults for empty args", async () => {
   assert.equal(r.resume, undefined);
   assert.equal(r.version, false);
   assert.equal(r.help, false);
+  // 上游 v0.3.1：exec 默认为 false
+  assert.equal(r.exec, false);
+});
+
+// 上游 v0.3.1 新增：--last / -l 恢复最近会话
+test("parseArguments returns last: true for --last", async () => {
+  const r = await parseArguments(["--last"]);
+  assert.ok(!("message" in r));
+  assert.equal(r.last, true);
+  assert.equal(r.resume, undefined);
+});
+
+test("parseArguments returns last: true for -l", async () => {
+  const r = await parseArguments(["-l"]);
+  assert.ok(!("message" in r));
+  assert.equal(r.last, true);
+});
+
+test("parseArguments returns last: false when not passed", async () => {
+  const r = await parseArguments(["-p", "test"]);
+  assert.ok(!("message" in r));
+  assert.equal(r.last, false);
+});
+
+test("parseArguments handles --last with -p", async () => {
+  const r = await parseArguments(["--last", "-p", "hello"]);
+  assert.ok(!("message" in r));
+  assert.equal(r.last, true);
+  assert.equal(r.prompt, "hello");
+});
+
+test("parseArguments handles -l with -p and -x", async () => {
+  const r = await parseArguments(["-l", "-x", "-p", "hello"]);
+  assert.ok(!("message" in r));
+  assert.equal(r.last, true);
+  assert.equal(r.exec, true);
+  assert.equal(r.prompt, "hello");
 });
 
 // ── parseArguments: -r alias ───────────────────────────────────────────────────
@@ -82,6 +152,14 @@ test("parseArguments handles -r <id> combined with -p", async () => {
   assert.equal(r.prompt, "hello");
 });
 
+// 上游 v0.3.1 新增：exec 模式与 --resume 组合
+test("parseArguments handles exec prompt with a session ID", async () => {
+  const r = await parseArguments(["-x", "-p", "hello", "-r", "0a5cb7a5-c39d-4c39-a11b-05f8b22b8df6"]);
+  assert.equal(r.exec, true);
+  assert.equal(r.prompt, "hello");
+  assert.equal(r.resume, "0a5cb7a5-c39d-4c39-a11b-05f8b22b8df6");
+});
+
 // ── parseArguments: --version / --help ─────────────────────────────────────────
 
 test("parseArguments detects --version", async () => {
@@ -97,6 +175,8 @@ test("parseArguments detects -v", async () => {
   assert.equal(r.version, true);
 });
 
+// fork 行为：--help / -h 由 parseArguments 手动处理并 exit(0)（FIX-15），
+// 与上游"仅解析 help 字段"的实现不同，以合并后实现为准。
 test("parseArguments --help triggers process.exit(0)", async () => {
   await withMockedExit(async (exitSpy) => {
     try {
@@ -149,9 +229,9 @@ test("parseArguments handles -p before --resume <id>", async () => {
   assert.equal(r.prompt, "hello");
 });
 
+// FIX-15：--help 现在由 parseArguments 手动处理并 exit(0)，
+// 与 --version 同时存在时最终走 help 退出路径（上游"两者同时返回 true"的行为不适用）。
 test("parseArguments --version --help exits 0 via help path", async () => {
-  // FIX-15：--help 现在由 parseArguments 手动处理并 exit(0)，
-  // 与 --version 同时存在时两者都被解析，但最终走 help 退出路径。
   await withMockedExit(async (exitSpy) => {
     try {
       await parseArguments(["--version", "--help"]);
@@ -239,6 +319,40 @@ test("parseArguments exits on empty -p value", async () => {
       /* expected */
     }
     assert.ok(exitSpy.calls.length >= 1);
+  });
+});
+
+// 上游 v0.3.1 新增：exec 模式的错误处理
+test("parseArguments exits when exec mode has no -p", async () => {
+  await withMockedExit(async (exitSpy) => {
+    try {
+      await parseArguments(["-x"]);
+    } catch {
+      /* expected */
+    }
+    assert.ok(exitSpy.calls.includes(1));
+  });
+});
+
+test("parseArguments exits when exec prompt is whitespace", async () => {
+  await withMockedExit(async (exitSpy) => {
+    try {
+      await parseArguments(["-x", "-p", "   "]);
+    } catch {
+      /* expected */
+    }
+    assert.ok(exitSpy.calls.includes(1));
+  });
+});
+
+test("parseArguments does not use a positional query as the exec prompt", async () => {
+  await withMockedExit(async (exitSpy) => {
+    try {
+      await parseArguments(["-x", "positional prompt"]);
+    } catch {
+      /* expected */
+    }
+    assert.ok(exitSpy.calls.includes(1));
   });
 });
 
@@ -335,4 +449,65 @@ test("parseArguments 未调用 review 时 parsed.review 为 undefined", async ()
   const r = await parseArguments(["--version"]);
   assert.ok(!("message" in r));
   assert.equal(r.review, undefined);
+});
+
+// 上游 v0.3.1 新增：--fork / --last 与 --resume 互斥的错误处理
+test("parseArguments exits on invalid --fork session ID", async () => {
+  await withMockedExit(async (exitSpy) => {
+    try {
+      await parseArguments(["--fork", "not-a-uuid"]);
+    } catch {
+      /* expected */
+    }
+    assert.ok(exitSpy.calls.length >= 1);
+  });
+});
+
+test("parseArguments exits when --fork is combined with --resume", async () => {
+  await withMockedExit(async (exitSpy) => {
+    try {
+      await parseArguments([
+        "--fork",
+        "0a5cb7a5-c39d-4c39-a11b-05f8b22b8df6",
+        "--resume",
+        "1a5cb7a5-c39d-4c39-a11b-05f8b22b8df6",
+      ]);
+    } catch {
+      /* expected */
+    }
+    assert.ok(exitSpy.calls.length >= 1);
+  });
+});
+
+test("parseArguments exits when --fork is combined with --last", async () => {
+  await withMockedExit(async (exitSpy) => {
+    try {
+      await parseArguments(["--fork", "--last"]);
+    } catch {
+      /* expected */
+    }
+    assert.ok(exitSpy.calls.length >= 1);
+  });
+});
+
+test("parseArguments exits when --last is combined with --resume", async () => {
+  await withMockedExit(async (exitSpy) => {
+    try {
+      await parseArguments(["--last", "--resume", "0a5cb7a5-c39d-4c39-a11b-05f8b22b8df6"]);
+    } catch {
+      /* expected */
+    }
+    assert.ok(exitSpy.calls.length >= 1);
+  });
+});
+
+test("parseArguments exits when --last is combined with bare --resume", async () => {
+  await withMockedExit(async (exitSpy) => {
+    try {
+      await parseArguments(["--last", "--resume"]);
+    } catch {
+      /* expected */
+    }
+    assert.ok(exitSpy.calls.length >= 1);
+  });
 });

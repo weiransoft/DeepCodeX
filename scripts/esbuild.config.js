@@ -22,6 +22,8 @@ await build({
   jsx: "automatic",
   jsxImportSource: "react",
   packages: "bundle",
+  // sharp 为原生模块，保持 external：由 npm 按宿主平台安装对应二进制
+  external: ["sharp"],
   inject: [join(__dirname, "esbuild-shims.js")],
   alias: {
     // react-devtools-core is a browser-only package pulled in by ink's

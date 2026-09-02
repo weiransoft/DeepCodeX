@@ -1,5 +1,7 @@
 import type { ChatCompletionMessageParam, ChatCompletionContentPart } from "openai/resources/chat/completions";
-import { supportsMultimodal, isQwen3Model } from "./model-capabilities";
+// 语义合并：保留 fork 的 isQwen3Model（Qwen3 兼容）与 V2 session-hook 依赖，
+// 同时采纳上游 v0.3.1 的 MultimodalMode（多模态开关 default|on|off）
+import { supportsMultimodal, isQwen3Model, type MultimodalMode } from "./model-capabilities";
 import type { SessionMessage } from "../session";
 import type { SessionContextHook, ContextSnippet } from "../v2/integration/session-hook";
 
@@ -37,8 +39,16 @@ export class OpenAIMessageConverter {
    * - 在现有逻辑之前同步调用 contextHook.preBuildContext（无 await），保持同步签名不变；
    * - 拿到上下文片段后注入到首条 system message 末尾的"## V2 Context"区块；
    * - contextHook 为 undefined（V2 未启用）或 snippets 为空时，行为与 v1 100% 一致。
+   *
+   * 上游 v0.3.1 新增 multimodal 参数：多模态内容开关（default|on|off），
+   * 由 settings.multimodal 传入，控制 image_url 内容是否保留。
    */
-  buildMessages(messages: SessionMessage[], thinkingEnabled: boolean, model: string): ChatCompletionMessageParam[] {
+  buildMessages(
+    messages: SessionMessage[],
+    thinkingEnabled: boolean,
+    model: string,
+    multimodal: MultimodalMode = "default"
+  ): ChatCompletionMessageParam[] {
     // V2 上下文 hook 注入（同步调用，无 await）
     // NP-01 修复：preBuildContext 为同步方法，保持 buildMessages 同步签名不变
     if (this.options.contextHook) {
@@ -63,7 +73,7 @@ export class OpenAIMessageConverter {
         continue;
       }
 
-      openAIMessages.push(this.convertMessage(message, thinkingEnabled, model));
+      openAIMessages.push(this.convertMessage(message, thinkingEnabled, model, multimodal));
 
       const toolCalls = this.getAssistantToolCalls(message);
       if (toolCalls.length === 0) {
@@ -78,7 +88,7 @@ export class OpenAIMessageConverter {
 
         const pairedToolIndex = toolPairings.get(this.buildToolPairingKey(index, toolCallIndex));
         if (pairedToolIndex != null) {
-          openAIMessages.push(this.convertMessage(activeMessages[pairedToolIndex], thinkingEnabled, model));
+          openAIMessages.push(this.convertMessage(activeMessages[pairedToolIndex], thinkingEnabled, model, multimodal));
           continue;
         }
 
@@ -223,7 +233,12 @@ export class OpenAIMessageConverter {
     return `${content}\n\n## V2 Context\n\n${contextBlock}`;
   }
 
-  private convertMessage(message: SessionMessage, thinkingEnabled: boolean, model: string): ChatCompletionMessageParam {
+  private convertMessage(
+    message: SessionMessage,
+    thinkingEnabled: boolean,
+    model: string,
+    multimodal: MultimodalMode = "default"
+  ): ChatCompletionMessageParam {
     const content = this.renderContent(message);
     const base: ChatCompletionMessageParam = {
       role: message.role,
@@ -256,7 +271,8 @@ export class OpenAIMessageConverter {
       const params = Array.isArray(message.contentParams) ? message.contentParams : [message.contentParams];
       for (const param of params) {
         const part = param as ChatCompletionContentPart;
-        if (part && (part.type !== "image_url" || supportsMultimodal(model))) {
+        // 上游 v0.3.1：multimodal 开关传入 supportsMultimodal，"off" 时强制过滤 image_url
+        if (part && (part.type !== "image_url" || supportsMultimodal(model, multimodal))) {
           contentParts.push(part);
         }
       }

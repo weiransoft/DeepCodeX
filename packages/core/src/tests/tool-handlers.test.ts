@@ -5,10 +5,12 @@ import * as os from "os";
 import * as path from "path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { BackgroundProcessCompletion, ProcessTimeoutControl, ToolExecutionContext } from "../tools/executor";
+// 融合两侧 import：fork 保留 LLM 类型引用，上游新增 skill 工具处理器
 import type { LLMClient, LLMRequest, LLMResponse } from "../providers/llm-provider";
 import { handleBashTool } from "../tools/bash-handler";
 import { handleEditTool } from "../tools/edit-handler";
 import { handleReadTool } from "../tools/read-handler";
+import { handleSkillTool } from "../tools/skill-handler";
 import { handleUpdatePlanTool } from "../tools/update-plan-handler";
 import { handleWriteTool } from "../tools/write-handler";
 
@@ -241,6 +243,39 @@ test("UpdatePlan rejects non-string plan payloads", async () => {
   assert.match(result.error ?? "", /InputValidationError/);
 });
 
+// 上游 v0.3.1 新增用例：skill 工具经 onLoadSkill 钩子委托加载
+test("Skill delegates loading through the onLoadSkill hook", async () => {
+  const workspace = createTempWorkspace();
+  const loaded: string[] = [];
+
+  const result = await handleSkillTool(
+    { name: "skill-writer" },
+    createContext("skill-load", workspace, {
+      onLoadSkill: async (skillName) => {
+        loaded.push(skillName);
+        return { ok: true, name: "skill", output: `Loaded skill: ${skillName}.` };
+      },
+    })
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.name, "skill");
+  assert.equal(result.output, "Loaded skill: skill-writer.");
+  assert.deepEqual(loaded, ["skill-writer"]);
+});
+
+test("Skill rejects empty names and reports missing hooks", async () => {
+  const workspace = createTempWorkspace();
+
+  const invalid = await handleSkillTool({ name: "  " }, createContext("skill-invalid", workspace));
+  assert.equal(invalid.ok, false);
+  assert.match(invalid.error ?? "", /InputValidationError/);
+
+  const missingHook = await handleSkillTool({ name: "skill-writer" }, createContext("skill-no-hook", workspace));
+  assert.equal(missingHook.ok, false);
+  assert.match(missingHook.error ?? "", /Skill loading is not available in this context/);
+});
+
 test("Read returns snippet metadata and Edit can scope replacements by snippet_id", async () => {
   const workspace = createTempWorkspace();
   const filePath = path.join(workspace, "sample.txt");
@@ -279,6 +314,7 @@ test("Read returns snippet metadata and Edit can scope replacements by snippet_i
   );
 });
 
+// fork 保留用例：V2 F-2 Edit 元数据增强（old_content / new_content 全文回传）
 test("Edit returns old_content and new_content metadata for V2 diff enhancement", async () => {
   // V2 F-2 验收标准 1：edit 成功后 metadata.old_content 为替换前完整文本、
   // new_content 为替换后完整文本（含中文等多字节字符，验证内容原样保留）。
@@ -489,6 +525,7 @@ test("Edit appends an LLM diagnosis when old_string is not found", async () => {
       new_string: "function computeTotal(input: number) {\n  return input;",
     },
     createContext(sessionId, workspace, {
+      // 合并后 edit-handler 的 LLM 辅助调用统一走 createLLMClient（fork provider 路由），保留 fork 注入方式
       createLLMClient: () =>
         createStubLLMClient(async (request) => {
           llmCalls += 1;
@@ -533,6 +570,7 @@ test("Edit keeps the base not-found error when the LLM diagnosis is unavailable"
       new_string: "const missing = false;",
     },
     createContext(sessionId, workspace, {
+      // 合并后统一走 createLLMClient（provider 路由），空 <response> 返回表示诊断不可用
       createLLMClient: () =>
         createStubLLMClient(async () => ({
           content: "<response></response>",
@@ -709,6 +747,7 @@ test("Edit accepts a unique loose-escape match when only escaping differs", asyn
       new_string: "params['city_json'] = city",
     },
     createContext(sessionId, workspace, {
+      // 合并后统一走 createLLMClient（provider 路由），返回转义纠正结果
       createLLMClient: () =>
         createStubLLMClient(async () => ({
           content:
@@ -745,6 +784,7 @@ test("Edit accepts a unique loose-escape match for over-escaped unicode sequence
       new_string: 'const sequence = "\\\\u001B[13;130u";',
     },
     createContext(sessionId, workspace, {
+      // 合并后统一走 createLLMClient（provider 路由），校验请求含 matched_text 上下文
       createLLMClient: () =>
         createStubLLMClient(async (request) => {
           llmCalls += 1;
@@ -768,6 +808,184 @@ test("Edit accepts a unique loose-escape match for over-escaped unicode sequence
   assert.equal(llmCalls, 1);
   assert.equal(editResult.metadata?.matched_via, "llm_escape_correction");
   assert.equal(fs.readFileSync(filePath, "utf8"), 'const sequence = "\\u001B[13;130u";\n');
+});
+
+// 上游 v0.3.1 新增用例组：引号/转义混合失配的 LLM 纠正（注入方式适配合并后的 createLLMClient 路径）
+test("Edit uses LLM correction when straight and curly quotation marks differ", async () => {
+  const workspace = createTempWorkspace();
+  const filePath = path.join(workspace, "output_cn.md");
+  const original =
+    "标签必须独占一行。计划通常含标题、摘要、接口变化、测试场景和已选择的假设。" +
+    "模板禁止要求用户“是否继续”，因为 TUI 负责提供实施确认。\n";
+  fs.writeFileSync(filePath, original, "utf8");
+
+  const sessionId = "quotation-mark-correction";
+  const snippet = await readSnippet(filePath, sessionId, workspace);
+  let llmCalls = 0;
+  const editResult = await handleEditTool(
+    {
+      snippet_id: snippet.id,
+      old_string:
+        "标签必须独占一行。计划通常含标题、摘要、接口变化、测试场景和已选择的假设。" +
+        '模板禁止要求用户"是否继续"，因为 TUI 负责提供实施确认。',
+      new_string:
+        "标签应该独占一行。计划通常含标题、摘要、接口变化、测试场景和已选择的假设。" +
+        '模板禁止要求用户"是否继续"，因为 TUI 负责提供实施确认。',
+    },
+    createContext(sessionId, workspace, {
+      // 合并后统一走 createLLMClient：system prompt（messages[0]）描述失配问题类型
+      createLLMClient: () =>
+        createStubLLMClient(async (request) => {
+          llmCalls += 1;
+          assert.match(String(request.messages?.[0]?.content ?? ""), /the only problem is quotation mark/);
+          return {
+            content:
+              "<response>" +
+              "<corrected_old_string><![CDATA[" +
+              original.trim() +
+              "]]></corrected_old_string>" +
+              "<corrected_new_string><![CDATA[" +
+              "标签应该独占一行。计划通常含标题、摘要、接口变化、测试场景和已选择的假设。" +
+              "模板禁止要求用户“是否继续”，因为 TUI 负责提供实施确认。" +
+              "]]></corrected_new_string>" +
+              "</response>",
+            thinking: "",
+            toolCalls: [],
+            stopReason: "stop",
+            usage: null,
+          };
+        }),
+    })
+  );
+
+  assert.equal(editResult.ok, true);
+  assert.equal(llmCalls, 1);
+  assert.equal(editResult.metadata?.matched_via, "llm_escape_correction");
+  assert.equal(
+    fs.readFileSync(filePath, "utf8"),
+    "标签应该独占一行。计划通常含标题、摘要、接口变化、测试场景和已选择的假设。" +
+      "模板禁止要求用户“是否继续”，因为 TUI 负责提供实施确认。\n"
+  );
+});
+
+test("Edit describes combined escaping and quotation mark corrections", async () => {
+  const workspace = createTempWorkspace();
+  const filePath = path.join(workspace, "quotes.ts");
+  fs.writeFileSync(filePath, "const label = “old”;\n", "utf8");
+
+  const sessionId = "escaping-and-quotation-mark-correction";
+  const snippet = await readSnippet(filePath, sessionId, workspace);
+  const editResult = await handleEditTool(
+    {
+      snippet_id: snippet.id,
+      old_string: 'const label = \\\\"old\\\\";',
+      new_string: 'const label = \\\\"new\\\\";',
+    },
+    createContext(sessionId, workspace, {
+      // 合并后统一走 createLLMClient：system prompt 描述"转义 + 引号"双重失配
+      createLLMClient: () =>
+        createStubLLMClient(async (request) => {
+          assert.match(String(request.messages?.[0]?.content ?? ""), /the problems are escaping and quotation mark/);
+          return {
+            content:
+              "<response>" +
+              "<corrected_old_string><![CDATA[const label = “old”;]]></corrected_old_string>" +
+              "<corrected_new_string><![CDATA[const label = “new”;]]></corrected_new_string>" +
+              "</response>",
+            thinking: "",
+            toolCalls: [],
+            stopReason: "stop",
+            usage: null,
+          };
+        }),
+    })
+  );
+
+  assert.equal(editResult.ok, true);
+  assert.equal(editResult.metadata?.matched_via, "llm_escape_correction");
+  assert.equal(fs.readFileSync(filePath, "utf8"), "const label = “new”;\n");
+});
+
+test("Edit rejects inexact LLM correction and falls back to a loose match", async () => {
+  // 行为矛盾裁定（合并后）：合并实现保留 fork 的纠正校验——corrected_old_string 必须与文件中
+  // loose 命中文本精确相等（edit-handler 中 parsed.oldString !== matchedText 即拒绝纠正）；
+  // 但纠正被拒后不再整体失败，而是恢复 fork 的 loose_escape 降级路径继续完成替换。
+  const workspace = createTempWorkspace();
+  const filePath = path.join(workspace, "quotes.md");
+  const original = "模板禁止要求用户“是否继续”。\n";
+  fs.writeFileSync(filePath, original, "utf8");
+
+  const sessionId = "inexact-corrected-old-string";
+  const snippet = await readSnippet(filePath, sessionId, workspace);
+  let llmCalls = 0;
+  const editResult = await handleEditTool(
+    {
+      snippet_id: snippet.id,
+      old_string: '模板禁止要求用户"是否继续"。',
+      new_string: '模板允许要求用户"是否继续"。',
+    },
+    createContext(sessionId, workspace, {
+      // 合并后统一走 createLLMClient：LLM 返回仍为直引号的 corrected，
+      // 与文件弯引号命中文本不一致 → 纠正被拒绝，降级为 loose_escape
+      createLLMClient: () =>
+        createStubLLMClient(async () => {
+          llmCalls += 1;
+          if (llmCalls === 1) {
+            return {
+              content:
+                "<response>" +
+                '<corrected_old_string><![CDATA[模板禁止要求用户"是否继续"。]]></corrected_old_string>' +
+                '<corrected_new_string><![CDATA[模板允许要求用户"是否继续"。]]></corrected_new_string>' +
+                "</response>",
+              thinking: "",
+              toolCalls: [],
+              stopReason: "stop",
+              usage: null,
+            };
+          }
+          return {
+            content: "<response></response>",
+            thinking: "",
+            toolCalls: [],
+            stopReason: "stop",
+            usage: null,
+          };
+        }),
+    })
+  );
+
+  // 合并后行为：纠正被拒（corrected_old_string 与命中文本不一致）后降级为 loose_escape 匹配，
+  // 以原 new_string（直引号）在命中位置执行替换
+  assert.equal(editResult.ok, true);
+  assert.equal(llmCalls, 1);
+  assert.equal(editResult.metadata?.matched_via, "loose_escape");
+  assert.equal(fs.readFileSync(filePath, "utf8"), '模板允许要求用户"是否继续"。\n');
+});
+
+test("Edit falls back to a loose match when LLM correction is unavailable", async () => {
+  // 行为矛盾裁定（合并后）：fork 原断言"无 LLM 纠正时不得模糊匹配"（ok=false）不再成立——
+  // 合并实现恢复了 fork 的 loose_escape 降级路径（LLM 不可用时仍按 score=1 模糊匹配执行替换），
+  // 按合并后的实现更新断言。
+  const workspace = createTempWorkspace();
+  const filePath = path.join(workspace, "quotes.md");
+  const original = "模板禁止要求用户“是否继续”。\n";
+  fs.writeFileSync(filePath, original, "utf8");
+
+  const sessionId = "unavailable-quotation-mark-correction";
+  const snippet = await readSnippet(filePath, sessionId, workspace);
+  const editResult = await handleEditTool(
+    {
+      snippet_id: snippet.id,
+      old_string: '模板禁止要求用户"是否继续"。',
+      new_string: '模板允许要求用户"是否继续"。',
+    },
+    createContext(sessionId, workspace)
+  );
+
+  // 合并后行为：无 LLM 时降级为 loose_escape 匹配，以原 new_string 在命中位置执行替换
+  assert.equal(editResult.ok, true);
+  assert.equal(editResult.metadata?.matched_via, "loose_escape");
+  assert.equal(fs.readFileSync(filePath, "utf8"), '模板允许要求用户"是否继续"。\n');
 });
 
 test("Edit strips accidental read-result tabs after newlines when that creates a unique match", async () => {
@@ -997,6 +1215,8 @@ test("Edit preserves CRLF line endings for existing files", async () => {
   assert.equal(fs.readFileSync(filePath, "utf8"), "alpha\r\ngamma\r\n");
 });
 
+// 行为矛盾裁定（合并后）：read 遇图片时保留 fork 的 followUpMessages 多模态注入语义，
+// 但返回形状采用 ok:false（避免工具结果文本与图片内容重复注入模型），断言以合并实现为准
 test("Read returns an acknowledgement for images and attaches the image as a follow-up system message", async () => {
   const workspace = createTempWorkspace();
   const filePath = path.join(workspace, "pixel.png");
@@ -1010,7 +1230,8 @@ test("Read returns an acknowledgement for images and attaches the image as a fol
 
   const readResult = await handleReadTool({ file_path: filePath }, createContext("image-read", workspace));
 
-  assert.equal(readResult.ok, true);
+  // 合并实现约定：图片读取返回 ok=false（防止文本结果重复进入模型上下文），图片经 followUpMessages 注入
+  assert.equal(readResult.ok, false);
   assert.equal(readResult.output, "File loaded.");
   assert.equal(readResult.metadata?.mime, "image/png");
   assert.equal(Array.isArray(readResult.followUpMessages), true);
@@ -1067,7 +1288,7 @@ function createContext(
 }
 
 /**
- * 构造 edit-handler LLM 辅助调用链路的 LLMClient 测试桩（B1）
+ * 构造 edit-handler LLM 辅助调用链路的 LLMClient 测试桩（B1，fork 保留）
  *
  * edit-handler 的「未找到原因诊断」与「转义纠正」增强现经统一 provider 层
  * （ToolExecutionContext.createLLMClient）发起，不再直连 OpenAI SDK；

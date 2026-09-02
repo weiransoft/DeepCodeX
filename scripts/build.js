@@ -7,8 +7,9 @@ const root = join(__dirname, "..");
 
 function run(command, args, label) {
   process.stdout.write(`\n[${label}] ${command} ${args.join(" ")}\n`);
-  // 禁用 shell:true，避免不必要的 shell 注入面；command 与 args 均为内部硬编码值。
-  const result = spawnSync(command, args, { stdio: "inherit", cwd: root });
+  // 跨平台兼容 + 安全加固：Windows 上 npm 是 .cmd shim，必须 shell:true 才能直接 spawn；
+  // 非 Windows 平台保持无 shell 调用（command 与 args 均为内部硬编码值，避免不必要的 shell 注入面）。
+  const result = spawnSync(command, args, { stdio: "inherit", cwd: root, shell: process.platform === "win32" });
   if (result.status !== 0) {
     process.exit(result.status ?? 1);
   }

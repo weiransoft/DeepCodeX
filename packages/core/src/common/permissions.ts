@@ -1,6 +1,8 @@
 import * as fs from "fs";
 import * as path from "path";
 import type { DeepcodingSettings, PermissionScope, PermissionSettings } from "../settings";
+// 上游 v0.3.1 新增：followUpMessages 复用统一类型（role 已扩展为 "system" | "user"）
+import type { ToolExecutionFollowUpMessage } from "./tool-types";
 import { isAbsoluteFilePath, normalizeFilePath } from "./state";
 
 export type BashPermissionScope = Exclude<PermissionScope, "mcp"> | "unknown";
@@ -46,7 +48,8 @@ export type PermissionToolExecution = {
     error?: string;
     metadata?: Record<string, unknown>;
     awaitUserResponse?: boolean;
-    followUpMessages?: Array<{ role: "system"; content: string; contentParams?: unknown | null }>;
+    // 上游 v0.3.1：复用 ToolExecutionFollowUpMessage 统一类型，替代本地内联结构
+    followUpMessages?: ToolExecutionFollowUpMessage[];
   };
 };
 
@@ -218,12 +221,13 @@ export function describeToolPermissionRequest(options: {
   const name = options.toolCall.function.name;
   const args = parseToolArgumentsForPermissions(options.toolCall.function.arguments);
 
-  if (name === "read" || name === "Read") {
+  // 上游 v0.3.1：ReadImage 图片读取工具与 read 共用同一权限分支
+  if (name === "read" || name === "Read" || name === "ReadImage") {
     const filePath = typeof args.file_path === "string" ? args.file_path : "";
     return {
       toolCallId: options.toolCall.id,
       name,
-      command: formatToolPathCommand("read", filePath),
+      command: formatToolPathCommand(name === "ReadImage" ? "read-image" : "read", filePath),
       scopes:
         filePath && !isPathInAnyDirectory(options.projectRoot, filePath, options.readPermissionExemptPaths)
           ? [isPathInProject(options.projectRoot, filePath) ? "read-in-cwd" : "read-out-cwd"]
@@ -272,6 +276,21 @@ export function describeToolPermissionRequest(options: {
       name,
       command: query,
       scopes: ["network"],
+    };
+  }
+
+  // 上游 v0.3.1 新增：UnderstandImage 图片理解工具权限分支（读文件 + 网络两种 scope）
+  if (name === "UnderstandImage") {
+    const imagePath = typeof args.image_path === "string" ? args.image_path : "";
+    const scopes: AskPermissionScope[] = ["network"];
+    if (imagePath && !isPathInAnyDirectory(options.projectRoot, imagePath, options.readPermissionExemptPaths)) {
+      scopes.unshift(isPathInProject(options.projectRoot, imagePath) ? "read-in-cwd" : "read-out-cwd");
+    }
+    return {
+      toolCallId: options.toolCall.id,
+      name,
+      command: imagePath ? `understand-image ${imagePath}` : "understand-image",
+      scopes,
     };
   }
 

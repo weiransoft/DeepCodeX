@@ -1,5 +1,8 @@
 import * as fs from "fs";
 import { z } from "zod";
+// fork 侧（B1）：统一 settings 解析链与 SessionMessage 合成消息，
+// 供 LLM 辅助调用走 createLLMClient（provider 路由）路径；上游 v0.3.1 的
+// buildThinkingRequestOptions 仅服务于 OpenAI SDK 直连路径，此处不再需要。
 import { resolveCurrentSettings } from "../settings";
 import type { SessionMessage } from "../session";
 import type { ToolExecutionContext, ToolExecutionResult } from "./executor";
@@ -24,7 +27,7 @@ const MAX_CANDIDATE_COUNT = 5;
 const REPLACE_ALL_MATCH_THRESHOLD = 5;
 const SHORT_REPLACE_ALL_LENGTH = 40;
 /**
- * V2 新增：metadata 中 old_content / new_content 字段的内联大小上限（字节）。
+ * V2 新增（fork）：metadata 中 old_content / new_content 字段的内联大小上限（字节）。
  * 供 ToolExecutionHooks.onAfterToolExecution 钩子（V2.3 P1-04 前名 onToolResult）做 diff 增强时读取完整原文/新文；
  * 单字段超过 256KB 时降级为 null，避免超大文件的全文内容挤占工具结果内存，
  * 钩子侧检测到 null 时回退使用既有 diff_preview 字段（详见 V2 技术方案 §3.3）。
@@ -188,6 +191,8 @@ export async function handleEditTool(
         const lineIndex = buildLineIndex(raw);
         const scope = buildSearchScope(filePath, raw, lineIndex, snippet);
         let matches: MatchOccurrence[] = [];
+        // fork 侧：保留 "loose_escape" 匹配途径（LLM 纠正失败时的降级路径，
+        // 见下方 loose escape 处理段）；上游 v0.3.1 移除了该降级，此处按 fork 语义恢复。
         let matchedVia:
           | "exact"
           | "empty_file"
@@ -246,15 +251,15 @@ export async function handleEditTool(
             );
 
             if (correctedStrings) {
-              const correctedMatches = findOccurrences(raw, correctedStrings.oldString, scope);
-              if (correctedMatches.length > 0) {
-                matches = correctedMatches;
-                matchedVia = "llm_escape_correction";
-                replacementOldString = correctedStrings.oldString;
-                replacementNewString = correctedStrings.newString;
-              }
+              matches = [looseEscapeMatches[0]];
+              matchedVia = "llm_escape_correction";
+              replacementOldString = correctedStrings.oldString;
+              replacementNewString = correctedStrings.newString;
             }
 
+            // fork 侧降级路径：LLM 纠正失败时，直接以模糊匹配（score===1）位置执行替换，
+            // 避免 old_string 仅因转义/引号差异失配时编辑直接失败。
+            // 上游 v0.3.1 移除了该降级，此处按 fork 语义恢复。
             if (matches.length === 0) {
               matches = [looseEscapeMatches[0]];
               matchedVia = "loose_escape";
@@ -630,7 +635,7 @@ function buildLooseEscapeRegex(source: string): RegExp | null {
 
       if (slashEnd < source.length) {
         pattern += "\\\\*";
-        pattern += escapeRegExp(source[slashEnd]);
+        pattern += buildLooseCharacterPattern(source[slashEnd]);
         index = slashEnd;
         continue;
       }
@@ -640,14 +645,14 @@ function buildLooseEscapeRegex(source: string): RegExp | null {
       continue;
     }
 
-    pattern += escapeRegExp(source[index]);
+    pattern += buildLooseCharacterPattern(source[index]);
   }
 
   return new RegExp(pattern, "g");
 }
 
 /**
- * 构造 LLM 辅助调用的合成 SessionMessage（B1）
+ * 构造 LLM 辅助调用的合成 SessionMessage（fork 侧 B1）
  *
  * provider 层统一转换入口（OpenAI/Anthropic converter）以 SessionMessage 为输入形态；
  * 此处的消息仅存在于单次请求内、不落盘，id 使用静态标识即可（converter 不消费 id）。
@@ -668,6 +673,22 @@ function buildLlmAssistMessage(role: SessionMessage["role"], content: string, se
   };
 }
 
+/**
+ * 构造 loose escape 正则的单字符匹配模式（上游 v0.3.1 新增）。
+ *
+ * 引号变体（“”/‘’ 与 ASCII 引号）在模糊匹配中视为等价字符，
+ * 提升 old_string 因引号风格差异失配时的匹配成功率。
+ */
+function buildLooseCharacterPattern(character: string): string {
+  if (character === '"' || character === "“" || character === "”") {
+    return '["“”]';
+  }
+  if (character === "'" || character === "‘" || character === "’") {
+    return "['‘’]";
+  }
+  return escapeRegExp(character);
+}
+
 async function inferOldStringNotFoundReasonWithLLM(
   raw: string,
   lineIndex: LineIndex,
@@ -676,7 +697,7 @@ async function inferOldStringNotFoundReasonWithLLM(
   newString: string,
   context: ToolExecutionContext
 ): Promise<string | null> {
-  // B1：经统一 LLM 客户端（provider 路由）发起，替代 OpenAI SDK 直连；
+  // B1（fork）：经统一 LLM 客户端（provider 路由）发起，替代 OpenAI SDK 直连；
   // 工厂未注入或无凭据（返回 null）时静默降级，沿用旧 client:null 语义
   const llmClient = context.createLLMClient?.() ?? null;
   if (!llmClient) {
@@ -786,12 +807,14 @@ async function correctEscapedStringsWithLLM(
   }
 
   try {
+    // 上游 v0.3.1 增强：精确描述失配问题类型（转义/引号），提升 LLM 纠正准确率
+    const problemDescription = describeCorrectionProblems(oldString, matchedText);
     // 提示词保持原有内容不变，仅换成合成 SessionMessage 形态适配 provider 统一转换入口
     const response = await llmClient.createMessage({
       messages: [
         buildLlmAssistMessage(
           "system",
-          "You correct file-edit strings when the only problem is escaping. " +
+          `You correct file-edit strings when ${problemDescription}. ` +
             "Return XML only using <response><corrected_old_string>...</corrected_old_string><corrected_new_string>...</corrected_new_string></response>. " +
             "Do not change semantics; only fix quoting or escaping so corrected_old_string matches the snippet exactly.",
           context.sessionId
@@ -828,6 +851,9 @@ async function correctEscapedStringsWithLLM(
       return null;
     }
     if (normalizeLooseText(parsed.newString) !== normalizedNew) {
+      return null;
+    }
+    if (parsed.oldString !== matchedText) {
       return null;
     }
     if (parsed.oldString === parsed.newString) {
@@ -873,9 +899,32 @@ function escapeRegExp(value: string): string {
 function normalizeLooseText(value: string): string {
   return value
     .replace(/\r\n?/g, "\n")
-    .replace(/\\+(?=["'`\\])/g, "")
+    .replace(/\\+(?=["'`\\“”‘’])/g, "")
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
     .replace(/[ \t]+/g, " ")
     .trim();
+}
+
+function describeCorrectionProblems(oldString: string, matchedText: string): string {
+  const hasEscapingProblem = normalizeQuotationMarks(oldString) !== normalizeQuotationMarks(matchedText);
+  const hasQuotationMarkProblem = normalizeEscaping(oldString) !== normalizeEscaping(matchedText);
+
+  if (hasEscapingProblem && hasQuotationMarkProblem) {
+    return "the problems are escaping and quotation mark";
+  }
+  if (hasQuotationMarkProblem) {
+    return "the only problem is quotation mark";
+  }
+  return "the only problem is escaping";
+}
+
+function normalizeEscaping(value: string): string {
+  return value.replace(/\\+(?=["'`\\“”‘’])/g, "");
+}
+
+function normalizeQuotationMarks(value: string): string {
+  return value.replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
 }
 
 function similarityScore(left: string, right: string): number {

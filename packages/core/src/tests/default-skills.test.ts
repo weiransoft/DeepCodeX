@@ -104,11 +104,20 @@ test("P0-T9: DEFAULT_SKILL_TEMPLATES 运行时导出且包含全部 4 个默认 
 test("P0-T9: getDefaultSkillPrompt() 加载全部 4 个默认 skill", () => {
   const prompt = getDefaultSkillPrompt();
 
-  // 验证 4 个默认 skill 的 skill 标签都存在
-  assert.equal(prompt.includes("<karpathy-guidelines-skill>"), true, "应加载 karpathy-guidelines skill");
-  assert.equal(prompt.includes("<design-aesthetics-skill>"), true, "应加载 design-aesthetics skill");
-  assert.equal(prompt.includes("<ui-ux-best-practices-skill>"), true, "应加载 ui-ux-best-practices skill");
-  assert.equal(prompt.includes("<code-quality-guidelines-skill>"), true, "应加载 code-quality-guidelines skill");
+  // 合并上游 v0.3.1 后统一采用 <skill_content name="..."> 标签
+  // （替代 fork 旧版 <xxx-skill> 标签，与 skill 工具加载格式、DSH 对齐）
+  assert.equal(prompt.includes('<skill_content name="karpathy-guidelines"'), true, "应加载 karpathy-guidelines skill");
+  assert.equal(prompt.includes('<skill_content name="design-aesthetics"'), true, "应加载 design-aesthetics skill");
+  assert.equal(
+    prompt.includes('<skill_content name="ui-ux-best-practices"'),
+    true,
+    "应加载 ui-ux-best-practices skill"
+  );
+  assert.equal(
+    prompt.includes('<skill_content name="code-quality-guidelines"'),
+    true,
+    "应加载 code-quality-guidelines skill"
+  );
 });
 
 test("P0-T9: getDefaultSkillPrompt() 包含默认 skill 内容", () => {
@@ -144,10 +153,14 @@ test("P0-T9: 可禁用单个默认 skill", () => {
     enabledSkills: { "karpathy-guidelines": false },
   });
 
-  assert.equal(prompt.includes("<karpathy-guidelines-skill>"), false, "karpathy-guidelines 应被禁用");
-  assert.equal(prompt.includes("<design-aesthetics-skill>"), true, "design-aesthetics 应仍加载");
-  assert.equal(prompt.includes("<ui-ux-best-practices-skill>"), true, "ui-ux-best-practices 应仍加载");
-  assert.equal(prompt.includes("<code-quality-guidelines-skill>"), true, "code-quality-guidelines 应仍加载");
+  assert.equal(prompt.includes('<skill_content name="karpathy-guidelines"'), false, "karpathy-guidelines 应被禁用");
+  assert.equal(prompt.includes('<skill_content name="design-aesthetics"'), true, "design-aesthetics 应仍加载");
+  assert.equal(prompt.includes('<skill_content name="ui-ux-best-practices"'), true, "ui-ux-best-practices 应仍加载");
+  assert.equal(
+    prompt.includes('<skill_content name="code-quality-guidelines"'),
+    true,
+    "code-quality-guidelines 应仍加载"
+  );
 });
 
 test("P0-T9: 可禁用 design-aesthetics skill", () => {
@@ -155,8 +168,8 @@ test("P0-T9: 可禁用 design-aesthetics skill", () => {
     enabledSkills: { "design-aesthetics": false },
   });
 
-  assert.equal(prompt.includes("<design-aesthetics-skill>"), false, "design-aesthetics 应被禁用");
-  assert.equal(prompt.includes("<karpathy-guidelines-skill>"), true, "karpathy-guidelines 应仍加载");
+  assert.equal(prompt.includes('<skill_content name="design-aesthetics"'), false, "design-aesthetics 应被禁用");
+  assert.equal(prompt.includes('<skill_content name="karpathy-guidelines"'), true, "karpathy-guidelines 应仍加载");
 });
 
 test("P0-T9: 可禁用 ui-ux-best-practices skill", () => {
@@ -164,8 +177,8 @@ test("P0-T9: 可禁用 ui-ux-best-practices skill", () => {
     enabledSkills: { "ui-ux-best-practices": false },
   });
 
-  assert.equal(prompt.includes("<ui-ux-best-practices-skill>"), false, "ui-ux-best-practices 应被禁用");
-  assert.equal(prompt.includes("<karpathy-guidelines-skill>"), true, "karpathy-guidelines 应仍加载");
+  assert.equal(prompt.includes('<skill_content name="ui-ux-best-practices"'), false, "ui-ux-best-practices 应被禁用");
+  assert.equal(prompt.includes('<skill_content name="karpathy-guidelines"'), true, "karpathy-guidelines 应仍加载");
 });
 
 test("P0-T9: 可禁用 code-quality-guidelines skill", () => {
@@ -173,8 +186,12 @@ test("P0-T9: 可禁用 code-quality-guidelines skill", () => {
     enabledSkills: { "code-quality-guidelines": false },
   });
 
-  assert.equal(prompt.includes("<code-quality-guidelines-skill>"), false, "code-quality-guidelines 应被禁用");
-  assert.equal(prompt.includes("<karpathy-guidelines-skill>"), true, "karpathy-guidelines 应仍加载");
+  assert.equal(
+    prompt.includes('<skill_content name="code-quality-guidelines"'),
+    false,
+    "code-quality-guidelines 应被禁用"
+  );
+  assert.equal(prompt.includes('<skill_content name="karpathy-guidelines"'), true, "karpathy-guidelines 应仍加载");
 });
 
 // ============================================================================

@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildDisableExtglobCommand,
+  // fork 保留：buildShellEnv 敏感环境变量过滤
   buildShellEnv,
   buildShellInitCommand,
   getShellKind,
@@ -119,9 +120,7 @@ test("File tool absolute checks accept Git Bash drive paths but reject root-rela
   assert.equal(isAbsoluteFilePath("./API_DOCUMENTATION.md", "win32"), false);
 });
 
-// ============================================================================
-// buildShellEnv 敏感环境变量过滤
-// ============================================================================
+// fork 保留用例：buildShellEnv 敏感环境变量过滤（黑名单 + 白名单）
 
 function withEnv<T>(overrides: Record<string, string | undefined>, fn: () => T): T {
   const original: Record<string, string | undefined> = {};

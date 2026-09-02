@@ -1,16 +1,25 @@
 import { handleAskUserQuestionTool } from "./ask-user-question-handler";
 import { handleBashTool } from "./bash-handler";
 import { handleEditTool } from "./edit-handler";
-import { handleReadTool } from "./read-handler";
-import { handleUpdatePlanTool } from "./update-plan-handler";
-import { handleWebSearchTool } from "./web-search-handler";
-import { handleWriteTool } from "./write-handler";
 // P1-T2：PureShowWidget 工具 handler（dynamic-ui skill 的执行入口）
 import { handlePureShowWidget } from "../visualization/widget-tool";
+// v0.3.1 上游新特性：ReadImage 图片读取工具 handler
+import { handleReadImageTool } from "./read-image-handler";
+import { handleReadTool } from "./read-handler";
+// v0.3.1 上游新特性：skill 工具 handler（bundled skills 执行入口）
+import { handleSkillTool } from "./skill-handler";
+import { handleUpdatePlanTool } from "./update-plan-handler";
+// v0.3.1 上游新特性：UnderstandImage 图片理解工具 handler
+import { handleUnderstandImageTool } from "./understand-image-handler";
+import { handleWebSearchTool } from "./web-search-handler";
+import { handleWriteTool } from "./write-handler";
 import type { McpManager } from "../mcp/mcp-manager";
+// 合并说明：CreateLLMClient 为 fork 侧 B1 统一 LLM 客户端工厂类型；
+//          SharpLoader 为上游 v0.3.1 sharp 图片库懒加载类型，两者均保留
 import type {
   CreateOpenAIClient,
   CreateLLMClient,
+  SharpLoader,
   ToolCall,
   ToolExecutionHooks,
   ToolExecutionResult,
@@ -20,7 +29,10 @@ import type {
 
 export type {
   CreateOpenAIClient,
+  // fork 侧：统一 LLM 客户端工厂类型（B1 provider 路由）
   CreateLLMClient,
+  // 上游 v0.3.1：sharp 图片库懒加载类型
+  SharpLoader,
   ToolCall,
   ToolExecutionContext,
   ToolExecutionHooks,
@@ -31,6 +43,8 @@ export type {
   ProcessTimeoutControl,
   BackgroundProcessCompletion,
   ToolExecutionFollowUpMessage,
+  // 上游 v0.3.1：插件限流工具名类型（UnderstandImage / WebSearch）
+  PluginRateLimitedTool,
 } from "../common/tool-types";
 
 const BUILT_IN_TOOL_NAME_ALIASES = new Map<string, string>([
@@ -74,8 +88,11 @@ function checkDangerousBashCommand(command: string): string | null {
 export class ToolExecutor {
   private readonly projectRoot: string;
   private readonly createOpenAIClient?: CreateOpenAIClient;
+  // fork 侧（B1）：统一 LLM 客户端工厂（provider 路由），供 edit-handler 等非流式辅助调用
   private readonly createLLMClient?: CreateLLMClient;
   private readonly mcpManager?: McpManager;
+  // 上游 v0.3.1：sharp 图片库懒加载器，供 ReadImage / UnderstandImage 图片工具使用
+  private readonly loadSharp?: SharpLoader;
   private readonly toolHandlers = new Map<string, ToolHandler>();
 
   /**
@@ -85,17 +102,25 @@ export class ToolExecutor {
    * @param createLLMClient B1：统一 LLM 客户端工厂（provider 路由），
    *                        供 edit-handler 等非流式 LLM 辅助调用使用；
    *                        未注入时相关增强能力静默降级（与 createOpenAIClient 缺省语义一致）
+   * @param loadSharp 上游 v0.3.1：sharp 图片库懒加载工厂，
+   *                  供 ReadImage / UnderstandImage 图片处理工具使用；
+   *                  未注入时图片工具按上游原语义降级处理
    */
+
   constructor(
     projectRoot: string,
     createOpenAIClient?: CreateOpenAIClient,
     mcpManager?: McpManager,
-    createLLMClient?: CreateLLMClient
+    // fork 侧（B1）：第 4 参保持 createLLMClient（与 fork 既有调用方兼容）
+    createLLMClient?: CreateLLMClient,
+    // 上游 v0.3.1：第 5 参新增 loadSharp（sharp 懒加载工厂，图片工具依赖）
+    loadSharp?: SharpLoader
   ) {
     this.projectRoot = projectRoot;
     this.createOpenAIClient = createOpenAIClient;
     this.mcpManager = mcpManager;
     this.createLLMClient = createLLMClient;
+    this.loadSharp = loadSharp;
     this.registerToolHandlers();
   }
 
@@ -129,12 +154,16 @@ export class ToolExecutor {
   private registerToolHandlers(): void {
     this.toolHandlers.set("bash", handleBashTool);
     this.toolHandlers.set("read", handleReadTool);
+    // 上游 v0.3.1 新增：ReadImage / skill / UnderstandImage 工具注册
+    this.toolHandlers.set("ReadImage", handleReadImageTool);
     this.toolHandlers.set("write", handleWriteTool);
     this.toolHandlers.set("edit", handleEditTool);
+    this.toolHandlers.set("skill", handleSkillTool);
     this.toolHandlers.set("AskUserQuestion", handleAskUserQuestionTool);
     this.toolHandlers.set("UpdatePlan", handleUpdatePlanTool);
+    this.toolHandlers.set("UnderstandImage", handleUnderstandImageTool);
     this.toolHandlers.set("WebSearch", handleWebSearchTool);
-    // P1-T2：PureShowWidget 工具 handler 注册
+    // P1-T2：PureShowWidget 工具 handler 注册（fork 侧 dynamic-ui skill 执行入口）
     //
     // 说明：handler 与 tool definition 的启用条件可能不一致：
     //   - tool definition：由 getTools(options) 根据 enabledSkills["dynamic-ui"] 条件加入
@@ -250,7 +279,7 @@ export class ToolExecutor {
     }
 
     try {
-      // P0 安全修复：对 bash 等高危工具做 fail-closed 兜底校验，避免调用方未注入
+      // P0 安全修复（fork）：对 bash 等高危工具做 fail-closed 兜底校验，避免调用方未注入
       // onBeforeToolExecution 守卫时直接执行危险命令。该检查与 bash-handler 内部守卫
       // 形成双重防线，不替代 EAG-P5 的完整 BlockerGuardChain。
       if (handlerName === "bash") {
@@ -265,7 +294,7 @@ export class ToolExecutor {
         }
       }
 
-      // V2 钩子：工具执行前审批
+      // V2 钩子（fork）：工具执行前审批
       // 在 handler 调用前调用 onBeforeToolExecution 钩子进行审批决策
       // 向后兼容：未提供钩子时（undefined）跳过决策，按原流程执行
       //
@@ -299,7 +328,10 @@ export class ToolExecutor {
         projectRoot: this.projectRoot,
         toolCall,
         createOpenAIClient: this.createOpenAIClient,
+        // fork 侧（B1）：统一 LLM 客户端工厂（edit-handler 等非流式辅助调用依赖）
         createLLMClient: this.createLLMClient,
+        // 上游 v0.3.1：sharp 懒加载工厂（ReadImage / UnderstandImage 图片工具依赖）
+        loadSharp: this.loadSharp,
         onProcessStart: hooks?.onProcessStart,
         onProcessExit: hooks?.onProcessExit,
         onProcessStdout: hooks?.onProcessStdout,
@@ -307,9 +339,13 @@ export class ToolExecutor {
         onBackgroundProcessComplete: hooks?.onBackgroundProcessComplete,
         onBeforeFileMutation: hooks?.onBeforeFileMutation,
         onAfterFileMutation: hooks?.onAfterFileMutation,
+        // 上游 v0.3.1 新增：插件限流回调（UnderstandImage / WebSearch 触发）
+        onPluginRateLimitExceeded: hooks?.onPluginRateLimitExceeded,
+        // 上游 v0.3.1 新增：skill 工具加载回调（skill 工具依赖）
+        onLoadSkill: hooks?.onLoadSkill,
       });
 
-      // V2 钩子：工具执行结果后处理
+      // V2 钩子（fork）：工具执行结果后处理
       // handler 返回后调用 onAfterToolExecution 钩子，允许对结果进行增强（如 diff 预览增强）
       // 命名说明（V2.3 P1-04）：原名 onToolResult，统一更名与 onBeforeToolExecution 对称，
       // 只在 ToolExecutor 层触发一次，文件级钩子（onAfterFileMutation）不重复处理
