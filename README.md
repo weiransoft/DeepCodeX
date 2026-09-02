@@ -91,28 +91,6 @@ Skills 会按以下优先级扫描：
 | `Ctrl+V`      | 从剪贴板粘贴图片           |
 | `Esc`         | 中断当前模型回复           |
 | 连续 `Ctrl+D`   | 退出                 |
-| `←` / `→`     | 光标左右移动一个字符          |
-| `Alt+←` / `Alt+→`（或 `Ctrl+←` / `Ctrl+→`） | 按词移动 |
-| `Home` / `End`（或 `Ctrl+A` / `Ctrl+E`） | 跳到行首 / 行尾 |
-| `Ctrl+B` / `Ctrl+F` | 光标左移 / 右移一个字符 |
-| `Alt+B` / `Alt+F` | 按词后退 / 前进 |
-| `Ctrl+W`      | 删除光标前的单词           |
-| `Alt+Backspace` | 删除光标前的单词（macOS）    |
-| `Alt+D`       | 删除光标后的单词           |
-| `Ctrl+K`      | 删除到行尾               |
-| `Ctrl+U`      | 清空输入                |
-| `Backspace` / `Delete` | 删除前一个 / 后一个字符 |
-
-以上编辑键同样适用于 AI 提问框中 "Other" 自由文本回答。
-
-### 终端按键映射说明
-
-`Cmd`（macOS）与 `Win`（Windows）组合键被操作系统保留，终端应用无法接收，请在终端模拟器中自行映射：
-
-- **Linux + Bash**：行首/行尾用 `Ctrl+A` / `Ctrl+E` 或 `Home` / `End`；按词移动用 `Alt+B` / `Alt+F` 或 `Ctrl+←` / `Ctrl+→`。
-- **macOS 终端（Terminal.app）**：行首/行尾用 `Ctrl+A` / `Ctrl+E`，`Fn+←` / `Fn+→` 等同于 Home/End。在 *设置 → 描述文件 → 键盘 → 将 Option 用作 Meta 键* 中启用后，`Option+B` / `Option+F` 可按词移动。
-- **macOS iTerm2**：在 *设置 → Profiles → Keys* 中将 `Cmd+←` / `Cmd+→` 映射为发送 Home/End 转义序列（`ESC[H` / `ESC[F`）或十六进制 `0x01` / `0x05`（`Ctrl+A` / `Ctrl+E`）。
-- **Windows Terminal（PowerShell / WSL）**：`Win+←` / `Win+→` 为系统窗口贴靠，无法使用。行首/行尾请用 `Home` / `End` 或 `Ctrl+A` / `Ctrl+E`，按词移动用 `Ctrl+←` / `Ctrl+→`。
 
 ## 支持的模型
 
