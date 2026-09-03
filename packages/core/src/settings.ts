@@ -1,5 +1,10 @@
 // 保留 fork defaultsToThinkingMode（Qwen3 识别），采纳上游 DEEPSEEK_V4_MODELS 与 MultimodalMode
-import { DEEPSEEK_V4_MODELS, defaultsToThinkingMode, type MultimodalMode } from "./common/model-capabilities";
+import {
+  DEEPSEEK_V4_MODELS,
+  defaultsToThinkingMode,
+  isQwen38Model,
+  type MultimodalMode,
+} from "./common/model-capabilities";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -203,6 +208,17 @@ export type SettingsProcessEnv = Record<string, string | undefined>;
 // ── 上游 0.3.1：上下文窗口常量与 Files API 默认值 ─────────────────────────────
 const DEFAULT_CONTEXT_WINDOW = 256 * 1024;
 const DEEPSEEK_V4_CONTEXT_WINDOW = 1024 * 1024;
+// v1.3（D9，2026-09-03）：Qwen3.8+ 系列默认上下文窗口 128K。
+// 依据用户部署约束单独设置（模型卡标称 262,144，但部署侧 RoPE/显存配额通常低于标称值）；
+// 自动 compact 阈值随 getDefaultContextWindow 联动（见 DEFAULT_AUTOCOMPACT_RATIO），仍可被显式配置覆盖
+const QWEN38_CONTEXT_WINDOW = 128 * 1024;
+
+// v1.3（D9）：默认自动压缩阈值比例（占上下文窗口的 80%，预留 20% 给输出与工具结果）。
+// 行业依据（2026-09 调研）：Gemini CLI 默认 0.7（DEFAULT_COMPRESSION_TOKEN_THRESHOLD）、
+// OpenAI Codex CLI 90%（95% 硬顶）、Claude Code ~92%（社区反馈偏晚）；
+// 80% 与本 fork 既有兜底 getCompactPromptTokenThreshold 的 contextWindow*0.8 语义对齐，处于行业区间中位。
+// 上游 v0.3.1 原默认为 50%（窗口一半），过于激进导致一半窗口闲置，v1.3 起改为 80%。
+export const DEFAULT_AUTOCOMPACT_RATIO = 0.8;
 export const DEFAULT_FILES_API_TIMEOUT_MS = 60_000;
 export const DEFAULT_FILE_EXPIRES_AFTER_SECONDS = 7 * 24 * 60 * 60;
 export const DEFAULT_FILE_REFRESH_MARGIN_SECONDS = 60 * 60;
@@ -210,14 +226,27 @@ export const DEFAULT_FILE_QUOTA_CLEANUP_BATCH = 100;
 export const DEFAULT_MAX_REQUEST_FILES_BYTES = 128 * 1024 * 1024;
 export const MAX_FILES_API_TIMEOUT_MS = 10 * 60 * 1000;
 
-/** 按模型推断默认上下文窗口：DeepSeek V4 系列 = 1M，其余 256K */
+/**
+ * 按模型推断默认上下文窗口（v1.3 D9 更新优先级）：
+ * DeepSeek V4 精确集合 = 1M → Qwen3.8+ 系列 = 128K → 其余 256K
+ *
+ * 优先级说明：DeepSeek V4 为精确集合匹配且分支在前（1M 不受 Qwen 前缀影响）；
+ * Qwen3.8+ 使用 isQwen38Model 系列级识别（qwen3.8 / qwen3.9 / qwen3.10… 均 >= 8）；
+ * 旧 Qwen3（<3.8）与未知模型回落 256K 默认值，行为与 v1.2 之前一致。
+ */
 export function getDefaultContextWindow(model: string): number {
-  return DEEPSEEK_V4_MODELS.has(model) ? DEEPSEEK_V4_CONTEXT_WINDOW : DEFAULT_CONTEXT_WINDOW;
+  if (DEEPSEEK_V4_MODELS.has(model)) {
+    return DEEPSEEK_V4_CONTEXT_WINDOW;
+  }
+  if (isQwen38Model(model)) {
+    return QWEN38_CONTEXT_WINDOW;
+  }
+  return DEFAULT_CONTEXT_WINDOW;
 }
 
-/** 按模型推断默认自动 compact 阈值窗口（contextWindow 的一半） */
+/** 按模型推断默认自动 compact 阈值窗口（v1.3 D9：contextWindow 的 80%，预留 20% 给输出与工具结果） */
 export function getDefaultAutoCompactWindow(model: string): number {
-  return getDefaultContextWindow(model) / 2;
+  return Math.floor(getDefaultContextWindow(model) * DEFAULT_AUTOCOMPACT_RATIO);
 }
 
 /**
@@ -686,13 +715,13 @@ export function resolveSettingsSources(
       projectSettings?.contextWindow,
       userSettings?.contextWindow
     ) ?? getDefaultContextWindow(model);
-  // 上游 0.3.1：自动 compact 阈值窗口（默认 contextWindow/2，且不超过 contextWindow）
+  // 上游 0.3.1：自动 compact 阈值窗口（默认 contextWindow 的 80%（v1.3 D9 调整，原 50%），且不超过 contextWindow）
   const configuredAutoCompactWindow = firstTokenWindow(
     systemEnv.AUTO_COMPACT_WINDOW,
     projectSettings?.autoCompactWindow,
     userSettings?.autoCompactWindow
   );
-  const defaultAutoCompactWindow = Math.max(1, Math.floor(contextWindow / 2));
+  const defaultAutoCompactWindow = Math.max(1, Math.floor(contextWindow * DEFAULT_AUTOCOMPACT_RATIO));
   const autoCompactWindow = Math.min(configuredAutoCompactWindow ?? defaultAutoCompactWindow, contextWindow);
   const thinkingEnabled =
     parseBoolean(systemEnv.THINKING_ENABLED) ??

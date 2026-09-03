@@ -369,7 +369,7 @@ export function createRawClientLLMClient(
 export function createMockedClientSessionManager(
   projectRoot: string,
   responses: unknown[],
-  options?: (() => LLMClient | null) | number
+  options?: (() => LLMClient | null) | number | { createLLMClient?: () => LLMClient | null; autoCompactWindow?: number }
 ): SessionManager {
   const client = {
     chat: {
@@ -387,9 +387,21 @@ export function createMockedClientSessionManager(
     },
   };
 
-  // 第三参数按类型分流：函数 → createLLMClient 桩；数字 → autoCompactWindow 阈值
-  const createLLMClient = typeof options === "function" ? options : undefined;
-  const autoCompactWindow = typeof options === "number" ? options : undefined;
+  // 第三参数按类型分流：函数 → createLLMClient 桩；数字 → autoCompactWindow 阈值；
+  // 对象（v1.3 D9 新增）→ 二者同时注入（供依赖压缩触发场景的测试显式固定阈值，
+  // 不受默认压缩比例调整影响）
+  const createLLMClient =
+    typeof options === "function"
+      ? options
+      : options && typeof options === "object"
+        ? options.createLLMClient
+        : undefined;
+  const autoCompactWindow =
+    typeof options === "number"
+      ? options
+      : options && typeof options === "object"
+        ? options.autoCompactWindow
+        : undefined;
 
   return new SessionManager({
     projectRoot,

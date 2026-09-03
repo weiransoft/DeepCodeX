@@ -234,6 +234,31 @@ export const MODEL_COMMAND_THINKING_OPTIONS: ThinkingModeOption[] = [
 
 D8 另需写明一对偶关系：CLI 侧无条件回放 `reasoning_content` 与服务端 `preserve_thinking` 默认值共同决定历史思考块是否进入 prompt——排查「模型忘记上文思考」类问题时需同时看两侧。
 
+### D9：Qwen3.8+ 默认上下文窗口 128K + 动态自动压缩（v1.3 增量，2026-09-03）
+
+需求：为 Qwen3.8 系列（如 `Qwen/Qwen3.8-27B-FP8`）单独设置默认上下文窗口 128K，并依据上下文使用情况自动动态压缩。
+
+方案（复用既有机制，仅改默认值推断，Karpathy Simplicity First）：
+
+1. `packages/core/src/settings.ts`：
+   - 新增常量 `QWEN38_CONTEXT_WINDOW = 128 * 1024`（131072 token）；
+   - `getDefaultContextWindow(model)` 增加 Qwen3.8+ 分支：`isQwen38Model(model)` 命中时返回 128K（优先级位于 DeepSeek V4 精确集合之后、默认 256K 之前）；
+   - 新增导出常量 `DEFAULT_AUTOCOMPACT_RATIO = 0.8`，`getDefaultAutoCompactWindow` 与 `resolveSettings` 的默认压缩阈值统一按 `floor(contextWindow × 0.8)` 联动（Qwen3.8 128K 窗口 → 阈值 104857，预留约 25.6K 余量）。
+2. 默认压缩比例 50% → 80%（v1.3 评审后调整，行业依据）：
+   - 上游 v0.3.1 默认 `contextWindow/2`（50%）过于激进，128K 窗口下近一半空间闲置；
+   - 行业调研（2026-09）：Gemini CLI 默认 70%（`DEFAULT_COMPRESSION_TOKEN_THRESHOLD = 0.7`）、OpenAI Codex CLI 90%（95% 硬顶）、Claude Code ~92%（社区反馈偏晚、压缩质量差）；
+   - 80% 与本 fork 既有兜底 `getCompactPromptTokenThreshold` 的 `contextWindow × 0.8`（注释"预留 20% 给 output + tool 结果"）语义一致，处于行业区间中位；session.ts 该兜底同步改用共享常量消除魔法数字。
+3. 动态压缩链路（既有机制，零改动，此处仅论证覆盖需求）：
+   - `resolveSettings` 将 `autoCompactWindow` 解析为 `min(显式配置 ?? floor(contextWindow × 0.8), contextWindow)`；
+   - `session.ts` 主循环每次迭代头部检查 `session.activeTokens > compactPromptTokenThreshold`（activeTokens 来自上一轮响应的真实 usage 统计），超限即触发 `compactSession` 动态压缩——即「根据上下文使用情况动态压缩」；
+   - 用户仍可经 `settings.contextWindow` / `settings.autoCompactWindow` / `DEEPCODE_CONTEXT_WINDOW` / `DEEPCODE_AUTO_COMPACT_WINDOW` 显式覆盖，显式配置优先于模型默认值。
+
+边界与回归：
+
+- Qwen3（<3.8，如 qwen3.6-plus / qwen3.7-max）不受影响，仍为 256K（`isQwen38Model` 对其恒 false）；
+- DeepSeek V4 精确集合分支在前，1M 默认不变；
+- 显式配置路径（env / settings）在模型默认值之前，覆盖语义不变。
+
 ## 4. 变更文件清单（经评审补全）
 
 | 文件 | 变更 |
@@ -351,6 +376,16 @@ Stub 规范（禁止 mock/简化）：复用 `packages/core/src/providers/tests/
 2. 再做 D1-D8 功能改动 + 新增测试；
 3. 最后 core + cli 全量回归。
 
+### 5.11 Qwen3.8+ 默认上下文窗口（D9，v1.3 增量，unit）
+
+落在 `settings-and-notify.test.ts`（既有 contextWindow 解析用例所在文件）：
+
+- W1 `model: "Qwen/Qwen3.8-27B-FP8"` 无显式配置 → `contextWindow === 131072` 且 `autoCompactWindow === 104857`（floor(131072×0.8)）；
+- W2 `model: "qwen3.8-plus"` 同上（系列级推断，非 27B 专属硬编码）；
+- W3 回归：`model: "qwen3.7-max"` → 256K / 209715（<3.8 不受影响）；`model: "deepseek-v4-flash"` → 1M / 838860；
+- W4 显式覆盖：settings `contextWindow: "512k"` → `contextWindow === 524288` 且 `autoCompactWindow === 419430`（显式配置优先于模型默认值）；
+- W5 上游既有断言同步：默认 autoCompactWindow 比例 50% → 80% 后，「derives model-specific defaults」「derives auto compact window from the configured context window」「ignores invalid windows」「skips invalid higher-priority」四处断言按 `floor(contextWindow × 0.8)` 更新。
+
 ## 6. 验收标准
 
 | # | 标准 | 测试支撑 |
@@ -363,6 +398,7 @@ Stub 规范（禁止 mock/简化）：复用 `packages/core/src/providers/tests/
 | 6 | 五档可经 settings 解析（含非法值回落 max）、经 handle 守卫（旧三档正向 + 新两档 + 非法负向）、在 UI 六项可选 | §5.3 + §5.4 + §5.5 |
 | 7 | openai-provider 流式对 `reasoning` / `reasoning_content` 两字段均产出 `thinking_delta` | §5.6 S3 |
 | 8 | core + cli 全量测试通过；`docs/configuration*.md` 与内置 skill 参考文档与实现一致 | §5.9 + §5.8 |
+| 9 | Qwen3.8+ 系列默认上下文窗口 128K、自动压缩阈值 80%（104857，基于真实 usage 动态触发，行业区间 70–92% 中位）；Qwen3 <3.8 与 DeepSeek V4 默认值不变；显式配置覆盖优先 | §5.11 |
 
 ## 7. Out of Scope（记录但不实现）
 

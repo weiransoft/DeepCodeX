@@ -235,6 +235,31 @@ export const MODEL_COMMAND_THINKING_OPTIONS: ThinkingModeOption[] = [
 
 D8 must also document the dual relationship: whether historical thinking blocks enter the prompt depends on both the CLI's unconditional `reasoning_content` replay and the server-side `preserve_thinking` default — when debugging "model forgets earlier thinking" issues, inspect both sides.
 
+### D9: Qwen3.8+ default context window 128K + dynamic auto-compaction (v1.3 increment, 2026-09-03)
+
+Requirement: set a dedicated default context window of 128K for the Qwen3.8 series (e.g. `Qwen/Qwen3.8-27B-FP8`), with dynamic compaction driven by actual context usage.
+
+Approach (reuse existing mechanisms; only change default inference — Karpathy Simplicity First):
+
+1. `packages/core/src/settings.ts`:
+   - New constant `QWEN38_CONTEXT_WINDOW = 128 * 1024` (131072 tokens);
+   - `getDefaultContextWindow(model)` gains a Qwen3.8+ branch: returns 128K when `isQwen38Model(model)` matches (ordered after the DeepSeek V4 exact set, before the default 256K);
+   - New exported constant `DEFAULT_AUTOCOMPACT_RATIO = 0.8`; `getDefaultAutoCompactWindow` and the `resolveSettings` default compaction threshold are unified to `floor(contextWindow × 0.8)` (Qwen3.8 128K window → threshold 104857, leaving ~25.6K headroom).
+2. Default compaction ratio 50% → 80% (adjusted after v1.3 review, industry evidence):
+   - The upstream v0.3.1 default `contextWindow/2` (50%) is overly aggressive — nearly half of a 128K window sits idle;
+   - Industry research (2026-09): Gemini CLI defaults to 70% (`DEFAULT_COMPRESSION_TOKEN_THRESHOLD = 0.7`), OpenAI Codex CLI 90% (95% hard clamp), Claude Code ~92% (community feedback: too late, poor compaction quality);
+   - 80% matches the fork's existing fallback `getCompactPromptTokenThreshold` (`contextWindow × 0.8`, commented as "reserve 20% for output + tool results") and sits mid-range; the session.ts fallback now uses the shared constant to remove the duplicated magic number.
+3. Dynamic compaction chain (existing mechanism, zero changes; argued here to cover the requirement):
+   - `resolveSettings` resolves `autoCompactWindow` as `min(explicit config ?? floor(contextWindow × 0.8), contextWindow)`;
+   - `session.ts` main loop checks `session.activeTokens > compactPromptTokenThreshold` at the head of every iteration (activeTokens comes from the previous response's real usage stats); exceeding the threshold triggers `compactSession` dynamic compaction;
+   - Users can still override explicitly via `settings.contextWindow` / `settings.autoCompactWindow` / `DEEPCODE_CONTEXT_WINDOW` / `DEEPCODE_AUTO_COMPACT_WINDOW`; explicit config takes precedence over model defaults.
+
+Boundaries and regression:
+
+- Qwen3 (<3.8, e.g. qwen3.6-plus / qwen3.7-max) is unaffected and stays 256K (`isQwen38Model` is always false for them);
+- The DeepSeek V4 exact-set branch comes first; the 1M default is unchanged;
+- Explicit config paths (env / settings) precede model defaults; override semantics unchanged.
+
 ## 4. Changed Files (completed after review)
 
 | File | Change |
@@ -352,6 +377,16 @@ Automated support for §6 #8:
 2. Then make the D1-D8 functional changes + new tests;
 3. Finally run the full core + cli regression.
 
+### 5.11 Qwen3.8+ default context window (D9, v1.3 increment, unit)
+
+Located in `settings-and-notify.test.ts` (where the existing contextWindow parsing cases live):
+
+- W1 `model: "Qwen/Qwen3.8-27B-FP8"` with no explicit config → `contextWindow === 131072` and `autoCompactWindow === 104857` (floor(131072×0.8));
+- W2 `model: "qwen3.8-plus"` same as above (series-level inference, not a 27B-specific hardcode);
+- W3 Regression: `model: "qwen3.7-max"` → 256K / 209715 (<3.8 unaffected); `model: "deepseek-v4-flash"` → 1M / 838860;
+- W4 Explicit override: settings `contextWindow: "512k"` → `contextWindow === 524288` and `autoCompactWindow === 419430` (explicit config takes precedence over model defaults);
+- W5 Upstream assertion sync: after the default autoCompactWindow ratio moves 50% → 80%, four existing assertions ("derives model-specific defaults", "derives auto compact window from the configured context window", "ignores invalid windows", "skips invalid higher-priority") are updated to `floor(contextWindow × 0.8)`.
+
 ## 6. Acceptance Criteria
 
 | # | Criterion | Test support |
@@ -364,6 +399,7 @@ Automated support for §6 #8:
 | 6 | Five levels parse via settings (incl. invalid-value fallback to max), pass the handle guard (old-three positive + new-two + invalid negative), and are selectable among the six UI items | §5.3 + §5.4 + §5.5 |
 | 7 | openai-provider streaming yields `thinking_delta` for both `reasoning` and `reasoning_content` fields | §5.6 S3 |
 | 8 | core + cli full test suites pass; `docs/configuration*.md` and the bundled skill reference docs consistent with the implementation | §5.9 + §5.8 |
+| 9 | Qwen3.8+ series default context window 128K with an 80% auto-compaction threshold (104857, dynamically triggered by real usage; mid-range of the 70–92% industry band); Qwen3 <3.8 and DeepSeek V4 defaults unchanged; explicit config takes precedence | §5.11 |
 
 ## 7. Out of Scope (recorded, not implemented)
 

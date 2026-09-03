@@ -233,10 +233,11 @@ test("resolveSettings derives model-specific context window defaults", () => {
     TEST_PROCESS_ENV
   );
 
+  // v1.3 D9：默认 autoCompactWindow 比例 50% → 80%（预留 20% 给输出与工具结果）
   assert.equal(regular.contextWindow, 256 * 1024);
-  assert.equal(regular.autoCompactWindow, 128 * 1024);
+  assert.equal(regular.autoCompactWindow, Math.floor(256 * 1024 * 0.8));
   assert.equal(deepseekV4.contextWindow, 1024 * 1024);
-  assert.equal(deepseekV4.autoCompactWindow, 512 * 1024);
+  assert.equal(deepseekV4.autoCompactWindow, Math.floor(1024 * 1024 * 0.8));
 });
 
 test("resolveSettings parses numeric and K/M context window settings", () => {
@@ -261,7 +262,8 @@ test("resolveSettings derives auto compact window from the configured context wi
   );
 
   assert.equal(resolved.contextWindow, 512 * 1024);
-  assert.equal(resolved.autoCompactWindow, 256 * 1024);
+  // v1.3 D9：未显式配置 autoCompactWindow 时联动为 contextWindow 的 80%
+  assert.equal(resolved.autoCompactWindow, Math.floor(512 * 1024 * 0.8));
 });
 
 test("resolveSettings ignores invalid windows and caps auto compact window at context window", () => {
@@ -277,7 +279,7 @@ test("resolveSettings ignores invalid windows and caps auto compact window at co
   );
 
   assert.equal(invalid.contextWindow, 256 * 1024);
-  assert.equal(invalid.autoCompactWindow, 128 * 1024);
+  assert.equal(invalid.autoCompactWindow, Math.floor(256 * 1024 * 0.8));
   assert.equal(capped.contextWindow, 128 * 1024);
   assert.equal(capped.autoCompactWindow, 128 * 1024);
 });
@@ -306,7 +308,74 @@ test("resolveSettingsSources skips invalid higher-priority context window values
   );
 
   assert.equal(resolved.contextWindow, 512 * 1024);
-  assert.equal(resolved.autoCompactWindow, 256 * 1024);
+  // v1.3 D9：无显式 autoCompactWindow，联动为 contextWindow 的 80%
+  assert.equal(resolved.autoCompactWindow, Math.floor(512 * 1024 * 0.8));
+});
+
+// v1.3 新增（Qwen3.8 适配 D9，对应设计文档 §5.11 W1）：Qwen3.8+ 系列默认上下文窗口 128K，
+// 自动 compact 阈值联动为 contextWindow 的 80%（基于真实 usage 动态触发压缩）
+test("resolveSettings defaults Qwen3.8-27B context window to 128K with 64K auto-compact", () => {
+  const resolved = resolveSettings(
+    {},
+    {
+      model: "Qwen/Qwen3.8-27B-FP8",
+      baseURL: "https://default.example.com",
+    },
+    TEST_PROCESS_ENV
+  );
+
+  assert.equal(resolved.contextWindow, 128 * 1024, "Qwen3.8-27B 默认上下文窗口应为 128K");
+  assert.equal(resolved.autoCompactWindow, Math.floor(128 * 1024 * 0.8), "自动 compact 阈值应联动为窗口的 80%");
+});
+
+// v1.3 新增（D9，§5.11 W2）：系列级推断（isQwen38Model），非 27B 专属硬编码
+test("resolveSettings defaults qwen3.8-plus context window to 128K", () => {
+  const resolved = resolveSettings(
+    {},
+    {
+      model: "qwen3.8-plus",
+      baseURL: "https://default.example.com",
+    },
+    TEST_PROCESS_ENV
+  );
+
+  assert.equal(resolved.contextWindow, 128 * 1024);
+  assert.equal(resolved.autoCompactWindow, Math.floor(128 * 1024 * 0.8));
+});
+
+// v1.3 新增（D9，§5.11 W3）：回归——旧 Qwen3（<3.8）仍为 256K，DeepSeek V4 仍为 1M
+test("resolveSettings keeps pre-3.8 Qwen and DeepSeek V4 context window defaults", () => {
+  const qwen37 = resolveSettings(
+    {},
+    { model: "qwen3.7-max", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  assert.equal(qwen37.contextWindow, 256 * 1024, "qwen3.7-max 不受 D9 影响，仍为 256K");
+  assert.equal(qwen37.autoCompactWindow, Math.floor(256 * 1024 * 0.8));
+
+  const deepseek = resolveSettings(
+    {},
+    { model: "deepseek-v4-flash", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  assert.equal(deepseek.contextWindow, 1024 * 1024, "DeepSeek V4 默认上下文窗口仍为 1M");
+  assert.equal(deepseek.autoCompactWindow, Math.floor(1024 * 1024 * 0.8));
+});
+
+// v1.3 新增（D9，§5.11 W4）：显式配置优先于模型默认值，autoCompactWindow 联动为显式窗口的 80%
+test("resolveSettings explicit context window overrides Qwen3.8 model default", () => {
+  const resolved = resolveSettings(
+    { contextWindow: "512k" },
+    {
+      model: "Qwen/Qwen3.8-27B-FP8",
+      baseURL: "https://default.example.com",
+    },
+    TEST_PROCESS_ENV
+  );
+
+  assert.equal(resolved.contextWindow, 512 * 1024, "显式 contextWindow 应覆盖 Qwen3.8 默认 128K");
+  // v1.3 D9：无显式 autoCompactWindow，联动为 contextWindow 的 80%
+  assert.equal(resolved.autoCompactWindow, Math.floor(512 * 1024 * 0.8));
 });
 
 test("resolveSettings reads TEMPERATURE, THINKING_ENABLED, REASONING_EFFORT, and DEBUG_LOG_ENABLED from env", () => {
