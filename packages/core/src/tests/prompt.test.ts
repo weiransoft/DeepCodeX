@@ -78,6 +78,30 @@ test("interactive prompt and tools include AskUserQuestion", () => {
   );
 });
 
+// suggestedCommand 优化（2026-09-03）：机制边界注入 + JSON schema 声明
+test("AskUserQuestion tool docs include suggestedCommand mechanism boundary (强制)", () => {
+  const prompt = getSystemPrompt("/tmp/project");
+  // 工具文档必须包含方案中的"机制边界"段——反建议循环的强制规则
+  assert.equal(prompt.includes("### 机制边界（强制，违反即产生建议循环）"), true);
+  assert.equal(prompt.includes("该机制**永久失效**"), true);
+  assert.equal(prompt.includes("直接完成该命令的等价工作"), true);
+});
+
+test("AskUserQuestion tool schema declares suggestedCommand property", () => {
+  const tool = getTools().find((candidate) => candidate.function.name === "AskUserQuestion");
+  assert.ok(tool);
+  const properties = tool.function.parameters.properties as Record<string, any>;
+  // additionalProperties: false 下，schema 未声明的字段会被严格 provider 拒绝，
+  // 因此 suggestedCommand 必须显式出现在 parameters.properties 中
+  assert.ok(properties.suggestedCommand, "schema 必须声明 suggestedCommand 属性");
+  const suggested = properties.suggestedCommand as any;
+  assert.deepEqual(suggested.required, ["command"]);
+  assert.equal(suggested.additionalProperties, false);
+  // command 约束说明必须传达：必须以 / 开头 + 白名单语义
+  const commandDesc = (suggested.properties?.command as any)?.description ?? "";
+  assert.ok(commandDesc.includes("MUST start with '/'"), "command 描述需说明斜杠开头约束");
+});
+
 test("non-interactive prompt and tools exclude only AskUserQuestion", () => {
   const externalTool = {
     type: "function" as const,

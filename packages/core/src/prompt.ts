@@ -614,7 +614,7 @@ export function getTools(options: PromptToolOptions = {}, externalTools: ToolDef
       function: {
         name: "AskUserQuestion",
         description:
-          "When the task has ambiguities or multiple implementation approaches, use this tool to pause execution and ask the user a question to get clarification or make a decision.",
+          "When the task has ambiguities or multiple implementation approaches, use this tool to pause execution and ask the user a question to get clarification or make a decision. Optionally attach suggestedCommand (a slash command) to be auto-dispatched right after the user answers; after the answer arrives this channel is gone — execute equivalent work with your tools instead of suggesting commands in plain text.",
         parameters: {
           type: "object",
           properties: {
@@ -654,6 +654,24 @@ export function getTools(options: PromptToolOptions = {}, externalTools: ToolDef
                 },
                 required: ["question", "options"],
               },
+            },
+            suggestedCommand: {
+              type: "object",
+              description:
+                "Optional slash command to auto-inject as the next user input immediately after the user answers. Only attach it to THIS AskUserQuestion call; use it only when the answer confirms the task scope and you have a clear next command. Do NOT use it for open-ended questions whose next step depends on the specific answer text.",
+              properties: {
+                command: {
+                  type: "string",
+                  description:
+                    "Full slash command to auto-dispatch, MUST start with '/'. Only allowlisted commands (e.g. /team dispatch, /architect, /eag-build) are accepted; other or malformed commands are silently dropped.",
+                },
+                reason: {
+                  type: "string",
+                  description: "Short explanation of why this command should run, shown in the UI.",
+                },
+              },
+              required: ["command"],
+              additionalProperties: false,
             },
           },
           required: ["questions"],
