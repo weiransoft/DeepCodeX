@@ -4,6 +4,8 @@ import {
   buildSlashCommands,
   filterSlashCommands,
   findExactSlashCommand,
+  findUniquePrefixSlashCommand,
+  normalizeSlashCommandText,
   formatSlashCommandDescription,
   formatSlashCommandLabel,
   // fork 扩展（FIX-06）：/help 命令清单渲染所需的导出
@@ -256,4 +258,70 @@ test("formatBuiltinCommandList aligns label column", () => {
     const prefix = line.slice(0, descStartCol);
     assert.ok(/^ {2}\/\S+ +$/.test(prefix), `行 "${line}" 的 label 列未对齐到第 ${descStartCol} 列`);
   }
+});
+
+// ============================================================================
+// normalizeSlashCommandText 测试（F1 修复：残缺命令归一化）
+// ============================================================================
+
+test("normalizeSlashCommandText 将残缺首 token 归一化为完整命令", () => {
+  // 核心场景：用户输入 "/revi" 后从菜单选中 /review，
+  // 原实现透传残缺文本导致 App 层严格校验失败（"无效的 /review 命令: /revi"）
+  assert.equal(normalizeSlashCommandText("/revi", "/review"), "/review");
+});
+
+test("normalizeSlashCommandText 归一化时保留其后参数", () => {
+  // "/revi 未提交改动" → 首 token 替换为 /review，参数原样保留
+  assert.equal(normalizeSlashCommandText("/revi 未提交改动", "/review"), "/review 未提交改动");
+  // 多参数场景
+  assert.equal(normalizeSlashCommandText("/mem list --json", "/memory"), "/memory list --json");
+});
+
+test("normalizeSlashCommandText 对完整命令输入幂等", () => {
+  // 首 token 与 label 一致时结果不变（正常精确匹配路径不受影响）
+  assert.equal(normalizeSlashCommandText("/review typecheck", "/review"), "/review typecheck");
+  assert.equal(normalizeSlashCommandText("/review", "/review"), "/review");
+});
+
+test("normalizeSlashCommandText 处理首尾空白与无参数输入", () => {
+  // 首尾空白先 trim，无参数时仅返回完整 label
+  assert.equal(normalizeSlashCommandText("  /revi  ", "/review"), "/review");
+  assert.equal(normalizeSlashCommandText("", "/review"), "/review");
+});
+
+// ============================================================================
+// findUniquePrefixSlashCommand 测试（F2 修复：唯一前缀自动补全）
+// ============================================================================
+
+test("findUniquePrefixSlashCommand 对唯一前缀匹配返回命令项", () => {
+  const items = buildSlashCommands(skills);
+  // "/revi" 在内置命令中唯一匹配 review
+  const match = findUniquePrefixSlashCommand(items, "/revi");
+  assert.equal(match?.kind, "review");
+  assert.equal(match?.label, "/review");
+});
+
+test("findUniquePrefixSlashCommand 对多个候选返回 null", () => {
+  const items = buildSlashCommands(skills);
+  // "/eag" 命中 5 个 EAG 编排命令，歧义时返回 null（由调用方提示候选）
+  assert.equal(findUniquePrefixSlashCommand(items, "/eag"), null);
+  // "/eag-autonomous-" 命中 autonomous / autonomous-status / autonomous-stop 三个，仍为歧义
+  assert.equal(findUniquePrefixSlashCommand(items, "/eag-autonomous-"), null);
+});
+
+test("findUniquePrefixSlashCommand 对零匹配与非斜杠 token 返回 null", () => {
+  const items = buildSlashCommands(skills);
+  // 零匹配：调用方保持原行为（按普通文本提交）
+  assert.equal(findUniquePrefixSlashCommand(items, "/xyzzy"), null);
+  // 非斜杠开头直接返回 null
+  assert.equal(findUniquePrefixSlashCommand(items, "review"), null);
+});
+
+test("findUniquePrefixSlashCommand 排除 skill 项避免歧义误判", () => {
+  // skills 中注册了 "code-review" 技能：若不排除 skill 项，
+  // "/revi" 会同时命中 skill "code-review"（includes 子串匹配）与内置 review，
+  // 变成歧义导致自动补全失效
+  const items = buildSlashCommands(skills);
+  const match = findUniquePrefixSlashCommand(items, "/revi");
+  assert.equal(match?.kind, "review");
 });

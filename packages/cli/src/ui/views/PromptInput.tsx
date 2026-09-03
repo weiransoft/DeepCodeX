@@ -34,7 +34,13 @@ import {
   redoPromptEdit,
   undoPromptEdit,
 } from "../core/prompt-undo-redo";
-import { buildSlashCommands, filterSlashCommands, findExactSlashCommand } from "../core/slash-commands";
+import {
+  buildSlashCommands,
+  filterSlashCommands,
+  findExactSlashCommand,
+  findUniquePrefixSlashCommand,
+  normalizeSlashCommandText,
+} from "../core/slash-commands";
 import type { SlashCommandItem } from "../core/slash-commands";
 import {
   filterFileMentionItems,
@@ -738,7 +744,9 @@ export const PromptInput = React.memo(function PromptInput({
     if (item.kind === "resume") {
       // ADR-DI-001：传递完整文本（包含 /resume <taskId> 参数），
       // 由 App.tsx 通过 isResumeTaskCommand 区分"恢复会话" vs "恢复暂停任务"
-      onSubmit({ text: buffer.text.trim(), imageUrls: [], command: "resume" });
+      // F1：残缺首 token（如 "/resu t-abc"）归一化为完整命令，否则 isResumeTaskCommand
+      // 的 startsWith("/resume") 前缀判定必然失败
+      onSubmit({ text: normalizeSlashCommandText(buffer.text.trim(), item.label), imageUrls: [], command: "resume" });
       resetPromptInput();
       return;
     }
@@ -772,7 +780,9 @@ export const PromptInput = React.memo(function PromptInput({
     if (item.kind === "review") {
       // /review <subcommand> [args] —— 透传完整文本，由 App 层调用 executeReviewCommand
       // 工具验证优先：所有数字必须有真实命令输出作为证据
-      onSubmit({ text: buffer.text.trim(), imageUrls: [], command: "review" });
+      // F1：残缺首 token（如 "/revi"）归一化为 "/review"，否则 App 层严格校验
+      // tokens[0] !== "review" 必然误报 "无效的 /review 命令"
+      onSubmit({ text: normalizeSlashCommandText(buffer.text.trim(), item.label), imageUrls: [], command: "review" });
       resetPromptInput();
       return;
     }
@@ -780,7 +790,8 @@ export const PromptInput = React.memo(function PromptInput({
       // /memory <subcommand> [args] —— 透传完整文本，由 App 层调用 handleMemoryCommand
       // 子命令：list / delete / delete-all / review / export / help
       // 设计依据：V2 PRD §US-MEM-001（用户可直接管理自己的记忆，命令不发送给 LLM）
-      onSubmit({ text: buffer.text.trim(), imageUrls: [], command: "memory" });
+      // F1：残缺首 token 归一化为完整命令，避免 App 层前缀解析失败
+      onSubmit({ text: normalizeSlashCommandText(buffer.text.trim(), item.label), imageUrls: [], command: "memory" });
       resetPromptInput();
       return;
     }
@@ -804,7 +815,9 @@ export const PromptInput = React.memo(function PromptInput({
     ) {
       // /team <subcommand> [args] 或 /<role> <task description> —— 透传完整文本，
       // 由 App 层调用 handleTeamSlashCommand 解析并执行 executeTeamCommand
-      onSubmit({ text: buffer.text.trim(), imageUrls: [], command: "team" });
+      // F1：残缺首 token（如 "/archi 任务"）归一化为完整角色命令（如 "/architect 任务"），
+      // 否则 App 层 teamShortcutToRoleId(tokens[0]) 解析必然失败
+      onSubmit({ text: normalizeSlashCommandText(buffer.text.trim(), item.label), imageUrls: [], command: "team" });
       resetPromptInput();
       return;
     }
@@ -813,13 +826,15 @@ export const PromptInput = React.memo(function PromptInput({
     // 对于无参数命令（tasks/pause），传递命令本身
     if (item.kind === "inject") {
       // /inject <指令文本> —— 透传完整文本，由 App 层提取参数并调用 injectInstruction
-      onSubmit({ text: buffer.text.trim(), imageUrls: [], command: "inject" });
+      // F1：残缺首 token 归一化为完整命令，避免 App 层 extractCommandArgument 前缀解析失败
+      onSubmit({ text: normalizeSlashCommandText(buffer.text.trim(), item.label), imageUrls: [], command: "inject" });
       resetPromptInput();
       return;
     }
     if (item.kind === "bg") {
       // /bg <任务描述> —— 透传完整文本，由 App 层提取参数并调用 startBackgroundTask
-      onSubmit({ text: buffer.text.trim(), imageUrls: [], command: "bg" });
+      // F1：残缺首 token 归一化为完整命令，避免 App 层 extractCommandArgument 前缀解析失败
+      onSubmit({ text: normalizeSlashCommandText(buffer.text.trim(), item.label), imageUrls: [], command: "bg" });
       resetPromptInput();
       return;
     }
@@ -831,13 +846,15 @@ export const PromptInput = React.memo(function PromptInput({
     }
     if (item.kind === "fg") {
       // /fg <taskId> —— 透传完整文本，由 App 层提取参数并调用 setForegroundTask
-      onSubmit({ text: buffer.text.trim(), imageUrls: [], command: "fg" });
+      // F1：残缺首 token 归一化为完整命令，避免 App 层 extractCommandArgument 前缀解析失败
+      onSubmit({ text: normalizeSlashCommandText(buffer.text.trim(), item.label), imageUrls: [], command: "fg" });
       resetPromptInput();
       return;
     }
     if (item.kind === "cancel") {
       // /cancel <taskId> —— 透传完整文本，由 App 层提取参数并调用 cancelTask
-      onSubmit({ text: buffer.text.trim(), imageUrls: [], command: "cancel" });
+      // F1：残缺首 token 归一化为完整命令，避免 App 层 extractCommandArgument 前缀解析失败
+      onSubmit({ text: normalizeSlashCommandText(buffer.text.trim(), item.label), imageUrls: [], command: "cancel" });
       resetPromptInput();
       return;
     }
@@ -881,9 +898,29 @@ export const PromptInput = React.memo(function PromptInput({
     }
 
     if (trimmed.startsWith("/")) {
-      const exactMatch = findExactSlashCommand(slashItems, trimmed.split(/\s+/, 1)[0]);
+      const firstToken = trimmed.split(/\s+/, 1)[0]!;
+      const exactMatch = findExactSlashCommand(slashItems, firstToken);
       if (exactMatch) {
         handleSlashSelection(exactMatch);
+        return;
+      }
+      // F2：精确匹配未命中时尝试唯一前缀补全（如 "/revi" → "/review"）
+      // - 恰好 1 个候选：走 handleSlashSelection（内部经 normalizeSlashCommandText 归一化后提交）
+      // - 多个候选：不提交，提示候选命令让用户补全（避免歧义误触发）
+      // - 零个候选：保持原行为，按普通文本提交（不破坏 EAG 裸文本透传等场景）
+      const prefixMatch = findUniquePrefixSlashCommand(slashItems, firstToken);
+      if (prefixMatch) {
+        handleSlashSelection(prefixMatch);
+        return;
+      }
+      const candidates = filterSlashCommands(slashItems, firstToken).filter((item) => item.kind !== "skill");
+      if (candidates.length > 1) {
+        setStatusMessage(
+          `歧义命令 ${firstToken}，候选: ${candidates
+            .slice(0, 5)
+            .map((item) => item.label)
+            .join(" ")}${candidates.length > 5 ? " …" : ""}`
+        );
         return;
       }
     }

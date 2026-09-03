@@ -190,6 +190,20 @@ test("getSystemPrompt includes tool-verification-first constraints for reports (
   assert.equal(prompt.includes("禁止编造"), true);
 });
 
+// F4 修复（2026-09-03）：系统提示词新增"命令执行纪律"，反建议循环
+test("getSystemPrompt includes command execution discipline rules (F4)", () => {
+  const prompt = getSystemPrompt("/tmp/project");
+  // 必须包含命令执行纪律段
+  assert.equal(prompt.includes("命令执行纪律（反建议循环，强制）"), true);
+  // 三条规则齐全：任务指令即执行信号 / 斜杠命令不可代输 / "继续"的含义
+  assert.equal(prompt.includes("任务指令即执行信号"), true);
+  assert.equal(prompt.includes('严禁回复"建议执行 /xxx 命令"'), true);
+  assert.equal(prompt.includes("斜杠命令不可代输"), true);
+  assert.equal(prompt.includes("由你直接完成该任务"), true);
+  // 与 F3 呼应的【执行要求】标记识别
+  assert.equal(prompt.includes("【执行要求】"), true);
+});
+
 test("getSystemPrompt does not include runtime context", () => {
   const prompt = getSystemPrompt("/tmp/project");
   assert.equal(prompt.includes("# Local Workspace Environment"), false);
