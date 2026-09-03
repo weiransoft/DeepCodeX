@@ -37,5 +37,16 @@ Rules:
 
 ### When NOT to use suggestedCommand
 
-- Clarification questions whose answer determines which command to run (use ask_clarification instead)
+- Clarification questions whose answer determines which command to run (use ask\_clarification instead)
 - Questions where the next step depends on the specific answer text
+
+### 机制边界（强制，违反即产生建议循环）
+
+- `suggestedCommand` 只能附加在**本次 AskUserQuestion 调用**的参数里，随提问一起发出。
+  它是唯一的命令自动执行通道。
+- 一旦用户已经回答（下一条 user 消息就是答案），该机制**永久失效**：没有任何后置通道
+  可以注入命令。此时若你仍输出"建议执行 /xxx 命令"，它只是一段无法被执行的死文字，
+  用户看到后只会被迫再次打断你。
+- 因此收到答案后的唯一正确动作是：**立即用你已有的工具（Bash/Read/Grep/Write 等）
+  直接完成该命令的等价工作**。例如想执行 /review，就直接 git diff + 逐文件审查，
+  而不是把 /review 推荐给用户。
