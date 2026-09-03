@@ -50,6 +50,7 @@ import {
   DEFAULT_FILES_API_TIMEOUT_MS,
   DEFAULT_MAX_REQUEST_FILES_BYTES,
   getDefaultAutoCompactWindow,
+  DEFAULT_AUTOCOMPACT_RATIO,
 } from "./settings";
 // fork 侧 B1：ProviderFactory 统一 LLM provider 路由（openai/anthropic）
 import { ProviderFactory } from "./providers/provider-factory";
@@ -261,10 +262,11 @@ export function getCompactPromptTokenThreshold(model: string, contextWindow?: nu
     return DEEPSEEK_V4_COMPACT_PROMPT_TOKEN_THRESHOLD;
   }
   // 显式传入 contextWindow：预留 20% 给 output + tool 结果，确保在 API 调用前 compact
+  // （v1.3 D9：比例改用 settings 导出的 DEFAULT_AUTOCOMPACT_RATIO 共享常量，消除魔法数字重复）
   if (typeof contextWindow === "number" && contextWindow > 0) {
-    return Math.floor(contextWindow * 0.8);
+    return Math.floor(contextWindow * DEFAULT_AUTOCOMPACT_RATIO);
   }
-  // 未传入 contextWindow：采用上游 v0.3.1 语义（按模型推断默认窗口的一半）
+  // 未传入 contextWindow：按模型推断默认窗口并乘以 DEFAULT_AUTOCOMPACT_RATIO（v1.3 D9：80%）
   return getDefaultAutoCompactWindow(model);
 }
 

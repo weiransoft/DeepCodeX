@@ -3477,7 +3477,9 @@ test("SessionManager resets active tokens to latest post-compaction response usa
       total_tokens: 7,
     }),
   ];
-  const manager = createMockedClientSessionManager(workspace, responses);
+  // v1.3 D9：默认压缩比例 50% → 80% 后，140K 用量不再超过默认阈值（209715）；
+  // 本用例验证压缩机制本身，显式固定阈值 131072（原 50% 语义）以保持触发场景
+  const manager = createMockedClientSessionManager(workspace, responses, 131_072);
 
   const sessionId = await manager.createSession({ text: "" });
   assert.equal(manager.getSession(sessionId)?.activeTokens, 140_000);

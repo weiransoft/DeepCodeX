@@ -28,7 +28,7 @@ The following are all the top-level fields supported in `settings.json`, along w
 | ------------------ | ------- | --------------------------------------------------------------------------- |
 | `env`              | object  | Group of environment variables (see sub-field table below)                 |
 | `contextWindow`   | number/string | Context-window limit as an exact token count or `128K`/`1M` value   |
-| `autoCompactWindow` | number/string | Auto-compaction threshold; defaults to 50% of the final context window |
+| `autoCompactWindow` | number/string | Auto-compaction threshold; defaults to 80% of the final context window |
 | `model`            | string  | Model name. Takes precedence over `env.MODEL`                              |
 | `provider`         | string  | LLM provider declaration, either `"openai"` or `"anthropic"` (see [provider section](#provider--llm-provider)) |
 | `thinkingEnabled`  | boolean | Whether to enable thinking mode (enabled by default for DeepSeek V4 series)|
@@ -89,7 +89,7 @@ The following are all the top-level fields supported in `settings.json`, along w
 }
 ```
 
-The default context window is `256K` for regular models and `1M` for DeepSeek V4 models. If the auto-compaction threshold is omitted, it is 50% of the final context window. Invalid values are ignored, and an auto-compaction threshold larger than the context window is capped at the context window.
+The default context window is `256K` for regular models, `1M` for DeepSeek V4 models, and `128K` for the Qwen3.8+ series. If the auto-compaction threshold is omitted, it is 80% of the final context window (reserving 20% for model output and tool results, aligned with the 70%–92% range of mainstream coding agents). Invalid values are ignored, and an auto-compaction threshold larger than the context window is capped at the context window.
 
 #### `provider` — LLM Provider
 
