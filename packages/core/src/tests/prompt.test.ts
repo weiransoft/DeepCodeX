@@ -219,11 +219,15 @@ test("getSystemPrompt includes command execution discipline rules (F4)", () => {
   const prompt = getSystemPrompt("/tmp/project");
   // 必须包含命令执行纪律段
   assert.equal(prompt.includes("命令执行纪律（反建议循环，强制）"), true);
-  // 三条规则齐全：任务指令即执行信号 / 斜杠命令不可代输 / "继续"的含义
+  // 四条规则齐全：任务指令即执行信号 / 斜杠命令不可代输 / "继续"的含义 / AskUserQuestion 答案=执行指令
   assert.equal(prompt.includes("任务指令即执行信号"), true);
   assert.equal(prompt.includes('严禁回复"建议执行 /xxx 命令"'), true);
   assert.equal(prompt.includes("斜杠命令不可代输"), true);
   assert.equal(prompt.includes("由你直接完成该任务"), true);
+  // 第 4 条：AskUserQuestion 答案 = 执行指令，suggestedCommand 回答后通道关闭
+  assert.equal(prompt.includes("AskUserQuestion 的答案 = 执行指令"), true);
+  assert.equal(prompt.includes("suggestedCommand 机制只能在提问时随问题一起附加"), true);
+  assert.equal(prompt.includes("回答发出后该通道已关闭"), true);
   // 与 F3 呼应的【执行要求】标记识别
   assert.equal(prompt.includes("【执行要求】"), true);
 });
