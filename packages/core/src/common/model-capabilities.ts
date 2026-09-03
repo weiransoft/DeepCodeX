@@ -55,6 +55,36 @@ export function isQwen3Model(model: string): boolean {
 }
 
 /**
+ * 判断是否为 Qwen3.8+ 系列模型（3.8 / 3.9 / 4.x 等后续子版本）
+ *
+ * v1.2 新增（Qwen3.8 适配，见 docs/qwen38-adaptation.md D2）：
+ * Qwen3.8 引入官方顶层 reasoning_effort 参数与 preserve_thinking 模板参数，
+ * 需按子版本差异化下发，故在 isQwen3Model 粗粒度识别之外增加细粒度判别。
+ *
+ * 识别规则：model 转小写、去首尾空白后，匹配锚定正则 /^(?:qwen\/)?qwen3\.(\d+)/，
+ * 且捕获的 minor 版本号 >= 8
+ * 覆盖模型：Qwen/Qwen3.8-27B-FP8 / qwen3.8-27b / qwen3.8-plus /
+ * qwen3.8-max-preview / qwen3.9-70b 等
+ *
+ * 设计说明：
+ * - 正则锚定 ^ 并仅允许 qwen/ 前缀，与 isQwen3Model 的命名空间口径
+ *   （"qwen3" / "qwen/qwen3" 开头）对齐，保证 isQwen38Model 识别集 ⊆ isQwen3Model 识别集
+ * - 必须带小数点（qwen3.8-…），"qwen38" / "qwen30-8b" 等非版本串不匹配
+ * - 以 3.8 为能力基线：3.8 引入 reasoning_effort / preserve_thinking，
+ *   后续子版本视为向后兼容同一能力集
+ * - \d+ 捕获完整数字，两位数 minor（如 qwen3.10）判定为 10 >= 8
+ *
+ * @param model 模型名称
+ * @returns 是否为 Qwen3.8+ 系列模型
+ */
+export function isQwen38Model(model: string): boolean {
+  const lower = model.trim().toLowerCase();
+  const match = /^(?:qwen\/)?qwen3\.(\d+)/.exec(lower);
+  if (!match) return false;
+  return Number(match[1]) >= 8;
+}
+
+/**
  * 判断是否为 DeepSeek thinking 模型（支持 thinking.type 参数格式）
  *
  * DeepSeek V4 系列使用 thinking: { type: "enabled" | "disabled" } 参数格式

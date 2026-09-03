@@ -106,8 +106,10 @@ export class OpenAILLMClient implements LLMClient {
         argumentsJson: tc.function.arguments,
       }));
 
-    // DeepSeek thinking：reasoning_content 为非标准字段，做类型容错
-    const reasoning = (msg as unknown as Record<string, unknown> | undefined)?.["reasoning_content"];
+    // DeepSeek/Qwen thinking：reasoning_content 为非标准字段，做类型容错
+    // v1.2（Qwen3.8 适配）：兼容部分部署使用的 reasoning 字段（与 session.ts 主路径的 ?? 语义一致）
+    const reasoningRaw = msg as unknown as Record<string, unknown> | undefined;
+    const reasoning = reasoningRaw?.["reasoning_content"] ?? reasoningRaw?.["reasoning"];
 
     const usage: LLMUsage | null = completion.usage
       ? { inputTokens: completion.usage.prompt_tokens, outputTokens: completion.usage.completion_tokens }
@@ -176,9 +178,15 @@ export class OpenAILLMClient implements LLMClient {
         if (typeof delta.content === "string" && delta.content.length > 0) {
           yield { type: "text_delta", text: delta.content };
         }
-        const reasoning = (delta as unknown as Record<string, unknown>)["reasoning_content"];
-        if (typeof reasoning === "string" && reasoning.length > 0) {
-          yield { type: "thinking_delta", thinking: reasoning };
+        // v1.2（Qwen3.8 适配）：与 session.ts 主路径对齐，兼容 reasoning_content（vLLM）
+        // 与 reasoning（部分部署）两种字段。?? 仅在 null/undefined 时回退，
+        // reasoning_content 为空字符串时不回退——空字符串 length > 0 判定不产生事件，
+        // 与主路径语义保持一致（两处实现相同）
+        const reasoningRaw =
+          (delta as unknown as Record<string, unknown>)["reasoning_content"] ??
+          (delta as unknown as Record<string, unknown>)["reasoning"];
+        if (typeof reasoningRaw === "string" && reasoningRaw.length > 0) {
+          yield { type: "thinking_delta", thinking: reasoningRaw };
         }
         for (const tc of delta.tool_calls ?? []) {
           const idx = tc.index;

@@ -14,10 +14,15 @@ type ThinkingModeOption = {
 // 上游 v0.3.1：模型下拉新增 deepseek-v4-flash-vision-exp 视觉实验模型
 export const MODEL_COMMAND_MODELS = ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"] as const;
 
+// v1.2 变更（Qwen3.8 适配，见 docs/qwen38-adaptation.md D7）：
+// 新增 xhigh / medium 档位选项（Qwen3.8 官方 reasoning_effort 档位为 low/medium/xhigh），
+// 六项按思考强度降序排列，xhigh 置顶（Qwen3.8 服务端默认档），No thinking 殿后。
+// 组件 maxVisible=6 恰好容纳六项，getThinkingOptionIndex 按档位精确匹配无需改动。
 export const MODEL_COMMAND_THINKING_OPTIONS: ThinkingModeOption[] = [
+  { label: "Thinking mode [xhigh]", thinkingEnabled: true, reasoningEffort: "xhigh" },
   { label: "Thinking mode [max]", thinkingEnabled: true, reasoningEffort: "max" },
   { label: "Thinking mode [high]", thinkingEnabled: true, reasoningEffort: "high" },
-  // 上游 v0.3.1：新增 low 档位思考强度选项
+  { label: "Thinking mode [medium]", thinkingEnabled: true, reasoningEffort: "medium" },
   { label: "Thinking mode [low]", thinkingEnabled: true, reasoningEffort: "low" },
   { label: "No thinking", thinkingEnabled: false },
 ];

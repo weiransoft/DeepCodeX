@@ -30,7 +30,10 @@ export type DeepcodingEnv = Record<string, string | undefined> & {
 };
 
 // 采纳上游 0.3.1：新增 "low" 推理档位
-export type ReasoningEffort = "low" | "high" | "max";
+// v1.2 变更（Qwen3.8 适配）：扩展 "medium" / "xhigh" 档位——
+// Qwen3.8 官方 reasoning_effort 档位为 low/medium/xhigh，
+// 扩展后五档在 openai-thinking.ts 中按映射表下发（见 docs/qwen38-adaptation.md D1/D3）
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export type McpServerConfig = {
   command: string;
@@ -257,8 +260,13 @@ function firstTokenWindow(...values: unknown[]): number | undefined {
 }
 
 // 采纳上游 0.3.1：reasoning effort 支持 "low" 档位
+// v1.2 变更（Qwen3.8 适配）：接受五档 low/medium/high/xhigh/max。
+// 严格字面量相等、大小写敏感：非法值（含 "XHIGH"、" high" 等变体）返回 undefined，
+// 由调用方回落默认 "max"
 function resolveReasoningEffort(value: unknown): ReasoningEffort | undefined {
-  return value === "low" || value === "high" || value === "max" ? value : undefined;
+  return value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max"
+    ? value
+    : undefined;
 }
 
 /** 解析多模态模式：default | on | off（大小写不敏感） */

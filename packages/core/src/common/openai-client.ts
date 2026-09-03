@@ -254,10 +254,13 @@ export function isOpenAIClientHandle(obj: unknown): obj is OpenAIClientHandle {
   if (typeof o.baseURL !== "string") return false;
   if (typeof o.thinkingEnabled !== "boolean") return false;
   // reasoningEffort 为可选字段，仅当存在时校验类型（v0.3.1 起支持 "low" 档）
+  // v1.2 变更（Qwen3.8 适配）：放宽至五档 low/medium/high/xhigh/max（见 settings.ts ReasoningEffort）
   if (
     o.reasoningEffort !== undefined &&
     o.reasoningEffort !== "low" &&
+    o.reasoningEffort !== "medium" &&
     o.reasoningEffort !== "high" &&
+    o.reasoningEffort !== "xhigh" &&
     o.reasoningEffort !== "max"
   ) {
     return false;

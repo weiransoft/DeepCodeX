@@ -31,7 +31,7 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 | `autoCompactWindow`        | number/string | 自动压缩阈值，默认取最终上下文窗口的 50%                      |
 | `model`                    | string        | 模型名称。默认 `deepseek-v4-flash`，优先级高于 `env.MODEL`    |
 | `thinkingEnabled`          | boolean       | 是否启用思考模式（DeepSeek V4 系列默认启用）                  |
-| `reasoningEffort`          | string        | 推理强度，可选 `"low"`、`"high"` 或 `"max"`（默认 `"max"`）   |
+| `reasoningEffort`          | string        | 推理强度，可选 `"low"`、`"medium"`、`"high"`、`"xhigh"` 或 `"max"`（默认 `"max"`） |
 | `filesApiEnabled`          | boolean       | 是否通过 DeepSeek Files API 发送图片（默认 `false`）          |
 | `filesApiTimeoutMs`        | number        | 单张图片 Files API 处理超时，默认 `60000`，最大 `600000` 毫秒 |
 | `fileExpiresAfterSeconds`  | number        | 远端文件有效期，默认 `604800` 秒                              |
@@ -75,20 +75,45 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 
 #### `thinkingEnabled` — 思考模式
 
-是否启用 DeepSeek 思考模式。设置为 `true` 启用、`false` 禁用。
+是否启用思考模式。设置为 `true` 启用、`false` 禁用。
 
 - 对于 `deepseek-v4-pro` 和 `deepseek-v4-flash`，思考模式**默认启用**。
+- 对于 Qwen3 系列模型（以 `qwen3` / `qwen/qwen3` 开头），思考模式**默认启用**。
 - 对于其他模型，思考模式**默认关闭**。
+
+> Qwen3 使用 `chat_template_kwargs.enable_thinking` 参数控制 thinking 模式，与 DeepSeek 的 `thinking.type` 格式不同。Deep Code 会根据模型名自动选择正确的参数格式。
+
+**Qwen3.8+ 专属参数**（如 `Qwen/Qwen3.8-27B-FP8` / `qwen3.8-plus` / `qwen3.9-70b`）：
+
+| 参数 | 位置 | 说明 |
+|------|------|------|
+| `enable_thinking` | `chat_template_kwargs` | thinking 模式开关（thinking 开启/关闭均下发） |
+| `preserve_thinking` | `chat_template_kwargs` | 保留历史消息思考块；CLI 在 thinking 模式下回放历史 `reasoning_content`，与此参数语义一致，故 thinking 开启时显式下发 `true`（thinking 关闭时不下发，沿用服务端默认） |
+| `reasoning_effort` | 请求体顶层 | Qwen3.8 官方推理强度，仅 thinking 开启时下发，取值 `xhigh`（服务端默认）/ `medium` / `low`，由 CLI 五档映射而来（见下文 `reasoningEffort` 映射表） |
 
 #### `reasoningEffort` — 推理强度
 
 当思考模式启用时，控制模型思考的深度：
 
-| 值     | 说明                            |
-| ------ | ------------------------------- |
-| `max`  | 最大推理深度（默认值）          |
-| `high` | 较高推理深度，token消耗相对较小 |
-| `low`  | 较低推理深度，token消耗更少     |
+| 值      | 说明                               |
+| ------- | --------------------------------- |
+| `max`   | 最大推理深度（默认值）              |
+| `xhigh` | 极高推理深度（Qwen3.8 服务端默认档） |
+| `high`  | 较高推理深度，token消耗相对较小      |
+| `medium`| 中等推理深度                        |
+| `low`   | 较低推理深度，token消耗更少          |
+
+**Qwen3.8+ 顶层 `reasoning_effort` 映射**（模型官方仅定义 `xhigh` / `medium` / `low` 三档）：
+
+| CLI 档位 | Qwen3.8 顶层值 | 说明 |
+| -------- | -------------- | ---- |
+| `low`    | `low`          | 直传 |
+| `medium` | `medium`       | 直传 |
+| `high`   | `medium`       | Qwen3.8 无 high 档，保守向下钳到次低档以控制 token 开销 |
+| `xhigh`  | `xhigh`        | 直传（Qwen3.8 服务端默认档） |
+| `max`    | `xhigh`        | 钳制到官方最高档 |
+
+DeepSeek V4 的 `reasoning_effort` 经 `extra_body` 下发，档位语义由 DeepSeek 服务端定义。
 
 #### DeepSeek Files API
 
