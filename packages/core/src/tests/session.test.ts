@@ -2628,56 +2628,60 @@ test("activateSession temporarily asks before allowed writes in Plan Mode", asyn
   assert.deepEqual(assistant?.meta?.permissions, [{ toolCallId: "call-write", permission: "ask" }]);
 });
 
-test("activateSession does not force allowed temporary writes to ask in Plan Mode", async () => {
-  const workspace = createTempDir("deepcode-plan-tmp-permission-workspace-");
-  const home = createTempDir("deepcode-plan-tmp-permission-home-");
-  const targetPath = path.join("/tmp", `deepcode-plan-${crypto.randomUUID()}.txt`);
-  tempDirs.push(targetPath);
-  setHomeDir(home);
+test(
+  "activateSession does not force allowed temporary writes to ask in Plan Mode",
+  { skip: process.platform === "win32" },
+  async () => {
+    const workspace = createTempDir("deepcode-plan-tmp-permission-workspace-");
+    const home = createTempDir("deepcode-plan-tmp-permission-home-");
+    const targetPath = path.join("/tmp", `deepcode-plan-${crypto.randomUUID()}.txt`);
+    tempDirs.push(targetPath);
+    setHomeDir(home);
 
-  const manager = createPermissionSessionManager(
-    workspace,
-    [
-      {
-        choices: [
-          {
-            message: {
-              content: "",
-              tool_calls: [
-                {
-                  id: "call-write-tmp",
-                  type: "function",
-                  function: {
-                    name: "write",
-                    arguments: JSON.stringify({ file_path: targetPath, content: "planned" }),
+    const manager = createPermissionSessionManager(
+      workspace,
+      [
+        {
+          choices: [
+            {
+              message: {
+                content: "",
+                tool_calls: [
+                  {
+                    id: "call-write-tmp",
+                    type: "function",
+                    function: {
+                      name: "write",
+                      arguments: JSON.stringify({ file_path: targetPath, content: "planned" }),
+                    },
                   },
-                },
-              ],
+                ],
+              },
             },
-          },
-        ],
-        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-      },
-      createChatResponse("done", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }),
-    ],
-    {
-      allow: ["write-in-tmp"],
-      deny: [],
-      ask: [],
-      defaultMode: "allowAll",
-    }
-  );
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        },
+        createChatResponse("done", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }),
+      ],
+      {
+        allow: ["write-in-tmp"],
+        deny: [],
+        ask: [],
+        defaultMode: "allowAll",
+      }
+    );
 
-  const sessionId = await manager.createSession({ text: "Plan this change", planMode: true });
-  const session = manager.getSession(sessionId);
-  const assistant = manager
-    .listSessionMessages(sessionId)
-    .find((message) => message.role === "assistant" && (message.messageParams as any)?.tool_calls);
+    const sessionId = await manager.createSession({ text: "Plan this change", planMode: true });
+    const session = manager.getSession(sessionId);
+    const assistant = manager
+      .listSessionMessages(sessionId)
+      .find((message) => message.role === "assistant" && (message.messageParams as any)?.tool_calls);
 
-  assert.equal(session?.status, "completed");
-  assert.deepEqual(assistant?.meta?.permissions, [{ toolCallId: "call-write-tmp", permission: "allow" }]);
-  assert.equal(fs.readFileSync(targetPath, "utf8"), "planned");
-});
+    assert.equal(session?.status, "completed");
+    assert.deepEqual(assistant?.meta?.permissions, [{ toolCallId: "call-write-tmp", permission: "allow" }]);
+    assert.equal(fs.readFileSync(targetPath, "utf8"), "planned");
+  }
+);
 
 test("SessionManager preserves permission_denied status when sessions are reloaded", async () => {
   const workspace = createTempDir("deepcode-permission-denied-workspace-");

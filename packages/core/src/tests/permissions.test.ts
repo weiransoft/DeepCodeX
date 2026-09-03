@@ -302,7 +302,7 @@ test("computeToolCallPermissions temporarily upgrades allowed forced scopes to a
 
 test("computeToolCallPermissions allows read tool calls under skill scan paths", () => {
   const projectRoot = createTempDir("deepcode-permissions-skill-read-workspace-");
-  const home = createTempDir("deepcode-permissions-skill-read-home-");
+  const home = createTempDir("deepcode-permissions-skill-read-home-", process.cwd());
   const skillRoot = path.join(home, ".agents", "skills");
   const skillResourcePath = path.join(skillRoot, "pdf", "scripts", "extract.py");
   const outsidePath = path.join(home, "notes.txt");
@@ -342,7 +342,7 @@ test("computeToolCallPermissions allows read tool calls under skill scan paths",
 
 test("UnderstandImage requires network and exempts only configured image directories from read scope", () => {
   const projectRoot = createTempDir("deepcode-permissions-image-workspace-");
-  const home = createTempDir("deepcode-permissions-image-home-");
+  const home = createTempDir("deepcode-permissions-image-home-", process.cwd());
   const sessionImages = path.join(home, ".deepcode", "projects", "project", "images", "session-1");
   const currentImage = path.join(sessionImages, "current.png");
   const projectImage = path.join(projectRoot, "project.png");
@@ -388,7 +388,7 @@ test("UnderstandImage requires network and exempts only configured image directo
 
 test("ReadImage uses filesystem read permissions without network access", () => {
   const projectRoot = createTempDir("deepcode-permissions-read-image-workspace-");
-  const home = createTempDir("deepcode-permissions-read-image-home-");
+  const home = createTempDir("deepcode-permissions-read-image-home-", process.cwd());
   const projectImage = path.join(projectRoot, "project.png");
   const outsideImage = path.join(home, "outside.png");
   const plan = computeToolCallPermissions({
@@ -666,8 +666,8 @@ test("hasUserPermissionReplies detects permission reply payloads", () => {
   assert.equal(hasUserPermissionReplies({ alwaysAllows: ["network"] }), true);
 });
 
-function createTempDir(prefix: string): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+function createTempDir(prefix: string, parentDir = os.tmpdir()): string {
+  const dir = fs.mkdtempSync(path.join(parentDir, prefix));
   tempDirs.push(dir);
   return dir;
 }
