@@ -81,6 +81,10 @@ export {
   buildSlashCommands,
   filterSlashCommands,
   findExactSlashCommand,
+  // F2 修复：唯一前缀匹配（残缺命令如 "/revi" 自动补全）
+  findUniquePrefixSlashCommand,
+  // F1 修复：残缺命令首 token 归一化为完整命令 label
+  normalizeSlashCommandText,
   // fork 特有：格式化内置命令完整列表（/review、/quality 等帮助文本）
   formatBuiltinCommandList,
   formatSlashCommandDescription,

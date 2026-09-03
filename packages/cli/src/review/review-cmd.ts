@@ -346,6 +346,38 @@ export function extractReviewNaturalLanguageTask(text: string): string | undefin
 }
 
 /**
+ * 构建自然语言审查任务的结构化提示（F3 修复）
+ *
+ * 问题背景：
+ *   /review <自然语言任务> 经 extractReviewNaturalLanguageTask 提取任务描述后，
+ *   交给 LLM 主流程执行。原模板只声明"请作为代码审查助手执行以下审查任务"，
+ *   缺少执行方式约束，导致模型收到任务后回复"建议执行 /review ..."形成建议循环
+ *   ——模型不知道该消息本身就是 /review 转换而来的任务指令。
+ *
+ * 模板约束（反建议循环三要素）：
+ *   1. 明确执行者身份：本消息已由 /review 命令转换而来，模型就是执行者，
+ *      必须立即用工具开始执行（先 git 获取真实改动范围，再逐文件审查）
+ *   2. 禁止建议命令：严禁回复"建议执行 /review 或任何斜杠命令"
+ *   3. 证据纪律：所有数字与结论必须来自真实命令输出（与系统提示词
+ *      "报告类内容的工具验证优先约束"呼应）
+ *
+ * @param projectRoot 项目根目录（用于模型定位审查范围）
+ * @param nlTask 自然语言任务描述（extractReviewNaturalLanguageTask 的返回值）
+ * @returns 结构化提示文本（作为用户消息进入 LLM 主流程）
+ */
+export function buildReviewNaturalLanguagePrompt(projectRoot: string, nlTask: string): string {
+  return (
+    `请作为代码审查助手，基于项目目录 ${projectRoot} 执行以下审查任务：\n\n${nlTask}\n\n` +
+    `【执行要求】\n` +
+    `1. 本消息已由 /review 命令转换而来，你就是执行者：立即用 Bash/Read/Grep 等工具开始执行，` +
+    `先运行 git status / git diff 获取真实改动范围，再逐文件审查。\n` +
+    `2. 严禁回复"建议执行 /review 或任何斜杠命令"——你无法替用户输入命令，` +
+    `且无需命令也能完成审查。\n` +
+    `3. 报告中所有数字与结论必须来自真实命令输出，不得臆造。`
+  );
+}
+
+/**
  * 解析 /review 命令参数
  *
  * 与 parseQualityArgs 设计对齐：接受 tokens 数组，返回 ReviewCommandArgs。

@@ -31,6 +31,7 @@ import {
   ReviewArgsError,
   formatReviewHelp,
   extractReviewNaturalLanguageTask,
+  buildReviewNaturalLanguagePrompt,
   type ReviewHandlerContext,
   type ToolCommandRecord,
   type RunToolCommandOptions,
@@ -888,4 +889,31 @@ test("getMaxStderrChars 默认值与环境变量配置（L6）", () => {
       process.env.REVIEW_MAX_STDERR_CHARS = originalValue;
     }
   }
+});
+
+// ============================================================================
+// buildReviewNaturalLanguagePrompt 测试（F3 修复：NL 模板加固，反建议循环）
+// ============================================================================
+
+test("buildReviewNaturalLanguagePrompt 包含项目根目录与任务描述", () => {
+  const prompt = buildReviewNaturalLanguagePrompt("/tmp/project", "审查当前未提交的代码");
+  // 原模板的主体部分保持不变：项目根目录 + 自然语言任务原文
+  assert.ok(prompt.includes("基于项目目录 /tmp/project"), "应包含项目根目录");
+  assert.ok(prompt.includes("审查当前未提交的代码"), "应包含自然语言任务描述原文");
+});
+
+test("buildReviewNaturalLanguagePrompt 包含【执行要求】硬约束段", () => {
+  const prompt = buildReviewNaturalLanguagePrompt("/tmp/project", "审查代码质量");
+  // F3 新增的执行要求段落必须存在，且三要素齐全
+  assert.ok(prompt.includes("【执行要求】"), "应包含【执行要求】标记段");
+  assert.ok(prompt.includes("立即用 Bash/Read/Grep 等工具开始执行"), "要素1：立即用工具执行");
+  assert.ok(prompt.includes("先运行 git status / git diff"), "要素1：先获取真实改动范围");
+  assert.ok(prompt.includes('严禁回复"建议执行 /review 或任何斜杠命令"'), "要素2：禁止建议命令");
+  assert.ok(prompt.includes("不得臆造"), "要素3：证据纪律");
+});
+
+test("buildReviewNaturalLanguagePrompt 任务描述包含特殊字符时原样保留", () => {
+  const nlTask = "审查 src/**/*.ts 中的 SQL 注入风险（含 90% 覆盖率要求）";
+  const prompt = buildReviewNaturalLanguagePrompt("/tmp/project", nlTask);
+  assert.ok(prompt.includes(nlTask), "含反斜杠/星号/百分号的任务文本应原样嵌入，不做转义改写");
 });

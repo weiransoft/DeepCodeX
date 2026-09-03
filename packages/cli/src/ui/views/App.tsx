@@ -816,11 +816,14 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
         //   1. 工具验证模式：/review [typecheck|lint|format|full|help] [options]
         //   2. 自然语言审查请求：/review 当前项目全部代码，并对照 gold comments ...
         // 对于自然语言请求，应交回 LLM 主流程；否则调用 executeReviewCommand 执行工具检查。
-        const { extractReviewNaturalLanguageTask } = await import("../../review/review-cmd.js");
+        const { extractReviewNaturalLanguageTask, buildReviewNaturalLanguagePrompt } =
+          await import("../../review/review-cmd.js");
         const nlTask = extractReviewNaturalLanguageTask(submission.text);
         if (nlTask !== undefined) {
           // 将自然语言请求转换为结构化提示，继续走下方 LLM 主流程
-          submission.text = `请作为代码审查助手，基于项目目录 ${projectRoot} 执行以下审查任务：\n\n${nlTask}`;
+          // F3：模板内置"立即执行 + 禁止建议命令 + 证据纪律"硬约束，
+          // 防止模型收到任务后回复"建议执行 /review"形成建议循环
+          submission.text = buildReviewNaturalLanguagePrompt(projectRoot, nlTask);
         } else {
           // 工具验证模式：解析并调用 executeReviewCommand
           // 工具验证优先：所有数字必须有真实命令输出作为证据
@@ -2071,7 +2074,14 @@ async function handleReviewSlashCommand(text: string): Promise<string> {
   const tokens = body.split(/\s+/).filter(Boolean);
 
   if (tokens.length === 0 || tokens[0] !== "review") {
-    return `无效的 /review 命令: ${text}`;
+    // F5：区分"命令不完整"与"完全无效"两种报错——
+    // 残缺前缀（如 "/revi"）给出补全提示，避免误导用户以为命令不存在而反复重试
+    const firstToken = tokens[0] ?? "";
+    const isPrefix = firstToken.startsWith("rev");
+    if (isPrefix) {
+      return `命令不完整: ${text}\n请键入完整命令 /review（输入 / 后可在菜单中 Tab/Enter 补全）\n用法: /review <typecheck|lint|format|full|help>`;
+    }
+    return `无效的 /review 命令: ${text}\n用法: /review <typecheck|lint|format|full|help>`;
   }
 
   // 去除 "review" 前缀，剩余 tokens 传给 parseReviewArgs

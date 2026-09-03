@@ -368,6 +368,59 @@ export function filterSlashCommands(items: SlashCommandItem[], token: string): S
   return items.filter((item) => item.name.toLowerCase().includes(query));
 }
 
+/**
+ * 将用户输入的首个 slash token 归一化为完整命令 label（F1 修复）
+ *
+ * 问题背景：
+ *   用户输入残缺命令（如 "/revi"）后从斜杠菜单选中 "/review"，菜单选中路径
+ *   （handleSlashSelection 的透传分支）原样提交 buffer 文本 "/revi"，
+ *   而 command 字段已标为 "review"，App 层严格校验 tokens[0] !== "review"
+ *   导致误报 "无效的 /review 命令: /revi"。
+ *
+ * 归一化规则：
+ *   - 将 buffer 首 token（可能残缺，如 "/revi"）替换为菜单项完整 label（如 "/review"）
+ *   - 保留首 token 之后的参数文本（如 "/revi 未提交改动" → "/review 未提交改动"）
+ *   - 若 buffer 无参数，仅返回完整 label
+ *   - buffer 首 token 与 label 一致时结果不变（幂等）
+ *
+ * @param text 用户当前输入的完整文本（如 "/revi 未提交改动"）
+ * @param label 菜单项完整命令 label（如 "/review"）
+ * @returns 归一化后的提交文本（如 "/review 未提交改动"）
+ */
+export function normalizeSlashCommandText(text: string, label: string): string {
+  const trimmed = text.trim();
+  // 移除首 token（含可能残缺的命令名），保留其后参数
+  const rest = trimmed.replace(/^\/\S+/, "").trim();
+  return rest ? `${label} ${rest}` : label;
+}
+
+/**
+ * 查找唯一前缀匹配的斜杠命令（F2 修复）
+ *
+ * 问题背景：
+ *   submitCurrentBuffer 原先只做精确匹配（findExactSlashCommand），
+ *   用户手输残缺命令（如 "/revi"）且菜单未命中时，文本会按普通消息发给 LLM，
+ *   导致模型困惑或误入命令解析报错路径。
+ *
+ * 匹配规则（与斜杠菜单 filterSlashCommands 同款 includes 语义，保持行为一致）：
+ *   - token 必须以 "/" 开头
+ *   - 恰好 1 个匹配 → 返回该命令项（调用方可走 handleSlashSelection 完成归一化提交）
+ *   - 0 个或多个匹配 → 返回 null（调用方零匹配按普通文本提交，多匹配提示候选）
+ *   - 匹配集排除 skill 项，避免技能名与内置命令混淆（与 findExactSlashCommand 的
+ *     "内置命令优先" 语义对齐）
+ *
+ * @param items 全部斜杠命令项（含技能）
+ * @param token 待匹配的首 token（如 "/revi"）
+ * @returns 唯一匹配的命令项，无法唯一确定时返回 null
+ */
+export function findUniquePrefixSlashCommand(items: SlashCommandItem[], token: string): SlashCommandItem | null {
+  if (!token.startsWith("/")) {
+    return null;
+  }
+  const candidates = filterSlashCommands(items, token).filter((item) => item.kind !== "skill");
+  return candidates.length === 1 ? (candidates[0] ?? null) : null;
+}
+
 export function findExactSlashCommand(items: SlashCommandItem[], token: string): SlashCommandItem | null {
   if (!token.startsWith("/")) {
     return null;
