@@ -648,10 +648,12 @@ test("resolveSettings allows explicit thinkingEnabled to override model defaults
   assert.equal(resolved.thinkingEnabled, false);
 });
 
-test("resolveSettings defaults invalid reasoning effort to max", () => {
+// v1.2 变更（Qwen3.8 适配，R1）：原非法样本 "medium" 已成为合法五档之一，
+// 非法样本改为真非法值 "ultra"（对应设计文档 docs/qwen38-adaptation.md §5.3 T6）
+test("resolveSettings defaults invalid reasoning effort (ultra) to max", () => {
   const resolved = resolveSettings(
     {
-      reasoningEffort: "medium" as never,
+      reasoningEffort: "ultra" as never,
     },
     {
       model: "default-model",
@@ -661,6 +663,95 @@ test("resolveSettings defaults invalid reasoning effort to max", () => {
   );
 
   assert.equal(resolved.reasoningEffort, "max");
+});
+
+// v1.2 新增（Qwen3.8 适配，对应设计文档 §5.3 T1）：五档中的新档位 xhigh 可正常解析
+test("resolveSettings accepts xhigh reasoning effort", () => {
+  const resolved = resolveSettings(
+    {
+      reasoningEffort: "xhigh",
+    },
+    {
+      model: "default-model",
+      baseURL: "https://default.example.com",
+    },
+    TEST_PROCESS_ENV
+  );
+
+  assert.equal(resolved.reasoningEffort, "xhigh");
+});
+
+// v1.2 新增（Qwen3.8 适配，对应设计文档 §5.3 T2）：五档中的新档位 medium 可正常解析
+test("resolveSettings accepts medium reasoning effort", () => {
+  const resolved = resolveSettings(
+    {
+      reasoningEffort: "medium",
+    },
+    {
+      model: "default-model",
+      baseURL: "https://default.example.com",
+    },
+    TEST_PROCESS_ENV
+  );
+
+  assert.equal(resolved.reasoningEffort, "medium");
+});
+
+// v1.2 新增（Qwen3.8 适配，对应设计文档 §5.3 T3）：严格字面量、大小写敏感，
+// 大写 "XHIGH" 与带空格 " high" 均为非法值，回落默认 "max"
+test("resolveSettings rejects case/space variants of reasoning effort", () => {
+  for (const invalid of ["XHIGH", " high"] as const) {
+    const resolved = resolveSettings(
+      {
+        reasoningEffort: invalid as never,
+      },
+      {
+        model: "default-model",
+        baseURL: "https://default.example.com",
+      },
+      TEST_PROCESS_ENV
+    );
+
+    assert.equal(resolved.reasoningEffort, "max", `非法档位 ${invalid} 应回落默认 max`);
+  }
+});
+
+// v1.2 新增（Qwen3.8 适配，对应设计文档 §5.3 T4）：新档位经系统环境变量路径穿透解析
+// 注意：collectDeepcodeEnv 仅收集 DEEPCODE_ 前缀的进程环境变量（去前缀后映射为配置项）
+test("resolveSettings accepts xhigh reasoning effort from system env", () => {
+  const resolved = resolveSettings(
+    {},
+    {
+      model: "default-model",
+      baseURL: "https://default.example.com",
+    },
+    {
+      ...TEST_PROCESS_ENV,
+      DEEPCODE_REASONING_EFFORT: "xhigh",
+    }
+  );
+
+  assert.equal(resolved.reasoningEffort, "xhigh");
+});
+
+// v1.2 新增（Qwen3.8 适配，对应设计文档 §5.3 T5）：优先级回归——
+// 系统环境变量 DEEPCODE_REASONING_EFFORT 优先级高于用户配置 reasoningEffort
+test("resolveSettings keeps system env precedence for reasoning effort", () => {
+  const resolved = resolveSettings(
+    {
+      reasoningEffort: "high",
+    },
+    {
+      model: "default-model",
+      baseURL: "https://default.example.com",
+    },
+    {
+      ...TEST_PROCESS_ENV,
+      DEEPCODE_REASONING_EFFORT: "low",
+    }
+  );
+
+  assert.equal(resolved.reasoningEffort, "low");
 });
 
 // 上游 v0.3.1 新增用例：reasoning effort 支持 "low" 档位

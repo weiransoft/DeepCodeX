@@ -428,3 +428,83 @@ test("LL-011: reasoning_content fallback（content 为空但 reasoning_content �
   // 断言 3：tokensConsumed 透传
   assert.equal(result.tokensConsumed.total, 200);
 });
+
+// ============================================================================
+// LL-012（S5）: v1.2 Qwen3.8 适配 - team 路径 Qwen3.8 thinking 参数端到端验证
+//
+// 对应设计文档 docs/qwen38-adaptation.md §5.7（验收标准第 2 条 team 调用路径）：
+// buildThinkingRequestOptions 共三个调用点（session 主循环 / team-adapter /
+// skill matching），其中 LL-010/LL-010b 仅覆盖 DeepSeek；本用例补齐
+// Qwen3.8 经 team-adapter executeDispatch 的端到端路径——
+// 请求体应含 chat_template_kwargs {enable_thinking, preserve_thinking}
+// 与映射后的顶层 reasoning_effort，且不混入 DeepSeek 格式字段。
+// ============================================================================
+
+test("LL-012: Qwen3.8 thinking 参数传递（请求体含 preserve_thinking + 顶层 reasoning_effort）", async () => {
+  // 捕获 stub client 收到的请求体，验证 Qwen3.8 格式参数是否被正确传递
+  let capturedRequest: Record<string, unknown> | null = null;
+
+  const qwen38StubClient: OpenAIClientHandle = {
+    client: {
+      chat: {
+        completions: {
+          create: async (
+            req: Record<string, unknown>,
+            _opts?: { signal?: AbortSignal }
+          ): Promise<{
+            choices: Array<{ message?: { content?: string } }>;
+            usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+          }> => {
+            // 捕获请求体，用于后续断言
+            capturedRequest = req;
+            return {
+              choices: [{ message: { content: "qwen38-thinking-response" } }],
+              usage: { prompt_tokens: 60, completion_tokens: 110, total_tokens: 170 },
+            };
+          },
+        },
+      },
+    },
+    // 使用真实 Qwen3.8 模型名，确保 buildThinkingRequestOptions 走 3.8+ 分支
+    model: "qwen3.8-plus",
+    baseURL: "https://stub.local",
+    temperature: 0.3,
+    thinkingEnabled: true,
+    // 传递新档位 reasoningEffort，验证五档映射在 team 路径生效
+    reasoningEffort: "xhigh",
+  };
+
+  const task = buildTask({ title: "Qwen3.8 thinking 测试", description: "验证 Qwen3.8 thinking 参数传递" });
+  const result = await executeDispatch(task, { injectedClient: qwen38StubClient });
+
+  // 断言 1：调用成功
+  assert.equal(result.status, "succeeded", "Qwen3.8 thinking 模式调用应成功");
+  assert.equal(result.output, "qwen38-thinking-response");
+
+  // 断言 2：请求体包含 chat_template_kwargs（enable_thinking + preserve_thinking）
+  assert.ok(capturedRequest, "应该捕获到请求体");
+  const chatTemplateKwargs = (capturedRequest as { chat_template_kwargs?: Record<string, unknown> })
+    .chat_template_kwargs;
+  assert.deepStrictEqual(
+    chatTemplateKwargs,
+    { enable_thinking: true, preserve_thinking: true },
+    "chat_template_kwargs 应含 enable_thinking=true 与 preserve_thinking=true"
+  );
+
+  // 断言 3：请求体包含顶层 reasoning_effort（xhigh 直传，五档映射表）
+  assert.equal(
+    (capturedRequest as { reasoning_effort?: string }).reasoning_effort,
+    "xhigh",
+    "顶层 reasoning_effort 应为映射后的 xhigh"
+  );
+
+  // 断言 4：不混入 DeepSeek 格式字段
+  assert.ok(!("thinking" in capturedRequest!), "Qwen3.8 格式不应包含 DeepSeek 的 thinking 字段");
+  assert.ok(!("extra_body" in capturedRequest!), "Qwen3.8 格式不应包含 extra_body 字段");
+
+  // 断言 5：请求体仍包含基本字段（model / messages / temperature）
+  const req = capturedRequest as Record<string, unknown> | null;
+  assert.ok(req !== null, "capturedRequest 不应为 null");
+  assert.equal(req!.model, "qwen3.8-plus");
+  assert.ok(Array.isArray(req!.messages), "请求体应包含 messages 数组");
+});

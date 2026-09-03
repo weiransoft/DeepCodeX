@@ -32,7 +32,7 @@ The following are all the top-level fields supported in `settings.json`, along w
 | `model`            | string  | Model name. Takes precedence over `env.MODEL`                              |
 | `provider`         | string  | LLM provider declaration, either `"openai"` or `"anthropic"` (see [provider section](#provider--llm-provider)) |
 | `thinkingEnabled`  | boolean | Whether to enable thinking mode (enabled by default for DeepSeek V4 series)|
-| `reasoningEffort`  | string  | Reasoning intensity: `"low"`, `"high"`, or `"max"` (default `"max"`)    |
+| `reasoningEffort`  | string  | Reasoning intensity: `"low"`, `"medium"`, `"high"`, `"xhigh"`, or `"max"` (default `"max"`) |
 | `multimodal`       | string  | Multimodal (image) capability override: `"default"`, `"on"`, or `"off"` (default `"default"`) |
 | `filesApiEnabled`  | boolean | Send images through the DeepSeek Files API (default `false`)               |
 | `filesApiTimeoutMs` | number | Per-image Files API timeout; defaults to `60000`, maximum `600000` ms       |
@@ -157,13 +157,26 @@ Qwen3 thinking parameter format:
 
 | Model Series | Thinking Enable Parameter Format | Reasoning Return Field |
 |--------------|----------------------------------|----------------------|
-| Qwen3 | `chat_template_kwargs: { enable_thinking: true }` (top-level request body field) | `reasoning_content` |
+| Qwen3 (<3.8) | `chat_template_kwargs: { enable_thinking: true }` (top-level request body field) | `reasoning_content` |
+| Qwen3.8+ | `chat_template_kwargs: { enable_thinking: true, preserve_thinking: true }` + top-level `reasoning_effort` (when thinking is on) | `reasoning_content` or `reasoning` |
 | DeepSeek V4 | `thinking: { type: "enabled" }` + `extra_body: { reasoning_effort }` | `reasoning_content` |
 | Anthropic Claude | `thinking: { type: "enabled", budget_tokens: N }` | `thinking` block |
 
 > Qwen3's `chat_template_kwargs` is a vLLM standard parameter that must be passed as a top-level request body field (not wrapped in `extra_body`).
 
 > Qwen3 model name identification: case-insensitive, starts with `qwen3` or `qwen/qwen3`. Covers Qwen3-8B / Qwen3-32B / Qwen3-30B-A3B / Qwen/Qwen3.6-27B / qwen3.6-plus / qwen3.7-max, etc.
+
+**Qwen3.8+ specific parameters** (v1.2 adaptation, e.g. `Qwen/Qwen3.8-27B-FP8` / `qwen3.8-plus` / `qwen3.9-70b`):
+
+| Parameter | Location | Description |
+|-----------|----------|-------------|
+| `enable_thinking` | `chat_template_kwargs` | Thinking mode switch (sent whether thinking is on or off) |
+| `preserve_thinking` | `chat_template_kwargs` | Keep thinking blocks in history messages; the CLI replays historical `reasoning_content` in thinking mode, matching this parameter's semantics, so it is explicitly sent as `true` when thinking is on (not sent when thinking is off, server default applies) |
+| `reasoning_effort` | Top-level request body | Official Qwen3.8 reasoning effort, sent only when thinking is on; values are `xhigh` (server default) / `medium` / `low`, mapped from the CLI's five levels (see the `reasoningEffort` mapping table below) |
+
+> When debugging "model forgets earlier thinking" issues, inspect both sides: the CLI's replay of historical `reasoning_content` is unconditional, while whether the thinking block actually enters the prompt also depends on the server-side `preserve_thinking` behavior.
+
+> Streaming thinking-delta fields vary by deployment: mainstream vLLM uses `delta.reasoning_content`, some deployments use `delta.reasoning`; Deep Code supports both.
 
 #### `thinkingEnabled` — Thinking Mode
 
@@ -179,11 +192,25 @@ Whether to enable thinking mode. Set to `true` to enable, `false` to disable.
 
 When thinking mode is enabled, controls the depth of the model’s reasoning:
 
-| Value  | Description                                               |
-| ------ | --------------------------------------------------------- |
-| `max`  | Maximum reasoning depth (default)                         |
-| `high` | Higher reasoning depth with relatively lower token usage  |
-| `low`  | Lower reasoning depth with lower token usage              |
+| Value   | Description                                                |
+| ------- | ---------------------------------------------------------- |
+| `max`   | Maximum reasoning depth (default)                          |
+| `xhigh` | Very high reasoning depth (Qwen3.8 server-side default)    |
+| `high`  | Higher reasoning depth with relatively lower token usage   |
+| `medium`| Medium reasoning depth                                     |
+| `low`   | Lower reasoning depth with lower token usage               |
+
+**Qwen3.8+ top-level `reasoning_effort` mapping** (the model officially defines only `xhigh` / `medium` / `low`):
+
+| CLI level | Qwen3.8 top-level value | Note |
+| --------- | ----------------------- | ---- |
+| `low`     | `low`                   | pass-through |
+| `medium`  | `medium`                | pass-through |
+| `high`    | `medium`                | Qwen3.8 has no high level; clamped down conservatively to control token cost |
+| `xhigh`   | `xhigh`                 | pass-through (Qwen3.8 server-side default) |
+| `max`     | `xhigh`                 | clamped to the official top level |
+
+DeepSeek V4's `reasoning_effort` is sent via `extra_body`, with level semantics defined by the DeepSeek server.
 
 #### `multimodal` — Multimodal (Image) Capability
 

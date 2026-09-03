@@ -32,7 +32,7 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 | `model`              | string    | 模型名称。优先级高于 `env.MODEL`                                    |
 | `provider`           | string    | LLM 提供商声明，可选 `"openai"` 或 `"anthropic"`（详见 [provider 章节](#provider--llm-提供商)） |
 | `thinkingEnabled`    | boolean   | 是否启用思考模式（DeepSeek V4 系列默认启用）                         |
-| `reasoningEffort`    | string    | 推理强度，可选 `"low"`、`"high"` 或 `"max"`（默认 `"max"`）        |
+| `reasoningEffort`    | string    | 推理强度，可选 `"low"`、`"medium"`、`"high"`、`"xhigh"` 或 `"max"`（默认 `"max"`） |
 | `multimodal`         | string    | 多模态（图片）能力开关，可选 `"default"`、`"on"` 或 `"off"`（默认 `"default"`） |
 | `filesApiEnabled`    | boolean   | 是否通过 DeepSeek Files API 发送图片（默认 `false`）                       |
 | `filesApiTimeoutMs`  | number    | 单张图片 Files API 处理超时，默认 `60000`，最大 `600000` 毫秒              |
@@ -157,13 +157,26 @@ Qwen3 thinking 参数格式说明：
 
 | 模型系列 | 启用 thinking 参数格式 | reasoning 返回字段 |
 |----------|----------------------|-------------------|
-| Qwen3 | `chat_template_kwargs: { enable_thinking: true }`（请求体顶层字段） | `reasoning_content` |
+| Qwen3（<3.8） | `chat_template_kwargs: { enable_thinking: true }`（请求体顶层字段） | `reasoning_content` |
+| Qwen3.8+ | `chat_template_kwargs: { enable_thinking: true, preserve_thinking: true }` + 顶层 `reasoning_effort`（thinking 开启时） | `reasoning_content` 或 `reasoning` |
 | DeepSeek V4 | `thinking: { type: "enabled" }` + `extra_body: { reasoning_effort }` | `reasoning_content` |
 | Anthropic Claude | `thinking: { type: "enabled", budget_tokens: N }` | `thinking` 块 |
 
 > Qwen3 的 `chat_template_kwargs` 是 vLLM 标准参数，必须作为请求体顶层字段传递（不包装在 `extra_body` 中）。
 
 > Qwen3 模型名识别规则：大小写不敏感，以 `qwen3` 或 `qwen/qwen3` 开头。覆盖 Qwen3-8B / Qwen3-32B / Qwen3-30B-A3B / Qwen/Qwen3.6-27B / qwen3.6-plus / qwen3.7-max 等。
+
+**Qwen3.8+ 专属参数**（v1.2 适配，如 `Qwen/Qwen3.8-27B-FP8` / `qwen3.8-plus` / `qwen3.9-70b`）：
+
+| 参数 | 位置 | 说明 |
+|------|------|------|
+| `enable_thinking` | `chat_template_kwargs` | thinking 模式开关（thinking 开启/关闭均下发） |
+| `preserve_thinking` | `chat_template_kwargs` | 保留历史消息思考块；CLI 在 thinking 模式下回放历史 `reasoning_content`，与此参数语义一致，故 thinking 开启时显式下发 `true`（thinking 关闭时不下发，沿用服务端默认） |
+| `reasoning_effort` | 请求体顶层 | Qwen3.8 官方推理强度，仅 thinking 开启时下发，取值 `xhigh`（服务端默认）/ `medium` / `low`，由 CLI 五档映射而来（见下文 `reasoningEffort` 映射表） |
+
+> 排查「模型忘记上文思考」类问题时需同时看两侧：CLI 侧历史 `reasoning_content` 的回放是无条件的，而历史思考块是否真正进入 prompt 还取决于服务端 `preserve_thinking` 的生效情况。
+
+> 流式输出的思考增量字段因部署而异：主流 vLLM 使用 `delta.reasoning_content`，部分部署使用 `delta.reasoning`，Deep Code 两种字段均兼容。
 
 #### `thinkingEnabled` — 思考模式
 
@@ -179,11 +192,25 @@ Qwen3 thinking 参数格式说明：
 
 当思考模式启用时，控制模型思考的深度：
 
-| 值     | 说明                               |
-| ------ | --------------------------------- |
-| `max`  | 最大推理深度（默认值）              |
-| `high` | 较高推理深度，token消耗相对较小      |
-| `low`  | 较低推理深度，token消耗更少          |
+| 值      | 说明                               |
+| ------- | --------------------------------- |
+| `max`   | 最大推理深度（默认值）              |
+| `xhigh` | 极高推理深度（Qwen3.8 服务端默认档） |
+| `high`  | 较高推理深度，token消耗相对较小      |
+| `medium`| 中等推理深度                        |
+| `low`   | 较低推理深度，token消耗更少          |
+
+**Qwen3.8+ 顶层 `reasoning_effort` 映射**（模型官方仅定义 `xhigh` / `medium` / `low` 三档）：
+
+| CLI 档位 | Qwen3.8 顶层值 | 说明 |
+| -------- | -------------- | ---- |
+| `low`    | `low`          | 直传 |
+| `medium` | `medium`       | 直传 |
+| `high`   | `medium`       | Qwen3.8 无 high 档，保守向下钳到次低档以控制 token 开销 |
+| `xhigh`  | `xhigh`        | 直传（Qwen3.8 服务端默认档） |
+| `max`    | `xhigh`        | 钳制到官方最高档 |
+
+DeepSeek V4 的 `reasoning_effort` 经 `extra_body` 下发，档位语义由 DeepSeek 服务端定义。
 
 #### `multimodal` — 多模态（图片）能力
 
