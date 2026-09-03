@@ -102,5 +102,7 @@ export {
   type FileMentionToken,
 } from "./core/file-mentions";
 export { findExpandedThinkingId, isCollapsedThinking } from "./core/thinking-state";
+// 建议循环客户端兜底（2026-09-03）：回合收尾"建议执行 /xxx"命令提取与可自动执行白名单
+export { AUTO_EXECUTABLE_COMMAND_KINDS, extractSuggestedCommandText } from "./core/suggestion-fallback";
 // 上游 v0.3.1 新增 buildPluginRateLimitHintText：插件限流提示文本
 export { buildExitSummaryText, buildPluginRateLimitHintText, buildResumeHintText } from "./exit-summary";

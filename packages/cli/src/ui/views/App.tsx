@@ -47,6 +47,8 @@ import { isCollapsedThinking } from "../core/thinking-state";
 import { ANSI_CLEAR_SCREEN } from "../constants";
 // ADR-DI-001 动态注入与后台子 Agent 命令辅助函数（fork 特有，保留）
 import { extractCommandArgument, isResumeTaskCommand, BUILTIN_SLASH_COMMANDS } from "../core/slash-commands";
+// 建议循环客户端兜底（2026-09-03）：从回合收尾文本提取"建议执行 /xxx"命令 + 可自动执行白名单
+import { AUTO_EXECUTABLE_COMMAND_KINDS, extractSuggestedCommandText } from "../core/suggestion-fallback";
 import type {
   LlmStreamProgress,
   MessageMeta,
@@ -344,6 +346,9 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
   const [queuedCount, setQueuedCount] = useState(0);
   const isProcessingRef = useRef(false);
   const handlePromptRef = useRef<(submission: PromptSubmission) => Promise<void>>(async () => {});
+  // 建议循环客户端兜底（2026-09-03）：各会话已自动执行过的命令 kind 记录（sessionId → Set<kind>），
+  // 同一 kind 每个会话只自动执行一次，防止"模型反复建议 → 反复注入"的无限循环
+  const autoExecutedCommandsRef = useRef<Map<string, Set<string>>>(new Map());
 
   rawModeRef.current = mode;
   messagesRef.current = messages;
@@ -1052,8 +1057,16 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
       if (!activeProcesses || activeProcesses.size === 0) {
         processStdoutRef.current.clear();
       }
+      // 建议循环客户端兜底（2026-09-03）：本次调用的 LLM 主流程状态机。
+      // "not-run" = 走了某个 slash 分支提前 return（未进入 LLM）；
+      // "completed" = LLM 回合正常结束；"error" = LLM 回合抛错。
+      // 兜底注入必须基于"本次调用真的跑完了 LLM 回合"，否则会误用上一回合的残留 assistantReply。
+      let llmTurnState: "not-run" | "completed" | "error" = "not-run";
+      // 本回合是否产生了待确认的计划（PlanImplementationPrompt 待用户选择），有待确认计划时不做自动注入
+      let hasPendingPlan = false;
       try {
         await sessionManager.handleUserPrompt(prompt);
+        llmTurnState = "completed";
         if (permissionReply) {
           setPendingPermissionReply(null);
         }
@@ -1065,7 +1078,9 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
             ? extractProposedPlan(completedSession.assistantReply)
             : null;
         setPendingPlanImplementation(proposedPlan);
+        hasPendingPlan = proposedPlan !== null;
       } catch (error) {
+        llmTurnState = "error";
         const message = error instanceof Error ? error.message : String(error);
         setErrorLine(message);
       } finally {
@@ -1082,6 +1097,32 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
           await handlePromptRef.current(next);
         } else {
           isProcessingRef.current = false;
+          // 建议循环客户端兜底（2026-09-03）：仅当本次调用真实跑完 LLM 回合且无异常、
+          // 回合以纯文本结束（无工具调用，status=completed）、无待确认计划、无排队用户消息时，
+          // 才扫描回复尾部的"建议执行 /xxx"句式并自动注入执行（复用 parseSlashCommandKind 校验）。
+          if (llmTurnState === "completed" && !hasPendingPlan && finalActiveSessionId) {
+            const finalSession = sessionManager.getSession(finalActiveSessionId);
+            const suggestedCommand =
+              finalSession?.status === "completed" && finalSession.assistantReply
+                ? extractSuggestedCommandText(finalSession.assistantReply)
+                : null;
+            const suggestedKind = suggestedCommand ? parseSlashCommandKind(suggestedCommand) : undefined;
+            const executedKinds = autoExecutedCommandsRef.current.get(finalActiveSessionId) ?? new Set<string>();
+            if (
+              suggestedCommand &&
+              suggestedKind &&
+              AUTO_EXECUTABLE_COMMAND_KINDS.has(suggestedKind) &&
+              !executedKinds.has(suggestedKind)
+            ) {
+              // 先标记再执行：自动注入回合的 finally 会再次走到本兜底逻辑，
+              // 届时标记已就位，即使模型仍回复"建议执行 /xxx"也会被一次性守卫拦截，确保防循环
+              executedKinds.add(suggestedKind);
+              autoExecutedCommandsRef.current.set(finalActiveSessionId, executedKinds);
+              // 在状态栏显示自动执行提示，让用户感知到命令注入（与 suggestedCommand 路径一致）
+              setStatusLine(`▶ 自动执行：${suggestedCommand}`);
+              await handlePromptRef.current({ text: suggestedCommand, imageUrls: [], command: suggestedKind });
+            }
+          }
         }
       }
     },
@@ -1098,6 +1139,8 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
       resetStaticView,
       planMode,
       projectRoot,
+      // 建议循环客户端兜底：finally 块自动注入前显示状态栏提示
+      setStatusLine,
     ]
   );
 
