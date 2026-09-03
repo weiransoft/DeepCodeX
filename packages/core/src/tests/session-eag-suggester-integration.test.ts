@@ -369,3 +369,289 @@ test("suggester 异常时 replySession 降级为 LLM 主对话", async () => {
   const session = manager.getSession(sessionId);
   assert.equal(session?.status, "completed", "异常降级后会话应为 completed 状态");
 });
+
+// ============================================================================
+// F8（2026-09-04）：建议层门禁豁免——反建议循环
+// 铁证：建议文本只走 UI 不持久化（jsonl 无建议消息）、建议器调用独立计数（total_reqs 停在 5）、
+// entry 在答案写入后仅 4ms 置 completed（建议器路径特征）——"建议执行 /xxx"不是主模型发的，
+// 而是 EAG 建议器拦截了不该拦截的输入。F4/F6/F7 修复全部打偏（约束错了对象 / 检查错了字段）。
+// 本组测试锁定三类豁免：bypass 标记 / AskUserQuestion 答案 / 权限回复。
+// ============================================================================
+
+/** 建议器拦截时的固定建议（suggest_command，模拟"建议执行 /team dispatch"死文字） */
+function createInterceptingSuggestion(): EagDynamicSuggestion {
+  return {
+    type: "suggest_command",
+    commandCategory: "team" as any,
+    commandId: "team-dispatch",
+    commandHint: "/team dispatch",
+    messageToUser: "建议执行 /team dispatch 分派任务",
+    reasoning: "拦截测试",
+  };
+}
+
+/**
+ * 构造带调用计数的 suggester stub
+ *
+ * 按调用次序返回预设建议序列（超出序列后重复最后一项），
+ * suggestCalls.value 用于断言建议器是否被（错误地）调用。
+ */
+function createCountingSuggester(suggestions: EagDynamicSuggestion[]): {
+  suggester: EagDynamicSuggester;
+  suggestCalls: { value: number };
+} {
+  const suggestCalls = { value: 0 };
+  const suggester = {
+    isEnabled: () => true,
+    suggest: async () => {
+      const suggestion = suggestions[Math.min(suggestCalls.value, suggestions.length - 1)];
+      suggestCalls.value++;
+      return suggestion;
+    },
+  } as unknown as EagDynamicSuggester;
+  return { suggester, suggestCalls };
+}
+
+/**
+ * 构造按响应队列工作的 LLM client 桩（支持 tool_calls / 文本混合响应）
+ *
+ * 技能匹配请求返回空响应避免干扰；其余请求按顺序出队。
+ */
+function isSkillMatchingRequest(request: any): boolean {
+  return request?.response_format?.type === "json_object";
+}
+
+function createQueuedClient(responses: unknown[]): { client: unknown; callCount: { value: number } } {
+  const queue = [...responses];
+  const callCount = { value: 0 };
+  const client = {
+    chat: {
+      completions: {
+        create: async (request: Record<string, unknown>) => {
+          callCount.value++;
+          if (isSkillMatchingRequest(request)) {
+            return {
+              choices: [{ message: { content: "" } }],
+              usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+            };
+          }
+          const response = queue.shift();
+          assert.ok(response, "expected a queued chat response");
+          return response;
+        },
+      },
+    },
+  };
+  return { client, callCount };
+}
+
+test("F8: bypassEagSuggestion 标记使输入跳过建议器直达主对话", async () => {
+  // 场景：/review NL 任务转换后的结构化提示带 bypass 标记重入。
+  // 建议器始终返回 suggest_command（模拟拦截一切的结构化文本）：
+  // 不带标记的输入被拦截（对照组，证明 stub 有效），带标记的输入必须直达主对话。
+  const workspace = createTempDir("deepcode-eag-bypass-workspace-");
+  const home = createTempDir("deepcode-eag-bypass-home-");
+  setHomeDir(home);
+
+  globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
+
+  const { client, callCount } = createCallCountingClient("已按结构化任务开始审查代码。");
+  const { suggester, suggestCalls } = createCountingSuggester([createInterceptingSuggestion()]);
+
+  const manager = new SessionManager({
+    projectRoot: workspace,
+    createOpenAIClient: () => ({
+      client: client as any,
+      model: "test-model",
+      baseURL: "https://api.deepseek.com",
+      thinkingEnabled: false,
+    }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+    eagDynamicSuggester: suggester,
+  });
+
+  const sessionId = await manager.createSession({ text: "" });
+  const createCallCount = callCount.value;
+
+  // 对照组：不带 bypass 标记 → 被建议器拦截，主对话不调用
+  await manager.handleUserPrompt({ text: "/review 审查全部代码（未带标记的对照输入）" });
+  assert.equal(callCount.value, createCallCount, "不带 bypass 标记时输入应被建议器拦截");
+  assert.equal(suggestCalls.value, 1, "对照组建议器应被调用 1 次");
+
+  // 实验组：带 bypassEagSuggestion 标记 → 直达主对话
+  await manager.handleUserPrompt({ text: "结构化审查任务提示（带 bypass 标记）", bypassEagSuggestion: true });
+  assert.ok(
+    callCount.value > createCallCount,
+    `带 bypass 标记时 LLM 主对话应被调用（createCallCount=${createCallCount}, total=${callCount.value}）`
+  );
+  assert.equal(suggestCalls.value, 1, "带 bypass 标记时建议器不应被再次调用");
+  assert.equal(manager.getSession(sessionId)?.status, "completed", "bypass 输入完成后会话应为 completed");
+});
+
+test("F8: AskUserQuestion 答案豁免建议器直达主对话", async () => {
+  // 场景：主模型（第一轮 LLM）调用 AskUserQuestion 向用户提问 → turn 以 waiting_for_user 结束
+  // → 用户的答案必须交还主模型继续任务，严禁被建议器拦截为"建议执行 /xxx"。
+  // suggester 第一轮放行（direct_chat），之后若被调用则拦截——F8 生效时答案不应触发第二次调用。
+  const workspace = createTempDir("deepcode-eag-askanswer-workspace-");
+  const home = createTempDir("deepcode-eag-askanswer-home-");
+  setHomeDir(home);
+
+  globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
+
+  const { client, callCount } = createQueuedClient([
+    // createSession({text:""}) 也会发起一次主对话 LLM 调用（消耗一个响应）
+    { choices: [{ message: { content: "" } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+    // 第一轮：主模型发起 AskUserQuestion 工具调用
+    {
+      choices: [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                id: "call-ask",
+                type: "function",
+                function: {
+                  name: "AskUserQuestion",
+                  arguments: JSON.stringify({
+                    questions: [{ question: "选择哪种方案？", options: [{ label: "方案A" }, { label: "方案B" }] }],
+                  }),
+                },
+              },
+            ],
+          },
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    },
+    // 第二轮：答案到达后主模型继续任务
+    {
+      choices: [{ message: { content: "收到答案，按方案A继续执行。" } }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    },
+  ]);
+  const { suggester, suggestCalls } = createCountingSuggester([
+    { type: "direct_chat", reasoning: "首轮放行" },
+    createInterceptingSuggestion(),
+  ]);
+
+  const manager = new SessionManager({
+    projectRoot: workspace,
+    createOpenAIClient: () => ({
+      client: client as any,
+      model: "test-model",
+      baseURL: "https://api.deepseek.com",
+      thinkingEnabled: false,
+    }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+    eagDynamicSuggester: suggester,
+  });
+
+  const sessionId = await manager.createSession({ text: "" });
+  const createCallCount = callCount.value;
+
+  // 第一轮：用户输入触发主模型提问
+  await manager.handleUserPrompt({ text: "帮我实现功能，先问我选哪种方案" });
+  assert.equal(suggestCalls.value, 1, "第一轮输入建议器应放行（direct_chat）");
+  assert.equal(manager.getSession(sessionId)?.status, "waiting_for_user", "主模型提问后 turn 应挂起等待答案");
+
+  // 第二轮：用户答案——F8 豁免生效，直达主对话
+  await manager.handleUserPrompt({ text: "方案A" });
+  assert.equal(suggestCalls.value, 1, "答案严禁触发建议器（应保持 1 次调用）");
+  assert.ok(
+    callCount.value > createCallCount + 1,
+    `答案必须交还主模型继续任务（createCallCount=${createCallCount}, total=${callCount.value}）`
+  );
+  assert.equal(manager.getSession(sessionId)?.status, "completed", "答案处理完成后会话应为 completed");
+});
+
+test("F8: 权限回复豁免建议器直达主对话", async () => {
+  // 场景：主模型发起需要授权的工具调用（bash + read-in-cwd → ask_permission 挂起）→
+  // 用户批准回复（带 permissions）必须直达主对话继续工具执行，严禁被建议器拦截。
+  // L2406 的 hasTrailingPendingToolCalls 直达路径最终也会落到建议层门禁，必须同样放行。
+  const workspace = createTempDir("deepcode-eag-permreply-workspace-");
+  const home = createTempDir("deepcode-eag-permreply-home-");
+  setHomeDir(home);
+
+  globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
+
+  const { client, callCount } = createQueuedClient([
+    // createSession({text:""}) 也会发起一次主对话 LLM 调用（消耗一个响应）
+    { choices: [{ message: { content: "" } }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+    // 第一轮：主模型发起 bash 工具调用（read-in-cwd 需要授权）
+    {
+      choices: [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                id: "call-bash",
+                type: "function",
+                function: {
+                  name: "bash",
+                  arguments: JSON.stringify({
+                    command: "echo perm-reply-test",
+                    description: "Echo test",
+                    sideEffects: ["read-in-cwd"],
+                  }),
+                },
+              },
+            ],
+          },
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    },
+    // 第二轮：授权后主模型继续任务
+    {
+      choices: [{ message: { content: "工具已执行，任务继续。" } }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    },
+  ]);
+  const { suggester, suggestCalls } = createCountingSuggester([
+    { type: "direct_chat", reasoning: "首轮放行" },
+    createInterceptingSuggestion(),
+  ]);
+
+  const manager = new SessionManager({
+    projectRoot: workspace,
+    createOpenAIClient: () => ({
+      client: client as any,
+      model: "test-model",
+      baseURL: "https://api.deepseek.com",
+      thinkingEnabled: false,
+    }),
+    getResolvedSettings: () => ({
+      model: "test-model",
+      permissions: { allow: [], deny: [], ask: ["read-in-cwd"], defaultMode: "allowAll" as const },
+    }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+    eagDynamicSuggester: suggester,
+  });
+
+  const sessionId = await manager.createSession({ text: "" });
+  const createCallCount = callCount.value;
+
+  // 第一轮：主模型发起工具调用 → ask_permission 挂起
+  await manager.handleUserPrompt({ text: "请运行 echo 命令" });
+  assert.equal(suggestCalls.value, 1, "第一轮输入建议器应放行（direct_chat）");
+  assert.equal(manager.getSession(sessionId)?.status, "ask_permission", "需要授权的工具调用应挂起等待批准");
+
+  // 第二轮：权限批准回复（带 permissions 字段）——F8 豁免生效，直达主对话
+  await manager.replySession(sessionId, {
+    text: "批准执行",
+    permissions: [{ toolCallId: "call-bash", permission: "allow" as const }],
+  });
+  assert.equal(suggestCalls.value, 1, "权限回复严禁触发建议器（应保持 1 次调用）");
+  assert.ok(
+    callCount.value > createCallCount + 1,
+    `权限回复必须交还主模型继续任务（createCallCount=${createCallCount}, total=${callCount.value}）`
+  );
+  assert.equal(manager.getSession(sessionId)?.status, "completed", "权限回复处理完成后会话应为 completed");
+});

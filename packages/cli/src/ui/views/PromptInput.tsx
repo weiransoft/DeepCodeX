@@ -106,6 +106,14 @@ export type PromptSubmission = {
     | "memory"
     // ===== DeepCodeX 帮助命令（FIX-06） =====
     | "help";
+  /**
+   * F8（2026-09-04）：旁路 EAG 动态建议层标记（可选）
+   *
+   * 用于"已确定交主模型处理"的输入（如 /review 自然语言任务转换后的结构化提示）：
+   * CLI 层透传给核心层 UserPromptContent.bypassEagSuggestion，使该输入跳过建议器
+   * 直达主对话，防止结构化任务文本被建议器拦截为"建议执行 /xxx"形成建议循环。
+   */
+  bypassDynamicSuggestion?: boolean;
 };
 
 export type PromptDraft = {

@@ -829,6 +829,12 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
           // F3：模板内置"立即执行 + 禁止建议命令 + 证据纪律"硬约束，
           // 防止模型收到任务后回复"建议执行 /review"形成建议循环
           submission.text = buildReviewNaturalLanguagePrompt(projectRoot, nlTask);
+          // F8（2026-09-04）：转换后的结构化提示带 bypass 标记重入主对话。
+          // 根因铁证：建议文本只走 UI 不持久化、建议器调用独立计数——说明"建议执行 /xxx"
+          // 不是主模型发的（它看不到系统提示词纪律），而是 EAG 建议器把结构化任务文本
+          // 当作 goal 拦截了。设置 bypass 标记后该输入直达主对话，堵住"mes 会话
+          // /review xxx 被再建议"的循环
+          submission.bypassDynamicSuggestion = true;
         } else {
           // 工具验证模式：解析并调用 executeReviewCommand
           // 工具验证优先：所有数字必须有真实命令输出作为证据
@@ -1027,6 +1033,8 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
         permissions: submission.permissions,
         alwaysAllows: submission.alwaysAllows,
         planMode: submission.planMode ?? planMode,
+        // F8（2026-09-04）：透传旁路建议层标记（/review NL 任务等已确定交主模型的输入）
+        bypassEagSuggestion: submission.bypassDynamicSuggestion,
       };
       const activeSessionId = sessionManager.getActiveSessionId();
       const permissionReply =

@@ -455,6 +455,18 @@ export type UserPromptContent = {
    * 既有命令路径（/continue、/plan 等）不读取此字段，向后兼容。
    */
   messageParams?: Record<string, unknown> | null;
+  /**
+   * F8（2026-09-04）：旁路 EAG 动态建议层标记（可选）
+   *
+   * 背景：EAG 建议器是独立 LLM 调用（看不到主模型系统提示词），当 CLI 层已把
+   * 输入确定为"必须交主模型处理"（如 /review 自然语言任务转换后的结构化提示，
+   * 模板已内置执行约束）时，若仍进入建议器，结构化长文本会被拦截为
+   * "建议执行 /xxx"，形成建议循环。CLI 层设置此标记后该输入直达主对话。
+   *
+   * 注意：AskUserQuestion 答案与权限回复的豁免在门禁处独立判定
+   * （分别依据待答标记与 hasUserPermissionReplies），不经由此字段。
+   */
+  bypassEagSuggestion?: boolean;
 };
 
 // 上游 v0.3.1：多模态持久化图片（粘贴/拖拽图片在会话存储中的二进制表示）
@@ -939,6 +951,11 @@ export class SessionManager {
   // - 当 LLM 返回 ask_clarification 时写入
   // - 用户下一轮回复命中时解析答案并回注 clarification，随后清除
   private readonly pendingEagClarifications = new Map<string, EagClarificationPending>();
+  // F8（2026-09-04）：主模型提问待答标记（内存级，key = sessionId）
+  // - 当 turn 因工具 awaitUserResponse=true 结束（AskUserQuestion 提问 / ask_user 审批请求）时写入：
+  //   此时主模型在等用户回答，用户的下一条输入是答案，必须直达主对话
+  // - 激活主对话前由 consumeAwaitingUserToolAnswer 消费（一次性）
+  private readonly sessionsAwaitingUserToolAnswer = new Set<string>();
   // 上游 v0.3.1：DeepSeek Files API 文件存储（图片上传/file_id 引用/配额清理）
   private readonly deepSeekFiles = new DeepSeekFileStore();
 
@@ -2495,12 +2512,27 @@ ${agentInstructions}
     // 修复：根据返回值决定是否 return。false 时继续执行下方主对话逻辑（追加用户消息 + activateSession）。
     // 注意：handleEagDynamicSuggestion 在 direct_chat/异常分支不追加用户消息，
     // 由下方 replySession 主流程统一追加，避免重复。
+    //
+    // F8 豁免（2026-09-04，反建议循环）——以下三类输入必须直达主对话，严禁进入建议器：
+    // 1. AskUserQuestion 答案：问题是主模型发的（awaitUserResponse 结束的 turn），
+    //    答案必须交还主模型继续任务；建议器是独立 LLM 调用，看不到主模型上下文，
+    //    拦截答案只会产出与任务无关的"建议执行 /xxx"死文字。
+    // 2. 权限回复：pendingPermissionReply 场景下用户已对主模型的工具调用做出授权决定，
+    //    属于主对话进行中的会话内信号（L2406 的 hasTrailingPendingToolCalls 直达路径
+    //    也会落到本门禁，必须同样放行）。
+    // 3. bypassEagSuggestion 标记：CLI 层已确定交主模型的输入（/review NL 任务重入等）。
+    // 说明：待答标记在此处消费（consume 语义），即使 suggester 未注入也不会残留。
+    const awaitingUserToolAnswer = this.consumeAwaitingUserToolAnswer(sessionId);
     if (
       this.eagDynamicSuggester &&
       this.eagDynamicSuggester.isEnabled() &&
       typeof userPrompt.text === "string" &&
       userPrompt.text.trim().length > 0 &&
-      !this.isContinuePrompt(userPrompt)
+      !this.isContinuePrompt(userPrompt) &&
+      // F8 豁免三连（见上方注释）：AskUserQuestion 答案 / 权限回复 / bypass 标记
+      !awaitingUserToolAnswer &&
+      !hasUserPermissionReplies(userPrompt) &&
+      !userPrompt.bypassEagSuggestion
     ) {
       const handledBySuggester = await this.handleEagDynamicSuggestion(sessionId, userPrompt, controller);
       // handledBySuggester === true：建议层已处理（ask_clarification / suggest_*），结束当前 turn
@@ -2570,6 +2602,37 @@ ${agentInstructions}
       (!userPrompt.imageUrls || userPrompt.imageUrls.length === 0) &&
       (!userPrompt.skills || userPrompt.skills.length === 0)
     );
+  }
+
+  /**
+   * F8（2026-09-04）：标记会话处于"主模型提问待答"状态
+   *
+   * 触发时机：turn 因工具 awaitUserResponse=true 结束（AskUserQuestion 向用户提问 /
+   * ask_user 审批请求）。此时用户的下一条输入是"答案"，必须直达主对话，
+   * 严禁被 EAG 建议器拦截（建议器是独立 LLM 调用，看不到主模型上下文）。
+   *
+   * @param sessionId 会话 ID
+   */
+  private markAwaitingUserToolAnswer(sessionId: string): void {
+    this.sessionsAwaitingUserToolAnswer.add(sessionId);
+  }
+
+  /**
+   * F8（2026-09-04）：消费"主模型提问待答"标记（一次性语义）
+   *
+   * 在 EAG 建议层门禁判定前调用：命中时返回 true 并清除标记，
+   * 使本次用户输入（即答案）跳过建议器直达主对话。
+   * 消费式设计保证即使 suggester 未注入或后续路径提前 return，标记也不会残留。
+   *
+   * @param sessionId 会话 ID
+   * @returns 是否处于待答状态
+   */
+  private consumeAwaitingUserToolAnswer(sessionId: string): boolean {
+    if (!this.sessionsAwaitingUserToolAnswer.has(sessionId)) {
+      return false;
+    }
+    this.sessionsAwaitingUserToolAnswer.delete(sessionId);
+    return true;
   }
 
   // ============================================================================
@@ -5176,6 +5239,9 @@ ${agentInstructions}
             return;
           }
           if (toolAppendResult.waitingForUser) {
+            // F8：权限恢复路径中工具再次等待用户响应（如 AskUserQuestion 链式提问）时，
+            // 同样标记"主模型提问待答"，保证用户的下一次输入直达主对话
+            this.markAwaitingUserToolAnswer(sessionId);
             this.updateSessionEntry(sessionId, (entry) => ({
               ...entry,
               toolCalls: pendingToolCallMessage.toolCalls,
@@ -5427,6 +5493,11 @@ ${agentInstructions}
             messagePermissions: permissionPlan?.permissions,
           });
           waitingForUser = toolAppendResult.waitingForUser;
+          // F8：turn 因工具等待用户响应而挂起（AskUserQuestion 提问 / ask_user 审批）时，
+          // 标记"主模型提问待答"，使用户的答案在下一次输入时豁免 EAG 建议器直达主对话
+          if (waitingForUser) {
+            this.markAwaitingUserToolAnswer(sessionId);
+          }
         }
 
         if (this.isInterrupted(sessionId)) {
@@ -7037,6 +7108,8 @@ ${agentInstructions}
       planMode: prompt.planMode,
       // EAG-P2 批次 9 S5：透传 messageParams 元数据（含 codingLoopRequest 等）
       messageParams: prompt.messageParams ? { ...prompt.messageParams } : undefined,
+      // F8（2026-09-04）：透传旁路建议层标记，保证元数据克隆后语义不变
+      bypassEagSuggestion: prompt.bypassEagSuggestion,
     };
   }
 
