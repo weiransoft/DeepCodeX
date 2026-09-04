@@ -23,6 +23,7 @@ import {
   buildInitPromptSubmission,
   buildPromptDraftFromSessionMessage,
   extractProposedPlan,
+  getClearContextImplementationPrompt,
   getImplementationPrompt,
   getPlanImplementationChoice,
   disableTerminalExtendedKeys,
@@ -179,6 +180,27 @@ test("extractProposedPlan only returns a complete non-empty plan", () => {
 test("getImplementationPrompt uses Chinese only above five full-width punctuation marks", () => {
   assert.equal(getImplementationPrompt("，、；。；"), "Implement the plan.");
   assert.equal(getImplementationPrompt("，、；。；。"), "实现此方案。");
+});
+
+test("getClearContextImplementationPrompt carries the complete plan into a fresh context", () => {
+  const plan = "# 方案\n\n- 保留 `Markdown`\n- Verify tests";
+  const prompt = getClearContextImplementationPrompt(plan);
+
+  assert.equal(
+    prompt,
+    "A previous agent produced the plan below to accomplish the user's task. " +
+      "Implement the plan in a fresh context. Treat the plan as the source of " +
+      "user intent, re-read files as needed, and carry the work through " +
+      `implementation and verification.\n\n${plan}`
+  );
+});
+
+test("getPlanImplementationChoice maps all four number shortcuts", () => {
+  const key = { escape: false, return: false };
+  assert.equal(getPlanImplementationChoice("1", key, 0), "implement");
+  assert.equal(getPlanImplementationChoice("2", key, 0), "clear-context");
+  assert.equal(getPlanImplementationChoice("3", key, 0), "stay");
+  assert.equal(getPlanImplementationChoice("4", key, 0), "default");
 });
 
 test("getPlanImplementationChoice treats escape as staying in Plan Mode", () => {
