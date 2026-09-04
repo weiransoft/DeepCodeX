@@ -860,6 +860,18 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
         ]);
         return;
       }
+      if (submission.command === "history") {
+        // /history <subcommand> [args] —— 解析并调用 handleHistoryCommand（一期 US-EH-005）
+        // 子命令：list / show / search / prune / help
+        // 设计依据：EXECUTION_HISTORY_PRD §US-EH-005（用户可直接查看和管理执行历史）
+        const historyResult = await handleHistorySlashCommand(submission.text, projectRoot);
+        setMessages((prev) => [
+          ...prev,
+          buildSyntheticUserMessage(submission.text, submission.imageUrls.length),
+          buildSyntheticAssistantMessage(historyResult),
+        ]);
+        return;
+      }
       if (submission.command === "help") {
         // /help —— 渲染内置命令清单（FIX-06：与 CLI --help EPILOG 同一数据源 BUILTIN_SLASH_COMMANDS）
         const { formatBuiltinCommandList } = await import("../core/slash-commands.js");
@@ -2257,6 +2269,62 @@ async function handleMemorySlashCommand(text: string, projectRoot: string): Prom
     // delete-all 之外的未知错误（如磁盘 I/O 异常）不应静默吞掉
     const message = error instanceof Error ? error.message : String(error);
     return `✖ /memory 命令执行失败：${message}`;
+  }
+}
+
+/**
+ * /history 命令处理器（一期 US-EH-005 + 二期 US-EH-008 双向关联）
+ *
+ * 模式对齐 handleMemorySlashCommand：
+ * - 动态 import 避免启动开销（ExecutionHistoryStore / handleHistoryCommand 均为 core v2 公开导出）
+ * - 构造 ExecutionHistoryStore（绑定 projectRoot，内部以 projectCode 算路径）
+ * - 二期可选传入 MemoryStore 支持 /history show 双向关联 MemoryEntry
+ *
+ * @param text 完整命令文本（如 "/history list --failed"）
+ * @param projectRoot 当前项目根目录
+ * @returns 处理结果文本（成功直接返回，失败加 ✖ 前缀）
+ */
+async function handleHistorySlashCommand(text: string, projectRoot: string): Promise<string> {
+  const [{ ExecutionHistoryStore, handleHistoryCommand, MemoryStore }] = await Promise.all([
+    import("@vegamo/deepcode-core"),
+  ]);
+
+  const trimmed = text.trim();
+  const body = trimmed.startsWith("/") ? trimmed.slice(1) : trimmed;
+  const tokens = body.split(/\s+/).filter(Boolean);
+
+  if (tokens.length === 0 || tokens[0] !== "history") {
+    return `无效的 /history 命令: ${text}`;
+  }
+
+  // 去除 "history" 前缀，剩余作为子命令参数串
+  const argsText = tokens.slice(1).join(" ");
+
+  // 构造 ExecutionHistoryStore（绑定 projectRoot）
+  const store = new ExecutionHistoryStore({ projectRoot });
+
+  try {
+    // 一期不传 memoryStore——二期 US-EH-008 时传入 MemoryStore 支持双向关联
+    // 这里尝试构造 MemoryStore（可选），如果不存在（一期）则 undefined
+    let memoryStore: InstanceType<typeof MemoryStore> | undefined;
+    try {
+      memoryStore = new MemoryStore(projectRoot);
+    } catch {
+      // MemoryStore 构造失败（罕见，如磁盘只读）——跳过，history show 不显示关联 MemoryEntry
+    }
+
+    const result = await handleHistoryCommand(argsText, store, memoryStore);
+    // 命令处理完同步 flush（closeSync），保证磁盘数据完整
+    store.closeSync();
+
+    if (result.success) {
+      return result.output;
+    }
+    return `✖ ${result.output}`;
+  } catch (error) {
+    store.closeSync();
+    const message = error instanceof Error ? error.message : String(error);
+    return `✖ /history 命令执行失败：${message}`;
   }
 }
 

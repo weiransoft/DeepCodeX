@@ -104,6 +104,8 @@ export type PromptSubmission = {
     | "review"
     // ===== DeepCodeX V2 记忆管理命令 =====
     | "memory"
+    // ===== DeepCodeX 执行历史管理命令（一期 US-EH-005） =====
+    | "history"
     // ===== DeepCodeX 帮助命令（FIX-06） =====
     | "help";
   /**

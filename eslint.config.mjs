@@ -65,6 +65,9 @@ export default tseslint.config(
                 "../../session*",
                 "../../settings*",
                 "../../eag/*",
+                // 多角色审查补漏：execution-history 曾直接 import ../../prompt
+                // （ToolDefinition），与 v1-adapters 审计命令对齐，纳入门禁
+                "../../prompt*",
               ],
               message:
                 "V2 模块禁止直接 import V1 文件（V2.3 P1-05 单一入口约束）。请从 ../../integration/v1-adapters 导入 V1 能力；若依赖缺失，请在 v1-adapters.ts 中补充 re-export。",
