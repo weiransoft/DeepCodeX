@@ -1298,6 +1298,70 @@ export class SessionManager {
     return file && (missing || invalidId);
   }
 
+  /**
+   * 空 body 400 瞬态错误的退避重试次数上限（首次调用之外的重试次数）
+   *
+   * 背景（2026-09-04 故障分析）：共用 GPU 推理服务器（SGLang）在瞬时资源压力下
+   * （KV cache / running requests 挤压，负载可能来自同机其它客户端），内部抛错被
+   * aiohttp 代理层转成"空 body 的 400"返回。这类响应本身不含任何诊断信息，
+   * 且重放实验证明原请求必然合法——重试是安全且正确的。
+   */
+  private static readonly TRANSIENT_EMPTY_BODY_400_MAX_RETRIES = 2;
+
+  /**
+   * 空 body 400 瞬态错误的退避间隔（毫秒），按重试次序取用：第 1 次重试等 2s，第 2 次等 5s
+   */
+  private static readonly TRANSIENT_EMPTY_BODY_400_RETRY_DELAYS_MS = [2000, 5000];
+
+  /**
+   * 判定是否为"空 body 400"瞬态错误（可安全重试）
+   *
+   * 识别特征（与用户方案对齐）：
+   * 1. HTTP status === 400；
+   * 2. 错误消息命中 OpenAI SDK 对"响应体无法解析为 JSON 错误结构"的固定文案
+   *    "400 status code (no body)"（即代理层/网关返回了空 body 或非 JSON body）。
+   *
+   * 刻意保守：带 JSON 错误体的真 400（参数校验错误、上下文超限等）有明确诊断信息，
+   * 必须立即抛出不重试，避免掩盖真实错误、避免对确定性失败做无谓重试。
+   *
+   * @param error SDK 调用抛出的错误对象
+   * @returns 是否为可重试的空 body 400 瞬态错误
+   */
+  private isTransientEmptyBody400Error(error: unknown): boolean {
+    const status = (error as { status?: unknown } | null)?.status;
+    if (status !== 400) {
+      return false;
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    return /no body/i.test(detail);
+  }
+
+  /**
+   * 可中断的退避等待：等待指定毫秒数，期间收到中止信号则立即提前返回
+   *
+   * 用于空 body 400 重试退避——用户主动中断（Esc）或流超时触发 abort 时，
+   * 不应继续傻等退避计时器，应尽快退出重试循环。
+   *
+   * @param ms 等待毫秒数
+   * @param signal 中止信号（复用流式调用的安全控制器）
+   */
+  private async sleepWithAbort(ms: number, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
   private async createChatCompletionStream(
     client: NonNullable<ReturnType<CreateOpenAIClient>["client"]>,
     request: Record<string, unknown>,
@@ -1359,41 +1423,69 @@ export class SessionManager {
     };
 
     let response: unknown;
-    try {
-      response = await (
-        client.chat.completions.create as unknown as (
-          body: Record<string, unknown>,
-          options?: Record<string, unknown>
-        ) => Promise<unknown>
-      )(
-        // fork 侧：传 sdkOptions（仅含安全控制器的 signal），非 SDK 标准字段已在上方过滤
-        streamRequest,
-        sdkOptions
-      );
-    } catch (error) {
-      this.logChatCompletionDebug(debug, {
-        timestamp: new Date().toISOString(),
-        location: debug?.location ?? "SessionManager.createChatCompletionStream:create",
-        requestId,
-        sessionId,
-        model: typeof request.model === "string" ? request.model : undefined,
-        baseURL: debug?.baseURL,
-        durationMs: Date.now() - startedAtMs,
-        params: { ...debug?.params, options: summarizeCompletionOptions(options) },
-        request: streamRequest,
-        error: normalizeDebugError(error),
-      });
-      logApiError({
-        timestamp: new Date().toISOString(),
-        location: "SessionManager.createChatCompletionStream:create",
-        requestId,
-        sessionId,
-        model: typeof request.model === "string" ? request.model : undefined,
-        error: getLlmErrorDetails(error),
-        request: streamRequest,
-      });
-      this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "end", sessionId);
-      throw error;
+    // 空 body 400 瞬态错误退避重试（2026-09-04）：
+    // 共用 GPU 推理服务器在瞬时资源压力下，代理层会把内部抛错转成无诊断信息的
+    // "400 status code (no body)"。此类错误重放实验证明请求必然合法，重试安全且正确；
+    // 带 JSON 错误体的真 400（参数/校验错误）有明确诊断信息，立即抛出不重试。
+    // 重试策略：最多额外重试 2 次，退避间隔 2s / 5s；期间收到中止信号立即放弃重试。
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        response = await (
+          client.chat.completions.create as unknown as (
+            body: Record<string, unknown>,
+            options?: Record<string, unknown>
+          ) => Promise<unknown>
+        )(
+          // fork 侧：传 sdkOptions（仅含安全控制器的 signal），非 SDK 标准字段已在上方过滤
+          streamRequest,
+          sdkOptions
+        );
+        break;
+      } catch (error) {
+        // 判定是否值得重试：仅"空 body 400"且未耗尽重试次数且未被中止
+        const canRetry =
+          this.isTransientEmptyBody400Error(error) &&
+          attempt < SessionManager.TRANSIENT_EMPTY_BODY_400_MAX_RETRIES &&
+          !safetyController.signal.aborted;
+        const retryDelayMs = canRetry ? SessionManager.TRANSIENT_EMPTY_BODY_400_RETRY_DELAYS_MS[attempt] : null;
+        this.logChatCompletionDebug(debug, {
+          timestamp: new Date().toISOString(),
+          location: debug?.location ?? "SessionManager.createChatCompletionStream:create",
+          requestId,
+          sessionId,
+          model: typeof request.model === "string" ? request.model : undefined,
+          baseURL: debug?.baseURL,
+          durationMs: Date.now() - startedAtMs,
+          params: { ...debug?.params, options: summarizeCompletionOptions(options) },
+          request: streamRequest,
+          error: normalizeDebugError(error),
+        });
+        logApiError({
+          timestamp: new Date().toISOString(),
+          location: "SessionManager.createChatCompletionStream:create",
+          requestId,
+          sessionId,
+          model: typeof request.model === "string" ? request.model : undefined,
+          error: getLlmErrorDetails(error),
+          request: streamRequest,
+        });
+        if (retryDelayMs === null) {
+          // 不可重试（真 400 / 非 400 错误 / 重试耗尽 / 已中止）：结束进度事件并抛出
+          this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "end", sessionId);
+          throw error;
+        }
+        // 可重试：记录退避等待提示（方便事后从诊断日志识别重试行为），等待后重新调用 SDK。
+        // 注意：不发出 "end" 进度事件——本 turn 仍在进行，重试成功后继续正常流式消费。
+        console.warn(
+          `[llm-retry] 空 body 400 瞬态错误（第 ${attempt + 1}/2 次重试，${retryDelayMs}ms 后重试）：requestId=${requestId} sessionId=${sessionId ?? "n/a"}`
+        );
+        await this.sleepWithAbort(retryDelayMs, safetyController.signal);
+        if (safetyController.signal.aborted) {
+          // 等待期间被中止（用户中断/流超时）：按最终失败处理
+          this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "end", sessionId);
+          throw error;
+        }
+      }
     }
 
     if (!response || typeof (response as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] !== "function") {

@@ -4665,3 +4665,164 @@ function escapeRegExp(value: string): string {
 async function flushPromises(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
+
+// ============================================================================
+// 空 body 400 瞬态错误退避重试（2026-09-04）
+// 背景：共用 GPU 推理服务器（SGLang）瞬时资源压力下，aiohttp 代理层把内部抛错
+// 转成无诊断信息的"400 status code (no body)"。重放实验证明请求必然合法，
+// 重试安全且正确；带 JSON 错误体的真 400 必须立即抛出，避免掩盖真错误。
+// 策略：最多额外重试 2 次，退避 2s/5s（测试中覆盖为短间隔以加速）。
+// ============================================================================
+
+/** 快速构造最小 SessionManager 实例（仅用于直接调用私有方法，不触发会话流程） */
+function createMinimalSessionManager(projectRoot: string): SessionManager {
+  return new SessionManager({
+    projectRoot,
+    createOpenAIClient: () => ({
+      client: {} as any,
+      model: "test-model",
+      baseURL: "https://api.deepseek.com",
+      thinkingEnabled: false,
+    }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+  });
+}
+
+/** 构造带调用计数的 SDK client 桩：按出队顺序抛错或返回响应 */
+function createRetryTestClient(behaviors: Array<{ throwError?: unknown; response?: unknown }>): {
+  client: unknown;
+  callCount: { value: number };
+} {
+  const queue = [...behaviors];
+  const callCount = { value: 0 };
+  const client = {
+    chat: {
+      completions: {
+        create: async () => {
+          callCount.value++;
+          const behavior = queue.shift();
+          assert.ok(behavior, "expected a queued behavior");
+          if (behavior.throwError !== undefined) {
+            throw behavior.throwError;
+          }
+          return behavior.response;
+        },
+      },
+    },
+  };
+  return { client, callCount };
+}
+
+/** 构造 OpenAI SDK 风格的空 body 400 错误（APIError：status + 固定文案） */
+function createEmptyBody400Error(): Error & { status: number } {
+  const error = new Error("400 status code (no body)") as Error & { status: number };
+  error.status = 400;
+  return error;
+}
+
+test("createChatCompletionStream retries transient empty-body 400 and succeeds", async () => {
+  const workspace = createTempDir("deepcode-retry-400-ok-");
+  const home = createTempDir("deepcode-retry-400-ok-home-");
+  setHomeDir(home);
+
+  const manager = createMinimalSessionManager(workspace);
+  const successResponse = {
+    choices: [{ message: { content: "ok" } }],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+  };
+  const { client, callCount } = createRetryTestClient([
+    { throwError: createEmptyBody400Error() },
+    { response: successResponse },
+  ]);
+
+  // 覆盖退避间隔为短值加速测试（还原在 finally 中保证）
+  const originalDelays = (SessionManager as any).TRANSIENT_EMPTY_BODY_400_RETRY_DELAYS_MS;
+  (SessionManager as any).TRANSIENT_EMPTY_BODY_400_RETRY_DELAYS_MS = [10, 20];
+  try {
+    const response = await (manager as any).createChatCompletionStream(
+      client,
+      { model: "test-model", messages: [{ role: "user", content: "hi" }] },
+      {}
+    );
+    // 核心断言：重试后成功返回响应，SDK 共被调用 2 次
+    assert.equal(callCount.value, 2, "空 body 400 后应重试 1 次（SDK 共调用 2 次）");
+    assert.equal((response as { choices?: unknown }).choices, successResponse.choices);
+  } finally {
+    (SessionManager as any).TRANSIENT_EMPTY_BODY_400_RETRY_DELAYS_MS = originalDelays;
+  }
+});
+
+test("createChatCompletionStream gives up after exhausting empty-body 400 retries", async () => {
+  const workspace = createTempDir("deepcode-retry-400-exhaust-");
+  const home = createTempDir("deepcode-retry-400-exhaust-home-");
+  setHomeDir(home);
+
+  const manager = createMinimalSessionManager(workspace);
+  const { client, callCount } = createRetryTestClient([
+    { throwError: createEmptyBody400Error() },
+    { throwError: createEmptyBody400Error() },
+    { throwError: createEmptyBody400Error() },
+  ]);
+
+  const originalDelays = (SessionManager as any).TRANSIENT_EMPTY_BODY_400_RETRY_DELAYS_MS;
+  (SessionManager as any).TRANSIENT_EMPTY_BODY_400_RETRY_DELAYS_MS = [10, 20];
+  try {
+    // 核心断言：重试 2 次仍失败 → 最终抛出，SDK 共被调用 3 次（1 次原始 + 2 次重试）
+    await assert.rejects(
+      (manager as any).createChatCompletionStream(
+        client,
+        { model: "test-model", messages: [{ role: "user", content: "hi" }] },
+        {}
+      ),
+      /no body/
+    );
+    assert.equal(callCount.value, 3, "重试耗尽后应停止（SDK 共调用 3 次）");
+  } finally {
+    (SessionManager as any).TRANSIENT_EMPTY_BODY_400_RETRY_DELAYS_MS = originalDelays;
+  }
+});
+
+test("createChatCompletionStream does not retry real 400 with diagnostic body", async () => {
+  const workspace = createTempDir("deepcode-retry-400-real-");
+  const home = createTempDir("deepcode-retry-400-real-home-");
+  setHomeDir(home);
+
+  const manager = createMinimalSessionManager(workspace);
+  // 真 400：带明确诊断信息的错误体（参数校验错误），不得重试
+  const real400 = Object.assign(new Error("Invalid request: missing required parameter 'model'"), { status: 400 });
+  const { client, callCount } = createRetryTestClient([{ throwError: real400 }]);
+
+  // 核心断言：立即抛出，SDK 只被调用 1 次（无重试）
+  await assert.rejects(
+    (manager as any).createChatCompletionStream(
+      client,
+      { model: "test-model", messages: [{ role: "user", content: "hi" }] },
+      {}
+    ),
+    /missing required parameter/
+  );
+  assert.equal(callCount.value, 1, "带 JSON 错误体的真 400 不得重试（SDK 只调用 1 次）");
+});
+
+test("createChatCompletionStream does not retry non-400 errors", async () => {
+  const workspace = createTempDir("deepcode-retry-500-");
+  const home = createTempDir("deepcode-retry-500-home-");
+  setHomeDir(home);
+
+  const manager = createMinimalSessionManager(workspace);
+  const error500 = Object.assign(new Error("Internal Server Error"), { status: 500 });
+  const { client, callCount } = createRetryTestClient([{ throwError: error500 }]);
+
+  // 核心断言：500 等非 400 错误不在重试范围（保持既有行为），立即抛出
+  await assert.rejects(
+    (manager as any).createChatCompletionStream(
+      client,
+      { model: "test-model", messages: [{ role: "user", content: "hi" }] },
+      {}
+    ),
+    /Internal Server Error/
+  );
+  assert.equal(callCount.value, 1, "非 400 错误不得重试（SDK 只调用 1 次）");
+});
