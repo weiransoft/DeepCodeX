@@ -20,7 +20,13 @@ import {
   formatAskUserQuestionAnswers,
 } from "../core/ask-user-question";
 import { PermissionPrompt, type PermissionPromptResult } from "./PermissionPrompt";
-import { PlanImplementationPrompt, extractProposedPlan, getImplementationPrompt } from "./PlanImplementationPrompt";
+import {
+  PlanImplementationPrompt,
+  extractProposedPlan,
+  getClearContextImplementationPrompt,
+  getImplementationPrompt,
+  type PlanImplementationChoice,
+} from "./PlanImplementationPrompt";
 import { buildExitSummaryText, buildPluginRateLimitHintText, buildResumeHintText } from "../exit-summary";
 import { RawMode, useRawModeContext } from "../contexts";
 import { renderMessageToStdout } from "../components/MessageView/utils";
@@ -561,13 +567,23 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
   );
 
   const handlePlanImplementationChoice = useCallback(
-    (choice: "implement" | "stay" | "default") => {
+    (choice: PlanImplementationChoice) => {
       const proposedPlan = pendingPlanImplementation;
       setPendingPlanImplementation(null);
       if (choice === "stay") {
         return;
       }
       setPlanMode(false);
+      if (choice === "clear-context" && proposedPlan) {
+        void resetToWelcome().then(() => {
+          handleSubmit({
+            text: getClearContextImplementationPrompt(proposedPlan),
+            imageUrls: [],
+            planMode: false,
+          });
+        });
+        return;
+      }
       if (choice === "implement" && proposedPlan) {
         handleSubmit({
           text: getImplementationPrompt(proposedPlan),
@@ -576,7 +592,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
         });
       }
     },
-    [handleSubmit, pendingPlanImplementation]
+    [handleSubmit, pendingPlanImplementation, resetToWelcome]
   );
 
   const handleExitShortcut = useCallback(() => {

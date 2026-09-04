@@ -18,8 +18,10 @@ export { AskUserQuestionPrompt, applyOtherAnswerEdit } from "./views/AskUserQues
 export {
   PlanImplementationPrompt,
   extractProposedPlan,
+  getClearContextImplementationPrompt,
   getImplementationPrompt,
   getPlanImplementationChoice,
+  type PlanImplementationChoice,
 } from "./views/PlanImplementationPrompt";
 export { MessageView } from "./components";
 export { parseDiffPreview } from "./components/MessageView/utils";
