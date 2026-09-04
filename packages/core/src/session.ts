@@ -52,6 +52,15 @@ import {
   getDefaultAutoCompactWindow,
   DEFAULT_AUTOCOMPACT_RATIO,
 } from "./settings";
+// 一期新增：执行历史存储 + query_execution_history LLM 工具
+import { ExecutionHistoryStore } from "./v2/memory/execution-history-store";
+import {
+  getQueryExecutionHistoryToolDefinition,
+  createQueryExecutionHistoryHandler,
+} from "./v2/memory/query-execution-history-tool";
+// 二期新增：执行历史 → MemoryStore 双向同步 + ContextSnippet 构建
+import { ExecutionHistoryMemorySync } from "./v2/memory/execution-history-memory-sync";
+import { MemoryStore } from "./v2/memory/memory-store";
 // fork 侧 B1：ProviderFactory 统一 LLM provider 路由（openai/anthropic）
 import { ProviderFactory } from "./providers/provider-factory";
 import type { LLMClient, LLMResponse, LLMToolDefinition, LLMUsage } from "./providers/llm-provider";
@@ -883,6 +892,10 @@ export class SessionManager {
   private readonly toolExecutor: ToolExecutor;
   private readonly mcpManager = new McpManager();
   private mcpToolDefinitions: ToolDefinition[] = [];
+  // 一期 US-EH-001：执行历史存储（构造时初始化，fire-and-forget 写入）
+  private executionHistoryStore?: ExecutionHistoryStore;
+  // 一期 US-EH-004：query_execution_history LLM 工具定义（追加到 getTools externalTools）
+  private readonly historyToolDefinition: ToolDefinition[] = [];
   private readonly messageConverter: OpenAIMessageConverter;
   // EAG-P0 外挂字段（可选注入，未注入时主循环行为不变，§5.4 / §5.2.1）
   private readonly evaluator?: IndependentEvaluator;
@@ -993,6 +1006,26 @@ export class SessionManager {
     // 未注入时返回 "feature unavailable" 错误（与 codemap 工具降级语义一致）。
     // 因此此处安全注册，不影响现有行为（NFR-4 零回归）。
     registerInterruptTools(this.toolExecutor, this as unknown as InterruptibleSessionManager);
+    // 一期 US-EH-001/004：执行历史存储初始化 + query_execution_history 工具注册
+    // - ExecutionHistoryStore 构造时绑定 projectRoot，内部以 projectCode 算路径
+    // - query_execution_history handler 注册到 ToolExecutor（工具执行入口）
+    // - historyToolDefinition 填充（后续 getTools externalTools 追加）
+    this.executionHistoryStore = new ExecutionHistoryStore({ projectRoot: this.projectRoot });
+    this.historyToolDefinition.push(getQueryExecutionHistoryToolDefinition());
+    this.toolExecutor.registerToolHandler(
+      "query_execution_history",
+      createQueryExecutionHistoryHandler({ store: this.executionHistoryStore })
+    );
+    // 二期 US-EH-006：把 executionHistoryStore 注入 DualLayerContextManager
+    // —— contextHook 是 SessionContextHook 接口，没有 setExecutionHistoryStore，需要 cast
+    // —— 如果 contextHook 没有这个方法（DefaultSessionContextHook），可选链直接跳过
+    if (this.contextHook) {
+      (
+        this.contextHook as unknown as {
+          setExecutionHistoryStore?: (store: ExecutionHistoryStore) => void;
+        }
+      ).setExecutionHistoryStore?.(this.executionHistoryStore);
+    }
     this.mcpManager.prepare(this.getResolvedSettings().mcpServers);
     // SkillManager 初始化（最小依赖注入：projectRoot / getResolvedSettings / listSessionMessages）
     // listSessionMessages 绑定到 this，确保 SkillManager 能访问当前会话消息
@@ -1140,6 +1173,12 @@ export class SessionManager {
     this.sessionControllers.clear();
     this.processTimeoutControls.clear();
     this.mcpManager.disconnect();
+    // 一期 US-EH-001：进程退出前同步 flush 执行历史待写数据
+    // —— fire-and-forget record() 可能还有未 flush 的数据，closeSync() 保证不丢
+    // —— 如果 store 未初始化（测试场景）则跳过
+    if (this.executionHistoryStore) {
+      this.executionHistoryStore.closeSync();
+    }
   }
 
   // Token 估算与格式化（已迁移到 ./stream-aggregator.ts，见 docs/dev/review.md CRITICAL-1 模块 1）
@@ -5447,7 +5486,10 @@ ${agentInstructions}
                 anthropicClient,
                 {
                   messages: sessionMessages,
-                  tools: getTools(this.getPromptToolOptions(), this.mcpToolDefinitions).map((tool) => ({
+                  tools: getTools(this.getPromptToolOptions(), [
+                    ...this.mcpToolDefinitions,
+                    ...this.historyToolDefinition,
+                  ]).map((tool) => ({
                     name: tool.function.name,
                     description: tool.function.description,
                     parameters: tool.function.parameters,
@@ -5470,7 +5512,10 @@ ${agentInstructions}
                   ...(temperature !== undefined ? { temperature } : {}),
                   // 上游 v0.3.1：Files API 启用时使用上传后带引用的消息；未启用时使用 converter 构建的多模态消息
                   messages: filesSettings.enabled ? prepared.messages : messages,
-                  tools: getTools(this.getPromptToolOptions(), this.mcpToolDefinitions),
+                  tools: getTools(this.getPromptToolOptions(), [
+                    ...this.mcpToolDefinitions,
+                    ...this.historyToolDefinition,
+                  ]),
                   ...thinkingOptions,
                 },
                 { signal: sessionController.signal, streamTimeoutMs, maxReasoningLength },
@@ -5667,6 +5712,24 @@ ${agentInstructions}
     } finally {
       if (this.sessionControllers.get(sessionId) === sessionController) {
         this.sessionControllers.delete(sessionId);
+      }
+      // 二期 US-EH-007：session 结束时回写 MemoryStore（自动沉淀 experience）
+      // —— try/catch 全隔离，任何异常只 console.error，不影响 session 正常结束
+      // —— 触发时机：activateSession finally 块（比 dispose() 更及时）
+      // —— MemoryStore 构造参数 projectRoot：与 ExecutionHistoryStore 共用 projectCode 路径
+      try {
+        if (this.executionHistoryStore) {
+          const memoryStore = new MemoryStore(this.projectRoot);
+          const sync = new ExecutionHistoryMemorySync(this.executionHistoryStore, memoryStore);
+          const { successCount, failureFixCount } = sync.syncSession(sessionId);
+          if (successCount > 0 || failureFixCount > 0) {
+            console.log(
+              `[exec-history] 二期沉淀: session ${sessionId} → MemoryStore +${successCount} 成功命令, +${failureFixCount} 失败+修复对`
+            );
+          }
+        }
+      } catch (err) {
+        console.error("[exec-history] 二期 MemoryStore 回写失败（降级）:", err);
       }
       this.maybeNotifyTaskCompletion(sessionId, notify, startedAt, env);
     }
@@ -7139,6 +7202,32 @@ ${agentInstructions}
       // 上游 v0.3.1 新增 hooks：插件限流记录 + 批内技能按需加载
       onPluginRateLimitExceeded: (tool) => this.recordPluginRateLimitExceeded(sessionId, tool),
       onLoadSkill: (skillName) => this.loadSkillForToolBatch(sessionId, skillName, loadedSkillNames),
+      // 一期 US-EH-001：执行历史记录（fire-and-forget，不阻塞主循环）
+      // 设计约束：onAfterToolExecution 钩子签名是同步返回 ToolExecutionResult（tool-types.ts L128-131），
+      // 内部用 void 调 store.record().catch() 实现 fire-and-forget；return 原样 result 不修改
+      onAfterToolExecution: (result, ctx) => {
+        if (this.executionHistoryStore) {
+          void this.executionHistoryStore
+            .record({
+              sessionId,
+              toolName: ctx.toolName,
+              ok: result.ok,
+              argsSnippet: ctx.args ? JSON.stringify(ctx.args).slice(0, 4000) : undefined,
+              outputSnippet: typeof result.output === "string" ? result.output.slice(0, 4000) : undefined,
+              errorSnippet: result.error?.slice(0, 2000),
+              exitCode: (result.metadata as Record<string, unknown> | undefined)?.exitCode as number | null | undefined,
+              signal: (result.metadata as Record<string, unknown> | undefined)?.signal as string | null | undefined,
+              cwd: (result.metadata as Record<string, unknown> | undefined)?.cwd as string | null | undefined,
+              timedOut: (result.metadata as Record<string, unknown> | undefined)?.timedOut as boolean | undefined,
+              pid: (result.metadata as Record<string, unknown> | undefined)?.pid as number | null | undefined,
+              durationMs: (result.metadata as Record<string, unknown> | undefined)?.durationMs as number | undefined,
+            })
+            .catch(() => {
+              // fail-safe：store 写失败静默降级（对齐 PRD §5）
+            });
+        }
+        return result;
+      },
       shouldStop: () => this.isInterrupted(sessionId),
     };
     const parsedToolCalls = toolCalls

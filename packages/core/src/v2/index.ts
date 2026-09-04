@@ -179,6 +179,40 @@ export type { MemoryCommandResult } from "./memory/memory-commands.js";
 export { handleMemoryCommand } from "./memory/memory-commands.js";
 
 // ============================================================================
+// 执行历史体系（ExecutionHistoryStore —— 一期 US-EH-001~005）
+// ============================================================================
+
+// 执行历史存储 + 类型定义
+export { ExecutionHistoryStore } from "./memory/execution-history-store.js";
+export type {
+  ArtifactEntry,
+  ExecutionHistoryQuery,
+  ExecutionHistoryRecordInputs,
+  ExecutionHistoryStoreOptions,
+  ExecutionOutcome,
+  ExecutionRecord,
+  QueryExecutionHistoryToolArgs,
+  QueryExecutionHistoryToolResult,
+} from "./memory/execution-history-types.js";
+export { LOW_VALUE_BASH_COMMANDS } from "./memory/execution-history-types.js";
+
+// query_execution_history LLM 工具定义 + handler
+export {
+  getQueryExecutionHistoryToolDefinition,
+  createQueryExecutionHistoryHandler,
+} from "./memory/query-execution-history-tool.js";
+
+// /history 命令处理器（handleHistoryCommand）
+export type { HistoryCommandResult } from "./memory/history-commands.js";
+export { handleHistoryCommand } from "./memory/history-commands.js";
+
+// 二期新增：ExecutionHistorySummaryBuilder + MemorySync + ContextSnippet builder
+export type { ExecutionTaskType } from "./memory/execution-history-summary-builder.js";
+export { ExecutionHistorySummaryBuilder } from "./memory/execution-history-summary-builder.js";
+export { ExecutionHistoryMemorySync } from "./memory/execution-history-memory-sync.js";
+export { buildExecutionHistorySnippet } from "./context/execution-history-snippet-builder.js";
+
+// ============================================================================
 // 3. codemap 子模块 - 代码地图生成与监视
 // ============================================================================
 

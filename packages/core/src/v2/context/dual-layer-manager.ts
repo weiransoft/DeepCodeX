@@ -294,7 +294,10 @@ export class DualLayerContextManager {
     private readonly userGlobalMemory?: UserGlobalMemoryManager,
     private readonly experienceRecommender?: ExperienceRecommender,
     // EAG-P0 新增可选参数（§5.5.3 规则注入通道，向后兼容，未注入时跳过规则片段收集）
-    private readonly ruleStore?: RuleStore
+    private readonly ruleStore?: RuleStore,
+    // 二期 US-EH-006 新增可选参数（execution_history snippet 注入通道，向后兼容，未注入时跳过）
+    // —— 可通过 setExecutionHistoryStore() setter 后注入（解决 createDualLayerContextHook 早于 SessionManager 构造的时序问题）
+    private executionHistoryStore?: import("../memory/execution-history-store").ExecutionHistoryStore
   ) {
     this.config = {
       window: config.window ?? {},
@@ -302,6 +305,16 @@ export class DualLayerContextManager {
       defaultTokenBudget: config.defaultTokenBudget ?? DEFAULT_TOKEN_BUDGET,
       projectRoot: config.projectRoot,
     };
+  }
+
+  /**
+   * 二期 US-EH-006：后注入 executionHistoryStore
+   * —— SessionManager 构造时序：SessionManager 内部创建 store 后，需要回传给 DualLayerContextManager
+   * —— 原方案：createDualLayerContextHook 先于 SessionManager 调用 → 无法直接注入
+   * —— setter 解决：store 创建后 SessionManager 调 setExecutionHistoryStore()，后续 turn 的 buildOptimizedContext 就能跑 4.11 块
+   */
+  setExecutionHistoryStore(store: import("../memory/execution-history-store").ExecutionHistoryStore): void {
+    this.executionHistoryStore = store;
   }
 
   /**
@@ -499,6 +512,30 @@ export class DualLayerContextManager {
       scoringCandidates.push(...fileSnippets);
     }
 
+    // 4.11 二期：ExecutionHistory 执行历史摘要片段（直接保留，US-EH-006）
+    // —— executionHistoryStore 构造注入后才执行；未注入时降级跳过
+    // —— 防 Advisor 发现的 Bug-2：不能 lazily new 新 store 实例——会有独立缓存看不到 session hooks 写入的最新数据
+    // —— 类型为 free string "execution_history"（对齐 ContextSnippet.type 自由字符串，零 schema 改动）
+    // —— 不新增 system 消息：走 directRetainSnippets 通道，与 user_global/domain/experience 同 batch 拼接
+    // —— 硬上限 2000 tokens 由 SummaryBuilder 自己截断（防经验 1190232 failure）
+    if (this.executionHistoryStore) {
+      try {
+        const { buildExecutionHistorySnippet } = await import("./execution-history-snippet-builder.js");
+        const taskType = DualLayerContextManager.inferTaskType(taskContext);
+        const execHistSnippet = buildExecutionHistorySnippet(
+          this.executionHistoryStore,
+          taskType,
+          this.config.projectRoot
+        );
+        if (execHistSnippet) {
+          directRetainSnippets.push(execHistSnippet);
+        }
+      } catch (err) {
+        // SummaryBuilder / snippet-builder 异常：降级为无 execution_history 片段
+        console.warn("[DualLayerContextManager] collect execution_history snippet 失败:", err);
+      }
+    }
+
     // ---- 5. 调用 SlidingWindowManager 做评分 + Top-K + Token 预算截断 + V2-P2 压缩 ----
     // 直接保留片段先扣除 Token 预算，剩余预算给评分片段
     const directTokens = this.estimateTokens(directRetainSnippets);
@@ -534,6 +571,56 @@ export class DualLayerContextManager {
       totalChars += s.content.length;
     }
     return Math.ceil(totalChars / charsPerToken);
+  }
+
+  // ------------------------------------------------------------------------
+  // 二期 US-EH-006 辅助：从 TaskContext 推断执行历史过滤的 taskType
+  // ------------------------------------------------------------------------
+
+  /**
+   * 从 TaskContext 推断当前任务类型（build/test/fix/deploy/general）
+   * —— 简单启发式：从 taskContext.goal / taskContext.focusPoints / thoughtHistory 里提取关键词
+   * —— general 为兜底类型（不过滤 toolName，最近 30 天全部有效记录）
+   *
+   * 二期 SummaryBuilder.buildForContext(taskType) 根据此返回值决定：
+   *   - build → 只查 bash tool
+   *   - test → 只查 bash tool
+   *   - fix → 不限 toolName（edit/write 都有价值）
+   *   - deploy → 只查 bash tool
+   *   - general → 不限
+   *
+   * @param taskContext 当前任务上下文（可能含 goal / focusPoints 等字段）
+   * @returns 推断的 ExecutionTaskType
+   */
+  public static inferTaskType(
+    taskContext: TaskContext | null | undefined
+  ): import("../memory/execution-history-summary-builder").ExecutionTaskType {
+    if (!taskContext) return "general";
+
+    // 收集候选文本（goal + focusPoints 字符串拼接）
+    // 先转 unknown 再转 Record——避免 TaskContext 没有 index signature 的 TS 错误
+    const ctx = taskContext as unknown as Record<string, unknown>;
+    const texts: string[] = [];
+    if (typeof ctx.goal === "string") {
+      texts.push(ctx.goal);
+    }
+    const focus = ctx.focusPoints;
+    if (Array.isArray(focus)) {
+      for (const fp of focus) {
+        if (fp && typeof fp === "object" && "description" in fp) {
+          texts.push(String((fp as { description: string }).description));
+        }
+      }
+    }
+    const combined = texts.join(" ").toLowerCase();
+
+    // 关键词匹配（按优先级排序）
+    if (/deploy|release|publish|deployment/.test(combined)) return "deploy";
+    if (/fix|bug|debug|broken|issue|patch|repair/.test(combined)) return "fix";
+    if (/test|spec|jest|vitest|unit.test/.test(combined)) return "test";
+    if (/build|compile|webpack|vite|rollup|tsc|make build/.test(combined)) return "build";
+
+    return "general";
   }
 
   // ------------------------------------------------------------------------

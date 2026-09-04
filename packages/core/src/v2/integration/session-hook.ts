@@ -92,6 +92,13 @@ export interface SessionContextHook {
    * @param sessionId 会话 ID
    */
   refreshContextAsync(sessionId: string): Promise<void>;
+
+  /**
+   * 二期 US-EH-006：后注入 ExecutionHistoryStore（可选，未实现时跳过）
+   * —— createDualLayerContextHook 先于 SessionManager 构造，store 创建后调此方法后注入
+   * —— DefaultSessionContextHook 不需要实现（可选方法，SessionManager 用可选链跳过）
+   */
+  setExecutionHistoryStore?(store: import("../memory/execution-history-store").ExecutionHistoryStore): void;
 }
 
 /**
@@ -366,6 +373,15 @@ export function createDualLayerContextHook(
         console.error(`[V2 Context] refreshContextAsync failed for ${sessionId}: ${message}`);
         hook.setSnippets(sessionId, []);
       }
+    },
+
+    /**
+     * 二期 US-EH-006：后注入 ExecutionHistoryStore
+     * —— createDualLayerContextHook 先于 SessionManager 构造（App.tsx 调用顺序）
+     * —— SessionManager 内部 store 创建后调此方法，透传给 DualLayerContextManager.setExecutionHistoryStore()
+     */
+    setExecutionHistoryStore(store: import("../memory/execution-history-store").ExecutionHistoryStore): void {
+      manager.setExecutionHistoryStore(store);
     },
   };
 }

@@ -203,3 +203,19 @@ export type { RuleStore } from "../../eag/rlis/rule-store";
 // V2 可观测性模块（v2-events）需要 getDeepCodeXLogDir 定位日志落盘目录。
 // V2 模块禁止直接 import V1 文件（P1-05 单一入口约束），经此 re-export。
 export { getDeepCodeXLogDir } from "../../common/log-rotation";
+
+// ============================================================================
+// 15. session（项目代码生成）
+// ============================================================================
+// V2 memory 模块（execution-history-store）需要 getProjectCode 生成项目级
+// 存储目录名（.deepclex/history/<projectCode>/）。
+// V2 模块禁止直接 import V1 文件（P1-05 单一入口约束），经此 re-export。
+export { getProjectCode } from "../../session";
+
+// ============================================================================
+// 16. prompt（V1 工具定义类型）
+// ============================================================================
+// V2 memory 模块（query-execution-history-tool）需要 ToolDefinition 类型定义
+// LLM 工具 schema。V2 模块禁止直接 import V1 文件（P1-05 单一入口约束），
+// 经此 re-export。
+export type { ToolDefinition } from "../../prompt";
