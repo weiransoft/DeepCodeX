@@ -1,4 +1,5 @@
 import type { LlmRetryEvent, LlmStreamProgress, SessionEntry } from "@vegamo/deepcode-core";
+import stringWidth from "string-width";
 
 type RunningProcesses = SessionEntry["processes"];
 
@@ -7,9 +8,12 @@ export type LoadingTextInput = {
   retry?: LlmRetryEvent | null;
   processes?: RunningProcesses;
   now: number;
+  screenWidth?: number;
 };
 
 const STALL_THRESHOLD_MS = 3000;
+const MIN_PREVIEW_TERMINAL_WIDTH = 80;
+const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 export function buildLoadingText(input: LoadingTextInput): string {
   const { progress, retry, processes, now } = input;
@@ -38,7 +42,27 @@ export function buildLoadingText(input: LoadingTextInput): string {
 
   const elapsedSeconds = Math.floor(elapsedMs / 1000);
   const tokens = progress.formattedTokens || "0";
-  return `Thinking... (${elapsedSeconds}s) · ↓ ${tokens} tokens`;
+  const status = `Thinking... (${elapsedSeconds}s) · ↓ ${tokens} tokens`;
+  const preview = progress.previewText;
+  if (progress.estimatedTokens <= 1500 || !preview || (input.screenWidth ?? 0) < MIN_PREVIEW_TERMINAL_WIDTH) {
+    return status;
+  }
+  const available = (input.screenWidth ?? 0) - 28 - stringWidth(status) - 3; // Space and brackets.
+  if (available <= 0) {
+    return status;
+  }
+  if (stringWidth(preview) <= available) {
+    return `${status} [${preview}]`;
+  }
+  let tail = "";
+  let width = 3; // Leading ellipsis.
+  const graphemes = Array.from(segmenter.segment(preview), (part) => part.segment);
+  for (let i = graphemes.length - 1; i >= 0; i--) {
+    width += stringWidth(graphemes[i]!);
+    if (width > available) break;
+    tail = graphemes[i] + tail;
+  }
+  return tail ? `${status} [...${tail}]` : status;
 }
 
 function buildProcessLoadingText(processes: RunningProcesses | undefined, now: number): string | null {

@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
+import { stripVTControlCharacters } from "node:util";
 import { fileURLToPath, pathToFileURL } from "url";
 import matter from "gray-matter";
 import ejs from "ejs";
@@ -396,6 +397,7 @@ export type LlmStreamProgress = {
   startedAt: string;
   estimatedTokens: number;
   formattedTokens: string;
+  previewText?: string;
   phase: "start" | "update" | "end";
 };
 
@@ -545,12 +547,23 @@ export class SessionManager {
     return `${Math.round(roundedTokens / 1000)}k`;
   }
 
+  private formatStreamPreview(text?: string): string | undefined {
+    if (text === undefined) {
+      return undefined;
+    }
+
+    return stripVTControlCharacters(text)
+      .replace(/\r\n|[\r\n\t\u2028\u2029]/g, " ")
+      .replace(/[\x00-\x1f\x7f-\x9f]/g, "");
+  }
+
   private emitLlmStreamProgress(
     requestId: string,
     startedAt: string,
     estimatedTokens: number,
     phase: LlmStreamProgress["phase"],
-    sessionId?: string
+    sessionId?: string,
+    previewText?: string
   ): void {
     this.onLlmStreamProgress?.({
       requestId,
@@ -558,6 +571,7 @@ export class SessionManager {
       startedAt,
       estimatedTokens: Math.round(estimatedTokens),
       formattedTokens: this.formatEstimatedTokens(estimatedTokens),
+      previewText: this.formatStreamPreview(previewText),
       phase,
     });
   }
@@ -841,12 +855,16 @@ export class SessionManager {
       }
     >();
 
-    const trackText = (value: unknown) => {
+    let previewText = "";
+    const trackText = (value: unknown, includeInPreview = false) => {
       if (typeof value !== "string" || value.length === 0) {
         return;
       }
       estimatedTokens += this.estimateStreamTokens(value);
-      this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "update", sessionId);
+      if (includeInPreview) {
+        previewText += value;
+      }
+      this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "update", sessionId, previewText);
     };
 
     try {
@@ -879,13 +897,13 @@ export class SessionManager {
           const contentDelta = delta.content;
           if (typeof contentDelta === "string") {
             content += contentDelta;
-            trackText(contentDelta);
+            trackText(contentDelta, true);
           }
 
           const reasoningDelta = delta.reasoning_content ?? delta.reasoning;
           if (typeof reasoningDelta === "string") {
             reasoningContent += reasoningDelta;
-            trackText(reasoningDelta);
+            trackText(reasoningDelta, true);
           }
 
           if (typeof delta.refusal === "string") {
