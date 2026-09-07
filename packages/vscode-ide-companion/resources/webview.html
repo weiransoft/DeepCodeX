@@ -100,6 +100,7 @@
     </div>
 
     <script nonce="{{nonce}}" src="{{attachmentsJsUri}}"></script>
+    <script nonce="{{nonce}}" src="{{thinkingPreviewJsUri}}"></script>
     <script nonce="{{nonce}}">
       const vscode = acquireVsCodeApi();
       const workspaceRoot = {{workspaceRoot}};
@@ -1661,9 +1662,30 @@
         if (statusEl) {
           statusEl.textContent = getThinkingContentText();
         }
+        const previewEl = currentThinkingBubbleElement.querySelector(".thinking-preview");
+        const progress = currentLlmStreamProgress;
+        const showPreview = progress && progress.estimatedTokens > 1500 &&
+          Date.now() - Date.parse(progress.startedAt) >= 3000 && !currentLlmRetry &&
+          (!currentRunningProcesses || Object.keys(currentRunningProcesses).length === 0);
+        previewEl.textContent = "";
+        previewEl.hidden = !showPreview || !progress.previewText;
+        if (previewEl.hidden) return;
+        const style = getComputedStyle(previewEl);
+        thinkingPreviewContext.font = style.font;
+        const preview = window.fitThinkingPreview(
+          progress.previewText,
+          previewEl.getBoundingClientRect().width,
+          (text) => thinkingPreviewContext.measureText(text).width
+        );
+        previewEl.textContent = preview;
+        previewEl.hidden = !preview;
       }
 
+      const thinkingPreviewContext = document.createElement("canvas").getContext("2d");
+      const thinkingResizeObserver = new ResizeObserver(updateThinkingBubbleContent);
+
       function removeThinkingBubble() {
+        thinkingResizeObserver.disconnect();
         if (currentThinkingBubbleElement) {
           currentThinkingBubbleElement.remove();
           currentThinkingBubbleElement = null;
@@ -1685,7 +1707,7 @@
         header.innerHTML = `
           <span class="${dotClass}"></span>
           <span class="bubble-title">
-            <span class="bubble-title-text"><b>Thinking</b> <span class="thinking-status">${escapeHtml(statusText)}</span></span>
+            <span class="bubble-title-text"><b>Thinking</b> <span class="thinking-status">${escapeHtml(statusText)}</span><span class="thinking-preview" hidden></span></span>
           </span>
         `;
 
@@ -1694,6 +1716,8 @@
         messages.scrollTop = messages.scrollHeight;
 
         currentThinkingBubbleElement = bubble;
+        thinkingResizeObserver.observe(bubble);
+        updateThinkingBubbleContent();
 
         // 连接线
         if (shouldConnectToPrev) {

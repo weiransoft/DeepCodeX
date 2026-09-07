@@ -8,6 +8,7 @@ import { type PromptDraft, PromptInput, type PromptSubmission } from "./PromptIn
 import { MessageView, RawModeExitPrompt } from "../components";
 import { SessionList } from "./SessionList";
 import { type UndoRestoreMode, UndoSelector } from "./UndoSelector";
+import { StatusLine } from "../components/status-line";
 import { buildLoadingText } from "../core/loading-text";
 import { findExpandedThinkingId } from "../core/thinking-state";
 import { WelcomeScreen } from "./WelcomeScreen";
@@ -60,8 +61,6 @@ import { writeStdout, writeStdoutLine } from "../../utils/stdio-helpers";
 
 type View = "chat" | "session-list" | "undo" | "mcp-status";
 
-const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
 type AppProps = {
   projectRoot: string;
   initialPrompt?: string;
@@ -69,39 +68,6 @@ type AppProps = {
   forkSessionId?: string;
   onRestart?: () => void;
 };
-
-const StatusLine = React.memo(function StatusLine({
-  busy,
-  text,
-}: {
-  busy: boolean;
-  text?: string;
-}): React.ReactElement {
-  const [spinnerIndex, setSpinnerIndex] = useState(0);
-
-  useEffect(() => {
-    if (!busy) {
-      setSpinnerIndex(0);
-      return;
-    }
-
-    const timer = setInterval(() => {
-      setSpinnerIndex((index) => (index + 1) % STATUS_SPINNER_FRAMES.length);
-    }, 80);
-    return () => clearInterval(timer);
-  }, [busy]);
-
-  return (
-    <Box>
-      {busy ? (
-        <Box marginRight={1}>
-          <Text color="yellow">{STATUS_SPINNER_FRAMES[spinnerIndex]}</Text>
-        </Box>
-      ) : null}
-      {text ? <Text dimColor>{text}</Text> : null}
-    </Box>
-  );
-});
 
 function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRestart }: AppProps): React.ReactElement {
   const { exit } = useApp();
@@ -876,11 +842,12 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
             progress: streamProgress,
             retry: retryEvent,
             processes: runningProcesses,
+            screenWidth,
             now: Date.now(),
           })
         : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps -- nowTick forces periodic recalculation for spinner animation
-    [busy, streamProgress, retryEvent, runningProcesses, nowTick]
+    [busy, streamProgress, retryEvent, runningProcesses, nowTick, screenWidth]
   );
 
   const welcomeItem: SessionMessage = useMemo(
@@ -996,7 +963,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
   }
 
   return (
-    <Box flexDirection="column" width={screenWidth} minWidth={80} overflowX={"visible"}>
+    <Box flexDirection="column" width={screenWidth}>
       <Static items={staticItems}>
         {(item) => {
           if (item.id.startsWith("__welcome__")) {
@@ -1020,7 +987,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
           );
         }}
       </Static>
-      {(busy || statusLine) && !isExiting ? <StatusLine busy={busy} text={statusLine} /> : null}
+      {(busy || statusLine) && !isExiting ? <StatusLine busy={busy} text={statusLine} width={screenWidth} /> : null}
       {errorLine ? (
         <Box>
           <Text color="red">Error: {errorLine}</Text>

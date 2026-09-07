@@ -5076,3 +5076,60 @@ function escapeRegExp(value: string): string {
 async function flushPromises(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
+
+test("stream previews combine only reasoning and content, sanitize text, and reset per request", async () => {
+  const events: Array<{ phase: string; previewText?: string; estimatedTokens: number }> = [];
+  const client = {
+    chat: {
+      completions: {
+        create: async () =>
+          createChatStreamResponse([
+            { choices: [{ delta: { reasoning_content: "think\r" } }] },
+            { choices: [{ delta: { reasoning: "\nnext\t" } }] },
+            { choices: [{ delta: { content: "\u001b[31m中文👋\u001b[0m\nanswer\r!\u0007" } }] },
+            {
+              choices: [
+                {
+                  delta: {
+                    refusal: "excluded",
+                    tool_calls: [
+                      { index: 0, id: "tool", type: "function", function: { name: "bash", arguments: "{}" } },
+                    ],
+                  },
+                  finish_reason: "tool_calls",
+                },
+              ],
+            },
+          ]),
+      },
+    },
+  };
+  const manager = new SessionManager({
+    projectRoot: process.cwd(),
+    createOpenAIClient: () => ({ client: client as any, model: "test-model", thinkingEnabled: false }),
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+    onLlmStreamProgress: (event) => events.push(event),
+  });
+  for (let i = 0; i < 2; i++) {
+    events.length = 0;
+    const response = await (manager as any).createChatCompletionStream(
+      client,
+      { model: "test-model" },
+      undefined,
+      "preview-session"
+    );
+    assert.equal(events[0]?.phase, "start");
+    assert.equal(events[0]?.previewText, undefined);
+    assert.equal(events[1]?.previewText, "think ");
+    assert.equal(events[2]?.previewText, "think next ");
+    assert.equal(events[3]?.previewText, "think next 中文👋 answer !");
+    const updates = events.filter((event) => event.phase === "update");
+    assert.equal(updates.at(-1)?.previewText, "think next 中文👋 answer !");
+    assert.ok(updates.at(-1)!.estimatedTokens > updates[2]!.estimatedTokens);
+    assert.equal(events.at(-1)?.phase, "end");
+    assert.equal(events.at(-1)?.previewText, undefined);
+    assert.equal(response.choices[0].message.content, "\u001b[31m中文👋\u001b[0m\nanswer\r!\u0007");
+  }
+});
