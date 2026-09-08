@@ -2847,11 +2847,18 @@ ${agentInstructions}
         return false;
       }
 
-      // 步骤 4.5：非 direct_chat 分支需要记录用户输入到会话日志
-      // ask_clarification / suggest_* 分支将发送建议文本，需先记录用户消息，
-      // 保证会话日志完整（用户输入 + 助手建议成对出现）
-      const userMessage = this.buildUserMessage(sessionId, userPrompt);
-      this.appendSessionMessage(sessionId, userMessage);
+      // 步骤 4.5：用户消息记录条件化（F9 自动执行机制）
+      // ask_clarification 分支：必须记录（展示问题前需要用户输入上下文）
+      // suggest_* 无 clarification 分支（首次建议）：记录（展示建议前需要用户输入上下文）
+      // suggest_* 有 clarification 分支（refine 后自动执行）：跳过，
+      //   因为 handler（如 handleEagAutonomousCommand）会在开头自己记录用户消息，
+      //   此处提前记录会导致重复。
+      const shouldRecordUserMessage = suggestion.type === "ask_clarification" || clarification === undefined;
+
+      if (shouldRecordUserMessage) {
+        const userMessage = this.buildUserMessage(sessionId, userPrompt);
+        this.appendSessionMessage(sessionId, userMessage);
+      }
 
       // 步骤 5：ask_clarification → 展示单选/多选问题与选项，并记录 pending 状态
       if (suggestion.type === "ask_clarification") {
@@ -2889,7 +2896,23 @@ ${agentInstructions}
         return true;
       }
 
-      // 步骤 6：suggest_command / suggest_autonomous / suggest_graph → 展示建议
+      // 步骤 6：suggest_command / suggest_autonomous / suggest_graph
+      // F9 自动执行机制：当存在 clarification（refine 结果，用户已明确选择）且
+      // commandHint 以 /eag- 开头时，自动构造命令并执行（而非只展示建议文本）。
+      // 首次建议（无 clarification）保持"只展示"行为——用户还没做出选择，
+      // 需要确认后才执行。
+      const autoExecuteResult = await this.tryAutoExecuteSuggestedCommand(
+        sessionId,
+        suggestion,
+        clarification,
+        goal,
+        controller
+      );
+      if (autoExecuteResult === "executed") {
+        return true;
+      }
+
+      // 降级：保持原有"只展示"行为（首次建议 / 非 EAG 命令 / eagCommandParser 未注入）
       const assistantMessage = this.buildAssistantMessage(sessionId, suggestion.messageToUser, null);
       this.onAssistantMessage(assistantMessage, false);
       this.updateSessionEntry(sessionId, (entry) => ({
@@ -2905,6 +2928,178 @@ ${agentInstructions}
       console.error(`handleEagDynamicSuggestion 异常：${reason}`);
       return false;
     }
+  }
+
+  /**
+   * F9 自动执行机制：当 refine 后（用户已通过澄清做出明确选择）suggest_* 返回 EAG 命令时，
+   * 自动构造命令字符串并调用对应 handler，而非只展示建议文本。
+   *
+   * 执行条件（三者同时满足）：
+   * 1. clarification !== undefined（refine 结果，用户已做出选择）
+   * 2. commandHint 以 /eag- 开头（EAG 命令体系，eagCommandParser 能识别）
+   * 3. this.eagCommandParser 已注入（handler 依赖 parser 分发）
+   *
+   * 降级策略（任一条件不满足时返回 "degraded"）：
+   * - 首次建议（无 clarification）：保持"只展示"，需要用户确认方向
+   * - 非 EAG 命令（如 team/rules/slash）：eagCommandParser 无法识别，降级展示
+   * - eagCommandParser 未注入：没有命令分发能力，降级展示
+   *
+   * @param sessionId 当前会话 ID
+   * @param suggestion suggester 返回的 suggest_* 结果
+   * @param clarification 用户澄清选项（存在表示 refine 流程）
+   * @param goal 原始用户目标（用于构造命令参数）
+   * @param controller 可选的 AbortController
+   * @returns "executed" 表示已自动执行命令，"degraded" 表示降级为只展示建议
+   */
+  private async tryAutoExecuteSuggestedCommand(
+    sessionId: string,
+    suggestion: Extract<EagDynamicSuggestion, { type: "suggest_command" | "suggest_autonomous" | "suggest_graph" }>,
+    clarification: ReadonlyArray<string> | undefined,
+    goal: string,
+    controller?: AbortController
+  ): Promise<"executed" | "degraded"> {
+    // 条件 1：必须存在 clarification（refine 结果），首次建议不自动执行
+    if (clarification === undefined) {
+      return "degraded";
+    }
+
+    // 条件 2：commandHint 必须以 /eag- 开头（EAG 命令体系）
+    const commandHint = this.extractSuggestedCommandHint(suggestion);
+    if (!commandHint || !commandHint.startsWith("/eag-")) {
+      return "degraded";
+    }
+
+    // 条件 3：eagCommandParser 必须已注入
+    if (!this.eagCommandParser) {
+      return "degraded";
+    }
+
+    // 构造自动执行的完整命令字符串（注入 goal 作为 --goal 参数）
+    const commandString = this.buildAutoExecuteCommand(commandHint, goal);
+
+    // 构造虚拟 UserPromptContent，让 eagCommandParser 能正确解析
+    const virtualPrompt: UserPromptContent = {
+      text: commandString,
+      // 复用原始 userPrompt 的 params（工具/skill 等），但 text 已替换为自动执行命令
+    };
+
+    // 通过 eagCommandParser 解析并分发到对应 handler
+    const eagCommand = this.eagCommandParser.parse(virtualPrompt);
+    if (eagCommand.kind === "unknown") {
+      // 解析失败，降级展示
+      console.warn(`tryAutoExecuteSuggestedCommand: eagCommandParser 未能识别命令 "${commandString}"，降级展示建议`);
+      return "degraded";
+    }
+
+    // 分发到对应 handler（handler 内部会自己记录用户消息，不需要预先记录）
+    this.activeSessionId = sessionId;
+    switch (eagCommand.kind) {
+      case "eag-build":
+        await this.handleEagBuildCommand(sessionId, virtualPrompt, eagCommand.payload, controller);
+        break;
+      case "eag-design":
+        await this.handleEagDesignCommand(sessionId, virtualPrompt, eagCommand.payload, controller);
+        break;
+      case "eag-test":
+        await this.handleEagTestCommand(sessionId, virtualPrompt, eagCommand.payload, controller);
+        break;
+      case "eag-run":
+        await this.handleEagRunCommand(sessionId, virtualPrompt, eagCommand.payload, controller);
+        break;
+      case "eag-resume":
+        await this.handleEagResumeCommand(sessionId, virtualPrompt, eagCommand.payload, controller);
+        break;
+      case "eag-status":
+        await this.handleEagStatusCommand(sessionId, virtualPrompt, eagCommand.payload, controller);
+        break;
+      case "eag-deploy":
+        await this.handleEagDeployCommand(sessionId, virtualPrompt, eagCommand.payload, controller);
+        break;
+      case "eag-autonomous":
+        await this.handleEagAutonomousCommand(sessionId, virtualPrompt, eagCommand.payload, controller);
+        break;
+      case "eag-autonomous-status":
+        await this.handleEagAutonomousStatusCommand(sessionId, virtualPrompt, eagCommand.payload, controller);
+        break;
+      default:
+        // 未处理的命令 kind（如 eag-graph 等），降级展示
+        console.warn(`tryAutoExecuteSuggestedCommand: 未处理的命令 kind "${eagCommand.kind}"，降级展示建议`);
+        return "degraded";
+    }
+
+    return "executed";
+  }
+
+  /**
+   * 从 suggest_command / suggest_autonomous / suggest_graph 联合类型中提取 commandHint
+   *
+   * 三者都有 commandHint 字段，但 TypeScript 联合类型无法直接访问。
+   * 通过 type 字段收窄后安全提取。
+   *
+   * @param suggestion suggest_* 类型的 EagDynamicSuggestion
+   * @returns commandHint 字符串；意外类型时返回 null
+   */
+  private extractSuggestedCommandHint(
+    suggestion: Extract<EagDynamicSuggestion, { type: "suggest_command" | "suggest_autonomous" | "suggest_graph" }>
+  ): string | null {
+    switch (suggestion.type) {
+      case "suggest_command":
+      case "suggest_autonomous":
+      case "suggest_graph":
+        return suggestion.commandHint ?? null;
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * 根据 commandHint 和 goal 构造自动执行的完整命令字符串
+   *
+   * EAG 命令参数格式（对齐 extractEagAutonomousRequestFromPrompt 等解析器）：
+   * - /eag-autonomous --goal "<目标>" --max-iterations 10 --confirmation smart
+   * - /eag-design --requirement "<目标>" --paradigm ddd-layered
+   * - /eag-build --goal "<目标>"
+   * - /eag-test --goal "<目标>"
+   * - /eag-run --goal "<目标>"
+   * - /eag-deploy --goal "<目标>"
+   * - /eag-graph：降级为裸命令（handler 内部会提示需要 graph 参数）
+   * - 其他：降级为裸命令
+   *
+   * goal 中的双引号、反斜杠、换行符会被安全转义，防止命令字符串解析失败。
+   *
+   * @param commandHint 命令提示字符串（如 "/eag-autonomous"）
+   * @param goal 用户原始目标文本（如"从46同步数据库到43采用full_overwrite全量覆盖"）
+   * @returns 完整命令字符串（如 "/eag-autonomous --goal \"从46同步数据库...\" --max-iterations 10 --confirmation smart"）
+   */
+  private buildAutoExecuteCommand(commandHint: string, goal: string): string {
+    // 安全转义 goal 中的特殊字符（对齐 shell 引号 + argparse 解析器）：
+    // - 反斜杠 → 双反斜杠
+    // - 双引号 → 反斜杠双引号
+    // - 换行符 → 空格（命令字符串不支持多行参数）
+    const escapedGoal = goal.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, " ").trim();
+
+    // 根据命令类型构造不同参数
+    const trimmedCommand = commandHint.trim();
+
+    // /eag-autonomous：完整参数（--goal + --max-iterations + --confirmation）
+    if (trimmedCommand === "/eag-autonomous") {
+      return `/eag-autonomous --goal "${escapedGoal}" --max-iterations 10 --confirmation smart`;
+    }
+
+    // /eag-design：--requirement + --paradigm
+    if (trimmedCommand === "/eag-design") {
+      return `/eag-design --requirement "${escapedGoal}" --paradigm ddd-layered`;
+    }
+
+    // /eag-build / /eag-test / /eag-run / /eag-deploy：通用 --goal 参数
+    const goalCommands = ["/eag-build", "/eag-test", "/eag-run", "/eag-deploy"];
+    if (goalCommands.includes(trimmedCommand)) {
+      return `${trimmedCommand} --goal "${escapedGoal}"`;
+    }
+
+    // /eag-graph 等特殊命令：降级为裸命令（handler 内部会提示需要额外参数）
+    // suggest_command 可能带参数（如 "/team dispatch"），直接返回 commandHint 让 handler 自行处理
+    return trimmedCommand;
   }
 
   /**
