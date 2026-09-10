@@ -719,6 +719,7 @@ test("SessionManager excludes disabled skills by resolved skill name", async () 
         "renamed-disabled": false,
         "deepcode-self-refer": false,
         "image-generator": false,
+        "video-generator": false,
         "skill-digester": false,
         plan: false,
         "enabled-skill": true,
