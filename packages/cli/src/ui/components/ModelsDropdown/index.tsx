@@ -12,10 +12,10 @@ type ThinkingModeOption = {
 };
 
 export const MODEL_COMMAND_MODELS = [
+  "deepseek-flash",
   "deepseek-v4-pro",
   "deepseek-v4-flash",
   "deepseek-v4-flash-vision-exp",
-  "deepseek-flash",
 ] as const;
 
 export const MODEL_COMMAND_THINKING_OPTIONS: ThinkingModeOption[] = [

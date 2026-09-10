@@ -4,10 +4,10 @@ import { getThinkingOptionIndex, MODEL_COMMAND_MODELS, MODEL_COMMAND_THINKING_OP
 
 test("model dropdown offers supported DeepSeek models", () => {
   assert.deepEqual(MODEL_COMMAND_MODELS, [
+    "deepseek-flash",
     "deepseek-v4-pro",
     "deepseek-v4-flash",
     "deepseek-v4-flash-vision-exp",
-    "deepseek-flash",
   ]);
 });
 
