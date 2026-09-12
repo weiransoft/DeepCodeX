@@ -19,16 +19,23 @@ const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
  * 将数字字符串格式化为带千分位分隔符的字符串。
  *
  * 例如："1234567" → "1,234,567"；"850" → "850"。
- * 输入为空或非数字时返回 "0"。
+ * 上游 v0.4.0 streaming preview 会传入已带单位的紧凑格式（如 "1.5k"），
+ * 此时原样透传（此前 Number("1.5k") 为 NaN 会被错误折叠为 "0"，
+ * 导致用户在 preview 场景看到 "↓ 0 tokens" 的显示 bug）。
+ * 输入为空或纯非数字时返回 "0"。
  *
- * @param value 原始 token 数字字符串
- * @returns 带千分位分隔符的字符串
+ * @param value 原始 token 数字字符串（或已格式化的紧凑串）
+ * @returns 带千分位分隔符的字符串，或透传的紧凑格式
  */
 function formatTokens(value: string | undefined): string {
   const raw = value?.trim() ?? "";
-  const num = Number(raw);
-  if (raw === "" || !Number.isFinite(num)) {
+  if (raw === "") {
     return "0";
+  }
+  const num = Number(raw);
+  if (!Number.isFinite(num)) {
+    // 非纯数字（如上游 preview 的 "1.5k" 紧凑格式）：原样透传，不折叠为 "0"
+    return raw;
   }
   return num.toLocaleString("en-US");
 }
