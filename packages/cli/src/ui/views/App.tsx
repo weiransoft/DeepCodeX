@@ -55,7 +55,11 @@ import { ANSI_CLEAR_SCREEN } from "../constants";
 // ADR-DI-001 动态注入与后台子 Agent 命令辅助函数（fork 特有，保留）
 import { extractCommandArgument, isResumeTaskCommand, BUILTIN_SLASH_COMMANDS } from "../core/slash-commands";
 // 建议循环客户端兜底（2026-09-03）：从回合收尾文本提取"建议执行 /xxx"命令 + 可自动执行白名单
-import { AUTO_EXECUTABLE_COMMAND_KINDS, extractSuggestedCommandText } from "../core/suggestion-fallback";
+import {
+  AUTO_EXECUTABLE_COMMAND_KINDS,
+  extractAutoExecutableEagCommandName,
+  extractSuggestedCommandText,
+} from "../core/suggestion-fallback";
 import type {
   LlmStreamProgress,
   LlmRetryEvent,
@@ -1134,6 +1138,23 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
               // 在状态栏显示自动执行提示，让用户感知到命令注入（与 suggestedCommand 路径一致）
               setStatusLine(`▶ 自动执行：${suggestedCommand}`);
               await handlePromptRef.current({ text: suggestedCommand, imageUrls: [], command: suggestedKind });
+            } else if (suggestedCommand) {
+              // F9-v2（2026-09-12）：EAG 命令纯文本注入通道
+              // 日志铁证：建议器输出"建议启动 /eag-autonomous --goal 'xxx'"后兜底全程静默——
+              // eag-* 不在 AUTO_EXECUTABLE_COMMAND_KINDS（parseSlashCommandKind 返回 undefined），
+              // 且旧正则在引号处截断丢失中文参数。正则已扩展引号参数捕获，此处对通过
+              // AUTO_EXECUTABLE_EAG_COMMANDS 白名单（仅 eag-autonomous，保守收录）的命令
+              // 以纯文本注入（不带 command 字段），经通用 prompt 路径透传至 core
+              // session.ts 的 EagCommandParser 前缀解析分发。
+              // 同一 EAG 命令名每会话仅自动执行一次（复用 executedKinds 一次性守卫防循环）。
+              const eagCommandName = extractAutoExecutableEagCommandName(suggestedCommand);
+              if (eagCommandName && !executedKinds.has(eagCommandName)) {
+                executedKinds.add(eagCommandName);
+                autoExecutedCommandsRef.current.set(finalActiveSessionId, executedKinds);
+                setStatusLine(`▶ 自动执行：${suggestedCommand}`);
+                // 纯文本注入：无 command 字段，与用户手输 /eag-autonomous 完全同路径
+                await handlePromptRef.current({ text: suggestedCommand, imageUrls: [] });
+              }
             }
           }
         }
