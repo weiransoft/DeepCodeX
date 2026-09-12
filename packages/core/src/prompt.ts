@@ -430,7 +430,7 @@ export function getCompactPrompt(sessionMessages: SessionMessage[]): string {
   return `${COMPACT_PROMPT_BASE}\n\nconversation below:\n\n\`\`\`jsonl\n${jsonl}\n\`\`\``;
 }
 
-export function getRuntimeContext(projectRoot: string, model?: string): string {
+export function getRuntimeContext(projectRoot: string, model?: string, addWorkingDirs: string[] = []): string {
   const uname = getUnameInfo();
   const shellPath = getShellPathInfo();
   const shellModeOpts = process.platform === "win32" ? { "shell mode": "git-bash" } : {};
@@ -438,6 +438,9 @@ export function getRuntimeContext(projectRoot: string, model?: string): string {
   const env = {
     "root path": projectRoot,
     pwd: projectRoot,
+    "additional working dirs": addWorkingDirs.map((directory) =>
+      path.isAbsolute(directory) ? path.resolve(directory) : path.resolve(projectRoot, directory)
+    ),
     homedir: os.homedir(),
     "system info": uname,
     "shell path": shellPath,
@@ -580,14 +583,16 @@ export function getTools(options: PromptToolOptions = {}, externalTools: ToolDef
             },
             sideEffects: {
               description:
-                'Permission scopes required by this bash command. Use [] only for commands that do not read, write, delete, or access the network. Use ["unknown"] when the effects cannot be classified safely.',
+                'Permission scopes required by this bash command. Treat the root path and additional working dirs from the runtime context as cwd; use read-in-tmp or write-in-tmp for /tmp and /private/tmp outside those directories. Use [] only for commands that do not read, write, delete, or access the network. Use ["unknown"] when the effects cannot be classified safely.',
               type: "array",
               items: {
                 type: "string",
                 enum: [
                   "read-in-cwd",
+                  "read-in-tmp",
                   "read-out-cwd",
                   "write-in-cwd",
+                  "write-in-tmp",
                   "write-out-cwd",
                   "delete-in-cwd",
                   "delete-out-cwd",

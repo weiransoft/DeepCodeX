@@ -7,6 +7,7 @@ import MarkdownIt from "markdown-it";
 import type { SessionMessage } from "@vegamo/deepcode-core";
 import {
   SessionManager,
+  type LlmRetryEvent,
   type LlmStreamProgress,
   type PermissionScope,
   type SessionEntry,
@@ -109,6 +110,15 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
         this.webviewView.webview.postMessage({
           type: "llmStreamProgress",
           progress,
+        });
+      },
+      onLlmRetry: (event: LlmRetryEvent) => {
+        if (!this.webviewView) {
+          return;
+        }
+        this.webviewView.webview.postMessage({
+          type: "llmRetry",
+          event,
         });
       },
     });
@@ -551,6 +561,9 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
     const cssUri = webview.asWebviewUri(cssPath);
     const attachmentsJsPath = vscode.Uri.joinPath(this.context.extensionUri, "resources", "prompt-attachments.js");
     const attachmentsJsUri = webview.asWebviewUri(attachmentsJsPath);
+    const thinkingPreviewJsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.context.extensionUri, "resources", "thinking-preview.js")
+    );
 
     // 获取 Logo 文件 URI
     const iconPath = vscode.Uri.joinPath(this.context.extensionUri, "resources", "deepcoding_icon.png");
@@ -561,6 +574,7 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
     html = html.replace(/\{\{cspSource\}\}/g, csp);
     html = html.replace(/\{\{cssUri\}\}/g, cssUri.toString());
     html = html.replace(/\{\{attachmentsJsUri\}\}/g, attachmentsJsUri.toString());
+    html = html.replace(/\{\{thinkingPreviewJsUri\}\}/g, thinkingPreviewJsUri.toString());
     html = html.replace(/\{\{iconUri\}\}/g, iconUri.toString());
     html = html.replace(/\{\{workspaceRoot\}\}/g, JSON.stringify(this.getWorkspaceRoot()));
 

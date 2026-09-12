@@ -2,6 +2,8 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
+import { stripVTControlCharacters } from "node:util";
+import { fileURLToPath, pathToFileURL } from "url";
 import matter from "gray-matter";
 import ejs from "ejs";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
@@ -216,6 +218,17 @@ import {
   type DeepSeekFileReference,
   type DeepSeekFilesPolicy,
 } from "./common/deepseek-files";
+import { loadImageFile } from "./tools/image-file";
+import {
+  getLlmRetryDelayMs,
+  getLlmRetryAfterMs,
+  isRetryableLlmError,
+  LLM_STREAM_IDLE_TIMEOUT_MS,
+  LlmStreamDisconnectedError,
+  LlmStreamIdleTimeoutError,
+  MAX_LLM_RETRIES,
+  waitForLlmRetry,
+} from "./common/llm-retry";
 
 export type { PermissionScope } from "./settings";
 export type {
@@ -416,6 +429,7 @@ export type MessageMeta = {
   paramsMd?: string;
   resultMd?: string;
   asThinking?: boolean;
+  isAnswers?: boolean;
   isSummary?: boolean;
   isModelChange?: boolean;
   skill?: SkillInfo;
@@ -476,12 +490,17 @@ export type UserPromptContent = {
    * （分别依据待答标记与 hasUserPermissionReplies），不经由此字段。
    */
   bypassEagSuggestion?: boolean;
+  /**
+   * upstream v0.4.0：标记本 UserPrompt 是否为 AskUserQuestion 的答案回复。
+   * SessionManager 在流式消费时据此识别答案消息，跳过 suggestion 分发，直送主对话。
+   */
+  isAnswers?: boolean;
 };
 
 // 上游 v0.3.1：多模态持久化图片（粘贴/拖拽图片在会话存储中的二进制表示）
 type PersistedPromptImage = {
   buffer: Buffer;
-  extension: ".jpg" | ".png" | ".webp";
+  extension: ".gif" | ".jpg" | ".png" | ".webp";
 };
 
 export type SkillInfo = {
@@ -531,6 +550,7 @@ export type SessionManagerOptions = {
   onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   onSessionEntryUpdated?: (entry: SessionEntry) => void;
   onLlmStreamProgress?: (progress: LlmStreamProgress) => void;
+  onLlmRetry?: (event: LlmRetryEvent) => void;
   onMcpStatusChanged?: () => void;
   onProcessStdout?: (pid: number, chunk: string) => void;
   /**
@@ -822,6 +842,7 @@ export type LlmStreamProgress = {
   startedAt: string;
   estimatedTokens: number;
   formattedTokens: string;
+  previewText?: string;
   phase: "start" | "update" | "end";
 };
 
@@ -846,6 +867,20 @@ type EagClarificationPending = {
 
 /** 最大澄清轮次，防止无限澄清循环 */
 const MAX_EAG_CLARIFICATION_ROUNDS = 3;
+
+/**
+ * upstream v0.4.0：LLM 自动重试事件。
+ * 当流式调用触发 LlmStreamIdleTimeoutError 等可重试错误时，
+ * SessionManager 发射此事件通知消费方（如 UI 展示重试状态）。
+ */
+export type LlmRetryEvent = {
+  requestId: string;
+  sessionId?: string;
+  error: string;
+  attempt: number;
+  maxRetries: number;
+  delayMs: number;
+};
 
 export class SessionManager {
   private readonly projectRoot: string;
@@ -875,6 +910,7 @@ export class SessionManager {
   private readonly onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   private readonly onSessionEntryUpdated?: (entry: SessionEntry) => void;
   private readonly onLlmStreamProgress?: (progress: LlmStreamProgress) => void;
+  private readonly onLlmRetry?: (event: LlmRetryEvent) => void;
   private readonly onMcpStatusChanged?: () => void;
   private readonly onProcessStdout?: (pid: number, chunk: string) => void;
   // 上游 v0.3.1：非交互模式标志（exec/headless 场景抑制交互式提示）
@@ -890,6 +926,7 @@ export class SessionManager {
   private readonly processTimeoutControls = new Map<string, ProcessTimeoutControl>();
   private readonly liveProcessKeys = new Set<string>();
   private readonly toolExecutor: ToolExecutor;
+  private readonly loadSharp?: SharpLoader;
   private readonly mcpManager = new McpManager();
   private mcpToolDefinitions: ToolDefinition[] = [];
   // 一期 US-EH-001：执行历史存储（构造时初始化，fire-and-forget 写入）
@@ -983,10 +1020,12 @@ export class SessionManager {
     this.onAssistantMessage = options.onAssistantMessage;
     this.onSessionEntryUpdated = options.onSessionEntryUpdated;
     this.onLlmStreamProgress = options.onLlmStreamProgress;
+    this.onLlmRetry = options.onLlmRetry;
     this.onMcpStatusChanged = options.onMcpStatusChanged;
     this.onProcessStdout = options.onProcessStdout;
     // 合并说明：ToolExecutor 第 4 参保持 fork 侧 createLLMClient 工厂（B1 统一 LLM 路由），
     // 第 5 参采纳上游 v0.3.1 的 loadSharp（sharp 图片库懒加载，ReadImage/UnderstandImage 依赖）
+    this.loadSharp = options.loadSharp;
     this.toolExecutor = new ToolExecutor(
       this.projectRoot,
       this.createOpenAIClient,
@@ -1191,12 +1230,23 @@ export class SessionManager {
     return formatEstimatedTokensImpl(tokens);
   }
 
+  private formatStreamPreview(text?: string): string | undefined {
+    if (text === undefined) {
+      return undefined;
+    }
+
+    return stripVTControlCharacters(text)
+      .replace(/\r\n|[\r\n\t\u2028\u2029]/g, " ")
+      .replace(/[\x00-\x1f\x7f-\x9f]/g, "");
+  }
+
   private emitLlmStreamProgress(
     requestId: string,
     startedAt: string,
     estimatedTokens: number,
     phase: LlmStreamProgress["phase"],
-    sessionId?: string
+    sessionId?: string,
+    previewText?: string
   ): void {
     this.onLlmStreamProgress?.({
       requestId,
@@ -1204,6 +1254,7 @@ export class SessionManager {
       startedAt,
       estimatedTokens: Math.round(estimatedTokens),
       formattedTokens: this.formatEstimatedTokens(estimatedTokens),
+      previewText: this.formatStreamPreview(previewText),
       phase,
     });
   }
@@ -1274,6 +1325,7 @@ export class SessionManager {
       image: ReturnType<typeof decodeDeepSeekImageDataUrl>;
     }> = [];
     let totalBytes = 0;
+    const uniqueImages = new Map<string, ReturnType<typeof decodeDeepSeekImageDataUrl>>();
 
     // 遍历转换后的消息，收集全部 image_url 内容块并校验总字节上限
     for (let messageIndex = 0; messageIndex < converted.length; messageIndex += 1) {
@@ -1287,21 +1339,26 @@ export class SessionManager {
           continue;
         }
         const image = decodeDeepSeekImageDataUrl(part.image_url.url, images.length);
-        totalBytes += image.buffer.byteLength;
-        if (totalBytes > settings.maxRequestFilesBytes) {
-          throw new Error(
-            `Images in this request exceed the configured ${settings.maxRequestFilesBytes}-byte Files API limit.`
-          );
+        if (!uniqueImages.has(image.hash)) {
+          totalBytes += image.buffer.byteLength;
+          if (totalBytes > settings.maxRequestFilesBytes) {
+            throw new Error(
+              `Images in this request exceed the configured ${settings.maxRequestFilesBytes}-byte Files API limit.`
+            );
+          }
+          uniqueImages.set(image.hash, image);
         }
         images.push({ messageIndex, contentIndex, image });
       }
     }
 
     // 并行上传全部图片，拿到 file_id 引用
+    const uniqueImageList = [...uniqueImages.values()];
     const references = await Promise.all(
-      images.map(({ image }) => this.deepSeekFiles.ensureUploaded(image, apiKey, settings.policy, signal))
+      uniqueImageList.map((image) => this.deepSeekFiles.ensureUploaded(image, apiKey, settings.policy, signal))
     );
     // 浅拷贝含数组 content 的消息，避免原地修改缓存数据
+    const referencesByHash = new Map(uniqueImageList.map((image, index) => [image.hash, references[index]] as const));
     const result = converted.map((message) => {
       const content = (message as { content?: unknown }).content;
       return Array.isArray(content) ? ({ ...message, content: [...content] } as ChatCompletionMessageParam) : message;
@@ -1310,7 +1367,7 @@ export class SessionManager {
     for (let index = 0; index < images.length; index += 1) {
       const image = images[index];
       const content = (result[image.messageIndex] as { content: unknown[] }).content;
-      content[image.contentIndex] = { type: "file", file_id: references[index].fileId };
+      content[image.contentIndex] = { type: "file", file_id: referencesByHash.get(image.image.hash)!.fileId };
     }
     return { messages: result, references };
   }
@@ -1411,13 +1468,60 @@ export class SessionManager {
     choices?: Array<{ message?: Record<string, unknown> }>;
     usage?: ModelUsage | null;
   }> {
+    // 合并说明：两层重试循环协同工作——
+    // - upstream 0.4.0 外层：跨 attempt 重试断连 / EOF / idle timeout / 5xx 等（非 400）
+    // - fork 内层（createChatCompletionStreamAttempt）：attempt 内部重试空 body 400 瞬态错误
+    // 两层不冲突：内层处理完 400 后，不可重试的错误（500/断连/EOF）会 throw 给外层，
+    // 外层根据 isRetryableLlmError 决定是否跨 attempt 重试。
     const requestId = crypto.randomUUID();
+    const signal = options?.signal as AbortSignal | undefined;
+    for (let retryCount = 0; ; retryCount += 1) {
+      try {
+        return await this.createChatCompletionStreamAttempt(client, request, options, sessionId, debug, requestId);
+      } catch (error) {
+        if (signal?.aborted || retryCount >= MAX_LLM_RETRIES || !isRetryableLlmError(error)) {
+          throw error;
+        }
+        const attempt = retryCount + 1;
+        const delayMs = getLlmRetryAfterMs(error) ?? getLlmRetryDelayMs(attempt);
+        const errorMessage = describeLlmError(error);
+        if (sessionId) {
+          this.onAssistantMessage(
+            this.buildAssistantMessage(sessionId, `Request failed: ${errorMessage}`, null),
+            false
+          );
+        }
+        this.onLlmRetry?.({
+          requestId,
+          sessionId,
+          error: errorMessage,
+          attempt,
+          maxRetries: MAX_LLM_RETRIES,
+          delayMs,
+        });
+        await waitForLlmRetry(delayMs, signal);
+      }
+    }
+  }
+
+  private async createChatCompletionStreamAttempt(
+    client: NonNullable<ReturnType<CreateOpenAIClient>["client"]>,
+    request: Record<string, unknown>,
+    options: Record<string, unknown> | undefined,
+    sessionId: string | undefined,
+    debug: ChatCompletionDebugOptions | undefined,
+    requestId: string
+  ): Promise<{
+    choices?: Array<{ message?: Record<string, unknown> }>;
+    usage?: ModelUsage | null;
+  }> {
     const startedAt = new Date().toISOString();
     const startedAtMs = Date.now();
     let estimatedTokens = 0;
     this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "start", sessionId);
 
-    // 提取流式安全控制参数（非 OpenAI SDK 标准字段，需在传给 SDK 前过滤）
+    // ===== Fork + upstream 融合的安全控制层 =====
+    // --- Fork 侧：提取非 SDK 标准参数（需过滤后再传给 SDK）---
     const rawSignal =
       options && typeof options.signal === "object" && options.signal instanceof AbortSignal
         ? options.signal
@@ -1431,26 +1535,51 @@ export class SessionManager {
         ? ((options as Record<string, unknown>).streamTimeoutMs as number)
         : undefined;
 
-    // 构造统一的安全控制器：聚合外部 signal、超时 signal 与内部主动中断。
-    // 通过 AbortController 管理，确保需要主动中断（如 reasoning 超长）时可调用 abort()。
-    const safetyController = new AbortController();
-    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-    const propagateAbort = () => {
-      safetyController.abort();
-    };
-    if (rawSignal) {
-      if (rawSignal.aborted) {
-        safetyController.abort();
-      } else {
-        rawSignal.addEventListener("abort", propagateAbort, { once: true });
+    // --- upstream v0.4.0：空闲自动超时机制 ---
+    // attemptController 是主 abort 控制器，聚合：
+    //   (a) 外部 rawSignal 的 abort 事件
+    //   (b) idle timeout（每个 chunk 后 reset，空闲超时则 abort）
+    //   (c) fork 的 streamTimeoutMs 总超时
+    //   (d) fork 的 maxReasoningLength 超限时的主动 abort
+    const attemptController = new AbortController();
+    let idleTimedOut = false;
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    let idleTimeoutPromise: Promise<never>;
+    const forwardAbort = () => attemptController.abort(rawSignal?.reason);
+    const clearAttempt = () => {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
       }
-    }
-    if (streamTimeoutMs && streamTimeoutMs > 0) {
-      timeoutHandle = setTimeout(() => safetyController.abort(), streamTimeoutMs);
+      rawSignal?.removeEventListener("abort", forwardAbort);
+    };
+    const resetIdleTimer = () => {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
+      idleTimeoutPromise = new Promise((_, reject) => {
+        idleTimer = setTimeout(() => {
+          idleTimedOut = true;
+          const error = new LlmStreamIdleTimeoutError();
+          attemptController.abort(error);
+          reject(error);
+        }, LLM_STREAM_IDLE_TIMEOUT_MS);
+      });
+    };
+    if (rawSignal?.aborted) {
+      forwardAbort();
+    } else {
+      rawSignal?.addEventListener("abort", forwardAbort, { once: true });
     }
 
-    // 构造 SDK 选项：只保留 SDK 认识的 signal
-    const sdkOptions: Record<string, unknown> = { signal: safetyController.signal };
+    // --- Fork 侧：streamTimeoutMs 总超时（聚合到 attemptController）---
+    let streamTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    if (streamTimeoutMs && streamTimeoutMs > 0) {
+      streamTimeoutHandle = setTimeout(() => attemptController.abort(), streamTimeoutMs);
+    }
+
+    // --- SDK 选项：仅保留 SDK 认识的字段，非标准字段（maxReasoningLength/streamTimeoutMs）已在上部过滤 ---
+    const attemptOptions: Record<string, unknown> = { signal: attemptController.signal, maxRetries: 0 };
 
     const streamRequest = {
       ...request,
@@ -1462,30 +1591,58 @@ export class SessionManager {
     };
 
     let response: unknown;
-    // 空 body 400 瞬态错误退避重试（2026-09-04）：
-    // 共用 GPU 推理服务器在瞬时资源压力下，代理层会把内部抛错转成无诊断信息的
-    // "400 status code (no body)"。此类错误重放实验证明请求必然合法，重试安全且正确；
-    // 带 JSON 错误体的真 400（参数/校验错误）有明确诊断信息，立即抛出不重试。
-    // 重试策略：最多额外重试 2 次，退避间隔 2s / 5s；期间收到中止信号立即放弃重试。
+    // ===== Fork 侧：空 body 400 瞬态错误退避重试 + upstream idle timeout =====
+    // 外层重试循环处理 "400 status code (no body)" 瞬态错误；
+    // 内层每次 attempt 都 resetIdleTimer 并用 Promise.race 包裹 SDK 调用，
+    // 使 idle timeout 和 retry 机制协同工作。
     for (let attempt = 0; ; attempt += 1) {
+      resetIdleTimer();
       try {
-        response = await (
-          client.chat.completions.create as unknown as (
-            body: Record<string, unknown>,
-            options?: Record<string, unknown>
-          ) => Promise<unknown>
-        )(
-          // fork 侧：传 sdkOptions（仅含安全控制器的 signal），非 SDK 标准字段已在上方过滤
-          streamRequest,
-          sdkOptions
-        );
+        response = await Promise.race([
+          (
+            client.chat.completions.create as unknown as (
+              body: Record<string, unknown>,
+              options?: Record<string, unknown>
+            ) => Promise<unknown>
+          )(streamRequest, attemptOptions),
+          idleTimeoutPromise!,
+        ]);
         break;
       } catch (error) {
-        // 判定是否值得重试：仅"空 body 400"且未耗尽重试次数且未被中止
+        // idle timeout 属于流级问题，不可重试；空 body 400 是请求级瞬态，可重试
+        if (error instanceof LlmStreamIdleTimeoutError || idleTimedOut) {
+          idleTimedOut = true;
+          clearAttempt();
+          this.logChatCompletionDebug(debug, {
+            timestamp: new Date().toISOString(),
+            location: debug?.location ?? "SessionManager.createChatCompletionStream:create",
+            requestId,
+            sessionId,
+            model: typeof request.model === "string" ? request.model : undefined,
+            baseURL: debug?.baseURL,
+            durationMs: Date.now() - startedAtMs,
+            params: { ...debug?.params, options: summarizeCompletionOptions(attemptOptions) },
+            request: streamRequest,
+            error: normalizeDebugError(new LlmStreamIdleTimeoutError()),
+          });
+          logApiError({
+            timestamp: new Date().toISOString(),
+            location: "SessionManager.createChatCompletionStream:create",
+            requestId,
+            sessionId,
+            model: typeof request.model === "string" ? request.model : undefined,
+            error: getLlmErrorDetails(new LlmStreamIdleTimeoutError()),
+            request: streamRequest,
+          });
+          this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "end", sessionId);
+          throw new LlmStreamIdleTimeoutError();
+        }
+
+        // 判定是否可重试：仅"空 body 400"且未耗尽重试次数且未被中止
         const canRetry =
           this.isTransientEmptyBody400Error(error) &&
           attempt < SessionManager.TRANSIENT_EMPTY_BODY_400_MAX_RETRIES &&
-          !safetyController.signal.aborted;
+          !attemptController.signal.aborted;
         const retryDelayMs = canRetry ? SessionManager.TRANSIENT_EMPTY_BODY_400_RETRY_DELAYS_MS[attempt] : null;
         this.logChatCompletionDebug(debug, {
           timestamp: new Date().toISOString(),
@@ -1495,7 +1652,7 @@ export class SessionManager {
           model: typeof request.model === "string" ? request.model : undefined,
           baseURL: debug?.baseURL,
           durationMs: Date.now() - startedAtMs,
-          params: { ...debug?.params, options: summarizeCompletionOptions(options) },
+          params: { ...debug?.params, options: summarizeCompletionOptions(attemptOptions) },
           request: streamRequest,
           error: normalizeDebugError(error),
         });
@@ -1509,18 +1666,19 @@ export class SessionManager {
           request: streamRequest,
         });
         if (retryDelayMs === null) {
-          // 不可重试（真 400 / 非 400 错误 / 重试耗尽 / 已中止）：结束进度事件并抛出
+          // 不可重试（真 400 / 非 400 错误 / 重试耗尽 / 已中止）：清理 + 结束进度 + 抛出
+          clearAttempt();
           this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "end", sessionId);
           throw error;
         }
-        // 可重试：记录退避等待提示（方便事后从诊断日志识别重试行为），等待后重新调用 SDK。
-        // 注意：不发出 "end" 进度事件——本 turn 仍在进行，重试成功后继续正常流式消费。
+        // 可重试：退避等待，期间若被 abort 则提前退出
         console.warn(
           `[llm-retry] 空 body 400 瞬态错误（第 ${attempt + 1}/2 次重试，${retryDelayMs}ms 后重试）：requestId=${requestId} sessionId=${sessionId ?? "n/a"}`
         );
-        await this.sleepWithAbort(retryDelayMs, safetyController.signal);
-        if (safetyController.signal.aborted) {
-          // 等待期间被中止（用户中断/流超时）：按最终失败处理
+        await this.sleepWithAbort(retryDelayMs, attemptController.signal);
+        if (attemptController.signal.aborted) {
+          // 等待期间被中止（用户中断/总超时）：清理 + 结束进度 + 抛出原错误
+          clearAttempt();
           this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "end", sessionId);
           throw error;
         }
@@ -1528,6 +1686,7 @@ export class SessionManager {
     }
 
     if (!response || typeof (response as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] !== "function") {
+      clearAttempt();
       this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "end", sessionId);
       this.logChatCompletionDebug(debug, {
         timestamp: new Date().toISOString(),
@@ -1537,7 +1696,7 @@ export class SessionManager {
         model: typeof request.model === "string" ? request.model : undefined,
         baseURL: debug?.baseURL,
         durationMs: Date.now() - startedAtMs,
-        params: { ...debug?.params, options: summarizeCompletionOptions(options) },
+        params: { ...debug?.params, options: summarizeCompletionOptions(attemptOptions) },
         request: streamRequest,
         response,
       });
@@ -1548,6 +1707,7 @@ export class SessionManager {
     let reasoningContent = "";
     let refusal: string | null = null;
     let usage: ModelUsage | null = null;
+    let streamCompleted = false;
     const responseChunks: unknown[] = [];
     const toolCallsByIndex = new Map<
       number,
@@ -1558,16 +1718,30 @@ export class SessionManager {
       }
     >();
 
-    const trackText = (value: unknown) => {
+    let previewText = "";
+    const trackText = (value: unknown, includeInPreview = false) => {
       if (typeof value !== "string" || value.length === 0) {
         return;
       }
       estimatedTokens += this.estimateStreamTokens(value);
-      this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "update", sessionId);
+      if (includeInPreview) {
+        previewText += value;
+      }
+      this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "update", sessionId, previewText);
     };
 
     try {
-      for await (const chunk of response as AsyncIterable<Record<string, unknown>>) {
+      // upstream v0.4.0：手动 iterator + Promise.race idle timeout
+      // fork 增强：InjectInterruptError 中断检查（嵌入每次迭代头部）
+      const iterator = (response as AsyncIterable<Record<string, unknown>>)[Symbol.asyncIterator]();
+      for (;;) {
+        const item = await Promise.race([iterator.next(), idleTimeoutPromise!]);
+        if (item.done) {
+          break;
+        }
+        const chunk = item.value;
+        resetIdleTimer();
+
         // E3 扩展点（ADR-DI-001 §5.1.3）：流式 chunk 之间检查中断队列
         //
         // 设计约束（Karpathy Surgical Changes）：
@@ -1581,21 +1755,24 @@ export class SessionManager {
         // - InjectInterruptError 走 catch 块 finally 路径，emitLlmStreamProgress 仍正常触发
         // - logChatCompletionDebug / logApiError 不会被 InjectInterruptError 触发（异常路径由
         //   activateSession catch 块单独识别，本 catch 块重新 throw 让上层处理）
-        // - 不调用 controller.abort()（避免与 cancel/pause 信号混淆）
+        // - 不调用 attemptController.abort()（避免与 cancel/pause/idle timeout 信号混淆）
         if (this.interruptQueue && this.interruptQueue.size > 0) {
-          // 抛出 InjectInterruptError，由 activateSession catch 块识别并 continue 进入下一轮迭代
-          // 注：pendingCount 字段携带当前队列长度，便于日志与 UI 展示
           throw new InjectInterruptError(this.interruptQueue.size);
         }
+
         if (debug?.enabled) {
           responseChunks.push(chunk);
         }
         if ("usage" in chunk && chunk.usage != null) {
           usage = chunk.usage as ModelUsage;
+          streamCompleted = true;
         }
 
         const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
         for (const choice of choices) {
+          if (isUsageRecord(choice) && choice.finish_reason != null) {
+            streamCompleted = true;
+          }
           const delta = isUsageRecord(choice) && isUsageRecord(choice.delta) ? choice.delta : null;
           if (!delta) {
             continue;
@@ -1604,18 +1781,17 @@ export class SessionManager {
           const contentDelta = delta.content;
           if (typeof contentDelta === "string") {
             content += contentDelta;
-            trackText(contentDelta);
+            trackText(contentDelta, true);
           }
 
           const reasoningDelta = delta.reasoning_content ?? delta.reasoning;
           if (typeof reasoningDelta === "string") {
             reasoningContent += reasoningDelta;
-            trackText(reasoningDelta);
-            // Skill matching 等短输出场景防护：reasoning 模型（如 Qwen3）可能在 thinking
-            // 过程中陷入循环，产生超长 reasoning 内容。超过阈值时立即 abort 并抛错，
-            // 由上层 catch 安全降级（如 identifyMatchingSkillNames 返回空数组）。
+            // upstream: includeInPreview=true（reasoning 也进入预览文本）
+            trackText(reasoningDelta, true);
+            // fork: Skill matching 等短输出场景防护——reasoning 模型可能陷入循环
             if (maxReasoningLength && reasoningContent.length > maxReasoningLength) {
-              safetyController.abort();
+              attemptController.abort();
               throw new Error(`reasoning content exceeded safety limit (${maxReasoningLength} chars)`);
             }
           }
@@ -1656,17 +1832,16 @@ export class SessionManager {
           }
         }
       }
+      if (!streamCompleted) {
+        throw new LlmStreamDisconnectedError();
+      }
     } catch (error) {
-      // E3 扩展点（ADR-DI-001 §5.1.3）：InjectInterruptError 是流控制信号，不是错误
-      //
-      // 设计约束：
-      // - 不记录 logApiError（避免污染 API 错误日志，这是用户主动注入指令的正常流程）
-      // - 不记录 logChatCompletionDebug（流被中断是预期行为，非调试关注点）
-      // - 直接 re-throw，由 activateSession 主循环 catch 块识别并 continue 进入下一轮迭代
-      // - finally 块的 emitLlmStreamProgress("end") 仍正常触发（保证 UI 流式进度闭环）
+      // fork E3：InjectInterruptError 是流控制信号，不是错误——不记录日志，直接 rethrow
       if (error instanceof InjectInterruptError) {
         throw error;
       }
+      // upstream v0.4.0：idle 超时映射为专用错误类型
+      const streamError = idleTimedOut ? new LlmStreamIdleTimeoutError() : error;
       this.logChatCompletionDebug(debug, {
         timestamp: new Date().toISOString(),
         location: debug?.location ?? "SessionManager.createChatCompletionStream:stream",
@@ -1675,10 +1850,10 @@ export class SessionManager {
         model: typeof request.model === "string" ? request.model : undefined,
         baseURL: debug?.baseURL,
         durationMs: Date.now() - startedAtMs,
-        params: { ...debug?.params, options: summarizeCompletionOptions(options) },
+        params: { ...debug?.params, options: summarizeCompletionOptions(attemptOptions) },
         request: streamRequest,
         responseChunks,
-        error: normalizeDebugError(error),
+        error: normalizeDebugError(streamError),
       });
       logApiError({
         timestamp: new Date().toISOString(),
@@ -1686,17 +1861,16 @@ export class SessionManager {
         requestId,
         sessionId,
         model: typeof request.model === "string" ? request.model : undefined,
-        error: getLlmErrorDetails(error),
+        error: getLlmErrorDetails(streamError),
         request: streamRequest,
       });
-      throw error;
+      throw streamError;
     } finally {
-      // fork 侧：清理超时定时器与外部 signal 监听器，避免泄漏
-      if (timeoutHandle) {
-        clearTimeout(timeoutHandle);
-      }
-      if (rawSignal) {
-        rawSignal.removeEventListener("abort", propagateAbort);
+      // upstream v0.4.0：清理 idleTimer + rawSignal 监听器
+      clearAttempt();
+      // fork：清理总超时定时器（聚合到 attemptController，独立于 clearAttempt）
+      if (streamTimeoutHandle) {
+        clearTimeout(streamTimeoutHandle);
       }
       this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "end", sessionId);
     }
@@ -1728,7 +1902,7 @@ export class SessionManager {
       model: typeof request.model === "string" ? request.model : undefined,
       baseURL: debug?.baseURL,
       durationMs: Date.now() - startedAtMs,
-      params: { ...debug?.params, options: summarizeCompletionOptions(options) },
+      params: { ...debug?.params, options: summarizeCompletionOptions(attemptOptions) },
       request: streamRequest,
       responseChunks,
       response: finalResponse,
@@ -2470,7 +2644,11 @@ ${agentInstructions}
 
     const runtimeContextMessage = this.buildSystemMessage(
       sessionId,
-      getRuntimeContext(this.projectRoot, promptToolOptions.model)
+      getRuntimeContext(
+        this.projectRoot,
+        promptToolOptions.model,
+        this.getResolvedSettings().permissions?.addWorkingDirs
+      )
     );
     this.appendSessionMessage(sessionId, runtimeContextMessage);
 
@@ -5629,9 +5807,16 @@ ${agentInstructions}
           }
         }
 
-        // 上游 v0.3.1：请求前预处理会话消息（多模态图片消息等转换为请求所需形态）
-        const sessionMessages = this.prepareSessionMessagesForRequest(this.listSessionMessages(sessionId));
-        // 上游 v0.3.1：DeepSeek Files API 设置（启用时大文件上传至 Files API，消息中仅保留引用）
+        // upstream v0.4.0：attachPromptImagesForRequest 包裹 prepareSessionMessagesForRequest（多模态图片）
+        const sessionMessages = await this.attachPromptImagesForRequest(
+          this.prepareSessionMessagesForRequest(this.listSessionMessages(sessionId)),
+          model,
+          this.getResolvedSettings().multimodal
+        );
+        if (this.isInterrupted(sessionId)) {
+          return;
+        }
+        // upstream：DeepSeek Files API 设置
         const filesSettings = this.getDeepSeekFilesSettings();
         if (filesSettings.enabled && !apiKey) {
           throw new Error("Files API is enabled, but no API key is available for uploads.");
@@ -6421,6 +6606,71 @@ ${agentInstructions}
     return prepared;
   }
 
+  private async attachPromptImagesForRequest(
+    messages: SessionMessage[],
+    model: string,
+    multimodal: MultimodalMode = "default"
+  ): Promise<SessionMessage[]> {
+    const includeImageContent = supportsMultimodal(model, multimodal);
+    const prepared = await Promise.all(
+      messages.map(async (message) => {
+        const imageUrls = message.role === "user" ? message.meta?.userPrompt?.imageUrls : undefined;
+        const promptImages: Array<{ source: "file" | "url"; value: string }> = [];
+        for (const imageUrl of imageUrls ?? []) {
+          const filePath = this.getLocalPromptImagePath(imageUrl);
+          if (filePath) {
+            promptImages.push({ source: "file", value: filePath });
+          } else if (/^https?:\/\//i.test(imageUrl)) {
+            promptImages.push({ source: "url", value: imageUrl });
+          }
+        }
+        if (promptImages.length === 0) {
+          return message;
+        }
+
+        const contentParams = Array.isArray(message.contentParams)
+          ? [...message.contentParams]
+          : message.contentParams
+            ? [message.contentParams]
+            : [];
+        if (includeImageContent) {
+          const imageParts = await Promise.all(
+            promptImages.map(async ({ source, value }) => {
+              if (source === "url") {
+                return { type: "image_url", image_url: { url: value } };
+              }
+              const { image } = await loadImageFile(value, this.loadSharp);
+              return {
+                type: "image_url",
+                image_url: { url: `data:${image.mediaType};base64,${image.data.toString("base64")}` },
+              };
+            })
+          );
+          for (const imagePart of imageParts) {
+            contentParams.push(imagePart);
+          }
+        }
+        if (!includeImageContent) {
+          contentParams.push({
+            type: "text",
+            text: `<message_meta>\n${JSON.stringify({ images: promptImages.map(({ value }) => value) }, null, 2)}\n</message_meta>`,
+          });
+        }
+        return { ...message, contentParams };
+      })
+    );
+    return prepared;
+  }
+
+  private getLocalPromptImagePath(imageUrl: string): string | null {
+    try {
+      const url = new URL(imageUrl);
+      return url.protocol === "file:" ? fileURLToPath(url) : null;
+    } catch {
+      return null;
+    }
+  }
+
   private reportNewPrompt(): void {
     const { machineId, telemetryEnabled } = this.createOpenAIClient();
     reportNewPrompt({ enabled: telemetryEnabled ?? true, machineId });
@@ -6985,57 +7235,62 @@ ${agentInstructions}
 
   private buildUserMessage(sessionId: string, prompt: UserPromptContent): SessionMessage {
     const now = new Date().toISOString();
-    const imageParams =
-      prompt.imageUrls
-        ?.filter((url) => Boolean(url))
-        .map((url) => ({
-          type: "image_url",
-          image_url: { url },
-        })) ?? [];
 
     return {
       id: crypto.randomUUID(),
       sessionId,
       role: "user",
       content: prompt.text ?? "",
-      contentParams: imageParams.length > 0 ? imageParams : null,
+      contentParams: null,
       messageParams: null,
       compacted: false,
       visible: true,
       createTime: now,
       updateTime: now,
-      meta: { userPrompt: this.cloneUserPromptForMeta(prompt) },
-      // fork：checkpoint 哈希经 coordinator 读取（与上游 this.getCurrentCheckpointHash
+      meta: {
+        userPrompt: this.cloneUserPromptForMeta(prompt),
+        // upstream v0.4.0：isAnswers 标记（上游新增）
+        isAnswers: prompt.isAnswers,
+      },
+      // fork：checkpoint 哈希经 coordinator 读取（与 upstream getCurrentCheckpointHash
       // 语义一致，操作同一 file-history git 仓库）
       checkpointHash: this.fileHistoryCoordinator.getCurrentCheckpointHash(sessionId),
     };
   }
 
-  // 上游 v0.3.1：多模态图片持久化——当 Files API 未启用且模型不支持原生多模态时，
-  // 把粘贴的 data URL 图片解码落盘到会话图片目录，并在文本末尾追加 <images> XML
-  // （标注本地路径与编号），供 ReadImage 工具按路径读取
+  // 上游 v0.3.1 + v0.4.0 融合：多模态图片持久化——
+  // - 把粘贴的 data URL 图片解码落盘到会话图片目录
+  // - 仅设置 imageUrls（不再追加 <images> XML 到 text），
+  //   由 upstream 0.4.0 的 attachPromptImagesForRequest 在构造 LLM 请求时处理
   private preparePromptImages(sessionId: string, prompt: UserPromptContent): UserPromptContent {
-    if (this.getDeepSeekFilesSettings().enabled) {
-      return prompt;
-    }
-    if (supportsMultimodal(this.getResolvedSettings().model, this.getResolvedSettings().multimodal)) {
-      return prompt;
-    }
-
     const imageUrls = prompt.imageUrls?.filter(Boolean) ?? [];
     if (imageUrls.length === 0) {
       return prompt;
     }
 
-    const images = imageUrls.map((dataUrl, index) => this.decodePersistedPromptImage(dataUrl, index));
+    const preparedUrls: string[] = [];
     const imagesDir = this.getSessionImagesDir(sessionId);
     const createdPaths: string[] = [];
     try {
-      fs.mkdirSync(imagesDir, { recursive: true });
-      for (const image of images) {
+      for (let index = 0; index < imageUrls.length; index += 1) {
+        const imageUrl = imageUrls[index];
+        if (!imageUrl.startsWith("data:")) {
+          if (imageUrl.startsWith("file:")) {
+            const url = new URL(imageUrl);
+            fileURLToPath(url);
+            preparedUrls.push(url.href);
+          } else {
+            preparedUrls.push(imageUrl);
+          }
+          continue;
+        }
+
+        const image = this.decodePersistedPromptImage(imageUrl, index);
+        fs.mkdirSync(imagesDir, { recursive: true });
         const imagePath = path.join(imagesDir, `${crypto.randomUUID()}${image.extension}`);
         fs.writeFileSync(imagePath, image.buffer, { flag: "wx", mode: 0o600 });
         createdPaths.push(imagePath);
+        preparedUrls.push(pathToFileURL(imagePath).href);
       }
     } catch (error) {
       // 写盘失败时回滚本次已创建的图片文件（尽力而为），保留历史会话的图片目录
@@ -7055,30 +7310,32 @@ ${agentInstructions}
       throw new Error(`Failed to save pasted image: ${message}`);
     }
 
-    // 以 XML 形式把图片路径注入 prompt 文本（ReadImage 工具按 name/path 读取）
-    const imageXml = [
-      "<images>",
-      ...createdPaths.map((imagePath, index) => `  <image name="[Image #${index + 1}]" path="${imagePath}" />`),
-      "</images>",
-    ].join("\n");
-    const text = prompt.text?.trimEnd() ?? "";
+    // upstream 0.4.0：不再把图片路径拼 XML 追加到 text——
+    // attachPromptImagesForRequest 会从 imageUrls 构造 LLM 请求中的图片内容
     return {
       ...prompt,
-      text: text ? `${text}\n\n${imageXml}` : imageXml,
+      imageUrls: preparedUrls,
     };
   }
 
   // 上游 v0.3.1：解码 data URL 图片（仅支持 JPEG/PNG/WebP），返回二进制与扩展名
   private decodePersistedPromptImage(dataUrl: string, index: number): PersistedPromptImage {
-    const match = /^data:(image\/(?:jpeg|jpg|png|webp));base64,([A-Za-z0-9+/=\r\n]+)$/i.exec(dataUrl);
+    const match = /^data:(image\/(?:gif|jpeg|jpg|png|webp));base64,([A-Za-z0-9+/=\r\n]+)$/i.exec(dataUrl);
     if (!match) {
-      throw new Error(`Image #${index + 1} is invalid or unsupported. Only JPEG, PNG, and WebP are supported.`);
+      throw new Error(`Image #${index + 1} is invalid or unsupported. Only GIF, JPEG, PNG, and WebP are supported.`);
     }
 
     const payload = match[2].replace(/[\r\n]/g, "");
     const buffer = Buffer.from(payload, "base64");
     const mimeType = match[1].toLowerCase();
-    const extension = mimeType === "image/png" ? ".png" : mimeType === "image/webp" ? ".webp" : ".jpg";
+    const extension =
+      mimeType === "image/gif"
+        ? ".gif"
+        : mimeType === "image/png"
+          ? ".png"
+          : mimeType === "image/webp"
+            ? ".webp"
+            : ".jpg";
     return { buffer, extension };
   }
 
@@ -7098,7 +7355,12 @@ ${agentInstructions}
     try {
       fs.mkdirSync(path.dirname(targetDir), { recursive: true });
       fs.cpSync(sourceDir, targetDir, { recursive: true, errorOnExist: true });
-      return replaceStringValues(messages, sourceDir, targetDir) as SessionMessage[];
+      const replacedPaths = replaceStringValues(messages, sourceDir, targetDir);
+      return replaceStringValues(
+        replacedPaths,
+        pathToFileURL(sourceDir).href,
+        pathToFileURL(targetDir).href
+      ) as SessionMessage[];
     } catch (error) {
       // 复制失败时清理目标目录（避免残留半成品），保留原始错误信息
       try {
@@ -7385,6 +7647,7 @@ ${agentInstructions}
     // 上游 v0.3.1：记录本批次已加载的技能名（避免同批次重复加载）
     const loadedSkillNames = new Set<string>();
     const hooks: ToolExecutionHooks = {
+      signal: this.sessionControllers.get(sessionId)?.signal,
       onProcessStart: (pid, command) => this.addSessionProcess(sessionId, pid, command),
       onProcessExit: (pid) => this.removeSessionProcess(sessionId, pid),
       onProcessStdout: (pid, chunk) => this.onProcessStdout?.(Number(pid), chunk),
@@ -7482,9 +7745,11 @@ ${agentInstructions}
       permissions: prompt.permissions ? prompt.permissions.map((permission) => ({ ...permission })) : undefined,
       alwaysAllows: prompt.alwaysAllows ? [...prompt.alwaysAllows] : undefined,
       planMode: prompt.planMode,
-      // EAG-P2 批次 9 S5：透传 messageParams 元数据（含 codingLoopRequest 等）
+      // upstream v0.4.0：isAnswers 标记（上游新增）
+      isAnswers: prompt.isAnswers,
+      // fork：EAG-P2 批次 9 S5——透传 messageParams 元数据（含 codingLoopRequest 等）
       messageParams: prompt.messageParams ? { ...prompt.messageParams } : undefined,
-      // F8（2026-09-04）：透传旁路建议层标记，保证元数据克隆后语义不变
+      // fork：F8（2026-09-04）——透传旁路建议层标记，保证元数据克隆后语义不变
       bypassEagSuggestion: prompt.bypassEagSuggestion,
     };
   }

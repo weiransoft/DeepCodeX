@@ -11,8 +11,14 @@ type ThinkingModeOption = {
   reasoningEffort?: ReasoningEffort;
 };
 
-// 上游 v0.3.1：模型下拉新增 deepseek-v4-flash-vision-exp 视觉实验模型
-export const MODEL_COMMAND_MODELS = ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"] as const;
+// 融合两侧：fork 保留 deepseek-v4-pro / deepseek-v4-flash / deepseek-v4-flash-vision-exp，
+// 上游 v0.4.0 新增 deepseek-flash
+export const MODEL_COMMAND_MODELS = [
+  "deepseek-flash",
+  "deepseek-v4-pro",
+  "deepseek-v4-flash",
+  "deepseek-v4-flash-vision-exp",
+] as const;
 
 // v1.2 变更（Qwen3.8 适配，见 docs/qwen38-adaptation.md D7）：
 // 新增 xhigh / medium 档位选项（Qwen3.8 官方 reasoning_effort 档位为 low/medium/xhigh），

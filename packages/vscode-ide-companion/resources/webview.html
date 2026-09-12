@@ -100,6 +100,7 @@
     </div>
 
     <script nonce="{{nonce}}" src="{{attachmentsJsUri}}"></script>
+    <script nonce="{{nonce}}" src="{{thinkingPreviewJsUri}}"></script>
     <script nonce="{{nonce}}">
       const vscode = acquireVsCodeApi();
       const workspaceRoot = {{workspaceRoot}};
@@ -541,7 +542,7 @@
       }
 
       function buildAskUserQuestionReply(questions, form) {
-        const lines = ["Answer to AskUserQuestion:"];
+        const lines = [`Questions ${questions.length}/${questions.length} answered`];
 
         for (let index = 0; index < questions.length; index += 1) {
           const question = questions[index];
@@ -558,14 +559,14 @@
             };
           }
 
-          lines.push("");
-          lines.push(`${index + 1}. ${question.question}`);
-          if (selectedOptions.length > 0) {
-            lines.push(`- Selected: ${selectedOptions.join(", ")}`);
-          }
+          const answers = [...selectedOptions];
           if (otherText) {
-            lines.push(`- Other: ${otherText}`);
+            answers.push(otherText);
           }
+          const questionText = String(question.question || "").replace(/\s+/g, " ").trim();
+          const answerText = answers.join(", ").replace(/\s+/g, " ").trim();
+          lines.push(` - ${questionText}`);
+          lines.push(`   answer: ${answerText}`);
         }
 
         return {
@@ -680,7 +681,7 @@
           }
           errorMessage.textContent = "";
           setAskUserQuestionFormState(form, false);
-          sendUserPromptText(reply.text);
+          sendUserPromptText(reply.text, undefined, [], { isAnswers: true });
         });
 
         wrapper.appendChild(form);
@@ -700,8 +701,13 @@
         }
 
         if (role === "user") {
-          // 普通用户气泡
-          bubble.textContent = content;
+          if (meta && meta.isAnswers) {
+            bubble.classList.add("answers");
+            bubble.innerHTML = content;
+          } else {
+            // 普通用户气泡
+            bubble.textContent = content;
+          }
         } else if (role === "assistant") {
           if (meta && meta.asThinking === true) {
             // 思考气泡（可折叠）
@@ -1025,8 +1031,10 @@
       function isAlwaysAllowedScope(scope) {
         return [
           "read-in-cwd",
+          "read-in-tmp",
           "read-out-cwd",
           "write-in-cwd",
+          "write-in-tmp",
           "write-out-cwd",
           "delete-in-cwd",
           "delete-out-cwd",
@@ -1041,10 +1049,14 @@
         switch (scope) {
           case "read-in-cwd":
             return "reads inside this workspace";
+          case "read-in-tmp":
+            return "reads inside system temporary directories";
           case "read-out-cwd":
             return "reads outside this workspace";
           case "write-in-cwd":
             return "writes inside this workspace";
+          case "write-in-tmp":
+            return "writes inside system temporary directories";
           case "write-out-cwd":
             return "writes outside this workspace";
           case "delete-in-cwd":
@@ -1067,6 +1079,8 @@
       function getPermissionRiskClass(scope) {
         switch (scope) {
           case "read-in-cwd":
+          case "read-in-tmp":
+          case "write-in-tmp":
           case "query-git-log":
             return "risk-low";
           case "read-out-cwd":
@@ -1620,6 +1634,7 @@
       }
 
       let currentThinkingBubbleElement = null; // 当前 thinking 气泡 DOM 元素
+      let currentLlmRetry = null;
 
       function getThinkingContentText() {
         if (currentRunningProcesses && Object.keys(currentRunningProcesses).length > 0) {
@@ -1627,6 +1642,10 @@
           const process = currentRunningProcesses[firstPid];
           const elapsed = formatElapsedTime(process.startTime);
           return `(${elapsed}) ${process.command}`;
+        }
+
+        if (currentLlmRetry) {
+          return `Reconnecting... ${currentLlmRetry.attempt}/${currentLlmRetry.maxRetries} (esc to interrupt)`;
         }
 
         if (currentLlmStreamProgress && currentLlmStreamProgress.startedAt) {
@@ -1647,9 +1666,30 @@
         if (statusEl) {
           statusEl.textContent = getThinkingContentText();
         }
+        const previewEl = currentThinkingBubbleElement.querySelector(".thinking-preview");
+        const progress = currentLlmStreamProgress;
+        const showPreview = progress && progress.estimatedTokens > 1500 &&
+          Date.now() - Date.parse(progress.startedAt) >= 3000 && !currentLlmRetry &&
+          (!currentRunningProcesses || Object.keys(currentRunningProcesses).length === 0);
+        previewEl.textContent = "";
+        previewEl.hidden = !showPreview || !progress.previewText;
+        if (previewEl.hidden) return;
+        const style = getComputedStyle(previewEl);
+        thinkingPreviewContext.font = style.font;
+        const preview = window.fitThinkingPreview(
+          progress.previewText,
+          previewEl.getBoundingClientRect().width,
+          (text) => thinkingPreviewContext.measureText(text).width
+        );
+        previewEl.textContent = preview;
+        previewEl.hidden = !preview;
       }
 
+      const thinkingPreviewContext = document.createElement("canvas").getContext("2d");
+      const thinkingResizeObserver = new ResizeObserver(updateThinkingBubbleContent);
+
       function removeThinkingBubble() {
+        thinkingResizeObserver.disconnect();
         if (currentThinkingBubbleElement) {
           currentThinkingBubbleElement.remove();
           currentThinkingBubbleElement = null;
@@ -1671,7 +1711,7 @@
         header.innerHTML = `
           <span class="${dotClass}"></span>
           <span class="bubble-title">
-            <span class="bubble-title-text"><b>Thinking</b> <span class="thinking-status">${escapeHtml(statusText)}</span></span>
+            <span class="bubble-title-text"><b>Thinking</b> <span class="thinking-status">${escapeHtml(statusText)}</span><span class="thinking-preview" hidden></span></span>
           </span>
         `;
 
@@ -1680,6 +1720,8 @@
         messages.scrollTop = messages.scrollHeight;
 
         currentThinkingBubbleElement = bubble;
+        thinkingResizeObserver.observe(bubble);
+        updateThinkingBubbleContent();
 
         // 连接线
         if (shouldConnectToPrev) {
@@ -1698,6 +1740,7 @@
         }
         if (!isLoading) {
           currentLlmStreamProgress = null;
+          currentLlmRetry = null;
         }
 
         // 清除旧的计时器
@@ -1958,11 +2001,21 @@
         }
       });
 
-      // 按 Escape 关闭下拉框
+      // 按 Escape 关闭下拉框或中断当前请求
       document.addEventListener("keydown", (event) => {
-        if (event.key === "Escape" && sessionDropdown.classList.contains("show")) {
+        if (event.key !== "Escape") {
+          return;
+        }
+        if (sessionDropdown.classList.contains("show")) {
           sessionDropdown.classList.remove("show");
           sessionSelector.classList.remove("open");
+          return;
+        }
+        if (isProcessing()) {
+          event.preventDefault();
+          vscode.postMessage({ type: "interrupt" });
+          currentSessionStatus = "interrupted";
+          setLoading(false, currentSessionStatus);
         }
       });
 
@@ -2001,6 +2054,7 @@
         const normalizedImages = Array.isArray(imageUrls) ? imageUrls.filter(Boolean) : [];
         const permissions = Array.isArray(options.permissions) ? options.permissions : undefined;
         const alwaysAllows = Array.isArray(options.alwaysAllows) ? options.alwaysAllows : undefined;
+        const isAnswers = options.isAnswers === true;
         const hasPermissionPayload = Boolean(
           (permissions && permissions.length > 0) || (alwaysAllows && alwaysAllows.length > 0)
         );
@@ -2018,7 +2072,8 @@
           skills: skills && skills.length > 0 ? skills : undefined,
           images: normalizedImages.length > 0 ? normalizedImages : undefined,
           permissions,
-          alwaysAllows
+          alwaysAllows,
+          isAnswers: isAnswers || undefined
         });
         return true;
       }
@@ -2172,7 +2227,7 @@
         if (msg.role === "system") {
           addBubble(msg.content, "system", msg.meta, shouldConnect);
         } else if (msg.role === "user") {
-          addBubble(msg.content, "user", msg.meta, false);
+          addBubble(msg.meta?.isAnswers ? msg.html || msg.content : msg.content, "user", msg.meta, false);
         } else if (msg.role === "assistant") {
           addBubble(msg.html || msg.content, "assistant", msg.meta, shouldConnect, msg.content || "");
         } else if (msg.role === "tool") {
@@ -2327,12 +2382,27 @@
               currentLlmStreamProgress = null;
             }
           } else {
+            currentLlmRetry = null;
             currentLlmStreamProgress = progress;
           }
           updateThinkingBubbleContent();
+        } else if (message.type === "llmRetry") {
+          const event = message.event || null;
+          if (!event || !event.attempt || !event.maxRetries) {
+            return;
+          }
+          if (event.sessionId && currentSessionId && event.sessionId !== currentSessionId) {
+            return;
+          }
+          currentLlmRetry = event;
+          updateThinkingBubbleContent();
         } else if (message.type === "userMessage") {
-          // 显示用户消息（纯文本）
-          addBubble(message.content || "", "user", message.meta, false);
+          addBubble(
+            message.meta?.isAnswers ? message.html || message.content || "" : message.content || "",
+            "user",
+            message.meta,
+            false
+          );
 
           // Record user message into history
           if (typeof message.content === "string") {

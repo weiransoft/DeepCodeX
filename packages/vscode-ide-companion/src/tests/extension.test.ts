@@ -252,6 +252,9 @@ test("userPrompt with text sends userMessage and loading states", async () => {
   const types = deps.messages.map((m: any) => m.type);
   assert.ok(types.includes("userMessage"), `Expected userMessage, got: ${types.join(", ")}`);
   assert.ok(types.includes("loading"), `Expected loading, got: ${types.join(", ")}`);
+  const userMessage = deps.messages.find((message: any) => message.type === "userMessage") as any;
+  assert.equal(userMessage.html, undefined);
+  assert.equal(userMessage.meta, undefined);
 
   // Should end with loading: false
   const lastLoading = [...deps.messages].reverse().find((m: any) => m.type === "loading");
@@ -285,6 +288,29 @@ test("userPrompt passes multiple image urls to the session manager", async () =>
   );
 
   assert.deepEqual(submittedPrompt?.imageUrls, ["data:image/png;base64,abc", "data:image/jpeg;base64,def"]);
+});
+
+test("userPrompt passes the AskUserQuestion answer marker to the session manager", async () => {
+  const deps = createDeps();
+  let submittedPrompt: any = null;
+  (deps.sessionManager as any).handleUserPrompt = (prompt: any) => {
+    submittedPrompt = prompt;
+    return Promise.resolve();
+  };
+
+  await handleWebviewMessage(
+    {
+      type: "userPrompt",
+      prompt: "Questions 1/1 answered\n - Continue?\n   answer: Yes",
+      isAnswers: true,
+    },
+    deps
+  );
+
+  assert.equal(submittedPrompt?.isAnswers, true);
+  const userMessage = deps.messages.find((message: any) => message.type === "userMessage") as any;
+  assert.equal(userMessage.meta?.isAnswers, true);
+  assert.match(userMessage.html, /^<p>Questions 1\/1 answered/);
 });
 
 test("userPrompt with permissions (continue) does not send userMessage", async () => {

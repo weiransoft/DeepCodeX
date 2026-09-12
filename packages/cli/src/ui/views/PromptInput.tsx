@@ -79,6 +79,7 @@ export type PromptSubmission = {
   permissions?: UserToolPermission[];
   alwaysAllows?: PermissionScope[];
   planMode?: boolean;
+  isAnswers?: boolean;
   // fork：扩展命令集合（动态注入/后台任务/质量门禁/评审/记忆/帮助），
   // 并采纳上游 v0.3.1 新增的 "fork"（会话分叉）命令
   command?:
@@ -1044,7 +1045,9 @@ export const PromptInput = React.memo(function PromptInput({
       <SlashCommandMenu width={screenWidth} items={slashMenu} activeIndex={menuIndex} />
       {!showFooterText && (
         <Box>
-          <Text dimColor>{footerText}</Text>
+          <Text dimColor wrap="truncate-end">
+            {footerText}
+          </Text>
         </Box>
       )}
       {statusLineSegments && statusLineSegments.length > 0 && (

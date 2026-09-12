@@ -1,5 +1,16 @@
-export const DEEPSEEK_V4_MODELS = new Set(["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp"]);
+export const DEEPSEEK_V4_MODELS = new Set([
+  "deepseek-v4-flash",
+  "deepseek-v4-pro",
+  "deepseek-v4-flash-vision-exp",
+  "deepseek-flash",
+]);
 
+/**
+ * 非多模态模型集合（默认不支持图片内容的模型）
+ * 用于 supportsMultimodal 的反推判定：不在此集合中的模型默认为多模态模型。
+ *
+ * fork 侧新增，用于多模态正推模型列表（upstream 0.4.0 采用 "deepseek-flash 或含 -vision" 正推）。
+ */
 export const NON_MULTIMODAL_MODELS = new Set([
   "deepseek-v4-pro",
   "deepseek-v4-flash",
@@ -100,6 +111,10 @@ export function isDeepSeekThinkingModel(model: string): boolean {
 /**
  * 判断模型是否支持多模态（图片）内容
  *
+ * 默认模式（"default"）下使用 NON_MULTIMODAL_MODELS 反推：
+ * 不在非多模态集合中的模型视为多模态模型。
+ * 也兼容 "deepseek-flash" 或含 "-vision" 正推识别（upstream 0.4.0 逻辑）。
+ *
  * @param model 模型名称
  * @param mode 多模态解析模式（settings.multimodal 解析结果，上游 0.3.1 引入）
  * @returns 是否支持多模态
@@ -112,5 +127,10 @@ export function supportsMultimodal(model: string, mode: MultimodalMode = "defaul
   if (mode === "off") {
     return false;
   }
-  return !NON_MULTIMODAL_MODELS.has(model.trim());
+  const normalized = model.trim();
+  // fork 反推：不在非多模态集合中 → 视为多模态
+  if (!NON_MULTIMODAL_MODELS.has(normalized)) return true;
+  // upstream 0.4.0 正推兜底：deepseek-flash 或含 -vision
+  if (normalized === "deepseek-flash" || normalized.includes("-vision")) return true;
+  return false;
 }

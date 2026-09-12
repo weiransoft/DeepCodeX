@@ -37,26 +37,34 @@ test("getTools always includes WebSearch", () => {
 
 // 上游 v0.3.1 新增用例：多模态能力驱动的图像工具切换
 test("image tools match the current model's multimodal capability", () => {
-  const nonMultimodalTools = getTools({ model: "deepseek-chat" }).map((tool) => tool.function.name);
-  const multimodalTools = getTools({ model: "gpt-4o" }).map((tool) => tool.function.name);
+  const nonMultimodalTools = getTools({ model: "gpt-4o" }).map((tool) => tool.function.name);
+  const multimodalTools = getTools({ model: "deepseek-v4-flash-vision-exp" }).map((tool) => tool.function.name);
 
   assert.equal(nonMultimodalTools.includes("UnderstandImage"), true);
   assert.equal(nonMultimodalTools.includes("ReadImage"), false);
   assert.equal(multimodalTools.includes("UnderstandImage"), false);
   assert.equal(multimodalTools.includes("ReadImage"), true);
-  assert.equal(getSystemPrompt("/tmp/project", { model: "deepseek-chat" }).includes("## UnderstandImage"), true);
-  assert.equal(getSystemPrompt("/tmp/project", { model: "deepseek-chat" }).includes("## ReadImage"), false);
-  assert.equal(getSystemPrompt("/tmp/project", { model: "gpt-4o" }).includes("## UnderstandImage"), false);
-  assert.equal(getSystemPrompt("/tmp/project", { model: "gpt-4o" }).includes("## ReadImage"), true);
+  assert.equal(getSystemPrompt("/tmp/project", { model: "gpt-4o" }).includes("## UnderstandImage"), true);
+  assert.equal(getSystemPrompt("/tmp/project", { model: "gpt-4o" }).includes("## ReadImage"), false);
+  assert.equal(
+    getSystemPrompt("/tmp/project", { model: "deepseek-v4-flash-vision-exp" }).includes("## UnderstandImage"),
+    false
+  );
+  assert.equal(
+    getSystemPrompt("/tmp/project", { model: "deepseek-v4-flash-vision-exp" }).includes("## ReadImage"),
+    true
+  );
 });
 
 test("multimodal config overrides model-based multimodal detection", () => {
   // "off" forces non-multimodal behavior even for a multimodal model.
-  const forcedOffTools = getTools({ model: "gpt-4o", multimodal: "off" }).map((tool) => tool.function.name);
+  const forcedOffTools = getTools({ model: "custom-vision-model", multimodal: "off" }).map(
+    (tool) => tool.function.name
+  );
   assert.equal(forcedOffTools.includes("UnderstandImage"), true);
   assert.equal(forcedOffTools.includes("ReadImage"), false);
   assert.equal(
-    getSystemPrompt("/tmp/project", { model: "gpt-4o", multimodal: "off" }).includes("## UnderstandImage"),
+    getSystemPrompt("/tmp/project", { model: "custom-vision-model", multimodal: "off" }).includes("## UnderstandImage"),
     true
   );
 
@@ -166,6 +174,8 @@ test("getTools requires bash sideEffects permission scopes", () => {
     items?: { enum?: unknown[] };
   };
   assert.equal(sideEffects.type, "array");
+  assert.equal(sideEffects.items?.enum?.includes("read-in-tmp"), true);
+  assert.equal(sideEffects.items?.enum?.includes("write-in-tmp"), true);
   assert.equal(sideEffects.items?.enum?.includes("write-out-cwd"), true);
   assert.equal(sideEffects.items?.enum?.includes("unknown"), true);
   const runInBackground = tool.function.parameters.properties.run_in_background as { type?: unknown };
@@ -385,14 +395,16 @@ test("getSystemPrompt does not include current date guidance", () => {
   assert.equal(prompt.includes(expected), false);
 });
 
-test("getRuntimeContext includes current date and model guidance", () => {
+test("getRuntimeContext includes current date, model guidance, and additional working directories", () => {
   const now = new Date();
   const expectedDate = `今天是${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日。随着对话的进行，时间在流逝。`;
-  const prompt = getRuntimeContext("/tmp/project", "deepseek-v4-pro");
+  const prompt = getRuntimeContext("/tmp/project", "deepseek-v4-pro", ["../shared", "/opt/project"]);
   assert.equal(prompt.includes(expectedDate), true);
   assert.equal(prompt.includes("当前LLM模型为deepseek-v4-pro，对话中可通过/model命令切换模型。"), true);
   assert.equal(prompt.includes("# Local Workspace Environment"), true);
   assert.equal(prompt.includes('"root path": "/tmp/project"'), true);
+  assert.equal(prompt.includes(JSON.stringify(path.resolve("/tmp/project", "../shared"))), true);
+  assert.equal(prompt.includes(JSON.stringify(path.resolve("/tmp/project", "/opt/project"))), true);
 });
 
 test("getSystemPrompt renders Read docs for non-multimodal models", () => {
@@ -412,4 +424,17 @@ test("runtime prompt assets live under templates", () => {
   assert.equal(fs.existsSync(path.join(repoRoot, "templates", "tools", "read.md")), false);
   assert.equal(fs.existsSync(path.join(repoRoot, "docs", "tools")), false);
   assert.equal(fs.existsSync(path.join(repoRoot, "docs", "prompts")), false);
+});
+
+test("deepseek-flash uses native image tools unless multimodal is disabled", () => {
+  for (const multimodal of ["default", "off"] as const) {
+    const config = { model: "deepseek-flash", multimodal };
+    const native = multimodal === "default";
+    const names = getTools(config).map((tool) => tool.function.name);
+    assert.equal(names.includes("ReadImage"), native);
+    assert.equal(names.includes("UnderstandImage"), !native);
+    const prompt = getSystemPrompt("/tmp/project", config);
+    assert.equal(prompt.includes("## ReadImage"), native);
+    assert.equal(prompt.includes("## UnderstandImage"), !native);
+  }
 });

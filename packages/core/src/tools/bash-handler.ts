@@ -1,3 +1,4 @@
+import { bindProcessAbort } from "../common/process-abort";
 import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import * as fs from "fs";
@@ -81,6 +82,7 @@ export async function handleBashTool(
   args: Record<string, unknown>,
   context: ToolExecutionContext
 ): Promise<ToolExecutionResult> {
+  context.signal?.throwIfAborted();
   const rawCommand = typeof args.command === "string" ? args.command : "";
   const runInBackground = isTrue(args.run_in_background);
   const command = runInBackground ? stripTrailingBackgroundOperator(rawCommand) : rawCommand;
@@ -110,6 +112,7 @@ export async function handleBashTool(
   }
 
   const execution = await executeShellCommand(shellPath, shellArgs, startCwd, command, context);
+  context.signal?.throwIfAborted();
   const result = buildToolCommandResult(
     execution.stdout,
     execution.stderr,
@@ -194,6 +197,7 @@ async function executeShellCommand(
   timeoutMs: number;
   deadlineAtMs: number;
 }> {
+  context.signal?.throwIfAborted();
   return new Promise((resolve) => {
     const detached = process.platform !== "win32";
     const configuredEnv = context.createOpenAIClient?.().env ?? {};
@@ -212,6 +216,7 @@ async function executeShellCommand(
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    bindProcessAbort(child, context.signal);
     const pid = child.pid;
 
     const getTimeoutInfo = (): ProcessTimeoutInfo => ({
@@ -310,6 +315,7 @@ function startBackgroundShellCommand(
   marker: string,
   context: ToolExecutionContext
 ): ToolExecutionResult {
+  context.signal?.throwIfAborted();
   fs.mkdirSync(BACKGROUND_OUTPUT_DIR, { recursive: true });
   const taskId = `bash-${randomUUID()}`;
   const outputPath = path.join(BACKGROUND_OUTPUT_DIR, `${taskId}.log`);
@@ -323,6 +329,7 @@ function startBackgroundShellCommand(
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  bindProcessAbort(child, context.signal);
   const pid = child.pid;
   const processId = typeof pid === "number" ? pid : -1;
   const stopCommand = typeof pid === "number" ? buildStopBackgroundProcessCommand(pid) : null;
@@ -376,9 +383,11 @@ function startBackgroundShellCommand(
       shellPath,
       cwd
     );
-    // P0 安全修复（fork）：后台任务同样需要做 CWD 边界校验。
-    const safeCwd = validateCwdWithinProjectRoot(result.cwd, context.projectRoot, cwd);
-    updateSessionCwd(context.sessionId, cwd, safeCwd);
+    // 合并：保留 fork 的 CWD 安全校验（safeCwd），同时融入 upstream v0.4.0 的 signal 取消检查
+    if (!context.signal?.aborted) {
+      const safeCwd = validateCwdWithinProjectRoot(result.cwd, context.projectRoot, cwd);
+      updateSessionCwd(context.sessionId, cwd, safeCwd);
+    }
     writeFinalBackgroundOutput(outputPath, finalOutput);
     if (typeof pid === "number") {
       context.onProcessExit?.(pid);

@@ -13,6 +13,7 @@ import {
 } from "../common/notify";
 // 融合两侧：fork 保留 applyModelConfigSelection 等核心导入，上游新增 Files API 常量与 readDeepcodePlusApiKey
 import {
+  DEFAULT_AUTOCOMPACT_RATIO,
   DEFAULT_FILE_EXPIRES_AFTER_SECONDS,
   DEFAULT_FILE_QUOTA_CLEANUP_BATCH,
   DEFAULT_FILE_REFRESH_MARGIN_SECONDS,
@@ -105,6 +106,22 @@ test("resolveSettings applies Files API defaults", () => {
   assert.equal(resolved.fileRefreshMarginSeconds, DEFAULT_FILE_REFRESH_MARGIN_SECONDS);
   assert.equal(resolved.fileQuotaCleanupBatch, DEFAULT_FILE_QUOTA_CLEANUP_BATCH);
   assert.equal(resolved.maxRequestFilesBytes, DEFAULT_MAX_REQUEST_FILES_BYTES);
+});
+
+test("resolveSettings enables Files API only for the DeepSeek API base URL", () => {
+  const deepSeek = resolveSettings(
+    { filesApiEnabled: true },
+    { model: "default-model", baseURL: "https://api.deepseek.com" },
+    TEST_PROCESS_ENV
+  );
+  const custom = resolveSettings(
+    { env: { BASE_URL: "https://example.com/v1" }, filesApiEnabled: true },
+    { model: "default-model", baseURL: "https://api.deepseek.com" },
+    TEST_PROCESS_ENV
+  );
+
+  assert.equal(deepSeek.filesApiEnabled, true);
+  assert.equal(custom.filesApiEnabled, false);
 });
 
 test("resolveSettingsSources validates Files API settings and uses project precedence", () => {
@@ -540,6 +557,7 @@ test("resolveSettingsSources merges permission settings", () => {
         allow: ["read-in-cwd", "network"],
         ask: ["write-out-cwd"],
         defaultMode: "askAll",
+        addWorkingDirs: ["../shared", "/opt/user-project", "", 42 as never],
       },
     },
     {
@@ -547,6 +565,7 @@ test("resolveSettingsSources merges permission settings", () => {
         allow: ["write-in-cwd", "read-in-cwd"],
         deny: ["delete-out-cwd"],
         defaultMode: "allowAll",
+        addWorkingDirs: ["../shared", " /opt/project "],
       },
     },
     {
@@ -560,6 +579,7 @@ test("resolveSettingsSources merges permission settings", () => {
   assert.deepEqual(resolved.permissions.ask, ["write-out-cwd"]);
   assert.deepEqual(resolved.permissions.deny, ["delete-out-cwd"]);
   assert.equal(resolved.permissions.defaultMode, "allowAll");
+  assert.deepEqual(resolved.permissions.addWorkingDirs, ["../shared", "/opt/user-project", "/opt/project"]);
 });
 
 test("resolveSettingsSources merges enabledSkills with project precedence", () => {
@@ -676,7 +696,7 @@ test("resolveSettings applies thinking defaults to the default model", () => {
     TEST_PROCESS_ENV
   );
 
-  // fork 决策：默认模型为 deepseek-v4-pro（上游为 deepseek-v4-flash）
+  // fork 决策：默认模型为 deepseek-v4-pro（上游为 deepseek-flash）
   assert.equal(DEFAULT_MODEL, "deepseek-v4-pro");
   assert.equal(resolved.model, DEFAULT_MODEL);
   assert.equal(resolved.thinkingEnabled, true);
@@ -899,7 +919,7 @@ test("applyModelConfigSelection persists a new selected model and thinking optio
       reasoningEffort: "max",
     },
     {
-      model: "deepseek-v4-flash",
+      model: "deepseek-flash",
       thinkingEnabled: true,
       reasoningEffort: "high",
     }
@@ -907,7 +927,7 @@ test("applyModelConfigSelection persists a new selected model and thinking optio
 
   assert.equal(result.changed, true);
   assert.equal(result.settings.env?.MODEL, "deepseek-v4-pro");
-  assert.equal(result.settings.model, "deepseek-v4-flash");
+  assert.equal(result.settings.model, "deepseek-flash");
   assert.equal(result.settings.thinkingEnabled, true);
   assert.equal(result.settings.reasoningEffort, "high");
 });
@@ -1067,3 +1087,23 @@ test(
     assert.equal(calls[1]?.options.env?.TITLE, "Fix login bug");
   }
 );
+
+test("resolveSettings applies deepseek-flash capabilities and respects explicit overrides", () => {
+  const defaults = { model: "default-model", baseURL: "https://api.deepseek.com" };
+  const resolved = resolveSettings({ model: "deepseek-flash" }, defaults, TEST_PROCESS_ENV);
+  assert.equal(resolved.model, "deepseek-flash");
+  assert.equal(resolved.thinkingEnabled, true);
+  const expectedContextWindow = 1024 * 1024;
+  assert.equal(resolved.contextWindow, expectedContextWindow);
+  // autoCompactWindow 默认值 = contextWindow * DEFAULT_AUTOCOMPACT_RATIO（fork 0.8，upstream 0.5）
+  assert.equal(resolved.autoCompactWindow, Math.floor(expectedContextWindow * DEFAULT_AUTOCOMPACT_RATIO));
+
+  const overridden = resolveSettings(
+    { model: "deepseek-flash", thinkingEnabled: false, contextWindow: "512K", autoCompactWindow: "128K" },
+    defaults,
+    TEST_PROCESS_ENV
+  );
+  assert.equal(overridden.thinkingEnabled, false);
+  assert.equal(overridden.contextWindow, 512 * 1024);
+  assert.equal(overridden.autoCompactWindow, 128 * 1024);
+});

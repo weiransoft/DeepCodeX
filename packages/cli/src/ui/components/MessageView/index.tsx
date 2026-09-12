@@ -22,7 +22,8 @@ export function MessageView({ message, collapsed, width = 80 }: MessageViewProps
   }
 
   if (message.role === "user") {
-    const text = message.content || "(no content)";
+    const content = message.content || "(no content)";
+    const text = message.meta?.isAnswers ? renderMarkdown(content) : content;
     return (
       <PromptEchoLine
         text={text}

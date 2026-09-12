@@ -12,6 +12,7 @@ import { type PromptDraft, PromptInput, type PromptSubmission } from "./PromptIn
 import { MessageView, RawModeExitPrompt } from "../components";
 import { SessionList } from "./SessionList";
 import { type UndoRestoreMode, UndoSelector } from "./UndoSelector";
+import { StatusLine } from "../components/status-line";
 import { buildLoadingText } from "../core/loading-text";
 import { findExpandedThinkingId } from "../core/thinking-state";
 import { WelcomeScreen } from "./WelcomeScreen";
@@ -24,7 +25,13 @@ import {
   formatAskUserQuestionAnswers,
 } from "../core/ask-user-question";
 import { PermissionPrompt, type PermissionPromptResult } from "./PermissionPrompt";
-import { PlanImplementationPrompt, extractProposedPlan, getImplementationPrompt } from "./PlanImplementationPrompt";
+import {
+  PlanImplementationPrompt,
+  extractProposedPlan,
+  getClearContextImplementationPrompt,
+  getImplementationPrompt,
+  type PlanImplementationChoice,
+} from "./PlanImplementationPrompt";
 // 上游 v0.3.1 新增 buildPluginRateLimitHintText：插件工具限流（429）退出提示
 import { buildExitSummaryText, buildPluginRateLimitHintText, buildResumeHintText } from "../exit-summary";
 import { RawMode, useRawModeContext } from "../contexts";
@@ -51,6 +58,7 @@ import { extractCommandArgument, isResumeTaskCommand, BUILTIN_SLASH_COMMANDS } f
 import { AUTO_EXECUTABLE_COMMAND_KINDS, extractSuggestedCommandText } from "../core/suggestion-fallback";
 import type {
   LlmStreamProgress,
+  LlmRetryEvent,
   MessageMeta,
   SessionEntry,
   SessionMessage,
@@ -255,38 +263,8 @@ type AppProps = {
   onRestart?: () => void;
 };
 
-const StatusLine = React.memo(function StatusLine({
-  busy,
-  text,
-}: {
-  busy: boolean;
-  text?: string;
-}): React.ReactElement {
-  const [spinnerIndex, setSpinnerIndex] = useState(0);
-
-  useEffect(() => {
-    if (!busy) {
-      setSpinnerIndex(0);
-      return;
-    }
-
-    const timer = setInterval(() => {
-      setSpinnerIndex((index) => (index + 1) % STATUS_SPINNER_FRAMES.length);
-    }, 80);
-    return () => clearInterval(timer);
-  }, [busy]);
-
-  return (
-    <Box>
-      {busy ? (
-        <Box marginRight={1}>
-          <Text color="yellow">{STATUS_SPINNER_FRAMES[spinnerIndex]}</Text>
-        </Box>
-      ) : null}
-      {text ? <Text dimColor>{text}</Text> : null}
-    </Box>
-  );
-});
+// StatusLine 组件：使用 upstream 0.4.0 导入的完整版本（支持 width prop）
+// 本地声明的简化版（无 width）已删除，避免与 "../components/status-line" 导入冲突
 
 // 上游 v0.3.1：函数签名新增 forkSessionId（会话分叉）
 function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRestart }: AppProps): React.ReactElement {
@@ -315,6 +293,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
   const [statusLine, setStatusLine] = useState<string>("");
   const [errorLine, setErrorLine] = useState<string | null>(null);
   const [streamProgress, setStreamProgress] = useState<LlmStreamProgress | null>(null);
+  const [retryEvent, setRetryEvent] = useState<LlmRetryEvent | null>(null);
   const [runningProcesses, setRunningProcesses] = useState<SessionEntry["processes"]>(null);
   const [activeStatus, setActiveStatus] = useState<SessionStatus | null>(null);
   const [activeAskPermissions, setActiveAskPermissions] = useState<SessionEntry["askPermissions"]>(undefined);
@@ -508,11 +487,15 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
         }
       },
       onLlmStreamProgress: (progress) => {
+        setRetryEvent(null);
         if (progress.phase === "end") {
           setStreamProgress(null);
           return;
         }
         setStreamProgress(progress);
+      },
+      onLlmRetry: (event) => {
+        setRetryEvent(event);
       },
       onMcpStatusChanged: () => {
         // 当 MCP 状态变更时，如果当前正在查看 MCP 状态页面，则更新显示
@@ -1047,6 +1030,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
         planMode: submission.planMode ?? planMode,
         // F8（2026-09-04）：透传旁路建议层标记（/review NL 任务等已确定交主模型的输入）
         bypassEagSuggestion: submission.bypassDynamicSuggestion,
+        isAnswers: submission.isAnswers,
       };
       const activeSessionId = sessionManager.getActiveSessionId();
       const permissionReply =
@@ -1064,13 +1048,21 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
         (submission.imageUrls.length > 0 ? "[Image]" : "");
 
       if (userDisplayContent && submission.command !== "continue") {
-        setMessages((prev) => [...prev, buildSyntheticUserMessage(userDisplayContent, submission.imageUrls.length)]);
+        setMessages((prev) => [
+          ...prev,
+          buildSyntheticUserMessage(
+            userDisplayContent,
+            submission.imageUrls.length,
+            submission.isAnswers ? { isAnswers: true } : undefined
+          ),
+        ]);
       }
 
       // fork：从此处开始进入真正的 LLM 回合，设置处理中标记以阻塞新的并发 LLM 调用
       isProcessingRef.current = true;
       setBusy(true);
       setErrorLine(null);
+      setRetryEvent(null);
       const activeProcesses = activeSessionId ? (sessionManager.getSession(activeSessionId)?.processes ?? null) : null;
       setRunningProcesses(activeProcesses);
       setShowProcessStdout(false);
@@ -1106,6 +1098,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
       } finally {
         setBusy(false);
         setStreamProgress(null);
+        setRetryEvent(null);
         const finalActiveSessionId = sessionManager.getActiveSessionId();
         setRunningProcesses(
           finalActiveSessionId ? (sessionManager.getSession(finalActiveSessionId)?.processes ?? null) : null
@@ -1263,13 +1256,23 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
   );
 
   const handlePlanImplementationChoice = useCallback(
-    (choice: "implement" | "stay" | "default") => {
+    (choice: PlanImplementationChoice) => {
       const proposedPlan = pendingPlanImplementation;
       setPendingPlanImplementation(null);
       if (choice === "stay") {
         return;
       }
       setPlanMode(false);
+      if (choice === "clear-context" && proposedPlan) {
+        void resetToWelcome().then(() => {
+          handleSubmit({
+            text: getClearContextImplementationPrompt(proposedPlan),
+            imageUrls: [],
+            planMode: false,
+          });
+        });
+        return;
+      }
       if (choice === "implement" && proposedPlan) {
         handleSubmit({
           text: getImplementationPrompt(proposedPlan),
@@ -1278,7 +1281,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
         });
       }
     },
-    [handleSubmit, pendingPlanImplementation]
+    [handleSubmit, pendingPlanImplementation, resetToWelcome]
   );
 
   const handleExitShortcut = useCallback(() => {
@@ -1561,9 +1564,18 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
   const pendingQuestion = useMemo(() => findPendingAskUserQuestion(messages, activeStatus), [activeStatus, messages]);
   const shouldShowQuestionPrompt = Boolean(pendingQuestion && !dismissedQuestionIds.has(pendingQuestion.messageId));
   const loadingText = useMemo(
-    () => (busy ? buildLoadingText({ progress: streamProgress, processes: runningProcesses, now: Date.now() }) : null),
+    () =>
+      busy
+        ? buildLoadingText({
+            progress: streamProgress,
+            retry: retryEvent,
+            processes: runningProcesses,
+            screenWidth,
+            now: Date.now(),
+          })
+        : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps -- nowTick forces periodic recalculation for spinner animation
-    [busy, streamProgress, runningProcesses, nowTick]
+    [busy, streamProgress, retryEvent, runningProcesses, nowTick, screenWidth]
   );
 
   const welcomeItem: SessionMessage = useMemo(
@@ -1700,7 +1712,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
   }
 
   return (
-    <Box flexDirection="column" width={screenWidth} minWidth={80} overflowX={"visible"}>
+    <Box flexDirection="column" width={screenWidth}>
       <Static items={staticItems}>
         {(item) => {
           if (item.id.startsWith("__welcome__")) {
@@ -1724,7 +1736,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
           );
         }}
       </Static>
-      {(busy || statusLine) && !isExiting ? <StatusLine busy={busy} text={statusLine} /> : null}
+      {(busy || statusLine) && !isExiting ? <StatusLine busy={busy} text={statusLine} width={screenWidth} /> : null}
       {errorLine ? (
         <Box>
           {/* fork FIX-11（多角色审查 2026-07-29）：errorLine 写入处已自带 ✖ 前缀，渲染层不再重复加 "Error: " */}

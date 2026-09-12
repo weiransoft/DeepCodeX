@@ -28,7 +28,7 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 | -------------------------- | ------------- | ------------------------------------------------------------- |
 | `env`                      | object        | 环境变量分组（见下方子字段表）                                |
 | `contextWindow`            | number/string | 上下文窗口上限，可使用精确 token 数或 `128K`、`1M` 等格式     |
-| `autoCompactWindow`        | number/string | 自动压缩阈值，默认取最终上下文窗口的 80%                      |
+| `autoCompactWindow`        | number/string | 自动压缩阈值，默认取最终上下文窗口的 50%                      |
 | `model`                    | string        | 模型名称。默认 `deepseek-v4-flash`，优先级高于 `env.MODEL`    |
 | `thinkingEnabled`          | boolean       | 是否启用思考模式（DeepSeek V4 系列默认启用）                  |
 | `reasoningEffort`          | string        | 推理强度，可选 `"low"`、`"medium"`、`"high"`、`"xhigh"` 或 `"max"`（默认 `"max"`） |
@@ -44,6 +44,7 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 | `webSearchTool`            | string        | 自定义联网搜索脚本的完整路径                                  |
 | `mcpServers`               | object        | MCP 服务器配置（键为服务名，值为 McpServerConfig 对象）       |
 | `temperature`              | number        | 模型采样温度，范围 `0` 到 `2`                                 |
+| `permissions`              | object        | 权限策略及 `addWorkingDirs` 额外工作目录配置（参见 [permission.md](./permission.md)） |
 | `enabledSkills`            | object        | 按 skill 名称启用或禁用 skill 的配置                          |
 
 #### `env` 子字段
@@ -73,11 +74,13 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 
 普通模型的默认上下文窗口为 `256K`，DeepSeek V4 系列为 `1M`，Qwen3.8+ 系列为 `128K`。未设置自动压缩阈值时取最终上下文窗口的 80%（预留 20% 给模型输出与工具结果，对齐业界主流编码代理的 70%–92% 区间）；无效值会被忽略，自动压缩阈值超过上下文窗口时会限制为上下文窗口。
 
+通过 `/model` 或 `model` 配置可选择 `deepseek-flash`（DeepSeek-V4.1-Flash）。它支持原生图片输入和 `low/high/max` 思考强度，默认上下文窗口为 1M（1,048,576 tokens），自动压缩阈值为 512K；显式配置优先。默认模型仍为 `deepseek-v4-flash`。
+
 #### `thinkingEnabled` — 思考模式
 
 是否启用思考模式。设置为 `true` 启用、`false` 禁用。
 
-- 对于 `deepseek-v4-pro` 和 `deepseek-v4-flash`，思考模式**默认启用**。
+- 对于 `deepseek-flash`、`deepseek-v4-pro`、`deepseek-v4-flash` 和 `deepseek-v4-flash-vision-exp`，思考模式**默认启用**。
 - 对于 Qwen3 系列模型（以 `qwen3` / `qwen/qwen3` 开头），思考模式**默认启用**。
 - 对于其他模型，思考模式**默认关闭**。
 
@@ -117,7 +120,7 @@ DeepSeek V4 的 `reasoning_effort` 经 `extra_body` 下发，档位语义由 Dee
 
 #### DeepSeek Files API
 
-设置 `filesApiEnabled: true` 后，Deep Code 会将图片上传到固定的 `https://api.deepseek.com/files`，并在聊天请求中使用 `file_id`。上传或缓存刷新失败时，本次请求直接失败；关闭开关时图片处理逻辑保持不变。
+当 `BASE_URL` 为 `https://api.deepseek.com` 时，设置 `filesApiEnabled: true` 后，Deep Code 会将图片上传到固定的 `https://api.deepseek.com/files`，并在聊天请求中使用 `file_id`。其他 API 地址不会启用该功能。上传或缓存刷新失败时，本次请求直接失败；关闭开关时图片处理逻辑保持不变。
 
 ```json
 {
