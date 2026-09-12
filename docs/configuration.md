@@ -46,6 +46,7 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 | `webSearchTool`      | string    | 自定义联网搜索脚本的完整路径                                         |
 | `mcpServers`         | object    | MCP 服务器配置（键为服务名，值为 McpServerConfig 对象）              |
 | `temperature`        | number    | 模型采样温度，范围 `0` 到 `2`                           |
+| `permissions`        | object    | 权限策略及 `addWorkingDirs` 额外工作目录配置（参见 [permission.md](./permission.md)） |
 | `enabledSkills`      | object    | 按 skill 名称启用或禁用 skill 的配置                                 |
 | `statusline`         | object    | 状态栏插件配置(参见 [statusline.md](./statusline.md))               |
 
@@ -182,7 +183,7 @@ Qwen3 thinking 参数格式说明：
 
 是否启用思考模式。设置为 `true` 启用、`false` 禁用。
 
-- 对于 `deepseek-v4-pro` 和 `deepseek-v4-flash`，思考模式**默认启用**。
+- 对于 `deepseek-flash`、`deepseek-v4-pro`、`deepseek-v4-flash` 和 `deepseek-v4-flash-vision-exp`，思考模式**默认启用**。
 - 对于 Qwen3 系列模型（以 `qwen3` / `qwen/qwen3` 开头），思考模式**默认启用**。
 - 对于其他模型，思考模式**默认关闭**。
 
@@ -226,7 +227,7 @@ DeepSeek V4 的 `reasoning_effort` 经 `extra_body` 下发，档位语义由 Dee
 
 #### DeepSeek Files API
 
-设置 `filesApiEnabled: true` 后，Deep Code 会将图片上传到固定的 `https://api.deepseek.com/files`，并在聊天请求中使用 `file_id`。上传或缓存刷新失败时，本次请求直接失败；关闭开关时图片处理逻辑保持不变。
+当 `BASE_URL` 为 `https://api.deepseek.com` 时，设置 `filesApiEnabled: true` 后，Deep Code 会将图片上传到固定的 `https://api.deepseek.com/files`，并在聊天请求中使用 `file_id`。其他 API 地址不会启用该功能。上传或缓存刷新失败时，本次请求直接失败；关闭开关时图片处理逻辑保持不变。
 
 ```json
 {

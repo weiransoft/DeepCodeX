@@ -4,13 +4,17 @@ import assert from "node:assert/strict";
 // 原因：ui/index.ts 间接 re-export 了视图组件（如 ProcessStdoutView），后者以值导入
 // @vegamo/deepcode-core 的 BASH_TIMEOUT_DECREMENT_MS，触发 dist/eag/tcs/index.js
 // 加载不存在的 ./fixtures.js（构建产物 bug，dist 中 fixtures 是目录而非文件）。
-// 直接从 ./core/ask-user-question 导入可避免触发该加载链，且 ask-user-question.ts
-// 对 deepcode-core 仅持有 type-only import，编译时会被完全删除。
+// 直接从 ./core/ask-user-question 和 ./core/prompt-buffer 导入可避免触发该加载链。
 import {
   findPendingAskUserQuestion,
   formatAskUserQuestionAnswers,
   formatAskUserQuestionDecline,
 } from "../ui/core/ask-user-question";
+// applyOtherAnswerEdit 定义在 AskUserQuestionPrompt.tsx 中（不在 core/ask-user-question 模块），
+// 上游 0.4.0 新增的 Other 答案编辑功能，需从视图组件直接导入
+import { applyOtherAnswerEdit } from "../ui/views/AskUserQuestionPrompt";
+import type { PromptBufferState } from "../ui/core/prompt-buffer";
+import { parseTerminalInput } from "../ui/hooks";
 import type { SessionMessage } from "@vegamo/deepcode-core";
 
 function message(content: unknown): SessionMessage {
@@ -112,7 +116,20 @@ test("formatAskUserQuestionAnswers creates model-readable answer text", () => {
       "Which package manager?": "yarn",
       "Any notes?": "Use the existing lockfile",
     }),
-    'User has answered your questions: "Which package manager?"="yarn", "Any notes?"="Use the existing lockfile". You can now continue with the user\'s answers in mind.'
+    [
+      "Questions 2/2 answered",
+      " - Which package manager?",
+      "   answer: yarn",
+      " - Any notes?",
+      "   answer: Use the existing lockfile",
+    ].join("\n")
+  );
+});
+
+test("formatAskUserQuestionAnswers normalizes multiline questions and answers", () => {
+  assert.equal(
+    formatAskUserQuestionAnswers({ "Which\nmode?": "Use fast\nmode" }),
+    ["Questions 1/1 answered", " - Which mode?", "   answer: Use fast mode"].join("\n")
   );
 });
 
@@ -121,7 +138,7 @@ test("formatAskUserQuestionDecline creates decline text", () => {
 });
 
 // ============================================================================
-// TC-15 ~ TC-22：suggestedCommand 字段解析集成测试
+// TC-15 ~ TC-27：suggestedCommand 字段解析集成测试
 //
 // 测试目标：
 // - 验证 findPendingAskUserQuestion 能正确解析 metadata.suggestedCommand
@@ -494,4 +511,62 @@ test("TC-27: CLI 层 suggestedCommand 使用合法相对路径时应被允许", 
   );
 
   assert.equal(pending?.suggestedCommand?.command, "/team dispatch --task-file docs/design.md");
+});
+
+// ============================================================================
+// 上游 v0.4.0：applyOtherAnswerEdit 函数（AskUserQuestionPrompt 的 Other 答案编辑）测试
+// ============================================================================
+
+function editWith(state: PromptBufferState, sequence: string): PromptBufferState | null {
+  const { input, key } = parseTerminalInput(sequence);
+  return applyOtherAnswerEdit(state, input, key);
+}
+
+function state(text: string, cursor: number): PromptBufferState {
+  return { text, cursor };
+}
+
+test("applyOtherAnswerEdit inserts typed text at the cursor", () => {
+  assert.deepEqual(editWith(state("ac", 1), "b"), { text: "abc", cursor: 2 });
+});
+
+test("applyOtherAnswerEdit moves the cursor with plain arrow keys and never inserts residue", () => {
+  const { input, key } = parseTerminalInput("\u001B[D");
+  assert.equal(input, "[D"); // escape-sequence residue that used to be typed
+  assert.deepEqual(applyOtherAnswerEdit(state("abc", 2), input, key), { text: "abc", cursor: 1 });
+  assert.deepEqual(editWith(state("abc", 1), "\u001B[C"), { text: "abc", cursor: 2 });
+  assert.deepEqual(editWith(state("abc", 2), "\u001B[C"), { text: "abc", cursor: 3 });
+});
+
+test("applyOtherAnswerEdit moves by word with ctrl/meta arrows", () => {
+  const text = state("one two three", 7);
+  assert.deepEqual(editWith(text, "\u001B[1;5D"), { text: "one two three", cursor: 4 });
+  assert.deepEqual(editWith(text, "\u001Bb"), { text: "one two three", cursor: 4 });
+  assert.deepEqual(editWith(state("one two", 0), "\u001B[1;5C"), { text: "one two", cursor: 3 });
+  assert.deepEqual(editWith(state("one two", 0), "\u001Bf"), { text: "one two", cursor: 3 });
+});
+
+test("applyOtherAnswerEdit moves to line start/end with home/end and ctrl+a/e", () => {
+  assert.deepEqual(editWith(state("abc", 1), "\u001B[H"), { text: "abc", cursor: 0 });
+  assert.deepEqual(editWith(state("abc", 1), "\u001B[F"), { text: "abc", cursor: 3 });
+  assert.deepEqual(editWith(state("abc", 1), "\u0001"), { text: "abc", cursor: 0 });
+  assert.deepEqual(editWith(state("abc", 1), "\u0005"), { text: "abc", cursor: 3 });
+  assert.deepEqual(editWith(state("abc", 1), "\u001B[1;5H"), { text: "abc", cursor: 0 });
+  assert.deepEqual(editWith(state("abc", 1), "\u001B[1;5F"), { text: "abc", cursor: 3 });
+});
+
+test("applyOtherAnswerEdit deletes around the cursor", () => {
+  assert.deepEqual(editWith(state("abcd", 2), "\u007F"), { text: "acd", cursor: 1 });
+  assert.deepEqual(editWith(state("abcd", 2), "\u001B[3~"), { text: "abd", cursor: 2 });
+  assert.deepEqual(editWith(state("one two", 7), "\u0017"), { text: "one ", cursor: 4 });
+  assert.deepEqual(editWith(state("abc", 1), "\u0015"), { text: "", cursor: 0 });
+  assert.deepEqual(editWith(state("ab\ncd", 1), "\u000B"), { text: "a\ncd", cursor: 1 });
+  assert.deepEqual(editWith(state("one two", 3), "\u001Bd"), { text: "one", cursor: 3 });
+  assert.deepEqual(editWith(state("one two", 4), "\u001B\u007F"), { text: "two", cursor: 0 });
+});
+
+test("applyOtherAnswerEdit ignores unhandled escape sequences instead of typing them", () => {
+  for (const sequence of ["\u001B[A", "\u001B[B", "\u001B[1;2D", "\u001B[11~", "\u001B[Z"]) {
+    assert.equal(editWith(state("abc", 1), sequence), null, `sequence ${JSON.stringify(sequence)}`);
+  }
 });

@@ -21,8 +21,10 @@ test("isAllowedExternalUrl accepts only the Plus packages URL", () => {
 test("VALID_PERMISSION_SCOPES contains all expected scopes", () => {
   const expected = [
     "read-in-cwd",
+    "read-in-tmp",
     "read-out-cwd",
     "write-in-cwd",
+    "write-in-tmp",
     "write-out-cwd",
     "delete-in-cwd",
     "delete-out-cwd",

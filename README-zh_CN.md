@@ -154,8 +154,10 @@ CLI 子命令统一使用以下退出码，便于脚本集成与 CI 流水线判
 
 ## 支持的模型
 
-- `deepseek-v4-pro`（推荐使用）
+- `deepseek-flash`（推荐使用）
+- `deepseek-v4-pro`
 - `deepseek-v4-flash`
+- `deepseek-v4-flash-vision-exp`
 - 任何其他 OpenAI 兼容模型
 
 ## 架构和基准测试
@@ -174,7 +176,13 @@ Deep Code 的收益来自于工具约束、上下文管理、Agent Skills 和权
 
 ### Deep Code 是否支持理解图片？
 
-Deep Code 内置免费可用的图片理解工具，可使用ctrl+v从剪贴板粘贴图片。Deep Code 本身支持多模态，但目前 deepseek-v4 系列模型还不支持多模态。有些模型虽然有多模态能力，但对多轮对话请求的限制太严。目前多模态输入推荐使用火山方舟的 Doubao-Seed-2.0-pro 模型，适配效果最好。
+支持。`deepseek-flash` 模型支持直接读取本地图片或使用`ctrl+v`从剪贴板粘贴图片，让模型直接看到图片内容。
+
+`deepseek-v4-pro`、`deepseek-v4-flash` 等非多模态模型仍会使用 `UnderstandImage` 识图工具。Deep Code 会自动判断模型能力，也可通过 `multimodal` 配置项手动覆盖。
+
+默认情况下，图片会以 base64 内联发送给模型。启用 `filesApiEnabled` 后，Deep Code 会使用 DeepSeek Files API 上传图片并在请求中复用 `file_id`。详见 [docs/configuration.md](docs/configuration.md#deepseek-files-api)。
+
+Deep Code 内置免费可用的图片理解工具。对于 DeepSeek V4 系列之外的多模态模型（如火山方舟的 Doubao-Seed-2.0-pro），也能通过 `multimodal` 配置启用直接图片输入。
 
 ### 怎样在任务完成后自动给 Slack 发消息？
 

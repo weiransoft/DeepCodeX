@@ -48,8 +48,10 @@ export type McpServerConfig = {
 
 export type PermissionScope =
   | "read-in-cwd"
+  | "read-in-tmp"
   | "read-out-cwd"
   | "write-in-cwd"
+  | "write-in-tmp"
   | "write-out-cwd"
   | "delete-in-cwd"
   | "delete-out-cwd"
@@ -65,6 +67,7 @@ export type PermissionSettings = {
   deny?: PermissionScope[];
   ask?: PermissionScope[];
   defaultMode?: PermissionDefaultMode;
+  addWorkingDirs?: string[];
 };
 
 export type EnabledSkillsSettings = Record<string, boolean>;
@@ -359,8 +362,10 @@ function trimString(value: unknown): string {
 
 const VALID_PERMISSION_SCOPES = new Set<PermissionScope>([
   "read-in-cwd",
+  "read-in-tmp",
   "read-out-cwd",
   "write-in-cwd",
+  "write-in-tmp",
   "write-out-cwd",
   "delete-in-cwd",
   "delete-out-cwd",
@@ -399,6 +404,20 @@ function mergePermissionLists(...lists: Array<PermissionScope[] | undefined>): P
   return result;
 }
 
+function normalizeWorkingDirectories(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const result: string[] = [];
+  for (const item of value) {
+    const directory = trimString(item);
+    if (directory && !result.includes(directory)) {
+      result.push(directory);
+    }
+  }
+  return result;
+}
+
 function normalizePermissionDefaultMode(value: unknown): PermissionDefaultMode | undefined {
   return value === "allowAll" || value === "askAll" ? value : undefined;
 }
@@ -409,6 +428,7 @@ function normalizePermissions(settings: PermissionSettings | null | undefined): 
     deny: normalizePermissionList(settings?.deny),
     ask: normalizePermissionList(settings?.ask),
     defaultMode: normalizePermissionDefaultMode(settings?.defaultMode) ?? "allowAll",
+    addWorkingDirs: normalizeWorkingDirectories(settings?.addWorkingDirs),
   };
 }
 
@@ -422,6 +442,7 @@ function mergePermissions(
     allow: mergePermissionLists(userPermissions.allow, projectPermissions.allow),
     deny: mergePermissionLists(userPermissions.deny, projectPermissions.deny),
     ask: mergePermissionLists(userPermissions.ask, projectPermissions.ask),
+    addWorkingDirs: [...new Set([...userPermissions.addWorkingDirs, ...projectPermissions.addWorkingDirs])],
     defaultMode: projectSettings?.permissions
       ? projectPermissions.defaultMode
       : userSettings?.permissions
@@ -845,7 +866,8 @@ export function resolveSettingsSources(
 
   // 上游 0.3.1：DeepSeek Files API 相关配置
   const filesApiEnabled =
-    parseBoolean(projectSettings?.filesApiEnabled) ?? parseBoolean(userSettings?.filesApiEnabled) ?? false;
+    baseURL === DEFAULT_BASE_URL &&
+    (parseBoolean(projectSettings?.filesApiEnabled) ?? parseBoolean(userSettings?.filesApiEnabled) ?? false);
   const filesApiTimeoutMs =
     firstIntegerInRange(
       1,
@@ -952,6 +974,9 @@ export function applyModelConfigSelection(
 // Default constants
 // ---------------------------------------------------------------------------
 
+// 保留 fork 默认 deepseek-v4-pro：与 v2 summarizer / VSCode companion / 既有测试断言对齐。
+// upstream v0.4.0 改为 deepseek-flash（更快/更便宜），但 fork 所有下游消费者已绑定 v4-pro，
+// 切换需单独评估性能/成本 trade-off，不在本次合并中处理。
 export const DEFAULT_MODEL = "deepseek-v4-pro";
 export const DEFAULT_BASE_URL = "https://api.deepseek.com";
 

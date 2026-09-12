@@ -46,6 +46,7 @@ The following are all the top-level fields supported in `settings.json`, along w
 | `webSearchTool`    | string  | Full path to a custom web search script                                     |
 | `mcpServers`       | object  | MCP server configurations (keys are service names, values are McpServerConfig objects) |
 | `temperature`      | number  | Sampling temperature for LLM, from `0` to `2`                 |
+| `permissions`      | object  | Permission policy and additional `addWorkingDirs` workspace roots (see [permission_en.md](./permission_en.md)) |
 | `enabledSkills`    | object  | Per-skill enable/disable map, keyed by skill name                           |
 | `statusline`       | object  | Status line plugins (see [statusline_en.md](./statusline_en.md))            |
 
@@ -182,7 +183,7 @@ Qwen3 thinking parameter format:
 
 Whether to enable thinking mode. Set to `true` to enable, `false` to disable.
 
-- For `deepseek-v4-pro` and `deepseek-v4-flash`, thinking mode is **enabled by default**.
+- For `deepseek-flash`, `deepseek-v4-pro`, `deepseek-v4-flash`, and `deepseek-v4-flash-vision-exp`, thinking mode is **enabled by default**.
 - For Qwen3 series models (starting with `qwen3` / `qwen/qwen3`), thinking mode is **enabled by default**.
 - For other models, thinking mode is **disabled by default**.
 
@@ -226,7 +227,7 @@ Use this to override the default detection when your model is not in the known-m
 
 #### DeepSeek Files API
 
-With `filesApiEnabled: true`, Deep Code uploads images to the fixed `https://api.deepseek.com/files` endpoint and sends `file_id` references in chat requests. An upload or cache-refresh failure fails the request; disabling the setting preserves the existing image path.
+When `BASE_URL` is `https://api.deepseek.com`, enabling `filesApiEnabled` uploads images to the fixed `https://api.deepseek.com/files` endpoint and sends `file_id` references in chat requests. Other API endpoints do not enable this feature. An upload or cache-refresh failure fails the request; disabling the setting preserves the existing image path.
 
 ```json
 {

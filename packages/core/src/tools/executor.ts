@@ -253,6 +253,7 @@ export class ToolExecutor {
     toolCall: ToolCall,
     hooks?: ToolExecutionHooks
   ): Promise<ToolExecutionResult> {
+    hooks?.signal?.throwIfAborted();
     const toolName = toolCall.function.name;
     const handlerName = BUILT_IN_TOOL_NAME_ALIASES.get(toolName) ?? toolName;
     const handler = this.toolHandlers.get(handlerName);
@@ -323,7 +324,9 @@ export class ToolExecutor {
         // decision === "approve" → 继续执行 handler
       }
 
+      // 合并：保留 fork 的 bash guard + before hook；融入 upstream v0.4.0 的 signal 取消检查
       const result = await handler(parsedArgs.args, {
+        signal: hooks?.signal,
         sessionId,
         projectRoot: this.projectRoot,
         toolCall,
@@ -345,6 +348,9 @@ export class ToolExecutor {
         onLoadSkill: hooks?.onLoadSkill,
       });
 
+      // 合并：先做 upstream v0.4.0 的 signal 取消检查，再执行 fork 的 onAfterToolExecution 结果钩子
+      hooks?.signal?.throwIfAborted();
+
       // V2 钩子（fork）：工具执行结果后处理
       // handler 返回后调用 onAfterToolExecution 钩子，允许对结果进行增强（如 diff 预览增强）
       // 命名说明（V2.3 P1-04）：原名 onToolResult，统一更名与 onBeforeToolExecution 对称，
@@ -356,6 +362,7 @@ export class ToolExecutor {
 
       return result;
     } catch (error) {
+      hooks?.signal?.throwIfAborted();
       const message = error instanceof Error ? error.message : String(error);
       return {
         ok: false,

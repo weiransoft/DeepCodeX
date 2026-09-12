@@ -149,6 +149,7 @@ export async function handleEditTool(
       try {
         stat = fs.statSync(filePath);
       } catch (error) {
+        context.signal?.throwIfAborted();
         const message = error instanceof Error ? error.message : String(error);
         return {
           ok: false,
@@ -243,7 +244,10 @@ export async function handleEditTool(
           const looseEscapeMatches = findLooseEscapeMatches(raw, oldString, scope);
           if (looseEscapeMatches.length === 1 && looseEscapeMatches[0]?.score === 1) {
             const correctedStrings = await correctEscapedStringsWithLLM(
-              raw.slice(scope.startOffset, scope.endOffset),
+              raw.slice(
+                Math.min(scope.startOffset, looseEscapeMatches[0].startOffset),
+                Math.max(scope.endOffset, looseEscapeMatches[0].endOffset)
+              ),
               oldString,
               newString,
               looseEscapeMatches[0].text,
@@ -332,7 +336,9 @@ export async function handleEditTool(
 
         const updated = applyReplacement(raw, replacementOldString, replacementNewString, matches, replaceAll);
         const diffPreview = buildDiffPreview(filePath, raw, updated);
+        context.signal?.throwIfAborted();
         context.onBeforeFileMutation?.(filePath);
+        context.signal?.throwIfAborted();
         writeTextFile(filePath, updated, metadata.encoding, metadata.lineEndings);
         context.onAfterFileMutation?.(filePath);
         const freshMetadata = readTextFileWithMetadata(filePath);
@@ -373,6 +379,7 @@ export async function handleEditTool(
           },
         };
       } catch (error) {
+        context.signal?.throwIfAborted();
         const message = error instanceof Error ? error.message : String(error);
         return {
           ok: false,
@@ -455,7 +462,7 @@ function findOccurrences(raw: string, needle: string, scope: SearchScope): Match
     return [];
   }
 
-  const scopeText = raw.slice(scope.startOffset, scope.endOffset);
+  const scopeText = raw;
   const matches: MatchOccurrence[] = [];
   let searchIndex = 0;
 
@@ -464,8 +471,12 @@ function findOccurrences(raw: string, needle: string, scope: SearchScope): Match
     if (found === -1) {
       break;
     }
-    const startOffset = scope.startOffset + found;
+    const startOffset = found;
     const endOffset = startOffset + needle.length;
+    if (startOffset >= scope.endOffset || endOffset <= scope.startOffset) {
+      searchIndex = found + needle.length;
+      continue;
+    }
     matches.push({
       startOffset,
       endOffset,
@@ -483,7 +494,7 @@ function findLooseEscapeMatches(raw: string, needle: string, scope: SearchScope)
     return [];
   }
 
-  const scopeText = raw.slice(scope.startOffset, scope.endOffset);
+  const scopeText = raw;
   const looseEscapeRegex = buildLooseEscapeRegex(needle);
   if (!looseEscapeRegex) {
     return [];
@@ -497,8 +508,9 @@ function findLooseEscapeMatches(raw: string, needle: string, scope: SearchScope)
     }
 
     const text = match[0];
-    const startOffset = scope.startOffset + match.index;
+    const startOffset = match.index;
     const endOffset = startOffset + text.length;
+    if (startOffset >= scope.endOffset || endOffset <= scope.startOffset) continue;
     matches.push({
       text,
       score: similarityScore(normalizedNeedle, normalizeLooseText(text)),
@@ -720,6 +732,8 @@ async function inferOldStringNotFoundReasonWithLLM(
   const contentAfterSnippet = getLinesAfterScope(lineIndex, scope, contextLineLimit);
 
   try {
+    // 合并：保留 fork B1 的 createMessage provider 路由；融入 upstream v0.4.0 的 signal 取消检查
+    context.signal?.throwIfAborted();
     // 提示词保持原有内容不变，仅换成合成 SessionMessage 形态适配 provider 统一转换入口
     const response = await llmClient.createMessage({
       messages: [
@@ -749,11 +763,13 @@ async function inferOldStringNotFoundReasonWithLLM(
         ),
       ],
       thinkingEnabled,
-      signal: null,
+      signal: context.signal,
     });
+    context.signal?.throwIfAborted();
 
     return parseOldStringNotFoundReason(response.content);
   } catch {
+    context.signal?.throwIfAborted();
     return null;
   }
 }
@@ -809,6 +825,8 @@ async function correctEscapedStringsWithLLM(
   try {
     // 上游 v0.3.1 增强：精确描述失配问题类型（转义/引号），提升 LLM 纠正准确率
     const problemDescription = describeCorrectionProblems(oldString, matchedText);
+    // 合并：保留 fork B1 的 createMessage provider 路由；融入 upstream v0.4.0 的 signal 取消检查
+    context.signal?.throwIfAborted();
     // 提示词保持原有内容不变，仅换成合成 SessionMessage 形态适配 provider 统一转换入口
     const response = await llmClient.createMessage({
       messages: [
@@ -837,8 +855,9 @@ async function correctEscapedStringsWithLLM(
         ),
       ],
       thinkingEnabled,
-      signal: null,
+      signal: context.signal,
     });
+    context.signal?.throwIfAborted();
 
     const parsed = parseCorrectedEditStrings(response.content);
     if (!parsed) {
@@ -862,6 +881,7 @@ async function correctEscapedStringsWithLLM(
 
     return parsed;
   } catch {
+    context.signal?.throwIfAborted();
     return null;
   }
 }

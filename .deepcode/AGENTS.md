@@ -93,13 +93,13 @@ The CLI (`@vegamo/deepcode-cli`) renders a terminal UI using [Ink](https://githu
 
 Ten built-in tools are available to the LLM: `bash`, `read`, `write`, `edit`, `skill`, `AskUserQuestion`, `UpdatePlan`, `WebSearch`, `ReadImage`, and `UnderstandImage`. The `read` tool returns a `snippet_id` that must be passed to subsequent `edit` calls, ensuring edits always operate on a known, session-local file snapshot. Tool definitions are registered in `packages/core/src/tools/executor.ts` and described to the LLM via `packages/core/src/prompt.ts`.
 
-**Image understanding (v0.3.1)**: `supportsMultimodal()` together with the `multimodal` setting (`default`/`on`/`off`) chooses between `ReadImage` (multimodal models — the image is validated and downscaled via Sharp, then injected into context) and `UnderstandImage` (non-multimodal fallback — a plugin-backed LLM analyzes the image and returns text). When `filesApiEnabled` is on, images are uploaded through the DeepSeek Files API, with file IDs cached in `~/.deepcode/files-api-cache.json`. Ctrl+V pastes images from the clipboard; Ctrl+X clears them.
+**Image understanding**: `supportsMultimodal()` together with the `multimodal` setting (`default`/`on`/`off`) chooses between `ReadImage` (multimodal models — the image is validated and downscaled via Sharp, then injected into context) and `UnderstandImage` (non-multimodal fallback — a plugin-backed LLM analyzes the image and returns text). When `filesApiEnabled` is on, images are uploaded through the DeepSeek Files API, with file IDs cached in `~/.deepcode/files-api-cache.json`. Ctrl+V pastes images from the clipboard; Ctrl+X clears them.
 
 A **permission system** (`packages/core/src/common/permissions.ts`) controls tool execution scopes (read/write/delete/network/git-log, etc.) with configurable allow/deny/ask decisions.
 
 A **file history system** (`packages/core/src/common/file-history.ts`) provides undo/checkpoint support via lightweight Git branches.
 
-**Models**: the default model is `deepseek-v4-flash`; `/model` offers `deepseek-v4-pro`, `deepseek-v4-flash`, and `deepseek-v4-flash-vision-exp` with reasoning effort `low`/`high`/`max`. Qwen3-series models (names starting with `qwen3` or `qwen/qwen3`, case-insensitive) are also recognized with dedicated thinking-mode handling.
+**Models**: the default model is `deepseek-flash` (V4.1 Flash); `/model` offers `deepseek-flash`, `deepseek-v4-pro`, `deepseek-v4-flash`, and `deepseek-v4-flash-vision-exp` with reasoning effort `low`/`high`/`max`. Qwen3-series models (names starting with `qwen3` or `qwen/qwen3`, case-insensitive) are also recognized with dedicated thinking-mode handling.
 
 **Slash commands**: `/skills`, `/model`, `/plan`, `/new`, `/init`, `/resume`, `/fork`, `/continue`, `/undo`, `/mcp`, `/raw`, `/exit`, plus fork-specific commands (`/team`, `/architect`, `/pm`, `/coder`, `/tester`, `/ui`, `/review`, `/quality-check`, `/memory`, `/rules`, `/inject`, `/bg`/`/fg`/`/tasks`, `/eag-*`, etc.) and dynamic `/skill-name` for each loaded skill.
 
@@ -115,6 +115,6 @@ A **file history system** (`packages/core/src/common/file-history.ts`) provides 
 
 - **AGENTS.md loading**: The CLI loads agent instructions from `./AGENTS.md`, `./.deepcode/AGENTS.md`, or `~/.deepcode/AGENTS.md` (first found wins).
 - **Skills**: Place skill definitions in `~/.agents/skills/<name>/SKILL.md` (user-level) or `./.agents/skills/<name>/SKILL.md` (project-level). Legacy path `./.deepcode/skills/` is also scanned. Each SKILL.md uses YAML frontmatter with `name` and `description` fields; call the `skill` tool for full instructions.
-- **Bundled skills**: Ship with the CLI — `deepcode-self-refer` (CLI documentation), `skill-digester` (digest & install skills), `skill-writer` (create & debug skills), `image-generator`, plus additional bundled skills (`docx`, `pdf`, `pptx`, `xlsx`, `web-dev`, `eag-*`, etc.).
+- **Bundled skills**: Ship with the CLI — `deepcode-self-refer` (CLI documentation), `skill-digester` (digest & install skills), `skill-writer` (create & debug skills), `image-generator`, `video-generator`, plus additional bundled skills (`docx`, `pdf`, `pptx`, `xlsx`, `web-dev`, `eag-*`, etc.).
 - **Default skill templates**: `karpathy-guidelines`, `design-aesthetics`, `ui-ux-best-practices`, and `code-quality-guidelines` are injected as default skill templates (can be disabled via `enabledSkills` settings).
 - **Prompt file references**: Use `@path/to/file` syntax in prompts to load file contents through the read tool.

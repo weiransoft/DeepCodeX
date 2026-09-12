@@ -73,6 +73,7 @@ export type {
   SessionProcessEntry,
   BashTimeoutAdjustment,
   LlmStreamProgress,
+  LlmRetryEvent,
   // 上游 v0.3.1 新增：SessionManager 构造选项类型（CLI 装配层注入 orchestrator 用）
   SessionManagerOptions,
 } from "./session";

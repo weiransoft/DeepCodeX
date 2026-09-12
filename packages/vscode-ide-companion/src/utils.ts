@@ -8,8 +8,10 @@ export function isAllowedExternalUrl(value: unknown): value is string {
 
 export const VALID_PERMISSION_SCOPES = new Set<PermissionScope>([
   "read-in-cwd",
+  "read-in-tmp",
   "read-out-cwd",
   "write-in-cwd",
+  "write-in-tmp",
   "write-out-cwd",
   "delete-in-cwd",
   "delete-out-cwd",

@@ -86,6 +86,7 @@ export async function handleWebviewMessage(message: unknown, deps: ProviderDeps)
     await handlePrompt(prompt, skills, images, sessionManager, postMessage, renderMarkdown, {
       permissions: permissions.length > 0 ? permissions : undefined,
       alwaysAllows: alwaysAllows.length > 0 ? alwaysAllows : undefined,
+      isAnswers: msg.isAnswers === true ? true : undefined,
     });
     return true;
   }
@@ -189,7 +190,7 @@ export function loadSession(
         role: m.role,
         content: m.content,
         html:
-          m.role !== "tool"
+          m.role !== "tool" && (m.role !== "user" || m.meta?.isAnswers)
             ? renderMarkdown(
                 m.content || (m.messageParams as { reasoning_content?: string } | null)?.reasoning_content || ""
               )
@@ -238,7 +239,7 @@ async function handlePrompt(
   sessionManager: ProviderDeps["sessionManager"],
   postMessage: PostMessageFn,
   renderMarkdown: (text: string) => string,
-  options: { permissions?: UserToolPermission[]; alwaysAllows?: PermissionScope[] } = {}
+  options: { permissions?: UserToolPermission[]; alwaysAllows?: PermissionScope[]; isAnswers?: boolean } = {}
 ): Promise<void> {
   const normalizedImages = imageUrls.filter(Boolean);
   const displayPrompt = prompt || (normalizedImages.length > 0 ? "粘贴的图像" : "");
@@ -248,7 +249,12 @@ async function handlePrompt(
     ((options.permissions?.length ?? 0) > 0 || (options.alwaysAllows?.length ?? 0) > 0);
 
   if (displayPrompt && !isPermissionContinue) {
-    postMessage({ type: "userMessage", content: displayPrompt });
+    postMessage({
+      type: "userMessage",
+      content: displayPrompt,
+      html: options.isAnswers ? renderMarkdown(displayPrompt) : undefined,
+      meta: options.isAnswers ? { isAnswers: true } : undefined,
+    });
   }
 
   postMessage({ type: "loading", value: true });
@@ -260,6 +266,7 @@ async function handlePrompt(
       imageUrls: normalizedImages,
       permissions: options.permissions,
       alwaysAllows: options.alwaysAllows,
+      isAnswers: options.isAnswers,
     });
     await sendSkillsList(sessionManager, postMessage);
 

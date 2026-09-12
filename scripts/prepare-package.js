@@ -137,6 +137,36 @@ function gitTagExists(tagName) {
   return result.status === 0;
 }
 
+function gitRefCommit(ref) {
+  const result = spawnSync("git", ["rev-parse", "--verify", `${ref}^{}`], {
+    cwd: root,
+    encoding: "utf-8",
+    shell: false,
+  });
+  if (result.status !== 0) {
+    fail(`Unable to resolve git ref: ${ref}`);
+  }
+  return result.stdout.trim();
+}
+
+function canReuseExistingTag(tagName) {
+  if (gitRefCommit(tagName) === gitRefCommit("HEAD")) {
+    return true;
+  }
+
+  const result = spawnSync("git", ["diff", "--name-only", `${tagName}^{}`, "HEAD"], {
+    cwd: root,
+    encoding: "utf-8",
+    shell: false,
+  });
+  if (result.status !== 0) {
+    fail(`Unable to compare existing tag ${tagName} with HEAD.`);
+  }
+
+  const changedPaths = result.stdout.split("\n").filter(Boolean);
+  return changedPaths.length > 0 && changedPaths.every((filePath) => filePath === "scripts/prepare-package.js");
+}
+
 // ── Parse args ───────────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
@@ -404,12 +434,16 @@ if (!dryRun) {
   }
 
   if (gitTagExists(tagName)) {
-    fail(`Git tag already exists: ${tagName}`);
+    if (!canReuseExistingTag(tagName)) {
+      fail(`Git tag already exists and does not match the current release contents: ${tagName}`);
+    }
+    log(`  Reusing existing tag ${tagName}`);
+  } else {
+    run("git", ["tag", tagName], {
+      label: `git tag ${tagName}`,
+    });
+    ok(`Created tag ${tagName}`);
   }
-  run("git", ["tag", tagName], {
-    label: `git tag ${tagName}`,
-  });
-  ok(`Created tag ${tagName}`);
 } else {
   log("\n  (dry-run) git add + commit + tag");
 }
