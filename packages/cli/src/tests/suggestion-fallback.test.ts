@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AUTO_EXECUTABLE_COMMAND_KINDS, extractSuggestedCommandText } from "../ui";
+import {
+  AUTO_EXECUTABLE_COMMAND_KINDS,
+  AUTO_EXECUTABLE_EAG_COMMANDS,
+  extractAutoExecutableEagCommandName,
+  extractSuggestedCommandText,
+} from "../ui";
 
 // 建议循环客户端兜底（2026-09-03）：回合收尾"建议执行 /xxx"命令提取的单元测试
 
@@ -87,5 +92,79 @@ test("AUTO_EXECUTABLE_COMMAND_KINDS contains only task-execution kinds", () => {
   // 会话控制/销毁类、进程控制类、循环风险类、信息展示类：严禁自动执行
   for (const kind of ["exit", "new", "resume", "undo", "cancel", "bg", "fg", "pause", "continue", "help"]) {
     assert.ok(!AUTO_EXECUTABLE_COMMAND_KINDS.has(kind), `${kind} 不得在自动执行白名单中`);
+  }
+});
+
+// ============================================================================
+// F9-v2（2026-09-12）：引号中文参数捕获 + EAG 命令白名单
+// 日志铁证：建议器输出"建议启动 /eag-autonomous --goal '从本机 46 导出...'"时，
+// 旧正则在引号处截断导致 --goal 中文值丢失、兜底全程静默。
+// ============================================================================
+
+test("extractSuggestedCommandText captures single-quoted chinese args", () => {
+  // 单引号包裹的中文参数（含空格）完整捕获，不截断
+  assert.equal(
+    extractSuggestedCommandText("建议启动 /eag-autonomous --goal '从本机 46 导出数据库到 43'"),
+    "/eag-autonomous --goal '从本机 46 导出数据库到 43'"
+  );
+});
+
+test("extractSuggestedCommandText captures double-quoted chinese args", () => {
+  // 双引号形式与单引号同构
+  assert.equal(
+    extractSuggestedCommandText('建议启动 /eag-autonomous --goal "从本机 46 导出数据库到 43 采用全量覆盖"'),
+    '/eag-autonomous --goal "从本机 46 导出数据库到 43 采用全量覆盖"'
+  );
+});
+
+test("extractSuggestedCommandText captures mixed quoted and ascii args", () => {
+  // 引号参数后可继续跟 ASCII token 参数（如 --max-iterations 10）
+  assert.equal(
+    extractSuggestedCommandText("建议启动 /eag-autonomous --goal '同步数据库' --max-iterations 10"),
+    "/eag-autonomous --goal '同步数据库' --max-iterations 10"
+  );
+});
+
+test("extractSuggestedCommandText unmatched quote falls back to ascii token", () => {
+  // 未闭合引号不满足引号模式，回退 ASCII token 捕获（--goal 后中文值不属于参数）
+  assert.equal(extractSuggestedCommandText("建议启动 /eag-autonomous --goal"), "/eag-autonomous --goal");
+});
+
+test("extractSuggestedCommandText quoted args do not leak chinese prose", () => {
+  // 命令名后紧跟中文散文（无引号）仍不视为参数，仅捕获命令名
+  assert.equal(extractSuggestedCommandText("建议启动 /eag-autonomous 来完成这次同步"), "/eag-autonomous");
+});
+
+test("extractAutoExecutableEagCommandName accepts whitelisted eag command with args", () => {
+  // 白名单内 EAG 命令 + 完整参数：返回命令名
+  assert.equal(
+    extractAutoExecutableEagCommandName("/eag-autonomous --goal '同步数据库' --max-iterations 10"),
+    "eag-autonomous"
+  );
+});
+
+test("extractAutoExecutableEagCommandName rejects non-whitelisted eag commands", () => {
+  // 熔断/查询/复杂参数类 EAG 命令：严禁自动执行
+  assert.equal(extractAutoExecutableEagCommandName("/eag-autonomous-stop"), null);
+  assert.equal(extractAutoExecutableEagCommandName("/eag-autonomous-status"), null);
+  assert.equal(extractAutoExecutableEagCommandName("/eag-graph --graph-file x.json"), null);
+  assert.equal(extractAutoExecutableEagCommandName("/eag-design --spec y.yaml"), null);
+});
+
+test("extractAutoExecutableEagCommandName rejects non-eag and malformed input", () => {
+  // 内置命令体系内的命令：不属于 EAG 白名单（走 AUTO_EXECUTABLE_COMMAND_KINDS 通道）
+  assert.equal(extractAutoExecutableEagCommandName("/review"), null);
+  // 非 "/" 开头、空字符串、纯 "/"：均拒绝
+  assert.equal(extractAutoExecutableEagCommandName("eag-autonomous"), null);
+  assert.equal(extractAutoExecutableEagCommandName(""), null);
+  assert.equal(extractAutoExecutableEagCommandName("/"), null);
+});
+
+test("AUTO_EXECUTABLE_EAG_COMMANDS contains only eag-autonomous", () => {
+  // 保守收录：仅 eag-autonomous（建议器 suggest_autonomous 的标准产出）
+  assert.ok(AUTO_EXECUTABLE_EAG_COMMANDS.has("eag-autonomous"));
+  // 熔断/状态查询/需复杂参数的命令不得进入白名单
+  for (const name of ["eag-autonomous-stop", "eag-autonomous-status", "eag-graph", "eag-design", "eag-build"]) {
+    assert.ok(!AUTO_EXECUTABLE_EAG_COMMANDS.has(name), `${name} 不得在 EAG 自动执行白名单中`);
   }
 });

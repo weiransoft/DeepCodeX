@@ -6,12 +6,17 @@
  * 出现"建议执行 /xxx"句式时，客户端自动把该命令注入执行，打破"模型反复建议、
  * 命令永不执行"的建议循环。
  *
- * 与 App.tsx handlePrompt finally 块配合工作，完整防线分三层：
- * 1. 提取层（本模块 extractSuggestedCommandText）：从回合收尾文本中提取建议的命令字符串；
+ * 与 App.tsx handlePrompt finally 块配合工作，完整防线分四层：
+ * 1. 提取层（本模块 extractSuggestedCommandText）：从回合收尾文本中提取建议的命令字符串
+ *    （F9-v2：参数捕获支持单/双引号包裹的中文参数）；
  * 2. 校验层（App.tsx parseSlashCommandKind）：命令必须是 BUILTIN_SLASH_COMMANDS 中的
  *    内置命令，否则视为 LLM 幻觉，静默放弃；
  * 3. 执行层（App.tsx）：只有 kind 落在 AUTO_EXECUTABLE_COMMAND_KINDS 白名单内才注入执行，
  *    且同一 kind 每个会话只自动执行一次（防循环）。
+ * 4. EAG 执行层（F9-v2，App.tsx）：PromptSubmission.command 体系外的 EAG 命令经
+ *    extractAutoExecutableEagCommandName + AUTO_EXECUTABLE_EAG_COMMANDS 校验后，
+ *    走纯文本注入通道直达 core session.ts 的 EagCommandParser（EAG 命令本身不在
+ *    第 2/3 层体系内）。
  *
  * 本模块为纯函数模块，不依赖 React / Ink，便于单元测试。
  */
@@ -31,21 +36,75 @@
  */
 export const AUTO_EXECUTABLE_COMMAND_KINDS = new Set<string>(["review", "quality-check", "team"]);
 
+/**
+ * F9-v2（2026-09-12）：允许自动执行的 EAG 命令名白名单。
+ *
+ * 背景：EAG 命令不在 AUTO_EXECUTABLE_COMMAND_KINDS 体系内——PromptSubmission.command
+ * 联合类型没有 eag-* 成员，EAG 命令经"裸文本透传"通道直达 core session.ts 的
+ * EagCommandParser 前缀解析分发。因此 EAG 建议的自动执行走独立的纯文本注入通道
+ * （见 App.tsx finally 兜底块），白名单也独立维护。
+ *
+ * 设计原则（保守收录）：
+ * - 仅收录 eag-autonomous：建议循环日志中反复出现"建议启动 /eag-autonomous"，
+ *   且该命令是 EAG 建议器（suggest_autonomous）的标准产出；
+ * - 明确排除：
+ *   eag-autonomous-stop（熔断操作，模型幻觉触发即中断真实任务）；
+ *   eag-autonomous-status（信息查询类，无执行价值）；
+ *   eag-graph（需要 --graph-file 等复杂参数，幻觉参数无法通过校验）；
+ *   eag-design/eag-build 等（需要完整需求/规格参数，交给建议层 refine 流程处理）。
+ */
+export const AUTO_EXECUTABLE_EAG_COMMANDS = new Set<string>(["eag-autonomous"]);
+
 // "建议 + 动词(执行|启动|运行|使用|部署|调用|发起|开始)" + 至多 12 个非换行非斜杠字符
-// （容忍"的/命令/反引号/，"等连接词）+ /命令名(+ASCII 参数)
+// （容忍"的/命令/反引号/，"等连接词）+ /命令名(+ 参数)
 //
 // F9 扩展：原正则只匹配"建议执行"，但 EAG 动态建议器输出的是"建议启动 /eag-autonomous"
 // 等句式，此处扩展动词枚举覆盖更多中文表达，前缀容忍窗口保持 12 字符不变。
-// 命令名要求字母开头（与 BUILTIN_SLASH_COMMANDS 命名一致），参数只捕获 ASCII token，
+// 命令名要求字母开头（与 BUILTIN_SLASH_COMMANDS 命名一致）。
+//
+// F9-v2 扩展（2026-09-12）：参数捕获支持单/双引号包裹的中文参数——
+// 日志铁证：建议器输出"建议启动 /eag-autonomous --goal '从本机 46 导出...'"时，
+// 原正则的 ASCII token 模式在引号处截断，导致 --goal 的中文值被丢弃、兜底全程静默。
+// 引号参数模式（'[^'\n]*'|"[^"\n]*"）完整捕获引号内任意非换行内容（含中文与空格），
+// 引号后继续匹配 ASCII token（如 --max-iterations 10）。
 // 中文散文（如"建议启动 /eag-autonomous 来完成这次同步"中的"来完成这次同步"）
-// 不会被误认为参数。
+// 仍不会被误认为参数（裸 token 模式保持 ASCII-only）。
 const SUGGESTION_COMMAND_PATTERN =
-  /建议(?:执行|启动|运行|使用|部署|调用|发起|开始)[^\n/]{0,12}\/([a-zA-Z][\w-]*)(?:[ \t]+[A-Za-z0-9_\-./@]+)*/g;
+  /建议(?:执行|启动|运行|使用|部署|调用|发起|开始)[^\n/]{0,12}\/([a-zA-Z][\w-]*)(?:[ \t]+(?:'[^'\n]*'|"[^"\n]*"|[A-Za-z0-9_\-./@]+))*/g;
 
 // 否定标记：当"建议执行 /xxx"是模型转述的模板约束文本（例如 F3 审查模板中的
 // "严禁回复'建议执行 /review 或任何斜杠命令'"），模式前文会出现下列否定词，
 // 此时该文本是"被禁止的示例"而非真正的建议，不应触发自动执行。
 const NEGATION_MARKER_PATTERN = /严禁|禁止|避免|不要|不建议|不会|不必|无需/;
+
+/**
+ * F9-v2（2026-09-12）：判断建议命令是否为允许自动执行的 EAG 命令。
+ *
+ * EAG 命令经纯文本注入通道执行（无 PromptSubmission.command 字段），因此
+ * App.tsx 的 parseSlashCommandKind + AUTO_EXECUTABLE_COMMAND_KINDS 校验体系
+ * 对 eag-* 返回 undefined（走不进白名单）。本函数为 EAG 命令提供等价的
+ * 白名单校验：命令名（首个 token 去除 "/"）必须落在 AUTO_EXECUTABLE_EAG_COMMANDS。
+ *
+ * @param commandText 建议命令字符串（如 "/eag-autonomous --goal 'xxx'"）
+ * @returns 命中的 EAG 命令名（如 "eag-autonomous"）；非白名单 EAG 命令或
+ *          非 EAG 命令返回 null
+ */
+export function extractAutoExecutableEagCommandName(commandText: string): string | null {
+  const trimmed = commandText.trim();
+  if (!trimmed.startsWith("/")) {
+    return null;
+  }
+  // 提取首个 token（如 "/eag-autonomous"），去除 "/" 得到命令名
+  const firstToken = trimmed.split(/\s+/, 1)[0];
+  if (!firstToken) {
+    return null;
+  }
+  const commandName = firstToken.slice(1);
+  if (!commandName) {
+    return null;
+  }
+  return AUTO_EXECUTABLE_EAG_COMMANDS.has(commandName) ? commandName : null;
+}
 
 /**
  * 从 assistant 回合收尾文本中提取"建议执行 /xxx"的斜杠命令。
