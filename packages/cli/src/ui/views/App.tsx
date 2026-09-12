@@ -60,6 +60,13 @@ import {
   extractAutoExecutableEagCommandName,
   extractSuggestedCommandText,
 } from "../core/suggestion-fallback";
+// F10（2026-09-12）：任务执行中指令分发判定 + 会话绑定排队队列（修复 G1-G5，
+// 详见 docs/dev/queued-dispatch-gaps-fix.md）
+import {
+  isImmediateControlCommand as isImmediateControlCommandPure,
+  isUrgentIntervention,
+  PendingPromptQueue,
+} from "../core/prompt-dispatch";
 import type {
   LlmStreamProgress,
   LlmRetryEvent,
@@ -155,108 +162,22 @@ const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", 
 /**
  * 当前 LLM 正在执行时，判断提交是否属于“控制类命令”。
  *
- * 这类命令不占用 LLM 回合，可以直接执行：
- * - exit / new / resume / undo / mcp / rules / team
- * - 任务管理：inject / bg / tasks / fg / cancel / pause
- *
- * 可能触发新 LLM 调用的命令（/init、非空会话的 /continue 等）以及普通文本默认不通过这里判断，
- * 而是由 isUrgentIntervention 进一步决定是插队中断还是排队。
+ * F10（2026-09-12）：白名单与纯判定逻辑已抽至 ui/core/prompt-dispatch.ts
+ * （可独立单测）；continue 的空会话特例（打开会话列表而非触发 LLM 回合）
+ * 需要会话状态参与判断，保留在此处调用方处理。
  */
 function isImmediateControlCommand(
   submission: { command?: string; text?: string },
   sessionManager: SessionManager
 ): boolean {
-  const IMMEDIATE_COMMANDS = new Set([
-    "exit",
-    "new",
-    "resume",
-    "undo",
-    "mcp",
-    "rules",
-    "team",
-    "inject",
-    "bg",
-    "tasks",
-    "fg",
-    "cancel",
-    "pause",
-  ]);
-  const cmd = submission.command;
-  if (!cmd) return false;
-  if (cmd === "continue") {
+  if (submission.command === "continue") {
     return isCurrentSessionEmpty(sessionManager);
   }
-  return IMMEDIATE_COMMANDS.has(cmd);
+  return isImmediateControlCommandPure(submission);
 }
 
-/**
- * 判断提交是否属于对当前正在运行的 LLM 回合的“紧急干预”。
- *
- * 当 LLM 正在思考/执行但明显出错，或用户需要立即纠正、停止、重试时，
- * 应当立刻中断当前回合，并用该消息重新驱动。
- *
- * 命中规则包括（中英混合，不区分大小写）：
- * - 停止/取消：stop / cancel / abort / halt / quit / enough、别 / 停 / 取消 / 停止 / 放弃 / 终止 / 够了 / 不要
- * - 纠正/重试：wrong / incorrect / mistake / fix / retry / redo / rewind / rethink、
- *   错了 / 不对 / 不正确 / 有误 / 改一下 / 修改 / 修正 / 纠正 / 重新 / 重来 / 重试 / 应该 / 不是 / 要用 / 改为 / 换成 / check / think again / 反思
- * - 紧急优先：urgent / immediate / asap、马上 / 立即 / 立刻 / 优先
- */
-function isUrgentIntervention(submission: { command?: string; text?: string }): boolean {
-  if (submission.command === "inject") return true;
-  const text = submission.text?.trim().toLowerCase() ?? "";
-  if (!text) return false;
-  const URGENT_PATTERNS = [
-    "stop",
-    "cancel",
-    "abort",
-    "halt",
-    "quit",
-    "enough",
-    "别",
-    "停",
-    "取消",
-    "停止",
-    "放弃",
-    "终止",
-    "够了",
-    "不要",
-    "wrong",
-    "incorrect",
-    "mistake",
-    "fix",
-    "retry",
-    "redo",
-    "rewind",
-    "rethink",
-    "错了",
-    "不对",
-    "不正确",
-    "有误",
-    "改一下",
-    "修改",
-    "修正",
-    "纠正",
-    "重新",
-    "重来",
-    "重试",
-    "应该",
-    "不是",
-    "要用",
-    "改为",
-    "换成",
-    "check",
-    "think again",
-    "反思",
-    "urgent",
-    "immediate",
-    "asap",
-    "马上",
-    "立即",
-    "立刻",
-    "优先",
-  ];
-  return URGENT_PATTERNS.some((pattern) => text.includes(pattern));
-}
+// F10（2026-09-12）：紧急干预判定已抽至 ui/core/prompt-dispatch.ts（可独立单测），
+// 此处直接复用；三级匹配语义见该模块注释与 docs/dev/queued-dispatch-gaps-fix.md G5。
 
 type AppProps = {
   projectRoot: string;
@@ -325,7 +246,9 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
   const [pendingPlanImplementation, setPendingPlanImplementation] = useState<string | null>(null);
   // fork：处理期间输入队列——允许用户在 LLM 回复过程中继续打字/回车，
   // 消息排入队列并在当前回合结束后自动连续发送（核心特性，保留）
-  const pendingQueueRef = useRef<PromptSubmission[]>([]);
+  // F10（2026-09-12）：改用 PendingPromptQueue——条目绑定入队时的会话 ID
+  // （G2：切换会话后旧会话排队消息不再泄漏到新会话）+ 容量上限 32（G5）
+  const pendingQueueRef = useRef(new PendingPromptQueue());
   const [queuedCount, setQueuedCount] = useState(0);
   const isProcessingRef = useRef(false);
   const handlePromptRef = useRef<(submission: PromptSubmission) => Promise<void>>(async () => {});
@@ -590,6 +513,10 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
   const resetToWelcome = useCallback(async () => {
     writeRef.current(ANSI_CLEAR_SCREEN);
     sessionManager.setActiveSessionId(null);
+    // F10（2026-09-12）G2 修复：回到欢迎页 = 放弃当前会话上下文，
+    // 排队消息全部丢弃（activeSessionId 置空后它们已无归属会话）
+    pendingQueueRef.current.discardAll();
+    setQueuedCount(0);
     setStatusLine("");
     setErrorLine(null);
     setRunningProcesses(null);
@@ -1108,12 +1035,21 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
           finalActiveSessionId ? (sessionManager.getSession(finalActiveSessionId)?.processes ?? null) : null
         );
         // fork：当前 LLM 回合结束，自动消费队列中的下一条消息（连续排队发送）
-        const next = pendingQueueRef.current.shift();
-        if (next) {
-          setQueuedCount(pendingQueueRef.current.length);
-          await handlePromptRef.current(next);
+        // F10（2026-09-12）G4 修复：LLM 回合出错（网络/上游异常）时停止自动连锁消费——
+        // 排队消息逐条执行很可能连锁失败，但**不丢弃**（保留用户输入），
+        // 状态栏提示后由用户下次主动发送消息时自然恢复队列消费。
+        if (llmTurnState === "error" && pendingQueueRef.current.size > 0) {
+          setStatusLine(`LLM 回合出错，${pendingQueueRef.current.size} 条排队消息已保留（发送任意消息后继续）`);
+        }
+        // F10 G2 修复：dequeue 只取属于当前活跃会话的条目，
+        // 其他会话的陈旧条目（用户中途切走会话）被顺手丢弃，不会发错会话
+        const nextEntry = llmTurnState === "error" ? null : pendingQueueRef.current.dequeue(finalActiveSessionId ?? "");
+        if (nextEntry) {
+          setQueuedCount(pendingQueueRef.current.size);
+          await handlePromptRef.current(nextEntry.submission);
         } else {
           isProcessingRef.current = false;
+          setQueuedCount(pendingQueueRef.current.size);
           // 建议循环客户端兜底（2026-09-03）：仅当本次调用真实跑完 LLM 回合且无异常、
           // 回合以纯文本结束（无工具调用，status=completed）、无待确认计划、无排队用户消息时，
           // 才扫描回复尾部的"建议执行 /xxx"句式并自动注入执行（复用 parseSlashCommandKind 校验）。
@@ -1182,8 +1118,16 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
   handlePromptRef.current = handlePrompt;
 
   const handleInterrupt = useCallback(() => {
+    // F10（2026-09-12）G3 修复：ESC 中断语义是"全部停下"——除打断当前回合外
+    // 还要清空排队消息，否则当前回合被打断后 finally 仍会自动发送队列中的
+    // 下一条消息，用户"停不干净"。丢弃条数经状态栏反馈，让用户有感知。
+    const discarded = pendingQueueRef.current.discardAll();
+    if (discarded > 0) {
+      setQueuedCount(0);
+      setStatusLine(`已中断当前回合，丢弃 ${discarded} 条排队消息`);
+    }
     sessionManager.interruptActiveSession();
-  }, [sessionManager]);
+  }, [sessionManager, setStatusLine]);
 
   const handleToggleProcessStdout = useCallback(() => {
     setShowProcessStdout(true);
@@ -1262,18 +1206,26 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
 
       // 2. 紧急干预：用户明显在纠正当前运行中的错误、要求停止/重试/立即修改时，
       //    将消息插到队列最前面，并立即中断当前 LLM 回合，让该消息优先执行
+      //    F10：条目绑定当前会话 ID（G2），容量超限时降级为状态栏提示（G5）
       if (isUrgentIntervention(submission)) {
-        pendingQueueRef.current.unshift(submission);
-        setQueuedCount(pendingQueueRef.current.length);
-        sessionManager.interruptActiveSession();
+        if (pendingQueueRef.current.enqueue(sessionManager.getActiveSessionId() ?? "", submission, { urgent: true })) {
+          sessionManager.interruptActiveSession();
+        } else {
+          setStatusLine(`排队队列已满（${pendingQueueRef.current.size} 条），请先处理积压消息`);
+        }
+        setQueuedCount(pendingQueueRef.current.size);
         return;
       }
 
       // 3. 普通后续指令排队，当前回合结束后自动连续发送
-      pendingQueueRef.current.push(submission);
-      setQueuedCount(pendingQueueRef.current.length);
+      //    F10：绑定会话 ID + 容量上限（队满拒绝入队并提示，G2/G5）
+      if (pendingQueueRef.current.enqueue(sessionManager.getActiveSessionId() ?? "", submission)) {
+        setQueuedCount(pendingQueueRef.current.size);
+      } else {
+        setStatusLine(`排队队列已满（${pendingQueueRef.current.size} 条），该消息未入队`);
+      }
     },
-    [sessionManager]
+    [sessionManager, setStatusLine]
   );
 
   const handlePlanImplementationChoice = useCallback(
@@ -1319,6 +1271,14 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
   const handleSelectSession = useCallback(
     async (sessionId: string) => {
       sessionManager.setActiveSessionId(sessionId);
+      // F10（2026-09-12）G2 修复：切换会话时丢弃其他会话的排队消息——
+      // 排队条目在入队时绑定了当时的会话 ID，切走后这些消息若继续消费
+      // 会被发到新会话（跨会话泄漏）。丢弃后同步排队计数。
+      const discardedQueued = pendingQueueRef.current.discardExcept(sessionId);
+      if (discardedQueued > 0) {
+        setQueuedCount(pendingQueueRef.current.size);
+        setStatusLine(`已切换会话，丢弃 ${discardedQueued} 条旧会话排队消息`);
+      }
       // Clear first so <Static> resets its index to 0.
       await resetStaticView(loadVisibleMessages(sessionManager, sessionId), { clearScreen: true });
       const session = sessionManager.getSession(sessionId);
@@ -1334,7 +1294,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
       }
       await refreshSkills(sessionId);
     },
-    [sessionManager, resetStaticView, pendingPermissionReply, refreshSkills, statusLineOptions]
+    [sessionManager, resetStaticView, pendingPermissionReply, refreshSkills, statusLineOptions, setStatusLine]
   );
 
   /**

@@ -136,14 +136,16 @@ const previewProgress = {
   previewText: "latest text",
 };
 const previewNow = Date.parse(previewProgress.startedAt) + 5000;
-const previewStatus = "Thinking... (5s) · ↓ 1.5k tokens";
+// fork 中文化：loading 状态文案为"思考中..."（与上方非 preview 用例一致）；
+// formattedTokens 传 "1.5k" 紧凑格式时由 formatTokens 原样透传
+const previewStatus = "思考中... (5s) · ↓ 1.5k tokens";
 
 test("loading preview requires more than 1500 tokens and preserves status priority", () => {
   const input = { progress: previewProgress, now: previewNow, screenWidth: 100 };
   assert.equal(buildLoadingText(input), `${previewStatus} [latest text]`);
   assert.equal(buildLoadingText({ ...input, progress: { ...previewProgress, estimatedTokens: 1500 } }), previewStatus);
   assert.equal(buildLoadingText({ ...input, progress: { ...previewProgress, previewText: "" } }), previewStatus);
-  assert.equal(buildLoadingText({ ...input, now: previewNow - 4000 }), "Thinking...");
+  assert.equal(buildLoadingText({ ...input, now: previewNow - 4000 }), "思考中...");
   assert.equal(
     buildLoadingText({
       ...input,

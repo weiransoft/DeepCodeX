@@ -112,5 +112,15 @@ export {
   extractAutoExecutableEagCommandName,
   extractSuggestedCommandText,
 } from "./core/suggestion-fallback";
+// F10（2026-09-12）：任务执行中指令分发判定 + 会话绑定排队队列
+// （立即控制命令 / 紧急干预三级匹配 / PendingPromptQueue，详见 docs/dev/queued-dispatch-gaps-fix.md）
+export {
+  IMMEDIATE_CONTROL_COMMANDS,
+  MAX_PENDING_QUEUE_SIZE,
+  isImmediateControlCommand,
+  isUrgentIntervention,
+  PendingPromptQueue,
+  type QueuedPromptEntry,
+} from "./core/prompt-dispatch";
 // 上游 v0.3.1 新增 buildPluginRateLimitHintText：插件限流提示文本
 export { buildExitSummaryText, buildPluginRateLimitHintText, buildResumeHintText } from "./exit-summary";
