@@ -1,7 +1,7 @@
 # DeepCodeX 新特性总览
 
-> **版本**：v1.1
-> **日期**：2026-07-26（v1.0）；2026-08-04（v1.1 文档对照代码一致性核查修订）
+> **版本**：v1.2
+> **日期**：2026-07-26（v1.0）；2026-08-04（v1.1 文档对照代码一致性核查修订）；2026-09-12（v1.2 新增 Q 章：F9-v2 建议循环确定性执行 + F10 任务中指令分发加固）
 > **状态**：✅ 已实施完成（例外：F.4 后台任务持久化、C.4 `.deepcode/eag.yml` 文件加载为已规划未接线，详见对应章节标注）
 > **关联文档**（`docs/fusion/` 为本地设计文档，未入库，链接仅本机有效）：
 > - 设计蓝图：[docs/fusion/DEEPCODEX_FUSION_PLAN.md](fusion/DEEPCODEX_FUSION_PLAN.md)
@@ -610,6 +610,7 @@ LLM 通过 AskUserQuestion 工具向用户提问后，用户回答仅作为消�
 | EAG-P5 E2E | 52 用例（L-U 组） | Dev / Verify / Fix / BLOCKER / 三命令 / 跨会话续跑 |
 | 日志与中断 | 57 用例 | log-rotation / interrupt-logger / error-logger / debug-logger |
 | AskUserQuestion | 2 套 | 核心层 + CLI 层白名单与合并方案 |
+| 建议循环与指令分发（Q 章） | 62 用例 | prompt-dispatch 13 + session F9-v2 13 + suggestion-fallback 24 + loading-text 12 |
 
 ---
 
@@ -679,3 +680,56 @@ LLM 通过 AskUserQuestion 工具向用户提问后，用户回答仅作为消�
 | [docs/session-persistence.md](session-persistence.md) | 会话持久化 |
 | [docs/statusline.md](statusline.md) | 状态行 |
 | [docs/eag-autonomous.md](eag-autonomous.md) | EAG Autonomous 使用指南 |
+
+---
+
+## Q. 建议循环确定性执行与任务中指令分发（F9-v2 / F10）
+
+> 代码实现：`packages/core/src/session.ts`（F9-v2 确定性执行通道）与 `packages/cli/src/ui/core/prompt-dispatch.ts` + `packages/cli/src/ui/core/suggestion-fallback.ts`（F10 分发与客户端兜底）
+> 日期：2026-09-12（日志驱动的三缺口修复 + 五缺口分发加固）
+
+### Q.1 问题背景
+
+实测日志暴露两类体验断点：
+
+1. **建议无法触达执行**：LLM 回合收尾给出"建议执行 /eag-autonomous --goal '...'"后，用户回复"执行这个全量覆盖！"被主 LLM 拒绝（"我不能直接替你执行"）；"启动 EAG 自主任务..."被建议器 LLM 误分类为 direct_chat，陷入"仅给出建议，不会自动执行"的循环。
+2. **任务执行中指令分发缺口**：排队消息不绑定会话（切换会话后泄漏）、ESC 中断不清空队列（停不干净）、LLM 出错后队列连锁失败、紧急干预判定任意位置子串匹配误伤高频词（"要不要继续""别人写的""停用缓存"）。
+
+### Q.2 F9-v2 确定性执行通道（core/session.ts）
+
+分流不依赖 LLM 的确定性文本匹配（建议器之前执行）：
+
+| 通道 | 触发条件 | 行为 |
+|------|---------|------|
+| 命令字面量 | 输入含 `/eag-autonomous` 字面量 | 直接进入命令分发 |
+| 意图前缀 | "启动/执行 + EAG/自主任务/无人值守"（双层否定词保护："不要启动"不触发；泛化词"自动循环/自动编排"故意不收录防误伤） | 剥离意图前缀构造命令执行 |
+| 指代确认 | "执行这个/该 X"式短语 + 上一条展示过的建议快照 | 直接执行该建议（一次性消费语义） |
+| F9 自动执行 | refine 澄清 / 显式意图 / 指代确认 三选一 | 建议自动执行 |
+
+建议降级展示时追加「回复"执行这个"即可自动执行」提示，引导用户跳出循环。
+
+### Q.3 客户端兜底增强（cli/suggestion-fallback.ts + App.tsx）
+
+- 兜底正则支持单/双引号中文参数完整捕获（`--goal '从本机 46 导出...'` 不再截断）；
+- `AUTO_EXECUTABLE_EAG_COMMANDS` 白名单（仅 `eag-autonomous`，保守收录）+ 纯文本注入通道（与用户手输同路径，一次性守卫防循环）。
+
+### Q.4 F10 任务中指令分发加固（cli/prompt-dispatch.ts）
+
+任务执行中（busy 状态）新指令的四路分发：
+
+| 分流 | 判定 | 动作 |
+|------|------|------|
+| 控制类命令 | 13 个白名单命令（exit/new/resume/undo/mcp/rules/team/inject/bg/tasks/fg/cancel/pause） | 立即执行，不占 LLM 回合 |
+| 紧急干预 | 三级匹配：强停止类子句起始锚定（中英，`别(?!人)` 排除复合词）／纠正重试类开头锚定（"错了/修改/重新..."）／紧急优先类显式词（urgent/立即/优先） | 插队头 + `interruptActiveSession()` 立即打断 |
+| 普通指令 | 兜底 | `PendingPromptQueue` 排队（条目绑定会话 ID、容量上限 32、FIFO），回合结束自动连续发送 |
+
+配套语义修复：切换会话 / 回欢迎页丢弃旧会话排队消息；ESC 中断清空队列并提示丢弃条数；LLM 回合出错保留排队消息停止连锁发送（状态栏提示）；队满拒绝入队。
+
+### Q.5 测试基线
+
+| 模块 | 测试数 | 说明 |
+|------|--------|------|
+| prompt-dispatch | 13 用例 | 白名单 / 三级匹配（含误伤反例）/ 队列（FIFO、插队、容量、跨会话、丢弃） |
+| session F9-v2 | 13 用例 | 意图前缀 / 指代确认 / 否定保护 / 一次性消费 |
+| suggestion-fallback | 24 用例 | 含引号中文参数捕获与 EAG 白名单 |
+| loading-text | 12 用例 | formatTokens 紧凑格式透传修复（存量 3 失败清零） |
