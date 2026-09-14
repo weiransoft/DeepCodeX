@@ -20,6 +20,14 @@ const MAX_CAPTURE_CHARS = 10 * 1024 * 1024;
 const BACKGROUND_OUTPUT_DIR = path.join(os.tmpdir(), "deepcode-background");
 const TRAILING_BACKGROUND_OPERATOR_PATTERN = /(^|[^\\&])\s*&\s*$/;
 const sessionWorkingDirs = new Map<string, string>();
+// A backgrounded descendant (`foo &`, `nohup ... &`) inherits this tool call's
+// stdout/stderr pipes. Once the shell itself is gone, killing its pid is a no-op
+// and 'close' may never fire, which used to hang the tool call — and the whole
+// session — forever. After these graces the promise is settled unconditionally.
+const TIMEOUT_SETTLE_GRACE_MS = 2_000;
+const EXIT_SETTLE_GRACE_MS = 2_000;
+const HELD_PIPE_NOTE =
+  "[deepcode] The command shell exited, but a background process still holds this call's output pipe; the call was settled anyway. Use run_in_background: true for detached work.";
 
 export function clearSessionWorkingDir(sessionId: string): void {
   if (!sessionId) {
@@ -96,12 +104,37 @@ function stripTrailingBackgroundOperator(command: string): string {
 }
 
 function getSessionCwd(sessionId: string, fallback: string): string {
-  return sessionWorkingDirs.get(sessionId) ?? fallback;
+  const stored = sessionWorkingDirs.get(sessionId);
+  if (stored && isUsableCwd(stored)) {
+    return stored;
+  }
+  // 存储的 cwd 已失效（如 Git Bash 虚拟路径 /tmp 转成 Windows 后不存在），
+  // 回退到 projectRoot 并清掉坏记录，避免 spawn ENOENT 导致整个 bash 工具坏死。
+  if (stored) {
+    sessionWorkingDirs.delete(sessionId);
+  }
+  return fallback;
 }
 
 function updateSessionCwd(sessionId: string, fallback: string, cwd: string | null): void {
   const nextCwd = cwd ?? fallback;
-  sessionWorkingDirs.set(sessionId, nextCwd);
+  // 只记录有效目录；无效 cwd（如 Git Bash 的 /tmp 被转成 \tmp）会导致下次 spawn 失败。
+  if (isUsableCwd(nextCwd)) {
+    sessionWorkingDirs.set(sessionId, nextCwd);
+  } else {
+    sessionWorkingDirs.delete(sessionId);
+  }
+}
+
+function isUsableCwd(cwd: string): boolean {
+  if (!cwd) {
+    return false;
+  }
+  try {
+    return fs.statSync(cwd).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 function buildShellCommand(command: string): {
@@ -179,6 +212,44 @@ async function executeShellCommand(
         timeoutTimer = null;
       }
     };
+    let forceSettleTimer: ReturnType<typeof setTimeout> | null = null;
+    const cancelForceSettleTimer = () => {
+      if (forceSettleTimer) {
+        clearTimeout(forceSettleTimer);
+        forceSettleTimer = null;
+      }
+    };
+    // Settle even when 'close' never fires: a detached descendant can keep the
+    // stdout/stderr pipes open forever after the shell pid itself is gone.
+    const forceSettle = (childExit: { code: number | null; signal: string | null } | null) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cancelForceSettleTimer();
+      stopTimeoutTimer();
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      if (typeof pid === "number") {
+        context.onProcessTimeoutControl?.(pid, null);
+        context.onProcessExit?.(pid);
+      }
+      if (childExit && !timedOut) {
+        stdout = `${stdout}${stdout && !stdout.endsWith("\n") ? "\n" : ""}${HELD_PIPE_NOTE}\n`;
+      }
+      resolve({
+        stdout,
+        stderr,
+        // Once the timeout has fired the exit status is meaningless: the shell was
+        // killed, so report the timeout rather than a bogus success.
+        exitCode: timedOut ? null : (childExit?.code ?? null),
+        signal: timedOut ? null : (childExit?.signal ?? null),
+        error,
+        timedOut,
+        timeoutMs,
+        deadlineAtMs,
+      });
+    };
     const triggerTimeout = () => {
       if (settled || timedOut || typeof pid !== "number") {
         return;
@@ -186,7 +257,19 @@ async function executeShellCommand(
       timedOut = true;
       stopTimeoutTimer();
       killProcessTree(pid, "SIGKILL");
+      // The kill above is a no-op once the shell pid is gone, so do not rely on
+      // 'close' to ever arrive.
+      forceSettleTimer = setTimeout(() => forceSettle(null), TIMEOUT_SETTLE_GRACE_MS);
     };
+    child.on("exit", (code, signal) => {
+      // The shell is gone; if 'close' has not followed right away a descendant is
+      // holding our pipes, so settle instead of hanging until the timeout.
+      cancelForceSettleTimer();
+      forceSettleTimer = setTimeout(
+        () => forceSettle({ code: typeof code === "number" ? code : null, signal: signal ?? null }),
+        EXIT_SETTLE_GRACE_MS
+      );
+    });
     const scheduleTimeout = () => {
       stopTimeoutTimer();
       if (settled) {
@@ -235,7 +318,11 @@ async function executeShellCommand(
     });
 
     child.on("close", (code, signal) => {
+      if (settled) {
+        return;
+      }
       settled = true;
+      cancelForceSettleTimer();
       stopTimeoutTimer();
       if (typeof pid === "number") {
         context.onProcessTimeoutControl?.(pid, null);

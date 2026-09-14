@@ -105,6 +105,32 @@ test("Bash timeout control can extend the active command deadline", async () => 
   assert.equal(result.metadata?.timeoutMs, 1000);
 });
 
+test("Bash settles when a background descendant keeps the output pipe open", async () => {
+  const workspace = createTempWorkspace();
+  const exitedPids: Array<string | number> = [];
+  const startedAt = Date.now();
+
+  const result = await handleBashTool(
+    {
+      // `sleep 5 &` inherits the tool's stdout/stderr pipes and outlives the shell,
+      // so once the shell is gone the kill is a no-op and 'close' never arrives.
+      // The call must still settle instead of wedging the session forever.
+      command: "sleep 5 & printf 'hi\\n'",
+    },
+    createContext("bash-held-pipe", workspace, {
+      bashTimeoutMs: 60_000,
+      bashMinTimeoutMs: 1,
+      onProcessExit: (pid) => exitedPids.push(pid),
+    })
+  );
+
+  assert.ok(Date.now() - startedAt < 10_000, "must not wait for the 60s command timeout");
+  assert.equal(result.ok, true);
+  assert.match(result.output ?? "", /hi/);
+  assert.match(result.output ?? "", /background process still holds/);
+  assert.equal(exitedPids.length, 1);
+});
+
 test("Bash can run commands in the background and report completion output", async () => {
   const workspace = createTempWorkspace();
   let completion: BackgroundProcessCompletion | null = null;
