@@ -29,6 +29,7 @@ import type { BlockerGuardChain } from "../guards/blocker-guard-chain";
 import type { GuardContext, GuardRecord, GuardVerdict, GuardChainResult } from "../guards/types";
 import type { P5SmartConfirmation } from "../smart-confirmation";
 import type { P5RunState, P5LoopType } from "../run-state-store";
+import type { P5TaskExecutor } from "./task-executor-port";
 
 // ============================================================================
 // 1. 枚举类型（字面量联合 + Object.freeze）
@@ -135,6 +136,30 @@ export interface P5StageContext {
   readonly testTimeoutSec: number;
   /** 当前 Loop 类型（design/coding/testing/deploy） */
   readonly loopType: P5LoopType;
+  /**
+   * 任务执行器端口（方案 A §3.1/§3.9）。
+   *
+   * - dev/fix 阶段在护栏 PASS 后通过它真实驱动 LLM+工具循环完成任务卡；
+   * - 由 AutonomousOrchestrator.bindTaskExecutor() 注入，SessionManager 构造期绑定生产实现；
+   * - 未绑定时 dev/fix 必须 fail-closed（failed），禁止空转成功；
+   * - 可选字段：既有手工构造 ctx 的 fixtures/测试不传时按未绑定处理，不破坏旧调用点。
+   */
+  readonly taskExecutor?: P5TaskExecutor | null;
+  /**
+   * 本轮任务卡是否由 plan 阶段从 objective 自动合成（方案 A §3.2）。
+   *
+   * verify 阶段据此收窄"无测试目标 → 诚实 skip"判定：仅合成任务路径允许降级 skip，
+   * 用户手写 tasks.md 的文件驱动路径不降级（无测试即失败）。
+   * 由 orchestrator 从本轮 plan 结果 artifacts.synthesized 投影。
+   */
+  readonly synthesizedTask?: boolean;
+  /**
+   * abort 标志文件绝对路径（方案 A §3.8）。
+   *
+   * orchestrator 写、dev/fix 阶段透传给任务执行器轮询；既有 fixtures 未提供时
+   * 执行器无法轮询文件中止——生产路径由 orchestrator 始终注入。
+   */
+  readonly abortFlagPath?: string;
 }
 
 // ============================================================================

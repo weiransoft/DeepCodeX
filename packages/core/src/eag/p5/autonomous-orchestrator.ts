@@ -70,6 +70,14 @@ import type { P5NotesMemory } from "./notes-memory";
 import type { P5SmartConfirmation } from "./smart-confirmation";
 import type { P5LoopExecutor } from "./loop-executor";
 import type { P5StageContext, P5StageResult, P5StageKind } from "./handlers/types";
+import type { P5TaskExecutor } from "./handlers/task-executor-port";
+import {
+  PLAN_REASON_ALL_TASKS_COMPLETED,
+  PLAN_REASON_TASKS_BLOCKED,
+  PLAN_REASON_TASKS_FILE_NOT_FOUND,
+  PLAN_REASON_NO_TASK_CARDS,
+} from "./handlers/plan-stage-handler";
+import { atomicWriteTextFile } from "./common/atomic-file";
 import { P5_STAGE_ORDER } from "./run-state-store";
 
 // eag/loop/ 集成（方案 A：P5 复用 eag/loop/）
@@ -491,6 +499,12 @@ export class AutonomousOrchestrator {
   private readonly defaultTestTimeoutSec: number;
   /** 日志回调 */
   private readonly log: AutonomousOrchestratorLogCallback;
+  /**
+   * 任务执行器（方案 A §3.9）：由 SessionManager 构造期通过 bindTaskExecutor 注入。
+   * 默认 null：dev/fix 阶段据此 fail-closed，禁止在未装配真实执行器时空转成功。
+   * 可变字段（构造后绑定一次），run() 循环只读不写。
+   */
+  private taskExecutor: P5TaskExecutor | null = null;
 
   /**
    * @param options 构造选项（含 5 个核心依赖 + 默认配置 + 可选 logger）
@@ -538,6 +552,25 @@ export class AutonomousOrchestrator {
   // ------------------------------------------------------------------------
   // 公共 API
   // ------------------------------------------------------------------------
+
+  /**
+   * 绑定任务执行器（方案 A §3.9）。
+   *
+   * 由 SessionManager 构造尾部调用，注入基于精简 LLM↔工具循环的生产执行器；
+   * 测试/录音替身（无此方法或显式传 null）不受影响，dev/fix 将 fail-closed。
+   * 幂等：重复绑定以最后一次为准（生产装配只调用一次）。
+   *
+   * @param executor 任务执行器实例；传 null 解除绑定（回到未装配语义）
+   */
+  bindTaskExecutor(executor: P5TaskExecutor | null): void {
+    this.taskExecutor = executor;
+    this.log(
+      executor === null
+        ? "P5TaskExecutor 已解除绑定（dev/fix 将 fail-closed）"
+        : "P5TaskExecutor 已绑定（dev/fix 将真实驱动 LLM+工具循环）",
+      "info"
+    );
+  }
 
   /**
    * 启动无人值守运行
@@ -616,6 +649,8 @@ export class AutonomousOrchestrator {
     let consecutiveFailures = 0;
     let totalLlmCallCount = 0;
     let totalTokensUsed = 0;
+    // 方案 A §3.10：执行器真实 LLM 请求次数累计（与 token/llmCallCount 解耦，供最终报告审计）
+    let totalExecutorLlmRequests = 0;
     let iterIndex = 0;
     // iterationsExecuted 记录实际执行的迭代次数（无论 status 是否变化都递增）
     // 与 iterIndex 区别：iterIndex 在 status 变化时不递增（用于 RunState 恢复定位），
@@ -700,6 +735,8 @@ export class AutonomousOrchestrator {
         let iterationFailed = false;
         let iterationFatal = false;
         let planTaskCard: TaskCard | null = null;
+        // 本轮 plan 是否从 objective 合成了任务卡（投影到 verify 的 skip 判定）
+        let iterationSynthesized = false;
 
         for (const stage of P5_STAGE_ORDER) {
           // 5b-1. 构造 P5StageContext
@@ -718,25 +755,35 @@ export class AutonomousOrchestrator {
             testCommand,
             testTimeoutSec,
             loopType: initialLoop,
+            taskExecutor: this.taskExecutor,
+            // plan 自身执行时尚不知是否合成（false）；dev/verify/fix 读取真实值
+            synthesizedTask: iterationSynthesized,
+            abortFlagPath: abortFilePath,
           });
 
           // 5b-2. 调用 loopExecutor.execute(stage, ctx)
           const result = await this.loopExecutor.execute(stage, ctx);
           iterationResults.push(result as P5StageResult);
 
-          // 5b-3. 累加统计（guardRecords / tokensUsed / llmCallCount）
+          // 5b-3. 累加统计（guardRecords / tokensUsed / llmCallCount / 执行器真实请求数）
           for (const gr of result.guardRecords) {
             triggeredGuards.push(gr);
           }
           totalTokensUsed += result.tokensUsed;
           // llmCallCount 近似估算：tokensUsed > 0 表示发生了 LLM 调用
+          // （执行器对不回 usage 的网关有 ≥1 估算保底，计数不会因网关缺 usage 归零）
           if (result.tokensUsed > 0) {
             totalLlmCallCount += 1;
           }
+          // 执行器真实请求次数（dev/fix artifacts.llmRequests），仅作审计累计
+          if (typeof result.artifacts["llmRequests"] === "number") {
+            totalExecutorLlmRequests += result.artifacts["llmRequests"] as number;
+          }
 
-          // 5b-4. 提取 plan 阶段产出的任务卡
+          // 5b-4. 提取 plan 阶段产出的任务卡与合成标志
           if (stage === "plan" && result.kind === "success") {
             planTaskCard = (result.artifacts["taskCard"] as TaskCard | null) ?? null;
+            iterationSynthesized = result.artifacts["synthesized"] === true;
           }
 
           // 5b-5. fatal → 立即中止内层循环
@@ -757,6 +804,19 @@ export class AutonomousOrchestrator {
               "warn"
             );
             // 不 break：让 fix 阶段有机会修复 verify 的失败
+          }
+
+          // 5b-6.5 方案 A §3.6：plan 阶段 success 但未选出任务卡（全部完成/阻塞/无卡/合成前空 objective）
+          //        时，dev/verify/fix 没有作用对象——继续执行只会让 verify 空跑 npm test 制造假失败、
+          //        把"全部完成"轮污染成失败轮。直接结束本轮阶段执行，终态交由 5d 按 plan reason 裁定。
+          if (stage === "plan" && planTaskCard === null && !iterationFatal && !iterationFailed) {
+            this.log(
+              `AutonomousOrchestrator.run 迭代 ${iterIndex} plan 未选出任务卡（reason=${String(
+                result.artifacts["reason"] ?? "unknown"
+              )}），跳过 dev/verify/fix`,
+              "info"
+            );
+            break;
           }
         }
 
@@ -811,14 +871,39 @@ export class AutonomousOrchestrator {
           }
         }
 
-        // 5c. 4 阶段全 success → 重置 consecutiveFailures，记录 milestone
-        if (!iterationFatal && !iterationFailed) {
+        // 5c. 任务轮 4 阶段全 success → 原子标记任务卡 completed，重置 consecutiveFailures，记录 milestone。
+        //     无任务卡轮（5b-6.5 已提前结束阶段循环）不标记、不记 milestone、不重置失败计数。
+        if (!iterationFatal && !iterationFailed && planTaskCard !== null) {
+          // 方案 A §3.3：本轮真实执行了任务卡且全绿 → 把 tasks.md 中对应卡改写为 completed。
+          try {
+            this.markTaskCompleted(tasksFilePath, planTaskCard.id);
+            this.log(
+              `AutonomousOrchestrator.run 迭代 ${iterIndex} 任务 ${planTaskCard.id} 全绿，tasks.md 已标记 completed`,
+              "info"
+            );
+          } catch (err) {
+            // 状态文件写入失败按本轮失败处理：连续失败累积直至 abort，杜绝"产物没写成却记 milestone"
+            iterationFailed = true;
+            const writeError = err instanceof Error ? err.message : String(err);
+            this.log(
+              `AutonomousOrchestrator.run 迭代 ${iterIndex} 标记任务 ${planTaskCard.id} 完成失败：${writeError}`,
+              "error"
+            );
+          }
+        }
+
+        if (!iterationFatal && !iterationFailed && planTaskCard !== null) {
           consecutiveFailures = 0;
 
-          // 记录里程碑
+          // 记录里程碑（verify 诚实 skip 时在里程碑名上显式标注 unverified，P2-1：不得写成"测试通过"）
+          const verifySkipped = iterationResults.some(
+            (r) => r.stage === "verify" && r.artifacts["unverified"] === true
+          );
           const milestone: P5MilestoneRecord = Object.freeze({
             index: milestones.length + 1,
-            name: `Iter ${iterIndex} 完成（4 阶段全绿）`,
+            name: verifySkipped
+              ? `Iter ${iterIndex} 完成（4 阶段全绿，测试跳过·unverified）`
+              : `Iter ${iterIndex} 完成（4 阶段全绿）`,
             loopType: initialLoop,
             completedAt: new Date().toISOString(),
             iterIndex,
@@ -836,21 +921,54 @@ export class AutonomousOrchestrator {
           // fatal → 累加 consecutiveFailures
           consecutiveFailures += 1;
         } else if (iterationFailed) {
-          // failed → 累加 consecutiveFailures
+          // failed → 累加 consecutiveFailures（含 tasks.md 完成标记写入失败）
           consecutiveFailures += 1;
         }
 
-        // 5d. plan 返回 taskCard=null → finalStatus="completed"，中止外层循环
-        if (!iterationFatal && planTaskCard === null) {
-          // 注：只有当 plan 阶段 success 且 taskCard=null 才视为"全部任务完成"
+        // 5d. 方案 A §3.6：plan 返回 taskCard=null 时按 reason 精确判定终态。
+        //     关键守卫 status==="running"：5b.7 LoopScheduler 可能已因连续失败置 aborted
+        //     （human_checkpoint/stop_failure 先于 5d 执行），此处不得翻转终态/exitCode/blockageReport。
+        if (status === "running" && !iterationFatal && planTaskCard === null) {
           const planResult = iterationResults.find((r) => r.stage === "plan");
           if (planResult && planResult.kind === "success") {
-            status = "completed";
-            finalStatus = "completed";
-            this.log(
-              `AutonomousOrchestrator.run 迭代 ${iterIndex} 检测到 plan 返回 taskCard=null，全部任务完成`,
-              "info"
-            );
+            const planReason = planResult.artifacts["reason"];
+            if (planReason === PLAN_REASON_ALL_TASKS_COMPLETED) {
+              // 仅"全部完成且本轮无失败"才允许 completed；本轮失败则不置终态，
+              // 交 LoopScheduler（连续失败）或迭代用尽路径裁定
+              if (!iterationFailed) {
+                status = "completed";
+                finalStatus = "completed";
+                this.log(`AutonomousOrchestrator.run 迭代 ${iterIndex} 清单任务全部 completed，运行完成`, "info");
+              } else {
+                lastFatalReason = "任务清单虽全部 completed，但本轮阶段存在失败，未宣告运行完成";
+                this.log(`AutonomousOrchestrator.run 迭代 ${iterIndex} ${lastFatalReason}`, "warn");
+              }
+            } else if (planReason === PLAN_REASON_TASKS_BLOCKED) {
+              status = "failed";
+              finalStatus = "failed";
+              // 终局裁定源自 plan 阶段结果：同步登记 lastFatalStage，
+              // 否则 generateFinalReport 只在 lastFatalStage!==null 时渲染"原因"段，
+              // 会导致 blocked 任务 ID 已写入 lastFatalReason 却不出现在最终报告（交付表达缺口）
+              lastFatalStage = "plan";
+              const blockedIds = Array.isArray(planResult.artifacts["blockedCardIds"])
+                ? (planResult.artifacts["blockedCardIds"] as unknown[]).map(String).join(", ")
+                : "";
+              lastFatalReason = `任务被阻塞，无可执行的 pending 任务卡${blockedIds ? `（blocked: ${blockedIds}）` : ""}`;
+              this.log(`AutonomousOrchestrator.run 迭代 ${iterIndex} ${lastFatalReason}`, "error");
+            } else {
+              // TASKS_FILE_NOT_FOUND / NO_TASK_CARDS / 其他未知 reason：不再误报 completed
+              status = "failed";
+              finalStatus = "failed";
+              // 同 blocked 分支：登记 plan 为终局失败阶段，保证失败原因进入最终报告
+              lastFatalStage = "plan";
+              lastFatalReason =
+                planReason === PLAN_REASON_TASKS_FILE_NOT_FOUND
+                  ? "tasks.md 缺失且 objective 为空，无可执行任务"
+                  : planReason === PLAN_REASON_NO_TASK_CARDS
+                    ? "tasks.md 存在但解析不到任何任务卡"
+                    : `plan 阶段未产出可执行任务卡（reason=${String(planReason ?? "unknown")}）`;
+              this.log(`AutonomousOrchestrator.run 迭代 ${iterIndex} ${lastFatalReason}`, "error");
+            }
           }
         }
 
@@ -937,6 +1055,7 @@ export class AutonomousOrchestrator {
         totalIterations: iterationsExecuted,
         totalLlmCallCount,
         totalTokensUsed,
+        totalExecutorLlmRequests,
         durationSec,
         milestones,
         triggeredGuards,
@@ -1938,6 +2057,12 @@ export class AutonomousOrchestrator {
     readonly testCommand: string;
     readonly testTimeoutSec: number;
     readonly loopType: P5LoopType;
+    /** 已绑定的任务执行器（未绑定时 dev/fix fail-closed） */
+    readonly taskExecutor: P5TaskExecutor | null;
+    /** 本轮任务卡是否由 plan 从 objective 合成（verify skip 收窄判定用） */
+    readonly synthesizedTask: boolean;
+    /** abort 标志文件绝对路径（透传执行器轮询） */
+    readonly abortFlagPath: string;
   }): Readonly<P5StageContext> {
     return Object.freeze({
       runId: args.runId,
@@ -1956,6 +2081,9 @@ export class AutonomousOrchestrator {
       testCommand: args.testCommand,
       testTimeoutSec: args.testTimeoutSec,
       loopType: args.loopType,
+      taskExecutor: args.taskExecutor,
+      synthesizedTask: args.synthesizedTask,
+      abortFlagPath: args.abortFlagPath,
     });
   }
 
@@ -1976,6 +2104,59 @@ export class AutonomousOrchestrator {
     // 若 plan 阶段未产出任务卡，使用 plan 阶段的 summary 作为计划
     const planResult = iterationResults.find((r) => r.stage === "plan");
     return planResult?.summary ?? "";
+  }
+
+  /**
+   * 把 tasks.md 中指定任务卡的状态原子改写为 completed（方案 A §3.3）。
+   *
+   * 行扫描语义（与 parseTaskCards 的区段模型严格对齐）：
+   * - 以 `## <taskId>` 标题行定位区段起点，下一个 `## ` 标题或 EOF 为终点；
+   * - 仅替换区段内首个 `- status: pending|in-progress|blocked` 行为 completed；
+   * - 任务卡不存在或没有可改写的 status 行时抛错（调用方按迭代失败处理）；
+   * - tmp 文件 + rename 原子写回（复用 P5 统一原子写工具，P2-3）。
+   *
+   * @param tasksFilePath tasks.md 绝对路径
+   * @param taskId 任务卡 ID（如 T-001）
+   * @throws Error 文件不存在/任务卡缺失/状态行缺失/写入失败
+   */
+  private markTaskCompleted(tasksFilePath: string, taskId: string): void {
+    const content = fs.readFileSync(tasksFilePath, "utf8");
+    const lines = content.split(/\r?\n/);
+
+    // 定位目标卡区段 [headerIndex, endIndex)
+    let headerIndex = -1;
+    for (let i = 0; i < lines.length; i += 1) {
+      const match = /^##\s+(T-\d+)(?:\s|$)/.exec(lines[i]!);
+      if (match && match[1] === taskId) {
+        headerIndex = i;
+        break;
+      }
+    }
+    if (headerIndex === -1) {
+      throw new Error(`tasks.md 中找不到任务卡 ${taskId}，无法标记完成`);
+    }
+    let endIndex = lines.length;
+    for (let i = headerIndex + 1; i < lines.length; i += 1) {
+      if (lines[i]!.startsWith("## ")) {
+        endIndex = i;
+        break;
+      }
+    }
+
+    // 在区段内改写 status 行（保留原始换行风格：按 \n 重组，文件末尾换行保留策略跟随主流写法）
+    let replaced = false;
+    for (let i = headerIndex + 1; i < endIndex; i += 1) {
+      if (/^-\s+status\s*:\s*(pending|in-progress|blocked)\s*$/.test(lines[i]!)) {
+        lines[i] = "- status: completed";
+        replaced = true;
+        break;
+      }
+    }
+    if (!replaced) {
+      throw new Error(`任务卡 ${taskId} 区段内没有可改写的 pending/in-progress/blocked 状态行`);
+    }
+
+    atomicWriteTextFile(tasksFilePath, lines.join("\n"));
   }
 
   // ------------------------------------------------------------------------
@@ -2393,6 +2574,8 @@ export class AutonomousOrchestrator {
     readonly totalIterations: number;
     readonly totalLlmCallCount: number;
     readonly totalTokensUsed: number;
+    /** 任务执行器真实 LLM 请求总数（方案 A §3.10，与 token 计数解耦的审计值） */
+    readonly totalExecutorLlmRequests: number;
     readonly durationSec: number;
     readonly milestones: ReadonlyArray<Readonly<P5MilestoneRecord>>;
     readonly triggeredGuards: ReadonlyArray<GuardRecord>;
@@ -2410,6 +2593,7 @@ export class AutonomousOrchestrator {
     lines.push(`- **退出码**：${args.exitCode}`);
     lines.push(`- **迭代次数**：${args.totalIterations}/${args.maxIterations}`);
     lines.push(`- **LLM 调用次数**：${args.totalLlmCallCount}`);
+    lines.push(`- **执行器 LLM 请求数**：${args.totalExecutorLlmRequests}`);
     lines.push(`- **Token 消耗**：${args.totalTokensUsed}`);
     lines.push(`- **总耗时**：${args.durationSec} 秒`);
     lines.push(`- **连续失败次数**：${args.consecutiveFailures}`);
@@ -2432,6 +2616,15 @@ export class AutonomousOrchestrator {
         lines.push(`- **m${m.index}**：${m.name}（${m.completedAt}）— ${m.summary}`);
       }
       lines.push("");
+
+      // 方案 A §3.7/P2-1：测试被跳过的里程碑必须在报告显式标注，禁止把"未测试"表述为"测试通过"
+      const unverifiedCount = args.milestones.filter((m) => m.name.includes("unverified")).length;
+      if (unverifiedCount > 0) {
+        lines.push(
+          `> **注意**：${unverifiedCount} 个里程碑的测试环节被跳过（项目未定义测试命令），相关任务结论为 **unverified（未测试）**，不代表测试通过。`
+        );
+        lines.push("");
+      }
     }
 
     if (args.triggeredGuards.length > 0) {

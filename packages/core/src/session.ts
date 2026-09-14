@@ -171,6 +171,8 @@ import type { DevOpsOrchestrator } from "./eag/devops/devops-orchestrator";
 import type { DevOpsContext, DevOpsResult } from "./eag/devops/types";
 import type { DeployRequest } from "./eag/cli/eag-command-parser";
 import type { AutonomousOrchestrator } from "./eag/p5/autonomous-orchestrator";
+// 方案 A §3.9：进程内 LLM 任务执行器（dev/fix 阶段真实编码循环）+ 重入防护 ALS
+import { LlmTaskExecutor, p5TaskExecutionStorage } from "./eag/p5/executors/llm-task-executor";
 import {
   EagAutonomousCommandHandler,
   extractEagAutonomousRequestFromPrompt,
@@ -1213,6 +1215,43 @@ export class SessionManager {
     this.taskRegistry = options.taskRegistry;
     this.backgroundRunner = options.backgroundRunner;
     this.isForeground = options.isForeground ?? true;
+
+    // 方案 A §3.9：为外挂的 AutonomousOrchestrator 绑定进程内 LLM 任务执行器
+    // （F9-v2 真实触发 /eag-autonomous 后 dev/fix 阶段真实编码的最后一公里）。
+    // 责任划分：orchestrator 本身由调用方经 options 注入（session.ts 不构造它的
+    // loopExecutor/guardChain 等依赖），但"把任务卡真实做完"的 LlmTaskExecutor
+    // 需要 SessionManager 私有的 createLLMClient()（凭据与 provider 路由）与
+    // projectRoot，因此执行器的构造与绑定只能在此处完成。
+    // 鸭子检测 bindTaskExecutor：F9-v2 确定性通道的 recording/stub orchestrator
+    // 没有该方法，自然跳过、行为零变化；bindTaskExecutor 自身幂等。
+    const autonomousOrchestratorWithBinder = this.autonomousOrchestrator as
+      | { readonly bindTaskExecutor?: (executor: unknown) => void }
+      | undefined;
+    if (
+      this.autonomousOrchestrator !== undefined &&
+      typeof autonomousOrchestratorWithBinder?.bindTaskExecutor === "function"
+    ) {
+      const p5TaskExecutor = new LlmTaskExecutor({
+        projectRoot: this.projectRoot,
+        // 闭包延迟到每次任务执行时再取客户端：与 createLLMClient 既有语义一致，
+        // 无凭据时返回 null，LlmTaskExecutor 首轮即 fail-closed（零请求 failed）
+        createLlmClient: () => this.createLLMClient(),
+        // model 仅用于工具定义的多模态裁剪等，实际请求模型由 client 自身决定。
+        // 走注入的 getResolvedSettings（必填、此刻已赋值）而非直接读盘：
+        // 与设计文档 §3.9 一致，并尊重 CLI/测试对设置解析的覆写。
+        model: this.getResolvedSettings().model,
+        // 执行器日志并入宿主进程既有 console 通道（session.ts 无结构化 logger）
+        logger: (message: string, level?: "info" | "warn" | "error"): void => {
+          if (level === "error") {
+            console.error(`[P5TaskExecutor] ${message}`);
+          } else if (level === "warn") {
+            console.warn(`[P5TaskExecutor] ${message}`);
+          }
+          // info 级别不打印，避免自主循环中工具轮日志淹没主对话输出
+        },
+      });
+      autonomousOrchestratorWithBinder.bindTaskExecutor(p5TaskExecutor);
+    }
   }
 
   /**
@@ -3393,6 +3432,15 @@ ${agentInstructions}
   ): Promise<boolean> {
     const text = (userPrompt.text ?? "").trim();
     if (!text) {
+      return false;
+    }
+
+    // 方案 A §3.9 / 架构师 P1-1 纵深防御：若当前调用栈正处于 P5 任务执行器的
+    // LLM↔工具循环内（p5TaskExecutionStorage 标志为 true），禁止任何文本再进入
+    // 确定性自主循环，防止模型回显"启动自主任务…"等触发词导致编排器重入。
+    // 当前精简执行器物理上不经过 SessionManager，正常生产链路不会命中；
+    // 一旦命中说明接线回归，返回 false 让文本走普通对话，绝不嵌套启动编排器。
+    if (p5TaskExecutionStorage.getStore() === true) {
       return false;
     }
 

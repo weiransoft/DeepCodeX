@@ -242,6 +242,13 @@ export function buildOrchestrator(overrides?: {
   readonly defaultConsecutiveFailureAbort?: number;
   readonly defaultTestCommand?: string;
   readonly defaultTestTimeoutSec?: number;
+  /**
+   * 方案 A §5/§6：注入任务执行器。
+   * - 传 P5TaskExecutor 实例：构造后立即 bindTaskExecutor（dev/fix 走真实/替身执行）；
+   * - 不传：保持未绑定（用于断言 fail-closed：dev/fix 必须 failed NOT_BOUND）；
+   * - 集成测试必须传真实 LlmTaskExecutor（桩仅替换 LLMClient HTTP 响应）。
+   */
+  readonly taskExecutor?: P5TaskExecutor | null;
 }): AutonomousOrchestrator {
   const loopExecutor = createP5LoopExecutorFromHandlers(
     new P5PlanStageHandler(),
@@ -256,7 +263,7 @@ export function buildOrchestrator(overrides?: {
   const guardChain = createDefaultBlockerGuardChain({ throwOnDeny: false });
   const smartConfirmation = new P5SmartConfirmation();
 
-  return new AutonomousOrchestrator({
+  const orchestrator = new AutonomousOrchestrator({
     loopExecutor,
     runStateStore,
     notesMemory,
@@ -267,6 +274,48 @@ export function buildOrchestrator(overrides?: {
     defaultConsecutiveFailureAbort: overrides?.defaultConsecutiveFailureAbort,
     defaultTestCommand: overrides?.defaultTestCommand,
     defaultTestTimeoutSec: overrides?.defaultTestTimeoutSec,
+  });
+
+  // 方案 A：构造后绑定执行器（与 SessionManager 生产装配路径一致）
+  if (overrides?.taskExecutor) {
+    orchestrator.bindTaskExecutor(overrides.taskExecutor);
+  }
+
+  return orchestrator;
+}
+
+/**
+ * 构造"恒成功"任务执行器测试替身（仅限既有单元测试聚焦状态机断言使用）。
+ *
+ * 边界（设计文档 §6 架构师清点，非生产 mock）：
+ * - 该替身仅替代 LLM 网络往返：executeTask 不发起任何真实模型请求，直接返回成功结果；
+ * - 文件系统、tasks.md 状态机、guardChain、smartConfirmation、orchestrator 调度仍全部真实；
+ * - 新增的端到端集成测试（eag-p5-llm-execution-integration.test.ts）禁止使用本替身，
+ *   必须使用真实 LlmTaskExecutor + 桩 LLMClient（桩仅实现 createMessage 响应序列）。
+ *
+ * @param options 可选覆盖（tokensUsed/llmRequests/changedFiles/success/error）
+ * @returns 符合 P5TaskExecutor 端口的测试替身
+ */
+export function createAlwaysSucceedTaskExecutor(options?: {
+  readonly tokensUsed?: number;
+  readonly llmRequests?: number;
+  readonly changedFiles?: ReadonlyArray<string>;
+  readonly success?: boolean;
+  readonly error?: string;
+}): P5TaskExecutor {
+  const frozenResult: P5TaskExecutionResult = Object.freeze({
+    success: options?.success ?? true,
+    summary: "[test-double] 任务执行器测试替身：未发起真实 LLM 请求，仅用于状态机断言",
+    tokensUsed: options?.tokensUsed ?? 1,
+    tokensEstimated: false,
+    llmRequests: options?.llmRequests ?? 1,
+    changedFiles: Object.freeze([...(options?.changedFiles ?? [])]),
+    error: options?.error,
+  });
+  return Object.freeze({
+    async executeTask(): Promise<Readonly<P5TaskExecutionResult>> {
+      return frozenResult;
+    },
   });
 }
 

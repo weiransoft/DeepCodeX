@@ -82,6 +82,8 @@ import {
   buildOrchestrator,
   buildStageContext,
   createTestTaskCard,
+  // 方案 A：仅替代 LLM 网络调用的执行器替身，文件/git/状态机/护栏均为真实链路
+  createAlwaysSucceedTaskExecutor,
 } from "./fixtures/eag-p5-e2e-fixtures";
 
 // ============================================================================
@@ -91,17 +93,31 @@ import {
 test("P1. FR-1 4 阶段循环完整呈现：plan → dev → verify → fix 全部执行", async () => {
   const projectRoot = createTempProject();
   try {
-    createTasksFile(projectRoot, 1, "completed");
+    // 方案 A：使用 pending 任务卡 + 恒成功执行器替身（仅替代 LLM 网络）。
+    // 首轮 plan 选中 T-001 → dev 真实执行成功 → verify 真实跑测试通过 → fix 无失败直接成功，
+    // 任务卡被真实标记 completed；次轮 plan 判定 all-tasks-completed 收尾（completed）。
+    // 旧用例使用 completed 卡：新语义下 plan 首轮即无卡收尾、不再执行 dev/verify/fix，
+    // 无法呈现 FR-1 的 4 阶段循环，故按设计改为 pending 全链路。
+    createTasksFile(projectRoot, 1, "pending");
     createDeclaredFile(projectRoot, "src/services/Service1.ts");
 
-    const orchestrator = buildOrchestrator();
+    const orchestrator = buildOrchestrator({
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
+    });
     const result = await orchestrator.run({
       projectRoot,
       objective: "测试 FR-1 4 阶段循环完整呈现",
-      maxIterations: 1,
+      maxIterations: 3,
       testCommand: PASS_TEST_CMD,
       testTimeoutSec: 10,
     });
+
+    // 次轮无卡收尾应裁定为 completed
+    assert.equal(
+      result.finalStatus,
+      "completed",
+      `应正常收尾，实际：${result.finalStatus}（${result.finalReport.slice(0, 200)}）`
+    );
 
     // 验证 AutonomousRunResult.completedLoops 含 "coding"
     assert.ok(result.completedLoops.includes("coding"), "completedLoops 应含 'coding'");

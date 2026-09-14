@@ -62,6 +62,7 @@ import {
   createDeclaredFile,
   buildStageContext,
   createTestTaskCard,
+  createAlwaysSucceedTaskExecutor,
 } from "./fixtures/eag-p5-e2e-fixtures";
 
 // ============================================================================
@@ -87,8 +88,11 @@ test("L1. Dev 阶段正常路径：产出 validatedFiles + diffStats + fileInven
     );
 
     // 构造 dev 阶段上下文（含 plan 阶段结果作为 prevResults）
+    // 方案 A：dev 阶段 fail-closed，必须绑定任务执行器；此处用仅替代 LLM 网络的状态机替身，
+    // changedFiles 声明为任务卡文件以满足 changeDiff 断言（盘点制品仍由真实文件系统产出）
     const ctx = buildStageContext(projectRoot, "dev", {
       prevResults: Object.freeze([planResult]),
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
     });
 
     // 执行 dev 阶段
@@ -303,6 +307,8 @@ test("L5. Dev 阶段 fileInventory 真实盘点：验证 exists/size/mtime 与�
 
     const ctx = buildStageContext(projectRoot, "dev", {
       prevResults: Object.freeze([planResult]),
+      // 方案 A：盘点制品在执行成功路径仍保留，但必须绑定执行器才会进入该路径
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
     });
 
     const handler = new P5DevStageHandler();
@@ -339,6 +345,7 @@ test("L5. Dev 阶段 fileInventory 真实盘点：验证 exists/size/mtime 与�
 
     const ctx2 = buildStageContext(projectRoot, "dev", {
       prevResults: Object.freeze([planResult2]),
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/NotExists.ts"] }),
     });
 
     const result2 = await handler.handle(ctx2);
@@ -381,6 +388,8 @@ test("M1. plan → dev 制品链：dev 阶段正确消费 plan 产出的 taskCar
     // 2. 执行 dev 阶段（含 plan 结果作为 prevResults）
     const devCtx = buildStageContext(projectRoot, "dev", {
       prevResults: Object.freeze([planResult]),
+      // 方案 A：fail-closed 绑定执行器替身（仅替代 LLM 网络，盘点/状态机链路真实）
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
     });
     const devHandler = new P5DevStageHandler();
     const devResult = await devHandler.handle(devCtx);
@@ -417,6 +426,7 @@ test("M2. dev → verify 制品链：verify 阶段正确消费 dev 阶段的 tas
     // 2. 执行 dev 阶段
     const devCtx = buildStageContext(projectRoot, "dev", {
       prevResults: Object.freeze([planResult]),
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
     });
     const devResult = await new P5DevStageHandler().handle(devCtx);
     assert.equal(devResult.kind, "success", "dev 阶段应返回 success");
@@ -459,6 +469,7 @@ test("M3. verify → fix 制品链：fix 阶段正确消费 verify 阶段的失�
     // 2. 执行 dev 阶段
     const devCtx = buildStageContext(projectRoot, "dev", {
       prevResults: Object.freeze([planResult]),
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
     });
     const devResult = await new P5DevStageHandler().handle(devCtx);
 
@@ -479,6 +490,9 @@ test("M3. verify → fix 制品链：fix 阶段正确消费 verify 阶段的失�
     // 4. 执行 fix 阶段（含 plan + dev + verify 结果作为 prevResults）
     const fixCtx = buildStageContext(projectRoot, "fix", {
       prevResults: Object.freeze([planResult, devResult, verifyResult]),
+      // 方案 A：fix 阶段 fail-closed，必须绑定执行器；替身仅替代 LLM 网络，
+      // fixSuggestion 制品仍由真实 fix handler 从 verify 失败结果分析产出
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
     });
     const fixResult = await new P5FixStageHandler().handle(fixCtx);
 
@@ -719,6 +733,8 @@ test("O2. Fix 阶段修复建议生成：FixSuggestion 含 failureCategory + sug
     // 执行 fix 阶段
     const ctx = buildStageContext(projectRoot, "fix", {
       prevResults: Object.freeze([planResult, devResult, verifyFailResult]),
+      // 方案 A：绑定执行器替身以进入真实修复成功路径（fixSuggestion 制品断言不变）
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
     });
 
     const handler = new P5FixStageHandler();

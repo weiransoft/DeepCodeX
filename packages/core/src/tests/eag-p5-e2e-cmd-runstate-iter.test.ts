@@ -56,6 +56,7 @@ import {
   createTasksFile,
   createDeclaredFile,
   buildOrchestrator,
+  createAlwaysSucceedTaskExecutor,
 } from "./fixtures/eag-p5-e2e-fixtures";
 
 // ============================================================================
@@ -634,12 +635,17 @@ test("T1. maxIterations=3 真实多轮迭代：completedLoops + notes.md 多轮�
   const projectRoot = createTempProject();
   try {
     // 准备：tasks.md（1 个 pending 任务）+ 声明的源文件
-    // pending 任务 + PASS_TEST_CMD：每轮 4 阶段全绿，但任务卡不自动更新 → 持续迭代到 maxIterations
+    // 方案 A：pending 任务 + PASS_TEST_CMD + 恒成功执行器：首轮 4 阶段全绿并标记 completed，
+    // 次轮 plan 判定 all-tasks-completed 收尾（finalStatus=completed）
     createTasksFile(projectRoot, 1, "pending");
     createDeclaredFile(projectRoot, "src/services/Service1.ts");
 
     // 1. 启动 run()（maxIterations=3）
-    const orchestrator = buildOrchestrator();
+    // 方案 A：绑定恒成功执行器替身（仅替代 LLM 网络）；首轮全绿后任务卡被真实标记 completed，
+    // 第 2 轮 plan 判定 all-tasks-completed 收尾，milestone/notes 链路均为真实状态机产出
+    const orchestrator = buildOrchestrator({
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
+    });
     const result = await orchestrator.run({
       projectRoot,
       objective: "测试 T1 多轮真实迭代",
@@ -708,7 +714,10 @@ test("T2. 4 阶段循环完整执行：plan → dev → verify → fix 全部执
     createDeclaredFile(projectRoot, "src/services/Service1.ts");
 
     // 1. 启动 run()（maxIterations=1，让 4 阶段循环执行 1 轮）
-    const orchestrator = buildOrchestrator();
+    // 方案 A：绑定恒成功执行器替身（仅替代 LLM 网络），dev 阶段才会真实成功
+    const orchestrator = buildOrchestrator({
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
+    });
     const result = await orchestrator.run({
       projectRoot,
       objective: "测试 T2 4 阶段循环完整执行",
@@ -783,8 +792,12 @@ test("T3. NotesMemory 跨轮记忆：多轮迭代后 notes.md 含多轮记录 + 
     createTasksFile(projectRoot, 1, "pending");
     createDeclaredFile(projectRoot, "src/services/Service1.ts");
 
-    // 1. 启动 run()（maxIterations=3，让 notes.md 追加 3 轮记录）
-    const orchestrator = buildOrchestrator();
+    // 1. 启动 run()（maxIterations=3，让 notes.md 追加多轮记录）
+    // 方案 A：绑定恒成功执行器替身（仅替代 LLM 网络）；首轮全绿标记 completed，
+    // 次轮收尾，notes 多段落由真实 NotesMemory 链路产出
+    const orchestrator = buildOrchestrator({
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
+    });
     const result = await orchestrator.run({
       projectRoot,
       objective: "测试 T3 NotesMemory 跨轮记忆",

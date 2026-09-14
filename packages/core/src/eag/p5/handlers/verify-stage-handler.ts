@@ -36,6 +36,8 @@
  */
 
 import { spawnSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 import type { P5StageContext, P5StageHandler, P5StageResult } from "./types";
 import { buildGuardContext, createSuccessStageResult, createFailedStageResult, toGuardRecords } from "./types";
@@ -45,6 +47,25 @@ import { createPassVerdict } from "../guards/types";
 // ============================================================================
 // 1. 常量定义
 // ============================================================================
+
+/**
+ * verify 阶段"无测试目标诚实 skip"原因码（方案 A §3.7，架构师 P1-5）。
+ */
+export const VERIFY_REASON_TEST_SKIPPED_NO_TEST_TARGET = "test-skipped-no-test-target" as const;
+
+/**
+ * 默认测试命令（与 orchestrator/命令层默认值同源）。
+ * 仅当测试命令为此默认值时才允许"无 package.json/scripts.test → skip"降级，
+ * 用户显式配置的自定义命令失败一律按真实失败处理。
+ */
+const DEFAULT_TEST_COMMAND = "npm test" as const;
+
+/**
+ * npm 未定义 test 脚本时的真实输出模式。
+ * 合成任务路径下 spawn 返回非零且输出命中该模式时，下限降级为 skip
+ * （覆盖前置 package.json 探测与实际执行环境不一致的边界情况）。
+ */
+const NPM_NO_TEST_SCRIPT_RE = /Missing script:\s*["']?test["']?|no test script found/i;
 
 /**
  * 测试输出最大摘要长度（字符数）
@@ -284,7 +305,17 @@ export class P5VerifyStageHandler implements P5StageHandler {
 
     try {
       // 1. 获取测试命令
-      const testCommand = ctx.testCommand || "npm test";
+      const testCommand = ctx.testCommand || DEFAULT_TEST_COMMAND;
+
+      // 1.5 方案 A §3.7（架构师 P1-5）：合成任务 + 默认 npm test + 项目真实无可测目标时，
+      //     诚实 skip 而非 spawn 一个必然失败的 npm test 把循环拖入假失败。
+      //     严格收窄：仅 ctx.synthesizedTask 路径允许；手写 tasks.md 不降级（无测试即失败）。
+      if (ctx.synthesizedTask === true && testCommand.trim() === DEFAULT_TEST_COMMAND) {
+        const noTestTarget = detectProjectWithoutTestTarget(ctx.projectRoot);
+        if (noTestTarget) {
+          return this.buildSkippedResult(testCommand, startTime, "项目无 package.json 或未定义 scripts.test");
+        }
+      }
 
       // 2. 调用 smartConfirmation.decide() 做命令级三态决策
       //    使用 createPassVerdict() 作为初始 verdict（系统级护栏未触发）
@@ -334,10 +365,19 @@ export class P5VerifyStageHandler implements P5StageHandler {
       const testStats = parseTestOutput(cmdResult.stdout, cmdResult.stderr);
 
       // 7. 构造 CompletionEvidence 制品（G-A4a 证据强制）
+      //    输出摘要必须合并 stdout 与 stderr：npm/yarn 等脚本运行器会把命令头
+      //    （"> xxx@1.0.0 test" 两行）写到 stdout，而测试框架（node:assert、
+      //    Jest 的失败详情、Mocha 等）常把真正的断言失败与堆栈写到 stderr。
+      //    若用 `stdout || stderr`，npm 包装下 stdout 永非空，stderr 中的失败
+      //    根因会被整体丢弃，fix 阶段将拿不到任何可用于修复的证据。
+      //    此处与 parseTestOutput 的合并策略保持一致。
+      const combinedTestOutput = [cmdResult.stdout, cmdResult.stderr]
+        .filter((chunk) => typeof chunk === "string" && chunk.length > 0)
+        .join("\n");
       const evidence: CompletionEvidence = Object.freeze({
         testCommand,
         testExitCode: cmdResult.exitCode ?? -1,
-        testOutputSummary: truncateOutput(cmdResult.stdout || cmdResult.stderr),
+        testOutputSummary: truncateOutput(combinedTestOutput),
         coveragePercent: 0, // 代码覆盖率需要额外工具支持，默认 0
         evaluatorVerdict: cmdResult.exitCode === 0 ? "pass" : "fail",
         executedAt: new Date().toISOString(),
@@ -354,6 +394,16 @@ export class P5VerifyStageHandler implements P5StageHandler {
       //    verify 阶段测试失败时并非声明完成，而是如实报告失败，
       //    此时护栏无需介入，直接返回 failed 让 fix 阶段尝试修复。
       if (!testPassed) {
+        // 方案 A §3.7 下限降级：前置探测与真实执行不一致时（package.json 动态生成等），
+        // 合成任务路径下 npm 明确报"Missing script: test"，按无测试目标 skip，
+        // 其他真实测试失败（断言/编译错误等）一律保持 failed。
+        if (
+          ctx.synthesizedTask === true &&
+          testCommand.trim() === DEFAULT_TEST_COMMAND &&
+          NPM_NO_TEST_SCRIPT_RE.test(`${cmdResult.stdout}\n${cmdResult.stderr}`)
+        ) {
+          return this.buildSkippedResult(testCommand, startTime, "npm 报告未定义 test 脚本");
+        }
         return createFailedStageResult(
           "verify",
           "failed",
@@ -470,6 +520,38 @@ export class P5VerifyStageHandler implements P5StageHandler {
   // ========================================================================
 
   /**
+   * 构造"无测试目标诚实 skip"结果（方案 A §3.7）。
+   *
+   * 语义约定：
+   * - kind=success：没有真实失败，不触发 fix/连续失败累计，循环可正常收尾；
+   * - artifacts.skipped/unverified=true：禁止任何下游把它表述为"测试通过"，
+   *   milestone 与最终报告必须标注该任务未经验证（P2-1）；
+   * - 不调用 guardChain：没有 completionEvidence，也不声明完成。
+   *
+   * @param testCommand 测试命令文本
+   * @param startTime 阶段开始时间戳
+   * @param detail 触发 skip 的具体原因（人类可读）
+   * @returns 冻结的 success 阶段结果
+   */
+  private buildSkippedResult(testCommand: string, startTime: number, detail: string): Readonly<P5StageResult> {
+    return createSuccessStageResult(
+      "verify",
+      "项目未定义测试命令，跳过测试执行（注意：这不代表测试通过，任务结论标记为 unverified）",
+      {
+        testCommand,
+        reason: VERIFY_REASON_TEST_SKIPPED_NO_TEST_TARGET,
+        skipped: true,
+        unverified: true,
+        skipDetail: detail,
+        guardDecision: "PASS",
+      },
+      [],
+      0,
+      Date.now() - startTime
+    );
+  }
+
+  /**
    * 真实执行测试命令（child_process.spawnSync）
    *
    * @param command 测试命令（如 "npm test"）
@@ -508,6 +590,38 @@ export class P5VerifyStageHandler implements P5StageHandler {
 // ============================================================================
 // 4. 测试输出解析器
 // ============================================================================
+
+/**
+ * 探测项目是否真实缺少 npm 测试目标（方案 A §3.7，架构师 P1-5）。
+ *
+ * 判定规则（真实读取 package.json，不 spawn）：
+ * - 无 package.json：true（默认 npm test 必然失败；Python/Go/Rust 等非 npm 项目同理，
+ *   用户应显式配置对应 testCommand）；
+ * - package.json 存在但 JSON 损坏：false（不做 skip 预判，交真实 spawn 裁定，避免掩盖故障）；
+ * - 解析成功但无 scripts.test 或其值非非空字符串：true；
+ * - 存在有效 scripts.test：false（必须真实执行）。
+ *
+ * @param projectRoot 项目根目录绝对路径
+ * @returns true=可诚实 skip；false=必须执行真实测试命令
+ */
+function detectProjectWithoutTestTarget(projectRoot: string): boolean {
+  const packageJsonPath = path.join(projectRoot, "package.json");
+  if (!fs.existsSync(packageJsonPath)) {
+    return true;
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as unknown;
+    const scripts = (parsed as { scripts?: unknown } | null)?.scripts;
+    if (!scripts || typeof scripts !== "object") {
+      return true;
+    }
+    const testScript = (scripts as { test?: unknown }).test;
+    return !(typeof testScript === "string" && testScript.trim().length > 0);
+  } catch {
+    // package.json 存在但无法解析：不让 skip 掩盖问题，走真实 spawn 路径
+    return false;
+  }
+}
 
 /**
  * 解析测试输出（stdout + stderr），提取 pass/fail/skip 统计
