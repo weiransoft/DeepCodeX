@@ -51,6 +51,8 @@ import {
   createTasksFile,
   createDeclaredFile,
   buildOrchestrator,
+  // 方案 A：仅替代 LLM 网络调用的执行器替身，文件/git/状态机/护栏均为真实链路
+  createAlwaysSucceedTaskExecutor,
 } from "./fixtures/eag-p5-e2e-fixtures";
 
 // ============================================================================
@@ -60,15 +62,18 @@ import {
 test("E1. 4 阶段循环完整执行（plan → dev → verify → fix，finalStatus=completed）", async () => {
   const projectRoot = createTempProject();
   try {
-    // 创建含 1 张 completed 任务卡的 tasks.md（plan 阶段直接成功）
-    createTasksFile(projectRoot, 1, "completed");
+    // 方案 A：使用 pending 任务卡真实跑完整 4 阶段（全绿后 orchestrator 原子改写为 completed，
+    // 下一轮 plan 判定 all-tasks-completed 收尾）。dev/fix 绑定恒成功执行器替身（仅替代 LLM 网络）。
+    createTasksFile(projectRoot, 1, "pending");
     createDeclaredFile(projectRoot, "src/services/Service1.ts");
 
-    const orchestrator = buildOrchestrator();
+    const orchestrator = buildOrchestrator({
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
+    });
     const result = await orchestrator.run({
       projectRoot,
       objective: "测试 4 阶段循环完整执行",
-      maxIterations: 1,
+      maxIterations: 3,
       testCommand: PASS_TEST_CMD,
       testTimeoutSec: 10,
     });
@@ -99,7 +104,10 @@ test("E2. stop_when 终止条件（finalStatus=stop_when, exitCode=3）", async 
     createTasksFile(projectRoot, 1, "pending");
     createDeclaredFile(projectRoot, "src/services/Service1.ts");
 
-    const orchestrator = buildOrchestrator();
+    // 方案 A：pending 卡需真实经过 dev 执行才能全绿，绑定恒成功执行器替身（仅替代 LLM 网络）
+    const orchestrator = buildOrchestrator({
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
+    });
     const result = await orchestrator.run({
       projectRoot,
       objective: "测试 stop_when 终止条件",

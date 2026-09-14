@@ -77,6 +77,16 @@ const CREDENTIAL_FILE_PATTERNS: ReadonlyArray<RegExp> = Object.freeze([
  */
 const CREDENTIAL_PATTERN_COUNT = CREDENTIAL_FILE_PATTERNS.length;
 
+/**
+ * dev 阶段结果原因码（方案 A §3.4）。
+ */
+/** 任务执行器未绑定：禁止"只盘点即成功"空转，fail-closed 判 failed */
+export const DEV_REASON_TASK_EXECUTOR_NOT_BOUND = "task-executor-not-bound" as const;
+/** 任务经执行器真实执行且正常到达终态 */
+export const DEV_REASON_TASK_EXECUTED = "task-executed" as const;
+/** 任务执行器返回失败（凭据缺失/abort/轮数上限/异常） */
+export const DEV_REASON_TASK_EXECUTION_FAILED = "task-execution-failed" as const;
+
 // ============================================================================
 // 2. 类型定义
 // ============================================================================
@@ -270,7 +280,7 @@ export class P5DevStageHandler implements P5StageHandler {
         );
       }
 
-      // 10. 护栏 PASS → 返回 success + validatedFiles + diffStats
+      // 10. 护栏 PASS → 真实执行任务（方案 A §3.4：删除"只盘点即 success"空转路径）
       const validatedFiles = inventory.filter((e) => e.withinProjectRoot && !e.isCredential).map((e) => e.relativePath);
 
       const diffStats: Readonly<[number, number, number]> = Object.freeze([
@@ -279,19 +289,99 @@ export class P5DevStageHandler implements P5StageHandler {
         inventory.filter((e) => !e.exists).length, // 新文件数
       ]) as Readonly<[number, number, number]>;
 
+      // 盘点制品（执行前基线，保留用于审计与对比）
+      const inventoryArtifacts = {
+        validatedFiles: Object.freeze(validatedFiles),
+        diffStats,
+        fileInventory: Object.freeze(inventory),
+      };
+
+      // 10.1 执行器未绑定 → fail-closed（无凭据/装配缺失必须显式失败，绝不空转成功）
+      const taskExecutor = ctx.taskExecutor ?? null;
+      if (taskExecutor === null) {
+        return createFailedStageResult(
+          "dev",
+          "failed",
+          `任务执行器未绑定（任务 ${taskCard.id}），无法真实执行`,
+          "P5TaskExecutor 未注入：请检查 SessionManager 装配；若未配置 LLM 凭据也会表现为执行失败",
+          {
+            taskCard,
+            reason: DEV_REASON_TASK_EXECUTOR_NOT_BOUND,
+            guardDecision: "PASS",
+            ...inventoryArtifacts,
+          },
+          guardRecords,
+          0,
+          Date.now() - startTime
+        );
+      }
+
+      // 10.2 调用执行器真实驱动 LLM+工具循环（工具/文件/git 全真实，LLM 客户端由装配层提供）
+      const execution = await taskExecutor.executeTask({
+        projectRoot: ctx.projectRoot,
+        runId: ctx.runId,
+        iterIndex: ctx.iterIndex,
+        stage: "dev",
+        objective: ctx.objective,
+        taskId: taskCard.id,
+        taskTitle: taskCard.title,
+        acceptanceCriteria: taskCard.acceptanceCriteria,
+        abortFlagPath: ctx.abortFlagPath ?? "",
+      });
+
+      if (!execution.success) {
+        return createFailedStageResult(
+          "dev",
+          "failed",
+          `任务 ${taskCard.id} 执行失败：${execution.error ?? "未知原因"}`,
+          execution.error ?? "任务执行器返回 success=false 且未提供错误原因",
+          {
+            taskCard,
+            reason: DEV_REASON_TASK_EXECUTION_FAILED,
+            guardDecision: "PASS",
+            execution: Object.freeze({ ...execution }),
+            llmRequests: execution.llmRequests,
+            ...inventoryArtifacts,
+          },
+          guardRecords,
+          execution.tokensUsed,
+          Date.now() - startTime
+        );
+      }
+
+      // 10.3 执行成功：用执行器经 git 真实检出的变更文件重建 ChangeDiff
+      const executedChangeDiff: ChangeDiff = Object.freeze({
+        changedFiles: Object.freeze(
+          execution.changedFiles.map((filePath) => ({
+            filePath,
+            // 执行器仅检出文件名（porcelain），不做 numstat：增删行数在 verify 阶段由真实测试侧证
+            additions: 0,
+            deletions: 0,
+            changeType: "modified" as const,
+          }))
+        ),
+        affectedSymbols: Object.freeze([...taskCard.declaredSymbols]),
+        totalAdditions: 0,
+        totalDeletions: 0,
+      });
+
       return createSuccessStageResult(
         "dev",
-        `dev 阶段前置护栏通过（任务 ${taskCard.id}，${validatedFiles.length} 个文件已验证）`,
+        `任务 ${taskCard.id} 已由 LLM 执行完成（${execution.changedFiles.length} 个变更文件，${execution.llmRequests} 次 LLM 请求）`,
         {
           taskCard,
-          changeDiff,
-          validatedFiles: Object.freeze(validatedFiles),
-          diffStats,
-          fileInventory: Object.freeze(inventory),
+          reason: DEV_REASON_TASK_EXECUTED,
+          changeDiff: executedChangeDiff,
           guardDecision: "PASS",
+          execution: Object.freeze({ ...execution }),
+          changedFiles: Object.freeze([...execution.changedFiles]),
+          llmRequests: execution.llmRequests,
+          tokensEstimated: execution.tokensEstimated,
+          executionSummary: execution.summary,
+          ...inventoryArtifacts,
         },
         guardRecords,
-        0,
+        execution.tokensUsed,
         Date.now() - startTime
       );
     } catch (err) {

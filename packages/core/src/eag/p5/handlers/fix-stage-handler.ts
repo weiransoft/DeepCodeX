@@ -75,6 +75,21 @@ const CLEANUP_KEYWORDS: ReadonlyArray<string> = Object.freeze([
 const CLEANUP_KEYWORDS_RE: ReadonlyArray<RegExp> = Object.freeze(CLEANUP_KEYWORDS.map((p) => new RegExp(p, "i")));
 
 /**
+ * fix 阶段结果原因码（方案 A §3.5）。
+ */
+/** 任务执行器未绑定：有 verify 失败却无法真实修复，fail-closed 判 failed */
+export const FIX_REASON_TASK_EXECUTOR_NOT_BOUND = "fix-task-executor-not-bound" as const;
+/** fix 经执行器真实执行且到达终态 */
+export const FIX_REASON_TASK_EXECUTED = "fix-task-executed" as const;
+/** fix 执行器返回失败 */
+export const FIX_REASON_TASK_EXECUTION_FAILED = "fix-task-execution-failed" as const;
+/** verify 失败但上下文中找不到任务卡（状态不一致，无法定位修复目标） */
+export const FIX_REASON_TASK_CARD_MISSING = "fix-task-card-missing" as const;
+
+/** 回灌给执行器的失败输出片段最大字符数 */
+const FIX_FEEDBACK_SNIPPET_CHARS = 500;
+
+/**
  * 失败模式分类规则表（按优先级排序）
  *
  * 每条规则为 [关键词正则, 分类名称]，按顺序匹配，命中第一个即停止。
@@ -290,18 +305,97 @@ export class P5FixStageHandler implements P5StageHandler {
         );
       }
 
-      // 10. 护栏 PASS → 返回 success + 修复建议
+      // 10. 护栏 PASS → 带失败反馈真实修复（方案 A §3.5：原"仅生成建议即 success"属空转，删除）
+
+      // 10.1 缺少任务卡：无法定位修复目标，诚实判 failed（建议仍保留在制品中供诊断）
+      if (taskCard === null) {
+        return createFailedStageResult(
+          "fix",
+          "failed",
+          "verify 失败但上下文中缺少任务卡，无法执行修复",
+          "fix 阶段未能从 plan 结果中提取任务卡",
+          {
+            fixSuggestion,
+            reason: FIX_REASON_TASK_CARD_MISSING,
+            guardDecision: "PASS",
+          },
+          guardRecords,
+          0,
+          Date.now() - startTime
+        );
+      }
+
+      // 10.2 执行器未绑定 → fail-closed（建议保留，但不得宣告修复成功）
+      const taskExecutor = ctx.taskExecutor ?? null;
+      if (taskExecutor === null) {
+        return createFailedStageResult(
+          "fix",
+          "failed",
+          `任务执行器未绑定（任务 ${taskCard.id}），无法真实修复`,
+          "P5TaskExecutor 未注入：fix 阶段不能只输出建议即宣告成功",
+          {
+            fixSuggestion,
+            reason: FIX_REASON_TASK_EXECUTOR_NOT_BOUND,
+            guardDecision: "PASS",
+          },
+          guardRecords,
+          0,
+          Date.now() - startTime
+        );
+      }
+
+      // 10.3 构造结构化反馈（失败分类/退出码/输出片段/建议动作），交执行器带反馈再执行
+      const feedback = buildFixFeedback(fixSuggestion);
+      const execution = await taskExecutor.executeTask({
+        projectRoot: ctx.projectRoot,
+        runId: ctx.runId,
+        iterIndex: ctx.iterIndex,
+        stage: "fix",
+        objective: ctx.objective,
+        taskId: taskCard.id,
+        taskTitle: taskCard.title,
+        acceptanceCriteria: taskCard.acceptanceCriteria,
+        feedback,
+        abortFlagPath: ctx.abortFlagPath ?? "",
+      });
+
+      if (!execution.success) {
+        return createFailedStageResult(
+          "fix",
+          "failed",
+          `任务 ${taskCard.id} 修复执行失败：${execution.error ?? "未知原因"}`,
+          execution.error ?? "任务执行器返回 success=false 且未提供错误原因",
+          {
+            fixSuggestion,
+            reason: FIX_REASON_TASK_EXECUTION_FAILED,
+            guardDecision: "PASS",
+            execution: Object.freeze({ ...execution }),
+            llmRequests: execution.llmRequests,
+          },
+          guardRecords,
+          execution.tokensUsed,
+          Date.now() - startTime
+        );
+      }
+
+      // 10.4 修复执行到达终态（是否真正修好由下一轮 verify 真实测试裁定，本阶段不宣告测试通过）
       return createSuccessStageResult(
         "fix",
-        `fix 阶段完成：失败分析（${failureCategory}），生成 ${suggestedActions.length} 条修复建议`,
+        `任务 ${taskCard.id} 已带失败反馈执行修复（${execution.changedFiles.length} 个变更文件，${execution.llmRequests} 次 LLM 请求）`,
         {
           fixSuggestion,
+          reason: FIX_REASON_TASK_EXECUTED,
           failureCategory,
           failedTestCount: failedCount,
           guardDecision: "PASS",
+          execution: Object.freeze({ ...execution }),
+          changedFiles: Object.freeze([...execution.changedFiles]),
+          llmRequests: execution.llmRequests,
+          tokensEstimated: execution.tokensEstimated,
+          executionSummary: execution.summary,
         },
         guardRecords,
-        0,
+        execution.tokensUsed,
         Date.now() - startTime
       );
     } catch (err) {
@@ -425,6 +519,36 @@ function generateSuggestedActions(
   actions.push("检查最近的代码改动是否引入回归");
 
   return actions;
+}
+
+/**
+ * 把结构化修复建议组装为回灌执行器的反馈文本（方案 A §3.5）。
+ *
+ * 反馈包含：失败分类、失败测试数、退出码、失败输出片段（≤500 字）、建议动作。
+ * 执行器把该文本放入 fix 轮 user 提示词，模型据此真实修改代码。
+ *
+ * @param suggestion 结构化修复建议
+ * @returns 多行反馈文本
+ */
+function buildFixFeedback(suggestion: Readonly<FixSuggestion>): string {
+  const lines: string[] = [
+    `失败分类：${suggestion.failureCategory}`,
+    `失败测试数：${suggestion.failedTestCount}`,
+    `测试退出码：${suggestion.testExitCode}`,
+    "",
+    "失败输出：",
+    suggestion.failureOutputSnippet.slice(0, FIX_FEEDBACK_SNIPPET_CHARS) || "（无输出摘要）",
+  ];
+  if (suggestion.suggestedActions.length > 0) {
+    lines.push("", "参考修复方向（需结合代码实际情况判断，不要机械照做）：");
+    for (const action of suggestion.suggestedActions) {
+      lines.push(`- ${action}`);
+    }
+  }
+  if (suggestion.filesToReview.length > 0) {
+    lines.push("", `任务卡声明文件：${suggestion.filesToReview.join(", ")}`);
+  }
+  return lines.join("\n");
 }
 
 // ============================================================================

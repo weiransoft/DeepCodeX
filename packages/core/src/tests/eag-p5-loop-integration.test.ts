@@ -55,7 +55,14 @@ import {
   type LoopEvent,
   // 默认配置常量
   AUTONOMOUS_DEFAULT_CONSECUTIVE_FAILURE_ABORT,
+  // 方案 A：任务执行器端口类型（dev/fix 阶段 fail-closed 装配）
+  type P5TaskExecutor,
 } from "../eag/p5/index";
+
+// 方案 A（F9-v2 LLM 执行链路）：
+// createAlwaysSucceedTaskExecutor 仅替代 LLM 网络调用；文件系统、git、任务卡状态机、
+// 护栏、orchestrator 全部保持真实链路（禁止 mock 框架，符合测试规则）
+import { createAlwaysSucceedTaskExecutor } from "./fixtures/eag-p5-e2e-fixtures";
 
 // ============================================================================
 // 1. 测试常量
@@ -145,6 +152,11 @@ function createDeclaredFile(projectRoot: string, relativePath: string): void {
 function buildOrchestrator(overrides?: {
   readonly defaultMaxIterations?: number;
   readonly defaultConsecutiveFailureAbort?: number;
+  /**
+   * 方案 A：任务执行器（仅替代 LLM 网络调用的测试替身）。
+   * pending 任务卡的成功链路用例必须注入，否则 dev 阶段 fail-closed 判定为 NOT_BOUND 失败。
+   */
+  readonly taskExecutor?: P5TaskExecutor | null;
 }): AutonomousOrchestrator {
   const loopExecutor = createP5LoopExecutorFromHandlers(
     new P5PlanStageHandler(),
@@ -157,7 +169,7 @@ function buildOrchestrator(overrides?: {
   const guardChain = createDefaultBlockerGuardChain({ throwOnDeny: false });
   const smartConfirmation = new P5SmartConfirmation();
 
-  return new AutonomousOrchestrator({
+  const orchestrator = new AutonomousOrchestrator({
     loopExecutor,
     runStateStore,
     notesMemory,
@@ -166,6 +178,11 @@ function buildOrchestrator(overrides?: {
     defaultMaxIterations: overrides?.defaultMaxIterations,
     defaultConsecutiveFailureAbort: overrides?.defaultConsecutiveFailureAbort,
   });
+  // 方案 A：显式绑定执行器到 dev/fix 阶段（undefined 时保持 fail-closed 默认语义）
+  if (overrides && "taskExecutor" in overrides) {
+    orchestrator.bindTaskExecutor(overrides.taskExecutor ?? null);
+  }
+  return orchestrator;
 }
 
 // ============================================================================
@@ -635,7 +652,10 @@ test("I9. 端到端：AutonomousOrchestrator + LoopScheduler → stop_when 终�
     createTasksFile(projectRoot, 1, "pending");
     createDeclaredFile(projectRoot, "src/services/Service1.ts");
 
-    const orchestrator = buildOrchestrator();
+    // 方案 A：pending 卡成功链路必须注入执行器替身（仅替代 LLM 网络）
+    const orchestrator = buildOrchestrator({
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
+    });
 
     const result = await orchestrator.run({
       projectRoot,

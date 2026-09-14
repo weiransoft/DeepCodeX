@@ -75,6 +75,13 @@ import {
   AUTONOMOUS_DEFAULT_TEST_TIMEOUT_SEC,
 } from "../eag/p5/index";
 
+// 方案 A（F9-v2 LLM 执行链路）：
+// - P5TaskExecutor：dev/fix 阶段执行器端口类型（fail-closed 装配）
+// - createAlwaysSucceedTaskExecutor：仅替代 LLM 网络调用的测试替身；
+//   文件系统、git、任务卡状态机、护栏、orchestrator 全部为真实链路
+import type { P5TaskExecutor } from "../eag/p5/index";
+import { createAlwaysSucceedTaskExecutor } from "./fixtures/eag-p5-e2e-fixtures";
+
 // ============================================================================
 // 1. 测试常量
 // ============================================================================
@@ -226,6 +233,8 @@ function buildOrchestrator(overrides?: {
   readonly defaultConsecutiveFailureAbort?: number;
   readonly defaultTestCommand?: string;
   readonly defaultTestTimeoutSec?: number;
+  /** 方案 A：可选绑定任务执行器（全绿/stop_when 用例必须绑定，否则 dev fail-closed） */
+  readonly taskExecutor?: P5TaskExecutor | null;
 }): AutonomousOrchestrator {
   const loopExecutor = buildLoopExecutor();
   const runStateStore = new P5RunStateStore();
@@ -235,7 +244,7 @@ function buildOrchestrator(overrides?: {
   const guardChain = createDefaultBlockerGuardChain({ throwOnDeny: false });
   const smartConfirmation = new P5SmartConfirmation();
 
-  return new AutonomousOrchestrator({
+  const orchestrator = new AutonomousOrchestrator({
     loopExecutor,
     runStateStore,
     notesMemory,
@@ -247,6 +256,12 @@ function buildOrchestrator(overrides?: {
     defaultTestCommand: overrides?.defaultTestCommand,
     defaultTestTimeoutSec: overrides?.defaultTestTimeoutSec,
   });
+
+  if (overrides?.taskExecutor) {
+    orchestrator.bindTaskExecutor(overrides.taskExecutor);
+  }
+
+  return orchestrator;
 }
 
 /**
@@ -373,9 +388,11 @@ test("A4. P5LoopExecutor execute 分流正确（4 个阶段分别调用对应 ha
     assert.ok(planTaskCard !== null && planTaskCard !== undefined);
 
     // 执行 dev 阶段（传入 plan 结果作为 prevResults）
+    // 方案 A：dev 阶段 fail-closed，绑定仅替代 LLM 网络的恒成功执行器替身
     const devCtx = createStageContext(projectRoot, {
       stage: "dev",
       prevResults: Object.freeze([planResult]),
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
     });
     const devResult = await executor.execute("dev", devCtx);
     assert.equal(devResult.stage, "dev");
@@ -460,6 +477,9 @@ test("A6. P5LoopExecutor executeBatch 全部 success（4 阶段顺序执行）",
       createStageContext(projectRoot, {
         stage,
         prevResults: Object.freeze([...prevResults]),
+        // 方案 A：仅 dev 阶段需要执行器；verify PASS / fix 无失败路径不触达
+        taskExecutor:
+          stage === "dev" ? createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }) : undefined,
       })
     );
 
@@ -492,6 +512,9 @@ test("A7. P5LoopExecutor executeBatch 中间 failed 时立即中止", async () =
         stage,
         testCommand: FAIL_TEST_CMD,
         prevResults: Object.freeze([...prevResults]),
+        // 方案 A：dev 阶段绑定恒成功替身，确保中止点真实发生在 verify 而非 dev fail-closed
+        taskExecutor:
+          stage === "dev" ? createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }) : undefined,
       })
     );
 
@@ -682,7 +705,10 @@ test("B4. AutonomousOrchestrator run() stop_when 终止条件（verify 通过 + 
     // 创建声明的源文件（让 dev 阶段能盘点到）
     createDeclaredFile(projectRoot, "src/services/Service1.ts");
 
-    const orchestrator = buildOrchestrator();
+    // 方案 A：stop_when 用例要求 4 阶段真实全绿，必须绑定执行器替身（仅替代 LLM 网络）
+    const orchestrator = buildOrchestrator({
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
+    });
 
     const result = await orchestrator.run({
       projectRoot,

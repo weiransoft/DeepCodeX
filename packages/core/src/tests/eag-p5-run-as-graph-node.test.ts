@@ -59,7 +59,14 @@ import {
   // 类型
   type AutonomousRunRequest,
   type AutonomousRunResult,
+  // 方案 A：任务执行器端口类型（dev/fix 阶段 fail-closed 装配）
+  type P5TaskExecutor,
 } from "../eag/p5/index";
+
+// 方案 A（F9-v2 LLM 执行链路）：
+// createAlwaysSucceedTaskExecutor 仅替代 LLM 网络调用；文件系统、git、任务卡状态机、
+// 护栏、orchestrator 全部保持真实链路（禁止 mock 框架，符合测试规则）
+import { createAlwaysSucceedTaskExecutor } from "./fixtures/eag-p5-e2e-fixtures";
 
 // graph 模块类型（仅用于构造测试 fixture，不导入运行时值）
 import type {
@@ -179,6 +186,11 @@ function buildOrchestrator(overrides?: {
   readonly defaultMaxTokens?: number;
   readonly defaultTestCommand?: string;
   readonly defaultTestTimeoutSec?: number;
+  /**
+   * 方案 A：任务执行器（仅替代 LLM 网络调用的测试替身）。
+   * pending 任务卡的成功链路用例必须注入，否则 dev 阶段 fail-closed 判定为 NOT_BOUND 失败。
+   */
+  readonly taskExecutor?: P5TaskExecutor | null;
 }): AutonomousOrchestrator {
   const loopExecutor = createP5LoopExecutorFromHandlers(
     new P5PlanStageHandler(),
@@ -191,7 +203,7 @@ function buildOrchestrator(overrides?: {
   const guardChain = createDefaultBlockerGuardChain({ throwOnDeny: false });
   const smartConfirmation = new P5SmartConfirmation();
 
-  return new AutonomousOrchestrator({
+  const orchestrator = new AutonomousOrchestrator({
     loopExecutor,
     runStateStore,
     notesMemory,
@@ -202,6 +214,11 @@ function buildOrchestrator(overrides?: {
     defaultTestCommand: overrides?.defaultTestCommand,
     defaultTestTimeoutSec: overrides?.defaultTestTimeoutSec,
   });
+  // 方案 A：显式绑定执行器到 dev/fix 阶段（undefined 时绑定 null 保持 fail-closed 语义）
+  if (overrides && "taskExecutor" in overrides) {
+    orchestrator.bindTaskExecutor(overrides.taskExecutor ?? null);
+  }
+  return orchestrator;
 }
 
 /**
@@ -551,9 +568,11 @@ test("E1. input.testCommand 覆盖默认测试命令", async () => {
     createDeclaredFile(projectRoot, "src/services/Service1.ts");
 
     // 默认测试命令设为 FAIL_TEST_CMD（会失败）
+    // 方案 A：pending 卡成功链路必须注入执行器替身（仅替代 LLM 网络）
     const orchestrator = buildOrchestrator({
       defaultTestCommand: FAIL_TEST_CMD,
       defaultTestTimeoutSec: 30,
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
     });
 
     // 使用 loopConfig 设置 stopWhen，让 verify 通过后触发 stop_when
@@ -585,9 +604,11 @@ test("E2. input.testTimeoutSec 覆盖默认超时", async () => {
     createTasksFile(projectRoot, "pending");
     createDeclaredFile(projectRoot, "src/services/Service1.ts");
 
+    // 方案 A：pending 卡成功链路必须注入执行器替身（仅替代 LLM 网络）
     const orchestrator = buildOrchestrator({
       defaultTestCommand: PASS_TEST_CMD,
       defaultTestTimeoutSec: 60,
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
     });
 
     // 使用 loopConfig 设置 stopWhen，让 verify 通过后触发 stop_when
@@ -623,9 +644,11 @@ test("F1. 成功路径：completed → status=completed + loopReport 正确", as
     createTasksFile(projectRoot, "pending");
     createDeclaredFile(projectRoot, "src/services/Service1.ts");
 
+    // 方案 A：pending 卡成功链路必须注入执行器替身（仅替代 LLM 网络）
     const orchestrator = buildOrchestrator({
       defaultTestCommand: PASS_TEST_CMD,
       defaultTestTimeoutSec: 30,
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
     });
 
     // 使用 loopConfig 设置 stopWhen，让 verify 通过后触发 stop_when
@@ -800,9 +823,11 @@ test("I1. 成功路径返回的 GraphNodeResult 被 Object.freeze 冻结", async
     createTasksFile(projectRoot, "pending");
     createDeclaredFile(projectRoot, "src/services/Service1.ts");
 
+    // 方案 A：pending 卡成功链路必须注入执行器替身（仅替代 LLM 网络）
     const orchestrator = buildOrchestrator({
       defaultTestCommand: PASS_TEST_CMD,
       defaultTestTimeoutSec: 30,
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
     });
 
     // 使用 loopConfig 设置 stopWhen，让 verify 通过后触发 stop_when
@@ -852,9 +877,11 @@ test("J1. LoopRunReport 字段映射正确（completed 路径）", async () => {
     createTasksFile(projectRoot, "pending");
     createDeclaredFile(projectRoot, "src/services/Service1.ts");
 
+    // 方案 A：pending 卡成功链路必须注入执行器替身（仅替代 LLM 网络）
     const orchestrator = buildOrchestrator({
       defaultTestCommand: PASS_TEST_CMD,
       defaultTestTimeoutSec: 30,
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
     });
 
     // 使用 loopConfig 设置 stopWhen，让 verify 通过后触发 stop_when
@@ -971,9 +998,11 @@ test("K1. 成功路径 output 包含全部预期字段", async () => {
     createTasksFile(projectRoot, "pending");
     createDeclaredFile(projectRoot, "src/services/Service1.ts");
 
+    // 方案 A：pending 卡成功链路必须注入执行器替身（仅替代 LLM 网络）
     const orchestrator = buildOrchestrator({
       defaultTestCommand: PASS_TEST_CMD,
       defaultTestTimeoutSec: 30,
+      taskExecutor: createAlwaysSucceedTaskExecutor({ changedFiles: ["src/services/Service1.ts"] }),
     });
 
     // 使用 loopConfig 设置 stopWhen，让 verify 通过后触发 stop_when

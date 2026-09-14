@@ -31,6 +31,7 @@ import * as path from "node:path";
 import type { P5StageContext, P5StageHandler, P5StageResult } from "./types";
 import { buildGuardContext, createSuccessStageResult, createFailedStageResult, toGuardRecords } from "./types";
 import type { TaskCard } from "../guards/types";
+import { atomicWriteTextFile } from "../common/atomic-file";
 // 领域专家匹配器集成：plan 阶段为任务卡匹配最合适的领域专家（可选增强）
 // 注：DomainExpertMatchResult 类型定义在 team/types.ts，需从正确路径导入
 import type { DomainExpertMatchResult } from "../../../team/types.js";
@@ -65,6 +66,30 @@ const TASK_CARD_PROPERTY_RE = /^-\s+([a-zA-Z_]+)\s*:\s*(.+)$/;
  * 默认 tasks.md 文件名
  */
 const DEFAULT_TASKS_FILENAME = "tasks.md" as const;
+
+/**
+ * plan 阶段结果原因码（方案 A §3.2/§3.6，架构师 P2-4：字面量提为常量，
+ * 供 orchestrator 5d 完成判定精确分支，避免散落字符串比较）。
+ */
+/** tasks.md 不存在且 objective 为空：无可执行任务（5d 判 failed） */
+export const PLAN_REASON_TASKS_FILE_NOT_FOUND = "tasks-file-not-found" as const;
+/** tasks.md 存在但解析不到任何任务卡（5d 判 failed） */
+export const PLAN_REASON_NO_TASK_CARDS = "no-task-cards" as const;
+// 注：合成任务卡落盘后仍走统一选卡流程，选中卡 reason 恒为 task-card-selected，
+// "本轮卡来自 objective 合成"这一事实由 artifacts.synthesized 布尔标志承载，
+// 故不设独立的 objective-synthesized reason（曾预留该常量，无消费方，已移除）。
+/** 清单内任务全部 completed（5d 仅在此 reason 且本轮无失败时才允许判 completed） */
+export const PLAN_REASON_ALL_TASKS_COMPLETED = "all-tasks-completed" as const;
+/** 存在未完成任务，但没有依赖已满足的 pending 卡（blocked/in-progress/依赖不满足，5d 判 failed） */
+export const PLAN_REASON_TASKS_BLOCKED = "tasks-blocked" as const;
+/** 正常选中一张可执行任务卡 */
+export const PLAN_REASON_TASK_CARD_SELECTED = "task-card-selected" as const;
+
+/** 合成任务卡 ID（单 goal 合成固定为 T-001，手写清单可继续追加 T-002…） */
+const SYNTHESIZED_TASK_ID = "T-001" as const;
+
+/** 合成任务卡标题最大字符数（防止超长 objective 撑爆单行标题） */
+const MAX_SYNTHESIZED_TITLE_CHARS = 200;
 
 // ============================================================================
 // 2. 类型定义
@@ -237,20 +262,47 @@ export class P5PlanStageHandler implements P5StageHandler {
    */
   async handle(ctx: Readonly<P5StageContext>): Promise<Readonly<P5StageResult>> {
     const startTime = Date.now();
+    // 本轮是否由 objective 合成了任务卡（合成状态需透传到选中卡 artifacts，
+    // 供 verify 阶段收窄"无测试目标 → 诚实 skip"判定）
+    let synthesized = false;
 
     try {
       // 1. 读取 tasks.md 文件
       const tasksFilePath = ctx.tasksFilePath || path.join(ctx.projectRoot, ".eag", "p5", DEFAULT_TASKS_FILENAME);
       if (!fs.existsSync(tasksFilePath)) {
-        // tasks.md 不存在 → 无任务可执行，返回 success + taskCard=null
-        return createSuccessStageResult(
-          "plan",
-          `tasks.md 不存在（${tasksFilePath}），无任务可执行`,
-          { taskCard: null, tasksFilePath, reason: "tasks-file-not-found" },
-          [],
-          0,
-          Date.now() - startTime
-        );
+        // 方案 A §3.2：文件不存在时，objective 非空则真实合成单卡任务清单并原子落盘，
+        // 让 objective 首次被消费；objective 为空才维持"无任务"结果（5d 新语义判 failed）。
+        const objective = typeof ctx.objective === "string" ? ctx.objective.trim() : "";
+        if (objective.length === 0) {
+          return createSuccessStageResult(
+            "plan",
+            `tasks.md 不存在（${tasksFilePath}）且 objective 为空，无任务可执行`,
+            { taskCard: null, tasksFilePath, reason: PLAN_REASON_TASKS_FILE_NOT_FOUND },
+            [],
+            0,
+            Date.now() - startTime
+          );
+        }
+
+        try {
+          const synthesizedContent = buildSynthesizedTasksContent(objective);
+          // 原子落盘（同目录 tmp + rename），随后与手写清单走完全相同的"回读→解析"闭环
+          atomicWriteTextFile(tasksFilePath, synthesizedContent);
+          synthesized = true;
+        } catch (writeError) {
+          // 合成落盘失败属真实 I/O 故障：判 fatal，绝不回退到"空转成功"
+          const message = writeError instanceof Error ? writeError.message : String(writeError);
+          return createFailedStageResult(
+            "plan",
+            "fatal",
+            "合成任务清单写入失败",
+            `无法写入 ${tasksFilePath}：${message}`,
+            { tasksFilePath, reason: "synthesis-write-failed" },
+            [],
+            0,
+            Date.now() - startTime
+          );
+        }
       }
 
       const tasksContent = fs.readFileSync(tasksFilePath, "utf8");
@@ -258,11 +310,11 @@ export class P5PlanStageHandler implements P5StageHandler {
       // 2. 解析任务卡列表
       const taskCards = parseTaskCards(tasksContent);
       if (taskCards.length === 0) {
-        // 无任务卡 → 返回 success + taskCard=null
+        // 无任务卡 → 返回 success + taskCard=null（5d 对 NO_TASK_CARDS 判 failed，不再误报完成）
         return createSuccessStageResult(
           "plan",
           `tasks.md 无任务卡（${tasksFilePath}），无任务可执行`,
-          { taskCard: null, tasksFilePath, reason: "no-task-cards", totalCards: 0 },
+          { taskCard: null, tasksFilePath, reason: PLAN_REASON_NO_TASK_CARDS, totalCards: 0 },
           [],
           0,
           Date.now() - startTime
@@ -274,17 +326,50 @@ export class P5PlanStageHandler implements P5StageHandler {
       const nextTask = pickNextPendingTask(taskCards, completedIds);
 
       if (nextTask === null) {
-        // 所有任务已完成或被阻塞 → 返回 success + taskCard=null
+        // 方案 A §3.6：把旧的 all-tasks-done-or-blocked 拆成两种诚实语义。
         const completedCount = completedIds.size;
+        const allCompleted = taskCards.every((c) => c.status === "completed");
+        if (allCompleted) {
+          // 清单全部 completed：可能是真正收尾（5d 还要看本轮有无失败与终态守卫）
+          return createSuccessStageResult(
+            "plan",
+            `所有任务已完成（completed=${completedCount}/${taskCards.length}）`,
+            {
+              taskCard: null,
+              tasksFilePath,
+              reason: PLAN_REASON_ALL_TASKS_COMPLETED,
+              totalCards: taskCards.length,
+              completedCards: completedCount,
+            },
+            [],
+            0,
+            Date.now() - startTime
+          );
+        }
+
+        // 存在未完成任务却没有可执行 pending 卡：区分"显式 blocked / in-progress 残留"
+        // 与"pending 但依赖未满足"，把任务 ID 与缺失依赖写入制品供最终报告诊断（P2-2）
+        const blockedCardIds = taskCards
+          .filter((c) => c.status !== "completed" && c.status !== "pending")
+          .map((c) => c.id);
+        const waitingDependencies = taskCards
+          .filter((c) => c.status === "pending")
+          .map((c) => ({
+            id: c.id,
+            missingDependencies: c.dependencies.filter((dep) => !completedIds.has(dep)),
+          }))
+          .filter((entry) => entry.missingDependencies.length > 0);
         return createSuccessStageResult(
           "plan",
-          `所有任务已完成或被阻塞（completed=${completedCount}/${taskCards.length}）`,
+          `任务被阻塞（completed=${completedCount}/${taskCards.length}，blocked=${blockedCardIds.length}，等待依赖=${waitingDependencies.length}）`,
           {
             taskCard: null,
             tasksFilePath,
-            reason: "all-tasks-done-or-blocked",
+            reason: PLAN_REASON_TASKS_BLOCKED,
             totalCards: taskCards.length,
             completedCards: completedCount,
+            blockedCardIds: Object.freeze(blockedCardIds),
+            waitingDependencies: Object.freeze(waitingDependencies),
           },
           [],
           0,
@@ -388,10 +473,15 @@ export class P5PlanStageHandler implements P5StageHandler {
       // 10. 护栏 PASS → 返回 success + 任务卡信息 + 领域专家 + GuardCoordinator 验证结果
       return createSuccessStageResult(
         "plan",
-        `选取下一任务卡：${nextTask.id} ${nextTask.title}（依赖已满足，范围锁预检通过）`,
+        synthesized
+          ? `已从目标合成并选取任务卡：${nextTask.id} ${nextTask.title}（范围锁预检通过）`
+          : `选取下一任务卡：${nextTask.id} ${nextTask.title}（依赖已满足，范围锁预检通过）`,
         {
           taskCard,
           tasksFilePath,
+          // 方案 A：精确 reason + synthesized 标志（verify/orchestrator 据此分流）
+          reason: PLAN_REASON_TASK_CARD_SELECTED,
+          synthesized,
           totalCards: taskCards.length,
           completedCards: completedIds.size,
           pendingCards: taskCards.length - completedIds.size,
@@ -608,6 +698,42 @@ export function pickNextPendingTask(
 // ============================================================================
 // 6. 工厂函数
 // ============================================================================
+
+/**
+ * 从用户目标构造合成 tasks.md 内容（方案 A §3.2）。
+ *
+ * 合成清单为单卡 T-001，格式与 parseTaskCards 的解析正则严格兼容：
+ * - 标题行 `## T-001 <单行目标>`；
+ * - 空值属性行（dependencies/files/deletions/symbols/acceptance）故意写成 `- key:`
+ *   （属性正则要求冒号后至少一个字符，空行不匹配 → 解析器取默认空数组，等价于"未声明"）；
+ * - status=pending，requirement=AUTO 标记其来源为自动合成。
+ *
+ * @param objective 已 trim 的用户目标文本（非空）
+ * @returns tasks.md 完整文本
+ */
+export function buildSynthesizedTasksContent(objective: string): string {
+  // 标题必须单行：折叠所有换行/制表符为空格并压缩连续空白，超长截断
+  const singleLineTitle = objective
+    .replace(/\r?\n/g, " ")
+    .replace(/\t/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_SYNTHESIZED_TITLE_CHARS);
+
+  return [
+    "# EAG-P5 任务清单（由自主目标自动生成，可手工编辑补充 files/acceptance）",
+    "",
+    `## ${SYNTHESIZED_TASK_ID} ${singleLineTitle}`,
+    "- requirement: AUTO",
+    "- status: pending",
+    "- dependencies:",
+    "- files:",
+    "- deletions:",
+    "- symbols:",
+    "- acceptance:",
+    "",
+  ].join("\n");
+}
 
 /**
  * 工厂函数：创建默认 P5PlanStageHandler 实例

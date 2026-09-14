@@ -361,6 +361,41 @@ export {
 export type { FixFailureCategory, FixSuggestion } from "./handlers/fix-stage-handler";
 
 // ============================================================================
+// 9.5 方案 A：LLM 任务执行器端口/实现 + 阶段 reason 常量（LLM 执行链路补全）
+// ============================================================================
+
+export type { P5TaskExecutor, P5TaskExecutionInput, P5TaskExecutionResult } from "./handlers/task-executor-port";
+
+export { LlmTaskExecutor, p5TaskExecutionStorage } from "./executors/llm-task-executor";
+export type { LlmTaskExecutorOptions } from "./executors/llm-task-executor";
+
+export { atomicWriteTextFile } from "./common/atomic-file";
+
+export {
+  PLAN_REASON_TASKS_FILE_NOT_FOUND,
+  PLAN_REASON_NO_TASK_CARDS,
+  PLAN_REASON_ALL_TASKS_COMPLETED,
+  PLAN_REASON_TASKS_BLOCKED,
+  PLAN_REASON_TASK_CARD_SELECTED,
+  buildSynthesizedTasksContent,
+} from "./handlers/plan-stage-handler";
+
+export {
+  DEV_REASON_TASK_EXECUTOR_NOT_BOUND,
+  DEV_REASON_TASK_EXECUTED,
+  DEV_REASON_TASK_EXECUTION_FAILED,
+} from "./handlers/dev-stage-handler";
+
+export {
+  FIX_REASON_TASK_EXECUTOR_NOT_BOUND,
+  FIX_REASON_TASK_EXECUTED,
+  FIX_REASON_TASK_EXECUTION_FAILED,
+  FIX_REASON_TASK_CARD_MISSING,
+} from "./handlers/fix-stage-handler";
+
+export { VERIFY_REASON_TEST_SKIPPED_NO_TEST_TARGET } from "./handlers/verify-stage-handler";
+
+// ============================================================================
 // 10. LoopExecutor 分流器导出（Phase 5.2 TASK-P5-1.2-008）
 // ============================================================================
 
