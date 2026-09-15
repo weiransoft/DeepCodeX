@@ -1,7 +1,7 @@
 # DeepCodeX 新特性总览
 
-> **版本**：v1.2
-> **日期**：2026-07-26（v1.0）；2026-08-04（v1.1 文档对照代码一致性核查修订）；2026-09-12（v1.2 新增 Q 章：F9-v2 建议循环确定性执行 + F10 任务中指令分发加固）
+> **版本**：v1.3
+> **日期**：2026-07-26（v1.0）；2026-08-04（v1.1 文档对照代码一致性核查修订）；2026-09-12（v1.2 新增 Q 章：F9-v2 建议循环确定性执行 + F10 任务中指令分发加固）；2026-09-15（v1.3 新增 Q.6：F9-v2 自主循环空转修复——补全 EAG-P5 LLM 任务执行链路）
 > **状态**：✅ 已实施完成（例外：F.4 后台任务持久化、C.4 `.deepcode/eag.yml` 文件加载为已规划未接线，详见对应章节标注）
 > **关联文档**（`docs/fusion/` 为本地设计文档，未入库，链接仅本机有效）：
 > - 设计蓝图：[docs/fusion/DEEPCODEX_FUSION_PLAN.md](fusion/DEEPCODEX_FUSION_PLAN.md)
@@ -733,3 +733,33 @@ LLM 通过 AskUserQuestion 工具向用户提问后，用户回答仅作为消�
 | session F9-v2 | 13 用例 | 意图前缀 / 指代确认 / 否定保护 / 一次性消费 |
 | suggestion-fallback | 24 用例 | 含引号中文参数捕获与 EAG 白名单 |
 | loading-text | 12 用例 | formatTokens 紧凑格式透传修复（存量 3 失败清零） |
+
+### Q.6 F9-v2 自主循环空转修复：补全 EAG-P5 LLM 任务执行链路
+
+> 代码实现：`packages/core/src/eag/p5/`（新增执行器端口与 `LlmTaskExecutor`、plan/dev/fix/verify 四阶段处理器与编排器改造）、`packages/core/src/session.ts`（构造期装配绑定）
+> 日期：2026-09-15（方案 A v2）
+
+**问题**：Q.2 的确定性通道打通后，`/eag-autonomous --goal '...'` 已能真实启动自主循环，但循环 **1 轮、0 次 LLM 调用即报 completed**——编排器空转。根因是执行链路最后一公里未接线：`AutonomousOrchestrator` 的 dev/fix 阶段 fail-closed 等待一个由 `bindTaskExecutor()` 注入的任务执行器，而该执行器从未被构造与绑定，执行器槽恒为 `null`，于是"执行任务"被静默跳过、任务被当作已完成。
+
+**修复**（新增能力，非仅补空指针）：
+
+| 环节 | 实现 |
+|------|------|
+| 执行端口 | `handlers/task-executor-port.ts`：`P5TaskExecutor` 接口 + 输入/结果契约（tokensUsed、llmRequests、changedFiles、失败原因），dev 与 fix 共用 |
+| 真实执行器 | `executors/llm-task-executor.ts`：精简 LLM↔工具循环，工具调用走真实 `ToolExecutor`（read/write/edit/UpdatePlan），文件与 git 状态全真实；无凭据首轮 fail-closed 零请求 failed |
+| plan 阶段 | objective 无任务文件时合成任务卡并**原子落盘**（`common/atomic-file.ts`），后续迭代真实读取 |
+| dev 阶段 | 护栏判定通过后调用执行器真实编码，失败原因透传上游；未绑定执行器显式 failed 而非静默跳过 |
+| fix 阶段 | 携带上一轮验证失败反馈（失败分类 / 退出码 / 输出摘要 / 修复方向）再次执行 |
+| verify 阶段 | 合成任务且项目无测试目标时诚实 skip（milestone 标记 `unverified`），不伪造通过 |
+| 编排器 | 任务轮全绿后在任务文件真实标记 completed；blocked / 无任务卡等终局裁定补齐失败阶段字段使报告渲染阻塞原因；最终报告新增「执行器 LLM 请求数」 |
+| 装配 | `session.ts` 构造尾部鸭子检测 `bindTaskExecutor`：存在则构造 `LlmTaskExecutor`（复用 SessionManager 私有的 `createLLMClient()` 与注入的 `getResolvedSettings()`，尊重 CLI 模型覆写）并注入；F9-v2 recording/stub orchestrator 无此方法自然跳过，行为零变化 |
+
+**测试期间连带暴露并修复的 3 处真实缺陷**（均由真实实现用例发现，非静态审查）：
+
+1. `git status --porcelain` 默认把未跟踪目录折叠为 `?? src/`，导致 LLM 新建文件的改动产出检出失真 → 统一加 `--untracked-files=all`；
+2. blocked 终局裁定未设置失败阶段，最终报告丢失被阻塞任务 ID → 补齐阶段字段；
+3. 验证证据摘要用 `stdout || stderr`，而 npm 命令头在 stdout（永非空）、断言失败详情在 stderr，导致修复轮拿不到失败根因 → 改为非空者合并后截断。
+
+**测试基线**：新增 36 用例（执行器 8 + 编排语义与装配 26 + 端到端集成 2，集成用例含"真实错误实现 → npm 真失败 → 带 stderr 反馈修正 → 全绿"完整闭环）；`eag-p5-*` 全套 **358/358 绿**，`tsc --noEmit` 零错误。桩仅实现 LLMClient 的 HTTP 响应，工具、文件、git、npm、状态机、护栏、编排器、SessionManager 全真实。
+
+**已知遗留**：`cancellation`（abort 竞态 ×2）、DeepSeek 模型清单断言、`isRetryableLlmError`、skills 禁用枚举、多模态能力等 6 项为干净 HEAD 上即存在的失败（经 `git worktree` 对照证实，与本次改动无关），属独立议题。
