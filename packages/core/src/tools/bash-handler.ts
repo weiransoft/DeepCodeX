@@ -111,8 +111,8 @@ function getSessionCwd(sessionId: string, fallback: string): string {
   if (stored && isUsableCwd(stored)) {
     return stored;
   }
-  // 存储的 cwd 已失效（如 Git Bash 虚拟路径 /tmp 转成 Windows 后不存在），
-  // 回退到 projectRoot 并清掉坏记录，避免 spawn ENOENT 导致整个 bash 工具坏死。
+  // If the stored cwd is no longer valid (e.g. Git Bash's virtual /tmp path does not exist after Windows conversion),
+  // fall back to projectRoot and clear the stale entry to prevent spawn ENOENT errors from breaking the bash tool.
   if (stored) {
     sessionWorkingDirs.delete(sessionId);
   }
@@ -121,7 +121,7 @@ function getSessionCwd(sessionId: string, fallback: string): string {
 
 function updateSessionCwd(sessionId: string, fallback: string, cwd: string | null): void {
   const nextCwd = cwd ?? fallback;
-  // 只记录有效目录；无效 cwd（如 Git Bash 的 /tmp 被转成 \tmp）会导致下次 spawn 失败。
+  // Only store valid directories; an invalid cwd (e.g. Git Bash's /tmp converted to \tmp) would cause the next spawn to fail.
   if (isUsableCwd(nextCwd)) {
     sessionWorkingDirs.set(sessionId, nextCwd);
   } else {

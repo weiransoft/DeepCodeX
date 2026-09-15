@@ -36,7 +36,7 @@ Create `~/.deepcode/settings.json`:
 ```json
 {
   "env": {
-    "MODEL": "deepseek-v4-pro",
+    "MODEL": "deepseek-flash",
     "BASE_URL": "https://api.deepseek.com",
     "API_KEY": "sk-..."
   },
