@@ -249,7 +249,9 @@ for (const replacement of ["deleted", "file"]) {
     const subdir = path.join(workspace, "child");
     fs.mkdirSync(subdir);
     const context = createContext(`bash-cwd-${replacement}`, workspace);
-    assert.equal((await handleBashTool({ command: "cd child" }, context)).ok, true);
+    const changed = await handleBashTool({ command: "cd child" }, context);
+    assert.equal(changed.ok, true);
+    assert.equal(fs.realpathSync(String(changed.metadata?.cwd)), fs.realpathSync(subdir));
     const retained = await handleBashTool({ command: "pwd" }, context);
     assert.equal(fs.realpathSync(String(retained.metadata?.startCwd)), fs.realpathSync(subdir));
     fs.rmdirSync(subdir);
@@ -259,6 +261,25 @@ for (const replacement of ["deleted", "file"]) {
     assert.equal(fs.realpathSync(String(result.metadata?.startCwd)), fs.realpathSync(workspace));
   });
 }
+
+test(
+  "Bash preserves Git Bash virtual mount cwd as a native Windows directory",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const context = createContext("bash-virtual-cwd", createTempWorkspace());
+    const changed = await handleBashTool({ command: "cd /tmp && pwd -W" }, context);
+    assert.equal(changed.ok, true);
+    const nativeCwd = String(changed.metadata?.cwd);
+    assert.equal(path.isAbsolute(nativeCwd), true);
+    assert.equal(fs.statSync(nativeCwd).isDirectory(), true);
+    assert.equal(fs.realpathSync(nativeCwd), fs.realpathSync((changed.output ?? "").trim()));
+
+    const retained = await handleBashTool({ command: "pwd -W" }, context);
+    assert.equal(retained.ok, true);
+    assert.equal(fs.realpathSync(String(retained.metadata?.startCwd)), fs.realpathSync(nativeCwd));
+    assert.equal(fs.realpathSync((retained.output ?? "").trim()), fs.realpathSync(nativeCwd));
+  }
+);
 
 test("Bash reports an invalid project root as a spawn failure", { timeout: 3_000 }, async () => {
   const root = path.join(createTempWorkspace(), "missing");

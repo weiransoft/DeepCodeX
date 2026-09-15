@@ -147,6 +147,9 @@ function buildShellCommand(command: string): {
   const initCommand = buildShellInitCommand(shellPath);
   const disableExtglobCommand = buildDisableExtglobCommand(shellPath);
   const normalizedCommand = rewriteWindowsNullRedirect(command);
+  // Git Bash mounts such as /tmp and /usr cannot be mapped by replacing
+  // separators or drive prefixes. Ask Bash for the native path while it is alive.
+  const cwdExpression = process.platform === "win32" ? '"$(builtin pwd -W)"' : '"$PWD"';
   const wrappedParts = [];
   if (initCommand) {
     wrappedParts.push(initCommand);
@@ -157,7 +160,7 @@ function buildShellCommand(command: string): {
   wrappedParts.push(
     normalizedCommand,
     "__DEEPCODE_STATUS__=$?",
-    `printf '%s%s\\n' "${marker}" "$PWD"`,
+    `printf '%s%s\\n' "${marker}" ${cwdExpression}`,
     "exit $__DEEPCODE_STATUS__"
   );
   const wrappedCommand = `{ ${wrappedParts.join("; ")}; } < /dev/null`;
