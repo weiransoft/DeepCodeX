@@ -1,9 +1,14 @@
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import { killProcessTree } from "../common/process-tree";
 import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { setTimeout as delay } from "node:timers/promises";
+import { setTimeout as delay, setImmediate as nextTurn } from "node:timers/promises";
 import type { BackgroundProcessCompletion, ProcessTimeoutControl, ToolExecutionContext } from "../tools/executor";
 import { handleBashTool } from "../tools/bash-handler";
 import { handleEditTool } from "../tools/edit-handler";
@@ -103,6 +108,186 @@ test("Bash timeout control can extend the active command deadline", async () => 
   assert.match(result.output ?? "", /done/);
   assert.equal(result.metadata?.timedOut, false);
   assert.equal(result.metadata?.timeoutMs, 1000);
+});
+
+for (const stream of ["stdout", "stderr"]) {
+  test(`Bash bounds draining when a descendant holds ${stream}`, { timeout: 8_000 }, async () => {
+    const workspace = createTempWorkspace();
+    const exits: Array<string | number> = [];
+    const chunks: string[] = [];
+    let pid: number | undefined;
+    let control: ProcessTimeoutControl | undefined;
+    let revoked = 0;
+    const startedAt = Date.now();
+    try {
+      const result = await handleBashTool(
+        { command: `sleep 30 ${stream === "stdout" ? "2>/dev/null" : ">/dev/null"} & printf 'hi\\n'` },
+        createContext(`bash-held-${stream}`, workspace, {
+          bashTimeoutMs: 1_000,
+          bashMinTimeoutMs: 1,
+          onProcessStart: (value) => {
+            pid = value as number;
+          },
+          onProcessStdout: (_pid, chunk) => chunks.push(chunk),
+          onProcessExit: (value) => exits.push(value),
+          onProcessTimeoutControl: (_pid, value) => {
+            if (value) control = value;
+            else revoked++;
+          },
+        })
+      );
+      assert.ok(Date.now() - startedAt < 6_000);
+      assert.equal(result.ok, true);
+      assert.equal(result.metadata?.timedOut, false);
+      assert.equal(result.metadata?.exitCode, 0);
+      assert.match(result.output ?? "", /hi/);
+      assert.match(result.output ?? "", /Output streams did not close/);
+      assert.equal(exits.length, 1);
+      assert.equal(revoked, 1);
+      const info = control!.getInfo();
+      assert.deepEqual(control!.setTimeoutMs(1), info);
+      const count = chunks.length;
+      await delay(50);
+      assert.equal(chunks.length, count);
+      assert.equal(exits.length, 1);
+    } finally {
+      if (pid) killProcessTree(pid, "SIGKILL");
+    }
+  });
+}
+
+test("Bash drains delayed output and preserves a failing shell exit", { timeout: 5_000 }, async () => {
+  const result = await handleBashTool(
+    { command: "(sleep 0.2; printf 'late-out'; printf 'late-err' >&2) & exit 7" },
+    createContext("bash-drain-failure", createTempWorkspace())
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.metadata?.exitCode, 7);
+  assert.match(result.output ?? "", /late-out/);
+  assert.match(result.output ?? "", /late-err/);
+  assert.doesNotMatch(result.output ?? "", /Output streams did not close/);
+});
+
+for (const lateEvent of ["close", "exit", "none"]) {
+  test(`Bash timeout stays failed with late event: ${lateEvent}`, async (t) => {
+    const child = Object.assign(new EventEmitter(), {
+      pid: 12345,
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+    });
+    const spawnMock = t.mock.method(childProcess, "spawn", () => child);
+    // Simulate an unsuccessful kill without touching any real process.
+    const killMock = t.mock.method(process, "kill", () => {
+      throw new Error("ESRCH");
+    });
+    const taskkillMock = t.mock.method(childProcess, "spawnSync", () => ({ status: 128 }));
+    syncBuiltinESMExports();
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    let exits = 0;
+    let revocations = 0;
+    const chunks: string[] = [];
+    try {
+      let completed = false;
+      const promise = handleBashTool(
+        { command: "ignored" },
+        createContext("bash-timeout-race", createTempWorkspace(), {
+          bashTimeoutMs: 100,
+          bashMinTimeoutMs: 1,
+          onProcessExit: () => {
+            exits++;
+          },
+          onProcessTimeoutControl: (_pid, control) => {
+            if (!control) revocations++;
+          },
+          onProcessStdout: (_pid, chunk) => {
+            chunks.push(chunk);
+          },
+        })
+      ).then((value) => {
+        completed = true;
+        return value;
+      });
+      const captured = "before" + "x".repeat(35_000);
+      child.stdout.write(captured);
+      t.mock.timers.tick(100);
+      assert.ok(killMock.mock.callCount() > 0);
+      t.mock.timers.tick(1_500);
+      if (lateEvent !== "none") child.emit("exit", 0, null);
+      if (lateEvent === "close") child.emit("close", 0, null);
+      t.mock.timers.tick(500);
+      await nextTurn();
+      assert.equal(completed, true, "late exit must not extend timeout grace");
+      const result = await promise;
+      assert.equal(result.ok, false);
+      assert.equal(result.error, "Command timed out.");
+      assert.equal(result.metadata?.timedOut, true);
+      assert.equal(result.metadata?.exitCode, null);
+      assert.equal(result.metadata?.signal, null);
+      assert.match(result.output ?? "", /before/);
+      assert.equal(result.metadata?.truncated, true);
+      if (lateEvent !== "close") assert.match(result.output ?? "", /Output streams did not close/);
+      child.emit("exit", 0, null);
+      child.emit("close", 0, null);
+      child.stdout.emit("data", "after");
+      t.mock.timers.tick(10_000);
+      assert.equal(exits, 1);
+      assert.equal(revocations, 1);
+      assert.deepEqual(chunks, [captured]);
+    } finally {
+      spawnMock.mock.restore();
+      killMock.mock.restore();
+      taskkillMock.mock.restore();
+      t.mock.timers.reset();
+      syncBuiltinESMExports();
+    }
+  });
+}
+
+for (const replacement of ["deleted", "file"]) {
+  test(`Bash falls back when cached cwd is ${replacement}`, async () => {
+    const workspace = createTempWorkspace();
+    const subdir = path.join(workspace, "child");
+    fs.mkdirSync(subdir);
+    const context = createContext(`bash-cwd-${replacement}`, workspace);
+    // Native realpath also expands Windows 8.3 aliases (RUNNER~1 vs runneradmin).
+    const changed = await handleBashTool({ command: "cd child" }, context);
+    assert.equal(changed.ok, true);
+    assert.equal(fs.realpathSync.native(String(changed.metadata?.cwd)), fs.realpathSync.native(subdir));
+    const retained = await handleBashTool({ command: "pwd" }, context);
+    assert.equal(fs.realpathSync.native(String(retained.metadata?.startCwd)), fs.realpathSync.native(subdir));
+    fs.rmdirSync(subdir);
+    if (replacement === "file") fs.writeFileSync(subdir, "not a directory");
+    const result = await handleBashTool({ command: "pwd" }, context);
+    assert.equal(result.ok, true);
+    assert.equal(fs.realpathSync.native(String(result.metadata?.startCwd)), fs.realpathSync.native(workspace));
+  });
+}
+
+test(
+  "Bash preserves Git Bash virtual mount cwd as a native Windows directory",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const context = createContext("bash-virtual-cwd", createTempWorkspace());
+    const changed = await handleBashTool({ command: "cd /tmp && pwd -W" }, context);
+    assert.equal(changed.ok, true);
+    const nativeCwd = String(changed.metadata?.cwd);
+    assert.equal(path.isAbsolute(nativeCwd), true);
+    assert.equal(fs.statSync(nativeCwd).isDirectory(), true);
+    assert.equal(fs.realpathSync.native(nativeCwd), fs.realpathSync.native((changed.output ?? "").trim()));
+
+    const retained = await handleBashTool({ command: "pwd -W" }, context);
+    assert.equal(retained.ok, true);
+    assert.equal(fs.realpathSync.native(String(retained.metadata?.startCwd)), fs.realpathSync.native(nativeCwd));
+    assert.equal(fs.realpathSync.native((retained.output ?? "").trim()), fs.realpathSync.native(nativeCwd));
+  }
+);
+
+test("Bash reports an invalid project root as a spawn failure", { timeout: 3_000 }, async () => {
+  const root = path.join(createTempWorkspace(), "missing");
+  const result = await handleBashTool({ command: "pwd" }, createContext("bash-invalid-root", root));
+  assert.equal(result.ok, false);
+  assert.match(result.error ?? "", /ENOENT/);
+  assert.equal(result.metadata?.timedOut, false);
 });
 
 test("Bash can run commands in the background and report completion output", async () => {
