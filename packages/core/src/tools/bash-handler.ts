@@ -20,14 +20,11 @@ const MAX_CAPTURE_CHARS = 10 * 1024 * 1024;
 const BACKGROUND_OUTPUT_DIR = path.join(os.tmpdir(), "deepcode-background");
 const TRAILING_BACKGROUND_OPERATOR_PATTERN = /(^|[^\\&])\s*&\s*$/;
 const sessionWorkingDirs = new Map<string, string>();
-// A backgrounded descendant (`foo &`, `nohup ... &`) inherits this tool call's
-// stdout/stderr pipes. Once the shell itself is gone, killing its pid is a no-op
-// and 'close' may never fire, which used to hang the tool call — and the whole
-// session — forever. After these graces the promise is settled unconditionally.
-const TIMEOUT_SETTLE_GRACE_MS = 2_000;
-const EXIT_SETTLE_GRACE_MS = 2_000;
+// Process completion and output EOF are separate: descendants may retain pipes.
+// Bound output draining after exit, and completion after a timeout kill attempt.
+const IO_DRAIN_TIMEOUT_MS = 2_000;
 const HELD_PIPE_NOTE =
-  "[deepcode] The command shell exited, but a background process still holds this call's output pipe; the call was settled anyway. Use run_in_background: true for detached work.";
+  "[deepcode] Output streams did not close within the drain deadline; later output may not have been collected. Use run_in_background: true for detached work.";
 
 export function clearSessionWorkingDir(sessionId: string): void {
   if (!sessionId) {
@@ -85,9 +82,12 @@ export async function handleBashTool(
     execution.timeoutMs,
     execution.deadlineAtMs
   );
+  if (execution.outputDrainTimedOut) {
+    result.output = `${result.output}${result.output && !result.output.endsWith("\n") ? "\n" : ""}${HELD_PIPE_NOTE}`;
+  }
   updateSessionCwd(context.sessionId, startCwd, result.cwd);
 
-  if (execution.error || result.exitCode !== 0 || result.signal !== null) {
+  if (execution.timedOut || execution.error || result.exitCode !== 0 || result.signal !== null) {
     const errorMessage = buildErrorMessage(result.exitCode, result.signal, execution.error, execution.timedOut);
     return formatResult({ ...result, ok: false }, "bash", errorMessage);
   }
@@ -179,6 +179,7 @@ async function executeShellCommand(
   timedOut: boolean;
   timeoutMs: number;
   deadlineAtMs: number;
+  outputDrainTimedOut: boolean;
 }> {
   return new Promise((resolve) => {
     const detached = process.platform !== "win32";
@@ -190,6 +191,11 @@ async function executeShellCommand(
     let deadlineAtMs = startedAtMs + timeoutMs;
     let timedOut = false;
     let settled = false;
+    let childExit: { code: number | null; signal: string | null } | null = null;
+    let stdout = "";
+    let stderr = "";
+    let error: string | undefined;
+    let timeoutControlRegistered = false;
     let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
     const child = spawn(shellPath, shellArgs, {
       cwd,
@@ -219,9 +225,13 @@ async function executeShellCommand(
         forceSettleTimer = null;
       }
     };
-    // Settle even when 'close' never fires: a detached descendant can keep the
-    // stdout/stderr pipes open forever after the shell pid itself is gone.
-    const forceSettle = (childExit: { code: number | null; signal: string | null } | null) => {
+    const unregisterTimeoutControl = () => {
+      if (timeoutControlRegistered && typeof pid === "number") {
+        timeoutControlRegistered = false;
+        context.onProcessTimeoutControl?.(pid, null);
+      }
+    };
+    const finish = (outputDrainTimedOut = false) => {
       if (settled) {
         return;
       }
@@ -230,49 +240,58 @@ async function executeShellCommand(
       stopTimeoutTimer();
       child.stdout?.destroy();
       child.stderr?.destroy();
+      unregisterTimeoutControl();
       if (typeof pid === "number") {
-        context.onProcessTimeoutControl?.(pid, null);
         context.onProcessExit?.(pid);
-      }
-      if (childExit && !timedOut) {
-        stdout = `${stdout}${stdout && !stdout.endsWith("\n") ? "\n" : ""}${HELD_PIPE_NOTE}\n`;
       }
       resolve({
         stdout,
         stderr,
-        // Once the timeout has fired the exit status is meaningless: the shell was
-        // killed, so report the timeout rather than a bogus success.
         exitCode: timedOut ? null : (childExit?.code ?? null),
         signal: timedOut ? null : (childExit?.signal ?? null),
         error,
         timedOut,
         timeoutMs,
         deadlineAtMs,
+        outputDrainTimedOut,
       });
     };
+    const startDrainTimer = () => {
+      // An exit after timeout must not extend the original completion deadline.
+      if (!forceSettleTimer) {
+        forceSettleTimer = setTimeout(
+          () =>
+            finish(
+              Boolean((child.stdout && !child.stdout.readableEnded) || (child.stderr && !child.stderr.readableEnded))
+            ),
+          IO_DRAIN_TIMEOUT_MS
+        );
+      }
+    };
     const triggerTimeout = () => {
-      if (settled || timedOut || typeof pid !== "number") {
+      if (settled || timedOut || childExit || typeof pid !== "number") {
         return;
       }
       timedOut = true;
       stopTimeoutTimer();
+      startDrainTimer();
+      unregisterTimeoutControl();
+      // Unix process groups can outlive their leader. Regardless of kill success,
+      // completion must not depend on either exit or pipe EOF arriving.
       killProcessTree(pid, "SIGKILL");
-      // The kill above is a no-op once the shell pid is gone, so do not rely on
-      // 'close' to ever arrive.
-      forceSettleTimer = setTimeout(() => forceSettle(null), TIMEOUT_SETTLE_GRACE_MS);
     };
     child.on("exit", (code, signal) => {
-      // The shell is gone; if 'close' has not followed right away a descendant is
-      // holding our pipes, so settle instead of hanging until the timeout.
-      cancelForceSettleTimer();
-      forceSettleTimer = setTimeout(
-        () => forceSettle({ code: typeof code === "number" ? code : null, signal: signal ?? null }),
-        EXIT_SETTLE_GRACE_MS
-      );
+      if (settled || childExit) {
+        return;
+      }
+      childExit = { code, signal };
+      stopTimeoutTimer();
+      startDrainTimer();
+      unregisterTimeoutControl();
     });
     const scheduleTimeout = () => {
       stopTimeoutTimer();
-      if (settled) {
+      if (settled || timedOut || childExit) {
         return;
       }
       const remainingMs = Math.max(0, deadlineAtMs - Date.now());
@@ -281,6 +300,9 @@ async function executeShellCommand(
     const timeoutControl: ProcessTimeoutControl = {
       getInfo: getTimeoutInfo,
       setTimeoutMs: (nextTimeoutMs) => {
+        if (settled || timedOut || childExit) {
+          return getTimeoutInfo();
+        }
         timeoutMs = clampBashTimeoutMs(nextTimeoutMs, minTimeoutMs);
         deadlineAtMs = startedAtMs + timeoutMs;
         if (deadlineAtMs <= Date.now()) {
@@ -292,53 +314,37 @@ async function executeShellCommand(
       },
     };
 
-    if (typeof pid === "number") {
-      context.onProcessStart?.(pid, command);
-      context.onProcessTimeoutControl?.(pid, timeoutControl);
-      scheduleTimeout();
-    }
-
-    let stdout = "";
-    let stderr = "";
-    let error: string | undefined;
-
     child.stdout?.on("data", (chunk: string | Buffer) => {
+      if (settled) return;
       stdout = appendChunk(stdout, chunk);
       const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
       context.onProcessStdout?.(pid as number, text);
     });
     child.stderr?.on("data", (chunk: string | Buffer) => {
+      if (settled) return;
       stderr = appendChunk(stderr, chunk);
       const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
       context.onProcessStdout?.(pid as number, text);
     });
 
     child.on("error", (spawnError) => {
+      if (settled) return;
       error = spawnError.message;
+      finish();
     });
 
     child.on("close", (code, signal) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      cancelForceSettleTimer();
-      stopTimeoutTimer();
-      if (typeof pid === "number") {
-        context.onProcessTimeoutControl?.(pid, null);
-        context.onProcessExit?.(pid);
-      }
-      resolve({
-        stdout,
-        stderr,
-        exitCode: typeof code === "number" ? code : null,
-        signal: signal ?? null,
-        error,
-        timedOut,
-        timeoutMs,
-        deadlineAtMs,
-      });
+      if (settled) return;
+      childExit ??= { code, signal };
+      finish();
     });
+
+    if (typeof pid === "number") {
+      context.onProcessStart?.(pid, command);
+      timeoutControlRegistered = true;
+      context.onProcessTimeoutControl?.(pid, timeoutControl);
+      scheduleTimeout();
+    }
   });
 }
 
@@ -509,7 +515,7 @@ function buildToolCommandResult(
   const combined = joinOutput(cleanedStdout, stderr);
   const { text, truncated } = truncateOutput(combined);
   return {
-    ok: exitCode === 0 && signal === null,
+    ok: !timedOut && exitCode === 0 && signal === null,
     output: text,
     cwd,
     exitCode,
@@ -565,11 +571,11 @@ function truncateOutput(output: string): { text: string; truncated: boolean } {
 }
 
 function buildErrorMessage(exitCode: number | null, signal: string | null, error?: string, timedOut = false): string {
-  if (error) {
-    return error;
-  }
   if (timedOut) {
     return "Command timed out.";
+  }
+  if (error) {
+    return error;
   }
   if (signal) {
     return `Command terminated by signal ${signal}.`;
