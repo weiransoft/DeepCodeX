@@ -249,16 +249,17 @@ for (const replacement of ["deleted", "file"]) {
     const subdir = path.join(workspace, "child");
     fs.mkdirSync(subdir);
     const context = createContext(`bash-cwd-${replacement}`, workspace);
+    // Native realpath also expands Windows 8.3 aliases (RUNNER~1 vs runneradmin).
     const changed = await handleBashTool({ command: "cd child" }, context);
     assert.equal(changed.ok, true);
-    assert.equal(fs.realpathSync(String(changed.metadata?.cwd)), fs.realpathSync(subdir));
+    assert.equal(fs.realpathSync.native(String(changed.metadata?.cwd)), fs.realpathSync.native(subdir));
     const retained = await handleBashTool({ command: "pwd" }, context);
-    assert.equal(fs.realpathSync(String(retained.metadata?.startCwd)), fs.realpathSync(subdir));
+    assert.equal(fs.realpathSync.native(String(retained.metadata?.startCwd)), fs.realpathSync.native(subdir));
     fs.rmdirSync(subdir);
     if (replacement === "file") fs.writeFileSync(subdir, "not a directory");
     const result = await handleBashTool({ command: "pwd" }, context);
     assert.equal(result.ok, true);
-    assert.equal(fs.realpathSync(String(result.metadata?.startCwd)), fs.realpathSync(workspace));
+    assert.equal(fs.realpathSync.native(String(result.metadata?.startCwd)), fs.realpathSync.native(workspace));
   });
 }
 
@@ -272,12 +273,12 @@ test(
     const nativeCwd = String(changed.metadata?.cwd);
     assert.equal(path.isAbsolute(nativeCwd), true);
     assert.equal(fs.statSync(nativeCwd).isDirectory(), true);
-    assert.equal(fs.realpathSync(nativeCwd), fs.realpathSync((changed.output ?? "").trim()));
+    assert.equal(fs.realpathSync.native(nativeCwd), fs.realpathSync.native((changed.output ?? "").trim()));
 
     const retained = await handleBashTool({ command: "pwd -W" }, context);
     assert.equal(retained.ok, true);
-    assert.equal(fs.realpathSync(String(retained.metadata?.startCwd)), fs.realpathSync(nativeCwd));
-    assert.equal(fs.realpathSync((retained.output ?? "").trim()), fs.realpathSync(nativeCwd));
+    assert.equal(fs.realpathSync.native(String(retained.metadata?.startCwd)), fs.realpathSync.native(nativeCwd));
+    assert.equal(fs.realpathSync.native((retained.output ?? "").trim()), fs.realpathSync.native(nativeCwd));
   }
 );
 
