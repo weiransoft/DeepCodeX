@@ -15,6 +15,7 @@ const RESUME_ID = "0a5cb7a5-c39d-4c39-a11b-05f8b22b8df6";
 
 function createSettings(
   permissions: ResolvedDeepcodingSettings["permissions"] = {
+    mode: "auto",
     allow: [],
     deny: [],
     ask: [],
@@ -283,7 +284,7 @@ test("runExecMode rejects a missing fork source and disposes resources", async (
 test("runExecMode reports the tool, action, scope, and reason for required permission", async () => {
   const harness = createHarness({
     finalStatus: "ask_permission",
-    permissions: { allow: [], deny: [], ask: ["network"], defaultMode: "allowAll", addWorkingDirs: [] },
+    permissions: { mode: "auto", allow: [], deny: [], ask: ["network"], defaultMode: "allowAll", addWorkingDirs: [] },
     askPermissions: [
       {
         toolCallId: "weather-search",
@@ -319,6 +320,7 @@ test("formatPermissionConfirmationError describes temporary directory scopes", (
       },
     ],
     {
+      mode: "auto",
       allow: [],
       deny: [],
       ask: ["write-in-tmp"],

@@ -62,7 +62,22 @@ export type PermissionScope =
 
 export type PermissionDefaultMode = "allowAll" | "askAll";
 
+/**
+ * 三态权限模式（对齐 Trae 命令审批机制，2026-09-17 设计文档 docs/dev/permission-modes.md）
+ *
+ * - "manual"：手动审批（对齐 TRAE IDE「始终手动运行」/ TRAE CLI permission_mode=default）——
+ *   写操作/网络/MCP 等非 allow 白名单的 scope 一律弹审批确认；
+ * - "auto"：自动审批 + 白名单（对齐 TRAE IDE「沙箱运行（支持白名单）」，默认值）——
+ *   既有 defaultMode（allowAll/askAll）评估逻辑原样生效，向后兼容存量配置；
+ * - "bypass"：完全访问（对齐 TRAE IDE「始终自动运行」/ TRAE CLI bypass_permissions）——
+ *   所有 scope 直接放行（含 deny/unknown），审批面板不触发；
+ *   安全底线：灾难性命令硬拦截（checkDangerousBashCommand）不依赖本配置，仍然生效。
+ */
+export type PermissionMode = "manual" | "auto" | "bypass";
+
 export type PermissionSettings = {
+  /** 三态权限模式（顶层分流开关）；缺省/非法值归一为 "auto"（存量配置行为不变） */
+  mode?: PermissionMode;
   allow?: PermissionScope[];
   deny?: PermissionScope[];
   ask?: PermissionScope[];
@@ -422,8 +437,22 @@ function normalizePermissionDefaultMode(value: unknown): PermissionDefaultMode |
   return value === "allowAll" || value === "askAll" ? value : undefined;
 }
 
+/**
+ * 归一化三态权限模式（PM-U01~U03）
+ *
+ * 合法值 manual/auto/bypass 原样保留；缺省、非字符串或非法字符串（如 "evil"）
+ * 一律降级为 undefined，由调用方（normalizePermissions）兜底为默认 "auto"。
+ *
+ * @param value settings.json 中读取的 permissions.mode 原始值
+ * @returns 合法的 PermissionMode；非法/缺省返回 undefined
+ */
+function normalizePermissionMode(value: unknown): PermissionMode | undefined {
+  return value === "manual" || value === "auto" || value === "bypass" ? value : undefined;
+}
+
 function normalizePermissions(settings: PermissionSettings | null | undefined): Required<PermissionSettings> {
   return {
+    mode: normalizePermissionMode(settings?.mode) ?? "auto",
     allow: normalizePermissionList(settings?.allow),
     deny: normalizePermissionList(settings?.deny),
     ask: normalizePermissionList(settings?.ask),
@@ -438,7 +467,13 @@ function mergePermissions(
 ): Required<PermissionSettings> {
   const userPermissions = normalizePermissions(userSettings?.permissions);
   const projectPermissions = normalizePermissions(projectSettings?.permissions);
+  // mode 合并按"显式配置了 mode 才生效"取值：项目 mode > 用户 mode > 默认 "auto"。
+  // 注意不能用"是否配置了 permissions 对象"判断（项目只配了 allow 等字段而未配 mode 时，
+  // 其归一出的 "auto" 不应覆盖用户显式设置的 manual/bypass，见测试 PM-U05）
+  const explicitProjectMode = normalizePermissionMode(projectSettings?.permissions?.mode);
+  const explicitUserMode = normalizePermissionMode(userSettings?.permissions?.mode);
   return {
+    mode: explicitProjectMode ?? explicitUserMode ?? "auto",
     allow: mergePermissionLists(userPermissions.allow, projectPermissions.allow),
     deny: mergePermissionLists(userPermissions.deny, projectPermissions.deny),
     ask: mergePermissionLists(userPermissions.ask, projectPermissions.ask),

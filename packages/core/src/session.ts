@@ -42,7 +42,7 @@ import {
   type ToolExecutionResult,
 } from "./tools/executor";
 import { McpManager } from "./mcp/mcp-manager";
-import type { McpServerConfig, PermissionScope, PermissionSettings } from "./settings";
+import type { McpServerConfig, PermissionMode, PermissionScope, PermissionSettings } from "./settings";
 import { resolveCurrentSettings } from "./settings";
 // 上游 v0.3.1：Files API 默认值与自动 compact 窗口计算，供 filesApi / autoCompactWindow 消费
 import {
@@ -836,6 +836,22 @@ export type SessionManagerOptions = {
   loadSharp?: SharpLoader;
   // 上游 v0.3.1：非交互模式标志（exec/headless 场景抑制交互式提示，默认 false）
   nonInteractive?: boolean;
+  /**
+   * 三态权限模式覆盖（可选注入，2026-09-17 设计文档 docs/dev/permission-modes.md §3.3）
+   *
+   * 由 CLI 层经 `--permission-mode <manual|auto|bypass>` 启动参数构造并注入，
+   * 优先级最高：CLI flag > 项目 settings.json > 用户 settings.json > 默认 "auto"。
+   *
+   * 未注入时（undefined）权限模式完全由 resolved settings（permissions.mode）决定，
+   * 行为与三态机制引入前一致（向后兼容，零回归）。
+   *
+   * 语义（对齐 Trae 命令审批机制）：
+   * - "manual"：手动审批——非 allow 白名单的 scope 一律弹审批确认；
+   * - "auto"：自动审批 + 白名单——defaultMode（allowAll/askAll）评估逻辑生效；
+   * - "bypass"：完全访问——全部 scope 直接放行，审批面板不触发；
+   *   灾难性命令硬拦截（checkDangerousBashCommand）不依赖本配置，仍然生效。
+   */
+  permissionModeOverride?: PermissionMode;
 };
 
 export type LlmStreamProgress = {
@@ -999,6 +1015,8 @@ export class SessionManager {
   private readonly onProcessStdout?: (pid: number, chunk: string) => void;
   // 上游 v0.3.1：非交互模式标志（exec/headless 场景抑制交互式提示）
   private readonly nonInteractive: boolean;
+  // 三态权限模式覆盖（CLI --permission-mode 注入；未注入时读 resolved settings 的 permissions.mode）
+  private readonly permissionModeOverride: PermissionMode | undefined;
   private activeSessionId: string | null = null;
   private activePromptController: AbortController | null = null;
   // SkillManager 实例（技能扫描/解析/去重/归一化，见 docs/dev/review.md CRITICAL-1 模块 3）
@@ -1105,6 +1123,8 @@ export class SessionManager {
     this.createLLMClientOverride = options.createLLMClient;
     // 上游 v0.3.1：非交互模式标志赋值（exec/headless 场景）
     this.nonInteractive = options.nonInteractive === true;
+    // 三态权限模式覆盖赋值（未注入时为 undefined，权限评估完全走 resolved settings）
+    this.permissionModeOverride = options.permissionModeOverride;
     this.getResolvedSettings = options.getResolvedSettings;
     this.onAssistantMessage = options.onAssistantMessage;
     this.onSessionEntryUpdated = options.onSessionEntryUpdated;
@@ -6371,12 +6391,19 @@ ${agentInstructions}
           return;
         }
         const assistantMessage = this.buildAssistantMessage(sessionId, content, toolCalls, thinking);
+        // 三态权限模式：CLI flag（permissionModeOverride）优先级最高，
+        // 未注入时使用 resolved settings 中的 permissions.mode（设计文档 docs/dev/permission-modes.md §3.3）。
+        // resolved settings 未提供 permissions 时保持旧行为（传 undefined，评估走默认 allowAll 策略）
+        const resolvedPermissions = this.getResolvedSettings().permissions;
+        const effectivePermissionSettings = resolvedPermissions
+          ? { ...resolvedPermissions, mode: this.permissionModeOverride ?? resolvedPermissions.mode }
+          : undefined;
         const permissionPlan = toolCalls
           ? computeToolCallPermissions({
               sessionId,
               projectRoot: this.projectRoot,
               toolCalls,
-              settings: this.getResolvedSettings().permissions,
+              settings: effectivePermissionSettings,
               forceAskScopes: this.getSession(sessionId)?.planMode ? PLAN_MODE_FORCE_ASK_SCOPES : undefined,
               // 上游 v0.3.1：免读权限路径 = 技能扫描根目录 + 会话图片目录（多模态 ReadImage 读取所需）
               readPermissionExemptPaths: this.getReadPermissionExemptPaths(sessionId),

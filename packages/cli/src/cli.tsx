@@ -235,6 +235,8 @@ async function main(): Promise<void> {
       projectRoot,
       resumeSessionId: typeof resumeSessionId === "string" ? resumeSessionId : undefined,
       forkSessionId: typeof forkSessionId === "string" ? forkSessionId : undefined,
+      // 三态权限模式覆盖：CLI --permission-mode 透传到 exec 模式 SessionManager
+      permissionMode: parsed.permissionMode,
     });
     return;
   }
@@ -303,6 +305,8 @@ async function main(): Promise<void> {
         resumeSessionId={appResumeSessionId}
         // 上游 v0.3.1：透传 forkSessionId（仅接受字符串形式）
         forkSessionId={typeof appForkSessionId === "string" ? appForkSessionId : undefined}
+        // 三态权限模式覆盖：CLI --permission-mode → App → SessionManager（优先级最高）
+        permissionMode={parsed.permissionMode}
         onRestart={() => restartRef.current?.()}
       />,
       { exitOnCtrlC: false }

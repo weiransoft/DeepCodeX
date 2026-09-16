@@ -2,7 +2,7 @@ import chalk from "chalk";
 import { renderMessageToStdout } from "../components/MessageView/utils";
 import type { RawMode } from "../contexts";
 import type { PromptDraft } from "../views/PromptInput";
-import type { ModelConfigSelection } from "@vegamo/deepcode-core";
+import type { ModelConfigSelection, PermissionMode } from "@vegamo/deepcode-core";
 import type { SessionEntry, SessionMessage } from "@vegamo/deepcode-core";
 import type { SessionManager } from "@vegamo/deepcode-core";
 import type { MessageMeta } from "@vegamo/deepcode-core";
@@ -134,6 +134,12 @@ export type BuildStatusLineOptions = {
   reasoningEffort?: string;
   /** 上下文窗口大小（上游 v0.3.1 settings 调用形态），大于 0 时以进度条展示 token 占用 */
   contextWindow?: number;
+  /**
+   * 三态权限模式（2026-09-17 设计文档 docs/dev/permission-modes.md §4）：
+   * 传入时在状态栏展示 "perm: <mode>" 段；bypass（完全访问）时附加 ⚠ 醒目提示。
+   * 未传入时段落省略（既有调用方与测试用例零回归）。
+   */
+  permissionMode?: PermissionMode;
 };
 
 /**
@@ -194,6 +200,12 @@ export function buildStatusLine(entry: SessionEntry, options?: BuildStatusLineOp
 
   if (entry.failReason) {
     parts.push(`fail: ${entry.failReason}`);
+  }
+
+  // 三态权限模式段（2026-09-17 设计文档 §4）：显式传入 permissionMode 时展示当前模式；
+  // bypass（完全访问）附加 ⚠ 前缀做醒目提示，帮助用户感知当前处于无审批状态。
+  if (options?.permissionMode) {
+    parts.push(options.permissionMode === "bypass" ? "⚠ perm: bypass" : `perm: ${options.permissionMode}`);
   }
   return parts.join(" · ");
 }

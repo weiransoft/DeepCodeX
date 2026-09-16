@@ -50,6 +50,7 @@ export type {
   PermissionScope,
   PermissionSettings,
   PermissionDefaultMode,
+  PermissionMode,
   McpServerConfig,
   ReasoningEffort,
   StatusLineSettings,
