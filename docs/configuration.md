@@ -41,7 +41,7 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 | `fileQuotaCleanupBatch` | number | 配额不足时清理的最旧 Deep Code 文件数，默认 `100`                         |
 | `maxRequestFilesBytes` | number | 单次请求内图片原始字节总上限，默认 `134217728`（128 MiB）                    |
 | `debugLogEnabled`    | boolean   | 是否启用调试日志输出（默认 `false`）                                 |
-| `telemetryEnabled`   | boolean   | 是否启用匿名使用数据上报（默认 `true`）                              |
+| `telemetryEnabled`   | boolean   | 是否启用匿名使用数据上报（默认 `false`，需显式开启）                 |
 | `notify`             | string    | 任务完成通知脚本的完整路径（如 Slack 通知脚本）                      |
 | `webSearchTool`      | string    | 自定义联网搜索脚本的完整路径                                         |
 | `mcpServers`         | object    | MCP 服务器配置（键为服务名，值为 McpServerConfig 对象）              |
@@ -330,13 +330,33 @@ MCP（Model Context Protocol）服务器配置。值是键值对，键为服务�
 
 #### `telemetryEnabled` — 匿名使用数据上报
 
-设为 `false` 可关闭匿名使用数据上报（默认 `true`）。上报仅包含匿名的机器标识，不包含对话内容、代码或 API 密钥。
+设为 `true` 可开启匿名使用数据上报（**默认 `false`，需显式开启**，opt-in 模式）。上报仅包含匿名机器标识（纯随机 UUID，不含主机名或设备指纹），不包含对话内容、代码或 API 密钥。
 
-也可以通过环境变量关闭：
+也可以通过环境变量开启：
 
 ```bash
-DEEPCODE_TELEMETRY_ENABLED=0 deepcode
+DEEPCODE_TELEMETRY_ENABLED=1 deepcode
 ```
+
+## 外部网络请求端点披露
+
+为便于企业与个人用户进行网络审计，以下列出 Deep Code 可能发起的全部出站网络请求（隐私加固，2026-09-17 审计后状态）：
+
+| 用途 | 目标端点 | 数据内容 | 控制/关闭方式 |
+|---|---|---|---|
+| 模型对话与工具调用 | 用户配置的 LLM `baseURL` | 对话内容、代码上下文、图片（多模态请求） | 更换模型/`baseURL` 配置 |
+| 图片理解（UnderstandImage） | 用户配置的 LLM `baseURL`（**不访问任何外部插件服务器**） | 图片以 base64 data URI 进入模型请求 | 与对话同级；无独立外发 |
+| 联网搜索（WebSearch，默认链路） | `https://deepcode.vegamo.cn/api/plugin/web-search` | 搜索词（已按密钥/JWT/私钥等模式脱敏）+ 匿名标识 | 配置 `webSearchTool` 自定义脚本替代 |
+| 遥测上报（opt-in） | `https://deepcode.vegamo.cn/api/plugin/new` | 空请求体 + 匿名标识（随机 UUID） | 默认关闭；`telemetryEnabled: true` 开启 |
+| 版本更新检查 | npm registry（官方源或腾讯镜像） | 仅包名与当前版本 | 自动；无用户数据 |
+| 视频生成技能 | `https://deepcode.vegamo.cn/api` 与 `https://files.vegamo.cn` | 用户指定的图片/视频/音频素材（执行前需用户确认积分并拒绝密钥类文件） | 不调用该技能即不触发 |
+| MCP 服务器 | 用户在 `mcpServers` 中配置的地址 | 工具调用参数 | 移除对应配置 |
+| 通知脚本 | 用户在 `notify` 中配置的命令 | 会话摘要等参数 | 移除配置 |
+
+说明：
+
+- 除上表外，Deep Code 不存在其他隐性出站请求；`UnderstandImage` 已不再上传图片至外部插件服务器。
+- 出站搜索词脱敏覆盖：OpenAI 风格密钥（`sk-`）、AWS AccessKey（`AKIA`）、GitHub/Slack/Google 令牌、JWT、`Authorization`/`Bearer` 片段、PEM 私钥块及 32 位以上十六进制串，命中内容以 `[REDACTED]` 占位。
 
 ## 环境变量优先级
 

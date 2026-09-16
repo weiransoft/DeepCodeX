@@ -7106,7 +7106,10 @@ ${agentInstructions}
 
   private reportNewPrompt(): void {
     const { machineId, telemetryEnabled } = this.createOpenAIClient();
-    reportNewPrompt({ enabled: telemetryEnabled ?? true, machineId });
+    // 隐私加固（2026-09-17 审计）：默认关闭遥测（opt-in）。
+    // 旧兜底值 true 会在 settings 未显式开启时仍然上报，现改为 false，
+    // 只有用户显式配置 telemetryEnabled=true 时才会触发 reportNewPrompt。
+    reportNewPrompt({ enabled: telemetryEnabled ?? false, machineId });
   }
 
   interruptActiveSession(): void {

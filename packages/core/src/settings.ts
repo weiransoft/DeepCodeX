@@ -813,13 +813,17 @@ export function resolveSettingsSources(
     // 用户仍可通过 DEBUG_LOG_ENABLED=false 或 settings.json 显式禁用
     true;
 
+  // 隐私加固（2026-09-17 审计）：遥测改为 opt-in 模式，默认关闭。
+  // 旧默认值 true 会在用户无感知的情况下向厂商服务器上报 machineId 与使用时序，
+  // 现要求用户通过 settings.json 的 telemetryEnabled=true 或
+  // 环境变量 TELEMETRY_ENABLED=1 显式开启后才上报。
   const telemetryEnabled =
     parseBoolean(systemEnv.TELEMETRY_ENABLED) ??
     parseBoolean(projectSettings?.telemetryEnabled) ??
     parseBoolean(projectEnv.TELEMETRY_ENABLED) ??
     parseBoolean(userSettings?.telemetryEnabled) ??
     parseBoolean(userEnv.TELEMETRY_ENABLED) ??
-    true;
+    false;
 
   // P0 安全：允许通过 settings.json 或环境变量放行本地/私有 baseURL。
   // 进程环境变量 DEEPCODE_ALLOW_PRIVATE_BASE_URL=true 优先级最高，便于 CI/脚本覆盖；

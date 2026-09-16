@@ -411,6 +411,100 @@ test("WebSearch returns a configuration error when neither a script nor an LLM c
   );
 });
 
+// 隐私加固（2026-09-17 审计建议 #4）：出站 query 脱敏
+test("WebSearch redacts credential-like content in the outbound query", async () => {
+  const workspace = createTempWorkspace();
+  const fetchCalls: Array<{ input: string | URL; init?: RequestInit }> = [];
+
+  // 翻译桩：与默认链路一致，处理 "Return strict JSON:" 请求
+  const fakeClient = {
+    chat: {
+      completions: {
+        create: async () => ({
+          choices: [
+            {
+              message: {
+                content: '{"dominant_language":"en","reason":"Keep the original terms."}',
+              },
+            },
+          ],
+        }),
+      },
+    },
+  } as unknown as OpenAI;
+
+  globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+    fetchCalls.push({ input, init });
+    return {
+      ok: true,
+      json: async () => ({
+        success: true,
+        result: JSON.stringify({ organic_results: [{ title: "Result" }] }, null, 2),
+      }),
+    } as Response;
+  }) as typeof fetch;
+
+  // 搜索词中意外携带用户粘贴的密钥片段（sk- 密钥 + JWT + 长十六进制）
+  const leakedQuery =
+    "how to fix sk-proj-abcdef1234567890qwer in eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.SflKxwRJSMeKKF2QT4f and cafebabe00112233445566778899aabb";
+
+  const result = await handleWebSearchTool(
+    { query: leakedQuery },
+    createContext(workspace, {
+      baseURL: "https://example.com/v1",
+      client: fakeClient,
+      machineId: "machine-id-123",
+    })
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(fetchCalls.length, 1);
+  const sentBody = JSON.parse(String(fetchCalls[0].init?.body)) as { query: string };
+  // 出站 query 已脱敏：凭据片段被 [REDACTED] 替换
+  assert.equal(sentBody.query.includes("sk-proj-abcdef1234567890qwer"), false);
+  assert.equal(sentBody.query.includes("eyJhbGciOiJIUzI1NiJ9"), false);
+  assert.equal(sentBody.query.includes("cafebabe00112233445566778899aabb"), false);
+  assert.ok(sentBody.query.includes("[REDACTED]"));
+  // 本地活动标签保留原始 query，便于用户审计本机行为
+  assert.ok(String(fetchCalls[0].init?.body).length > 0);
+});
+
+test("redactSensitiveContent covers common credential formats", async () => {
+  const { redactSensitiveContent, SENSITIVE_REDACTED_PLACEHOLDER } = await import("../tools/web-search-handler");
+
+  // OpenAI 风格密钥
+  assert.equal(redactSensitiveContent("key is sk-abc123XYZdef_456"), `key is ${SENSITIVE_REDACTED_PLACEHOLDER}`);
+  // AWS AccessKey
+  assert.equal(redactSensitiveContent("aws AKIAIOSFODNN7EXAMPLE"), `aws ${SENSITIVE_REDACTED_PLACEHOLDER}`);
+  // GitHub 令牌
+  assert.equal(
+    redactSensitiveContent("token ghp_0123456789abcdefghijklmnopqrstuv"),
+    `token ${SENSITIVE_REDACTED_PLACEHOLDER}`
+  );
+  // Slack 令牌
+  assert.equal(
+    redactSensitiveContent("slack xoxb-fake-fixture-token-not-real-abc"),
+    `slack ${SENSITIVE_REDACTED_PLACEHOLDER}`
+  );
+  // Google API Key
+  assert.equal(
+    redactSensitiveContent("gcp AIza0123456789abcdefghijklmnopqrstuv0123456"),
+    `gcp ${SENSITIVE_REDACTED_PLACEHOLDER}`
+  );
+  // PEM 私钥块整体移除
+  assert.equal(
+    redactSensitiveContent("-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----"),
+    SENSITIVE_REDACTED_PLACEHOLDER
+  );
+  // Authorization 片段：关键字后的内容整体截断脱敏（搜索词中不该有认证头，宁可多删）
+  assert.equal(
+    redactSensitiveContent("use authorization: Bearer abc.def.ghi-jkl in requests"),
+    `use authorization: ${SENSITIVE_REDACTED_PLACEHOLDER}`
+  );
+  // 普通文本不受影响
+  assert.equal(redactSensitiveContent("node.js release schedule 2026"), "node.js release schedule 2026");
+});
+
 function createContext(
   projectRoot: string,
   options: {

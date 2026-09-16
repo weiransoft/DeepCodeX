@@ -42,7 +42,9 @@ for (const stage of ["diagnosis", "escape", "language", "translation", "search",
         completions: {
           create: (body: unknown, options: { signal?: AbortSignal }) => {
             chatCalls++;
-            if (["search", "image", "responses"].includes(stage) || (stage === "translation" && chatCalls === 1)) {
+            // 隐私加固（2026-09-17 审计）后 UnderstandImage 走 LLM 多模态通道：
+            // image 阶段取消点从外部 fetch 迁移到 chat.completions.create（pending 桩）
+            if (["search", "responses"].includes(stage) || (stage === "translation" && chatCalls === 1)) {
               return Promise.resolve({ choices: [{ message: { content: '{"dominant_language":"en"}' } }] });
             }
             return pending(body, options);

@@ -4,6 +4,7 @@
 import argparse
 import json
 import mimetypes
+import re
 import sys
 import tempfile
 import time
@@ -16,12 +17,27 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 BASE_URL = 'https://deepcode.vegamo.cn/api'
 SETTINGS_PATH = Path.home() / '.deepcode-plus/settings.json'
 UPLOAD_PREFIX = 'deepcode-plus/video-input/'
-PUBLIC_BASE_URL = 'http://files.vegamo.cn'
+# 隐私加固（2026-09-17 审计）：产物分发地址从 http 升级为 https，
+# 避免视频产物 URL 与内容在明文 HTTP 传输中被中间人截获/篡改
+PUBLIC_BASE_URL = 'https://files.vegamo.cn'
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024
 MAX_FRAME_SIZE = 10 * 1024 * 1024
 POLL_INTERVAL_SECONDS = 10
 MAX_POLL_MINUTES = 30
 RATIOS = ('auto', '21:9', '16:9', '4:3', '1:1', '3:4', '9:16')
+
+# 隐私加固（2026-09-17 审计建议 #2）：敏感文件上传拦截名单。
+# 媒体素材正常不应命中以下名称/后缀；一旦命中说明 LLM 误传了路径或用户误选了
+# 凭据文件，一律拒绝上传，避免密钥类文件被送至外部对象存储。
+SENSITIVE_FILENAMES = frozenset({
+    'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519',          # SSH 私钥
+    'credentials', 'credentials.json',                      # 通用凭据文件
+    '.netrc', '.npmrc', '.htpasswd', '.git-credentials',    # 各类明文凭据
+})
+SENSITIVE_SUFFIXES = ('.pem', '.key', '.p12', '.pfx', '.jks', '.keystore', '.kdbx')
+SENSITIVE_PREFIXES = ('.env',)
+# 名称中含 secret/credential 的文件同样拒绝（如 api_secrets.json）
+SENSITIVE_NAME_PATTERN = re.compile(r'secret|credential|passwo?rd', re.IGNORECASE)
 
 
 class VideoError(RuntimeError):
@@ -116,10 +132,26 @@ def build_payload(args):
     return payload
 
 
+def assert_upload_safe(path):
+    """隐私加固（2026-09-17 审计建议 #2）：拒绝疑似密钥/凭据文件上传。
+
+    按"敏感文件名全匹配 + 敏感后缀 + .env 前缀 + secret/credential 关键词"
+    四类规则拦截；命中即抛出 VideoError，阻止文件进入上传流程。
+    媒体素材（图片/视频/音频）正常不会命中这些规则，误报率极低。
+    """
+    name = path.name.lower()
+    if (name in SENSITIVE_FILENAMES
+            or name.endswith(SENSITIVE_SUFFIXES)
+            or name.startswith(SENSITIVE_PREFIXES)
+            or SENSITIVE_NAME_PATTERN.search(name)):
+        raise VideoError(f'疑似密钥/凭据文件，禁止上传：{path.name}')
+
+
 def validate_file(path, kind, frame=False):
     """Check local file size and extension; pixel requirements live in SKILL.md."""
     if not path.is_file():
         raise VideoError(f'素材文件不存在：{path}')
+    assert_upload_safe(path)
     limit = MAX_FRAME_SIZE if frame else MAX_UPLOAD_SIZE
     if not 0 < path.stat().st_size <= limit:
         raise VideoError(f'素材不能为空且不能超过 {limit // (1024 * 1024)} MiB：{path.name}')

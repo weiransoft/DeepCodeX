@@ -66,7 +66,7 @@ npm install -g @vegamo/deepcode-cli
 
 Yes. The `deepseek-flash` model can read local images directly, or you can paste images from the clipboard with `Ctrl+V`, so the model can see the image content directly.
 
-Non-multimodal models such as `deepseek-v4-pro` and `deepseek-v4-flash` continue to use the `UnderstandImage` image-understanding tool. Deep Code detects model capabilities automatically; you can also override the detection with the `multimodal` setting.
+Non-multimodal models such as `deepseek-v4-pro` and `deepseek-v4-flash` continue to use the `UnderstandImage` image-understanding tool. Images are sent with the multimodal request to your configured model service and are never uploaded to any external plugin server (privacy hardening, 2026-09-17). Deep Code detects model capabilities automatically; you can also override the detection with the `multimodal` setting.
 
 By default, images are sent inline as base64. With `filesApiEnabled`, Deep Code uploads images through the DeepSeek Files API and reuses the `file_id` in subsequent requests. See [docs/configuration_en.md](../../docs/configuration_en.md#deepseek-files-api).
 

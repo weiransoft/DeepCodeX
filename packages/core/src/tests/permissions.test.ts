@@ -342,7 +342,7 @@ test("computeToolCallPermissions allows read tool calls under skill scan paths",
   );
 });
 
-test("UnderstandImage requires network and exempts only configured image directories from read scope", () => {
+test("UnderstandImage requires no network scope after privacy hardening and exempts only configured image directories from read scope", () => {
   const projectRoot = createTempDir("deepcode-permissions-image-workspace-");
   const home = createTempDir("deepcode-permissions-image-home-", process.cwd());
   const sessionImages = path.join(home, ".deepcode", "projects", "project", "images", "session-1");
@@ -378,14 +378,19 @@ test("UnderstandImage requires network and exempts only configured image directo
     ],
   });
 
+  // 隐私加固（2026-09-17 审计）：UnderstandImage 改走用户自有 LLM 多模态通道，
+  // 不再访问外部插件 API → 仅保留文件读取 scope，豁免路径图片无任何权限要求。
+  // 豁免路径图片 scopes 为空 → evaluatePermissionScopes 直接放行，
+  // 既不出现在 askPermissions 中，也在 permissions 中标记为 allow。
   assert.deepEqual(
     plan.askPermissions.map((item) => ({ id: item.toolCallId, scopes: item.scopes })),
     [
-      { id: "call-current", scopes: ["network"] },
-      { id: "call-project", scopes: ["read-in-cwd", "network"] },
-      { id: "call-outside", scopes: ["read-out-cwd", "network"] },
+      { id: "call-project", scopes: ["read-in-cwd"] },
+      { id: "call-outside", scopes: ["read-out-cwd"] },
     ]
   );
+  const exemptCall = plan.permissions.find((item) => item.toolCallId === "call-current");
+  assert.equal(exemptCall?.permission, "allow");
 });
 
 test("ReadImage uses filesystem read permissions without network access", () => {
@@ -521,7 +526,7 @@ test("computeToolCallPermissions applies temporary and additional working direct
       { id: "call-write", scopes: ["write-in-tmp"] },
       { id: "call-edit", scopes: ["write-in-cwd"] },
       { id: "call-read-image", scopes: ["read-in-tmp"] },
-      { id: "call-understand-image", scopes: ["read-in-tmp", "network"] },
+      { id: "call-understand-image", scopes: ["read-in-tmp"] },
     ]
   );
 });
