@@ -61,12 +61,26 @@ export function parseTeamArgs(tokens: string[]): TeamCommandArgs {
       first === "autonomous" ||
       first === "full-lifecycle"
     ) {
+      // 合法子命令：正常消费第一个 token 并从剩余 tokens 继续解析
       subcommand = first;
       tokens = tokens.slice(1);
     } else {
-      // 未知子命令，仍保留原值让 executeTeamCommand 报错（exhaustiveness check）
-      subcommand = first as TeamSubcommand;
-      tokens = tokens.slice(1);
+      // 降级路径（2026-09-16 架构改进）：
+      // 第一个 token 不是合法子命令 → 用户大概率想直接给一个任务描述
+      // （例如 "/team 1）读取报告与关联业务数据；2）建立字段映射..."），
+      // 此时不应该让 executeTeamCommand 报"未知子命令"，而是自动降级为
+      // autonomous 子命令，把所有自由文本拼成 task 描述传入。
+      //
+      // 这样做的好处：
+      // 1. 用户说"执行这个建议"时，parseTeamArgs 不再拦截自由文本目标；
+      // 2. CLI 命令行入口（cli-args.ts）与 TUI slash 命令（App.tsx）统一走
+      //    同一套降级逻辑；
+      // 3. 与 SessionManager 层的 EAG 确定性通道互补——CLI 层只做命令入口识别，
+      //    真正的意图判定交给 SessionManager 的 matchDeterministicEagAutonomousCommand。
+      subcommand = "autonomous";
+      // 把所有 tokens（包括非法首 token）拼成 task 描述，避免丢失
+      raw.task = tokens.join(" ");
+      tokens = []; // 全部消费，不再参与后续 --key value 解析
     }
   }
   raw.subcommand = subcommand;
