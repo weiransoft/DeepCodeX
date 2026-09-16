@@ -39,7 +39,7 @@ Deep Code 使用 `settings.json` 设置文件进行持久化配置，支持两�
 | `fileQuotaCleanupBatch`    | number        | 配额不足时清理的最旧 Deep Code 文件数，默认 `100`             |
 | `maxRequestFilesBytes`     | number        | 单次请求图片原始字节总上限，默认 `134217728`（128 MiB）       |
 | `debugLogEnabled`          | boolean       | 是否启用调试日志输出（默认 `false`）                          |
-| `telemetryEnabled`         | boolean       | 是否启用匿名使用数据上报（默认 `true`）                       |
+| `telemetryEnabled`         | boolean       | 是否启用匿名使用数据上报（默认 `false`，需显式开启）          |
 | `notify`                   | string        | 任务完成通知脚本的完整路径（如 Slack 通知脚本）               |
 | `webSearchTool`            | string        | 自定义联网搜索脚本的完整路径                                  |
 | `mcpServers`               | object        | MCP 服务器配置（键为服务名，值为 McpServerConfig 对象）       |
@@ -222,12 +222,12 @@ MCP（Model Context Protocol）服务器配置。值是键值对，键为服务�
 
 #### `telemetryEnabled` — 匿名使用数据上报
 
-设为 `false` 可关闭匿名使用数据上报（默认 `true`）。上报仅包含匿名的机器标识，不包含对话内容、代码或 API 密钥。
+设为 `true` 可开启匿名使用数据上报（**默认 `false`，需显式开启**，opt-in 模式）。上报仅包含匿名机器标识（纯随机 UUID，不含主机名或设备指纹），不包含对话内容、代码或 API 密钥。
 
-也可以通过环境变量关闭：
+也可以通过环境变量开启：
 
 ```bash
-DEEPCODE_TELEMETRY_ENABLED=0 deepcode
+DEEPCODE_TELEMETRY_ENABLED=1 deepcode
 ```
 
 ## 环境变量优先级

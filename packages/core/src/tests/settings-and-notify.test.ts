@@ -420,9 +420,19 @@ test("resolveSettings reads TEMPERATURE, THINKING_ENABLED, REASONING_EFFORT, and
   assert.equal(resolved.baseURL, "https://default.example.com");
 });
 
-test("resolveSettings defaults telemetryEnabled to true", () => {
+// 隐私加固（2026-09-17 审计）：遥测改为 opt-in，默认 false，须显式开启
+test("resolveSettings defaults telemetryEnabled to false (opt-in 隐私加固)", () => {
   const resolved = resolveSettings(
     {},
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  assert.equal(resolved.telemetryEnabled, false);
+});
+
+test("resolveSettings reads TELEMETRY_ENABLED=1 from env to opt in telemetry", () => {
+  const resolved = resolveSettings(
+    { env: { TELEMETRY_ENABLED: "1" } },
     { model: "default-model", baseURL: "https://default.example.com" },
     TEST_PROCESS_ENV
   );

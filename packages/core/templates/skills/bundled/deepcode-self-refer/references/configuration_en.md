@@ -39,7 +39,7 @@ The following are all the top-level fields supported in `settings.json`, along w
 | `fileQuotaCleanupBatch`    | number        | Oldest Deep Code files removed during quota recovery, default `100`                                            |
 | `maxRequestFilesBytes`     | number        | Raw image byte limit per request, default `134217728` (128 MiB)                                                |
 | `debugLogEnabled`          | boolean       | Enable debug log output (default `false`)                                                                      |
-| `telemetryEnabled`         | boolean       | Enable anonymous usage reporting (default `true`)                                                              |
+| `telemetryEnabled`         | boolean       | Enable anonymous usage reporting (default `false`, opt-in)     |
 | `notify`                   | string        | Full path to a task-completion notification script (e.g., Slack notification script)                           |
 | `webSearchTool`            | string        | Full path to a custom web search script                                                                        |
 | `mcpServers`               | object        | MCP server configurations (keys are service names, values are McpServerConfig objects)                         |
@@ -220,12 +220,12 @@ Set to `true` to enable detailed debug logging (default `false`), useful for tro
 
 #### `telemetryEnabled` — Anonymous Usage Reporting
 
-Set to `false` to disable anonymous usage reporting (default `true`). The report only includes an anonymous machine identifier and does not contain conversation content, code, or API keys.
+Set to `true` to enable anonymous usage reporting (**default `false`, opt-in required**). The report only includes an anonymous machine identifier (a pure random UUID containing no hostname or device fingerprint) and does not contain conversation content, code, or API keys.
 
-You can also disable it via environment variable:
+You can also enable it via environment variable:
 
 ```bash
-DEEPCODE_TELEMETRY_ENABLED=0 deepcode
+DEEPCODE_TELEMETRY_ENABLED=1 deepcode
 ```
 
 ## Environment Variable Priority

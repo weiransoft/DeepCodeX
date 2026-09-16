@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -152,16 +153,30 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
   };
 }
 
-function getMachineId(): string | undefined {
+/**
+ * 读取（或首次生成）本机匿名标识 machineId。
+ *
+ * 隐私加固（2026-09-17 审计）：
+ * 1. 标识改为纯随机 UUID（crypto.randomUUID），不再包含 os.hostname()。
+ *    旧实现 `${hostname}-${random}-${timestamp}` 会把主机名（可能含用户姓名/
+ *    公司命名规范等 PII）持久化并随遥测/插件请求头发送给远端服务器。
+ * 2. 兼容迁移：若检测到旧版文件内容中包含当前主机名（旧版生成的标识），
+ *    自动重新生成纯随机 UUID 覆盖，消除历史 PII 残留。
+ *
+ * @returns 持久化的匿名 machineId；文件系统不可用时返回 undefined（调用方须容忍缺失）
+ */
+export function getMachineId(): string | undefined {
   try {
     const idPath = path.join(os.homedir(), ".deepcode", "machine-id");
     if (fs.existsSync(idPath)) {
       const raw = fs.readFileSync(idPath, "utf8").trim();
-      if (raw) {
+      // 空内容或包含主机名的旧版标识均视为无效，重新生成（旧内容含 PII）
+      if (raw && !raw.includes(os.hostname())) {
         return raw;
       }
     }
-    const generated = `${os.hostname()}-${Math.random().toString(36).slice(2)}-${Date.now()}`;
+    // 生成纯随机 UUID：不含主机名、时间戳等任何可识别用户/机器的信息
+    const generated = randomUUID();
     fs.mkdirSync(path.dirname(idPath), { recursive: true });
     fs.writeFileSync(idPath, generated, "utf8");
     return generated;

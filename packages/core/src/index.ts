@@ -133,7 +133,8 @@ export type {
 // Tool handlers
 export { handleBashTool, clearSessionWorkingDir } from "./tools/bash-handler";
 export { handleReadTool } from "./tools/read-handler";
-// 上游 v0.3.1 新增：ReadImage（多模态模型直读图片）与 UnderstandImage（LLM 降级理解图片）
+// 上游 v0.3.1 新增：ReadImage（多模态模型直读图片）与 UnderstandImage（图片经多模态消息交给当前模型分析；
+// 隐私加固 2026-09-17：不再上传外部插件服务器）
 export { handleReadImageTool } from "./tools/read-image-handler";
 export { handleUnderstandImageTool } from "./tools/understand-image-handler";
 export { handleWriteTool } from "./tools/write-handler";

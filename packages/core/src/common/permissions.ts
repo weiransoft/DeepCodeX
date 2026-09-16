@@ -299,12 +299,13 @@ export function describeToolPermissionRequest(options: {
     };
   }
 
-  // 上游 v0.3.1 新增：UnderstandImage 图片理解工具权限分支（读文件 + 网络两种 scope）
+  // 隐私加固（2026-09-17 审计）：UnderstandImage 已改走用户自有 LLM 多模态通道，
+  // 不再访问外部插件 API，因此仅需文件读取 scope，不再申请 network scope
   if (name === "UnderstandImage") {
     const imagePath = typeof args.image_path === "string" ? args.image_path : "";
-    const scopes: AskPermissionScope[] = ["network"];
+    const scopes: AskPermissionScope[] = [];
     if (imagePath && !isPathInAnyDirectory(options.projectRoot, imagePath, options.readPermissionExemptPaths)) {
-      scopes.unshift(classifyFilePermissionScope(options.projectRoot, imagePath, "read", options.addWorkingDirs));
+      scopes.push(classifyFilePermissionScope(options.projectRoot, imagePath, "read", options.addWorkingDirs));
     }
     return {
       toolCallId: options.toolCall.id,

@@ -41,7 +41,7 @@ The following are all the top-level fields supported in `settings.json`, along w
 | `fileQuotaCleanupBatch` | number | Oldest Deep Code files removed during quota recovery, default `100`    |
 | `maxRequestFilesBytes` | number | Raw image byte limit per request, default `134217728` (128 MiB)          |
 | `debugLogEnabled`  | boolean | Enable debug log output (default `false`)                                   |
-| `telemetryEnabled` | boolean | Enable anonymous usage reporting (default `true`)                           |
+| `telemetryEnabled` | boolean | Enable anonymous usage reporting (default `false`, opt-in)      |
 | `notify`           | string  | Full path to a task-completion notification script (e.g., Slack notification script) |
 | `webSearchTool`    | string  | Full path to a custom web search script                                     |
 | `mcpServers`       | object  | MCP server configurations (keys are service names, values are McpServerConfig objects) |
@@ -329,13 +329,33 @@ Set to `true` to enable detailed debug logging (default `false`), useful for tro
 
 #### `telemetryEnabled` — Anonymous Usage Reporting
 
-Set to `false` to disable anonymous usage reporting (default `true`). The report only includes an anonymous machine identifier and does not contain conversation content, code, or API keys.
+Set to `true` to enable anonymous usage reporting (**default `false`, opt-in required**). The report only includes an anonymous machine identifier (a pure random UUID containing no hostname or device fingerprint) and does not contain conversation content, code, or API keys.
 
-You can also disable it via environment variable:
+You can also enable it via environment variable:
 
 ```bash
-DEEPCODE_TELEMETRY_ENABLED=0 deepcode
+DEEPCODE_TELEMETRY_ENABLED=1 deepcode
 ```
+
+## Outbound Network Endpoint Disclosure
+
+For enterprise and individual network auditing, the following lists every outbound network request Deep Code may issue (state after the 2026-09-17 privacy hardening):
+
+| Purpose | Target endpoint | Data content | Control / how to disable |
+|---|---|---|---|
+| Model chat & tool calls | User-configured LLM `baseURL` | Conversation content, code context, images (multimodal requests) | Change model / `baseURL` settings |
+| Image understanding (UnderstandImage) | User-configured LLM `baseURL` (**no external plugin servers**) | Image as a base64 data URI in the model request | Same as chat; no separate outbound |
+| Web search (WebSearch, default path) | `https://deepcode.vegamo.cn/api/plugin/web-search` | Search query (redacted for keys/JWT/private keys) + anonymous identifier | Configure a custom `webSearchTool` script |
+| Telemetry (opt-in) | `https://deepcode.vegamo.cn/api/plugin/new` | Empty body + anonymous identifier (random UUID) | Off by default; enable via `telemetryEnabled: true` |
+| Version update check | npm registry (official or Tencent mirror) | Package name and current version only | Automatic; no user data |
+| Video generation skill | `https://deepcode.vegamo.cn/api` and `https://files.vegamo.cn` | User-specified image/video/audio materials (requires user credit confirmation and rejects key-like files) | Not triggered unless the skill is invoked |
+| MCP servers | Addresses configured in `mcpServers` | Tool call parameters | Remove the configuration |
+| Notification script | Command configured in `notify` | Session summary and other arguments | Remove the configuration |
+
+Notes:
+
+- Deep Code makes no other hidden outbound requests; `UnderstandImage` no longer uploads images to any external plugin server.
+- Outbound query redaction covers OpenAI-style keys (`sk-`), AWS AccessKeys (`AKIA`), GitHub/Slack/Google tokens, JWTs, `Authorization`/`Bearer` fragments, PEM private key blocks, and hex strings of 32+ characters; matches are replaced with `[REDACTED]`.
 
 ## Environment Variable Priority
 

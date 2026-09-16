@@ -4814,6 +4814,9 @@ function createSessionManager(projectRoot: string, machineId: string): SessionMa
       baseURL: "https://api.deepseek.com",
       thinkingEnabled: false,
       machineId,
+      // 隐私加固（2026-09-17 审计）后遥测默认关闭（opt-in）；
+      // 上报链路测试需显式开启，模拟用户已同意遥测的场景
+      telemetryEnabled: true,
     }),
     getResolvedSettings: () => ({ model: "test-model" }),
     renderMarkdown: (text) => text,

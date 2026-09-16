@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import { randomUUID } from "crypto";
 import OpenAI from "openai";
 import MarkdownIt from "markdown-it";
 import type { SessionMessage } from "@vegamo/deepcode-core";
@@ -409,7 +410,11 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
 
     const { model, thinkingEnabled, reasoningEffort, debugLogEnabled, notify, webSearchTool, env } = settings;
     const { apiKey, baseURL } = connection;
-    const machineId = vscode.env.machineId;
+    // 隐私加固（2026-09-17 审计）：不再使用 vscode.env.machineId 作为遥测标识。
+    // vscode.env.machineId 是 VS Code 生成的稳定设备唯一标识符，可跨会话持续追踪用户，
+    // 属于设备指纹信息。改为使用扩展全局状态中持久化的纯随机 UUID（首次使用时生成），
+    // 该标识不含任何设备/用户特征，且可随扩展数据清除。
+    const machineId = this.getAnonymousMachineId();
 
     if (!apiKey) {
       return {
@@ -447,6 +452,32 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
       machineId,
       plusApiKey,
     };
+  }
+
+  /**
+   * 获取（或首次生成）扩展级匿名标识 machineId。
+   *
+   * 隐私加固（2026-09-17 审计）：替代 vscode.env.machineId（稳定设备指纹）。
+   * 实现方式：在扩展 globalState 中持久化一个纯随机 UUID（crypto.randomUUID），
+   * - 标识本身不含主机名、MAC、VS Code 设备 ID 等任何可识别信息；
+   * - 首次生成后跨窗口复用，保证同一扩展安装内的会话连贯性；
+   * - 用户清除扩展数据即同步清除该标识。
+   *
+   * @returns 持久化的随机 UUID；globalState 不可用时返回 undefined（调用方须容忍缺失）
+   */
+  private getAnonymousMachineId(): string | undefined {
+    try {
+      const key = "deepcode.anonymousMachineId";
+      const existing = this.context.globalState.get<string>(key);
+      if (typeof existing === "string" && existing.trim()) {
+        return existing.trim();
+      }
+      const generated = randomUUID();
+      void this.context.globalState.update(key, generated);
+      return generated;
+    } catch {
+      return undefined;
+    }
   }
 
   private buildTokenTelemetry(session: SessionEntry | null): {

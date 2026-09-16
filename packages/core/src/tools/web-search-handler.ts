@@ -350,6 +350,52 @@ function stripCodeFence(text: string): string {
   return fenceMatch ? fenceMatch[1] : trimmed;
 }
 
+/** 出站查询中命中的敏感内容统一替换为该占位符 */
+export const SENSITIVE_REDACTED_PLACEHOLDER = "[REDACTED]";
+
+/**
+ * 出站搜索 query 脱敏（隐私加固 2026-09-17 审计建议 #4）。
+ *
+ * 搜索词由 LLM 从用户上下文生成，可能意外携带用户粘贴的密钥、令牌等敏感片段。
+ * 在向默认搜索 API 发送前，按常见凭据格式做模式化脱敏：
+ * 覆盖 OpenAI 风格密钥、AWS AccessKey、GitHub/Slack/Google 令牌、JWT、
+ * Authorization 头片段、PEM 私钥标记与长十六进制串（疑似哈希/密钥）。
+ *
+ * @param query 原始搜索词
+ * @returns 脱敏后的搜索词；未命中任何模式时原样返回
+ */
+export function redactSensitiveContent(query: string): string {
+  let redacted = query;
+  // PEM 私钥块：连同头尾标记整体移除（搜索词中不该出现私钥）
+  redacted = redacted.replace(
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+    SENSITIVE_REDACTED_PLACEHOLDER
+  );
+  // PEM 私钥头标记（块被截断时兜底）
+  redacted = redacted.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----/g, SENSITIVE_REDACTED_PLACEHOLDER);
+  // OpenAI 风格密钥：sk- 前缀 + 8 位以上凭据字符
+  redacted = redacted.replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, SENSITIVE_REDACTED_PLACEHOLDER);
+  // AWS AccessKey ID
+  redacted = redacted.replace(/\bAKIA[0-9A-Z]{16}\b/g, SENSITIVE_REDACTED_PLACEHOLDER);
+  // GitHub 令牌：ghp_/gho_/ghs_/ghu_/ghr_ 前缀
+  redacted = redacted.replace(/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, SENSITIVE_REDACTED_PLACEHOLDER);
+  // Slack 令牌：xoxa/xoxb/xoxp/xoxs/xoxo/xoxr 前缀
+  redacted = redacted.replace(/\bxox[abposr]-[A-Za-z0-9-]{10,}\b/g, SENSITIVE_REDACTED_PLACEHOLDER);
+  // Google API Key：AIza 前缀 + 30 位以上凭据字符（真实 key 为 35 位，放宽下限并
+  // 依靠 \b 词边界收尾，避免精确位数导致带后缀文本无法命中）
+  redacted = redacted.replace(/\bAIza[0-9A-Za-z_-]{30,}\b/g, SENSITIVE_REDACTED_PLACEHOLDER);
+  // JWT（三段式 base64url）
+  redacted = redacted.replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, SENSITIVE_REDACTED_PLACEHOLDER);
+  // Authorization/Bearer 片段：认证头出现后，其后的内容整体视为敏感（搜索词中不该有认证头）
+  redacted = redacted.replace(
+    /\b(bearer|authorization)\b\s*[:=]\s*\S[\s\S]*/gi,
+    (_match, keyword: string) => `${keyword}: ${SENSITIVE_REDACTED_PLACEHOLDER}`
+  );
+  // 长十六进制串（≥32 位，疑似哈希、密钥摘要或盐值）
+  redacted = redacted.replace(/\b[0-9a-f]{32,}\b/gi, SENSITIVE_REDACTED_PLACEHOLDER);
+  return redacted;
+}
+
 async function runDefaultWebSearchRequest(
   query: string,
   machineId: string | undefined,
@@ -357,7 +403,8 @@ async function runDefaultWebSearchRequest(
   context: ToolExecutionContext
 ): Promise<string> {
   if (!machineId) {
-    throw new Error("Missing vscode.env.machineId for the default WebSearch request.");
+    // 隐私加固（2026-09-17 审计）：标识已改为扩展级随机 UUID，不再使用 vscode.env.machineId
+    throw new Error("Missing anonymous machine id for the default WebSearch request.");
   }
 
   const activityId = `web-search-${randomUUID()}`;
@@ -372,7 +419,7 @@ async function runDefaultWebSearchRequest(
         // 上游 v0.3.1 新增：plusApiKey 透传（PLUS-API-KEY 请求头）
         ...(plusApiKey ? { "PLUS-API-KEY": plusApiKey } : {}),
       },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({ query: redactSensitiveContent(query) }),
     });
 
     if (!response.ok) {

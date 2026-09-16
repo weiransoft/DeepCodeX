@@ -874,7 +874,8 @@ export function getTools(options: PromptToolOptions = {}, externalTools: ToolDef
       type: "function",
       function: {
         name: "UnderstandImage",
-        description: "Analyze or extract information from a local JPEG, PNG, or WebP image.",
+        description:
+          "Analyze or extract information from a local JPEG, PNG, or WebP image. The image is sent to the currently configured model's multimodal API; it is never uploaded to any third-party plugin server.",
         parameters: {
           type: "object",
           properties: {
