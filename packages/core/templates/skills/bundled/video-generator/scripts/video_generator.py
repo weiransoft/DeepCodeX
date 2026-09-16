@@ -234,12 +234,12 @@ def poll_task(task_id, api_key):
             time.sleep(min(delay, max(0, deadline - time.monotonic())))
         raise VideoError('已达到本地轮询等待上限。')
     finally:
-        print(f'taskId={task_id}；本地停止不会取消远端任务，可用 status --task-id 查询。',
+        print(f'taskId={task_id}；本地停止不会取消远端任务，可用 status --task-id 配合 --output 查询并保存。',
               file=sys.stderr, flush=True)
 
 
 def save_output(result, output):
-    if output is None or result.get('taskStatus') != 'COMPLETED':
+    if result.get('taskStatus') != 'COMPLETED':
         return result
     try:
         import requests
@@ -321,15 +321,16 @@ def parser():
     commands = root.add_subparsers(dest='command', required=True)
     descriptions = {
         'cost': 'Validate inputs and estimate credits and minimum wait time; no API key, uploads, or task submission.',
-        'generate': 'Recheck confirmed credits, upload local inputs, submit and poll until completion; optionally save an MP4.',
-        'status': 'Query an existing task, optionally wait for completion or download the video without resubmitting.',
+        'generate': 'Recheck confirmed credits, upload local inputs, submit and poll until completion, then save an MP4.',
+        'status': 'Query an existing task, optionally wait, and save the video if completed without resubmitting.',
     }
     for command, description in descriptions.items():
         sub = commands.add_parser(command, help=description, description=description)
         sub.add_argument('--settings', type=Path, default=SETTINGS_PATH,
                          help='Settings file containing env.PLUS_API_KEY (default: %(default)s)')
         if command != 'cost':
-            sub.add_argument('--output', type=Path, help='Optional destination MP4 path for the completed video')
+            sub.add_argument('--output', type=Path, required=True,
+                             help='Destination MP4 path for the completed video')
         if command == 'status':
             sub.add_argument('--task-id', required=True, help='Task ID returned when the task was created')
             sub.add_argument('--wait', action='store_true',
@@ -341,10 +342,11 @@ def parser():
                               '▯ portrait 3:4/9:16, auto for automatic selection')
         sub.add_argument('--resolution', choices=('720p', '1080p'), required=True,
                          help='Video resolution selected by the user')
-        sub.add_argument('--duration', type=int, choices=range(5, 21), default=5,
-                         help='Duration in whole seconds, 5–20 (default: %(default)s)')
+        sub.add_argument('--duration', type=int, choices=range(5, 21), required=True,
+                         help='Duration in whole seconds, 5–20')
         sub.add_argument('--tier', choices=('turbo', 'base'), required=True,
-                         help='Generation mode: turbo for speed, base for quality')
+                         help='Generation mode: turbo (10 inference steps, shorter rendering time) '
+                              'or base (20 inference steps, improved quality)')
         sub.add_argument('--first-frame', help='First-frame local path or HTTP(S) URL; cannot be combined with reference inputs')
         sub.add_argument('--last-frame', help='Last-frame local path or HTTP(S) URL; requires --first-frame')
         sub.add_argument('--image', action='append', default=[],
