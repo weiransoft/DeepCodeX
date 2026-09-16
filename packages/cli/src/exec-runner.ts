@@ -4,6 +4,7 @@ import {
   resolveCurrentSettings,
   type AskPermissionRequest,
   type AskPermissionScope,
+  type PermissionMode,
   type PermissionSettings,
   type SessionManagerOptions,
 } from "@vegamo/deepcode-core";
@@ -32,6 +33,9 @@ export interface ExecRunnerOptions {
   projectRoot: string;
   resumeSessionId?: string;
   forkSessionId?: string;
+  // 三态权限模式覆盖（2026-09-17 设计文档 docs/dev/permission-modes.md）：
+  // CLI --permission-mode 透传；未传时 undefined，权限模式由 settings.json 决定
+  permissionMode?: PermissionMode;
   input?: ExecInputStream;
 }
 
@@ -70,12 +74,21 @@ export async function runExecMode(
   deps.signalTarget.on("SIGINT", handleSigint);
   try {
     const settings = deps.resolveSettings(options.projectRoot);
+    // 三态权限模式：bypass（完全访问）时向 stderr 输出醒目提示（走 stderr 避免污染 stdout 的
+    // assistantReply 输出；对齐设计文档 docs/dev/permission-modes.md §4「bypass 醒目提示」）
+    if (options.permissionMode === "bypass") {
+      deps.writeStderrLine(
+        "⚠ Permission mode: bypass (full access). All tool calls run without approval; catastrophic commands are still blocked."
+      );
+    }
     manager = deps.createSessionManager({
       projectRoot: options.projectRoot,
       createOpenAIClient: () => createOpenAIClient(options.projectRoot),
       getResolvedSettings: () => deps.resolveSettings(options.projectRoot),
       renderMarkdown: (text) => text,
       nonInteractive: true,
+      // 三态权限模式覆盖：exec 模式同样支持 --permission-mode（优先级高于 settings.json）
+      permissionModeOverride: options.permissionMode,
       onAssistantMessage: () => {},
     });
 

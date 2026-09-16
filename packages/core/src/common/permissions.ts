@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import type { DeepcodingSettings, PermissionScope, PermissionSettings } from "../settings";
+import type { DeepcodingSettings, PermissionMode, PermissionScope, PermissionSettings } from "../settings";
 // 上游 v0.3.1 新增：followUpMessages 复用统一类型（role 已扩展为 "system" | "user"）
 import type { ToolExecutionFollowUpMessage } from "./tool-types";
 import { isAbsoluteFilePath, normalizeFilePath } from "./state";
@@ -156,6 +156,20 @@ export function buildSyntheticToolExecution(toolCall: PermissionToolCall, error:
 export function computeToolCallPermissions(options: ComputeToolCallPermissionsOptions): PermissionPlan {
   const permissions: MessageToolPermission[] = [];
   const askPermissions: AskPermissionRequest[] = [];
+
+  // bypass（完全访问）快速通道（PM-U16）：
+  // 所有工具调用一律 allow，不产生 askPermissions（审批面板不触发），
+  // planMode 的 forceAskScopes 强制询问同样放行（设计文档 §3.2：bypass = 用户明确放弃审批）。
+  if (options.settings?.mode === "bypass") {
+    for (const rawToolCall of options.toolCalls) {
+      const toolCall = parseToolCallForPermissions(rawToolCall);
+      if (!toolCall) {
+        continue;
+      }
+      permissions.push({ toolCallId: toolCall.id, permission: "allow" });
+    }
+    return { permissions, askPermissions };
+  }
 
   for (const rawToolCall of options.toolCalls) {
     const toolCall = parseToolCallForPermissions(rawToolCall);
@@ -320,6 +334,7 @@ export function describeToolPermissionRequest(options: {
 export function evaluatePermissionScopes(
   scopes: AskPermissionScope[],
   settings: PermissionPolicySettings = {
+    mode: "auto",
     allow: [],
     deny: [],
     ask: [],
@@ -327,8 +342,18 @@ export function evaluatePermissionScopes(
     addWorkingDirs: [],
   }
 ): PermissionDecision {
+  // 三态权限模式顶层分流（2026-09-17 设计文档 docs/dev/permission-modes.md §3.2）：
+  // - "bypass"（完全访问）：所有 scope 一律放行（含 deny/unknown），
+  //   安全底线由 executor/bash-handler 的灾难命令硬拦截独立保障（不依赖本函数）；
+  // - "manual"（手动审批）：未显式 allow 的 scope 一律 ask，deny 黑名单仍生效；
+  // - "auto"（默认）：既有 defaultMode 评估逻辑原样执行（向后兼容，行为与三态机制引入前一致）。
+  if (settings.mode === "bypass") {
+    return "allow";
+  }
+
   // P0 安全修复：只要 scopes 中包含 "unknown"（例如非法 sideEffects 被降级为 unknown），
   // 即使在 allowAll 默认策略下也返回 ask，防止 LLM 通过构造非法 sideEffects 绕过权限检查。
+  // 注：bypass 模式已在上方提前放行（完全访问语义），unknown 检查仅约束 manual/auto。
   if (scopes.includes("unknown")) {
     return "ask";
   }
@@ -338,6 +363,10 @@ export function evaluatePermissionScopes(
   const permissionScopes = scopes.filter((scope): scope is PermissionScope => scope !== "unknown");
   if (permissionScopes.some((scope) => settings.deny.includes(scope))) {
     return "deny";
+  }
+  // manual（手动审批）：deny 未命中且未进 allow 白名单的 scope 一律询问（对齐 Trae「始终手动运行」）
+  if (settings.mode === "manual") {
+    return permissionScopes.every((scope) => settings.allow.includes(scope)) ? "allow" : "ask";
   }
   if (permissionScopes.some((scope) => settings.ask.includes(scope))) {
     return "ask";
@@ -351,6 +380,7 @@ export function evaluatePermissionScopes(
 export function getPermissionScopesRequiringAsk(
   scopes: AskPermissionScope[],
   settings: PermissionPolicySettings = {
+    mode: "auto",
     allow: [],
     deny: [],
     ask: [],
@@ -358,6 +388,10 @@ export function getPermissionScopesRequiringAsk(
     addWorkingDirs: [],
   }
 ): AskPermissionScope[] {
+  // bypass（完全访问）：无任何 scope 需要询问（PM-U15）
+  if (settings.mode === "bypass") {
+    return [];
+  }
   const result: AskPermissionScope[] = [];
   for (const scope of scopes) {
     // P0 安全修复：unknown scope 无条件需要用户确认，与 evaluatePermissionScopes 保持一致。
@@ -366,6 +400,13 @@ export function getPermissionScopesRequiringAsk(
       continue;
     }
     if (settings.deny.includes(scope)) {
+      continue;
+    }
+    // manual（手动审批）：未进 allow 白名单的 scope 全量入列（与 evaluatePermissionScopes 对齐）
+    if (settings.mode === "manual") {
+      if (!settings.allow.includes(scope)) {
+        result.push(scope);
+      }
       continue;
     }
     if (settings.ask.includes(scope)) {
@@ -545,6 +586,8 @@ export function appendProjectPermissionAllows(
     ? { ...existingPermissions }
     : options.inheritedPermissions
       ? {
+          // 三态权限模式：回写 settings.json 时保留继承的模式（避免 always allow 回写丢失 mode 字段）
+          mode: options.inheritedPermissions.mode,
           allow: [...options.inheritedPermissions.allow],
           deny: [...options.inheritedPermissions.deny],
           ask: [...options.inheritedPermissions.ask],

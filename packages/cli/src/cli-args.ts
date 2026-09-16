@@ -9,6 +9,8 @@ import { getCliVersion } from "./utils/version";
 import { writeStderrLine } from "./utils/stdio-helpers";
 import { hideBin } from "yargs/helpers";
 import { ROLE_REGISTRY } from "@vegamo/deepcode-core";
+// 三态权限模式类型（2026-09-17 设计文档 docs/dev/permission-modes.md）
+import type { PermissionMode } from "@vegamo/deepcode-core";
 // FIX-06（多角色审查 2026-07-29）：EPILOG 命令清单从 BUILTIN_SLASH_COMMANDS 单一数据源生成，
 // 消除与 slash-commands.ts 注册表的双份维护漂移（审查发现 EPILOG 缺 11+ 已注册命令）
 import { formatBuiltinCommandList } from "./ui/core/slash-commands";
@@ -80,6 +82,12 @@ export interface ParsedCliArgs {
   review: string | undefined;
   /** Review 子命令选项（key-value 对） */
   reviewOptions: Record<string, string | boolean | number | string[] | undefined>;
+  /**
+   * 三态权限模式覆盖（2026-09-17 设计文档 docs/dev/permission-modes.md §3.3）
+   * - `undefined` — 未传 --permission-mode，权限模式由 settings.json 的 permissions.mode 决定
+   * - `string`    — CLI 显式指定的模式（manual / auto / bypass），优先级最高
+   */
+  permissionMode: PermissionMode | undefined;
 }
 
 const QUALITY_CHECK_SUBCOMMANDS = ["codemap", "uiux", "visual", "all", "help"] as const;
@@ -90,6 +98,17 @@ const QUALITY_CHECK_SUBCOMMANDS = ["codemap", "uiux", "visual", "all", "help"] a
  * 与 packages/cli/src/review/review-cmd.ts 中 ReviewSubcommand 类型对齐。
  */
 const REVIEW_SUBCOMMANDS = ["typecheck", "lint", "format", "full", "help"] as const;
+
+/**
+ * --permission-mode 合法值（三态权限模式，对齐 Trae 命令审批机制）
+ *
+ * 与 core 包 PermissionMode 类型保持一致：
+ * - manual：手动审批（对齐 TRAE「始终手动运行」）
+ * - auto：自动审批 + 白名单（默认，对齐 TRAE「沙箱运行（支持白名单）」）
+ * - bypass：完全访问（对齐 TRAE「始终自动运行」/ bypass_permissions）
+ * 供 yargs choices 校验与单元测试复用（单一数据源）。
+ */
+export const PERMISSION_MODE_CHOICES = ["manual", "auto", "bypass"] as const;
 
 /**
  * CLI --help 底部附加说明（EPILOG）
@@ -161,6 +180,15 @@ async function configureYargs(argv?: string[]) {
           type: "boolean",
           default: false,
           describe: "Resume the most recent session for the current project directory.",
+        })
+        // 三态权限模式覆盖（2026-09-17 设计文档 docs/dev/permission-modes.md）：
+        // 优先级 CLI flag > 项目 settings.json > 用户 settings.json > 默认 auto。
+        // 非法值经 yargs choices 校验直接报错退出（与 .strict() 风格一致）。
+        .option("permission-mode", {
+          type: "string",
+          choices: [...PERMISSION_MODE_CHOICES],
+          describe:
+            "Override permission mode for this run: manual (ask before every non-allowlisted op) / auto (default, allowlist + risk-based) / bypass (full access, dangerous commands still blocked)",
         })
         .check((argv: { [x: string]: unknown }) => {
           const query = argv["query"] as string | string[] | undefined;
@@ -665,6 +693,8 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     version: parsed.version === true,
     help: parsed.help === true,
     last: parsed.last === true,
+    // 三态权限模式覆盖（yargs choices 已保证值合法性；未传时为 undefined 走 settings）
+    permissionMode: parsed["permission-mode"] as PermissionMode | undefined,
     // fork 扩展字段：team / rules / quality-check / review 子命令
     team: teamRaw,
     teamOptions,

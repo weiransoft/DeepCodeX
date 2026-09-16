@@ -6,7 +6,7 @@ import * as nodeFs from "node:fs";
 import * as nodeOs from "node:os";
 import * as nodePath from "node:path";
 import { createOpenAIClient, getDeepCodeXLogDir } from "@vegamo/deepcode-core";
-import type { PermissionScope } from "@vegamo/deepcode-core";
+import type { PermissionMode, PermissionScope } from "@vegamo/deepcode-core";
 import { type ModelConfigSelection } from "@vegamo/deepcode-core";
 import { type PromptDraft, PromptInput, type PromptSubmission } from "./PromptInput";
 import { MessageView, RawModeExitPrompt } from "../components";
@@ -185,6 +185,10 @@ type AppProps = {
   resumeSessionId?: string | true;
   // 上游 v0.3.1 新增：/fork 会话分叉的源会话 ID
   forkSessionId?: string;
+  // 三态权限模式覆盖（2026-09-17 设计文档 docs/dev/permission-modes.md）：
+  // CLI --permission-mode 经 cli.tsx → AppContainer 透传，注入 SessionManager，
+  // 未传时为 undefined（权限模式由 settings.json 决定，零回归）
+  permissionMode?: PermissionMode;
   onRestart?: () => void;
 };
 
@@ -192,7 +196,14 @@ type AppProps = {
 // 本地声明的简化版（无 width）已删除，避免与 "../components/status-line" 导入冲突
 
 // 上游 v0.3.1：函数签名新增 forkSessionId（会话分叉）
-function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRestart }: AppProps): React.ReactElement {
+function App({
+  projectRoot,
+  initialPrompt,
+  resumeSessionId,
+  forkSessionId,
+  permissionMode,
+  onRestart,
+}: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout, write } = useStdout();
   const { columns, rows } = useWindowSize();
@@ -237,8 +248,9 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
   const statusLineOptions = useMemo(() => {
     const model = resolvedSettings.model || "";
     const maxContextTokens = getCompactPromptTokenThreshold(model, resolvedSettings.contextWindow);
-    return { model, maxContextTokens };
-  }, [resolvedSettings]);
+    return { model, maxContextTokens, permissionMode };
+    // permissionMode 变化时同步刷新状态栏的 perm 段（三态权限模式展示）
+  }, [resolvedSettings, permissionMode]);
   const [nowTick, setNowTick] = useState(0);
   const [mcpStatuses, setMcpStatuses] = useState<ReturnType<typeof sessionManager.getMcpStatus>>([]);
   const [showProcessStdout, setShowProcessStdout] = useState(false);
@@ -334,6 +346,8 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
             getResolvedSettings: () => resolveCurrentSettings(projectRoot),
             renderMarkdown: (text) => text,
             isForeground: false,
+            // 三态权限模式覆盖：后台任务与前台保持同一模式（CLI flag > settings）
+            permissionModeOverride: permissionMode,
             interruptQueue: bgInterruptQueue,
             taskRegistry,
             contextHook: bgContextHook,
@@ -375,6 +389,8 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
       createOpenAIClient: () => createOpenAIClient(projectRoot),
       getResolvedSettings: () => resolveCurrentSettings(projectRoot),
       renderMarkdown: (text) => text,
+      // 三态权限模式覆盖（CLI --permission-mode > settings.json permissions.mode）
+      permissionModeOverride: permissionMode,
       // fork：EAG 动态建议层、外部命令描述符、V2 上下文钩子、EAG 编排器与
       // ADR-DI-001 动态注入/后台子 Agent 组件注入（fork 特有，保留）
       eagDynamicSuggester,
@@ -447,7 +463,8 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
         buf.set(pid, current + text.slice(0, available));
       },
     });
-  }, [projectRoot]);
+    // permissionMode 变化会改变权限评估行为，需重建 SessionManager（与 projectRoot 同级依赖）
+  }, [projectRoot, permissionMode]);
 
   /**
    * Navigate to a sub-view.

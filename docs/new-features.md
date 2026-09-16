@@ -801,3 +801,34 @@ LLM 通过 AskUserQuestion 工具向用户提问后，用户回答仅作为消�
 
 1. **非 `/eag-` 命令的指代确认执行**：`tryAnaphoraConfirmExecution` 经 `dispatchEagCommandString` 分发，该分发器只识别 `/eag-` 命令。`/team autonomous` 建议可降级展示 + 追加提示 + 存快照，但用户回复"执行这个"时执行不通（快照仍按一次性消费语义清除，不会重复触发）。需扩展 team handler 接入分发后打通。
 2. **CLI 命令行入口**：`cli-args.ts` 的 yargs 子命令校验仍会拦截 `deepcode team <自由文本>`；本轮降级修在 `parseTeamArgs`（生效于 TUI slash 路径），yargs 路径待补。
+
+---
+
+### R. 三态权限模式：对齐 Trae 命令审批机制（manual / auto / bypass）
+
+> 代码实现：`packages/core/src/settings.ts`（PermissionMode 类型 + 归一/合并）、`packages/core/src/common/permissions.ts`（三态评估分流）、`packages/core/src/session.ts`（`permissionModeOverride` 注入 + effectivePermissionSettings 组装）、`packages/cli/src/cli-args.ts`（`--permission-mode`）、`packages/cli/src/exec-runner.ts`、`packages/cli/src/ui/views/App.tsx`、`packages/cli/src/ui/views/AppContainer.tsx`、`packages/cli/src/ui/utils/index.ts`（statusline 提示）
+> 设计文档：`docs/dev/permission-modes.md`（含调研结论、语义表、测试用例清单 PM-U01~U17 / PM-I01~I08）
+> 日期：2026-09-17
+
+**背景**：DeepCodeX 的 scope 级权限引擎只有 `defaultMode`（allowAll/askAll）两态，缺 Trae「完全访问」语义，且用户无法一键切换审批策略——只能手工编辑 allow/deny/ask 数组，也没有 CLI 启动覆盖入口。本次对照 TRAE IDE 三种自动运行模式（沙箱运行/始终手动运行/始终自动运行）与 TRAE CLI `permission_mode`（default/plan/bypass_permissions），在既有权限引擎之上补齐顶层三态开关。
+
+**语义**（顶层分流，deny 黑名单在 manual/auto 下保持不变）：
+
+| 模式 | 对齐 Trae | 行为 |
+|------|-----------|------|
+| `manual` | 始终手动运行 | 未显式 allow 的 scope 一律 ask（unknown 仍 ask、deny 仍 deny） |
+| `auto`（默认） | 沙箱运行（支持白名单） | 既有 defaultMode 评估逻辑原样生效（存量配置零回归） |
+| `bypass` | 始终自动运行 / bypass_permissions | 全部 scope 放行（含 deny/unknown）、审批面板不触发、planMode 强制询问也放行；**安全底线**：灾难命令硬拦截（`checkDangerousBashCommand` 双层防线）不依赖本配置，仍然生效 |
+
+**配置入口与优先级**：CLI `--permission-mode <manual|auto|bypass>` > 项目 `.deepcode/settings.json` 的 `permissions.mode` > 用户 settings > 默认 `auto`。非法值（含篡改 settings.json 的非字符串/未知值）一律 fail-safe 降级为 `auto`；bypass 启动时 exec 模式输出 stderr 醒目提示、TUI statusline 显示 `⚠ perm: bypass`。
+
+**实现要点**：
+
+1. `normalizePermissions` 归一 mode（非法值 → auto）；`mergePermissions` 按"显式配置才生效"合并（项目只配 `allow` 未配 `mode` 时不会用归一的 auto 覆盖用户显式的 manual/bypass——测试 PM-U05 发现的缺陷）；
+2. `evaluatePermissionScopes` / `getPermissionScopesRequiringAsk` / `computeToolCallPermissions` 三处评估函数按 §3.2 语义表前置分流；bypass 在 `computeToolCallPermissions` 走快速通道（不产生 askPermissions）；
+3. `appendProjectPermissionAllows` 回写 alwaysAllow 时保留继承的 mode，避免"始终允许"把 manual/bypass 悄悄改写回 auto；
+4. CLI flag 经 `SessionManagerOptions.permissionModeOverride` 注入（沿用 `eagCommandParser` 成熟注入先例），TUI 与 exec 两条装配链路均接通。
+
+**测试基线**：新增 4 个测试文件共 29 个用例（core 24：PM-U01~U17 + PM-I01~I07；cli 5：PM-I08 含子进程校验 yargs choices 拒绝非法值）全部跑绿；core 全量 5984 例（pass 5961，6 项失败为干净 HEAD 即存在的已知遗留：cancellation abort 竞态 ×2、DeepSeek 模型清单断言、`isRetryableLlmError`、skills 禁用枚举、多模态能力，与本次改动无关）；cli 全量与双包 `tsc --noEmit`、monorepo build 通过。
+
+**明确不做**（防过度设计，见设计文档 §3.5）：不接入 V2 ApprovalGate（双引擎并存现状保持）；不做命令前缀级白名单/沙箱执行；不改 `/permissions` TUI 运行时切换命令。
