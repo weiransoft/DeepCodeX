@@ -58,13 +58,51 @@ test("TPA-002: 5 个合法子命令位置参数逐一解析", () => {
 });
 
 // ============================================================================
-// TPA-003: 未知子命令保留原值（交给 executeTeamCommand 报错）
+// TPA-003: 未知子命令自动降级为 autonomous --task 自由文本（2026-09-16 架构改进）
+// 旧行为：未知子命令保留原值交给 executeTeamCommand 的 default 分支报错
+// 新行为：自动降级为 autonomous，把所有自由文本拼成 task 描述传入
+// 根因日志铁证：用户输入 "/team 1）读取报告与关联业务数据；2）建立字段映射..."
+// 时，"1）读取报告..." 被当成非法子命令名直接报错，导致建议→执行死循环
 // ============================================================================
 
-test("TPA-003: 未知子命令保留原值（exhaustiveness check 路径）", () => {
+test("TPA-003: 未知子命令自动降级为 autonomous + task", () => {
+  // 简单场景：单个非法 token
   const args = parseTeamArgs(["unknown-cmd"]);
-  // 未知子命令不做本地拒绝，保留原值让 executeTeamCommand 的 default 分支报错
-  assert.equal(args.subcommand, "unknown-cmd", `未知子命令应保留原值，实际: ${args.subcommand}`);
+  assert.equal(args.subcommand, "autonomous", `未知子命令应降级为 "autonomous"，实际: ${args.subcommand}`);
+  assert.equal(args.task, "unknown-cmd", `原始自由文本应拼入 task，实际: ${args.task}`);
+});
+
+test("TPA-003b: 真实用户场景——/team 后接自然语言目标描述自动降级", () => {
+  // 用户实际报错场景："/team 1）读取报告与关联业务数据；2）建立字段映射..."
+  const args = parseTeamArgs([
+    "1）读取报告与关联业务数据；2）建立字段映射",
+    "3）执行数据对齐校验；4）梳理表间/模块间数据关系",
+  ]);
+  assert.equal(args.subcommand, "autonomous", `应降级为 "autonomous"，实际: ${args.subcommand}`);
+  // 所有 tokens（包括非法首 token）拼成 task
+  assert.ok(args.task?.includes("1）读取报告"), `task 应包含原始自由文本，实际: ${args.task}`);
+  assert.ok(args.task?.includes("梳理表间/模块间数据关系"), `task 应包含所有 tokens，实际: ${args.task}`);
+  // 未填充其他字段（降级时全部消费，不再参与 --key value 解析）
+  assert.equal(args.goal, undefined, `降级路径不应填充 goal`);
+});
+
+test("TPA-003c: /team 直接跟自由文本且无合法子命令——不消费后续 --key value（降级优先）", () => {
+  // 降级触发时，所有 tokens 一次性拼成 task，不再参与后续 --key value 解析
+  const args = parseTeamArgs(["做一个同步脚本", "--max-iterations", "5", "--fail-fast"]);
+  assert.equal(args.subcommand, "autonomous", `应降级为 "autonomous"，实际: ${args.subcommand}`);
+  // 降级路径把所有 tokens 都拼进 task（包括 "--max-iterations 5 --fail-fast"）
+  assert.ok(args.task?.includes("做一个同步脚本"), `task 应包含自由文本前缀`);
+  // 但由于 tokens 被清空，--key value 参数不会被后续解析循环处理
+  assert.equal(args.maxIterations, undefined, `降级路径下 --max-iterations 不被解析`);
+});
+
+test("TPA-003d: 合法子命令 + 可选自由文本描述——正常走 --task 解析（不触发降级）", () => {
+  // 合法子命令开头的情况，自由文本应通过 --task 传入，不走降级路径
+  const args = parseTeamArgs(["autonomous", "--task", "做一个同步脚本"]);
+  assert.equal(args.subcommand, "autonomous", `合法子命令应正常识别`);
+  assert.equal(args.task, "做一个同步脚本", `--task 参数应正确解析`);
+  // 空 tokens（全部消费），failFast 默认 true
+  assert.equal(args.failFast, true);
 });
 
 // ============================================================================
