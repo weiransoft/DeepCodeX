@@ -1,7 +1,7 @@
 # DeepCodeX 新特性总览
 
-> **版本**：v1.3
-> **日期**：2026-07-26（v1.0）；2026-08-04（v1.1 文档对照代码一致性核查修订）；2026-09-12（v1.2 新增 Q 章：F9-v2 建议循环确定性执行 + F10 任务中指令分发加固）；2026-09-15（v1.3 新增 Q.6：F9-v2 自主循环空转修复——补全 EAG-P5 LLM 任务执行链路）
+> **版本**：v1.4
+> **日期**：2026-07-26（v1.0）；2026-08-04（v1.1 文档对照代码一致性核查修订）；2026-09-12（v1.2 新增 Q 章：F9-v2 建议循环确定性执行 + F10 任务中指令分发加固）；2026-09-15（v1.3 新增 Q.6：F9-v2 自主循环空转修复——补全 EAG-P5 LLM 任务执行链路）；2026-09-16（v1.4 新增 Q.7：方案 B 架构升级——LLM 语义理解驱动路由取代正则匹配）
 > **状态**：✅ 已实施完成（例外：F.4 后台任务持久化、C.4 `.deepcode/eag.yml` 文件加载为已规划未接线，详见对应章节标注）
 > **关联文档**（`docs/fusion/` 为本地设计文档，未入库，链接仅本机有效）：
 > - 设计蓝图：[docs/fusion/DEEPCODEX_FUSION_PLAN.md](fusion/DEEPCODEX_FUSION_PLAN.md)
@@ -704,9 +704,9 @@ LLM 通过 AskUserQuestion 工具向用户提问后，用户回答仅作为消�
 | 命令字面量 | 输入含 `/eag-autonomous` 字面量 | 直接进入命令分发 |
 | 意图前缀 | "启动/执行 + EAG/自主任务/无人值守"（双层否定词保护："不要启动"不触发；泛化词"自动循环/自动编排"故意不收录防误伤） | 剥离意图前缀构造命令执行 |
 | 指代确认 | "执行这个/该 X"式短语 + 上一条展示过的建议快照 | 直接执行该建议（一次性消费语义） |
-| F9 自动执行 | refine 澄清 / 显式意图 / 指代确认 三选一 | 建议自动执行 |
+| F9 自动执行 | ~~refine 澄清 / 显式意图 / 指代确认 三选一~~ **v1.4 起放宽**：建议器返回 suggest_* 且 commandHint 以 `/eag-` 开头即默认自动执行（见 Q.7） | 建议自动执行 |
 
-建议降级展示时追加「回复"执行这个"即可自动执行」提示，引导用户跳出循环。
+建议降级展示时追加「回复"执行这个"即可自动执行」提示，引导用户跳出循环（v1.4 起对所有带 commandHint 的降级建议生效，不再仅限 `/eag-` 命令）。
 
 ### Q.3 客户端兜底增强（cli/suggestion-fallback.ts + App.tsx）
 
@@ -763,3 +763,41 @@ LLM 通过 AskUserQuestion 工具向用户提问后，用户回答仅作为消�
 **测试基线**：新增 36 用例（执行器 8 + 编排语义与装配 26 + 端到端集成 2，集成用例含"真实错误实现 → npm 真失败 → 带 stderr 反馈修正 → 全绿"完整闭环）；`eag-p5-*` 全套 **358/358 绿**，`tsc --noEmit` 零错误。桩仅实现 LLMClient 的 HTTP 响应，工具、文件、git、npm、状态机、护栏、编排器、SessionManager 全真实。
 
 **已知遗留**：`cancellation`（abort 竞态 ×2）、DeepSeek 模型清单断言、`isRetryableLlmError`、skills 禁用枚举、多模态能力等 6 项为干净 HEAD 上即存在的失败（经 `git worktree` 对照证实，与本次改动无关），属独立议题。
+
+### Q.7 方案 B 架构升级：LLM 语义理解驱动路由取代正则匹配
+
+> 代码实现：`packages/core/src/eag/dynamic/prompts/eag-suggestion-prompt.ts`（建议器提示词）、`packages/core/src/session.ts`（自动执行判定与降级快照）、`packages/cli/src/ui/core/parse-team-args.ts`（`/team` 自由文本降级）
+> 日期：2026-09-16（方案 B）
+
+**问题**：Q.2/Q.6 打通执行链路后，真实日志暴露出**意图识别层的架构性缺陷**——用户输入"启动 Team 自主迭代模式，围绕报告自动完成……"这类明确执行意图，系统仍只给建议不执行。三处正则各自失守：
+
+1. **建议器提示词自我设限**：`eag-suggestion-prompt.ts` 写着"绝对不允许自动执行任何命令"，LLM 即使正确识别出执行意图，也倾向保守归为 `direct_chat`；
+2. **自动执行三软条件互斥**：`tryAutoExecuteSuggestedCommand` 要求 refine 澄清 / 显式 EAG 关键词正则 / 指代确认短语三选一，首次表达意图时三者全不满足 → 降级只展示 → 用户被迫回复"执行这个" → 再走一轮，形成建议循环；
+3. **正则字面量覆盖不全**：`EAG_AUTONOMOUS_KEYWORD_PATTERN` 只认"自主任务/无人值守"，"自主迭代/自主模式/自主循环"漏判；且"自动"二字误伤"自动完成"这类普通描述。
+
+**方案 B 的核心判断**：意图识别应交给 LLM 语义理解，正则只在 LLM 不可用时兜底。据此把路由架构调整为四级优先：
+
+```
+用户输入
+  ├─ ① LLM 建议器（主路径）  suggest_* + commandHint 以 /eag- 开头 → 默认自动执行
+  ├─ ② 字面量命令快捷通道    /eag-autonomous、/team autonomous → 直接分发，零延迟
+  ├─ ③ 正则兜底             意图前缀 + 关键词（LLM 不可用时）
+  └─ ④ 主对话 LLM           direct_chat（简单问答/闲聊）
+```
+
+**改动**（3 个文件、5 处，最小侵入）：
+
+| 位置 | 旧行为 | 新行为 |
+|------|--------|--------|
+| `eag-suggestion-prompt.ts` | "绝对不允许自动执行任何命令"，引导保守归类 | 改为"返回 suggest_* 即表示意图充分，CLI 会立即自动执行"；新增【自然语言意图识别要点】列出"自主迭代 / 无人值守 / 启动执行"等变体；`direct_chat` 职责收窄为简单问答与闲聊 |
+| `session.ts` · `tryAutoExecuteSuggestedCommand` | 三个正则软条件全不满足即 `degraded` | **移除三个软条件**。仅保留硬条件：`commandHint` 以 `/eag-` 开头 + `eagCommandParser` 已注入 → 自动执行 |
+| `session.ts` · 降级快照 | 仅 `/eag-` 命令存快照并追加执行提示 | 所有带 `commandHint` 的降级建议均存快照 + 追加提示，指代确认通道可消费任意建议（非 `/eag-` 命令的分发待扩展） |
+| `parse-team-args.ts` | `/team 1）读取报告……` 首 token 非法 → 报"未知子命令" | 首 token 非已知子命令时降级为 `autonomous --task <全部自由文本>` |
+| `session.ts` · 关键词正则 | `/EAG\|eag\|自主任务\|无人值守/`（"自主迭代/自主模式/自主循环"漏判） | 扩展为 `/EAG\|eag\|自主(?!动)\|无人值守/`，覆盖"自主"全部自然语言变体；`(?!动)` 负向断言排除"自动"，避免误伤"自动完成"这类普通描述 |
+
+**测试基线**：`session.test.ts` 127 + `session-f9v2-deterministic-execution.test.ts` 13（其中 4 个为方案 B 新行为用例）+ `session-eag-suggester-integration.test.ts` 8 + `eag-p5-*` 358 + `eag-dynamic-suggester.test.ts` 26 = **532/532 绿**，`tsc --noEmit` 零错误，构建通过。
+
+**已知限制**（后续扩展点）：
+
+1. **非 `/eag-` 命令的指代确认执行**：`tryAnaphoraConfirmExecution` 经 `dispatchEagCommandString` 分发，该分发器只识别 `/eag-` 命令。`/team autonomous` 建议可降级展示 + 追加提示 + 存快照，但用户回复"执行这个"时执行不通（快照仍按一次性消费语义清除，不会重复触发）。需扩展 team handler 接入分发后打通。
+2. **CLI 命令行入口**：`cli-args.ts` 的 yargs 子命令校验仍会拦截 `deepcode team <自由文本>`；本轮降级修在 `parseTeamArgs`（生效于 TUI slash 路径），yargs 路径待补。
