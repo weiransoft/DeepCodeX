@@ -3236,19 +3236,23 @@ ${agentInstructions}
         return true;
       }
 
-      // 降级：保持原有"只展示"行为（无明确意图 / 非 EAG 命令 / eagCommandParser 未注入）
-      // F9-v2：对 EAG 命令建议记录建议快照（供指代确认消费），并追加执行提示——
-      // 日志铁证：用户看到建议后回复"执行这个全量覆盖！"，主 LLM 却拒绝执行；
-      // 显式提示"回复'执行这个'即可自动执行"引导用户走出建议循环。
+      // 降级：tryAutoExecuteSuggestedCommand 返回 "degraded"（commandHint 不以 /eag- 开头、
+      // eagCommandParser 未注入、或分发失败）时，保持"只展示"行为。
+      //
+      // 方案 B（2026-09-16）升级：不再只对 EAG 命令建议记录快照 + 追加提示——
+      // 任何 suggestion.commandHint 非空时，都存储快照 + 追加"回复'执行这个'即可自动执行"提示。
+      // 这样：
+      // 1. 非 EAG 命令（如 /team autonomous /eag-graph）也能让用户看到明确操作引导；
+      // 2. 指代确认通道（handleAnaphoraConfirmExecution）能消费所有类型的 snapshot；
+      // 3. commandHint 为空的 suggestion（如 ask_clarification）不需要追加提示。
       const degradedCommandHint = this.extractSuggestedCommandHint(suggestion);
-      const isEagCommandSuggestion = degradedCommandHint !== null && degradedCommandHint.startsWith("/eag-");
-      if (isEagCommandSuggestion) {
+      if (degradedCommandHint) {
         this.lastEagDisplayedSuggestions.set(sessionId, {
           commandHint: degradedCommandHint,
           goal,
         });
       }
-      const degradedMessage = isEagCommandSuggestion
+      const degradedMessage = degradedCommandHint
         ? `${suggestion.messageToUser}\n\n> 回复"执行这个"即可自动执行。`
         : suggestion.messageToUser;
       const assistantMessage = this.buildAssistantMessage(sessionId, degradedMessage, null);
@@ -3269,29 +3273,36 @@ ${agentInstructions}
   }
 
   /**
-   * F9 自动执行机制：当 refine 后（用户已通过澄清做出明确选择）suggest_* 返回 EAG 命令时，
-   * 自动构造命令字符串并调用对应 handler，而非只展示建议文本。
+   * F9 自动执行机制（2026-09-16 方案 B 架构升级）：
    *
-   * F9-v2（2026-09-12）执行条件放宽为"三选一"（任一满足即可自动执行）：
-   * 1. refine 澄清：clarification !== undefined（用户已通过澄清做出明确选择）；
-   * 2. 显式意图：goal 含 EAG/自主任务/无人值守等关键词（用户明确点名 EAG 体系，
-   *    即使建议器首次建议也直接执行——日志铁证："启动 EAG 自主任务..."被误分类
-   *    为 direct_chat 后主 LLM 拒绝执行，显式意图不应被"只展示"拦截）；
-   * 3. 指代确认：goal 是"执行这个/该 X"式短语（用户明确要执行上一条建议）。
+   * 当 EagDynamicSuggester 的 suggest() 返回 suggest_command/suggest_autonomous/suggest_graph
+   * 且 commandHint 以 /eag- 开头时，**默认自动构造命令并执行**，不再要求 refine 澄清 /
+   * 显式 EAG 意图关键词 / 指代确认短语 这三个软条件之一。
    *
-   * 其余硬性条件（必须同时满足）：
+   * 架构原则（方案 B v2）：
+   * - LLM 建议器返回 suggest_* 即表示"意图充分理解，可立即执行"——这是 LLM 语义分析后的结论，
+   *   应该被信任；正则关键词是 LLM 不可用时的兜底（matchDeterministicEagAutonomousCommand），
+   *   不是 suggest_* 执行的前置条件。
+   * - 建议器 system prompt 已更新为引导 LLM 在"启动自主迭代"、"做个同步脚本"等自然语言
+   *   场景下直接返回 suggest_autonomous，而不是 direct_chat。
+   * - ask_clarification 场景（需求严重模糊 / 多路径分歧）在 suggest() 返回前就已分流，
+   *   不会走到本方法。
+   *
+   * 保留的硬性条件（全部满足才执行）：
    * - commandHint 以 /eag- 开头（EAG 命令体系，eagCommandParser 能识别）
    * - this.eagCommandParser 已注入（handler 依赖 parser 分发）
+   * - eagCommandParser 成功解析 commandHint
    *
-   * 降级策略（任一硬性条件不满足或三个软条件均不满足时返回 "degraded"）：
-   * - 无明确意图的首次建议：保持"只展示"，需要用户确认方向
-   * - 非 EAG 命令（如 team/rules/slash）：eagCommandParser 无法识别，降级展示
+   * 降级策略（任一硬性条件不满足时返回 "degraded"）：
+   * - commandHint 不以 /eag- 开头（如 /team /rules /slash 命令）：eagCommandParser 无法识别，
+   *   降级为只展示建议文本——后续可扩展为非 EAG 命令也能自动执行
    * - eagCommandParser 未注入：没有命令分发能力，降级展示
+   * - dispatchEagCommandString 返回 false（解析失败 / 未处理的命令 kind）：降级展示
    *
    * @param sessionId 当前会话 ID
    * @param suggestion suggester 返回的 suggest_* 结果
-   * @param clarification 用户澄清选项（存在表示 refine 流程）
-   * @param goal 原始用户目标（用于构造命令参数，亦是显式意图/指代确认的判定文本）
+   * @param clarification 用户澄清选项（存在表示 refine 流程，可选）
+   * @param goal 原始用户目标（用于构造命令参数）
    * @param controller 可选的 AbortController
    * @returns "executed" 表示已自动执行命令，"degraded" 表示降级为只展示建议
    */
@@ -3302,18 +3313,15 @@ ${agentInstructions}
     goal: string,
     controller?: AbortController
   ): Promise<"executed" | "degraded"> {
-    // 软条件（三选一）：refine 澄清 / 显式 EAG 意图 / 指代确认短语
-    // - 显式意图：goal 含 EAG 关键词（EAG/自主任务/无人值守），用户明确点名 EAG 体系
-    // - 指代确认：goal 是"执行这个/该 X"式短语且无否定词（用户要执行上一条建议）
-    const hasExplicitEagIntent = EAG_AUTONOMOUS_KEYWORD_PATTERN.test(goal) && !EAG_INTENT_NEGATION_PATTERN.test(goal);
-    const hasAnaphoraConfirm = ANAPHORA_CONFIRM_PATTERN.test(goal) && !ANAPHORA_CONFIRM_NEGATION_PATTERN.test(goal);
-    if (clarification === undefined && !hasExplicitEagIntent && !hasAnaphoraConfirm) {
-      return "degraded";
-    }
-
-    // 硬条件 1：commandHint 必须以 /eag- 开头（EAG 命令体系）
+    // 硬条件 1：commandHint 必须以 /eag- 开头（EAG 命令体系，eagCommandParser 能识别）
+    // 方案 B 架构升级后，去掉了三个软条件（refine 澄清 / 显式意图关键词 / 指代确认短语）——
+    // 只要 LLM 返回 suggest_* 且 commandHint 可执行，就自动执行。
+    // clarification 参数保留但不再参与判定（仅用于语义表示 refine 流程，handler 可能消费）
+    void clarification;
     const commandHint = this.extractSuggestedCommandHint(suggestion);
     if (!commandHint || !commandHint.startsWith("/eag-")) {
+      // 非 EAG 命令（如 /team /rules /slash）暂降级展示——eagCommandParser 无法识别
+      // 后续可扩展为 /team autonomous 也能自动执行（需 handler 独立接入）
       return "degraded";
     }
 

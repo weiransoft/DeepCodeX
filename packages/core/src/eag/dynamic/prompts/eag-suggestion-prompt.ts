@@ -5,12 +5,16 @@
  * 和当前全部可用命令清单（EAG/Team/Rules/slash），生成供 LLM 做意图识别与
  * 命令建议的 prompt。
  *
- * 设计原则（对齐 2026-07-24-eag-llm-dynamic-orchestration.md v1.4）：
- * 1. 只做建议，不自动执行任何命令。
+ * 设计原则（2026-09-16 方案 B 架构升级，对齐 eag-llm-dynamic-orchestration.md v2.0）：
+ * 1. 你返回 suggest_* 即表示用户意图充分理解——CLI 会**立即自动执行**该命令，
+ *    不再要求用户确认。只有 ask_clarification 才是向用户提问澄清。
  * 2. 覆盖全部命令体系：EAG 编排、Team 多角色、Rules 规则管理、TUI slash 命令。
- * 3. 多阶段模糊任务优先推荐 /eag-autonomous 或 /team autonomous，而非 /eag-graph。
- * 4. 当任务存在多种合理技术路径或需求不清时，必须返回 ask_clarification。
- * 5. 必须说明前置条件（如 /eag-build 需要 spec/plan/tasks）。
+ * 3. 多阶段模糊任务优先推荐 /eag-autonomous 或 /team autonomous。
+ * 4. 当且仅当需求严重不清（如"帮我做点什么"、"应该怎么办"）或存在多路径分歧时，
+ *    才返回 ask_clarification。有明确目标的模糊描述（如"启动自主迭代"、
+ *    "做个同步脚本"）应直接返回 suggest_autonomous。
+ * 5. direct_chat 仅限简单问答/解释/闲聊/单点技术建议（不涉及执行操作）。
+ * 6. 必须说明前置条件（如 /eag-build 需要 spec/plan/tasks）。
  *
  * @module eag/dynamic/prompts/eag-suggestion-prompt
  */
@@ -69,13 +73,19 @@ ${commandDescriptions}
 
 【决策规则】
 1. 简单问答、解释、闲聊、单点技术建议 → 返回 action="direct_chat"，让主对话 LLM 处理。
-2. 明确单阶段 EAG 任务（只需设计 / 编码 / 测试 / 部署中的一项） → 返回 action="suggest_command"，commandCategory="eag"，并给出 commandHint。
-3. 模糊多阶段目标（如"帮我实现一个登录模块"、"完成用户认证功能"） → 返回 action="suggest_autonomous"，优先推荐 /eag-autonomous。
+2. 明确单阶段 EAG 任务（只需设计 / 编码 / 测试 / 部署中的一项） → 返回 action="suggest_command"，commandCategory="eag"，并给出 commandHint。CLI 会立即执行。
+3. 模糊多阶段目标、自主迭代、无人值守、自动化执行需求（如"启动自主迭代"、"做个同步脚本"、"自动完成数据治理"、"帮我实现一个登录模块"） → 返回 action="suggest_autonomous"，优先推荐 /eag-autonomous。**任何带"自主"、"迭代"、"自动"、"执行"意图的多步任务都应命中此类**。
 4. 用户明确提到 DAG、并行分支、条件路由，或已提供图定义文件 → 返回 action="suggest_graph"，推荐 /eag-graph。
-5. 需要多角色协同（如"启动新项目"、"架构评审"） → 返回 action="suggest_command"，commandCategory="team"，推荐 /team dispatch 或 /team full-lifecycle。
+5. 需要多角色协同（如"启动新项目"、"架构评审"、"团队分工"） → 返回 action="suggest_command"，commandCategory="team"，推荐 /team dispatch 或 /team autonomous。
 6. 需要管理规则（查看/添加/删除规则） → 返回 action="suggest_command"，commandCategory="rules"，推荐 /rules list 等。
 7. 需要 TUI 操作（切换模型、查看技能、新建会话等） → 返回 action="suggest_command"，commandCategory="slash"，推荐对应 slash 命令。
-8. 任务规划存在多个方向、不同技术路径、需求不清或歧义时 → 返回 action="ask_clarification"，列出选项要求用户确认。
+8. 仅当任务存在多个明显技术路径、或目标严重模糊（如"帮我做点什么"、"应该怎么办"）时 → 返回 action="ask_clarification"，列出选项要求用户确认。有明确目标的模糊描述应直接返回 suggest_autonomous。
+
+【自然语言意图识别要点（高优先级）】
+- "自主迭代"、"自主模式"、"自主循环"、"无人值守"、"启动 EAG 自主任务"、"执行这个建议" → suggest_autonomous /eag-autonomous
+- "数据对齐校验、数据关系梳理、数据质量评估、异常数据分析" → suggest_autonomous /eag-autonomous（多阶段数据治理任务）
+- 任何用户说"执行"、"启动"、"开始" + 多步目标描述 → suggest_autonomous
+- 用户回复"执行这个"、"就运行"、"开始吧"这类指代确认短语，且上一轮有 suggest_* 建议时 → 视为意图确认，CLI 会自动执行上一条建议
 
 【命令体系说明】
 - EAG 命令（category=eag）：企业级应用生成编排，包含设计/编码/测试/部署/自动化/图编排等阶段。
@@ -88,7 +98,8 @@ ${commandDescriptions}
 - Slash 命令（category=slash）：TUI 交互命令，如 /skills、/model、/new、/init、/resume 等。
 
 【强制约束】
-- 绝对不允许自动执行任何命令。
+- **返回 suggest_* 即表示意图充分，CLI 会立即自动执行该命令**。不要犹豫或保守——宁可多返回 suggest_autonomous，也不要把"做个同步脚本"这种明确执行意图误归为 direct_chat。
+- 不要在 messageToUser 里加"回复 X 即可执行"的引导文本——CLI 收到 suggest_* 后会自动执行，用户无需再确认。
 - 只能建议当前可用命令清单中存在的命令（通过 commandCategory + commandId 精确标识）。
 - /eag-build、/eag-test、/eag-deploy、/eag-run 需要 spec/plan/tasks 等前置文档，如果用户未提供，必须在 messageToUser 或 prerequisites 中说明。
 - 多阶段任务优先推荐 /eag-autonomous 或 /team autonomous，而不是 /eag-graph。

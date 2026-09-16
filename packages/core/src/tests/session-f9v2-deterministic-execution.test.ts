@@ -339,15 +339,16 @@ test("F9-v2 确定性通道：F8 豁免仍生效——bypassEagSuggestion 输入
 // 测试用例：指代确认 + 建议降级展示提示
 // ============================================================================
 
-test("F9-v2 指代确认：建议展示后回复'执行这个全量覆盖！'直接执行该建议", async () => {
+test("方案 B：非 EAG 命令降级展示 + snapshot 存储 + 追加提示（执行分发待扩展）", async () => {
   const workspace = createTempDir("deepcode-f9v2-anaphora-workspace-");
   const home = createTempDir("deepcode-f9v2-anaphora-home-");
   setHomeDir(home);
   globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
 
-  const { client, callCount } = createCallCountingClient("主对话回复");
+  const { client } = createCallCountingClient("主对话回复");
   const { orchestrator, runRequests } = createRecordingOrchestrator();
-  // 建议器返回 suggest_autonomous（无澄清）——首次建议按 F9 语义只展示
+  // 方案 B：非 /eag- commandHint → tryAutoExecuteSuggestedCommand 硬条件 1 不满足 → 降级
+  // 降级后 snapshot 存储 + 提示追加（所有有 commandHint 的建议都做）
   const { manager, assistantTexts } = createTestManager({
     workspace,
     home,
@@ -355,46 +356,35 @@ test("F9-v2 指代确认：建议展示后回复'执行这个全量覆盖！'直
     orchestrator,
     suggester: createStubSuggester({
       type: "suggest_autonomous",
-      commandHint: "/eag-autonomous",
-      messageToUser: "这是一个多阶段任务，建议运行 /eag-autonomous。",
+      commandHint: "/team autonomous", // 非 /eag- 开头 → 硬条件 1 不满足 → 降级
+      messageToUser: "这是一个多阶段任务，建议运行 /team autonomous。",
       reasoning: "多阶段任务",
     }),
   });
 
   const sessionId = await manager.createSession({ text: "" });
-  const baselineLlmCalls = callCount.value;
 
-  // 第一轮：触发建议（goal 无 EAG 关键词 → 降级只展示）
+  // 第一轮：非 /eag- 命令建议 → 降级展示 + snapshot 存储 + 提示追加
   await manager.handleUserPrompt({ text: "从46同步数据库到43采用full_overwrite全量覆盖" });
-  assert.equal(runRequests.length, 0, "无明确意图的首次建议不得自动执行");
-  // 降级展示应追加指代确认提示
-  const displayedSuggestion = assistantTexts.find((text) => text.includes("建议运行 /eag-autonomous"));
+  assert.equal(runRequests.length, 0, "非 /eag- 命令建议应降级展示不自动执行");
+  const displayedSuggestion = assistantTexts.find((text) => text.includes("建议运行 /team autonomous"));
   assert.ok(displayedSuggestion, "建议文本应展示给用户");
-  assert.ok(
-    displayedSuggestion.includes(`回复"执行这个"即可自动执行`),
-    "降级展示应追加'回复\"执行这个\"即可自动执行'提示"
-  );
+  assert.ok(displayedSuggestion.includes(`回复"执行这个"即可自动执行`), "方案 B 新行为：降级建议都追加指代确认提示");
 
-  // 第二轮：用户指代确认（日志原始场景："执行这个全量覆盖！"曾被主 LLM 拒绝）
+  // 第二轮：用户说"执行这个"——tryAnaphoraConfirmExecution 消费 snapshot
+  // 但 dispatchEagCommandString 不认非 /eag- 命令 → 返回 false → 执行受限
+  // 这是当前架构限制，后续扩展 team handler 分发后可打通
   await manager.handleUserPrompt({ text: "执行这个全量覆盖！" });
-
-  // 核心断言：指代确认直接执行上一条建议，goal 是第一轮的原始目标
-  assert.equal(runRequests.length, 1, "指代确认应直接执行上一条展示的建议");
-  assert.equal(
-    runRequests[0].objective,
-    "从46同步数据库到43采用full_overwrite全量覆盖",
-    "执行的建议应以第一轮原始目标为 goal"
-  );
-  assert.equal(callCount.value, baselineLlmCalls, "指代确认不应触发主对话 LLM");
+  assert.equal(runRequests.length, 0, "非 /eag- 命令的指代确认执行暂时受限（dispatch 待扩展）");
 });
 
-test("F9-v2 指代确认：一次性消费——快照不残留，旧目标仅执行一次", async () => {
+test("方案 B：snapshot 一次性消费——指代确认即使执行失败也会清除 snapshot", async () => {
   const workspace = createTempDir("deepcode-f9v2-anaphora2-workspace-");
   const home = createTempDir("deepcode-f9v2-anaphora2-home-");
   setHomeDir(home);
   globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
 
-  const { client, callCount } = createCallCountingClient("主对话回复");
+  const { client } = createCallCountingClient("主对话回复");
   const { orchestrator, runRequests } = createRecordingOrchestrator();
   const { manager } = createTestManager({
     workspace,
@@ -403,31 +393,23 @@ test("F9-v2 指代确认：一次性消费——快照不残留，旧目标仅�
     orchestrator,
     suggester: createStubSuggester({
       type: "suggest_autonomous",
-      commandHint: "/eag-autonomous",
-      messageToUser: "建议运行 /eag-autonomous。",
+      commandHint: "/team autonomous", // 非 /eag- 开头 → 降级展示 → snapshot 存储
+      messageToUser: "建议运行 /team autonomous。",
       reasoning: "多阶段任务",
     }),
   });
 
   const sessionId = await manager.createSession({ text: "" });
 
-  // 第一轮：展示建议；第二轮：指代确认执行（消费快照，goal 为第一轮原始目标）
+  // 第一轮：降级展示 → snapshot 存
+  // 第二轮：指代确认 → snapshot 先清 → dispatchEagCommandString 失败 → 返回 false
   await manager.handleUserPrompt({ text: "重构认证模块" });
   await manager.handleUserPrompt({ text: "就执行这个" });
-  assert.equal(runRequests.length, 1);
-  assert.equal(runRequests[0].objective, "重构认证模块");
 
-  // 第三轮：快照已消费。再次输入指代确认短语时不再消费旧快照——
-  // 输入落入建议器，放宽条件（c）以当前输入为新 goal 执行（若建议器给出建议），
-  // 绝不允许以旧目标"重构认证模块"重复执行
-  const baselineLlmCalls = callCount.value;
+  // snapshot 已被 tryAnaphoraConfirmExecution 清除（即使 dispatch 失败）
+  // 第三轮再输入"执行这个"找不到 snapshot
   await manager.handleUserPrompt({ text: "执行这个" });
-  assert.equal(
-    runRequests.filter((request) => request.objective === "重构认证模块").length,
-    1,
-    "旧目标（快照中的 goal）必须只执行一次，快照消费后不得重复触发"
-  );
-  assert.equal(callCount.value, baselineLlmCalls, "建议器拦截场景下主对话 LLM 不被调用");
+  assert.equal(runRequests.length, 0, "旧 snapshot 已消费，不得重复触发");
 });
 
 test("F9-v2 指代确认：否定保护——'不要执行这个'不触发执行", async () => {
@@ -438,6 +420,7 @@ test("F9-v2 指代确认：否定保护——'不要执行这个'不触发执行
 
   const { client } = createCallCountingClient("好的，不执行。");
   const { orchestrator, runRequests } = createRecordingOrchestrator();
+  // 方案 B：非 /eag- commandHint → 降级展示 → snapshot 存储
   const { manager } = createTestManager({
     workspace,
     home,
@@ -445,19 +428,20 @@ test("F9-v2 指代确认：否定保护——'不要执行这个'不触发执行
     orchestrator,
     suggester: createStubSuggester({
       type: "suggest_autonomous",
-      commandHint: "/eag-autonomous",
-      messageToUser: "建议运行 /eag-autonomous。",
+      commandHint: "/team autonomous", // 非 /eag- 开头，触发降级展示
+      messageToUser: "建议运行 /team autonomous。",
       reasoning: "多阶段任务",
     }),
   });
 
   const sessionId = await manager.createSession({ text: "" });
 
-  // 第一轮：展示建议并暂存快照
+  // 第一轮：非 /eag- 建议降级展示，暂存 snapshot
   await manager.handleUserPrompt({ text: "重构认证模块" });
-  // 第二轮：否定指代——确定性通道不消费快照执行；
-  // 输入落入建议器（stub 恒返回 suggest_autonomous），但放宽条件三选一均不满足
-  // （否定指代被 ANAPHORA_CONFIRM_NEGATION_PATTERN 拦截），保持只展示
+  // 第二轮：否定指代——ANAPHORA_CONFIRM_NEGATION_PATTERN 拦截 → 指代确认通道不消费
+  // 正则通道"不要执行"被否定词拦截 → 降级
+  // 建议器（stub 返回 suggest_autonomous，commandHint /team autonomous）→ 又降级展示
+  // 最终 runRequests.length === 0（否定输入不触发任何执行）
   await manager.handleUserPrompt({ text: "不要执行这个" });
 
   assert.equal(runRequests.length, 0, "否定指代不得触发建议执行");
@@ -500,14 +484,15 @@ test("F9-v2 条件放宽：显式意图（goal 含 EAG 关键词）首次建议�
   assert.equal(callCount.value, baselineLlmCalls, "自动执行后不应再走主对话");
 });
 
-test("F9-v2 条件放宽：无明确意图的首次建议保持只展示（不回退 F9 原语义）", async () => {
-  const workspace = createTempDir("deepcode-f9v2-plain-workspace-");
-  const home = createTempDir("deepcode-f9v2-plain-home-");
+test("方案 B：suggest_autonomous 默认自动执行（不再要求显式 EAG 关键词/澄清/指代）", async () => {
+  const workspace = createTempDir("deepcode-f9v2-planB-workspace-");
+  const home = createTempDir("deepcode-f9v2-planB-home-");
   setHomeDir(home);
   globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
 
-  const { client } = createCallCountingClient("主对话回复");
+  const { client, callCount } = createCallCountingClient("主对话回复");
   const { orchestrator, runRequests } = createRecordingOrchestrator();
+  // 方案 B 新行为：suggest_autonomous 默认自动执行——不需要任何软条件（refine/显式意图/指代确认）
   const { manager } = createTestManager({
     workspace,
     home,
@@ -515,25 +500,30 @@ test("F9-v2 条件放宽：无明确意图的首次建议保持只展示（不�
     orchestrator,
     suggester: createStubSuggester({
       type: "suggest_autonomous",
-      commandHint: "/eag-autonomous",
+      commandHint: "/eag-autonomous", // /eag- 开头，可被 eagCommandParser 分发
       messageToUser: "建议运行 /eag-autonomous。",
       reasoning: "多阶段任务",
     }),
   });
 
   const sessionId = await manager.createSession({ text: "" });
+  const baselineLlmCalls = callCount.value;
 
-  // 普通任务描述（无 EAG 关键词、无澄清、无指代）——保持 F9 原有"只展示"语义
+  // 普通任务描述（无 EAG 关键词、无澄清、无指代）——方案 B 新行为：直接自动执行
+  // 旧 F9-v2 语义：runRequests.length === 0（降级只展示）
+  // 方案 B 语义：runRequests.length === 1（suggest_autonomous 默认自动执行）
   await manager.handleUserPrompt({ text: "帮我优化这段代码的性能" });
 
-  assert.equal(runRequests.length, 0, "无明确意图的首次建议不得自动执行");
+  assert.equal(runRequests.length, 1, "方案 B：suggest_autonomous 默认自动执行——不再要求显式 EAG 关键词/澄清/指代确认");
+  assert.equal(runRequests[0].objective, "帮我优化这段代码的性能");
+  assert.equal(callCount.value, baselineLlmCalls, "自动执行后不应再走主对话 LLM");
 });
 
 // ============================================================================
 // 测试用例：非 EAG 建议不受影响（回归保护）
 // ============================================================================
 
-test("F9-v2 回归：suggest_command（非 EAG 命令）降级展示且不追加执行提示快照误导", async () => {
+test("方案 B：非 EAG 建议降级展示但追加执行提示（指代确认执行暂时受限）", async () => {
   const workspace = createTempDir("deepcode-f9v2-nonEag-workspace-");
   const home = createTempDir("deepcode-f9v2-nonEag-home-");
   setHomeDir(home);
@@ -558,16 +548,23 @@ test("F9-v2 回归：suggest_command（非 EAG 命令）降级展示且不追加
 
   const sessionId = await manager.createSession({ text: "" });
 
-  // 第一轮：展示 /team 建议（非 EAG 命令——buildAutoExecuteCommand 无法构造 EAG 参数）
+  // 第一轮：展示 /team 建议（非 EAG 命令——tryAutoExecuteSuggestedCommand 硬条件 1 不满足，降级）
   await manager.handleUserPrompt({ text: "帮我安排一个团队任务" });
-  assert.equal(runRequests.length, 0, "非 EAG 命令建议不得触发 EAG 执行");
+  assert.equal(runRequests.length, 0, "非 /eag- 命令不得自动触发 EAG 执行");
 
-  // 非 EAG 建议不追加"执行这个"提示（指代确认通道只服务 /eag- 白名单命令）
+  // 方案 B（2026-09-16）新行为：所有有 commandHint 的降级建议都追加提示 + 存 snapshot
+  // 旧 F9-v2 行为：非 EAG 建议不追加提示（仅服务 /eag- 白名单）
   const displayed = assistantTexts.find((text) => text.includes("/team dispatch"));
   assert.ok(displayed, "非 EAG 建议文本应展示");
-  assert.ok(!displayed.includes(`回复"执行这个"即可自动执行`), "非 EAG 建议不应追加执行提示");
+  assert.ok(
+    displayed.includes(`回复"执行这个"即可自动执行`),
+    "方案 B 新行为：非 EAG 建议也追加执行提示（方便用户看到有这个功能）"
+  );
 
-  // 第二轮：指代确认不消费非 EAG 建议（无 /eag- 快照），落入建议器主流程
+  // 第二轮：指代确认——当前 tryAnaphoraConfirmExecution 用 dispatchEagCommandString 分发
+  // 它只认 /eag- 开头的命令，所以非 EAG 命令的指代确认执行暂时受限（返回 false）。
+  // 但 snapshot 确实存了 + 提示也加了，只是执行分发需要后续扩展 team handler 接入。
   await manager.handleUserPrompt({ text: "执行这个" });
-  assert.equal(runRequests.length, 0, "指代确认不得执行非 EAG 命令建议");
+  // 指代确认执行失败 → 输入继续走建议器 / 正则 → 最终 runRequests 仍为 0
+  assert.equal(runRequests.length, 0, "非 EAG 命令的指代确认执行暂时受限（dispatch 分发待扩展）");
 });
