@@ -84,6 +84,27 @@ test("video_generator.py assert_upload_safe 拦截敏感文件并放行正常媒
   assert.match(stdout, /ALL_OK/);
 });
 
+test(
+  "video_generator upgrade_download_url 将明文 files.vegamo.cn 产物地址升级为 HTTPS",
+  { skip: !hasPython3() },
+  () => {
+    const python = [
+      "import importlib.util",
+      `spec = importlib.util.spec_from_file_location('vg', r'''${SCRIPT_PATH}''')`,
+      "module = importlib.util.module_from_spec(spec)",
+      "spec.loader.exec_module(module)",
+      "assert module.upgrade_download_url('http://files.vegamo.cn/a/b.mp4?sig=1') == 'https://files.vegamo.cn/a/b.mp4?sig=1', 'plain http url must be upgraded'",
+      "assert module.upgrade_download_url('https://files.vegamo.cn/a.mp4') == 'https://files.vegamo.cn/a.mp4', 'https url must stay unchanged'",
+      "assert module.upgrade_download_url('https://other.example.com/a.mp4') == 'https://other.example.com/a.mp4', 'third-party url must stay unchanged'",
+      "assert module.upgrade_download_url(None) is None, 'None must pass through'",
+      "print('ALL_OK')",
+    ].join("\n");
+
+    const stdout = execFileSync("python3", ["-c", python], { encoding: "utf8" });
+    assert.match(stdout, /ALL_OK/);
+  }
+);
+
 test("video_generator.py validate_file 在存在性检查后立即调用敏感拦截", { skip: !hasPython3() }, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "video-gen-safety-"));
   try {

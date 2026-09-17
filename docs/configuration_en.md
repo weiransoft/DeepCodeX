@@ -349,6 +349,8 @@ For enterprise and individual network auditing, the following lists every outbou
 | Telemetry (opt-in) | `https://deepcode.vegamo.cn/api/plugin/new` | Empty body + anonymous identifier (random UUID) | Off by default; enable via `telemetryEnabled: true` |
 | Version update check | npm registry (official or Tencent mirror) | Package name and current version only | Automatic; no user data |
 | Video generation skill | `https://deepcode.vegamo.cn/api` and `https://files.vegamo.cn` | User-specified image/video/audio materials (requires user credit confirmation and rejects key-like files) | Not triggered unless the skill is invoked |
+| Image generation skill | `https://deepcode.vegamo.cn/api/plugin/image-gen` and cost-calculation endpoint | Image generation prompt and user-specified reference images (base64), with an anonymous identifier (random UUID) | Not triggered unless the skill is invoked |
+| DeepSeek Files API (VS Code extension, opt-in) | `https://api.deepseek.com` (Files API) | Image files uploaded when `filesApiEnabled` is on | Off by default; not triggered unless enabled |
 | MCP servers | Addresses configured in `mcpServers` | Tool call parameters | Remove the configuration |
 | Notification script | Command configured in `notify` | Session summary and other arguments | Remove the configuration |
 
