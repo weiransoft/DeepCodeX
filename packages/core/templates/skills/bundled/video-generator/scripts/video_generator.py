@@ -270,6 +270,18 @@ def poll_task(task_id, api_key):
               file=sys.stderr, flush=True)
 
 
+def upgrade_download_url(url):
+    """隐私加固（2026-09-17 审计）：产物下载地址防御性升级为 HTTPS。
+
+    服务端返回的产物 URL 若仍是明文 http（如旧版 files.vegamo.cn 地址），
+    统一升级为 https，避免视频内容在下载阶段被中间人截获/篡改。
+    非 files.vegamo.cn 的地址原样返回（不猜测第三方域名的证书支持情况）。
+    """
+    if isinstance(url, str) and url.startswith('http://files.vegamo.cn'):
+        return 'https://files.vegamo.cn' + url[len('http://files.vegamo.cn'):]
+    return url
+
+
 def save_output(result, output):
     if output is None or result.get('taskStatus') != 'COMPLETED':
         return result
@@ -279,9 +291,10 @@ def save_output(result, output):
         raise VideoError('缺少 requests，请安装 scripts/requirements.txt。') from exc
     destination = output.expanduser().resolve()
     temporary = None
+    video_url = upgrade_download_url(str(result.get('videoUrl', '')))
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with requests.get(result['videoUrl'], stream=True, timeout=(30, 120)) as response:
+        with requests.get(video_url, stream=True, timeout=(30, 120)) as response:
             response.raise_for_status()
             with tempfile.NamedTemporaryFile(dir=destination.parent, prefix='.video-',
                                              suffix='.part', delete=False) as file:
@@ -294,7 +307,7 @@ def save_output(result, output):
             temporary.replace(destination)
     except (OSError, requests.RequestException, TimeoutError, VideoError) as exc:
         raise VideoError(f'视频已生成但保存失败（{type(exc).__name__}）；'
-                         f'taskId={result["taskId"]}；videoUrl={result["videoUrl"]}；'
+                         f'taskId={result["taskId"]}；videoUrl={video_url}；'
                          '可用 status --task-id 配合 --output 重试下载。') from exc
     finally:
         if temporary is not None:

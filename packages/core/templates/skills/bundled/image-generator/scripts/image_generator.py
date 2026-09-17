@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """Calculate image cost and generate images through Deep Code Plus."""
 
+# 兼容 Python 3.9-：延迟求值类型注解，避免 `str | None` 在旧解释器上于函数定义时报错
+from __future__ import annotations
+
 import argparse
 import base64
 import json
 import mimetypes
-import secrets
 import socket
 import sys
-import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -51,15 +53,20 @@ def load_plus_api_key(settings_path: Path) -> str:
 
 
 def get_machine_id() -> str | None:
+    """隐私加固（2026-09-17 审计）：与 CLI 侧 getMachineId 逻辑对齐。
+
+    标识为纯随机 UUID（crypto 级随机，不含主机名/时间戳等 PII）；
+    若检测到旧版生成的 `${hostname}-...` 标识（含主机名，属潜在 PII），
+    自动重新生成并覆盖写回，消除历史残留。文件不可用时返回 None（调用方容忍缺失）。
+    """
     try:
         if MACHINE_ID_PATH.exists():
             machine_id = MACHINE_ID_PATH.read_text(encoding='utf-8').strip()
-            if machine_id:
+            # 空内容或包含主机名的旧版标识均视为无效，重新生成
+            if machine_id and socket.gethostname() not in machine_id:
                 return machine_id
 
-        random_part = secrets.token_hex(8)
-        timestamp = int(time.time() * 1000)
-        machine_id = f'{socket.gethostname()}-{random_part}-{timestamp}'
+        machine_id = str(uuid.uuid4())
         MACHINE_ID_PATH.parent.mkdir(parents=True, exist_ok=True)
         MACHINE_ID_PATH.write_text(machine_id, encoding='utf-8')
         return machine_id

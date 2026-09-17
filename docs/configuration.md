@@ -350,6 +350,8 @@ DEEPCODE_TELEMETRY_ENABLED=1 deepcode
 | 遥测上报（opt-in） | `https://deepcode.vegamo.cn/api/plugin/new` | 空请求体 + 匿名标识（随机 UUID） | 默认关闭；`telemetryEnabled: true` 开启 |
 | 版本更新检查 | npm registry（官方源或腾讯镜像） | 仅包名与当前版本 | 自动；无用户数据 |
 | 视频生成技能 | `https://deepcode.vegamo.cn/api` 与 `https://files.vegamo.cn` | 用户指定的图片/视频/音频素材（执行前需用户确认积分并拒绝密钥类文件） | 不调用该技能即不触发 |
+| 图片生成技能 | `https://deepcode.vegamo.cn/api/plugin/image-gen` 及费用计算端点 | 生图 prompt 与用户指定的参考图片（base64），携带匿名标识（纯随机 UUID） | 不调用该技能即不触发 |
+| 图片 Files API（VS Code 扩展，opt-in） | `https://api.deepseek.com`（Files API） | 启用 `filesApiEnabled` 后上传的图片文件 | 默认关闭；不开启该配置即不触发 |
 | MCP 服务器 | 用户在 `mcpServers` 中配置的地址 | 工具调用参数 | 移除对应配置 |
 | 通知脚本 | 用户在 `notify` 中配置的命令 | 会话摘要等参数 | 移除配置 |
 
