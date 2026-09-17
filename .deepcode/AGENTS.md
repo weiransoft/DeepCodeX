@@ -4,15 +4,16 @@
 
 npm workspaces monorepo under `packages/`.
 
-- `packages/core/src/` — `session.ts` (LLM loop, streaming, retry, compaction), `tools/` (10 handlers), `common/` (permissions, OpenAI client, model capabilities, file history), `mcp/`, `templates/`.
-- `packages/cli/src/` — Ink/React terminal UI (`cli.tsx`, `ui/views`, `ui/components`, `ui/core`, `ui/hooks`); `packages/vscode-ide-companion/` — VSCode companion.
+- `packages/core/src/` — `session.ts` (LLM loop, streaming, retry, compaction), `tools/` (10 handlers), `common/` (permissions, OpenAI client, capabilities, file history), `mcp/`, `templates/`.
+- `packages/cli/src/` — Ink/React TUI (`cli.tsx`, `cli-args.ts`, `ui/`); `packages/vscode-ide-companion/` — VSCode companion.
 - `docs/` — user docs; `scripts/` — build/release tooling; `dist/` — bundled output (gitignored).
 
 ## Build, Test, and Development Commands
 
-- `npm run check` — typecheck/lint/format check; `npm test` — all workspace tests.
-- `npm run build` — full build; `npm run bundle` — esbuild bundle + git info; `npm run start` — run the built CLI.
-- Single test: `node packages/core/src/tests/run-tests.mjs packages/core/src/tests/session.test.ts`.
+- `npm run check` — typecheck/lint/format; `npm test` — workspace tests.
+- `npm run build` — full build; `npm run bundle` — esbuild bundle; `npm run start` — run the CLI.
+- Single test: `node --import tsx --test packages/core/src/tests/session.test.ts`.
+- Release: `npm run release:version -- <bump>`, then `npm run prepare:package` / `prepare:vscode` (`RELEASE.md`; `v0.4.0`).
 
 ## Coding Style & Naming Conventions
 
@@ -22,27 +23,26 @@ npm workspaces monorepo under `packages/`.
 
 ## Testing Guidelines
 
-- Node native test runner (`node:test`) via `tsx`; assertions with `node:assert/strict`.
-- Tests live in `packages/*/src/tests/`, named after the source module. Run `npm test` before PRs.
+- Node native test runner (`node:test`) via `tsx` with `node:assert/strict`.
+- Tests live in `packages/*/src/tests/`, named after the source module; run `npm test` before PRs.
 
 ## Commit & Pull Request Guidelines
 
 - Conventional commits: `feat:`, `fix:`, `chore:`, `refactor:`, `style:`, `test:`, `docs:`, `perf:`, `build:`.
-- PRs: clear description, linked issues, UI screenshots, passing `npm run check && npm test`, no unintended `dist/`/`package-lock.json` changes.
+- PRs: clear description, linked issues, UI screenshots, passing `npm run check && npm test`, no unintended `dist/`/lockfile changes.
 
 ## Architecture Overview
 
-- `@vegamo/deepcode-cli` (Ink TUI) uses `SessionManager` (`@vegamo/deepcode-core`) to drive the LLM loop: prompts, streaming preview, tools, retry, compaction.
-- Connectivity: `createOpenAIClient()` (180s keep-alive) with DeepCode Plus fallback; `describeLlmError()` normalizes errors.
-- Tools: 10 built-ins — `bash`, `read`, `write`, `edit`, `skill`, `AskUserQuestion`, `UpdatePlan`, `WebSearch`, `ReadImage`, `UnderstandImage`; `read` returns a `snippet_id` for `edit`.
-- Images: `supportsMultimodal()` + `multimodal` choose `ReadImage` vs `UnderstandImage`; `filesApiEnabled` uploads via the DeepSeek Files API.
-- Permissions: 12 scopes incl. `read-in-tmp`/`write-in-tmp`; `addWorkingDirs` extends the workspace; `file-history.ts` provides undo.
-- Models: default `deepseek-flash` (V4.1 Flash); `/model` offers `deepseek-flash`, `deepseek-v4-pro`, `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp` with thinking effort `low`/`high`/`max`.
-- Slash commands: `/skills`, `/model`, `/plan`, `/new`, `/init`, `/resume`, `/fork`, `/continue`, `/undo`, `/mcp`, `/raw`, `/exit`, plus dynamic `/skill-name`. Plan Mode gates writes behind `<proposed_plan>` approval.
+- `@vegamo/deepcode-cli` (Ink TUI) drives the LLM loop via `SessionManager` (`@vegamo/deepcode-core`) over a 180s keep-alive `createOpenAIClient()` with DeepCode Plus fallback.
+- Built-in tools: `bash`, `read`, `write`, `edit`, `skill`, `AskUserQuestion`, `UpdatePlan`, `WebSearch`, `ReadImage`, `UnderstandImage`; `read` returns a `snippet_id` for `edit`, and `supportsMultimodal()` picks the matching image tool.
+- `bash` bounds output draining after exit/timeout so a held pipe cannot hang a session, captures native cwd on Windows Git Bash; `run_in_background` handles detached work.
+- Permissions: 12 scopes including `read-in-tmp`/`write-in-tmp`; `addWorkingDirs` extends the workspace; `file-history.ts` provides undo.
+- Models: default `deepseek-flash`; `/model` offers `deepseek-v4-pro`, `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp` (effort `low`/`high`/`max`).
+- Commands: `/skills`, `/model`, `/plan`, `/new`, `/init`, `/resume`, `/fork`, `/continue`, `/undo`, `/mcp`, `/raw`, `/exit`; Plan Mode gates writes behind `<proposed_plan>`.
 - CLI flags: `-p`, `-x`, `-r`, `-f`, `-l`, `-v`, `-h`.
 
 ## Agent-Specific Instructions
 
-- AGENTS.md loads from `./.deepcode/AGENTS.md`, `./AGENTS.md`, then `~/.deepcode/AGENTS.md` (first found wins).
-- Skills load from `./.deepcode/skills`, `./.agents/skills`, or `~` equivalents; call the `skill` tool. Bundled: `deepcode-self-refer`, `image-generator`, `video-generator`, `skill-digester`, `skill-writer`.
+- AGENTS.md loads from `./.deepcode/AGENTS.md`, `./AGENTS.md`, then `~/.deepcode/AGENTS.md` (first wins).
+- Skills load from `./.deepcode/skills`, `./.agents/skills`, or `~` equivalents via the `skill` tool. Bundled: `deepcode-self-refer`, `image-generator`, `video-generator` (+`references/`, `scripts/`), `skill-digester`, `skill-writer`.
 - File references: `@path/to/file`.
