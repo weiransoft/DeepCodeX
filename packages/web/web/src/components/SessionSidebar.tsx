@@ -105,6 +105,12 @@ export function SessionSidebar(props: SessionSidebarProps) {
             </select>
           </label>
         )}
+        {/* 空白名单引导（第一次启动未配置 web.allowRoots 时）：明确告知配置方法而非报 400 */}
+        {allowRoots.length === 0 && (
+          <div className="project-root-empty" title="新建对话前需要先配置允许访问的项目目录">
+            未配置项目根目录：请在 ~/.deepcode/settings.json 的 web.allowRoots 中添加目录后重启服务
+          </div>
+        )}
       </div>
 
       {/* 历史会话列表（P0-1：主键为 chatId；状态点对齐引擎 SessionStatus 的 processing） */}

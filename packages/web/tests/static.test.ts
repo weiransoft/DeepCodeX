@@ -79,6 +79,31 @@ test("static：带扩展名的缺失资源应 404（不得误回 HTML）", async
   assert.match(body.error, /资源不存在/);
 });
 
+test("static：内置 favicon（/favicon.ico 与 /favicon.svg）应 200 返回 SVG（不依赖 dist）", async () => {
+  // dist 已存在的服务器：两条路径都返回内置 SVG，消除浏览器 favicon 404 噪音
+  for (const route of ["/favicon.ico", "/favicon.svg"]) {
+    const response = await fetch(`http://127.0.0.1:${server.port}${route}`);
+    assert.equal(response.status, 200, `${route} 必须 200`);
+    assert.match(response.headers.get("content-type") ?? "", /image\/svg\+xml/);
+    const body = await response.text();
+    assert.ok(body.includes("<svg"), "响应体必须是 SVG 图标");
+  }
+
+  // dist 不存在的服务器：favicon 依然可用（内置资源不依赖构建产物）
+  const bareServer = await startWebServer(
+    createResolvedSettings({ auth: { jwtSecret: "placeholder-secret", sessionTtlSeconds: 60 } }),
+    { staticDir: path.join(tmpRoot, "dist-does-not-exist") }
+  );
+  try {
+    const response = await fetch(`http://127.0.0.1:${bareServer.port}/favicon.ico`);
+    assert.equal(response.status, 200, "dist 未构建时 favicon 仍必须 200");
+    assert.match(response.headers.get("content-type") ?? "", /image\/svg\+xml/);
+    await response.text();
+  } finally {
+    await bareServer.close();
+  }
+});
+
 test("static：静态路径穿越（%2e%2e）应被拦截（404，绝不回包白名单外内容）", async () => {
   // 构造 dist 外的机密文件
   const secretPath = path.join(path.dirname(staticDir), "secret.html");

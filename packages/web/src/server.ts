@@ -113,10 +113,20 @@ function sendPlaceholderPage(res: ServerResponse, port: number): void {
   res.end(html);
 }
 
+/** 内置 favicon（对话气泡 SVG，消除 dist 无图标文件时的 404 噪音） */
+const FAVICON_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">' +
+  '<rect x="1" y="2" width="14" height="10" rx="3" fill="#4f8ef7"/>' +
+  '<path d="M5 12 L5 15 L9 12 Z" fill="#4f8ef7"/>' +
+  '<circle cx="5.5" cy="7" r="1.2" fill="#fff"/>' +
+  '<circle cx="8" cy="7" r="1.2" fill="#fff"/>' +
+  '<circle cx="10.5" cy="7" r="1.2" fill="#fff"/></svg>';
+
 /**
  * 静态资源处理（非 /api 路径的 GET/HEAD）。
  *
  * 规则：
+ * - /favicon.ico 与 /favicon.svg 返回内置 SVG 图标（不依赖构建产物）；
  * - dist 存在时：请求路径映射到 dist 内文件（路径归一 + 前缀校验防穿越）；
  *   文件存在则按 MIME 返回；不存在则 SPA fallback 返回 index.html；
  * - dist 不存在时：一律返回提示页。
@@ -134,6 +144,16 @@ function serveStatic(
   staticDir: string,
   port: number
 ): void {
+  // 内置 favicon：任何形态的部署（含 dist 未构建）都不再 404
+  if (pathname === "/favicon.ico" || pathname === "/favicon.svg") {
+    res.writeHead(200, {
+      "Content-Type": "image/svg+xml",
+      "Cache-Control": "public, max-age=86400",
+      "X-Content-Type-Options": "nosniff",
+    });
+    res.end(req.method === "HEAD" ? undefined : FAVICON_SVG);
+    return;
+  }
   if (!existsSync(staticDir)) {
     sendPlaceholderPage(res, port);
     return;

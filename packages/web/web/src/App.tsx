@@ -356,6 +356,12 @@ export function App() {
   /** 新建对话（projectRoot 来自侧栏选择；本地列表项字段与后端 ChatSummary 契约对齐） */
   const newChat = useCallback((): void => {
     if (creatingChat) return;
+    // 空根防御（第一次启动 allowRoots 未配置时 projectRoot 为空字符串）：
+    // 不发必然 400 的请求，直接提示配置方法（docs/dev/web-ui.md §3.3 allowRoots 说明）
+    if (projectRoot === "") {
+      showToast("未配置可用的项目根目录：请在 ~/.deepcode/settings.json 的 web.allowRoots 中添加目录后重启");
+      return;
+    }
     setCreatingChat(true);
     createChat(projectRoot)
       .then(({ chatId }) => {
