@@ -115,6 +115,84 @@ export type StatusLineSettings = {
   providers?: StatusLineProviderConfig[];
 };
 
+/**
+ * Web 对话界面本地兜底用户（docs/dev/web-ui.md §3.3）。
+ *
+ * LDAP 不可用/未启用时，允许以 settings.json 中预置的本地账号登录。
+ * passwordHash 为 sha256(password) 的 hex 编码，明文密码绝不落盘。
+ */
+export type WebLocalUserSettings = {
+  /** 登录用户名（唯一标识） */
+  username: string;
+  /** sha256(password) hex 值 */
+  passwordHash: string;
+  /** 显示名（可选，缺省用 username） */
+  displayName?: string;
+};
+
+/** Web 认证配置子节（docs/dev/web-ui.md §3.3） */
+export type WebAuthSettings = {
+  /** JWT 签名密钥（必填；可被环境变量 DEEPCODE_WEB_JWT_SECRET 覆盖） */
+  jwtSecret?: string;
+  /** 会话有效期（秒），默认 28800（8 小时） */
+  sessionTtlSeconds?: number;
+  /** 本地兜底用户列表（可选；LDAP 失败/未启用时使用） */
+  localUsers?: WebLocalUserSettings[];
+};
+
+/**
+ * Web LDAP 配置子节（对齐 qa-audit LDAP 配置键，docs/dev/web-ui.md §3.3）。
+ *
+ * 认证流程：服务账号 bind → 按用户名搜索条目 → 用户 DN + 密码二次 bind 验证。
+ */
+export type WebLdapSettings = {
+  /** 是否启用 LDAP 登录（默认 false，走 localUsers 兜底） */
+  enabled?: boolean;
+  /** LDAP 服务器主机名/IP（启用时必填） */
+  server?: string;
+  /** 端口，默认 useSsl ? 636 : 389 */
+  port?: number;
+  /** 是否使用 ldaps://（默认 false） */
+  useSsl?: boolean;
+  /** 服务账号 DN（未配置时尝试匿名 bind） */
+  bindDn?: string;
+  /** 服务账号密码（可被环境变量 DEEPCODE_WEB_LDAP_BIND_PASSWORD 覆盖） */
+  bindPassword?: string;
+  /** 搜索基准 DN（启用时必填） */
+  baseDn?: string;
+  /** 用户过滤模板，支持 %s 占位（如 "(uid=%s)"）；无占位时追加 (uid=%s) */
+  userFilter?: string;
+  /** 连接/搜索超时（毫秒），默认 10000 */
+  timeoutMs?: number;
+  /** 属性映射（LDAP 属性名 → 展示字段，如 {"mail":"mail","displayName":"displayName"}） */
+  attrs?: Record<string, string>;
+};
+
+/**
+ * Web 对话界面配置子树（docs/dev/web-ui.md §3.3）。
+ *
+ * 原始（未归一）配置类型：解析与默认值归一在 packages/web/src/config.ts 中完成，
+ * 产出 ResolvedWebSettings（含全部默认值）；core 侧仅承载类型定义。
+ */
+export type WebSettings = {
+  /** 是否启用 Web 界面（默认 false；显式开启才允许 `deepcode web` 启动） */
+  enabled?: boolean;
+  /** 监听地址，默认 127.0.0.1（仅本机）；0.0.0.0 需显式配置 */
+  host?: string;
+  /** 监听端口，默认 3210 */
+  port?: number;
+  /** 目录浏览/上传/下载白名单根目录（支持 ~ 展开；空则文件功能禁用） */
+  allowRoots?: string[];
+  /** 聊天附件暂存目录，默认 ~/.deepcode/web-uploads */
+  uploadDir?: string;
+  /** 单文件上传上限（字节），默认 50MB */
+  maxUploadBytes?: number;
+  /** 认证配置 */
+  auth?: WebAuthSettings;
+  /** LDAP 配置 */
+  ldap?: WebLdapSettings;
+};
+
 export type ResolvedStatusLineSettings = {
   enabled: boolean;
   refreshMs: number;
@@ -161,6 +239,11 @@ export type DeepcodingSettings = {
    * 使用 Record<string, unknown> 以兼容 schema 演进，实际校验在 mergeV2Config 中进行。
    */
   v2?: Record<string, unknown>;
+  /**
+   * Web 对话界面配置子树（docs/dev/web-ui.md §3.3）。
+   * 由 packages/web 的 `deepcode web` 子命令消费；TUI/exec 路径不读取此节。
+   */
+  web?: WebSettings;
 };
 
 export type ResolvedDeepcodingSettings = {

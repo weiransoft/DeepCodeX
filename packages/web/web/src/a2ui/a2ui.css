@@ -1,0 +1,359 @@
+/**
+ * A2UI 渲染层样式（卡片 / 代码块 / 表格 / 图表配色变量 / 兜底组件）。
+ *
+ * 主题策略：浅色为主，深色跟随系统（prefers-color-scheme），
+ * 全部颜色经 CSS 变量定义，与全局 styles.css 的变量体系保持一致。
+ */
+
+/* ============ 图表配色变量（深浅主题各一套，供 chart.tsx 引用） ============ */
+:root {
+  --a2ui-chart-1: #4d6bfe;
+  --a2ui-chart-2: #10b981;
+  --a2ui-chart-3: #f59e0b;
+  --a2ui-chart-4: #ef4444;
+  --a2ui-chart-5: #8b5cf6;
+  --a2ui-chart-6: #06b6d4;
+  --a2ui-surface: #ffffff; /* 扇区描边色（与卡片底色一致） */
+  --a2ui-chart-grid: #ececec;
+  --a2ui-chart-axis: #8a8f99;
+  --a2ui-chart-title: #34373d;
+  --a2ui-chart-legend: #595b63;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --a2ui-chart-1: #6b85ff;
+    --a2ui-chart-2: #34d399;
+    --a2ui-chart-3: #fbbf24;
+    --a2ui-chart-4: #f87171;
+    --a2ui-chart-5: #a78bfa;
+    --a2ui-chart-6: #22d3ee;
+    --a2ui-surface: #292a2d;
+    --a2ui-chart-grid: #3a3b3e;
+    --a2ui-chart-axis: #9a9ea6;
+    --a2ui-chart-title: #e2e3e6;
+    --a2ui-chart-legend: #b3b6bd;
+  }
+}
+
+/* ============ surface 根容器 ============ */
+.a2ui-surface {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* ============ 文本 ============ */
+.a2ui-text {
+  white-space: pre-wrap; /* 保留段落内的换行（聊天场景友好） */
+  overflow-wrap: anywhere;
+  line-height: 1.65;
+  color: var(--app-text);
+}
+
+.a2ui-text-mono {
+  margin: 0;
+  padding: 12px 14px;
+  font-family: var(--app-font-mono);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-x: auto;
+  color: var(--app-text);
+  background: var(--app-bg-code);
+  border-radius: 0 0 8px 8px;
+  tab-size: 4;
+}
+
+.a2ui-text-quote {
+  margin: 0;
+  padding: 6px 12px;
+  border-left: 3px solid var(--app-border-strong);
+  color: var(--app-text-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--app-bg-subtle);
+  border-radius: 0 6px 6px 0;
+}
+
+.a2ui-inline-code {
+  font-family: var(--app-font-mono);
+  font-size: 0.9em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--app-bg-code);
+  border: 1px solid var(--app-border);
+}
+
+.a2ui-inline-link {
+  color: var(--app-accent);
+  text-decoration: none;
+}
+.a2ui-inline-link:hover {
+  text-decoration: underline;
+}
+
+/* ============ 标题 ============ */
+.a2ui-heading {
+  margin: 4px 0 0;
+  color: var(--app-text);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.a2ui-heading-1 { font-size: 1.4em; font-weight: 700; }
+.a2ui-heading-2 { font-size: 1.28em; font-weight: 700; }
+.a2ui-heading-3 { font-size: 1.16em; font-weight: 600; }
+.a2ui-heading-4 { font-size: 1.06em; font-weight: 600; }
+.a2ui-heading-5 { font-size: 1em; font-weight: 600; }
+.a2ui-heading-6 { font-size: 0.95em; font-weight: 600; color: var(--app-text-secondary); }
+
+/* ============ 卡片（代码块等） ============ */
+.a2ui-card {
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-bg-code);
+  overflow: hidden;
+  min-width: 0;
+}
+
+.a2ui-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px 5px 12px;
+  background: var(--app-bg-card-header);
+  border-bottom: 1px solid var(--app-border);
+}
+
+.a2ui-card-title {
+  font-family: var(--app-font-mono);
+  font-size: 12px;
+  color: var(--app-text-secondary);
+  user-select: none;
+}
+
+.a2ui-card-body {
+  min-width: 0;
+}
+
+/* 复制按钮：图标直显 + 轻量反馈文案 */
+.a2ui-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--app-text-secondary);
+  cursor: pointer;
+  line-height: 1;
+}
+.a2ui-copy-btn:hover {
+  background: var(--app-bg-hover);
+  color: var(--app-text);
+}
+.a2ui-copy-feedback {
+  font-size: 11px;
+  color: var(--app-text-secondary);
+}
+
+/* ============ 布局容器（Row / Column / List） ============ */
+.a2ui-row {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 8px;
+  min-width: 0;
+}
+
+.a2ui-column {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* 表格由 List→Row→Column 组成：行间细分隔线，单元格均分宽度 */
+.a2ui-list-vertical {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  overflow: hidden;
+  min-width: 0;
+  overflow-x: auto;
+}
+.a2ui-list-horizontal {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* 表格行：奇偶斑马纹；首行（表头）加底色 */
+.a2ui-list-vertical > .a2ui-row {
+  border-bottom: 1px solid var(--app-border);
+  flex: 1 1 0;
+}
+.a2ui-list-vertical > .a2ui-row:last-child {
+  border-bottom: none;
+}
+.a2ui-list-vertical > .a2ui-row:nth-child(odd):not(:first-child) {
+  background: var(--app-bg-subtle);
+}
+.a2ui-list-vertical > .a2ui-row:first-child {
+  background: var(--app-bg-card-header);
+}
+
+/* 表格单元格：均分列宽，内边距与正文文本 */
+.a2ui-list-vertical > .a2ui-row > .a2ui-column {
+  flex: 1 1 0;
+  min-width: 88px;
+  gap: 0;
+  padding: 7px 10px;
+}
+.a2ui-list-vertical > .a2ui-row > .a2ui-column + .a2ui-column {
+  border-left: 1px solid var(--app-border);
+}
+.a2ui-list-vertical .a2ui-text {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ============ 分隔线 ============ */
+.a2ui-divider {
+  border: none;
+  border-top: 1px solid var(--app-border);
+  margin: 2px 0;
+}
+
+/* ============ 图片 ============ */
+.a2ui-image {
+  max-width: min(420px, 100%);
+  border-radius: 8px;
+  border: 1px solid var(--app-border);
+  display: block;
+}
+
+.a2ui-image-invalid {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px dashed var(--app-border-strong);
+  border-radius: 8px;
+  color: var(--app-text-secondary);
+  font-size: 13px;
+}
+
+/* ============ 按钮 ============ */
+.a2ui-button-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.a2ui-button {
+  padding: 5px 14px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 6px;
+  background: var(--app-bg-elevated);
+  color: var(--app-text);
+  font-size: 13px;
+  cursor: pointer;
+}
+.a2ui-button:hover {
+  background: var(--app-bg-hover);
+}
+.a2ui-button-hint {
+  font-size: 12px;
+  color: var(--app-text-secondary);
+}
+
+/* ============ 图表（SVG 内文字元素） ============ */
+.a2ui-chart {
+  width: 100%;
+  max-width: 640px;
+  height: auto;
+  display: block;
+}
+.a2ui-chart .a2ui-chart-title {
+  font-size: 15px;
+  font-weight: 600;
+  fill: var(--a2ui-chart-title);
+}
+.a2ui-chart .a2ui-chart-grid {
+  stroke: var(--a2ui-chart-grid);
+  stroke-width: 1;
+}
+.a2ui-chart .a2ui-chart-axisline {
+  stroke: var(--a2ui-chart-axis);
+  stroke-width: 1;
+}
+.a2ui-chart .a2ui-chart-axis {
+  font-size: 11px;
+  fill: var(--a2ui-chart-axis);
+}
+.a2ui-chart .a2ui-chart-value {
+  font-size: 10px;
+  fill: var(--a2ui-chart-legend);
+}
+.a2ui-chart .a2ui-chart-legend {
+  font-size: 12px;
+  fill: var(--a2ui-chart-legend);
+}
+.a2ui-chart .a2ui-chart-pct {
+  font-size: 11px;
+  font-weight: 600;
+  fill: #ffffff;
+  paint-order: stroke;
+  stroke: rgba(0, 0, 0, 0.35);
+  stroke-width: 2.5px;
+}
+.a2ui-chart .a2ui-chart-hint {
+  font-size: 11px;
+  fill: var(--a2ui-chart-axis);
+}
+.a2ui-chart .a2ui-chart-empty {
+  font-size: 14px;
+  fill: var(--a2ui-chart-axis);
+}
+
+/* ============ 兜底组件（未实现原语） ============ */
+.a2ui-fallback {
+  position: relative;
+  padding: 10px 12px;
+  border: 1px dashed var(--app-border-strong);
+  border-radius: 8px;
+  background: var(--app-bg-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.a2ui-fallback-badge {
+  align-self: flex-start;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--app-bg-badge);
+  color: var(--app-text-secondary);
+  letter-spacing: 0.3px;
+}
+.a2ui-fallback-line {
+  font-size: 13px;
+  color: var(--app-text);
+  overflow-wrap: anywhere;
+}
+
+/* 缺失组件 / 渲染异常占位 */
+.a2ui-missing {
+  font-size: 12px;
+  color: var(--app-text-tertiary);
+  padding: 4px 0;
+}

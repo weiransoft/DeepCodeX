@@ -1,0 +1,214 @@
+/**
+ * Web 后端 API DTO 类型与配置解析产物类型（docs/dev/web-ui.md §3.3 / §3.5）。
+ *
+ * 本文件只承载类型定义，不含运行时逻辑；
+ * ResolvedWebSettings 由 src/config.ts 的 resolveWebSettings 产出。
+ */
+
+import type { SessionStatus, WebLocalUserSettings } from "@vegamo/deepcode-core";
+
+/**
+ * Web 配置解析产物（全部默认值已归一、路径已展开）。
+ *
+ * 由 resolveWebSettings(projectRoot, env) 构造；
+ * jwtSecret 已通过 env（DEEPCODE_WEB_JWT_SECRET）覆盖归一，启动前保证非空。
+ */
+export type ResolvedWebSettings = {
+  /** 配置解析时使用的项目根目录（决定项目级 settings.json 位置） */
+  projectRoot: string;
+  /** 是否允许 `deepcode web` 启动（默认 false，显式开启才允许） */
+  enabled: boolean;
+  /** 监听地址（默认 127.0.0.1，仅本机） */
+  host: string;
+  /** 监听端口（默认 3210） */
+  port: number;
+  /**
+   * 目录浏览/上传/下载白名单根目录（已做 ~ 展开 + path.resolve）。
+   * 空数组合法，此时文件类端点一律 403。
+   */
+  allowRoots: string[];
+  /** 聊天附件暂存目录（默认 ~/.deepcode/web-uploads） */
+  uploadDir: string;
+  /** 单文件上传上限（字节，默认 50MB） */
+  maxUploadBytes: number;
+  /** 认证配置（已归一） */
+  auth: {
+    /** JWT 签名密钥（启动 fail-fast 保证非空） */
+    jwtSecret: string;
+    /** 会话有效期（秒，默认 28800 即 8 小时） */
+    sessionTtlSeconds: number;
+    /** 本地兜底用户列表（LDAP 未启用/失败时使用） */
+    localUsers: WebLocalUserSettings[];
+  };
+  /** LDAP 配置（已归一） */
+  ldap: {
+    /** 是否启用 LDAP 登录 */
+    enabled: boolean;
+    /** LDAP 服务器主机名/IP */
+    server: string;
+    /** 端口（默认 useSsl ? 636 : 389） */
+    port: number;
+    /** 是否使用 ldaps:// */
+    useSsl: boolean;
+    /** 服务账号 DN（未配置时匿名 bind） */
+    bindDn?: string;
+    /** 服务账号密码（可被 DEEPCODE_WEB_LDAP_BIND_PASSWORD 覆盖） */
+    bindPassword?: string;
+    /** 搜索基准 DN */
+    baseDn: string;
+    /** 用户过滤模板（支持 %s 占位，默认 "(uid=%s)"） */
+    userFilter: string;
+    /** 连接/操作超时（毫秒，默认 10000） */
+    timeoutMs: number;
+    /** 属性映射（LDAP 属性名 → 展示字段） */
+    attrs: Record<string, string>;
+  };
+};
+
+/** POST /api/auth/login 请求体 */
+export type LoginRequest = {
+  username?: unknown;
+  password?: unknown;
+};
+
+/** 登录成功响应 / GET /api/auth/me 响应体 */
+export type LoginResponse = {
+  username: string;
+  displayName?: string;
+  mail?: string;
+  /** 认证来源：ldap = LDAP 目录认证；local = settings.json 本地兜底用户 */
+  authSource: "ldap" | "local";
+};
+
+/**
+ * JWT 载荷（HS256，node:crypto 自实现）。
+ *
+ * sub 为登录用户名；dn/displayName/mail 来自 LDAP 属性；authSource 供 /me 回显。
+ */
+export type JwtPayload = {
+  sub: string;
+  dn?: string;
+  displayName?: string;
+  mail?: string;
+  authSource?: "ldap" | "local";
+  iat: number;
+  exp: number;
+};
+
+/** GET /api/chats 返回的会话摘要 */
+export type ChatSummary = {
+  /** Web 会话 id（SessionPool 内部分配，与底层 sessionId 不同） */
+  chatId: string;
+  /** 底层 SessionManager 会话 id（首个消息发出前为 null） */
+  sessionId: string | null;
+  /** 会话所属项目根目录 */
+  projectRoot: string;
+  /** 会话标题摘要（取 SessionEntry.summary，可能为 null） */
+  title: string | null;
+  /** 底层引擎状态 */
+  status: SessionStatus;
+  createTime: string;
+  updateTime: string;
+  /** 来源：active = 本进程 SessionPool 内活跃；history = 磁盘 sessions-index.json 历史 */
+  source: "active" | "history";
+};
+
+/** GET/POST /api/chats/:id/messages 中的消息 DTO */
+export type ChatMessageDto = {
+  id: string;
+  role: string;
+  /** 消息文本（可能为 null） */
+  content: string | null;
+  /** 是否对用户可见（工具执行等隐藏消息为 false） */
+  visible: boolean;
+  createTime: string;
+  updateTime: string;
+};
+
+/** POST /api/chats/:id/messages 请求体（JSON 形态） */
+export type SendMessageRequest = {
+  text?: unknown;
+  imageUrls?: unknown;
+  permissions?: unknown;
+  alwaysAllows?: unknown;
+};
+
+/**
+ * POST /api/chats/:id/messages 响应体（202 异步受理，docs/dev/web-ui.md §3.5）。
+ *
+ * POST 返回 202 仅表示「受理成功」：整轮 handleUserPrompt 已入队
+ * session-pool 串行队列异步执行，本轮全部事件（llm_delta / assistant_message /
+ * tool_progress / permission_request / status / done）经 SSE 推送，
+ * 最终引擎状态以 SSE done 事件载荷为准（本响应不含 status 字段）。
+ */
+export type SendMessageResponse = {
+  /** 受理成功标志（恒为 true） */
+  ok: true;
+  /** Web 会话 id */
+  chatId: string;
+  /**
+   * 受理时已知的底层 SessionManager 会话 id。
+   * 允许为 null：首轮消息受理时底层会话尚未创建（或历史恢复失败），
+   * 此刻没有可归属的底层会话；最终 sessionId 以 SSE done 事件载荷为准，
+   * 前端不得假定本字段一定非空。
+   */
+  sessionId: string | null;
+};
+
+/**
+ * SSE done 事件载荷（本轮 handleUserPrompt 结束时推送，docs/dev/web-ui.md §3.5）。
+ *
+ * 承诺语义：无论轮次成功、中断还是异常，订阅方都必然收到一帧 done，
+ * 不会悬死等待（异常路径 status 固定 "failed" 并携带 error 摘要）。
+ */
+export type DoneEvent = {
+  /** Web 会话 id */
+  chatId: string;
+  /**
+   * 底层引擎会话 id：允许为 null——轮次在引擎创建底层会话之前即失败等场景下，
+   * 没有可归属的底层会话；前端不应假定该字段一定非空。
+   */
+  sessionId: string | null;
+  /** 本轮结束时的引擎状态（轮次异常路径固定为 "failed"） */
+  status: SessionStatus;
+  /** 仅 status="failed" 时携带：错误摘要（中文），供前端提示展示 */
+  error?: string;
+};
+
+/**
+ * SSE 事件名（docs/dev/web-ui.md §3.5）。
+ *
+ * - llm_delta：LLM 流式文本增量（phase: start|update|end + previewText）
+ * - assistant_message：完整助手消息
+ * - tool_progress：工具执行进度（来自 onSessionEntryUpdated 的通用状态流，保留扩展点）
+ * - permission_request：引擎请求权限审批（askPermissions 明细）
+ * - status：会话状态变化
+ * - done：本轮 handleUserPrompt 结束
+ */
+export type SseEventName =
+  | "llm_delta"
+  | "assistant_message"
+  | "tool_progress"
+  | "permission_request"
+  | "status"
+  | "done";
+
+/** GET /api/files?path= 返回的目录条目 */
+export type FileEntry = {
+  name: string;
+  /** dir = 目录；file = 普通文件 */
+  type: "file" | "dir";
+  /** 文件大小（字节；目录为 0） */
+  size: number;
+  /** 最后修改时间（ISO 字符串） */
+  mtime: string;
+};
+
+/** GET /api/config 响应体（脱敏，绝不返回密钥） */
+export type PublicWebConfig = {
+  enabled: boolean;
+  /** 已展开的绝对路径白名单 */
+  allowRoots: string[];
+  maxUploadBytes: number;
+  ldapEnabled: boolean;
+};

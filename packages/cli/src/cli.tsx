@@ -13,6 +13,8 @@ import { getPackageJson } from "./utils/package";
 import { CLI_VERSION } from "./generated/git-commit";
 // 上游 v0.3.1 新增：--exec 非交互模式运行器（exec-runner.ts / exec-input.ts）
 import { runExecMode } from "./exec-runner";
+// fork 扩展：`deepcode web` 子命令——启动进程内 Web 对话服务器（docs/dev/web-ui.md）
+import { runWebCommand } from "./web-command";
 
 void main();
 
@@ -226,6 +228,13 @@ async function main(): Promise<void> {
       writeStderrLine("No previous sessions found for the current project.\n");
       process.exit(1);
     }
+  }
+
+  // fork 扩展：`deepcode web` 子命令——启动 Web 对话服务器（阻塞运行直至 SIGINT/SIGTERM）
+  // runWebCommand 内部自行解析 settings.json 的 web 节与环境变量，CLI 仅透传 --host/--port 覆盖
+  if (parsed.web) {
+    await runWebCommand({ host: parsed.web.host, port: parsed.web.port });
+    return;
   }
 
   // 上游 v0.3.1：--exec 非交互模式，运行单个 prompt 后退出（不进入 TUI）

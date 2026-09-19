@@ -56,6 +56,10 @@ export type {
   StatusLineSettings,
   ResolvedStatusLineSettings,
   StatusLineProviderConfig,
+  WebSettings,
+  WebAuthSettings,
+  WebLdapSettings,
+  WebLocalUserSettings,
 } from "./settings";
 
 // Session
