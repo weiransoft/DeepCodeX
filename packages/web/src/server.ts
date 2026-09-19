@@ -16,8 +16,10 @@ import { fileURLToPath } from "node:url";
 import http, { type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { SseHub } from "./events";
 import { ApiError, sendJson } from "./http-utils";
-import { buildJailRoots } from "./jail";
+import { buildJailRoots, realpathAllowMissing } from "./jail";
 import { authenticateRequest } from "./auth/middleware";
+import { buildAuthContext, type AuthContext } from "./user-identity";
+import { getPersonalJailRoots } from "./user-files";
 import { handleLogin, handleLogout, handleMe } from "./api/auth-api";
 import {
   handleCreateChat,
@@ -194,13 +196,47 @@ export async function startWebServer(
   const hub = new SseHub();
   // 牢笼白名单：启动时一次 realpath 归一（不可用根跳过，空牢笼一律 403）
   const jailRoots = await buildJailRoots(resolved.allowRoots);
+  // 安全配置告警（docs/dev/web-isolation.md §3.5）：uploadDir 落于任一 allowRoot 内时，
+  // shared scope 浏览可触达全体用户的个人区与聊天附件（R3 隔离被配置削弱）。
+  // 行为不阻断启动（向后兼容既有部署），但必须显式提醒管理员修正配置。
+  if (jailRoots.length > 0) {
+    // uploadDir 可能尚未创建（首次使用前）：realpathAllowMissing 对最近存在祖先归一
+    const uploadRoot = await realpathAllowMissing(path.resolve(resolved.uploadDir));
+    if (jailRoots.some((root) => uploadRoot === root || uploadRoot.startsWith(root + path.sep))) {
+      console.warn(
+        `[web] 安全警告：uploadDir（${resolved.uploadDir}）位于 allowRoots 白名单内，` +
+          `shared 模式浏览/下载可触达用户个人文件与聊天附件，建议将 uploadDir 移出 allowRoots` +
+          `（docs/dev/web-isolation.md §3.5 配置约束）`
+      );
+    }
+  }
   const pool = new SessionPool(resolved, hub, jailRoots, {
     createLLMClient: opts.createLLMClient,
     createOpenAIClient: opts.createOpenAIClient,
+    registryBaseDir: opts.registryBaseDir,
   });
   const staticDir = opts.staticDir ?? defaultStaticDir();
-  /** 实际监听端口（listen(0) 时由系统分配；handleRequest 内静态页展示用） */
+  /** 实际监听端口（listen(0) 时为随机分配端口；handleRequest 内静态页展示用） */
   let actualPort = resolved.port;
+  /** 个人文件牢笼缓存（userId → realpath 根；docs/dev/web-isolation.md §3.5） */
+  const personalJailCache = new Map<string, string[]>();
+  /**
+   * 解析 files 端点的牢笼根（scope 分流，docs/dev/web-isolation.md §3.5）。
+   *
+   * @param ctx 认证上下文（personal 场景决定目录归属）
+   * @param scope 查询参数 scope（非法值按 400 拒绝）
+   * @returns shared = 全局 allowRoots 牢笼；personal = 本人个人区牢笼
+   * @throws ApiError 400 scope 非法
+   */
+  async function resolveFileJailRoots(ctx: AuthContext, scope: string | null): Promise<string[]> {
+    if (scope === null || scope === "shared") {
+      return jailRoots;
+    }
+    if (scope === "personal") {
+      return getPersonalJailRoots(resolved.uploadDir, ctx.userId, personalJailCache);
+    }
+    throw new ApiError(400, `scope 参数非法（值：${JSON.stringify(scope)}）：仅支持 shared / personal`);
+  }
 
   /**
    * 顶层请求处理：解析 URL → 认证门禁 → 路由分发 → 统一错误映射。
@@ -248,6 +284,8 @@ export async function startWebServer(
         sendJson(res, 401, { error: "未认证或会话已过期，请重新登录" });
         return;
       }
+      // 认证上下文：JWT 载荷 + 派生 userId（多用户隔离主键，docs/dev/web-isolation.md §3.2）
+      const ctx = buildAuthContext(payload);
 
       // 认证后端点
       if (pathname === "/api/auth/me" && req.method === "GET") {
@@ -266,11 +304,11 @@ export async function startWebServer(
         return;
       }
       if (pathname === "/api/chats" && req.method === "GET") {
-        handleListChats(res, pool);
+        handleListChats(res, pool, ctx);
         return;
       }
       if (pathname === "/api/chats" && req.method === "POST") {
-        await handleCreateChat(req, res, pool);
+        await handleCreateChat(req, res, pool, ctx);
         return;
       }
 
@@ -280,34 +318,48 @@ export async function startWebServer(
         const chatId = chatMatch[1];
         const sub = chatMatch[2];
         if (sub === "messages" && req.method === "GET") {
-          handleGetMessages(res, pool, chatId);
+          handleGetMessages(res, pool, chatId, ctx);
           return;
         }
         if (sub === "messages" && req.method === "POST") {
-          await handleSendMessage(req, res, pool, resolved, chatId);
+          await handleSendMessage(req, res, pool, resolved, chatId, ctx);
           return;
         }
         if (sub === "stream" && req.method === "GET") {
-          handleStream(res, pool, hub, chatId);
+          handleStream(res, pool, hub, chatId, ctx);
           return;
         }
         if (sub === "interrupt" && req.method === "POST") {
-          handleInterrupt(res, pool, chatId);
+          handleInterrupt(res, pool, chatId, ctx);
           return;
         }
       }
 
-      // /api/files 端点
+      // /api/files 端点（scope 分流：shared=共享 allowRoots / personal=本人个人区）
       if (pathname === "/api/files" && req.method === "GET") {
-        await handleListFiles(res, jailRoots, url.searchParams.get("path"));
+        await handleListFiles(
+          res,
+          await resolveFileJailRoots(ctx, url.searchParams.get("scope")),
+          url.searchParams.get("path")
+        );
         return;
       }
       if (pathname === "/api/files/upload" && req.method === "POST") {
-        await handleUploadFile(req, res, resolved, jailRoots, url.searchParams.get("path"));
+        await handleUploadFile(
+          req,
+          res,
+          resolved,
+          await resolveFileJailRoots(ctx, url.searchParams.get("scope")),
+          url.searchParams.get("path")
+        );
         return;
       }
       if (pathname === "/api/files/download" && req.method === "GET") {
-        await handleDownloadFile(res, jailRoots, url.searchParams.get("path"));
+        await handleDownloadFile(
+          res,
+          await resolveFileJailRoots(ctx, url.searchParams.get("scope")),
+          url.searchParams.get("path")
+        );
         return;
       }
 

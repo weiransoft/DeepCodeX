@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { LLMRequest, LLMStreamEvent } from "@vegamo/deepcode-core";
 import { startWebServer, type RunningWebServer } from "../src/server";
+import { userIdFromUsername } from "../src/user-identity";
 import {
   buildMultipartBody,
   createControlledOpenAIClientHandle,
@@ -319,7 +320,7 @@ test("chat：非法 permissions（元素缺 toolCallId / permission 非枚举值
   assert.equal(ok.status, 202);
 });
 
-test("chat：multipart 上传的图片附件应真实落盘到 uploadDir", async () => {
+test("chat：multipart 上传的图片附件应真实落盘到用户个人区 uploadDir/<userId>/", async () => {
   const chatId = await createChat();
   // 真实合法 1x1 PNG（引擎轮次会真实解码该图片，伪造字节会导致轮次 failed）
   const pngBytes = Buffer.from(
@@ -339,12 +340,15 @@ test("chat：multipart 上传的图片附件应真实落盘到 uploadDir", async
   // 因此响应立即返回时文件已落盘
   assert.equal(response.status, 202);
 
-  // uploadDir 中应存在落盘文件且字节一致
-  const { readdirSync, readFileSync } = await import("node:fs");
-  const uploadDir = path.join(tmpRoot, "uploads");
-  const files = readdirSync(uploadDir).filter((name) => name.endsWith("-saved.png"));
-  assert.equal(files.length, 1, "图片附件必须落盘");
-  assert.ok(readFileSync(path.join(uploadDir, files[0])).equals(pngBytes), "落盘字节必须与上传一致");
+  // 多用户隔离（docs/dev/web-isolation.md §3.5）：聊天附件落个人区
+  // uploadDir/<userId>/（userId = sha256(username) hex 前 16 位），且字节一致
+  const { readdirSync, readFileSync, existsSync } = await import("node:fs");
+  const uploadRoot = path.join(tmpRoot, "uploads");
+  const personalDir = path.join(uploadRoot, userIdFromUsername("admin"));
+  assert.ok(existsSync(personalDir), "个人区目录必须随附件落盘创建");
+  const files = readdirSync(personalDir).filter((name) => name.endsWith("-saved.png"));
+  assert.equal(files.length, 1, "图片附件必须落盘到个人区");
+  assert.ok(readFileSync(path.join(personalDir, files[0])).equals(pngBytes), "落盘字节必须与上传一致");
 });
 
 // 说明：interrupt 用例依赖无限流脚本；ScriptedLLMClient 的脚本是按请求动态求值的，

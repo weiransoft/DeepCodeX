@@ -16,51 +16,62 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { PermissionScope, UserToolPermission } from "@vegamo/deepcode-core";
 import { parseMultipartRequest, MultipartError } from "../multipart";
 import { ApiError, readJsonBody, sendJson } from "../http-utils";
+import { personalUploadRoot } from "../user-files";
 import type { SessionPool, SendMessageInput } from "../session-pool";
+import type { AuthContext } from "../user-identity";
 import type { SseHub } from "../events";
 import type { ResolvedWebSettings, SendMessageResponse } from "../types";
 const IMAGE_MIME_PREFIX = "image/";
 
 /**
- * 处理 GET /api/chats：返回合并后的会话列表。
+ * 处理 GET /api/chats：返回当前用户的会话列表（按用户隔离，docs/dev/web-isolation.md §3.3）。
  *
  * @param res 响应对象
  * @param pool 会话池
+ * @param ctx 认证上下文（决定可见集合）
  */
-export function handleListChats(res: ServerResponse, pool: SessionPool): void {
-  sendJson(res, 200, { chats: pool.listChats() });
+export function handleListChats(res: ServerResponse, pool: SessionPool, ctx: AuthContext): void {
+  sendJson(res, 200, { chats: pool.listChats(ctx) });
 }
 
 /**
- * 处理 POST /api/chats：创建新会话。
+ * 处理 POST /api/chats：创建新会话（归属当前用户；docs/dev/web-isolation.md §3.3）。
  *
- * @param req 请求对象（JSON：{projectRoot, sessionId?}）
+ * @param req 请求对象（JSON：{projectRoot, sessionId?}；sessionId 恢复时校验归属）
  * @param res 响应对象
  * @param pool 会话池
+ * @param ctx 认证上下文（会话归属者）
  */
-export async function handleCreateChat(req: IncomingMessage, res: ServerResponse, pool: SessionPool): Promise<void> {
+export async function handleCreateChat(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pool: SessionPool,
+  ctx: AuthContext
+): Promise<void> {
   const body = await readJsonBody<{ projectRoot?: unknown; sessionId?: unknown }>(req);
   if (typeof body.projectRoot !== "string" || body.projectRoot.trim() === "") {
     throw new ApiError(400, "请求体必须包含非空 projectRoot 字符串");
   }
   const sessionId = typeof body.sessionId === "string" && body.sessionId !== "" ? body.sessionId : undefined;
-  const created = await pool.createChat(body.projectRoot, sessionId);
+  const created = await pool.createChat(body.projectRoot, ctx, sessionId);
   sendJson(res, 200, created);
 }
 
 /**
- * 处理 GET /api/chats/:id/messages：返回会话历史消息。
+ * 处理 GET /api/chats/:id/messages：返回会话历史消息（仅归属者）。
  *
  * @param res 响应对象
  * @param pool 会话池
  * @param chatId Web 会话 id
+ * @param ctx 认证上下文（归属校验）
  */
-export function handleGetMessages(res: ServerResponse, pool: SessionPool, chatId: string): void {
-  sendJson(res, 200, { messages: pool.getMessages(chatId) });
+export function handleGetMessages(res: ServerResponse, pool: SessionPool, chatId: string, ctx: AuthContext): void {
+  sendJson(res, 200, { messages: pool.getMessages(chatId, ctx) });
 }
 
 /**
- * 处理 GET /api/chats/:id/stream：建立 SSE 事件流。
+ * 处理 GET /api/chats/:id/stream：建立 SSE 事件流（订阅前校验归属，
+ * docs/dev/web-isolation.md §3.6）。
  *
  * 订阅建立后立即推送一次当前状态快照（status 事件），
  * 让前端刷新/重连后能同步会话状态与待审批卡片。
@@ -69,13 +80,20 @@ export function handleGetMessages(res: ServerResponse, pool: SessionPool, chatId
  * @param pool 会话池
  * @param hub SSE 总线
  * @param chatId Web 会话 id
+ * @param ctx 认证上下文（归属校验）
  */
-export function handleStream(res: ServerResponse, pool: SessionPool, hub: SseHub, chatId: string): void {
-  // 会话不存在时直接 404（不进入 SSE）
-  pool.getChatInfo(chatId);
+export function handleStream(
+  res: ServerResponse,
+  pool: SessionPool,
+  hub: SseHub,
+  chatId: string,
+  ctx: AuthContext
+): void {
+  // 会话不存在或非本人时直接 404（不进入 SSE；R5 防枚举）
+  pool.getChatInfo(chatId, ctx);
   hub.subscribe(chatId, res);
   // 初始状态快照：让新订阅者立即获得当前 status 与待审批明细
-  const summary = pool.listChats().find((chat) => chat.chatId === chatId);
+  const summary = pool.listChats(ctx).find((chat) => chat.chatId === chatId);
   hub.publish(chatId, "status", {
     chatId,
     status: summary?.status ?? "pending",
@@ -84,14 +102,15 @@ export function handleStream(res: ServerResponse, pool: SessionPool, hub: SseHub
 }
 
 /**
- * 处理 POST /api/chats/:id/interrupt：中断当前生成。
+ * 处理 POST /api/chats/:id/interrupt：中断当前生成（仅归属者）。
  *
  * @param res 响应对象
  * @param pool 会话池
  * @param chatId Web 会话 id
+ * @param ctx 认证上下文（归属校验）
  */
-export function handleInterrupt(res: ServerResponse, pool: SessionPool, chatId: string): void {
-  pool.interrupt(chatId);
+export function handleInterrupt(res: ServerResponse, pool: SessionPool, chatId: string, ctx: AuthContext): void {
+  pool.interrupt(chatId, ctx);
   sendJson(res, 200, { ok: true });
 }
 
@@ -148,33 +167,36 @@ function parseAlwaysAllows(raw: unknown): PermissionScope[] {
  * 1. application/json：{text?, imageUrls?, permissions?, alwaysAllows?}（1MB 上限）；
  * 2. multipart/form-data：文本字段 text（+可选 payload JSON 字段携带 permissions/alwaysAllows）
  *    + 一个或多个 file 字段。图片（image/*）转为 file:// URL 进入 imageUrls，
- *    其他文件落盘 uploadDir 并在文本中追加「附件：文件名（路径）」说明（供 LLM Read 工具读取）。
+ *    其他文件落盘用户个人区并在文本中追加「附件：文件名（路径）」说明（供 LLM Read 工具读取）。
  *
  * @param req 请求对象
  * @param res 响应对象
  * @param pool 会话池
  * @param settings Web 配置（uploadDir / maxUploadBytes）
  * @param chatId Web 会话 id
+ * @param ctx 认证上下文（归属校验 + 附件落个人区，docs/dev/web-isolation.md §3.5）
  */
 export async function handleSendMessage(
   req: IncomingMessage,
   res: ServerResponse,
   pool: SessionPool,
   settings: ResolvedWebSettings,
-  chatId: string
+  chatId: string,
+  ctx: AuthContext
 ): Promise<void> {
-  // 先校验会话存在（404 优先于 body 解析错误）
-  pool.getChatInfo(chatId);
+  // 先校验会话存在与归属（404 优先于 body 解析错误；R5 防枚举）
+  pool.getChatInfo(chatId, ctx);
 
   const contentType = req.headers["content-type"] ?? "";
   let input: SendMessageInput;
 
   if (contentType.toLowerCase().startsWith("multipart/form-data")) {
     // —— multipart 形态：消息 + 附件 ——
+    // 附件落当前用户个人区（R3 数据隔离）：uploadDir/<userId>/，multipart 解析器内部幂等建目录
     let parsed;
     try {
       parsed = await parseMultipartRequest(req, {
-        uploadDir: settings.uploadDir,
+        uploadDir: personalUploadRoot(settings.uploadDir, ctx.userId),
         maxUploadBytes: settings.maxUploadBytes,
       });
     } catch (error) {
@@ -276,7 +298,7 @@ export async function handleSendMessage(
   // 202 异步受理：入队串行链后立即返回（不等待轮次完成），
   // 本轮 llm_delta/assistant_message/tool_progress/permission_request/status/done
   // 全部经 SSE 推送，最终状态以 done 载荷为准
-  const accepted = pool.sendMessage(chatId, input);
+  const accepted = pool.sendMessage(chatId, input, ctx);
   const response: SendMessageResponse = { ok: true, chatId: accepted.chatId, sessionId: accepted.sessionId };
   sendJson(res, 202, response);
 }

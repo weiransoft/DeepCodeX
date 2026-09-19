@@ -862,6 +862,32 @@ body {
   display: inline-flex;
   gap: 2px;
 }
+/* 作用域切换 tab（docs/dev/web-isolation.md §3.5：共享目录 / 我的文件） */
+.drawer-scope {
+  display: flex;
+  gap: 4px;
+  padding: 10px 12px 0;
+}
+.scope-tab {
+  flex: 1;
+  height: 28px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--app-text-muted, var(--app-text));
+  font-size: 12px;
+  cursor: pointer;
+}
+.scope-tab:hover {
+  background: var(--app-hover, rgba(127, 127, 127, 0.12));
+}
+.scope-tab-active {
+  background: var(--app-accent-weak, rgba(59, 130, 246, 0.14));
+  border-color: var(--app-accent, #3b82f6);
+  color: var(--app-accent, #3b82f6);
+  font-weight: 600;
+}
+
 .drawer-roots {
   padding: 10px 12px 0;
 }
