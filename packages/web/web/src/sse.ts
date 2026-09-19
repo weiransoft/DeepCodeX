@@ -86,6 +86,14 @@ export interface DoneEvent {
   chatId: string;
   sessionId: string | null;
   status: string;
+  /**
+   * 本轮收敛后该会话仍在排队的轮次数（同会话连发任务的串行排队场景）。
+   * 大于 0 表示串行链上还有后续轮次待执行——onDone 不得复位「生成中」；
+   * 缺省（旧契约）视为 0。
+   */
+  pendingTurns?: number;
+  /** 仅 status="failed" 时携带：错误摘要 */
+  error?: string;
 }
 
 /** 事件回调集合：App 层按事件类型分发状态更新 */

@@ -176,6 +176,12 @@ export type DoneEvent = {
   sessionId: string | null;
   /** 本轮结束时的引擎状态（轮次异常路径固定为 "failed"） */
   status: SessionStatus;
+  /**
+   * 本轮收敛后该会话仍在排队的轮次数（同会话连发任务的串行排队场景）。
+   * 大于 0 表示串行链上还有后续轮次待执行——前端不应据此 done 帧复位
+   * 「生成中」状态；缺省（旧契约）视为 0。
+   */
+  pendingTurns?: number;
   /** 仅 status="failed" 时携带：错误摘要（中文），供前端提示展示 */
   error?: string;
 };

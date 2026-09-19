@@ -221,15 +221,24 @@ export function App() {
    * done：一轮对话结束 → 复位流式状态、刷新列表状态。
    * P0-2：订阅保留不关闭（仅在切换会话/组件卸载/登出时断开），
    * 避免每轮重建 EventSource 的开销与订阅空窗期事件丢失。
+   *
+   * 轮次串行排队修复（done 帧携带 pendingTurns）：
+   * - 列表状态更新无条件执行（不再被 activeChatId 守卫拦截）——切走的
+   *   会话轮次完成后列表也要落状态，否则永远显示「执行中」；
+   * - 「生成中」复位仅对当前活跃会话生效，且依据 pendingTurns：旧轮次
+   *   done 后仍有排队轮次（同会话连发任务的串行排队）时保持生成状态，
+   *   避免排队中的新任务被旧 done 帧误复位为「已完成/空闲」。
    */
   const onDone = useCallback(
     (e: DoneEvent): void => {
-      if (e.chatId !== activeChatIdRef.current) return;
-      applyStreaming(false);
       // P0-1/P2：列表项主键为 chatId；done 携带的 sessionId 可为 null（首个消息前），null 时保留原值
       setChats((prev) =>
         prev.map((c) => (c.chatId === e.chatId ? { ...c, status: e.status, sessionId: e.sessionId ?? c.sessionId } : c))
       );
+      if (e.chatId !== activeChatIdRef.current) return;
+      // pendingTurns 缺省（旧契约/单轮次）时复位为空闲；> 0 表示串行链上仍有排队轮次
+      const hasQueuedTurns = typeof e.pendingTurns === "number" ? e.pendingTurns > 0 : false;
+      applyStreaming(hasQueuedTurns);
     },
     [applyStreaming]
   );
