@@ -91,7 +91,9 @@ test("static：内置 favicon（/favicon.ico 与 /favicon.svg）应 200 返回 S
 
   // dist 不存在的服务器：favicon 依然可用（内置资源不依赖构建产物）
   const bareServer = await startWebServer(
-    createResolvedSettings({ auth: { jwtSecret: "placeholder-secret", sessionTtlSeconds: 60 } }),
+    createResolvedSettings({
+      auth: { jwtSecret: "placeholder-secret", sessionTtlSeconds: 60, localUsers: [] },
+    }),
     { staticDir: path.join(tmpRoot, "dist-does-not-exist") }
   );
   try {
@@ -118,7 +120,9 @@ test("static：静态路径穿越（%2e%2e）应被拦截（404，绝不回包�
 
 test("static：dist 不存在时应返回中文提示页（后端先行可用）", async () => {
   const missingServer = await startWebServer(
-    createResolvedSettings({ auth: { jwtSecret: "placeholder-secret", sessionTtlSeconds: 60 } }),
+    createResolvedSettings({
+      auth: { jwtSecret: "placeholder-secret", sessionTtlSeconds: 60, localUsers: [] },
+    }),
     { staticDir: path.join(tmpRoot, "dist-does-not-exist") }
   );
   try {
