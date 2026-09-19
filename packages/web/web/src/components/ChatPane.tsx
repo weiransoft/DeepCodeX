@@ -11,7 +11,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { parseMarkdownToA2ui } from "../a2ui/parser";
 import { A2uiSurface } from "../a2ui/renderer";
 import type { ChatEntry, UserAttachment } from "../chat-model";
-import { extractToolText, humanizeEngineContent } from "../chat-model";
+import { extractToolText, humanizeEngineContent, setEngineToolEntryHint } from "../chat-model";
 import { FolderOpenIcon, PaperclipIcon, StopIcon, WrenchIcon, BotAvatarIcon, UserAvatarIcon } from "./icons";
 import { PermissionCard } from "./PermissionCard";
 
@@ -103,6 +103,16 @@ export function ChatPane(props: ChatPaneProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   /** 用户是否主动上翻离开底部（此时暂停自动跟随） */
   const [followBottom, setFollowBottom] = useState(true);
+
+  // 渲染入口同步「工具折叠条目内容指纹」：助手正文可读化时据此判定引擎
+  // 工具结果块是否已被折叠条目承载（双写同源 → 正文移除；否则正文兜底展示）。
+  // 在组件体（map 渲染之前）执行，React 单线程保证 humanize 调用时值已就绪。
+  setEngineToolEntryHint(
+    entries
+      .filter((x) => x.kind === "tool")
+      .map((x) => (typeof x.raw.content === "string" ? x.raw.content : ""))
+      .filter((s) => s !== "")
+  );
 
   // 条目或流式状态变化时：若用户位于底部附近则滚动到底
   useEffect(() => {

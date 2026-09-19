@@ -246,6 +246,92 @@ function isEngineToolResultBlock(parsed: Record<string, unknown>): boolean {
 }
 
 /**
+ * 「本次渲染的工具折叠条目内容指纹」模块级状态（raw.content 文本集合）。
+ *
+ * 引擎把工具结果同时写入工具消息（前端渲染为折叠条目）与助手正文
+ * （JSON 块拼接）。助手正文可读化时据此决定正文引擎块的去留：
+ * 条目的 raw 中含相同 JSON 文本（双写同源）→ 正文移除该块（条目负责
+ * 展示）；条目不含该块（如 write 类工具块只进正文不落条目）→ 正文
+ * 保留可读化兜底，信息不丢。
+ * 渲染入口（ChatPane 组件体）每次渲染同步设置，React 单线程模型下
+ * humanize 读取必然发生在同帧 set 之后；纯函数（humanize 及调用方）只读。
+ */
+let engineToolEntryRawTexts: Set<string> = new Set();
+
+/**
+ * 设置本次渲染的工具折叠条目指纹（raw.content 文本集合）。
+ *
+ * @param rawContents 各工具条目 raw.content 字符串（非字符串项忽略）
+ */
+export function setEngineToolEntryHint(rawContents: string[]): void {
+  engineToolEntryRawTexts = new Set(rawContents);
+}
+
+/**
+ * 判断正文引擎块是否为「已被折叠条目承载」的双写块。
+ *
+ * 双写判定（顺序短路）：
+ * 1. 条目 raw.content 与块文本完全相等 → 同源；
+ * 2. 条目 content 包含块文本（条目 content 为多块混排）→ 同源；
+ * 3. 内容等价回退：块与条目 content 中的 JSON 解析后深度相等——
+ *    引擎对同一结果两处序列化时 key 顺序/缩进可能不同，文本不等但语义同源。
+ *
+ * @param blockText 正文中的引擎 JSON 块原文
+ * @returns 该块是否已由某个工具折叠条目承载
+ */
+function isBlockCarriedByToolEntry(blockText: string): boolean {
+  if (engineToolEntryRawTexts.size === 0) return false;
+  // 快速路径：文本完全相等 / 包含关系
+  for (const raw of engineToolEntryRawTexts) {
+    if (raw === blockText || raw.includes(blockText)) return true;
+  }
+  // 内容等价回退：解析正文块，与条目 content 中的 JSON 块深度比对
+  let blockParsed: unknown;
+  try {
+    blockParsed = JSON.parse(blockText);
+  } catch {
+    return false;
+  }
+  for (const raw of engineToolEntryRawTexts) {
+    const scanned = scanJsonBlock(raw, 0);
+    if (scanned === null) continue;
+    try {
+      const entryParsed: unknown = JSON.parse(scanned[0]);
+      if (deepEqualJson(entryParsed, blockParsed)) return true;
+    } catch {
+      // 条目 content 非 JSON 开头：不构成同源
+    }
+  }
+  return false;
+}
+
+/**
+ * JSON 值深度相等比较（键序无关，用于双写同源的内容等价判定）。
+ *
+ * @param a 值 A
+ * @param b 值 B
+ * @returns 是否语义相等
+ */
+function deepEqualJson(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== typeof b || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return false;
+    return a.every((v, i) => deepEqualJson(v, b[i]));
+  }
+  if (typeof a === "object" && typeof b === "object") {
+    const oa = a as Record<string, unknown>;
+    const ob = b as Record<string, unknown>;
+    const keysA = Object.keys(oa);
+    const keysB = Object.keys(ob);
+    if (keysA.length !== keysB.length) return false;
+    return keysA.every((k) => Object.prototype.hasOwnProperty.call(ob, k) && deepEqualJson(oa[k], ob[k]));
+  }
+  return false;
+}
+
+/**
  * 将引擎消息文本中的「工具结果 JSON 块」可读化为纯文本（页面渲染前转换）。
  *
  * 背景：引擎在 nonInteractive 模式下会把工具执行结果以序列化 JSON 文本
@@ -269,6 +355,11 @@ export function humanizeEngineContent(content: string): string {
   // 按 ``` 围栏切段：围栏内（模型代码输出）原样保留，仅处理围栏外段落
   const fencePattern = /```[\s\S]*?(?:```|$)/g;
   const segments: string[] = [];
+  // 围栏外可读化后的重复内容去重集合：引擎双写（工具消息 + 正文拼接同一
+  // JSON 块）经确定性可读化后产生完全相同的渲染文本，第二次出现直接删除。
+  // 围栏段（模型代码输出）不进此逻辑；流式多气泡各自渲染互不影响
+  // （每个助手条目独立调用本函数，集合函数内私有）。
+  const seenRendered = new Set<string>();
   let cursor = 0;
   for (;;) {
     fencePattern.lastIndex = 0;
@@ -276,12 +367,12 @@ export function humanizeEngineContent(content: string): string {
     const fenceMatch = fencePattern.exec(rest);
     if (fenceMatch === null) {
       // 剩余无围栏：整段做混排解析
-      segments.push(...parseMixedJsonBlocksStrict(rest));
+      segments.push(...parseMixedJsonBlocksStrict(rest, seenRendered));
       break;
     }
     const fenceStart = cursor + (fenceMatch.index ?? 0);
     // 围栏前的文本段：混排解析
-    segments.push(...parseMixedJsonBlocksStrict(content.slice(cursor, fenceStart)));
+    segments.push(...parseMixedJsonBlocksStrict(content.slice(cursor, fenceStart), seenRendered));
     // 围栏段本身原样保留（含未闭合到文末的形态）
     segments.push(content.slice(fenceStart, fenceStart + fenceMatch[0].length));
     cursor = fenceStart + fenceMatch[0].length;
@@ -296,12 +387,14 @@ export function humanizeEngineContent(content: string): string {
  *
  * 与 parseMixedJsonBlocks 的差异：块必须命中 isEngineToolResultBlock
  * 才提取 output 文本；其余块（含解析失败的截断块）原样保留；
- * 段落间不加空行分隔（保持原文间距，重组后与原文结构一致）。
+ * 段落间不加空行分隔（保持原文间距，重组后与原文结构一致）；
+ * 可读化输出经 seenRendered 集合做跨段去重（引擎双写的同一块只渲染一次）。
  *
  * @param text 待解析文本段
+ * @param seenRendered 围栏外可读化文本去重集合（跨段共享，调用方持有）
  * @returns 处理后的文本段列表（按原文顺序拼接）
  */
-function parseMixedJsonBlocksStrict(text: string): string[] {
+function parseMixedJsonBlocksStrict(text: string, seenRendered: Set<string>): string[] {
   if (!text.includes("{")) {
     return [text];
   }
@@ -328,10 +421,26 @@ function parseMixedJsonBlocksStrict(text: string): string[] {
     try {
       const parsed: unknown = JSON.parse(blockText);
       if (parsed !== null && typeof parsed === "object" && isEngineToolResultBlock(parsed as Record<string, unknown>)) {
+        // 双写同源块（工具折叠条目已承载同一结果）：正文直接移除，
+        // 折叠条目（label 已含工具名）负责展示，避免正文被工具输出淹没。
+        // 非同源块（如 write 类只进正文不落条目）：正文保留可读化兜底。
+        if (isBlockCarriedByToolEntry(blockText)) {
+          // 必须推进游标：只 continue 不更新 cursor 会导致死循环
+          cursor = nextIndex;
+          continue;
+        }
         const readable = toolResultToText(parsed as Record<string, unknown>);
         // 无可读字段（如无 output 的形态二块）：格式化缩进显示，与原始
         // 内容信息等价但更易读（键值分行、消除单行密集形态）
-        segments.push(readable ?? extractJsonPayload(blockText) ?? blockText);
+        const rendered = readable ?? extractJsonPayload(blockText) ?? blockText;
+        // 跨段去重：引擎双写的同一块（字节一致）第二次出现直接删除，
+        // 只保留首次渲染，消除正文重复刷屏
+        if (seenRendered.has(rendered)) {
+          cursor = nextIndex;
+          continue;
+        }
+        seenRendered.add(rendered);
+        segments.push(rendered);
       } else {
         // 非工具结果块（模型输出数据/A2UI 指令等）：原样保留
         segments.push(blockText);
