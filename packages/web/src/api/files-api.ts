@@ -23,6 +23,25 @@ import { ApiError, sendJson } from "../http-utils";
 import type { FileEntry, ResolvedWebSettings } from "../types";
 
 /**
+ * 解析目录浏览/上传的目标路径（空路径缺省语义）。
+ *
+ * 单根牢笼（personal scope 的用户个人区）空 path 默认落在牢笼根——
+ * 前端无法预知服务端派生的个人区路径（uploadDir/<userId>），切到
+ * 「我的文件」tab 时不带 path，由服务端缺省到个人区根；
+ * 多根牢笼（shared allowRoots）仍要求显式 path（根选择由前端负责）。
+ *
+ * @param jailRoots 牢笼白名单根
+ * @param dirPath 请求的目录路径（可为 null/空）
+ * @returns 有效的目标路径（可能仍为空串，由 guardPath 报 400）
+ */
+function resolveTargetPath(jailRoots: string[], dirPath: string | null): string {
+  if (dirPath !== null && dirPath.trim() !== "") {
+    return dirPath;
+  }
+  return jailRoots.length === 1 ? jailRoots[0] : "";
+}
+
+/**
  * 校验 allowRoots 非空并解析目标路径（牢笼校验统一入口）。
  *
  * @param jailRoots realpath 后的白名单根集合
@@ -59,7 +78,8 @@ async function guardPath(jailRoots: string[], target: string, kind: string): Pro
  * @param dirPath 请求的目录路径
  */
 export async function handleListFiles(res: ServerResponse, jailRoots: string[], dirPath: string | null): Promise<void> {
-  const dir = await guardPath(jailRoots, dirPath ?? "", "目录列表");
+  // 单根牢笼空路径缺省到根（personal「我的文件」入口），多根仍要求显式 path
+  const dir = await guardPath(jailRoots, resolveTargetPath(jailRoots, dirPath), "目录列表");
   let dirents;
   try {
     dirents = await readdir(dir, { withFileTypes: true });
@@ -126,7 +146,8 @@ export async function handleUploadFile(
   jailRoots: string[],
   dirPath: string | null
 ): Promise<void> {
-  const dir = await guardPath(jailRoots, dirPath ?? "", "文件上传");
+  // 单根牢笼空路径缺省到根（personal 首次上传免指定路径），多根仍要求显式 path
+  const dir = await guardPath(jailRoots, resolveTargetPath(jailRoots, dirPath), "文件上传");
   // 目标目录必须存在（上传不隐式建目录，防止拼错路径散落文件）
   const dirInfo = await stat(dir).catch(() => null);
   if (!dirInfo || !dirInfo.isDirectory()) {

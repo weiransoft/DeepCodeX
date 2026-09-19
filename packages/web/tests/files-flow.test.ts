@@ -7,7 +7,7 @@
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -208,10 +208,44 @@ test("files：牢笼越界（../ 逃逸）应 403 且不泄露内部路径", asy
   }
 });
 
-test("files：缺 path 参数应 400", async () => {
+test("files：单根牢笼空 path 缺省浏览根；多根牢笼空 path 仍 400", async () => {
+  // 主 server 为单根 allowRoots：空 path 缺省到该根（personal「我的文件」与
+  // 单根 shared 的统一缺省语义——根无歧义时前端无需感知服务端派生路径）
   const noPath = await fetchJson(server.port, "GET", "/api/files", undefined, cookie);
-  assert.equal(noPath.status, 400);
-  assert.match(noPath.body.error, /缺少 path/);
+  assert.equal(noPath.status, 200, "单根牢笼空 path 应缺省到根");
+  assert.equal(noPath.body.path, await realpath(tmpRoot), "缺省路径必须是归一后的白名单根");
+
+  // 多根牢笼（shared）根选择有歧义：空 path 仍必须 400（根选择由前端负责）
+  const rootsDir = mkdtempSync(path.join(tmpdir(), "deepcode-web-multi-"));
+  const secondRoot = path.join(rootsDir, "second");
+  mkdirSync(secondRoot, { recursive: true });
+  try {
+    const multiServer = await startWebServer(
+      createResolvedSettings({
+        allowRoots: [tmpRoot, secondRoot],
+        auth: {
+          jwtSecret: "multi-root-secret",
+          sessionTtlSeconds: 3600,
+          localUsers: [{ username: "admin", passwordHash: sha256Hex("multi-pass") }],
+        },
+      })
+    );
+    try {
+      const loginRes = await fetchJson(multiServer.port, "POST", "/api/auth/login", {
+        username: "admin",
+        password: "multi-pass",
+      });
+      assert.equal(loginRes.status, 200, "多根服务器登录前置条件失败");
+      const multiCookie = extractAuthCookie(loginRes.headers)!;
+      const multiNoPath = await fetchJson(multiServer.port, "GET", "/api/files?scope=shared", undefined, multiCookie);
+      assert.equal(multiNoPath.status, 400, "多根牢笼空 path 必须保持 400");
+      assert.match(multiNoPath.body.error, /缺少 path/);
+    } finally {
+      await multiServer.close();
+    }
+  } finally {
+    rmSync(rootsDir, { recursive: true, force: true });
+  }
 });
 
 test("files：allowRoots 为空时文件端点一律 403（文件功能禁用）", async () => {
