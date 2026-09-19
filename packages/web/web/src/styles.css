@@ -254,12 +254,24 @@ body {
 .new-chat-btn:disabled {
   opacity: 0.55;
   cursor: default;
+  color: var(--app-text-secondary);
 }
 .project-root-row {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: var(--app-text-secondary);
+}
+
+/* 空白名单引导（allowRoots 未配置时）：弱化文案色 + 可读行高 */
+.project-root-empty {
+  margin-top: 6px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-tertiary, #9a9a9a);
+  background: var(--bg-inset, rgba(127, 127, 127, 0.08));
+  border-radius: 6px;
+  word-break: break-all;
 }
 .project-root-select {
   flex: 1;
