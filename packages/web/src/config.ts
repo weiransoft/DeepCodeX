@@ -9,7 +9,8 @@
  * 4. 启动期 fail-fast 校验（jwtSecret 缺失、port/host 非法、ldap 启用但缺 server/baseDn）。
  */
 
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import path from "node:path";
 import {
@@ -101,18 +102,88 @@ export function validateHost(host: string): string {
   return trimmed;
 }
 
+/** 引导用户凭据文件落盘结构（仅存哈希，明文密码不落盘） */
+interface BootstrapAdminFile {
+  /** 默认用户名（固定 admin） */
+  username: string;
+  /** sha256(密码) hex 小写摘要 */
+  passwordHash: string;
+  /** 创建时间（ISO 8601） */
+  createTime: string;
+}
+
+/**
+ * 确保存在可登录的本地用户（首次启动默认用户，docs/dev/web-ui.md §3.3）。
+ *
+ * 触发条件：settings 的 web.auth.localUsers 为空（既未配置本地用户也未启用 LDAP 兜底）。
+ * 行为：
+ * - 引导凭据文件 `<bootstrapDir>/bootstrap-admin.json` 不存在或损坏时，
+ *   生成默认用户 admin 与随机密码（crypto.randomBytes，base64url 12 字符），
+ *   仅落盘密码哈希（文件权限 0600），明文密码仅经返回值供启动日志一次性展示；
+ * - 文件合法时复用既有凭据（重启不换密码），bootstrapPassword 返回 null；
+ * - 用户后续在 settings.json 配置 web.auth.localUsers 后，本函数不再被调用，
+ *   可删除引导文件。
+ *
+ * @param bootstrapDir 引导凭据目录（默认 ~/.deepcode/web；测试注入 mkdtemp 临时目录）
+ * @returns localUsers 供登录兜底的本地用户列表；bootstrapPassword 仅首次生成时非 null
+ */
+export function ensureBootstrapLocalUsers(bootstrapDir?: string): {
+  localUsers: Array<{ username: string; passwordHash: string }>;
+  bootstrapPassword: string | null;
+} {
+  const dir = bootstrapDir ?? path.join(homedir(), ".deepcode", "web");
+  const file = path.join(dir, "bootstrap-admin.json");
+
+  // 既有合法凭据：直接复用（幂等，重启不换密码）
+  if (existsSync(file)) {
+    try {
+      const parsed = JSON.parse(readFileSync(file, "utf8")) as BootstrapAdminFile;
+      if (
+        typeof parsed.username === "string" &&
+        parsed.username !== "" &&
+        typeof parsed.passwordHash === "string" &&
+        /^[0-9a-f]{64}$/.test(parsed.passwordHash)
+      ) {
+        return {
+          localUsers: [{ username: parsed.username, passwordHash: parsed.passwordHash }],
+          bootstrapPassword: null,
+        };
+      }
+      // 字段缺失/格式非法：落入下方重新生成（损坏自愈）
+    } catch {
+      // JSON 解析失败：落入下方重新生成（损坏自愈）
+    }
+  }
+
+  // 首次生成：随机密码（base64url，约 12 字符，密码学随机源）
+  const username = "admin";
+  const bootstrapPassword = randomBytes(9).toString("base64url");
+  const passwordHash = createHash("sha256").update(bootstrapPassword, "utf8").digest("hex").toLowerCase();
+  mkdirSync(dir, { recursive: true });
+  const record: BootstrapAdminFile = { username, passwordHash, createTime: new Date().toISOString() };
+  writeFileSync(file, JSON.stringify(record, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
+  return { localUsers: [{ username, passwordHash }], bootstrapPassword };
+}
+
 /**
  * 解析 Web 配置（docs/dev/web-ui.md §3.3 的完整实现）。
  *
  * 合并顺序：用户级 web 节 < 项目级 web 节（各子节 auth/ldap 浅合并），
  * 之后应用环境变量覆盖并归一默认值，最后执行启动期校验（fail-fast）。
+ * web.auth.localUsers 为空时自动生成首次启动默认用户（ensureBootstrapLocalUsers）。
  *
  * @param projectRoot 当前项目根目录（决定项目级 settings.json 位置）
  * @param env 环境变量对象（默认 process.env；测试可注入受控 env，避免污染进程环境）
+ * @param options 可选注入点：bootstrapDir 指定引导凭据目录（测试注入临时目录，
+ *   默认 ~/.deepcode/web）
  * @returns 归一后的 ResolvedWebSettings
  * @throws Error 当 jwtSecret 缺失、port/host 非法或 LDAP 配置不完整时抛出带中文说明的错误
  */
-export function resolveWebSettings(projectRoot: string, env: NodeJS.ProcessEnv = process.env): ResolvedWebSettings {
+export function resolveWebSettings(
+  projectRoot: string,
+  env: NodeJS.ProcessEnv = process.env,
+  options: { bootstrapDir?: string } = {}
+): ResolvedWebSettings {
   // 1. 读取用户级与项目级 settings.json，提取 web 节（项目级覆盖用户级，子节浅合并）
   const userSettings = readSettingsFile(getUserSettingsPath());
   const projectSettings = readSettingsFile(getProjectSettingsPath(projectRoot));
@@ -174,7 +245,7 @@ export function resolveWebSettings(projectRoot: string, env: NodeJS.ProcessEnv =
     );
   }
 
-  // 8. LDAP 配置校验：启用时 server 与 baseDn 必填
+  // 8. LDAP 配置校验：启用时 server 与 baseDn 必填（LDAP 默认不启用，enabled 缺省 false）
   if (merged.ldap?.enabled === true) {
     const server = (merged.ldap.server ?? "").trim();
     const baseDn = (merged.ldap.baseDn ?? "").trim();
@@ -182,6 +253,15 @@ export function resolveWebSettings(projectRoot: string, env: NodeJS.ProcessEnv =
       throw new Error("web.ldap.enabled 为 true 时必须同时配置 web.ldap.server 与 web.ldap.baseDn");
     }
   }
+
+  // 9. 首次启动默认用户（docs/dev/web-ui.md §3.3）：本地用户列表为空时生成默认用户
+  //    admin + 随机密码（哈希落盘 bootstrap-admin.json，明文仅本次启动日志展示一次）；
+  //    已配置 localUsers 时跳过（用户自行管理凭据）
+  const configuredLocalUsers = merged.auth?.localUsers ?? [];
+  const bootstrap =
+    configuredLocalUsers.length > 0
+      ? { localUsers: configuredLocalUsers, bootstrapPassword: null }
+      : ensureBootstrapLocalUsers(options.bootstrapDir);
 
   return {
     projectRoot,
@@ -194,7 +274,8 @@ export function resolveWebSettings(projectRoot: string, env: NodeJS.ProcessEnv =
     auth: {
       jwtSecret,
       sessionTtlSeconds,
-      localUsers: merged.auth?.localUsers ?? [],
+      localUsers: bootstrap.localUsers,
+      bootstrapPassword: bootstrap.bootstrapPassword ?? undefined,
     },
     ldap: {
       enabled: merged.ldap?.enabled ?? false,
