@@ -37,8 +37,13 @@ export type ResolvedWebSettings = {
     jwtSecret: string;
     /** 会话有效期（秒，默认 28800 即 8 小时） */
     sessionTtlSeconds: number;
-    /** 本地兜底用户列表（LDAP 未启用/失败时使用） */
+    /** 本地兜底用户列表（LDAP 未启用/失败时使用；为空时首次启动自动生成默认用户） */
     localUsers: WebLocalUserSettings[];
+    /**
+     * 首次启动自动生成的默认用户明文密码（仅生成当次非空，供启动日志一次性展示；
+     * 凭据落盘 bootstrap-admin.json（0600，仅存哈希），明文不再出现于后续启动）
+     */
+    bootstrapPassword?: string;
   };
   /** LDAP 配置（已归一） */
   ldap: {

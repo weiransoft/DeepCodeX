@@ -408,6 +408,15 @@ export async function startWebServer(
     });
   });
 
+  // 首次启动默认用户提示（docs/dev/web-ui.md §3.3）：明文密码仅此一次展示；
+  // 凭据哈希已落盘 ~/.deepcode/web/bootstrap-admin.json（0600），忘记密码可删除后重启重新生成
+  if (resolved.auth.bootstrapPassword) {
+    console.log(
+      `[web] 首次启动：已创建默认本地登录用户 admin，密码 ${resolved.auth.bootstrapPassword}` +
+        `（凭据文件 ~/.deepcode/web/bootstrap-admin.json 仅存哈希；配置 web.auth.localUsers 后可删除该文件）`
+    );
+  }
+
   return {
     server,
     port: actualPort,
