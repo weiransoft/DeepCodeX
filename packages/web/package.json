@@ -1,0 +1,43 @@
+{
+  "name": "@vegamo/deepcode-web",
+  "version": "0.4.0",
+  "description": "Deep Code Web chat UI backend — REST + SSE facade over the in-process SessionManager engine",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/server.js",
+  "types": "./dist/server.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "import": "./dist/config.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lessweb/deepcode-cli.git"
+  },
+  "scripts": {
+    "typecheck": "tsc -p ./ --noEmit",
+    "build": "tsc -p ./ && node web/build.mjs",
+    "format": "prettier --write .",
+    "test": "node tests/run-tests.mjs"
+  },
+  "dependencies": {
+    "@vegamo/deepcode-core": "file:../core",
+    "ldapts": "^7.4.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0"
+  }
+}

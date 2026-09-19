@@ -14,7 +14,12 @@ await build({
   outdir: join(cliRoot, "dist"),
   entryNames: "[name]",
   chunkNames: "chunks/[name]-[hash]",
-  splitting: true,
+  // splitting 关闭（2026-09-19）：开启 code splitting 时，yargs platform-shims esm.mjs
+  // 顶层的 `var __dirname = fileURLToPath(import.meta.url)` 可能与 esbuild-shims.js 注入的
+  // `__dirname` 导入落在同一入口 chunk 作用域，产生 ESM 重复声明 SyntaxError
+  // （新增 @vegamo/deepcode-web 依赖后模块图变化触发）。关闭后 esbuild 在单文件内
+  // 自动重命名冲突符号，bundle 语义不变。
+  splitting: false,
   platform: "node",
   format: "esm",
   target: "node22",

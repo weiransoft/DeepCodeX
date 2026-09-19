@@ -88,6 +88,12 @@ export interface ParsedCliArgs {
    * - `string`    — CLI 显式指定的模式（manual / auto / bypass），优先级最高
    */
   permissionMode: PermissionMode | undefined;
+  /**
+   * Web 子命令参数（docs/dev/web-ui.md §3.2）。
+   * - `undefined` — 未调用 web 子命令
+   * - 对象        — `deepcode web` 的 --host / --port 覆盖项（未传字段为 undefined）
+   */
+  web: { host?: string; port?: string } | undefined;
 }
 
 const QUALITY_CHECK_SUBCOMMANDS = ["codemap", "uiux", "visual", "all", "help"] as const;
@@ -460,6 +466,20 @@ async function configureYargs(argv?: string[]) {
             describe: "Project root directory (default process.cwd())",
           })
     )
+    // web 子命令：启动 Web 对话界面（docs/dev/web-ui.md §3.2）
+    // 用法：deepcode web [--host <host>] [--port <port>]
+    // host/port 覆盖 settings.json web.host / web.port（优先级最高）
+    .command("web", "Start the DeepCodeX Web chat UI", (y: Argv) =>
+      y
+        .option("host", {
+          type: "string",
+          describe: "Override listen host (default from settings, 127.0.0.1)",
+        })
+        .option("port", {
+          type: "string",
+          describe: "Override listen port (default from settings, 3210)",
+        })
+    )
     // 上游 v0.3.1：examples 扩充（--exec 非交互、--fork、管道 stdin）
     .example("deepcode", "Launch the interactive TUI in the current directory")
     .example("deepcode -p <prompt>", "Launch the TUI and submit a prompt")
@@ -554,6 +574,9 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
   const qualityCheckInvoked = positionalArgs[0] === "quality-check" || helpAsSecondPositional === "quality-check";
   // review 命令检测：positional[0] === "review" 或通过 help fallback
   const reviewInvoked = positionalArgs[0] === "review" || helpAsSecondPositional === "review";
+  // web 命令检测：positional[0] === "web"（无子命令，yargs 18 下 parsed["web"] 恒为 undefined，
+  // 与 team/rules 的检测方式对齐，以 positional 列表为准）
+  const webInvoked = positionalArgs[0] === "web";
   // v1.6 P0-2 修正（TC-TEAM-12）：yargs 18 把 "help" 当成内置 help 命令，
   // 导致 `parsed["subcommand"]` 不被设置。此时从 `helpAsSecondPositional` 提取 "help"。
   // 原因：yargs 18 的内置 help 机制会拦截 "help" 关键字，不将其作为 positional 传递
@@ -684,6 +707,14 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     fork = forkRaw;
   }
 
+  // 提取 web 子命令的选项（--host / --port；仅当 web 子命令被调用时提取）
+  const webArgs: ParsedCliArgs["web"] = webInvoked
+    ? {
+        host: parsed["host"] as string | undefined,
+        port: parsed["port"] as string | undefined,
+      }
+    : undefined;
+
   return {
     prompt: parsed.prompt as string | undefined,
     // 上游 v0.3.1 新增字段
@@ -705,5 +736,7 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     qualityCheckPositional: qualityCheckTarget,
     review: reviewRaw,
     reviewOptions,
+    // web 子命令（docs/dev/web-ui.md §3.2）：--host / --port 覆盖项
+    web: webArgs,
   };
 }

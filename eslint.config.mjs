@@ -78,8 +78,17 @@ export default tseslint.config(
     },
   },
   // Test files: relaxed rules
+  // 2026-09-19：packages/web 新增后，测试目录除 packages/*/src/tests/** 外还有
+  // packages/web/tests/**（Web 包测试独立于 src 布局），统一纳入放宽规则：
+  // no-explicit-any 关闭（测试桩/受控实现需要）、unused-vars 关闭、Node globals。
   {
-    files: ["packages/*/src/tests/**/*.ts", "packages/*/src/tests/**/*.mjs"],
+    files: [
+      "packages/*/src/tests/**/*.ts",
+      "packages/*/src/tests/**/*.mjs",
+      "packages/*/tests/**/*.ts",
+      "packages/*/tests/**/*.tsx",
+      "packages/*/tests/**/*.mjs",
+    ],
     languageOptions: {
       globals: {
         process: "readonly",
@@ -109,6 +118,9 @@ export default tseslint.config(
       "packages/*/src/v2/tests/scripts/**/*.mjs",
       "./tests/*.mjs",
       "packages/*/*.mjs",
+      // 2026-09-19：web 包独立 runner 与前端构建脚本（src 布局之外的 Node 程序）
+      "packages/*/tests/*.mjs",
+      "packages/*/web/*.mjs",
     ],
     languageOptions: {
       globals: {
