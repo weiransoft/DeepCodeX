@@ -9,7 +9,7 @@
  */
 import type { ChatSummary, UserInfo } from "../api";
 import { formatTime } from "../format";
-import { ChatIcon, FolderIcon, LogoutIcon, PanelLeftIcon, PlusIcon } from "./icons";
+import { ChatIcon, FolderIcon, LogoutIcon, PanelLeftIcon, PlusIcon, UserAvatarIcon } from "./icons";
 
 /** SessionSidebar 组件属性 */
 export interface SessionSidebarProps {
@@ -135,8 +135,9 @@ export function SessionSidebar(props: SessionSidebarProps) {
         ))}
       </nav>
 
-      {/* 底部用户区：显示名直显 + 登出 */}
+      {/* 底部用户区：默认头像 + 显示名直显 + 登出 */}
       <div className="sidebar-user">
+        <UserAvatarIcon size={22} className="sidebar-user-avatar" />
         <span className="sidebar-user-name" title={user?.mail ?? user?.username ?? ""}>
           {user?.displayName !== "" && user?.displayName !== undefined ? user.displayName : (user?.username ?? "")}
         </span>
