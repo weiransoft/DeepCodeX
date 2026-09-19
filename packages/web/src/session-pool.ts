@@ -60,6 +60,13 @@ type ChatSession = {
   createTime: string;
   /** 串行化 Promise 链尾（恒不 reject，错误在 runTurn 内收敛） */
   busy: Promise<void>;
+  /**
+   * 已受理尚未收敛的轮次计数（含正在执行的）。
+   * sendMessage 受理入队时 +1，runTurn 收敛（成功/异常）时 -1；
+   * done 帧携带收敛后的剩余值，供前端区分「本轮结束但仍有排队轮次」
+   * 与「整条串行链已空闲」（旧轮次 done 不得误复位新受理轮次的生成状态）。
+   */
+  pendingTurns: number;
   /** 归属者用户名（JWT sub；多用户隔离：仅本人可操作，docs/dev/web-isolation.md §3.3） */
   owner: string;
   /** 归属者隔离标识（注册表文件名主键，userIdFromUsername 产物） */
@@ -233,6 +240,8 @@ export class SessionPool {
       sessionId: null,
       createTime,
       busy: Promise.resolve(),
+      // 受理轮次计数：runTurn 收敛时递减（done 帧携带剩余排队数）
+      pendingTurns: 0,
       // 会话归属：创建者本人（后续操作均按此校验）
       owner: ctx.sub,
       ownerUserId: ctx.userId,
@@ -310,6 +319,8 @@ export class SessionPool {
    */
   sendMessage(chatId: string, input: SendMessageInput, ctx: AuthContext): SendMessageAcceptance {
     const chat = this.getOwnedChat(chatId, ctx);
+    // 受理计数：入队即 +1（runTurn 收敛时 -1，done 帧携带剩余值）
+    chat.pendingTurns += 1;
     // Promise 链串行化：同一 chatId 的轮次按调用顺序依次执行，不同 chatId 并行
     const run = chat.busy.then(() => this.runTurn(chat, input));
     // 链尾吞错：错误已在 runTurn 内经 SSE done 收敛，这里仅防止污染后续轮次入队
@@ -359,14 +370,17 @@ export class SessionPool {
     }
 
     if (turnError !== null) {
+      const message = turnError instanceof Error ? turnError.message : String(turnError);
       // P1-3：轮次异常必须推送 failed done 帧，否则前端等待本轮结束的订阅方悬死；
       // error 摘要随帧携带（DoneEvent 契约：仅 failed 时存在），再记录服务端日志
-      const message = turnError instanceof Error ? turnError.message : String(turnError);
+      // 收敛计数先行递减：done 帧的 pendingTurns = 本轮收敛后仍在排队的轮次数
+      chat.pendingTurns = Math.max(0, chat.pendingTurns - 1);
       const doneEvent: DoneEvent = {
         chatId: chat.chatId,
         sessionId: chat.sessionId,
         status: "failed",
         error: message,
+        pendingTurns: chat.pendingTurns,
       };
       this.hub.publish(chat.chatId, "done", doneEvent);
       // 注册表回写：失败轮次同样落盘（AC7 状态一致性；sessionId 可能已创建）
@@ -386,11 +400,15 @@ export class SessionPool {
       });
     }
 
-    // 轮次结束信号（前端据此收起停止按钮/刷新状态）
+    // 轮次结束信号（前端据此收起停止按钮/刷新状态）。
+    // 收敛计数先行递减：旧轮次 done 携带 pendingTurns>0 时，前端可知仍有
+    // 排队轮次（同会话连发任务的串行排队场景），不得复位「生成中」状态
+    chat.pendingTurns = Math.max(0, chat.pendingTurns - 1);
     this.hub.publish(chat.chatId, "done", {
       chatId: chat.chatId,
       sessionId: chat.sessionId,
       status,
+      pendingTurns: chat.pendingTurns,
     });
 
     // 注册表回写（R2）：轮次收敛点落盘归属记录（成功与异常路径均覆盖），

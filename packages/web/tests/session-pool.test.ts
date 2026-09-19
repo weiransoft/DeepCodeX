@@ -332,6 +332,38 @@ test("pool：不同 chatId 的消息可并行执行", async () => {
   );
 });
 
+test("pool：同会话串行排队——旧轮次 done 必须携带 pendingTurns，前端据此保持生成状态", async () => {
+  // 真实场景回归：旧轮次卡住很久，用户再发新任务（202 受理、busy 链排队）。
+  // 旧轮次完成推 done 时若无法表达「仍有排队轮次」，前端会把新任务的
+  // 「生成中」误复位——契约修复：done 帧携带 pendingTurns（本轮收敛后剩余排队数）。
+  const script: LLMStreamEvent[] = [
+    { type: "text_delta", text: "ok" },
+    { type: "message_end", stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1 } },
+  ];
+  // 每个事件 80ms 让出：首轮执行期间足够让第二条消息入队排队
+  const p = await createTestPool(script, 80);
+  const created = await p.createChat(tmpRoot, ctx);
+  const chatId = created.chatId;
+  subscribeFrames(p, chatId);
+
+  // 同一会话连发两条：第一条立即开始执行，第二条排队等待
+  p.sendMessage(chatId, { text: "第一个任务" }, ctx);
+  p.sendMessage(chatId, { text: "第二个任务" }, ctx);
+
+  // 等待两个 done 帧收敛（串行执行，每轮约 2 个事件 × 80ms）
+  await waitForCondition(
+    () => frames.filter((frame) => frame.data?.chatId === chatId && frame.event === "done").length >= 2,
+    10000,
+    "两个 done 帧"
+  );
+
+  const doneFrames = frames.filter((frame) => frame.data?.chatId === chatId && frame.event === "done");
+  // 第一轮收敛时第二条仍在排队：pendingTurns 必须为 1（前端据此保持「生成中」）
+  assert.equal(doneFrames[0].data.pendingTurns, 1, "旧轮次 done 必须携带 pendingTurns=1");
+  // 第二轮收敛后串行链空闲：pendingTurns 必须为 0（前端复位「生成中」）
+  assert.equal(doneFrames[1].data.pendingTurns, 0, "最后一轮 done 必须携带 pendingTurns=0");
+});
+
 test("pool：interrupt 应中止进行中的轮次并在 5 秒内收尾 done", async () => {
   // 无限流：每次调用都产出源源不断的 text_delta，signal 中断时抛 AbortError
   const endlessScript = (request: any): LLMStreamEvent[] => {
