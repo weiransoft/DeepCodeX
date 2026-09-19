@@ -11,6 +11,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { parseMarkdownToA2ui } from "../a2ui/parser";
 import { A2uiSurface } from "../a2ui/renderer";
 import type { ChatEntry, UserAttachment } from "../chat-model";
+import { extractToolText } from "../chat-model";
 import { FolderOpenIcon, PaperclipIcon, StopIcon, WrenchIcon, BotAvatarIcon, UserAvatarIcon } from "./icons";
 import { PermissionCard } from "./PermissionCard";
 
@@ -66,9 +67,12 @@ function AttachmentChips({ attachments }: { attachments: UserAttachment[] }) {
   );
 }
 
-/** 单条工具进度折叠条目 */
+/** 单条工具进度折叠条目（展开区优先文本渲染，原始 JSON 收进次级折叠不丢信息） */
 function ToolEntry({ entry }: { entry: Extract<ChatEntry, { kind: "tool" }> }) {
   const statusText = TOOL_STATUS_TEXT[entry.status] ?? entry.status;
+  // 可读文本提取：output 直显（含混排 JSON 块解析）；null 时回退原始 JSON
+  const text = extractToolText(entry.raw);
+  const rawJson = JSON.stringify(entry.raw, null, 2);
   return (
     <details className="tool-entry">
       <summary>
@@ -76,8 +80,18 @@ function ToolEntry({ entry }: { entry: Extract<ChatEntry, { kind: "tool" }> }) {
         <span className="tool-entry-label">{entry.label}</span>
         <span className={`tool-entry-status tool-entry-status-${entry.status}`}>{statusText}</span>
       </summary>
-      {/* 事件原始字段以 JSON 展示（React 文本节点，安全；信息不丢失） */}
-      <pre className="tool-entry-raw">{JSON.stringify(entry.raw, null, 2)}</pre>
+      {text !== null ? (
+        // 文本渲染：工具输出直显（等宽保留换行，限高滚动）
+        <pre className="tool-entry-text">{text}</pre>
+      ) : (
+        // 兜底：无可读文本时维持原始 JSON 展示
+        <pre className="tool-entry-raw">{rawJson}</pre>
+      )}
+      {/* 原始事件数据次级折叠：文本渲染的同时保留完整事件字段（信息不丢） */}
+      <details className="tool-entry-raw-toggle">
+        <summary>原始事件数据</summary>
+        <pre className="tool-entry-raw">{rawJson}</pre>
+      </details>
     </details>
   );
 }
