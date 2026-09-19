@@ -11,7 +11,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { parseMarkdownToA2ui } from "../a2ui/parser";
 import { A2uiSurface } from "../a2ui/renderer";
 import type { ChatEntry, UserAttachment } from "../chat-model";
-import { extractToolText } from "../chat-model";
+import { extractToolText, humanizeEngineContent } from "../chat-model";
 import { FolderOpenIcon, PaperclipIcon, StopIcon, WrenchIcon, BotAvatarIcon, UserAvatarIcon } from "./icons";
 import { PermissionCard } from "./PermissionCard";
 
@@ -173,12 +173,14 @@ export function ChatPane(props: ChatPaneProps) {
                     <div className="msg-assistant-with-avatar">
                       <BotAvatarIcon size={26} className="msg-avatar msg-avatar-assistant" />
                       {entry.content !== null ? (
-                        // 完整内容：A2UI 管线渲染
-                        <AssistantA2ui content={entry.content} messageId={entry.id} />
+                        // 完整内容：先可读化（引擎拼接的工具结果 JSON 块 → output 文本，
+                        // 围栏代码与非工具结果 JSON 原样保留）再进 A2UI 管线渲染
+                        <AssistantA2ui content={humanizeEngineContent(entry.content)} messageId={entry.id} />
                       ) : (
-                        // 流式阶段：previewText 纯文本 + 光标动画
+                        // 流式阶段：previewText 纯文本 + 光标动画（同步可读化，尽力而为：
+                        // 流式中的截断块经容错解析原样保留，完成后自然变为文本）
                         <div className="chat-stream-preview">
-                          {entry.preview ?? ""}
+                          {humanizeEngineContent(entry.preview ?? "")}
                           {entry.done !== true && <span className="stream-cursor" aria-hidden="true" />}
                         </div>
                       )}

@@ -99,6 +99,39 @@ test("ChatPane：无可读文本时应回退 JSON 渲染且仍有原始数据折
   assert.ok(html.includes("原始事件数据"), "次级折叠仍保留");
 });
 
+test("ChatPane：助手消息正文中的引擎拼接 JSON 块应渲染为 output 文本", () => {
+  // 真实形态：引擎 nonInteractive 把工具结果 JSON 拼进 assistant content
+  const block = JSON.stringify({
+    ok: true,
+    name: "bash",
+    output: "Filesystem   Size  Used\n/dev/vda2    2.0G  259M\n",
+    metadata: { exitCode: 0 },
+  });
+  const entries: ChatEntry[] = [
+    {
+      kind: "assistant",
+      id: "h-a9",
+      content: `${block}\n/var/lib/docker 无权限读取，继续深挖可读区域：\n`,
+      preview: null,
+      done: true,
+    },
+  ];
+  const html = renderToString(<ChatPane {...buildProps(entries)} />);
+  assert.ok(html.includes("Filesystem   Size  Used"), "output 表格必须直显");
+  assert.ok(html.includes("继续深挖可读区域"), "助手自然文本必须保留");
+  // JSON 壳不得出现在助手消息正文
+  assert.ok(!html.includes("&quot;ok&quot;"), "助手正文不得渲染 JSON 字段名 ok");
+  assert.ok(!html.includes("&quot;metadata&quot;"), "助手正文不得渲染 JSON 字段名 metadata");
+});
+
+test("ChatPane：流式 preview 中的工具结果 JSON 同样可读化", () => {
+  const block = JSON.stringify({ ok: true, name: "bash", output: "788M\t/var/log\n", metadata: { exitCode: 0 } });
+  const entries: ChatEntry[] = [{ kind: "assistant", id: "h-a10", content: null, preview: `${block}\n`, done: false }];
+  const html = renderToString(<ChatPane {...buildProps(entries)} />);
+  assert.ok(html.includes("788M\t/var/log"), "流式 preview 的 output 必须直显");
+  assert.ok(!html.includes("&quot;ok&quot;"), "流式 preview 不得渲染 JSON 壳");
+});
+
 test("ChatPane：用户/助手消息行与头像随工具条目正常共渲染", () => {
   const entries: ChatEntry[] = [
     { kind: "user", id: "h-u1", text: "查看磁盘占用", attachments: [], createTime: "2026-09-19T12:00:00.000Z" },
