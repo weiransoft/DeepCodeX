@@ -132,6 +132,21 @@ test("ChatPane：流式 preview 中的工具结果 JSON 同样可读化", () => 
   assert.ok(!html.includes("&quot;ok&quot;"), "流式 preview 不得渲染 JSON 壳");
 });
 
+test("ChatPane：双重序列化 output（转义 JSON）应格式化渲染且无转义壳泄漏", () => {
+  // 真实缺陷形态：query_execution_history 的 output 本身是序列化 JSON，
+  // 修复前页面直接显示 {\n \"ok\": true... 大片转义 JSON
+  const innerPayload = JSON.stringify({ ok: true, totalCount: 55, records: [{ id: "mu6mxkqif38c" }] });
+  const block = JSON.stringify({ ok: true, name: "query_execution_history", output: innerPayload });
+  const entries: ChatEntry[] = [
+    { kind: "assistant", id: "h-a11", content: `${block}\n检索完成，继续分析。`, preview: null, done: true },
+  ];
+  const html = renderToString(<ChatPane {...buildProps(entries)} />);
+  // 转义壳（\n \" 形态经 HTML 转义后为 \\n &quot;）不得出现
+  assert.ok(!html.includes("\\n"), "不得出现转义换行壳");
+  assert.ok(html.includes("totalCount"), "内层 JSON 字段必须直显");
+  assert.ok(html.includes("检索完成"), "自然文本必须保留");
+});
+
 test("ChatPane：用户/助手消息行与头像随工具条目正常共渲染", () => {
   const entries: ChatEntry[] = [
     { kind: "user", id: "h-u1", text: "查看磁盘占用", attachments: [], createTime: "2026-09-19T12:00:00.000Z" },
