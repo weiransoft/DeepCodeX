@@ -160,7 +160,7 @@ export function FileDrawer({ open, allowRoots, onClose, onInsertAttachment }: Fi
               className="icon-btn"
               title="刷新"
               disabled={loading}
-              onClick={() => load(currentPath)}
+              onClick={() => load(currentPath, scope)}
             >
               <RefreshIcon size={16} />
             </button>
@@ -209,7 +209,7 @@ export function FileDrawer({ open, allowRoots, onClose, onInsertAttachment }: Fi
             <select
               className="drawer-root-select"
               value={allowRoots.find((r) => (listing?.path ?? currentPath).startsWith(r)) ?? allowRoots[0]}
-              onChange={(e) => load(e.target.value)}
+              onChange={(e) => load(e.target.value, scope)}
             >
               {allowRoots.map((r) => (
                 <option key={r} value={r}>
@@ -235,7 +235,7 @@ export function FileDrawer({ open, allowRoots, onClose, onInsertAttachment }: Fi
             return (
               <span key={prefix} className="crumb-seg">
                 <span className="crumb-sep">/</span>
-                <button type="button" className="crumb" onClick={() => load(prefix)} title={prefix}>
+                <button type="button" className="crumb" onClick={() => load(prefix, scope)} title={prefix}>
                   {seg}
                 </button>
               </span>

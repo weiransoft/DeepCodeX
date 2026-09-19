@@ -73,6 +73,8 @@ export function App() {
   // ---------- refs：SSE 回调与异步流程中读取"当前值"，避免陈旧闭包 ----------
   const streamRef = useRef<ChatStream | null>(null);
   const activeChatIdRef = useRef<string | null>(null);
+  /** 会话列表最新值 ref（selectChat 恢复分流中读取当前项来源，避免陈旧闭包） */
+  const chatsRef = useRef<ChatSummary[]>([]);
   const streamingRef = useRef(false);
   /** 乐观条目自增序号（保证 key 稳定唯一） */
   const seqRef = useRef(0);
@@ -317,11 +319,11 @@ export function App() {
   }, []);
 
   /**
-   * 选择会话：先建立持久 SSE 订阅（P0-2：订阅即建立，done 后不关闭），
+   * 打开会话（内存池直连路径）：先建立持久 SSE 订阅（P0-2：订阅即建立，done 后不关闭），
    * 再拉取历史并合并——订阅窗口内已到达的实时事件不丢：
    * 历史条目前插，同源助手消息（历史 id 为 h-<id>、实时 id 为 messageId）去重保留实时版本。
    */
-  const selectChat = useCallback(
+  const openChat = useCallback(
     (chatId: string): void => {
       if (chatId === activeChatIdRef.current) return;
       activeChatIdRef.current = chatId;
@@ -353,6 +355,46 @@ export function App() {
         });
     },
     [applyStreaming, convertHistory, ensureStream, handleUnauthorized, showToast]
+  );
+
+  /**
+   * 选择会话：按列表项来源分流（docs/dev/web-isolation.md §3.4 恢复路径）。
+   *
+   * - active（本进程内存池内）：直接 openChat 订阅 + 拉历史；
+   * - history（磁盘注册表历史，服务重启后不在内存池）：直接对旧 chatId 订阅/拉历史必 404，
+   *   先 POST /api/chats {projectRoot, sessionId} 走后端恢复路径（归属校验：注册表命中
+   *   或池内活跃命中）重挂载换取新 chatId，列表项同步换绑（source → active），
+   *   再对新 id 打开；后续点击直接命中内存池。
+   */
+  const selectChat = useCallback(
+    (chatId: string): void => {
+      if (chatId === activeChatIdRef.current) return;
+      const item = chatsRef.current.find((c) => c.chatId === chatId);
+      // —— 历史会话恢复路径（sessionId 为恢复主键；缺失时按普通路径尝试并交由后端报错）——
+      if (item && item.source === "history" && item.sessionId !== null) {
+        if (creatingChat) return;
+        setCreatingChat(true);
+        createChat(item.projectRoot, item.sessionId)
+          .then(({ chatId: remountedId }) => {
+            // 列表项换绑：旧 chatId → 新 chatId，source 置 active（已命中内存池，后续点击直连）
+            setChats((prev) =>
+              prev.map((c) => (c.chatId === chatId ? { ...c, chatId: remountedId, source: "active" as const } : c))
+            );
+            openChat(remountedId);
+          })
+          .catch((e: unknown) => {
+            if (e instanceof ApiError && e.status === 401) {
+              handleUnauthorized();
+              return;
+            }
+            showToast(e instanceof Error ? e.message : "历史会话恢复失败");
+          })
+          .finally(() => setCreatingChat(false));
+        return;
+      }
+      openChat(chatId);
+    },
+    [creatingChat, handleUnauthorized, openChat, showToast]
   );
 
   /** 新建对话（projectRoot 来自侧栏选择；本地列表项字段与后端 ChatSummary 契约对齐） */
@@ -597,6 +639,11 @@ export function App() {
   useEffect(() => {
     return () => streamRef.current?.close();
   }, []);
+
+  // 会话列表最新值同步到 ref（selectChat 恢复分流读取）
+  useEffect(() => {
+    chatsRef.current = chats;
+  }, [chats]);
 
   // ---------- 渲染 ----------
 

@@ -174,18 +174,20 @@ export function ensureBootstrapLocalUsers(bootstrapDir?: string): {
  *
  * @param projectRoot 当前项目根目录（决定项目级 settings.json 位置）
  * @param env 环境变量对象（默认 process.env；测试可注入受控 env，避免污染进程环境）
- * @param options 可选注入点：bootstrapDir 指定引导凭据目录（测试注入临时目录，
- *   默认 ~/.deepcode/web）
+ * @param options 可选注入点（与 SessionPool 的 DI 缝合点风格一致）：
+ *   bootstrapDir 指定引导凭据目录（默认 ~/.deepcode/web）；
+ *   userSettingsPath 指定用户级 settings.json 路径（默认 ~/.deepcode/settings.json，
+ *   测试注入临时文件路径以隔离真实用户配置）
  * @returns 归一后的 ResolvedWebSettings
  * @throws Error 当 jwtSecret 缺失、port/host 非法或 LDAP 配置不完整时抛出带中文说明的错误
  */
 export function resolveWebSettings(
   projectRoot: string,
   env: NodeJS.ProcessEnv = process.env,
-  options: { bootstrapDir?: string } = {}
+  options: { bootstrapDir?: string; userSettingsPath?: string } = {}
 ): ResolvedWebSettings {
   // 1. 读取用户级与项目级 settings.json，提取 web 节（项目级覆盖用户级，子节浅合并）
-  const userSettings = readSettingsFile(getUserSettingsPath());
+  const userSettings = readSettingsFile(options.userSettingsPath ?? getUserSettingsPath());
   const projectSettings = readSettingsFile(getProjectSettingsPath(projectRoot));
   const userWeb: WebSettings = userSettings.web ?? {};
   const projectWeb: WebSettings = projectSettings.web ?? {};

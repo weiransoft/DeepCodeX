@@ -30,10 +30,11 @@ after(() => {
 /**
  * 在独立临时项目根写入 .deepcode/settings.json 并解析配置。
  *
- * 同时注入独立的 bootstrapDir（mkdtemp），隔离首次启动默认用户凭据落盘，
- * 避免污染真实 ~/.deepcode/web。
+ * 同时注入独立的 bootstrapDir（mkdtemp，隔离首次启动默认用户凭据落盘）与
+ * userSettingsPath（指向不存在的临时文件路径，隔离真实 ~/.deepcode/settings.json
+ * 中可能存在的 web 节——否则本机真实用户配置会使测试失效）。
  *
- * @param webNode settings.json 的 web 节内容（原样写入）
+ * @param webNode settings.json 的 web 节内容（原样写入项目级文件）
  * @param env 注入的环境变量（默认空）
  * @returns resolveWebSettings 解析结果与本次注入的 bootstrapDir
  */
@@ -44,7 +45,9 @@ function resolveWithProjectSettings(webNode: unknown, env: Record<string, string
     writeFileSync(path.join(projectRoot, ".deepcode", "settings.json"), JSON.stringify({ web: webNode }), "utf8");
   }
   const bootstrapDir = mkdtempSync(path.join(baseTmp, "bootstrap-"));
-  const resolved = resolveWebSettings(projectRoot, env, { bootstrapDir });
+  // userSettingsPath 指向临时目录中不存在的文件：readSettingsFile 对缺失文件返回空对象
+  const userSettingsPath = path.join(bootstrapDir, "user-settings.json");
+  const resolved = resolveWebSettings(projectRoot, env, { bootstrapDir, userSettingsPath });
   return { resolved, bootstrapDir };
 }
 
@@ -151,9 +154,13 @@ test("config：ldap.enabled=true 缺 server 或 baseDn 应 fail-fast", () => {
 
 test("config：settings.json 非法 JSON 应报中文错误", () => {
   const projectRoot = mkdtempSync(path.join(baseTmp, "broken-"));
+  const bootstrapDir = mkdtempSync(path.join(baseTmp, "bootstrap-broken-"));
   mkdirSync(path.join(projectRoot, ".deepcode"), { recursive: true });
   writeFileSync(path.join(projectRoot, ".deepcode", "settings.json"), "{ not-json", "utf8");
-  assert.throws(() => resolveWebSettings(projectRoot, {}), /不是合法 JSON/);
+  assert.throws(
+    () => resolveWebSettings(projectRoot, {}, { userSettingsPath: path.join(bootstrapDir, "none.json") }),
+    /不是合法 JSON/
+  );
 });
 
 test("config：allowRoots ~ 展开为家目录绝对路径并尽力创建目录", () => {
@@ -197,8 +204,14 @@ test("config：重启幂等——同一 bootstrapDir 再次解析复用凭据且
   const bootstrapDir = mkdtempSync(path.join(baseTmp, "bootstrap-reuse-"));
   const env = { DEEPCODE_WEB_JWT_SECRET: "env-secret" };
 
-  const first = resolveWebSettings(projectRoot, env, { bootstrapDir });
-  const second = resolveWebSettings(projectRoot, env, { bootstrapDir });
+  const first = resolveWebSettings(projectRoot, env, {
+    bootstrapDir,
+    userSettingsPath: path.join(bootstrapDir, "user-settings.json"),
+  });
+  const second = resolveWebSettings(projectRoot, env, {
+    bootstrapDir,
+    userSettingsPath: path.join(bootstrapDir, "user-settings.json"),
+  });
 
   assert.ok(first.auth.bootstrapPassword, "首次必须生成明文密码");
   assert.equal(second.auth.bootstrapPassword, undefined, "复用凭据时不再回显明文");
@@ -225,13 +238,27 @@ test("config：凭据文件损坏时自愈重新生成（新哈希 + 新明文�
   const bootstrapDir = mkdtempSync(path.join(baseTmp, "bootstrap-corrupt-"));
   writeFileSync(path.join(bootstrapDir, "bootstrap-admin.json"), '{"username":"admin","pass', "utf8");
 
-  const resolved = resolveWebSettings(projectRoot, { DEEPCODE_WEB_JWT_SECRET: "env-secret" }, { bootstrapDir });
+  const resolved = resolveWebSettings(
+    projectRoot,
+    { DEEPCODE_WEB_JWT_SECRET: "env-secret" },
+    {
+      bootstrapDir,
+      userSettingsPath: path.join(bootstrapDir, "user-settings.json"),
+    }
+  );
 
   assert.equal(resolved.auth.localUsers[0].username, "admin", "损坏自愈后仍为默认用户");
   assert.match(resolved.auth.localUsers[0].passwordHash, /^[0-9a-f]{64}$/);
   assert.ok(resolved.auth.bootstrapPassword, "自愈场景必须回显新明文（用户需重新获知密码）");
   // 自愈后文件应重新可复用（再次解析不再回显明文）
-  const again = resolveWebSettings(projectRoot, { DEEPCODE_WEB_JWT_SECRET: "env-secret" }, { bootstrapDir });
+  const again = resolveWebSettings(
+    projectRoot,
+    { DEEPCODE_WEB_JWT_SECRET: "env-secret" },
+    {
+      bootstrapDir,
+      userSettingsPath: path.join(bootstrapDir, "user-settings.json"),
+    }
+  );
   assert.equal(again.auth.bootstrapPassword, undefined);
   assert.deepEqual(again.auth.localUsers, resolved.auth.localUsers);
 });
