@@ -183,6 +183,107 @@ export function parseLeadingJsonBlock(content: string): Record<string, unknown> 
 }
 
 /**
+ * 判断解析出的 JSON 对象是否为「引擎拼接的工具结果块」。
+ *
+ * 严格特征：name 与 output 均为 string（引擎序列化工具结果的统一形态，
+ * 如 { ok, name: "bash", output, metadata }）。仅对匹配块做可读化重写，
+ * 避免误伤模型主动输出的其他 JSON 数据（如 A2UI 指令、模型给出的配置示例）。
+ *
+ * @param parsed 已解析的 JSON 对象
+ * @returns 是否为工具结果块
+ */
+function isEngineToolResultBlock(parsed: Record<string, unknown>): boolean {
+  return typeof parsed.name === "string" && typeof parsed.output === "string";
+}
+
+/**
+ * 将引擎消息文本中的「工具结果 JSON 块」可读化为纯文本（页面渲染前转换）。
+ *
+ * 背景：引擎在 nonInteractive 模式下会把工具执行结果以序列化 JSON 文本
+ * 拼进 assistant 消息（多个 { ok, name, output, metadata } 块 + 助手自然文本
+ * 混排），前端 Markdown 原样渲染导致页面大量 JSON。
+ *
+ * 转换策略（保守，信息不丢）：
+ * - ``` 围栏内的代码块原样保留（模型主动输出，不是引擎拼接物）；
+ * - 围栏外的裸 JSON 块仅当匹配工具结果特征（name+output 双 string 字段）
+ *   时才重写为 output 文本 + metadata 异常注记；其余 JSON 原样保留；
+ * - 无 '{' 的纯文本快速路径零开销直通。
+ *
+ * @param content 引擎 assistant 消息原文
+ * @returns 可读化后的文本（无工具结果块时与原文一致）
+ */
+export function humanizeEngineContent(content: string): string {
+  // 快速路径：不含 JSON 块起始符，无需解析
+  if (!content.includes("{")) {
+    return content;
+  }
+  // 按 ``` 围栏切段：围栏内（模型代码输出）原样保留，仅处理围栏外段落
+  const fencePattern = /```[\s\S]*?(?:```|$)/g;
+  const segments: string[] = [];
+  let cursor = 0;
+  for (;;) {
+    fencePattern.lastIndex = 0;
+    const rest = content.slice(cursor);
+    const fenceMatch = fencePattern.exec(rest);
+    if (fenceMatch === null) {
+      // 剩余无围栏：整段做混排解析
+      segments.push(...parseMixedJsonBlocksStrict(rest));
+      break;
+    }
+    const fenceStart = cursor + (fenceMatch.index ?? 0);
+    // 围栏前的文本段：混排解析
+    segments.push(...parseMixedJsonBlocksStrict(content.slice(cursor, fenceStart)));
+    // 围栏段本身原样保留（含未闭合到文末的形态）
+    segments.push(content.slice(fenceStart, fenceStart + fenceMatch[0].length));
+    cursor = fenceStart + fenceMatch[0].length;
+    if (cursor >= content.length) break;
+  }
+  const joined = segments.join("");
+  return joined !== "" ? joined : content;
+}
+
+/**
+ * 混排解析（严格特征版）：仅重写匹配引擎工具结果特征的 JSON 块。
+ *
+ * 与 parseMixedJsonBlocks 的差异：块必须命中 isEngineToolResultBlock
+ * 才提取 output 文本；其余块（含解析失败的截断块）原样保留；
+ * 段落间不加空行分隔（保持原文间距，重组后与原文结构一致）。
+ *
+ * @param text 待解析文本段
+ * @returns 处理后的文本段列表（按原文顺序拼接）
+ */
+function parseMixedJsonBlocksStrict(text: string): string[] {
+  if (!text.includes("{")) {
+    return [text];
+  }
+  const segments: string[] = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const scanned = scanJsonBlock(text, cursor);
+    if (scanned === null) {
+      segments.push(text.slice(cursor));
+      break;
+    }
+    const [blockText, startIndex, nextIndex] = scanned;
+    segments.push(text.slice(cursor, startIndex));
+    try {
+      const parsed: unknown = JSON.parse(blockText);
+      if (parsed !== null && typeof parsed === "object" && isEngineToolResultBlock(parsed as Record<string, unknown>)) {
+        const readable = toolResultToText(parsed as Record<string, unknown>);
+        segments.push(readable ?? blockText);
+      } else {
+        // 非工具结果块（模型输出数据/A2UI 指令等）：原样保留
+        segments.push(blockText);
+      }
+    } catch {
+      segments.push(blockText);
+    }
+    cursor = nextIndex;
+  }
+  return segments;
+}
+
+/**
  * 从工具条目 raw 中提取可读文本（页面文本渲染优先，JSON 兜底）。
  *
  * raw 形态与处理：

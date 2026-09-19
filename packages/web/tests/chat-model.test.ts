@@ -10,7 +10,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { extractToolText, parseLeadingJsonBlock } from "../web/src/chat-model";
+import { extractToolText, parseLeadingJsonBlock, humanizeEngineContent } from "../web/src/chat-model";
 
 test("chat-model：extractToolText 应解析混排 content 中的多个 JSON 块为 output 文本", () => {
   // 模拟真实历史 content：两个 bash 结果 JSON 块 + 尾部助手自然文本
@@ -99,4 +99,53 @@ test("chat-model：parseLeadingJsonBlock 应解析首块并容忍块前空白", 
   assert.equal(parseLeadingJsonBlock("普通文本\n{not json"), null);
   // 截断块
   assert.equal(parseLeadingJsonBlock('{"name": "abc'), null);
+});
+
+test("chat-model：humanizeEngineContent 应把引擎拼接的工具结果块转为 output 文本", () => {
+  // 真实形态：多个工具结果 JSON 块 + 尾部助手自然文本（无围栏）
+  const block1 = JSON.stringify({
+    ok: true,
+    name: "bash",
+    output: "Filesystem   Size\n/dev/vda2 2.0G\n",
+    metadata: { exitCode: 0 },
+  });
+  const block2 = JSON.stringify({ ok: true, name: "bash", output: "70G\t/home/hguser\n", metadata: { exitCode: 0 } });
+  const content = `${block1}\n${block2}\n/var/lib/docker 无权限读取。继续深挖：\n`;
+  const out = humanizeEngineContent(content);
+  assert.ok(out.includes("Filesystem   Size"), "块 1 output 必须直显");
+  assert.ok(out.includes("70G\t/home/hguser"), "块 2 output 必须直显");
+  assert.ok(out.includes("继续深挖"), "助手自然文本必须保留");
+  assert.ok(!out.includes('"ok"') && !out.includes('"metadata"'), "JSON 壳必须剥离");
+});
+
+test("chat-model：humanizeEngineContent 必须保留围栏代码与非工具结果 JSON", () => {
+  const toolBlock = JSON.stringify({ ok: true, name: "bash", output: "hello\n" });
+  const content = [
+    "结果如下：",
+    toolBlock,
+    "```json",
+    '{"name": "bash", "output": "围栏内不应被改写"}',
+    "```",
+    "模型输出的配置示例：",
+    '{"name": "myapp", "port": 8080}',
+    "完。",
+  ].join("\n");
+  const out = humanizeEngineContent(content);
+  // 围栏内 JSON 原样（模型主动输出，不是引擎拼接物）
+  assert.ok(out.includes('{"name": "bash", "output": "围栏内不应被改写"}'), "围栏内代码必须原样保留");
+  // 非工具结果特征（无 output 字段）的裸 JSON 原样
+  assert.ok(out.includes('{"name": "myapp", "port": 8080}'), "非工具结果 JSON 必须原样保留");
+  // 工具结果块被可读化
+  assert.ok(out.includes("hello\n") || out.includes("hello"), "工具结果块应转为文本");
+  assert.ok(!out.includes('"ok"'), "工具结果 JSON 壳剥离");
+});
+
+test("chat-model：humanizeEngineContent 纯文本与截断块应零改动直通", () => {
+  // 纯自然文本（快速路径）
+  assert.equal(humanizeEngineContent("普通回答，没有任何 JSON。"), "普通回答，没有任何 JSON。");
+  // 截断 JSON 块（流式中间态）：解析失败原样保留
+  const truncated = '执行中 {"ok": true, "name": "bas';
+  assert.equal(humanizeEngineContent(truncated), truncated);
+  // 空串
+  assert.equal(humanizeEngineContent(""), "");
 });
