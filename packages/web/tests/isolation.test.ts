@@ -276,6 +276,50 @@ test("isolation AC4：聊天附件落个人区；B 的 personal 区不含 A 的�
   assert.ok(downloaded.equals(secretBytes), "下载字节必须与上传一致");
 });
 
+test("isolation：personal scope 空 path 应缺省浏览个人区根（我的文件入口）", async () => {
+  // 前端切「我的文件」tab 时不带 path（前端无法预知服务端派生的 uploadDir/<userId>）；
+  // 单根牢笼（personal）空 path 必须缺省到个人区根而不是 400
+  const list = await fetchJson(server.port, "GET", "/api/files?scope=personal", undefined, cookieA);
+  assert.equal(
+    list.status,
+    200,
+    `personal 空 path 应 200 缺省个人区根（得到 ${list.status}: ${JSON.stringify(list.body)}）`
+  );
+  // 返回 path 必须是 A 的个人区根（前端以该值回写 currentPath）
+  assert.equal(
+    list.body.path,
+    await realpath(path.join(tmpRoot, "uploads", userIdA)),
+    "返回 path 必须为本人个人区归一根"
+  );
+
+  // 空 path 上传同样缺省到个人区根（首次上传免指定路径）
+  const body = buildMultipartBody("isoNoPathB", [
+    { name: "file", filename: "default-root.txt", contentType: "text/plain", data: Buffer.from("缺省根上传") },
+  ]);
+  const upload = await fetch(`http://127.0.0.1:${server.port}/api/files/upload?scope=personal`, {
+    method: "POST",
+    headers: { cookie: cookieA, "content-type": 'multipart/form-data; boundary="isoNoPathB"' },
+    body: new Uint8Array(body),
+  });
+  assert.equal(upload.status, 200, "personal 空 path 上传应缺省到个人区根");
+  const uploadBody = await upload.json();
+  // 保存名经 multipart 随机化，以响应 savedPath 的目录断言落点
+  const savedPath: string = uploadBody.files?.[0]?.savedPath ?? "";
+  assert.ok(savedPath !== "", "上传响应必须携带 savedPath");
+  assert.equal(
+    path.dirname(await realpath(savedPath)),
+    await realpath(path.join(tmpRoot, "uploads", userIdA)),
+    "文件必须落在个人区根目录"
+  );
+
+  // 对照：shared scope 空 path 在本环境（单根 allowRoots）同样缺省到根——
+  // 单根牢笼根无歧义时缺省语义统一；多根 shared 空 path 保持 400
+  //（由 files-flow「单根缺省/多根 400」用例覆盖）
+  const sharedList = await fetchJson(server.port, "GET", "/api/files?scope=shared", undefined, cookieA);
+  assert.equal(sharedList.status, 200, "单根 shared 空 path 应同样缺省到根");
+  assert.equal(sharedList.body.path, await realpath(tmpRoot), "shared 缺省路径必须是白名单归一根");
+});
+
 test("isolation AC5：shared scope 浏览行为对所有用户一致", async () => {
   // 在共享区放一个文件
   mkdirSync(path.join(tmpRoot, "shared"), { recursive: true });
