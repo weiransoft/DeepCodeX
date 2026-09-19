@@ -352,6 +352,79 @@ test("isolation AC6：特殊字符用户名登录后个人目录名为定长 hex
   }
 });
 
+test("isolation AC4 强制防护：重叠配置下 shared scope 触达个人区必须 403（架构师审查 P1-1 修复）", async () => {
+  // 主服务器即重叠配置（allowRoots=[tmpRoot] 包含 uploadDir=tmpRoot/uploads）。
+  // shared scope 请求 uploadDir 下任何路径（含他人/本人个人区与 uploadDir 根）
+  // 一律 403，隔离不依赖部署配置；personal scope 不受影响。
+  const uploadDirRoot = path.join(tmpRoot, "uploads");
+
+  // shared 浏览 uploadDir 根 → 403
+  const listRoot = await fetchJson(
+    server.port,
+    "GET",
+    `/api/files?path=${encodeURIComponent(uploadDirRoot)}`,
+    undefined,
+    cookieA
+  );
+  assert.equal(listRoot.status, 403, "shared 浏览 uploadDir 根必须 403");
+  assert.match(listRoot.body.error, /服务私有目录/);
+
+  // shared 浏览他人个人区子目录 → 403
+  const listOther = await fetchJson(
+    server.port,
+    "GET",
+    `/api/files?path=${encodeURIComponent(path.join(uploadDirRoot, userIdB))}`,
+    undefined,
+    cookieA
+  );
+  assert.equal(listOther.status, 403, "shared 浏览他人个人区必须 403");
+
+  // shared 上传到 uploadDir 子路径 → 403
+  const uploadBody = buildMultipartBody("protBOUNDARY", [
+    { name: "file", filename: "x.txt", contentType: "text/plain", data: Buffer.from("x") },
+  ]);
+  const uploadShared = await fetch(
+    `http://127.0.0.1:${server.port}/api/files/upload?path=${encodeURIComponent(path.join(uploadDirRoot, userIdB))}`,
+    {
+      method: "POST",
+      headers: { cookie: cookieA, "content-type": 'multipart/form-data; boundary="protBOUNDARY"' },
+      body: new Uint8Array(uploadBody),
+    }
+  );
+  assert.equal(uploadShared.status, 403, "shared 上传到个人区必须 403");
+  await uploadShared.text();
+
+  // shared 下载他人个人区文件 → 403（AC4 已落盘的 A 的附件）
+  const personalRootA = await realpath(path.join(uploadDirRoot, userIdA));
+  const secretPath = path.join(personalRootA, "a-private.txt");
+  const downloadShared = await fetch(
+    `http://127.0.0.1:${server.port}/api/files/download?path=${encodeURIComponent(secretPath)}`,
+    { headers: { cookie: cookieB } }
+  );
+  assert.equal(downloadShared.status, 403, "shared 下载他人个人区文件必须 403");
+  await downloadShared.text();
+
+  // 对照组：personal scope 不受保护线影响（AC4 中 A 本人下载已验证 200，此处确认 A 仍可浏览）
+  const listPersonal = await fetchJson(
+    server.port,
+    "GET",
+    `/api/files?path=${encodeURIComponent(personalRootA)}&scope=personal`,
+    undefined,
+    cookieA
+  );
+  assert.equal(listPersonal.status, 200, "personal scope 访问本人个人区不受保护线影响");
+
+  // 对照组：shared 浏览 allowRoots 内的非 uploadDir 路径不受影响（R4）
+  const listShared = await fetchJson(
+    server.port,
+    "GET",
+    `/api/files?path=${encodeURIComponent(tmpRoot)}`,
+    undefined,
+    cookieA
+  );
+  assert.equal(listShared.status, 200, "shared 浏览 allowRoots 非个人区路径不受影响");
+});
+
 test("isolation AC4：files 端点 scope 非法值必须 400", async () => {
   const list = await fetchJson(
     server.port,

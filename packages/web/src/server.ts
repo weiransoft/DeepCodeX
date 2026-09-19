@@ -17,6 +17,7 @@ import http, { type IncomingMessage, type Server, type ServerResponse } from "no
 import { SseHub } from "./events";
 import { ApiError, sendJson } from "./http-utils";
 import { buildJailRoots, realpathAllowMissing } from "./jail";
+import { expandHomePath } from "./config";
 import { authenticateRequest } from "./auth/middleware";
 import { buildAuthContext, type AuthContext } from "./user-identity";
 import { getPersonalJailRoots } from "./user-files";
@@ -196,17 +197,16 @@ export async function startWebServer(
   const hub = new SseHub();
   // 牢笼白名单：启动时一次 realpath 归一（不可用根跳过，空牢笼一律 403）
   const jailRoots = await buildJailRoots(resolved.allowRoots);
-  // 安全配置告警（docs/dev/web-isolation.md §3.5）：uploadDir 落于任一 allowRoot 内时，
-  // shared scope 浏览可触达全体用户的个人区与聊天附件（R3 隔离被配置削弱）。
-  // 行为不阻断启动（向后兼容既有部署），但必须显式提醒管理员修正配置。
+  // 安全配置告警（docs/dev/web-isolation.md §3.5）：uploadDir 落于任一 allowRoot 内时
+  // 属配置重叠形态。shared scope 对个人区的访问已由 resolveFileJailRoots 强制阻断
+  // （403，见下方保护线），告警仅提醒管理员将 uploadDir 移出 allowRoots 以理顺语义。
   if (jailRoots.length > 0) {
     // uploadDir 可能尚未创建（首次使用前）：realpathAllowMissing 对最近存在祖先归一
     const uploadRoot = await realpathAllowMissing(path.resolve(resolved.uploadDir));
     if (jailRoots.some((root) => uploadRoot === root || uploadRoot.startsWith(root + path.sep))) {
       console.warn(
         `[web] 安全警告：uploadDir（${resolved.uploadDir}）位于 allowRoots 白名单内，` +
-          `shared 模式浏览/下载可触达用户个人文件与聊天附件，建议将 uploadDir 移出 allowRoots` +
-          `（docs/dev/web-isolation.md §3.5 配置约束）`
+          `shared 模式对该目录的访问将被强制拒绝（个人区隔离保护），建议将 uploadDir 移出 allowRoots`
       );
     }
   }
@@ -221,15 +221,38 @@ export async function startWebServer(
   /** 个人文件牢笼缓存（userId → realpath 根；docs/dev/web-isolation.md §3.5） */
   const personalJailCache = new Map<string, string[]>();
   /**
+   * uploadDir 归一根（启动时一次，realpath 消解符号链接）。
+   * shared scope 的个人区保护边界：任何位于该根内的请求路径一律 403，
+   * 与 allowRoots 配置无关（架构师审查 P1-1 强制修复）。
+   */
+  const uploadRootNormalized = await realpathAllowMissing(path.resolve(resolved.uploadDir));
+  /**
    * 解析 files 端点的牢笼根（scope 分流，docs/dev/web-isolation.md §3.5）。
    *
    * @param ctx 认证上下文（personal 场景决定目录归属）
    * @param scope 查询参数 scope（非法值按 400 拒绝）
+   * @param requestedPath 查询参数 path 原值（shared 分支的个人区保护线判定用）
    * @returns shared = 全局 allowRoots 牢笼；personal = 本人个人区牢笼
-   * @throws ApiError 400 scope 非法
+   * @throws ApiError 400 scope 非法；403 shared 请求触达 uploadDir（个人区）
    */
-  async function resolveFileJailRoots(ctx: AuthContext, scope: string | null): Promise<string[]> {
+  async function resolveFileJailRoots(
+    ctx: AuthContext,
+    scope: string | null,
+    requestedPath: string | null
+  ): Promise<string[]> {
     if (scope === null || scope === "shared") {
+      // 个人区保护线（P1-1 强制修复）：即使部署方误将 uploadDir 配入 allowRoots，
+      // shared 浏览/上传/下载也不得触达任何用户的个人区与聊天附件（R3 不依赖配置）。
+      // 请求路径经 ~ 展开 + realpath 消解后与 uploadDir 归一根做前缀包含判定。
+      if (requestedPath !== null) {
+        const normalized = await realpathAllowMissing(path.resolve(expandHomePath(requestedPath)));
+        if (uploadRootNormalized === normalized || normalized.startsWith(uploadRootNormalized + path.sep)) {
+          throw new ApiError(
+            403,
+            "uploadDir 为服务私有目录（用户个人区），shared 模式不可访问；个人文件请使用 scope=personal"
+          );
+        }
+      }
       return jailRoots;
     }
     if (scope === "personal") {
@@ -339,7 +362,7 @@ export async function startWebServer(
       if (pathname === "/api/files" && req.method === "GET") {
         await handleListFiles(
           res,
-          await resolveFileJailRoots(ctx, url.searchParams.get("scope")),
+          await resolveFileJailRoots(ctx, url.searchParams.get("scope"), url.searchParams.get("path")),
           url.searchParams.get("path")
         );
         return;
@@ -349,7 +372,7 @@ export async function startWebServer(
           req,
           res,
           resolved,
-          await resolveFileJailRoots(ctx, url.searchParams.get("scope")),
+          await resolveFileJailRoots(ctx, url.searchParams.get("scope"), url.searchParams.get("path")),
           url.searchParams.get("path")
         );
         return;
@@ -357,7 +380,7 @@ export async function startWebServer(
       if (pathname === "/api/files/download" && req.method === "GET") {
         await handleDownloadFile(
           res,
-          await resolveFileJailRoots(ctx, url.searchParams.get("scope")),
+          await resolveFileJailRoots(ctx, url.searchParams.get("scope"), url.searchParams.get("path")),
           url.searchParams.get("path")
         );
         return;
