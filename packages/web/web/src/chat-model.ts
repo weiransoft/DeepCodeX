@@ -222,15 +222,27 @@ export function parseLeadingJsonBlock(content: string): Record<string, unknown> 
 /**
  * 判断解析出的 JSON 对象是否为「引擎拼接的工具结果块」。
  *
- * 严格特征：name 与 output 均为 string（引擎序列化工具结果的统一形态，
- * 如 { ok, name: "bash", output, metadata }）。仅对匹配块做可读化重写，
- * 避免误伤模型主动输出的其他 JSON 数据（如 A2UI 指令、模型给出的配置示例）。
+ * 形态一（严格特征）：name 与 output 均为 string——引擎序列化工具结果的
+ * 统一形态（如 { ok, name: "bash", output, metadata }）。
+ * 形态二（结构指纹）：ok 为 boolean + name 为 string + metadata 为对象——
+ * 部分工具（如 UpdatePlan/write）无 output 字段（结果信息在 metadata），
+ * 该三元组合是引擎包装结构独有指纹，模型常规输出不会命中。
+ * 仅对匹配块做可读化重写，避免误伤模型主动输出的其他 JSON 数据
+ * （如 A2UI 指令、模型给出的配置示例）。
  *
  * @param parsed 已解析的 JSON 对象
  * @returns 是否为工具结果块
  */
 function isEngineToolResultBlock(parsed: Record<string, unknown>): boolean {
-  return typeof parsed.name === "string" && typeof parsed.output === "string";
+  if (typeof parsed.name === "string" && typeof parsed.output === "string") {
+    return true;
+  }
+  return (
+    typeof parsed.ok === "boolean" &&
+    typeof parsed.name === "string" &&
+    parsed.metadata !== null &&
+    typeof parsed.metadata === "object"
+  );
 }
 
 /**
@@ -317,7 +329,9 @@ function parseMixedJsonBlocksStrict(text: string): string[] {
       const parsed: unknown = JSON.parse(blockText);
       if (parsed !== null && typeof parsed === "object" && isEngineToolResultBlock(parsed as Record<string, unknown>)) {
         const readable = toolResultToText(parsed as Record<string, unknown>);
-        segments.push(readable ?? blockText);
+        // 无可读字段（如无 output 的形态二块）：格式化缩进显示，与原始
+        // 内容信息等价但更易读（键值分行、消除单行密集形态）
+        segments.push(readable ?? extractJsonPayload(blockText) ?? blockText);
       } else {
         // 非工具结果块（模型输出数据/A2UI 指令等）：原样保留
         segments.push(blockText);

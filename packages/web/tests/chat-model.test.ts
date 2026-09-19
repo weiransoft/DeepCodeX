@@ -171,6 +171,33 @@ test("chat-model：extractJsonPayload 应解包双重序列化 JSON 为格式化
   assert.equal(extractJsonPayload('{"name": "abc'), null);
 });
 
+test("chat-model：humanizeEngineContent 应处理无 output 的形态二引擎块（UpdatePlan/write）", () => {
+  // 形态二 A（UpdatePlan）：有 output 短文本 → 直显文本，JSON 壳剥离
+  const planBlock = JSON.stringify({
+    ok: true,
+    name: "UpdatePlan",
+    output: "Plan updated.",
+    metadata: { plan: ["核对实现", "补齐测试"], explanation: "按需求逐项核对" },
+  });
+  const outA = humanizeEngineContent(`${planBlock}\n以上是计划更新。`);
+  assert.ok(outA.includes("Plan updated."), "UpdatePlan 的 output 文本必须直显");
+  assert.ok(outA.includes("以上是计划更新。"), "块外自然文本必须保留");
+  assert.ok(!outA.includes('"ok"') && !outA.includes('"metadata"'), "UpdatePlan JSON 壳必须剥离");
+  // 形态二 B（write）：无 output，信息全在 metadata → 格式化缩进显示（不再原样密集单行）
+  const writeBlock = JSON.stringify({
+    ok: true,
+    name: "write",
+    metadata: { type: "file_write", file_path: "/tmp/a.txt", bytesWritten: 128, diff_preview: "+hello" },
+  });
+  const outB = humanizeEngineContent(writeBlock);
+  assert.ok(outB.includes('"file_path": "/tmp/a.txt"'), "write 块 metadata 必须格式化键值分行显示");
+  assert.ok(outB.includes('"bytesWritten": 128'), "格式化后信息不丢");
+  assert.ok(outB.includes("\n  "), "必须为缩进多行形态而非原始单行密集 JSON");
+  // 非引擎形态的裸 JSON（缺 ok/name/metadata 指纹）仍原样保留，不被误伤
+  const plain = '{"name": "myapp", "port": 8080}';
+  assert.equal(humanizeEngineContent(plain), plain, "非引擎指纹 JSON 必须原样直通");
+});
+
 test("chat-model：humanizeEngineContent 应格式化双重序列化 output 并吸收失步残留", () => {
   // 真实缺陷形态（output 内嵌大 JSON 导致括号扫描失步后页面泄漏转义 JSON）：
   // query_execution_history 的 output 是序列化 JSON，其后紧跟其他工具块
