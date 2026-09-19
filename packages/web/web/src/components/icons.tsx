@@ -347,3 +347,36 @@ export function FolderOpenIcon(p: IconProps) {
     </IconBase>
   );
 }
+
+/** 默认机器头像（DeepCodeX 引擎/助手消息）：圆形底内机器人脸 */
+export function BotAvatarIcon(p: IconProps) {
+  return (
+    <IconBase {...p} label="DeepCodeX 助手">
+      {/* 机器人头部圆角矩形 + 天线 */}
+      <rect x="3.2" y="5" width="9.6" height="7" rx="2" fill="none" stroke="currentColor" strokeWidth="1.2" />
+      <line x1="8" y1="2.6" x2="8" y2="5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <circle cx="8" cy="2.4" r="0.9" fill="currentColor" />
+      {/* 双眼与嘴 */}
+      <circle cx="6" cy="8" r="0.9" fill="currentColor" />
+      <circle cx="10" cy="8" r="0.9" fill="currentColor" />
+      <path d="M6.2 10.2h3.6" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+    </IconBase>
+  );
+}
+
+/** 默认用户头像（登录用户/用户消息）：圆形底内人形剪影 */
+export function UserAvatarIcon(p: IconProps) {
+  return (
+    <IconBase {...p} label="用户">
+      {/* 头部圆 + 肩部弧（经典人形剪影） */}
+      <circle cx="8" cy="5.6" r="2.4" fill="none" stroke="currentColor" strokeWidth="1.2" />
+      <path
+        d="M3.4 13.4a4.6 4.6 0 0 1 9.2 0"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
+    </IconBase>
+  );
+}

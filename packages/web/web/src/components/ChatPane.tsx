@@ -11,7 +11,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { parseMarkdownToA2ui } from "../a2ui/parser";
 import { A2uiSurface } from "../a2ui/renderer";
 import type { ChatEntry, UserAttachment } from "../chat-model";
-import { FolderOpenIcon, PaperclipIcon, StopIcon, WrenchIcon } from "./icons";
+import { FolderOpenIcon, PaperclipIcon, StopIcon, WrenchIcon, BotAvatarIcon, UserAvatarIcon } from "./icons";
 import { PermissionCard } from "./PermissionCard";
 
 /** ChatPane 组件属性 */
@@ -148,21 +148,27 @@ export function ChatPane(props: ChatPaneProps) {
                       <AttachmentChips attachments={entry.attachments} />
                       {entry.text !== "" && <div className="msg-user-text">{entry.text}</div>}
                     </div>
+                    {/* 默认用户头像（气泡右侧，与右对齐布局一致） */}
+                    <UserAvatarIcon size={26} className="msg-avatar msg-avatar-user" />
                   </div>
                 );
               case "assistant":
                 return (
                   <div key={entry.id} className="msg-row msg-row-assistant">
-                    {entry.content !== null ? (
-                      // 完整内容：A2UI 管线渲染
-                      <AssistantA2ui content={entry.content} messageId={entry.id} />
-                    ) : (
-                      // 流式阶段：previewText 纯文本 + 光标动画
-                      <div className="chat-stream-preview">
-                        {entry.preview ?? ""}
-                        {entry.done !== true && <span className="stream-cursor" aria-hidden="true" />}
-                      </div>
-                    )}
+                    {/* 默认机器头像（DeepCodeX 引擎，内容左侧） */}
+                    <div className="msg-assistant-with-avatar">
+                      <BotAvatarIcon size={26} className="msg-avatar msg-avatar-assistant" />
+                      {entry.content !== null ? (
+                        // 完整内容：A2UI 管线渲染
+                        <AssistantA2ui content={entry.content} messageId={entry.id} />
+                      ) : (
+                        // 流式阶段：previewText 纯文本 + 光标动画
+                        <div className="chat-stream-preview">
+                          {entry.preview ?? ""}
+                          {entry.done !== true && <span className="stream-cursor" aria-hidden="true" />}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 );
               case "tool":

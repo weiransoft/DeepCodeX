@@ -355,6 +355,16 @@ body {
   padding: 10px 12px;
   border-top: 1px solid var(--app-border);
 }
+/* 底部用户区默认头像：圆形底，与消息区用户头像同一视觉语言 */
+.sidebar-user-avatar {
+  flex: none;
+  padding: 3px;
+  border-radius: 50%;
+  box-sizing: border-box;
+  color: var(--app-text-secondary);
+  background: var(--app-bg-elevated);
+  border: 1px solid var(--app-border);
+}
 .sidebar-user-name {
   font-size: 13px;
   color: var(--app-text-secondary);
@@ -428,6 +438,11 @@ body {
 }
 .msg-row-user {
   align-items: flex-end;
+  /* 头像与气泡同行：行内水平排布（气泡左、头像右） */
+  flex-direction: row;
+  justify-content: flex-end;
+  align-items: flex-start;
+  gap: 8px;
 }
 .msg-user-bubble {
   max-width: 78%;
@@ -470,6 +485,36 @@ body {
 /* 助手消息：通栏 */
 .msg-row-assistant {
   align-items: stretch;
+}
+/* 助手消息行：头像 + 内容水平排布 */
+.msg-assistant-with-avatar {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+.msg-assistant-with-avatar .chat-assistant-body,
+.msg-assistant-with-avatar .chat-stream-preview {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 默认头像（机器/用户）：圆形底 + 主题色线稿，随明暗主题自适应 */
+.msg-avatar {
+  flex: none;
+  padding: 4px;
+  border-radius: 50%;
+  box-sizing: border-box;
+}
+.msg-avatar-assistant {
+  color: #4f8ef7;
+  background: rgba(79, 142, 247, 0.14);
+  border: 1px solid rgba(79, 142, 247, 0.25);
+}
+.msg-avatar-user {
+  color: var(--app-text-secondary);
+  background: var(--app-bg-elevated);
+  border: 1px solid var(--app-border);
 }
 .chat-assistant-body {
   gap: 10px;
