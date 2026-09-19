@@ -24,6 +24,7 @@ import {
   type UserInfo,
 } from "./api";
 import type { ChatEntry, UserAttachment } from "./chat-model";
+import { parseLeadingJsonBlock } from "./chat-model";
 import { ChatPane } from "./components/ChatPane";
 import { Composer } from "./components/Composer";
 import { FileDrawer } from "./components/FileDrawer";
@@ -306,9 +307,18 @@ export function App() {
       if (d.role === "user") {
         result.push({ kind: "user", id: `h-${d.id}`, text: content, attachments: [], createTime: d.createTime });
       } else if (d.role === "tool") {
-        // 历史工具条目：展示名取 content 首行（截断到 60 字符），全文保留在 raw 中不丢信息
+        // 历史工具条目标签：content 常为「JSON 块混排」——首行以 { 开头时解析首块
+        // 取工具名生成友好标签（避免折叠行显示 "{"）；普通文本取首行（截断 60 字符）。
+        // 全文保留在 raw 中不丢信息。
+        let label: string;
         const firstLine = content.split("\n", 1)[0] ?? "";
-        const label = firstLine === "" ? "工具执行" : firstLine.length > 60 ? `${firstLine.slice(0, 59)}…` : firstLine;
+        if (firstLine.startsWith("{")) {
+          const leading = parseLeadingJsonBlock(content);
+          const toolName = leading !== null && typeof leading.name === "string" ? leading.name : "";
+          label = toolName !== "" ? `工具执行：${toolName}` : "工具执行";
+        } else {
+          label = firstLine === "" ? "工具执行" : firstLine.length > 60 ? `${firstLine.slice(0, 59)}…` : firstLine;
+        }
         result.push({ kind: "tool", id: `h-${d.id}`, label, status: "completed", raw: { content } });
       } else {
         // assistant / system：统一按助手内容进 A2UI 管线（system 不静默丢弃）

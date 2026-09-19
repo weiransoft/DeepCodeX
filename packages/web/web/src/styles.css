@@ -603,6 +603,43 @@ body {
   color: var(--app-text-secondary);
   background: var(--app-bg-code);
 }
+/* 工具输出文本渲染（优先于 JSON）：等宽保留换行，限高滚动防长输出撑爆对话流 */
+.tool-entry-text {
+  margin: 0;
+  padding: 10px 12px;
+  border-top: 1px solid var(--app-border);
+  font-family: var(--app-font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--app-text);
+  background: var(--app-bg-code);
+  max-height: 320px;
+  overflow-y: auto;
+}
+/* 原始事件数据次级折叠：标题弱化，展开后 JSON 同 .tool-entry-raw */
+.tool-entry-raw-toggle > summary {
+  padding: 6px 12px;
+  border-top: 1px solid var(--app-border);
+  font-size: 11px;
+  color: var(--app-text-tertiary);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.tool-entry-raw-toggle > summary::-webkit-details-marker {
+  display: none;
+}
+.tool-entry-raw-toggle > summary:hover {
+  color: var(--app-text-secondary);
+  background: var(--app-bg-hover);
+}
+.tool-entry-raw-toggle > pre {
+  border-top: none;
+  max-height: 320px;
+  overflow-y: auto;
+}
 
 /* 权限卡片 */
 .msg-row-permission {
