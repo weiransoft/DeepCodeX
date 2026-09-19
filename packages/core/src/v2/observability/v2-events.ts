@@ -128,9 +128,15 @@ export type V2LogEvent = ApprovalEvent | CompressionEvent | RetrievalEvent | Sna
 // ============================================================================
 
 /**
- * 默认日志目录：~/.deepcodex/logs/
+ * 默认日志目录（docs/dev/web-workspace.md C7 陷阱修复）：
+ *
+ * 旧版是模块级常量 `= getDeepCodeXLogDir()`，模块加载时即固化家目录路径，
+ * Web 多用户注入的 homeDir 对其无效。改为函数每次调用时求值，
+ * 作为 V2EventLogger 构造缺省（未注入 homeDir 时行为与旧版一致）。
  */
-const DEFAULT_LOG_DIR = getDeepCodeXLogDir();
+function defaultV2LogDir(): string {
+  return getDeepCodeXLogDir();
+}
 
 /**
  * V2 事件日志记录器
@@ -165,7 +171,7 @@ export class V2EventLogger {
    * @param logDir 日志目录（默认 ~/.deepcodex/logs/，测试注入临时目录）
    * @param redactor 敏感信息过滤器（默认使用内置 11 条规则）
    */
-  constructor(logDir: string = DEFAULT_LOG_DIR, redactor: SensitiveInfoRedactor = new SensitiveInfoRedactor()) {
+  constructor(logDir: string = defaultV2LogDir(), redactor: SensitiveInfoRedactor = new SensitiveInfoRedactor()) {
     this.logDir = logDir;
     this.redactor = redactor;
     // DEEPCODEX_DEBUG=1 时同步输出 stderr

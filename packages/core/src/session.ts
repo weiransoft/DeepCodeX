@@ -42,7 +42,13 @@ import {
   type ToolExecutionResult,
 } from "./tools/executor";
 import { McpManager } from "./mcp/mcp-manager";
-import type { McpServerConfig, PermissionMode, PermissionScope, PermissionSettings } from "./settings";
+import type {
+  McpServerConfig,
+  PermissionMode,
+  PermissionScope,
+  PermissionSettings,
+  ResolvedDeepcodingSettings,
+} from "./settings";
 import { resolveCurrentSettings } from "./settings";
 // 上游 v0.3.1：Files API 默认值与自动 compact 窗口计算，供 filesApi / autoCompactWindow 消费
 import {
@@ -584,6 +590,30 @@ export type SessionManagerOptions = {
    */
   loopGuard?: LoopGuard;
   /**
+   * Web 个人工作区牢笼：引擎数据家目录（docs/dev/web-workspace.md §3 / C1）。
+   *
+   * 注入后，本实例的全部引擎数据目录以 `<homeDir>/.deepcode/` 为根：
+   * - projects/<projectCode>/：sessions-index.json、<sessionId>.jsonl、images/、
+   *   file-history/.git、execution-history.jsonl
+   * - memory/：global.json、experience.json、redaction.log
+   * - logs/：debug.log、error.log、interrupts.log（引擎内 logger 调用点透传）
+   * - AGENTS.md（用户级指令）、files-api-cache.json、global-context.json
+   *
+   * 缺省 = os.homedir()（CLI 单用户行为逐字节不变）。
+   * Web 会话池为每个聊天注入 <engineHomeDir>/<userId>，实现用户间记忆/日志/
+   * 会话数据物理分离；进程级 HOME 不做任何修改（并发安全，见审查 P0-2）。
+   */
+  homeDir?: string;
+  /**
+   * Web 个人工作区牢笼：忽略项目级 settings.json（docs/dev/web-workspace.md C3）。
+   *
+   * true 时本实例内 resolveCurrentSettings 一律跳过
+   * `<projectRoot>/.deepcode/settings.json` 来源——个人工作区是用户可写目录，
+   * 不得成为模型凭据 / mcpServers / 权限模式 / allowPrivateBaseURL 的配置入口。
+   * 缺省 false（CLI 项目级配置照常生效）。
+   */
+  ignoreProjectSettings?: boolean;
+  /**
    * EAG-P0：评估器红线清单（可选注入，§5.1.3 企业红线 + §5.5 RLIS 规则即红线）
    *
    * 未注入时评估器跳过判定（EAG-P0 降级语义）。
@@ -984,6 +1014,13 @@ export type LlmRetryEvent = {
 
 export class SessionManager {
   private readonly projectRoot: string;
+  /**
+   * 引擎数据家目录（docs/dev/web-workspace.md C1）：本实例全部引擎数据目录的根。
+   * 构造时锁定（options.homeDir ?? os.homedir()），会话生命周期内不可变。
+   */
+  private readonly homeRoot: string;
+  /** 是否忽略项目级 settings.json（docs/dev/web-workspace.md C3，Web 牢笼防凭据劫持） */
+  private readonly ignoreProjectSettings: boolean;
   private readonly createOpenAIClient: CreateOpenAIClient;
   // B1：统一 LLM 客户端工厂注入（可选，测试缝合点；未注入时走 resolveCurrentSettings + ProviderFactory）
   private readonly createLLMClientOverride?: CreateLLMClient;
@@ -1114,10 +1151,24 @@ export class SessionManager {
   // - 激活主对话前由 consumeAwaitingUserToolAnswer 消费（一次性）
   private readonly sessionsAwaitingUserToolAnswer = new Set<string>();
   // 上游 v0.3.1：DeepSeek Files API 文件存储（图片上传/file_id 引用/配额清理）
-  private readonly deepSeekFiles = new DeepSeekFileStore();
+  // 牢笼改造（docs/dev/web-workspace.md C7）：cachePath 依赖构造参数 homeDir，
+  // 字段初始化器拿不到 options，改为构造体内赋值。
+  private readonly deepSeekFiles: DeepSeekFileStore;
 
   constructor(options: SessionManagerOptions) {
     this.projectRoot = options.projectRoot;
+    // 用户工作目录牢笼（docs/dev/web-workspace.md C1）：引擎数据根目录。
+    // 未注入时回退进程真实家目录（CLI 单机行为零变化）；Web 多用户模式下
+    // 由调用方注入 `<engineHomeDir>/<userId>`，本实例全部引擎记忆/日志/会话
+    // 索引都落在该目录下，与用户可读写的工作区（projectRoot）物理分离。
+    this.homeRoot = options.homeDir ?? os.homedir();
+    // 凭据防劫持开关（docs/dev/web-workspace.md C3）：true 时本实例的引擎设置
+    // 解析全部忽略 project 级 settings（用户可写区不可注入 API_KEY/mcpServers 等），
+    // 未注入时 false，行为与既有 CLI/Web 完全一致。
+    this.ignoreProjectSettings = options.ignoreProjectSettings === true;
+    // 牢笼改造（docs/dev/web-workspace.md C7）：DeepSeek Files API 缓存落在
+    // 引擎数据根（homeRoot）下，随用户隔离；CLI 缺省 homeRoot=进程家目录，行为不变。
+    this.deepSeekFiles = new DeepSeekFileStore(path.join(this.homeRoot, ".deepcode", "files-api-cache.json"));
     this.createOpenAIClient = options.createOpenAIClient;
     // B1：统一 LLM 工厂注入（未注入时走默认 resolveCurrentSettings + ProviderFactory 路由）
     this.createLLMClientOverride = options.createLLMClient;
@@ -1301,11 +1352,26 @@ export class SessionManager {
     if (this.createLLMClientOverride) {
       return this.createLLMClientOverride();
     }
-    const settings = resolveCurrentSettings(this.projectRoot);
+    const settings = this.resolveEngineSettings();
     if (!settings.apiKey) {
       return null;
     }
     return ProviderFactory.create(settings);
+  }
+
+  /**
+   * 本实例的统一设置解析入口（docs/dev/web-workspace.md C3）
+   *
+   * 在 `resolveCurrentSettings(this.projectRoot)` 基础上叠加
+   * `ignoreProjectSettings` 开关：Web 模式下项目根是用户可写的个人工作区，
+   * 其 `.deepcode/settings.json` 不得注入 API_KEY / mcpServers /
+   * permissions.mode / allowPrivateBaseURL 等敏感配置；CLI 未注入开关时
+   * 行为与直接调用 resolveCurrentSettings 完全一致。
+   */
+  private resolveEngineSettings(): ResolvedDeepcodingSettings {
+    return resolveCurrentSettings(this.projectRoot, {
+      ignoreProjectSettings: this.ignoreProjectSettings,
+    });
   }
 
   /**
@@ -1771,15 +1837,19 @@ export class SessionManager {
             request: streamRequest,
             error: normalizeDebugError(new LlmStreamIdleTimeoutError()),
           });
-          logApiError({
-            timestamp: new Date().toISOString(),
-            location: "SessionManager.createChatCompletionStream:create",
-            requestId,
-            sessionId,
-            model: typeof request.model === "string" ? request.model : undefined,
-            error: getLlmErrorDetails(new LlmStreamIdleTimeoutError()),
-            request: streamRequest,
-          });
+          // 牢笼改造（docs/dev/web-workspace.md C8）：错误日志透传本实例 homeRoot
+          logApiError(
+            {
+              timestamp: new Date().toISOString(),
+              location: "SessionManager.createChatCompletionStream:create",
+              requestId,
+              sessionId,
+              model: typeof request.model === "string" ? request.model : undefined,
+              error: getLlmErrorDetails(new LlmStreamIdleTimeoutError()),
+              request: streamRequest,
+            },
+            this.homeRoot
+          );
           this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "end", sessionId);
           throw new LlmStreamIdleTimeoutError();
         }
@@ -1802,15 +1872,19 @@ export class SessionManager {
           request: streamRequest,
           error: normalizeDebugError(error),
         });
-        logApiError({
-          timestamp: new Date().toISOString(),
-          location: "SessionManager.createChatCompletionStream:create",
-          requestId,
-          sessionId,
-          model: typeof request.model === "string" ? request.model : undefined,
-          error: getLlmErrorDetails(error),
-          request: streamRequest,
-        });
+        // 牢笼改造（C8）：错误日志透传 homeRoot（同上）
+        logApiError(
+          {
+            timestamp: new Date().toISOString(),
+            location: "SessionManager.createChatCompletionStream:create",
+            requestId,
+            sessionId,
+            model: typeof request.model === "string" ? request.model : undefined,
+            error: getLlmErrorDetails(error),
+            request: streamRequest,
+          },
+          this.homeRoot
+        );
         if (retryDelayMs === null) {
           // 不可重试（真 400 / 非 400 错误 / 重试耗尽 / 已中止）：清理 + 结束进度 + 抛出
           clearAttempt();
@@ -2001,15 +2075,19 @@ export class SessionManager {
         responseChunks,
         error: normalizeDebugError(streamError),
       });
-      logApiError({
-        timestamp: new Date().toISOString(),
-        location: "SessionManager.createChatCompletionStream:stream",
-        requestId,
-        sessionId,
-        model: typeof request.model === "string" ? request.model : undefined,
-        error: getLlmErrorDetails(streamError),
-        request: streamRequest,
-      });
+      // 牢笼改造（C8）：错误日志透传 homeRoot（同上）
+      logApiError(
+        {
+          timestamp: new Date().toISOString(),
+          location: "SessionManager.createChatCompletionStream:stream",
+          requestId,
+          sessionId,
+          model: typeof request.model === "string" ? request.model : undefined,
+          error: getLlmErrorDetails(streamError),
+          request: streamRequest,
+        },
+        this.homeRoot
+      );
       throw streamError;
     } finally {
       // upstream v0.4.0：清理 idleTimer + rawSignal 监听器
@@ -2269,19 +2347,23 @@ export class SessionManager {
         responseChunks,
         error: normalizeDebugError(error),
       });
-      logApiError({
-        timestamp: new Date().toISOString(),
-        location: "SessionManager.createLlmMessageStream",
-        requestId,
-        sessionId,
-        model: llmClient.model,
-        error: {
-          name: error instanceof Error ? error.name : "UnknownError",
-          message: error instanceof Error ? error.message : String(error),
-          stack: error instanceof Error ? error.stack : undefined,
+      // 牢笼改造（C8）：错误日志透传 homeRoot（同上）
+      logApiError(
+        {
+          timestamp: new Date().toISOString(),
+          location: "SessionManager.createLlmMessageStream",
+          requestId,
+          sessionId,
+          model: llmClient.model,
+          error: {
+            name: error instanceof Error ? error.name : "UnknownError",
+            message: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack : undefined,
+          },
+          request: logRequest,
         },
-        request: logRequest,
-      });
+        this.homeRoot
+      );
       throw error;
     } finally {
       if (timeoutHandle) {
@@ -2336,7 +2418,8 @@ export class SessionManager {
     if (!debug?.enabled) {
       return;
     }
-    logOpenAIChatCompletionDebug(entry);
+    // 牢笼改造（docs/dev/web-workspace.md C8）：debug 日志透传本实例 homeRoot
+    logOpenAIChatCompletionDebug(entry, this.homeRoot);
   }
 
   async identifyMatchingSkillNames(
@@ -6532,7 +6615,9 @@ ${agentInstructions}
       // —— MemoryStore 构造参数 projectRoot：与 ExecutionHistoryStore 共用 projectCode 路径
       try {
         if (this.executionHistoryStore) {
-          const memoryStore = new MemoryStore(this.projectRoot);
+          // 牢笼改造（docs/dev/web-workspace.md C6）：经验记忆沉淀透传 homeRoot，
+          // 全局/经验记忆按用户落在各自引擎数据根下
+          const memoryStore = new MemoryStore(this.projectRoot, this.homeRoot);
           const sync = new ExecutionHistoryMemorySync(this.executionHistoryStore, memoryStore);
           const { successCount, failureFixCount } = sync.syncSession(sessionId);
           if (successCount > 0 || failureFixCount > 0) {
@@ -6881,7 +6966,9 @@ ${agentInstructions}
     }
     // 请求级参数（thinking 开关/采样温度）继续取自统一 settings 解析链，
     // 与主对话及旧 compact 通路同源，保证行为语义不变
-    const { thinkingEnabled, temperature } = resolveCurrentSettings(this.projectRoot);
+    // 牢笼改造（docs/dev/web-workspace.md C3）：compact 的请求级参数同样经
+    // resolveEngineSettings 解析，尊重 ignoreProjectSettings 开关
+    const { thinkingEnabled, temperature } = this.resolveEngineSettings();
     const sessionMessages = this.listSessionMessages(sessionId).filter((message) => !message.compacted);
     if (sessionMessages.length === 0) {
       return;
@@ -6931,20 +7018,24 @@ ${agentInstructions}
       });
     } catch (error) {
       // 保持错误可观测性（对齐旧 createChatCompletionStream 的 logApiError 行为），随后原样抛出
-      logApiError({
-        timestamp: new Date().toISOString(),
-        location: "SessionManager.compactSession",
-        requestId: crypto.randomUUID(),
-        sessionId,
-        model: llmClient.model,
-        baseURL: llmClient.baseURL,
-        error: {
-          name: error instanceof Error ? error.name : "UnknownError",
-          message: error instanceof Error ? error.message : String(error),
-          stack: error instanceof Error ? error.stack : undefined,
+      // 牢笼改造（C8）：错误日志透传 homeRoot（同上）
+      logApiError(
+        {
+          timestamp: new Date().toISOString(),
+          location: "SessionManager.compactSession",
+          requestId: crypto.randomUUID(),
+          sessionId,
+          model: llmClient.model,
+          baseURL: llmClient.baseURL,
+          error: {
+            name: error instanceof Error ? error.name : "UnknownError",
+            message: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack : undefined,
+          },
+          request: { provider: llmClient.providerName, messages: [{ role: "user", content: compactPrompt }] },
         },
-        request: { provider: llmClient.providerName, messages: [{ role: "user", content: compactPrompt }] },
-      });
+        this.homeRoot
+      );
       throw error;
     }
     this.throwIfAborted(signal);
@@ -7454,7 +7545,10 @@ ${agentInstructions}
     sessionsIndexPath: string;
   } {
     const projectCode = getProjectCode(this.projectRoot);
-    const projectDir = path.join(os.homedir(), ".deepcode", "projects", projectCode);
+    // 牢笼改造（docs/dev/web-workspace.md C2）：会话索引/jsonl/图片/file-history
+    // 全部经此方法解析，锚点从进程家目录改为本实例的引擎数据根 homeRoot。
+    // 未注入 homeDir 时 homeRoot = os.homedir()，CLI 路径逐字节不变。
+    const projectDir = path.join(this.homeRoot, ".deepcode", "projects", projectCode);
     const sessionsIndexPath = path.join(projectDir, "sessions-index.json");
     return { projectCode, projectDir, sessionsIndexPath };
   }
@@ -7881,7 +7975,9 @@ ${agentInstructions}
       return projectInstructions.content;
     }
 
-    return this.readNonEmptyFile(path.join(os.homedir(), ".deepcode", "AGENTS.md"));
+    // 牢笼改造（docs/dev/web-workspace.md C9）：全局 AGENTS.md 从引擎数据根读取，
+    // Web 多用户下每个用户读到自己 engineHome 下的 AGENTS.md。
+    return this.readNonEmptyFile(path.join(this.homeRoot, ".deepcode", "AGENTS.md"));
   }
 
   private buildSystemMessage(

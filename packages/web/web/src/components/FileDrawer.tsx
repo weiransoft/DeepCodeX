@@ -30,6 +30,11 @@ export interface FileDrawerProps {
   open: boolean;
   /** 目录白名单（来自 /api/config） */
   allowRoots: string[];
+  /**
+   * 个人工作目录模式（docs/dev/web-workspace.md W7）：true 时隐藏「共享目录」tab，
+   * 作用域锁定 personal（后端 shared 一律 403，前端同步收敛入口）。
+   */
+  personalOnly: boolean;
   /** 关闭抽屉 */
   onClose: () => void;
   /** 把服务器文件路径作为附件插入对话 */
@@ -62,11 +67,21 @@ function entryIcon(e: FileEntry) {
 }
 
 /** FileDrawer：右侧抽屉 */
-export function FileDrawer({ open, allowRoots, onClose, onInsertAttachment }: FileDrawerProps) {
+export function FileDrawer({ open, allowRoots, personalOnly, onClose, onInsertAttachment }: FileDrawerProps) {
   /** 当前浏览目录（初始为第一个白名单根；无白名单时为空串由服务端决定默认） */
   const [currentPath, setCurrentPath] = useState(() => (allowRoots.length > 0 ? allowRoots[0] : ""));
-  /** 文件区作用域：shared=共享 allowRoots / personal=本人个人区（隔离设计 §3.5） */
-  const [scope, setScope] = useState<FileScope>("shared");
+  /** 文件区作用域：shared=共享 allowRoots / personal=本人个人区（隔离设计 §3.5；个人模式下恒为 personal） */
+  const [scope, setScope] = useState<FileScope>(personalOnly ? "personal" : "shared");
+
+  // 个人模式配置异步就绪（config 晚于首次渲染返回）时把作用域收敛到 personal，
+  // 避免残留 shared 作用域向已被后端禁用的共享区发请求
+  useEffect(() => {
+    if (personalOnly && scope !== "personal") {
+      setScope("personal");
+      setListing(null);
+      setCurrentPath("");
+    }
+  }, [personalOnly, scope]);
   /** 目录列表数据 */
   const [listing, setListing] = useState<FileListing | null>(null);
   /** 加载中 / 上传中 / 错误提示 */
@@ -181,17 +196,20 @@ export function FileDrawer({ open, allowRoots, onClose, onInsertAttachment }: Fi
           />
         </div>
 
-        {/* 作用域切换（docs/dev/web-isolation.md §3.5）：共享目录 / 我的文件 */}
+        {/* 作用域切换（docs/dev/web-isolation.md §3.5）：共享目录 / 我的文件；
+            个人工作目录模式（W7）下共享区已被后端禁用，隐藏 tab 仅保留「我的文件」 */}
         <div className="drawer-scope" role="tablist" aria-label="文件区作用域">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={scope === "shared"}
-            className={scope === "shared" ? "scope-tab scope-tab-active" : "scope-tab"}
-            onClick={() => switchScope("shared")}
-          >
-            共享目录
-          </button>
+          {!personalOnly && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={scope === "shared"}
+              className={scope === "shared" ? "scope-tab scope-tab-active" : "scope-tab"}
+              onClick={() => switchScope("shared")}
+            >
+              共享目录
+            </button>
+          )}
           <button
             type="button"
             role="tab"

@@ -185,6 +185,19 @@ export type WebSettings = {
   allowRoots?: string[];
   /** 聊天附件暂存目录，默认 ~/.deepcode/web-uploads */
   uploadDir?: string;
+  /**
+   * 个人工作目录模式（docs/dev/web-workspace.md，默认 true）：
+   * 开启后 Web 端所有会话与文件锁定在用户个人工作区（<uploadDir>/<userId>/），
+   * scope=shared 一律 403，POST /api/chats 忽略 body.projectRoot 强制个人区；
+   * 关闭后回退旧行为（allowRoots 共享浏览 + 客户端指定 projectRoot）。
+   */
+  personalOnly?: boolean;
+  /**
+   * 引擎数据家目录根（docs/dev/web-workspace.md §3）：每个用户的引擎数据
+   * （会话索引/记忆/日志等 <homeDir>/.deepcode/**）落在 <engineHomeDir>/<userId>/，
+   * 默认空 = 派生 <uploadDir>/.engine-home（不在任何 allowRoot 内）。
+   */
+  engineHomeDir?: string;
   /** 单文件上传上限（字节），默认 50MB */
   maxUploadBytes?: number;
   /** 认证配置 */
@@ -805,8 +818,19 @@ export function resolveSettingsSources(
   userSettings: DeepcodingSettings | null | undefined,
   projectSettings: DeepcodingSettings | null | undefined,
   defaults: { model: string; baseURL: string },
-  processEnv: SettingsProcessEnv = process.env
+  processEnv: SettingsProcessEnv = process.env,
+  options: { ignoreProjectSettings?: boolean } = {}
 ): ResolvedDeepcodingSettings {
+  // Web 个人工作区牢笼（docs/dev/web-workspace.md §2 P0-2）：调用方（Web 会话池）
+  // 可声明忽略项目级 settings——用户可写目录（个人工作区）绝不作为凭据 /
+  // mcpServers / 权限模式 / allowPrivateBaseURL 的可信配置来源，
+  // 防止上传一个 .deepcode/settings.json 即劫持模型端点或注入任意 MCP 命令。
+  // ignoreProjectSettings 仅屏蔽「项目级配置文件」这一来源（入参遮蔽为 null，
+  // 函数体全部 projectSettings 引用点自然失效），
+  // 用户级 settings 与进程环境变量照常参与解析。
+  if (options.ignoreProjectSettings === true) {
+    projectSettings = null;
+  }
   const userEnv = normalizeEnv(userSettings?.env);
   const projectEnv = normalizeEnv(projectSettings?.env);
   const systemEnv = collectDeepcodeEnv(processEnv);
@@ -1357,7 +1381,10 @@ export function writeModelConfigSelection(
   return result;
 }
 
-export function resolveCurrentSettings(projectRoot: string = process.cwd()): ResolvedDeepcodingSettings {
+export function resolveCurrentSettings(
+  projectRoot: string = process.cwd(),
+  options: { ignoreProjectSettings?: boolean } = {}
+): ResolvedDeepcodingSettings {
   const userPath = path.resolve(getUserSettingsPath());
   const projectPath = path.resolve(getProjectSettingsPath(projectRoot));
   const sameFile = userPath === projectPath;
@@ -1368,6 +1395,8 @@ export function resolveCurrentSettings(projectRoot: string = process.cwd()): Res
       model: DEFAULT_MODEL,
       baseURL: DEFAULT_BASE_URL,
     },
-    process.env
+    process.env,
+    // Web 个人工作区牢笼：忽略项目级 settings（详见 resolveSettingsSources 注释）
+    { ignoreProjectSettings: options.ignoreProjectSettings }
   );
 }

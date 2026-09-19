@@ -73,10 +73,14 @@ export class MemoryStore {
    * 创建记忆存储管理器
    *
    * @param projectRoot 项目根目录绝对路径（null 表示无项目上下文，project 类型记忆将无法持久化）
+   * @param homeDir 引擎数据根目录（docs/dev/web-workspace.md C6）：用户全局/经验记忆
+   *                落盘锚点 `<homeDir>/.deepcode/memory/`。缺省 = os.homedir()
+   *                （CLI 单用户行为不变）；Web 多用户注入 `<engineHomeDir>/<userId>`，
+   *                使全局记忆按用户物理隔离。
    */
-  constructor(projectRoot?: string | null) {
-    const homeDir = os.homedir();
-    const globalMemoryDir = path.join(homeDir, ".deepcode", "memory");
+  constructor(projectRoot?: string | null, homeDir?: string) {
+    const homeRoot = homeDir ?? os.homedir();
+    const globalMemoryDir = path.join(homeRoot, ".deepcode", "memory");
 
     this.globalMemoryPath = path.join(globalMemoryDir, "global.json");
     this.experienceMemoryPath = path.join(globalMemoryDir, "experience.json");

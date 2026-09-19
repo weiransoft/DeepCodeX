@@ -239,6 +239,25 @@ export function resolveWebSettings(
     // 同 allowRoots：延迟到上传时再报错
   }
 
+  // 6.1 个人工作目录模式归一（docs/dev/web-workspace.md W1）：
+  // personalOnly 默认 true——登录用户获得专属工作目录（<uploadDir>/<userId>/），
+  // 引擎数据落 <engineHomeRoot>/<userId>/；显式配置 false 才回退旧共享行为。
+  const personalOnly = merged.personalOnly ?? true;
+  // engineHomeRoot：配置项 engineHomeDir 非空时 ~ 展开使用；缺省派生
+  // <uploadDir>/.engine-home（点前缀目录 + 不在任何 allowRoot 内 → 文件 API 天然不可达）。
+  // 尽力 mkdir，失败不阻断启动（会话创建时还会兜底）。
+  const engineHomeRoot =
+    typeof merged.engineHomeDir === "string" && merged.engineHomeDir.trim() !== ""
+      ? expandHomePath(merged.engineHomeDir.trim())
+      : path.join(uploadDir, ".engine-home");
+  if (personalOnly) {
+    try {
+      mkdirSync(engineHomeRoot, { recursive: true });
+    } catch {
+      // 创建失败延迟到 createChat 时再报错（与 uploadDir 同策略）
+    }
+  }
+
   // 7. JWT 密钥校验（启动 fail-fast：密钥缺失直接拒绝启动，防止无签名服务裸奔）
   if (typeof jwtSecret !== "string" || jwtSecret.trim() === "") {
     throw new Error(
@@ -272,6 +291,9 @@ export function resolveWebSettings(
     port,
     allowRoots,
     uploadDir,
+    // 个人工作目录模式与引擎数据家目录根（6.1 归一产物，docs/dev/web-workspace.md W1）
+    personalOnly,
+    engineHomeRoot,
     maxUploadBytes,
     auth: {
       jwtSecret,

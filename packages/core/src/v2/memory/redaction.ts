@@ -191,9 +191,16 @@ export const DEFAULT_REDACTION_RULES: RedactionRule[] = [
 // ============================================================================
 
 /**
- * 默认审计日志路径：~/.deepcode/memory/redaction.log
+ * 默认审计日志路径（docs/dev/web-workspace.md C7 陷阱修复）：
+ * `<homeDir>/.deepcode/memory/redaction.log`，缺省 homeDir = os.homedir()。
+ *
+ * 旧版是模块级常量，模块加载时即固化家目录路径——Web 多用户注入的 homeDir
+ * 对其无效（数据撕裂风险）。改为函数求值，作为构造参数缺省，
+ * 每次 new SensitiveInfoRedactor() 时按当前家目录解析。
  */
-const DEFAULT_LOG_PATH = path.join(os.homedir(), ".deepcode", "memory", "redaction.log");
+export function defaultRedactionLogPath(homeDir?: string): string {
+  return path.join(homeDir ?? os.homedir(), ".deepcode", "memory", "redaction.log");
+}
 
 /**
  * 敏感信息过滤器：记忆持久化前的强制关卡
@@ -212,7 +219,7 @@ export class SensitiveInfoRedactor {
    */
   constructor(
     private readonly rules: RedactionRule[] = DEFAULT_REDACTION_RULES,
-    private readonly logPath: string = DEFAULT_LOG_PATH
+    private readonly logPath: string = defaultRedactionLogPath()
   ) {}
 
   /**

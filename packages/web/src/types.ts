@@ -29,6 +29,19 @@ export type ResolvedWebSettings = {
   allowRoots: string[];
   /** 聊天附件暂存目录（默认 ~/.deepcode/web-uploads） */
   uploadDir: string;
+  /**
+   * 个人工作目录模式（docs/dev/web-workspace.md W1，默认 true）：
+   * 开启后所有会话锁定在个人工作区 `<uploadDir>/<userId>/`，
+   * scope=shared 端点一律 403；关闭后回退旧共享浏览行为（allowRoots + 客户端指定 projectRoot）。
+   */
+  personalOnly: boolean;
+  /**
+   * 引擎数据家目录根（docs/dev/web-workspace.md W1）：每个用户的引擎数据
+   * （会话索引/记忆/日志）落在 `<engineHomeRoot>/<userId>/` 下，
+   * 不在任何 allowRoot / personal 牢笼内，Web 文件 API 不可达。
+   * 缺省 = `<uploadDir>/.engine-home`。
+   */
+  engineHomeRoot: string;
   /** 单文件上传上限（字节，默认 50MB） */
   maxUploadBytes: number;
   /** 认证配置（已归一） */
@@ -225,4 +238,6 @@ export type PublicWebConfig = {
   allowRoots: string[];
   maxUploadBytes: number;
   ldapEnabled: boolean;
+  /** 个人工作目录模式（docs/dev/web-workspace.md W7）：前端据此隐藏共享区入口 */
+  personalOnly: boolean;
 };

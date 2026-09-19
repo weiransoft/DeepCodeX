@@ -261,6 +261,11 @@ export async function startWebServer(
     requestedPath: string | null
   ): Promise<string[]> {
     if (scope === null || scope === "shared") {
+      // 个人工作目录模式（docs/dev/web-workspace.md W4）：shared 一律 403，
+      // 共享文件区被整体禁用（与 allowRoots 配置无关），前端已隐藏入口（W7）
+      if (resolved.personalOnly) {
+        throw new ApiError(403, "个人工作目录模式：共享文件区已禁用，请使用 scope=personal 访问你的个人工作目录");
+      }
       // 个人区保护线（P1-1 强制修复）：即使部署方误将 uploadDir 配入 allowRoots，
       // shared 浏览/上传/下载也不得触达任何用户的个人区与聊天附件（R3 不依赖配置）。
       // 请求路径经 ~ 展开 + realpath 消解后与 uploadDir 归一根做前缀包含判定。
@@ -342,6 +347,8 @@ export async function startWebServer(
           allowRoots: resolved.allowRoots,
           maxUploadBytes: resolved.maxUploadBytes,
           ldapEnabled: resolved.ldap.enabled,
+          // 个人工作目录模式（W7）：前端据此隐藏共享区 tab、放宽空 projectRoot 新建
+          personalOnly: resolved.personalOnly,
         };
         sendJson(res, 200, config);
         return;
@@ -351,7 +358,7 @@ export async function startWebServer(
         return;
       }
       if (pathname === "/api/chats" && req.method === "POST") {
-        await handleCreateChat(req, res, pool, ctx);
+        await handleCreateChat(req, res, pool, ctx, resolved);
         return;
       }
 

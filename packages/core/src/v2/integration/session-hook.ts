@@ -255,12 +255,15 @@ export class DefaultSessionContextHook implements SessionContextHook {
  * @param projectRoot 项目根目录
  * @param v2Config V2 配置（可选；未提供时使用默认配置，V2 默认关闭）
  * @param ttlMs 缓存 TTL（毫秒，可选；默认 30 分钟）
+ * @param homeDir 引擎数据家目录根（可选，牢笼改造 C11）：global-context.json
+ *                落 `<homeDir>/.deepcode/`；缺省回退进程家目录（CLI 行为不变）
  * @returns SessionContextHook 实例
  */
 export function createDualLayerContextHook(
   projectRoot: string,
   v2Config?: V2Config,
-  ttlMs?: number
+  ttlMs?: number,
+  homeDir?: string
 ): SessionContextHook {
   // V2 总开关与上下文子开关必须同时为 true 才启用 DualLayerContextManager
   // 任一未开启时降级为 DefaultSessionContextHook，refreshContextAsync 为空操作
@@ -272,8 +275,9 @@ export function createDualLayerContextHook(
   // 基础缓存 hook，用于同步供给 preBuildContext
   const hook = new DefaultSessionContextHook(ttlMs);
 
-  // 全局上下文管理器：加载 ~/.deepcode/global-context.json，文件缺失时降级返回默认空上下文
-  const globalManager = new GlobalContextManager();
+  // 全局上下文管理器：加载 <homeDir>/.deepcode/global-context.json（缺省进程家目录），
+  // 文件缺失时降级返回默认空上下文（牢笼改造 C11：homeDir 透传实现按用户隔离）
+  const globalManager = new GlobalContextManager(undefined, homeDir);
 
   // 任务上下文管理器：内存级，进程结束即销毁
   const taskManager = new TaskContextManager();

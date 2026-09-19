@@ -451,14 +451,17 @@ export class GlobalContextManager {
   private readonly filePath: string;
 
   /**
-   * @param filePath 可选的自定义存储路径（测试用）；默认 ~/.deepcode/global-context.json
+   * @param filePath 可选的自定义存储路径（测试用）；默认 <homeDir>/.deepcode/global-context.json
+   * @param homeDir 引擎数据根目录（docs/dev/web-workspace.md C10）：filePath 未指定时的
+   *                落盘锚点。缺省 = os.homedir()（CLI 行为不变）；Web 多用户注入
+   *                `<engineHomeDir>/<userId>`，全局上下文按用户隔离。
    */
-  constructor(filePath?: string) {
+  constructor(filePath?: string, homeDir?: string) {
     if (filePath) {
       this.filePath = filePath;
     } else {
-      const homeDir = os.homedir();
-      const dir = path.join(homeDir, ".deepcode");
+      const homeRoot = homeDir ?? os.homedir();
+      const dir = path.join(homeRoot, ".deepcode");
       this.filePath = path.join(dir, "global-context.json");
     }
   }
