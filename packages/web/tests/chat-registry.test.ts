@@ -177,3 +177,29 @@ test("registry：不同用户的注册表相互隔离（各自独立文件）", 
     "B 的注册表只含 B 的会话"
   );
 });
+
+test("registry：同用户并发回写不得冲突或丢条目（tmp 名每次唯一）", async () => {
+  // 真实场景：同一用户的多个会话轮次几乎同时结束，persistChatRegistration
+  // 并发调用 upsertUserChat。旧实现 tmp 名仅含 pid，A rename 走 tmp 后
+  // B rename 会 ENOENT 丢回写；修复后每次 upsert 的 tmp 名随机唯一。
+  const userId = userIdFromUsername("concurrent-writer");
+  const COUNT = 24;
+  // 24 条并发 upsert（不同 chatId），全部必须成功且无一抛错
+  await Promise.all(
+    Array.from({ length: COUNT }, (_, i) =>
+      Promise.resolve().then(() => {
+        upsertUserChat(userId, makeEntry({ chatId: `chat-conc-${i}`, title: `并发会话 ${i}` }), registryDir);
+      })
+    )
+  );
+  // 全部条目入库（无丢失）
+  const chats = loadUserChats(userId, registryDir);
+  const ids = new Set(chats.map((item) => item.chatId));
+  for (let i = 0; i < COUNT; i++) {
+    assert.ok(ids.has(`chat-conc-${i}`), `并发条目 chat-conc-${i} 必须落盘`);
+  }
+  assert.equal(chats.length, COUNT, "并发写入后条目总数必须等于写入条数");
+  // 同目录不得残留 tmp 文件
+  const leftovers = readdirSync(registryDir).filter((name) => name.includes(".tmp"));
+  assert.equal(leftovers.length, 0, `并发写完成后不得残留 tmp 文件（发现 ${leftovers.join(",")}）`);
+});

@@ -13,6 +13,7 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 import type { SessionStatus } from "@vegamo/deepcode-core";
 
@@ -120,7 +121,10 @@ export function upsertUserChat(userId: string, entry: RegisteredChat, baseDir?: 
   }
 
   const file: RegistryFile = { version: 1, chats: existing };
-  const tmpPath = `${filePath}.${process.pid}.tmp`;
+  // tmp 名必须每次唯一：同进程多个轮次并发回写（如两个会话几乎同时 done）时，
+  // 仅含 pid 的 tmp 名会发生「A rename 走 tmp → B rename ENOENT」冲突导致丢回写；
+  // 追加随机后缀使每次 upsert 的 tmp 互不相干（rename 在同目录下仍为原子替换）
+  const tmpPath = `${filePath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   writeFileSync(tmpPath, JSON.stringify(file, null, 2), "utf8");
   renameSync(tmpPath, filePath);
 }
