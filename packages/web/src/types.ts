@@ -193,6 +193,9 @@ export type SseEventName =
   | "status"
   | "done";
 
+/** GET /api/files?scope= 的作用域（docs/dev/web-isolation.md §3.5） */
+export type FileScope = "shared" | "personal";
+
 /** GET /api/files?path= 返回的目录条目 */
 export type FileEntry = {
   name: string;

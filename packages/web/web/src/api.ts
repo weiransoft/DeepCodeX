@@ -242,22 +242,28 @@ export function interruptChat(chatId: string): Promise<void> {
   return request<void>("POST", `/api/chats/${encodeURIComponent(chatId)}/interrupt`);
 }
 
-/** 目录浏览（路径牢笼由服务端校验；path 为空时由服务端返回默认目录） */
-export function listFiles(path: string): Promise<FileListing> {
-  const q = path !== "" ? `?path=${encodeURIComponent(path)}` : "";
+/**
+ * 文件区作用域（docs/dev/web-isolation.md §3.5）：
+ * shared = 管理员配置的共享 allowRoots；personal = 当前用户个人上传区。
+ */
+export type FileScope = "shared" | "personal";
+
+/** 目录浏览（scope 分流共享区/个人区；路径牢笼由服务端校验；path 为空时由服务端返回默认目录） */
+export function listFiles(path: string, scope: FileScope = "shared"): Promise<FileListing> {
+  const q = `?scope=${scope}${path !== "" ? `&path=${encodeURIComponent(path)}` : ""}`;
   return request<FileListing>("GET", `/api/files${q}`);
 }
 
-/** 上传文件到指定目录（multipart，多个 file 字段） */
-export function uploadFiles(path: string, files: File[]): Promise<void> {
+/** 上传文件到指定目录（multipart，多个 file 字段；scope 决定共享区/个人区） */
+export function uploadFiles(path: string, files: File[], scope: FileScope = "shared"): Promise<void> {
   const form = new FormData();
   for (const f of files) {
     form.append("file", f, f.name);
   }
-  return request<void>("POST", `/api/files/upload?path=${encodeURIComponent(path)}`, form);
+  return request<void>("POST", `/api/files/upload?scope=${scope}&path=${encodeURIComponent(path)}`, form);
 }
 
-/** 构造下载地址：供 <a download> 直接使用（服务端 Content-Disposition 附件下载） */
-export function fileDownloadUrl(path: string): string {
-  return `/api/files/download?path=${encodeURIComponent(path)}`;
+/** 构造下载地址：供 <a download> 直接使用（服务端 Content-Disposition 附件下载；scope 分流） */
+export function fileDownloadUrl(path: string, scope: FileScope = "shared"): string {
+  return `/api/files/download?scope=${scope}&path=${encodeURIComponent(path)}`;
 }

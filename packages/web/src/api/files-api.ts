@@ -1,12 +1,16 @@
 /**
- * 文件端点（docs/dev/web-ui.md §3.5，路径牢笼统一防护见 jail.ts）。
+ * 文件端点（docs/dev/web-ui.md §3.5；scope 隔离 docs/dev/web-isolation.md §3.5，
+ * 路径牢笼统一防护见 jail.ts）。
  *
- * - GET  /api/files?path=<目录>：目录列表 {name, type, size, mtime}
- * - POST /api/files/upload?path=<目录>：multipart 上传到指定目录（jail + 大小限制 + 随机名）
- * - GET  /api/files/download?path=<文件>：流式下载（Content-Disposition attachment）
+ * - GET  /api/files?path=<目录>&scope=shared|personal：目录列表 {name, type, size, mtime}
+ * - POST /api/files/upload?path=<目录>&scope=...：multipart 上传到指定目录（jail + 大小限制 + 随机名）
+ * - GET  /api/files/download?path=<文件>&scope=...：流式下载（Content-Disposition attachment）
  *
- * 安全约定：allowRoots 为空时三个端点一律 403；所有路径经 resolveInJail
- * （realpath + 前缀校验）防 `..` 与 symlink 逃逸（CWE-22）。
+ * 安全约定：
+ * - allowRoots 为空时 shared 一律 403；personal 牢笼为用户个人上传区（每用户独立）；
+ * - 牢笼根由 server.ts 按认证上下文与 scope 分流后传入本层（shared = allowRoots，
+ *   personal = <uploadDir>/<userId>/），本层不感知用户身份；
+ * - 所有路径经 resolveInJail（realpath + 前缀校验）防 `..` 与 symlink 逃逸（CWE-22）。
  */
 
 import { createReadStream } from "node:fs";

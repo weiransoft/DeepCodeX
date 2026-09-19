@@ -5,7 +5,7 @@
  * - createLLMClient 缝合点注入 ScriptedLLMClient（真实实现 LLMClient 接口的受控客户端）；
  * - createOpenAIClient 缝合点注入真实结构的受控连接句柄（activateSession 要求非空）；
  * - SseHub 经 addSink 缝合点挂真实受控 sink 收集 SSE 帧；
- * - projectRoot 使用 mkdtemp 真实目录；磁盘历史用例真实读写 ~/.deepcode/projects（用后清理）。
+ * - projectRoot 使用 mkdtemp 真实目录；磁盘历史用例经 registryBaseDir 注入临时注册表目录（不污染真实 home）。
  *
  * 覆盖：createChat 牢笼校验、事件桥接（llm_delta/assistant_message/tool_progress/status/done）、
  * 202 同步受理契约（sendMessage 立即返回 {chatId, sessionId}，轮次经 SSE done 收尾）、
@@ -15,19 +15,24 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, unlinkSync } from "node:fs";
 import { realpath } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import path from "node:path";
-import { getProjectCode, type LLMStreamEvent } from "@vegamo/deepcode-core";
+import type { LLMStreamEvent } from "@vegamo/deepcode-core";
 import { SessionPool } from "../src/session-pool";
 import { SseHub, type SseSink } from "../src/events";
 import { buildJailRoots } from "../src/jail";
+import { upsertUserChat } from "../src/chat-registry";
 import type { SendMessageInput } from "../src/session-pool";
-import { createControlledOpenAIClientHandle, createResolvedSettings, ScriptedLLMClient } from "./helpers";
+import { createControlledOpenAIClientHandle, createResolvedSettings, makeCtx, ScriptedLLMClient } from "./helpers";
 
 /** 共享临时项目根（牢笼白名单） */
 let tmpRoot: string;
+/** 共享临时注册表根（registryBaseDir 注入，避免污染真实 ~/.deepcode/web/chats） */
+let registryDir: string;
+/** 默认测试用户（归属校验用；ctx 复用同一用户贯穿全部用例） */
+const ctx = makeCtx("tester");
 let pool: SessionPool;
 let hub: SseHub;
 let client: ScriptedLLMClient;
@@ -140,6 +145,7 @@ async function createTestPool(
   const testPool = new SessionPool(settings, testHub, jailRoots, {
     createLLMClient: () => testClient,
     createOpenAIClient: () => createControlledOpenAIClientHandle(),
+    registryBaseDir: registryDir,
   });
   // 记录实例供全局 after 统一释放（心跳定时器与引擎句柄必须清理，否则测试子进程无法退出）
   createdHubs.push(testHub);
@@ -163,6 +169,8 @@ function subscribeFrames(p: SessionPool, chatId: string): void {
 
 before(() => {
   tmpRoot = mkdtempSync(path.join(tmpdir(), "deepcode-web-pool-"));
+  // 注册表根注入点（SessionPool registryBaseDir）：隔离磁盘历史用例，不污染真实 home
+  registryDir = mkdtempSync(path.join(tmpdir(), "deepcode-web-pool-registry-"));
 });
 
 after(() => {
@@ -180,11 +188,14 @@ after(() => {
   createdHubs.length = 0;
   createdPools.length = 0;
   rmSync(tmpRoot, { recursive: true, force: true });
+  if (registryDir) {
+    rmSync(registryDir, { recursive: true, force: true });
+  }
 });
 
 test("pool：createChat 在牢笼内应成功并返回 UUID 与归一根路径", async () => {
   const p = await createTestPool([]);
-  const created = await p.createChat(tmpRoot);
+  const created = await p.createChat(tmpRoot, ctx);
 
   assert.ok(/^[0-9a-f-]{36}$/.test(created.chatId), "chatId 必须是 UUID");
   assert.equal(created.sessionId, null, "首条消息前 sessionId 为 null");
@@ -197,7 +208,7 @@ test("pool：createChat 牢笼外 projectRoot 应抛 JailViolationError", async 
   const outside = mkdtempSync(path.join(tmpdir(), "deepcode-web-pool-outside-"));
   try {
     await assert.rejects(
-      () => p.createChat(outside),
+      () => p.createChat(outside, ctx),
       (error: unknown) => {
         assert.ok(error instanceof Error);
         assert.equal(error.name, "JailViolationError");
@@ -216,12 +227,12 @@ test("pool：sendMessage 应同步受理并经 SSE 桥接 llm_delta / assistant_
     { type: "message_end", stopReason: "end_turn", usage: { inputTokens: 3, outputTokens: 2 } },
   ];
   const p = await createTestPool(script);
-  const { chatId } = await p.createChat(tmpRoot);
+  const { chatId } = await p.createChat(tmpRoot, ctx);
   subscribeFrames(p, chatId);
 
   const input: SendMessageInput = { text: "你好" };
   // 202 异步受理：同步返回 {chatId, sessionId}；首轮受理时底层会话尚未创建，sessionId 为 null
-  const accepted = p.sendMessage(chatId, input);
+  const accepted = p.sendMessage(chatId, input, ctx);
   assert.equal(accepted.chatId, chatId);
   assert.equal(accepted.sessionId, null, "首轮受理时 sessionId 必须为 null");
 
@@ -254,7 +265,7 @@ test("pool：sendMessage 应同步受理并经 SSE 桥接 llm_delta / assistant_
   assert.equal(doneFrame.data.status, "completed", "脚本正常完成时轮次状态应为 completed");
 
   // 历史消息：包含用户与助手可见消息
-  const messages = p.getMessages(chatId);
+  const messages = p.getMessages(chatId, ctx);
   assert.ok(messages.length >= 2, "至少含 user + assistant 两条消息");
   assert.ok(messages.some((message) => message.role === "user" && message.content === "你好"));
   assert.ok(messages.some((message) => message.role === "assistant" && message.content === "Hello world"));
@@ -270,12 +281,12 @@ test("pool：同一 chatId 的并发 sendMessage 应串行执行（第二轮在�
     return Array.from({ length: 8 }, (_, index) => ({ type: "text_delta", text: `chunk-${index} ` }) as LLMStreamEvent);
   };
   const p = await createTestPool(infiniteScript, 15); // 每事件 15ms → 单轮约 120ms
-  const { chatId } = await p.createChat(tmpRoot);
+  const { chatId } = await p.createChat(tmpRoot, ctx);
   subscribeFrames(p, chatId);
 
   // 同步受理两次：两次调用均立即返回，轮次在串行链内先后执行
-  p.sendMessage(chatId, { text: "第一轮" });
-  p.sendMessage(chatId, { text: "第二轮" });
+  p.sendMessage(chatId, { text: "第一轮" }, ctx);
+  p.sendMessage(chatId, { text: "第二轮" }, ctx);
 
   // 等两轮都收尾（2 个 done 帧）
   await waitForCondition(() => countFrames(chatId, "done") >= 2, 10000, "两轮 done 帧");
@@ -295,15 +306,15 @@ test("pool：不同 chatId 的消息可并行执行", async () => {
     { type: "message_end", stopReason: "end_turn", usage: null },
   ];
   const p = await createTestPool(script, 40); // 每事件 40ms，拉长单轮 LLM 流时长以观察时间区间重叠
-  const chatA = await p.createChat(tmpRoot);
-  const chatB = await p.createChat(tmpRoot);
+  const chatA = await p.createChat(tmpRoot, ctx);
+  const chatB = await p.createChat(tmpRoot, ctx);
   // 帧轮询前置：两个 chat 都必须订阅（原版直接 await 返回值无需订阅）
   subscribeFrames(p, chatA.chatId);
   subscribeFrames(p, chatB.chatId);
 
   // 同步受理两个不同 chatId：各自独立串行链，应并行执行
-  p.sendMessage(chatA.chatId, { text: "a" });
-  p.sendMessage(chatB.chatId, { text: "b" });
+  p.sendMessage(chatA.chatId, { text: "a" }, ctx);
+  p.sendMessage(chatB.chatId, { text: "b" }, ctx);
   await waitForCondition(
     () => countFrames(chatA.chatId, "done") >= 1 && countFrames(chatB.chatId, "done") >= 1,
     10000,
@@ -331,15 +342,15 @@ test("pool：interrupt 应中止进行中的轮次并在 5 秒内收尾 done", a
     );
   };
   const p = await createTestPool(endlessScript, 5);
-  const { chatId } = await p.createChat(tmpRoot);
+  const { chatId } = await p.createChat(tmpRoot, ctx);
   subscribeFrames(p, chatId);
 
   // 同步受理：轮次立即开始跑无限流
-  p.sendMessage(chatId, { text: "开始生成" });
+  p.sendMessage(chatId, { text: "开始生成" }, ctx);
   // 等首个 llm_delta 出现（轮次确实在跑）
   await waitForFrame(chatId, "llm_delta", 5000);
 
-  p.interrupt(chatId);
+  p.interrupt(chatId, ctx);
 
   // 中断后 done 帧必须在 5 秒内到达（轮次收敛 + 订阅方不悬死）
   const doneFrame = await waitForFrame(chatId, "done", 5000);
@@ -351,84 +362,98 @@ test("pool：listChats 应合并池内活跃会话与磁盘历史并按 updateTi
     { type: "text_delta", text: "hi" },
     { type: "message_end", stopReason: "end_turn", usage: null },
   ]);
-  const { chatId, projectRoot } = await p.createChat(tmpRoot);
+  const { chatId, projectRoot } = await p.createChat(tmpRoot, ctx);
   // 帧轮询前置：先订阅再受理（原版直接 await 返回值无需订阅）
   subscribeFrames(p, chatId);
   // 同步受理后等轮次收尾，从 done 帧取 sessionId（202 异步受理契约）
-  p.sendMessage(chatId, { text: "造一条活跃会话" });
+  p.sendMessage(chatId, { text: "造一条活跃会话" }, ctx);
   const doneFrame = await waitForFrame(chatId, "done");
   const sessionId = doneFrame.data.sessionId as string;
   assert.ok(sessionId);
 
-  // 真实写磁盘历史条目（~/.deepcode/projects/<projectCode>/sessions-index.json）
-  // projectCode 必须用 realpath 归一后的 projectRoot 计算（与 SessionPool 内部读取路径一致）
-  const projectCode = getProjectCode(projectRoot);
-  const historyDir = path.join(homedir(), ".deepcode", "projects", projectCode);
-  const historyId = `history-${randomUUID()}`;
-  mkdirSync(historyDir, { recursive: true });
-  writeFileSync(
-    path.join(historyDir, "sessions-index.json"),
-    JSON.stringify({
-      entries: [
-        {
-          id: historyId,
-          summary: "磁盘历史条目",
-          status: "completed",
-          createTime: "2026-01-01T00:00:00.000Z",
-          updateTime: "2026-01-02T00:00:00.000Z",
-        },
-      ],
-    }),
-    "utf8"
+  // 真实写用户注册表历史条目（registryBaseDir 注入的临时目录，docs/dev/web-isolation.md §3.4）
+  const historyId = randomUUID();
+  upsertUserChat(
+    ctx.userId,
+    {
+      chatId: historyId,
+      sessionId: historyId,
+      projectRoot,
+      title: "磁盘历史条目",
+      status: "completed",
+      createTime: "2026-01-01T00:00:00.000Z",
+      updateTime: "2026-01-02T00:00:00.000Z",
+    },
+    registryDir
   );
 
-  try {
-    const chats = p.listChats();
-    const active = chats.find((chat) => chat.chatId === chatId);
-    assert.ok(active, "池内活跃会话必须出现");
-    assert.equal(active!.source, "active");
-    assert.equal(active!.sessionId, sessionId);
+  const chats = p.listChats(ctx);
+  const active = chats.find((chat) => chat.chatId === chatId);
+  assert.ok(active, "池内活跃会话必须出现");
+  assert.equal(active!.source, "active");
+  assert.equal(active!.sessionId, sessionId);
 
-    const history = chats.find((chat) => chat.chatId === historyId);
-    assert.ok(history, "磁盘历史条目必须合并进列表");
-    assert.equal(history!.source, "history");
-    assert.equal(history!.title, "磁盘历史条目");
+  const history = chats.find((chat) => chat.chatId === historyId);
+  assert.ok(history, "磁盘历史条目必须合并进列表");
+  assert.equal(history!.source, "history");
+  assert.equal(history!.title, "磁盘历史条目");
 
-    // 降序排列：updateTime 新的在前。活跃会话 updateTime 为当前时间（2026-09），
-    // 晚于历史条目（2026-01-02），因此活跃条目应排在历史条目之前
-    const activeIndex = chats.indexOf(active!);
-    const historyIndex = chats.indexOf(history!);
-    assert.ok(activeIndex < historyIndex, "updateTime 新的条目应排前面");
-  } finally {
-    // 清理磁盘历史残留（best-effort）
-    rmSync(historyDir, { recursive: true, force: true });
+  // 降序排列：updateTime 新的在前。活跃会话 updateTime 为当前时间（2026-09），
+  // 晚于历史条目（2026-01-02），因此活跃条目应排在历史条目之前
+  const activeIndex = chats.indexOf(active!);
+  const historyIndex = chats.indexOf(history!);
+  assert.ok(activeIndex < historyIndex, "updateTime 新的条目应排前面");
+});
+
+test("pool：注册表丢失时活跃会话的 sessionId 仍可恢复（activeHit 通道）", async () => {
+  const p = await createTestPool([
+    { type: "text_delta", text: "hi" },
+    { type: "message_end", stopReason: "end_turn", usage: null },
+  ]);
+  const { chatId } = await p.createChat(tmpRoot, ctx);
+  subscribeFrames(p, chatId);
+  p.sendMessage(chatId, { text: "产生 sessionId" }, ctx);
+  const doneFrame = await waitForFrame(chatId, "done");
+  const sessionId = doneFrame.data.sessionId as string;
+  assert.ok(sessionId);
+
+  // 模拟注册表登记丢失（如磁盘故障/写失败）：删除该用户注册表文件。
+  // 此时恢复校验的 registryHit 通道失效，应回落到 activeHit 通道（池内活跃会话绑定）
+  const registryFile = path.join(registryDir, `${ctx.userId}.json`);
+  if (existsSync(registryFile)) {
+    unlinkSync(registryFile);
   }
+
+  // 活跃会话仍在池内：同 sessionId 恢复必须成功（docs/dev/web-isolation.md §3.3 双通道）
+  const restored = await p.createChat(tmpRoot, ctx, sessionId);
+  assert.ok(restored.chatId, "activeHit 通道应允许恢复");
+  assert.equal(restored.sessionId, sessionId);
 });
 
 test("pool：不存在的 chatId 操作应抛 404 语义 ApiError；disposeAll 后同样", async () => {
   const p = await createTestPool([]);
   const fakeId = randomUUID();
   assert.throws(
-    () => p.getChatInfo(fakeId),
+    () => p.getChatInfo(fakeId, ctx),
     (error: unknown) => {
       assert.ok(error instanceof Error && (error as any).status === 404);
       return true;
     }
   );
   assert.throws(
-    () => p.sendMessage(fakeId, { text: "x" }),
+    () => p.sendMessage(fakeId, { text: "x" }, ctx),
     (error: unknown) => {
       assert.ok(error instanceof Error && (error as any).status === 404);
       return true;
     }
   );
-  assert.throws(() => p.interrupt(fakeId));
+  assert.throws(() => p.interrupt(fakeId, ctx));
 
   // disposeAll：清空池后原 chatId 不再可用
-  const { chatId } = await p.createChat(tmpRoot);
+  const { chatId } = await p.createChat(tmpRoot, ctx);
   p.disposeAll();
   assert.throws(
-    () => p.getChatInfo(chatId),
+    () => p.getChatInfo(chatId, ctx),
     (error: unknown) => {
       assert.ok(error instanceof Error && (error as any).status === 404);
       return true;
@@ -462,10 +487,10 @@ test("pool：轮次携带工具调用时应桥接 tool_progress 帧（P1-2）", 
     ];
   };
   const p = await createTestPool(toolScript);
-  const { chatId } = await p.createChat(tmpRoot);
+  const { chatId } = await p.createChat(tmpRoot, ctx);
   subscribeFrames(p, chatId);
 
-  p.sendMessage(chatId, { text: "跑个命令" });
+  p.sendMessage(chatId, { text: "跑个命令" }, ctx);
 
   // tool_progress 帧：载荷含 chatId/status/toolCalls，toolCalls 元素 id 透传
   const progressFrame = await waitForFrame(chatId, "tool_progress", 15000);
@@ -489,10 +514,10 @@ test("pool：轮次异常时应推送 done(status=failed) 帧（P1-3，订阅方
     { type: "error", error: new Error("注入的 LLM 流错误") },
   ];
   const p = await createTestPool(errorScript);
-  const { chatId } = await p.createChat(tmpRoot);
+  const { chatId } = await p.createChat(tmpRoot, ctx);
   subscribeFrames(p, chatId);
 
-  p.sendMessage(chatId, { text: "触发错误" });
+  p.sendMessage(chatId, { text: "触发错误" }, ctx);
 
   const doneFrame = await waitForFrame(chatId, "done", 15000);
   assert.equal(doneFrame.data.status, "failed", `done 帧 status 必须为 failed（得到 ${doneFrame.data.status}）`);

@@ -2,14 +2,16 @@
  * 右侧文件抽屉 FileDrawer（R4，设计文档 §4；弹窗一律抽屉式的 UI 偏好）。
  *
  * 功能：
- * - 目录浏览：GET /api/files?path=（路径牢笼由服务端校验），面包屑导航 + 条目列表
+ * - 目录浏览：GET /api/files?path=&scope=（路径牢笼由服务端校验），面包屑导航 + 条目列表
  *   （类型图标直显：文件夹/图片/代码/普通文件，大小与修改时间）；
- * - 上传：行内上传图标按钮（多选），POST /api/files/upload?path=<当前目录> 后刷新；
- * - 下载：行内下载图标（<a download> 直链 GET /api/files/download?path=）；
+ * - 双作用域（docs/dev/web-isolation.md §3.5）：「共享目录」= 管理员配置的 allowRoots；
+ *   「我的文件」= 当前用户个人上传区（聊天附件落此处，仅本人可见）；
+ * - 上传：行内上传图标按钮（多选），POST /api/files/upload?path=&scope= 后刷新；
+ * - 下载：行内下载图标（<a download> 直链 GET /api/files/download?path=&scope=）；
  * - 「作为附件插入对话」：把选中文件路径经 onInsertAttachment 交给 Composer。
  */
 import { useEffect, useRef, useState } from "react";
-import { fileDownloadUrl, listFiles, uploadFiles, type FileEntry, type FileListing } from "../api";
+import { fileDownloadUrl, listFiles, uploadFiles, type FileEntry, type FileListing, type FileScope } from "../api";
 import { formatTime, humanSize } from "../format";
 import {
   CloseIcon,
@@ -63,6 +65,8 @@ function entryIcon(e: FileEntry) {
 export function FileDrawer({ open, allowRoots, onClose, onInsertAttachment }: FileDrawerProps) {
   /** 当前浏览目录（初始为第一个白名单根；无白名单时为空串由服务端决定默认） */
   const [currentPath, setCurrentPath] = useState(() => (allowRoots.length > 0 ? allowRoots[0] : ""));
+  /** 文件区作用域：shared=共享 allowRoots / personal=本人个人区（隔离设计 §3.5） */
+  const [scope, setScope] = useState<FileScope>("shared");
   /** 目录列表数据 */
   const [listing, setListing] = useState<FileListing | null>(null);
   /** 加载中 / 上传中 / 错误提示 */
@@ -72,11 +76,11 @@ export function FileDrawer({ open, allowRoots, onClose, onInsertAttachment }: Fi
   /** 隐藏的上传 input 引用 */
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
 
-  /** 加载目录列表 */
-  const load = (path: string): void => {
+  /** 加载目录列表（scope 由调用方显式传入，避免闭包读到旧状态） */
+  const load = (path: string, sc: FileScope): void => {
     setLoading(true);
     setError("");
-    listFiles(path)
+    listFiles(path, sc)
       .then((data) => {
         setListing(data);
         // 以服务端归一化后的路径为准（消除 ~ 展开等差异）
@@ -91,25 +95,34 @@ export function FileDrawer({ open, allowRoots, onClose, onInsertAttachment }: Fi
 
   // 抽屉打开时加载当前目录
   useEffect(() => {
-    if (open) load(currentPath);
+    if (open) load(currentPath, scope);
     // 仅在 open 变化时触发；currentPath 变化经由面包屑点击后显式 load
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   // allowRoots 异步就绪后（抽屉已开但初始路径为空）自动初始化
   useEffect(() => {
-    if (open && listing === null && !loading && allowRoots.length > 0 && currentPath === "") {
-      load(allowRoots[0]);
+    if (open && listing === null && !loading && scope === "shared" && allowRoots.length > 0 && currentPath === "") {
+      load(allowRoots[0], scope);
     }
-  }, [open, allowRoots, listing, loading, currentPath]);
+  }, [open, allowRoots, listing, loading, currentPath, scope]);
+
+  /** 切换作用域：清空路径由服务端返回各区默认目录，并立即加载 */
+  const switchScope = (next: FileScope): void => {
+    if (next === scope) return;
+    setScope(next);
+    setListing(null);
+    setCurrentPath("");
+    load("", next);
+  };
 
   /** 执行上传后刷新列表 */
   const handleUpload = (files: FileList): void => {
     if (files.length === 0) return;
     setUploading(true);
     setError("");
-    uploadFiles(currentPath, Array.from(files))
-      .then(() => load(currentPath))
+    uploadFiles(currentPath, Array.from(files), scope)
+      .then(() => load(currentPath, scope))
       .catch((e: unknown) => {
         setError(e instanceof Error ? e.message : "上传失败");
       })
@@ -168,8 +181,30 @@ export function FileDrawer({ open, allowRoots, onClose, onInsertAttachment }: Fi
           />
         </div>
 
-        {/* 多白名单根切换 */}
-        {allowRoots.length > 1 && (
+        {/* 作用域切换（docs/dev/web-isolation.md §3.5）：共享目录 / 我的文件 */}
+        <div className="drawer-scope" role="tablist" aria-label="文件区作用域">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={scope === "shared"}
+            className={scope === "shared" ? "scope-tab scope-tab-active" : "scope-tab"}
+            onClick={() => switchScope("shared")}
+          >
+            共享目录
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={scope === "personal"}
+            className={scope === "personal" ? "scope-tab scope-tab-active" : "scope-tab"}
+            onClick={() => switchScope("personal")}
+          >
+            我的文件
+          </button>
+        </div>
+
+        {/* 多白名单根切换（仅共享区有意义；个人区恒为本人单一根） */}
+        {scope === "shared" && allowRoots.length > 1 && (
           <div className="drawer-roots">
             <select
               className="drawer-root-select"
@@ -190,7 +225,7 @@ export function FileDrawer({ open, allowRoots, onClose, onInsertAttachment }: Fi
           <button
             type="button"
             className="crumb"
-            onClick={() => load(allowRoots.length > 0 ? allowRoots[0] : "")}
+            onClick={() => load(scope === "shared" ? (allowRoots.length > 0 ? allowRoots[0] : "") : "", scope)}
             title="回到根目录"
           >
             根目录
@@ -226,7 +261,7 @@ export function FileDrawer({ open, allowRoots, onClose, onInsertAttachment }: Fi
                     key={full}
                     type="button"
                     className="file-row file-row-dir"
-                    onClick={() => load(full)}
+                    onClick={() => load(full, scope)}
                     title={full}
                   >
                     {entryIcon(e)}
@@ -253,7 +288,7 @@ export function FileDrawer({ open, allowRoots, onClose, onInsertAttachment }: Fi
                       <InsertIcon size={15} />
                     </button>
                     {/* 原生下载直链：服务端 Content-Disposition 附件响应 */}
-                    <a className="icon-btn" href={fileDownloadUrl(full)} download={e.name} title="下载">
+                    <a className="icon-btn" href={fileDownloadUrl(full, scope)} download={e.name} title="下载">
                       <svg viewBox="0 0 16 16" width="15" height="15" aria-label="下载" role="img">
                         <path
                           d="M8 2.5v7m0 0L5.2 6.7M8 9.5l2.8-2.8"

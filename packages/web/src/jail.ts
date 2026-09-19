@@ -52,7 +52,7 @@ export async function buildJailRoots(allowRoots: string[]): Promise<string[]> {
  * @param target 已归一（resolve 展开）的目标绝对路径
  * @returns 真实路径（可能包含尚未存在的末段）
  */
-async function realpathAllowMissing(target: string): Promise<string> {
+export async function realpathAllowMissing(target: string): Promise<string> {
   try {
     return await realpath(target);
   } catch {

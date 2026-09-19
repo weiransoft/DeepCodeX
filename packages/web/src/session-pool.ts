@@ -25,13 +25,9 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import path from "node:path";
 import {
   SessionManager,
   createOpenAIClient as createDefaultOpenAIClient,
-  getProjectCode,
   resolveCurrentSettings,
   type AskPermissionRequest,
   type LLMClient,
@@ -42,6 +38,8 @@ import {
 } from "@vegamo/deepcode-core";
 import { ApiError } from "./http-utils";
 import { resolveInJail } from "./jail";
+import { findChatBySessionId, loadUserChats, upsertUserChat } from "./chat-registry";
+import type { AuthContext } from "./user-identity";
 import type { SseHub } from "./events";
 import type { ChatMessageDto, ChatSummary, DoneEvent, ResolvedWebSettings } from "./types";
 
@@ -62,6 +60,10 @@ type ChatSession = {
   createTime: string;
   /** 串行化 Promise 链尾（恒不 reject，错误在 runTurn 内收敛） */
   busy: Promise<void>;
+  /** 归属者用户名（JWT sub；多用户隔离：仅本人可操作，docs/dev/web-isolation.md §3.3） */
+  owner: string;
+  /** 归属者隔离标识（注册表文件名主键，userIdFromUsername 产物） */
+  ownerUserId: string;
 };
 
 /** sendMessage 入参（已由 API 层校验过的强类型） */
@@ -103,6 +105,11 @@ export type SessionPoolOptions = {
    * 未注入时使用默认 createOpenAIClient(projectRoot)。
    */
   createOpenAIClient?: (projectRoot: string) => OpenAIClientHandle;
+  /**
+   * 用户会话注册表根目录覆写（docs/dev/web-isolation.md §3.4 测试缝合点）。
+   * 生产缺省 ~/.deepcode/web/chats；测试注入临时目录避免污染真实用户目录。
+   */
+  registryBaseDir?: string;
 };
 
 /**
@@ -114,6 +121,8 @@ export class SessionPool {
   /** 受控工厂（可选） */
   private readonly createLLMClient?: () => LLMClient | null;
   private readonly createOpenAIClientOverride?: (projectRoot: string) => OpenAIClientHandle;
+  /** 用户注册表根目录注入点（测试用；默认 ~/.deepcode/web/chats，docs/dev/web-isolation.md §3.4） */
+  private readonly registryBaseDir?: string;
 
   /**
    * @param settings 归一后的 Web 配置
@@ -129,6 +138,7 @@ export class SessionPool {
   ) {
     this.createLLMClient = options.createLLMClient;
     this.createOpenAIClientOverride = options.createOpenAIClient;
+    this.registryBaseDir = options.registryBaseDir;
   }
 
   /**
@@ -139,14 +149,28 @@ export class SessionPool {
    * 可选恢复指定 sessionId。
    *
    * @param projectRoot 项目根目录（必须位于 allowRoots 白名单内）
-   * @param sessionId 可选：恢复既有底层会话（刷新后恢复历史）
+   * @param ctx 认证上下文（会话归属者；多用户隔离，docs/dev/web-isolation.md §3.3）
+   * @param sessionId 可选：恢复既有底层会话（刷新后恢复历史；仅归属者可恢复）
    * @returns chatId / sessionId / projectRoot
    * @throws JailViolationError projectRoot 越出白名单（映射 403）
-   * @throws ApiError 404 指定 sessionId 在该项目下不存在
+   * @throws ApiError 404 指定 sessionId 不存在或不属于当前用户
    */
-  async createChat(projectRoot: string, sessionId?: string): Promise<CreateChatResult> {
+  async createChat(projectRoot: string, ctx: AuthContext, sessionId?: string): Promise<CreateChatResult> {
     // 牢笼校验：消解符号链接后必须落在某个 allowRoot 内（否则 403）
     const resolvedRoot = await resolveInJail(this.jailRoots, projectRoot);
+
+    // 恢复归属校验（R2/AC3）：目标 sessionId 必须属于当前用户——
+    // 注册表中有记录，或池内该用户活跃会话已绑定该 sessionId（轮次进行中刷新场景）。
+    // 校验失败复用「不存在」文案与 404 状态码，不区分「不存在」与「无权」（R5 防枚举）
+    if (sessionId !== undefined) {
+      const registryHit = findChatBySessionId(ctx.userId, sessionId, this.registryBaseDir);
+      const activeHit = [...this.chats.values()].some(
+        (chat) => chat.ownerUserId === ctx.userId && chat.sessionId === sessionId
+      );
+      if (!registryHit && !activeHit) {
+        throw new ApiError(404, `会话 ${sessionId} 在项目 ${resolvedRoot} 下不存在，无法恢复`);
+      }
+    }
 
     const chatId = randomUUID();
     const createTime = new Date().toISOString();
@@ -209,6 +233,9 @@ export class SessionPool {
       sessionId: null,
       createTime,
       busy: Promise.resolve(),
+      // 会话归属：创建者本人（后续操作均按此校验）
+      owner: ctx.sub,
+      ownerUserId: ctx.userId,
     };
 
     // 可选恢复：校验会话在当前项目索引中存在后 setActiveSessionId
@@ -223,13 +250,52 @@ export class SessionPool {
     }
 
     this.chats.set(chatId, chat);
+    // 注册表登记（R2）：创建即落盘归属记录（sessionId 尚为 null，轮次 done 后回写补全），
+    // 进程重启后历史列表与恢复校验均以本表为准。
+    // 写盘失败不抛出：池内会话已建立，失败仅影响重启后恢复能力，与轮次回写同收敛策略
+    try {
+      upsertUserChat(
+        ctx.userId,
+        {
+          chatId,
+          sessionId: chat.sessionId,
+          projectRoot: resolvedRoot,
+          title: null,
+          status: "pending",
+          createTime,
+          updateTime: createTime,
+        },
+        this.registryBaseDir
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[session-pool] 注册表登记失败 chatId=${chatId}: ${message}`);
+    }
     return { chatId, sessionId: chat.sessionId, projectRoot: resolvedRoot };
+  }
+
+  /**
+   * 取会话并校验归属（多用户隔离统一入口，docs/dev/web-isolation.md §3.3）。
+   *
+   * 归属不符时复用「不存在」文案与 404 状态码（R5 防枚举：不泄露他人会话存在性）。
+   *
+   * @param chatId Web 会话 id
+   * @param ctx 认证上下文
+   * @returns 归属校验通过的聊天会话
+   * @throws ApiError 404 会话不存在或不属于当前用户
+   */
+  private getOwnedChat(chatId: string, ctx: AuthContext): ChatSession {
+    const chat = this.chats.get(chatId);
+    if (!chat || chat.ownerUserId !== ctx.userId) {
+      throw new ApiError(404, `会话 ${chatId} 不存在或已关闭`);
+    }
+    return chat;
   }
 
   /**
    * 发送一条用户消息（同一 chatId 串行化执行；202 异步受理语义）。
    *
-   * 执行序：同步校验 → 入队 Promise 链 → 立即返回受理结果。
+   * 执行序：归属与存在校验 → 入队 Promise 链 → 立即返回受理结果。
    * handleUserPrompt 的整轮执行在后台异步进行（串行链保证同 chatId 顺序），
    * 本轮全部事件（assistant_message / llm_delta / tool_progress /
    * permission_request / status / done）均经 SSE 推送；
@@ -238,14 +304,12 @@ export class SessionPool {
    *
    * @param chatId Web 会话 id
    * @param input 消息内容（text / imageUrls / 审批回注 permissions / alwaysAllows）
+   * @param ctx 认证上下文（归属校验）
    * @returns 受理结果 {chatId, sessionId}（sessionId 允许 null）
-   * @throws ApiError 404 会话不存在
+   * @throws ApiError 404 会话不存在或不属于当前用户
    */
-  sendMessage(chatId: string, input: SendMessageInput): SendMessageAcceptance {
-    const chat = this.chats.get(chatId);
-    if (!chat) {
-      throw new ApiError(404, `会话 ${chatId} 不存在或已关闭`);
-    }
+  sendMessage(chatId: string, input: SendMessageInput, ctx: AuthContext): SendMessageAcceptance {
+    const chat = this.getOwnedChat(chatId, ctx);
     // Promise 链串行化：同一 chatId 的轮次按调用顺序依次执行，不同 chatId 并行
     const run = chat.busy.then(() => this.runTurn(chat, input));
     // 链尾吞错：错误已在 runTurn 内经 SSE done 收敛，这里仅防止污染后续轮次入队
@@ -305,6 +369,8 @@ export class SessionPool {
         error: message,
       };
       this.hub.publish(chat.chatId, "done", doneEvent);
+      // 注册表回写：失败轮次同样落盘（AC7 状态一致性；sessionId 可能已创建）
+      this.persistChatRegistration(chat, null);
       console.error(`[session-pool] 轮次执行失败 chatId=${chat.chatId}: ${message}`);
       return;
     }
@@ -326,6 +392,41 @@ export class SessionPool {
       sessionId: chat.sessionId,
       status,
     });
+
+    // 注册表回写（R2）：轮次收敛点落盘归属记录（成功与异常路径均覆盖），
+    // 进程重启后该用户的列表 / 恢复校验以注册表为准
+    this.persistChatRegistration(chat, session);
+  }
+
+  /**
+   * 将会话当前状态回写至归属用户的注册表（docs/dev/web-isolation.md §3.3）。
+   *
+   * 标题 / 状态 / updateTime 取引擎条目快照；引擎条目不可用（如失败早于建会话）时
+   * 保留注册表现值语义（title 传 null 即覆盖为 null——轮次失败场景状态必须如实为 failed）。
+   *
+   * @param chat 目标聊天（ownerUserId 决定写入哪份注册表）
+   * @param session 引擎会话条目（可能为 null）
+   */
+  private persistChatRegistration(chat: ChatSession, session: ReturnType<SessionManager["getSession"]>): void {
+    try {
+      upsertUserChat(
+        chat.ownerUserId,
+        {
+          chatId: chat.chatId,
+          sessionId: chat.sessionId,
+          projectRoot: chat.projectRoot,
+          title: session?.summary ?? null,
+          status: session?.status ?? "failed",
+          createTime: chat.createTime,
+          updateTime: session?.updateTime ?? new Date().toISOString(),
+        },
+        this.registryBaseDir
+      );
+    } catch (error) {
+      // 注册表写失败不阻断对话主链路：仅影响重启后历史可见性，记录日志即可
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[session-pool] 注册表回写失败 chatId=${chat.chatId}: ${message}`);
+    }
   }
 
   /**
@@ -334,13 +435,11 @@ export class SessionPool {
    * 不等待引擎收尾：handleUserPrompt 会随中断信号自行结束并经事件桥接推送 status/done。
    *
    * @param chatId Web 会话 id
-   * @throws ApiError 404 会话不存在
+   * @param ctx 认证上下文（归属校验）
+   * @throws ApiError 404 会话不存在或不属于当前用户
    */
-  interrupt(chatId: string): void {
-    const chat = this.chats.get(chatId);
-    if (!chat) {
-      throw new ApiError(404, `会话 ${chatId} 不存在或已关闭`);
-    }
+  interrupt(chatId: string, ctx: AuthContext): void {
+    const chat = this.getOwnedChat(chatId, ctx);
     chat.manager.interruptActiveSession();
   }
 
@@ -348,14 +447,12 @@ export class SessionPool {
    * 查询会话元信息（chat-api 响应组装用）。
    *
    * @param chatId Web 会话 id
+   * @param ctx 认证上下文（归属校验）
    * @returns chatId / sessionId / projectRoot
-   * @throws ApiError 404 会话不存在
+   * @throws ApiError 404 会话不存在或不属于当前用户
    */
-  getChatInfo(chatId: string): { chatId: string; sessionId: string | null; projectRoot: string } {
-    const chat = this.chats.get(chatId);
-    if (!chat) {
-      throw new ApiError(404, `会话 ${chatId} 不存在或已关闭`);
-    }
+  getChatInfo(chatId: string, ctx: AuthContext): { chatId: string; sessionId: string | null; projectRoot: string } {
+    const chat = this.getOwnedChat(chatId, ctx);
     return { chatId: chat.chatId, sessionId: chat.sessionId, projectRoot: chat.projectRoot };
   }
 
@@ -363,14 +460,12 @@ export class SessionPool {
    * 读取会话历史消息（刷新恢复用）。
    *
    * @param chatId Web 会话 id
+   * @param ctx 认证上下文（归属校验）
    * @returns 消息 DTO 列表（尚未产生底层会话时为空数组）
-   * @throws ApiError 404 会话不存在
+   * @throws ApiError 404 会话不存在或不属于当前用户
    */
-  getMessages(chatId: string): ChatMessageDto[] {
-    const chat = this.chats.get(chatId);
-    if (!chat) {
-      throw new ApiError(404, `会话 ${chatId} 不存在或已关闭`);
-    }
+  getMessages(chatId: string, ctx: AuthContext): ChatMessageDto[] {
+    const chat = this.getOwnedChat(chatId, ctx);
     if (!chat.sessionId) {
       return [];
     }
@@ -385,20 +480,27 @@ export class SessionPool {
   }
 
   /**
-   * 会话列表：池内活跃会话 + 各 allowRoot 项目磁盘历史合并，按 updateTime 降序。
+   * 会话列表（按用户隔离，docs/dev/web-isolation.md §3.3）：当前用户的池内活跃会话
+   * + 其私有注册表历史合并，按 updateTime 降序。
    *
-   * 去重规则：同一底层 sessionId 以池内活跃记录为准（历史记录跳过）。
+   * 去重规则：同一底层 sessionId 以池内活跃记录为准（历史记录跳过）；
+   * 磁盘历史不再扫描 sessions-index.json（无归属者信息，全量忽略），
+   * 仅取该用户注册表（chat-registry）。
    *
+   * @param ctx 认证上下文（决定可见集合）
    * @returns 会话摘要列表
    */
-  listChats(): ChatSummary[] {
+  listChats(ctx: AuthContext): ChatSummary[] {
     /** sessionId/chatId → 摘要 */
     const merged = new Map<string, ChatSummary>();
 
-    // 1. 池内活跃会话
+    // 1. 池内活跃会话（仅本人：ownerUserId 匹配）
     for (const chat of this.chats.values()) {
+      if (chat.ownerUserId !== ctx.userId) {
+        continue;
+      }
       const entry = chat.sessionId ? chat.manager.getSession(chat.sessionId) : null;
-      // P1-4 去重键统一为底层 sessionId：下方历史条目以 entry.id（即 sessionId）为键，
+      // P1-4 去重键统一为底层 sessionId：历史条目以 sessionId 为键，
       // 活跃会话若已绑定 sessionId 必须使用同一键合并，否则同一底层会话会同时出现
       // 「活跃」与「历史」两条记录；尚无底层会话的活跃 chat 用 chatId 兜底（不可能冲突）
       const mergeKey = chat.sessionId ?? chat.chatId;
@@ -414,24 +516,22 @@ export class SessionPool {
       });
     }
 
-    // 2. 磁盘历史：扫描各 allowRoot 的 sessions-index.json
-    for (const root of this.jailRoots) {
-      for (const entry of readProjectSessionIndex(root)) {
-        // 同一 sessionId 已有活跃记录时以活跃为准
-        if (merged.has(entry.id)) {
-          continue;
-        }
-        merged.set(entry.id, {
-          chatId: entry.id,
-          sessionId: entry.id,
-          projectRoot: root,
-          title: entry.summary ?? null,
-          status: entry.status,
-          createTime: entry.createTime,
-          updateTime: entry.updateTime,
-          source: "history",
-        });
+    // 2. 磁盘历史：当前用户私有注册表（R2 历史归属）
+    for (const entry of loadUserChats(ctx.userId, this.registryBaseDir)) {
+      // 同一 sessionId 已有活跃记录时以活跃为准（chatId 兜底键同理）
+      if (merged.has(entry.sessionId ?? entry.chatId)) {
+        continue;
       }
+      merged.set(entry.sessionId ?? entry.chatId, {
+        chatId: entry.chatId,
+        sessionId: entry.sessionId,
+        projectRoot: entry.projectRoot,
+        title: entry.title,
+        status: entry.status,
+        createTime: entry.createTime,
+        updateTime: entry.updateTime,
+        source: "history",
+      });
     }
 
     // 3. updateTime 降序
@@ -490,42 +590,6 @@ function serializeToolCallsForSse(toolCalls: unknown[]): unknown[] {
   } catch {
     // 循环引用等极端情况：降级为计数描述，保证 SSE 帧可发送
     return [{ toolCallCount: toolCalls.length, note: "toolCalls 含不可序列化结构，已降级展示" }];
-  }
-}
-
-/**
- * 读取指定项目根的磁盘会话索引（sessions-index.json）。
- *
- * 路径约定与 core 一致：~/.deepcode/projects/<projectCode>/sessions-index.json。
- * 文件缺失/损坏时返回空数组（历史扫描是尽力而为，不阻断列表）。
- *
- * @param projectRoot 项目根目录
- * @returns 会话条目列表
- */
-function readProjectSessionIndex(projectRoot: string): Array<{
-  id: string;
-  summary: string | null;
-  status: SessionStatus;
-  createTime: string;
-  updateTime: string;
-}> {
-  const indexPath = path.join(homedir(), ".deepcode", "projects", getProjectCode(projectRoot), "sessions-index.json");
-  if (!existsSync(indexPath)) {
-    return [];
-  }
-  try {
-    const parsed = JSON.parse(readFileSync(indexPath, "utf8")) as {
-      entries?: Array<{
-        id: string;
-        summary: string | null;
-        status: SessionStatus;
-        createTime: string;
-        updateTime: string;
-      }>;
-    };
-    return Array.isArray(parsed.entries) ? parsed.entries : [];
-  } catch {
-    return [];
   }
 }
 

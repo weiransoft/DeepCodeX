@@ -15,6 +15,22 @@ import type { AddressInfo } from "node:net";
 import type { LLMClient, LLMRequest, LLMResponse, LLMStreamEvent } from "@vegamo/deepcode-core";
 import type { createOpenAIClient } from "@vegamo/deepcode-core";
 import type { ResolvedWebSettings } from "../src/types";
+import { userIdFromUsername, type AuthContext } from "../src/user-identity";
+
+/**
+ * 构造测试用认证上下文（多用户隔离测试的主键来源；docs/dev/web-isolation.md §3.2）。
+ *
+ * @param username 用户名（JWT sub）
+ * @returns 含派生 userId 的完整 AuthContext
+ */
+export function makeCtx(username: string): AuthContext {
+  return {
+    sub: username,
+    userId: userIdFromUsername(username),
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  };
+}
 
 /** createOpenAIClient 返回句柄类型（与 session-pool.ts 内部定义一致） */
 export type OpenAIClientHandle = ReturnType<typeof createOpenAIClient>;
