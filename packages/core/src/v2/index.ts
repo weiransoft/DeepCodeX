@@ -171,8 +171,9 @@ export type { GitignoreRule } from "./memory/gitignore-filter.js";
 export { GitignoreFilter, parseGitignoreLine, matchesGitignore } from "./memory/gitignore-filter.js";
 
 // 敏感信息脱敏（SensitiveInfoRedactor）
+// defaultRedactionLogPath：审计日志缺省路径函数（牢笼改造 C7，供测试与调用方按 homeDir 解析）
 export type { RedactionRule, RedactionHit, RedactionResult, RedactionLogEntry } from "./memory/redaction.js";
-export { SensitiveInfoRedactor, DEFAULT_REDACTION_RULES } from "./memory/redaction.js";
+export { SensitiveInfoRedactor, DEFAULT_REDACTION_RULES, defaultRedactionLogPath } from "./memory/redaction.js";
 
 // /memory 命令处理器（handleMemoryCommand + MemoryCommandResult）
 export type { MemoryCommandResult } from "./memory/memory-commands.js";

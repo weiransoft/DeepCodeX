@@ -392,6 +392,12 @@ export function App() {
       // —— 历史会话恢复路径（sessionId 为恢复主键；缺失时按普通路径尝试并交由后端报错）——
       if (item && item.source === "history" && item.sessionId !== null) {
         if (creatingChat) return;
+        // 共享模式下空根不发必然 400 的请求；个人模式（personalOnly）空串合法，
+        // 服务端会落到本人个人工作区并校验会话归属
+        if (item.projectRoot === "" && !(config?.personalOnly ?? false)) {
+          showToast("历史会话缺少项目根目录，无法恢复");
+          return;
+        }
         setCreatingChat(true);
         createChat(item.projectRoot, item.sessionId)
           .then(({ chatId: remountedId }) => {
@@ -413,15 +419,15 @@ export function App() {
       }
       openChat(chatId);
     },
-    [creatingChat, handleUnauthorized, openChat, showToast]
+    [creatingChat, config, handleUnauthorized, openChat, showToast]
   );
 
   /** 新建对话（projectRoot 来自侧栏选择；本地列表项字段与后端 ChatSummary 契约对齐） */
   const newChat = useCallback((): void => {
     if (creatingChat) return;
-    // 空根防御（第一次启动 allowRoots 未配置时 projectRoot 为空字符串）：
-    // 不发必然 400 的请求，直接提示配置方法（docs/dev/web-ui.md §3.3 allowRoots 说明）
-    if (projectRoot === "") {
+    // 空根防御：共享模式（personalOnly=false）下 allowRoots 未配置时 projectRoot 为空串，
+    // 不发必然 400 的请求；个人模式空串合法——服务端自动落到本人个人工作区
+    if (projectRoot === "" && !(config?.personalOnly ?? false)) {
       showToast("未配置可用的项目根目录：请在 ~/.deepcode/settings.json 的 web.allowRoots 中添加目录后重启");
       return;
     }
@@ -431,6 +437,8 @@ export function App() {
         const now = new Date().toISOString();
         // POST /api/chats 仅返回 {chatId, sessionId}；列表项按后端契约本地补全
         // （status 用引擎合法状态 pending；sessionId 在首个消息发出前为 null）
+        // projectRoot 以本地选择值回填；个人模式本地为空串时留空——
+        // 服务端已落个人区，列表展示不依赖该值，恢复路径在个人模式下亦允许空串
         setChats((prev) => [
           {
             chatId,
@@ -459,7 +467,7 @@ export function App() {
         showToast(e instanceof Error ? e.message : "新建对话失败");
       })
       .finally(() => setCreatingChat(false));
-  }, [applyStreaming, creatingChat, ensureStream, handleUnauthorized, projectRoot, showToast]);
+  }, [applyStreaming, config, creatingChat, ensureStream, handleUnauthorized, projectRoot, showToast]);
 
   /**
    * 发送消息：乐观上屏 → 按附件形态选择 JSON / multipart 通道。
@@ -639,15 +647,23 @@ export function App() {
       });
   }, [authState, handleUnauthorized, showToast]);
 
-  // 自动新建首个对话：会话列表为空（autoCreatePending）且项目根已就绪时触发一次。
-  // 注意时序：listChats 与 fetchConfig 并发，projectRoot 可能晚于空列表就绪——
-  // projectRoot 为空时保持 pending 等待（不取消），避免竞态丢失自动新建；
-  // allowRoots 未配置（projectRoot 恒为空串）时 pending 静默滞留——侧栏已有持久配置引导
+  // 自动新建首个对话：会话列表为空（autoCreatePending）时触发一次。
+  // 个人模式（personalOnly）：projectRoot 可为空串（服务端落个人区），
+  //   等 config 就绪确认模式后即可创建，不依赖 allowRoots；
+  // 共享模式：等 projectRoot（来自 allowRoots[0]）就绪；未配置时 pending 静默滞留，
+  //   侧栏已有持久配置引导。
   useEffect(() => {
-    if (!autoCreatePending || creatingChat || projectRoot === "") return;
-    setAutoCreatePending(false);
-    newChat();
-  }, [autoCreatePending, creatingChat, projectRoot, newChat]);
+    if (!autoCreatePending || creatingChat) return;
+    if (projectRoot !== "") {
+      setAutoCreatePending(false);
+      newChat();
+      return;
+    }
+    if (config?.personalOnly === true) {
+      setAutoCreatePending(false);
+      newChat();
+    }
+  }, [autoCreatePending, creatingChat, projectRoot, config, newChat]);
 
   // 首次挂载：检查登录态
   useEffect(() => {
@@ -727,6 +743,7 @@ export function App() {
       <FileDrawer
         open={fileDrawerOpen}
         allowRoots={config?.allowRoots ?? []}
+        personalOnly={config?.personalOnly ?? true}
         onClose={() => setFileDrawerOpen(false)}
         onInsertAttachment={insertAttachment}
       />

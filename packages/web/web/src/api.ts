@@ -30,6 +30,8 @@ export interface AppConfig {
   allowRoots: string[];
   maxUploadBytes: number;
   ldapEnabled: boolean;
+  /** 个人工作目录模式（docs/dev/web-workspace.md W7）：true 时共享区禁用、会话锁定个人区 */
+  personalOnly: boolean;
 }
 
 /**
@@ -204,7 +206,13 @@ export function listChats(): Promise<{ chats: ChatSummary[] }> {
   return request<{ chats: ChatSummary[] }>("GET", "/api/chats");
 }
 
-/** 新建会话（projectRoot 必须位于 allowRoots 内，由服务端校验） */
+/**
+ * 新建会话。
+ *
+ * - 共享模式（personalOnly=false）：projectRoot 必须位于 allowRoots 内，由服务端校验；
+ * - 个人工作目录模式（personalOnly=true）：projectRoot 可传空串，服务端自动落到
+ *   当前用户的个人工作区（docs/dev/web-workspace.md W3）。
+ */
 export function createChat(projectRoot: string, sessionId?: string): Promise<{ chatId: string; sessionId: string }> {
   return request<{ chatId: string; sessionId: string }>("POST", "/api/chats", { projectRoot, sessionId });
 }

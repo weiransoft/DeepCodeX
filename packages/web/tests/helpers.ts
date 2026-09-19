@@ -11,6 +11,8 @@
 
 import { createHash } from "node:crypto";
 import http from "node:http";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type { AddressInfo } from "node:net";
 import type { LLMClient, LLMRequest, LLMResponse, LLMStreamEvent } from "@vegamo/deepcode-core";
 import type { createOpenAIClient } from "@vegamo/deepcode-core";
@@ -144,7 +146,13 @@ export function createResolvedSettings(overrides: Partial<ResolvedWebSettings> =
     host: "127.0.0.1",
     port: 0,
     allowRoots: [],
-    uploadDir: "/tmp/deepcode-web-test-uploads",
+    // uploadDir/engineHomeRoot 默认落在系统临时区独立目录（真实目录语义；
+    // 用例通常经 overrides 指到各自 mkdtemp 工作区，互不干扰）
+    uploadDir: path.join(tmpdir(), "deepcode-web-test-uploads"),
+    // 默认回退旧共享模式：既有集成测试基于 allowRoots 共享浏览假设，
+    // 个人工作目录模式用例显式覆盖 personalOnly=true
+    personalOnly: false,
+    engineHomeRoot: path.join(tmpdir(), "deepcode-web-test-engine-home"),
     maxUploadBytes: 1024 * 1024,
     auth: {
       jwtSecret: "test-jwt-secret",

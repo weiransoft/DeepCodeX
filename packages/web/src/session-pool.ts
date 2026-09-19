@@ -25,6 +25,8 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import path from "node:path";
 import {
   SessionManager,
   createOpenAIClient as createDefaultOpenAIClient,
@@ -37,7 +39,8 @@ import {
   type PermissionScope,
 } from "@vegamo/deepcode-core";
 import { ApiError } from "./http-utils";
-import { resolveInJail } from "./jail";
+import { buildJailRoots, resolveInJail } from "./jail";
+import { personalUploadRoot } from "./user-files";
 import { findChatBySessionId, loadUserChats, upsertUserChat } from "./chat-registry";
 import type { AuthContext } from "./user-identity";
 import type { SseHub } from "./events";
@@ -151,20 +154,58 @@ export class SessionPool {
   /**
    * 创建新的 Web 聊天会话。
    *
-   * 流程：projectRoot 牢笼校验（必须在 allowRoots 内）→ 构造 SessionManager
-   * （nonInteractive + renderMarkdown 透传 + 事件桥接回调）→ initMcpServers →
-   * 可选恢复指定 sessionId。
+   * 流程（docs/dev/web-workspace.md W2/W3/W6）：
+   * 1. personalOnly=true（默认）：忽略客户端 projectRoot，服务端强制拼接个人
+   *    工作区 `<uploadDir>/<userId>` 作为 projectRoot（不经 ~ 展开、不接受外部输入拼接）；
+   *    显式传入 projectRoot 时仅允许等于本人个人区，否则 403（明确拒绝，不静默改写）。
+   *    personalOnly=false：回退旧行为——projectRoot 牢笼校验（必须在 allowRoots 内）。
+   * 2. personalOnly=true 时 SessionManager 注入 per-user 引擎数据根
+   *    `homeDir=<engineHomeRoot>/<userId>` + `ignoreProjectSettings=true`
+   *    （个人区可写，绝不作为凭据/MCP/权限模式来源），并把 bash 子进程 HOME
+   *    覆写为 homeDir（家目录写入落引擎区，个人区内 `~` 无危害）。
+   * 3. 构造 SessionManager（nonInteractive + 事件桥接）→ initMcpServers →
+   *    可选恢复指定 sessionId。
    *
-   * @param projectRoot 项目根目录（必须位于 allowRoots 白名单内）
+   * @param projectRoot 项目根目录（personalOnly 模式下必须缺省或等于本人个人区）
    * @param ctx 认证上下文（会话归属者；多用户隔离，docs/dev/web-isolation.md §3.3）
    * @param sessionId 可选：恢复既有底层会话（刷新后恢复历史；仅归属者可恢复）
    * @returns chatId / sessionId / projectRoot
-   * @throws JailViolationError projectRoot 越出白名单（映射 403）
+   * @throws ApiError 403 personalOnly 模式下请求了个人区之外的目录
+   * @throws JailViolationError projectRoot 越出白名单（personalOnly=false 旧路径，映射 403）
    * @throws ApiError 404 指定 sessionId 不存在或不属于当前用户
    */
   async createChat(projectRoot: string, ctx: AuthContext, sessionId?: string): Promise<CreateChatResult> {
-    // 牢笼校验：消解符号链接后必须落在某个 allowRoot 内（否则 403）
-    const resolvedRoot = await resolveInJail(this.jailRoots, projectRoot);
+    // 个人工作目录模式（docs/dev/web-workspace.md R1/R2）：服务端拼接个人区，
+    // 绝不经 ~ 展开或 allowRoots 解析，从源头杜绝越界与路径注入
+    const personalRoot = personalUploadRoot(this.settings.uploadDir, ctx.userId);
+    // per-user 引擎数据根（R3/R4）：记忆/日志/会话索引落此目录，Web 文件 API 不可达
+    const engineHomeDir = path.join(this.settings.engineHomeRoot, ctx.userId);
+    if (this.settings.personalOnly) {
+      // 尽力确保两级目录就绪（个人区 + 引擎区；mkdir 幂等）
+      mkdirSync(personalRoot, { recursive: true });
+      mkdirSync(engineHomeDir, { recursive: true });
+      // W3：显式传入 projectRoot 时只接受本人个人区（明确 403，不静默改写）；
+      // 归一后比较，允许尾斜杠 / 相对等价写法等表达同一目录
+      const requested = (projectRoot ?? "").trim();
+      if (requested !== "" && path.resolve(requested) !== personalRoot) {
+        throw new ApiError(403, "个人工作目录模式：会话只能在你的个人工作区内创建，无法访问其他目录");
+      }
+    }
+    // 牢笼校验：personalOnly 模式下 personalRoot 拼接自服务端可信配置，
+    // 仍走 resolveInJail（个人区在其自身牢笼内必然通过，同时消解 symlink）；
+    // personalOnly=false 走 allowRoots 白名单旧路径
+    const resolvedRoot = this.settings.personalOnly
+      ? await resolveInJail(await buildJailRoots([personalRoot]), personalRoot)
+      : await resolveInJail(this.jailRoots, projectRoot);
+
+    // W6 旧历史恢复防御：personalOnly 模式下，恢复目标所在注册表条目的
+    // projectRoot 必须仍在本人个人区内（旧 allowRoot 时代的历史不可恢复）
+    if (this.settings.personalOnly && sessionId !== undefined) {
+      const registryHit = findChatBySessionId(ctx.userId, sessionId, this.registryBaseDir);
+      if (registryHit && path.resolve(registryHit.projectRoot) !== personalRoot) {
+        throw new ApiError(403, "历史会话所在目录不在个人工作区内，无法恢复");
+      }
+    }
 
     // 恢复归属校验（R2/AC3）：目标 sessionId 必须属于当前用户——
     // 注册表中有记录，或池内该用户活跃会话已绑定该 sessionId（轮次进行中刷新场景）。
@@ -181,19 +222,34 @@ export class SessionPool {
 
     const chatId = randomUUID();
     const createTime = new Date().toISOString();
-    const settings = resolveCurrentSettings(resolvedRoot);
+    // 引擎设置解析：personalOnly 时忽略项目级 settings（个人区可写区不得注入
+    // 凭据 / mcpServers / 权限模式，docs/dev/web-workspace.md R5 P0 防线）
+    const ignoreProjectSettings = this.settings.personalOnly;
+    const settings = resolveCurrentSettings(resolvedRoot, { ignoreProjectSettings });
 
     const manager = new SessionManager({
       projectRoot: resolvedRoot,
-      // OpenAI 连接工厂：测试经 SessionPoolOptions 注入受控句柄；生产走 core 默认实现
-      createOpenAIClient: () =>
-        this.createOpenAIClientOverride
+      // W2 牢笼注入：per-user 引擎数据根（记忆/日志/会话索引按用户物理分离）
+      // 与项目级 settings 忽略开关（personalOnly=false 时两者缺省 = 旧行为）
+      ...(this.settings.personalOnly ? { homeDir: engineHomeDir, ignoreProjectSettings: true } : {}),
+      // OpenAI 连接工厂：测试经 SessionPoolOptions 注入受控句柄；生产走 core 默认实现。
+      // personalOnly 时在外层再包一层 HOME 覆写：bash 子进程（buildShellEnv 合并
+      // createOpenAIClient().env）与引擎内 os.homedir() 的家目录写入全部落
+      // <engineHomeRoot>/<userId>，进程级 HOME 不动（并发安全，审查 P0-2）。
+      createOpenAIClient: () => {
+        const base = this.createOpenAIClientOverride
           ? this.createOpenAIClientOverride(resolvedRoot)
-          : createDefaultOpenAIClient(resolvedRoot),
+          : createDefaultOpenAIClient(resolvedRoot);
+        if (!this.settings.personalOnly) {
+          return base;
+        }
+        return { ...base, env: { ...base.env, HOME: engineHomeDir } };
+      },
       // LLM 工厂缝合点：测试注入受控 LLMClient；未注入时 undefined 走 core 默认路由
       ...(this.createLLMClient ? { createLLMClient: this.createLLMClient } : {}),
-      // 配置直读：与 CLI 同源（resolveCurrentSettings 透传）
-      getResolvedSettings: () => resolveCurrentSettings(resolvedRoot),
+      // 配置直读：与 CLI 同源（resolveCurrentSettings 透传；
+      // personalOnly 时同样忽略项目级 settings，与 SessionManager 内部解析一致）
+      getResolvedSettings: () => resolveCurrentSettings(resolvedRoot, { ignoreProjectSettings }),
       renderMarkdown: (text) => text,
       nonInteractive: true,
       // —— 事件桥接（chatId 闭包绑定）——

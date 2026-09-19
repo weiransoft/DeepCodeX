@@ -91,8 +91,14 @@ export interface ExecutionRecord {
 
 /** ExecutionHistoryStore 构造参数 */
 export interface ExecutionHistoryStoreOptions {
-  /** 项目根目录（用于计算 projectCode，路径 ~/.deepcode/projects/<projectCode>/execution-history.jsonl） */
+  /** 项目根目录（用于计算 projectCode，路径 <homeDir>/.deepcode/projects/<projectCode>/execution-history.jsonl） */
   projectRoot: string;
+  /**
+   * 引擎数据根目录（docs/dev/web-workspace.md C5）：执行历史落盘锚点。
+   * 缺省 = os.homedir()（CLI 单用户行为不变）；Web 多用户模式注入
+   * `<engineHomeDir>/<userId>`，使用户执行历史与其他用户物理隔离。
+   */
+  homeDir?: string;
   /** 每 session 最大保留记录数（默认 500）——超出时裁剪最旧记录 */
   maxRecordsPerSession?: number;
   /** 全局记录最大保留天数（默认 100）——超出时裁剪 */

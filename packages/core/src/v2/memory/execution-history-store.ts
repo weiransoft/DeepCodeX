@@ -86,7 +86,10 @@ export class ExecutionHistoryStore {
 
   constructor(options: ExecutionHistoryStoreOptions) {
     const projectCode = getProjectCode(options.projectRoot);
-    this.projectDir = path.join(os.homedir(), ".deepcode", "projects", projectCode);
+    // 牢笼改造（docs/dev/web-workspace.md C5）：存储锚点从进程家目录改为可注入的
+    // 引擎数据根（options.homeDir）；未注入时回退 os.homedir()，CLI 路径逐字节不变。
+    const homeRoot = options.homeDir ?? os.homedir();
+    this.projectDir = path.join(homeRoot, ".deepcode", "projects", projectCode);
     this.historyFilePath = path.join(this.projectDir, "execution-history.jsonl");
 
     this.options = {

@@ -89,8 +89,15 @@ export interface InterruptEvent {
  *
  * @returns 日志文件绝对路径（~/.deepcodex/logs/interrupts.log）
  */
-export function getInterruptLogPath(): string {
-  return path.join(getDeepCodeXLogDir(), INTERRUPT_LOG_FILE);
+/**
+ * 获取中断事件日志文件路径
+ *
+ * @param homeDir 引擎数据根目录（docs/dev/web-workspace.md C8）：可选注入，
+ *                缺省 = os.homedir()（CLI 行为不变）。
+ * @returns 日志文件绝对路径（`<homeDir>/.deepcodex/logs/interrupts.log`）
+ */
+export function getInterruptLogPath(homeDir?: string): string {
+  return path.join(getDeepCodeXLogDir(homeDir), INTERRUPT_LOG_FILE);
 }
 
 /**
@@ -107,10 +114,12 @@ export function getInterruptLogPath(): string {
  * - 不影响 CLI 主流程
  *
  * @param event 中断事件
+ * @param homeDir 引擎数据根目录（docs/dev/web-workspace.md C8）：Web 多用户透传，
+ *                缺省走进程家目录（CLI 行为不变）。
  */
-export function logInterruptEvent(event: InterruptEvent): void {
+export function logInterruptEvent(event: InterruptEvent, homeDir?: string): void {
   try {
-    const logPath = getInterruptLogPath();
+    const logPath = getInterruptLogPath(homeDir);
     // 确保日志目录存在
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
     // 写入前检查轮转（失败时降级为直接 append）

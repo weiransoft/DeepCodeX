@@ -16,8 +16,14 @@ const ERROR_LOG_FILE = "error.log";
  *
  * 日志目录已迁移到 ~/.deepcodex/logs，旧版 ~/.deepcode/logs 仅保留只读兼容。
  */
-export function getErrorLogPath(): string {
-  return path.join(getDeepCodeXLogDir(), ERROR_LOG_FILE);
+/**
+ * 获取 error.log 完整路径。
+ *
+ * @param homeDir 引擎数据根目录（docs/dev/web-workspace.md C8）：可选注入，
+ *                缺省 = os.homedir()（CLI 行为不变）。
+ */
+export function getErrorLogPath(homeDir?: string): string {
+  return path.join(getDeepCodeXLogDir(homeDir), ERROR_LOG_FILE);
 }
 
 /**
@@ -105,11 +111,15 @@ export type ApiErrorLogEntry = {
 };
 
 /**
- * Write an API error log entry to ~/.deepcodex/logs/error.log.
+ * Write an API error log entry to `<homeDir>/.deepcodex/logs/error.log`.
+ *
+ * @param entry 日志条目
+ * @param homeDir 引擎数据根目录（docs/dev/web-workspace.md C8）：Web 多用户透传，
+ *                缺省走进程家目录（CLI 行为不变）。
  */
-export function logApiError(entry: ApiErrorLogEntry): void {
+export function logApiError(entry: ApiErrorLogEntry, homeDir?: string): void {
   try {
-    const logPath = getErrorLogPath();
+    const logPath = getErrorLogPath(homeDir);
     ensureLogDir(logPath);
 
     const logLine: Record<string, unknown> = {

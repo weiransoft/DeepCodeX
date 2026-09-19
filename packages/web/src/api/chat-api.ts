@@ -37,23 +37,33 @@ export function handleListChats(res: ServerResponse, pool: SessionPool, ctx: Aut
 /**
  * 处理 POST /api/chats：创建新会话（归属当前用户；docs/dev/web-isolation.md §3.3）。
  *
- * @param req 请求对象（JSON：{projectRoot, sessionId?}；sessionId 恢复时校验归属）
+ * personalOnly 模式（docs/dev/web-workspace.md W3）：projectRoot 可缺省
+ * （服务端强制拼接个人工作区）；显式传入时由 pool.createChat 校验只能等于
+ * 本人个人区，否则 403。personalOnly=false 旧行为：projectRoot 必填
+ * 且必须落在 allowRoots 白名单内。
+ *
+ * @param req 请求对象（JSON：{projectRoot?, sessionId?}；sessionId 恢复时校验归属）
  * @param res 响应对象
  * @param pool 会话池
  * @param ctx 认证上下文（会话归属者）
+ * @param settings 归一后的 Web 配置（personalOnly 决定 projectRoot 是否必填）
  */
 export async function handleCreateChat(
   req: IncomingMessage,
   res: ServerResponse,
   pool: SessionPool,
-  ctx: AuthContext
+  ctx: AuthContext,
+  settings: ResolvedWebSettings
 ): Promise<void> {
   const body = await readJsonBody<{ projectRoot?: unknown; sessionId?: unknown }>(req);
-  if (typeof body.projectRoot !== "string" || body.projectRoot.trim() === "") {
+  const requestedRoot = typeof body.projectRoot === "string" ? body.projectRoot.trim() : "";
+  // personalOnly=false（旧共享模式）保持 projectRoot 必填校验；
+  // personalOnly=true 允许缺省（个人区由服务端拼接，见 session-pool.createChat）
+  if (!settings.personalOnly && requestedRoot === "") {
     throw new ApiError(400, "请求体必须包含非空 projectRoot 字符串");
   }
   const sessionId = typeof body.sessionId === "string" && body.sessionId !== "" ? body.sessionId : undefined;
-  const created = await pool.createChat(body.projectRoot, ctx, sessionId);
+  const created = await pool.createChat(requestedRoot, ctx, sessionId);
   sendJson(res, 200, created);
 }
 

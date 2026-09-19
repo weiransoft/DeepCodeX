@@ -36,15 +36,20 @@ export const DEFAULT_MAX_LOG_SIZE_BYTES = 10 * 1024 * 1024;
 export const DEFAULT_MAX_BACKUP_COUNT = 3;
 
 /**
- * 获取 DeepCodeX 统一日志目录路径（~/.deepcodex/logs）。
+ * 获取 DeepCodeX 统一日志目录路径（`<homeDir>/.deepcodex/logs`）。
  *
- * 所有新日志写入均应使用此目录。函数在调用时实时读取 os.homedir()，
+ * 所有新日志写入均应使用此目录。未注入 homeDir 时实时读取 os.homedir()，
  * 便于测试通过切换 process.env.HOME 实现目录隔离。
  *
+ * 牢笼改造（docs/dev/web-workspace.md C8）：homeDir 可选参数供 Web 多用户
+ * 模式注入各用户的引擎数据根（SessionManager 调用点透传），日志按用户隔离；
+ * 缺省时行为与旧版逐字节一致（CLI 零回归）。
+ *
+ * @param homeDir 引擎数据根目录（可选，缺省 = os.homedir()）
  * @returns 日志目录绝对路径
  */
-export function getDeepCodeXLogDir(): string {
-  return path.join(os.homedir(), DEEPCODEX_LOG_DIR_NAME, LOGS_SUBDIR);
+export function getDeepCodeXLogDir(homeDir?: string): string {
+  return path.join(homeDir ?? os.homedir(), DEEPCODEX_LOG_DIR_NAME, LOGS_SUBDIR);
 }
 
 /**

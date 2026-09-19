@@ -53,9 +53,17 @@ export type OpenAIChatCompletionDebugEntry = {
   };
 };
 
-export function logOpenAIChatCompletionDebug(entry: OpenAIChatCompletionDebugEntry): void {
+/**
+ * 记录一次 chat completion 调试日志。
+ *
+ * @param entry 日志条目
+ * @param homeDir 引擎数据根目录（docs/dev/web-workspace.md C8）：Web 多用户模式
+ *                透传 SessionManager 的 homeRoot，日志落 `<homeDir>/.deepcodex/logs/debug.log`；
+ *                缺省走进程家目录（CLI 行为不变）。
+ */
+export function logOpenAIChatCompletionDebug(entry: OpenAIChatCompletionDebugEntry, homeDir?: string): void {
   try {
-    const logPath = getDebugLogPath();
+    const logPath = getDebugLogPath(homeDir);
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
     // D-2 修复：写入前调用日志轮转（按文件大小 10MB 滚动备份，保留 3 个备份）
     // 失败时降级为直接 append，不阻塞主流程
@@ -70,8 +78,13 @@ export function logOpenAIChatCompletionDebug(entry: OpenAIChatCompletionDebugEnt
   }
 }
 
-export function getDebugLogPath(): string {
-  return path.join(getDeepCodeXLogDir(), DEBUG_LOG_FILE);
+/**
+ * 获取 debug.log 完整路径。
+ *
+ * @param homeDir 引擎数据根目录（可选，缺省 = os.homedir()，见 C8 说明）
+ */
+export function getDebugLogPath(homeDir?: string): string {
+  return path.join(getDeepCodeXLogDir(homeDir), DEBUG_LOG_FILE);
 }
 
 export function normalizeDebugError(error: unknown): { name: string; message: string; stack?: string } {

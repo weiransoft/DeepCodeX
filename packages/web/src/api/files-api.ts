@@ -23,6 +23,33 @@ import { ApiError, sendJson } from "../http-utils";
 import type { FileEntry, ResolvedWebSettings } from "../types";
 
 /**
+ * 个人区引擎目录保护（docs/dev/web-workspace.md W5）。
+ *
+ * 个人工作区根下的 `.deepcode` 目录是引擎在该用户 HOME（即个人区根）下
+ * 落盘的运行时数据（settings、projects 缓存、记忆、日志等）。用户经
+ * files 端点向其中写入/覆盖文件（如 settings.json）可能劫持引擎凭据、
+ * 权限模式或 MCP 配置，因此 upload / download 一律 403；list 仅屏蔽
+ * 该目录名（纵深防御，不向用户暴露引擎区结构）。
+ *
+ * 判定基于 resolveInJail 之后的真实路径做前缀包含，symlink 已消解，
+ * 无法用链接绕过；非个人区牢笼（shared allowRoots）不命中此路径，天然放行。
+ *
+ * @param jailRoots 牢笼白名单根（personal scope 为单根 = 个人区根）
+ * @param resolvedPath 已经 resolveInJail 校验的真实绝对路径
+ * @throws ApiError 403 路径等于个人区根下 `.deepcode` 目录或位于其内
+ */
+function guardPersonalEngineDir(jailRoots: string[], resolvedPath: string): void {
+  for (const root of jailRoots) {
+    // 引擎目录 = 牢笼根（个人区根）下的 `.deepcode`
+    const engineDir = path.join(root, ".deepcode");
+    // 等于引擎目录本身，或位于其内（path.sep 防 `.deepcodex` 之类前缀误伤）
+    if (resolvedPath === engineDir || resolvedPath.startsWith(engineDir + path.sep)) {
+      throw new ApiError(403, "该目录为引擎运行时数据区，禁止读写");
+    }
+  }
+}
+
+/**
  * 解析目录浏览/上传的目标路径（空路径缺省语义）。
  *
  * 单根牢笼（personal scope 的用户个人区）空 path 默认落在牢笼根——
@@ -80,6 +107,8 @@ async function guardPath(jailRoots: string[], target: string, kind: string): Pro
 export async function handleListFiles(res: ServerResponse, jailRoots: string[], dirPath: string | null): Promise<void> {
   // 单根牢笼空路径缺省到根（personal「我的文件」入口），多根仍要求显式 path
   const dir = await guardPath(jailRoots, resolveTargetPath(jailRoots, dirPath), "目录列表");
+  // 个人区引擎目录保护：拒绝把 `.deepcode`（或其子目录）当作浏览目标
+  guardPersonalEngineDir(jailRoots, dir);
   let dirents;
   try {
     dirents = await readdir(dir, { withFileTypes: true });
@@ -94,28 +123,31 @@ export async function handleListFiles(res: ServerResponse, jailRoots: string[], 
     throw error;
   }
 
-  // 逐条 stat 取 size/mtime（并发执行）
+  // 个人区引擎目录保护：目录列表屏蔽 `.deepcode`（纵深防御，不暴露引擎区结构）
+  const engineDirNames = new Set(jailRoots.map((root) => path.basename(path.join(root, ".deepcode"))));
   const entries: FileEntry[] = await Promise.all(
-    dirents.map(async (dirent) => {
-      const entryPath = path.join(dir, dirent.name);
-      try {
-        const info = await stat(entryPath);
-        return {
-          name: dirent.name,
-          type: dirent.isDirectory() ? ("dir" as const) : ("file" as const),
-          size: info.isFile() ? info.size : 0,
-          mtime: info.mtime.toISOString(),
-        };
-      } catch {
-        // 条目在列举间隙被删除等竞态：以类型信息兜底
-        return {
-          name: dirent.name,
-          type: dirent.isDirectory() ? ("dir" as const) : ("file" as const),
-          size: 0,
-          mtime: new Date(0).toISOString(),
-        };
-      }
-    })
+    dirents
+      .filter((dirent) => !engineDirNames.has(dirent.name))
+      .map(async (dirent) => {
+        const entryPath = path.join(dir, dirent.name);
+        try {
+          const info = await stat(entryPath);
+          return {
+            name: dirent.name,
+            type: dirent.isDirectory() ? ("dir" as const) : ("file" as const),
+            size: info.isFile() ? info.size : 0,
+            mtime: info.mtime.toISOString(),
+          };
+        } catch {
+          // 条目在列举间隙被删除等竞态：以类型信息兜底
+          return {
+            name: dirent.name,
+            type: dirent.isDirectory() ? ("dir" as const) : ("file" as const),
+            size: 0,
+            mtime: new Date(0).toISOString(),
+          };
+        }
+      })
   );
 
   // 目录在前、文件在后，各自按名称升序（稳定且对用户友好）
@@ -148,6 +180,9 @@ export async function handleUploadFile(
 ): Promise<void> {
   // 单根牢笼空路径缺省到根（personal 首次上传免指定路径），多根仍要求显式 path
   const dir = await guardPath(jailRoots, resolveTargetPath(jailRoots, dirPath), "文件上传");
+  // 个人区引擎目录保护：禁止向 `.deepcode`（或其子目录）上传任何文件，
+  // 阻断经 files 端点注入 settings.json 等引擎配置的凭据劫持路径
+  guardPersonalEngineDir(jailRoots, dir);
   // 目标目录必须存在（上传不隐式建目录，防止拼错路径散落文件）
   const dirInfo = await stat(dir).catch(() => null);
   if (!dirInfo || !dirInfo.isDirectory()) {
@@ -195,6 +230,8 @@ export async function handleDownloadFile(
   filePath: string | null
 ): Promise<void> {
   const file = await guardPath(jailRoots, filePath ?? "", "文件下载");
+  // 个人区引擎目录保护：禁止下载引擎区内部文件（如 settings.json 凭据、日志）
+  guardPersonalEngineDir(jailRoots, file);
   const info = await stat(file).catch(() => null);
   if (!info) {
     throw new ApiError(404, "文件不存在");
