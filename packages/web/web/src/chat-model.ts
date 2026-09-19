@@ -96,9 +96,43 @@ function scanJsonBlock(content: string, fromIndex: number): [string, number, num
 }
 
 /**
+ * 从字符串中提取可渲染的 JSON 载荷（双重序列化输出解包）。
+ *
+ * 引擎部分工具（如 query_execution_history）的 output 本身就是序列化
+ * JSON 字符串（嵌套双重序列化）；直接显示全是转义 JSON。若字符串
+ * trim 后可解析为对象/数组，返回 JSON.stringify(null,2) 的格式化文本
+ * （前端 <pre> 等宽渲染，可读性等同结构化视图）；非 JSON 或解析失败
+ * 返回 null，调用方按原文显示。
+ *
+ * @param value 待检测字符串（如工具 output 原文）
+ * @returns 格式化 JSON 文本；非 JSON 载荷返回 null
+ */
+export function extractJsonPayload(value: string): string | null {
+  const trimmed = value.trim();
+  // 快速路径：非 {/[ 开头（且非引号包裹的序列化字符串）必非 JSON 载荷
+  const startsJson = trimmed.startsWith("{") || trimmed.startsWith("[");
+  const startsQuoted = trimmed.startsWith('"');
+  if (!startsJson && !startsQuoted) return null;
+  try {
+    let parsed: unknown = JSON.parse(trimmed);
+    // 引号包裹的序列化字符串（如 "\"{ ... }\""）：再解一层，仍非对象/数组则放弃
+    if (typeof parsed === "string") {
+      parsed = JSON.parse(parsed);
+    }
+    if (parsed !== null && typeof parsed === "object") {
+      return JSON.stringify(parsed, null, 2);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 从工具结果对象提取单条可读文本。
  *
  * 字段优先级：output → result → content（引擎工具结果的常见文本字段）；
+ * 字段值若为序列化 JSON（工具输出的双重序列化形态）则格式化为缩进 JSON；
  * metadata 中的异常信号（非零退出码/信号/截断/超时）附加为尾部方括号注记。
  *
  * @param obj 工具结果对象（如 { ok, name, output, metadata }）
@@ -114,6 +148,9 @@ function toolResultToText(obj: Record<string, unknown>): string | null {
           ? obj.content
           : null;
   if (output === null) return null;
+  // 双重序列化（output 本身是 JSON 文本）：格式化缩进显示，转义壳全部消除
+  const formatted = extractJsonPayload(output);
+  const display = formatted ?? output;
   const meta =
     typeof obj.metadata === "object" && obj.metadata !== null ? (obj.metadata as Record<string, unknown>) : {};
   // 异常信号注记：正常完成（exitCode=0 且无异常标记）不加噪音
@@ -123,7 +160,7 @@ function toolResultToText(obj: Record<string, unknown>): string | null {
     notes.push(`信号 ${meta.signal}`);
   if (meta.truncated === true) notes.push("输出已截断");
   if (meta.timedOut === true) notes.push("执行超时");
-  return notes.length > 0 ? `${output}\n[${notes.join("，")}]` : output;
+  return notes.length > 0 ? `${display}\n[${notes.join("，")}]` : display;
 }
 
 /**
@@ -261,7 +298,17 @@ function parseMixedJsonBlocksStrict(text: string): string[] {
   while (cursor < text.length) {
     const scanned = scanJsonBlock(text, cursor);
     if (scanned === null) {
-      segments.push(text.slice(cursor));
+      // 无法再提取完整块（流式截断/JSON 字符串解析失败等异常形态）。
+      // 关键回退：若剩余文本本身可解析为 JSON 载荷（如 output 内嵌 JSON
+      // 导致字符串/括号状态失步后的残留），格式化吸收整段，避免页面泄漏
+      // 大片转义 JSON；否则保留剩余原文。
+      const tail = text.slice(cursor);
+      const formattedTail = extractJsonPayload(tail);
+      if (formattedTail !== null) {
+        segments.push(formattedTail);
+      } else {
+        segments.push(tail);
+      }
       break;
     }
     const [blockText, startIndex, nextIndex] = scanned;

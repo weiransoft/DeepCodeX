@@ -10,7 +10,12 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { extractToolText, parseLeadingJsonBlock, humanizeEngineContent } from "../web/src/chat-model";
+import {
+  extractToolText,
+  parseLeadingJsonBlock,
+  humanizeEngineContent,
+  extractJsonPayload,
+} from "../web/src/chat-model";
 
 test("chat-model：extractToolText 应解析混排 content 中的多个 JSON 块为 output 文本", () => {
   // 模拟真实历史 content：两个 bash 结果 JSON 块 + 尾部助手自然文本
@@ -148,4 +153,32 @@ test("chat-model：humanizeEngineContent 纯文本与截断块应零改动直通
   assert.equal(humanizeEngineContent(truncated), truncated);
   // 空串
   assert.equal(humanizeEngineContent(""), "");
+});
+
+test("chat-model：extractJsonPayload 应解包双重序列化 JSON 为格式化文本", () => {
+  // 双重序列化形态：output 本身就是序列化 JSON（query_execution_history 类工具）
+  const inner = JSON.stringify({ ok: true, totalCount: 23, records: [{ id: "mu46", sessionId: "2f2f" }] });
+  const formatted = extractJsonPayload(inner);
+  assert.ok(formatted !== null, "合法 JSON 载荷必须解包");
+  assert.ok(formatted.includes('"totalCount": 23'), "必须为缩进格式化文本");
+  assert.ok(!formatted.includes('\\"'), "不得残留转义壳");
+  // 引号包裹的序列化字符串再解一层
+  const quoted = JSON.stringify(inner);
+  assert.ok(extractJsonPayload(quoted) !== null, "引号包裹的序列化 JSON 必须再解一层");
+  // 普通文本 / JSON 标量 / 截断 JSON → null（按原文显示）
+  assert.equal(extractJsonPayload("Filesystem   Size"), null);
+  assert.equal(extractJsonPayload("42"), null);
+  assert.equal(extractJsonPayload('{"name": "abc'), null);
+});
+
+test("chat-model：humanizeEngineContent 应格式化双重序列化 output 并吸收失步残留", () => {
+  // 真实缺陷形态（output 内嵌大 JSON 导致括号扫描失步后页面泄漏转义 JSON）：
+  // query_execution_history 的 output 是序列化 JSON，其后紧跟其他工具块
+  const innerPayload = JSON.stringify({ ok: true, totalCount: 2, records: [{ id: "a1" }, { id: "b2" }] });
+  const block = JSON.stringify({ ok: true, name: "query_execution_history", output: innerPayload });
+  const out = humanizeEngineContent(`${block}\n后续文本`);
+  // 内层转义壳必须全部消除（\n 转义形态不得残留）
+  assert.ok(!out.includes("\\n"), "不得残留转义换行壳");
+  assert.ok(out.includes('"totalCount": 2'), "内层 JSON 必须格式化直显");
+  assert.ok(out.includes("后续文本"), "块外自然文本必须保留");
 });
