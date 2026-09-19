@@ -15,6 +15,7 @@ import {
   parseLeadingJsonBlock,
   humanizeEngineContent,
   extractJsonPayload,
+  setEngineToolEntryHint,
 } from "../web/src/chat-model";
 
 test("chat-model：extractToolText 应解析混排 content 中的多个 JSON 块为 output 文本", () => {
@@ -208,4 +209,57 @@ test("chat-model：humanizeEngineContent 应格式化双重序列化 output 并�
   assert.ok(!out.includes("\\n"), "不得残留转义换行壳");
   assert.ok(out.includes('"totalCount": 2'), "内层 JSON 必须格式化直显");
   assert.ok(out.includes("后续文本"), "块外自然文本必须保留");
+});
+
+test("chat-model：humanizeEngineContent 应移除与工具折叠条目同源的正文引擎块", () => {
+  // 真实双写形态：同一工具结果块既落工具条目 raw.content，又拼进助手正文。
+  // 条目已承载的块从正文移除（条目负责展示）；非同源块保留兜底。
+  const block = JSON.stringify({
+    ok: true,
+    name: "bash",
+    output: "-rw-rw-r-- 1 hguser hguser 28071 s69_gen_report.py\n",
+    metadata: { exitCode: 0 },
+  });
+  setEngineToolEntryHint([block]);
+  try {
+    const out = humanizeEngineContent(`继续生成报表：\n${block}\n报表已写入 html_view。`);
+    assert.ok(out.includes("继续生成报表"), "引擎块前的助手文本必须保留");
+    assert.ok(out.includes("报表已写入"), "引擎块后的助手文本必须保留");
+    assert.ok(!out.includes("s69_gen_report.py"), "同源块内容应从正文移除（折叠条目负责展示）");
+    // 非同源引擎块（条目未承载，如 write 类只进正文）→ 保留可读兜底
+    const writeBlock = JSON.stringify({
+      ok: true,
+      name: "write",
+      metadata: { file_path: "/tmp/only-in-content.txt" },
+    });
+    const out2 = humanizeEngineContent(`${writeBlock}\n文件已写入。`);
+    assert.ok(out2.includes("/tmp/only-in-content.txt"), "非同源块必须保留可读化兜底");
+    assert.ok(out2.includes("文件已写入"), "非同源块场景自然文本必须保留");
+  } finally {
+    setEngineToolEntryHint([]);
+  }
+});
+
+test("chat-model：humanizeEngineContent 双写同源判定应兼容键序差异（内容等价）", () => {
+  // 引擎两处序列化同一结果时 key 顺序可能不同：文本不等但解析后语义相同
+  const entryContent = JSON.stringify({ ok: true, name: "bash", output: "same\n", metadata: { exitCode: 0 } });
+  const bodyBlock = JSON.stringify({ metadata: { exitCode: 0 }, output: "same\n", name: "bash", ok: true });
+  setEngineToolEntryHint([entryContent]);
+  try {
+    const out = humanizeEngineContent(`${bodyBlock}\n自然文本`);
+    assert.ok(!out.includes("same"), "键序不同的同源块同样必须从正文移除");
+    assert.ok(out.includes("自然文本"), "自然文本必须保留");
+  } finally {
+    setEngineToolEntryHint([]);
+  }
+});
+
+test("chat-model：humanizeEngineContent 应合并相邻重复的可读化文本段", () => {
+  // 正文内同一引擎块连续拼接两次（无任何条目承载，均走兜底可读化）：
+  // 可读化后文本相同，相邻重复仅保留一份
+  setEngineToolEntryHint([]);
+  const block = JSON.stringify({ ok: true, name: "bash", output: "same output\n", metadata: { exitCode: 0 } });
+  const out = humanizeEngineContent(`${block}\n${block}`);
+  const occurrences = out.split("same output").length - 1;
+  assert.equal(occurrences, 1, "相邻重复文本必须合并为一份");
 });

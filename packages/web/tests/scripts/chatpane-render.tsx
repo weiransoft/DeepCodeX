@@ -101,6 +101,7 @@ test("ChatPane：无可读文本时应回退 JSON 渲染且仍有原始数据折
 
 test("ChatPane：助手消息正文中的引擎拼接 JSON 块应渲染为 output 文本", () => {
   // 真实形态：引擎 nonInteractive 把工具结果 JSON 拼进 assistant content
+  // 本用例 entries 无工具折叠条目 → 正文保留可读化兜底文本
   const block = JSON.stringify({
     ok: true,
     name: "bash",
@@ -122,6 +123,50 @@ test("ChatPane：助手消息正文中的引擎拼接 JSON 块应渲染为 outpu
   // JSON 壳不得出现在助手消息正文
   assert.ok(!html.includes("&quot;ok&quot;"), "助手正文不得渲染 JSON 字段名 ok");
   assert.ok(!html.includes("&quot;metadata&quot;"), "助手正文不得渲染 JSON 字段名 metadata");
+});
+
+test("ChatPane：存在工具折叠条目时助手正文中的引擎块应移除（条目负责展示）", () => {
+  // 真实双写形态：同一工具结果既落工具条目又拼进助手正文。
+  // 页面期望：折叠条目展示工具输出，正文只留助手自然文本（不再重复渲染 JSON/文本）。
+  const block = JSON.stringify({
+    ok: true,
+    name: "bash",
+    output: "-rw-rw-r-- 1 hguser hguser 28071 s69_gen_report.py\n",
+    metadata: { exitCode: 0 },
+  });
+  // 正文中的引擎块与条目 content 字节不同（key 顺序差异）——真实引擎
+  // 两处序列化时 key 顺序可能不一致，同源判定走「内容等价」回退命中移除。
+  const bodyBlock = JSON.stringify({
+    metadata: { exitCode: 0 },
+    output: "-rw-rw-r-- 1 hguser hguser 28071 s69_gen_report.py\n",
+    name: "bash",
+    ok: true,
+  });
+  const entries: ChatEntry[] = [
+    { kind: "tool", id: "h-t2", label: "工具执行：bash", status: "completed", raw: { content: block } },
+    {
+      kind: "assistant",
+      id: "h-a12",
+      content: `内联 heredoc 有引号问题，改为写文件执行：\n${bodyBlock}\nfx_pair.json 已生成。`,
+      preview: null,
+      done: true,
+    },
+  ];
+  const html = renderToString(<ChatPane {...buildProps(entries)} />);
+  // 折叠条目展开区仍展示工具输出（信息不丢）
+  assert.ok(html.includes("s69_gen_report.py"), "工具条目展开区必须显示 output");
+  assert.ok(html.includes("工具执行：bash"), "折叠条目标签正常");
+  // 正文只留自然文本
+  assert.ok(html.includes("内联 heredoc 有引号问题"), "引擎块前的助手文本必须保留");
+  assert.ok(html.includes("fx_pair.json 已生成"), "引擎块后的助手文本必须保留");
+  // 正文不得出现 JSON 壳
+  assert.ok(!html.includes("&quot;ok&quot;"), "不得渲染 JSON 字段名 ok");
+  assert.ok(!html.includes("&quot;metadata&quot;"), "不得渲染 JSON 字段名 metadata");
+  // 整页字串计数：条目可读区（可读化文本）×1 +「原始事件数据」折叠 raw
+  // （JSON.stringify(raw)）×1 = 2（条目 raw.content 本身即 block，可读化
+  // 后仅剩 output 文本一份）；正文若仍渲染该块会 ≥ 3
+  const occurrences = html.split("s69_gen_report.py").length - 1;
+  assert.equal(occurrences, 2, "正文必须移除条目已承载的双写块（仅条目可读区与折叠原样数据含该字串）");
 });
 
 test("ChatPane：流式 preview 中的工具结果 JSON 同样可读化", () => {
