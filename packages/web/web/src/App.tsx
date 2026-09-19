@@ -55,6 +55,8 @@ export function App() {
   const [entries, setEntries] = useState<ChatEntry[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [creatingChat, setCreatingChat] = useState(false);
+  /** 自动新建标记：登录后会话列表为空时置位，projectRoot 就绪后自动创建首个对话 */
+  const [autoCreatePending, setAutoCreatePending] = useState(false);
   /** 新建对话选用的项目根（默认第一个白名单根） */
   const [projectRoot, setProjectRoot] = useState("");
 
@@ -560,7 +562,13 @@ export function App() {
         showToast(e instanceof Error ? e.message : "配置加载失败");
       });
     listChats()
-      .then(({ chats: list }) => setChats(list))
+      .then(({ chats: list }) => {
+        setChats(list);
+        // 空列表标记：登录后没有任何对话时自动新建首个对话（等待 projectRoot 就绪后由下方 effect 执行）
+        if (list.length === 0) {
+          setAutoCreatePending(true);
+        }
+      })
       .catch((e: unknown) => {
         if (e instanceof ApiError && e.status === 401) {
           handleUnauthorized();
@@ -569,6 +577,16 @@ export function App() {
         showToast(e instanceof Error ? e.message : "会话列表加载失败");
       });
   }, [authState, handleUnauthorized, showToast]);
+
+  // 自动新建首个对话：会话列表为空（autoCreatePending）且项目根已就绪时触发一次。
+  // 注意时序：listChats 与 fetchConfig 并发，projectRoot 可能晚于空列表就绪——
+  // projectRoot 为空时保持 pending 等待（不取消），避免竞态丢失自动新建；
+  // allowRoots 未配置（projectRoot 恒为空串）时 pending 静默滞留——侧栏已有持久配置引导
+  useEffect(() => {
+    if (!autoCreatePending || creatingChat || projectRoot === "") return;
+    setAutoCreatePending(false);
+    newChat();
+  }, [autoCreatePending, creatingChat, projectRoot, newChat]);
 
   // 首次挂载：检查登录态
   useEffect(() => {
