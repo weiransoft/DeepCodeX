@@ -774,6 +774,48 @@ body {
   background: var(--app-bg-hover);
 }
 
+/* ============ 任务执行中补充指令（docs/dev/web-steering.md F2/F3/F4） ============ */
+/* 运行中补充指令的受理模式角标（用户气泡顶部） */
+.user-mode-badge {
+  align-self: flex-start;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 1px 8px;
+  border-radius: 999px;
+}
+.user-mode-badge-steered {
+  color: var(--app-accent);
+  background: var(--app-accent-weak);
+}
+.user-mode-badge-queued {
+  color: var(--app-text-secondary);
+  background: var(--app-bg-badge);
+}
+
+/* 指令注入分隔条：居中弱化样式，与常规助手消息区分 */
+.steering-divider {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 1px dashed var(--app-border-strong);
+  border-radius: 10px;
+  background: var(--app-bg-subtle);
+  font-size: 12.5px;
+}
+.steering-divider-label {
+  flex-shrink: 0;
+  color: var(--app-accent);
+  font-weight: 600;
+}
+.steering-divider-text {
+  color: var(--app-text-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
 /* ============ Composer ============ */
 .composer {
   position: relative;

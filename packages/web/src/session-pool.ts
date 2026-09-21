@@ -28,6 +28,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import {
+  InterruptQueue,
   SessionManager,
   createOpenAIClient as createDefaultOpenAIClient,
   resolveCurrentSettings,
@@ -70,6 +71,19 @@ type ChatSession = {
    * 与「整条串行链已空闲」（旧轮次 done 不得误复位新受理轮次的生成状态）。
    */
   pendingTurns: number;
+  /**
+   * 当前是否有轮次正在引擎内执行（docs/dev/web-steering.md W5）。
+   * runTurn 入口置 true、finally 收敛置 false（同步赋值，无 await 竞态）；
+   * steering 注入的活性检查依赖本标志：false 时一律排队，严禁向无轮次消费的
+   * 内存队列注入（InterruptQueue 不持久化，注入即滞留丢失）。
+   */
+  turnActive: boolean;
+  /**
+   * 本聊天专属的中断指令队列（docs/dev/web-steering.md W2）。
+   * 与 SessionManager 注入的是同一实例；steering 判定为 steer 时经
+   * injectSteering 入队，引擎 E3/E2 扩展点在轮内消费。
+   */
+  interruptQueue: InterruptQueue;
   /** 归属者用户名（JWT sub；多用户隔离：仅本人可操作，docs/dev/web-isolation.md §3.3） */
   owner: string;
   /** 归属者隔离标识（注册表文件名主键，userIdFromUsername 产物） */
@@ -93,6 +107,22 @@ export type SendMessageAcceptance = {
    * 允许为 null：首轮消息受理时底层会话尚未创建（或历史恢复失败）；
    * 最终 sessionId 以 SSE done 事件载荷为准。
    */
+  sessionId: string | null;
+  /** 受理模式：本方法恒为 "queued"（steered 路径走 injectSteering，不经过串行链） */
+  mode: "steered" | "queued";
+};
+
+/** injectSteering 结果（docs/dev/web-steering.md W4） */
+export type InjectSteeringResult = {
+  /** 是否成功注入当前运行中的任务 */
+  injected: boolean;
+  /**
+   * 未注入原因（injected=false 时必有）：
+   * - "inactive"：轮次不活跃（turnActive=false 或引擎状态非 processing）——调用方降级排队；
+   * - "queue"：注入被引擎拒绝（interruptQueue 未注入 / 队列已满 / 文本非法）——调用方降级排队。
+   */
+  reason?: "inactive" | "queue";
+  /** 当前已知的底层 sessionId（响应组装用） */
   sessionId: string | null;
 };
 
@@ -120,6 +150,14 @@ export type SessionPoolOptions = {
    * 生产缺省 ~/.deepcode/web/chats；测试注入临时目录避免污染真实用户目录。
    */
   registryBaseDir?: string;
+  /**
+   * steering 意图分类客户端工厂覆写（docs/dev/web-steering.md W2 测试缝合点）。
+   * 透传给 SessionManagerOptions.classifyLlmClientFactory；未注入时 core 内部
+   * 回退 createLLMClient()（凭据/provider 路由单一事实源）。
+   * 测试注入独立受控分类客户端，与主对话 ScriptedLLMClient 分离，
+   * 可精确断言分类请求次数与输出契约。
+   */
+  classifyLlmClientFactory?: () => LLMClient | null;
 };
 
 /**
@@ -131,6 +169,8 @@ export class SessionPool {
   /** 受控工厂（可选） */
   private readonly createLLMClient?: () => LLMClient | null;
   private readonly createOpenAIClientOverride?: (projectRoot: string) => OpenAIClientHandle;
+  /** steering 分类客户端工厂覆写（W2 测试缝合点；未注入时 core 回退 createLLMClient 链） */
+  private readonly classifyLlmClientFactory?: () => LLMClient | null;
   /** 用户注册表根目录注入点（测试用；默认 ~/.deepcode/web/chats，docs/dev/web-isolation.md §3.4） */
   private readonly registryBaseDir?: string;
 
@@ -148,6 +188,7 @@ export class SessionPool {
   ) {
     this.createLLMClient = options.createLLMClient;
     this.createOpenAIClientOverride = options.createOpenAIClient;
+    this.classifyLlmClientFactory = options.classifyLlmClientFactory;
     this.registryBaseDir = options.registryBaseDir;
   }
 
@@ -222,16 +263,38 @@ export class SessionPool {
 
     const chatId = randomUUID();
     const createTime = new Date().toISOString();
+    // steering 中断队列（docs/dev/web-steering.md W2）：每聊天一个实例，
+    // 与 CLI 同款无回调构造（onEnqueue 无对齐义务——E3 本就是下一 chunk 生效）
+    const interruptQueue = new InterruptQueue();
     // 引擎设置解析：personalOnly 时忽略项目级 settings（个人区可写区不得注入
     // 凭据 / mcpServers / 权限模式，docs/dev/web-workspace.md R5 P0 防线）
     const ignoreProjectSettings = this.settings.personalOnly;
     const settings = resolveCurrentSettings(resolvedRoot, { ignoreProjectSettings });
+
+    // 事件桥接闭包引用：status 帧需要读取最新 pendingTurns/turnActive（W1③），
+    // 用 const 包裹 chat 对象，闭包内读取的是属性最新值（chat 先于首帧事件存在）
+    const chatRef: ChatSession = {
+      chatId,
+      manager: undefined as unknown as SessionManager,
+      projectRoot: resolvedRoot,
+      sessionId: null,
+      createTime,
+      busy: Promise.resolve(),
+      pendingTurns: 0,
+      turnActive: false,
+      interruptQueue,
+      owner: ctx.sub,
+      ownerUserId: ctx.userId,
+    };
 
     const manager = new SessionManager({
       projectRoot: resolvedRoot,
       // W2 牢笼注入：per-user 引擎数据根（记忆/日志/会话索引按用户物理分离）
       // 与项目级 settings 忽略开关（personalOnly=false 时两者缺省 = 旧行为）
       ...(this.settings.personalOnly ? { homeDir: engineHomeDir, ignoreProjectSettings: true } : {}),
+      // ADR-DI-001 动态指令注入接线（docs/dev/web-steering.md W2）：注入后
+      // E3 流式检查点/E2 主循环头部才生效；未注入时引擎行为零变化。
+      interruptQueue,
       // OpenAI 连接工厂：测试经 SessionPoolOptions 注入受控句柄；生产走 core 默认实现。
       // personalOnly 时在外层再包一层 HOME 覆写：bash 子进程（buildShellEnv 合并
       // createOpenAIClient().env）与引擎内 os.homedir() 的家目录写入全部落
@@ -247,6 +310,9 @@ export class SessionPool {
       },
       // LLM 工厂缝合点：测试注入受控 LLMClient；未注入时 undefined 走 core 默认路由
       ...(this.createLLMClient ? { createLLMClient: this.createLLMClient } : {}),
+      // steering 意图分类客户端工厂（W2 测试缝合点；未注入时 core 内部
+      // 回退 createLLMClient()——凭据/provider 路由/ignoreProjectSettings 单一事实源）
+      ...(this.classifyLlmClientFactory ? { classifyLlmClientFactory: this.classifyLlmClientFactory } : {}),
       // 配置直读：与 CLI 同源（resolveCurrentSettings 透传；
       // personalOnly 时同样忽略项目级 settings，与 SessionManager 内部解析一致）
       getResolvedSettings: () => resolveCurrentSettings(resolvedRoot, { ignoreProjectSettings }),
@@ -254,10 +320,15 @@ export class SessionPool {
       nonInteractive: true,
       // —— 事件桥接（chatId 闭包绑定）——
       onAssistantMessage: (message) => {
+        // steering W1①：载荷补 role + meta——注入指令的 system 消息带
+        // meta.steeringInject 标记（core C1②），前端据此渲染「指令注入」样式，
+        // 替代脆弱的内容前缀匹配
         this.hub.publish(chatId, "assistant_message", {
           chatId,
           messageId: message.id,
+          role: message.role,
           content: message.content ?? "",
+          meta: message.meta ?? null,
         });
       },
       onLlmStreamProgress: (progress) => {
@@ -268,10 +339,14 @@ export class SessionPool {
         });
       },
       onSessionEntryUpdated: (entry) => {
+        // steering W1③：status 快照补 pendingTurns/turnActive——前端与
+        // SSE 重连快照可感知排队深度与轮次活性（无需等 done 帧）
         this.hub.publish(chatId, "status", {
           chatId,
           status: entry.status,
           askPermissions: entry.askPermissions ?? null,
+          pendingTurns: chatRef.pendingTurns,
+          turnActive: chatRef.turnActive,
         });
         // P1-2 tool_progress 桥接：引擎条目携带工具调用列表时额外推送进度帧，
         // 供前端渲染「工具执行中」卡片（status 事件保留，二者载荷互补）；
@@ -289,20 +364,9 @@ export class SessionPool {
     // MCP 服务器装配（与 exec-runner 同款：settings.mcpServers 直传）
     await manager.initMcpServers(settings.mcpServers);
 
-    const chat: ChatSession = {
-      chatId,
-      manager,
-      projectRoot: resolvedRoot,
-      sessionId: null,
-      createTime,
-      busy: Promise.resolve(),
-      // 受理轮次计数：runTurn 收敛时递减（done 帧携带剩余排队数）
-      pendingTurns: 0,
-      // 会话归属：创建者本人（后续操作均按此校验）
-      owner: ctx.sub,
-      ownerUserId: ctx.userId,
-    };
-
+    // 回填 manager 引用（chatRef 已在上面建好，事件桥接闭包即可安全引用）
+    chatRef.manager = manager;
+    const chat = chatRef;
     // 可选恢复：校验会话在当前项目索引中存在后 setActiveSessionId
     if (sessionId !== undefined) {
       const entry = manager.getSession(sessionId);
@@ -377,6 +441,12 @@ export class SessionPool {
     const chat = this.getOwnedChat(chatId, ctx);
     // 受理计数：入队即 +1（runTurn 收敛时 -1，done 帧携带剩余值）
     chat.pendingTurns += 1;
+    // W3：排队受理即广播 user_message 帧——多订阅者与 SSE 重连场景实时可见
+    //（发送者前端乐观上屏，其余订阅者靠本帧补齐；文本消息才广播，
+    //  纯审批回注 permissions 轮次没有用户文本，不广播）
+    if (input.text !== undefined && input.text !== "") {
+      this.publishUserMessage(chatId, input.text);
+    }
     // Promise 链串行化：同一 chatId 的轮次按调用顺序依次执行，不同 chatId 并行
     const run = chat.busy.then(() => this.runTurn(chat, input));
     // 链尾吞错：错误已在 runTurn 内经 SSE done 收敛，这里仅防止污染后续轮次入队
@@ -388,7 +458,68 @@ export class SessionPool {
     // 未来改动引入的逃逸异常，避免 unhandledRejection
     run.catch(() => undefined);
     // 202 异步受理：立即返回，本轮最终状态以 SSE done 载荷为准
-    return { chatId: chat.chatId, sessionId: chat.sessionId };
+    return { chatId: chat.chatId, sessionId: chat.sessionId, mode: "queued" };
+  }
+
+  /**
+   * 广播一条用户消息到该会话的全部 SSE 订阅者（W3/W4a 共用）。
+   *
+   * 消息为服务端受理时合成的 DTO：无引擎 id（尚未落盘），id 用合成 uuid 占位
+   * （仅作前端 React key）；引擎轮内真正落盘的 user 消息在历史恢复时以引擎 id 为准。
+   *
+   * @param chatId Web 会话 id
+   * @param text 用户消息文本
+   */
+  private publishUserMessage(chatId: string, text: string): void {
+    const now = new Date().toISOString();
+    this.hub.publish(chatId, "user_message", {
+      chatId,
+      message: {
+        id: randomUUID(),
+        role: "user",
+        content: text,
+        visible: true,
+        createTime: now,
+        updateTime: now,
+      },
+    });
+  }
+
+  /**
+   * 向运行中的任务注入补充指令（docs/dev/web-steering.md W4）。
+   *
+   * 调用前提：chat-api 层已完成意图分类（steer）与第一次活性检查；
+   * 本方法内做**二次活性检查**（分类窗口内轮次可能恰好收敛——竞态消除）
+   * 后才入队。绝不在非 processing 状态注入：InterruptQueue 纯内存不持久化，
+   * 无轮次消费的注入会永久滞留、进程重启即丢。
+   *
+   * @param chatId Web 会话 id
+   * @param text 补充指令原文
+   * @param ctx 认证上下文（归属校验）
+   * @returns injected=true 已入队（引擎 E3/E2 轮内消费）；否则 reason 说明降级原因
+   * @throws ApiError 404 会话不存在或不属于当前用户
+   */
+  injectSteering(chatId: string, text: string, ctx: AuthContext): InjectSteeringResult {
+    const chat = this.getOwnedChat(chatId, ctx);
+    // W4② 活性检查（P0）：注入的消费前提是引擎 E2 主循环正在执行本会话
+    // （注入队列有消费方）。唯一可靠判据 = 引擎内存运行时事实：
+    // getActiveRuntimeSessionId 非空即主循环在跑（createSession 首轮路径
+    // chat.sessionId 尚未绑定、索引条目状态亦有落盘滞后，两者均不可信）。
+    // 分类窗口内轮次若恰好收敛（activateSession finally 已注销运行时），
+    // 纯内存的 InterruptQueue 注入将永久滞留，必须拒绝 → 调用方降级排队。
+    if (chat.manager.getActiveRuntimeSessionId() === null) {
+      return { injected: false, reason: "inactive", sessionId: chat.sessionId };
+    }
+    try {
+      // 委托 core 公开入口入队（内部校验非空 + MAX_QUEUE_SIZE 上限）
+      chat.manager.injectInstruction(text);
+    } catch {
+      // 队列满 / 文本非法等引擎拒绝：保守降级排队，不污染运行中轮次
+      return { injected: false, reason: "queue", sessionId: chat.sessionId };
+    }
+    // W4a：注入成功后广播 user_message 帧——注入消息与排队消息在订阅者视角同等可见
+    this.publishUserMessage(chatId, text);
+    return { injected: true, sessionId: chat.sessionId };
   }
 
   /**
@@ -416,6 +547,9 @@ export class SessionPool {
     // JS 语义：catch 先于 finally 执行。turnError 暂存异常，finally 同步 sessionId
     // 后统一收敛，保证异常路径同样推送 done 帧（订阅方不悬死）
     let turnError: unknown = null;
+    // W5 轮次活性标志：入口置 true、finally 置 false（同步赋值，无 await 竞态）
+    // steering 注入的二次活性检查依赖本标志（分类窗口内轮次可能恰好收敛）
+    chat.turnActive = true;
     try {
       await chat.manager.handleUserPrompt(prompt);
     } catch (error) {
@@ -423,6 +557,7 @@ export class SessionPool {
     } finally {
       // 成败都同步 sessionId（异常路径下会话可能已创建，状态为 failed）
       chat.sessionId = chat.manager.getActiveSessionId() ?? chat.sessionId;
+      chat.turnActive = false;
     }
 
     if (turnError !== null) {
@@ -518,6 +653,85 @@ export class SessionPool {
   }
 
   /**
+   * 查询会话活性快照（docs/dev/web-steering.md W6 判定链依据 / W1③ 快照载荷）。
+   *
+   * chat-api 在 handleSendMessage 分类前做第一次活性检查、SSE 订阅初始快照
+   * 组装都用本方法——turnActive（串行链上是否有轮次在引擎内执行）与
+   * pendingTurns（排队深度）的唯一读取出口。
+   *
+   * @param chatId Web 会话 id
+   * @param ctx 认证上下文（归属校验）
+   * @returns turnActive / pendingTurns / 引擎状态（无底层会话时 null）
+   * @throws ApiError 404 会话不存在或不属于当前用户
+   */
+  getChatActivity(
+    chatId: string,
+    ctx: AuthContext
+  ): { turnActive: boolean; pendingTurns: number; status: SessionStatus | null } {
+    const chat = this.getOwnedChat(chatId, ctx);
+    // 运行中优先：引擎 E2 主循环执行期间（getActiveRuntimeSessionId 非空）
+    // 状态必为 processing——磁盘索引条目要到 updateSessionEntry 落盘才可见
+    // （createSession 首轮 sessionId 甚至尚未绑定），读盘在此窗口内滞后。
+    // 引擎内存运行时是唯一可靠的「轮次在跑」事实源。
+    // 注意：本方法服务外部可见性（判定链第一次检查 / SSE 快照）——
+    // 运行中透出 processing 不构成注入授权，注入的实际判据在 injectSteering。
+    const runtimeActive = chat.manager.getActiveRuntimeSessionId() !== null;
+    const status: SessionStatus | null = runtimeActive
+      ? "processing"
+      : chat.sessionId
+        ? (chat.manager.getSession(chat.sessionId)?.status ?? null)
+        : null;
+    // turnActive：池轮次标志（runTurn 入口/finally 同步读写）——比运行时
+    // 窗口更宽（覆盖 handleUserPrompt 中 activateSession 前后的准备段），
+    // 运行中事实取两者并集（链上排队轮尚未启动时二者皆 false）
+    const turnActive = chat.turnActive || runtimeActive;
+    return { turnActive, pendingTurns: chat.pendingTurns, status };
+  }
+
+  /**
+   * 补充指令意图分类（docs/dev/web-steering.md W6 判定链的分类环节）。
+   *
+   * chat-api 层在「轮次活跃 + steeringEnabled + 纯文本消息」时调用本方法：
+   * 一次由引擎客户端工厂构建的非流式 LLM 调用（core
+   * SessionManager.classifySteeringIntent——凭据/provider 路由单一事实源），
+   * 3 秒超时由 AbortSignal.timeout 控制。
+   *
+   * 分类失败（凭据缺失/网络错误/超时/非法输出）**一律抛错**——保守安全，
+   * 由调用方（chat-api）降级排队，绝不猜测意图污染运行中轮次。
+   *
+   * @param chatId Web 会话 id
+   * @param text 用户补充指令原文
+   * @param ctx 认证上下文（归属校验）
+   * @returns intent=steer（立即注入）| next（排队为新任务）+ 模型理由
+   * @throws ApiError 404 会话不存在或不属于当前用户
+   * @throws Error 分类客户端不可用 / 调用失败 / 输出非法 / 3 秒超时
+   */
+  async classifySteering(
+    chatId: string,
+    text: string,
+    ctx: AuthContext
+  ): Promise<{ intent: "steer" | "next"; reason: string }> {
+    const chat = this.getOwnedChat(chatId, ctx);
+    // 最近上下文摘要：分类发生在运行中轮次内，此刻 chat.sessionId 可能尚未
+    // 绑定（createSession 首轮要等 runTurn finally 才同步）——以引擎内存
+    // 运行时 id 为准（无活跃轮次时回退 chat.sessionId，再空则占位提示）。
+    const sessionIdForContext = chat.manager.getActiveRuntimeSessionId() ?? chat.sessionId;
+    let recentContext = "";
+    if (sessionIdForContext) {
+      const messages = chat.manager
+        .listSessionMessages(sessionIdForContext)
+        .filter((message) => message.visible && message.content)
+        .slice(-6);
+      recentContext = messages.map((message) => `${message.role}: ${(message.content ?? "").slice(0, 200)}`).join("\n");
+    }
+    if (recentContext === "") {
+      recentContext = "（无可见历史，仅有本条补充指令）";
+    }
+    // 3 秒硬超时（S3：超时 → 调用方降级排队）
+    return chat.manager.classifySteeringIntent(text, recentContext, AbortSignal.timeout(3000));
+  }
+
+  /**
    * 查询会话元信息（chat-api 响应组装用）。
    *
    * @param chatId Web 会话 id
@@ -550,6 +764,8 @@ export class SessionPool {
       visible: message.visible,
       createTime: message.createTime,
       updateTime: message.updateTime,
+      // W1①：桥接 meta（含 steeringInject）——历史恢复路径与实时帧同判据渲染注入样式
+      ...(message.meta ? { meta: message.meta } : {}),
     }));
   }
 

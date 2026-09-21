@@ -169,11 +169,25 @@ export function ChatPane(props: ChatPaneProps) {
                 return (
                   <div key={entry.id} className="msg-row msg-row-user">
                     <div className="msg-user-bubble">
+                      {/* steering F2 角标：运行中补充指令的受理模式（202 mode 打标） */}
+                      {entry.mode !== undefined && (
+                        <span className={`user-mode-badge user-mode-badge-${entry.mode}`}>
+                          {entry.mode === "steered" ? "已注入当前任务" : "排队中"}
+                        </span>
+                      )}
                       <AttachmentChips attachments={entry.attachments} />
                       {entry.text !== "" && <div className="msg-user-text">{entry.text}</div>}
                     </div>
                     {/* 默认用户头像（气泡右侧，与右对齐布局一致） */}
                     <UserAvatarIcon size={26} className="msg-avatar msg-avatar-user" />
+                  </div>
+                );
+              case "steering":
+                // steering F3/F4：执行中补充指令的注入分隔条（system + meta.steeringInject）
+                return (
+                  <div key={entry.id} className="steering-divider">
+                    <span className="steering-divider-label">指令注入</span>
+                    <span className="steering-divider-text">{entry.text}</span>
                   </div>
                 );
               case "assistant":

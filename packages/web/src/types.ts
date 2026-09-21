@@ -44,6 +44,12 @@ export type ResolvedWebSettings = {
   engineHomeRoot: string;
   /** 单文件上传上限（字节，默认 50MB） */
   maxUploadBytes: number;
+  /**
+   * 任务执行中补充指令（steering）开关（docs/dev/web-steering.md W7，默认 true）：
+   * 开启后轮次运行中收到的补充消息经 LLM 意图分类（steer→立即注入当前任务 /
+   * next→排队）；关闭后一律串行排队（回退旧行为）。
+   */
+  steeringEnabled: boolean;
   /** 认证配置（已归一） */
   auth: {
     /** JWT 签名密钥（启动 fail-fast 保证非空） */
@@ -141,6 +147,12 @@ export type ChatMessageDto = {
   visible: boolean;
   createTime: string;
   updateTime: string;
+  /**
+   * 引擎消息元信息（docs/dev/web-steering.md W1①：桥接补充）。
+   * 前端据 meta.steeringInject 把注入指令的 system 消息渲染为「指令注入」样式；
+   * 历史恢复（GET messages）与实时 user_message 帧共用本 DTO——后者无 meta 时缺省。
+   */
+  meta?: { steeringInject?: true } & Record<string, unknown>;
 };
 
 /** POST /api/chats/:id/messages 请求体（JSON 形态） */
@@ -171,6 +183,14 @@ export type SendMessageResponse = {
    * 前端不得假定本字段一定非空。
    */
   sessionId: string | null;
+  /**
+   * 消息受理模式（docs/dev/web-steering.md W6）：
+   * - "steered"：补充指令已被注入运行中的当前任务（不产生独立 done、不改 pendingTurns，
+   *   终结信号由当前轮既有 done 帧承载）；
+   * - "queued"：消息进入该会话串行队列（含空闲即时执行、分类降级、审批等待等全部旧语义）。
+   * 缺省（旧客户端/旧服务）视为 "queued"。
+   */
+  mode: "steered" | "queued";
 };
 
 /**
@@ -203,19 +223,34 @@ export type DoneEvent = {
  * SSE 事件名（docs/dev/web-ui.md §3.5）。
  *
  * - llm_delta：LLM 流式文本增量（phase: start|update|end + previewText）
- * - assistant_message：完整助手消息
+ * - assistant_message：完整助手消息（载荷含 role/meta——注入指令的 system 消息
+ *   经 meta.steeringInject 标记，docs/dev/web-steering.md W1①）
+ * - user_message：用户消息实时广播（排队受理与 steering 注入两路径均广播，
+ *   多订阅者与 SSE 重连场景实时可见，docs/dev/web-steering.md W3/W4a）
  * - tool_progress：工具执行进度（来自 onSessionEntryUpdated 的通用状态流，保留扩展点）
  * - permission_request：引擎请求权限审批（askPermissions 明细）
- * - status：会话状态变化
+ * - status：会话状态变化（快照载荷含 pendingTurns/turnActive，docs/dev/web-steering.md W1③）
  * - done：本轮 handleUserPrompt 结束
  */
 export type SseEventName =
   | "llm_delta"
   | "assistant_message"
+  | "user_message"
   | "tool_progress"
   | "permission_request"
   | "status"
   | "done";
+
+/**
+ * SSE user_message 事件载荷（docs/dev/web-steering.md W3/W4a）。
+ *
+ * role 恒为 "user"；消息为服务端受理时合成的 DTO（无引擎 id，
+ * id 用合成 uuid 占位，仅作前端 React key 用）。
+ */
+export type UserMessageEvent = {
+  chatId: string;
+  message: ChatMessageDto;
+};
 
 /** GET /api/files?scope= 的作用域（docs/dev/web-isolation.md §3.5） */
 export type FileScope = "shared" | "personal";
@@ -240,4 +275,6 @@ export type PublicWebConfig = {
   ldapEnabled: boolean;
   /** 个人工作目录模式（docs/dev/web-workspace.md W7）：前端据此隐藏共享区入口 */
   personalOnly: boolean;
+  /** 任务执行中补充指令开关（docs/dev/web-steering.md W7）：false 时前端回退运行中禁用输入 */
+  steeringEnabled: boolean;
 };

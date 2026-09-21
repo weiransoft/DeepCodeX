@@ -63,7 +63,13 @@ export type {
 } from "./settings";
 
 // Session
-export { SessionManager, getProjectCode, getCompactPromptTokenThreshold } from "./session";
+export {
+  SessionManager,
+  getProjectCode,
+  getCompactPromptTokenThreshold,
+  // web-steering C1：补充指令意图分类输出解析（web 端/测试复用同一契约）
+  parseSteeringIntentJson,
+} from "./session";
 export type {
   SessionMessage,
   SessionEntry,

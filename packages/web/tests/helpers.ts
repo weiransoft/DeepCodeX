@@ -81,15 +81,19 @@ export class ScriptedLLMClient implements LLMClient {
   /** 已收到的请求日志（start/end 毫秒时间戳 + 请求对象引用） */
   readonly requestLog: Array<{ start: number; end: number | null; request: LLMRequest }> = [];
 
-  /** 当前事件脚本（setScript 可在用例间切换，供同一服务器实例测试中断等场景） */
-  private script: LLMStreamEvent[] | ((request: LLMRequest) => LLMStreamEvent[]);
+  /** 当前事件脚本（setScript 可在用例间切换，供同一服务器实例测试中断等场景）；
+   *  函数脚本可返回 "keepalive" 标记 → 本次迭代走持续流（steering 注入类用例） */
+  private script: LLMStreamEvent[] | ((request: LLMRequest) => LLMStreamEvent[] | "keepalive");
+
+  /** 持续流回调（startInfiniteStream 激活；优先于 script，见 createMessageStream） */
+  private infiniteStream?: (index: number) => LLMStreamEvent | undefined;
 
   /**
    * @param script 事件脚本：固定数组，或按请求动态产出（无限流中断测试用）
    * @param yieldDelayMs 每个事件 yield 后的让出延时（串行化测试拉开时长用）
    */
   constructor(
-    script: LLMStreamEvent[] | ((request: LLMRequest) => LLMStreamEvent[]),
+    script: LLMStreamEvent[] | ((request: LLMRequest) => LLMStreamEvent[] | "keepalive"),
     private readonly yieldDelayMs = 0
   ) {
     this.script = script;
@@ -100,8 +104,29 @@ export class ScriptedLLMClient implements LLMClient {
    *
    * @param script 新的事件脚本
    */
-  setScript(script: LLMStreamEvent[] | ((request: LLMRequest) => LLMStreamEvent[])): void {
+  setScript(script: LLMStreamEvent[] | ((request: LLMRequest) => LLMStreamEvent[] | "keepalive")): void {
     this.script = script;
+  }
+
+  /**
+   * 启动一个「持续流」：后续 createMessageStream 迭代持续产出给定事件序列
+   * （每轮重新循环，永不自然结束，直至 signal 中断）。
+   *
+   * steering 注入类用例（ST1/ST4/ST9）需要「处理窗口无限拉长、注入必被
+   * 下一迭代消费」的可控节奏；数组脚本 + 大延迟会把断言窗口拉进分钟级。
+   * 收尾时显式 stopInfiniteStream()——进行中的流会在下一个 message_end
+   * 处自然结束（消费者收敛循环）。
+   *
+   * @param events 持续循环的事件序列（text_delta 无限循环；script 函数脚本
+   *        返回的 message_end 脚本负责收尾，见 createMessageStream 持续流分支）
+   */
+  startInfiniteStream(events: LLMStreamEvent[]): void {
+    this.infiniteStream = events;
+  }
+
+  /** 停止持续流（script 恢复生效；进行中的流在下一个 message_end 处自然结束）。 */
+  stopInfiniteStream(): void {
+    this.infiniteStream = undefined;
   }
 
   /** 非流式调用（本测试路径不触达，返回最小合法响应） */
@@ -114,8 +139,47 @@ export class ScriptedLLMClient implements LLMClient {
     const logEntry = { start: Date.now(), end: null as number | null, request };
     this.requestLog.push(logEntry);
     try {
+      // 持续流模式：text_delta 无限循环（注入必被下一迭代消费、永不自然收敛）。
+      // message_end 来自 script 函数脚本返回值（无函数脚本时用收尾用的 end_turn
+      // 事件，轮次正常收敛），两类分支都在 message_end 处终止本轮迭代。
+      if (this.infiniteStream) {
+        const scriptFn = typeof this.script === "function" ? this.script : undefined;
+        const fallback = endTurnEvents();
+        for (;;) {
+          let terminal = false;
+          // 每次外循环求值脚本：注入落盘后返回 end_turn → 本轮终止（消费者收敛）
+          const scriptEvents = scriptFn ? scriptFn(request) : fallback;
+          const stream =
+            scriptEvents === "keepalive" ? this.infiniteStream : scriptEvents.length > 0 ? scriptEvents : fallback;
+          for (const event of stream) {
+            if (request.signal?.aborted) {
+              throw new Error("AbortError: stream aborted by consumer");
+            }
+            yield event;
+            if (this.yieldDelayMs > 0) {
+              await new Promise((resolve) => setTimeout(resolve, this.yieldDelayMs));
+            }
+            if (request.signal?.aborted) {
+              throw new Error("AbortError: stream aborted by consumer");
+            }
+            // message_end 终止本轮迭代（消费者按 stopReason 决定是否进入下一迭代）
+            if (event.type === "message_end") {
+              terminal = true;
+              break;
+            }
+          }
+          if (terminal) {
+            break;
+          }
+        }
+      }
       const events = typeof this.script === "function" ? this.script(request) : this.script;
-      for (const event of events) {
+      // "keepalive" 标记：本轮迭代走持续流（未 startInfiniteStream 时视为空转结束）
+      const streamEvents = events === "keepalive" ? this.infiniteStream : events;
+      if (!streamEvents) {
+        return;
+      }
+      for (const event of streamEvents) {
         if (request.signal?.aborted) {
           throw new Error("AbortError: stream aborted by consumer");
         }
@@ -130,6 +194,61 @@ export class ScriptedLLMClient implements LLMClient {
     } finally {
       logEntry.end = Date.now();
     }
+  }
+}
+
+/**
+ * 收尾 end_turn 事件对（持续流模式下 script 无函数脚本/返回空时的兜底收敛）。
+ *
+ * @returns text_delta + end_turn 两个事件
+ */
+function endTurnEvents(): LLMStreamEvent[] {
+  return [
+    { type: "text_delta", text: "持续流收尾" },
+    { type: "message_end", stopReason: "end_turn", usage: null },
+  ];
+}
+
+/**
+ * 受控脚本化「意图分类」客户端（完整实现 LLMClient 接口，非 mock 框架产物）。
+ *
+ * steering 集成测试专用（docs/dev/web-steering.md W2 测试缝合点）：与主对话
+ * ScriptedLLMClient 分离注入（classifyLlmClientFactory），可精确断言
+ * 分类请求次数（requestLog）与输出契约。
+ * - content：createMessage 固定返回文本（合法 JSON / 非法串 / 空串=解析失败降级）；
+ * - throwError：createMessage 抛错（分类器故障降级场景）；
+ * - delayMs：createMessage 前等待（超时降级场景，配合 3s 硬超时）。
+ */
+export class ScriptedClassifierClient implements LLMClient {
+  readonly providerName = "anthropic" as const;
+  readonly model = "classifier-test";
+  readonly baseURL = "http://localhost:8000/v1";
+  readonly supportsThinking = false;
+  readonly supportsPromptCaching = false;
+
+  /** 已收到的分类请求日志（零分类请求断言依据） */
+  readonly requestLog: LLMRequest[] = [];
+
+  constructor(
+    private readonly content = "",
+    private readonly throwError?: Error,
+    private readonly delayMs = 0
+  ) {}
+
+  async createMessage(request: LLMRequest): Promise<LLMResponse> {
+    this.requestLog.push(request);
+    if (this.throwError) {
+      throw this.throwError;
+    }
+    if (this.delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.delayMs));
+    }
+    return { content: this.content, thinking: "", toolCalls: [], stopReason: null, usage: null };
+  }
+
+  /** 分类路径不触达流式；调用即失败（保证测试只走 createMessage 契约） */
+  createMessageStream(_request: LLMRequest): AsyncIterable<LLMStreamEvent> {
+    throw new Error("steering 分类客户端不应触达流式调用");
   }
 }
 
@@ -152,6 +271,9 @@ export function createResolvedSettings(overrides: Partial<ResolvedWebSettings> =
     // 默认回退旧共享模式：既有集成测试基于 allowRoots 共享浏览假设，
     // 个人工作目录模式用例显式覆盖 personalOnly=true
     personalOnly: false,
+    // 补充指令（steering）默认开启（与 resolveWebSettings 归一一致）；
+    // 关闭场景（分类回退排队）由用例经 overrides 显式置 false
+    steeringEnabled: true,
     engineHomeRoot: path.join(tmpdir(), "deepcode-web-test-engine-home"),
     maxUploadBytes: 1024 * 1024,
     auth: {
