@@ -258,6 +258,11 @@ export function resolveWebSettings(
     }
   }
 
+  // 6.2 补充指令（steering）开关归一（docs/dev/web-steering.md W7）：
+  // 默认 true——运行中补充消息经 LLM 意图分类决定注入/排队；
+  // 显式配置 false 回退纯串行排队（分类器整体关闭的回退开关）。
+  const steeringEnabled = merged.steeringEnabled ?? true;
+
   // 7. JWT 密钥校验（启动 fail-fast：密钥缺失直接拒绝启动，防止无签名服务裸奔）
   if (typeof jwtSecret !== "string" || jwtSecret.trim() === "") {
     throw new Error(
@@ -295,6 +300,8 @@ export function resolveWebSettings(
     personalOnly,
     engineHomeRoot,
     maxUploadBytes,
+    // 补充指令开关（6.2 归一产物，docs/dev/web-steering.md W7）
+    steeringEnabled,
     auth: {
       jwtSecret,
       sessionTtlSeconds,

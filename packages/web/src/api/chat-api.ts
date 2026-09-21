@@ -104,10 +104,14 @@ export function handleStream(
   hub.subscribe(chatId, res);
   // 初始状态快照：让新订阅者立即获得当前 status 与待审批明细
   const summary = pool.listChats(ctx).find((chat) => chat.chatId === chatId);
+  // steering W1③：快照补 pendingTurns/turnActive（重连后可感知排队深度与轮次活性）
+  const activity = pool.getChatActivity(chatId, ctx);
   hub.publish(chatId, "status", {
     chatId,
     status: summary?.status ?? "pending",
     askPermissions: null,
+    pendingTurns: activity.pendingTurns,
+    turnActive: activity.turnActive,
   });
 }
 
@@ -305,10 +309,61 @@ export async function handleSendMessage(
     }
   }
 
+  // —— steering 判定链（docs/dev/web-steering.md W6）——
+  // 仅「纯文本补充消息 + 轮次活跃 + steeringEnabled」三条全满足才尝试分类注入；
+  // 任一不满足直接走既有串行排队（零回归）。附件消息不注入：multipart 合成的
+  // 文本含「附件：路径」说明且文件未随注入进上下文，注入语义不完整，一律排队。
+  const steeringCandidate =
+    settings.steeringEnabled &&
+    input.text !== undefined &&
+    input.text !== "" &&
+    (input.imageUrls ?? []).length === 0 &&
+    (input.permissions ?? []).length === 0;
+  if (steeringCandidate) {
+    // 第一次活性检查（S3 硬规则）：无运行中轮次或引擎非 processing（含
+    // ask_permission 审批等待）→ 不分类、不注入，直接排队
+    const activity = pool.getChatActivity(chatId, ctx);
+    if (activity.turnActive && activity.status === "processing") {
+      let steeringOk = false;
+      try {
+        // 模型意图分类（非流式，3s 超时；失败抛错 → 降级排队）
+        const verdict = await pool.classifySteering(chatId, input.text as string, ctx);
+        if (verdict.intent === "steer") {
+          // W4 内做二次活性检查（分类窗口内轮次可能恰好收敛——竞态消除）
+          const injected = pool.injectSteering(chatId, input.text as string, ctx);
+          if (injected.injected) {
+            steeringOk = true;
+            // steered：不产生独立 done、不改 pendingTurns——终结信号由
+            // 当前轮既有 done 帧承载（前端 F2 不得为 steered 等待 done）
+            sendJson(res, 202, {
+              ok: true,
+              chatId,
+              sessionId: injected.sessionId,
+              mode: "steered",
+            } satisfies SendMessageResponse);
+          }
+        }
+        // next：模型判定为独立新任务 → 落入下方排队路径
+      } catch (error) {
+        // 分类失败（凭据缺失/网络/超时/非法输出）保守降级排队，仅服务端日志
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`[chat-api] steering 意图分类失败，降级排队 chatId=${chatId}: ${message}`);
+      }
+      if (steeringOk) {
+        return;
+      }
+    }
+  }
+
   // 202 异步受理：入队串行链后立即返回（不等待轮次完成），
   // 本轮 llm_delta/assistant_message/tool_progress/permission_request/status/done
   // 全部经 SSE 推送，最终状态以 done 载荷为准
   const accepted = pool.sendMessage(chatId, input, ctx);
-  const response: SendMessageResponse = { ok: true, chatId: accepted.chatId, sessionId: accepted.sessionId };
+  const response: SendMessageResponse = {
+    ok: true,
+    chatId: accepted.chatId,
+    sessionId: accepted.sessionId,
+    mode: accepted.mode,
+  };
   sendJson(res, 202, response);
 }

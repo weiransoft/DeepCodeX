@@ -233,6 +233,10 @@ export async function startWebServer(
   const pool = new SessionPool(resolved, hub, jailRoots, {
     createLLMClient: opts.createLLMClient,
     createOpenAIClient: opts.createOpenAIClient,
+    // steering 分类客户端工厂透传（docs/dev/web-steering.md W2 测试缝合点）：
+    // 缺失时 SessionPool 无法向 SessionManager 注入 → core 回退 createLLMClient()
+    // 路径，生产行为不变（未注入=undefined），但测试分类链路完全断开
+    classifyLlmClientFactory: opts.classifyLlmClientFactory,
     registryBaseDir: opts.registryBaseDir,
   });
   const staticDir = opts.staticDir ?? defaultStaticDir();
@@ -349,6 +353,8 @@ export async function startWebServer(
           ldapEnabled: resolved.ldap.enabled,
           // 个人工作目录模式（W7）：前端据此隐藏共享区 tab、放宽空 projectRoot 新建
           personalOnly: resolved.personalOnly,
+          // 补充指令开关（web-steering W7）：false 时前端回退「运行中禁用输入」旧行为
+          steeringEnabled: resolved.steeringEnabled,
         };
         sendJson(res, 200, config);
         return;

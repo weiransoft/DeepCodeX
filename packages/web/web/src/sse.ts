@@ -29,12 +29,37 @@ export interface LlmDeltaEvent {
   previewText: string;
 }
 
-/** assistant_message 事件载荷：完整助手消息 */
+/**
+ * assistant_message 事件载荷：完整助手消息。
+ * role/meta 为 steering W1① 桥接补充：注入指令的 system 消息带
+ * meta.steeringInject 标记（前端 F3 渲染「指令注入」），常规消息缺省。
+ */
 export interface AssistantMessageEvent {
   chatId: string;
   messageId: string;
+  /** 消息角色（assistant / system；旧服务缺省视为 assistant） */
+  role?: string;
   /** 完整 Markdown 文本 → 交给 A2UI 渲染管线 */
   content: string;
+  /** 引擎消息元信息（注入标记用；旧服务缺省 null） */
+  meta?: Record<string, unknown> | null;
+}
+
+/**
+ * user_message 事件载荷（docs/dev/web-steering.md W3/W4a）：
+ * 用户消息实时广播——排队受理与 steering 注入两路径均推送，
+ * 发送者本人乐观上屏后按文本去重，其余订阅者靠本帧补齐。
+ */
+export interface UserMessageEvent {
+  chatId: string;
+  message: {
+    /** 合成 uuid（仅作 React key，非引擎落盘 id） */
+    id: string;
+    /** 恒为 "user" */
+    role: string;
+    content: string | null;
+    createTime: string;
+  };
 }
 
 /** tool_progress 事件中的单个工具调用进度项 */
@@ -100,6 +125,7 @@ export interface DoneEvent {
 export interface SseCallbacks {
   onLlmDelta: (e: LlmDeltaEvent) => void;
   onAssistantMessage: (e: AssistantMessageEvent) => void;
+  onUserMessage: (e: UserMessageEvent) => void;
   onToolProgress: (e: ToolProgressEvent) => void;
   onPermissionRequest: (e: PermissionRequestEvent) => void;
   onStatus: (e: StatusEvent) => void;
@@ -167,6 +193,7 @@ export class ChatStream {
 
     on<LlmDeltaEvent>("llm_delta", cb.onLlmDelta);
     on<AssistantMessageEvent>("assistant_message", cb.onAssistantMessage);
+    on<UserMessageEvent>("user_message", cb.onUserMessage);
     on<ToolProgressEvent>("tool_progress", cb.onToolProgress);
     on<PermissionRequestEvent>("permission_request", cb.onPermissionRequest);
     on<StatusEvent>("status", cb.onStatus);

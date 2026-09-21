@@ -23,6 +23,18 @@ export type ChatEntry =
       text: string;
       attachments: UserAttachment[];
       createTime?: string;
+      /**
+       * 受理模式角标（docs/dev/web-steering.md F2）：
+       * 仅运行中发送的补充指令在 202 受理后打标——
+       * steered = 已注入当前任务；queued = 排队中。空闲首发消息不打标。
+       */
+      mode?: "steered" | "queued";
+      /**
+       * 该用户消息来自 SSE user_message 帧（其他订阅者广播，docs/dev/web-steering.md F3）。
+       * 发送者本人的乐观气泡不带此标记——历史恢复时广播帧与乐观消息同源，
+       * openChat 合并按此标记去重，避免刷新后同一条消息出现两个气泡。
+       */
+      fromBroadcast?: boolean;
     }
   /** 助手消息：content 为完整文本（经 A2UI 渲染）；preview 为流式纯文本预览 */
   | {
@@ -32,6 +44,16 @@ export type ChatEntry =
       preview: string | null;
       /** 本条消息是否已终结（收到 assistant_message 后为 true） */
       done: boolean;
+    }
+  /**
+   * 指令注入分隔条（docs/dev/web-steering.md F3/F4）：
+   * system 消息且 meta.steeringInject === true（实时 SSE 帧与历史 DTO 两路径），
+   * 渲染「指令注入」样式，与技能目录/plan-mode 等常规 system 消息区分。
+   */
+  | {
+      kind: "steering";
+      id: string;
+      text: string;
     }
   /** 工具执行进度：折叠条目，raw 保留事件原始字段（不丢信息） */
   | {

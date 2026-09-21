@@ -74,6 +74,12 @@ export interface ChatMessageDto {
   createTime: string;
   /** 最后更新时间（ISO 字符串） */
   updateTime: string;
+  /**
+   * 引擎消息元信息（docs/dev/web-steering.md W1①）：
+   * meta.steeringInject === true 标记「执行中补充指令」注入的 system 消息，
+   * 历史恢复据此渲染「指令注入」样式（F4）；其余消息缺省。
+   */
+  meta?: { steeringInject?: true } & Record<string, unknown>;
 }
 
 /** 目录条目（GET /api/files） */
@@ -99,6 +105,24 @@ export interface SendTextPayload {
 /** 审批回注载荷（有权限请求时即"审批回注"消息，见设计文档 §3.5） */
 export interface SendPermissionsPayload {
   permissions: PermissionDecision[];
+}
+
+/**
+ * 发送消息受理响应（POST /messages → 202 带 JSON 体，docs/dev/web-steering.md W6）。
+ *
+ * 注意：202 在本封装里不走「无内容短路」分支——必须解析响应体拿 mode，
+ * 因此 request() 对 202 会先读 body（空体时返回 undefined，调用方缺省 queued）。
+ */
+export interface SendMessageResult {
+  /** Web 会话 id */
+  chatId: string;
+  /** 受理时已知的底层会话 id（可为 null，最终以 SSE done 为准） */
+  sessionId: string | null;
+  /**
+   * 受理模式：steered = 已注入运行中的当前任务（不产生独立 done）；
+   * queued = 进入串行队列。缺省（旧服务/空体）视为 queued。
+   */
+  mode: "steered" | "queued";
 }
 
 /**
@@ -150,8 +174,10 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
     throw new ApiError(0, "网络错误，请检查连接后重试");
   }
 
-  // 204 / 202 等无内容响应直接返回 undefined
-  if (resp.status === 204 || resp.status === 202) {
+  // 204 等真正无内容响应直接返回 undefined。
+  // 202 例外：POST /messages 的受理响应携带 mode（steered/queued，docs/dev/web-steering.md W6），
+  // 必须走下方 JSON 解析；空体时 text === "" 自然返回 undefined，调用方缺省 queued。
+  if (resp.status === 204) {
     return undefined as T;
   }
 
@@ -223,26 +249,32 @@ export function fetchMessages(chatId: string): Promise<{ messages: ChatMessageDt
 }
 
 /**
- * 发送消息（文本/图片 JSON 路径）→ 202 已受理，结果经 SSE 推送。
- * 注意：不设置 Content-Type 之外的头；202 无响应体。
+ * 发送消息（文本/图片 JSON 路径）→ 202 受理，结果经 SSE 推送。
+ * 返回受理响应（mode 区分注入/排队，docs/dev/web-steering.md F2）；
+ * 旧服务空体时 mode 缺省 queued。
+ * 注意：不设置 Content-Type 之外的头。
  */
-export function sendTextMessage(chatId: string, payload: SendTextPayload): Promise<void> {
-  return request<void>("POST", `/api/chats/${encodeURIComponent(chatId)}/messages`, payload);
+export function sendTextMessage(chatId: string, payload: SendTextPayload): Promise<SendMessageResult> {
+  return request<SendMessageResult>("POST", `/api/chats/${encodeURIComponent(chatId)}/messages`, payload);
 }
 
-/** 审批回注：把 allow/deny 决策作为消息回传引擎 */
+/** 审批回注：把 allow/deny 决策作为消息回传引擎（无 mode 语义，响应体忽略） */
 export function sendPermissionDecisions(chatId: string, payload: SendPermissionsPayload): Promise<void> {
   return request<void>("POST", `/api/chats/${encodeURIComponent(chatId)}/messages`, payload);
 }
 
-/** 发送带附件的消息（multipart/form-data：text 字段 + 多个 file 字段） */
-export function sendMessageWithFiles(chatId: string, text: string, files: File[]): Promise<void> {
+/**
+ * 发送带附件的消息（multipart/form-data：text 字段 + 多个 file 字段）。
+ * 带附件的消息一律走排队（不参与 steering 注入，docs/dev/web-steering.md W6），
+ * 响应体同 sendTextMessage（mode 恒为 queued，缺省亦可）。
+ */
+export function sendMessageWithFiles(chatId: string, text: string, files: File[]): Promise<SendMessageResult> {
   const form = new FormData();
   form.append("text", text);
   for (const f of files) {
     form.append("file", f, f.name);
   }
-  return request<void>("POST", `/api/chats/${encodeURIComponent(chatId)}/messages`, form);
+  return request<SendMessageResult>("POST", `/api/chats/${encodeURIComponent(chatId)}/messages`, form);
 }
 
 /** 停止生成（interruptActiveSession） */

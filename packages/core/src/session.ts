@@ -71,7 +71,7 @@ import { ExecutionHistoryMemorySync } from "./v2/memory/execution-history-memory
 import { MemoryStore } from "./v2/memory/memory-store";
 // fork 侧 B1：ProviderFactory 统一 LLM provider 路由（openai/anthropic）
 import { ProviderFactory } from "./providers/provider-factory";
-import type { LLMClient, LLMResponse, LLMToolDefinition, LLMUsage } from "./providers/llm-provider";
+import type { LLMClient, LLMRequest, LLMResponse, LLMToolDefinition, LLMUsage } from "./providers/llm-provider";
 // Usage 追踪模块（从 session.ts 抽取，见 docs/dev/review.md CRITICAL-1 模块 2）
 // 包含：isUsageRecord / addUsageValue / accumulateUsage / usageWithRequestCount /
 // accumulateUsagePerModel / getTotalTokens / toModelUsage / ModelUsage 类型
@@ -440,6 +440,14 @@ export type MessageMeta = {
   isAnswers?: boolean;
   isSummary?: boolean;
   isModelChange?: boolean;
+  /**
+   * 任务执行中补充指令注入标记（docs/dev/web-steering.md C1①）
+   *
+   * E2 扩展点把 InterruptQueue 中待消费指令合成为 system 消息时置 true；
+   * Web 前端据此把该消息渲染为「指令注入」样式（区别于技能目录、
+   * plan-mode 等其他 system 消息），替代脆弱的内容前缀字符串匹配。
+   */
+  steeringInject?: true;
   skill?: SkillInfo;
   // 上游 v0.3.1：技能目录快照（技能列表变化时随消息持久化，供恢复会话后重建目录提示）
   skillCatalog?: Array<{ name: string; description: string }>;
@@ -848,6 +856,19 @@ export type SessionManagerOptions = {
    */
   isForeground?: boolean;
   /**
+   * 补充指令意图分类客户端工厂（可选注入，docs/dev/web-steering.md C1③）
+   *
+   * Web「任务执行中补充指令」特性用一次轻量非流式 LLM 调用判定补充指令
+   * 的意图（steer=立即注入当前任务 / next=排队为新任务）。分类客户端经
+   * 此工厂构建；不注入时 classifySteeringIntent 内部回退
+   * this.createLLMClient()（凭据与 provider 路由单一事实源，尊重
+   * ignoreProjectSettings 牢笼链）。
+   *
+   * 注入场景：测试注入独立受控分类客户端（与主对话 ScriptedLLMClient
+   * 分离，避免共享脚本/requestLog）；生产一般不注入。
+   */
+  classifyLlmClientFactory?: () => LLMClient | null;
+  /**
    * V2 Session 上下文钩子（可选注入，§9.1）
    *
    * 未注入时 OpenAIMessageConverter 行为与 v1 完全一致（向后兼容，零回归）。
@@ -1012,6 +1033,46 @@ export type LlmRetryEvent = {
   delayMs: number;
 };
 
+/**
+ * 补充指令意图分类输出解析（docs/dev/web-steering.md C1④ 配套）
+ *
+ * 对分类 LLM 的原始输出做宽容外壳 + 严格内核解析：
+ * - 剥除 markdown 代码围栏（```json ... ```）与首尾空白；
+ * - JSON.parse 后严格校验：intent 必须为 "steer" | "next"，reason 必须为字符串；
+ * - 任何一步失败返回 null（调用方 classifySteeringIntent 据此抛错 → Web 端降级排队）。
+ *
+ * @param raw 分类 LLM 原始文本输出
+ * @returns 合法则返回 {intent, reason}，非法返回 null
+ */
+export function parseSteeringIntentJson(raw: string): { intent: "steer" | "next"; reason: string } | null {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  // 剥 markdown 代码壳：```json\n{...}\n``` / ```\n{...}\n```
+  let text = raw.trim();
+  const fenceMatch = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  if (fenceMatch) {
+    text = fenceMatch[1].trim();
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    return null;
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (obj.intent !== "steer" && obj.intent !== "next") {
+    return null;
+  }
+  if (typeof obj.reason !== "string") {
+    return null;
+  }
+  return { intent: obj.intent, reason: obj.reason };
+}
+
 export class SessionManager {
   private readonly projectRoot: string;
   /**
@@ -1062,6 +1123,12 @@ export class SessionManager {
   // 抽取模式见 file-history-coordinator.ts 模块头注释，供后续域拆分复用）
   private readonly fileHistoryCoordinator: FileHistoryCoordinator;
   private readonly sessionControllers = new Map<string, AbortController>();
+  /**
+   * steering 活性判定的内存事实源：当前正在执行 activateSession 主循环的
+   * 会话 id（Web 层单会话单 manager，同一时刻至多一个活跃轮次）。
+   * activateSession 入口登记、finally 注销；见 getActiveRuntimeSessionId。
+   */
+  private activeRuntimeSessionId: string | null = null;
   private readonly processTimeoutControls = new Map<string, ProcessTimeoutControl>();
   private readonly liveProcessKeys = new Set<string>();
   private readonly toolExecutor: ToolExecutor;
@@ -1132,6 +1199,14 @@ export class SessionManager {
   private readonly taskRegistry?: TaskRegistry;
   private readonly backgroundRunner?: BackgroundTaskRunner;
   private readonly isForeground: boolean;
+  /**
+   * 补充指令意图分类客户端工厂（可选注入，docs/dev/web-steering.md C1③）
+   *
+   * classifySteeringIntent 用它构建一次性非流式分类客户端；未注入时内部
+   * 回退 this.createLLMClient()——凭据解析 / provider 路由 /
+   * ignoreProjectSettings 单一事实源，生产路径无需注入。
+   */
+  private readonly classifyLlmClientFactory?: () => LLMClient | null;
   // V2 Session 上下文钩子（可选注入，§9.1）
   // - 未注入时 messageConverter 行为与 v1 一致
   // - 注入后 buildMessages 同步调用 preBuildContext 注入上下文片段
@@ -1292,6 +1367,9 @@ export class SessionManager {
     this.taskRegistry = options.taskRegistry;
     this.backgroundRunner = options.backgroundRunner;
     this.isForeground = options.isForeground ?? true;
+    // web-steering C1③：分类客户端工厂（未注入时 classifySteeringIntent
+    // 回退 createLLMClient，行为与主对话凭据链一致）
+    this.classifyLlmClientFactory = options.classifyLlmClientFactory;
 
     // 方案 A §3.9：为外挂的 AutonomousOrchestrator 绑定进程内 LLM 任务执行器
     // （F9-v2 真实触发 /eag-autonomous 后 dev/fix 阶段真实编码的最后一公里）。
@@ -6185,6 +6263,9 @@ ${agentInstructions}
     }));
 
     this.sessionControllers.set(sessionId, sessionController);
+    // steering 活性判定的内存事实源：主循环执行期间登记活跃会话 id，
+    // finally 注销（activateSession 的所有 return 出口都在 try 内，注销完备）
+    this.activeRuntimeSessionId = sessionId;
 
     try {
       const maxIterations = 80000; // about 1K RMB cost
@@ -6310,6 +6391,10 @@ ${agentInstructions}
               null,
               true // visible=true，让用户看到注入被消费（§5.1.4 可见性语义）
             );
+            // web-steering C1②：打 steeringInject 标记——Web 端按
+            // role==="system" && meta.steeringInject 渲染「指令注入」样式，
+            // 与技能目录 / plan-mode 等其他 system 消息稳定区分（不依赖文案前缀）
+            injectMessage.meta = { ...injectMessage.meta, steeringInject: true };
             this.appendSessionMessage(sessionId, injectMessage);
             // 通知 UI：注入已被消费（onAssistantMessage 第二参数 false 表示不连接流）
             this.onAssistantMessage(injectMessage, false);
@@ -6609,6 +6694,11 @@ ${agentInstructions}
       if (this.sessionControllers.get(sessionId) === sessionController) {
         this.sessionControllers.delete(sessionId);
       }
+      // steering 活性事实注销：与入口登记配对（仅注销自己登记的会话，
+      // 防御同 manager 并发激活交错时误清他人登记）
+      if (this.activeRuntimeSessionId === sessionId) {
+        this.activeRuntimeSessionId = null;
+      }
       // 二期 US-EH-007：session 结束时回写 MemoryStore（自动沉淀 experience）
       // —— try/catch 全隔离，任何异常只 console.error，不影响 session 正常结束
       // —— 触发时机：activateSession finally 块（比 dispose() 更及时）
@@ -6675,6 +6765,87 @@ ${agentInstructions}
     };
     // 委托给 InterruptQueue.enqueue（内部校验 text 非空 + 容量上限 + 触发 onEnqueue 回调）
     this.interruptQueue.enqueue(instruction);
+  }
+
+  /**
+   * 判定「任务执行中补充指令」的意图（docs/dev/web-steering.md C1④）
+   *
+   * Web 端在轮次运行中收到用户补充消息时调用：一次轻量**非流式** LLM 调用，
+   * 判定该指令应「立即注入当前任务（steer）」还是「排队为新任务（next）」。
+   *
+   * 设计约束（架构师审查结论）：
+   * - 客户端取 classifyLlmClientFactory ?? createLLMClient()——凭据解析、
+   *   provider 路由、ignoreProjectSettings 牢笼链单一事实源；
+   * - 仅用非流式 createMessage：严禁走 createChatCompletionStream 重试层
+   *   （避免 onLlmRetry / 「Request failed」onAssistantMessage 噪声污染会话）；
+   * - signal 透传至 LLMRequest.signal（调用方以 AbortSignal.timeout 控制超时）；
+   * - 输出必须为严格 JSON `{"intent":"steer"|"next","reason":string}`，
+   *   解析/校验失败抛错，由调用方降级排队（保守安全）。
+   *
+   * @param text 用户补充指令原文
+   * @param recentContext 最近会话上下文摘要（判定「与当前任务相关/无关」的依据）
+   * @param signal 中止信号（超时/取消）
+   * @returns intent=steer（立即注入当前任务）| next（排队为新任务）；reason 为模型判定理由
+   * @throws {Error} 分类客户端不可用（无凭据）、调用失败、输出非法 JSON / 非法 intent
+   */
+  async classifySteeringIntent(
+    text: string,
+    recentContext: string,
+    signal?: AbortSignal
+  ): Promise<{ intent: "steer" | "next"; reason: string }> {
+    const client = this.classifyLlmClientFactory ? this.classifyLlmClientFactory() : this.createLLMClient();
+    if (!client) {
+      throw new Error("classifySteeringIntent 失败：无可用 LLM 客户端（凭据缺失）");
+    }
+    // 分类系统提示词：明确二选一语义 + 严格 JSON 输出契约（不附工具定义，防工具调用路径）
+    const systemPrompt = [
+      "你是任务指令意图分类器。当前有一个 AI 任务正在执行中，用户补充了一条新指令。",
+      "判断该指令的意图，二选一：",
+      '- "steer"：对当前任务的修正、补充、加速或方向调整（应立即注入当前任务，让执行中的模型调整做法）',
+      '- "next"：与当前任务无关的独立新任务，或要求推翻重做（应排队为下一个任务）',
+      "只输出一个 JSON 对象，不要任何多余文本：",
+      '{"intent":"steer"|"next","reason":"一句话理由"}',
+    ].join("\n");
+    const userContent = `【最近任务上下文】\n${recentContext}\n\n【用户补充指令】\n${text}`;
+    const request: LLMRequest = {
+      messages: [
+        {
+          id: crypto.randomUUID(),
+          sessionId: "steering-classifier",
+          role: "system",
+          content: systemPrompt,
+          contentParams: null,
+          messageParams: null,
+          compacted: false,
+          visible: false,
+          createTime: new Date().toISOString(),
+          updateTime: new Date().toISOString(),
+        },
+        {
+          id: crypto.randomUUID(),
+          sessionId: "steering-classifier",
+          role: "user",
+          content: userContent,
+          contentParams: null,
+          messageParams: null,
+          compacted: false,
+          visible: false,
+          createTime: new Date().toISOString(),
+          updateTime: new Date().toISOString(),
+        },
+      ],
+      thinkingEnabled: false,
+      maxTokens: 200,
+      signal: signal ?? null,
+    };
+    // 非流式直连（不经引擎重试层）；调用失败原样抛错，由调用方降级排队
+    const response = await client.createMessage(request);
+    // 输出解析：剥除可能的 markdown 代码壳后做严格 JSON 校验
+    const parsed = parseSteeringIntentJson(response.content);
+    if (!parsed) {
+      throw new Error(`classifySteeringIntent 输出非法（无法解析为契约 JSON）：${response.content.slice(0, 200)}`);
+    }
+    return parsed;
   }
 
   /**
@@ -7314,6 +7485,24 @@ ${agentInstructions}
   getSession(sessionId: string): SessionEntry | null {
     const index = this.loadSessionsIndex();
     return index.entries.find((entry) => entry.id === sessionId) ?? null;
+  }
+
+  /**
+   * 当前正在执行 activateSession 主循环的会话 id（引擎内存运行时事实）。
+   *
+   * 与 getSession 的区别：索引条目要等 updateSessionEntry 落盘才可见，
+   * 且存在两段「运行中但索引不可见/滞后」的窗口——
+   * ① createSession 路径：sessionId 在激活全程不绑定 activeSessionId
+   * （调用方要到 handleUserPrompt 返回后才拿得到 id）；
+   * ② 运行中窗口：updateSessionEntry 在每迭代边界同步写盘，但条目首次
+   * 可见依赖 createSession 入口写入，中途读盘存在滞后错觉。
+   * steering 注入的活性判定必须读取内存事实：返回值非空即
+   * 「E2 主循环在跑、注入队列有消费方」。
+   *
+   * @returns 活跃会话 id；无活跃轮次返回 null
+   */
+  getActiveRuntimeSessionId(): string | null {
+    return this.activeRuntimeSessionId;
   }
 
   // 上游 v0.3.1 新增：会话分叉——以指定会话的最后一条消息为基准创建新会话，

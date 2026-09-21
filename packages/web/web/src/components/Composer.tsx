@@ -4,7 +4,9 @@
  * - 本地附件：点击回形针选择 / 拖拽高亮上传 / 图片粘贴（paste 捕获 clipboardData.files 中 image/*）；
  * - 附件 chips（图标直显，图片带缩略预览，URL.createObjectURL 并在移除时 revoke）；
  * - 服务器附件（文件抽屉"作为附件插入对话"）以 serverFiles 传入，一并展示与发送；
- * - 发送/停止合并按钮位：生成中变为停止（中断请求由 App 转发到 POST /interrupt）。
+ * - 发送/停止按钮位：生成中显示停止（中断请求由 App 转发到 POST /interrupt）；
+ * - steering F1（docs/dev/web-steering.md）：steeringEnabled 时生成中不禁用输入，
+ *   用户可随时发送补充指令（后端分类注入或排队），发送与停止按钮并排同显。
  */
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from "react";
 import { humanSize } from "../format";
@@ -15,8 +17,10 @@ import { CloseIcon, FileCodeIcon, FileIcon, FileImageIcon, PaperclipIcon, SendIc
 export interface ComposerProps {
   /** 无会话时禁用输入 */
   disabled: boolean;
-  /** 生成中：发送按钮切换为停止 */
+  /** 生成中：发送按钮切换为停止（steeringEnabled 时发送与停止并排同显） */
   streaming: boolean;
+  /** 任务执行中补充指令开关（docs/dev/web-steering.md W7）：false 时生成中禁用输入（旧行为） */
+  steeringEnabled: boolean;
   /** 单文件大小上限（来自 /api/config，超出即拒绝并提示） */
   maxUploadBytes: number;
   /** 服务器附件（文件抽屉插入的路径引用） */
@@ -45,7 +49,13 @@ function fileIcon(name: string) {
 
 /** Composer：底部输入框 */
 export function Composer(props: ComposerProps) {
-  const { disabled, streaming, maxUploadBytes, serverFiles, onRemoveServerFile, onSend, onStop } = props;
+  const { disabled, streaming, steeringEnabled, maxUploadBytes, serverFiles, onRemoveServerFile, onSend, onStop } =
+    props;
+  /**
+   * 输入区是否禁用（steering F1）：steeringEnabled 时生成中仍可输入补充指令；
+   * 关闭时回退旧行为（生成中禁用 textarea/附件/发送）。
+   */
+  const inputBlocked = disabled || (streaming && !steeringEnabled);
 
   /** 输入文本 */
   const [text, setText] = useState("");
@@ -236,12 +246,12 @@ export function Composer(props: ComposerProps) {
       {error !== "" && <div className="composer-error">{error}</div>}
 
       <div className="composer-main">
-        {/* 附件选择按钮（图标直显） */}
+        {/* 附件选择按钮（图标直显；生成中在 steering 模式下仍可添加附件） */}
         <button
           type="button"
           className="icon-btn composer-attach"
           title="添加附件"
-          disabled={disabled || streaming}
+          disabled={inputBlocked}
           onClick={() => fileInputRef.current?.click()}
         >
           <PaperclipIcon size={17} />
@@ -279,15 +289,30 @@ export function Composer(props: ComposerProps) {
           }}
         />
 
-        {/* 发送 / 停止 合并按钮位 */}
-        {streaming ? (
+        {/* 发送 / 停止按钮位：
+            - steering 关闭（旧行为）：生成中只显示停止；
+            - steering 开启：生成中 发送 + 停止 并排同显（补充指令随时可发）。 */}
+        {streaming && !steeringEnabled ? (
           <button type="button" className="composer-send composer-send-stop" title="停止生成" onClick={onStop}>
             <StopIcon size={15} />
           </button>
         ) : (
-          <button type="button" className="composer-send" title="发送" disabled={!canSend} onClick={doSend}>
-            <SendIcon size={15} />
-          </button>
+          <>
+            {streaming && (
+              <button type="button" className="composer-send composer-send-stop" title="停止生成" onClick={onStop}>
+                <StopIcon size={15} />
+              </button>
+            )}
+            <button
+              type="button"
+              className="composer-send"
+              title={streaming ? "发送补充指令" : "发送"}
+              disabled={!canSend}
+              onClick={doSend}
+            >
+              <SendIcon size={15} />
+            </button>
+          </>
         )}
       </div>
     </div>

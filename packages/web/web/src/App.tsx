@@ -21,6 +21,7 @@ import {
   type AppConfig,
   type ChatMessageDto,
   type ChatSummary,
+  type SendMessageResult,
   type UserInfo,
 } from "./api";
 import type { ChatEntry, UserAttachment } from "./chat-model";
@@ -38,6 +39,7 @@ import {
   type StatusEvent,
   type ToolProgressEvent,
   type AssistantMessageEvent,
+  type UserMessageEvent,
 } from "./sse";
 
 /** 登录态三阶段：checking=启动检查中；authed=已登录；anon=未登录/会话过期 */
@@ -127,9 +129,20 @@ export function App() {
     [applyStreaming]
   );
 
-  /** assistant_message：完整内容到达 → 用 messageId 固化气泡并进入 A2UI 管线 */
+  /**
+   * assistant_message：完整内容到达 → 用 messageId 固化气泡并进入 A2UI 管线。
+   * steering F3：role==="system" 且 meta.steeringInject === true 的注入指令
+   * 渲染「指令注入」分隔条（追加为独立条目）；半截 stream 气泡保留原位，
+   * 由当前轮收敛时的正式 assistant_message 或下一轮 llm_delta start 覆盖
+   * （设计 §3.4：注入消息覆盖的是 stream 显示位，不是条目本身）。
+   */
   const onAssistantMessage = useCallback((e: AssistantMessageEvent): void => {
     if (e.chatId !== activeChatIdRef.current) return;
+    // 注入指令的 system 消息（core C1② meta 标记）→ 注入分隔条
+    if (e.role === "system" && e.meta?.steeringInject === true) {
+      setEntries((prev) => [...prev, { kind: "steering", id: `inject-${e.messageId}`, text: e.content }]);
+      return;
+    }
     setEntries((prev) => {
       const streamIdx = prev.findIndex((x) => x.kind === "assistant" && x.id === "stream");
       if (streamIdx >= 0) {
@@ -146,6 +159,33 @@ export function App() {
         return next;
       }
       return [...prev, { kind: "assistant", id: e.messageId, content: e.content, preview: null, done: true }];
+    });
+  }, []);
+
+  /**
+   * user_message：用户消息实时广播（docs/dev/web-steering.md W3/W4a/F3）。
+   * 排队受理与 steering 注入两路径均推送。发送者本人的乐观气泡已在屏，
+   * 按文本去重（同会话用户消息文本重复概率极低，重发场景重复文本同义合并）；
+   * 其余订阅者（多窗口/重连）靠本帧补齐上屏。
+   */
+  const onUserMessage = useCallback((e: UserMessageEvent): void => {
+    if (e.chatId !== activeChatIdRef.current) return;
+    const text = typeof e.message?.content === "string" ? e.message.content : "";
+    if (text === "") return;
+    setEntries((prev) => {
+      const exists = prev.some((x) => x.kind === "user" && x.text === text);
+      if (exists) return prev;
+      return [
+        ...prev,
+        {
+          kind: "user",
+          id: `bcast-${e.message.id}`,
+          text,
+          attachments: [],
+          createTime: e.message.createTime,
+          fromBroadcast: true,
+        },
+      ];
     });
   }, []);
 
@@ -204,12 +244,22 @@ export function App() {
     });
   }, []);
 
-  /** status：运行状态同步（后端 SessionStatus 语义：processing = 执行中）；askPermissions 兜底建卡 */
+  /**
+   * status：运行状态同步（后端 SessionStatus 语义：processing = 执行中）；askPermissions 兜底建卡。
+   * steering F1：快照载荷带 turnActive/pendingTurns（W1③）——仅 processing 才置位
+   * 「生成中」；非 processing（含审批等待 ask_permission）时，仅当快照明示仍有
+   * 排队轮次（pendingTurns>0，旧服务缺省字段时保持原状）才维持/复位为生成中，
+   * 否则按引擎状态如实复位（修复旧版 ask_permission 后停止条残留的缺陷）。
+   */
   const onStatus = useCallback(
     (e: StatusEvent): void => {
       if (e.chatId !== activeChatIdRef.current) return;
       // 与引擎状态对齐（P0-1）：SessionStatus 无 "running"，执行中为 "processing"
-      if (e.status === "processing") applyStreaming(true);
+      if (e.status === "processing") {
+        applyStreaming(true);
+      } else if (typeof e.pendingTurns === "number") {
+        applyStreaming(e.pendingTurns > 0);
+      }
       if (Array.isArray(e.askPermissions) && e.askPermissions.length > 0) {
         onPermissionRequest({ chatId: e.chatId, requests: e.askPermissions });
       }
@@ -252,6 +302,7 @@ export function App() {
   const sseCallbacksRef = useRef({
     onLlmDelta,
     onAssistantMessage,
+    onUserMessage,
     onToolProgress,
     onPermissionRequest,
     onStatus,
@@ -262,6 +313,7 @@ export function App() {
   sseCallbacksRef.current = {
     onLlmDelta,
     onAssistantMessage,
+    onUserMessage,
     onToolProgress,
     onPermissionRequest,
     onStatus,
@@ -278,6 +330,9 @@ export function App() {
       },
       get onAssistantMessage() {
         return sseCallbacksRef.current.onAssistantMessage;
+      },
+      get onUserMessage() {
+        return sseCallbacksRef.current.onUserMessage;
       },
       get onToolProgress() {
         return sseCallbacksRef.current.onToolProgress;
@@ -303,7 +358,9 @@ export function App() {
    * 历史消息 → ChatEntry 归并（P2）：
    * - 过滤 visible === false（工具执行等对用户不可见的内部消息）；
    * - 过滤 content 为空（null / 空串）的条目；
-   * - role 分发：user → 用户气泡；tool → 折叠工具条目；其余（assistant/system）→ A2UI 管线。
+   * - role 分发：user → 用户气泡；tool → 折叠工具条目；其余（assistant/system）→ A2UI 管线；
+   * - steering F4：role === "system" 且 meta.steeringInject === true 的历史注入
+   *   指令 → 「指令注入」分隔条（与实时 F3 同款样式）。
    */
   const convertHistory = useCallback((dtos: ChatMessageDto[]): ChatEntry[] => {
     const result: ChatEntry[] = [];
@@ -313,7 +370,10 @@ export function App() {
       // 空内容消息不渲染（null / 空串）
       const content = typeof d.content === "string" ? d.content : "";
       if (content === "") continue;
-      if (d.role === "user") {
+      // steering F4：注入指令的 system 消息（meta.steeringInject）→ 注入分隔条
+      if (d.role === "system" && d.meta?.steeringInject === true) {
+        result.push({ kind: "steering", id: `h-${d.id}`, text: content });
+      } else if (d.role === "user") {
         result.push({ kind: "user", id: `h-${d.id}`, text: content, attachments: [], createTime: d.createTime });
       } else if (d.role === "tool") {
         // 历史工具条目标签：content 常为「JSON 块混排」——首行以 { 开头时解析首块
@@ -359,9 +419,18 @@ export function App() {
           const history = convertHistory(messages);
           setEntries((prev) => {
             if (prev.length === 0) return history;
-            // 订阅窗口内已有实时事件：历史前插 + 同源助手消息去重（h-<id> 对比实时 messageId）
-            const liveIds = new Set(prev.filter((x) => x.kind === "assistant").map((x) => x.id));
-            const deduped = history.filter((h) => h.kind !== "assistant" || !liveIds.has(h.id.slice(2)));
+            // 订阅窗口内已有实时事件：历史前插 + 同源消息去重
+            // 助手：历史 id 为 h-<id>、实时 id 为 messageId，按去前缀 id 对比；
+            // 用户：乐观气泡与 user_message 广播帧同源（广播帧无引擎 id），
+            //     实时侧存在任何用户消息（含广播帧）时，历史用户气泡中同文本
+            //     的条目去重，刷新后同一条消息只保留一个气泡。
+            const liveAssistantIds = new Set(prev.filter((x) => x.kind === "assistant").map((x) => x.id));
+            const liveUserTexts = new Set(prev.filter((x) => x.kind === "user").map((x) => x.text));
+            const deduped = history.filter((h) => {
+              if (h.kind === "assistant") return !liveAssistantIds.has(h.id.slice(2));
+              if (h.kind === "user") return !liveUserTexts.has(h.text);
+              return true;
+            });
             return [...deduped, ...prev];
           });
         })
@@ -474,6 +543,10 @@ export function App() {
    * P1-1：POST /messages 为 202 异步受理（fire-and-forget）——返回 2xx 即视为受理成功，
    * 不等待整轮完成；流式文本 / 工具进度 / 审批卡片 / done 复位全部由持久 SSE 订阅驱动。
    * P0-2：发送前确保事件流已订阅（connect 对同一会话幂等复用，不重复建连）。
+   * steering F2：运行中（streaming）发送的补充指令，202 受理后按 mode 给乐观
+   * 气泡打角标——steered「已注入当前任务」/ queued「排队中」；降级文案由响应
+   * mode 统一决定，前端不猜测。steered 不产生独立 done：「生成中」复位仍由
+   * 当前轮 done/pendingTurns 决定（onDone 逻辑不变），此处不为 steered 等待 done。
    */
   const sendMessage = useCallback(
     (text: string, localFiles: File[], serverAttachments: UserAttachment[]): void => {
@@ -482,6 +555,8 @@ export function App() {
       // 发送前确保已订阅（P0-2）：订阅断线/未建连时由 connect 兜底补建
       ensureStream(chatId);
 
+      // 运行中发送的补充指令才需要 mode 角标（空闲首发消息保持无角标语义）
+      const isSupplement = streamingRef.current;
       // 乐观用户消息（先上屏，受理后等待 SSE 流式回包）
       const attachments: UserAttachment[] = [
         ...localFiles.map((f) => ({ name: f.name, source: "local" as const, image: f.type.startsWith("image/") })),
@@ -501,9 +576,16 @@ export function App() {
         .join("");
       const serverImagePaths = serverAttachments.filter((sf) => sf.image).map((sf) => sf.name);
 
-      /** 受理成功（202/200）：仅清理抽屉附件；streaming 复位交给 done 事件（P0-2 订阅保留） */
-      const finish = (): void => {
+      /**
+       * 受理成功（202/200）：清理抽屉附件 + 按 mode 打运行中补充指令角标。
+       * @param result 202 受理响应（旧服务空体 undefined → 视为 queued）
+       */
+      const finish = (result: SendMessageResult | undefined): void => {
         setServerFiles([]); // 已随消息发出，清空抽屉附件
+        if (isSupplement) {
+          const mode = result?.mode === "steered" ? "steered" : "queued";
+          setEntries((prev) => prev.map((x) => (x.kind === "user" && x.id === entryId ? { ...x, mode } : x)));
+        }
       };
       const fail = (e: unknown): void => {
         applyStreaming(false);
@@ -731,6 +813,7 @@ export function App() {
         <Composer
           disabled={activeChatId === null}
           streaming={streaming}
+          steeringEnabled={config?.steeringEnabled ?? false}
           maxUploadBytes={config?.maxUploadBytes ?? 0}
           serverFiles={serverFiles}
           onRemoveServerFile={(i) => setServerFiles((prev) => prev.filter((_, idx) => idx !== i))}
