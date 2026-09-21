@@ -176,10 +176,21 @@ test("createLlmMessageStream aggregates plain text deltas and emits full progres
     ["start", "update", "update", "end"]
   );
   assert.equal(progressRecords[progressRecords.length - 1]?.estimatedTokens > 0, true);
+  // docs/dev/web-thinking-display.md TH4：start/end 帧 preview/thinking 均为 undefined
+  //（Web 前端据此不在 start 帧渲染空气泡）；update 帧携带正文
+  assert.equal(progressRecords[0]?.previewText, undefined);
+  assert.equal(progressRecords[0]?.thinkingText, undefined);
+  assert.equal(progressRecords[1]?.previewText, "你好，");
+  assert.equal(progressRecords[2]?.previewText, "你好，世界");
+  const last = progressRecords[progressRecords.length - 1];
+  assert.equal(last?.previewText, undefined);
+  assert.equal(last?.thinkingText, undefined);
 });
 
 test("createLlmMessageStream aggregates thinking deltas into reasoning_content", async () => {
-  const manager = createUnitManager();
+  // docs/dev/web-thinking-display.md TH4：Anthropic 通路 thinking/text 双通道外发断言
+  const progressRecords: LlmStreamProgress[] = [];
+  const manager = createUnitManager(progressRecords);
   const client = createAnthropicStreamStub({
     events: [
       { type: "thinking_delta", thinking: "先分析一下" },
@@ -195,6 +206,16 @@ test("createLlmMessageStream aggregates thinking deltas into reasoning_content",
   assert.equal(message.reasoning_content, "先分析一下再给出结论");
   assert.equal(message.content, "答案");
   assert.equal(response.usage, null);
+
+  // 进度通道（update 阶段）：thinking 增量累积进 thinkingText 且 previewText 为空串
+  //（start/end 阶段两字段均 undefined；空串 = 尚无正文增量，thinking 阶段正文即空串）；
+  // text 增量后 previewText 非空且 thinkingText 保留已累积思考
+  const updates = progressRecords.filter((r) => r.phase === "update");
+  const thinkingOnlyUpdates = updates.filter((r) => !r.previewText);
+  assert.equal(thinkingOnlyUpdates.at(-1)?.thinkingText, "先分析一下再给出结论");
+  const textUpdate = updates.find((r) => !!r.previewText);
+  assert.equal(textUpdate?.previewText, "答案");
+  assert.equal(textUpdate?.thinkingText, "先分析一下再给出结论");
 });
 
 test("createLlmMessageStream assembles a single tool call into OpenAI tool_calls shape", async () => {
@@ -704,6 +725,9 @@ test("activateSession persists anthropic thinking reply", async () => {
   assert.equal(session?.assistantThinking, "推理一下");
   const assistant = manager.listSessionMessages(sessionId).find((message) => message.role === "assistant");
   assert.equal((assistant?.messageParams as any)?.reasoning_content, "推理一下");
+  // docs/dev/web-thinking-display.md W2：注入标记消息携带原文 steeringText；
+  // 常规助手消息不带注入标记（前端据 meta.steeringInject 区分注入条）
+  assert.equal((assistant?.meta as Record<string, unknown> | undefined)?.steeringInject, undefined);
 });
 
 test("activateSession marks refusal reply as failed with refusal text as reason", async () => {

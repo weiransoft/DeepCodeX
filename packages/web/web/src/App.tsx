@@ -138,9 +138,12 @@ export function App() {
    */
   const onAssistantMessage = useCallback((e: AssistantMessageEvent): void => {
     if (e.chatId !== activeChatIdRef.current) return;
-    // 注入指令的 system 消息（core C1② meta 标记）→ 注入分隔条
+    // 注入指令的 system 消息（core C1② meta 标记）→ 注入分隔条；
+    // 优先展示用户原文 meta.steeringText（web-thinking-display W2/F3），缺省回退 content
     if (e.role === "system" && e.meta?.steeringInject === true) {
-      setEntries((prev) => [...prev, { kind: "steering", id: `inject-${e.messageId}`, text: e.content }]);
+      const raw = e.meta.steeringText;
+      const text = typeof raw === "string" && raw !== "" ? raw : e.content;
+      setEntries((prev) => [...prev, { kind: "steering", id: `inject-${e.messageId}`, text }]);
       return;
     }
     setEntries((prev) => {
@@ -246,7 +249,7 @@ export function App() {
 
   /**
    * status：运行状态同步（后端 SessionStatus 语义：processing = 执行中）；askPermissions 兜底建卡。
-   * steering F1：快照载荷带 turnActive/pendingTurns（W1③）——仅 processing 才置位
+   * steering F1：快照载荷带 pendingTurns（W1③）——仅 processing 才置位
    * 「生成中」；非 processing（含审批等待 ask_permission）时，仅当快照明示仍有
    * 排队轮次（pendingTurns>0，旧服务缺省字段时保持原状）才维持/复位为生成中，
    * 否则按引擎状态如实复位（修复旧版 ask_permission 后停止条残留的缺陷）。
@@ -370,9 +373,11 @@ export function App() {
       // 空内容消息不渲染（null / 空串）
       const content = typeof d.content === "string" ? d.content : "";
       if (content === "") continue;
-      // steering F4：注入指令的 system 消息（meta.steeringInject）→ 注入分隔条
+      // steering F4：注入指令的 system 消息（meta.steeringInject）→ 注入分隔条；
+      // 优先展示用户原文 meta.steeringText（web-thinking-display W2/F3），缺省回退 content
       if (d.role === "system" && d.meta?.steeringInject === true) {
-        result.push({ kind: "steering", id: `h-${d.id}`, text: content });
+        const raw = d.meta.steeringText;
+        result.push({ kind: "steering", id: `h-${d.id}`, text: typeof raw === "string" && raw !== "" ? raw : content });
       } else if (d.role === "user") {
         result.push({ kind: "user", id: `h-${d.id}`, text: content, attachments: [], createTime: d.createTime });
       } else if (d.role === "tool") {

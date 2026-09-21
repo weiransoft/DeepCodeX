@@ -115,12 +115,20 @@ export function FileDrawer({ open, allowRoots, personalOnly, onClose, onInsertAt
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  // allowRoots 异步就绪后（抽屉已开但初始路径为空）自动初始化
+  // 当前作用域尚无有效目录时自动初始化（DR2：覆盖 shared 与 personal 两作用域）：
+  // - 首次打开/切换作用域后 path 为空 → shared 取第一个白名单根，personal 空 path
+  //   由服务端缺省到个人区根；
+  // - 上次加载失败（listing 为 null、error 非空、path 已被 DR1 清空）后，
+  //   配置（allowRoots/personalOnly）就绪或重试条件具备时自动重试。
   useEffect(() => {
-    if (open && listing === null && !loading && scope === "shared" && allowRoots.length > 0 && currentPath === "") {
+    if (!open || loading || listing !== null || currentPath !== "") return;
+    if (scope === "personal") {
+      load("", scope);
+    } else if (allowRoots.length > 0) {
       load(allowRoots[0], scope);
     }
-  }, [open, allowRoots, listing, loading, currentPath, scope]);
+    // 仅在影响「能否初始化」的状态变化时触发；load 稳定、scope 变化已由 switchScope 显式加载
+  }, [open, allowRoots, listing, loading, currentPath, scope, personalOnly]);
 
   /** 切换作用域：清空路径由服务端返回各区默认目录，并立即加载 */
   const switchScope = (next: FileScope): void => {
@@ -243,8 +251,26 @@ export function FileDrawer({ open, allowRoots, personalOnly, onClose, onInsertAt
           <button
             type="button"
             className="crumb"
-            onClick={() => load(scope === "shared" ? (allowRoots.length > 0 ? allowRoots[0] : "") : "", scope)}
-            title="回到根目录"
+            onClick={() => {
+              // DR3：有有效列表时回到当前目录所属作用域的根（listing.path 即当前作用域根内路径）；
+              // 无列表时按作用域缺省（shared 取第一个白名单根；personal 空 path 服务端缺省个人区根）。
+              // 绝不再把另一作用域的残留路径或空 path 发进错误牢笼。
+              if (listing !== null) {
+                load(listing.path, scope);
+              } else if (scope === "personal") {
+                load("", scope);
+              } else if (allowRoots.length > 0) {
+                load(allowRoots[0], scope);
+              }
+            }}
+            disabled={scope === "shared" && listing === null && allowRoots.length === 0}
+            title={
+              scope === "shared" && listing === null
+                ? allowRoots.length > 0
+                  ? allowRoots[0]
+                  : "共享目录未配置白名单根（web.allowRoots）"
+                : "回到根目录"
+            }
           >
             根目录
           </button>

@@ -150,9 +150,11 @@ export type ChatMessageDto = {
   /**
    * 引擎消息元信息（docs/dev/web-steering.md W1①：桥接补充）。
    * 前端据 meta.steeringInject 把注入指令的 system 消息渲染为「指令注入」样式；
-   * 历史恢复（GET messages）与实时 user_message 帧共用本 DTO——后者无 meta 时缺省。
+   * meta.steeringText 为注入指令用户原文（docs/dev/web-thinking-display.md W2），
+   * 注入条优先展示原文；历史恢复（GET messages）与实时 user_message 帧共用本
+   * DTO——后者无 meta 时缺省。
    */
-  meta?: { steeringInject?: true } & Record<string, unknown>;
+  meta?: { steeringInject?: true; steeringText?: string } & Record<string, unknown>;
 };
 
 /** POST /api/chats/:id/messages 请求体（JSON 形态） */
@@ -222,7 +224,9 @@ export type DoneEvent = {
 /**
  * SSE 事件名（docs/dev/web-ui.md §3.5）。
  *
- * - llm_delta：LLM 流式文本增量（phase: start|update|end + previewText）
+ * - llm_delta：LLM 流式增量（phase: start|update|end + previewText 正文预览
+ *   + thinkingText 思考过程，thinkingText 换行保留供前端 Markdown 折叠渲染，
+ *   docs/dev/web-thinking-display.md W1）
  * - assistant_message：完整助手消息（载荷含 role/meta——注入指令的 system 消息
  *   经 meta.steeringInject 标记，docs/dev/web-steering.md W1①）
  * - user_message：用户消息实时广播（排队受理与 steering 注入两路径均广播，

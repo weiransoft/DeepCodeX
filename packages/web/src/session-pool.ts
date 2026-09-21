@@ -332,10 +332,13 @@ export class SessionPool {
         });
       },
       onLlmStreamProgress: (progress) => {
+        // docs/dev/web-thinking-display.md W1：thinkingText 独立透传——
+        // 前端渲染可折叠「思考过程」（换行保留的 Markdown 源文本）
         this.hub.publish(chatId, "llm_delta", {
           chatId,
           phase: progress.phase,
           previewText: progress.previewText,
+          thinkingText: progress.thinkingText,
         });
       },
       onSessionEntryUpdated: (entry) => {

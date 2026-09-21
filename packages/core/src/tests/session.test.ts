@@ -5275,9 +5275,11 @@ test("createChatCompletionStream does not retry non-400 errors", async () => {
 });
 
 // ---- 上游 v0.4.0 新增测试：streaming preview 与 interrupt ----
+// docs/dev/web-thinking-display.md TH3：thinking 与正文分通道（thinkingText 换行保留，
+// previewText 仅正文且单行压缩），本用例断言相应更新。
 
-test("stream previews combine only reasoning and content, sanitize text, and reset per request", async () => {
-  const events: Array<{ phase: string; previewText?: string; estimatedTokens: number }> = [];
+test("stream previews separate thinking and content channels, sanitize text, and reset per request", async () => {
+  const events: Array<{ phase: string; previewText?: string; thinkingText?: string; estimatedTokens: number }> = [];
   const client = {
     chat: {
       completions: {
@@ -5321,11 +5323,18 @@ test("stream previews combine only reasoning and content, sanitize text, and res
     );
     assert.equal(events[0]?.phase, "start");
     assert.equal(events[0]?.previewText, undefined);
-    assert.equal(events[1]?.previewText, "think ");
-    assert.equal(events[2]?.previewText, "think next ");
-    assert.equal(events[3]?.previewText, "think next 中文👋 answer !");
+    // thinking 独立通道：CRLF/孤立 CR 归一为 LF、制表符保留（Markdown 渲染依赖行结构）
+    assert.equal(events[1]?.thinkingText, "think\n");
+    assert.equal(events[2]?.thinkingText, "think\nnext\t");
+    // update 帧 previewText 为空串（尚无正文增量）= thinking 未混入 previewText（TH3 分离）；
+    // start 帧才是 undefined（events[0] 已断言）
+    assert.equal(events[1]?.previewText, "", "thinking 增量不得混入 previewText（TH3 分离）");
+    assert.equal(events[2]?.previewText, "", "thinking 增量不得混入 previewText（TH3 分离）");
+    // 正文通道：单行压缩语义不变（CLI loading 消费）
+    assert.equal(events[3]?.previewText, "中文👋 answer !");
     const updates = events.filter((event) => event.phase === "update");
-    assert.equal(updates.at(-1)?.previewText, "think next 中文👋 answer !");
+    assert.equal(updates.at(-1)?.previewText, "中文👋 answer !");
+    assert.equal(updates.at(-1)?.thinkingText, "think\nnext\t");
     assert.ok(updates.at(-1)!.estimatedTokens > updates[2]!.estimatedTokens);
     assert.equal(events.at(-1)?.phase, "end");
     assert.equal(events.at(-1)?.previewText, undefined);
