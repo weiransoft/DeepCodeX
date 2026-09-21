@@ -77,9 +77,11 @@ export interface ChatMessageDto {
   /**
    * 引擎消息元信息（docs/dev/web-steering.md W1①）：
    * meta.steeringInject === true 标记「执行中补充指令」注入的 system 消息，
-   * 历史恢复据此渲染「指令注入」样式（F4）；其余消息缺省。
+   * meta.steeringText 为用户注入原文（docs/dev/web-thinking-display.md W2，
+   * 注入条优先展示原文）；历史恢复据此渲染「指令注入」样式（F4），
+   * 其余消息缺省。
    */
-  meta?: { steeringInject?: true } & Record<string, unknown>;
+  meta?: { steeringInject?: true; steeringText?: string } & Record<string, unknown>;
 }
 
 /** 目录条目（GET /api/files） */

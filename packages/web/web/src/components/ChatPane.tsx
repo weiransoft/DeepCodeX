@@ -52,6 +52,34 @@ function AssistantA2ui({ content, messageId }: { content: string; messageId: str
   return <A2uiSurface messages={messages} className="a2ui-surface chat-assistant-body" />;
 }
 
+/** PreviewMarkdown 组件属性 */
+interface PreviewMarkdownProps {
+  /** 流式累积文本（正文 preview 或思考 thinking，均可能含未闭合围栏） */
+  text: string;
+  /** A2UI surface 标识（同一气泡内正文/思考各自独立，避免 surface key 冲突） */
+  surfaceId: string;
+  /** 是否显示流式光标（生成中 true） */
+  cursor?: boolean;
+}
+
+/**
+ * 流式预览 → 容错 Markdown 渲染（docs/dev/web-thinking-display.md F2）。
+ *
+ * 与旧「纯文本 div」的区别：thinking/preview 均经 parseMarkdownToA2ui 渲染，
+ * 恢复分段、列表、代码围栏等格式；解析器对**未闭合围栏自动补全到文末**，
+ * 半截 fence 渲染为代码块而非吞掉后续内容（fence 抖动防护由解析器承担）。
+ * useMemo 以 text 为缓存键，流式更新只重解析当前文本。
+ */
+function PreviewMarkdown({ text, surfaceId, cursor = false }: PreviewMarkdownProps) {
+  const messages = useMemo(() => parseMarkdownToA2ui(text, `stream-${surfaceId}`), [text, surfaceId]);
+  return (
+    <div className="chat-stream-preview">
+      <A2uiSurface messages={messages} className="a2ui-surface" />
+      {cursor && <span className="stream-cursor" aria-hidden="true" />}
+    </div>
+  );
+}
+
 /** 附件 chips（图标按类型直显） */
 function AttachmentChips({ attachments }: { attachments: UserAttachment[] }) {
   if (attachments.length === 0) return null;
@@ -201,12 +229,22 @@ export function ChatPane(props: ChatPaneProps) {
                         // 围栏代码与非工具结果 JSON 原样保留）再进 A2UI 管线渲染
                         <AssistantA2ui content={humanizeEngineContent(entry.content)} messageId={entry.id} />
                       ) : (
-                        // 流式阶段：previewText 纯文本 + 光标动画（同步可读化，尽力而为：
-                        // 流式中的截断块经容错解析原样保留，完成后自然变为文本）
-                        <div className="chat-stream-preview">
-                          {humanizeEngineContent(entry.preview ?? "")}
-                          {entry.done !== true && <span className="stream-cursor" aria-hidden="true" />}
-                        </div>
+                        // 流式阶段（docs/dev/web-thinking-display.md F2）：
+                        // 思考过程（可折叠，默认展开）+ 正文预览，均经容错 Markdown
+                        // 管线渲染——恢复分段与格式；未闭合围栏自动补全，防 fence 抖动。
+                        <>
+                          {entry.thinking !== undefined && entry.thinking !== "" && (
+                            <details className="chat-thinking" open>
+                              <summary className="chat-thinking-summary">思考过程</summary>
+                              <PreviewMarkdown text={entry.thinking} surfaceId={`thinking-${entry.id}`} />
+                            </details>
+                          )}
+                          <PreviewMarkdown
+                            text={humanizeEngineContent(entry.preview ?? "")}
+                            surfaceId={`preview-${entry.id}`}
+                            cursor={entry.done !== true}
+                          />
+                        </>
                       )}
                     </div>
                   </div>

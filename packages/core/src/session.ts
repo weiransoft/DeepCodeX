@@ -448,6 +448,13 @@ export type MessageMeta = {
    * plan-mode 等其他 system 消息），替代脆弱的内容前缀字符串匹配。
    */
   steeringInject?: true;
+  /**
+   * 注入指令的用户原文（docs/dev/web-thinking-display.md W2，随 steeringInject 携带）。
+   *
+   * 消息 content 为引擎渲染后的完整注入文案（含时间戳与提示语），
+   * Web 前端「指令注入」条优先展示本原文，避免刷新/恢复后注入条变成引擎模板文本。
+   */
+  steeringText?: string;
   skill?: SkillInfo;
   // 上游 v0.3.1：技能目录快照（技能列表变化时随消息持久化，供恢复会话后重建目录提示）
   skillCatalog?: Array<{ name: string; description: string }>;
@@ -912,6 +919,14 @@ export type LlmStreamProgress = {
   estimatedTokens: number;
   formattedTokens: string;
   previewText?: string;
+  /**
+   * 思考（thinking / reasoning_content）流式累积文本（docs/dev/web-thinking-display.md TH1）。
+   *
+   * 与 previewText 分离：previewText 只含正式回复正文；thinking 增量进本字段，
+   * 经换行保留格式化后外发，供 Web 前端渲染可折叠「思考过程」。
+   * CLI / VSCode 等不消费本字段的宿主行为不变（零回归）。
+   */
+  thinkingText?: string;
   phase: "start" | "update" | "end";
 };
 
@@ -1530,13 +1545,37 @@ export class SessionManager {
       .replace(/[\x00-\x1f\x7f-\x9f]/g, "");
   }
 
+  /**
+   * 思考流式文本格式化（docs/dev/web-thinking-display.md TH2）。
+   *
+   * 与 formatStreamPreview 的区别：**保留换行**（仅归一 CRLF→LF 并剥控制字符），
+   * Web 前端以 Markdown 管线渲染思考过程，分段与列表/围栏结构依赖行首语义。
+   *
+   * @param text 累积的 thinking 增量文本（可为 undefined：该通路/阶段无思考内容）
+   * @returns 换行保留的干净文本；undefined 原样透传（消费端按缺省处理）
+   */
+  private formatStreamThinking(text?: string): string | undefined {
+    if (text === undefined) {
+      return undefined;
+    }
+    return (
+      stripVTControlCharacters(text)
+        .replace(/\r\n/g, "\n")
+        // 孤立 CR / CRLF 之外的 \r 同归一为换行（行尾分隔语义，与预览压行语义对齐）
+        .replace(/\r/g, "\n")
+        .replace(/[\u2028\u2029]/g, "\n")
+        .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, "")
+    );
+  }
+
   private emitLlmStreamProgress(
     requestId: string,
     startedAt: string,
     estimatedTokens: number,
     phase: LlmStreamProgress["phase"],
     sessionId?: string,
-    previewText?: string
+    previewText?: string,
+    thinkingText?: string
   ): void {
     this.onLlmStreamProgress?.({
       requestId,
@@ -1545,6 +1584,7 @@ export class SessionManager {
       estimatedTokens: Math.round(estimatedTokens),
       formattedTokens: this.formatEstimatedTokens(estimatedTokens),
       previewText: this.formatStreamPreview(previewText),
+      thinkingText: this.formatStreamThinking(thinkingText),
       phase,
     });
   }
@@ -2017,15 +2057,20 @@ export class SessionManager {
     >();
 
     let previewText = "";
-    const trackText = (value: unknown, includeInPreview = false) => {
+    // thinking 独立累积（docs/dev/web-thinking-display.md TH3）：不再混入 previewText，
+    // Web 前端据此渲染可折叠「思考过程」；CLI loading 只展示正文预览（更干净）
+    let thinkingText = "";
+    const trackText = (value: unknown, channel: "content" | "thinking" | "none" = "none") => {
       if (typeof value !== "string" || value.length === 0) {
         return;
       }
       estimatedTokens += this.estimateStreamTokens(value);
-      if (includeInPreview) {
+      if (channel === "content") {
         previewText += value;
+      } else if (channel === "thinking") {
+        thinkingText += value;
       }
-      this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "update", sessionId, previewText);
+      this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "update", sessionId, previewText, thinkingText);
     };
 
     try {
@@ -2079,14 +2124,15 @@ export class SessionManager {
           const contentDelta = delta.content;
           if (typeof contentDelta === "string") {
             content += contentDelta;
-            trackText(contentDelta, true);
+            trackText(contentDelta, "content");
           }
 
           const reasoningDelta = delta.reasoning_content ?? delta.reasoning;
           if (typeof reasoningDelta === "string") {
             reasoningContent += reasoningDelta;
-            // upstream: includeInPreview=true（reasoning 也进入预览文本）
-            trackText(reasoningDelta, true);
+            // thinking 走独立通道（docs/dev/web-thinking-display.md TH3）：混入正文预览
+            // 会导致 Web 端「思考与回复拍成一行无格式」，分离后前端折叠渲染
+            trackText(reasoningDelta, "thinking");
             // fork: Skill matching 等短输出场景防护——reasoning 模型可能陷入循环
             if (maxReasoningLength && reasoningContent.length > maxReasoningLength) {
               attemptController.abort();
@@ -2315,13 +2361,23 @@ export class SessionManager {
       { id: string; type: string; function: { name: string; arguments: string } }
     >();
 
-    // token 估算追踪：text/thinking/工具名/arguments 四类增量（对等 OpenAI 侧五类中的适用项）
-    const trackText = (value: string) => {
+    // token 估算追踪 + 流式预览外发（docs/dev/web-thinking-display.md TH4）：
+    // text/thinking/工具名/arguments 四类增量（对等 OpenAI 侧五类中的适用项）。
+    // 与 OpenAI 通路对等维护 previewText（正文，CLI loading 单行消费）与
+    // thinkingText（思考，Web 折叠渲染），两通道均经 emitLlmStreamProgress 外发。
+    let previewText = "";
+    let thinkingText = "";
+    const trackText = (value: string, channel: "content" | "thinking" | "none" = "none") => {
       if (value.length === 0) {
         return;
       }
       estimatedTokens += this.estimateStreamTokens(value);
-      this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "update", sessionId);
+      if (channel === "content") {
+        previewText += value;
+      } else if (channel === "thinking") {
+        thinkingText += value;
+      }
+      this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "update", sessionId, previewText, thinkingText);
     };
 
     try {
@@ -2348,11 +2404,11 @@ export class SessionManager {
         switch (event.type) {
           case "text_delta":
             content += event.text;
-            trackText(event.text);
+            trackText(event.text, "content");
             break;
           case "thinking_delta":
             reasoningContent += event.thinking;
-            trackText(event.thinking);
+            trackText(event.thinking, "thinking");
             // 主对话 reasoning 超长防护：与 OpenAI 通路对齐，超过阈值时立即 abort 并抛错，
             // 由 activateSession catch 块识别后安全降级为 failed 状态，避免用户无响应等待。
             if (maxReasoningLength && reasoningContent.length > maxReasoningLength) {
@@ -6393,8 +6449,14 @@ ${agentInstructions}
             );
             // web-steering C1②：打 steeringInject 标记——Web 端按
             // role==="system" && meta.steeringInject 渲染「指令注入」样式，
-            // 与技能目录 / plan-mode 等其他 system 消息稳定区分（不依赖文案前缀）
-            injectMessage.meta = { ...injectMessage.meta, steeringInject: true };
+            // 与技能目录 / plan-mode 等其他 system 消息稳定区分（不依赖文案前缀）；
+            // web-thinking-display W2：随标记携带用户原文（多条以空行合并，
+            // 不含时间戳与提示语模板），前端注入条展示原文
+            injectMessage.meta = {
+              ...injectMessage.meta,
+              steeringInject: true,
+              steeringText: instructions.map((i) => i.text).join("\n\n"),
+            };
             this.appendSessionMessage(sessionId, injectMessage);
             // 通知 UI：注入已被消费（onAssistantMessage 第二参数 false 表示不连接流）
             this.onAssistantMessage(injectMessage, false);

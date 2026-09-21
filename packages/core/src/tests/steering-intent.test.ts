@@ -331,6 +331,8 @@ test("CT5-01: 注入指令被轮内消费 → 合成 system 消息带 steeringIn
   assert.ok(injectMsg, "E2 注入消息必须带 meta.steeringInject 标记并经 onAssistantMessage 通知");
   assert.equal(injectMsg.role, "system");
   assert.ok(injectMsg.content?.includes("改用 pnpm 安装依赖"), "注入消息必须包含指令原文");
+  // W2：meta.steeringText 携带注入原文（多条指令以空行合并，本用例单条即原文）
+  assert.equal(injectMsg.meta?.steeringText, "改用 pnpm 安装依赖", "注入消息 meta 必须携带用户原文 steeringText");
 
   // 落盘 JSONL 同样持久化 meta 标记（历史恢复路径可用）
   // 注：SessionManager 内部用未经 realpath 的 projectRoot 原样计算 projectCode

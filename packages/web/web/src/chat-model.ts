@@ -42,6 +42,12 @@ export type ChatEntry =
       id: string;
       content: string | null;
       preview: string | null;
+      /**
+       * 流式阶段的思考过程（docs/dev/web-thinking-display.md F1）：
+       * llm_delta.thinkingText 独立通道（换行保留），ChatPane 渲染为
+       * 可折叠「思考过程」；正式消息（assistant_message）完成后缺省。
+       */
+      thinking?: string;
       /** 本条消息是否已终结（收到 assistant_message 后为 true） */
       done: boolean;
     }

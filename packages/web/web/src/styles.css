@@ -519,10 +519,31 @@ body {
 .chat-assistant-body {
   gap: 10px;
 }
+
+/* 流式预览（thinking 区块与正文共用）：间距由 A2UI surface 内部排版接管 */
 .chat-stream-preview {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  min-width: 0;
   line-height: 1.65;
+}
+
+/* 思考过程折叠区块（docs/dev/web-thinking-display.md F2）：弱化样式，与正文区分 */
+.chat-thinking {
+  margin-bottom: 8px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-bg-subtle);
+  padding: 6px 12px;
+  font-size: 13px;
+}
+.chat-thinking-summary {
+  cursor: pointer;
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+  user-select: none;
+}
+.chat-thinking .chat-stream-preview {
+  margin-top: 6px;
+  color: var(--app-text-secondary);
 }
 
 /* 流式光标动画 */

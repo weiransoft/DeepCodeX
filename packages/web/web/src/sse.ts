@@ -27,6 +27,11 @@ export interface LlmDeltaEvent {
   phase: "start" | "update" | "end";
   /** 当前累积的预览文本（纯文本，未完成 Markdown 不做半截解析） */
   previewText: string;
+  /**
+   * 思考过程累积文本（docs/dev/web-thinking-display.md W1/F1）：
+   * 与正文分离的 thinking/reasoning 增量，换行保留；旧服务缺省 undefined。
+   */
+  thinkingText?: string;
 }
 
 /**
