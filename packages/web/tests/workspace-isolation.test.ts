@@ -732,3 +732,80 @@ test("WS-T12-02：注册表无源数据可迁移 → 恢复仍 403，但列表�
   assert.equal(restored.status, 403, `无源可迁移的旧目录历史恢复必须 403（得到 ${restored.status}）`);
   assert.match(restored.body.error, /个人工作区|无法恢复/);
 });
+
+test("WS-T12-03：前端携带旧 projectRoot 的恢复请求不得被 W3 校验先决 403（真实点击行为回归）", async () => {
+  // 回归场景（用户实际报错）：前端恢复历史会话时必然携带注册表记录的旧
+  // projectRoot（App.tsx selectChat 传 item.projectRoot）。修复前 W3 校验
+  // 位于迁移通路之前，恒 403「个人工作目录模式：会话只能在你的个人工作区
+  // 内创建」，旧会话永远无法恢复。修复后：命中本人注册表条目即视为合法
+  // 恢复意图，先迁移后按个人区恢复。
+  const legacyProjectRoot = await realpath(mkdtempSync(path.join(tmpRoot, "legacy-click-project-")));
+
+  // —— 前置：共享服务器真实跑一轮产出合法会话数据（与 WS-T12-01 同款播种，
+  //    保证 jsonl/索引条目是引擎真实格式）——
+  const seed = await fetchJson(
+    sharedServer.port,
+    "POST",
+    "/api/chats",
+    { projectRoot: legacyProjectRoot },
+    sharedCookieA
+  );
+  assert.equal(seed.status, 200, `旧时代会话创建前置条件失败：${JSON.stringify(seed.body)}`);
+  const seedChatId = seed.body.chatId as string;
+  const { collector, controller } = await openSseStream(sharedServer.port, seedChatId, sharedCookieA);
+  const donePromise = collector.waitFor("done", 15000);
+  const send = await fetchJson(
+    sharedServer.port,
+    "POST",
+    `/api/chats/${seedChatId}/messages`,
+    { text: "旧时代点击恢复的消息" },
+    sharedCookieA
+  );
+  assert.equal(send.status, 202);
+  const done = await donePromise;
+  controller.abort();
+  const legacySessionId = done.data.sessionId as string;
+  assert.ok(legacySessionId, "旧会话轮次必须产出底层 sessionId");
+
+  // —— 旧引擎区数据：把共享轮次落在进程家目录的项目数据复制到候选链中的
+  //    旧引擎根（tmpRoot = legacyRoot 父目录，候选链第 2 位先扫先裁决）——
+  const legacyCode = getProjectCode(legacyProjectRoot);
+  const sourceProjectDir = path.join(homedir(), ".deepcode", "projects", legacyCode);
+  assert.ok(existsSync(path.join(sourceProjectDir, "sessions-index.json")), "前置：旧会话索引必须真实落盘");
+  const legacyProjects = path.join(tmpRoot, ".deepcode", "projects", legacyCode);
+  mkdirSync(path.dirname(legacyProjects), { recursive: true });
+  cpSync(sourceProjectDir, legacyProjects, { recursive: true });
+
+  // —— 注册表伪装旧格式：projectRoot 指向个人区之外的旧共享项目 ——
+  const legacyRegistry = loadUserChats(userIdA, registryDir).find((item) => item.sessionId === legacySessionId);
+  assert.ok(legacyRegistry, "前置：共享轮次结束后注册表必须有该会话记录");
+  upsertUserChat(userIdA, { ...legacyRegistry, projectRoot: legacyProjectRoot }, registryDir);
+
+  // 等待共享轮次收尾的异步落盘完成（同 WS-T12-01）
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+
+  // 真实点击行为：请求携带旧 projectRoot + sessionId → 必须迁移成功并 200
+  const restored = await fetchJson(
+    personalServer.port,
+    "POST",
+    "/api/chats",
+    { projectRoot: legacyProjectRoot, sessionId: legacySessionId },
+    cookieA
+  );
+  assert.equal(
+    restored.status,
+    200,
+    `携带旧 projectRoot 的可迁历史恢复必须 200（得到 ${restored.status}：${JSON.stringify(restored.body)}）`
+  );
+  const personalRootA = await realpath(path.join(tmpRoot, "uploads", userIdA));
+  assert.equal(restored.body.projectRoot, personalRootA, "恢复后必须落本人个人区");
+
+  // 迁移结果：聊天数据已复制进个人引擎区
+  const migratedProjectDir = path.join(engineHomeRoot, userIdA, ".deepcode", "projects", getProjectCode(personalRootA));
+  assert.ok(existsSync(path.join(migratedProjectDir, `${legacySessionId}.jsonl`)), "个人引擎区必须出现迁入的消息流");
+
+  // 注册表条目改写为个人区根（后续点击直接命中个人区路径）
+  const rewritten = loadUserChats(userIdA, registryDir).find((item) => item.sessionId === legacySessionId);
+  assert.ok(rewritten, "注册表条目必须保留");
+  assert.equal(rewritten.projectRoot, personalRootA, "注册表 projectRoot 必须改写为个人区根");
+});

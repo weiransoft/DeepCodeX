@@ -227,16 +227,15 @@ export class SessionPool {
       // 尽力确保两级目录就绪（个人区 + 引擎区；mkdir 幂等）
       mkdirSync(personalRoot, { recursive: true });
       mkdirSync(engineHomeDir, { recursive: true });
-      // W3：显式传入 projectRoot 时只接受本人个人区（明确 403，不静默改写）；
-      // 归一后比较，允许尾斜杠 / 相对等价写法等表达同一目录
-      const requested = (projectRoot ?? "").trim();
-      if (requested !== "" && path.resolve(requested) !== personalRoot) {
-        throw new ApiError(403, "个人工作目录模式：会话只能在你的个人工作区内创建，无法访问其他目录");
-      }
     }
+
     // 牢笼校验：personalOnly 模式下 personalRoot 拼接自服务端可信配置，
     // 仍走 resolveInJail（个人区在其自身牢笼内必然通过，同时消解 symlink）；
-    // personalOnly=false 走 allowRoots 白名单旧路径
+    // personalOnly=false 走 allowRoots 白名单旧路径。
+    // 必须先于旧历史迁移计算：恢复路径 = realpath 归一后的 resolvedRoot
+    //（Mac 上 /var→/private/var 等符号链接形态），迁移的目标 projectCode、
+    // 注册表改写值必须与之一致，否则数据迁入「影子目录」——迁移显示
+    // 成功但 getSession 按归一形态找不到索引（404）。
     const resolvedRoot = this.settings.personalOnly
       ? await resolveInJail(await buildJailRoots([personalRoot]), personalRoot)
       : await resolveInJail(this.jailRoots, projectRoot);
@@ -245,21 +244,40 @@ export class SessionPool {
     // personalOnly 模式下，恢复目标在本人注册表中的 projectRoot 落在个人区之外
     // （旧共享模式 / 工作区重建时代的历史）时——先尝试把该会话的聊天数据
     // （索引条目 + jsonl + 图片）与全局记忆一次性拷贝进本人引擎数据根，并把
-    // 注册表条目改写为个人区根，之后按个人区正常恢复；
-    // 无法安全迁移（注册表无记录 / 引擎区无源条目 / 源根名非法）时维持旧防御：
-    // 明确 403「不在个人工作区内，无法恢复」，绝不静默跨区读取。
+    // 注册表条目改写为个人区根，之后按个人区正常恢复。
+    //
+    // 必须位于 W3 显式 projectRoot 校验**之前**：前端恢复历史会话时必然携带
+    // 旧 projectRoot（点击的是注册表记录的旧项目根），若先做 W3 校验，
+    // 旧会话恢复永远走不到迁移通路（恒 403）。
+    // 注册表命中本身即证明该 sessionId 归当前用户所有，其携带的旧根
+    // 属于「合法恢复意图」而非越界尝试；未命中注册表的任意 projectRoot
+    // 仍被下方 W3 校验拒绝。
+    let legacyMigrated = false;
     if (this.settings.personalOnly && sessionId !== undefined) {
       const registryHit = findChatBySessionId(ctx.userId, sessionId, this.registryBaseDir);
-      if (registryHit && path.resolve(registryHit.projectRoot) !== personalRoot) {
-        // 迁移目标必须与恢复时 SessionManager 实际使用的 projectRoot 一致
-        // （resolvedRoot=realpath 归一值）——getProjectCode 对路径逐字节敏感，
-        // 若两侧形态不一致（如 /var 与 /private/var）数据会迁入影子目录，
+      if (registryHit && path.resolve(registryHit.projectRoot) !== resolvedRoot) {
+        legacyMigrated = true;
+        // 迁移后注册表条目已改写为个人区根（resolvedRoot 形态）；旧根会话的
+        // 聊天数据与记忆已拷贝。后续恢复一律按个人区进行，不再使用客户端
+        // 携带的旧根。迁移目标按 resolvedRoot（realpath 归一值）计算——
+        // getProjectCode 对路径逐字节敏感，未归一形态（如 /var 与
+        // /private/var）会算出不同 projectCode，数据迁入影子目录导致
         // 迁移显示成功但恢复 404。
         const migrated = this.migrateLegacySession(ctx.userId, sessionId, resolvedRoot, engineHomeDir);
         if (!migrated) {
+          legacyMigrated = false;
           throw new ApiError(403, "历史会话所在目录不在个人工作区内，无法恢复");
         }
         console.log(`[session-pool] 旧会话 ${sessionId} 已迁移至个人工作区（聊天数据与记忆拷贝完成）`);
+      }
+    }
+
+    if (this.settings.personalOnly && !legacyMigrated) {
+      // W3：显式传入 projectRoot 时只接受本人个人区（明确 403，不静默改写）；
+      // 归一后比较，允许尾斜杠 / 相对等价写法等表达同一目录
+      const requested = (projectRoot ?? "").trim();
+      if (requested !== "" && path.resolve(requested) !== personalRoot) {
+        throw new ApiError(403, "个人工作目录模式：会话只能在你的个人工作区内创建，无法访问其他目录");
       }
     }
 

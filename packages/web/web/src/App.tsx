@@ -763,7 +763,14 @@ export function App() {
     fetchConfig()
       .then((cfg) => {
         setConfig(cfg);
-        setProjectRoot((cur) => (cur !== "" ? cur : (cfg.allowRoots[0] ?? "")));
+        // 个人工作目录模式：项目根恒为空串（服务端强制落本人个人区）。
+        // 绝不允许 allowRoots/历史残留值进入新建会话请求——否则后端
+        // personalOnly 校验必然 403（docs/dev/web-workspace.md W3）。
+        if (cfg.personalOnly) {
+          setProjectRoot("");
+        } else {
+          setProjectRoot((cur) => (cur !== "" ? cur : (cfg.allowRoots[0] ?? "")));
+        }
       })
       .catch((e: unknown) => {
         if (e instanceof ApiError && e.status === 401) {
