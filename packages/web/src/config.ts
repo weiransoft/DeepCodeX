@@ -23,6 +23,8 @@ import type { ResolvedWebSettings } from "./types";
 
 /** 单文件上传上限默认值：50MB（docs/dev/web-ui.md §3.3） */
 const DEFAULT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+/** 文本预览读取上限默认值：2MiB（docs/dev/web-file-preview.md P1）：超限 413 引导下载 */
+const DEFAULT_MAX_PREVIEW_BYTES = 2 * 1024 * 1024;
 /** JWT 会话有效期默认值：28800 秒（8 小时） */
 const DEFAULT_SESSION_TTL_SECONDS = 28800;
 /** LDAP 连接/操作超时默认值：10000 毫秒 */
@@ -209,12 +211,18 @@ export function resolveWebSettings(
   const host = validateHost(merged.host ?? "127.0.0.1");
   const port = validatePort(merged.port ?? 3210, "settings.json web.port");
   const maxUploadBytes = merged.maxUploadBytes ?? DEFAULT_MAX_UPLOAD_BYTES;
+  // 文本预览上限归一（docs/dev/web-file-preview.md P1）：预览读取的字节上限，
+  // 超限文件拒绝预览（413）并引导用户下载，避免抽屉被超大文本拖垮
+  const maxPreviewBytes = merged.maxPreviewBytes ?? DEFAULT_MAX_PREVIEW_BYTES;
   const sessionTtlSeconds = merged.auth?.sessionTtlSeconds ?? DEFAULT_SESSION_TTL_SECONDS;
   const useSsl = merged.ldap?.useSsl ?? false;
 
   // 4. 数值合法性校验（fail-fast，避免启动后行为异常）
   if (!Number.isFinite(maxUploadBytes) || maxUploadBytes <= 0) {
     throw new Error(`web.maxUploadBytes 配置非法（值：${String(maxUploadBytes)}）：必须是正数（字节）`);
+  }
+  if (!Number.isFinite(maxPreviewBytes) || maxPreviewBytes <= 0) {
+    throw new Error(`web.maxPreviewBytes 配置非法（值：${String(maxPreviewBytes)}）：必须是正数（字节）`);
   }
   if (!Number.isFinite(sessionTtlSeconds) || sessionTtlSeconds <= 0) {
     throw new Error(`web.auth.sessionTtlSeconds 配置非法（值：${String(sessionTtlSeconds)}）：必须是正数（秒）`);
@@ -300,6 +308,8 @@ export function resolveWebSettings(
     personalOnly,
     engineHomeRoot,
     maxUploadBytes,
+    // 文本预览上限（docs/dev/web-file-preview.md P1 归一产物）
+    maxPreviewBytes,
     // 补充指令开关（6.2 归一产物，docs/dev/web-steering.md W7）
     steeringEnabled,
     auth: {

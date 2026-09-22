@@ -8,11 +8,14 @@
  *   「我的文件」= 当前用户个人上传区（聊天附件落此处，仅本人可见）；
  * - 上传：行内上传图标按钮（多选），POST /api/files/upload?path=&scope= 后刷新；
  * - 下载：行内下载图标（<a download> 直链 GET /api/files/download?path=&scope=）；
+ * - 预览（docs/dev/web-file-preview.md P2/P3）：文本/图片文件行内预览图标 + 点击文件名，
+ *   抽屉内容区切换为 FilePreview 覆盖层（md A2UI 渲染 / 代码行号 / 图片内嵌）；
  * - 「作为附件插入对话」：把选中文件路径经 onInsertAttachment 交给 Composer。
  */
 import { useEffect, useRef, useState } from "react";
 import { fileDownloadUrl, listFiles, uploadFiles, type FileEntry, type FileListing, type FileScope } from "../api";
 import { formatTime, humanSize } from "../format";
+import { FilePreview, isPreviewable } from "./FilePreview";
 import {
   CloseIcon,
   FileCodeIcon,
@@ -20,6 +23,7 @@ import {
   FileImageIcon,
   FolderIcon,
   InsertIcon,
+  PreviewIcon,
   RefreshIcon,
   UploadIcon,
 } from "./icons";
@@ -37,6 +41,11 @@ export interface FileDrawerProps {
   personalOnly: boolean;
   /** 关闭抽屉 */
   onClose: () => void;
+  /**
+   * 文本预览上限（字节，来自 /api/config）：条目预览入口判定用，
+   * 0 = 配置未就绪时宽松放行（后端 preview 端点仍会 413 兜底）。
+   */
+  maxPreviewBytes: number;
   /** 把服务器文件路径作为附件插入对话 */
   onInsertAttachment: (path: string, isImage: boolean) => void;
 }
@@ -67,11 +76,20 @@ function entryIcon(e: FileEntry) {
 }
 
 /** FileDrawer：右侧抽屉 */
-export function FileDrawer({ open, allowRoots, personalOnly, onClose, onInsertAttachment }: FileDrawerProps) {
+export function FileDrawer({
+  open,
+  allowRoots,
+  personalOnly,
+  maxPreviewBytes,
+  onClose,
+  onInsertAttachment,
+}: FileDrawerProps) {
   /** 当前浏览目录（初始为第一个白名单根；无白名单时为空串由服务端决定默认） */
   const [currentPath, setCurrentPath] = useState(() => (allowRoots.length > 0 ? allowRoots[0] : ""));
   /** 文件区作用域：shared=共享 allowRoots / personal=本人个人区（隔离设计 §3.5；个人模式下恒为 personal） */
   const [scope, setScope] = useState<FileScope>(personalOnly ? "personal" : "shared");
+  /** 预览目标（null = 列表态；非空 = 抽屉内容区覆盖为 FilePreview） */
+  const [preview, setPreview] = useState<{ path: string; name: string; size: number } | null>(null);
 
   // 个人模式配置异步就绪（config 晚于首次渲染返回）时把作用域收敛到 personal，
   // 避免残留 shared 作用域向已被后端禁用的共享区发请求
@@ -80,6 +98,7 @@ export function FileDrawer({ open, allowRoots, personalOnly, onClose, onInsertAt
       setScope("personal");
       setListing(null);
       setCurrentPath("");
+      setPreview(null); // 作用域收敛时退出预览态（预览目标可能属共享区）
     }
   }, [personalOnly, scope]);
   /** 目录列表数据 */
@@ -90,6 +109,9 @@ export function FileDrawer({ open, allowRoots, personalOnly, onClose, onInsertAt
   const [error, setError] = useState("");
   /** 隐藏的上传 input 引用 */
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
+
+  /** 面包屑当前目录完整路径（服务端归一 listing.path 优先，回退本地 currentPath） */
+  const browsePath = listing?.path ?? currentPath;
 
   /** 加载目录列表（scope 由调用方显式传入，避免闭包读到旧状态） */
   const load = (path: string, sc: FileScope): void => {
@@ -157,8 +179,9 @@ export function FileDrawer({ open, allowRoots, personalOnly, onClose, onInsertAt
   // 未打开时不渲染（抽屉动画由 CSS 过渡处理；直接卸载可保证状态干净）
   if (!open) return null;
 
-  // 面包屑分段：从服务端返回的归一路径拆解，逐级可点
-  const segments = (listing?.path ?? currentPath).split("/").filter((s) => s !== "");
+  // 面包屑分段：从服务端返回的归一路径拆解，逐级可点；
+  // 绝对路径的根段显示为「根目录」二字（完整路径已在上方 crumb-fullpath 行展示）
+  const segments = browsePath.split("/").filter((s) => s !== "");
 
   return (
     <>
@@ -246,8 +269,13 @@ export function FileDrawer({ open, allowRoots, personalOnly, onClose, onInsertAt
           </div>
         )}
 
-        {/* 面包屑：根 / 逐级目录 */}
+        {/* 面包屑：当前目录完整路径（单行、中间省略、title 悬浮全量）+ 逐级可点 */}
         <nav className="breadcrumb" aria-label="路径">
+          <span className="crumb-fullpath" title={browsePath}>
+            {browsePath === "" ? "（未选择目录）" : browsePath}
+          </span>
+        </nav>
+        <nav className="breadcrumb breadcrumb-trail" aria-label="逐级目录">
           <button
             type="button"
             className="crumb"
@@ -264,13 +292,7 @@ export function FileDrawer({ open, allowRoots, personalOnly, onClose, onInsertAt
               }
             }}
             disabled={scope === "shared" && listing === null && allowRoots.length === 0}
-            title={
-              scope === "shared" && listing === null
-                ? allowRoots.length > 0
-                  ? allowRoots[0]
-                  : "共享目录未配置白名单根（web.allowRoots）"
-                : "回到根目录"
-            }
+            title={browsePath !== "" ? browsePath : "回到根目录"}
           >
             根目录
           </button>
@@ -279,12 +301,29 @@ export function FileDrawer({ open, allowRoots, personalOnly, onClose, onInsertAt
             return (
               <span key={prefix} className="crumb-seg">
                 <span className="crumb-sep">/</span>
-                <button type="button" className="crumb" onClick={() => load(prefix, scope)} title={prefix}>
+                <button
+                  type="button"
+                  className="crumb"
+                  onClick={() => {
+                    setPreview(null); // 点目录逐级回列表
+                    load(prefix, scope);
+                  }}
+                  title={prefix}
+                >
                   {seg}
                 </button>
               </span>
             );
           })}
+          {/* 预览态面包屑：末级追加文件名（不可点，仅标识当前预览对象） */}
+          {preview !== null && (
+            <span className="crumb-seg">
+              <span className="crumb-sep">/</span>
+              <span className="crumb crumb-current" title={preview.path}>
+                {preview.name}
+              </span>
+            </span>
+          )}
         </nav>
 
         {/* 错误与状态提示 */}
@@ -305,7 +344,10 @@ export function FileDrawer({ open, allowRoots, personalOnly, onClose, onInsertAt
                     key={full}
                     type="button"
                     className="file-row file-row-dir"
-                    onClick={() => load(full, scope)}
+                    onClick={() => {
+                      setPreview(null); // 进入子目录回列表态
+                      load(full, scope);
+                    }}
                     title={full}
                   >
                     {entryIcon(e)}
@@ -314,15 +356,32 @@ export function FileDrawer({ open, allowRoots, personalOnly, onClose, onInsertAt
                   </button>
                 );
               }
+              const previewable = isPreviewable(e.name, e.size, maxPreviewBytes);
+              /** 打开预览：stopPropagation 阻断行点击重复触发 */
+              const openPreview = (event: { stopPropagation: () => void }): void => {
+                event.stopPropagation();
+                setPreview({ path: full, name: e.name, size: e.size });
+              };
               return (
-                <div key={full} className="file-row file-row-file" title={full}>
+                <div
+                  key={full}
+                  className="file-row file-row-file"
+                  title={previewable ? `${full}（点击预览）` : full}
+                  onClick={previewable ? () => setPreview({ path: full, name: e.name, size: e.size }) : undefined}
+                >
                   {entryIcon(e)}
                   <span className="file-row-name">{e.name}</span>
                   <span className="file-row-meta">
                     {humanSize(e.size)} · {formatTime(e.mtime)}
                   </span>
-                  {/* 行内操作：插入对话 / 下载（图标直显） */}
-                  <span className="file-row-actions">
+                  {/* 行内操作：预览（文本/图片）/ 插入对话 / 下载（图标直显；
+                      按钮一律 stopPropagation，防止触发行级预览） */}
+                  <span className="file-row-actions" onClick={(ev) => ev.stopPropagation()}>
+                    {previewable && (
+                      <button type="button" className="icon-btn" title="预览" onClick={openPreview}>
+                        <PreviewIcon size={15} />
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="icon-btn"
@@ -356,6 +415,17 @@ export function FileDrawer({ open, allowRoots, personalOnly, onClose, onInsertAt
               );
             })}
         </div>
+
+        {/* 预览覆盖层（docs/dev/web-file-preview.md P3）：覆盖面包屑以下的内容区 */}
+        {preview !== null && (
+          <FilePreview
+            path={preview.path}
+            name={preview.name}
+            size={preview.size}
+            scope={scope}
+            onBack={() => setPreview(null)}
+          />
+        )}
       </aside>
     </>
   );

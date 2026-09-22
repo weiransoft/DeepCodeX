@@ -14,7 +14,7 @@
  */
 
 import { createReadStream } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { resolveInJail } from "../jail";
@@ -255,4 +255,102 @@ export async function handleDownloadFile(
     res.on("close", resolve);
     stream.pipe(res);
   });
+}
+
+/** GET /api/files/preview 响应载荷（docs/dev/web-file-preview.md P1） */
+export type FilePreviewResult = {
+  /** 服务端归一后的真实绝对路径 */
+  path: string;
+  /** 文件名（basename） */
+  name: string;
+  /** 文件字节大小 */
+  size: number;
+  /** 最后修改时间（ISO） */
+  mtime: string;
+  /** 预览文本（UTF-8；truncated 为 true 时按上限截断） */
+  text: string;
+  /** 是否因超过 maxPreviewBytes 被截断 */
+  truncated: boolean;
+};
+
+/**
+ * UTF-8 解码并在多字节字符中间截断时安全去除残缺尾字节。
+ *
+ * Node 的 Buffer.toString("utf8") 对残缺尾序列以 U+FFFD 收尾；预览截断
+ * 允许恰好多字节边界切断，此时去掉残缺尾字节重解，保证返回文本无乱码尾。
+ *
+ * @param buf 原始字节（可能截断于多字节字符中间）
+ * @returns 无残缺尾的 UTF-8 文本
+ */
+function decodeUtf8Safe(buf: Buffer): string {
+  let text = buf.toString("utf8");
+  // 截断点把多字节字符切成残尾：toString 产生 1 个 U+FFFD；逐字节回退重解
+  while (text.endsWith("\uFFFD")) {
+    const shorter = buf.subarray(0, buf.length - 1);
+    if (shorter.length === buf.length) break;
+    buf = shorter;
+    text = buf.toString("utf8");
+  }
+  return text;
+}
+
+/**
+ * 处理 GET /api/files/preview?path=<文件>：文本文件预览。
+ *
+ * 安全链路与 download 完全一致（牢笼 + 个人区 `.deepcode` 保护）；
+ * 文本性判定：前 8 KiB 采样无 NUL 字节且可严格 UTF-8 解码（BOM 放行），
+ * 不满足 → 415 引导下载；文件 > maxPreviewBytes → 413（预览上限独立于上传上限）。
+ *
+ * @param res 响应对象（200 JSON 响应体）
+ * @param settings Web 配置（maxPreviewBytes）
+ * @param jailRoots 牢笼白名单根
+ * @param filePath 请求的文件路径
+ */
+export async function handlePreviewFile(
+  res: ServerResponse,
+  settings: ResolvedWebSettings,
+  jailRoots: string[],
+  filePath: string | null
+): Promise<void> {
+  const file = await guardPath(jailRoots, filePath ?? "", "文件预览");
+  // 个人区引擎目录保护：禁止预览引擎区内部文件（如 settings.json 凭据、日志）
+  guardPersonalEngineDir(jailRoots, file);
+  const info = await stat(file).catch(() => null);
+  if (!info) {
+    throw new ApiError(404, "文件不存在");
+  }
+  if (!info.isFile()) {
+    throw new ApiError(400, "path 不是普通文件（目录请使用目录浏览端点）");
+  }
+  if (info.size > settings.maxPreviewBytes) {
+    throw new ApiError(413, `文件超过预览上限（${settings.maxPreviewBytes} 字节），请下载后查看`);
+  }
+
+  // 读取上限内的字节（大小已 ≤ maxPreviewBytes，整读安全）
+  const buf = await readFile(file);
+  // 文本性判定：含 NUL 视为二进制（UTF-16/图片等）；严格 UTF-8 解码失败同样拒绝。
+  // BOM（EF BB BF）放行——采样段跳过起始 BOM 后再严格解码。
+  if (buf.includes(0)) {
+    throw new ApiError(415, "二进制文件不支持文本预览，请下载后查看");
+  }
+  const sampleLen = Math.min(buf.length, 8192);
+  try {
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    // 跳过 UTF-8 BOM 后严格解码采样段（fatal：非法字节抛错而非替换）
+    const start = buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf ? 3 : 0;
+    decoder.decode(buf.subarray(start, sampleLen));
+  } catch {
+    throw new ApiError(415, "非 UTF-8 文本文件，暂不支持预览，请下载后查看");
+  }
+
+  const truncated = buf.length > settings.maxPreviewBytes; // 上限 413 后理论恒 false，保留供未来分级预览
+  const text = decodeUtf8Safe(truncated ? buf.subarray(0, settings.maxPreviewBytes) : buf);
+  sendJson(res, 200, {
+    path: file,
+    name: path.basename(file),
+    size: info.size,
+    mtime: info.mtime.toISOString(),
+    text,
+    truncated,
+  } satisfies FilePreviewResult);
 }

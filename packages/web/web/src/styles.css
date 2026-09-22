@@ -837,6 +837,114 @@ body {
   text-align: left;
 }
 
+/* ============ 文件预览（docs/dev/web-file-preview.md P3） ============ */
+/* 预览覆盖层：flex 子项占满抽屉剩余空间（.drawer 为纵向 flex 容器） */
+.file-preview {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--app-bg-panel);
+  border-top: 1px solid var(--app-border);
+}
+
+/* 预览头：返回 / 文件名 / 类型徽标 / 大小 / 下载 */
+.file-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--app-border);
+  flex-shrink: 0;
+}
+.file-preview-name {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+.file-preview-badge {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  color: var(--app-accent);
+  background: var(--app-accent-weak);
+}
+.file-preview-size {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--app-text-secondary);
+}
+
+/* 预览体：可滚动主体区 */
+.file-preview-body {
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+  min-height: 0;
+}
+.file-preview-image {
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+  display: block;
+  margin: 0 auto;
+}
+.file-preview-error {
+  color: var(--app-text-secondary);
+  font-size: 13px;
+  padding: 16px 4px;
+}
+.file-preview-error p {
+  margin: 0 0 6px;
+}
+.file-preview-error-hint {
+  font-size: 12px;
+  color: var(--app-text-secondary);
+  opacity: 0.8;
+}
+.file-preview-markdown {
+  gap: 10px;
+  font-size: 14px;
+}
+
+/* 代码/文本：等宽 + 行号（无语法高亮，零依赖） */
+.file-preview-code {
+  margin: 0;
+  font-family: var(--app-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12.5px;
+  line-height: 1.6;
+  counter-reset: none;
+}
+.code-line {
+  display: flex;
+}
+.code-line-no {
+  flex-shrink: 0;
+  width: 40px;
+  text-align: right;
+  padding-right: 10px;
+  color: var(--app-text-secondary);
+  opacity: 0.55;
+  user-select: none;
+}
+.code-line-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+/* 预览态面包屑末级（不可点标识） */
+.crumb-current {
+  color: var(--app-text);
+  font-weight: 600;
+  cursor: default;
+}
+
 /* ============ Composer ============ */
 .composer {
   position: relative;
@@ -1084,6 +1192,25 @@ body {
 }
 .crumb-sep {
   color: var(--app-text-tertiary);
+}
+/* 当前目录完整路径（面包屑首行）：单行、开头省略号保留末级目录名，悬浮 title 看全量 */
+.crumb-fullpath {
+  display: block;
+  width: 100%;
+  color: var(--app-text-secondary);
+  font-family: var(--app-font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl; /* 长路径从头省略、保留尾部（末级目录名）可见 */
+  text-align: left;
+  cursor: default;
+}
+/* 逐级可点行（根目录/…/文件名）：更紧凑，视觉从属于完整路径行 */
+.breadcrumb-trail {
+  padding-top: 0;
+  opacity: 0.85;
 }
 .drawer-error {
   margin: 0 12px 8px;
