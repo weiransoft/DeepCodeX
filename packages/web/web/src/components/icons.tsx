@@ -221,6 +221,32 @@ export function CloseIcon(p: IconProps) {
   );
 }
 
+/** 预览（放大镜）：文件抽屉文本/图片预览入口（docs/dev/web-file-preview.md P2） */
+export function PreviewIcon(p: IconProps) {
+  return (
+    <IconBase {...p} label="预览">
+      <circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <path d="m10.2 10.2 3.3 3.3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </IconBase>
+  );
+}
+
+/** 返回（左箭头）：预览态返回列表 */
+export function BackIcon(p: IconProps) {
+  return (
+    <IconBase {...p} label="返回">
+      <path
+        d="M9.5 3.5 5 8l4.5 4.5M5.5 8h7"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </IconBase>
+  );
+}
+
 /** 作为附件插入（引用箭头） */
 export function InsertIcon(p: IconProps) {
   return (

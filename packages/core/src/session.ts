@@ -1299,7 +1299,13 @@ export class SessionManager {
     // - ExecutionHistoryStore 构造时绑定 projectRoot，内部以 projectCode 算路径
     // - query_execution_history handler 注册到 ToolExecutor（工具执行入口）
     // - historyToolDefinition 填充（后续 getTools externalTools 追加）
-    this.executionHistoryStore = new ExecutionHistoryStore({ projectRoot: this.projectRoot });
+    // 牢笼改造（docs/dev/web-workspace.md C6/C7）：透传本实例 homeRoot，
+    // Web 个人模式下执行历史落入 `<homeRoot>/.deepcode/projects/<code>/`，
+    // 随用户隔离；CLI 缺省 homeRoot = os.homedir()，路径逐字节不变。
+    this.executionHistoryStore = new ExecutionHistoryStore({
+      projectRoot: this.projectRoot,
+      homeDir: this.homeRoot,
+    });
     this.historyToolDefinition.push(getQueryExecutionHistoryToolDefinition());
     this.toolExecutor.registerToolHandler(
       "query_execution_history",

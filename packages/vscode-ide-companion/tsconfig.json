@@ -3,7 +3,6 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "ignoreDeprecations": "6.0",
     "lib": ["ES2022"],
     "strict": true,
     "esModuleInterop": true,
@@ -12,7 +11,6 @@
     "resolveJsonModule": true,
     "noEmit": true,
     "types": ["node", "vscode"],
-    "baseUrl": ".",
     "paths": {
       "@vegamo/deepcode-core": ["../core/src/index.ts"],
       "@vegamo/deepcode-core/*": ["../core/src/*"]

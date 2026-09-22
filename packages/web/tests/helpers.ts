@@ -276,6 +276,8 @@ export function createResolvedSettings(overrides: Partial<ResolvedWebSettings> =
     steeringEnabled: true,
     engineHomeRoot: path.join(tmpdir(), "deepcode-web-test-engine-home"),
     maxUploadBytes: 1024 * 1024,
+    // 文本预览上限默认 2MiB（与 resolveWebSettings 归一一致，docs/dev/web-file-preview.md P1）
+    maxPreviewBytes: 2 * 1024 * 1024,
     auth: {
       jwtSecret: "test-jwt-secret",
       sessionTtlSeconds: 3600,

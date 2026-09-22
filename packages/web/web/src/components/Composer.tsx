@@ -15,8 +15,6 @@ import { CloseIcon, FileCodeIcon, FileIcon, FileImageIcon, PaperclipIcon, SendIc
 
 /** Composer 组件属性 */
 export interface ComposerProps {
-  /** 无会话时禁用输入 */
-  disabled: boolean;
   /** 生成中：发送按钮切换为停止（steeringEnabled 时发送与停止并排同显） */
   streaming: boolean;
   /** 任务执行中补充指令开关（docs/dev/web-steering.md W7）：false 时生成中禁用输入（旧行为） */
@@ -49,13 +47,13 @@ function fileIcon(name: string) {
 
 /** Composer：底部输入框 */
 export function Composer(props: ComposerProps) {
-  const { disabled, streaming, steeringEnabled, maxUploadBytes, serverFiles, onRemoveServerFile, onSend, onStop } =
-    props;
+  const { streaming, steeringEnabled, maxUploadBytes, serverFiles, onRemoveServerFile, onSend, onStop } = props;
   /**
    * 输入区是否禁用（steering F1）：steeringEnabled 时生成中仍可输入补充指令；
    * 关闭时回退旧行为（生成中禁用 textarea/附件/发送）。
+   * 注意：不存在「无会话禁用」——无选中会话时发送由 App 自动新建会话承载。
    */
-  const inputBlocked = disabled || (streaming && !steeringEnabled);
+  const inputBlocked = streaming && !steeringEnabled;
 
   /** 输入文本 */
   const [text, setText] = useState("");
@@ -166,7 +164,7 @@ export function Composer(props: ComposerProps) {
 
   /** 执行发送：有内容或附件才触发；发送后清空本地状态 */
   const doSend = (): void => {
-    if (disabled || streaming) return;
+    if (inputBlocked) return;
     const trimmed = text.trim();
     if (trimmed === "" && localFiles.length === 0 && serverFiles.length === 0) return;
     onSend(trimmed, localFiles, serverFiles);
@@ -188,7 +186,8 @@ export function Composer(props: ComposerProps) {
     }
   };
 
-  const canSend = !disabled && !streaming && (text.trim() !== "" || localFiles.length > 0 || serverFiles.length > 0);
+  /** 可发送：输入未被阻塞（生成中且 steering 关闭时阻塞）且有文本或附件 */
+  const canSend = !inputBlocked && (text.trim() !== "" || localFiles.length > 0 || serverFiles.length > 0);
 
   return (
     <div
@@ -271,10 +270,10 @@ export function Composer(props: ComposerProps) {
         <textarea
           ref={textareaRef}
           className="composer-input"
-          placeholder={disabled ? "先从左侧新建或选择一个对话" : "输入消息，Enter 发送，Shift+Enter 换行"}
+          placeholder="输入消息，Enter 发送，Shift+Enter 换行"
           rows={1}
           value={text}
-          disabled={disabled || streaming}
+          disabled={inputBlocked}
           onChange={(e) => {
             setText(e.target.value);
             autoResize();

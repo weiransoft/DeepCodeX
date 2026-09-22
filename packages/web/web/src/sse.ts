@@ -109,6 +109,12 @@ export interface StatusEvent {
   status: string;
   /** 处于 ask_permission 状态时携带待审批列表（订阅初始快照可能为 null） */
   askPermissions?: PermissionRequest[] | null;
+  /**
+   * 该会话当前仍在排队的轮次数（steering W1③ / 串行排队修复）：
+   * processing 快照携带；大于 0 表示串行链上还有后续轮次——前端不得复位「生成中」。
+   * 缺省（旧契约快照）视为未知，由前端保持原状。
+   */
+  pendingTurns?: number;
 }
 
 /** done 事件载荷：一轮对话结束（P2：sessionId 在首个消息前可能为 null） */

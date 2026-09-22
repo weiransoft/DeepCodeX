@@ -30,7 +30,7 @@ import {
   handleSendMessage,
   handleStream,
 } from "./api/chat-api";
-import { handleDownloadFile, handleListFiles, handleUploadFile } from "./api/files-api";
+import { handleDownloadFile, handleListFiles, handlePreviewFile, handleUploadFile } from "./api/files-api";
 import { SessionPool, type SessionPoolOptions } from "./session-pool";
 import type { PublicWebConfig, ResolvedWebSettings } from "./types";
 
@@ -350,6 +350,8 @@ export async function startWebServer(
           enabled: resolved.enabled,
           allowRoots: resolved.allowRoots,
           maxUploadBytes: resolved.maxUploadBytes,
+          // 文本预览上限（web-file-preview P1）：前端按 size ≤ 上限显示预览入口
+          maxPreviewBytes: resolved.maxPreviewBytes,
           ldapEnabled: resolved.ldap.enabled,
           // 个人工作目录模式（W7）：前端据此隐藏共享区 tab、放宽空 projectRoot 新建
           personalOnly: resolved.personalOnly,
@@ -413,6 +415,16 @@ export async function startWebServer(
       if (pathname === "/api/files/download" && req.method === "GET") {
         await handleDownloadFile(
           res,
+          await resolveFileJailRoots(ctx, url.searchParams.get("scope"), url.searchParams.get("path")),
+          url.searchParams.get("path")
+        );
+        return;
+      }
+      // 文本预览（docs/dev/web-file-preview.md P1）：牢笼/scope 与 download 完全一致
+      if (pathname === "/api/files/preview" && req.method === "GET") {
+        await handlePreviewFile(
+          res,
+          resolved,
           await resolveFileJailRoots(ctx, url.searchParams.get("scope"), url.searchParams.get("path")),
           url.searchParams.get("path")
         );

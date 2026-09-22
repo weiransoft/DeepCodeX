@@ -81,6 +81,12 @@ export function App() {
   const streamingRef = useRef(false);
   /** 乐观条目自增序号（保证 key 稳定唯一） */
   const seqRef = useRef(0);
+  /**
+   * 自动新建已让位标志：用户在无会话状态主动发送首条消息（自动建会话路径）
+   * 后置位——autoCreatePending 的「列表为空即抢建会话」effect 永久让位，
+   * 避免用户已发消息建了会话后又多出一个空会话。
+   */
+  const autoCreateDismissedRef = useRef(false);
 
   /** 展示轻提示（替换式单条） */
   const showToast = useCallback((msg: string): void => {
@@ -496,18 +502,27 @@ export function App() {
     [creatingChat, config, handleUnauthorized, openChat, showToast]
   );
 
-  /** 新建对话（projectRoot 来自侧栏选择；本地列表项字段与后端 ChatSummary 契约对齐） */
-  const newChat = useCallback((): void => {
-    if (creatingChat) return;
-    // 空根防御：共享模式（personalOnly=false）下 allowRoots 未配置时 projectRoot 为空串，
-    // 不发必然 400 的请求；个人模式空串合法——服务端自动落到本人个人工作区
-    if (projectRoot === "" && !(config?.personalOnly ?? false)) {
-      showToast("未配置可用的项目根目录：请在 ~/.deepcode/settings.json 的 web.allowRoots 中添加目录后重启");
-      return;
-    }
-    setCreatingChat(true);
-    createChat(projectRoot)
-      .then(({ chatId }) => {
+  /**
+   * 新建会话核心（newChat / 首条消息自动建会话共用）。
+   *
+   * @param root 新建对话选用的项目根（个人模式空串合法——服务端落本人个人区）
+   * @param firstMessage 可选：新会话建立后立即发送的首条消息（无选中会话时
+   *        用户在输入框直接发消息的自动建会话路径；附件随同一条消息发出）
+   * @returns 新建的 chatId（失败返回 null，错误已经 toast/401 收敛）
+   */
+  const createNewChat = useCallback(
+    async (
+      root: string,
+      firstMessage?: { text: string; files: File[]; serverAttachments: UserAttachment[] }
+    ): Promise<string | null> => {
+      // 空根防御：共享模式（personalOnly=false）下 allowRoots 未配置时 projectRoot 为空串，
+      // 不发必然 400 的请求；个人模式空串合法——服务端自动落到本人个人工作区
+      if (root === "" && !(config?.personalOnly ?? false)) {
+        showToast("未配置可用的项目根目录：请在 ~/.deepcode/settings.json 的 web.allowRoots 中添加目录后重启");
+        return null;
+      }
+      try {
+        const { chatId } = await createChat(root);
         const now = new Date().toISOString();
         // POST /api/chats 仅返回 {chatId, sessionId}；列表项按后端契约本地补全
         // （status 用引擎合法状态 pending；sessionId 在首个消息发出前为 null）
@@ -517,7 +532,7 @@ export function App() {
           {
             chatId,
             sessionId: null,
-            projectRoot,
+            projectRoot: root,
             title: null,
             status: "pending",
             createTime: now,
@@ -532,19 +547,32 @@ export function App() {
         applyStreaming(false);
         setServerFiles([]);
         ensureStream(chatId);
-      })
-      .catch((e: unknown) => {
+        // 首条消息自动发送路径：新会话订阅就绪后立即发出
+        if (firstMessage) {
+          submitToChat(chatId, firstMessage.text, firstMessage.files, firstMessage.serverAttachments);
+        }
+        return chatId;
+      } catch (e: unknown) {
         if (e instanceof ApiError && e.status === 401) {
           handleUnauthorized();
-          return;
+          return null;
         }
         showToast(e instanceof Error ? e.message : "新建对话失败");
-      })
-      .finally(() => setCreatingChat(false));
-  }, [applyStreaming, config, creatingChat, ensureStream, handleUnauthorized, projectRoot, showToast]);
+        return null;
+      }
+    },
+    [applyStreaming, config, ensureStream, handleUnauthorized, showToast]
+  );
+
+  /** 新建对话（侧栏按钮入口；复用 createNewChat，创建中标记防重入） */
+  const newChat = useCallback((): void => {
+    if (creatingChat) return;
+    setCreatingChat(true);
+    void createNewChat(projectRoot).finally(() => setCreatingChat(false));
+  }, [createNewChat, creatingChat, projectRoot]);
 
   /**
-   * 发送消息：乐观上屏 → 按附件形态选择 JSON / multipart 通道。
+   * 把消息发送到指定会话（与 Composer 的 onSend 通道共用）。
    * P1-1：POST /messages 为 202 异步受理（fire-and-forget）——返回 2xx 即视为受理成功，
    * 不等待整轮完成；流式文本 / 工具进度 / 审批卡片 / done 复位全部由持久 SSE 订阅驱动。
    * P0-2：发送前确保事件流已订阅（connect 对同一会话幂等复用，不重复建连）。
@@ -552,11 +580,14 @@ export function App() {
    * 气泡打角标——steered「已注入当前任务」/ queued「排队中」；降级文案由响应
    * mode 统一决定，前端不猜测。steered 不产生独立 done：「生成中」复位仍由
    * 当前轮 done/pendingTurns 决定（onDone 逻辑不变），此处不为 steered 等待 done。
+   *
+   * @param chatId 目标会话 id（自动建会话路径传入新建的 id）
+   * @param text 消息文本
+   * @param localFiles 本地附件（multipart 通道）
+   * @param serverAttachments 抽屉服务器路径附件
    */
-  const sendMessage = useCallback(
-    (text: string, localFiles: File[], serverAttachments: UserAttachment[]): void => {
-      const chatId = activeChatIdRef.current;
-      if (chatId === null) return;
+  const submitToChat = useCallback(
+    (chatId: string, text: string, localFiles: File[], serverAttachments: UserAttachment[]): void => {
       // 发送前确保已订阅（P0-2）：订阅断线/未建连时由 connect 兜底补建
       ensureStream(chatId);
 
@@ -618,6 +649,30 @@ export function App() {
       }
     },
     [applyStreaming, ensureStream, handleUnauthorized, showToast]
+  );
+
+  /**
+   * Composer 发送入口：有选中会话 → 直接发送；无选中会话（初始化/会话失效后）→
+   * 自动新建会话并把本条消息（含附件）作为首条消息发出，输入框永不因
+   * 「没有会话」而不可用。
+   */
+  const sendMessage = useCallback(
+    (text: string, localFiles: File[], serverAttachments: UserAttachment[]): void => {
+      const chatId = activeChatIdRef.current;
+      if (chatId !== null) {
+        submitToChat(chatId, text, localFiles, serverAttachments);
+        return;
+      }
+      if (creatingChat) return; // 自动建会话进行中防重入
+      // 用户主动首发：让「空列表自动建会话」永久让位（防止随后再多出一个空会话）
+      autoCreateDismissedRef.current = true;
+      setAutoCreatePending(false);
+      setCreatingChat(true);
+      void createNewChat(projectRoot, { text, files: localFiles, serverAttachments }).finally(() =>
+        setCreatingChat(false)
+      );
+    },
+    [createNewChat, creatingChat, projectRoot, submitToChat]
   );
 
   /**
@@ -734,13 +789,15 @@ export function App() {
       });
   }, [authState, handleUnauthorized, showToast]);
 
-  // 自动新建首个对话：会话列表为空（autoCreatePending）时触发一次。
+  // 自动新建首个对话：仅当会话列表为空（autoCreatePending）且用户从未主动
+  // 发送过消息时触发一次——输入框现在无会话也可直接输入（首条消息自动建会话），
+  // 不再抢建用户没要求的空会话。
   // 个人模式（personalOnly）：projectRoot 可为空串（服务端落个人区），
   //   等 config 就绪确认模式后即可创建，不依赖 allowRoots；
   // 共享模式：等 projectRoot（来自 allowRoots[0]）就绪；未配置时 pending 静默滞留，
   //   侧栏已有持久配置引导。
   useEffect(() => {
-    if (!autoCreatePending || creatingChat) return;
+    if (!autoCreatePending || creatingChat || autoCreateDismissedRef.current) return;
     if (projectRoot !== "") {
       setAutoCreatePending(false);
       newChat();
@@ -815,8 +872,8 @@ export function App() {
           onOpenFileDrawer={() => setFileDrawerOpen(true)}
           submittingPermIds={submittingPermIds}
         />
+        {/* 输入框永不禁用：无选中会话时发送将自动新建会话承载首条消息 */}
         <Composer
-          disabled={activeChatId === null}
           streaming={streaming}
           steeringEnabled={config?.steeringEnabled ?? false}
           maxUploadBytes={config?.maxUploadBytes ?? 0}
@@ -832,6 +889,7 @@ export function App() {
         open={fileDrawerOpen}
         allowRoots={config?.allowRoots ?? []}
         personalOnly={config?.personalOnly ?? true}
+        maxPreviewBytes={config?.maxPreviewBytes ?? 0}
         onClose={() => setFileDrawerOpen(false)}
         onInsertAttachment={insertAttachment}
       />

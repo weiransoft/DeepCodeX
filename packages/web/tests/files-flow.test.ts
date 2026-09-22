@@ -323,3 +323,186 @@ test("files：超过 maxUploadBytes 的上传应 413", async () => {
     await limitServer.close();
   }
 });
+
+// ============================================================================
+// 文本文件预览（docs/dev/web-file-preview.md P1：GET /api/files/preview）
+// ============================================================================
+
+test("preview：UTF-8 文本应 200 且内容与磁盘一致（含 name/size/mtime/truncated 字段）", async () => {
+  const filePath = path.join(tmpRoot, "docs", "report.md");
+  const { status, body } = await fetchJson(
+    server.port,
+    "GET",
+    `/api/files/preview?path=${encodeURIComponent(filePath)}`,
+    undefined,
+    cookie
+  );
+
+  assert.equal(status, 200);
+  assert.equal(body.name, "report.md");
+  assert.ok(body.path.endsWith("report.md"), "path 必须是归一后的文件绝对路径");
+  assert.equal(body.text, "# report\n\n内容", "text 必须与磁盘 UTF-8 内容一致");
+  assert.equal(body.size, Buffer.byteLength("# report\n\n内容", "utf8"));
+  assert.equal(body.truncated, false, "限内文件 truncated 必须为 false");
+  assert.ok(!Number.isNaN(Date.parse(body.mtime)), "mtime 必须是合法 ISO 时间");
+});
+
+test("preview：含 NUL 二进制应 415；非法 UTF-8 采样应 415", async () => {
+  const binPath = path.join(tmpRoot, "binary.bin");
+  writeFileSync(binPath, Buffer.concat([Buffer.from("PNG\u0000\u0000binary", "utf8"), Buffer.from([0x89, 0x50])]));
+  const bin = await fetchJson(
+    server.port,
+    "GET",
+    `/api/files/preview?path=${encodeURIComponent(binPath)}`,
+    undefined,
+    cookie
+  );
+  assert.equal(bin.status, 415);
+  assert.match(bin.body.error, /二进制/);
+
+  const badPath = path.join(tmpRoot, "bad-utf8.txt");
+  // 0xff/0xfe 不是合法 UTF-8 起始字节——fatal 解码必须拒绝
+  writeFileSync(badPath, Buffer.from([0xff, 0xfe, 0x41, 0x42]));
+  const bad = await fetchJson(
+    server.port,
+    "GET",
+    `/api/files/preview?path=${encodeURIComponent(badPath)}`,
+    undefined,
+    cookie
+  );
+  assert.equal(bad.status, 415);
+  assert.match(bad.body.error, /UTF-8/);
+});
+
+test("preview：超过 maxPreviewBytes 应 413 引导下载；目录应 400；不存在应 404", async () => {
+  const limitServer = await startWebServer(
+    createResolvedSettings({
+      allowRoots: [tmpRoot],
+      maxPreviewBytes: 64,
+      auth: {
+        jwtSecret: "preview-limit-secret",
+        sessionTtlSeconds: 3600,
+        localUsers: [{ username: "admin", passwordHash: sha256Hex("pv-pass") }],
+      },
+    })
+  );
+  try {
+    const login = await fetchJson(limitServer.port, "POST", "/api/auth/login", {
+      username: "admin",
+      password: "pv-pass",
+    });
+    const pvCookie = extractAuthCookie(login.headers)!;
+
+    const bigPath = path.join(tmpRoot, "big.txt");
+    writeFileSync(bigPath, "字".repeat(100), "utf8"); // 300 字节 > 64
+    const big = await fetchJson(
+      limitServer.port,
+      "GET",
+      `/api/files/preview?path=${encodeURIComponent(bigPath)}`,
+      undefined,
+      pvCookie
+    );
+    assert.equal(big.status, 413, "超限文件必须 413 引导下载");
+    assert.match(big.body.error, /预览上限/);
+
+    const dir = await fetchJson(
+      limitServer.port,
+      "GET",
+      `/api/files/preview?path=${encodeURIComponent(path.join(tmpRoot, "docs"))}`,
+      undefined,
+      pvCookie
+    );
+    assert.equal(dir.status, 400);
+
+    const missing = await fetchJson(
+      limitServer.port,
+      "GET",
+      `/api/files/preview?path=${encodeURIComponent(path.join(tmpRoot, "ghost.txt"))}`,
+      undefined,
+      pvCookie
+    );
+    assert.equal(missing.status, 404);
+  } finally {
+    await limitServer.close();
+  }
+});
+
+test("preview：牢笼越界应 403（白名单防护与 download 同链路）", async () => {
+  const outsideDir = mkdtempSync(path.join(tmpdir(), "deepcode-web-pv-outside-"));
+  try {
+    const secretPath = path.join(outsideDir, "secret.txt");
+    writeFileSync(secretPath, "top secret", "utf8");
+    const { status, body } = await fetchJson(
+      server.port,
+      "GET",
+      `/api/files/preview?path=${encodeURIComponent(secretPath)}`,
+      undefined,
+      cookie
+    );
+    assert.equal(status, 403, "白名单外文件预览必须 403");
+    assert.match(body.error, /白名单/);
+    assert.ok(!JSON.stringify(body).includes("top secret"), "403 响应绝不能包含文件内容");
+  } finally {
+    rmSync(outsideDir, { recursive: true, force: true });
+  }
+});
+
+test("preview：多字节字符截断不得产生残缺尾（UTF-8 安全边界）", async () => {
+  // 上限 67 字节：1 字节 ASCII 头 + 多字节中文，67 恰落中文字符中间
+  const limitServer = await startWebServer(
+    createResolvedSettings({
+      allowRoots: [tmpRoot],
+      maxPreviewBytes: 67,
+      auth: {
+        jwtSecret: "preview-utf8-secret",
+        sessionTtlSeconds: 3600,
+        localUsers: [{ username: "admin", passwordHash: sha256Hex("pv8-pass") }],
+      },
+    })
+  );
+  try {
+    const login = await fetchJson(limitServer.port, "POST", "/api/auth/login", {
+      username: "admin",
+      password: "pv8-pass",
+    });
+    const pvCookie = extractAuthCookie(login.headers)!;
+
+    const path8 = path.join(tmpRoot, "utf8-edge.txt");
+    writeFileSync(path8, "a中中中中中", "utf8"); // 1 + 5×3 = 16 字节 < 67，全量返回无截断
+    const ok = await fetchJson(
+      limitServer.port,
+      "GET",
+      `/api/files/preview?path=${encodeURIComponent(path8)}`,
+      undefined,
+      pvCookie
+    );
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.text, "a中中中中中");
+    assert.ok(!ok.body.text.includes("\uFFFD"), "全量文本绝不含替换符");
+
+    // 边界两侧：67 字节（恰等于上限）全量 200；70 字节（超上限）必须 413
+    const edgePath = path.join(tmpRoot, "utf8-trunc.txt");
+    writeFileSync(edgePath, "a" + "中".repeat(22), "utf8"); // 1 + 22×3 = 67 字节整 → 200 全量
+    const edge = await fetchJson(
+      limitServer.port,
+      "GET",
+      `/api/files/preview?path=${encodeURIComponent(edgePath)}`,
+      undefined,
+      pvCookie
+    );
+    assert.equal(edge.status, 200, "67 字节恰好等于上限（≤ 判定）须 200");
+
+    const overPath = path.join(tmpRoot, "utf8-over.txt");
+    writeFileSync(overPath, "a" + "中".repeat(23), "utf8"); // 1 + 23×3 = 70 字节 > 67 → 413
+    const over = await fetchJson(
+      limitServer.port,
+      "GET",
+      `/api/files/preview?path=${encodeURIComponent(overPath)}`,
+      undefined,
+      pvCookie
+    );
+    assert.equal(over.status, 413, "超过 maxPreviewBytes 的文件必须 413");
+  } finally {
+    await limitServer.close();
+  }
+});

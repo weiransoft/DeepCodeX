@@ -13,20 +13,21 @@
  * - T9  双用户引擎数据矩阵（会话索引按用户物理分离）
  * - T10 shared 禁用矩阵（personalOnly=true 三端点全 403；false 回归现状）
  * - T11 个人区 `.deepcode` 拒写（upload/list/download 一律 403）
- * - T12 旧历史恢复防御（注册表条目 projectRoot 在个人区外 → 恢复 403、列表仍可见）
+ * - T12 旧历史迁移与恢复防御（聊天数据+记忆迁入个人引擎区、注册表改写、
+ *   多源歧义按记忆信号裁决；无源可迁 → 恢复 403、列表仍可见）
  *
  * 测试纪律（用户硬性规则）：无 mock 框架——LLM 用 helpers 中真实受控实现
  * ScriptedLLMClient；所有目录为 mkdtemp 真实磁盘；注册表经 registryBaseDir 注入。
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { realpath } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { getProjectCode, type LLMRequest, type LLMStreamEvent } from "@vegamo/deepcode-core";
 import { startWebServer, type RunningWebServer } from "../src/server";
-import { upsertUserChat } from "../src/chat-registry";
+import { loadUserChats, upsertUserChat } from "../src/chat-registry";
 import { userIdFromUsername } from "../src/user-identity";
 import {
   buildMultipartBody,
@@ -585,12 +586,119 @@ test("WS-T11-03：下载 .deepcode 内文件一律 403", async () => {
 });
 
 // ============================================================================
-// T12：旧历史（allowRoot 时代）恢复防御
+// T12：旧历史（allowRoot 时代）迁移与恢复防御
 // ============================================================================
 
-test("WS-T12-01：注册表条目 projectRoot 在个人区外 → 恢复 403，但列表仍可见", async () => {
-  const legacySessionId = "legacy-session-0001";
-  // 直接向注册表写入一条旧格式记录（projectRoot=共享 allowRoot 时代目录）
+test("WS-T12-01：旧共享时代会话恢复 → 聊天数据与记忆迁入个人引擎区、注册表改写、正常恢复", async () => {
+  const legacyProjectRoot = await realpath(mkdtempSync(path.join(tmpRoot, "legacy-shared-project-")));
+  // legacyEngineHome 就是 tmpRoot（= legacyRoot 的父目录，候选链第 2 位，
+  // 比进程家目录先扫）：构造「人工放置的旧引擎区（带记忆）」与「真实
+  // 家目录影子源（真实轮次落盘）」并存的多源歧义，验证迁移优先选择
+  // 候选链更精确、且记忆与聊天数据同根的旧引擎区。
+  const legacyEngineHome = tmpRoot;
+
+  // —— 前置：在共享服务器（personalOnly=false，引擎区=进程家目录）真实跑一轮，
+  //    让旧会话的 sessions-index.json / <sessionId>.jsonl 由引擎真实落盘 ——
+  const seed = await fetchJson(
+    sharedServer.port,
+    "POST",
+    "/api/chats",
+    { projectRoot: legacyProjectRoot },
+    sharedCookieA
+  );
+  assert.equal(seed.status, 200, `旧时代会话创建前置条件失败：${JSON.stringify(seed.body)}`);
+  const seedChatId = seed.body.chatId as string;
+  const { collector, controller } = await openSseStream(sharedServer.port, seedChatId, sharedCookieA);
+  const donePromise = collector.waitFor("done", 15000);
+  const send = await fetchJson(
+    sharedServer.port,
+    "POST",
+    `/api/chats/${seedChatId}/messages`,
+    { text: "旧时代的历史消息" },
+    sharedCookieA
+  );
+  assert.equal(send.status, 202);
+  const done = await donePromise;
+  controller.abort();
+  const legacySessionId = done.data.sessionId as string;
+  assert.ok(legacySessionId, "旧会话轮次必须产出底层 sessionId");
+
+  // —— 旧引擎区数据构造：共享时代引擎锚定进程家目录，把真实落盘的项目数据
+  //    复制到合成的旧引擎数据根（模拟旧部署的引擎区），并放置旧时代全局记忆
+  const legacyCode = getProjectCode(legacyProjectRoot);
+  // 共享服务器 personalOnly=false 未注入引擎区覆写，引擎数据按默认布局落
+  // 真实进程家目录（os.homedir()，非 realpath 形态）——旧时代部署的镜像，
+  // 源目录必须用 homedir() 原样拼接。
+  const sourceProjectDir = path.join(homedir(), ".deepcode", "projects", legacyCode);
+  assert.ok(existsSync(path.join(sourceProjectDir, "sessions-index.json")), "前置：旧会话索引必须真实落盘");
+  const legacyProjects = path.join(legacyEngineHome, ".deepcode", "projects");
+  mkdirSync(legacyProjects, { recursive: true });
+  cpSync(sourceProjectDir, path.join(legacyProjects, legacyCode), { recursive: true });
+  const legacyMemoryDir = path.join(legacyEngineHome, ".deepcode", "memory");
+  mkdirSync(legacyMemoryDir, { recursive: true });
+  // 记忆文件名避开共享轮次收尾会在真实家目录沉淀的同名文件（global.json
+  // 等），保证「一次性拷贝」断言读到的是干净迁入副本而非写入中间态。
+  const legacyGlobalMemory = path.join(legacyMemoryDir, "user-global.json");
+  writeFileSync(legacyGlobalMemory, JSON.stringify({ entries: [{ content: "旧时代的经验记忆" }] }), "utf8");
+
+  // —— 注册表伪装旧格式：会话的 projectRoot 指向个人区之外的旧共享项目 ——
+  const legacyRegistry = loadUserChats(userIdA, registryDir).find((item) => item.sessionId === legacySessionId);
+  assert.ok(legacyRegistry, "前置：共享轮次结束后注册表必须有该会话记录");
+  upsertUserChat(userIdA, { ...legacyRegistry, projectRoot: legacyProjectRoot }, registryDir);
+
+  // —— 等待共享轮次收尾的全部异步落盘（记忆沉淀 / redaction.log 等）完成，
+  //    否则它们可能在下方迁移「逐文件记忆拷贝」之后才出现在个人引擎区，
+  //    虽不会覆盖迁入副本，但会让断言读到写入中途的状态。——
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+
+  // —— 恢复：个人模式服务器应触发一次性迁移并按个人区正常恢复（200 而非 403）——
+  const restored = await fetchJson(
+    personalServer.port,
+    "POST",
+    "/api/chats",
+    { projectRoot: "", sessionId: legacySessionId },
+    cookieA
+  );
+  assert.equal(
+    restored.status,
+    200,
+    `旧历史迁移后恢复必须 200（得到 ${restored.status}：${JSON.stringify(restored.body)}）`
+  );
+  const personalRootA = await realpath(path.join(tmpRoot, "uploads", userIdA));
+  assert.equal(restored.body.projectRoot, personalRootA, "恢复后的 projectRoot 必须是本人个人区");
+
+  // —— 迁移结果断言：聊天数据（索引条目 + jsonl）已复制进个人引擎区 ——
+  const migratedProjectDir = path.join(engineHomeRoot, userIdA, ".deepcode", "projects", getProjectCode(personalRootA));
+  assert.ok(existsSync(path.join(migratedProjectDir, "sessions-index.json")), "个人引擎区必须出现会话索引");
+  assert.ok(existsSync(path.join(migratedProjectDir, `${legacySessionId}.jsonl`)), "个人引擎区必须出现迁入的消息流");
+
+  // —— 记忆一次性拷贝：旧时代记忆文件进入个人引擎区（隔离副本）。
+  //    选 user-global.json：共享轮次收尾会在共用引擎区沉淀 global.json 等
+  //    同名文件（copyIfMissing「目标已存在跳过」正是「个人记忆绝不与共享
+  //    旧记忆混合」的隔离语义），而 user-global.json 在无工具调用的轮次中
+  //    不会产生，可干净断言一次性拷贝。——
+  const migratedMemory = path.join(engineHomeRoot, userIdA, ".deepcode", "memory", "user-global.json");
+  assert.ok(existsSync(migratedMemory), "旧时代记忆文件必须一次性拷贝进个人引擎区");
+  assert.equal(
+    readFileSync(migratedMemory, "utf8"),
+    readFileSync(legacyGlobalMemory, "utf8"),
+    "记忆副本内容必须与源一致"
+  );
+
+  // —— 注册表条目改写：projectRoot 已指向个人区 ——
+  const rewritten = loadUserChats(userIdA, registryDir).find((item) => item.sessionId === legacySessionId);
+  assert.ok(rewritten, "注册表条目必须保留");
+  assert.equal(rewritten.projectRoot, personalRootA, "注册表 projectRoot 必须改写为个人区根");
+
+  // —— 全部复制、绝不删除：旧引擎区源数据原样保留（共享模式其他用户仍可用）——
+  assert.ok(existsSync(path.join(legacyProjects, legacyCode, `${legacySessionId}.jsonl`)), "旧引擎区 jsonl 不得被删除");
+  assert.ok(existsSync(legacyGlobalMemory), "旧引擎区记忆源不得被删除");
+});
+
+test("WS-T12-02：注册表无源数据可迁移 → 恢复仍 403，但列表仍可见", async () => {
+  const legacySessionId = "22222222-2222-4222-8222-222222222222";
+  // 直接向注册表写入一条旧格式记录（projectRoot=共享 allowRoot 时代目录，
+  // 但磁盘上不存在任何含该会话索引的旧引擎区 → 迁移无源可寻 → 403 兜底）
   upsertUserChat(
     userIdA,
     {
@@ -613,7 +721,7 @@ test("WS-T12-01：注册表条目 projectRoot 在个人区外 → 恢复 403，�
   assert.equal(hit.title, "旧时代会话");
   assert.equal(hit.source, "history");
 
-  // 恢复：个人模式下注册表条目 projectRoot 不在个人区 → 403
+  // 恢复：无源数据可迁移 → 维持旧防御：明确 403，绝不静默跨区读取
   const restored = await fetchJson(
     personalServer.port,
     "POST",
@@ -621,6 +729,6 @@ test("WS-T12-01：注册表条目 projectRoot 在个人区外 → 恢复 403，�
     { projectRoot: "", sessionId: legacySessionId },
     cookieA
   );
-  assert.equal(restored.status, 403, `旧目录历史恢复必须 403（得到 ${restored.status}）`);
+  assert.equal(restored.status, 403, `无源可迁移的旧目录历史恢复必须 403（得到 ${restored.status}）`);
   assert.match(restored.body.error, /个人工作区|无法恢复/);
 });

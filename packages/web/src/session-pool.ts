@@ -25,12 +25,14 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import {
   InterruptQueue,
   SessionManager,
   createOpenAIClient as createDefaultOpenAIClient,
+  getProjectCode,
   resolveCurrentSettings,
   type AskPermissionRequest,
   type LLMClient,
@@ -239,12 +241,25 @@ export class SessionPool {
       ? await resolveInJail(await buildJailRoots([personalRoot]), personalRoot)
       : await resolveInJail(this.jailRoots, projectRoot);
 
-    // W6 旧历史恢复防御：personalOnly 模式下，恢复目标所在注册表条目的
-    // projectRoot 必须仍在本人个人区内（旧 allowRoot 时代的历史不可恢复）
+    // W6 旧历史迁移 + 恢复防御（docs/dev/web-workspace.md 补充需求）：
+    // personalOnly 模式下，恢复目标在本人注册表中的 projectRoot 落在个人区之外
+    // （旧共享模式 / 工作区重建时代的历史）时——先尝试把该会话的聊天数据
+    // （索引条目 + jsonl + 图片）与全局记忆一次性拷贝进本人引擎数据根，并把
+    // 注册表条目改写为个人区根，之后按个人区正常恢复；
+    // 无法安全迁移（注册表无记录 / 引擎区无源条目 / 源根名非法）时维持旧防御：
+    // 明确 403「不在个人工作区内，无法恢复」，绝不静默跨区读取。
     if (this.settings.personalOnly && sessionId !== undefined) {
       const registryHit = findChatBySessionId(ctx.userId, sessionId, this.registryBaseDir);
       if (registryHit && path.resolve(registryHit.projectRoot) !== personalRoot) {
-        throw new ApiError(403, "历史会话所在目录不在个人工作区内，无法恢复");
+        // 迁移目标必须与恢复时 SessionManager 实际使用的 projectRoot 一致
+        // （resolvedRoot=realpath 归一值）——getProjectCode 对路径逐字节敏感，
+        // 若两侧形态不一致（如 /var 与 /private/var）数据会迁入影子目录，
+        // 迁移显示成功但恢复 404。
+        const migrated = this.migrateLegacySession(ctx.userId, sessionId, resolvedRoot, engineHomeDir);
+        if (!migrated) {
+          throw new ApiError(403, "历史会话所在目录不在个人工作区内，无法恢复");
+        }
+        console.log(`[session-pool] 旧会话 ${sessionId} 已迁移至个人工作区（聊天数据与记忆拷贝完成）`);
       }
     }
 
@@ -404,6 +419,228 @@ export class SessionPool {
       console.error(`[session-pool] 注册表登记失败 chatId=${chatId}: ${message}`);
     }
     return { chatId, sessionId: chat.sessionId, projectRoot: resolvedRoot };
+  }
+
+  /**
+   * 把旧（个人区之外）引擎数据根下的一次性会话数据迁移进本人引擎数据根
+   * （docs/dev/web-workspace.md 补充需求：个人工作目录模式启用前的历史会话，
+   * 聊天数据与全局记忆都要拷贝到个人工作区，之后记忆只使用个人区副本）。
+   *
+   * 迁移内容（全部复制、绝不移动/删除旧数据——共享模式下其他用户可能仍依赖）：
+   * 1. 会话聊天数据：`<sourceHome>/.deepcode/projects/<sourceCode>/` 内该会话的
+   *    sessions-index.json 条目、`<sessionId>.jsonl` 消息流、`images/<sessionId>/`
+   *    图片目录 → 合并/复制到 `<engineHome>/.deepcode/projects/<personalCode>/`；
+   * 2. 全局记忆（一次性拷贝）：`<sourceHome>/.deepcode/` 的 memory 目录、
+   *    global-context.json、AGENTS.md → 本人引擎数据根，**目标已存在时跳过**
+   *    （记忆隔离语义：个人区一旦有自己的记忆，绝不与共享区旧记忆混合）。
+   *
+   * 安全边界：
+   * - sessionId 必须是 UUID 形态（jsonl 文件名直接拼接，防路径注入）；
+   * - 个人引擎区（engineHomeRoot 及其子树、projects 下 `.` 前缀目录）一律
+   *   不作为迁移源——防止把某个用户的个人引擎区当作源拷贝（越权读取他人数据）；
+   * - 注册表条目 projectRoot 改写为个人区根后立即原子落盘（tmp+rename），
+   *   后续恢复归属校验与列表展示均以改写后的记录为准。
+   *
+   * @param userId 归属者隔离标识（注册表读写主键）
+   * @param sessionId 待迁移的底层引擎会话 id
+   * @param personalRoot 本人个人工作区根（改写注册表条目的目标 projectRoot）
+   * @param engineHome 本人引擎数据根（迁移目标 `<engineHomeRoot>/<userId>`）
+   * @returns true=迁移完成（调用方按个人区正常恢复）；false=无法安全迁移
+   */
+  private migrateLegacySession(userId: string, sessionId: string, personalRoot: string, engineHome: string): boolean {
+    try {
+      // ① sessionId 合法性：引擎会话 id 恒为 UUID；强校验后文件名可安全直接拼接
+      const entry = loadUserChats(userId, this.registryBaseDir).find((item) => item.sessionId === sessionId);
+      if (!entry || !/^[0-9a-fA-F-]{36}$/.test(sessionId)) {
+        return false;
+      }
+      // ② 注册表条目中的旧项目根（已确认落在个人区之外，调用方保证）
+      const legacyRoot = path.resolve(entry.projectRoot);
+      // ③ 旧引擎数据根推导：引擎会话数据的锚点是 `<引擎数据根>/.deepcode/projects/
+      //    <projectCode>/`，旧共享时代的引擎数据根 = 旧服务进程家目录，
+      //    无法从配置精确还原，按合理性依次尝试：
+      //    a) legacyRoot 直接作为引擎数据根（旧进程家目录被直接用作工作目录）；
+      //    b) legacyRoot 的父目录链（旧工作目录位于家目录下一/二/三级是常见布局，
+      //       3 层封顶 + 必须真存在，防无界上溯）；
+      //    c) 服务进程家目录（共享时代从未改过引擎区的部署）。
+      //    个人引擎区（engineHomeRoot 及其任何子树——含 uploadDir/<userId> 个人区）
+      //    一律不作为源，杜绝跨用户读取。
+      const engineRootAbs = path.resolve(this.settings.engineHomeRoot);
+      const insideEngineRoot = (target: string): boolean =>
+        target === engineRootAbs || target.startsWith(engineRootAbs + path.sep);
+      const legacyHomeCandidates: string[] = [];
+      const pushCandidate = (candidate: string): void => {
+        const abs = path.resolve(candidate);
+        if (!insideEngineRoot(abs) && existsSync(abs) && !legacyHomeCandidates.includes(abs)) {
+          legacyHomeCandidates.push(abs);
+        }
+      };
+      pushCandidate(legacyRoot);
+      let ancestor = path.dirname(legacyRoot);
+      for (let depth = 0; depth < 3; depth += 1) {
+        pushCandidate(ancestor);
+        const parent = path.dirname(ancestor);
+        if (parent === ancestor) {
+          break; // 到达文件系统根，停止上溯
+        }
+        ancestor = parent;
+      }
+      pushCandidate(homedir());
+      // ④ 源选择：收集**全部**含该会话索引条目的候选源。
+      // 多源歧义（同一 sessionId 的索引散落在多个候选家目录，开发机上
+      // 常见——真实进程家目录与旧部署引擎目录并存）时按候选顺序优先：
+      // 旧项目根自身及其祖先链（精确推导，记忆与聊天数据同根）排在
+      // 进程家目录（默认布局影子源）之前，先命中先裁决。
+      type SourceCandidate = { home: string; projects: string };
+      const sourceMatches: SourceCandidate[] = [];
+      const indexHasSession = (indexPath: string): boolean => {
+        if (!existsSync(indexPath)) {
+          return false;
+        }
+        try {
+          const parsed = JSON.parse(readFileSync(indexPath, "utf8")) as { entries?: Array<{ id?: string }> };
+          return Array.isArray(parsed.entries) && parsed.entries.some((item) => item?.id === sessionId);
+        } catch {
+          // 索引损坏：视为未命中，交给下一个候选
+          return false;
+        }
+      };
+      for (const home of legacyHomeCandidates) {
+        const projectsDir = path.join(home, ".deepcode", "projects");
+        if (!existsSync(projectsDir)) {
+          continue;
+        }
+        let codes: string[];
+        try {
+          codes = readdirSync(projectsDir);
+        } catch {
+          continue;
+        }
+        for (const code of codes) {
+          // 个人引擎区的 projectCode 目录形态（`.` 前缀隐藏目录）不作为迁移源
+          if (code.startsWith(".")) {
+            continue;
+          }
+          if (indexHasSession(path.join(projectsDir, code, "sessions-index.json"))) {
+            sourceMatches.push({ home, projects: path.join(projectsDir, code) });
+            break; // 同一 home 只取一个命中目录
+          }
+        }
+      }
+      if (sourceMatches.length === 0) {
+        // 兜底（共享时代引擎从未改过引擎区的部署）：legacyRoot 被用作工作
+        // 目录，但会话数据按默认布局直接落在服务进程家目录（家目录候选
+        // 即便已扫过，上一步也只扫家目录的 projects，而非按旧根推导的
+        // projectCode 路径——该场景下家目录扫描同样命中，此处仅为家目录
+        // 不在候选列表（等于个人引擎区，极端配置）时留一条按默认布局
+        // 定位的通路）。个人引擎区仍被排除，跨用户读取不可能发生。
+        const homeAbs = path.resolve(homedir());
+        const legacyCode = getProjectCode(legacyRoot);
+        if (!insideEngineRoot(homeAbs) && !legacyCode.startsWith(".")) {
+          const directProjects = path.join(homeAbs, ".deepcode", "projects", legacyCode);
+          if (indexHasSession(path.join(directProjects, "sessions-index.json"))) {
+            sourceMatches.push({ home: homeAbs, projects: directProjects });
+          }
+        }
+      }
+      if (sourceMatches.length === 0) {
+        // 源数据必须真实存在且含该会话索引条目——无源可迁时绝不进入注册表
+        // 改写，绝不出现「条目已改写但数据未迁移」半态。
+        return false;
+      }
+      // 多源歧义裁决：候选顺序第一个命中（旧项目根/祖先链优先于进程家目录）
+      const chosenSource = sourceMatches[0];
+      const sourceProjects = chosenSource.projects;
+      const sourceHome = chosenSource.home;
+
+      // ⑤ 目标项目目录（个人区根的 projectCode）与数据复制。
+      // 必须按引擎恢复时的 projectRoot 计算（调用方传入的 resolvedRoot =
+      // realpath 归一值）——getProjectCode 对路径逐字节敏感，未归一形态
+      // （如 /var 与 /private/var）可能算出不同 projectCode，数据迁入
+      // 「影子目录」会导致迁移成功但恢复 404。
+      // 引擎 saveSessionsIndex 落盘时写 originalPath=projectRoot，load 时
+      // 信任该值——迁移条目同样改写，保持与目标区原生条目一致。
+      const targetCode = getProjectCode(personalRoot);
+      const targetDir = path.join(engineHome, ".deepcode", "projects", targetCode);
+      mkdirSync(targetDir, { recursive: true });
+      // 消息流 jsonl（目标已存在同名文件时不覆盖——个人区数据优先）
+      const sourceJsonl = path.join(sourceProjects, `${sessionId}.jsonl`);
+      const targetJsonl = path.join(targetDir, `${sessionId}.jsonl`);
+      if (existsSync(sourceJsonl) && !existsSync(targetJsonl)) {
+        cpSync(sourceJsonl, targetJsonl);
+      }
+      // 会话图片目录（递归复制，force=false 保证同名不覆盖）
+      const sourceImages = path.join(sourceProjects, "images", sessionId);
+      const targetImages = path.join(targetDir, "images", sessionId);
+      if (existsSync(sourceImages)) {
+        cpSync(sourceImages, targetImages, { recursive: true, force: false, errorOnExist: false });
+      }
+      // 会话索引条目合并：源条目原样追加；同 id 条目以目标（个人区）为准。
+      // 读失败/结构非法时目标索引保持原样，会话将因条目缺失回退 403（不静默造数据）
+      const sourceIndex = JSON.parse(readFileSync(path.join(sourceProjects, "sessions-index.json"), "utf8")) as {
+        entries: Array<Record<string, unknown>>;
+      };
+      const targetIndexPath = path.join(targetDir, "sessions-index.json");
+      let targetEntries: Array<Record<string, unknown>> = [];
+      if (existsSync(targetIndexPath)) {
+        try {
+          const parsedTarget = JSON.parse(readFileSync(targetIndexPath, "utf8")) as { entries?: unknown };
+          if (Array.isArray(parsedTarget.entries)) {
+            targetEntries = parsedTarget.entries as Array<Record<string, unknown>>;
+          }
+        } catch {
+          // 目标索引损坏：以空表重建（仅含迁入条目），损坏文件先备份
+          cpSync(targetIndexPath, `${targetIndexPath}.corrupted.${Date.now()}`);
+        }
+      }
+      const targetIds = new Set(targetEntries.map((item) => String(item["id"] ?? "")));
+      for (const item of sourceIndex.entries ?? []) {
+        if (String(item["id"] ?? "") === sessionId && !targetIds.has(sessionId)) {
+          targetEntries.push(item);
+        }
+      }
+      // sourceIndex.entries 全部校验通过后原子写入（tmp+rename）
+      const tmpIndex = `${targetIndexPath}.${process.pid}.${randomUUID()}.tmp`;
+      writeFileSync(tmpIndex, JSON.stringify({ version: 1, entries: targetEntries }, null, 2), "utf8");
+      renameSync(tmpIndex, targetIndexPath);
+
+      // ⑥ 全局记忆一次性拷贝（逐文件：个人区已有同名文件即跳过——个人区
+      // 记忆独立，绝不与共享区旧记忆混合；memory 目录可能已被个人区活动
+      // 创建（如 redaction.log），整目录跳过会丢失旧记忆文件，故平铺复制）
+      const legacyDeepcode = path.join(sourceHome, ".deepcode");
+      const targetDeepcode = path.join(engineHome, ".deepcode");
+      const copyFileIfMissing = (src: string, dst: string): void => {
+        if (!existsSync(src) || existsSync(dst)) {
+          return;
+        }
+        mkdirSync(path.dirname(dst), { recursive: true });
+        cpSync(src, dst, { force: false, errorOnExist: false });
+      };
+      const legacyMemory = path.join(legacyDeepcode, "memory");
+      if (existsSync(legacyMemory)) {
+        try {
+          for (const name of readdirSync(legacyMemory)) {
+            copyFileIfMissing(path.join(legacyMemory, name), path.join(targetDeepcode, "memory", name));
+          }
+        } catch {
+          // 目录不可读：记忆拷贝尽力而为，失败不影响聊天数据迁移结论
+        }
+      }
+      copyFileIfMissing(
+        path.join(legacyDeepcode, "global-context.json"),
+        path.join(targetDeepcode, "global-context.json")
+      );
+      copyFileIfMissing(path.join(legacyDeepcode, "AGENTS.md"), path.join(targetDeepcode, "AGENTS.md"));
+
+      // ⑦ 注册表条目改写：projectRoot → 个人区根（其余字段原样保留）
+      upsertUserChat(userId, { ...entry, projectRoot: personalRoot }, this.registryBaseDir);
+      return true;
+    } catch (error) {
+      // 迁移失败绝不部分生效后才继续恢复：任何异常收敛为 false → 调用方 403
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[session-pool] 旧会话迁移失败 sessionId=${sessionId}: ${message}`);
+      return false;
+    }
   }
 
   /**

@@ -201,6 +201,11 @@ export type WebSettings = {
   /** 单文件上传上限（字节），默认 50MB */
   maxUploadBytes?: number;
   /**
+   * 文本文件预览读取上限（字节，docs/dev/web-file-preview.md P1，默认 2MB）：
+   * Web 文件抽屉 GET /api/files/preview 读取的字节上限，超限 413 引导下载。
+   */
+  maxPreviewBytes?: number;
+  /**
    * 任务执行中补充指令（steering）开关（docs/dev/web-steering.md W7，默认 true）：
    * 开启后 Web 端轮次运行中收到的补充消息经 LLM 意图分类，判定为 steer 时
    * 立即注入当前任务（injectInstruction），否则排队为新任务；

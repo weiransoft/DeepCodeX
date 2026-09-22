@@ -32,6 +32,10 @@ export interface AppConfig {
   ldapEnabled: boolean;
   /** 个人工作目录模式（docs/dev/web-workspace.md W7）：true 时共享区禁用、会话锁定个人区 */
   personalOnly: boolean;
+  /** 补充指令开关（docs/dev/web-steering.md W7）：false 时前端回退「运行中禁用输入」旧行为 */
+  steeringEnabled: boolean;
+  /** 文本预览上限（字节，docs/dev/web-file-preview.md P1）：前端据此预判可预览文件 */
+  maxPreviewBytes: number;
 }
 
 /**
@@ -96,6 +100,25 @@ export interface FileEntry {
 export interface FileListing {
   path: string;
   entries: FileEntry[];
+}
+
+/**
+ * 文本预览响应（GET /api/files/preview，docs/dev/web-file-preview.md P1）。
+ * 字段与后端 packages/web/src/api/files-api.ts 的 FilePreviewResult 逐字一致。
+ */
+export interface FilePreviewResult {
+  /** 服务端归一后的真实绝对路径 */
+  path: string;
+  /** 文件名（basename） */
+  name: string;
+  /** 文件字节大小 */
+  size: number;
+  /** 最后修改时间（ISO） */
+  mtime: string;
+  /** 预览文本（UTF-8；truncated 为 true 时按上限截断） */
+  text: string;
+  /** 是否因超过 maxPreviewBytes 被截断 */
+  truncated: boolean;
 }
 
 /** 发送文本消息载荷（JSON 路径；imageUrls 为图片本地路径/数据地址，见设计文档 §2.1） */
@@ -224,6 +247,26 @@ export function fetchMe(): Promise<UserInfo> {
   return request<UserInfo>("GET", "/api/auth/me");
 }
 
+/**
+ * 由用户名派生与后端一致的隔离标识（sha256 hex 前 16 位）。
+ *
+ * 用途：前端展示「我的文件」面包屑时还原个人工作区实际路径段
+ * （个人区 = <uploadDir>/<userId>）。与后端 userIdFromUsername 同算法；
+ * 该值为单向哈希、登录前即已知的用户名派生物，纯展示辅助，无安全语义。
+ *
+ * 实现：Web Crypto SHA-256（浏览器安全上下文/SubtleCrypto 可用）。
+ *
+ * @param username 登录用户名（JWT sub，/api/auth/me 返回）
+ * @returns 16 位小写 hex 字符串
+ */
+export async function deriveUserId(username: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(username));
+  return [...new Uint8Array(digest)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("")
+    .slice(0, 16);
+}
+
 /** 脱敏配置（allowRoots / 上传上限 / LDAP 是否启用） */
 export function fetchConfig(): Promise<AppConfig> {
   return request<AppConfig>("GET", "/api/config");
@@ -308,4 +351,13 @@ export function uploadFiles(path: string, files: File[], scope: FileScope = "sha
 /** 构造下载地址：供 <a download> 直接使用（服务端 Content-Disposition 附件下载；scope 分流） */
 export function fileDownloadUrl(path: string, scope: FileScope = "shared"): string {
   return `/api/files/download?scope=${scope}&path=${encodeURIComponent(path)}`;
+}
+
+/**
+ * 文本文件预览（GET /api/files/preview，docs/dev/web-file-preview.md P1）。
+ * 牢笼与 scope 校验在服务端完成；413（超限）/415（二进制）等错误经
+ * request() 统一抛 ApiError，由预览层展示错误引导。
+ */
+export function fetchPreview(path: string, scope: FileScope = "shared"): Promise<FilePreviewResult> {
+  return request<FilePreviewResult>("GET", `/api/files/preview?scope=${scope}&path=${encodeURIComponent(path)}`);
 }

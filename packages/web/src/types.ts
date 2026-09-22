@@ -45,6 +45,11 @@ export type ResolvedWebSettings = {
   /** 单文件上传上限（字节，默认 50MB） */
   maxUploadBytes: number;
   /**
+   * 文本预览读取上限（字节，默认 2MiB，docs/dev/web-file-preview.md P1）：
+   * GET /api/files/preview 读取的字节上限，超限 413 引导下载。
+   */
+  maxPreviewBytes: number;
+  /**
    * 任务执行中补充指令（steering）开关（docs/dev/web-steering.md W7，默认 true）：
    * 开启后轮次运行中收到的补充消息经 LLM 意图分类（steer→立即注入当前任务 /
    * next→排队）；关闭后一律串行排队（回退旧行为）。
@@ -276,6 +281,8 @@ export type PublicWebConfig = {
   /** 已展开的绝对路径白名单 */
   allowRoots: string[];
   maxUploadBytes: number;
+  /** 文本预览上限（字节，docs/dev/web-file-preview.md P1）：前端据此预判可预览文件 */
+  maxPreviewBytes: number;
   ldapEnabled: boolean;
   /** 个人工作目录模式（docs/dev/web-workspace.md W7）：前端据此隐藏共享区入口 */
   personalOnly: boolean;
