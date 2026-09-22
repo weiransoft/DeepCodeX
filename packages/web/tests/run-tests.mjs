@@ -35,9 +35,15 @@ for (const file of testFiles) {
 }
 
 // 运行 node:test（透传额外 CLI 参数）
-const result = spawnSync(process.execPath, ["--import", "tsx", "--test", ...process.argv.slice(2), ...testFiles], {
+// TSX_TSCONFIG_PATH：显式指定 tests/tsconfig.json（jsx: react-jsx +
+// jsxImportSource react）。tsx 默认从进程 cwd 向上发现 tsconfig——
+// cwd=packages/web 时读不到 tests 目录配置，会把 web/src 下 .tsx 模块
+// （如 a2ui/renderer）按经典转换编译成 React.createElement，运行时抛
+// "React is not defined"。
+const result = spawnSync(process.execPath, ["--import", "tsx", "--test", ...testFiles], {
   stdio: "inherit",
   cwd: __dirname,
+  env: { ...process.env, TSX_TSCONFIG_PATH: path.join(__dirname, "tsconfig.json") },
 });
 
 process.exit(result.status ?? 1);
