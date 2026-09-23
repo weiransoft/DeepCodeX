@@ -48,6 +48,13 @@ export type ChatEntry =
        * 可折叠「思考过程」；正式消息（assistant_message）完成后缺省。
        */
       thinking?: string;
+      /**
+       * 本条为「思考中」占位气泡（萤火虫闪烁）：轮次开始（status processing /
+       * llm_delta start 无 thinkingText）时上屏，首个 thinking/正文内容或
+       * assistant_message 到达时被替换。修复工具批次结束后新请求窗口期
+       * 界面无任何指示、看似卡死的问题。
+       */
+      thinkingPending?: boolean;
       /** 本条消息是否已终结（收到 assistant_message 后为 true） */
       done: boolean;
     }
@@ -81,6 +88,20 @@ export type ChatEntry =
       plan: string;
       /** 可选的变更说明（UpdatePlan 的 explanation 参数） */
       explanation?: string;
+    }
+  /**
+   * 后台任务完成/失败通知卡片（引擎 addBackgroundProcessCompletionMessage）：
+   * 引擎以 system 消息（visible=true）推送
+   * `Background command "…" failed with signal SIGKILL after 7m 52s. Output: …`
+   * + 可选 `<background_task_failure_log>` 日志尾切片。整段文本经 Markdown/A2UI
+   * 渲染会命令换行碎裂、日志标签暴露——归并为专用卡片（状态/命令/输出/耗时 +
+   * 可折叠日志尾）。实时 SSE system 帧与历史恢复（role=system DTO）两路径同源生成。
+   */
+  | {
+      kind: "bgtask";
+      id: string;
+      /** 通知载荷（parseBackgroundTaskNotice 解析结果） */
+      notice: BackgroundTaskNotice;
     }
   /** 内联权限审批卡片 */
   | {
@@ -607,4 +628,71 @@ export function parsePlanTasks(plan: string): PlanTaskItem[] {
     if (text !== "") items.push({ text, status, depth });
   }
   return items;
+}
+
+/**
+ * 后台任务完成/失败通知载荷（引擎
+ * addBackgroundProcessCompletionMessage 的 system 消息结构化解析结果）。
+ */
+export interface BackgroundTaskNotice {
+  /** 状态：completed（ok）/ failed（信号或退出码） */
+  status: "completed" | "failed";
+  /** 状态说明原文（signal SIGKILL / exit code 1 / unknown status / completed） */
+  exitText: string;
+  /** 后台命令原文（多行，卡片等宽折叠展示） */
+  command: string;
+  /** 运行时长文本（如 "7m 52s"，引擎 formatBackgroundDuration 产出） */
+  duration: string;
+  /** 输出日志文件路径 */
+  outputPath: string;
+  /** 失败日志尾切片（<background_task_failure_log> 标签内原文；完成态无） */
+  logTail?: string;
+  /** 日志尾是否被引擎截断（"(N bytes)..." 前缀标记） */
+  logTruncated?: boolean;
+}
+
+/**
+ * 解析引擎后台任务通知文本（system 消息 content）。
+ *
+ * 引擎形态（session.ts addBackgroundProcessCompletionMessage）：
+ *   Background command "<cmd>" completed|failed with <exitText> after <dur>. Output: <path>
+ *   [<background_task_failure_log path="...">(N bytes)...\n]<log>[/background_task_failure_log]
+ * 命令本身可含换行（heredoc / && 续行），正则必须用 [\s\S]+? 跨行匹配；
+ * exitText 单行不含 " after "，duration 不含 ". Output:"，均可安全捕获。
+ *
+ * @param content system 消息原文
+ * @returns 结构化载荷；非后台通知文本返回 null（调用方按普通消息渲染）
+ */
+export function parseBackgroundTaskNotice(content: string): BackgroundTaskNotice | null {
+  const m =
+    /^Background command "([\s\S]+?)" (completed|failed) with (.+?) after ([^\n]+?)\. Output: (\S+)(?:\n([\s\S]*))?$/m.exec(
+      content
+    );
+  if (m === null) return null;
+  const [, command, statusWord, exitText, duration, outputPath, tailRaw] = m;
+  const notice: BackgroundTaskNotice = {
+    status: statusWord === "completed" ? "completed" : "failed",
+    exitText: exitText.trim(),
+    command,
+    duration,
+    outputPath,
+  };
+  // 引擎字段缺省防御（unknown status 分支不产出 " after …" 段）：不在此类
+  // 边缘形态上猜测，交给调用方按普通消息渲染，保证信息不丢
+  if (duration.trim() === "" || outputPath === "") return null;
+  // 失败日志尾：<background_task_failure_log path="…">…</background_task_failure_log>
+  if (typeof tailRaw === "string" && tailRaw.trim() !== "") {
+    const log = /<background_task_failure_log path="[^"]*">([\s\S]*?)<\/background_task_failure_log>/.exec(tailRaw);
+    let logBody = log !== null ? log[1] : tailRaw.trim();
+    // 引擎截断前缀："(N bytes)...\n"（日志超长时仅保留尾部切片）；
+    // 标签后可能紧跟换行（引擎 join），前缀匹配前先剥离开头空白
+    const trunc = /^\s*\((\d+) bytes\)\.\.\.\n?/.exec(logBody);
+    if (trunc !== null) {
+      notice.logTruncated = true;
+      logBody = logBody.slice(trunc[0].length);
+    }
+    // 首尾空白规整（标签后换行不进日志体；多行日志内部换行保留）
+    notice.logTail = logBody.replace(/^\s+/, "").replace(/\s+$/, "");
+  }
+  return notice;
 }

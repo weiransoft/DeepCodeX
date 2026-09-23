@@ -562,6 +562,122 @@ body {
   }
 }
 
+/* 「思考中」占位（萤火虫闪烁）：轮次开始但尚无 thinking/正文内容时上屏 */
+.thinking-firefly {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 0;
+}
+.thinking-firefly-label {
+  margin-left: 4px;
+  color: var(--app-text-secondary);
+  font-size: 13px;
+}
+.firefly {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #ffe9a3, #f5c518 70%, #c99700);
+  box-shadow: 0 0 6px 2px rgba(245, 197, 24, 0.55);
+  animation: firefly-blink 1.6s ease-in-out infinite;
+}
+.firefly-2 {
+  animation-delay: 0.35s;
+}
+.firefly-3 {
+  animation-delay: 0.7s;
+}
+@keyframes firefly-blink {
+  0%,
+  100% {
+    opacity: 0.15;
+    transform: scale(0.7);
+    box-shadow: 0 0 2px 0 rgba(245, 197, 24, 0.2);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+    box-shadow: 0 0 8px 3px rgba(245, 197, 24, 0.65);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .firefly {
+    animation: none;
+    opacity: 0.8;
+  }
+}
+
+/* 后台任务完成/失败通知卡片 */
+.bgtask-card {
+  border: 1px solid var(--app-border);
+  border-left: 3px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-bg-elevated);
+  padding: 10px 14px;
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.bgtask-failed {
+  border-left-color: #d9534f;
+}
+.bgtask-completed {
+  border-left-color: #5cb85c;
+}
+.bgtask-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.bgtask-badge {
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+}
+.bgtask-badge-failed {
+  background: #d9534f;
+}
+.bgtask-badge-ok {
+  background: #5cb85c;
+}
+.bgtask-exit,
+.bgtask-duration {
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+}
+.bgtask-cmd-summary,
+.bgtask-log-summary {
+  cursor: pointer;
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+  user-select: none;
+}
+.bgtask-cmd-pre,
+.bgtask-log-pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--app-bg-subtle);
+  border: 1px solid var(--app-border);
+  font-family: var(--app-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 260px;
+  overflow: auto;
+}
+.bgtask-output {
+  color: var(--app-text-secondary);
+  font-size: 12px;
+  word-break: break-all;
+}
+
 /* 工具执行折叠条目 */
 .tool-entry {
   border: 1px solid var(--app-border);

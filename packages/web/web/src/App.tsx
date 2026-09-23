@@ -25,7 +25,7 @@ import {
   type UserInfo,
 } from "./api";
 import type { ChatEntry, UserAttachment } from "./chat-model";
-import { extractPlanFromToolContent, parseLeadingJsonBlock } from "./chat-model";
+import { extractPlanFromToolContent, parseBackgroundTaskNotice, parseLeadingJsonBlock } from "./chat-model";
 import { ChatPane } from "./components/ChatPane";
 import { Composer } from "./components/Composer";
 import { FileDrawer } from "./components/FileDrawer";
@@ -100,6 +100,23 @@ export function App() {
   const applyStreaming = useCallback((v: boolean): void => {
     streamingRef.current = v;
     setStreaming(v);
+    // 「思考中」占位气泡（萤火虫闪烁）随流式状态同步上屏/移除：
+    // 轮次开始即让用户立刻看到引擎在活动，首个 thinking/正文内容
+    // （onLlmDelta）或 assistant_message 到达时由归并逻辑替换
+    if (v) {
+      setEntries((prev) =>
+        prev.some((x) => x.kind === "assistant" && x.id === "stream")
+          ? prev
+          : [
+              ...prev,
+              { kind: "assistant", id: "stream", content: null, preview: null, thinkingPending: true, done: false },
+            ]
+      );
+    } else {
+      setEntries((prev) =>
+        prev.filter((x) => !(x.kind === "assistant" && x.id === "stream" && x.thinkingPending === true))
+      );
+    }
   }, []);
 
   /** 401 统一处理：切换到登录页并清理会话状态 */
@@ -123,13 +140,31 @@ export function App() {
       setEntries((prev) => {
         const idx = prev.findIndex((x) => x.kind === "assistant" && x.id === "stream");
         if (idx >= 0) {
-          // 已有流式气泡：更新预览文本
+          // 已有流式气泡：更新预览文本（占位态 thinkingPending 随首个
+          // thinking/正文内容到达自然清除——展开态由 next 对象整体替换）
           const next = [...prev];
-          next[idx] = { kind: "assistant", id: "stream", content: null, preview: e.previewText, done: false };
+          next[idx] = {
+            kind: "assistant",
+            id: "stream",
+            content: null,
+            preview: e.previewText,
+            thinking: e.thinkingText,
+            done: false,
+          };
           return next;
         }
         // start（或漏收 start）：新建流式气泡
-        return [...prev, { kind: "assistant", id: "stream", content: null, preview: e.previewText, done: false }];
+        return [
+          ...prev,
+          {
+            kind: "assistant",
+            id: "stream",
+            content: null,
+            preview: e.previewText,
+            thinking: e.thinkingText,
+            done: false,
+          },
+        ];
       });
     },
     [applyStreaming]
@@ -163,6 +198,16 @@ export function App() {
       if (payload === null) return;
       setEntries((prev) => [...prev.filter((x) => x.kind !== "plan"), { kind: "plan", id: "plan-latest", ...payload }]);
       return;
+    }
+    // 后台任务完成/失败通知（引擎 system 消息，visible=true 经本通道实时推送）：
+    // 归并为专用通知卡片（命令/状态/耗时/输出 + 可折叠日志尾），
+    // 避免整段文本进助手气泡导致命令换行碎裂、日志标签暴露
+    if (e.role === "system") {
+      const notice = parseBackgroundTaskNotice(e.content);
+      if (notice !== null) {
+        setEntries((prev) => [...prev, { kind: "bgtask", id: `bg-${e.messageId}`, notice }]);
+        return;
+      }
     }
     setEntries((prev) => {
       const streamIdx = prev.findIndex((x) => x.kind === "assistant" && x.id === "stream");
@@ -415,6 +460,15 @@ export function App() {
       if (d.role === "system" && d.meta?.steeringInject === true) {
         const raw = d.meta.steeringText;
         result.push({ kind: "steering", id: `h-${d.id}`, text: typeof raw === "string" && raw !== "" ? raw : content });
+      } else if (d.role === "system") {
+        // 后台任务完成/失败通知（引擎 system 消息，与实时帧同源归并）；
+        // 解析失败的其他 system 消息落入下方助手管线，不静默丢弃
+        const notice = parseBackgroundTaskNotice(content);
+        if (notice !== null) {
+          result.push({ kind: "bgtask", id: `h-${d.id}`, notice });
+        } else {
+          result.push({ kind: "assistant", id: `h-${d.id}`, content, preview: null, done: true });
+        }
       } else if (d.role === "user") {
         result.push({ kind: "user", id: `h-${d.id}`, text: content, attachments: [], createTime: d.createTime });
       } else if (d.role === "tool") {
@@ -644,7 +698,9 @@ export function App() {
       ];
       const entryId = `user-${seqRef.current++}`;
       setEntries((prev) => [
-        ...prev,
+        // 移除可能残留的「思考中」占位气泡（用户新消息上屏后由
+        // applyStreaming(true) 重新上屏，避免占位排在用户消息之前）
+        ...prev.filter((x) => !(x.kind === "assistant" && x.id === "stream" && x.thinkingPending === true)),
         { kind: "user", id: entryId, text, attachments, createTime: new Date().toISOString() },
       ]);
       applyStreaming(true);

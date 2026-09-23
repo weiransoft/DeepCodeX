@@ -214,6 +214,41 @@ export function PlanCard({ entry }: { entry: Extract<ChatEntry, { kind: "plan" }
   );
 }
 
+/**
+ * BgTaskNotice：后台任务完成/失败通知卡片。
+ * 引擎 system 通知整段文本直接渲染会命令换行碎裂、日志标签暴露——
+ * 解析后归并为：状态徽标 + 命令（等宽，长文折叠）+ 耗时/输出路径 +
+ * 失败日志尾（可折叠，默认收起）。解析失败的信息全部保留在卡片字段中。
+ */
+export function BgTaskNotice({ entry }: { entry: Extract<ChatEntry, { kind: "bgtask" }> }) {
+  const n = entry.notice;
+  const failed = n.status === "failed";
+  return (
+    <section className={`bgtask-card ${failed ? "bgtask-failed" : "bgtask-completed"}`}>
+      <header className="bgtask-head">
+        <span className={`bgtask-badge ${failed ? "bgtask-badge-failed" : "bgtask-badge-ok"}`}>
+          {failed ? "后台任务失败" : "后台任务完成"}
+        </span>
+        <span className="bgtask-exit">{n.exitText}</span>
+        <span className="bgtask-duration">耗时 {n.duration}</span>
+      </header>
+      <details className="bgtask-cmd" open={n.command.length <= 120}>
+        <summary className="bgtask-cmd-summary">后台命令</summary>
+        <pre className="bgtask-cmd-pre">{n.command}</pre>
+      </details>
+      <div className="bgtask-output" title={n.outputPath}>
+        输出日志：{n.outputPath}
+      </div>
+      {n.logTail !== undefined && n.logTail !== "" && (
+        <details className="bgtask-log">
+          <summary className="bgtask-log-summary">失败日志尾{n.logTruncated === true ? "（已截断）" : ""}</summary>
+          <pre className="bgtask-log-pre">{n.logTail}</pre>
+        </details>
+      )}
+    </section>
+  );
+}
+
 /** ChatPane：中间对话流 */
 export function ChatPane(props: ChatPaneProps) {
   const { entries, streaming, chatTitle, onDecide, onStop, onOpenFileDrawer, submittingPermIds } = props;
@@ -318,6 +353,17 @@ export function ChatPane(props: ChatPaneProps) {
                         // 完整内容：先可读化（引擎拼接的工具结果 JSON 块 → output 文本，
                         // 围栏代码与非工具结果 JSON 原样保留）再进 A2UI 管线渲染
                         <AssistantA2ui content={humanizeEngineContent(entry.content)} messageId={entry.id} />
+                      ) : entry.thinkingPending === true &&
+                        (entry.thinking === undefined || entry.thinking === "") &&
+                        (entry.preview === null || entry.preview === "") ? (
+                        // 「思考中」占位（萤火虫闪烁）：轮次已开始但尚无
+                        // thinking/正文内容——让用户立刻看到引擎在活动
+                        <div className="thinking-firefly">
+                          <span className="firefly firefly-1" aria-hidden="true" />
+                          <span className="firefly firefly-2" aria-hidden="true" />
+                          <span className="firefly firefly-3" aria-hidden="true" />
+                          <span className="thinking-firefly-label">思考中…</span>
+                        </div>
                       ) : (
                         // 流式阶段（docs/dev/web-thinking-display.md F2）：
                         // 思考过程（可折叠，默认展开）+ 正文预览，均经容错 Markdown
@@ -343,6 +389,8 @@ export function ChatPane(props: ChatPaneProps) {
                 return <ToolEntry key={entry.id} entry={entry} />;
               case "plan":
                 return <PlanCard key={entry.id} entry={entry} />;
+              case "bgtask":
+                return <BgTaskNotice key={entry.id} entry={entry} />;
               case "permission":
                 return (
                   <div key={entry.id} className="msg-row msg-row-permission">
