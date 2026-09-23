@@ -25,7 +25,7 @@ import {
   type UserInfo,
 } from "./api";
 import type { ChatEntry, UserAttachment } from "./chat-model";
-import { parseLeadingJsonBlock } from "./chat-model";
+import { extractPlanFromToolContent, parseLeadingJsonBlock } from "./chat-model";
 import { ChatPane } from "./components/ChatPane";
 import { Composer } from "./components/Composer";
 import { FileDrawer } from "./components/FileDrawer";
@@ -152,6 +152,18 @@ export function App() {
       setEntries((prev) => [...prev, { kind: "steering", id: `inject-${e.messageId}`, text }]);
       return;
     }
+    // 工具结果消息（role=tool，引擎 appendToolMessages 经同一桥接推送）：
+    // UpdatePlan 结果 → 执行计划卡片（最新一次覆盖旧计划，与 convertHistory
+    // 历史路径同用 plan-latest id）；其余工具结果不入对话流——与历史路径
+    // 对齐（历史 role=tool 在打开会话时渲染为折叠条目，实时由
+    // tool_progress 帧承载进度条目），避免刷新前后消息序列不一致。
+    if (e.role === "tool") {
+      if (!e.content.startsWith("{")) return;
+      const payload = extractPlanFromToolContent(e.content);
+      if (payload === null) return;
+      setEntries((prev) => [...prev.filter((x) => x.kind !== "plan"), { kind: "plan", id: "plan-latest", ...payload }]);
+      return;
+    }
     setEntries((prev) => {
       const streamIdx = prev.findIndex((x) => x.kind === "assistant" && x.id === "stream");
       if (streamIdx >= 0) {
@@ -224,6 +236,25 @@ export function App() {
           typeof item.toolCallId === "string" && item.toolCallId !== "" ? `tool-${item.toolCallId}` : "tool-anon";
         // 单项状态优先，回退事件级 status
         const status = typeof item.status === "string" && item.status !== "" ? item.status : e.status;
+        // UpdatePlan 识别：进度项携带结果文本（output/content）且解析出计划
+        // → 生成「执行计划」卡片条目（最新一次 UpdatePlan 覆盖旧计划）。
+        // 载荷缺计划（如 running 态仅有名称）时保持普通工具条目语义。
+        const resultText =
+          typeof item.output === "string"
+            ? item.output
+            : typeof item.content === "string"
+              ? item.content
+              : typeof item.result === "string"
+                ? item.result
+                : null;
+        if (name === "UpdatePlan" && resultText !== null && resultText.trim() !== "") {
+          const payload = extractPlanFromToolContent(resultText);
+          if (payload !== null) {
+            const planEntry: ChatEntry = { kind: "plan", id: "plan-latest", ...payload };
+            next = [...next.filter((x) => x.kind !== "plan"), planEntry];
+            continue;
+          }
+        }
         // raw 同时保留事件级与单项数据（信息不丢失，展开可见全部字段）
         const entry: ChatEntry = { kind: "tool", id, label: name, status, raw: { event: e, item } };
         const idx = next.findIndex((x) => x.id === id);
@@ -387,6 +418,19 @@ export function App() {
       } else if (d.role === "user") {
         result.push({ kind: "user", id: `h-${d.id}`, text: content, attachments: [], createTime: d.createTime });
       } else if (d.role === "tool") {
+        // UpdatePlan 历史消息：content JSON 块解析出计划 → 执行计划卡片
+        // （引擎协议「最新一次调用覆盖旧计划」——历史多条 UpdatePlan 时
+        // 后到覆盖，实时帧并入后同样取最新态，id 恒为 plan-latest）
+        if (content.startsWith("{")) {
+          const payload = extractPlanFromToolContent(content);
+          if (payload !== null) {
+            const withoutPlan = result.filter((x) => x.kind !== "plan");
+            withoutPlan.push({ kind: "plan", id: "plan-latest", ...payload });
+            result.length = 0;
+            result.push(...withoutPlan);
+            continue;
+          }
+        }
         // 历史工具条目标签：content 常为「JSON 块混排」——首行以 { 开头时解析首块
         // 取工具名生成友好标签（避免折叠行显示 "{"）；普通文本取首行（截断 60 字符）。
         // 全文保留在 raw 中不丢信息。

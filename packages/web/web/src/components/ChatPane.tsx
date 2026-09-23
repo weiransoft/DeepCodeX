@@ -10,8 +10,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { parseMarkdownToA2ui } from "../a2ui/parser";
 import { A2uiSurface } from "../a2ui/renderer";
-import type { ChatEntry, UserAttachment } from "../chat-model";
-import { extractToolText, humanizeEngineContent, setEngineToolEntryHint } from "../chat-model";
+import type { ChatEntry, PlanTaskItem, UserAttachment } from "../chat-model";
+import { extractToolText, humanizeEngineContent, parsePlanTasks, setEngineToolEntryHint } from "../chat-model";
 import { FolderOpenIcon, PaperclipIcon, StopIcon, WrenchIcon, BotAvatarIcon, UserAvatarIcon } from "./icons";
 import { PermissionCard } from "./PermissionCard";
 
@@ -121,6 +121,96 @@ function ToolEntry({ entry }: { entry: Extract<ChatEntry, { kind: "tool" }> }) {
         <pre className="tool-entry-raw">{rawJson}</pre>
       </details>
     </details>
+  );
+}
+
+/** 任务状态图标：done=打勾方框 / active=脉冲圆点 / pending=空心方框 */
+function PlanTaskGlyph({ status }: { status: PlanTaskItem["status"] }) {
+  if (status === "done") {
+    return (
+      <svg viewBox="0 0 16 16" width="14" height="14" className="plan-glyph plan-glyph-done" aria-hidden="true">
+        <rect x="1.5" y="1.5" width="13" height="13" rx="3.5" fill="currentColor" opacity="0.16" />
+        <rect x="1.5" y="1.5" width="13" height="13" rx="3.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
+        <path
+          d="M4.5 8.2l2.4 2.4 4.6-5"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.7"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+  if (status === "active") {
+    return (
+      <svg viewBox="0 0 16 16" width="14" height="14" className="plan-glyph plan-glyph-active" aria-hidden="true">
+        <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="1.4" opacity="0.45" />
+        <circle cx="8" cy="8" r="3" fill="currentColor" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" className="plan-glyph plan-glyph-pending" aria-hidden="true">
+      <rect x="1.5" y="1.5" width="13" height="13" rx="3.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
+/**
+ * 执行计划卡片（UpdatePlan）：引擎每次以完整 Markdown 任务列表覆盖旧计划，
+ * 卡片恒为「最新态」——头部标题 + 进度统计（完成/进行中/总数 + 进度条），
+ * 主体为任务行清单（[x]/[>]/[ ] 图标 + 缩进层级），变更说明（explanation）
+ * 以引用样式展示。任务解析失败（无列表行）时回退整段 Markdown 进 A2UI 管线，
+ * 保证信息不丢。
+ */
+export function PlanCard({ entry }: { entry: Extract<ChatEntry, { kind: "plan" }> }) {
+  // 任务行解析（useMemo：计划文本不变则不重复解析）
+  const tasks = useMemo(() => parsePlanTasks(entry.plan), [entry.plan]);
+  const doneCount = tasks.filter((t) => t.status === "done").length;
+  const activeTask = tasks.find((t) => t.status === "active");
+  const allDone = tasks.length > 0 && doneCount === tasks.length;
+  const percent = tasks.length > 0 ? Math.round((doneCount / tasks.length) * 100) : 0;
+  return (
+    <section className="plan-card" aria-label="执行计划">
+      <header className="plan-card-head">
+        <span className="plan-card-title">执行计划</span>
+        {tasks.length > 0 && (
+          <span className={`plan-card-progress${allDone ? " plan-card-progress-done" : ""}`}>
+            {doneCount}/{tasks.length}
+          </span>
+        )}
+        {/* 进行中任务：头部直接露出当前步骤，无需展开清单即可知进度 */}
+        {activeTask !== undefined && <span className="plan-card-current">进行中：{activeTask.text}</span>}
+      </header>
+      {tasks.length > 0 && (
+        <div
+          className="plan-progress-track"
+          role="progressbar"
+          aria-valuenow={percent}
+          aria-valuemin={0}
+          aria-valuemax={100}
+        >
+          <div className="plan-progress-fill" style={{ width: `${percent}%` }} />
+        </div>
+      )}
+      {entry.explanation !== undefined && entry.explanation !== "" && (
+        <div className="plan-card-explanation">{entry.explanation}</div>
+      )}
+      {tasks.length > 0 ? (
+        <ul className="plan-task-list">
+          {tasks.map((t, i) => (
+            <li key={i} className={`plan-task plan-task-${t.status}`} data-depth={t.depth}>
+              <PlanTaskGlyph status={t.status} />
+              <span className="plan-task-text">{t.text}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        // 兜底：计划文本不含可解析任务行 → 整段进 A2UI（信息不丢，绝不留白）
+        <AssistantA2ui content={entry.plan} messageId={`plan-${entry.id}`} />
+      )}
+    </section>
   );
 }
 
@@ -251,6 +341,8 @@ export function ChatPane(props: ChatPaneProps) {
                 );
               case "tool":
                 return <ToolEntry key={entry.id} entry={entry} />;
+              case "plan":
+                return <PlanCard key={entry.id} entry={entry} />;
               case "permission":
                 return (
                   <div key={entry.id} className="msg-row msg-row-permission">

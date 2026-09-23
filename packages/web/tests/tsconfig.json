@@ -13,5 +13,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["*.test.ts", "*.test.tsx", "helpers.ts", "scripts/*.tsx", "../web/src/a2ui/**/*"]
+  "include": ["*.test.ts", "*.test.tsx", "helpers.ts", "scripts/*.tsx", "../web/src/**/*"]
 }
