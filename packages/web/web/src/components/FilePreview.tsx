@@ -30,6 +30,11 @@ export interface FilePreviewProps {
   /** 返回列表 */
   onBack: () => void;
   /**
+   * 401 统一收敛回调（会话过期/失效）：预览请求收到 401 时上抛给
+   * App 切登录页；缺省不传时仅在预览区内展示错误（组件独立复用语义）。
+   */
+  onUnauthorized?: () => void;
+  /**
    * 并排预览态（宽屏抽屉加宽后的左栏）：预览头隐藏返回按钮
    * （列表仍在右栏可见可点，文件标识由抽屉面包屑末级承担，返回语义统一为关闭预览）。
    */
@@ -119,7 +124,7 @@ function langLabel(name: string): string {
 }
 
 /** FilePreview：预览覆盖层（含加载态/错误态/三类渲染分支） */
-export function FilePreview({ path, name, size, scope, onBack, inSplit = false }: FilePreviewProps) {
+export function FilePreview({ path, name, size, scope, onBack, onUnauthorized, inSplit = false }: FilePreviewProps) {
   /** 文本预览数据（图片路径不请求） */
   const [data, setData] = useState<FilePreviewResult | null>(null);
   /** 加载错误文案（null = 无错误） */
@@ -141,6 +146,11 @@ export function FilePreview({ path, name, size, scope, onBack, inSplit = false }
       })
       .catch((e: unknown) => {
         if (reqSeq.seq !== seq) return;
+        // 401：会话已失效——上抛统一收敛登录页，不在失效会话下展示错误态
+        if (e instanceof ApiError && e.status === 401 && onUnauthorized) {
+          onUnauthorized();
+          return;
+        }
         setError(e instanceof ApiError ? `${e.message}` : "预览加载失败");
       });
     // reqSeq 为恒定对象引用（仅承载序号），无需进依赖数组

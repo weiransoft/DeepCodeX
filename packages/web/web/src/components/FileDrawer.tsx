@@ -13,7 +13,15 @@
  * - 「作为附件插入对话」：把选中文件路径经 onInsertAttachment 交给 Composer。
  */
 import { useEffect, useRef, useState } from "react";
-import { fileDownloadUrl, listFiles, uploadFiles, type FileEntry, type FileListing, type FileScope } from "../api";
+import {
+  ApiError,
+  fileDownloadUrl,
+  listFiles,
+  uploadFiles,
+  type FileEntry,
+  type FileListing,
+  type FileScope,
+} from "../api";
 import { formatTime, humanSize } from "../format";
 import { FilePreview, isPreviewable } from "./FilePreview";
 import {
@@ -46,6 +54,16 @@ export interface FileDrawerProps {
    * 0 = 配置未就绪时宽松放行（后端 preview 端点仍会 413 兜底）。
    */
   maxPreviewBytes: number;
+  /**
+   * 本人个人工作区绝对路径（来自 /api/config 的 personalRoot）：
+   * 列表加载前（或加载失败时）个人区面包屑据此显示完整路径。
+   */
+  personalRoot: string;
+  /**
+   * 401 统一收敛回调（会话过期/失效）：文件区任何请求收到 401 时上抛，
+   * 由 App 切换到登录页——绝不在失效会话下继续渲染文件区。
+   */
+  onUnauthorized: () => void;
   /** 把服务器文件路径作为附件插入对话 */
   onInsertAttachment: (path: string, isImage: boolean) => void;
 }
@@ -81,6 +99,8 @@ export function FileDrawer({
   allowRoots,
   personalOnly,
   maxPreviewBytes,
+  personalRoot,
+  onUnauthorized,
   onClose,
   onInsertAttachment,
 }: FileDrawerProps) {
@@ -110,8 +130,25 @@ export function FileDrawer({
   /** 隐藏的上传 input 引用 */
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
 
-  /** 面包屑当前目录完整路径（服务端归一 listing.path 优先，回退本地 currentPath） */
-  const browsePath = listing?.path ?? currentPath;
+  /**
+   * 面包屑当前目录完整路径：服务端归一 listing.path 优先 → 本地 currentPath →
+   * 个人作用域回退个人区根（personalRoot）——列表加载失败/未加载时
+   * 「我的文件」仍显示完整路径，而不是「（未选择目录）」。
+   */
+  const browsePath = listing?.path ?? (currentPath !== "" ? currentPath : scope === "personal" ? personalRoot : "");
+
+  /**
+   * 请求错误统一处理：401 上抛给 App 切登录页（不渲染过期会话下的文件区），
+   * 其它错误置列表空态并展示原因。
+   */
+  const handleRequestError = (e: unknown, fallback: string): void => {
+    setListing(null);
+    if (e instanceof ApiError && e.status === 401) {
+      onUnauthorized();
+      return;
+    }
+    setError(e instanceof Error ? e.message : fallback);
+  };
 
   /** 加载目录列表（scope 由调用方显式传入，避免闭包读到旧状态） */
   const load = (path: string, sc: FileScope): void => {
@@ -124,8 +161,7 @@ export function FileDrawer({
         setCurrentPath(data.path);
       })
       .catch((e: unknown) => {
-        setListing(null);
-        setError(e instanceof Error ? e.message : "目录加载失败");
+        handleRequestError(e, "目录加载失败");
       })
       .finally(() => setLoading(false));
   };
@@ -152,9 +188,16 @@ export function FileDrawer({
     // 仅在影响「能否初始化」的状态变化时触发；load 稳定、scope 变化已由 switchScope 显式加载
   }, [open, allowRoots, listing, loading, currentPath, scope, personalOnly]);
 
-  /** 切换作用域：清空路径由服务端返回各区默认目录，并立即加载 */
+  /**
+   * 切换作用域：清空路径由服务端返回各区默认目录，并立即加载。
+   * 重复点击当前作用域时不直接早退——若列表处于失败空态（listing 为 null
+   * 且未在加载），重新发起加载，给用户一个明确的「重试」入口。
+   */
   const switchScope = (next: FileScope): void => {
-    if (next === scope) return;
+    if (next === scope) {
+      if (!loading && listing === null) load("", next);
+      return;
+    }
     setScope(next);
     setListing(null);
     setCurrentPath("");
@@ -169,6 +212,12 @@ export function FileDrawer({
     uploadFiles(currentPath, Array.from(files), scope)
       .then(() => load(currentPath, scope))
       .catch((e: unknown) => {
+        // 401 → 统一收敛登录页；其它错误仅提示（列表数据仍在，不清空）
+        if (e instanceof ApiError && e.status === 401) {
+          setUploading(false);
+          onUnauthorized();
+          return;
+        }
         setError(e instanceof Error ? e.message : "上传失败");
       })
       .finally(() => {
@@ -183,6 +232,11 @@ export function FileDrawer({
   // 绝对路径的根段显示为「根目录」二字（完整路径已在上方 crumb-fullpath 行展示）
   const segments = browsePath.split("/").filter((s) => s !== "");
 
+  // 列表渲染守卫：先收窄到局部常量再遍历——map 回调内一律读列表常量
+  // （currentListing.entries / currentListing.path），杜绝压缩后渲染函数里对
+  // 已置空状态的裸读（点击「我的文件」401 时 listing 置 null 的同帧不再可能读到 null.path）
+  const currentListing = listing;
+
   // 预览内容体（列表区与预览并排时共用同一实例语义——仅一份渲染树）
   const previewBody = (
     <FilePreview
@@ -191,6 +245,8 @@ export function FileDrawer({
       size={preview.size}
       scope={scope}
       onBack={() => setPreview(null)}
+      // 401 统一收敛：预览请求失效会话时上抛登录页
+      onUnauthorized={onUnauthorized}
       // 并排态标记：类名门控 CSS——宽屏（≥980px）时抽屉加宽为左右双栏
       // （左预览 / 右列表并排）；窄屏退化为列表下方独立预览区
       inSplit
@@ -350,11 +406,13 @@ export function FileDrawer({
           {/* 条目列表 */}
           <div className="file-list">
             {loading && <div className="drawer-hint">加载中…</div>}
-            {!loading && listing !== null && listing.entries.length === 0 && <div className="drawer-hint">空目录</div>}
+            {!loading && currentListing !== null && currentListing.entries.length === 0 && (
+              <div className="drawer-hint">空目录</div>
+            )}
             {!loading &&
-              listing !== null &&
-              sortEntries(listing.entries).map((e) => {
-                const full = joinPath(listing.path, e.name);
+              currentListing !== null &&
+              sortEntries(currentListing.entries).map((e) => {
+                const full = joinPath(currentListing.path, e.name);
                 if (e.type === "dir") {
                   return (
                     <button

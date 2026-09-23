@@ -16,7 +16,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createElement } from "react";
@@ -325,6 +325,24 @@ test("FP-INT-07：会话创建后个人区文件可预览（端到端：会话 �
       })
     );
     assert.ok(surfaceHtml.includes("会话报告"), "会话产物 Markdown 必须可渲染");
+  } finally {
+    await stopFixture(fx);
+  }
+});
+
+test("FP-INT-08：/api/config.personalRoot 与个人区列表归一路径逐字一致（面包屑路径显示数据源）", async () => {
+  const fx = await startPersonalFixture(4096);
+  try {
+    const cfg = await fetchJson(fx.server.port, "GET", "/api/config", undefined, fx.cookie);
+    assert.equal(cfg.status, 200);
+    // macOS 临时目录 /var → /private/var：personalRoot 经服务端 realpath 归一，
+    // 与磁盘原始路径比较时同样先 realpath（断言语义 = 两者指向同一目录）
+    assert.equal(
+      realpathSync(String(cfg.body.personalRoot)),
+      realpathSync(fx.personalRoot),
+      "personalRoot 必须与 GET /api/files?scope=personal 归一 path 逐字一致——" +
+        "前端「我的文件」面包屑在列表加载前据此显示完整路径"
+    );
   } finally {
     await stopFixture(fx);
   }

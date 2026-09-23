@@ -897,6 +897,8 @@ export function App() {
         allowRoots={config?.allowRoots ?? []}
         personalOnly={config?.personalOnly ?? true}
         maxPreviewBytes={config?.maxPreviewBytes ?? 0}
+        personalRoot={config?.personalRoot ?? ""}
+        onUnauthorized={handleUnauthorized}
         onClose={() => setFileDrawerOpen(false)}
         onInsertAttachment={insertAttachment}
       />

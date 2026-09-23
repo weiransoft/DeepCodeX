@@ -7,7 +7,7 @@
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { startWebServer, type RunningWebServer } from "../src/server";
@@ -63,6 +63,18 @@ test("static：静态资产按扩展名 MIME 返回；HEAD 请求返回空体", 
   assert.equal(js.status, 200);
   assert.match(js.headers.get("content-type") ?? "", /text\/javascript/);
   assert.equal(await js.text(), "console.log('spa');");
+});
+
+test("static：静态资源必须 Cache-Control: no-cache（防旧 bundle 启发式缓存混用）", async () => {
+  for (const route of ["/", "/assets/app.js"]) {
+    const response = await fetch(`http://127.0.0.1:${server.port}${route}`);
+    assert.equal(response.status, 200, `${route} 必须 200`);
+    assert.equal(
+      response.headers.get("cache-control"),
+      "no-cache",
+      `${route} 必须 no-cache——否则浏览器启发式缓存旧 bundle，前端更新后新旧混用导致渲染崩溃`
+    );
+  }
 });
 
 test("static：无扩展名未知路径应 SPA fallback 到 index.html", async () => {
@@ -141,9 +153,10 @@ test("config：登录后 /api/config 必须脱敏（无 jwtSecret/密码等密�
   const { status, body } = await fetchJson(server.port, "GET", "/api/config", undefined, cookie);
   assert.equal(status, 200);
 
-  // 结构断言：仅允许七个公开字段（personalOnly 为个人工作目录模式公开开关；
+  // 结构断言：仅允许八个公开字段（personalOnly 为个人工作目录模式公开开关；
   // steeringEnabled 为补充指令功能公开开关，docs/dev/web-steering.md W7；
-  // maxPreviewBytes 为文本预览上限，docs/dev/web-file-preview.md P1）
+  // maxPreviewBytes 为文本预览上限，docs/dev/web-file-preview.md P1；
+  // personalRoot 为当前认证用户本人个人区路径——非密钥，仅本人可见）
   const keys = Object.keys(body).sort();
   assert.deepEqual(keys, [
     "allowRoots",
@@ -152,6 +165,7 @@ test("config：登录后 /api/config 必须脱敏（无 jwtSecret/密码等密�
     "maxPreviewBytes",
     "maxUploadBytes",
     "personalOnly",
+    "personalRoot",
     "steeringEnabled",
   ]);
   assert.equal(body.enabled, true);
@@ -161,6 +175,16 @@ test("config：登录后 /api/config 必须脱敏（无 jwtSecret/密码等密�
   assert.deepEqual(body.allowRoots, [path.resolve(tmpRoot)]);
   assert.equal(body.personalOnly, false);
   assert.equal(body.steeringEnabled, true);
+  // personalRoot = <uploadDir>/<userId>：admin 的 userId 为 sha256("admin") 前 16 位 hex。
+  // helpers 默认 uploadDir 为系统 tmpdir 下固定目录（可能尚未创建——服务端
+  // realpathAllowMissing 对最近存在祖先归一；本服务器 jailRoots 非空不会提前
+  // mkdir），故期望值同样按「最近存在祖先归一 + 补回缺失尾段」还原。
+  const adminUserId = sha256Hex("admin").slice(0, 16);
+  const expectedUploadDir = path.join(tmpdir(), "deepcode-web-test-uploads");
+  const expectedPersonalRoot = existsSync(expectedUploadDir)
+    ? path.join(realpathSync(expectedUploadDir), adminUserId)
+    : path.join(realpathSync(path.dirname(expectedUploadDir)), path.basename(expectedUploadDir), adminUserId);
+  assert.equal(body.personalRoot, expectedPersonalRoot, "personalRoot 必须等于 <uploadDir>/<admin 派生 userId>");
 
   // 全量 JSON 不得包含任何密钥值
   const raw = JSON.stringify(body);

@@ -36,6 +36,11 @@ export interface AppConfig {
   steeringEnabled: boolean;
   /** 文本预览上限（字节，docs/dev/web-file-preview.md P1）：前端据此预判可预览文件 */
   maxPreviewBytes: number;
+  /**
+   * 本人个人工作区绝对路径（<uploadDir>/<userId>）：「我的文件」面包屑在
+   * 列表加载前据此显示完整路径（与 GET /api/files personal 归一 path 一致）。
+   */
+  personalRoot: string;
 }
 
 /**
