@@ -237,21 +237,24 @@ export function FileDrawer({
   // 已置空状态的裸读（点击「我的文件」401 时 listing 置 null 的同帧不再可能读到 null.path）
   const currentListing = listing;
 
-  // 预览内容体（列表区与预览并排时共用同一实例语义——仅一份渲染树）
-  const previewBody = (
-    <FilePreview
-      path={preview.path}
-      name={preview.name}
-      size={preview.size}
-      scope={scope}
-      onBack={() => setPreview(null)}
-      // 401 统一收敛：预览请求失效会话时上抛登录页
-      onUnauthorized={onUnauthorized}
-      // 并排态标记：类名门控 CSS——宽屏（≥980px）时抽屉加宽为左右双栏
-      // （左预览 / 右列表并排）；窄屏退化为列表下方独立预览区
-      inSplit
-    />
-  );
+  // 预览内容体（列表区与预览并排时共用同一实例语义——仅一份渲染树）：
+  // 必须惰性构造——personalOnly 收敛等 effect 会在「列表态」下把 preview 置 null，
+  // 若无条件构造 FilePreview 元素，null.path 读取会在渲染期直接 TypeError
+  const previewBody =
+    preview !== null ? (
+      <FilePreview
+        path={preview.path}
+        name={preview.name}
+        size={preview.size}
+        scope={scope}
+        onBack={() => setPreview(null)}
+        // 401 统一收敛：预览请求失效会话时上抛登录页
+        onUnauthorized={onUnauthorized}
+        // 并排态标记：类名门控 CSS——宽屏（≥980px）时抽屉加宽为左右双栏
+        // （左预览 / 右列表并排）；窄屏退化为列表下方独立预览区
+        inSplit
+      />
+    ) : null;
 
   return (
     <>
