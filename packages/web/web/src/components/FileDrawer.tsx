@@ -183,11 +183,25 @@ export function FileDrawer({
   // 绝对路径的根段显示为「根目录」二字（完整路径已在上方 crumb-fullpath 行展示）
   const segments = browsePath.split("/").filter((s) => s !== "");
 
+  // 预览内容体（列表区与预览并排时共用同一实例语义——仅一份渲染树）
+  const previewBody = (
+    <FilePreview
+      path={preview.path}
+      name={preview.name}
+      size={preview.size}
+      scope={scope}
+      onBack={() => setPreview(null)}
+      // 并排态标记：类名门控 CSS——宽屏（≥980px）时抽屉加宽为左右双栏
+      // （左预览 / 右列表并排）；窄屏退化为列表下方独立预览区
+      inSplit
+    />
+  );
+
   return (
     <>
       {/* 遮罩：点击关闭 */}
       <div className="drawer-overlay" onClick={onClose} />
-      <aside className="drawer" role="dialog" aria-label="文件目录">
+      <aside className={preview !== null ? "drawer drawer-previewing" : "drawer"} role="dialog" aria-label="文件目录">
         {/* 抽屉头：标题 + 操作（上传/刷新/关闭） */}
         <div className="drawer-head">
           <span className="drawer-title">文件目录</span>
@@ -330,102 +344,99 @@ export function FileDrawer({
         {error !== "" && <div className="drawer-error">{error}</div>}
         {uploading && <div className="drawer-hint">上传中…</div>}
 
-        {/* 条目列表 */}
-        <div className="file-list">
-          {loading && <div className="drawer-hint">加载中…</div>}
-          {!loading && listing !== null && listing.entries.length === 0 && <div className="drawer-hint">空目录</div>}
-          {!loading &&
-            listing !== null &&
-            sortEntries(listing.entries).map((e) => {
-              const full = joinPath(listing.path, e.name);
-              if (e.type === "dir") {
+        {/* 内容区：列表（+ 预览并排，宽屏时左右双栏）。预览态下列表保留可见，
+            点击其他文件即时切换预览目标 */}
+        <div className={preview !== null ? "drawer-body drawer-body-row" : "drawer-body"}>
+          {/* 条目列表 */}
+          <div className="file-list">
+            {loading && <div className="drawer-hint">加载中…</div>}
+            {!loading && listing !== null && listing.entries.length === 0 && <div className="drawer-hint">空目录</div>}
+            {!loading &&
+              listing !== null &&
+              sortEntries(listing.entries).map((e) => {
+                const full = joinPath(listing.path, e.name);
+                if (e.type === "dir") {
+                  return (
+                    <button
+                      key={full}
+                      type="button"
+                      className="file-row file-row-dir"
+                      onClick={() => {
+                        setPreview(null); // 进入子目录回列表态
+                        load(full, scope);
+                      }}
+                      title={full}
+                    >
+                      {entryIcon(e)}
+                      <span className="file-row-name">{e.name}</span>
+                      <span className="file-row-meta">目录</span>
+                    </button>
+                  );
+                }
+                const previewable = isPreviewable(e.name, e.size, maxPreviewBytes);
+                /** 打开预览：stopPropagation 阻断行点击重复触发 */
+                const openPreview = (event: { stopPropagation: () => void }): void => {
+                  event.stopPropagation();
+                  setPreview({ path: full, name: e.name, size: e.size });
+                };
                 return (
-                  <button
+                  <div
                     key={full}
-                    type="button"
-                    className="file-row file-row-dir"
-                    onClick={() => {
-                      setPreview(null); // 进入子目录回列表态
-                      load(full, scope);
-                    }}
-                    title={full}
+                    className="file-row file-row-file"
+                    title={previewable ? `${full}（点击预览）` : full}
+                    onClick={previewable ? () => setPreview({ path: full, name: e.name, size: e.size }) : undefined}
                   >
                     {entryIcon(e)}
                     <span className="file-row-name">{e.name}</span>
-                    <span className="file-row-meta">目录</span>
-                  </button>
-                );
-              }
-              const previewable = isPreviewable(e.name, e.size, maxPreviewBytes);
-              /** 打开预览：stopPropagation 阻断行点击重复触发 */
-              const openPreview = (event: { stopPropagation: () => void }): void => {
-                event.stopPropagation();
-                setPreview({ path: full, name: e.name, size: e.size });
-              };
-              return (
-                <div
-                  key={full}
-                  className="file-row file-row-file"
-                  title={previewable ? `${full}（点击预览）` : full}
-                  onClick={previewable ? () => setPreview({ path: full, name: e.name, size: e.size }) : undefined}
-                >
-                  {entryIcon(e)}
-                  <span className="file-row-name">{e.name}</span>
-                  <span className="file-row-meta">
-                    {humanSize(e.size)} · {formatTime(e.mtime)}
-                  </span>
-                  {/* 行内操作：预览（文本/图片）/ 插入对话 / 下载（图标直显；
+                    <span className="file-row-meta">
+                      {humanSize(e.size)} · {formatTime(e.mtime)}
+                    </span>
+                    {/* 行内操作：预览（文本/图片）/ 插入对话 / 下载（图标直显；
                       按钮一律 stopPropagation，防止触发行级预览） */}
-                  <span className="file-row-actions" onClick={(ev) => ev.stopPropagation()}>
-                    {previewable && (
-                      <button type="button" className="icon-btn" title="预览" onClick={openPreview}>
-                        <PreviewIcon size={15} />
+                    <span className="file-row-actions" onClick={(ev) => ev.stopPropagation()}>
+                      {previewable && (
+                        <button type="button" className="icon-btn" title="预览" onClick={openPreview}>
+                          <PreviewIcon size={15} />
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="icon-btn"
+                        title="作为附件插入对话"
+                        onClick={() => onInsertAttachment(full, /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(e.name))}
+                      >
+                        <InsertIcon size={15} />
                       </button>
-                    )}
-                    <button
-                      type="button"
-                      className="icon-btn"
-                      title="作为附件插入对话"
-                      onClick={() => onInsertAttachment(full, /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(e.name))}
-                    >
-                      <InsertIcon size={15} />
-                    </button>
-                    {/* 原生下载直链：服务端 Content-Disposition 附件响应 */}
-                    <a className="icon-btn" href={fileDownloadUrl(full, scope)} download={e.name} title="下载">
-                      <svg viewBox="0 0 16 16" width="15" height="15" aria-label="下载" role="img">
-                        <path
-                          d="M8 2.5v7m0 0L5.2 6.7M8 9.5l2.8-2.8"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="1.4"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                        <path
-                          d="M2.8 12.2v.8a1 1 0 0 0 1 1h8.4a1 1 0 0 0 1-1v-.8"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="1.4"
-                          strokeLinecap="round"
-                        />
-                      </svg>
-                    </a>
-                  </span>
-                </div>
-              );
-            })}
-        </div>
+                      {/* 原生下载直链：服务端 Content-Disposition 附件响应 */}
+                      <a className="icon-btn" href={fileDownloadUrl(full, scope)} download={e.name} title="下载">
+                        <svg viewBox="0 0 16 16" width="15" height="15" aria-label="下载" role="img">
+                          <path
+                            d="M8 2.5v7m0 0L5.2 6.7M8 9.5l2.8-2.8"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="1.4"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                          <path
+                            d="M2.8 12.2v.8a1 1 0 0 0 1 1h8.4a1 1 0 0 0 1-1v-.8"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="1.4"
+                            strokeLinecap="round"
+                          />
+                        </svg>
+                      </a>
+                    </span>
+                  </div>
+                );
+              })}
+          </div>
 
-        {/* 预览覆盖层（docs/dev/web-file-preview.md P3）：覆盖面包屑以下的内容区 */}
-        {preview !== null && (
-          <FilePreview
-            path={preview.path}
-            name={preview.name}
-            size={preview.size}
-            scope={scope}
-            onBack={() => setPreview(null)}
-          />
-        )}
+          {/* 预览区（docs/dev/web-file-preview.md P3）：宽屏（≥980px）时与列表
+              左右并排（预览在左、列表在右）；窄屏退化为列表下方独立预览区 */}
+          {preview !== null && previewBody}
+        </div>
       </aside>
     </>
   );

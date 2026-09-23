@@ -838,12 +838,22 @@ body {
 }
 
 /* ============ 文件预览（docs/dev/web-file-preview.md P3） ============ */
-/* 预览覆盖层：flex 子项占满抽屉剩余空间（.drawer 为纵向 flex 容器） */
+/* 抽屉内容区：纵向 flex（窄屏退化 = 列表在上、预览在下） */
+.drawer-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* 预览区：flex 子项占满内容区剩余空间；宽屏（≥980px）时被 .drawer-body-row
+   覆写为左右并排的左栏（预览在左、列表在右） */
 .file-preview {
   flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
   background: var(--app-bg-panel);
   border-top: 1px solid var(--app-border);
 }
@@ -1108,6 +1118,43 @@ body {
   to {
     transform: translateX(0);
     opacity: 1;
+  }
+}
+
+/* 预览加宽态：宽屏（≥980px）时抽屉扩展为左右双栏——左预览、右列表。
+   窄屏（<980px）此规则不生效，.drawer-body 保持纵向、预览退化为
+   列表下方独立区域（保证小屏仍可用）。 */
+@media (min-width: 980px) {
+  .drawer-previewing {
+    width: min(1240px, 96vw);
+  }
+  /* 抽屉头/作用域/面包屑属于全宽 chrome：横向 flex 下会侵占内容区高度，
+     必须显式不增长不收缩（与 .drawer-head 等既有 flex-shrink:0 语义一致） */
+  .drawer-previewing > .drawer-head,
+  .drawer-previewing > .drawer-scope,
+  .drawer-previewing > .drawer-roots,
+  .drawer-previewing > .breadcrumb,
+  .drawer-previewing > .drawer-error,
+  .drawer-previewing > .drawer-hint {
+    flex: 0 0 auto;
+  }
+  .drawer-previewing .drawer-body {
+    flex-direction: row;
+  }
+  /* 并排态（inSplit 类名门控）：预览占据左栏全部剩余宽度，
+     列表收缩至右栏；边框从「上边线」翻转为「右边线」分隔双栏 */
+  .drawer-body-row .file-preview-split {
+    flex: 1 1 auto;
+    order: -1;
+    min-width: 0;
+    border-top: none;
+    border-right: 1px solid var(--app-border);
+  }
+  .drawer-body-row .file-list {
+    /* 固定右栏宽度（覆盖基础 flex 简写的 flex-basis:0 与 flex-grow:1） */
+    flex: 0 0 360px;
+    min-height: 0;
+    min-width: 0;
   }
 }
 .drawer-head {
