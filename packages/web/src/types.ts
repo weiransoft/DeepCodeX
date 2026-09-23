@@ -288,4 +288,10 @@ export type PublicWebConfig = {
   personalOnly: boolean;
   /** 任务执行中补充指令开关（docs/dev/web-steering.md W7）：false 时前端回退运行中禁用输入 */
   steeringEnabled: boolean;
+  /**
+   * 个人工作区绝对路径（<uploadDir>/<userId>，docs/dev/web-workspace.md W1 同款派生）。
+   * 仅当前认证用户可见：前端「我的文件」面包屑在列表加载前据此显示完整路径
+   * （与 GET /api/files personal scope 返回的归一 path 完全一致）。
+   */
+  personalRoot: string;
 };

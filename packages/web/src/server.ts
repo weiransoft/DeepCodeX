@@ -186,10 +186,14 @@ function serveStatic(
     return;
   }
 
+  // 静态资源（index.html / bundle.js 等）：一律 no-cache——
+  // 否则无 Cache-Control 的响应会被浏览器启发式缓存（旧 bundle 配新前端
+  // 混用会导致渲染崩溃等难排查问题）；协商缓存 304 开销可忽略。
   const mime = STATIC_MIME[path.extname(filePath).toLowerCase()] ?? "application/octet-stream";
   res.writeHead(200, {
     "Content-Type": mime,
     "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "no-cache",
   });
   if (req.method === "HEAD") {
     res.end();
@@ -217,13 +221,21 @@ export async function startWebServer(
   const hub = new SseHub();
   // 牢笼白名单：启动时一次 realpath 归一（不可用根跳过，空牢笼一律 403）
   const jailRoots = await buildJailRoots(resolved.allowRoots);
+  /**
+   * uploadDir 归一根（启动时一次，realpath 消解符号链接；目录可能尚未创建，
+   * realpathAllowMissing 对最近存在祖先归一）。
+   * 复用场景：
+   * 1. shared scope 的个人区保护边界——任何位于该根内的请求路径一律 403，
+   *    与 allowRoots 配置无关（架构师审查 P1-1 强制修复）；
+   * 2. /api/config 的 personalRoot 拼接——与 GET /api/files personal 归一
+   *    path 逐字一致（前端「我的文件」面包屑数据源）。
+   */
+  const uploadRootNormalized = await realpathAllowMissing(path.resolve(resolved.uploadDir));
   // 安全配置告警（docs/dev/web-isolation.md §3.5）：uploadDir 落于任一 allowRoot 内时
   // 属配置重叠形态。shared scope 对个人区的访问已由 resolveFileJailRoots 强制阻断
   // （403，见下方保护线），告警仅提醒管理员将 uploadDir 移出 allowRoots 以理顺语义。
   if (jailRoots.length > 0) {
-    // uploadDir 可能尚未创建（首次使用前）：realpathAllowMissing 对最近存在祖先归一
-    const uploadRoot = await realpathAllowMissing(path.resolve(resolved.uploadDir));
-    if (jailRoots.some((root) => uploadRoot === root || uploadRoot.startsWith(root + path.sep))) {
+    if (jailRoots.some((root) => uploadRootNormalized === root || uploadRootNormalized.startsWith(root + path.sep))) {
       console.warn(
         `[web] 安全警告：uploadDir（${resolved.uploadDir}）位于 allowRoots 白名单内，` +
           `shared 模式对该目录的访问将被强制拒绝（个人区隔离保护），建议将 uploadDir 移出 allowRoots`
@@ -244,12 +256,6 @@ export async function startWebServer(
   let actualPort = resolved.port;
   /** 个人文件牢笼缓存（userId → realpath 根；docs/dev/web-isolation.md §3.5） */
   const personalJailCache = new Map<string, string[]>();
-  /**
-   * uploadDir 归一根（启动时一次，realpath 消解符号链接）。
-   * shared scope 的个人区保护边界：任何位于该根内的请求路径一律 403，
-   * 与 allowRoots 配置无关（架构师审查 P1-1 强制修复）。
-   */
-  const uploadRootNormalized = await realpathAllowMissing(path.resolve(resolved.uploadDir));
   /**
    * 解析 files 端点的牢笼根（scope 分流，docs/dev/web-isolation.md §3.5）。
    *
@@ -357,6 +363,11 @@ export async function startWebServer(
           personalOnly: resolved.personalOnly,
           // 补充指令开关（web-steering W7）：false 时前端回退「运行中禁用输入」旧行为
           steeringEnabled: resolved.steeringEnabled,
+          // 本人个人工作区绝对路径：前端「我的文件」面包屑在列表加载前即可显示完整路径。
+          // 经 uploadRootNormalized（启动时 realpath 归一的上传根）拼接——与 GET /api/files
+          // personal 归一 path 逐字一致（macOS /var→/private/var 等符号链接形态由
+          // realpath 统一消解，绝不再用未归一的 resolved.uploadDir 直接拼接）
+          personalRoot: path.join(uploadRootNormalized, ctx.userId),
         };
         sendJson(res, 200, config);
         return;
