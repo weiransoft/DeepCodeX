@@ -662,6 +662,137 @@ body {
   overflow-y: auto;
 }
 
+/* 执行计划卡片（UpdatePlan）：任务清单 + 进度条 + 当前步骤 */
+.plan-card {
+  margin: 4px 0;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-bg-elevated);
+  box-shadow: var(--app-shadow);
+  padding: 12px 14px;
+  min-width: 0;
+}
+.plan-card-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.plan-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text);
+}
+.plan-card-progress {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 999px;
+  color: var(--app-accent);
+  background: var(--app-accent-weak);
+}
+.plan-card-progress-done {
+  color: #17a673;
+  background: color-mix(in srgb, #17a673 12%, transparent);
+}
+.plan-card-current {
+  font-size: 12px;
+  color: var(--app-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+/* 进度条：完成比例填充（全部完成转绿色） */
+.plan-progress-track {
+  height: 4px;
+  margin: 10px 0 2px;
+  border-radius: 999px;
+  background: var(--app-bg-badge);
+  overflow: hidden;
+}
+.plan-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--app-accent);
+  transition: width 0.3s ease;
+}
+.plan-card-progress-done + .plan-progress-track .plan-progress-fill {
+  background: #17a673;
+}
+/* 变更说明（explanation）：引用样式弱化展示 */
+.plan-card-explanation {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--app-border-strong);
+  border-radius: 0 6px 6px 0;
+  background: var(--app-bg-subtle);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--app-text-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.plan-task-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.plan-task {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--app-text);
+}
+/* 嵌套层级缩进（2 空格一级，CSS 属性选择器免内联样式） */
+.plan-task[data-depth="1"] { margin-left: 18px; }
+.plan-task[data-depth="2"] { margin-left: 36px; }
+.plan-task[data-depth="3"] { margin-left: 54px; }
+.plan-glyph {
+  flex: 0 0 auto;
+  margin-top: 3px;
+}
+.plan-glyph-done {
+  color: #17a673;
+}
+.plan-glyph-active {
+  color: var(--app-accent);
+  animation: plan-active-pulse 1.6s ease-in-out infinite;
+}
+/* 进行中图标脉冲：呼吸感提示「正在执行」 */
+@keyframes plan-active-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .plan-glyph-active {
+    animation: none;
+  }
+}
+.plan-glyph-pending {
+  color: var(--app-text-tertiary);
+}
+/* 进行中任务文字高亮；已完成任务弱化 + 删除线 */
+.plan-task-active .plan-task-text {
+  color: var(--app-accent);
+  font-weight: 500;
+}
+.plan-task-done .plan-task-text {
+  color: var(--app-text-tertiary);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--app-text-tertiary) 55%, transparent);
+}
+
 /* 权限卡片 */
 .msg-row-permission {
   align-items: stretch;

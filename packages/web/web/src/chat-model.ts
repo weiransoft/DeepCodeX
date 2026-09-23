@@ -69,6 +69,19 @@ export type ChatEntry =
       status: string;
       raw: Record<string, unknown>;
     }
+  /**
+   * 执行计划卡片（UpdatePlan 工具）：引擎每次以完整 Markdown 任务列表
+   * 覆盖上一版计划，前端只渲染最新态——状态图标 + 进度统计 + 可折叠清单。
+   * 实时（tool_progress）与历史恢复（role=tool 消息）两路径同源生成。
+   */
+  | {
+      kind: "plan";
+      id: string;
+      /** 计划 Markdown 原文（任务列表，[ ]/[>]/[x] 复选框 + 有序/无序列表混排） */
+      plan: string;
+      /** 可选的变更说明（UpdatePlan 的 explanation 参数） */
+      explanation?: string;
+    }
   /** 内联权限审批卡片 */
   | {
       kind: "permission";
@@ -509,4 +522,89 @@ export function extractToolText(raw: Record<string, unknown>): string | null {
     }
   }
   return null;
+}
+
+/** UpdatePlan 提取结果（执行计划卡片数据） */
+export interface PlanPayload {
+  /** 计划 Markdown 原文（非空） */
+  plan: string;
+  /** 变更说明（UpdatePlan 可选 explanation，缺省 undefined） */
+  explanation?: string;
+}
+
+/**
+ * 从 UpdatePlan 工具结果块中提取执行计划（Markdown 任务列表）。
+ *
+ * 识别判据（保守，宁缺勿错）：
+ * 1. 块 JSON 解析成功且 name === "UpdatePlan"（引擎工具结果统一形态）；
+ * 2. metadata.plan 为非空字符串——每次 UpdatePlan 都是「完整任务列表」，
+ *    前端只渲染最新态（引擎协议：latest call replaces the previous visible plan）。
+ * 非 UpdatePlan 块 / 缺 plan / 空 plan 一律返回 null（条目按普通工具展示）。
+ *
+ * 兼容两种载荷位置（信息不丢）：
+ * - 标准形态：{ ok, name: "UpdatePlan", output, metadata: { plan, explanation } }；
+ * - 退化形态（metadata 丢失但 plan 直挂顶层）：{ name: "UpdatePlan", plan }。
+ *
+ * @param content 工具结果 JSON 文本（历史 content 或实时 item 序列化后）
+ * @returns 计划载荷；非 UpdatePlan 或缺计划返回 null
+ */
+export function extractPlanFromToolContent(content: string): PlanPayload | null {
+  const block = parseLeadingJsonBlock(content);
+  if (block === null || block.name !== "UpdatePlan") return null;
+  // 失败块不渲染计划卡（引擎执行失败时无有效计划态）
+  if (block.ok === false) return null;
+  // 标准形态：metadata.plan
+  const meta =
+    typeof block.metadata === "object" && block.metadata !== null ? (block.metadata as Record<string, unknown>) : {};
+  const planRaw = typeof meta.plan === "string" ? meta.plan : block.plan;
+  if (typeof planRaw !== "string" || planRaw.trim() === "") return null;
+  const explanationRaw = typeof meta.explanation === "string" ? meta.explanation : block.explanation;
+  const explanation =
+    typeof explanationRaw === "string" && explanationRaw.trim() !== "" ? explanationRaw.trim() : undefined;
+  return { plan: planRaw, explanation };
+}
+
+/** 计划任务行的状态分类（复选框标记 → 图标/进度语义） */
+export type PlanTaskStatus = "done" | "active" | "pending";
+
+/** 计划解析结果：单条任务行 */
+export interface PlanTaskItem {
+  /** 任务文本（已去掉列表符号与复选框标记） */
+  text: string;
+  /** 状态：done=[x] / active=[>] / pending=[ ] 或无复选框 */
+  status: PlanTaskStatus;
+  /** 缩进层级（列表嵌套深度，按行首空格估算） */
+  depth: number;
+}
+
+/**
+ * 解析计划 Markdown 为任务行列表（仅处理列表行，非列表行忽略——
+ * 标题/段落等结构交给卡片头部与说明区表达，任务行承载进度）。
+ *
+ * 识别规则：
+ * - 无序/有序列表行（- / * / 1.）；
+ * - 复选框标记：[x]/[X] → done；[>] → active（进行中）；[ ] → pending；
+ * - depth 按行首空格数折算（2 空格一级，上限 3 级防御畸形缩进）。
+ *
+ * @param plan 计划 Markdown 原文
+ * @returns 任务行数组（顺序保持原文；无列表行时为空数组）
+ */
+export function parsePlanTasks(plan: string): PlanTaskItem[] {
+  const items: PlanTaskItem[] = [];
+  for (const rawLine of plan.split(/\r?\n/)) {
+    // 列表行匹配：可选缩进 + （无序 - * + 或有序 数字. ）+ 内容
+    const m = /^(\s*)(?:[-*+]|\d+[.)])\s+(.*)$/.exec(rawLine);
+    if (m === null) continue;
+    const depth = Math.min(3, Math.floor(m[1].replace(/\t/g, "  ").length / 2));
+    let text = m[2].trim();
+    let status: PlanTaskStatus = "pending";
+    // 复选框标记（GFM 风格）：[x]/[X]=完成，[>]=进行中，[ ]=待办
+    const cb = /^\[([xX> ])\]\s*(.*)$/.exec(text);
+    if (cb !== null) {
+      status = cb[1] === "x" || cb[1] === "X" ? "done" : cb[1] === ">" ? "active" : "pending";
+      text = cb[2].trim();
+    }
+    if (text !== "") items.push({ text, status, depth });
+  }
+  return items;
 }
