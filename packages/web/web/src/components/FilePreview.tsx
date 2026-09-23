@@ -29,6 +29,11 @@ export interface FilePreviewProps {
   scope: FileScope;
   /** 返回列表 */
   onBack: () => void;
+  /**
+   * 并排预览态（宽屏抽屉加宽后的左栏）：预览头隐藏返回按钮
+   * （列表仍在右栏可见可点，文件标识由抽屉面包屑末级承担，返回语义统一为关闭预览）。
+   */
+  inSplit?: boolean;
 }
 
 /** 图片扩展名（与 FileDrawer.entryIcon 同一判定源） */
@@ -114,7 +119,7 @@ function langLabel(name: string): string {
 }
 
 /** FilePreview：预览覆盖层（含加载态/错误态/三类渲染分支） */
-export function FilePreview({ path, name, size, scope, onBack }: FilePreviewProps) {
+export function FilePreview({ path, name, size, scope, onBack, inSplit = false }: FilePreviewProps) {
   /** 文本预览数据（图片路径不请求） */
   const [data, setData] = useState<FilePreviewResult | null>(null);
   /** 加载错误文案（null = 无错误） */
@@ -165,12 +170,19 @@ export function FilePreview({ path, name, size, scope, onBack }: FilePreviewProp
   }, [data, markdownMessages, isImage]);
 
   return (
-    <div className="file-preview" role="region" aria-label={`预览 ${name}`}>
-      {/* 预览头：返回 + 文件名 + 类型徽标 + 大小 + 下载 */}
+    <div
+      className={inSplit ? "file-preview file-preview-split" : "file-preview"}
+      role="region"
+      aria-label={`预览 ${name}`}
+    >
+      {/* 预览头：返回（窄屏覆盖态）+ 文件名 + 类型徽标 + 大小 + 下载；
+          并排态（inSplit）隐藏返回按钮——列表就在右栏，返回语义统一为关闭预览 */}
       <div className="file-preview-head">
-        <button type="button" className="icon-btn" title="返回列表" onClick={onBack}>
-          <BackIcon size={16} />
-        </button>
+        {!inSplit && (
+          <button type="button" className="icon-btn" title="返回列表" onClick={onBack}>
+            <BackIcon size={16} />
+          </button>
+        )}
         <span className="file-preview-name" title={path}>
           {name}
         </span>
