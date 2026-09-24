@@ -2192,7 +2192,7 @@ test("Write checkpoints restore tool-touched files outside the workspace and lea
   const sessionId = await manager.createSession({ text: "create an outside file" });
   const userMessage = manager.listSessionMessages(sessionId).find((message) => message.role === "user");
   assert.ok(userMessage?.checkpointHash);
-  assert.equal(fs.readFileSync(outsideFilePath, "utf8"), "outside\n");
+  assert.equal(fs.readFileSync(outsideFilePath, "utf8"), `outside${os.EOL}`);
 
   fs.writeFileSync(unrelatedWorkspaceFilePath, "keep\n", "utf8");
   manager.restoreSessionCode(sessionId, userMessage.id);
@@ -2236,7 +2236,7 @@ test("missing git executable does not block sessions or Write tool calls", async
     const sessionId = await manager.createSession({ text: "create an index page" });
     const userMessage = manager.listSessionMessages(sessionId).find((message) => message.role === "user");
 
-    assert.equal(fs.readFileSync(filePath, "utf8"), "<h1>No Git</h1>\n");
+    assert.equal(fs.readFileSync(filePath, "utf8"), `<h1>No Git</h1>${os.EOL}`);
     assert.equal(userMessage?.checkpointHash, undefined);
     assert.equal(manager.getSession(sessionId)?.status, "completed");
   } finally {
