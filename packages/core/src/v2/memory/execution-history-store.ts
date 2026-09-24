@@ -182,7 +182,14 @@ export class ExecutionHistoryStore {
 
     // 入写缓冲队列 + 更新内存缓存
     this.pendingWrites.push(record);
-    this.cacheRecordToMemory(record);
+    // 数据不变式：pending ⊆ cache（patchRecordLinks 直接读 cache.get 定位记录即依赖此前提）。
+    // 仅在缓存未从文件全量加载（isFullyLoaded=false）时才同步入缓存——此时 cache 是
+    // pending 的临时超集，loadFileToCache 清空后由 pendingWrites 恢复（见 patchRecordLinks）；
+    // 若已加载（cache 已与文件对齐），此处不预先入缓存，改由 flush 落盘后
+    // reattachFlushedRecordsToCache 统一补入，避免与文件重建形成双倍数据。
+    if (!this.isFullyLoaded) {
+      this.cacheRecordToMemory(record);
+    }
 
     // 启动/重启 flush 定时器（合并 burst writes 为单次 fs appendFile）
     if (this.flushTimer === null) {
@@ -254,6 +261,13 @@ export class ExecutionHistoryStore {
     try {
       const recordsToWrite = this.pendingWrites.splice(0, this.pendingWrites.length);
       await this.appendToFileAsync(recordsToWrite);
+      // flush 落盘后确保记录回到缓存——缓存是 query 的唯一事实源，而 loadFileToCache
+      // 在 isFullyLoaded=false 时会清空 cache（含 record 尚未 flush 的记录）。
+      // 若此前发生过一次 loadFileToCache（如 DualLayerContextManager 执行历史片段
+      // 检索触发），pending 记录已被移出缓存；此处在落盘后重新灌回，使 flushSedimentation
+      // 链路（closeSync 落盘 → syncSession 查询）能查到本轮记录（docs/dev/
+      // eag-web-sedimentation-fixes.md §2.2 兜底不丢数据）。cacheRecordToMemory 幂等。
+      this.reattachFlushedRecordsToCache(recordsToWrite);
     } catch (err) {
       console.error("[execution-history] async flush error:", err);
     } finally {
@@ -268,6 +282,27 @@ export class ExecutionHistoryStore {
     if (this.pendingWrites.length === 0) return;
     const recordsToWrite = this.pendingWrites.splice(0, this.pendingWrites.length);
     this.appendToFileSync(recordsToWrite);
+    // 同 flushPendingWritesAsync：落盘后把记录补回缓存，避免此前 loadFileToCache
+    // 清缓存导致 closeSync→query 链路查不到本轮记录（缓存为唯一事实源）。
+    this.reattachFlushedRecordsToCache(recordsToWrite);
+  }
+
+  /**
+   * flush 落盘后把记录补回内存缓存
+   *
+   * 幂等保护：仅当该记录 id 不在缓存对应 session 数组时才追加——
+   * 常规路径 record() 已 cacheRecordToMemory（id 已在缓存）→ 本方法为 no-op；
+   * 仅当缓存曾被 loadFileToCache 清空（isFullyLoaded=false 的 query /
+   * patchRecordLinks 前提）导致记录脱离缓存时，才在 flush 后补回。
+   *
+   * @param records 本次 flush 已落盘的记录
+   */
+  private reattachFlushedRecordsToCache(records: ExecutionRecord[]): void {
+    for (const record of records) {
+      const existing = this.cache.get(record.sessionId);
+      if (existing && existing.some((r) => r.id === record.id)) continue;
+      this.cacheRecordToMemory(record);
+    }
   }
 
   /**
@@ -552,6 +587,84 @@ export class ExecutionHistoryStore {
     } catch (err) {
       console.error("[execution-history] rewriteFile failed:", err);
     }
+  }
+
+  // ========== 二期 T4：raw jsonl 关联字段回填 ==========
+
+  /**
+   * 回填指定 session 记录的二期关联字段（T4 fixedByExecutionId / memoryEntryIds）
+   *
+   * 背景：record() 从不写二期字段（fixedByExecutionId / memoryEntryIds），
+   * 失败+修复关联此前只存在于 MemoryEntry.metadata 一侧；沉淀 sync 识别出
+   * 失败+修复对后经本方法回写 raw jsonl，使原始记录自描述。
+   *
+   * 实现语义：
+   * 1. 缓存为唯一事实源——缓存未加载时先 loadFileToCache()（与 query() 同前提）；
+   * 2. 逐 patch 按 id 定位该 session 缓存记录，只合并传入的字段
+   *    （memoryEntryIds / fixedByExecutionId 未传时不动原值）；
+   * 3. id 不存在于该 session 缓存 → 静默跳过（不计入命中数）；
+   * 4. 有任何命中才 rewriteFileFromCache() 全量原子重写文件（tmp + rename，
+   *    复用 prune() 同款写路径与 safeSerialize 序列化）。
+   *
+   * 并发前提（设计评审结论，docs/dev/eag-web-sedimentation-fixes.md §5）：
+   * 与 100ms pending flush 并发时以缓存为唯一事实源——已确认 flush 实现
+   * （flushPendingWritesAsync/flushPendingWritesSync）只 append pendingWrites
+   * 队列中的新记录（record() 时已同步入缓存），绝不重写文件；patch 时 pending
+   * 未落盘记录也已在缓存全集中，rewriteFileFromCache 序列化缓存全集（含 pending）
+   * 覆盖文件，随后 flush 再 append 已落盘的 pending 记录时会在文件尾部产生重复行——
+   * 该窗口极小（同步调用链内不存在），且 loadFileToCache 幂等消费、query 语义
+   * 不受影响；单进程内可接受，不引入锁（对齐设计 §5 评审结论）。
+   * 为彻底关闭该窗口，本方法在重写前先同步刷写 pending 队列。
+   *
+   * @param sessionId 目标 session id（patch 只在该 session 的记录范围内定位）
+   * @param patches 回填项列表：id 定位记录，字段按需传入
+   * @returns 命中的记录条数（id 不存在的 patch 不计入）
+   */
+  patchRecordLinks(
+    sessionId: string,
+    patches: Array<{ id: string; memoryEntryIds?: string[]; fixedByExecutionId?: string | null }>
+  ): number {
+    if (patches.length === 0) return 0;
+
+    // 确保缓存已加载（与 query() 同前提：缓存是 patch 与重写的唯一事实源）。
+    // 注意顺序：loadFileToCache 会清空 cache 后从文件重建——此时 pending 记录虽在
+    // record() 时入过缓存也会被清掉，因此加载完成后必须把 pending 重新放回缓存
+    // 并从 pending 队列移除（事实源移交给缓存），随后 flush 不会再 append 同一批
+    // 记录，rewriteFileFromCache 序列化缓存全集（含 pending）也不丢数据。
+    if (!this.isFullyLoaded) {
+      this.loadFileToCache();
+      for (const pending of this.pendingWrites) {
+        this.cacheRecordToMemory(pending);
+      }
+    }
+    // 同步刷写 pending 落盘并清定时器（缓存此时已含这批记录，flush 置空 pending
+    // 队列不会产生重复行；无 pending 时仅清定时器）
+    if (this.flushTimer !== null) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    this.flushPendingWritesSync();
+
+    const sessionRecords = this.cache.get(sessionId);
+    if (!sessionRecords || sessionRecords.length === 0) return 0;
+
+    // id → 记录索引（一次构建，供全部 patch O(1) 定位）
+    const byId = new Map<string, ExecutionRecord>();
+    for (const rec of sessionRecords) byId.set(rec.id, rec);
+
+    let patched = 0;
+    for (const patch of patches) {
+      const target = byId.get(patch.id);
+      if (!target) continue; // id 不存在 → 静默跳过（对齐设计 §2.4）
+      if (patch.memoryEntryIds !== undefined) target.memoryEntryIds = patch.memoryEntryIds;
+      if (patch.fixedByExecutionId !== undefined) target.fixedByExecutionId = patch.fixedByExecutionId;
+      patched++;
+    }
+    if (patched === 0) return 0;
+
+    // 有命中 → 全量原子重写文件（tmp + rename，复用 rewriteFileFromCache）
+    this.rewriteFileFromCache();
+    return patched;
   }
 
   // ========== 查询工具：LLM query_execution_history 用 ==========

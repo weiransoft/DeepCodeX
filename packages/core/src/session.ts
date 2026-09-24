@@ -101,6 +101,9 @@ import {
   throwIfAborted as throwIfAbortedImpl,
 } from "./stream-aggregator";
 import { logApiError } from "./common/error-logger";
+// T8：compact 链路进度日志（JSONL 事件 + console.debug 人类可读行）
+import { logCompactEvent } from "./common/compact-logger";
+import { logSedimentEvent } from "./common/sediment-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./common/debug-logger";
 import { describeLlmError, getLlmErrorDetails } from "./common/llm-error";
 // V2 codemap 工具注入：将 codemap_query / impact_analysis / flow_trace / risk_scan
@@ -194,6 +197,13 @@ import type {
 import type { GraphLoopOrchestratorOptions } from "./eag/graph/graph-loop-protocols";
 import { EagGraphCommandHandler, extractEagGraphRequestFromPrompt } from "./eag/cli/index";
 import type { EagGraphRequest, EagGraphCommandResult } from "./eag/cli/index";
+// EA-03b 修复 2026-09-24：suggestion-auto.ts 的 buildAutoExecuteCommand 是纯函数版本，
+// session.ts 的 private buildAutoExecuteCommand 委托至此——消除两份实现漂移风险。
+// 本 import 在 EAG import 区域保持集中，不会循环（suggestion-auto.ts 不 import session.ts）。
+import {
+  buildAutoExecuteCommand as buildAutoExecuteCommandImpl,
+  shouldDemoteToolCallFragment,
+} from "./eag/suggestion-auto";
 import type {
   EagDynamicSuggester,
   EagDynamicSuggestion,
@@ -1088,6 +1098,13 @@ export function parseSteeringIntentJson(raw: string): { intent: "steer" | "next"
   return { intent: obj.intent, reason: obj.reason };
 }
 
+/**
+ * T2 增量沉淀阈值（docs/dev/eag-web-sedimentation-fixes.md §2.2）：
+ * 同一会话每满 N 个「用户 prompt 激活轮次」触发一次增量沉淀。
+ * MemoryStore upsert 按 dedupKey 幂等（usageCount 递增），增量安全。
+ */
+const SEDIMENT_INCREMENTAL_EVERY_TURNS = 10;
+
 export class SessionManager {
   private readonly projectRoot: string;
   /**
@@ -1244,6 +1261,15 @@ export class SessionManager {
   // 牢笼改造（docs/dev/web-workspace.md C7）：cachePath 依赖构造参数 homeDir，
   // 字段初始化器拿不到 options，改为构造体内赋值。
   private readonly deepSeekFiles: DeepSeekFileStore;
+  /**
+   * T2 增量沉淀轮次计数（内存级，key = sessionId）：
+   * 每次用户 prompt 触发的 activateSession（会话 entry 已存在）计数 +1，
+   * 满 SEDIMENT_INCREMENTAL_EVERY_TURNS 个激活轮次触发一次增量沉淀并重置。
+   * 目的：长会话运行中 SIGTERM/崩溃前已沉淀过经验，避免 only-finally 丢数据
+   * （设计 docs/dev/eag-web-sedimentation-fixes.md §2.2）。
+   * MemoryStore upsert 按 dedupKey 幂等（usageCount 递增），重复沉淀安全。
+   */
+  private readonly activateRoundsSinceSediment = new Map<string, number>();
 
   constructor(options: SessionManagerOptions) {
     this.projectRoot = options.projectRoot;
@@ -1529,6 +1555,82 @@ export class SessionManager {
     if (this.executionHistoryStore) {
       this.executionHistoryStore.closeSync();
     }
+  }
+
+  /**
+   * T2 沉淀核心实现（docs/dev/eag-web-sedimentation-fixes.md §2.2）：
+   * 把本 session 的执行历史沉淀为 MemoryStore experience（并触发 T4 raw 关联回写）。
+   *
+   * 由三处复用：activateSession finally、增量沉淀（每 N 轮）、flushSedimentation。
+   * 全 try/catch 隔离：任何异常只 console.error + 记 degrade 结构化日志后
+   * 返回全 0 统计，绝不 rethrow 影响调用方主流程（沿用原 finally 内联块语义）。
+   *
+   * 牢笼改造（docs/dev/web-workspace.md C6）：MemoryStore 构造透传 homeRoot，
+   * 经验记忆按用户落在各自引擎数据根下；CLI 缺省 homeRoot = os.homedir()。
+   *
+   * @param sessionId 目标 session id
+   * @returns 沉淀统计（成功命令数 / 失败+修复对数 / raw 关联回填条数；异常时全 0）
+   */
+  private syncSedimentationForSession(sessionId: string): {
+    successCount: number;
+    failureFixCount: number;
+    linkedCount: number;
+  } {
+    try {
+      if (this.executionHistoryStore) {
+        const memoryStore = new MemoryStore(this.projectRoot, this.homeRoot);
+        const sync = new ExecutionHistoryMemorySync(this.executionHistoryStore, memoryStore);
+        const { successCount, failureFixCount, linkedCount } = sync.syncSession(sessionId);
+        if (successCount > 0 || failureFixCount > 0) {
+          console.log(
+            `[exec-history] 二期沉淀: session ${sessionId} → MemoryStore +${successCount} 成功命令, +${failureFixCount} 失败+修复对`
+          );
+        }
+        return { successCount, failureFixCount, linkedCount };
+      }
+      return { successCount: 0, failureFixCount: 0, linkedCount: 0 };
+    } catch (err) {
+      // 降级：沉淀失败不影响 session 正常结束/flush 调用方（T5：结构化日志留痕）
+      console.error("[exec-history] 二期 MemoryStore 回写失败（降级）:", err);
+      logSedimentEvent(this.homeRoot, {
+        type: "degrade",
+        sessionId,
+        error: String(err),
+      });
+      return { successCount: 0, failureFixCount: 0, linkedCount: 0 };
+    }
+  }
+
+  /**
+   * T2 沉淀兜底公开 API（docs/dev/eag-web-sedimentation-fixes.md §2.2）：
+   * 主动把指定 session 的执行历史完整沉淀到 MemoryStore。
+   *
+   * 触发场景：Web SessionPool.disposeAll（SIGTERM/SIGINT 关闭链路）在 dispose 前
+   * 逐会话调用；CLI 侧可显式调用。流程：
+   * 1. executionHistoryStore.closeSync()——pending 写队列同步落盘 + 清 flush 定时器，
+   *    保证 fire-and-forget record 的数据全部进入可查询范围；
+   * 2. syncSedimentationForSession 执行沉淀（含 T4 raw 关联回写）；
+   * 3. logSedimentEvent(type:"flush") 记录结构化事件。
+   * store 未初始化（测试场景）时返回 {0,0,0}。
+   *
+   * @param sessionId 目标 session id
+   * @returns 沉淀统计（成功命令数 / 失败+修复对数 / raw 关联回填条数）
+   */
+  flushSedimentation(sessionId: string): { successCount: number; failureFixCount: number; linkedCount: number } {
+    if (!this.executionHistoryStore) {
+      return { successCount: 0, failureFixCount: 0, linkedCount: 0 };
+    }
+    // pending 落盘 + 刷缓存（closeSync 幂等：无 pending 时仅清定时器）
+    this.executionHistoryStore.closeSync();
+    const stats = this.syncSedimentationForSession(sessionId);
+    logSedimentEvent(this.homeRoot, {
+      type: "flush",
+      sessionId,
+      successCount: stats.successCount,
+      failureFixCount: stats.failureFixCount,
+      linkedRecords: stats.linkedCount,
+    });
+    return stats;
   }
 
   // Token 估算与格式化（已迁移到 ./stream-aggregator.ts，见 docs/dev/review.md CRITICAL-1 模块 1）
@@ -2233,12 +2335,33 @@ export class SessionManager {
       .sort(([left], [right]) => left - right)
       .map(([, toolCall]) => toolCall);
     const normalizedToolCalls = this.normalizeLlmToolCalls(toolCalls);
-    const message: Record<string, unknown> = { content };
+    // 中间推理碎片治理（2026-09-24，Advisor 收窄版）：
+    // 推理模型（qwen3.8 等）在多轮工具循环的**中间轮次**把零散叙述误输出在
+    // 正文通道（delta.content）而非 reasoning_content 通道，产生「数据库连接池异常」
+    // 这类与最终回复无关的孤立碎片。
+    //
+    // 降级判据（三条件同时满足，避免误伤合法长前导）：
+    //   1. normalizedToolCalls 存在 → 本回合有工具调用（中间轮次铁证——最终回复轮无工具）
+    //   2. reasoningContent 为空 → 模型本该把这段叙述放 thinking 通道但放错了
+    //      （若 reasoning 通道已有正常产出，content 里的前导可能是合法叙述，不降级）
+    //   3. content.trim() 长度 < 80 字符 → 短碎片判据（80 字覆盖中文 40+ 字
+    //      的零散叙述片段，同时排除"让我先检查一下项目结构..."这类长句前导）
+    //
+    // 三条件同时满足才降级：工具调用回合铁证 + reasoning 为空 + content 短 < 80
+    // （判据已提取为 suggestion-auto.ts shouldDemoteToolCallFragment 纯函数，
+    // 与 Anthropic 通路 createLlmMessageStream L~2666 完全共用，防漂移）
+    let contentForMessage = content;
+    let reasoningForMessage = reasoningContent;
+    if (shouldDemoteToolCallFragment({ normalizedToolCalls, reasoningContent, content })) {
+      reasoningForMessage = content;
+      contentForMessage = "";
+    }
+    const message: Record<string, unknown> = { content: contentForMessage };
     if (normalizedToolCalls) {
       message.tool_calls = normalizedToolCalls;
     }
-    if (reasoningContent.length > 0) {
-      message.reasoning_content = reasoningContent;
+    if (reasoningForMessage.length > 0) {
+      message.reasoning_content = reasoningForMessage;
     }
     if (refusal != null) {
       message.refusal = refusal;
@@ -2520,12 +2643,22 @@ export class SessionManager {
     // 返回前过一次 normalizeLlmToolCalls（对齐 OpenAI 侧 L754）：Anthropic id 必然存在，
     // 实际不触发补 id 逻辑，仅为两通路返回体语义严格一致
     const normalizedToolCalls = this.normalizeLlmToolCalls(Array.from(toolCallBuckets.values()));
-    const message: Record<string, unknown> = { content };
+    // 中间推理碎片治理（2026-09-24，Advisor 收窄版）：与 OpenAI 通路
+    // 三条件同时满足才降级：工具调用回合铁证 + reasoning 为空 + content 短 < 80
+    // （判据已提取为 suggestion-auto.ts shouldDemoteToolCallFragment 纯函数，
+    // 与 OpenAI 通路 createChatCompletionStream L~2360 完全共用，防漂移）
+    let contentForMessage = content;
+    let reasoningForMessage = reasoningContent;
+    if (shouldDemoteToolCallFragment({ normalizedToolCalls, reasoningContent, content })) {
+      reasoningForMessage = content;
+      contentForMessage = "";
+    }
+    const message: Record<string, unknown> = { content: contentForMessage };
     if (normalizedToolCalls) {
       message.tool_calls = normalizedToolCalls;
     }
-    if (reasoningContent.length > 0) {
-      message.reasoning_content = reasoningContent;
+    if (reasoningForMessage.length > 0) {
+      message.reasoning_content = reasoningForMessage;
     }
     if (refusal != null) {
       message.refusal = refusal;
@@ -3899,34 +4032,12 @@ ${agentInstructions}
    * @returns 完整命令字符串（如 "/eag-autonomous --goal \"从46同步数据库...\" --max-iterations 10 --confirmation smart"）
    */
   private buildAutoExecuteCommand(commandHint: string, goal: string): string {
-    // 安全转义 goal 中的特殊字符（对齐 shell 引号 + argparse 解析器）：
-    // - 反斜杠 → 双反斜杠
-    // - 双引号 → 反斜杠双引号
-    // - 换行符 → 空格（命令字符串不支持多行参数）
-    const escapedGoal = goal.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, " ").trim();
-
-    // 根据命令类型构造不同参数
-    const trimmedCommand = commandHint.trim();
-
-    // /eag-autonomous：完整参数（--goal + --max-iterations + --confirmation）
-    if (trimmedCommand === "/eag-autonomous") {
-      return `/eag-autonomous --goal "${escapedGoal}" --max-iterations 10 --confirmation smart`;
-    }
-
-    // /eag-design：--requirement + --paradigm
-    if (trimmedCommand === "/eag-design") {
-      return `/eag-design --requirement "${escapedGoal}" --paradigm ddd-layered`;
-    }
-
-    // /eag-build / /eag-test / /eag-run / /eag-deploy：通用 --goal 参数
-    const goalCommands = ["/eag-build", "/eag-test", "/eag-run", "/eag-deploy"];
-    if (goalCommands.includes(trimmedCommand)) {
-      return `${trimmedCommand} --goal "${escapedGoal}"`;
-    }
-
-    // /eag-graph 等特殊命令：降级为裸命令（handler 内部会提示需要额外参数）
-    // suggest_command 可能带参数（如 "/team dispatch"），直接返回 commandHint 让 handler 自行处理
-    return trimmedCommand;
+    // 委托到 eag/suggestion-auto 的公共纯函数（EA-03b 修复 2026-09-24）。
+    // 原实现与 suggestion-auto.ts 里的 buildAutoExecuteCommand 完全同构，
+    // 为防止两条路径独立漂移（CLI 调用 vs 本方法调用），统一委托。
+    // ESM 环境下不能用 require（tsx / ESM loader 均无 require 全局），
+    // 已在顶部 EAG import 区域静态导入 buildAutoExecuteCommandImpl。
+    return buildAutoExecuteCommandImpl(commandHint, goal);
   }
 
   /**
@@ -6318,6 +6429,31 @@ ${agentInstructions}
     const streamTimeoutMs = settingsTimeout > 0 ? settingsTimeout * 1000 : undefined;
     const maxReasoningLength = 100_000;
 
+    // T2 增量沉淀计数（docs/dev/eag-web-sedimentation-fixes.md §2.2）：
+    // 走到此处说明本次是有效的「用户 prompt 激活轮次」（client 可用且未中止）。
+    // 每满 SEDIMENT_INCREMENTAL_EVERY_TURNS 轮触发一次增量沉淀 + 重置计数，
+    // 保证长会话运行中（尚未走到 finally）也能周期性把执行历史沉淀到 MemoryStore，
+    // 避免进程 SIGTERM/崩溃时 only-finally 触发点丢数据。
+    // 计数与触发全 try/catch 隔离，沉淀异常绝不影响本轮激活主流程。
+    try {
+      const rounds = (this.activateRoundsSinceSediment.get(sessionId) ?? 0) + 1;
+      if (rounds >= SEDIMENT_INCREMENTAL_EVERY_TURNS) {
+        this.activateRoundsSinceSediment.set(sessionId, 0);
+        const stats = this.syncSedimentationForSession(sessionId);
+        logSedimentEvent(this.homeRoot, {
+          type: "incremental",
+          sessionId,
+          successCount: stats.successCount,
+          failureFixCount: stats.failureFixCount,
+          linkedRecords: stats.linkedCount,
+        });
+      } else {
+        this.activateRoundsSinceSediment.set(sessionId, rounds);
+      }
+    } catch {
+      // 增量沉淀计数/触发异常静默降级（syncSedimentationForSession 内部已自带降级）
+    }
+
     this.updateSessionEntry(sessionId, (entry) => ({
       ...entry,
       status: "processing",
@@ -6423,6 +6559,15 @@ ${agentInstructions}
           message.meta = { asThinking: true };
           this.onAssistantMessage(message, false);
           await this.compactSession(sessionId, sessionController.signal);
+        } else {
+          // T8：自动触发点未达阈值 → compact_skip（below-threshold），
+          // 纯观测打点，不改变任何判定与返回语义
+          this.logCompactProgress(sessionId, {
+            type: "compact_skip",
+            reason: "below-threshold",
+            tokensBefore: session.activeTokens,
+            threshold: compactPromptTokenThreshold,
+          });
         }
 
         // E2 扩展点（ADR-DI-001 §5.1.2）：检查中断队列，drain 并合成为 system 消息
@@ -6627,6 +6772,11 @@ ${agentInstructions}
           return;
         }
         const assistantMessage = this.buildAssistantMessage(sessionId, content, toolCalls, thinking);
+        // 注：2026-09-24 曾在此处加 content-only 短碎片标记（!toolCalls && !thinking && content ≤ 20 → meta.asThinking），
+        // 但 Advisor 审查判定误判率过高——合法短回复"好的"/"已完成"/"明白了"与脏碎片"数据库连接池异常"
+        // 长度完全无法区分。本轮移除。工具调用回合的碎片已由流式聚合器降级逻辑（下方 createChatCompletionStream /
+        // createLlmMessageStream 聚合尾部）覆盖——三条件（normalizedToolCalls 存在 + reasoningContent 为空 + content < 80）
+        // 的收窄判据能精准命中用户遇到的脏碎片场景。
         // 三态权限模式：CLI flag（permissionModeOverride）优先级最高，
         // 未注入时使用 resolved settings 中的 permissions.mode（设计文档 docs/dev/permission-modes.md §3.3）。
         // resolved settings 未提供 permissions 时保持旧行为（传 undefined，评估走默认 allowAll 策略）
@@ -6768,25 +6918,18 @@ ${agentInstructions}
         this.activeRuntimeSessionId = null;
       }
       // 二期 US-EH-007：session 结束时回写 MemoryStore（自动沉淀 experience）
-      // —— try/catch 全隔离，任何异常只 console.error，不影响 session 正常结束
-      // —— 触发时机：activateSession finally 块（比 dispose() 更及时）
-      // —— MemoryStore 构造参数 projectRoot：与 ExecutionHistoryStore 共用 projectCode 路径
-      try {
-        if (this.executionHistoryStore) {
-          // 牢笼改造（docs/dev/web-workspace.md C6）：经验记忆沉淀透传 homeRoot，
-          // 全局/经验记忆按用户落在各自引擎数据根下
-          const memoryStore = new MemoryStore(this.projectRoot, this.homeRoot);
-          const sync = new ExecutionHistoryMemorySync(this.executionHistoryStore, memoryStore);
-          const { successCount, failureFixCount } = sync.syncSession(sessionId);
-          if (successCount > 0 || failureFixCount > 0) {
-            console.log(
-              `[exec-history] 二期沉淀: session ${sessionId} → MemoryStore +${successCount} 成功命令, +${failureFixCount} 失败+修复对`
-            );
-          }
-        }
-      } catch (err) {
-        console.error("[exec-history] 二期 MemoryStore 回写失败（降级）:", err);
-      }
+      // —— T2：内联沉淀块提取为私有方法 syncSedimentationForSession，
+      //    finally 与 flushSedimentation/增量沉淀复用同一实现。
+      //    方法内部保持 try/catch 全隔离降级语义（异常只 console.error + 记 degrade 日志）。
+      const sedimentStats = this.syncSedimentationForSession(sessionId);
+      // T5：finally 常规沉淀事件留痕（degrade 事件已在方法内部记录）
+      logSedimentEvent(this.homeRoot, {
+        type: "sync",
+        sessionId,
+        successCount: sedimentStats.successCount,
+        failureFixCount: sedimentStats.failureFixCount,
+        linkedRecords: sedimentStats.linkedCount,
+      });
       this.maybeNotifyTaskCompletion(sessionId, notify, startedAt, env);
     }
   }
@@ -7196,11 +7339,15 @@ ${agentInstructions}
   }
 
   async compactSession(sessionId: string, signal?: AbortSignal): Promise<void> {
+    // T8：compact 总耗时打点起点（compact_done 的 durationMs 基准）
+    const compactStartedAt = Date.now();
     this.throwIfAborted(signal);
     // B1：非流式调用改经 provider 抽象层（createLLMClient 按 settings.provider 路由
     // OpenAI/Anthropic），不再直连 OpenAI SDK；无凭据时保持静默返回（旧 client:null 语义）
     const llmClient = this.createLLMClient();
     if (!llmClient) {
+      // T8：无凭据静默跳过（原语义不变），补 compact_skip 事件消除黑盒
+      this.logCompactProgress(sessionId, { type: "compact_skip", reason: "no-llm-client" });
       return;
     }
     // 请求级参数（thinking 开关/采样温度）继续取自统一 settings 解析链，
@@ -7210,11 +7357,19 @@ ${agentInstructions}
     const { thinkingEnabled, temperature } = this.resolveEngineSettings();
     const sessionMessages = this.listSessionMessages(sessionId).filter((message) => !message.compacted);
     if (sessionMessages.length === 0) {
+      // T8：无未压缩消息可处理，补 compact_skip 事件
+      this.logCompactProgress(sessionId, { type: "compact_skip", reason: "no-messages", messageCount: 0 });
       return;
     }
 
     const startIndex = sessionMessages.findIndex((message) => message.role !== "system");
     if (startIndex === -1) {
+      // T8：消息全部为 system（无可压缩的非系统消息），补 compact_skip 事件
+      this.logCompactProgress(sessionId, {
+        type: "compact_skip",
+        reason: "no-non-system-message",
+        messageCount: sessionMessages.length,
+      });
       return;
     }
 
@@ -7227,8 +7382,31 @@ ${agentInstructions}
       }
     }
     if (endIndex === -1 || endIndex <= startIndex) {
+      // T8：searchStart 之后找不到非 tool 角色边界（区间退化），补 compact_skip 事件
+      this.logCompactProgress(sessionId, {
+        type: "compact_skip",
+        reason: "no-boundary-message",
+        rangeStart: startIndex,
+        rangeEnd: endIndex,
+        messageCount: sessionMessages.length,
+      });
       return;
     }
+
+    // T8：全部前置判定通过，压缩正式开始。tokensBefore/threshold 取自会话
+    // 当前估算 token 数与统一 settings 解析链的自动 compact 阈值，与
+    // activateSession 自动触发点（resolvedSettings.autoCompactWindow ??
+    // getCompactPromptTokenThreshold）同源，仅用于日志观测，不参与任何判定。
+    const tokensBefore = this.getSession(sessionId)?.activeTokens ?? 0;
+    const compactThreshold = this.getCompactThresholdForLog();
+    this.logCompactProgress(sessionId, {
+      type: "compact_start",
+      tokensBefore,
+      threshold: compactThreshold,
+      rangeStart: startIndex,
+      rangeEnd: endIndex,
+      messageCount: sessionMessages.length,
+    });
 
     // 提示词保持原有构造逻辑（getCompactPrompt），仅换成合成 SessionMessage 形态
     // 以适配 provider 层的统一转换入口（OpenAI/Anthropic converter 均按 user 文本处理）
@@ -7248,6 +7426,9 @@ ${agentInstructions}
     };
 
     let response: LLMResponse;
+    // T8：摘要 LLM 请求阶段打点起点（summary_done/summary_fail 的 durationMs 基准）
+    const summaryStartedAt = Date.now();
+    this.logCompactProgress(sessionId, { type: "summary_start", rangeStart: startIndex, rangeEnd: endIndex });
     try {
       response = await llmClient.createMessage({
         messages: [promptMessage],
@@ -7256,6 +7437,12 @@ ${agentInstructions}
         signal: signal ?? null,
       });
     } catch (error) {
+      // T8：摘要请求失败（含 abort），记录 summary_fail 后按原语义继续（logApiError + 原样抛出）
+      this.logCompactProgress(sessionId, {
+        type: "summary_fail",
+        durationMs: Date.now() - summaryStartedAt,
+        error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      });
       // 保持错误可观测性（对齐旧 createChatCompletionStream 的 logApiError 行为），随后原样抛出
       // 牢笼改造（C8）：错误日志透传 homeRoot（同上）
       logApiError(
@@ -7280,6 +7467,12 @@ ${agentInstructions}
     this.throwIfAborted(signal);
     const llmResponse = response.content;
     const compactedSummary = llmResponse.replace(/<analysis>[\s\S]*?<\/analysis>/gi, "").trim();
+    // T8：摘要请求成功返回，记录耗时与摘要字符数
+    this.logCompactProgress(sessionId, {
+      type: "summary_done",
+      durationMs: Date.now() - summaryStartedAt,
+      summaryChars: compactedSummary.length,
+    });
 
     const now = new Date().toISOString();
     const responseUsage = toModelUsage(response.usage);
@@ -7323,6 +7516,60 @@ ${agentInstructions}
     };
     sessionMessages.splice(endIndex, 0, summaryMessage);
     this.saveSessionMessages(sessionId, sessionMessages);
+    // T8：压缩落盘完成，记录消息总数（含 summary）与压缩总耗时
+    this.logCompactProgress(sessionId, {
+      type: "compact_done",
+      rangeStart: startIndex,
+      rangeEnd: endIndex,
+      messageCount: sessionMessages.length,
+      durationMs: Date.now() - compactStartedAt,
+    });
+  }
+
+  /**
+   * T8：compact 链路进度日志统一出口
+   *
+   * 双通道输出（判定逻辑零介入，纯观测）：
+   * 1. logCompactEvent → `<homeRoot>/.deepcodex/logs/compact.log`（结构化 JSONL，
+   *    内部 try/catch 静默，日志失败不影响 compact 主流程）；
+   * 2. console.debug `[compact]` 前缀人类可读行 —— console.debug 在生产终端
+   *    默认不显示（stdout 原样输出但 TUI 不消费），零噪声；排查时用
+   *    `node --inspect`／重定向即可看到。
+   *
+   * @param sessionId 会话 ID
+   * @param event compact 事件（type 及其余观测字段）
+   */
+  private logCompactProgress(sessionId: string, event: Omit<Parameters<typeof logCompactEvent>[1], "sessionId">): void {
+    const fullEvent = { ...event, sessionId };
+    logCompactEvent(this.homeRoot, fullEvent);
+    // 人类可读行：事件类型 + 关键字段（仅输出非空字段，保持单行简洁）
+    const details = Object.entries(fullEvent)
+      .filter(([key, value]) => key !== "type" && key !== "sessionId" && value !== undefined)
+      .map(([key, value]) => `${key}=${value}`)
+      .join(" ");
+    console.debug(`[compact] ${fullEvent.type} session=${sessionId}${details ? ` ${details}` : ""}`);
+  }
+
+  /**
+   * T8：日志专用的 compact 阈值解析（供 compact_start 事件观测字段）
+   *
+   * 与 activateSession 自动触发点的阈值计算完全同源
+   * （autoCompactWindow 显式配置优先，否则 getCompactPromptTokenThreshold），
+   * 但不参与任何触发判定；settings 解析异常时返回 undefined，
+   * 保证日志观测通路本身绝不破坏 compact 主流程。
+   *
+   * @returns compact 阈值（token 数）；解析失败时 undefined
+   */
+  private getCompactThresholdForLog(): number | undefined {
+    try {
+      const resolvedSettings = this.getResolvedSettings();
+      return (
+        resolvedSettings.autoCompactWindow ??
+        getCompactPromptTokenThreshold(resolvedSettings.model, resolvedSettings.contextWindow)
+      );
+    } catch {
+      return undefined;
+    }
   }
 
   // 工具注册选项（融合双方字段）：model/multimodal/nonInteractive 为上游 v0.3.1 新增，
@@ -8762,6 +9009,8 @@ ${agentInstructions}
       exitCode: number | null;
       signal: string | null;
       error?: string;
+      /** T6 SIGKILL 误报甄别说明（completed 态透传，通知文本追加 Note 段） */
+      note?: string;
       completedAtMs: number;
       startedAtMs: number;
     }
@@ -8774,9 +9023,15 @@ ${agentInstructions}
           ? `signal ${completion.signal}`
           : completion.error || "unknown status";
     const durationMs = Math.max(0, completion.completedAtMs - completion.startedAtMs);
-    const baseContent =
+    let baseContent =
       `Background command "${completion.command}" ${status} with ${exitText} ` +
       `after ${this.formatBackgroundDuration(durationMs)}. Output: ${completion.outputPath}`;
+    // T6 甄别说明：completed 且携带 note（shell 包装被组杀但任务实际成功的降级场景）
+    // 时追加单行 Note 段——Web 卡片解析为黄色提示条，CLI/模型侧亦可见降级事实。
+    // 换行拼接：note 文本单行化（strip 换行），确保 Web 端 `. Output: (\S+)` 主正则不受影响。
+    if (completion.ok && typeof completion.note === "string" && completion.note.trim() !== "") {
+      baseContent += `\nNote: ${completion.note.replace(/\s*\r?\n\s*/g, " ").trim()}`;
+    }
     const logTail = completion.ok ? null : this.buildBackgroundFailureLogTailSlice(completion.outputPath);
     const content = logTail ? `${baseContent}\n${logTail}` : baseContent;
     this.addSessionSystemMessage(sessionId, content, true);

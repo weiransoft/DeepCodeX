@@ -521,3 +521,20 @@ export * from "./dynamic/index";
 // - 其余 P5 专属符号（如 AutonomousOrchestrator / P5RunStateStore / BlockerGuardChain 等）
 //   无同名冲突，正常参与根 barrel 导出。
 export * from "./p5/index";
+
+// ============================================================================
+// 19. assembly —— EAG 编排器统一装配（T1 装配下沉，2026-09-24）
+// ============================================================================
+//
+// 设计依据：docs/dev/eag-web-sedimentation-fixes.md §2.1（方案 A）
+//
+// 从 CLI ui/core/eag-orchestrator-assembly.ts 下沉，成为 CLI / Web 共享的
+// 单一生产装配源：三个 build* 工厂 + 生产级 LoopHandoffAdapter，
+// 失败安全语义不变（任一组件构造异常 → 返回 undefined）。
+//
+// 公开 API：
+// - 函数：buildAutonomousOrchestrator / buildGraphLoopOrchestratorOptions / buildDesignOrchestrator
+// - 类：ProductionLoopHandoffAdapter（原 CLI 版 CliLoopHandoffAdapter，无终端依赖整体下沉）
+// - 类型：AssemblyLogCallback / DesignLlmClientFactory
+// 消费者经 core 根 index（./eag/assembly）扁平导入；本 barrel 汇聚保持 EAG 体系单一入口。
+export * from "./assembly";

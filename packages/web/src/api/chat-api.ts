@@ -101,6 +101,10 @@ export function handleStream(
 ): void {
   // 会话不存在或非本人时直接 404（不进入 SSE；R5 防枚举）
   pool.getChatInfo(chatId, ctx);
+  // T7 语义边界：SSE 是纯「事件投递通道」，退订（unsubscribe，经 hub.subscribe
+  // 内部 res.on("close") 完成）只断开浏览器与事件流之间的通路。
+  // 浏览器断开 ≠ 用户中断：轮次必须继续在服务端执行到自然完成，SessionManager
+  // 绝不因断连被 interrupt/abort；用户主动停止走 POST /api/chats/:id/interrupt。
   hub.subscribe(chatId, res);
   // 初始状态快照：让新订阅者立即获得当前 status 与待审批明细
   const summary = pool.listChats(ctx).find((chat) => chat.chatId === chatId);

@@ -30,11 +30,25 @@ import { homedir } from "node:os";
 import path from "node:path";
 import {
   InterruptQueue,
+  ProviderFactory,
   SessionManager,
+  buildAutonomousOrchestrator,
+  buildDesignOrchestrator,
+  buildGraphLoopOrchestratorOptions,
+  createEagDynamicSuggester,
   createOpenAIClient as createDefaultOpenAIClient,
+  extractAutoExecutableEagCommandName,
+  extractSuggestedCommandText,
+  extractSuggestedCommandAndGoal,
+  buildAutoExecuteCommand,
   getProjectCode,
   resolveCurrentSettings,
   type AskPermissionRequest,
+  type AutonomousOrchestrator,
+  type DesignLoopOrchestrator,
+  type DynamicCommandDescriptor,
+  type EagDynamicSuggester,
+  type GraphLoopOrchestratorOptions,
   type LLMClient,
   type SessionStatus,
   type UserPromptContent,
@@ -90,6 +104,12 @@ type ChatSession = {
   owner: string;
   /** 归属者隔离标识（注册表文件名主键，userIdFromUsername 产物） */
   ownerUserId: string;
+  /**
+   * 本会话已「建议器自动执行」过的 EAG 命令名集合（一次性守卫，防建议循环）。
+   * 与 SessionPool.autoExecutedCommands 是同一 Set 引用（池级 Map 观测入口 +
+   * 会话级读写便捷性兼顾），runTurn 收尾兜底与自动注入通道共用。
+   */
+  autoExecuted: Set<string>;
 };
 
 /** sendMessage 入参（已由 API 层校验过的强类型） */
@@ -135,6 +155,27 @@ export type CreateChatResult = {
   projectRoot: string;
 };
 
+/**
+ * EAG 编排器与动态建议层装配产物（docs/dev/eag-web-sedimentation-fixes.md §2.1）。
+ *
+ * 每池装配一次、跨全部会话共享（与 CLI 多会话共享同构，安全性已评审：
+ * AutonomousOrchestrator 按 runId 文件隔离运行状态、GraphLoopOrchestratorOptions
+ * 为不可变装配配置、DesignLoopOrchestrator.run() 入口重置运行时状态、
+ * EagDynamicSuggester 无会话态）。失败安全的组件为 undefined——SessionManager
+ * 维持「未注入时命令不可用」的 fail-closed 降级，与装配前现状零回归。
+ */
+type EagAssembly = {
+  /** /eag-autonomous 三命令执行体（P5 四阶段 + 护栏链）；装配失败为 undefined */
+  autonomousOrchestrator: AutonomousOrchestrator | undefined;
+  /** /eag-graph 图编排选项（GoalDispatcher + 6 插件）；装配失败为 undefined */
+  graphLoopOrchestratorOptions: GraphLoopOrchestratorOptions | undefined;
+  /** /eag-design DESIGN Loop 三角色编排器；装配失败为 undefined */
+  designOrchestrator: DesignLoopOrchestrator | undefined;
+  /** EAG LLM 动态编排建议层（决策 LLM 工厂与会话 createLLMClient 同源）；
+   *  测试基线（eagEnabled=false）下为 undefined = 未注入 */
+  eagDynamicSuggester: EagDynamicSuggester | undefined;
+};
+
 /** SessionPool 构造选项（依赖注入缝合点定义） */
 export type SessionPoolOptions = {
   /**
@@ -160,6 +201,13 @@ export type SessionPoolOptions = {
    * 可精确断言分类请求次数与输出契约。
    */
   classifyLlmClientFactory?: () => LLMClient | null;
+  /**
+   * EAG 装配注入开关（测试专用基线对照，docs/dev/eag-web-sedimentation-fixes.md
+   * §2.1 验收用例 EA-03a）。缺省 true = 生产行为（三编排器 + 建议层注入）；
+   * 显式置 false 时 SessionManager 维持「未注入时命令不可用」的 fail-closed
+   * 基线（= 装配前行为），仅用于测试证明注入前后的可观测差异，生产禁用。
+   */
+  eagEnabled?: boolean;
 };
 
 /**
@@ -173,8 +221,24 @@ export class SessionPool {
   private readonly createOpenAIClientOverride?: (projectRoot: string) => OpenAIClientHandle;
   /** steering 分类客户端工厂覆写（W2 测试缝合点；未注入时 core 回退 createLLMClient 链） */
   private readonly classifyLlmClientFactory?: () => LLMClient | null;
+  /** EAG 装配注入开关（缺省 true；false 为测试 fail-closed 基线，见 SessionPoolOptions） */
+  private readonly eagEnabled: boolean;
   /** 用户注册表根目录注入点（测试用；默认 ~/.deepcode/web/chats，docs/dev/web-isolation.md §3.4） */
   private readonly registryBaseDir?: string;
+
+  /**
+   * EAG 装配产物（懒构建，docs/dev/eag-web-sedimentation-fixes.md §2.1）。
+   * null = 尚未构建；构建后每池一份、跨全部会话共享（构建失败组件为 undefined，fail-closed）。
+   */
+  private eagAssemblyCache: EagAssembly | null = null;
+
+  /**
+   * 建议器自动执行一次性守卫（对齐 CLI App.tsx autoExecutedCommandsRef 防循环语义）：
+   * chatId → 该会话已「建议器自动执行」过的 EAG 命令名集合（与 ChatSession.autoExecuted
+   * 同一 Set 引用）。同一命令名每会话只自动执行一次——自动注入回合结束后兜底逻辑会
+   * 再次扫描回复，标记先置位保证模型继续回复「建议执行 /xxx」也不会二次注入。
+   */
+  private readonly autoExecutedCommands = new Map<string, Set<string>>();
 
   /**
    * @param settings 归一后的 Web 配置
@@ -191,7 +255,182 @@ export class SessionPool {
     this.createLLMClient = options.createLLMClient;
     this.createOpenAIClientOverride = options.createOpenAIClient;
     this.classifyLlmClientFactory = options.classifyLlmClientFactory;
+    this.eagEnabled = options.eagEnabled ?? true;
     this.registryBaseDir = options.registryBaseDir;
+  }
+
+  /**
+   * 取得（首次调用时构建）EAG 装配产物——每池一次的唯一生产装配点。
+   *
+   * 装配来源：core T1 下沉工厂（docs/dev/eag-web-sedimentation-fixes.md §2.1），
+   * 与 CLI App.tsx 共享同一份装配代码（单一数据源）：
+   * - buildAutonomousOrchestrator：/eag-autonomous 三命令执行体；
+   * - buildGraphLoopOrchestratorOptions：/eag-graph 图编排选项（projectRoot 用池配置）；
+   * - buildDesignOrchestrator：/eag-design DESIGN Loop 三角色编排器；
+   * - createEagDynamicSuggester：LLM 动态编排建议层（confidenceThreshold/maxDecisionTokens
+   *   与 CLI 完全一致：0.6 / 2048）。
+   *
+   * LLM 客户端工厂决策（web 与 CLI 的差异点）：CLI 的 createDecisionLLMClient 直接
+   * `resolveCurrentSettings(projectRoot) + ProviderFactory.create`；Web 多用户牢笼模式下
+   * 项目级 settings 是用户可写区、严禁注入凭据（web-workspace.md R5 P0 防线），故此处
+   * 与池内会话 LLM 通道保持同源：优先 SessionPoolOptions.createLLMClient 缝合点
+   * （受控客户端），未注入时按共享 projectRoot 以 ignoreProjectSettings 解析设置并经
+   * ProviderFactory 路由——凭据/ provider 路由语义与 core 默认 createLLMClient 一致，
+   * 仅设置解析口径与 Web 牢笼纪律对齐。
+   *
+   * 失败安全：三工厂任一构造异常返回 undefined（core 工厂内部收敛），本方法只补
+   * console.warn 留痕；SessionManager 维持「未注入时命令不可用」的 fail-closed 降级。
+   *
+   * @returns 池级装配产物（跨会话共享）
+   */
+  private getEagAssembly(): EagAssembly {
+    if (this.eagAssemblyCache) {
+      return this.eagAssemblyCache;
+    }
+    // 测试基线开关：不构造任何 EAG 组件，SessionManager 维持 fail-closed（装配前行为）
+    if (!this.eagEnabled) {
+      const disabled: EagAssembly = {
+        autonomousOrchestrator: undefined,
+        graphLoopOrchestratorOptions: undefined,
+        designOrchestrator: undefined,
+        // undefined = 未注入（与装配前"无建议器"现状逐字节一致，绝非仅 enabled:false）
+        eagDynamicSuggester: undefined,
+      };
+      this.eagAssemblyCache = disabled;
+      return disabled;
+    }
+    // 装配日志载体（任务约定保持最简）：console.debug + [eag-assembly] 前缀，
+    // 与 CLI 的 ~/.deepcodex/logs/eag-assembly.log 文件写入器等价留痕、不新增文件依赖
+    const assemblyLog = (message: string, level?: "info" | "warn" | "error"): void => {
+      const line = `[eag-assembly] ${message}`;
+      if (level === "error") {
+        console.warn(line);
+      } else {
+        console.debug(line);
+      }
+    };
+    // 惰性 LLM 客户端工厂：与池内会话 createLLMClient 通道同源（见方法头注释决策）
+    const createSharedLlmClient = (): LLMClient | null => {
+      if (this.createLLMClient) {
+        return this.createLLMClient();
+      }
+      const settings = resolveCurrentSettings(this.settings.projectRoot, { ignoreProjectSettings: true });
+      if (!settings.apiKey) {
+        return null;
+      }
+      return ProviderFactory.create(settings);
+    };
+    const autonomousOrchestrator = buildAutonomousOrchestrator(assemblyLog);
+    const graphLoopOrchestratorOptions = buildGraphLoopOrchestratorOptions(this.settings.projectRoot, assemblyLog);
+    const designOrchestrator = buildDesignOrchestrator(createSharedLlmClient, assemblyLog);
+    const eagDynamicSuggester = createEagDynamicSuggester({
+      createDecisionLLMClient: createSharedLlmClient,
+      enabled: true,
+      confidenceThreshold: 0.6,
+      maxDecisionTokens: 2048,
+    });
+    // 装配失败留痕（warn 级）：对应命令维持 fail-closed，Web 服务不受影响
+    if (!autonomousOrchestrator) {
+      console.warn("[eag-assembly] AutonomousOrchestrator 未装配：/eag-autonomous 维持 fail-closed");
+    }
+    if (!graphLoopOrchestratorOptions) {
+      console.warn("[eag-assembly] GraphLoopOrchestratorOptions 未装配：/eag-graph 维持 fail-closed");
+    }
+    if (!designOrchestrator) {
+      console.warn("[eag-assembly] DesignLoopOrchestrator 未装配：/eag-design 维持 fail-closed");
+    }
+    this.eagAssemblyCache = {
+      autonomousOrchestrator,
+      graphLoopOrchestratorOptions,
+      designOrchestrator,
+      eagDynamicSuggester,
+    };
+    return this.eagAssemblyCache;
+  }
+
+  /**
+   * 构造 Web 侧外部命令描述符（team / rules 命令体系，注入建议层 availableCommands）。
+   *
+   * CLI 版 buildDynamicCommandDescriptors 额外覆盖 TUI slash 命令体系
+   * （/skills、/model 等）——那些是 Ink 终端界面专属命令，在 Web 宿主中不存在
+   * 执行体，注入只会诱导建议器建议 Web 无法执行的命令，故 Web 仅收录
+   * team/rules 两个跨宿主可用的命令体系（EAG 命令描述符由 core session.ts
+   * 内部 listAvailableCommands() 生成，宿主无需提供）。
+   *
+   * @returns 冻结的 DynamicCommandDescriptor 数组
+   */
+  private buildWebDynamicCommandDescriptors(): ReadonlyArray<DynamicCommandDescriptor> {
+    return Object.freeze([
+      // —— team 子命令（对齐 CLI ui/core/dynamic-commands.ts 的 TEAM_COMMAND_DESCRIPTORS）——
+      Object.freeze({
+        category: "team" as const,
+        id: "team-list",
+        name: "/team list",
+        description: "列出所有可用角色（架构师/产品经理/测试专家/独立开发者/UI设计师）。",
+      }),
+      Object.freeze({
+        category: "team" as const,
+        id: "team-match",
+        name: "/team match",
+        description: "根据关键词匹配最合适的角色，输出置信度和匹配理由。",
+        args: ["--keywords <kw1,kw2,...>"],
+      }),
+      Object.freeze({
+        category: "team" as const,
+        id: "team-dispatch",
+        name: "/team dispatch",
+        description: "分派任务到指定角色（自动匹配或 --role 强制指定）。适合单角色任务。",
+        args: ["--task <任务描述>"],
+      }),
+      Object.freeze({
+        category: "team" as const,
+        id: "team-autonomous",
+        name: "/team autonomous",
+        description: "启动 Ralph 自主迭代模式（plan → dev → verify → fix 4 阶段循环）。适合需要自动迭代的多步任务。",
+        args: ["--goal <目标>"],
+      }),
+      Object.freeze({
+        category: "team" as const,
+        id: "team-full-lifecycle",
+        name: "/team full-lifecycle",
+        description: "8 阶段项目全流程（需求→架构→UI→测试设计→分解→开发→测试→文档审查）。适合新项目启动。",
+        args: ["--project <项目名>"],
+      }),
+      // —— rules 子命令（对齐 CLI 的 RULES_COMMAND_DESCRIPTORS）——
+      Object.freeze({
+        category: "rules" as const,
+        id: "rules-list",
+        name: "/rules list",
+        description: "列出所有生效规则（按 BLOCKER/MAJOR/WARNING 分组，含种子/用户/项目三层）。",
+      }),
+      Object.freeze({
+        category: "rules" as const,
+        id: "rules-add",
+        name: "/rules add",
+        description: "添加用户规则或项目规则（自动生成 USER-xxx / PROJ-xxx ID）。",
+        args: ["--content <规则内容>", "--severity <BLOCKER|MAJOR|WARNING>"],
+      }),
+      Object.freeze({
+        category: "rules" as const,
+        id: "rules-remove",
+        name: "/rules remove",
+        description: "提示用户手动编辑规则文件移除规则（新 RLIS API 不支持运行时删除）。",
+        args: ["--rule-id <ID>"],
+      }),
+      Object.freeze({
+        category: "rules" as const,
+        id: "rules-show",
+        name: "/rules show",
+        description: "查看规则详情（ID、分类、严重级别、内容、来源、注入/违规次数等）。",
+        args: ["--rule-id <ID>"],
+      }),
+      Object.freeze({
+        category: "rules" as const,
+        id: "rules-path",
+        name: "/rules path",
+        description: "显示规则文件路径（全局用户层 ~/.deepcodeX/rules/global-rules.json 和项目层）。",
+      }),
+    ]);
   }
 
   /**
@@ -304,6 +543,11 @@ export class SessionPool {
     const ignoreProjectSettings = this.settings.personalOnly;
     const settings = resolveCurrentSettings(resolvedRoot, { ignoreProjectSettings });
 
+    // EAG 装配（docs/dev/eag-web-sedimentation-fixes.md §2.1）：每池一次的编排器 +
+    // 建议层实例（跨会话共享）；懒构建意味着首次 createChat 才真实构造。
+    // eagEnabled=false（仅测试基线）→ 全部 undefined，等价装配前 fail-closed 现状。
+    const eag = this.getEagAssembly();
+
     // 事件桥接闭包引用：status 帧需要读取最新 pendingTurns/turnActive（W1③），
     // 用 const 包裹 chat 对象，闭包内读取的是属性最新值（chat 先于首帧事件存在）
     const chatRef: ChatSession = {
@@ -318,6 +562,7 @@ export class SessionPool {
       interruptQueue,
       owner: ctx.sub,
       ownerUserId: ctx.userId,
+      autoExecuted: new Set<string>(),
     };
 
     const manager = new SessionManager({
@@ -346,6 +591,15 @@ export class SessionPool {
       // steering 意图分类客户端工厂（W2 测试缝合点；未注入时 core 内部
       // 回退 createLLMClient()——凭据/provider 路由/ignoreProjectSettings 单一事实源）
       ...(this.classifyLlmClientFactory ? { classifyLlmClientFactory: this.classifyLlmClientFactory } : {}),
+      // —— EAG 注入（docs/dev/eag-web-sedimentation-fixes.md §2.1，与 CLI App.tsx 同构）——
+      // 池级共享实例：编排器跨会话安全（runId 文件隔离 / 不可变配置 / run() 入口重置）；
+      // undefined 组件维持 core fail-closed 降级（命令报「未注入」，主流程零回归）。
+      autonomousOrchestrator: eag.autonomousOrchestrator,
+      graphLoopOrchestratorOptions: eag.graphLoopOrchestratorOptions,
+      designOrchestrator: eag.designOrchestrator,
+      eagDynamicSuggester: eag.eagDynamicSuggester,
+      // Web 侧外部命令描述符（team/rules；EAG 命令描述符由 core 内部生成，slash 为 TUI 专属不注入）
+      dynamicCommandDescriptors: this.buildWebDynamicCommandDescriptors(),
       // 配置直读：与 CLI 同源（resolveCurrentSettings 透传；
       // personalOnly 时同样忽略项目级 settings，与 SessionManager 内部解析一致）
       getResolvedSettings: () => resolveCurrentSettings(resolvedRoot, { ignoreProjectSettings }),
@@ -414,6 +668,7 @@ export class SessionPool {
       chat.sessionId = sessionId;
     }
 
+    this.autoExecutedCommands.set(chatId, chatRef.autoExecuted);
     this.chats.set(chatId, chat);
     // 注册表登记（R2）：创建即落盘归属记录（sessionId 尚为 null，轮次 done 后回写补全），
     // 进程重启后历史列表与恢复校验均以本表为准。
@@ -863,6 +1118,110 @@ export class SessionPool {
     // 注册表回写（R2）：轮次收敛点落盘归属记录（成功与异常路径均覆盖），
     // 进程重启后该用户的列表 / 恢复校验以注册表为准
     this.persistChatRegistration(chat, session);
+
+    // 建议循环服务端兜底（docs/dev/eag-web-sedimentation-fixes.md §2.1，对齐 CLI
+    // App.tsx handlePrompt finally 的 F9-v2 EAG 纯文本注入通道）：done 帧已推送、
+    // 注册表已回写之后触发，异步 fire-and-forget——自动执行回合绝不阻塞本轮收敛。
+    this.scheduleAutoExecuteSuggestion(chat, session);
+  }
+
+  /**
+   * 建议循环兜底判定（docs/dev/eag-web-sedimentation-fixes.md §2.1，Web 版 F9-v2）。
+   *
+   * 触发条件（与 CLI finally 块逐条对齐）：
+   * 1. 本轮真实跑完 LLM 回合且无异常（turnError 为空，done status=completed）；
+   * 2. 回合以纯文本结束：引擎条目 toolCalls 为空（工具调用轮不是「建议收尾」）；
+   * 3. 回复文本命中 extractSuggestedCommandText 的「建议执行/启动 /xxx」句式
+   *    （core 纯函数，引号参数捕获 + 否定保护）；
+   * 4. 命令名命中 AUTO_EXECUTABLE_EAG_COMMANDS 白名单
+   *    （extractAutoExecutableEagCommandName，仅 eag-autonomous，保守收录）；
+   * 5. 该命令名在本会话尚未自动执行过（chat.autoExecuted 一次性守卫防循环）。
+   *
+   * 满足全部条件 → 置位守卫后异步发起自动注入回合；任何条件不满足都静默返回，
+   * 行为与注入前完全一致（零回归）。
+   *
+   * @param chat 收敛完成的聊天
+   * @param session 引擎会话条目（done 帧同源快照；可能为 null）
+   */
+  private scheduleAutoExecuteSuggestion(chat: ChatSession, session: ReturnType<SessionManager["getSession"]>): void {
+    if (!session || session.status !== "completed") {
+      return;
+    }
+    // 纯文本回合判据：toolCalls 为空（CLI 版同款条件——带工具调用的回合说明模型
+    // 已在干活，不属于「反复建议、命令永不执行」的建议循环病灶）
+    if (Array.isArray(session.toolCalls) && session.toolCalls.length > 0) {
+      return;
+    }
+    const suggestedCommand = session.assistantReply ? extractSuggestedCommandText(session.assistantReply) : null;
+    if (!suggestedCommand) {
+      return;
+    }
+    // EA-03b 修复（2026-09-24）：从建议句式同时抽取 goal 散文 → 构造完整命令
+    // （带 --goal/--max-iterations 等参数）。原实现直接把抽出的裸命令（/eag-autonomous）
+    // 注入，handleEagAutonomousCommand 因缺 --goal 参数解析失败 → executor 零请求 →
+    // 编排器不启动。现改为从 assistantReply 提取 SuggestedCommandCapture，
+    // 用 buildAutoExecuteCommand 组装完整命令再注入。
+    const capture = session.assistantReply ? extractSuggestedCommandAndGoal(session.assistantReply) : null;
+    const fullCommandText = capture
+      ? buildAutoExecuteCommand(capture.commandWithSlash, capture.goalText)
+      : suggestedCommand;
+    // EAG 白名单校验（core 单一数据源；非 EAG 斜杠命令的 slash 体系校验属 CLI，
+    // Web 宿主无 TUI slash 执行体，不适用 AUTO_EXECUTABLE_COMMAND_KINDS 通道）
+    const eagCommandName = extractAutoExecutableEagCommandName(suggestedCommand);
+    if (!eagCommandName) {
+      return;
+    }
+    // 一次性守卫：先标记再执行——自动注入回合收敛后本兜底会再次扫描，届时守卫
+    // 已就位，模型继续回复「建议启动 /eag-autonomous」也不会二次注入（防循环）
+    if (chat.autoExecuted.has(eagCommandName)) {
+      return;
+    }
+    chat.autoExecuted.add(eagCommandName);
+    // EA-03b 修复（日志用完整命令文本，便于排障；下游 runAutoExecutedTurn 同样用完整命令）
+    console.log(`[session-pool] 建议器自动执行（chatId=${chat.chatId}）：${fullCommandText}`);
+    // fire-and-forget：经 chat.busy Promise 链排队，同 chatId 轮次天然串行；
+    // runTurn 自身收敛全部异常，此处 catch 仅防御性吞掉未来改动引入的逃逸
+    chat.busy = chat.busy.then(() => this.runAutoExecutedTurn(chat, fullCommandText)).catch(() => undefined);
+  }
+
+  /**
+   * 执行一次「建议器自动执行」回合（在串行链内调用；不向调用方抛错）。
+   *
+   * 流程（任务约定：系统提示走既有 system 事件桥接 + 命令文本复用 runTurn 通路）：
+   * 1. 向 SSE 推送一条 role:"system" 的 assistant_message 帧，内容注明
+   *    「建议器自动执行」——前端事件桥接收方与既有 system 消息（steering 注入等）
+   *    同格式渲染，用户可感知命令是系统自动注入而非本人手输；
+   *    刻意不向引擎会话注入 system 消息：命令文本即将作为**用户消息**进入会话历史，
+   *    经 EagCommandParser 走与手输完全同路径；若同时注入 system 消息会造成回合
+   *    上下文冗余，且可能命中 core 确定性意图通道的否定词保护造成行为分叉；
+   * 2. 命令文本作为用户 prompt 走 runTurn 既有通路（权限审批/done 帧/注册表回写
+   *    /自动再扫描语义与用户消息轮次完全一致）。
+   *
+   * @param chat 目标聊天
+   * @param commandText 建议命令全文（如 `/eag-autonomous --goal "xxx"`）
+   */
+  private async runAutoExecutedTurn(chat: ChatSession, commandText: string): Promise<void> {
+    // system 事件桥接帧（与 publishUserMessage 同款合成 DTO：无引擎落盘 id，
+    // id 仅作前端 React key；历史恢复时以引擎轮次真实落盘消息为准）
+    try {
+      const now = new Date().toISOString();
+      this.hub.publish(chat.chatId, "assistant_message", {
+        chatId: chat.chatId,
+        messageId: randomUUID(),
+        role: "system",
+        content: `【建议器自动执行】检测到助手回复中的「建议执行 ${commandText}」句式，已自动注入执行（同一命令每会话仅自动执行一次）。`,
+        createTime: now,
+        updateTime: now,
+      });
+    } catch (error) {
+      // 系统提示帧推送失败不阻断自动执行（消息可见性属增强信息，命令执行本身
+      // 走 EagCommandParser 独立通路）；留痕便于排障
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[session-pool] 建议器自动执行系统提示注入失败（chatId=${chat.chatId}）：${message}`);
+    }
+    // 复用 runTurn：权限/异常/done 帧/注册表回写/自动再扫描（守卫已置位不会二次注入）
+    // 全部语义与用户消息轮次一致
+    await this.runTurn(chat, { text: commandText });
   }
 
   /**
@@ -1090,9 +1449,33 @@ export class SessionPool {
 
   /**
    * 释放全部会话（服务器优雅关闭时调用）：逐个 dispose 引擎并清空池。
+   *
+   * SIGTERM/SIGINT 沉淀兜底（docs/dev/eag-web-sedimentation-fixes.md §2.2）：
+   * dispose 前对每个已绑定底层会话的 chat 主动调用 flushSedimentation——
+   * 沉淀（执行历史 → MemoryStore experience）常规触发点在 activateSession
+   * finally 与每 N 轮增量，长会话被 SIGTERM 击杀时轮次可能永远不会走到 finally，
+   * 学习数据（成功命令经验 / 失败+修复对）将随 pending 写队列一起丢失。
+   * flushSedimentation = closeSync 同步落盘 + 完整沉淀回写 + type:"flush" 结构化日志。
+   * 尽力而为：任一会话 flush 异常只留痕不阻断其余会话释放（关闭链路必须收敛）。
    */
   disposeAll(): void {
     for (const chat of this.chats.values()) {
+      // 沉淀兜底（先于 dispose：dispose 会 abort 活跃轮次并关闭 store，
+      // flush 必须在引擎仍可用时执行）
+      if (chat.sessionId) {
+        try {
+          const stats = chat.manager.flushSedimentation(chat.sessionId);
+          if (stats.successCount > 0 || stats.failureFixCount > 0) {
+            console.log(
+              `[session-pool] 关闭前沉淀兜底 chatId=${chat.chatId}：+${stats.successCount} 成功命令, +${stats.failureFixCount} 失败+修复对`
+            );
+          }
+        } catch (error) {
+          // 尽力而为：flush 失败（只读盘/权限等）不影响后续 dispose 与其余会话
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn(`[session-pool] 关闭前沉淀兜底失败（chatId=${chat.chatId}）：${message}`);
+        }
+      }
       try {
         chat.manager.dispose();
       } catch {
@@ -1100,6 +1483,8 @@ export class SessionPool {
       }
     }
     this.chats.clear();
+    // 池级建议器自动执行守卫随会话池一同清算（chatId 为一次性 UUID，防跨重启残留）
+    this.autoExecutedCommands.clear();
   }
 }
 

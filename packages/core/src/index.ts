@@ -141,7 +141,9 @@ export type {
 } from "./common/tool-types";
 
 // Tool handlers
-export { handleBashTool, clearSessionWorkingDir } from "./tools/bash-handler";
+// detectBackgroundSuccessFromLog / readTail：T6 后台任务 SIGKILL 误报甄别的日志尾成功标记
+// 判定纯函数与文件尾部读取辅助函数（导出供单测复用）
+export { handleBashTool, clearSessionWorkingDir, detectBackgroundSuccessFromLog, readTail } from "./tools/bash-handler";
 export { handleReadTool } from "./tools/read-handler";
 // 上游 v0.3.1 新增：ReadImage（多模态模型直读图片）与 UnderstandImage（图片经多模态消息交给当前模型分析；
 // 隐私加固 2026-09-17：不再上传外部插件服务器）
@@ -277,6 +279,9 @@ export type { MultimodalMode } from "./common/model-capabilities";
 export { findGitBashPath, resolveShellPath, setShellIfWindows } from "./common/shell-utils";
 export { logApiError } from "./common/error-logger";
 export { logOpenAIChatCompletionDebug } from "./common/debug-logger";
+// T5（docs/dev/eag-web-sedimentation-fixes.md §2.5）：沉淀事件结构化日志（Web disposeAll 兜底等共用）
+export { logSedimentEvent, getSedimentLogPath } from "./common/sediment-logger";
+export type { SedimentEvent, SedimentEventType } from "./common/sediment-logger";
 // 统一日志目录入口：CLI 与核心库共用 ~/.deepcodex/logs，旧版 ~/.deepcode/logs 仅只读兼容
 export { getDeepCodeXLogDir, getLegacyLogDir } from "./common/log-rotation";
 export { describeLlmError, getLlmErrorDetails } from "./common/llm-error";
@@ -1127,6 +1132,48 @@ export type {
   GraphLifecycleStateChangeEvent,
   GraphLifecycleStateChangeListener,
 } from "./eag/graph/index.js";
+
+// ============================================================================
+// EAG 编排器统一装配（T1 装配下沉，2026-09-24）
+//
+// 设计依据：docs/dev/eag-web-sedimentation-fixes.md §2.1（方案 A）
+// 从 CLI ui/core/eag-orchestrator-assembly.ts 下沉，CLI / Web 共享单一装配源：
+// - buildAutonomousOrchestrator：/eag-autonomous 三命令执行体（P5 四阶段 + 护栏链）
+// - buildGraphLoopOrchestratorOptions：/eag-graph 图编排选项（GoalDispatcher + 6 插件）
+// - buildDesignOrchestrator：/eag-design DESIGN Loop 三角色编排器
+// - ProductionLoopHandoffAdapter：loop 节点真实 Handoff/Verification 回调
+//   （原 CLI 版 CliLoopHandoffAdapter，无终端依赖整体下沉）
+// 失败安全语义不变：任一组件构造异常 → 返回 undefined（命令 fail-closed 降级）。
+// ============================================================================
+export {
+  buildAutonomousOrchestrator,
+  buildGraphLoopOrchestratorOptions,
+  buildDesignOrchestrator,
+  ProductionLoopHandoffAdapter,
+} from "./eag/assembly";
+export type { AssemblyLogCallback, DesignLlmClientFactory } from "./eag/assembly";
+
+// ============================================================================
+// EAG 建议自动执行白名单（T1 装配下沉，2026-09-24）
+//
+// 从 CLI ui/core/suggestion-fallback.ts 迁移的纯函数三件套（无 React/Ink 依赖）：
+// - AUTO_EXECUTABLE_EAG_COMMANDS：允许自动执行的 EAG 命令名白名单（仅 eag-autonomous）
+// - extractAutoExecutableEagCommandName：EAG 命令白名单校验
+// - extractSuggestedCommandText："建议执行 /xxx"回合收尾文本提取（引号参数 + 否定保护）
+// - extractSuggestedCommandAndGoal（F1-v2 2026-09-24 EA-03b 修复）：同时提取命令片段 + 中文散文 goal
+// - buildAutoExecuteCommand：命令提示 + goal → 完整命令（带 --goal/--max-iterations 等参数）
+// - shouldDemoteToolCallFragment（2026-09-24 脏碎片治理）：工具轮短碎片降级判据纯函数
+// 注：AUTO_EXECUTABLE_COMMAND_KINDS 属 CLI slash 体系，按设计文档留在 CLI 不迁移。
+// ============================================================================
+export {
+  AUTO_EXECUTABLE_EAG_COMMANDS,
+  extractAutoExecutableEagCommandName,
+  extractSuggestedCommandText,
+  extractSuggestedCommandAndGoal,
+  buildAutoExecuteCommand,
+  shouldDemoteToolCallFragment,
+} from "./eag/suggestion-auto";
+export type { SuggestedCommandCapture } from "./eag/suggestion-auto";
 
 // ============================================================================
 // V2 上下文记忆体系（v2.8，V2-P0a/P0b/P1/P2/P3 五阶段全部完成）

@@ -111,7 +111,9 @@ export class SseHub {
       },
       close: () => res.end(),
     });
-    // 连接断开自动清理（退订 + 心跳定时器）
+    // 连接断开自动清理（退订 + 心跳定时器）。
+    // T7 语义边界：此处只做订阅簿记清理——浏览器断开 ≠ 用户中断，
+    // 绝不触发引擎 interrupt/abort；轮次继续在服务端执行到自然完成。
     res.on("close", unsubscribe);
     return unsubscribe;
   }

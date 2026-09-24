@@ -57,15 +57,20 @@ export class ExecutionHistoryMemorySync {
    * —— activateSession finally 块唯一入口
    * —— 内部全 try/catch 隔离，异常不 rethrow（PRD §6.2 B5）
    *
+   * T4 增强：沉淀出 failureFixPairs 后调用 store.patchRecordLinks 把关联字段
+   * 回写 raw jsonl——failure 记录写 fixedByExecutionId=fix.id；成功命令与修复
+   * 对双侧记录写 memoryEntryIds（memoryEntry 为 null 即沉淀未成功时跳过该侧）。
+   *
    * @param sessionId 刚结束的 session id
-   * @returns 沉淀统计：成功命令数 + 失败+修复对数
+   * @returns 沉淀统计：成功命令数 + 失败+修复对数 + raw 关联回填条数（linkedCount，
+   *          patchRecordLinks 命中数；T4 新增字段，既有调用方解构兼容不受影响）
    */
-  syncSession(sessionId: string): { successCount: number; failureFixCount: number } {
+  syncSession(sessionId: string): { successCount: number; failureFixCount: number; linkedCount: number } {
     try {
       // 1. 从 ExecutionHistoryStore 取本 session 全部记录
       const records = this.store.query({ sessionId, order: "asc", limit: 500 });
       if (records.length === 0) {
-        return { successCount: 0, failureFixCount: 0 };
+        return { successCount: 0, failureFixCount: 0, linkedCount: 0 };
       }
 
       // 2. SummaryBuilder.buildForMemory 分离成功 / 失败+修复对
@@ -73,33 +78,72 @@ export class ExecutionHistoryMemorySync {
 
       let successCount = 0;
       let failureFixCount = 0;
+      // T4：沉淀成功的 record.id → MemoryEntry.id 映射（同一 record 命中多个
+      // memoryEntry 时追加去重），供 patchRecordLinks 回写 memoryEntryIds
+      const memoryIdsByRecord = new Map<string, string[]>();
+      const addMemoryLink = (recordId: string, memoryEntryId: string): void => {
+        const ids = memoryIdsByRecord.get(recordId) ?? [];
+        if (!ids.includes(memoryEntryId)) ids.push(memoryEntryId);
+        memoryIdsByRecord.set(recordId, ids);
+      };
 
       // 3. 成功命令沉淀
       for (const entry of successEntries) {
         try {
           const memoryEntry = this.upsertSuccessExperience(entry.record, entry.key);
-          if (memoryEntry) successCount++;
+          if (memoryEntry) {
+            successCount++;
+            // T4：成功命令记录 → memoryEntry 双向关联（成功侧）
+            addMemoryLink(entry.record.id, memoryEntry.id);
+          }
         } catch (err) {
           console.error("[exec-history-sync] 成功命令沉淀失败:", err);
         }
       }
 
       // 4. 失败+修复对沉淀
+      // T4：failure.id → fix.id 关联表 + failure/fix 双侧 memoryEntryIds 关联
+      const fixedByByFailure = new Map<string, string>();
       for (const pair of failureFixPairs) {
         try {
           const memoryEntry = this.upsertFailureFixExperience(pair.failure, pair.fix, pair.key);
-          if (memoryEntry) failureFixCount++;
+          if (memoryEntry) {
+            failureFixCount++;
+            // memoryEntry 非 null（沉淀成功）才回写双侧关联；null 时跳过该侧
+            fixedByByFailure.set(pair.failure.id, pair.fix.id);
+            addMemoryLink(pair.failure.id, memoryEntry.id);
+            addMemoryLink(pair.fix.id, memoryEntry.id);
+          }
         } catch (err) {
           console.error("[exec-history-sync] 失败+修复对沉淀失败:", err);
         }
       }
 
+      // 5. T4：把关联字段回写 raw jsonl（patchRecordLinks 内部缓存为准 + 原子重写）。
+      // patch 项 = 有 memoryEntryIds 关联的记录 ∪ 有 fixedByExecutionId 关联的失败记录，
+      // 两项字段按需携带（undefined 的字段 patch 时不动原值）。
+      // 回写失败（store 内部静默降级）不影响沉淀统计返回。
+      let linkedCount = 0;
+      try {
+        const patchIds = new Set<string>([...memoryIdsByRecord.keys(), ...fixedByByFailure.keys()]);
+        if (patchIds.size > 0) {
+          const patches = [...patchIds].map((id) => ({
+            id,
+            memoryEntryIds: memoryIdsByRecord.get(id),
+            fixedByExecutionId: fixedByByFailure.get(id),
+          }));
+          linkedCount = this.store.patchRecordLinks(sessionId, patches);
+        }
+      } catch (err) {
+        console.error("[exec-history-sync] raw jsonl 关联字段回写失败（降级）:", err);
+      }
+
       // 注意：不在这里调 store.closeSync()——session.dispose() 统一处理最终 flush
       // 双写 metadata.executionRecordIds 后直接返回沉淀统计
-      return { successCount, failureFixCount };
+      return { successCount, failureFixCount, linkedCount };
     } catch (err) {
       console.error("[exec-history-sync] syncSession 整体失败:", err);
-      return { successCount: 0, failureFixCount: 0 };
+      return { successCount: 0, failureFixCount: 0, linkedCount: 0 };
     }
   }
 

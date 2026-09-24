@@ -374,8 +374,13 @@ export function App() {
       // pendingTurns 缺省（旧契约/单轮次）时复位为空闲；> 0 表示串行链上仍有排队轮次
       const hasQueuedTurns = typeof e.pendingTurns === "number" ? e.pendingTurns > 0 : false;
       applyStreaming(hasQueuedTurns);
+      // T7 状态语义：interrupted = 中止类终态（显式中断/服务关停），
+      // 与 failed（引擎真实错误）区分；轻提示复用 toast 通道
+      if (e.status === "interrupted" && !hasQueuedTurns) {
+        showToast("本轮已中断");
+      }
     },
-    [applyStreaming]
+    [applyStreaming, showToast]
   );
 
   /** SSE 连接错误：EventSource 自动重连；生成中时给出轻提示 */

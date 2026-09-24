@@ -131,6 +131,9 @@ export function SessionSidebar(props: SessionSidebarProps) {
             </span>
             {/* 执行中的会话显示状态点（引擎状态语义：processing = 生成中） */}
             {c.status === "processing" && <span className="chat-item-dot" title="生成中" />}
+            {/* T7 状态语义：interrupted = 中止类终态（显式中断/服务关停），
+                与 failed（引擎真实错误）区分展示；徽标样式复用状态点并灰化 */}
+            {c.status === "interrupted" && <span className="chat-item-dot chat-item-dot-interrupted" title="已中断" />}
           </button>
         ))}
       </nav>

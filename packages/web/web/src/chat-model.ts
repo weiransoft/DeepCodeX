@@ -649,6 +649,11 @@ export interface BackgroundTaskNotice {
   logTail?: string;
   /** 日志尾是否被引擎截断（"(N bytes)..." 前缀标记） */
   logTruncated?: boolean;
+  /**
+   * 成功甄别说明（T6）：completed 态且引擎判定「shell 包装进程被组杀（SIGKILL）
+   * 但输出日志尾命中成功标记、任务实际成功」时携带——卡片以黄色提示条展示。
+   */
+  note?: string;
 }
 
 /**
@@ -680,10 +685,22 @@ export function parseBackgroundTaskNotice(content: string): BackgroundTaskNotice
   // 引擎字段缺省防御（unknown status 分支不产出 " after …" 段）：不在此类
   // 边缘形态上猜测，交给调用方按普通消息渲染，保证信息不丢
   if (duration.trim() === "" || outputPath === "") return null;
+  // T6 成功甄别说明：completed 通知在 Output 行后以独立单行追加 `Note: …`
+  // （session.ts addBackgroundProcessCompletionMessage）。先从尾段剥离，
+  // 剩余文本再走失败日志尾解析；无 Note 形态（既有全部通知文本）零影响。
+  let tailRaw2 = tailRaw;
+  if (typeof tailRaw2 === "string" && tailRaw2 !== "") {
+    const noteMatch = /\nNote: ([^\n]*)/.exec(tailRaw2);
+    if (noteMatch !== null) {
+      const note = noteMatch[1].trim();
+      if (note !== "") notice.note = note;
+      tailRaw2 = tailRaw2.replace(noteMatch[0], "");
+    }
+  }
   // 失败日志尾：<background_task_failure_log path="…">…</background_task_failure_log>
-  if (typeof tailRaw === "string" && tailRaw.trim() !== "") {
-    const log = /<background_task_failure_log path="[^"]*">([\s\S]*?)<\/background_task_failure_log>/.exec(tailRaw);
-    let logBody = log !== null ? log[1] : tailRaw.trim();
+  if (typeof tailRaw2 === "string" && tailRaw2.trim() !== "") {
+    const log = /<background_task_failure_log path="[^"]*">([\s\S]*?)<\/background_task_failure_log>/.exec(tailRaw2);
+    let logBody = log !== null ? log[1] : tailRaw2.trim();
     // 引擎截断前缀："(N bytes)...\n"（日志超长时仅保留尾部切片）；
     // 标签后可能紧跟换行（引擎 join），前缀匹配前先剥离开头空白
     const trunc = /^\s*\((\d+) bytes\)\.\.\.\n?/.exec(logBody);
