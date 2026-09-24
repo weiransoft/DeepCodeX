@@ -393,15 +393,33 @@ function startBackgroundShellCommand(
       context.onProcessExit?.(pid);
     }
     const ok = !error && result.exitCode === 0 && result.signal === null;
+    // T6 SIGKILL 误报甄别（仅后台分支，设计文档 §2.6）：nohup/setsid 型后台命令的
+    // 工作进程早于 shell 包装进程退出，用户 `kill -- -<pgid>` 或外部清组时，SIGKILL
+    // 落在已无子进程的 shell 包装上 → exitCode=null + signal=SIGKILL → 原判 failed
+    // 属误报。甄别条件（保守，全部满足才降级为 completed）：
+    //   1) 非 spawn 失败（error 为空——spawn 失败没有任何成功可能）；
+    //   2) signal=SIGKILL 且 exitCode=null（shell 包装死亡且无退出码）；
+    //   3) 输出日志尾命中全词成功标记，且标记行邻域无 FAILED/ERROR 行（判据见
+    //      detectBackgroundSuccessFromLog 注释）。
+    // 任一不满足维持 failed；前台超时强杀不经过本回调，零影响。
+    const killSpurious =
+      !ok &&
+      !error &&
+      result.signal === "SIGKILL" &&
+      result.exitCode === null &&
+      readBackgroundKillSuccessSignal(outputPath);
     context.onBackgroundProcessComplete?.({
       taskId,
       processId,
       command,
       outputPath,
-      ok,
+      ok: ok || killSpurious,
       exitCode: result.exitCode,
       signal: result.signal,
-      error: ok ? undefined : buildErrorMessage(result.exitCode, result.signal, error),
+      error: ok || killSpurious ? undefined : buildErrorMessage(result.exitCode, result.signal, error),
+      // 甄别成功的说明：completed 通知文本追加 Note 段，Web 卡片以黄色提示条展示，
+      // 保证「误报降为成功」对用户透明可见，不静默掩盖杀进程事实。
+      note: killSpurious ? "process-group killed after successful completion (signal SIGKILL)" : undefined,
       cwd: result.cwd,
       shellPath,
       startedAtMs,
@@ -440,6 +458,119 @@ function buildStopBackgroundProcessCommand(processId: number): string {
     return `cmd.exe /c "taskkill /PID ${processId} /T /F"`;
   }
   return `kill -- -${processId}`;
+}
+
+/**
+ * 后台任务 SIGKILL 误报甄别——日志尾成功标记判定（纯函数，便于单测）。
+ *
+ * 设计动机（设计文档 §2.6）：nohup / 长任务型后台命令的真实工作进程往往先于
+ * shell 包装进程收尾；用户执行 `kill -- -<pgid>`（停止命令）或超时清组时，
+ * SIGKILL 落在仍在 sleep/wait 的 shell 包装上 → close 事件 exitCode=null +
+ * signal=SIGKILL → 原判定逻辑报 failed，属误报。本函数只依据输出日志尾部的
+ * 「整行全词成功标记」证据改判，绝不因日志含任意文本判成功。
+ *
+ * 判据边界（保守优先，真失败绝不能判成成功）：
+ * 1. 逐行扫描日志尾，命中「整行即成功标记」才算候选（`^…$` 全词行级匹配，
+ *    大小写敏感、只认设计文档 §2.6 固定全大写词表，不允许标记出现在行中——
+ *    防 `FAILED: SYNTAX_OK earlier` / `status: ok` 之类文本误判）；
+ * 2. 加强防护：成功标记行的前后各 2 行邻域内不得出现 FAILED/ERROR（大小写
+ *    不敏感，词级匹配）——真实失败脚本的收尾通常是 `… FAILED` / `ERROR: …`，
+ *    成功标记后紧跟失败行说明任务实际未完成；
+ * 3. 空文本 / 无标记 → false（维持 failed）。
+ *
+ * @param tailText 输出日志尾部文本（调用方经 readTail 截 ≤4KB）
+ * @returns true = 判定任务实际已成功（shell 包装被组杀的误报场景）
+ */
+export function detectBackgroundSuccessFromLog(tailText: string): boolean {
+  if (typeof tailText !== "string" || tailText.trim() === "") {
+    return false;
+  }
+  // 成功标记：整行全词（允许行尾空白/CR），设计文档 §2.6 固定词表
+  const successMarker = /^(?:OK|DONE|SUCCESS|SYNTAX_OK|BG_OK|COMPLETED)[ \t]*\r?$/;
+  // 失败邻域标记：词级 FAILED / ERROR（大小写不敏感），出现在标记行邻域即否决
+  const failureMarker = /\b(?:FAILED|ERROR)\b/i;
+  const lines = tailText.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!successMarker.test(lines[i])) {
+      continue;
+    }
+    // 邻域 ±2 行内不得有失败标记（含标记行自身，防极端拼接形态）
+    let neighborhoodFailed = false;
+    for (let j = Math.max(0, i - 2); j <= Math.min(lines.length - 1, i + 2); j += 1) {
+      if (failureMarker.test(lines[j])) {
+        neighborhoodFailed = true;
+        break;
+      }
+    }
+    if (!neighborhoodFailed) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 读取文件尾部字节并解码为文本（纯 IO 辅助函数，便于单测）。
+ *
+ * 实现要点：
+ * 1. 真尾部切片：lseek 到 `size - maxBytes` 起读，不整读大日志（后台任务
+ *    日志可达数十 MB，全量读没有必要——成功标记总在收尾处）；
+ * 2. UTF-8 安全：切片起点若落在多字节字符中间，跳过开头最多 3 个 UTF-8
+ *    续字节（0x80-0xBF），避免首字符解码乱码（乱码不影响成功标记判定，
+ *    但保证尾部文本可读性）；
+ * 3. 失败语义：文件不存在/不可读/为空 → 返回空串，调用方据此维持 failed
+ *    （拿不到证据就不改判，与「判据必须保守」的铁律一致）。
+ *
+ * @param filePath 目标文件路径
+ * @param maxBytes 尾部字节上限（成功标记总在任务收尾处）
+ * @returns 尾部文本；读取失败返回空串
+ */
+export function readTail(filePath: string, maxBytes: number): string {
+  let fd: number | null = null;
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile() || stat.size <= 0) {
+      return "";
+    }
+    const start = Math.max(0, stat.size - maxBytes);
+    const length = stat.size - start;
+    fd = fs.openSync(filePath, "r");
+    const buffer = Buffer.alloc(length);
+    const bytesRead = fs.readSync(fd, buffer, 0, length, start);
+    const end = bytesRead;
+    // 尾部切片起点可能截断多字节字符：跳过开头连续的 UTF-8 续字节
+    let offset = 0;
+    if (start > 0) {
+      while (offset < Math.min(3, end) && (buffer[offset] & 0xc0) === 0x80) {
+        offset += 1;
+      }
+    }
+    return buffer.toString("utf8", offset, end);
+  } catch {
+    return "";
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // 关闭失败不影响已读数据
+      }
+    }
+  }
+}
+
+/**
+ * 读取后台任务输出日志尾部并做 SIGKILL 误报甄别判定。
+ *
+ * 读取失败（文件不存在/不可读/为空）→ 返回 false（不甄别，维持 failed），
+ * 与「判据必须保守」的铁律一致：拿不到证据就不改判。
+ *
+ * @param outputPath 后台任务输出日志路径
+ * @returns true = 日志尾证据支持「任务已成功、包装进程被组杀」
+ */
+function readBackgroundKillSuccessSignal(outputPath: string): boolean {
+  // 只读尾部 4KB：成功标记总在任务收尾处，全量读大日志没有必要
+  return detectBackgroundSuccessFromLog(readTail(outputPath, 4096));
 }
 
 function writeFinalBackgroundOutput(outputPath: string, output: string | undefined): void {

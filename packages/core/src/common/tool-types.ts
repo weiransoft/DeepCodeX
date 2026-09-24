@@ -142,6 +142,13 @@ export type BackgroundProcessCompletion = {
   exitCode: number | null;
   signal: string | null;
   error?: string;
+  /**
+   * T6 SIGKILL 误报甄别说明：后台 shell 包装进程被组杀（signal=SIGKILL 且无退出码）
+   * 但输出日志尾命中成功标记时，completion 以 ok=true 上报并携带本说明——
+   * 通知文本追加 `Note: …` 段、Web 卡片以黄色提示条展示，保证降级对用户透明。
+   * 常规完成/失败路径为 undefined。
+   */
+  note?: string;
   cwd: string | null;
   shellPath: string;
   startedAtMs: number;

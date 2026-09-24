@@ -250,6 +250,10 @@ export async function startWebServer(
     // 路径，生产行为不变（未注入=undefined），但测试分类链路完全断开
     classifyLlmClientFactory: opts.classifyLlmClientFactory,
     registryBaseDir: opts.registryBaseDir,
+    // EAG 装配注入开关透传（测试基线缝合点，docs/dev/eag-web-sedimentation-fixes.md
+    // §2.1 EA-03a）：此前透传缺失导致 failclosed 测试服务器实际仍注入编排器，
+    // fail-closed 基线不可达。生产不传 = 缺省 true，行为零变化。
+    ...(opts.eagEnabled !== undefined ? { eagEnabled: opts.eagEnabled } : {}),
   });
   const staticDir = opts.staticDir ?? defaultStaticDir();
   /** 实际监听端口（listen(0) 时为随机分配端口；handleRequest 内静态页展示用） */

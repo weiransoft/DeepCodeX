@@ -239,6 +239,9 @@ export function BgTaskNotice({ entry }: { entry: Extract<ChatEntry, { kind: "bgt
       <div className="bgtask-output" title={n.outputPath}>
         输出日志：{n.outputPath}
       </div>
+      {/* T6 成功甄别提示：仅完成态展示（黄色小字条）——引擎判定 shell 包装被组杀
+          但任务实际成功的降级说明；失败态设计上不携带 note，条件双保险 */}
+      {!failed && n.note !== undefined && n.note !== "" && <div className="bgtask-note">{n.note}</div>}
       {n.logTail !== undefined && n.logTail !== "" && (
         <details className="bgtask-log">
           <summary className="bgtask-log-summary">失败日志尾{n.logTruncated === true ? "（已截断）" : ""}</summary>

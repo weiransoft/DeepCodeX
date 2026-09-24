@@ -346,6 +346,10 @@ body {
   background: var(--app-accent);
   flex-shrink: 0;
 }
+/* T7 状态语义：已中断（interrupted）徽标——复用状态点尺寸，灰化区别于生成中 */
+.chat-item-dot-interrupted {
+  background: var(--app-text-muted, #9ca3af);
+}
 
 .sidebar-user {
   display: flex;
@@ -676,6 +680,17 @@ body {
   color: var(--app-text-secondary);
   font-size: 12px;
   word-break: break-all;
+}
+/* T6 成功甄别提示条：完成态携带 Note（包装进程被组杀但任务实际成功）时黄底小字展示 */
+.bgtask-note {
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(255, 193, 7, 0.16);
+  border: 1px solid rgba(255, 193, 7, 0.45);
+  color: #8a6d1a;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
 }
 
 /* 工具执行折叠条目 */
