@@ -1196,10 +1196,10 @@ test("Write repairs JSON object content for .json files", async () => {
   assert.equal(writeResult.metadata?.type, "create");
   assert.equal(writeResult.metadata?.file_path, filePath);
   assert.equal(writeResult.metadata?.cache_refreshed, true);
-  assert.equal(writeResult.metadata?.line_endings, "LF");
+  assert.equal(writeResult.metadata?.line_endings, os.EOL === "\r\n" ? "CRLF" : "LF");
   assert.equal(writeResult.metadata?.input_repaired, true);
   assert.match(String(writeResult.metadata?.diff_preview ?? ""), /\+\s*"name": "demo"|^\+\{/m);
-  assert.equal(fs.readFileSync(filePath, "utf8"), '{\n  "name": "demo",\n  "private": true\n}');
+  assert.equal(fs.readFileSync(filePath, "utf8"), ["{", '  "name": "demo",', '  "private": true', "}"].join(os.EOL));
 });
 
 test("Edit requires snippet_id even after Write refreshes file state", async () => {
@@ -1229,7 +1229,7 @@ test("Edit requires snippet_id even after Write refreshes file state", async () 
 
   assert.equal(editResult.ok, false);
   assert.match(editResult.error ?? "", /snippet_id/);
-  assert.equal(fs.readFileSync(filePath, "utf8"), "alpha\nbeta\n");
+  assert.equal(fs.readFileSync(filePath, "utf8"), `alpha${os.EOL}beta${os.EOL}`);
 });
 
 test("Edit allows empty old_string when the file is empty", async () => {
