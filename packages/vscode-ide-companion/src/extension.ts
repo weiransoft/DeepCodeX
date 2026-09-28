@@ -14,8 +14,8 @@ import {
   type SkillInfo,
   type UserPromptContent,
   type UserToolPermission,
-  readDeepcodePlusApiKey,
-  resolveOpenAIConnection,
+  withPlusSubscription,
+  type OpenAIConnectionContext,
   resolveSettingsSources,
   type DeepcodingSettings,
   type ReasoningEffort,
@@ -73,7 +73,10 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
             }
           ),
       }),
-      createOpenAIClient: () => this.createOpenAIClient(),
+      createOpenAIClient: withPlusSubscription(
+        () => this.resolveCurrentSettings(),
+        (connection) => this.createOpenAIClient(connection)
+      ),
       getResolvedSettings: () => this.resolveCurrentSettings(),
       renderMarkdown: (text) => this.md.render(text),
       onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => {
@@ -389,7 +392,7 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
     this.showSessionsList();
   }
 
-  private createOpenAIClient(): {
+  private createOpenAIClient(context: OpenAIConnectionContext): {
     client: OpenAI | null;
     apiKey?: string;
     model: string;
@@ -402,10 +405,11 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
     env?: Record<string, string>;
     machineId?: string;
     plusApiKey?: string;
+    usingPlus: boolean;
+    configurationError?: string;
   } {
     const settings = this.resolveCurrentSettings();
-    const plusApiKey = readDeepcodePlusApiKey();
-    const connection = resolveOpenAIConnection(settings, plusApiKey);
+    const { plusApiKey, connection } = context;
 
     const { model, thinkingEnabled, reasoningEffort, debugLogEnabled, notify, webSearchTool, env } = settings;
     const { apiKey, baseURL } = connection;
@@ -425,6 +429,8 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
         env,
         machineId,
         plusApiKey,
+        usingPlus: connection.usingPlus,
+        configurationError: connection.configurationError,
       };
     }
 
@@ -446,6 +452,8 @@ export class DeepCodeViewProvider implements vscode.WebviewViewProvider {
       env,
       machineId,
       plusApiKey,
+      usingPlus: connection.usingPlus,
+      configurationError: connection.configurationError,
     };
   }
 

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Box, Static, Text, useApp, useStdout, useWindowSize } from "ink";
 import chalk from "chalk";
-import { createOpenAIClient } from "@vegamo/deepcode-core";
+import { createOpenAIClientFactory } from "@vegamo/deepcode-core";
 import type { PermissionScope } from "@vegamo/deepcode-core";
 import { type ModelConfigSelection } from "@vegamo/deepcode-core";
 import { type PromptDraft, PromptInput, type PromptSubmission } from "./PromptInput";
@@ -115,10 +115,12 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
   rawModeRef.current = mode;
   messagesRef.current = messages;
 
+  const clientFactory = useMemo(() => createOpenAIClientFactory(projectRoot), [projectRoot]);
+
   const sessionManager = useMemo(() => {
     return new SessionManager({
       projectRoot,
-      createOpenAIClient: () => createOpenAIClient(projectRoot),
+      createOpenAIClient: clientFactory,
       getResolvedSettings: () => resolveCurrentSettings(projectRoot),
       renderMarkdown: (text) => text,
       onAssistantMessage: (message: SessionMessage) => {
@@ -163,7 +165,7 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
         buf.set(pid, current + text.slice(0, available));
       },
     });
-  }, [projectRoot]);
+  }, [projectRoot, clientFactory]);
 
   /**
    * Navigate to a sub-view.
@@ -254,8 +256,8 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
   // warmup (fire-and-forget inside createOpenAIClient) starts before the
   // user sends their first prompt.
   useEffect(() => {
-    createOpenAIClient(projectRoot);
-  }, [projectRoot]);
+    clientFactory();
+  }, [clientFactory]);
 
   /**
    * Initialize MCP servers.

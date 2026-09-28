@@ -272,3 +272,20 @@ DEEPCODE_TELEMETRY_ENABLED=0 deepcode
 3. 项目级settings.json: `{"mcpServers":{"github":{"env":{"GITHUB_PERSONAL_ACCESS_TOKEN":"..."}}}}`
 4. 项目级settings.json: `{"env": {"MCP_GITHUB_PERSONAL_ACCESS_TOKEN": "..."}}`
 5. 系统环境变量: `DEEPCODE_MCP_GITHUB_PERSONAL_ACCESS_TOKEN=... deepcode`
+
+## DeepCode PLUS 订阅与 LLM 通道
+
+PLUS 独立配置文件为 `~/.deepcode-plus/settings.json`：
+
+```json
+{
+  "subscriptionPlan": "default",
+  "env": { "PLUS_API_KEY": "sk-..." }
+}
+```
+
+`subscriptionPlan` 支持 `default`、`on`、`off`；缺失或非法值按 `default` 处理。普通通道继续使用上文配置层级合并后的 API key 和 base URL。
+
+- `default`：未配置 PLUS key 时使用普通通道；否则每次创建或回复会话前，用 PLUS key 请求 `GET https://deepcode.vegamo.cn/plugin/openai/models`。200 表示 `full ability`，使用 PLUS；401/403 表示 `api only`，使用普通通道（普通 key 缺失也不回退 PLUS）。其他 HTTP 状态、网络异常或 3 秒超时表示 `unknown`：优先普通 key，未配置普通 key 时使用 PLUS。
+- `on`：直接使用 PLUS key 和 `https://deepcode.vegamo.cn/plugin/openai`，不执行订阅检查。缺少 PLUS key 时明确报错，不回退普通通道。
+- `off`：固定使用普通通道，不执行订阅检查。

@@ -19,6 +19,7 @@ import {
   DEFAULT_MODEL,
   applyModelConfigSelection,
   readDeepcodePlusApiKey,
+  readDeepcodePlusSettings,
   resolveSettings,
   resolveSettingsSources,
 } from "../settings";
@@ -907,4 +908,28 @@ test("resolveSettings applies deepseek-flash capabilities and respects explicit 
   assert.equal(overridden.thinkingEnabled, false);
   assert.equal(overridden.contextWindow, 512 * 1024);
   assert.equal(overridden.autoCompactWindow, 128 * 1024);
+});
+
+test("PLUS settings normalize subscriptionPlan and keep it separate from env", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "deepcode-plus-plan-"));
+  const settingsPath = path.join(tempDir, "settings.json");
+  try {
+    for (const value of ["default", "on", "off", "invalid", null, 1, undefined]) {
+      fs.writeFileSync(settingsPath, JSON.stringify({ subscriptionPlan: value, env: { PLUS_API_KEY: " key " } }));
+      assert.deepEqual(readDeepcodePlusSettings(settingsPath), {
+        apiKey: "key",
+        subscriptionPlan: value === "on" || value === "off" ? value : "default",
+      });
+    }
+    for (const value of [null, [], {}, { env: { subscriptionPlan: "on", PLUS_API_KEY: " " } }]) {
+      fs.writeFileSync(settingsPath, JSON.stringify(value));
+      assert.equal(readDeepcodePlusSettings(settingsPath).subscriptionPlan, "default");
+      assert.equal(readDeepcodePlusSettings(settingsPath).apiKey, undefined);
+    }
+    fs.writeFileSync(settingsPath, "invalid json");
+    assert.deepEqual(readDeepcodePlusSettings(settingsPath), { subscriptionPlan: "default" });
+    assert.deepEqual(readDeepcodePlusSettings(path.join(tempDir, "absent")), { subscriptionPlan: "default" });
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });

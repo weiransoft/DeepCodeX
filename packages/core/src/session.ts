@@ -288,6 +288,7 @@ export type SessionEntry = {
   askPermissions?: AskPermissionRequest[];
   planMode?: boolean;
   pluginRateLimitedTool?: PluginRateLimitedTool;
+  usingPlus?: boolean;
   forkedFrom?: {
     sessionId: string;
     messageId: string;
@@ -1474,9 +1475,11 @@ ${agentInstructions}
   }
 
   async createSession(userPrompt: UserPromptContent, controller?: AbortController): Promise<string> {
-    this.reportNewPrompt();
     const signal = controller?.signal;
     this.throwIfAborted(signal);
+    await this.createOpenAIClient.prepare?.(signal);
+    this.throwIfAborted(signal);
+    this.reportNewPrompt();
 
     const sessionId = crypto.randomUUID();
     const originalSummary = userPrompt.text ? userPrompt.text.slice(0, 100) : "[Image Prompt]";
@@ -1486,6 +1489,7 @@ ${agentInstructions}
     const index = this.loadSessionsIndex();
     const entry: SessionEntry = {
       id: sessionId,
+      usingPlus: this.createOpenAIClient().usingPlus === true,
       summary: originalSummary,
       assistantReply: null,
       assistantThinking: null,
@@ -1581,6 +1585,12 @@ ${agentInstructions}
       await this.createSession(userPrompt, controller);
       return;
     }
+    await this.createOpenAIClient.prepare?.(signal);
+    this.throwIfAborted(signal);
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      usingPlus: this.createOpenAIClient().usingPlus === true,
+    }));
     userPrompt = this.preparePromptImages(sessionId, userPrompt);
     appendProjectPermissionAllows(this.projectRoot, userPrompt.alwaysAllows, {
       inheritedPermissions: this.getResolvedSettings().permissions,
@@ -1664,6 +1674,8 @@ ${agentInstructions}
     const startedAt = Date.now();
     const {
       client,
+      usingPlus,
+      configurationError,
       apiKey,
       model,
       baseURL,
@@ -1677,17 +1689,19 @@ ${agentInstructions}
     const now = new Date().toISOString();
     rebuildSessionStateFromHistory(sessionId, this.listSessionMessages(sessionId));
 
+    this.updateSessionEntry(sessionId, (entry) => ({ ...entry, usingPlus: usingPlus === true }));
     if (!client) {
       this.updateSessionEntry(sessionId, (entry) => ({
         ...entry,
         status: "failed",
-        failReason: "API key not found",
+        failReason: configurationError ?? "API key not found",
         updateTime: now,
       }));
       this.onAssistantMessage(
         this.buildAssistantMessage(
           sessionId,
-          "API key not found. Please configure ~/.deepcode/settings.json or ./.deepcode/settings.json.",
+          configurationError ??
+            "API key not found. Please configure ~/.deepcode/settings.json or ./.deepcode/settings.json.",
           null
         ),
         false
@@ -2299,6 +2313,7 @@ ${agentInstructions}
       updateTime: now,
       processes: null,
       planMode: source.planMode,
+      usingPlus: source.usingPlus,
       forkedFrom: {
         sessionId: sourceSessionId,
         messageId: sourceMessage.id,
@@ -3574,6 +3589,7 @@ ${agentInstructions}
       processes: this.deserializeProcesses(value.processes),
       askPermissions: normalizeAskPermissions(value.askPermissions),
       planMode: value.planMode === true,
+      usingPlus: value.usingPlus === true,
       pluginRateLimitedTool: this.normalizePluginRateLimitedTool(value.pluginRateLimitedTool),
       forkedFrom: this.normalizeForkedFrom(value.forkedFrom),
     };

@@ -271,3 +271,20 @@ Applied in the following priority order (lower-numbered overridden by higher-num
 3. Project-level settings.json: `{"mcpServers":{"github":{"env":{"GITHUB_PERSONAL_ACCESS_TOKEN":"..."}}}}`
 4. Project-level settings.json: `{"env": {"MCP_GITHUB_PERSONAL_ACCESS_TOKEN": "..."}}`
 5. System environment variable: `DEEPCODE_MCP_GITHUB_PERSONAL_ACCESS_TOKEN=... deepcode`
+
+## DeepCode PLUS subscription and LLM routing
+
+Configure PLUS separately in `~/.deepcode-plus/settings.json`:
+
+```json
+{
+  "subscriptionPlan": "default",
+  "env": { "PLUS_API_KEY": "sk-..." }
+}
+```
+
+`subscriptionPlan` accepts `default`, `on`, or `off`; missing or invalid values use `default`. The regular connection retains the user/project/environment precedence described above.
+
+- `default`: Without a PLUS key, use the regular connection. Otherwise, before each session creation or reply, request `GET https://deepcode.vegamo.cn/plugin/openai/models` with the PLUS key. HTTP 200 means `full ability` and selects PLUS. HTTP 401/403 means `api only` and selects the regular connection, even if its key is missing. Other HTTP statuses, network errors, and a 3-second timeout mean `unknown`: prefer the regular key if configured, otherwise use PLUS.
+- `on`: Use the PLUS key with `https://deepcode.vegamo.cn/plugin/openai` directly, without a subscription check. A missing PLUS key produces an explicit error without falling back.
+- `off`: Always use the regular connection without checking the subscription.

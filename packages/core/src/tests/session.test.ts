@@ -10,6 +10,7 @@ import { GitFileHistory } from "../common/file-history";
 import { clearSessionState } from "../common/state";
 import { getSystemPrompt } from "../prompt";
 import { getProjectCode, SessionManager, type SessionMessage } from "../session";
+import { withPlusSubscription, type PlusSubscriptionStatus } from "../common/plus-subscription";
 import type { MultimodalMode } from "../common/model-capabilities";
 
 const originalFetch = globalThis.fetch;
@@ -5197,4 +5198,133 @@ test("interrupt settles an active prompt waiting for an internal tool request", 
   };
   await manager.handleUserPrompt({ text: "next" });
   assert.equal(resumed, true);
+});
+
+test("sessions prepare subscription before skill matching and preserve the actual route across reloads", async () => {
+  const workspace = createTempDir("deepcode-subscription-workspace-");
+  setHomeDir(createTempDir("deepcode-subscription-home-"));
+  let checks = 0;
+  let status: PlusSubscriptionStatus = "full ability";
+  const calls: Array<{ key?: string; skill: boolean }> = [];
+  const factory = withPlusSubscription(
+    () => ({ apiKey: "regular", baseURL: "https://regular.test" }),
+    ({ connection }) => ({
+      ...connection,
+      model: "test-model",
+      thinkingEnabled: false,
+      telemetryEnabled: false,
+      client: {
+        chat: {
+          completions: {
+            create: async (request: any) => {
+              assert.ok(checks > 0, "subscription must be checked before any LLM request");
+              const skill = isSkillMatchingRequest(request);
+              calls.push({ key: connection.apiKey, skill });
+              return skill
+                ? createSkillMatchingResponse()
+                : createChatResponse("done", { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 });
+            },
+          },
+        },
+      } as any,
+    }),
+    {
+      readSettings: () => ({ apiKey: "plus", subscriptionPlan: "default" }),
+      checkSubscription: async () => {
+        checks++;
+        return status;
+      },
+    }
+  );
+  const manager = new SessionManager({
+    projectRoot: workspace,
+    createOpenAIClient: factory,
+    getResolvedSettings: () => ({ model: "test-model" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+  });
+  try {
+    const sessionId = await manager.createSession({ text: "hello" });
+    assert.equal(checks, 1);
+    assert.equal(manager.getSession(sessionId)?.status, "completed");
+    assert.equal(manager.getSession(sessionId)?.usingPlus, true);
+    assert.ok(calls.some((call) => call.skill));
+    assert.ok(calls.some((call) => !call.skill));
+    assert.ok(calls.every((call) => call.key === "plus"));
+    const reloaded = createSessionManager(workspace, "reload-subscription");
+    assert.equal(reloaded.getSession(sessionId)?.usingPlus, true);
+    reloaded.dispose();
+    calls.length = 0;
+    status = "api only";
+    await manager.replySession(sessionId, { text: "next" });
+    assert.equal(checks, 2);
+    assert.equal(manager.getSession(sessionId)?.usingPlus, false);
+    assert.ok(calls.length > 0);
+    assert.ok(calls.every((call) => call.key === "regular"));
+    await manager.replySession(sessionId, { text: "/continue" });
+    assert.equal(checks, 3);
+    await manager.replySession("missing-session", { text: "new" });
+    assert.equal(checks, 4, "reply delegating to create must probe only once");
+  } finally {
+    manager.dispose();
+  }
+});
+
+test("on without PLUS key fails clearly without falling back to a regular key", async () => {
+  const workspace = createTempDir("deepcode-missing-plus-workspace-");
+  setHomeDir(createTempDir("deepcode-missing-plus-home-"));
+  const factory = withPlusSubscription(
+    () => ({ apiKey: "regular", baseURL: "https://regular.test" }),
+    ({ connection }) => {
+      assert.equal(connection.apiKey, undefined);
+      return { ...connection, client: null, model: "test", thinkingEnabled: false, telemetryEnabled: false };
+    },
+    { readSettings: () => ({ subscriptionPlan: "on" }) }
+  );
+  const manager = new SessionManager({
+    projectRoot: workspace,
+    createOpenAIClient: factory,
+    getResolvedSettings: () => ({ model: "test" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+  });
+  try {
+    const id = await manager.createSession({ text: "hello" });
+    assert.equal(manager.getSession(id)?.status, "failed");
+    assert.match(manager.getSession(id)?.failReason ?? "", /PLUS_API_KEY/);
+  } finally {
+    manager.dispose();
+  }
+});
+
+test("cancelling subscription preparation starts no LLM calls or new session", async () => {
+  const workspace = createTempDir("deepcode-cancel-subscription-workspace-");
+  setHomeDir(createTempDir("deepcode-cancel-subscription-home-"));
+  const controller = new AbortController();
+  const factory = withPlusSubscription(
+    () => ({ apiKey: "regular", baseURL: "https://regular.test" }),
+    () => {
+      assert.fail("must not build a client after cancellation");
+    },
+    {
+      readSettings: () => ({ apiKey: "plus", subscriptionPlan: "default" }),
+      checkSubscription: async () => {
+        controller.abort();
+        return "unknown";
+      },
+    }
+  );
+  const manager = new SessionManager({
+    projectRoot: workspace,
+    createOpenAIClient: factory,
+    getResolvedSettings: () => ({ model: "test" }),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {},
+  });
+  try {
+    await assert.rejects(manager.createSession({ text: "hello" }, controller), { name: "AbortError" });
+    assert.equal(manager.listSessions().length, 0);
+  } finally {
+    manager.dispose();
+  }
 });

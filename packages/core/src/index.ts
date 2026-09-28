@@ -15,6 +15,7 @@ export {
   getUserSettingsPath,
   getProjectSettingsPath,
   readDeepcodePlusApiKey,
+  readDeepcodePlusSettings,
   getDefaultContextWindow,
   getDefaultAutoCompactWindow,
   DEFAULT_MODEL,
@@ -27,6 +28,8 @@ export {
   MAX_FILES_API_TIMEOUT_MS,
 } from "./settings";
 export type {
+  DeepcodePlusSettings,
+  SubscriptionPlan,
   DeepcodingSettings,
   ResolvedDeepcodingSettings,
   ModelConfigSelection,
@@ -76,6 +79,7 @@ export type { ToolDefinition, SkillPromptDocument, PromptToolOptions } from "./p
 export { ToolExecutor } from "./tools/executor";
 export type {
   CreateOpenAIClient,
+  OpenAIClientResult,
   ToolCall,
   ToolExecutionContext,
   ToolExecutionHooks,
@@ -107,7 +111,12 @@ export { McpClient } from "./mcp/mcp-client";
 export type { McpServerStatus } from "./mcp/mcp-manager";
 
 // Common utilities
-export { createOpenAIClient, resolveOpenAIConnection, DEEPCODE_PLUS_BASE_URL } from "./common/openai-client";
+export {
+  createOpenAIClient,
+  createOpenAIClientFactory,
+  resolveOpenAIConnection,
+  DEEPCODE_PLUS_BASE_URL,
+} from "./common/openai-client";
 export { buildThinkingRequestOptions } from "./common/openai-thinking";
 export { readTextFileWithMetadata, writeTextFile, buildDiffPreview, ensureParentDirectory } from "./common/file-utils";
 export { normalizeFilePath, getSnippet, clearSessionState, recordFileState, getFileState } from "./common/state";
@@ -152,3 +161,6 @@ export type {
 // State types
 export type { FileState, FileSnippet, FileLineEnding } from "./common/state";
 export type { FileReadMetadata } from "./common/file-utils";
+
+export { checkPlusSubscription, withPlusSubscription } from "./common/plus-subscription";
+export type { PlusSubscriptionStatus, OpenAIConnection, OpenAIConnectionContext } from "./common/plus-subscription";

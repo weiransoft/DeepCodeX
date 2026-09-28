@@ -127,7 +127,8 @@ export function buildStatusLine(
   }
   const model = settings.model.trim();
   if (model) {
-    parts.push(settings.thinkingEnabled ? `${model} ${settings.reasoningEffort}` : model);
+    const modelLabel = settings.thinkingEnabled ? `${model} ${settings.reasoningEffort}` : model;
+    parts.push(`${modelLabel}${entry.usingPlus ? " plus" : ""}`);
   }
   if (entry.failReason) {
     parts.push(`fail: ${entry.failReason}`);
