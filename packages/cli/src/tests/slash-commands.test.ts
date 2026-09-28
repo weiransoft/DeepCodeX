@@ -41,10 +41,54 @@ test("filterSlashCommands matches partial prefixes", () => {
   assert.deepEqual(matched, ["skill-writer", "skills"]);
 });
 
+test("filterSlashCommands ranks /model before /commondao for /mo", () => {
+  const items = buildSlashCommands([
+    { name: "commondao", path: "/skills/commondao/SKILL.md", description: "CommonDAO guide" },
+  ]);
+  assert.deepEqual(
+    filterSlashCommands(items, "/mo").map((item) => item.name),
+    ["model", "commondao"]
+  );
+});
+
+test("filterSlashCommands preserves order within match groups without mutating input", () => {
+  const items = buildSlashCommands(
+    ["commondao", "motion", "demo", "model-helper"].map((name) => ({
+      name,
+      path: `/skills/${name}/SKILL.md`,
+      description: name,
+    }))
+  );
+  const original = [...items];
+  assert.deepEqual(
+    filterSlashCommands(items, "/mo").map((item) => item.name),
+    ["motion", "model-helper", "model", "commondao", "demo"]
+  );
+  assert.deepEqual(items, original);
+});
+
+test("filterSlashCommands matches and prioritizes prefixes case-insensitively", () => {
+  const items = buildSlashCommands(
+    ["ComMonDAO", "Motion"].map((name) => ({
+      name,
+      path: `/skills/${name}/SKILL.md`,
+      description: name,
+    }))
+  );
+  assert.deepEqual(
+    filterSlashCommands(items, "/MO").map((item) => item.name),
+    ["Motion", "model", "ComMonDAO"]
+  );
+});
+
 test("filterSlashCommands returns all entries on bare slash", () => {
   const items = buildSlashCommands(skills);
   const matched = filterSlashCommands(items, "/");
-  assert.equal(matched.length, items.length);
+  assert.deepEqual(matched, items);
+});
+
+test("filterSlashCommands returns nothing when no names match", () => {
+  assert.deepEqual(filterSlashCommands(buildSlashCommands(skills), "/missing"), []);
 });
 
 test("filterSlashCommands returns nothing for non-slash tokens", () => {
