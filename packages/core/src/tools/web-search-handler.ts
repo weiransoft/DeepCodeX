@@ -1,3 +1,4 @@
+import { resolvePlusHost } from "../common/plus-subscription";
 import { bindProcessAbort } from "../common/process-abort";
 import { randomUUID } from "crypto";
 import { spawn } from "child_process";
@@ -7,7 +8,6 @@ import type { CreateOpenAIClient, ToolExecutionContext, ToolExecutionResult } fr
 const MAX_OUTPUT_CHARS = 30000;
 const MAX_CAPTURE_CHARS = 10 * 1024 * 1024;
 const WEB_SEARCH_TOOL_ACTIVITY_PREFIX = "WebSearch:";
-const DEFAULT_WEB_SEARCH_API_URL = "https://deepcode.vegamo.cn/api/plugin/web-search";
 const DEEPSEEK_BASE_URL = "https://api.deepseek.com";
 const DEEPSEEK_WEB_SEARCH_MODEL = "deepseek-v4-flash";
 const EMPTY_DEEPSEEK_WEB_SEARCH_OUTPUT = "No web search results were returned.";
@@ -361,7 +361,7 @@ async function runDefaultWebSearchRequest(
   const activityId = `web-search-${randomUUID()}`;
   context.onProcessStart?.(activityId, formatWebSearchActivityLabel(query));
   try {
-    const response = await fetch(DEFAULT_WEB_SEARCH_API_URL, {
+    const response = await fetch(`${resolvePlusHost(plusApiKey)}/api/plugin/web-search`, {
       method: "POST",
       signal: context.signal,
       headers: {

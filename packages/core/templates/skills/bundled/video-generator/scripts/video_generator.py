@@ -13,7 +13,6 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-BASE_URL = 'https://deepcode.vegamo.cn/api'
 SETTINGS_PATH = Path.home() / '.deepcode-plus/settings.json'
 UPLOAD_PREFIX = 'deepcode-plus/video-input/'
 PUBLIC_BASE_URL = 'http://files.vegamo.cn'
@@ -40,17 +39,43 @@ def emit(value):
     print(json.dumps(value, ensure_ascii=False), flush=True)
 
 
-def load_key(path):
+def resolve_host(api_key=None):
+    if api_key is None:
+        return 'https://deepcode.vegamo.cn'
+    if not isinstance(api_key, str):
+        raise VideoError('Invalid PLUS_API_KEY: expected "sk-" followed by 24 or 26 characters.')
+    key = api_key.strip()
+    if not key.startswith('sk-') or len(key[3:]) not in (24, 26):
+        raise VideoError('Invalid PLUS_API_KEY: expected "sk-" followed by 24 or 26 characters.')
+    return ('https://www.deepcodeplus.com' if len(key[3:]) == 26
+            else 'https://deepcode.vegamo.cn')
+
+
+def load_key(settings_path, required=True):
     try:
-        key = json.loads(path.expanduser().read_text(encoding='utf-8'))['env']['PLUS_API_KEY']
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise VideoError(f'请在 {path} 配置 env.PLUS_API_KEY。') from exc
-    if not isinstance(key, str) or not key.strip():
-        raise VideoError('env.PLUS_API_KEY 不能为空。')
+        settings = json.loads(settings_path.expanduser().read_text(encoding='utf-8'))
+    except FileNotFoundError as exc:
+        if not required:
+            return None
+        raise VideoError(f'Please configure env.PLUS_API_KEY in {settings_path}.') from exc
+    except (OSError, ValueError) as exc:
+        raise VideoError(f'Unable to read PLUS settings: {settings_path}') from exc
+    env = settings.get('env') if isinstance(settings, dict) else None
+    if not isinstance(env, dict) or 'PLUS_API_KEY' not in env:
+        if not required:
+            return None
+        raise VideoError(f'Please configure env.PLUS_API_KEY in {settings_path}.')
+    key = env['PLUS_API_KEY']
+    try:
+        if key is None:
+            raise VideoError('Invalid PLUS_API_KEY: expected "sk-" followed by 24 or 26 characters.')
+        resolve_host(key)
+    except VideoError as exc:
+        raise VideoError(f'{exc} Settings: {settings_path}') from exc
     return key.strip()
 
 
-def request_result(method, path, *, payload=None, api_key=None, timeout: float = 90):
+def request_result(method, path, *, payload=None, api_key=None, timeout: float = 90, host=None):
     headers = {'Accept': 'application/json'}
     if api_key:
         headers['PLUS-API-KEY'] = api_key
@@ -58,7 +83,7 @@ def request_result(method, path, *, payload=None, api_key=None, timeout: float =
     if payload is not None:
         headers['Content-Type'] = 'application/json'
         data = json.dumps(payload).encode('utf-8')
-    req = Request(BASE_URL + path, data=data, headers=headers, method=method)
+    req = Request((host or resolve_host(api_key)) + "/api" + path, data=data, headers=headers, method=method)
     status, retry_after = 200, 0
     try:
         with build_opener(NoRedirect()).open(req, timeout=timeout) as response:
@@ -86,9 +111,9 @@ def request_result(method, path, *, payload=None, api_key=None, timeout: float =
     return result
 
 
-def calculate_cost(payload):
+def calculate_cost(payload, api_key=None):
     query = urlencode({k: payload[k] for k in ('duration', 'resolution', 'tier')})
-    result = request_result('GET', '/plugin/calc-video-gen-cost?' + query)
+    result = request_result('GET', '/plugin/calc-video-gen-cost?' + query, host=resolve_host(api_key))
     for field in ('credits', 'minMinutes'):
         if type(result.get(field)) is not int or result[field] < 0:
             raise VideoError(f'试算响应缺少有效 {field}。')
@@ -271,8 +296,8 @@ def save_output(result, output):
 
 
 def run(args):
+    key = load_key(args.settings, required=args.command != 'cost')
     if args.command == 'status':
-        key = load_key(args.settings)
         if not args.task_id.strip():
             raise VideoError('taskId 不能为空。')
         if args.wait:
@@ -282,14 +307,13 @@ def run(args):
         return save_output(result, args.output)
     payload = build_payload(args)
     prepared = prepare_materials(payload)
-    estimate = calculate_cost(payload)
+    estimate = calculate_cost(payload, key)
     public = {k: estimate[k] for k in ('credits', 'minMinutes')}
     if args.command == 'cost':
         return public
     if args.confirmed_credits != estimate['credits']:
         raise VideoError(f'试算结果与确认值不同：{estimate["credits"]} 积分。'
                          '请重新让用户确认；未上传或提交。')
-    key = load_key(args.settings)
     uploaded = upload_materials(payload, prepared, estimate['uptoken'])
     try:
         created = request_result('POST', '/plugin/video-gen-task', payload=uploaded, api_key=key)

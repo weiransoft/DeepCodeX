@@ -13,7 +13,7 @@ test("connection selection covers all plans, subscription states and missing cre
   for (const subscriptionPlan of ["default", "on", "off"] as const) {
     for (const status of ["api only", "full ability", "unknown"] as const) {
       for (const apiKey of [undefined, "regular"]) {
-        for (const plusKey of [undefined, "plus"]) {
+        for (const plusKey of [undefined, "sk-aaaaaaaaaaaaaaaaaaaaaaaa"]) {
           const connection = resolveOpenAIConnection(
             { apiKey, baseURL: "https://regular.test" },
             plusKey,
@@ -43,10 +43,10 @@ test("connection selection covers all plans, subscription states and missing cre
 test("subscription check uses authenticated GET and only the exact HTTP status", async () => {
   for (const status of [200, 201, 204, 301, 401, 403, 404, 429, 500, 503]) {
     let released = false;
-    const result = await checkPlusSubscription("test-key", undefined, async (url, options) => {
+    const result = await checkPlusSubscription("sk-aaaaaaaaaaaaaaaaaaaaaaaa", undefined, async (url, options) => {
       assert.equal(url, `${DEEPCODE_PLUS_BASE_URL}/models`);
       assert.equal(options.method, "GET");
-      assert.deepEqual(options.headers, { Authorization: "Bearer test-key" });
+      assert.deepEqual(options.headers, { Authorization: "Bearer sk-aaaaaaaaaaaaaaaaaaaaaaaa" });
       assert.equal(options.redirect, "manual");
       return {
         status,
@@ -65,7 +65,7 @@ test("subscription check uses authenticated GET and only the exact HTTP status",
 test("network failure and timeout are unknown without retrying", async () => {
   let calls = 0;
   assert.equal(
-    await checkPlusSubscription("key", undefined, async () => {
+    await checkPlusSubscription("sk-aaaaaaaaaaaaaaaaaaaaaaaa", undefined, async () => {
       calls++;
       throw new Error("offline");
     }),
@@ -74,7 +74,7 @@ test("network failure and timeout are unknown without retrying", async () => {
   assert.equal(calls, 1);
   assert.equal(
     await checkPlusSubscription(
-      "key",
+      "sk-aaaaaaaaaaaaaaaaaaaaaaaa",
       undefined,
       async (_url, { signal }) => {
         calls++;
@@ -93,14 +93,14 @@ test("user cancellation propagates instead of selecting a fallback", async () =>
   const controller = new AbortController();
   const reason = new Error("cancelled by user");
   await assert.rejects(
-    checkPlusSubscription("key", controller.signal, async (_url, { signal }) => {
+    checkPlusSubscription("sk-aaaaaaaaaaaaaaaaaaaaaaaa", controller.signal, async (_url, { signal }) => {
       controller.abort(reason);
       throw signal.reason;
     }),
     (error) => error === reason
   );
   await assert.rejects(
-    checkPlusSubscription("key", controller.signal, async () => {
+    checkPlusSubscription("sk-aaaaaaaaaaaaaaaaaaaaaaaa", controller.signal, async () => {
       assert.fail("must not fetch when already aborted");
     }),
     (error) => error === reason
@@ -108,7 +108,7 @@ test("user cancellation propagates instead of selecting a fallback", async () =>
 });
 
 test("factory prepares once per turn, holds credentials stable, and isolates instances", async () => {
-  let plus: DeepcodePlusSettings = { apiKey: "plus", subscriptionPlan: "default" };
+  let plus: DeepcodePlusSettings = { apiKey: "sk-aaaaaaaaaaaaaaaaaaaaaaaa", subscriptionPlan: "default" };
   let regular = { apiKey: "regular", baseURL: "https://regular.test" };
   let status: PlusSubscriptionStatus = "full ability";
   let checks = 0;
@@ -134,17 +134,17 @@ test("factory prepares once per turn, holds credentials stable, and isolates ins
   const factory = makeFactory();
   const otherFactory = makeFactory();
   await factory.prepare!();
-  plus = { apiKey: "changed-plus", subscriptionPlan: "default" };
+  plus = { apiKey: "sk-bbbbbbbbbbbbbbbbbbbbbbbbbb", subscriptionPlan: "default" };
   regular = { apiKey: "changed-regular", baseURL: "https://changed.test" };
   status = "api only";
   for (let i = 0; i < 3; i++) {
-    assert.equal(factory().apiKey, "plus");
+    assert.equal(factory().apiKey, "sk-aaaaaaaaaaaaaaaaaaaaaaaa");
     assert.equal(factory().usingPlus, true);
   }
   assert.equal(checks, 1);
   await otherFactory.prepare!();
   assert.equal(otherFactory().apiKey, "changed-regular");
-  assert.equal(factory().apiKey, "plus");
+  assert.equal(factory().apiKey, "sk-aaaaaaaaaaaaaaaaaaaaaaaa");
   await factory.prepare!();
   assert.equal(factory().apiKey, "changed-regular");
   assert.equal(factory().usingPlus, false);
@@ -153,7 +153,7 @@ test("factory prepares once per turn, holds credentials stable, and isolates ins
 
 test("on, off and absent PLUS key skip subscription checks", async () => {
   for (const plan of ["on", "off", "default"] as const) {
-    for (const key of [undefined, "plus"]) {
+    for (const key of [undefined, "sk-aaaaaaaaaaaaaaaaaaaaaaaa"]) {
       if (plan === "default" && key) continue;
       const factory = withPlusSubscription(
         () => ({ apiKey: "regular", baseURL: "https://regular.test" }),

@@ -2166,8 +2166,8 @@ ${agentInstructions}
   }
 
   private reportNewPrompt(): void {
-    const { machineId, telemetryEnabled } = this.createOpenAIClient();
-    reportNewPrompt({ enabled: telemetryEnabled ?? true, machineId });
+    const { machineId, telemetryEnabled, plusApiKey } = this.createOpenAIClient();
+    reportNewPrompt({ enabled: telemetryEnabled ?? true, machineId, plusApiKey });
   }
 
   interruptActiveSession(): void {

@@ -1597,7 +1597,7 @@ test("createSession stores /init and sends generate prompt when no project AGENT
   assert.doesNotMatch(openAIUserMessage?.content ?? "", /Update \.\/AGENTS\.md/);
 });
 
-test("createSession reports a new prompt with the machineId token", async () => {
+test("createSession routes telemetry using the PLUS key and keeps the machineId token", async () => {
   const workspace = createTempDir("deepcode-session-workspace-");
   const home = createTempDir("deepcode-session-home-");
   setHomeDir(home);
@@ -1611,7 +1611,7 @@ test("createSession reports a new prompt with the machineId token", async () => 
     } as Response;
   }) as typeof fetch;
 
-  const manager = createSessionManager(workspace, "machine-id-123");
+  const manager = createSessionManager(workspace, "machine-id-123", "sk-" + "b".repeat(26));
   const activatedSessionIds: string[] = [];
   (manager as any).activateSession = async (sessionId: string) => {
     activatedSessionIds.push(sessionId);
@@ -1623,7 +1623,7 @@ test("createSession reports a new prompt with the machineId token", async () => 
   assert.equal(activatedSessionIds.length, 1);
   assert.equal(activatedSessionIds[0], sessionId);
   assert.equal(fetchCalls.length, 1);
-  assert.equal(String(fetchCalls[0].input), "https://deepcode.vegamo.cn/api/plugin/new");
+  assert.equal(String(fetchCalls[0].input), "https://www.deepcodeplus.com/api/plugin/new");
   assert.equal(fetchCalls[0].init?.method, "POST");
   assert.ok(fetchCalls[0].init?.signal instanceof AbortSignal);
   assert.deepEqual(JSON.parse(String(fetchCalls[0].init?.body)), {});
@@ -4780,7 +4780,7 @@ function runFileHistoryGit(
   );
 }
 
-function createSessionManager(projectRoot: string, machineId: string): SessionManager {
+function createSessionManager(projectRoot: string, machineId: string, plusApiKey?: string): SessionManager {
   return new SessionManager({
     projectRoot,
     createOpenAIClient: () => ({
@@ -4789,6 +4789,7 @@ function createSessionManager(projectRoot: string, machineId: string): SessionMa
       baseURL: "https://api.deepseek.com",
       thinkingEnabled: false,
       machineId,
+      plusApiKey,
     }),
     getResolvedSettings: () => ({ model: "test-model" }),
     renderMarkdown: (text) => text,
@@ -5229,7 +5230,7 @@ test("sessions prepare subscription before skill matching and preserve the actua
       } as any,
     }),
     {
-      readSettings: () => ({ apiKey: "plus", subscriptionPlan: "default" }),
+      readSettings: () => ({ apiKey: "sk-aaaaaaaaaaaaaaaaaaaaaaaa", subscriptionPlan: "default" }),
       checkSubscription: async () => {
         checks++;
         return status;
@@ -5250,7 +5251,7 @@ test("sessions prepare subscription before skill matching and preserve the actua
     assert.equal(manager.getSession(sessionId)?.usingPlus, true);
     assert.ok(calls.some((call) => call.skill));
     assert.ok(calls.some((call) => !call.skill));
-    assert.ok(calls.every((call) => call.key === "plus"));
+    assert.ok(calls.every((call) => call.key === "sk-aaaaaaaaaaaaaaaaaaaaaaaa"));
     const reloaded = createSessionManager(workspace, "reload-subscription");
     assert.equal(reloaded.getSession(sessionId)?.usingPlus, true);
     reloaded.dispose();
@@ -5307,7 +5308,7 @@ test("cancelling subscription preparation starts no LLM calls or new session", a
       assert.fail("must not build a client after cancellation");
     },
     {
-      readSettings: () => ({ apiKey: "plus", subscriptionPlan: "default" }),
+      readSettings: () => ({ apiKey: "sk-aaaaaaaaaaaaaaaaaaaaaaaa", subscriptionPlan: "default" }),
       checkSubscription: async () => {
         controller.abort();
         return "unknown";

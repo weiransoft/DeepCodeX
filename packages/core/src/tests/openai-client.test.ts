@@ -7,10 +7,13 @@ import { Models } from "openai/resources/models";
 import { createOpenAIClientFactory, DEEPCODE_PLUS_BASE_URL, resolveOpenAIConnection } from "../common/openai-client";
 
 test("resolveOpenAIConnection falls back to DeepCode Plus credentials", () => {
-  const resolved = resolveOpenAIConnection({ baseURL: "https://configured.example.com" }, "sk-plus-test");
+  const resolved = resolveOpenAIConnection(
+    { baseURL: "https://configured.example.com" },
+    "sk-aaaaaaaaaaaaaaaaaaaaaaaa"
+  );
 
   assert.deepEqual(resolved, {
-    apiKey: "sk-plus-test",
+    apiKey: "sk-aaaaaaaaaaaaaaaaaaaaaaaa",
     baseURL: DEEPCODE_PLUS_BASE_URL,
     usingPlus: true,
   });
@@ -19,7 +22,7 @@ test("resolveOpenAIConnection falls back to DeepCode Plus credentials", () => {
 test("resolveOpenAIConnection prefers regular credentials", () => {
   const resolved = resolveOpenAIConnection(
     { apiKey: "sk-regular-test", baseURL: "https://configured.example.com" },
-    "sk-plus-test"
+    "sk-aaaaaaaaaaaaaaaaaaaaaaaa"
   );
 
   assert.deepEqual(resolved, {
@@ -49,7 +52,7 @@ test("on mode retains PLUS routing after the existing models warmup fails", asyn
     path.join(home, ".deepcode-plus", "settings.json"),
     JSON.stringify({
       subscriptionPlan: "on",
-      env: { PLUS_API_KEY: "plus-warmup-test" },
+      env: { PLUS_API_KEY: "sk-bbbbbbbbbbbbbbbbbbbbbbbbbb" },
     })
   );
   // Stub the SDK warmup, so no request can reach the real PLUS service.
@@ -61,8 +64,9 @@ test("on mode retains PLUS routing after the existing models warmup fails", asyn
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(warmup.mock.callCount(), 1);
     assert.equal(first.usingPlus, true);
-    assert.equal(first.apiKey, "plus-warmup-test");
-    assert.equal(first.baseURL, DEEPCODE_PLUS_BASE_URL);
+    assert.equal(first.apiKey, "sk-bbbbbbbbbbbbbbbbbbbbbbbbbb");
+    assert.equal(first.baseURL, "https://www.deepcodeplus.com/plugin/openai");
+    assert.equal(first.client?.baseURL, first.baseURL);
     assert.equal(factory().client, first.client);
     assert.equal(factory().usingPlus, true);
     assert.equal(warmup.mock.callCount(), 1, "cached client should not warm up again");

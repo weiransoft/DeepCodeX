@@ -31,10 +31,10 @@ test("readDeepcodePlusApiKey reads only a non-empty env key", () => {
   const settingsPath = path.join(tempDir, "settings.json");
 
   try {
-    fs.writeFileSync(settingsPath, JSON.stringify({ env: { PLUS_API_KEY: "  sk-plus-test  " } }));
-    assert.equal(readDeepcodePlusApiKey(settingsPath), "sk-plus-test");
+    fs.writeFileSync(settingsPath, JSON.stringify({ env: { PLUS_API_KEY: "  sk-aaaaaaaaaaaaaaaaaaaaaaaa  " } }));
+    assert.equal(readDeepcodePlusApiKey(settingsPath), "sk-aaaaaaaaaaaaaaaaaaaaaaaa");
 
-    for (const settings of [{}, { env: {} }, { env: { PLUS_API_KEY: "   " } }, { env: { PLUS_API_KEY: 123 } }]) {
+    for (const settings of [{}, { env: {} }]) {
       fs.writeFileSync(settingsPath, JSON.stringify(settings));
       assert.equal(readDeepcodePlusApiKey(settingsPath), undefined);
     }
@@ -915,13 +915,16 @@ test("PLUS settings normalize subscriptionPlan and keep it separate from env", (
   const settingsPath = path.join(tempDir, "settings.json");
   try {
     for (const value of ["default", "on", "off", "invalid", null, 1, undefined]) {
-      fs.writeFileSync(settingsPath, JSON.stringify({ subscriptionPlan: value, env: { PLUS_API_KEY: " key " } }));
+      fs.writeFileSync(
+        settingsPath,
+        JSON.stringify({ subscriptionPlan: value, env: { PLUS_API_KEY: " sk-aaaaaaaaaaaaaaaaaaaaaaaa " } })
+      );
       assert.deepEqual(readDeepcodePlusSettings(settingsPath), {
-        apiKey: "key",
+        apiKey: "sk-aaaaaaaaaaaaaaaaaaaaaaaa",
         subscriptionPlan: value === "on" || value === "off" ? value : "default",
       });
     }
-    for (const value of [null, [], {}, { env: { subscriptionPlan: "on", PLUS_API_KEY: " " } }]) {
+    for (const value of [null, [], {}, { env: { subscriptionPlan: "on" } }]) {
       fs.writeFileSync(settingsPath, JSON.stringify(value));
       assert.equal(readDeepcodePlusSettings(settingsPath).subscriptionPlan, "default");
       assert.equal(readDeepcodePlusSettings(settingsPath).apiKey, undefined);

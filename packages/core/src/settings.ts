@@ -775,48 +775,20 @@ export const DEFAULT_BASE_URL = "https://api.deepseek.com";
 // Settings file I/O
 // ---------------------------------------------------------------------------
 
+export {
+  getDeepcodePlusSettingsPath,
+  readDeepcodePlusSettings,
+  readDeepcodePlusApiKey,
+  type SubscriptionPlan,
+  type DeepcodePlusSettings,
+} from "./common/plus-subscription";
+
 export function getUserSettingsPath(): string {
   return path.join(os.homedir(), ".deepcode", "settings.json");
 }
 
-export function getDeepcodePlusSettingsPath(): string {
-  return path.join(os.homedir(), ".deepcode-plus", "settings.json");
-}
-
 export function getProjectSettingsPath(projectRoot: string): string {
   return path.join(projectRoot, ".deepcode", "settings.json");
-}
-
-export type SubscriptionPlan = "default" | "on" | "off";
-
-export type DeepcodePlusSettings = {
-  apiKey?: string;
-  subscriptionPlan: SubscriptionPlan;
-};
-
-export function readDeepcodePlusSettings(settingsPath: string = getDeepcodePlusSettingsPath()): DeepcodePlusSettings {
-  try {
-    const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as {
-      env?: { PLUS_API_KEY?: unknown };
-      subscriptionPlan?: unknown;
-    } | null;
-    return {
-      apiKey:
-        typeof settings?.env?.PLUS_API_KEY === "string"
-          ? trimString(settings.env.PLUS_API_KEY) || undefined
-          : undefined,
-      subscriptionPlan:
-        settings?.subscriptionPlan === "on" || settings?.subscriptionPlan === "off"
-          ? settings.subscriptionPlan
-          : "default",
-    };
-  } catch {
-    return { subscriptionPlan: "default" };
-  }
-}
-
-export function readDeepcodePlusApiKey(settingsPath: string = getDeepcodePlusSettingsPath()): string | undefined {
-  return readDeepcodePlusSettings(settingsPath).apiKey;
 }
 
 export function readSettingsFile(settingsPath: string): DeepcodingSettings | null {

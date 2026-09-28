@@ -256,7 +256,11 @@ function App({ projectRoot, initialPrompt, resumeSessionId, forkSessionId, onRes
   // warmup (fire-and-forget inside createOpenAIClient) starts before the
   // user sends their first prompt.
   useEffect(() => {
-    clientFactory();
+    try {
+      clientFactory();
+    } catch (error) {
+      setErrorLine(error instanceof Error ? error.message : String(error));
+    }
   }, [clientFactory]);
 
   /**
