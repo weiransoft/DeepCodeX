@@ -36,10 +36,10 @@
     --app-text: #e2e3e6;
     --app-text-secondary: #b3b6bd;
     --app-text-tertiary: #7d8189;
-    --app-border: #3a3b3e;
+    --app-border: #36383c;
     --app-border-strong: #4a4c50;
-    --app-accent: #6b85ff;
-    --app-accent-weak: #2c3554;
+    --app-accent: #7b94ff;
+    --app-accent-weak: #1e2947;
     --app-danger: #f2555a;
     --app-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
   }
@@ -497,8 +497,16 @@ body {
   gap: 8px;
   min-width: 0;
 }
+/* 助手消息 flex 子元素统一骨架：流式阶段 Fragment 内的 chat-thinking、
+   生成中萤火虫占位 thinking-firefly、以及完整内容 chat-assistant-body
+   都必须是 flex:1 + min-width:0——否则它们作为 .msg-assistant-with-avatar
+   这个 flex row 的直接子元素会被 shrink 到内容最小宽度，
+   文字被挤成"一列一列"（根因：React Fragment 不生成 DOM 包裹层，
+   子元素直接成为外层 flex 行的子元素） */
 .msg-assistant-with-avatar .chat-assistant-body,
-.msg-assistant-with-avatar .chat-stream-preview {
+.msg-assistant-with-avatar .chat-stream-preview,
+.msg-assistant-with-avatar .chat-thinking,
+.msg-assistant-with-avatar .thinking-firefly {
   flex: 1;
   min-width: 0;
 }
@@ -1623,15 +1631,37 @@ a.icon-btn {
   }
 }
 
+/* ============ 中间断点（721~980px 盲区补全） ============
+   用户把浏览器缩成 side-by-side 双窗口时落在这个区间——
+   sidebar 从 260px 逐步收窄到 200px，聊天区有更充裕的正文宽度。
+   骨架属性（flex/min-width）绝不在这里重定义——
+   这里只调数值型参数，避免断点间行为漂移 */
+@media (max-width: 980px) {
+  .sidebar {
+    width: 220px;
+  }
+  .composer {
+    width: min(640px, calc(100% - 32px));
+  }
+  .msg-user-bubble {
+    max-width: 82%;
+  }
+}
+
 /* ============ 窄屏基础可用 ============ */
 @media (max-width: 720px) {
   .sidebar {
-    width: 200px;
+    width: 180px;
   }
   .chat-entries {
     padding: 16px 12px 32px;
   }
   .drawer {
     width: 100vw;
+  }
+  .composer {
+    width: calc(100% - 24px);
+    margin: 0 auto 12px;
+    border-radius: 10px;
   }
 }
