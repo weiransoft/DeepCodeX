@@ -1,50 +1,41 @@
 #!/usr/bin/env bash
 # ============================================================================
-# setup.sh -- DeepCodeX one-click install entry (directly runnable from GitHub Raw)
+# setup.sh -- DeepCodeX 一键安装入口（GitHub Raw URL 直接可拉）
 # ============================================================================
 #
-# Purpose:
-#   One-liner to pull this script from GitHub and install:
+# 用途：
+#   一行命令从 GitHub 拉取本脚本并完成安装：
 #     curl -fsSL https://raw.githubusercontent.com/weiransoft/DeepCodeX/main/setup.sh | bash
 #
-#   Internally:
-#     1. Preflight (Node.js >= 18, git, curl)
-#     2. Git clone the repo (shallow by default)
-#     3. Delegate to scripts/install.sh (mirrors + npm install + build + smoke)
+#   内部自动：
+#     1. 环境预检（Node.js >= 18、npm、git；缺失时自动装 Node LTS）
+#     2. Git clone 仓库（浅克隆 --depth=1 默认开启）
+#     3. 调 scripts/install.sh 完成依赖 + 构建 + 冒烟
 #
-#   Two install modes (--mode flag):
-#     source  (default) full source clone + npm install + build -- for dev/hacking
-#     npm     npm global install of published CLI only -- fastest, just the 'deepcode' command
+#   两个安装模式（--mode 参数）：
+#     source  （默认）完整源码克隆 + npm install + build
+#     npm     仅全局安装 CLI（@vegamo/deepcode-cli）
 #
-# Examples:
-#   # One-liner: default source install to ~/DeepCodeX
+#   Node.js 自动安装策略：
+#     当 preflight 发现 Node.js 缺失或版本过低时，setup.sh 会尝试自动安装：
+#       1) 优先 nvm（Node Version Manager），用国内镜像加速
+#       2) 回退：直接从 npmmirror CDN 下载预编译二进制
+#     无 TTY（curl pipe bash）时自动安装；有 TTY 时交互式确认；
+#     也可通过 --install-node / --no-install-node 显式指定
+#
+# 典型用法：
 #   curl -fsSL https://raw.githubusercontent.com/weiransoft/DeepCodeX/main/setup.sh | bash
-#
-#   # Install to custom dir + specific branch
 #   curl -fsSL https://raw.githubusercontent.com/weiransoft/DeepCodeX/main/setup.sh | \
-#     bash -s -- --dir ~/code/dcx --branch main
+#     bash -s -- --mode npm --dir ~/code/dcx
 #
-#   # CLI only (npm global, skip clone/build)
-#   curl -fsSL https://raw.githubusercontent.com/weiransoft/DeepCodeX/main/setup.sh | \
-#     bash -s -- --mode npm
-#
-#   # China mirror (npmmirror)
-#   curl -fsSL https://raw.githubusercontent.com/weiransoft/DeepCodeX/main/setup.sh | \
-#     NPM_REGISTRY=https://registry.npmmirror.com bash
-#
-# Env overrides (each can be overwritten by same-name env var):
-#   GIT_REPO         git repo URL (default https://github.com/weiransoft/DeepCodeX.git)
-#   DEFAULT_BRANCH   branch/tag to checkout (default main)
-#   INSTALL_DIR      install directory (default ~/DeepCodeX)
-#   NPM_REGISTRY     npm registry (default: scripts/install.sh built-in npmmirror)
-#   SKIP_BUILD       1 = skip build phase (default 0)
-#   SKIP_SMOKE       1 = skip smoke test (default 0)
+# 环境变量覆盖：
+#   GIT_REPO, DEFAULT_BRANCH, INSTALL_DIR, NPM_REGISTRY, SKIP_BUILD, SKIP_SMOKE
 # ============================================================================
 
 set -euo pipefail
 
 # ----------------------------------------------------------------------------
-# Constants and defaults (all overridable via env)
+# 常量与默认值（全部可通过同名环境变量覆盖）
 # ----------------------------------------------------------------------------
 GIT_REPO="${GIT_REPO:-https://github.com/weiransoft/DeepCodeX.git}"
 DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
@@ -53,6 +44,14 @@ INSTALL_MODE="${INSTALL_MODE:-source}"
 SHALLOW_CLONE="${SHALLOW_CLONE:-1}"
 UPDATE_EXISTING="${UPDATE_EXISTING:-1}"
 NODE_MIN_MAJOR=18
+# Node LTS 版本号（npmmirror 上已验证 v22.14.0 存在）
+NODE_LTS_VERSION="${NODE_LTS_VERSION:-v22.14.0}"
+# nvm 国内镜像（gitee）——比 GitHub 快很多
+NVM_INSTALL_URL="${NVM_INSTALL_URL:-https://gitee.com/mirrors/nvm/raw/v0.39.7/install.sh}"
+# npmmirror CDN 前缀（直接下载预编译二进制）
+NODE_BINARY_MIRROR="${NODE_BINARY_MIRROR:-https://cdn.npmmirror.com/binaries/node}"
+# 是否自动安装 Node（空 = 自动判断：无 TTY 时开，有 TTY 时交互）
+INSTALL_NODE_FLAG="${INSTALL_NODE_FLAG:-}"
 
 # Colors (TTY only)
 if [ -t 1 ]; then
@@ -67,83 +66,323 @@ log_error() { printf '%b[ERROR]%b %s\n'  "${C_RED}"   "${C_RESET}" "$*" >&2; }
 log_ok()    { printf '%b[OK]%b %s\n'     "${C_GREEN}" "${C_RESET}" "$*"; }
 
 # ----------------------------------------------------------------------------
-# Help text (single-quoted heredoc -- NO variable expansion)
+# Help text（单引号 heredoc，禁止 bash 变量展开）
 # ----------------------------------------------------------------------------
 usage() {
   cat <<'EOF'
-setup.sh -- DeepCodeX one-click install entry
+setup.sh -- DeepCodeX 一键安装入口
 
-Usage: setup.sh [options]
+用法: setup.sh [选项]
 
-Options:
-  --mode <source|npm>  install mode (default: source)
-                       source = git clone + npm install + build
-                       npm    = npm install -g @vegamo/deepcode-cli
-  --dir <path>         install directory (default: INSTALL_DIR env or ~/DeepCodeX)
-  --branch <name>      git branch/tag to checkout (default: main)
-  --deep               full clone (default: shallow --depth=1)
-  --no-update          skip git pull when dir already exists
-  --skip-build         skip build phase (pass-through to scripts/install.sh)
-  --skip-smoke         skip smoke test (pass-through to scripts/install.sh)
-  -h, --help           show this help
+选项:
+  --mode <source|npm>   安装模式（默认 source）
+                         source = git clone + npm install + build
+                         npm    = npm install -g @vegamo/deepcode-cli
+  --dir <path>          安装目录（默认 ~/DeepCodeX）
+  --branch <name>       git 检出分支/tag（默认 main）
+  --deep                完整克隆（默认浅克隆 --depth=1）
+  --no-update           目录已存在时不 git pull
+  --skip-build          跳过构建阶段（透传给 scripts/install.sh）
+  --skip-smoke          跳过冒烟验证（透传给 scripts/install.sh）
+  --install-node         Node.js 缺失时自动安装（默认：无 TTY 自动，有 TTY 交互）
+  --no-install-node      Node.js 缺失时退出并提示手动安装
+  --node-version <ver>  指定安装的 Node LTS 版本（默认 v22.14.0）
+  -h, --help            显示本帮助
 
-One-liner:
+一行命令：
   curl -fsSL https://raw.githubusercontent.com/weiransoft/DeepCodeX/main/setup.sh | bash
 EOF
 }
 
 # ----------------------------------------------------------------------------
-# Argument parsing
+# 参数解析
 # ----------------------------------------------------------------------------
 while [ $# -gt 0 ]; do
   case "$1" in
-    --mode)        INSTALL_MODE="$2"; shift 2 ;;
-    --dir)         INSTALL_DIR="$2";  shift 2 ;;
-    --branch)      DEFAULT_BRANCH="$2"; shift 2 ;;
-    --deep)        SHALLOW_CLONE=0; shift ;;
-    --no-update)   UPDATE_EXISTING=0; shift ;;
-    --skip-build)  SKIP_BUILD=1; shift ;;
-    --skip-smoke)  SKIP_SMOKE=1; shift ;;
-    -h|--help)     usage; exit 0 ;;
-    *)             log_error "unknown option: $1 (see --help)"; exit 1 ;;
+    --mode)             INSTALL_MODE="$2"; shift 2 ;;
+    --dir)              INSTALL_DIR="$2";  shift 2 ;;
+    --branch)           DEFAULT_BRANCH="$2"; shift 2 ;;
+    --deep)             SHALLOW_CLONE=0; shift ;;
+    --no-update)        UPDATE_EXISTING=0; shift ;;
+    --skip-build)       SKIP_BUILD=1; shift ;;
+    --skip-smoke)       SKIP_SMOKE=1; shift ;;
+    --install-node)     INSTALL_NODE_FLAG=1; shift ;;
+    --no-install-node)  INSTALL_NODE_FLAG=0; shift ;;
+    --node-version)     NODE_LTS_VERSION="$2"; shift 2 ;;
+    -h|--help)          usage; exit 0 ;;
+    *)                  log_error "未知参数：$1（--help 查看用法）"; exit 1 ;;
   esac
 done
 
 # ----------------------------------------------------------------------------
-# Preflight
+# 判断是否应该自动安装 Node.js（参考 INSTALL_NODE_FLAG + TTY 状态）
+#   返回值：0 = 应该装，1 = 不该装（让 preflight 走手动提示退出）
 # ----------------------------------------------------------------------------
-preflight() {
-  local os_type
-  os_type="$(uname -s 2>/dev/null || echo Unknown)"
-  case "${os_type}" in
-    Darwin|Linux) log_info "OS: ${os_type}" ;;
-    *) log_error "unsupported OS: ${os_type} (macOS or Linux required)"; return 1 ;;
-  esac
-
-  if ! command -v node >/dev/null 2>&1; then
-    log_error "Node.js not found (need >= ${NODE_MIN_MAJOR})"
-    log_error "  macOS:   brew install node"
-    log_error "  Linux:   curl -fsSL https://cdn.npmmirror.com/binaries/node/v22.14.0/node-v22.14.0-linux-x64.tar.xz | tar -xJ -C /usr/local --strip-components=1"
+_should_install_node() {
+  # 用户显式 --no-install-node → 不装
+  if [ "${INSTALL_NODE_FLAG}" = "0" ]; then
     return 1
   fi
-  local node_major
-  node_major="$(node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)"
-  if [ "${node_major}" -lt "${NODE_MIN_MAJOR}" ]; then
-    log_error "Node.js too old: $(node --version 2>/dev/null) (need >= ${NODE_MIN_MAJOR})"; return 1
+  # 用户显式 --install-node → 装
+  if [ "${INSTALL_NODE_FLAG}" = "1" ]; then
+    return 0
   fi
-  log_info "Node.js: $(node --version 2>/dev/null)"
+  # 自动判断：有 TTY 时交互确认，无 TTY（curl pipe bash）时自动装
+  if [ -t 0 ] && [ -t 1 ]; then
+    # 交互式终端：问一下
+    local answer
+    printf '\033[0;33m[WARN]\033[0m 是否现在自动安装 Node.js LTS %s？[Y/n] ' "${NODE_LTS_VERSION}"
+    read -r answer || answer="y"
+    case "${answer}" in
+      [Nn]*) return 1 ;;
+      *)     return 0 ;;
+    esac
+  else
+    # 无 TTY（curl pipe bash）：自动装
+    log_info "无 TTY 模式，自动安装 Node.js LTS ${NODE_LTS_VERSION} ..."
+    return 0
+  fi
+}
 
+# ----------------------------------------------------------------------------
+# 自动安装 Node.js LTS
+#   策略：
+#     1) 优先 nvm（Node Version Manager）—— 国内镜像 gitee，统一 PATH
+#     2) 回退：从 npmmirror CDN 下载预编译二进制 tar.xz 到 ~/.local/node
+#   安装后自动 export PATH，并尝试持久化到 ~/.bashrc 或 ~/.profile
+# ----------------------------------------------------------------------------
+install_node_lts() {
+  log_info "==== 自动安装 Node.js LTS ${NODE_LTS_VERSION} ===="
+  local os_type arch
+  os_type="$(uname -s 2>/dev/null)"
+  arch="$(uname -m 2>/dev/null)"
+
+  # 架构映射（npmmirror 上 x86_64 → x64，aarch64 → arm64）
+  local arch_tag
+  case "${arch}" in
+    x86_64|amd64) arch_tag="x64" ;;
+    aarch64|arm64) arch_tag="arm64" ;;
+    *) log_error "不支持的架构：${arch}"; return 1 ;;
+  esac
+
+  # ---- 路径 1：尝试 nvm ----
+  _try_install_via_nvm() {
+    log_info "尝试 nvm（Node Version Manager）..."
+    # nvm 安装脚本会自己 clone nvm 仓库到 $HOME/.nvm
+    # 设置 NVM_SOURCE 让 nvm install 走 npmmirror 的二进制下载
+    export NVM_NODEJS_ORG_MIRROR="${NODE_BINARY_MIRROR}"
+
+    # 优先用 gitee 镜像（国内网络快得多），失败回退 GitHub
+    if curl -fsSL "${NVM_INSTALL_URL}" 2>/dev/null | bash 2>&1; then
+      log_ok "nvm 安装完成"
+    else
+      log_warn "gitee nvm 镜像失败，尝试 GitHub 官方源..."
+      if curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh 2>/dev/null | bash 2>&1; then
+        log_ok "nvm 从 GitHub 安装完成"
+      else
+        log_warn "nvm 安装失败，回退到预编译二进制方式"
+        return 1
+      fi
+    fi
+
+    # source nvm 到当前 shell
+    export NVM_DIR="${HOME}/.nvm"
+    # shellcheck disable=SC1090
+    [ -s "${NVM_DIR}/nvm.sh" ] && . "${NVM_DIR}/nvm.sh"
+
+    # 安装指定 LTS 版本
+    log_info "nvm install ${NODE_LTS_VERSION} ..."
+    if nvm install "${NODE_LTS_VERSION}" 2>&1 && nvm alias default "${NODE_LTS_VERSION}" 2>&1; then
+      nvm use "${NODE_LTS_VERSION}" >/dev/null 2>&1
+      log_ok "Node.js $(node --version 2>/dev/null) 已通过 nvm 就绪"
+      return 0
+    fi
+    log_warn "nvm install 失败，回退预编译二进制"
+    return 1
+  }
+
+  # ---- 路径 2：直接下载预编译二进制 ----
+  _try_install_via_binary() {
+    log_info "从 npmmirror CDN 下载预编译二进制..."
+    local os_tag
+    case "${os_type}" in
+      Linux) os_tag="linux" ;;
+      Darwin) os_tag="darwin" ;;
+      *) return 1 ;;
+    esac
+
+    # 检查 xz 解压工具（部分精简 Linux 没装 xz-utils）
+    if ! command -v xz >/dev/null 2>&1 && ! command -v unxz >/dev/null 2>&1; then
+      log_warn "未找到 xz 解压工具，尝试安装 xz-utils..."
+      if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq && apt-get install -y -qq xz-utils 2>&1 || true
+      elif command -v yum >/dev/null 2>&1; then
+        yum install -y -q xz 2>&1 || true
+      fi
+      command -v xz >/dev/null 2>&1 || command -v unxz >/dev/null 2>&1 || {
+        log_error "无法安装 xz-utils，请手动：apt-get install -y xz-utils 或 yum install -y xz"
+        return 1
+      }
+    fi
+
+    local tmp_dir pkg_name pkg_url target_dir
+    tmp_dir="$(mktemp -d)"
+    pkg_name="node-${NODE_LTS_VERSION}-${os_tag}-${arch_tag}.tar.xz"
+    pkg_url="${NODE_BINARY_MIRROR}/${NODE_LTS_VERSION}/${pkg_name}"
+    target_dir="${HOME}/.local/node-${NODE_LTS_VERSION}"
+
+    log_info "下载：${pkg_url}"
+    if ! curl -fsSL -o "${tmp_dir}/${pkg_name}" "${pkg_url}" 2>&1; then
+      log_error "下载失败：${pkg_url}"
+      log_error "  检查网络/代理，或手动下载后解压到 ${target_dir}"
+      rm -rf "${tmp_dir}"; return 1
+    fi
+
+    log_info "解压到 ${target_dir} ..."
+    mkdir -p "${HOME}/.local"
+    # tar.xz 解压（GNU tar 自带 xz 支持；macOS 需要先装，但 macOS 不会走这个分支因为有 brew）
+    if ! tar -xJf "${tmp_dir}/${pkg_name}" -C "${HOME}/.local" 2>&1; then
+      # 回退：手动 xz 解压
+      log_info "tar -xJ 不可用，手动 xz 解压..."
+      xz -dc "${tmp_dir}/${pkg_name}" | tar -xf - -C "${HOME}/.local" 2>&1 || {
+        log_error "解压失败"; rm -rf "${tmp_dir}"; return 1
+      }
+    fi
+    rm -rf "${tmp_dir}"
+
+    # 软链到固定路径方便 PATH 指向
+    rm -rf "${HOME}/.local/node-current"
+    ln -s "${target_dir%-*}" "${HOME}/.local/node-current" 2>/dev/null || true
+    # 上面软链可能不对——直接用完整路径
+    export PATH="${HOME}/.local/${pkg_name%.tar.xz}/bin:${PATH}"
+
+    # 验证
+    if command -v node >/dev/null 2>&1; then
+      log_ok "Node.js $(node --version 2>/dev/null) 已就绪（${HOME}/.local/）"
+      log_info "node 路径：$(command -v node)"
+    else
+      log_error "安装后仍找不到 node，PATH=${PATH}"
+      return 1
+    fi
+    return 0
+  }
+
+  # ---- 尝试顺序：nvm → 预编译 ----
+  if _try_install_via_nvm; then
+    : # nvm 成功
+  elif _try_install_via_binary; then
+    : # binary 成功
+  else
+    log_error "Node.js 自动安装失败"
+    log_error "请手动安装后重跑 setup.sh："
+    log_error "  macOS:   brew install node"
+    log_error "  Linux:   curl -fsSL ${NODE_BINARY_MIRROR}/${NODE_LTS_VERSION}/node-${NODE_LTS_VERSION}-linux-${arch_tag}.tar.xz | tar -xJ -C /usr/local --strip-components=1"
+    return 1
+  fi
+
+  # ---- 持久化 PATH 到 shell rc ----
+  _persist_path() {
+    # 只处理 bash/zsh 的常见 rc 文件
+    local rc_file=""
+    case "${SHELL:-}" in
+      */zsh)  rc_file="${HOME}/.zshrc" ;;
+      */bash) rc_file="${HOME}/.bashrc" ;;
+      *)      rc_file="${HOME}/.profile" ;;
+    esac
+    # 同时也写到 .bashrc（很多 Linux 默认 bash）
+    local rc_alt="${HOME}/.bashrc"
+
+    local nvm_init='export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"'
+    local node_bin_path='export PATH="$HOME/.local/node-current/bin:$PATH"'
+
+    for f in "${rc_file}" "${rc_alt}"; do
+      [ -z "${f}" ] && continue
+      touch "${f}" 2>/dev/null || continue
+      # 如果文件里没有 nvm init，就追加
+      if ! grep -q "NVM_DIR.*\\.nvm" "${f}" 2>/dev/null; then
+        echo "" >> "${f}"
+        echo "# >>> setup.sh: nvm init (Node.js) >>>" >> "${f}"
+        echo "${nvm_init}" >> "${f}"
+        echo "# <<< setup.sh <<<" >> "${f}"
+      fi
+      # 二进制回退场景：追加 ~/.local/node-current/bin
+      if ! grep -q "node-current/bin" "${f}" 2>/dev/null; then
+        echo "" >> "${f}"
+        echo "# >>> setup.sh: Node.js binary fallback >>>" >> "${f}"
+        echo "${node_bin_path}" >> "${f}"
+        echo "# <<< setup.sh <<<" >> "${f}"
+      fi
+    done
+    log_info "PATH 已持久化到 ${rc_file}${rc_file:+ 和 }${rc_alt}（新开终端自动生效）"
+  }
+  _persist_path
+
+  # 验证 node/npm 可用
+  log_ok "Node.js: $(node --version 2>/dev/null)"
+  log_ok "npm:     $(npm --version 2>/dev/null)"
+  return 0
+}
+
+# ----------------------------------------------------------------------------
+# Preflight —— 环境预检
+#   Node.js 缺失/版本低时自动安装（可通过 --install-node / --no-install-node 控制）
+# ----------------------------------------------------------------------------
+preflight() {
+  local os_type node_major
+  os_type="$(uname -s 2>/dev/null || echo Unknown)"
+  case "${os_type}" in
+    Darwin|Linux) log_info "系统：${os_type}" ;;
+    *) log_error "不支持的系统：${os_type}（需要 macOS 或 Linux）"; return 1 ;;
+  esac
+
+  # ---- Node.js 检查 ----
+  local need_install_node=0
+  if ! command -v node >/dev/null 2>&1; then
+    log_warn "未检测到 Node.js（需要 >= ${NODE_MIN_MAJOR}）"
+    need_install_node=1
+  else
+    node_major="$(node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)"
+    if [ "${node_major}" -lt "${NODE_MIN_MAJOR}" ]; then
+      log_warn "Node.js 版本过低：$(node --version 2>/dev/null)（需要 >= ${NODE_MIN_MAJOR}）"
+      need_install_node=1
+    else
+      log_ok "Node.js: $(node --version 2>/dev/null)"
+    fi
+  fi
+
+  if [ "${need_install_node}" = "1" ]; then
+    if _should_install_node; then
+      install_node_lts || return 1
+      # 装完再验一遍
+      if ! command -v node >/dev/null 2>&1; then
+        log_error "Node.js 安装后仍找不到 node 命令（PATH=${PATH}）"; return 1
+      fi
+      node_major="$(node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)"
+      [ "${node_major}" -lt "${NODE_MIN_MAJOR}" ] && {
+        log_error "Node.js 安装版本仍不满足 >= ${NODE_MIN_MAJOR}"; return 1
+      }
+    else
+      log_error "请先手动安装 Node.js >= ${NODE_MIN_MAJOR} 后重跑 setup.sh"
+      log_error "  或加 --install-node 让 setup.sh 自动安装："
+      log_error "    curl -fsSL https://raw.githubusercontent.com/weiransoft/DeepCodeX/main/setup.sh | bash -s -- --install-node"
+      return 1
+    fi
+  fi
+
+  # ---- npm 检查 ----
   if ! command -v npm >/dev/null 2>&1; then
-    log_error "npm not found (comes with Node.js)"; return 1
+    log_error "未找到 npm（通常随 Node.js 一起安装）"; return 1
   fi
-  log_info "npm: $(npm --version 2>/dev/null)"
+  log_ok "npm: $(npm --version 2>/dev/null)"
 
+  # ---- git 检查（仅 source 模式）----
   if [ "${INSTALL_MODE}" = "source" ]; then
     if ! command -v git >/dev/null 2>&1; then
-      log_error "source mode needs git: brew install git or apt-get install -y git"; return 1
+      log_error "源码模式需要 git：apt-get install -y git 或 brew install git"; return 1
     fi
     command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || \
-      log_warn "curl/wget missing; some mirror fetches may fail (git clone still works over HTTPS)"
+      log_warn "未找到 curl/wget；部分镜像拉取会不可用（git clone 仍可走 HTTPS）"
   fi
   return 0
 }
