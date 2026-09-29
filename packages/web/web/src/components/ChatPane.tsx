@@ -351,40 +351,47 @@ export function ChatPane(props: ChatPaneProps) {
                   <div key={entry.id} className="msg-row msg-row-assistant">
                     {/* 默认机器头像（DeepCodeX 引擎，内容左侧） */}
                     <div className="msg-assistant-with-avatar">
+                      {/* 头像：固定宽度，不参与 flex shrink */}
                       <BotAvatarIcon size={26} className="msg-avatar msg-avatar-assistant" />
-                      {entry.content !== null ? (
-                        // 完整内容：先可读化（引擎拼接的工具结果 JSON 块 → output 文本，
-                        // 围栏代码与非工具结果 JSON 原样保留）再进 A2UI 管线渲染
-                        <AssistantA2ui content={humanizeEngineContent(entry.content)} messageId={entry.id} />
-                      ) : entry.thinkingPending === true &&
-                        (entry.thinking === undefined || entry.thinking === "") &&
-                        (entry.preview === null || entry.preview === "") ? (
-                        // 「思考中」占位（萤火虫闪烁）：轮次已开始但尚无
-                        // thinking/正文内容——让用户立刻看到引擎在活动
-                        <div className="thinking-firefly">
-                          <span className="firefly firefly-1" aria-hidden="true" />
-                          <span className="firefly firefly-2" aria-hidden="true" />
-                          <span className="firefly firefly-3" aria-hidden="true" />
-                          <span className="thinking-firefly-label">思考中…</span>
-                        </div>
-                      ) : (
-                        // 流式阶段（docs/dev/web-thinking-display.md F2）：
-                        // 思考过程（可折叠，默认展开）+ 正文预览，均经容错 Markdown
-                        // 管线渲染——恢复分段与格式；未闭合围栏自动补全，防 fence 抖动。
-                        <>
-                          {entry.thinking !== undefined && entry.thinking !== "" && (
-                            <details className="chat-thinking" open>
-                              <summary className="chat-thinking-summary">思考过程</summary>
-                              <PreviewMarkdown text={entry.thinking} surfaceId={`thinking-${entry.id}`} />
-                            </details>
-                          )}
-                          <PreviewMarkdown
-                            text={humanizeEngineContent(entry.preview ?? "")}
-                            surfaceId={`preview-${entry.id}`}
-                            cursor={entry.done !== true}
-                          />
-                        </>
-                      )}
+                      {/* 内容 wrapper：作为 flex row 的唯一 content 子元素，
+                          独占头像之外全部宽度，内部用 flex-direction: column 垂直排列。
+                          这样流式阶段 Fragment 展开的 thinking + preview 两个子元素
+                          不会被作为 flex row item 均分挤压（这就是"挤到一列"的根因）。 */}
+                      <div className="msg-assistant-body-wrapper">
+                        {entry.content !== null ? (
+                          // 完整内容：先可读化（引擎拼接的工具结果 JSON 块 → output 文本，
+                          // 围栏代码与非工具结果 JSON 原样保留）再进 A2UI 管线渲染
+                          <AssistantA2ui content={humanizeEngineContent(entry.content)} messageId={entry.id} />
+                        ) : entry.thinkingPending === true &&
+                          (entry.thinking === undefined || entry.thinking === "") &&
+                          (entry.preview === null || entry.preview === "") ? (
+                          // 「思考中」占位（萤火虫闪烁）：轮次已开始但尚无
+                          // thinking/正文内容——让用户立刻看到引擎在活动
+                          <div className="thinking-firefly">
+                            <span className="firefly firefly-1" aria-hidden="true" />
+                            <span className="firefly firefly-2" aria-hidden="true" />
+                            <span className="firefly firefly-3" aria-hidden="true" />
+                            <span className="thinking-firefly-label">思考中…</span>
+                          </div>
+                        ) : (
+                          // 流式阶段（docs/dev/web-thinking-display.md F2）：
+                          // 思考过程（可折叠，默认展开）+ 正文预览，均经容错 Markdown
+                          // 管线渲染——恢复分段与格式；未闭合围栏自动补全，防 fence 抖动。
+                          <>
+                            {entry.thinking !== undefined && entry.thinking !== "" && (
+                              <details className="chat-thinking" open>
+                                <summary className="chat-thinking-summary">思考过程</summary>
+                                <PreviewMarkdown text={entry.thinking} surfaceId={`thinking-${entry.id}`} />
+                              </details>
+                            )}
+                            <PreviewMarkdown
+                              text={humanizeEngineContent(entry.preview ?? "")}
+                              surfaceId={`preview-${entry.id}`}
+                              cursor={entry.done !== true}
+                            />
+                          </>
+                        )}
+                      </div>
                     </div>
                   </div>
                 );
