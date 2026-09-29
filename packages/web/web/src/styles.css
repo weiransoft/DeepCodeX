@@ -497,17 +497,23 @@ body {
   gap: 8px;
   min-width: 0;
 }
-/* 助手消息 flex 子元素统一骨架：流式阶段 Fragment 内的 chat-thinking、
-   生成中萤火虫占位 thinking-firefly、以及完整内容 chat-assistant-body
-   都必须是 flex:1 + min-width:0——否则它们作为 .msg-assistant-with-avatar
-   这个 flex row 的直接子元素会被 shrink 到内容最小宽度，
-   文字被挤成"一列一列"（根因：React Fragment 不生成 DOM 包裹层，
-   子元素直接成为外层 flex 行的子元素） */
-.msg-assistant-with-avatar .chat-assistant-body,
-.msg-assistant-with-avatar .chat-stream-preview,
-.msg-assistant-with-avatar .chat-thinking,
-.msg-assistant-with-avatar .thinking-firefly {
+/* 内容 wrapper：作为 flex row 的唯一 content 子元素，
+   独占头像之外全部宽度，内部用 flex-direction: column 垂直排列 thinking + preview。
+   chat-thinking / stream-preview / thinking-firefly 在 wrapper 内部是 column item，
+   不再作为 flex row item 参与均分行——这是"挤到一列"问题的结构性修复。 */
+.msg-assistant-with-avatar .msg-assistant-body-wrapper {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+/* wrapper 内部元素作为 column item 撑满宽度（width:100% 而非 flex:1） */
+.msg-assistant-body-wrapper .chat-assistant-body,
+.msg-assistant-body-wrapper .chat-stream-preview,
+.msg-assistant-body-wrapper .chat-thinking,
+.msg-assistant-body-wrapper .thinking-firefly {
+  width: 100%;
   min-width: 0;
 }
 
