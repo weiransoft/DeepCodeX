@@ -170,6 +170,30 @@ install_node_lts() {
   os_type="$(uname -s 2>/dev/null)"
   arch="$(uname -m 2>/dev/null)"
 
+  # ---- GLIBC 版本检测（旧系统如 CentOS 7 只有 glibc-2.17，Node 官方二进制跑不了）----
+  # 官方 Node v18/v22 预编译二进制需要 glibc >= 2.28
+  # 低于此值时，nvm 会自动走源码编译（--build-from-source），只需要 gcc/make
+  local glibc_version="" glibc_major=0 glibc_minor=0
+  if [ -f /lib64/libc.so.6 ]; then
+    glibc_version="$(/lib64/libc.so.6 2>&1 | grep -oE 'version [0-9]+\.[0-9]+' | head -1 | awk '{print $2}')"
+  elif command -v ldd >/dev/null 2>&1; then
+    glibc_version="$(ldd --version 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+  fi
+  if [ -n "${glibc_version}" ]; then
+    glibc_major="$(echo "${glibc_version}" | cut -d. -f1)"
+    glibc_minor="$(echo "${glibc_version}" | cut -d. -f2)"
+    log_info "系统 GLIBC: ${glibc_version}"
+  else
+    log_info "系统 GLIBC: 无法检测"
+  fi
+  # glibc >= 2.28 → 用预编译二进制；否则 → 强制源码编译
+  local force_build_from_source=0
+  if [ "${glibc_major}" -lt 2 ] || { [ "${glibc_major}" -eq 2 ] && [ "${glibc_minor}" -lt 28 ]; }; then
+    log_warn "系统 GLIBC ${glibc_version:-未知} < 2.28，官方 Node 二进制跑不了"
+    log_warn "自动切换为源码编译（需要 gcc/make，首次安装较慢）"
+    force_build_from_source=1
+  fi
+
   # 架构映射（npmmirror 上 x86_64 → x64，aarch64 → arm64）
   local arch_tag
   case "${arch}" in
@@ -204,8 +228,12 @@ install_node_lts() {
     [ -s "${NVM_DIR}/nvm.sh" ] && . "${NVM_DIR}/nvm.sh"
 
     # 安装指定 LTS 版本
-    log_info "nvm install ${NODE_LTS_VERSION} ..."
-    if nvm install "${NODE_LTS_VERSION}" 2>&1 && nvm alias default "${NODE_LTS_VERSION}" 2>&1; then
+    local nvm_install_args=("${NODE_LTS_VERSION}")
+    if [ "${force_build_from_source}" = "1" ]; then
+      nvm_install_args+=("--build-from-source")
+    fi
+    log_info "nvm install ${nvm_install_args[*]} ..."
+    if nvm install "${nvm_install_args[@]}" 2>&1 && nvm alias default "${NODE_LTS_VERSION}" 2>&1; then
       nvm use "${NODE_LTS_VERSION}" >/dev/null 2>&1
       log_ok "Node.js $(node --version 2>/dev/null) 已通过 nvm 就绪"
       return 0
@@ -280,9 +308,14 @@ install_node_lts() {
     return 0
   }
 
-  # ---- 尝试顺序：nvm → 预编译 ----
+  # ---- 尝试顺序：nvm → 预编译（仅 glibc >= 2.28 才走 binary）----
   if _try_install_via_nvm; then
-    : # nvm 成功
+    : # nvm 成功（glibc 旧时已自动 --build-from-source）
+  elif [ "${force_build_from_source}" = "1" ]; then
+    log_error "GLIBC ${glibc_version} < 2.28 且 nvm 源码编译也失败"
+    log_error "请手动升级系统 glibc，或手动安装 Node.js 后重试"
+    log_error "  CentOS 7 临时方案: yum install centos-release-scl && yum install rh-nodejs18-nodejs"
+    log_error "  或：curl -fsSL https://rpm.nodesource.com/setup_18.x | bash - && yum install nodejs"
   elif _try_install_via_binary; then
     : # binary 成功
   else
