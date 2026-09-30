@@ -6,6 +6,10 @@
 
 ## [Unreleased]
 
+（本版本暂无变更。）
+
+## [0.4.2] - 2026-09-30
+
 ### 新增
 
 - **Web — 执行计划卡片（A2UI）**：UpdatePlan 工具的计划在对话流渲染为专用卡片——头部进度统计（完成 n/m + 进行中步骤）、进度条、变更说明与任务清单（`[x]/[>]/[ ]` 三态图标 + 嵌套层级，进行中脉冲动画）；实时（tool_progress / 工具消息帧）与历史恢复三路同源归并为单一最新态卡片，无列表行的计划整段回退 A2UI 渲染保证信息不丢（bf026d4b）
@@ -36,5 +40,6 @@
 
 （本版本记录待补充：该版本发布时未维护更新日志，可通过 `git log v0.3.1..v0.4.0` 追溯。）
 
-[Unreleased]: https://github.com/weiransoft/DeepCodeX/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/weiransoft/DeepCodeX/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/weiransoft/DeepCodeX/compare/v0.4.0...v0.4.2
 [0.4.0]: https://github.com/weiransoft/DeepCodeX/compare/v0.3.1...v0.4.0
