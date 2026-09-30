@@ -228,14 +228,24 @@ install_node_lts() {
     [ -s "${NVM_DIR}/nvm.sh" ] && . "${NVM_DIR}/nvm.sh"
 
     # 安装指定 LTS 版本
+    # nvm 源码编译参数：-s 是通用短选项，--source 是长选项（兼容老版本 nvm）
+    # --build-from-source 是 v0.39+ 才引入的，部分旧 nvm 不认
     local nvm_install_args=("${NODE_LTS_VERSION}")
     if [ "${force_build_from_source}" = "1" ]; then
-      nvm_install_args+=("--build-from-source")
+      nvm_install_args+=("--source")
     fi
     log_info "nvm install ${nvm_install_args[*]} ..."
     if nvm install "${nvm_install_args[@]}" 2>&1 && nvm alias default "${NODE_LTS_VERSION}" 2>&1; then
       nvm use "${NODE_LTS_VERSION}" >/dev/null 2>&1
+      hash -r 2>/dev/null || true  # 清除 shell 的 node 命令缓存，确保用新版
       log_ok "Node.js $(node --version 2>/dev/null) 已通过 nvm 就绪"
+      # 验证 node 真的能跑（旧 GLIBC 上如果还是预编译二进制，node --version 会直接 crash）
+      if ! node --version >/dev/null 2>&1; then
+        log_warn "node --version 失败！nvm 可能没正确源码编译，重试带 -s 选项..."
+        nvm install "${NODE_LTS_VERSION}" -s 2>&1 || true
+        nvm use "${NODE_LTS_VERSION}" >/dev/null 2>&1
+        hash -r 2>/dev/null || true
+      fi
       return 0
     fi
     log_warn "nvm install 失败，回退预编译二进制"
