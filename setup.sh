@@ -14,7 +14,13 @@
 #
 #   两个安装模式（--mode 参数）：
 #     source  （默认）完整源码克隆 + npm install + build
-#     npm     仅全局安装 CLI（@vegamo/deepcode-cli）
+#     npm     GitHub Release tarball → npm install -g（最快，CLI only）
+#             默认拉 latest；可用 --tag v0.4.2 指定版本
+#
+#   生产发布流程（开发者执行一次）：
+#     npm run build && cd packages/cli && npm pack
+#     gh release create v0.4.2 --title "v0.4.2" --notes "..." \
+#       ./vegamo-deepcode-cli-0.4.2.tgz#deepcode-cli.tgz
 #
 #   Node.js 自动安装策略：
 #     当 preflight 发现 Node.js 缺失或版本过低时，setup.sh 会尝试自动安装：
@@ -79,7 +85,9 @@ setup.sh -- DeepCodeX 一键安装入口
 选项:
   --mode <source|npm>   安装模式（默认 source）
                          source = git clone + npm install + build
-                         npm    = npm install -g @vegamo/deepcode-cli
+                         npm    = GitHub Release tarball → npm install -g
+  --tag <vX.Y.Z>        npm 模式指定 Release tag（默认 latest）
+                         例: --tag v0.4.2
   --dir <path>          安装目录（默认 ~/DeepCodeX）
   --branch <name>       git 检出分支/tag（默认 main）
   --deep                完整克隆（默认浅克隆 --depth=1）
@@ -103,6 +111,7 @@ EOF
 while [ $# -gt 0 ]; do
   case "$1" in
     --mode)             INSTALL_MODE="$2"; shift 2 ;;
+    --tag)              RELEASE_TAG="$2"; shift 2 ;;
     --dir)              INSTALL_DIR="$2";  shift 2 ;;
     --branch)           DEFAULT_BRANCH="$2"; shift 2 ;;
     --deep)             SHALLOW_CLONE=0; shift ;;
@@ -435,30 +444,70 @@ preflight() {
 #   --force: 先 npm uninstall -g 清干净，再重新 install
 # ----------------------------------------------------------------------------
 install_via_npm() {
-  log_info "==== mode: npm global ===="
+  log_info "==== mode: release tarball（GitHub Release → 本地 npm install -g）===="
+
+  # Release 下载 URL：
+  #   默认 latest  → https://github.com/weiransoft/DeepCodeX/releases/latest/download/deepcode-cli.tgz
+  #   指定 tag     → https://github.com/weiransoft/DeepCodeX/releases/download/v0.4.2/deepcode-cli.tgz
+  # asset 名固定为 deepcode-cli.tgz（每次 release 覆盖上传），避免 setup.sh 解析版本号
+  local release_url release_tgz tgz_path
+  if [ -n "${RELEASE_TAG:-}" ]; then
+    release_url="https://github.com/weiransoft/DeepCodeX/releases/download/${RELEASE_TAG}/deepcode-cli.tgz"
+    log_info "指定版本: ${RELEASE_TAG}"
+  else
+    release_url="https://github.com/weiransoft/DeepCodeX/releases/latest/download/deepcode-cli.tgz"
+    log_info "拉取最新 Release（或用 --tag 指定版本）"
+  fi
+  tgz_path="$(mktemp -t deepcode-cli-XXXXXX.tgz)"
+
+  # ---- 下载 tarball（带超时 + 重试）----
+  log_info "下载: ${release_url}"
+  local max_attempts=3 attempt=1
+  while [ "${attempt}" -le "${max_attempts}" ]; do
+    if curl -fsSL --connect-timeout 15 --max-time 180 \
+        -o "${tgz_path}" "${release_url}" 2>&1; then
+      break
+    fi
+    if [ "${attempt}" = "${max_attempts}" ]; then
+      log_error "下载失败（${max_attempts} 次尝试）: ${release_url}"
+      log_error "检查: GitHub Release 是否已上传 deepcode-cli.tgz"
+      rm -f "${tgz_path}"
+      return 1
+    fi
+    log_warn "下载失败，${attempt}/${max_attempts}，2s 后重试..."
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+
+  # 校验下载文件（必须是有效的 tarball）
+  if ! tar tzf "${tgz_path}" >/dev/null 2>&1; then
+    log_error "下载的文件不是有效的 tarball（可能 Release 不存在或 404）"
+    log_error "URL: ${release_url}"
+    rm -f "${tgz_path}"
+    return 1
+  fi
+  log_ok "下载完成（$(du -h "${tgz_path}" | cut -f1)）"
+
+  # ---- --force: 先卸载旧版本 ----
   if [ "${FORCE_REINSTALL}" = "1" ]; then
     log_info "--force: 先卸载旧版本..."
     npm uninstall -g @vegamo/deepcode-cli 2>&1 || log_warn "卸载跳过（可能未安装）"
   fi
 
-  local -a extra_flags
-  extra_flags=()
-  if [ -n "${NPM_REGISTRY:-}" ]; then
-    extra_flags+=(--registry "${NPM_REGISTRY}")
+  # ---- 从本地 tarball 安装 ----
+  if ! npm install -g "${tgz_path}" 2>&1; then
+    log_error "npm install -g ${tgz_path} failed"
+    rm -f "${tgz_path}"
+    return 1
   fi
-
-  # "${arr[@]+"${arr[@]}"}" 是 bash set -u 下安全的空数组展开写法
-  if ! npm install -g @vegamo/deepcode-cli "${extra_flags[@]+"${extra_flags[@]}"}" 2>&1; then
-    log_error "npm install -g @vegamo/deepcode-cli failed"; return 1
-  fi
-  log_ok "npm global install done"
+  log_ok "npm install 完成"
+  rm -f "${tgz_path}"
 
   # ---- 关键：取 npm 全局 prefix，确保 bin 目录进 PATH ----
   local npm_prefix npm_bin_dir
   npm_prefix="$(npm config get prefix 2>/dev/null || echo "")"
   npm_bin_dir="${npm_prefix}/bin"
   if [ -n "${npm_bin_dir}" ] && [ -d "${npm_bin_dir}" ]; then
-    # 当前 shell 立即生效（注意：不能让旧版本的 bin 目录优先）
     case ":${PATH}:" in
       *":${npm_bin_dir}:"*) : ;;
       *) export PATH="${npm_bin_dir}:${PATH}" ;;
@@ -470,7 +519,6 @@ install_via_npm() {
   local cli_path="" cli_ver=""
   cli_path="$(command -v deepcode 2>/dev/null || echo "")"
   if [ -z "${cli_path}" ]; then
-    # PATH 里没找到，但 npm_bin_dir 里也许有
     if [ -x "${npm_bin_dir}/deepcode" ]; then
       cli_path="${npm_bin_dir}/deepcode"
       log_warn "deepcode 已安装但当前 shell PATH 未包含 ${npm_bin_dir}"
@@ -485,10 +533,9 @@ install_via_npm() {
   log_ok "deepcode: ${cli_path}"
   [ -n "${cli_ver}" ] && log_ok "  version: ${cli_ver}"
 
-  # 多版本告警：如果有多个 deepcode 在 PATH 上
-  local all_deepcode
+  # 多版本告警
+  local all_deepcode deepcode_count
   all_deepcode="$(command -a deepcode 2>/dev/null | sort -u || echo "")"
-  local deepcode_count
   deepcode_count="$(echo "${all_deepcode}" | grep -c . || true)"
   if [ "${deepcode_count}" -gt 1 ]; then
     log_warn "PATH 上有 ${deepcode_count} 个 deepcode（可能是多次安装残留）："
