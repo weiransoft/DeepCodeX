@@ -43,6 +43,8 @@ INSTALL_DIR="${INSTALL_DIR:-$HOME/DeepCodeX}"
 INSTALL_MODE="${INSTALL_MODE:-source}"
 SHALLOW_CLONE="${SHALLOW_CLONE:-1}"
 UPDATE_EXISTING="${UPDATE_EXISTING:-1}"
+# --force 覆盖重装（npm 模式先卸载再装；source 模式删目录重 clone）
+FORCE_REINSTALL="${FORCE_REINSTALL:-0}"
 NODE_MIN_MAJOR=18
 # Node LTS 版本号（npmmirror 上已验证 v22.14.0 存在）
 NODE_LTS_VERSION="${NODE_LTS_VERSION:-v22.14.0}"
@@ -81,6 +83,7 @@ setup.sh -- DeepCodeX 一键安装入口
   --dir <path>          安装目录（默认 ~/DeepCodeX）
   --branch <name>       git 检出分支/tag（默认 main）
   --deep                完整克隆（默认浅克隆 --depth=1）
+  --force               覆盖重装：npm 模式先卸载再装；source 模式删目录重 clone
   --no-update           目录已存在时不 git pull
   --skip-build          跳过构建阶段（透传给 scripts/install.sh）
   --skip-smoke          跳过冒烟验证（透传给 scripts/install.sh）
@@ -103,6 +106,7 @@ while [ $# -gt 0 ]; do
     --dir)              INSTALL_DIR="$2";  shift 2 ;;
     --branch)           DEFAULT_BRANCH="$2"; shift 2 ;;
     --deep)             SHALLOW_CLONE=0; shift ;;
+    --force)            FORCE_REINSTALL=1; shift ;;
     --no-update)        UPDATE_EXISTING=0; shift ;;
     --skip-build)       SKIP_BUILD=1; shift ;;
     --skip-smoke)       SKIP_SMOKE=1; shift ;;
@@ -428,9 +432,15 @@ preflight() {
 
 # ----------------------------------------------------------------------------
 # Mode 1: npm global install (fastest, CLI only)
+#   --force: 先 npm uninstall -g 清干净，再重新 install
 # ----------------------------------------------------------------------------
 install_via_npm() {
   log_info "==== mode: npm global ===="
+  if [ "${FORCE_REINSTALL}" = "1" ]; then
+    log_info "--force: 先卸载旧版本..."
+    npm uninstall -g @vegamo/deepcode-cli 2>&1 || log_warn "卸载跳过（可能未安装）"
+  fi
+
   local -a extra_flags
   extra_flags=()
   if [ -n "${NPM_REGISTRY:-}" ]; then
@@ -444,19 +454,15 @@ install_via_npm() {
   log_ok "npm global install done"
 
   # ---- 关键：取 npm 全局 prefix，确保 bin 目录进 PATH ----
-  #   nvm 场景：prefix = ~/.nvm/versions/node/v22.14.0 → bin 在 ~/.nvm/versions/node/v22.14.0/bin
-  #   apt 装 Node：prefix = /usr/local → bin 在 /usr/local/bin（已在 PATH）
-  #   二进制回退：prefix = ~/.local/node-current → bin 在 ~/.local/node-current/bin
   local npm_prefix npm_bin_dir
   npm_prefix="$(npm config get prefix 2>/dev/null || echo "")"
   npm_bin_dir="${npm_prefix}/bin"
   if [ -n "${npm_bin_dir}" ] && [ -d "${npm_bin_dir}" ]; then
-    # 当前 shell 立即生效
+    # 当前 shell 立即生效（注意：不能让旧版本的 bin 目录优先）
     case ":${PATH}:" in
-      *":${npm_bin_dir}:"*) : ;;  # 已经在 PATH
+      *":${npm_bin_dir}:"*) : ;;
       *) export PATH="${npm_bin_dir}:${PATH}" ;;
     esac
-    # 持久化到 shell rc（_persist_path 提到了顶层，install_via_npm 也能调）
     _persist_path "${npm_bin_dir}" || true
   fi
 
@@ -464,25 +470,31 @@ install_via_npm() {
   local cli_path="" cli_ver=""
   cli_path="$(command -v deepcode 2>/dev/null || echo "")"
   if [ -z "${cli_path}" ]; then
-    # PATH 里没找到，但 npm_bin_dir 里也许有（刚装的）
+    # PATH 里没找到，但 npm_bin_dir 里也许有
     if [ -x "${npm_bin_dir}/deepcode" ]; then
       cli_path="${npm_bin_dir}/deepcode"
       log_warn "deepcode 已安装但当前 shell PATH 未包含 ${npm_bin_dir}"
-      log_warn "  当前 PATH: ${PATH}"
       log_warn "  修复: source ~/.bashrc  或  export PATH=\"${npm_bin_dir}:\$PATH\""
-      log_warn "  新终端自动生效（已写入 ~/.bashrc / ~/.zshrc）"
     else
       log_error "deepcode 未找到（npm install 可能没把它链接到 bin 目录）"
       log_error "  npm_prefix=${npm_prefix}"
-      log_error "  检查: ls -la ${npm_bin_dir}/ 2>/dev/null"
       return 1
     fi
   fi
   cli_ver="$("${cli_path}" --version 2>&1 | head -1 || echo "")"
   log_ok "deepcode: ${cli_path}"
   [ -n "${cli_ver}" ] && log_ok "  version: ${cli_ver}"
-  log_info "note: npm mode installs CLI only. For Web UI use source mode:"
-  log_info "  curl -fsSL https://raw.githubusercontent.com/weiransoft/DeepCodeX/main/setup.sh | bash"
+
+  # 多版本告警：如果有多个 deepcode 在 PATH 上
+  local all_deepcode
+  all_deepcode="$(command -a deepcode 2>/dev/null | sort -u || echo "")"
+  local deepcode_count
+  deepcode_count="$(echo "${all_deepcode}" | grep -c . || true)"
+  if [ "${deepcode_count}" -gt 1 ]; then
+    log_warn "PATH 上有 ${deepcode_count} 个 deepcode（可能是多次安装残留）："
+    echo "${all_deepcode}" | while IFS= read -r p; do log_warn "  ${p}"; done
+    log_warn "清理: npm uninstall -g @vegamo/deepcode-cli（多 prefix 重复执行）"
+  fi
   return 0
 }
 
