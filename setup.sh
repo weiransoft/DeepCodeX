@@ -280,48 +280,87 @@ install_node_lts() {
     return 1
   fi
 
-  # ---- 持久化 PATH 到 shell rc ----
-  _persist_path() {
-    # 只处理 bash/zsh 的常见 rc 文件
-    local rc_file=""
-    case "${SHELL:-}" in
-      */zsh)  rc_file="${HOME}/.zshrc" ;;
-      */bash) rc_file="${HOME}/.bashrc" ;;
-      *)      rc_file="${HOME}/.profile" ;;
-    esac
-    # 同时也写到 .bashrc（很多 Linux 默认 bash）
-    local rc_alt="${HOME}/.bashrc"
-
-    local nvm_init='export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"'
-    local node_bin_path='export PATH="$HOME/.local/node-current/bin:$PATH"'
-
-    for f in "${rc_file}" "${rc_alt}"; do
-      [ -z "${f}" ] && continue
-      touch "${f}" 2>/dev/null || continue
-      # 如果文件里没有 nvm init，就追加
-      if ! grep -q "NVM_DIR.*\\.nvm" "${f}" 2>/dev/null; then
-        echo "" >> "${f}"
-        echo "# >>> setup.sh: nvm init (Node.js) >>>" >> "${f}"
-        echo "${nvm_init}" >> "${f}"
-        echo "# <<< setup.sh <<<" >> "${f}"
-      fi
-      # 二进制回退场景：追加 ~/.local/node-current/bin
-      if ! grep -q "node-current/bin" "${f}" 2>/dev/null; then
-        echo "" >> "${f}"
-        echo "# >>> setup.sh: Node.js binary fallback >>>" >> "${f}"
-        echo "${node_bin_path}" >> "${f}"
-        echo "# <<< setup.sh <<<" >> "${f}"
-      fi
-    done
-    log_info "PATH 已持久化到 ${rc_file}${rc_file:+ 和 }${rc_alt}（新开终端自动生效）"
-  }
-  _persist_path
+  # ---- 持久化 PATH（nvm 已成功的话会追加 NVM_DIR init；二进制成功的话追加 node-current/bin）----
+  # install_via_npm 会在此基础上再追加 npm_prefix/bin
+  _persist_path || true
 
   # 验证 node/npm 可用
   log_ok "Node.js: $(node --version 2>/dev/null)"
   log_ok "npm:     $(npm --version 2>/dev/null)"
   return 0
+}
+
+# ----------------------------------------------------------------------------
+# 持久化 PATH 条目到 shell rc 文件（可多次调用，自动去重）
+#   用法：_persist_path [extra_path1] [extra_path2] ...
+#     内置追加：NVM_DIR init（若 ~/.nvm/nvm.sh 存在）、~/.local/node-current/bin
+#     额外追加：从参数传入的路径（例如 npm_prefix/bin）
+# ----------------------------------------------------------------------------
+_persist_path() {
+  local rc_file="" rc_alt="${HOME}/.bashrc"
+  case "${SHELL:-}" in
+    */zsh)  rc_file="${HOME}/.zshrc" ;;
+    */bash) rc_file="${HOME}/.bashrc" ;;
+    *)      rc_file="${HOME}/.profile" ;;
+  esac
+
+  local need_nvm_init=0
+  local need_node_bin=0
+  [ -s "${HOME}/.nvm/nvm.sh" ] && need_nvm_init=1
+  [ -d "${HOME}/.local/node-current/bin" ] && need_node_bin=1
+
+  local nvm_init='export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"'
+  local node_bin_path='export PATH="$HOME/.local/node-current/bin:$PATH"'
+
+  local -a paths_to_add
+  paths_to_add=()
+  [ ${need_nvm_init} = 1 ] && paths_to_add+=("__NVM_INIT__")
+  [ ${need_node_bin} = 1 ] && paths_to_add+=("${node_bin_path}")
+  # 追加调用方传入的额外路径
+  for extra in "$@"; do
+    [ -n "${extra}" ] && paths_to_add+=("export PATH=\"${extra}:\$PATH\"")
+  done
+
+  if [ ${#paths_to_add[@]} -eq 0 ]; then
+    return 0  # 没有需要持久化的条目
+  fi
+
+  local f p
+  for f in "${rc_file}" "${rc_alt}"; do
+    [ -z "${f}" ] && continue
+    touch "${f}" 2>/dev/null || continue
+    local section_added=0
+    for p in "${paths_to_add[@]}"; do
+      if [ "${p}" = "__NVM_INIT__" ]; then
+        # nvm init 检查的是 NVM_DIR 关键字
+        if ! grep -q "NVM_DIR.*\\.nvm" "${f}" 2>/dev/null; then
+          if [ ${section_added} -eq 0 ]; then
+            echo "" >> "${f}"
+            echo "# >>> setup.sh: PATH init >>>" >> "${f}"
+            section_added=1
+          fi
+          echo "${nvm_init}" >> "${f}"
+        fi
+      else
+        # 普通 PATH 条目：用 grep -q 检查关键部分
+        local keyword="${p#export PATH=\"}"
+        keyword="${keyword%%:\$PATH\"}"
+        if ! grep -Fq "${keyword}" "${f}" 2>/dev/null; then
+          if [ ${section_added} -eq 0 ]; then
+            echo "" >> "${f}"
+            echo "# >>> setup.sh: PATH init >>>" >> "${f}"
+            section_added=1
+          fi
+          echo "${p}" >> "${f}"
+        fi
+      fi
+    done
+    if [ ${section_added} -eq 1 ]; then
+      echo "# <<< setup.sh <<<" >> "${f}"
+    fi
+  done
+  log_info "PATH 已持久化（新开终端自动生效；或执行 source ~/.bashrc）"
 }
 
 # ----------------------------------------------------------------------------
@@ -402,16 +441,46 @@ install_via_npm() {
   if ! npm install -g @vegamo/deepcode-cli "${extra_flags[@]+"${extra_flags[@]}"}" 2>&1; then
     log_error "npm install -g @vegamo/deepcode-cli failed"; return 1
   fi
+  log_ok "npm global install done"
 
-  log_ok "installed"
-  local cli_path
-  cli_path="$(command -v deepcode 2>/dev/null || echo "")"
-  if [ -n "${cli_path}" ]; then
-    log_ok "deepcode binary: ${cli_path}"
-    local cli_ver
-    cli_ver="$(deepcode --version 2>&1 | head -1 || echo "")"
-    [ -n "${cli_ver}" ] && log_ok "version: ${cli_ver}"
+  # ---- 关键：取 npm 全局 prefix，确保 bin 目录进 PATH ----
+  #   nvm 场景：prefix = ~/.nvm/versions/node/v22.14.0 → bin 在 ~/.nvm/versions/node/v22.14.0/bin
+  #   apt 装 Node：prefix = /usr/local → bin 在 /usr/local/bin（已在 PATH）
+  #   二进制回退：prefix = ~/.local/node-current → bin 在 ~/.local/node-current/bin
+  local npm_prefix npm_bin_dir
+  npm_prefix="$(npm config get prefix 2>/dev/null || echo "")"
+  npm_bin_dir="${npm_prefix}/bin"
+  if [ -n "${npm_bin_dir}" ] && [ -d "${npm_bin_dir}" ]; then
+    # 当前 shell 立即生效
+    case ":${PATH}:" in
+      *":${npm_bin_dir}:"*) : ;;  # 已经在 PATH
+      *) export PATH="${npm_bin_dir}:${PATH}" ;;
+    esac
+    # 持久化到 shell rc（_persist_path 提到了顶层，install_via_npm 也能调）
+    _persist_path "${npm_bin_dir}" || true
   fi
+
+  # ---- 诊断 deepcode 可执行性 ----
+  local cli_path="" cli_ver=""
+  cli_path="$(command -v deepcode 2>/dev/null || echo "")"
+  if [ -z "${cli_path}" ]; then
+    # PATH 里没找到，但 npm_bin_dir 里也许有（刚装的）
+    if [ -x "${npm_bin_dir}/deepcode" ]; then
+      cli_path="${npm_bin_dir}/deepcode"
+      log_warn "deepcode 已安装但当前 shell PATH 未包含 ${npm_bin_dir}"
+      log_warn "  当前 PATH: ${PATH}"
+      log_warn "  修复: source ~/.bashrc  或  export PATH=\"${npm_bin_dir}:\$PATH\""
+      log_warn "  新终端自动生效（已写入 ~/.bashrc / ~/.zshrc）"
+    else
+      log_error "deepcode 未找到（npm install 可能没把它链接到 bin 目录）"
+      log_error "  npm_prefix=${npm_prefix}"
+      log_error "  检查: ls -la ${npm_bin_dir}/ 2>/dev/null"
+      return 1
+    fi
+  fi
+  cli_ver="$("${cli_path}" --version 2>&1 | head -1 || echo "")"
+  log_ok "deepcode: ${cli_path}"
+  [ -n "${cli_ver}" ] && log_ok "  version: ${cli_ver}"
   log_info "note: npm mode installs CLI only. For Web UI use source mode:"
   log_info "  curl -fsSL https://raw.githubusercontent.com/weiransoft/DeepCodeX/main/setup.sh | bash"
   return 0
