@@ -489,38 +489,72 @@ preflight() {
 install_via_npm() {
   log_info "==== mode: release tarball（GitHub Release → 本地 npm install -g）===="
 
-  # Release 下载 URL：
-  #   默认 latest  → https://github.com/weiransoft/DeepCodeX/releases/latest/download/deepcode-cli.tgz
-  #   指定 tag     → https://github.com/weiransoft/DeepCodeX/releases/download/v0.4.2/deepcode-cli.tgz
+  # Release 下载 URL（GitHub 原始地址）：
+  #   默认 latest  → .../releases/latest/download/deepcode-cli.tgz
+  #   指定 tag     → .../releases/download/v0.4.2/deepcode-cli.tgz
   # asset 名固定为 deepcode-cli.tgz（每次 release 覆盖上传），避免 setup.sh 解析版本号
-  local release_url release_tgz tgz_path
+  local gh_release_url tgz_path
   if [ -n "${RELEASE_TAG:-}" ]; then
-    release_url="https://github.com/weiransoft/DeepCodeX/releases/download/${RELEASE_TAG}/deepcode-cli.tgz"
+    gh_release_url="https://github.com/weiransoft/DeepCodeX/releases/download/${RELEASE_TAG}/deepcode-cli.tgz"
     log_info "指定版本: ${RELEASE_TAG}"
   else
-    release_url="https://github.com/weiransoft/DeepCodeX/releases/latest/download/deepcode-cli.tgz"
+    gh_release_url="https://github.com/weiransoft/DeepCodeX/releases/latest/download/deepcode-cli.tgz"
     log_info "拉取最新 Release（或用 --tag 指定版本）"
   fi
   tgz_path="$(mktemp -t deepcode-cli-XXXXXX.tgz)"
 
-  # ---- 下载 tarball（带超时 + 重试）----
-  log_info "下载: ${release_url}"
-  local max_attempts=3 attempt=1
-  while [ "${attempt}" -le "${max_attempts}" ]; do
-    if curl -fsSL --connect-timeout 15 --max-time 180 \
-        -o "${tgz_path}" "${release_url}" 2>&1; then
+  # ---- 候选下载源：ghproxy 国内镜像前缀优先 + 直连兜底 ----
+  # GitHub Release 实际重定向到 objects.githubusercontent.com（国内 CDN 墙点），
+  # 36MB 大文件直连几乎必超时（每次仅拉到 2~6MB）。ghproxy 系列镜像在国内可全速，
+  # 用法：在原始 URL 前加代理前缀，如 https://gh-proxy.com/<原始URL>。
+  # 允许 GH_PROXY 环境变量覆盖（如自建代理或内网镜像，空格分隔多个）。
+  local proxy_list download_sources _p
+  proxy_list="${GH_PROXY:-https://gh-proxy.com/ https://ghproxy.net/ https://ghfast.top/}"
+  download_sources=""
+  for _p in ${proxy_list}; do
+    # 代理前缀确保以 / 结尾，拼接成 <prefix><原始URL>
+    case "${_p}" in
+      */) download_sources="${download_sources} ${_p}${gh_release_url}" ;;
+      *)  download_sources="${download_sources} ${_p}/${gh_release_url}" ;;
+    esac
+  done
+  # 直连地址放最后兜底（海外用户 / 已配代理时可用）
+  download_sources="${download_sources} ${gh_release_url}"
+
+  # ---- 逐个源下载：支持断点续传 + 进度条 ----
+  # -C - : 断点续传（重试时接着已下载字节继续，避免 36MB 反复从头来）
+  # --retry 2 : curl 层瞬时抖动自动重试
+  # --progress-bar : 大文件下载时给用户可视化进度
+  local dl_ok=0 src attempt max_attempts
+  for src in ${download_sources}; do
+    attempt=1
+    max_attempts=3
+    while [ "${attempt}" -le "${max_attempts}" ]; do
+      log_info "下载: ${src}（第 ${attempt}/${max_attempts} 次）"
+      if curl -fL --connect-timeout 10 --max-time 600 --retry 2 \
+          -C - --progress-bar \
+          -o "${tgz_path}" "${src}" 2>&1; then
+        dl_ok=1
+        break
+      fi
+      log_warn "下载中断/失败，重试 ${attempt}/${max_attempts}..."
+      sleep 2
+      attempt=$((attempt + 1))
+    done
+    if [ "${dl_ok}" = "1" ]; then
       break
     fi
-    if [ "${attempt}" = "${max_attempts}" ]; then
-      log_error "下载失败（${max_attempts} 次尝试）: ${release_url}"
-      log_error "检查: GitHub Release 是否已上传 deepcode-cli.tgz"
-      rm -f "${tgz_path}"
-      return 1
-    fi
-    log_warn "下载失败，${attempt}/${max_attempts}，2s 后重试..."
-    sleep 2
-    attempt=$((attempt + 1))
+    # 当前源彻底失败，清理残留换下一个源（从头下）
+    rm -f "${tgz_path}" 2>/dev/null || true
+    log_warn "该源彻底失败，切换下一个下载源..."
   done
+  if [ "${dl_ok}" != "1" ]; then
+    log_error "所有下载源均失败: ${gh_release_url}"
+    log_error "检查: GitHub Release 是否已上传 deepcode-cli.tgz"
+    log_error "或设置 GH_PROXY 指定可用代理（如自建内网镜像）"
+    rm -f "${tgz_path}" 2>/dev/null || true
+    return 1
+  fi
 
   # 校验下载文件（必须是有效的 tarball）
   if ! tar tzf "${tgz_path}" >/dev/null 2>&1; then
