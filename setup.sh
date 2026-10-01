@@ -58,6 +58,8 @@ NODE_LTS_VERSION="${NODE_LTS_VERSION:-v22.14.0}"
 NVM_INSTALL_URL="${NVM_INSTALL_URL:-https://gitee.com/mirrors/nvm/raw/v0.39.7/install.sh}"
 # npmmirror CDN 前缀（直接下载预编译二进制）
 NODE_BINARY_MIRROR="${NODE_BINARY_MIRROR:-https://cdn.npmmirror.com/binaries/node}"
+# unofficial-builds npmmirror 镜像前缀（glibc-2.17 兼容版，CentOS 7 / RHEL 7 专用）
+NODE_UNOFFICIAL_MIRROR="${NODE_UNOFFICIAL_MIRROR:-https://registry.npmmirror.com/-/binary/node-unofficial-builds}"
 # 是否自动安装 Node（空 = 自动判断：无 TTY 时开，有 TTY 时交互）
 INSTALL_NODE_FLAG="${INSTALL_NODE_FLAG:-}"
 
@@ -307,32 +309,112 @@ install_node_lts() {
     # 上面软链可能不对——直接用完整路径
     export PATH="${HOME}/.local/${pkg_name%.tar.xz}/bin:${PATH}"
 
-    # 验证
-    if command -v node >/dev/null 2>&1; then
+    # 验证：必须 node --version 真能输出才算成功（旧 GLIBC 上二进制会崩，stdout 为空）
+    if command -v node >/dev/null 2>&1 && node --version >/dev/null 2>&1; then
       log_ok "Node.js $(node --version 2>/dev/null) 已就绪（${HOME}/.local/）"
       log_info "node 路径：$(command -v node)"
     else
-      log_error "安装后仍找不到 node，PATH=${PATH}"
+      log_error "安装后 node 无法运行（GLIBC 不匹配）或找不到 node，PATH=${PATH}"
       return 1
     fi
     return 0
   }
 
-  # ---- 尝试顺序：nvm → 预编译（仅 glibc >= 2.28 才走 binary）----
-  if _try_install_via_nvm; then
-    : # nvm 成功（glibc 旧时已自动 --build-from-source）
-  elif [ "${force_build_from_source}" = "1" ]; then
-    log_error "GLIBC ${glibc_version} < 2.28 且 nvm 源码编译也失败"
-    log_error "请手动升级系统 glibc，或手动安装 Node.js 后重试"
-    log_error "  CentOS 7 临时方案: yum install centos-release-scl && yum install rh-nodejs18-nodejs"
-    log_error "  或：curl -fsSL https://rpm.nodesource.com/setup_18.x | bash - && yum install nodejs"
-  elif _try_install_via_binary; then
-    : # binary 成功
-  else
+  # ---- 路径 3：unofficial-builds glibc-2.17 专用版（CentOS 7 / RHEL 7 救星）----
+  # 官方 Node v18+ 预编译二进制要 glibc >= 2.28，CentOS 7（glibc 2.17）跑不了；
+  # nvm 源码编译又依赖可用的 node + gcc/make + 足够内存。
+  # unofficial-builds 项目专门编译了 glibc-2.17 版，解压即用，无需 root/编译。
+  # npmmirror 镜像：.../-/binary/node-unofficial-builds/<ver>/node-<ver>-linux-<arch>-glibc-217.tar.xz
+  _try_install_via_glibc217() {
+    log_info "尝试 unofficial-builds glibc-2.17 专用版（CentOS 7 / RHEL 7）..."
+
+    # unofficial-builds 的 glibc-217 版仅提供 x64；其它架构不支持
+    if [ "${arch_tag}" != "x64" ]; then
+      log_warn "unofficial-builds glibc-217 版仅支持 x64，当前架构 ${arch_tag}，跳过"
+      return 1
+    fi
+
+    # xz 解压工具检查
+    if ! command -v xz >/dev/null 2>&1 && ! command -v unxz >/dev/null 2>&1; then
+      log_warn "未找到 xz 解压工具，尝试安装 xz-utils..."
+      if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq && apt-get install -y -qq xz-utils 2>&1 || true
+      elif command -v yum >/dev/null 2>&1; then
+        yum install -y -q xz 2>&1 || true
+      fi
+      command -v xz >/dev/null 2>&1 || command -v unxz >/dev/null 2>&1 || {
+        log_error "无法安装 xz-utils，请手动：apt-get install -y xz-utils 或 yum install -y xz"
+        return 1
+      }
+    fi
+
+    # glibc-217 版本候选：优先固定兼容版（已验证存在于 npmmirror），其次用户指定版本
+    # 固定列表兜底——即便 NODE_LTS_VERSION 太新无 glibc-217 构建也能回落到已知可用版
+    local ver_candidates
+    if [ "${force_build_from_source}" = "1" ]; then
+      ver_candidates="v20.18.1 v18.20.4 ${NODE_LTS_VERSION}"
+    else
+      ver_candidates="${NODE_LTS_VERSION} v20.18.1 v18.20.4"
+    fi
+
+    local tmp_dir ver file_name url target_dir
+    tmp_dir="$(mktemp -d)"
+    for ver in ${ver_candidates}; do
+      file_name="node-${ver}-linux-${arch_tag}-glibc-217.tar.xz"
+      url="${NODE_UNOFFICIAL_MIRROR}/${ver}/${file_name}"
+      # 解压后顶层目录名 = 文件名去掉 .tar.xz（即 node-vX.Y.Z-linux-x64-glibc-217）
+      target_dir="${HOME}/.local/${file_name%.tar.xz}"
+      log_info "下载：${url}"
+      if curl -fL -C - --connect-timeout 15 --max-time 600 --retry 2 \
+          -o "${tmp_dir}/${file_name}" "${url}" 2>&1; then
+        log_info "解压到 ${target_dir} ..."
+        rm -rf "${target_dir}"
+        mkdir -p "${HOME}/.local"
+        if ! tar -xJf "${tmp_dir}/${file_name}" -C "${HOME}/.local" 2>&1; then
+          log_info "tar -xJ 不可用，手动 xz 解压..."
+          xz -dc "${tmp_dir}/${file_name}" | tar -xf - -C "${HOME}/.local" 2>&1 || {
+            log_warn "解压失败，尝试下一个版本"; continue
+          }
+        fi
+        # 软链到固定路径方便 PATH 与持久化指向
+        rm -rf "${HOME}/.local/node-current"
+        ln -s "${target_dir}" "${HOME}/.local/node-current" 2>/dev/null || true
+        export PATH="${target_dir}/bin:${PATH}"
+        hash -r 2>/dev/null || true
+        # 关键验证：node --version 必须真能输出（glibc-217 版在 CentOS 7 上应可通过）
+        if node --version >/dev/null 2>&1; then
+          log_ok "Node.js $(node --version 2>/dev/null)（glibc-2.17 兼容版）就绪"
+          log_info "node 路径：$(command -v node)"
+          rm -rf "${tmp_dir}"
+          return 0
+        fi
+        log_warn "${ver} 的 glibc-217 版运行失败，尝试下一个版本..."
+      else
+        log_warn "下载失败：${url}，尝试下一个版本..."
+      fi
+    done
+    rm -rf "${tmp_dir}" 2>/dev/null || true
+    return 1
+  }
+
+  # ---- 尝试顺序：nvm → 预编译（仅 glibc >= 2.28 才走 binary）→ glibc-217 专用版 ----
+  # glibc-217 专用版在 nvm 失败时触发，并作为 glibc < 2.28 且二进制路径被跳过时的兜底
+  local node_installed=0
+  if _try_install_via_nvm && node --version >/dev/null 2>&1; then
+    node_installed=1
+  elif _try_install_via_glibc217; then
+    node_installed=1
+  elif [ "${force_build_from_source}" = "0" ] && _try_install_via_binary; then
+    # 仅 glibc >= 2.28 才尝试官方预编译二进制（走 npmmirror CDN）
+    node_installed=1
+  fi
+
+  if [ "${node_installed}" != "1" ]; then
     log_error "Node.js 自动安装失败"
     log_error "请手动安装后重跑 setup.sh："
-    log_error "  macOS:   brew install node"
-    log_error "  Linux:   curl -fsSL ${NODE_BINARY_MIRROR}/${NODE_LTS_VERSION}/node-${NODE_LTS_VERSION}-linux-${arch_tag}.tar.xz | tar -xJ -C /usr/local --strip-components=1"
+    log_error "  macOS:     brew install node"
+    log_error "  Linux:     curl -fsSL ${NODE_BINARY_MIRROR}/${NODE_LTS_VERSION}/node-${NODE_LTS_VERSION}-linux-${arch_tag}.tar.xz | tar -xJ -C /usr/local --strip-components=1"
+    log_error "  CentOS 7:  curl -fL ${NODE_UNOFFICIAL_MIRROR}/v20.18.1/node-v20.18.1-linux-${arch_tag}-glibc-217.tar.xz | tar -xJ -C \$HOME/.local && export PATH=\$HOME/.local/node-v20.18.1-linux-${arch_tag}-glibc-217/bin:\$PATH"
     return 1
   fi
 
@@ -456,11 +538,18 @@ preflight() {
   if [ "${need_install_node}" = "1" ]; then
     if _should_install_node; then
       install_node_lts || return 1
+      hash -r 2>/dev/null || true  # 刷新 shell 命令缓存，确保用刚装好的 node
       # 装完再验一遍
       if ! command -v node >/dev/null 2>&1; then
         log_error "Node.js 安装后仍找不到 node 命令（PATH=${PATH}）"; return 1
       fi
-      node_major="$(node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)"
+      # 复检版本：node --version 取不到版本（GLIBC 崩溃等）视同安装失败，避免空值比较报错
+      local node_ver_after
+      node_ver_after="$(node --version 2>/dev/null || true)"
+      node_major="$(printf '%s' "${node_ver_after}" | sed 's/^v//' | cut -d. -f1)"
+      if [ -z "${node_major}" ]; then
+        log_error "Node.js 安装后仍无法运行（GLIBC 不匹配？）"; return 1
+      fi
       [ "${node_major}" -lt "${NODE_MIN_MAJOR}" ] && {
         log_error "Node.js 安装版本仍不满足 >= ${NODE_MIN_MAJOR}"; return 1
       }
