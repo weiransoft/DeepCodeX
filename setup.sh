@@ -565,6 +565,25 @@ install_via_npm() {
   fi
   log_ok "下载完成（$(du -h "${tgz_path}" | cut -f1)）"
 
+  # ---- 非 root 权限自适应：无写权限时自动切用户级 prefix ----
+  # 普通用户 npm install -g 会因无法写系统全局目录（/usr/lib、/usr/local/lib）报
+  # EACCES；而 sudo npm 又常因 sudo 不继承 nvm 的 PATH 而「npm：找不到命令」。
+  # 解法：非 root 且当前 prefix 不可写时，把 prefix 切到家目录 ~/.npm-global，
+  # 全程无需 root，也不依赖 sudo。
+  if [ "$(id -u)" != "0" ]; then
+    local cur_prefix
+    cur_prefix="$(npm config get prefix 2>/dev/null || echo "")"
+    # 判断当前 prefix 是否可写（不可写则触发用户级兜底）
+    if [ -n "${cur_prefix}" ] && [ ! -w "${cur_prefix}" ]; then
+      local user_prefix="${HOME}/.npm-global"
+      log_warn "非 root 且 npm 全局目录不可写（${cur_prefix}）"
+      log_warn "自动切换用户级 prefix：${user_prefix}"
+      mkdir -p "${user_prefix}"
+      npm config set prefix "${user_prefix}"
+      export PATH="${user_prefix}/bin:${PATH}"
+    fi
+  fi
+
   # ---- --force: 先卸载旧版本 ----
   if [ "${FORCE_REINSTALL}" = "1" ]; then
     log_info "--force: 先卸载旧版本..."
@@ -574,6 +593,10 @@ install_via_npm() {
   # ---- 从本地 tarball 安装 ----
   if ! npm install -g "${tgz_path}" 2>&1; then
     log_error "npm install -g ${tgz_path} failed"
+    log_error "若为权限问题（EACCES），手动重装："
+    log_error "  mkdir -p ~/.npm-global && npm config set prefix ~/.npm-global"
+    log_error "  npm install -g ${tgz_path}"
+    log_error "  export PATH=~/.npm-global/bin:\$PATH"
     rm -f "${tgz_path}"
     return 1
   fi
