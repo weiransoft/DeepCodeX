@@ -397,16 +397,23 @@ install_node_lts() {
     return 1
   }
 
-  # ---- 尝试顺序：nvm → 预编译（仅 glibc >= 2.28 才走 binary）→ glibc-217 专用版 ----
-  # glibc-217 专用版在 nvm 失败时触发，并作为 glibc < 2.28 且二进制路径被跳过时的兜底
+  # ---- 尝试顺序（按 GLIBC 分流）----
+  # glibc < 2.28（CentOS7/RHEL7）：glibc-217 专用版秒装优先 → nvm 源码编译兜底
+  #   （跳过 nvm 优先是因为源码编译要 5~10 分钟且依赖 gcc/make/内存，glibc217 版解压即用）
+  # glibc >= 2.28：nvm → 官方预编译二进制
   local node_installed=0
-  if _try_install_via_nvm && node --version >/dev/null 2>&1; then
-    node_installed=1
-  elif _try_install_via_glibc217; then
-    node_installed=1
-  elif [ "${force_build_from_source}" = "0" ] && _try_install_via_binary; then
-    # 仅 glibc >= 2.28 才尝试官方预编译二进制（走 npmmirror CDN）
-    node_installed=1
+  if [ "${force_build_from_source}" = "1" ]; then
+    if _try_install_via_glibc217; then
+      node_installed=1
+    elif _try_install_via_nvm && node --version >/dev/null 2>&1; then
+      node_installed=1
+    fi
+  else
+    if _try_install_via_nvm && node --version >/dev/null 2>&1; then
+      node_installed=1
+    elif _try_install_via_binary; then
+      node_installed=1
+    fi
   fi
 
   if [ "${node_installed}" != "1" ]; then
