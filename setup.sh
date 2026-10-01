@@ -437,12 +437,19 @@ preflight() {
     log_warn "未检测到 Node.js（需要 >= ${NODE_MIN_MAJOR}）"
     need_install_node=1
   else
-    node_major="$(node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)"
-    if [ "${node_major}" -lt "${NODE_MIN_MAJOR}" ]; then
-      log_warn "Node.js 版本过低：$(node --version 2>/dev/null)（需要 >= ${NODE_MIN_MAJOR}）"
+    # 注意：node 可能存在于 PATH 但因 GLIBC 不匹配运行即崩（stderr 报错、stdout 空）。
+    # 因此必须验证 node --version 真能输出版本号，取不到版本视同缺失，触发自动重装。
+    local node_ver_out
+    node_ver_out="$(node --version 2>/dev/null || true)"
+    node_major="$(printf '%s' "${node_ver_out}" | sed 's/^v//' | cut -d. -f1)"
+    if [ -z "${node_major}" ]; then
+      log_warn "node 命令存在但无法运行（可能 GLIBC 不匹配，跨机拷贝常见），将自动重装"
+      need_install_node=1
+    elif [ "${node_major}" -lt "${NODE_MIN_MAJOR}" ]; then
+      log_warn "Node.js 版本过低：${node_ver_out}（需要 >= ${NODE_MIN_MAJOR}）"
       need_install_node=1
     else
-      log_ok "Node.js: $(node --version 2>/dev/null)"
+      log_ok "Node.js: ${node_ver_out}"
     fi
   fi
 
