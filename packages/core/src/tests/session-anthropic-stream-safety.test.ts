@@ -13,6 +13,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SessionManager } from "../session";
+import { LlmStreamIdleTimeoutError } from "../common/llm-retry";
 import type { LLMClient, LLMStreamEvent } from "../providers/llm-provider";
 
 /**
@@ -186,4 +187,40 @@ test("TC-3: 正常 Anthropic 流应完整聚合返回", async () => {
   ).createLlmMessageStream(client, { messages: [], thinkingEnabled: false }, { maxReasoningLength: 100_000 });
 
   assert.equal(result.choices?.[0]?.message?.content, "Hello world");
+});
+
+// ============================================================================
+// TC-4：streamTimeoutMs 触发时应抛 LlmStreamIdleTimeoutError（可重试错误类型）
+// 期望：OpenAI 通路空闲超时抛 LlmStreamIdleTimeoutError 并被外层重试循环
+//       （isRetryableLlmError）自动重试；Anthropic 通路 streamTimeoutMs 触发时
+//       走 AbortController 静默 abort，抛的是裸 AbortError——
+//       isRetryableLlmError 判定为不可重试 → 上游 Bad Gateway 场景下"思考中…"
+//       长时间无响应也无法自动恢复。本用例锁定语义：
+//       超时必须抛 LlmStreamIdleTimeoutError（保持两通路重试语义对等）。
+// ============================================================================
+test("TC-4: streamTimeoutMs 超时应抛 LlmStreamIdleTimeoutError（与 OpenAI 通路重试语义对等）", async () => {
+  const client = createStubLlmClient(() => {
+    const events: LLMStreamEvent[] = [];
+    for (let i = 0; i < 1_000_000; i++) {
+      events.push({ type: "text_delta", text: `chunk-${i} ` });
+    }
+    return events;
+  }, 10);
+
+  const manager = createSessionManagerWithLlmClient(client);
+
+  const err = await rejectsWithin(
+    (manager as unknown as { createLlmMessageStream: typeof manager.createLlmMessageStream }).createLlmMessageStream(
+      client,
+      { messages: [], thinkingEnabled: false },
+      { streamTimeoutMs: 50, maxReasoningLength: 100_000 }
+    ),
+    500
+  );
+
+  assert.ok(err instanceof Error, "应抛出 Error");
+  assert.ok(
+    err instanceof LlmStreamIdleTimeoutError,
+    `超时应抛 LlmStreamIdleTimeoutError 以复用可重试判定，实际 ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`
+  );
 });

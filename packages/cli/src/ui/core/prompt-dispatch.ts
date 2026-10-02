@@ -70,6 +70,12 @@ export function isImmediateControlCommand(submission: { command?: string; text?:
   if (!cmd) {
     return false;
   }
+  // 防御性归一化：调用方传入 "help "（尾随空格）或 "/help"（带斜杠）形态时，
+  // Set 严格匹配会漏判 → 控制命令被误入队 → 卡死期间 ESC 之外一切失效。
+  const normalized = cmd.trim().replace(/^\//, "");
+  if (IMMEDIATE_CONTROL_COMMANDS.has(normalized)) {
+    return true;
+  }
   return IMMEDIATE_CONTROL_COMMANDS.has(cmd);
 }
 
@@ -248,7 +254,9 @@ export class PendingPromptQueue {
    * @returns 匹配的排队条目；无匹配（含队列空）返回 null
    */
   dequeue(sessionId: string): QueuedPromptEntry | null {
-    // 从队头扫描：非匹配条目即陈旧（用户已切换会话），边扫描边丢弃
+    // 从队头扫描：非匹配条目即陈旧（用户已切换会话），边扫描边丢弃。
+    // 实现要点：命中陈旧条目时 splice 删除且**不前进 i**（后续元素前移到当前
+    // 位置需原地复查）；命中匹配条目时 splice 后立即 return，i 无需可变状态。
     const i = 0;
     while (i < this.entries.length) {
       const entry = this.entries[i];

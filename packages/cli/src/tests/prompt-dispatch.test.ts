@@ -35,6 +35,15 @@ test("isImmediateControlCommand rejects continue, LLM commands and plain text", 
   assert.equal(isImmediateControlCommand({ command: undefined }), false);
 });
 
+test("isImmediateControlCommand tolerates slash prefix and whitespace (卡死防御 2026-10-03)", () => {
+  // 带斜杠 / 尾随空格形态同样命中白名单：控制命令误入队是"卡死期间一切失效"的入口之一
+  assert.equal(isImmediateControlCommand({ command: "/exit" }), true);
+  assert.equal(isImmediateControlCommand({ command: "cancel " }), true);
+  assert.equal(isImmediateControlCommand({ command: " /tasks" }), true);
+  // 非白名单命令带斜杠也不误伤
+  assert.equal(isImmediateControlCommand({ command: "/review" }), false);
+});
+
 // ============================================================================
 // G5：紧急干预判定三级匹配（收紧误伤面）
 // ============================================================================

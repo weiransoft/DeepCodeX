@@ -4,6 +4,15 @@ export const MAX_LLM_RETRIES = 5;
 export const LLM_STREAM_IDLE_TIMEOUT_MS = 60_000;
 
 const BASE_RETRY_DELAY_MS = 800;
+/**
+ * LLM 重试退避硬上限（120 秒）。
+ *
+ * 上游（网关/代理）的 retry-after 头在过载时可能给出数百秒甚至更长的值，
+ * 直接照单全收会让 CLI 挂在"思考中..."数分钟且无任何反馈，与"卡死"不可区分。
+ * 超过本上限时截断为上限值——重试次数（MAX_LLM_RETRIES=5）与指数退避本身
+ * 已覆盖常规瞬态，硬上限只兜异常头的底。
+ */
+export const MAX_LLM_RETRY_DELAY_MS = 120_000;
 const RETRYABLE_NETWORK_CODES = new Set([
   "ECONNRESET",
   "ECONNREFUSED",
@@ -41,7 +50,8 @@ export function getLlmRetryAfterMs(error: unknown, now: number = Date.now()): nu
   const headers = getErrorHeaders(error);
   const retryAfterMs = parseDelay(getHeader(headers, "retry-after-ms"));
   if (retryAfterMs !== undefined) {
-    return retryAfterMs;
+    // 硬上限截断：超大 retry-after 钳到 120s，避免 UI 挂在"思考中..."数分钟无反馈
+    return Math.min(retryAfterMs, MAX_LLM_RETRY_DELAY_MS);
   }
 
   const retryAfter = getHeader(headers, "retry-after");
@@ -50,10 +60,10 @@ export function getLlmRetryAfterMs(error: unknown, now: number = Date.now()): nu
   }
   const seconds = Number.parseFloat(retryAfter);
   if (Number.isFinite(seconds)) {
-    return Math.max(0, Math.round(seconds * 1000));
+    return Math.min(Math.max(0, Math.round(seconds * 1000)), MAX_LLM_RETRY_DELAY_MS);
   }
   const date = Date.parse(retryAfter);
-  return Number.isFinite(date) ? Math.max(0, date - now) : undefined;
+  return Number.isFinite(date) ? Math.min(Math.max(0, date - now), MAX_LLM_RETRY_DELAY_MS) : undefined;
 }
 
 export function isRetryableLlmError(error: unknown): boolean {
@@ -101,7 +111,10 @@ export function waitForLlmRetry(delayMs: number, signal?: AbortSignal): Promise<
     return Promise.reject(abortError(signal));
   }
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(finish, delayMs);
+    // 32 位有符号整数上限：setTimeout 延时超过该值会立即触发（Node 规范行为），
+    // 上游 retry-after 异常大（分钟级/垃圾头）时必须钳制，否则退避等待会瞬时穿透
+    const MAX_SAFE_TIMEOUT_MS = 2_147_483_647;
+    const timer = setTimeout(finish, Math.min(Math.max(0, delayMs), MAX_SAFE_TIMEOUT_MS));
     signal?.addEventListener("abort", cancel, { once: true });
 
     function finish(): void {
