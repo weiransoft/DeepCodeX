@@ -206,6 +206,49 @@ test("E3. 项目内 .env 凭据文件：凭据模式命中 deny，文件绝不�
   }
 });
 
+test("E3b. 模板豁免：read .env.example / .env.prod.example 应 approve（安装引导依赖）", async () => {
+  const projectRoot = createGitProject();
+  // 真实预置两个公开模板文件（无真实凭据，仅占位 KEY=）
+  const tpl1 = path.join(projectRoot, ".env.example");
+  const tpl2 = path.join(projectRoot, ".env.prod.example");
+  try {
+    fs.writeFileSync(tpl1, "DATABASE_URL=postgres://user:pass@localhost:5432/db\n");
+    fs.writeFileSync(tpl2, "VLLM_BASE_URL=http://localhost:8000/v1\n");
+
+    const client = new StubLlmClient([
+      {
+        content: "",
+        toolCalls: [
+          { name: "read", args: { file_path: tpl1 } },
+          { name: "read", args: { file_path: tpl2 } },
+        ],
+      },
+      { content: "已读取两份环境模板，可据此生成 .env.prod。" },
+    ]);
+    const executor = new LlmTaskExecutor({ projectRoot, createLlmClient: () => client });
+
+    const result = await executor.executeTask(buildExecutionInput(projectRoot));
+
+    // read 是只读工具：deny 不报错但结果文本含拒绝语义；approve 时模型拿到文件内容。
+    // 通过 StubLlmClient 真实收到的消息回灌验证读取成功（无 deny 文本）。
+    const toolMessages = client
+      .getRequests()
+      .slice(1)
+      .flatMap((req: any) => req.messages ?? [])
+      .filter((m: any) => m.role === "tool");
+    assert.ok(toolMessages.length >= 2, "两次 read 都应有 tool 结果回灌");
+    for (const msg of toolMessages) {
+      assert.ok(
+        !/拒绝|deny|不允许|凭据/.test(String(msg.content)),
+        `模板文件 read 不应被凭据模式拒绝，实际回灌：${String(msg.content).slice(0, 120)}`
+      );
+    }
+    assert.equal(result.success, true);
+  } finally {
+    cleanup(projectRoot);
+  }
+});
+
 test("E4. 白名单外工具（bash）：deny 且命令绝不执行（副作用 marker 不存在）", async () => {
   const projectRoot = createGitProject();
   // 若 bash 被真实执行，会在项目内留下 marker 文件（用 node 而非 touch 以跨平台）
