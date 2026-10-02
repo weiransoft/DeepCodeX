@@ -93,6 +93,34 @@ const CREDENTIAL_FILE_PATTERNS: ReadonlyArray<RegExp> = Object.freeze([
   /\.git-credentials$/i,
 ]);
 
+/**
+ * 凭据模板文件豁免模式（纵深防御前的精确性修正）。
+ *
+ * .env.example / .env.prod.example / config.example.json / *.template 等
+ * 纯模板文件按惯例不含真实凭据（真实值一律不提交入库），且安装引导
+ * （cp .env.example .env.prod）依赖任务读取它们。仅当 basename 以
+ * example/template/sample（可带 .env. 点段前缀）结尾时豁免；
+ * .env / .env.prod 等无后缀真实文件不受影响，继续拦截。
+ */
+const CREDENTIAL_EXEMPT_PATTERN = /\.(?:example|template|sample)$/i;
+
+/**
+ * 判断目标文件是否命中凭据保护（含模板豁免）。
+ *
+ * 注意：lastIndex 复位是调用方责任（CREDENTIAL_FILE_PATTERNS 含 /g 不带、
+ * 但 /i 无状态；本函数内统一不复位，与调用点行为保持一致）。
+ *
+ * @param relativePath 相对项目根的路径
+ * @returns true 表示应拒绝访问
+ */
+function isCredentialProtected(relativePath: string): boolean {
+  // 模板豁免优先：example/template/sample 后缀不视为凭据
+  if (CREDENTIAL_EXEMPT_PATTERN.test(relativePath)) {
+    return false;
+  }
+  return CREDENTIAL_FILE_PATTERNS.some((re) => re.test(relativePath));
+}
+
 /** 单任务工具循环默认最大轮数（每轮一次真实 LLM 请求 + 一批工具调用） */
 const DEFAULT_MAX_TOOL_ROUNDS = 12;
 
@@ -363,8 +391,8 @@ export class LlmTaskExecutor implements P5TaskExecutor {
       return "deny";
     }
 
-    // 第四层：凭据模式（对项目根内的 .env/密钥等同名文件同样拒绝，纵深防御）
-    if (CREDENTIAL_FILE_PATTERNS.some((re) => re.test(relativePath))) {
+    // 第四层：凭据模式（对项目根内的 .env/密钥等同名文件同样拒绝，纵深防御；豁免模板文件）
+    if (isCredentialProtected(relativePath)) {
       this.log(`凭据文件访问被拒绝：${relativePath}`, "warn");
       return "deny";
     }

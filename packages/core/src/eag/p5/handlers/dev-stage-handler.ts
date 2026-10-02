@@ -78,6 +78,28 @@ const CREDENTIAL_FILE_PATTERNS: ReadonlyArray<RegExp> = Object.freeze([
 const CREDENTIAL_PATTERN_COUNT = CREDENTIAL_FILE_PATTERNS.length;
 
 /**
+ * 凭据模板文件豁免模式（与 llm-task-executor 同构，两处需同步维护）：
+ * .env.example / .env.prod.example / *.template / *.sample 等纯模板文件
+ * 按惯例不含真实凭据，且安装引导（cp .env.example .env.prod）依赖读取；
+ * .env / .env.prod 等无后缀真实文件不受影响，继续拦截。
+ */
+const CREDENTIAL_EXEMPT_PATTERN = /\.(?:example|template|sample)$/i;
+
+/**
+ * 判断目标文件是否命中凭据保护（含模板豁免）。
+ *
+ * @param relativePath 相对项目根的路径
+ * @returns true 表示应视为凭据文件（拒绝读取/盘点）
+ */
+function isCredentialProtected(relativePath: string): boolean {
+  // 模板豁免优先：example/template/sample 后缀不视为凭据
+  if (CREDENTIAL_EXEMPT_PATTERN.test(relativePath)) {
+    return false;
+  }
+  return CREDENTIAL_FILE_PATTERNS.some((re) => re.test(relativePath));
+}
+
+/**
  * dev 阶段结果原因码（方案 A §3.4）。
  */
 /** 任务执行器未绑定：禁止"只盘点即成功"空转，fail-closed 判 failed */
@@ -419,8 +441,8 @@ export class P5DevStageHandler implements P5StageHandler {
       const normalizedRoot = path.resolve(projectRoot);
       const withinProjectRoot = isWithinPath(absolutePath, normalizedRoot);
 
-      // 凭据白名单：检查文件名是否命中黑名单模式
-      const isCredential = CREDENTIAL_FILE_PATTERNS.some((re) => re.test(relativePath));
+      // 凭据白名单：检查文件名是否命中黑名单模式（豁免 example/template/sample 模板）
+      const isCredential = isCredentialProtected(relativePath);
 
       // 文件状态盘点
       let exists = false;

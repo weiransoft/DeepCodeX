@@ -787,6 +787,31 @@ test("E6. TC-GUARD-A5a-005：凭据文件读取白名单通过（空列表）", 
   assert.equal(verdict.decision, "PASS");
 });
 
+test("E6b. TC-GUARD-A5a-006：模板文件豁免（.env.example / *.template / *.sample 读取放行）", () => {
+  const guard = new CredentialMisuseGuard();
+  const ctx = createContext({
+    // 模板文件按惯例不含真实凭据，安装引导依赖读取，应全部 PASS
+    pendingReadFiles: [
+      ".env.example",
+      ".env.prod.example",
+      "backend/.env.example",
+      "config.app.template",
+      "settings.sample",
+    ],
+  });
+  const verdict = guard.check(ctx);
+  assert.equal(verdict.decision, "PASS", `模板文件应豁免凭据拦截，实际：${verdict.reason ?? ""}`);
+});
+
+test("E6c. TC-GUARD-A5a-007：真实凭据文件不受模板豁免影响（.env.prod 仍拒绝）", () => {
+  const guard = new CredentialMisuseGuard();
+  const ctx = createContext({
+    pendingReadFiles: [".env.prod"],
+  });
+  const verdict = guard.check(ctx);
+  assert.equal(verdict.decision, "DENY", "无豁免后缀的真实 .env.prod 应继续拒绝");
+});
+
 test("E7. TC-GUARD-A5b-001：gitleaks 检出即阻断（AWS Access Key）", async () => {
   const guard = new CredentialMisuseGuard();
   // 创建临时文件含 AWS Access Key
