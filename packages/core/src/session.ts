@@ -2460,6 +2460,10 @@ export class SessionManager {
     // 通过 AbortController 管理，确保需要主动中断（如 reasoning 超长）时可调用 abort()。
     const safetyController = new AbortController();
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    // 流总超时标记（修复"思考中卡死"2026-10-03）：超时 abort 与用户 ESC abort 必须可区分。
+    // 旧行为：超时只 abort()，流循环抛裸 AbortError → isAbortLikeError 判为用户中断，
+    // 既不触发外层重试也不显示错误行，上游 Bad Gateway 无响应时 UI 永远停在"思考中..."。
+    let streamTimedOut = false;
     const propagateAbort = () => {
       safetyController.abort();
     };
@@ -2471,7 +2475,10 @@ export class SessionManager {
       }
     }
     if (streamTimeoutMs && streamTimeoutMs > 0) {
-      timeoutHandle = setTimeout(() => safetyController.abort(), streamTimeoutMs);
+      timeoutHandle = setTimeout(() => {
+        streamTimedOut = true;
+        safetyController.abort();
+      }, streamTimeoutMs);
     }
 
     // debug/error 日志共用的请求快照：不含 signal（对齐 OpenAI 侧 request 不含 signal 的现状）
@@ -2603,6 +2610,12 @@ export class SessionManager {
       if (error instanceof InjectInterruptError) {
         throw error;
       }
+      // 流总超时归一化（修复"思考中卡死"2026-10-03，对齐 OpenAI 通路 L2302 的
+      // `idleTimedOut ? new LlmStreamIdleTimeoutError() : error` 语义）：
+      // streamTimeoutMs 触发的 abort 会让流循环抛裸 AbortError，若不归一化，
+      // 下游 isAbortLikeError 会把"上游无响应"误判为"用户中断"——既不重试
+      // 也无错误提示，UI 永远停在"思考中..."。归一化后走可重试判定自动重连。
+      const streamError = streamTimedOut ? new LlmStreamIdleTimeoutError() : error;
       this.logChatCompletionDebug(debug, {
         timestamp: new Date().toISOString(),
         location: debug?.location ?? "SessionManager.createLlmMessageStream",
@@ -2614,7 +2627,7 @@ export class SessionManager {
         params: debug?.params,
         request: logRequest,
         responseChunks,
-        error: normalizeDebugError(error),
+        error: normalizeDebugError(streamError),
       });
       // 牢笼改造（C8）：错误日志透传 homeRoot（同上）
       logApiError(
@@ -2625,15 +2638,15 @@ export class SessionManager {
           sessionId,
           model: llmClient.model,
           error: {
-            name: error instanceof Error ? error.name : "UnknownError",
-            message: error instanceof Error ? error.message : String(error),
-            stack: error instanceof Error ? error.stack : undefined,
+            name: streamError instanceof Error ? streamError.name : "UnknownError",
+            message: streamError instanceof Error ? streamError.message : String(streamError),
+            stack: streamError instanceof Error ? streamError.stack : undefined,
           },
           request: logRequest,
         },
         this.homeRoot
       );
-      throw error;
+      throw streamError;
     } finally {
       if (timeoutHandle) {
         clearTimeout(timeoutHandle);
