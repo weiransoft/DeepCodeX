@@ -224,6 +224,33 @@ const CREDENTIAL_FILE_PATTERNS: ReadonlyArray<
 ]);
 
 /**
+ * 凭据模板文件豁免模式（与 dev-stage-handler / llm-task-executor 同构，三处需同步维护）：
+ * .env.example / .env.prod.example / *.template / *.sample 等纯模板文件
+ * 按惯例不含真实凭据，且安装引导（cp .env.example .env.prod）依赖读取；
+ * .env / .env.prod 等无后缀真实文件不受影响，继续拦截。
+ */
+const CREDENTIAL_EXEMPT_PATTERN = /\.(?:example|template|sample)$/i;
+
+/**
+ * 判断归一化路径是否命中凭据保护（含模板豁免）。
+ *
+ * G-A5a 白名单校验与测试断言共用本函数，保证"豁免规则"只有一处定义。
+ *
+ * @param normalizedPath POSIX 分隔符归一化后的文件路径
+ * @returns 命中凭据保护时返回对应 pattern 条目，豁免或未命中时返回 undefined
+ */
+function matchCredentialPattern(normalizedPath: string): { pattern: RegExp; description: string } | undefined {
+  // 模板豁免优先：example/template/sample 后缀不视为凭据
+  if (CREDENTIAL_EXEMPT_PATTERN.test(normalizedPath)) {
+    return undefined;
+  }
+  return CREDENTIAL_FILE_PATTERNS.find(({ pattern }) => {
+    pattern.lastIndex = 0;
+    return pattern.test(normalizedPath);
+  });
+}
+
+/**
  * gitleaks 规则集（G-A5b commit 前密钥扫描）
  *
  * 对齐需求文档 §3 FR-2 G-A5b + gitleaks 默认规则集：
@@ -911,16 +938,15 @@ export class CredentialMisuseGuard implements GuardRule {
       // 归一化路径（POSIX 分隔符）
       const normalizedPath = filePath.replace(/\\/g, "/");
 
-      for (const { pattern, description } of CREDENTIAL_FILE_PATTERNS) {
-        pattern.lastIndex = 0;
-        if (pattern.test(normalizedPath)) {
-          return createDenyVerdict(
-            "G-A5a",
-            "BLOCKER",
-            `凭据文件读取白名单违规：禁止读取 ${description}（路径：${filePath}）`,
-            "中止迭代，禁止 agent 读取凭据文件，建议使用环境变量或密钥管理服务"
-          );
-        }
+      // 凭据模式匹配（含模板豁免：example/template/sample 后缀不拦截）
+      const credentialHit = matchCredentialPattern(normalizedPath);
+      if (credentialHit) {
+        return createDenyVerdict(
+          "G-A5a",
+          "BLOCKER",
+          `凭据文件读取白名单违规：禁止读取 ${credentialHit.description}（路径：${filePath}）`,
+          "中止迭代，禁止 agent 读取凭据文件，建议使用环境变量或密钥管理服务"
+        );
       }
     }
 
