@@ -8,6 +8,19 @@
 
 （本版本暂无变更。）
 
+## [0.4.3] - 2026-10-02
+
+### 新增
+
+- **安装脚本**：setup.sh 一键安装入口（`curl -fsSL …/setup.sh | bash`）——Release tarball（npm 模式）/ 源码构建（source 模式）双路径、`--force` 覆盖重装、`--tag` 版本锁定、非 root 自动切用户级 npm prefix（4cfa251d、372ddb5b）
+- **安装脚本 — 老系统支持**：GLIBC 自动检测，CentOS 7 / RHEL 7（glibc < 2.28）自动下载 glibc-2.17 专用 Node 解压即用，nvm 源码编译降为兜底；非 ASCII 终端全链路国内镜像（npmmirror / ghproxy 多源择优 + 断点续传）（ec68568e、65c6d89a、974d3f81、c0cd9a11、088fe276）
+
+### 修复
+
+- **模型能力 — 长路径模型名**：注册中心长路径模型名（如 `ms/kpanda-global-cluster/public/qwen38-27b-awq`）剥离路径前缀后再匹配，修复 Qwen3 系识别 MISS 导致中间 system 消息未展平、上游 vLLM 400（`System message must be at the beginning`）（66641791、5a43ce0a）
+- **CLI — 对话正文纯净**：compact 观测行（`[compact] compact_skip …`）与执行历史沉淀行（`[exec-history] 二期沉淀 …`）不再打印 stdout，统一改走结构化日志（compact.log / sediment.log JSONL）（ff695c8d、2f32673b）
+- **P5 — 凭据守卫模板豁免**：`.env.example` / `.env.prod.example` / `*.template` / `*.sample` 不再误拦（安装引导 `cp .env.example .env` 依赖读取）；`.env` / `.env.prod` 等真实凭据文件继续拦截（636d4505）
+
 ## [0.4.2] - 2026-09-30
 
 ### 新增
