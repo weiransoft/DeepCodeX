@@ -7529,25 +7529,19 @@ ${agentInstructions}
   /**
    * T8：compact 链路进度日志统一出口
    *
-   * 双通道输出（判定逻辑零介入，纯观测）：
-   * 1. logCompactEvent → `<homeRoot>/.deepcodex/logs/compact.log`（结构化 JSONL，
-   *    内部 try/catch 静默，日志失败不影响 compact 主流程）；
-   * 2. console.debug `[compact]` 前缀人类可读行 —— console.debug 在生产终端
-   *    默认不显示（stdout 原样输出但 TUI 不消费），零噪声；排查时用
-   *    `node --inspect`／重定向即可看到。
+   * 单通道输出（判定逻辑零介入，纯观测）：
+   * logCompactEvent → `<homeRoot>/.deepcodex/logs/compact.log`（结构化 JSONL，
+   * 内部 try/catch 静默，日志失败不影响 compact 主流程）。
+   *
+   * 历史上还有一路 console.debug `[compact]` 人类可读行，但 console.debug 在
+   * Node.js 中原样写入 stdout，CLI 对话模式下会污染正文（compact_skip 等观测
+   * 行混入回复），已移除；排查时直接看 compact.log（结构化 JSONL 字段更全）。
    *
    * @param sessionId 会话 ID
    * @param event compact 事件（type 及其余观测字段）
    */
   private logCompactProgress(sessionId: string, event: Omit<Parameters<typeof logCompactEvent>[1], "sessionId">): void {
-    const fullEvent = { ...event, sessionId };
-    logCompactEvent(this.homeRoot, fullEvent);
-    // 人类可读行：事件类型 + 关键字段（仅输出非空字段，保持单行简洁）
-    const details = Object.entries(fullEvent)
-      .filter(([key, value]) => key !== "type" && key !== "sessionId" && value !== undefined)
-      .map(([key, value]) => `${key}=${value}`)
-      .join(" ");
-    console.debug(`[compact] ${fullEvent.type} session=${sessionId}${details ? ` ${details}` : ""}`);
+    logCompactEvent(this.homeRoot, { ...event, sessionId });
   }
 
   /**
