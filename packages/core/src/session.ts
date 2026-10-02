@@ -1581,10 +1581,16 @@ export class SessionManager {
         const memoryStore = new MemoryStore(this.projectRoot, this.homeRoot);
         const sync = new ExecutionHistoryMemorySync(this.executionHistoryStore, memoryStore);
         const { successCount, failureFixCount, linkedCount } = sync.syncSession(sessionId);
+        // 观测留痕走结构化日志（sediment.log JSONL）而非 console.log：
+        // console.log 原样写 stdout，CLI 对话模式下会污染回复正文
         if (successCount > 0 || failureFixCount > 0) {
-          console.log(
-            `[exec-history] 二期沉淀: session ${sessionId} → MemoryStore +${successCount} 成功命令, +${failureFixCount} 失败+修复对`
-          );
+          logSedimentEvent(this.homeRoot, {
+            type: "sync",
+            sessionId,
+            successCount,
+            failureFixCount,
+            linkedRecords: linkedCount,
+          });
         }
         return { successCount, failureFixCount, linkedCount };
       }
