@@ -17,7 +17,7 @@ import { reportNewPrompt } from "../common/telemetry";
 const routes = [
   [undefined, "https://deepcode.vegamo.cn", "https://deepcode.vegamo.cn"],
   [`sk-${"a".repeat(24)}`, "https://deepcode.vegamo.cn", "https://deepcode.vegamo.cn"],
-  [`sk-${"b".repeat(26)}`, "https://www.deepcodeplus.com", "https://api.deepcodeplus.com"],
+  [`sk-${"b".repeat(26)}`, "https://www.deepcodeplus.com", "https://chat.deepcodeplus.com"],
 ] as const;
 
 for (const [key, host, llmHost] of routes) {

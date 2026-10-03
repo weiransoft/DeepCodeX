@@ -6,7 +6,7 @@ import type { CreateOpenAIClient, OpenAIClientResult } from "./tool-types";
 
 export const DEEPCODE_PLUS_LEGACY_HOST = "https://deepcode.vegamo.cn";
 export const DEEPCODE_PLUS_HOST = "https://www.deepcodeplus.com";
-export const DEEPCODE_PLUS_LLM_HOST = "https://api.deepcodeplus.com";
+export const DEEPCODE_PLUS_LLM_HOST = "https://chat.deepcodeplus.com";
 
 /** Undefined means unconfigured; all explicitly configured values must be valid. */
 export function normalizePlusApiKey(

@@ -271,7 +271,7 @@ PLUS 独立配置文件为 `~/.deepcode-plus/settings.json`：
 }
 ```
 
-PLUS 接口根据去除首尾空白后的 `env.PLUS_API_KEY` 选择域名：`sk-` 后接 24 位字符串时，所有服务使用 `https://deepcode.vegamo.cn`；后接 26 位字符串时，LLM 请求 `/plugin/openai/**`（包括 `/models` 订阅探测和连接预热）使用 `https://api.deepcodeplus.com`，其余服务使用 `https://www.deepcodeplus.com`，包括网络搜索、图片理解、图片/视频生成、遥测及积分试算。未配置 Key 的匿名插件请求继续使用旧域名。不额外限制 Key 后缀字符类型；已配置但格式无效（包括空字符串或非字符串）时明确报错，`subscriptionPlan=off` 也不例外。 下文 `{llmHost}` 表示选定的 LLM 域名。
+PLUS 接口根据去除首尾空白后的 `env.PLUS_API_KEY` 选择域名：`sk-` 后接 24 位字符串时，所有服务使用 `https://deepcode.vegamo.cn`；后接 26 位字符串时，LLM 请求 `/plugin/openai/**`（包括 `/models` 订阅探测和连接预热）使用 `https://chat.deepcodeplus.com`，其余服务使用 `https://www.deepcodeplus.com`，包括网络搜索、图片理解、图片/视频生成、遥测及积分试算。未配置 Key 的匿名插件请求继续使用旧域名。不额外限制 Key 后缀字符类型；已配置但格式无效（包括空字符串或非字符串）时明确报错，`subscriptionPlan=off` 也不例外。 下文 `{llmHost}` 表示选定的 LLM 域名。
 
 `subscriptionPlan` 支持 `default`、`on`、`off`；缺失或非法值按 `default` 处理。普通通道继续使用上文配置层级合并后的 API key 和 base URL。
 

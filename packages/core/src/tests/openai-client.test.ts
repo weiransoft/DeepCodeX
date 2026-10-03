@@ -65,7 +65,7 @@ test("on mode retains PLUS routing after the existing models warmup fails", asyn
     assert.equal(warmup.mock.callCount(), 1);
     assert.equal(first.usingPlus, true);
     assert.equal(first.apiKey, "sk-bbbbbbbbbbbbbbbbbbbbbbbbbb");
-    assert.equal(first.baseURL, "https://api.deepcodeplus.com/plugin/openai");
+    assert.equal(first.baseURL, "https://chat.deepcodeplus.com/plugin/openai");
     assert.equal(first.client?.baseURL, first.baseURL);
     assert.equal(factory().client, first.client);
     assert.equal(factory().usingPlus, true);
