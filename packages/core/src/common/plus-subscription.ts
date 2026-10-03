@@ -6,6 +6,7 @@ import type { CreateOpenAIClient, OpenAIClientResult } from "./tool-types";
 
 export const DEEPCODE_PLUS_LEGACY_HOST = "https://deepcode.vegamo.cn";
 export const DEEPCODE_PLUS_HOST = "https://www.deepcodeplus.com";
+export const DEEPCODE_PLUS_LLM_HOST = "https://api.deepcodeplus.com";
 
 /** Undefined means unconfigured; all explicitly configured values must be valid. */
 export function normalizePlusApiKey(
@@ -24,6 +25,10 @@ export function normalizePlusApiKey(
 export function resolvePlusHost(apiKey?: string): string {
   const key = normalizePlusApiKey(apiKey);
   return key && Array.from(key.slice(3)).length === 26 ? DEEPCODE_PLUS_HOST : DEEPCODE_PLUS_LEGACY_HOST;
+}
+
+export function resolvePlusLlmHost(apiKey?: string): string {
+  return resolvePlusHost(apiKey) === DEEPCODE_PLUS_HOST ? DEEPCODE_PLUS_LLM_HOST : DEEPCODE_PLUS_LEGACY_HOST;
 }
 
 export function getDeepcodePlusSettingsPath(): string {
@@ -77,7 +82,7 @@ export function resolveOpenAIConnection(
   status: PlusSubscriptionStatus = "unknown"
 ): OpenAIConnection {
   plusApiKey = normalizePlusApiKey(plusApiKey);
-  const baseURL = `${resolvePlusHost(plusApiKey)}/plugin/openai`;
+  const baseURL = `${resolvePlusLlmHost(plusApiKey)}/plugin/openai`;
   const regular = { apiKey: settings.apiKey, baseURL: settings.baseURL, usingPlus: false };
   if (subscriptionPlan === "off") return regular;
   if (subscriptionPlan === "on" && !plusApiKey) {
@@ -115,7 +120,7 @@ export async function checkPlusSubscription(
 ): Promise<PlusSubscriptionStatus> {
   signal?.throwIfAborted();
   apiKey = normalizePlusApiKey(apiKey)!;
-  const baseURL = `${resolvePlusHost(apiKey)}/plugin/openai`;
+  const baseURL = `${resolvePlusLlmHost(apiKey)}/plugin/openai`;
   const controller = new AbortController();
   const abort = () => controller.abort(signal?.reason);
   signal?.addEventListener("abort", abort, { once: true });

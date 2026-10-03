@@ -6,6 +6,7 @@ import * as path from "node:path";
 import {
   normalizePlusApiKey,
   resolvePlusHost,
+  resolvePlusLlmHost,
   checkPlusSubscription,
   resolveOpenAIConnection,
   withPlusSubscription,
@@ -14,28 +15,33 @@ import { readDeepcodePlusSettings } from "../settings";
 import { reportNewPrompt } from "../common/telemetry";
 
 const routes = [
-  [undefined, "https://deepcode.vegamo.cn"],
-  [`sk-${"a".repeat(24)}`, "https://deepcode.vegamo.cn"],
-  [`sk-${"b".repeat(26)}`, "https://www.deepcodeplus.com"],
+  [undefined, "https://deepcode.vegamo.cn", "https://deepcode.vegamo.cn"],
+  [`sk-${"a".repeat(24)}`, "https://deepcode.vegamo.cn", "https://deepcode.vegamo.cn"],
+  [`sk-${"b".repeat(26)}`, "https://www.deepcodeplus.com", "https://api.deepcodeplus.com"],
 ] as const;
 
-for (const [key, host] of routes) {
+for (const [key, host, llmHost] of routes) {
   test(`PLUS routing for ${key?.length ?? "absent"} characters`, async (t) => {
     assert.equal(resolvePlusHost(key), host);
+    assert.equal(resolvePlusLlmHost(key), llmHost);
     if (key) {
-      assert.equal(normalizePlusApiKey(`  ${key}\n`), key);
-      assert.equal(
-        resolveOpenAIConnection({ baseURL: "https://regular.test" }, key, "on").baseURL,
-        `${host}/plugin/openai`
-      );
-      assert.equal(
-        await checkPlusSubscription(key, undefined, async (url, options) => {
-          assert.equal(url, `${host}/plugin/openai/models`);
-          assert.equal(options.headers.Authorization, `Bearer ${key}`);
-          return { status: 200 };
-        }),
-        "full ability"
-      );
+      for (const input of [key, `  ${key}\n`]) {
+        assert.equal(normalizePlusApiKey(input), key);
+        assert.equal(resolvePlusHost(input), host);
+        assert.equal(resolvePlusLlmHost(input), llmHost);
+        assert.equal(
+          resolveOpenAIConnection({ baseURL: "https://regular.test" }, input, "on").baseURL,
+          `${llmHost}/plugin/openai`
+        );
+        assert.equal(
+          await checkPlusSubscription(input, undefined, async (url, options) => {
+            assert.equal(url, `${llmHost}/plugin/openai/models`);
+            assert.equal(options.headers.Authorization, `Bearer ${key}`);
+            return { status: 200 };
+          }),
+          "full ability"
+        );
+      }
     }
     const fetch = t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
       assert.equal(url, `${host}/api/plugin/new`);
@@ -59,6 +65,7 @@ test("configured invalid values fail for every subscription plan without reveali
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, "settings.json");
   t.mock.method(globalThis, "fetch", async () => assert.fail("must not fetch"));
+  assert.throws(() => resolvePlusLlmHost("invalid"), /Invalid PLUS_API_KEY/);
   for (const plan of ["default", "on", "off"] as const) {
     for (const value of [
       "",
