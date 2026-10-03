@@ -71,12 +71,14 @@ echo "GitHub API 通道：${GITHUB_API_BASE}"
 # 参数解析
 # ----------------------------------------------------------------------------
 DRY_RUN=0
+FORCE_TAG=0
 VERSION_OVERRIDE=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --dry-run) DRY_RUN=1; shift ;;
-    v*)        VERSION_OVERRIDE="$1"; shift ;;
-    *)         echo "未知参数: $1"; exit 1 ;;
+    --dry-run)  DRY_RUN=1; shift ;;
+    --force-tag) FORCE_TAG=1; shift ;;
+    v*)         VERSION_OVERRIDE="$1"; shift ;;
+    *)          echo "未知参数: $1"; exit 1 ;;
   esac
 done
 
@@ -152,15 +154,22 @@ if [ -n "$(git status --porcelain)" ]; then
   git commit -m "chore: release ${TAG}" || true
 fi
 
-# tag（已存在则跳过）
+# tag：默认已存在则跳过；--force-tag 时删除重建并强推（补发场景——同一
+# 版本号先建过 Release 后又合入修复，需要 tag 指向最新 commit 重新发布）。
 if git rev-parse "${TAG}" >/dev/null 2>&1; then
-  echo "  tag ${TAG} 已存在，跳过"
+  if [ "${FORCE_TAG}" = "1" ]; then
+    echo "  tag ${TAG} 已存在（指向 $(git rev-parse --short "${TAG}^{commit}")），--force-tag 删除重建指向 $(git rev-parse --short HEAD) ..."
+    git tag -d "${TAG}" >/dev/null
+    git tag -a "${TAG}" -m "release: ${TAG}"
+    git push --force origin "refs/tags/${TAG}" 2>&1 || echo "⚠️  tag 强推失败（可能 GitHub 连不上）"
+  else
+    echo "  tag ${TAG} 已存在，跳过（补发新 commit 请加 --force-tag）"
+  fi
 else
   git tag -a "${TAG}" -m "release: ${TAG}"
+  # push tag
+  git push origin "${TAG}" 2>&1 || echo "⚠️  git push 失败（可能 GitHub 连不上），跳过 Release API"
 fi
-
-# push tag
-git push origin "${TAG}" 2>&1 || echo "⚠️  git push 失败（可能 GitHub 连不上），跳过 Release API"
 
 # ----------------------------------------------------------------------------
 # Step 5: GitHub API 创建 Release + 上传 asset
@@ -176,7 +185,7 @@ fi
 echo ""
 echo "[5/5] GitHub API 创建 Release + 上传 asset ..."
 
-# 5a. 创建 Release
+# 5a. 创建 Release（已存在则复用其 upload_url——同版本重复发布 / 补发场景）
 echo "  POST /releases (tag=${TAG}) ..."
 RELEASE_RESP="$(curl -fsSL -X POST "${GITHUB_API_BASE}/repos/${REPO}/releases" \
   -H "Authorization: Bearer ${GITHUB_TOKEN}" \
@@ -188,10 +197,18 @@ RELEASE_RESP="$(curl -fsSL -X POST "${GITHUB_API_BASE}/repos/${REPO}/releases" \
     \"draft\": false,
     \"prerelease\": false
   }" 2>&1)" || {
-  echo "❌ Release 创建失败:"
-  echo "   ${RELEASE_RESP}" | head -5
-  echo "   检查 token 权限: repo Contents=Write, Releases=Write"
-  exit 1
+  # 422 = Release already exists：改查现有 Release 复用（继续走 asset 上传）
+  EXISTING="$(curl -fsSL "${GITHUB_API_BASE}/repos/${REPO}/releases/tags/${TAG}" \
+    -H "Authorization: Bearer ${GITHUB_TOKEN}" 2>/dev/null || true)"
+  if echo "${EXISTING}" | grep -q '"upload_url"'; then
+    echo "  ℹ️  Release ${TAG} 已存在，复用其 upload_url 继续上传 asset"
+    RELEASE_RESP="${EXISTING}"
+  else
+    echo "❌ Release 创建失败:"
+    echo "   ${RELEASE_RESP}" | head -5
+    echo "   检查 token 权限: repo Contents=Write, Releases=Write"
+    exit 1
+  fi
 }
 
 UPLOAD_URL="$(echo "${RELEASE_RESP}" | grep -o '"upload_url":"[^"]*"' | head -1 | sed 's/"upload_url":"//;s/"$//;s/{?name,label}//')"
@@ -199,8 +216,17 @@ RELEASE_ID="$(echo "${RELEASE_RESP}" | grep -oE '"id": [0-9]+' | head -1 | grep 
 
 echo "  ✅ Release ID=${RELEASE_ID}"
 
-# 5b. 上传 tarball
+# 5b. 上传 tarball（同名 asset 已存在 → 先删旧再传新，否则 GitHub 返回 422）
 echo "  POST upload asset deepcode-cli.tgz ..."
+# GitHub API JSON 无空格紧凑输出，grep 模式与解析端保持一致（无空格）
+ASSET_ID="$(curl -fsSL "${GITHUB_API_BASE}/repos/${REPO}/releases/tags/${TAG}" \
+  -H "Authorization: Bearer ${GITHUB_TOKEN}" 2>/dev/null \
+  | grep -oE '"url":"[^"]*/assets/[0-9]+"' | head -1 | grep -oE '[0-9]+$' || true)"
+if [ -n "${ASSET_ID}" ]; then
+  echo "  ℹ️  同名 asset 已存在（id=${ASSET_ID}），删除后重传 ..."
+  curl -fsSL -X DELETE "${GITHUB_API_BASE}/repos/${REPO}/releases/assets/${ASSET_ID}" \
+    -H "Authorization: Bearer ${GITHUB_TOKEN}" >/dev/null 2>&1 || true
+fi
 curl -fsSL -X POST "${UPLOAD_URL}?name=deepcode-cli.tgz" \
   -H "Authorization: Bearer ${GITHUB_TOKEN}" \
   -H "Content-Type: application/octet-stream" \
