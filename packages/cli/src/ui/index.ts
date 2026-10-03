@@ -55,7 +55,7 @@ export {
   type AskUserQuestionAnswers,
 } from "./core/ask-user-question";
 export { readClipboardImage, type ClipboardImage } from "./core/clipboard";
-export { buildLoadingText, type LoadingTextInput } from "./core/loading-text";
+export { buildLoadingText, thinkingSpinnerFrame, type LoadingTextInput } from "./core/loading-text";
 export { renderMarkdown, renderMarkdownSegments, type MarkdownSegment } from "./components/MessageView/markdown";
 export {
   EMPTY_BUFFER,
