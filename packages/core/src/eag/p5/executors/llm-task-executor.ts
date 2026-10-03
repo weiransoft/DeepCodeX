@@ -27,6 +27,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -66,6 +67,40 @@ export const p5TaskExecutionStorage = new AsyncLocalStorage<boolean>();
  * - skill / WebSearch / 图片工具 / MCP / codemap：超出"按卡编码"职责面。
  */
 const ALLOWED_TOOL_NAMES: ReadonlySet<string> = Object.freeze(new Set<string>(["read", "write", "edit", "UpdatePlan"]));
+
+/**
+ * 只读放行前缀（修复"查询读取文件被牢笼误拦"2026-10-03）：
+ * read 工具为纯只读访问，以下前缀的读取不涉及写入风险，直接放行：
+ * - /tmp、/var/tmp：临时目录（pip wheel、构建产物、日志的常规落点）
+ * - os.tmpdir()：macOS 上为 /var/folders/...（mkdtemp 的真实落点），
+ *   静态 /tmp 前缀覆盖不到，动态并入
+ * - /opt：第三方安装包目录（deepcodex-install 等部署布局）
+ * - /usr、/proc、/sys：系统库与只读伪文件系统（版本查询、依赖排查）
+ * macOS 上 /tmp 实为 /private/tmp 符号链接，path.resolve 后统一为 /tmp 前缀。
+ * 注意：/root、/home、/etc 等含用户数据/配置的目录不在只读放行之列，仍需牢笼约束。
+ */
+const READONLY_ALLOWED_PREFIXES: ReadonlyArray<string> = Object.freeze(
+  [
+    "/tmp",
+    "/var/tmp",
+    // macOS darwin 的 os.tmpdir() 是 /var/folders/xx/xxxx/T/，mkdtemp 文件真实落点
+    os.tmpdir(),
+    "/opt",
+    "/usr",
+    "/proc",
+    "/sys",
+  ].filter((prefix) => typeof prefix === "string" && prefix.length > 0)
+);
+
+/**
+ * 判断路径是否命中只读放行前缀（路径段精确匹配，防 /tmpx 之类前缀误放行）。
+ *
+ * @param resolvedPath 已 path.resolve 归一化的绝对路径
+ * @returns 命中任一放行前缀（或其子树）返回 true
+ */
+function isReadonlyAllowedPath(resolvedPath: string): boolean {
+  return READONLY_ALLOWED_PREFIXES.some((prefix) => resolvedPath === prefix || resolvedPath.startsWith(prefix + "/"));
+}
 
 /**
  * 凭据文件模式黑名单（与 dev-stage-handler.ts 的 G-A5a 预检同源，保持独立副本，
@@ -379,6 +414,17 @@ export class LlmTaskExecutor implements P5TaskExecutor {
     if (!targetPath) {
       this.log(`${toolName} 缺少可定位的文件路径（file_path 或有效 snippet_id）`, "warn");
       return "deny";
+    }
+
+    // 第二层半：只读放行（修复"查询读取文件被牢笼误拦"2026-10-03）：
+    // read 工具读取 /tmp、/opt 等只读安全前缀时直接放行——排查日志、读 wheel/安装包
+    // 是任务执行的正常查询路径，牢笼的本意是防"写入"越界而非禁一切读取。
+    // 注意：必须在第四层 isCredentialProtected 之前判定——越界路径的 relativePath
+    // 含 ".."，会绕过第四层的 basename 豁免逻辑（.env.example 模板被误拦的根因）；
+    // 放行路径仍会进入真实 read handler，/root、/home、/etc 等敏感目录不在放行之列。
+    const earlyResolved = path.resolve(this.projectRoot, targetPath);
+    if (toolName === "read" && isReadonlyAllowedPath(earlyResolved)) {
+      return "approve";
     }
 
     // 第三层：路径牢笼（与 dev-stage-handler G-A1a 同构：resolve 后前缀校验）
