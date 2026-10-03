@@ -21,6 +21,30 @@ const MIN_PREVIEW_TERMINAL_WIDTH = 80;
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 /**
+ * 思考中状态的 braille spinner 帧序列（存活指示器）。
+ *
+ * 与 status-line.tsx / App.tsx 的 STATUS_SPINNER_FRAMES 同源字形。
+ * 帧索引由 buildLoadingText 从 `now` 推导（now / 120 % 10），
+ * 不持内部状态——App.tsx 的 nowTick 定时器每次触发重算都会取到新一帧，
+ * 终端表现为持续旋转，用户据此判断 DeepCode 进程仍存活。
+ */
+const THINKING_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+/** spinner 帧间隔（毫秒）——120ms/帧 ≈ 8.3 转/秒，与其他 CLI 观感一致 */
+const SPINNER_FRAME_INTERVAL_MS = 120;
+
+/**
+ * 按当前时刻取 spinner 帧（纯函数，无状态）。
+ *
+ * 导出供单测按同一 `now` 推导期望帧（避免断言硬编码字符导致时间漂移 flaky）。
+ *
+ * @param now 当前毫秒时间戳（来自 buildLoadingText 入参，保证同一轮渲染帧一致）
+ * @returns 10 帧 braille 点字之一
+ */
+export function thinkingSpinnerFrame(now: number): string {
+  return THINKING_SPINNER_FRAMES[Math.floor(now / SPINNER_FRAME_INTERVAL_MS) % THINKING_SPINNER_FRAMES.length];
+}
+
+/**
  * 将数字字符串格式化为带千分位分隔符的字符串。
  *
  * 例如："1234567" → "1,234,567"；"850" → "850"。
@@ -47,33 +71,37 @@ function formatTokens(value: string | undefined): string {
 
 export function buildLoadingText(input: LoadingTextInput): string {
   const { progress, retry, processes, now } = input;
-  const processText = buildProcessLoadingText(processes, now);
+  // spinner 前缀：所有 busy 态文案统一带存活指示器（帧索引由 now 推导，
+  // App.tsx 120ms tick 驱动重算 → 终端持续旋转，一眼区分"活着"与"卡死"）
+  const spinner = thinkingSpinnerFrame(now);
+
+  const processText = buildProcessLoadingText(processes, now, spinner);
   if (processText) {
     return processText;
   }
 
   if (retry) {
-    return `Reconnecting... ${retry.attempt}/${retry.maxRetries} (esc to interrupt)`;
+    return `${spinner} Reconnecting... ${retry.attempt}/${retry.maxRetries} (esc to interrupt)`;
   }
 
   if (!progress) {
-    return "思考中...";
+    return `${spinner} 思考中...`;
   }
 
   const startedAt = parseTimestamp(progress.startedAt);
   if (startedAt === null) {
-    return "思考中...";
+    return `${spinner} 思考中...`;
   }
 
   const elapsedMs = Math.max(0, now - startedAt);
   if (elapsedMs < STALL_THRESHOLD_MS) {
-    return "思考中...";
+    return `${spinner} 思考中...`;
   }
 
   const elapsedSeconds = Math.floor(elapsedMs / 1000);
   // 融合两侧：fork 的千分位格式化 + 上游 v0.4.0 的 streaming preview
   const tokens = formatTokens(progress.formattedTokens);
-  const status = `思考中... (${elapsedSeconds}s) · ↓ ${tokens} tokens`;
+  const status = `${spinner} 思考中... (${elapsedSeconds}s) · ↓ ${tokens} tokens`;
   const preview = progress.previewText;
   if (progress.estimatedTokens <= 1500 || !preview || (input.screenWidth ?? 0) < MIN_PREVIEW_TERMINAL_WIDTH) {
     return status;
@@ -96,7 +124,7 @@ export function buildLoadingText(input: LoadingTextInput): string {
   return tail ? `${status} [...${tail}]` : status;
 }
 
-function buildProcessLoadingText(processes: RunningProcesses | undefined, now: number): string | null {
+function buildProcessLoadingText(processes: RunningProcesses | undefined, now: number, spinner: string): string | null {
   if (!processes || processes.size === 0) {
     return null;
   }
@@ -108,7 +136,7 @@ function buildProcessLoadingText(processes: RunningProcesses | undefined, now: n
 
   const elapsedMs = Math.max(0, now - (parseTimestamp(first.startTime) ?? now));
   const hint = buildRunningProcessHint(elapsedMs);
-  return `(${formatElapsedTime(first.startTime, now)}) ${first.command}${hint}`;
+  return `${spinner} (${formatElapsedTime(first.startTime, now)}) ${first.command}${hint}`;
 }
 
 /**

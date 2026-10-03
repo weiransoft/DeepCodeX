@@ -500,7 +500,11 @@ function App({
     if (!busy) {
       return;
     }
-    const id = setInterval(() => setNowTick((tick) => tick + 1), 500);
+    // 存活指示器心跳（修复"等待时无法判断进程是否卡死"2026-10-03）：
+    // 120ms 与 loading-text.ts 的 SPINNER_FRAME_INTERVAL_MS 对齐——
+    // spinner 帧索引由 Date.now() 推导，tick 频率低于帧间隔会出现跳帧/顿感。
+    // 此前 500ms tick 导致"思考中"转圈明显迟滞，长思考期看起来像已卡死。
+    const id = setInterval(() => setNowTick((tick) => tick + 1), 120);
     return () => clearInterval(id);
   }, [busy]);
 
