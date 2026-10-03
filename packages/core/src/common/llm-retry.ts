@@ -34,8 +34,8 @@ export class LlmStreamIdleTimeoutError extends Error {
 }
 
 export class LlmStreamDisconnectedError extends Error {
-  constructor() {
-    super("Model stream disconnected before completion.");
+  constructor(options?: { cause?: unknown }) {
+    super("Model stream disconnected before completion.", options);
     this.name = "LlmStreamDisconnectedError";
   }
 }

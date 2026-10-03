@@ -17,6 +17,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { ResolvedDeepcodingSettings } from "../settings";
 import { AnthropicMessageConverter } from "./anthropic-converter";
+import { LlmStreamDisconnectedError } from "../common/llm-retry";
+import { isAbortLikeError } from "../stream-aggregator";
 import type {
   LLMClient,
   LLMProvider,
@@ -150,6 +152,10 @@ export class AnthropicLLMClient implements LLMClient {
 
     // 流式状态：tool_use 块的 id/name 在 content_block_start 给出，input_json_delta 后续增量
     let currentToolId: string | null = null;
+    // 流级错误归一化（修复 `stream is not iterable` 错误风暴 2026-10-03）：
+    // SDK Stream 在 abort/网络错误后内部状态损坏，后续 next() 派生
+    // TypeError: stream is not iterable——catch 里把损坏态 TypeError
+    // 还原为可重试的流断连语义；abort 保持原语义向上抛出。
     // 流式 usage 聚合状态（M2）：Anthropic 的 input/cache 用量在 message_start 给出，
     // message_delta.usage 仅携带 output_tokens，需暂存后在 message_end 合并发出完整 LLMUsage
     let startUsage: {
@@ -160,6 +166,9 @@ export class AnthropicLLMClient implements LLMClient {
 
     try {
       for await (const event of stream) {
+        // SDK Stream 把网络错误/abort 转为 raw type="error" 事件下发，但所有事件
+        // 都在下方 switch 里按正常形态处理；流循环本身抛错（abort / TypeError）
+        // 由 catch 统一归一化（abort rethrow、流损坏 → LlmStreamDisconnectedError）。
         switch (event.type) {
           case "message_start": {
             // 暂存 message_start 携带的 input/cache 用量，供 message_delta 合并
@@ -227,7 +236,19 @@ export class AnthropicLLMClient implements LLMClient {
         }
       }
     } catch (e) {
-      // 流式错误归一化为 error 事件（不抛出，让上层统一处理）
+      // 用户中断（ESC / streamTimeout / abort）： AbortError 必须向上抛出，
+      // 由 session 层判定为"用户中断"（isAbortLikeError → interrupted 状态）。
+      // 此前所有错误都转 error 事件，abort 被误当作普通请求错误展示给用户。
+      if (isAbortLikeError(e)) {
+        throw e;
+      }
+      // SDK Stream 损坏态归一化（`stream is not iterable` 错误风暴修复）：
+      // abort/error 后 Stream 的 Symbol.asyncIterator 丢失，派生 TypeError
+      // 既不是 abort 也不是可重试网络错误——归一为流断连（可重试），并保留 cause。
+      if (e instanceof TypeError && /not iterable|asyncIterator/i.test(e.message)) {
+        throw new LlmStreamDisconnectedError({ cause: e });
+      }
+      // 其余流式错误归一化为 error 事件（网络等瞬态错误由上层重试处理）
       yield { type: "error", error: e instanceof Error ? e : new Error(String(e)) };
     }
   }
