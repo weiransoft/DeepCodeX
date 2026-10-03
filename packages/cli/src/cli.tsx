@@ -9,6 +9,11 @@ import { checkForNpmUpdate, promptForPendingUpdate } from "./common/update-check
 import { AppContainer } from "./ui";
 import { parseArguments } from "./cli-args";
 import { writeStderrLine, writeStdoutLine } from "./utils/stdio-helpers";
+// TTY 冻死防护（2026-10-03）：SSH 卡死/终端销毁时 stdout 背压写与 EIO/EPIPE
+// 不再拖死/炸掉进程——渲染自动降级静默，后台任务（LLM/工具）继续执行。
+// 必须在任何输出与渲染开始之前安装。
+import { installStdioGuard } from "./utils/tty-guard";
+installStdioGuard();
 import { getPackageJson } from "./utils/package";
 import { CLI_VERSION } from "./generated/git-commit";
 // 上游 v0.3.1 新增：--exec 非交互模式运行器（exec-runner.ts / exec-input.ts）
