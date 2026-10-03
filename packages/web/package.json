@@ -1,6 +1,6 @@
 {
   "name": "@vegamo/deepcode-web",
-  "version": "0.4.3.5",
+  "version": "0.4.3.6",
   "description": "Deep Code Web chat UI backend — REST + SSE facade over the in-process SessionManager engine",
   "license": "MIT",
   "type": "module",

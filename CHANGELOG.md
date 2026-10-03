@@ -8,6 +8,20 @@
 
 （本版本暂无变更。）
 
+## [0.4.3.6] - 2026-10-03
+
+补丁版（Web 白屏防护——渲染崩溃不再整页卸载 + CLI 版本解析容错）。
+
+- 修复：Web 前端「工具执行完成后整页瞬间全白」——新增根级 React 错误边界
+  （`AppErrorBoundary`），任何组件渲染期异常不再卸载整棵组件树，
+  改为显示可自解释的降级页（错误详情 + 重新加载按钮，会话历史服务端持久化不丢）
+- 修复：`getPackageJson()` 对 4 段版本号（0.4.3.x）抛严格 semver 异常——
+  `read-package-up@12` 内部 normalize-package-data 校验失败会炸死所有 CLI 命令
+  （含 --help），现包 try/catch 回退编译期常量 `CLI_VERSION`
+- 测试：新增 `tool-render-crash-regression.test.tsx` 白屏回归（真实引擎工具
+  结果 JSON 块全链路 SSR 零异常、ChatPane 混合条目渲染、双写同源去重、
+  humanizeEngineContent 极端输入永不抛异常）
+
 ## [0.4.3.5] - 2026-10-03
 
 补丁版（TUI 冻死防护——SSH 卡死/终端销毁不再拖死后台任务）。
