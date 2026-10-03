@@ -128,7 +128,7 @@ Deep Code 的收益来自于工具约束、上下文管理、Agent Skills 和权
 
 ### 怎样启用联网搜索功能？
 
-Deep Code 已支持 [DeepSeek Responses API](https://api-docs.deepseek.com/zh-cn/guides/responses_api/#tools) 的原生联网搜索能力。如果你希望使用自定义脚本进行联网搜索，可以在 `~/.deepcode/settings.json` 中将 `webSearchTool` 设为脚本的完整路径即可。详细步骤可参考：https://github.com/qorzj/web_search_cli
+Deep Code自带免费的、且大部分情况够用的Web Search工具。如果你希望使用自定义脚本进行联网搜索，可以在 `~/.deepcode/settings.json` 中将 `webSearchTool` 设为脚本的完整路径即可。详细步骤可参考：https://github.com/qorzj/web_search_cli
 
 ### 如何配置 MCP？
 
