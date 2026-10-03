@@ -1,6 +1,6 @@
 {
   "name": "@vegamo/deepcode-cli",
-  "version": "0.4.3.3",
+  "version": "0.4.3.4",
   "description": "Deep Code CLI - Vibe coding for the deepseek-v4 model in your terminal",
   "license": "MIT",
   "type": "module",
@@ -27,7 +27,7 @@
   "scripts": {
     "typecheck": "tsc -p ./ --noEmit",
     "bundle": "node ../../scripts/esbuild.config.js",
-    "build": "npm run typecheck && npm run bundle && node ../../scripts/copy-bundle-assets.js && node -e \"import('node:fs').then(f => f.chmodSync('dist/cli.js', 0o755))\"",
+    "build": "npm run typecheck && node ../../scripts/generate-git-commit-info.js && npm run bundle && node ../../scripts/copy-bundle-assets.js && node -e \"import('node:fs').then(f => f.chmodSync('dist/cli.js', 0o755))\"",
     "prepublishOnly": "npm run build",
     "format": "prettier --write .",
     "test": "node src/tests/run-tests.mjs"
