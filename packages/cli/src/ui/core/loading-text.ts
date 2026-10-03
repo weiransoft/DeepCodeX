@@ -18,6 +18,16 @@ export type LoadingTextInput = {
 
 const STALL_THRESHOLD_MS = 3000;
 const MIN_PREVIEW_TERMINAL_WIDTH = 80;
+/** 思考尾行渲染的最小终端宽度：状态行前缀约 38 列，低于此宽尾行无立足之地只能换行 */
+const MIN_THINKING_TAIL_TERMINAL_WIDTH = 50;
+/** 思考尾行可渲染的最小字符数：低于该值多为空白/换行碎片，不值得占用状态行 */
+const MIN_THINKING_TAIL_CHARS = 2;
+/**
+ * 思考尾行折叠后的最大保留长度（字符）。
+ * 1-1.7MB 的 reasoning 流只需尾行即可证明"活着"，无需全量进入状态行；
+ * 且状态行单行渲染，必须防止未折叠的超长文本把终端挤成多行。
+ */
+const MAX_THINKING_TAIL_CHARS = 240;
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 /**
@@ -102,8 +112,33 @@ export function buildLoadingText(input: LoadingTextInput): string {
   // 融合两侧：fork 的千分位格式化 + 上游 v0.4.0 的 streaming preview
   const tokens = formatTokens(progress.formattedTokens);
   const status = `${spinner} 思考中... (${elapsedSeconds}s) · ↓ ${tokens} tokens`;
+
+  // 思考尾行兜底（修复"thinking 期状态行零进展"2026-10-03）：
+  // thinking/reasoning 模型在前 100-250s 只推 reasoning_content，正文 previewText 恒空，
+  // 状态行只剩固定文案 + 一个缓慢增长的 token 数 → 用户仍感知"卡死"。
+  // 三条渲染规则：
+  //   1. 正文 preview 满足原门槛（>1500 token 且终端 ≥80 列）→ 原样走 preview 分支（零回归）；
+  //   2. 否则有思考尾行 → 渲染尾行（thinking 通道本身就是进度信号，豁免 token 门槛；
+  //      终端 <50 列时不渲染——状态行前缀约 38 列，再挂尾行必然整行溢出换行，
+  //      反而破坏渲染，不如只显示状态行）；
+  //   3. 都没有 → 纯状态行。
   const preview = progress.previewText;
-  if (progress.estimatedTokens <= 1500 || !preview || (input.screenWidth ?? 0) < MIN_PREVIEW_TERMINAL_WIDTH) {
+  const thinkingTail = buildThinkingTailLine(progress.thinkingText);
+  const screenWidth = input.screenWidth ?? 0;
+  if (
+    thinkingTail &&
+    screenWidth >= MIN_THINKING_TAIL_TERMINAL_WIDTH &&
+    !(progress.estimatedTokens > 1500 && preview && screenWidth >= MIN_PREVIEW_TERMINAL_WIDTH)
+  ) {
+    // "· 思考 " 前缀 6 列（1+1+2+2）+ 右侧留 2 列余量 = 8 列开销，
+    // 保证整行（含尾行）严格不超 screenWidth，杜绝终端折行
+    const tail = truncateToTerminalWidth(thinkingTail, screenWidth - 8 - stringWidth(status));
+    if (tail) {
+      return `${status} · 思考 ${tail}`;
+    }
+  }
+
+  if (progress.estimatedTokens <= 1500 || !preview || screenWidth < MIN_PREVIEW_TERMINAL_WIDTH) {
     return status;
   }
   const available = (input.screenWidth ?? 0) - 28 - stringWidth(status) - 3; // Space and brackets.
@@ -122,6 +157,59 @@ export function buildLoadingText(input: LoadingTextInput): string {
     tail = graphemes[i] + tail;
   }
   return tail ? `${status} [...${tail}]` : status;
+}
+
+/**
+ * 把 thinking 累积文本折叠成适合状态行展示的单行尾行。
+ *
+ * reasoning 流体量可达 1MB+ 且含大量换行，直接上屏会把单行状态行撑成多行、
+ * 破坏终端渲染。因此：折叠所有连续空白为单空格 → 只保留尾部（最新思考内容
+ * 最能证明"仍在推进"）→ 限长 MAX_THINKING_TAIL_CHARS。
+ *
+ * @param thinkingText core 累积的思考通道文本（可能为 undefined / 空串 / 纯空白）
+ * @returns 可渲染的单行尾行；无有效内容时返回空串（调用侧回落到原状态行）
+ */
+function buildThinkingTailLine(thinkingText: string | undefined): string {
+  const raw = thinkingText?.trim();
+  if (!raw) {
+    return "";
+  }
+  const collapsed = raw.replace(/\s+/g, " ");
+  if (collapsed.length < MIN_THINKING_TAIL_CHARS) {
+    return "";
+  }
+  return collapsed.length > MAX_THINKING_TAIL_CHARS ? `…${collapsed.slice(-MAX_THINKING_TAIL_CHARS)}` : collapsed;
+}
+
+/**
+ * 按终端可用列宽裁剪尾行，保证状态行始终单行。
+ *
+ * 复用与正文 preview 相同的图簇切分策略（避免切断 emoji/组合字符），
+ * 超宽时保留最新（右侧）片段并前置省略号。可用宽度不足时返回空串，
+ * 由调用侧退化为不带尾行的状态行。
+ *
+ * @param tail 已折叠的单行尾行文本
+ * @param available 终端剩余可用列宽（已扣除状态行前缀与括号开销）
+ * @returns 裁剪后的尾行；无空间时返回空串
+ */
+function truncateToTerminalWidth(tail: string, available: number): string {
+  if (available <= 0) {
+    return "";
+  }
+  if (stringWidth(tail) <= available) {
+    return tail;
+  }
+  let result = "";
+  let width = 1; // 前导省略号宽度
+  const graphemes = Array.from(segmenter.segment(tail), (part) => part.segment);
+  for (let i = graphemes.length - 1; i >= 0; i -= 1) {
+    width += stringWidth(graphemes[i]!);
+    if (width > available) {
+      break;
+    }
+    result = graphemes[i] + result;
+  }
+  return result ? `…${result}` : "";
 }
 
 function buildProcessLoadingText(processes: RunningProcesses | undefined, now: number, spinner: string): string | null {

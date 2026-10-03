@@ -237,3 +237,71 @@ test("loading preview hides below 80 columns and returns when the terminal grows
     assert.equal(buildLoadingText({ ...input, screenWidth }), `${previewStatus} [latest text]`);
   }
 });
+
+// ===== 思考尾行渲染（修复"thinking 期状态行零进展"2026-10-03） =====
+
+/** 思考期典型进度：token 未过 1500 门槛、正文 previewText 为空、thinkingText 持续累积 */
+const thinkingProgress = {
+  requestId: "thinking",
+  startedAt: "2026-04-28T00:00:00.000Z",
+  estimatedTokens: 700,
+  formattedTokens: "0.7k",
+  phase: "update" as const,
+  thinkingText: "先检查 package.json 的依赖，\n再分析 deploy 目录结构是否完整",
+};
+const thinkingNow = Date.parse(thinkingProgress.startedAt) + 120_000;
+const thinkingStatus = `${spin(thinkingNow)}思考中... (120s) · ↓ 0.7k tokens`;
+
+test("thinking tail renders when content preview is absent (long thinking phase not looking stalled)", () => {
+  const text = buildLoadingText({ progress: thinkingProgress, now: thinkingNow, screenWidth: 120 });
+  // 尾行必须带"思考"标记，且换行折叠为单空格（状态行始终单行）
+  assert.equal(text, `${thinkingStatus} · 思考 先检查 package.json 的依赖， 再分析 deploy 目录结构是否完整`);
+  assert.ok(!text.includes("\n"), "状态行绝不允许含换行");
+});
+
+test("thinking tail renders below 1500-token preview gate but not below 50 columns", () => {
+  // 50~79 列：正文 preview 门槛不满足，但思考尾行仍渲染（thinking 本身就是进度信号）；
+  // 70 列下状态行 + "· 思考" 前缀只剩约 16 列 → 保留最新尾段并前置省略号
+  assert.equal(
+    buildLoadingText({ progress: thinkingProgress, now: thinkingNow, screenWidth: 70 }),
+    `${thinkingStatus} · 思考 …析 deploy 目录结构是否完整`
+  );
+  // <50 列：状态行前缀已近满宽，尾行只能换行 → 不渲染
+  assert.equal(buildLoadingText({ progress: thinkingProgress, now: thinkingNow, screenWidth: 40 }), thinkingStatus);
+  // screenWidth 未提供（undefined → 0）：宽度未知时保守不渲染尾行（与正文 preview 同策略）
+  assert.equal(buildLoadingText({ progress: thinkingProgress, now: thinkingNow }), thinkingStatus);
+});
+
+test("content preview keeps priority over thinking tail", () => {
+  // 正文 preview 满足原门槛（>1500 token 且终端 ≥80 列）→ 走原 preview 分支，零回归
+  const both = { ...previewProgress, thinkingText: "some reasoning text here" };
+  assert.equal(
+    buildLoadingText({ progress: both, now: previewNow, screenWidth: 120 }),
+    `${previewStatus} [latest text]`
+  );
+});
+
+test("thinking tail truncates 1MB-scale reasoning to bounded single line", () => {
+  const huge = `reasoning ${"x ".repeat(200_000)}conclusion`;
+  const text = buildLoadingText({
+    progress: { ...thinkingProgress, thinkingText: huge },
+    now: thinkingNow,
+    screenWidth: 120,
+  });
+  assert.ok(stringWidth(text) <= 120, `状态行必须不超终端宽度，实际 ${stringWidth(text)}`);
+  assert.ok(!text.includes("\n"));
+  // 保留的是最新（尾部）内容——"conclusion" 必须可见，开头的旧推理被裁掉
+  assert.ok(text.endsWith("conclusion"), "尾行必须保留最新思考片段");
+  // 旧推理最多只剩尾行预算内的若干组（"x x x" 出现次数必须远小于原始 20 万组），
+  // 且整行仍受终端宽度约束（上方 stringWidth ≤120 断言已兜底）
+  const xGroups = (text.match(/x /g) ?? []).length;
+  assert.ok(xGroups <= 40, `旧推理必须被折叠到尾行预算内，实际残留 ${xGroups} 组`);
+});
+
+test("blank or whitespace-only thinkingText falls back to plain status line", () => {
+  const status = (thinkingText: string) =>
+    buildLoadingText({ progress: { ...thinkingProgress, thinkingText }, now: thinkingNow, screenWidth: 120 });
+  assert.equal(status(""), thinkingStatus);
+  assert.equal(status("   \n\n  \t "), thinkingStatus);
+  assert.equal(status("嗯"), thinkingStatus);
+});
