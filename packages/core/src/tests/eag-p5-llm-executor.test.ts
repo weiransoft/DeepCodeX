@@ -249,6 +249,52 @@ test("E3b. 模板豁免：read .env.example / .env.prod.example 应 approve（�
   }
 });
 
+test("E3c. 只读放行（修复 2026-10-03）：read /tmp 下文件应 approve，write /tmp 同路径仍 deny", async () => {
+  const projectRoot = createGitProject();
+  // 真实预置 /tmp 下的日志文件（模拟 deepcodex-verify.log 查询场景）
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "eag-p5-readonly-"));
+  const logPath = path.join(tmpDir, "deepcodex-verify.log");
+  fs.writeFileSync(logPath, "verify ok\n");
+  const writeTarget = path.join(tmpDir, "should-be-denied.txt");
+  try {
+    const client = new StubLlmClient([
+      {
+        content: "",
+        toolCalls: [
+          // read 越界到 /tmp：只读放行例外应 approve（模型拿到文件内容）
+          { name: "read", args: { file_path: logPath } },
+          // write 越界到 /tmp：只放行 read，写入仍必须被牢笼拒绝
+          { name: "write", args: { file_path: writeTarget, content: "evil" } },
+        ],
+      },
+      { content: "读取日志完成，写文件被拒绝。" },
+    ]);
+    const executor = new LlmTaskExecutor({ projectRoot, createLlmClient: () => client });
+
+    const result = await executor.executeTask(buildExecutionInput(projectRoot));
+
+    assert.equal(result.success, true);
+    const toolMessages = client
+      .getRequests()
+      .slice(1)
+      .flatMap((req: any) => req.messages ?? [])
+      .filter((m: any) => m.role === "tool");
+    assert.ok(toolMessages.length >= 2, "read 与 write 都应有 tool 结果回灌");
+    // 第 1 条：read /tmp 放行 → 内容回灌且无拒绝语义
+    assert.match(String(toolMessages[0]!.content), /verify ok/, "read /tmp 应真实回灌文件内容");
+    // 第 2 条：write /tmp 仍拒绝 → 含拒绝语义且文件绝不创建
+    assert.match(String(toolMessages[1]!.content), /拒绝|deny|权限|不允许|路径/i);
+    assert.ok(!fs.existsSync(writeTarget), "write /tmp（牢笼外）绝不允许落盘");
+  } finally {
+    cleanup(projectRoot);
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      // 容错
+    }
+  }
+});
+
 test("E4. 白名单外工具（bash）：deny 且命令绝不执行（副作用 marker 不存在）", async () => {
   const projectRoot = createGitProject();
   // 若 bash 被真实执行，会在项目内留下 marker 文件（用 node 而非 touch 以跨平台）
