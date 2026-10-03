@@ -2420,6 +2420,17 @@ export class SessionManager {
    * 有意不对等：OpenAI 侧的 Symbol.asyncIterator 非流式回退是其测试基建产物，
    * LLMClient.createMessageStream 契约保证必返回 AsyncIterable，此处不照搬（避免死代码）。
    */
+  /**
+   * Anthropic 通路流式调用（带外层重试环，对齐 OpenAI 通路 createChatCompletionStream）。
+   *
+   * 修复"思考中卡死"报告 路径C/D（2026-10-03）：Anthropic 路径此前没有任何跨 attempt
+   * 重试环，provider 层归一化出的可重试错误（LlmStreamDisconnectedError /
+   * LlmStreamIdleTimeoutError）没有消费者，一次网关抖动直接失败整个回合。
+   *
+   * 关键语义（报告建议 5）：每次重试都重新调用 attempt——attempt 内部每次重新调用
+   * llmClient.createMessageStream 新建流，绝不持有/复用上一轮已销毁的 stream 引用，
+   * 从根上消除 abort 后复用坏流导致的 `stream is not iterable` 错误风暴。
+   */
   private async createLlmMessageStream(
     llmClient: LLMClient,
     request: {
@@ -2436,6 +2447,77 @@ export class SessionManager {
     usage?: ModelUsage | null;
   }> {
     const requestId = crypto.randomUUID();
+    // 重试信号：优先取 options.signal（对等 OpenAI 侧），回落 request.signal
+    const signal = options && options.signal instanceof AbortSignal ? options.signal : (request.signal ?? undefined);
+    // idle timeout 专属重试 cap（报告路径C 雪崩修复）：
+    // LlmStreamIdleTimeoutError 本身就是"上游长时间静默"的信号，再等 5 次指数退避
+    // 只会把 60s × 6 ≈ 6 分钟用户钉在"思考中..."；限定最多 2 次 attempt（首次 + 1 次重试），
+    // 既给偶发抖动一次恢复机会，又不会雪崩。其余可重试错误（Disconnected / 5xx / 408/429）
+    // 保持 MAX_LLM_RETRIES=5 的完整重试能力。
+    const MAX_IDLE_TIMEOUT_ATTEMPTS = 2;
+    let idleTimeoutAttempts = 0;
+    for (let retryCount = 0; ; retryCount += 1) {
+      try {
+        return await this.createLlmMessageStreamAttempt(llmClient, request, options, sessionId, debug, requestId);
+      } catch (error) {
+        // idle timeout 专属 cap：首次不重试、或已到 cap → 立即 rethrow
+        if (error instanceof LlmStreamIdleTimeoutError) {
+          idleTimeoutAttempts += 1;
+          if (idleTimeoutAttempts >= MAX_IDLE_TIMEOUT_ATTEMPTS) {
+            throw error;
+          }
+        }
+        // 不可重试即原样抛出（abort / InjectInterruptError / 4xx 等保持原语义）；
+        // InjectInterruptError 是流控制信号而非错误，isRetryableLlmError 不会命中，
+        // 会从这里原样 rethrow 给 activateSession 主循环处理
+        if (signal?.aborted || retryCount >= MAX_LLM_RETRIES || !isRetryableLlmError(error)) {
+          throw error;
+        }
+        const attempt = retryCount + 1;
+        const delayMs = getLlmRetryAfterMs(error) ?? getLlmRetryDelayMs(attempt);
+        const errorMessage = describeLlmError(error);
+        if (sessionId) {
+          this.onAssistantMessage(
+            this.buildAssistantMessage(sessionId, `Request failed: ${errorMessage}`, null),
+            false
+          );
+        }
+        // 首次失败即外发 retry 事件 → UI 立刻从"思考中..."切到 Reconnecting 文案，
+        // 消除"失败后仍显示思考中"的卡死错觉（报告建议 7）
+        this.onLlmRetry?.({
+          requestId,
+          sessionId,
+          error: errorMessage,
+          attempt,
+          maxRetries: MAX_LLM_RETRIES,
+          delayMs,
+        });
+        await waitForLlmRetry(delayMs, signal);
+        // 循环继续：下一轮 attempt 重新发起完整请求（新流、新超时、新安全控制器）
+      }
+    }
+  }
+
+  /** 单次 Anthropic 流式请求尝试：聚合流事件为完整响应，不含跨 attempt 重试 */
+  private async createLlmMessageStreamAttempt(
+    llmClient: LLMClient,
+    request: {
+      messages: SessionMessage[];
+      tools?: LLMToolDefinition[];
+      thinkingEnabled: boolean;
+      signal?: AbortSignal | null;
+    },
+    options?: Record<string, unknown>,
+    sessionId?: string,
+    debug?: ChatCompletionDebugOptions,
+    requestId?: string
+  ): Promise<{
+    choices?: Array<{ message?: Record<string, unknown> }>;
+    usage?: ModelUsage | null;
+  }> {
+    // 复用外层重试环生成的 requestId（对等 OpenAI 侧 attempt 共享 requestId 语义），
+    // 独立调用时回落新生成
+    const usedRequestId = requestId ?? crypto.randomUUID();
     const startedAt = new Date().toISOString();
     const startedAtMs = Date.now();
     let estimatedTokens = 0;
@@ -2444,7 +2526,7 @@ export class SessionManager {
     // 必须先于 progress start 发出，否则已中止信号会留下无 end 的孤对 progress
     this.throwIfAborted(request.signal);
 
-    this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "start", sessionId);
+    this.emitLlmStreamProgress(usedRequestId, startedAt, estimatedTokens, "start", sessionId);
 
     // 提取流式安全控制参数（非 LLMClient 标准字段，传给 provider 前过滤）
     const rawSignal: AbortSignal | null | undefined =
@@ -2519,7 +2601,15 @@ export class SessionManager {
       } else if (channel === "thinking") {
         thinkingText += value;
       }
-      this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "update", sessionId, previewText, thinkingText);
+      this.emitLlmStreamProgress(
+        usedRequestId,
+        startedAt,
+        estimatedTokens,
+        "update",
+        sessionId,
+        previewText,
+        thinkingText
+      );
     };
 
     try {
@@ -2619,7 +2709,7 @@ export class SessionManager {
       this.logChatCompletionDebug(debug, {
         timestamp: new Date().toISOString(),
         location: debug?.location ?? "SessionManager.createLlmMessageStream",
-        requestId,
+        requestId: usedRequestId,
         sessionId,
         model: llmClient.model,
         baseURL: debug?.baseURL,
@@ -2634,7 +2724,7 @@ export class SessionManager {
         {
           timestamp: new Date().toISOString(),
           location: "SessionManager.createLlmMessageStream",
-          requestId,
+          requestId: usedRequestId,
           sessionId,
           model: llmClient.model,
           error: {
@@ -2655,7 +2745,7 @@ export class SessionManager {
         rawSignal.removeEventListener("abort", propagateAbort);
       }
       // finally 进度 end 照发（对齐 OpenAI 路径正常/异常/abort 均发 end 的行为）
-      this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "end", sessionId);
+      this.emitLlmStreamProgress(usedRequestId, startedAt, estimatedTokens, "end", sessionId);
     }
 
     // 桶按 Map 插入序迭代 = 事件出现序，即对等 OpenAI 侧 index 排序后的语义；
@@ -2690,7 +2780,7 @@ export class SessionManager {
     this.logChatCompletionDebug(debug, {
       timestamp: new Date().toISOString(),
       location: debug?.location ?? "SessionManager.createLlmMessageStream",
-      requestId,
+      requestId: usedRequestId,
       sessionId,
       model: llmClient.model,
       baseURL: debug?.baseURL,

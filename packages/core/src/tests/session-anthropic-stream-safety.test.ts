@@ -110,6 +110,8 @@ async function rejectsWithin<T>(promise: Promise<T>, timeoutMs: number): Promise
 // ============================================================================
 // TC-1：streamTimeoutMs 触发后应中断无限流
 // 期望：50ms 超时后 createLlmMessageStream 拒绝，且不处理完全部事件
+// 重试说明：Anthropic 通路新增外层重试环（对齐 OpenAI 通路），但 idle timeout
+// 有专属 cap（最多 2 次 attempt），单次重试延迟 800ms → 总拒绝时长 ≈ 900ms
 // ============================================================================
 test("TC-1: streamTimeoutMs 应中断长期无响应的 Anthropic 流", async () => {
   const eventIndex = { value: 0 };
@@ -132,13 +134,14 @@ test("TC-1: streamTimeoutMs 应中断长期无响应的 Anthropic 流", async ()
 
   const manager = createSessionManagerWithLlmClient(client);
 
+  // 预期总时长 ≈ streamTimeoutMs(50) + retryDelay(800) + streamTimeoutMs(50) ≈ 900ms
   const err = await rejectsWithin(
     (manager as unknown as { createLlmMessageStream: typeof manager.createLlmMessageStream }).createLlmMessageStream(
       client,
       { messages: [], thinkingEnabled: false },
       { streamTimeoutMs: 50, maxReasoningLength: 100_000 }
     ),
-    500
+    3_000
   );
 
   assert.ok(err instanceof Error, "应抛出 Error");
@@ -215,7 +218,7 @@ test("TC-4: streamTimeoutMs 超时应抛 LlmStreamIdleTimeoutError（与 OpenAI 
       { messages: [], thinkingEnabled: false },
       { streamTimeoutMs: 50, maxReasoningLength: 100_000 }
     ),
-    500
+    3_000
   );
 
   assert.ok(err instanceof Error, "应抛出 Error");
