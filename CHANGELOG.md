@@ -8,6 +8,30 @@
 
 （本版本暂无变更。）
 
+## [0.4.3.1] - 2026-10-03
+
+补丁版（三段版本号 0.4.3 之上的第 1 个补丁；后续改动按 0.4.3.2、0.4.3.3 递增）。
+
+### Fixed
+- **bash 工具调用（git/pip 等）超时卡死**（`879519b0`）：
+  - `buildShellEnv` 注入 `GIT_PAGER=cat` / `PAGER=cat` / `GIT_MERGE_AUTOEDIT=no` /
+    `DEBIAN_FRONTEND=noninteractive` / `PIP_NO_INPUT=1`，根治 git log/diff 进
+    分页器、pip/apt 弹交互确认导致的无限等待；
+  - 默认超时 `DEFAULT_BASH_TIMEOUT_MS` 10min → 2min；新增
+    `settings.bashTimeoutMs` 与 `env.BASH_TIMEOUT_MS`（支持 "120s"/"2m" 后缀）
+    可配置覆盖，下限钳制 60s；
+  - 命令运行 10s/30s/60s 卡顿阶梯提示（"运行中，可 Ctrl+C 中断" 等），
+    消除"无输出 = 已死"错觉。
+- **read 工具查询 /tmp、/opt 等只读路径被路径牢笼误拦**（`73d5155d`）：
+  P5TaskExecutor 权限钩子新增只读放行前缀（/tmp、/var/tmp、os.tmpdir()、
+  /opt、/usr、/proc、/sys）——read 正常排查日志/安装包不再被拒；
+  write/edit 越界仍严格拒绝。
+
+### Added
+- **busy 等待态持续闪动的存活指示器**（`143142cc`）：思考中/Reconnecting/
+  命令执行中三类状态文案统一前置 braille spinner（120ms/帧），
+  点字转 = 进程活着，点字停 = 真卡死；nowTick 心跳 500ms→120ms 对齐帧间隔。
+
 ## [0.4.3] - 2026-10-03
 
 ### 新增
