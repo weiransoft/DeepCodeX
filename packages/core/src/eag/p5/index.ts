@@ -377,6 +377,10 @@ export {
   PLAN_REASON_ALL_TASKS_COMPLETED,
   PLAN_REASON_TASKS_BLOCKED,
   PLAN_REASON_TASK_CARD_SELECTED,
+  // 能力预检（修复"能力/目标错配烧轮"2026-10-03）
+  PLAN_REASON_CAPABILITY_GAP,
+  detectShellCapabilityGap,
+  type CapabilityPreflightResult,
   buildSynthesizedTasksContent,
 } from "./handlers/plan-stage-handler";
 
@@ -428,6 +432,8 @@ export {
 
 export type {
   AutonomousRunRequest,
+  // 进度回写（修复"eag 全程主会话零输出"2026-10-03）：迭代摘要类型随请求类型导出
+  AutonomousIterationSummary,
   AutonomousRunResult,
   AutonomousStatusResult,
   AutonomousStopResult,

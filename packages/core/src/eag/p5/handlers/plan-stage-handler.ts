@@ -84,6 +84,12 @@ export const PLAN_REASON_ALL_TASKS_COMPLETED = "all-tasks-completed" as const;
 export const PLAN_REASON_TASKS_BLOCKED = "tasks-blocked" as const;
 /** 正常选中一张可执行任务卡 */
 export const PLAN_REASON_TASK_CARD_SELECTED = "task-card-selected" as const;
+/**
+ * 能力预检拒绝（修复"能力/目标错配烧轮"2026-10-03）：
+ * objective 命中需要 shell 能力的语义（安装/远程/容器/服务/数据库变更），
+ * 而 P5 执行器工具白名单无 bash——在合成任务卡之前即 fatal 拒绝。
+ */
+export const PLAN_REASON_CAPABILITY_GAP = "capability-gap" as const;
 
 /** 合成任务卡 ID（单 goal 合成固定为 T-001，手写清单可继续追加 T-002…） */
 const SYNTHESIZED_TASK_ID = "T-001" as const;
@@ -285,6 +291,32 @@ export class P5PlanStageHandler implements P5StageHandler {
         }
 
         try {
+          // 能力预检（修复"能力/目标错配烧轮"2026-10-03）：
+          // P5 执行器工具白名单硬隔离为 read/write/edit/UpdatePlan（无 bash），
+          // 需要命令执行的目标（安装/远程/容器/服务/数据库变更）物理上不可能完成。
+          // 此前此类目标照样合成放行 → 3 轮 × 12 次 LLM 调用空转 → 熔断 abort，
+          // 全程主会话零输出。现在合成前检测，命中即 fatal 拒绝并给出可执行建议。
+          const capabilityGap = detectShellCapabilityGap([objective]);
+          if (capabilityGap.requiresShell) {
+            return createFailedStageResult(
+              "plan",
+              "fatal",
+              `目标需要主会话执行命令，超出 P5 执行器能力（缺口：${capabilityGap.capabilities.join("、")}）`,
+              "P5 任务执行器仅有 read/write/edit/UpdatePlan 工具（无 bash），" +
+                "安装、远程执行、容器、服务、数据库类操作必须由主会话（DeepCode 对话）执行。" +
+                "建议：退出自主循环后直接在主会话分步下达该目标；" +
+                "或将目标改写为纯代码/配置文件产出（如生成部署清单、Dockerfile、初始化脚本），" +
+                "执行动作交给主会话或人工。",
+              {
+                taskCard: null,
+                reason: PLAN_REASON_CAPABILITY_GAP,
+                capabilityGap: capabilityGap.capabilities,
+              },
+              [],
+              0,
+              Date.now() - startTime
+            );
+          }
           const synthesizedContent = buildSynthesizedTasksContent(objective);
           // 原子落盘（同目录 tmp + rename），随后与手写清单走完全相同的"回读→解析"闭环
           atomicWriteTextFile(tasksFilePath, synthesizedContent);
@@ -507,6 +539,77 @@ export class P5PlanStageHandler implements P5StageHandler {
       );
     }
   }
+}
+
+// ============================================================================
+// 3.5 能力预检（修复"能力/目标错配烧轮"2026-10-03）
+// ============================================================================
+
+/**
+ * 能力缺口检测关键词表（P5 执行器无 shell 能力 → 需要命令执行的目标必败）。
+ *
+ * 语义：命中任一模式意味着任务完成的**必要步骤**需要执行命令
+ * （安装软件 / 远程连接 / 容器操作 / 长驻服务 / 数据库变更），
+ * 而非仅编辑代码文件。
+ */
+const CAPABILITY_GAP_PATTERNS: ReadonlyArray<Readonly<[RegExp, string]>> = Object.freeze([
+  // 远程执行 / SSH（如"远程装 K3s CUDA""登录服务器部署"）。
+  // "远程"后接词放宽为单字"做"形（装/部署/安装/执行/登录/连接/配置…），
+  // 真实事故目标"远程装 K3s CUDA"中的"远程装"此前不命中枚举——漏检即白烧 36 次 LLM 调用。
+  [/ssh|远程[装安执部登连配升更重启]?|跳板机|堡垒机|生产(服务|环?境)|线上(服务器|环境)/i, "远程执行（SSH/远程主机）"],
+  // 软件安装 / 包管理（如"安装 CUDA""pip install""apt-get"）
+  // 软件安装 / 包管理（如"安装 CUDA""装 K3s""pip install""apt-get"）。
+  // 单字"装"须与上下文类别（容器/远程/系统/服务）同时出现才命中，
+  // 防止"把逻辑装进适配器"之类纯编码表述误伤。
+  [
+    /安装|装(好|完)|install\b|pip\s+install|npm\s+(install|i)\b|apt(-get)?|yum\b|dnf\b|(装|部署)[^。;,，；]{0,12}(k3s|k8s|kubernetes|cuda|docker|服务|环境|中间件|mysql|redis)/i,
+    "软件/包安装",
+  ],
+  // 容器与编排（如"拉镜像""部署 MySQL""kubectl apply"）
+  [/docker|镜像|k3s|kubernetes|k8s|helm\b|podman/i, "容器/编排操作"],
+  // 长驻服务与系统服务管理（如"启动 nginx""systemctl restart"）
+  [/systemctl|service\s+(start|restart)|启动.*(服务|守护|中间件)|守护进程/i, "系统服务管理"],
+  // 数据库初始化 / 迁移（需要数据库客户端连接执行）
+  [/\bDDL\b|建库|建表|数据库初始化|数据初始化|初始化数据|迁移.*(执行|到库)|\bmigrate\b/i, "数据库变更执行"],
+]);
+
+/**
+ * 能力预检结果。
+ */
+export interface CapabilityPreflightResult {
+  /** 目标/任务是否命中需要 shell 能力的语义 */
+  readonly requiresShell: boolean;
+  /** 命中的能力类别列表（去重后） */
+  readonly capabilities: ReadonlyArray<string>;
+}
+
+/**
+ * 对 objective + 任务卡文本做能力缺口检测（修复"能力/目标错配"2026-10-03）。
+ *
+ * 事故复盘：目标"远程装 K3s CUDA、部署 MySQL/Redis、拉镜像、初始化数据"被
+ * objective 合成为单卡任务放行，dev 阶段执行器只有 read/write/edit 四个工具，
+ * 每轮 12 次 LLM 调用空转 ×3 轮才熔断 abort——共 36 次 LLM 调用烧完才知道
+ * "根本不可能完成"。本预检让这类目标在 plan 阶段第一步就被诚实拒绝。
+ *
+ * @param texts 待检测文本列表（objective、任务卡标题等）
+ * @returns 检测结果（命中类别已去重）
+ */
+export function detectShellCapabilityGap(texts: ReadonlyArray<string>): CapabilityPreflightResult {
+  const hits = new Set<string>();
+  for (const text of texts) {
+    if (typeof text !== "string" || text.length === 0) {
+      continue;
+    }
+    for (const [pattern, label] of CAPABILITY_GAP_PATTERNS) {
+      if (pattern.test(text)) {
+        hits.add(label);
+      }
+    }
+  }
+  return Object.freeze({
+    requiresShell: hits.size > 0,
+    capabilities: Object.freeze([...hits]),
+  });
 }
 
 // ============================================================================

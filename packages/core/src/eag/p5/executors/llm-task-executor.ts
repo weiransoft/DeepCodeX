@@ -291,6 +291,14 @@ export class LlmTaskExecutor implements P5TaskExecutor {
         return this.failure("LLM 客户端不可用：未配置 API 凭据（请检查 settings.json 与环境变量）", llmRequests);
       }
 
+      // 拒绝风暴 fail-fast（修复"同一错误静默重复烧轮"2026-10-03）：
+      // 累计连续被权限钩子（牢笼/凭据/白名单）拒绝的工具调用数。真实事故中
+      // 模型反复尝试读 .env.prod.example / 越界路径被 deny，36 次 LLM 调用
+      // 全程静默重复同一错误。达到阈值立即终止并醒目标注根因，
+      // 而不是把 12 轮 × N 次调用烧完才报"工具循环达上限"。
+      let consecutiveDenials = 0;
+      const DENIAL_STORM_LIMIT = 6;
+
       for (let round = 1; round <= this.maxToolRounds; round += 1) {
         // 每轮顶部双重 abort 检查：标志文件（跨进程 stop）+ AbortSignal（进程内）
         if (this.isAbortRequested(input.abortFlagPath) || abortController.signal.aborted) {
@@ -357,6 +365,19 @@ export class LlmTaskExecutor implements P5TaskExecutor {
           messages.push(
             this.buildSessionMessage("tool", execution.content, Object.freeze({ tool_call_id: execution.toolCallId }))
           );
+          // 拒绝风暴计数：本轮出现任何成功调用即清零；连续 deny 达阈值 fail-fast
+          if (this.isDeniedToolExecution(execution)) {
+            consecutiveDenials += 1;
+          } else {
+            consecutiveDenials = 0;
+          }
+        }
+        if (consecutiveDenials >= DENIAL_STORM_LIMIT) {
+          return this.failure(
+            `拒绝风暴：连续 ${consecutiveDenials} 次工具调用被权限守卫拒绝——目标可能超出 P5 执行器能力` +
+              `（无 bash / 路径牢笼 / 凭据守卫）。请检查任务目标是否需要命令执行，或调整任务卡文件范围。`,
+            llmRequests
+          );
         }
       }
 
@@ -374,6 +395,20 @@ export class LlmTaskExecutor implements P5TaskExecutor {
       // 释放合成 sessionId 在 common/state 模块级 Map 中累积的 snippet/文件状态
       clearSessionState(toolSessionId);
     }
+  }
+
+  /**
+   * 判断一次工具执行是否为"权限守卫拒绝"（拒绝风暴计数用，2026-10-03）。
+   *
+   * deny 回灌的固定文案由 ToolExecutor 审批门控产生
+   * （"工具执行被审批门控拒绝（Tool execution denied by approval gate）"），
+   * 这里用稳定子串匹配；后续若审批文案调整需同步本匹配式。
+   *
+   * @param execution 工具执行结果
+   * @returns true 表示该次调用被审批门控 deny
+   */
+  private isDeniedToolExecution(execution: ToolCallExecution): boolean {
+    return execution.content.includes("审批门控拒绝") || execution.content.includes("denied by approval gate");
   }
 
   // ==========================================================================
@@ -419,11 +454,16 @@ export class LlmTaskExecutor implements P5TaskExecutor {
     // 第二层半：只读放行（修复"查询读取文件被牢笼误拦"2026-10-03）：
     // read 工具读取 /tmp、/opt 等只读安全前缀时直接放行——排查日志、读 wheel/安装包
     // 是任务执行的正常查询路径，牢笼的本意是防"写入"越界而非禁一切读取。
-    // 注意：必须在第四层 isCredentialProtected 之前判定——越界路径的 relativePath
-    // 含 ".."，会绕过第四层的 basename 豁免逻辑（.env.example 模板被误拦的根因）；
-    // 放行路径仍会进入真实 read handler，/root、/home、/etc 等敏感目录不在放行之列。
+    //
+    // 但只读放行绝不能架空凭据守卫：当项目根本身就位于临时目录前缀之下
+    // （单测/沙箱布局常见，如 mkdtemp 建在 os.tmpdir），牢笼内的 .env* 凭据文件
+    // 路径同样命中临时目录前缀，直接放行会导致凭据 deny 静默失效——真实事故验证。
+    // 因此：目标解析后仍牢笼内（relativeToRoot 不以 ".." 开头）时不适用只读放行，
+    // 必须继续走第四层凭据判定；只有真正越出牢笼的只读查询才享受前缀放行。
     const earlyResolved = path.resolve(this.projectRoot, targetPath);
-    if (toolName === "read" && isReadonlyAllowedPath(earlyResolved)) {
+    const earlyRelative = path.relative(path.resolve(this.projectRoot), earlyResolved);
+    const earlyIsInside = earlyRelative === "" || (!earlyRelative.startsWith("..") && !path.isAbsolute(earlyRelative));
+    if (toolName === "read" && !earlyIsInside && isReadonlyAllowedPath(earlyResolved)) {
       return "approve";
     }
 
@@ -432,14 +472,21 @@ export class LlmTaskExecutor implements P5TaskExecutor {
     const resolvedTarget = path.resolve(this.projectRoot, targetPath);
     const relativePath = path.relative(resolvedRoot, resolvedTarget);
     const isInside = relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
-    if (!isInside) {
-      this.log(`路径越界被拒绝：${targetPath}（牢笼：${resolvedRoot}）`, "warn");
+
+    // 第四层：凭据模式（牢笼内外一律拒绝，纵深防御；豁免模板文件）。
+    // 必须前置于牢笼判定：macOS 上 /var → /private/var 符号链接布局下，
+    // path.relative 对同一秒链根内的两个路径会按 lexical 语义得出 ".." 前缀
+    // （如 root=/var/folders/x/T/p 对 target=/var/folders/x/T/p/.env.sensitive
+    // 在部分 Node 版本归一化下失配），凭据检查若只覆盖"根内"文件，
+    // .env* 会在越界分支被放行——真实事故验证：.env.sensitive 读取 deny 静默失效。
+    // 凭据守卫本就对越界路径同样适用，用 basename 判定保证两种形态拦截一致。
+    if (isCredentialProtected(path.basename(resolvedTarget))) {
+      this.log(`凭据文件访问被拒绝：${relativePath}`, "warn");
       return "deny";
     }
 
-    // 第四层：凭据模式（对项目根内的 .env/密钥等同名文件同样拒绝，纵深防御；豁免模板文件）
-    if (isCredentialProtected(relativePath)) {
-      this.log(`凭据文件访问被拒绝：${relativePath}`, "warn");
+    if (!isInside) {
+      this.log(`路径越界被拒绝：${targetPath}（牢笼：${resolvedRoot}）`, "warn");
       return "deny";
     }
 

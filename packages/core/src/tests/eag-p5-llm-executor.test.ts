@@ -437,3 +437,86 @@ test("E8. 网关全程不回 usage（usage=null）：tokensEstimated=true 且字
     cleanup(projectRoot);
   }
 });
+
+// ============================================================================
+// 拒绝风暴 fail-fast（修复"同一错误静默重复烧轮"2026-10-03）
+// ============================================================================
+
+test("E9. 拒绝风暴：连续 6 次越权 read 后 fail-fast，不再烧满 12 轮", async () => {
+  const projectRoot = createGitProject();
+  try {
+    // 脚本：12 轮全部持续调用 read 越界路径（越界且不在只读放行前缀的目录）。
+    // /tmp 已只读放行，因此这里改用凭据模式：项目内 .env.sensitive 会被凭据守卫
+    // deny——但注意权限钩子在执行 handler 之前判定，凭据 deny 必须真实命中
+    // isCredentialProtected；为保证与真实事故场景一致，先落盘一个真实凭据文件。
+    // 脚本重复 3 轮 × 2 次 = 6 次 deny 即触发风暴 fail-fast。
+    const envPath = path.join(projectRoot, ".env.sensitive");
+    fs.writeFileSync(envPath, "SECRET_TOKEN=unit-test-fixture-value\n");
+    const responses: ConstructorParameters<typeof StubLlmClient>[0] = [];
+    for (let round = 0; round < 12; round += 1) {
+      responses.push({
+        content: "",
+        toolCalls: [
+          { name: "read", args: { file_path: envPath } },
+          { name: "read", args: { file_path: envPath } },
+        ],
+      });
+    }
+    const client = new StubLlmClient(responses);
+    const executor = new LlmTaskExecutor({ projectRoot, createLlmClient: () => client });
+
+    const result = await executor.executeTask(buildExecutionInput(projectRoot));
+
+    assert.equal(result.success, false);
+    assert.match(result.error ?? "", /拒绝风暴/, `应醒目标注拒绝风暴根因，实际：${result.error}`);
+    // fail-fast：3 轮（6 次 deny）即停，llmRequests=3 << 12 轮上限
+    assert.ok(result.llmRequests <= 3, `拒绝风暴应在 3 轮内终止，实际 llmRequests=${result.llmRequests}`);
+  } finally {
+    cleanup(projectRoot);
+  }
+});
+
+test("E10. 单次 deny 后恢复正常调用：风暴计数清零不误伤", async () => {
+  const projectRoot = createGitProject();
+  const envPath = path.join(projectRoot, ".env.sensitive");
+  const okPath = path.join(projectRoot, "ok.txt");
+  try {
+    // 真实落盘凭据文件，保证 deny 由凭据守卫命中（而非"文件不存在"错误）
+    fs.writeFileSync(envPath, "SECRET_TOKEN=unit-test-fixture-value\n");
+    const client = new StubLlmClient([
+      // 第 1 轮：一次 deny + 一次成功 write（混合轮次清零计数）
+      {
+        content: "",
+        toolCalls: [
+          { name: "read", args: { file_path: envPath } },
+          { name: "write", args: { file_path: okPath, content: "ok\n" } },
+        ],
+      },
+      // 后续多轮重复 deny——若计数未清零，风暴分支在第二轮就该误触发
+      {
+        content: "",
+        toolCalls: [
+          { name: "read", args: { file_path: envPath } },
+          { name: "read", args: { file_path: envPath } },
+        ],
+      },
+      {
+        content: "",
+        toolCalls: [
+          { name: "read", args: { file_path: envPath } },
+          { name: "read", args: { file_path: envPath } },
+        ],
+      },
+      { content: "完成" },
+    ]);
+    const executor = new LlmTaskExecutor({ projectRoot, createLlmClient: () => client });
+
+    const result = await executor.executeTask(buildExecutionInput(projectRoot));
+
+    // 3 次 deny（< 阈值 6）→ 不触发风暴，任务以正常终态成功
+    assert.equal(result.success, true);
+    assert.ok(fs.existsSync(okPath), "混合轮次中的成功 write 必须真实落盘");
+  } finally {
+    cleanup(projectRoot);
+  }
+});

@@ -223,6 +223,33 @@ export interface AutonomousRunRequest {
   readonly tasksFilePath?: string;
   /** 连续失败 abort 阈值（默认 3） */
   readonly consecutiveFailureAbort?: number;
+  /**
+   * 每轮迭代摘要回调（修复"eag 全程主会话零输出"2026-10-03）。
+   *
+   * 事故复盘：/eag-autonomous 运行 2 分 18 秒期间主会话一条进度消息都没有，
+   * 熔断 abort 后结果也不回写——用户端表现为"发出命令后界面永久卡死"。
+   * 注入本回调后，orchestrator 在每轮迭代收尾（5h notes 追加之后）把迭代
+   * 摘要推给调用方（session 层），由调用方以 system/assistant 消息写入主会话。
+   * 回调异常不影响主循环（orchestrator 内部 try/catch 吞掉并记日志）。
+   */
+  readonly onIteration?: (summary: AutonomousIterationSummary) => void | Promise<void>;
+}
+
+/**
+ * 每轮迭代摘要（onIteration 回调载荷，修复"eag 全程主会话零输出"2026-10-03）。
+ * 字段全部为标量/短数组，调用方可直接渲染为人类可读进度行。
+ */
+export interface AutonomousIterationSummary {
+  /** run id */
+  readonly runId: string;
+  /** 本轮迭代序号（从 0 起） */
+  readonly iterIndex: number;
+  /** 本轮收尾后的运行状态（running/completed/aborted/failed/stop_when） */
+  readonly status: string;
+  /** 本轮 4 阶段各自结果概要（stage + success + 摘要/失败原因） */
+  readonly stages: ReadonlyArray<{ stage: string; success: boolean; summary: string }>;
+  /** 收尾后的连续失败计数 */
+  readonly consecutiveFailures: number;
 }
 
 /**
@@ -1012,6 +1039,38 @@ export class AutonomousOrchestrator {
           status,
           finalStatus,
         });
+
+        // 5h2. 进度回写（修复"eag 全程主会话零输出"2026-10-03）：
+        // 每轮迭代收尾后把摘要推给调用方（session 层写入主会话），
+        // 让用户实时看到 plan/dev/verify/fix 各阶段结果而不是全程静默。
+        // 回调异常绝不反噬主循环——try/catch 吞掉并记 warn 日志。
+        if (typeof request.onIteration === "function") {
+          try {
+            await request.onIteration({
+              runId,
+              iterIndex,
+              status,
+              stages: Object.freeze(
+                iterationResults.map((r) =>
+                  Object.freeze({
+                    stage: r.stage,
+                    success: r.kind === "success",
+                    summary:
+                      typeof r.summary === "string" && r.summary.length > 0
+                        ? r.summary.slice(0, 200)
+                        : typeof r.error === "string"
+                          ? r.error.slice(0, 200)
+                          : "",
+                  })
+                )
+              ),
+              consecutiveFailures,
+            });
+          } catch (cbErr) {
+            const cbMsg = cbErr instanceof Error ? cbErr.message : String(cbErr);
+            this.log(`onIteration 回调异常（已忽略，不影响主循环）：${cbMsg}`, "warn");
+          }
+        }
 
         // 5i. iterIndex++（用于 RunState 恢复定位）
         //     iterationsExecuted++（用于结果统计，无论 status 是否变化都递增）
