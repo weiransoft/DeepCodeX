@@ -8379,6 +8379,42 @@ ${agentInstructions}
     this.ensureProjectDir();
     const messagePath = this.getSessionMessagesPath(sessionId);
     fs.appendFileSync(messagePath, `${JSON.stringify(message)}\n`, "utf8");
+    // 循环心跳落盘（修复"卡死后无法精确断点"2026-10-03，TTY 冻死防护配套）：
+    // 每向会话 jsonl 追加一条消息 = agent 循环向前推进了一步，此刻以 fsync
+    // 写一条心跳行到独立的 <sessionId>.jsonl.heartbeat（绝不混入会话文件，
+    // 保证 --resume/--fork 解析零污染）。进程被杀/OOM/机器失联后，最后一条
+    // 心跳精确回答"卡死发生在第几条消息之后"，配合 jsonl 实现断点定位。
+    // fsync 异步执行（不阻塞消息热路径）；任何失败静默——心跳是尽力观测。
+    void this.writeLoopHeartbeat(sessionId, messagePath, message);
+  }
+
+  /**
+   * 写入一条循环心跳（fsync 强制落盘）。
+   *
+   * @param sessionId   会话 ID
+   * @param messagePath 会话 jsonl 绝对路径（心跳文件 = 该路径 + ".heartbeat"）
+   * @param message     刚追加的会话消息（记录 role 便于人工排查断点上下文）
+   */
+  private async writeLoopHeartbeat(sessionId: string, messagePath: string, message: SessionMessage): Promise<void> {
+    try {
+      const line = `${JSON.stringify({
+        t: new Date().toISOString(),
+        kind: "session_append",
+        role: message.role,
+        sessionId,
+      })}\n`;
+      const heartbeatFile = `${messagePath}.heartbeat`;
+      await fs.promises.appendFile(heartbeatFile, line, "utf8");
+      // fsync 保证数据穿透页缓存：进程被 SIGKILL/断电后心跳仍在磁盘上
+      const handle = await fs.promises.open(heartbeatFile, "r");
+      try {
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    } catch {
+      // 心跳失败绝不反噬消息主路径（尽力观测语义）
+    }
   }
 
   private saveSessionMessages(sessionId: string, messages: SessionMessage[]): void {

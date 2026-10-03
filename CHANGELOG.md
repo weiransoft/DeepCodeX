@@ -8,6 +8,27 @@
 
 （本版本暂无变更。）
 
+## [0.4.3.5] - 2026-10-03
+
+补丁版（TUI 冻死防护——SSH 卡死/终端销毁不再拖死后台任务）。
+
+### Fixed
+- **TTY 冻死防护（新增 packages/cli/src/utils/tty-guard.ts）**：
+  Ink 渲染与 stdio-helpers 直接 `process.stdout.write` 在 SSH 劣化/伪终端
+  销毁场景下会把事件循环拖入背压写黑洞（渲染 tick 持续入队 → LLM 网络 IO
+  饿死 → 表象"TUI 冻死"），或 EPIPE/EIO 冒泡终结进程。现于进程入口安装
+  stdio 守卫：通道写异常（EPIPE/EIO/EBADF）吞噬并进入静默降级，渲染路径
+  只消费不再投递，后台任务（LLM 请求、工具执行）继续运行；持续背压
+  （1.5s drain 超时）同样降级；每 10s 用零宽字符探测终端复活，SSH 恢复
+  自动复显；流级 error 事件与 uncaughtException 兜底吸收通道错误，进程不崩。
+- **循环心跳落盘（断点 resume 定位）**：core/session.ts 的 appendSessionMessage
+  每向会话 jsonl 追加一条消息即以 fsync 落一行心跳到独立
+  `<sessionId>.jsonl.heartbeat`（绝不混入会话文件，--resume/--fork 零污染）。
+  进程被杀/OOM/断电后可精确回答"卡死发生在第几条消息之后"；
+  tty-guard 提供 readHeartbeatResumeHint 解析断点（半行损坏容错）。
+- 回归测试：新增 tty-guard.test.ts 8 用例（透传/EIO 静默/EPIPE 回调消化/
+  非通道错误维持抛出/销毁流安全/幂等/心跳解析×2）全绿。
+
 ## [0.4.3.4] - 2026-10-03
 
 补丁版（4 段版本号导致 CLI 启动即死——紧急修复）。
