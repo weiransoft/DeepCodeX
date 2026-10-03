@@ -8,7 +8,7 @@
 
 （本版本暂无变更。）
 
-## [0.4.3] - 2026-10-02
+## [0.4.3] - 2026-10-03
 
 ### 新增
 
@@ -20,6 +20,7 @@
 - **模型能力 — 长路径模型名**：注册中心长路径模型名（如 `ms/kpanda-global-cluster/public/qwen38-27b-awq`）剥离路径前缀后再匹配，修复 Qwen3 系识别 MISS 导致中间 system 消息未展平、上游 vLLM 400（`System message must be at the beginning`）（66641791、5a43ce0a）
 - **CLI — 对话正文纯净**：compact 观测行（`[compact] compact_skip …`）与执行历史沉淀行（`[exec-history] 二期沉淀 …`）不再打印 stdout，统一改走结构化日志（compact.log / sediment.log JSONL）（ff695c8d、2f32673b）
 - **P5 — 凭据守卫模板豁免**：`.env.example` / `.env.prod.example` / `*.template` / `*.sample` 不再误拦（安装引导 `cp .env.example .env` 依赖读取）；`.env` / `.env.prod` 等真实凭据文件继续拦截（636d4505）
+- **LLM — "思考中"卡死**：Anthropic 通路流总超时此前只静默 abort，抛裸 AbortError 被误判为用户中断——上游无响应（Bad Gateway / ECONNRESET）时既不重试也无错误提示，UI 永远停在"思考中..."；现归一化抛 `LlmStreamIdleTimeoutError` 进可重试判定自动重连（对齐 OpenAI 通路语义）。同批：`retry-after` 头钳制 120s 硬上限防静默长挂、setTimeout 32 位溢出防御、控制命令判定容忍斜杠/空格形态（04014814）
 
 ## [0.4.2] - 2026-09-30
 
