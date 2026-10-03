@@ -8,6 +8,22 @@
 
 （本版本暂无变更。）
 
+## [0.4.3.4] - 2026-10-03
+
+补丁版（4 段版本号导致 CLI 启动即死——紧急修复）。
+
+### Fixed
+- **getPackageJson 解析异常不再炸穿启动路径**：read-package-up@12 内部
+  normalize-package-data 对 4 段补丁版本号（0.4.3.2 起）抛严格 semver 校验异常，
+  旧实现只处理"未找到 package.json"分支，导致 --help 在内的所有 CLI 命令启动即崩。
+  现将 readPackageUp 整体纳入 try/catch，异常与未命中统一回退编译期常量
+  CLI_VERSION（经 semver 形状过滤），CLI 任何命令均可正常启动。
+- **build 链刷新编译期版本常量**：packages/cli build 前执行
+  scripts/generate-git-commit-info.js，修复 CLI_VERSION 长期停留旧值 0.4.3、
+  --version 显示与实际发布版本不一致的问题。
+- 回归测试：新增 package-version-fallback.test.ts（正常路径/异常兜底/
+  缓存路径/常量形状 3 用例全绿）；`deepcode --version` 实测输出 0.4.3.x。
+
 ## [0.4.3.3] - 2026-10-03
 
 补丁版（thinking 长思考期状态行零进展——"卡死"观感修复）。
