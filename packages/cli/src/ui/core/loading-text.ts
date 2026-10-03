@@ -1,4 +1,9 @@
 import type { LlmRetryEvent, LlmStreamProgress, SessionEntry } from "@vegamo/deepcode-core";
+import {
+  BASH_RUNNING_HINT_SLOW_MS,
+  BASH_RUNNING_HINT_STUCK_MS,
+  BASH_RUNNING_HINT_VERY_SLOW_MS,
+} from "@vegamo/deepcode-core";
 import stringWidth from "string-width";
 
 type RunningProcesses = SessionEntry["processes"];
@@ -101,7 +106,36 @@ function buildProcessLoadingText(processes: RunningProcesses | undefined, now: n
     return null;
   }
 
-  return `(${formatElapsedTime(first.startTime, now)}) ${first.command}`;
+  const elapsedMs = Math.max(0, now - (parseTimestamp(first.startTime) ?? now));
+  const hint = buildRunningProcessHint(elapsedMs);
+  return `(${formatElapsedTime(first.startTime, now)}) ${first.command}${hint}`;
+}
+
+/**
+ * 运行中命令的卡顿提示阶梯（修复"工具调用卡死"2026-10-03）。
+ *
+ * 阶梯与 core 的 BASH_RUNNING_HINT_* 常量对齐：
+ *   <10s   → 不提示
+ *   10~30s → 运行中，可 Ctrl+C 中断
+ *   30~60s → 较慢，建议走 run_in_background
+ *   ≥60s   → 已卡住？Ctrl+C 中断 + 改用 run_in_background:true
+ *
+ * 仅做提示，不改变 120s 硬超时兜底逻辑。
+ *
+ * @param elapsedMs 命令已运行毫秒数
+ * @returns 提示后缀（带前导分隔符 " · "）；<10s 返回空串
+ */
+function buildRunningProcessHint(elapsedMs: number): string {
+  if (elapsedMs >= BASH_RUNNING_HINT_STUCK_MS) {
+    return " · 已卡住？Ctrl+C 中断 + 改用 run_in_background:true";
+  }
+  if (elapsedMs >= BASH_RUNNING_HINT_VERY_SLOW_MS) {
+    return " · 较慢，建议走 run_in_background";
+  }
+  if (elapsedMs >= BASH_RUNNING_HINT_SLOW_MS) {
+    return " · 运行中，可 Ctrl+C 中断";
+  }
+  return "";
 }
 
 function formatElapsedTime(startTimeIso: string, now: number): string {

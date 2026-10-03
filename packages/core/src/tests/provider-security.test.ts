@@ -145,6 +145,8 @@ test("OpenAIProvider.createClient 在 apiKey 缺失时立即抛错", () => {
     thinkingEnabled: false,
     reasoningEffort: "max",
     timeout: 600,
+    // 修复"工具调用卡死"2026-10-03：补 ResolvedDeepcodingSettings 必填字段
+    bashTimeoutMs: 120000,
     contextWindow: 131072,
     debugLogEnabled: false,
     telemetryEnabled: false,
@@ -168,6 +170,8 @@ test("OpenAIProvider.createClient 在 apiKey 为空字符串时立即抛错", ()
     thinkingEnabled: false,
     reasoningEffort: "max",
     timeout: 600,
+    // 修复"工具调用卡死"2026-10-03：补 ResolvedDeepcodingSettings 必填字段
+    bashTimeoutMs: 120000,
     contextWindow: 131072,
     debugLogEnabled: false,
     telemetryEnabled: false,

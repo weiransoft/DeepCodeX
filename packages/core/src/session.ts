@@ -574,6 +574,12 @@ export type SessionManagerOptions = {
     contextWindow?: number;
     autoCompactWindow?: number;
     timeout?: number;
+    /**
+     * 修复"工具调用卡死"2026-10-03：bash 工具调用超时（毫秒）。
+     * 由 SessionOptions 实现方从 ResolvedDeepcodingSettings.bashTimeoutMs 透传，
+     * 缺省时由 bash-handler 走 DEFAULT_BASH_TIMEOUT_MS=120s 兜底。
+     */
+    bashTimeoutMs?: number;
     webSearchTool?: string;
     mcpServers?: Record<string, McpServerConfig>;
     permissions?: Required<PermissionSettings>;
@@ -1132,6 +1138,12 @@ export class SessionManager {
     autoCompactWindow?: number;
     // fork 侧：LLM 请求超时（毫秒）
     timeout?: number;
+    /**
+     * 修复"工具调用卡死"2026-10-03：bash 工具调用超时（毫秒）。
+     * 由 SessionOptions 实现方从 ResolvedDeepcodingSettings.bashTimeoutMs 透传，
+     * 缺省时由 bash-handler 走 DEFAULT_BASH_TIMEOUT_MS=120s 兜底。
+     */
+    bashTimeoutMs?: number;
     webSearchTool?: string;
     mcpServers?: Record<string, McpServerConfig>;
     permissions?: Required<PermissionSettings>;
@@ -8785,6 +8797,17 @@ ${agentInstructions}
   ): Promise<{ waitingForUser: boolean }> {
     // 上游 v0.3.1：记录本批次已加载的技能名（避免同批次重复加载）
     const loadedSkillNames = new Set<string>();
+    // 修复"工具调用卡死"2026-10-03：从 settings 解析 bash 超时（毫秒），
+    // 透传到 hooks.bashTimeoutMs → executor → handler。
+    // getResolvedSettings 是 lazy 解析的，每次 appendToolMessages 都重新取一次
+    // 以兼容运行期 settings 热更新。解析失败（throw）时回落 undefined，
+    // 由 bash-handler 内部 clamp 到 DEFAULT_BASH_TIMEOUT_MS（120s）。
+    let bashTimeoutMsFromSettings: number | undefined;
+    try {
+      bashTimeoutMsFromSettings = this.getResolvedSettings?.().bashTimeoutMs;
+    } catch {
+      // 回落 undefined → bash-handler 走 DEFAULT_BASH_TIMEOUT_MS=120s
+    }
     const hooks: ToolExecutionHooks = {
       signal: this.sessionControllers.get(sessionId)?.signal,
       onProcessStart: (pid, command) => this.addSessionProcess(sessionId, pid, command),
@@ -8799,6 +8822,8 @@ ${agentInstructions}
       // 上游 v0.3.1 新增 hooks：插件限流记录 + 批内技能按需加载
       onPluginRateLimitExceeded: (tool) => this.recordPluginRateLimitExceeded(sessionId, tool),
       onLoadSkill: (skillName) => this.loadSkillForToolBatch(sessionId, skillName, loadedSkillNames),
+      // 修复"工具调用卡死"2026-10-03：注入 bash 超时（毫秒）到 handler 上下文
+      bashTimeoutMs: bashTimeoutMsFromSettings,
       // 一期 US-EH-001：执行历史记录（fire-and-forget，不阻塞主循环）
       // 设计约束：onAfterToolExecution 钩子签名是同步返回 ToolExecutionResult（tool-types.ts L128-131），
       // 内部用 void 调 store.record().catch() 实现 fire-and-forget；return 原样 result 不修改

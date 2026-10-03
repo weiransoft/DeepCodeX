@@ -35,6 +35,8 @@ function createSettings(
     autoCompactWindow: 128 * 1024,
     thinkingEnabled: false,
     reasoningEffort: "high",
+    // 修复"工具调用卡死"2026-10-03：补 ResolvedDeepcodingSettings 必填字段
+    bashTimeoutMs: 120_000,
     debugLogEnabled: false,
     telemetryEnabled: false,
     multimodal: "default",

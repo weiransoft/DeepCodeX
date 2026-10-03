@@ -11,6 +11,10 @@ import {
   type NotifyContext,
   type NotifySpawn,
 } from "../common/notify";
+// 修复"工具调用卡死"2026-10-03：bash 超时默认值/下限常量复用
+import { DEFAULT_BASH_TIMEOUT_MS, MIN_BASH_TIMEOUT_MS } from "../common/bash-timeout";
+// 修复"工具调用卡死"2026-10-03：buildShellEnv 非交互环境变量注入单测
+import { buildShellEnv } from "../common/shell-utils";
 // 融合两侧：fork 保留 applyModelConfigSelection 等核心导入，上游新增 Files API 常量与 readDeepcodePlusApiKey
 import {
   DEFAULT_AUTOCOMPACT_RATIO,
@@ -1116,4 +1120,103 @@ test("resolveSettings applies deepseek-flash capabilities and respects explicit 
   assert.equal(overridden.thinkingEnabled, false);
   assert.equal(overridden.contextWindow, 512 * 1024);
   assert.equal(overridden.autoCompactWindow, 128 * 1024);
+});
+
+// ============================================================================
+// 修复"工具调用卡死"2026-10-03：bash 超时（settings.bashTimeoutMs / env.BASH_TIMEOUT_MS）
+// 解析链单测——默认 120s、后缀解析、优先级、下限钳制
+// ============================================================================
+
+test("resolveSettings bashTimeoutMs 默认 120s（无任何配置）", () => {
+  const defaults = { model: "test-model", baseURL: "https://api.example.com" };
+  const resolved = resolveSettings({}, defaults, TEST_PROCESS_ENV);
+  assert.equal(resolved.bashTimeoutMs, DEFAULT_BASH_TIMEOUT_MS);
+  assert.equal(DEFAULT_BASH_TIMEOUT_MS, 120_000);
+});
+
+test("resolveSettings bashTimeoutMs 从 settings 字段读取（number 与带后缀字符串）", () => {
+  const defaults = { model: "test-model", baseURL: "https://api.example.com" };
+  assert.equal(resolveSettings({ bashTimeoutMs: 300000 }, defaults, TEST_PROCESS_ENV).bashTimeoutMs, 300000);
+  assert.equal(resolveSettings({ bashTimeoutMs: 90_000 }, defaults, TEST_PROCESS_ENV).bashTimeoutMs, 90_000);
+});
+
+test("resolveSettings bashTimeoutMs 从 settings.env.BASH_TIMEOUT_MS 读取并解析后缀（s/m）", () => {
+  const defaults = { model: "test-model", baseURL: "https://api.example.com" };
+  // 用户级 settings.json 的 env 段解析（processEnv 需 DEEPCODE_ 前缀，与 TIMEOUT 等配置语义一致）
+  assert.equal(
+    resolveSettings({ env: { BASH_TIMEOUT_MS: "180s" } }, defaults, TEST_PROCESS_ENV).bashTimeoutMs,
+    180_000
+  );
+  assert.equal(resolveSettings({ env: { BASH_TIMEOUT_MS: "5m" } }, defaults, TEST_PROCESS_ENV).bashTimeoutMs, 300_000);
+  assert.equal(
+    resolveSettings({ env: { BASH_TIMEOUT_MS: "90000" } }, defaults, TEST_PROCESS_ENV).bashTimeoutMs,
+    90_000
+  );
+  assert.equal(
+    resolveSettings({ env: { BASH_TIMEOUT_MS: "200000ms" } }, defaults, TEST_PROCESS_ENV).bashTimeoutMs,
+    200_000
+  );
+});
+
+test("resolveSettings bashTimeoutMs 从 DEEPCODE_BASH_TIMEOUT_MS 进程环境变量读取", () => {
+  const defaults = { model: "test-model", baseURL: "https://api.example.com" };
+  assert.equal(resolveSettings({}, defaults, { DEEPCODE_BASH_TIMEOUT_MS: "150s" }).bashTimeoutMs, 150_000);
+});
+
+test("resolveSettings bashTimeoutMs 非法值回落默认 120s", () => {
+  const defaults = { model: "test-model", baseURL: "https://api.example.com" };
+  // 非法字符串、0、负数：parseTimeoutMsValue 返回 undefined → 默认
+  assert.equal(
+    resolveSettings({ env: { BASH_TIMEOUT_MS: "abc" } }, defaults, TEST_PROCESS_ENV).bashTimeoutMs,
+    DEFAULT_BASH_TIMEOUT_MS
+  );
+  assert.equal(
+    resolveSettings({ env: { BASH_TIMEOUT_MS: "0" } }, defaults, TEST_PROCESS_ENV).bashTimeoutMs,
+    DEFAULT_BASH_TIMEOUT_MS
+  );
+  assert.equal(
+    resolveSettings({ env: { BASH_TIMEOUT_MS: "-5s" } }, defaults, TEST_PROCESS_ENV).bashTimeoutMs,
+    DEFAULT_BASH_TIMEOUT_MS
+  );
+});
+
+test("resolveSettings bashTimeoutMs 低于下限钳制到 MIN_BASH_TIMEOUT_MS（60s）", () => {
+  const defaults = { model: "test-model", baseURL: "https://api.example.com" };
+  // 30s < MIN_BASH_TIMEOUT_MS(60s)：合法解析但被 clampBashTimeoutMs 钳到下限
+  assert.equal(
+    resolveSettings({ env: { BASH_TIMEOUT_MS: "30s" } }, defaults, TEST_PROCESS_ENV).bashTimeoutMs,
+    MIN_BASH_TIMEOUT_MS
+  );
+  assert.equal(MIN_BASH_TIMEOUT_MS, 60_000);
+});
+
+test("resolveSettings bashTimeoutMs 优先级 settings 字段 > settings.env（与 timeout 解析链一致）", () => {
+  const defaults = { model: "test-model", baseURL: "https://api.example.com" };
+  // 顶层字段命中时忽略同级 env（与 reasoningEffort/timeout 解析链语义一致：
+  // systemEnv > projectSettings > projectEnv > userSettings > userEnv）
+  const resolved = resolveSettings({ bashTimeoutMs: 300_000, env: { BASH_TIMEOUT_MS: "90s" } }, defaults, {});
+  assert.equal(resolved.bashTimeoutMs, 300_000);
+});
+
+// ============================================================================
+// 修复"工具调用卡死"2026-10-03：buildShellEnv 非交互化环境变量注入单测
+// ============================================================================
+
+test("buildShellEnv 注入分页器禁用与非交互环境变量组", () => {
+  const env = buildShellEnv("/bin/bash");
+  // git/pager 类交互卡死的根治组
+  assert.equal(env.GIT_PAGER, "cat");
+  assert.equal(env.PAGER, "cat");
+  assert.equal(env.GIT_EDITOR, "true");
+  assert.equal(env.GIT_MERGE_AUTOEDIT, "no");
+  assert.equal(env.DEBIAN_FRONTEND, "noninteractive");
+  assert.equal(env.PIP_NO_INPUT, "1");
+  assert.equal(env.SHELL, "/bin/bash");
+});
+
+test("buildShellEnv 非交互变量不被 extraEnv 覆盖失败（extraEnv 先合并、硬编码在后）", () => {
+  // 硬编码非交互变量在 extraEnv 展开之后写入 → 用户 env 段无法意外破坏该组防线
+  const env = buildShellEnv("/bin/bash", { GIT_PAGER: "less", CUSTOM_VAR: "keep-me" });
+  assert.equal(env.GIT_PAGER, "cat");
+  assert.equal(env.CUSTOM_VAR, "keep-me");
 });

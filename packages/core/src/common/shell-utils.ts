@@ -186,6 +186,21 @@ export function buildShellEnv(shellPath: string, extraEnv: Record<string, string
     ...extraEnv,
     SHELL: shellPath,
     GIT_EDITOR: "true",
+    // 非交互化环境变量组（修复"工具调用卡死"2026-10-03）：
+    // git log/diff/show/blame 默认打开 pager（less），子 shell 无 tty 时
+    // pager 仍可能等待输入 → 命令 hang 到 120s 超时。统一注入：
+    //   GIT_PAGER=cat        git 自带 pager 退化为 cat（直出）
+    //   PAGER=cat            通用 pager 兜底（git 之外的 less/more 同样失效）
+    //   GIT_MERGE_AUTOEDIT=no  防 git merge 进入编辑器
+    //   DEBIAN_FRONTEND=noninteractive  apt/dpkg 不弹交互确认
+    //   PIP_NO_INPUT=1       pip 不等待键盘输入（如 pip config edit）
+    //   HOME 保留：git/pip/npm 配置定位需要（已在用户可写目录方案下安全）
+    // 用户如需交互式命令，显式 run_in_background:true 即可（走另一条 spawn 路径）。
+    GIT_PAGER: "cat",
+    PAGER: "cat",
+    GIT_MERGE_AUTOEDIT: "no",
+    DEBIAN_FRONTEND: "noninteractive",
+    PIP_NO_INPUT: "1",
   };
 
   // P0 安全修复：过滤敏感环境变量，避免 API Key / SSH Agent / 密码等泄露给子 shell。
