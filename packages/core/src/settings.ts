@@ -8,6 +8,9 @@ import {
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+// 修复"工具调用卡死"2026-10-03：bash 超时默认值/下限常量与 clamp 函数复用
+// （clampBashTimeoutMs 同时被 bash-handler 消费，单一来源防漂移）
+import { clampBashTimeoutMs, DEFAULT_BASH_TIMEOUT_MS, MIN_BASH_TIMEOUT_MS } from "./common/bash-timeout";
 
 export type DeepcodingEnv = Record<string, string | undefined> & {
   MODEL?: string;
@@ -30,6 +33,12 @@ export type DeepcodingEnv = Record<string, string | undefined> & {
   LLM_CONTEXT_WINDOW?: string;
   /** v1.1 新增：超时配置（优先级高于 LLM_TIMEOUT） */
   TIMEOUT?: string;
+  /**
+   * 修复"工具调用卡死"2026-10-03：bash 工具调用超时（毫秒）。
+   * 支持 "120000" / "120s" / "2m" 后缀写法；下限 MIN_BASH_TIMEOUT_MS=60s。
+   * 长任务（npm install 大包、git clone 大仓库）应显式 run_in_background:true。
+   */
+  BASH_TIMEOUT_MS?: string;
   /** v1.1 新增：上下文窗口配置（预留，当前无消费方） */
   CONTEXT_WINDOW?: string;
 };
@@ -237,6 +246,12 @@ export type DeepcodingSettings = {
   temperature?: number;
   thinkingEnabled?: boolean;
   reasoningEffort?: ReasoningEffort;
+  /**
+   * 工具调用（bash）超时（毫秒）。来自 settings.bashTimeoutMs / env.BASH_TIMEOUT_MS。
+   * 修复"工具调用卡死"2026-10-03：默认从 600s 降到 120s，长任务显式
+   * run_in_background:true 走另一条无超时路径。下限 MIN_BASH_TIMEOUT_MS=60s。
+   */
+  bashTimeoutMs?: number;
   debugLogEnabled?: boolean;
   telemetryEnabled?: boolean;
   notify?: string;
@@ -292,6 +307,13 @@ export type ResolvedDeepcodingSettings = {
   reasoningEffort: ReasoningEffort;
   /** v1.1 新增：LLM 请求超时（秒），来自 env.TIMEOUT / env.LLM_TIMEOUT，默认 600（10 分钟） */
   timeout: number;
+  /**
+   * 工具调用（bash）超时（毫秒）。来自 settings.bashTimeoutMs / env.BASH_TIMEOUT_MS。
+   * 修复"工具调用卡死"2026-10-03：120s 默认（覆盖 90% 日常 git/pip 命令），
+   * 由 clampBashTimeoutMs 钳制下限 MIN_BASH_TIMEOUT_MS=60s。
+   * 长任务（npm install 大包、git clone 大仓库）显式 run_in_background:true 走另一条路径。
+   */
+  bashTimeoutMs: number;
   /**
    * 上下文窗口大小（token 数）。
    * 上游 0.3.1 语义：来自 settings.contextWindow / env.CONTEXT_WINDOW，
@@ -401,6 +423,48 @@ function parseTokenWindow(value: unknown): number | undefined {
   const multiplier = suffix === "m" ? 1024 * 1024 : suffix === "k" ? 1024 : 1;
   const tokens = amount * multiplier;
   return Number.isSafeInteger(tokens) && tokens > 0 ? tokens : undefined;
+}
+
+/**
+ * 解析"毫秒级超时"配置（与 parseTokenWindow 同形态）。
+ *
+ * 修复"工具调用卡死"2026-10-03：用于解析 BASH_TIMEOUT_MS。支持：
+ * - number 类型（直接透传，需为正整数）
+ * - 纯数字字符串（如 "120000"）
+ * - 带 ms/s/m 后缀（如 "120s" / "2m" / "90000ms"）——降低配置心智成本
+ *
+ * 非法值（0、负数、NaN、含非法字符）返回 undefined，由调用方回落默认值。
+ *
+ * @param value 候选配置值
+ * @returns 解析后的毫秒数；无效返回 undefined
+ */
+function parseTimeoutMsValue(value: unknown): number | undefined {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const match = /^(\d+)(ms|s|m)?$/i.exec(value.trim());
+  if (!match) {
+    return undefined;
+  }
+  const amount = Number(match[1]);
+  const suffix = match[2]?.toLowerCase();
+  const multiplier = suffix === "s" ? 1_000 : suffix === "m" ? 60_000 : 1;
+  const ms = amount * multiplier;
+  return Number.isSafeInteger(ms) && ms > 0 ? ms : undefined;
+}
+
+/** 依次尝试多个候选毫秒超时值，返回第一个有效值 */
+function parseTimeoutMs(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    const parsed = parseTimeoutMsValue(value);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+  }
+  return undefined;
 }
 
 /** 依次尝试解析多个候选 token 窗口值，返回第一个有效值 */
@@ -914,6 +978,20 @@ export function resolveSettingsSources(
     resolveReasoningEffort(userEnv.REASONING_EFFORT) ??
     "max";
 
+  // 工具调用（bash）超时（毫秒）——修复"工具调用卡死"2026-10-03：
+  // 默认 120s（DEFAULT_BASH_TIMEOUT_MS），覆盖 90% 日常 git/pip/ls/cat 命令；
+  // 长任务（npm install 大包 / git clone 大仓库）显式 run_in_background:true 走另一条路径。
+  // 解析链与 timeout 同模式：systemEnv > projectSettings > projectEnv > userSettings > userEnv > 默认。
+  // 非法/缺省值由 ?? 落到默认 120s；合法配置（含低于下限的值）由 clampBashTimeoutMs 钳到下限。
+  const bashTimeoutMsRaw = parseTimeoutMs(
+    systemEnv.BASH_TIMEOUT_MS,
+    projectSettings?.bashTimeoutMs,
+    projectEnv.BASH_TIMEOUT_MS,
+    userSettings?.bashTimeoutMs,
+    userEnv.BASH_TIMEOUT_MS
+  );
+  const bashTimeoutMs = clampBashTimeoutMs(bashTimeoutMsRaw ?? DEFAULT_BASH_TIMEOUT_MS, MIN_BASH_TIMEOUT_MS);
+
   const temperature =
     parseTemperature(systemEnv.TEMPERATURE) ??
     parseTemperature(projectSettings?.temperature) ??
@@ -1071,6 +1149,7 @@ export function resolveSettingsSources(
     thinkingEnabled,
     reasoningEffort,
     timeout,
+    bashTimeoutMs,
     debugLogEnabled,
     telemetryEnabled,
     allowPrivateBaseURL,

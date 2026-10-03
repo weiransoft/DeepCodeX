@@ -46,7 +46,35 @@ test("buildLoadingText formats long-running process time with minutes", () => {
   const startedAt = "2026-04-28T00:00:00.000Z";
   const now = Date.parse(startedAt) + 65_250;
   const processes = new Map([["web-search", { startTime: startedAt, command: "WebSearch: latest node release" }]]);
-  assert.equal(buildLoadingText({ processes, progress: null, now }), "(1m5s) WebSearch: latest node release");
+  // 修复"工具调用卡死"2026-10-03：≥60s 加卡顿提示后缀（阶梯详见 loading-text.ts buildRunningProcessHint）
+  assert.equal(
+    buildLoadingText({ processes, progress: null, now }),
+    "(1m5s) WebSearch: latest node release · 已卡住？Ctrl+C 中断 + 改用 run_in_background:true"
+  );
+});
+
+test("buildLoadingText adds 10s slow hint suffix for processes running over 10s", () => {
+  const startedAt = "2026-04-28T00:00:00.000Z";
+  const now = Date.parse(startedAt) + 15_000;
+  const processes = new Map([["123", { startTime: startedAt, command: "git fetch" }]]);
+  assert.equal(buildLoadingText({ processes, progress: null, now }), "(15s) git fetch · 运行中，可 Ctrl+C 中断");
+});
+
+test("buildLoadingText adds 30s very-slow hint suffix for processes running over 30s", () => {
+  const startedAt = "2026-04-28T00:00:00.000Z";
+  const now = Date.parse(startedAt) + 45_000;
+  const processes = new Map([["123", { startTime: startedAt, command: "pip install torch" }]]);
+  assert.equal(
+    buildLoadingText({ processes, progress: null, now }),
+    "(45s) pip install torch · 较慢，建议走 run_in_background"
+  );
+});
+
+test("buildLoadingText does not add hint suffix for processes under 10s", () => {
+  const startedAt = "2026-04-28T00:00:00.000Z";
+  const now = Date.parse(startedAt) + 5_000;
+  const processes = new Map([["123", { startTime: startedAt, command: "ls -la" }]]);
+  assert.equal(buildLoadingText({ processes, progress: null, now }), "(5s) ls -la");
 });
 
 test("buildLoadingText returns plain 思考中... while elapsed below 3s", () => {

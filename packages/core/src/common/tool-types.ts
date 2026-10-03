@@ -83,6 +83,12 @@ export type ToolExecutionHooks = {
   onPluginRateLimitExceeded?: (tool: PluginRateLimitedTool) => void;
   /** 上游 v0.3.1 新增：技能加载回调，skill-handler 通过它按需加载技能内容 */
   onLoadSkill?: (skillName: string) => Promise<ToolExecutionResult>;
+  /**
+   * 修复"工具调用卡死"2026-10-03：bash 工具调用超时（毫秒）。
+   * 由 session 从 ResolvedDeepcodingSettings.bashTimeoutMs 注入；
+   * 未注入时 bash-handler 回落 DEFAULT_BASH_TIMEOUT_MS（120s）。
+   */
+  bashTimeoutMs?: number;
   shouldStop?: () => boolean;
   /**
    * V2 新增：工具执行前的审批钩子

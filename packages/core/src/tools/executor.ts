@@ -346,6 +346,8 @@ export class ToolExecutor {
         onPluginRateLimitExceeded: hooks?.onPluginRateLimitExceeded,
         // 上游 v0.3.1 新增：skill 工具加载回调（skill 工具依赖）
         onLoadSkill: hooks?.onLoadSkill,
+        // 修复"工具调用卡死"2026-10-03：透传 session 注入的 bash 超时配置到 handler
+        bashTimeoutMs: hooks?.bashTimeoutMs,
       });
 
       // 合并：先做 upstream v0.4.0 的 signal 取消检查，再执行 fork 的 onAfterToolExecution 结果钩子

@@ -56,6 +56,8 @@ function makeSettings(): ResolvedDeepcodingSettings {
     thinkingEnabled: true,
     reasoningEffort: "max",
     timeout: 600,
+    // 修复"工具调用卡死"2026-10-03：补 ResolvedDeepcodingSettings 必填字段
+    bashTimeoutMs: 120000,
     contextWindow: 131072,
     // 上游 0.3.1 新增必填字段：自动 compact 阈值、多模态与 Files API 配置（测试夹具默认值）
     autoCompactWindow: 65536,

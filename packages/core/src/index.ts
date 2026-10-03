@@ -289,8 +289,13 @@ export type { LlmErrorDetails } from "./common/llm-error";
 export {
   clampBashTimeoutMs,
   DEFAULT_BASH_TIMEOUT_MS,
+  MIN_BASH_TIMEOUT_MS,
   BASH_TIMEOUT_INCREMENT_MS,
   BASH_TIMEOUT_DECREMENT_MS,
+  // 修复"工具调用卡死"2026-10-03：卡顿提示阶梯常量
+  BASH_RUNNING_HINT_SLOW_MS,
+  BASH_RUNNING_HINT_VERY_SLOW_MS,
+  BASH_RUNNING_HINT_STUCK_MS,
 } from "./common/bash-timeout";
 export { executeValidatedTool, semanticBoolean } from "./common/validate";
 export { OpenAIMessageConverter } from "./common/openai-message-converter";
