@@ -8,6 +8,38 @@
 
 （本版本暂无变更。）
 
+## [0.4.3.2] - 2026-10-03
+
+补丁版（eag 自主循环"假死"事故复盘四项修复；事故链：不可完成目标 × 只读执行器
+→ 12 轮空转 ×3 熔断 abort → 全程主会话零输出 + 终态不回写 = 用户端"永久卡死"表象）。
+
+### Fixed
+- **计划阶段能力预检（修复#3）**：`detectShellCapabilityGap` 对 objective 合成
+  任务卡路径检测远程执行/软件安装/容器编排/系统服务/数据库变更五类 shell 语义，
+  命中即 plan 阶段 fatal 拒绝并给出"退出自主循环改主会话执行 / 改写为纯代码产出"
+  建议——不再烧 3 轮 × 12 次 LLM 调用才熔断（远程装 K3s/部署 MySQL 类目标
+  第一秒即被诚实拒绝，tasks.md 不落盘）。
+- **eag 进度回写主会话（修复#4）**：`AutonomousRunRequest.onIteration` 回调 +
+  session.ts 装配——每轮迭代 4 阶段摘要（✓/✗ + 截断文本 + 连续失败计数）实时以
+  assistant 消息 append 主会话；回调异常被吞并记 warn，绝不反噬主循环。
+  abort/completed 终态回写链路（updateSessionEntry + onAssistantMessage）经核验保持完整。
+- **verify 空测试误判 failed（修复#5）**：合成任务 + 默认 npm test 且输出
+  0 passed/0 failed/0 skipped 时诚实降级 `unverified/skipped`（bio-vlab 类
+  无测试脚本项目不再累加 consecutiveFailures）；手写任务卡与自定义测试命令
+  仍如实 failed（V4 契约不放宽）。
+- **拒绝风暴 fail-fast（修复#6）**：P5TaskExecutor 连续 6 次工具调用被权限守卫
+  拒绝即终止并报醒目根因（"拒绝风暴：……超出 P5 执行器能力"），不再静默烧满
+  12 轮报"工具循环达上限"；任何一次成功调用即清零计数。
+- **凭据守卫被只读放行通道架空（E9 调试中新发现，真实 deny 静默失效）**：
+  项目根位于临时目录（沙箱/单测布局）时，牢笼内 `.env*` 路径同样命中
+  os.tmpdir 只读放行前缀 → 凭据 deny 全程未触发。现只读放行仅限牢笼外路径，
+  且凭据 basename 判定前置于路径牢笼，两种路径形态拦截行为一致。
+
+### Added
+- 回归测试：`eag-p5-stall-fixes.test.ts`（G1-G6 能力预检 / V1-V3 空测试降级 /
+  O1-O2 进度回写回调）+ `eag-p5-llm-executor.test.ts` E9/E10（拒绝风暴
+  fail-fast / 计数清零不误伤）。
+
 ## [0.4.3.1] - 2026-10-03
 
 补丁版（三段版本号 0.4.3 之上的第 1 个补丁；后续改动按 0.4.3.2、0.4.3.3 递增）。

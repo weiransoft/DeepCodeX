@@ -5865,10 +5865,30 @@ ${agentInstructions}
     // Markdown 报告渲染 + 异常兜底，session.ts 仅需调用 execute() 即可
     // 装配前再次检查 abort 信号（对齐 handleEagDeployCommand 的 P1-2 修复）
     this.throwIfAborted(signal);
+    // 进度回写（修复"eag 全程主会话零输出"2026-10-03）：
+    // 注入每轮迭代回调——每轮收尾后把 4 阶段摘要以 assistant 消息实时写入主会话，
+    // 用户从第一秒起就能看到 plan/dev/verify/fix 进展，而不是全程"思考中"假死。
+    // 使用 spread 生成新请求对象（validatedRequest 是冻结的，不可原地修改）。
+    const requestWithProgress: EagAutonomousRequest = {
+      ...validatedRequest,
+      onIteration: (summary) => {
+        const stageLines = summary.stages
+          .map((s) => `${s.success ? "✓" : "✗"} ${s.stage}: ${s.summary || (s.success ? "ok" : "failed")}`)
+          .join("\n");
+        const header =
+          summary.status === "running"
+            ? `EAG 自主迭代 ${summary.iterIndex + 1} 完成（继续下一轮，连续失败 ${summary.consecutiveFailures}）`
+            : `EAG 自主迭代 ${summary.iterIndex + 1} 结束（状态：${summary.status}，连续失败 ${summary.consecutiveFailures}）`;
+        this.onAssistantMessage(
+          this.buildAssistantMessage(sessionId, `[EAG Autonomous Loop] ${header}\n${stageLines}`, null),
+          false
+        );
+      },
+    };
     const handler = new EagAutonomousCommandHandler(this.autonomousOrchestrator);
     let result: Readonly<EagAutonomousCommandResult>;
     try {
-      result = await handler.execute(validatedRequest, this.projectRoot);
+      result = await handler.execute(requestWithProgress, this.projectRoot);
     } catch (e) {
       // 异常兜底：handler.execute() 内部已 try/catch orchestrator.run()，
       // 此处捕获的是 handler 自身的异常（如 validateRequest 抛错、formatSuccessReport 异常）
