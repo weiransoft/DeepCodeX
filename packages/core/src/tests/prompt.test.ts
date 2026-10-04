@@ -36,16 +36,19 @@ test("getTools always includes WebSearch", () => {
 });
 
 // 上游 v0.3.1 新增用例：多模态能力驱动的图像工具切换
+// 注：默认（default）判定规则已演进为「NON_MULTIMODAL_MODELS 反推为主 + deepseek-flash/-vision 正推兜底」，
+// 非多模态用例必须使用 NON_MULTIMODAL_MODELS 中的显式模型名（如 deepseek-chat），
+// 未知模型（如 gpt-4o）默认视为多模态。
 test("image tools match the current model's multimodal capability", () => {
-  const nonMultimodalTools = getTools({ model: "gpt-4o" }).map((tool) => tool.function.name);
+  const nonMultimodalTools = getTools({ model: "deepseek-chat" }).map((tool) => tool.function.name);
   const multimodalTools = getTools({ model: "deepseek-v4-flash-vision-exp" }).map((tool) => tool.function.name);
 
   assert.equal(nonMultimodalTools.includes("UnderstandImage"), true);
   assert.equal(nonMultimodalTools.includes("ReadImage"), false);
   assert.equal(multimodalTools.includes("UnderstandImage"), false);
   assert.equal(multimodalTools.includes("ReadImage"), true);
-  assert.equal(getSystemPrompt("/tmp/project", { model: "gpt-4o" }).includes("## UnderstandImage"), true);
-  assert.equal(getSystemPrompt("/tmp/project", { model: "gpt-4o" }).includes("## ReadImage"), false);
+  assert.equal(getSystemPrompt("/tmp/project", { model: "deepseek-chat" }).includes("## UnderstandImage"), true);
+  assert.equal(getSystemPrompt("/tmp/project", { model: "deepseek-chat" }).includes("## ReadImage"), false);
   assert.equal(
     getSystemPrompt("/tmp/project", { model: "deepseek-v4-flash-vision-exp" }).includes("## UnderstandImage"),
     false
@@ -54,6 +57,13 @@ test("image tools match the current model's multimodal capability", () => {
     getSystemPrompt("/tmp/project", { model: "deepseek-v4-flash-vision-exp" }).includes("## ReadImage"),
     true
   );
+});
+
+test("unknown models default to multimodal (ReadImage) in default mode", () => {
+  // 反推语义回归保护：不在 NON_MULTIMODAL_MODELS 中的模型（未知/第三方）默认多模态
+  const unknownModelTools = getTools({ model: "gpt-4o" }).map((tool) => tool.function.name);
+  assert.equal(unknownModelTools.includes("ReadImage"), true);
+  assert.equal(unknownModelTools.includes("UnderstandImage"), false);
 });
 
 test("multimodal config overrides model-based multimodal detection", () => {

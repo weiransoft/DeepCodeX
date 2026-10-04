@@ -30,6 +30,40 @@ function setHomeDir(dir: string): void {
   }
 }
 
+/**
+ * 删除临时目录（带重试，2026-10-04 加固）
+ *
+ * 背景：部分用例（如 background completion）在 rmSync 时刻仍持有异步写入
+ * （session jsonl 的 heartbeat flush），macOS 下并发写入会让 rmSync 抛
+ * ENOTEMPTY。先立即重试一次，再退避 50ms 重试一次，吸收亚帧级竞态；
+ * 仍失败则交由全局 teardown 兜底，不阻断测试结论。
+ */
+function removeTempDir(dir: string): void {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+    return;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOTEMPTY") {
+      throw err;
+    }
+  }
+  const deadline = Date.now() + 500;
+  while (Date.now() < deadline) {
+    const waitUntil = Date.now() + 50;
+    while (Date.now() < waitUntil) {
+      // 同步自旋等待（测试清理路径，50ms 量级，避免引入异步时序依赖）
+    }
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOTEMPTY") {
+        throw err;
+      }
+    }
+  }
+}
+
 afterEach(() => {
   globalThis.fetch = originalFetch;
   console.warn = originalConsoleWarn;
@@ -47,7 +81,7 @@ afterEach(() => {
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir) {
-      fs.rmSync(dir, { recursive: true, force: true });
+      removeTempDir(dir);
     }
   }
 });

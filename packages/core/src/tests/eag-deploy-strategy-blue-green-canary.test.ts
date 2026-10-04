@@ -84,6 +84,32 @@ function checkCliAvailable(cliName: string): boolean {
   }
 }
 
+/**
+ * 检测当前 kubectl context 是否指向可连通的集群（2026-10-04 新增）
+ *
+ * 背景：本机 kubectl CLI 存在但 kubeconfig 默认 context 指向不可达集群时，
+ * `--cluster` 与 `version --short` 等 API 调用会阻塞至 TCP 连接超时（~75s），
+ * 真实 kubectl 测试用例即使有 CLI 检测也会挂死全量测试（--test-concurrency=1
+ * 下放大为整套件停摆）。此处加集群连通性守卫：短超时内拿不到结果即视为不可用，
+ * 真实 kubectl 用例自动 skip。
+ *
+ * @returns true=集群可连通（真实 kubectl 用例可运行），false=不可达/未配置（跳过）
+ */
+function checkKubectlClusterReachable(): boolean {
+  try {
+    // cluster-info 走 API Server 根路径，是官方最轻量的连通性探针
+    const result = spawnSync("kubectl", ["cluster-info"], {
+      stdio: ["pipe", "pipe", "pipe"],
+      encoding: "utf8",
+      // 15s 上限：健康集群 1~3s 返回；不可达集群在超时内必失败（非永久挂起）
+      timeout: 15000,
+    });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
+}
+
 // ============================================================================
 // 辅助函数：构造测试用 DeployContext
 // ============================================================================
@@ -199,6 +225,11 @@ spec:
 // ============================================================================
 
 const hasKubectl = checkCliAvailable("kubectl");
+
+// CLI 存在但集群不可达（kubeconfig 指向不可连通的 API Server）时，真实 kubectl
+// 用例会长时间阻塞（kubectl apply 无客户端超时，须等 TCP 层失败），因此真实调用
+// 用例统一用「CLI 存在 + 集群可连通」双守卫；集群不可达时自动 skip。
+const hasKubectlCluster = hasKubectl && checkKubectlClusterReachable();
 
 // ============================================================================
 // ============================================================================
@@ -600,7 +631,7 @@ test("TC-CN-007c. errors 数组已冻结", async () => {
 // TC-CN-008. 真实 kubectl 调用（CLI 存在时，可选测试）
 // ----------------------------------------------------------------------------
 
-test("TC-CN-008. 真实 kubectl 调用（CLI 存在时）", { skip: !hasKubectl }, async () => {
+test("TC-CN-008. 真实 kubectl 调用（CLI 存在时）", { skip: !hasKubectlCluster }, async () => {
   // 此测试在 kubectl 可用时运行，验证真实 kubectl 调用路径
   // 注意：此测试需要可访问的 K8s 集群，否则 kubectl apply 会失败
   // 测试目的：验证 CanaryStrategy.execute() 真实调用 kubectl（非 mock）
