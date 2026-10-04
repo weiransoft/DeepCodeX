@@ -519,6 +519,120 @@ test("方案 B：suggest_autonomous 默认自动执行（不再要求显式 EAG 
   assert.equal(callCount.value, baselineLlmCalls, "自动执行后不应再走主对话 LLM");
 });
 
+/**
+ * F9-v2.1（2026-10-04）：Plan B goal 有效性预检回归测试
+ *
+ * 根因：用户输入 "继续 —— 已完成（2026-10-04 人工接管并实测验证）" 被 suggester LLM
+ * 返回 suggest_autonomous → Plan B 无条件自动执行 → goal 原样透传到 LlmTaskExecutor →
+ * LLM 模型因 objective 是状态标签无实质可执行意图，连续 bash 探索 10+ 轮直到 maxToolRounds。
+ *
+ * 修复：在 tryAutoExecuteSuggestedCommand 开头调用 hasExecutableIntent(goal) 预检——
+ * 仅含终态标记词且无可执行动词/技术关键词的 goal 降级为只展示建议，不触发自动执行。
+ */
+test("方案 B：纯状态标签 goal（已完成/人工接管）应降级为只展示建议，不触发自动执行", async () => {
+  const workspace = createTempDir("deepcode-f9v2-planB-workspace-");
+  const home = createTempDir("deepcode-f9v2-planB-home-");
+  setHomeDir(home);
+  globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
+
+  const { client } = createCallCountingClient("主对话回复");
+  const { orchestrator, runRequests } = createRecordingOrchestrator();
+  const { manager, assistantTexts } = createTestManager({
+    workspace,
+    home,
+    client,
+    orchestrator,
+    // suggester LLM 误判：把纯状态标签建议为 suggest_autonomous
+    suggester: createStubSuggester({
+      type: "suggest_autonomous",
+      commandHint: "/eag-autonomous",
+      messageToUser: "建议用 EAG 处理。",
+      reasoning: "任务恢复",
+    }),
+  });
+
+  const sessionId = await manager.createSession({ text: "" });
+
+  // 用户报告的真实场景：suggester 收到的 goal 就是这个纯状态标签
+  await manager.handleUserPrompt({ text: "继续 —— 已完成（2026-10-04 人工接管并实测验证）" });
+
+  // 关键断言：orchestrator.run() 绝不应该被调用——状态标签 goal 应被降级
+  assert.equal(runRequests.length, 0, "纯状态标签 goal 不得触发自动执行——应降级为只展示建议");
+
+  // 降级消息应明确告知用户问题（goal 含终态标记 + 无可执行意图）
+  const lastAssistantText = assistantTexts[assistantTexts.length - 1] ?? "";
+  assert.match(
+    lastAssistantText,
+    /已完成|人工接管|终态|自动执行已降级/,
+    `降级消息应明确告知状态标记问题，实际：${lastAssistantText}`
+  );
+});
+
+test("方案 B：含终态标记但同时有可执行动词的 goal（修复已完成的回归）仍应触发自动执行", async () => {
+  const workspace = createTempDir("deepcode-f9v2-planB-workspace-");
+  const home = createTempDir("deepcode-f9v2-planB-home-");
+  setHomeDir(home);
+  globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
+
+  const { client, callCount } = createCallCountingClient("主对话回复");
+  const { orchestrator, runRequests } = createRecordingOrchestrator();
+  const { manager } = createTestManager({
+    workspace,
+    home,
+    client,
+    orchestrator,
+    suggester: createStubSuggester({
+      type: "suggest_autonomous",
+      commandHint: "/eag-autonomous",
+      messageToUser: "建议用 EAG 处理。",
+      reasoning: "多阶段修复",
+    }),
+  });
+
+  const sessionId = await manager.createSession({ text: "" });
+  const baselineLlmCalls = callCount.value;
+
+  // 含终态标记 + 可执行动词：终态只是背景描述，核心意图是"修复回归"
+  await manager.handleUserPrompt({ text: "修复已完成任务的回归 bug" });
+
+  // 应该正常自动执行——hasExecutableIntent 检测到 "修复" 动词
+  assert.equal(runRequests.length, 1, "含可执行动词的 goal（即使有终态标记）应正常自动执行");
+  assert.equal(runRequests[0].objective, "修复已完成任务的回归 bug");
+  assert.equal(callCount.value, baselineLlmCalls, "自动执行后不应再走主对话 LLM");
+});
+
+test("方案 B：纯状态关键词变体（completed/done/已验证）也应被降级", async () => {
+  const workspace = createTempDir("deepcode-f9v2-planB-workspace-");
+  const home = createTempDir("deepcode-f9v2-planB-home-");
+  setHomeDir(home);
+  globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
+
+  const { client } = createCallCountingClient("主对话回复");
+  const { orchestrator, runRequests } = createRecordingOrchestrator();
+  const { manager } = createTestManager({
+    workspace,
+    home,
+    client,
+    orchestrator,
+    suggester: createStubSuggester({
+      type: "suggest_autonomous",
+      commandHint: "/eag-autonomous",
+      messageToUser: "建议用 EAG 处理。",
+      reasoning: "状态查询",
+    }),
+  });
+
+  const sessionId = await manager.createSession({ text: "" });
+
+  // 英文终态标记 + 无动词
+  await manager.handleUserPrompt({ text: "completed" });
+  assert.equal(runRequests.length, 0, "英文终态标记 completed 不得触发自动执行");
+
+  // 中文终态标记变体
+  await manager.handleUserPrompt({ text: "已验证 / 实测通过" });
+  assert.equal(runRequests.length, 0, "中文终态标记变体不得触发自动执行");
+});
+
 // ============================================================================
 // 测试用例：非 EAG 建议不受影响（回归保护）
 // ============================================================================
