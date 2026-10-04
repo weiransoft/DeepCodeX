@@ -367,7 +367,11 @@ export type { FixFailureCategory, FixSuggestion } from "./handlers/fix-stage-han
 export type { P5TaskExecutor, P5TaskExecutionInput, P5TaskExecutionResult } from "./handlers/task-executor-port";
 
 export { LlmTaskExecutor, p5TaskExecutionStorage } from "./executors/llm-task-executor";
-export type { LlmTaskExecutorOptions } from "./executors/llm-task-executor";
+export type {
+  LlmTaskExecutorOptions,
+  P5TaskProgressEvent,
+  P5TaskProgressCallback,
+} from "./executors/llm-task-executor";
 
 export { atomicWriteTextFile } from "./common/atomic-file";
 

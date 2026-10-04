@@ -34,10 +34,17 @@ import { randomUUID } from "node:crypto";
 import { ToolExecutor } from "../../../tools/executor";
 import { getTools } from "../../../prompt";
 import { clearSessionState, getSnippet } from "../../../common/state";
+import { clearSessionWorkingDir } from "../../../tools/bash-handler";
 import type { ToolCallExecution } from "../../../common/tool-types";
 import type { LLMClient, LLMToolDefinition, LLMToolCall } from "../../../providers/llm-provider";
 import type { SessionMessage } from "../../../session";
-import type { P5TaskExecutor, P5TaskExecutionInput, P5TaskExecutionResult } from "../handlers/task-executor-port";
+import type {
+  P5DangerousCommandApproval,
+  P5TaskExecutor,
+  P5TaskExecutionInput,
+  P5TaskExecutionResult,
+} from "../handlers/task-executor-port";
+import { detectShellCapabilityGap } from "../handlers/plan-stage-handler";
 
 // ============================================================================
 // 1. 常量定义（Object.freeze 冻结，运行期不可被模型/外部修改）
@@ -59,14 +66,65 @@ export const p5TaskExecutionStorage = new AsyncLocalStorage<boolean>();
  * - read：读取项目内文件（同样受路径牢笼与凭据模式约束，防止读密钥后外泄）；
  * - write：整文件创建/覆盖（足以完成新建与改写）；
  * - edit：基于 snippet 的精确替换（依赖先 read 获取 snippet_id，状态按合成 sessionId 隔离）；
- * - UpdatePlan：无副作用的计划更新工具，帮助模型组织步骤。
+ * - UpdatePlan：无副作用的计划更新工具，帮助模型组织步骤；
+ * - bash：命令执行（开放给安装/容器/服务/数据库类任务真实执行，用户决策 2026-10-03）。
+ *   进程内第二道防线见 DANGEROUS_COMMAND_PATTERNS：破坏性命令不静默放行，
+ *   一律挂起等待宿主（CLI 审批提示 / Web 确认框）人工确认——批准才执行，
+ *   拒绝/超时/无确认通道（fail-closed）deny 并把原因回灌模型。
  *
  * 明确不开放：
- * - bash：命令执行统一归 verify 阶段真实测试，任务执行阶段硬隔离，杜绝 rm/网络/安装等副作用；
- * - AskUserQuestion：无人值守循环无人应答，开放只会造成挂起；
+ * - AskUserQuestion：无人值守循环内无通用应答通道（高危 bash 确认走独立的
+ *   dangerousCommandApproval 回调，不经过模型工具调用），开放只会造成挂起；
  * - skill / WebSearch / 图片工具 / MCP / codemap：超出"按卡编码"职责面。
  */
-const ALLOWED_TOOL_NAMES: ReadonlySet<string> = Object.freeze(new Set<string>(["read", "write", "edit", "UpdatePlan"]));
+const ALLOWED_TOOL_NAMES: ReadonlySet<string> = Object.freeze(
+  new Set<string>(["read", "write", "edit", "UpdatePlan", "bash"])
+);
+
+/**
+ * bash 命令破坏性模式黑名单（高危命令人工确认的触发条件，2026-10-03）。
+ *
+ * 决策背景：用户明确要求 autonomous 任务直接 bash 执行（安装/容器/服务类任务），
+ * 不再 fatal 拒绝；但高危命令（不可逆销毁 / 提权 / 关停主机 / 远程脚本管道）
+ * 必须经宿主（CLI 审批提示 / Web 确认框）人工批准才可执行。
+ *
+ * 语义：命中任一模式 → 挂起等待 dangerousCommandApproval 人工决策；
+ * 批准→执行；拒绝/超时/回调异常/无确认通道 → deny 并把原因回灌模型
+ * （模型可改用安全替代方案），与主会话的 rm/sudo 审批守卫同源思路。
+ */
+const DANGEROUS_COMMAND_PATTERNS: ReadonlyArray<Readonly<[RegExp, string]>> = Object.freeze([
+  // rm -rf / mkfs / dd 写块设备 / shred：不可逆销毁
+  [/\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+\s*\/(\s|$)/i, "rm -rf 根目录"],
+  [/\brm\s+-[a-zA-Z]*r[a-zA-Z]*f|\brm\s+-[a-zA-Z]*f[a-zA-Z]*r/i, "rm -rf 递归强删"],
+  [/\bmkfs(\.|\s)/i, "mkfs 格式化"],
+  [/\bdd\s+if=.*of=\/dev\//i, "dd 写块设备"],
+  [/\bshred\b/i, "shred 销毁文件"],
+  // 全局提权安装（无人值守下污染宿主环境；项目内 npm/pip install 不命中）
+  [/\bsudo\s+|-g\s+(npm|pip|pip3)\b|\bpip3?\s+install\b(?![^\n]*(--user|--target|--prefix|-r\s))/i, "全局/提权安装"],
+  // 危险 chmod/chown（对 / 或整个 home）
+  [/chmod\s+(-[a-zA-Z]+\s+)*(777|666)\s+\/|chown\s+(-[a-zA-Z]+\s+)*\S+\s+\/(\s|$)/i, "chmod/chown 根目录"],
+  // 块设备/磁盘工具与内核模块
+  [/\b(diskutil|fdisk|gdisk)\s+(erase|partition|dd)/i, "磁盘分区破坏"],
+  // 直接关停宿主机（部署类任务常误发 shutdown，无人值守下不可挽回）
+  [/\b(shutdown|halt|poweroff|reboot)\b/i, "主机关停/重启"],
+  // curl/wget 管道直接执行远程脚本（供应链风险）
+  [/\b(curl|wget)\b[^|]*\|\s*(ba)?sh\b/i, "远程脚本管道执行"],
+]);
+
+/**
+ * 检查 bash 命令是否命中破坏性模式（无人值守 deny 清单）。
+ *
+ * @param command 待执行命令原文
+ * @returns 命中的风险描述；未命中返回 null（放行）
+ */
+function classifyDangerousCommand(command: string): string | null {
+  for (const [pattern, label] of DANGEROUS_COMMAND_PATTERNS) {
+    if (pattern.test(command)) {
+      return label;
+    }
+  }
+  return null;
+}
 
 /**
  * 只读放行前缀（修复"查询读取文件被牢笼误拦"2026-10-03）：
@@ -172,22 +230,58 @@ const GIT_STATUS_TIMEOUT_MS = 10000;
 const CHARS_PER_TOKEN_ESTIMATE = 3.5;
 
 /**
+ * 任务执行进度事件（供 Web UI 显示 autonomous 模式的执行进展）。
+ *
+ * 背景（修复 Web UI 分流只显示"思考中…"但不显示执行内容 2026-10-03）：
+ * LlmTaskExecutor 走非流式 createMessage，不经过 SessionManager 的流式聚合
+ * （emitLlmStreamProgress），因此 onLlmStreamProgress 收不到任何增量，
+ * Web 前端的流式气泡永远停在 thinkingPending 萤火虫占位态。
+ *
+ * 本事件类型让执行器在关键节点（轮次开始/LLM 返回/工具调用/终态）
+ * 主动推送结构化进度，由 SessionManager 转成 llm_delta SSE 帧透传前端，
+ * 复用现有「思考过程」折叠区渲染执行日志。
+ */
+export interface P5TaskProgressEvent {
+  /** 进度阶段标识 */
+  readonly phase: "task_start" | "llm_request" | "tool_execution" | "task_end";
+  /** 人类可读的进度文本（累积式，前端直接展示最新值） */
+  readonly previewText: string;
+  /** 执行日志文本（累积式，含轮次/工具名/结果摘要，前端渲染进「思考过程」折叠区） */
+  readonly thinkingText: string;
+  /** 当前迭代轮次（1-based，tool_execution 为产生该工具调用的轮次） */
+  readonly round?: number;
+  /** 本次任务累计真实 LLM 请求次数 */
+  readonly llmRequests?: number;
+}
+
+/**
+ * 任务执行进度回调类型（与 LlmTaskExecutorOptions.onTaskProgress 配对）。
+ */
+export type P5TaskProgressCallback = (event: Readonly<P5TaskProgressEvent>) => void;
+
+/**
  * 执行器系统提示词。
  *
  * 刻意避免出现"EAG/自主任务/无人值守/自动循环"等 F9 确定性通道触发词（架构师 P1-1），
  * 防止模型回显文本时在重入场景下误触发命令解析。
+ *
+ * bash 开放（2026-10-03 用户决策）：规则 3 从"禁止执行 shell 命令"改为
+ * "bash 真实执行 + 安全边界"——破坏性命令由进程内黑名单 + 人工确认闸门拦截，
+ * 提示词如实告知模型可用能力，避免模型因不知道有 bash 而空转。
  */
 const SYSTEM_PROMPT = [
   "你是一名在指定项目目录内工作的编码执行代理。你将收到一张明确的任务卡，",
-  "必须通过工具调用真实完成文件改动，而不是仅给出建议或代码片段。",
+  "必须通过工具调用真实完成任务，而不是仅给出建议或代码片段。",
   "",
   "硬性规则：",
-  "1. 只能操作任务指定项目目录内的文件；项目目录之外的任何路径一律不要尝试。",
+  "1. 文件操作只能限定在任务指定项目目录内；项目目录之外的任何路径一律不要尝试写入。",
   "2. 禁止读取或写入环境变量文件、密钥、证书、凭据（如 .env、.ssh、.aws、secrets、*.pem、*.key）。",
-  "3. 禁止删除文件、执行 shell 命令、安装依赖或访问网络；你只有 read/write/edit 与计划工具。",
+  "3. 你可以用 bash 真实执行命令（安装依赖、docker、启动服务、git、测试命令等）；",
+  "   但破坏性命令（rm -rf、sudo、格式化磁盘、关停主机、curl|sh 远程脚本等）会被安全守卫",
+  "   拦截并要求人工确认——请优先使用安全替代方案，被拒绝后不要反复重试同一命令。",
   "4. 修改既有文件前先 read 读取内容；新文件用 write 直接创建，内容必须完整可用。",
   "5. 完成全部改动后，用一条不含工具调用的简短文本回复总结：实际创建/修改了哪些文件、",
-  "   每个文件的核心改动、如何验证。不要在终态回复中贴大段代码。",
+  "   执行了哪些命令、每个改动的核心内容、如何验证。不要在终态回复中贴大段代码。",
   "6. 如果任务信息不足以安全动手，同样以无工具调用的文本回复说明缺少什么。",
 ].join("\n");
 
@@ -211,6 +305,22 @@ export interface LlmTaskExecutorOptions {
   readonly logger?: (message: string, level?: "info" | "warn" | "error") => void;
   /** 单任务工具循环最大轮数，默认 12；测试可收窄 */
   readonly maxToolRounds?: number;
+  /**
+   * 任务执行进度回调（可选，默认无操作）。
+   *
+   * Web UI 接线：SessionManager 构造执行器时注入 `(e) => this.emitLlmStreamProgress(...)`
+   * 适配器，把执行进展转成 llm_delta SSE 帧，让前端「思考过程」区实时显示
+   * autonomous 模式下的轮次/工具调用/终态摘要（docs/dev/web-thinking-display.md 补充）。
+   */
+  readonly onTaskProgress?: P5TaskProgressCallback;
+  /**
+   * bash 高危命令人工确认回调（可选，宿主注入，2026-10-03）。
+   *
+   * 命中 DANGEROUS_COMMAND_PATTERNS 的 bash 命令经此回调挂起等待人类批准/拒绝
+   * （CLI 审批提示 / Web 前端确认框）；未注入时高危命令 fail-closed 直接 deny。
+   * 契约（超时/异常一律按拒绝）见 task-executor-port.ts。
+   */
+  readonly dangerousCommandApproval?: P5DangerousCommandApproval;
 }
 
 // ============================================================================
@@ -229,12 +339,21 @@ export class LlmTaskExecutor implements P5TaskExecutor {
   private readonly model: string | undefined;
   private readonly log: (message: string, level?: "info" | "warn" | "error") => void;
   private readonly maxToolRounds: number;
+  /** 任务执行进度回调（默认无操作；Web 接线时推送 llm_delta 进度帧） */
+  private readonly onTaskProgress: P5TaskProgressCallback;
+  /**
+   * bash 高危命令人工确认回调（宿主注入；undefined 表示无宿主确认通道，
+   * 高危命令 fail-closed 直接 deny，2026-10-03）。
+   */
+  private readonly dangerousCommandApproval: P5DangerousCommandApproval | undefined;
 
   constructor(options: Readonly<LlmTaskExecutorOptions>) {
     this.projectRoot = options.projectRoot;
     this.createLlmClient = options.createLlmClient;
     this.model = options.model;
     this.log = options.logger ?? (() => undefined);
+    this.onTaskProgress = options.onTaskProgress ?? (() => undefined);
+    this.dangerousCommandApproval = options.dangerousCommandApproval;
     const rounds = options.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
     if (!Number.isInteger(rounds) || rounds <= 0) {
       throw new Error(`LlmTaskExecutor maxToolRounds 必须为正整数，实际：${String(rounds)}`);
@@ -284,6 +403,32 @@ export class LlmTaskExecutor implements P5TaskExecutor {
     let estimatedCharsTotal = 0;
     let sawUsage = false;
 
+    // 进度文本累积（Web UI「思考过程」区消费，2026-10-03 修复 autonomous 无进展显示）：
+    // thinkingLog 累积执行日志（轮次/工具/结果），progressPreview 累积人类可读进展行
+    let thinkingLog = "";
+    let progressPreview = "";
+    /** 推送一次进度事件（内部闭包，捕获累积文本与执行上下文） */
+    const emitProgress = (
+      phase: P5TaskProgressEvent["phase"],
+      previewLine: string,
+      thinkingLine: string,
+      round?: number
+    ): void => {
+      if (previewLine) {
+        progressPreview = progressPreview ? `${progressPreview}\n${previewLine}` : previewLine;
+      }
+      if (thinkingLine) {
+        thinkingLog = thinkingLog ? `${thinkingLog}\n${thinkingLine}` : thinkingLine;
+      }
+      this.onTaskProgress({
+        phase,
+        previewText: progressPreview,
+        thinkingText: thinkingLog,
+        round,
+        llmRequests,
+      });
+    };
+
     try {
       // 进入循环前先取一次客户端：无凭据直接 fail-closed，不发起任何请求
       const client = this.createLlmClient();
@@ -291,12 +436,31 @@ export class LlmTaskExecutor implements P5TaskExecutor {
         return this.failure("LLM 客户端不可用：未配置 API 凭据（请检查 settings.json 与环境变量）", llmRequests);
       }
 
+      emitProgress(
+        "task_start",
+        `开始执行任务 ${input.taskId}（${input.taskTitle}）`,
+        `阶段：${input.stage} | 迭代：${input.iterIndex} | 任务：${input.taskId} ${input.taskTitle}`
+      );
+
+      // 能力提示（原 fatal 拒绝已随 bash 开放降级为 info，2026-10-03 用户决策）：
+      // 执行器现已开放 bash，安装/远程/容器/服务类任务可直接执行，不再 fatal 终止。
+      // 仅在任务文本命中 shell 语义时于「思考过程」区提示一句，帮助使用者了解
+      // 后续将真实执行命令（高危命令仍有人工确认闸门兜底）。
+      const capabilityGap = detectShellCapabilityGap([input.taskTitle, input.objective, ...input.acceptanceCriteria]);
+      if (capabilityGap.requiresShell) {
+        emitProgress(
+          "task_start",
+          `任务涉及命令执行（${capabilityGap.capabilities.join("、")}），将通过 bash 真实执行`,
+          `能力提示：任务文本命中 ${capabilityGap.capabilities.join("、")} 语义，执行器将用 bash 真实执行相关命令；高危命令会挂起等待人工确认。`
+        );
+      }
+
       // 拒绝风暴 fail-fast（修复"同一错误静默重复烧轮"2026-10-03）：
-      // 累计连续被权限钩子（牢笼/凭据/白名单）拒绝的工具调用数。真实事故中
-      // 模型反复尝试读 .env.prod.example / 越界路径被 deny，36 次 LLM 调用
-      // 全程静默重复同一错误。达到阈值立即终止并醒目标注根因，
-      // 而不是把 12 轮 × N 次调用烧完才报"工具循环达上限"。
-      let consecutiveDenials = 0;
+      // 按"被拒目标指纹"分组计数——同一目标路径/同一被拒工具重复命中即累计；
+      // 其他目标的合法调用穿插不清零（此前一次成功调用即整体清零，模型
+      // "成功一次→再撞同一堵墙"的循环恰好绕过计数，烧满 12 轮才终止）。
+      // 任一指纹达到阈值立即终止并醒目标注重复目标，交回编排器决定 fix/abort。
+      const denialCountsByTarget = new Map<string, number>();
       const DENIAL_STORM_LIMIT = 6;
 
       for (let round = 1; round <= this.maxToolRounds; round += 1) {
@@ -306,6 +470,12 @@ export class LlmTaskExecutor implements P5TaskExecutor {
         }
 
         // 真实非流式 LLM 请求（简单、usage 直接可得、无 skill 预请求缝隙）
+        emitProgress(
+          "llm_request",
+          `第 ${round} 轮：向模型发起请求…`,
+          `── 轮次 ${round}/${this.maxToolRounds}：LLM 请求开始`,
+          round
+        );
         const response = await client.createMessage({
           messages,
           tools: toolDefinitions,
@@ -332,6 +502,12 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             inputTokensTotal + outputTokensTotal,
             estimatedCharsTotal
           );
+          emitProgress(
+            "task_end",
+            `任务完成：${(response.content || "").slice(0, 200)}`,
+            `── 轮次 ${round}：模型给出终态回复，任务正常结束\n变更文件：${changedFiles.length > 0 ? changedFiles.join(", ") : "（无）"}`,
+            round
+          );
           return Object.freeze({
             success: true,
             summary: (response.content || "").slice(0, MAX_SUMMARY_CHARS),
@@ -346,6 +522,14 @@ export class LlmTaskExecutor implements P5TaskExecutor {
         messages.push(this.buildAssistantToolCallMessage(response.toolCalls, response.content));
 
         // 真实执行工具调用（越权由 onBeforeToolExecution 进程内硬判，deny 结果原样回灌）
+        emitProgress(
+          "tool_execution",
+          `第 ${round} 轮：执行 ${response.toolCalls.map((tc) => tc.name).join("、")}`,
+          `── 轮次 ${round}：LLM 返回 ${response.toolCalls.length} 个工具调用：${response.toolCalls
+            .map((tc) => `${tc.name}(${this.summarizeToolArgs(tc.argumentsJson)})`)
+            .join("；")}`,
+          round
+        );
         const executions: ToolCallExecution[] = await toolExecutor.executeToolCalls(
           toolSessionId,
           response.toolCalls.map((tc) => ({
@@ -356,44 +540,68 @@ export class LlmTaskExecutor implements P5TaskExecutor {
           {
             signal: abortController.signal,
             shouldStop: () => this.isAbortRequested(input.abortFlagPath),
-            onBeforeToolExecution: (toolName, args) => this.authorizeToolCall(toolName, args, toolSessionId),
+            onBeforeToolExecution: (toolName, args) =>
+              this.authorizeToolCall(toolName, args, toolSessionId, input, emitProgress),
           }
         );
 
         // 每个工具结果作为独立 tool 消息（tool_call_id 与调用一一配对）
-        for (const execution of executions) {
+        const toolResults: string[] = [];
+        // 本轮被拒指纹的最大累计计数与对应目标（风暴判定用，跨轮累计不清零）
+        let stormHitCount = 0;
+        let stormTarget = "";
+        for (let i = 0; i < executions.length; i += 1) {
+          const execution = executions[i]!;
           messages.push(
             this.buildSessionMessage("tool", execution.content, Object.freeze({ tool_call_id: execution.toolCallId }))
           );
-          // 拒绝风暴计数：本轮出现任何成功调用即清零；连续 deny 达阈值 fail-fast
+          toolResults.push(
+            `${this.isDeniedToolExecution(execution) ? "✗ 拒绝" : "✓"} ${execution.content.slice(0, 120)}`
+          );
+          // 拒绝风暴计数（按被拒目标指纹分组）：同一目标重复 deny 即累计，
+          // 不同目标/成功调用互不干扰——合法穿插调用不再给风暴"续命清零"
           if (this.isDeniedToolExecution(execution)) {
-            consecutiveDenials += 1;
-          } else {
-            consecutiveDenials = 0;
+            const toolCall = response.toolCalls[i]!;
+            const fingerprint = this.denialFingerprint(toolCall.name, toolCall.argumentsJson);
+            const count = (denialCountsByTarget.get(fingerprint) ?? 0) + 1;
+            denialCountsByTarget.set(fingerprint, count);
+            if (count > stormHitCount) {
+              stormHitCount = count;
+              stormTarget = fingerprint;
+            }
           }
         }
-        if (consecutiveDenials >= DENIAL_STORM_LIMIT) {
-          return this.failure(
-            `拒绝风暴：连续 ${consecutiveDenials} 次工具调用被权限守卫拒绝——目标可能超出 P5 执行器能力` +
-              `（无 bash / 路径牢笼 / 凭据守卫）。请检查任务目标是否需要命令执行，或调整任务卡文件范围。`,
-            llmRequests
-          );
+        emitProgress("tool_execution", "", `工具结果：\n${toolResults.join("\n")}`, round);
+        if (stormHitCount >= DENIAL_STORM_LIMIT) {
+          const stormError =
+            `拒绝风暴：同一目标「${stormTarget}」累计 ${stormHitCount} 次被权限守卫拒绝——` +
+            `反复重试同一堵墙不会变通，目标可能超出执行器安全边界` +
+            `（路径牢笼 / 凭据守卫 / 高危命令未获人工确认）。请调整任务目标、文件范围，或改用安全替代命令。`;
+          emitProgress("task_end", `执行失败：拒绝风暴`, stormError, round);
+          return this.failure(stormError, llmRequests);
         }
       }
 
       // 达到轮数上限仍在持续调用工具：诚实判失败，交回编排器决定 fix/abort
-      return this.failure(`工具循环达上限（${this.maxToolRounds} 轮）仍未给出终态回复`, llmRequests);
+      const roundLimitError = `工具循环达上限（${this.maxToolRounds} 轮）仍未给出终态回复`;
+      emitProgress("task_end", `执行失败：${roundLimitError}`, roundLimitError);
+      return this.failure(roundLimitError, llmRequests);
     } catch (error) {
       // AbortError：用户/编排器主动中止
       if (error instanceof Error && error.name === "AbortError") {
+        emitProgress("task_end", "执行中止：任务被中止信号中断", "aborted：任务执行被中止信号中断");
         return this.failure("aborted：任务执行被中止信号中断", llmRequests);
       }
       const message = error instanceof Error ? error.message : String(error);
       this.log(`任务执行异常：${message}`, "error");
+      emitProgress("task_end", `执行异常：${message}`, `任务执行异常：${message}`);
       return this.failure(`任务执行异常：${message}`, llmRequests);
     } finally {
       // 释放合成 sessionId 在 common/state 模块级 Map 中累积的 snippet/文件状态
       clearSessionState(toolSessionId);
+      // 同步释放 bash-handler 模块级 sessionWorkingDirs 中该 sessionId 的 cwd 缓存，
+      // 防止临时项目目录被清理后残留 stale 路径，导致后续同名 sessionId 的任务 spawn ENOENT。
+      clearSessionWorkingDir(toolSessionId);
     }
   }
 
@@ -411,6 +619,58 @@ export class LlmTaskExecutor implements P5TaskExecutor {
     return execution.content.includes("审批门控拒绝") || execution.content.includes("denied by approval gate");
   }
 
+  /**
+   * 计算一次工具调用的"被拒目标指纹"（拒绝风暴分组计数用，2026-10-03）。
+   *
+   * 指纹 = 工具名 + 归一化后的 file_path（绝对路径原样、相对路径去 ./ 前缀），
+   * 无 file_path 的调用（edit 走 snippet_id / UpdatePlan 等）退化为原始参数
+   * JSON 截断——保证"同一被拒路径/同一错误重复即计"，不同目标各自独立计数。
+   *
+   * @param toolName 工具名
+   * @param argumentsJson 工具参数原始 JSON
+   * @returns 分组键（≤140 字符，直接用于失败文案展示）
+   */
+  private denialFingerprint(toolName: string, argumentsJson: string): string {
+    try {
+      const parsed = JSON.parse(argumentsJson) as Record<string, unknown>;
+      const filePath = typeof parsed.file_path === "string" ? parsed.file_path : "";
+      if (filePath) {
+        // 归一化：绝对路径 resolve 消除 ./ ../ 变体，避免同一路径两种写法绕过分组
+        const normalized = path.isAbsolute(filePath)
+          ? path.normalize(filePath)
+          : path.normalize(filePath).replace(/^\.\//, "");
+        return `${toolName}:${normalized}`;
+      }
+      return `${toolName}:${JSON.stringify(parsed).slice(0, 100)}`;
+    } catch {
+      return `${toolName}:${argumentsJson.slice(0, 100)}`;
+    }
+  }
+
+  /**
+   * 把工具参数 JSON 压缩成一行人类可读摘要（进度日志用，2026-10-03）。
+   *
+   * 优先展示 file_path（read/write/edit 最常见的定位参数），
+   * 解析失败或无 file_path 时退化为截断的原始 JSON，避免进度日志膨胀。
+   *
+   * @param argumentsJson 工具参数原始 JSON 字符串
+   * @returns 一行摘要（≤80 字符）
+   */
+  private summarizeToolArgs(argumentsJson: string): string {
+    try {
+      const parsed = JSON.parse(argumentsJson) as Record<string, unknown>;
+      const filePath = typeof parsed.file_path === "string" ? parsed.file_path : "";
+      if (filePath) {
+        // 只显示相对路径最后两段，避免绝对路径过长
+        const parts = filePath.split("/").filter(Boolean);
+        return parts.length > 2 ? parts.slice(-2).join("/") : filePath;
+      }
+      return JSON.stringify(parsed).slice(0, 60);
+    } catch {
+      return argumentsJson.slice(0, 60);
+    }
+  }
+
   // ==========================================================================
   // 3.2 权限硬判（白名单 + 路径牢笼 + 凭据模式）
   // ==========================================================================
@@ -426,9 +686,16 @@ export class LlmTaskExecutor implements P5TaskExecutor {
   private async authorizeToolCall(
     toolName: string,
     args: Record<string, unknown>,
-    toolSessionId: string
+    toolSessionId: string,
+    input: Readonly<P5TaskExecutionInput>,
+    emitProgress: (
+      phase: P5TaskProgressEvent["phase"],
+      previewLine: string,
+      thinkingLine: string,
+      round?: number
+    ) => void
   ): Promise<"approve" | "deny" | "ask_user"> {
-    // 第一层：工具白名单（schema 已只暴露 4 个，这里防模型/调用方注入其他工具名）
+    // 第一层：工具白名单（schema 已只暴露白名单工具，这里防模型/调用方注入其他工具名）
     if (!ALLOWED_TOOL_NAMES.has(toolName)) {
       this.log(`工具被白名单拒绝：${toolName}`, "warn");
       return "deny";
@@ -437,6 +704,55 @@ export class LlmTaskExecutor implements P5TaskExecutor {
     // UpdatePlan 无文件参数，直接放行
     if (toolName === "UpdatePlan") {
       return "approve";
+    }
+
+    // bash 专用通道：命令安全策略 + 高危人工确认（2026-10-03 用户决策：
+    // autonomous 任务直接 bash 执行安装/容器/服务类命令，不再 fatal 拒绝；
+    // 但命中破坏性模式的高危命令必须经宿主（CLI/Web）人类批准才可执行）。
+    if (toolName === "bash") {
+      const command = typeof args.command === "string" ? args.command : "";
+      if (!command.trim()) {
+        this.log("bash 调用缺少 command 参数，拒绝", "warn");
+        return "deny";
+      }
+      const risk = classifyDangerousCommand(command);
+      // 常规命令（npm/pip install、docker、curl、git、测试命令等）直接放行
+      if (risk === null) {
+        return "approve";
+      }
+      // 高危命令：无确认通道 → fail-closed 拒绝（宁可误拒不可误放）
+      const approval = this.dangerousCommandApproval ?? input.dangerousCommandApproval;
+      if (approval === undefined) {
+        this.log(`高危命令被拒绝（无确认通道）：${risk} → ${command.slice(0, 120)}`, "warn");
+        return "deny";
+      }
+      // 有确认通道：挂起等待人类决策，并把"等待确认"状态透出到 Web「思考过程」区
+      emitProgress(
+        "tool_execution",
+        `等待人工确认高危命令（${risk}）…`,
+        `⚠ 高危命令等待确认：${command.slice(0, 300)}（风险：${risk}）`
+      );
+      let approved = false;
+      try {
+        approved = await approval({
+          command,
+          risk,
+          taskId: input.taskId,
+          taskTitle: input.taskTitle,
+          runId: input.runId,
+        });
+      } catch (approvalError) {
+        // 回调异常按拒绝处理（契约：fail-closed），原因入日志便于排查宿主故障
+        const message = approvalError instanceof Error ? approvalError.message : String(approvalError);
+        this.log(`高危命令确认回调异常，按拒绝处理：${message}`, "warn");
+        approved = false;
+      }
+      emitProgress(
+        "tool_execution",
+        approved ? "人工确认：批准执行高危命令" : "人工确认：拒绝执行高危命令",
+        approved ? `人工已批准高危命令（${risk}），继续执行` : `人工拒绝/超时未确认高危命令（${risk}），该调用被 deny`
+      );
+      return approved ? "approve" : "deny";
     }
 
     // 第二层：解析目标文件路径。

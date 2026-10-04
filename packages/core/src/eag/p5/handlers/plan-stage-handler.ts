@@ -85,9 +85,9 @@ export const PLAN_REASON_TASKS_BLOCKED = "tasks-blocked" as const;
 /** 正常选中一张可执行任务卡 */
 export const PLAN_REASON_TASK_CARD_SELECTED = "task-card-selected" as const;
 /**
- * 能力预检拒绝（修复"能力/目标错配烧轮"2026-10-03）：
- * objective 命中需要 shell 能力的语义（安装/远程/容器/服务/数据库变更），
- * 而 P5 执行器工具白名单无 bash——在合成任务卡之前即 fatal 拒绝。
+ * 能力预检拒绝 reason 码（历史保留：修复"能力/目标错配烧轮"2026-10-03）。
+ * 同日用户决策开放 bash 后 plan 不再产生该 reason（fatal 拦截已移除）；
+ * 保留导出仅为兼容外部对历史 RunState 制品的 reason 判别，勿新增消费方。
  */
 export const PLAN_REASON_CAPABILITY_GAP = "capability-gap" as const;
 
@@ -291,32 +291,9 @@ export class P5PlanStageHandler implements P5StageHandler {
         }
 
         try {
-          // 能力预检（修复"能力/目标错配烧轮"2026-10-03）：
-          // P5 执行器工具白名单硬隔离为 read/write/edit/UpdatePlan（无 bash），
-          // 需要命令执行的目标（安装/远程/容器/服务/数据库变更）物理上不可能完成。
-          // 此前此类目标照样合成放行 → 3 轮 × 12 次 LLM 调用空转 → 熔断 abort，
-          // 全程主会话零输出。现在合成前检测，命中即 fatal 拒绝并给出可执行建议。
-          const capabilityGap = detectShellCapabilityGap([objective]);
-          if (capabilityGap.requiresShell) {
-            return createFailedStageResult(
-              "plan",
-              "fatal",
-              `目标需要主会话执行命令，超出 P5 执行器能力（缺口：${capabilityGap.capabilities.join("、")}）`,
-              "P5 任务执行器仅有 read/write/edit/UpdatePlan 工具（无 bash），" +
-                "安装、远程执行、容器、服务、数据库类操作必须由主会话（DeepCode 对话）执行。" +
-                "建议：退出自主循环后直接在主会话分步下达该目标；" +
-                "或将目标改写为纯代码/配置文件产出（如生成部署清单、Dockerfile、初始化脚本），" +
-                "执行动作交给主会话或人工。",
-              {
-                taskCard: null,
-                reason: PLAN_REASON_CAPABILITY_GAP,
-                capabilityGap: capabilityGap.capabilities,
-              },
-              [],
-              0,
-              Date.now() - startTime
-            );
-          }
+          // 能力 fatal 预检已随执行器开放 bash 而移除（2026-10-03 用户决策）：
+          // objective 命中安装/远程/容器/服务/数据库语义时不再拒绝——执行器现在
+          // 有 bash 工具可真实执行此类任务（高危命令由人工确认闸门兜底）。
           const synthesizedContent = buildSynthesizedTasksContent(objective);
           // 原子落盘（同目录 tmp + rename），随后与手写清单走完全相同的"回读→解析"闭环
           atomicWriteTextFile(tasksFilePath, synthesizedContent);
@@ -408,6 +385,10 @@ export class P5PlanStageHandler implements P5StageHandler {
           Date.now() - startTime
         );
       }
+
+      // （3.5 任务卡级能力 fatal 预检已随执行器开放 bash 而移除，2026-10-03
+      //  用户决策：docker/安装/服务类任务卡直接放行进 dev，由执行器 bash 真实
+      //  执行；高危命令在执行器权限钩子处挂起等待人工确认。）
 
       // 4. 转换为标准 TaskCard 接口
       const taskCard: TaskCard = Object.freeze({
@@ -542,15 +523,20 @@ export class P5PlanStageHandler implements P5StageHandler {
 }
 
 // ============================================================================
-// 3.5 能力预检（修复"能力/目标错配烧轮"2026-10-03）
+// 3.5 能力语义检测（原"能力预检 fatal 拒绝"，2026-10-03 bash 开放后降级为提示）
 // ============================================================================
 
 /**
- * 能力缺口检测关键词表（P5 执行器无 shell 能力 → 需要命令执行的目标必败）。
+ * 能力语义检测关键词表（识别需要 shell 命令执行的任务文本）。
  *
  * 语义：命中任一模式意味着任务完成的**必要步骤**需要执行命令
- * （安装软件 / 远程连接 / 容器操作 / 长驻服务 / 数据库变更），
- * 而非仅编辑代码文件。
+ * （安装软件 / 远程连接 / 容器操作 / 长驻服务 / 数据库变更）。
+ *
+ * 历史（修复"能力/目标错配烧轮"2026-10-03）：P5 执行器曾硬隔离无 bash，
+ * 此类目标必败 → plan 阶段 fatal 拒绝。同日用户决策开放 bash 后，fatal
+ * 拦截已移除（plan 不再消费本函数），当前唯一消费方为 LlmTaskExecutor
+ * 的「能力提示」进度事件；破坏性命令的安全边界改由执行器
+ * DANGEROUS_COMMAND_PATTERNS + 人工确认闸门承担。
  */
 const CAPABILITY_GAP_PATTERNS: ReadonlyArray<Readonly<[RegExp, string]>> = Object.freeze([
   // 远程执行 / SSH（如"远程装 K3s CUDA""登录服务器部署"）。
@@ -574,7 +560,7 @@ const CAPABILITY_GAP_PATTERNS: ReadonlyArray<Readonly<[RegExp, string]>> = Objec
 ]);
 
 /**
- * 能力预检结果。
+ * 能力提示检测结果（不再用于 fatal 拒绝，仅驱动执行器进度提示，2026-10-03）。
  */
 export interface CapabilityPreflightResult {
   /** 目标/任务是否命中需要 shell 能力的语义 */
@@ -584,12 +570,13 @@ export interface CapabilityPreflightResult {
 }
 
 /**
- * 对 objective + 任务卡文本做能力缺口检测（修复"能力/目标错配"2026-10-03）。
+ * 对 objective + 任务卡文本做 shell 能力语义检测。
  *
- * 事故复盘：目标"远程装 K3s CUDA、部署 MySQL/Redis、拉镜像、初始化数据"被
- * objective 合成为单卡任务放行，dev 阶段执行器只有 read/write/edit 四个工具，
- * 每轮 12 次 LLM 调用空转 ×3 轮才熔断 abort——共 36 次 LLM 调用烧完才知道
- * "根本不可能完成"。本预检让这类目标在 plan 阶段第一步就被诚实拒绝。
+ * 历史（修复"能力/目标错配烧轮"2026-10-03）：目标"远程装 K3s CUDA、部署
+ * MySQL/Redis、拉镜像、初始化数据"曾被合成放行，dev 阶段执行器（当时无
+ * bash）12 次 LLM 调用空转 ×3 轮才熔断 abort。当日用户决策开放 bash 后，
+ * 本函数不再用于 fatal 拒绝，仅供 LlmTaskExecutor 在「思考过程」区提示
+ * "任务将通过 bash 真实执行命令"。
  *
  * @param texts 待检测文本列表（objective、任务卡标题等）
  * @returns 检测结果（命中类别已去重）

@@ -182,6 +182,7 @@ import type { DeployRequest } from "./eag/cli/eag-command-parser";
 import type { AutonomousOrchestrator } from "./eag/p5/autonomous-orchestrator";
 // 方案 A §3.9：进程内 LLM 任务执行器（dev/fix 阶段真实编码循环）+ 重入防护 ALS
 import { LlmTaskExecutor, p5TaskExecutionStorage } from "./eag/p5/executors/llm-task-executor";
+import type { P5TaskProgressEvent } from "./eag/p5/executors/llm-task-executor";
 import {
   EagAutonomousCommandHandler,
   extractEagAutonomousRequestFromPrompt,
@@ -593,6 +594,29 @@ export type SessionManagerOptions = {
   onMcpStatusChanged?: () => void;
   onProcessStdout?: (pid: number, chunk: string) => void;
   /**
+   * EAG-P5：bash 高危命令人工确认回调（用户决策 2026-10-03）。
+   *
+   * autonomous 任务执行器（LlmTaskExecutor）命中破坏性命令黑名单时挂起等待
+   * 此回调的人类决策：true=批准执行，false=拒绝（含超时/异常，fail-closed）。
+   * Web 宿主接前端确认框，CLI 宿主接审批提示；未注入时执行器直接 deny 高危命令。
+   */
+  onP5DangerousApproval?: (
+    request: Readonly<{
+      /** 待确认的原始命令文本 */
+      command: string;
+      /** 命中的破坏性风险类别（如 "rm -rf 根目录"） */
+      risk: string;
+      /** 所属任务卡 ID（UI 展示上下文） */
+      taskId: string;
+      /** 所属任务卡标题 */
+      taskTitle: string;
+      /** P5 run-id（宿主路由/去重用） */
+      runId: string;
+      /** 审批请求唯一 ID（宿主解析答案时回传关联） */
+      approvalId: string;
+    }>
+  ) => void;
+  /**
    * EAG-P0：独立评估器外挂（可选注入，§5.4 Goal Evaluator 接入主循环）
    *
    * 未注入时主循环行为完全不变（向后兼容，V2 526 测试零回归）。
@@ -928,6 +952,17 @@ export type SessionManagerOptions = {
   permissionModeOverride?: PermissionMode;
 };
 
+/**
+ * EAG-P5：bash 高危命令审批 ID 前缀（单一事实源，2026-10-04）。
+ *
+ * requestP5DangerousApproval 生成的 approvalId 以此前缀开头；
+ * Web 宿主（session-pool）按本前缀识别审批回填决策并分流到
+ * resolveP5DangerousApproval，不再进入对话轮次队列。
+ * 修改本常量必须与 requestP5DangerousApproval 的模板串同步。
+ */
+export const P5_DANGEROUS_APPROVAL_ID_PREFIX = "p5-approval-";
+
+/** LLM 流式进度帧（对外契约类型） */
 export type LlmStreamProgress = {
   requestId: string;
   sessionId?: string;
@@ -1155,6 +1190,14 @@ export class SessionManager {
   private readonly onLlmRetry?: (event: LlmRetryEvent) => void;
   private readonly onMcpStatusChanged?: () => void;
   private readonly onProcessStdout?: (pid: number, chunk: string) => void;
+  /** EAG-P5：bash 高危命令人工确认宿主回调（见 SessionManagerOptions.onP5DangerousApproval） */
+  private readonly onP5DangerousApproval?: SessionManagerOptions["onP5DangerousApproval"];
+  /**
+   * P5 高危命令审批挂起表：approvalId → resolve。
+   * 宿主经 resolveP5DangerousApproval(approvalId, approved) 回填人类决策；
+   * 回调内部另有超时兜底（见 p5DangerousCommandApprovalBridge）。
+   */
+  private readonly p5DangerousApprovalResolvers = new Map<string, (approved: boolean) => void>();
   // 上游 v0.3.1：非交互模式标志（exec/headless 场景抑制交互式提示）
   private readonly nonInteractive: boolean;
   // 三态权限模式覆盖（CLI --permission-mode 注入；未注入时读 resolved settings 的 permissions.mode）
@@ -1311,6 +1354,8 @@ export class SessionManager {
     this.onLlmRetry = options.onLlmRetry;
     this.onMcpStatusChanged = options.onMcpStatusChanged;
     this.onProcessStdout = options.onProcessStdout;
+    // EAG-P5：bash 高危命令人工确认宿主回调（Web 确认框 / CLI 审批提示注入）
+    this.onP5DangerousApproval = options.onP5DangerousApproval;
     // 合并说明：ToolExecutor 第 4 参保持 fork 侧 createLLMClient 工厂（B1 统一 LLM 路由），
     // 第 5 参采纳上游 v0.3.1 的 loadSharp（sharp 图片库懒加载，ReadImage/UnderstandImage 依赖）
     this.loadSharp = options.loadSharp;
@@ -1445,11 +1490,38 @@ export class SessionManager {
       this.autonomousOrchestrator !== undefined &&
       typeof autonomousOrchestratorWithBinder?.bindTaskExecutor === "function"
     ) {
+      // autonomous 任务执行进度 → llm_delta 桥接（修复 Web UI 分流只显示"思考中…"
+      // 但不显示执行内容 2026-10-03）：执行器每轮推送结构化进度，转成现有
+      // LlmStreamProgress 帧经 onLlmStreamProgress 外发，Web 端透传 SSE llm_delta，
+      // 前端「思考过程」折叠区实时渲染轮次/工具调用/结果摘要。
+      const p5ProgressStartedAt = new Date().toISOString();
+      const p5ProgressRequestId = `p5-progress-${crypto.randomUUID()}`;
+      const onTaskProgress = (event: Readonly<P5TaskProgressEvent>): void => {
+        // task_start / task_end 用 start/end 相位闭环流式气泡；中间轮次用 update
+        const phase = event.phase === "task_start" ? "start" : event.phase === "task_end" ? "end" : "update";
+        this.emitLlmStreamProgress(
+          p5ProgressRequestId,
+          p5ProgressStartedAt,
+          0,
+          phase,
+          undefined,
+          event.previewText,
+          event.thinkingText
+        );
+      };
       const p5TaskExecutor = new LlmTaskExecutor({
         projectRoot: this.projectRoot,
         // 闭包延迟到每次任务执行时再取客户端：与 createLLMClient 既有语义一致，
         // 无凭据时返回 null，LlmTaskExecutor 首轮即 fail-closed（零请求 failed）
         createLlmClient: () => this.createLLMClient(),
+        // bash 高危命令人工确认桥接（用户决策 2026-10-03）：执行器命中破坏性
+        // 黑名单的命令挂起等待宿主确认——宿主经 onP5DangerousApproval 收到
+        // 审批请求（Web 确认框 / CLI 提示），人类决策经 resolveP5DangerousApproval
+        // 回填。宿主未注入回调时传 undefined → 执行器 fail-closed deny。
+        dangerousCommandApproval:
+          this.onP5DangerousApproval === undefined
+            ? undefined
+            : (request): Promise<boolean> => this.requestP5DangerousApproval(request),
         // model 仅用于工具定义的多模态裁剪等，实际请求模型由 client 自身决定。
         // 走注入的 getResolvedSettings（必填、此刻已赋值）而非直接读盘：
         // 与设计文档 §3.9 一致，并尊重 CLI/测试对设置解析的覆写。
@@ -1463,6 +1535,7 @@ export class SessionManager {
           }
           // info 级别不打印，避免自主循环中工具轮日志淹没主对话输出
         },
+        onTaskProgress,
       });
       autonomousOrchestratorWithBinder.bindTaskExecutor(p5TaskExecutor);
     }
@@ -1713,6 +1786,57 @@ export class SessionManager {
       thinkingText: this.formatStreamThinking(thinkingText),
       phase,
     });
+  }
+
+  /**
+   * EAG-P5：向宿主发起 bash 高危命令人工确认（用户决策 2026-10-03）。
+   *
+   * 流程：生成 approvalId 登记挂起表 → 触发宿主 onP5DangerousApproval 回调
+   * （Web 弹确认框 / CLI 打审批提示）→ 等待人类经 resolveP5DangerousApproval
+   * 回填，或兜底超时（10 分钟）按拒绝处理（fail-closed：无人决策绝不放行）。
+   *
+   * @param request 执行器透传的高危命令上下文（command/risk/taskId/taskTitle/runId）
+   * @returns 人类是否批准执行该命令
+   */
+  private requestP5DangerousApproval(
+    request: Readonly<{ command: string; risk: string; taskId: string; taskTitle: string; runId: string }>
+  ): Promise<boolean> {
+    const approvalId = `${P5_DANGEROUS_APPROVAL_ID_PREFIX}${crypto.randomUUID()}`;
+    const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const settle = (approved: boolean): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        this.p5DangerousApprovalResolvers.delete(approvalId);
+        resolve(approved);
+      };
+      // 兜底超时：宿主吞掉确认请求（前端断线/未实现审批 UI）时绝不无限挂起，
+      // 超时按拒绝处理，执行器把 deny 原因回灌模型改用安全替代方案
+      const timer = setTimeout(() => settle(false), APPROVAL_TIMEOUT_MS);
+      this.p5DangerousApprovalResolvers.set(approvalId, settle);
+      // 宿主回调自身异常按拒绝处理（fail-closed 与端口契约一致）
+      Promise.resolve(this.onP5DangerousApproval?.({ ...request, approvalId })).catch(() => settle(false));
+    });
+  }
+
+  /**
+   * EAG-P5：回填高危命令审批的人类决策（宿主侧调用，Web/CLI 确认框确认后触发）。
+   *
+   * @param approvalId requestP5DangerousApproval 生成并透传给宿主的审批 ID
+   * @param approved 人类是否批准
+   * @returns 是否命中挂起中的审批（false 表示已超时/重复回填，宿主可安全忽略）
+   */
+  resolveP5DangerousApproval(approvalId: string, approved: boolean): boolean {
+    const settle = this.p5DangerousApprovalResolvers.get(approvalId);
+    if (!settle) {
+      return false;
+    }
+    settle(approved);
+    return true;
   }
 
   // 中断类错误判定与中断抛出（已迁移到 ./stream-aggregator.ts，见 CRITICAL-1 模块 1）

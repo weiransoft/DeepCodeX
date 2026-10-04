@@ -130,12 +130,15 @@ test("E1. write 工具真实落盘 → 终态：success、llmRequests=2、token 
       `changedFiles 应含 ${targetRelativePath}，实际：${JSON.stringify(result.changedFiles)}`
     );
 
-    // 4. 两次请求均只暴露白名单工具（无 bash/AskUserQuestion 等）
+    // 4. 两次请求均只暴露白名单工具（bash 已入白名单，2026-10-03 用户决策）
     const requests = client.getRequests();
     assert.equal(requests.length, 2);
     for (const record of requests) {
       for (const toolName of record.toolNames) {
-        assert.ok(["read", "write", "edit", "UpdatePlan"].includes(toolName), `暴露了白名单外工具：${toolName}`);
+        assert.ok(
+          ["read", "write", "edit", "UpdatePlan", "bash"].includes(toolName),
+          `暴露了白名单外工具：${toolName}`
+        );
       }
     }
   } finally {
@@ -295,29 +298,39 @@ test("E3c. 只读放行（修复 2026-10-03）：read /tmp 下文件应 approve�
   }
 });
 
-test("E4. 白名单外工具（bash）：deny 且命令绝不执行（副作用 marker 不存在）", async () => {
+test("E4. bash 入白名单（用户决策 2026-10-03）：常规命令 approve 真实执行；白名单外工具仍 deny", async () => {
   const projectRoot = createGitProject();
-  // 若 bash 被真实执行，会在项目内留下 marker 文件（用 node 而非 touch 以跨平台）
-  const markerRelativePath = "pwned.marker";
-  const markerAbsolutePath = path.join(projectRoot, markerRelativePath);
-  const injectedCommand = `node -e "require('fs').writeFileSync(${JSON.stringify(markerAbsolutePath)},'x')"`;
+  const markerAbsolutePath = path.join(projectRoot, "executed.marker");
+  // E4 同构引号约定：shell 单引号 → node 双引号源码（避免路径被解析为正则字面量）
+  const safeCommand = `node -e 'require("fs").writeFileSync(${JSON.stringify(markerAbsolutePath)},"x")'`;
   try {
     const client = new StubLlmClient([
       {
         content: "",
-        toolCalls: [{ name: "bash", args: { command: injectedCommand } }],
+        toolCalls: [
+          { name: "bash", args: { command: safeCommand } },
+          // 白名单外工具（WebSearch）仍必须 deny（防模型/调用方注入）
+          { name: "WebSearch", args: { query: "anything" } },
+        ],
       },
-      // 第二次尝试 edit（白名单内但无有效 snippet）也应被拒，随后模型终态
-      { content: "", toolCalls: [{ name: "edit", args: { snippet_id: "nonexistent", replacement: "x" } }] },
-      { content: "无可用执行通道，结束。" },
+      { content: "完成。" },
     ]);
     const executor = new LlmTaskExecutor({ projectRoot, createLlmClient: () => client });
 
     const result = await executor.executeTask(buildExecutionInput(projectRoot));
 
     assert.equal(result.success, true);
-    assert.ok(!fs.existsSync(markerAbsolutePath), "bash 被 deny，注入命令绝不能执行产生 marker");
-    assert.equal(result.changedFiles.length, 0);
+    assert.ok(fs.existsSync(markerAbsolutePath), "bash 已入白名单，常规命令必须真实执行");
+    // 白名单外工具 deny 语义必须回灌模型
+    const toolMessages = client
+      .getRequests()
+      .slice(1)
+      .flatMap((req: any) => req.messages ?? [])
+      .filter((m: any) => m.role === "tool");
+    assert.ok(
+      toolMessages.some((m: any) => /拒绝|deny/i.test(String(m.content))),
+      "WebSearch（白名单外）的 deny 必须回灌模型"
+    );
   } finally {
     cleanup(projectRoot);
   }
@@ -476,7 +489,7 @@ test("E9. 拒绝风暴：连续 6 次越权 read 后 fail-fast，不再烧满 12
   }
 });
 
-test("E10. 单次 deny 后恢复正常调用：风暴计数清零不误伤", async () => {
+test("E10. deny 穿插合法调用不误伤：少量重复 deny（< 阈值）+ 合法穿插，任务正常终态", async () => {
   const projectRoot = createGitProject();
   const envPath = path.join(projectRoot, ".env.sensitive");
   const okPath = path.join(projectRoot, "ok.txt");
@@ -484,7 +497,7 @@ test("E10. 单次 deny 后恢复正常调用：风暴计数清零不误伤", asy
     // 真实落盘凭据文件，保证 deny 由凭据守卫命中（而非"文件不存在"错误）
     fs.writeFileSync(envPath, "SECRET_TOKEN=unit-test-fixture-value\n");
     const client = new StubLlmClient([
-      // 第 1 轮：一次 deny + 一次成功 write（混合轮次清零计数）
+      // 第 1 轮：一次 deny + 一次成功 write（合法穿插）
       {
         content: "",
         toolCalls: [
@@ -492,14 +505,7 @@ test("E10. 单次 deny 后恢复正常调用：风暴计数清零不误伤", asy
           { name: "write", args: { file_path: okPath, content: "ok\n" } },
         ],
       },
-      // 后续多轮重复 deny——若计数未清零，风暴分支在第二轮就该误触发
-      {
-        content: "",
-        toolCalls: [
-          { name: "read", args: { file_path: envPath } },
-          { name: "read", args: { file_path: envPath } },
-        ],
-      },
+      // 后续轮次重复 deny 同一目标——累计 3 次仍 < 阈值 6，不得误触发风暴
       {
         content: "",
         toolCalls: [
@@ -516,6 +522,423 @@ test("E10. 单次 deny 后恢复正常调用：风暴计数清零不误伤", asy
     // 3 次 deny（< 阈值 6）→ 不触发风暴，任务以正常终态成功
     assert.equal(result.success, true);
     assert.ok(fs.existsSync(okPath), "混合轮次中的成功 write 必须真实落盘");
+  } finally {
+    cleanup(projectRoot);
+  }
+});
+
+test("E11. 拒绝风暴按目标指纹计数：合法穿插不清零，同一目标累计 6 次即 fail-fast", async () => {
+  const projectRoot = createGitProject();
+  const envPath = path.join(projectRoot, ".env.sensitive");
+  const okPath = path.join(projectRoot, "ok.txt");
+  try {
+    fs.writeFileSync(envPath, "SECRET_TOKEN=unit-test-fixture-value\n");
+    // 每轮：一次对 ok.txt 的合法 write（穿插的"成功调用"）+ 两次对凭据文件的 deny。
+    // 旧实现：每轮成功 write 把计数清零 → 风暴永不触发 → 烧满 12 轮。
+    // 新实现：ok.txt 的 write 与凭据 deny 指纹不同互不干扰，凭据指纹
+    // 每轮 +2，第 3 轮累计 6 次即 fail-fast。
+    const responses: ConstructorParameters<typeof StubLlmClient>[0] = [];
+    for (let round = 0; round < 12; round += 1) {
+      responses.push({
+        content: "",
+        toolCalls: [
+          { name: "write", args: { file_path: okPath, content: `ok-${round}\n` } },
+          { name: "read", args: { file_path: envPath } },
+          { name: "read", args: { file_path: envPath } },
+        ],
+      });
+    }
+    const client = new StubLlmClient(responses);
+    const executor = new LlmTaskExecutor({ projectRoot, createLlmClient: () => client });
+
+    const result = await executor.executeTask(buildExecutionInput(projectRoot));
+
+    assert.equal(result.success, false, "同一目标累计 6 次 deny 必须判失败");
+    assert.match(result.error ?? "", /拒绝风暴/, `应醒目标注拒绝风暴根因，实际：${result.error}`);
+    // 错误信息必须点名的被拒目标
+    assert.match(result.error ?? "", /read:.*\.env\.sensitive/, `风暴信息应含被拒目标指纹，实际：${result.error}`);
+    // fail-fast：3 轮（6 次同目标 deny）即停，合法穿插不再给风暴"续命"
+    assert.ok(result.llmRequests <= 3, `同目标风暴应在 3 轮内终止，实际 llmRequests=${result.llmRequests}`);
+    assert.ok(fs.existsSync(okPath), "穿插的合法 write 必须真实落盘（风暴不误伤正常调用）");
+  } finally {
+    cleanup(projectRoot);
+  }
+});
+
+test("E12. 风暴按指纹分组：两个不同目标各 deny 5 次（均 < 阈值）不误伤，终态成功", async () => {
+  const projectRoot = createGitProject();
+  const envPathA = path.join(projectRoot, ".env.alpha");
+  const envPathB = path.join(projectRoot, ".env.beta");
+  try {
+    fs.writeFileSync(envPathA, "SECRET_TOKEN=A\n");
+    fs.writeFileSync(envPathB, "SECRET_TOKEN=B\n");
+    // 3 轮 × 每轮 2 个目标各 1 次 deny → 每个指纹各 3 次；再加 1 轮交替 4 次
+    // → 每指纹各 5 次，均 < 阈值 6 → 不触发风暴（分组独立性）；第 4 轮终态。
+    const responses: ConstructorParameters<typeof StubLlmClient>[0] = [
+      {
+        content: "",
+        toolCalls: [
+          { name: "read", args: { file_path: envPathA } },
+          { name: "read", args: { file_path: envPathB } },
+        ],
+      },
+      {
+        content: "",
+        toolCalls: [
+          { name: "read", args: { file_path: envPathA } },
+          { name: "read", args: { file_path: envPathB } },
+        ],
+      },
+      {
+        content: "",
+        toolCalls: [
+          { name: "read", args: { file_path: envPathA } },
+          { name: "read", args: { file_path: envPathB } },
+        ],
+      },
+      {
+        content: "",
+        toolCalls: [
+          { name: "read", args: { file_path: envPathA } },
+          { name: "read", args: { file_path: envPathB } },
+          { name: "read", args: { file_path: envPathA } },
+          { name: "read", args: { file_path: envPathB } },
+        ],
+      },
+      { content: "完成" },
+    ];
+    const client = new StubLlmClient(responses);
+    const executor = new LlmTaskExecutor({ projectRoot, createLlmClient: () => client });
+
+    const result = await executor.executeTask(buildExecutionInput(projectRoot));
+
+    // 每指纹各 5 次 deny（< 阈值 6）→ 不触发风暴，任务以正常终态成功
+    assert.equal(result.success, true, `不同目标各自 < 阈值不得误触发风暴，实际：${result.error}`);
+    assert.equal(result.llmRequests, 5);
+  } finally {
+    cleanup(projectRoot);
+  }
+});
+
+test("E13. bash 开放（用户决策 2026-10-03）：shell 类任务不再拒绝，推送能力提示后正常执行", async () => {
+  const projectRoot = createGitProject();
+  const markerPath = path.join(projectRoot, "deploy.marker");
+  try {
+    // 桩客户端：第 1 轮 bash echo 写 marker（常规命令应真实执行），第 2 轮终态
+    const client = new StubLlmClient([
+      {
+        content: "",
+        toolCalls: [{ name: "bash", args: { command: `echo done > ${JSON.stringify(markerPath)}` } }],
+      },
+      { content: "已完成部署准备命令执行。" },
+    ]);
+    const progressEvents: { phase: string; previewText: string; thinkingText: string }[] = [];
+    const executor = new LlmTaskExecutor({
+      projectRoot,
+      createLlmClient: () => client,
+      onTaskProgress: (event) =>
+        progressEvents.push({ phase: event.phase, previewText: event.previewText, thinkingText: event.thinkingText }),
+    });
+
+    const input: P5TaskExecutionInput = Object.freeze({
+      projectRoot,
+      runId: "unit-run-bash",
+      iterIndex: 0,
+      stage: "dev",
+      objective: "在远程服务器部署推理环境",
+      taskId: "T-001",
+      taskTitle: "docker pull 镜像并安装 CUDA 驱动",
+      acceptanceCriteria: Object.freeze(["容器正常运行"]),
+      abortFlagPath: path.join(projectRoot, ".eag", "p5", "abort.flag"),
+    });
+
+    const result = await executor.executeTask(input);
+
+    // 不再 fatal 拒绝：任务正常执行到终态（bash 已开放，docker/安装类任务直接执行）
+    assert.equal(result.success, true, `shell 类任务应正常执行，实际 error=${result.error}`);
+    assert.equal(result.llmRequests, 2);
+    assert.ok(fs.existsSync(markerPath), "常规 bash 命令必须真实执行（echo 重定向落盘 marker）");
+
+    // 「思考过程」区必须收到能力提示（告知将通过 bash 真实执行命令）
+    const hint = progressEvents.find((e) => e.thinkingText.includes("能力提示"));
+    assert.ok(hint, `进度事件应含能力提示，实际：${JSON.stringify(progressEvents.map((e) => e.previewText))}`);
+    assert.match(hint.thinkingText, /容器|安装/, "能力提示应列出命中的 shell 语义类别");
+    assert.match(hint.thinkingText, /人工确认/, "能力提示应说明高危命令有人工确认闸门");
+  } finally {
+    cleanup(projectRoot);
+  }
+});
+
+test("E14. bash 高危命令无确认通道：fail-closed deny，命令绝不执行", async () => {
+  const projectRoot = createGitProject();
+  const markerPath = path.join(projectRoot, "pwned.marker");
+  try {
+    // 注入命中黑名单的命令（shred 销毁文件）：未注入 dangerousCommandApproval
+    // → 权限钩子直接 deny，命令绝不执行（marker 不存在即证明）
+    const injectedCommand = `node -e "require('fs').writeFileSync(${JSON.stringify(markerPath)},'x')" && shred ${JSON.stringify(markerPath)}`;
+    const client = new StubLlmClient([
+      { content: "", toolCalls: [{ name: "bash", args: { command: injectedCommand } }] },
+      { content: "高危命令被拒绝，结束。" },
+    ]);
+    const executor = new LlmTaskExecutor({ projectRoot, createLlmClient: () => client });
+
+    const result = await executor.executeTask(buildExecutionInput(projectRoot));
+
+    assert.equal(result.success, true, "deny 回灌后模型终态，任务本身正常收尾");
+    assert.ok(!fs.existsSync(markerPath), "高危命令被 deny，注入命令绝不能执行产生 marker");
+    // 拒绝语义必须回灌给模型（tool 消息含拒绝文案），供模型改用安全替代方案
+    const toolMessages = client
+      .getRequests()
+      .slice(1)
+      .flatMap((req: any) => req.messages ?? [])
+      .filter((m: any) => m.role === "tool");
+    assert.ok(
+      toolMessages.some((m: any) => /拒绝|deny/i.test(String(m.content))),
+      "高危命令 deny 结果必须回灌模型"
+    );
+  } finally {
+    cleanup(projectRoot);
+  }
+});
+
+test("E15. bash 高危命令人工批准：确认后真实执行；人工拒绝：deny 且不执行", async () => {
+  // 场景 A：宿主确认回调返回 true → 命令真实执行（echo 重定向落盘 marker）
+  const projectRootA = createGitProject();
+  const markerDir = fs.mkdtempSync(path.join(os.tmpdir(), "eag-p5-e15-"));
+  const markerA = path.join(markerDir, "approved.marker");
+  // 命令含 sudo（黑名单"全局/提权安装"）但实际无害：用 sudo -n true 验证拦截语义，
+  // 再附加安全部分验证放行后真实执行——拆两条命令避免真实 sudo 交互。
+  const riskyCommandA = `sudo -n true; echo ok > ${JSON.stringify(markerA)}`;
+  try {
+    const approvalCalls: { command: string; risk: string; taskId: string }[] = [];
+    const client = new StubLlmClient([
+      { content: "", toolCalls: [{ name: "bash", args: { command: riskyCommandA } }] },
+      { content: "完成。" },
+    ]);
+    const executor = new LlmTaskExecutor({
+      projectRoot: projectRootA,
+      createLlmClient: () => client,
+      dangerousCommandApproval: async (request) => {
+        approvalCalls.push({ command: request.command, risk: request.risk, taskId: request.taskId });
+        return true; // 人类批准
+      },
+    });
+    const result = await executor.executeTask(buildExecutionInput(projectRootA));
+    assert.equal(result.success, true);
+    assert.equal(approvalCalls.length, 1, "高危命令必须恰好触发一次人工确认");
+    assert.match(approvalCalls[0]!.risk, /提权|安装/, `确认请求应含风险类别，实际：${approvalCalls[0]!.risk}`);
+    assert.equal(approvalCalls[0]!.taskId, "T-001", "确认请求应携带任务卡上下文");
+    // 批准 → handler 真实执行的证据取"命令回灌给模型的 tool 消息"：
+    // ok=true 且含 sudo 的 stderr 输出——证明命令进程真实跑过（非 deny 短路）。
+    const toolMessages = client
+      .getRequests()
+      .slice(1)
+      .flatMap((req: any) => req.messages ?? [])
+      .filter((m: any) => m.role === "tool");
+    assert.ok(
+      toolMessages.some((m: any) => /"ok":\s*true/.test(String(m.content)) && /sudo/i.test(String(m.content))),
+      `人工批准后 bash 命令必须真实执行（tool 回灌应含 ok:true 与 sudo 输出），实际：${JSON.stringify(
+        toolMessages.map((m: any) => String(m.content).slice(0, 150))
+      )}`
+    );
+    // 命令副作用断言：批准执行的 echo 必须真实落盘（stale cwd 修复后此断言稳定）
+    assert.ok(fs.existsSync(markerA), "人工批准后 bash 命令的 echo 副作用必须真实落盘");
+  } finally {
+    cleanup(projectRootA);
+    try {
+      fs.rmSync(markerDir, { recursive: true, force: true });
+    } catch {
+      // 容错
+    }
+  }
+
+  // 场景 B：宿主确认回调返回 false → deny，命令绝不执行
+  const projectRootB = createGitProject();
+  const markerB = path.join(projectRootB, "rejected.marker");
+  try {
+    const client = new StubLlmClient([
+      { content: "", toolCalls: [{ name: "bash", args: { command: `shred ${JSON.stringify(markerB)}` } }] },
+      { content: "用户拒绝，结束。" },
+    ]);
+    const executor = new LlmTaskExecutor({
+      projectRoot: projectRootB,
+      createLlmClient: () => client,
+      dangerousCommandApproval: async () => false, // 人类拒绝
+    });
+    const result = await executor.executeTask(buildExecutionInput(projectRootB));
+    assert.equal(result.success, true);
+    assert.ok(!fs.existsSync(markerB), "人工拒绝后高危命令绝不能执行");
+  } finally {
+    cleanup(projectRootB);
+  }
+});
+
+test("E16. stale cwd 回归（修复 2026-10-04）：同合成 sessionId 的前序项目目录被删除后，后续任务 bash 仍真实执行", async () => {
+  // 根因：bash-handler 模块级 sessionWorkingDirs 按 sessionId 缓存 cwd；
+  // P5 执行器合成 sessionId（p5-<runId>-i<iter>-<stage>）跨任务相同，
+  // 前序任务的临时项目目录被清理删除后缓存残留 stale 路径，
+  // spawn 的 cwd 指向不存在目录时 Node 报出误导性的 `spawn <shell> ENOENT`。
+  // 本用例用同一 buildExecutionInput（同 runId/iterIndex/stage → 同 sessionId）
+  // 复刻该场景：case-1 执行 bash 后删除其项目目录，case-2 必须不受污染。
+  const projectRootFirst = createGitProject();
+  const projectRootSecond = createGitProject();
+  try {
+    // 第一轮：正常执行 bash，cwd 缓存写入 projectRootFirst
+    const clientFirst = new StubLlmClient([
+      { content: "", toolCalls: [{ name: "bash", args: { command: "echo first" } }] },
+      { content: "完成。" },
+    ]);
+    const executorFirst = new LlmTaskExecutor({ projectRoot: projectRootFirst, createLlmClient: () => clientFirst });
+    const resultFirst = await executorFirst.executeTask(buildExecutionInput(projectRootFirst));
+    assert.equal(resultFirst.success, true, "第一轮 bash 应成功");
+
+    // 模拟编排器清理前序任务的临时项目目录（缓存中残留 stale cwd）
+    cleanup(projectRootFirst);
+
+    // 第二轮：同合成 sessionId 的新任务，新目录。修复前必现 spawn ENOENT。
+    const markerSecond = path.join(projectRootSecond, "cwd-clean.marker");
+    const clientSecond = new StubLlmClient([
+      { content: "", toolCalls: [{ name: "bash", args: { command: `echo ok > ${JSON.stringify(markerSecond)}` } }] },
+      { content: "完成。" },
+    ]);
+    const executorSecond = new LlmTaskExecutor({ projectRoot: projectRootSecond, createLlmClient: () => clientSecond });
+    const resultSecond = await executorSecond.executeTask(buildExecutionInput(projectRootSecond));
+    assert.equal(resultSecond.success, true, "第二轮任务应成功（stale cwd 已被防御回退）");
+
+    // bash 真实执行证据：tool 回灌 ok:true 且副作用落盘
+    const toolMessages = clientSecond
+      .getRequests()
+      .slice(1)
+      .flatMap((req: any) => req.messages ?? [])
+      .filter((m: any) => m.role === "tool");
+    assert.ok(
+      toolMessages.some((m: any) => /"ok":\s*true/.test(String(m.content))),
+      `stale cwd 场景下 bash 必须真实执行（tool 回灌应含 ok:true），实际：${JSON.stringify(
+        toolMessages.map((m: any) => String(m.content).slice(0, 200))
+      )}`
+    );
+    assert.ok(fs.existsSync(markerSecond), "stale cwd 场景下 bash 副作用必须真实落盘");
+  } finally {
+    cleanup(projectRootFirst);
+    cleanup(projectRootSecond);
+  }
+});
+
+// ============================================================================
+// 3. onTaskProgress 进度回调（Web UI 分流进展显示，2026-10-03）
+// ============================================================================
+
+test("P1. onTaskProgress：正常 write→终态任务应推送 task_start / llm_request / tool_execution / task_end 四类进度", async () => {
+  const projectRoot = createGitProject();
+  try {
+    const targetAbsolutePath = path.join(projectRoot, "src", "answer.js");
+    const fileContent = "module.exports = () => 42;\n";
+
+    const client = new StubLlmClient([
+      {
+        content: "",
+        toolCalls: [{ name: "write", args: { file_path: targetAbsolutePath, content: fileContent } }],
+      },
+      { content: "已创建 src/answer.js。" },
+    ]);
+
+    /** 进度事件真实收集（非断言替身——验证的就是这个数组的内容） */
+    const progressEvents: { phase: string; previewText: string; thinkingText: string }[] = [];
+    const executor = new LlmTaskExecutor({
+      projectRoot,
+      createLlmClient: () => client,
+      onTaskProgress: (event) => {
+        progressEvents.push({
+          phase: event.phase,
+          previewText: event.previewText,
+          thinkingText: event.thinkingText,
+        });
+      },
+    });
+
+    const result = await executor.executeTask(buildExecutionInput(projectRoot));
+    assert.equal(result.success, true);
+
+    // 1. 四类进度相位全部出现且顺序正确
+    const phases = progressEvents.map((e) => e.phase);
+    assert.ok(phases.includes("task_start"), "缺少 task_start");
+    assert.ok(phases.includes("llm_request"), "缺少 llm_request");
+    assert.ok(phases.includes("tool_execution"), "缺少 tool_execution");
+    assert.ok(phases.includes("task_end"), "缺少 task_end");
+    assert.equal(phases[0], "task_start", "首个进度必须是 task_start");
+    assert.equal(phases[phases.length - 1], "task_end", "末个进度必须是 task_end");
+
+    // 2. task_start 的 previewText 包含任务卡信息
+    const start = progressEvents.find((e) => e.phase === "task_start")!;
+    assert.ok(start.previewText.includes("T-001"), "task_start 应含任务卡 ID");
+    assert.ok(start.thinkingText.includes("dev"), "task_start thinkingText 应含阶段名");
+
+    // 3. tool_execution 的 thinkingText 包含工具名与文件路径摘要
+    const toolEvents = progressEvents.filter((e) => e.phase === "tool_execution");
+    assert.ok(toolEvents.length >= 1, "至少一次 tool_execution 进度");
+    const toolThinking = toolEvents[0].thinkingText;
+    assert.ok(toolThinking.includes("write"), "tool_execution 应含工具名 write");
+
+    // 4. task_end 的 thinkingText 包含"任务正常结束"语义
+    const end = progressEvents.find((e) => e.phase === "task_end")!;
+    assert.ok(
+      end.thinkingText.includes("终态回复") || end.thinkingText.includes("任务正常结束"),
+      "task_end thinkingText 应含终态语义"
+    );
+
+    // 5. thinkingText 单调累积（后一条包含前一条的内容前缀）
+    for (let i = 1; i < progressEvents.length; i += 1) {
+      const prev = progressEvents[i - 1].thinkingText;
+      const cur = progressEvents[i].thinkingText;
+      assert.ok(
+        cur.startsWith(prev) || prev === "" || cur.includes(prev.split("\n")[0]),
+        `thinkingText 应保持累积语义（第 ${i} 条应以前一条为基础）`
+      );
+    }
+  } finally {
+    cleanup(projectRoot);
+  }
+});
+
+test("P2. onTaskProgress：轮数上限失败时推送 task_end 且 previewText 含失败原因", async () => {
+  const projectRoot = createGitProject();
+  try {
+    // 脚本：全部轮次持续调用工具，永不给出终态（maxToolRounds 收窄为 2 加速测试）
+    const toolCallRound = {
+      content: "",
+      toolCalls: [{ name: "read", args: { file_path: path.join(projectRoot, "nonexist.js") } }],
+    };
+    const client = new StubLlmClient([toolCallRound, toolCallRound, toolCallRound]);
+
+    const progressEvents: { phase: string; previewText: string }[] = [];
+    const executor = new LlmTaskExecutor({
+      projectRoot,
+      createLlmClient: () => client,
+      maxToolRounds: 2,
+      onTaskProgress: (event) => progressEvents.push({ phase: event.phase, previewText: event.previewText }),
+    });
+
+    const result = await executor.executeTask(buildExecutionInput(projectRoot));
+    assert.equal(result.success, false, "轮数上限必须判失败");
+
+    const end = progressEvents[progressEvents.length - 1];
+    assert.equal(end.phase, "task_end", "失败终态也须推送 task_end");
+    assert.ok(end.previewText.includes("上限"), `task_end previewText 应含失败原因，实际：${end.previewText}`);
+  } finally {
+    cleanup(projectRoot);
+  }
+});
+
+test("P3. onTaskProgress 未注入（默认无操作）：任务执行不受影响（零回归）", async () => {
+  const projectRoot = createGitProject();
+  try {
+    const client = new StubLlmClient([{ content: "直接终态，无工具调用。" }]);
+    // 不传 onTaskProgress——构造的默认 noop 回调不得抛异常
+    const executor = new LlmTaskExecutor({ projectRoot, createLlmClient: () => client });
+
+    const result = await executor.executeTask(buildExecutionInput(projectRoot));
+    assert.equal(result.success, true);
+    assert.equal(result.llmRequests, 1);
   } finally {
     cleanup(projectRoot);
   }

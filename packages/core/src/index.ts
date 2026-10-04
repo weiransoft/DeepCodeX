@@ -69,6 +69,8 @@ export {
   getCompactPromptTokenThreshold,
   // web-steering C1：补充指令意图分类输出解析（web 端/测试复用同一契约）
   parseSteeringIntentJson,
+  // EAG-P5：高危命令审批 ID 前缀（Web 宿主识别审批回填决策的单一事实源）
+  P5_DANGEROUS_APPROVAL_ID_PREFIX,
 } from "./session";
 export type {
   SessionMessage,
