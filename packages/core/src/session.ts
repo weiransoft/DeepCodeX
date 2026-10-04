@@ -1085,6 +1085,86 @@ const ANAPHORA_CONFIRM_PATTERN =
 const ANAPHORA_CONFIRM_NEGATION_PATTERN =
   /(?:不要|别|勿|不用|无需|无须|禁止|严禁)\s*(?:直接|立即|马上)?\s*(?:执行|运行|启动|跑)/;
 
+// ============================================================================
+// F9-v2.1（2026-10-04）：Plan B 自动执行前的 goal 有效性预检
+// ============================================================================
+// 背景：用户输入 "继续 —— 已完成（2026-10-04 人工接管并实测验证）" 被 suggester LLM
+// 返回 suggest_autonomous → Plan B 无条件自动执行 → goal 原样透传到 LlmTaskExecutor →
+// LLM 模型因 objective 是状态标签无实质可执行意图，连续 bash 探索 10+ 轮直到 maxToolRounds。
+// 根因：Plan B 移除软条件后过度信任 suggester LLM 的判定；终态标记词（已完成/completed）
+// 应视为"不再需要执行"的信号，而非"继续执行"的目标。
+// ============================================================================
+
+/**
+ * 终态标记词模式：表示任务已完成/已验证/已停止等终态状态。
+ * 命中此模式的 goal 如果同时不含可执行动词和技术关键词，
+ * 则属于"状态标签"而非"执行目标"，不应触发自动执行。
+ *
+ * 中英文混合覆盖：既有中文运维常用的"已完成/人工接管/实测验证"，
+ * 也包含英文任务卡常见的 "completed/done/finished"。
+ *
+ * 注意：用小写 i 标志做大小写不敏感匹配，但不使用全局 g 标志——
+ * test() 是有状态的，但我们每次调用都是新的 test()，无 lastIndex 副作用。
+ */
+const GOAL_TERMINAL_MARKERS_PATTERN = Object.freeze(
+  /已完成|已做完|已验证|已执行|人工接管|实测验证|已交付|已上线|已关闭|已修复|已停止|已终止|已中止|已取消|已接管|已实测|completed|已结束|已处理|已确认|已解决/i
+);
+
+/**
+ * 可执行动词模式：表示 goal 包含实质可执行的动作。
+ * 覆盖开发（实现/修复/重构）、运维（部署/配置/升级）、数据（迁移/同步）、
+ * 工程化（测试/构建/调试）四类动词，中英文混合。
+ *
+ * 设计原则：宁可多收录也不能漏收录——如果 goal 真的包含可执行动词，
+ * 即使同时有终态标记词（如"修复已完成的回归"），也应该允许自动执行。
+ */
+const GOAL_EXECUTABLE_VERBS_PATTERN = Object.freeze(
+  /实现|修复|添加|创建|新建|删除|移除|重构|优化|配置|部署|上线|运行|测试|迁移|同步|升级|安装|生成|编写|修改|更新|合并|提交|推送|搭建|构建|调试|排查|设计|开发|完善|改造|调整|处理|解决|审查|review|implement|fix|add|create|delete|remove|refactor|optimize|config|deploy|run|test|migrate|sync|upgrade|install|generate|build|debug|handle|solve/i
+);
+
+/**
+ * 技术关键词模式：表示 goal 有具体技术上下文（不是纯状态标签）。
+ * 覆盖主流语言、框架、协议、架构概念，让模糊但有技术锚点的输入
+ * （如 "TypeScript 的测试"、"Docker 部署"）不会被误拦截。
+ */
+const GOAL_TECH_KEYWORDS_PATTERN = Object.freeze(
+  /TypeScript|JavaScript|Python|Rust|Go|Java|React|Vue|Angular|Node\.js|Docker|K8s|Kubernetes|SQL|GraphQL|REST\s*API|HTTP|CLI|API|函数|类|模块|组件|服务|数据库|接口|表|文件|目录|路径|包|依赖|配置|环境|日志|缓存|队列|任务|迭代|循环|脚本|build|compile|deploy/i
+);
+
+/**
+ * 判断 goal 是否包含足够的可执行意图（Plan B 自动执行预检）
+ *
+ * 算法：
+ * 1. 如果 goal 命中终态标记词（已完成/completed/人工接管 等）：
+ *    a. 同时检查是否有可执行动词（实现/修复/重构 等）或技术关键词（TypeScript/Docker/API 等）
+ *    b. 如果有 → 说明终态标记只是背景描述，goal 仍有可执行意图 → 返回 true
+ *       （例："修复已完成任务的回归"、"TypeScript 项目已完成一半，继续"）
+ *    c. 如果没有 → 纯状态标签，不应自动执行 → 返回 false
+ *       （例："已完成（2026-10-04 人工接管）"、"继续 —— 已验证"）
+ * 2. 如果 goal 不命中终态标记词 → 走 Plan B 默认自动执行路径 → 返回 true
+ *
+ * @param goal 待检查的用户目标文本（来自 suggester LLM 的 suggest_autonomous 结果）
+ * @returns true 表示 goal 有足够可执行意图，允许自动执行；false 表示应降级为只展示建议
+ */
+function hasExecutableIntent(goal: string): boolean {
+  // 空白/空目标 → 无可执行意图
+  if (!goal || goal.trim().length === 0) {
+    return false;
+  }
+  const trimmed = goal.trim();
+  // 仅含状态标记词且无实质内容 → 无可执行意图
+  if (GOAL_TERMINAL_MARKERS_PATTERN.test(trimmed)) {
+    // 同时有可执行动词或技术关键词 → 有实质意图（终态标记只是背景）
+    if (GOAL_EXECUTABLE_VERBS_PATTERN.test(trimmed) || GOAL_TECH_KEYWORDS_PATTERN.test(trimmed)) {
+      return true;
+    }
+    // 纯终态标记，无任何动作/技术关键词 → 无效 goal
+    return false;
+  }
+  // 不含终态标记词 → Plan B 默认自动执行
+  return true;
+}
+
 /**
  * upstream v0.4.0：LLM 自动重试事件。
  * 当流式调用触发 LlmStreamIdleTimeoutError 等可重试错误时，
@@ -3857,6 +3937,25 @@ ${agentInstructions}
         return true;
       }
 
+      // 降级处理：区分 goal 有效性预检降级 vs 通用 degraded
+      // F9-v2.1（2026-10-04）：当 tryAutoExecuteSuggestedCommand 因 goal 含纯状态标记
+      // （已完成/completed/人工接管 等）且无可执行意图而降级时，展示针对性提示；
+      // 其他 degraded 情况（硬条件不满足）保持原有"只展示建议"行为。
+      if (autoExecuteResult === "degraded-goal-invalid") {
+        const warningMessage =
+          `[EAG] 目标描述 "${goal}" 主要包含终态状态标记（如"已完成"/"人工接管"/"completed"），` +
+          `未检测到实质可执行意图。\n` +
+          `自动执行已被安全拦截——如需重新执行，请提供具体的开发/运维目标（如"修复 XX 功能"、"部署 XX 服务"）。`;
+        const assistantMessage = this.buildAssistantMessage(sessionId, warningMessage, null);
+        this.onAssistantMessage(assistantMessage, false);
+        this.updateSessionEntry(sessionId, (entry) => ({
+          ...entry,
+          status: "completed",
+          updateTime: new Date().toISOString(),
+        }));
+        return true;
+      }
+
       // 降级：tryAutoExecuteSuggestedCommand 返回 "degraded"（commandHint 不以 /eag- 开头、
       // eagCommandParser 未注入、或分发失败）时，保持"只展示"行为。
       //
@@ -3933,7 +4032,19 @@ ${agentInstructions}
     clarification: ReadonlyArray<string> | undefined,
     goal: string,
     controller?: AbortController
-  ): Promise<"executed" | "degraded"> {
+  ): Promise<"executed" | "degraded" | "degraded-goal-invalid"> {
+    // F9-v2.1（2026-10-04）：goal 有效性预检——防止状态标签触发空转循环
+    // 背景：suggester LLM 可能因上下文误判将"已完成（2026-10-04 人工接管）"这类
+    // 状态标签建议为 suggest_autonomous → Plan B 无条件自动执行 → goal 原样透传
+    // 到 LlmTaskExecutor → LLM 因无实质可执行意图连续 bash 探索烧满 12 轮。
+    // 修复：在硬条件之前先预检 goal 是否包含足够的可执行意图——仅含终态标记词
+    // 且无动作动词/技术关键词的 goal 返回特殊 degraded 标记，由上层
+    // handleEagDynamicSuggestion 展示针对性提示（不在此处直接发消息，避免
+    // 与 degraded 分支的通用消息重复/冲突）。
+    if (!hasExecutableIntent(goal)) {
+      return "degraded-goal-invalid";
+    }
+
     // 硬条件 1：commandHint 必须以 /eag- 开头（EAG 命令体系，eagCommandParser 能识别）
     // 方案 B 架构升级后，去掉了三个软条件（refine 澄清 / 显式意图关键词 / 指代确认短语）——
     // 只要 LLM 返回 suggest_* 且 commandHint 可执行，就自动执行。

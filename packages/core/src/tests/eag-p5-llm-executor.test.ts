@@ -943,3 +943,85 @@ test("P3. onTaskProgress 未注入（默认无操作）：任务执行不受影�
     cleanup(projectRoot);
   }
 });
+
+/**
+ * E3d. 只读放行前缀 + 凭据守卫协同（2026-10-04 安全加固回归）
+ *
+ * 场景：LLM 试图读取 /tmp/.env、/tmp/secrets.key 等越出牢笼但命中只读放行前缀的
+ *       凭据文件——只读放行绝不能架空凭据守卫（原代码在只读放行命中后直接 return "approve"
+ *       跳过第四层凭据判定，属于安全漏洞）。
+ *
+ * 验证：越出牢笼 + 命中 /tmp 前缀 + basename 命中凭据模式 → 必须 deny，
+ *       同时越出牢笼 + 命中 /tmp 前缀 + basename 非凭据文件 → 正常 approve（只读放行）。
+ *
+ * 安全边界：本测试不碰生产环境 /tmp 下真实凭据文件——项目本身不在 /tmp 下，
+ *       创建的 .env / secrets 都是测试临时路径，但 basename 匹配凭据模式，
+ *       足以验证守卫协同逻辑。
+ */
+test("E3d. 只读放行 + 凭据守卫协同：/tmp/.env、/tmp/private.key 越界凭据文件必须 deny", async () => {
+  const projectRoot = createGitProject();
+  // 真实预置 /tmp 下的凭据文件（文件名命中 CREDENTIAL_FILE_PATTERNS）
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "eag-p5-cred-readonly-"));
+  const tmpEnvPath = path.join(tmpDir, ".env");
+  const tmpKeyPath = path.join(tmpDir, "private.pem");
+  const tmpLogPath = path.join(tmpDir, "verify.log"); // 非凭据，对照验证只读放行仍工作
+  fs.writeFileSync(tmpEnvPath, "SECRET=should-not-be-readable\n");
+  fs.writeFileSync(tmpKeyPath, "-----BEGIN PRIVATE KEY-----\n");
+  fs.writeFileSync(tmpLogPath, "safe content\n");
+  try {
+    // Stub 脚本：模型依次尝试读取 /tmp/.env、/tmp/private.pem、/tmp/verify.log
+    // 预期：前两个凭据文件被 deny，第三个安全日志被 approve
+    const client = new StubLlmClient([
+      {
+        content: "",
+        toolCalls: [
+          { name: "read", args: { file_path: tmpEnvPath } },
+          { name: "read", args: { file_path: tmpKeyPath } },
+          { name: "read", args: { file_path: tmpLogPath } },
+        ],
+      },
+      { content: "凭据文件被拒绝，安全日志可读。" },
+    ]);
+    const executor = new LlmTaskExecutor({ projectRoot, createLlmClient: () => client });
+
+    const result = await executor.executeTask(buildExecutionInput(projectRoot));
+    assert.equal(result.success, true);
+
+    // 验证 3 个 read 调用的权限判定结果
+    const toolMessages = client
+      .getRequests()
+      .slice(1)
+      .flatMap((req: any) => req.messages ?? [])
+      .filter((m: any) => m.role === "tool");
+    assert.equal(toolMessages.length, 3, "3 次 read 应有 3 条 tool 结果回灌");
+
+    // 第 1 条：/tmp/.env → 凭据 deny
+    const envResult = String(toolMessages[0]!.content);
+    assert.match(envResult, /拒绝|deny|凭据|权限/i, `/tmp/.env 必须被凭据守卫拒绝，实际：${envResult.slice(0, 120)}`);
+    assert.ok(!/SECRET=should-not-be-readable/.test(envResult), "被拒绝的凭据内容绝不能泄露到模型");
+
+    // 第 2 条：/tmp/private.pem → 凭据 deny
+    const keyResult = String(toolMessages[1]!.content);
+    assert.match(
+      keyResult,
+      /拒绝|deny|凭据|权限/i,
+      `/tmp/private.pem 必须被凭据守卫拒绝，实际：${keyResult.slice(0, 120)}`
+    );
+    assert.ok(!/BEGIN PRIVATE KEY/.test(keyResult), "被拒绝的密钥内容绝不能泄露到模型");
+
+    // 第 3 条：/tmp/verify.log → 只读放行 approve
+    const logResult = String(toolMessages[2]!.content);
+    assert.ok(
+      !/拒绝|deny|凭据|权限/i.test(logResult),
+      `/tmp/verify.log（非凭据）应被只读放行 approve，实际：${logResult.slice(0, 120)}`
+    );
+    assert.match(logResult, /safe content/, "只读放行的安全文件内容应真实回灌");
+  } finally {
+    cleanup(projectRoot);
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      // 容错
+    }
+  }
+});

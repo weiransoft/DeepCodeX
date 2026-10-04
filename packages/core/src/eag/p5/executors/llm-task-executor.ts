@@ -771,15 +771,26 @@ export class LlmTaskExecutor implements P5TaskExecutor {
     // read 工具读取 /tmp、/opt 等只读安全前缀时直接放行——排查日志、读 wheel/安装包
     // 是任务执行的正常查询路径，牢笼的本意是防"写入"越界而非禁一切读取。
     //
-    // 但只读放行绝不能架空凭据守卫：当项目根本身就位于临时目录前缀之下
-    // （单测/沙箱布局常见，如 mkdtemp 建在 os.tmpdir），牢笼内的 .env* 凭据文件
-    // 路径同样命中临时目录前缀，直接放行会导致凭据 deny 静默失效——真实事故验证。
-    // 因此：目标解析后仍牢笼内（relativeToRoot 不以 ".." 开头）时不适用只读放行，
-    // 必须继续走第四层凭据判定；只有真正越出牢笼的只读查询才享受前缀放行。
+    // 但只读放行绝不能架空凭据守卫（2026-10-04 安全加固）：
+    // 原代码在只读放行前缀命中后直接 return "approve"，跳过了第四层凭据判定——
+    // 当 LLM 试图读取 /tmp/.env 或 /tmp/secrets.key 这种越出牢笼但 basename
+    // 命中凭据模式的文件时，会被静默放行（真实安全漏洞）。
+    // 修复：在只读放行 approve 之前，同样对 earlyResolved 的 basename 执行
+    // isCredentialProtected 检查，确保 /tmp/.env、/var/tmp/credentials 等
+    // 越界凭据文件一律被拦截。
+    //
+    // 牢笼内凭据（单测/沙箱项目位于临时目录下的 .env*）不进入此分支——
+    // earlyIsInside=true 时上面的 if 被跳过，继续走第四层凭据判定，不受影响。
     const earlyResolved = path.resolve(this.projectRoot, targetPath);
     const earlyRelative = path.relative(path.resolve(this.projectRoot), earlyResolved);
     const earlyIsInside = earlyRelative === "" || (!earlyRelative.startsWith("..") && !path.isAbsolute(earlyRelative));
     if (toolName === "read" && !earlyIsInside && isReadonlyAllowedPath(earlyResolved)) {
+      // 安全加固（2026-10-04）：越出牢笼但命中只读前缀时，仍需对 basename 执行凭据守卫
+      // 防止 /tmp/.env、/var/tmp/private.pem 等凭据文件通过只读放行绕过拦截
+      if (isCredentialProtected(path.basename(earlyResolved))) {
+        this.log(`凭据文件访问被拒绝（只读放行前缀拦截）：${earlyResolved}`, "warn");
+        return "deny";
+      }
       return "approve";
     }
 
