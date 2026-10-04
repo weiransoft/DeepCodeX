@@ -11,7 +11,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { parseMarkdownToA2ui } from "../a2ui/parser";
 import { A2uiSurface } from "../a2ui/renderer";
 import type { ChatEntry, PlanTaskItem, UserAttachment } from "../chat-model";
-import { extractToolText, humanizeEngineContent, parsePlanTasks, setEngineToolEntryHint } from "../chat-model";
+import {
+  extractToolText,
+  humanizeEngineContent,
+  humanizeStreamPreview,
+  parsePlanTasks,
+  setEngineToolEntryHint,
+} from "../chat-model";
 import { FolderOpenIcon, PaperclipIcon, StopIcon, WrenchIcon, BotAvatarIcon, UserAvatarIcon } from "./icons";
 import { PermissionCard } from "./PermissionCard";
 
@@ -381,11 +387,14 @@ export function ChatPane(props: ChatPaneProps) {
                             {entry.thinking !== undefined && entry.thinking !== "" && (
                               <details className="chat-thinking" open>
                                 <summary className="chat-thinking-summary">思考过程</summary>
-                                <PreviewMarkdown text={entry.thinking} surfaceId={`thinking-${entry.id}`} />
+                                <PreviewMarkdown
+                                  text={humanizeStreamPreview(entry.thinking)}
+                                  surfaceId={`thinking-${entry.id}`}
+                                />
                               </details>
                             )}
                             <PreviewMarkdown
-                              text={humanizeEngineContent(entry.preview ?? "")}
+                              text={humanizeStreamPreview(entry.preview ?? "")}
                               surfaceId={`preview-${entry.id}`}
                               cursor={entry.done !== true}
                             />

@@ -36,7 +36,6 @@ import {
   createP5LoopExecutorFromHandlers,
   createDefaultBlockerGuardChain,
   detectShellCapabilityGap,
-  PLAN_REASON_CAPABILITY_GAP,
   VERIFY_REASON_TEST_SKIPPED_NO_TEST_TARGET,
   type P5StageContext,
   type P5RunState,
@@ -171,7 +170,7 @@ test("G3. 能力预检：空文本/空数组健壮（不抛错、不命中）", 
   assert.equal(detectShellCapabilityGap(["", "  "]).requiresShell, false);
 });
 
-test("G4. plan 阶段：objective 合成路径命中能力缺口 → fatal 拒绝且不落盘 tasks.md", async () => {
+test("G4. plan 阶段：shell 类 objective 不再 fatal 拒绝（bash 开放 2026-10-03），正常合成放行", async () => {
   const projectRoot = createTempProject();
   try {
     const handler = new P5PlanStageHandler();
@@ -179,17 +178,10 @@ test("G4. plan 阶段：objective 合成路径命中能力缺口 → fatal 拒�
 
     const result = await handler.handle(ctx);
 
-    // 必须 fatal（failed/fatal 语义），绝不合成放行
-    assert.equal(result.kind, "fatal", `能力缺口目标必须 fatal 拒绝，实际 kind=${result.kind}`);
-    assert.match(result.summary, /超出 P5 执行器能力/);
-    assert.equal(result.artifacts["reason"], PLAN_REASON_CAPABILITY_GAP);
-    // detail 必须给出可执行建议（主会话执行 / 改写为纯代码产出）
-    assert.match(result.error ?? "", /主会话/);
-    // 关键：tasks.md 绝不落盘——合成前的预检必须早于任何写盘
-    assert.ok(
-      !fs.existsSync(path.join(projectRoot, ".eag", "p5", "tasks.md")),
-      "能力预检拒绝后不得合成并落盘 tasks.md"
-    );
+    // 执行器已开放 bash，此类任务可真实执行——plan 不再 fatal，正常合成单卡选中
+    assert.equal(result.kind, "success", `shell 类目标应合成放行，实际 kind=${result.kind}`);
+    assert.ok(result.artifacts["taskCard"], "应产出选中的任务卡（不再拦截）");
+    assert.ok(fs.existsSync(path.join(projectRoot, ".eag", "p5", "tasks.md")), "合成任务清单必须真实落盘");
   } finally {
     cleanupTempProject(projectRoot);
   }

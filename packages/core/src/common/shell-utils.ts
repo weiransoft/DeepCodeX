@@ -63,10 +63,18 @@ export function resolveShellPath(): string {
   }
 
   const envShell = process.env.SHELL;
-  if (envShell && getShellKind(envShell) !== "unknown") {
+  // 修复"spawn /bin/zsh ENOENT"（2026-10-03）：环境变量的存在 ≠ 文件真实存在——
+  // 父进程带 SHELL 但目标 shell 二进制被卸载/异机复用环境（CI runner、
+  // node --import tsx 与直接 spawn 环境的差异）时，spawn 直接 ENOENT，
+  // bash 工具整轮失败。这里校验实际存在性，不存在则回退系统内置 shell。
+  if (envShell && getShellKind(envShell) !== "unknown" && fs.existsSync(envShell)) {
     return envShell;
   }
-  return "/bin/bash";
+  // POSIX 内置回退：/bin/bash 优先（macOS/Linux 均自带），极端环境退 /bin/sh
+  if (fs.existsSync("/bin/bash")) {
+    return "/bin/bash";
+  }
+  return "/bin/sh";
 }
 
 export function getShellKind(shellPath: string): ShellKind {

@@ -146,7 +146,20 @@ function stripTrailingBackgroundOperator(command: string): string {
 }
 
 function getSessionCwd(sessionId: string, fallback: string): string {
-  return sessionWorkingDirs.get(sessionId) ?? fallback;
+  const cached = sessionWorkingDirs.get(sessionId);
+  if (cached === undefined) {
+    return fallback;
+  }
+  // 防御 stale 缓存（2026-10-04）：合成 sessionId（如 P5 执行器的 p5-<runId>-i<iter>-<stage>）
+  // 可能跨任务复用，而缓存的工作目录（临时项目目录）已被清理删除。
+  // 若直接把不存在的目录传给 spawn，Node 在 macOS 上会报出误导性的
+  // `spawn <shell> ENOENT`（shell 二进制本身存在）。这里校验目录存在性，
+  // 不存在则回退 fallback（projectRoot）并清除 stale 条目。
+  if (!fs.existsSync(cached)) {
+    sessionWorkingDirs.delete(sessionId);
+    return fallback;
+  }
+  return cached;
 }
 
 function updateSessionCwd(sessionId: string, fallback: string, cwd: string | null): void {

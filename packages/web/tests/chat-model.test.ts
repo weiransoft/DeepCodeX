@@ -149,9 +149,16 @@ test("chat-model：humanizeEngineContent 必须保留围栏代码与非工具结
 test("chat-model：humanizeEngineContent 纯文本与截断块应零改动直通", () => {
   // 纯自然文本（快速路径）
   assert.equal(humanizeEngineContent("普通回答，没有任何 JSON。"), "普通回答，没有任何 JSON。");
-  // 截断 JSON 块（流式中间态）：解析失败原样保留
-  const truncated = '执行中 {"ok": true, "name": "bas';
+  // 截断 JSON 块但不含引擎包装指纹（模型自身输出的未完成数据形态）：原样保留
+  const truncated = '执行中 {"status": "running", "step": "bas';
   assert.equal(humanizeEngineContent(truncated), truncated);
+  // 截断 JSON 块且命中引擎包装指纹（"name":"…" + 括号不平衡）：
+  // 裸块以占位符吸收（流式白屏修复 2026-10-04，见 humanizeStreamPreview 注释）
+  const engineTruncated = '执行中 {"ok": true, "name": "bas';
+  const out = humanizeEngineContent(engineTruncated);
+  assert.ok(out.startsWith("执行中 "), "块前文本必须保留");
+  assert.ok(out.includes("流式输出中"), "引擎未完成块必须以占位符吸收");
+  assert.ok(!out.includes('"name"'), "裸 JSON 巨块不得泄漏为正文");
   // 空串
   assert.equal(humanizeEngineContent(""), "");
 });

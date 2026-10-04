@@ -101,9 +101,10 @@ test("INT-A. 合成任务直通：真实 write 落盘 → 诚实 skip → markTa
     // ---- LLM 真实请求计数（dev：1 次工具轮 + 1 次终态 = 2）----
     const requests = client.getRequests();
     assert.equal(requests.length, 2, "dev 执行必须恰好发起 2 次 createMessage");
-    // 白名单收窄事实：每次请求暴露的工具只能是 read/write/edit/UpdatePlan
+    // 白名单收窄事实：每次请求暴露的工具只能是 read/write/edit/UpdatePlan/bash
+    //（bash 于 2026-10-03 用户决策开放，高危命令仍受审批门控约束）
     for (const record of requests) {
-      assert.deepEqual([...record.toolNames].sort(), ["UpdatePlan", "edit", "read", "write"]);
+      assert.deepEqual([...record.toolNames].sort(), ["UpdatePlan", "bash", "edit", "read", "write"]);
     }
     // 第二次请求必须携带工具结果回灌消息（system/user/assistant/tool）
     assert.ok(requests[1]!.messages.length >= 4, "终态请求前必须回灌 write 的工具结果");

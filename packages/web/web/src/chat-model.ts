@@ -445,6 +445,130 @@ export function humanizeEngineContent(content: string): string {
 }
 
 /**
+ * 流式预览可读化（正文与思考通道共用）。
+ *
+ * 白屏根因修复（2026-10-04）：流式中途的助手文本含**未闭合**引擎工具 JSON 块
+ * （bash 输出正在逐 token 拼进正文，闭合 '}' 尚未到达）——该残留尾部既提取不出
+ * 完整 JSON 块、又不能解析为 JSON 载荷，旧实现原样推给 A2UI 管线；而助手正文
+ * 以 `<div class="a2ui-surface">` 渲染且**无 white-space 保留样式**（仅
+ * monospace 变体才有，见 a2ui.css），换行被折叠成整行巨块，浏览器超长文本
+ * 渲染崩坏 → 思考与 bash 命令执行后整页白屏。
+ *
+ * 策略：以 humanizeEngineContent 的可读化结果为基础；若结果仍以 '{' 开头
+ * （流式中途形态：整段尚未出现正文前缀文本，直接以工具 JSON 块起始），
+ * 把该裸 JSON 前缀替换为合法占位符「（流式输出中…）」，让可读化残留退化为
+ * 普通段落文本；非 '{' 开头的尾部残留（JSON 前有正文）已由换行保护，不再干预。
+ * 闭合块（可读化成功的正常形态）绝不命中占位分支，零影响。
+ *
+ * @param content 流式累积的 preview / thinking 原文
+ * @returns 可读化 + 流式裸块占位保护后的文本
+ */
+export function humanizeStreamPreview(content: string): string {
+  const humanized = humanizeEngineContent(content);
+  const PLACEHOLDER = "（流式输出中…）";
+  if (humanized.startsWith("{")) {
+    // 流式中途：整段以未闭合引擎块（或裸 JSON 文本）起始，占位替代巨块裸 JSON
+    return PLACEHOLDER;
+  }
+  if (humanized.startsWith(`\n{`)) {
+    // JSON 块前有换行（正文与块以换行分隔的中途形态）：保留换行前的空段语义，
+    // 仅把裸块前缀替换为占位符
+    return `\n${PLACEHOLDER}${humanized.slice(1 + scanUnterminatedJsonPrefixLength(humanized.slice(1)))}`;
+  }
+  return humanized;
+}
+
+/**
+ * 计算文本开头的「JSON 前缀」长度（供流式裸块占位替换定位边界）。
+ *
+ * 优先按括号平衡扫描取完整块长度（罕见：闭合块却以 '\n{' 起始的形态）；
+ * 扫描不出完整块（流式未闭合）时，从首个 '{' 吸收至文末——未闭合尾部全部
+ * 视为裸块前缀（流式语义下 '{' 之后必然是该 JSON 的续写）。
+ *
+ * @param text 以 '{' 起始的文本段
+ * @returns 应被占位符替代的前缀长度；无 '{' 时返回 0
+ */
+function scanUnterminatedJsonPrefixLength(text: string): number {
+  const scanned = scanJsonBlock(text, 0);
+  if (scanned !== null) return scanned[2];
+  const brace = text.indexOf("{");
+  return brace === -1 ? 0 : text.length - brace;
+}
+
+/**
+ * 混排 JSON 文本段 → 可读文本（引擎双写正文路径的残留吸收策略）。
+ *
+ * 背景：引擎在 nonInteractive 模式下会把**未完成**的工具结果 JSON 文本也拼进
+ * 助手正文（如 `{ "ok": true, "name": "bas` 截断形态）。裸 JSON 巨块进 A2UI
+ * 渲染（正文无 white-space 保留样式）会折叠成整行巨块导致页面渲染崩坏。
+ *
+ * 三级回退（信息不丢，但绝不泄漏裸 JSON 巨块）：
+ * 1. 整段可解析为 JSON 载荷 → 格式化缩进直显；
+ * 2. 文本含引擎包装指纹 `"name":"<tool>"`（引擎拼接工具结果块的独有特征，
+ *    模型常规正文不会命中）→ 从承载该指纹的块起始 '{' 起视为未完成块残留，
+ *    JSON 前缀以占位符「（流式输出中…）」替代，块前文本保留；
+ * 3. 其余 → 原样保留（普通文本 / 模型主动输出的数据，零改动直通）。
+ *
+ * @param text 混排解析失败的残留文本段
+ * @returns 可读化后的文本段
+ */
+function absorbMismatchedJsonSegment(text: string): string {
+  const formatted = extractJsonPayload(text);
+  if (formatted !== null) return formatted;
+  const nameMatch = /"name"\s*:\s*"/.exec(text);
+  if (nameMatch !== null) {
+    // 从指纹位置向前回溯块起始 '{'；再校验该起点起的括号平衡（含字符串态），
+    // 避免正文中段文本被误判为引擎块（如自然语言引用 JSON 片段的场景）
+    let brace = text.lastIndexOf("{", nameMatch.index);
+    while (brace !== -1) {
+      if (scanJsonBlock(text, brace) === null && isUnbalancedJsonTail(text.slice(brace))) {
+        return `${text.slice(0, brace)}（流式输出中…）`;
+      }
+      brace = text.lastIndexOf("{", brace - 1);
+    }
+  }
+  return text;
+}
+
+/**
+ * 判断文本段是否为「括号不平衡的未完成 JSON 尾部」。
+ *
+ * 判定：以 '{' 起始，按字符串/转义态扫描至文末，深度仍大于 0（闭合 '}'
+ * 未到达）→ 未完成形态；深度归零（完整块）、非 '{' 起始、字符串未闭合等
+ * 均返回 false（不构成引擎未完成块指纹）。
+ *
+ * @param tail 待判定文本段
+ * @returns 是否为未闭合 JSON 尾部
+ */
+function isUnbalancedJsonTail(tail: string): boolean {
+  if (!tail.startsWith("{")) return false;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (const ch of tail) {
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{") {
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+    }
+  }
+  // 字符串未闭合的形态（流式截断在字符串中间）同样属未完成尾部
+  return depth > 0 || inString;
+}
+
+/**
  * 混排解析（严格特征版）：仅重写匹配引擎工具结果特征的 JSON 块。
  *
  * 与 parseMixedJsonBlocks 的差异：块必须命中 isEngineToolResultBlock
@@ -466,16 +590,11 @@ function parseMixedJsonBlocksStrict(text: string, seenRendered: Set<string>): st
     const scanned = scanJsonBlock(text, cursor);
     if (scanned === null) {
       // 无法再提取完整块（流式截断/JSON 字符串解析失败等异常形态）。
-      // 关键回退：若剩余文本本身可解析为 JSON 载荷（如 output 内嵌 JSON
-      // 导致字符串/括号状态失步后的残留），格式化吸收整段，避免页面泄漏
-      // 大片转义 JSON；否则保留剩余原文。
+      // 关键回退：残留若为引擎工具块未完成形态（含 "name":"…" 指纹）或可解析
+      // JSON 载荷，统一吸收为占位/格式化文本——绝不把裸 JSON 巨块推给渲染层
+      // （流式白屏根因，见 humanizeStreamPreview 注释）；普通文本原样保留。
       const tail = text.slice(cursor);
-      const formattedTail = extractJsonPayload(tail);
-      if (formattedTail !== null) {
-        segments.push(formattedTail);
-      } else {
-        segments.push(tail);
-      }
+      segments.push(absorbMismatchedJsonSegment(tail));
       break;
     }
     const [blockText, startIndex, nextIndex] = scanned;

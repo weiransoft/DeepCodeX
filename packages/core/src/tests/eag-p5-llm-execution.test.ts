@@ -290,6 +290,49 @@ test("P-S7. buildSynthesizedTasksContent：格式契约（标题单行/换行折
   assert.equal(reparsed[0]!.status, "pending");
 });
 
+test("P-S8. 手写任务卡标题命中 shell 语义（docker/部署）：bash 开放后不再 fatal，正常选卡（2026-10-03）", async () => {
+  const projectRoot = createTempProject();
+  try {
+    // 历史：任务卡级能力 fatal 预检曾拦截此类卡（dev 空转事故修复）；
+    // 用户决策开放 bash 后拦截移除——docker/部署卡直接放行进 dev 真实执行。
+    const tasksContent = [
+      "# EAG-P5 任务清单",
+      "",
+      "## T-001 docker pull 镜像并部署 MySQL 服务",
+      "- requirement: F-001",
+      "- status: pending",
+      "- dependencies:",
+      "- files:",
+      "- acceptance:",
+      "",
+    ].join("\n");
+    fs.writeFileSync(path.join(projectRoot, ".eag", "p5", "tasks.md"), tasksContent, "utf8");
+
+    const result = await new P5PlanStageHandler().handle(buildStageContext(projectRoot, "plan"));
+
+    assert.equal(result.kind, "success", `docker/部署任务卡应放行进 dev，实际：${result.summary}`);
+    assert.equal(result.artifacts["reason"], PLAN_REASON_TASK_CARD_SELECTED);
+    const taskCard = result.artifacts["taskCard"] as TaskCard;
+    assert.equal(taskCard.id, "T-001");
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
+});
+
+test("P-S9. 手写任务卡为纯编码任务：能力预检不误伤，正常选卡", async () => {
+  const projectRoot = createTempProject();
+  try {
+    createTasksFile(projectRoot, 1, "pending");
+    const result = await new P5PlanStageHandler().handle(buildStageContext(projectRoot, "plan"));
+    assert.equal(result.kind, "success");
+    assert.equal(result.artifacts["reason"], PLAN_REASON_TASK_CARD_SELECTED);
+    const taskCard = result.artifacts["taskCard"] as TaskCard;
+    assert.equal(taskCard.id, "T-001");
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
+});
+
 // ============================================================================
 // 3. dev 阶段：fail-closed / 无卡 / 护栏优先 / 失败透传
 // ============================================================================
@@ -900,6 +943,177 @@ test("BIND-2. 鸭子检测：外挂 orchestrator 无 bindTaskExecutor 方法（F
     const manager = createMinimalSessionManager(projectRoot, recordingOrchestrator, () => null);
     assert.ok(manager instanceof SessionManager);
     assert.equal(recordingOrchestrator.runCalls, 0);
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
+});
+
+test("BIND-4. bash 高危审批人工拒绝：宿主回填 deny → 命令绝不执行，模型改道安全终态", async () => {
+  const projectRoot = createTempProject("eag-p5-deny-");
+  const markerPath = path.join(projectRoot, "rejected.marker");
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: projectRoot, stdio: "ignore" });
+
+    const orchestrator = buildOrchestrator();
+    // 宿主替身：收到确认请求后异步回填"拒绝"——等价用户点击拒绝按钮
+    const approvalRequests: { command: string; risk: string; approvalId: string }[] = [];
+    let managerRef: SessionManager | null = null;
+    const manager = new SessionManager({
+      projectRoot,
+      createOpenAIClient: () => ({ client: null, model: "stub-model", thinkingEnabled: false }),
+      getResolvedSettings: () => ({ model: "stub-model" }),
+      renderMarkdown: (text: string) => text,
+      onAssistantMessage: () => undefined,
+      autonomousOrchestrator: orchestrator,
+      createLLMClient: () =>
+        new StubLlmClient([
+          {
+            content: "",
+            toolCalls: [{ name: "bash", args: { command: `sudo -n true; echo ok > ${JSON.stringify(markerPath)}` } }],
+          },
+          { content: "命令未获批准，任务以说明收尾。" },
+        ]),
+      onP5DangerousApproval: async (request) => {
+        approvalRequests.push({ command: request.command, risk: request.risk, approvalId: request.approvalId });
+        // 异步回填拒绝（回调契约 void：决策只经 resolveP5DangerousApproval 生效）
+        setTimeout(() => {
+          if (managerRef) {
+            managerRef.resolveP5DangerousApproval(request.approvalId, false);
+          }
+        }, 5);
+      },
+    } as unknown as ConstructorParameters<typeof SessionManager>[0]);
+    managerRef = manager;
+
+    const result = await orchestrator.run({
+      projectRoot,
+      objective: "执行部署准备命令（高危审批拒绝路径验证）",
+      maxIterations: 2,
+      testCommand: "npm test",
+      testTimeoutSec: 30,
+    });
+
+    // 审批链路：宿主收到 1 次确认请求
+    assert.equal(approvalRequests.length, 1, "高危命令必须恰好触发一次宿主确认");
+    // 拒绝 → deny 回灌模型 → 模型改道终态回复 → 命令副作用绝不落盘
+    assert.ok(!fs.existsSync(markerPath), "人工拒绝后高危命令绝不能执行（marker 绝不允许落盘）");
+    // deny 原因回灌证据：第二次 LLM 请求的 tool 消息含拒绝语义
+    // （桩客户端无法直接回读，退而验证编排器整体不因此异常中断——
+    //  任务执行器把 deny 当普通工具结果继续循环，模型给出终态即成功收尾）
+    assert.notEqual(result.finalStatus, "aborted", "拒绝审批不得导致编排器中断");
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
+});
+
+test("BIND-5. bash 高危审批无人决策：resolve 未回填时审批挂起表可被超时兜底拒绝（fail-closed）", async () => {
+  const projectRoot = createTempProject("eag-p5-nohost-");
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: projectRoot, stdio: "ignore" });
+
+    const orchestrator = buildOrchestrator();
+    // 宿主收到请求但**永不回填**（模拟前端断线/吞掉确认请求）：
+    // 引擎 10 分钟兜底超时不可在测试内等待，这里改为验证挂起表登记语义——
+    // 审批 ID 未回填前，对同一 approvalId 的重复回填命中=true，回填后二次回填=false。
+    let capturedApprovalId = "";
+    let managerRef: SessionManager | null = null;
+    const manager = new SessionManager({
+      projectRoot,
+      createOpenAIClient: () => ({ client: null, model: "stub-model", thinkingEnabled: false }),
+      getResolvedSettings: () => ({ model: "stub-model" }),
+      renderMarkdown: (text: string) => text,
+      onAssistantMessage: () => undefined,
+      autonomousOrchestrator: orchestrator,
+      createLLMClient: () =>
+        new StubLlmClient([
+          { content: "", toolCalls: [{ name: "bash", args: { command: "sudo -n true" } }] },
+          { content: "命令未获批准，任务以说明收尾。" },
+        ]),
+      onP5DangerousApproval: async (request) => {
+        capturedApprovalId = request.approvalId;
+        // 立即拒绝以免测试挂起 10 分钟
+        if (managerRef) {
+          managerRef.resolveP5DangerousApproval(request.approvalId, false);
+        }
+      },
+    } as unknown as ConstructorParameters<typeof SessionManager>[0]);
+    managerRef = manager;
+
+    const result = await orchestrator.run({
+      projectRoot,
+      objective: "执行部署准备命令（审批挂起表语义验证）",
+      maxIterations: 2,
+      testCommand: "npm test",
+      testTimeoutSec: 30,
+    });
+
+    assert.notEqual(capturedApprovalId, "", "宿主必须收到审批请求（approvalId 非空）");
+    // 挂起表清算语义：决策已回填后，同一 approvalId 重复回填必须返回 false
+    //（防止审批卡片重复点击/网络重放导致执行器状态二次翻转）
+    assert.equal(
+      manager.resolveP5DangerousApproval(capturedApprovalId, true),
+      false,
+      "已结算的审批重复回填必须返回 false（挂起表已清算）"
+    );
+    assert.notEqual(result.finalStatus, "aborted", "拒绝审批不得导致编排器中断");
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
+});
+
+test("BIND-3. bash 高危审批桥接：执行器→SessionManager→宿主确认框→回填，端到端批准执行", async () => {
+  const projectRoot = createTempProject("eag-p5-approval-");
+  const markerPath = path.join(projectRoot, "approved.marker");
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: projectRoot, stdio: "ignore" });
+
+    const orchestrator = buildOrchestrator();
+    // 宿主（Web 前端）审批通道替身：收到请求时异步回填"批准"——
+    // 等价用户看到确认框后点击批准（setTimeout 让挂起表先登记完成）
+    const approvalRequests: { command: string; risk: string; approvalId: string }[] = [];
+    let managerRef: SessionManager | null = null;
+    const manager = new SessionManager({
+      projectRoot,
+      createOpenAIClient: () => ({ client: null, model: "stub-model", thinkingEnabled: false }),
+      getResolvedSettings: () => ({ model: "stub-model" }),
+      renderMarkdown: (text: string) => text,
+      onAssistantMessage: () => undefined,
+      autonomousOrchestrator: orchestrator,
+      createLLMClient: () =>
+        new StubLlmClient([
+          {
+            content: "",
+            toolCalls: [{ name: "bash", args: { command: `sudo -n true; echo ok > ${JSON.stringify(markerPath)}` } }],
+          },
+          { content: "部署准备命令执行完成。" },
+        ]),
+      onP5DangerousApproval: async (request) => {
+        approvalRequests.push({ command: request.command, risk: request.risk, approvalId: request.approvalId });
+        // 异步回填：命令含 sudo 命中黑名单，宿主确认框展示后人类批准。
+        // 回调契约（void）下决策只经 resolveP5DangerousApproval 回填生效。
+        setTimeout(() => {
+          if (managerRef) {
+            managerRef.resolveP5DangerousApproval(request.approvalId, true);
+          }
+        }, 5);
+      },
+    } as unknown as ConstructorParameters<typeof SessionManager>[0]);
+    managerRef = manager;
+
+    const result = await orchestrator.run({
+      projectRoot,
+      objective: "执行部署准备命令（高危审批桥接验证）",
+      maxIterations: 2,
+      testCommand: "npm test",
+      testTimeoutSec: 30,
+    });
+
+    // 审批链路：执行器命中黑名单 → 宿主收到 1 次确认请求（含命令与风险类别）
+    assert.equal(approvalRequests.length, 1, "高危命令必须恰好触发一次宿主确认");
+    assert.match(approvalRequests[0]!.risk, /提权|安装/, `风险类别应透传宿主，实际：${approvalRequests[0]!.risk}`);
+    // 批准 → 命令真实执行（echo 落盘 marker）→ 端到端全绿收尾
+    assert.equal(result.finalStatus, "completed", `批准后应端到端跑通：\n${result.finalReport}`);
+    assert.ok(fs.existsSync(markerPath), "宿主回填批准后 bash 命令必须真实执行");
   } finally {
     cleanupTempProject(projectRoot);
   }

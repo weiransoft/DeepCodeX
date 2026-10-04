@@ -32,6 +32,7 @@ import {
   InterruptQueue,
   ProviderFactory,
   SessionManager,
+  P5_DANGEROUS_APPROVAL_ID_PREFIX,
   buildAutonomousOrchestrator,
   buildDesignOrchestrator,
   buildGraphLoopOrchestratorOptions,
@@ -65,6 +66,12 @@ import type { ChatMessageDto, ChatSummary, DoneEvent, ResolvedWebSettings } from
 
 /** OpenAI 连接句柄类型（createOpenAIClient 的返回结构） */
 type OpenAIClientHandle = ReturnType<typeof createDefaultOpenAIClient>;
+
+/**
+ * P5 高危命令审批 ID 前缀别名（core 单一事实源常量，2026-10-04）。
+ * sendMessage 用它识别审批回填决策并分流到 resolveP5DangerousApproval。
+ */
+const P5_APPROVAL_ID_PREFIX = P5_DANGEROUS_APPROVAL_ID_PREFIX;
 
 /** 池内单个聊天会话 */
 type ChatSession = {
@@ -628,6 +635,29 @@ export class SessionPool {
           thinkingText: progress.thinkingText,
         });
       },
+      // EAG-P5：bash 高危命令人工确认桥接（用户决策 2026-10-04）。
+      // 引擎侧 LlmTaskExecutor 命中破坏性命令黑名单时挂起等待人类决策；
+      // Web 宿主把审批请求桥接为 permission_request 事件复用前端审批卡片 UI：
+      // - toolCallId 取 approvalId（p5-approval-<uuid>），与常规权限审批的
+      //   引擎 toolCallId 命名空间天然不冲突，卡片归并/去重逻辑零改动复用；
+      // - 人类决策经 chat-api 的 permissions 通道回填（见 sendMessage 识别分支），
+      //   最终调 manager.resolveP5DangerousApproval(approvalId, approved)；
+      // - 引擎内部另有 10 分钟兜底超时（超时按拒绝 fail-closed），
+      //   前端断线/未决策不会把任务执行器无限挂死。
+      onP5DangerousApproval: (request) => {
+        this.hub.publish(chatId, "permission_request", {
+          chatId,
+          requests: [
+            {
+              toolCallId: request.approvalId,
+              name: "bash",
+              command: request.command,
+              description: `高危命令需人工确认（风险：${request.risk}）｜任务 ${request.taskId} ${request.taskTitle}`,
+              scopes: ["p5-dangerous-command"],
+            },
+          ],
+        });
+      },
       onSessionEntryUpdated: (entry) => {
         // steering W1③：status 快照补 pendingTurns/turnActive——前端与
         // SSE 重连快照可感知排队深度与轮次活性（无需等 done 帧）
@@ -961,6 +991,31 @@ export class SessionPool {
       this.publishUserMessage(chatId, input.text);
     }
     // Promise 链串行化：同一 chatId 的轮次按调用顺序依次执行，不同 chatId 并行
+    // P5 高危命令审批回填分流（2026-10-04）：toolCallId 以 P5_APPROVAL_ID_PREFIX
+    // 开头的决策不走对话轮次队列（执行器挂起点在当前轮内部，排队的审批轮次会死锁），
+    // 直接同步回填 manager.resolveP5DangerousApproval；
+    // 剩余常规决策（若有）维持原入队语义。
+    const permissions = input.permissions ?? [];
+    const p5Decisions = permissions.filter((p) => p.toolCallId.startsWith(P5_APPROVAL_ID_PREFIX));
+    const regularPermissions = permissions.filter((p) => !p.toolCallId.startsWith(P5_APPROVAL_ID_PREFIX));
+    if (p5Decisions.length > 0) {
+      for (const decision of p5Decisions) {
+        // 命中挂起审批=true；已超时/重复回填=false（引擎 10 分钟兜底超时，可安全忽略）
+        chat.manager.resolveP5DangerousApproval(decision.toolCallId, decision.permission === "allow");
+      }
+      // 纯审批回填请求：不产生对话轮次（不广播、不入队、无 done 帧），
+      // 审批卡片的前端状态由卡片自身乐观更新维护，执行器继续执行的进展经 llm_delta 推送
+      if (
+        regularPermissions.length === 0 &&
+        (input.text === undefined || input.text === "") &&
+        (input.imageUrls === undefined || input.imageUrls.length === 0) &&
+        (input.alwaysAllows === undefined || input.alwaysAllows.length === 0)
+      ) {
+        return { chatId: chat.chatId, sessionId: chat.sessionId, mode: "queued" };
+      }
+      // 混合请求：剩余常规决策继续走常规通道
+      input = { ...input, permissions: regularPermissions };
+    }
     const run = chat.busy.then(() => this.runTurn(chat, input));
     // 链尾吞错：错误已在 runTurn 内经 SSE done 收敛，这里仅防止污染后续轮次入队
     chat.busy = run.then(
