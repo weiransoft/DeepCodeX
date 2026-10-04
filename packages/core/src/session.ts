@@ -7156,10 +7156,30 @@ ${agentInstructions}
         // 三态权限模式：CLI flag（permissionModeOverride）优先级最高，
         // 未注入时使用 resolved settings 中的 permissions.mode（设计文档 docs/dev/permission-modes.md §3.3）。
         // resolved settings 未提供 permissions 时保持旧行为（传 undefined，评估走默认 allowAll 策略）
+        //
+        // Web 宿主适配（修复 2026-10-04 "Web bash 不像 CLI 自动执行"回归）：
+        // Web 模式 ignoreProjectSettings=true + 个人工作区无用户级 permissions 配置 →
+        // resolved settings 的 permissions 为空 → 旧逻辑传 undefined，权限评估直落
+        // computeToolCallPermissions 内部默认值（mode:"manual"）→ bash 任意命令
+        // （含只读 ls/git status）全部弹审批卡片，与 CLI（defaultMode:allowAll 直通）
+        // 行为分叉——用户感知即"0.4.3.3 之前 bash 像 CLI 一样自动执行"。
+        // 修复：Web（ignoreProjectSettings=true）且无任何显式权限配置时，注入与 CLI
+        // 历史默认一致的 auto + allowAll 策略：非灾难命令直通执行（灾难命令硬拦截
+        // 在 executor/bash-handler 独立保障，不依赖本配置），ask/deny 列表仍全量生效。
+        // CLI 路径（ignoreProjectSettings=false）不动，零回归。
         const resolvedPermissions = this.getResolvedSettings().permissions;
         const effectivePermissionSettings = resolvedPermissions
           ? { ...resolvedPermissions, mode: this.permissionModeOverride ?? resolvedPermissions.mode }
-          : undefined;
+          : this.ignoreProjectSettings
+            ? {
+                mode: (this.permissionModeOverride ?? "auto") as PermissionMode,
+                allow: [],
+                deny: [],
+                ask: [],
+                defaultMode: "allowAll" as const,
+                addWorkingDirs: [],
+              }
+            : undefined;
         const permissionPlan = toolCalls
           ? computeToolCallPermissions({
               sessionId,
