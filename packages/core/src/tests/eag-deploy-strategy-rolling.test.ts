@@ -160,6 +160,33 @@ spec:
 
 const hasKubectl = checkCliAvailable("kubectl");
 
+/**
+ * 检测当前 kubectl context 是否指向可连通的集群（2026-10-04 新增）
+ *
+ * 背景：本机 kubectl CLI 存在但 kubeconfig 默认 context 指向不可达集群时，
+ * kubectl apply 等真实调用会阻塞至 TCP 连接超时（~75s），在 --test-concurrency=1
+ * 下挂死整套件。加集群连通性守卫：短超时内拿不到结果即视为不可用，真实用例 skip。
+ *
+ * @returns true=集群可连通（真实 kubectl 用例可运行），false=不可达/未配置（跳过）
+ */
+function checkKubectlClusterReachable(): boolean {
+  try {
+    // cluster-info 走 API Server 根路径，是官方最轻量的连通性探针
+    const result = spawnSync("kubectl", ["cluster-info"], {
+      stdio: ["pipe", "pipe", "pipe"],
+      encoding: "utf8",
+      // 15s 上限：健康集群 1~3s 返回；不可达集群在超时内必失败（非永久挂起）
+      timeout: 15000,
+    });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+// CLI 存在但集群不可达时真实 kubectl 用例长时间阻塞，统一双守卫 skip
+const hasKubectlCluster = hasKubectl && checkKubectlClusterReachable();
+
 // ============================================================================
 // TC-RL-001. 实例化与接口契约
 // ============================================================================
@@ -340,7 +367,7 @@ test("TC-RL-005c. errors 数组已冻结", async () => {
 // TC-RL-006. 真实 kubectl 调用（CLI 存在时，可选测试）
 // ============================================================================
 
-test("TC-RL-006. 真实 kubectl 调用（CLI 存在时）", { skip: !hasKubectl }, async () => {
+test("TC-RL-006. 真实 kubectl 调用（CLI 存在时）", { skip: !hasKubectlCluster }, async () => {
   // 此测试在 kubectl 可用时运行，验证真实 kubectl 调用路径
   // 注意：此测试需要可访问的 K8s 集群，否则 kubectl apply 会失败
   // 测试目的：验证 RollingStrategy.execute() 真实调用 kubectl（非 mock）

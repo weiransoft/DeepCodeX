@@ -29,7 +29,9 @@ for (const stage of ["diagnosis", "escape", "language", "translation", "search",
     const { root, controller, context } = setup(t);
     let calls = 0;
     const pending = (_body: unknown, options?: { signal?: AbortSignal | null }) => {
-      assert.equal(options?.signal, controller.signal);
+      if (stage !== "diagnosis" && stage !== "escape") {
+        assert.equal(options?.signal, controller.signal);
+      }
       calls++;
       return new Promise<never>((_resolve, reject) => {
         options!.signal!.addEventListener("abort", () => reject(options!.signal!.reason), { once: true });
@@ -60,6 +62,17 @@ for (const stage of ["diagnosis", "escape", "language", "translation", "search",
       thinkingEnabled: false,
       baseURL: stage === "responses" ? "https://api.deepseek.com" : "https://example.com",
     });
+    // B1 迁移（2026-09）：edit 的 diagnosis / escape 辅助调用从 OpenAI SDK 直连
+    // （createOpenAIClient → chat.completions）迁至统一 LLM 客户端（provider 路由），
+    // 取消语义改为 createMessage 内部检查 signal（throwIfAborted）+ catch 再检查：
+    // abort 后必然以 AbortError reject。pending 桩在 abort 时以 signal.reason
+    // reject，与 throwIfAborted 的 reason 语义一致。
+    if (stage === "diagnosis" || stage === "escape") {
+      context.createLLMClient = () =>
+        ({
+          createMessage: ({ signal }: { signal?: AbortSignal | null }) => pending(null, { signal }),
+        }) as unknown as ToolExecutionContext["createLLMClient"];
+    }
     const originalFetch = globalThis.fetch;
     t.after(() => {
       globalThis.fetch = originalFetch;

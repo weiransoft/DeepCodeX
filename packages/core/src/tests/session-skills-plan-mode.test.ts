@@ -300,6 +300,8 @@ test("SessionManager excludes disabled skills by resolved skill name", async () 
         "renamed-disabled": false,
         "deepcode-self-refer": false,
         "image-generator": false,
+        // video-generator 为后续新增的 bundled skill，须显式禁用以保持测试范围隔离
+        "video-generator": false,
         "skill-digester": false,
         plan: false,
         // 批次 2 新增的 6 个 EAK 模式 Skill 包——本测试只验证 enabled-skill 的发现，
