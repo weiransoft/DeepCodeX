@@ -52,9 +52,19 @@ const TOOL_STATUS_TEXT: Record<string, string> = {
  * 助手消息 → A2UI surface：
  * 仅对完整 content 解析（流式 preview 不进管线，见设计文档 §3.7 流式约束）。
  * useMemo 以 content 为缓存键，流式更新不触发重复解析。
+ *
+ * 空内容兜底（2026-10-05 白屏事故修复）：引擎「纯 thinking 轮次」收敛时把
+ * content 为空（或可读化后空白）的助手消息持久化为可见消息——空文本进
+ * A2UI 管线产不出任何块，气泡渲染成零内容空白容器且刷新后依旧（历史恢复
+ * 同样空），用户感知即「思考过程一过，回复区整块白屏」。此处对可读化后
+ * 无可见文本的固化消息渲染明确的兜底提示，绝不留白。
  */
 function AssistantA2ui({ content, messageId }: { content: string; messageId: string }) {
   const messages = useMemo(() => parseMarkdownToA2ui(content, `msg-${messageId}`), [content, messageId]);
+  // 可读化后仅剩空白/控制字符（含纯工具双写块被移除的场景）→ 兜底提示
+  if (content.trim() === "") {
+    return <div className="assistant-empty-hint">（本轮无文本回复，思考过程见上方折叠区）</div>;
+  }
   return <A2uiSurface messages={messages} className="a2ui-surface chat-assistant-body" />;
 }
 

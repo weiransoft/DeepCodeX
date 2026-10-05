@@ -17,6 +17,7 @@
  *
  * 运行方式：node --import tsx --test（经 run-tests.mjs 统一入口）。
  */
+import "./jsx-runtime-shim";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { renderToString } from "react-dom/server";

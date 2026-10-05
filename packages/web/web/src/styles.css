@@ -564,6 +564,15 @@ body {
   color: var(--app-text-secondary);
 }
 
+/* 空回复兜底提示（2026-10-05 白屏事故修复）：固化助手消息可读化后无
+   可见文本时替代空白容器，明确告知本轮无文本输出 */
+.assistant-empty-hint {
+  color: var(--app-text-secondary);
+  font-size: 13px;
+  font-style: italic;
+  padding: 2px 0;
+}
+
 /* 流式光标动画 */
 .stream-cursor {
   display: inline-block;
