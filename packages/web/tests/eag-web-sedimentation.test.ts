@@ -54,6 +54,10 @@ import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { LLMClient, LLMRequest, LLMResponse, LLMStreamEvent } from "@vegamo/deepcode-core";
+// 跨 run 失败守卫（EA-03c）：项目码与会话索引落点推导（getProjectCode）+
+// goal 指纹归一化（normalizeGoalFingerprint，与 core 写侧单一事实源）+
+// 会话级自主运行终态记录结构（AutonomousGoalRunRecord，播种契约）
+import { getProjectCode, normalizeGoalFingerprint, type AutonomousGoalRunRecord } from "@vegamo/deepcode-core";
 import { startWebServer, type RunningWebServer } from "../src/server";
 import { personalUploadRoot } from "../src/user-files";
 import {
@@ -798,6 +802,132 @@ test("EA-03b：纯文本建议回合 → 服务端兜底自动注入执行一次
   // 收尾清理：删除本用例播种的 pending 卡（编排器已将其标记 completed 回写），
   // 杜绝向后续同 projectRoot 用例泄漏陈旧清单。
   rmSync(tasksFileB, { force: true });
+});
+
+// ============================================================================
+// EA-03c：跨 run 失败守卫（2026-10-06 第二条指令空转事故）
+// ============================================================================
+
+test("EA-03c：goal 曾以非 completed 终态运行 → 服务端兜底跳过自动注入并推送可见拦截说明", async () => {
+  // 事故复现结构（docs/research/2026-10-eag-auto-loop-trigger-guard.md §5）：
+  // 上一会话轮中 goal「修复登录失败问题」已以 aborted 终态结束（写侧
+  // SessionEntry.autonomousGoalRuns 落盘）；新 chat 轮中主对话回复再次以
+  // 「建议启动 /eag-autonomous 修复登录失败问题。」句式收尾——chat.autoExecuted
+  // 一次性守卫随 chat 对象新建而失效（每条指令新建 chat 的病灶），此时
+  // scheduleAutoExecuteSuggestion 的跨 run 失败守卫必须拦截：
+  // - 会话级记忆（sessions-index.json 落盘字段）不受 chat 生命周期影响；
+  // - 拦截必须可见：SSE 推送 role=system 的「【EAG 拦截】」说明帧；
+  // - 绝不注入命令：无「建议器自动执行」帧、无 /eag-autonomous 用户消息落盘、
+  //   编排器执行器通道零请求。
+  // 独立服务器（goalguard）物理隔离，播种方式：第一轮 done 后直接改写
+  // sessions-index.json（SessionManager 每次 getSession 均从磁盘加载，
+  // normalizeSessionEntry 反序列化校验保留 autonomousGoalRuns 字段），
+  // 第二轮建议回合收敛后守卫即从磁盘读到失败记录。
+  const gg = await makeServer("goalguard", true);
+  const goal = "修复登录失败问题";
+
+  // 脚本队列：第一轮建会话 + 第二轮建议句式收尾 + 拦截后空转防御位
+  gg.client.setScript([
+    plainTurnEvents("第一轮普通回合已建立会话"),
+    plainTurnEvents(`分析完成，建议启动 /eag-autonomous ${goal}。`),
+    plainTurnEvents("空转防御：拦截后不应消费本脚本"),
+  ]);
+  const chatId = await createChat(gg.server, gg.cookie, gg.personalRoot);
+  const { collector, controller } = await openSseStream(gg.server.port, chatId, gg.cookie);
+
+  // —— 第一轮：普通消息建立底层会话 ——
+  await sendText(gg.server, gg.cookie, chatId, "帮我看看这个页面");
+  const firstDone = await collector.waitFor("done", 20000);
+  assert.equal(firstDone.data.status, "completed", "第一轮普通回合应 completed");
+  const sessionId = findChatSummary(gg.server, chatId)?.sessionId;
+  assert.ok(sessionId, "第一轮后必须绑定底层 sessionId");
+
+  // —— 播种失败运行记录（写侧等价物）：改写 sessions-index.json ——
+  // 落点推导：engineHome = <engineHomeRoot>/<userId>；项目目录 =
+  // <engineHome>/.deepcode/projects/<getProjectCode(resolvedRoot)>；
+  // resolvedRoot = realpath 归一后的个人区（与 EA-03a 编排器 projectRoot 同源）。
+  const ggEngineHomeRoot = serverEngineHomeRootOf("goalguard");
+  const sessionsIndexPath = path.join(
+    ggEngineHomeRoot,
+    ctx.userId,
+    ".deepcode",
+    "projects",
+    getProjectCode(await realpath(gg.personalRoot)),
+    "sessions-index.json"
+  );
+  assert.ok(existsSync(sessionsIndexPath), `第一轮后会话索引必须已落盘：${sessionsIndexPath}`);
+  const indexRaw = JSON.parse(readFileSync(sessionsIndexPath, "utf8")) as {
+    entries: Array<{ id: string; autonomousGoalRuns?: AutonomousGoalRunRecord[] }>;
+  };
+  const targetEntry = indexRaw.entries.find((entry) => entry.id === sessionId);
+  assert.ok(targetEntry, `会话索引必须含本会话条目：${JSON.stringify(indexRaw.entries.map((e) => e.id))}`);
+  // 记录结构与 core SessionManager.recordAutonomousRunOutcome 落盘契约一致：
+  // 指纹经 normalizeGoalFingerprint 归一化（web 端与 core 单一事实源）
+  targetEntry.autonomousGoalRuns = [
+    {
+      goalFingerprint: normalizeGoalFingerprint(goal),
+      goal,
+      finalStatus: "aborted",
+      endedAt: new Date().toISOString(),
+    },
+  ];
+  writeFileSync(sessionsIndexPath, JSON.stringify(indexRaw, null, 2), "utf8");
+
+  // —— 第二轮：回复以「建议启动 /eag-autonomous …」句式收尾 →
+  // done 后服务端兜底扫描命中跨 run 失败守卫 ——
+  await sendText(gg.server, gg.cookie, chatId, "分析完了吗？下一步怎么办");
+  const secondDone = await collector.waitFor("done", 20000);
+  assert.equal(secondDone.data.status, "completed", "第二轮建议回合应 completed");
+
+  // 断言①（拦截可见性）：SSE 出现 role=system 的「【EAG 拦截】」说明帧
+  const blockedNotices = () =>
+    collector.events.filter(
+      (event) =>
+        event.event === "assistant_message" &&
+        event.data?.role === "system" &&
+        String(event.data?.content ?? "").includes("【EAG 拦截】")
+    );
+  await waitFor(() => (blockedNotices().length >= 1 ? true : null), 15000, "「【EAG 拦截】」system 提示帧");
+
+  // 宽限窗：确保（若错误触发的）自动注入即使异步发起也能被观测到
+  await new Promise((resolve) => setTimeout(resolve, 500));
+
+  // 断言②（零注入）：绝不出现「建议器自动执行」帧（守卫必须先于一次性守卫短路）
+  const autoNotices = collector.events.filter(
+    (event) =>
+      event.event === "assistant_message" &&
+      event.data?.role === "system" &&
+      String(event.data?.content ?? "").includes("建议器自动执行")
+  );
+  assert.equal(autoNotices.length, 0, "失败目标必须被拦截：不得出现「建议器自动执行」提示帧");
+
+  // 断言③（零注入落盘）：无 /eag-autonomous 用户消息进入会话历史
+  const history = await fetchJson(gg.server.port, "GET", `/api/chats/${chatId}/messages`, undefined, gg.cookie);
+  assert.equal(history.status, 200, `历史消息接口应 200：${JSON.stringify(history.body)}`);
+  const userTexts = (history.body.messages as Array<{ role: string; content?: string }>)
+    .filter((message) => message.role === "user")
+    .map((message) => String(message.content ?? ""));
+  assert.ok(
+    !userTexts.some((text) => text.includes("/eag-autonomous")),
+    `失败目标不得被注入执行：历史中不得出现 /eag-autonomous 用户消息；实际：${JSON.stringify(userTexts)}`
+  );
+
+  // 断言④（零执行器请求）：编排器执行器通道零请求（守卫在派发前短路，
+  // 编排器根本不启动）——空转循环的进程内权威反证
+  assert.equal(
+    gg.client.countOf("executor"),
+    0,
+    `守卫拦截后编排器执行器通道必须零请求；实际：${JSON.stringify(gg.client.requestLog.map((e) => e.kind))}`
+  );
+  // 流式通道恰 2 次（仅两轮主对话；拦截不消费流式脚本）
+  assert.equal(
+    gg.client.countOf("stream"),
+    2,
+    `拦截后流式通道应恰为主对话 2 次；实际：${JSON.stringify(gg.client.requestLog.map((e) => e.kind))}`
+  );
+
+  controller.abort();
+  await gg.server.close();
 });
 
 // ============================================================================

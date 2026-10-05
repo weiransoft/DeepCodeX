@@ -409,6 +409,25 @@ export type BashTimeoutAdjustment = {
   timedOut: boolean;
 };
 
+/**
+ * 单次自主运行的目标终态记录（修复 2026-10-06 第二条指令空转事故）。
+ *
+ * 事故链路：/eag-autonomous 以 aborted/failed 终态结束后，运行结果不落盘，
+ * 下一条短指令（"继续"）被建议器双通道把同一历史目标重新炒成 suggest_autonomous
+ * 无条件自动执行 → 逐字重演上一轮的 12 轮空转。本记录为触发层提供"该目标
+ * 在本会话跑过且未成功"的记忆（详见 docs/research/2026-10-eag-auto-loop-trigger-guard.md）。
+ */
+export type AutonomousGoalRunRecord = {
+  /** 归一化目标指纹（normalizeGoalFingerprint 产出，判重键） */
+  goalFingerprint: string;
+  /** 原始目标文本（截断至 200 字符，供拦截提示语回显） */
+  goal: string;
+  /** 运行终态（AutonomousRunResult.finalStatus 原值：completed/aborted/failed 等） */
+  finalStatus: string;
+  /** 终态时间（ISO 8601） */
+  endedAt: string;
+};
+
 export type SessionEntry = {
   id: string;
   summary: string | null;
@@ -433,6 +452,17 @@ export type SessionEntry = {
     sessionId: string;
     messageId: string;
   };
+  /**
+   * 自主运行目标终态历史（修复 2026-10-06 第二条指令空转事故，触发层跨 run 失败守卫的写侧存储）。
+   *
+   * 每次 /eag-autonomous 运行到达终态（completed/aborted/failed 等）时由
+   * recordAutonomousRunOutcome 以目标指纹 upsert 一条记录（容量上限 30，淘汰最旧）。
+   * 触发层自动执行通道（建议器/确定性/Web 注入）派发前查询本历史：
+   * 同一目标曾以非 completed 终态结束 → 拦截自动重放（设计文档
+   * docs/research/2026-10-eag-auto-loop-trigger-guard.md §3/§4）。
+   * 可选字段保证旧会话文件零迁移。
+   */
+  autonomousGoalRuns?: AutonomousGoalRunRecord[];
 };
 
 export type SessionsIndex = {
@@ -1163,6 +1193,88 @@ function hasExecutableIntent(goal: string): boolean {
   }
   // 不含终态标记词 → Plan B 默认自动执行
   return true;
+}
+
+/**
+ * 判断 goal 是否为"纯终态状态标签"（修复 2026-10-05 双通道空转事故）。
+ *
+ * 与 hasExecutableIntent 的分支 1c 语义一致：goal 命中终态标记词
+ * （已完成/completed/人工接管 等）且不含任何可执行动词与技术关键词，
+ * 即属于状态标签而非执行目标。
+ *
+ * 使用场景：确定性命令通道（matchDeterministicEagAutonomousCommand）与
+ * 指代确认通道（tryAnaphoraConfirmExecution）不经过建议器路径的
+ * hasExecutableIntent 预检，需要本函数独立拦截，防止历史状态标签被
+ * "继续/执行这个"类短指令重新炒成 objective 入队空转。
+ *
+ * @param goal 待检查的目标文本
+ * @returns true 表示是纯终态状态标签，应拒绝自动执行
+ */
+function isPureTerminalStatusLabel(goal: string): boolean {
+  // 空白/空目标不视为终态标签（由其他校验兜底）
+  if (!goal || goal.trim().length === 0) {
+    return false;
+  }
+  const trimmed = goal.trim();
+  // 未命中终态标记词 → 不是状态标签
+  if (!GOAL_TERMINAL_MARKERS_PATTERN.test(trimmed)) {
+    return false;
+  }
+  // 命中终态标记词但同时有可执行动词或技术关键词 → 终态只是背景描述，仍有实质意图
+  if (GOAL_EXECUTABLE_VERBS_PATTERN.test(trimmed) || GOAL_TECH_KEYWORDS_PATTERN.test(trimmed)) {
+    return false;
+  }
+  // 纯终态标记，无任何动作/技术关键词 → 状态标签
+  return true;
+}
+
+/** 自主运行终态历史容量上限（淘汰最旧，防长会话无限膨胀） */
+const AUTONOMOUS_GOAL_RUNS_MAX = 30;
+/** 拦截提示语中目标文本的回显截断长度 */
+const AUTONOMOUS_GOAL_ECHO_MAX = 200;
+
+/**
+ * 归一化目标指纹（修复 2026-10-06 跨 run 失败守卫的判重键）。
+ *
+ * 归一化规则：trim → 连续空白折叠为单空格 → 小写化（中文不受影响）。
+ * 建议器重放的目标与上一轮失败的 goal 文本同源透传，归一化仅消化
+ * 引号转义还原、首尾空白与大小写差异，避免"同一目标"因格式抖动漏判。
+ *
+ * @param goal 目标文本
+ * @returns 归一化指纹字符串
+ */
+export function normalizeGoalFingerprint(goal: string): string {
+  return goal.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/**
+ * 从自动执行命令字符串中提取 --goal 参数值（修复 2026-10-06 确定性通道守卫用）。
+ *
+ * 命令字符串由 buildAutoExecuteCommand 构造：goal 内的双引号被转义为 \\"、
+ * 反斜杠被转义为 \\\\，本函数解析时做反向还原。
+ *
+ * @param commandString 完整命令字符串（如 "/eag-autonomous --goal \\"xxx\\" --max-iterations 10"）
+ * @returns 还原后的 goal 原文；命令不含 --goal 参数时返回 null
+ */
+export function extractGoalFromCommandString(commandString: string): string | null {
+  // 匹配 --goal "..."：值内允许转义引号（\\"）与转义反斜杠（\\\\），禁止裸双引号
+  const match = /--goal\s+"((?:[^"\\]|\\.)*)"/.exec(commandString);
+  if (!match) {
+    return null;
+  }
+  // 反向还原转义：\\" → "，\\\\ → \（顺序无关紧要：转义序列互不前缀重叠）
+  return match[1].replace(/\\(["\\])/g, "$1");
+}
+
+/**
+ * 截断目标文本用于提示语回显（超长目标避免刷屏）。
+ *
+ * @param goal 目标原文
+ * @returns 截断至 200 字符的回显文本，超长时追加省略号
+ */
+function echoTruncateGoal(goal: string): string {
+  const trimmed = goal.trim().replace(/\s+/g, " ");
+  return trimmed.length > AUTONOMOUS_GOAL_ECHO_MAX ? `${trimmed.slice(0, AUTONOMOUS_GOAL_ECHO_MAX)}…` : trimmed;
 }
 
 /**
@@ -3956,6 +4068,19 @@ ${agentInstructions}
         return true;
       }
 
+      // 跨 run 失败守卫降级（修复 2026-10-06 第二条指令空转事故）：
+      // tryAutoExecuteSuggestedCommand 已因该 goal 存在失败运行记录而拦截，
+      // 并完成可见拦截提示 + 逃生门快照存储（notifyFailedGoalBlocked）——
+      // 此处仅收敛本轮（建议已被消费处理，不再走通用 degraded 分支重复展示）。
+      if (autoExecuteResult === "degraded-goal-failed") {
+        this.updateSessionEntry(sessionId, (entry) => ({
+          ...entry,
+          status: "completed",
+          updateTime: new Date().toISOString(),
+        }));
+        return true;
+      }
+
       // 降级：tryAutoExecuteSuggestedCommand 返回 "degraded"（commandHint 不以 /eag- 开头、
       // eagCommandParser 未注入、或分发失败）时，保持"只展示"行为。
       //
@@ -4032,7 +4157,7 @@ ${agentInstructions}
     clarification: ReadonlyArray<string> | undefined,
     goal: string,
     controller?: AbortController
-  ): Promise<"executed" | "degraded" | "degraded-goal-invalid"> {
+  ): Promise<"executed" | "degraded" | "degraded-goal-invalid" | "degraded-goal-failed"> {
     // F9-v2.1（2026-10-04）：goal 有效性预检——防止状态标签触发空转循环
     // 背景：suggester LLM 可能因上下文误判将"已完成（2026-10-04 人工接管）"这类
     // 状态标签建议为 suggest_autonomous → Plan B 无条件自动执行 → goal 原样透传
@@ -4055,6 +4180,28 @@ ${agentInstructions}
       // 非 EAG 命令（如 /team /rules /slash）暂降级展示——eagCommandParser 无法识别
       // 后续可扩展为 /team autonomous 也能自动执行（需 handler 独立接入）
       return "degraded";
+    }
+
+    // 跨 run 失败守卫（修复 2026-10-06 第二条指令空转事故）：
+    // 该 goal 在本会话曾以非 completed 终态（aborted/failed 等）结束 → 拦截自动重放。
+    // 事故链路：12 轮烧满 abort 后运行结果不落盘，下一条短指令（"继续"）被建议器
+    // 重新炒成同一 suggest_autonomous 无条件重放 → 逐字重演空转。仅对
+    // /eag-autonomous 生效（其他 EAG 命令无本轮次语义）。
+    // 判定目标双源：goal 参数（buildAutoExecuteCommand 注入路径）与 commandHint
+    // 内嵌的 --goal（建议器可能把历史目标直接写进 hint，buildAutoExecuteCommand
+    // 对带参数的 hint 原样透传）——任一命中失败记录即拦截。
+    if (commandHint.startsWith("/eag-autonomous")) {
+      const candidateGoals = [goal, extractGoalFromCommandString(commandHint)].filter(
+        (g): g is string => typeof g === "string" && g.trim().length > 0
+      );
+      for (const candidate of candidateGoals) {
+        const failedRun = this.findFailedAutonomousRun(sessionId, candidate);
+        if (failedRun) {
+          // 命中：发可见拦截提示 + 存逃生门快照（用户回复"执行这个"显式确认后放行）
+          this.notifyFailedGoalBlocked(sessionId, candidate, failedRun, "/eag-autonomous");
+          return "degraded-goal-failed";
+        }
+      }
     }
 
     // 硬条件 2：eagCommandParser 必须已注入
@@ -4198,7 +4345,7 @@ ${agentInstructions}
     }
 
     // 通道 2：EAG 自主任务意图识别
-    const commandString = this.matchDeterministicEagAutonomousCommand(text);
+    const commandString = this.matchDeterministicEagAutonomousCommand(sessionId, text);
     if (commandString) {
       const dispatched = await this.dispatchEagCommandString(sessionId, commandString, controller);
       if (dispatched) {
@@ -4233,11 +4380,12 @@ ${agentInstructions}
    * 关键词边界：泛化词"自动循环/自动编排"故意不收录——日常对话过于常见，
    * 收录会把"帮我自动循环播放"类普通请求误触发为无人值守任务。
    *
+   * @param sessionId 当前会话 ID（跨 run 失败守卫查询运行终态历史用）
    * @param text 用户输入文本（已 trim）
    * @returns 完整命令字符串（如 "/eag-autonomous --goal \"xxx\" --max-iterations 10 --confirmation smart"）；
-   *          未命中确定性意图时返回 null
+   *          未命中确定性意图，或命中但被跨 run 失败守卫拦截时返回 null
    */
-  private matchDeterministicEagAutonomousCommand(text: string): string | null {
+  private matchDeterministicEagAutonomousCommand(sessionId: string, text: string): string | null {
     // 全局否定保护：任何"否定词 + 启动/执行"组合都不触发确定性通道
     if (EAG_INTENT_NEGATION_PATTERN.test(text)) {
       return null;
@@ -4257,6 +4405,12 @@ ${agentInstructions}
       // 字面量后紧跟的字符必须是空白/行尾/参数起始，排除"/eag-autonomous-xxx"误命中
       const nextChar = commandString.slice("/eag-autonomous".length, "/eag-autonomous".length + 1);
       if (nextChar === "" || /[\s]/.test(nextChar)) {
+        // 跨 run 失败守卫：从命令字符串提取 --goal，命中失败运行记录则拦截
+        // （CLI 建议注入通道以"建议执行 /eag-autonomous --goal ..."句式进入本规则，
+        // 与用户手输字面量无法区分，统一拦截 + 逃生门快照，见 notifyFailedGoalBlocked）
+        if (this.blockFailedGoalAutoExecute(sessionId, commandString)) {
+          return null;
+        }
         return commandString;
       }
       return null;
@@ -4285,8 +4439,24 @@ ${agentInstructions}
       goal = text;
     }
 
+    // 终态声明拦截（修复 2026-10-05 双通道空转事故）：goal 是"已完成/人工
+    // 接管"类纯状态标签时拒绝派发——本通道不经过建议器路径的
+    // hasExecutableIntent 预检，历史状态标签一旦被炒成 objective 入队，
+    // 会反复消费僵尸任务卡形成 12 轮 × N 轮空转死循环。
+    if (isPureTerminalStatusLabel(goal)) {
+      return null;
+    }
+
     // 复用 buildAutoExecuteCommand 的参数构造与 goal 转义逻辑
-    return this.buildAutoExecuteCommand("/eag-autonomous", goal);
+    const commandString = this.buildAutoExecuteCommand("/eag-autonomous", goal);
+
+    // 跨 run 失败守卫（修复 2026-10-06 第二条指令空转事故）：该 goal 曾以
+    // 非 completed 终态结束 → 拦截重放（发可见提示 + 存逃生门快照）
+    if (this.blockFailedGoalAutoExecute(sessionId, commandString)) {
+      return null;
+    }
+
+    return commandString;
   }
 
   /**
@@ -4331,6 +4501,14 @@ ${agentInstructions}
       return false;
     }
 
+    // 条件 4（修复 2026-10-05 双通道空转事故）：快照 goal 是"已完成/人工接管"
+    // 类纯终态标签时不消费——上一轮收尾产生的状态标签若被"继续/执行这个"
+    // 重新炒成 objective 入队，会反复消费僵尸任务卡形成空转死循环。
+    // 快照保留待用户看清提示后手动处理（此处不清除，避免吞掉合法建议）。
+    if (isPureTerminalStatusLabel(stored.goal)) {
+      return false;
+    }
+
     // 一次性消费：先清除快照再执行（防执行异常后残留导致重复触发）
     this.lastEagDisplayedSuggestions.delete(sessionId);
 
@@ -4343,6 +4521,140 @@ ${agentInstructions}
       console.warn(`tryAnaphoraConfirmExecution: 未能分发命令 "${commandString}"，降级至主流程`);
       return false;
     }
+    return true;
+  }
+
+  // ============================================================================
+  // 跨 run 失败守卫（修复 2026-10-06 第二条指令空转事故）
+  // 设计文档：docs/research/2026-10-eag-auto-loop-trigger-guard.md §3/§4
+  // ============================================================================
+
+  /**
+   * 记录一次自主运行的目标终态（写侧）。
+   *
+   * 以目标指纹 upsert：同指纹重跑时删除旧记录再插尾（保留最新终态与时间），
+   * 容量超限时淘汰最旧记录。completed 终态同样记录——查询侧以
+   * finalStatus !== "completed" 区分"失败目标拦截 / 成功目标放行重放"。
+   *
+   * @param sessionId 会话 ID
+   * @param goal 本轮运行的目标文本（validatedRequest.goal 原值）
+   * @param finalStatus 运行终态（AutonomousRunResult.finalStatus 原值）
+   */
+  private recordAutonomousRunOutcome(sessionId: string, goal: string, finalStatus: string): void {
+    // 空目标无指纹意义（解析兜底路径可能产生空串），跳过记录
+    if (!goal || goal.trim().length === 0) {
+      return;
+    }
+    const fingerprint = normalizeGoalFingerprint(goal);
+    this.updateSessionEntry(sessionId, (entry) => {
+      // 同指纹 upsert：删旧插尾，保证同目标只有最新一条记录
+      const previous = (entry.autonomousGoalRuns ?? []).filter((r) => r.goalFingerprint !== fingerprint);
+      const next = [
+        ...previous,
+        {
+          goalFingerprint: fingerprint,
+          goal: echoTruncateGoal(goal),
+          finalStatus,
+          endedAt: new Date().toISOString(),
+        },
+      ];
+      // 容量淘汰：超过上限时保留最新的 AUTONOMOUS_GOAL_RUNS_MAX 条
+      const trimmedHistory =
+        next.length > AUTONOMOUS_GOAL_RUNS_MAX ? next.slice(next.length - AUTONOMOUS_GOAL_RUNS_MAX) : next;
+      return {
+        ...entry,
+        autonomousGoalRuns: trimmedHistory,
+        updateTime: new Date().toISOString(),
+      };
+    });
+  }
+
+  /**
+   * 查询目标在本会话是否曾以非 completed 终态结束（读侧，公共方法供 Web 宿主复用）。
+   *
+   * 判定语义：存在指纹匹配的记录且 finalStatus !== "completed" → true。
+   * completed 目标不拦（"再跑一次测试"属合法重放）；failed/aborted/fatal
+   * 目标拦截自动重放，防止失败目标被建议器逐字重演空转循环。
+   *
+   * @param sessionId 会话 ID
+   * @param goal 待自动执行的目标文本
+   * @returns true 表示该目标曾失败/中断，应拦截自动执行
+   */
+  hasFailedAutonomousRun(sessionId: string, goal: string): boolean {
+    return this.findFailedAutonomousRun(sessionId, goal) !== null;
+  }
+
+  /**
+   * 查询目标命中的失败运行记录（读侧内部实现，供拦截提示回显终态详情）。
+   *
+   * 判定语义与 hasFailedAutonomousRun 一致：指纹匹配且 finalStatus !== "completed"。
+   *
+   * @param sessionId 会话 ID
+   * @param goal 待自动执行的目标文本
+   * @returns 命中的失败运行记录；无失败记录（含目标成功完成过/无记录）时返回 null
+   */
+  private findFailedAutonomousRun(sessionId: string, goal: string): AutonomousGoalRunRecord | null {
+    if (!goal || goal.trim().length === 0) {
+      return null;
+    }
+    const fingerprint = normalizeGoalFingerprint(goal);
+    const session = this.getSession(sessionId);
+    const history = session?.autonomousGoalRuns ?? [];
+    return history.find((r) => r.goalFingerprint === fingerprint && r.finalStatus !== "completed") ?? null;
+  }
+
+  /**
+   * 拦截提示 + 逃生门快照（读侧命中后的统一动作）。
+   *
+   * 1. 向主会话推送可见的拦截说明（对齐事故报告"注入消息可见性"诉求——
+   *    拦截必须让用户看见原因，而非静默吞掉）；
+   * 2. 存储建议快照：用户回复"执行这个"即经指代确认通道显式确认重放
+   *    （tryAnaphoraConfirmExecution 不做失败记录守卫——显式确认属知情行为；
+   *    快照以裸 commandHint + goal 存储，重放时经 buildAutoExecuteCommand 重建命令）。
+   *
+   * @param sessionId 会话 ID
+   * @param goal 被拦截的目标文本
+   * @param record 命中的失败运行记录（提示语回显终态与时间）
+   * @param commandHint 逃生门快照存储的命令提示（裸 "/eag-autonomous"）
+   */
+  private notifyFailedGoalBlocked(
+    sessionId: string,
+    goal: string,
+    record: AutonomousGoalRunRecord,
+    commandHint: string
+  ): void {
+    const message =
+      `[EAG] 目标 "${echoTruncateGoal(goal)}" 在本会话已于 ${record.endedAt} 运行过且未成功完成` +
+      `（终态：${record.finalStatus}）。\n` +
+      `为避免失败目标被自动重放形成空转循环，本次自动执行已拦截。\n` +
+      `如确认要重新执行：回复"执行这个"；建议提供修改后的新目标（如补充约束/更换环境）。`;
+    // 逃生门快照：覆盖旧快照（同会话只保留最新一条待确认建议，对齐既有语义）
+    this.lastEagDisplayedSuggestions.set(sessionId, { commandHint, goal });
+    this.onAssistantMessage(this.buildAssistantMessage(sessionId, message, null), false);
+  }
+
+  /**
+   * 确定性通道的跨 run 失败守卫（修复 2026-10-06 第二条指令空转事故）。
+   *
+   * 从命令字符串提取 --goal 参数，命中失败运行记录时发可见拦截提示 + 存
+   * 逃生门快照并返回 true（调用方据此返回 null，文本回落普通对话不进入循环）。
+   * 命令不含 --goal 参数（裸命令）时无法建立指纹，直接放行。
+   *
+   * @param sessionId 会话 ID
+   * @param commandString 待派发的完整命令字符串
+   * @returns true 表示已拦截（调用方不得继续派发）；false 表示放行
+   */
+  private blockFailedGoalAutoExecute(sessionId: string, commandString: string): boolean {
+    // 裸命令（无 --goal 参数）无法建立目标指纹，不适用本守卫
+    const goal = extractGoalFromCommandString(commandString);
+    if (goal === null) {
+      return false;
+    }
+    const failedRun = this.findFailedAutonomousRun(sessionId, goal);
+    if (!failedRun) {
+      return false;
+    }
+    this.notifyFailedGoalBlocked(sessionId, goal, failedRun, "/eag-autonomous");
     return true;
   }
 
@@ -6129,6 +6441,8 @@ ${agentInstructions}
       // 此处捕获的是 handler 自身的异常（如 validateRequest 抛错、formatSuccessReport 异常）
       const isAborted = this.isAbortLikeError(e) || signal?.aborted === true;
       const errMsg = e instanceof Error ? e.message : String(e);
+      // 跨 run 失败守卫写侧：终态落盘（goal 指纹 + 终态），供触发层拦截自动重放
+      this.recordAutonomousRunOutcome(sessionId, validatedRequest.goal, isAborted ? "aborted" : "failed");
       this.updateSessionEntry(sessionId, (entry) => ({
         ...entry,
         status: "failed",
@@ -6151,6 +6465,8 @@ ${agentInstructions}
     // handler.execute() 完成后再次检查 abort 信号
     // 避免 handler 完成后用户已 abort 还要继续渲染结果
     if (signal?.aborted) {
+      // 跨 run 失败守卫写侧：编排完成后被中断同样落盘终态（触发层拦自动重放）
+      this.recordAutonomousRunOutcome(sessionId, validatedRequest.goal, "aborted");
       this.updateSessionEntry(sessionId, (entry) => ({
         ...entry,
         status: "failed",
@@ -6177,6 +6493,9 @@ ${agentInstructions}
     // - success=true：session 标记 completed（包括 finalStatus=completed / stop_when / aborted，
     //   因为 handler.execute() 已捕获 orchestrator 异常并返回 success=false）
     // - success=false：session 标记 failed，failReason 取 errorMessage
+    // 跨 run 失败守卫写侧：无论成败，终态先落盘（触发层据 finalStatus 判定拦截/放行）。
+    // success=false 且无 runResult（handler 自身异常）时归一化为 "failed"。
+    this.recordAutonomousRunOutcome(sessionId, validatedRequest.goal, result.runResult?.finalStatus ?? "failed");
     this.updateSessionEntry(sessionId, (entry) => ({
       ...entry,
       status: result.success ? "completed" : "failed",
@@ -9666,7 +9985,47 @@ ${agentInstructions}
       // 上游 v0.3.1：插件限流标记与会话分叉来源（反序列化时做结构校验）
       pluginRateLimitedTool: this.normalizePluginRateLimitedTool(value.pluginRateLimitedTool),
       forkedFrom: this.normalizeForkedFrom(value.forkedFrom),
+      // 跨 run 失败守卫（修复 2026-10-06 第二条指令空转事故）：目标终态历史
+      // 反序列化时做逐条结构校验，非法记录直接丢弃（对齐 forkedFrom 的防御式风格）
+      autonomousGoalRuns: this.normalizeAutonomousGoalRuns(value.autonomousGoalRuns),
     };
+  }
+
+  /**
+   * 自主运行终态历史反序列化校验（跨 run 失败守卫写侧的持久化配套）。
+   *
+   * 磁盘数据不可信：逐条校验 goalFingerprint/goal/finalStatus/endedAt 四字段
+   * 类型后重建，任何一条非法即丢弃该条（不影响其余合法记录）。
+   *
+   * @param value 磁盘读出的原始值
+   * @returns 校验通过的历史记录数组；无合法记录时返回 undefined（不占字段）
+   */
+  private normalizeAutonomousGoalRuns(value: unknown): AutonomousGoalRunRecord[] | undefined {
+    if (!Array.isArray(value)) {
+      return undefined;
+    }
+    const records: AutonomousGoalRunRecord[] = [];
+    for (const item of value) {
+      if (!item || typeof item !== "object") {
+        continue;
+      }
+      const record = item as Record<string, unknown>;
+      if (
+        typeof record.goalFingerprint === "string" &&
+        record.goalFingerprint.length > 0 &&
+        typeof record.goal === "string" &&
+        typeof record.finalStatus === "string" &&
+        typeof record.endedAt === "string"
+      ) {
+        records.push({
+          goalFingerprint: record.goalFingerprint,
+          goal: record.goal,
+          finalStatus: record.finalStatus,
+          endedAt: record.endedAt,
+        });
+      }
+    }
+    return records.length > 0 ? records : undefined;
   }
 
   // 上游 v0.3.1：插件限流工具字段校验（仅接受 UnderstandImage / WebSearch 两个合法值）

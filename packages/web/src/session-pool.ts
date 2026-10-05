@@ -1226,6 +1226,30 @@ export class SessionPool {
     if (!eagCommandName) {
       return;
     }
+    // 跨 run 失败守卫（修复 2026-10-06 第二条指令空转事故）：同一 goal 在本会话
+    // 曾以非 completed 终态结束 → 跳过自动注入并向用户推送可见拦截说明。
+    // core 会话级守卫（SessionEntry.autonomousGoalRuns）不受 chatId 生命周期影响——
+    // chat 每条指令新建导致 autoExecuted 守卫失效的病灶在此被会话级记忆兜住；
+    // goal 无法提取（裸命令）时不适用指纹守卫，维持原行为。
+    if (capture && chat.sessionId && chat.manager.hasFailedAutonomousRun(chat.sessionId, capture.goalText)) {
+      try {
+        const now = new Date().toISOString();
+        this.hub.publish(chat.chatId, "assistant_message", {
+          chatId: chat.chatId,
+          messageId: randomUUID(),
+          role: "system",
+          content: `【EAG 拦截】建议中的目标在本会话已运行过且未成功完成，为避免失败目标被自动重放形成空转循环，本次自动执行已跳过。如确认要重新执行，请回复"执行这个"或提供修改后的新目标。`,
+          createTime: now,
+          updateTime: now,
+        });
+      } catch (error) {
+        // 拦截说明推送失败不阻断主链路（守卫语义已生效：跳过注入即不进入循环）
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`[session-pool] 失败目标拦截提示推送失败（chatId=${chat.chatId}）：${message}`);
+      }
+      console.log(`[session-pool] 跨 run 失败守卫拦截自动注入（chatId=${chat.chatId}）：${fullCommandText}`);
+      return;
+    }
     // 一次性守卫：先标记再执行——自动注入回合收敛后本兜底会再次扫描，届时守卫
     // 已就位，模型继续回复「建议启动 /eag-autonomous」也不会二次注入（防循环）
     if (chat.autoExecuted.has(eagCommandName)) {
