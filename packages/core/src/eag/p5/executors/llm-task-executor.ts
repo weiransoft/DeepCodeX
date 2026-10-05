@@ -217,6 +217,29 @@ function isCredentialProtected(relativePath: string): boolean {
 /** 单任务工具循环默认最大轮数（每轮一次真实 LLM 请求 + 一批工具调用） */
 const DEFAULT_MAX_TOOL_ROUNDS = 12;
 
+/**
+ * 递归按 key 排序 JSON 值（相同调用空转熔断的指纹规范化用，2026-10-05）。
+ *
+ * 对象键按键名升序重排（消除同一参数对象的键序差异），数组保序（顺序
+ * 有语义，如工具调用序列），标量原样返回。仅处理 JSON 可表达的值形态。
+ *
+ * @param value 任意 JSON 值
+ * @returns 键序规范化的同构值（不修改入参）
+ */
+function sortJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => sortJsonValue(item));
+  }
+  if (value !== null && typeof value === "object") {
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      sorted[key] = sortJsonValue((value as Record<string, unknown>)[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
 /** 单次 LLM 请求最大输出 token 数（执行循环不需要长篇解释） */
 const EXECUTION_MAX_TOKENS = 8192;
 
@@ -347,6 +370,14 @@ export class LlmTaskExecutor implements P5TaskExecutor {
    */
   private readonly dangerousCommandApproval: P5DangerousCommandApproval | undefined;
 
+  /**
+   * 相同调用重复熔断阈值（修复 2026-10-05 自主任务 12 轮 bash 空转事故）：
+   * 同一"工具名+参数"规范化指纹连续命中达到此次数，说明模型在重复同一
+   * 无效动作空转（无新信息输入），立即终止本轮循环并失败——不再烧完
+   * 剩余轮次（每轮一次完整 LLM 请求 + 一次真实命令执行，纯 token 浪费）。
+   */
+  private static readonly IDENTICAL_CALL_STORM_LIMIT = 3;
+
   constructor(options: Readonly<LlmTaskExecutorOptions>) {
     this.projectRoot = options.projectRoot;
     this.createLlmClient = options.createLlmClient;
@@ -462,6 +493,15 @@ export class LlmTaskExecutor implements P5TaskExecutor {
       // 任一指纹达到阈值立即终止并醒目标注重复目标，交回编排器决定 fix/abort。
       const denialCountsByTarget = new Map<string, number>();
       const DENIAL_STORM_LIMIT = 6;
+
+      // 相同调用重复熔断（修复 2026-10-05 自主任务 12 轮 bash 空转事故）：
+      // 模型连续输出完全相同的"工具名+规范化参数"调用（无任何新信息输入）
+      // 即为空转——上次调用结果已回灌历史，重复执行既无新信息也必无新结果。
+      // 与拒绝风暴互补：风暴只计被 deny 的调用，此熔断覆盖 approve 后重复
+      // 执行的无效探索（如反复 ls / 反复 git status）。连续计数：出现不同
+      // 调用即重置，同一指纹连续命中达阈值立即终止。
+      let lastCallFingerprint: string | null = null;
+      let identicalCallStreak = 0;
 
       for (let round = 1; round <= this.maxToolRounds; round += 1) {
         // 每轮顶部双重 abort 检查：标志文件（跨进程 stop）+ AbortSignal（进程内）
@@ -580,6 +620,28 @@ export class LlmTaskExecutor implements P5TaskExecutor {
           emitProgress("task_end", `执行失败：拒绝风暴`, stormError, round);
           return this.failure(stormError, llmRequests);
         }
+
+        // 相同调用重复熔断判定（本轮全部调用之后统一评估）：把本轮工具序列
+        // 拼成一个批量指纹，与上一轮比较。连续相同即模型空转。
+        const batchFingerprint = response.toolCalls
+          .map((tc) => `${tc.name}:${this.normalizeToolArgsFingerprint(tc.argumentsJson)}`)
+          .join("||");
+        if (batchFingerprint === lastCallFingerprint) {
+          identicalCallStreak += 1;
+        } else {
+          lastCallFingerprint = batchFingerprint;
+          identicalCallStreak = 1;
+        }
+        if (identicalCallStreak >= LlmTaskExecutor.IDENTICAL_CALL_STORM_LIMIT) {
+          const identicalError =
+            `相同调用空转熔断：模型连续 ${identicalCallStreak} 轮输出完全相同的工具调用` +
+            `「${batchFingerprint.slice(0, 200)}」——重复执行不会带来新信息，` +
+            `任务描述大概率缺少可执行信息或与工作目录现状矛盾（如标题声称已完成/目标与项目无关）。` +
+            `请检查任务卡内容是否可执行、目标是否与当前项目匹配，或补充缺失上下文后重试。`;
+          this.log(identicalError, "warn");
+          emitProgress("task_end", `执行失败：相同调用空转熔断`, identicalError, round);
+          return this.failure(identicalError, llmRequests);
+        }
       }
 
       // 达到轮数上限仍在持续调用工具：诚实判失败，交回编排器决定 fix/abort
@@ -644,6 +706,27 @@ export class LlmTaskExecutor implements P5TaskExecutor {
       return `${toolName}:${JSON.stringify(parsed).slice(0, 100)}`;
     } catch {
       return `${toolName}:${argumentsJson.slice(0, 100)}`;
+    }
+  }
+
+  /**
+   * 规范化工具参数 JSON 为稳定指纹（相同调用空转熔断用，2026-10-05）。
+   *
+   * 与 denialFingerprint 的区别：这里比较的是"两次调用是否完全等价"，
+   * 必须覆盖**全部**参数且顺序无关——JSON.parse 后按 key 排序重新序列化，
+   * 消除 {"a":1,"b":2} 与 {"b":2,"a":1} 的键序差异；字符串值原样保留
+   * （bash 的 command、write 的 content 任一字符不同即视为不同调用）。
+   * 解析失败（非法 JSON）退化为 trim 后的原文，宁可少判空转不可误判。
+   *
+   * @param argumentsJson 工具参数原始 JSON
+   * @returns 规范化指纹（键序稳定的 JSON 或截断原文）
+   */
+  private normalizeToolArgsFingerprint(argumentsJson: string): string {
+    try {
+      const parsed = JSON.parse(argumentsJson) as unknown;
+      return JSON.stringify(sortJsonValue(parsed));
+    } catch {
+      return argumentsJson.trim().slice(0, 400);
     }
   }
 

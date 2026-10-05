@@ -160,6 +160,14 @@ export interface P5StageContext {
    * 执行器无法轮询文件中止——生产路径由 orchestrator 始终注入。
    */
   readonly abortFlagPath?: string;
+  /**
+   * 阶段级日志回调（修复 2026-10-05 僵尸任务卡事故的可观测性补齐）。
+   *
+   * plan 阶段用它把 tasks.md 解析告警（如非法 status 值降级 pending）写入
+   * 运行日志，避免"静默降级无人知晓"；可选字段：既有手工构造 ctx 的
+   * fixtures/测试不传时静默跳过，不破坏旧调用点。
+   */
+  readonly logger?: ((message: string, level: "info" | "warn" | "error") => void) | null;
 }
 
 // ============================================================================

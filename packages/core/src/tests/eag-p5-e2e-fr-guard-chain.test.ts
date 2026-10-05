@@ -106,7 +106,7 @@ test("P1. FR-1 4 阶段循环完整呈现：plan → dev → verify → fix 全�
     });
     const result = await orchestrator.run({
       projectRoot,
-      objective: "测试 FR-1 4 阶段循环完整呈现",
+      objective: "运行测试任务 1 验证 FR-1 4 阶段循环完整呈现",
       maxIterations: 3,
       testCommand: PASS_TEST_CMD,
       testTimeoutSec: 10,
@@ -208,7 +208,7 @@ test("P3. FR-7 NotesMemory 跨轮记忆呈现：run() 后 notes.md 文件存在�
     const orchestrator = buildOrchestrator();
     const result = await orchestrator.run({
       projectRoot,
-      objective: "测试 FR-7 NotesMemory 跨轮记忆",
+      objective: "运行测试任务验证 FR-7 NotesMemory 跨轮记忆",
       maxIterations: 1,
       testCommand: PASS_TEST_CMD,
       testTimeoutSec: 10,
@@ -284,7 +284,7 @@ test("P5. NFR-8 不可变优先呈现：所有 readonly 字段 + Object.freeze �
     const orchestrator = buildOrchestrator();
     const result = await orchestrator.run({
       projectRoot,
-      objective: "测试 NFR-8 不可变优先",
+      objective: "运行测试任务 1 验证 NFR-8 不可变优先",
       maxIterations: 1,
       testCommand: PASS_TEST_CMD,
       testTimeoutSec: 10,

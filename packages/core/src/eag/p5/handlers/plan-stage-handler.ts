@@ -14,6 +14,9 @@
  * 关键技术决策：
  * - 任务卡格式：标准 markdown（## 标题 + 列表项），LLM 可直接消费
  * - 解析器：基于正则的逐行扫描（零新增依赖，不引入 gray-matter 等）
+ * - 状态宽容读入：done / doing 等人工别名经 normalizeTaskCardStatus 归一化；
+ *   完全未知状态告警后按 pending 处理（修复 2026-10-05 僵尸任务卡事故——
+ *   done 被静默降级 pending 导致旧卡永不被视为已完成）
  * - 范围锁预检：调用 ScopeLockGuard 检查 declaredFiles 是否在任务卡声明范围内
  * - 无任务可执行时返回 success + artifacts.taskCard=null（Orchestrator 据此判断完成）
  *
@@ -316,14 +319,34 @@ export class P5PlanStageHandler implements P5StageHandler {
 
       const tasksContent = fs.readFileSync(tasksFilePath, "utf8");
 
-      // 2. 解析任务卡列表
-      const taskCards = parseTaskCards(tasksContent);
+      // 2. 解析任务卡列表（解析告警经 logger 进入运行日志，修复事故：非法状态静默降级）
+      const parseWarnings: string[] = [];
+      const pushParseWarning = (msg: string): void => {
+        parseWarnings.push(msg);
+        ctx.logger?.(`plan 解析告警：${msg}`, "warn");
+      };
+      let taskCards = parseTaskCards(tasksContent, pushParseWarning);
+
+      // 2.1 空清单 + 非空 objective → 合成卡消费目标（与"tasks.md 不存在"分支的
+      // 合成语义对齐：空文件与缺文件在"目标必须被消费"这一点上语义相同）
+      const objectiveForEmpty = typeof ctx.objective === "string" ? ctx.objective.trim() : "";
+      if (taskCards.length === 0 && objectiveForEmpty.length > 0) {
+        try {
+          atomicWriteTextFile(tasksFilePath, buildSynthesizedTasksContent(objectiveForEmpty));
+          synthesized = true;
+          ctx.logger?.(`plan 空清单合成：tasks.md 无任务卡，已按目标合成 T-001 落盘 ${tasksFilePath}`, "warn");
+        } catch {
+          // 落盘失败：维持"无任务卡"结果（5d 判 failed），不伪造成功
+        }
+        taskCards = parseTaskCards(fs.readFileSync(tasksFilePath, "utf8"), pushParseWarning);
+      }
+
       if (taskCards.length === 0) {
         // 无任务卡 → 返回 success + taskCard=null（5d 对 NO_TASK_CARDS 判 failed，不再误报完成）
         return createSuccessStageResult(
           "plan",
           `tasks.md 无任务卡（${tasksFilePath}），无任务可执行`,
-          { taskCard: null, tasksFilePath, reason: PLAN_REASON_NO_TASK_CARDS, totalCards: 0 },
+          { taskCard: null, tasksFilePath, reason: PLAN_REASON_NO_TASK_CARDS, totalCards: 0, parseWarnings },
           [],
           0,
           Date.now() - startTime
@@ -331,37 +354,192 @@ export class P5PlanStageHandler implements P5StageHandler {
       }
 
       // 3. 挑选下一张 pending 任务卡（依赖已满足）
+      //    selectedCards/completedIds 为可变工作集：3.4 stale-state 守卫追加
+      //    合成卡后会被替换为重新解析结果；taskCards 保持只读冻结不被篡改。
+      let selectedCards: ReadonlyArray<ParsedTaskCard> = taskCards;
       const completedIds = new Set<string>(taskCards.filter((c) => c.status === "completed").map((c) => c.id));
-      const nextTask = pickNextPendingTask(taskCards, completedIds);
+      let nextTask = pickNextPendingTask(selectedCards, completedIds);
+
+      // 3.4 stale-state 守卫（修复 2026-10-05 僵尸任务卡死循环事故）：
+      // objective 非空且与现存**所有**任务卡文本零/弱相关时，说明本目录的
+      // tasks.md 大概率是历史遗留清单（事故中 10-04 的"继续——已完成"卡与
+      // 新目标"bio-backend 注册信息接收 API"完全无关）。旧行为"文件存在即
+      // 复用"让新目标永远不被消费——无论旧卡是 pending（反复选中僵尸卡）
+      // 还是全部 completed/blocked（被 5d 误判 all-tasks-completed 提前收尾）。
+      // 新行为：自动把 objective 合成为新任务卡追加到清单尾部（原内容原样
+      // 保留、旧 pending 卡不丢），再重新解析：
+      // - 旧卡有 pending：追加后 pickNextPendingTask 按 ID 升序仍先消费旧卡；
+      // - 旧卡全 completed/blocked：新合成卡直接成为本轮待执行卡。
+      //
+      // 触发时机必须在"无可执行 pending 卡"判定**之前**：若等到 nextTask 为
+      // null 才检查，全部旧卡已完成的僵尸清单会先命中 all-tasks-completed
+      // 直接收尾（5d 据此宣告运行完成），新目标依旧永不被追加执行。
+      {
+        const objectiveText = typeof ctx.objective === "string" ? ctx.objective.trim() : "";
+        // 本轮卡已由 objective 合成（synthesized=true）时跳过守卫，避免自反触发
+        if (objectiveText.length > 0 && !synthesized) {
+          const cardTexts = taskCards.map((c) => `${c.title} ${c.requirementId}`);
+          const relevance = computeObjectiveRelevance(objectiveText, cardTexts);
+          // 双向包含快判（与僵尸完成守卫同构）：手写卡标题本身就是目标
+          // （前缀/子串）时，卡与目标必然同义，无论文本长短都直接视为相关。
+          // 否则短目标（如"运行测试任务 1"）对长卡标题（"测试任务 1"）的
+          // Jaccard/min 归一比例会因目标侧词集滑窗膨胀而被稀释误判为无关
+          // （Z8 事故复盘：误合成第二张 AUTO 卡导致 dev 重复执行、熔断器永不触发）。
+          const titleEmbedded = taskCards.some(
+            (c) => c.title.length > 0 && (objectiveText.includes(c.title) || c.title.includes(objectiveText))
+          );
+          if (!titleEmbedded && relevance < OBJECTIVE_RELEVANCE_MIN_RATIO) {
+            // 防重复追加的"合成卡识别"必须同时满足：① T-001 标题是 objective 的
+            // 前缀/子串（标题由 objective 截断而来，见 buildSynthesizedTasksContent）；
+            // ② requirement 为 AUTO 合成标记。否则人工手写、标题恰好是 objective
+            // 子串的旧卡（如 objective"重构支付模块并补测试"、旧卡"重构支付模块"）
+            // 会被误判为已合成，导致新目标永远不被追加。
+            const alreadySynthesized = taskCards.some(
+              (c) =>
+                c.id === SYNTHESIZED_TASK_ID &&
+                c.requirementId === "AUTO" &&
+                c.title.length > 0 &&
+                objectiveText.includes(c.title)
+            );
+            // 注：不得用 `tasksContent.includes("## T-001 ")` 做文件级判重——
+            // 合成卡沿用 T-001 编号（见 Z5 用例"旧卡 done 不改号"），手写清单
+            // 首张卡标题必然命中该子串，会把所有手写卡误判为"已合成"，
+            // 导致守卫永不追加（2026-10-05 守卫时序修复时纠正）。
+            if (!alreadySynthesized) {
+              try {
+                // 去首尾空白（含事故遗留 BOM）后补单个换行：与文件原有单换行结尾约定一致，
+                // 保证追加后合成卡标题前恰好一个空行（原尾部 `/\s*$/` 贪婪剥除会把空行一并吃掉）
+                const appended = `${tasksContent.replace(/\s+$/, "")}\n\n${buildSynthesizedTasksContent(objectiveText)}`;
+                atomicWriteTextFile(tasksFilePath, appended);
+                synthesized = true;
+                ctx.logger?.(
+                  `plan 目标相关性守卫：objective 与现存任务卡相关性过低` +
+                    `（${(relevance * 100).toFixed(0)}% < ${(OBJECTIVE_RELEVANCE_MIN_RATIO * 100).toFixed(0)}%），` +
+                    `已把目标合成为新任务卡追加到 ${tasksFilePath}`,
+                  "warn"
+                );
+                // 重新解析（与首次解析同一闭环），新合成卡进入候选
+                const reparsed = parseTaskCards(fs.readFileSync(tasksFilePath, "utf8"), (msg) => {
+                  parseWarnings.push(msg);
+                  ctx.logger?.(`plan 解析告警：${msg}`, "warn");
+                });
+                const reparsedCompletedIds = new Set<string>(
+                  reparsed.filter((c) => c.status === "completed").map((c) => c.id)
+                );
+                const reparsedNext = pickNextPendingTask(reparsed, reparsedCompletedIds);
+                if (reparsedNext !== null) {
+                  selectedCards = reparsed;
+                  completedIds.clear();
+                  for (const id of reparsedCompletedIds) {
+                    completedIds.add(id);
+                  }
+                  nextTask = reparsedNext;
+                }
+              } catch (appendError) {
+                // 追加失败不阻断本轮（旧行为：继续用现存卡）；告警留痕供诊断
+                const message = appendError instanceof Error ? appendError.message : String(appendError);
+                ctx.logger?.(`plan 目标相关性守卫：合成新任务卡追加失败（${message}），本轮沿用现存任务卡`, "warn");
+              }
+            }
+          }
+        }
+      }
 
       if (nextTask === null) {
         // 方案 A §3.6：把旧的 all-tasks-done-or-blocked 拆成两种诚实语义。
         const completedCount = completedIds.size;
-        const allCompleted = taskCards.every((c) => c.status === "completed");
-        if (allCompleted) {
-          // 清单全部 completed：可能是真正收尾（5d 还要看本轮有无失败与终态守卫）
-          return createSuccessStageResult(
-            "plan",
-            `所有任务已完成（completed=${completedCount}/${taskCards.length}）`,
-            {
-              taskCard: null,
-              tasksFilePath,
-              reason: PLAN_REASON_ALL_TASKS_COMPLETED,
-              totalCards: taskCards.length,
-              completedCards: completedCount,
-            },
-            [],
-            0,
-            Date.now() - startTime
-          );
+        const allCompleted = selectedCards.every((c) => c.status === "completed");
+        // 僵尸 completed 守卫（修复 2026-10-05 事故第二轮空转）：
+        // objective 与**全部**已完成卡零/弱相关时，"所有任务已完成"实为
+        // 历史清单收尾假象——本轮目标从未被任何卡消费。不放行收尾，
+        // 改为合成新卡消费本轮目标（与 3.4 守卫同一语义出口）。
+        // 注意：allCompleted 时 3.4 守卫可能已追加过合成卡（synthesized=true），
+        // 此时不重复追加，改判"无可执行卡"走下方阻塞路径透出诊断。
+        if (allCompleted && !synthesized) {
+          const objectiveText = typeof ctx.objective === "string" ? ctx.objective.trim() : "";
+          if (objectiveText.length > 0) {
+            const cardTexts = selectedCards.map((c) => `${c.title} ${c.requirementId}`);
+            const relevance = computeObjectiveRelevance(objectiveText, cardTexts);
+            // 双向包含快判（与 3.4 守卫同构）：卡标题与目标同义（互为前缀/子串）
+            // 时视为真正的目标收尾，不触发僵尸合成。
+            const titleEmbedded = selectedCards.some(
+              (c) => c.title.length > 0 && (objectiveText.includes(c.title) || c.title.includes(objectiveText))
+            );
+            if (!titleEmbedded && relevance < OBJECTIVE_RELEVANCE_MIN_RATIO) {
+              // 与 3.4 守卫同构：AUTO 合成标记 + objective 包含卡标题 双条件判
+              // "已合成"，防止人工手写卡被误判；文件可能已被 3.4 之后的流程改动，
+              // 以最新磁盘内容为准判重
+              const freshContent = fs.readFileSync(tasksFilePath, "utf8");
+              const freshCards = parseTaskCards(freshContent);
+              const alreadySynthesized = freshCards.some(
+                (c) =>
+                  c.id === SYNTHESIZED_TASK_ID &&
+                  c.requirementId === "AUTO" &&
+                  c.title.length > 0 &&
+                  objectiveText.includes(c.title)
+              );
+              if (!alreadySynthesized) {
+                try {
+                  const appended = `${freshContent.replace(/\s+$/, "")}\n\n${buildSynthesizedTasksContent(objectiveText)}`;
+                  atomicWriteTextFile(tasksFilePath, appended);
+                  synthesized = true;
+                  ctx.logger?.(
+                    `plan 僵尸完成守卫：objective 与全部已完成卡相关性过低` +
+                      `（${(relevance * 100).toFixed(0)}% < ${(OBJECTIVE_RELEVANCE_MIN_RATIO * 100).toFixed(0)}%），` +
+                      `已把目标合成为新任务卡追加到 ${tasksFilePath}`,
+                    "warn"
+                  );
+                  const reparsed = parseTaskCards(fs.readFileSync(tasksFilePath, "utf8"), (msg) => {
+                    parseWarnings.push(msg);
+                    ctx.logger?.(`plan 解析告警：${msg}`, "warn");
+                  });
+                  const reparsedCompletedIds = new Set<string>(
+                    reparsed.filter((c) => c.status === "completed").map((c) => c.id)
+                  );
+                  const reparsedNext = pickNextPendingTask(reparsed, reparsedCompletedIds);
+                  if (reparsedNext !== null) {
+                    selectedCards = reparsed;
+                    completedIds.clear();
+                    for (const id of reparsedCompletedIds) {
+                      completedIds.add(id);
+                    }
+                    nextTask = reparsedNext;
+                  }
+                } catch (appendError) {
+                  const message = appendError instanceof Error ? appendError.message : String(appendError);
+                  ctx.logger?.(`plan 僵尸完成守卫：合成新任务卡追加失败（${message}），按已完成收尾处理`, "warn");
+                }
+              }
+            }
+          }
+        }
+
+        if (nextTask === null) {
+          if (allCompleted) {
+            // 清单全部 completed：可能是真正收尾（5d 还要看本轮有无失败与终态守卫）
+            return createSuccessStageResult(
+              "plan",
+              `所有任务已完成（completed=${completedCount}/${selectedCards.length}）`,
+              {
+                taskCard: null,
+                tasksFilePath,
+                reason: PLAN_REASON_ALL_TASKS_COMPLETED,
+                totalCards: selectedCards.length,
+                completedCards: completedCount,
+              },
+              [],
+              0,
+              Date.now() - startTime
+            );
+          }
         }
 
         // 存在未完成任务却没有可执行 pending 卡：区分"显式 blocked / in-progress 残留"
         // 与"pending 但依赖未满足"，把任务 ID 与缺失依赖写入制品供最终报告诊断（P2-2）
-        const blockedCardIds = taskCards
+        const blockedCardIds = selectedCards
           .filter((c) => c.status !== "completed" && c.status !== "pending")
           .map((c) => c.id);
-        const waitingDependencies = taskCards
+        const waitingDependencies = selectedCards
           .filter((c) => c.status === "pending")
           .map((c) => ({
             id: c.id,
@@ -370,12 +548,12 @@ export class P5PlanStageHandler implements P5StageHandler {
           .filter((entry) => entry.missingDependencies.length > 0);
         return createSuccessStageResult(
           "plan",
-          `任务被阻塞（completed=${completedCount}/${taskCards.length}，blocked=${blockedCardIds.length}，等待依赖=${waitingDependencies.length}）`,
+          `任务被阻塞（completed=${completedCount}/${selectedCards.length}，blocked=${blockedCardIds.length}，等待依赖=${waitingDependencies.length}）`,
           {
             taskCard: null,
             tasksFilePath,
             reason: PLAN_REASON_TASKS_BLOCKED,
-            totalCards: taskCards.length,
+            totalCards: selectedCards.length,
             completedCards: completedCount,
             blockedCardIds: Object.freeze(blockedCardIds),
             waitingDependencies: Object.freeze(waitingDependencies),
@@ -495,9 +673,10 @@ export class P5PlanStageHandler implements P5StageHandler {
           // 方案 A：精确 reason + synthesized 标志（verify/orchestrator 据此分流）
           reason: PLAN_REASON_TASK_CARD_SELECTED,
           synthesized,
-          totalCards: taskCards.length,
+          totalCards: selectedCards.length,
           completedCards: completedIds.size,
-          pendingCards: taskCards.length - completedIds.size,
+          pendingCards: selectedCards.length - completedIds.size,
+          parseWarnings,
           guardDecision: "PASS",
           domainExperts, // 领域专家匹配结果（可选增强，供后续阶段参考）
           guardCoordinatorResult, // GuardCoordinator 执行前验证结果（可选增强）
@@ -604,6 +783,55 @@ export function detectShellCapabilityGap(texts: ReadonlyArray<string>): Capabili
 // ============================================================================
 
 /**
+ * 任务卡状态别名归一化映射表（修复 2026-10-05 僵尸任务卡死循环事故）。
+ *
+ * 背景：人工在 tasks.md 里把任务写成 `- status: done` 时，旧解析器白名单
+ * 只认 pending / in-progress / completed / blocked 四个值，done 不在其中，
+ * 被静默降级回默认值 pending——一张已完成的任务卡从此变成"永远 pending 的
+ * 僵尸卡"，每轮 plan 都选中它 → dev 执行器拿到自相矛盾的任务描述 → bash
+ * 盲目探索烧满 12 轮 → 失败 → 下轮再选同一张卡，直到连续失败 3 次才 abort。
+ *
+ * 归一化策略（宽容读入）：
+ * - done / finished / complete / closed / 已完成 / 完成 → completed
+ * - doing / ongoing / wip / 进行中 → in-progress
+ * - 大小写不敏感（先 trim + toLowerCase 再查表；中文值不受 toLowerCase 影响）
+ * - 输入已是大写规范值（pending 等）时映射表同样命中，行为与旧版一致
+ * - 未知状态返回 null，由调用方决定降级策略（见 parseTaskCards 的 status 分支）
+ *
+ * @param raw 原始状态文本（已 trim）
+ * @returns 归一化后的合法状态；无法识别（含空串）返回 null
+ */
+function normalizeTaskCardStatus(raw: string): ParsedTaskCard["status"] | null {
+  switch (raw.trim().toLowerCase()) {
+    case "pending":
+    case "todo":
+    case "待办":
+    case "待执行":
+      return "pending";
+    case "in-progress":
+    case "in_progress":
+    case "doing":
+    case "ongoing":
+    case "wip":
+    case "进行中":
+      return "in-progress";
+    case "completed":
+    case "done":
+    case "finished":
+    case "complete":
+    case "closed":
+    case "已完成":
+    case "完成":
+      return "completed";
+    case "blocked":
+    case "阻塞":
+      return "blocked";
+    default:
+      return null;
+  }
+}
+
+/**
  * 解析 tasks.md 文件内容为任务卡列表
  *
  * 格式约定：
@@ -623,9 +851,15 @@ export function detectShellCapabilityGap(texts: ReadonlyArray<string>): Capabili
  * ```
  *
  * @param content tasks.md 文件内容
+ * @param onWarning 可选告警回调：状态值无法归一化时以"卡 ID + 原始值 +
+ *   降级策略"告警（修复 2026-10-05 僵尸任务卡事故：done 等非法状态被静默
+ *   降级 pending，运维完全无感知）；未提供时静默保持向后兼容
  * @returns 任务卡列表（readonly）
  */
-export function parseTaskCards(content: string): ReadonlyArray<ParsedTaskCard> {
+export function parseTaskCards(
+  content: string,
+  onWarning: (message: string) => void = () => {}
+): ReadonlyArray<ParsedTaskCard> {
   const cards: ParsedTaskCard[] = [];
   const lines = content.split(/\r?\n/);
 
@@ -665,9 +899,22 @@ export function parseTaskCards(content: string): ReadonlyArray<ParsedTaskCard> {
           currentCard.requirementId = value;
           break;
         case "status": {
-          const status = value as ParsedTaskCard["status"];
-          if (status === "pending" || status === "in-progress" || status === "completed" || status === "blocked") {
-            currentCard.status = status;
+          // 宽容读入 + 显式告警（修复 2026-10-05 僵尸任务卡死循环事故）：
+          // 1) done/doing/已完成 等人工书写别名经归一化映射为合法状态；
+          // 2) 完全无法识别的值通过 onWarning 告警后按 pending 保守处理，
+          //    绝不静默吞掉——旧实现直接把 done 降级成 pending，把人工已
+          //    完成的卡变成永远选不掉的僵尸卡。
+          const normalized = normalizeTaskCardStatus(value);
+          if (normalized !== null) {
+            currentCard.status = normalized;
+          } else {
+            // status 属性行先于标题行出现（畸形文件）时 id 尚未赋值，取默认占位
+            onWarning(
+              `任务卡 ${currentCard.id ?? "(未知)"} 的 status 值 "${value}" 无法识别` +
+                `（合法值：pending / in-progress / completed / blocked 及 done、doing 等常见别名），` +
+                `按 pending 处理——若该卡实际已完成，请改写为 completed 或 done`
+            );
+            currentCard.status = "pending";
           }
           break;
         }
@@ -756,6 +1003,105 @@ function parseStringList(value: string): ReadonlyArray<string> {
 // ============================================================================
 
 /**
+ * 英文/技术 token：带字母的连续标识符（小写化后作为相关性词集元素）。
+ *
+ * 例："bio-backend API" → {"bio", "backend", "api"}；
+ * docker / git / kubectl / 注册信息 等中文以外的技术词全部命中。
+ */
+const WORD_TOKEN_RE = /[A-Za-z][A-Za-z0-9_.+-]*/g;
+
+/**
+ * 中文词组提取的块切分正则：匹配连续汉字段（≥2 字）。
+ *
+ * 中文无空格分词，提取策略是"先按非汉字字符切出连续汉字块，块内再做
+ * 2-4 字滑窗"（见 extractRelevanceTokens），滑窗绝不跨数字、标点、
+ * 英文等非汉字边界："运行测试任务 1" 的"1"会把汉字段切成
+ * "运行测试任务" 一块，滑窗只在块内滑动。
+ * 滑窗会产出交叉重复片段，但 Jaccard 是对称度量，双方同样膨胀，不影响判定。
+ */
+const CJK_BLOCK_RE = /[\u4e00-\u9fff]{2,}/g;
+
+/**
+ * 目标相关性判定阈值（Jaccard 相似度系数）。
+ *
+ * 选中卡文本词集与 objective 词集的交集占两者较小者的比例 ≥ 0.3 视为相关；
+ * 低于阈值说明 tasks.md 与本次目标大概率无关（stale-state，事故中 10-04 的
+ * 僵尸卡与新目标 bio-backend API 零词重合），触发 objective 补充合成新卡。
+ */
+const OBJECTIVE_RELEVANCE_MIN_RATIO = 0.3;
+
+/**
+ * 提取文本的相关性词集（英文 token + 中文连续字块 + 字块内 2-4 字滑窗）。
+ *
+ * 中文分词策略说明（修复 2026-10-05 "运行测试任务 1" vs "测试任务 1"
+ * 零重合误判）：CJK 滑窗**必须限定在连续汉字段内部**，不得跨数字、
+ * 标点、英文等非汉字边界——否则"运行测试任务 1"中的滑窗"行测试"会
+ * 跨越"运行/测试任务"的语义边界，与"测试任务 1"产生虚假匹配。
+ * 块内滑窗保证候选词都是真实相邻子串；连续 ≥5 字的大块因同起点产生的
+ * 长公共前缀（如 3 字窗口重合 ≥3 个），按 min 归一后占比可达阈值。
+ *
+ * @param text 输入文本（标题 / requirement / objective）
+ * @returns 词集（Set<string>）
+ */
+function extractRelevanceTokens(text: string): Set<string> {
+  const tokens = new Set<string>();
+  if (typeof text !== "string" || text.length === 0) {
+    return tokens;
+  }
+  for (const m of text.matchAll(WORD_TOKEN_RE)) {
+    tokens.add(m[0]!.toLowerCase());
+  }
+  // 先按非汉字字符切出连续汉字块（CJK_BLOCK_RE），再在块内做 2-4 字滑窗（不跨块）
+  for (const blockMatch of text.matchAll(CJK_BLOCK_RE)) {
+    const block = blockMatch[0]!;
+    for (let len = 2; len <= 4; len += 1) {
+      for (let i = 0; i + len <= block.length; i += 1) {
+        tokens.add(block.slice(i, i + len));
+      }
+    }
+  }
+  return tokens;
+}
+
+/**
+ * 计算 objective 与一组任务卡文本的相关性比例。
+ *
+ * 语义：
+ * - objective 词集为空（无法比较）→ 返回 1（视为相关，不触发补充合成）；
+ * - 任务卡文本全空（纯合成卡等）→ 返回 0（视为不相关，新目标应重新合成）；
+ * - 否则：对每张卡计算 Jaccard 比例（交集 / 较小词集），取所有卡的最大值，
+ *   只要有一张卡与目标显著相关即视为清单相关。
+ *
+ * @param objective 用户目标文本
+ * @param cardTexts 每张任务卡的文本（标题 + requirement 拼接）
+ * @returns 相关性比例 ∈ [0, 1]
+ */
+export function computeObjectiveRelevance(objective: string, cardTexts: ReadonlyArray<string>): number {
+  const objectiveTokens = extractRelevanceTokens(objective);
+  if (objectiveTokens.size === 0) {
+    return 1;
+  }
+  let bestRatio = 0;
+  for (const cardText of cardTexts) {
+    const cardTokens = extractRelevanceTokens(cardText);
+    if (cardTokens.size === 0) {
+      continue;
+    }
+    let intersection = 0;
+    for (const token of cardTokens) {
+      if (objectiveTokens.has(token)) {
+        intersection += 1;
+      }
+    }
+    const ratio = intersection / Math.min(objectiveTokens.size, cardTokens.size);
+    if (ratio > bestRatio) {
+      bestRatio = ratio;
+    }
+  }
+  return bestRatio;
+}
+
+/**
  * 挑选下一张 pending 任务卡（依赖已满足）
  *
  * 选取规则：
@@ -811,7 +1157,7 @@ export function buildSynthesizedTasksContent(objective: string): string {
     .slice(0, MAX_SYNTHESIZED_TITLE_CHARS);
 
   return [
-    "# EAG-P5 任务清单（由自主目标自动生成，可手工编辑补充 files/acceptance）",
+    "<!-- EAG-P5 任务清单（由自主目标自动生成，可手工编辑补充 files/acceptance） -->",
     "",
     `## ${SYNTHESIZED_TASK_ID} ${singleLineTitle}`,
     "- requirement: AUTO",

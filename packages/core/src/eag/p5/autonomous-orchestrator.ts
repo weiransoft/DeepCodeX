@@ -71,6 +71,7 @@ import type { P5SmartConfirmation } from "./smart-confirmation";
 import type { P5LoopExecutor } from "./loop-executor";
 import type { P5StageContext, P5StageResult, P5StageKind } from "./handlers/types";
 import type { P5TaskExecutor } from "./handlers/task-executor-port";
+import { tagStageResultIterIndex } from "./handlers/fix-stage-handler";
 import {
   PLAN_REASON_ALL_TASKS_COMPLETED,
   PLAN_REASON_TASKS_BLOCKED,
@@ -459,6 +460,15 @@ export interface AutonomousOrchestratorOptions {
  */
 export type AutonomousOrchestratorLogCallback = (message: string, level?: "info" | "warn" | "error") => void;
 
+/**
+ * 确定性失败熔断阈值（修复 2026-10-05 僵尸任务卡死循环事故）。
+ *
+ * 同一任务卡 + 完全相同失败集合连续重复达到此次数时直接 abort，
+ * 不再等 LoopScheduler 的连续失败阈值（默认 3）——相同输入必得相同
+ * 输出，重复执行是纯 token 浪费，没有收敛可能。
+ */
+export const IDENTICAL_FAILURE_CIRCUIT_BREAKER_THRESHOLD = 2;
+
 // ============================================================================
 // 3. 默认日志空函数
 // ============================================================================
@@ -676,6 +686,10 @@ export class AutonomousOrchestrator {
     let consecutiveFailures = 0;
     let totalLlmCallCount = 0;
     let totalTokensUsed = 0;
+    // 确定性失败指纹熔断状态（修复 2026-10-05 僵尸任务卡事故，见 5b.7 注释）：
+    // 上一轮失败指纹（任务卡 ID + 失败集合）与连续重复次数
+    let lastFailureFingerprint: string | null = null;
+    let identicalFailureStreak = 0;
     // 方案 A §3.10：执行器真实 LLM 请求次数累计（与 token/llmCallCount 解耦，供最终报告审计）
     let totalExecutorLlmRequests = 0;
     let iterIndex = 0;
@@ -690,6 +704,16 @@ export class AutonomousOrchestrator {
     const milestones: P5MilestoneRecord[] = [];
     const triggeredGuards: GuardRecord[] = [];
     const completedLoops: P5LoopType[] = [];
+
+    // 熔断器跨 run 状态复位：lastFailureFingerprint / identicalFailureStreak 等
+    // 声明在 run() 函数体内，每次调用天然是全新值——不存在跨 run 残留问题。
+    // 此处显式复位仅防御两类真实场景：
+    // 1. RunState 从磁盘"续跑"（iterIndex 从持久化值恢复，但指纹状态属新进程）；
+    // 2. 未来重构把状态提升为实例字段时的遗留值污染。
+    // 上一轮指纹属于上一次 run（进程可能已重启），新一轮必须从干净计数开始，
+    // 否则新 run 首轮可能误用陈旧指纹提前（或永远无法）触发熔断。
+    lastFailureFingerprint = null;
+    identicalFailureStreak = 0;
 
     // 5. 主循环（包装在 try/finally 中，finally 块清理 abort 标志文件）
     // 设计理由：无论 run() 以何种方式退出（成功/失败/中止/异常），都需清理 abort 标志文件，
@@ -790,6 +814,10 @@ export class AutonomousOrchestrator {
 
           // 5b-2. 调用 loopExecutor.execute(stage, ctx)
           const result = await this.loopExecutor.execute(stage, ctx);
+          // 打轮次标签：fix 阶段 findVerifyFailure 靠 WeakMap 侧表区分
+          // "本轮 verify 失败"与"陈旧轮次 verify 失败"（iterIndex 不在
+          // P5StageResult 公共契约内，用 handler 侧表传递，见 fix-stage-handler）
+          tagStageResultIterIndex(result, iterIndex);
           iterationResults.push(result as P5StageResult);
 
           // 5b-3. 累加统计（guardRecords / tokensUsed / llmCallCount / 执行器真实请求数）
@@ -857,43 +885,74 @@ export class AutonomousOrchestrator {
           const loopEvent = this.buildLoopEvent(runId, iterIndex, loopVerdict);
           loopEvents.push(loopEvent);
 
-          const schedulingDecision = loopScheduler.decideNext(
-            iterIndex,
-            loopVerdict,
-            loopEvents,
-            totalTokensUsed,
-            consecutiveFailures // 不含本轮失败（5c 尚未执行）
-          );
-
-          this.log(
-            `AutonomousOrchestrator.run 迭代 ${iterIndex} LoopScheduler 决策：action=${schedulingDecision.action} reason=${schedulingDecision.reason}`,
-            "info"
-          );
-
-          // 映射 SchedulingDecision → P5 status（替代原 5f 终止条件）
-          // - human_checkpoint → aborted（P5 无人值守，不等待人工，直接 abort）
-          // - stop_failure（非最大迭代次数）→ aborted（连续失败或 Token 耗尽）
-          // - stop_failure（最大迭代次数）→ 不处理，由步骤 6 统一设为 failed（保持向后兼容）
-          // - stop_success / continue / fix → 不改变 status（由 5d/5e/while 循环条件处理）
-          if (schedulingDecision.action === "human_checkpoint") {
+          // 确定性失败指纹熔断（修复 2026-10-05 僵尸任务卡死循环事故）：
+          // 同一任务卡 + 完全相同的失败集合连续重复达阈值（默认 2 次，即本轮与前
+          // 一轮指纹相同）时，LoopScheduler 的连续失败计数（默认 3）还会再烧一轮
+          // 完全相同的迭代——每轮 12 个工具回合纯烧 token 的确定性重复执行。
+          // 指纹 = 本轮 plan 选中的任务卡 ID + 全部阶段失败信息（[stage] kind:
+          // error/summary 有序列表）；全绿轮（findings 为空）清除计数。
+          if (loopVerdict.passed || loopVerdict.findings.length === 0) {
+            lastFailureFingerprint = null;
+            identicalFailureStreak = 0;
+          } else {
+            const failureFingerprint = `${planTaskCard?.id ?? "(no-card)"}|${loopVerdict.findings.join("\u0001")}`;
+            if (failureFingerprint === lastFailureFingerprint) {
+              identicalFailureStreak += 1;
+            } else {
+              lastFailureFingerprint = failureFingerprint;
+              identicalFailureStreak = 1;
+            }
+          }
+          if (!loopVerdict.passed && identicalFailureStreak >= IDENTICAL_FAILURE_CIRCUIT_BREAKER_THRESHOLD) {
             status = "aborted";
             finalStatus = "aborted";
             this.log(
-              `AutonomousOrchestrator.run 迭代 ${iterIndex} LoopScheduler 触发 human_checkpoint，status=aborted`,
+              `AutonomousOrchestrator.run 迭代 ${iterIndex} 触发确定性失败熔断：` +
+                `同一任务卡 + 相同失败连续 ${identicalFailureStreak} 次` +
+                `（阈值 ${IDENTICAL_FAILURE_CIRCUIT_BREAKER_THRESHOLD}），` +
+                `继续重试只会重复消耗，status=aborted。` +
+                `失败指纹：${lastFailureFingerprint?.slice(0, 500) ?? ""}`,
               "error"
             );
-          } else if (schedulingDecision.action === "stop_failure") {
-            // 区分"最大迭代次数触发"与"连续失败/Token 耗尽触发"
-            // 最大迭代次数 → 由步骤 6 统一设为 failed（向后兼容）
-            // 其他原因 → 设为 aborted
-            const isMaxIterationsReached = iterIndex + 1 >= maxIterations;
-            if (!isMaxIterationsReached) {
+          } else {
+            const schedulingDecision = loopScheduler.decideNext(
+              iterIndex,
+              loopVerdict,
+              loopEvents,
+              totalTokensUsed,
+              consecutiveFailures // 不含本轮失败（5c 尚未执行）
+            );
+
+            this.log(
+              `AutonomousOrchestrator.run 迭代 ${iterIndex} LoopScheduler 决策：action=${schedulingDecision.action} reason=${schedulingDecision.reason}`,
+              "info"
+            );
+
+            // 映射 SchedulingDecision → P5 status（替代原 5f 终止条件）
+            // - human_checkpoint → aborted（P5 无人值守，不等待人工，直接 abort）
+            // - stop_failure（非最大迭代次数）→ aborted（连续失败或 Token 耗尽）
+            // - stop_failure（最大迭代次数）→ 不处理，由步骤 6 统一设为 failed（保持向后兼容）
+            // - stop_success / continue / fix → 不改变 status（由 5d/5e/while 循环条件处理）
+            if (schedulingDecision.action === "human_checkpoint") {
               status = "aborted";
               finalStatus = "aborted";
               this.log(
-                `AutonomousOrchestrator.run 迭代 ${iterIndex} LoopScheduler 触发 stop_failure（${schedulingDecision.reason}），status=aborted`,
+                `AutonomousOrchestrator.run 迭代 ${iterIndex} LoopScheduler 触发 human_checkpoint，status=aborted`,
                 "error"
               );
+            } else if (schedulingDecision.action === "stop_failure") {
+              // 区分"最大迭代次数触发"与"连续失败/Token 耗尽触发"
+              // 最大迭代次数 → 由步骤 6 统一设为 failed（向后兼容）
+              // 其他原因 → 设为 aborted
+              const isMaxIterationsReached = iterIndex + 1 >= maxIterations;
+              if (!isMaxIterationsReached) {
+                status = "aborted";
+                finalStatus = "aborted";
+                this.log(
+                  `AutonomousOrchestrator.run 迭代 ${iterIndex} LoopScheduler 触发 stop_failure（${schedulingDecision.reason}），status=aborted`,
+                  "error"
+                );
+              }
             }
           }
         }
@@ -2143,6 +2202,9 @@ export class AutonomousOrchestrator {
       taskExecutor: args.taskExecutor,
       synthesizedTask: args.synthesizedTask,
       abortFlagPath: args.abortFlagPath,
+      // 阶段级日志回调：plan 阶段用它上报 tasks.md 解析告警（修复 2026-10-05
+      // 僵尸任务卡事故——非法 status 静默降级 pending 完全无日志痕迹）
+      logger: this.log,
     });
   }
 
@@ -2203,16 +2265,23 @@ export class AutonomousOrchestrator {
     }
 
     // 在区段内改写 status 行（保留原始换行风格：按 \n 重组，文件末尾换行保留策略跟随主流写法）
+    // done / doing 等等价别名一并接受（修复 2026-10-05 僵尸任务卡事故：人工手写
+    // "- status: done" 的卡即使侥幸跑完全绿，也会因正则不认 done 而在这里抛错，
+    // 被计入迭代失败——形成"无论怎么执行都出不去"的死局）。
+    // done→completed 语义本就等价，直接改写为规范值 completed。
     let replaced = false;
     for (let i = headerIndex + 1; i < endIndex; i += 1) {
-      if (/^-\s+status\s*:\s*(pending|in-progress|blocked)\s*$/.test(lines[i]!)) {
+      if (/^-\s+status\s*:\s*(pending|in-progress|blocked|done|doing|in_progress)\s*$/i.test(lines[i]!)) {
         lines[i] = "- status: completed";
         replaced = true;
         break;
       }
     }
     if (!replaced) {
-      throw new Error(`任务卡 ${taskId} 区段内没有可改写的 pending/in-progress/blocked 状态行`);
+      throw new Error(
+        `任务卡 ${taskId} 区段内没有可改写的 pending/in-progress/blocked/done 状态行` +
+          `（若卡片已完成请人工改写为 "- status: completed"）`
+      );
     }
 
     atomicWriteTextFile(tasksFilePath, lines.join("\n"));

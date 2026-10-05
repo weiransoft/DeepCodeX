@@ -627,7 +627,9 @@ test("I8. 端到端：AutonomousOrchestrator + LoopScheduler → completed 终�
 
     const result = await orchestrator.run({
       projectRoot,
-      objective: "测试 LoopScheduler 集成后的 completed 终止条件",
+      // objective 与已完成卡标题"测试任务 1"相关（"测试任务"词命中）：
+      // 僵尸完成守卫不误触发合成，验证真正的 all-completed 收尾终止条件
+      objective: "确认测试任务 1 已完成并收尾",
       maxIterations: 3,
       testCommand: PASS_TEST_CMD,
       testTimeoutSec: 10,
