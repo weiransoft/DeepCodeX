@@ -572,8 +572,10 @@ test("E12. 风暴按指纹分组：两个不同目标各 deny 5 次（均 < 阈�
   try {
     fs.writeFileSync(envPathA, "SECRET_TOKEN=A\n");
     fs.writeFileSync(envPathB, "SECRET_TOKEN=B\n");
-    // 3 轮 × 每轮 2 个目标各 1 次 deny → 每个指纹各 3 次；再加 1 轮交替 4 次
-    // → 每指纹各 5 次，均 < 阈值 6 → 不触发风暴（分组独立性）；第 4 轮终态。
+    // 5 轮 deny 调用 + 1 轮终态：交替排列 [A,B] / [B,A] 使批量指纹逐轮变化
+    // （"相同调用空转熔断"守卫按连续相同批量指纹判定，交替排列恒不触发；
+    // 该守卫与"风暴按指纹分组"独立，本用例只验证后者）。
+    // 每个指纹（read A / read B）各 deny 5 次，均 < 阈值 6 → 不触发风暴。
     const responses: ConstructorParameters<typeof StubLlmClient>[0] = [
       {
         content: "",
@@ -585,8 +587,8 @@ test("E12. 风暴按指纹分组：两个不同目标各 deny 5 次（均 < 阈�
       {
         content: "",
         toolCalls: [
-          { name: "read", args: { file_path: envPathA } },
           { name: "read", args: { file_path: envPathB } },
+          { name: "read", args: { file_path: envPathA } },
         ],
       },
       {
@@ -599,8 +601,13 @@ test("E12. 风暴按指纹分组：两个不同目标各 deny 5 次（均 < 阈�
       {
         content: "",
         toolCalls: [
-          { name: "read", args: { file_path: envPathA } },
           { name: "read", args: { file_path: envPathB } },
+          { name: "read", args: { file_path: envPathA } },
+        ],
+      },
+      {
+        content: "",
+        toolCalls: [
           { name: "read", args: { file_path: envPathA } },
           { name: "read", args: { file_path: envPathB } },
         ],
@@ -614,7 +621,7 @@ test("E12. 风暴按指纹分组：两个不同目标各 deny 5 次（均 < 阈�
 
     // 每指纹各 5 次 deny（< 阈值 6）→ 不触发风暴，任务以正常终态成功
     assert.equal(result.success, true, `不同目标各自 < 阈值不得误触发风暴，实际：${result.error}`);
-    assert.equal(result.llmRequests, 5);
+    assert.equal(result.llmRequests, 6);
   } finally {
     cleanup(projectRoot);
   }

@@ -575,14 +575,79 @@ export function detectCleanupIntent(command: string): boolean {
 // ============================================================================
 
 /**
+ * 结果 → 所属迭代轮次的映射（WeakMap 侧表）
+ *
+ * 背景（2026-10-05 僵尸任务卡死循环修复）：编排路径的 fix 阶段必须只认
+ * **本轮**的 verify 失败——旧实现无限向前扫描 prevResults，后续轮 plan/dev
+ * 失败、本轮无 verify 结果时仍命中前一轮陈旧 verify 失败并白烧 fix 执行器，
+ * 破坏编排层"相同卡+相同失败指纹"的确定性熔断判定。
+ * 但 iterIndex 并不属于 P5StageResult 公共契约（orchestrator 也不回填），
+ * 因此用 WeakMap 在 handler 侧建立"结果对象 → 轮次"侧表：
+ * - 写入方：各 stage handler 在返回结果前调用 tagStageResultIterIndex；
+ * - 读取方：findVerifyFailure 通过 readStageResultIterIndex 取轮次，
+ *   读不到（调用方手搭/未打标签的旧结果）返回 null → 走批内锚点兼容路径。
+ *
+ * WeakMap 键为冻结的结果对象引用，对象不可达时自动回收，无内存泄漏。
+ */
+const stageResultIterIndexMap = new WeakMap<object, number>();
+
+/**
+ * 给阶段结果打轮次标签（handler 在返回前调用）
+ *
+ * @param result 即将返回的阶段结果对象
+ * @param iterIndex 产生该结果的迭代轮次
+ * @returns 原对象（透传，便于内联包装）
+ */
+export function tagStageResultIterIndex<T extends object>(result: T, iterIndex: number): T {
+  stageResultIterIndexMap.set(result, iterIndex);
+  return result;
+}
+
+/**
+ * 读取阶段结果的轮次标签
+ *
+ * @param result 阶段结果对象
+ * @returns 轮次；未打标签（手搭结果/旧数据）返回 null
+ */
+function readStageResultIterIndex(result: Readonly<P5StageResult>): number | null {
+  return stageResultIterIndexMap.get(result) ?? null;
+}
+
+/**
  * 从 prevResults 中查找 verify 阶段的失败结果
  *
- * 查找规则：从 prevResults 末尾向前查找第一个 stage === "verify" 且 kind !== "success" 的结果。
+ * 查找规则（轮次隔离修复于 2026-10-05 僵尸任务卡死循环事故）：
+ * - **编排路径**（orchestrator 同轮顺序执行 plan→dev→verify→fix，prevResults
+ *   携带跨轮历史）：只认**本轮**（轮次标签 === ctx.iterIndex）的 verify
+ *   失败。旧实现无限向前扫描，后续轮 plan/dev 失败、本轮无 verify 结果时仍命中
+ *   前一轮陈旧 verify 失败并再次白烧一次 fix 执行器，失败信息还掺入陈旧输出，
+ *   破坏编排层"相同卡+相同失败指纹"的确定性失败熔断判定。
+ * - **单元/兼容路径**（结果无轮次标签，如历史测试手搭同批次结果）：
+ *   批内锚点模式——批内无轮次信息可比对，等价于"整批视为同轮"，
+ *   向前扫描到批首为止。
  *
  * @param ctx 阶段执行上下文
- * @returns 失败的 verify 阶段结果（若无则返回 null）
+ * @returns 本轮（或当前批）失败的 verify 阶段结果（若无则返回 null）
  */
 function findVerifyFailure(ctx: Readonly<P5StageContext>): Readonly<P5StageResult> | null {
+  // 快速判定：prevResults 中存在轮次标签与 ctx.iterIndex 对齐的结果 → 编排路径，
+  // 严格按本轮隔离；否则视为单元路径，走批内兼容模式。
+  const hasAlignedRound = ctx.prevResults.some((r) => readStageResultIterIndex(r) === ctx.iterIndex);
+
+  if (hasAlignedRound) {
+    for (let i = ctx.prevResults.length - 1; i >= 0; i--) {
+      const result = ctx.prevResults[i]!;
+      if (readStageResultIterIndex(result) !== ctx.iterIndex) {
+        continue;
+      }
+      if (result.stage === "verify" && result.kind !== "success") {
+        return result;
+      }
+    }
+    return null;
+  }
+
+  // 批内兼容模式：无轮次标签可比对（手搭批次），整批视为同轮向前扫描
   for (let i = ctx.prevResults.length - 1; i >= 0; i--) {
     const result = ctx.prevResults[i]!;
     if (result.stage === "verify" && result.kind !== "success") {

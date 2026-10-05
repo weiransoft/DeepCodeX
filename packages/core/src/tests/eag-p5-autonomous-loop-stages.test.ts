@@ -72,7 +72,9 @@ test("E1. 4 阶段循环完整执行（plan → dev → verify → fix，finalSt
     });
     const result = await orchestrator.run({
       projectRoot,
-      objective: "测试 4 阶段循环完整执行",
+      // objective 与夹具卡标题"测试任务 1"相关（"测试任务"词命中）：
+      // 目标相关性守卫不误触发合成，验证真正的 4 阶段循环收尾
+      objective: "运行测试任务 1 验证 4 阶段循环完整执行",
       maxIterations: 3,
       testCommand: PASS_TEST_CMD,
       testTimeoutSec: 10,
@@ -110,7 +112,7 @@ test("E2. stop_when 终止条件（finalStatus=stop_when, exitCode=3）", async 
     });
     const result = await orchestrator.run({
       projectRoot,
-      objective: "测试 stop_when 终止条件",
+      objective: "运行测试任务 1 验证 stop_when 终止条件",
       maxIterations: 1,
       stopWhen: "all tests pass",
       testCommand: PASS_TEST_CMD,
@@ -137,7 +139,7 @@ test("E3. aborted 终止条件（连续失败 >= abort 阈值, exitCode=2）", a
     const orchestrator = buildOrchestrator();
     const result = await orchestrator.run({
       projectRoot,
-      objective: "测试 aborted 终止条件",
+      objective: "运行测试任务 1 验证 aborted 终止条件",
       maxIterations: 5,
       consecutiveFailureAbort: 2, // 连续失败 2 次即 abort
       testCommand: FAIL_TEST_CMD, // 测试命令始终失败
@@ -165,7 +167,7 @@ test("E4. failed 终止条件（迭代次数用尽, exitCode=1）", async () => 
     const orchestrator = buildOrchestrator();
     const result = await orchestrator.run({
       projectRoot,
-      objective: "测试 failed 终止条件",
+      objective: "运行测试任务 1 验证 failed 终止条件",
       maxIterations: 1, // 仅 1 轮迭代
       consecutiveFailureAbort: 3, // abort 阈值设为 3（1 次失败不触发 abort）
       testCommand: FAIL_TEST_CMD,
@@ -191,7 +193,8 @@ test("E5. AutonomousRunResult 完整字段验证", async () => {
     const orchestrator = buildOrchestrator();
     const result = await orchestrator.run({
       projectRoot,
-      objective: "完整字段验证",
+      // objective 与已完成卡标题"测试任务 1"相关：僵尸完成守卫不误触发合成
+      objective: "确认测试任务 1 完成并做完整字段验证",
       maxIterations: 1,
       testCommand: PASS_TEST_CMD,
       testTimeoutSec: 10,
@@ -228,7 +231,7 @@ test("F1. maxIterations 上限触发终止（迭代次数用尽 → failed）", 
     const orchestrator = buildOrchestrator();
     const result = await orchestrator.run({
       projectRoot,
-      objective: "测试 maxIterations 上限",
+      objective: "运行测试任务 1 验证 maxIterations 上限",
       maxIterations: 2, // 限制 2 轮迭代
       consecutiveFailureAbort: 10, // 高阈值，避免触发 abort
       testCommand: FAIL_TEST_CMD, // 始终失败
@@ -260,7 +263,8 @@ test("F3. AutonomousRunRequest 不可变性（G-A6d Object.freeze）", async () 
     const orchestrator = buildOrchestrator();
     const request: AutonomousRunRequest = Object.freeze({
       projectRoot,
-      objective: "不可变性测试",
+      // objective 与已完成卡标题"测试任务 1"相关：僵尸完成守卫不误触发合成
+      objective: "对测试任务 1 做不可变性测试",
       maxIterations: 1,
       maxTokens: 200000,
       stopWhen: "",

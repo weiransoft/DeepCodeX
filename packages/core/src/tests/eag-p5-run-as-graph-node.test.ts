@@ -133,6 +133,10 @@ function cleanupTempProject(projectRoot: string): void {
 /**
  * 创建 tasks.md 文件（含 1 张指定状态的任务卡）
  *
+ * 卡标题默认与图节点目标"实现 Service1 功能"完全一致：目标相关性守卫
+ * （objective 与旧卡无关时自动合成新卡）对该夹具零误触发，
+ * 本文件用例验证的是 runAsGraphNode 适配层语义，而非 plan 守卫语义。
+ *
  * @param projectRoot 项目根目录
  * @param status 任务卡状态（pending/completed/in-progress/blocked）
  * @returns tasks.md 文件绝对路径
@@ -148,7 +152,7 @@ function createTasksFile(
   const lines: string[] = [];
   lines.push("# EAG-P5 任务清单");
   lines.push("");
-  lines.push("## T-001 测试任务 1");
+  lines.push("## T-001 实现 Service1 功能");
   lines.push("- requirement: F-001");
   lines.push(`- status: ${status}`);
   lines.push("- dependencies: ");

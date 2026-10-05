@@ -30,7 +30,7 @@ import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { SessionManager } from "../session";
-import { LlmTaskExecutor } from "../eag/p5/index";
+import { LlmTaskExecutor, computeObjectiveRelevance } from "../eag/p5/index";
 
 import {
   P5PlanStageHandler,
@@ -152,6 +152,28 @@ async function runPlanDevVerify(
   return Object.freeze({ plan, dev, verify });
 }
 
+/**
+ * 构造执行器输入（与 eag-p5-llm-executor.test.ts 夹具同构的最小完整真实值）。
+ *
+ * Z9/Z10 空转熔断用例专用：abort 标志指向不存在的文件（不中止）。
+ *
+ * @param projectRoot 项目根目录
+ * @returns 冻结的 P5TaskExecutionInput
+ */
+function buildExecutionInput(projectRoot: string): P5TaskExecutionInput {
+  return Object.freeze({
+    projectRoot,
+    runId: "zombie-fix-run",
+    iterIndex: 0,
+    stage: "dev",
+    objective: "空转熔断用例目标",
+    taskId: "T-001",
+    taskTitle: "空转熔断用例",
+    acceptanceCriteria: Object.freeze([]),
+    abortFlagPath: path.join(projectRoot, ".eag", "p5", "abort.flag"),
+  });
+}
+
 // ============================================================================
 // 2. plan 阶段：合成落盘 / reason 拆分
 // ============================================================================
@@ -210,7 +232,11 @@ test("P-S3. 清单全部 completed：taskCard=null 且 reason=all-tasks-complete
   const projectRoot = createTempProject();
   try {
     createTasksFile(projectRoot, 2, "completed");
-    const result = await new P5PlanStageHandler().handle(buildStageContext(projectRoot, "plan"));
+    // objective 与卡标题"测试任务 N"相关：僵尸完成守卫不触发合成（Z3 同款），
+    // 验证的是"真正收尾"语义而非"新目标不被消费"语义
+    const result = await new P5PlanStageHandler().handle(
+      buildStageContext(projectRoot, "plan", { objective: "完成测试任务 1 与测试任务 2" })
+    );
     assert.equal(result.kind, "success");
     assert.equal(result.artifacts["taskCard"], null);
     assert.equal(result.artifacts["reason"], PLAN_REASON_ALL_TASKS_COMPLETED);
@@ -224,7 +250,11 @@ test("P-S4. 显式 blocked 卡：reason=tasks-blocked 且 blockedCardIds 含任�
   const projectRoot = createTempProject();
   try {
     createTasksFile(projectRoot, 1, "blocked");
-    const result = await new P5PlanStageHandler().handle(buildStageContext(projectRoot, "plan"));
+    // objective 与卡标题"测试任务 1"相关：目标相关性守卫不触发合成（Z7 同款），
+    // 验证的是"阻塞透出"语义本身
+    const result = await new P5PlanStageHandler().handle(
+      buildStageContext(projectRoot, "plan", { objective: "完成测试任务 1 并通过验收" })
+    );
     assert.equal(result.kind, "success");
     assert.equal(result.artifacts["taskCard"], null);
     assert.equal(result.artifacts["reason"], PLAN_REASON_TASKS_BLOCKED);
@@ -251,7 +281,11 @@ test("P-S5. pending 卡依赖未满足：reason=tasks-blocked 且 waitingDepende
     ].join("\n");
     fs.writeFileSync(path.join(projectRoot, ".eag", "p5", "tasks.md"), tasksContent, "utf8");
 
-    const result = await new P5PlanStageHandler().handle(buildStageContext(projectRoot, "plan"));
+    // objective 与卡标题"被依赖阻塞的任务"相关（"任务"词命中）：目标相关性守卫
+    // 不触发合成，验证的是"依赖等待透出"语义本身
+    const result = await new P5PlanStageHandler().handle(
+      buildStageContext(projectRoot, "plan", { objective: "完成被依赖阻塞的任务" })
+    );
     assert.equal(result.artifacts["reason"], PLAN_REASON_TASKS_BLOCKED);
     const waiting = result.artifacts["waitingDependencies"] as ReadonlyArray<{
       readonly id: string;
@@ -269,10 +303,36 @@ test("P-S6. tasks.md 存在但无任何任务卡：reason=no-task-cards", async 
   const projectRoot = createTempProject();
   try {
     fs.writeFileSync(path.join(projectRoot, ".eag", "p5", "tasks.md"), "# 只有标题\n\n- 不是任务卡属性\n", "utf8");
-    const result = await new P5PlanStageHandler().handle(buildStageContext(projectRoot, "plan"));
+    // 空 objective：空清单合成（2.1 节）仅在 objective 非空时触发，
+    // 此处验证"无卡且无目标可合成"的诚实 no-task-cards 终局
+    const result = await new P5PlanStageHandler().handle(buildStageContext(projectRoot, "plan", { objective: "" }));
     assert.equal(result.kind, "success");
     assert.equal(result.artifacts["taskCard"], null);
     assert.equal(result.artifacts["reason"], PLAN_REASON_NO_TASK_CARDS);
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
+});
+
+test("P-S6b. tasks.md 空清单 + 非空 objective：合成新卡消费目标（与缺文件分支语义对齐）", async () => {
+  const projectRoot = createTempProject();
+  try {
+    const tasksFilePath = path.join(projectRoot, ".eag", "p5", "tasks.md");
+    fs.writeFileSync(tasksFilePath, "# 只有标题\n\n- 不是任务卡属性\n", "utf8");
+    const objective = "实现积分兑换功能";
+    const result = await new P5PlanStageHandler().handle(buildStageContext(projectRoot, "plan", { objective }));
+    assert.equal(result.kind, "success");
+    assert.equal(result.artifacts["reason"], PLAN_REASON_TASK_CARD_SELECTED);
+    assert.equal(result.artifacts["synthesized"], true);
+    const taskCard = result.artifacts["taskCard"] as TaskCard;
+    assert.equal(taskCard.id, "T-001");
+    assert.equal(taskCard.status, "pending");
+    const raw = fs.readFileSync(tasksFilePath, "utf8");
+    assert.match(raw, /## T-001 实现积分兑换功能/, "空清单必须按目标合成新卡落盘");
+    assert.match(raw, /^- requirement: AUTO$/m, "合成卡必须带 AUTO 标记");
+    // 原清单无任何任务卡头（## T-xxx），不存在"旧卡保留"语义：
+    // 与缺文件分支一致，整文件由 buildSynthesizedTasksContent 生成
+    assert.equal((raw.match(/^## T-\d+ /gm) ?? []).length, 1, "清单必须只有一张合成卡");
   } finally {
     cleanupTempProject(projectRoot);
   }
@@ -328,6 +388,271 @@ test("P-S9. 手写任务卡为纯编码任务：能力预检不误伤，正常�
     assert.equal(result.artifacts["reason"], PLAN_REASON_TASK_CARD_SELECTED);
     const taskCard = result.artifacts["taskCard"] as TaskCard;
     assert.equal(taskCard.id, "T-001");
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
+});
+
+// ============================================================================
+// 2.5 僵尸任务卡死循环修复（2026-10-05）：done 别名 / 目标相关性守卫 /
+//     确定性失败熔断 / 相同调用空转熔断
+// ============================================================================
+
+test("Z1. 人工手写 status: done 解析为 completed（修复 done 静默降级 pending 僵尸卡事故）", () => {
+  const content = [
+    "# EAG-P5 任务清单",
+    "",
+    "## T-001 历史任务（人工标记完成）",
+    "- requirement: F-001",
+    "- status: done",
+    "- dependencies:",
+    "- files:",
+    "- acceptance:",
+    "",
+  ].join("\n");
+  const warnings: string[] = [];
+  const cards = parseTaskCards(content, (msg) => warnings.push(msg));
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0]!.status, "completed", "done 必须归一化为 completed，不得降级 pending");
+  assert.deepEqual(warnings, [], "done 是合法别名，不应产生告警");
+});
+
+test("Z2. 非法状态值保守 pending 且通过 onWarning 显式告警（绝不静默降级）", () => {
+  const content = [
+    "# EAG-P5 任务清单",
+    "",
+    "## T-001 状态拼错的卡",
+    "- requirement: F-001",
+    "- status: finshed",
+    "- dependencies:",
+    "- files:",
+    "- acceptance:",
+    "",
+  ].join("\n");
+  const warnings: string[] = [];
+  const cards = parseTaskCards(content, (msg) => warnings.push(msg));
+  assert.equal(cards[0]!.status, "pending", "未知状态按 pending 保守处理");
+  assert.equal(warnings.length, 1, "未知状态必须产生一条告警");
+  assert.match(warnings[0]!, /finshed/, "告警必须包含原始非法值便于定位");
+});
+
+test("Z3. 全 done 清单：plan 判定 all-tasks-completed（僵尸卡不再阻塞收尾）", async () => {
+  const projectRoot = createTempProject();
+  try {
+    const tasksContent = [
+      "# EAG-P5 任务清单",
+      "",
+      "## T-001 继续 —— 已完成（2026-10-04 人工接管并实测验证）",
+      "- requirement: F-001",
+      "- status: done",
+      "- dependencies:",
+      "- files:",
+      "- acceptance:",
+      "",
+    ].join("\n");
+    fs.writeFileSync(path.join(projectRoot, ".eag", "p5", "tasks.md"), tasksContent, "utf8");
+
+    // objective 与卡标题高度相关（事故场景的合法收尾形态）：守卫不追加新卡
+    const objective = "继续 —— 已完成（2026-10-04 人工接管并实测验证）";
+    const result = await new P5PlanStageHandler().handle(buildStageContext(projectRoot, "plan", { objective }));
+    assert.equal(result.kind, "success");
+    assert.equal(result.artifacts["taskCard"], null);
+    assert.equal(result.artifacts["reason"], PLAN_REASON_ALL_TASKS_COMPLETED);
+    assert.equal(result.artifacts["completedCards"], 1);
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
+});
+
+test("Z4. 目标相关性纯函数：无关清单≈0、英文命中=1、AUTO 合成卡不计分", () => {
+  // 事故场景：僵尸卡标题与新目标零词重合
+  const zombie = computeObjectiveRelevance("bio-backend 注册信息接收 API", [
+    "继续 —— 已完成（2026-10-04 人工接管并实测验证） F-001",
+  ]);
+  assert.ok(zombie < 0.3, `无关清单相关性应 <0.3，实际 ${zombie}`);
+
+  // 英文技术词命中：全部词重合 → 满分
+  const matched = computeObjectiveRelevance("bio-backend API", ["bio-backend API F-001"]);
+  assert.equal(matched, 1);
+
+  // AUTO 合成卡文本不参与评分（其标题即 objective，由追加逻辑防重）
+  const autoOnly = computeObjectiveRelevance("任何目标", ["   "]);
+  assert.equal(autoOnly, 0);
+
+  // objective 词集为空 → 无法比较，视为相关（1），守卫不触发
+  assert.equal(computeObjectiveRelevance("   ", ["任意卡文本"]), 1);
+});
+
+test("Z5. 目标相关性守卫：objective 与全部旧卡无关 → 自动追加合成卡（修复新目标永不被消费）", async () => {
+  const projectRoot = createTempProject();
+  try {
+    // 复现事故现场：10-04 人工完成的僵尸卡（done）+ 全新不相关目标
+    const tasksContent = [
+      "# EAG-P5 任务清单",
+      "",
+      "## T-001 继续 —— 已完成（2026-10-04 人工接管并实测验证）",
+      "- requirement: F-001",
+      "- status: done",
+      "- dependencies:",
+      "- files:",
+      "- acceptance:",
+      "",
+    ].join("\n");
+    const tasksFilePath = path.join(projectRoot, ".eag", "p5", "tasks.md");
+    fs.writeFileSync(tasksFilePath, tasksContent, "utf8");
+
+    const objective = "bio-backend 用户注册信息接收 API";
+    const result = await new P5PlanStageHandler().handle(buildStageContext(projectRoot, "plan", { objective }));
+
+    assert.equal(result.kind, "success");
+    assert.equal(result.artifacts["reason"], PLAN_REASON_TASK_CARD_SELECTED, "新目标必须被合成新卡并选中");
+    const taskCard = result.artifacts["taskCard"] as TaskCard;
+    assert.equal(taskCard.id, "T-001", "追加的合成卡沿用 T-001（旧卡 done 不改号）");
+    assert.equal(taskCard.status, "pending");
+
+    // 文件必须真实追加：旧卡原样保留 + 新合成卡落盘
+    const raw = fs.readFileSync(tasksFilePath, "utf8");
+    assert.match(raw, /## T-001 继续 —— 已完成（2026-10-04 人工接管并实测验证）/, "旧卡原文必须保留");
+    assert.match(raw, /^- status: done$/m, "旧卡 done 状态不得被改写");
+    assert.match(raw, /bio-backend 用户注册信息接收 API/, "新目标必须合成入清单");
+    assert.match(raw, /^- requirement: AUTO$/m, "合成卡必须带 AUTO 标记");
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
+});
+
+test("Z6. 目标相关性守卫幂等：已存在 AUTO 合成卡不再重复追加", async () => {
+  const projectRoot = createTempProject();
+  try {
+    const objective = "docker compose 部署 bio 服务";
+    const tasksFilePath = path.join(projectRoot, ".eag", "p5", "tasks.md");
+    // 第一轮守卫已追加过合成卡（AUTO + 标题为 objective 前缀）
+    fs.writeFileSync(
+      tasksFilePath,
+      ["# EAG-P5 任务清单", "", buildSynthesizedTasksContent(objective)].join("\n"),
+      "utf8"
+    );
+
+    const result = await new P5PlanStageHandler().handle(buildStageContext(projectRoot, "plan", { objective }));
+    assert.equal(result.kind, "success");
+    assert.equal(result.artifacts["reason"], PLAN_REASON_TASK_CARD_SELECTED);
+
+    const raw = fs.readFileSync(tasksFilePath, "utf8");
+    const autoHeaders = raw.match(/^- requirement: AUTO$/gm) ?? [];
+    assert.equal(autoHeaders.length, 1, "重复运行不得叠加第二张合成卡");
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
+});
+
+test("Z7. 目标相关性守卫不误伤：objective 与现存 pending 卡相关 → 直接沿用旧卡不追加", async () => {
+  const projectRoot = createTempProject();
+  try {
+    createTasksFile(projectRoot, 1, "pending"); // 卡标题"测试任务 1"
+    const result = await new P5PlanStageHandler().handle(
+      buildStageContext(projectRoot, "plan", { objective: "完成测试任务 1 并通过验收" })
+    );
+    assert.equal(result.artifacts["reason"], PLAN_REASON_TASK_CARD_SELECTED);
+    const taskCard = result.artifacts["taskCard"] as TaskCard;
+    assert.equal(taskCard.requirementId.startsWith("F-"), true, "必须沿用旧手写卡（requirement F-*），不得换合成卡");
+
+    const raw = fs.readFileSync(path.join(projectRoot, ".eag", "p5", "tasks.md"), "utf8");
+    assert.equal(/AUTO/.test(raw), false, "相关清单不得追加合成卡");
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
+});
+
+test("Z8. 确定性失败熔断：同卡同错重复轮立即 aborted，不烧满迭代", async () => {
+  const projectRoot = createTempProject();
+  try {
+    createTasksFile(projectRoot, 1, "pending"); // 卡文本"测试任务 1"，验收"测试通过"
+    let devCalls = 0;
+    // 替身回报确定性失败（每次调用错误文本完全相同）：熔断器以"任务卡 ID +
+    // 相同失败集合"为指纹，第二个相同失败轮（第 2 轮）立即终止；
+    // 旧实现无指纹熔断，会烧到连续失败阈值（此处特意放宽到 5）才 abort。
+    const executor: P5TaskExecutor = {
+      async executeTask(): Promise<Readonly<P5TaskExecutionResult>> {
+        devCalls += 1;
+        return Object.freeze({
+          success: false,
+          summary: "",
+          tokensUsed: 1,
+          tokensEstimated: false,
+          llmRequests: 1,
+          changedFiles: Object.freeze([]),
+          error: "确定性失败：任务信息与项目现状矛盾",
+        });
+      },
+    };
+    // 连续失败阈值特意放宽到 5：若熔断器不生效，运行会持续到第 5 轮才 abort；
+    // 熔断器生效则在第二个相同失败轮（第 2 轮）立即终止。
+    const orchestrator = buildOrchestrator({ taskExecutor: executor, defaultConsecutiveFailureAbort: 5 });
+    const result = await orchestrator.run({
+      projectRoot,
+      objective: "运行测试任务 1",
+      maxIterations: 10,
+      testCommand: PASS_TEST_CMD,
+      testTimeoutSec: 10,
+    });
+
+    assert.equal(result.finalStatus, "aborted", `同错重复应熔断 abort：${result.finalReport.slice(0, 300)}`);
+    // 任务卡状态机：第 1 轮失败后第 2 轮重复失败即终止 → dev 至多执行 2 次；
+    // 旧实现（错误文本作指纹）会一路烧到第 5 轮（devCalls ≥ 5）。
+    assert.ok(devCalls <= 2, `确定性重复失败必须在第二个相同失败轮终止（devCalls≤2），实际 devCalls=${devCalls}`);
+    assert.ok(
+      result.finalReport.includes("确定性失败熔断") || result.milestones.length === 0,
+      "最终报告应反映熔断或至少无任何进展里程碑"
+    );
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
+});
+
+test("Z9. 相同调用空转熔断：模型连续输出同一工具调用 3 次即失败（不烧满 12 轮）", async () => {
+  const projectRoot = createTempProject();
+  try {
+    // 3 个完全相同的 approve 工具调用（bash ls -la），第 3 轮触发熔断：
+    // args 逐字符一致 → 批量指纹连续 3 轮相同。执行器端 normalizeToolArgsFingerprint
+    // （sortJsonValue 键序规范化）保证即使模型输出键序抖动也判同一指纹。
+    const stub = new StubLlmClient([
+      { content: "", toolCalls: [{ name: "bash", args: { command: "ls -la" } }] },
+      { content: "", toolCalls: [{ name: "bash", args: { command: "ls -la" } }] },
+      { content: "", toolCalls: [{ name: "bash", args: { command: "ls -la" } }] },
+    ]);
+    const executor = new LlmTaskExecutor({
+      projectRoot,
+      createLlmClient: () => stub,
+      maxToolRounds: 12,
+    });
+    const result = await executor.executeTask(buildExecutionInput(projectRoot));
+
+    assert.equal(result.success, false, "空转必须诚实判失败");
+    assert.match(result.error ?? result.summary, /相同调用空转熔断/, `应命中空转熔断文案：${result.summary}`);
+    assert.equal(result.llmRequests, 3, "第 3 轮立即终止，不得继续烧第 4-12 轮");
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
+});
+
+test("Z10. 空转熔断不误伤：同一工具不同参数（带新信息）连续执行不触发", async () => {
+  const projectRoot = createTempProject();
+  try {
+    fs.writeFileSync(path.join(projectRoot, "a.txt"), "A", "utf8");
+    fs.writeFileSync(path.join(projectRoot, "b.txt"), "B", "utf8");
+    fs.writeFileSync(path.join(projectRoot, "c.txt"), "C", "utf8");
+    // 同名工具（read）但目标文件各不相同，随后给出终态回复 → 正常成功
+    const stub = new StubLlmClient([
+      { content: "", toolCalls: [{ name: "read", args: { file_path: "a.txt" } }] },
+      { content: "", toolCalls: [{ name: "read", args: { file_path: "b.txt" } }] },
+      { content: "", toolCalls: [{ name: "read", args: { file_path: "c.txt" } }] },
+      { content: "已读取三个文件，任务完成。" },
+    ]);
+    const executor = new LlmTaskExecutor({ projectRoot, createLlmClient: () => stub });
+    const result = await executor.executeTask(buildExecutionInput(projectRoot));
+
+    assert.equal(result.success, true, `不同参数的同名工具调用不是空转：${result.summary} ${result.error ?? ""}`);
+    assert.equal(result.llmRequests, 4);
   } finally {
     cleanupTempProject(projectRoot);
   }
@@ -652,7 +977,9 @@ test("M1. 两张 pending 卡：逐轮全绿标记 completed，他卡与正文属
     const orchestrator = buildOrchestrator({ taskExecutor: executor });
     const result = await orchestrator.run({
       projectRoot,
-      objective: "两张卡逐轮完成",
+      // objective 含卡标题"测试任务"（双向包含快判命中）：僵尸完成守卫在
+      // 第 3 轮全 completed 收尾时不误触发合成，验证真正的多卡逐轮收尾
+      objective: "逐轮完成两张测试任务卡",
       maxIterations: 4,
       testCommand: PASS_TEST_CMD,
       testTimeoutSec: 10,
@@ -742,7 +1069,9 @@ test("O1. blocked 卡编排收尾：finalStatus=failed/exit1，最终报告含�
     const orchestrator = buildOrchestrator();
     const result = await orchestrator.run({
       projectRoot,
-      objective: "阻塞任务收尾",
+      // objective 与卡标题"测试任务 1"相关（"测试任务"词命中）：目标相关性守卫
+      // 不误触发合成，验证 blocked 卡本身透出失败的编排终局语义
+      objective: "完成阻塞的测试任务收尾",
       maxIterations: 2,
       testCommand: PASS_TEST_CMD,
       testTimeoutSec: 10,

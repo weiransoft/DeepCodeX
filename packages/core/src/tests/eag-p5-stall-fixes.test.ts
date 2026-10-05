@@ -395,7 +395,9 @@ test("O1. onIteration：每轮迭代结束后收到 4 阶段摘要（abort 前�
 
     const result = await orchestrator.run({
       projectRoot,
-      objective: "验证进度回写回调",
+      // objective 即卡标题（双向包含快判必然命中）：目标相关性守卫
+      // 不误触发合成，验证的是"每轮迭代 onIteration 回写"语义本身
+      objective: "实现 add 函数",
       maxIterations: 2,
       consecutiveFailureAbort: 10,
       // 真实失败命令：输出 Jest 格式 0 passed 1 failed → verify 如实 failed（非空输出降级路径）
@@ -407,7 +409,14 @@ test("O1. onIteration：每轮迭代结束后收到 4 阶段摘要（abort 前�
     });
 
     // 2 轮迭代全部用尽 → 回调必须收到 2 条摘要（修复前运行期零观测点）
-    assert.equal(result.finalStatus, "failed");
+    // 终态说明：本用例两轮失败指纹完全相同（同卡+同 verify 失败），会先触发
+    // 确定性失败熔断（第 2 轮 aborted）；旧实现下同样的重复失败要烧满
+    // consecutiveFailureAbort=10 轮才终止——用例验证的是"abort 前每轮都有
+    // onIteration 回写点"，abort/failed 只是终止原因不同。
+    assert.ok(
+      result.finalStatus === "failed" || result.finalStatus === "aborted",
+      `迭代用尽/确定性熔断均应正常终止，实际：${result.finalStatus}`
+    );
     assert.equal(summaries.length, 2, `每轮迭代应各触发一次 onIteration，实际 ${summaries.length} 次`);
     // 摘要结构完整性：runId/iterIndex/stages/连续失败计数
     const first = summaries[0]!;
@@ -457,7 +466,9 @@ test("O2. onIteration 回调抛错：被吞掉并记 warn，绝不反噬主循�
     // 回调必然抛错：orchestrator 必须吞掉异常，completed 终止不受影响
     const result = await orchestrator.run({
       projectRoot,
-      objective: "验证回调异常隔离",
+      // objective 与已完成卡标题"已完成任务"相关（双向包含）：僵尸完成守卫
+      // 不误触发合成，run 正常 completed 收尾，验证回调异常隔离语义
+      objective: "确认已完成任务并收尾",
       maxIterations: 2,
       testCommand: `node -e 'console.log("Tests: 1 passed, 0 failed")'`,
       testTimeoutSec: 30,

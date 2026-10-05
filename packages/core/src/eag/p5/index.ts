@@ -333,11 +333,15 @@ export type { P5StageKind, P5StageResultKind, P5StageContext, P5StageResult, P5S
 // 9. 4 个 StageHandler 导出（Phase 5.2 TASK-P5-1.2-004~007）
 // ============================================================================
 
+// 确定性失败熔断阈值（僵尸任务卡修复配套，见 autonomous-orchestrator 5b.7）
+export { IDENTICAL_FAILURE_CIRCUIT_BREAKER_THRESHOLD } from "./autonomous-orchestrator";
+
 export {
   P5PlanStageHandler,
   createPlanStageHandler,
   parseTaskCards,
   pickNextPendingTask,
+  computeObjectiveRelevance,
 } from "./handlers/plan-stage-handler";
 
 export {

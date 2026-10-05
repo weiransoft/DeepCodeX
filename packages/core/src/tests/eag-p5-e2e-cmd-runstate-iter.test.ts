@@ -91,9 +91,11 @@ test("R1. /eag-autonomous 启动完整链路：CLI 解析 → handler → orches
     createDeclaredFile(projectRoot, "src/services/Service1.ts");
 
     // 1. 验证 extractEagAutonomousRequestFromPrompt 解析 --goal + --max-iterations
-    const prompt = `/eag-autonomous --goal "测试 R1 启动完整链路" --max-iterations 1 --test-command "${PASS_TEST_CMD}"`;
+    // goal 含夹具卡标题词"测试任务"：目标相关性守卫不误触发合成新卡，
+    // 验证真正的 completed 任务 → plan taskCard=null → completed 收尾链路
+    const prompt = `/eag-autonomous --goal "确认测试任务 1 完成并验证 R1 启动完整链路" --max-iterations 1 --test-command "${PASS_TEST_CMD}"`;
     const request = extractEagAutonomousRequestFromPrompt(prompt);
-    assert.equal(request.goal, "测试 R1 启动完整链路", "应正确解析 --goal");
+    assert.equal(request.goal, "确认测试任务 1 完成并验证 R1 启动完整链路", "应正确解析 --goal");
     assert.equal(request.maxIterations, 1, "应正确解析 --max-iterations");
     assert.equal(request.testCommand, PASS_TEST_CMD, "应正确解析 --test-command");
 
@@ -158,7 +160,8 @@ test("R2. /eag-autonomous-status 状态查询完整链路：CLI 解析 → handl
     const orchestrator = buildOrchestrator();
     const runResult = await orchestrator.run({
       projectRoot,
-      objective: "测试 R2 状态查询链路",
+      // objective 与夹具卡标题"测试任务 1"相关：僵尸完成守卫不误触发合成
+      objective: "确认测试任务 1 完成并验证 R2 状态查询链路",
       maxIterations: 1,
       testCommand: PASS_TEST_CMD,
       testTimeoutSec: 10,
@@ -252,7 +255,7 @@ test("R3. /eag-autonomous-stop 熔断完整链路：CLI 解析 → stop() → ab
     // 这样 run() 会持续迭代，给 stop() 留出触发 abort 的窗口
     const runPromise = orchestrator.run({
       projectRoot,
-      objective: "测试 R3 熔断完整链路",
+      objective: "运行测试任务验证 R3 熔断完整链路",
       maxIterations: 10,
       testCommand: FAIL_TEST_CMD,
       testTimeoutSec: 10,
@@ -345,7 +348,7 @@ test("S1. RunState JSONL 持久化端到端验证：run() 后文件存在 + SHA2
     const orchestrator = buildOrchestrator();
     const runResult = await orchestrator.run({
       projectRoot,
-      objective: "测试 S1 RunState JSONL 持久化",
+      objective: "运行测试任务 1 验证 S1 RunState JSONL 持久化",
       maxIterations: 1,
       testCommand: PASS_TEST_CMD,
       testTimeoutSec: 10,
@@ -435,7 +438,7 @@ test("S2. kill -9 模拟中断端到端验证：abort 标志文件触发中断 +
     // 这样 run() 会持续迭代，给中断留出窗口
     const runPromise = orchestrator.run({
       projectRoot,
-      objective: "测试 S2 kill -9 模拟中断",
+      objective: "运行测试任务验证 S2 kill -9 模拟中断",
       maxIterations: 10,
       testCommand: FAIL_TEST_CMD,
       testTimeoutSec: 10,
@@ -529,7 +532,7 @@ test("S3. P5RunStateStore.resume 断点续跑验证：load + verify + 状态重�
 
     const runPromise = orchestrator.run({
       projectRoot,
-      objective: "测试 S3 resume 断点续跑",
+      objective: "运行测试任务验证 S3 resume 断点续跑",
       maxIterations: 10,
       testCommand: FAIL_TEST_CMD,
       testTimeoutSec: 10,
@@ -648,7 +651,7 @@ test("T1. maxIterations=3 真实多轮迭代：completedLoops + notes.md 多轮�
     });
     const result = await orchestrator.run({
       projectRoot,
-      objective: "测试 T1 多轮真实迭代",
+      objective: "运行测试任务验证 T1 多轮真实迭代",
       maxIterations: 3,
       testCommand: PASS_TEST_CMD,
       testTimeoutSec: 10,
@@ -720,7 +723,7 @@ test("T2. 4 阶段循环完整执行：plan → dev → verify → fix 全部执
     });
     const result = await orchestrator.run({
       projectRoot,
-      objective: "测试 T2 4 阶段循环完整执行",
+      objective: "运行测试任务验证 T2 4 阶段循环完整执行",
       maxIterations: 1,
       testCommand: PASS_TEST_CMD,
       testTimeoutSec: 10,
@@ -800,7 +803,7 @@ test("T3. NotesMemory 跨轮记忆：多轮迭代后 notes.md 含多轮记录 + 
     });
     const result = await orchestrator.run({
       projectRoot,
-      objective: "测试 T3 NotesMemory 跨轮记忆",
+      objective: "运行测试任务验证 T3 NotesMemory 跨轮记忆",
       maxIterations: 3,
       testCommand: PASS_TEST_CMD,
       testTimeoutSec: 10,
