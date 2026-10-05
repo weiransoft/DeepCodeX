@@ -8,6 +8,34 @@
 
 （本版本暂无变更。）
 
+## [0.4.3.10] - 2026-10-06
+
+补丁版（EAG 触发层跨 run 失败守卫——失败目标不再被自动重放空转）。
+
+### Fixed
+- **触发层跨 run 失败守卫（2026-10-06 第二条指令空转事故复盘）**：
+  `/eag-autonomous` 以 aborted/failed 终态结束后，运行结果不落盘，下一条短指令
+  （"继续"）被建议器双通道把同一历史目标重新炒成 suggest_autonomous 无条件自动
+  执行 → 逐字重演上一轮的空转。修复方向为**触发层识别、不进入空循环**（而非
+  in-loop 熔断跳出）：
+  - 写侧终态落盘：`SessionEntry.autonomousGoalRuns`（可选字段，旧会话文件零迁移）
+    记录每次自主运行的目标指纹 + 终态（`recordAutonomousRunOutcome`，同指纹
+    upsert、容量上限 30 淘汰最旧；handleEagAutonomousCommand 三个终态位置全覆盖）
+  - 读侧三通道拦截：建议器通道（`tryAutoExecuteSuggestedCommand` 新增
+    `degraded-goal-failed` 变体，goal 参数与 commandHint 内嵌 `--goal` 双源判定）、
+    确定性通道（`matchDeterministicEagAutonomousCommand` 经
+    `blockFailedGoalAutoExecute` 拦截）、Web 注入通道
+    （`session-pool.scheduleAutoExecuteSuggestion` 跳过自动注入）；命中均推送
+    可见拦截说明，绝不静默吞掉
+  - 逃生门：拦截后回复"执行这个"经指代确认通道显式知情重放放行；completed
+    目标不拦（合法重放）；显式手输 `/eag-autonomous` 不拦
+- 设计文档：`docs/research/2026-10-eag-auto-loop-trigger-guard.md`（含 git 考古：
+  方案B `5b0884da` 移除触发层全部准入确认是根因引入点）
+- 测试：新增 core `session-eag-goal-failure-guard.test.ts` 8 用例（指纹归一化/
+  写侧 upsert/三通道拦截/completed 放行/逃生门/零回归）全绿；web
+  `eag-web-sedimentation.test.ts` 新增 EA-03c 跨 run 失败守卫集成用例（播种
+  sessions-index → 建议回合 → 拦截帧 + 零注入 + 零执行器请求）全绿
+
 ## [0.4.3.6] - 2026-10-03
 
 补丁版（Web 白屏防护——渲染崩溃不再整页卸载 + CLI 版本解析容错）。

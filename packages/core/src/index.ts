@@ -71,10 +71,14 @@ export {
   parseSteeringIntentJson,
   // EAG-P5：高危命令审批 ID 前缀（Web 宿主识别审批回填决策的单一事实源）
   P5_DANGEROUS_APPROVAL_ID_PREFIX,
+  // 跨 run 失败守卫：goal 指纹归一化（web 端测试播种失败记录时复用同一归一化契约）
+  normalizeGoalFingerprint,
 } from "./session";
 export type {
   SessionMessage,
   SessionEntry,
+  // 跨 run 失败守卫：会话级自主运行终态记录（web 端测试播种复用同一结构契约）
+  AutonomousGoalRunRecord,
   SessionStatus,
   SessionsIndex,
   SessionMessageRole,
