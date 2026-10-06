@@ -8,6 +8,60 @@
 
 （本版本暂无变更。）
 
+## [0.4.3.11] - 2026-10-06
+
+补丁版（EAG 触发层 LLM 化——第一次/第二次指令统一经 LLM 意图识别 + 任务动态规划，不再依赖关键字/规则命中）。
+
+### Changed
+- **触发层统一 LLM 决策（`handleEagIntentResolution` 取代"确定性正则通道 + 建议器自动执行"两层结构）**：
+  每次非豁免用户输入只做一次 `EagDynamicSuggester.suggest()` 决策调用，由 LLM 结合
+  建议快照（指代识别依据）、运行终态历史（知情重试判定依据）、澄清答案（refine 上下文）
+  直接输出七种 action：
+  - `execute_command`：第一次指令——LLM 判定意图充分时输出裸 `/eag-` 命令 + 独立 goal
+    字段（任务动态规划），消费侧守卫（D2）→ `buildAutoExecuteCommand` → 派发；
+    派发失败降级展示并存逃生门快照
+  - `confirm_previous`：第二次指令——"执行这个"类确认语义由 LLM 结合快照上下文识别
+    （原 `ANAPHORA_CONFIRM_PATTERN` 短语正则删除），消费快照显式重放
+  - `suggest_command` / `suggest_autonomous` / `suggest_graph`：**仅展示不再自动执行**
+    （原 Plan B"suggest_* 且 /eag- 前缀 → 自动执行"取消），存快照供下一轮确认消费
+  - `ask_clarification` / `direct_chat`：澄清流程与主对话语义不变
+- **删除的规则匹配点**：`EAG_AUTONOMOUS_KEYWORD_PATTERN` /
+  `EAG_AUTONOMOUS_INTENT_PREFIX_PATTERN` / `EAG_INTENT_NEGATION_PATTERN` /
+  `ANAPHORA_CONFIRM_PATTERN` / `ANAPHORA_CONFIRM_NEGATION_PATTERN` /
+  `GOAL_TERMINAL_MARKERS_PATTERN` / `GOAL_EXECUTABLE_VERBS_PATTERN` /
+  `GOAL_TECH_KEYWORDS_PATTERN` / `hasExecutableIntent` / `isPureTerminalStatusLabel`
+  及 `tryDeterministicEagExecution` / `matchDeterministicEagAutonomousCommand` /
+  `tryAnaphoraConfirmExecution` / `tryAutoExecuteSuggestedCommand` 四个通道方法
+- **失败守卫升级（D2 决策：硬拦截 + LLM 知情确认）**：0.4.3.10 数据层资产全部保留
+  （`autonomousGoalRuns` 落盘 / 指纹归一化 / 30 条淘汰）；运行终态历史注入决策上下文，
+  LLM 判定用户明确知情重试时输出 `acknowledgeFailedGoal: true` 直接放行；无法确认知情
+  且目标命中失败记录时仍硬拦截（提示 + 逃生门快照）；"执行这个"逃生门语义不变
+- **降级语义（D1 决策）**：决策 LLM 不可用 / 输出非法 / 置信度不足时一律 `direct_chat`
+  走主对话，不自动执行——**不保留任何正则兜底**
+- Prompt 重写：`buildEagSuggestionPrompt` system 开场白改为"触发层统一决策助手
+  （意图识别 + 任务动态规划）"，新增目标有效性判定（终态状态标签禁令）、指代确认判定、
+  否定语义判定、知情重试判定四组 LLM 判定规则；web 侧 `classifyNonStreamingRequest`
+  决策通道路由标记同步
+- 结构化豁免（`/continue` / 待答 / 权限回复 / bypass）、`pendingEagClarifications`
+  澄清流程、P5 重入守卫、`plan-stage-handler.ts extractRelevanceTokens`（D4）均不动
+
+### 测试
+- 新增 core `session-eag-llm-trigger.test.ts`（T1-T5/T9-T17：execute 派发与快照一次性、
+  direct_chat 主对话、confirm_previous 一次性消费、澄清清快照、D1 降级、状态标签/否定
+  语义、/eag-build 防御降级逃生门、非 EAG hint 降级、澄清 refine 执行、P5 重入守卫、
+  派发失败降级、建议器未注入、prompt 四区块注入）全绿
+- 重写 `session-eag-goal-failure-guard.test.ts` 通道级用例（execute_command 决策路径
+  硬拦截 / 知情确认放行 / 逃生门三元组）全绿
+- 扩充 `eag-dynamic-suggester.test.ts`（execute/confirm_previous 解析校验 7 用例：
+  参数内嵌 hint 剥离、goal 空白降级、acknowledgeFailedGoal 透传、上下文注入不破坏链路）
+  全绿
+- 删除 `session-f9v2-deterministic-execution.test.ts`（确定性正则通道已移除，场景迁移）
+- 设计文档：`docs/research/2026-10-eag-llm-intent-trigger.md`（§8 实现偏差留痕：
+  suggest()/buildEagSuggestionPrompt 名称保留、T10 改防御降级、T15 改派发失败场景）
+- 回归：core 4 runner（src/tests 704 例 / team / providers / v2）+ web 242 例全绿
+  （`session-lifecycle-init` notify 轮询与 v2 FW-12 file-watcher 在多套件并发时存在
+  与本次改动无关的时序抖动，单跑复验通过）
+
 ## [0.4.3.10] - 2026-10-06
 
 补丁版（EAG 触发层跨 run 失败守卫——失败目标不再被自动重放空转）。

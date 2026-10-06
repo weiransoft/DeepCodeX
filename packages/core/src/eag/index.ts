@@ -493,9 +493,11 @@ export type { TaskCard } from "./doc-driven/types";
 // 17. dynamic —— LLM 动态编排建议层（新增）
 // ============================================================================
 //
-// 根据用户自然语言目标，动态识别任务粒度并给出最合适的 EAG 命令建议。
-// 第一阶段只做建议（direct_chat / suggest_command / suggest_autonomous / suggest_graph /
-// ask_clarification），不自动执行任何命令，不自动生成 WorkGraph，不注册新工具。
+// 根据用户自然语言目标做触发层统一 LLM 决策（0.4.3.11：意图识别 + 任务动态规划）。
+// 输出七种 action：execute_command（立即执行）/ confirm_previous（确认上一条建议）/
+// suggest_command / suggest_autonomous / suggest_graph（仅展示建议）/
+// ask_clarification（追问澄清）/ direct_chat（交回主对话）。
+// 不再依赖关键字/规则命中；LLM 不可用时降级 direct_chat（不自动执行）。
 //
 // 公开 API：
 // - 类：EagDynamicSuggester

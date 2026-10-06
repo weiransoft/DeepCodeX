@@ -86,8 +86,8 @@ type LlmLogEntry = {
  * 非流式请求的通道判定（单一事实源，createMessage 与 requestLog 共用）：
  * - 带 tools 的非流式请求 = 编排器 LlmTaskExecutor 执行通道
  *   （core llm-task-executor.ts：每轮 createMessage({messages, tools, ...})）；
- * - 含「全局动态编排建议助手」（core buildEagSuggestionPrompt system 开场白）
- *   的非流式请求 = 建议器决策通道；
+ * - 含「触发层统一决策助手」（core buildEagSuggestionPrompt system 开场白，
+ *   0.4.3.11 起触发层统一 LLM 决策）的非流式请求 = 建议器决策通道；
  * - 其余非流式请求（技能匹配等）= 保守降级（direct_chat / 空技能数组），绝不误触发。
  */
 function classifyNonStreamingRequest(request: LLMRequest): "decision" | "executor" | "other" {
@@ -95,7 +95,7 @@ function classifyNonStreamingRequest(request: LLMRequest): "decision" | "executo
     return "executor";
   }
   const text = JSON.stringify(request.messages ?? []);
-  if (text.includes("全局动态编排建议助手")) {
+  if (text.includes("触发层统一决策助手")) {
     return "decision";
   }
   return "other";

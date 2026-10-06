@@ -999,8 +999,9 @@ export { GateOrchestrator, GateOrchestratorError } from "./eag/gate/index";
 // ============================================================================
 // EAG LLM 动态编排建议层（2026-07-24 新增）
 //
-// 根据用户自然语言目标，动态识别任务粒度并给出全局命令建议。
-// 覆盖 EAG/Team/Rules/slash 全部命令体系，第一阶段只做建议不自动执行。
+// 根据用户自然语言目标做触发层统一 LLM 决策（0.4.3.11：意图识别 + 任务动态规划）。
+// 覆盖 EAG/Team/Rules/slash 全部命令体系；第一次/第二次指令均由 LLM 决策，
+// 不依赖关键字/规则命中；LLM 不可用时降级 direct_chat（不自动执行）。
 //
 // 公开 API：
 // - 类：EagDynamicSuggester
