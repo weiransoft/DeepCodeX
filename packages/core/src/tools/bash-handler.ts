@@ -356,9 +356,15 @@ function startBackgroundShellCommand(
   // 依赖 close 事件触发时 stripMarker + writeFinalBackgroundOutput 覆写最终文件。
   // 风险场景：close 事件没触发（detached 进程被外部 kill）或 writeFinalBackgroundOutput
   // 失败（磁盘满/权限）时，outputPath 永久残留 marker 行。
-  // 修复：按行缓冲输出，检测到 marker 开头的行时跳过持久化——双保险：
+  // 修复：按行缓冲输出，检测到 marker 前缀的行时跳过持久化——双保险：
   //   1) close 正常触发 → writeFinalBackgroundOutput 再次覆写（幂等）
   //   2) close 不触发 → 文件里也没有 marker 行（append 时已跳过）
+  //
+  // chunk 拆分防御：TCP 可能把 marker 行拆成两个 chunk（marker 前缀在 A、后缀在 B）。
+  // 检测不能只靠 startsWith(marker)——因为拼起来的完整行才会进入持久化循环，
+  // 到那个点 marker 前缀必然完整出现。但若 shell write 本身就把 marker 拆了
+  // （极端），用固定前缀 __DEEPCODE_PWD__ 做 includes 兜底检测。
+  const MARKER_FIXED_PREFIX = "__DEEPCODE_PWD__";
   let lineBuffer = "";
   const appendOutputFile = (chunk: string | Buffer) => {
     try {
@@ -368,9 +374,10 @@ function startBackgroundShellCommand(
       // 最后一个元素可能是不完整行（缓冲中等待下一个换行符）
       lineBuffer = lines.pop() ?? "";
       for (const line of lines) {
-        // 跳过 marker 行：格式 `__DEEPCODE_PWD__<uuid>__<cwd>`
-        // marker 是前缀匹配，整行跳过（包括可能追加在同一行的 cwd 部分）
-        if (!line.startsWith(marker)) {
+        // 跳过 marker 行：两种匹配策略
+        //   1) startsWith(marker)：完整 marker（含 uuid）在行首，最常见
+        //   2) includes(MARKER_FIXED_PREFIX)：marker 被拆导致 startsWith 失效时兜底
+        if (!line.startsWith(marker) && !line.includes(MARKER_FIXED_PREFIX)) {
           fs.appendFileSync(outputPath, line + "\n");
         }
       }
