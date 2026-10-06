@@ -43,9 +43,11 @@ export type ChatEntry =
       content: string | null;
       preview: string | null;
       /**
-       * 流式阶段的思考过程（docs/dev/web-thinking-display.md F1）：
+       * 思考过程（docs/dev/web-thinking-display.md W1/F1/§5.2 TH5）：
        * llm_delta.thinkingText 独立通道（换行保留），ChatPane 渲染为
-       * 可折叠「思考过程」；正式消息（assistant_message）完成后缺省。
+       * 可折叠「思考过程」。流式阶段实时累积；assistant_message 固化时由
+       * App.tsx 从流式条目带入保留（前端内存级）——引擎与历史 DTO 均不
+       * 持久化 thinking，刷新后历史恢复无此数据，折叠区随之不可回放。
        */
       thinking?: string;
       /**

@@ -212,9 +212,21 @@ export function App() {
     setEntries((prev) => {
       const streamIdx = prev.findIndex((x) => x.kind === "assistant" && x.id === "stream");
       if (streamIdx >= 0) {
-        // 流式气泡升级为正式消息（换 id，触发 A2UI 解析）
+        // 流式气泡升级为正式消息（换 id，触发 A2UI 解析）。
+        // TH5（web-thinking-display.md §5.2）：固化时保留流式阶段累积的 thinking——
+        // 引擎 assistant_message 不携带 reasoning_content，这是前端内存级的唯一数据源；
+        // 历史恢复无此数据（引擎不持久化），刷新后折叠区不可回放属已知边界
+        const streamEntry = prev[streamIdx];
+        const streamThinking = streamEntry.kind === "assistant" ? streamEntry.thinking : undefined;
         const next = [...prev];
-        next[streamIdx] = { kind: "assistant", id: e.messageId, content: e.content, preview: null, done: true };
+        next[streamIdx] = {
+          kind: "assistant",
+          id: e.messageId,
+          content: e.content,
+          preview: null,
+          thinking: streamThinking,
+          done: true,
+        };
         return next;
       }
       const existIdx = prev.findIndex((x) => x.kind === "assistant" && x.id === e.messageId);
@@ -483,7 +495,9 @@ export function App() {
         if (content.startsWith("{")) {
           const payload = extractPlanFromToolContent(content);
           if (payload !== null) {
-            const withoutPlan = result.filter((x) => x.kind !== "plan");
+            // 显式注解 ChatEntry[]：TS 5.5+ 会把 filter 谓词收窄成排除 "plan" 的
+            // 元素类型，导致后续 push 计划卡片报 TS2322（存量类型错误修复）
+            const withoutPlan: ChatEntry[] = result.filter((x) => x.kind !== "plan");
             withoutPlan.push({ kind: "plan", id: "plan-latest", ...payload });
             result.length = 0;
             result.push(...withoutPlan);
