@@ -88,10 +88,36 @@ export interface EagClarificationOption {
 }
 
 /**
- * EAG 智能建议结果
+ * EAG 智能建议结果（0.4.3.11：触发层统一决策输出）
+ *
+ * execute_command / confirm_previous 是触发层 LLM 化后新增的"执行决策"分支——
+ * LLM 直接判定用户输入表达了可执行意图（第一次指令）或对上一条建议的确认（第二次指令），
+ * 由 session.ts 消费并派发命令；suggest_* 仅展示建议，不再隐含自动执行语义。
  */
 export type EagDynamicSuggestion =
   | { readonly type: "direct_chat"; readonly reasoning: string }
+  | {
+      /** 用户输入表达明确可执行意图，立即执行（第一次指令触发） */
+      readonly type: "execute_command";
+      /** 裸命令提示字符串（如 "/eag-autonomous"，必须 /eag- 前缀且不带参数，goal 独立字段传递） */
+      readonly commandHint: string;
+      /** 动态规划提取的目标文本 */
+      readonly goal: string;
+      /** 目标命中失败运行历史且用户明确知情重试时为 true（跨 run 失败守卫放行依据） */
+      readonly acknowledgeFailedGoal?: boolean;
+      /** 展示给用户的文本 */
+      readonly messageToUser: string;
+      /** 推理说明 */
+      readonly reasoning: string;
+    }
+  | {
+      /** 用户确认执行上一条展示过的建议（第二次指令触发） */
+      readonly type: "confirm_previous";
+      /** 展示给用户的文本 */
+      readonly messageToUser: string;
+      /** 推理说明 */
+      readonly reasoning: string;
+    }
   | {
       readonly type: "suggest_command";
       /** 命令所属体系 */
@@ -144,7 +170,7 @@ export interface EagDynamicSuggesterOptions {
 }
 
 /**
- * 建议上下文
+ * 建议上下文（0.4.3.11：新增触发层决策依据字段）
  */
 export interface EagDynamicContext {
   readonly sessionId: string;
@@ -155,6 +181,14 @@ export interface EagDynamicContext {
   readonly availableCommands: ReadonlyArray<DynamicCommandDescriptor>;
   /** 上一轮澄清问题的用户选择（可选，用于 refine 建议） */
   readonly clarification?: ReadonlyArray<string>;
+  /** 上一条展示过的建议快照（可选，指代确认识别依据） */
+  readonly previousSuggestion?: Readonly<{ commandHint: string; goal: string }> | null;
+  /** 自主运行终态历史（可选，知情重试判定依据；goal 为截断回显） */
+  readonly autonomousGoalRuns?: ReadonlyArray<{
+    readonly goal: string;
+    readonly finalStatus: string;
+    readonly endedAt: string;
+  }>;
 }
 
 /**
@@ -163,11 +197,16 @@ export interface EagDynamicContext {
 interface RawSuggestionOutput {
   readonly reasoning?: string;
   readonly action?: string;
+  /** execute_command / suggest_autonomous / suggest_graph 时的命令提示字符串 */
+  readonly commandHint?: string;
+  /** execute_command 时动态规划提取的目标文本 */
+  readonly goal?: string;
+  /** execute_command 时用户明确知情重试失败目标的确认标记 */
+  readonly acknowledgeFailedGoal?: boolean;
   /** suggest_command 时建议的命令所属体系 */
   readonly commandCategory?: string;
   /** suggest_command 时建议的命令唯一标识 */
   readonly commandId?: string;
-  readonly commandHint?: string;
   readonly messageToUser?: string;
   readonly prerequisites?: ReadonlyArray<string>;
   readonly question?: string;
@@ -186,9 +225,11 @@ const DEFAULT_CONFIDENCE_THRESHOLD = 0.6;
 /** 默认最大输出 token */
 const DEFAULT_MAX_DECISION_TOKENS = 2048;
 
-/** 有效的 action 取值集合 */
+/** 有效的 action 取值集合（0.4.3.11：新增 execute_command / confirm_previous） */
 const VALID_ACTIONS = new Set([
   "direct_chat",
+  "execute_command",
+  "confirm_previous",
   "suggest_command",
   "suggest_autonomous",
   "suggest_graph",
@@ -232,17 +273,22 @@ export class EagDynamicSuggester {
   }
 
   /**
-   * 根据用户目标和上下文生成建议
+   * 触发层统一决策入口（0.4.3.11 LLM 化改造）
+   *
+   * 取代旧"建议层只出建议 + 确定性正则通道执行"的双层结构：每次非豁免用户输入
+   * 只做一次 LLM 决策调用，由 LLM 语义判定 execute_command（第一次指令触发执行）/
+   * confirm_previous（第二次指令确认执行上一条建议）/ suggest_*（仅展示）/
+   * ask_clarification（澄清）/ direct_chat（交回主对话）。
    *
    * 算法：
    * 1. 校验上下文合法性。
-   * 2. 构建决策 prompt。
+   * 2. 构建决策 prompt（注入建议快照与运行终态历史）。
    * 3. 调用决策 LLM 获取 JSON 输出。
    * 4. 解析并校验输出格式。
-   * 5. 低于置信度阈值时降级为 direct_chat。
+   * 5. 低于置信度阈值时降级为 direct_chat（D1 决策：LLM 不可用即不自动执行，无正则兜底）。
    * 6. 构造并返回冻结的 EagDynamicSuggestion。
    *
-   * @param context 建议上下文
+   * @param context 决策上下文
    * @returns 冻结的 EagDynamicSuggestion
    */
   async suggest(context: Readonly<EagDynamicContext>): Promise<Readonly<EagDynamicSuggestion>> {
@@ -254,12 +300,14 @@ export class EagDynamicSuggester {
       return Object.freeze({ type: "direct_chat", reasoning: "无可用命令，降级为直接对话" });
     }
 
-    // 步骤 2：构建 prompt
+    // 步骤 2：构建 prompt（注入建议快照与运行终态历史两类触发层决策依据）
     const messages = buildEagSuggestionPrompt({
       goal: context.goal,
       recentMessages: context.recentMessages,
       availableCommands: context.availableCommands,
       clarification: context.clarification,
+      previousSuggestion: context.previousSuggestion,
+      autonomousGoalRuns: context.autonomousGoalRuns,
     });
 
     // 步骤 3：调用 LLM
@@ -323,6 +371,37 @@ export class EagDynamicSuggester {
     switch (raw.action) {
       case "direct_chat":
         return Object.freeze({ type: "direct_chat", reasoning: raw.reasoning ?? "直接对话" });
+
+      case "execute_command": {
+        // 架构审查 A1：commandHint 必须为裸 /eag- 命令——LLM 可能仍按旧习惯把参数塞进
+        // hint（如 "/eag-autonomous --goal \"xxx\""），此处防御性剥离参数只保留命令名，
+        // goal 一律走独立字段，保证 buildAutoExecuteCommand 的参数注入不被透传跳过。
+        const hint = typeof raw.commandHint === "string" ? raw.commandHint.trim() : "";
+        const bareHint = hint.split(/\s+/)[0] ?? "";
+        const goal = typeof raw.goal === "string" ? raw.goal.trim() : "";
+        // 校验失败（非 /eag- 命令、目标为空）→ 降级 direct_chat（宁可交给主对话，不误触发）
+        if (!bareHint.startsWith("/eag-") || goal.length === 0) {
+          return Object.freeze({
+            type: "direct_chat",
+            reasoning: "execute_command 缺少合法的 /eag- 裸命令或目标文本，降级为直接对话",
+          });
+        }
+        return Object.freeze({
+          type: "execute_command",
+          commandHint: bareHint,
+          goal,
+          acknowledgeFailedGoal: raw.acknowledgeFailedGoal === true,
+          messageToUser: raw.messageToUser ?? `即将执行 ${bareHint}：${goal}`,
+          reasoning: raw.reasoning ?? "",
+        });
+      }
+
+      case "confirm_previous":
+        return Object.freeze({
+          type: "confirm_previous",
+          messageToUser: raw.messageToUser ?? "正在执行上一条展示过的建议。",
+          reasoning: raw.reasoning ?? "",
+        });
 
       case "suggest_command": {
         const descriptor = this.parseCommandDescriptor(

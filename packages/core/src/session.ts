@@ -1048,185 +1048,17 @@ type EagDisplayedSuggestion = {
 };
 
 // ============================================================================
-// F9-v2（2026-09-12）：建议循环次因修复——确定性执行通道 + 指代确认
-//
-// 日志暴露的 3 个新缺口（即使重建 bundle 也会再犯）：
-// 1. "执行这个全量覆盖！" → 主 LLM 拒绝"我不能直接替你执行"——指代确认短语无法触达执行；
-// 2. "启动 EAG 自主任务..." → 建议器 LLM 误分类为 direct_chat，且没有不依赖 LLM 的
-//    确定性执行通道；
-// 3. 客户端兜底全程静默——兜底正则丢弃带引号中文参数，eag-* 不在自动执行白名单。
+// 0.4.3.11（2026-10-06）触发层 LLM 化改造：本区域原有的确定性规则匹配资产
+// （EAG 意图前缀正则 / 关键词模式 / 否定窗口正则 / 指代确认短语正则 /
+// GOAL_TERMINAL_MARKERS / GOAL_EXECUTABLE_VERBS / GOAL_TECH_KEYWORDS 三正则 /
+// hasExecutableIntent / isPureTerminalStatusLabel）已全部移除——第一次/第二次
+// 指令统一经 EagDynamicSuggester 单次 LLM 决策（execute_command / confirm_previous /
+// suggest_* / ask_clarification / direct_chat），不再依赖关键字命中。
+// 历史背景：F9-v2（2026-09-12）曾以确定性正则通道修复"建议器误分类 + 指代确认
+// 无法触达执行"缺口；0.4.3.11 由 LLM 语义识别取代正则命中，LLM 不可用时降级为
+// 不自动执行（无正则兜底）。
+// 设计文档：docs/research/2026-10-eag-llm-intent-trigger.md §2/§3
 // ============================================================================
-
-/**
- * F9-v2（2026-09-16 扩展）：EAG 自主任务关键词模式
- *
- * 出现任一关键词即视为输入含 EAG 意图要素（用于显式意图判定与确定性通道触发）。
- * 使用前瞻断言 `自主(?!动)` 覆盖所有以"自主"开头的变体（自主任务 / 自主迭代 /
- * 自主模式 / 自主循环 …），同时精确排除"自动"开头的泛化词（自动循环播放、
- * 自动编排 等）——日常对话中"自动 X"过于常见，收录会误伤普通聊天输入。
- *
- * 2026-09-16 扩展日志铁证：真实用户对话反复用"Team 自主迭代模式 / 自主迭代"
- * （而非"自主任务"）表达 EAG 意图，旧模式（仅 EAG|eag|自主任务|无人值守）
- * 在意图前缀正则命中后被关键词二次校验拦截，导致确定性通道 return null，
- * 降级回建议器，AI 再次输出自由文本建议而非执行，进入死循环。
- */
-const EAG_AUTONOMOUS_KEYWORD_PATTERN = /EAG|eag|自主(?!动)|无人值守/;
-
-/**
- * F9-v2：确定性通道意图前缀模式（锚定文本开头）
- *
- * 匹配"（礼貌前导词）+（立即/直接）+ 启动/执行 + EAG/自主/无人值守短语 + 分隔符"：
- * - "启动 EAG 自主任务：从46同步数据库到43"
- * - "执行自主任务 从46同步数据库到43"
- * - "请帮我启动无人值守任务，目标是xxx"
- *
- * 锚定开头的设计天然提供否定保护："不要启动自主任务"中的"不要"不在礼貌前导词
- * 枚举内，锚定匹配直接失败，不会触发确定性通道。
- */
-const EAG_AUTONOMOUS_INTENT_PREFIX_PATTERN =
-  /^\s*(?:请|麻烦|帮我|给我|我要|我想|能否|能不能|可以|可不可以)?\s*(?:直接|立即|马上)?\s*(?:启动|执行)\s*(?:一个|一下)?\s*(?:EAG|eag)?\s*(?:自主|无人值守)?\s*(?:任务|循环|流程|模式)?\s*(?::|：|,|，|。|\.|;|；|-|=|\s|$)/;
-
-/**
- * F9-v2：意图否定保护模式
- *
- * "不要/别/禁止"等否定词出现在"启动/执行"动词前 6 个字符窗口内时，
- * 视为用户明确拒绝执行（如"不要启动自主任务"），确定性通道不触发。
- * 锚定前缀已天然排除大部分否定场景，此模式作为中缀否定（如"先不要执行，看看再说"
- * 混合句式）的防御层。
- */
-const EAG_INTENT_NEGATION_PATTERN = /(?:不要|别|勿|不用|无需|无须|禁止|严禁)[^\n]{0,6}(?:启动|执行)/;
-
-/**
- * F9-v2：指代确认短语模式
- *
- * 匹配"执行/运行/启动/跑 + 这/该/此/上面/刚才/刚刚"式短语（如"执行这个全量覆盖！"、
- * "就运行该方案"）。命中且存在上一条展示过的建议时，直接执行该建议，
- * 跳过建议器 LLM 分类——这是"指代确认无法触达执行"缺口的确定性修复。
- * 要求短语出现在句首或标点/空白之后，避免命中句中偶然出现的字面组合。
- */
-const ANAPHORA_CONFIRM_PATTERN =
-  /(?:^|[，。！!？?\s])(?:请|麻烦|帮我|直接|就|马上|立即)?\s*(?:执行|运行|启动|跑)\s*(?:一下|一回)?\s*(?:这|该|此|上面|刚才|刚刚)/;
-
-/**
- * F9-v2：指代确认否定保护模式
- *
- * "不要执行这个"式否定输入不得触发指代确认执行。
- */
-const ANAPHORA_CONFIRM_NEGATION_PATTERN =
-  /(?:不要|别|勿|不用|无需|无须|禁止|严禁)\s*(?:直接|立即|马上)?\s*(?:执行|运行|启动|跑)/;
-
-// ============================================================================
-// F9-v2.1（2026-10-04）：Plan B 自动执行前的 goal 有效性预检
-// ============================================================================
-// 背景：用户输入 "继续 —— 已完成（2026-10-04 人工接管并实测验证）" 被 suggester LLM
-// 返回 suggest_autonomous → Plan B 无条件自动执行 → goal 原样透传到 LlmTaskExecutor →
-// LLM 模型因 objective 是状态标签无实质可执行意图，连续 bash 探索 10+ 轮直到 maxToolRounds。
-// 根因：Plan B 移除软条件后过度信任 suggester LLM 的判定；终态标记词（已完成/completed）
-// 应视为"不再需要执行"的信号，而非"继续执行"的目标。
-// ============================================================================
-
-/**
- * 终态标记词模式：表示任务已完成/已验证/已停止等终态状态。
- * 命中此模式的 goal 如果同时不含可执行动词和技术关键词，
- * 则属于"状态标签"而非"执行目标"，不应触发自动执行。
- *
- * 中英文混合覆盖：既有中文运维常用的"已完成/人工接管/实测验证"，
- * 也包含英文任务卡常见的 "completed/done/finished"。
- *
- * 注意：用小写 i 标志做大小写不敏感匹配，但不使用全局 g 标志——
- * test() 是有状态的，但我们每次调用都是新的 test()，无 lastIndex 副作用。
- */
-const GOAL_TERMINAL_MARKERS_PATTERN = Object.freeze(
-  /已完成|已做完|已验证|已执行|人工接管|实测验证|已交付|已上线|已关闭|已修复|已停止|已终止|已中止|已取消|已接管|已实测|completed|已结束|已处理|已确认|已解决/i
-);
-
-/**
- * 可执行动词模式：表示 goal 包含实质可执行的动作。
- * 覆盖开发（实现/修复/重构）、运维（部署/配置/升级）、数据（迁移/同步）、
- * 工程化（测试/构建/调试）四类动词，中英文混合。
- *
- * 设计原则：宁可多收录也不能漏收录——如果 goal 真的包含可执行动词，
- * 即使同时有终态标记词（如"修复已完成的回归"），也应该允许自动执行。
- */
-const GOAL_EXECUTABLE_VERBS_PATTERN = Object.freeze(
-  /实现|修复|添加|创建|新建|删除|移除|重构|优化|配置|部署|上线|运行|测试|迁移|同步|升级|安装|生成|编写|修改|更新|合并|提交|推送|搭建|构建|调试|排查|设计|开发|完善|改造|调整|处理|解决|审查|review|implement|fix|add|create|delete|remove|refactor|optimize|config|deploy|run|test|migrate|sync|upgrade|install|generate|build|debug|handle|solve/i
-);
-
-/**
- * 技术关键词模式：表示 goal 有具体技术上下文（不是纯状态标签）。
- * 覆盖主流语言、框架、协议、架构概念，让模糊但有技术锚点的输入
- * （如 "TypeScript 的测试"、"Docker 部署"）不会被误拦截。
- */
-const GOAL_TECH_KEYWORDS_PATTERN = Object.freeze(
-  /TypeScript|JavaScript|Python|Rust|Go|Java|React|Vue|Angular|Node\.js|Docker|K8s|Kubernetes|SQL|GraphQL|REST\s*API|HTTP|CLI|API|函数|类|模块|组件|服务|数据库|接口|表|文件|目录|路径|包|依赖|配置|环境|日志|缓存|队列|任务|迭代|循环|脚本|build|compile|deploy/i
-);
-
-/**
- * 判断 goal 是否包含足够的可执行意图（Plan B 自动执行预检）
- *
- * 算法：
- * 1. 如果 goal 命中终态标记词（已完成/completed/人工接管 等）：
- *    a. 同时检查是否有可执行动词（实现/修复/重构 等）或技术关键词（TypeScript/Docker/API 等）
- *    b. 如果有 → 说明终态标记只是背景描述，goal 仍有可执行意图 → 返回 true
- *       （例："修复已完成任务的回归"、"TypeScript 项目已完成一半，继续"）
- *    c. 如果没有 → 纯状态标签，不应自动执行 → 返回 false
- *       （例："已完成（2026-10-04 人工接管）"、"继续 —— 已验证"）
- * 2. 如果 goal 不命中终态标记词 → 走 Plan B 默认自动执行路径 → 返回 true
- *
- * @param goal 待检查的用户目标文本（来自 suggester LLM 的 suggest_autonomous 结果）
- * @returns true 表示 goal 有足够可执行意图，允许自动执行；false 表示应降级为只展示建议
- */
-function hasExecutableIntent(goal: string): boolean {
-  // 空白/空目标 → 无可执行意图
-  if (!goal || goal.trim().length === 0) {
-    return false;
-  }
-  const trimmed = goal.trim();
-  // 仅含状态标记词且无实质内容 → 无可执行意图
-  if (GOAL_TERMINAL_MARKERS_PATTERN.test(trimmed)) {
-    // 同时有可执行动词或技术关键词 → 有实质意图（终态标记只是背景）
-    if (GOAL_EXECUTABLE_VERBS_PATTERN.test(trimmed) || GOAL_TECH_KEYWORDS_PATTERN.test(trimmed)) {
-      return true;
-    }
-    // 纯终态标记，无任何动作/技术关键词 → 无效 goal
-    return false;
-  }
-  // 不含终态标记词 → Plan B 默认自动执行
-  return true;
-}
-
-/**
- * 判断 goal 是否为"纯终态状态标签"（修复 2026-10-05 双通道空转事故）。
- *
- * 与 hasExecutableIntent 的分支 1c 语义一致：goal 命中终态标记词
- * （已完成/completed/人工接管 等）且不含任何可执行动词与技术关键词，
- * 即属于状态标签而非执行目标。
- *
- * 使用场景：确定性命令通道（matchDeterministicEagAutonomousCommand）与
- * 指代确认通道（tryAnaphoraConfirmExecution）不经过建议器路径的
- * hasExecutableIntent 预检，需要本函数独立拦截，防止历史状态标签被
- * "继续/执行这个"类短指令重新炒成 objective 入队空转。
- *
- * @param goal 待检查的目标文本
- * @returns true 表示是纯终态状态标签，应拒绝自动执行
- */
-function isPureTerminalStatusLabel(goal: string): boolean {
-  // 空白/空目标不视为终态标签（由其他校验兜底）
-  if (!goal || goal.trim().length === 0) {
-    return false;
-  }
-  const trimmed = goal.trim();
-  // 未命中终态标记词 → 不是状态标签
-  if (!GOAL_TERMINAL_MARKERS_PATTERN.test(trimmed)) {
-    return false;
-  }
-  // 命中终态标记词但同时有可执行动词或技术关键词 → 终态只是背景描述，仍有实质意图
-  if (GOAL_EXECUTABLE_VERBS_PATTERN.test(trimmed) || GOAL_TECH_KEYWORDS_PATTERN.test(trimmed)) {
-    return false;
-  }
-  // 纯终态标记，无任何动作/技术关键词 → 状态标签
-  return true;
-}
 
 /** 自主运行终态历史容量上限（淘汰最旧，防长会话无限膨胀） */
 const AUTONOMOUS_GOAL_RUNS_MAX = 30;
@@ -3782,25 +3614,18 @@ ${agentInstructions}
       hasUserPermissionReplies(userPrompt) ||
       Boolean(userPrompt.bypassEagSuggestion);
 
-    // F9-v2 确定性执行通道（建议器之前，跳过 LLM 分类）：
-    // 日志铁证："启动 EAG 自主任务..." 被建议器 LLM 误分类为 direct_chat 后落入
-    // 主对话，主 LLM 回复"当前仅给出建议，不会自动执行"——明确意图被两层 LLM 消化。
-    // 此处用纯文本匹配（无 LLM 参与）识别两类确定性意图并直接构造命令执行：
-    // 1. 指代确认："执行这个/该 X"式短语 + 上一条展示过的建议 → 直接执行该建议；
-    // 2. EAG 意图：文本含 /eag-autonomous 字面量，或"启动/执行 + EAG/自主任务/
-    //    无人值守"意图前缀 → 剥离意图前缀构造命令执行（带否定词保护）。
-    if (!exemptFromSuggestionLayer) {
-      const handledDeterministically = await this.tryDeterministicEagExecution(sessionId, userPrompt, controller);
-      if (handledDeterministically) {
-        return;
-      }
-    }
-
+    // 0.4.3.11 触发层 LLM 化（设计文档 docs/research/2026-10-eag-llm-intent-trigger.md §3）：
+    // 第一次/第二次指令统一经 EagDynamicSuggester 单次 LLM 决策——
+    // execute_command（第一次指令触发执行）/ confirm_previous（第二次指令确认执行
+    // 上一条建议）/ suggest_*（仅展示）/ ask_clarification（澄清）/ direct_chat（主对话）。
+    // 原"确定性正则通道（tryDeterministicEagExecution）+ 建议层"两层结构已合并删除，
+    // 不再依赖关键字/规则命中；LLM 不可用时降级为不自动执行（无正则兜底）。
     if (!exemptFromSuggestionLayer && this.eagDynamicSuggester && this.eagDynamicSuggester.isEnabled()) {
-      const handledBySuggester = await this.handleEagDynamicSuggestion(sessionId, userPrompt, controller);
-      // handledBySuggester === true：建议层已处理（ask_clarification / suggest_*），结束当前 turn
-      // handledBySuggester === false：建议层判定为 direct_chat 或异常，继续 LLM 主对话
-      if (handledBySuggester) {
+      const handledByTrigger = await this.handleEagIntentResolution(sessionId, userPrompt, controller);
+      // handledByTrigger === true：触发层已处理（execute / confirm_previous / ask_clarification /
+      // suggest_* 展示），结束当前 turn
+      // handledByTrigger === false：LLM 判定 direct_chat 或决策不可用，继续 LLM 主对话
+      if (handledByTrigger) {
         return;
       }
       // direct_chat：继续执行下方主对话流程（追加用户消息 + skill matching + activateSession）
@@ -3911,25 +3736,26 @@ ${agentInstructions}
   // ============================================================================
 
   /**
-   * EAG LLM 动态编排建议层入口（2026-07-24 新增）
+   * EAG 触发层统一 LLM 决策入口（0.4.3.11，原 handleEagDynamicSuggestion 升级）
    *
-   * 在显式 EAG 命令未命中时，调用 EagDynamicSuggester 判断任务粒度并给出建议。
-   * 第一阶段只做建议，不自动执行任何 EAG 命令。
+   * 第一次/第二次指令统一经 EagDynamicSuggester 单次 LLM 决策（不再有关键字/规则
+   * 命中的确定性通道）：
+   * 1. 若存在待澄清问题，解析用户回复为选项值数组（clarification）。
+   * 2. 调用 suggester.suggest() 获取统一决策（context 注入建议快照与运行终态历史）。
+   * 3. execute_command：守卫（D2 硬拦截 + LLM 知情确认）→ 构造命令 → 派发。
+   * 4. confirm_previous：消费建议快照 → 构造命令 → 派发（显式确认不做失败守卫）。
+   * 5. ask_clarification：展示单选/多选问题与选项，并记录 pending 状态等待下一轮回复。
+   * 6. suggest_*：展示建议文本 + 存快照（不再自动执行——0.4.3.11 语义变化）。
+   * 7. direct_chat：落入下方 LLM 主对话（追加用户消息后返回 false，由调用方继续）。
    *
-   * 算法：
-   * 1. 记录用户输入到消息历史。
-   * 2. 若存在待澄清问题，解析用户回复为选项值数组（clarification）。
-   * 3. 调用 suggester.suggest() 获取建议（携带 clarification 时以原始目标重新 refine）。
-   * 4. ask_clarification：展示单选/多选问题与选项，并记录 pending 状态等待下一轮回复。
-   * 5. suggest_*：通过 onAssistantMessage 展示建议文本。
-   * 6. direct_chat：落入下方 LLM 主对话（追加用户消息后返回 false，由调用方继续）。
+   * LLM 不可用/输出非法时 suggest() 内部降级 direct_chat → 不自动执行（D1，无正则兜底）。
    *
    * @param sessionId 会话 ID
    * @param userPrompt 用户输入
    * @param controller 中断控制器
-   * @returns 是否已处理（true 表示已发送建议并应结束当前 turn，false 表示应继续主对话）
+   * @returns 是否已处理（true 表示触发层已处理并应结束当前 turn，false 表示应继续主对话）
    */
-  private async handleEagDynamicSuggestion(
+  private async handleEagIntentResolution(
     sessionId: string,
     userPrompt: UserPromptContent,
     controller?: AbortController
@@ -3943,6 +3769,14 @@ ${agentInstructions}
     // 澄清问题或建议文本时才记录用户输入）。direct_chat / 异常分支不追加，由 replySession
     // 主流程统一追加，避免重复并保证 LLM 主对话能正常看到用户消息。
     try {
+      // P5 重入守卫（方案 A §3.9 / 架构师 P1-1 纵深防御，原确定性通道开头逻辑迁入）：
+      // 若当前调用栈正处于 P5 任务执行器的 LLM↔工具循环内（p5TaskExecutionStorage 标志
+      // 为 true），禁止任何文本再触发自主循环派发，防止模型回显"启动自主任务…"等
+      // 语义导致编排器重入。命中时返回 false 让文本走普通对话，绝不嵌套启动编排器。
+      if (p5TaskExecutionStorage.getStore() === true) {
+        return false;
+      }
+
       // 步骤 2：检测是否存在待澄清问题
       const pending = this.pendingEagClarifications.get(sessionId);
       let goal = userPrompt.text ?? "";
@@ -3957,8 +3791,11 @@ ${agentInstructions}
         // 答案无效时继续以当前输入作为目标，让 LLM 自行处理或再次澄清
       }
 
-      // 步骤 3：调用建议器（携带 clarification 时即为 refine 流程）
-      // 传入合并后的全部命令描述符（EAG + team/rules/slash），使 LLM 能建议全部命令体系
+      // 步骤 3：调用触发层统一决策（单次 LLM 调用；携带 clarification 时即为 refine 流程）
+      // 传入合并后的全部命令描述符（EAG + team/rules/slash），使 LLM 能识别全部命令体系；
+      // 注入两类触发层决策依据（0.4.3.11）：
+      // - previousSuggestion：上一条展示过的建议快照（confirm_previous 指代确认识别依据）；
+      // - autonomousGoalRuns：自主运行终态历史（失败守卫知情重试判定依据，D2）。
       // 注意：此处不追加用户消息，suggester 通过 goal 参数获取当前用户输入，
       // recentMessages 仅包含历史消息（不含当前输入），符合 suggester 设计意图。
       const suggestion = await this.eagDynamicSuggester!.suggest({
@@ -3968,6 +3805,8 @@ ${agentInstructions}
         recentMessages: this.getRecentSessionMessages(sessionId, 10),
         availableCommands: this.listAvailableCommands(),
         clarification,
+        previousSuggestion: this.lastEagDisplayedSuggestions.get(sessionId) ?? null,
+        autonomousGoalRuns: this.getSession(sessionId)?.autonomousGoalRuns,
       });
 
       // 无论新建议是什么，先清除旧的 pending 状态（避免重复命中）
@@ -3979,13 +3818,13 @@ ${agentInstructions}
         return false;
       }
 
-      // 步骤 4.5：用户消息记录条件化（F9 自动执行机制）
-      // ask_clarification 分支：必须记录（展示问题前需要用户输入上下文）
-      // suggest_* 无 clarification 分支（首次建议）：记录（展示建议前需要用户输入上下文）
-      // suggest_* 有 clarification 分支（refine 后自动执行）：跳过，
-      //   因为 handler（如 handleEagAutonomousCommand）会在开头自己记录用户消息，
-      //   此处提前记录会导致重复。
-      const shouldRecordUserMessage = suggestion.type === "ask_clarification" || clarification === undefined;
+      // 步骤 4.5：用户消息记录条件化（0.4.3.11）
+      // execute_command / confirm_previous 分支：跳过——派发路径经 dispatchEagCommandString
+      //   进入对应 handler（如 handleEagAutonomousCommand），handler 在开头自己记录
+      //   用户消息（命令字符串形态），此处提前记录会导致重复；
+      // ask_clarification / suggest_* 分支：记录（展示问题/建议前需要用户输入上下文）；
+      //   execute 决策降级展示时由 degradeExecuteToSuggestion 补记。
+      const shouldRecordUserMessage = suggestion.type !== "execute_command" && suggestion.type !== "confirm_previous";
 
       if (shouldRecordUserMessage) {
         const userMessage = this.buildUserMessage(sessionId, userPrompt);
@@ -4031,65 +3870,24 @@ ${agentInstructions}
         return true;
       }
 
-      // 步骤 6：suggest_command / suggest_autonomous / suggest_graph
-      // F9 自动执行机制：当存在 clarification（refine 结果，用户已明确选择）且
-      // commandHint 以 /eag- 开头时，自动构造命令并执行（而非只展示建议文本）。
-      // F9-v2（2026-09-12）：执行条件放宽为三选一——
-      //   a. clarification !== undefined（refine 结果，用户已通过澄清做出明确选择）；
-      //   b. 显式意图：goal 含 EAG/自主任务/无人值守等关键词（用户明确点名 EAG 体系）；
-      //   c. 指代确认：goal 是"执行这个/该 X"式短语（用户明确要执行上一条建议）。
-      const autoExecuteResult = await this.tryAutoExecuteSuggestedCommand(
-        sessionId,
-        suggestion,
-        clarification,
-        goal,
-        controller
-      );
-      if (autoExecuteResult === "executed") {
-        return true;
+      // 步骤 6：execute_command——触发层 LLM 判定的"第一次指令"（0.4.3.11）
+      // 守卫（D2 硬拦截 + LLM 知情确认）→ 构造命令 → 派发；失败降级展示 + 存快照（A2）。
+      if (suggestion.type === "execute_command") {
+        return await this.consumeExecuteCommandDecision(sessionId, suggestion, userPrompt, controller);
       }
 
-      // 降级处理：区分 goal 有效性预检降级 vs 通用 degraded
-      // F9-v2.1（2026-10-04）：当 tryAutoExecuteSuggestedCommand 因 goal 含纯状态标记
-      // （已完成/completed/人工接管 等）且无可执行意图而降级时，展示针对性提示；
-      // 其他 degraded 情况（硬条件不满足）保持原有"只展示建议"行为。
-      if (autoExecuteResult === "degraded-goal-invalid") {
-        const warningMessage =
-          `[EAG] 目标描述 "${goal}" 主要包含终态状态标记（如"已完成"/"人工接管"/"completed"），` +
-          `未检测到实质可执行意图。\n` +
-          `自动执行已被安全拦截——如需重新执行，请提供具体的开发/运维目标（如"修复 XX 功能"、"部署 XX 服务"）。`;
-        const assistantMessage = this.buildAssistantMessage(sessionId, warningMessage, null);
-        this.onAssistantMessage(assistantMessage, false);
-        this.updateSessionEntry(sessionId, (entry) => ({
-          ...entry,
-          status: "completed",
-          updateTime: new Date().toISOString(),
-        }));
-        return true;
+      // 步骤 7：confirm_previous——触发层 LLM 判定的"第二次指令"（0.4.3.11）
+      // 消费建议快照执行；无快照可确认时返回 false 交回主对话（LLM 误判安全出口）。
+      if (suggestion.type === "confirm_previous") {
+        return await this.consumeConfirmPreviousDecision(sessionId, controller);
       }
 
-      // 跨 run 失败守卫降级（修复 2026-10-06 第二条指令空转事故）：
-      // tryAutoExecuteSuggestedCommand 已因该 goal 存在失败运行记录而拦截，
-      // 并完成可见拦截提示 + 逃生门快照存储（notifyFailedGoalBlocked）——
-      // 此处仅收敛本轮（建议已被消费处理，不再走通用 degraded 分支重复展示）。
-      if (autoExecuteResult === "degraded-goal-failed") {
-        this.updateSessionEntry(sessionId, (entry) => ({
-          ...entry,
-          status: "completed",
-          updateTime: new Date().toISOString(),
-        }));
-        return true;
-      }
-
-      // 降级：tryAutoExecuteSuggestedCommand 返回 "degraded"（commandHint 不以 /eag- 开头、
-      // eagCommandParser 未注入、或分发失败）时，保持"只展示"行为。
-      //
-      // 方案 B（2026-09-16）升级：不再只对 EAG 命令建议记录快照 + 追加提示——
-      // 任何 suggestion.commandHint 非空时，都存储快照 + 追加"回复'执行这个'即可自动执行"提示。
-      // 这样：
-      // 1. 非 EAG 命令（如 /team autonomous /eag-graph）也能让用户看到明确操作引导；
-      // 2. 指代确认通道（handleAnaphoraConfirmExecution）能消费所有类型的 snapshot；
-      // 3. commandHint 为空的 suggestion（如 ask_clarification）不需要追加提示。
+      // 步骤 8：suggest_command / suggest_autonomous / suggest_graph 仅展示（0.4.3.11 语义变化）：
+      // 建议不再隐含自动执行——"立即执行"已独立为 execute_command 由 LLM 显式决策。
+      // 存快照供下一轮 confirm_previous（LLM 结合快照识别"执行这个"类确认语义）消费。
+      // 1. 非 EAG 命令（如 /team autonomous /eag-graph）与带前置条件说明的 EAG 建议
+      //    统一走此展示路径；
+      // 2. commandHint 为空的 suggestion 不存快照、不追加提示。
       const degradedCommandHint = this.extractSuggestedCommandHint(suggestion);
       if (degradedCommandHint) {
         this.lastEagDisplayedSuggestions.set(sessionId, {
@@ -4098,7 +3896,7 @@ ${agentInstructions}
         });
       }
       const degradedMessage = degradedCommandHint
-        ? `${suggestion.messageToUser}\n\n> 回复"执行这个"即可自动执行。`
+        ? `${suggestion.messageToUser}\n\n> 确认无误请回复"执行这个"，我将执行该命令。`
         : suggestion.messageToUser;
       const assistantMessage = this.buildAssistantMessage(sessionId, degradedMessage, null);
       this.onAssistantMessage(assistantMessage, false);
@@ -4112,126 +3910,172 @@ ${agentInstructions}
       // 失败安全：建议层异常时不阻塞主对话
       this.pendingEagClarifications.delete(sessionId);
       const reason = error instanceof Error ? error.message : String(error);
-      console.error(`handleEagDynamicSuggestion 异常：${reason}`);
+      console.error(`handleEagIntentResolution 异常：${reason}`);
       return false;
     }
   }
 
   /**
-   * F9 自动执行机制（2026-09-16 方案 B 架构升级）：
+   * execute_command 决策消费（0.4.3.11：第一次指令的 LLM 触发执行路径）。
    *
-   * 当 EagDynamicSuggester 的 suggest() 返回 suggest_command/suggest_autonomous/suggest_graph
-   * 且 commandHint 以 /eag- 开头时，**默认自动构造命令并执行**，不再要求 refine 澄清 /
-   * 显式 EAG 意图关键词 / 指代确认短语 这三个软条件之一。
+   * 取代原 tryAutoExecuteSuggestedCommand（Plan B 自动执行 + 正则预检）——
+   * "是否立即执行"已上移为触发层 LLM 的显式决策输出，本方法只负责消费该决策：
    *
-   * 架构原则（方案 B v2）：
-   * - LLM 建议器返回 suggest_* 即表示"意图充分理解，可立即执行"——这是 LLM 语义分析后的结论，
-   *   应该被信任；正则关键词是 LLM 不可用时的兜底（matchDeterministicEagAutonomousCommand），
-   *   不是 suggest_* 执行的前置条件。
-   * - 建议器 system prompt 已更新为引导 LLM 在"启动自主迭代"、"做个同步脚本"等自然语言
-   *   场景下直接返回 suggest_autonomous，而不是 direct_chat。
-   * - ask_clarification 场景（需求严重模糊 / 多路径分歧）在 suggest() 返回前就已分流，
-   *   不会走到本方法。
-   *
-   * 保留的硬性条件（全部满足才执行）：
-   * - commandHint 以 /eag- 开头（EAG 命令体系，eagCommandParser 能识别）
-   * - this.eagCommandParser 已注入（handler 依赖 parser 分发）
-   * - eagCommandParser 成功解析 commandHint
-   *
-   * 降级策略（任一硬性条件不满足时返回 "degraded"）：
-   * - commandHint 不以 /eag- 开头（如 /team /rules /slash 命令）：eagCommandParser 无法识别，
-   *   降级为只展示建议文本——后续可扩展为非 EAG 命令也能自动执行
-   * - eagCommandParser 未注入：没有命令分发能力，降级展示
-   * - dispatchEagCommandString 返回 false（解析失败 / 未处理的命令 kind）：降级展示
+   * 1. 防御校验：commandHint 非 /eag- 前缀（suggester parseAndValidate 已做过
+   *    防御性剥离，此处双保险）→ degradeExecuteToSuggestion 降级展示；
+   * 2. 跨 run 失败守卫（D2 决策：硬拦截 + LLM 知情确认）：/eag-autonomous 且
+   *    LLM 未输出 acknowledgeFailedGoal=true 时，findFailedAutonomousRun 命中
+   *    失败记录 → notifyFailedGoalBlocked（可见拦截提示 + 逃生门快照）→ return true
+   *    结束当前 turn。知情重试（acknowledgeFailedGoal=true）直接放行——
+   *    LLM 已结合运行终态历史判定用户明确表达知情重试；
+   * 3. eagCommandParser 未注入或 dispatchEagCommandString 失败 →
+   *    degradeExecuteToSuggestion（架构师 A2：降级必须存快照保逃生门）；
+   * 4. 派发成功 → 清除旧建议快照（一次性消费，防 confirm_previous 重复执行）
+   *    → return true 结束当前 turn。
    *
    * @param sessionId 当前会话 ID
-   * @param suggestion suggester 返回的 suggest_* 结果
-   * @param clarification 用户澄清选项（存在表示 refine 流程，可选）
-   * @param goal 原始用户目标（用于构造命令参数）
+   * @param suggestion suggester 返回的 execute_command 决策（goal 为 LLM 动态规划的目标文本）
+   * @param userPrompt 用户输入（降级展示时补记用户消息用）
    * @param controller 可选的 AbortController
-   * @returns "executed" 表示已自动执行命令，"degraded" 表示降级为只展示建议
+   * @returns true 表示已处理（执行 / 拦截 / 降级展示均结束当前 turn）
    */
-  private async tryAutoExecuteSuggestedCommand(
+  private async consumeExecuteCommandDecision(
     sessionId: string,
-    suggestion: Extract<EagDynamicSuggestion, { type: "suggest_command" | "suggest_autonomous" | "suggest_graph" }>,
-    clarification: ReadonlyArray<string> | undefined,
-    goal: string,
+    suggestion: Extract<EagDynamicSuggestion, { type: "execute_command" }>,
+    userPrompt: UserPromptContent,
     controller?: AbortController
-  ): Promise<"executed" | "degraded" | "degraded-goal-invalid" | "degraded-goal-failed"> {
-    // F9-v2.1（2026-10-04）：goal 有效性预检——防止状态标签触发空转循环
-    // 背景：suggester LLM 可能因上下文误判将"已完成（2026-10-04 人工接管）"这类
-    // 状态标签建议为 suggest_autonomous → Plan B 无条件自动执行 → goal 原样透传
-    // 到 LlmTaskExecutor → LLM 因无实质可执行意图连续 bash 探索烧满 12 轮。
-    // 修复：在硬条件之前先预检 goal 是否包含足够的可执行意图——仅含终态标记词
-    // 且无动作动词/技术关键词的 goal 返回特殊 degraded 标记，由上层
-    // handleEagDynamicSuggestion 展示针对性提示（不在此处直接发消息，避免
-    // 与 degraded 分支的通用消息重复/冲突）。
-    if (!hasExecutableIntent(goal)) {
-      return "degraded-goal-invalid";
+  ): Promise<boolean> {
+    const commandHint = suggestion.commandHint;
+    // 目标单一事实源：LLM 动态规划输出的独立 goal 字段（已剥离意图前缀、
+    // 合并澄清答案），不使用原始用户输入——这才是"任务动态规划"的落点
+    const goal = suggestion.goal;
+
+    // 防御 1：hint 必须是 /eag- 裸命令（parseAndValidate 已剥离参数取首 token，
+    // 此处再校验前缀；非 EAG 命令体系无法经 eagCommandParser 分发）
+    if (!commandHint.startsWith("/eag-")) {
+      console.warn(`consumeExecuteCommandDecision: 非法 commandHint "${commandHint}"，降级展示建议`);
+      return this.degradeExecuteToSuggestion(sessionId, suggestion, userPrompt, commandHint);
     }
 
-    // 硬条件 1：commandHint 必须以 /eag- 开头（EAG 命令体系，eagCommandParser 能识别）
-    // 方案 B 架构升级后，去掉了三个软条件（refine 澄清 / 显式意图关键词 / 指代确认短语）——
-    // 只要 LLM 返回 suggest_* 且 commandHint 可执行，就自动执行。
-    // clarification 参数保留但不再参与判定（仅用于语义表示 refine 流程，handler 可能消费）
-    void clarification;
-    const commandHint = this.extractSuggestedCommandHint(suggestion);
-    if (!commandHint || !commandHint.startsWith("/eag-")) {
-      // 非 EAG 命令（如 /team /rules /slash）暂降级展示——eagCommandParser 无法识别
-      // 后续可扩展为 /team autonomous 也能自动执行（需 handler 独立接入）
-      return "degraded";
-    }
-
-    // 跨 run 失败守卫（修复 2026-10-06 第二条指令空转事故）：
-    // 该 goal 在本会话曾以非 completed 终态（aborted/failed 等）结束 → 拦截自动重放。
-    // 事故链路：12 轮烧满 abort 后运行结果不落盘，下一条短指令（"继续"）被建议器
-    // 重新炒成同一 suggest_autonomous 无条件重放 → 逐字重演空转。仅对
-    // /eag-autonomous 生效（其他 EAG 命令无本轮次语义）。
-    // 判定目标双源：goal 参数（buildAutoExecuteCommand 注入路径）与 commandHint
-    // 内嵌的 --goal（建议器可能把历史目标直接写进 hint，buildAutoExecuteCommand
-    // 对带参数的 hint 原样透传）——任一命中失败记录即拦截。
-    if (commandHint.startsWith("/eag-autonomous")) {
-      const candidateGoals = [goal, extractGoalFromCommandString(commandHint)].filter(
-        (g): g is string => typeof g === "string" && g.trim().length > 0
-      );
-      for (const candidate of candidateGoals) {
-        const failedRun = this.findFailedAutonomousRun(sessionId, candidate);
-        if (failedRun) {
-          // 命中：发可见拦截提示 + 存逃生门快照（用户回复"执行这个"显式确认后放行）
-          this.notifyFailedGoalBlocked(sessionId, candidate, failedRun, "/eag-autonomous");
-          return "degraded-goal-failed";
-        }
+    // 守卫 D2：/eag-autonomous 且非知情重试 → 查失败运行记录，命中即硬拦截。
+    // 仅 /eag-autonomous 适用（其他 EAG 命令无本轮次重放语义）；
+    // goal 由 suggester parseAndValidate 保证非空，指纹判定单一来源（hint 为裸命令无内嵌 goal）。
+    if (commandHint.startsWith("/eag-autonomous") && suggestion.acknowledgeFailedGoal !== true) {
+      const failedRun = this.findFailedAutonomousRun(sessionId, goal);
+      if (failedRun) {
+        // 可见拦截提示 + 存逃生门快照（commandHint + goal）——用户回复"执行这个"后
+        // 经 confirm_previous 决策（LLM 识别确认意图）显式确认重放
+        this.notifyFailedGoalBlocked(sessionId, goal, failedRun, commandHint);
+        return true;
       }
     }
 
-    // 硬条件 2：eagCommandParser 必须已注入
+    // 防御 2：eagCommandParser 未注入时无命令分发能力，降级展示
     if (!this.eagCommandParser) {
-      return "degraded";
+      return this.degradeExecuteToSuggestion(sessionId, suggestion, userPrompt, commandHint);
     }
 
-    // 构造自动执行的完整命令字符串（注入 goal 作为 --goal 参数）
+    // 构造完整命令字符串（goal 转义注入 --goal 参数）并经 parser 分发到对应 handler
     const commandString = this.buildAutoExecuteCommand(commandHint, goal);
-
-    // 通过 eagCommandParser 解析并分发到对应 handler（公共分发方法）
     const dispatched = await this.dispatchEagCommandString(sessionId, commandString, controller);
     if (!dispatched) {
-      // 解析失败 / 未处理的命令 kind，降级展示
-      console.warn(`tryAutoExecuteSuggestedCommand: 未能分发命令 "${commandString}"，降级展示建议`);
-      return "degraded";
+      console.warn(`consumeExecuteCommandDecision: 未能分发命令 "${commandString}"，降级展示建议`);
+      return this.degradeExecuteToSuggestion(sessionId, suggestion, userPrompt, commandHint);
     }
 
-    // F9-v2：建议已被消费执行，清除建议快照，防止后续指代确认重复执行
+    // 执行已消费：清除旧建议快照，防止后续 confirm_previous 重复执行同一命令
     this.lastEagDisplayedSuggestions.delete(sessionId);
-    return "executed";
+    return true;
+  }
+
+  /**
+   * execute_command 决策降级为建议展示（架构师 A2 修订点）。
+   *
+   * 适用场景：commandHint 非法 / eagCommandParser 未注入 / 命令派发失败——
+   * LLM 决策本身是"立即执行"，但执行通道不可用，安全降级为展示建议。
+   * 关键约束：必须补记用户消息（execute 路径在主流程跳过了条件化记录）+
+   * 存建议快照，保证逃生门（用户回复"执行这个"经 confirm_previous 消费）语义完整。
+   *
+   * @param sessionId 当前会话 ID
+   * @param suggestion 原 execute_command 决策（messageToUser 作为展示主体、goal 作为快照目标）
+   * @param userPrompt 用户输入（补记用户消息用）
+   * @param commandHint 快照存储的命令提示（裸 /eag- 命令或原始 hint）
+   * @returns true（已降级处理，结束当前 turn）
+   */
+  private degradeExecuteToSuggestion(
+    sessionId: string,
+    suggestion: Extract<EagDynamicSuggestion, { type: "execute_command" }>,
+    userPrompt: UserPromptContent,
+    commandHint: string
+  ): boolean {
+    // 补记用户消息：execute 路径在 handleEagIntentResolution 中跳过了条件化记录，
+    // 降级为展示时必须补上，保证会话消息序列完整（展示建议前需要用户输入上下文）
+    const userMessage = this.buildUserMessage(sessionId, userPrompt);
+    this.appendSessionMessage(sessionId, userMessage);
+
+    // 存快照：与 suggest_* 展示路径同构，供下一轮 confirm_previous 消费
+    // （goal 取 LLM 动态规划目标，保证逃生门重放与首次执行目标一致）
+    this.lastEagDisplayedSuggestions.set(sessionId, { commandHint, goal: suggestion.goal });
+
+    // 展示降级说明 + 确认指引
+    const message = `${suggestion.messageToUser}\n\n> 本轮未能自动执行（命令派发通道不可用）。确认无误请回复"执行这个"，我将执行该命令。`;
+    const assistantMessage = this.buildAssistantMessage(sessionId, message, null);
+    this.onAssistantMessage(assistantMessage, false);
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: "completed",
+      updateTime: new Date().toISOString(),
+    }));
+    return true;
+  }
+
+  /**
+   * confirm_previous 决策消费（0.4.3.11：第二次指令的 LLM 识别路径）。
+   *
+   * 取代原 tryAnaphoraConfirmExecution（指代确认短语正则通道）——"执行这个"类
+   * 确认语义不再靠短语正则命中，而是触发层 LLM 结合建议快照上下文识别确认意图
+   * 后输出 confirm_previous 决策。本方法只负责消费：
+   *
+   * 1. 无快照 → return false 交回主对话（LLM 误判安全出口，不消费不记录，
+   *    用户消息由 replySession 主流程统一追加）；
+   * 2. 有快照 → 先删快照（一次性消费语义，防重复执行）→
+   *    buildAutoExecuteCommand(stored.commandHint, stored.goal) 构造完整命令 → 派发；
+   * 3. 不做跨 run 失败守卫——逃生门快照由 notifyFailedGoalBlocked 存入时，
+   *    用户回复"执行这个"属显式知情确认（与原指代确认通道语义一致）；
+   * 4. 派发失败 → warn 后 return false 交回主对话。
+   *
+   * @param sessionId 当前会话 ID
+   * @param controller 可选的 AbortController
+   * @returns true 表示已消费快照并派发执行；false 表示无快照或派发失败（交回主对话）
+   */
+  private async consumeConfirmPreviousDecision(sessionId: string, controller?: AbortController): Promise<boolean> {
+    // 条件 1：必须有上一条展示过的建议快照（无快照时确认无目标，安全出口）
+    const stored = this.lastEagDisplayedSuggestions.get(sessionId);
+    if (!stored) {
+      return false;
+    }
+
+    // 一次性消费：先删除快照再执行（防执行异常后残留导致重复触发）
+    this.lastEagDisplayedSuggestions.delete(sessionId);
+
+    // 用暂存的 commandHint + goal 构造完整命令并分发执行
+    const commandString = this.buildAutoExecuteCommand(stored.commandHint, stored.goal);
+    const dispatched = await this.dispatchEagCommandString(sessionId, commandString, controller);
+    if (!dispatched) {
+      // 降级：命令解析失败（理论上不应发生——快照 commandHint 来自 /eag- 白名单），
+      // 记录警告后返回 false 让输入继续走主对话
+      console.warn(`consumeConfirmPreviousDecision: 未能分发命令 "${commandString}"，交回主对话`);
+      return false;
+    }
+    return true;
   }
 
   /**
    * F9-v2（2026-09-12）：把命令字符串经 eagCommandParser 解析后分发到对应 EAG handler
    *
-   * 从 tryAutoExecuteSuggestedCommand 抽取的公共分发逻辑，供三个调用方复用：
-   * 1. tryAutoExecuteSuggestedCommand（refine/显式意图/指代确认自动执行）；
-   * 2. tryDeterministicEagExecution 的确定性意图通道（EAG 意图前缀识别）；
-   * 3. tryAnaphoraConfirmExecution 的指代确认通道（执行上一条展示过的建议）。
+   * 公共分发逻辑，0.4.3.11 起供两个调用方复用：
+   * 1. consumeExecuteCommandDecision（execute_command 决策：LLM 判定的第一次指令触发执行）；
+   * 2. consumeConfirmPreviousDecision（confirm_previous 决策：LLM 识别的第二次指令确认执行）。
    *
    * 算法：
    * 1. 构造虚拟 UserPromptContent（text = 命令字符串），让 eagCommandParser 能解析；
@@ -4301,228 +4145,13 @@ ${agentInstructions}
     }
   }
 
-  /**
-   * F9-v2（2026-09-12）：确定性执行通道入口（建议器之前调用，跳过 LLM 分类）
-   *
-   * 依次尝试两个纯文本确定性通道（均不发起任何 LLM 调用）：
-   * 1. 指代确认：输入是"执行这个/该 X"式短语且存在上一条展示过的建议 →
-   *    直接执行该建议（修复"执行这个全量覆盖！"被主 LLM 拒绝执行的缺口）；
-   * 2. EAG 意图识别：输入含 /eag-autonomous 字面量，或匹配"启动/执行 +
-   *    EAG/自主任务/无人值守"意图前缀 → 剥离意图前缀构造命令执行
-   *    （修复"启动 EAG 自主任务..."被建议器误分类后无人执行的缺口）。
-   *
-   * 两个通道均未命中时返回 false，输入继续走建议器 / LLM 主对话原有流程。
-   *
-   * @param sessionId 当前会话 ID
-   * @param userPrompt 用户输入
-   * @param controller 可选的 AbortController
-   * @returns true 表示已确定性处理（应结束当前 turn），false 表示未命中
-   */
-  private async tryDeterministicEagExecution(
-    sessionId: string,
-    userPrompt: UserPromptContent,
-    controller?: AbortController
-  ): Promise<boolean> {
-    const text = (userPrompt.text ?? "").trim();
-    if (!text) {
-      return false;
-    }
-
-    // 方案 A §3.9 / 架构师 P1-1 纵深防御：若当前调用栈正处于 P5 任务执行器的
-    // LLM↔工具循环内（p5TaskExecutionStorage 标志为 true），禁止任何文本再进入
-    // 确定性自主循环，防止模型回显"启动自主任务…"等触发词导致编排器重入。
-    // 当前精简执行器物理上不经过 SessionManager，正常生产链路不会命中；
-    // 一旦命中说明接线回归，返回 false 让文本走普通对话，绝不嵌套启动编排器。
-    if (p5TaskExecutionStorage.getStore() === true) {
-      return false;
-    }
-
-    // 通道 1：指代确认（优先级更高——"执行这个 EAG 自主任务"在有历史建议时
-    // 应执行上一条建议，而非重新构造命令）
-    const anaphoraHandled = await this.tryAnaphoraConfirmExecution(sessionId, text, controller);
-    if (anaphoraHandled) {
-      return true;
-    }
-
-    // 通道 2：EAG 自主任务意图识别
-    const commandString = this.matchDeterministicEagAutonomousCommand(sessionId, text);
-    if (commandString) {
-      const dispatched = await this.dispatchEagCommandString(sessionId, commandString, controller);
-      if (dispatched) {
-        return true;
-      }
-      // 解析失败（如字面量后参数非法）：降级走建议器 / 主对话，不拦截
-    }
-
-    return false;
-  }
-
-  /**
-   * F9-v2（2026-09-12）：识别确定性 EAG 自主任务意图并构造命令字符串
-   *
-   * 两类识别规则（带否定词保护）：
-   *
-   * 规则 A（命令字面量内嵌）：文本中间出现 /eag-autonomous 字面量
-   * （开头出现已被上游 EagCommandParser 分发，不会走到此处），
-   * 如"帮我执行 /eag-autonomous --goal '从本机 46 导出'" →
-   * 直接从字面量位置截取到行尾作为命令字符串。
-   *
-   * 规则 B（意图前缀）：文本开头匹配"（礼貌前导词）+ 启动/执行 +
-   * EAG/自主任务/无人值守短语 + 分隔符"（见 EAG_AUTONOMOUS_INTENT_PREFIX_PATTERN），
-   * 如"启动 EAG 自主任务：从46同步数据库到43" →
-   * 剥离意图前缀，剩余文本作为 --goal 构造完整命令。
-   *
-   * 否定保护（两条规则共用）：
-   * - 规则 B 锚定开头 + 礼貌前导词白名单，"不要启动自主任务"天然不匹配；
-   * - 额外用 EAG_INTENT_NEGATION_PATTERN 拦截中缀否定（"先不要执行...看看再说"）；
-   * - 规则 A 检查字面量前 6 个字符内是否出现否定词（"不要执行 /eag-autonomous"）。
-   *
-   * 关键词边界：泛化词"自动循环/自动编排"故意不收录——日常对话过于常见，
-   * 收录会把"帮我自动循环播放"类普通请求误触发为无人值守任务。
-   *
-   * @param sessionId 当前会话 ID（跨 run 失败守卫查询运行终态历史用）
-   * @param text 用户输入文本（已 trim）
-   * @returns 完整命令字符串（如 "/eag-autonomous --goal \"xxx\" --max-iterations 10 --confirmation smart"）；
-   *          未命中确定性意图，或命中但被跨 run 失败守卫拦截时返回 null
-   */
-  private matchDeterministicEagAutonomousCommand(sessionId: string, text: string): string | null {
-    // 全局否定保护：任何"否定词 + 启动/执行"组合都不触发确定性通道
-    if (EAG_INTENT_NEGATION_PATTERN.test(text)) {
-      return null;
-    }
-
-    // 规则 A：命令字面量内嵌（如"帮我执行 /eag-autonomous --goal 'xxx'"）
-    const literalIndex = text.indexOf("/eag-autonomous");
-    if (literalIndex > 0) {
-      // 字面量前 6 个字符窗口内出现否定词（如"不要执行 /eag-autonomous"）不触发
-      const prefixWindow = text.slice(Math.max(0, literalIndex - 6), literalIndex);
-      if (/(?:不要|别|勿|不用|无需|无须|禁止|严禁)\s*$/.test(prefixWindow)) {
-        return null;
-      }
-      // 从字面量截取到行尾（多行输入只取首行，防尾部散文污染参数）
-      const firstLineEnd = text.indexOf("\n", literalIndex);
-      const commandString = text.slice(literalIndex, firstLineEnd >= 0 ? firstLineEnd : undefined).trim();
-      // 字面量后紧跟的字符必须是空白/行尾/参数起始，排除"/eag-autonomous-xxx"误命中
-      const nextChar = commandString.slice("/eag-autonomous".length, "/eag-autonomous".length + 1);
-      if (nextChar === "" || /[\s]/.test(nextChar)) {
-        // 跨 run 失败守卫：从命令字符串提取 --goal，命中失败运行记录则拦截
-        // （CLI 建议注入通道以"建议执行 /eag-autonomous --goal ..."句式进入本规则，
-        // 与用户手输字面量无法区分，统一拦截 + 逃生门快照，见 notifyFailedGoalBlocked）
-        if (this.blockFailedGoalAutoExecute(sessionId, commandString)) {
-          return null;
-        }
-        return commandString;
-      }
-      return null;
-    }
-
-    // 规则 B：意图前缀（锚定开头）+ 关键词要素校验
-    // 前缀模式本身含 EAG/自主/无人值守要素，但存在"启动任务"这种无要素误匹配，
-    // 用关键词模式做二次校验（EAG|自主任务|无人值守 至少出现一个）
-    if (!EAG_AUTONOMOUS_KEYWORD_PATTERN.test(text)) {
-      return null;
-    }
-    const prefixMatch = EAG_AUTONOMOUS_INTENT_PREFIX_PATTERN.exec(text);
-    if (!prefixMatch) {
-      return null;
-    }
-
-    // 剥离意图前缀，剩余文本作为 goal（跳过分隔符与连接词）
-    let goal = text
-      .slice(prefixMatch[0].length)
-      .replace(/^[\s:：,，.。;；\-—=的来去是]+/, "")
-      .trim();
-
-    // 意图词后无实质内容时以原文兜底，保证 --goal 参数非空
-    // （如"启动 EAG 自主任务"——此时整个输入就是目标描述）
-    if (!goal) {
-      goal = text;
-    }
-
-    // 终态声明拦截（修复 2026-10-05 双通道空转事故）：goal 是"已完成/人工
-    // 接管"类纯状态标签时拒绝派发——本通道不经过建议器路径的
-    // hasExecutableIntent 预检，历史状态标签一旦被炒成 objective 入队，
-    // 会反复消费僵尸任务卡形成 12 轮 × N 轮空转死循环。
-    if (isPureTerminalStatusLabel(goal)) {
-      return null;
-    }
-
-    // 复用 buildAutoExecuteCommand 的参数构造与 goal 转义逻辑
-    const commandString = this.buildAutoExecuteCommand("/eag-autonomous", goal);
-
-    // 跨 run 失败守卫（修复 2026-10-06 第二条指令空转事故）：该 goal 曾以
-    // 非 completed 终态结束 → 拦截重放（发可见提示 + 存逃生门快照）
-    if (this.blockFailedGoalAutoExecute(sessionId, commandString)) {
-      return null;
-    }
-
-    return commandString;
-  }
-
-  /**
-   * F9-v2（2026-09-12）：指代确认执行通道
-   *
-   * 场景（日志铁证）：建议层展示"/eag-autonomous"建议后用户回复
-   * "执行这个全量覆盖！"——主 LLM 回复"我不能直接替你执行"，指代确认
-   * 短语永远无法触达执行。本通道在建议器之前用纯文本匹配识别指代确认，
-   * 直接消费 lastEagDisplayedSuggestions 中暂存的建议执行。
-   *
-   * 触发条件（全部满足）：
-   * 1. 存在上一条展示过的建议快照（本会话内，未被澄清问题清除）；
-   * 2. 输入匹配指代确认短语模式（执行/运行/启动/跑 + 这/该/此/上面/刚才/刚刚）；
-   * 3. 无否定词（"不要执行这个"不触发）。
-   *
-   * 一次性消费语义：无论执行成功与否都清除快照——执行成功后残留会导致
-   * 下一次"执行这个"重复执行同一条命令。
-   *
-   * @param sessionId 当前会话 ID
-   * @param text 用户输入文本（已 trim）
-   * @param controller 可选的 AbortController
-   * @returns true 表示已执行建议（应结束当前 turn），false 表示未命中或降级
-   */
-  private async tryAnaphoraConfirmExecution(
-    sessionId: string,
-    text: string,
-    controller?: AbortController
-  ): Promise<boolean> {
-    // 条件 1：必须有上一条展示过的建议快照（无快照时指代无目标，直接放行）
-    const stored = this.lastEagDisplayedSuggestions.get(sessionId);
-    if (!stored) {
-      return false;
-    }
-
-    // 条件 2：输入是指代确认短语
-    if (!ANAPHORA_CONFIRM_PATTERN.test(text)) {
-      return false;
-    }
-
-    // 条件 3：否定保护（"不要执行这个"是拒绝而非确认）
-    if (ANAPHORA_CONFIRM_NEGATION_PATTERN.test(text)) {
-      return false;
-    }
-
-    // 条件 4（修复 2026-10-05 双通道空转事故）：快照 goal 是"已完成/人工接管"
-    // 类纯终态标签时不消费——上一轮收尾产生的状态标签若被"继续/执行这个"
-    // 重新炒成 objective 入队，会反复消费僵尸任务卡形成空转死循环。
-    // 快照保留待用户看清提示后手动处理（此处不清除，避免吞掉合法建议）。
-    if (isPureTerminalStatusLabel(stored.goal)) {
-      return false;
-    }
-
-    // 一次性消费：先清除快照再执行（防执行异常后残留导致重复触发）
-    this.lastEagDisplayedSuggestions.delete(sessionId);
-
-    // 用暂存的 commandHint + goal 构造完整命令并分发执行
-    const commandString = this.buildAutoExecuteCommand(stored.commandHint, stored.goal);
-    const dispatched = await this.dispatchEagCommandString(sessionId, commandString, controller);
-    if (!dispatched) {
-      // 降级：命令解析失败（理论上不应发生——commandHint 来自 /eag- 白名单），
-      // 记录警告后返回 false 让输入继续走建议器 / 主对话
-      console.warn(`tryAnaphoraConfirmExecution: 未能分发命令 "${commandString}"，降级至主流程`);
-      return false;
-    }
-    return true;
-  }
+  // ============================================================================
+  // 0.4.3.11 触发层 LLM 化改造：原三个确定性正则通道
+  // （tryDeterministicEagExecution / matchDeterministicEagAutonomousCommand /
+  // tryAnaphoraConfirmExecution）已整体删除——第一次指令 / 第二次指令统一经
+  // EagDynamicSuggester 单次 LLM 决策（handleEagIntentResolution），不再存在
+  // 关键字/短语规则命中路径。设计文档：docs/research/2026-10-eag-llm-intent-trigger.md §3
+  // ============================================================================
 
   // ============================================================================
   // 跨 run 失败守卫（修复 2026-10-06 第二条指令空转事故）
@@ -4608,8 +4237,9 @@ ${agentInstructions}
    *
    * 1. 向主会话推送可见的拦截说明（对齐事故报告"注入消息可见性"诉求——
    *    拦截必须让用户看见原因，而非静默吞掉）；
-   * 2. 存储建议快照：用户回复"执行这个"即经指代确认通道显式确认重放
-   *    （tryAnaphoraConfirmExecution 不做失败记录守卫——显式确认属知情行为；
+   * 2. 存储建议快照：用户回复"执行这个"后由触发层 LLM 识别确认意图输出
+   *    confirm_previous 决策，经 consumeConfirmPreviousDecision 消费快照重放
+   *    （确认路径不做失败记录守卫——显式确认属知情行为；
    *    快照以裸 commandHint + goal 存储，重放时经 buildAutoExecuteCommand 重建命令）。
    *
    * @param sessionId 会话 ID
@@ -4631,31 +4261,6 @@ ${agentInstructions}
     // 逃生门快照：覆盖旧快照（同会话只保留最新一条待确认建议，对齐既有语义）
     this.lastEagDisplayedSuggestions.set(sessionId, { commandHint, goal });
     this.onAssistantMessage(this.buildAssistantMessage(sessionId, message, null), false);
-  }
-
-  /**
-   * 确定性通道的跨 run 失败守卫（修复 2026-10-06 第二条指令空转事故）。
-   *
-   * 从命令字符串提取 --goal 参数，命中失败运行记录时发可见拦截提示 + 存
-   * 逃生门快照并返回 true（调用方据此返回 null，文本回落普通对话不进入循环）。
-   * 命令不含 --goal 参数（裸命令）时无法建立指纹，直接放行。
-   *
-   * @param sessionId 会话 ID
-   * @param commandString 待派发的完整命令字符串
-   * @returns true 表示已拦截（调用方不得继续派发）；false 表示放行
-   */
-  private blockFailedGoalAutoExecute(sessionId: string, commandString: string): boolean {
-    // 裸命令（无 --goal 参数）无法建立目标指纹，不适用本守卫
-    const goal = extractGoalFromCommandString(commandString);
-    if (goal === null) {
-      return false;
-    }
-    const failedRun = this.findFailedAutonomousRun(sessionId, goal);
-    if (!failedRun) {
-      return false;
-    }
-    this.notifyFailedGoalBlocked(sessionId, goal, failedRun, "/eag-autonomous");
-    return true;
   }
 
   /**

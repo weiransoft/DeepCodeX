@@ -594,3 +594,155 @@ test("自定义置信度阈值生效", async () => {
   });
   assert.equal(suggestion.type, "direct_chat");
 });
+
+// ============================================================================
+// 0.4.3.11 触发层统一决策：execute_command / confirm_previous 解析校验
+// ============================================================================
+
+test("execute_command 正常解析（裸命令 + 独立 goal + 默认 messageToUser）", async () => {
+  const client = createStubLLMClient(
+    JSON.stringify({
+      action: "execute_command",
+      commandHint: "/eag-autonomous",
+      goal: "从46同步数据库到43",
+      reasoning: "明确可执行意图",
+      confidence: 0.9,
+    })
+  );
+  const suggester = new EagDynamicSuggester(createSuggesterOptions(client));
+  const suggestion = await suggester.suggest({
+    sessionId: "s-1",
+    projectRoot: "/test",
+    goal: "启动 EAG 自主任务：从46同步数据库到43",
+    availableCommands: ALL_COMMANDS,
+  });
+  assert.equal(suggestion.type, "execute_command");
+  assert.equal(suggestion.commandHint, "/eag-autonomous");
+  assert.equal(suggestion.goal, "从46同步数据库到43");
+  assert.equal(suggestion.acknowledgeFailedGoal, false, "缺省时知情重试标记必须为 false");
+  assert.ok(suggestion.messageToUser.includes("/eag-autonomous"), "默认 messageToUser 应含命令提示");
+});
+
+test("execute_command 参数内嵌 hint 防御性剥离（架构师 A1：goal 一律走独立字段）", async () => {
+  const client = createStubLLMClient(
+    JSON.stringify({
+      action: "execute_command",
+      // LLM 仍按旧习惯把参数塞进 hint——解析层必须剥离参数只保留命令名
+      commandHint: '/eag-autonomous --goal "旧习惯目标" --max-iterations 5',
+      goal: "动态规划后的目标",
+      reasoning: "意图充分",
+      confidence: 0.9,
+    })
+  );
+  const suggester = new EagDynamicSuggester(createSuggesterOptions(client));
+  const suggestion = await suggester.suggest({
+    sessionId: "s-1",
+    projectRoot: "/test",
+    goal: "启动自主任务",
+    availableCommands: ALL_COMMANDS,
+  });
+  assert.equal(suggestion.type, "execute_command");
+  assert.equal(suggestion.commandHint, "/eag-autonomous", "hint 必须被剥离为裸命令");
+  assert.equal(suggestion.goal, "动态规划后的目标", "goal 只能来自独立字段");
+});
+
+test("execute_command 非 /eag- hint 降级为 direct_chat（不误触发非 EAG 命令）", async () => {
+  const client = createStubLLMClient(
+    JSON.stringify({
+      action: "execute_command",
+      commandHint: "/team autonomous",
+      goal: "多阶段任务",
+      reasoning: "团队任务",
+      confidence: 0.9,
+    })
+  );
+  const suggester = new EagDynamicSuggester(createSuggesterOptions(client));
+  const suggestion = await suggester.suggest({
+    sessionId: "s-1",
+    projectRoot: "/test",
+    goal: "启动团队任务",
+    availableCommands: ALL_COMMANDS,
+  });
+  assert.equal(suggestion.type, "direct_chat", "非 /eag- 命令体系不得输出 execute_command");
+});
+
+test("execute_command 缺少 goal 降级为 direct_chat（目标为空不执行）", async () => {
+  const client = createStubLLMClient(
+    JSON.stringify({
+      action: "execute_command",
+      commandHint: "/eag-autonomous",
+      goal: "   ",
+      reasoning: "目标缺失",
+      confidence: 0.9,
+    })
+  );
+  const suggester = new EagDynamicSuggester(createSuggesterOptions(client));
+  const suggestion = await suggester.suggest({
+    sessionId: "s-1",
+    projectRoot: "/test",
+    goal: "启动自主任务",
+    availableCommands: ALL_COMMANDS,
+  });
+  assert.equal(suggestion.type, "direct_chat");
+});
+
+test("execute_command acknowledgeFailedGoal=true 透传（知情重试标记）", async () => {
+  const client = createStubLLMClient(
+    JSON.stringify({
+      action: "execute_command",
+      commandHint: "/eag-autonomous",
+      goal: "重跑同一个目标",
+      acknowledgeFailedGoal: true,
+      reasoning: "用户明确表达知情重试",
+      confidence: 0.9,
+    })
+  );
+  const suggester = new EagDynamicSuggester(createSuggesterOptions(client));
+  const suggestion = await suggester.suggest({
+    sessionId: "s-1",
+    projectRoot: "/test",
+    goal: "配置已修复，重跑同一个目标",
+    availableCommands: ALL_COMMANDS,
+    autonomousGoalRuns: [{ goal: "重跑同一个目标", finalStatus: "aborted", endedAt: "2026-10-06T00:00:00.000Z" }],
+  });
+  assert.equal(suggestion.type, "execute_command");
+  assert.equal(suggestion.acknowledgeFailedGoal, true, "知情重试标记必须透传给守卫");
+});
+
+test("confirm_previous 正常解析（messageToUser 缺省兜底）", async () => {
+  const client = createStubLLMClient(
+    JSON.stringify({
+      action: "confirm_previous",
+      reasoning: "用户确认语义",
+      confidence: 0.9,
+    })
+  );
+  const suggester = new EagDynamicSuggester(createSuggesterOptions(client));
+  const suggestion = await suggester.suggest({
+    sessionId: "s-1",
+    projectRoot: "/test",
+    goal: "执行这个",
+    availableCommands: ALL_COMMANDS,
+    previousSuggestion: { commandHint: "/eag-autonomous", goal: "从46同步数据库到43" },
+  });
+  assert.equal(suggestion.type, "confirm_previous");
+  assert.ok(suggestion.messageToUser.length > 0, "messageToUser 缺省时应有兜底文案");
+});
+
+test("prompt 注入运行终态历史与建议快照区块（D2 知情重试判定依据）", async () => {
+  // 通过受控 client 捕获 prompt 内容：决策 LLM 不可达时 suggest 降级，
+  // 但 prompt 已构造——用非法 JSON 触发降级前无法捕获，故直接校验降级结果 +
+  // 依赖 session-eag-llm-trigger.test.ts T17 的 buildEagSuggestionPrompt 区块断言。
+  // 此处验证：带 autonomousGoalRuns / previousSuggestion 的上下文不破坏解析链路。
+  const client = createStubLLMClient('{"action":"direct_chat","reasoning":"测试"}');
+  const suggester = new EagDynamicSuggester(createSuggesterOptions(client));
+  const suggestion = await suggester.suggest({
+    sessionId: "s-1",
+    projectRoot: "/test",
+    goal: "继续",
+    availableCommands: ALL_COMMANDS,
+    previousSuggestion: { commandHint: "/eag-autonomous", goal: "历史目标" },
+    autonomousGoalRuns: [{ goal: "历史目标", finalStatus: "failed", endedAt: "2026-10-06T00:00:00.000Z" }],
+  });
+  assert.equal(suggestion.type, "direct_chat");
+});
