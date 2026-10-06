@@ -384,9 +384,16 @@ export class P5VerifyStageHandler implements P5StageHandler {
       });
 
       // 8. 判定测试是否通过
-      //    测试失败时不调用 guardChain（G-A4a 仅校验"声明完成"的证据，
-      //    测试失败并非声明完成，无需护栏拦截，直接返回 failed 进入 fix 阶段）
-      const testPassed = cmdResult.exitCode === 0 && testStats.failed === 0;
+      //
+      // 【2026-10-07 加 passed>0 守卫】旧条件 `exitCode===0 && failed===0` 在
+      // "0 passed / 0 failed / exitCode=0" 场景下误判 success——测试运行器
+      // 可能没跑任何用例（如 node --test 对空目录、没有 test 脚本的 npm test），
+      // exitCode=0 但 passed=0，不代表"所有测试通过"，代表"根本没有测试"。
+      // 加 passed>0 守卫后：
+      //   exitCode=0, passed>0, failed=0 → 真通过 ✓
+      //   exitCode=0, passed=0, failed=0 → 无测试 → testPassed=false → 进 skip 降级
+      //   exitCode≠0 或 failed>0 → 真失败 → 进 failed 分支
+      const testPassed = cmdResult.exitCode === 0 && testStats.passed > 0 && testStats.failed === 0;
       const summary = formatTestSummary(testStats, cmdResult, testPassed);
 
       // 9. 测试失败 → 直接返回 failed（不调用 guardChain，避免 G-A4a 误判）

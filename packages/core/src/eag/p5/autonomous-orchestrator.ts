@@ -825,13 +825,14 @@ export class AutonomousOrchestrator {
             triggeredGuards.push(gr);
           }
           totalTokensUsed += result.tokensUsed;
-          // llmCallCount 近似估算：tokensUsed > 0 表示发生了 LLM 调用
-          // （执行器对不回 usage 的网关有 ≥1 估算保底，计数不会因网关缺 usage 归零）
-          if (result.tokensUsed > 0) {
-            totalLlmCallCount += 1;
-          }
-          // 执行器真实请求次数（dev/fix artifacts.llmRequests），仅作审计累计
+          // llmCallCount 直接用执行器真实请求次数（artifacts.llmRequests），
+          // 替代旧方案"tokensUsed>0 时 +1"近似——旧方案对 multi-request dev/fix 严重低估，
+          // 且 failure() 路径 tokensUsed 硬编码为 0 时 llmCallCount 被跳过（根因链 2026-10-07）。
+          // plan/verify 阶段不调 LLM，artifacts 中无 llmRequests → 自然 +0（正确）。
           if (typeof result.artifacts["llmRequests"] === "number") {
+            totalLlmCallCount += result.artifacts["llmRequests"] as number;
+            // RunState.totalExecutorLlmRequests 审计字段，与 totalLlmCallCount 同源累加
+            // （方案 A §3.10 原始设计意图：与 token 计数解耦的真实请求数）
             totalExecutorLlmRequests += result.artifacts["llmRequests"] as number;
           }
 
