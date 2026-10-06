@@ -450,7 +450,22 @@ test("EA-03a：第二轮确定性 EAG 意图直达编排器执行（P5 run-state
   // - 回合不途经流式通道（命令分发直达 handler），流式脚本仅作主循环空转收敛防御。
   client.setScript(
     [plainTurnEvents("第一轮普通回合已建立会话"), plainTurnEvents("空转防御：EAG 命令回合不应消费本脚本")],
-    [],
+    // decisions：建议器决策通道脚本（非流式）。0.4.3.11 触发层 LLM 化后，
+    // 第二轮自然语言"启动 EAG 自主任务：…"经 handleEagIntentResolution →
+    // suggester.suggest() 非流式调用 → 本 decisions 队列弹出 → 必须返回
+    // execute_command 决策 JSON 才能触发 consumeExecuteCommandDecision → 编排器启动。
+    // 空数组会导致脚本耗尽默认返回 direct_chat → 不走 EAG → 落入主对话流式通道
+    // 消费第二个脚本事件 → run-state 永不落盘 → 20s 超时（修复 2026-10-07）。
+    [
+      JSON.stringify({
+        action: "execute_command",
+        commandHint: "/eag-autonomous",
+        goal: "修复登录页面的空指针问题",
+        messageToUser: "即将启动 EAG 自主任务：修复登录页面的空指针问题",
+        reasoning: "用户表达了明确的自主任务执行意图，包含 EAG/自主关键词和可执行目标",
+        confidence: 0.95,
+      }),
+    ],
     [executorTextResponse("任务卡编码完成：已创建修复文件")]
   );
   const chatId = await createChat(server, cookie, eagPersonalRoot);
@@ -574,13 +589,10 @@ function readFileSyncDirSafe(dir: string): string[] {
 
 test("EA-03a 基线：eagEnabled=false → 第二轮同一输入落 fail-closed「未注入」文案", async () => {
   // 与 EA-03a 注入组严格同结构（第一轮建会话 + 第二轮同 EAG 意图句式）、严格同输入。
-  // failclosed 服务器使用独立 engine-home（engine-home-failclosed，无注入组播种的
-  // tasks.md），fail-closed 判据纯净。fail-closed 回合不经流式通道（handler 在
-  // 未注入分支直接推送文案后返回），流式脚本仅作主对话第一轮的回合脚本与空转收敛防御。
-  failclosedClient.setScript([
-    plainTurnEvents("第一轮普通回合已建立会话"),
-    plainTurnEvents("空转防御：fail-closed 回合不应消费本脚本"),
-  ]);
+  // fail-closed 回合走命令分发直接推送文案，不经主对话流式通道
+  // （命令分发 handler 内 onAssistantMessage 直接构建消息，不走 activateSession），
+  // 流式脚本仅作主对话第一轮的回合脚本。
+  failclosedClient.setScript([plainTurnEvents("第一轮普通回合已建立会话")]);
   const chatId = await createChat(failclosedServer, failclosedCookie, failclosedPersonalRoot);
   const { collector, controller } = await openSseStream(failclosedServer.port, chatId, failclosedCookie);
 
@@ -590,9 +602,19 @@ test("EA-03a 基线：eagEnabled=false → 第二轮同一输入落 fail-closed�
   assert.equal(firstDone.data.status, "completed", `第一轮普通回合应 completed：${JSON.stringify(firstDone.data)}`);
   assert.ok(findChatSummary(failclosedServer, chatId)?.sessionId, "第一轮后必须绑定底层 sessionId");
 
-  // 第二轮：与注入组同句式 → replySession 确定性通道同样命中
-  // tryDeterministicEagExecution → handleEagAutonomousCommand 未注入分支。
-  await sendText(failclosedServer, failclosedCookie, chatId, "启动 EAG 自主任务：修复登录页面的空指针问题");
+  // 第二轮：显式 /eag-autonomous 斜杠命令 → eagCommandParser.parse() 在建议器之前
+  // 拦截（replySession L3523 顺序：命令分发 → 建议层 → 规则学习）→
+  // switch 分发到 handleEagAutonomousCommand → autonomousOrchestrator 未注入
+  // （eagEnabled=false 时 getEagAssembly 返回全部 undefined）→ fail-closed 推送
+  // 「[EAG Autonomous Loop] AutonomousOrchestrator 未注入：…」文案。
+  //
+  // 【2026-10-07 修复】原第二轮用自然语言"启动 EAG 自主任务：…"——
+  // eagEnabled=false 时 eagDynamicSuggester=undefined → 触发层门禁不成立 →
+  // 自然语言直接进入主对话流式通道 → 消费第二个脚本事件返回"空转防御"文本而非
+  // fail-closed 文案。确定性正则通道（tryDeterministicEagExecution）已在 0.4.3.11
+  // 改造中整体删除，不再存在确定性 fallback 兜底路径。改显式斜杠命令后
+  // eagCommandParser.parse() 绕过 suggester，直接经命令分发路径抵达 handler。
+  await sendText(failclosedServer, failclosedCookie, chatId, '/eag-autonomous --goal "修复登录页面的空指针问题"');
 
   // 可观测差异判据 = fail-closed 文案本身：core handleEagAutonomousCommand 在
   // autonomousOrchestrator 未注入时经 onAssistantMessage 推送
