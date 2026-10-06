@@ -6,6 +6,12 @@
 
 ## [Unreleased]
 
+（本版本暂无变更。）
+
+## [0.4.3.12] - 2026-10-07
+
+补丁版（P0 轮数上限 12→40 + failure() tokens 结算 + 编排器 llmCallCount 直读 + verify 空测试守卫 + EA-03a 测试适配 0.4.3.11 + bash marker 残留防御）。
+
 ### Changed
 - **DEFAULT_MAX_TOOL_ROUNDS 从 12 提升到 40**（packages/core/src/eag/p5/executors/llm-task-executor.ts）：
   部署类目标（ssh 远程+构建镜像+推送+启动容器+curl 验证）需要几十步工具调用，
@@ -13,28 +19,27 @@
   相同调用 3 次熔断独立于轮数上限生效、自然终态任务 5-12 轮即结束、编排器 token
   预算（200K）闸门独立拦截。
 - **failure() 签名扩展：失败路径同样结算累计 tokens**（packages/core/src/eag/p5/executors/llm-task-executor.ts）：
-  新增 `sawUsage / realTokens / estimatedChars` 三参数，与成功路径同构走
-  `resolveTokensUsed` 结算。旧实现硬编码 `tokensUsed: 0` → RunState 在
+  新增 sawUsage / realTokens / estimatedChars 三参数，与成功路径同构走
+  resolveTokensUsed 结算。旧实现硬编码 tokensUsed: 0 → RunState 在
   "达到轮数上限熔断"等 failure 路径下 tokensUsed=0。
 - **编排器 totalLlmCallCount 用 artifacts.llmRequests 直接累加**（packages/core/src/eag/p5/autonomous-orchestrator.ts）：
-  替代旧方案 `if (result.tokensUsed > 0) { totalLlmCallCount += 1; }` 近似估算。
+  替代旧方案 if (result.tokensUsed > 0) { totalLlmCallCount += 1; } 近似估算。
   旧方案两个缺陷：multi-request dev/fix 严重低估（n 轮只计 1 次）、failure()
   路径 tokensUsed=0 导致本轮 llmCallCount 被跳过。totalExecutorLlmRequests
   审计字段保留同源累加。
 
 ### Fixed
 - **verify 阶段 "0 passed, 0 failed, exitCode=0" 误判 success**（packages/core/src/eag/p5/handlers/verify-stage-handler.ts）：
-  旧判定 `exitCode===0 && failed===0` 未检查 passed 数量，node --test 对空目录、
+  旧判定 exitCode===0 && failed===0 未检查 passed 数量，node --test 对空目录、
   无 test 脚本的 npm test 等场景 exitCode=0 但 passed=0 被误判为"测试全部通过"。
-  修复：testPassed 条件增加 `&& testStats.passed > 0`，空测试场景区间进 skip
+  修复：testPassed 条件增加 && testStats.passed > 0，空测试场景区间进 skip
   降级（与 exitCode≠0 的 noTestsCollected 对称）。
 - **bash 后台任务 marker 残留**（packages/core/src/tools/bash-handler.ts appendOutputFile）：
-  原实现在 child.on('data') 时直接 fs.appendFileSync 原始 chunk（含 `__DEEPCODE_PWD__`
-  marker 行），依赖 close 事件触发时 stripMarker + writeFinalBackgroundOutput 覆写
-  最终文件。风险场景：close 事件没触发（detached 进程被外部 kill）或覆写失败
-  （磁盘满/权限）时 outputPath 永久残留 marker 行。修复：appendOutputFile 改为
-  按行缓冲，检测到 marker 前缀的行时跳过持久化——双保险：close 正常触发时覆写
-  幂等，close 不触发时文件里也没有 marker 行。
+  原实现在 child.on('data') 时直接 fs.appendFileSync 原始 chunk（含 marker 行），
+  依赖 close 事件触发时 stripMarker + writeFinalBackgroundOutput 覆写最终文件。
+  风险场景：close 事件没触发（detached 进程被外部 kill）或覆写失败（磁盘满/权限）
+  时 outputPath 永久残留 marker 行。修复：appendOutputFile 改为按行缓冲，检测
+  到 marker 前缀（startsWith + includes 固定前缀双保险）的行时跳过持久化。
 - **Web EA-03a 集成测试修复**（packages/web/tests/eag-web-sedimentation.test.ts）：
   旧测试依赖 0.4.3.11 改造前已删除的 tryDeterministicEagExecution 确定性正则通道。
   改造后触发层统一 LLM 决策（EagDynamicSuggester），确定性通道已删除：
@@ -43,7 +48,7 @@
     正确的 execute_command JSON（含 confidence: 0.95 过阈值校验）。
   - 基线组（eagEnabled=false）自然语言第二轮输入 → suggester=undefined →
     触发层门禁不成立 → 直入主对话流式通道消费脚本。修复：第二轮输入改显式
-    `/eag-autonomous --goal "..."` 斜杠命令（eagCommandParser 在建议器之前
+    /eag-autonomous --goal "..." 斜杠命令（eagCommandParser 在建议器之前
     拦截 → 分发到 handleEagAutonomousCommand → fail-closed 推送「未注入」文案）。
 
 ## [0.4.3.11] - 2026-10-07
