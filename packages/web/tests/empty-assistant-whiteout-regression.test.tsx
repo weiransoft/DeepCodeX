@@ -110,10 +110,13 @@ test("事故复现场景：thinking 流式结束后空 content 固化（浏览�
   // ③ ChatPane 助手分支走 AssistantA2ui：修复前空文本 → A2UI 零块 →
   //    气泡只剩空白容器，thinking 折叠区同时消失 → 「thinking 过后白屏」。
   // 修复后：固化空消息必须渲染 .assistant-empty-hint 兜底文案。
+  // 2026-10-06 追补（web-thinking-display.md §5.2）：实时固化链路 App.tsx
+  // 会保留 thinking（TH5），ChatPane 固化分支渲染折叠区（TH6）——该形态
+  // 见下一用例；本用例覆盖历史恢复形态（引擎不持久化 thinking，刷新后
+  // 无此数据），提示语必须准确降级，不得指向不存在的折叠区（TH7）。
   const entries: ChatEntry[] = [
     { kind: "user", id: "u1", text: "你好", attachments: [], createTime: "" },
-    // 归并后的固化态：与 App.tsx onAssistantMessage 中
-    // `{ content: e.content, preview: null, done: true }` 完全同构
+    // 历史恢复形态：与 App.tsx convertHistory 产出的固化条目同构（无 thinking）
     { kind: "assistant", id: "msg-real-001", content: "", preview: null, done: true },
   ];
   const html = renderPane(entries);
@@ -125,8 +128,63 @@ test("事故复现场景：thinking 流式结束后空 content 固化（浏览�
     .trim();
   assert.ok(visibleText.length > 0, "thinking 后空固化消息渲染零可见文本（白屏复现）");
   assert.match(assistantRow, /assistant-empty-hint/u, "必须命中空内容兜底分支");
-  // 兜底文案须引导用户查看思考过程（与 trae 显示效果对齐：思考可见、正文有交代）
-  assert.match(visibleText, /思考/u, `兜底文案应提示思考过程：${visibleText.slice(0, 60)}`);
+  // TH7：无 thinking（历史恢复）→ 提示语不得引用「上方折叠区」（死链防护）
+  assert.doesNotMatch(visibleText, /见上方折叠区/u, `提示语不得指向不存在的折叠区：${visibleText.slice(0, 60)}`);
+  // TH7：无 thinking 时也不渲染「思考过程」折叠区（无数据可回放）
+  assert.doesNotMatch(assistantRow, /chat-thinking/u, "历史恢复无 thinking 时不得渲染空折叠区");
   // 不得残留 A2UI 空 surface（兜底分支替换整个容器，杜绝零内容空白节点）
   assert.doesNotMatch(assistantRow, /chat-assistant-body/u, "空消息不应再渲染 A2UI 空容器");
+});
+
+test("TH5/TH6 追补：纯 thinking 轮次实时固化（content 空 + thinking 保留）折叠区可回放", () => {
+  // 实时固化形态：App.tsx onAssistantMessage 把流式条目的 thinking 带入
+  // 固化条目（TH5），ChatPane 固化分支渲染默认收起的「思考过程」折叠块
+  // （TH6），兜底提示维持默认文案——上方确有可展开的折叠区。
+  const entries: ChatEntry[] = [
+    { kind: "user", id: "u1", text: "详细分析这个项目的架构", attachments: [], createTime: "" },
+    {
+      kind: "assistant",
+      id: "msg-think-001",
+      content: "",
+      preview: null,
+      thinking: "第一点：分层架构……\n第二点：模块边界……",
+      done: true,
+    },
+  ];
+  const html = renderPane(entries);
+  const assistantRow = html.slice(html.indexOf("msg-row-assistant"));
+  // 折叠区存在：summary「思考过程」+ thinking 内容在 details 内可回放
+  assert.match(assistantRow, /chat-thinking/u, "固化消息携带 thinking 时必须渲染思考过程折叠区");
+  assert.match(assistantRow, /chat-thinking-summary/u, "折叠区摘要必须为「思考过程」标识");
+  assert.match(assistantRow, /分层架构/u, "thinking 内容必须进入折叠区（可回放）");
+  // 兜底提示保留默认文案：指向的折叠区真实存在，不再是死链
+  assert.match(assistantRow, /assistant-empty-hint/u, "空 content 仍需兜底提示");
+  assert.match(assistantRow, /见上方折叠区/u, "有 thinking 时兜底提示应指向真实存在的折叠区");
+  // 折叠区默认收起：固化态不携带 open 属性（流式态为 open，二者区分）
+  assert.ok(!/chat-thinking[^>]*open/.test(assistantRow), "固化态折叠区应默认收起（不携带 open）");
+});
+
+test("TH6 追补：有正文的固化消息带 thinking → 折叠区位于正文上方", () => {
+  // 与用户偏好对齐：思考过程放在最终结果上方的可折叠框中
+  const entries: ChatEntry[] = [
+    { kind: "user", id: "u1", text: "你好", attachments: [], createTime: "" },
+    {
+      kind: "assistant",
+      id: "msg-think-002",
+      content: "你好！我是 Deep Code。",
+      preview: null,
+      thinking: "用户在打招呼，回复问候即可。",
+      done: true,
+    },
+  ];
+  const html = renderPane(entries);
+  const wrapperIdx = html.indexOf("msg-assistant-body-wrapper");
+  const bodySlice = html.slice(wrapperIdx);
+  const thinkingIdx = bodySlice.indexOf("chat-thinking");
+  const bodyIdx = bodySlice.indexOf("chat-assistant-body");
+  assert.ok(thinkingIdx >= 0, "固化消息带 thinking 必须渲染思考过程折叠区");
+  assert.ok(bodyIdx >= 0, "有正文的固化消息必须渲染 A2UI 正文");
+  assert.ok(thinkingIdx < bodyIdx, "折叠区必须位于正文上方（思考在前、结果在后）");
+  // 有正文时不应出现空内容兜底提示
+  assert.doesNotMatch(bodySlice, /assistant-empty-hint/u, "有正文的消息不得出现兜底提示");
 });

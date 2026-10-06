@@ -58,12 +58,26 @@ const TOOL_STATUS_TEXT: Record<string, string> = {
  * A2UI 管线产不出任何块，气泡渲染成零内容空白容器且刷新后依旧（历史恢复
  * 同样空），用户感知即「思考过程一过，回复区整块白屏」。此处对可读化后
  * 无可见文本的固化消息渲染明确的兜底提示，绝不留白。
+ *
+ * 兜底提示分档（web-thinking-display.md §5.2 TH7）：调用方可用 emptyHint
+ * 覆盖默认文案——固化消息携带 thinking 时维持默认文案（上方确有可展开的
+ * 「思考过程」折叠区）；历史恢复等无 thinking 场景降级为「（本轮无文本回复）」，
+ * 避免提示语指向一个不存在的折叠区（2026-10-06 死链反馈修复）。
  */
-function AssistantA2ui({ content, messageId }: { content: string; messageId: string }) {
+function AssistantA2ui({
+  content,
+  messageId,
+  emptyHint = "（本轮无文本回复，思考过程见上方折叠区）",
+}: {
+  content: string;
+  messageId: string;
+  /** 空内容兜底提示文案（缺省指向上方「思考过程」折叠区，历史恢复场景可覆盖） */
+  emptyHint?: string;
+}) {
   const messages = useMemo(() => parseMarkdownToA2ui(content, `msg-${messageId}`), [content, messageId]);
   // 可读化后仅剩空白/控制字符（含纯工具双写块被移除的场景）→ 兜底提示
   if (content.trim() === "") {
-    return <div className="assistant-empty-hint">（本轮无文本回复，思考过程见上方折叠区）</div>;
+    return <div className="assistant-empty-hint">{emptyHint}</div>;
   }
   return <A2uiSurface messages={messages} className="a2ui-surface chat-assistant-body" />;
 }
@@ -375,9 +389,33 @@ export function ChatPane(props: ChatPaneProps) {
                           不会被作为 flex row item 均分挤压（这就是"挤到一列"的根因）。 */}
                       <div className="msg-assistant-body-wrapper">
                         {entry.content !== null ? (
-                          // 完整内容：先可读化（引擎拼接的工具结果 JSON 块 → output 文本，
-                          // 围栏代码与非工具结果 JSON 原样保留）再进 A2UI 管线渲染
-                          <AssistantA2ui content={humanizeEngineContent(entry.content)} messageId={entry.id} />
+                          <>
+                            {/* 固化态「思考过程」折叠区（web-thinking-display.md §5.2 TH6）：
+                                App.tsx 固化时保留了流式阶段累积的 thinking，此处渲染为
+                                默认收起的折叠块，位于正文（含空内容兜底提示）上方——
+                                与用户偏好一致：思考过程在最终结果上方的可折叠框中。
+                                历史恢复路径无 thinking 数据（引擎不持久化），自然不渲染 */}
+                            {entry.thinking !== undefined && entry.thinking !== "" && (
+                              <details className="chat-thinking">
+                                <summary className="chat-thinking-summary">思考过程</summary>
+                                <PreviewMarkdown
+                                  text={humanizeStreamPreview(entry.thinking)}
+                                  surfaceId={`thinking-${entry.id}`}
+                                />
+                              </details>
+                            )}
+                            {/* 完整内容：先可读化（引擎拼接的工具结果 JSON 块 → output 文本，
+                                围栏代码与非工具结果 JSON 原样保留）再进 A2UI 管线渲染。
+                                空内容兜底提示按有无 thinking 分档（TH7）：无 thinking
+                                （历史恢复）不指向不存在的折叠区 */}
+                            <AssistantA2ui
+                              content={humanizeEngineContent(entry.content)}
+                              messageId={entry.id}
+                              emptyHint={
+                                entry.thinking === undefined || entry.thinking === "" ? "（本轮无文本回复）" : undefined
+                              }
+                            />
+                          </>
                         ) : entry.thinkingPending === true &&
                           (entry.thinking === undefined || entry.thinking === "") &&
                           (entry.preview === null || entry.preview === "") ? (

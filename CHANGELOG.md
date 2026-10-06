@@ -62,6 +62,14 @@
   （`session-lifecycle-init` notify 轮询与 v2 FW-12 file-watcher 在多套件并发时存在
   与本次改动无关的时序抖动，单跑复验通过）
 
+### Fixed
+- **Web「思考过程见上方折叠区」死链**（web-thinking-display.md §5 追补）：纯 thinking
+  轮次固化后 thinking 折叠块消失、提示语指向不存在的折叠区。修复：`assistant_message`
+  固化时前端保留流式累积的 thinking（内存级，引擎/历史不持久化，刷新后不可回放）；
+  ChatPane 固化分支在正文上方渲染默认收起的「思考过程」折叠块；空内容兜底提示按
+  有无 thinking 分档（历史恢复降级为「本轮无文本回复」，不再死链）。顺带修复
+  App.tsx 历史恢复路径 filter 谓词收窄导致的存量 TS2322 类型错误
+
 ## [0.4.3.10] - 2026-10-06
 
 补丁版（EAG 触发层跨 run 失败守卫——失败目标不再被自动重放空转）。
