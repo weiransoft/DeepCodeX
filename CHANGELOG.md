@@ -6,7 +6,28 @@
 
 ## [Unreleased]
 
-（本版本暂无变更。）
+### Changed
+- **DEFAULT_MAX_TOOL_ROUNDS 从 12 提升到 40**（packages/core/src/eag/p5/executors/llm-task-executor.ts）：
+  部署类目标（ssh 远程+构建镜像+推送+启动容器+curl 验证）需要几十步工具调用，
+  12 轮结构性不足导致连续相同失败后熔断 abort。三重安全网：拒绝风暴 6 次熔断 /
+  相同调用 3 次熔断独立于轮数上限生效、自然终态任务 5-12 轮即结束、编排器 token
+  预算（200K）闸门独立拦截。
+- **failure() 签名扩展：失败路径同样结算累计 tokens**（packages/core/src/eag/p5/executors/llm-task-executor.ts）：
+  新增 `sawUsage / realTokens / estimatedChars` 三参数，与成功路径同构走
+  `resolveTokensUsed` 结算。旧实现硬编码 `tokensUsed: 0` → RunState 在
+  "达到轮数上限熔断"等 failure 路径下 tokensUsed=0。
+- **编排器 totalLlmCallCount 用 artifacts.llmRequests 直接累加**（packages/core/src/eag/p5/autonomous-orchestrator.ts）：
+  替代旧方案 `if (result.tokensUsed > 0) { totalLlmCallCount += 1; }` 近似估算。
+  旧方案两个缺陷：multi-request dev/fix 严重低估（n 轮只计 1 次）、failure()
+  路径 tokensUsed=0 导致本轮 llmCallCount 被跳过。totalExecutorLlmRequests
+  审计字段保留同源累加。
+
+### Fixed
+- **verify 阶段 "0 passed, 0 failed, exitCode=0" 误判 success**（packages/core/src/eag/p5/handlers/verify-stage-handler.ts）：
+  旧判定 `exitCode===0 && failed===0` 未检查 passed 数量，node --test 对空目录、
+  无 test 脚本的 npm test 等场景 exitCode=0 但 passed=0 被误判为"测试全部通过"。
+  修复：testPassed 条件增加 `&& testStats.passed > 0`，空测试场景区间进 skip
+  降级（与 exitCode≠0 的 noTestsCollected 对称）。
 
 ## [0.4.3.11] - 2026-10-07
 

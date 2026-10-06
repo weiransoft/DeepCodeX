@@ -214,8 +214,18 @@ function isCredentialProtected(relativePath: string): boolean {
   return CREDENTIAL_FILE_PATTERNS.some((re) => re.test(relativePath));
 }
 
-/** 单任务工具循环默认最大轮数（每轮一次真实 LLM 请求 + 一批工具调用） */
-const DEFAULT_MAX_TOOL_ROUNDS = 12;
+/** 单任务工具循环默认最大轮数（每轮一次真实 LLM 请求 + 一批工具调用）。
+ *
+ * 【2026-10-07 从 12 提升到 40】：部署类目标（ssh 远程+构建镜像+推送+启动容器+curl
+ * 验证+修 AF3 网络）需要几十步工具调用，12 轮结构性不足导致连续 2 轮相同失败后
+ * 熔断 abort（docs/dev/eag-task-id-and-web-session-isolation.md §1.3 根因 B）。
+ *
+ * 提升到 40 轮的三重安全网：
+ *  1. 拒绝风暴熔断（6 次/相同调用熔断 3 次）独立于轮数上限生效，空转不会烧完 40 轮
+ *  2. 自然终态：绝大多数编码任务 5-12 轮即给出终态回复，40 轮是 ceiling 而非 floor
+ *  3. 编排器级 token 预算（DEFAULT_MAX_TOKENS=200K）在 LoopScheduler 中独立闸门拦截
+ */
+const DEFAULT_MAX_TOOL_ROUNDS = 40;
 
 /**
  * 递归按 key 排序 JSON 值（相同调用空转熔断的指纹规范化用，2026-10-05）。
@@ -464,7 +474,13 @@ export class LlmTaskExecutor implements P5TaskExecutor {
       // 进入循环前先取一次客户端：无凭据直接 fail-closed，不发起任何请求
       const client = this.createLlmClient();
       if (client === null || client === undefined) {
-        return this.failure("LLM 客户端不可用：未配置 API 凭据（请检查 settings.json 与环境变量）", llmRequests);
+        return this.failure(
+          "LLM 客户端不可用：未配置 API 凭据（请检查 settings.json 与环境变量）",
+          llmRequests,
+          sawUsage,
+          inputTokensTotal + outputTokensTotal,
+          estimatedCharsTotal
+        );
       }
 
       emitProgress(
@@ -506,7 +522,13 @@ export class LlmTaskExecutor implements P5TaskExecutor {
       for (let round = 1; round <= this.maxToolRounds; round += 1) {
         // 每轮顶部双重 abort 检查：标志文件（跨进程 stop）+ AbortSignal（进程内）
         if (this.isAbortRequested(input.abortFlagPath) || abortController.signal.aborted) {
-          return this.failure("aborted：任务执行被中止信号中断", llmRequests);
+          return this.failure(
+            "aborted：任务执行被中止信号中断",
+            llmRequests,
+            sawUsage,
+            inputTokensTotal + outputTokensTotal,
+            estimatedCharsTotal
+          );
         }
 
         // 真实非流式 LLM 请求（简单、usage 直接可得、无 skill 预请求缝隙）
@@ -618,7 +640,13 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             `反复重试同一堵墙不会变通，目标可能超出执行器安全边界` +
             `（路径牢笼 / 凭据守卫 / 高危命令未获人工确认）。请调整任务目标、文件范围，或改用安全替代命令。`;
           emitProgress("task_end", `执行失败：拒绝风暴`, stormError, round);
-          return this.failure(stormError, llmRequests);
+          return this.failure(
+            stormError,
+            llmRequests,
+            sawUsage,
+            inputTokensTotal + outputTokensTotal,
+            estimatedCharsTotal
+          );
         }
 
         // 相同调用重复熔断判定（本轮全部调用之后统一评估）：把本轮工具序列
@@ -640,24 +668,48 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             `请检查任务卡内容是否可执行、目标是否与当前项目匹配，或补充缺失上下文后重试。`;
           this.log(identicalError, "warn");
           emitProgress("task_end", `执行失败：相同调用空转熔断`, identicalError, round);
-          return this.failure(identicalError, llmRequests);
+          return this.failure(
+            identicalError,
+            llmRequests,
+            sawUsage,
+            inputTokensTotal + outputTokensTotal,
+            estimatedCharsTotal
+          );
         }
       }
 
       // 达到轮数上限仍在持续调用工具：诚实判失败，交回编排器决定 fix/abort
       const roundLimitError = `工具循环达上限（${this.maxToolRounds} 轮）仍未给出终态回复`;
       emitProgress("task_end", `执行失败：${roundLimitError}`, roundLimitError);
-      return this.failure(roundLimitError, llmRequests);
+      return this.failure(
+        roundLimitError,
+        llmRequests,
+        sawUsage,
+        inputTokensTotal + outputTokensTotal,
+        estimatedCharsTotal
+      );
     } catch (error) {
       // AbortError：用户/编排器主动中止
       if (error instanceof Error && error.name === "AbortError") {
         emitProgress("task_end", "执行中止：任务被中止信号中断", "aborted：任务执行被中止信号中断");
-        return this.failure("aborted：任务执行被中止信号中断", llmRequests);
+        return this.failure(
+          "aborted：任务执行被中止信号中断",
+          llmRequests,
+          sawUsage,
+          inputTokensTotal + outputTokensTotal,
+          estimatedCharsTotal
+        );
       }
       const message = error instanceof Error ? error.message : String(error);
       this.log(`任务执行异常：${message}`, "error");
       emitProgress("task_end", `执行异常：${message}`, `任务执行异常：${message}`);
-      return this.failure(`任务执行异常：${message}`, llmRequests);
+      return this.failure(
+        `任务执行异常：${message}`,
+        llmRequests,
+        sawUsage,
+        inputTokensTotal + outputTokensTotal,
+        estimatedCharsTotal
+      );
     } finally {
       // 释放合成 sessionId 在 common/state 模块级 Map 中累积的 snippet/文件状态
       clearSessionState(toolSessionId);
@@ -1093,13 +1145,33 @@ export class LlmTaskExecutor implements P5TaskExecutor {
   /**
    * 构造失败结果（不报告变更文件：失败语义下 changedFiles 无消费意义，
    * 残留改动可由下一轮 plan/dev 的真实盘点与 git status 重新检出）。
+   *
+   * 【2026-10-07 签名扩展】新增 sawUsage / realTokens / estimatedChars 入参。
+   * 旧实现硬编码 tokensUsed:0，导致 RunState.totalTokensUsed 与 totalLlmCallCount
+   * 在"达到轮数上限熔断"等 failure 路径下恒为 0——编排器用 tokensUsed>0 近似
+   * 估算 llmCallCount，failure 路径下 tokensUsed=0 → 该轮 LLM 请求数被跳过累加。
+   * 修复：失败路径同样用 resolveTokensUsed 结算（与成功路径同构），
+   * 传入 runLoop 闭包内已累计的 sawUsage / input+output / estimatedChars。
+   *
+   * @param error 失败原因描述
+   * @param llmRequests 已完成的 LLM 请求次数（runLoop 闭包累计）
+   * @param sawUsage 是否拿到过网关真实 usage
+   * @param realTokens 累计真实 tokens（inputTokensTotal + outputTokensTotal）
+   * @param estimatedChars 累计估算字符数（无 usage 时的 fallback）
    */
-  private failure(error: string, llmRequests: number): Readonly<P5TaskExecutionResult> {
+  private failure(
+    error: string,
+    llmRequests: number,
+    sawUsage: boolean,
+    realTokens: number,
+    estimatedChars: number
+  ): Readonly<P5TaskExecutionResult> {
+    const tokens = this.resolveTokensUsed(sawUsage, realTokens, estimatedChars);
     return Object.freeze({
       success: false,
       summary: "",
-      tokensUsed: 0,
-      tokensEstimated: false,
+      tokensUsed: tokens.tokens,
+      tokensEstimated: tokens.estimated,
       llmRequests,
       changedFiles: Object.freeze([]),
       error,
