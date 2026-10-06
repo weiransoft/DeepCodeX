@@ -8,6 +8,28 @@
 
 （本版本暂无变更。）
 
+## [0.4.3.11] - 2026-10-07
+
+补丁版（EAG 选卡劫持修复 + Web 会话注册表 sessionId 去重 + React setState 竞态修复）。
+
+### Fixed
+- **EAG 选卡劫持：动态任务 ID 取代固定 T-001 编号**（packages/core/src/eag/p5/handlers/plan-stage-handler.ts）：
+  `SYNTHESIZED_TASK_ID = "T-001"` 硬编码常量导致每次目标合成的任务卡都用同一编号，
+  `tasks.md` 中多张 pending 卡共享 ID 时 `pickNextPendingTask` 退化为文件序选择 →
+  最早追加的旧卡永远压在本次目标卡前面，形成"空循环"（每轮为旧目标空烧 2×12 轮工具调用后熔断 abort）。
+  修复：新增 `generateSynthesizedTaskId(cards)` 扫描现有最大 `T-xxx` +1 生成唯一编号；
+  `alreadySynthesized` 检测同步从 `c.id === SYNTHESIZED_TASK_ID` 改为扫描 `requirementId === "AUTO"` 且
+  标题为 objective 子串的卡（语义等价，移除固定 ID 依赖）。
+- **Web 会话切换串显：React setState flush 与 Promise microtask 竞态**（packages/web/web/src/App.tsx openChat）：
+  `setEntries([])` 排入 React 18 更新队列（macrotask flush），但 `fetchMessages().then` 的函数式 setState
+  回调在 microtask 阶段先执行 → `prev` 读到的是 flush 前旧会话 entries → 去重合并分支混入旧消息。
+  修复：then 回调内直接 `setEntries(history)` 不读 prev，彻底绕过 React 批处理竞态窗口。
+- **Web 注册表同 sessionId 多 chatId 脏条目**（packages/web/src/chat-registry.ts upsertUserChat）：
+  `createChat` remount 每次生成新 chatId 并 upsert，但旧 chatId 同 sessionId 条目不清理 →
+  `~/.deepcode/web/chats/<userId>.json` 累积 5 组以上多 chatId 共享同一底层 sessionId 的冗余记录。
+  修复：upsertUserChat 内当新条目 sessionId 非空时，同表内过滤掉 sessionId 相同但 chatId 不同的旧条目
+  （原子读→过滤→写在一次调用内完成，并发 remount 不丢数据）。
+
 ## [0.4.3.11] - 2026-10-06
 
 补丁版（EAG 触发层 LLM 化——第一次/第二次指令统一经 LLM 意图识别 + 任务动态规划，不再依赖关键字/规则命中）。

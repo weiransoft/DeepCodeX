@@ -535,6 +535,12 @@ export function App() {
       if (chatId === activeChatIdRef.current) return;
       activeChatIdRef.current = chatId;
       setActiveChatId(chatId);
+      // —— 先清空 entries：与 fetchMessages.then 的 prev 竞态隔离 ——
+      // React 18 的 setState flush 发生在 task 阶段（事件循环下一个 macrotask），
+      // 而 fetchMessages.then 是 microtask，**它先于 React flush 执行**。
+      // 因此不能在 then 里读 prev（prev 仍是 setEntries([]) 前的旧会话 entries），
+      // 否则旧会话消息会通过"去重合并分支"串到新会话页面（docs/dev/web-chat-switch-isolation.md）。
+      // 修复：then 内直接 setEntries(history)，不碰 prev。
       setEntries([]);
       applyStreaming(false);
       setServerFiles([]); // 切换会话清空未发送的抽屉附件
@@ -545,22 +551,12 @@ export function App() {
           // 仅当仍是当前会话时应用（防止快速切换竞态覆盖）
           if (activeChatIdRef.current !== chatId) return;
           const history = convertHistory(messages);
-          setEntries((prev) => {
-            if (prev.length === 0) return history;
-            // 订阅窗口内已有实时事件：历史前插 + 同源消息去重
-            // 助手：历史 id 为 h-<id>、实时 id 为 messageId，按去前缀 id 对比；
-            // 用户：乐观气泡与 user_message 广播帧同源（广播帧无引擎 id），
-            //     实时侧存在任何用户消息（含广播帧）时，历史用户气泡中同文本
-            //     的条目去重，刷新后同一条消息只保留一个气泡。
-            const liveAssistantIds = new Set(prev.filter((x) => x.kind === "assistant").map((x) => x.id));
-            const liveUserTexts = new Set(prev.filter((x) => x.kind === "user").map((x) => x.text));
-            const deduped = history.filter((h) => {
-              if (h.kind === "assistant") return !liveAssistantIds.has(h.id.slice(2));
-              if (h.kind === "user") return !liveUserTexts.has(h.text);
-              return true;
-            });
-            return [...deduped, ...prev];
-          });
+          // 直接覆盖：不读 prev（prev 此时必为旧值——React flush 还没到）
+          // 安全保证：
+          // ① ensureStream 已在 fetch 之前同步调用 → 旧 ES 已 close，新 ES 已建立；
+          // ② 新 ES 的回调第一行有 chatId 守卫 → 旧会话事件不可能再写 entries；
+          // ③ setEntries([]) 已排入更新队列，history 直接覆盖后 React 会正确 flush
+          setEntries(history);
         })
         .catch((e: unknown) => {
           if (e instanceof ApiError && e.status === 401) {

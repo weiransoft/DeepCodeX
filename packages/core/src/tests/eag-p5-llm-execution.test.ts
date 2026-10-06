@@ -339,7 +339,7 @@ test("P-S6b. tasks.md 空清单 + 非空 objective：合成新卡消费目标（
 });
 
 test("P-S7. buildSynthesizedTasksContent：格式契约（标题单行/换行折叠/空值属性行）", () => {
-  const content = buildSynthesizedTasksContent("第一行\n  第二行\t制表");
+  const content = buildSynthesizedTasksContent("第一行\n  第二行\t制表", "T-001");
   assert.match(content, /^## T-001 第一行 第二行 制表$/m);
   // 空值属性行故意保留 "- key:"（不被属性正则命中，解析器取默认空数组）
   for (const key of ["dependencies", "files", "deletions", "symbols", "acceptance"]) {
@@ -529,7 +529,7 @@ test("Z6. 目标相关性守卫幂等：已存在 AUTO 合成卡不再重复追�
     // 第一轮守卫已追加过合成卡（AUTO + 标题为 objective 前缀）
     fs.writeFileSync(
       tasksFilePath,
-      ["# EAG-P5 任务清单", "", buildSynthesizedTasksContent(objective)].join("\n"),
+      ["# EAG-P5 任务清单", "", buildSynthesizedTasksContent(objective, "T-001")].join("\n"),
       "utf8"
     );
 

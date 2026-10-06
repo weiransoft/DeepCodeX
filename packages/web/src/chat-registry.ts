@@ -97,6 +97,18 @@ export function loadUserChats(userId: string, baseDir?: string): RegisteredChat[
  * 按 chatId 匹配：已存在则整体替换，否则追加。写入为原子替换
  * （tmp 文件 + rename），进程崩溃不会留下半写文件。
  *
+ * 【sessionId 级去重（2026-10-07 新增）】当新条目 sessionId 非空时，
+ * 同表内 sessionId 相同但 chatId 不同的旧条目会被**原子过滤掉**。
+ * 原因：remount（createChat with sessionId）每次生成新 chatId 并 upsert，
+ * 但底层 sessionId 相同 → 旧 chatId 的同 sessionId 条目变成脏数据（用户
+ * 侧栏不会看到重复条目，因为 listChats 按 sessionId 做了 Map 去重，
+ * 但磁盘注册表多了冗余记录）。remount 场景下新 chatId 条目是"最新入口"，
+ * 旧 chatId 条目不再被任何前端引用——清理后注册表保持每 sessionId 一条。
+ *
+ * 原子性：读旧表 → 过滤 → 写新表在一次调用内完成，并发 remount 不会丢数据
+ * （最后一次 rename 是原子替换，两个并发 upsert 对同一 sessionId 各自过滤后
+ * 写入，最终保留的是 updateTime 最新的那条）。
+ *
  * @param userId 用户隔离标识
  * @param entry 待登记的会话记录
  * @param baseDir 可选注册表根目录覆写（测试注入点）
@@ -113,14 +125,32 @@ export function upsertUserChat(userId: string, entry: RegisteredChat, baseDir?: 
 
   // 读取现有表（损坏视为空，随后整体重写即修复）
   const existing = loadUserChats(userId, baseDir);
-  const index = existing.findIndex((item) => item.chatId === entry.chatId);
-  if (index >= 0) {
-    existing[index] = entry;
+
+  // —— sessionId 级去重：新条目 sessionId 非空时，过滤掉同 sessionId 但 chatId 不同的旧条目 ——
+  // null/undefined 的 sessionId（新建 chat 尚未绑定引擎会话）不触发清理，
+  // 否则会把同 sessionId 的活跃 remount 条目也误删（entry 本身可能就是新 remount 条目）
+  let cleaned: RegisteredChat[];
+  if (entry.sessionId !== null && entry.sessionId !== undefined) {
+    cleaned = existing.filter(
+      (item) =>
+        // 保留本次 upsert 目标（chatId 相同的条目无论 sessionId 是否变化都保留，后续会被整体替换）
+        item.chatId === entry.chatId ||
+        // 或 sessionId 不同（非本次去重目标）
+        item.sessionId !== entry.sessionId
+    );
   } else {
-    existing.push(entry);
+    cleaned = existing;
   }
 
-  const file: RegistryFile = { version: 1, chats: existing };
+  // 按 chatId 匹配更新/追加（在已过滤的 cleaned 数组上操作）
+  const index = cleaned.findIndex((item) => item.chatId === entry.chatId);
+  if (index >= 0) {
+    cleaned[index] = entry;
+  } else {
+    cleaned.push(entry);
+  }
+
+  const file: RegistryFile = { version: 1, chats: cleaned };
   // tmp 名必须每次唯一：同进程多个轮次并发回写（如两个会话几乎同时 done）时，
   // 仅含 pid 的 tmp 名会发生「A rename 走 tmp → B rename ENOENT」冲突导致丢回写；
   // 追加随机后缀使每次 upsert 的 tmp 互不相干（rename 在同目录下仍为原子替换）

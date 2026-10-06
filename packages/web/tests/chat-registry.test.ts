@@ -203,3 +203,89 @@ test("registry：同用户并发回写不得冲突或丢条目（tmp 名每次�
   const leftovers = readdirSync(registryDir).filter((name) => name.includes(".tmp"));
   assert.equal(leftovers.length, 0, `并发写完成后不得残留 tmp 文件（发现 ${leftovers.join(",")}）`);
 });
+
+// ============================================================================
+// sessionId 级去重（2026-10-07 P1 修复：remount 产生多 chatId 共享 sessionId 的注册表脏条目）
+// ============================================================================
+
+test("registry：R1 remount 场景（旧 chatId=A, chatId=B 同 sessionId=X）→ 新 chatId=C upsert 后只剩 chatId=C", () => {
+  // 模拟报告中的脏数据：同一 sessionId 被多次 remount 后注册表累积多条
+  // 注意：前两次 upsert（chat-A → chat-B）已经在触发去重逻辑，
+  //       因为 entry.sessionId=sess-X 非空且 chat-B ≠ chat-A → chat-A 被清理
+  //       所以第三次 upsert 时表实际状态是 [chat-B/sess-X, chat-other/sess-Y]
+  const userId = userIdFromUsername("remount-dedup");
+  upsertUserChat(userId, makeEntry({ chatId: "chat-A", sessionId: "sess-X", title: "旧入口 A" }), registryDir);
+  upsertUserChat(userId, makeEntry({ chatId: "chat-B", sessionId: "sess-X", title: "旧入口 B" }), registryDir);
+  upsertUserChat(userId, makeEntry({ chatId: "chat-other", sessionId: "sess-Y", title: "另一独立会话" }), registryDir);
+  // 前置确认：chat-A 已被 chat-B 的同 sessionId 清理 → 只剩 chat-B + chat-other = 2 条
+  assert.equal(
+    loadUserChats(userId, registryDir).length,
+    2,
+    "前置：chat-A 被 chat-B 的同 sessionId 清理后，表应为 2 条"
+  );
+
+  // 执行新 remount：chatId=C，sessionId=X → chat-B 被清理，chat-C 写入
+  const newEntry = makeEntry({
+    chatId: "chat-C",
+    sessionId: "sess-X",
+    title: "新入口 C（本次 remount）",
+    updateTime: "2026-10-07T10:00:00.000Z",
+  });
+  upsertUserChat(userId, newEntry, registryDir);
+
+  const chats = loadUserChats(userId, registryDir);
+  assert.equal(chats.length, 2, "去重后应只剩 chat-C（sess-X）+ chat-other（sess-Y）共 2 条");
+  const sessXEntries = chats.filter((c) => c.sessionId === "sess-X");
+  assert.equal(sessXEntries.length, 1, "sess-X 必须只剩 chat-C 一条");
+  assert.equal(sessXEntries[0].chatId, "chat-C", "去重后 sess-X 的 chatId 必须是本次 upsert 的 chat-C");
+});
+
+test("registry：R2 sessionId=null（新建 chat 未发消息）→ upsert 不得触发同 sessionId 清理", () => {
+  const userId = userIdFromUsername("null-session");
+  // 先写两条 null sessionId 的条目（两个新建 chat 尚未发消息）
+  upsertUserChat(userId, makeEntry({ chatId: "chat-null-1", sessionId: null }), registryDir);
+  upsertUserChat(userId, makeEntry({ chatId: "chat-null-2", sessionId: null }), registryDir);
+  // null sessionId 不应互相清理（各属不同 chatId）
+  const chats = loadUserChats(userId, registryDir);
+  assert.equal(chats.length, 2, "两条 sessionId=null 的条目应该各自保留，互不触发清理");
+});
+
+test("registry：R3 同 chatId 再 upsert（轮次 done 后 updateTime 回写）→ 正常整体替换，不过滤", () => {
+  const userId = userIdFromUsername("same-chatid-update");
+  // 首次写入
+  upsertUserChat(
+    userId,
+    makeEntry({
+      chatId: "chat-update-1",
+      sessionId: "sess-U",
+      title: "旧标题",
+      updateTime: "2026-10-01T00:00:00.000Z",
+    }),
+    registryDir
+  );
+  // 同 chatId 再 upsert（updateTime 回写、title 更新）
+  const updated = makeEntry({
+    chatId: "chat-update-1",
+    sessionId: "sess-U",
+    title: "新标题（updateTime 回写）",
+    updateTime: "2026-10-02T00:00:00.000Z",
+  });
+  upsertUserChat(userId, updated, registryDir);
+
+  const chats = loadUserChats(userId, registryDir);
+  assert.equal(chats.length, 1, "同 chatId 再 upsert 应整体替换（不是追加也不是清理）");
+  assert.equal(chats[0].title, "新标题（updateTime 回写）", "updateTime 回写必须生效");
+  assert.equal(chats[0].chatId, "chat-update-1", "chatId 不变");
+});
+
+test("registry：R4 同 sessionId、不同 chatId（chatId=A 存在，upsert chatId=B/sessionId=X）→ chatId=A 被清理", () => {
+  const userId = userIdFromUsername("simple-dedup");
+  // 先写 chatId=A，sessionId=X
+  upsertUserChat(userId, makeEntry({ chatId: "chat-A", sessionId: "sess-X" }), registryDir);
+  assert.equal(loadUserChats(userId, registryDir).length, 1, "前置：1 条");
+  // 再 upsert chatId=B，sessionId=X → 同 sessionId 清理 chat-A
+  upsertUserChat(userId, makeEntry({ chatId: "chat-B", sessionId: "sess-X" }), registryDir);
+  const chats = loadUserChats(userId, registryDir);
+  assert.equal(chats.length, 1, "同 sessionId 不同 chatId 只保留最后一条");
+  assert.equal(chats[0].chatId, "chat-B", "清理后 chatId 应为 chat-B");
+});
