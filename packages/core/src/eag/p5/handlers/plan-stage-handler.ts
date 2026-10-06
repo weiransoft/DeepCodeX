@@ -94,8 +94,15 @@ export const PLAN_REASON_TASK_CARD_SELECTED = "task-card-selected" as const;
  */
 export const PLAN_REASON_CAPABILITY_GAP = "capability-gap" as const;
 
-/** 合成任务卡 ID（单 goal 合成固定为 T-001，手写清单可继续追加 T-002…） */
-const SYNTHESIZED_TASK_ID = "T-001" as const;
+/**
+ * 合成卡 ID 的"空清单回退值"（2026-10-07 Z5 修复前是固定常量 SYNTHESIZED_TASK_ID = "T-001"，
+ * 每次目标合成都用同一编号导致多卡共享 ID → pickNextPendingTask 永远取文件序第一张旧卡
+ * （详见 docs/dev/eag-task-id-and-web-session-isolation.md §1.1）。
+ *
+ * 现仅作为 generateSynthesizedTaskId() 扫描空清单时的回退返回值；正常流程由
+ * generateSynthesizedTaskId 扫描现有卡后取最大 T-xxx+1 生成唯一编号。
+ */
+const FALLBACK_SYNTHESIZED_TASK_ID = "T-001" as const;
 
 /** 合成任务卡标题最大字符数（防止超长 objective 撑爆单行标题） */
 const MAX_SYNTHESIZED_TITLE_CHARS = 200;
@@ -297,7 +304,7 @@ export class P5PlanStageHandler implements P5StageHandler {
           // 能力 fatal 预检已随执行器开放 bash 而移除（2026-10-03 用户决策）：
           // objective 命中安装/远程/容器/服务/数据库语义时不再拒绝——执行器现在
           // 有 bash 工具可真实执行此类任务（高危命令由人工确认闸门兜底）。
-          const synthesizedContent = buildSynthesizedTasksContent(objective);
+          const synthesizedContent = buildSynthesizedTasksContent(objective, generateSynthesizedTaskId([]));
           // 原子落盘（同目录 tmp + rename），随后与手写清单走完全相同的"回读→解析"闭环
           atomicWriteTextFile(tasksFilePath, synthesizedContent);
           synthesized = true;
@@ -332,7 +339,10 @@ export class P5PlanStageHandler implements P5StageHandler {
       const objectiveForEmpty = typeof ctx.objective === "string" ? ctx.objective.trim() : "";
       if (taskCards.length === 0 && objectiveForEmpty.length > 0) {
         try {
-          atomicWriteTextFile(tasksFilePath, buildSynthesizedTasksContent(objectiveForEmpty));
+          atomicWriteTextFile(
+            tasksFilePath,
+            buildSynthesizedTasksContent(objectiveForEmpty, generateSynthesizedTaskId([]))
+          );
           synthesized = true;
           ctx.logger?.(`plan 空清单合成：tasks.md 无任务卡，已按目标合成 T-001 落盘 ${tasksFilePath}`, "warn");
         } catch {
@@ -395,11 +405,7 @@ export class P5PlanStageHandler implements P5StageHandler {
             // 子串的旧卡（如 objective"重构支付模块并补测试"、旧卡"重构支付模块"）
             // 会被误判为已合成，导致新目标永远不被追加。
             const alreadySynthesized = taskCards.some(
-              (c) =>
-                c.id === SYNTHESIZED_TASK_ID &&
-                c.requirementId === "AUTO" &&
-                c.title.length > 0 &&
-                objectiveText.includes(c.title)
+              (c) => c.requirementId === "AUTO" && c.title.length > 0 && objectiveText.includes(c.title)
             );
             // 注：不得用 `tasksContent.includes("## T-001 ")` 做文件级判重——
             // 合成卡沿用 T-001 编号（见 Z5 用例"旧卡 done 不改号"），手写清单
@@ -409,7 +415,7 @@ export class P5PlanStageHandler implements P5StageHandler {
               try {
                 // 去首尾空白（含事故遗留 BOM）后补单个换行：与文件原有单换行结尾约定一致，
                 // 保证追加后合成卡标题前恰好一个空行（原尾部 `/\s*$/` 贪婪剥除会把空行一并吃掉）
-                const appended = `${tasksContent.replace(/\s+$/, "")}\n\n${buildSynthesizedTasksContent(objectiveText)}`;
+                const appended = `${tasksContent.replace(/\s+$/, "")}\n\n${buildSynthesizedTasksContent(objectiveText, generateSynthesizedTaskId(taskCards))}`;
                 atomicWriteTextFile(tasksFilePath, appended);
                 synthesized = true;
                 ctx.logger?.(
@@ -472,15 +478,11 @@ export class P5PlanStageHandler implements P5StageHandler {
               const freshContent = fs.readFileSync(tasksFilePath, "utf8");
               const freshCards = parseTaskCards(freshContent);
               const alreadySynthesized = freshCards.some(
-                (c) =>
-                  c.id === SYNTHESIZED_TASK_ID &&
-                  c.requirementId === "AUTO" &&
-                  c.title.length > 0 &&
-                  objectiveText.includes(c.title)
+                (c) => c.requirementId === "AUTO" && c.title.length > 0 && objectiveText.includes(c.title)
               );
               if (!alreadySynthesized) {
                 try {
-                  const appended = `${freshContent.replace(/\s+$/, "")}\n\n${buildSynthesizedTasksContent(objectiveText)}`;
+                  const appended = `${freshContent.replace(/\s+$/, "")}\n\n${buildSynthesizedTasksContent(objectiveText, generateSynthesizedTaskId(freshCards))}`;
                   atomicWriteTextFile(tasksFilePath, appended);
                   synthesized = true;
                   ctx.logger?.(
@@ -1102,6 +1104,30 @@ export function computeObjectiveRelevance(objective: string, cardTexts: Readonly
 }
 
 /**
+ * 动态生成新合成卡的任务 ID：扫描现有最大 T-xxx 编号 +1。
+ *
+ * 解决"多卡共用固定 T-001 导致 pickNextPendingTask 永远取文件序第一张旧卡"的劫持问题
+ * （docs/dev/eag-task-id-and-web-session-isolation.md §1.1）。
+ * 空清单回退 T-001（与修复前行为一致）。
+ *
+ * @param cards 当前已解析的任务卡列表（可为空）
+ * @returns 新合成卡的唯一 ID，格式 T-XXX（零填充 3 位；超 3 位时按实际位数输出）
+ */
+export function generateSynthesizedTaskId(cards: ReadonlyArray<ParsedTaskCard>): string {
+  let maxNum = 0;
+  for (const card of cards) {
+    const match = card.id.match(/^T-(\d+)$/);
+    if (match) {
+      const num = parseInt(match[1]!, 10);
+      if (num > maxNum) maxNum = num;
+    }
+  }
+  const nextNum = maxNum + 1;
+  // 零填充到 3 位（T-001 ~ T-999 足够日常使用）
+  return nextNum < 100 ? `T-${String(nextNum).padStart(3, "0")}` : `T-${nextNum}`;
+}
+
+/**
  * 挑选下一张 pending 任务卡（依赖已满足）
  *
  * 选取规则：
@@ -1145,9 +1171,10 @@ export function pickNextPendingTask(
  * - status=pending，requirement=AUTO 标记其来源为自动合成。
  *
  * @param objective 已 trim 的用户目标文本（非空）
+ * @param taskId 新合成卡的唯一 ID（由 generateSynthesizedTaskId 生成，调用方保证唯一性）
  * @returns tasks.md 完整文本
  */
-export function buildSynthesizedTasksContent(objective: string): string {
+export function buildSynthesizedTasksContent(objective: string, taskId: string): string {
   // 标题必须单行：折叠所有换行/制表符为空格并压缩连续空白，超长截断
   const singleLineTitle = objective
     .replace(/\r?\n/g, " ")
@@ -1159,7 +1186,7 @@ export function buildSynthesizedTasksContent(objective: string): string {
   return [
     "<!-- EAG-P5 任务清单（由自主目标自动生成，可手工编辑补充 files/acceptance） -->",
     "",
-    `## ${SYNTHESIZED_TASK_ID} ${singleLineTitle}`,
+    `## ${taskId} ${singleLineTitle}`,
     "- requirement: AUTO",
     "- status: pending",
     "- dependencies:",
