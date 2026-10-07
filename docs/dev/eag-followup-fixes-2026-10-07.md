@@ -235,3 +235,35 @@ P2 改动最大但最独立，先做；P0 最简洁最后做；两个 P1 中间�
 
 - core P5 系列 147/147 绿；web 248/248 绿；tsc 零错误。
 - 未修复（接受现状）：根因 4 相关性算法仅调阈值会引入新误判，本次以根因 1-3 修复阻断空循环主链，根因 4 留待出现实际误判案例再治。
+
+---
+
+# 附录 B：任务完成"变更文件清单"设计与实现（2026-10-07 第三轮）
+
+## 需求
+
+/eag-autonomous 任务完成时，Web 与 CLI 都要列出本次运行修改和新增的文件清单。
+
+## 多角色团队裁决（架构师 / 测试专家 / 宿主审计员）
+
+1. **单一事实源**：清单只生成一份——`AutonomousRunResult.changedFiles`（结构化）+ finalReport"## 变更文件清单"段（markdown 同源渲染文本）。宿主零改动：CLI MessageView markdown 原样渲染、Web SSE assistant_message 全文透传，均自动生效。
+2. **归因正确性是生命线**（测试专家 C-6 关键用例）：运行前工作区已有的脏文件（用户未提交改动）绝不能归因给本次运行。方案：run() 入口采集 git 基线快照（porcelain -uall + ls-files），结束再做终态快照差集。**不做基线差集此用例必挂**。
+3. **porcelain 状态码边界**（测试专家）：新文件是 `??` 不是 `A`（LLM 执行器不会 git add）；`-uall` 展开未跟踪目录（默认折叠 `?? src/` 丢文件）；rename `R old -> new` 拆 new(M)+old(D)。
+4. **诚实降级**：非 git 仓库 → changedFiles 空 + `gitAttributionAvailable=false`，报告标注"git 归因不可用"，禁止输出"无文件变更"误导结论。
+5. **管线元数据排除**（实施中发现）：`.eag/`（tasks.md 状态流转、notes 记忆）每次运行必变，是编排器账本不是任务产出——快照 pathspec `:(exclude).eag/` 排除，否则只读任务也会报 tasks.md 变更淹没真实清单。
+
+## 实现
+
+| 文件 | 改动 |
+|------|------|
+| autonomous-orchestrator.ts | 新增 `RunFileChange`/`RunFileChangeKind` 类型、`GitChangeSnapshot` 内部结构；`captureGitSnapshot()`（git status -uall + ls-files，fail-open null）；`diffRunFileChanges()`（纯函数归因：?? 且基线不脏→added，M 基线跟踪→modified，D→deleted，基线脏且状态未变→排除，基线 ?? 消失→排除）；`computeRunFileChanges()`（null 降级 + added→modified→deleted 稳定排序）；run() 3b 基线快照 / 7a 终态差集；`generateFinalReport` 增清单段（三态诚实输出）；`AutonomousRunResult` 增 `changedFiles` + `gitAttributionAvailable` |
+| index.ts | 导出 RunFileChange / RunFileChangeKind |
+| cli / web | **零改动**（审计确认：finalReport markdown 经既有双写链路自动到达两宿主） |
+
+## 测试
+
+`eag-p5-changed-files-inventory.test.ts` 8 用例：CF-1 纯函数三态归类+排序、CF-2 关键归因（运行前脏文件排除）、CF-3 rename 拆分、CF-4 多轮跨任务去重（端到端真实 git）、CF-5 端到端新增+报告同源、CF-6 端到端归因（预置脏文件排除）、CF-7 非 git 诚实降级、CF-8 只读任务零变更文案。
+
+## 回归结果
+
+- inventory 8/8 + orchestrator happy/extended/autonomous/multi-command 26/26 = 34/34 绿；tsc 零错误。

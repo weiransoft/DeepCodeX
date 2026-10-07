@@ -447,6 +447,8 @@ export type {
   AutonomousRunResult,
   AutonomousStatusResult,
   AutonomousStopResult,
+  RunFileChange,
+  RunFileChangeKind,
   P5MilestoneRecord,
   P5BlockageReport,
   AutonomousOrchestratorOptions,
