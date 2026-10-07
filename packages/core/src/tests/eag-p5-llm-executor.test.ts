@@ -735,16 +735,20 @@ test("E15. bash 高危命令人工批准：确认后真实执行；人工拒绝�
     assert.equal(approvalCalls.length, 1, "高危命令必须恰好触发一次人工确认");
     assert.match(approvalCalls[0]!.risk, /提权|安装/, `确认请求应含风险类别，实际：${approvalCalls[0]!.risk}`);
     assert.equal(approvalCalls[0]!.taskId, "T-001", "确认请求应携带任务卡上下文");
-    // 批准 → handler 真实执行的证据取"命令回灌给模型的 tool 消息"：
-    // ok=true 且含 sudo 的 stderr 输出——证明命令进程真实跑过（非 deny 短路）。
+    // 批准 → handler 真实执行的证据取"命令回灌给模型的 tool 消息"：ok=true
+    // 证明命令进程真实跑过（非 deny 短路）。
+    // 【2026-10-07 root 适配】旧断言额外要求 tool 文本含 sudo（非 root 机器上
+    // `sudo -n true` 报 sudo 不可用/需密码的 stderr），但 root 环境 sudo 静默
+    // 成功无任何输出 → 该附加条件在 root 下恒假。命令真实执行的副作用证据由
+    // 下方 markerA 落盘断言独立覆盖（更强），此处 ok:true 已足以排除 deny 短路。
     const toolMessages = client
       .getRequests()
       .slice(1)
       .flatMap((req: any) => req.messages ?? [])
       .filter((m: any) => m.role === "tool");
     assert.ok(
-      toolMessages.some((m: any) => /"ok":\s*true/.test(String(m.content)) && /sudo/i.test(String(m.content))),
-      `人工批准后 bash 命令必须真实执行（tool 回灌应含 ok:true 与 sudo 输出），实际：${JSON.stringify(
+      toolMessages.some((m: any) => /"ok":\s*true/.test(String(m.content))),
+      `人工批准后 bash 命令必须真实执行（tool 回灌应含 ok:true），实际：${JSON.stringify(
         toolMessages.map((m: any) => String(m.content).slice(0, 150))
       )}`
     );
