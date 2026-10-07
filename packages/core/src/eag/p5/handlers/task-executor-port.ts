@@ -145,6 +145,14 @@ export interface P5TaskExecutionResult {
    * 非 git 仓库或无变更时为空数组。
    */
   readonly changedFiles: ReadonlyArray<string>;
+  /**
+   * 空转标记（2026-10-07 新增）：模型未发起任何工具调用且 git 无任何变更时为 true。
+   *
+   * 语义：success 仍为 true（工具循环正常到达终态），但本任务"光说不做"——
+   * 编排器据此把该轮计入 consecutiveNoopIterations 空转熔断计数，防止
+   * "每轮纯文本回复 → 卡标 completed → 零产出"被当成真实进展无限循环。
+   */
+  readonly noop?: boolean;
   /** success=false 时的错误原因（aborted / 凭据缺失 / 异常消息等） */
   readonly error?: string;
 }

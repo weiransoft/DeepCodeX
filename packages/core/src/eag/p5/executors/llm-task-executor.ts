@@ -601,10 +601,15 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             inputTokensTotal + outputTokensTotal,
             estimatedCharsTotal
           );
+          // 空转标记（2026-10-07 新增）：模型全程未发起任何工具调用且 git 无任何变更，
+          // 说明本任务是"光说不做"——success 仍为 true（循环正常到达终态），
+          // 但 noop=true 让编排器把本轮计入 consecutiveNoopIterations 空转熔断，
+          // 防止"纯文本回复 → 卡 completed → 零产出"被当成真实进展无限循环。
+          const isNoop = llmRequests > 0 && changedFiles.length === 0;
           emitProgress(
             "task_end",
             `任务完成：${(response.content || "").slice(0, 200)}`,
-            `── 轮次 ${round}：模型给出终态回复，任务正常结束\n变更文件：${changedFiles.length > 0 ? changedFiles.join(", ") : "（无）"}`,
+            `── 轮次 ${round}：模型给出终态回复，任务正常结束\n变更文件：${changedFiles.length > 0 ? changedFiles.join(", ") : "（无）"}${isNoop ? "\n（空转：模型未发起任何工具调用且无文件变更）" : ""}`,
             round
           );
           return Object.freeze({
@@ -614,6 +619,7 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             tokensEstimated: tokensUsed.estimated,
             llmRequests,
             changedFiles: Object.freeze(changedFiles),
+            noop: isNoop,
           });
         }
 

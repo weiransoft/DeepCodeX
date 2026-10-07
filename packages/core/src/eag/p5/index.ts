@@ -334,7 +334,8 @@ export type { P5StageKind, P5StageResultKind, P5StageContext, P5StageResult, P5S
 // ============================================================================
 
 // 确定性失败熔断阈值（僵尸任务卡修复配套，见 autonomous-orchestrator 5b.7）
-export { IDENTICAL_FAILURE_CIRCUIT_BREAKER_THRESHOLD } from "./autonomous-orchestrator";
+// 连续空转熔断阈值（2026-10-07 空循环修复配套，见 autonomous-orchestrator 5c.2）
+export { IDENTICAL_FAILURE_CIRCUIT_BREAKER_THRESHOLD, NOOP_CIRCUIT_BREAKER_THRESHOLD } from "./autonomous-orchestrator";
 
 export {
   P5PlanStageHandler,
@@ -342,6 +343,7 @@ export {
   parseTaskCards,
   pickNextPendingTask,
   computeObjectiveRelevance,
+  markTaskCardStatusInContent,
 } from "./handlers/plan-stage-handler";
 
 export {
@@ -351,7 +353,7 @@ export {
   extractTaskCardFromPrevResults as extractTaskCardFromDevPrevResults,
 } from "./handlers/dev-stage-handler";
 
-export { P5VerifyStageHandler, parseTestOutput } from "./handlers/verify-stage-handler";
+export { P5VerifyStageHandler, parseTestOutput, createVerifyStageHandler } from "./handlers/verify-stage-handler";
 
 export type { TestResultStats } from "./handlers/verify-stage-handler";
 
