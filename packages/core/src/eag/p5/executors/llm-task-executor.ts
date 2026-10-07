@@ -457,6 +457,12 @@ export class LlmTaskExecutor implements P5TaskExecutor {
     let outputTokensTotal = 0;
     let estimatedCharsTotal = 0;
     let sawUsage = false;
+    // 工具调用总数（2026-10-07 空循环修复）：跨轮累计模型发起的工具调用个数。
+    // noop 判据用它而非 changedFiles——changedFiles=0 有两类合法场景：
+    // ① 非 git 仓库（git status 失败恒返回 []，无法据此判空转）；
+    // ② 纯 bash/只读任务（真实运行测试、读文件本就不产生 git 变更）。
+    // "光说不做"的准确语义是模型从未发起任何工具调用。
+    let toolCallsTotal = 0;
 
     // 进度文本累积（Web UI「思考过程」区消费，2026-10-03 修复 autonomous 无进展显示）：
     // thinkingLog 累积执行日志（轮次/工具/结果），progressPreview 累积人类可读进展行
@@ -601,11 +607,13 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             inputTokensTotal + outputTokensTotal,
             estimatedCharsTotal
           );
-          // 空转标记（2026-10-07 新增）：模型全程未发起任何工具调用且 git 无任何变更，
-          // 说明本任务是"光说不做"——success 仍为 true（循环正常到达终态），
-          // 但 noop=true 让编排器把本轮计入 consecutiveNoopIterations 空转熔断，
-          // 防止"纯文本回复 → 卡 completed → 零产出"被当成真实进展无限循环。
-          const isNoop = llmRequests > 0 && changedFiles.length === 0;
+          // 空转标记（2026-10-07 新增）：判据是"模型全程未发起任何工具调用"——
+          // 这才是"光说不做"的准确语义。不用 changedFiles 判据的原因：
+          // 非 git 仓库恒检出空数组、纯 bash/只读任务本就零变更，两类合法
+          // 场景都会被误标 noop 导致连续空转熔断误杀真实工作。
+          // success 仍为 true（循环正常到达终态），但 noop=true 让编排器
+          // 把本轮计入 consecutiveNoopIterations 空转熔断。
+          const isNoop = llmRequests > 0 && toolCallsTotal === 0;
           emitProgress(
             "task_end",
             `任务完成：${(response.content || "").slice(0, 200)}`,
@@ -635,6 +643,8 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             .join("；")}`,
           round
         );
+        // 跨轮累计工具调用数（noop 判据，见 toolCallsTotal 声明处注释）
+        toolCallsTotal += response.toolCalls.length;
         const executions: ToolCallExecution[] = await toolExecutor.executeToolCalls(
           toolSessionId,
           response.toolCalls.map((tc) => ({
