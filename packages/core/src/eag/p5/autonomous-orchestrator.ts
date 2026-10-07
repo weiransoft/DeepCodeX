@@ -294,6 +294,19 @@ export interface AutonomousRunResult {
   readonly blockageReport?: Readonly<P5BlockageReport>;
   /** 触发的护栏记录列表（含 BLOCKER 与 MAJOR，用于审计） */
   readonly triggeredGuards: ReadonlyArray<GuardRecord>;
+  /**
+   * 本次运行真实归因的文件变更清单（2026-10-07 新增，任务完成清单需求）。
+   *
+   * Web / CLI 双宿主共同数据源：finalReport 的"## 变更文件清单"段与
+   * 本字段同源生成（单一事实源），宿主无需各自拼接。
+   *
+   * - git 仓库：运行前后 porcelain 快照差集归因（运行前既有脏文件不计入）；
+   * - 非 git 仓库：空数组 + gitAttributionAvailable=false（诚实降级，
+   *   报告中显式标注不可用，绝不伪装"无变更"）。
+   */
+  readonly changedFiles: ReadonlyArray<RunFileChange>;
+  /** git 归因是否可用（false = 非 git 仓库 / git 命令失败，清单为空不代表无变更） */
+  readonly gitAttributionAvailable: boolean;
 }
 
 /**
@@ -459,6 +472,45 @@ export interface AutonomousOrchestratorOptions {
  * 复用 P5LogCallback 签名（message + level），独立命名避免循环依赖。
  */
 export type AutonomousOrchestratorLogCallback = (message: string, level?: "info" | "warn" | "error") => void;
+
+/**
+ * 变更文件归因分类（2026-10-07 新增，任务完成清单需求）。
+ *
+ * 判定规则（运行前后 git porcelain 快照差集，路径均为仓库相对路径）：
+ * - added   ：基线快照中不存在、终态快照中未跟踪（??）→ 本次运行新建文件；
+ * - modified：基线快照中已存在（脏或已跟踪）、终态仍脏 → 本次运行修改文件；
+ *             特例：基线脏（??）→ 终态脏（M）的同路径文件归 modified（先前
+ *             新建、本次改动）。
+ * - deleted ：基线快照存在（含已跟踪文件被工作区删除 D）、终态消失 → 删除。
+ * - renamed ：git porcelain "R old -> new" 拆为 new=added + old=deleted。
+ *
+ * 非 git 仓库无法采集基线 → 清单为空数组并在报告标注降级（诚实原则，
+ * 不得把"检不出"表述为"无变更"以外的更强结论）。
+ */
+export type RunFileChangeKind = "added" | "modified" | "deleted";
+
+/**
+ * 单条变更文件归因记录（AutonomousRunResult.changedFiles 元素）。
+ */
+export interface RunFileChange {
+  /** 仓库相对路径（git porcelain 输出路径，可能含引号包裹的空格文件名） */
+  readonly path: string;
+  /** 归因分类：新增 / 修改 / 删除 */
+  readonly kind: RunFileChangeKind;
+}
+
+/**
+ * git 变更快照（运行前后各采一次，用于差集归因）。
+ *
+ * - dirty     ：porcelain 检出的路径 → 首状态字符映射（??→?，其余取首字母）；
+ *               rename（R/C）拆为 old(D 语义待归因) + new(?/M)
+ * - tracked   ：git ls-files 已跟踪路径集合（added/modified 判定辅助）
+ * 采集失败（非 git 仓库 / git 不可用）→ captureGitSnapshot 返回 null。
+ */
+interface GitChangeSnapshot {
+  readonly dirty: ReadonlyMap<string, string>;
+  readonly tracked: ReadonlySet<string>;
+}
 
 /**
  * 确定性失败熔断阈值（修复 2026-10-05 僵尸任务卡死循环事故）。
@@ -754,6 +806,13 @@ export class AutonomousOrchestrator {
       currentRunState = initialState;
       runId = initialState.runId;
       this.log(`AutonomousOrchestrator.run 已初始化 RunState：runId=${runId}`, "info");
+
+      // 3b. git 变更基线快照（2026-10-07 变更文件清单需求）：
+      // 运行前采集工作区脏集合 + 已跟踪集合，运行结束再做终态快照差集归因。
+      // 没有基线就无法区分"本次运行干的"与"用户运行前已有的未提交改动"——
+      // 归因错误的清单比没有清单更糟（会把用户脏文件报成本任务产出）。
+      // 采集失败（非 git 仓库 / git 不可用）→ null：清单降级为空并显式标注。
+      const baselineSnapshot = this.captureGitSnapshot(projectRoot);
 
       // 类型守卫：确保 currentRunState 非空（后续 while 循环内安全使用）
       // 此处 currentRunState 已通过 L603 赋值，理论上不可能为 null
@@ -1225,6 +1284,11 @@ export class AutonomousOrchestrator {
       // 7. 构造 AutonomousRunResult
       const durationSec = Math.floor((Date.now() - startTime) / 1000);
       const exitCode = this.computeExitCode(finalStatus);
+      // 7a. 变更文件清单归因（2026-10-07）：终态快照 − 基线快照 → 新增/修改/删除。
+      // 单一事实源：结构化字段与 finalReport markdown 段同用这份 changedFiles。
+      const finalSnapshot = this.captureGitSnapshot(projectRoot);
+      const changedFiles = this.computeRunFileChanges(baselineSnapshot, finalSnapshot);
+      const gitAttributionAvailable = baselineSnapshot !== null && finalSnapshot !== null;
       const finalReport = this.generateFinalReport({
         runId,
         objective,
@@ -1241,6 +1305,8 @@ export class AutonomousOrchestrator {
         maxIterations,
         lastFatalStage,
         lastFatalReason,
+        changedFiles,
+        gitAttributionAvailable,
       });
 
       const blockageReport =
@@ -1269,6 +1335,8 @@ export class AutonomousOrchestrator {
         finalReport,
         blockageReport,
         triggeredGuards: Object.freeze([...triggeredGuards]),
+        changedFiles: Object.freeze([...changedFiles]),
+        gitAttributionAvailable,
       });
 
       this.log(
@@ -2749,6 +2817,189 @@ export class AutonomousOrchestrator {
   }
 
   /**
+   * 采集 git 变更快照（2026-10-07 变更文件清单需求）
+   *
+   * 两条命令：
+   * 1. `git status --porcelain --untracked-files=all`：工作区脏文件集合。
+   *    -uall 展开未跟踪目录下的具体文件（默认会把 ?? src/ 折叠成目录，
+   *    清单必须精确到文件）；rename（R/C）"old -> new" 拆成两条记录。
+   * 2. `git ls-files`：已跟踪路径集合——终态 ?? 但基线不存在的文件判 added，
+   *    终态 M 的文件必在 tracked（否则 M 检不出来），辅助归因更稳。
+   *
+   * fail-open：任一命令失败（非 git 仓库 / git 不可用）→ 返回 null，
+   * 调用方据此把清单降级为空 + gitAttributionAvailable=false 显式标注，
+   * 绝不把"检不出"伪装成"无变更"。
+   *
+   * @param projectRoot 项目根目录（绝对路径）
+   * @returns 快照对象；采集失败返回 null
+   */
+  private captureGitSnapshot(projectRoot: string): GitChangeSnapshot | null {
+    const dirty = new Map<string, string>();
+    const tracked = new Set<string>();
+    try {
+      // pathspec 排除 .eag/：编排器自己的运行时产物（tasks.md 任务卡状态流转、
+      // notes 记忆落盘）每次运行必然变化，属于管线元数据而非任务产出。
+      // 混进"变更文件清单"会淹没真实产出（只读任务也会报 tasks.md 变更），
+      // 用户消费清单时关心的是"任务改了什么"，不是"编排器写了哪份账本"。
+      const statusOutput = execFileSync(
+        "git",
+        ["status", "--porcelain", "--untracked-files=all", "--", ".", ":(exclude).eag/"],
+        {
+          cwd: projectRoot,
+          encoding: "utf-8",
+          timeout: 10_000,
+          maxBuffer: 10 * 1024 * 1024,
+          stdio: ["ignore", "pipe", "ignore"],
+        }
+      ).trim();
+      if (statusOutput.length > 0) {
+        for (const rawLine of statusOutput.split("\n")) {
+          const line = rawLine.replace(/\r$/, "");
+          if (line.length < 4) {
+            continue;
+          }
+          // porcelain 固定格式：X Y <space> path（前两字符状态码，第 3 字符空格）
+          const indexStatus = line.charAt(0);
+          const worktreeStatus = line.charAt(1);
+          let pathPart = line.slice(3).trim();
+          // rename/copy："old -> new"——取新路径为主记录，旧路径记 deleted 语义
+          const renameSep = " -> ";
+          const renameIdx = pathPart.indexOf(renameSep);
+          if (renameIdx >= 0) {
+            const oldPath = this.unquoteGitPath(pathPart.slice(0, renameIdx).trim());
+            pathPart = this.unquoteGitPath(pathPart.slice(renameIdx + renameSep.length).trim());
+            if (oldPath.length > 0) {
+              dirty.set(oldPath, "D");
+            }
+          } else {
+            pathPart = this.unquoteGitPath(pathPart);
+          }
+          if (pathPart.length === 0) {
+            continue;
+          }
+          // 状态归类：?? 未跟踪 → "?"；工作区删除（" D"）→ "D"；其余 → "M"
+          // （M/A/T/C/U 均视为"相对基线有改动"，added/modified 判定交给差集）
+          if (indexStatus === "?" && worktreeStatus === "?") {
+            dirty.set(pathPart, "?");
+          } else if (worktreeStatus === "D") {
+            dirty.set(pathPart, "D");
+          } else {
+            dirty.set(pathPart, "M");
+          }
+        }
+      }
+      const lsOutput = execFileSync("git", ["ls-files"], {
+        cwd: projectRoot,
+        encoding: "utf-8",
+        timeout: 10_000,
+        maxBuffer: 10 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      for (const rawLine of lsOutput.split("\n")) {
+        const line = rawLine.trim();
+        if (line.length > 0) {
+          tracked.add(this.unquoteGitPath(line));
+        }
+      }
+    } catch {
+      // 非 git 仓库 / git 不可用 / 超时：快照不可用，调用方降级处理
+      return null;
+    }
+    return { dirty, tracked };
+  }
+
+  /**
+   * 去除 git porcelain 对特殊字符文件名的双引号包裹（"my file.txt" → my file.txt）。
+   *
+   * @param rawPath porcelain 输出的原始路径片段
+   * @returns 去引号后的路径
+   */
+  private unquoteGitPath(rawPath: string): string {
+    if (rawPath.length >= 2 && rawPath.startsWith('"') && rawPath.endsWith('"')) {
+      return rawPath.slice(1, -1);
+    }
+    return rawPath;
+  }
+
+  /**
+   * 归因算法核心（纯函数，2026-10-07 变更文件清单需求）。
+   *
+   * 输入两份快照的脏集合，输出归因清单（未排序）。独立成模块级纯函数
+   * 是为了让单元测试用受控 porcelain 语义输入直接验证归因规则
+   * （eag-p5-changed-files-inventory CF-1/CF-2/CF-3），无需伪造实例状态；
+   * 生产路径仅 computeRunFileChanges 一个调用方。
+   *
+   * @param baselineDirty 基线脏集合（路径 → ?/M/D 归类）
+   * @param finalDirty    终态脏集合
+   * @returns 归因变更列表（排序由调用方负责）
+   */
+  private diffRunFileChanges(
+    baselineDirty: ReadonlyMap<string, string>,
+    finalDirty: ReadonlyMap<string, string>
+  ): RunFileChange[] {
+    const changes: RunFileChange[] = [];
+    // 终态脏集合 → added / modified / deleted（基线不脏的 D）判定
+    for (const [filePath, status] of finalDirty) {
+      const baselineStatus = baselineDirty.get(filePath);
+      if (baselineStatus === undefined) {
+        // 基线无此脏记录：?? → 新文件；D → 基线干净跟踪文件被删除；
+        // M → 基线跟踪未改动、本次修改
+        if (status === "D") {
+          changes.push({ path: filePath, kind: "deleted" });
+        } else if (status === "?") {
+          changes.push({ path: filePath, kind: "added" });
+        } else {
+          changes.push({ path: filePath, kind: "modified" });
+        }
+        continue;
+      }
+      // 基线已有脏记录：状态未变 → 改动完全属于基线（运行前已存在），排除归因。
+      // 状态变化（??→M / M→D 等）→ 本次运行进一步处理过该文件。
+      if (status === baselineStatus) {
+        continue;
+      }
+      changes.push({ path: filePath, kind: status === "D" ? "deleted" : "modified" });
+    }
+    // 基线脏但终态消失
+    for (const [filePath, baselineStatus] of baselineDirty) {
+      if (finalDirty.has(filePath)) {
+        continue;
+      }
+      // 基线未跟踪文件（??）消失：git 无法区分"运行期间谁删的"，
+      // 保守排除（宁缺勿错归因）
+      if (baselineStatus === "?") {
+        continue;
+      }
+      // 基线 M/D 跟踪文件消失 → 本次运行删除
+      changes.push({ path: filePath, kind: "deleted" });
+    }
+    return changes;
+  }
+
+  /**
+   * 基线/终态快照差集归因（2026-10-07 变更文件清单需求）
+   *
+   * 归因规则详见 diffRunFileChanges；本方法负责 null 降级与稳定排序。
+   *
+   * 归因正确性生命线：运行前既有脏文件（用户未提交改动）必须排除——
+   * 没有基线差集就无法区分"本次运行干的"与"用户早就改好的"。
+   *
+   * @param baseline 运行前快照（null = 不可用）
+   * @param final    运行后快照（null = 不可用）
+   * @returns 归因后的变更清单（added → modified → deleted 稳定排序）
+   */
+  private computeRunFileChanges(baseline: GitChangeSnapshot | null, final: GitChangeSnapshot | null): RunFileChange[] {
+    if (baseline === null || final === null) {
+      return [];
+    }
+    const changes = this.diffRunFileChanges(baseline.dirty, final.dirty);
+    // 稳定排序：added → modified → deleted，组内路径字典序
+    const kindOrder: Record<RunFileChangeKind, number> = { added: 0, modified: 1, deleted: 2 };
+    changes.sort((a, b) => kindOrder[a.kind] - kindOrder[b.kind] || a.path.localeCompare(b.path));
+    return changes;
+  }
+
+  /**
    * 生成最终报告（Markdown 格式）
    *
    * @param args 报告参数
@@ -2771,6 +3022,10 @@ export class AutonomousOrchestrator {
     readonly maxIterations: number;
     readonly lastFatalStage: P5StageKind | null;
     readonly lastFatalReason: string;
+    /** 变更文件清单（与 AutonomousRunResult.changedFiles 同源，2026-10-07） */
+    readonly changedFiles: ReadonlyArray<RunFileChange>;
+    /** git 归因是否可用（false = 非 git 仓库，清单段标注不可用而非"无变更"） */
+    readonly gitAttributionAvailable: boolean;
   }): string {
     const lines: string[] = [];
     lines.push(`# EAG-P5 AutonomousOrchestrator 运行报告`);
@@ -2794,6 +3049,39 @@ export class AutonomousOrchestrator {
       lines.push("");
       lines.push(`- **最后致命阶段**：${args.lastFatalStage}`);
       lines.push(`- **原因**：${args.lastFatalReason}`);
+      lines.push("");
+    }
+
+    // 变更文件清单段（2026-10-07 需求：任务完成时 Web/CLI 列出修改与新增文件）。
+    // 三种诚实输出：git 归因有清单 → 分组列表；git 归因可用但零变更 → "无文件变更"；
+    // git 归因不可用（非 git 仓库）→ 显式标注不可用，绝不表述为"无变更"。
+    lines.push(`## 变更文件清单`);
+    lines.push("");
+    if (!args.gitAttributionAvailable) {
+      lines.push(`> git 归因不可用（非 git 仓库或 git 命令失败）：以下不代表本次运行无文件变更。`);
+      lines.push("");
+    } else if (args.changedFiles.length === 0) {
+      lines.push(`（本次运行无文件变更）`);
+      lines.push("");
+    } else {
+      const kindGroups: Array<{ kind: RunFileChangeKind; label: string }> = [
+        { kind: "added", label: "新增" },
+        { kind: "modified", label: "修改" },
+        { kind: "deleted", label: "删除" },
+      ];
+      for (const group of kindGroups) {
+        const groupFiles = args.changedFiles.filter((f) => f.kind === group.kind);
+        if (groupFiles.length === 0) {
+          continue;
+        }
+        lines.push(`### ${group.label}（${groupFiles.length}）`);
+        lines.push("");
+        for (const f of groupFiles) {
+          lines.push(`- \`${f.path}\``);
+        }
+        lines.push("");
+      }
+      lines.push(`合计 ${args.changedFiles.length} 个文件变更。`);
       lines.push("");
     }
 
