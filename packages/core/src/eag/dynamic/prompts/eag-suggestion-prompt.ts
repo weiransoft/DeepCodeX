@@ -103,6 +103,11 @@ ${commandDescriptions}
    目标文本。execute_command 仅限 category=eag 的命令；team/rules/slash 命令只能 suggest_command。
 3. 用户输入是在确认执行上一条展示过的建议（如"执行这个""就运行该方案""开始吧"，
    结合上一条建议快照判断）→ action="confirm_previous"。
+   **确认语境优先级最高**：若最近消息中最后一条助手消息是失败目标拦截提示
+   （含"已拦截""回复执行这个"字样），说明系统正在等待用户对重放提问的确认——
+   此时用户输入表达确认执行（如"执行这个""重新执行""确认重试"）必须输出
+   confirm_previous，**禁止**输出 execute_command 或 acknowledgeFailedGoal
+   （execute_command 会再次命中守卫形成拦截循环）。
 4. 意图存在但不足以自动执行（如 /eag-build 缺 spec/plan 前置文档、需要用户知晓说明、
    非 EAG 命令）→ action="suggest_command" / "suggest_autonomous" / "suggest_graph"，仅展示。
 5. 仅当需求严重模糊（"帮我做点什么"）或多路径分歧时 → action="ask_clarification"。
