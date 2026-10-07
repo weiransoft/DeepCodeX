@@ -1066,6 +1066,46 @@ const AUTONOMOUS_GOAL_RUNS_MAX = 30;
 const AUTONOMOUS_GOAL_ECHO_MAX = 200;
 
 /**
+ * 失败目标拦截后等待用户确认的短语前缀表（2026-10-07 附录 C 修复：
+ * 拦截确认逃生门死循环）。
+ *
+ * 与 0.4.3.11 删除的"通用意图正则"本质不同：这里不是识别"用户想执行什么
+ * 任务"（那属于触发层 LLM 职责），而是识别"用户在回答拦截提示的确认问题"
+ * ——拦截提示是系统自己发出的、语义为"是否重新执行"的提问，用户回答是
+ * 二元确认，属系统协议应答而非开放意图，因此确定性前缀匹配合理且必要：
+ * 触发层 LLM 看不到拦截语境时（recentMessages 不含拦截提示）必然漏判，
+ * 主对话 LLM 又无命令派发能力，逃生门必须在 direct_chat 分支确定性闭合。
+ */
+const CONFIRM_EXECUTE_PREFIXES: ReadonlyArray<string> = Object.freeze([
+  "执行这个",
+  "执行这条",
+  "执行该命令",
+  "执行该任务",
+  "执行它",
+  "重新执行",
+  "重新发起",
+  "确认重试",
+  "确认执行",
+]);
+
+/**
+ * 判定用户输入是否为"对拦截提示的确认应答"（纯函数，供单测直接覆盖）。
+ *
+ * 规则：trim 后以 CONFIRM_EXECUTE_PREFIXES 任一短语开头即为确认。
+ * 只匹配前缀不要求全句相等——用户常附加说明（"执行这个，这次加上 --test-command"）。
+ *
+ * @param text 用户输入原文
+ * @returns true 表示输入是对系统确认提问的肯定应答
+ */
+export function startsWithConfirmExecutePhrase(text: string): boolean {
+  const normalized = text.trim();
+  if (normalized.length === 0) {
+    return false;
+  }
+  return CONFIRM_EXECUTE_PREFIXES.some((prefix) => normalized.startsWith(prefix));
+}
+
+/**
  * 归一化目标指纹（修复 2026-10-06 跨 run 失败守卫的判重键）。
  *
  * 归一化规则：trim → 连续空白折叠为单空格 → 小写化（中文不受影响）。
@@ -3656,6 +3696,28 @@ ${agentInstructions}
     const userMessage = this.buildUserMessage(sessionId, userPrompt);
     this.appendSessionMessage(sessionId, userMessage);
 
+    // 失败目标拦截确认逃生门（2026-10-07 附录 C 修复：拦截确认死循环）：
+    // 走到这里说明触发层未处理本轮输入（direct_chat 降级）；若同时存在
+    // 待确认逃生门快照（notifyFailedGoalBlocked 拦截时存入）且用户输入是
+    // 确认应答（"执行这个"式）→ 消费快照派发，主对话 LLM 不再参与。
+    // 必要性：触发层决策 LLM 可能连续漏判确认语义（事故中三段"假装执行"），
+    // 主对话 LLM 无命令派发能力——逃生门必须在此确定性闭合，否则
+    // 拦截提示 → 确认 → 再拦截 的循环无法打破。
+    // 消费语义与触发层 confirm_previous 完全一致（同一 consume 方法，
+    // 先删快照再派发的一次性消费）。
+    if (
+      typeof userPrompt.text === "string" &&
+      this.lastEagDisplayedSuggestions.has(sessionId) &&
+      startsWithConfirmExecutePhrase(userPrompt.text)
+    ) {
+      const escaped = await this.consumeConfirmPreviousDecision(sessionId, controller);
+      if (escaped) {
+        return;
+      }
+      // 派发失败（如 eagCommandParser 未注入）：快照已消费不残留，
+      // 继续主对话由 LLM 向用户说明情况
+    }
+
     // 上游 v0.3.1：命中技能列表（用于下方技能目录消息合并）。
     // 采纳上游语义：匹配技能仅记入目录快照（LLM 经 skill 工具按需加载），
     // 不再自动注入技能消息（与 createSession 的语义调整保持一致）
@@ -4199,24 +4261,11 @@ ${agentInstructions}
   }
 
   /**
-   * 查询目标在本会话是否曾以非 completed 终态结束（读侧，公共方法供 Web 宿主复用）。
-   *
-   * 判定语义：存在指纹匹配的记录且 finalStatus !== "completed" → true。
-   * completed 目标不拦（"再跑一次测试"属合法重放）；failed/aborted/fatal
-   * 目标拦截自动重放，防止失败目标被建议器逐字重演空转循环。
-   *
-   * @param sessionId 会话 ID
-   * @param goal 待自动执行的目标文本
-   * @returns true 表示该目标曾失败/中断，应拦截自动执行
-   */
-  hasFailedAutonomousRun(sessionId: string, goal: string): boolean {
-    return this.findFailedAutonomousRun(sessionId, goal) !== null;
-  }
-
-  /**
    * 查询目标命中的失败运行记录（读侧内部实现，供拦截提示回显终态详情）。
    *
-   * 判定语义与 hasFailedAutonomousRun 一致：指纹匹配且 finalStatus !== "completed"。
+   * 判定语义：存在指纹匹配的记录且 finalStatus !== "completed" → 返回该记录。
+   * completed 目标不拦（"再跑一次测试"属合法重放）；failed/aborted/fatal
+   * 目标拦截自动重放，防止失败目标被建议器逐字重演空转循环。
    *
    * @param sessionId 会话 ID
    * @param goal 待自动执行的目标文本
@@ -4257,9 +4306,15 @@ ${agentInstructions}
       `[EAG] 目标 "${echoTruncateGoal(goal)}" 在本会话已于 ${record.endedAt} 运行过且未成功完成` +
       `（终态：${record.finalStatus}）。\n` +
       `为避免失败目标被自动重放形成空转循环，本次自动执行已拦截。\n` +
-      `如确认要重新执行：回复"执行这个"；建议提供修改后的新目标（如补充约束/更换环境）。`;
+      `直接回复"执行这个"我将立即重新发起该任务；建议同时提供修改后的新目标（如补充约束/更换环境）以提高成功率。`;
     // 逃生门快照：覆盖旧快照（同会话只保留最新一条待确认建议，对齐既有语义）
     this.lastEagDisplayedSuggestions.set(sessionId, { commandHint, goal });
+    // 双写落盘（2026-10-07 附录 C 修复：拦截确认逃生门死循环）：
+    // 拦截提示此前只 onAssistantMessage 不落盘——触发层决策 LLM 的
+    // recentMessages 与主对话 LLM 上下文都看不到"等待确认"状态，
+    // 用户回复"执行这个"后被主对话 LLM 口头"假装执行"，形成确认死循环。
+    // 落盘后两级 LLM 均可见拦截语境，direct_chat 确认通道也有状态依据。
+    this.appendSessionMessage(sessionId, this.buildAssistantMessage(sessionId, message, null));
     this.onAssistantMessage(this.buildAssistantMessage(sessionId, message, null), false);
   }
 

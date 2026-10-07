@@ -23,7 +23,12 @@ import assert from "node:assert/strict";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { SessionManager, extractGoalFromCommandString, normalizeGoalFingerprint } from "../session";
+import {
+  SessionManager,
+  extractGoalFromCommandString,
+  normalizeGoalFingerprint,
+  startsWithConfirmExecutePhrase,
+} from "../session";
 import type { EagDynamicSuggester, EagDynamicSuggestion } from "../eag/dynamic/eag-dynamic-suggester";
 import type { AutonomousOrchestrator } from "../eag/p5/autonomous-orchestrator";
 import type { AutonomousRunRequest, AutonomousRunResult } from "../eag/p5/autonomous-orchestrator";
@@ -482,4 +487,142 @@ test("N7. 零回归：无失败记录时 execute_command 决策照常派发执�
   await manager.handleUserPrompt({ text: "帮我优化这段代码的性能" });
   assert.equal(runRequests.length, 1, "无失败记录时 execute_command 决策必须正常派发");
   assert.equal(runRequests[0].objective, "帮我优化这段代码的性能");
+});
+
+/**
+ * 构造按用户输入路由决策的 EagDynamicSuggester 桩（事故 LLM 行为复刻）
+ *
+ * 触发层决策 LLM 看不到拦截语境（修复前）时的典型漏判形态：确认短语
+ * "执行这个"被误判为同目标的 execute_command（而非 confirm_previous），
+ * 迫使确认落到 direct_chat 分支验证逃生门确定性通道。
+ *
+ * @param defaultDecision 非确认输入的默认决策
+ * @param confirmDecision 确认短语（startsWithConfirmExecutePhrase 命中）的决策
+ * @returns EagDynamicSuggester 桩实例
+ */
+function createRoutingStubSuggester(
+  defaultDecision: EagDynamicSuggestion,
+  confirmDecision: EagDynamicSuggestion
+): EagDynamicSuggester {
+  return {
+    isEnabled: () => true,
+    suggest: async (context: { goal: string }) =>
+      startsWithConfirmExecutePhrase(context.goal) ? confirmDecision : defaultDecision,
+  } as unknown as EagDynamicSuggester;
+}
+
+// ============================================================================
+// N8 拦截确认逃生门死循环修复（2026-10-07 附录 C）：纯函数 + direct_chat 通道
+// ============================================================================
+
+test("N8a. startsWithConfirmExecutePhrase：确认短语前缀命中与拒绝判定", () => {
+  // 命中：拦截提示指引的标准应答与同义确认短语
+  assert.ok(startsWithConfirmExecutePhrase("执行这个"));
+  assert.ok(startsWithConfirmExecutePhrase(" 执行这个，这次加上 --test-command "), "前缀命中即可，允许附加说明");
+  assert.ok(startsWithConfirmExecutePhrase("重新执行该任务"));
+  assert.ok(startsWithConfirmExecutePhrase("确认重试"));
+  assert.ok(startsWithConfirmExecutePhrase("确认执行"));
+  // 拒绝：空文本、无关输入、否定应答、短语在句中而非开头
+  assert.ok(!startsWithConfirmExecutePhrase(""));
+  assert.ok(!startsWithConfirmExecutePhrase("   "));
+  assert.ok(!startsWithConfirmExecutePhrase("不要执行这个"));
+  assert.ok(!startsWithConfirmExecutePhrase("继续"));
+  assert.ok(!startsWithConfirmExecutePhrase("先别执行这个任务"));
+  assert.ok(!startsWithConfirmExecutePhrase("我想了解执行这个会发生什么"));
+});
+
+test("N8b. 事故复刻：触发层连续误判 + 主对话接管，'执行这个'经 direct_chat 确认通道确定性放行", async () => {
+  const workspace = createTempDir("deepcode-goalguard-escape-loop-workspace-");
+  const home = createTempDir("deepcode-goalguard-escape-loop-home-");
+  setHomeDir(home);
+  globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
+
+  const { client } = createCallCountingClient("主对话回复：已确认重试");
+  const { orchestrator, runRequests } = createSequencedOrchestrator(["aborted", "completed"]);
+  // 事故 LLM 行为复刻：确认短语"执行这个"被触发层误判为同目标的
+  // execute_command（而非 confirm_previous）→ 触发层拦截 return true，
+  // direct_chat 确认通道不触发 → 死循环（修复前的真实行为）。
+  // 修复后触发层（prompt 优先级规则）或 direct_chat 通道任一路闭合即可；
+  // 本用例用 direct_chat 桩验证第二道确定性闭合。
+  const { manager, assistantTexts } = createTestManager({
+    workspace,
+    home,
+    client,
+    orchestrator,
+    suggester: createRoutingStubSuggester(
+      createExecuteDecision("从46同步数据库到43采用full_overwrite全量覆盖"),
+      // 触发层误判形态：确认短语也输出 execute_command（无知情标记）→ 守卫再拦截
+      createExecuteDecision("从46同步数据库到43采用full_overwrite全量覆盖")
+    ),
+  });
+
+  await manager.createSession({ text: "" });
+  const goal = "从46同步数据库到43采用full_overwrite全量覆盖";
+
+  // 第一轮：执行 → aborted 终态落盘
+  await manager.handleUserPrompt({ text: goal });
+  assert.equal(runRequests.length, 1);
+
+  // 第二轮：同目标 execute_command → 守卫硬拦截（拦截提示落盘）
+  await manager.handleUserPrompt({ text: goal });
+  assert.equal(runRequests.length, 1);
+  assert.ok(
+    assistantTexts.some((t) => t.includes("已拦截")),
+    "前置条件：拦截提示已推送"
+  );
+
+  // 第三轮：确认输入但触发层仍误判 execute_command——修复前此处形成
+  // "再拦截"死循环（本用例该桩即修复前行为复刻：拦截计数 +1）
+  await manager.handleUserPrompt({ text: "执行这个" });
+  assert.equal(runRequests.length, 1, "触发层误判 execute_command 时 direct_chat 通道不介入");
+  assert.equal(assistantTexts.filter((t) => t.includes("已拦截")).length, 2, "修复前复刻：触发层误判导致再拦截");
+
+  // 第四轮：触发层按修复后规则输出 direct_chat（未识别为确认，交回主对话）——
+  // direct_chat 确定性确认通道必须消费逃生门快照并派发（打破死循环）
+  const directChatSuggester = createRoutingStubSuggester(
+    { type: "direct_chat", reasoning: "主对话" },
+    { type: "direct_chat", reasoning: "主对话" }
+  );
+  (manager as unknown as { eagDynamicSuggester: EagDynamicSuggester }).eagDynamicSuggester = directChatSuggester;
+  await manager.handleUserPrompt({ text: "执行这个" });
+  assert.equal(runRequests.length, 2, "确认应答必须经 direct_chat 确认通道派发（逃生门确定性闭合）");
+  assert.equal(runRequests[1].objective, goal, "重放 goal 必须与快照目标一致");
+  assert.equal(assistantTexts.filter((t) => t.includes("已拦截")).length, 2, "确认轮不得产生第三条拦截提示");
+
+  // 第五轮：逃生门已一次性消费——再次"执行这个"无快照，不得重复派发
+  await manager.handleUserPrompt({ text: "执行这个" });
+  assert.equal(runRequests.length, 2, "确认通道一次性消费：重复确认不得重复派发");
+});
+
+test("N8c. 拦截提示落盘（双写）：供触发层 recentMessages 与主对话上下文可见", async () => {
+  const workspace = createTempDir("deepcode-goalguard-persist-workspace-");
+  const home = createTempDir("deepcode-goalguard-persist-home-");
+  setHomeDir(home);
+  globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
+
+  const { client } = createCallCountingClient("主对话回复");
+  const { orchestrator } = createSequencedOrchestrator(["aborted"]);
+  const { manager, assistantTexts } = createTestManager({
+    workspace,
+    home,
+    client,
+    orchestrator,
+    suggester: createStubSuggester(createExecuteDecision("从46同步数据库到43采用full_overwrite全量覆盖")),
+  });
+
+  const sessionId = await manager.createSession({ text: "" });
+  const goal = "从46同步数据库到43采用full_overwrite全量覆盖";
+
+  await manager.handleUserPrompt({ text: goal });
+  await manager.handleUserPrompt({ text: goal });
+
+  // 拦截提示必须持久化到会话消息历史（修复前只 onAssistantMessage 阅后即焚）
+  const persisted = manager
+    .listSessionMessages(sessionId)
+    .filter((m) => m.role === "assistant" && (m.content ?? "").includes("已拦截"));
+  assert.equal(persisted.length, 1, "拦截提示必须落盘且只落盘一条（双写不得产生重复）");
+  assert.ok(
+    assistantTexts.some((t) => t.includes("已拦截")),
+    "拦截提示同时推送给宿主"
+  );
 });

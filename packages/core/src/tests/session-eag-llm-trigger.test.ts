@@ -730,3 +730,29 @@ test("T17. buildEagSuggestionPrompt：输出含快照/运行历史/命令清单/
   assert.ok(userText.includes("上一轮澄清选择"), "应注入澄清答案区块");
   assert.ok(userText.includes("全量覆盖"), "澄清区块应含用户选择");
 });
+
+// ============================================================================
+// N9：拦截确认逃生门死循环修复——prompt 优先级规则（2026-10-07 附录 C）
+// ============================================================================
+
+test("N9. buildEagSuggestionPrompt：confirm_previous 拦截确认语境优先级规则存在（防 execute 再入循环）", () => {
+  const messages = buildEagSuggestionPrompt({
+    goal: "执行这个",
+    availableCommands: [
+      { category: "eag", id: "eag-autonomous", name: "/eag-autonomous", description: "多阶段自动循环" },
+    ],
+    recentMessages: [
+      { role: "user", content: "从46同步数据库到43" },
+      {
+        role: "assistant",
+        content: '为避免失败目标被自动重放形成空转循环，本次自动执行已拦截。\n直接回复"执行这个"我将立即重新发起该任务',
+      },
+    ],
+  });
+
+  const systemText = messages[0].content;
+  // 规则 3 扩展：拦截等待确认语境下，确认短语必须输出 confirm_previous 且
+  // 禁止 execute_command（execute 会再命中守卫形成拦截循环）
+  assert.ok(systemText.includes("确认语境优先级最高"), "system prompt 必须含确认语境优先级规则");
+  assert.ok(systemText.includes("已拦截"), "优先级规则必须描述拦截提示识别特征");
+});

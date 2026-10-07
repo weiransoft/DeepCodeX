@@ -267,3 +267,54 @@ P2 改动最大但最独立，先做；P0 最简洁最后做；两个 P1 中间�
 ## 回归结果
 
 - inventory 8/8 + orchestrator happy/extended/autonomous/multi-command 26/26 = 34/34 绿；tsc 零错误。
+
+---
+
+# 附录 C：失败目标拦截确认逃生门死循环修复（2026-10-07 第四轮）
+
+## 事故
+
+失败目标拦截提示明确指引"回复执行这个"，用户连续两次照做，系统每轮都只是
+"检测到该任务…请确认"——死循环，正常命令也无法执行。
+
+## 根因链（三环闭合）
+
+1. **拦截提示阅后即焚**：`notifyFailedGoalBlocked` 只 `onAssistantMessage` 不
+   `appendSessionMessage` → 不落盘 → 既不进触发层决策 LLM 的 recentMessages，
+   也不进主对话 LLM 上下文；
+2. **触发层决策 LLM 看不到"等待确认"状态**：recentMessages 全是历史噪音，
+   "执行这个"指代无依据 → 输出 direct_chat 或 execute_command（又命中守卫
+   再拦截）；prompt 规则 3 的措辞只覆盖"上一条展示过的建议"，不覆盖
+   "拦截提示等待确认"；
+3. **主对话 LLM 无执行能力**：direct_chat 接管后只口头"假装执行"（用户截图中
+   三段措辞各异的确认话术即主对话 LLM 产物，它每轮重新生成拦截文案但无法
+   真正派发命令）。
+
+N6 单测证明逃生门代码本身无缺陷——触发层输出 confirm_previous 即放行；
+缺陷在"确认意图识别"这一输入侧环节。
+
+## 修复方案（方向 A：拦截轮升级为主对话提问 + 触发层优先级双保险）
+
+1. **拦截提示落盘**：`notifyFailedGoalBlocked` 改 appendSessionMessage +
+   onAssistantMessage 双写 → 进入两级 LLM 上下文；
+2. **主对话提问文案**：明确"直接回复『执行这个』我会立即重新发起"（不再用
+   "建议提供新目标"稀释确认语义）；
+3. **主对话确认通道**：direct_chat 落盘用户消息后、主对话 LLM 调用前——
+   存在待确认逃生门快照且用户输入以确认短语开头 →
+   `consumeConfirmPreviousDecision` 消费快照派发（与触发层 confirm_previous
+   同一消费语义），主对话 LLM 不再参与；
+4. **触发层 prompt 优先级规则**：recentMessages 最近 assistant 消息为拦截等待
+   确认提示且当前输入表达确认执行 → confirm_previous 优先于
+   execute_command/acknowledgeFailedGoal（防 LLM 误判 execute 再入拦截循环）。
+
+## 实现
+
+| 文件 | 改动 |
+|------|------|
+| session.ts | `notifyFailedGoalBlocked` 双写落盘 + 提问文案；新增 `CONFIRM_EXECUTE_PREFIXES` 常量与 `startsWithConfirmExecutePhrase` 纯函数；`handleUserPrompt` direct_chat 分支（触发层未处理、主对话 LLM 前）插入确认通道；删除 `hasFailedAutonomousRun` 死代码 |
+| eag-suggestion-prompt.ts | 规则 3 扩展：拦截等待确认语境下确认短语 → confirm_previous 优先级最高 |
+
+## 测试
+
+- N8（session-eag-goal-failure-guard.test.ts）：触发层连续误判 execute_command（复刻事故 LLM 行为），用户"执行这个"经 direct_chat 确认通道派发，零拦截循环；
+- N9（session-eag-llm-trigger.test.ts）：prompt 含 confirm_previous 优先规则 + 双写后 recentMessages 含拦截提示。
