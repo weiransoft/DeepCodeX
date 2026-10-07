@@ -411,16 +411,31 @@ export class P5VerifyStageHandler implements P5StageHandler {
         ) {
           return this.buildSkippedResult(testCommand, startTime, "npm 报告未定义 test 脚本");
         }
-        // "无测试可跑"降级（修复 verify 空测试误判 failed 2026-10-03）：
-        // 输出解析不出任何测试计数（0 passed / 0 failed / 0 skipped）且退出码非零时，
-        // 极可能是测试运行器根本没用例可跑（如 node --test 对空目录、pytest 收集 0 项、
-        // 脚本名缺失变体）——真实事故中"0 passed, 0 failed, exitCode=1, 441ms"即此类，
-        // 判 failed 会白白累加 consecutiveFailures 把循环拖进熔断。
-        // 诚实语义：按"未验证"skip 处理（unverified，不代表测试通过）。
-        // 严格收窄（对齐 §3.7 与 V4 既有契约）：仅 objective 合成任务 + 默认 npm test
-        // 才允许降级——手写 tasks.md 的项目必须自备测试命令，无测试即如实 failed；
-        // 真实断言失败必然 failed>0，任何路径都不会走到本分支，判定强度不降。
+        // "无测试可跑"降级（修复 verify 空测试误判 failed 2026-10-03 + 2026-10-07）：
+        // 输出解析不出任何测试计数（0 passed / 0 failed / 0 skipped）时：
+        //   exitCode≠0 → 极可能是测试运行器根本没用例可跑（node --test 空目录、
+        //                pytest 收集 0 项、脚本名缺失变体）——判 failed 会白白
+        //                累加 consecutiveFailures 把循环拖进熔断。
+        //   exitCode=0 → 命令执行成功但解析不到任何测试计数——要么不是测试命令
+        //                （如 echo "hello" exitCode=0 但不是测试），要么测试框架
+        //                输出格式不认识（parseTestOutput 无匹配 pattern），要么
+        //                真的没有测试用例。原条件 `exitCode===0 && failed===0`
+        //                会误判 pass（错误），现在 testPassed=false 进入本分支。
+        // 诚实语义：按"未验证"skip 处理（unverified，不代表测试通过也不代表失败）。
         const noTestsCollected = testStats.passed === 0 && testStats.failed === 0 && testStats.skipped === 0;
+        if (noTestsCollected && cmdResult.exitCode === 0) {
+          // exitCode=0 + 无测试计数：命令成功执行但没有任何测试结果
+          // （含原 testPassed=false 踢过来的 exitCode=0 场景 + 原 noTestsCollected
+          // exitCode≠0 但命令成功被调用的场景）
+          return this.buildSkippedResult(
+            testCommand,
+            startTime,
+            `测试命令退出码 ${cmdResult.exitCode} 但输出无任何测试计数（0 passed/0 failed/0 skipped）——判定为无测试可跑或非测试命令，而非测试失败`
+          );
+        }
+        // exitCode≠0 + noTestsCollected：命令失败且无测试计数
+        // 严格收窄（对齐既有契约）：仅 objective 合成任务 + 默认 npm test
+        // 才允许降级——手写 tasks.md 的项目必须自备测试命令，exitCode≠0 如实 failed。
         if (noTestsCollected && ctx.synthesizedTask === true && testCommand.trim() === DEFAULT_TEST_COMMAND) {
           return this.buildSkippedResult(
             testCommand,
