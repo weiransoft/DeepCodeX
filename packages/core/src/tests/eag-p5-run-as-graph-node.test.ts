@@ -1055,9 +1055,12 @@ test("L1. run() 抛异常时返回 failed 状态 + failureReason 包含异常信
     });
 
     const node = createLoopNode("node-1", "测试任务");
-    // 使用一个不存在的路径作为 projectRoot
+    // 使用一个不存在的路径作为 projectRoot。
+    // 必须是 temp 目录下的不存在路径：run() 内部 RunStateStore 初始化会
+    // mkdir -p 状态目录，写死的绝对假路径（如 /nonexistent/...）会被真实创建，
+    // 污染根文件系统并使后续依赖"该路径不存在"的用例（quality E2E-F2）级联失败。
     const input = Object.freeze({
-      projectRoot: "/nonexistent/path/that/does/not/exist",
+      projectRoot: path.join(projectRoot, "definitely-missing", "sub-dir"),
     });
     const context = createGraphRunContext();
 

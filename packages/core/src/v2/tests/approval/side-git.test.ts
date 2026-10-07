@@ -493,51 +493,64 @@ test("SG-08d: rebuild 步骤 2 重建失败处置（备份自动恢复）", asyn
   assert.equal(headAfter, headBefore, "重建失败后备份应恢复到原路径");
 });
 
-test("SG-08e: rebuild 步骤 3 基线快照失败处置", async () => {
-  // 独立 sideGitDir 并破坏 HEAD（使 rebuild 的步骤 1/2 可正常执行）
-  const customDir = path.join(tempDir, "sg08e", "side-git");
-  const customGit = new SideGitManager({
-    sideGitDir: customDir,
-    workspaceRoot,
-    autoSnapshot: true,
-    maxSnapshots: 50,
-  });
-  await customGit.initialize();
-  await fs.writeFile(path.join(customDir, "HEAD"), "corrupted\n", "utf8");
+/**
+ * 判断当前进程是否以 root 身份运行（root 下 chmod 0o000 不限制读取，
+ * 无法构造 git add 的 EACCES 失败场景 → 权限相关用例跳过）。
+ * 与 log-rotation.test.ts / error-logger.test.ts 的同名夹具保持一致约定。
+ */
+function isRoot(): boolean {
+  return typeof process.getuid === "function" && process.getuid() === 0;
+}
 
-  // 在工作区放置不可读文件：步骤 3 createSnapshot 的 git add 读取内容时 EACCES 失败
-  // （git status 对未跟踪文件不读内容，故步骤 2 的 initialize 不受影响）
-  const secretFile = path.join(workspaceRoot, "secret-unreadable.txt");
-  await fs.writeFile(secretFile, "secret\n", "utf8");
-  await fs.chmod(secretFile, 0o000);
+test(
+  "SG-08e: rebuild 步骤 3 基线快照失败处置",
+  { skip: isRoot() ? "root 下 chmod(0o000) 对读取无效，无法触发 git add EACCES 失败" : false },
+  async () => {
+    // 独立 sideGitDir 并破坏 HEAD（使 rebuild 的步骤 1/2 可正常执行）
+    const customDir = path.join(tempDir, "sg08e", "side-git");
+    const customGit = new SideGitManager({
+      sideGitDir: customDir,
+      workspaceRoot,
+      autoSnapshot: true,
+      maxSnapshots: 50,
+    });
+    await customGit.initialize();
+    await fs.writeFile(path.join(customDir, "HEAD"), "corrupted\n", "utf8");
 
-  const notifications: string[] = [];
-  const { SideGitRecovery } = await import("../../approval/side-git-recovery.js");
-  const recovery = new SideGitRecovery(customGit, customGit["config"], (msg) => {
-    notifications.push(msg);
-  });
+    // 在工作区放置不可读文件：步骤 3 createSnapshot 的 git add 读取内容时 EACCES 失败
+    // （git status 对未跟踪文件不读内容，故步骤 2 的 initialize 不受影响）
+    const secretFile = path.join(workspaceRoot, "secret-unreadable.txt");
+    await fs.writeFile(secretFile, "secret\n", "utf8");
+    await fs.chmod(secretFile, 0o000);
 
-  try {
-    await recovery.rebuild();
-  } finally {
-    // 恢复文件权限以便 afterEach 清理
-    await fs.chmod(secretFile, 0o644);
+    const notifications: string[] = [];
+    const { SideGitRecovery } = await import("../../approval/side-git-recovery.js");
+    const recovery = new SideGitRecovery(customGit, customGit["config"], (msg) => {
+      notifications.push(msg);
+    });
+
+    try {
+      await recovery.rebuild();
+    } finally {
+      // 恢复文件权限以便 afterEach 清理
+      await fs.chmod(secretFile, 0o644);
+    }
+
+    // 验证：通知包含基线快照失败告警 + 重建成功通知（步骤 3 失败不视为重建失败）
+    assert.ok(
+      notifications.some((m) => m.includes("基线快照失败")),
+      "应通知基线快照失败"
+    );
+    assert.ok(
+      notifications.some((m) => m.includes("已重建")),
+      "步骤 3 失败不阻断重建成功通知"
+    );
+
+    // 验证：未进入降级模式（sideGitDir 已就绪，下次 createSnapshot 时再建快照）
+    const report = await recovery.verifyIntegrityLightweight();
+    assert.ok(!report.failures.includes("degraded_mode"), "不应进入降级模式");
   }
-
-  // 验证：通知包含基线快照失败告警 + 重建成功通知（步骤 3 失败不视为重建失败）
-  assert.ok(
-    notifications.some((m) => m.includes("基线快照失败")),
-    "应通知基线快照失败"
-  );
-  assert.ok(
-    notifications.some((m) => m.includes("已重建")),
-    "步骤 3 失败不阻断重建成功通知"
-  );
-
-  // 验证：未进入降级模式（sideGitDir 已就绪，下次 createSnapshot 时再建快照）
-  const report = await recovery.verifyIntegrityLightweight();
-  assert.ok(!report.failures.includes("degraded_mode"), "不应进入降级模式");
-});
+);
 
 test("SG-08f: rebuild 步骤 4 通知失败处置", async () => {
   // 独立 sideGitDir 并破坏 HEAD

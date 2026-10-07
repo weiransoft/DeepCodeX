@@ -507,7 +507,10 @@ test("Z5. 目标相关性守卫：objective 与全部旧卡无关 → 自动追�
     assert.equal(result.kind, "success");
     assert.equal(result.artifacts["reason"], PLAN_REASON_TASK_CARD_SELECTED, "新目标必须被合成新卡并选中");
     const taskCard = result.artifacts["taskCard"] as TaskCard;
-    assert.equal(taskCard.id, "T-001", "追加的合成卡沿用 T-001（旧卡 done 不改号）");
+    // 2026-10-07 Z5 修复回归适配：合成卡 ID 从固定 T-001 改为「现有最大 T-xxx + 1」
+    // （generateSynthesizedTaskId）。旧卡占用 T-001（done）时新合成卡必须取 T-002，
+    // 否则重蹈「多卡共享 T-001 → pickNextPendingTask 永远取文件序旧卡」的选卡劫持事故。
+    assert.equal(taskCard.id, "T-002", "合成卡取现有最大号+1（旧卡 done 占用 T-001 → 新卡 T-002）");
     assert.equal(taskCard.status, "pending");
 
     // 文件必须真实追加：旧卡原样保留 + 新合成卡落盘
@@ -1005,6 +1008,12 @@ test("M1. 两张 pending 卡：逐轮全绿标记 completed，他卡与正文属
 });
 
 test("M2. 全绿但 tasks.md 原子写回失败：本轮判失败、不记 milestone、任务卡保持 pending，最终 aborted", async () => {
+  // root 绕过 Unix 权限检查（chmod 0o555 对 root 的 rename/写入无效），故障注入
+  // 不生效 → 用例前提不成立。与 log-rotation.test.ts / error-logger.test.ts 的
+  // isRoot 跳过模式一致；非 root CI 环境正常执行该守卫验证。
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    return;
+  }
   const projectRoot = createTempProject();
   const p5Dir = path.join(projectRoot, ".eag", "p5");
   try {
