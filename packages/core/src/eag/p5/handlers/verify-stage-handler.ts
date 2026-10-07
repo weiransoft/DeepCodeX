@@ -305,7 +305,12 @@ export class P5VerifyStageHandler implements P5StageHandler {
 
     try {
       // 1. 获取测试命令
-      const testCommand = ctx.testCommand || DEFAULT_TEST_COMMAND;
+      // 项目类型自动探测（异构 root 不会默认 npm test 必超时，2026-10-07）：
+      //   - 用户显式指定 → 尊重 ctx.testCommand
+      //   - 用户未指定 → detectDefaultTestCommand(projectRoot) 按项目类型选默认值
+      //     Python → "python3 -m pytest" / Go → "go test ./..." / Rust → "cargo test" / Node → "npm test"
+      //     都没有 → 回退 "npm test"（保持向后兼容）
+      const testCommand = ctx.testCommand || detectDefaultTestCommand(ctx.projectRoot);
 
       // 1.5 方案 A §3.7（架构师 P1-5）：合成任务 + 默认 npm test + 项目真实无可测目标时，
       //     诚实 skip 而非 spawn 一个必然失败的 npm test 把循环拖入假失败。
@@ -660,6 +665,53 @@ function detectProjectWithoutTestTarget(projectRoot: string): boolean {
     // package.json 存在但无法解析：不让 skip 掩盖问题，走真实 spawn 路径
     return false;
   }
+}
+
+/**
+ * 项目类型自动探测默认测试命令（修复异构 projectRoot 上默认 npm test 必超时，2026-10-07）。
+ *
+ * 探测优先级（按文件存在性）：
+ *   1. pyproject.toml / requirements.txt / setup.py / conftest.py → "python3 -m pytest"
+ *      （优先 pyproject.toml，覆盖新/旧 Python 项目；conftest.py 说明 pytest 配置已存在）
+ *   2. Cargo.toml → "cargo test"
+ *   3. go.mod → "go test ./..."
+ *   4. package.json + 有 test script → "npm test"（原 DEFAULT_TEST_COMMAND）
+ *   5. 以上都没有 → "npm test"（兜底，保持向后兼容；运行器会因 Missing script 进 skip 降级）
+ *
+ * 注意：探测只看根目录，不递归子目录。探测结果是"合理默认值"，
+ * 不等于用户项目一定有测试——真实 spawn 失败仍会进 verify 已有的 skip/failed 分支。
+ *
+ * @param projectRoot EAG 目标项目根目录
+ * @returns 探测到的默认测试命令字符串
+ */
+function detectDefaultTestCommand(projectRoot: string): string {
+  const pyprojectPath = path.join(projectRoot, "pyproject.toml");
+  const requirementsPath = path.join(projectRoot, "requirements.txt");
+  const setupPyPath = path.join(projectRoot, "setup.py");
+  const conftestPath = path.join(projectRoot, "conftest.py");
+  if (
+    fs.existsSync(pyprojectPath) ||
+    fs.existsSync(requirementsPath) ||
+    fs.existsSync(setupPyPath) ||
+    fs.existsSync(conftestPath)
+  ) {
+    return "python3 -m pytest";
+  }
+
+  const cargoPath = path.join(projectRoot, "Cargo.toml");
+  if (fs.existsSync(cargoPath)) {
+    return "cargo test";
+  }
+
+  const goModPath = path.join(projectRoot, "go.mod");
+  if (fs.existsSync(goModPath)) {
+    return "go test ./...";
+  }
+
+  // Node.js：package.json + scripts.test 存在 → npm test
+  // 没有 package.json 或没有 test script → 仍回退 npm test（detectProjectWithoutTestTarget
+  // 在 synthesizedTask 路径会把这种情况降级为 skip，不会硬超时）
+  return DEFAULT_TEST_COMMAND;
 }
 
 /**

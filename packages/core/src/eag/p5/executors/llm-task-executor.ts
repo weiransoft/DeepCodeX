@@ -336,8 +336,19 @@ export interface LlmTaskExecutorOptions {
   readonly model?: string;
   /** 可选日志回调（与 AutonomousOrchestrator 日志同构，此处结构化复制避免跨层类型依赖） */
   readonly logger?: (message: string, level?: "info" | "warn" | "error") => void;
-  /** 单任务工具循环最大轮数，默认 12；测试可收窄 */
+  /** 单任务工具循环最大轮数，默认 DEFAULT_MAX_TOOL_ROUNDS；测试可收窄 */
   readonly maxToolRounds?: number;
+  /**
+   * 单任务最大 Token 预算（可选，undefined 时执行器不检查，由编排器在迭代间统一检查）。
+   *
+   * 2026-10-07 新增增量预算守卫：让执行器在 for 循环内每轮都对比累计 tokensUsed
+   * 与 perTaskBudget，超限立即 failure。比"单轮 dev/fix 40 轮全跑完才让编排器看到
+   * tokensUsed"更诚实——避免单轮烧穿预算 N 倍。
+   *
+   * 编排器传入策略：perTaskBudget = totalBudget - totalTokensUsedAlreadyConsumed
+   * （已用预算从 RunState.totalTokensUsed 取），每迭代剩余预算递减。
+   */
+  readonly perTaskBudget?: number;
   /**
    * 任务执行进度回调（可选，默认无操作）。
    *
@@ -372,6 +383,8 @@ export class LlmTaskExecutor implements P5TaskExecutor {
   private readonly model: string | undefined;
   private readonly log: (message: string, level?: "info" | "warn" | "error") => void;
   private readonly maxToolRounds: number;
+  /** 单任务 Token 预算（构造时从 options.perTaskBudget 注入；undefined 表示执行器不检查） */
+  private readonly perTaskBudget: number | undefined;
   /** 任务执行进度回调（默认无操作；Web 接线时推送 llm_delta 进度帧） */
   private readonly onTaskProgress: P5TaskProgressCallback;
   /**
@@ -400,6 +413,7 @@ export class LlmTaskExecutor implements P5TaskExecutor {
       throw new Error(`LlmTaskExecutor maxToolRounds 必须为正整数，实际：${String(rounds)}`);
     }
     this.maxToolRounds = rounds;
+    this.perTaskBudget = options.perTaskBudget;
   }
 
   /**
@@ -529,6 +543,29 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             inputTokensTotal + outputTokensTotal,
             estimatedCharsTotal
           );
+        }
+
+        // 增量 Token 预算检查（2026-10-07 新增）：
+        // 每轮都对比累计 tokensUsed 与 perTaskBudget，超限立即 failure。
+        // 这比"40 轮全跑完才让编排器看到 tokensUsed"更诚实——避免单轮
+        // dev/fix 烧穿预算 N 倍（架构师指出的根因）。
+        // perTaskBudget 由编排器注入 = totalBudget - totalTokensUsedAlreadyConsumed
+        // （未注入时 undefined → 执行器不检查，编排器统一管）。
+        if (this.perTaskBudget !== undefined) {
+          const currentTokens = this.resolveTokensUsed(
+            sawUsage,
+            inputTokensTotal + outputTokensTotal,
+            estimatedCharsTotal
+          ).tokens;
+          if (currentTokens > this.perTaskBudget) {
+            return this.failure(
+              `Token 预算超限：单任务已用 ${currentTokens} tokens（预算 ${this.perTaskBudget}），执行中止`,
+              llmRequests,
+              sawUsage,
+              inputTokensTotal + outputTokensTotal,
+              estimatedCharsTotal
+            );
+          }
         }
 
         // 真实非流式 LLM 请求（简单、usage 直接可得、无 skill 预请求缝隙）

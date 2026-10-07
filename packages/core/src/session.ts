@@ -6031,10 +6031,15 @@ ${agentInstructions}
           summary.status === "running"
             ? `EAG 自主迭代 ${summary.iterIndex + 1} 完成（继续下一轮，连续失败 ${summary.consecutiveFailures}）`
             : `EAG 自主迭代 ${summary.iterIndex + 1} 结束（状态：${summary.status}，连续失败 ${summary.consecutiveFailures}）`;
-        this.onAssistantMessage(
-          this.buildAssistantMessage(sessionId, `[EAG Autonomous Loop] ${header}\n${stageLines}`, null),
-          false
+        const assistantMsg = this.buildAssistantMessage(
+          sessionId,
+          `[EAG Autonomous Loop] ${header}\n${stageLines}`,
+          null
         );
+        // 双写：appendSessionMessage 持久化会话历史（无人值守运行不丢）
+        // onAssistantMessage 推送宿主（SSE/CLI）
+        this.appendSessionMessage(sessionId, assistantMsg);
+        this.onAssistantMessage(assistantMsg, false);
       },
     };
     const handler = new EagAutonomousCommandHandler(this.autonomousOrchestrator);
@@ -6090,9 +6095,13 @@ ${agentInstructions}
     }
 
     // 步骤 6：渲染结果摘要
-    // result.markdownReport 已由 handler.formatSuccessReport / formatErrorReport 装配，
-    // session.ts 直接通过 onAssistantMessage 推送给用户
-    this.onAssistantMessage(this.buildAssistantMessage(sessionId, result.markdownReport, null), false);
+    // result.markdownReport 已由 handler.formatSuccessReport / formatErrorReport 装配。
+    // 双写模式（对齐 onIteration 回调 L6039-L6042）：
+    // appendSessionMessage 持久化会话历史 → 无人值守运行结果不丢（阅后不再焚）
+    // onAssistantMessage 推送宿主 → 用户立即看到报告
+    const reportMsg = this.buildAssistantMessage(sessionId, result.markdownReport, null);
+    this.appendSessionMessage(sessionId, reportMsg);
+    this.onAssistantMessage(reportMsg, false);
 
     // 步骤 7：更新 session 状态（依据 result.success）
     // - success=true：session 标记 completed（包括 finalStatus=completed / stop_when / aborted，
