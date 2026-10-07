@@ -451,6 +451,53 @@ export class P5PlanStageHandler implements P5StageHandler {
         }
       }
 
+      // 3.5 AUTO 卡语义相关性选后守卫（2026-10-07 新增）：
+      // pickNextPendingTask 只按 ID 升序取第一张 pending 卡，不检查目标相关性。
+      // 3.4 守卫在"所有卡"层面追加新卡，但如果旧 AUTO 卡 prefix 更小（T-001 vs T-002），
+      // pickNextPendingTask 仍先取旧卡——这是 3.4 守卫未覆盖的"旧 pending 卡抢先"路径。
+      // 修复：取到 AUTO 卡（requirementId==="AUTO"）后，检查它与当前 objective 是否语义相关。
+      // 不相关时强制追加新合成卡，并把旧 AUTO 卡标记为 blocked（不再参与选取）。
+      // 手写卡（requirementId≠AUTO）不做拦截——用户手写的卡必然有意，不应覆盖。
+      if (nextTask !== null && !synthesized) {
+        const objectiveText = typeof ctx.objective === "string" ? ctx.objective.trim() : "";
+        const selectedIsAuto = nextTask.requirementId === "AUTO";
+        if (selectedIsAuto && objectiveText.length > 0) {
+          const titleEmbedded =
+            nextTask.title.length > 0 &&
+            (objectiveText.includes(nextTask.title) || nextTask.title.includes(objectiveText));
+          const singleCardRelevance = computeObjectiveRelevance(objectiveText, [
+            `${nextTask.title} ${nextTask.requirementId}`,
+          ]);
+          if (!titleEmbedded && singleCardRelevance < OBJECTIVE_RELEVANCE_MIN_RATIO) {
+            // 旧 AUTO 卡语义无关 → 追加新合成卡 + 旧卡 blocked
+            ctx.logger?.(
+              `plan AUTO 卡语义无关守卫：T-${nextTask.id}「${nextTask.title}」与 objective「${objectiveText}」相关性 ${singleCardRelevance.toFixed(2)} < 阈值 ${OBJECTIVE_RELEVANCE_MIN_RATIO.toFixed(2)}，追加新合成卡`,
+              "warn"
+            );
+            try {
+              const newTaskId = generateSynthesizedTaskId(selectedCards);
+              const syntheticContent = buildSynthesizedTasksContent(objectiveText, newTaskId);
+              const reparsed = parseTaskCards(syntheticContent);
+              const reparsedCompletedIds = new Set<string>(reparsed.map((c) => c.id));
+              // 旧 AUTO 卡标记 blocked，新合成卡加入候选
+              const patched = [
+                ...selectedCards.map((c) =>
+                  c.id === nextTask!.id && c.requirementId === "AUTO" ? { ...c, status: "blocked" as const } : c
+                ),
+                ...reparsed,
+              ];
+              const patchedCompletedIds = new Set(completedIds);
+              patchedCompletedIds.add(newTaskId); // 新卡为 pending，completedIds 不含它（自然）
+              nextTask = pickNextPendingTask(patched, patchedCompletedIds);
+              selectedCards = patched;
+            } catch (appendError) {
+              const message = appendError instanceof Error ? appendError.message : String(appendError);
+              ctx.logger?.(`plan AUTO 卡语义守卫：追加合成卡失败（${message}），本轮沿用旧卡`, "warn");
+            }
+          }
+        }
+      }
+
       if (nextTask === null) {
         // 方案 A §3.6：把旧的 all-tasks-done-or-blocked 拆成两种诚实语义。
         const completedCount = completedIds.size;
