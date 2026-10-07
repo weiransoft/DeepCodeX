@@ -461,6 +461,34 @@ test("E-N2. 执行器：模型真实 write 落盘 → noop=false（非空转，�
   }
 });
 
+test("E-N3. 执行器：模型真实调用了只读工具但零文件变更 → noop=false（防误报回归）", async () => {
+  const projectRoot = createGitProject();
+  try {
+    // 非 git 项目场景合并验证：createTempProject 不含 .git——read-only bash/read
+    // 类任务在非 git 仓库本就检不出任何变更，若用 changedFiles 判据必被误标 noop
+    const nonGitRoot = createTempProject("eag-noopfix-nongit-");
+    const existingFile = path.join(nonGitRoot, "report.md");
+    fs.writeFileSync(existingFile, "# 已有报告\n", "utf8");
+    try {
+      const client = new StubLlmClient([
+        { content: "", toolCalls: [{ name: "read", args: { file_path: existingFile } }] },
+        { content: "已审阅 report.md，无需修改。" },
+      ]);
+      const executor = new LlmTaskExecutor({ projectRoot: nonGitRoot, createLlmClient: () => client });
+
+      const result = await executor.executeTask(buildExecutionInput(nonGitRoot));
+
+      assert.equal(result.success, true);
+      assert.equal(result.noop, false, "模型真实发起了工具调用（只读），不得标记 noop");
+      assert.equal(result.changedFiles.length, 0, "只读任务零变更属合法场景");
+    } finally {
+      cleanup(nonGitRoot);
+    }
+  } finally {
+    cleanup(projectRoot);
+  }
+});
+
 // ============================================================================
 // 4. 根因 3：编排器连续空转熔断（O-N1）
 // ============================================================================
