@@ -8,6 +8,40 @@
 
 （本版本暂无变更。）
 
+## [0.4.3.13] - 2026-10-07
+
+补丁版（EAG 自主运行"空循环"专项修复：无人值守输出持久化 + 多角色 review 四根因 + 多指令会话端到端测试）。
+
+### Fixed
+- **无人值守运行结果阅后即焚**（packages/core/src/session.ts）：handleEagAutonomousCommand 的
+  onIteration 回调与最终报告只走 onAssistantMessage 推送宿主，宿主断开即丢失。修复：两处各加
+  appendSessionMessage 持久化会话历史（对齐 addSessionSystemMessage 双写模式）。
+- **verify 默认测试命令在异构项目必超时**（packages/core/src/eag/p5/handlers/verify-stage-handler.ts）：
+  新增 detectDefaultTestCommand 按根目录标志文件探测——Python（pyproject.toml/requirements.txt/
+  setup.py/conftest.py）→ python3 -m pytest；Rust（Cargo.toml）→ cargo test；Go（go.mod）→ go test ./...；
+  兜底 npm test。
+- **单轮烧穿 Token 预算**（packages/core/src/eag/p5/executors/llm-task-executor.ts）：LlmTaskExecutor
+  新增 perTaskBudget 选项，for 循环每轮顶部对比累计 tokensUsed 与预算，超限立即 failure。
+- **3.5 AUTO 卡守卫"内存态未落盘"空循环回归**（packages/core/src/eag/p5/handlers/plan-stage-handler.ts）：
+  守卫产物只存内存且误将新卡 ID 加入 completedIds → 下一轮重读磁盘旧卡仍 pending，守卫每轮
+  重触发、无卡执行。修复：新增 markTaskCardStatusInContent 把旧卡 blocked 与新合成卡真实落盘后
+  回读重解析；判重改用磁盘最新内容；3.5 不再被 3.4 的 synthesized 标志跳过（旧卡抢先路径）。
+- **"光说不做"被判真实进展**（packages/core/src/eag/p5/executors/llm-task-executor.ts）：模型零工具
+  调用纯文本终态被记 success。修复：P5TaskExecutionResult 新增 noop 字段（判据 toolCallsTotal===0，
+  与 git 状态解耦，避免非 git 仓库/只读任务误报），dev/fix 透传 artifacts 供编排器计数。
+- **成功路径空转无熔断**（packages/core/src/eag/p5/autonomous-orchestrator.ts）：新增
+  NOOP_CIRCUIT_BREAKER_THRESHOLD=3，连续"plan 无卡轮 + dev/fix noop 轮"达阈值即 abort；
+  真实进展/失败轮清零。
+- **多指令会话空循环（用户主反馈场景）**：同一会话前几个任务完成后提交语义无关新指令时，
+  旧清单 all-tasks-completed 抢先收尾/守卫重触发导致新目标空转。经 3.4/3.5/僵尸 completed 守卫
+  修复 + 空转熔断兜底，新增 eag-p5-multi-command-session-e2e（MT-1~6）端到端验证：连续 4 轮
+  新指令每轮 ≤3 迭代收敛、旧手写卡优先消费不丢失、noop 会话被熔断截获。
+
+### Added
+- 回归测试：eag-p5-noop-loop-fixes（N1~N5/E-N1~N3/O-N1，9 用例）、
+  eag-p5-multi-command-session-e2e（MT-1~MT-6，6 用例）；设计文档
+  docs/dev/eag-followup-fixes-2026-10-07.md（含多角色 review 裁决附录）。
+
 ## [0.4.3.12] - 2026-10-07
 
 补丁版（P0 轮数上限 12→40 + failure() tokens 结算 + 编排器 llmCallCount 直读 + verify 空测试守卫 + EA-03a 测试适配 0.4.3.11 + bash marker 残留防御）。
