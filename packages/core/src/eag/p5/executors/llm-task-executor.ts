@@ -1166,7 +1166,14 @@ export class LlmTaskExecutor implements P5TaskExecutor {
     realTokens: number,
     estimatedChars: number
   ): Readonly<P5TaskExecutionResult> {
-    const tokens = this.resolveTokensUsed(sawUsage, realTokens, estimatedChars);
+    // 零请求守卫：llmRequests===0 表示 runLoop 循环根本没进（无凭据/abort 预先存在），
+    // 没有任何真实 LLM 交互 → tokensUsed 必须是 0。
+    // resolveTokensUsed 的 Math.max(1, ...) 保底是为了给有真实请求但缺 usage 的场景
+    // 提供估算值，不能错误地给零请求场景也返回 1（会误导编排器 llmCallCount 累加逻辑）。
+    const tokens =
+      llmRequests === 0
+        ? { tokens: 0, estimated: false }
+        : this.resolveTokensUsed(sawUsage, realTokens, estimatedChars);
     return Object.freeze({
       success: false,
       summary: "",
