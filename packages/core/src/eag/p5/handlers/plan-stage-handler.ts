@@ -94,16 +94,6 @@ export const PLAN_REASON_TASK_CARD_SELECTED = "task-card-selected" as const;
  */
 export const PLAN_REASON_CAPABILITY_GAP = "capability-gap" as const;
 
-/**
- * 合成卡 ID 的"空清单回退值"（2026-10-07 Z5 修复前是固定常量 SYNTHESIZED_TASK_ID = "T-001"，
- * 每次目标合成都用同一编号导致多卡共享 ID → pickNextPendingTask 永远取文件序第一张旧卡
- * （详见 docs/dev/eag-task-id-and-web-session-isolation.md §1.1）。
- *
- * 现仅作为 generateSynthesizedTaskId() 扫描空清单时的回退返回值；正常流程由
- * generateSynthesizedTaskId 扫描现有卡后取最大 T-xxx+1 生成唯一编号。
- */
-const FALLBACK_SYNTHESIZED_TASK_ID = "T-001" as const;
-
 /** 合成任务卡标题最大字符数（防止超长 objective 撑爆单行标题） */
 const MAX_SYNTHESIZED_TITLE_CHARS = 200;
 
@@ -451,14 +441,19 @@ export class P5PlanStageHandler implements P5StageHandler {
         }
       }
 
-      // 3.5 AUTO 卡语义相关性选后守卫（2026-10-07 新增）：
+      // 3.5 AUTO 卡语义相关性选后守卫（2026-10-07 新增，同日修复"内存态未落盘"空循环回归）：
       // pickNextPendingTask 只按 ID 升序取第一张 pending 卡，不检查目标相关性。
       // 3.4 守卫在"所有卡"层面追加新卡，但如果旧 AUTO 卡 prefix 更小（T-001 vs T-002），
       // pickNextPendingTask 仍先取旧卡——这是 3.4 守卫未覆盖的"旧 pending 卡抢先"路径。
       // 修复：取到 AUTO 卡（requirementId==="AUTO"）后，检查它与当前 objective 是否语义相关。
-      // 不相关时强制追加新合成卡，并把旧 AUTO 卡标记为 blocked（不再参与选取）。
+      // 不相关时：旧 AUTO 卡 status 真实写回 blocked + 新合成卡追加落盘（与 3.4 同构落盘），
+      // 再从磁盘回读重解析。绝不走"内存态 patched"——曾因未落盘导致下一轮重读磁盘时
+      // 旧卡仍 pending、守卫每轮重触发，形成空循环回归（2026-10-07 review 根因 1）。
       // 手写卡（requirementId≠AUTO）不做拦截——用户手写的卡必然有意，不应覆盖。
-      if (nextTask !== null && !synthesized) {
+      // 注意：这里不能被 3.4 的 synthesized 标志跳过——3.4 追加新卡后
+      // pickNextPendingTask 仍按 ID 升序选中旧 AUTO 卡（抢先路径恰恰发生在这里）；
+      // 是否重复追加由下方 alreadySynthesized 判定决定。
+      if (nextTask !== null) {
         const objectiveText = typeof ctx.objective === "string" ? ctx.objective.trim() : "";
         const selectedIsAuto = nextTask.requirementId === "AUTO";
         if (selectedIsAuto && objectiveText.length > 0) {
@@ -469,30 +464,63 @@ export class P5PlanStageHandler implements P5StageHandler {
             `${nextTask.title} ${nextTask.requirementId}`,
           ]);
           if (!titleEmbedded && singleCardRelevance < OBJECTIVE_RELEVANCE_MIN_RATIO) {
-            // 旧 AUTO 卡语义无关 → 追加新合成卡 + 旧卡 blocked
             ctx.logger?.(
-              `plan AUTO 卡语义无关守卫：T-${nextTask.id}「${nextTask.title}」与 objective「${objectiveText}」相关性 ${singleCardRelevance.toFixed(2)} < 阈值 ${OBJECTIVE_RELEVANCE_MIN_RATIO.toFixed(2)}，追加新合成卡`,
+              `plan AUTO 卡语义无关守卫：${nextTask.id}「${nextTask.title}」与 objective「${objectiveText}」` +
+                `相关性 ${singleCardRelevance.toFixed(2)} < 阈值 ${OBJECTIVE_RELEVANCE_MIN_RATIO.toFixed(2)}，` +
+                `旧卡 blocked 落盘并追加新合成卡`,
               "warn"
             );
             try {
-              const newTaskId = generateSynthesizedTaskId(selectedCards);
-              const syntheticContent = buildSynthesizedTasksContent(objectiveText, newTaskId);
-              const reparsed = parseTaskCards(syntheticContent);
-              const reparsedCompletedIds = new Set<string>(reparsed.map((c) => c.id));
-              // 旧 AUTO 卡标记 blocked，新合成卡加入候选
-              const patched = [
-                ...selectedCards.map((c) =>
-                  c.id === nextTask!.id && c.requirementId === "AUTO" ? { ...c, status: "blocked" as const } : c
-                ),
-                ...reparsed,
-              ];
-              const patchedCompletedIds = new Set(completedIds);
-              patchedCompletedIds.add(newTaskId); // 新卡为 pending，completedIds 不含它（自然）
-              nextTask = pickNextPendingTask(patched, patchedCompletedIds);
-              selectedCards = patched;
+              // 从磁盘重读最新内容：3.4 守卫可能已在上面追加过合成卡，tasksContent 变量是旧快照，
+              // 直接用会丢掉 3.4 刚写入的卡
+              const currentTasksContent = fs.readFileSync(tasksFilePath, "utf8");
+              // 防重复追加判定（与 3.4 的 alreadySynthesized 同构）：3.4 可能刚把同一目标
+              // 合成为 AUTO 卡（title=objective 截断）。此时 3.5 只需把旧卡 blocked，
+              // 不得再追加同目标卡——否则同一目标落两张重复卡，浪费一轮执行。
+              // 注意：必须用磁盘最新内容重新解析（taskCards 变量是进入 handler 时的旧快照，
+              // 不含 3.4 刚追加的卡），否则判重失效、重复追加（N1/N2 回归测试发现）。
+              const currentCards = parseTaskCards(currentTasksContent);
+              const alreadySynthesized = currentCards.some(
+                (c) => c.requirementId === "AUTO" && c.title.length > 0 && objectiveText.includes(c.title)
+              );
+              // 旧 AUTO 卡 status 真实改写为 blocked（内存文本）——blocked 落盘是关键：
+              // 不落盘则下一轮重读磁盘时旧卡仍 pending，守卫每轮重触发
+              const blockedContent = markTaskCardStatusInContent(currentTasksContent, nextTask.id, "blocked");
+              const contentToWrite = alreadySynthesized
+                ? blockedContent
+                : `${blockedContent.replace(/\s+$/, "")}\n\n` +
+                  `${buildSynthesizedTasksContent(objectiveText, generateSynthesizedTaskId(taskCards))}`;
+              atomicWriteTextFile(tasksFilePath, contentToWrite);
+              synthesized = true;
+              ctx.logger?.(
+                `plan AUTO 卡语义守卫：${nextTask.id} 已 blocked 落盘` +
+                  `（新目标消费卡：${alreadySynthesized ? "复用 3.4 已合成的同目标卡，未重复追加" : "已追加新合成卡"}）→ ${tasksFilePath}`,
+                "warn"
+              );
+              // 与首次解析同一闭环回读重解析（磁盘是唯一事实源）：
+              // 新合成卡 title=objective 截断 → titleEmbedded 命中 → 下一轮不会再触发本守卫
+              const reparsed = parseTaskCards(fs.readFileSync(tasksFilePath, "utf8"), (msg) => {
+                parseWarnings.push(msg);
+                ctx.logger?.(`plan 解析告警：${msg}`, "warn");
+              });
+              const reparsedCompletedIds = new Set<string>(
+                reparsed.filter((c) => c.status === "completed").map((c) => c.id)
+              );
+              const reparsedNext = pickNextPendingTask(reparsed, reparsedCompletedIds);
+              if (reparsedNext !== null) {
+                selectedCards = reparsed;
+                completedIds.clear();
+                for (const id of reparsedCompletedIds) {
+                  completedIds.add(id);
+                }
+                nextTask = reparsedNext;
+              }
+              // reparsedNext 为 null（新卡也被 dependencies 挡住等）→ 维持 nextTask 不变，
+              // 由下游"无可执行卡"路径透出诊断，不伪造成功
             } catch (appendError) {
+              // 落盘失败不阻断本轮（与 3.4 同策略：沿用现存卡）；告警留痕供诊断
               const message = appendError instanceof Error ? appendError.message : String(appendError);
-              ctx.logger?.(`plan AUTO 卡语义守卫：追加合成卡失败（${message}），本轮沿用旧卡`, "warn");
+              ctx.logger?.(`plan AUTO 卡语义守卫：blocked 落盘/追加失败（${message}），本轮沿用旧卡`, "warn");
             }
           }
         }
@@ -1243,6 +1271,67 @@ export function buildSynthesizedTasksContent(objective: string, taskId: string):
     "- acceptance:",
     "",
   ].join("\n");
+}
+
+/**
+ * 在 tasks.md 文本中将指定任务卡的 status 行改写为 newState（仅改内存文本，落盘由调用方负责）。
+ *
+ * 2026-10-07 为 3.5 AUTO 卡语义守卫新增：守卫在拦截旧 AUTO 卡后需要把它的
+ * status 真实写回为 blocked——若只在内存改状态而不落盘，下一轮 plan 从磁盘
+ * 重新 parseTaskCards 时旧卡仍为 pending，守卫每轮重触发，形成空循环回归。
+ *
+ * 区段定位规则：
+ * - 目标卡区段从 `## <taskId> ` 标题行开始；
+ * - 到下一张卡的 `## ` 标题行或文件尾结束；
+ * - 区段内第一条 `- status: <value>` 行被改写为 `- status: <newState>`。
+ *
+ * 兜底语义：若目标卡区段内没有 status 行（解析器默认按 pending 处理），
+ * 则在标题行后插入一行 `- status: <newState>`——否则旧卡在磁盘上仍是
+ * pending，守卫会永远重触发（空循环回归的根因之一）。
+ *
+ * @param content tasks.md 完整文本
+ * @param taskId 目标任务卡 ID（如 "T-001"）
+ * @param newState 新状态值（如 "blocked"）
+ * @returns 改写后的 tasks.md 完整文本（未找到目标卡标题时原样返回）
+ */
+export function markTaskCardStatusInContent(content: string, taskId: string, newState: string): string {
+  // taskId 进入正则前转义（防御手写清单中出现非常规 ID 字符）
+  const escapedTaskId = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const headingRe = new RegExp(`^##\\s+${escapedTaskId}(?=\\s|$)`);
+  const statusLineRe = /^(\s*-\s*status:)\s*\S.*$/;
+  const lines = content.split(/\r?\n/);
+  const output: string[] = [];
+  let inTargetCard = false;
+  let replaced = false;
+
+  for (const line of lines) {
+    if (headingRe.test(line)) {
+      // 命中目标卡标题 → 进入其区段
+      inTargetCard = true;
+      output.push(line);
+      continue;
+    }
+    if (inTargetCard && /^##\s/.test(line)) {
+      // 进入下一张卡的区段 → 目标卡区段结束
+      inTargetCard = false;
+      output.push(line);
+      continue;
+    }
+    if (inTargetCard && !replaced && statusLineRe.test(line)) {
+      // 区段内第一条 status 行 → 改写状态
+      replaced = true;
+      output.push(line.replace(statusLineRe, `$1 ${newState}`));
+      continue;
+    }
+    output.push(line);
+  }
+
+  // 兜底：目标卡区段没有任何 status 行 → 在标题行后插入一行，确保磁盘状态真实变更
+  if (inTargetCard && !replaced) {
+    const headingIndex = output.findIndex((l) => headingRe.test(l));
+    output.splice(headingIndex + 1, 0, `- status: ${newState}`);
+  }
+  return output.join("\n");
 }
 
 /**

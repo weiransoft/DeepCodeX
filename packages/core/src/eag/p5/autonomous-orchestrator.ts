@@ -469,6 +469,20 @@ export type AutonomousOrchestratorLogCallback = (message: string, level?: "info"
  */
 export const IDENTICAL_FAILURE_CIRCUIT_BREAKER_THRESHOLD = 2;
 
+/**
+ * 连续空转熔断阈值（2026-10-07 新增，修复"成功路径上的空循环"）。
+ *
+ * 既有确定性失败熔断只覆盖失败路径（5b.7），而空循环往往发生在全绿轮：
+ * - plan 每轮未选出任务卡（守卫重触发/清单空转）→ dev/verify/fix 全跳过；
+ * - dev/fix 执行器检出 noop（模型零工具调用 + 零文件变更，"光说不做"）。
+ * 两类轮次都会被记成"成功"并烧掉 plan/LLM token，只有 maxIterations 兜底。
+ * 连续达到此次数（默认 3）即 abort，与失败熔断并列构成双保险。
+ *
+ * 注意：计数器为循环局部变量，跨进程 resume 后重新计数——阈值取 3 保证
+ * resume 后最多再容忍 2 轮空转，代价可接受，不为它扩展 RunState 持久化 schema。
+ */
+export const NOOP_CIRCUIT_BREAKER_THRESHOLD = 3;
+
 // ============================================================================
 // 3. 默认日志空函数
 // ============================================================================
@@ -690,6 +704,10 @@ export class AutonomousOrchestrator {
     // 上一轮失败指纹（任务卡 ID + 失败集合）与连续重复次数
     let lastFailureFingerprint: string | null = null;
     let identicalFailureStreak = 0;
+    // 连续空转计数（2026-10-07 新增，见 NOOP_CIRCUIT_BREAKER_THRESHOLD 注释）：
+    // 统计"全绿但零进展"的连续轮次——plan 无卡轮 + dev/fix noop 轮；
+    // 任何真实进展（执行了任务卡且非 noop）或失败/异常轮都会清零
+    let consecutiveNoopIterations = 0;
     // 方案 A §3.10：执行器真实 LLM 请求次数累计（与 token/llmCallCount 解耦，供最终报告审计）
     let totalExecutorLlmRequests = 0;
     let iterIndex = 0;
@@ -1010,6 +1028,47 @@ export class AutonomousOrchestrator {
         } else if (iterationFailed) {
           // failed → 累加 consecutiveFailures（含 tasks.md 完成标记写入失败）
           consecutiveFailures += 1;
+        }
+
+        // 5c.2 连续空转熔断（2026-10-07 新增，修复"成功路径上的空循环"）：
+        // 既有确定性失败熔断（5b.7）只覆盖失败路径，而空循环往往发生在全绿轮：
+        // a) plan success 但未选出任务卡（5b-6.5 已跳过 dev/verify/fix）——典型成因
+        //    是 plan 守卫每轮重触发、清单被旧卡占满，每轮只烧 plan 阶段 LLM token；
+        // b) dev/fix 执行器检出 noop（模型零工具调用 + 零文件变更，"光说不做"）。
+        // 两类轮次都会被记成"成功"，此前只有 maxIterations 兜底。连续达到
+        // NOOP_CIRCUIT_BREAKER_THRESHOLD 即 abort，与失败熔断并列构成双保险。
+        // 真实进展轮（执行了任务卡且非 noop）与失败/异常轮清零计数——失败路径
+        // 由 5b.7 确定性失败熔断与 LoopScheduler 连续失败兜底，不与空转混算。
+        if (!iterationFatal && !iterationFailed) {
+          const devOrFixNoop = iterationResults.some(
+            (r) => (r.stage === "dev" || r.stage === "fix") && r.kind === "success" && r.artifacts["noop"] === true
+          );
+          const isNoopIteration = planTaskCard === null || devOrFixNoop;
+          if (isNoopIteration) {
+            consecutiveNoopIterations += 1;
+            this.log(
+              `AutonomousOrchestrator.run 迭代 ${iterIndex} 空转轮（` +
+                `${planTaskCard === null ? "plan 未选出任务卡" : "dev/fix 执行器检出 noop：零工具调用 + 零文件变更"}），` +
+                `连续空转 ${consecutiveNoopIterations}/${NOOP_CIRCUIT_BREAKER_THRESHOLD}`,
+              "warn"
+            );
+            if (consecutiveNoopIterations >= NOOP_CIRCUIT_BREAKER_THRESHOLD && status === "running") {
+              status = "aborted";
+              finalStatus = "aborted";
+              this.log(
+                `AutonomousOrchestrator.run 迭代 ${iterIndex} 触发连续空转熔断：` +
+                  `连续 ${consecutiveNoopIterations} 轮全绿但零进展（阈值 ${NOOP_CIRCUIT_BREAKER_THRESHOLD}），` +
+                  `status=aborted`,
+                "error"
+              );
+            }
+          } else if (planTaskCard !== null) {
+            // 真实进展：执行了任务卡且非 noop → 清零
+            consecutiveNoopIterations = 0;
+          }
+        } else {
+          // 失败/异常轮：有真实动作，清零空转计数（失败由失败熔断负责）
+          consecutiveNoopIterations = 0;
         }
 
         // 5d. 方案 A §3.6：plan 返回 taskCard=null 时按 reason 精确判定终态。

@@ -398,6 +398,9 @@ export class P5DevStageHandler implements P5StageHandler {
           execution: Object.freeze({ ...execution }),
           changedFiles: Object.freeze([...execution.changedFiles]),
           llmRequests: execution.llmRequests,
+          // 空转透传（2026-10-07）：执行器检出"模型零工具调用 + 零文件变更"时为 true，
+          // 编排器据此计入 consecutiveNoopIterations 空转熔断
+          noop: execution.noop === true,
           tokensEstimated: execution.tokensEstimated,
           executionSummary: execution.summary,
           ...inventoryArtifacts,

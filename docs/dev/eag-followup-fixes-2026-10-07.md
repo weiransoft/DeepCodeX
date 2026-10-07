@@ -206,3 +206,32 @@ P2 改动最大但最独立，先做；P0 最简洁最后做；两个 P1 中间�
 - 改动都在已有测试覆盖范围内（session.test.ts 覆盖 appendSessionMessage；eag-p5-llm-executor.test.ts 覆盖执行器循环；verify-stage-handler-safety.test.ts 覆盖 verify）
 - 增量预算检查需要新增测试：构造 maxTokens=1000 的执行器 + 脚本 20 轮持续调用工具 → 第 5/10/15 轮触发预算超限 → tokensUsed < 1000
 - goal 相关性守卫需要新增测试：残留 T-001 卡（requirement="修复登录"）+ 新 goal="订单退款" → pickNextPendingTask 应拒绝并合成新卡
+
+---
+
+# 附录：空循环多角色 Review 裁决与修复（2026-10-07 第二轮）
+
+## 背景
+
+4 条修复合入（commit 93ba88f7）后，用户反馈 /eag-autonomous "总是空循环"。多角色团队（循环机制审计员 / 规划链路审计员 / 意图入口审计员 / 执行器回路审计员）并行审计，裁决出一条四环根因链。
+
+## 根因链
+
+| # | 优先级 | 根因 | 位置 |
+|---|--------|------|------|
+| 1 | P0 | 3.5 AUTO 卡守卫走"内存态 patched"未落盘，且误将新卡 ID 加入 completedIds——下一轮重读磁盘旧卡仍 pending，守卫每轮重触发；新卡被排除出选取 → 无卡执行 → 空转 | plan-stage-handler.ts 3.5 |
+| 2 | P0 | 执行器把"零工具调用纯文本回复"判 success，不检查 changedFiles——"光说不做"被记为进展 | llm-task-executor.ts 终态分支 |
+| 3 | P1 | 确定性失败熔断只覆盖失败路径；全绿空转轮（无卡轮 / noop 轮）无熔断，只靠 maxIterations 兜底 | autonomous-orchestrator.ts |
+| 4 | P2 | 中文滑窗膨胀使长 goal 易低于 0.3 阈值，守卫过敏放大根因 1 | computeObjectiveRelevance |
+
+## 修复实施
+
+1. **3.5 守卫改磁盘落盘**：旧 AUTO 卡经 `markTaskCardStatusInContent` 真实改写 blocked + 新合成卡追加，`atomicWriteTextFile` 落盘后回读重解析；删除 `patchedCompletedIds.add(newTaskId)`；判重（alreadySynthesized）改用磁盘最新内容解析（避免与 3.4 重复追加同目标卡）；3.5 不再被 3.4 的 synthesized 标志跳过（3.4 追加后旧卡仍会被 ID 升序选中——抢先路径恰在此处）。
+2. **执行器 noop 标记**：零工具调用 + git 零变更 → `P5TaskExecutionResult.noop=true`（success 仍 true）；dev/fix 阶段 handler 将 noop 透传进 artifacts。
+3. **连续空转熔断**：`NOOP_CIRCUIT_BREAKER_THRESHOLD=3`；编排器 5c.2 统计连续"全绿零进展"轮（无卡轮 + noop 轮），达阈值 abort；真实进展轮与失败轮清零。计数器为循环局部变量（resume 后重新计数，代价可接受，不扩展 RunState schema）。
+4. **回归测试**：`eag-p5-noop-loop-fixes.test.ts` 8 用例（N1-N5 守卫落盘/判重/手写卡边界、E-N1/E-N2 noop 标记、O-N1 熔断端到端）。
+
+## 回归结果
+
+- core P5 系列 147/147 绿；web 248/248 绿；tsc 零错误。
+- 未修复（接受现状）：根因 4 相关性算法仅调阈值会引入新误判，本次以根因 1-3 修复阻断空循环主链，根因 4 留待出现实际误判案例再治。
