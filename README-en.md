@@ -36,7 +36,7 @@ Create `~/.deepcode/settings.json`:
 ```json
 {
   "env": {
-    "MODEL": "deepseek-v4-pro",
+    "MODEL": "deepseek-flash",
     "BASE_URL": "https://api.deepseek.com",
     "API_KEY": "sk-..."
   },
@@ -171,7 +171,7 @@ Write a shell notification script that calls a Slack webhook, then set the `noti
 
 ### How do I enable web search?
 
-Deep Code now supports native web search through the [DeepSeek Responses API](https://api-docs.deepseek.com/guides/responses_api/#tools). If you prefer to use a custom script for web search, set the `webSearchTool` field in `~/.deepcode/settings.json` to the full path of your script. For detailed steps, refer to: https://github.com/qorzj/web_search_cli
+Deep Code comes with a built-in, free Web Search tool that works well for most use cases. If you prefer to use a custom script for web search, set the `webSearchTool` field in `~/.deepcode/settings.json` to the full path of your script. For detailed steps, refer to: https://github.com/qorzj/web_search_cli
 
 ### Does it support Coding Plan?
 

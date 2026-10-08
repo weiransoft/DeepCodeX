@@ -189,12 +189,14 @@ export function buildStatusLine(entry: SessionEntry, options?: BuildStatusLineOp
   const rawModel = options?.model ?? inferModelName(entry);
   const model = rawModel.trim();
   if (model) {
+    // 上游 v0.4.3：PLUS 订阅通道命中的会话在模型名后追加 " plus" 标记
+    const plusSuffix = entry.usingPlus ? " plus" : "";
     if (options?.thinkingEnabled !== undefined) {
       // 上游 v0.3.1 格式：无前缀，思考开启时追加 reasoning effort
-      parts.push(options.thinkingEnabled ? `${model} ${options.reasoningEffort}` : model);
+      parts.push(`${options.thinkingEnabled ? `${model} ${options.reasoningEffort}` : model}${plusSuffix}`);
     } else {
       // fork 格式：带 model: 前缀
-      parts.push(`model: ${model}`);
+      parts.push(`model: ${model}${plusSuffix}`);
     }
   }
 

@@ -159,9 +159,7 @@ DeepSeek V4 的 `reasoning_effort` 经 `extra_body` 下发，档位语义由 Dee
 
 #### `webSearchTool` — 自定义联网搜索
 
-未配置 `webSearchTool` 时，如果 `BASE_URL` 是 `https://api.deepseek.com`，Deep Code 会调用 DeepSeek Responses API 的 `web_search` 工具，并固定使用 `deepseek-v4-flash`，不受 `MODEL` 配置影响。其他 API 地址仍使用 Deep Code Web Search API。
-
-如果需要自定义搜索逻辑，可将 `webSearchTool` 设为一个可执行脚本的完整路径。自定义脚本始终优先于内置搜索：
+Deep Code 内置免费可用的 Web Search 工具。如果需要自定义搜索逻辑，可将 `webSearchTool` 设为一个可执行脚本的完整路径：
 
 ```json
 {
@@ -284,3 +282,26 @@ DEEPCODE_TELEMETRY_ENABLED=1 deepcode
 3. 项目级settings.json: `{"mcpServers":{"github":{"env":{"GITHUB_PERSONAL_ACCESS_TOKEN":"..."}}}}`
 4. 项目级settings.json: `{"env": {"MCP_GITHUB_PERSONAL_ACCESS_TOKEN": "..."}}`
 5. 系统环境变量: `DEEPCODE_MCP_GITHUB_PERSONAL_ACCESS_TOKEN=... deepcode`
+
+## DeepCode PLUS 订阅与 LLM 通道
+
+PLUS 独立配置文件为 `~/.deepcode-plus/settings.json`：
+
+```json
+{
+  "subscriptionPlan": "default",
+  "env": { "PLUS_API_KEY": "sk-..." }
+}
+```
+
+PLUS 接口根据去除首尾空白后的 `env.PLUS_API_KEY` 选择域名：`sk-` 后接 24 位字符串时，所有服务使用 `https://deepcode.vegamo.cn`；后接 26 位字符串时，LLM 请求 `/plugin/openai/**`（包括 `/models` 订阅探测和连接预热）使用 `https://chat.deepcodeplus.com`，其余服务使用 `https://www.deepcodeplus.com`，包括网络搜索、图片理解、图片/视频生成、遥测及积分试算。未配置 Key 的匿名插件请求继续使用旧域名。不额外限制 Key 后缀字符类型；已配置但格式无效（包括空字符串或非字符串）时明确报错，`subscriptionPlan=off` 也不例外。 下文 `{llmHost}` 表示选定的 LLM 域名。
+
+`subscriptionPlan` 支持 `default`、`on`、`off`；缺失或非法值按 `default` 处理。普通通道继续使用上文配置层级合并后的 API key 和 base URL。
+
+- `default`：未配置 PLUS key 时使用普通通道；否则每次创建或回复会话前，用 PLUS key 请求 `GET {llmHost}/plugin/openai/models`。200 表示 `full ability`，使用 PLUS；401/403 表示 `api only`，使用普通通道（普通 key 缺失也不回退 PLUS）。其他 HTTP 状态、网络异常或 3 秒超时表示 `unknown`：优先普通 key，未配置普通 key 时使用 PLUS。
+- `on`：直接使用 PLUS key 和 `{llmHost}/plugin/openai`，不执行订阅检查。缺少 PLUS key 时明确报错，不回退普通通道。
+- `off`：固定使用普通通道，不执行订阅检查。
+
+每轮共享同一次订阅检查的选择结果；下一轮重新读取配置并检查。用户取消检查会中止本轮。现有 `/models` 连接预热保留，其结果不影响通道选择，也可能在 `on` 模式发生。
+
+实际使用 PLUS 通道时，CLI 状态栏在模型及推理强度后追加 `plus`，例如 `deepseek-flash max plus`。这些设置只控制 LLM 通道，不改变 PLUS 插件工具自身的凭据规则。

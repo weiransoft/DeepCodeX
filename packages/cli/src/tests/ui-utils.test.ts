@@ -114,3 +114,20 @@ function buildMessage(role: SessionMessage["role"], content: string, visible: bo
     updateTime: "2026-01-01T00:00:00.000Z",
   };
 }
+
+test("buildStatusLine appends plus only for the selected PLUS connection", () => {
+  for (const usingPlus of [undefined, false, true]) {
+    for (const thinkingEnabled of [false, true]) {
+      const entry = { status: "completed", activeTokens: 0, failReason: null, usingPlus } as SessionEntry;
+      assert.equal(
+        buildStatusLine(entry, {
+          model: "deepseek-flash",
+          thinkingEnabled,
+          reasoningEffort: "max",
+          contextWindow: 1024 * 1024,
+        }),
+        `status: completed · deepseek-flash${thinkingEnabled ? " max" : ""}${usingPlus ? " plus" : ""}`
+      );
+    }
+  }
+});

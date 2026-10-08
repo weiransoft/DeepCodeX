@@ -365,7 +365,17 @@ export function filterSlashCommands(items: SlashCommandItem[], token: string): S
   if (!query) {
     return items;
   }
-  return items.filter((item) => item.name.toLowerCase().includes(query));
+  const prefixMatches: SlashCommandItem[] = [];
+  const otherMatches: SlashCommandItem[] = [];
+  for (const item of items) {
+    const name = item.name.toLowerCase();
+    if (name.startsWith(query)) {
+      prefixMatches.push(item);
+    } else if (name.includes(query)) {
+      otherMatches.push(item);
+    }
+  }
+  return [...prefixMatches, ...otherMatches];
 }
 
 /**
