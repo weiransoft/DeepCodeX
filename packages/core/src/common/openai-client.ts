@@ -4,7 +4,10 @@ import * as os from "os";
 import * as path from "path";
 import OpenAI from "openai";
 import { Agent, fetch as undiciFetch } from "undici";
-import { readDeepcodePlusApiKey, resolveCurrentSettings, type ReasoningEffort } from "../settings";
+import { readDeepcodePlusSettings, resolveCurrentSettings, type ReasoningEffort } from "../settings";
+import { resolveOpenAIConnection, withPlusSubscription, type OpenAIConnectionContext } from "./plus-subscription";
+import type { CreateOpenAIClient } from "./tool-types";
+export { resolveOpenAIConnection, DEEPCODE_PLUS_BASE_URL } from "./plus-subscription";
 
 // Custom undici Agent with a 180-second keepAlive timeout.  The default
 // global fetch (undici) only keeps connections alive for 4 seconds, which
@@ -20,33 +23,17 @@ const keepAliveAgent = new Agent({ keepAliveTimeout: 180_000 });
 let cachedOpenAI: OpenAI | null = null;
 let cachedOpenAIKey = "";
 
-/** 上游 v0.3.1 新增：DeepCode Plus 插件通道的固定 baseURL（PLUS_API_KEY 场景） */
-export const DEEPCODE_PLUS_BASE_URL = "https://deepcode.vegamo.cn/plugin/openai";
-
-/**
- * 上游 v0.3.1 新增：解析实际生效的 API 连接信息。
- *
- * 优先级：用户自配 apiKey（任意 baseURL）> plusApiKey（走 DeepCode Plus 通道）。
- * 这样 PLUS_API_KEY 可以作为"无自配 Key 时"的兜底凭据。
- *
- * @param settings 当前解析出的设置（apiKey / baseURL）
- * @param plusApiKey PLUS_API_KEY 环境变量读取结果
- * @returns 实际使用的 apiKey + baseURL 组合
- */
-export function resolveOpenAIConnection(
-  settings: { apiKey?: string; baseURL: string },
-  plusApiKey?: string
-): { apiKey?: string; baseURL: string } {
-  if (settings.apiKey) {
-    return { apiKey: settings.apiKey, baseURL: settings.baseURL };
-  }
-  if (plusApiKey) {
-    return { apiKey: plusApiKey, baseURL: DEEPCODE_PLUS_BASE_URL };
-  }
-  return { apiKey: undefined, baseURL: settings.baseURL };
+export function createOpenAIClientFactory(projectRoot: string = process.cwd()): CreateOpenAIClient {
+  return withPlusSubscription(
+    () => resolveCurrentSettings(projectRoot),
+    (context) => createOpenAIClient(projectRoot, context)
+  );
 }
 
-export function createOpenAIClient(projectRoot: string = process.cwd()): {
+export function createOpenAIClient(
+  projectRoot: string = process.cwd(),
+  context?: OpenAIConnectionContext
+): {
   client: OpenAI | null;
   /** 上游 v0.3.1 新增：实际生效的 apiKey（plusApiKey 兜底后可能来自 PLUS_API_KEY） */
   apiKey?: string;
@@ -64,10 +51,14 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
   machineId?: string;
   /** 上游 v0.3.1 新增：透传 PLUS_API_KEY，供调用方区分计费通道 */
   plusApiKey?: string;
+  usingPlus: boolean;
+  configurationError?: string;
 } {
   const settings = resolveCurrentSettings(projectRoot);
-  const plusApiKey = readDeepcodePlusApiKey();
-  const connection = resolveOpenAIConnection(settings, plusApiKey);
+  const plusSettings = context ? undefined : readDeepcodePlusSettings();
+  const plusApiKey = context ? context.plusApiKey : plusSettings?.apiKey;
+  const connection =
+    context?.connection ?? resolveOpenAIConnection(settings, plusApiKey, plusSettings?.subscriptionPlan);
   if (!connection.apiKey) {
     return {
       client: null,
@@ -84,6 +75,8 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
       env: settings.env,
       machineId: getMachineId(),
       plusApiKey,
+      usingPlus: connection.usingPlus,
+      configurationError: connection.configurationError,
     };
   }
 
@@ -107,6 +100,8 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
       machineId: getMachineId(),
       // 上游 v0.3.1 新增：缓存命中路径同样透传 plusApiKey
       plusApiKey,
+      usingPlus: connection.usingPlus,
+      configurationError: connection.configurationError,
     };
   }
 
@@ -150,6 +145,8 @@ export function createOpenAIClient(projectRoot: string = process.cwd()): {
     machineId: getMachineId(),
     // 上游 v0.3.1 新增：透传 PLUS_API_KEY，供调用方区分计费通道
     plusApiKey,
+    usingPlus: connection.usingPlus,
+    configurationError: connection.configurationError,
   };
 }
 

@@ -140,7 +140,7 @@ export function PermissionPrompt({ requests, onSubmit, onCancel }: Props): React
       </Box>
       <Text bold>{prompt.request.name}</Text>
       <Text>{prompt.request.command}</Text>
-      {prompt.request.description ? <Text dimColor>{prompt.request.description}</Text> : null}
+      {prompt.request.description ? <Text color="cyanBright">{prompt.request.description}</Text> : null}
       <Box marginTop={1}>
         <Text>Do you want to proceed?</Text>
       </Box>

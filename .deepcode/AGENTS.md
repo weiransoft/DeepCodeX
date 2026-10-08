@@ -4,8 +4,8 @@
 
 npm workspaces monorepo; packages live under `packages/`.
 
-- `packages/core/src/` — LLM session (`session.ts`), prompt/tool definitions (`prompt.ts`), settings resolution (`settings.ts`), `tools/` (10 built-in handlers), `common/` (permissions, OpenAI client, DeepSeek Files API, file history), `mcp/`.
-- `packages/cli/src/` — Ink/React terminal UI: `cli.tsx` entry, `ui/views`, `ui/components`, `ui/core`, `ui/hooks`, `tests/`.
+- `packages/core/src/` — LLM session (`session.ts`), prompt/tool definitions (`prompt.ts`), settings resolution (`settings.ts`), `tools/` (10 built-in handlers), `common/` (permissions, OpenAI client, PLUS routing, capabilities, DeepSeek Files API, file history), `mcp/`, `templates/`.
+- `packages/cli/src/` — Ink/React terminal UI: `cli.tsx` entry, `cli-args.ts`, `ui/views`, `ui/components`, `ui/core`, `ui/hooks`, `tests/`.
 - `packages/vscode-ide-companion/` — VSCode extension companion.
 - `docs/` — user documentation; `scripts/` — build/release tooling; `dist/` — bundled CLI output (gitignored).
 
@@ -89,7 +89,7 @@ Run the CLI locally for manual testing: `node packages/cli/dist/cli.js` (after `
 
 ## Architecture Overview
 
-The CLI (`@vegamo/deepcode-cli`) renders a terminal UI using [Ink](https://github.com/vadimdemedes/ink) (React for terminals). `SessionManager` (in `@vegamo/deepcode-core`) drives the LLM interaction loop: it builds system prompts, sends user messages with optional skills/images, streams responses, executes tool calls via `ToolExecutor`, and compacts context when token thresholds are exceeded (512K for DeepSeek V4 models, 128K for others). OpenAI client connectivity is managed by `createOpenAIClient()` with a 180-second keep-alive timeout and a DeepCode Plus fallback (`plusApiKey`); API errors are normalized through `describeLlmError()` in `packages/core/src/common/llm-error.ts`, which produces credential-safe, structured error details.
+The CLI (`@vegamo/deepcode-cli`) renders a terminal UI using [Ink](https://github.com/vadimdemedes/ink) (React for terminals). `SessionManager` (in `@vegamo/deepcode-core`) drives the LLM interaction loop: it builds system prompts, sends user messages with optional skills/images, streams responses, executes tool calls via `ToolExecutor`, and compacts context when token thresholds are exceeded (512K for DeepSeek V4 models, 128K for others). OpenAI client connectivity is managed by `createOpenAIClient()` / `createOpenAIClientFactory()` (with `withPlusSubscription` wrapper, upstream v0.4.3) with a 180-second keep-alive timeout and a DeepCode Plus fallback (`plusApiKey`); API errors are normalized through `describeLlmError()` in `packages/core/src/common/llm-error.ts`, which produces credential-safe, structured error details.
 
 Ten built-in tools are available to the LLM: `bash`, `read`, `write`, `edit`, `skill`, `AskUserQuestion`, `UpdatePlan`, `WebSearch`, `ReadImage`, and `UnderstandImage`. The `read` tool returns a `snippet_id` that must be passed to subsequent `edit` calls, ensuring edits always operate on a known, session-local file snapshot. Tool definitions are registered in `packages/core/src/tools/executor.ts` and described to the LLM via `packages/core/src/prompt.ts`.
 
@@ -110,6 +110,8 @@ A **file history system** (`packages/core/src/common/file-history.ts`) provides 
 **CLI flags**: `-p <prompt>` / `--prompt` to auto-submit a prompt on launch, `-x` / `--exec` to run one prompt non-interactively (requires `--prompt`), `-r [sessionId]` / `--resume [sessionId]` to resume a session or show the session picker, `-f [sessionId]` / `--fork [sessionId]` to fork a session (most recent by default), `-l` / `--last` to resume the most recent session for the current project, `-v` / `--version`, `-h` / `--help`.
 
 **Logging**: unified log directory `~/.deepcodex/logs` (the legacy `~/.deepcode/logs` remains read-only compatible).
+
+**PLUS routing**（上游 v0.4.3，`common/plus-subscription.ts`）：`~/.deepcode-plus/settings.json` 提供 `subscriptionPlan`（`default`/`on`/`off`）与 `env.PLUS_API_KEY`（`sk-` + 24/26 字符）；Key 长度决定宿主（`deepcode.vegamo.cn` / `www.deepcodeplus.com`），由 web search、遥测共享。`bash` 在退出/超时后对输出 drain 设界；新 `write`/`edit` 文件遵循 Git `eol` 属性，否则用平台默认换行。权限体系含 12 个 scope（含 `read-in-tmp`/`write-in-tmp`），`addWorkingDirs` 可扩展工作区。
 
 ## Agent-Specific Instructions
 
