@@ -799,6 +799,53 @@ test("B6. AutonomousOrchestrator run() failed 终止条件（迭代次数用尽�
   }
 });
 
+test("B6b. blockageReport.summary 如实反映 Token 预算耗尽（修复 2026-10-08 误导性报告）", async () => {
+  const projectRoot = createTempProject();
+  try {
+    // 注意：**故意不创建 tasks.md**——plan 首轮从 objective 真实合成单卡清单
+    // （合成轮不消耗 token），dev 轮才消耗固定 token，终止路径可精确构造。
+    createDeclaredFile(projectRoot, "src/services/Service1.ts");
+
+    // dev/fix 执行器替身（与 fixtures 工厂同语义：仅替代 LLM 网络往返，
+    // 文件系统/tasks.md 状态机/guardChain/orchestrator 调度全部真实）：
+    // 每次消耗 30_000 token 且 success=false。
+    // 迭代 1：plan 合成 0 + dev 30_000 + verify（合成卡无测试目标 skip）0
+    // + fix 30_000 = 60_000；迭代 2：plan 选中同一卡（dev 失败 → 5c 不标
+    // completed → 仍 pending）+ dev 30_000 → 阶段循环**内部**累计 90_000
+    // ≥ 60_000 → 5b.7 前置 Token 检查（本次修复核心）在 verify/fix 之前
+    // 即触发终止。summary 必须如实写 Token 预算耗尽，不得再以
+    // "确定性失败熔断/连续失败"口径掩盖（真实事故误导排查的根因）。
+    const tokenBurnExecutor = createAlwaysSucceedTaskExecutor({
+      success: false,
+      error: "桩失败（Token 预算用例）",
+      tokensUsed: 30_000,
+      llmRequests: 1,
+    });
+    const orchestrator = buildOrchestrator({ taskExecutor: tokenBurnExecutor });
+
+    const result = await orchestrator.run({
+      projectRoot,
+      objective: "测试 Token 预算耗尽终止条件",
+      maxIterations: 5,
+      consecutiveFailureAbort: 99,
+      // 30_000 = 生产下限（上限不可自改护栏校验区间 [1000, +∞)），
+      // 迭代 1 累计 60_000 已超限——迭代 2 阶段循环内即触发轮内增量检查
+      maxTokens: 30_000,
+      testCommand: FAIL_TEST_CMD,
+      testTimeoutSec: 10,
+    });
+
+    assert.equal(result.finalStatus, "aborted");
+    assert.ok(result.blockageReport !== undefined);
+    const summary = result.blockageReport!.summary;
+    assert.ok(summary.includes("Token 预算"), `summary 必须如实写 Token 预算耗尽，实际：${summary}`);
+    // 不得误写"连续失败 N 次触发 abort"（误导性报告是修复对象）
+    assert.ok(!/连续失败 \d+ 次触发 abort/.test(summary), `summary 不得再误导为连续失败，实际：${summary}`);
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
+});
+
 test("B7. AutonomousOrchestrator run() request 校验失败（projectRoot 缺失）", async () => {
   const orchestrator = buildOrchestrator();
 

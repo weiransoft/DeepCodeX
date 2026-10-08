@@ -771,6 +771,12 @@ export class AutonomousOrchestrator {
     let finalStatus: "completed" | "failed" | "aborted" | "stop_when" = "failed";
     let lastFatalStage: P5StageKind | null = null;
     let lastFatalReason = "";
+    // 运行终止真实原因（2026-10-08 修复"报告误导排查"，分析报告 run 4923fdc21e5b）：
+    // 记录最先置终态的判定来源（LoopScheduler stop_failure reason / 确定性失败
+    // 熔断 / 空转熔断 / 任务阻塞等）。此前报告 summary 恒按"连续失败 N 次触发
+    // abort"口径输出，Token 预算熔断（原因在 scheduler decision.reason 里，只进
+    // 进程日志不进报告）被掩盖成"连续失败 1 次 abort"，直接误导根因排查。
+    let abortReason = "";
     const milestones: P5MilestoneRecord[] = [];
     const triggeredGuards: GuardRecord[] = [];
     const completedLoops: P5LoopType[] = [];
@@ -913,6 +919,26 @@ export class AutonomousOrchestrator {
             totalExecutorLlmRequests += result.artifacts["llmRequests"] as number;
           }
 
+          // Token 预算轮内增量检查（P1 修复 2026-10-08，分析报告 run 4923fdc21e5b）：
+          // 真实事故：maxIterations=10 且单轮 dev 40 回合烧 877,542 token——预算
+          // 200,000 被击穿 4.4 倍才在迭代末尾熔断。根因：预算检查只在每迭代一次
+          // 的 5b.7 调度点执行，一轮（4 阶段 × 每阶段数十回合）烧完全量才 check。
+          // 现在每阶段执行完毕即检查剩余预算：耗尽立即中止本迭代阶段循环并置
+          // aborted（口径与 5b.7 前置检查完全一致），把超烧窗口从"整轮迭代"
+          // 收窄到"单个阶段"。skip 阶段 tokensUsed=0 不触发；plan/verify 0 token
+          // 阶段零开销。
+          if (totalTokensUsed >= maxTokens) {
+            status = "aborted";
+            finalStatus = "aborted";
+            abortReason = `Token 预算耗尽：${totalTokensUsed} >= ${maxTokens}（阶段 ${stage} 执行后增量检查）`;
+            this.log(
+              `AutonomousOrchestrator.run 迭代 ${iterIndex} 阶段 ${stage} 执行后 Token 预算耗尽` +
+                `（累计 ${totalTokensUsed} >= 上限 ${maxTokens}），中止本迭代剩余阶段，status=aborted`,
+              "error"
+            );
+            break;
+          }
+
           // 5b-4. 提取 plan 阶段产出的任务卡与合成标志
           if (stage === "plan" && result.kind === "success") {
             planTaskCard = (result.artifacts["taskCard"] as TaskCard | null) ?? null;
@@ -924,6 +950,9 @@ export class AutonomousOrchestrator {
             iterationFatal = true;
             lastFatalStage = stage;
             lastFatalReason = result.error ?? result.summary;
+            if (abortReason.length === 0) {
+              abortReason = `${stage} 阶段致命错误：${lastFatalReason}`;
+            }
             this.log(`AutonomousOrchestrator.run 迭代 ${iterIndex} 阶段 ${stage} fatal：${lastFatalReason}`, "error");
             break;
           }
@@ -969,6 +998,12 @@ export class AutonomousOrchestrator {
           // 完全相同的迭代——每轮 12 个工具回合纯烧 token 的确定性重复执行。
           // 指纹 = 本轮 plan 选中的任务卡 ID + 全部阶段失败信息（[stage] kind:
           // error/summary 有序列表）；全绿轮（findings 为空）清除计数。
+          //
+          // 2026-10-08 修订（分析报告 run 4923fdc21e5b）：Token 预算终止已由
+          // 阶段循环内的轮内增量检查统一负责（每阶段累加后即 check，status
+          // 置 aborted → 外层 5b.7 整块跳过），本处只做非 Token 路径的调度；
+          // 此前 identical-failure 熔断会抢先于 Token 预算终止，导致预算耗尽的
+          // run 以"确定性失败"口径写报告，误导排查。
           if (loopVerdict.passed || loopVerdict.findings.length === 0) {
             lastFailureFingerprint = null;
             identicalFailureStreak = 0;
@@ -984,6 +1019,9 @@ export class AutonomousOrchestrator {
           if (!loopVerdict.passed && identicalFailureStreak >= IDENTICAL_FAILURE_CIRCUIT_BREAKER_THRESHOLD) {
             status = "aborted";
             finalStatus = "aborted";
+            abortReason =
+              `确定性失败熔断：同一任务卡 + 相同失败连续 ${identicalFailureStreak} 次` +
+              `（阈值 ${IDENTICAL_FAILURE_CIRCUIT_BREAKER_THRESHOLD}），继续重试只会重复消耗`;
             this.log(
               `AutonomousOrchestrator.run 迭代 ${iterIndex} 触发确定性失败熔断：` +
                 `同一任务卡 + 相同失败连续 ${identicalFailureStreak} 次` +
@@ -1014,6 +1052,7 @@ export class AutonomousOrchestrator {
             if (schedulingDecision.action === "human_checkpoint") {
               status = "aborted";
               finalStatus = "aborted";
+              abortReason = `LoopScheduler human_checkpoint（P5 无人值守不等待人工，直接终止）：${schedulingDecision.reason}`;
               this.log(
                 `AutonomousOrchestrator.run 迭代 ${iterIndex} LoopScheduler 触发 human_checkpoint，status=aborted`,
                 "error"
@@ -1026,6 +1065,9 @@ export class AutonomousOrchestrator {
               if (!isMaxIterationsReached) {
                 status = "aborted";
                 finalStatus = "aborted";
+                // scheduler reason 原样透出（"Token 预算耗尽：877542 >= 200000" /
+                // "连续失败 N 次，终止 Loop"等），报告不再用统一"连续失败"口径
+                abortReason = `LoopScheduler stop_failure：${schedulingDecision.reason}`;
                 this.log(
                   `AutonomousOrchestrator.run 迭代 ${iterIndex} LoopScheduler 触发 stop_failure（${schedulingDecision.reason}），status=aborted`,
                   "error"
@@ -1114,6 +1156,9 @@ export class AutonomousOrchestrator {
             if (consecutiveNoopIterations >= NOOP_CIRCUIT_BREAKER_THRESHOLD && status === "running") {
               status = "aborted";
               finalStatus = "aborted";
+              abortReason =
+                `连续空转熔断：连续 ${consecutiveNoopIterations} 轮全绿但零进展` +
+                `（阈值 ${NOOP_CIRCUIT_BREAKER_THRESHOLD}，判据=模型未发起任何工具调用）`;
               this.log(
                 `AutonomousOrchestrator.run 迭代 ${iterIndex} 触发连续空转熔断：` +
                   `连续 ${consecutiveNoopIterations} 轮全绿但零进展（阈值 ${NOOP_CIRCUIT_BREAKER_THRESHOLD}），` +
@@ -1159,6 +1204,7 @@ export class AutonomousOrchestrator {
                 ? (planResult.artifacts["blockedCardIds"] as unknown[]).map(String).join(", ")
                 : "";
               lastFatalReason = `任务被阻塞，无可执行的 pending 任务卡${blockedIds ? `（blocked: ${blockedIds}）` : ""}`;
+              abortReason = lastFatalReason;
               this.log(`AutonomousOrchestrator.run 迭代 ${iterIndex} ${lastFatalReason}`, "error");
             } else {
               // TASKS_FILE_NOT_FOUND / NO_TASK_CARDS / 其他未知 reason：不再误报 completed
@@ -1172,6 +1218,7 @@ export class AutonomousOrchestrator {
                   : planReason === PLAN_REASON_NO_TASK_CARDS
                     ? "tasks.md 存在但解析不到任何任务卡"
                     : `plan 阶段未产出可执行任务卡（reason=${String(planReason ?? "unknown")}）`;
+              abortReason = lastFatalReason;
               this.log(`AutonomousOrchestrator.run 迭代 ${iterIndex} ${lastFatalReason}`, "error");
             }
           }
@@ -1260,6 +1307,7 @@ export class AutonomousOrchestrator {
       if (status === "running") {
         status = "failed";
         finalStatus = "failed";
+        abortReason = `迭代次数用尽（${maxIterations} 轮）仍未达成完成条件`;
         this.log(`AutonomousOrchestrator.run 迭代次数用尽（${maxIterations}），finalStatus=failed`, "warn");
         // P1-1 修复：迭代用尽时持久化 status="failed" 到 RunState
         // 否则 status/stop 查询会读到过期的 "running" 状态
@@ -1305,6 +1353,7 @@ export class AutonomousOrchestrator {
         maxIterations,
         lastFatalStage,
         lastFatalReason,
+        abortReason,
         changedFiles,
         gitAttributionAvailable,
       });
@@ -1317,6 +1366,7 @@ export class AutonomousOrchestrator {
               loopType: initialLoop,
               lastFatalStage,
               lastFatalReason,
+              abortReason,
               consecutiveFailures,
               triggeredGuards,
             })
@@ -3022,6 +3072,12 @@ export class AutonomousOrchestrator {
     readonly maxIterations: number;
     readonly lastFatalStage: P5StageKind | null;
     readonly lastFatalReason: string;
+    /**
+     * 运行终止真实原因（2026-10-08 修复报告误导，分析报告 run 4923fdc21e5b）：
+     * 最先置终态的判定来源原文（Token 预算耗尽 / 连续失败 / 确定性熔断 /
+     * 空转熔断 / 任务阻塞 / 迭代用尽）。空串 = 正常完成或未知路径。
+     */
+    readonly abortReason: string;
     /** 变更文件清单（与 AutonomousRunResult.changedFiles 同源，2026-10-07） */
     readonly changedFiles: ReadonlyArray<RunFileChange>;
     /** git 归因是否可用（false = 非 git 仓库，清单段标注不可用而非"无变更"） */
@@ -3042,6 +3098,12 @@ export class AutonomousOrchestrator {
     lines.push(`- **连续失败次数**：${args.consecutiveFailures}`);
     lines.push(`- **里程碑数**：${args.milestones.length}`);
     lines.push(`- **触发护栏数**：${args.triggeredGuards.length}`);
+    // 终止真实原因行（2026-10-08 修复报告误导，分析报告 run 4923fdc21e5b）：
+    // 非 completed 终态必打——"Token 预算耗尽"与"连续失败 N 次"是两种
+    // 完全不同的排查方向，报告不再把后者强加于前者。
+    if (args.finalStatus !== "completed") {
+      lines.push(`- **终止原因**：${args.abortReason.length > 0 ? args.abortReason : "未知（未记录终态判定来源）"}`);
+    }
     lines.push("");
 
     if (args.lastFatalStage !== null) {
@@ -3127,6 +3189,8 @@ export class AutonomousOrchestrator {
     readonly loopType: P5LoopType;
     readonly lastFatalStage: P5StageKind | null;
     readonly lastFatalReason: string;
+    /** 运行终止真实原因（见 generateFinalReport.abortReason 注释，2026-10-08） */
+    readonly abortReason: string;
     readonly consecutiveFailures: number;
     readonly triggeredGuards: ReadonlyArray<GuardRecord>;
   }): Readonly<P5BlockageReport> {
@@ -3150,6 +3214,16 @@ export class AutonomousOrchestrator {
       rootCauseHypotheses.push("迭代次数用尽但未识别明确根因");
     }
 
+    // Token 预算/空转/确定性熔断类终止的根因假设（2026-10-08 修复报告误导）：
+    // abortReason 含"Token 预算耗尽"时单列根因，避免只剩"连续失败"误导
+    if (args.abortReason.includes("Token 预算耗尽")) {
+      rootCauseHypotheses.unshift(
+        `Token 预算熔断：累计消耗已达上限（终止原因原文：${args.abortReason}）——` +
+          `多为未终态长循环每轮全量回传历史所致，考虑提高 --max-tokens 或缩短单任务轮数上限`
+      );
+      suggestedSolutions.unshift("提高 --max-tokens 预算（部署/多步骤类任务建议 ≥1M），或减小单任务范围");
+    }
+
     // 建议方案生成
     if (args.lastFatalStage === "plan") {
       suggestedSolutions.push("检查 tasks.md 格式与任务卡完整性");
@@ -3170,10 +3244,16 @@ export class AutonomousOrchestrator {
       suggestedSolutions.push("检查日志与 notes.md 获取详细执行记录");
     }
 
+    // summary 口径（2026-10-08 修复报告误导，分析报告 run 4923fdc21e5b）：
+    // 优先输出真实终止原因（Token 预算耗尽/空转熔断等），不再恒按
+    // "连续失败 N 次触发 abort"——Token 熔断时连续失败可能只有 1 次，
+    // 旧文案把真实原因掩盖成失败重试问题，直接误导根因排查。
     const summary =
-      args.lastFatalStage !== null
-        ? `${args.lastFatalStage} 阶段致命错误（连续失败 ${args.consecutiveFailures} 次）`
-        : `连续失败 ${args.consecutiveFailures} 次触发 abort`;
+      args.abortReason.length > 0
+        ? args.abortReason
+        : args.lastFatalStage !== null
+          ? `${args.lastFatalStage} 阶段致命错误（连续失败 ${args.consecutiveFailures} 次）`
+          : `连续失败 ${args.consecutiveFailures} 次触发 abort`;
 
     return Object.freeze({
       runId: args.runId,

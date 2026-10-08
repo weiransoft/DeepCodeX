@@ -31,6 +31,7 @@ import { execFileSync } from "node:child_process";
 import { LlmTaskExecutor } from "../eag/p5/index";
 import type { P5TaskExecutionInput } from "../eag/p5/index";
 import { StubLlmClient } from "./fixtures/stub-llm-client";
+import type { SessionMessage } from "../session";
 
 // ============================================================================
 // 1. 真实临时 git 项目夹具
@@ -145,6 +146,173 @@ test("E1. write 工具真实落盘 → 终态：success、llmRequests=2、token 
     cleanup(projectRoot);
   }
 });
+
+// ============================================================================
+// 2.5 自压缩重放（2026-10-08 修复"未终态 run 请求规模不收敛"）：
+//     私有方法经原型访问测试——与模块内既有 generateSynthesizedTaskId
+//     测试模式一致；断言只用公开行为事实（消息规模/协议合法性），
+//     不触碰实现细节。
+// ============================================================================
+
+/** 构造一条测试用 SessionMessage（与执行器内部构造器同形，仅测试视图） */
+function makeMessage(role: SessionMessage["role"], content: string, messageParams: unknown = null): SessionMessage {
+  const now = new Date().toISOString();
+  return {
+    id: `msg-${Math.random().toString(36).slice(2)}`,
+    sessionId: "compact-unit-test",
+    role,
+    content,
+    contentParams: null,
+    messageParams,
+    compacted: false,
+    visible: true,
+    createTime: now,
+    updateTime: now,
+  };
+}
+
+/** 访问执行器私有压缩方法（测试视图，不改变生产行为） */
+function compactWith(executor: LlmTaskExecutor, messages: ReadonlyArray<SessionMessage>): SessionMessage[] {
+  return (
+    executor as unknown as { compactMessagesForRequest(m: ReadonlyArray<SessionMessage>): SessionMessage[] }
+  ).compactMessagesForRequest(messages);
+}
+
+/** 消息序列内容总字符数 */
+function totalContentChars(messages: ReadonlyArray<SessionMessage>): number {
+  return messages.reduce((sum, m) => sum + (typeof m.content === "string" ? m.content.length : 0), 0);
+}
+
+test("E1c. compactMessagesForRequest 短历史直通：≤3 条消息原样返回（引用不同、内容相同）", () => {
+  const executor = new LlmTaskExecutor({ projectRoot: "/tmp", createLlmClient: () => null as never });
+  const messages = [makeMessage("system", "sys"), makeMessage("user", "任务卡")];
+  const compacted = compactWith(executor, messages);
+  assert.equal(compacted.length, 2);
+  assert.deepEqual(
+    compacted.map((m) => m.content),
+    messages.map((m) => m.content)
+  );
+});
+
+test("E1d. compactMessagesForRequest 单条大 tool 输出 → 截断至上限且保留头部原文", () => {
+  const executor = new LlmTaskExecutor({ projectRoot: "/tmp", createLlmClient: () => null as never });
+  const big = "Q".repeat(9_000);
+  const messages = [
+    makeMessage("system", "sys"),
+    makeMessage("user", "任务卡：修复解析失败问题"),
+    makeMessage("assistant", "", {
+      tool_calls: [{ id: "c1", type: "function", function: { name: "bash", arguments: "{}" } }],
+    }),
+    makeMessage("tool", big, { tool_call_id: "c1" }),
+    makeMessage("assistant", "", {
+      tool_calls: [{ id: "c2", type: "function", function: { name: "bash", arguments: "{}" } }],
+    }),
+    makeMessage("tool", "tail".repeat(10), { tool_call_id: "c2" }),
+  ];
+  const compacted = compactWith(executor, messages);
+  const toolBig = compacted[3]!;
+  assert.ok(toolBig.content!.length < big.length, "tool 内容必须被截断");
+  assert.ok(toolBig.content!.startsWith("QQQQ"), "截断必须保留头部原文（信息优先）");
+  assert.ok(toolBig.content!.includes("已截断"), "必须带截断尾注");
+  // 协议合法性：assistant/tool 配对数量不变
+  assert.equal(compacted.filter((m) => m.role === "tool").length, 2);
+  assert.equal(compacted.filter((m) => m.role === "assistant").length, 2);
+});
+
+test("E1e. compactMessagesForRequest 大量大 tool 输出 → 总量收敛到预算内且保护最近 4 条与锚点", () => {
+  const executor = new LlmTaskExecutor({ projectRoot: "/tmp", createLlmClient: () => null as never });
+  // 20 轮各 30K 的互不相同 tool 输出（总量 600K >> TOOL_RESULTS_BUDGET_CHARS=100K）
+  const rounds = 20;
+  const perRound = 30_000;
+  const messages: SessionMessage[] = [
+    makeMessage("system", "sys"),
+    makeMessage("user", "任务卡：部署 MinIO 到 29 号服务器"),
+  ];
+  const originalToolContents: string[] = [];
+  for (let i = 0; i < rounds; i += 1) {
+    const payload = `${i}:`.padEnd(perRound, "x");
+    originalToolContents.push(payload);
+    messages.push(
+      makeMessage("assistant", "", {
+        tool_calls: [{ id: `c${i}`, type: "function", function: { name: "bash", arguments: `{"i":${i}}` } }],
+      })
+    );
+    messages.push(makeMessage("tool", payload, { tool_call_id: `c${i}` }));
+  }
+  const compacted = compactWith(executor, messages);
+
+  // 1. 消息条数不变（丢弃=内容替换占位，绝不影响协议配对结构）
+  assert.equal(compacted.length, messages.length);
+  // 2. 总量收敛到预算内
+  assert.ok(totalContentChars(compacted) <= 100_000, `压缩后必须 ≤100K，实际 ${totalContentChars(compacted)}`);
+  // 3. system 与任务卡锚点原文保留
+  assert.equal(compacted[0]!.content, "sys");
+  assert.equal(compacted[1]!.content, "任务卡：部署 MinIO 到 29 号服务器");
+  // 4. 最近 4 条 tool（c16-c19）不得被第 2 级"上下文压缩"丢弃（允许第 0 级截断）
+  const toolMsgs = compacted.filter((m) => m.role === "tool");
+  for (let k = rounds - 4; k < rounds; k += 1) {
+    assert.ok(!toolMsgs[k]!.content!.includes("上下文压缩"), `最近 4 条 tool（第 ${k} 轮）不得被丢弃为占位`);
+    // 头部信息保留原则：截断保留头部原文；丢弃占位以（开头。最近 4 条必须含头部
+    assert.ok(
+      toolMsgs[k]!.content!.startsWith(`${k}:`.padEnd(8, "x").slice(0, 8)),
+      `最近 4 条 tool（第 ${k} 轮）必须保留头部原文（截断可、丢弃不可）`
+    );
+  }
+  // 5. 最老 tool 之一已被压缩（第 0 级截断或第 2 级丢弃占位都算收敛生效）
+  const oldTools = toolMsgs.slice(0, rounds - 4);
+  assert.ok(
+    oldTools.every((m) => m.content!.length <= 4_100),
+    "最老 tool 必须全部收敛到 4K 上限附近（截断或占位）"
+  );
+  // 6. 原始数组不被篡改（审计事实源）
+  assert.equal(messages[3]!.content!.length, perRound, "原始消息数组必须只读不被篡改");
+});
+
+test("E1f. 端到端：多轮大输出后，第 4 轮请求消息规模必须显著低于全量基线", async () => {
+  const projectRoot = createGitProject();
+  try {
+    // 用 bash cat 制造真实大文本 tool 输出（read 工具结果是 JSON envelope，
+    // 60K 文件也被工具层收敛；bash 结果体积由脚本输出直接决定）。
+    const bigOutput = Array.from({ length: 2000 }, (_, i) => `line-${i}-Z`.padEnd(30, "Z")).join("\n");
+    const uniqOutput = Array.from({ length: 2000 }, (_, i) => `line-${i}-Y`.padEnd(30, "Y")).join("\n");
+    const client = new StubLlmClient([
+      { content: "", toolCalls: [{ name: "bash", args: { command: `cat ${path.join(projectRoot, "big1.txt")}` } }] },
+      { content: "", toolCalls: [{ name: "bash", args: { command: `cat ${path.join(projectRoot, "big2.txt")}` } }] },
+      { content: "", toolCalls: [{ name: "bash", args: { command: `cat ${path.join(projectRoot, "big3.txt")}` } }] },
+      { content: "基线读取完成。" },
+    ]);
+    fs.writeFileSync(path.join(projectRoot, "big1.txt"), bigOutput);
+    fs.writeFileSync(path.join(projectRoot, "big2.txt"), bigOutput);
+    fs.writeFileSync(path.join(projectRoot, "big3.txt"), uniqOutput);
+    const executor = new LlmTaskExecutor({ projectRoot, createLlmClient: () => client });
+
+    const result = await executor.executeTask(buildExecutionInput(projectRoot));
+    assert.equal(result.success, true);
+
+    // 第 4 轮请求时刻：轮 1（big1）+ 轮 2（big2）+ 轮 3（big3）三条 60K tool
+    // 结果已回传，全量基线 ≈180K；压缩生效则必须 <100K（收敛趋势核心断言）。
+    const finalRequest = client.getRequests()[3]!;
+    const toolMsgs = finalRequest.messages.filter((m) => m.role === "tool");
+    assert.equal(toolMsgs.length, 3);
+    for (const tm of toolMsgs) {
+      assert.ok(tm.content!.length < 5_000, `大 tool 结果必须截断至 4K 上限附近，实际 ${tm.content!.length}`);
+      assert.ok(tm.content!.includes("line-0-"), "截断必须保留头部原文");
+      assert.ok(tm.content!.includes("已截断"), "截断必须带可恢复尾注");
+    }
+    assert.ok(
+      totalContentChars(finalRequest.messages) < 100_000,
+      `第 4 轮请求必须 <100K（全量基线 ≈180K），实际 ${totalContentChars(finalRequest.messages)}`
+    );
+    // 协议合法性：assistant/tool 配对数量不变
+    assert.equal(finalRequest.messages.filter((m) => m.role === "assistant").length, 3);
+  } finally {
+    cleanup(projectRoot);
+  }
+});
+
+// ============================================================================
+// 3. 测试用例（E2 起为既有边界断言）
+// ============================================================================
 
 test("E2. 越权 write（projectRoot 外绝对路径）：权限钩子 deny，文件绝不创建，任务仍可诚实终态", async () => {
   const projectRoot = createGitProject();
