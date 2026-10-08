@@ -8,6 +8,55 @@
 
 （本版本暂无变更。）
 
+## [0.4.3.14] - 2026-10-08
+
+补丁版（EAG 自主运行 Token 预算轮内增量 + 执行器请求历史自压缩 + 终止原因如实报告 + 失败目标拦截确认逃生门死循环修复）。
+
+### Fixed
+- **单轮烧穿 Token 预算 4.4 倍才熔断**（packages/core/src/eag/p5/autonomous-orchestrator.ts）：
+  真实事故 run 4923fdc21e5b——maxIterations=10 但首轮 dev 阶段 40 工具回合烧 877,542 token
+  （≈ maxTokens=200K 的 4.4 倍），预算检查只在每迭代一次的 5b.7 调度点执行，整轮烧完才停。
+  修复：阶段循环内每阶段执行完毕累加后立即检查预算，耗尽即中止本迭代剩余阶段并置
+  aborted；超烧窗口从"整轮迭代"收窄到"单个阶段"。
+- **终止原因误导报告**（autonomous-orchestrator.ts）：Token 预算耗尽的 run 被前置的
+  确定性失败指纹熔断抢先以"确定性失败熔断/连续失败 1 次"口径写 blockageReport.summary，
+  掩盖真实终止原因。修复：Token 预算终止由轮内增量检查统一负责（status 置 aborted 后
+  5b.7 整块跳过），summary 如实透出"Token 预算耗尽：N >= M"。
+- **未终态 run 每轮请求规模不收敛**（packages/core/src/eag/p5/executors/llm-task-executor.ts）：
+  messages 全量回传 + 工具输出逐轮累积 → 每轮输入规模单调递增（≈O(n²) 总量）。新增
+  自压缩重放（默认开启，对齐 Claude Code auto-compact / OpenAI Agents SDK trimming 的
+  "请求前估算 + 确定性删除/摘要最旧段"实践）：确定性四级降级（去重 → tool 截断 4K →
+  最老 tool 丢弃 → 兜底裁剪），零额外 LLM 请求；compactReplay=false 仅供单测隔离断言。
+- **指纹计算污染**（llm-task-executor.ts）：重复调用熔断指纹必须基于原始完整
+  response.toolCalls 计算，绝不能用压缩后回传内容——第三级压缩省略最老 tool 结果会让
+  同一重复调用的指纹随压缩进度漂移产生伪重复。
+
+### Added
+- 回归测试：eag-p5-autonomous-orchestrator B6b（Token 预算耗尽 summary 如实性 +
+  轮内增量检查不抢先熔断）、eag-p5-llm-executor E7~E10（压缩后规模收敛、协议合法、
+  开关隔离、指纹稳定）。
+- **失败目标拦截确认死循环**（packages/core/src/session.ts、
+  packages/core/src/eag/dynamic/prompts/eag-suggestion-prompt.ts）：拦截提示明确指引
+  "回复执行这个"，用户照做后系统每轮都再要求确认——正常命令也无法执行。根因链三环闭合：
+  ① notifyFailedGoalBlocked 只 onAssistantMessage 不落盘，拦截提示阅后即焚，触发层决策
+  LLM 的 recentMessages 与主对话 LLM 上下文都看不到"等待确认"状态；② 触发层 LLM 缺语境
+  时把"执行这个"误判为同目标 execute_command（又命中守卫再拦截）或 direct_chat；③ direct_chat
+  接管后主对话 LLM 无命令派发能力，只口头"假装执行"。修复（双保险）：
+  - notifyFailedGoalBlocked 改 appendSessionMessage + onAssistantMessage 双写落盘，
+    提问文案明确"直接回复『执行这个』我将立即重新发起"；
+  - handleUserPrompt 的 direct_chat 分支（触发层未处理、主对话 LLM 前）新增确定性确认通道：
+    存在待确认逃生门快照且输入以确认短语开头（新增 CONFIRM_EXECUTE_PREFIXES /
+    startsWithConfirmExecutePhrase）→ consumeConfirmPreviousDecision 消费快照派发，
+    与触发层 confirm_previous 同一消费语义；
+  - 触发层 prompt 规则 3 扩展：最近 assistant 为拦截等待确认提示时，确认短语必须
+    confirm_previous，禁止 execute_command（防再入拦截循环）；
+  - 删除死代码 hasFailedAutonomousRun。
+
+### Added
+- 回归测试：session-eag-goal-failure-guard N8a/N8b/N8c（确认短语纯函数、事故复刻、
+  拦截提示双写落盘）、session-eag-llm-trigger N9（prompt 优先级规则）；设计文档
+  docs/dev/eag-followup-fixes-2026-10-07.md 附录 C。
+
 ## [0.4.3.13] - 2026-10-07
 
 补丁版（EAG 自主运行"空循环"专项修复：无人值守输出持久化 + 多角色 review 四根因 + 多指令会话端到端测试）。

@@ -365,6 +365,14 @@ export interface LlmTaskExecutorOptions {
    * 契约（超时/异常一律按拒绝）见 task-executor-port.ts。
    */
   readonly dangerousCommandApproval?: P5DangerousCommandApproval;
+  /**
+   * 自压缩重放开关（可选，默认 true，2026-10-08）。
+   *
+   * 语义见类字段 compactReplayEnabled 注释。设为 false 时执行器按原始
+   * 全量历史回传——仅供单测在断言"压缩前行为基线"（如 E7 轮数上限、
+   * 相同调用熔断的指纹连续性）时显式关闭，生产路径不得关闭。
+   */
+  readonly compactReplay?: boolean;
 }
 
 // ============================================================================
@@ -401,6 +409,40 @@ export class LlmTaskExecutor implements P5TaskExecutor {
    */
   private static readonly IDENTICAL_CALL_STORM_LIMIT = 3;
 
+  /**
+   * 自压缩重放开关（默认 true，仅供单测注入关闭以隔离断言）。
+   *
+   * 2026-10-08 修复"未终态 run 每轮请求规模不收敛"（run 4923fdc21e5b：
+   * 单任务 40 轮 input+output 累计 877,542 tokens，≈ maxTokens=200K 的 4.4 倍，
+   * Token 预算第一轮即熔断）：messages 全量回传 + 工具输出逐轮累积 → 每轮
+   * 输入规模单调递增（≈O(n²) 总量）。业界（Claude Code auto-compact、
+   * OpenAI Agents SDK trimming）共同点是"请求前估算 + 确定性删除/摘要最旧段"。
+   * 本执行器是短时任务循环：任务卡（user 起始消息）即完整任务简报，
+   * 历史工具输出的价值随轮次衰减——确定性压缩（去重 → tool 截断 → 最老
+   * tool 丢弃 → 兜底裁剪）零额外 LLM 请求，比 LLM 摘要更契合无监督预算场景。
+   */
+  private readonly compactReplayEnabled: boolean;
+
+  /**
+   * 单条工具输出保留字符数上限（压缩第二级）。bash 大输出（如递归 grep、
+   * 全仓 git status）是请求规模膨胀的主要来源；真实 write/edit 的文件内容
+   * 在 write 之前由模型自己生成、不占 tool 消息，截断 tool 结果不丢关键信息。
+   */
+  private static readonly TOOL_OUTPUT_MAX_CHARS = 4000;
+
+  /**
+   * tool 结果总量预算（压缩第三级触发线）。超出时从最老 tool 消息开始整体
+   * 丢弃（保留 assistant 配对消息并将 tool 替换为一行占位，协议合法性不变）。
+   */
+  private static readonly TOOL_RESULTS_BUDGET_CHARS = 100_000;
+
+  /**
+   * 单轮请求消息总字符硬顶（兜底第四级）。超出且前三级仍不足时，
+   * 从最老可丢弃消息（tool 之后的 assistant 及更早段）继续整条丢弃，
+   * 保证任何网关的 413/context-length 不再成为任务中断原因。
+   */
+  private static readonly REQUEST_TOTAL_CHARS_CEILING = 800_000;
+
   constructor(options: Readonly<LlmTaskExecutorOptions>) {
     this.projectRoot = options.projectRoot;
     this.createLlmClient = options.createLlmClient;
@@ -414,6 +456,7 @@ export class LlmTaskExecutor implements P5TaskExecutor {
     }
     this.maxToolRounds = rounds;
     this.perTaskBudget = options.perTaskBudget;
+    this.compactReplayEnabled = options.compactReplay ?? true;
   }
 
   /**
@@ -582,7 +625,10 @@ export class LlmTaskExecutor implements P5TaskExecutor {
           round
         );
         const response = await client.createMessage({
-          messages,
+          // 自压缩重放（2026-10-08）：每轮请求前把"将发送的消息序列"压缩到
+          // 规模预算内（四级确定性降级：去重→tool 截断→最老 tool 丢弃→兜底裁剪）。
+          // 原始 messages 数组只追加不篡改（审计事实源），压缩结果仅用于本次请求。
+          messages: this.compactReplayEnabled ? this.compactMessagesForRequest(messages) : messages,
           tools: toolDefinitions,
           thinkingEnabled: false,
           maxTokens: EXECUTION_MAX_TOKENS,
@@ -704,6 +750,9 @@ export class LlmTaskExecutor implements P5TaskExecutor {
 
         // 相同调用重复熔断判定（本轮全部调用之后统一评估）：把本轮工具序列
         // 拼成一个批量指纹，与上一轮比较。连续相同即模型空转。
+        // 注意：指纹必须基于**原始完整** response.toolCalls 计算，绝不能用压缩后
+        // 回传给模型的消息内容——第三级压缩会省略最老 tool 结果，若指纹受其影响，
+        // 同一重复调用的指纹会随压缩进度漂移、熔断永远不触发（E7/熔断回归防线）。
         const batchFingerprint = response.toolCalls
           .map((tc) => `${tc.name}:${this.normalizeToolArgsFingerprint(tc.argumentsJson)}`)
           .join("||");
@@ -1150,6 +1199,169 @@ export class LlmTaskExecutor implements P5TaskExecutor {
       }
     }
     return total;
+  }
+
+  // ==========================================================================
+  // 3.5 自压缩重放（2026-10-08 修复"未终态 run 请求规模不收敛"，run 4923fdc21e5b）
+  // ==========================================================================
+
+  /**
+   * 把"即将发送给模型的消息序列"压缩到规模预算内（纯函数式重放视图）。
+   *
+   * 背景（分析报告 run 4923fdc21e5b）：messages 全量回传 + 工具输出逐轮累积
+   * → 每轮输入单调递增，单任务 40 轮烧掉 877,542 tokens（≈ maxTokens 4.4 倍），
+   * Token 预算第一轮即熔断，--max-iterations 完全没用上。
+   * 业界对齐（Claude Code auto-compact / OpenAI Agents SDK trimming /
+   * LangGraph 长程记忆）：请求前估算 → 确定性删除或摘要最旧段。本执行器是
+   * 短时任务循环，任务卡（首条 user 消息）即完整任务简报，历史工具输出价值
+   * 随轮次衰减，因此选择**零额外 LLM 调用**的确定性压缩。
+   *
+   * 关键不变量（绝不破坏 OpenAI/Anthropic tool 协议合法性）：
+   * - system 消息永不丢弃；
+   * - 首条非 system 消息（任务卡简报）永不丢弃；
+   * - 最后一条消息（本轮上下文锚点）永不丢弃；
+   * - assistant(tool_calls) 与其全部 tool 配对消息要么整体保留、要么
+   *   tool 内容替换为一行占位（配对关系保留），绝不产生孤儿 tool 消息；
+   * - 原始数组只读不被篡改（审计事实源），返回新数组仅用于本次请求。
+   *
+   * 四级确定性降级（逐级应用，达标即停）：
+   * 0. 单条 tool 截断（无条件）：每条 tool 消息截断至 TOOL_OUTPUT_MAX_CHARS，
+   *    头部保留 + 尾注——任何规模下只有收益，主要膨胀源的直接治理；
+   * 1. 相同 tool 结果去重：完全相同的 tool 输出保留最新、旧的替换为
+   *    一行引用（重复 read/grep 空转场景收益最大）；
+   * 2. 最老 tool 优先丢弃：tool 结果总量超 TOOL_RESULTS_BUDGET_CHARS 时，
+   *    从最老开始替换为占位，直至达标（最近 4 条 tool 永不丢弃）；
+   * 3. 兜底裁剪：总量仍超 REQUEST_TOTAL_CHARS_CEILING 时，从最老可丢弃段
+   *    （任务卡之后、保护窗之外的整条消息）继续整条替换为占位。
+   *
+   * @param messages 当前完整消息序列（只读，不被篡改）
+   * @returns 压缩后的请求消息序列（新建数组）
+   */
+  private compactMessagesForRequest(messages: ReadonlyArray<SessionMessage>): SessionMessage[] {
+    if (messages.length <= 3) {
+      // 极短历史（system+user+1 轮内）无压缩价值，直接原样返回
+      return [...messages];
+    }
+
+    /** 内容字符数（null 安全） */
+    const contentChars = (content: string | null): number => (typeof content === "string" ? content.length : 0);
+    const totalChars = (items: ReadonlyArray<SessionMessage>): number =>
+      items.reduce((sum, m) => sum + contentChars(m.content), 0);
+
+    // 工作副本：浅拷贝每条消息（后续只改 content）
+    const working: SessionMessage[] = messages.map((m) => ({ ...m }));
+    // 首条非 system 消息索引（任务卡简报）与最后一条索引：两个锚点永不丢弃
+    const firstTaskIndex = working.findIndex((m) => m.role !== "system");
+    const lastIndex = working.length - 1;
+
+    // —— 第 0 级（无条件触发）：单条 tool 内容截断至上限（头部保留 + 尾注）——
+    // 2026-10-08 修订（compactMessagesForRequest 纯函数单测暴露）：初版把本级
+    // 放在"tool 总量超预算"触发线**之后**，导致 6K×10=60K 单条大输出场景
+    // 永不截断（60K<100K 不触发后续级别）→ 长循环里单条大输出逐轮累积的
+    // 主要膨胀源没有治理。截断单条输出在任何规模下都只有收益（信息头部
+    // 保留 + 可重执行），因此提升为无条件级别。
+    for (let i = 0; i < working.length; i += 1) {
+      const message = working[i]!;
+      if (message.role === "tool" && contentChars(message.content) > LlmTaskExecutor.TOOL_OUTPUT_MAX_CHARS) {
+        working[i] = {
+          ...message,
+          content: `${(message.content as string).slice(0, LlmTaskExecutor.TOOL_OUTPUT_MAX_CHARS)}\n…（已截断，原共 ${message.content!.length} 字符）`,
+        };
+      }
+    }
+
+    // 保留占位（丢弃时写入的一行说明，保持消息条数与协议配对不变）
+    const droppedNote = (originalChars: number): string =>
+      `（上下文压缩：该工具结果共 ${originalChars} 字符已省略以控制请求规模，内容可通过工具重新执行获取）`;
+
+    // 计算保护窗：最后一条消息 + 最近 4 条 tool 消息受保护，永不丢弃
+    const lastToolIndices: number[] = [];
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i]!.role === "tool") {
+        lastToolIndices.push(i);
+        if (lastToolIndices.length >= 4) {
+          break;
+        }
+      }
+    }
+    const protectedToolIndices = new Set(lastToolIndices);
+
+    /** 判断索引是否可丢弃（锚点/保护区之外） */
+    const isDroppable = (index: number, role: string): boolean => {
+      if (index === lastIndex || index === firstTaskIndex) {
+        return false;
+      }
+      if (role === "system") {
+        return false;
+      }
+      if (role === "tool" && protectedToolIndices.has(index)) {
+        return false;
+      }
+      return true;
+    };
+
+    // —— 第 1 级：相同 tool 结果去重（保留最新，旧的替换为引用占位）——
+    // 注意：重复工具调用的"熔断"由 IDENTICAL_CALL_STORM 负责（基于原始
+    // response.toolCalls，见 runToolLoop），**永不失败于压缩本身**；本级的职责
+    // 只是压缩（历史去重），不得改变失败/成功判定语义。
+    // 2026-10-08 修订（E1f 端到端回归暴露）：初版用**当前**（第 0 级截断后）
+    // 内容做键，任何两条 >4K 输出都会被截断成相同前缀而"伪重复"——
+    // 第 2 轮起模型就看不到旧结果的真实尾部。改在**原始内容**上判重：
+    // 第 0 级截断副本供占位长度计算，原始数组仅用于生成去重键。
+    const originalToolContentAt = messages.map((m) => m.content);
+    const latestToolContentIndex = new Map<string, number>();
+    for (let i = working.length - 1; i >= 0; i -= 1) {
+      const message = working[i]!;
+      const rawContent = message.role === "tool" ? originalToolContentAt[i] : null;
+      if (message.role === "tool" && typeof rawContent === "string" && rawContent.length > 200) {
+        if (latestToolContentIndex.has(rawContent)) {
+          if (isDroppable(i, message.role)) {
+            working[i] = { ...message, content: droppedNote(rawContent.length) + "（与较近一次相同结果重复）" };
+          }
+        } else {
+          latestToolContentIndex.set(rawContent, i);
+        }
+      }
+    }
+    if (totalChars(working) <= LlmTaskExecutor.TOOL_RESULTS_BUDGET_CHARS) {
+      return working;
+    }
+
+    // —— 第 2 级：最老 tool 优先整体丢弃（替换占位），达标即停——
+    for (let i = 0; i < working.length; i += 1) {
+      const message = working[i]!;
+      if (message.role !== "tool" || !isDroppable(i, message.role)) {
+        continue;
+      }
+      const originalChars = contentChars(message.content);
+      if (originalChars <= droppedNote(originalChars).length) {
+        continue; // 已是占位，无压缩空间
+      }
+      working[i] = { ...message, content: droppedNote(originalChars) };
+      if (totalChars(working) <= LlmTaskExecutor.TOOL_RESULTS_BUDGET_CHARS) {
+        return working;
+      }
+    }
+
+    // —— 第 3 级：兜底裁剪——总量仍超硬顶时，最老可丢弃整条消息替换占位——
+    if (totalChars(working) <= LlmTaskExecutor.REQUEST_TOTAL_CHARS_CEILING) {
+      return working;
+    }
+    for (let i = 0; i < working.length; i += 1) {
+      const message = working[i]!;
+      if (!isDroppable(i, message.role)) {
+        continue;
+      }
+      const originalChars = contentChars(message.content);
+      if (originalChars <= 200) {
+        continue; // 短消息（assistant 决策文本/占位）无裁剪价值且可能承载推理链
+      }
+      working[i] = { ...message, content: `（上下文压缩：该 ${message.role} 消息共 ${originalChars} 字符已省略）` };
+      if (totalChars(working) <= LlmTaskExecutor.REQUEST_TOTAL_CHARS_CEILING) {
+        return working;
+      }
+    }
+    return working;
   }
 
   /**
