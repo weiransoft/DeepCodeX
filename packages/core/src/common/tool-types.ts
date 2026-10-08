@@ -3,7 +3,12 @@ import type sharp from "sharp";
 import type { ReasoningEffort } from "../settings";
 import type { LLMClient } from "../providers/llm-provider";
 
-export type CreateOpenAIClient = () => {
+export type CreateOpenAIClient = {
+  (): OpenAIClientResult;
+  prepare?: (signal?: AbortSignal) => Promise<void>;
+};
+
+export type OpenAIClientResult = {
   client: OpenAI | null;
   /** 上游 v0.3.1 新增：当前生效的 API Key（供调用方区分主 Key 与 plusApiKey 场景） */
   apiKey?: string;
@@ -20,6 +25,8 @@ export type CreateOpenAIClient = () => {
   machineId?: string;
   /** 上游 v0.3.1 新增：PLUS_API_KEY 对应的备用密钥（插件增强能力专用） */
   plusApiKey?: string;
+  usingPlus?: boolean;
+  configurationError?: string;
 };
 
 /**

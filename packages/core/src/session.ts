@@ -448,6 +448,8 @@ export type SessionEntry = {
   // 上游 v0.3.1：限流插件命中的工具信息（供 CLI 渲染限流提示）
   pluginRateLimitedTool?: PluginRateLimitedTool;
   // 上游 v0.3.1：会话 fork 来源（session fork/恢复到新目录时的溯源信息）
+  // 上游 v0.4.3：会话是否走 DeepCode Plus 订阅通道
+  usingPlus?: boolean;
   forkedFrom?: {
     sessionId: string;
     messageId: string;
@@ -3375,9 +3377,11 @@ ${agentInstructions}
   }
 
   async createSession(userPrompt: UserPromptContent, controller?: AbortController): Promise<string> {
-    this.reportNewPrompt();
     const signal = controller?.signal;
     this.throwIfAborted(signal);
+    await this.createOpenAIClient.prepare?.(signal);
+    this.throwIfAborted(signal);
+    this.reportNewPrompt();
 
     const sessionId = crypto.randomUUID();
     // fork 侧：文件历史协调器初始化会话分支（coordinator 与上游内联方法操作同一
@@ -3404,6 +3408,8 @@ ${agentInstructions}
     const index = this.loadSessionsIndex();
     const entry: SessionEntry = {
       id: sessionId,
+      // 上游 v0.4.3：记录会话是否走 DeepCode Plus 订阅通道
+      usingPlus: this.createOpenAIClient().usingPlus === true,
       // 上游 v0.3.1：使用图片处理前捕获的原始摘要
       summary: originalSummary,
       assistantReply: null,
@@ -3516,6 +3522,12 @@ ${agentInstructions}
       await this.createSession(userPrompt, controller);
       return;
     }
+    await this.createOpenAIClient.prepare?.(signal);
+    this.throwIfAborted(signal);
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      usingPlus: this.createOpenAIClient().usingPlus === true,
+    }));
     userPrompt = this.preparePromptImages(sessionId, userPrompt);
     appendProjectPermissionAllows(this.projectRoot, userPrompt.alwaysAllows, {
       inheritedPermissions: this.getResolvedSettings().permissions,
@@ -4279,6 +4291,21 @@ ${agentInstructions}
     const session = this.getSession(sessionId);
     const history = session?.autonomousGoalRuns ?? [];
     return history.find((r) => r.goalFingerprint === fingerprint && r.finalStatus !== "completed") ?? null;
+  }
+
+  /**
+   * 跨 run 失败守卫的公开查询面（Web 宿主 session-pool 自动注入前调用）。
+   *
+   * 判定语义与 findFailedAutonomousRun 完全一致：同一 goal 在本会话曾以
+   * 非 completed 终态结束（failed/aborted/fatal）→ true，宿主应跳过自动注入，
+   * 防止失败目标被建议器逐字重演形成空转循环（修复 2026-10-06 事故）。
+   *
+   * @param sessionId 会话 ID
+   * @param goal 待自动执行的目标文本
+   * @returns 该目标存在未成功的历史运行时为 true
+   */
+  hasFailedAutonomousRun(sessionId: string, goal: string): boolean {
+    return this.findFailedAutonomousRun(sessionId, goal) !== null;
   }
 
   /**
@@ -6733,6 +6760,8 @@ ${agentInstructions}
     const startedAt = Date.now();
     const {
       client,
+      usingPlus,
+      configurationError,
       apiKey,
       model,
       baseURL,
@@ -6754,17 +6783,19 @@ ${agentInstructions}
     const now = new Date().toISOString();
     rebuildSessionStateFromHistory(sessionId, this.listSessionMessages(sessionId));
 
+    this.updateSessionEntry(sessionId, (entry) => ({ ...entry, usingPlus: usingPlus === true }));
     if (!client) {
       this.updateSessionEntry(sessionId, (entry) => ({
         ...entry,
         status: "failed",
-        failReason: "API key not found",
+        failReason: configurationError ?? "API key not found",
         updateTime: now,
       }));
       this.onAssistantMessage(
         this.buildAssistantMessage(
           sessionId,
-          "API key not found. Please configure ~/.deepcode/settings.json or ./.deepcode/settings.json.",
+          configurationError ??
+            "API key not found. Please configure ~/.deepcode/settings.json or ./.deepcode/settings.json.",
           null
         ),
         false
@@ -8060,11 +8091,11 @@ ${agentInstructions}
   }
 
   private reportNewPrompt(): void {
-    const { machineId, telemetryEnabled } = this.createOpenAIClient();
+    const { machineId, telemetryEnabled, plusApiKey } = this.createOpenAIClient();
     // 隐私加固（2026-09-17 审计）：默认关闭遥测（opt-in）。
     // 旧兜底值 true 会在 settings 未显式开启时仍然上报，现改为 false，
     // 只有用户显式配置 telemetryEnabled=true 时才会触发 reportNewPrompt。
-    reportNewPrompt({ enabled: telemetryEnabled ?? false, machineId });
+    reportNewPrompt({ enabled: telemetryEnabled ?? false, machineId, plusApiKey });
   }
 
   interruptActiveSession(): void {
@@ -8231,6 +8262,7 @@ ${agentInstructions}
       updateTime: now,
       processes: null,
       planMode: source.planMode,
+      usingPlus: source.usingPlus,
       forkedFrom: {
         sessionId: sourceSessionId,
         messageId: sourceMessage.id,
@@ -9651,6 +9683,8 @@ ${agentInstructions}
       processes: this.deserializeProcesses(value.processes),
       askPermissions: normalizeAskPermissions(value.askPermissions),
       planMode: value.planMode === true,
+      // 上游 v0.4.3：Plus 订阅通道标记（反序列化时归一化为布尔）
+      usingPlus: value.usingPlus === true,
       // 上游 v0.3.1：插件限流标记与会话分叉来源（反序列化时做结构校验）
       pluginRateLimitedTool: this.normalizePluginRateLimitedTool(value.pluginRateLimitedTool),
       forkedFrom: this.normalizeForkedFrom(value.forkedFrom),

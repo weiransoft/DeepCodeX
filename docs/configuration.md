@@ -266,9 +266,7 @@ DeepSeek V4 的 `reasoning_effort` 经 `extra_body` 下发，档位语义由 Dee
 
 #### `webSearchTool` — 自定义联网搜索
 
-未配置 `webSearchTool` 时，如果 `BASE_URL` 是 `https://api.deepseek.com`，Deep Code 会调用 DeepSeek Responses API 的 `web_search` 工具，并固定使用 `deepseek-v4-flash`，不受 `MODEL` 配置影响。其他 API 地址仍使用 Deep Code Web Search API。
-
-如果需要自定义搜索逻辑，可将 `webSearchTool` 设为一个可执行脚本的完整路径。自定义脚本始终优先于内置搜索：
+Deep Code 内置免费可用的 Web Search 工具。如果需要自定义搜索逻辑，可将 `webSearchTool` 设为一个可执行脚本的完整路径：
 
 ```json
 {
@@ -413,3 +411,20 @@ DEEPCODE_TELEMETRY_ENABLED=1 deepcode
 3. 项目级settings.json: `{"mcpServers":{"github":{"env":{"GITHUB_PERSONAL_ACCESS_TOKEN":"..."}}}}`
 4. 项目级settings.json: `{"env": {"MCP_GITHUB_PERSONAL_ACCESS_TOKEN": "..."}}`
 5. 系统环境变量: `DEEPCODE_MCP_GITHUB_PERSONAL_ACCESS_TOKEN=... deepcode`
+
+## DeepCode PLUS 订阅与 LLM 通道
+
+PLUS 独立配置文件为 `~/.deepcode-plus/settings.json`：
+
+```json
+{
+  "subscriptionPlan": "default",
+  "env": { "PLUS_API_KEY": "sk-..." }
+}
+```
+
+`subscriptionPlan` 支持 `default`、`on`、`off`；缺失或非法值按 `default` 处理。普通通道继续使用上文配置层级合并后的 API key 和 base URL。
+
+- `default`：如果开通了DeepCode Plus订阅，则相当于`on`，否则相当于`off`。
+- `on`：直接使用 PLUS key，不执行订阅检查。缺少 PLUS key 时明确报错，不回退普通通道。
+- `off`：固定使用普通通道，不执行订阅检查。

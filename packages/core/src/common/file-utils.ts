@@ -1,4 +1,6 @@
+import childProcess from "node:child_process";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import type { FileState, FileLineEnding } from "./state";
 
@@ -15,6 +17,39 @@ export function normalizeContent(value: string): string {
 
 export function detectLineEndings(value: string): FileLineEnding {
   return value.includes("\r\n") ? "CRLF" : "LF";
+}
+
+export function platformLineEnding(eol: string = os.EOL): FileLineEnding {
+  return eol === "\r\n" ? "CRLF" : "LF";
+}
+
+/** Resolve Git's eol attribute for a new file, falling back to the platform default. */
+export function newFileLineEnding(filePath: string, eol: string = os.EOL): FileLineEnding {
+  try {
+    // The caller creates the parent directory first. Resolve from the target's
+    // directory so nested attributes, worktrees, and files outside the session's
+    // project root use the correct repository and Git's own matching rules.
+    const output = childProcess.execFileSync(
+      "git",
+      ["check-attr", "-z", "text", "eol", "--", path.basename(filePath)],
+      {
+        cwd: path.dirname(filePath),
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 5000,
+        windowsHide: true,
+      }
+    );
+    const [, , textAttribute, , , eolAttribute] = output.split("\0");
+    // Git ignores eol when text conversion is explicitly disabled (-text/binary).
+    if (textAttribute !== "unset") {
+      if (eolAttribute === "lf") return "LF";
+      if (eolAttribute === "crlf") return "CRLF";
+    }
+  } catch {
+    // Missing Git, non-repository paths, or failed lookups must not block writes.
+  }
+  return platformLineEnding(eol);
 }
 
 export function detectEncoding(buffer: Buffer): BufferEncoding {

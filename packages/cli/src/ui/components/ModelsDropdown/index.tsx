@@ -151,7 +151,7 @@ const ModelsDropdown: React.FC<Props> = ({
     step === "model"
       ? MODEL_COMMAND_MODELS.map((model) => ({
           key: model,
-          label: model,
+          label: model === "deepseek-flash" ? "deepseek-flash (V4.1 Flash)" : model,
           description: model === modelConfig.model ? "current model" : "",
           selected: model === (pendingModel ?? modelConfig.model),
         }))
