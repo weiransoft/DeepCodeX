@@ -157,9 +157,7 @@ The following context is injected as environment variables when the notify scrip
 
 #### `webSearchTool` — Custom Web Search
 
-When `webSearchTool` is not configured and `BASE_URL` is `https://api.deepseek.com`, Deep Code calls the `web_search` tool through the DeepSeek Responses API with the fixed `deepseek-v4-flash` model, regardless of the `MODEL` setting. Other API endpoints continue to use the Deep Code Web Search API.
-
-For custom search logic, set `webSearchTool` to the full path of an executable script. A custom script always takes precedence over the built-in search:
+Deep Code has a built-in, free-to-use Web Search tool. If you need custom search logic, set `webSearchTool` to the full path of an executable script:
 
 ```json
 {
@@ -282,3 +280,26 @@ Applied in the following priority order (lower-numbered overridden by higher-num
 3. Project-level settings.json: `{"mcpServers":{"github":{"env":{"GITHUB_PERSONAL_ACCESS_TOKEN":"..."}}}}`
 4. Project-level settings.json: `{"env": {"MCP_GITHUB_PERSONAL_ACCESS_TOKEN": "..."}}`
 5. System environment variable: `DEEPCODE_MCP_GITHUB_PERSONAL_ACCESS_TOKEN=... deepcode`
+
+## DeepCode PLUS subscription and LLM routing
+
+Configure PLUS separately in `~/.deepcode-plus/settings.json`:
+
+```json
+{
+  "subscriptionPlan": "default",
+  "env": { "PLUS_API_KEY": "sk-..." }
+}
+```
+
+PLUS API domains are selected from `env.PLUS_API_KEY` after trimming surrounding whitespace. With `sk-` followed by 24 characters, all services use `https://deepcode.vegamo.cn`. With 26 characters, LLM requests under `/plugin/openai/**` (including `/models` subscription probes and connection warmup) use `https://chat.deepcodeplus.com`; all other services use `https://www.deepcodeplus.com`, including web search, image understanding, image/video generation, telemetry, and cost estimates. Without a key, anonymous plugin requests retain the legacy host. No additional suffix character restriction applies. An explicitly configured invalid value (including an empty string or non-string) produces an error even when `subscriptionPlan=off`. In the URLs below, `{llmHost}` refers to the selected LLM domain.
+
+`subscriptionPlan` accepts `default`, `on`, or `off`; missing or invalid values use `default`. The regular connection retains the user/project/environment precedence described above.
+
+- `default`: Without a PLUS key, use the regular connection. Otherwise, before each session creation or reply, request `GET {llmHost}/plugin/openai/models` with the PLUS key. HTTP 200 means `full ability` and selects PLUS. HTTP 401/403 means `api only` and selects the regular connection, even if its key is missing. Other HTTP statuses, network errors, and a 3-second timeout mean `unknown`: prefer the regular key if configured, otherwise use PLUS.
+- `on`: Use the PLUS key with `{llmHost}/plugin/openai` directly, without a subscription check. A missing PLUS key produces an explicit error without falling back.
+- `off`: Always use the regular connection without checking the subscription.
+
+All LLM calls within a turn share the selected connection. The next turn reloads configuration and checks again. Cancelling the check stops the turn. Existing `/models` connection warmup remains independent of subscription checks and can also run in `on` mode; its result does not change routing.
+
+When the selected connection uses PLUS, the CLI appends `plus` after the model and reasoning effort, for example `deepseek-flash max plus`. These settings control LLM routing and do not change credentials used by PLUS plugin tools.

@@ -23,6 +23,11 @@ const MAX_CAPTURE_CHARS = 10 * 1024 * 1024;
 const BACKGROUND_OUTPUT_DIR = path.join(os.tmpdir(), "deepcode-background");
 const TRAILING_BACKGROUND_OPERATOR_PATTERN = /(^|[^\\&])\s*&\s*$/;
 const sessionWorkingDirs = new Map<string, string>();
+// Process completion and output EOF are separate: descendants may retain pipes.
+// Bound output draining after exit, and completion after a timeout kill attempt.
+const IO_DRAIN_TIMEOUT_MS = 2_000;
+const HELD_PIPE_NOTE =
+  "[deepcode] Output streams did not close within the drain deadline; later output may not have been collected. Use run_in_background: true for detached work.";
 
 export function clearSessionWorkingDir(sessionId: string): void {
   if (!sessionId) {
@@ -125,11 +130,15 @@ export async function handleBashTool(
     execution.timeoutMs,
     execution.deadlineAtMs
   );
+  // 上游 v0.4.3：子进程退出但管道被孙进程长期占用时，输出 drain 超时提示追加到结果
+  if (execution.outputDrainTimedOut) {
+    result.output = `${result.output}${result.output && !result.output.endsWith("\n") ? "\n" : ""}${HELD_PIPE_NOTE}`;
+  }
   // P0 安全修复（fork）：CWD 必须位于 projectRoot 子树内，防止命令输出伪造 marker 行将 session CWD 切换到项目外。
   const safeCwd = validateCwdWithinProjectRoot(result.cwd, context.projectRoot, startCwd);
   updateSessionCwd(context.sessionId, startCwd, safeCwd);
 
-  if (execution.error || result.exitCode !== 0 || result.signal !== null) {
+  if (execution.timedOut || execution.error || result.exitCode !== 0 || result.signal !== null) {
     const errorMessage = buildErrorMessage(result.exitCode, result.signal, execution.error, execution.timedOut);
     return formatResult({ ...result, ok: false, cwd: safeCwd }, "bash", errorMessage);
   }
@@ -146,25 +155,41 @@ function stripTrailingBackgroundOperator(command: string): string {
 }
 
 function getSessionCwd(sessionId: string, fallback: string): string {
-  const cached = sessionWorkingDirs.get(sessionId);
-  if (cached === undefined) {
-    return fallback;
+  const stored = sessionWorkingDirs.get(sessionId);
+  if (stored && isUsableCwd(stored)) {
+    return stored;
   }
-  // 防御 stale 缓存（2026-10-04）：合成 sessionId（如 P5 执行器的 p5-<runId>-i<iter>-<stage>）
-  // 可能跨任务复用，而缓存的工作目录（临时项目目录）已被清理删除。
+  // 防御 stale 缓存（2026-10-04 fork / 上游 v0.4.3 强化）：合成 sessionId（如 P5 执行器的
+  // p5-<runId>-i<iter>-<stage>）可能跨任务复用，而缓存的工作目录（临时项目目录）已被清理删除；
+  // 上游修复还覆盖 Git Bash 的 /tmp 虚拟路径在 Windows 转换后不存在的情形。
   // 若直接把不存在的目录传给 spawn，Node 在 macOS 上会报出误导性的
-  // `spawn <shell> ENOENT`（shell 二进制本身存在）。这里校验目录存在性，
-  // 不存在则回退 fallback（projectRoot）并清除 stale 条目。
-  if (!fs.existsSync(cached)) {
+  // `spawn <shell> ENOENT`（shell 二进制本身存在）。这里校验目录可用性，
+  // 不可用则清除 stale 条目并回退 fallback（projectRoot）。
+  if (stored) {
     sessionWorkingDirs.delete(sessionId);
-    return fallback;
   }
-  return cached;
+  return fallback;
 }
 
 function updateSessionCwd(sessionId: string, fallback: string, cwd: string | null): void {
   const nextCwd = cwd ?? fallback;
-  sessionWorkingDirs.set(sessionId, nextCwd);
+  // Only store valid directories; an invalid cwd (e.g. Git Bash's /tmp converted to \tmp) would cause the next spawn to fail.
+  if (isUsableCwd(nextCwd)) {
+    sessionWorkingDirs.set(sessionId, nextCwd);
+  } else {
+    sessionWorkingDirs.delete(sessionId);
+  }
+}
+
+function isUsableCwd(cwd: string): boolean {
+  if (!cwd) {
+    return false;
+  }
+  try {
+    return fs.statSync(cwd).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 function buildShellCommand(command: string): {
@@ -177,6 +202,9 @@ function buildShellCommand(command: string): {
   const initCommand = buildShellInitCommand(shellPath);
   const disableExtglobCommand = buildDisableExtglobCommand(shellPath);
   const normalizedCommand = rewriteWindowsNullRedirect(command);
+  // Git Bash mounts such as /tmp and /usr cannot be mapped by replacing
+  // separators or drive prefixes. Ask Bash for the native path while it is alive.
+  const cwdExpression = process.platform === "win32" ? '"$(builtin pwd -W)"' : '"$PWD"';
   const wrappedParts = [];
   if (initCommand) {
     wrappedParts.push(initCommand);
@@ -187,7 +215,7 @@ function buildShellCommand(command: string): {
   wrappedParts.push(
     normalizedCommand,
     "__DEEPCODE_STATUS__=$?",
-    `printf '%s%s\\n' "${marker}" "$PWD"`,
+    `printf '%s%s\\n' "${marker}" ${cwdExpression}`,
     "exit $__DEEPCODE_STATUS__"
   );
   const wrappedCommand = `{ ${wrappedParts.join("; ")}; } < /dev/null`;
@@ -209,6 +237,7 @@ async function executeShellCommand(
   timedOut: boolean;
   timeoutMs: number;
   deadlineAtMs: number;
+  outputDrainTimedOut: boolean;
 }> {
   context.signal?.throwIfAborted();
   return new Promise((resolve) => {
@@ -221,6 +250,11 @@ async function executeShellCommand(
     let deadlineAtMs = startedAtMs + timeoutMs;
     let timedOut = false;
     let settled = false;
+    let childExit: { code: number | null; signal: string | null } | null = null;
+    let stdout = "";
+    let stderr = "";
+    let error: string | undefined;
+    let timeoutControlRegistered = false;
     let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
     const child = spawn(shellPath, shellArgs, {
       cwd,
@@ -244,17 +278,80 @@ async function executeShellCommand(
         timeoutTimer = null;
       }
     };
+    let forceSettleTimer: ReturnType<typeof setTimeout> | null = null;
+    const cancelForceSettleTimer = () => {
+      if (forceSettleTimer) {
+        clearTimeout(forceSettleTimer);
+        forceSettleTimer = null;
+      }
+    };
+    const unregisterTimeoutControl = () => {
+      if (timeoutControlRegistered && typeof pid === "number") {
+        timeoutControlRegistered = false;
+        context.onProcessTimeoutControl?.(pid, null);
+      }
+    };
+    const finish = (outputDrainTimedOut = false) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cancelForceSettleTimer();
+      stopTimeoutTimer();
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      unregisterTimeoutControl();
+      if (typeof pid === "number") {
+        context.onProcessExit?.(pid);
+      }
+      resolve({
+        stdout,
+        stderr,
+        exitCode: timedOut ? null : (childExit?.code ?? null),
+        signal: timedOut ? null : (childExit?.signal ?? null),
+        error,
+        timedOut,
+        timeoutMs,
+        deadlineAtMs,
+        outputDrainTimedOut,
+      });
+    };
+    const startDrainTimer = () => {
+      // An exit after timeout must not extend the original completion deadline.
+      if (!forceSettleTimer) {
+        forceSettleTimer = setTimeout(
+          () =>
+            finish(
+              Boolean((child.stdout && !child.stdout.readableEnded) || (child.stderr && !child.stderr.readableEnded))
+            ),
+          IO_DRAIN_TIMEOUT_MS
+        );
+      }
+    };
     const triggerTimeout = () => {
-      if (settled || timedOut || typeof pid !== "number") {
+      if (settled || timedOut || childExit || typeof pid !== "number") {
         return;
       }
       timedOut = true;
       stopTimeoutTimer();
+      startDrainTimer();
+      unregisterTimeoutControl();
+      // Unix process groups can outlive their leader. Regardless of kill success,
+      // completion must not depend on either exit or pipe EOF arriving.
       killProcessTree(pid, "SIGKILL");
     };
+    child.on("exit", (code, signal) => {
+      if (settled || childExit) {
+        return;
+      }
+      childExit = { code, signal };
+      stopTimeoutTimer();
+      startDrainTimer();
+      unregisterTimeoutControl();
+    });
     const scheduleTimeout = () => {
       stopTimeoutTimer();
-      if (settled) {
+      if (settled || timedOut || childExit) {
         return;
       }
       const remainingMs = Math.max(0, deadlineAtMs - Date.now());
@@ -263,6 +360,9 @@ async function executeShellCommand(
     const timeoutControl: ProcessTimeoutControl = {
       getInfo: getTimeoutInfo,
       setTimeoutMs: (nextTimeoutMs) => {
+        if (settled || timedOut || childExit) {
+          return getTimeoutInfo();
+        }
         timeoutMs = clampBashTimeoutMs(nextTimeoutMs, minTimeoutMs);
         deadlineAtMs = startedAtMs + timeoutMs;
         if (deadlineAtMs <= Date.now()) {
@@ -274,49 +374,37 @@ async function executeShellCommand(
       },
     };
 
-    if (typeof pid === "number") {
-      context.onProcessStart?.(pid, command);
-      context.onProcessTimeoutControl?.(pid, timeoutControl);
-      scheduleTimeout();
-    }
-
-    let stdout = "";
-    let stderr = "";
-    let error: string | undefined;
-
     child.stdout?.on("data", (chunk: string | Buffer) => {
+      if (settled) return;
       stdout = appendChunk(stdout, chunk);
       const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
       context.onProcessStdout?.(pid as number, text);
     });
     child.stderr?.on("data", (chunk: string | Buffer) => {
+      if (settled) return;
       stderr = appendChunk(stderr, chunk);
       const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
       context.onProcessStdout?.(pid as number, text);
     });
 
     child.on("error", (spawnError) => {
+      if (settled) return;
       error = spawnError.message;
+      finish();
     });
 
     child.on("close", (code, signal) => {
-      settled = true;
-      stopTimeoutTimer();
-      if (typeof pid === "number") {
-        context.onProcessTimeoutControl?.(pid, null);
-        context.onProcessExit?.(pid);
-      }
-      resolve({
-        stdout,
-        stderr,
-        exitCode: typeof code === "number" ? code : null,
-        signal: signal ?? null,
-        error,
-        timedOut,
-        timeoutMs,
-        deadlineAtMs,
-      });
+      if (settled) return;
+      childExit ??= { code, signal };
+      finish();
     });
+
+    if (typeof pid === "number") {
+      context.onProcessStart?.(pid, command);
+      timeoutControlRegistered = true;
+      context.onProcessTimeoutControl?.(pid, timeoutControl);
+      scheduleTimeout();
+    }
   });
 }
 
@@ -678,7 +766,7 @@ function buildToolCommandResult(
   const combined = joinOutput(cleanedStdout, stderr);
   const { text, truncated } = truncateOutput(combined);
   return {
-    ok: exitCode === 0 && signal === null,
+    ok: !timedOut && exitCode === 0 && signal === null,
     output: text,
     cwd,
     exitCode,
@@ -734,11 +822,11 @@ function truncateOutput(output: string): { text: string; truncated: boolean } {
 }
 
 function buildErrorMessage(exitCode: number | null, signal: string | null, error?: string, timedOut = false): string {
-  if (error) {
-    return error;
-  }
   if (timedOut) {
     return "Command timed out.";
+  }
+  if (error) {
+    return error;
   }
   if (signal) {
     return `Command terminated by signal ${signal}.`;
