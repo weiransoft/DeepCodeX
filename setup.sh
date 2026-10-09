@@ -15,12 +15,12 @@
 #   两个安装模式（--mode 参数）：
 #     source  （默认）完整源码克隆 + npm install + build
 #     npm     GitHub Release tarball → npm install -g（最快，CLI only）
-#             默认拉 latest；可用 --tag v0.4.2 指定版本
+#             默认拉 latest；可用 --tag v0.4.3.14 指定版本
 #
-#   生产发布流程（开发者执行一次）：
+#   生产发布流程（开发者执行一次，或用 scripts/release.sh 一键完成）：
 #     npm run build && cd packages/cli && npm pack
-#     gh release create v0.4.2 --title "v0.4.2" --notes "..." \
-#       ./vegamo-deepcode-cli-0.4.2.tgz#deepcode-cli.tgz
+#     gh release create v0.4.3.14 --title "v0.4.3.14" --notes "..." \
+#       ./vegamo-deepcode-cli-0.4.3.14.tgz#deepcode-cli.tgz
 #
 #   Node.js 自动安装策略：
 #     当 preflight 发现 Node.js 缺失或版本过低时，setup.sh 会尝试自动安装：
@@ -89,7 +89,7 @@ setup.sh -- DeepCodeX 一键安装入口
                          source = git clone + npm install + build
                          npm    = GitHub Release tarball → npm install -g
   --tag <vX.Y.Z>        npm 模式指定 Release tag（默认 latest）
-                         例: --tag v0.4.2
+                         例: --tag v0.4.3.14
   --dir <path>          安装目录（默认 ~/DeepCodeX）
   --branch <name>       git 检出分支/tag（默认 main）
   --deep                完整克隆（默认浅克隆 --depth=1）
@@ -594,7 +594,7 @@ install_via_npm() {
 
   # Release 下载 URL（GitHub 原始地址）：
   #   默认 latest  → .../releases/latest/download/deepcode-cli.tgz
-  #   指定 tag     → .../releases/download/v0.4.2/deepcode-cli.tgz
+  #   指定 tag     → .../releases/download/v0.4.3.14/deepcode-cli.tgz
   # asset 名固定为 deepcode-cli.tgz（每次 release 覆盖上传），避免 setup.sh 解析版本号
   local gh_release_url tgz_path
   if [ -n "${RELEASE_TAG:-}" ]; then
