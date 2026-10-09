@@ -77,6 +77,7 @@ import {
   PLAN_REASON_TASKS_BLOCKED,
   PLAN_REASON_TASKS_FILE_NOT_FOUND,
   PLAN_REASON_NO_TASK_CARDS,
+  PLAN_REASON_PLANNER_STOP,
 } from "./handlers/plan-stage-handler";
 import { atomicWriteTextFile } from "./common/atomic-file";
 import { P5_STAGE_ORDER } from "./run-state-store";
@@ -201,6 +202,23 @@ const ABORT_FLAGS_DIR = ".eag/p5/abort-flags" as const;
  * 使用 .abort 后缀，避免与其他文件类型混淆。
  */
 const ABORT_FILE_EXTENSION = ".abort" as const;
+
+/**
+ * 单阶段最小可行 Token 预算（2026-10-09 F-B，docs/dev/eag-p5-llm-dynamic-planning.md）。
+ *
+ * 背景（真实事故 run 2cb0893cccea）：dev 单任务 21 轮烧光 200,000 预算后，
+ * verify 失败进入 fix 阶段，此时剩余预算仅 779 token——fix 的首轮请求预估
+ * 输入即超限（1872 tokens）瞬败，形成"阶段机械瞬败"式空循环尾巴。编排器
+ * 此前只在"阶段执行完之后"做增量检查，无法阻止"明知预算注定不足还进入
+ * 阶段"的浪费。
+ *
+ * 语义：每个阶段开始前检查剩余预算，低于该阈值则不再进入该阶段，直接以
+ * aborted 收尾（abortReason 含"预算不足"字样，供 5d 判定与前端透出）。
+ * 3000 的取值依据：单次最小 LLM 请求（含消息序列开销）的输入估算约
+ * 2000~3000 token（与执行器 CHARS_PER_TOKEN_ESTIMATE=3.5 口径一致），
+ * 低于它任何阶段都无法完成哪怕一次有效请求。
+ */
+const MIN_VIABLE_STAGE_TOKENS = 3000 as const;
 
 // ============================================================================
 // 2. 类型定义（不可变优先，所有字段 readonly）
@@ -898,8 +916,39 @@ export class AutonomousOrchestrator {
         let planTaskCard: TaskCard | null = null;
         // 本轮 plan 是否从 objective 合成了任务卡（投影到 verify 的 skip 判定）
         let iterationSynthesized = false;
+        // F-C 跨 run 失败反馈（2026-10-09）：plan 阶段从上一轮 run 终态摘要
+        // 读取的记忆（artifacts.lastFailureFeedback），投影到 dev 阶段 ctx，
+        // 让执行器带着"上一轮为什么失败"的认知重新实现同一任务卡。
+        // 首轮迭代或 plan 未透出时为 undefined，dev 行为与修复前一致。
+        let iterationLastFailureFeedback: string | undefined;
 
         for (const stage of P5_STAGE_ORDER) {
+          // F-B 阶段前置预算检查（2026-10-09，docs/dev/eag-p5-llm-dynamic-planning.md）：
+          // 真实事故 run 2cb0893cccea——dev 烧光预算后 fix 阶段剩余 779 token
+          // 仍被放行进入，首轮请求预估输入即超限瞬败（1872 tokens），形成
+          // "阶段机械瞬败"空循环尾巴。现在每个阶段开始前检查：剩余预算低于
+          // 单次最小可行请求阈值时不再进入阶段，直接 aborted 收尾（abortReason
+          // 含"预算不足"，与 5b-3 执行后增量检查、5b.7 迭代间检查构成三级防线）。
+          const remainingBeforeStage = Math.max(0, maxTokens - totalTokensUsed);
+          if (remainingBeforeStage < MIN_VIABLE_STAGE_TOKENS) {
+            status = "aborted";
+            finalStatus = "aborted";
+            abortReason =
+              `Token 预算不足：阶段 ${stage} 开始前剩余 ${remainingBeforeStage} token，` +
+              `低于单阶段最小可行阈值 ${MIN_VIABLE_STAGE_TOKENS}，不再进入阶段`;
+            // 与 5b-3 熔断路径同构的诚实收尾五件套：预算不足即本轮失败，
+            // 5c 据此走 consecutiveFailures 累加；lastFatalStage 登记真实
+            // 阻塞阶段（避免 blockageReport 兜底误报为 plan）。
+            iterationFailed = true;
+            lastFatalStage = stage;
+            this.log(
+              `AutonomousOrchestrator.run 迭代 ${iterIndex} 阶段 ${stage} 开始前 Token 预算不足` +
+                `（剩余 ${remainingBeforeStage} < 最小可行 ${MIN_VIABLE_STAGE_TOKENS}），中止迭代，status=aborted`,
+              "error"
+            );
+            break;
+          }
+
           // 5b-1. 构造 P5StageContext
           const ctx = this.buildStageContext({
             runId,
@@ -928,6 +977,10 @@ export class AutonomousOrchestrator {
             // 真实剩余额度，否则运行级已续期而执行器仍按名义余额提前段熔断，
             // 两层口径不一致会让续期形同虚设。
             perTaskBudget: Math.max(0, tokenHardCeiling - totalTokensUsed),
+            // F-C 跨 run 失败反馈（2026-10-09）：plan 阶段读到的上一轮终态摘要
+            // 投影到 dev 阶段（dev handler 作为 executeTask 的 feedback 注入）；
+            // plan 自身执行时变量尚未赋值（undefined），与修复前行为一致。
+            lastFailureFeedback: iterationLastFailureFeedback,
           });
 
           // 5b-2. 调用 loopExecutor.execute(stage, ctx)
@@ -946,7 +999,9 @@ export class AutonomousOrchestrator {
           // llmCallCount 直接用执行器真实请求次数（artifacts.llmRequests），
           // 替代旧方案"tokensUsed>0 时 +1"近似——旧方案对 multi-request dev/fix 严重低估，
           // 且 failure() 路径 tokensUsed 硬编码为 0 时 llmCallCount 被跳过（根因链 2026-10-07）。
-          // plan/verify 阶段不调 LLM，artifacts 中无 llmRequests → 自然 +0（正确）。
+          // verify 阶段不调 LLM，artifacts 中无 llmRequests → 自然 +0（正确）；
+          // plan 阶段自 2026-10-09 F-A2 起可能发起一次规划器 LLM 调用（含 llmRequests），
+          // 其 tokensUsed/llmRequests 已由 plan handler 诚实计入，此处照常累加。
           if (typeof result.artifacts["llmRequests"] === "number") {
             totalLlmCallCount += result.artifacts["llmRequests"] as number;
             // RunState.totalExecutorLlmRequests 审计字段，与 totalLlmCallCount 同源累加
@@ -954,10 +1009,17 @@ export class AutonomousOrchestrator {
             totalExecutorLlmRequests += result.artifacts["llmRequests"] as number;
           }
 
-          // 5b-4. 提取 plan 阶段产出的任务卡与合成标志
+          // 5b-4. 提取 plan 阶段产出的任务卡、合成标志与跨 run 失败反馈
           if (stage === "plan" && result.kind === "success") {
             planTaskCard = (result.artifacts["taskCard"] as TaskCard | null) ?? null;
             iterationSynthesized = result.artifacts["synthesized"] === true;
+            // F-C（2026-10-09）：plan 阶段从上一轮 run 终态摘要读到的失败记忆，
+            // 透传给后续 dev 阶段（executeTask 的 feedback 注入）——同目标重跑时
+            // 模型带着"上一轮为什么失败"的认知重新实现，不再盲目重走老路。
+            const feedback = result.artifacts["lastFailureFeedback"];
+            if (typeof feedback === "string" && feedback.length > 0) {
+              iterationLastFailureFeedback = feedback;
+            }
           }
 
           // 5b-5. fatal → 立即中止内层循环
@@ -1179,7 +1241,7 @@ export class AutonomousOrchestrator {
             loopType: initialLoop,
             completedAt: new Date().toISOString(),
             iterIndex,
-            summary: this.formatIterationSummary(iterationResults, true),
+            summary: this.formatIterationSummary(iterationResults),
           });
           milestones.push(milestone);
 
@@ -1270,6 +1332,16 @@ export class AutonomousOrchestrator {
                 ? (planResult.artifacts["blockedCardIds"] as unknown[]).map(String).join(", ")
                 : "";
               lastFatalReason = `任务被阻塞，无可执行的 pending 任务卡${blockedIds ? `（blocked: ${blockedIds}）` : ""}`;
+              abortReason = lastFatalReason;
+              this.log(`AutonomousOrchestrator.run 迭代 ${iterIndex} ${lastFatalReason}`, "error");
+            } else if (planReason === PLAN_REASON_PLANNER_STOP) {
+              // F-A2（2026-10-09）：LLM 规划器判定停止（目标不可行/预算注定不足等）
+              // → 诚实 failed，透出规划理由而非通用模板文案
+              status = "failed";
+              finalStatus = "failed";
+              lastFatalStage = "plan";
+              const plannerReasoning = String(planResult.artifacts["plannerReasoning"] ?? "");
+              lastFatalReason = `LLM 规划判定停止运行${plannerReasoning ? `：${plannerReasoning}` : ""}`;
               abortReason = lastFatalReason;
               this.log(`AutonomousOrchestrator.run 迭代 ${iterIndex} ${lastFatalReason}`, "error");
             } else {
@@ -2430,6 +2502,12 @@ export class AutonomousOrchestrator {
      * 由调用点按 maxTokens - totalTokensUsed 计算并夹到 ≥0；执行器据此做每轮增量检查。
      */
     readonly perTaskBudget: number;
+    /**
+     * 跨 run 失败反馈（2026-10-09 F-C，可选）：plan 阶段从上一轮 run 终态摘要
+     * 读到的失败记忆，投影到 dev 阶段 ctx（dev handler 作为 executeTask 的
+     * feedback 注入）。首轮迭代或 plan 未透出时为 undefined。
+     */
+    readonly lastFailureFeedback?: string;
   }): Readonly<P5StageContext> {
     return Object.freeze({
       runId: args.runId,
@@ -2452,6 +2530,9 @@ export class AutonomousOrchestrator {
       taskExecutor: args.taskExecutor,
       synthesizedTask: args.synthesizedTask,
       abortFlagPath: args.abortFlagPath,
+      // F-C 跨 run 失败反馈（可选字段，undefined 时不写入冻结对象语义无差异，
+      // 显式透传保持字段完整性供调试与审计）
+      lastFailureFeedback: args.lastFailureFeedback,
       // 阶段级日志回调：plan 阶段用它上报 tasks.md 解析告警（修复 2026-10-05
       // 僵尸任务卡事故——非法 status 静默降级 pending 完全无日志痕迹）
       logger: this.log,
@@ -2889,19 +2970,21 @@ export class AutonomousOrchestrator {
   /**
    * 格式化迭代摘要（用于 milestone）
    *
+   * 2026-10-09 修复（run f2358227def5 事故：里程碑文案"4 阶段全绿
+   * （plan=success, dev=failed）"自相矛盾）：allSuccess 不再由调用方传入
+   * （旧调用点硬编码 true，与括号内真实阶段状态打架），改为按 iterationResults
+   * 全量 kind==="success" 真实判定——任何一个阶段非 success 即输出"部分失败"。
+   *
    * @param iterationResults 当前迭代的阶段结果
-   * @param allSuccess 是否全部成功
    * @returns 摘要字符串
    */
-  private formatIterationSummary(
-    iterationResults: ReadonlyArray<Readonly<P5StageResult>>,
-    allSuccess: boolean
-  ): string {
+  private formatIterationSummary(iterationResults: ReadonlyArray<Readonly<P5StageResult>>): string {
     const parts: string[] = [];
     for (const result of iterationResults) {
       parts.push(`${result.stage}=${result.kind}`);
     }
     const summary = parts.join(", ");
+    const allSuccess = iterationResults.length > 0 && iterationResults.every((r) => r.kind === "success");
     return allSuccess ? `4 阶段全绿（${summary}）` : `部分失败（${summary}）`;
   }
 
@@ -3294,6 +3377,21 @@ export class AutonomousOrchestrator {
           `多为未终态长循环每轮全量回传历史所致，考虑提高 --max-tokens 或缩短单任务轮数上限`
       );
       suggestedSolutions.unshift("提高 --max-tokens 预算（部署/多步骤类任务建议 ≥1M），或减小单任务范围");
+    }
+
+    // 任务阻塞类终止的根因假设（2026-10-09 修复 run 5081a4c28cd7 报告误导）：
+    // plan 返回 TASKS_BLOCKED → 5d 判 failed 时，abortReason 以"任务被阻塞"开头，
+    // 单列真实成因（显式 blocked / in-progress 残留 / 依赖不满足的非 pending 卡），
+    // 避免通用模板文案（"检查依赖是否成环"）掩盖实际阻塞构成。
+    if (args.abortReason.includes("任务被阻塞")) {
+      rootCauseHypotheses.unshift(
+        `任务清单无可执行的 pending 卡：存在显式 blocked / in-progress 残留 / 依赖不满足的` +
+          `非 pending 卡（终止原因原文：${args.abortReason}）——` +
+          `若清单含与目标同题的 completed AUTO 卡，可能是历史运行误标 completed 所致`
+      );
+      suggestedSolutions.unshift(
+        "清理或重置 tasks.md 中的 blocked / in-progress 任务卡（AUTO 合成卡可手工改回 pending），或修正依赖关系后重跑"
+      );
     }
 
     // 建议方案生成

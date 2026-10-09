@@ -40,6 +40,9 @@ import type { LLMClient, LLMToolDefinition, LLMToolCall } from "../../../provide
 import type { SessionMessage } from "../../../session";
 import type {
   P5DangerousCommandApproval,
+  P5PlanIterationInput,
+  P5PlanIterationResult,
+  P5PlanIterationTask,
   P5TaskExecutor,
   P5TaskExecutionInput,
   P5TaskExecutionResult,
@@ -363,9 +366,36 @@ const SYSTEM_PROMPT = [
   "6. 如果任务信息不足以安全动手，同样以无工具调用的文本回复说明缺少什么。",
 ].join("\n");
 
-// ============================================================================
-// 2. 构造选项与工厂
-// ============================================================================
+/**
+ * plan 阶段规划器 system 提示词（2026-10-09 F-A1）。
+ *
+ * 角色约束：规划器不做任何文件/命令操作（请求不带工具定义），只读简报
+ * 输出 JSON 决策；决策空间与字段契约在此固定，与 parsePlannerDecision
+ * 的解析规则一一对应。
+ */
+const PLANNER_SYSTEM_PROMPT = [
+  "你是自主编码循环（EAG-P5）的任务规划器。你不执行任何工具、不修改任何文件，",
+  "只根据给定的运行简报输出一个 JSON 决策对象。",
+  "",
+  "输出格式（只能是以下四种之一）：",
+  '1. 选择一张[可执行]的任务卡交给执行器：{"action":"select","taskId":"T-001","reasoning":"一句话理由"}',
+  "2. 重排任务卡集合（只影响 requirement=AUTO 的卡，可置 pending/blocked、可追加新卡）：",
+  '   {"action":"replan","tasks":[{"id":"T-001","status":"blocked"},{"title":"新任务","status":"pending","dependencies":[]}],"reasoning":"一句话理由"}',
+  '3. 判定应当停止运行：{"action":"stop","reasoning":"一句话理由"}',
+  '4. 不干预、交由本地规则：{"action":"none","reasoning":"一句话理由"}',
+  "",
+  "决策原则：",
+  "- 上一轮运行记忆显示某张卡反复失败时，优先换思路：把旧卡 blocked 并追加一张",
+  "  分解后的新卡（title 写清具体第一步），而不是机械重跑；",
+  "- 剩余预算不足以完成哪怕最简单的一张卡时，输出 stop；",
+  "- select 只能选[可执行]标注的卡；没有可执行卡且无法通过 replan 产出可执行卡时输出 stop；",
+  "- 卡不可行（环境缺失、目标超出当前能力）时输出 stop 并在 reasoning 说明；",
+  "- reasoning 必须是简体中文一句话。",
+  "不要输出 JSON 以外的任何文本。",
+].join("\n");
+
+/** 规划请求最大输出 token 数（决策 JSON 不需要长篇输出） */
+const PLANNER_MAX_TOKENS = 2048;
 
 /** LlmTaskExecutor 构造选项（不可变） */
 export interface LlmTaskExecutorOptions {
@@ -515,6 +545,230 @@ export class LlmTaskExecutor implements P5TaskExecutor {
   }
 
   // ==========================================================================
+  // 3.0 plan 阶段 LLM 动态规划（2026-10-09 F-A1，docs/dev/eag-p5-llm-dynamic-planning.md）
+  // ==========================================================================
+
+  /**
+   * plan 阶段动态规划（端口可选方法实现）。
+   *
+   * 与 executeTask 的差异：单次无工具 LLM 调用（规划器不做任何文件/命令操作，
+   * 只读简报做决策），无工具循环、无重入标志、无进度事件——一次请求即终态。
+   * 任何失败（client 缺失 / abort / 请求异常 / JSON 不合法）都收敛为
+   * ok=false + error 说明，绝不伪造决策；调用方（plan-stage-handler）
+   * 据 ok=false 回退本地规则选卡。
+   */
+  async planIteration(input: Readonly<P5PlanIterationInput>): Promise<Readonly<P5PlanIterationResult>> {
+    // abort 预检：标志文件已存在时不发请求（与 executeTask 轮顶检查同源）
+    if (input.abortFlagPath.length > 0 && this.isAbortRequested(input.abortFlagPath)) {
+      return Object.freeze({
+        ok: false,
+        action: "none" as const,
+        reasoning: "",
+        tokensUsed: 0,
+        error: "aborted：检测到中止标志文件，跳过规划请求",
+      });
+    }
+    // 无凭据 fail-closed：与 executeTask 首轮检查同口径，绝不伪造决策
+    const client = this.createLlmClient();
+    if (client === null || client === undefined) {
+      return Object.freeze({
+        ok: false,
+        action: "none" as const,
+        reasoning: "",
+        tokensUsed: 0,
+        error: "LLM 客户端不可用：未配置 API 凭据（请检查 settings.json 与环境变量）",
+      });
+    }
+
+    // 单轮消息序列（system 固定角色 + user 规划简报），无工具定义
+    const messages: SessionMessage[] = [
+      this.buildSessionMessage("system", PLANNER_SYSTEM_PROMPT, null),
+      this.buildSessionMessage("user", this.buildPlannerUserPrompt(input), null),
+    ];
+
+    // token 记账变量（与 runLoop 同构：usage 优先，无 usage 按字符估算保底）
+    let sawUsage = false;
+    let inputTokensTotal = 0;
+    let outputTokensTotal = 0;
+    let estimatedCharsTotal = 0;
+
+    try {
+      const response = await client.createMessage({
+        messages,
+        // 规划器不暴露任何工具：决策必须是一次纯文本 JSON 回复
+        tools: [],
+        thinkingEnabled: false,
+        maxTokens: PLANNER_MAX_TOKENS,
+      });
+      // usage 记账（部分网关不回 usage：字符估算保底，口径与 executeTask 一致）
+      if (response.usage) {
+        sawUsage = true;
+        inputTokensTotal += response.usage.inputTokens;
+        outputTokensTotal += response.usage.outputTokens;
+      } else {
+        estimatedCharsTotal += this.lastUserishContentChars(messages) + response.content.length;
+      }
+      const tokens = this.resolveTokensUsed(sawUsage, inputTokensTotal + outputTokensTotal, estimatedCharsTotal);
+
+      // JSON 提取与校验：剥 markdown 围栏后截取首个 { 到末个 }，解析失败 → ok=false
+      const decision = this.parsePlannerDecision(response.content);
+      if (decision === null) {
+        return Object.freeze({
+          ok: false,
+          action: "none" as const,
+          reasoning: "",
+          tokensUsed: tokens.tokens,
+          error: `规划输出不是合法 JSON 决策（原始回复前 200 字符：${response.content.slice(0, 200)}）`,
+        });
+      }
+      return Object.freeze({
+        ...decision,
+        tokensUsed: tokens.tokens,
+      });
+    } catch (err) {
+      // 请求异常（网络/网关/中止）→ ok=false，tokensUsed 诚实记录已消耗部分
+      const message = err instanceof Error ? err.message : String(err);
+      const tokens = this.resolveTokensUsed(sawUsage, inputTokensTotal + outputTokensTotal, estimatedCharsTotal);
+      this.log(`planIteration 规划请求异常：${message}`, "warn");
+      return Object.freeze({
+        ok: false,
+        action: "none" as const,
+        reasoning: "",
+        tokensUsed: tokens.tokens,
+        error: `规划请求异常：${message}`,
+      });
+    }
+  }
+
+  /**
+   * 解析规划器输出的 JSON 决策。
+   *
+   * 容错规则：剥 ```json 围栏 → 截取首个 `{` 到末个 `}` → JSON.parse →
+   * 校验 action 枚举与关联字段（select 必须带 taskId；replan 必须带 tasks 数组）。
+   * 任何一步失败返回 null（调用方据此判 ok=false 回退本地规则）。
+   *
+   * @param content 模型原始回复文本
+   * @returns 合法决策对象；不合法返回 null
+   */
+  private parsePlannerDecision(content: string): {
+    ok: true;
+    action: "select" | "replan" | "stop" | "none";
+    taskId?: string;
+    tasks?: ReadonlyArray<Readonly<P5PlanIterationTask>>;
+    reasoning: string;
+  } | null {
+    // 剥围栏：```json ... ``` / ``` ... ``` 中的内容优先
+    let text = content.trim();
+    const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (fenceMatch) {
+      text = fenceMatch[1]!.trim();
+    }
+    // 截取 JSON 主体：首个 { 到末个 }（容忍模型在 JSON 前后夹杂说明文字）
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start < 0 || end <= start) {
+      return null;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text.slice(start, end + 1));
+    } catch {
+      return null;
+    }
+    if (parsed === null || typeof parsed !== "object") {
+      return null;
+    }
+    const obj = parsed as Record<string, unknown>;
+    const action = obj["action"];
+    if (typeof action !== "string") {
+      return null;
+    }
+    const validActions = ["select", "replan", "stop", "none"] as const;
+    if (!validActions.includes(action as (typeof validActions)[number])) {
+      return null;
+    }
+    // includes 校验通过后收窄字面量类型（TS 无法从 includes 推断，此处显式断言）
+    const validAction = action as (typeof validActions)[number];
+    // reasoning：缺省空串，非字符串时转字符串（宽容处理，决策本身已校验）
+    const rawReasoning = obj["reasoning"];
+    const reasoning = typeof rawReasoning === "string" ? rawReasoning : String(rawReasoning ?? "");
+
+    if (action === "select") {
+      const taskId = obj["taskId"];
+      if (typeof taskId !== "string" || taskId.length === 0) {
+        // select 决策缺 taskId → 整体不合法
+        return null;
+      }
+      return { ok: true, action: validAction, taskId, reasoning };
+    }
+    if (validAction === "replan") {
+      const rawTasks = obj["tasks"];
+      if (!Array.isArray(rawTasks) || rawTasks.length === 0) {
+        // replan 决策缺 tasks → 整体不合法
+        return null;
+      }
+      // 逐条宽松校验：id/title 至少其一为字符串才保留（防模型输出垃圾条目）
+      const tasks: P5PlanIterationTask[] = [];
+      for (const entry of rawTasks) {
+        if (entry === null || typeof entry !== "object") {
+          continue;
+        }
+        const t = entry as Record<string, unknown>;
+        const id = typeof t["id"] === "string" ? t["id"] : undefined;
+        const title = typeof t["title"] === "string" ? t["title"] : undefined;
+        if (id === undefined && title === undefined) {
+          continue;
+        }
+        tasks.push({
+          id,
+          title,
+          status: typeof t["status"] === "string" ? t["status"] : undefined,
+          dependencies: Array.isArray(t["dependencies"])
+            ? t["dependencies"].filter((d): d is string => typeof d === "string")
+            : undefined,
+        });
+      }
+      if (tasks.length === 0) {
+        return null;
+      }
+      return { ok: true, action: "replan", tasks, reasoning };
+    }
+    // stop / none：无需关联字段
+    return { ok: true, action: validAction, reasoning };
+  }
+
+  /**
+   * 构造规划简报（user 消息）。
+   *
+   * 把目标、卡清单、笔记、前序阶段摘要、跨 run 失败记忆、剩余预算装配为
+   * 结构化简报；长文本字段已由调用方截断，此处只做拼接。
+   */
+  private buildPlannerUserPrompt(input: Readonly<P5PlanIterationInput>): string {
+    const sections: string[] = [
+      `## 运行简报（第 ${input.iterIndex + 1} 次迭代规划）`,
+      `### 用户目标\n${input.objective.length > 0 ? input.objective : "（未提供）"}`,
+      `### 任务卡清单（[可执行] = status=pending 且依赖已满足，select 只能选这些卡）\n${
+        input.tasksOverview.length > 0 ? input.tasksOverview : "（空）"
+      }`,
+    ];
+    if (input.previousRunContext.length > 0) {
+      sections.push(`### 上一轮运行记忆（同项目最近一次终态）\n${input.previousRunContext}`);
+    }
+    if (input.notesSnapshot.length > 0) {
+      sections.push(`### 跨轮笔记\n${input.notesSnapshot}`);
+    }
+    if (input.prevStageSummaries.length > 0) {
+      sections.push(`### 本迭代前序阶段摘要\n${input.prevStageSummaries}`);
+    }
+    sections.push(`### 剩余 Token 预算\n${String(input.remainingTokenBudget)}`);
+    sections.push(
+      "### 你的任务\n根据以上信息输出一个 JSON 决策（select/replan/stop/none），" +
+        "只输出 JSON，不要输出任何其他文本。"
+    );
+    return sections.join("\n\n");
+  }
+
+  // ==========================================================================
   // 3.1 主循环
   // ==========================================================================
 
@@ -659,6 +913,20 @@ export class LlmTaskExecutor implements P5TaskExecutor {
         // （单测/旧宿主显式配置）。此前只读构造字段而生产链路从未注入，
         // 检查恒跳过——run 4923fdc21e5b/1c76da8bc0c8 单阶段烧穿预算 4.4×/8.6×
         // 的根因之一。两者均未注入时不做轮内检查，由编排器阶段间检查兜底。
+        //
+        // 2026-10-09 追加两级防线（修复 run f2358227def5 超烧 15741 tokens）：
+        // 旧检查只在"轮顶"比对上一轮累计 usage——跨线那次请求的 input+output
+        // 全额计入后要到下一轮顶部才熔断，超烧窗口 = 单次请求 token 量。
+        // 现补两级：
+        // a) pre-flight 估算检查：请求前按"实际发送消息序列"字符量估算
+        //    输入侧 token（复用 CHARS_PER_TOKEN_ESTIMATE 既有系数，不新造口径），
+        //    估算值 + 已用量越线 → 不发请求直接 failure（超烧 ≈ 0）；
+        // b) 响应后检查：真实 usage 回来且本次仍要继续执行工具时立即比对，
+        //    越线 → 不执行工具、直接 failure。终态回复（无工具调用）不拦——
+        //    工作已真实完成，越线事实交由编排器阶段间检查诚实收尾。
+        // 每轮实际发送的消息序列（自压缩重放）：预检与请求复用同一次压缩结果，
+        // 避免同轮重复压缩，也保证预检口径与真实请求完全一致。
+        const outgoingMessages = this.compactReplayEnabled ? this.compactMessagesForRequest(messages) : messages;
         const effectiveBudget = input.perTaskBudget ?? this.perTaskBudget;
         if (effectiveBudget !== undefined) {
           const currentTokens = this.resolveTokensUsed(
@@ -676,6 +944,29 @@ export class LlmTaskExecutor implements P5TaskExecutor {
               `Token 预算超限：累计 ${currentTokens} tokens 已触达单任务绝对上限 ${totalCeiling}` +
                 `（名义预算 ${effectiveBudget} × ${MAX_TOTAL_BUDGET_MULTIPLIER}，` +
                 `已自动压缩续跑 ${budgetEpoch} 次仍未完成），执行中止`,
+              llmRequests,
+              sawUsage,
+              inputTokensTotal + outputTokensTotal,
+              estimatedCharsTotal
+            );
+          }
+          // a) pre-flight 估算检查（2026-10-09 F 修复）：估算输入侧规模 + 已用量，
+          //    越线不发请求。口径与本段额度判定不同层——pre-flight 拦的是
+          //    "本次请求明知会超出总额度"的明显超烧（超烧 ≈ 0）；即便估算越线，
+          //    下方 segment 检查仍保有压缩续跑通道，故此处仅在无任何续跑额度
+          //    （budgetEpoch 已用尽）时直接失败，有额度时把决策交给 segment 逻辑。
+          const estimatedRequestTokens = Math.max(
+            1,
+            Math.ceil(this.lastUserishContentChars(outgoingMessages) / CHARS_PER_TOKEN_ESTIMATE)
+          );
+          if (
+            currentTokens + estimatedRequestTokens > effectiveBudget &&
+            budgetEpoch >= MAX_CONTEXT_EPOCH_ROLLOVERS
+          ) {
+            return this.failure(
+              `Token 预算预检超限：本次请求估算输入 ≈${estimatedRequestTokens} tokens` +
+                `（消息序列 ${this.lastUserishContentChars(outgoingMessages)} 字符），` +
+                `累计已用 ${currentTokens}（预算 ${effectiveBudget}），不再发送请求，执行中止`,
               llmRequests,
               sawUsage,
               inputTokensTotal + outputTokensTotal,
@@ -749,7 +1040,8 @@ export class LlmTaskExecutor implements P5TaskExecutor {
           // 自压缩重放（2026-10-08）：每轮请求前把"将发送的消息序列"压缩到
           // 规模预算内（四级确定性降级：去重→tool 截断→最老 tool 丢弃→兜底裁剪）。
           // 原始 messages 数组只追加不篡改（审计事实源），压缩结果仅用于本次请求。
-          messages: this.compactReplayEnabled ? this.compactMessagesForRequest(messages) : messages,
+          // 2026-10-09：压缩结果上移为 outgoingMessages，与 pre-flight 预检共用。
+          messages: outgoingMessages,
           tools: toolDefinitions,
           thinkingEnabled: false,
           maxTokens: EXECUTION_MAX_TOKENS,
@@ -764,6 +1056,30 @@ export class LlmTaskExecutor implements P5TaskExecutor {
           outputTokensTotal += response.usage.outputTokens;
         } else {
           estimatedCharsTotal += this.lastUserishContentChars(messages) + response.content.length;
+        }
+
+        // b) 响应后预算检查（2026-10-09 新增；2026-10-12 对齐压缩续跑）：真实
+        // usage 已越线且本次仍要执行工具时立即熔断——把熔断点从"下一轮顶部"
+        // 提前到"本响应之后"，不再为已知越线的会话继续执行工具/发起新请求。
+        // 终态回复（无工具调用）不拦：任务已真实完成，越线收尾交编排器阶段间检查。
+        // 与段额度（segmentBudget）口径对齐：仍有续跑额度（budgetEpoch 未用尽）
+        // 时不在这里失败——下一轮顶部的 segment 检查会走压缩续跑通道，此处若抢先
+        // 失败会让"压缩续跑"永远轮不到执行，等于把上游修复（c1a5131）打回原形。
+        if (response.toolCalls.length > 0 && effectiveBudget !== undefined) {
+          const postResponseTokens = this.resolveTokensUsed(
+            sawUsage,
+            inputTokensTotal + outputTokensTotal,
+            estimatedCharsTotal
+          ).tokens;
+          if (postResponseTokens > effectiveBudget && budgetEpoch >= MAX_CONTEXT_EPOCH_ROLLOVERS) {
+            return this.failure(
+              `Token 预算超限（响应后检查）：单任务已用 ${postResponseTokens} tokens（预算 ${effectiveBudget}），不再执行工具调用，执行中止`,
+              llmRequests,
+              sawUsage,
+              inputTokensTotal + outputTokensTotal,
+              estimatedCharsTotal
+            );
+          }
         }
 
         // 无工具调用 = 模型终态回复：任务执行正常结束

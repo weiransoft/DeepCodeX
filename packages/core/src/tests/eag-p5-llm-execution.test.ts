@@ -1195,9 +1195,14 @@ test("BIND-1. SessionManager 构造尾部把真实 LlmTaskExecutor 绑入 orches
     // 真实 orchestrator（构造时未绑定执行器），交由 SessionManager 构造尾部完成装配
     const orchestrator = buildOrchestrator();
 
-    // 桩客户端仅替换 HTTP 边界（与 INT-A 同构：write 真实落盘 + 终态，共 2 次请求）
+    // 桩客户端仅替换 HTTP 边界（与 INT-A 同构：write 真实落盘 + 终态）。
+    // 2026-10-09 F-A2 起 plan 阶段会先发起一次 LLM 规划请求（真实 planIteration），
+    // 故脚本前置一条规划决策（none=不干预），随后才是 dev 的 write 工具调用 + 终态。
     const mathFileAbs = path.join(projectRoot, "src", "bind-check.js");
     const client = new StubLlmClient([
+      {
+        content: '{"action":"none","reasoning":"本地选卡合理，无需干预"}',
+      },
       {
         content: "写入装配验证文件。",
         toolCalls: [
@@ -1230,7 +1235,8 @@ test("BIND-1. SessionManager 构造尾部把真实 LlmTaskExecutor 绑入 orches
       testTimeoutSec: 30,
     });
     assert.equal(result.finalStatus, "completed", `装配后应端到端跑通：\n${result.finalReport}`);
-    assert.equal(client.requestCount, 2, "绑定执行器必须真实发起 2 次 LLM 请求");
+    // 1 次规划请求（plan F-A2）+ 2 次任务请求（write + 终态）= 3
+    assert.equal(client.requestCount, 3, "规划 1 次 + 绑定执行器任务 2 次 = 3 次 LLM 请求");
     assert.ok(fs.existsSync(mathFileAbs), "write 工具必须在项目牢笼内真实落盘");
   } finally {
     cleanupTempProject(projectRoot);

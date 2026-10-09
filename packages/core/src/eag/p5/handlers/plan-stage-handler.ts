@@ -34,6 +34,7 @@ import * as path from "node:path";
 import type { P5StageContext, P5StageHandler, P5StageResult } from "./types";
 import { buildGuardContext, createSuccessStageResult, createFailedStageResult, toGuardRecords } from "./types";
 import type { TaskCard } from "../guards/types";
+import type { P5PlanIterationTask } from "./task-executor-port";
 import { atomicWriteTextFile } from "../common/atomic-file";
 // 领域专家匹配器集成：plan 阶段为任务卡匹配最合适的领域专家（可选增强）
 // 注：DomainExpertMatchResult 类型定义在 team/types.ts，需从正确路径导入
@@ -88,6 +89,14 @@ export const PLAN_REASON_TASKS_BLOCKED = "tasks-blocked" as const;
 /** 正常选中一张可执行任务卡 */
 export const PLAN_REASON_TASK_CARD_SELECTED = "task-card-selected" as const;
 /**
+ * LLM 规划器判定停止运行（2026-10-09 F-A2 新增）。
+ *
+ * plan 阶段动态规划返回 action=stop（或 replan 后无可执行卡）时，plan 以
+ * success + taskCard=null + 本 reason 返回，走既有 5b-6.5 提前结束 +
+ * 5d 判定路径（failed，不假完成）。
+ */
+export const PLAN_REASON_PLANNER_STOP = "planner-stop" as const;
+/**
  * 能力预检拒绝 reason 码（历史保留：修复"能力/目标错配烧轮"2026-10-03）。
  * 同日用户决策开放 bash 后 plan 不再产生该 reason（fatal 拦截已移除）；
  * 保留导出仅为兼容外部对历史 RunState 制品的 reason 判别，勿新增消费方。
@@ -107,6 +116,115 @@ const MAX_SYNTHESIZED_TITLE_CHARS = 200;
  * 绝不让守卫循环无界空转，也绝不静默放行错卡进 dev。
  */
 const GUARD_MAX_ROUNDS = 10;
+
+// ============================================================================
+// 1.1 LLM 动态规划常量（2026-10-09 F-A2，docs/dev/eag-p5-llm-dynamic-planning.md）
+// ============================================================================
+
+/**
+ * plan 阶段 LLM 规划的最小剩余预算闸门。
+ *
+ * 剩余预算低于该值时连一次最小规划请求都发不起（system 提示 + 简报 ≈ 数千
+ * 字符 / 3.5 ≈ 1k tokens，留输出余量），此时跳过 LLM 规划直接走本地规则——
+ * 后续 dev 阶段的执行器 pre-flight 预检也会熔断，plan 不必白烧。
+ */
+const MIN_PLANNER_TOKEN_BUDGET = 3000;
+
+/** 规划简报中 notesSnapshot 的截断长度（跨轮笔记可能很长，只保留近期要点） */
+const PLANNER_NOTES_MAX_CHARS = 4000;
+
+/** 规划简报中前序阶段摘要的截断长度 */
+const PLANNER_PREV_RESULTS_MAX_CHARS = 2000;
+
+/** 跨 run 失败记忆文本的截断长度 */
+const PREVIOUS_RUN_CONTEXT_MAX_CHARS = 1500;
+
+/** replan 决策允许的最大任务条目数（防御模型输出超长列表撑爆 tasks.md） */
+const PLANNER_REPLAN_MAX_TASKS = 20;
+
+/**
+ * 读取跨 run 失败记忆（2026-10-09 F-A3）。
+ *
+ * 扫描 `<projectRoot>/.eag/p5/run-state/*.jsonl`，取同项目且 runId 不同于
+ * 当前运行的最近一个**终态** run（status≠running）的末行快照，渲染为紧凑
+ * 文本供规划简报与 artifacts 消费。磁盘是唯一事实源：上一轮为什么 aborted、
+ * 烧了多少 token，全部来自真实 RunState 落盘，不虚构。
+ *
+ * @param projectRoot 项目根目录绝对路径
+ * @param currentRunId 当前运行 runId（排除自身，避免读到本 run 的中间态）
+ * @returns 记忆文本（无历史 run / 读取失败时为空串，绝不虚构）
+ */
+export function loadPreviousRunContext(projectRoot: string, currentRunId: string): string {
+  const runStateDir = path.join(projectRoot, ".eag", "p5", "run-state");
+  let files: string[] = [];
+  try {
+    files = fs.readdirSync(runStateDir).filter((f) => f.endsWith(".jsonl"));
+  } catch {
+    // 目录不存在（首次运行）或不可读 → 无历史记忆，空串兜底
+    return "";
+  }
+
+  // 收集每个历史 run 的末行快照（末行 = 最终状态；中间行是过程快照）
+  interface PreviousRunSnapshot {
+    readonly runId: string;
+    readonly updatedAt: string;
+    readonly status: string;
+    readonly currentStage: string;
+    readonly totalTokensUsed: number;
+    readonly totalLlmCallCount: number;
+    readonly consecutiveFailures: number;
+    /** 终止原因（aborted/failed 时非空，是"上一轮为什么失败"的核心记忆） */
+    readonly abortReason: string;
+  }
+  const snapshots: PreviousRunSnapshot[] = [];
+  for (const file of files) {
+    const runId = file.replace(/\.jsonl$/, "");
+    if (runId.length === 0 || runId === currentRunId) {
+      continue;
+    }
+    try {
+      const content = fs.readFileSync(path.join(runStateDir, file), "utf8");
+      const lines = content.split("\n").filter((l) => l.trim().length > 0);
+      if (lines.length === 0) {
+        continue;
+      }
+      const last = JSON.parse(lines[lines.length - 1]!) as Record<string, unknown>;
+      const status = typeof last["status"] === "string" ? last["status"] : "";
+      // 只取终态 run：running 的中间态（可能来自其他进行中的会话）不构成"失败记忆"
+      if (status.length === 0 || status === "running") {
+        continue;
+      }
+      snapshots.push({
+        runId,
+        updatedAt: typeof last["updatedAt"] === "string" ? last["updatedAt"] : "",
+        status,
+        currentStage: typeof last["currentStage"] === "string" ? last["currentStage"] : "",
+        totalTokensUsed: typeof last["totalTokensUsed"] === "number" ? last["totalTokensUsed"] : 0,
+        totalLlmCallCount: typeof last["totalLlmCallCount"] === "number" ? last["totalLlmCallCount"] : 0,
+        consecutiveFailures: typeof last["consecutiveFailures"] === "number" ? last["consecutiveFailures"] : 0,
+        abortReason: typeof last["abortReason"] === "string" ? last["abortReason"] : "",
+      });
+    } catch {
+      // 单个文件损坏/不可读 → 跳过该文件，不影响其他历史 run
+      continue;
+    }
+  }
+  if (snapshots.length === 0) {
+    return "";
+  }
+  // 按 updatedAt 降序取最近一次（ISO 8601 字符串字典序即时间序）
+  snapshots.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const prev = snapshots[0]!;
+  // 终止原因只在非空时拼接（completed 等正常终态无 abortReason）
+  const abortReasonPart = prev.abortReason.length > 0 ? `，终止原因：${prev.abortReason}` : "";
+  const text =
+    `上一轮 run ${prev.runId} 于 ${prev.updatedAt} 以 ${prev.status} 终止` +
+    `（最后活动阶段 ${prev.currentStage}，消耗 ${prev.totalTokensUsed} tokens / ` +
+    `${prev.totalLlmCallCount} 次 LLM 请求，连续失败 ${prev.consecutiveFailures}${abortReasonPart}）。` +
+    `若上一轮为 aborted/failed，请勿机械重跑同一张卡：优先分析失败原因、` +
+    `换思路分解任务，或在不可行时输出 stop。`;
+  return text.length > PREVIOUS_RUN_CONTEXT_MAX_CHARS ? text.slice(0, PREVIOUS_RUN_CONTEXT_MAX_CHARS) : text;
+}
 
 // ============================================================================
 // 2. 类型定义
@@ -592,6 +710,13 @@ export class P5PlanStageHandler implements P5StageHandler {
         }
       }
 
+      // F-A2b（2026-10-09 页面端到端复测发现）：无可执行卡（全部 blocked/依赖
+      // 不满足/in-progress 残留）时不再提前 return——那正是跨 run 恢复最需要
+      // LLM 动态规划的场景（本地规则永远解不开 blocked，LLM 可以 replan 解锁
+      // AUTO 卡或诚实判 stop）。先把阻塞结果暂存，3.7 规划器执行后若仍未选出
+      // 可执行卡再返回（保持诊断信息与 planner 审计完整）。
+      let blockedResult: P5StageResult | null = null;
+
       if (nextTask === null) {
         // 方案 A §3.6：把旧的 all-tasks-done-or-blocked 拆成两种诚实语义。
         const completedCount = completedIds.size;
@@ -677,34 +802,344 @@ export class P5PlanStageHandler implements P5StageHandler {
           }
         }
 
-        // 存在未完成任务却没有可执行 pending 卡：区分"显式 blocked / in-progress 残留"
-        // 与"pending 但依赖未满足"，把任务 ID 与缺失依赖写入制品供最终报告诊断（P2-2）
-        const blockedCardIds = selectedCards
-          .filter((c) => c.status !== "completed" && c.status !== "pending")
-          .map((c) => c.id);
-        const waitingDependencies = selectedCards
-          .filter((c) => c.status === "pending")
-          .map((c) => ({
-            id: c.id,
-            missingDependencies: c.dependencies.filter((dep) => !completedIds.has(dep)),
-          }))
-          .filter((entry) => entry.missingDependencies.length > 0);
-        return createSuccessStageResult(
-          "plan",
-          `任务被阻塞（completed=${completedCount}/${selectedCards.length}，blocked=${blockedCardIds.length}，等待依赖=${waitingDependencies.length}）`,
-          {
-            taskCard: null,
-            tasksFilePath,
-            reason: PLAN_REASON_TASKS_BLOCKED,
-            totalCards: selectedCards.length,
-            completedCards: completedCount,
-            blockedCardIds: Object.freeze(blockedCardIds),
-            waitingDependencies: Object.freeze(waitingDependencies),
-          },
-          [],
-          0,
-          Date.now() - startTime
+        // 3.6 AUTO 卡同目标重跑恢复守卫（2026-10-09 修复 run f2358227def5/5081a4c28cd7 死锁）：
+        // 清单可能出现"标题与 objective 互含的 completed AUTO 卡"（历史运行把 dev
+        // 中途失败的任务卡误标 completed、或用户对同一目标显式重跑），同时其余卡
+        // 全部 blocked/依赖不满足 → pickNextPendingTask 返回 null → 本函数原本直接
+        // 返回 TASKS_BLOCKED，同目标重跑幂等死锁（0 LLM / 0 秒 failed）。
+        // 恢复语义：AUTO 卡由 objective 自动合成，"同目标重跑"的唯一合理解读是
+        // 重新执行——把该卡真实写回 pending 落盘（与 3.5 守卫落盘同构，磁盘是
+        // 唯一事实源）并回读重选。手写卡（requirementId≠AUTO）是人工完成事实，
+        // 绝不重置。
+        // 防运行内重入：本运行此前迭代的 plan 已真实选中过该卡（ctx.prevResults
+        // 的 plan success artifacts.taskCard）时不重置——否则 iter0 完成 → iter1
+        // 重置 → 反复执行同一卡烧穿 maxIterations。
+        // fail-closed：落盘失败不伪造成功，维持 TASKS_BLOCKED 透出诊断信息。
+        if (!synthesized) {
+          const rerunObjective = typeof ctx.objective === "string" ? ctx.objective.trim() : "";
+          if (rerunObjective.length > 0) {
+            // 目标候选：completed + AUTO 合成标记 + 标题与 objective 互含（与 3.4
+            // titleEmbedded 同口径——标题由 objective 截断而来，互含即同题）
+            const rerunCandidate = selectedCards.find(
+              (c) =>
+                c.status === "completed" &&
+                c.requirementId === "AUTO" &&
+                c.title.length > 0 &&
+                (rerunObjective.includes(c.title) || c.title.includes(rerunObjective))
+            );
+            // 防重入：本运行此前迭代已选过该卡 → 保持阻塞语义，不重置
+            const alreadyRanThisRun =
+              rerunCandidate !== undefined &&
+              ctx.prevResults.some(
+                (r) =>
+                  r.stage === "plan" &&
+                  r.kind === "success" &&
+                  (r.artifacts["taskCard"] as TaskCard | null | undefined)?.id === rerunCandidate.id
+              );
+            if (rerunCandidate !== undefined && !alreadyRanThisRun) {
+              try {
+                // 以磁盘最新内容为基线改写（上方守卫可能已修改过文件）
+                const freshContent = fs.readFileSync(tasksFilePath, "utf8");
+                const resetContent = markTaskCardStatusInContent(freshContent, rerunCandidate.id, "pending");
+                if (resetContent !== freshContent) {
+                  atomicWriteTextFile(tasksFilePath, resetContent);
+                  ctx.logger?.(
+                    `plan 同目标重跑恢复：completed AUTO 卡 ${rerunCandidate.id}「${rerunCandidate.title}」` +
+                      `已重置为 pending 落盘（同目标重跑语义）→ ${tasksFilePath}`,
+                    "warn"
+                  );
+                  // 与首次解析同一闭环回读重解析（磁盘是唯一事实源）
+                  const reparsed = parseTaskCards(fs.readFileSync(tasksFilePath, "utf8"), (msg) => {
+                    parseWarnings.push(msg);
+                    ctx.logger?.(`plan 解析告警：${msg}`, "warn");
+                  });
+                  const reparsedCompletedIds = new Set<string>(
+                    reparsed.filter((c) => c.status === "completed").map((c) => c.id)
+                  );
+                  const reparsedNext = pickNextPendingTask(reparsed, reparsedCompletedIds);
+                  if (reparsedNext !== null) {
+                    selectedCards = reparsed;
+                    completedIds.clear();
+                    for (const id of reparsedCompletedIds) {
+                      completedIds.add(id);
+                    }
+                    nextTask = reparsedNext;
+                  }
+                }
+              } catch (resetError) {
+                // 落盘失败不阻断收尾：维持 TASKS_BLOCKED 诚实透出诊断（不伪造成功）
+                const message = resetError instanceof Error ? resetError.message : String(resetError);
+                ctx.logger?.(
+                  `plan 同目标重跑恢复：AUTO 卡 ${rerunCandidate.id} 重置落盘失败（${message}），维持任务阻塞语义`,
+                  "warn"
+                );
+              }
+            }
+          }
+        }
+
+        // 3.6 恢复守卫可能已把 nextTask 从 null 恢复为可执行卡（同目标重跑语义），
+        // blocked 返回必须重新判空——否则恢复出的卡会被无条件 TASKS_BLOCKED 吞掉，
+        // 永远到不了下方第 4 步的护栏预检与 dev 执行（T-A5 回归测试发现的缺陷）。
+        if (nextTask === null) {
+          // 存在未完成任务却没有可执行 pending 卡：区分"显式 blocked / in-progress 残留"
+          // 与"pending 但依赖未满足"，把任务 ID 与缺失依赖写入制品供最终报告诊断（P2-2）
+          const blockedCardIds = selectedCards
+            .filter((c) => c.status !== "completed" && c.status !== "pending")
+            .map((c) => c.id);
+          const waitingDependencies = selectedCards
+            .filter((c) => c.status === "pending")
+            .map((c) => ({
+              id: c.id,
+              missingDependencies: c.dependencies.filter((dep) => !completedIds.has(dep)),
+            }))
+            .filter((entry) => entry.missingDependencies.length > 0);
+          // F-A2b：暂存阻塞结果（不提前 return），先给 3.7 规划器一个
+          // replan 解锁 / stop 的机会；3.7 结束后仍未选出卡时再返回它
+          blockedResult = createSuccessStageResult(
+            "plan",
+            `任务被阻塞（completed=${completedCount}/${selectedCards.length}，blocked=${blockedCardIds.length}，等待依赖=${waitingDependencies.length}）`,
+            {
+              taskCard: null,
+              tasksFilePath,
+              reason: PLAN_REASON_TASKS_BLOCKED,
+              totalCards: selectedCards.length,
+              completedCards: completedCount,
+              blockedCardIds: Object.freeze(blockedCardIds),
+              waitingDependencies: Object.freeze(waitingDependencies),
+            },
+            [],
+            0,
+            Date.now() - startTime
+          );
+        }
+      }
+
+      // 3.7 LLM 动态规划（2026-10-09 F-A2，架构师审查 P1-1 修正后的调用点）：
+      // 全部本地守卫（2.1/3.4/3.5/3.6）已执行完毕、候选局面已定，此处调用执行器
+      // 的 planIteration 做一次"无工具"LLM 规划调用，让模型基于"目标 + 卡清单 +
+      // 跨 run 失败记忆 + 笔记 + 剩余预算"动态决定：选哪张卡（select）/
+      // 重排 AUTO 卡集合（replan）/ 停止运行（stop）。规划失败/不可用 →
+      // 保持本地选卡结果（行为与修复前一致，fail-open 但 warn 留痕）。
+      const previousRunContext = loadPreviousRunContext(ctx.projectRoot, ctx.runId);
+      let plannerTokensUsed = 0;
+      let plannerAction = "skipped";
+      let plannerReasoning = "";
+      const planExecutor = ctx.taskExecutor ?? null;
+      const planIterationFn = planExecutor?.planIteration;
+      // 前置闸门：执行器无 planIteration 能力（旧宿主/测试替身）或剩余预算
+      // 不足以发起一次最小规划请求时，跳过 LLM 规划直接走本地规则
+      const plannerGateOpen =
+        typeof planIterationFn === "function" &&
+        (ctx.perTaskBudget === undefined || ctx.perTaskBudget >= MIN_PLANNER_TOKEN_BUDGET);
+      if (plannerGateOpen) {
+        // 可执行卡集合（与 pickNextPendingTask 同口径：pending + 依赖已满足），
+        // select 决策只能从该集合选（架构师审查 P1-2 修正：防止选中依赖未满足的卡）
+        const executableCards = selectedCards.filter(
+          (c) => c.status === "pending" && c.dependencies.every((dep) => completedIds.has(dep))
         );
+        // 卡清单总览：一行一卡，标注 requirement 来源与当前可执行性
+        const tasksOverview = selectedCards
+          .map((c) => {
+            const executable = executableCards.some((e) => e.id === c.id);
+            const deps = c.dependencies.length > 0 ? `，dependencies=[${c.dependencies.join(",")}]` : "";
+            return `- ${c.id}「${c.title}」 status=${c.status} requirement=${c.requirementId}${deps}${executable ? " [可执行]" : ""}`;
+          })
+          .join("\n");
+        // 本迭代前序阶段摘要（plan 是首个阶段时为空串）
+        const prevStageSummaries =
+          ctx.prevResults.length > 0
+            ? ctx.prevResults
+                .map((r) => `- ${r.stage}/${r.kind}：${r.summary.slice(0, 300)}`)
+                .join("\n")
+                .slice(0, PLANNER_PREV_RESULTS_MAX_CHARS)
+            : "";
+        try {
+          const planResult = await planIterationFn.call(planExecutor, {
+            projectRoot: ctx.projectRoot,
+            runId: ctx.runId,
+            iterIndex: ctx.iterIndex,
+            objective: ctx.objective,
+            tasksOverview,
+            notesSnapshot: (ctx.notesSnapshot ?? "").slice(0, PLANNER_NOTES_MAX_CHARS),
+            prevStageSummaries,
+            previousRunContext,
+            remainingTokenBudget: ctx.perTaskBudget ?? Number.MAX_SAFE_INTEGER,
+            abortFlagPath: ctx.abortFlagPath ?? "",
+          });
+          // 规划调用的 token 消耗诚实计入 plan 阶段结果（此前 plan 恒 0）
+          plannerTokensUsed = planResult.tokensUsed;
+          if (!planResult.ok) {
+            plannerAction = "failed";
+            ctx.logger?.(`plan LLM 规划不可用，回退本地选卡：${planResult.error ?? "未知原因"}`, "warn");
+          } else {
+            plannerAction = planResult.action;
+            plannerReasoning = planResult.reasoning;
+            if (planResult.action === "stop") {
+              // 规划器判定停止：走 5b-6.5 提前结束 + 5d 判定路径（failed，不假完成）
+              ctx.logger?.(`plan LLM 规划判定停止：${planResult.reasoning}`, "warn");
+              return createSuccessStageResult(
+                "plan",
+                `LLM 规划判定停止运行：${planResult.reasoning}`,
+                {
+                  taskCard: null,
+                  tasksFilePath,
+                  reason: PLAN_REASON_PLANNER_STOP,
+                  plannerAction: "stop",
+                  plannerReasoning: planResult.reasoning,
+                  previousRunContext,
+                  // 规划器单次请求审计：消耗了 token 即代表真实发起了 1 次 LLM 请求
+                  llmRequests: plannerTokensUsed > 0 ? 1 : 0,
+                },
+                [],
+                plannerTokensUsed,
+                Date.now() - startTime
+              );
+            }
+            if (planResult.action === "select") {
+              const requested = planResult.taskId ?? "";
+              const target = executableCards.find((c) => c.id === requested);
+              if (target !== undefined) {
+                // 合法 select：覆盖本地选卡（本地 pickNextPendingTask 的 ID 升序
+                // 结果只是默认值，动态规划才是用户要求的决策来源）
+                nextTask = target;
+                ctx.logger?.(
+                  `plan LLM 规划选卡：${target.id}「${target.title}」（理由：${planResult.reasoning}）`,
+                  "info"
+                );
+              } else {
+                plannerAction = "select-invalid";
+                ctx.logger?.(`plan LLM 规划 select 非法（${requested} 不在可执行集合），回退本地选卡`, "warn");
+              }
+            } else if (planResult.action === "replan") {
+              // replan 合并应用（架构师约束：只允许操作 requirement=AUTO 的卡；
+              // completed 不允许由 LLM 设置——防假完成落盘；手写卡一律不动）
+              const entries = (planResult.tasks ?? []).slice(0, PLANNER_REPLAN_MAX_TASKS);
+              // 以磁盘最新内容为合并基线（上方守卫可能已修改过文件）
+              let merged = fs.readFileSync(tasksFilePath, "utf8");
+              for (const entry of entries) {
+                if (entry.id !== undefined) {
+                  const existing = selectedCards.find((c) => c.id === entry.id);
+                  if (
+                    existing !== undefined &&
+                    existing.requirementId === "AUTO" &&
+                    (entry.status === "pending" || entry.status === "blocked")
+                  ) {
+                    merged = markTaskCardStatusInContent(merged, entry.id, entry.status);
+                  }
+                } else if (entry.title !== undefined && entry.title.trim().length > 0) {
+                  // 追加新 AUTO 卡：编号由本地生成（防 LLM 撞号），标题单行截断
+                  const newId = generateSynthesizedTaskId(parseTaskCards(merged));
+                  merged =
+                    `${merged.replace(/\s+$/, "")}\n\n` +
+                    buildAutoTaskCardContent(entry.title.trim(), entry.dependencies ?? [], newId);
+                }
+              }
+              try {
+                atomicWriteTextFile(tasksFilePath, merged);
+                // 与守卫同一闭环：回读重解析 + 本地 pickNextPendingTask 重选
+                // （本地守门不变：LLM 只影响卡集合与状态，最终可执行性由本地判定）
+                const reparsed = parseTaskCards(fs.readFileSync(tasksFilePath, "utf8"), (msg) => {
+                  parseWarnings.push(msg);
+                  ctx.logger?.(`plan 解析告警：${msg}`, "warn");
+                });
+                const reparsedCompletedIds = new Set<string>(
+                  reparsed.filter((c) => c.status === "completed").map((c) => c.id)
+                );
+                const reparsedNext = pickNextPendingTask(reparsed, reparsedCompletedIds);
+                if (reparsedNext !== null) {
+                  selectedCards = reparsed;
+                  completedIds.clear();
+                  for (const id of reparsedCompletedIds) {
+                    completedIds.add(id);
+                  }
+                  nextTask = reparsedNext;
+                  ctx.logger?.(
+                    `plan LLM 规划 replan 已落盘并重选 ${nextTask.id}「${nextTask.title}」（理由：${planResult.reasoning}）`,
+                    "info"
+                  );
+                } else {
+                  // replan 后无可执行卡 → 按规划器停止语义收尾（诚实透出理由）
+                  ctx.logger?.(`plan LLM 规划 replan 后无可执行卡，按停止处理：${planResult.reasoning}`, "warn");
+                  return createSuccessStageResult(
+                    "plan",
+                    `LLM 规划 replan 后无可执行卡：${planResult.reasoning}`,
+                    {
+                      taskCard: null,
+                      tasksFilePath,
+                      reason: PLAN_REASON_PLANNER_STOP,
+                      plannerAction: "replan",
+                      plannerReasoning: planResult.reasoning,
+                      previousRunContext,
+                      // 规划器单次请求审计：消耗了 token 即代表真实发起了 1 次 LLM 请求
+                      llmRequests: plannerTokensUsed > 0 ? 1 : 0,
+                    },
+                    [],
+                    plannerTokensUsed,
+                    Date.now() - startTime
+                  );
+                }
+              } catch (writeError) {
+                // 落盘失败 fail-closed：维持本地选卡结果（不伪造 replan 成功）
+                const message = writeError instanceof Error ? writeError.message : String(writeError);
+                plannerAction = "replan-write-failed";
+                ctx.logger?.(`plan LLM 规划 replan 落盘失败（${message}），回退本地选卡`, "warn");
+              }
+            }
+            // action=none：不干预，保持本地选卡结果
+          }
+        } catch (plannerError) {
+          // 规划调用异常（网络/中止等）→ 回退本地选卡，token 消耗仍诚实记录
+          const message = plannerError instanceof Error ? plannerError.message : String(plannerError);
+          plannerAction = "exception";
+          ctx.logger?.(`plan LLM 规划异常，回退本地选卡：${message}`, "warn");
+        }
+      }
+
+      // F-A2b 收尾：规划器执行后仍无可执行卡 → 返回暂存的阻塞结果。
+      // 若规划器真实发起过请求（tokensUsed>0），tokensUsed 与 planner 审计
+      // 字段诚实并入返回值（维持"消耗了 token 就必须记账"原则）。
+      // 说明：nextTask===null 时 blockedResult 必然已由上方守卫块尾记录
+      // （all-completed 合成、3.6 恢复、阻塞记录三出口覆盖），此处断言仅
+      // 满足 TS 控制流分析；理论不可达分支兜底返回通用阻塞诊断。
+      if (nextTask === null) {
+        const blockedFallback =
+          blockedResult ??
+          createSuccessStageResult(
+            "plan",
+            `任务被阻塞（completed=${completedIds.size}/${selectedCards.length}）`,
+            {
+              taskCard: null,
+              tasksFilePath,
+              reason: PLAN_REASON_TASKS_BLOCKED,
+              totalCards: selectedCards.length,
+              completedCards: completedIds.size,
+              blockedCardIds: Object.freeze(
+                selectedCards.filter((c) => c.status !== "completed" && c.status !== "pending").map((c) => c.id)
+              ),
+              waitingDependencies: Object.freeze([]),
+            },
+            [],
+            0,
+            Date.now() - startTime
+          );
+        if (plannerTokensUsed > 0 || plannerAction !== "skipped") {
+          return createSuccessStageResult(
+            "plan",
+            blockedFallback.summary,
+            {
+              ...blockedFallback.artifacts,
+              plannerAction,
+              plannerReasoning,
+              previousRunContext,
+              llmRequests: plannerTokensUsed > 0 ? 1 : 0,
+            },
+            [],
+            plannerTokensUsed,
+            Date.now() - startTime
+          );
+        }
+        return blockedFallback;
       }
 
       // （3.5 任务卡级能力 fatal 预检已随执行器开放 bash 而移除，2026-10-03
@@ -745,9 +1180,12 @@ export class P5PlanStageHandler implements P5StageHandler {
             taskCard,
             guardDecision: "DENY",
             guardRuleId: firstDenial?.ruleId ?? "",
+            // 规划器单次请求审计（护栏拒绝不能抹掉真实请求记录）
+            llmRequests: plannerTokensUsed > 0 ? 1 : 0,
           },
           guardRecords,
-          0,
+          // F-A2：规划调用已发生时 token 消耗诚实计入（护栏拒绝不能抹掉真实消耗）
+          plannerTokensUsed,
           Date.now() - startTime
         );
       }
@@ -764,9 +1202,12 @@ export class P5PlanStageHandler implements P5StageHandler {
             taskCard,
             guardDecision: "ASK",
             guardRuleId: firstAsk?.ruleId ?? "",
+            // 规划器单次请求审计（待确认状态不能抹掉真实请求记录）
+            llmRequests: plannerTokensUsed > 0 ? 1 : 0,
           },
           guardRecords,
-          0,
+          // F-A2：规划调用已发生时 token 消耗诚实计入（待确认状态不能抹掉真实消耗）
+          plannerTokensUsed,
           Date.now() - startTime
         );
       }
@@ -821,11 +1262,20 @@ export class P5PlanStageHandler implements P5StageHandler {
           pendingCards: selectedCards.length - completedIds.size,
           parseWarnings,
           guardDecision: "PASS",
+          // F-A2 规划决策留痕（审计 + orchestrator 前端展示；skipped=未启用规划）
+          plannerAction,
+          plannerReasoning,
+          // F-A3 跨 run 失败记忆透出（审计 + F-C dev 阶段失败反馈注入的数据源）
+          previousRunContext,
+          lastFailureFeedback: previousRunContext,
+          // 规划器单次请求审计（orchestrator 据此累加 totalLlmCallCount）
+          llmRequests: plannerTokensUsed > 0 ? 1 : 0,
           domainExperts, // 领域专家匹配结果（可选增强，供后续阶段参考）
           guardCoordinatorResult, // GuardCoordinator 执行前验证结果（可选增强）
         },
         guardRecords,
-        0,
+        // F-A2：规划调用真实消耗诚实计入（此前 plan 恒 0，导致 run 级预算虚高）
+        plannerTokensUsed,
         Date.now() - startTime
       );
     } catch (err) {
@@ -1331,6 +1781,50 @@ export function buildSynthesizedTasksContent(objective: string, taskId: string):
     "- requirement: AUTO",
     "- status: pending",
     "- dependencies:",
+    "- files:",
+    "- deletions:",
+    "- symbols:",
+    "- acceptance:",
+    "",
+  ].join("\n");
+}
+
+/**
+ * 构造单张 AUTO 任务卡的 markdown 区段文本（2026-10-09 F-A2 replan 决策新增）。
+ *
+ * 背景：plan 阶段 LLM 规划器输出 replan 决策并要求新增任务卡时，新增卡由
+ * 本地生成 AUTO 编号并追加到 tasks.md——本函数负责把一条 LLM 描述渲染成
+ * 与 parseTaskCards 解析正则严格兼容的卡区段（与 buildSynthesizedTasksContent
+ * 的单卡格式同构，但允许显式声明依赖）。
+ *
+ * 格式要点（与解析器约束对齐）：
+ * - 标题必须单行：折叠换行/制表符为空格并压缩连续空白，超长截断（防跨区段注入）；
+ * - `- requirement: AUTO` 标记来源为 LLM 动态规划（AUTO 卡语义守卫的判定依据）；
+ * - `- dependencies: T-001, T-002` 逗号分隔（无依赖时冒号后留空，解析器取默认空数组）；
+ * - status 固定 pending（completed 不允许由 LLM 设置——防假完成，见端口协议注释）。
+ *
+ * @param title 已 trim 的任务标题（调用方保证非空）
+ * @param dependencies 依赖卡 ID 列表（可为空数组）
+ * @param taskId 新卡的唯一 ID（由 generateSynthesizedTaskId 生成，调用方保证唯一性）
+ * @returns 单张卡区段的 markdown 文本（以换行结尾，可直接拼接追加）
+ */
+export function buildAutoTaskCardContent(title: string, dependencies: ReadonlyArray<string>, taskId: string): string {
+  // 标题单行化：折叠所有换行/制表符为空格并压缩连续空白，超长截断（与合成卡同规则）
+  const singleLineTitle = title
+    .replace(/\r?\n/g, " ")
+    .replace(/\t/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_SYNTHESIZED_TITLE_CHARS);
+  // 依赖行：无依赖时冒号后留空（解析器属性正则要求冒号后至少一个字符才命中，
+  // 空行不匹配 → 取默认空数组，与 buildSynthesizedTasksContent 的空值行语义一致）
+  const dependenciesLine = dependencies.length > 0 ? `- dependencies: ${dependencies.join(", ")}` : "- dependencies:";
+
+  return [
+    `## ${taskId} ${singleLineTitle}`,
+    "- requirement: AUTO",
+    "- status: pending",
+    dependenciesLine,
     "- files:",
     "- deletions:",
     "- symbols:",
