@@ -79,6 +79,7 @@ export async function handleUnderstandImageTool(
     context.signal?.throwIfAborted();
 
     // 获取当前会话的 LLM 客户端（与主对话共用同一 baseURL / apiKey / model）
+    // 隐私加固：保留本地多模态通道，不采纳上游 v0.4.3 的插件服务器上传实现
     const llm = context.createOpenAIClient?.();
     if (!llm?.client) {
       return toolError("UnderstandImage requires a configured LLM client. Check your API key and model settings.");

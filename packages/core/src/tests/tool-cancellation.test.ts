@@ -24,7 +24,16 @@ function setup(t: TestContext) {
   return { root, controller, context };
 }
 
-for (const stage of ["diagnosis", "escape", "language", "translation", "search", "image", "responses"] as const) {
+for (const stage of [
+  "diagnosis",
+  "escape",
+  "language",
+  "translation",
+  "search",
+  "image",
+  "responses",
+  "search-deepseek",
+] as const) {
   test(`cancellation reaches pending ${stage} request`, { timeout: 3000 }, async (t) => {
     const { root, controller, context } = setup(t);
     let calls = 0;
@@ -53,14 +62,13 @@ for (const stage of ["diagnosis", "escape", "language", "translation", "search",
           },
         },
       },
-      responses: { create: pending },
     } as unknown as OpenAI;
     context.createOpenAIClient = () => ({
       client,
       model: "test",
       machineId: "test-machine",
       thinkingEnabled: false,
-      baseURL: stage === "responses" ? "https://api.deepseek.com" : "https://example.com",
+      baseURL: stage === "search-deepseek" ? "https://api.deepseek.com" : "https://example.com",
     });
     // B1 迁移（2026-09）：edit 的 diagnosis / escape 辅助调用从 OpenAI SDK 直连
     // （createOpenAIClient → chat.completions）迁至统一 LLM 客户端（provider 路由），

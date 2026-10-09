@@ -16,7 +16,10 @@
 #   bash scripts/release.sh
 #
 #   # 覆盖版本号（不改 package.json，只影响 tag + release）
-#   bash scripts/release.sh v0.4.3
+#   bash scripts/release.sh v0.4.3.14
+#
+#   # 补发：Release 已建但 tag 需指向最新 commit（删除重建 + 强推）
+#   bash scripts/release.sh --force-tag
 #
 #   # 只 build + pack（不推 tag / 不创建 Release）
 #   bash scripts/release.sh --dry-run
