@@ -349,6 +349,9 @@ export class P5DevStageHandler implements P5StageHandler {
         taskTitle: taskCard.title,
         acceptanceCriteria: taskCard.acceptanceCriteria,
         abortFlagPath: ctx.abortFlagPath ?? "",
+        // 运行剩余预算透传（2026-10-08 T-009/T-010 事故修复）：执行器每轮增量检查，
+        // 把单阶段超烧窗口从"整轮迭代"收窄到"单轮请求"；fixtures 未注入时 undefined
+        perTaskBudget: ctx.perTaskBudget,
       });
 
       if (!execution.success) {

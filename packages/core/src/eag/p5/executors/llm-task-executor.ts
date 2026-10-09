@@ -594,21 +594,25 @@ export class LlmTaskExecutor implements P5TaskExecutor {
           );
         }
 
-        // 增量 Token 预算检查（2026-10-07 新增）：
+        // 增量 Token 预算检查（2026-10-07 新增；2026-10-08 T-009/T-010 事故修复接线）：
         // 每轮都对比累计 tokensUsed 与 perTaskBudget，超限立即 failure。
         // 这比"40 轮全跑完才让编排器看到 tokensUsed"更诚实——避免单轮
         // dev/fix 烧穿预算 N 倍（架构师指出的根因）。
-        // perTaskBudget 由编排器注入 = totalBudget - totalTokensUsedAlreadyConsumed
-        // （未注入时 undefined → 执行器不检查，编排器统一管）。
-        if (this.perTaskBudget !== undefined) {
+        // 预算优先级：调用方 input.perTaskBudget（编排器按运行剩余预算
+        // maxTokens - totalTokensUsed 逐阶段注入）> 构造期 this.perTaskBudget
+        // （单测/旧宿主显式配置）。此前只读构造字段而生产链路从未注入，
+        // 检查恒跳过——run 4923fdc21e5b/1c76da8bc0c8 单阶段烧穿预算 4.4×/8.6×
+        // 的根因之一。两者均未注入时不做轮内检查，由编排器阶段间检查兜底。
+        const effectiveBudget = input.perTaskBudget ?? this.perTaskBudget;
+        if (effectiveBudget !== undefined) {
           const currentTokens = this.resolveTokensUsed(
             sawUsage,
             inputTokensTotal + outputTokensTotal,
             estimatedCharsTotal
           ).tokens;
-          if (currentTokens > this.perTaskBudget) {
+          if (currentTokens > effectiveBudget) {
             return this.failure(
-              `Token 预算超限：单任务已用 ${currentTokens} tokens（预算 ${this.perTaskBudget}），执行中止`,
+              `Token 预算超限：单任务已用 ${currentTokens} tokens（预算 ${effectiveBudget}），执行中止`,
               llmRequests,
               sawUsage,
               inputTokensTotal + outputTokensTotal,

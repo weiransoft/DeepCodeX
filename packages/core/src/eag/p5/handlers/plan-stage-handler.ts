@@ -97,6 +97,17 @@ export const PLAN_REASON_CAPABILITY_GAP = "capability-gap" as const;
 /** 合成任务卡标题最大字符数（防止超长 objective 撑爆单行标题） */
 const MAX_SYNTHESIZED_TITLE_CHARS = 200;
 
+/**
+ * 3.5 AUTO 卡语义守卫单轮拦截上限（2026-10-08 T-009/T-010 事故修复新增）。
+ *
+ * 有界循环每轮拦截一张无关 AUTO 旧卡（blocked 落盘 + 必要时追加合成卡）。
+ * 正常场景 1-2 轮收敛（第一轮 blocked 旧卡并追加合成卡，第二轮新卡
+ * titleEmbedded 命中即 break）。上限只防御"每张新选中卡都无关且每轮都能
+ * 成功落盘"的病态清单，超限交给循环后的诚实兜底 fail-closed，
+ * 绝不让守卫循环无界空转，也绝不静默放行错卡进 dev。
+ */
+const GUARD_MAX_ROUNDS = 10;
+
 // ============================================================================
 // 2. 类型定义
 // ============================================================================
@@ -455,73 +466,128 @@ export class P5PlanStageHandler implements P5StageHandler {
       // 是否重复追加由下方 alreadySynthesized 判定决定。
       if (nextTask !== null) {
         const objectiveText = typeof ctx.objective === "string" ? ctx.objective.trim() : "";
-        const selectedIsAuto = nextTask.requirementId === "AUTO";
-        if (selectedIsAuto && objectiveText.length > 0) {
+        // 守卫落盘失败原因（若有）——供循环后的诚实兜底构造错误信息
+        let guardWriteError: string | null = null;
+        // 有界拦截循环（2026-10-08 T-009/T-010 事故修复）：旧实现单发拦截后不复查
+        // 新选中卡——落盘成功但下一张仍是无关 AUTO 旧卡时直接放行 dev 执行错卡。
+        // 每轮：选中无关 AUTO 卡 → blocked 落盘 +（必要时）追加合成卡 → 回读重选卡。
+        // 新合成卡 title=objective 截断 → titleEmbedded 命中 → break（正常 1-2 轮收敛）；
+        // 手写卡/相关卡/判空立即 break；最多 GUARD_MAX_ROUNDS 轮后交给下方诚实兜底。
+        for (let guardRound = 0; guardRound < GUARD_MAX_ROUNDS; guardRound += 1) {
+          if (nextTask === null) break;
+          const selectedIsAuto = nextTask.requirementId === "AUTO";
+          if (!selectedIsAuto || objectiveText.length === 0) break;
           const titleEmbedded =
             nextTask.title.length > 0 &&
             (objectiveText.includes(nextTask.title) || nextTask.title.includes(objectiveText));
           const singleCardRelevance = computeObjectiveRelevance(objectiveText, [
             `${nextTask.title} ${nextTask.requirementId}`,
           ]);
-          if (!titleEmbedded && singleCardRelevance < OBJECTIVE_RELEVANCE_MIN_RATIO) {
+          if (titleEmbedded || singleCardRelevance >= OBJECTIVE_RELEVANCE_MIN_RATIO) break;
+          ctx.logger?.(
+            `plan AUTO 卡语义无关守卫：${nextTask.id}「${nextTask.title}」与 objective「${objectiveText}」` +
+              `相关性 ${singleCardRelevance.toFixed(2)} < 阈值 ${OBJECTIVE_RELEVANCE_MIN_RATIO.toFixed(2)}，` +
+              `旧卡 blocked 落盘并追加新合成卡`,
+            "warn"
+          );
+          try {
+            // 从磁盘重读最新内容：3.4 守卫可能已在上面追加过合成卡，tasksContent 变量是旧快照，
+            // 直接用会丢掉 3.4 刚写入的卡
+            const currentTasksContent = fs.readFileSync(tasksFilePath, "utf8");
+            // 防重复追加判定（与 3.4 的 alreadySynthesized 同构）：3.4 可能刚把同一目标
+            // 合成为 AUTO 卡（title=objective 截断）。此时 3.5 只需把旧卡 blocked，
+            // 不得再追加同目标卡——否则同一目标落两张重复卡，浪费一轮执行。
+            // 注意：必须用磁盘最新内容重新解析（taskCards 变量是进入 handler 时的旧快照，
+            // 不含 3.4 刚追加的卡），否则判重失效、重复追加（N1/N2 回归测试发现）。
+            const currentCards = parseTaskCards(currentTasksContent);
+            const alreadySynthesized = currentCards.some(
+              (c) => c.requirementId === "AUTO" && c.title.length > 0 && objectiveText.includes(c.title)
+            );
+            // 旧 AUTO 卡 status 真实改写为 blocked（内存文本）——blocked 落盘是关键：
+            // 不落盘则下一轮重读磁盘时旧卡仍 pending，守卫每轮重触发
+            const blockedContent = markTaskCardStatusInContent(currentTasksContent, nextTask.id, "blocked");
+            const contentToWrite = alreadySynthesized
+              ? blockedContent
+              : `${blockedContent.replace(/\s+$/, "")}\n\n` +
+                `${buildSynthesizedTasksContent(objectiveText, generateSynthesizedTaskId(taskCards))}`;
+            atomicWriteTextFile(tasksFilePath, contentToWrite);
+            synthesized = true;
             ctx.logger?.(
-              `plan AUTO 卡语义无关守卫：${nextTask.id}「${nextTask.title}」与 objective「${objectiveText}」` +
-                `相关性 ${singleCardRelevance.toFixed(2)} < 阈值 ${OBJECTIVE_RELEVANCE_MIN_RATIO.toFixed(2)}，` +
-                `旧卡 blocked 落盘并追加新合成卡`,
+              `plan AUTO 卡语义守卫：${nextTask.id} 已 blocked 落盘` +
+                `（新目标消费卡：${alreadySynthesized ? "复用 3.4 已合成的同目标卡，未重复追加" : "已追加新合成卡"}）→ ${tasksFilePath}`,
               "warn"
             );
-            try {
-              // 从磁盘重读最新内容：3.4 守卫可能已在上面追加过合成卡，tasksContent 变量是旧快照，
-              // 直接用会丢掉 3.4 刚写入的卡
-              const currentTasksContent = fs.readFileSync(tasksFilePath, "utf8");
-              // 防重复追加判定（与 3.4 的 alreadySynthesized 同构）：3.4 可能刚把同一目标
-              // 合成为 AUTO 卡（title=objective 截断）。此时 3.5 只需把旧卡 blocked，
-              // 不得再追加同目标卡——否则同一目标落两张重复卡，浪费一轮执行。
-              // 注意：必须用磁盘最新内容重新解析（taskCards 变量是进入 handler 时的旧快照，
-              // 不含 3.4 刚追加的卡），否则判重失效、重复追加（N1/N2 回归测试发现）。
-              const currentCards = parseTaskCards(currentTasksContent);
-              const alreadySynthesized = currentCards.some(
-                (c) => c.requirementId === "AUTO" && c.title.length > 0 && objectiveText.includes(c.title)
-              );
-              // 旧 AUTO 卡 status 真实改写为 blocked（内存文本）——blocked 落盘是关键：
-              // 不落盘则下一轮重读磁盘时旧卡仍 pending，守卫每轮重触发
-              const blockedContent = markTaskCardStatusInContent(currentTasksContent, nextTask.id, "blocked");
-              const contentToWrite = alreadySynthesized
-                ? blockedContent
-                : `${blockedContent.replace(/\s+$/, "")}\n\n` +
-                  `${buildSynthesizedTasksContent(objectiveText, generateSynthesizedTaskId(taskCards))}`;
-              atomicWriteTextFile(tasksFilePath, contentToWrite);
-              synthesized = true;
-              ctx.logger?.(
-                `plan AUTO 卡语义守卫：${nextTask.id} 已 blocked 落盘` +
-                  `（新目标消费卡：${alreadySynthesized ? "复用 3.4 已合成的同目标卡，未重复追加" : "已追加新合成卡"}）→ ${tasksFilePath}`,
-                "warn"
-              );
-              // 与首次解析同一闭环回读重解析（磁盘是唯一事实源）：
-              // 新合成卡 title=objective 截断 → titleEmbedded 命中 → 下一轮不会再触发本守卫
-              const reparsed = parseTaskCards(fs.readFileSync(tasksFilePath, "utf8"), (msg) => {
-                parseWarnings.push(msg);
-                ctx.logger?.(`plan 解析告警：${msg}`, "warn");
-              });
-              const reparsedCompletedIds = new Set<string>(
-                reparsed.filter((c) => c.status === "completed").map((c) => c.id)
-              );
-              const reparsedNext = pickNextPendingTask(reparsed, reparsedCompletedIds);
-              if (reparsedNext !== null) {
-                selectedCards = reparsed;
-                completedIds.clear();
-                for (const id of reparsedCompletedIds) {
-                  completedIds.add(id);
-                }
-                nextTask = reparsedNext;
+            // 与首次解析同一闭环回读重解析（磁盘是唯一事实源）：
+            // 新合成卡 title=objective 截断 → titleEmbedded 命中 → 下一轮不会再触发本守卫
+            const reparsed = parseTaskCards(fs.readFileSync(tasksFilePath, "utf8"), (msg) => {
+              parseWarnings.push(msg);
+              ctx.logger?.(`plan 解析告警：${msg}`, "warn");
+            });
+            const reparsedCompletedIds = new Set<string>(
+              reparsed.filter((c) => c.status === "completed").map((c) => c.id)
+            );
+            const reparsedNext = pickNextPendingTask(reparsed, reparsedCompletedIds);
+            if (reparsedNext !== null) {
+              selectedCards = reparsed;
+              completedIds.clear();
+              for (const id of reparsedCompletedIds) {
+                completedIds.add(id);
               }
-              // reparsedNext 为 null（新卡也被 dependencies 挡住等）→ 维持 nextTask 不变，
-              // 由下游"无可执行卡"路径透出诊断，不伪造成功
-            } catch (appendError) {
-              // 落盘失败不阻断本轮（与 3.4 同策略：沿用现存卡）；告警留痕供诊断
-              const message = appendError instanceof Error ? appendError.message : String(appendError);
-              ctx.logger?.(`plan AUTO 卡语义守卫：blocked 落盘/追加失败（${message}），本轮沿用旧卡`, "warn");
+              nextTask = reparsedNext;
+            } else {
+              // reparsedNext 为 null（新卡也被 dependencies 挡住等）→ 显式判空，
+              // 由下游"无可执行卡"路径透出诊断。旧实现"维持 nextTask 不变"会把
+              // 刚被 blocked 落盘的旧卡继续送入 dev 执行（内存态与磁盘态分裂）。
+              nextTask = null;
             }
+          } catch (appendError) {
+            // 落盘失败不再"沿用旧卡"（2026-10-08 T-009/T-010 事故修复）：失败原因
+            // 记录后交由下方 fail-closed 兜底处理——沿用旧卡会让 dev 执行错卡且
+            // synthesized=true 的 summary 谎报"已从目标合成并选取任务卡：<旧卡标题>"
+            const message = appendError instanceof Error ? appendError.message : String(appendError);
+            guardWriteError = message;
+            ctx.logger?.(`plan AUTO 卡语义守卫：blocked 落盘/追加失败（${message}），交由 fail-closed 兜底`, "warn");
+            break;
+          }
+        }
+        // 诚实兜底（2026-10-08 T-009/T-010 事故修复）：有界循环后选中卡仍是与目标
+        // 无关的 AUTO 卡（落盘失败、或无关旧卡数超过拦截上限），绝不能继续放行 dev
+        // 执行错卡并输出误导性 summary——fail-closed 判 plan failed，错误信息指向
+        // tasks.md 供人工介入。旧实现兜底是"静默沿用旧卡"，run 4923fdc21e5b 据此
+        // 谎报"已从目标合成并选取任务卡：T-009 继续"并烧掉一轮 40 次 LLM 请求。
+        if (nextTask !== null && objectiveText.length > 0 && nextTask.requirementId === "AUTO") {
+          const finalTitleEmbedded =
+            nextTask.title.length > 0 &&
+            (objectiveText.includes(nextTask.title) || nextTask.title.includes(objectiveText));
+          const finalRelevance = computeObjectiveRelevance(objectiveText, [
+            `${nextTask.title} ${nextTask.requirementId}`,
+          ]);
+          if (!finalTitleEmbedded && finalRelevance < OBJECTIVE_RELEVANCE_MIN_RATIO) {
+            const cause =
+              guardWriteError !== null
+                ? `tasks.md 写入失败（${guardWriteError}）`
+                : `无关旧 AUTO 卡数量超过单轮拦截上限（${GUARD_MAX_ROUNDS} 轮）`;
+            ctx.logger?.(
+              `plan AUTO 卡语义守卫：${nextTask.id} 与 objective 仍未消除无关性（${cause}），fail-closed 避免错卡执行`,
+              "error"
+            );
+            return createFailedStageResult(
+              "plan",
+              "failed",
+              `任务卡 ${nextTask.id}「${nextTask.title}」与当前目标语义无关且守卫无法纠正（${cause}），中止以避免执行错误任务`,
+              `objective「${objectiveText}」与卡「${nextTask.title}」相关性 ${finalRelevance.toFixed(2)}` +
+                ` < 阈值 ${OBJECTIVE_RELEVANCE_MIN_RATIO}；守卫无法落盘合成卡替代。` +
+                `请检查 ${tasksFilePath} 的可写性与内容，必要时手工清理过期的 pending AUTO 卡后重试`,
+              {
+                taskCardId: nextTask.id,
+                reason: "auto-card-relevance-unresolvable",
+                relevance: finalRelevance,
+                guardWriteError,
+              },
+              [],
+              0,
+              Date.now() - startTime
+            );
           }
         }
       }

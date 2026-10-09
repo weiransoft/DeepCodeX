@@ -103,6 +103,20 @@ export interface P5TaskExecutionInput {
    */
   readonly abortFlagPath: string;
   /**
+   * 本次任务执行的 Token 预算上限（可选，2026-10-08 T-009/T-010 事故修复新增）。
+   *
+   * 由编排器按运行剩余预算（maxTokens - 已消耗 token）经 P5StageContext 透传到
+   * dev/fix handler，再随本输入进入执行器。执行器每轮开始前对比本任务累计
+   * tokensUsed 与该上限，超限立即 failure——把单阶段超烧窗口从"整轮迭代"收窄到
+   * "单轮请求"。真实事故 run 4923fdc21e5b/1c76da8bc0c8：轮内检查代码存在但生产
+   * 链路从未注入（构造字段恒 undefined），单阶段 40 轮分别烧 877,542/1,716,646
+   * token（预算 200,000 的 4.4×/8.6×）。
+   *
+   * 未注入（undefined）时回退构造期 perTaskBudget（再缺省则不做轮内检查，
+   * 由编排器阶段间检查兜底）——既有测试替身与旧调用点行为不变。
+   */
+  readonly perTaskBudget?: number;
+  /**
    * bash 高危命令人工确认回调（可选，宿主注入；2026-10-03）。
    *
    * 执行器权限钩子命中 DANGEROUS_COMMAND_PATTERNS 时挂起等待此回调的人类决策：

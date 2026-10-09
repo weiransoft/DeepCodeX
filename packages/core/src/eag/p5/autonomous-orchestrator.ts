@@ -893,6 +893,11 @@ export class AutonomousOrchestrator {
             // plan 自身执行时尚不知是否合成（false）；dev/verify/fix 读取真实值
             synthesizedTask: iterationSynthesized,
             abortFlagPath: abortFilePath,
+            // 运行剩余预算（2026-10-08 T-009/T-010 事故修复）：经 ctx 透传给 dev/fix
+            // 执行器做轮内增量检查，随 totalTokensUsed 逐阶段递减。此前该值从未注入
+            // （执行器轮内检查恒跳过），真实事故单阶段 40 轮烧 877,542/1,716,646 token
+            // （预算 200,000 的 4.4×/8.6×）才由阶段间检查兜底。
+            perTaskBudget: Math.max(0, maxTokens - totalTokensUsed),
           });
 
           // 5b-2. 调用 loopExecutor.execute(stage, ctx)
@@ -2359,6 +2364,11 @@ export class AutonomousOrchestrator {
     readonly synthesizedTask: boolean;
     /** abort 标志文件绝对路径（透传执行器轮询） */
     readonly abortFlagPath: string;
+    /**
+     * 本阶段任务执行的 Token 预算上限（运行剩余预算，2026-10-08 T-009/T-010 事故修复）。
+     * 由调用点按 maxTokens - totalTokensUsed 计算并夹到 ≥0；执行器据此做每轮增量检查。
+     */
+    readonly perTaskBudget: number;
   }): Readonly<P5StageContext> {
     return Object.freeze({
       runId: args.runId,
@@ -2377,6 +2387,7 @@ export class AutonomousOrchestrator {
       testCommand: args.testCommand,
       testTimeoutSec: args.testTimeoutSec,
       loopType: args.loopType,
+      perTaskBudget: args.perTaskBudget,
       taskExecutor: args.taskExecutor,
       synthesizedTask: args.synthesizedTask,
       abortFlagPath: args.abortFlagPath,
