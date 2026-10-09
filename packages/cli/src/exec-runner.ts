@@ -1,6 +1,6 @@
 import {
   SessionManager,
-  createOpenAIClient,
+  createOpenAIClientFactory,
   resolveCurrentSettings,
   type AskPermissionRequest,
   type AskPermissionScope,
@@ -83,7 +83,7 @@ export async function runExecMode(
     }
     manager = deps.createSessionManager({
       projectRoot: options.projectRoot,
-      createOpenAIClient: () => createOpenAIClient(options.projectRoot),
+      createOpenAIClient: createOpenAIClientFactory(options.projectRoot),
       getResolvedSettings: () => deps.resolveSettings(options.projectRoot),
       renderMarkdown: (text) => text,
       nonInteractive: true,

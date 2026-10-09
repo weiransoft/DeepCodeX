@@ -5,7 +5,7 @@ import chalk from "chalk";
 import * as nodeFs from "node:fs";
 import * as nodeOs from "node:os";
 import * as nodePath from "node:path";
-import { createOpenAIClient, getDeepCodeXLogDir } from "@vegamo/deepcode-core";
+import { createOpenAIClient, createOpenAIClientFactory, getDeepCodeXLogDir } from "@vegamo/deepcode-core";
 import type { PermissionMode, PermissionScope } from "@vegamo/deepcode-core";
 import { type ModelConfigSelection } from "@vegamo/deepcode-core";
 import { type PromptDraft, PromptInput, type PromptSubmission } from "./PromptInput";
@@ -271,6 +271,8 @@ function App({
   rawModeRef.current = mode;
   messagesRef.current = messages;
 
+  const clientFactory = useMemo(() => createOpenAIClientFactory(projectRoot), [projectRoot]);
+
   const sessionManager = useMemo(() => {
     // 构造全局动态编排建议层
     // - createDecisionLLMClient 复用项目级 LLM 客户端
@@ -386,7 +388,7 @@ function App({
     // fork：以上为动态注入/后台任务/EAG 编排装配逻辑，整体保留
     return new SessionManager({
       projectRoot,
-      createOpenAIClient: () => createOpenAIClient(projectRoot),
+      createOpenAIClient: clientFactory,
       getResolvedSettings: () => resolveCurrentSettings(projectRoot),
       renderMarkdown: (text) => text,
       // 三态权限模式覆盖（CLI --permission-mode > settings.json permissions.mode）
@@ -464,7 +466,8 @@ function App({
       },
     });
     // permissionMode 变化会改变权限评估行为，需重建 SessionManager（与 projectRoot 同级依赖）
-  }, [projectRoot, permissionMode]);
+    // 上游 v0.4.3：clientFactory 由 projectRoot 派生，一并声明为依赖
+  }, [projectRoot, permissionMode, clientFactory]);
 
   /**
    * Navigate to a sub-view.
@@ -563,8 +566,12 @@ function App({
   // warmup (fire-and-forget inside createOpenAIClient) starts before the
   // user sends their first prompt.
   useEffect(() => {
-    createOpenAIClient(projectRoot);
-  }, [projectRoot]);
+    try {
+      clientFactory();
+    } catch (error) {
+      setErrorLine(error instanceof Error ? error.message : String(error));
+    }
+  }, [clientFactory]);
 
   /**
    * Initialize MCP servers.

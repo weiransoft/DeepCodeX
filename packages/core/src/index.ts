@@ -32,6 +32,7 @@ export {
   getProjectSettingsPath,
   // 上游 v0.3.1 新增：Deepcode Plus API Key 读取 + 上下文窗口默认值 + Files API 常量
   readDeepcodePlusApiKey,
+  readDeepcodePlusSettings,
   getDefaultContextWindow,
   getDefaultAutoCompactWindow,
   DEFAULT_MODEL,
@@ -44,6 +45,8 @@ export {
   MAX_FILES_API_TIMEOUT_MS,
 } from "./settings";
 export type {
+  DeepcodePlusSettings,
+  SubscriptionPlan,
   DeepcodingSettings,
   ResolvedDeepcodingSettings,
   ModelConfigSelection,
@@ -131,6 +134,7 @@ export type { ToolDefinition, SkillPromptDocument, PromptToolOptions } from "./p
 export { ToolExecutor } from "./tools/executor";
 export type {
   CreateOpenAIClient,
+  OpenAIClientResult,
   ToolCall,
   ToolExecutionContext,
   ToolExecutionHooks,
@@ -266,10 +270,15 @@ export type { McpServerStatus } from "./mcp/mcp-manager";
 
 // Common utilities
 // fork v1.6 P0-2：OpenAIClientHandle 接口与类型守卫（team-adapter.executeDispatch 注入用）
-export { createOpenAIClient, isOpenAIClientHandle } from "./common/openai-client";
+export { isOpenAIClientHandle } from "./common/openai-client";
 export type { OpenAIClientHandle } from "./common/openai-client";
-// 上游 v0.3.1 新增：Plus 专线连接解析与默认 Plus 网关地址
-export { resolveOpenAIConnection, DEEPCODE_PLUS_BASE_URL } from "./common/openai-client";
+// 上游 v0.4.3：客户端工厂（Plus 订阅包装）+ Plus 专线连接解析与默认 Plus 网关地址
+export {
+  createOpenAIClient,
+  createOpenAIClientFactory,
+  resolveOpenAIConnection,
+  DEEPCODE_PLUS_BASE_URL,
+} from "./common/openai-client";
 export { buildThinkingRequestOptions } from "./common/openai-thinking";
 export { readTextFileWithMetadata, writeTextFile, buildDiffPreview, ensureParentDirectory } from "./common/file-utils";
 export { normalizeFilePath, getSnippet, clearSessionState, recordFileState, getFileState } from "./common/state";
@@ -326,6 +335,10 @@ export type {
 // State types
 export type { FileState, FileSnippet, FileLineEnding } from "./common/state";
 export type { FileReadMetadata } from "./common/file-utils";
+
+// 上游 v0.4.3 新增：Plus 订阅检查与包装（plus-subscription 模块）
+export { checkPlusSubscription, withPlusSubscription } from "./common/plus-subscription";
+export type { PlusSubscriptionStatus, OpenAIConnection, OpenAIConnectionContext } from "./common/plus-subscription";
 
 // Loop Guard —— EAG 与 autonomous 共享上限保护（EAG §5.2.1）
 export { DEFAULT_LOOP_GUARD_CONFIG, INITIAL_LOOP_GUARD_STATE, LoopGuard } from "./common/loop-guard";
