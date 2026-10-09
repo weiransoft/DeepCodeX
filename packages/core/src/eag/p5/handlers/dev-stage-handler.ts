@@ -352,6 +352,12 @@ export class P5DevStageHandler implements P5StageHandler {
         // 运行剩余预算透传（2026-10-08 T-009/T-010 事故修复）：执行器每轮增量检查，
         // 把单阶段超烧窗口从"整轮迭代"收窄到"单轮请求"；fixtures 未注入时 undefined
         perTaskBudget: ctx.perTaskBudget,
+        // F-C 跨 run 失败反馈注入（2026-10-09）：同目标重跑时 orchestrator 会从
+        // 上一轮 run 终态摘要投影 lastFailureFeedback（上一轮 aborted 原因/失败卡/
+        // 预算消耗），此处作为 feedback 传给执行器，让模型带着"上一轮为什么失败"
+        // 的认知重新实现——修复此前 dev 盲目重走老路的空循环。首轮/无历史时
+        // undefined，与修复前行为一致。
+        feedback: ctx.lastFailureFeedback,
       });
 
       if (!execution.success) {

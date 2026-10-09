@@ -11,6 +11,7 @@ import {
   getPermissionScopesRequiringAsk,
   hasUserPermissionReplies,
   isPathInAnyDirectory,
+  isPathInProject,
   parseBashSideEffects,
 } from "../common/permissions";
 import type { PermissionScope, PermissionSettings } from "../settings";
@@ -460,6 +461,48 @@ test("isPathInAnyDirectory matches absolute and project-relative directories wit
   );
   assert.equal(isPathInAnyDirectory(projectRoot, path.join(home, "notes.txt"), undefined), false);
 });
+
+// ============================================================================
+// 符号链接归一（2026-10-09 修复：macOS /var ↔ /private/var 拼写差异导致
+// bash cwd 越界误判，详见 docs/dev/macos-symlink-cwd-validation-fix.md）。
+// 全部使用真实文件系统 + 真实 fs.symlinkSync（Windows 创建符号链接需特权，skip）。
+// ============================================================================
+
+test(
+  "isPathInProject resolves symlinks on both sides before lexical comparison",
+  { skip: process.platform === "win32" },
+  () => {
+    // 真实夹具：physicalRoot 为物理目录，linkRoot 为指向它的符号链接，
+    // escapeLink 为 physicalRoot 内指向目录外 outsideRoot 的符号链接
+    const physicalRoot = createTempDir("deepcode-permissions-symlink-real-");
+    const outsideRoot = createTempDir("deepcode-permissions-symlink-out-");
+    const childDir = path.join(physicalRoot, "child");
+    fs.mkdirSync(childDir);
+    const linkRoot = path.join(createTempDir("deepcode-permissions-symlink-link-"), "link");
+    fs.symlinkSync(physicalRoot, linkRoot, "dir");
+    const escapeLink = path.join(physicalRoot, "escape");
+    fs.symlinkSync(outsideRoot, escapeLink, "dir");
+
+    // T1 核心回归：projectRoot 为符号链接拼写、filePath 为物理真实路径
+    //（macOS /var ↔ /private/var 事故场景的最小复现，修复前词法误判越界）
+    assert.equal(isPathInProject(linkRoot, path.join(physicalRoot, "child", "a.ts")), true);
+    // T2 反向拼写：projectRoot 为物理路径、filePath 经符号链接访问
+    assert.equal(isPathInProject(physicalRoot, path.join(linkRoot, "child", "a.ts")), true);
+    // T3 双侧同构：两侧均为符号链接拼写（回归保护）
+    assert.equal(isPathInProject(linkRoot, path.join(linkRoot, "child", "a.ts")), true);
+    // T4 安全收紧：项目内符号链接指向目录外 → 按真实物理位置判越界
+    //（修复前词法 /physicalRoot/escape/... 判"项目内"，存在逃逸漏洞）
+    assert.equal(isPathInProject(physicalRoot, path.join(escapeLink, "secret.txt")), false);
+    // T5 不存在路径词法兜底：项目内不存在文件 → true；项目外不存在文件 → false
+    assert.equal(isPathInProject(physicalRoot, path.join(physicalRoot, "not-exist.txt")), true);
+    assert.equal(isPathInProject(physicalRoot, path.join(outsideRoot, "not-exist.txt")), false);
+    // T6 新文件 + 符号链接 projectRoot（架构师审查补充的回归点）：
+    // write 新文件时 filePath 必然不存在，须按"最长存在祖先归一 + 尾缀拼接"
+    // 保持两侧坐标系一致，不得回退词法造成混合坐标系误判
+    assert.equal(isPathInProject(linkRoot, path.join(linkRoot, "newfile.txt")), true);
+    assert.equal(isPathInProject(linkRoot, path.join(physicalRoot, "newfile.txt")), true);
+  }
+);
 
 test("classifyFilePermissionScope prioritizes working directories over temporary directories", () => {
   const projectRoot = createTempDir("deepcode-permissions-classify-workspace-");

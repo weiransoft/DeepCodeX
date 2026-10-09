@@ -8,6 +8,42 @@
 
 （本版本暂无变更。）
 
+## [0.4.3.15] - 2026-10-10
+
+补丁版（EAG-P5 plan 阶段 LLM 动态规划 + 跨 run 失败记忆 + 预算不足干净终止；事故 run 2cb0893cccea——同目标重跑零智能机械循环）。
+
+### Added
+- **plan 阶段 LLM 动态规划**（packages/core/src/eag/p5/handlers/plan-stage-handler.ts、
+  executors/llm-task-executor.ts、handlers/task-executor-port.ts）：plan 此前纯本地规则
+  （`pickNextPendingTask` ID 升序 5ms 机械选卡），同目标重跑只会原样重蹈上一轮失败任务。
+  `P5TaskExecutor` 新增可选端口 `planIteration`（单次无工具 LLM 调用 + JSON 决策解析，
+  tokensUsed 诚实计入），返回 select/replan/stop 三类决策；合法则应用（选卡覆盖/重写
+  AUTO 卡集合原子落盘），非法/不可用/预算闸门（perTaskBudget<3000）回退既有本地规则
+  并 warn 留痕（fail-open，行为与修复前等价）。
+- **跨 run 失败记忆**（plan-stage-handler.ts `loadPreviousRunContext`）：扫描
+  `.eag/p5/run-state/*.jsonl` 取同 projectRoot 最近终态 run 的 status/abortReason/
+  token 消耗注入规划简报与 artifacts（previousRunContext），并经编排器透传为 dev 阶段
+  执行器 feedback（F-C），让模型首轮就知道上一轮怎么失败的。
+- **全卡 blocked 不再绕过规划器**（plan-stage-handler.ts F-A2b，页面端到端复测发现）：
+  `TASKS_BLOCKED` 分支不再提前 return——blocked 局面下规划器照常执行，解锁路径为
+  replan（LLM 重置 AUTO 卡 pending / 追加新卡）或诚实 stop；无规划能力（旧宿主
+  taskExecutor=null）维持修复前行为不伪造 plannerAction。
+
+### Fixed
+- **预算不足阶段机械瞬败**（packages/core/src/eag/p5/autonomous-orchestrator.ts F-B）：
+  5b 阶段循环顶部新增最小可行预算检查（remaining < 3000 直接 aborted，abortReason 含
+  "预算不足"），消除 fix 阶段剩余 779 token 仍构造 ctx 进执行器的瞬败空转；与 run 级
+  轮内增量、轮级 pre-flight 构成三级预算防线。
+- **页面端到端复测验收**：同会话连发两条同目标 /eag-autonomous，第二条 plan 真实
+  LLM replan（16.6s 从全卡 blocked 解锁 T-003 并追加 T-004，run 3918a2162f51）；
+  预算耗尽干净 aborted 如实报告（207027 >= 200000），不再机械空循环。
+
+### Tests
+- 新增 `eag-p5-llm-dynamic-planning.test.ts`（T1-T16：planIteration 真实执行器、
+  select/replan/stop 应用与越权拒绝、非 JSON/无凭据/预算闸门回退、跨 run 记忆、
+  F-B 干净熔断、F-C dev 反馈、T14-T16 全卡 blocked 规划器可达性）。
+- 场景集成测试 `eag-p5-token-abort-and-rerun-recovery.test.ts` 随同入库。
+
 ## [0.4.3.14] - 2026-10-08
 
 补丁版（EAG 自主运行 Token 预算轮内增量 + 执行器请求历史自压缩 + 终止原因如实报告 + 失败目标拦截确认逃生门死循环修复）。

@@ -506,6 +506,63 @@ export function classifyFilePermissionScope(
   return operation === "read" ? "read-out-cwd" : "write-out-cwd";
 }
 
+/**
+ * 将路径归一为真实物理路径（解析符号链接）。
+ *
+ * 修复（2026-10-09）：macOS 上 os.tmpdir() 返回 /var/folders/...，它是
+ * /private/var/folders 的符号链接；bash 子进程 pwd 输出物理路径，与逻辑拼写
+ * 的 projectRoot 做词法 path.relative 比较时被判"越界"，导致 bash cwd 缓存
+ * 回退失效（tool-handlers.test.ts 两用例失败）。归一后两侧坐标系一致。
+ *
+ * 架构师审查修订：不能"整路径 realpath 失败即回退词法"——filePath 常是文件
+ * 路径，write 新文件时该文件必然不存在，realpath 必然 throw；若 projectRoot
+ * 侧归一（/var→/private）而 filePath 侧保持 /var 词法，混合坐标系比较会把
+ * 新文件写入误判越界（行为回归）。正确语义：沿路径向上找最长存在的祖先目录
+ * 做 realpath，剩余尾缀原样拼接，保证两侧坐标系一致；完全找不到任何存在祖先
+ * 时回退词法绝对路径（既有行为兜底）。
+ *
+ * @param target 任意绝对/相对路径
+ * @returns 真实物理路径（符号链接已解析）；无法解析时返回词法绝对路径
+ */
+function resolveRealPathSafe(target: string): string {
+  const resolved = path.resolve(target);
+  try {
+    // 快路径：目标本身存在（目录或文件），一次性归一
+    return fs.realpathSync.native(resolved);
+  } catch {
+    // 目标不存在（write 新文件等场景）：向上回溯最近存在的祖先目录，
+    // 对祖先做 realpath 归一后拼接剩余尾缀（尾缀保持原拼写，不引入新语义）
+    let cut = resolved.length;
+    const rootLength = path.parse(resolved).root.length;
+    while (cut > rootLength) {
+      try {
+        return fs.realpathSync.native(resolved.slice(0, cut)) + resolved.slice(cut);
+      } catch {
+        // 当前前缀不存在，回退到上一级路径分隔符继续向上找
+        const previousSep = resolved.lastIndexOf(path.sep, cut - 1);
+        if (previousSep <= 0) {
+          break;
+        }
+        cut = previousSep;
+      }
+    }
+    return resolved;
+  }
+}
+
+/**
+ * 判定 filePath 是否位于 directory 目录（含其子目录）内部。
+ *
+ * 修复（2026-10-09）：比较前对两侧做符号链接归一（resolveRealPathSafe），
+ * 使同一目录的不同拼写（如 macOS /var ↔ /private/var）落在同一坐标系；
+ * 归一是收紧方向的修复——项目内符号链接指向项目外时按真实位置判越界，
+ * 消除词法前缀判定可被符号链接拼写绕过的漏洞。
+ *
+ * @param projectRoot 项目根目录（相对路径以它为基准解析）
+ * @param filePath 待判定的文件/目录路径
+ * @param directory 判定基准目录
+ * @returns 位于目录内（含等于目录本身）返回 true
+ */
 function isPathInDirectory(projectRoot: string, filePath: string, directory: string): boolean {
   const normalized = normalizeFilePath(filePath);
   const absolutePath = isAbsoluteFilePath(normalized) ? normalized : path.resolve(projectRoot, normalized);
@@ -513,7 +570,10 @@ function isPathInDirectory(projectRoot: string, filePath: string, directory: str
   const absoluteDirectory = isAbsoluteFilePath(normalizedDirectory)
     ? normalizedDirectory
     : path.resolve(projectRoot, normalizedDirectory);
-  const relative = path.relative(path.resolve(absoluteDirectory), path.resolve(absolutePath));
+  const relative = path.relative(
+    path.resolve(resolveRealPathSafe(absoluteDirectory)),
+    path.resolve(resolveRealPathSafe(absolutePath))
+  );
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 

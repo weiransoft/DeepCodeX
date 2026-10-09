@@ -174,6 +174,18 @@ export interface P5StageContext {
    */
   readonly abortFlagPath?: string;
   /**
+   * 跨 run 失败反馈（2026-10-09 F-C，docs/dev/eag-p5-llm-dynamic-planning.md）。
+   *
+   * 由 orchestrator 从上一轮 plan 阶段 artifacts.lastFailureFeedback 投影（数据
+   * 源为 loadPreviousRunContext 渲染的跨 run 终态摘要：上一轮 aborted 原因、
+   * 失败任务卡、消耗预算等）。dev 阶段在 executeTask 时作为 feedback 注入
+   * 执行器，让模型"带着上一轮为什么失败的认知"重新实现同一任务卡——
+   * 修复此前同目标重跑时 dev 盲目重走老路的空循环问题。
+   *
+   * 可选字段：首轮迭代或无跨 run 历史时为 undefined，dev 行为与修复前一致。
+   */
+  readonly lastFailureFeedback?: string;
+  /**
    * 阶段级日志回调（修复 2026-10-05 僵尸任务卡事故的可观测性补齐）。
    *
    * plan 阶段用它把 tasks.md 解析告警（如非法 status 值降级 pending）写入

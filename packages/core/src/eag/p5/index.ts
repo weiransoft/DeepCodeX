@@ -344,6 +344,9 @@ export {
   pickNextPendingTask,
   computeObjectiveRelevance,
   markTaskCardStatusInContent,
+  // F-A2/A3（2026-10-09）：LLM 动态规划相关导出（测试与宿主消费）
+  loadPreviousRunContext,
+  buildAutoTaskCardContent,
 } from "./handlers/plan-stage-handler";
 
 export {
@@ -387,6 +390,8 @@ export {
   PLAN_REASON_ALL_TASKS_COMPLETED,
   PLAN_REASON_TASKS_BLOCKED,
   PLAN_REASON_TASK_CARD_SELECTED,
+  // F-A2（2026-10-09）：LLM 规划器停止判定 reason
+  PLAN_REASON_PLANNER_STOP,
   // 能力预检（修复"能力/目标错配烧轮"2026-10-03）
   PLAN_REASON_CAPABILITY_GAP,
   detectShellCapabilityGap,

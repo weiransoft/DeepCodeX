@@ -186,4 +186,87 @@ export interface P5TaskExecutor {
    * @returns 执行结果（Promise，语义上不可变）
    */
   executeTask(input: Readonly<P5TaskExecutionInput>): Promise<Readonly<P5TaskExecutionResult>>;
+
+  /**
+   * plan 阶段 LLM 动态规划（可选能力，2026-10-09 F-A1）。
+   *
+   * 背景（docs/dev/eag-p5-llm-dynamic-planning.md）：plan 阶段此前为纯本地规则
+   * 选卡（ID 升序取第一张 pending），同目标重跑时机械重跑上一轮失败的卡——
+   * 用户要求"任务由 LLM 动态规划，而不是靠关键字或规则机械命中"。
+   *
+   * 语义：单次无工具 LLM 调用（不走 executeTask 的 LLM↔工具循环，规划器
+   * 不应有写权限），输入完整规划简报，输出结构化 JSON 决策：
+   * - select：从可执行卡集合中选一张执行；
+   * - replan：重排/追加 AUTO 卡集合（由 plan-stage-handler 落盘应用）；
+   * - stop：判定当前局面应停止（如目标不可行、预算注定不足）；
+   * - none：不做干预（由本地规则兜底）。
+   *
+   * 可选方法：旧宿主/测试替身未实现时，plan 阶段回退纯本地规则（行为与
+   * 修复前一致）；生产实现 LlmTaskExecutor 必须真实实现。
+   *
+   * @param input 规划输入（readonly）
+   * @returns 规划结果（Promise；ok=false 表示调用失败/输出不合法，绝不伪造决策）
+   */
+  planIteration?(input: Readonly<P5PlanIterationInput>): Promise<Readonly<P5PlanIterationResult>>;
+}
+
+// ============================================================================
+// plan 阶段 LLM 动态规划类型（2026-10-09 F-A1，见 docs/dev/eag-p5-llm-dynamic-planning.md）
+// ============================================================================
+
+/** replan 决策中的单条任务卡描述（LLM 输出，经 plan-stage-handler 校验后落盘） */
+export interface P5PlanIterationTask {
+  /**
+   * 既有卡 ID（可选）：提供且命中 requirementId=AUTO 的现存卡时按 status 更新；
+   * 缺省或未命中时视为新增卡（由本地生成 AUTO 编号追加）。
+   */
+  readonly id?: string;
+  /** 任务标题（新增卡必填；更新既有卡时可空表示只改状态） */
+  readonly title?: string;
+  /** 期望状态：仅 pending / blocked 会被应用（completed 不允许由 LLM 设置，防假完成） */
+  readonly status?: string;
+  /** 依赖卡 ID 列表（新增卡用；仅作记录，最终可执行性仍由本地 pickNextPendingTask 判定） */
+  readonly dependencies?: ReadonlyArray<string>;
+}
+
+/** plan 阶段动态规划输入（不可变，由 plan-stage-handler 装配） */
+export interface P5PlanIterationInput {
+  /** 项目根目录绝对路径（仅作简报上下文，规划器不做任何文件操作） */
+  readonly projectRoot: string;
+  /** P5 run-id（12 位 UUID 前缀），用于日志与审计 */
+  readonly runId: string;
+  /** 当前迭代号（0-based） */
+  readonly iterIndex: number;
+  /** 用户原始目标 */
+  readonly objective: string;
+  /** 任务卡清单总览文本（含每张卡 id/title/status/dependencies 与"当前可执行"标注） */
+  readonly tasksOverview: string;
+  /** 跨轮笔记快照（notes.md 内容，已由调用方截断） */
+  readonly notesSnapshot: string;
+  /** 本迭代前序阶段摘要（prevResults 的 kind+summary，已由调用方截断） */
+  readonly prevStageSummaries: string;
+  /** 跨 run 失败记忆（上一轮同项目 run 的终态摘要，无历史时为空串） */
+  readonly previousRunContext: string;
+  /** 运行剩余 Token 预算（透明给模型，供其评估"是否还有资源继续"） */
+  readonly remainingTokenBudget: number;
+  /** abort 标志文件绝对路径（规划请求发起前检查，存在则直接 ok=false 不发请求） */
+  readonly abortFlagPath: string;
+}
+
+/** plan 阶段动态规划结果（不可变；ok=false 时除 error/tokensUsed 外字段不可信） */
+export interface P5PlanIterationResult {
+  /** LLM 调用成功且 JSON 决策合法时为 true；client 缺失/请求异常/JSON 不合法为 false */
+  readonly ok: boolean;
+  /** 决策类型：select 选卡执行 / replan 重排卡集合 / stop 停止运行 / none 不干预 */
+  readonly action: "select" | "replan" | "stop" | "none";
+  /** action=select 时的目标卡 ID（合法性由 plan-stage-handler 按可执行集合校验） */
+  readonly taskId?: string;
+  /** action=replan 时期望卡集合（仅 AUTO 卡会被应用，见 P5PlanIterationTask 注释） */
+  readonly tasks?: ReadonlyArray<Readonly<P5PlanIterationTask>>;
+  /** 决策理由（审计留痕，写入 plan artifacts.plannerReasoning） */
+  readonly reasoning: string;
+  /** 本次规划的真实 token 消耗（usage 优先，网关未回 usage 时按字符估算） */
+  readonly tokensUsed: number;
+  /** ok=false 时的失败原因（client null / 请求异常 / JSON 不合法等） */
+  readonly error?: string;
 }
