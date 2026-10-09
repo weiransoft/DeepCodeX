@@ -10,7 +10,7 @@
  *    listen(0) 支持测试随机端口；close() 优雅收敛 SSE/会话池/连接。
  */
 
-import { createReadStream, existsSync, statSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import http, { type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -87,6 +87,23 @@ const STATIC_MIME: Record<string, string> = {
 function defaultStaticDir(): string {
   return path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "web", "dist");
 }
+
+/**
+ * Web 服务运行版本号（启动时一次性读取 package.json 缓存）。
+ *
+ * 读取 `dist/../package.json`（即 packages/web/package.json），与编译产物目录
+ * 相对定位，源码 tsx 直跑与 tsc 编译后运行两种形态路径一致。
+ * 读取/解析失败时回退 "unknown"，绝不让版本号展示问题影响服务启动。
+ */
+const WEB_SERVER_VERSION: string = (() => {
+  try {
+    const pkgPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json");
+    const raw = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: unknown };
+    return typeof raw.version === "string" && raw.version !== "" ? raw.version : "unknown";
+  } catch {
+    return "unknown";
+  }
+})();
 
 /**
  * 写出静态资源提示页（dist 不存在时）。
@@ -372,6 +389,8 @@ export async function startWebServer(
           // personal 归一 path 逐字一致（macOS /var→/private/var 等符号链接形态由
           // realpath 统一消解，绝不再用未归一的 resolved.uploadDir 直接拼接）
           personalRoot: path.join(uploadRootNormalized, ctx.userId),
+          // Web 服务运行版本号（启动时缓存）：前端侧栏底部/登录页品牌区展示
+          version: WEB_SERVER_VERSION,
         };
         sendJson(res, 200, config);
         return;
