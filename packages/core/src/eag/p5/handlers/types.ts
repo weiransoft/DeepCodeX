@@ -137,6 +137,19 @@ export interface P5StageContext {
   /** 当前 Loop 类型（design/coding/testing/deploy） */
   readonly loopType: P5LoopType;
   /**
+   * 本阶段任务执行的 Token 预算上限（2026-10-08 T-009/T-010 事故修复接线）。
+   *
+   * 编排器按运行剩余预算（maxTokens - 已消耗 token）注入，dev/fix 阶段透传给
+   * 任务执行器做每轮增量检查。此前 LlmTaskExecutor 的轮内预算检查代码存在但
+   * 生产链路从未注入（构造字段恒 undefined → 检查恒跳过），真实事故
+   * run 4923fdc21e5b/1c76da8bc0c8 单阶段 40 轮分别烧 877,542/1,716,646 token
+   * （预算 200,000 的 4.4×/8.6×）。
+   *
+   * 可选字段：既有手工构造 ctx 的 fixtures/测试不传时按"执行器不做轮内检查"
+   * 处理（与修复前行为一致，由编排器阶段间检查兜底）。
+   */
+  readonly perTaskBudget?: number;
+  /**
    * 任务执行器端口（方案 A §3.1/§3.9）。
    *
    * - dev/fix 阶段在护栏 PASS 后通过它真实驱动 LLM+工具循环完成任务卡；
