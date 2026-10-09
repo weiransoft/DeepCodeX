@@ -376,6 +376,18 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* 版本号徽标：底部用户区内小号弱化的版本标签（hover 提示完整语义） */
+.sidebar-version {
+  flex: none;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 8px;
+  color: var(--app-text-muted, #9ca3af);
+  background: var(--app-bg-elevated);
+  border: 1px solid var(--app-border);
+  font-variant-numeric: tabular-nums;
+}
 
 /* ============ 对话区 ============ */
 .chat-pane {

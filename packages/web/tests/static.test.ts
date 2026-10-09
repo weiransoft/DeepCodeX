@@ -153,10 +153,11 @@ test("config：登录后 /api/config 必须脱敏（无 jwtSecret/密码等密�
   const { status, body } = await fetchJson(server.port, "GET", "/api/config", undefined, cookie);
   assert.equal(status, 200);
 
-  // 结构断言：仅允许八个公开字段（personalOnly 为个人工作目录模式公开开关；
+  // 结构断言：仅允许九个公开字段（personalOnly 为个人工作目录模式公开开关；
   // steeringEnabled 为补充指令功能公开开关，docs/dev/web-steering.md W7；
   // maxPreviewBytes 为文本预览上限，docs/dev/web-file-preview.md P1；
-  // personalRoot 为当前认证用户本人个人区路径——非密钥，仅本人可见）
+  // personalRoot 为当前认证用户本人个人区路径——非密钥，仅本人可见；
+  // version 为 Web 服务运行版本号——非密钥，供侧栏版本徽标展示）
   const keys = Object.keys(body).sort();
   assert.deepEqual(keys, [
     "allowRoots",
@@ -167,6 +168,7 @@ test("config：登录后 /api/config 必须脱敏（无 jwtSecret/密码等密�
     "personalOnly",
     "personalRoot",
     "steeringEnabled",
+    "version",
   ]);
   assert.equal(body.enabled, true);
   assert.equal(body.ldapEnabled, false);

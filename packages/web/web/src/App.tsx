@@ -976,6 +976,7 @@ export function App() {
         allowRoots={config?.allowRoots ?? []}
         projectRoot={projectRoot}
         creating={creatingChat}
+        version={config?.version ?? ""}
         onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
         onSelectChat={selectChat}
         onNewChat={newChat}
