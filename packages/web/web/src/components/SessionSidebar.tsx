@@ -37,6 +37,8 @@ export interface SessionSidebarProps {
   creating: boolean;
   /** 登出 */
   onLogout: () => void;
+  /** Web 服务运行版本号（来自 /api/config；空串时不展示版本徽标） */
+  version: string;
 }
 
 /** 取会话展示标题：后端契约为 title（string | null），null/空串时回退"未命名对话" */
@@ -60,6 +62,7 @@ export function SessionSidebar(props: SessionSidebarProps) {
     onProjectRootChange,
     creating,
     onLogout,
+    version,
   } = props;
 
   // 折叠态：窄条仅保留展开按钮（图标直显）
@@ -138,12 +141,18 @@ export function SessionSidebar(props: SessionSidebarProps) {
         ))}
       </nav>
 
-      {/* 底部用户区：默认头像 + 显示名直显 + 登出 */}
+      {/* 底部用户区：默认头像 + 显示名直显 + 版本号 + 登出 */}
       <div className="sidebar-user">
         <UserAvatarIcon size={22} className="sidebar-user-avatar" />
         <span className="sidebar-user-name" title={user?.mail ?? user?.username ?? ""}>
           {user?.displayName !== "" && user?.displayName !== undefined ? user.displayName : (user?.username ?? "")}
         </span>
+        {/* 版本号徽标：来自 /api.config 的 version（后端 package.json），空串（旧后端）时隐藏 */}
+        {version !== "" && (
+          <span className="sidebar-version" title="DeepCodeX Web 版本">
+            v{version}
+          </span>
+        )}
         <button type="button" className="icon-btn" title="退出登录" onClick={onLogout}>
           <LogoutIcon size={16} />
         </button>

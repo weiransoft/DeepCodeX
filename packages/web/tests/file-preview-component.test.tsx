@@ -16,7 +16,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createElement } from "react";
@@ -342,6 +342,27 @@ test("FP-INT-08：/api/config.personalRoot 与个人区列表归一路径逐字�
       realpathSync(fx.personalRoot),
       "personalRoot 必须与 GET /api/files?scope=personal 归一 path 逐字一致——" +
         "前端「我的文件」面包屑在列表加载前据此显示完整路径"
+    );
+  } finally {
+    await stopFixture(fx);
+  }
+});
+
+test("FP-INT-09：/api/config.version 返回真实运行版本号（侧栏版本徽标数据源）", async () => {
+  const fx = await startPersonalFixture(4096);
+  try {
+    const cfg = await fetchJson(fx.server.port, "GET", "/api/config", undefined, fx.cookie);
+    assert.equal(cfg.status, 200);
+    // 版本号契约：非空字符串且与 packages/web/package.json 的 version 逐字一致
+    // （服务端启动时读取真实 package.json——禁止 mock/占位值，杜绝"unknown"蒙混过关）
+    const expectedVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"))
+      .version as string;
+    assert.equal(typeof cfg.body.version, "string", "version 必须是字符串");
+    assert.notEqual(cfg.body.version, "", "version 不得为空串（空串前端会隐藏徽标）");
+    assert.equal(
+      String(cfg.body.version),
+      expectedVersion,
+      "version 必须与 packages/web/package.json 的 version 逐字一致（侧栏徽标即部署版本）"
     );
   } finally {
     await stopFixture(fx);

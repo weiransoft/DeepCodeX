@@ -41,6 +41,8 @@ export interface AppConfig {
    * 列表加载前据此显示完整路径（与 GET /api/files personal 归一 path 一致）。
    */
   personalRoot: string;
+  /** Web 服务运行版本号（后端 package.json 的 version）：侧栏底部/登录页品牌区展示 */
+  version: string;
 }
 
 /**

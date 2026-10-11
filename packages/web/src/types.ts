@@ -294,4 +294,9 @@ export type PublicWebConfig = {
    * （与 GET /api/files personal scope 返回的归一 path 完全一致）。
    */
   personalRoot: string;
+  /**
+   * Web 服务运行版本号（= packages/web package.json 的 version）。
+   * 前端侧栏底部品牌区展示，便于用户/运维确认当前部署版本。
+   */
+  version: string;
 };
