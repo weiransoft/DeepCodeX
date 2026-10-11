@@ -846,6 +846,55 @@ test("B6b. blockageReport.summary 如实反映 Token 预算耗尽（修复 2026-
   }
 });
 
+test("B6c. Token 预算耗尽 aborted 不得把未完成任务卡误标 completed（修复 run e52437ca342e 误标事故）", async () => {
+  // 真实事故（2026-10-11，run e52437ca342e / T-018）：阶段循环内 Token 预算熔断
+  // 检查位于 5b-5（fatal）与 5b-6（failed 折算）之前，break 后 dev 的 failed
+  // 结果从未写入 iterationFailed → 5c 以"全绿"口径把未完成任务卡改写为
+  // completed 落盘。tasks.md 被污染后，后续 run 的 plan 阶段看到全卡
+  // completed → 无 pending 卡 → dev/verify 跳过 → "跑了但什么都没执行"。
+  // 本测试构造同构场景：dev 失败 + 单阶段烧穿预算 → 断言 aborted 且
+  // tasks.md 中任务卡仍为 pending（绝不允许误标 completed）。
+  const projectRoot = createTempProject();
+  try {
+    createTasksFile(projectRoot, 1, "pending");
+    createDeclaredFile(projectRoot, "src/services/Service1.ts");
+
+    // 替身执行器：恒失败且单次调用即烧穿全部预算（同构真实事故的
+    // "dev 轮内 Token 预算超限熔断"——执行器返回 failed 且 tokensUsed 超限）
+    const budgetBurnExecutor = createAlwaysSucceedTaskExecutor({
+      success: false,
+      error: "Token 预算超限：单任务已用 211228 tokens（预算 200000），执行中止",
+      tokensUsed: 30_000,
+      llmRequests: 1,
+    });
+    const orchestrator = buildOrchestrator({ taskExecutor: budgetBurnExecutor });
+
+    const result = await orchestrator.run({
+      projectRoot,
+      objective: "测试 Token 预算耗尽不误标任务卡",
+      maxIterations: 5,
+      consecutiveFailureAbort: 99,
+      // dev 单次 30_000 即触发阶段后增量检查（迭代 1 dev 后即熔断）
+      maxTokens: 30_000,
+      testCommand: FAIL_TEST_CMD,
+      testTimeoutSec: 10,
+    });
+
+    assert.equal(result.finalStatus, "aborted");
+    assert.ok(result.totalTokensUsed >= 30_000, "预算耗尽场景 tokens 统计应已超限");
+
+    // 核心断言（修复对象）：任务卡绝不允许被误标 completed，必须保持 pending
+    const tasksContent = fs.readFileSync(path.join(projectRoot, ".eag", "p5", "tasks.md"), "utf8");
+    assert.ok(
+      !/- status: completed/.test(tasksContent),
+      `预算熔断 aborted 时任务卡不得被误标 completed，实际 tasks.md：\n${tasksContent}`
+    );
+    assert.match(tasksContent, /- status: pending/, "未完成任务卡必须保持 pending，供后续 run 重新选取执行");
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
+});
+
 test("B7. AutonomousOrchestrator run() request 校验失败（projectRoot 缺失）", async () => {
   const orchestrator = buildOrchestrator();
 
