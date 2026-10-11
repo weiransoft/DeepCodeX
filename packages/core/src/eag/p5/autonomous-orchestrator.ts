@@ -924,26 +924,6 @@ export class AutonomousOrchestrator {
             totalExecutorLlmRequests += result.artifacts["llmRequests"] as number;
           }
 
-          // Token 预算轮内增量检查（P1 修复 2026-10-08，分析报告 run 4923fdc21e5b）：
-          // 真实事故：maxIterations=10 且单轮 dev 40 回合烧 877,542 token——预算
-          // 200,000 被击穿 4.4 倍才在迭代末尾熔断。根因：预算检查只在每迭代一次
-          // 的 5b.7 调度点执行，一轮（4 阶段 × 每阶段数十回合）烧完全量才 check。
-          // 现在每阶段执行完毕即检查剩余预算：耗尽立即中止本迭代阶段循环并置
-          // aborted（口径与 5b.7 前置检查完全一致），把超烧窗口从"整轮迭代"
-          // 收窄到"单个阶段"。skip 阶段 tokensUsed=0 不触发；plan/verify 0 token
-          // 阶段零开销。
-          if (totalTokensUsed >= maxTokens) {
-            status = "aborted";
-            finalStatus = "aborted";
-            abortReason = `Token 预算耗尽：${totalTokensUsed} >= ${maxTokens}（阶段 ${stage} 执行后增量检查）`;
-            this.log(
-              `AutonomousOrchestrator.run 迭代 ${iterIndex} 阶段 ${stage} 执行后 Token 预算耗尽` +
-                `（累计 ${totalTokensUsed} >= 上限 ${maxTokens}），中止本迭代剩余阶段，status=aborted`,
-              "error"
-            );
-            break;
-          }
-
           // 5b-4. 提取 plan 阶段产出的任务卡与合成标志
           if (stage === "plan" && result.kind === "success") {
             planTaskCard = (result.artifacts["taskCard"] as TaskCard | null) ?? null;
@@ -971,6 +951,30 @@ export class AutonomousOrchestrator {
               "warn"
             );
             // 不 break：让 fix 阶段有机会修复 verify 的失败
+          }
+
+          // Token 预算轮内增量检查（P1 修复 2026-10-08，分析报告 run 4923fdc21e5b；
+          // P2 修复 2026-10-11，误标事故 run e52437ca342e——位置从 5b-3 之后移到此处）：
+          // 真实事故一（P1）：maxIterations=10 且单轮 dev 40 回合烧 877,542 token——预算
+          // 200,000 被击穿 4.4 倍才在迭代末尾熔断。每阶段执行完毕即检查剩余预算，
+          // 把超烧窗口从"整轮迭代"收窄到"单个阶段"（口径与 5b.7 前置检查一致）。
+          // 真实事故二（P2）：本检查原先位于 5b-4/5b-5/5b-6 之前，dev 失败烧穿预算时
+          // break 抢在 failed 折算之前——iterationFailed 恒 false → 5c 以"全绿"口径把
+          // 未完成任务卡误标 completed 写回 tasks.md → 后续 run 见到全卡 completed、
+          // 无 pending 卡 → plan 后直接跳过 dev/verify → "跑了但什么都没执行"。
+          // 现在置于 5b-6 之后：break 前当前阶段的 failed/fatal 均已折算进轮内标志，
+          // 5c 的 completed 标记与 milestone 均被正确拦截。skip 阶段 tokensUsed=0
+          // 不触发；plan/verify 0 token 阶段零开销。
+          if (totalTokensUsed >= maxTokens) {
+            status = "aborted";
+            finalStatus = "aborted";
+            abortReason = `Token 预算耗尽：${totalTokensUsed} >= ${maxTokens}（阶段 ${stage} 执行后增量检查）`;
+            this.log(
+              `AutonomousOrchestrator.run 迭代 ${iterIndex} 阶段 ${stage} 执行后 Token 预算耗尽` +
+                `（累计 ${totalTokensUsed} >= 上限 ${maxTokens}），中止本迭代剩余阶段，status=aborted`,
+              "error"
+            );
+            break;
           }
 
           // 5b-6.5 方案 A §3.6：plan 阶段 success 但未选出任务卡（全部完成/阻塞/无卡/合成前空 objective）
