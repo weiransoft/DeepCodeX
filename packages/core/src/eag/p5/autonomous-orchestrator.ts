@@ -118,6 +118,27 @@ const DEFAULT_MAX_ITERATIONS = 10 as const;
 const DEFAULT_MAX_TOKENS = 200_000 as const;
 
 /**
+ * 运行级 Token 软预算续期比例（修复 2026-10-11，run e52437ca342e 及 T-013~T-018 系列）
+ *
+ * 真实痛点：名义预算（默认 200,000）在 qwen3.8-flash 实际消耗水位
+ * （≈10,000~16,000 token/轮）下只够 12~20 轮工具循环——运维/冒烟类长任务
+ * 第一轮迭代必死，--max-iterations 名存实亡；连续 5 个 run 全部死于
+ * "Token 预算超限"，没有任何一次运行真正完成过任务。
+ *
+ * 机制：名义预算 maxTokens 用尽时不再立即熔断，而是自动续期一次
+ * （追加 maxTokens × 本比例的额度）；续期后到达硬上限
+ * （maxTokens × (1 + 本比例) = 1.5×）才真正 aborted。
+ * 设计约束：
+ * - 只续期一次（无级联续期），总消耗仍被约束在名义预算的 1.5 倍内，
+ *   防失控上界不变量保持；
+ * - 全部确定性熔断（确定性失败指纹/相同调用空转/拒绝风暴/连续失败/
+ *   空循环）独立于预算生效，续期不能让空转多烧一个 token；
+ * - 执行器段内压缩续跑（epoch rollover）与本机制正交：执行器折叠上下文
+ *   降低每轮成本，运行级续期给足总时长，两层各自有界。
+ */
+const RUN_TOKEN_SOFT_RENEWAL_RATIO = 0.5;
+
+/**
  * 默认连续失败 abort 阈值
  *
  * 对齐架构 §4.4 AutonomousConfig.consecutiveFailureAbort 默认值。
@@ -714,6 +735,12 @@ export class AutonomousOrchestrator {
     const objective = request.objective;
     const maxIterations = this.resolveMaxIterations(request.maxIterations);
     const maxTokens = request.maxTokens ?? this.defaultMaxTokens;
+    // Token 软预算（修复 2026-10-11，见 RUN_TOKEN_SOFT_RENEWAL_RATIO 注释）：
+    // 名义预算 softRenewalLine 用尽时自动续期一次至 tokenHardCeiling（1.5×），
+    // 到硬上限才熔断。tokenBudgetRenewed 保证续期只发生一次。
+    const tokenSoftRenewalLine = maxTokens;
+    const tokenHardCeiling = maxTokens + Math.floor(maxTokens * RUN_TOKEN_SOFT_RENEWAL_RATIO);
+    let tokenBudgetRenewed = false;
     const stopWhen = request.stopWhen ?? DEFAULT_STOP_WHEN;
     const testCommand = request.testCommand ?? this.defaultTestCommand;
     const testTimeoutSec = request.testTimeoutSec ?? this.defaultTestTimeoutSec;
@@ -897,7 +924,10 @@ export class AutonomousOrchestrator {
             // 执行器做轮内增量检查，随 totalTokensUsed 逐阶段递减。此前该值从未注入
             // （执行器轮内检查恒跳过），真实事故单阶段 40 轮烧 877,542/1,716,646 token
             // （预算 200,000 的 4.4×/8.6×）才由阶段间检查兜底。
-            perTaskBudget: Math.max(0, maxTokens - totalTokensUsed),
+            // 预算口径用运行级硬上限（含软续期额度）：软续期后执行器应看到
+            // 真实剩余额度，否则运行级已续期而执行器仍按名义余额提前段熔断，
+            // 两层口径不一致会让续期形同虚设。
+            perTaskBudget: Math.max(0, tokenHardCeiling - totalTokensUsed),
           });
 
           // 5b-2. 调用 loopExecutor.execute(stage, ctx)
@@ -965,13 +995,28 @@ export class AutonomousOrchestrator {
           // 现在置于 5b-6 之后：break 前当前阶段的 failed/fatal 均已折算进轮内标志，
           // 5c 的 completed 标记与 milestone 均被正确拦截。skip 阶段 tokensUsed=0
           // 不触发；plan/verify 0 token 阶段零开销。
-          if (totalTokensUsed >= maxTokens) {
+          if (totalTokensUsed >= tokenSoftRenewalLine && !tokenBudgetRenewed) {
+            // 软预算续期（修复 2026-10-11）：名义预算首次用尽不熔断，一次性
+            // 续期至硬上限并醒目告警。续期不重置任何失败/空转熔断计数——
+            // 预算只延时长，不救坏行为。
+            tokenBudgetRenewed = true;
+            this.log(
+              `AutonomousOrchestrator.run 迭代 ${iterIndex} 阶段 ${stage} 执行后 Token 名义预算用尽` +
+                `（累计 ${totalTokensUsed} >= 名义 ${tokenSoftRenewalLine}），` +
+                `自动软续期一次：硬上限调整为 ${tokenHardCeiling}` +
+                `（名义 ×(1+${RUN_TOKEN_SOFT_RENEWAL_RATIO})，见 RUN_TOKEN_SOFT_RENEWAL_RATIO）`,
+              "warn"
+            );
+          }
+          if (totalTokensUsed >= tokenHardCeiling) {
             status = "aborted";
             finalStatus = "aborted";
-            abortReason = `Token 预算耗尽：${totalTokensUsed} >= ${maxTokens}（阶段 ${stage} 执行后增量检查）`;
+            abortReason =
+              `Token 预算耗尽：${totalTokensUsed} >= ${tokenHardCeiling}` +
+              `（名义 ${maxTokens}${tokenBudgetRenewed ? "，已软续期至硬上限" : ""}，阶段 ${stage} 执行后增量检查）`;
             this.log(
               `AutonomousOrchestrator.run 迭代 ${iterIndex} 阶段 ${stage} 执行后 Token 预算耗尽` +
-                `（累计 ${totalTokensUsed} >= 上限 ${maxTokens}），中止本迭代剩余阶段，status=aborted`,
+                `（累计 ${totalTokensUsed} >= 硬上限 ${tokenHardCeiling}），中止本迭代剩余阶段，status=aborted`,
               "error"
             );
             break;
@@ -1040,11 +1085,18 @@ export class AutonomousOrchestrator {
               "error"
             );
           } else {
+            // scheduler 的 Token 硬闸（config.maxTokens=名义预算）与运行级软续期
+            // 对齐：已续期时扣除续期授予的额度增量再传入，使 scheduler 的
+            // "cumulative >= maxTokens" 等价于运行级 "total >= 硬上限"；
+            // 未续期时原样透传（行为与历史完全一致）。
+            const schedulerTokens = tokenBudgetRenewed
+              ? Math.max(0, totalTokensUsed - (tokenHardCeiling - maxTokens))
+              : totalTokensUsed;
             const schedulingDecision = loopScheduler.decideNext(
               iterIndex,
               loopVerdict,
               loopEvents,
-              totalTokensUsed,
+              schedulerTokens,
               consecutiveFailures // 不含本轮失败（5c 尚未执行）
             );
 
@@ -1088,7 +1140,12 @@ export class AutonomousOrchestrator {
 
         // 5c. 任务轮 4 阶段全 success → 原子标记任务卡 completed，重置 consecutiveFailures，记录 milestone。
         //     无任务卡轮（5b-6.5 已提前结束阶段循环）不标记、不记 milestone、不重置失败计数。
-        if (!iterationFatal && !iterationFailed && planTaskCard !== null) {
+        //     终态守卫 status==="running"（修复 2026-10-11 误标事故第二道防线）：任何
+        //     本轮已置 aborted/failed 终态的路径（预算 break / fatal / scheduler 终止）都
+        //     不得再以"全绿"口径落 completed——即使将来有人在折算 iterationFailed 之前
+        //     新增 break 分支，completed 误标也会被终态本身拦住（与 5d/5b.7 的
+        //     status==="running" 守卫口径一致）。
+        if (status === "running" && !iterationFatal && !iterationFailed && planTaskCard !== null) {
           // 方案 A §3.3：本轮真实执行了任务卡且全绿 → 把 tasks.md 中对应卡改写为 completed。
           try {
             this.markTaskCompleted(tasksFilePath, planTaskCard.id);

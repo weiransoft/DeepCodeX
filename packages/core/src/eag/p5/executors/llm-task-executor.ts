@@ -253,6 +253,51 @@ function sortJsonValue(value: unknown): unknown {
 /** 单次 LLM 请求最大输出 token 数（执行循环不需要长篇解释） */
 const EXECUTION_MAX_TOKENS = 8192;
 
+/**
+ * 上下文预算耗尽时的自动"压缩续跑"（epoch rollover）次数上限（软预算修复 2026-10-11）。
+ *
+ * 真实痛点（run e52437ca342e 及 T-013/14/15/17/18 系列）：单任务轮内预算
+ * 检查超限即直接 failure——200K 预算在 qwen3.8-flash（≈10K token/轮）下
+ * 只够 12~20 轮，运维/冒烟类任务第一轮必死，任务永远做不完；且此前一旦
+ * 熔断，任务卡保持 pending，下次 run 又从零上下文重跑，前功尽弃。
+ * 现在超限不再立即失败：把会话折叠为「system + 任务卡 + 确定性进度摘要 +
+ * 续跑指令」的全新上下文（等价于交互式 CLI 的 auto-compact，但零额外
+ * LLM 调用——摘要由已累积的工具调用轨迹确定性生成，不请求模型总结），
+ * 以续跑轮（epoch）继续执行；续跑轮再烧穿自己的额度才诚实 failure。
+ *
+ * 额度设计（两处协同，缺一不可）：
+ * 1. 续跑段额度 = max(名义预算 × EPOCH_BUDGET_RATIO, 实测单轮均耗 ×
+ *    EPOCH_MIN_ROUNDS)。若只给"固定半额"，当单轮成本高于半额时续跑段
+ *    第一轮即再次超限——续跑形同虚设（写第一版时踩过这个坑，是 E9/E10
+ *    用例推演暴露的）。按轮数兜底保证压缩后的新上下文至少能跑
+ *    EPOCH_MIN_ROUNDS 轮，才有机会真正推进任务。
+ * 2. 全任务绝对上限 = 名义预算 × MAX_TOTAL_BUDGET_MULTIPLIER。无论段额度
+ *    如何折算，累计消耗触达该上限一律诚实 failure——这是防失控硬上界，
+ *    保证"续跑"永远不会变成无限烧钱。
+ *
+ * 运行级兜底仍由编排器阶段间检查 + 软预算续期（RUN_TOKEN_SOFT_RENEWAL_RATIO）
+ * 负责，与本常量正交。
+ */
+const MAX_CONTEXT_EPOCH_ROLLOVERS = 1;
+
+/** 续跑段额度的名义预算折算比例 */
+const EPOCH_BUDGET_RATIO = 0.5;
+
+/**
+ * 续跑段最少可跑轮数（按实测单轮均耗折算成额度）
+ *
+ * 压缩后上下文只剩「system + 任务卡 + 轨迹摘要」，单轮成本远低于首段；
+ * 用首段实测均耗作保守上界换算 4 轮额度，既保证续跑有意义，
+ * 又被 MAX_TOTAL_BUDGET_MULTIPLIER 总上界压住。
+ */
+const EPOCH_MIN_ROUNDS = 4;
+
+/** 全任务 token 绝对上限 = 名义预算 × 本值（防失控硬上界） */
+const MAX_TOTAL_BUDGET_MULTIPLIER = 2.5;
+
+/** 压缩续跑摘要的最大保留字符数（超限保头尾、省略中段，防止摘要本身膨胀） */
+const CONTEXT_SUMMARY_MAX_CHARS = 8000;
+
 /** 终态摘要最大保留字符数 */
 const MAX_SUMMARY_CHARS = 2000;
 
@@ -582,6 +627,17 @@ export class LlmTaskExecutor implements P5TaskExecutor {
       let lastCallFingerprint: string | null = null;
       let identicalCallStreak = 0;
 
+      // 上下文续跑（epoch）状态（软预算修复 2026-10-11，设计见 MAX_CONTEXT_EPOCH_ROLLOVERS）：
+      // 预算超限不再直接 failure，而是把膨胀的历史折叠成紧凑上下文续跑。
+      // - epochTokensBaseline：本段开始时的"全任务累计 token"，段内增量 = 累计 - 基线；
+      // - epochBudget：本段独立额度（首段=effectiveBudget，续跑段见 EPOCH_BUDGET_RATIO
+      //   与 EPOCH_MIN_ROUNDS 的折算规则）。
+      // 必须按"段"而非"全任务累计"判限：否则续跑段起步即超限，续跑形同虚设；
+      // 总消耗另由 MAX_TOTAL_BUDGET_MULTIPLIER 绝对上限兜住。
+      let budgetEpoch = 0;
+      let epochTokensBaseline = 0;
+      let epochBudget: number | undefined;
+
       for (let round = 1; round <= this.maxToolRounds; round += 1) {
         // 每轮顶部双重 abort 检查：标志文件（跨进程 stop）+ AbortSignal（进程内）
         if (this.isAbortRequested(input.abortFlagPath) || abortController.signal.aborted) {
@@ -610,14 +666,75 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             inputTokensTotal + outputTokensTotal,
             estimatedCharsTotal
           ).tokens;
-          if (currentTokens > effectiveBudget) {
+          const segmentBudget = epochBudget ?? effectiveBudget;
+          const segmentTokens = currentTokens - epochTokensBaseline;
+          // 全任务绝对上限（防失控硬上界）：优先于段额度判定，保证续跑机制
+          // 不会把总消耗放大到不可控（口径见 MAX_TOTAL_BUDGET_MULTIPLIER）。
+          const totalCeiling = Math.ceil(effectiveBudget * MAX_TOTAL_BUDGET_MULTIPLIER);
+          if (currentTokens > totalCeiling) {
             return this.failure(
-              `Token 预算超限：单任务已用 ${currentTokens} tokens（预算 ${effectiveBudget}），执行中止`,
+              `Token 预算超限：累计 ${currentTokens} tokens 已触达单任务绝对上限 ${totalCeiling}` +
+                `（名义预算 ${effectiveBudget} × ${MAX_TOTAL_BUDGET_MULTIPLIER}，` +
+                `已自动压缩续跑 ${budgetEpoch} 次仍未完成），执行中止`,
               llmRequests,
               sawUsage,
               inputTokensTotal + outputTokensTotal,
               estimatedCharsTotal
             );
+          }
+          if (segmentTokens > segmentBudget) {
+            // 额度用尽：还有续跑额度 → 压缩历史开新上下文续跑；已用完 → 诚实失败
+            if (budgetEpoch >= MAX_CONTEXT_EPOCH_ROLLOVERS) {
+              return this.failure(
+                `Token 预算超限：本段已用 ${segmentTokens} tokens（本段额度 ${segmentBudget}，` +
+                  `名义预算 ${effectiveBudget}，累计 ${currentTokens}，` +
+                  `已自动压缩续跑 ${budgetEpoch} 次仍未完成），执行中止`,
+                llmRequests,
+                sawUsage,
+                inputTokensTotal + outputTokensTotal,
+                estimatedCharsTotal
+              );
+            }
+            // —— 压缩续跑：折叠历史为「system + 任务卡原文 + 确定性轨迹摘要 + 续跑指令」——
+            // 旧历史的价值（探索过程）已被摘要覆盖，其体积才是每轮成本单调上涨的根因；
+            // 折叠后每轮输入回到"任务卡 + 摘要 + 最近若干轮"，成本骤降。
+            const rolloutSummary = this.buildContextRolloutSummary(messages);
+            const carriedRound = round;
+            messages.length = 0;
+            for (const message of this.buildRolledOverMessages(input, rolloutSummary, budgetEpoch + 1)) {
+              messages.push(message);
+            }
+            budgetEpoch += 1;
+            epochTokensBaseline = currentTokens;
+            // 段额度 = max(名义 × 折算比例, 实测单轮均耗 × 最少轮数)：
+            // 前者防失控，后者防止"单轮成本 > 半额"时续跑段一轮即死、
+            // 压缩续跑形同虚设（单轮均耗按已发生的 round 轮实测，是保守上界——
+            // 压缩后上下文大幅变小，真实单轮成本只会更低）。
+            const observedAvgCostPerRound = currentTokens / Math.max(1, round - 1);
+            epochBudget = Math.max(
+              Math.max(1, Math.floor(effectiveBudget * EPOCH_BUDGET_RATIO)),
+              Math.ceil(observedAvgCostPerRound * EPOCH_MIN_ROUNDS)
+            );
+            // 熔断指纹状态重置：新上下文里重复旧调用属于"模型看到摘要后的新决策"，
+            // 应重新计数（否则旧段末尾的 1~2 连击会让续跑第一击即触发空转熔断）。
+            lastCallFingerprint = null;
+            identicalCallStreak = 0;
+            // 注意：拒绝风暴计数**故意保留**——守卫不会因折叠上下文而改判，
+            // 已烧穿 6 次配额的越权目标在续跑段依然不可达，保留计数防止继续撞墙。
+            this.log(
+              `单任务上下文压缩续跑：任务 ${input.taskId} 段 ${budgetEpoch} 起步` +
+                `（本段烧 ${segmentTokens} / 额度 ${segmentBudget}，累计 ${currentTokens} tokens；` +
+                `折叠前 ${carriedRound} 轮轨迹已压缩为摘要 ${rolloutSummary.length} 字符）`,
+              "warn"
+            );
+            emitProgress(
+              "llm_request",
+              `上下文已达规模上限，自动压缩后继续执行（第 ${budgetEpoch + 1} 段）`,
+              `── 上下文压缩续跑：历史已折叠为 ${rolloutSummary.length} 字符轨迹摘要，` +
+                `本段额度 ${epochBudget} tokens，从当前进度继续（不重跑已完成步骤）`
+            );
+            // 本轮不发起请求也不跳过轮次计数：直接进入下一轮，用新上下文重新提问
+            continue;
           }
         }
 
@@ -836,7 +953,7 @@ export class LlmTaskExecutor implements P5TaskExecutor {
    * @returns true 表示该次调用被审批门控 deny
    */
   private isDeniedToolExecution(execution: ToolCallExecution): boolean {
-    return execution.content.includes("审批门控拒绝") || execution.content.includes("denied by approval gate");
+    return this.isDeniedToolContent(execution.content);
   }
 
   /**
@@ -1203,6 +1320,122 @@ export class LlmTaskExecutor implements P5TaskExecutor {
       }
     }
     return total;
+  }
+
+  // ==========================================================================
+  // 3.4b 上下文压缩续跑（epoch rollover，软预算修复 2026-10-11）
+  // ==========================================================================
+
+  /**
+   * 从消息序列确定性提取「已执行工具轨迹」摘要（压缩续跑的折叠素材）。
+   *
+   * 零 LLM 调用：不请求模型总结历史（总结本身要烧 token 且需要额外一轮），
+   * 而是从 assistant 消息的 tool_calls 元数据机械重建"做过什么"清单：
+   * - 每个工具调用一行（轮次 / 工具名 / 参数摘要），最近一轮额外带模型自述；
+   * - 被权限守卫拒绝的调用标 ✗，让续跑段知道"此路不通"，不再重复撞墙；
+   * - 超 CONTEXT_SUMMARY_MAX_CHARS 时保头尾、省略中段（首尾信息价值最高：
+   *   开头是初始探索，结尾是中断点）。
+   *
+   * @param messages 当前完整消息序列（只读，不被篡改）
+   * @returns 摘要文本；尚无任何工具调用时返回空串
+   */
+  private buildContextRolloutSummary(messages: ReadonlyArray<SessionMessage>): string {
+    const lines: string[] = [];
+    let round = 0;
+    for (const message of messages) {
+      if (message.role === "assistant") {
+        const params = message.messageParams as {
+          tool_calls?: ReadonlyArray<{ function?: { name?: string; arguments?: string } }>;
+        } | null;
+        const calls = params?.tool_calls ?? [];
+        if (calls.length === 0) {
+          continue;
+        }
+        round += 1;
+        const names: string[] = [];
+        for (const call of calls) {
+          const name = call.function?.name ?? "(unknown)";
+          names.push(`${name}(${this.summarizeToolArgs(call.function?.arguments ?? "")})`);
+        }
+        lines.push(`- 轮 ${round}：${names.join("；")}`);
+      } else if (message.role === "tool" && typeof message.content === "string") {
+        if (this.isDeniedToolContent(message.content)) {
+          lines.push(`  ↳ ✗ 被权限守卫拒绝：${message.content.slice(0, 100)}`);
+        }
+      }
+    }
+    if (lines.length === 0) {
+      return "";
+    }
+    let summary = lines.join("\n");
+    if (summary.length > CONTEXT_SUMMARY_MAX_CHARS) {
+      const headLen = Math.floor(CONTEXT_SUMMARY_MAX_CHARS * 0.6);
+      const tailLen = Math.floor(CONTEXT_SUMMARY_MAX_CHARS * 0.3);
+      const head = summary.slice(0, headLen);
+      const tail = summary.slice(-tailLen);
+      summary = `${head}\n…（中段 ${summary.length - head.length - tail.length} 字符轨迹已省略）\n${tail}`;
+    }
+    return summary;
+  }
+
+  /**
+   * 构造「压缩续跑」的全新上下文消息序列（system + user 两条）。
+   *
+   * 语义等价于交互式 CLI 的 auto-compact，但摘要是确定性生成的（见
+   * buildContextRolloutSummary）。新序列天然满足 compactMessagesForRequest
+   * 的协议不变量（无 assistant/tool 孤儿配对），因此续跑段无需特殊压缩分支。
+   *
+   * @param input 任务执行输入（任务卡原文来源，保证目标与验收标准零丢失）
+   * @param rolloutSummary 已执行轨迹摘要
+   * @param epoch 续跑段序号（1-based，仅用于文案）
+   * @returns 全新消息序列
+   */
+  private buildRolledOverMessages(
+    input: Readonly<P5TaskExecutionInput>,
+    rolloutSummary: string,
+    epoch: number
+  ): SessionMessage[] {
+    const lines: string[] = [
+      `工作目录（绝对路径，所有文件操作的牢笼）：${input.projectRoot}`,
+      `任务目标背景：${input.objective}`,
+      `任务卡：${input.taskId} ${input.taskTitle}`,
+    ];
+    if (input.acceptanceCriteria.length > 0) {
+      lines.push("验收标准：");
+      for (const criterion of input.acceptanceCriteria) {
+        lines.push(`- ${criterion}`);
+      }
+    }
+    if (input.stage === "fix" && input.feedback) {
+      lines.push("", "本任务此前的验证失败反馈（请据此修复，不要重复导致失败的做法）：", input.feedback);
+    }
+    lines.push(
+      "",
+      `—— 上下文续跑（第 ${epoch + 1} 段，前 ${epoch} 段已压缩）——`,
+      "上一段执行因上下文规模达到预算上限被自动压缩。任务卡原文与验收标准如上，未发生任何变化。",
+      "以下是前段已真实执行的轨迹摘要（由工具调用元数据确定性生成，非模型回忆）：",
+      ""
+    );
+    lines.push(rolloutSummary.length > 0 ? rolloutSummary : "-（前段未留下可解析的工具调用轨迹）");
+    lines.push(
+      "",
+      "请从中断处继续完成任务，硬性要求：",
+      "1. 不要重复摘要中已经执行过的调用（尤其是标 ✗ 的被拒目标——守卫不会改变判定）；",
+      "2. 需要此前读过的文件内容就重新 read（旧工具结果已省略，但可重新获取）；",
+      "3. 全部完成后给出一条不含工具调用的终态文本总结。"
+    );
+    return [
+      this.buildSessionMessage("system", SYSTEM_PROMPT, null),
+      this.buildSessionMessage("user", lines.join("\n"), null),
+    ];
+  }
+
+  /**
+   * 判断一段 tool 结果内容是否为"权限守卫拒绝"（与 isDeniedToolExecution 同判据，
+   * 供摘要构造复用——那里只有内容字符串、没有 ToolCallExecution 对象）。
+   */
+  private isDeniedToolContent(content: string): boolean {
+    return content.includes("审批门控拒绝") || content.includes("denied by approval gate");
   }
 
   // ==========================================================================

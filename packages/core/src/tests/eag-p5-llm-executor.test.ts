@@ -1204,3 +1204,103 @@ test("E3d. 只读放行 + 凭据守卫协同：/tmp/.env、/tmp/private.key 越�
     }
   }
 });
+
+// ============================================================================
+// 4. 上下文压缩续跑（epoch rollover，软预算修复 2026-10-11）
+// ============================================================================
+
+test("E17. 单任务预算耗尽：压缩上下文续跑一轮后完成（不再首轮必死），续跑请求=紧凑上下文", async () => {
+  const projectRoot = createGitProject();
+  try {
+    const targetFile = path.join(projectRoot, "soft-budget.txt");
+    // 每次响应固定 600 token usage；名义预算 1000：
+    // 轮1 请求后累计 600；轮2 检查通过、请求后 1200；轮3 顶部段额度检查超限
+    // （1200 > 1000）→ 压缩上下文续跑（baseline=1200，
+    // 段额度=max(1000×0.5, 均耗600×4)=2400），continue 不耗请求也不耗脚本；
+    // 轮4 用紧凑上下文请求后给出终态。共 4 请求 = 2400 tokens，
+    // 在未触达绝对上限 2500 之前把任务做完。
+    // 修复对象：修复前轮3 直接 failure（名义预算 1000 连 2 轮都跑不满），
+    // 任务永远做不完；现在能压缩续跑把任务做完。
+    const burn = { inputTokens: 500, outputTokens: 100 };
+    const client = new StubLlmClient([
+      { content: "", toolCalls: [{ name: "write", args: { file_path: targetFile, content: "a\n" } }], usage: burn },
+      {
+        content: "",
+        toolCalls: [{ name: "write", args: { file_path: targetFile, content: "b\n" } }],
+        usage: burn,
+      },
+      {
+        content: "",
+        toolCalls: [{ name: "write", args: { file_path: targetFile, content: "c\n" } }],
+        usage: burn,
+      },
+      { content: "续跑完成：三次写入均已落盘。", usage: burn },
+    ]);
+    const executor = new LlmTaskExecutor({ projectRoot, createLlmClient: () => client });
+
+    const result = await executor.executeTask({ ...buildExecutionInput(projectRoot), perTaskBudget: 1000 });
+
+    // 核心断言（修复对象）：预算 1000 下任务**没有**被"Token 预算超限"杀死，而是续跑完成
+    assert.equal(result.success, true, `软预算下任务必须续跑完成，实际 error=${result.error}`);
+    // 4 请求 = 首段 2 请求 + 续跑段 2 请求（轮3 为检查轮：压缩+continue，零请求）
+    assert.equal(result.llmRequests, 4, "轮3 检查轮零请求：4 次请求完成 3 次写入 + 终态");
+    assert.equal(result.tokensUsed, 2400, "总消耗 4×600=2400 ≤ 绝对上限 2500 + 单轮窗口");
+    assert.ok(fs.existsSync(targetFile), "真实文件写入必须落盘");
+
+    // 续跑上下文形状：第 3 次请求必须是折叠后的全新上下文（system+user 两条）
+    const rolloverRequest = client.getRequests()[2]!;
+    assert.equal(rolloverRequest.messages.length, 2, "续跑上下文必须为 system+user 两条（旧历史已折叠）");
+    const rolloverUser = rolloverRequest.messages[1]!;
+    assert.equal(rolloverUser.role, "user");
+    const userText = rolloverUser.content ?? "";
+    assert.ok(userText.includes("T-001"), "折叠上下文必须保留任务卡原文（id）");
+    assert.ok(userText.includes("创建 answer 模块"), "折叠上下文必须保留任务卡标题");
+    assert.ok(userText.includes("上下文续跑"), "折叠上下文必须含续跑指令段");
+    assert.ok(userText.includes("轮 1") && userText.includes("轮 2"), "折叠上下文必须含确定性轨迹摘要");
+    // 协议合法性：折叠后不存在 tool 孤儿消息
+    assert.equal(rolloverRequest.messages.filter((m) => m.role === "tool").length, 0);
+  } finally {
+    cleanup(projectRoot);
+  }
+});
+
+test("E18. 压缩续跑额度再烧穿：诚实 failure 且错误口径含续跑次数（不伪成功、不无限续命）", async () => {
+  const projectRoot = createGitProject();
+  try {
+    const targetFile = path.join(projectRoot, "hard-stop.txt");
+    const burn = { inputTokens: 500, outputTokens: 100 };
+    // 模型永不给终态（每轮都调工具）：轮1/轮2 烧满名义预算 → 轮3 压缩续跑
+    // （段额度 max(500, 600×4)=2400，保证续跑至少 4 轮）→ 续跑段继续烧 →
+    // 累计触达绝对上限 2500（=1000×2.5）时（轮7 顶部检查）诚实失败。
+    const script = Array.from({ length: 12 }, (_unused, index) => ({
+      content: "",
+      toolCalls: [{ name: "write", args: { file_path: targetFile, content: `r${index}\n` } }],
+      usage: burn,
+    }));
+    const executor = new LlmTaskExecutor({
+      projectRoot,
+      createLlmClient: () => new StubLlmClient(script),
+    });
+
+    const result = await executor.executeTask({ ...buildExecutionInput(projectRoot), perTaskBudget: 1000 });
+
+    assert.equal(result.success, false);
+    assert.ok(
+      result.error !== undefined && result.error.includes("Token 预算超限"),
+      `error 必须说明预算超限，实际：${result.error}`
+    );
+    assert.ok(result.error!.includes("已自动压缩续跑 1 次"), `error 必须如实标注续跑次数，实际：${result.error}`);
+    // 有界性（防失控不变量）：绝对上限 2500 触达即停，超烧窗口 ≤ 单轮成本
+    assert.ok(result.error!.includes("绝对上限"), `error 必须说明触达绝对上限，实际：${result.error}`);
+    // 首段 2 请求 + 续跑段 3 请求（轮3 检查轮零请求）：续跑段确实拿到了
+    // ≥4 轮额度（不是"一轮即死"的摆设），但也绝不无限续命
+    assert.equal(result.llmRequests, 5, `续跑段应获得真实额度后仍在有界处停止，实际 ${result.llmRequests} 请求`);
+    assert.equal(result.tokensUsed, 3000, "累计 = 5 请求 × 600");
+    assert.ok(
+      result.tokensUsed <= 2500 + 600,
+      `总消耗必须被 2.5× 绝对上限约束（允许一个单轮超烧窗口），实际 ${result.tokensUsed}`
+    );
+  } finally {
+    cleanup(projectRoot);
+  }
+});
