@@ -7409,15 +7409,33 @@ ${agentInstructions}
         // 在 executor/bash-handler 独立保障，不依赖本配置），ask/deny 列表仍全量生效。
         // CLI 路径（ignoreProjectSettings=false）不动，零回归。
         const resolvedPermissions = this.getResolvedSettings().permissions;
+        // defaultMode 解析（单一函数，与审批门控、自动审批过滤三处消费点同源）：
+        // manual 模式语义（docs/dev/permission-modes.md §3.2，修复 2026-10-12
+        // Web approvalMode=manual 仍直通）——mode=manual 强制配 askAll 默认策略，
+        // 未显式 allow 白名单的 scope 一律弹审批。配置来源（permissions.mode=manual /
+        // CLI flag / Web approvalMode=manual）若把 defaultMode 留空或 allowAll，
+        // 「手动审批」会退化成全部直通，与三态设计相悖，故强制归一为 askAll
+        // （显式 allow 白名单项仍直通，语义与 Trae「始终手动运行」一致）。
+        const resolveDefaultMode = (mode: PermissionMode | undefined): "allowAll" | "askAll" => {
+          if (mode === "manual") {
+            return "askAll";
+          }
+          return resolvedPermissions?.defaultMode ?? "allowAll";
+        };
+        const resolvedMode = this.permissionModeOverride ?? resolvedPermissions?.mode;
         const effectivePermissionSettings = resolvedPermissions
-          ? { ...resolvedPermissions, mode: this.permissionModeOverride ?? resolvedPermissions.mode }
+          ? {
+              ...resolvedPermissions,
+              mode: resolvedMode ?? resolvedPermissions.mode,
+              defaultMode: resolveDefaultMode(resolvedMode),
+            }
           : this.ignoreProjectSettings
             ? {
                 mode: (this.permissionModeOverride ?? "auto") as PermissionMode,
                 allow: [],
                 deny: [],
                 ask: [],
-                defaultMode: "allowAll" as const,
+                defaultMode: resolveDefaultMode(this.permissionModeOverride ?? "auto"),
                 addWorkingDirs: [],
               }
             : undefined;

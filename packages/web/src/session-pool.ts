@@ -1407,7 +1407,12 @@ export class SessionPool {
   getChatActivity(
     chatId: string,
     ctx: AuthContext
-  ): { turnActive: boolean; pendingTurns: number; status: SessionStatus | null } {
+  ): {
+    turnActive: boolean;
+    pendingTurns: number;
+    status: SessionStatus | null;
+    askPermissions: AskPermissionRequest[] | null;
+  } {
     const chat = this.getOwnedChat(chatId, ctx);
     // 运行中优先：引擎 E2 主循环执行期间（getActiveRuntimeSessionId 非空）
     // 状态必为 processing——磁盘索引条目要到 updateSessionEntry 落盘才可见
@@ -1447,7 +1452,14 @@ export class SessionPool {
     // 窗口更宽（覆盖 handleUserPrompt 中 activateSession 前后的准备段），
     // 运行中事实取两者并集（链上排队轮尚未启动时二者皆 false）
     const turnActive = chat.turnActive || runtimeActive;
-    return { turnActive, pendingTurns: chat.pendingTurns, status };
+    // 待审批明细（2026-10-12 修复"切页/刷新后审批卡片丢失，任务看似需输入继续"）：
+    // 引擎条目停在 ask_permission 时把 askPermissions 随快照透出——SSE 订阅初始
+    // 帧据此重放 permission_request，前端重建审批卡片。此前快照恒发
+    // askPermissions:null，permission_request 又只在轮次收敛点推送一次，
+    // 事件窗口错过即永久丢失，用户只能切走再切回碰运气。
+    const pendingAsks =
+      status === "ask_permission" ? (chat.manager.getSession(chat.sessionId ?? "")?.askPermissions ?? null) : null;
+    return { turnActive, pendingTurns: chat.pendingTurns, status, askPermissions: pendingAsks };
   }
 
   /**

@@ -8,6 +8,32 @@
 
 （本版本暂无变更。）
 
+## [0.4.3.16] - 2026-10-12
+
+补丁版（Web 审批三态细化：只读直通白名单 + 重定向闸门 + 会话级总是允许 + 设计文档与场景集成测试）。
+
+### Added
+- **Web 审批「自动审批」只读直通**（packages/core/src/session.ts
+  `AUTO_APPROVE_READONLY_PREFIXES` / `isFullyReadonlyBashCommand`）：
+  `web.approvalMode`（manual/auto/bypass，默认 auto）经 `permissionModeOverride`
+  注入引擎后，auto 模式下纯只读 bash 命令（ls/cat/grep 等白名单前缀、无写副作用段）
+  免弹卡直通；其余命令照常走审批。
+- **会话级「总是允许」**（session.ts `sessionAlwaysAllowScopes` /
+  `addSessionAlwaysAllows`，packages/web/src/components/PermissionCard.tsx）：
+  审批卡新增「本次会话总是允许」按钮，命中 scope 的后续命令本会话内免弹卡
+  （内存 Set，不落盘、不跨会话）。
+- **场景集成测试**（packages/core/src/tests/session-web-auto-approval.test.ts
+  WA-I01~I05）：覆盖 auto 只读直通、manual 弹卡、会话总是允许、重定向闸门、
+  bypass 全放行五条链路。
+- **设计文档**（docs/dev/web-approval.md）：三态数据流、只读判据、
+  模式×defaultMode 组合语义表、测试映射，及「页面切换任务不中断」调查结论
+  （轮次执行与 SSE 连接解耦，后台轮次不受页面切换/断连影响）。
+
+### Fixed
+- **只读白名单重定向绕过**（session.ts `isReadonlyAutoApprovableSegment`）：
+  `echo hi > note.txt` 以白名单前缀 echo 开头曾被误判只读自动放行；
+  命令段含 `>` / `<` 重定向即判非只读，必须走审批。
+
 ## [0.4.3.15] - 2026-10-10
 
 补丁版（EAG-P5 plan 阶段 LLM 动态规划 + 跨 run 失败记忆 + 预算不足干净终止；事故 run 2cb0893cccea——同目标重跑零智能机械循环）。
