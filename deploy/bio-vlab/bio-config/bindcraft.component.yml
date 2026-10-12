@@ -1,0 +1,75 @@
+id: bindcraft
+name: BindCraft 蛋白结合体设计
+enabled: true
+category: protein_design
+provider: BindCraft
+tags:
+  - gpu
+  - protein
+  - binder
+
+runtime:
+  type: docker-container
+  image: bio-bindcraft:latest
+  command: null
+
+lifecycle:
+  start_command: docker run -d --name bindcraft
+  stop_command: docker stop bindcraft
+  restart_command: docker restart bindcraft
+  start_timeout: 300
+  stop_timeout: 120
+
+healthcheck:
+  mode: http
+  endpoint: http://bindcraft:8086/api/v1/bindcraft/health
+  interval: 30
+  timeout: 15
+  retries: 5
+  start_period: 180
+
+resources:
+  cpus: "8"
+  memory: "16G"
+  gpus: 1
+  # 本机 GPU 拓扑：bindcraft=0，protenix=1（与运行中容器 --gpus device 一致）
+  gpu_device_ids: ["0"]
+  gpu_memory_threshold_mb: 8192
+  reservations:
+    cpus: "2"
+    memory: "4G"
+    gpus: 1
+  allocation_strategy: memory_best_fit
+
+env:
+  BINDCRAFT_MODEL_DIR: /data/models/bindcraft
+  INFERENCE_DEVICE: cuda
+  JOB_TMP_DIR: /tmp/bindcraft_jobs
+  PYTHONUNBUFFERED: "1"
+
+volumes:
+  # 与运行中容器的实际挂载一致（AF2 params 权重 + jobs 工作区）
+  - source: /root/bio/model-cache/bindcraft/params
+    target: /data/models/bindcraft/params:ro
+  - source: /root/bio/model-cache/jobs/bindcraft
+    target: /data/jobs/bindcraft:rw
+
+dependencies: []
+
+metadata:
+  description: BindCraft CUDA 版 - 蛋白结合体设计推理服务
+  homepage: https://github.com/bindcraft
+  ports:
+    - "8086:8086"
+
+# 工具调用集成配置: BindCraftTool 通过 HTTP 调用此端口
+# healthcheck endpoint=http://localhost:8086/api/v1/bindcraft/health 推导出主端点
+tool_integration:
+  port: 8086
+  invoke_endpoint: /api/v1/bindcraft/predict
+  http_method: POST
+  input_schema_ref: BINDCRAFT_TOOL_INPUT_SCHEMA
+  output_schema_ref: BINDCRAFT_TOOL_OUTPUT_SCHEMA
+  warmup_endpoint: null
+  request_timeout_seconds: 1800
+  content_type: application/json

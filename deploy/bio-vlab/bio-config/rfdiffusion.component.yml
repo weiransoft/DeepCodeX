@@ -1,0 +1,77 @@
+id: rfdiffusion
+name: RFdiffusion 蛋白质骨架设计
+enabled: true
+category: protein_design
+provider: RFdiffusion
+tags:
+  - gpu
+  - protein
+  - design
+
+runtime:
+  type: docker-container
+  image: bio-rfdiffusion:latest
+  command: null
+
+lifecycle:
+  start_command: docker run -d --name rfdiffusion
+  stop_command: docker stop rfdiffusion
+  restart_command: docker restart rfdiffusion
+  start_timeout: 300
+  stop_timeout: 120
+
+healthcheck:
+  mode: http
+  endpoint: http://rfd-adapter:8083/api/v1/rfdiffusion/health
+  interval: 30
+  timeout: 15
+  retries: 5
+  start_period: 180
+
+resources:
+  cpus: "8"
+  memory: "16G"
+  gpus: 1
+  gpu_device_ids: []
+  gpu_memory_threshold_mb: 8192
+  reservations:
+    cpus: "2"
+    memory: "4G"
+    gpus: 1
+  allocation_strategy: memory_best_fit
+
+env:
+  SERVER_MODE: rfdiffusion
+  RFDIFFUSION_MODEL_DIR: /data/models/rfdiffusion
+  RFDIFFUSION_REPO: /opt/RFdiffusion
+  INFERENCE_DEVICE: auto
+  JOB_TMP_DIR: /tmp/rfdiffusion_jobs
+  PYTHONUNBUFFERED: "1"
+
+volumes:
+  - source: ./data/models
+    target: /data/models:ro
+  - source: rfdiffusion-tmp
+    target: /tmp/rfdiffusion_jobs
+
+dependencies: []
+
+metadata:
+  description: 基于 CUDA 12.4 的 RFdiffusion 蛋白质骨架设计推理服务
+  homepage: https://github.com/RosettaCommons/RFdiffusion
+  ports:
+    - "8083:8083"
+
+# 工具调用集成配置: RFdiffusionTool 通过 HTTP 调用此端口
+# 字段值摘自 rfdiffusion_tool.py:
+#   DEFAULT_API_URL="http://rfdiffusion:8083"
+#   get_schema() 中 operation 支持 "design" / "partial"
+tool_integration:
+  port: 8083
+  invoke_endpoint: /api/v1/rfdiffusion/predict
+  http_method: POST
+  input_schema_ref: RFDIFFUSION_TOOL_INPUT_SCHEMA
+  output_schema_ref: RFDIFFUSION_TOOL_OUTPUT_SCHEMA
+  warmup_endpoint: null
+  request_timeout_seconds: 1800
+  content_type: application/json

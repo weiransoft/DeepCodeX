@@ -1,0 +1,76 @@
+id: opendde
+name: OpenDDE 全原子生物分子基础模型 (CUDA)
+enabled: true
+category: structure_prediction
+provider: Aureka Research
+tags:
+  - gpu
+  - structure
+  - biomolecule
+
+runtime:
+  type: docker-container
+  image: bio-opendde:latest
+  command: null
+
+lifecycle:
+  start_command: docker run -d --name opendde
+  stop_command: docker stop opendde
+  restart_command: docker restart opendde
+  start_timeout: 600
+  stop_timeout: 180
+
+healthcheck:
+  mode: http
+  endpoint: http://localhost:8090/health
+  interval: 30
+  timeout: 15
+  retries: 5
+  start_period: 300
+
+resources:
+  cpus: "16"
+  memory: "48G"
+  gpus: 1
+  gpu_device_ids: []
+  gpu_memory_threshold_mb: 24576
+  reservations:
+    cpus: "4"
+    memory: "16G"
+    gpus: 1
+  allocation_strategy: exclusive
+
+env:
+  OPENDDE_MODEL_DIR: /data/models/opendde
+  OPENDDE_WEIGHT: opendde_v1
+  INFERENCE_DEVICE: cuda
+  PORT: "8090"
+  PYTHONUNBUFFERED: "1"
+
+volumes:
+  - source: ./data/models
+    target: /data/models:ro
+  - source: opendde-tmp
+    target: /tmp/opendde_jobs
+
+dependencies: []
+
+metadata:
+  description: OpenDDE CUDA 版 - 全原子生物分子基础模型（结构预测/功能理解/分子设计）
+  homepage: https://github.com/AurekaResearch/OpenDDE
+  ports:
+    - "8090:8090"
+
+# 工具调用集成配置: OpenDDETool 通过 HTTP 调用此端口
+# 字段值摘自 opendde_tool.py:
+#   DEFAULT_OPENDDE_HOST="127.0.0.1", DEFAULT_OPENDDE_PORT=8090
+#   predict_structure() / predict_complex() 提交异步任务后轮询 /result/{job_id}
+tool_integration:
+  port: 8090
+  invoke_endpoint: /api/predict
+  http_method: POST
+  input_schema_ref: OPENDDE_TOOL_INPUT_SCHEMA
+  output_schema_ref: OPENDDE_TOOL_OUTPUT_SCHEMA
+  warmup_endpoint: null
+  request_timeout_seconds: 600
+  content_type: application/json

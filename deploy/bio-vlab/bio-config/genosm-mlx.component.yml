@@ -1,0 +1,85 @@
+id: genosm-mlx
+name: GenOSM 微生物组学大模型 (CUDA)
+enabled: true
+category: microbiome
+provider: BGI-HangzhouAI / Genos-m
+tags:
+  - gpu
+  - microbiome
+  - moe
+  - cuda
+  - dna
+
+# T-006：MLX(Mac) → CUDA 改造。原 native-script（macOS + mlx-lm）运行时替换为
+# 独立 CUDA 容器（docker-container），镜像由 docker/models/genosm-mlx/Dockerfile
+# 构建（PyTorch 2.4.1 + cu124，直接加载 HF 官方 safetensors，无格式转换）。
+runtime:
+  type: docker-container
+  image: bio-genosm:cuda-latest
+  command: null
+
+lifecycle:
+  # docker-container 类型实际启停由 LocalBackend 依据 runtime/resources/env/
+  # volumes/metadata.ports 组装 docker run；以下命令为兜底与审计展示用。
+  start_command: docker start genosm-mlx
+  stop_command: docker stop genosm-mlx
+  restart_command: docker restart genosm-mlx
+  start_timeout: 600
+  stop_timeout: 120
+
+healthcheck:
+  mode: http
+  # GENOSM_API_URL 在 backend 进程环境定义（compose 注入，默认本机 8011）；
+  # substitute_variables 支持 ${VAR:-default}，单机=k8s/GPU 分离部署均可解析。
+  endpoint: ${GENOSM_API_URL:-http://localhost:8011}/health
+  interval: 30
+  timeout: 10
+  retries: 5
+  # bf16 权重 fp32 源 ~19.5GB，A800 冷启动加载 ~70-120s
+  start_period: 240
+
+resources:
+  cpus: "8"
+  memory: "48G"
+  gpus: 1
+  gpu_device_ids: []
+  gpu_memory_threshold_mb: 24576
+  reservations:
+    cpus: "4"
+    memory: "24G"
+    gpus: 1
+
+env:
+  WEIGHTS_DIR: /data/models/genosm
+  PORT: "8011"
+  QUANT: bf16
+  PRELOAD_MODEL: "1"
+
+volumes:
+  # HF 官方权重（model-0000{1..4}-of-00004.safetensors + tokenizer 元文件）
+  # 只读挂载；容器内 HF 缓存落 /tmp（镜像内置），不受 :ro 影响
+  - source: ./data/models/genosm
+    target: /data/models/genosm
+    mode: ro
+
+dependencies:
+  - mysql
+  - redis
+
+metadata:
+  description: Genos-m 4.7B MoE 微生物基因组基座大模型 CUDA 推理服务（嵌入/生成/AMR/毒力/BGC/疾病分型/宏基因组表征）
+  homepage: https://huggingface.co/BGI-HangzhouAI/Genos-m
+  ports:
+    - "8011:8011"
+
+# 工具调用集成配置：GenosMTool（genosm_tool.py v1.1 HTTP 模式）经
+# GENOSM_API_URL 调用此容器；主端点取 embed（tool 按 operation 分发到
+# /v1/embed、/v1/generate、/v1/classify/{op}、/v1/metagenome_repr，
+# 路径映射见 genosm_tool.py _HTTP_* 常量）
+tool_integration:
+  port: 8011
+  invoke_endpoint: /v1/embed
+  http_method: POST
+  warmup_endpoint: /health
+  request_timeout_seconds: 1800
+  content_type: application/json

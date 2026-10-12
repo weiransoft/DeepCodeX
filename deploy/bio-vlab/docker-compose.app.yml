@@ -1,0 +1,362 @@
+# =============================================================================
+# bio-vlab 应用服务器 docker-compose（CentOS 7 / 10.101.66.29 直装版）
+# 由 docker-compose.prod.yml 裁剪适配：
+#   - 去掉 nginx（省 TLS 证书依赖）：对外入口 = frontend:3000，
+#     浏览器同源 /api/v1/* 由 Next.js rewrites 反代到 backend:8080
+#   - 去掉 K8s/GPU/监控组件：模型推理由 GPU 机（10.101.20.30）上的
+#     boltz 等容器承担，backend 经 BOLTZ_HOST 等变量直连
+#   - 镜像由 GPU 机构建后 docker save/load 传入（远端不通 Docker Hub）
+# 启动：docker compose -f docker-compose.app.yml --env-file .env up -d
+# =============================================================================
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
+x-restart-policy: &default-restart
+  restart: unless-stopped
+
+services:
+  mysql:
+    image: mysql:8.0.36
+    container_name: bio-mysql
+    <<: *default-restart
+    expose: ["3306"]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-bio_ai}
+      MYSQL_USER: ${MYSQL_USER:-bio_app}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+      - --max_connections=500
+      - --innodb_buffer_pool_size=2G
+      - --default-time-zone=+08:00
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks: [bio-net]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    logging: *default-logging
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: bio-redis
+    <<: *default-restart
+    expose: ["6379"]
+    # 修复（远端实测 FATAL CONFIG FILE ERROR）：原 prod 编排把 "redis-server"
+    # 作为 command 列表首元素 + "--flag=value" 形式传参，Redis 7.4 会把
+    # "--appendonly=yes" 误解析为配置文件路径。改为 sh -c 显式 exec 标准
+    # "--key value" 语法；${REDIS_PASSWORD} 由 compose 渲染期注入。
+    command:
+      - sh
+      - -c
+      - exec redis-server --appendonly yes --appendfsync everysec --maxmemory 2gb --maxmemory-policy allkeys-lru --requirepass '${REDIS_PASSWORD}'
+    volumes:
+      - redis-data:/data
+    networks: [bio-net]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    logging: *default-logging
+
+  # MinIO 对象存储（可选：pull 失败时可用 COMPOSE_PROFILES 留空跳过，
+  # backend 会自动降级本地存储，知识库/组学上传能力受限但主流程可用）
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: bio-minio
+    <<: *default-restart
+    profiles: ["minio"]
+    expose: ["9000", "9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+      MINIO_CONSOLE_PORT: "9001"
+    command: ["server", "/data", "--console-address", ":9001"]
+    volumes:
+      - minio-data:/data
+    networks: [bio-net]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    logging: *default-logging
+
+  backend:
+    image: bio-backend:latest
+    container_name: bio-backend
+    <<: *default-restart
+    ports:
+      - "8080:8080"
+    environment:
+      ENVIRONMENT: production
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_NAME: ${MYSQL_DATABASE:-bio_ai}
+      DB_USER: ${MYSQL_USER:-bio_app}
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      DB_CHARSET: utf8mb4
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: HS256
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: 60
+      JWT_REFRESH_TOKEN_EXPIRE_DAYS: 7
+      SCIMINER_API_BASE_URL: ${SCIMINER_API_BASE_URL:-https://sciminer.tech/console/api}
+      SCIMINER_API_KEY: ${SCIMINER_API_KEY:-sk-not-configured}
+      # LLM：[T-007 2026-10-10] 指向 bio-net 内 bio-llm 容器（ollama，OpenAI 兼容）。
+      # 不再走 host.docker.internal:8000 —— 宿主 INPUT 链 DROP 导致容器→宿主黑洞，
+      # 且 8000 实为 boltz 推理服务而非 LLM。
+      LLM_API_BASE_URL: ${LLM_API_BASE_URL:-http://llm:11434/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-empty}
+      LLM_MODEL_NAME: ${LLM_MODEL_NAME:-deepseek-r1:70b}
+      # ⚠️ config.py 中 LLM_* 只是 VLLM_* 的只读 property 别名（兼容层），真正的
+      # pydantic 字段是 VLLM_BASE_URL 等；仅注入 LLM_* 会被忽略并回落默认
+      # http://localhost:8000/v1（容器内=自身，永不可达）。必须同时注入 VLLM_*。
+      VLLM_BASE_URL: ${LLM_API_BASE_URL:-http://llm:11434/v1}
+      VLLM_API_KEY: ${LLM_API_KEY:-empty}
+      VLLM_MODEL_NAME: ${LLM_MODEL_NAME:-deepseek-r1:70b}
+      LLM_MAX_TOKENS: 4096
+      LLM_TEMPERATURE: 0.1
+      # 浏览器经 frontend rewrites 同源访问，CORS 仅放行直连 8080 的场景
+      # [CORS 修复 2026-10-11] 默认值同步加入 GPU 机 3100 前端 origin
+      CORS_ORIGINS: '${CORS_ORIGINS:-["http://10.101.20.20:3100","http://10.101.20.30:3100","http://10.101.66.29:3000"]}'
+      LOG_LEVEL: INFO
+      DEBUG: "false"
+      UPLOAD_DIR: /app/uploads
+      MAX_UPLOAD_SIZE: 52428800
+      # GPU 机上的模型服务直连地址（boltz 已在 10.101.20.30:8000 运行）
+      BOLTZ_HOST: ${BOLTZ_HOST:-10.101.20.30}
+      BOLTZ_PORT: ${BOLTZ_PORT:-8000}
+      BOLTZ_HEALTHCHECK_TIMEOUT: 30
+      PROTEINMPNN_API_URL: ${PROTEINMPNN_API_URL:-http://10.101.20.30:8085}
+      RFDIFFUSION_API_URL: ${RFDIFFUSION_API_URL:-http://10.101.20.30:8083}
+      # [T-006 补齐 2026-10-09] Genos-m CUDA 常驻推理服务（GPU 机 8011）。
+      # 模板此前缺失该项：genosm_tool.py 默认回落 http://genosm-mlx:8011
+      # （compose 网络内不存在的 Mac MLX 遗留服务名）→ GenOSM 调用必然失败。
+      GENOSM_API_URL: ${GENOSM_API_URL:-http://10.101.20.30:8011}
+      # ---------------------------------------------------------------------
+      # [T-004 / D3 修复 2026-10-07] 固化 OpenDDE 契约网关指向。
+      # 根因：此前 compose env 缺 OPENDDE_* 两项，backend 回落到 config.py 默认
+      # 127.0.0.1:8090（容器内不可能连通）。运维通过 PUT /settings/runtime 写入
+      # 的 runtime_overrides 只在执行层（opendde_tool）生效，展示层
+      # （GET /settings/runtime 的 groups、GET /settings/runtime/health）读裸
+      # env 值 → 恒显 down（缺陷 D3）。env 固化后三层（env 默认值 → 展示层 →
+      # 执行层）同源，UI 不再误报；DB override 仍可按需临时改指向。
+      # 见 deploy/bio-vlab/README.md「D3：runtime_overrides 与 UI 显示不一致」。
+      # ---------------------------------------------------------------------
+      OPENDDE_HOST: ${OPENDDE_HOST:-10.101.20.30}
+      OPENDDE_PORT: ${OPENDDE_PORT:-8090}
+      OPENDDE_REQUEST_TIMEOUT: ${OPENDDE_REQUEST_TIMEOUT:-1800}
+      # AF3（8642 MLX / 8087 官方）在本平台未部署，仅登记占位地址；
+      # 结构预测由调度门面回退链降级到 OpenDDE（见 T-003 报告 E4）
+      AF3_HOST: ${AF3_HOST:-10.101.20.30}
+      AF3_PORT: ${AF3_PORT:-8642}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET: ${MINIO_BUCKET:-bio-ai}
+      MINIO_SECURE: "false"
+      # [2026-10-10] MinerU 文档解析服务本平台未部署，必须显式置空：
+      # config.py 默认值是 http://localhost:8080，在容器内即 backend 自身
+      # 监听口 → 运行时健康探测打自己且恒 404，UI 误报 MinerU down。
+      # 置空后探测按 probe=none 返回「未配置」。
+      KB_MINERU_BASE_URL: ""
+      METRICS_AUTH_ENABLED: "false"
+      # [T-004 / D4 修复 2026-10-07] DDL 显式交由 Alembic 迁移管理：
+      # 旧行为是启动期裸 Base.metadata.create_all(bind=engine)（等价
+      # checkfirst=False），对已存在表抛 pymysql 1050 "Table already exists"
+      # 告警栈（component_dispatches 等）。backend=1 副本、celery-worker=N 副本
+      # 并发启动时竞态尤其明显。现在：
+      #   MIGRATIONS_ENABLED=true  → 启动前先执行 alembic upgrade head
+      #                              （backend 服务对 alembic_version 加 GET_LOCK 串行化）
+      #   AUTO_CREATE_ALL=false    → 不再无条件裸建表；缺库（首次部署）时
+      #                              database.init_db() 以 checkfirst=True 兜底幂等补齐
+      # [2026-10-09 关键补注] 镜像 ENTRYPOINT=tini、CMD=uvicorn 直起，start.sh
+      # 的 alembic upgrade head 在容器部署形态下从不执行；迁移由 backend 代码
+      # （app.main startup → database.run_migrations）读取本开关触发。旧版镜像
+      # 无该代码，MIGRATIONS_ENABLED 是死配置——必须使用 2026-10-09 之后构建
+      # 的 bio-backend 镜像（含 D4 合入），或以 alembic run 一次性 job 兜底。
+      # ALEMBIC_INI 指向上方挂载的部署包 ini（其 env.py 优先读 run_migrations
+      # 注入的引擎串，口令不落盘）；未挂载部署包时镜像自带 /app/alembic.ini
+      # + 完整版本链兜底。
+      ALEMBIC_INI: /opt/bio-vlab/alembic.ini
+      MIGRATIONS_ENABLED: ${MIGRATIONS_ENABLED:-true}
+      AUTO_CREATE_ALL: ${AUTO_CREATE_ALL:-false}
+    volumes:
+      - backend-uploads:/app/uploads
+      - backend-logs:/app/logs
+      - backend-cache:/app/cache
+      # [T-005 补齐 2026-10-09] Docker 组件运维（LocalBackend 探测 + 组件启停）
+      # 需要 docker CLI + 宿主机 daemon socket；镜像已内置 docker-cli（Debian 13
+      # 拆分包），挂载 socket 后 runtime-mode 探测才能报 compose-local。
+      # ⚠️ 安全提示：挂载 docker.sock 等效授予容器 root，仅限受信单机部署；
+      # k3s 部署严禁此挂载（组件运维走 RemoteAgentBackend→agent-gpu mTLS）。
+      - /var/run/docker.sock:/var/run/docker.sock
+      # [T-005 补齐 2026-10-09] 组件定义目录（*-docker.components 播种/扫描共用，
+      # 只读）。镜像 build context 为 backend/，不含仓库根 docker/components/；
+      # 本部署形态将组件 yml 放宿主机 ./bio-config（运维可改），挂到代码默认
+      # 扫描路径 /app/docker/components（settings.DOCKER_COMPONENTS_DIR）。
+      - ./bio-config:/app/docker/components:ro
+      # Alembic 迁移脚本（仓库内版本管理，改镜像不丢迁移历史）
+      - ./alembic:/opt/bio-vlab/alembic:ro
+      - ./alembic.ini:/opt/bio-vlab/alembic.ini:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [bio-net]
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging: *default-logging
+
+  celery-worker:
+    image: bio-backend:latest
+    container_name: bio-celery-worker
+    <<: *default-restart
+    command:
+      - celery
+      - -A
+      - app.celery_app
+      - worker
+      - --loglevel=INFO
+      - --concurrency=4
+      - --max-tasks-per-child=1000
+      - --without-heartbeat
+      - -Q
+      # [RC-2 修复 2026-10-09] 必须消费默认队列 celery：docker-components
+      # 启停等任务经 send_task 未指定 queue → 落默认队列 celery；此前只消费
+      # default,bio_workflow，任务石沉大海（redis llen celery 持续堆积，
+      # 页面组件永远 stopped/error，见 docs/incident-report-20261008 §RC-2）。
+      - default,bio_workflow,celery
+    environment:
+      ENVIRONMENT: production
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_NAME: ${MYSQL_DATABASE:-bio_ai}
+      DB_USER: ${MYSQL_USER:-bio_app}
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
+      # [部署修复 2026-10-03] config.py 在 ENVIRONMENT=production 下强校验
+      # JWT_SECRET_KEY(≥32) 与 CORS_ORIGINS(禁 localhost)；worker 同进程加载
+      # Settings，缺这两项即用默认值触发 ValidationError 崩溃循环
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: HS256
+      CORS_ORIGINS: '${CORS_ORIGINS:-["http://10.101.20.20:3100","http://10.101.20.30:3100","http://10.101.66.29:3000"]}'
+      SCIMINER_API_BASE_URL: ${SCIMINER_API_BASE_URL:-https://sciminer.tech/console/api}
+      SCIMINER_API_KEY: ${SCIMINER_API_KEY:-sk-not-configured}
+      # [T-007 2026-10-10] worker 与 backend 同指向 bio-net 内 bio-llm；
+      # LLM_* 是 VLLM_* 的只读别名，必须双注入（见 backend 段说明）
+      LLM_API_BASE_URL: ${LLM_API_BASE_URL:-http://llm:11434/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-empty}
+      LLM_MODEL_NAME: ${LLM_MODEL_NAME:-deepseek-r1:70b}
+      VLLM_BASE_URL: ${LLM_API_BASE_URL:-http://llm:11434/v1}
+      VLLM_API_KEY: ${LLM_API_KEY:-empty}
+      VLLM_MODEL_NAME: ${LLM_MODEL_NAME:-deepseek-r1:70b}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET: ${MINIO_BUCKET:-bio-ai}
+      MINIO_SECURE: "false"
+      LOG_LEVEL: INFO
+      BOLTZ_HOST: ${BOLTZ_HOST:-10.101.20.30}
+      BOLTZ_PORT: ${BOLTZ_PORT:-8000}
+      # [T-006 补齐 2026-10-09] worker 侧异步 GenOSM 任务与 backend 同指向
+      GENOSM_API_URL: ${GENOSM_API_URL:-http://10.101.20.30:8011}
+      # [T-004 / D3 修复 2026-10-07] worker 同样会经 OpenDDETool 发起推理
+      # （异步任务分支），必须与 backend 用同一组 OPENDDE_* 地址，否则
+      # 异步任务打到容器自身 127.0.0.1:8090 必然失败。
+      # [T-004 / D4 修复] worker 多副本并发启动正是裸 CREATE TABLE 竞态的
+      # 主要来源，这里显式关闭 worker 侧 DDL（迁移由 backend 单副本负责）。
+      OPENDDE_HOST: ${OPENDDE_HOST:-10.101.20.30}
+      OPENDDE_PORT: ${OPENDDE_PORT:-8090}
+      OPENDDE_REQUEST_TIMEOUT: ${OPENDDE_REQUEST_TIMEOUT:-1800}
+      AF3_HOST: ${AF3_HOST:-10.101.20.30}
+      AF3_PORT: ${AF3_PORT:-8642}
+      MIGRATIONS_ENABLED: ${WORKER_MIGRATIONS_ENABLED:-false}
+      AUTO_CREATE_ALL: ${WORKER_AUTO_CREATE_ALL:-false}
+    volumes:
+      - backend-uploads:/app/uploads
+      - backend-logs:/app/logs
+      - backend-cache:/app/cache
+      # [T-005 补齐 2026-10-09] docker_component.start/stop/restart 等任务在
+      # worker 进程内经 LocalBackend → docker CLI 操作本机 Docker：worker
+      # 必须与 backend 同等挂载 socket，否则任务执行时找不到 daemon 必失败。
+      # ⚠️ 安全提示：等效授予容器 root，仅限受信单机部署；k3s 严禁。
+      - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [bio-net]
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # [部署修复 2026-10-03] 不在 compose 定义 healthcheck 时会继承镜像
+    # HEALTHCHECK（curl backend:8080/health）；celery 进程不监听 8080，
+    # 必然 unhealthy。worker 存活由 restart 策略与日志保障，此处禁用继承检查。
+    healthcheck:
+      disable: true
+    logging: *default-logging
+
+  frontend:
+    image: bio-frontend:latest
+    container_name: bio-frontend
+    <<: *default-restart
+    # 对外入口（HTTP）。firewalld 不拦 docker 发布端口
+    # 宿主端口可经 FRONTEND_PORT 覆盖：3000 常被同机其他 Web 服务占用
+    # （本机实测 open-webui 常驻 0.0.0.0:3000），硬编码会让 frontend 起不来
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      # 运行时 rewrites 目标：Next server 端把 /api/v1/* 反代到 backend:8080
+      NEXT_PUBLIC_API_BASE: http://backend:8080/api/v1
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+    networks: [bio-net]
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/login"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging: *default-logging
+
+networks:
+  bio-net:
+    driver: bridge
+
+volumes:
+  mysql-data:
+  redis-data:
+  minio-data:
+  backend-uploads:
+  backend-logs:
+  backend-cache:

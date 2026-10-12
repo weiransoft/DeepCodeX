@@ -1,0 +1,77 @@
+id: protenix
+name: Protenix 开源 AF3 等效结构预测
+enabled: true
+category: structure_prediction
+provider: Protenix
+tags:
+  - gpu
+  - structure
+  - af3
+
+runtime:
+  type: docker-container
+  image: bio-protenix:latest
+  command: null
+
+lifecycle:
+  start_command: docker run -d --name protenix
+  stop_command: docker stop protenix
+  restart_command: docker restart protenix
+  start_timeout: 300
+  stop_timeout: 120
+
+healthcheck:
+  mode: http
+  endpoint: http://protenix:8088/api/v1/protenix/health
+  interval: 30
+  timeout: 15
+  retries: 5
+  start_period: 180
+
+resources:
+  cpus: "8"
+  memory: "24G"
+  gpus: 1
+  # 本机 GPU 拓扑：bindcraft=0，protenix=1（与运行中容器 --gpus device 一致）
+  gpu_device_ids: ["1"]
+  gpu_memory_threshold_mb: 12288
+  reservations:
+    cpus: "2"
+    memory: "4G"
+    gpus: 1
+  allocation_strategy: memory_best_fit
+
+env:
+  PROTENIX_ROOT_DIR: /data/models/protenix
+  PROTENIX_MODEL: protenix-v2
+  PROTENIX_MAX_CONCURRENCY: "1"
+  PROTENIX_MAX_WALLCLOCK: "5400"
+  PYTHONUNBUFFERED: "1"
+
+volumes:
+  - source: ./model-cache/protenix-v2/checkpoint
+    target: /data/models/protenix/checkpoint:ro
+  - source: ./model-cache/protenix/common
+    target: /data/models/protenix/common:ro
+  - source: ./model-cache/jobs/protenix
+    target: /data/jobs/protenix:rw
+
+dependencies: []
+
+metadata:
+  description: Protenix v2（Shanghai AI Lab + BioMap，AF3 开源等效）结构预测推理服务
+  homepage: https://github.com/bytedance/protenix
+  ports:
+    - "8088:8088"
+
+# 工具调用集成配置: ProtenixTool 通过 HTTP 调用此端口
+# （backend config.py 默认 PROTEINX_API_URL=http://protenix:8088，经 bio-net 别名解析）
+tool_integration:
+  port: 8088
+  invoke_endpoint: /api/v1/protenix/predict
+  http_method: POST
+  input_schema_ref: PROTENIX_TOOL_INPUT_SCHEMA
+  output_schema_ref: PROTENIX_TOOL_OUTPUT_SCHEMA
+  warmup_endpoint: null
+  request_timeout_seconds: 3600
+  content_type: application/json

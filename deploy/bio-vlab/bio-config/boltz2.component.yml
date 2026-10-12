@@ -1,0 +1,90 @@
+id: boltz2
+name: Boltz-2 / Chai-1 联合推理
+enabled: true
+category: structure_prediction
+provider: Boltz-2
+tags:
+  - gpu
+  - structure
+  - protein-ligand
+
+# [2026-10-12 对齐] 原声明 docker-compose-service + docker-compose.prod.yml：
+# 该 compose 文件在部署目录不存在（实际 compose 工程位于 /home/llm/boltz/，
+# project=boltz/service=boltz，对 backend 容器不可见），导致容器缺失时平台
+# start/restart 重建路径必然失败。现改为 docker-container 并逐项对齐实际
+# 运行容器（3719fa830a1d）：image=boltz:latest、BOLTZ_CACHE、binds、端口、
+# 网络、重启策略。status/stop/restart 走 container_id/组件 id 均不受影响。
+runtime:
+  type: docker-container
+  image: boltz:latest
+  command: null
+
+lifecycle:
+  # docker-container 类型实际启停由 LocalBackend 依据 runtime/resources/env/
+  # volumes/metadata 组装；以下命令为兜底与审计展示用（容器名=组件 id）。
+  start_command: docker start boltz2
+  stop_command: docker stop boltz2
+  restart_command: docker restart boltz2
+  start_timeout: 300
+  stop_timeout: 120
+
+healthcheck:
+  mode: http
+  endpoint: http://boltz2:8000/health
+  interval: 30
+  timeout: 15
+  retries: 5
+  start_period: 180
+
+resources:
+  cpus: "8"
+  memory: "32G"
+  gpus: 1
+  gpu_device_ids: []
+  gpu_memory_threshold_mb: 10240
+  reservations:
+    cpus: "2"
+    memory: "8G"
+    gpus: 1
+
+env:
+  # 与实际容器 Config.Env 对齐（其余 CUDA 变量为镜像内置，无需重复声明）。
+  # 旧声明 BOLTZ_MODEL_DIR/CHAI_MODEL_DIR/BOLTZ_DEVICES 实际容器中不存在。
+  BOLTZ_CACHE: /app/cache
+  PYTHONUNBUFFERED: "1"
+
+volumes:
+  # 与实际容器 HostConfig.Binds 一致
+  - source: /home/llm/boltz/input
+    target: /input:ro
+  - source: /home/llm/boltz/output
+    target: /output:rw
+  - source: /home/llm/boltz/boltz_cache
+    target: /app/cache:rw
+  - source: /home/llm/boltz/api-data/inputs
+    target: /data/inputs:rw
+  - source: /home/llm/boltz/api-data/outputs
+    target: /data/outputs:rw
+
+dependencies: []
+
+metadata:
+  description: 基于 NVIDIA CUDA 12.1 的蛋白-配体联合预测容器（boltz:latest + API 适配）
+  homepage: https://github.com/jwohlwend/boltz
+  ports:
+    - "8000:8000"
+  network: appserver-deploy_bio-net
+  restart_policy: unless-stopped
+
+# 工具调用集成配置: Boltz2Tool 经 BOLTZ_HOST(=boltz2):8000 调用此容器。
+# 注：服务实际路由为 /health、/predict、/tasks/{id}（openapi 实测），
+# invoke_endpoint 保留原值仅为兼容后端既有映射，未做行为变更。
+tool_integration:
+  port: 8000
+  invoke_endpoint: /api/v1/boltz2/predict
+  http_method: POST
+  input_schema_ref: BOLTZ_TOOL_INPUT_SCHEMA
+  output_schema_ref: BOLTZ_TOOL_OUTPUT_SCHEMA
+  warmup_endpoint: null
+  request_timeout_seconds: 600
+  content_type: application/json
