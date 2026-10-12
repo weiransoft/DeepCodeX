@@ -21,11 +21,13 @@ import {
   type AppConfig,
   type ChatMessageDto,
   type ChatSummary,
+  type SendPermissionsPayload,
   type SendMessageResult,
   type UserInfo,
 } from "./api";
 import type { ChatEntry, UserAttachment } from "./chat-model";
 import { extractPlanFromToolContent, parseBackgroundTaskNotice, parseLeadingJsonBlock } from "./chat-model";
+import type { PermissionDecisionChoice } from "./components/PermissionCard";
 import { ChatPane } from "./components/ChatPane";
 import { Composer } from "./components/Composer";
 import { FileDrawer } from "./components/FileDrawer";
@@ -794,13 +796,19 @@ export function App() {
    * 权限决策回注（P1-1）：POST {permissions:[...]} → 202 受理即成功（fire-and-forget），
    * 卡片立即进入已决策只读态；决策后的续跑事件（流式文本 / 后续审批 / done 复位）
    * 全部由持久 SSE 订阅推送，无需在此重建订阅（P0-2）。
+   * decision="always"（本次会话总是允许）：权限决策仍提交 allow，
+   * 额外携带 sessionAlwaysAllowToolCallIds 让服务端登记会话级 scope 放行。
    */
   const decide = useCallback(
-    (toolCallId: string, decision: "allow" | "deny"): void => {
+    (toolCallId: string, decision: PermissionDecisionChoice): void => {
       const chatId = activeChatIdRef.current;
       if (chatId === null) return;
       setSubmittingPermIds((prev) => new Set(prev).add(toolCallId));
-      sendPermissionDecisions(chatId, { permissions: [{ toolCallId, permission: decision }] })
+      const payload: SendPermissionsPayload =
+        decision === "always"
+          ? { permissions: [{ toolCallId, permission: "allow" }], sessionAlwaysAllowToolCallIds: [toolCallId] }
+          : { permissions: [{ toolCallId, permission: decision }] };
+      sendPermissionDecisions(chatId, payload)
         .then(() => {
           // 202 受理成功：卡片置为已决策只读态（submitting 复位）
           setEntries((prev) =>

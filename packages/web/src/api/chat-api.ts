@@ -179,6 +179,23 @@ function parseAlwaysAllows(raw: unknown): PermissionScope[] {
 }
 
 /**
+ * 校验并归一 JSON 请求中的 sessionAlwaysAllowToolCallIds 字段
+ * （审批决策同时声明「本次会话总是允许」的 toolCallId 列表）。
+ *
+ * @param raw 请求体中的原始 sessionAlwaysAllowToolCallIds 值
+ * @returns 字符串数组（元素必须非空字符串；缺失时为空数组）
+ */
+function parseSessionAlwaysAllowToolCallIds(raw: unknown): string[] {
+  if (raw === undefined || raw === null) {
+    return [];
+  }
+  if (!Array.isArray(raw) || raw.some((item) => typeof item !== "string" || item === "")) {
+    throw new ApiError(400, "sessionAlwaysAllowToolCallIds 必须是非空字符串数组");
+  }
+  return raw as string[];
+}
+
+/**
  * 处理 POST /api/chats/:id/messages。
  *
  * 两种请求形态：
@@ -231,6 +248,7 @@ export async function handleSendMessage(
     const text = (parsed.fields["text"] ?? "").trim();
     let permissions: UserToolPermission[] = [];
     let alwaysAllows: PermissionScope[] = [];
+    let sessionAlwaysAllowToolCallIds: string[] = [];
     // 可选 payload 字段：JSON 携带 permissions/alwaysAllows（与 JSON 形态字段语义一致）
     const payloadRaw = parsed.fields["payload"];
     if (payloadRaw !== undefined && payloadRaw.trim() !== "") {
@@ -244,6 +262,7 @@ export async function handleSendMessage(
         const record = payload as Record<string, unknown>;
         permissions = parsePermissions(record["permissions"]);
         alwaysAllows = parseAlwaysAllows(record["alwaysAllows"]);
+        sessionAlwaysAllowToolCallIds = parseSessionAlwaysAllowToolCallIds(record["sessionAlwaysAllowToolCallIds"]);
       }
     }
 
@@ -272,6 +291,7 @@ export async function handleSendMessage(
       imageUrls,
       permissions,
       alwaysAllows,
+      sessionAlwaysAllowToolCallIds,
     };
   } else {
     // —— JSON 形态 ——
@@ -280,6 +300,7 @@ export async function handleSendMessage(
       imageUrls?: unknown;
       permissions?: unknown;
       alwaysAllows?: unknown;
+      sessionAlwaysAllowToolCallIds?: unknown;
     }>(req);
     // text 校验：可选字符串
     let text: string | undefined;
@@ -302,6 +323,7 @@ export async function handleSendMessage(
       imageUrls,
       permissions: parsePermissions(body.permissions),
       alwaysAllows: parseAlwaysAllows(body.alwaysAllows),
+      sessionAlwaysAllowToolCallIds: parseSessionAlwaysAllowToolCallIds(body.sessionAlwaysAllowToolCallIds),
     };
     // 空消息防御：无文本、无图片、无审批决策的请求无意义
     if (

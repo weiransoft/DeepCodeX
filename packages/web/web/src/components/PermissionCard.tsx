@@ -2,23 +2,27 @@
  * 内联权限审批卡片（R7，设计文档 §4）。
  *
  * 对应 SSE permission_request 事件中的单个请求：
- * 展示工具名 / 命令 / 描述 / 申请权限范围，提供 允许 / 拒绝 按钮；
- * 决策经 POST /api/chats/:id/messages {permissions: [...]} 回注引擎。
+ * 展示工具名 / 命令 / 描述 / 申请权限范围，提供 允许 / 本次会话总是允许 / 拒绝 按钮；
+ * 决策经 POST /api/chats/:id/messages {permissions: [...]} 回注引擎
+ * （「总是允许」额外携带 sessionAlwaysAllowToolCallIds，仅本会话生命周期生效）。
  * 决策提交后卡片保留在对话流中并展示决策结果（可追溯，不可重复提交）。
  */
-import { BanIcon, ShieldCheckIcon, WrenchIcon } from "./icons";
+import { BanIcon, ShieldCheckIcon, ShieldPlusIcon, WrenchIcon } from "./icons";
 import type { PermissionRequest } from "../sse";
+
+/** 审批决策（总是允许 = allow + 会话级 scope 登记） */
+export type PermissionDecisionChoice = "allow" | "always" | "deny";
 
 /** PermissionCard 组件属性 */
 export interface PermissionCardProps {
   /** 待审批请求 */
   request: PermissionRequest;
   /** 已做出的决策（有值时卡片进入只读展示态） */
-  decided?: "allow" | "deny";
+  decided?: PermissionDecisionChoice;
   /** 决策提交中（禁用按钮防重复提交） */
   submitting?: boolean;
   /** 决策回调（仅 undecided 状态下按钮可点） */
-  onDecide: (toolCallId: string, decision: "allow" | "deny") => void;
+  onDecide: (toolCallId: string, decision: PermissionDecisionChoice) => void;
 }
 
 /** PermissionCard：内联审批卡片 */
@@ -33,6 +37,8 @@ export function PermissionCard({ request, decided, submitting, onDecide }: Permi
           <span className="perm-badge perm-badge-pending">待审批</span>
         ) : decided === "allow" ? (
           <span className="perm-badge perm-badge-allow">已允许</span>
+        ) : decided === "always" ? (
+          <span className="perm-badge perm-badge-allow">本会话总是允许</span>
         ) : (
           <span className="perm-badge perm-badge-deny">已拒绝</span>
         )}
@@ -59,7 +65,7 @@ export function PermissionCard({ request, decided, submitting, onDecide }: Permi
         </div>
       )}
 
-      {/* 操作区：未决策时展示 允许/拒绝；已决策/提交中禁用 */}
+      {/* 操作区：未决策时展示 允许/总是允许/拒绝；已决策/提交中禁用 */}
       {decided === undefined && (
         <div className="perm-card-actions">
           <button
@@ -70,6 +76,15 @@ export function PermissionCard({ request, decided, submitting, onDecide }: Permi
           >
             <ShieldCheckIcon size={14} />
             允许
+          </button>
+          <button
+            type="button"
+            className="perm-btn perm-btn-always"
+            disabled={submitting === true}
+            onClick={() => onDecide(request.toolCallId, "always")}
+          >
+            <ShieldPlusIcon size={14} />
+            本次会话总是允许
           </button>
           <button
             type="button"

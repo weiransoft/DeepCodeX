@@ -19,7 +19,7 @@ import {
   setEngineToolEntryHint,
 } from "../chat-model";
 import { FolderOpenIcon, PaperclipIcon, StopIcon, WrenchIcon, BotAvatarIcon, UserAvatarIcon } from "./icons";
-import { PermissionCard } from "./PermissionCard";
+import { PermissionCard, type PermissionDecisionChoice } from "./PermissionCard";
 
 /** ChatPane 组件属性 */
 export interface ChatPaneProps {
@@ -30,7 +30,7 @@ export interface ChatPaneProps {
   /** 当前会话标题（未选会话时为 null → 欢迎页） */
   chatTitle: string | null;
   /** 决策回调（透传给 PermissionCard） */
-  onDecide: (toolCallId: string, decision: "allow" | "deny") => void;
+  onDecide: (toolCallId: string, decision: PermissionDecisionChoice) => void;
   /** 停止生成 */
   onStop: () => void;
   /** 打开文件抽屉 */

@@ -5,7 +5,7 @@
  * ResolvedWebSettings 由 src/config.ts 的 resolveWebSettings 产出。
  */
 
-import type { SessionStatus, WebLocalUserSettings } from "@vegamo/deepcode-core";
+import type { PermissionMode, SessionStatus, WebLocalUserSettings } from "@vegamo/deepcode-core";
 
 /**
  * Web 配置解析产物（全部默认值已归一、路径已展开）。
@@ -55,6 +55,14 @@ export type ResolvedWebSettings = {
    * next→排队）；关闭后一律串行排队（回退旧行为）。
    */
   steeringEnabled: boolean;
+  /**
+   * 命令审批模式（Web 审批三态 docs/dev/web-approval.md，默认 "auto"）：
+   * - "manual"：所有需审批 scope 一律弹审批卡片等待人工决策；
+   * - "auto"：非高危命令（整串只读 bash）自动放行，高危/黑名单命令仍弹审批卡片；
+   * - "bypass"：全部放行（bash-handler 灾难命令硬拦截仍生效，无法绕过）。
+   * 注入 SessionManager.permissionModeOverride，与 CLI --permission-mode 同通道。
+   */
+  approvalMode: PermissionMode;
   /** 认证配置（已归一） */
   auth: {
     /** JWT 签名密钥（启动 fail-fast 保证非空） */

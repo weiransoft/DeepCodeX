@@ -110,7 +110,8 @@ export type ChatEntry =
       kind: "permission";
       id: string;
       request: PermissionRequest;
-      decided?: "allow" | "deny";
+      /** 审批决策（always = 本次会话总是允许，仅前端展示态；回注仍为 allow） */
+      decided?: "allow" | "always" | "deny";
       /** 决策提交中（防重复点击） */
       submitting: boolean;
     };

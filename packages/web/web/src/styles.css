@@ -1065,6 +1065,14 @@ body {
 .perm-btn-allow:hover:not(:disabled) {
   filter: brightness(1.06);
 }
+/* 本次会话总是允许：描边强调按钮（介于允许/拒绝之间的中性强调态） */
+.perm-btn-always {
+  border-color: var(--app-accent);
+  color: var(--app-accent);
+}
+.perm-btn-always:hover:not(:disabled) {
+  background: var(--app-bg-hover);
+}
 .perm-btn-deny:hover:not(:disabled) {
   background: var(--app-bg-hover);
 }

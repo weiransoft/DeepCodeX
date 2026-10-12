@@ -221,6 +221,16 @@ export type WebSettings = {
    * 关闭后补充消息一律走既有串行排队语义（零回归回退开关）。
    */
   steeringEnabled?: boolean;
+  /**
+   * 命令审批模式（Web 审批三态，docs/dev/web-approval.md，默认 "auto"）：
+   * - "manual"：所有需审批的 scope 一律弹审批卡片等待人工决策；
+   * - "auto"：自动审批非高危命令——经 CommandSafety 风险评分，
+   *   high/critical（rm -rf /、dd of=/dev/sd、mkfs、fork bomb 等灾难性命令）
+   *   仍弹审批卡片等待人工确认，其余命令直通执行；
+   * - "bypass"：全部放行，审批卡片不触发；
+   *   灾难性命令硬拦截（bash-handler 黑名单）独立于本配置生效，无法绕过。
+   */
+  approvalMode?: PermissionMode;
   /** 认证配置 */
   auth?: WebAuthSettings;
   /** LDAP 配置 */
