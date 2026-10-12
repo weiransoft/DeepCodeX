@@ -117,6 +117,16 @@ export function handleStream(
     pendingTurns: activity.pendingTurns,
     turnActive: activity.turnActive,
   });
+  // 待审批重放（2026-10-12 修复"切页/刷新后审批卡片丢失"）：订阅时引擎仍停在
+  // ask_permission → 立刻补发 permission_request，前端重建审批卡片。
+  // permission_request 原本只在轮次收敛点推送一次，SSE 断连窗口内错过即永久丢失；
+  // 前端 onPermissionRequest 按 toolCallId 幂等去重，重复推送无副作用。
+  if (activity.status === "ask_permission" && activity.askPermissions && activity.askPermissions.length > 0) {
+    hub.publish(chatId, "permission_request", {
+      chatId,
+      requests: activity.askPermissions,
+    });
+  }
 }
 
 /**
