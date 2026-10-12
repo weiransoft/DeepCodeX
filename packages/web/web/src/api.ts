@@ -137,6 +137,12 @@ export interface SendTextPayload {
 /** 审批回注载荷（有权限请求时即"审批回注"消息，见设计文档 §3.5） */
 export interface SendPermissionsPayload {
   permissions: PermissionDecision[];
+  /**
+   * 声明「本次会话总是允许」的 toolCallId 列表（Web 审批三态 docs/dev/web-approval.md）：
+   * 对应决策必须同时是 allow；服务端把该待审批项的申请 scopes 登记进
+   * 会话级总是允许集合（仅本会话生命周期，不落盘任何配置）。
+   */
+  sessionAlwaysAllowToolCallIds?: string[];
 }
 
 /**

@@ -270,6 +270,16 @@ export function resolveWebSettings(
   // 默认 true——运行中补充消息经 LLM 意图分类决定注入/排队；
   // 显式配置 false 回退纯串行排队（分类器整体关闭的回退开关）。
   const steeringEnabled = merged.steeringEnabled ?? true;
+  if (typeof steeringEnabled !== "boolean") {
+    throw new Error("web.steeringEnabled 必须是布尔值");
+  }
+
+  // 命令审批模式（Web 审批三态 docs/dev/web-approval.md）：默认 auto——
+  // 非高危命令自动审批放行、高危命令仍弹卡片；非法值启动期 fail-fast
+  const approvalMode = merged.approvalMode ?? "auto";
+  if (approvalMode !== "manual" && approvalMode !== "auto" && approvalMode !== "bypass") {
+    throw new Error('web.approvalMode 必须是 "manual" | "auto" | "bypass"');
+  }
 
   // 7. JWT 密钥校验（启动 fail-fast：密钥缺失直接拒绝启动，防止无签名服务裸奔）
   if (typeof jwtSecret !== "string" || jwtSecret.trim() === "") {
@@ -312,6 +322,8 @@ export function resolveWebSettings(
     maxPreviewBytes,
     // 补充指令开关（6.2 归一产物，docs/dev/web-steering.md W7）
     steeringEnabled,
+    // 命令审批模式（6.3 归一产物，docs/dev/web-approval.md）
+    approvalMode,
     auth: {
       jwtSecret,
       sessionTtlSeconds,

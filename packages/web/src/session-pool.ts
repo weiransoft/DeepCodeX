@@ -125,6 +125,14 @@ export type SendMessageInput = {
   imageUrls?: string[];
   permissions?: UserToolPermission[];
   alwaysAllows?: PermissionScope[];
+  /**
+   * 审批决策同时声明「本次会话总是允许」的申请 scope 列表（按 toolCallId 归属，
+   * docs/dev/web-approval.md）。仅对 permissions 中 permission==="allow" 的
+   * 决策生效：Web 层查引擎待审批项对应 scopes 后登记会话级总是允许集合。
+   * 与 alwaysAllows（落盘项目级 permissions.allow 配置）不同——本字段只在
+   * 当前 Web 会话生命周期内生效，不写任何磁盘配置（个人区 R5 防线）。
+   */
+  sessionAlwaysAllowToolCallIds?: string[];
 };
 
 /** sendMessage 受理结果（202 异步受理：轮次结果经 SSE done 事件推送，本结果不含 status） */
@@ -610,6 +618,14 @@ export class SessionPool {
       // 配置直读：与 CLI 同源（resolveCurrentSettings 透传；
       // personalOnly 时同样忽略项目级 settings，与 SessionManager 内部解析一致）
       getResolvedSettings: () => resolveCurrentSettings(resolvedRoot, { ignoreProjectSettings }),
+      // Web 审批三态（settings.web.approvalMode，默认 auto）：
+      // - auto：非高危（整串只读）bash 命令自动放行，高危命令仍弹审批卡片
+      //   （core.applyAutoApprovalFilter 实现）；
+      // - manual：所有需审批 scope 一律人工确认；
+      // - bypass：全部放行（bash-handler 灾难命令硬拦截仍生效）。
+      // 注入为 permissionModeOverride，优先级高于 resolved settings 的
+      // permissions.mode（与 CLI --permission-mode 同一通道，语义一致）。
+      permissionModeOverride: this.settings.approvalMode,
       renderMarkdown: (text) => text,
       nonInteractive: true,
       // —— 事件桥接（chatId 闭包绑定）——
@@ -982,6 +998,59 @@ export class SessionPool {
    */
   sendMessage(chatId: string, input: SendMessageInput, ctx: AuthContext): SendMessageAcceptance {
     const chat = this.getOwnedChat(chatId, ctx);
+    // P5 高危命令审批回填分流（2026-10-04）：toolCallId 以 P5_APPROVAL_ID_PREFIX
+    // 开头的决策不走对话轮次队列（执行器挂起点在当前轮内部，排队的审批轮次会死锁），
+    // 直接同步回填 manager.resolveP5DangerousApproval；
+    // 剩余常规决策（若有）维持原入队语义。
+    // 【注意】本分流段必须先于 pendingTurns 计数与 user_message 广播执行且不入队即返回，
+    // 否则会出现"计数 +1 但永不收敛"或"广播幽灵用户消息"的状态泄漏。
+    const permissions = input.permissions ?? [];
+    const p5Decisions = permissions.filter((p) => p.toolCallId.startsWith(P5_APPROVAL_ID_PREFIX));
+    const regularPermissions = permissions.filter((p) => !p.toolCallId.startsWith(P5_APPROVAL_ID_PREFIX));
+    if (p5Decisions.length > 0) {
+      for (const decision of p5Decisions) {
+        // 命中挂起审批=true；已超时/重复回填=false（引擎 10 分钟兜底超时，可安全忽略）
+        chat.manager.resolveP5DangerousApproval(decision.toolCallId, decision.permission === "allow");
+      }
+      // 纯 P5 审批回填（无文本/图片/常规决策/新 alwaysAllow 配置）：
+      // 不产生对话轮次（不计数、不广播、不入队），执行器经 resolve 原地继续执行，
+      // 后续进展由当前轮的 llm_delta / done 帧自然推送
+      const isPureP5 =
+        regularPermissions.length === 0 &&
+        (input.text === undefined || input.text === "") &&
+        (input.imageUrls === undefined || input.imageUrls.length === 0) &&
+        (input.alwaysAllows === undefined || input.alwaysAllows.length === 0);
+      if (isPureP5) {
+        return { chatId: chat.chatId, sessionId: chat.sessionId, mode: "queued" };
+      }
+      // 混合请求：P5 决策已就地 resolve，剩余内容剥离 P5 项后照常入队
+      input = { ...input, permissions: regularPermissions };
+    }
+    // 会话级「总是允许」登记（2026-10-12，Web 审批卡片第三按钮回填通道）：
+    // 请求显式携带 sessionAlwaysAllowToolCallIds 且决策为 allow 时，把引擎
+    // 当前待审批项（ask_permission 状态条目）中对应 toolCallId 的申请 scopes
+    // 登记进 manager.addSessionAlwaysAllows——常规审批轮次 ask_permission 收敛
+    // 后，用户决策经本轮 permissions 回注引擎恢复执行（appendToolMessages
+    // 按决策放行/拒绝工具调用），恢复后的下一轮权限分流经
+    // applyAutoApprovalFilter 第一级判定对同 scope 直接放行，不再弹卡片。
+    // 仅显式声明才登记（普通"允许"是一次性决策，不带"总是"语义）。
+    const sessionAlwaysAllowIds = input.sessionAlwaysAllowToolCallIds ?? [];
+    if (sessionAlwaysAllowIds.length > 0) {
+      const pendingAsk = chat.manager.getSession(chat.sessionId ?? "")?.askPermissions;
+      if (Array.isArray(pendingAsk) && pendingAsk.length > 0) {
+        for (const decision of regularPermissions) {
+          if (decision.permission !== "allow" || !sessionAlwaysAllowIds.includes(decision.toolCallId)) {
+            continue;
+          }
+          const matched = pendingAsk.find((item) => item.toolCallId === decision.toolCallId);
+          if (matched && Array.isArray(matched.scopes) && matched.scopes.length > 0) {
+            chat.manager.addSessionAlwaysAllows(matched.scopes);
+          }
+        }
+      }
+      // 该字段只是登记通道，不随轮次回注引擎（剥离，避免污染 replySession 入参语义）
+      input = { ...input, sessionAlwaysAllowToolCallIds: undefined };
+    }
     // 受理计数：入队即 +1（runTurn 收敛时 -1，done 帧携带剩余值）
     chat.pendingTurns += 1;
     // W3：排队受理即广播 user_message 帧——多订阅者与 SSE 重连场景实时可见
@@ -991,31 +1060,6 @@ export class SessionPool {
       this.publishUserMessage(chatId, input.text);
     }
     // Promise 链串行化：同一 chatId 的轮次按调用顺序依次执行，不同 chatId 并行
-    // P5 高危命令审批回填分流（2026-10-04）：toolCallId 以 P5_APPROVAL_ID_PREFIX
-    // 开头的决策不走对话轮次队列（执行器挂起点在当前轮内部，排队的审批轮次会死锁），
-    // 直接同步回填 manager.resolveP5DangerousApproval；
-    // 剩余常规决策（若有）维持原入队语义。
-    const permissions = input.permissions ?? [];
-    const p5Decisions = permissions.filter((p) => p.toolCallId.startsWith(P5_APPROVAL_ID_PREFIX));
-    const regularPermissions = permissions.filter((p) => !p.toolCallId.startsWith(P5_APPROVAL_ID_PREFIX));
-    if (p5Decisions.length > 0) {
-      for (const decision of p5Decisions) {
-        // 命中挂起审批=true；已超时/重复回填=false（引擎 10 分钟兜底超时，可安全忽略）
-        chat.manager.resolveP5DangerousApproval(decision.toolCallId, decision.permission === "allow");
-      }
-      // 纯审批回填请求：不产生对话轮次（不广播、不入队、无 done 帧），
-      // 审批卡片的前端状态由卡片自身乐观更新维护，执行器继续执行的进展经 llm_delta 推送
-      if (
-        regularPermissions.length === 0 &&
-        (input.text === undefined || input.text === "") &&
-        (input.imageUrls === undefined || input.imageUrls.length === 0) &&
-        (input.alwaysAllows === undefined || input.alwaysAllows.length === 0)
-      ) {
-        return { chatId: chat.chatId, sessionId: chat.sessionId, mode: "queued" };
-      }
-      // 混合请求：剩余常规决策继续走常规通道
-      input = { ...input, permissions: regularPermissions };
-    }
     const run = chat.busy.then(() => this.runTurn(chat, input));
     // 链尾吞错：错误已在 runTurn 内经 SSE done 收敛，这里仅防止污染后续轮次入队
     chat.busy = run.then(
@@ -1377,6 +1421,28 @@ export class SessionPool {
       : chat.sessionId
         ? (chat.manager.getSession(chat.sessionId)?.status ?? null)
         : null;
+    // 活性自愈（2026-10-12 修复"切页后任务看似中断，需输入继续才恢复"）：
+    // chat.turnActive 是 runTurn finally 里复位的服务端标志——正常路径不会滞留；
+    // 但极端场景（引擎内部异常逃逸、历史版本遗留状态）可能让标志与实际执行脱钩，
+    // 表现为 turnActive=true 而引擎运行时与磁盘条目都已终态，前端据此渲染
+    // "生成中"并等待永不到来的续跑事件，用户只能输入"继续"手动推进。
+    // 自愈判据：池标志声称活跃，但引擎运行时已无该会话（getActiveRuntimeSessionId
+    // 为 null）**且**磁盘条目状态为终态（completed/failed/interrupted）→
+    // 判定标志失真，清零 pendingTurns 并补发 done 帧让前端订阅方收敛。
+    const terminalStatus = status === "completed" || status === "failed" || status === "interrupted";
+    if (chat.turnActive && !runtimeActive && terminalStatus) {
+      chat.turnActive = false;
+      chat.pendingTurns = 0;
+      this.hub.publish(chatId, "done", {
+        chatId,
+        sessionId: chat.sessionId,
+        status: status as SessionStatus,
+        pendingTurns: 0,
+      });
+      console.warn(
+        `[session-pool] 活性自愈：chatId=${chatId} turnActive 失真（引擎已终态 ${status}），已清零并补发 done 帧`
+      );
+    }
     // turnActive：池轮次标志（runTurn 入口/finally 同步读写）——比运行时
     // 窗口更宽（覆盖 handleUserPrompt 中 activateSession 前后的准备段），
     // 运行中事实取两者并集（链上排队轮尚未启动时二者皆 false）

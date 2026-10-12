@@ -287,6 +287,22 @@ export function ShieldCheckIcon(p: IconProps) {
   );
 }
 
+/** 权限盾牌加号（本次会话总是允许） */
+export function ShieldPlusIcon(p: IconProps) {
+  return (
+    <IconBase {...p} label="总是允许">
+      <path
+        d="M8 1.8 13 3.6v4c0 3.2-2.1 5.6-5 6.6-2.9-1-5-3.4-5-6.6v-4L8 1.8Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+      <path d="M8 5.6v4.4M5.8 7.8h4.4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </IconBase>
+  );
+}
+
 /** 禁止（拒绝） */
 export function BanIcon(p: IconProps) {
   return (

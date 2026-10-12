@@ -129,7 +129,9 @@ import {
   normalizeAskPermissions,
   parseToolCallForPermissions,
   type AskPermissionRequest,
+  type AskPermissionScope,
   type MessageToolPermission,
+  type PermissionPlan,
   type PermissionToolCall,
   type UserToolPermission,
 } from "./common/permissions";
@@ -138,6 +140,10 @@ import { reportNewPrompt } from "./common/telemetry";
 import { OpenAIMessageConverter } from "./common/openai-message-converter";
 // V2 Session 上下文钩子：可选注入，未注入时 OpenAIMessageConverter 行为与 v1 一致
 import type { SessionContextHook } from "./v2/integration/session-hook";
+// Web 审批三态（docs/dev/web-approval.md）：auto 模式下用 CommandSafety 对
+// 待审批 bash 命令做风险分级——黑名单/破坏性命令仍要求人工确认，
+// 良性命令（git status、npm test、ls 等）自动放行，减少审批打断。
+import { CommandSafety } from "./v2/approval/command-safety";
 // === EAG 模块导入（@experimental）===
 // 以下 EAG 相关导入均为可选注入能力，未注入时主流程零回归。
 // 详细设计决策见 docs/dev/ADR-EAG-001-experimental-status.md。
@@ -985,6 +991,135 @@ export type SessionManagerOptions = {
 };
 
 /**
+ * 自动审批分流（Web 审批三态 docs/dev/web-approval.md，mode="auto" 专用）。
+ *
+ * 输入 computeToolCallPermissions 产出的待审批列表，输出「自动放行」与
+ * 「仍需人工」两个子集。判据全部基于只读命令特征，绝不做写入/删除类自动放行：
+ * 1. 仅 bash 工具参与自动放行（read/write/edit/mcp 等保持人工审批，防止
+ *    仓库外文件访问与写入被静默绕过）；
+ * 2. 命令命中 CommandSafety 黑名单（rm -rf /、dd of=/dev/sd、mkfs、
+ *    fork bomb 等）→ 必须人工；
+ * 3. 风险评分 level === "destructive"（评分 > 90）→ 必须人工；
+ * 4. 命令必须完全由「只读无害前缀」命令段组成（git status / ls / cat /
+ *    npm test 等），任一命令段不在白名单内 → 必须人工。
+ *
+ * 只读前缀白名单刻意保守：只收录无副作用或副作用严格限于仓库内构建/测试
+ * 产物的常用命令；curl/wget/chmod/git push/git reset 等一律不在列。
+ */
+const AUTO_APPROVE_READONLY_PREFIXES: readonly string[] = Object.freeze([
+  // —— 版本控制只读 ——
+  "git status",
+  "git log",
+  "git diff",
+  "git show",
+  "git branch",
+  "git blame",
+  "git remote -v",
+  "git ls-files",
+  "git rev-parse",
+  "git describe",
+  "git config --get",
+  "git stash list",
+  "git tag --list",
+  // —— 文件/目录只读 ——
+  "ls",
+  "cat",
+  "head",
+  "tail",
+  "wc",
+  "file",
+  "stat",
+  "du",
+  "df",
+  "find",
+  "tree",
+  "which",
+  "pwd",
+  "echo",
+  "grep",
+  "rg",
+  // —— 运行时版本查询 ——
+  "node -v",
+  "node --version",
+  "npm -v",
+  "npm --version",
+  "npm list",
+  "npm ls",
+  "python --version",
+  "python3 --version",
+  "pip list",
+  "pip show",
+  "pip3 list",
+  "pip3 show",
+  "go version",
+  "java -version",
+  "rustc --version",
+  "cargo --version",
+  "docker ps",
+  "docker images",
+  // —— 仓库内测试 / 构建（副作用限于工作区产物）——
+  "npm test",
+  "npm run test",
+  "npx jest",
+  "npx vitest",
+  "npx tsc",
+  "pytest",
+  "cargo test",
+  "go test",
+  "make test",
+]);
+
+/**
+ * 判断单个 shell 命令段是否属于只读无害白名单。
+ *
+ * 匹配规则：命令段以白名单项整体开头，且后续字符为空白或参数分隔
+ * （词边界匹配，防 "catfish" 误匹配 "cat"）。
+ *
+ * 安全闸门：命令段含任何 shell 重定向运算符（> 或 <，含 >> 追加、2> 错误流、
+ * >| 强制覆盖）即判非只读——"echo hi > secrets.txt" 这类命令虽以白名单
+ * 前缀（echo）开头，但实际产生写副作用，绝不可自动放行。管道符（|）不参与
+ * 本检查，因其分割逻辑已由 isFullyReadonlyBashCommand 拆段处理，管道各段
+ * 独立判定只读性（如 `git log | head` 合法）。
+ *
+ * @param segment 已按 && ; | 拆分的单个命令段（trim 后）
+ * @returns 命中白名单且无重定向副作用返回 true
+ */
+function isReadonlyAutoApprovableSegment(segment: string): boolean {
+  if (segment.length === 0) {
+    return false;
+  }
+  // 重定向闸门：> < 均为写/读外部资源运算符，命中即非只读
+  if (/[><]/.test(segment)) {
+    return false;
+  }
+  return AUTO_APPROVE_READONLY_PREFIXES.some((prefix) => {
+    if (!segment.startsWith(prefix)) {
+      return false;
+    }
+    const rest = segment.slice(prefix.length);
+    return rest.length === 0 || /^[\s/&|;]/.test(rest);
+  });
+}
+
+/**
+ * 判断整条 bash 命令是否「整串只读」：按 && 、; 、| 换行拆段后，
+ * 每个命令段都必须命中只读白名单（含管道尾部，如 `git log | head`）。
+ *
+ * @param command bash 命令原文
+ * @returns 全部命令段均只读返回 true
+ */
+function isFullyReadonlyBashCommand(command: string): boolean {
+  const segments = command
+    .split(/&&|;|\|\||\||\n/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (segments.length === 0) {
+    return false;
+  }
+  return segments.every((segment) => isReadonlyAutoApprovableSegment(segment));
+}
+
+/**
  * EAG-P5：bash 高危命令审批 ID 前缀（单一事实源，2026-10-04）。
  *
  * requestP5DangerousApproval 生成的 approvalId 以此前缀开头；
@@ -1268,6 +1403,11 @@ export class SessionManager {
   private readonly nonInteractive: boolean;
   // 三态权限模式覆盖（CLI --permission-mode 注入；未注入时读 resolved settings 的 permissions.mode）
   private readonly permissionModeOverride: PermissionMode | undefined;
+  /**
+   * Web 审批 auto 模式的风险评估器（懒加载单例，见 applyAutoApprovalFilter）。
+   * CommandSafety 构造时编译黑名单正则，跨轮次复用避免重复编译开销。
+   */
+  private commandSafety: CommandSafety | undefined;
   private activeSessionId: string | null = null;
   private activePromptController: AbortController | null = null;
   // SkillManager 实例（技能扫描/解析/去重/归一化，见 docs/dev/review.md CRITICAL-1 模块 3）
@@ -1276,6 +1416,14 @@ export class SessionManager {
   // 抽取模式见 file-history-coordinator.ts 模块头注释，供后续域拆分复用）
   private readonly fileHistoryCoordinator: FileHistoryCoordinator;
   private readonly sessionControllers = new Map<string, AbortController>();
+  /**
+   * 当前激活轮次（activateSession）注册的 controller 引用。
+   * isInterrupted 的中断判定兜底：controller 被从 map 移除后（interruptSession
+   * 先删后 abort 的历史行为、以及任何非用户中断的清理路径），仍以本轮
+   * controller 的 abort 信号为唯一中断事实源，杜绝"条目消失 = 中断"误判。
+   * activateSession 入口登记、finally 与 map 注销配对清除。
+   */
+  private currentTurnController: AbortController | null = null;
   /**
    * steering 活性判定的内存事实源：当前正在执行 activateSession 主循环的
    * 会话 id（Web 层单会话单 manager，同一时刻至多一个活跃轮次）。
@@ -3777,6 +3925,77 @@ ${agentInstructions}
    */
   private markAwaitingUserToolAnswer(sessionId: string): void {
     this.sessionsAwaitingUserToolAnswer.add(sessionId);
+  }
+
+  /**
+   * 会话级「总是允许」scope 集合（Web 审批卡片"本次会话总是允许"按钮回填）。
+   *
+   * 与 appendProjectPermissionAllows（落盘项目级配置、跨重启持久）不同，
+   * 本集合仅存活于当前 SessionManager 生命周期（Web 个人区不得写项目级
+   * 权限配置——docs/dev/web-workspace.md R5 防线），会话恢复/服务重启即清空。
+   * applyAutoApprovalFilter 在人工审批分流前消费：命中 scope 的工具调用
+   * 直接改判 allow，不再弹审批卡片。
+   */
+  private readonly sessionAlwaysAllowScopes = new Set<AskPermissionScope>();
+
+  /**
+   * 登记会话级「总是允许」scope（Web 审批卡片第三个按钮回填通道）。
+   *
+   * @param scopes 用户选择永久放行的权限范围（来自审批卡片的 scopes 明细）
+   */
+  addSessionAlwaysAllows(scopes: readonly AskPermissionScope[]): void {
+    for (const scope of scopes) {
+      this.sessionAlwaysAllowScopes.add(scope);
+    }
+  }
+
+  /**
+   * Web 审批三态（docs/dev/web-approval.md）：auto 模式下的「非高危自动放行」分流。
+   *
+   * 就地修改 permissionPlan：命中自动放行的条目从 askPermissions 移除，
+   * 并把对应 permissions 决策从 ask 改判 allow（下游 buildPermissionToolExecution
+   * 按 permissions 执行，ask 改 allow 即直通执行）。
+   *
+   * 两级放行判据（顺序执行，命中即放行）：
+   * 1. 会话级「总是允许」（sessionAlwaysAllowScopes，审批卡片第三按钮回填）：
+   *    请求的全部 scope 都已被用户声明永久放行 → allow，任何审批模式生效；
+   * 2. auto 模式非高危只读直通：仅 bash + 整串只读 + 未命中 CommandSafety
+   *    黑名单 + 风险评分非 destructive 才自动放行；其余（write/edit/mcp、
+   *    安装、网络、删除类）保持人工审批。
+   *
+   * @param permissionPlan computeToolCallPermissions 产物（就地修改）
+   * @param allowReadonlyPassthrough 是否启用 auto 模式非高危只读直通
+   *                                 （mode==="auto" 且非 planMode 时为 true）
+   */
+  private applyAutoApprovalFilter(permissionPlan: PermissionPlan, allowReadonlyPassthrough: boolean): void {
+    // CommandSafety 懒加载单例（构造时编译黑名单正则，跨轮次复用避免重复编译）
+    this.commandSafety ??= new CommandSafety();
+    const safety = this.commandSafety;
+    const remainingAsk: AskPermissionRequest[] = [];
+    for (const request of permissionPlan.askPermissions) {
+      // 第一级：会话级「总是允许」——请求的全部申请 scope 均被用户
+      // 声明永久放行（scopes 为空说明无实际受限范围，保守不放行）
+      const sessionAlwaysAllowed =
+        request.scopes.length > 0 && request.scopes.every((scope) => this.sessionAlwaysAllowScopes.has(scope));
+      // 第二级：auto 模式非高危只读直通（仅 allowReadonlyPassthrough=true 时评估）
+      const nonDangerous =
+        allowReadonlyPassthrough &&
+        request.name === "bash" &&
+        !safety.isBlacklisted(request.command) &&
+        safety.assessRisk(request.command).level !== "destructive" &&
+        isFullyReadonlyBashCommand(request.command);
+      if (sessionAlwaysAllowed || nonDangerous) {
+        // 改判：permissions 中对应条目 ask → allow（执行链路以 permissions 为准）
+        const entry = permissionPlan.permissions.find((item) => item.toolCallId === request.toolCallId);
+        if (entry) {
+          entry.permission = "allow";
+        }
+        continue;
+      }
+      remainingAsk.push(request);
+    }
+    permissionPlan.askPermissions.length = 0;
+    permissionPlan.askPermissions.push(...remainingAsk);
   }
 
   /**
@@ -6856,6 +7075,9 @@ ${agentInstructions}
     }));
 
     this.sessionControllers.set(sessionId, sessionController);
+    // 登记本轮 controller：isInterrupted 在条目被移除后仍按 abort 信号判定，
+    // 防"条目消失 = 中断"误判（见 currentTurnController 声明注释）
+    this.currentTurnController = sessionController;
     // steering 活性判定的内存事实源：主循环执行期间登记活跃会话 id，
     // finally 注销（activateSession 的所有 return 出口都在 try 内，注销完备）
     this.activeRuntimeSessionId = sessionId;
@@ -7211,6 +7433,18 @@ ${agentInstructions}
               resolveSnippetPath: (id, snippetId) => getSnippet(id, snippetId)?.filePath,
             })
           : null;
+        // 审批分流（docs/dev/web-approval.md）：只要存在待审批项就执行两级
+        // 自动放行判定——
+        // 1. 会话级「总是允许」scope：任何审批模式（manual/auto/bypass 之外的
+        //    场景）均生效，用户已声明永久放行的 scope 不再弹卡片；
+        // 2. auto 模式非高危只读 bash：mode==="auto" 且非 planMode 时直通执行。
+        // planMode 强制询问（forceAskScopes）不参与只读直通，保持规划模式语义；
+        // bypass 模式在上游 computeToolCallPermissions 已全量 allow，不进入本分流。
+        if (permissionPlan && permissionPlan.askPermissions.length > 0) {
+          const allowReadonlyPassthrough =
+            effectivePermissionSettings?.mode === "auto" && !this.getSession(sessionId)?.planMode;
+          this.applyAutoApprovalFilter(permissionPlan, allowReadonlyPassthrough);
+        }
         if (permissionPlan) {
           assistantMessage.meta = {
             ...(assistantMessage.meta ?? {}),
@@ -7326,6 +7560,10 @@ ${agentInstructions}
     } finally {
       if (this.sessionControllers.get(sessionId) === sessionController) {
         this.sessionControllers.delete(sessionId);
+      }
+      // 本轮 controller 注销（仅注销自己登记的轮次，防并发激活交错误清）
+      if (this.currentTurnController === sessionController) {
+        this.currentTurnController = null;
       }
       // steering 活性事实注销：与入口登记配对（仅注销自己登记的会话，
       // 防御同 manager 并发激活交错时误清他人登记）
@@ -8128,6 +8366,8 @@ ${agentInstructions}
 
     const controller = this.sessionControllers.get(sessionId);
     if (controller) {
+      // 先 abort 再从 map 删除：abort 是中断的唯一事实源（isInterrupted
+      // 以 signal.aborted 判定）。顺序颠倒会让"条目消失"短暂先于 abort 可见。
       controller.abort();
       this.sessionControllers.delete(sessionId);
     }
@@ -8153,7 +8393,21 @@ ${agentInstructions}
   }
 
   private isInterrupted(sessionId: string): boolean {
-    return !this.sessionControllers.has(sessionId);
+    // 中断判定的事实源必须是「本轮注册的 controller 是否已被 abort」，
+    // 而不是「map 中是否还有该 sessionId 的条目」。
+    //
+    // 回归修复（Web 页面切换后任务停摆、必须输入"继续"才恢复）：
+    // interruptSession 为让后续 isInterrupted 立即生效，会先把 controller
+    // 从 map 中删除再 abort。这使 isInterrupted 退化成"查存在性"，
+    // 任何非用户主动的删除路径（工具执行链路中的清理、并发会话交错、
+    // 历史恢复路径）一旦移除条目，主循环下一次检查即误判为"已中断"，
+    // 静默 return 且不落任何终态——表现为任务中途停摆、状态仍停留在
+    // processing，只能靠用户再发一轮（如"继续"）重新驱动。
+    // 现以 map 现值优先、本轮 controller 的 abort 信号兜底，
+    // 语义与显式中断（abort 必然先于删除发生或同步执行）完全等价，
+    // 且不再把"条目消失"当成中断信号。CLI 路径零回归。
+    const controller = this.sessionControllers.get(sessionId) ?? this.currentTurnController;
+    return controller?.signal.aborted === true;
   }
 
   /**
