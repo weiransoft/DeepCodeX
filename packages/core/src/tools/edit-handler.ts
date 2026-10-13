@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import { z } from "zod";
+import type { ChatCompletionCreateParamsNonStreaming } from "openai/resources/chat/completions";
 import { buildThinkingRequestOptions } from "../common/openai-thinking";
 import type { ToolExecutionContext, ToolExecutionResult } from "./executor";
 import {
@@ -662,6 +663,7 @@ async function inferOldStringNotFoundReasonWithLLM(
 
   try {
     context.signal?.throwIfAborted();
+    // DeepSeek supports "max", which is absent from the OpenAI SDK types.
     const response = await client.chat.completions.create(
       {
         model,
@@ -692,7 +694,7 @@ async function inferOldStringNotFoundReasonWithLLM(
           },
         ],
         ...buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort),
-      },
+      } as ChatCompletionCreateParamsNonStreaming,
       { signal: context.signal }
     );
     context.signal?.throwIfAborted();
@@ -748,6 +750,7 @@ async function correctEscapedStringsWithLLM(
   try {
     const problemDescription = describeCorrectionProblems(oldString, matchedText);
     context.signal?.throwIfAborted();
+    // DeepSeek supports "max", which is absent from the OpenAI SDK types.
     const response = await client.chat.completions.create(
       {
         model,
@@ -777,7 +780,7 @@ async function correctEscapedStringsWithLLM(
           },
         ],
         ...buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort),
-      },
+      } as ChatCompletionCreateParamsNonStreaming,
       { signal: context.signal }
     );
     context.signal?.throwIfAborted();
