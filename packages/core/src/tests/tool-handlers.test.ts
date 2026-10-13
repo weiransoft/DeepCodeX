@@ -631,6 +631,7 @@ test("Edit appends an LLM diagnosis when old_string is not found", async () => {
   assert.ok(snippet);
 
   let llmCalls = 0;
+  let llmRequest: Record<string, unknown> | undefined;
   let prompt = "";
   const editResult = await handleEditTool(
     {
@@ -645,6 +646,7 @@ test("Edit appends an LLM diagnosis when old_string is not found", async () => {
             completions: {
               create: async (request: { messages?: Array<{ content?: string }> }) => {
                 llmCalls += 1;
+                llmRequest = request;
                 prompt = String(request.messages?.[1]?.content ?? "");
                 return {
                   choices: [
@@ -661,13 +663,17 @@ test("Edit appends an LLM diagnosis when old_string is not found", async () => {
           },
         } as any,
         model: "test-model",
-        thinkingEnabled: false,
+        thinkingEnabled: true,
+        reasoningEffort: "max",
       }),
     })
   );
 
   assert.equal(editResult.ok, false);
   assert.equal(llmCalls, 1);
+  assert.deepEqual(llmRequest?.thinking, { type: "enabled" });
+  assert.equal(llmRequest?.reasoning_effort, "max");
+  assert.equal("extra_body" in llmRequest!, false);
   assert.equal(
     editResult.error,
     "old_string not found in file. The requested function name is computeTotal, but the snippet contains computeSubtotal."
@@ -972,6 +978,7 @@ test("Edit uses LLM correction when straight and curly quotation marks differ", 
   const sessionId = "quotation-mark-correction";
   const snippet = await readSnippet(filePath, sessionId, workspace);
   let llmCalls = 0;
+  let llmRequest: Record<string, unknown> | undefined;
   const editResult = await handleEditTool(
     {
       snippet_id: snippet.id,
@@ -989,6 +996,7 @@ test("Edit uses LLM correction when straight and curly quotation marks differ", 
             completions: {
               create: async (request: { messages?: Array<{ content?: string }> }) => {
                 llmCalls += 1;
+                llmRequest = request;
                 assert.match(String(request.messages?.[0]?.content ?? ""), /the only problem is quotation mark/);
                 return {
                   choices: [
@@ -1013,13 +1021,17 @@ test("Edit uses LLM correction when straight and curly quotation marks differ", 
           },
         } as any,
         model: "test-model",
-        thinkingEnabled: false,
+        thinkingEnabled: true,
+        reasoningEffort: "max",
       }),
     })
   );
 
   assert.equal(editResult.ok, true);
   assert.equal(llmCalls, 1);
+  assert.deepEqual(llmRequest?.thinking, { type: "enabled" });
+  assert.equal(llmRequest?.reasoning_effort, "max");
+  assert.equal("extra_body" in llmRequest!, false);
   assert.equal(editResult.metadata?.matched_via, "llm_escape_correction");
   assert.equal(
     fs.readFileSync(filePath, "utf8"),

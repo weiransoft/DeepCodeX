@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import OpenAI from "openai";
 import { buildThinkingRequestOptions } from "../common/openai-thinking";
 
 test("buildThinkingRequestOptions explicitly disables thinking", () => {
@@ -40,4 +41,37 @@ test("buildThinkingRequestOptions accepts low reasoning effort", () => {
     thinking: { type: "enabled" },
     reasoning_effort: "low",
   });
+});
+
+test("OpenAI SDK sends thinking options at the top level", async () => {
+  let body: Record<string, unknown> = {};
+  const client = new OpenAI({
+    apiKey: "test-key",
+    maxRetries: 0,
+    fetch: async (_url, init) => {
+      body = JSON.parse(String(init?.body));
+      return new Response('{"choices":[]}', { headers: { "content-type": "application/json" } });
+    },
+  });
+
+  for (const [enabled, effort] of [
+    [true, "low"],
+    [true, "high"],
+    [true, "max"],
+    [true, undefined],
+    [false, "max"],
+  ] as const) {
+    await client.chat.completions.create({
+      model: "deepseek-flash",
+      messages: [{ role: "user", content: "hello" }],
+      ...buildThinkingRequestOptions(enabled, undefined, effort),
+    } as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming);
+
+    assert.deepEqual(body, {
+      model: "deepseek-flash",
+      messages: [{ role: "user", content: "hello" }],
+      thinking: { type: enabled ? "enabled" : "disabled" },
+      ...(enabled ? { reasoning_effort: effort ?? "max" } : {}),
+    });
+  }
 });
