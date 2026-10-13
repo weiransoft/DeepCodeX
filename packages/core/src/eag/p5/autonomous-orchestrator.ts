@@ -929,21 +929,59 @@ export class AutonomousOrchestrator {
           // "阶段机械瞬败"空循环尾巴。现在每个阶段开始前检查：剩余预算低于
           // 单次最小可行请求阈值时不再进入阶段，直接 aborted 收尾（abortReason
           // 含"预算不足"，与 5b-3 执行后增量检查、5b.7 迭代间检查构成三级防线）。
-          const remainingBeforeStage = Math.max(0, maxTokens - totalTokensUsed);
-          if (remainingBeforeStage < MIN_VIABLE_STAGE_TOKENS) {
+          // 2026-10-12 修复"预算耗尽没有切换新上下文"：原口径用名义预算判限——
+          // 运行级软续期（5b-3 后置检查）授予的续期额度对本检查不可见，名义预算
+          // 用尽但软续期未触发的阶段间隙（如单阶段恰好烧穿名义预算、增量检查
+          // 后置尚未续期）会被直接 abort，运行级的"耗尽→软续期切换新额度"
+          // 通道被架空。改为：剩余不足时先兑现一次软续期（若尚未续期），
+          // 续期后再判定；续期已用仍不足才 aborted（防失控硬上界不变）。
+          const remainingBeforeStage = Math.max(0, tokenHardCeiling - totalTokensUsed);
+          if (remainingBeforeStage < MIN_VIABLE_STAGE_TOKENS && !tokenBudgetRenewed) {
+            // 前置软续期（与 5b-3 后置检查同一判定、同一来源）：名义额度
+            // 不足而硬上限仍有空间时，先切换续期额度再进入阶段——检查本身
+            // 不消耗 token，先兑现再判限才能真正"用完名义预算、续期额度继续干"。
+            tokenBudgetRenewed = true;
+            this.log(
+              `AutonomousOrchestrator.run 迭代 ${iterIndex} 阶段 ${stage} 开始前名义预算剩余额不足` +
+                `（名义剩余 ${Math.max(0, maxTokens - totalTokensUsed)} < 最小可行 ${MIN_VIABLE_STAGE_TOKENS}）` +
+                `，自动软续期一次：硬上限调整为 ${tokenHardCeiling}` +
+                `（名义 ×(1+${RUN_TOKEN_SOFT_RENEWAL_RATIO})，见 RUN_TOKEN_SOFT_RENEWAL_RATIO）`,
+              "warn"
+            );
+          }
+          if (Math.max(0, tokenHardCeiling - totalTokensUsed) < MIN_VIABLE_STAGE_TOKENS) {
             status = "aborted";
             finalStatus = "aborted";
+            const remainingAtAbort = Math.max(0, tokenHardCeiling - totalTokensUsed);
+            // 原因口径区分"耗尽"与"不足"（T-A1 契约）：累计已越过名义预算时，
+            // 真实事实是"名义预算耗尽 + 软续期额度也撑不起下一个最小可行阶段"，
+            // 摘要必须透出"Token 预算耗尽"而非仅"不足"，否则阻塞报告掩盖
+            // 预算已烧穿的事实，误导排查方向。
             abortReason =
-              `Token 预算不足：阶段 ${stage} 开始前剩余 ${remainingBeforeStage} token，` +
-              `低于单阶段最小可行阈值 ${MIN_VIABLE_STAGE_TOKENS}，不再进入阶段`;
+              totalTokensUsed >= tokenSoftRenewalLine
+                ? `Token 预算耗尽：累计 ${totalTokensUsed}（名义 ${maxTokens}` +
+                  `${tokenBudgetRenewed ? "，已软续期至硬上限" : ""}），` +
+                  `阶段 ${stage} 开始前硬上限剩余 ${remainingAtAbort} token` +
+                  `低于单阶段最小可行阈值 ${MIN_VIABLE_STAGE_TOKENS}，不再进入阶段`
+                : `Token 预算不足：阶段 ${stage} 开始前剩余 ${remainingAtAbort} token（硬上限口径）` +
+                  `低于单阶段最小可行阈值 ${MIN_VIABLE_STAGE_TOKENS}，不再进入阶段`;
             // 与 5b-3 熔断路径同构的诚实收尾五件套：预算不足即本轮失败，
             // 5c 据此走 consecutiveFailures 累加；lastFatalStage 登记真实
             // 阻塞阶段（避免 blockageReport 兜底误报为 plan）。
             iterationFailed = true;
-            lastFatalStage = stage;
+            // "保留最早登记"（T-A1 回归点，run f2358227def5 排查）：真实事故
+            // 是 dev 执行器失败烧穿预算、熔断在 verify 前置检查命中——此时
+            // 5b-6 已把 dev 登记进 lastFatalStage，本处不得用当前（尚未进入
+            // 的）阶段覆盖，否则阻塞报告把熔断误报成 verify。仅在尚无登记
+            // 时登记本阶段（与 5b-3 后置熔断检查同口径）。
+            if (lastFatalStage === null) {
+              lastFatalStage = stage;
+            }
             this.log(
               `AutonomousOrchestrator.run 迭代 ${iterIndex} 阶段 ${stage} 开始前 Token 预算不足` +
-                `（剩余 ${remainingBeforeStage} < 最小可行 ${MIN_VIABLE_STAGE_TOKENS}），中止迭代，status=aborted`,
+                `（硬上限剩余 ${remainingAtAbort} < 最小可行 ${MIN_VIABLE_STAGE_TOKENS}，` +
+                `${tokenBudgetRenewed ? "已软续期至硬上限" : `未触发软续期（累计 ${totalTokensUsed} < 名义 ${maxTokens}）`}）` +
+                `，中止迭代，status=aborted`,
               "error"
             );
             break;
@@ -1038,6 +1076,15 @@ export class AutonomousOrchestrator {
           //       （允许 fix 阶段尝试修复 verify 的失败）
           if (result.kind === "failed" || result.kind === "retriable") {
             iterationFailed = true;
+            // 登记真实失败阶段（2026-10-12 修复，run f2358227def5 排查）：
+            // failed 与 fatal 同构记录 lastFatalStage（保留最早登记，fatal 更
+            // 接近根因），否则后续 Token 熔断等收尾检查只能把当前阶段兜底登记
+            // ——dev 失败烧穿预算、熔断在 verify 前置检查命中时，阻塞报告会被
+            // 误报成 verify（T-A1 回归点：blockedStage 必须是真实失败阶段）。
+            if (lastFatalStage === null) {
+              lastFatalStage = stage;
+              lastFatalReason = result.error ?? result.summary;
+            }
             this.log(
               `AutonomousOrchestrator.run 迭代 ${iterIndex} 阶段 ${stage} ${result.kind}：${result.summary}`,
               "warn"
@@ -1076,6 +1123,13 @@ export class AutonomousOrchestrator {
             abortReason =
               `Token 预算耗尽：${totalTokensUsed} >= ${tokenHardCeiling}` +
               `（名义 ${maxTokens}${tokenBudgetRenewed ? "，已软续期至硬上限" : ""}，阶段 ${stage} 执行后增量检查）`;
+            // 登记真实熔断阶段：本检查置于 5b-6 之后，若前面阶段已 fatal 登记过
+            // lastFatalStage，保留最早登记（fatal 更接近"为什么走到这一步"的根因）；
+            // 否则（如 dev 执行器失败烧穿预算）登记当前阶段，避免 blockedStage
+            // 兜底误报为 plan（T-A1 回归点）。
+            if (lastFatalStage === null) {
+              lastFatalStage = stage;
+            }
             this.log(
               `AutonomousOrchestrator.run 迭代 ${iterIndex} 阶段 ${stage} 执行后 Token 预算耗尽` +
                 `（累计 ${totalTokensUsed} >= 硬上限 ${tokenHardCeiling}），中止本迭代剩余阶段，status=aborted`,
@@ -3418,9 +3472,18 @@ export class AutonomousOrchestrator {
     // 优先输出真实终止原因（Token 预算耗尽/空转熔断等），不再恒按
     // "连续失败 N 次触发 abort"——Token 熔断时连续失败可能只有 1 次，
     // 旧文案把真实原因掩盖成失败重试问题，直接误导根因排查。
+    // 2026-10-13 补充（T-A1 回归点）：收尾的熔断检查（前置预算不足/后置
+    // 增量耗尽）只是"在哪一步发现预算没了"，真实根因往往是更早阶段的
+    // 致命失败（典型：dev 执行器失败烧穿预算 → 熔断在下一阶段前置检查）。
+    // 熔断类终止原因（含"Token 预算"）且存在更早的阶段致命原因时，
+    // 摘要用"根因 → 熔断点"双段口径，"Token 预算耗尽/不足"事实仍保留。
+    let terminationReason = args.abortReason;
+    if (terminationReason.includes("Token 预算") && args.lastFatalStage !== null && args.lastFatalReason.length > 0) {
+      terminationReason = `${terminationReason}（根因：${args.lastFatalStage} 阶段失败 ${args.lastFatalReason}）`;
+    }
     const summary =
-      args.abortReason.length > 0
-        ? args.abortReason
+      terminationReason.length > 0
+        ? terminationReason
         : args.lastFatalStage !== null
           ? `${args.lastFatalStage} 阶段致命错误（连续失败 ${args.consecutiveFailures} 次）`
           : `连续失败 ${args.consecutiveFailures} 次触发 abort`;

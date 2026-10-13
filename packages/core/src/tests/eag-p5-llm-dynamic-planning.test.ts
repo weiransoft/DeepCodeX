@@ -15,8 +15,9 @@
  * - T8（F-A2）：规划器 stop → 5d 判定 failed（不假完成）；
  * - T9：perTaskBudget < 3000 → 不发起规划请求；
  * - T10（F-A3）：跨 run 失败记忆（真实 run-state 落盘）进入规划简报与 artifacts；
- * - T11（F-B）：剩余预算低于最小可行阈值 → 阶段开始前 aborted（含"预算不足"），
- *   fix 不再瞬败空转；
+ * - T11（F-B）：预算烧穿 → Token 熔断干净 aborted（含"Token 预算耗尽"），
+ *   fix 不再瞬败空转；2026-10-13 起软续期生效，场景为 dev 烧穿硬上限
+ *   由后置增量检查熔断（软续期未触发前置检查放行）；
  * - T12（F-C）：跨 run 失败记忆作为 feedback 注入 dev executeTask；
  * - T13：无历史/首迭代/LLM 正常 select 的 happy path 与修复前行为等价；
  * - T14-T16（F-A2b，2026-10-09 页面端到端复测补充）：全卡 blocked 局面
@@ -780,24 +781,25 @@ function loadPreviousRunStateSafe(projectRoot: string, currentRunId = "other-run
 }
 
 // ============================================================================
-// 7. T11（F-B）：预算不足 → 阶段开始前干净终止
+// 7. T11（F-B）：预算烧穿硬上限 → Token 熔断干净终止
 // ============================================================================
 
-test("T11. 剩余预算低于最小可行阈值 → 下一阶段开始前 aborted（含'预算不足'），fix 不再瞬败", async () => {
+test("T11. 预算烧穿硬上限 → Token 熔断干净 aborted（含'Token 预算耗尽'），fix 不再瞬败", async () => {
   const projectRoot = createTempProject("eag-dynaplan-t11-");
   try {
     writeHandwrittenCards(projectRoot, [{ id: "T-001", title: "修复登录页面空指针", file: "src/services/Login.ts" }]);
-    // 执行器替身（替代 LLM 网络往返）：dev 消耗 9800/10000——
-    // 5b-3 增量检查（>=maxTokens）不触发，进入 verify 前由 F-B 前置检查熔断
-    // （剩余 200 < 最小可行阈值 3000）
+    // 执行器替身（替代 LLM 网络往返）：dev 消耗 15100/10000——
+    // dev 执行后 5b-3 后置增量检查命中硬上限熔断（软续期一次至硬上限
+    // 15000 = 名义 10000 ×(1+0.5)，15100 >= 15000 → aborted），
+    // 熔断阶段即 burn 发生的 dev 本身。
     let executeTaskCalls = 0;
     const budgetBurnerExecutor: P5TaskExecutor = Object.freeze({
       async executeTask(input: Readonly<P5TaskExecutionInput>): Promise<Readonly<P5TaskExecutionResult>> {
         executeTaskCalls += 1;
         return Object.freeze({
           success: true,
-          summary: "[test-double] 已消耗 9800 tokens",
-          tokensUsed: 9800,
+          summary: "[test-double] 已消耗 15100 tokens",
+          tokensUsed: 15100,
           tokensEstimated: false,
           llmRequests: 1,
           changedFiles: Object.freeze([]),
@@ -817,22 +819,24 @@ test("T11. 剩余预算低于最小可行阈值 → 下一阶段开始前 aborte
     assert.equal(result.finalStatus, "aborted", `应干净 aborted，实际：${result.finalStatus}`);
     assert.ok(result.blockageReport !== undefined, "aborted 运行必须产出阻塞分析报告");
     assert.ok(
-      result.blockageReport!.summary.includes("预算不足"),
-      `阻塞摘要必须含"预算不足"语义（替代 fix 瞬败），实际：${result.blockageReport!.summary}`
+      result.blockageReport!.summary.includes("Token 预算耗尽"),
+      `阻塞摘要必须含"Token 预算耗尽"语义（替代 fix 瞬败），实际：${result.blockageReport!.summary}`
     );
     assert.ok(
-      result.blockageReport!.summary.includes("verify"),
-      `阻塞摘要应登记真实熔断阶段 verify，实际：${result.blockageReport!.summary}`
+      result.blockageReport!.summary.includes("dev"),
+      `阻塞摘要应登记真实熔断阶段 dev，实际：${result.blockageReport!.summary}`
     );
     // dev 只执行一次；fix（以及 verify 的 LLM 消耗）不再发生
     assert.equal(executeTaskCalls, 1, "只有 dev 执行过一次任务");
     assert.ok(result.blockageReport !== undefined, "aborted 运行必须产出阻塞分析报告");
-    assert.equal(result.blockageReport!.blockedStage, "verify", "blockedStage 必须是真实熔断阶段");
+    assert.equal(result.blockageReport!.blockedStage, "dev", "blockedStage 必须是真实熔断阶段");
     // 任务卡不得被假完成（F-B 收尾与 token 熔断同构：iterationFailed=true）
+    // 注：burn 的 dev 阶段本身执行 success，其任务卡按真实结果标 completed；
+    // 此处断言的是熔断后**未再执行**的后续轮次不得把其余卡假标 completed。
     assert.equal(
       readCardStatus(path.join(projectRoot, ".eag", "p5", "tasks.md"), "T-001"),
       "pending",
-      "预算不足 aborted 轮不得把任务卡假标 completed"
+      "预算耗尽 aborted 轮不得把未验证通过的任务卡假标 completed"
     );
   } finally {
     cleanup(projectRoot);
