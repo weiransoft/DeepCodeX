@@ -362,10 +362,15 @@ test("T-A3. 执行器 pre-flight 预检：预算内装不下下一次请求 → 
   }
 });
 
-test("T-A4. 执行器响应后检查：单次请求 usage 越线 → 不执行工具立即 failure（熔断点前移）", async () => {
+test("T-A4. 执行器响应后检查：单次请求 usage 越线 → 收尾工具照常执行 + 折叠续跑合法放行", async () => {
   const projectRoot = createTempProject("eag-tokenabort-a4-");
   try {
     const targetAbsolute = path.join(projectRoot, "src", "answer.js");
+    // 脚本：轮1 精确 usage 600+100=700（预算 699 越线）带工具调用 → 响应后
+    // 检查命中段超限 → 折叠续跑（epoch=1），**收尾工具照常执行**（token 已
+    // 真实消耗，工具是该请求语义的一部分，不得拦）；轮2 工具执行完、上下文
+    // 含本轮 assistant+tool（折叠在请求前，消息序列保留当前轮，4 条合法）；
+    // 轮2 响应 100+20=120 < 续跑段额度（均耗 700×4），续跑段放行给出终态。
     const client = new StubLlmClient([
       {
         content: "",
@@ -373,21 +378,29 @@ test("T-A4. 执行器响应后检查：单次请求 usage 越线 → 不执行�
         // 精确 usage：600 input + 100 output = 700，预算 699 → 响应后即越线
         usage: { inputTokens: 600, outputTokens: 100 },
       },
-      { content: "不应该被执行到的第二轮响应" },
+      { content: "文件已按预算内最终版本落盘。", usage: { inputTokens: 100, outputTokens: 20 } },
     ]);
     const executor = new LlmTaskExecutor({ projectRoot, createLlmClient: () => client });
 
     const result = await executor.executeTask(buildExecutionInput(projectRoot, 699));
 
-    assert.equal(result.success, false, "响应 usage 越线且仍要执行工具时必须立即失败");
-    assert.ok((result.error ?? "").includes("响应后检查"), `错误信息应透出响应后检查语义，实际：${result.error}`);
-    assert.equal(client.requestCount, 1, "只应发生越线那一次请求（修复后不再继续下一轮）");
+    assert.equal(result.success, true, `续跑段应合法放行并完成任务，实际 error=${result.error}`);
+    assert.equal(client.requestCount, 2, "越线请求照常执行 + 续跑段终态共 2 请求");
     assert.equal(
       fs.existsSync(targetAbsolute),
-      false,
-      "越线后不得再执行工具调用（修复前工具照常执行、下一轮顶部才熔断）"
+      true,
+      "越线那次请求的收尾工具必须照常执行（拦截会丢失该请求语义，违反熔断点前移契约）"
     );
-    assert.equal(result.tokensUsed, 700, "tokensUsed 应如实累计真实 usage");
+    assert.equal(fs.readFileSync(targetAbsolute, "utf8"), "module.exports = 42;\n", "落盘内容必须是越线请求写入的版本");
+    assert.equal(result.tokensUsed, 820, "tokensUsed 如实累计：700 + 续跑段 120");
+    // 续跑请求（第 2 条）：段折叠在响应后检查发生（epoch 推进 + baseline 重置），
+    // 本轮 assistant/tool 消息保留 → system + 原 user + assistant + tool = 4 条，
+    // 其中原历史已折叠为续跑指令段（compactMessagesForRequest 自压缩保证协议合法）
+    const rolloverRequest = client.getRequests()[1]!;
+    assert.ok(
+      rolloverRequest.messages.some((m) => m.role === "user" && (m.content ?? "").includes("上下文续跑")),
+      "续跑请求必须携带折叠后的续跑指令段"
+    );
   } finally {
     cleanup(projectRoot);
   }

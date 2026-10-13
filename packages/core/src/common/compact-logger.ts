@@ -72,6 +72,12 @@ export interface CompactEvent {
   error?: string;
   /** 跳过原因（compact_skip 填写，如 "no-llm-client" / "below-threshold" 等） */
   reason?: string;
+  /** compact 策略（compact_start / compact_done 填写："llm-summary" | "deterministic"，见 docs/dev/context-budget-provider.md §3.2 规则 4） */
+  strategy?: string;
+  /** 压缩前区间消息总字符数（compact_done 填写，观测压缩收益） */
+  charsBefore?: number;
+  /** 压缩后落盘消息总字符数（compact_done 填写，与 charsBefore 配对计算压缩比） */
+  charsAfter?: number;
 }
 
 // ============================================================================

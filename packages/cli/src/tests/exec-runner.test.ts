@@ -33,6 +33,8 @@ function createSettings(
     model: "test-model",
     contextWindow: 256 * 1024,
     autoCompactWindow: 128 * 1024,
+    // docs/dev/context-budget-provider.md §3.2 新增必填字段：compact 策略（测试夹具默认走 llm-summary，行为零变化）
+    compactStrategy: "llm-summary",
     thinkingEnabled: false,
     reasoningEffort: "high",
     // 修复"工具调用卡死"2026-10-03：补 ResolvedDeepcodingSettings 必填字段

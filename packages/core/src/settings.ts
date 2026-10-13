@@ -250,6 +250,14 @@ export type DeepcodingSettings = {
   contextWindow?: number | string;
   /** 上游 0.3.1 新增：自动 compact 阈值窗口 */
   autoCompactWindow?: number | string;
+  /**
+   * 会话历史 compact 策略（2026-10-12 新增，见 docs/dev/context-budget-provider.md §3.2）：
+   * - "llm-summary"（默认）：现行 LLM 摘要落盘路径（compactSession），行为零变化；
+   * - "deterministic"：确定性四级压缩（DeterministicContextBudgetProvider），
+   *   零 LLM 请求、无凭据也能压缩；仅回写 tool 消息变更，保护 user/assistant 原文。
+   * 非法值一律回落 "llm-summary"（fail-open，配置错误不阻断会话）。
+   */
+  compactStrategy?: "llm-summary" | "deterministic";
   model?: string;
   /** LLM provider 显式声明（最高优先级），未设置时按 env/model 前缀推断 */
   provider?: "openai" | "anthropic";
@@ -332,6 +340,11 @@ export type ResolvedDeepcodingSettings = {
   contextWindow: number;
   /** 上游 0.3.1 新增：自动 compact 阈值窗口（默认 contextWindow/2，不超过 contextWindow） */
   autoCompactWindow: number;
+  /**
+   * 会话历史 compact 策略（解析后恒为合法值，缺省/非法回落 "llm-summary"）。
+   * session.compactSession 据此选择 LLM 摘要（默认）或确定性四级压缩分支。
+   */
+  compactStrategy: "llm-summary" | "deterministic";
   debugLogEnabled: boolean;
   telemetryEnabled: boolean;
   /**
@@ -972,6 +985,16 @@ export function resolveSettingsSources(
   );
   const defaultAutoCompactWindow = Math.max(1, Math.floor(contextWindow * DEFAULT_AUTOCOMPACT_RATIO));
   const autoCompactWindow = Math.min(configuredAutoCompactWindow ?? defaultAutoCompactWindow, contextWindow);
+  // 会话历史 compact 策略解析（2026-10-12，见 docs/dev/context-budget-provider.md §3.2）。
+  // 解析链与 autoCompactWindow 同模式：projectSettings > userSettings（配置优先于 env——
+  // 策略是行为开关而非运行参数，不做 env 别名以免散落多源）。仅接受两个合法字面量，
+  // 其余（含大小写/拼写错误、非字符串）一律回落 "llm-summary"，保证默认行为零回归。
+  const compactStrategy: "llm-summary" | "deterministic" =
+    projectSettings?.compactStrategy === "deterministic" || projectSettings?.compactStrategy === "llm-summary"
+      ? projectSettings.compactStrategy
+      : userSettings?.compactStrategy === "deterministic" || userSettings?.compactStrategy === "llm-summary"
+        ? userSettings.compactStrategy
+        : "llm-summary";
   const thinkingEnabled =
     parseBoolean(systemEnv.THINKING_ENABLED) ??
     parseBoolean(projectSettings?.thinkingEnabled) ??
@@ -1155,6 +1178,7 @@ export function resolveSettingsSources(
     anthropic,
     contextWindow,
     autoCompactWindow,
+    compactStrategy,
     temperature,
     thinkingEnabled,
     reasoningEffort,

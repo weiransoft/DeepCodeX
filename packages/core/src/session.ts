@@ -103,6 +103,9 @@ import {
 import { logApiError } from "./common/error-logger";
 // T8：compact 链路进度日志（JSONL 事件 + console.debug 人类可读行）
 import { logCompactEvent } from "./common/compact-logger";
+// 确定性四级压缩提供者（2026-10-12 compactStrategy=deterministic 分支接入，
+// 见 docs/dev/context-budget-provider.md §3.2）
+import { DeterministicContextBudgetProvider } from "./context-budget";
 import { logSedimentEvent } from "./common/sediment-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./common/debug-logger";
 import { describeLlmError, getLlmErrorDetails } from "./common/llm-error";
@@ -623,6 +626,12 @@ export type SessionManagerOptions = {
     mcpServers?: Record<string, McpServerConfig>;
     permissions?: Required<PermissionSettings>;
     enabledSkills?: Record<string, boolean>;
+    /**
+     * 会话历史 compact 策略（docs/dev/context-budget-provider.md §3.2）。
+     * 由 SessionOptions 实现方从 ResolvedDeepcodingSettings.compactStrategy 透传，
+     * 缺省（undefined）等价 "llm-summary"（走既有 LLM 摘要路径，行为零变化）。
+     */
+    compactStrategy?: "llm-summary" | "deterministic";
   };
   renderMarkdown: (text: string) => string;
   onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
@@ -1384,6 +1393,11 @@ export class SessionManager {
     mcpServers?: Record<string, McpServerConfig>;
     permissions?: Required<PermissionSettings>;
     enabledSkills?: Record<string, boolean>;
+    /**
+     * 会话历史 compact 策略（docs/dev/context-budget-provider.md §3.2）。
+     * 缺省（undefined）等价 "llm-summary"，compactSession 据此分流确定性压缩分支。
+     */
+    compactStrategy?: "llm-summary" | "deterministic";
   };
   private readonly onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   private readonly onSessionEntryUpdated?: (entry: SessionEntry) => void;
@@ -8013,6 +8027,14 @@ ${agentInstructions}
     // T8：compact 总耗时打点起点（compact_done 的 durationMs 基准）
     const compactStartedAt = Date.now();
     this.throwIfAborted(signal);
+    // compact 策略分支（2026-10-12，docs/dev/context-budget-provider.md §3.2）：
+    // deterministic 前置于 createLLMClient() 空判——确定性四级压缩零 LLM 请求，
+    // 无凭据场景也能压缩（否则"无凭据可压缩"落空）；llm-summary 走下方原路径，
+    // 含 no-llm-client 静默跳过语义，行为零变化。
+    if (this.getResolvedSettings().compactStrategy === "deterministic") {
+      await this.compactSessionDeterministic(sessionId, signal, compactStartedAt);
+      return;
+    }
     // B1：非流式调用改经 provider 抽象层（createLLMClient 按 settings.provider 路由
     // OpenAI/Anthropic），不再直连 OpenAI SDK；无凭据时保持静默返回（旧 client:null 语义）
     const llmClient = this.createLLMClient();
@@ -8077,6 +8099,7 @@ ${agentInstructions}
       rangeStart: startIndex,
       rangeEnd: endIndex,
       messageCount: sessionMessages.length,
+      strategy: "llm-summary",
     });
 
     // 提示词保持原有构造逻辑（getCompactPrompt），仅换成合成 SessionMessage 形态
@@ -8187,13 +8210,150 @@ ${agentInstructions}
     };
     sessionMessages.splice(endIndex, 0, summaryMessage);
     this.saveSessionMessages(sessionId, sessionMessages);
-    // T8：压缩落盘完成，记录消息总数（含 summary）与压缩总耗时
+    // T8：压缩落盘完成，记录消息总数（含 summary）与压缩总耗时。
+    // charsBefore/charsAfter：区间压缩前总字符 vs 摘要字符（摘要替代了整个区间，
+    // 即压缩后的有效载荷），与 deterministic 分支同字段口径，供压缩比观测。
     this.logCompactProgress(sessionId, {
       type: "compact_done",
       rangeStart: startIndex,
       rangeEnd: endIndex,
       messageCount: sessionMessages.length,
       durationMs: Date.now() - compactStartedAt,
+      strategy: "llm-summary",
+      charsBefore: sessionMessages
+        .slice(startIndex, endIndex)
+        .reduce((sum, m) => sum + (typeof m.content === "string" ? m.content.length : 0), 0),
+      charsAfter: compactedSummary.length,
+    });
+  }
+
+  /**
+   * 确定性四级压缩分支（compactStrategy = "deterministic"，2026-10-12 新增，
+   * 设计见 docs/dev/context-budget-provider.md §3.2）。
+   *
+   * 与 llm-summary 路径的四条硬性规则差异：
+   * 1. 不需要 LLM client（本方法在 createLLMClient() 空判之前被调用），
+   *    无凭据场景照常压缩——这是引入 deterministic 的核心收益之一；
+   * 2. 只回写 role === "tool" 消息的变更：provider 输出中 user/assistant 的
+   *    第 3 级整条占位结果丢弃不用——原引擎落盘不可逆（p5 是内存副本），
+   *    必须保护用户可见的 user/assistant 原文；tool 是膨胀主源（p5 收益 90%+
+   *    来自 tool 截断/丢弃），压缩力度不受实质影响；
+   * 3. 压缩后重估 entry.activeTokens（按落盘后消息字符 × 既有估算系数）：
+   *    否则主循环阈值检查（session.activeTokens > compactPromptTokenThreshold）
+   *    每轮重复命中，反复插入 "compacting..." 消息并产生打点风暴；
+   * 4. 打点单源：compact_start/compact_done 带 strategy 与 charsBefore/charsAfter。
+   *
+   * 落盘语义：条数不变、消息 id 与 compacted 标记保持原值
+   * （saveSessionMessages 为全量覆盖写）、meta.skillCatalog 与 system 消息
+   * 天然不变更（provider 不动 system；skillCatalog 为 system 角色）。
+   *
+   * @param sessionId 会话 ID
+   * @param signal 可选中止信号（压缩前检查）
+   * @param compactStartedAt 压缩起点时间戳（compact_done 的 durationMs 基准）
+   */
+  private async compactSessionDeterministic(
+    sessionId: string,
+    signal: AbortSignal | undefined,
+    compactStartedAt: number
+  ): Promise<void> {
+    this.throwIfAborted(signal);
+    // 与 llm-summary 路径相同的前置判定（T8 打点字段口径保持一致）
+    const sessionMessages = this.listSessionMessages(sessionId).filter((message) => !message.compacted);
+    if (sessionMessages.length === 0) {
+      this.logCompactProgress(sessionId, {
+        type: "compact_skip",
+        reason: "no-messages",
+        messageCount: 0,
+        strategy: "deterministic",
+      });
+      return;
+    }
+    const startIndex = sessionMessages.findIndex((message) => message.role !== "system");
+    if (startIndex === -1) {
+      this.logCompactProgress(sessionId, {
+        type: "compact_skip",
+        reason: "no-non-system-message",
+        messageCount: sessionMessages.length,
+        strategy: "deterministic",
+      });
+      return;
+    }
+    const searchStart = Math.floor(startIndex + ((sessionMessages.length - startIndex) * 2) / 3);
+    let endIndex = -1;
+    for (let i = Math.max(searchStart, startIndex); i < sessionMessages.length; i += 1) {
+      if (sessionMessages[i].role !== "tool") {
+        endIndex = i;
+        break;
+      }
+    }
+    if (endIndex === -1 || endIndex <= startIndex) {
+      this.logCompactProgress(sessionId, {
+        type: "compact_skip",
+        reason: "no-boundary-message",
+        rangeStart: startIndex,
+        rangeEnd: endIndex,
+        messageCount: sessionMessages.length,
+        strategy: "deterministic",
+      });
+      return;
+    }
+
+    const tokensBefore = this.getSession(sessionId)?.activeTokens ?? 0;
+    /** 逐条消息内容字符数（null 安全），供 charsBefore/charsAfter 与 activeTokens 重估共用 */
+    const contentChars = (content: string | null): number => (typeof content === "string" ? content.length : 0);
+    const charsBefore = sessionMessages.reduce((sum, m) => sum + contentChars(m.content), 0);
+    this.logCompactProgress(sessionId, {
+      type: "compact_start",
+      tokensBefore,
+      threshold: this.getCompactThresholdForLog(),
+      rangeStart: startIndex,
+      rangeEnd: endIndex,
+      messageCount: sessionMessages.length,
+      strategy: "deterministic",
+    });
+
+    // 请求前确定性四级压缩（纯函数，不改输入、不发 LLM 请求、不落盘）
+    const provider = new DeterministicContextBudgetProvider();
+    const compactedMessages = provider.compactForRequest(sessionMessages);
+
+    // 规则 2：只回写 tool 消息变更——user/assistant 的整条占位结果丢弃，
+    // 保护用户可见原文（provider 输出条数与输入一致，可按下标对位）。
+    const now = new Date().toISOString();
+    const savedMessages: SessionMessage[] = sessionMessages.map((original, index) => {
+      const compacted = compactedMessages[index];
+      if (original.role !== "tool" || compacted === undefined || compacted.content === original.content) {
+        return original;
+      }
+      // 仅替换 content，id/compacted 标记/createTime 等保持原值
+      return { ...original, content: compacted.content, updateTime: now };
+    });
+    this.saveSessionMessages(sessionId, savedMessages);
+
+    // 规则 3：按落盘后消息字符重估 activeTokens（estimateStreamTokens 为
+    // session 既有估算系数，与流式 token 估算同源，不新造口径），
+    // 保证主循环阈值检查在压缩后回落到阈值之下，不再重复触发。
+    const charsAfter = savedMessages.reduce((sum, m) => sum + contentChars(m.content), 0);
+    const estimatedActiveTokens = Math.round(
+      savedMessages.reduce(
+        (sum, m) => sum + (typeof m.content === "string" ? this.estimateStreamTokens(m.content) : 0),
+        0
+      )
+    );
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      activeTokens: estimatedActiveTokens,
+      updateTime: now,
+    }));
+
+    this.logCompactProgress(sessionId, {
+      type: "compact_done",
+      rangeStart: startIndex,
+      rangeEnd: endIndex,
+      messageCount: savedMessages.length,
+      durationMs: Date.now() - compactStartedAt,
+      strategy: "deterministic",
+      charsBefore,
+      charsAfter,
     });
   }
 
