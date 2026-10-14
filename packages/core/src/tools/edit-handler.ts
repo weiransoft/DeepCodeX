@@ -1,8 +1,10 @@
 import * as fs from "fs";
 import { z } from "zod";
-// fork 侧（B1）：统一 settings 解析链与 SessionMessage 合成消息，
-// 供 LLM 辅助调用走 createLLMClient（provider 路由）路径；上游 v0.3.1 的
-// buildThinkingRequestOptions 仅服务于 OpenAI SDK 直连路径，此处不再需要。
+// ======== merge 策略：保留本地 fork B1 架构（统一 provider 路由） ========
+// upstream/main 的 edit-handler.ts 仍用 client.chat.completions.create
+// （OpenAI SDK 直连），本地 fork 已迁移到 createMessage + resolveCurrentSettings
+// （provider 路由 + settings 解析链），与整个 fork 架构对齐。
+// reasoning_effort 顶层修复已在 openai-thinking.ts 合入，此处不回退到 SDK 直连。
 import { resolveCurrentSettings } from "../settings";
 import type { SessionMessage } from "../session";
 import type { ToolExecutionContext, ToolExecutionResult } from "./executor";
@@ -734,7 +736,10 @@ async function inferOldStringNotFoundReasonWithLLM(
   try {
     // 合并：保留 fork B1 的 createMessage provider 路由；融入 upstream v0.4.0 的 signal 取消检查
     context.signal?.throwIfAborted();
-    // 提示词保持原有内容不变，仅换成合成 SessionMessage 形态适配 provider 统一转换入口
+    // ======== merge 策略：保留本地 createMessage（fork B1 统一 provider 路由） ========
+    // upstream 仍用 client.chat.completions.create 直连，本地 fork 已迁移到
+    // llmClient.createMessage（provider 路由 + SessionMessage 合成），
+    // 与 openai-provider / provider-factory 架构对齐。
     const response = await llmClient.createMessage({
       messages: [
         buildLlmAssistMessage(
@@ -827,7 +832,9 @@ async function correctEscapedStringsWithLLM(
     const problemDescription = describeCorrectionProblems(oldString, matchedText);
     // 合并：保留 fork B1 的 createMessage provider 路由；融入 upstream v0.4.0 的 signal 取消检查
     context.signal?.throwIfAborted();
-    // 提示词保持原有内容不变，仅换成合成 SessionMessage 形态适配 provider 统一转换入口
+    // ======== merge 策略：保留本地 createMessage（fork B1 统一 provider 路由） ========
+    // upstream 仍用 client.chat.completions.create 直连，本地 fork 已迁移到
+    // llmClient.createMessage（provider 路由 + SessionMessage 合成）。
     const response = await llmClient.createMessage({
       messages: [
         buildLlmAssistMessage(

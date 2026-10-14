@@ -17,9 +17,19 @@ type QwenReasoningEffort = "xhigh" | "medium" | "low";
 
 type ThinkingRequestOptions = {
   thinking?: ThinkingConfig;
-  extra_body?: {
-    reasoning_effort?: ReasoningEffort;
-  };
+  /**
+   * reasoning_effort 顶层字段（upstream v0.4.3 修复点）
+   *
+   * upstream 修复（commit 3ed02dac）：extra_body 是 Python-SDK 约定，Node OpenAI SDK
+   * 不会展开 extra_body，包装在内的 reasoning_effort 会被 DeepSeek API 忽略。
+   * 必须作为请求体顶层字段发送。
+   *
+   * 类型约束：保持为 ReasoningEffort（OpenAI SDK 兼容的五档：low/medium/high/xhigh/max）。
+   * Qwen3.8 官方三档（xhigh/medium/low）与 ReasoningEffort 联合会导致 SDK 类型冲突，
+   * 所以 Qwen3.8 分支产出的 reasoning_effort 用类型断言 as ReasoningEffort 绕过——
+   * 实际上 xhigh/medium/low 是 ReasoningEffort 五档的子集，断言后值不变、类型只收窄。
+   */
+  reasoning_effort?: ReasoningEffort;
   /**
    * Qwen3 专属：chat_template_kwargs 作为请求体顶层字段
    *
@@ -38,13 +48,6 @@ type ThinkingRequestOptions = {
      */
     preserve_thinking?: boolean;
   };
-  /**
-   * Qwen3.8+ 专属：官方顶层 reasoning_effort（xhigh / medium / low）
-   *
-   * v1.2 新增（Qwen3.8 适配，见 docs/qwen38-adaptation.md D3）。
-   * 仅 Qwen3.8+ 分支产出，禁止挪到公共路径（理由见 QwenReasoningEffort 注释）。
-   */
-  reasoning_effort?: QwenReasoningEffort;
 };
 
 /**
@@ -122,7 +125,10 @@ export function buildThinkingRequestOptions(
     if (isQwen38Model(model) && thinkingEnabled) {
       return {
         chat_template_kwargs: { enable_thinking: true, preserve_thinking: true },
-        reasoning_effort: mapReasoningEffortToQwen(reasoningEffort),
+        // as ReasoningEffort：QwenReasoningEffort（xhigh/medium/low）是 ReasoningEffort
+        // 五档（low/medium/high/xhigh/max）的子集，值不变、类型只收窄。
+        // 目的是通过 SDK 类型检查——SDK 的 ReasoningEffort 不认 QwenReasoningEffort 联合。
+        reasoning_effort: mapReasoningEffortToQwen(reasoningEffort) as ReasoningEffort,
       };
     }
     // thinking 关闭或非 3.8+ 子版本：仅 enable_thinking，不新增字段（零回归）
@@ -131,13 +137,15 @@ export function buildThinkingRequestOptions(
     };
   }
 
-  // DeepSeek V4 系列：使用 thinking.type + extra_body.reasoning_effort
-  // thinking 为 DeepSeek 非标准扩展字段，SDK 类型未覆盖，经显式类型拓宽注入
+  // DeepSeek V4 系列：使用 thinking.type + 顶层 reasoning_effort
+  // reasoning_effort 必须顶层（upstream commit 3ed02dac 修复）：
+  // extra_body 是 Python-SDK 约定，Node OpenAI SDK 不会展开它，
+  // 包装在内的 reasoning_effort 会被 DeepSeek API 忽略。
   if (isDeepSeekThinkingModel(model)) {
     const thinking: ThinkingConfig = { type: thinkingEnabled ? "enabled" : "disabled" };
     return {
       thinking,
-      ...(thinkingEnabled ? { extra_body: { reasoning_effort: reasoningEffort } } : {}),
+      ...(thinkingEnabled ? { reasoning_effort: reasoningEffort } : {}),
     };
   }
 
