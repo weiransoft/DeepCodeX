@@ -893,7 +893,55 @@ export class LlmTaskExecutor implements P5TaskExecutor {
       const effectiveBudgetForRun = input.perTaskBudget ?? this.perTaskBudget;
       const epochState = effectiveBudgetForRun !== undefined ? new ContextEpochState(effectiveBudgetForRun) : undefined;
 
-      for (let round = 1; round <= this.maxToolRounds; round += 1) {
+      // ======== 主循环重构（2026-10-14 P0-1：修复"折叠不重置轮数 + 死折叠"根因） ========
+      // 原 for (let round = 1; round <= this.maxToolRounds; round += 1) 的结构性问题：
+      //   折叠（rollover）成功后 continue → for 自增 round → 若 round==maxToolRounds
+      //   则 round+1 直接跳出循环 → 新上下文一次请求都没发，还误报"工具循环达上限"。
+      //
+      // 改为 while + 双层轮数预算：
+      // 1. currentRound（全局硬上限）：1 → this.maxToolRounds，每轮 +1，永不重置；
+      //    作用：执行器的绝对轮数天花板，无论怎么折叠都不击穿（防失控）。
+      // 2. segmentRoundsUsed（段内已用）：每次 rollover 重置为 0；
+      // 3. segmentRoundBudget（本段可消耗的最大轮数）：首段 = maxToolRounds；
+      //    每次 rollover 后 = min(剩余全局轮数, 本段额度 / 实测均耗 向上取整)。
+      //
+      // 折叠守卫（三处折叠点通用）：
+      //   若剩余全局轮数（maxToolRounds - currentRound + 1）< 按均耗算出的
+      //   本段最少轮数空间（epochState.config.minRoundsPerEpoch），则折叠后
+      //   新段一次请求都发不出（死折叠），直接诚实 failure 而不是白烧折叠开销。
+      let currentRound = 1;
+      let segmentRoundsUsed = 0;
+      // 首段段轮数预算 = 全局轮数上限（首段就是"不折叠"的整段）
+      let segmentRoundBudget = this.maxToolRounds;
+      // 折叠后新段最少需要多少轮才能"跑得起来"（= epochState.config.minRoundsPerEpoch，
+      // 无 epochState 时退化为 4），用于死折叠守卫阈值
+      const MIN_SEGMENT_ROUNDS = epochState?.config.minRoundsPerEpoch ?? 4;
+      // ======== P0-2 终局收尾注入标志（2026-10-14 第二轮修复） ========
+      // 原终局收尾注入只在折叠点触发，但折叠后 segmentRoundBudget ≥ MIN_SEGMENT_ROUNDS（4）
+      // 所以条件"剩余 ≤3 轮"永远不成立——是个死分支。
+      // 正确触发路径：while 循环顶部，当全局硬上限还剩 ≤3 轮时注入一次 system 提示。
+      let terminalHintInjected = false;
+
+      while (currentRound <= this.maxToolRounds && segmentRoundsUsed < segmentRoundBudget) {
+        // ======== 终局收尾注入（2026-10-14 P0-2 第二轮修复） ========
+        // 全局硬上限还剩 ≤3 轮时，向模型注入 system 提示让其停止探索、立即收尾。
+        // 把"40 轮无终态"降级为"有终态的部分完成"。一次性注入（terminalHintInjected
+        // 标志防重复），在 while 顶部先于 pre-flight 检查执行——让本轮请求就带着
+        // 收尾指令发出去。折叠点的注入逻辑作为死分支保留（segmentRoundBudget
+        // 重算后理论上可能再次 ≤3，但 while 顶部优先拦截，折叠点逻辑不会被执行）。
+        if (!terminalHintInjected && this.maxToolRounds - currentRound + 1 <= 3) {
+          const remainingHint = this.maxToolRounds - currentRound + 1;
+          messages.push(
+            this.buildSessionMessage(
+              "system",
+              `⚠ 剩余全局硬上限 ${remainingHint} 轮，请立即停止新的探索性工具调用（read/write/edit/bash），` +
+                `基于已有进度输出一条不含工具调用的终态总结——说明已完成哪些改动、还有哪些未完成、后续建议方向。`,
+              null
+            )
+          );
+          terminalHintInjected = true;
+          this.log(`执行器终局收尾注入：全局硬上限剩余 ${remainingHint} 轮，已向模型追加 system 提示让其收尾`, "info");
+        }
         // 每轮顶部双重 abort 检查：标志文件（跨进程 stop）+ AbortSignal（进程内）
         if (this.isAbortRequested(input.abortFlagPath) || abortController.signal.aborted) {
           return this.failure(
@@ -1002,6 +1050,27 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             // 只在有新增消耗时触发，本段已无额度可消耗，空等一轮只会让 for
             // 循环轮次白白 +1 并白白吞掉一个 maxToolRounds 名额）。折叠后
             // 下一轮以新段额度重新预检。
+            //
+            // 死折叠守卫（2026-10-14 P0-1）：rollover 调用前先检查剩余全局轮数
+            // 是否够新段跑出 MIN_SEGMENT_ROUNDS 次请求。若不够（剩余 < MIN），
+            // 折叠后新段 segmentRoundsUsed 从 0 起步但 while 条件
+            // currentRound <= maxToolRounds - segmentRoundBudget 立即不成立
+            // → 新段一次请求都发不出。直接诚实 failure，避免浪费一次 rollover
+            // 配额和折叠开销，也不误导为"工具循环达上限"。
+            const remainingGlobalPreflight = this.maxToolRounds - currentRound + 1;
+            if (remainingGlobalPreflight < MIN_SEGMENT_ROUNDS) {
+              return this.failure(
+                `Token 预算预检超限且剩余轮数不足：本段已达规模上限，尝试折叠续跑...` +
+                  `但剩余全局轮数 ${remainingGlobalPreflight} 小于新段最低需求 ${MIN_SEGMENT_ROUNDS}，` +
+                  `折叠后新上下文一次请求都发不出（死折叠），执行中止。` +
+                  `累计 ${currentTokens} tokens，已用 ${currentRound}/${this.maxToolRounds} 轮，` +
+                  `本段已用 ${segmentTokens}/${segmentBudget}。`,
+                llmRequests,
+                sawUsage,
+                inputTokensTotal + outputTokensTotal,
+                estimatedCharsTotal
+              );
+            }
             this.log(
               `Token 预算预检（段口径）：本段已用 ${segmentTokens} + 估算输入 ≈${estimatedRequestTokens}` +
                 ` > 本段额度 ${segmentBudget}（累计 ${currentTokens}，名义预算 ${effectiveBudget}），` +
@@ -1009,8 +1078,8 @@ export class LlmTaskExecutor implements P5TaskExecutor {
               "warn"
             );
             const rolloutSummary = this.buildContextRolloutSummary(messages);
-            const carriedRound = round;
-            const newSegmentBudget = epochState.rollover(currentTokens, round)!;
+            const carriedRound = currentRound;
+            const newSegmentBudget = epochState.rollover(currentTokens, currentRound)!;
             messages.length = 0;
             for (const message of this.buildRolledOverMessages(input, rolloutSummary, epochState.epoch)) {
               messages.push(message);
@@ -1018,16 +1087,42 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             // 折叠指纹状态重置与拒绝风暴保留策略同段超限折叠（见下方注释）
             lastCallFingerprint = null;
             identicalCallStreak = 0;
+            // ======== 折叠后轮数重置（2026-10-14 P0-1） ========
+            // 折叠轮不消耗 segmentRoundsUsed（本轮零请求、零工具），直接重置为 0
+            // 让新段从"段内第 1 轮"起步。segmentRoundBudget 按"剩余全局轮数"
+            // 与"本段额度/实测均耗向上取整"两者较小值重算，保证新段既能在全局
+            // 硬上限内跑完，又能在段额度约束内推进足够轮次。
+            segmentRoundsUsed = 0;
+            // 均耗 = 当前累计 / max(1, currentRound - roundOffset)（轮顶语义，
+            // currentRound 尚未消耗本轮——pre-flight 在请求前，roundOffset=1）
+            const preFlightObservedAvg = currentTokens / Math.max(1, currentRound - epochState.config.roundOffset);
+            segmentRoundBudget = Math.min(
+              remainingGlobalPreflight,
+              Math.max(MIN_SEGMENT_ROUNDS, Math.ceil(newSegmentBudget / Math.max(1, preFlightObservedAvg)))
+            );
+            // 折叠后剩余段轮数 ≤ 3 时，注入终局收尾指令（P0-2：把"硬上限死"
+            // 降级为"有终态的部分完成"，见 SYSTEM_TERMINATE_HINT）
+            const remainingSegmentRounds = segmentRoundBudget - segmentRoundsUsed;
+            if (remainingSegmentRounds <= 3) {
+              messages.push(
+                this.buildSessionMessage(
+                  "system",
+                  `剩余 ${remainingSegmentRounds} 轮，请停止新的探索性工具调用，基于已有进度立即输出一条不含工具调用的终态总结——` +
+                    `说明已完成哪些改动、还有哪些未完成、建议后续方向。不要继续尝试新的 read/write/edit/bash。`,
+                  null
+                )
+              );
+            }
             this.log(
               `单任务上下文压缩续跑（预检触发）：任务 ${input.taskId} 段 ${epochState.epoch} 起步` +
                 `（本段烧 ${segmentTokens} / 额度 ${segmentBudget} → 新段额度 ${newSegmentBudget}，` +
+                `段轮数预算 ${segmentRoundBudget}/${remainingGlobalPreflight}（全局），` +
                 `累计 ${currentTokens} tokens；折叠前 ${carriedRound} 轮轨迹已压缩为摘要 ` +
                 `${rolloutSummary.length} 字符）`,
               "warn"
             );
-            // 折叠轮不占用 maxToolRounds 名额：不手动递增，轮次由 for 循环
-            // 自然推进（响应后折叠同口径——折叠发生在本轮请求之后，同样
-            // 不再为折叠额外 +1）。
+            // 折叠轮不占用 currentRound 名额：手动保持 currentRound 不变，
+            // 由 while 循环尾部的 currentRound+=1 仅在"完成一轮 LLM+工具"后执行。
             continue;
           }
           if (epochState.isSegmentExceeded(currentTokens)) {
@@ -1049,11 +1144,40 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             // —— 折叠：历史压成「system + 任务卡原文 + 确定性轨迹摘要 + 续跑指令」——
             // 旧历史的价值（探索过程）已被摘要覆盖，其体积才是每轮成本单调上涨的根因；
             // 折叠后每轮输入回到"任务卡 + 摘要 + 最近若干轮"，成本骤降。
+            //
+            // 死折叠守卫（2026-10-14 P0-1）：与 pre-flight 同口径——rollover 调用前
+            // 先检查剩余全局轮数是否够新段跑出 MIN_SEGMENT_ROUNDS 次请求。
+            const remainingGlobalSegmentTop = this.maxToolRounds - currentRound + 1;
+            if (remainingGlobalSegmentTop < MIN_SEGMENT_ROUNDS) {
+              return this.failure(
+                `Token 预算超限（段口径）且剩余轮数不足：本段已烧穿额度，尝试折叠续跑...` +
+                  `但剩余全局轮数 ${remainingGlobalSegmentTop} 小于新段最低需求 ${MIN_SEGMENT_ROUNDS}，` +
+                  `折叠后新上下文一次请求都发不出（死折叠），执行中止。` +
+                  `累计 ${currentTokens} tokens，已用 ${currentRound}/${this.maxToolRounds} 轮，` +
+                  `本段已用 ${segmentTokens}/${segmentBudget}。`,
+                llmRequests,
+                sawUsage,
+                inputTokensTotal + outputTokensTotal,
+                estimatedCharsTotal
+              );
+            }
+            // rollover 耗尽门禁：耗尽时直接 failure（下一轮 while 顶部会再拦一次
+            // 但为了诚实失败信息，这里直接收口）
+            if (epochState.isRolloverExhausted()) {
+              return this.failure(
+                `Token 预算超限（段口径）：累计 ${currentTokens} tokens 已烧穿本段额度 ${segmentBudget}，` +
+                  `续跑折叠已用尽 ${epochState.epoch} 次，不再折叠，执行中止。`,
+                llmRequests,
+                sawUsage,
+                inputTokensTotal + outputTokensTotal,
+                estimatedCharsTotal
+              );
+            }
             const rolloutSummary = this.buildContextRolloutSummary(messages);
-            const carriedRound = round;
+            const carriedRound = currentRound;
             // 状态机先推进（折叠次数 +1、基线=当前累计、段额度按均耗折算），
             // 再折叠消息——新段额度计算与耗尽门禁以 ContextEpochState 为单一事实源。
-            const newSegmentBudget = epochState.rollover(currentTokens, round)!;
+            const newSegmentBudget = epochState.rollover(currentTokens, currentRound)!;
             messages.length = 0;
             for (const message of this.buildRolledOverMessages(input, rolloutSummary, epochState.epoch)) {
               messages.push(message);
@@ -1064,17 +1188,39 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             identicalCallStreak = 0;
             // 注意：拒绝风暴计数**故意保留**——守卫不会因折叠上下文而改判，
             // 已烧穿 6 次配额的越权目标在续跑段依然不可达，保留计数防止继续撞墙。
+            // ======== 折叠后轮数重置（2026-10-14 P0-1） ========
+            // 与 pre-flight 同口径：折叠轮不消耗 segmentRoundsUsed（零请求），
+            // 直接重置为 0；segmentRoundBudget 按"剩余全局轮数"与"本段额度/实测均耗"较小值重算。
+            segmentRoundsUsed = 0;
+            const segmentTopObservedAvg = currentTokens / Math.max(1, currentRound - epochState.config.roundOffset);
+            segmentRoundBudget = Math.min(
+              remainingGlobalSegmentTop,
+              Math.max(MIN_SEGMENT_ROUNDS, Math.ceil(newSegmentBudget / Math.max(1, segmentTopObservedAvg)))
+            );
+            // 终局收尾注入（P0-2）
+            const remainingSegRounds = segmentRoundBudget - segmentRoundsUsed;
+            if (remainingSegRounds <= 3) {
+              messages.push(
+                this.buildSessionMessage(
+                  "system",
+                  `剩余 ${remainingSegRounds} 轮，请停止新的探索性工具调用，基于已有进度立即输出一条不含工具调用的终态总结——` +
+                    `说明已完成哪些改动、还有哪些未完成、建议后续方向。不要继续尝试新的 read/write/edit/bash。`,
+                  null
+                )
+              );
+            }
             this.log(
-              `单任务上下文压缩续跑：任务 ${input.taskId} 段 ${epochState.epoch} 起步` +
-                `（本段烧 ${segmentTokens} / 额度 ${segmentBudget}，累计 ${currentTokens} tokens；` +
-                `折叠前 ${carriedRound} 轮轨迹已压缩为摘要 ${rolloutSummary.length} 字符）`,
+              `单任务上下文压缩续跑（段超限）：任务 ${input.taskId} 段 ${epochState.epoch} 起步` +
+                `（本段烧 ${segmentTokens} / 额度 ${segmentBudget} → 新段额度 ${newSegmentBudget}，` +
+                `段轮数预算 ${segmentRoundBudget}/${remainingGlobalSegmentTop}（全局），` +
+                `累计 ${currentTokens} tokens；折叠前 ${carriedRound} 轮轨迹已压缩为摘要 ${rolloutSummary.length} 字符）`,
               "warn"
             );
             emitProgress(
               "llm_request",
               `上下文已达规模上限，自动压缩后继续执行（第 ${epochState.epoch + 1} 段）`,
               `── 上下文压缩续跑：历史已折叠为 ${rolloutSummary.length} 字符轨迹摘要，` +
-                `本段额度 ${newSegmentBudget} tokens，从当前进度继续（不重跑已完成步骤）`
+                `本段额度 ${newSegmentBudget} tokens，段轮数预算 ${segmentRoundBudget}，从当前进度继续（不重跑已完成步骤）`
             );
             // 本轮不发起请求也不跳过轮次计数：直接进入下一轮，用新上下文重新提问
             continue;
@@ -1084,9 +1230,9 @@ export class LlmTaskExecutor implements P5TaskExecutor {
         // 真实非流式 LLM 请求（简单、usage 直接可得、无 skill 预请求缝隙）
         emitProgress(
           "llm_request",
-          `第 ${round} 轮：向模型发起请求…`,
-          `── 轮次 ${round}/${this.maxToolRounds}：LLM 请求开始`,
-          round
+          `第 ${currentRound} 轮：向模型发起请求…`,
+          `── 轮次 ${currentRound}/${this.maxToolRounds}：LLM 请求开始`,
+          currentRound
         );
         const response = await client.createMessage({
           // 自压缩重放（2026-10-08）：每轮请求前把"将发送的消息序列"压缩到
@@ -1158,12 +1304,31 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             // （耗尽段零请求），此处不拦当前收尾工具，避免与"越线那次请求的
             // 工具照常执行"的既有契约冲突。
             if (!epochState.isRolloverExhausted()) {
+              // 死折叠守卫（2026-10-14 P0-1）：响应后折叠的特殊语境——本轮请求
+              // 已发生（token 已烧），但工具还没执行。如果剩余全局轮数不够新段
+              // 跑 MIN_SEGMENT_ROUNDS 次，折叠后工具执行完 currentRound+=1 立即
+              // 撞全局硬上限退出 → 新上下文一次请求没发。直接诚实 failure 说明
+              // 死折叠，不让本轮工具白跑后再被误报"工具循环达上限"。
+              const remainingGlobalPostResp = this.maxToolRounds - currentRound + 1;
+              if (remainingGlobalPostResp < MIN_SEGMENT_ROUNDS) {
+                return this.failure(
+                  `Token 预算超限（响应后检查）且剩余轮数不足：本段已烧穿额度，尝试折叠续跑...` +
+                    `但剩余全局轮数 ${remainingGlobalPostResp} 小于新段最低需求 ${MIN_SEGMENT_ROUNDS}，` +
+                    `折叠后新上下文一次请求都发不出（死折叠），执行中止。` +
+                    `累计 ${postResponseTokens} tokens，已用 ${currentRound}/${this.maxToolRounds} 轮，` +
+                    `本段已用 ${postSegmentTokens}/${postSegmentBudget}。`,
+                  llmRequests,
+                  sawUsage,
+                  inputTokensTotal + outputTokensTotal,
+                  estimatedCharsTotal
+                );
+              }
               const rolloutSummary = this.buildContextRolloutSummary(messages);
-              const carriedRound = round;
+              const carriedRound = currentRound;
               // 均耗折算分母口径保持迁移前语义：响应后折叠时本轮请求已发生，
-              // 已发生轮数 = round（轮顶折叠时本轮尚未请求，已发生轮数 = round−1，
-              // 即缺省 roundOffset=1；本分支显式按 round 口径折算，不引入新口径）
-              const observedAvgCostPerRound = postResponseTokens / Math.max(1, round);
+              // 已发生轮数 = currentRound（轮顶折叠时本轮尚未请求，已发生轮数 = currentRound−1，
+              // 即缺省 roundOffset=1；本分支显式按 currentRound 口径折算，不引入新口径）
+              const observedAvgCostPerRound = postResponseTokens / Math.max(1, currentRound);
               const newSegmentBudget = Math.max(
                 Math.max(1, Math.floor(effectiveBudget * epochState.config.budgetRatio)),
                 Math.ceil(observedAvgCostPerRound * epochState.config.minRoundsPerEpoch)
@@ -1178,17 +1343,43 @@ export class LlmTaskExecutor implements P5TaskExecutor {
               // 折叠指纹状态重置与拒绝风暴保留策略同轮顶折叠（见轮顶注释）
               lastCallFingerprint = null;
               identicalCallStreak = 0;
+              // ======== 折叠后轮数重置（2026-10-14 P0-1） ========
+              // 响应后折叠的特殊性：本轮请求已发、token 已烧，但工具还没执行。
+              // segmentRoundsUsed 在 while 循环尾部会被 +1（本轮工具执行完算一轮），
+              // 所以这里只重置，不额外补偿——让 segmentRoundsUsed 从 0 起步，尾部自然
+              // 变成 1，while 条件继续成立。segmentRoundBudget 按"剩余全局轮数"
+              // 与"本段额度/实测均耗"较小值重算。
+              segmentRoundsUsed = 0;
+              segmentRoundBudget = Math.min(
+                remainingGlobalPostResp,
+                Math.max(MIN_SEGMENT_ROUNDS, Math.ceil(epochState.budget / Math.max(1, observedAvgCostPerRound)))
+              );
+              // 终局收尾注入（P0-2）：segmentRoundsUsed 在这里还没被尾部 +1，
+              // 所以 segmentRoundBudget - segmentRoundsUsed 等于"本段剩余轮数 +1"
+              // （含本轮），用它来判断是否需要注入
+              const remainingSegRounds = segmentRoundBudget - segmentRoundsUsed;
+              if (remainingSegRounds <= 3) {
+                messages.push(
+                  this.buildSessionMessage(
+                    "system",
+                    `剩余 ${remainingSegRounds} 轮（含本轮工具执行），请停止新的探索性工具调用，基于已有进度立即输出一条不含工具调用的终态总结——` +
+                      `说明已完成哪些改动、还有哪些未完成、建议后续方向。不要继续尝试新的 read/write/edit/bash。`,
+                    null
+                  )
+                );
+              }
               this.log(
                 `单任务上下文压缩续跑（响应后）：任务 ${input.taskId} 段 ${epochState.epoch} 起步` +
-                  `（本段烧 ${postSegmentTokens} / 额度 ${postSegmentBudget}，累计 ${postResponseTokens} tokens；` +
-                  `折叠前 ${carriedRound} 轮轨迹已压缩为摘要 ${rolloutSummary.length} 字符）`,
+                  `（本段烧 ${postSegmentTokens} / 额度 ${postSegmentBudget} → 新段额度 ${epochState.budget}，` +
+                  `段轮数预算 ${segmentRoundBudget}/${remainingGlobalPostResp}（全局），` +
+                  `累计 ${postResponseTokens} tokens；折叠前 ${carriedRound} 轮轨迹已压缩为摘要 ${rolloutSummary.length} 字符）`,
                 "warn"
               );
               emitProgress(
                 "llm_request",
                 `上下文已达规模上限，自动压缩后继续执行（第 ${epochState.epoch + 1} 段）`,
                 `── 上下文压缩续跑：历史已折叠为 ${rolloutSummary.length} 字符轨迹摘要，` +
-                  `本段额度 ${epochState.budget} tokens，从当前进度继续（不重跑已完成步骤）`
+                  `本段额度 ${epochState.budget} tokens，段轮数预算 ${segmentRoundBudget}，从当前进度继续（不重跑已完成步骤）`
               );
             }
           }
@@ -1212,8 +1403,8 @@ export class LlmTaskExecutor implements P5TaskExecutor {
           emitProgress(
             "task_end",
             `任务完成：${(response.content || "").slice(0, 200)}`,
-            `── 轮次 ${round}：模型给出终态回复，任务正常结束\n变更文件：${changedFiles.length > 0 ? changedFiles.join(", ") : "（无）"}${isNoop ? "\n（空转：模型未发起任何工具调用且无文件变更）" : ""}`,
-            round
+            `── 轮次 ${currentRound}：模型给出终态回复，任务正常结束\n变更文件：${changedFiles.length > 0 ? changedFiles.join(", ") : "（无）"}${isNoop ? "\n（空转：模型未发起任何工具调用且无文件变更）" : ""}`,
+            currentRound
           );
           return Object.freeze({
             success: true,
@@ -1232,11 +1423,11 @@ export class LlmTaskExecutor implements P5TaskExecutor {
         // 真实执行工具调用（越权由 onBeforeToolExecution 进程内硬判，deny 结果原样回灌）
         emitProgress(
           "tool_execution",
-          `第 ${round} 轮：执行 ${response.toolCalls.map((tc) => tc.name).join("、")}`,
-          `── 轮次 ${round}：LLM 返回 ${response.toolCalls.length} 个工具调用：${response.toolCalls
+          `第 ${currentRound} 轮：执行 ${response.toolCalls.map((tc) => tc.name).join("、")}`,
+          `── 轮次 ${currentRound}：LLM 返回 ${response.toolCalls.length} 个工具调用：${response.toolCalls
             .map((tc) => `${tc.name}(${this.summarizeToolArgs(tc.argumentsJson)})`)
             .join("；")}`,
-          round
+          currentRound
         );
         // 跨轮累计工具调用数（noop 判据，见 toolCallsTotal 声明处注释）
         toolCallsTotal += response.toolCalls.length;
@@ -1281,13 +1472,13 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             }
           }
         }
-        emitProgress("tool_execution", "", `工具结果：\n${toolResults.join("\n")}`, round);
+        emitProgress("tool_execution", "", `工具结果：\n${toolResults.join("\n")}`, currentRound);
         if (stormHitCount >= DENIAL_STORM_LIMIT) {
           const stormError =
             `拒绝风暴：同一目标「${stormTarget}」累计 ${stormHitCount} 次被权限守卫拒绝——` +
             `反复重试同一堵墙不会变通，目标可能超出执行器安全边界` +
             `（路径牢笼 / 凭据守卫 / 高危命令未获人工确认）。请调整任务目标、文件范围，或改用安全替代命令。`;
-          emitProgress("task_end", `执行失败：拒绝风暴`, stormError, round);
+          emitProgress("task_end", `执行失败：拒绝风暴`, stormError, currentRound);
           return this.failure(
             stormError,
             llmRequests,
@@ -1318,7 +1509,7 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             `任务描述大概率缺少可执行信息或与工作目录现状矛盾（如标题声称已完成/目标与项目无关）。` +
             `请检查任务卡内容是否可执行、目标是否与当前项目匹配，或补充缺失上下文后重试。`;
           this.log(identicalError, "warn");
-          emitProgress("task_end", `执行失败：相同调用空转熔断`, identicalError, round);
+          emitProgress("task_end", `执行失败：相同调用空转熔断`, identicalError, currentRound);
           return this.failure(
             identicalError,
             llmRequests,
@@ -1327,10 +1518,29 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             estimatedCharsTotal
           );
         }
+        // ======== while 循环尾部：全局轮数 +1、段内轮数 +1（2026-10-14 P0-1） ========
+        // 原 for 循环由 `round += 1` 自增，while 需手动推进；折叠时 segmentRoundsUsed
+        // 已重置为 0，此处 +1 仅在"本轮完成一轮 LLM+工具"后执行。
+        currentRound += 1;
+        segmentRoundsUsed += 1;
       }
 
-      // 达到轮数上限仍在持续调用工具：诚实判失败，交回编排器决定 fix/abort
-      const roundLimitError = `工具循环达上限（${this.maxToolRounds} 轮）仍未给出终态回复`;
+      // while 循环退出（自然结束，无终态回复）：诚实判失败，交回编排器决定 fix/abort。
+      // 2026-10-14：区分两种退出根因（原 for 循环无此区分，"工具循环达上限"是唯一文案
+      // 但掩盖了"折叠后轮数不够"等真实死因）：
+      // - 路径 A：currentRound > maxToolRounds → 全局硬上限撞顶
+      // - 路径 B：segmentRoundsUsed >= segmentRoundBudget → 本段段轮数预算耗尽
+      //   （可能还有剩余全局轮数但本 segmentRoundBudget 被 rollover 重算后变小）
+      // 三种折叠点已在"剩余轮数不够让新段跑 MIN_SEGMENT_ROUNDS 次"时直接诚实 failure，
+      // 不会走到这里的段轮数耗尽——所以路径 B 意味着 segmentRoundBudget 确实跑满了
+      // （正常折叠续跑路径），而不是死折叠漏网。
+      const hitGlobalCeiling = currentRound > this.maxToolRounds;
+      const remainingGlobal = this.maxToolRounds - currentRound + 1;
+      const roundLimitError = hitGlobalCeiling
+        ? `工具循环达全局硬上限（${this.maxToolRounds} 轮）仍未给出终态回复`
+        : `段轮数预算耗尽（本段 ${segmentRoundBudget} 轮已用完）仍未给出终态回复，` +
+          `剩余全局轮数 ${Math.max(0, remainingGlobal)}（本轮 currentRound=${currentRound}）。` +
+          `续跑折叠已全部触发过或全局轮数不足以让新段跑出有效请求。`;
       emitProgress("task_end", `执行失败：${roundLimitError}`, roundLimitError);
       return this.failure(
         roundLimitError,
