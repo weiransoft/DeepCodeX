@@ -68,6 +68,15 @@ const ALLOWED_SUGGESTED_COMMAND_NAMES = new Set<string>([
   "eag-test",
   "eag-run",
   "eag-deploy",
+  /**
+   * eag-autonomous（2026-10-14 补入）：修复"答了全部但命令蒸发"假静默缺陷。
+   *
+   * 模型把 /eag-autonomous 挂到 AskUserQuestion.suggestedCommand 时，
+   * 原白名单不含此命令 → parseSuggestedCommand 静默返回 undefined →
+   * 用户答完后命令凭空消失，无任何反馈。现补入与 AUTO_EXECUTABLE_EAG_COMMANDS
+   * 同源的 eag-autonomous，让 suggestedCommand 通道与自动执行通道口径对齐。
+   */
+  "eag-autonomous",
 ]);
 
 /**
@@ -159,7 +168,15 @@ function parseSuggestedCommand(raw: unknown, projectRoot?: string): SuggestedCom
   }
   const commandName = firstToken.slice(1);
   if (!commandName || !ALLOWED_SUGGESTED_COMMAND_NAMES.has(commandName)) {
-    // 命令不在白名单中（如 "/exit"、"/undo"、"/inject" 等），拒绝自动执行
+    // 命令不在白名单中（如 "/exit"、"/undo"、"/inject" 等），拒绝自动执行。
+    // 2026-10-14：加 console.warn 让"静默丢弃"变成可见——此前模型把白名单外命令
+    // （如 /eag-autonomous）挂到 suggestedCommand 时无任何反馈，用户答完后命令凭空消失。
+    if (commandName) {
+      console.warn(
+        `[AskUserQuestion] suggestedCommand "${trimmedCommand}" 不在白名单中（命令名 "${commandName}"），` +
+          `已拒绝自动执行。允许的命令：${Array.from(ALLOWED_SUGGESTED_COMMAND_NAMES).join(", ")}。`
+      );
+    }
     return undefined;
   }
 
