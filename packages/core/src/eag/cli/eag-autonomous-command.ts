@@ -41,6 +41,8 @@
 
 import type { AutonomousOrchestrator } from "../p5/autonomous-orchestrator";
 import type { AutonomousRunRequest, AutonomousRunResult } from "../p5/autonomous-orchestrator";
+// 共享参数解析工具（2026-10-14 修复：支持 --goal 值内 \" 转义引号，收敛 4 处重复正则副本）
+import { parseEagArgs } from "./eag-args";
 
 // ============================================================================
 // 1. 常量定义（不可变，Object.freeze 冻结）
@@ -241,35 +243,18 @@ export function extractEagAutonomousRequestFromPrompt(prompt: string): EagAutono
   // 截取前缀之后的部分作为参数字符串
   const argsPart = trimmed.slice(prefixMatch[0].length).trim();
 
-  // 步骤 3：用正则解析 --key value 形式参数
-  // 正则说明（与 extractDeployRequestFromPrompt 一致）：
-  // - --([\w][\w-]*)                              匹配参数名 → 捕获组 1
-  // - (?:[=\s]+                                   分隔符（= 或空白，至少一个）
-  //   (?:"([^"]*)"                                双引号值 → 捕获组 2
-  //   |'([^']*)'                                  单引号值 → 捕获组 3
-  //   |(?!--)([^\s"']+)                           裸值（不以 -- 开头）→ 捕获组 4
-  //   ))?                                         整个值组可选（支持 flag 形式）
-  // - (?=\s|$)                                    前瞻断言：匹配结束位置必须是空白或字符串结尾
-  const argPattern = /--([\w][\w-]*)(?:[=\s]+(?:"([^"]*)"|'([^']*)'|(?!--)([^\s"']+)))?(?=\s|$)/g;
-  const args: Record<string, string | true> = {};
-
-  // 注意：重复参数首次匹配生效（后续覆盖被跳过）
-  let match: RegExpExecArray | null;
-  while ((match = argPattern.exec(argsPart)) !== null) {
-    const key = match[1];
-    // 三种值形式：双引号（match[2]）、单引号（match[3]）、裸值（match[4]）；均未匹配则为 flag（true）
-    const value = match[2] ?? match[3] ?? match[4] ?? true;
-    // 仅首次匹配生效（重复参数被跳过）
-    if (!(key in args)) {
-      args[key] = value;
-    }
-  }
+  // 步骤 3：解析 --key value 形式参数（共享实现，见 eag-args.ts）
+  // 支持双引号值（含 \" 转义）、单引号值（字面）、裸值与 flag 形式；
+  // 重复参数首次匹配生效。2026-10-14 修复：旧内联正则不支持值内 \" 转义，
+  // 导致 --goal "…hc_config.get(\"url\")…" 类目标被误判为缺失。
+  const args = parseEagArgs(argsPart);
 
   // 步骤 4：校验必填参数 --goal（非空字符串）
   const goalRaw = args["goal"];
   if (goalRaw === undefined || goalRaw === true || String(goalRaw).trim().length === 0) {
     throw new Error(
-      'extractEagAutonomousRequestFromPrompt: 缺少必填参数 --goal 或值为空（期望非空字符串，如 --goal "为订单服务加退款功能"）'
+      'extractEagAutonomousRequestFromPrompt: 缺少必填参数 --goal 或值为空（期望非空字符串，如 --goal "为订单服务加退款功能"；' +
+        '若目标文本含引号，请在内层引号前加反斜杠转义（\\"）或改用单引号包裹整个目标）'
     );
   }
   const goal = String(goalRaw).trim();
