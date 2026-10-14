@@ -4,6 +4,49 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.3.17] - 2026-10-14
+
+补丁版（EAG 规划执行流程根因修复：死折叠守卫 + 终局收尾注入 + 轮数口径自洽 + 复杂目标守卫 + 建议命令白名单补入）。
+
+### Fixed
+- **执行器 for→while 重构，根治「死折叠」**（packages/core/src/eag/p5/executors/llm-task-executor.ts）：
+  旧 `for (round=1; round<=40; round+=1)` 在段顶 `round==maxToolRounds` 触发折叠时，
+  `continue` 后 `round+=1` 立即越界退出循环——新段（rollover 已执行、历史已压缩）里
+  **零 LLM 请求**即失败，且失败文案 `"工具循环达上限（40 轮）"` 掩盖真实根因。
+  新 `while (currentRound <= maxToolRounds && segmentRoundsUsed < segmentRoundBudget)`
+  用三段变量解耦：`currentRound`（全局硬上限永不重置）、
+  `segmentRoundsUsed`（rollover 时重置 0）、`segmentRoundBudget`（rollover 后
+  按 `min(剩余全局, ceil(本段额度/均耗))` 重算）。折叠点 `continue` 不消耗
+  `currentRound`，段预算耗尽时独立计算新段额度，确保新上下文能继续执行。
+
+- **三处折叠点加「死折叠守卫」**（pre-flight L1061 / segment-top L1151 /
+  post-response L1313）：每次尝试 rollover 前先算
+  `remainingGlobal = maxToolRounds - currentRound + 1`，若
+  `remainingGlobal < MIN_SEGMENT_ROUNDS (默认 4)` → **诚实 failure**，
+  rollover 根本不执行，错误文案显式说明
+  `"Token 预算超限且剩余轮数不足…折叠后新上下文一次请求都发不出（死折叠）"`，
+  不再伪装成「工具循环达上限」。
+
+- **终局收尾注入**（while 循环顶部）：当 `remainingGlobal <= 3` 时向 system prompt
+  追加 `"剩余全局硬上限 N 轮，请立即停止探索性工具调用，基于已有进度输出不含工具调用的
+  终态总结"`，让模型主动收敛而非被动耗尽轮数。
+
+- **合成目标卡复杂度守卫**（packages/core/src/eag/p5/handlers/plan-stage-handler.ts）：
+  多阶段动词（如「重构 + 修复 + 测试」≥2 个）或超长（> 200 字符）objective →
+  acceptance 字段自动追加拆条提示 `"目标较长请一件一件完成"`，防止根因报告中
+  「巨型目标卡 40 轮装不下」的场景重现。
+
+- **建议命令白名单补入 + 拒绝可见化**（packages/core/src/tools/ask-user-question-handler.ts）：
+  `ALLOWED_SUGGESTED_COMMAND_NAMES` 新增 `"eag-autonomous"`；
+  `parseSuggestedCommand` 白名单失败分支加 `console.warn`，消灭「静默 drop」
+  假静默缺陷。
+
+### Added
+- **死折叠守卫专项测试**（packages/core/src/tests/eag-p5-dead-fold-guard.test.ts
+  DFG-1 ~ DFG-4）：DFG-1 正常折叠续跑、DFG-2 根因复现（剩余轮数 < MIN → 诚实 failure，
+  修复前 run add68b75f656 的「段 2 round==40 折叠后零请求」场景）、
+  DFG-3 终局收尾注入断言、DFG-4 折叠点 continue 不消耗名额。
+
 ## [Unreleased]
 
 （本版本暂无变更。）
