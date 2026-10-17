@@ -131,7 +131,18 @@ export class ContextSynchronizer {
   /**
    * @param globalStore GlobalContext 管理器（依赖注入，负责持久化与 LRU 淘汰）
    */
-  constructor(private readonly globalStore: GlobalContextManager) {}
+  constructor(
+    private readonly globalStore: GlobalContextManager,
+    /**
+     * 沉淀来源项目根目录（可选，需求121 修复新增）
+     *
+     * 传入后，所有经本同步器沉淀的 Success/FailureExperience 都会写入
+     * sourceProjectRoot 字段——注入侧（DualLayerContextManager）在跨项目
+     * 经验开关关闭时据此过滤其他项目的经验；缺省（undefined）保持旧数据
+     * 语义（通用经验放行）。
+     */
+    private readonly projectRoot?: string
+  ) {}
 
   /**
    * 同步全局与任务上下文
@@ -302,6 +313,8 @@ export class ContextSynchronizer {
       createdAt: now,
       accessCount: 0,
       lastAccessedAt: now,
+      // 需求121 修复：记录沉淀来源项目（注入侧跨项目开关关闭时按此过滤）
+      sourceProjectRoot: this.projectRoot,
     };
   }
 
@@ -330,6 +343,8 @@ export class ContextSynchronizer {
       createdAt: now,
       accessCount: 0,
       lastAccessedAt: now,
+      // 需求121 修复：记录沉淀来源项目（注入侧跨项目开关关闭时按此过滤）
+      sourceProjectRoot: this.projectRoot,
     };
   }
 
@@ -354,6 +369,8 @@ export class ContextSynchronizer {
       createdAt: summary.archivedAt,
       accessCount: 0,
       lastAccessedAt: summary.archivedAt,
+      // 需求121 修复：归档沉淀同样记录来源项目
+      sourceProjectRoot: this.projectRoot,
     };
   }
 
@@ -379,6 +396,8 @@ export class ContextSynchronizer {
       createdAt: summary.archivedAt,
       accessCount: 0,
       lastAccessedAt: summary.archivedAt,
+      // 需求121 修复：归档沉淀同样记录来源项目
+      sourceProjectRoot: this.projectRoot,
     };
   }
 

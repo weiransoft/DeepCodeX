@@ -298,8 +298,17 @@ function App({
     // V2 Session 上下文钩子：根据 settings.json 与环境变量构造 DualLayerContextHook
     // 未启用 V2 总开关或上下文子开关时，createDualLayerContextHook 内部降级为
     // DefaultSessionContextHook，preBuildContext 返回空数组，行为与 v1 完全一致（零回归）
+    // 需求121：显式透传 v2Config.context.crossProjectExperience——跨项目经验注入
+    // 开关关闭（默认）时，其他项目沉淀的经验/用户全局记忆/领域知识不再注入本会话，
+    // 杜绝跨会话上下文污染（EGFR 检查会话混入 COVID-19 项目上下文的场景）。
     const v2Config = buildV2Config(projectRoot);
-    const contextHook: SessionContextHook = createDualLayerContextHook(projectRoot, v2Config);
+    const contextHook: SessionContextHook = createDualLayerContextHook(
+      projectRoot,
+      v2Config,
+      undefined,
+      undefined,
+      v2Config.context.crossProjectExperience
+    );
 
     // EAG P5 编排器装配（2026-07-31 新特性集成审查 FIX-1/FIX-2）
     // 真实构造 AutonomousOrchestrator 与 GraphLoopOrchestratorOptions，
@@ -1764,6 +1773,7 @@ function App({
       ) : view === "session-list" ? (
         <SessionList
           sessions={sessions}
+          displayTimezone={resolvedSettings.displayTimezone}
           onSelect={(id) => void handleSelectSession(id)}
           onCancel={() => setView("chat")}
           onDelete={(id) => {
@@ -1781,6 +1791,7 @@ function App({
       ) : view === "undo" ? (
         <UndoSelector
           targets={undoTargets}
+          displayTimezone={resolvedSettings.displayTimezone}
           onSelect={(target, restoreMode) => void handleUndoRestore(target, restoreMode)}
           onCancel={() => {
             setPromptDraft(null);

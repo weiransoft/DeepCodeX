@@ -82,6 +82,12 @@ const contextConfigSchema = z.object({
   syncIntervalMs: z.number().default(60 * 1000),
   topKFiles: z.number().default(20),
   keepRecentTurns: z.number().default(5),
+  // 需求121：跨项目经验注入开关
+  // - true（默认）：保持历史行为——全局经验/用户全局记忆/领域知识跨项目注入
+  // - false：仅注入当前项目作用域内容，杜绝跨会话/跨项目上下文污染
+  // 注：CLI 侧 createDualLayerContextHook 调用方（App.tsx）未显式传参时以
+  //     DEFAULT_CROSS_PROJECT_EXPERIENCE（false）兜底，schema 默认值与此一致。
+  crossProjectExperience: z.boolean().default(true),
 });
 
 /** CodeMap 配置 schema */

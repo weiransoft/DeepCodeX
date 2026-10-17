@@ -4,6 +4,60 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.3.18] - 2026-10-18
+
+补丁版（V2 上下文记忆跨会话污染防线 + 展示时区可配置化 + TurnGuard 循环护栏 + 执行历史双向打通）。
+
+### Added
+- **TurnGuard 循环护栏**（packages/core/src/common/loop-guard.ts + session.ts 接线，需求123/124）：
+  普通会话主循环每轮 LLM 请求前判定——默认 40 轮上限或连续 3 轮工具全失败即
+  **暂停咨询用户**（会话转 `waiting_for_user`，注入 `[执行护栏]` 提示消息，
+  不再盲目烧到 41 次请求）；Token 预算（默认 200 万）触达硬线直接终止。
+  用户确认继续（continue/权限回复）走主循环 `acknowledgeAndContinue` 放行；
+  护栏咨询后下达**新指令**走 `replySession` 入口消费暂停态——清零轮数与
+  连续失败计数给予完整预算窗口，Token 预算跨指令保持（硬兜底不被绕过）。
+  `createSession` 新任务时重置护栏计数。
+- **展示时区可配置**（需求122）：`settings.timezone` 字段 / `DEEPCODE_TIMEZONE`
+  环境变量（解析链与 bashTimeoutMs 同模式），`resolveDisplayTimezone` 以
+  `Intl.DateTimeFormat` 校验 IANA 时区名，非法/缺省回落
+  `DEFAULT_DISPLAY_TIMEZONE = "Asia/Shanghai"`（东八区北京时间，fail-open）；
+  SessionList / UndoSelector 时间展示统一走 `formatTimestampInTimezone`，
+  不再依赖宿主机系统时区。
+- **执行历史持久化与双向打通**（V2 二期 US-EH-006/007/008）：
+  `ExecutionHistoryStore`（jsonl 落盘 `~/.deepcode/projects/<projectCode>/execution-history.jsonl`）
+  经 `onAfterToolExecution` 钩子 fire-and-forget 记录工具执行；
+  `execution-history-summary-builder` 构建 execution_history ContextSnippet 注入；
+  成功经验经 `execution-history-memory-sync` 沉淀至全局经验库（项目作用域+命令组合键去重，
+  `LOW_VALUE_BASH_COMMANDS` 黑名单过滤），记录 metadata.executionRecordIds /
+  memoryEntryIds 实现经验↔执行记录双向追溯。
+- **跨项目经验注入开关**（settings v2.context.crossProjectExperience，默认关闭）：
+  关闭时跳过 UserGlobalMemory / DomainKnowledge / RecommendedExperience 注入通道，
+  Success/Failure 兜底经验按沉淀来源项目（`sourceProjectRoot`，realpath 归一化）
+  过滤——其他项目沉淀的经验不再注入当前会话上下文（需求121 跨会话污染防线）。
+- **V2-P3 全局记忆与经验推荐器接线**（dual-layer-manager）：UserProfile /
+  UserGlobalMemory / DomainKnowledge / RecommendedExperience / HistoricalExperience
+  片段收集与降级；直接保留片段与评分片段分离，避免非文件片段被 Top-K 误截断。
+- **普通会话循环护栏单测**（packages/core/src/tests/turn-guard.test.ts）：
+  28 用例覆盖默认配置、判定优先级、Token/轮数/连续失败线、咨询-确认闭环、
+  需求123/124 场景还原与 replySession 恢复路径（H1-H4）。
+
+### Fixed
+- **跨会话上下文污染**（需求121，dual-layer-manager / synchronizer / global-context）：
+  归档沉淀经验写入 `sourceProjectRoot`；注入侧构造透传修复（此前 config 未接收
+  开关导致过滤恒关）；开关关闭时经验类片段按项目作用域隔离。
+- **时间展示时区**（需求122）：SessionList / UndoSelector 原用运行机器本地时区，
+  现按配置时区渲染且缺省固定东八区；prompt 层时间声明同步配置时区。
+- **护栏咨询后新指令被立即再拦截**（session.ts replySession）：新指令不带
+  permissionPrompt 时在入口消费护栏暂停态，避免用户回复新指令后主循环
+  第一行 `decideBeforeIteration()` 再次拦死。
+- **synchronizer.test.ts / p1-pipeline.test.ts TaskContext 夹具类型缺字段**：
+  补齐 skillContext / version / workingMemory 必填字段，恢复 tsc 零错误。
+
+### Changed
+- `ResolvedDeepcodingSettings` 新增必填 `displayTimezone`（providers / cli 测试夹具同步）。
+- DualLayerContextConfig 新增 `projectRoot` 必填与跨项目开关透传；
+  图级片段 / RuleStore / CodeMap 收集失败一律降级（console.warn），零回归保证主对话。
+
 ## [0.4.3.17] - 2026-10-14
 
 补丁版（EAG 规划执行流程根因修复：死折叠守卫 + 终局收尾注入 + 轮数口径自洽 + 复杂目标守卫 + 建议命令白名单补入）。

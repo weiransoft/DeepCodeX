@@ -244,6 +244,13 @@ export interface SuccessExperience {
   accessCount: number;
   /** 最后访问时间（ISO 8601，初始等于 createdAt） */
   lastAccessedAt: string;
+  /**
+   * 沉淀来源项目根目录（可选，需求121 修复新增）
+   *
+   * 跨项目经验注入开关关闭时，注入侧据此过滤"其他项目沉淀"的经验；
+   * 缺省（undefined）视为通用经验放行，兼容旧数据。
+   */
+  sourceProjectRoot?: string;
 }
 
 /**
@@ -272,6 +279,10 @@ export interface FailureExperience {
   accessCount: number;
   /** 最后访问时间 */
   lastAccessedAt: string;
+  /**
+   * 沉淀来源项目根目录（可选，需求121 修复新增，语义同 SuccessExperience）
+   */
+  sourceProjectRoot?: string;
 }
 
 /**

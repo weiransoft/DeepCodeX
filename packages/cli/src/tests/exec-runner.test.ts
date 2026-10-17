@@ -41,6 +41,8 @@ function createSettings(
     bashTimeoutMs: 120_000,
     debugLogEnabled: false,
     telemetryEnabled: false,
+    // 需求122 新增必填字段：展示时区（测试夹具默认东八区北京时间）
+    displayTimezone: "Asia/Shanghai",
     multimodal: "default",
     filesApiEnabled: false,
     filesApiTimeoutMs: 60_000,

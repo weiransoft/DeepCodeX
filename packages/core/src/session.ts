@@ -152,7 +152,8 @@ import { CommandSafety } from "./v2/approval/command-safety";
 // 详细设计决策见 docs/dev/ADR-EAG-001-experimental-status.md。
 // 涉及模块：LoopGuard / Evaluator / Coding / Testing / Design / LongHorizon / RLIS /
 // DevOps / Autonomous / Graph / Dynamic / Interrupts
-import type { LoopGuard } from "./common/loop-guard";
+import type { LoopGuard, TurnGuardConfig } from "./common/loop-guard";
+import { TurnGuard } from "./common/loop-guard";
 import type {
   IndependentEvaluator,
   RedlineDefinition,
@@ -691,6 +692,15 @@ export type SessionManagerOptions = {
    * - 跨 session 单例仅适用于 autonomous 长程任务场景（§5.12.3 AU-6 熔断回滚需跨迭代跟踪）
    */
   loopGuard?: LoopGuard;
+  /**
+   * 需求123/124：普通会话循环护栏配置（可选注入）
+   *
+   * 控制单 turn 的迭代轮数上限（默认 40）、连续工具全失败上限（默认 3）、
+   * Token 总预算（默认 2M）。触达轮数/连续失败上限时暂停并咨询用户是否继续，
+   * 触达 Token 预算时直接终止——修复"死循环烧 Token 直至会话异常退出"。
+   * 缺省使用 DEFAULT_TURN_GUARD_CONFIG。
+   */
+  turnGuard?: Partial<TurnGuardConfig>;
   /**
    * Web 个人工作区牢笼：引擎数据家目录（docs/dev/web-workspace.md §3 / C1）。
    *
@@ -1458,6 +1468,15 @@ export class SessionManager {
   // EAG-P0 外挂字段（可选注入，未注入时主循环行为不变，§5.4 / §5.2.1）
   private readonly evaluator?: IndependentEvaluator;
   private readonly loopGuard?: LoopGuard;
+  // 需求123/124：普通会话循环护栏
+  // turnGuard：每 turn 入口经 getOrCreateTurnGuard 获取（同 turn 复用、用户确认继续时
+  // acknowledgeAndContinue 清零咨询计数、新任务 resetTurnGuard 重置）。
+  // 单活跃会话模型（this.activeSessionId 全局唯一 + isInterrupted 保证上一 turn 已退出），
+  // 单实例即可承载；连续失败/轮数上限触达 → 暂停咨询用户，Token 预算触达 → 终止。
+  // turnGuardConfig：缺省 DEFAULT_TURN_GUARD_CONFIG（maxTurns=40 / 连续失败 3 轮 /
+  // Token 预算 2M），由 options 透传。
+  private turnGuard?: TurnGuard;
+  private readonly turnGuardConfig?: Partial<TurnGuardConfig>;
   private readonly evaluatorRedlines?: ReadonlyArray<RedlineDefinition>;
   // EAG-P2 批次 9 S5 外挂字段（可选注入，未注入时 /eag-build 命令不可用，§4.7 / §4.9）
   private readonly codingOrchestrator?: CodingOrchestrator;
@@ -1661,6 +1680,9 @@ export class SessionManager {
     // EAG-P0 外挂字段赋值（可选注入，未注入时为 undefined，主循环行为不变）
     this.evaluator = options.evaluator;
     this.loopGuard = options.loopGuard;
+    // 需求123/124：循环护栏配置透传（实例本身在首个 turn 入口懒构造，
+    // 保证 settings 解析完成后再读取覆盖值）
+    this.turnGuardConfig = options.turnGuard;
     this.evaluatorRedlines = options.evaluatorRedlines;
     // EAG-P2 批次 9 S5 外挂字段赋值（可选注入，未注入时 /eag-build 命令不可用）
     this.codingOrchestrator = options.codingOrchestrator;
@@ -3546,6 +3568,9 @@ ${agentInstructions}
     this.reportNewPrompt();
 
     const sessionId = crypto.randomUUID();
+    // 需求123/124：新任务（新会话）开始时重置循环护栏——护栏计数按"任务"累计，
+    // 新任务应获得完整的轮数/连续失败/Token 预算窗口，不受上一个任务残留计数影响。
+    this.turnGuard = new TurnGuard(this.turnGuardConfig);
     // fork 侧：文件历史协调器初始化会话分支（coordinator 与上游内联方法操作同一
     // <projectDir>/file-history/.git 仓库，此处用 coordinator 版本避免重复初始化）
     this.fileHistoryCoordinator.ensureFileHistorySession(sessionId);
@@ -3705,6 +3730,29 @@ ${agentInstructions}
       planMode: nextPlanMode,
       updateTime: now,
     }));
+
+    // 需求123/124：护栏暂停（waiting_for_user + 护栏消息）后用户输入新指令的恢复路径——
+    // activateSession 主循环的放行判定依赖 permissionPrompt（hasPermissionReply /
+    // isContinuePrompt），而"护栏咨询后的普通新指令"不带 permissionPrompt，
+    // 会在主循环第一行立即被 decideBeforeIteration() 再次拦截。
+    // 因此在 turn 入口消费护栏暂停态：会话此前处于护栏咨询暂停（failReason 带护栏标记）
+    // 且本条输入是新指令（非 continue/权限回复——这两类走上方早退分支并由
+    // 主循环 acknowledgeAndContinue 放行）时，清零轮数与连续失败计数，
+    // 让新指令获得完整预算窗口。Token 总预算不清零（硬兜底跨指令保持）。
+    if (
+      updated &&
+      !hasUserPermissionReplies(userPrompt) &&
+      !this.isContinuePrompt(userPrompt) &&
+      this.turnGuard &&
+      (this.turnGuard.getState().turnsCompleted > 0 || this.turnGuard.getState().consecutiveFailedTurns > 0)
+    ) {
+      const pendingGuardPause = this.listSessionMessages(sessionId).some(
+        (m) => m.role === "system" && typeof m.content === "string" && m.content.startsWith("[执行护栏]")
+      );
+      if (pendingGuardPause) {
+        this.turnGuard.acknowledgeAndContinue();
+      }
+    }
 
     // fork 侧：会话条目更新失败（竞态下被清理）时兜底创建新会话，保持 fork 既有行为
     if (!updated) {
@@ -7049,6 +7097,14 @@ ${agentInstructions}
       return;
     }
 
+    // 需求123/124：循环护栏实例获取（同一 SessionManager 生命周期内复用同一实例）
+    // —— 护栏计数跨 turn 累积：40 轮 = 整个任务累计 40 次 LLM 迭代，
+    //    触达即暂停咨询；用户任何后续消息（确认继续 / 澄清指令）都视为放行，
+    //    acknowledgeAndContinue() 清零轮数与连续失败计数（Token 总量不清零）。
+    if (!this.turnGuard) {
+      this.turnGuard = new TurnGuard(this.turnGuardConfig);
+    }
+
     // 主对话流式安全参数：与 settings.timeout 对齐，防止 LLM 长期无响应或 reasoning 无限增长。
     // OpenAI 路径当前依赖 SDK 请求级 timeout（默认 600s），此处额外提供流式整体超时；
     // Anthropic 路径在 createLlmMessageStream 中通过 AbortController 实现，因 Anthropic SDK 未配置 timeout。
@@ -7144,6 +7200,47 @@ ${agentInstructions}
 
         const session = this.getSession(sessionId);
         if (session == null || session.status === "interrupted" || session.status === "failed") {
+          return;
+        }
+
+        // 需求123/124：TurnGuard 循环护栏判定（每轮 LLM 请求前）
+        // 触达上限 ≠ 报错崩溃：
+        // - terminate_token_budget → Token 预算硬兜底，会话标记失败并终止（防资源耗尽）
+        // - consult_user_* → 会话转 waiting_for_user 暂停，向用户展示原因并等待指示；
+        //   用户下一条消息（确认继续/澄清指令）重新进入本方法时清零轮数与连续失败计数放行
+        const guard = this.turnGuard!;
+        const hasPermissionReply = Boolean(permissionPrompt && hasUserPermissionReplies(permissionPrompt));
+        const isContinuePrompt = Boolean(permissionPrompt && this.isContinuePrompt(permissionPrompt));
+        // 用户放行信号：本 turn 携带权限回复或 continue（即用户对上一轮暂停的回应），
+        // 且护栏此前处于暂停态（已有计数）——清零轮数/连续失败，给用户新的预算窗口
+        if (
+          (hasPermissionReply || isContinuePrompt) &&
+          (guard.getState().turnsCompleted > 0 || guard.getState().consecutiveFailedTurns > 0)
+        ) {
+          guard.acknowledgeAndContinue();
+        }
+        const guardDecision = guard.decideBeforeIteration();
+        if (!guardDecision.allow) {
+          const isTokenExhausted = guardDecision.action === "terminate_token_budget";
+          this.updateSessionEntry(sessionId, (entry) => ({
+            ...entry,
+            status: isTokenExhausted ? "failed" : "waiting_for_user",
+            failReason: isTokenExhausted ? guardDecision.reason : entry.failReason,
+            updateTime: new Date().toISOString(),
+          }));
+          // 护栏消息走 buildSystemMessage（visible=true）：不产生 tool_calls、
+          // 不污染 assistantReply 语义，UI 按 system 消息原样展示
+          const guardMessage = this.buildSystemMessage(
+            sessionId,
+            isTokenExhausted
+              ? `[执行护栏] ${guardDecision.reason}`
+              : `[执行护栏] ${guardDecision.reason}\n是否继续执行？回复任意内容继续，或调整任务后重新下达指令。`,
+            null,
+            true
+          );
+          this.appendSessionMessage(sessionId, guardMessage);
+          this.onAssistantMessage(guardMessage, false);
+          this.maybeNotifyTaskCompletion(sessionId, notify, startedAt, env);
           return;
         }
 
@@ -7488,6 +7585,9 @@ ${agentInstructions}
 
         let waitingForUser = false;
         const responseUsage = response.usage ?? null;
+        // 需求123/124：本轮工具执行成败统计（TurnGuard 连续失败判定依据）
+        let turnToolFailedCount = 0;
+        let turnToolSucceededCount = 0;
         if (toolCalls) {
           if (permissionPlan?.askPermissions.length) {
             this.updateSessionEntry(sessionId, (entry) => ({
@@ -7510,12 +7610,22 @@ ${agentInstructions}
             messagePermissions: permissionPlan?.permissions,
           });
           waitingForUser = toolAppendResult.waitingForUser;
+          turnToolFailedCount = toolAppendResult.failedCount;
+          turnToolSucceededCount = toolAppendResult.succeededCount;
           // F8：turn 因工具等待用户响应而挂起（AskUserQuestion 提问 / ask_user 审批）时，
           // 标记"主模型提问待答"，使用户的答案在下一次输入时豁免 EAG 建议器直达主对话
           if (waitingForUser) {
             this.markAwaitingUserToolAnswer(sessionId);
           }
         }
+
+        // 需求123/124：TurnGuard 记录本轮迭代（Token 累计 + 连续失败计数），
+        // 下一轮 LLM 请求前的 decideBeforeIteration() 据此判定是否暂停咨询/终止
+        this.turnGuard!.recordTurn({
+          tokensUsed: getTotalTokens(responseUsage),
+          hadToolCalls: toolCalls !== null,
+          allToolsFailed: toolCalls !== null && turnToolSucceededCount === 0 && turnToolFailedCount > 0,
+        });
 
         if (this.isInterrupted(sessionId)) {
           return;
@@ -9557,7 +9667,7 @@ ${agentInstructions}
       permissionOverrides?: UserToolPermission[];
       messagePermissions?: MessageToolPermission[];
     } = {}
-  ): Promise<{ waitingForUser: boolean }> {
+  ): Promise<{ waitingForUser: boolean; failedCount: number; succeededCount: number }> {
     // 上游 v0.3.1：记录本批次已加载的技能名（避免同批次重复加载）
     const loadedSkillNames = new Set<string>();
     // 修复"工具调用卡死"2026-10-03：从 settings 解析 bash 超时（毫秒），
@@ -9632,13 +9742,22 @@ ${agentInstructions}
       toolExecutions.push(...executions);
     }
     if (this.isInterrupted(sessionId)) {
-      return { waitingForUser: false };
+      return { waitingForUser: false, failedCount: 0, succeededCount: 0 };
     }
     let waitingForUser = false;
+    // 需求124：统计本批次工具执行成败（TurnGuard 连续失败判定依据）——
+    // ok=false 计失败，ok=true 计成功；awaitUserResponse 挂起的工具不计入
+    // 任何一侧（等待用户不是失败）
+    let failedCount = 0;
+    let succeededCount = 0;
     const followUpMessages: SessionMessage[] = [];
     for (const execution of toolExecutions) {
       if (execution.result.awaitUserResponse === true) {
         waitingForUser = true;
+      } else if (execution.result.ok) {
+        succeededCount++;
+      } else {
+        failedCount++;
       }
       const toolFunction = this.messageConverter.findToolFunction(toolCalls, execution.toolCallId);
       // 上游 v0.3.1：技能加载结果（name === "skill"）携带 metadata，供 buildToolMessage 提取 skill 标记
@@ -9661,7 +9780,7 @@ ${agentInstructions}
     for (const followUpMessage of followUpMessages) {
       this.appendSessionMessage(sessionId, followUpMessage);
     }
-    return { waitingForUser };
+    return { waitingForUser, failedCount, succeededCount };
   }
 
   private cloneUserPromptForMeta(prompt: UserPromptContent): UserPromptContent {

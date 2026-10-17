@@ -65,6 +65,14 @@ export class ExecutionHistoryStore {
     Pick<ExecutionHistoryStoreOptions, "maxRecordsPerSession" | "maxAgeDays" | "cacheMax">
   >;
 
+  /**
+   * 当前项目根目录绝对路径（需求121 修复新增）
+   *
+   * 沉淀侧（ExecutionHistoryMemorySync）在 ExecutionRecord.cwd 缺失时回退此值
+   * 作为经验的项目作用域事实源，注入侧据此过滤其他项目沉淀的经验。
+   */
+  private readonly projectRootPath: string;
+
   /** 内存缓存：Map<sessionId, ExecutionRecord[]> */
   private readonly cache = new Map<string, ExecutionRecord[]>();
   /** 是否已缓存完整文件（文件扫描至少做过一次）——避免每次 query 都读文件 */
@@ -91,6 +99,8 @@ export class ExecutionHistoryStore {
     const homeRoot = options.homeDir ?? os.homedir();
     this.projectDir = path.join(homeRoot, ".deepcode", "projects", projectCode);
     this.historyFilePath = path.join(this.projectDir, "execution-history.jsonl");
+    // 需求121 修复：保存原始项目根，供沉淀侧作为经验的项目作用域事实源
+    this.projectRootPath = options.projectRoot;
 
     this.options = {
       maxRecordsPerSession: options.maxRecordsPerSession ?? DEFAULT_MAX_RECORDS_PER_SESSION,
@@ -100,6 +110,18 @@ export class ExecutionHistoryStore {
   }
 
   // ========== 生命周期 ==========
+
+  /**
+   * 获取当前存储绑定的项目根目录绝对路径（需求121 修复新增）
+   *
+   * 用途：ExecutionHistoryMemorySync 沉淀经验时，ExecutionRecord.cwd 缺失
+   * （非 bash 工具或元数据未透传）则回退此值作为经验的项目作用域。
+   *
+   * @returns 构造时传入的 projectRoot
+   */
+  getProjectRoot(): string {
+    return this.projectRootPath;
+  }
 
   /**
    * 确保存储目录存在

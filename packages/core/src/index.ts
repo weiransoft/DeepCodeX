@@ -43,6 +43,9 @@ export {
   DEFAULT_FILE_QUOTA_CLEANUP_BATCH,
   DEFAULT_MAX_REQUEST_FILES_BYTES,
   MAX_FILES_API_TIMEOUT_MS,
+  // 需求122：展示时区默认值与校验（供 UI 时间格式化消费）
+  DEFAULT_DISPLAY_TIMEZONE,
+  resolveDisplayTimezone,
 } from "./settings";
 export type {
   DeepcodePlusSettings,
@@ -343,6 +346,9 @@ export type { PlusSubscriptionStatus, OpenAIConnection, OpenAIConnectionContext 
 // Loop Guard —— EAG 与 autonomous 共享上限保护（EAG §5.2.1）
 export { DEFAULT_LOOP_GUARD_CONFIG, INITIAL_LOOP_GUARD_STATE, LoopGuard } from "./common/loop-guard";
 export type { LoopGuardConfig, LoopGuardState, GuardCheckResult, GuardStopReason } from "./common/loop-guard";
+// 需求123/124：普通会话循环护栏（40 轮咨询 / 连续 3 轮全失败咨询 / Token 硬预算终止）
+export { DEFAULT_TURN_GUARD_CONFIG, TurnGuard } from "./common/loop-guard";
+export type { TurnGuardConfig, LoopGuardAction, LoopGuardTurnDecision } from "./common/loop-guard";
 
 // ============================================================================
 // EAG (Enterprise App Generation) module —— 企业级应用生成能力

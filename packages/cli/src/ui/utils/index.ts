@@ -2,7 +2,8 @@ import chalk from "chalk";
 import { renderMessageToStdout } from "../components/MessageView/utils";
 import type { RawMode } from "../contexts";
 import type { PromptDraft } from "../views/PromptInput";
-import type { ModelConfigSelection, PermissionMode } from "@vegamo/deepcode-core";
+// 需求122：DEFAULT_DISPLAY_TIMEZONE 用于时间格式化缺省回落（东八区北京时间）
+import { DEFAULT_DISPLAY_TIMEZONE, type ModelConfigSelection, type PermissionMode } from "@vegamo/deepcode-core";
 import type { SessionEntry, SessionMessage } from "@vegamo/deepcode-core";
 import type { SessionManager } from "@vegamo/deepcode-core";
 import type { MessageMeta } from "@vegamo/deepcode-core";
@@ -286,4 +287,51 @@ export function formatThinkingMode(
 
 export function formatModelConfig(settings: ModelConfigSelection): string {
   return `${settings.model}, ${formatThinkingMode(settings)}`;
+}
+
+/**
+ * 将 ISO 时间戳格式化为指定时区的可读时间（需求122）
+ *
+ * 设计目标：前端展示的所有操作时间与配置的展示时区同步
+ * （settings.timezone / env.TIMEZONE，缺省为东八区北京时间）。
+ * 实现：使用 Intl 显式指定传入的 IANA 时区，不依赖运行机器的系统时区——
+ * 即使部署机器时区为 UTC/其他，展示仍按配置时区渲染。
+ *
+ * 非法时区名回落 DEFAULT_DISPLAY_TIMEZONE（东八区），非法时间字符串原样返回
+ * （防御式降级，与旧实现语义一致）。
+ *
+ * @param value ISO 8601 时间字符串（如 SessionMessage.createTime）
+ * @param timezone IANA 时区名（来自 resolved settings.displayTimezone）；
+ *                 未传/非法时回落 DEFAULT_DISPLAY_TIMEZONE（Asia/Shanghai）
+ * @returns 形如 "2026-10-17 15:42:08" 的指定时区时间字符串
+ */
+export function formatTimestampInTimezone(value: string, timezone?: string): string {
+  try {
+    const date = new Date(value);
+    if (Number.isNaN(date.valueOf())) {
+      return value;
+    }
+    // 非法/缺省时区回落东八区默认值（校验逻辑与 core resolveDisplayTimezone 同语义：
+    // Intl 构造非法时区名抛 RangeError → 回落）
+    let safeTimezone = timezone?.trim() || DEFAULT_DISPLAY_TIMEZONE;
+    try {
+      new Intl.DateTimeFormat("zh-CN", { timeZone: safeTimezone });
+    } catch {
+      safeTimezone = DEFAULT_DISPLAY_TIMEZONE;
+    }
+    // hour12:false + 显式 timeZone 保证 24 小时制指定时区输出
+    return new Intl.DateTimeFormat("zh-CN", {
+      timeZone: safeTimezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).format(date);
+  } catch {
+    // Intl 异常（极端环境无 ICU）降级返回原始字符串，不崩溃 UI
+    return value;
+  }
 }

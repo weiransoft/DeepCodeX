@@ -64,6 +64,8 @@ function makeSettings(provider: "openai" | "anthropic", apiKey = "sk-test"): Res
     debugLogEnabled: false,
     telemetryEnabled: false,
     allowPrivateBaseURL: false,
+    // 需求122 新增必填字段：展示时区（测试夹具默认东八区北京时间）
+    displayTimezone: "Asia/Shanghai",
     permissions: {} as ResolvedDeepcodingSettings["permissions"],
     enabledSkills: {},
     statusline: {} as ResolvedDeepcodingSettings["statusline"],

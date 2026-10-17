@@ -17,6 +17,7 @@
  * Anchor 文件零改动：不依赖 executor/prompt/tool-types
  */
 
+import * as path from "node:path";
 import type { ExecutionHistoryStore } from "./execution-history-store";
 import type { ExecutionRecord } from "./execution-history-types";
 import { ExecutionHistorySummaryBuilder } from "./execution-history-summary-builder";
@@ -155,10 +156,14 @@ export class ExecutionHistoryMemorySync {
    * —— 已存在则 update（MemoryStore 没有 update，走 delete + add）
    */
   private upsertSuccessExperience(record: ExecutionRecord, dedupKey: string): MemoryEntry | null {
-    // 去重：先查 MemoryStore.list 返回的 entries 数组
-    const existing = this.findExperienceByDedupKey(dedupKey);
+    // 需求121 修复：按"项目作用域 + 命令"组合键去重——同一命令在不同项目沉淀的
+    // 经验各自独立成条，避免项目 A 的经验计数被项目 B 的同类执行虚增，
+    // 也为注入侧按当前项目过滤提供 metadata.projectScopePath 事实源。
+    const scopedKey = this.buildProjectScopedKey(record, dedupKey);
+    // 去重：先查 MemoryStore.list 返回的 entries 数组（按 scopedKey 匹配 tags）
+    const existing = this.findExperienceByDedupKey(scopedKey);
     const cmd = this.extractCommandShort(record);
-    const key = `exec-history:bash-success:${dedupKey}`;
+    const key = `exec-history:bash-success:${scopedKey}`;
     const value = `bash ${cmd} 成功，exit ${record.exitCode ?? 0}`;
 
     if (existing) {
@@ -188,12 +193,15 @@ export class ExecutionHistoryMemorySync {
       value,
       confidence: DEFAULT_AUTO_CONFIDENCE,
       source: AUTO_EXTRACTED_SOURCE,
-      tags: ["auto-extracted", "exec-history", dedupKey],
+      tags: ["auto-extracted", "exec-history", scopedKey],
       metadata: {
         executionRecordIds: [record.id],
         sessionId: record.sessionId,
         executionDate: record.date,
         usageCount: 1,
+        // 需求121 修复：记录沉淀来源项目的绝对路径（bash cwd 优先，缺失时回退
+        // ExecutionHistoryStore 的 projectRoot）——注入侧据此过滤其他项目的经验
+        projectScopePath: this.resolveProjectScope(record),
       },
     });
   }
@@ -206,8 +214,11 @@ export class ExecutionHistoryMemorySync {
     fix: ExecutionRecord,
     dedupKey: string
   ): MemoryEntry | null {
-    const existing = this.findExperienceByDedupKey(dedupKey);
-    const key = `exec-history:failure-fix:${dedupKey}`;
+    // 需求121 修复：与成功命令沉淀同构——按"项目作用域 + 失败修复对"组合键去重，
+    // 不同项目的失败修复经验各自独立成条，避免跨项目虚增计数与注入混淆。
+    const scopedKey = this.buildProjectScopedKey(failure, dedupKey);
+    const existing = this.findExperienceByDedupKey(scopedKey);
+    const key = `exec-history:failure-fix:${scopedKey}`;
 
     if (existing) {
       const prevIds = ((existing.metadata?.executionRecordIds as string[] | undefined) ?? []).filter(
@@ -245,15 +256,47 @@ export class ExecutionHistoryMemorySync {
       value,
       confidence: DEFAULT_AUTO_CONFIDENCE,
       source: AUTO_EXTRACTED_SOURCE,
-      tags: ["auto-extracted", "exec-history", dedupKey, "failure-fix"],
+      tags: ["auto-extracted", "exec-history", scopedKey, "failure-fix"],
       metadata: {
         executionRecordIds: [failure.id, fix.id],
         fixedByExecutionId: fix.id,
         failureExitCode: failure.exitCode ?? null,
         sessionId: failure.sessionId,
         usageCount: 1,
+        // 需求121 修复：记录沉淀来源项目（注入侧按当前项目过滤的事实源）
+        projectScopePath: this.resolveProjectScope(failure),
       },
     });
+  }
+
+  /**
+   * 把原始 dedupKey（命令前缀归一化）扩展为“项目作用域 + 命令”组合键
+   *
+   * 需求121 修复核心：不同项目执行的同类命令沉淀为独立经验条目，
+   * 键格式 `<projectCode>:<dedupKey>`，projectCode 用 path.basename 取短名
+   * （完整绝对路径会过长污染 tags，且注入侧比对已用完整路径）。
+   */
+  private buildProjectScopedKey(record: ExecutionRecord, dedupKey: string): string {
+    const scope = this.resolveProjectScope(record);
+    if (!scope) {
+      // 无法解析作用域（store 无 projectRoot）——退回原始键，保持兼容
+      return dedupKey;
+    }
+    return `${path.basename(scope)}:${dedupKey}`;
+  }
+
+  /**
+   * 解析单条执行记录的项目作用域（绝对路径）
+   *
+   * 优先级：bash cwd（最精确）→ ExecutionHistoryStore 绑定的 projectRoot（兜底）。
+   * 解析失败返回 undefined——注入侧会把“无作用域”经验视为通用经验放行。
+   */
+  private resolveProjectScope(record: ExecutionRecord): string | undefined {
+    const cwd = record.cwd;
+    if (cwd && typeof cwd === "string" && cwd.length > 0) {
+      return cwd;
+    }
+    return this.store.getProjectRoot();
   }
 
   /**
