@@ -16,8 +16,9 @@ import { buildThinkingRequestOptions } from "../common/openai-thinking";
 //   T6  旧 Qwen3 thinking=false → 仅 enable_thinking（零回归）
 //   T7  分叉边界 qwen30-8b → 走旧分支（零回归）
 //   T8  非 thinking 模型（gpt-4o）→ 空对象
-//   T9  DeepSeek 回归 thinking=true → thinking.type + extra_body.reasoning_effort
-//   T10 DeepSeek 回归 thinking=false → thinking.type: "disabled"，无 extra_body
+//   T9  DeepSeek 回归 thinking=true → thinking.type + 顶层 reasoning_effort
+//       （upstream commit 3ed02dac：OpenAI Node SDK 不展开 extra_body，必须顶层发送）
+//   T10 DeepSeek 回归 thinking=false → thinking.type: "disabled"，无 reasoning_effort
 //
 // 请求体断言一律使用 deepStrictEqual（多字段/少字段均失败），禁止宽松比较。
 // ============================================================================
@@ -111,17 +112,19 @@ test("非 thinking 模型（gpt-4o）thinking=true 返回空对象（T8）", () 
 
 test("DeepSeek thinking=true 格式回归，与 Qwen3.8 格式严格区分（T9）", () => {
   const result = buildThinkingRequestOptions(true, "https://api.deepseek.com", "xhigh", "deepseek-v4-pro");
+  // upstream commit 3ed02dac：OpenAI Node SDK 不展开 extra_body，
+  // reasoning_effort 必须作为请求体顶层字段发送
   assert.deepStrictEqual(
     result,
     {
       thinking: { type: "enabled" },
-      extra_body: { reasoning_effort: "xhigh" },
+      reasoning_effort: "xhigh",
     },
-    "DeepSeek 应维持 thinking.type + extra_body.reasoning_effort 格式"
+    "DeepSeek 应维持 thinking.type + 顶层 reasoning_effort 格式"
   );
   // 负向断言：不得混入 Qwen3.8 格式字段
   assert.ok(!("chat_template_kwargs" in result), "DeepSeek 格式不应包含 chat_template_kwargs");
-  assert.ok(!("reasoning_effort" in result), "DeepSeek 格式的 reasoning_effort 应在 extra_body 内而非顶层");
+  assert.ok(!("extra_body" in result), "DeepSeek 格式不应包含 extra_body（SDK 不展开，必须顶层发送）");
 });
 
 test("DeepSeek thinking=false 格式回归，无 extra_body（T10）", () => {

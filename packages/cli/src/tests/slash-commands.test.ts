@@ -97,10 +97,12 @@ test("filterSlashCommands ranks /model before /commondao for /mo", () => {
   const items = buildSlashCommands([
     { name: "commondao", path: "/skills/commondao/SKILL.md", description: "CommonDAO guide" },
   ]);
-  assert.deepEqual(
-    filterSlashCommands(items, "/mo").map((item) => item.name),
-    ["model", "commondao"]
-  );
+  const matched = filterSlashCommands(items, "/mo").map((item) => item.name);
+  // V2 内置命令扩展（memory / eag-autonomous*）同样匹配 "/mo" 前缀；
+  // 断言核心排序语义：技能命令 commondao 必须排在内置 model 之后，
+  // 而不是耦合完整的内置命令集合
+  assert.ok(matched.includes("model") && matched.includes("commondao"));
+  assert.ok(matched.indexOf("model") < matched.indexOf("commondao"), "model 应排在 commondao 之前");
 });
 
 test("filterSlashCommands preserves order within match groups without mutating input", () => {
@@ -112,10 +114,14 @@ test("filterSlashCommands preserves order within match groups without mutating i
     }))
   );
   const original = [...items];
-  assert.deepEqual(
-    filterSlashCommands(items, "/mo").map((item) => item.name),
-    ["motion", "model-helper", "model", "commondao", "demo"]
-  );
+  const matched = filterSlashCommands(items, "/mo").map((item) => item.name);
+  // V2 内置命令扩展（memory / eag-autonomous*）同样匹配 "/mo"，断言只提取
+  // 测试技能子序列，验证组内排序语义而不耦合完整内置集合
+  const skillSubset = matched.filter((n) => ["motion", "model-helper", "commondao", "demo"].includes(n));
+  assert.deepEqual(skillSubset, ["motion", "model-helper", "commondao", "demo"]);
+  // 内置 model 位于技能匹配组之后、commondao 之前
+  assert.ok(matched.indexOf("model") > matched.indexOf("model-helper"));
+  assert.ok(matched.indexOf("model") < matched.indexOf("commondao"));
   assert.deepEqual(items, original);
 });
 
@@ -127,10 +133,13 @@ test("filterSlashCommands matches and prioritizes prefixes case-insensitively", 
       description: name,
     }))
   );
-  assert.deepEqual(
-    filterSlashCommands(items, "/MO").map((item) => item.name),
-    ["Motion", "model", "ComMonDAO"]
-  );
+  const matched = filterSlashCommands(items, "/MO").map((item) => item.name);
+  // 大写前缀 "/MO" 应照常匹配（大小写不敏感）；内置扩展命令（memory 等）
+  // 也在结果中，断言提取技能子序列与内置 model 的相对序
+  const skillSubset = matched.filter((n) => ["Motion", "ComMonDAO"].includes(n));
+  assert.deepEqual(skillSubset, ["Motion", "ComMonDAO"]);
+  assert.ok(matched.includes("model"), "内置 model 应匹配 /MO");
+  assert.ok(matched.indexOf("model") < matched.indexOf("ComMonDAO"));
 });
 
 test("filterSlashCommands returns all entries on bare slash", () => {

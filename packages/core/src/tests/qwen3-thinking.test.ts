@@ -83,10 +83,12 @@ test("Qwen3 模型名大小写不敏感（QWEN3-32B / qwen3-32b / Qwen3-32B 等�
 
 test("DeepSeek 格式不受 Qwen3 改动影响（回归保护）", () => {
   // DeepSeek-V4-Pro 启用 thinking
+  // 注意（upstream commit 3ed02dac）：OpenAI Node SDK 不展开 extra_body，
+  // reasoning_effort 必须作为请求体顶层字段发送，故此处断言顶层字段而非 extra_body 包装。
   const deepseekEnabled = buildThinkingRequestOptions(true, "https://api.deepseek.com", "max", "deepseek-v4-pro");
   assert.deepEqual(deepseekEnabled, {
     thinking: { type: "enabled" },
-    extra_body: { reasoning_effort: "max" },
+    reasoning_effort: "max",
   });
   // 不应包含 chat_template_kwargs
   assert.ok(!("chat_template_kwargs" in deepseekEnabled), "DeepSeek 格式不应包含 chat_template_kwargs");

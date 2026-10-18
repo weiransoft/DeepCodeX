@@ -3720,7 +3720,9 @@ ${agentInstructions}
       inheritedPermissions: this.getResolvedSettings().permissions,
     });
     const now = new Date().toISOString();
-    const previousPlanMode = Boolean(this.getSession(sessionId)?.planMode);
+    // 在 updateSessionEntry 覆盖 status 之前捕获会话快照（护栏暂停态判定依赖旧 status）
+    const session = this.getSession(sessionId);
+    const previousPlanMode = Boolean(session?.planMode);
     const nextPlanMode = Boolean(userPrompt.planMode);
     const updated = this.updateSessionEntry(sessionId, (entry) => ({
       ...entry,
@@ -3735,23 +3737,27 @@ ${agentInstructions}
     // activateSession 主循环的放行判定依赖 permissionPrompt（hasPermissionReply /
     // isContinuePrompt），而"护栏咨询后的普通新指令"不带 permissionPrompt，
     // 会在主循环第一行立即被 decideBeforeIteration() 再次拦截。
-    // 因此在 turn 入口消费护栏暂停态：会话此前处于护栏咨询暂停（failReason 带护栏标记）
-    // 且本条输入是新指令（非 continue/权限回复——这两类走上方早退分支并由
-    // 主循环 acknowledgeAndContinue 放行）时，清零轮数与连续失败计数，
-    // 让新指令获得完整预算窗口。Token 总预算不清零（硬兜底跨指令保持）。
+    // 因此在 turn 入口消费护栏暂停态：本条输入是新指令（非 continue/权限回复——
+    // 这两类走上方早退分支并由主循环 acknowledgeAndContinue 放行）时，
+    // 清零轮数与连续失败计数，让新指令获得完整预算窗口。
+    // Token 总预算不清零（硬兜底跨指令保持）。
+    //
+    // 暂停态判定（架构审查缺陷1修复）：必须在 updateSessionEntry 把 status 覆盖为
+    // "pending" 之前捕获护栏暂停态——护栏触发时主循环把会话置为 waiting_for_user
+    // （Token 硬终止置 failed，failed 不消费：新指令也不应绕过 Token 硬兜底）。
+    // 此前实现扫描全历史"[执行护栏]"消息（.some()），导致"曾触发过护栏的长会话"里
+    // 任何普通新指令都会误清零未暂停的计数，护栏累计上限形同虚设——已废弃该判定。
+    // 护栏暂停态下用户回复任意内容（含"继续"等自然语言）都视为放行，
+    // 与咨询文案"回复任意内容继续"语义一致（架构审查缺陷2修复：不再要求 /continue 精确匹配）。
     if (
       updated &&
       !hasUserPermissionReplies(userPrompt) &&
       !this.isContinuePrompt(userPrompt) &&
+      session?.status === "waiting_for_user" &&
       this.turnGuard &&
       (this.turnGuard.getState().turnsCompleted > 0 || this.turnGuard.getState().consecutiveFailedTurns > 0)
     ) {
-      const pendingGuardPause = this.listSessionMessages(sessionId).some(
-        (m) => m.role === "system" && typeof m.content === "string" && m.content.startsWith("[执行护栏]")
-      );
-      if (pendingGuardPause) {
-        this.turnGuard.acknowledgeAndContinue();
-      }
+      this.turnGuard.acknowledgeAndContinue();
     }
 
     // fork 侧：会话条目更新失败（竞态下被清理）时兜底创建新会话，保持 fork 既有行为

@@ -284,21 +284,26 @@ test("G3. maxConsecutiveFailedTurns=0：首轮即咨询连续失败线", () => {
 
 /**
  * 模拟 session.ts replySession 入口的护栏暂停消费逻辑（与生产代码同构）：
- * 护栏咨询暂停后（消息历史中存在 "[执行护栏]" system 消息），
- * 新指令（非 continue/权限回复）进入 turn 时清零轮数与连续失败计数，
+ * 暂停态判定采用会话状态门控（架构审查缺陷1修复）——
+ * 护栏咨询暂停时主循环把会话置为 "waiting_for_user"，
+ * replySession 在 updateSessionEntry 覆盖 status 之前捕获该旧状态；
+ * 新指令（非 continue/权限回复）在暂停态下进入 turn 时清零轮数与连续失败计数，
  * 使新指令获得完整预算窗口；Token 预算保持不清零。
+ *
+ * 注意：此前版本以"全历史是否存在 [执行护栏] 消息"判定暂停态，
+ * 导致曾触发过护栏的长会话中任何普通新指令都会误清零计数——已废弃。
  */
 function simulateReplySessionGuardConsume(
   guard: TurnGuard,
-  hasGuardPauseMessage: boolean,
+  isWaitingForUser: boolean,
   isPermissionReply: boolean,
   isContinue: boolean
 ): void {
   if (
     !isPermissionReply &&
     !isContinue &&
-    (guard.getState().turnsCompleted > 0 || guard.getState().consecutiveFailedTurns > 0) &&
-    hasGuardPauseMessage
+    isWaitingForUser &&
+    (guard.getState().turnsCompleted > 0 || guard.getState().consecutiveFailedTurns > 0)
   ) {
     guard.acknowledgeAndContinue();
   }
@@ -311,15 +316,15 @@ test("H1. 护栏咨询暂停后新指令进入 turn → 计数清零恢复放行
     guard.recordTurn({ tokensUsed: 1000, hadToolCalls: true, allToolsFailed: true });
   }
   assert.equal(guard.decideBeforeIteration().allow, false);
-  // 用户回复新指令（消息历史含护栏消息）→ replySession 消费暂停态
+  // 用户回复新指令（会话处于 waiting_for_user 暂停态）→ replySession 消费暂停态
   simulateReplySessionGuardConsume(guard, true, false, false);
   assert.equal(guard.decideBeforeIteration().allow, true, "新指令必须获得完整预算窗口");
 });
 
-test("H2. 无护栏暂停消息时新指令不清零（防止误放行仍在推进的任务计数）", () => {
+test("H2. 非 waiting_for_user 状态时新指令不清零（缺陷1回归：长会话误清零防护）", () => {
   const guard = new TurnGuard({ maxConsecutiveFailedTurns: 10, maxTurns: 40, maxTokenBudget: 0 });
   guard.recordTurn({ tokensUsed: 1000, hadToolCalls: true, allToolsFailed: true });
-  // 多轮消息（历史无护栏消息）
+  // 会话未暂停（status 非 waiting_for_user，即使历史上曾触发过护栏消息）
   simulateReplySessionGuardConsume(guard, false, false, false);
   assert.equal(guard.getState().turnsCompleted, 1, "非护栏暂停态不清零轮数计数");
 });

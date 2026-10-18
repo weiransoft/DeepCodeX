@@ -20,9 +20,11 @@ test("buildThinkingRequestOptions uses the same disabled payload for volces endp
 });
 
 test("buildThinkingRequestOptions enables thinking with default reasoning effort for DeepSeek", () => {
+  // upstream v0.4.3 修复（commit 3ed02dac）：reasoning_effort 顶层发送——
+  // Node OpenAI SDK 不展开 extra_body，包装在内的 reasoning_effort 会被 DeepSeek API 忽略
   assert.deepEqual(buildThinkingRequestOptions(true, "https://api.deepseek.com", "max", "deepseek-v4-pro"), {
     thinking: { type: "enabled" },
-    extra_body: { reasoning_effort: "max" },
+    reasoning_effort: "max",
   });
 });
 
@@ -31,7 +33,7 @@ test("buildThinkingRequestOptions uses the same enabled payload for volces endpo
     buildThinkingRequestOptions(true, "https://ark.cn-beijing.volces.com/api/v3", "max", "deepseek-v4-pro"),
     {
       thinking: { type: "enabled" },
-      extra_body: { reasoning_effort: "max" },
+      reasoning_effort: "max",
     }
   );
 });
@@ -39,7 +41,7 @@ test("buildThinkingRequestOptions uses the same enabled payload for volces endpo
 test("buildThinkingRequestOptions accepts high reasoning effort for DeepSeek", () => {
   assert.deepEqual(buildThinkingRequestOptions(true, "https://api.deepseek.com", "high", "deepseek-v4-pro"), {
     thinking: { type: "enabled" },
-    extra_body: { reasoning_effort: "high" },
+    reasoning_effort: "high",
   });
 });
 
@@ -64,7 +66,7 @@ test("buildThinkingRequestOptions returns empty object for non-thinking model wh
 test("buildThinkingRequestOptions enables thinking for deepseek-v4-flash (same format as pro)", () => {
   assert.deepEqual(buildThinkingRequestOptions(true, "https://api.deepseek.com", "max", "deepseek-v4-flash"), {
     thinking: { type: "enabled" },
-    extra_body: { reasoning_effort: "max" },
+    reasoning_effort: "max",
   });
 });
 
@@ -72,6 +74,6 @@ test("buildThinkingRequestOptions enables thinking for deepseek-v4-flash (same f
 test("buildThinkingRequestOptions accepts low reasoning effort for DeepSeek", () => {
   assert.deepEqual(buildThinkingRequestOptions(true, "https://api.deepseek.com", "low", "deepseek-v4-pro"), {
     thinking: { type: "enabled" },
-    extra_body: { reasoning_effort: "low" },
+    reasoning_effort: "low",
   });
 });
