@@ -1,9 +1,0 @@
-metric,value,p,note
-endpoint_titre_log2,3.429448,,cut-off=2.1x阴性均值OD
-welch_t,26.887165,0.0,log2 滴度，双侧
-mannwhitney_U,0.0,0.004329,ties+连续性校正，权威口径
-ED50_log2dose,8.000191,,4PL 变量投影 NLS
-hill_b,1.500084,,Hill 斜率
-GMT_fold_change,2214.860316,,vs 未免疫
-protection_rate_vax,0.875,0.000699,1 尾 Fisher + 效应量 log10 载量降幅
-elispot_median_diff_SFC,846.0,0.002165,每百万 PBMC 斑点
