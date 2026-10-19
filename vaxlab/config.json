@@ -1,0 +1,43 @@
+{
+  "project": "VaxLab mRNA vaccine optimization pipeline",
+  "target_antigen": "SARSr-CoV-S_2P",
+  "reference_strain": "hCoV-Wuhan-Hu-1",
+  "reference_source": "UniProt P0DTC2 (SPIKE_SARS2, Wuhan-Hu-1), 1273 aa; cross-checked identical to NCBI RefSeq YP_009724390.1 (reference/YP_009724390.1_spike_wuhan.fasta)",
+  "antigen": {
+    "name": "SARSr-CoV-S_2P",
+    "source_fasta": "reference/P0DTC2_spike.fasta",
+    "construct": "primary candidate = P0DTC2 residues 319-857 (539 aa, RBD + fusion-peptide/HR1 region) with furin-proximal double proline R682P/R685P; full-length 2P sites K986P/V987P are outside the construct window and tracked in silico only",
+    "length_residues": 539,
+    "engineering": "R682P/R685P within construct; escape-hotspot variant scan K417N/E484A/N501Y within construct",
+    "ea_range": [70, 80]
+  },
+  "codon_optimization": {
+    "host": "Homo sapiens",
+    "targetGC": 0.5,
+    "gcWindow": 100,
+    "gcRange": 0.05,
+    "rank_weights": { "expr": 0.6, "stability": 0.4 }
+  },
+  "gates": {
+    "ea_min": 70,
+    "ea_max": 80,
+    "gc_min": 0.45,
+    "gc_max": 0.55,
+    "encapsulation_min": 90.0,
+    "pdi_max": 0.2,
+    "particle_size_max_nm": 120.0
+  },
+  "lnp": {
+    "factors": {
+      "np_ratio": { "low": 4, "center": 7, "high": 10 },
+      "flow_ratio": { "low": 30, "center": 45, "high": 60, "note": "lipid:ethanol flow ratio, 30:1 to 60:1" },
+      "ethanol_pct": { "low": 10, "center": 30, "high": 50 }
+    },
+    "responses": ["encapsulation_pct", "pdi", "particle_size_nm"]
+  },
+  "statistics": {
+    "alpha": 0.05,
+    "titre_cutoff_factor": 2.1,
+    "low_n_threshold": 5
+  }
+}
