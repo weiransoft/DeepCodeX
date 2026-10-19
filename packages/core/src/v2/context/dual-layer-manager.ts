@@ -114,6 +114,15 @@ export interface DualLayerContextConfig {
    * 以及文件片段内容读取的根路径定位。
    */
   projectRoot: string;
+  /**
+   * 跨项目经验注入开关（需求121 修复新增，默认 true 保持向后兼容）
+   *
+   * - true：全局层经验（experience_success / experience_failure）跨项目注入；
+   * - false：仅注入"当前项目作用域内"或"无作用域标记（通用）"的经验，
+   *   其他项目沉淀的经验（含项目路径、业务语义等具体信息）不再进入本会话上下文，
+   *   避免跨会话/跨项目上下文污染（需求121 场景：EGFR 检查会话混入 COVID-19 项目上下文）。
+   */
+  crossProjectExperienceEnabled?: boolean;
 }
 
 /**
@@ -304,6 +313,9 @@ export class DualLayerContextManager {
       scoring: config.scoring ?? {},
       defaultTokenBudget: config.defaultTokenBudget ?? DEFAULT_TOKEN_BUDGET,
       projectRoot: config.projectRoot,
+      // 需求121 修复：跨项目经验注入开关透传到 config（缺省 undefined →
+      // isCrossProjectExperienceEnabled() 视为 true，向后兼容旧调用方）
+      crossProjectExperienceEnabled: config.crossProjectExperienceEnabled,
     };
   }
 
@@ -411,38 +423,50 @@ export class DualLayerContextManager {
 
     // 4.2 V2-P3 全局层：UserGlobalMemory 片段（直接保留，P0-3 修复：复用 injectIntoSystemPrompt）
     // 仅当 userGlobalMemory 注入时收集；空记忆或异常降级为无片段（不中断流程）
-    try {
-      const userMemorySnippets = this.collectUserGlobalMemorySnippets(userId);
-      directRetainSnippets.push(...userMemorySnippets);
-    } catch {
-      // UserGlobalMemory 收集失败：降级为无片段（不中断整体流程）
+    // 需求121 修复：跨项目注入关闭时跳过——用户全局记忆常含其他项目的具体语义
+    // （项目路径、项目名、业务事实），是跨会话上下文污染的主要来源。
+    if (this.isCrossProjectExperienceEnabled()) {
+      try {
+        const userMemorySnippets = this.collectUserGlobalMemorySnippets(userId);
+        directRetainSnippets.push(...userMemorySnippets);
+      } catch {
+        // UserGlobalMemory 收集失败：降级为无片段（不中断整体流程）
+      }
     }
 
     // 4.3 V2-P3 全局层：DomainKnowledge 片段（直接保留，P0-1 修复：从 GlobalContext.domainKnowledge 读取）
     // 始终执行（仅依赖已加载的 globalContext，零额外依赖，P1-3 修复统一降级语义）
-    try {
-      const domainSnippets = this.collectDomainKnowledgeSnippets(globalContext);
-      directRetainSnippets.push(...domainSnippets);
-    } catch {
-      // DomainKnowledge 收集失败：降级为无片段（不中断整体流程）
+    // 需求121 修复：跨项目注入关闭时跳过——领域知识（概念库/规则库）按项目沉淀，
+    // 注入其他项目的领域概念会诱导模型关联无关项目上下文。
+    if (this.isCrossProjectExperienceEnabled()) {
+      try {
+        const domainSnippets = this.collectDomainKnowledgeSnippets(globalContext);
+        directRetainSnippets.push(...domainSnippets);
+      } catch {
+        // DomainKnowledge 收集失败：降级为无片段（不中断整体流程）
+      }
     }
 
     // 4.4 V2-P3 全局层：RecommendedExperience 片段（直接保留，P0-2 修复：recordAccess=false）
     // 仅当 experienceRecommender 注入时收集；recommend() 异常降级为无片段
     // P1-2 修复：先收集推荐经验，记录已推荐的经验 id，后续 collectExperienceSnippets 兜底时排除
+    // 需求121 修复：跨项目注入关闭时跳过推荐通道（推荐源同为全局经验库），
+    // 避免 RAG 推荐把其他项目经验带入本会话。
     const recommendedIds = new Set<string>();
-    try {
-      const recommendedSnippets = this.collectRecommendedExperienceSnippets(taskContext);
-      for (const s of recommendedSnippets) {
-        // 从 source 提取经验 id（source 格式：global:experience:recommendation:<id>）
-        const id = s.source.split(":").pop();
-        if (id) {
-          recommendedIds.add(id);
+    if (this.isCrossProjectExperienceEnabled()) {
+      try {
+        const recommendedSnippets = this.collectRecommendedExperienceSnippets(taskContext);
+        for (const s of recommendedSnippets) {
+          // 从 source 提取经验 id（source 格式：global:experience:recommendation:<id>）
+          const id = s.source.split(":").pop();
+          if (id) {
+            recommendedIds.add(id);
+          }
         }
+        directRetainSnippets.push(...recommendedSnippets);
+      } catch {
+        // RecommendedExperience 收集失败：降级为无片段（不中断整体流程）
       }
-      directRetainSnippets.push(...recommendedSnippets);
-    } catch {
-      // RecommendedExperience 收集失败：降级为无片段（不中断整体流程）
     }
 
     // 4.5 全局层：HistoricalExperience 片段（V2-P1 兜底，直接保留）
@@ -805,6 +829,44 @@ export class DualLayerContextManager {
   // ------------------------------------------------------------------------
 
   /**
+   * 判断跨项目经验注入开关是否开启（需求121 修复）
+   *
+   * 缺省 true（向后兼容：旧调用方未传该字段时行为不变）。
+   * CLI 接线侧可显式传 false 关闭跨项目注入，彻底消除跨会话/跨项目上下文污染。
+   */
+  private isCrossProjectExperienceEnabled(): boolean {
+    return this.config.crossProjectExperienceEnabled !== false;
+  }
+
+  /**
+   * 规范化项目作用域路径（需求121 修复）
+   *
+   * - POSIX 化（/ 分隔符），消除 macOS/Linux 与 Windows 的 sep 差异
+   * - 去尾部分隔符，保证 "/a/b/" 与 "/a/b" 视为同一项目
+   */
+  private normalizeScopePath(rootPath: string | undefined): string {
+    if (!rootPath) return "";
+    const normalized = rootPath.split(path.sep).join("/");
+    return normalized.length > 1 && normalized.endsWith("/") ? normalized.slice(0, -1) : normalized;
+  }
+
+  /**
+   * 判断一条经验的沉淀来源项目是否在当前项目作用域内（需求121 修复）
+   *
+   * - 经验无 sourceProjectRoot（通用经验，含旧数据）→ 放行
+   * - 来源项目与当前项目根一致（完全匹配或以其为前缀子目录）→ 放行
+   * - 其他 → 拦截（跨项目经验不注入）
+   */
+  private isExperienceInScope(sourceProjectRoot: string | undefined, currentRoot: string): boolean {
+    if (!sourceProjectRoot) return true;
+    const src = this.normalizeScopePath(sourceProjectRoot);
+    if (!src) return true;
+    if (src === currentRoot) return true;
+    // 子目录也算同一项目作用域（如 monorepo 内按子包沉淀）
+    return src.startsWith(currentRoot + "/");
+  }
+
+  /**
    * 收集 UserProfile 片段（全局层）
    *
    * 提取 UserProfile 中的可注入字段，封装为 ContextSnippet。
@@ -866,10 +928,16 @@ export class DualLayerContextManager {
   ): ContextSnippet[] {
     const snippets: ContextSnippet[] = [];
     const exp = globalContext.historicalExperience;
+    // 需求121 修复：跨项目注入关闭时，按当前项目作用域过滤经验条目——
+    // 只保留"无来源项目（通用经验）"或"来源项目与当前项目一致"的条目，
+    // 其他项目沉淀的经验（含项目路径、业务语义等具体信息）不再注入本会话。
+    const scopeFilterActive = !this.isCrossProjectExperienceEnabled();
+    const currentRoot = this.normalizeScopePath(this.config.projectRoot);
 
     // 成功经验：按 createdAt 倒序取最近 N 条（排除已被推荐的经验）
     const successes = [...exp.successExperiences]
       .filter((s) => !excludeIds.has(s.id))
+      .filter((s) => !scopeFilterActive || this.isExperienceInScope(s.sourceProjectRoot, currentRoot))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, Math.ceil(MAX_EXPERIENCE_SNIPPETS / 2));
     for (const s of successes) {
@@ -884,6 +952,7 @@ export class DualLayerContextManager {
     // 失败经验：按 createdAt 倒序取最近 N 条（排除已被推荐的经验）
     const failures = [...exp.failureExperiences]
       .filter((f) => !excludeIds.has(f.id))
+      .filter((f) => !scopeFilterActive || this.isExperienceInScope(f.sourceProjectRoot, currentRoot))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, Math.floor(MAX_EXPERIENCE_SNIPPETS / 2));
     for (const f of failures) {
@@ -914,6 +983,10 @@ export class DualLayerContextManager {
    *   - 从返回值中提取 <user_memory>...</user_memory> 块内容作为片段 content
    *   - 空记忆时 injectIntoSystemPrompt 返回原 prompt（即空字符串），此时返回空数组
    *   - 注：UserGlobalMemoryManager 内部已做 facts 按 confidence 降序取 Top-10、2000 字符截断
+   *
+   * 需求121 修复：crossProjectExperienceEnabled=false 时跳过本片段——
+   * 用户全局记忆（如"项目 f7b6cb04 是 COVID-19 mRNA 疫苗研发"这类含项目语义的 facts）
+   * 是跨会话污染的主要来源之一，关闭跨项目注入时不再进入本会话上下文。
    *
    * 降级语义：
    *   - userGlobalMemory 未注入：返回空数组（无用户记忆片段）

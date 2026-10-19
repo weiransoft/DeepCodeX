@@ -49,7 +49,7 @@ test("LLM_API_KEY 别名解析为 apiKey", () => {
     {
       env: {
         ...LOCAL_LLM_ENV,
-        LLM_API_KEY: "sk-7314d75a1e774abda07aa9c797b72326",
+        LLM_API_KEY: "sk-test",
         BASE_URL: "http://localhost:8000/v1",
       },
     },
@@ -57,7 +57,7 @@ test("LLM_API_KEY 别名解析为 apiKey", () => {
     DEFAULTS,
     {}
   );
-  assert.equal(resolved.apiKey, "sk-7314d75a1e774abda07aa9c797b72326");
+  assert.equal(resolved.apiKey, "sk-test");
 });
 
 test("LLM_MODEL 别名解析为 model", () => {
@@ -219,7 +219,7 @@ test("用户完整参数集成测试（LLM_BASE_URL + LLM_API_KEY + LLM_MODEL + 
     {
       env: {
         LLM_BASE_URL: "http://47.95.252.237:8003/v1",
-        LLM_API_KEY: "sk-7314d75a1e774abda07aa9c797b72326",
+        LLM_API_KEY: "sk-test",
         LLM_MODEL: "Qwen/Qwen3.6-27B",
         LLM_TIMEOUT: "1200",
       },
@@ -229,7 +229,7 @@ test("用户完整参数集成测试（LLM_BASE_URL + LLM_API_KEY + LLM_MODEL + 
     {}
   );
   assert.equal(resolved.baseURL, "http://47.95.252.237:8003/v1");
-  assert.equal(resolved.apiKey, "sk-7314d75a1e774abda07aa9c797b72326");
+  assert.equal(resolved.apiKey, "sk-test");
   assert.equal(resolved.model, "Qwen/Qwen3.6-27B");
   assert.equal(resolved.timeout, 1200);
   assert.equal(resolved.thinkingEnabled, true, "Qwen3 模型应默认启用 thinking");

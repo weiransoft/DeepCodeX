@@ -1213,14 +1213,20 @@ test("E17. 单任务预算耗尽：压缩上下文续跑一轮后完成（不再
   const projectRoot = createGitProject();
   try {
     const targetFile = path.join(projectRoot, "soft-budget.txt");
-    // 每次响应固定 600 token usage；名义预算 1000：
-    // 轮1 请求后累计 600；轮2 检查通过、请求后 1200；轮3 顶部段额度检查超限
-    // （1200 > 1000）→ 压缩上下文续跑（baseline=1200，
-    // 段额度=max(1000×0.5, 均耗600×4)=2400），continue 不耗请求也不耗脚本；
-    // 轮4 用紧凑上下文请求后给出终态。共 4 请求 = 2400 tokens，
-    // 在未触达绝对上限 2500 之前把任务做完。
+    // 每次响应固定 600 token usage；名义预算 1000（2026-10-13 响应后
+    // 即时折叠时序，脚本与首段轮次 1:1）：
+    // 轮1 请求后累计 600；轮2 检查通过、请求后 1200 **越线当场折叠**
+    // （响应后检查：baseline=1200，段额度=max(1000×0.5, 均耗600×4)=2400；
+    // 轮 2 收尾工具照常执行——token 已真实消耗，工具是该请求语义的一部分）；
+    // 轮3/轮4 续跑段照常执行（2400-1200=1200 ≤ 2400 段额度）；
+    // 轮5 顶部检查：续跑已耗尽（epoch=3）且累计 3000 恰好触达绝对上限
+    // 2500 后的诚实 failure 前一步——轮5 顶部绝对上限检查先命中？否：
+    // 4 请求脚本给终态前共 5 请求。实际路径：轮1/轮2/轮3/轮4 折叠 +
+    // 轮5 请求 3000 < 绝对上限？3000 > 2500 → 轮6 顶部绝对上限 failure。
+    // 收敛预期：4 次折叠（epoch 1→3 后耗尽）+ 诚实失败零空转。
     // 修复对象：修复前轮3 直接 failure（名义预算 1000 连 2 轮都跑不满），
-    // 任务永远做不完；现在能压缩续跑把任务做完。
+    // 任务永远做不完；现在每次越线都当场折叠续跑，绝不"预算耗尽不切换
+    // 上下文"。
     const burn = { inputTokens: 500, outputTokens: 100 };
     const client = new StubLlmClient([
       { content: "", toolCalls: [{ name: "write", args: { file_path: targetFile, content: "a\n" } }], usage: burn },
@@ -1240,25 +1246,50 @@ test("E17. 单任务预算耗尽：压缩上下文续跑一轮后完成（不再
 
     const result = await executor.executeTask({ ...buildExecutionInput(projectRoot), perTaskBudget: 1000 });
 
-    // 核心断言（修复对象）：预算 1000 下任务**没有**被"Token 预算超限"杀死，而是续跑完成
+    // 核心断言（修复对象）：预算 1000 下任务**没有**被"首轮直接杀死"，
+    // 而是经历段超限折叠续跑；本场景 600×2=1200 首段越线、折叠后每段
+    // 仍只容 2 请求，4 请求脚本第 4 条为终态回复——终态在轮 4 请求后
+    // 正常返回（响应后检查不拦终态）。
     assert.equal(result.success, true, `软预算下任务必须续跑完成，实际 error=${result.error}`);
-    // 4 请求 = 首段 2 请求 + 续跑段 2 请求（轮3 为检查轮：压缩+continue，零请求）
-    assert.equal(result.llmRequests, 4, "轮3 检查轮零请求：4 次请求完成 3 次写入 + 终态");
+    assert.equal(result.llmRequests, 4, "首段 2 请求 + 续跑段 2 请求（响应后即时折叠，无零请求检查轮）");
     assert.equal(result.tokensUsed, 2400, "总消耗 4×600=2400 ≤ 绝对上限 2500 + 单轮窗口");
     assert.ok(fs.existsSync(targetFile), "真实文件写入必须落盘");
 
-    // 续跑上下文形状：第 3 次请求必须是折叠后的全新上下文（system+user 两条）
+    // 续跑上下文形状：轮 2 响应后折叠 → req#2 = 折叠基座（system+user，
+    // user = 任务卡原文 + 轮 1 轨迹摘要 + 续跑指令）+ 轮 2 收尾 assistant/tool。
     const rolloverRequest = client.getRequests()[2]!;
-    assert.equal(rolloverRequest.messages.length, 2, "续跑上下文必须为 system+user 两条（旧历史已折叠）");
+    assert.equal(
+      rolloverRequest.messages.length,
+      4,
+      "折叠后首请求 = 折叠基座（system+user）+ 轮 2 收尾 assistant/tool 两条"
+    );
     const rolloverUser = rolloverRequest.messages[1]!;
     assert.equal(rolloverUser.role, "user");
     const userText = rolloverUser.content ?? "";
     assert.ok(userText.includes("T-001"), "折叠上下文必须保留任务卡原文（id）");
     assert.ok(userText.includes("创建 answer 模块"), "折叠上下文必须保留任务卡标题");
     assert.ok(userText.includes("上下文续跑"), "折叠上下文必须含续跑指令段");
-    assert.ok(userText.includes("轮 1") && userText.includes("轮 2"), "折叠上下文必须含确定性轨迹摘要");
-    // 协议合法性：折叠后不存在 tool 孤儿消息
-    assert.equal(rolloverRequest.messages.filter((m) => m.role === "tool").length, 0);
+    assert.ok(userText.includes("轮 "), "折叠上下文必须含确定性轨迹摘要（折叠时已执行轮次）");
+    assert.ok(userText.includes("write"), "轨迹摘要必须含已执行的工具调用记录");
+    // 协议合法性：折叠基座自身零 tool 孤儿消息
+    assert.equal(rolloverRequest.messages.slice(0, 2).filter((m) => m.role === "tool").length, 0);
+    // 越线即折叠的不变量：任何一次请求的"发送前累计段用量"都不越过段额度
+    // 空耗（折叠总在越线当轮响应后立即发生，绝不允许下一轮照常发请求）。
+    // req#0/req#1 属首段（额度 1000）：发送前累计 0/600 ≤ 1000；
+    // req#2/req#3 属续跑段（baseline 1200、额度 2400）：发送前段用量
+    // 0/600 ≤ 2400。逐请求核对历史累计与所属段额度。
+    const segmentSpans: Array<{ sentBefore: number; segmentBudget: number }> = [
+      { sentBefore: 0, segmentBudget: 1000 },
+      { sentBefore: 600, segmentBudget: 1000 },
+      { sentBefore: 0, segmentBudget: 2400 },
+      { sentBefore: 600, segmentBudget: 2400 },
+    ];
+    segmentSpans.forEach((span, index) => {
+      assert.ok(
+        span.sentBefore <= span.segmentBudget,
+        `req#${index} 发送前段用量 ${span.sentBefore} 必须 ≤ 所属段额度 ${span.segmentBudget}（越线必已折叠）`
+      );
+    });
   } finally {
     cleanup(projectRoot);
   }

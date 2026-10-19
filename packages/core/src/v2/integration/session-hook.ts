@@ -25,6 +25,7 @@ import type { SessionMessage } from "./v1-adapters";
 import type { V2Config } from "./settings-bridge.js";
 import { DualLayerContextManager, type CodeMapProvider } from "../context/dual-layer-manager.js";
 import { GlobalContextManager } from "../context/global-context.js";
+import { ContextSynchronizer } from "../context/synchronizer.js";
 import { TaskContextManager } from "../context/task-context-manager.js";
 import type { TaskDefinition } from "../context/types.js";
 import { CodeMapGenerator, type CodeMap } from "../codemap/generator.js";
@@ -257,13 +258,19 @@ export class DefaultSessionContextHook implements SessionContextHook {
  * @param ttlMs 缓存 TTL（毫秒，可选；默认 30 分钟）
  * @param homeDir 引擎数据家目录根（可选，牢笼改造 C11）：global-context.json
  *                落 `<homeDir>/.deepcode/`；缺省回退进程家目录（CLI 行为不变）
+ * @param crossProjectExperienceEnabled 跨项目经验注入开关（可选，需求121 修复）：
+ *                false = 全局层经验/用户全局记忆/领域知识仅注入当前项目作用域内容，
+ *                杜绝跨会话/跨项目上下文污染；
+ *                未显式传参时兜底读 v2Config.context.crossProjectExperience，
+ *                两者均缺省 → false（需求121 默认关闭跨项目注入，CLI 无需改调用点）
  * @returns SessionContextHook 实例
  */
 export function createDualLayerContextHook(
   projectRoot: string,
   v2Config?: V2Config,
   ttlMs?: number,
-  homeDir?: string
+  homeDir?: string,
+  crossProjectExperienceEnabled?: boolean
 ): SessionContextHook {
   // V2 总开关与上下文子开关必须同时为 true 才启用 DualLayerContextManager
   // 任一未开启时降级为 DefaultSessionContextHook，refreshContextAsync 为空操作
@@ -272,6 +279,10 @@ export function createDualLayerContextHook(
     return new DefaultSessionContextHook(ttlMs);
   }
 
+  // 需求121 修复：跨项目经验注入开关解析优先级——
+  // 显式参数 > v2Config.context.crossProjectExperience > false（默认关闭跨项目注入）
+  const crossProjectEnabled = crossProjectExperienceEnabled ?? v2Config?.context?.crossProjectExperience ?? false;
+
   // 基础缓存 hook，用于同步供给 preBuildContext
   const hook = new DefaultSessionContextHook(ttlMs);
 
@@ -279,8 +290,13 @@ export function createDualLayerContextHook(
   // 文件缺失时降级返回默认空上下文（牢笼改造 C11：homeDir 透传实现按用户隔离）
   const globalManager = new GlobalContextManager(undefined, homeDir);
 
-  // 任务上下文管理器：内存级，进程结束即销毁
-  const taskManager = new TaskContextManager();
+  // 任务上下文管理器：内存级，进程结束即销毁。
+  // 需求121 修复：构造时注入归档回调——任务归档沉淀的全局经验（addSuccessExperience/
+  // addFailureExperience）自带 sourceProjectRoot（沉淀来源项目），注入侧在
+  // 跨项目开关关闭时据此过滤其他项目的经验，从源头切断"项目 A 的执行经验
+  // 污染项目 B 新会话"的路径。
+  const synchronizer = new ContextSynchronizer(globalManager, projectRoot);
+  const taskManager = new TaskContextManager(synchronizer.asArchiveCallback("default"));
 
   // CodeMap 提供者：基于 CodeMapGenerator 的会话级缓存
   // 同一 projectRoot 在 hook 生命周期内复用同一个 generator 实例
@@ -311,6 +327,8 @@ export function createDualLayerContextHook(
       window: {},
       scoring: {},
       defaultTokenBudget: v2Config.context?.tokenBudget ?? 100_000,
+      // 需求121 修复：透传跨项目经验注入开关（显式参数 > v2 配置 > 默认 false）
+      crossProjectExperienceEnabled: crossProjectEnabled,
     },
     globalManager,
     taskManager,

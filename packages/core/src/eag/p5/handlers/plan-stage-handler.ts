@@ -1774,6 +1774,46 @@ export function buildSynthesizedTasksContent(objective: string, taskId: string):
     .trim()
     .slice(0, MAX_SYNTHESIZED_TITLE_CHARS);
 
+  // ======== 合成卡复杂度守卫（2026-10-14 P1 修复"元任务整段下发"根因） ========
+  // 历史痛点（run add68b75f656 T-025）：objective="完成后续修复+调查eag不执行Bug"
+  // 被折叠成单行单卡 → 40 轮/200K 执行器根本跑不完 → 折叠续跑也跑不完 →
+  // 死折叠 + 误报"工具循环达上限"。执行器 40 轮硬上限内不存在可达终态。
+  //
+  // 守卫策略（保守收敛，不破坏单卡返回契约）：
+  // 1. 标题超长（>MAX_SYNTHESIZED_TITLE_CHARS 说明 objective 本身被截断了，
+  //    有实质内容被吞掉）；且
+  // 2. 含多个阶段标记动词（修复/调查/实现/完成/添加/移除/重构等任一 ≥2 次）；
+  // → 在 acceptance 里把 objective 按句号/分号拆成多条 bullet point，
+  //    给执行器模型明确的子任务边界（"要做 A、B、C 三件事，一件一件来"），
+  //    同时追加一条说明提示"本卡目标较长，建议拆分为多张"。
+  //
+  // 不主动拆卡的原因：buildSynthesizedTasksContent 返回值被调用方当作
+  // "完整 tasks.md 内容"消费，改成多张卡会破坏依赖方假设（parseTasks
+  // 期待 AUTO 合成卡只有 T-001）。acceptance 拆条既安全又有效。
+  const originalTrimmed = objective.trim();
+  const titleTruncated = originalTrimmed.length > MAX_SYNTHESIZED_TITLE_CHARS;
+  // 阶段标记动词（中文 + 英文都覆盖，按出现次数判多阶段）
+  const PHASE_VERB_PATTERN =
+    /(修复|调查|实现|完成|添加|移除|重构|开发|部署|测试|修|加|改|删|fix|investigate|implement|complete|add|remove|refactor|develop|deploy|test)/gi;
+  const phaseVerbMatches = originalTrimmed.match(PHASE_VERB_PATTERN);
+  const phaseVerbCount = phaseVerbMatches ? phaseVerbMatches.length : 0;
+  const isComplexObjective = titleTruncated || phaseVerbCount >= 2;
+
+  // acceptance 行：正常单卡留空；复杂目标追加拆条说明
+  const acceptanceLine = isComplexObjective
+    ? `- acceptance: ${buildComplexAcceptanceHint(originalTrimmed)}`
+    : "- acceptance:";
+
+  // 记录 warn（调用方可通过 ctx.logger 消费；此函数为纯函数，log 由调用方执行）
+  // 注意：此函数是导出的纯工厂，不可引入 ctx.logger——warn 语义通过注释+acceptance 拆条承载
+  if (titleTruncated || phaseVerbCount >= 3) {
+    console.warn(
+      `[EAG-P5] buildSynthesizedTasksContent：目标复杂度较高（长度 ${originalTrimmed.length}，` +
+        `阶段动词 ${phaseVerbCount} 次），合成卡 ${taskId} 已追加 acceptance 拆条。` +
+        `建议调用方考虑拆分为多张范围明确的任务卡。`
+    );
+  }
+
   return [
     "<!-- EAG-P5 任务清单（由自主目标自动生成，可手工编辑补充 files/acceptance） -->",
     "",
@@ -1784,9 +1824,34 @@ export function buildSynthesizedTasksContent(objective: string, taskId: string):
     "- files:",
     "- deletions:",
     "- symbols:",
-    "- acceptance:",
+    acceptanceLine,
     "",
   ].join("\n");
+}
+
+/**
+ * 为复杂目标构造 acceptance 拆条（辅助函数，2026-10-14 P1）。
+ *
+ * 把超长/多阶段 objective 按句号、分号、换行拆成多条 bullet point，
+ * 给执行器明确子任务边界。每条截断到 120 字符（acceptance 单行不宜过长）。
+ * 末尾追加一条提示，明确告知"本卡目标较长，建议一件一件完成"。
+ *
+ * @param objective 原始 objective 文本
+ * @returns 以 "完成 [x]；[y]；[z]；注意：目标较长请一件一件推进" 格式拼接的单行 acceptance 值
+ */
+function buildComplexAcceptanceHint(objective: string): string {
+  // 按句号、分号、问号、感叹号、换行、中文"然后"、"之后"拆
+  const rawParts = objective
+    .split(/[。！？!?;；\n\r]/g)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  // 每个片段截断到 120 字符（acceptance 行不宜过长，单行超限会让 markdown 解析器困惑）
+  const truncated = rawParts.map((p) => (p.length > 120 ? p.slice(0, 120) + "..." : p));
+  // 拼回单行：最多保留前 5 个片段（再长 acceptance 行就太臃肿了）
+  const capped = truncated.slice(0, 5);
+  const joined = capped.join("；");
+  const suffix = "（本卡目标较长，含多个子阶段，请一件一件完成后再进入下一件——避免一次性打包在 40 轮内烧完而无终态）";
+  return joined + suffix;
 }
 
 /**

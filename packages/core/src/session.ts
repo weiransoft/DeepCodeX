@@ -103,6 +103,9 @@ import {
 import { logApiError } from "./common/error-logger";
 // T8：compact 链路进度日志（JSONL 事件 + console.debug 人类可读行）
 import { logCompactEvent } from "./common/compact-logger";
+// 确定性四级压缩提供者（2026-10-12 compactStrategy=deterministic 分支接入，
+// 见 docs/dev/context-budget-provider.md §3.2）
+import { DeterministicContextBudgetProvider } from "./context-budget";
 import { logSedimentEvent } from "./common/sediment-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./common/debug-logger";
 import { describeLlmError, getLlmErrorDetails } from "./common/llm-error";
@@ -149,7 +152,8 @@ import { CommandSafety } from "./v2/approval/command-safety";
 // 详细设计决策见 docs/dev/ADR-EAG-001-experimental-status.md。
 // 涉及模块：LoopGuard / Evaluator / Coding / Testing / Design / LongHorizon / RLIS /
 // DevOps / Autonomous / Graph / Dynamic / Interrupts
-import type { LoopGuard } from "./common/loop-guard";
+import type { LoopGuard, TurnGuardConfig } from "./common/loop-guard";
+import { TurnGuard } from "./common/loop-guard";
 import type {
   IndependentEvaluator,
   RedlineDefinition,
@@ -623,6 +627,12 @@ export type SessionManagerOptions = {
     mcpServers?: Record<string, McpServerConfig>;
     permissions?: Required<PermissionSettings>;
     enabledSkills?: Record<string, boolean>;
+    /**
+     * 会话历史 compact 策略（docs/dev/context-budget-provider.md §3.2）。
+     * 由 SessionOptions 实现方从 ResolvedDeepcodingSettings.compactStrategy 透传，
+     * 缺省（undefined）等价 "llm-summary"（走既有 LLM 摘要路径，行为零变化）。
+     */
+    compactStrategy?: "llm-summary" | "deterministic";
   };
   renderMarkdown: (text: string) => string;
   onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
@@ -682,6 +692,15 @@ export type SessionManagerOptions = {
    * - 跨 session 单例仅适用于 autonomous 长程任务场景（§5.12.3 AU-6 熔断回滚需跨迭代跟踪）
    */
   loopGuard?: LoopGuard;
+  /**
+   * 需求123/124：普通会话循环护栏配置（可选注入）
+   *
+   * 控制单 turn 的迭代轮数上限（默认 40）、连续工具全失败上限（默认 3）、
+   * Token 总预算（默认 2M）。触达轮数/连续失败上限时暂停并咨询用户是否继续，
+   * 触达 Token 预算时直接终止——修复"死循环烧 Token 直至会话异常退出"。
+   * 缺省使用 DEFAULT_TURN_GUARD_CONFIG。
+   */
+  turnGuard?: Partial<TurnGuardConfig>;
   /**
    * Web 个人工作区牢笼：引擎数据家目录（docs/dev/web-workspace.md §3 / C1）。
    *
@@ -1384,6 +1403,11 @@ export class SessionManager {
     mcpServers?: Record<string, McpServerConfig>;
     permissions?: Required<PermissionSettings>;
     enabledSkills?: Record<string, boolean>;
+    /**
+     * 会话历史 compact 策略（docs/dev/context-budget-provider.md §3.2）。
+     * 缺省（undefined）等价 "llm-summary"，compactSession 据此分流确定性压缩分支。
+     */
+    compactStrategy?: "llm-summary" | "deterministic";
   };
   private readonly onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   private readonly onSessionEntryUpdated?: (entry: SessionEntry) => void;
@@ -1444,6 +1468,15 @@ export class SessionManager {
   // EAG-P0 外挂字段（可选注入，未注入时主循环行为不变，§5.4 / §5.2.1）
   private readonly evaluator?: IndependentEvaluator;
   private readonly loopGuard?: LoopGuard;
+  // 需求123/124：普通会话循环护栏
+  // turnGuard：每 turn 入口经 getOrCreateTurnGuard 获取（同 turn 复用、用户确认继续时
+  // acknowledgeAndContinue 清零咨询计数、新任务 resetTurnGuard 重置）。
+  // 单活跃会话模型（this.activeSessionId 全局唯一 + isInterrupted 保证上一 turn 已退出），
+  // 单实例即可承载；连续失败/轮数上限触达 → 暂停咨询用户，Token 预算触达 → 终止。
+  // turnGuardConfig：缺省 DEFAULT_TURN_GUARD_CONFIG（maxTurns=40 / 连续失败 3 轮 /
+  // Token 预算 2M），由 options 透传。
+  private turnGuard?: TurnGuard;
+  private readonly turnGuardConfig?: Partial<TurnGuardConfig>;
   private readonly evaluatorRedlines?: ReadonlyArray<RedlineDefinition>;
   // EAG-P2 批次 9 S5 外挂字段（可选注入，未注入时 /eag-build 命令不可用，§4.7 / §4.9）
   private readonly codingOrchestrator?: CodingOrchestrator;
@@ -1647,6 +1680,9 @@ export class SessionManager {
     // EAG-P0 外挂字段赋值（可选注入，未注入时为 undefined，主循环行为不变）
     this.evaluator = options.evaluator;
     this.loopGuard = options.loopGuard;
+    // 需求123/124：循环护栏配置透传（实例本身在首个 turn 入口懒构造，
+    // 保证 settings 解析完成后再读取覆盖值）
+    this.turnGuardConfig = options.turnGuard;
     this.evaluatorRedlines = options.evaluatorRedlines;
     // EAG-P2 批次 9 S5 外挂字段赋值（可选注入，未注入时 /eag-build 命令不可用）
     this.codingOrchestrator = options.codingOrchestrator;
@@ -2510,6 +2546,10 @@ export class SessionManager {
     let refusal: string | null = null;
     let usage: ModelUsage | null = null;
     let streamCompleted = false;
+    // 2026-10-19 停止按钮修复：标记是否因 abort 提前 break（用户主动停止）。
+    // 正常 stream 结束（item.done）时 streamCompleted 会被设为 true，
+    // abort break 则不会——需要区分两者，让 abort break 跳过 disconnected 错误检查。
+    let abortedBreak = false;
     const responseChunks: unknown[] = [];
     const toolCallsByIndex = new Map<
       number,
@@ -2542,12 +2582,28 @@ export class SessionManager {
       // fork 增强：InjectInterruptError 中断检查（嵌入每次迭代头部）
       const iterator = (response as AsyncIterable<Record<string, unknown>>)[Symbol.asyncIterator]();
       for (;;) {
+        // 2026-10-19 停止按钮修复：在等待 chunk 之前先检查 abort 信号。
+        // 用户点击停止按钮时 sessionController.abort() → forwardAbort() → attemptController.abort()。
+        // 如果已 abort，立即 break 出循环，不再等待新 chunk（让 SDK 的 abort 自行清理底层 fetch）。
+        if (attemptController.signal.aborted) {
+          abortedBreak = true;
+          break;
+        }
         const item = await Promise.race([iterator.next(), idleTimeoutPromise!]);
         if (item.done) {
           break;
         }
         const chunk = item.value;
         resetIdleTimer();
+
+        // 2026-10-19 停止按钮修复：每个 chunk 后再次检查 abort 信号。
+        // 原因：用户可能在两个 chunk 之间点击停止按钮，此时 iterator.next()
+        // 已经 resolve 了当前 chunk，但 abort 信号还没被消费。
+        // 在 resetIdleTimer 之后检查，防止 abort 与 idle timeout 竞态覆盖。
+        if (attemptController.signal.aborted) {
+          abortedBreak = true;
+          break;
+        }
 
         // E3 扩展点（ADR-DI-001 §5.1.3）：流式 chunk 之间检查中断队列
         //
@@ -2640,7 +2696,9 @@ export class SessionManager {
           }
         }
       }
-      if (!streamCompleted) {
+      // 2026-10-19 停止按钮修复：abort 提前 break 不算 stream disconnected
+      // （用户主动停止 ≠ 连接断开），允许循环正常走 finally 清理 + 返回已积累的部分内容
+      if (!streamCompleted && !abortedBreak) {
         throw new LlmStreamDisconnectedError();
       }
     } catch (error) {
@@ -2690,7 +2748,13 @@ export class SessionManager {
     const toolCalls = Array.from(toolCallsByIndex.entries())
       .sort(([left], [right]) => left - right)
       .map(([, toolCall]) => toolCall);
-    const normalizedToolCalls = this.normalizeLlmToolCalls(toolCalls);
+    let normalizedToolCalls = this.normalizeLlmToolCalls(toolCalls);
+    // 2026-10-19 停止按钮修复：abort 提前 break 时丢弃所有 tool calls。
+    // 用户主动停止 → 后续工具执行不应继续；只保留已积累的 content（给用户看到部分回复）。
+    // 这也防止了 truncated arguments JSON 导致下游执行异常。
+    if (abortedBreak) {
+      normalizedToolCalls = null;
+    }
     // 中间推理碎片治理（2026-09-24，Advisor 收窄版）：
     // 推理模型（qwen3.8 等）在多轮工具循环的**中间轮次**把零散叙述误输出在
     // 正文通道（delta.content）而非 reasoning_content 通道，产生「数据库连接池异常」
@@ -2927,6 +2991,8 @@ export class SessionManager {
     let reasoningContent = "";
     let refusal: string | null = null;
     let usage: ModelUsage | null = null;
+    // 2026-10-19 停止按钮修复：标记是否因 abort 提前 break（与 OpenAI 路径 abortedBreak 对等）
+    let abortedBreak = false;
     const responseChunks: unknown[] = [];
     // 工具调用桶：按 id 索引（provider 层保证 start → delta* → end 顺序），
     // 同时天然支持任意交错序列，不做「同时只有一个活跃桶」假设（§4.2 规则 1/3）
@@ -2969,6 +3035,14 @@ export class SessionManager {
         thinkingEnabled: request.thinkingEnabled,
         signal: safetyController.signal,
       })) {
+        // 2026-10-19 停止按钮修复：每个 event 后检查 abort 信号（与 OpenAI 路径双点检查对等）
+        // 原因：用户可能在两个 event 之间点击停止按钮，for-await-of 已经 resolve 了当前 event。
+        // 如果已 abort，标记 abortedBreak 并跳出循环（让 finally 清理，不抛错给上层）。
+        if (safetyController.signal.aborted) {
+          abortedBreak = true;
+          break;
+        }
+
         // E3 扩展点（ADR-DI-001 §5.1.3）：流式事件之间检查中断队列
         //
         // 与 OpenAI 通路（createChatCompletionStream）完全对等：
@@ -3101,7 +3175,11 @@ export class SessionManager {
     // 桶按 Map 插入序迭代 = 事件出现序，即对等 OpenAI 侧 index 排序后的语义；
     // 返回前过一次 normalizeLlmToolCalls（对齐 OpenAI 侧 L754）：Anthropic id 必然存在，
     // 实际不触发补 id 逻辑，仅为两通路返回体语义严格一致
-    const normalizedToolCalls = this.normalizeLlmToolCalls(Array.from(toolCallBuckets.values()));
+    let normalizedToolCalls = this.normalizeLlmToolCalls(Array.from(toolCallBuckets.values()));
+    // 2026-10-19 停止按钮修复：与 OpenAI 路径对等——abort 提前 break 时丢弃 tool calls
+    if (abortedBreak) {
+      normalizedToolCalls = null;
+    }
     // 中间推理碎片治理（2026-09-24，Advisor 收窄版）：与 OpenAI 通路
     // 三条件同时满足才降级：工具调用回合铁证 + reasoning 为空 + content 短 < 80
     // （判据已提取为 suggestion-auto.ts shouldDemoteToolCallFragment 纯函数，
@@ -3532,6 +3610,9 @@ ${agentInstructions}
     this.reportNewPrompt();
 
     const sessionId = crypto.randomUUID();
+    // 需求123/124：新任务（新会话）开始时重置循环护栏——护栏计数按"任务"累计，
+    // 新任务应获得完整的轮数/连续失败/Token 预算窗口，不受上一个任务残留计数影响。
+    this.turnGuard = new TurnGuard(this.turnGuardConfig);
     // fork 侧：文件历史协调器初始化会话分支（coordinator 与上游内联方法操作同一
     // <projectDir>/file-history/.git 仓库，此处用 coordinator 版本避免重复初始化）
     this.fileHistoryCoordinator.ensureFileHistorySession(sessionId);
@@ -3681,7 +3762,9 @@ ${agentInstructions}
       inheritedPermissions: this.getResolvedSettings().permissions,
     });
     const now = new Date().toISOString();
-    const previousPlanMode = Boolean(this.getSession(sessionId)?.planMode);
+    // 在 updateSessionEntry 覆盖 status 之前捕获会话快照（护栏暂停态判定依赖旧 status）
+    const session = this.getSession(sessionId);
+    const previousPlanMode = Boolean(session?.planMode);
     const nextPlanMode = Boolean(userPrompt.planMode);
     const updated = this.updateSessionEntry(sessionId, (entry) => ({
       ...entry,
@@ -3691,6 +3774,33 @@ ${agentInstructions}
       planMode: nextPlanMode,
       updateTime: now,
     }));
+
+    // 需求123/124：护栏暂停（waiting_for_user + 护栏消息）后用户输入新指令的恢复路径——
+    // activateSession 主循环的放行判定依赖 permissionPrompt（hasPermissionReply /
+    // isContinuePrompt），而"护栏咨询后的普通新指令"不带 permissionPrompt，
+    // 会在主循环第一行立即被 decideBeforeIteration() 再次拦截。
+    // 因此在 turn 入口消费护栏暂停态：本条输入是新指令（非 continue/权限回复——
+    // 这两类走上方早退分支并由主循环 acknowledgeAndContinue 放行）时，
+    // 清零轮数与连续失败计数，让新指令获得完整预算窗口。
+    // Token 总预算不清零（硬兜底跨指令保持）。
+    //
+    // 暂停态判定（架构审查缺陷1修复）：必须在 updateSessionEntry 把 status 覆盖为
+    // "pending" 之前捕获护栏暂停态——护栏触发时主循环把会话置为 waiting_for_user
+    // （Token 硬终止置 failed，failed 不消费：新指令也不应绕过 Token 硬兜底）。
+    // 此前实现扫描全历史"[执行护栏]"消息（.some()），导致"曾触发过护栏的长会话"里
+    // 任何普通新指令都会误清零未暂停的计数，护栏累计上限形同虚设——已废弃该判定。
+    // 护栏暂停态下用户回复任意内容（含"继续"等自然语言）都视为放行，
+    // 与咨询文案"回复任意内容继续"语义一致（架构审查缺陷2修复：不再要求 /continue 精确匹配）。
+    if (
+      updated &&
+      !hasUserPermissionReplies(userPrompt) &&
+      !this.isContinuePrompt(userPrompt) &&
+      session?.status === "waiting_for_user" &&
+      this.turnGuard &&
+      (this.turnGuard.getState().turnsCompleted > 0 || this.turnGuard.getState().consecutiveFailedTurns > 0)
+    ) {
+      this.turnGuard.acknowledgeAndContinue();
+    }
 
     // fork 侧：会话条目更新失败（竞态下被清理）时兜底创建新会话，保持 fork 既有行为
     if (!updated) {
@@ -7035,6 +7145,14 @@ ${agentInstructions}
       return;
     }
 
+    // 需求123/124：循环护栏实例获取（同一 SessionManager 生命周期内复用同一实例）
+    // —— 护栏计数跨 turn 累积：40 轮 = 整个任务累计 40 次 LLM 迭代，
+    //    触达即暂停咨询；用户任何后续消息（确认继续 / 澄清指令）都视为放行，
+    //    acknowledgeAndContinue() 清零轮数与连续失败计数（Token 总量不清零）。
+    if (!this.turnGuard) {
+      this.turnGuard = new TurnGuard(this.turnGuardConfig);
+    }
+
     // 主对话流式安全参数：与 settings.timeout 对齐，防止 LLM 长期无响应或 reasoning 无限增长。
     // OpenAI 路径当前依赖 SDK 请求级 timeout（默认 600s），此处额外提供流式整体超时；
     // Anthropic 路径在 createLlmMessageStream 中通过 AbortController 实现，因 Anthropic SDK 未配置 timeout。
@@ -7133,6 +7251,50 @@ ${agentInstructions}
           return;
         }
 
+        // 需求123/124：TurnGuard 循环护栏判定（每轮 LLM 请求前）
+        // 触达上限 ≠ 报错崩溃：
+        // - terminate_token_budget / terminate_model_loop → 硬终止，会话标记 failed
+        // - consult_user_* → 会话转 waiting_for_user 暂停，等待用户指示
+        const guard = this.turnGuard!;
+        const hasPermissionReply = Boolean(permissionPrompt && hasUserPermissionReplies(permissionPrompt));
+        const isContinuePrompt = Boolean(permissionPrompt && this.isContinuePrompt(permissionPrompt));
+        // 用户放行信号：本 turn 携带权限回复或 continue（即用户对上一轮暂停的回应），
+        // 且护栏此前处于暂停态（已有计数）——清零轮数/连续失败，给用户新的预算窗口
+        if (
+          (hasPermissionReply || isContinuePrompt) &&
+          (guard.getState().turnsCompleted > 0 || guard.getState().consecutiveFailedTurns > 0)
+        ) {
+          guard.acknowledgeAndContinue();
+        }
+
+        const guardDecision = guard.decideBeforeIteration();
+        if (!guardDecision.allow) {
+          const isHardTerminate =
+            guardDecision.action === "terminate_token_budget" || guardDecision.action === "terminate_model_loop";
+          this.updateSessionEntry(sessionId, (entry) => ({
+            ...entry,
+            status: isHardTerminate ? "failed" : "waiting_for_user",
+            failReason: isHardTerminate ? guardDecision.reason : entry.failReason,
+            updateTime: new Date().toISOString(),
+          }));
+          // 护栏消息走 buildSystemMessage（visible=true）：不产生 tool_calls、
+          // 不污染 assistantReply 语义，UI 按 system 消息原样展示
+          const guardMessage = this.buildSystemMessage(
+            sessionId,
+            isHardTerminate
+              ? `[执行护栏] ${guardDecision.reason}`
+              : `[执行护栏] ${guardDecision.reason}\n是否继续执行？回复任意内容继续，或调整任务后重新下达指令。`,
+            null,
+            true
+          );
+          this.appendSessionMessage(sessionId, guardMessage);
+          this.onAssistantMessage(guardMessage, false);
+          this.maybeNotifyTaskCompletion(sessionId, notify, startedAt, env);
+          return;
+        }
+
+        // 2026-10-19 停止按钮修复：compactSession 是 async，
+        // await 后必须立即检查中断信号，防止"用户已停止但 compact 仍继续"
         const pendingToolCallMessage = this.messageConverter.getTrailingPendingToolCallMessage(
           this.listSessionMessages(sessionId)
         );
@@ -7474,6 +7636,9 @@ ${agentInstructions}
 
         let waitingForUser = false;
         const responseUsage = response.usage ?? null;
+        // 需求123/124：本轮工具执行成败统计（TurnGuard 连续失败判定依据）
+        let turnToolFailedCount = 0;
+        let turnToolSucceededCount = 0;
         if (toolCalls) {
           if (permissionPlan?.askPermissions.length) {
             this.updateSessionEntry(sessionId, (entry) => ({
@@ -7496,11 +7661,34 @@ ${agentInstructions}
             messagePermissions: permissionPlan?.permissions,
           });
           waitingForUser = toolAppendResult.waitingForUser;
+          turnToolFailedCount = toolAppendResult.failedCount;
+          turnToolSucceededCount = toolAppendResult.succeededCount;
           // F8：turn 因工具等待用户响应而挂起（AskUserQuestion 提问 / ask_user 审批）时，
           // 标记"主模型提问待答"，使用户的答案在下一次输入时豁免 EAG 建议器直达主对话
           if (waitingForUser) {
             this.markAwaitingUserToolAnswer(sessionId);
           }
+        }
+
+        // 需求123/124：TurnGuard 记录本轮迭代（Token 累计 + 连续失败计数），
+        // 下一轮 LLM 请求前的 decideBeforeIteration() 据此判定是否暂停咨询/终止
+        this.turnGuard!.recordTurn({
+          tokensUsed: getTotalTokens(responseUsage),
+          hadToolCalls: toolCalls !== null,
+          allToolsFailed: toolCalls !== null && turnToolSucceededCount === 0 && turnToolFailedCount > 0,
+        });
+
+        // 2026-10-19 新增：模型循环检测 —— 记录本轮 tool call 签名
+        // 连续 maxRepeatedToolCalls 次调用相同工具+相同参数 → 自动终止
+        if (toolCalls !== null && Array.isArray(toolCalls) && toolCalls.length > 0) {
+          // 适配：LLM 返回的 tool_call 结构是 { function: { name, arguments } }，
+          // 而 TurnGuard.recordToolCalls 期望 { name, arguments } 扁平结构
+          const adapted = toolCalls.map((tc) => {
+            const t = tc as Record<string, unknown>;
+            const fn = t.function as Record<string, unknown> | undefined;
+            return { name: String(fn?.name ?? t.name ?? ""), arguments: fn?.arguments ?? t.arguments };
+          });
+          this.turnGuard!.recordToolCalls(adapted);
         }
 
         if (this.isInterrupted(sessionId)) {
@@ -8013,6 +8201,14 @@ ${agentInstructions}
     // T8：compact 总耗时打点起点（compact_done 的 durationMs 基准）
     const compactStartedAt = Date.now();
     this.throwIfAborted(signal);
+    // compact 策略分支（2026-10-12，docs/dev/context-budget-provider.md §3.2）：
+    // deterministic 前置于 createLLMClient() 空判——确定性四级压缩零 LLM 请求，
+    // 无凭据场景也能压缩（否则"无凭据可压缩"落空）；llm-summary 走下方原路径，
+    // 含 no-llm-client 静默跳过语义，行为零变化。
+    if (this.getResolvedSettings().compactStrategy === "deterministic") {
+      await this.compactSessionDeterministic(sessionId, signal, compactStartedAt);
+      return;
+    }
     // B1：非流式调用改经 provider 抽象层（createLLMClient 按 settings.provider 路由
     // OpenAI/Anthropic），不再直连 OpenAI SDK；无凭据时保持静默返回（旧 client:null 语义）
     const llmClient = this.createLLMClient();
@@ -8077,6 +8273,7 @@ ${agentInstructions}
       rangeStart: startIndex,
       rangeEnd: endIndex,
       messageCount: sessionMessages.length,
+      strategy: "llm-summary",
     });
 
     // 提示词保持原有构造逻辑（getCompactPrompt），仅换成合成 SessionMessage 形态
@@ -8187,13 +8384,150 @@ ${agentInstructions}
     };
     sessionMessages.splice(endIndex, 0, summaryMessage);
     this.saveSessionMessages(sessionId, sessionMessages);
-    // T8：压缩落盘完成，记录消息总数（含 summary）与压缩总耗时
+    // T8：压缩落盘完成，记录消息总数（含 summary）与压缩总耗时。
+    // charsBefore/charsAfter：区间压缩前总字符 vs 摘要字符（摘要替代了整个区间，
+    // 即压缩后的有效载荷），与 deterministic 分支同字段口径，供压缩比观测。
     this.logCompactProgress(sessionId, {
       type: "compact_done",
       rangeStart: startIndex,
       rangeEnd: endIndex,
       messageCount: sessionMessages.length,
       durationMs: Date.now() - compactStartedAt,
+      strategy: "llm-summary",
+      charsBefore: sessionMessages
+        .slice(startIndex, endIndex)
+        .reduce((sum, m) => sum + (typeof m.content === "string" ? m.content.length : 0), 0),
+      charsAfter: compactedSummary.length,
+    });
+  }
+
+  /**
+   * 确定性四级压缩分支（compactStrategy = "deterministic"，2026-10-12 新增，
+   * 设计见 docs/dev/context-budget-provider.md §3.2）。
+   *
+   * 与 llm-summary 路径的四条硬性规则差异：
+   * 1. 不需要 LLM client（本方法在 createLLMClient() 空判之前被调用），
+   *    无凭据场景照常压缩——这是引入 deterministic 的核心收益之一；
+   * 2. 只回写 role === "tool" 消息的变更：provider 输出中 user/assistant 的
+   *    第 3 级整条占位结果丢弃不用——原引擎落盘不可逆（p5 是内存副本），
+   *    必须保护用户可见的 user/assistant 原文；tool 是膨胀主源（p5 收益 90%+
+   *    来自 tool 截断/丢弃），压缩力度不受实质影响；
+   * 3. 压缩后重估 entry.activeTokens（按落盘后消息字符 × 既有估算系数）：
+   *    否则主循环阈值检查（session.activeTokens > compactPromptTokenThreshold）
+   *    每轮重复命中，反复插入 "compacting..." 消息并产生打点风暴；
+   * 4. 打点单源：compact_start/compact_done 带 strategy 与 charsBefore/charsAfter。
+   *
+   * 落盘语义：条数不变、消息 id 与 compacted 标记保持原值
+   * （saveSessionMessages 为全量覆盖写）、meta.skillCatalog 与 system 消息
+   * 天然不变更（provider 不动 system；skillCatalog 为 system 角色）。
+   *
+   * @param sessionId 会话 ID
+   * @param signal 可选中止信号（压缩前检查）
+   * @param compactStartedAt 压缩起点时间戳（compact_done 的 durationMs 基准）
+   */
+  private async compactSessionDeterministic(
+    sessionId: string,
+    signal: AbortSignal | undefined,
+    compactStartedAt: number
+  ): Promise<void> {
+    this.throwIfAborted(signal);
+    // 与 llm-summary 路径相同的前置判定（T8 打点字段口径保持一致）
+    const sessionMessages = this.listSessionMessages(sessionId).filter((message) => !message.compacted);
+    if (sessionMessages.length === 0) {
+      this.logCompactProgress(sessionId, {
+        type: "compact_skip",
+        reason: "no-messages",
+        messageCount: 0,
+        strategy: "deterministic",
+      });
+      return;
+    }
+    const startIndex = sessionMessages.findIndex((message) => message.role !== "system");
+    if (startIndex === -1) {
+      this.logCompactProgress(sessionId, {
+        type: "compact_skip",
+        reason: "no-non-system-message",
+        messageCount: sessionMessages.length,
+        strategy: "deterministic",
+      });
+      return;
+    }
+    const searchStart = Math.floor(startIndex + ((sessionMessages.length - startIndex) * 2) / 3);
+    let endIndex = -1;
+    for (let i = Math.max(searchStart, startIndex); i < sessionMessages.length; i += 1) {
+      if (sessionMessages[i].role !== "tool") {
+        endIndex = i;
+        break;
+      }
+    }
+    if (endIndex === -1 || endIndex <= startIndex) {
+      this.logCompactProgress(sessionId, {
+        type: "compact_skip",
+        reason: "no-boundary-message",
+        rangeStart: startIndex,
+        rangeEnd: endIndex,
+        messageCount: sessionMessages.length,
+        strategy: "deterministic",
+      });
+      return;
+    }
+
+    const tokensBefore = this.getSession(sessionId)?.activeTokens ?? 0;
+    /** 逐条消息内容字符数（null 安全），供 charsBefore/charsAfter 与 activeTokens 重估共用 */
+    const contentChars = (content: string | null): number => (typeof content === "string" ? content.length : 0);
+    const charsBefore = sessionMessages.reduce((sum, m) => sum + contentChars(m.content), 0);
+    this.logCompactProgress(sessionId, {
+      type: "compact_start",
+      tokensBefore,
+      threshold: this.getCompactThresholdForLog(),
+      rangeStart: startIndex,
+      rangeEnd: endIndex,
+      messageCount: sessionMessages.length,
+      strategy: "deterministic",
+    });
+
+    // 请求前确定性四级压缩（纯函数，不改输入、不发 LLM 请求、不落盘）
+    const provider = new DeterministicContextBudgetProvider();
+    const compactedMessages = provider.compactForRequest(sessionMessages);
+
+    // 规则 2：只回写 tool 消息变更——user/assistant 的整条占位结果丢弃，
+    // 保护用户可见原文（provider 输出条数与输入一致，可按下标对位）。
+    const now = new Date().toISOString();
+    const savedMessages: SessionMessage[] = sessionMessages.map((original, index) => {
+      const compacted = compactedMessages[index];
+      if (original.role !== "tool" || compacted === undefined || compacted.content === original.content) {
+        return original;
+      }
+      // 仅替换 content，id/compacted 标记/createTime 等保持原值
+      return { ...original, content: compacted.content, updateTime: now };
+    });
+    this.saveSessionMessages(sessionId, savedMessages);
+
+    // 规则 3：按落盘后消息字符重估 activeTokens（estimateStreamTokens 为
+    // session 既有估算系数，与流式 token 估算同源，不新造口径），
+    // 保证主循环阈值检查在压缩后回落到阈值之下，不再重复触发。
+    const charsAfter = savedMessages.reduce((sum, m) => sum + contentChars(m.content), 0);
+    const estimatedActiveTokens = Math.round(
+      savedMessages.reduce(
+        (sum, m) => sum + (typeof m.content === "string" ? this.estimateStreamTokens(m.content) : 0),
+        0
+      )
+    );
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      activeTokens: estimatedActiveTokens,
+      updateTime: now,
+    }));
+
+    this.logCompactProgress(sessionId, {
+      type: "compact_done",
+      rangeStart: startIndex,
+      rangeEnd: endIndex,
+      messageCount: savedMessages.length,
+      durationMs: Date.now() - compactStartedAt,
+      strategy: "deterministic",
+      charsBefore,
+      charsAfter,
     });
   }
 
@@ -9397,7 +9731,7 @@ ${agentInstructions}
       permissionOverrides?: UserToolPermission[];
       messagePermissions?: MessageToolPermission[];
     } = {}
-  ): Promise<{ waitingForUser: boolean }> {
+  ): Promise<{ waitingForUser: boolean; failedCount: number; succeededCount: number }> {
     // 上游 v0.3.1：记录本批次已加载的技能名（避免同批次重复加载）
     const loadedSkillNames = new Set<string>();
     // 修复"工具调用卡死"2026-10-03：从 settings 解析 bash 超时（毫秒），
@@ -9472,13 +9806,22 @@ ${agentInstructions}
       toolExecutions.push(...executions);
     }
     if (this.isInterrupted(sessionId)) {
-      return { waitingForUser: false };
+      return { waitingForUser: false, failedCount: 0, succeededCount: 0 };
     }
     let waitingForUser = false;
+    // 需求124：统计本批次工具执行成败（TurnGuard 连续失败判定依据）——
+    // ok=false 计失败，ok=true 计成功；awaitUserResponse 挂起的工具不计入
+    // 任何一侧（等待用户不是失败）
+    let failedCount = 0;
+    let succeededCount = 0;
     const followUpMessages: SessionMessage[] = [];
     for (const execution of toolExecutions) {
       if (execution.result.awaitUserResponse === true) {
         waitingForUser = true;
+      } else if (execution.result.ok) {
+        succeededCount++;
+      } else {
+        failedCount++;
       }
       const toolFunction = this.messageConverter.findToolFunction(toolCalls, execution.toolCallId);
       // 上游 v0.3.1：技能加载结果（name === "skill"）携带 metadata，供 buildToolMessage 提取 skill 标记
@@ -9501,7 +9844,7 @@ ${agentInstructions}
     for (const followUpMessage of followUpMessages) {
       this.appendSessionMessage(sessionId, followUpMessage);
     }
-    return { waitingForUser };
+    return { waitingForUser, failedCount, succeededCount };
   }
 
   private cloneUserPromptForMeta(prompt: UserPromptContent): UserPromptContent {

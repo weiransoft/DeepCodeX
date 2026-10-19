@@ -61,9 +61,6 @@ import type { EagGraphRequest } from "./eag-graph-command";
 //   --requirement / --paradigm 参数构造 DesignLoopInput（CLI 内联参数模式）
 // 注：eag-design-command.ts 不依赖本模块，无循环依赖风险
 import { extractDesignLoopInputFromPrompt } from "./eag-design-command";
-// 共享参数解析工具（2026-10-14 修复：支持双引号值内 \" 转义，收敛 /eag-deploy 内联正则副本）
-// 注：eag-args.ts 无任何依赖，不构成循环引用
-import { parseEagArgs } from "./eag-args";
 
 // ============================================================================
 // DeployRequest 接口定义（EAG-P4 批次 13 Phase 7 §5.1）
@@ -1638,9 +1635,38 @@ export function extractDeployRequestFromPrompt(prompt: string): DeployRequest {
   // 截取前缀之后的部分作为参数字符串
   const argsPart = trimmed.slice(prefixMatch[0].length).trim();
 
-  // 步骤 3：解析 --key value 形式参数（共享实现，见 eag-args.ts；
-  // 支持双引号值内 \" 转义、单引号字面值、裸值与 flag 形式，重复参数首次匹配生效）
-  const args = parseEagArgs(argsPart);
+  // 步骤 3：用正则解析 --key value 形式参数
+  // 正则说明（关键设计：必须消费 key 与 value 之间的分隔符，且裸值必须用捕获组包裹）：
+  // - --([\w][\w-]*)                              匹配参数名（字母/下划线开头，可含字母数字下划线与连字符）→ 捕获组 1
+  // - (?:[=\s]+                                   分隔符（= 或空白，至少一个，必须消费以避免值丢失）
+  //   (?:"([^"]*)"                                双引号值 → 捕获组 2
+  //   |'([^']*)'                                  单引号值 → 捕获组 3
+  //   |(?!--)([^\s"']+)                           裸值（不以 -- 开头，避免误吞后续 flag）→ 捕获组 4
+  //   ))?                                         整个值组可选（?），支持 --dry-run flag（无值）形式
+  // - (?=\s|$)                                    前瞻断言：匹配结束位置必须是空白或字符串结尾
+  //
+  // 设计要点：
+  // - 分隔符 [=\s]+ 必须在值组内部，确保 --key value 形式的空格被消费（避免 value 丢失）
+  // - 裸值前的 (?!--) 负向前瞻，避免 --dry-run --env prod 中 --env 被误当作 --dry-run 的值
+  // - 裸值必须用 ([^\s"']+) 捕获组包裹，否则 match[4] 为 undefined（关键修复点）
+  // - 整个值组可选（?），支持 --dry-run flag（无值）形式
+  // - 前瞻 (?=\s|$) 确保匹配边界清晰，避免值尾部粘连
+  // - 全局匹配（g 标志），依次取出所有 --key value 对
+  const argPattern = /--([\w][\w-]*)(?:[=\s]+(?:"([^"]*)"|'([^']*)'|(?!--)([^\s"']+)))?(?=\s|$)/g;
+  const args: Record<string, string | true> = {};
+
+  // 注意：--dry-run 是 flag（无值），匹配时 value 部分为 undefined，记录为 true
+  // 注意：重复参数首次匹配生效（后续覆盖被跳过），与设计文档 §5.1 一致
+  let match: RegExpExecArray | null;
+  while ((match = argPattern.exec(argsPart)) !== null) {
+    const key = match[1];
+    // 三种值形式：双引号（match[2]）、单引号（match[3]）、裸值（match[4]）；均未匹配则为 flag（true）
+    const value = match[2] ?? match[3] ?? match[4] ?? true;
+    // 仅首次匹配生效（重复参数被跳过，对齐设计文档"首次匹配生效"约定）
+    if (!(key in args)) {
+      args[key] = value;
+    }
+  }
 
   // 步骤 4：校验 7 个必填参数并提取值
   // projectName: --project 参数

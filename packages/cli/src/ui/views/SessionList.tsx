@@ -2,6 +2,7 @@ import React, { useState, useMemo, useCallback } from "react";
 import { Box, Text, useInput, useWindowSize } from "ink";
 import type { SessionEntry, SessionStatus } from "@vegamo/deepcode-core";
 import { truncate } from "../components/MessageView/utils";
+import { formatTimestampInTimezone } from "../utils/index";
 
 type Props = {
   sessions: SessionEntry[];
@@ -9,6 +10,8 @@ type Props = {
   onCancel: () => void;
   onDelete?: (sessionId: string) => void;
   onRename?: (sessionId: string, newName: string) => void;
+  /** 需求122：展示时区（IANA 名，来自 settings.timezone / env.TIMEZONE，缺省东八区） */
+  displayTimezone?: string;
 };
 
 /**
@@ -39,7 +42,14 @@ export function filterSessions(sessions: SessionEntry[], query: string): Session
   });
 }
 
-export function SessionList({ sessions, onSelect, onCancel, onDelete, onRename }: Props): React.ReactElement {
+export function SessionList({
+  sessions,
+  onSelect,
+  onCancel,
+  onDelete,
+  onRename,
+  displayTimezone,
+}: Props): React.ReactElement {
   const [index, setIndex] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
   const [confirmDeleteSessionId, setConfirmDeleteSessionId] = useState<string | null>(null);
@@ -337,7 +347,7 @@ export function SessionList({ sessions, onSelect, onCancel, onDelete, onRename }
                       )}
                     </Box>
                     <Box width="100%">
-                      <Text dimColor>{formatTimestamp(session.updateTime)} </Text>
+                      <Text dimColor>{formatTimestampInTimezone(session.updateTime, displayTimezone)} </Text>
                     </Box>
                   </Box>
                 </Box>
@@ -395,18 +405,6 @@ export function SessionList({ sessions, onSelect, onCancel, onDelete, onRename }
       </Box>
     </Box>
   );
-}
-
-function formatTimestamp(value: string): string {
-  try {
-    const date = new Date(value);
-    if (Number.isNaN(date.valueOf())) {
-      return value;
-    }
-    return date.toLocaleString();
-  } catch {
-    return value;
-  }
 }
 
 export function formatSessionTitle(value: string, max = 70): string {

@@ -530,3 +530,73 @@ test("CS-09: asArchiveCallback 注入 TaskContextManager → 归档时触发同�
   const archivedCtx = taskManager.get("task-archive-001");
   assert.equal(archivedCtx, null, "归档后任务上下文应已删除");
 });
+
+// ============================================================
+// CS-10 ~ CS-12: 需求121 修复——sourceProjectRoot 沉淀来源项目标记
+// ============================================================
+
+test("CS-10: 构造透传 projectRoot → 归档沉淀的成功经验写入 sourceProjectRoot", () => {
+  // 准备：带 projectRoot 的同步器 + 归档回调
+  const projectRoot = "/Users/tester/projects/egfr-app";
+  const scopedSync = new ContextSynchronizer(globalManager, projectRoot);
+  const taskManager = new TaskContextManager(scopedSync.asArchiveCallback("default"));
+
+  const ctx = taskManager.create(
+    "task-scoped-001",
+    createTaskDef({ description: "EGFR 导入任务", taskType: "feature" })
+  );
+  taskManager.addIntermediateResult("task-scoped-001", "导入完成", "edit");
+  taskManager.updateState("task-scoped-001", "completed", 100, "完成");
+  taskManager.archive("task-scoped-001", true);
+
+  const global = globalManager.load("default");
+  const exp = global.historicalExperience.successExperiences[0];
+  assert.ok(exp, "归档应新增 1 条成功经验");
+  assert.equal(exp.sourceProjectRoot, projectRoot, "成功经验应写入沉淀来源项目根目录");
+});
+
+test("CS-11: 失败归档沉淀的失败经验同样写入 sourceProjectRoot", () => {
+  const projectRoot = "/Users/tester/projects/mrna-vaccine";
+  const scopedSync = new ContextSynchronizer(globalManager, projectRoot);
+  const taskManager = new TaskContextManager(scopedSync.asArchiveCallback("default"));
+
+  const ctx = taskManager.create("task-scoped-002", createTaskDef({ description: "质控失败任务", taskType: "bugfix" }));
+  taskManager.addThought("task-scoped-002", "序列校验超时", "执行失败");
+  taskManager.updateState("task-scoped-002", "failed", 50, "失败");
+  taskManager.archive("task-scoped-002", false);
+
+  const global = globalManager.load("default");
+  const exp = global.historicalExperience.failureExperiences[0];
+  assert.ok(exp, "失败归档应新增 1 条失败经验");
+  assert.equal(exp.sourceProjectRoot, projectRoot, "失败经验应写入沉淀来源项目根目录");
+});
+
+test("CS-12: 未透传 projectRoot（旧调用方）→ sourceProjectRoot 为 undefined（兼容旧数据放行语义）", async () => {
+  // 准备：不带 projectRoot 的同步器（既有 CS 用例的默认构造）
+  const global = createDefaultGlobalContext("default");
+  // TaskContext 完整构造（skillContext/version/temporaryData 等必填字段
+  // 仅为通过类型检查，buildSuccessExperience 不消费它们）
+  const ctx = synchronizer["buildSuccessExperience"]({
+    taskId: "task-legacy-001",
+    taskDefinition: createTaskDef(),
+    workingMemory: {
+      focusPoints: [],
+      thoughtHistory: [],
+      intermediateResults: [{ result: "旧路径完成", source: "edit", timestamp: new Date().toISOString() }],
+      temporaryData: {},
+      pendingItems: [],
+      contextWindow: [],
+    },
+    taskState: {
+      status: "completed",
+      progress: 100,
+      startedAt: new Date().toISOString(),
+      currentStage: "完成",
+    },
+    skillContext: { activeSkills: [], loadedHistory: [] },
+    version: 1,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  } as TaskContext);
+  assert.equal(ctx.sourceProjectRoot, undefined, "旧调用方（无 projectRoot）沉淀的经验不带来源项目标记");
+});

@@ -243,6 +243,191 @@ test("IT-01: 端到端注入（CodeMap 生成 → buildOptimizedContext → setS
   }
 });
 
+// ============================================================================
+// IT-05 ~ IT-07: 需求121 修复——跨项目经验注入过滤（上下文污染防线）
+// ============================================================================
+
+/**
+ * 构造注入侧集成组件（双项目共享同一 global-context.json 文件）
+ *
+ * @param projectRoot 当前会话的项目根目录
+ * @param globalFilePath 共享的全局上下文文件路径
+ * @param crossProjectEnabled 跨项目经验注入开关
+ * @returns dualLayer + taskManager（调用方负责 create 任务）
+ */
+function createInjectionFixture(
+  projectRoot: string,
+  globalFilePath: string,
+  crossProjectEnabled: boolean
+): { dualLayer: DualLayerContextManager; taskManager: TaskContextManager } {
+  const generator = new CodeMapGenerator({
+    projectRoot,
+    extensions: [".ts"],
+    excludeDirs: ["node_modules"],
+    maxFileSizeKb: 512,
+    incremental: false,
+    outputPath: ".deepcode/codemap.json",
+  });
+  const codeMapProvider = new TestCodeMapProvider(generator);
+  const globalManager = new GlobalContextManager(globalFilePath);
+  const taskManager = new TaskContextManager();
+  const scorer = new RelevanceScorer();
+  const progressiveLoader = new ProgressiveContextLoader({ tokenBudget: 100_000 });
+  const summarizer = new RuleBasedSummarizer();
+  const windowManager = new SlidingWindowManager({ tokenBudget: 100_000 }, scorer, progressiveLoader, summarizer);
+  const dualLayer = new DualLayerContextManager(
+    {
+      projectRoot,
+      window: {},
+      scoring: {},
+      defaultTokenBudget: 100_000,
+      crossProjectExperienceEnabled: crossProjectEnabled,
+    },
+    globalManager,
+    taskManager,
+    codeMapProvider,
+    scorer,
+    windowManager,
+    progressiveLoader,
+    summarizer
+  );
+  return { dualLayer, taskManager };
+}
+
+test("IT-05: 需求121——开关关闭时，其他项目沉淀的经验不注入当前会话上下文", async () => {
+  // macOS 临时目录存在 /var → /private/var symlink，作用域比对按 realpath 归一化，
+  // 测试断言前同样归一化，避免 symlink 差异误判
+  const egfrRoot = fs.realpathSync(createTmpProjectDir()); // 当前项目：EGFR 蛋白检查
+  const otherRoot = fs.realpathSync(createTmpProjectDir()); // 其他项目：COVID-19 mRNA 疫苗
+  const tmpGlobalDir = createTmpProjectDir();
+  const globalFilePath = path.join(tmpGlobalDir, "global-context.json");
+  try {
+    writeFile(egfrRoot, "src/check.ts", `export function check(): void {}\n`);
+
+    // ---- 沉淀阶段：其他项目（mRNA 疫苗）完成任务并归档 → 全局经验带 sourceProjectRoot ----
+    const globalManager = new GlobalContextManager(globalFilePath);
+    const otherSync = new ContextSynchronizer(globalManager, otherRoot);
+    const otherTaskManager = new TaskContextManager(otherSync.asArchiveCallback("default"));
+    otherTaskManager.create(
+      "vaccine-task",
+      createTestTaskDef({ description: "COVID-19 mRNA 疫苗研发导入", taskType: "feature" })
+    );
+    otherTaskManager.addIntermediateResult("vaccine-task", "截图URL指向项目 f7b6cb04", "code-gen");
+    otherTaskManager.updateState("vaccine-task", "completed", 1.0);
+    otherTaskManager.archive("vaccine-task", true);
+
+    // ---- 注入阶段：EGFR 项目新会话，开关关闭 ----
+    const { dualLayer, taskManager } = createInjectionFixture(egfrRoot, globalFilePath, false);
+    taskManager.create("egfr-session", createTestTaskDef({ description: "检查EGFR蛋白P00533是否导入成功" }));
+    taskManager.updateState("egfr-session", "in_progress", 0.1, "checking");
+
+    const snippets = await dualLayer.buildOptimizedContext("default", "egfr-session");
+
+    // 断言 1：无任何 success/failure 类经验片段（其他项目经验被过滤）
+    // 注：experience_pattern（全局抽象规律）/ execution_history（按 projectCode 分桶存储）
+    //     不属于"跨项目语义污染"通道，作用域过滤不拦截
+    const expSnippets = snippets.filter(
+      (s) =>
+        s.type === "experience_success" || s.type === "experience_failure" || s.type === "experience_recommendation"
+    );
+    assert.equal(
+      expSnippets.length,
+      0,
+      `开关关闭时其他项目经验不应注入（防污染），实际: ${expSnippets.map((s) => s.type + "|" + s.source).join("; ")}`
+    );
+    // 断言 2：污染内容（疫苗项目语义）完全不出现在任何片段中
+    const polluted = snippets.find((s) => s.content.includes("疫苗") || s.content.includes("f7b6cb04"));
+    assert.equal(polluted, undefined, "任何片段都不应包含其他项目的业务语义内容");
+    // 断言 3：任务层片段正常注入（当前会话自身上下文不受影响）
+    assert.ok(
+      snippets.find((s) => s.type === "task_definition"),
+      "当前会话任务层片段应正常注入"
+    );
+  } finally {
+    cleanupTmpDir(egfrRoot);
+    cleanupTmpDir(otherRoot);
+    cleanupTmpDir(tmpGlobalDir);
+  }
+});
+
+test("IT-06: 需求121——开关关闭时，当前项目沉淀的经验仍正常注入（作用域内放行）", async () => {
+  const projectRoot = createTmpProjectDir();
+  const tmpGlobalDir = createTmpProjectDir();
+  const globalFilePath = path.join(tmpGlobalDir, "global-context.json");
+  try {
+    writeFile(projectRoot, "src/check.ts", `export function check(): void {}\n`);
+
+    // ---- 沉淀阶段：当前项目自身完成任务归档 ----
+    const globalManager = new GlobalContextManager(globalFilePath);
+    const ownSync = new ContextSynchronizer(globalManager, projectRoot);
+    const ownTaskManager = new TaskContextManager(ownSync.asArchiveCallback("default"));
+    ownTaskManager.create("own-task", createTestTaskDef({ description: "EGFR 序列导入自检", taskType: "feature" }));
+    ownTaskManager.addIntermediateResult("own-task", "使用 PDBID 1M17 校验通过", "code-gen");
+    ownTaskManager.updateState("own-task", "completed", 1.0);
+    ownTaskManager.archive("own-task", true);
+
+    // ---- 注入阶段：同项目新会话，开关关闭 ----
+    const { dualLayer, taskManager } = createInjectionFixture(projectRoot, globalFilePath, false);
+    taskManager.create("own-session", createTestTaskDef({ description: "检查EGFR蛋白P00533是否导入成功" }));
+    taskManager.updateState("own-session", "in_progress", 0.1, "checking");
+
+    const snippets = await dualLayer.buildOptimizedContext("default", "own-session");
+
+    // 断言：本项目的成功经验仍注入（作用域内经验是合法复用，不是污染）
+    const expSnippets = snippets.filter((s) => s.type === "experience_success");
+    assert.ok(expSnippets.length >= 1, "当前项目沉淀的经验应在开关关闭时仍注入");
+    assert.ok(
+      expSnippets.some((s) => s.content.includes("EGFR 序列导入自检")),
+      "注入的应是本项目经验内容"
+    );
+  } finally {
+    cleanupTmpDir(projectRoot);
+    cleanupTmpDir(tmpGlobalDir);
+  }
+});
+
+test("IT-07: 需求121——开关开启时，其他项目经验恢复注入（旧行为向后兼容）", async () => {
+  const egfrRoot = createTmpProjectDir();
+  const otherRoot = createTmpProjectDir();
+  const tmpGlobalDir = createTmpGlobalDirForTest();
+  const globalFilePath = path.join(tmpGlobalDir, "global-context.json");
+  try {
+    writeFile(egfrRoot, "src/check.ts", `export function check(): void {}\n`);
+
+    // ---- 沉淀阶段：其他项目归档经验 ----
+    const globalManager = new GlobalContextManager(globalFilePath);
+    const otherSync = new ContextSynchronizer(globalManager, otherRoot);
+    const otherTaskManager = new TaskContextManager(otherSync.asArchiveCallback("default"));
+    otherTaskManager.create(
+      "vaccine-task2",
+      createTestTaskDef({ description: "mRNA 疫苗项目任务", taskType: "feature" })
+    );
+    otherTaskManager.addIntermediateResult("vaccine-task2", "疫苗项目解决方案", "code-gen");
+    otherTaskManager.updateState("vaccine-task2", "completed", 1.0);
+    otherTaskManager.archive("vaccine-task2", true);
+
+    // ---- 注入阶段：开关开启（显式 true 恢复旧行为）----
+    const { dualLayer, taskManager } = createInjectionFixture(egfrRoot, globalFilePath, true);
+    taskManager.create("egfr-session-2", createTestTaskDef({ description: "检查EGFR蛋白P00533" }));
+    taskManager.updateState("egfr-session-2", "in_progress", 0.1, "checking");
+
+    const snippets = await dualLayer.buildOptimizedContext("default", "egfr-session-2");
+
+    // 断言：开关开启时跨项目经验注入（与修复前行为一致）
+    const expSnippets = snippets.filter((s) => s.type === "experience_success");
+    assert.ok(expSnippets.length >= 1, "开关开启时跨项目经验应注入（向后兼容）");
+  } finally {
+    cleanupTmpDir(egfrRoot);
+    cleanupTmpDir(otherRoot);
+    cleanupTmpDir(tmpGlobalDir);
+  }
+});
+
+/** 临时目录工厂（IT-07 独立 global 目录） */
+function createTmpGlobalDirForTest(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "deepcode-it07-global-"));
+}
+
 test("IT-02: 归档同步闭环（archive(success) → ContextSynchronizer 回调 → global-context.json 落盘 SuccessExperience）", async () => {
   const projectRoot = createTmpProjectDir();
   const tmpGlobalDir = createTmpProjectDir();

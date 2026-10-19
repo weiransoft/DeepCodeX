@@ -8,6 +8,7 @@ import {
   // 融合两侧：上游新增 buildSkillCatalogPrompt（skill 工具目录提示），fork 保留 getDefaultSkillPrompt（默认 skill 注入）
   buildSkillCatalogPrompt,
   buildSkillDocumentsPrompt,
+  formatChinaTime,
   getDefaultSkillPrompt,
   getPlanModePrompt,
   getRuntimeContext,
@@ -406,10 +407,25 @@ test("getSystemPrompt does not include current date guidance", () => {
 });
 
 test("getRuntimeContext includes current date, model guidance, and additional working directories", () => {
+  // 需求122：日期片段升级为东八区声明。日期主体断言必须与生产代码同源生成
+  // （zh-CN long 月份、前导零），避免宿主机与东八区跨日时刻导致的偶发失败。
+  // getRuntimeContext 内部会调用 getSystemPrompt→getCurrentDateAndModelPrompt 再次取时间，
+  // 测试须在同一时刻点预生成 system prompt，保证两次取时一致。
   const now = new Date();
-  const expectedDate = `今天是${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日。随着对话的进行，时间在流逝。`;
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  }).formatToParts(now);
+  const get = (type: string): string => parts.find((p) => p.type === type)?.value ?? "";
+  const expectedDate = `今天是${get("year")}年${get("month")}${get("day")}日（东八区北京时间，当前时刻 `;
   const prompt = getRuntimeContext("/tmp/project", "deepseek-v4-pro", ["../shared", "/opt/project"]);
   assert.equal(prompt.includes(expectedDate), true);
+  // 当前时刻片段断言容差到分钟：生产 prompt 与测试各自取 new Date()，
+  // 跨秒边界时刻/秒为 60 的边界时刻不应导致偶发失败
+  assert.equal(prompt.includes(`（东八区北京时间，当前时刻 ${formatChinaTime(now).slice(0, 16)}`), true);
+  assert.equal(prompt.includes("随着对话的进行，时间在流逝。"), true);
   assert.equal(prompt.includes("当前LLM模型为deepseek-v4-pro，对话中可通过/model命令切换模型。"), true);
   assert.equal(prompt.includes("# Local Workspace Environment"), true);
   assert.equal(prompt.includes('"root path": "/tmp/project"'), true);

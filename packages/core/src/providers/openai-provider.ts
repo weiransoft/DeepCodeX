@@ -145,7 +145,7 @@ export class OpenAILLMClient implements LLMClient {
         {
           model: this.model,
           messages,
-          stream: true,
+          stream: true as const,
           ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
           ...(request.tools && request.tools.length > 0
             ? {
@@ -164,7 +164,7 @@ export class OpenAILLMClient implements LLMClient {
             this.settings.reasoningEffort,
             this.model
           ),
-        },
+        } as OpenAI.ChatCompletionCreateParamsStreaming,
         { signal: request.signal ?? undefined }
       );
 

@@ -41,6 +41,11 @@ export type DeepcodingEnv = Record<string, string | undefined> & {
   BASH_TIMEOUT_MS?: string;
   /** v1.1 新增：上下文窗口配置（预留，当前无消费方） */
   CONTEXT_WINDOW?: string;
+  /**
+   * 需求122：展示/提示时间用的 IANA 时区名（如 "Asia/Shanghai"、"America/New_York"）。
+   * 解析链与 bashTimeoutMs 同模式：systemEnv > projectSettings > projectEnv > userSettings > userEnv。
+   */
+  TIMEZONE?: string;
 };
 
 // 采纳上游 0.3.1：新增 "low" 推理档位
@@ -250,6 +255,14 @@ export type DeepcodingSettings = {
   contextWindow?: number | string;
   /** 上游 0.3.1 新增：自动 compact 阈值窗口 */
   autoCompactWindow?: number | string;
+  /**
+   * 会话历史 compact 策略（2026-10-12 新增，见 docs/dev/context-budget-provider.md §3.2）：
+   * - "llm-summary"（默认）：现行 LLM 摘要落盘路径（compactSession），行为零变化；
+   * - "deterministic"：确定性四级压缩（DeterministicContextBudgetProvider），
+   *   零 LLM 请求、无凭据也能压缩；仅回写 tool 消息变更，保护 user/assistant 原文。
+   * 非法值一律回落 "llm-summary"（fail-open，配置错误不阻断会话）。
+   */
+  compactStrategy?: "llm-summary" | "deterministic";
   model?: string;
   /** LLM provider 显式声明（最高优先级），未设置时按 env/model 前缀推断 */
   provider?: "openai" | "anthropic";
@@ -266,6 +279,11 @@ export type DeepcodingSettings = {
   telemetryEnabled?: boolean;
   notify?: string;
   webSearchTool?: string;
+  /**
+   * 需求122：展示/提示时间用的 IANA 时区名（如 "Asia/Shanghai" 东八区北京时间）。
+   * settings.timezone 配置或 env.TIMEZONE 环境变量；缺省/非法值回落 DEFAULT_DISPLAY_TIMEZONE。
+   */
+  timezone?: string;
   /** 上游 0.3.1 新增：多模态与 DeepSeek Files API 配置 */
   multimodal?: MultimodalMode;
   filesApiEnabled?: boolean;
@@ -332,6 +350,11 @@ export type ResolvedDeepcodingSettings = {
   contextWindow: number;
   /** 上游 0.3.1 新增：自动 compact 阈值窗口（默认 contextWindow/2，不超过 contextWindow） */
   autoCompactWindow: number;
+  /**
+   * 会话历史 compact 策略（解析后恒为合法值，缺省/非法回落 "llm-summary"）。
+   * session.compactSession 据此选择 LLM 摘要（默认）或确定性四级压缩分支。
+   */
+  compactStrategy: "llm-summary" | "deterministic";
   debugLogEnabled: boolean;
   telemetryEnabled: boolean;
   /**
@@ -341,6 +364,12 @@ export type ResolvedDeepcodingSettings = {
   allowPrivateBaseURL: boolean;
   notify?: string;
   webSearchTool?: string;
+  /**
+   * 需求122：解析后的展示时区（IANA 名，恒为合法值）。
+   * 由 settings.timezone / env.TIMEZONE 合并校验得到，非法值回落 DEFAULT_DISPLAY_TIMEZONE；
+   * 供 UI 时间格式化（formatTimestampInTimezone）与 system prompt 时间声明消费。
+   */
+  displayTimezone: string;
   /** 上游 0.3.1 新增：多模态解析模式与 DeepSeek Files API 配置 */
   multimodal: MultimodalMode;
   filesApiEnabled: boolean;
@@ -383,6 +412,43 @@ export const DEFAULT_FILE_REFRESH_MARGIN_SECONDS = 60 * 60;
 export const DEFAULT_FILE_QUOTA_CLEANUP_BATCH = 100;
 export const DEFAULT_MAX_REQUEST_FILES_BYTES = 128 * 1024 * 1024;
 export const MAX_FILES_API_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * 需求122：默认展示时区（东八区北京时间）。
+ *
+ * 用户可在 settings.json 的 `timezone` 字段或 `TIMEZONE` 环境变量覆盖为任意
+ * 合法 IANA 时区名；缺省与非法值（Intl 不识别）一律回落实本默认值，
+ * 保证 UI 时间与 system prompt 时间声明行为零回归。
+ */
+export const DEFAULT_DISPLAY_TIMEZONE = "Asia/Shanghai";
+
+/**
+ * 校验并归一化展示时区（需求122）。
+ *
+ * 合法性以 `Intl.DateTimeFormat` 是否接受该 IANA 时区名为准（Node 内置 ICU 数据源）；
+ * 非法/空值回落 `fallback`（默认 DEFAULT_DISPLAY_TIMEZONE），不抛异常（fail-open，
+ * 配置错误不阻断会话）。
+ *
+ * @param value 待校验的时区名（settings.timezone / env.TIMEZONE 原始值）
+ * @param fallback 回落值，默认 DEFAULT_DISPLAY_TIMEZONE
+ * @returns 恒为 Intl 可接受的 IANA 时区名
+ */
+export function resolveDisplayTimezone(value: unknown, fallback: string = DEFAULT_DISPLAY_TIMEZONE): string {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return fallback;
+  }
+  try {
+    // Intl 构造时校验时区合法性，非法名抛 RangeError → 回落默认
+    new Intl.DateTimeFormat("zh-CN", { timeZone: trimmed });
+    return trimmed;
+  } catch {
+    return fallback;
+  }
+}
 
 /**
  * 按模型推断默认上下文窗口（v1.3 D9 更新优先级）：
@@ -972,6 +1038,16 @@ export function resolveSettingsSources(
   );
   const defaultAutoCompactWindow = Math.max(1, Math.floor(contextWindow * DEFAULT_AUTOCOMPACT_RATIO));
   const autoCompactWindow = Math.min(configuredAutoCompactWindow ?? defaultAutoCompactWindow, contextWindow);
+  // 会话历史 compact 策略解析（2026-10-12，见 docs/dev/context-budget-provider.md §3.2）。
+  // 解析链与 autoCompactWindow 同模式：projectSettings > userSettings（配置优先于 env——
+  // 策略是行为开关而非运行参数，不做 env 别名以免散落多源）。仅接受两个合法字面量，
+  // 其余（含大小写/拼写错误、非字符串）一律回落 "llm-summary"，保证默认行为零回归。
+  const compactStrategy: "llm-summary" | "deterministic" =
+    projectSettings?.compactStrategy === "deterministic" || projectSettings?.compactStrategy === "llm-summary"
+      ? projectSettings.compactStrategy
+      : userSettings?.compactStrategy === "deterministic" || userSettings?.compactStrategy === "llm-summary"
+        ? userSettings.compactStrategy
+        : "llm-summary";
   const thinkingEnabled =
     parseBoolean(systemEnv.THINKING_ENABLED) ??
     parseBoolean(projectSettings?.thinkingEnabled) ??
@@ -1001,6 +1077,26 @@ export function resolveSettingsSources(
     userEnv.BASH_TIMEOUT_MS
   );
   const bashTimeoutMs = clampBashTimeoutMs(bashTimeoutMsRaw ?? DEFAULT_BASH_TIMEOUT_MS, MIN_BASH_TIMEOUT_MS);
+
+  // 需求122：展示时区解析（settings.timezone / env.TIMEZONE 合并）。
+  // 解析链与 bashTimeoutMs 同模式：systemEnv > projectSettings > projectEnv > userSettings > userEnv > 默认。
+  // 非法值（Intl 不接受的时区名）由 resolveDisplayTimezone 回落 DEFAULT_DISPLAY_TIMEZONE（东八区），
+  // 保证 UI 时间与 system prompt 时间声明恒为合法时区，配置错误不阻断会话。
+  const displayTimezone = resolveDisplayTimezone(
+    // 顶层 env 字段（DeepcodingSettings.env，normalizeEnv 后含裸键与 DEEPCODE_ 别名键）
+    // 优先于配置文件字段，与 bashTimeoutMs 的 env 通道语义对齐；
+    // DEEPCODE_ 别名键同时解析，让 settings.env.DEEPCODE_TIMEZONE 与进程环境
+    // DEEPCODE_TIMEZONE（collectDeepcodeEnv 剥离后的 TIMEZONE）行为一致
+    env.TIMEZONE ||
+      env.DEEPCODE_TIMEZONE ||
+      systemEnv.TIMEZONE ||
+      projectSettings?.timezone ||
+      projectEnv.TIMEZONE ||
+      projectEnv.DEEPCODE_TIMEZONE ||
+      userSettings?.timezone ||
+      userEnv.TIMEZONE ||
+      userEnv.DEEPCODE_TIMEZONE
+  );
 
   const temperature =
     parseTemperature(systemEnv.TEMPERATURE) ??
@@ -1155,6 +1251,7 @@ export function resolveSettingsSources(
     anthropic,
     contextWindow,
     autoCompactWindow,
+    compactStrategy,
     temperature,
     thinkingEnabled,
     reasoningEffort,
@@ -1165,6 +1262,7 @@ export function resolveSettingsSources(
     allowPrivateBaseURL,
     notify: notify || undefined,
     webSearchTool: webSearchTool || undefined,
+    displayTimezone,
     multimodal,
     filesApiEnabled,
     filesApiTimeoutMs,

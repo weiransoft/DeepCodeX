@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { Box, Text, useInput, useWindowSize } from "ink";
 import type { UndoTarget } from "@vegamo/deepcode-core";
+import { formatTimestampInTimezone } from "../utils/index";
 
 export type UndoRestoreMode = "code-and-conversation" | "conversation";
 
@@ -8,13 +9,15 @@ type Props = {
   targets: UndoTarget[];
   onSelect: (target: UndoTarget, mode: UndoRestoreMode) => void;
   onCancel: () => void;
+  /** 需求122：展示时区（IANA 名，来自 settings.timezone / env.TIMEZONE，缺省东八区） */
+  displayTimezone?: string;
 };
 
 type Phase = "message" | "mode";
 
 const MAX_VISIBLE_TARGETS = 7;
 
-export function UndoSelector({ targets, onSelect, onCancel }: Props): React.ReactElement {
+export function UndoSelector({ targets, onSelect, onCancel, displayTimezone }: Props): React.ReactElement {
   const [phase, setPhase] = useState<Phase>("message");
   const [targetIndex, setTargetIndex] = useState(Math.max(0, targets.length - 1));
   const [modeIndex, setModeIndex] = useState(0);
@@ -128,7 +131,7 @@ export function UndoSelector({ targets, onSelect, onCancel }: Props): React.Reac
                       {formatUndoMessage(target.message.content)}
                     </Text>
                     <Text dimColor>
-                      {formatTimestamp(target.message.createTime)}
+                      {formatTimestamp(target.message.createTime, displayTimezone)}
                       {target.canRestoreCode ? " · code checkpoint available" : " · conversation only"}
                     </Text>
                   </Box>
@@ -186,10 +189,8 @@ function formatUndoMessage(content: unknown): string {
   return singleLine.length > 90 ? `${singleLine.slice(0, 89)}…` : singleLine;
 }
 
-function formatTimestamp(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.valueOf())) {
-    return value;
-  }
-  return date.toLocaleString();
+function formatTimestamp(value: string, displayTimezone?: string): string {
+  // 需求122：统一委托配置时区格式化（时区来自 settings.timezone / env.TIMEZONE，
+  // 缺省东八区北京时间；原实现用运行机器本地时区，不符合"展示时间与配置时区同步"要求）
+  return formatTimestampInTimezone(value, displayTimezone);
 }

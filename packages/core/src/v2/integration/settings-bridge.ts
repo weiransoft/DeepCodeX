@@ -82,6 +82,11 @@ const contextConfigSchema = z.object({
   syncIntervalMs: z.number().default(60 * 1000),
   topKFiles: z.number().default(20),
   keepRecentTurns: z.number().default(5),
+  // 需求121：跨项目经验注入开关
+  // - false（默认）：仅注入当前项目作用域内容，杜绝跨会话/跨项目上下文污染
+  //   （开启 V2 上下文的用户默认即受保护，与 session-hook.ts 兜底 false 一致）
+  // - true：显式恢复历史行为——全局经验/用户全局记忆/领域知识跨项目注入
+  crossProjectExperience: z.boolean().default(false),
 });
 
 /** CodeMap 配置 schema */

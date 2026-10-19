@@ -18,6 +18,7 @@ import { buildShellEnv } from "../common/shell-utils";
 // 融合两侧：fork 保留 applyModelConfigSelection 等核心导入，上游新增 Files API 常量与 readDeepcodePlusApiKey
 import {
   DEFAULT_AUTOCOMPACT_RATIO,
+  DEFAULT_DISPLAY_TIMEZONE,
   DEFAULT_FILE_EXPIRES_AFTER_SECONDS,
   DEFAULT_FILE_QUOTA_CLEANUP_BATCH,
   DEFAULT_FILE_REFRESH_MARGIN_SECONDS,
@@ -27,11 +28,84 @@ import {
   applyModelConfigSelection,
   readDeepcodePlusApiKey,
   readDeepcodePlusSettings,
+  resolveDisplayTimezone,
   resolveSettings,
   resolveSettingsSources,
 } from "../settings";
 
 const TEST_PROCESS_ENV = {};
+
+// 需求122：展示时区解析单测（settings.timezone / env.TIMEZONE，缺省与非法回落东八区）
+test("resolveDisplayTimezone validates IANA names and falls back to Beijing default", () => {
+  // 合法 IANA 名原样返回（含 UTC 与带大写字母的区域名）
+  assert.equal(resolveDisplayTimezone("UTC"), "UTC");
+  assert.equal(resolveDisplayTimezone("America/New_York"), "America/New_York");
+  assert.equal(resolveDisplayTimezone(" Asia/Shanghai "), "Asia/Shanghai", "首尾空白应被 trim");
+  // 非法名（Intl 不接受）回落默认东八区
+  assert.equal(resolveDisplayTimezone("Not/AZone"), DEFAULT_DISPLAY_TIMEZONE);
+  assert.equal(resolveDisplayTimezone(""), DEFAULT_DISPLAY_TIMEZONE);
+  assert.equal(resolveDisplayTimezone("   "), DEFAULT_DISPLAY_TIMEZONE);
+  assert.equal(resolveDisplayTimezone(undefined), DEFAULT_DISPLAY_TIMEZONE);
+  assert.equal(resolveDisplayTimezone(42), DEFAULT_DISPLAY_TIMEZONE, "非字符串回落默认");
+  // 自定义回落值
+  assert.equal(resolveDisplayTimezone("Bad/Zone", "UTC"), "UTC");
+  // 默认值本身恒为东八区北京时间
+  assert.equal(DEFAULT_DISPLAY_TIMEZONE, "Asia/Shanghai");
+});
+
+test("resolveSettings displayTimezone defaults to Beijing without config", () => {
+  const resolved = resolveSettings(
+    { env: { MODEL: "deepseek-v3.2", BASE_URL: "https://example.com/v1", API_KEY: "sk-test" } },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  assert.equal(resolved.displayTimezone, "Asia/Shanghai", "未配置时缺省为东八区北京时间");
+});
+
+test("resolveSettings displayTimezone from top-level timezone field", () => {
+  const resolved = resolveSettings(
+    { timezone: "America/New_York" },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  assert.equal(resolved.displayTimezone, "America/New_York", "settings.timezone 字段应生效");
+});
+
+test("resolveSettings displayTimezone from env.TIMEZONE with priority chain", () => {
+  // 解析链（与 bashTimeoutMs 同模式）：DEEPCODE_TIMEZONE > settings.timezone
+  // > DEEPCODE_ 别名（projectEnv/userEnv）> 默认（东八区）。
+  // 进程环境经 collectDeepcodeEnv 仅收集 DEEPCODE_ 前缀键（防无关环境变量泄漏）。
+  const systemEnv = resolveSettings(
+    { timezone: "America/New_York" },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    { DEEPCODE_TIMEZONE: "UTC" }
+  );
+  assert.equal(systemEnv.displayTimezone, "UTC", "DEEPCODE_TIMEZONE 优先于 settings.timezone");
+  // 用户级 settings.env.TIMEZONE（经 DEEPCODE_ 别名通道参与解析）
+  const userEnv = resolveSettingsSources(
+    { env: { DEEPCODE_TIMEZONE: "UTC" }, timezone: "America/New_York" },
+    null,
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  assert.equal(userEnv.displayTimezone, "UTC", "settings.env.DEEPCODE_TIMEZONE 别名应生效");
+  // settings.timezone 单独配置（无任何 env 通道）时也生效
+  const fieldOnly = resolveSettings(
+    { timezone: "America/New_York" },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  assert.equal(fieldOnly.displayTimezone, "America/New_York", "settings.timezone 字段应生效");
+});
+
+test("resolveSettings invalid displayTimezone falls back to Beijing (fail-open)", () => {
+  const resolved = resolveSettings(
+    { timezone: "Mars/Olympus" },
+    { model: "default-model", baseURL: "https://default.example.com" },
+    TEST_PROCESS_ENV
+  );
+  assert.equal(resolved.displayTimezone, "Asia/Shanghai", "非法时区名回落东八区，不抛异常");
+});
 
 // 上游 v0.3.1 新增用例：DeepCode Plus API Key 读取
 test("readDeepcodePlusApiKey reads only a non-empty env key", () => {

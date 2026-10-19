@@ -402,9 +402,58 @@ function escapeXml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/**
+ * 东八区（Asia/Shanghai）时区标识
+ *
+ * 需求122：所有对模型/用户展示"当前时间"的位置统一使用东八区，
+ * Intl API 按 IANA 时区名换算，不受宿主机系统时区影响。
+ */
+const CHINA_TIMEZONE = "Asia/Shanghai";
+
+/**
+ * 将 Date 格式化为东八区的"ISO 风格 + 星期"可读文本
+ *
+ * 输出形如 `2026-10-17 14:05:30 (UTC+08:00, 星期五)`。
+ * 用于注入 system prompt，让模型判断"导入时间/操作时间"等时效性信息时
+ * 与用户看到的东八区时间一致（需求122）。
+ *
+ * @param date 时间点
+ * @returns 东八区可读时间字符串
+ */
+export function formatChinaTime(date: Date): string {
+  // en-CA 给出 YYYY-MM-DD、en-GB 给出 24 小时制 HH:mm:ss，组合为东八区 ISO 风格
+  const dateTime = new Intl.DateTimeFormat("en-CA", {
+    timeZone: CHINA_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+  const weekday = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: CHINA_TIMEZONE,
+    weekday: "long",
+  }).format(date);
+  return `${dateTime.replace(",", "")} (UTC+08:00, ${weekday})`;
+}
+
 function getCurrentDateAndModelPrompt(model?: string): string {
+  // 需求122：日期明确标注东八区，避免宿主机非东八区时模型写出与用户
+  // 预期不符的时间（如 UTC 或当地时间）
   const date = new Date();
-  let prompt = `今天是${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日。随着对话的进行，时间在流逝。`;
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: CHINA_TIMEZONE,
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  }).formatToParts(date);
+  const get = (type: string): string => parts.find((p) => p.type === type)?.value ?? "";
+  let prompt =
+    `今天是${get("year")}年${get("month")}${get("day")}日（东八区北京时间，当前时刻 ${formatChinaTime(date)}）。` +
+    `所有日期时间计算、文件时间戳展示一律使用东八区（UTC+8），禁止把 ISO UTC 时间直接当作本地日期报告。` +
+    `随着对话的进行，时间在流逝。`;
   prompt += model ? `\n当前LLM模型为${model}，对话中可通过/model命令切换模型。` : "";
   return prompt;
 }
@@ -435,7 +484,12 @@ export function getRuntimeContext(projectRoot: string, model?: string, addWorkin
   const shellPath = getShellPathInfo();
   const shellModeOpts = process.platform === "win32" ? { "shell mode": "git-bash" } : {};
   const runtimeVersions = getRuntimeVersionInfo();
+  // 需求122：会话级运行时上下文注入东八区当前时间，模型展示"导入时间/操作时间"
+  // 等时效信息时与用户看到的北京时间一致
+  const now = new Date();
   const env = {
+    "current time (UTC+8)": formatChinaTime(now),
+    "current time (ISO 8601 UTC)": now.toISOString(),
     "root path": projectRoot,
     pwd: projectRoot,
     "additional working dirs": addWorkingDirs.map((directory) =>

@@ -55,6 +55,8 @@ function makeSettings(overrides?: Partial<ResolvedDeepcodingSettings>): Resolved
     contextWindow: 131072,
     // 上游 0.3.1 新增必填字段：自动 compact 阈值、多模态与 Files API 配置（测试夹具默认值）
     autoCompactWindow: 65536,
+    // docs/dev/context-budget-provider.md §3.2 新增必填字段：compact 策略（测试夹具默认走 llm-summary，行为零变化）
+    compactStrategy: "llm-summary",
     multimodal: "default",
     filesApiEnabled: false,
     filesApiTimeoutMs: 60000,
@@ -65,6 +67,8 @@ function makeSettings(overrides?: Partial<ResolvedDeepcodingSettings>): Resolved
     debugLogEnabled: false,
     telemetryEnabled: false,
     allowPrivateBaseURL: false,
+    // 需求122 新增必填字段：展示时区（测试夹具默认东八区北京时间）
+    displayTimezone: "Asia/Shanghai",
     permissions: {} as ResolvedDeepcodingSettings["permissions"],
     enabledSkills: {},
     statusline: {} as ResolvedDeepcodingSettings["statusline"],
