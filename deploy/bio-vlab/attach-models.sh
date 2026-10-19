@@ -51,7 +51,7 @@ if docker ps --format '{{.Names}}' | grep -qx bio-backend; then
   echo "--- 自检（bio-backend 内直连） ---"
   docker exec bio-backend sh -c '
     for u in http://boltz:8000/health http://genosm-cuda:8011/health \
-             http://opendde-gateway:8090/health http://alphafold3:8642/health; do
+             http://opendde-gateway:8090/health http://alphafold3:8092/health; do
       printf "%-42s " "$u"
       curl -sS -o /dev/null -w "%{http_code}\n" --max-time 4 "$u" 2>/dev/null || echo FAIL
     done'

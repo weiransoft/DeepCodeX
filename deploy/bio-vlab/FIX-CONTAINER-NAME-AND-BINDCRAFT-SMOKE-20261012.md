@@ -118,9 +118,9 @@ Rank1 序列（60aa）：
   **路径不可达**：8 组件 `is_resident=True`，平台启停均为状态同步短路，不拥有
   容器生命周期；若置 False，声明重建仍不等效（entrypoint/volumes/env 漂移）
   （§7.1/§7.3，待办）。
-- （2026-10-13 复检）resident stop 探测键名错位 `url` vs `endpoint`，探测恒
-  pass——组件真 down 时 stop 也无法收敛 health_check_failed（§7.2，P2，
-  一行补丁待评审）。
+- ~~resident stop 探测键名错位 `url` vs `endpoint`，探测恒 pass~~ → **已修复并
+  部署生效（2026-10-14，§7.2）**：两键兼容读取 + 3 个回归测试 + E2E 验证；
+  实施中发现并一并修复次生回归（直接赋值污染审计事件流）。
 - （2026-10-13 复检）rename 持久化补强：宿主 compose 已 pin
   `container_name: boltz2`，"依赖下次自然重启检验"一项**关闭**（§7.4）。
 
@@ -154,7 +154,15 @@ no-op + bio-net HTTP 探活复核，并未证明容器级重启生效——对 r
 实际生命周期归 operator 的宿主 compose 工程（`/home/llm/boltz/docker-compose.yml`）。
 此前声明的"对齐即重建等效"应修正为：对齐后的 docker-container 声明只有在
 is_resident 置回 False 时才会被消费，而届时重建仍会失败（见 7.3）。
-is_resident=True 的设入主体（update API/SQL/历史脚本）未追溯 [不确定]。
+**设入主体追溯（2026-10-14 补，消除原 [不确定]）[已验证]**：`operation_logs`
+有 8 条 `action=update, entity_type=docker_component, status=success` 记录，
+`user_id` 均关联 `admin@bio-ai.com`（role=admin）；`result_data` 逐条含
+`"updated_fields": ["auto_stop_enabled", "is_resident"]`，实体覆盖
+proteinmpnn/boltz2（11:46:55 批）与 alphafold3/rfdiffusion/opendde 等
+（14:03:15 批），与 8 组件 resident 化时间吻合。`updated_fields` 键仅在
+`PUT /docker-components/{id}` 处理函数（docker_components.py L900）写日志时
+产出——手工 SQL/历史脚本不写 operation_logs，据此排除，坐实为
+**admin 经组件 update API 两批置入**（与 2026-10-12 resident 化改造一致）。
 
 ### 7.2 附带发现 A：resident stop 探测键名错位（url vs endpoint）[已验证-代码]
 
@@ -164,6 +172,38 @@ is_resident=True 的设入主体（update API/SQL/历史脚本）未追溯 [不�
 恒 None → 探测恒跳过、恒 `probe_ok=True`、恒"保持 running"。即使组件真
 down，对 resident 组件的 stop 请求也无法收敛到 health_check_failed。
 建议一行补丁：`hc_url = hc_config.get("url") or hc_config.get("endpoint")`。
+
+**修复实施（2026-10-14）[已验证]**：
+
+1. **补丁落地**：`lifecycle_manager.py` stop 短路分支改为两键兼容
+   `hc_url = hc_config.get("url") or hc_config.get("endpoint")`（保留 `url`
+   兼容早期 seed 历史数据）。源文件 `/root/bio/bio-vlab/backend/`
+   （md5 `b74d4753…`）与容器 bio-backend / bio-celery-worker `/app` 三处
+   一致；`docker restart bio-backend bio-celery-worker` 后生效（uvicorn
+   无 reload，必须重启）。
+2. **次生回归修复（实施中发现）**：原缺陷代码不健康分支先
+   `component.status = "health_check_failed"` 直接赋值 + commit，再调
+   `_transition_state`——状态机看到 `health_check_failed →
+   health_check_failed` 自转换判"非法"，会记录误导性 ERROR 事件并丢失
+   真正的 HEALTH_CHECK_FAILED 事件。修复：删除直接赋值，状态置位与事件
+   记录统一交由 `_transition_state`（`running → health_check_failed`
+   为合法转换）。
+3. **回归测试**：`test_lifecycle_manager.py` 新增/更新 3 用例——
+   `probe_uses_endpoint_key`（endpoint 键触发真实探测）、
+   `probe_down_converges`（down→收敛 health_check_failed + 事件审计断言）、
+   `probe_legacy_url_key`（url 键向后兼容）。修复前 2 失败
+   （`assert 'running' == 'health_check_failed'`），修复后整文件
+   **16 passed**；负向验证：回退旧版补丁后新审计断言仍失败，证明断言
+   有效非恒真。
+4. **E2E（生产，boltz2）**：`POST /docker-components/boltz2/stop` →
+   Celery `docker_component.stop` 0.23s succeeded
+   `{'status': 'running', 'resident': True, 'message': '…健康探测通过，
+   保持 running'}`；`GET …/boltz2` status=running；事件仅 1 条
+   `stopping/success`（探测通过语义，无非法转换 ERROR 污染）；
+   `docker ps` boltz2 `Up 3 weeks` 未受扰动；boltz2 访问日志出现
+   bio-worker IP（172.22.0.4）来源 `GET /health 200`——探测真实发出。
+   故障对照：修复前同请求 `hc_url=None` 探测恒跳过；修复后
+   `hc_config.endpoint` 被消费。
 
 ### 7.3 附带发现 B：若 is_resident 置 False，声明重建仍不等效 [已验证-代码+快照 diff]
 
@@ -182,6 +222,11 @@ inspect 快照：
 即"声明已对齐"仅对 boltz2 的 env/volumes/ports/network/restart_policy 子集
 成立；command/entrypoint 表达能力缺失 + proteinmpnn volumes/env 漂移，置
 False 后重建必失败。未实施变更（生产生命周期逻辑，待评审后修复）。
+**修复方案评审稿已出（2026-10-14）**：`PROPOSAL-DECLARATIVE-REBUILD-
+EQUIVALENCE-20261014.md`（同目录）——container_run 增 entrypoint 参数 +
+`metadata.gpu_all` 开关 + proteinmpnn/boltz2 声明逐项对齐（含复检新发现
+D6/D7：proteinmpnn 启动命令与 network/restart_policy 同样漂移）；含验证
+方案、风险回滚与 3 项决策请求。状态：待评审，未实施。
 
 ### 7.4 遗留项②终态复核：rename 持久化 [已验证]
 

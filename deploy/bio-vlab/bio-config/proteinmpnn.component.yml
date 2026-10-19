@@ -14,7 +14,14 @@ runtime:
   # （health backend=proteinmpnn-cli-adapter）。旧声明 bio-proteinmpnn:latest
   # 镜像在本机不存在，若容器缺失时经平台 start 重建必然失败。
   image: boltz:latest
-  command: null
+  # [§7.3 修复 2026-10-14] 与实际运行容器（1ac3bd4b4324）inspect 快照对齐：
+  # ENTRYPOINT=["python"] + CMD=["-m","uvicorn","mpnn_server:app",...]
+  # （adapter 挂载提供 mpnn_server 模块）。
+  entrypoint: ["python"]
+  command: ["-m", "uvicorn", "mpnn_server:app", "--host", "0.0.0.0", "--port", "8085", "--log-level", "info"]
+  # [D8 修复 2026-10-14 克隆实测发现] 实际容器 WorkingDir=/opt/adapter；
+  # mpnn_server 模块位于 adapter 挂载内且不在 PYTHONPATH，cwd 必须指向该目录。
+  working_dir: /opt/adapter
 
 lifecycle:
   # docker-container 类型实际启停由 LocalBackend 依据 runtime/resources/env/
@@ -37,7 +44,8 @@ resources:
   cpus: "8"
   memory: "16G"
   gpus: 1
-  gpu_device_ids: []
+  # [§7.3 修复] 实际容器 NVIDIA_VISIBLE_DEVICES=0（固定 GPU0）
+  gpu_device_ids: ["0"]
   gpu_memory_threshold_mb: 8192
   reservations:
     cpus: "2"
@@ -46,18 +54,26 @@ resources:
   allocation_strategy: memory_best_fit
 
 env:
-  SERVER_MODE: proteinmpnn
-  PROTEINMPNN_MODEL_DIR: /data/models/proteinmpnn
-  PROTEINMPNN_REPO: /opt/ProteinMPNN
-  INFERENCE_DEVICE: auto
-  JOB_TMP_DIR: /tmp/proteinmpnn_jobs
+  # [§7.3 修复 2026-10-14] 与实际容器 Config.Env 业务项对齐（adapter 版服务）。
+  # 旧声明 SERVER_MODE/PROTEINMPNN_*/JOB_TMP_DIR 等 5 项为虚构镜像的环境，
+  # 实际 mpnn_server adapter 不读取这些键。
+  MPNN_LIB: /opt/bio-services/proteinmpnn/pylibs
+  TZ: Asia/Shanghai
   PYTHONUNBUFFERED: "1"
 
 volumes:
-  - source: ./data/models
-    target: /data/models:ro
-  - source: proteinmpnn-tmp
-    target: /tmp/proteinmpnn_jobs
+  # [§7.3 修复 2026-10-14] 与实际容器 HostConfig.Binds 逐项对齐。
+  # 旧声明 ./data/models（相对路径，docker run 源路径非法）与 named volume
+  # proteinmpnn-tmp 均与实际不符；缺失 adapter 挂载时 mpnn_server 模块不存在。
+  - source: /opt/bio-services/proteinmpnn/pylibs
+    target: /opt/bio-services/proteinmpnn/pylibs
+    mode: "ro"
+  - source: /opt/bio-services/logs
+    target: /app/logs
+    mode: "rw"
+  - source: /root/bio/bio-services/adapter
+    target: /opt/adapter
+    mode: "ro"
 
 dependencies: []
 
@@ -66,6 +82,10 @@ metadata:
   homepage: https://github.com/dauparas/ProteinMPNN
   ports:
     - "8085:8085"
+  # [§7.3 修复 D7] 实际容器在 appserver-deploy_bio-net + unless-stopped；
+  # 缺这两个键时重建容器不在 bio-net，探活与工具调用（http://proteinmpnn:8085）全断。
+  network: appserver-deploy_bio-net
+  restart_policy: unless-stopped
 
 # 工具调用集成配置: ProteinMPNNTool 通过 HTTP 调用此端口
 # 字段值摘自 proteinmpnn_tool.py:

@@ -17,7 +17,11 @@ tags:
 runtime:
   type: docker-container
   image: boltz:latest
-  command: null
+  # [§7.3 修复 2026-10-14] 与实际运行容器（3719fa830a1d）inspect 快照对齐：
+  # ENTRYPOINT=["python"] + CMD=["-m","uvicorn","serve:app",...]。
+  # 此前 command:null 时按声明重建会回落镜像默认 ENTRYPOINT（boltz --help 打印即退）。
+  entrypoint: ["python"]
+  command: ["-m", "uvicorn", "serve:app", "--host", "0.0.0.0", "--port", "8000"]
 
 lifecycle:
   # docker-container 类型实际启停由 LocalBackend 依据 runtime/resources/env/
@@ -75,6 +79,9 @@ metadata:
     - "8000:8000"
   network: appserver-deploy_bio-net
   restart_policy: unless-stopped
+  # [§7.3 修复] 实际容器 GPU 为 --gpus all（DeviceRequests.Count=-1），
+  # 非固定设备。gpu_all=true 由 LocalBackend 映射为 --gpus all。
+  gpu_all: true
 
 # 工具调用集成配置: Boltz2Tool 经 BOLTZ_HOST(=boltz2):8000 调用此容器。
 # 注：服务实际路由为 /health、/predict、/tasks/{id}（openapi 实测），

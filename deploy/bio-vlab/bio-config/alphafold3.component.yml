@@ -8,13 +8,23 @@ tags:
   - structure
   - alphafold
 
+# [T-028 修复 2026-10-19] Mac MLX (8642) 链路退役，CUDA 服务统一迁移至 8092：
+# - 历史遗留：af3_cuda_server.py 镜像内置 AF3_PORT=8642（沿用 Mac MLX 兼容接口
+#   端口号），早期 yml 又虚构过 8092 + /api/v1/af3/health 假路由，两个端口
+#   声明长期漂移。本卡以 8092 为 CUDA 规范端口收敛：容器以运行时 env
+#   AF3_PORT=8092 覆盖镜像内置 8642，发布 8092:8092；8642 不再监听。
+# - CMD=[python3 /app/af3_cuda_server.py]、EP=null、WORKDIR=/app/alphafold
+#   均镜像内置，不声明，重建回落镜像默认即等效；
+# - 实际路由（openapi 实测）：/api/jobs(POST 提交)、/api/jobs/{id}/results、
+#   /api/system/status、/health——healthcheck 使用真实端点，不再使用
+#   早期模板虚构的 /api/v1/af3/health。
 runtime:
   type: docker-container
   image: bio-alphafold3:latest
   command: null
 
 lifecycle:
-  start_command: docker run -d --name alphafold3
+  start_command: docker start alphafold3
   stop_command: docker stop alphafold3
   restart_command: docker restart alphafold3
   start_timeout: 600
@@ -22,7 +32,7 @@ lifecycle:
 
 healthcheck:
   mode: http
-  endpoint: http://localhost:8092/api/v1/af3/health
+  endpoint: http://alphafold3:8092/api/system/status
   interval: 30
   timeout: 15
   retries: 5
@@ -32,7 +42,9 @@ resources:
   cpus: "16"
   memory: "64G"
   gpus: 1
-  gpu_device_ids: []
+  # 实际 DeviceRequests DeviceIDs=["0"]（--gpus device=0，NVIDIA_
+  # VISIBLE_DEVICES=0 为镜像内置同值）；[] 声明重建将无 GPU。
+  gpu_device_ids: ["0"]
   gpu_memory_threshold_mb: 24576
   reservations:
     cpus: "4"
@@ -41,32 +53,47 @@ resources:
   allocation_strategy: exclusive
 
 env:
-  AF3_MODEL_DIR: /data/models/alphafold3
-  AF3_DBS_DIR: /data/models/alphafold3/dbs
-  INFERENCE_DEVICE: cuda
-  JOB_TMP_DIR: /tmp/af3_jobs
-  PYTHONUNBUFFERED: "1"
+  # [T-028] 关键项：覆盖镜像内置的 MLX 遗留端口 8642，CUDA 服务监听 8092。
+  AF3_PORT: "8092"
 
 volumes:
-  - source: ./data/models
-    target: /data/models:ro
-  - source: alphafold3-tmp
+  # 实际 binds（/af3_jobs 为宿主目录，job 工作区；模型/数据库只读）。
+  - source: /af3_jobs
     target: /tmp/af3_jobs
+    mode: rw
+  - source: /home/bioinfolab/AlphaFold3/data_source/model
+    target: /root/models
+    mode: ro
+  - source: /home/bioinfolab/AlphaFold3/data_source/database_afdb
+    target: /root/public_databases
+    mode: ro
 
 dependencies: []
 
 metadata:
   description: AlphaFold 3 CUDA 版 - 蛋白质结构预测推理服务
   homepage: https://github.com/google-deepmind/alphafold3
+  # PortBindings={"8092/tcp":[{"HostIp":"","HostPort":"8092"}]}
+  # （运行时 env AF3_PORT=8092 同步覆盖服务监听口）。
   ports:
     - "8092:8092"
+  network: appserver-deploy_bio-net
+  restart_policy: unless-stopped
 
-# 工具调用集成配置: AlphaFold3Tool 通过 HTTP 调用此端口
-# healthcheck endpoint=http://localhost:8092/api/v1/af3/health 推导出主端点
+# 工具调用集成配置: AlphaFold3 CUDA 工具链通过 HTTP 调用此端口。
+# [T-028 修复 2026-10-19] port/base_url 统一到 CUDA 规范端口 8092
+# （Mac MLX 遗留 8642 退役，Mac 平台如需 MLX 服务另行独立注册组件，
+# 不复用本 CUDA 组件定义）。
 tool_integration:
   port: 8092
   invoke_endpoint: /api/v1/af3/predict
   http_method: POST
+  # 泛化分发契约：af3 CUDA 服务实际路由为 POST /api/jobs
+  # （响应键 id，非 task_id；分发器已做 id/job_id 回落）+ GET /api/jobs/{task_id}。
+  # 容器名 alphafold3 经 bio-net 网络 DNS 解析（= component_id）。
+  base_url: http://alphafold3:8092
+  submit_endpoint: /api/jobs
+  status_path_template: /api/jobs/{task_id}
   input_schema_ref: ALPHAFOLD3_CUDA_TOOL_INPUT_SCHEMA
   output_schema_ref: ALPHAFOLD3_CUDA_TOOL_OUTPUT_SCHEMA
   warmup_endpoint: null

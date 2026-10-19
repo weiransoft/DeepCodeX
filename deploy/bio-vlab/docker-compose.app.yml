@@ -163,10 +163,13 @@ services:
       OPENDDE_HOST: ${OPENDDE_HOST:-10.101.20.30}
       OPENDDE_PORT: ${OPENDDE_PORT:-8090}
       OPENDDE_REQUEST_TIMEOUT: ${OPENDDE_REQUEST_TIMEOUT:-1800}
-      # AF3（8642 MLX / 8087 官方）在本平台未部署，仅登记占位地址；
-      # 结构预测由调度门面回退链降级到 OpenDDE（见 T-003 报告 E4）
-      AF3_HOST: ${AF3_HOST:-10.101.20.30}
-      AF3_PORT: ${AF3_PORT:-8642}
+      # [T-028 修复 2026-10-19] Mac MLX (8642) 链路退役：CUDA 版 AF3 服务
+      # （bio-alphafold3 容器，af3_cuda_server.py，cuda-jax 后端）固化规范
+      # 端口 8092（容器运行时 AF3_PORT=8092 覆盖镜像内置 MLX 遗留 8642）。
+      # backend 执行层/展示层（settings_runtime 探测、AlphaFold3Tool、调度门面）
+      # 与本变量同源；8642 不再监听。
+      AF3_HOST: ${AF3_HOST:-alphafold3}
+      AF3_PORT: ${AF3_PORT:-8092}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
@@ -295,8 +298,9 @@ services:
       OPENDDE_HOST: ${OPENDDE_HOST:-10.101.20.30}
       OPENDDE_PORT: ${OPENDDE_PORT:-8090}
       OPENDDE_REQUEST_TIMEOUT: ${OPENDDE_REQUEST_TIMEOUT:-1800}
-      AF3_HOST: ${AF3_HOST:-10.101.20.30}
-      AF3_PORT: ${AF3_PORT:-8642}
+      # [T-028 修复 2026-10-19] worker 侧 AF3 与 backend 同源（8092 CUDA，8642 MLX 退役）
+      AF3_HOST: ${AF3_HOST:-alphafold3}
+      AF3_PORT: ${AF3_PORT:-8092}
       MIGRATIONS_ENABLED: ${WORKER_MIGRATIONS_ENABLED:-false}
       AUTO_CREATE_ALL: ${WORKER_AUTO_CREATE_ALL:-false}
     volumes:
