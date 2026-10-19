@@ -103,8 +103,13 @@ export type GuardStopReason =
  *
  * 与 EAG 场景的 LoopGuardConfig 分离：EAG 场景触达上限直接终止；
  * 普通会话触达 maxTurns/连续失败 时暂停并咨询用户（需求124 预期：
- * "反复处理无果后（同一请求拨通3-5次），咨询用户是否继续"），
- * maxTokenBudget 为防 Token 耗尽的兜底线，触达即终止。
+ * "反复处理无果后（同一请求拨通3-5次），咨询用户是否继续"）。
+ *
+ * Token 预算护栏已移除（2026-10-19 需求变更）：
+ * 上下文压力改由"自动压缩 + 新任务切新上下文"策略接管——
+ * - 上下文不足（activeTokens 超阈值）→ 自动 compactSession（session.ts 主循环既有逻辑）
+ * - 新任务（LLM 意图分类判定）→ 归档旧上下文直接切换（replySession 入口）
+ * 因此 TurnGuard 不再设置 Token 硬终止线，tokensConsumed 仅作状态观测保留。
  *
  * 模型循环检测（2026-10-19 新增）：
  * 跟踪最近 N 次 tool 调用签名（tool name + 简化参数 hash），
@@ -114,8 +119,6 @@ export type GuardStopReason =
 export interface TurnGuardConfig {
   /** 单 turn 最大 LLM 迭代轮数（默认 40，需求123 反馈"40 轮内未解决"即咨询） */
   maxTurns: number;
-  /** 单 turn Token 总预算（默认 2_000_000；0 = 禁用 Token 预算护栏） */
-  maxTokenBudget: number;
   /** 连续工具全失败轮数上限（默认 3，需求124"同一请求拨通3-5次"下限） */
   maxConsecutiveFailedTurns: number;
   /**
@@ -136,8 +139,6 @@ export interface TurnGuardConfig {
  * 数值依据：
  * - maxTurns=40：需求123 反馈的期望轮次——正常任务 40 轮内可完成，
  *   超出即说明执行受阻，应停下来问用户而不是继续烧 Token
- * - maxTokenBudget=2_000_000：兜底防爆（需求124 的 41 次请求约数十万 Token），
- *   触达即终止会话并通知用户
  * - maxConsecutiveFailedTurns=3：需求124 下限——连续 3 轮工具调用全部失败
  *   即判定"反复处理无果"，暂停咨询
  * - maxRepeatedToolCalls=3：同一工具 + 相同参数连续调用 3 次 → 模型死循环
@@ -145,7 +146,6 @@ export interface TurnGuardConfig {
  */
 export const DEFAULT_TURN_GUARD_CONFIG: Readonly<TurnGuardConfig> = Object.freeze({
   maxTurns: 40,
-  maxTokenBudget: 2_000_000,
   maxConsecutiveFailedTurns: 3,
   maxRepeatedToolCalls: 3,
   trackedToolCallHistory: 5,
@@ -159,8 +159,6 @@ export type LoopGuardAction =
   | "consult_user_consecutive_failures"
   /** 迭代轮数达上限 → 暂停咨询用户（可恢复） */
   | "consult_user_max_turns"
-  /** Token 预算耗尽 → 直接终止（不可恢复） */
-  | "terminate_token_budget"
   /** 模型死循环（同一工具+参数重复调用）→ 直接终止（不可恢复） */
   | "terminate_model_loop";
 
@@ -444,7 +442,8 @@ export class LoopGuard {
  * - LoopGuard：触达上限直接终止（自主长程任务无人值守）
  * - TurnGuard：触达轮数/连续失败上限时**暂停咨询用户**（交互式会话有人值守），
  *   用户确认后 acknowledgeAndContinue() 清零本轮计数继续执行；
- *   Token 预算为唯一硬终止线（防耗尽兜底）
+ *   Token 预算硬终止线已移除（2026-10-19）——上下文压力由
+ *   "自动压缩 + 新任务切新上下文"策略接管，tokensConsumed 仅作状态观测
  *
  * 用法（session.ts activateSession 主循环）：
  * ```typescript
@@ -570,9 +569,11 @@ export class TurnGuard {
    *
    * 判定优先级（需求123/124 + 2026-10-19 模型循环检测）：
    * 1. 模型死循环 → terminate_model_loop（硬终止，不可恢复）
-   * 2. Token 预算耗尽 → terminate_token_budget（硬终止，不可恢复）
-   * 3. 连续工具全失败 ≥ 上限 → consult_user_consecutive_failures（暂停咨询）
-   * 4. 迭代轮数 ≥ 上限 → consult_user_max_turns（暂停咨询）
+   * 2. 连续工具全失败 ≥ 上限 → consult_user_consecutive_failures（暂停咨询）
+   * 3. 迭代轮数 ≥ 上限 → consult_user_max_turns（暂停咨询）
+   *
+   * Token 预算硬终止线已移除（2026-10-19）：上下文压力由
+   * "自动压缩 + 新任务切新上下文"策略接管，不再按 Token 配额终止会话。
    *
    * @returns 判定结果（allow=false 时 reason 可直接展示给用户）
    */
@@ -589,18 +590,7 @@ export class TurnGuard {
       };
     }
 
-    // 2. Token 预算兜底线（0 = 禁用）
-    if (this.config.maxTokenBudget > 0 && this.tokensConsumed >= this.config.maxTokenBudget) {
-      return {
-        allow: false,
-        action: "terminate_token_budget",
-        reason:
-          `本回合 Token 消耗已达预算上限（${this.tokensConsumed}/${this.config.maxTokenBudget}），` +
-          `会话终止以避免资源耗尽。请缩小任务范围或开启新会话继续。`,
-      };
-    }
-
-    // 3. 连续工具全失败（需求124："同一请求拨通3-5次后咨询用户"）
+    // 2. 连续工具全失败（需求124："同一请求拨通3-5次后咨询用户"）
     if (this.consecutiveFailedTurns >= this.config.maxConsecutiveFailedTurns) {
       return {
         allow: false,
@@ -609,7 +599,7 @@ export class TurnGuard {
       };
     }
 
-    // 4. 迭代轮数上限（需求123："40 轮内未解决"）
+    // 3. 迭代轮数上限（需求123："40 轮内未解决"）
     if (this.turnsCompleted >= this.config.maxTurns) {
       return {
         allow: false,
@@ -645,8 +635,8 @@ export class TurnGuard {
   /**
    * 用户确认继续后清零咨询触发计数（需求124 咨询-确认闭环）
    *
-   * 清零 consecutiveFailedTurns / turnsCompleted（各自给用户新的预算窗口），
-   * 但保留 tokensConsumed——Token 总预算不咨询恢复，触达即终止（硬兜底）。
+   * 清零 consecutiveFailedTurns / turnsCompleted（各自给用户新的预算窗口）。
+   * tokensConsumed 保留——仅作状态观测（Token 硬终止线已移除，2026-10-19）。
    */
   acknowledgeAndContinue(): void {
     this.consecutiveFailedTurns = 0;

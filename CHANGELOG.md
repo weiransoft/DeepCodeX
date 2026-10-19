@@ -4,6 +4,39 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.3.19] - 2026-10-19
+
+补丁版（上下文管理策略重构：移除 Token 配额硬终止 + 模型循环检测 + 流式停止修复 + 新任务切新上下文）。
+
+### Added
+- **模型循环检测**（packages/core/src/common/loop-guard.ts TurnGuard + session.ts 接线）：
+  `recordToolCalls` 记录最近 5 次 tool 调用签名（工具名 + 参数 hash），
+  连续 3 次同工具 + 同参数调用即判定死循环，`decideBeforeIteration` 返回
+  `terminate_model_loop` 硬终止（优先级高于连续失败咨询线），防止模型
+  "同一命令反复重试"无限烧 Token。28 个单测（J1-J7 循环检测等）。
+- **新任务直接切新上下文**（session.ts replySession 入口）：
+  上一轮已结束（completed/failed/interrupted）+ 纯文本新指令 + 上下文已达
+  压缩阈值时，复用 `classifySteeringIntent`（3 秒硬超时，失败保守回落 steer）
+  判定 steer/next——判定为 next（独立新任务）则将全部 user/assistant/tool
+  消息标记 `compacted=true` 归档（不生成摘要、磁盘保留完整历史可回溯），
+  重估 `activeTokens`、重置 TurnGuard（新任务=新预算窗口），新指令在全新
+  上下文中执行；判定为 steer（当前任务延续）沿用既有路径，自动压缩兜底。
+
+### Changed
+- **移除 Token 配额硬终止线**（2026-10-19 需求变更）：TurnGuard 删除
+  `maxTokenBudget` 配置与 `terminate_token_budget` 动作，任何 Token 消耗
+  不再终止会话；上下文压力改由"自动压缩（activeTokens 超阈值 →
+  compactSession）+ 新任务切新上下文"双通道接管，`tokensConsumed` 仅作
+  状态观测保留。
+
+### Fixed
+- **Web 停止按钮无法完全停止对话**（session.ts 流式链路）：
+  OpenAI `createChatCompletionStreamAttempt` 与 Anthropic 流式循环此前仅
+  检查 interruptQueue，未检查 abort 信号——用户点击停止后 chunk 间隙期间
+  流式读取继续。现双路径增加 abort 信号双点检查（等待前 + 每个事件后），
+  abort 提前 break 跳过 `LlmStreamDisconnectedError` 误判，并丢弃不完整的
+  tool calls（防止截断的 arguments JSON 被下游执行）。
+
 ## [0.4.3.18] - 2026-10-18
 
 补丁版（V2 上下文记忆跨会话污染防线 + 展示时区可配置化 + TurnGuard 循环护栏 + 执行历史双向打通）。

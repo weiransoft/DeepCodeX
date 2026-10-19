@@ -696,8 +696,10 @@ export type SessionManagerOptions = {
    * 需求123/124：普通会话循环护栏配置（可选注入）
    *
    * 控制单 turn 的迭代轮数上限（默认 40）、连续工具全失败上限（默认 3）、
-   * Token 总预算（默认 2M）。触达轮数/连续失败上限时暂停并咨询用户是否继续，
-   * 触达 Token 预算时直接终止——修复"死循环烧 Token 直至会话异常退出"。
+   * 模型循环检测（同工具+同参数连续 3 次 → 自动终止）。触达轮数/连续失败上限时
+   * 暂停并咨询用户是否继续——修复"死循环烧 Token 直至会话异常退出"。
+   * Token 配额硬终止线已移除（2026-10-19）：上下文压力由
+   * "自动压缩 + 新任务切新上下文"策略接管。
    * 缺省使用 DEFAULT_TURN_GUARD_CONFIG。
    */
   turnGuard?: Partial<TurnGuardConfig>;
@@ -1472,9 +1474,10 @@ export class SessionManager {
   // turnGuard：每 turn 入口经 getOrCreateTurnGuard 获取（同 turn 复用、用户确认继续时
   // acknowledgeAndContinue 清零咨询计数、新任务 resetTurnGuard 重置）。
   // 单活跃会话模型（this.activeSessionId 全局唯一 + isInterrupted 保证上一 turn 已退出），
-  // 单实例即可承载；连续失败/轮数上限触达 → 暂停咨询用户，Token 预算触达 → 终止。
+  // 单实例即可承载；连续失败/轮数上限触达 → 暂停咨询用户，
+  // 模型死循环 → 硬终止（Token 配额线已移除，2026-10-19）。
   // turnGuardConfig：缺省 DEFAULT_TURN_GUARD_CONFIG（maxTurns=40 / 连续失败 3 轮 /
-  // Token 预算 2M），由 options 透传。
+  // 循环检测 3 次签名），由 options 透传。
   private turnGuard?: TurnGuard;
   private readonly turnGuardConfig?: Partial<TurnGuardConfig>;
   private readonly evaluatorRedlines?: ReadonlyArray<RedlineDefinition>;
@@ -3611,7 +3614,7 @@ ${agentInstructions}
 
     const sessionId = crypto.randomUUID();
     // 需求123/124：新任务（新会话）开始时重置循环护栏——护栏计数按"任务"累计，
-    // 新任务应获得完整的轮数/连续失败/Token 预算窗口，不受上一个任务残留计数影响。
+    // 新任务应获得完整的轮数/连续失败/循环检测窗口，不受上一个任务残留计数影响。
     this.turnGuard = new TurnGuard(this.turnGuardConfig);
     // fork 侧：文件历史协调器初始化会话分支（coordinator 与上游内联方法操作同一
     // <projectDir>/file-history/.git 仓库，此处用 coordinator 版本避免重复初始化）
@@ -3782,11 +3785,11 @@ ${agentInstructions}
     // 因此在 turn 入口消费护栏暂停态：本条输入是新指令（非 continue/权限回复——
     // 这两类走上方早退分支并由主循环 acknowledgeAndContinue 放行）时，
     // 清零轮数与连续失败计数，让新指令获得完整预算窗口。
-    // Token 总预算不清零（硬兜底跨指令保持）。
+    // tokensConsumed 保留作观测（Token 配额线已移除，不参与判定）。
     //
     // 暂停态判定（架构审查缺陷1修复）：必须在 updateSessionEntry 把 status 覆盖为
     // "pending" 之前捕获护栏暂停态——护栏触发时主循环把会话置为 waiting_for_user
-    // （Token 硬终止置 failed，failed 不消费：新指令也不应绕过 Token 硬兜底）。
+    // （模型死循环硬终止置 failed，failed 不消费：失败态走下方新任务切新上下文路径）。
     // 此前实现扫描全历史"[执行护栏]"消息（.some()），导致"曾触发过护栏的长会话"里
     // 任何普通新指令都会误清零未暂停的计数，护栏累计上限形同虚设——已废弃该判定。
     // 护栏暂停态下用户回复任意内容（含"继续"等自然语言）都视为放行，
@@ -3806,6 +3809,98 @@ ${agentInstructions}
     if (!updated) {
       await this.createSession(userPrompt, controller);
       return;
+    }
+
+    // 2026-10-19 需求变更：新任务直接切新上下文（与"自动压缩"互补的上下文管理策略）
+    //
+    // 背景：Token 配额硬终止线已移除，上下文压力策略改为——
+    // - 任务继续执行中上下文膨胀 → activateSession 主循环自动 compactSession（L7326 既有逻辑）
+    // - 上一轮已结束 + 本条是新任务 → 不继承旧上下文，直接归档切换
+    //
+    // 触发条件（全部满足才判定）：
+    // 1. 上一轮已结束（completed/failed/interrupted）——waiting_for_user 是护栏暂停态，
+    //    走上方 acknowledgeAndContinue 恢复路径，不在此列
+    // 2. 本条是纯文本新指令（非权限回复/continue，且无未答工具调用——否则是任务延续）
+    // 3. 上下文已膨胀到"自动压缩本会触发"的量级（activeTokens > 压缩阈值）——
+    //    上下文小时携带成本可忽略，不做 LLM 分类（零延迟零成本零回归）
+    //
+    // 判定方式：复用 web 层同款 classifySteeringIntent（steer=当前任务延续 / next=独立新任务），
+    // 3 秒硬超时；分类失败一律按 steer 保守回落（沿用原路径，自动压缩兜底，零回归）。
+    //
+    // 切换实现：归档旧上下文——全部 user/assistant/tool 消息标记 compacted=true（不生成摘要，
+    // 磁盘保留完整历史可回溯），buildMessages 过滤 compacted 后模型侧上下文仅剩系统消息；
+    // 随后重估 activeTokens、重置 turnGuard（新任务=新预算窗口），本条新指令在全新上下文中执行。
+    if (
+      updated &&
+      !hasUserPermissionReplies(userPrompt) &&
+      !this.isContinuePrompt(userPrompt) &&
+      Boolean(userPrompt.text) &&
+      !this.hasTrailingPendingToolCalls(sessionId) &&
+      (session?.status === "completed" || session?.status === "failed" || session?.status === "interrupted")
+    ) {
+      const resolvedSettings = this.getResolvedSettings();
+      const compactThreshold =
+        resolvedSettings.autoCompactWindow ??
+        getCompactPromptTokenThreshold(resolvedSettings.model, resolvedSettings.contextWindow);
+      if ((session?.activeTokens ?? 0) > compactThreshold) {
+        let steeringIntent: "steer" | "next" = "steer";
+        try {
+          // 最近上下文摘要：与 web 层 classifySteering 同口径（最近 6 条可见消息，每条截断 200 字符）
+          const recentContext =
+            this.listSessionMessages(sessionId)
+              .filter((message) => message.visible && message.content)
+              .slice(-6)
+              .map((message) => `${message.role}: ${(message.content ?? "").slice(0, 200)}`)
+              .join("\n") || "（无可见历史）";
+          const classification = await this.classifySteeringIntent(
+            userPrompt.text!,
+            recentContext,
+            AbortSignal.timeout(3000)
+          );
+          steeringIntent = classification.intent;
+        } catch {
+          // 分类失败（凭据缺失/超时/非法输出）→ 保守按当前任务延续，走既有自动压缩路径
+        }
+        if (steeringIntent === "next") {
+          const archivedAt = new Date().toISOString();
+          const messagesBeforeArchive = this.listSessionMessages(sessionId);
+          // 归档：system 与 skillCatalog 快照保留（新上下文仍需系统提示词与技能目录），
+          // 其余全部标记 compacted=true（buildMessages 过滤后不再进入模型上下文）
+          this.saveSessionMessages(
+            sessionId,
+            messagesBeforeArchive.map((message) =>
+              message.role === "system" || message.meta?.skillCatalog
+                ? message
+                : { ...message, compacted: true, updateTime: archivedAt }
+            )
+          );
+          // 重估 activeTokens：按归档后剩余消息字符重算（与 compactSession 同口径，
+          // estimateStreamTokens 为 session 既有估算系数，不新造口径）
+          const remainingMessages = this.listSessionMessages(sessionId);
+          const estimatedActiveTokens = Math.round(
+            remainingMessages.reduce(
+              (sum, m) => sum + (typeof m.content === "string" ? this.estimateStreamTokens(m.content) : 0),
+              0
+            )
+          );
+          this.updateSessionEntry(sessionId, (entry) => ({
+            ...entry,
+            activeTokens: estimatedActiveTokens,
+            updateTime: archivedAt,
+          }));
+          // 新任务 = 新预算窗口：重置护栏（轮数/连续失败/循环检测签名队列归零）
+          this.turnGuard = new TurnGuard(this.turnGuardConfig);
+          // 可见系统消息：告知用户已切换（与护栏消息同管道，UI 原样展示）
+          const switchMessage = this.buildSystemMessage(
+            sessionId,
+            "[上下文管理] 检测到新任务，已切换到全新上下文（历史任务上下文已归档，可在会话历史中回溯）。",
+            null,
+            true
+          );
+          this.appendSessionMessage(sessionId, switchMessage);
+          this.onAssistantMessage(switchMessage, false);
+        }
+      }
     }
 
     this.appendPlanModeTransitionMessages(sessionId, previousPlanMode, nextPlanMode);
@@ -7253,7 +7348,8 @@ ${agentInstructions}
 
         // 需求123/124：TurnGuard 循环护栏判定（每轮 LLM 请求前）
         // 触达上限 ≠ 报错崩溃：
-        // - terminate_token_budget / terminate_model_loop → 硬终止，会话标记 failed
+        // - terminate_model_loop → 硬终止，会话标记 failed（Token 预算线已移除，
+        //   上下文压力由自动压缩 + 新任务切新上下文接管）
         // - consult_user_* → 会话转 waiting_for_user 暂停，等待用户指示
         const guard = this.turnGuard!;
         const hasPermissionReply = Boolean(permissionPrompt && hasUserPermissionReplies(permissionPrompt));
@@ -7269,8 +7365,7 @@ ${agentInstructions}
 
         const guardDecision = guard.decideBeforeIteration();
         if (!guardDecision.allow) {
-          const isHardTerminate =
-            guardDecision.action === "terminate_token_budget" || guardDecision.action === "terminate_model_loop";
+          const isHardTerminate = guardDecision.action === "terminate_model_loop";
           this.updateSessionEntry(sessionId, (entry) => ({
             ...entry,
             status: isHardTerminate ? "failed" : "waiting_for_user",
