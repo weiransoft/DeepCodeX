@@ -2546,6 +2546,10 @@ export class SessionManager {
     let refusal: string | null = null;
     let usage: ModelUsage | null = null;
     let streamCompleted = false;
+    // 2026-10-19 停止按钮修复：标记是否因 abort 提前 break（用户主动停止）。
+    // 正常 stream 结束（item.done）时 streamCompleted 会被设为 true，
+    // abort break 则不会——需要区分两者，让 abort break 跳过 disconnected 错误检查。
+    let abortedBreak = false;
     const responseChunks: unknown[] = [];
     const toolCallsByIndex = new Map<
       number,
@@ -2578,12 +2582,28 @@ export class SessionManager {
       // fork 增强：InjectInterruptError 中断检查（嵌入每次迭代头部）
       const iterator = (response as AsyncIterable<Record<string, unknown>>)[Symbol.asyncIterator]();
       for (;;) {
+        // 2026-10-19 停止按钮修复：在等待 chunk 之前先检查 abort 信号。
+        // 用户点击停止按钮时 sessionController.abort() → forwardAbort() → attemptController.abort()。
+        // 如果已 abort，立即 break 出循环，不再等待新 chunk（让 SDK 的 abort 自行清理底层 fetch）。
+        if (attemptController.signal.aborted) {
+          abortedBreak = true;
+          break;
+        }
         const item = await Promise.race([iterator.next(), idleTimeoutPromise!]);
         if (item.done) {
           break;
         }
         const chunk = item.value;
         resetIdleTimer();
+
+        // 2026-10-19 停止按钮修复：每个 chunk 后再次检查 abort 信号。
+        // 原因：用户可能在两个 chunk 之间点击停止按钮，此时 iterator.next()
+        // 已经 resolve 了当前 chunk，但 abort 信号还没被消费。
+        // 在 resetIdleTimer 之后检查，防止 abort 与 idle timeout 竞态覆盖。
+        if (attemptController.signal.aborted) {
+          abortedBreak = true;
+          break;
+        }
 
         // E3 扩展点（ADR-DI-001 §5.1.3）：流式 chunk 之间检查中断队列
         //
@@ -2676,7 +2696,9 @@ export class SessionManager {
           }
         }
       }
-      if (!streamCompleted) {
+      // 2026-10-19 停止按钮修复：abort 提前 break 不算 stream disconnected
+      // （用户主动停止 ≠ 连接断开），允许循环正常走 finally 清理 + 返回已积累的部分内容
+      if (!streamCompleted && !abortedBreak) {
         throw new LlmStreamDisconnectedError();
       }
     } catch (error) {
@@ -2726,7 +2748,13 @@ export class SessionManager {
     const toolCalls = Array.from(toolCallsByIndex.entries())
       .sort(([left], [right]) => left - right)
       .map(([, toolCall]) => toolCall);
-    const normalizedToolCalls = this.normalizeLlmToolCalls(toolCalls);
+    let normalizedToolCalls = this.normalizeLlmToolCalls(toolCalls);
+    // 2026-10-19 停止按钮修复：abort 提前 break 时丢弃所有 tool calls。
+    // 用户主动停止 → 后续工具执行不应继续；只保留已积累的 content（给用户看到部分回复）。
+    // 这也防止了 truncated arguments JSON 导致下游执行异常。
+    if (abortedBreak) {
+      normalizedToolCalls = null;
+    }
     // 中间推理碎片治理（2026-09-24，Advisor 收窄版）：
     // 推理模型（qwen3.8 等）在多轮工具循环的**中间轮次**把零散叙述误输出在
     // 正文通道（delta.content）而非 reasoning_content 通道，产生「数据库连接池异常」
@@ -2963,6 +2991,8 @@ export class SessionManager {
     let reasoningContent = "";
     let refusal: string | null = null;
     let usage: ModelUsage | null = null;
+    // 2026-10-19 停止按钮修复：标记是否因 abort 提前 break（与 OpenAI 路径 abortedBreak 对等）
+    let abortedBreak = false;
     const responseChunks: unknown[] = [];
     // 工具调用桶：按 id 索引（provider 层保证 start → delta* → end 顺序），
     // 同时天然支持任意交错序列，不做「同时只有一个活跃桶」假设（§4.2 规则 1/3）
@@ -3005,6 +3035,14 @@ export class SessionManager {
         thinkingEnabled: request.thinkingEnabled,
         signal: safetyController.signal,
       })) {
+        // 2026-10-19 停止按钮修复：每个 event 后检查 abort 信号（与 OpenAI 路径双点检查对等）
+        // 原因：用户可能在两个 event 之间点击停止按钮，for-await-of 已经 resolve 了当前 event。
+        // 如果已 abort，标记 abortedBreak 并跳出循环（让 finally 清理，不抛错给上层）。
+        if (safetyController.signal.aborted) {
+          abortedBreak = true;
+          break;
+        }
+
         // E3 扩展点（ADR-DI-001 §5.1.3）：流式事件之间检查中断队列
         //
         // 与 OpenAI 通路（createChatCompletionStream）完全对等：
@@ -3137,7 +3175,11 @@ export class SessionManager {
     // 桶按 Map 插入序迭代 = 事件出现序，即对等 OpenAI 侧 index 排序后的语义；
     // 返回前过一次 normalizeLlmToolCalls（对齐 OpenAI 侧 L754）：Anthropic id 必然存在，
     // 实际不触发补 id 逻辑，仅为两通路返回体语义严格一致
-    const normalizedToolCalls = this.normalizeLlmToolCalls(Array.from(toolCallBuckets.values()));
+    let normalizedToolCalls = this.normalizeLlmToolCalls(Array.from(toolCallBuckets.values()));
+    // 2026-10-19 停止按钮修复：与 OpenAI 路径对等——abort 提前 break 时丢弃 tool calls
+    if (abortedBreak) {
+      normalizedToolCalls = null;
+    }
     // 中间推理碎片治理（2026-09-24，Advisor 收窄版）：与 OpenAI 通路
     // 三条件同时满足才降级：工具调用回合铁证 + reasoning 为空 + content 短 < 80
     // （判据已提取为 suggestion-auto.ts shouldDemoteToolCallFragment 纯函数，
@@ -7211,9 +7253,8 @@ ${agentInstructions}
 
         // 需求123/124：TurnGuard 循环护栏判定（每轮 LLM 请求前）
         // 触达上限 ≠ 报错崩溃：
-        // - terminate_token_budget → Token 预算硬兜底，会话标记失败并终止（防资源耗尽）
-        // - consult_user_* → 会话转 waiting_for_user 暂停，向用户展示原因并等待指示；
-        //   用户下一条消息（确认继续/澄清指令）重新进入本方法时清零轮数与连续失败计数放行
+        // - terminate_token_budget / terminate_model_loop → 硬终止，会话标记 failed
+        // - consult_user_* → 会话转 waiting_for_user 暂停，等待用户指示
         const guard = this.turnGuard!;
         const hasPermissionReply = Boolean(permissionPrompt && hasUserPermissionReplies(permissionPrompt));
         const isContinuePrompt = Boolean(permissionPrompt && this.isContinuePrompt(permissionPrompt));
@@ -7225,20 +7266,22 @@ ${agentInstructions}
         ) {
           guard.acknowledgeAndContinue();
         }
+
         const guardDecision = guard.decideBeforeIteration();
         if (!guardDecision.allow) {
-          const isTokenExhausted = guardDecision.action === "terminate_token_budget";
+          const isHardTerminate =
+            guardDecision.action === "terminate_token_budget" || guardDecision.action === "terminate_model_loop";
           this.updateSessionEntry(sessionId, (entry) => ({
             ...entry,
-            status: isTokenExhausted ? "failed" : "waiting_for_user",
-            failReason: isTokenExhausted ? guardDecision.reason : entry.failReason,
+            status: isHardTerminate ? "failed" : "waiting_for_user",
+            failReason: isHardTerminate ? guardDecision.reason : entry.failReason,
             updateTime: new Date().toISOString(),
           }));
           // 护栏消息走 buildSystemMessage（visible=true）：不产生 tool_calls、
           // 不污染 assistantReply 语义，UI 按 system 消息原样展示
           const guardMessage = this.buildSystemMessage(
             sessionId,
-            isTokenExhausted
+            isHardTerminate
               ? `[执行护栏] ${guardDecision.reason}`
               : `[执行护栏] ${guardDecision.reason}\n是否继续执行？回复任意内容继续，或调整任务后重新下达指令。`,
             null,
@@ -7250,6 +7293,8 @@ ${agentInstructions}
           return;
         }
 
+        // 2026-10-19 停止按钮修复：compactSession 是 async，
+        // await 后必须立即检查中断信号，防止"用户已停止但 compact 仍继续"
         const pendingToolCallMessage = this.messageConverter.getTrailingPendingToolCallMessage(
           this.listSessionMessages(sessionId)
         );
@@ -7632,6 +7677,19 @@ ${agentInstructions}
           hadToolCalls: toolCalls !== null,
           allToolsFailed: toolCalls !== null && turnToolSucceededCount === 0 && turnToolFailedCount > 0,
         });
+
+        // 2026-10-19 新增：模型循环检测 —— 记录本轮 tool call 签名
+        // 连续 maxRepeatedToolCalls 次调用相同工具+相同参数 → 自动终止
+        if (toolCalls !== null && Array.isArray(toolCalls) && toolCalls.length > 0) {
+          // 适配：LLM 返回的 tool_call 结构是 { function: { name, arguments } }，
+          // 而 TurnGuard.recordToolCalls 期望 { name, arguments } 扁平结构
+          const adapted = toolCalls.map((tc) => {
+            const t = tc as Record<string, unknown>;
+            const fn = t.function as Record<string, unknown> | undefined;
+            return { name: String(fn?.name ?? t.name ?? ""), arguments: fn?.arguments ?? t.arguments };
+          });
+          this.turnGuard!.recordToolCalls(adapted);
+        }
 
         if (this.isInterrupted(sessionId)) {
           return;

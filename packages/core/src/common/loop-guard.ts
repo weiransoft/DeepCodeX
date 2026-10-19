@@ -105,6 +105,11 @@ export type GuardStopReason =
  * 普通会话触达 maxTurns/连续失败 时暂停并咨询用户（需求124 预期：
  * "反复处理无果后（同一请求拨通3-5次），咨询用户是否继续"），
  * maxTokenBudget 为防 Token 耗尽的兜底线，触达即终止。
+ *
+ * 模型循环检测（2026-10-19 新增）：
+ * 跟踪最近 N 次 tool 调用签名（tool name + 简化参数 hash），
+ * 当连续 maxRepeatedToolCalls 次调用相同工具 + 相同参数 → 自动终止，
+ * 防止模型陷入"同一命令反复重试"的死循环烧 Token。
  */
 export interface TurnGuardConfig {
   /** 单 turn 最大 LLM 迭代轮数（默认 40，需求123 反馈"40 轮内未解决"即咨询） */
@@ -113,10 +118,20 @@ export interface TurnGuardConfig {
   maxTokenBudget: number;
   /** 连续工具全失败轮数上限（默认 3，需求124"同一请求拨通3-5次"下限） */
   maxConsecutiveFailedTurns: number;
+  /**
+   * 循环检测：连续多少次调用相同工具+相同参数即判定为模型死循环（默认 3）。
+   * 设为 0 禁用循环检测。
+   */
+  maxRepeatedToolCalls: number;
+  /**
+   * 循环检测：跟踪最近多少次 tool 调用的签名（默认 5）。
+   * 越大检测越准但内存开销略增。
+   */
+  trackedToolCallHistory: number;
 }
 
 /**
- * 默认循环护栏配置（需求123/124）
+ * 默认循环护栏配置（需求123/124 + 2026-10-19 模型循环检测）
  *
  * 数值依据：
  * - maxTurns=40：需求123 反馈的期望轮次——正常任务 40 轮内可完成，
@@ -125,15 +140,19 @@ export interface TurnGuardConfig {
  *   触达即终止会话并通知用户
  * - maxConsecutiveFailedTurns=3：需求124 下限——连续 3 轮工具调用全部失败
  *   即判定"反复处理无果"，暂停咨询
+ * - maxRepeatedToolCalls=3：同一工具 + 相同参数连续调用 3 次 → 模型死循环
+ * - trackedToolCallHistory=5：跟踪最近 5 次 tool 调用签名
  */
 export const DEFAULT_TURN_GUARD_CONFIG: Readonly<TurnGuardConfig> = Object.freeze({
   maxTurns: 40,
   maxTokenBudget: 2_000_000,
   maxConsecutiveFailedTurns: 3,
+  maxRepeatedToolCalls: 3,
+  trackedToolCallHistory: 5,
 });
 
 /**
- * 循环护栏触发的暂停动作类型（需求123/124）
+ * 循环护栏触发的暂停动作类型（需求123/124 + 2026-10-19 模型循环检测）
  */
 export type LoopGuardAction =
   /** 连续工具全失败达上限 → 暂停咨询用户（可恢复） */
@@ -141,7 +160,9 @@ export type LoopGuardAction =
   /** 迭代轮数达上限 → 暂停咨询用户（可恢复） */
   | "consult_user_max_turns"
   /** Token 预算耗尽 → 直接终止（不可恢复） */
-  | "terminate_token_budget";
+  | "terminate_token_budget"
+  /** 模型死循环（同一工具+参数重复调用）→ 直接终止（不可恢复） */
+  | "terminate_model_loop";
 
 /**
  * 循环护栏判定结果（需求123/124）
@@ -451,6 +472,13 @@ export class TurnGuard {
   private consecutiveFailedTurns = 0;
 
   /**
+   * 最近 N 次 tool 调用签名队列（2026-10-19 新增，模型循环检测）。
+   * 每个签名是 `toolName + "|" + argsHash` 的字符串。
+   * 当队列尾部连续 maxRepeatedToolCalls 条签名相同 → 判定为死循环。
+   */
+  private readonly toolCallSignatures: string[] = [];
+
+  /**
    * 构造 TurnGuard
    *
    * @param config 配置（缺省字段使用 DEFAULT_TURN_GUARD_CONFIG）
@@ -463,17 +491,105 @@ export class TurnGuard {
   }
 
   /**
+   * 简化参数为签名哈希（用于模型循环检测）
+   *
+   * 提取规则：JSON.stringify 后截取前 200 字符 + 长度后缀。
+   * 目的：相同语义的参数产生相同签名，微小差异（如空格、数字精度变化）不影响检测。
+   *
+   * @param args 原始 tool call 参数（任意可 JSON 序列化的对象）
+   * @returns 签名字符串（200 字符内 + 长度标记）
+   */
+  private static hashToolArgs(args: unknown): string {
+    if (args === null || args === undefined) return "";
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(args);
+    } catch {
+      serialized = String(args);
+    }
+    // 截取前 200 字符 + 总长度后缀，平衡精度与抗噪声
+    const prefix = serialized.length > 200 ? serialized.slice(0, 200) : serialized;
+    return `${prefix}#${serialized.length}`;
+  }
+
+  /**
+   * 记录一次 tool 调用（用于循环检测，2026-10-19 新增）
+   *
+   * 每轮迭代结束后调用（recordTurn 之后），把本次 LLM 响应中的所有
+   * tool call 签名追加到队列头部，超出门槛时从尾部丢弃。
+   *
+   * @param toolCalls 本轮 LLM 响应中的 tool call 数组（每元素含 name 和 arguments）
+   */
+  recordToolCalls(toolCalls: ReadonlyArray<{ readonly name: string; readonly arguments?: unknown }>): void {
+    if (!toolCalls || toolCalls.length === 0) return;
+    const maxHistory = this.config.trackedToolCallHistory;
+    for (const tc of toolCalls) {
+      const sig = `${tc.name}|${TurnGuard.hashToolArgs(tc.arguments)}`;
+      this.toolCallSignatures.push(sig);
+      // 超出门槛时从尾部丢弃（保持最近 N 次）
+      while (this.toolCallSignatures.length > maxHistory) {
+        this.toolCallSignatures.shift();
+      }
+    }
+  }
+
+  /**
+   * 检查模型是否陷入死循环（连续相同工具+参数调用，2026-10-19 新增）
+   *
+   * 判定规则：
+   * 1. maxRepeatedToolCalls > 0（循环检测未禁用）
+   * 2. toolCallSignatures 长度 >= maxRepeatedToolCalls
+   * 3. 尾部连续 maxRepeatedToolCalls 条签名完全相同
+   *
+   * @returns 是否检测到模型死循环
+   */
+  private detectModelLoop(): boolean {
+    const { maxRepeatedToolCalls } = this.config;
+    if (maxRepeatedToolCalls <= 0) return false;
+    if (this.toolCallSignatures.length < maxRepeatedToolCalls) return false;
+    const tail = this.toolCallSignatures.slice(-maxRepeatedToolCalls);
+    // 所有尾部签名必须相同
+    return tail.every((s) => s === tail[0]);
+  }
+
+  /**
+   * 获取循环检测信息（供判定 reason 详细展示）
+   *
+   * @returns { toolName, repeatCount } 或 null（未检测到循环）
+   */
+  private getLoopInfo(): { toolName: string; repeatCount: number } | null {
+    if (!this.detectModelLoop()) return null;
+    const lastSig = this.toolCallSignatures[this.toolCallSignatures.length - 1];
+    const toolName = lastSig.split("|")[0];
+    const repeatCount = this.config.maxRepeatedToolCalls;
+    return { toolName, repeatCount };
+  }
+
+  /**
    * 每轮 LLM 迭代开始前判定是否允许继续
    *
-   * 判定优先级（需求123/124）：
-   * 1. Token 预算耗尽 → terminate_token_budget（硬终止，不可咨询恢复）
-   * 2. 连续工具全失败 ≥ 上限 → consult_user_consecutive_failures（暂停咨询）
-   * 3. 迭代轮数 ≥ 上限 → consult_user_max_turns（暂停咨询）
+   * 判定优先级（需求123/124 + 2026-10-19 模型循环检测）：
+   * 1. 模型死循环 → terminate_model_loop（硬终止，不可恢复）
+   * 2. Token 预算耗尽 → terminate_token_budget（硬终止，不可恢复）
+   * 3. 连续工具全失败 ≥ 上限 → consult_user_consecutive_failures（暂停咨询）
+   * 4. 迭代轮数 ≥ 上限 → consult_user_max_turns（暂停咨询）
    *
    * @returns 判定结果（allow=false 时 reason 可直接展示给用户）
    */
   decideBeforeIteration(): LoopGuardTurnDecision {
-    // 1. Token 预算兜底线（0 = 禁用）
+    // 1. 模型死循环检测（2026-10-19 新增：最高优先级，防止反复烧 Token）
+    const loopInfo = this.getLoopInfo();
+    if (loopInfo) {
+      return {
+        allow: false,
+        action: "terminate_model_loop",
+        reason:
+          `检测到模型死循环：工具 "${loopInfo.toolName}" 连续 ${loopInfo.repeatCount} 次以相同参数被调用。` +
+          `任务自动终止，请调整指令后重新开始。`,
+      };
+    }
+
+    // 2. Token 预算兜底线（0 = 禁用）
     if (this.config.maxTokenBudget > 0 && this.tokensConsumed >= this.config.maxTokenBudget) {
       return {
         allow: false,
@@ -484,7 +600,7 @@ export class TurnGuard {
       };
     }
 
-    // 2. 连续工具全失败（需求124："同一请求拨通3-5次后咨询用户"）
+    // 3. 连续工具全失败（需求124："同一请求拨通3-5次后咨询用户"）
     if (this.consecutiveFailedTurns >= this.config.maxConsecutiveFailedTurns) {
       return {
         allow: false,
@@ -493,7 +609,7 @@ export class TurnGuard {
       };
     }
 
-    // 3. 迭代轮数上限（需求123："40 轮内未解决"）
+    // 4. 迭代轮数上限（需求123："40 轮内未解决"）
     if (this.turnsCompleted >= this.config.maxTurns) {
       return {
         allow: false,
@@ -538,7 +654,11 @@ export class TurnGuard {
   }
 
   /** 当前状态快照（供审计/展示） */
-  getState(): Readonly<{ turnsCompleted: number; tokensConsumed: number; consecutiveFailedTurns: number }> {
+  getState(): Readonly<{
+    turnsCompleted: number;
+    tokensConsumed: number;
+    consecutiveFailedTurns: number;
+  }> {
     return {
       turnsCompleted: this.turnsCompleted,
       tokensConsumed: this.tokensConsumed,

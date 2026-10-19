@@ -75,16 +75,17 @@ test("B1. 全新 guard 首轮允许执行", () => {
   assert.equal(decision.reason, "");
 });
 
-test("B2. Token 预算触达 → terminate_token_budget（硬终止优先于其他咨询判定）", () => {
+test("B2. Token 预算触达 → terminate_token_budget（硬终止）", () => {
   const guard = new TurnGuard({ maxTokenBudget: 1000, maxTurns: 100, maxConsecutiveFailedTurns: 100 });
   guard.recordTurn({ tokensUsed: 1000, hadToolCalls: false, allToolsFailed: false });
   const decision = guard.decideBeforeIteration();
   assert.equal(decision.allow, false);
   assert.equal(decision.action, "terminate_token_budget");
   assert.match(decision.reason, /Token 消耗已达预算上限/);
+  assert.match(decision.reason, /会话终止/);
 });
 
-test("B3. Token 触达与连续失败同时满足时，Token 硬终止优先（不可咨询恢复）", () => {
+test("B3. Token 触达与连续失败同时满足时，Token 硬终止优先于连续失败咨询", () => {
   const guard = new TurnGuard({ maxTokenBudget: 100, maxTurns: 100, maxConsecutiveFailedTurns: 2 });
   guard.recordTurn({ tokensUsed: 50, hadToolCalls: true, allToolsFailed: true });
   guard.recordTurn({ tokensUsed: 50, hadToolCalls: true, allToolsFailed: true });
@@ -242,15 +243,15 @@ test("F2. 需求124：用户放行（新消息/确认）后清零并再给 3 次
   assert.equal(guard.decideBeforeIteration().action, "consult_user_consecutive_failures");
 });
 
-test("F3. 需求124：Token 触达预算后即使连续失败清零也不再放行（硬终止）", () => {
+test("F3. 需求124：Token 触达预算后 acknowledgeAndContinue 不清零 Token（硬线跨咨询保持）", () => {
   const guard = new TurnGuard({ maxTokenBudget: 10_000 });
   guard.recordTurn({ tokensUsed: 10_000, hadToolCalls: true, allToolsFailed: true });
   const d1 = guard.decideBeforeIteration();
   assert.equal(d1.action, "terminate_token_budget");
-  // 确认继续（正常场景不会发生，但验证 Token 硬线不受咨询恢复影响）
+  // 确认继续（acknowledgeAndContinue 只清零轮数/连续失败，不清 Token）
   guard.acknowledgeAndContinue();
   const d2 = guard.decideBeforeIteration();
-  assert.equal(d2.allow, false);
+  assert.equal(d2.allow, false, "硬终止线不受咨询恢复影响");
   assert.equal(d2.action, "terminate_token_budget");
 });
 
@@ -353,4 +354,137 @@ test("H4. 新指令恢复后 Token 预算保持累计（硬兜底跨指令生效
   // 计数虽清零，但 Token 已 22500 > 20000 → 下一轮立即 Token 硬终止
   assert.equal(guard.getState().consecutiveFailedTurns, 0);
   assert.equal(guard.decideBeforeIteration().action, "terminate_token_budget", "Token 硬兜底必须跨指令保持");
+});
+
+// ============================================================================
+// J. 模型循环检测（2026-10-19 新增）
+// ============================================================================
+
+test("J1. 同一工具 + 相同参数连续 maxRepeatedToolCalls 次 → terminate_model_loop", () => {
+  const guard = new TurnGuard({
+    maxTokenBudget: 0,
+    maxTurns: 100,
+    maxConsecutiveFailedTurns: 100,
+    maxRepeatedToolCalls: 3,
+    trackedToolCallHistory: 5,
+  });
+  const sameArgs = { path: "/etc/passwd", recursive: false };
+  // 连续 3 次相同工具 + 相同参数
+  for (let i = 0; i < 3; i++) {
+    guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: true });
+    guard.recordToolCalls([{ name: "bash", arguments: sameArgs }]);
+  }
+  const decision = guard.decideBeforeIteration();
+  assert.equal(decision.allow, false);
+  assert.equal(decision.action, "terminate_model_loop");
+  assert.match(decision.reason, /死循环/);
+  assert.match(decision.reason, /bash/);
+});
+
+test("J2. 不同工具 → 不触发循环检测", () => {
+  const guard = new TurnGuard({
+    maxTokenBudget: 0,
+    maxTurns: 100,
+    maxConsecutiveFailedTurns: 100,
+    maxRepeatedToolCalls: 3,
+    trackedToolCallHistory: 5,
+  });
+  // 3 次不同工具
+  guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: true });
+  guard.recordToolCalls([{ name: "bash", arguments: { cmd: "ls" } }]);
+  guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: true });
+  guard.recordToolCalls([{ name: "read_file", arguments: { path: "a.txt" } }]);
+  guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: true });
+  guard.recordToolCalls([{ name: "bash", arguments: { cmd: "cat" } }]);
+  const decision = guard.decideBeforeIteration();
+  assert.equal(decision.allow, true, "不同工具不应触发循环检测");
+});
+
+test("J3. 同一工具但不同参数 → 不触发循环检测", () => {
+  const guard = new TurnGuard({
+    maxTokenBudget: 0,
+    maxTurns: 100,
+    maxConsecutiveFailedTurns: 100,
+    maxRepeatedToolCalls: 3,
+    trackedToolCallHistory: 5,
+  });
+  // 3 次同工具但不同参数
+  guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: true });
+  guard.recordToolCalls([{ name: "bash", arguments: { cmd: "ls /a" } }]);
+  guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: true });
+  guard.recordToolCalls([{ name: "bash", arguments: { cmd: "ls /b" } }]);
+  guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: true });
+  guard.recordToolCalls([{ name: "bash", arguments: { cmd: "ls /c" } }]);
+  const decision = guard.decideBeforeIteration();
+  assert.equal(decision.allow, true, "同工具但不同参数不应触发循环检测");
+});
+
+test("J4. maxRepeatedToolCalls=0 → 禁用循环检测", () => {
+  const guard = new TurnGuard({
+    maxTokenBudget: 0,
+    maxTurns: 100,
+    maxConsecutiveFailedTurns: 100,
+    maxRepeatedToolCalls: 0,
+  });
+  // 5 次相同工具（历史超限也不触发）
+  for (let i = 0; i < 5; i++) {
+    guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: true });
+    guard.recordToolCalls([{ name: "bash", arguments: { cmd: "ls" } }]);
+  }
+  assert.equal(guard.decideBeforeIteration().allow, true, "maxRepeatedToolCalls=0 时禁用检测");
+});
+
+test("J5. 默认配置 maxRepeatedToolCalls=3 自动生效", () => {
+  const guard = new TurnGuard({ maxTokenBudget: 0, maxTurns: 100, maxConsecutiveFailedTurns: 100 });
+  assert.equal(guard.getConfig().maxRepeatedToolCalls, 3);
+  assert.equal(guard.getConfig().trackedToolCallHistory, 5);
+  // 连续 3 次相同 → 触发
+  for (let i = 0; i < 3; i++) {
+    guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: false });
+    guard.recordToolCalls([{ name: "bash", arguments: { cmd: "retry" } }]);
+  }
+  assert.equal(guard.decideBeforeIteration().action, "terminate_model_loop");
+});
+
+test("J6. 混合轮：不同轮交替 → 不触发循环检测", () => {
+  const guard = new TurnGuard({
+    maxTokenBudget: 0,
+    maxTurns: 100,
+    maxConsecutiveFailedTurns: 100,
+    maxRepeatedToolCalls: 3,
+    trackedToolCallHistory: 5,
+  });
+  // A B A B A：尾部是 A，需要 3 个连续 A，不满足
+  guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: false });
+  guard.recordToolCalls([{ name: "bash", arguments: { cmd: "A" } }]);
+  guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: false });
+  guard.recordToolCalls([{ name: "bash", arguments: { cmd: "B" } }]);
+  guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: false });
+  guard.recordToolCalls([{ name: "bash", arguments: { cmd: "A" } }]);
+  guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: false });
+  guard.recordToolCalls([{ name: "bash", arguments: { cmd: "B" } }]);
+  guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: false });
+  guard.recordToolCalls([{ name: "bash", arguments: { cmd: "A" } }]);
+  assert.equal(guard.decideBeforeIteration().allow, true, "交替序列不应触发循环检测");
+});
+
+test("J7. 多工具轮：一轮内多个 tool call，循环检测跟踪所有", () => {
+  const guard = new TurnGuard({
+    maxTokenBudget: 0,
+    maxTurns: 100,
+    maxConsecutiveFailedTurns: 100,
+    maxRepeatedToolCalls: 3,
+    trackedToolCallHistory: 5,
+  });
+  // 每轮 2 个相同工具 → 连续 3 次（跨轮）
+  guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: false });
+  guard.recordToolCalls([
+    { name: "bash", arguments: { cmd: "same" } },
+    { name: "bash", arguments: { cmd: "same" } },
+  ]);
+  // 再 1 轮 1 个相同 → 总 3 个连续
+  guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: false });
+  guard.recordToolCalls([{ name: "bash", arguments: { cmd: "same" } }]);
+  assert.equal(guard.decideBeforeIteration().allow, false);
+  assert.equal(guard.decideBeforeIteration().action, "terminate_model_loop");
 });
