@@ -102,7 +102,7 @@ export type GuardStopReason =
  * 普通会话（交互式 chat）循环护栏配置
  *
  * 与 EAG 场景的 LoopGuardConfig 分离：EAG 场景触达上限直接终止；
- * 普通会话触达 maxTurns/连续失败 时暂停并咨询用户（需求124 预期：
+ * 普通会话连续失败时暂停并咨询用户（需求124 预期：
  * "反复处理无果后（同一请求拨通3-5次），咨询用户是否继续"）。
  *
  * Token 预算护栏已移除（2026-10-19 需求变更）：
@@ -111,14 +111,18 @@ export type GuardStopReason =
  * - 新任务（LLM 意图分类判定）→ 归档旧上下文直接切换（replySession 入口）
  * 因此 TurnGuard 不再设置 Token 硬终止线，tokensConsumed 仅作状态观测保留。
  *
+ * 迭代轮数上限已移除（2026-10-20 需求变更"去掉 40 轮限制"）：
+ * 原优先级 3 的 consult_user_max_turns（40 轮未解决即暂停咨询）删除——
+ * 迭代轮数不再触发咨询/终止，长任务可一直执行；防失控由模型循环检测
+ * （同工具+参数重复调用 → 硬终止）与连续工具全失败咨询兜底。
+ * turnsCompleted 仍每轮累计（观测口径），acknowledgeAndContinue 同步清零。
+ *
  * 模型循环检测（2026-10-19 新增）：
  * 跟踪最近 N 次 tool 调用签名（tool name + 简化参数 hash），
  * 当连续 maxRepeatedToolCalls 次调用相同工具 + 相同参数 → 自动终止，
  * 防止模型陷入"同一命令反复重试"的死循环烧 Token。
  */
 export interface TurnGuardConfig {
-  /** 单 turn 最大 LLM 迭代轮数（默认 40，需求123 反馈"40 轮内未解决"即咨询） */
-  maxTurns: number;
   /** 连续工具全失败轮数上限（默认 3，需求124"同一请求拨通3-5次"下限） */
   maxConsecutiveFailedTurns: number;
   /**
@@ -134,31 +138,26 @@ export interface TurnGuardConfig {
 }
 
 /**
- * 默认循环护栏配置（需求123/124 + 2026-10-19 模型循环检测）
+ * 默认循环护栏配置（需求124 + 2026-10-19 模型循环检测 + 2026-10-20 轮数上限移除）
  *
  * 数值依据：
- * - maxTurns=40：需求123 反馈的期望轮次——正常任务 40 轮内可完成，
- *   超出即说明执行受阻，应停下来问用户而不是继续烧 Token
  * - maxConsecutiveFailedTurns=3：需求124 下限——连续 3 轮工具调用全部失败
  *   即判定"反复处理无果"，暂停咨询
  * - maxRepeatedToolCalls=3：同一工具 + 相同参数连续调用 3 次 → 模型死循环
  * - trackedToolCallHistory=5：跟踪最近 5 次 tool 调用签名
  */
 export const DEFAULT_TURN_GUARD_CONFIG: Readonly<TurnGuardConfig> = Object.freeze({
-  maxTurns: 40,
   maxConsecutiveFailedTurns: 3,
   maxRepeatedToolCalls: 3,
   trackedToolCallHistory: 5,
 });
 
 /**
- * 循环护栏触发的暂停动作类型（需求123/124 + 2026-10-19 模型循环检测）
+ * 循环护栏触发的暂停动作类型（需求124 + 2026-10-19 模型循环检测）
  */
 export type LoopGuardAction =
   /** 连续工具全失败达上限 → 暂停咨询用户（可恢复） */
   | "consult_user_consecutive_failures"
-  /** 迭代轮数达上限 → 暂停咨询用户（可恢复） */
-  | "consult_user_max_turns"
   /** 模型死循环（同一工具+参数重复调用）→ 直接终止（不可恢复） */
   | "terminate_model_loop";
 
@@ -567,13 +566,16 @@ export class TurnGuard {
   /**
    * 每轮 LLM 迭代开始前判定是否允许继续
    *
-   * 判定优先级（需求123/124 + 2026-10-19 模型循环检测）：
+   * 判定优先级（需求124 + 2026-10-19 模型循环检测 + 2026-10-20 轮数上限移除）：
    * 1. 模型死循环 → terminate_model_loop（硬终止，不可恢复）
    * 2. 连续工具全失败 ≥ 上限 → consult_user_consecutive_failures（暂停咨询）
-   * 3. 迭代轮数 ≥ 上限 → consult_user_max_turns（暂停咨询）
    *
-   * Token 预算硬终止线已移除（2026-10-19）：上下文压力由
-   * "自动压缩 + 新任务切新上下文"策略接管，不再按 Token 配额终止会话。
+   * 已移除的判定：
+   * - Token 预算硬终止线（2026-10-19）：上下文压力由
+   *   "自动压缩 + 新任务切新上下文"策略接管，不再按 Token 配额终止会话。
+   * - 迭代轮数上限（2026-10-20"去掉 40 轮限制"）：原优先级 3 的
+   *   consult_user_max_turns 删除——迭代轮数不再触发咨询，长任务可一直执行；
+   *   turnsCompleted 保留为观测口径（acknowledgeAndContinue 同步清零）。
    *
    * @returns 判定结果（allow=false 时 reason 可直接展示给用户）
    */
@@ -596,15 +598,6 @@ export class TurnGuard {
         allow: false,
         action: "consult_user_consecutive_failures",
         reason: `已连续 ${this.consecutiveFailedTurns} 轮工具调用全部失败，继续重试大概率无法自行解决。`,
-      };
-    }
-
-    // 3. 迭代轮数上限（需求123："40 轮内未解决"）
-    if (this.turnsCompleted >= this.config.maxTurns) {
-      return {
-        allow: false,
-        action: "consult_user_max_turns",
-        reason: `已执行 ${this.turnsCompleted} 轮迭代仍未得出结论，可能陷入循环或任务过于复杂。`,
       };
     }
 

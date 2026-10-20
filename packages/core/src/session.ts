@@ -1474,9 +1474,9 @@ export class SessionManager {
   // turnGuard：每 turn 入口经 getOrCreateTurnGuard 获取（同 turn 复用、用户确认继续时
   // acknowledgeAndContinue 清零咨询计数、新任务 resetTurnGuard 重置）。
   // 单活跃会话模型（this.activeSessionId 全局唯一 + isInterrupted 保证上一 turn 已退出），
-  // 单实例即可承载；连续失败/轮数上限触达 → 暂停咨询用户，
-  // 模型死循环 → 硬终止（Token 配额线已移除，2026-10-19）。
-  // turnGuardConfig：缺省 DEFAULT_TURN_GUARD_CONFIG（maxTurns=40 / 连续失败 3 轮 /
+  // 单实例即可承载；连续失败触达上限 → 暂停咨询用户，
+  // 模型死循环 → 硬终止（Token 配额线已移除 2026-10-19，轮数上限已移除 2026-10-20）。
+  // turnGuardConfig：缺省 DEFAULT_TURN_GUARD_CONFIG（连续失败 3 轮 /
   // 循环检测 3 次签名），由 options 透传。
   private turnGuard?: TurnGuard;
   private readonly turnGuardConfig?: Partial<TurnGuardConfig>;

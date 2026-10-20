@@ -3,18 +3,23 @@
  *
  * 测试范围：
  * - A. 默认配置（DEFAULT_TURN_GUARD_CONFIG）与构造覆盖/冻结
- * - B. decideBeforeIteration() 判定优先级（模型死循环硬终止 > 连续失败咨询 > 轮数咨询）
+ * - B. decideBeforeIteration() 判定优先级（模型死循环硬终止 > 连续失败咨询）
  * - C. recordTurn() 状态更新（轮数递增 / Token 累计观测 / 连续失败计数与清零）
  * - D. acknowledgeAndContinue() 咨询-确认闭环（轮数/连续失败清零、Token 保留观测）
- * - E. 需求123 场景还原（40 轮未解决 → consult_user_max_turns，用户确认后继续）
+ * - E. 需求123 场景还原（已变更：40+ 轮未解决仍持续放行，轮数上限已移除）
  * - F. 需求124 场景还原（连续 3 轮工具全失败 → 咨询用户）
- * - G. 边界条件（maxTurns=0 / Token 配额移除后大消耗不终止 / 负 Token 钳制）
+ * - G. 边界条件（轮数仅观测累计 / Token 配额移除后大消耗不终止 / 负 Token 钳制）
  * - H. replySession 恢复路径模拟（session.ts 护栏暂停后新指令放行闭环）
  * - J. 模型循环检测（2026-10-19 新增）
  *
  * 2026-10-19 需求变更：Token 配额硬终止线（terminate_token_budget / maxTokenBudget）
  * 已移除——上下文压力由"自动压缩 + 新任务切新上下文"策略接管（session.ts），
  * 本文件相应用例改为验证"任何 Token 消耗都不再触发终止"。
+ *
+ * 2026-10-20 需求变更"去掉 40 轮限制"：轮数咨询线（consult_user_max_turns / maxTurns）
+ * 已移除——迭代轮数不再触发咨询/终止，长任务可一直执行；防失控由模型循环检测
+ * （terminate_model_loop）与连续工具全失败咨询（consult_user_consecutive_failures）兜底，
+ * turnsCompleted 保留观测口径。本文件相应用例改为验证"任意轮数累计都不再触发咨询"。
  *
  * 测试约定（遵循项目规则）：
  * - 使用 node:test + node:assert/strict
@@ -37,8 +42,12 @@ import {
 // A. 默认配置与构造
 // ============================================================================
 
-test("A1. DEFAULT_TURN_GUARD_CONFIG.maxTurns 默认 40（需求123 的 40 轮上限）", () => {
-  assert.equal(DEFAULT_TURN_GUARD_CONFIG.maxTurns, 40);
+test("A1. 轮数上限已移除：默认配置不再包含 maxTurns 字段", () => {
+  assert.equal(
+    "maxTurns" in DEFAULT_TURN_GUARD_CONFIG,
+    false,
+    "2026-10-20 需求变更'去掉 40 轮限制'：轮数不再触发咨询/终止，配置不得残留 maxTurns"
+  );
 });
 
 test("A2. DEFAULT_TURN_GUARD_CONFIG.maxConsecutiveFailedTurns 默认 3（需求124 的 3-5 次咨询线）", () => {
@@ -56,15 +65,14 @@ test("A3. Token 配额已移除：默认配置不再包含 maxTokenBudget 字段
 test("A4. 构造缺省回落默认配置且冻结不可改", () => {
   const guard = new TurnGuard();
   const config = guard.getConfig();
-  assert.equal(config.maxTurns, DEFAULT_TURN_GUARD_CONFIG.maxTurns);
   assert.equal(config.maxConsecutiveFailedTurns, DEFAULT_TURN_GUARD_CONFIG.maxConsecutiveFailedTurns);
   assert.ok(Object.isFrozen(config), "getConfig() 返回值必须冻结（LLM 不可自改上限）");
 });
 
 test("A5. 构造支持部分字段覆盖，未覆盖字段保留默认", () => {
-  const override: Partial<TurnGuardConfig> = { maxTurns: 10 };
+  const override: Partial<TurnGuardConfig> = { maxRepeatedToolCalls: 7 };
   const guard = new TurnGuard(override);
-  assert.equal(guard.getConfig().maxTurns, 10);
+  assert.equal(guard.getConfig().maxRepeatedToolCalls, 7);
   assert.equal(guard.getConfig().maxConsecutiveFailedTurns, DEFAULT_TURN_GUARD_CONFIG.maxConsecutiveFailedTurns);
 });
 
@@ -80,7 +88,7 @@ test("B1. 全新 guard 首轮允许执行", () => {
 });
 
 test("B2. Token 配额移除后：大量 Token 消耗不再触发任何终止（由自动压缩接管）", () => {
-  const guard = new TurnGuard({ maxTurns: 100, maxConsecutiveFailedTurns: 100 });
+  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 100 });
   guard.recordTurn({ tokensUsed: 2_000_000, hadToolCalls: false, allToolsFailed: false });
   const decision = guard.decideBeforeIteration();
   assert.equal(decision.allow, true, "Token 消耗不再终止会话——上下文压力由自动压缩/新任务切新上下文接管");
@@ -98,7 +106,7 @@ test("B3. 模型死循环与连续失败同时满足时，死循环硬终止优�
 });
 
 test("B4. 连续失败触达上限 → consult_user_consecutive_failures", () => {
-  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 3, maxTurns: 100 });
+  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 3 });
   for (let i = 0; i < 3; i++) {
     guard.recordTurn({ tokensUsed: 1, hadToolCalls: true, allToolsFailed: true });
   }
@@ -108,15 +116,13 @@ test("B4. 连续失败触达上限 → consult_user_consecutive_failures", () =>
   assert.match(decision.reason, /连续 3 轮工具调用全部失败/);
 });
 
-test("B5. 轮数触达上限 → consult_user_max_turns", () => {
-  const guard = new TurnGuard({ maxTurns: 5, maxConsecutiveFailedTurns: 100 });
-  for (let i = 0; i < 5; i++) {
+test("B5. 轮数上限已移除：任意轮数累计不再触发咨询（由循环检测/连续失败兜底）", () => {
+  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 100 });
+  for (let i = 0; i < 60; i++) {
     guard.recordTurn({ tokensUsed: 10, hadToolCalls: true, allToolsFailed: false });
   }
   const decision = guard.decideBeforeIteration();
-  assert.equal(decision.allow, false);
-  assert.equal(decision.action, "consult_user_max_turns");
-  assert.match(decision.reason, /已执行 5 轮迭代/);
+  assert.equal(decision.allow, true, "2026-10-20 需求变更：轮数不再触发咨询，长任务可一直执行");
 });
 
 // ============================================================================
@@ -165,7 +171,7 @@ test("C5. 负 Token 输入钳制为 0（防脏数据使观测值倒扣）", () =
 // ============================================================================
 
 test("D1. 确认继续清零轮数与连续失败，Token 累计保留作观测", () => {
-  const guard = new TurnGuard({ maxTurns: 5, maxConsecutiveFailedTurns: 2 });
+  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 2 });
   guard.recordTurn({ tokensUsed: 300, hadToolCalls: true, allToolsFailed: true });
   guard.recordTurn({ tokensUsed: 300, hadToolCalls: true, allToolsFailed: true });
   // 触达连续失败线
@@ -184,7 +190,7 @@ test("D1. 确认继续清零轮数与连续失败，Token 累计保留作观测"
 // E. 需求123 场景还原
 // ============================================================================
 
-test("E1. 需求123：默认 40 轮上限，40 轮未解决转咨询用户", () => {
+test("E1. 需求123 已变更：40 轮未解决仍允许继续（轮数上限移除）", () => {
   const guard = new TurnGuard();
   const decisions: LoopGuardTurnDecision[] = [];
   for (let i = 0; i < 41; i++) {
@@ -195,22 +201,17 @@ test("E1. 需求123：默认 40 轮上限，40 轮未解决转咨询用户", () 
     guard.recordTurn({ tokensUsed: 5000, hadToolCalls: true, allToolsFailed: false });
   }
   assert.equal(decisions.length, 41);
-  assert.equal(decisions[40].allow, false);
-  assert.equal(decisions[40].action, "consult_user_max_turns");
+  assert.equal(decisions[40].allow, true, "去掉 40 轮限制后，第 41 次判定仍放行");
 });
 
-test("E2. 需求123：用户确认继续后获得新的 40 轮预算窗口", () => {
+test("E2. 需求123 已变更：超过原 40 轮窗口数倍仍持续放行（无预算窗口概念）", () => {
   const guard = new TurnGuard();
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < 80; i++) {
+    const d = guard.decideBeforeIteration();
+    assert.equal(d.allow, true, `第 ${i + 1} 轮判定必须放行（轮数上限已移除）`);
     guard.recordTurn({ tokensUsed: 5000, hadToolCalls: true, allToolsFailed: false });
   }
-  assert.equal(guard.decideBeforeIteration().allow, false);
-  guard.acknowledgeAndContinue();
-  // 新窗口：再跑 39 轮仍允许
-  for (let i = 0; i < 39; i++) {
-    assert.equal(guard.decideBeforeIteration().allow, true);
-    guard.recordTurn({ tokensUsed: 5000, hadToolCalls: true, allToolsFailed: false });
-  }
+  assert.equal(guard.getState().turnsCompleted, 80, "turnsCompleted 保留观测口径持续累计");
 });
 
 // ============================================================================
@@ -250,21 +251,23 @@ test("F2. 需求124：用户放行（新消息/确认）后清零并再给 3 次
 // G. 边界条件
 // ============================================================================
 
-test("G1. maxTurns=0：首轮即咨询（上限设为 0 表示立即需要用户确认）", () => {
-  const guard = new TurnGuard({ maxTurns: 0, maxConsecutiveFailedTurns: 100 });
-  const d = guard.decideBeforeIteration();
-  assert.equal(d.allow, false);
-  assert.equal(d.action, "consult_user_max_turns");
+test("G1. 轮数仅作观测累计：多轮后 turnsCompleted 持续增长且不影响判定", () => {
+  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 100 });
+  for (let i = 0; i < 10; i++) {
+    assert.equal(guard.decideBeforeIteration().allow, true);
+    guard.recordTurn({ tokensUsed: 10, hadToolCalls: true, allToolsFailed: false });
+  }
+  assert.equal(guard.getState().turnsCompleted, 10, "turnsCompleted 保留观测口径");
 });
 
 test("G2. Token 配额移除后：任何 Token 累计都允许（原 maxTokenBudget=0 语义已成为唯一行为）", () => {
-  const guard = new TurnGuard({ maxTurns: 1000, maxConsecutiveFailedTurns: 1000 });
+  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 1000 });
   guard.recordTurn({ tokensUsed: 999_999_999, hadToolCalls: false, allToolsFailed: false });
   assert.equal(guard.decideBeforeIteration().allow, true);
 });
 
 test("G3. maxConsecutiveFailedTurns=0：首轮即咨询连续失败线", () => {
-  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 0, maxTurns: 1000 });
+  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 0 });
   const d = guard.decideBeforeIteration();
   assert.equal(d.allow, false);
   assert.equal(d.action, "consult_user_consecutive_failures");
@@ -302,7 +305,7 @@ function simulateReplySessionGuardConsume(
 }
 
 test("H1. 护栏咨询暂停后新指令进入 turn → 计数清零恢复放行", () => {
-  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 3, maxTurns: 40 });
+  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 3 });
   // 连续 3 轮全失败 → 咨询暂停
   for (let i = 0; i < 3; i++) {
     guard.recordTurn({ tokensUsed: 1000, hadToolCalls: true, allToolsFailed: true });
@@ -314,7 +317,7 @@ test("H1. 护栏咨询暂停后新指令进入 turn → 计数清零恢复放行
 });
 
 test("H2. 非 waiting_for_user 状态时新指令不清零（缺陷1回归：长会话误清零防护）", () => {
-  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 10, maxTurns: 40 });
+  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 10 });
   guard.recordTurn({ tokensUsed: 1000, hadToolCalls: true, allToolsFailed: true });
   // 会话未暂停（status 非 waiting_for_user，即使历史上曾触发过护栏消息）
   simulateReplySessionGuardConsume(guard, false, false, false);
@@ -322,7 +325,7 @@ test("H2. 非 waiting_for_user 状态时新指令不清零（缺陷1回归：长
 });
 
 test("H3. continue 指令不在 replySession 入口清零（由主循环 acknowledgeAndContinue 处理）", () => {
-  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 3, maxTurns: 40 });
+  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 3 });
   for (let i = 0; i < 3; i++) {
     guard.recordTurn({ tokensUsed: 1000, hadToolCalls: true, allToolsFailed: true });
   }
@@ -333,7 +336,7 @@ test("H3. continue 指令不在 replySession 入口清零（由主循环 acknowl
 });
 
 test("H4. 新指令恢复后连续失败重新从 0 累计（预算窗口语义回归）", () => {
-  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 3, maxTurns: 40 });
+  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 3 });
   for (let i = 0; i < 3; i++) {
     guard.recordTurn({ tokensUsed: 3500, hadToolCalls: true, allToolsFailed: true });
   }
@@ -352,7 +355,6 @@ test("H4. 新指令恢复后连续失败重新从 0 累计（预算窗口语义�
 
 test("J1. 同一工具 + 相同参数连续 maxRepeatedToolCalls 次 → terminate_model_loop", () => {
   const guard = new TurnGuard({
-    maxTurns: 100,
     maxConsecutiveFailedTurns: 100,
     maxRepeatedToolCalls: 3,
     trackedToolCallHistory: 5,
@@ -372,7 +374,6 @@ test("J1. 同一工具 + 相同参数连续 maxRepeatedToolCalls 次 → termina
 
 test("J2. 不同工具 → 不触发循环检测", () => {
   const guard = new TurnGuard({
-    maxTurns: 100,
     maxConsecutiveFailedTurns: 100,
     maxRepeatedToolCalls: 3,
     trackedToolCallHistory: 5,
@@ -390,7 +391,6 @@ test("J2. 不同工具 → 不触发循环检测", () => {
 
 test("J3. 同一工具但不同参数 → 不触发循环检测", () => {
   const guard = new TurnGuard({
-    maxTurns: 100,
     maxConsecutiveFailedTurns: 100,
     maxRepeatedToolCalls: 3,
     trackedToolCallHistory: 5,
@@ -408,7 +408,6 @@ test("J3. 同一工具但不同参数 → 不触发循环检测", () => {
 
 test("J4. maxRepeatedToolCalls=0 → 禁用循环检测", () => {
   const guard = new TurnGuard({
-    maxTurns: 100,
     maxConsecutiveFailedTurns: 100,
     maxRepeatedToolCalls: 0,
   });
@@ -421,7 +420,7 @@ test("J4. maxRepeatedToolCalls=0 → 禁用循环检测", () => {
 });
 
 test("J5. 默认配置 maxRepeatedToolCalls=3 自动生效", () => {
-  const guard = new TurnGuard({ maxTurns: 100, maxConsecutiveFailedTurns: 100 });
+  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 100 });
   assert.equal(guard.getConfig().maxRepeatedToolCalls, 3);
   assert.equal(guard.getConfig().trackedToolCallHistory, 5);
   // 连续 3 次相同 → 触发
@@ -434,7 +433,6 @@ test("J5. 默认配置 maxRepeatedToolCalls=3 自动生效", () => {
 
 test("J6. 混合轮：不同轮交替 → 不触发循环检测", () => {
   const guard = new TurnGuard({
-    maxTurns: 100,
     maxConsecutiveFailedTurns: 100,
     maxRepeatedToolCalls: 3,
     trackedToolCallHistory: 5,
@@ -455,7 +453,6 @@ test("J6. 混合轮：不同轮交替 → 不触发循环检测", () => {
 
 test("J7. 多工具轮：一轮内多个 tool call，循环检测跟踪所有", () => {
   const guard = new TurnGuard({
-    maxTurns: 100,
     maxConsecutiveFailedTurns: 100,
     maxRepeatedToolCalls: 3,
     trackedToolCallHistory: 5,
