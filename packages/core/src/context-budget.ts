@@ -270,6 +270,8 @@ export class DeterministicContextBudgetProvider implements ContextBudgetProvider
 export interface ContextEpochConfig {
   /** 最多续跑折叠次数（耗尽后 rollover 返回 null，调用方诚实 failure） */
   maxRollovers: number;
+  /** 压缩触发阈值：段增量超过段额度 × 该值即折叠续跑（2026-10-20 起缺省 0.8，提前到 80% 压缩而非 100% 烧穿） */
+  segmentThreshold: number;
   /** 续跑段额度折算比例：段额度 ≥ 名义预算 × 该值（防失控下限） */
   budgetRatio: number;
   /** 续跑段最少轮数：段额度 ≥ 实测单轮均耗 × 该值（防续跑形同虚设） */
@@ -285,17 +287,20 @@ export interface ContextEpochConfig {
 }
 
 /**
- * 缺省 epoch 配置：
- * - maxRollovers=3：预算连续耗尽三次均切换新上下文（修复"预算耗尽没有
- *   切换新上下文"——原值 1 下单任务至多折叠一次，名义×2 以下的消耗永远
- *   等不到第 2 次切换）；
+ * 缺省 epoch 配置（2026-10-20 需求变更后口径）：
+ * - maxRollovers=Infinity：续跑折叠次数不再设限——Token 预算不再终止运行，
+ *   压缩可无限续跑，防失控完全交给模型循环/空循环熔断（调用方已无
+ *   "续跑耗尽 → failure" 分支，isRolloverExhausted 恒 false 仅保留防御）；
+ * - segmentThreshold=0.8：段增量达段额度 80% 即提前折叠压缩
+ *   （原 100% 烧穿才折叠，压缩点前移避免单轮巨耗击穿额度）；
  * - budgetRatio=0.5：续跑段额度不低于名义半额；
  * - minRoundsPerEpoch=4：段额度按实测均耗折算时保底 4 轮推进空间；
- * - totalMultiplier=2.5：全任务绝对上限 = 名义 × 2.5（软预算续期不可
- *   击穿的最后防线）。
+ * - totalMultiplier=2.5：绝对上限仅保留状态机口径（观测/测试兼容），
+ *   调用方已不再据此终止。
  */
 export const DEFAULT_CONTEXT_EPOCH_CONFIG: ContextEpochConfig = Object.freeze({
-  maxRollovers: 3,
+  maxRollovers: Infinity,
+  segmentThreshold: 0.8,
   budgetRatio: 0.5,
   minRoundsPerEpoch: 4,
   totalMultiplier: 2.5,
@@ -376,13 +381,14 @@ export class ContextEpochState {
   }
 
   /**
-   * 段判限：本段增量是否超出本段额度（软预算修复核心口径）。
+   * 段判限：本段增量是否达到压缩触发线（2026-10-20 起为段额度 ×
+   * segmentThreshold=80%，提前压缩而非 100% 烧穿；软预算修复核心口径）。
    *
    * @param currentTokens 全任务累计 token
-   * @returns 段增量（累计 − 段基线）> 段额度时 true（恰好等于不算超）
+   * @returns 段增量（累计 − 段基线）> 段额度 × 80% 时 true
    */
   isSegmentExceeded(currentTokens: number): boolean {
-    return currentTokens - this.segmentBaseline > this.segmentBudget;
+    return currentTokens - this.segmentBaseline > this.segmentBudget * this.config.segmentThreshold;
   }
 
   /**
@@ -441,5 +447,32 @@ export class ContextEpochState {
     this.segmentBaseline = currentTokens;
     this.segmentBudget = newSegmentBudget;
     return newSegmentBudget;
+  }
+
+  /**
+   * 预览下一次折叠将得到的新段额度（不推进状态）。
+   *
+   * 2026-10-20 新增：Token 预算终止移除后，p5 执行器 pre-flight 门禁需要
+   * 判定"折叠是否可解"——任务简报本身超预算时，折叠换段仍装不下，若照常
+   * 折叠会形成"装不下 → 折叠 → 仍装不下"的**零消耗无限折叠循环**（不耗
+   * token、不耗轮数，任何轮数防线都无法收口）。调用方先用本方法预览新段
+   * 额度，与折叠后请求的估算规模比对：装得下才折叠，装不下诚实 failure
+   * （旧"续跑耗尽 → failure"语义的等价收口）。折算公式与 {@link rollover}
+   * 完全一致（单一事实源），杜绝预览与实际额度漂移。
+   *
+   * @param currentTokens 折叠时点的全任务累计 token
+   * @param round 折叠时点的轮次编号（均耗折算分母 = max(1, 轮次 − roundOffset)）
+   * @returns 将得到的新段额度（> 0；缺省 maxRollovers=Infinity 下永不耗尽，
+   *          显式 maxRollovers 用尽时返回 null）
+   */
+  previewRollover(currentTokens: number, round: number): number | null {
+    if (this.isRolloverExhausted()) {
+      return null;
+    }
+    const observedAvgCostPerRound = currentTokens / Math.max(1, round - this.config.roundOffset);
+    return Math.max(
+      Math.max(1, Math.floor(this.nominal * this.config.budgetRatio)),
+      Math.ceil(observedAvgCostPerRound * this.config.minRoundsPerEpoch)
+    );
   }
 }

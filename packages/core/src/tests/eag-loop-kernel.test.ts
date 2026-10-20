@@ -988,7 +988,7 @@ test("S3. LoopScheduler.computeBackoff 受 maxBackoff 上限约束", () => {
   assert.ok(backoff <= 1.2, `backoff 应 <= 1.2（含 jitter），实际：${backoff}`);
 });
 
-test("S4. LoopScheduler.decideNext Token 预算耗尽 → STOP_FAILURE", () => {
+test("S4. LoopScheduler.decideNext Token 消耗不再终止（2026-10-20 语义翻转：cumulativeTokens 仅观测）", () => {
   const config = createLoopEngineeringConfig({
     maxIterations: 10,
     maxTokens: 1000,
@@ -1005,16 +1005,25 @@ test("S4. LoopScheduler.decideNext Token 预算耗尽 → STOP_FAILURE", () => {
     suggestedFix: "",
     sampledArtifacts: [],
   };
-  // cumulativeTokens=1000 >= maxTokens=1000 → STOP_FAILURE
+  // 2026-10-20 需求变更前（对照）：cumulativeTokens=1000 >= maxTokens=1000
+  // → STOP_FAILURE"Token 预算耗尽"（最高优先级 1）。
+  // 新语义：Token 预算硬闸已从 LoopScheduler 移除——Token 消耗不再终止运行，
+  // cumulativeTokens 仅作观测口径透传（签名兼容）；上下文压力由执行器段
+  // 额度 80% 自动压缩接管，防失控由模型循环/空循环熔断与轮数上限负责。
+  // 越线 + 验证通过 → 走既有验证驱动路径（空 stopWhen + 默认不停止 → continue）。
   const decision = scheduler.decideNext(
     0,
     verdict,
     [],
-    1000, // 等于 maxTokens
+    1000, // 等于 maxTokens（旧口径即熔断点）
     0
   );
-  assert.equal(decision.action, "stop_failure");
-  assert.ok(decision.reason.includes("Token 预算耗尽"));
+  assert.equal(
+    decision.action,
+    "stop_success",
+    `Token 消耗触线不得终止——验证通过走正常停止路径，实际：${decision.action}`
+  );
+  assert.ok(!decision.reason.includes("Token 预算耗尽"), `"Token 预算耗尽"终止口径应绝迹，实际：${decision.reason}`);
 });
 
 test("S5. LoopScheduler.decideNext maxIterations 达到且 passed → STOP_SUCCESS", () => {

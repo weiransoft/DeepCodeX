@@ -76,18 +76,21 @@ test("DFG-1 段超限折叠且剩余轮数足够（≥MIN_SEGMENT_ROUNDS=4）→
     const targetFile = path.join(projectRoot, "fold-test.txt");
     const burn = { inputTokens: 200, outputTokens: 100 };
 
-    // 7 次请求：前 6 次每次写一行（不给终态），第 7 次给终态。
-    // 每次消耗 300 tokens。perTaskBudget=500，段 1 额度默认 500×0.8=400。
-    // 修复后：段 1 首次请求后烧 300（< 400 继续），次轮预检越 400 → 折叠；
-    // 折叠前 remainingGlobalPreflight=maxToolRounds-1+1=8（足够 ≥ MIN=4）→ 守卫放行；
-    // 新段 segmentRoundBudget=min(8, ceil(newBudget/均耗))，继续跑。
+    // 6 次请求：前 5 次每次写一行（不给终态），第 6 次给终态。
+    // 每次消耗 300 tokens。perTaskBudget=500，段 1 压缩线 500×0.8=400。
+    // 时序：段 1 首次请求后烧 300（< 400 继续），次轮响应后累计 600 > 400 → 折叠；
+    // 折叠前 remainingGlobal 足够（≥ MIN=4）→ 守卫放行；新段段轮数预算
+    // = min(剩余全局, max(4, ceil(新额度/均耗)))=4，恰好在第 4 轮（请求 6）给出终态。
+    // （2026-10-20 语义更新：旧场景依赖 totalCeiling=1250 熔断作为失败出口——
+    // 该口径已随 Token 预算硬终止移除，场景改为折叠续跑段内真实完成；
+    // 失败分支的诚实口径断言补充"段轮数预算耗尽"作为兜底出口。）
     const script = [
-      ...Array.from({ length: 6 }, (_unused, i) => ({
+      ...Array.from({ length: 5 }, (_unused, i) => ({
         content: "",
         toolCalls: [{ name: "write", args: { file_path: targetFile, content: `line-${i}\n` } }],
         usage: burn,
       })),
-      { content: "任务完成：6 次写入均已落盘。", usage: burn },
+      { content: "任务完成：5 次写入均已落盘。", usage: burn },
     ];
     const client = new StubLlmClient(script);
 
@@ -106,17 +109,20 @@ test("DFG-1 段超限折叠且剩余轮数足够（≥MIN_SEGMENT_ROUNDS=4）→
       `error 不应包含旧版误导文案"工具循环达上限"——根因修复对象。实际 error=${result.error}`
     );
 
-    // 核心断言 2：如果成功跑完 7 次，llmRequests=7 且文件真实落盘
+    // 核心断言 2：如果成功跑完 6 次，llmRequests=6 且文件真实落盘
     if (result.success) {
-      assert.equal(result.llmRequests, 7, `成功跑完 7 次 LLM 请求（含续跑段），实际 ${result.llmRequests}`);
+      assert.equal(result.llmRequests, 6, `成功跑完 6 次 LLM 请求（含续跑段），实际 ${result.llmRequests}`);
       const content = fs.readFileSync(targetFile, "utf-8");
-      assert.ok(content.includes("line-0") && content.includes("line-5"), "6 次写入均已落盘");
+      assert.ok(content.includes("line-0") && content.includes("line-4"), "5 次写入均已落盘");
     }
-    // 如果失败，必须是 Token 预算耗尽（诚实口径），绝不是"工具循环达上限"
+    // 如果失败，必须是诚实口径（Token 预算压缩续跑被段轮数收口），绝不是"工具循环达上限"
     if (!result.success && result.error) {
       assert.ok(
-        result.error.includes("Token 预算") || result.error.includes("死折叠") || result.error.includes("硬上限"),
-        `失败口径应为 Token 预算/死折叠/硬上限，实际：${result.error}`
+        result.error.includes("Token 预算") ||
+          result.error.includes("死折叠") ||
+          result.error.includes("段轮数预算耗尽") ||
+          result.error.includes("硬上限"),
+        `失败口径应为 Token 预算/死折叠/段轮数预算耗尽/硬上限，实际：${result.error}`
       );
     }
   } finally {

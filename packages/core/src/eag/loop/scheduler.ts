@@ -200,14 +200,18 @@ export class LoopScheduler {
    * 决定下一步动作
    *
    * 决策优先级（从高到低）：
-   * 1. Token 预算硬上限（max_tokens）
-   * 2. 最大迭代次数硬上限（max_iterations）
-   * 3. 验证结果驱动（通过 → 检查停止条件；未通过 → FIX/HUMAN_CHECKPOINT/STOP_FAILURE）
+   * 1. 最大迭代次数硬上限（max_iterations）
+   * 2. 验证结果驱动（通过 → 检查停止条件；未通过 → FIX/HUMAN_CHECKPOINT/STOP_FAILURE）
+   *
+   * 2026-10-20 需求变更：移除 Token 预算硬上限判定（原优先级 1 的
+   * "Token 预算耗尽" STOP_FAILURE）——Token 消耗不再终止运行，上下文压力
+   * 由执行器段额度 80% 自动压缩接管，防失控由模型循环/空循环熔断负责。
+   * cumulativeTokens 参数保留仅作观测口径（签名兼容），不参与判定。
    *
    * @param currentIter 当前迭代索引（从 0 开始）
    * @param verdict 本轮独立 Evaluator 判定结果
    * @param memoryEvents 历史事件列表（供 stop_when 关键词匹配）
-   * @param cumulativeTokens 累计 token 消耗估算
+   * @param cumulativeTokens 累计 token 消耗估算（仅观测，不参与判定）
    * @param consecutiveFailures 当前连续失败次数（不含本轮，本轮若失败由调用方在 decideNext 后 +1）
    * @returns 调度决策
    */
@@ -218,13 +222,7 @@ export class LoopScheduler {
     cumulativeTokens: number,
     consecutiveFailures: number = 0
   ): SchedulingDecision {
-    // 1. Token 预算硬上限（最高优先级，无视验证结果）
-    if (cumulativeTokens >= this.config.maxTokens) {
-      this.info(`Token 预算耗尽：${cumulativeTokens} >= ${this.config.maxTokens}`);
-      return this.makeDecision("stop_failure", `Token 预算耗尽：${cumulativeTokens} >= ${this.config.maxTokens}`);
-    }
-
-    // 2. 最大迭代次数硬上限
+    // 1. 最大迭代次数硬上限
     if (currentIter + 1 >= this.config.maxIterations) {
       if (verdict.passed) {
         this.info(`达到最大迭代次数 ${this.config.maxIterations}，最后一轮通过`);

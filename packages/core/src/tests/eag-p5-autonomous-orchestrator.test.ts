@@ -809,12 +809,11 @@ test("B6b. blockageReport.summary 如实反映 Token 预算耗尽（修复 2026-
     // dev/fix 执行器替身（与 fixtures 工厂同语义：仅替代 LLM 网络往返，
     // 文件系统/tasks.md 状态机/guardChain/orchestrator 调度全部真实）：
     // 每次消耗 30_000 token 且 success=false。
-    // 迭代 1：plan 合成 0 + dev 30_000 + verify（合成卡无测试目标 skip）0
-    // + fix 30_000 = 60_000；迭代 2：plan 选中同一卡（dev 失败 → 5c 不标
-    // completed → 仍 pending）+ dev 30_000 → 阶段循环**内部**累计 90_000
-    // ≥ 60_000 → 5b.7 前置 Token 检查（本次修复核心）在 verify/fix 之前
-    // 即触发终止。summary 必须如实写 Token 预算耗尽，不得再以
-    // "确定性失败熔断/连续失败"口径掩盖（真实事故误导排查的根因）。
+    // 2026-10-20 需求变更：Token 消耗不再终止运行——本场景的收口路径是
+    // **确定性失败熔断**（同一任务卡 + 相同失败连续 2 次即 abort，防模型
+    // 循环重试），而非旧的"5b.7 前置 Token 检查"（已随 Token 预算硬终止
+    // 一并移除）。B6b 的核心不变量保留：阻塞报告 summary 必须如实透出
+    // 真实终止原因，且"Token 预算耗尽"旧口径必须绝迹。
     const tokenBurnExecutor = createAlwaysSucceedTaskExecutor({
       success: false,
       error: "桩失败（Token 预算用例）",
@@ -829,7 +828,7 @@ test("B6b. blockageReport.summary 如实反映 Token 预算耗尽（修复 2026-
       maxIterations: 5,
       consecutiveFailureAbort: 99,
       // 30_000 = 生产下限（上限不可自改护栏校验区间 [1000, +∞)），
-      // 迭代 1 累计 60_000 已超限——迭代 2 阶段循环内即触发轮内增量检查
+      // 迭代 1 累计 60_000 已远超名义——新语义下不再熔断，由确定性失败熔断收口
       maxTokens: 30_000,
       testCommand: FAIL_TEST_CMD,
       testTimeoutSec: 10,
@@ -838,9 +837,10 @@ test("B6b. blockageReport.summary 如实反映 Token 预算耗尽（修复 2026-
     assert.equal(result.finalStatus, "aborted");
     assert.ok(result.blockageReport !== undefined);
     const summary = result.blockageReport!.summary;
-    assert.ok(summary.includes("Token 预算"), `summary 必须如实写 Token 预算耗尽，实际：${summary}`);
-    // 不得误写"连续失败 N 次触发 abort"（误导性报告是修复对象）
-    assert.ok(!/连续失败 \d+ 次触发 abort/.test(summary), `summary 不得再误导为连续失败，实际：${summary}`);
+    // 新语义：终止口径必须如实写确定性失败熔断（模型循环重试的收口路径）
+    assert.ok(summary.includes("确定性失败熔断"), `summary 必须如实写确定性失败熔断，实际：${summary}`);
+    // "Token 预算耗尽"终止口径必须绝迹（Token 不再是终止原因）
+    assert.ok(!summary.includes("Token 预算耗尽"), `summary 不得再出现 Token 预算耗尽口径，实际：${summary}`);
   } finally {
     cleanupTempProject(projectRoot);
   }
@@ -895,27 +895,21 @@ test("B6c. Token 预算耗尽 aborted 不得把未完成任务卡误标 complete
   }
 });
 
-test("B6d. Token 名义预算用尽自动软续期一次至 1.5× 硬上限（修复 2026-10-11 长任务必死）", async () => {
-  // 真实痛点（run e52437ca342e 与 T-013/14/15/17/18 系列）：名义预算（默认
-  // 200,000）在真实模型水位下只够十几轮工具循环，运维/冒烟类长任务第一轮
-  // 迭代必死，--max-iterations 名存实亡。现在名义预算用尽自动续期一次至
-  // 1.5×（仅一次，不级联），到硬上限才 aborted——多给一个迭代窗口把任务做完。
-  //
-  // 场景构造（每迭代 dev+fix 各烧 30_000，共 60_000/迭代；任务卡恒 pending）：
-  // - 迭代 1：dev 后累计 30_000（未触线）→ fix 后累计 60_000 == 名义线
-  //   → 触发软续期（硬上限 90_000），60_000 < 90_000 → 不熔断，本轮正常收尾；
-  // - 迭代 2：plan 重选同一 pending 卡（0 token）→ dev 后累计 90_000
-  //   >= 硬上限 90_000 → 熔断 aborted。
-  // 修复前对照：迭代 1 fix 后 60_000 >= 名义 60_000 即熔断，只跑 1 个迭代、
-  // 累计停在 60_000——本测试用"累计 90_000 / 跑了第 2 迭代"证明续期生效。
+test("B6d. 预算烧穿不终止运行：dev 真实成功 + Token 烧穿硬上限 → 运行正常 completed（2026-10-20 语义翻转）", async () => {
+  // 2026-10-20 需求变更前（对照）：名义预算用尽自动软续期一次至 1.5× 硬上限
+  // （修复 2026-10-11 长任务必死），到硬上限 aborted。
+  // 新语义：Token 消耗不再终止运行——软续期机制已随 Token 硬闸一并移除，
+  // 预算烧穿（含 1.5× 硬上限口径）只影响执行器压缩基线（段额度 80% 自动
+  // 折叠），运行本身正常收口。本测试用**成功**替身验证：dev 真实完成 +
+  // 累计烧穿名义预算 → 任务卡 completed、运行 completed、无任何 Token 终止口径。
   const projectRoot = createTempProject();
   try {
     createTasksFile(projectRoot, 1, "pending");
     createDeclaredFile(projectRoot, "src/services/Service1.ts");
 
     const tokenBurnExecutor = createAlwaysSucceedTaskExecutor({
-      success: false,
-      error: "桩失败（软预算续期用例）",
+      success: true,
+      summary: "桩成功（预算烧穿不终止用例）",
       tokensUsed: 30_000,
       llmRequests: 1,
     });
@@ -923,44 +917,34 @@ test("B6d. Token 名义预算用尽自动软续期一次至 1.5× 硬上限（�
 
     const result = await orchestrator.run({
       projectRoot,
-      objective: "测试 Token 名义预算软续期",
+      objective: "测试 Token 预算烧穿不终止",
       maxIterations: 5,
       consecutiveFailureAbort: 99,
-      maxTokens: 60_000,
-      testCommand: FAIL_TEST_CMD,
+      // dev 单次 30_000 即烧穿名义预算（旧口径迭代 1 内即熔断）
+      maxTokens: 30_000,
+      // 测试命令用 PASS：dev 成功 + verify 通过 → 卡 completed → 运行正常收口
+      // （若用 FAIL_TEST_CMD，verify 失败会走确定性失败熔断，与 Token 语义无关）
+      testCommand: PASS_TEST_CMD,
       testTimeoutSec: 10,
     });
 
-    assert.equal(result.finalStatus, "aborted", "硬上限（1.5×）用尽仍必须诚实终止");
-    assert.equal(
-      result.totalTokensUsed,
-      90_000,
-      `累计必须跑到硬上限 90_000（=60_000×1.5），证明续期授予了第二个迭代窗口；` + `修复前会停在 60_000（单迭代熔断）`
-    );
-
-    // 终止口径如实标注：既说明 Token 预算耗尽，也说明已经历软续期
-    assert.ok(result.blockageReport !== undefined, "预算熔断必须产出 blockageReport");
-    const summary = result.blockageReport!.summary;
-    assert.ok(summary.includes("Token 预算"), `summary 必须写明 Token 预算耗尽，实际：${summary}`);
-    assert.ok(summary.includes("软续期"), `summary 必须如实标注已经历软续期，实际：${summary}`);
-
-    // 未完成任务卡保持 pending（与 B6c 同族的污染防线，续期不得破坏该不变量）
+    assert.equal(result.finalStatus, "completed", `预算烧穿不得终止运行，实际：${result.finalStatus}`);
+    assert.ok(result.totalTokensUsed >= 30_000, `预算烧穿场景 tokens 统计应超名义预算，实际 ${result.totalTokensUsed}`);
+    // 任务卡按 dev 真实成功结果标 completed
     const tasksContent = fs.readFileSync(path.join(projectRoot, ".eag", "p5", "tasks.md"), "utf8");
-    assert.ok(
-      !/- status: completed/.test(tasksContent),
-      `续期后熔断仍不得误标 completed，实际 tasks.md：\n${tasksContent}`
-    );
-    assert.match(tasksContent, /- status: pending/);
+    assert.match(tasksContent, /- status: completed/, "dev 真实成功且无 Token 熔断 → 任务卡正常标 completed");
   } finally {
     cleanupTempProject(projectRoot);
   }
 });
 
-test("B6e. 软续期只授予一次：硬上限之上绝不二次续期（防无限续命）", async () => {
-  // 上界不变量：续期是一次性的（tokenBudgetRenewed 布尔门），总消耗恒
-  // ≤ 名义 × 1.5 + 单阶段超烧窗口。若续期可级联，失败任务能把预算烧到无穷。
-  // 构造：每迭代烧 60_000（dev+fix 各 30_000），名义 60_000 → 硬上限 90_000。
-  // 唯一熔断点是迭代 2 dev 之后（累计 90_000），此后不得再有阶段/迭代执行。
+test("B6e. Token 无上限后的防失控不变量：恒失败烧穿预算 → 确定性失败熔断有界收口", async () => {
+  // 2026-10-20 需求变更前（对照）：软续期只授予一次（tokenBudgetRenewed
+  // 布尔门），总消耗恒 ≤ 名义 × 1.5 + 单阶段超烧窗口。
+  // 新语义：Token 上限与软续期一并移除，"防无限续命"的有界性完全交给
+  // **非 Token 防线**——本测试验证恒失败场景被确定性失败熔断精确收口
+  // （同一任务卡 + 相同失败连续 2 次），执行器调用次数有界、不因预算
+  // 烧穿而无限重试。
   const projectRoot = createTempProject();
   try {
     createTasksFile(projectRoot, 1, "pending");
@@ -991,13 +975,15 @@ test("B6e. 软续期只授予一次：硬上限之上绝不二次续期（防无
       testTimeoutSec: 10,
     });
 
-    assert.equal(result.finalStatus, "aborted");
-    // 执行器调用次数上限：迭代1 dev+fix（2 次）+ 迭代2 dev（1 次，随后熔断）= 3 次。
-    // 若续期被级联，这里会远大于 3（继续跑 fix 乃至第 3/4 个迭代）。
-    assert.equal(executorCalls, 3, `硬上限必须精确熔断（dev+fix+dev 三次），实际 ${executorCalls} 次`);
+    assert.equal(result.finalStatus, "aborted", "恒失败必须被确定性失败熔断收口");
+    // 执行器调用次数有界：失败指纹按"同一任务卡 + 相同失败信息"聚合，
+    // dev 与 fix 两个阶段各失败 1 次后进入第 2 轮重试（dev、fix 再各失败 1 次），
+    // 累计 4 次调用后命中"同一任务卡相同失败连续 2 次"判定收口——Token 预算
+    // 虽无上限，失败循环不可能无限重试。
+    assert.equal(executorCalls, 4, `恒失败应在 4 次调用后被确定性失败熔断收口，实际 ${executorCalls} 次`);
     assert.ok(
-      result.totalTokensUsed <= 90_000 + 30_000,
-      `总消耗必须被名义×1.5 + 单阶段窗口封顶，实际 ${result.totalTokensUsed}`
+      result.blockageReport !== undefined && result.blockageReport!.summary.includes("确定性失败熔断"),
+      "终止口径应为确定性失败熔断"
     );
   } finally {
     cleanupTempProject(projectRoot);

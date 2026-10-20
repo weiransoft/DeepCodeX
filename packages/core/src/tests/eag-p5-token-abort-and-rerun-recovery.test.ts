@@ -206,7 +206,7 @@ function buildOrchestrator(noTestCmd = 'node -e "console.log(1)"'): AutonomousOr
 // 2. F1 + F3：Token 熔断 aborted 轮诚实收尾（T-A1）
 // ============================================================================
 
-test("T-A1. 编排器：dev 阶段 Token 熔断 → aborted 轮不标 completed、不记 milestone、blockedStage=dev", async () => {
+test("T-A1. 编排器：dev 阶段确定性失败 → 熔断 aborted 轮不标 completed、不记 milestone、blockedStage=dev", async () => {
   const projectRoot = createTempProject("eag-tokenabort-a1-");
   try {
     // 一张手写卡（requirement F-001，避开 3.4/3.5 守卫），声明文件真实存在
@@ -234,8 +234,12 @@ test("T-A1. 编排器：dev 阶段 Token 熔断 → aborted 轮不标 completed�
     // 任务执行器替身（仅替代 LLM 网络往返）：dev 执行"失败 + 烧穿预算"——
     // 复现 run f2358227def5 的核心事实：单任务 tokensUsed 超过 maxTokens。
     // 2026-10-09 F-B 起阶段开始前有最小可行预算检查（3000），故 maxTokens
-    // 取 4000 保证 plan/dev 正常进入，dev 返回 4500 越线由 5b-3 执行后
-    // 增量检查熔断（blockedStage=dev 路径不变）。
+    // 取 4000 保证 plan/dev 正常进入，dev 返回 4500 越线。
+    // 2026-10-20 需求变更：Token 消耗不再终止运行——替身的 Token 超限 error
+    // 只是普通失败信息，运行按**确定性失败熔断**收口（同一任务卡 + 相同失败
+    // 连续 2 次即 abort，防模型循环重试）——这正是新口径下"模型循环就终止"
+    // 的编排器级体现；任务卡毒化拦截（不标 completed）与 blockedStage=dev
+    // 语义保持不变。
     const failingExecutor: P5TaskExecutor = Object.freeze({
       async executeTask(): Promise<Readonly<P5TaskExecutionResult>> {
         return Object.freeze({
@@ -259,8 +263,8 @@ test("T-A1. 编排器：dev 阶段 Token 熔断 → aborted 轮不标 completed�
       maxTokens: 4000,
     });
 
-    // 断言 1（F1）：终态 aborted，且不得按全绿轮收尾
-    assert.equal(result.finalStatus, "aborted", `应 Token 熔断 aborted，实际：${result.finalStatus}`);
+    // 断言 1（F1）：终态 aborted（确定性失败熔断），且不得按全绿轮收尾
+    assert.equal(result.finalStatus, "aborted", `应熔断 aborted，实际：${result.finalStatus}`);
     assert.equal(result.milestones.length, 0, "aborted 轮不得记录里程碑（修复前会记'4 阶段全绿'假里程碑）");
     // 断言 2（F1 核心回归点）：dev 失败的任务卡不得被 markTaskCompleted 毒化落盘
     const tasksFilePath = path.join(projectRoot, ".eag", "p5", "tasks.md");
@@ -269,12 +273,14 @@ test("T-A1. 编排器：dev 阶段 Token 熔断 → aborted 轮不标 completed�
       "pending",
       "dev 熔断失败的任务卡必须保持 pending（修复前被假标 completed，毒化下次运行）"
     );
-    // 断言 3（F3）：阻塞报告的 blockedStage 必须是真实熔断阶段 dev（修复前兜底成 plan）
+    // 断言 3（F3）：阻塞报告的 blockedStage 必须是真实熔断阶段 dev（修复前兜底成 plan）；
+    // 终止原因透出**确定性失败熔断**（2026-10-20 起 Token 预算耗尽不再是终止口径，
+    // 恒失败的模型循环由确定性失败熔断收口）
     assert.ok(result.blockageReport !== undefined, "aborted 运行必须产出阻塞分析报告");
     assert.equal(result.blockageReport!.blockedStage, "dev", "blockedStage 必须是真实熔断阶段 dev");
     assert.ok(
-      result.blockageReport!.summary.includes("Token 预算耗尽"),
-      `阻塞报告摘要应透出真实终止原因，实际：${result.blockageReport!.summary}`
+      result.blockageReport!.summary.includes("确定性失败熔断"),
+      `阻塞报告摘要应透出真实终止原因（确定性失败熔断），实际：${result.blockageReport!.summary}`
     );
     // 断言 4（F1）：假全绿轮的 completedLoops 误登记不得发生
     assert.ok(!result.completedLoops.includes("coding"), "aborted 轮不得把 coding 登记为已完成 Loop");

@@ -283,17 +283,16 @@ const EXECUTION_MAX_TOKENS = 8192;
  *    第一轮即再次超限——续跑形同虚设（写第一版时踩过这个坑，是 E9/E10
  *    用例推演暴露的）。按轮数兜底保证压缩后的新上下文至少能跑
  *    EPOCH_MIN_ROUNDS 轮，才有机会真正推进任务。
- * 2. 全任务绝对上限 = 名义预算 × MAX_TOTAL_BUDGET_MULTIPLIER。无论段额度
- *    如何折算，累计消耗触达该上限一律诚实 failure——这是防失控硬上界，
- *    保证"续跑"永远不会变成无限烧钱。
- *
- * 运行级兜底仍由编排器阶段间检查 + 软预算续期（RUN_TOKEN_SOFT_RENEWAL_RATIO）
- * 负责，与本常量正交。
+ * 2. 全任务绝对上限 = 名义预算 × MAX_TOTAL_BUDGET_MULTIPLIER。2026-10-20
+ *    需求变更后该口径仅保留在 ContextEpochState 状态机（观测/测试兼容），
+ *    执行器不再据此终止——Token 消耗不再终止运行，段额度 80% 即折叠压缩
+ *    （segmentThreshold），压缩可无限续跑，防失控交给模型循环/空循环熔断
+ *    与全局轮数上限。
  *
  * 2026-10-12 起：额度折算比例、最少轮数、折叠次数上界、绝对上限倍数四个
- * 口径迁入共享模块 context-budget.ts（ContextEpochState / DEFAULT_CONTEXT_EPOCH_CONFIG，
- * 缺省值与下述历史值逐值一致），执行器不再持有 epoch 常量副本；
- * 次数上界修复历史（原值 1 → 3）见 DEFAULT_CONTEXT_EPOCH_CONFIG 注释。
+ * 口径迁入共享模块 context-budget.ts（ContextEpochState / DEFAULT_CONTEXT_EPOCH_CONFIG）；
+ * 2026-10-20 起：折叠次数上界缺省 Infinity、压缩阈值 0.8，运行级编排器
+ * 软续期/硬闸与调度器 Token 硬闸同步移除，见 DEFAULT_CONTEXT_EPOCH_CONFIG 注释。
  */
 
 /** 压缩续跑摘要的最大保留字符数（超限保头尾、省略中段，防止摘要本身膨胀） */
@@ -953,26 +952,25 @@ export class LlmTaskExecutor implements P5TaskExecutor {
           );
         }
 
-        // 增量 Token 预算检查（2026-10-07 新增；2026-10-08 T-009/T-010 事故修复接线）：
-        // 每轮都对比累计 tokensUsed 与 perTaskBudget，超限立即 failure。
-        // 这比"40 轮全跑完才让编排器看到 tokensUsed"更诚实——避免单轮
-        // dev/fix 烧穿预算 N 倍（架构师指出的根因）。
-        // 预算优先级：调用方 input.perTaskBudget（编排器按运行剩余预算
+        // 增量 Token 预算检查（2026-10-07 新增；2026-10-08 T-009/T-010 事故修复接线；
+        // 2026-10-20 需求变更：Token 消耗不再终止执行——本轮内所有"预算超限 →
+        // failure"分支已移除，段额度只作为**压缩触发基线**：达段额度 80%
+        // （ContextEpochState.segmentThreshold）即折叠历史开新段续跑，压缩可
+        // 无限续跑，防失控交给模型循环/空循环熔断与全局轮数上限）。
+        // 预算来源：调用方 input.perTaskBudget（编排器按运行剩余预算
         // maxTokens - totalTokensUsed 逐阶段注入）> 构造期 this.perTaskBudget
         // （单测/旧宿主显式配置）。此前只读构造字段而生产链路从未注入，
         // 检查恒跳过——run 4923fdc21e5b/1c76da8bc0c8 单阶段烧穿预算 4.4×/8.6×
-        // 的根因之一。两者均未注入时不做轮内检查，由编排器阶段间检查兜底。
+        // 的根因之一。两者均未注入时不做轮内检查。
         //
-        // 2026-10-09 追加两级防线（修复 run f2358227def5 超烧 15741 tokens）：
-        // 旧检查只在"轮顶"比对上一轮累计 usage——跨线那次请求的 input+output
-        // 全额计入后要到下一轮顶部才熔断，超烧窗口 = 单次请求 token 量。
-        // 现补两级：
+        // 检查时序（保留既有两级防线形状，终止语义全部换成折叠续跑）：
         // a) pre-flight 估算检查：请求前按"实际发送消息序列"字符量估算
         //    输入侧 token（复用 CHARS_PER_TOKEN_ESTIMATE 既有系数，不新造口径），
-        //    估算值 + 已用量越线 → 不发请求直接 failure（超烧 ≈ 0）；
-        // b) 响应后检查：真实 usage 回来且本次仍要继续执行工具时立即比对，
-        //    越线 → 不执行工具、直接 failure。终态回复（无工具调用）不拦——
-        //    工作已真实完成，越线事实交由编排器阶段间检查诚实收尾。
+        //    估算值 + 本段已用量超过段额度估算余量层 → 不发请求直接折叠换段
+        //    （本轮零请求、零新消耗）；
+        // b) 响应后检查：真实 usage 回来且本段增量过线时折叠历史开新段，
+        //    当前响应继续正常执行工具（已发生请求的收尾不拦）。终态回复
+        //    （无工具调用）不拦——任务已真实完成。
         // 每轮实际发送的消息序列（自压缩重放）：预检与请求复用同一次压缩结果，
         // 避免同轮重复压缩，也保证预检口径与真实请求完全一致。
         const outgoingMessages = this.compactReplayEnabled ? this.compactMessagesForRequest(messages) : messages;
@@ -985,39 +983,22 @@ export class LlmTaskExecutor implements P5TaskExecutor {
           ).tokens;
           const segmentBudget = epochState.budget;
           const segmentTokens = currentTokens - epochState.baseline;
-          // 全任务绝对上限（防失控硬上界）：优先于段额度判定，保证续跑机制
-          // 不会把总消耗放大到不可控（口径见 ContextEpochState.totalCeiling）。
-          const totalCeiling = epochState.totalCeiling;
-          if (epochState.isTotalCeilingExceeded(currentTokens)) {
-            return this.failure(
-              `Token 预算超限：累计 ${currentTokens} tokens 已触达单任务绝对上限 ${totalCeiling}` +
-                `（名义预算 ${effectiveBudget} × ${epochState.config.totalMultiplier}，` +
-                `已自动压缩续跑 ${epochState.epoch} 次仍未完成），执行中止`,
-              llmRequests,
-              sawUsage,
-              inputTokensTotal + outputTokensTotal,
-              estimatedCharsTotal
-            );
-          }
           // a) pre-flight 估算检查（2026-10-09 F 修复；2026-10-12 段口径统一 +
-          //    门禁收敛）：估算输入侧规模 + 本段已用量 > **本段额度的估算专用
-          //    余量层** → 本段大概率装不下下一次请求，**不空耗请求，直接折叠
-          //    续跑换段**（本轮零请求、零新消耗）；续跑已耗尽时才是诚实预检
-          //    失败点（零请求 failure，超烧 ≈ 0）。
+          //    门禁收敛；2026-10-20 耗尽分支移除）：估算输入侧规模 + 本段已用量
+          //    > **本段额度的估算专用余量层** → 本段大概率装不下下一次请求，
+          //    **不空耗请求，直接折叠续跑换段**（本轮零请求、零新消耗）。
           //    为什么是「额度 × PREFLIGHT_SEGMENT_FACTOR」而不是「额度」直接
-          //    判限：段额度的正常烧穿通道在轮顶段超限检查与响应后检查（真实
+          //    判限：段额度的正常压缩通道在轮顶段检查与响应后检查（真实
           //    usage 口径）；本估算值只是字符数近似（CHARS_PER_TOKEN_ESTIMATE），
           //    真实 usage 恰好低于估算的请求（如短消息网关虚高场景）永远轮不到
-          //    本层拦截。余量层保证真实检查先判定：额度真实烧穿 → 轮顶/响应后
+          //    本层拦截。余量层保证真实检查先判定：段增量达 80% → 轮顶/响应后
           //    折叠（正常时序）；估算规模远超额度 → 说明继续发请求只是空耗
           //    token 且大概率超烧，提前零成本换段。两通道折叠形状完全一致
-          //    （同一 buildRolledOverMessages），时序收敛为「真实越线当轮折叠」。
-          //    耗尽语义：折叠已无额度可换（isRolloverExhausted）且估算仍装不下
-          //    → 诚实 failure（折叠后的紧凑上下文仍装不下 = 任务简报本身超预算，
-          //    失败语义成立；错误消息如实标注续跑次数）。直接失败而不空耗请求，
-          //    也避免 2026-10-11 软预算修复被架空（预算 < 任务简报规模的任务
-          //    折叠换段后依然装不下，耗尽后必须在零请求处收口，不能让折叠通道
-          //    无限循环）。
+          //    （同一 buildRolledOverMessages），时序收敛为「越线当轮折叠」。
+          //    2026-10-20 变更：原"续跑耗尽 → 诚实 failure"分支随 Token 预算
+          //    终止一并移除（isRolloverExhausted 缺省恒 false），估算装不下时
+          //    总是折叠换段；若任务简报本身超预算，由死折叠守卫（剩余全局轮数
+          //    不足新段最低需求）兜底收口，不会无限折叠。
           //    估算必须覆盖**请求全部字符**：system prompt + 消息序列。原实现
           //    只算消息序列不含 system——当任务简报极短而 system 较长时（T-A3
           //    预算 10），紧凑续跑请求被严重低估放行，连续 6 次请求合法通过
@@ -1033,20 +1014,43 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             Math.ceil((SYSTEM_PROMPT.length + outgoingCharsTotal) / CHARS_PER_TOKEN_ESTIMATE)
           );
           if (segmentTokens + estimatedRequestTokens > segmentBudget * PREFLIGHT_SEGMENT_FACTOR) {
-            if (epochState.isRolloverExhausted()) {
-              return this.failure(
-                `Token 预算预检超限：本次请求估算输入 ≈${estimatedRequestTokens} tokens` +
-                  `（system ${SYSTEM_PROMPT.length} + 消息序列 ${outgoingCharsTotal} 字符），` +
-                  `本段已用 ${segmentTokens}（本段额度 ${segmentBudget}，累计 ${currentTokens}，` +
-                  `名义预算 ${effectiveBudget}），续跑折叠已用尽 ${epochState.epoch} 次仍装不下，` +
-                  `不再发送请求，执行中止`,
-                llmRequests,
-                sawUsage,
-                inputTokensTotal + outputTokensTotal,
-                estimatedCharsTotal
+            // 折叠可解性判定（2026-10-20 新增，Token 预算终止移除后的等价收口）：
+            // 任务简报本身超预算时，折叠换段也装不下——若照常折叠会形成
+            // "装不下 → 折叠 → 仍装不下"的**零消耗无限折叠循环**（不耗 token、
+            // 不耗轮数，任何轮数防线都无法收口，T-A3 场景实测挂死）。用
+            // previewRollover（与 rollover 折算公式同源的预览）得到新段额度，
+            // 与**折叠后紧凑请求**的估算规模比对：装得下才折叠，装不下诚实
+            // failure——零请求、零新增消耗，语义与旧"续跑耗尽 → failure"完全
+            // 等价（错误口径同样含"预检超限 + 零请求"要素）。折叠后紧凑请求
+            // 估算 = system + 最后一条 userish 消息（任务简报，历史已被摘要
+            // 替代）+ 折叠模板常数（角色指令/摘要头/续跑指令的保守余量）。
+            {
+              const lastUserish = [...messages].reverse().find((m) => m.role === "user");
+              const lastUserishChars = typeof lastUserish?.content === "string" ? lastUserish.content.length : 0;
+              const COMPACT_TEMPLATE_OVERHEAD_CHARS = 2048;
+              const compactEstimateTokens = Math.max(
+                1,
+                Math.ceil(
+                  (SYSTEM_PROMPT.length + lastUserishChars + COMPACT_TEMPLATE_OVERHEAD_CHARS) / CHARS_PER_TOKEN_ESTIMATE
+                )
               );
+              const previewBudget = epochState.previewRollover(currentTokens, currentRound + 1);
+              if (previewBudget !== null && compactEstimateTokens > previewBudget * PREFLIGHT_SEGMENT_FACTOR) {
+                return this.failure(
+                  `Token 预算预检超限：本次请求估算输入 ≈${estimatedRequestTokens} tokens` +
+                    `（system ${SYSTEM_PROMPT.length} + 消息序列 ${outgoingCharsTotal} 字符），` +
+                    `本段已用 ${segmentTokens}（本段额度 ${segmentBudget}，累计 ${currentTokens}，` +
+                    `名义预算 ${effectiveBudget}）；折叠换段后紧凑请求估算仍需 ≈${compactEstimateTokens}` +
+                    ` tokens（简报 ${lastUserishChars} 字符），新段额度仅 ${previewBudget}，` +
+                    `折叠不可解，不再发送请求，执行中止`,
+                  llmRequests,
+                  sawUsage,
+                  inputTokensTotal + outputTokensTotal,
+                  estimatedCharsTotal
+                );
+              }
             }
-            // 本段装不下但续跑未耗尽 → 直接折叠续跑换段（本轮零请求；段超限
+            // 本段装不下 → 直接折叠续跑换段（本轮零请求；段超限
             // 只在有新增消耗时触发，本段已无额度可消耗，空等一轮只会让 for
             // 循环轮次白白 +1 并白白吞掉一个 maxToolRounds 名额）。折叠后
             // 下一轮以新段额度重新预检。
@@ -1126,21 +1130,16 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             continue;
           }
           if (epochState.isSegmentExceeded(currentTokens)) {
-            // —— 压缩续跑（统一折叠路径，2026-10-12）：额度用尽即折叠历史，
-            // 无论续跑是否已耗尽（epochState.isRolloverExhausted()）。
-            // 耗尽后折叠失败（零 LLM 请求）的职责在上方 pre-flight 估算门禁：
-            // 折叠后紧凑上下文（system+user 两条）的估算规模若仍烧不进新段
-            // 额度（典型：名义预算 ≪ 任务简报规模），pre-flight 于下一轮顶部
-            // 直接 failure，绝不发请求。这样"耗尽段估算门禁恒真 → 请求永远
-            // 发不出去 → rollover 永远不可达"的死锁不存在（门禁只在耗尽段
-            // 且折叠已实际发生时生效），E17/E18 软预算续跑语义也保持紧凑
-            // 请求照常放行、真实超限才折叠。
+            // —— 压缩续跑（统一折叠路径，2026-10-12；2026-10-20 语义更新）：
+            // 本段增量达段额度 80%（segmentThreshold）即折叠历史开新段，
+            // 压缩点从 100% 烧穿前移到 80%，降低单轮巨耗击穿额度的风险。
+            // 2026-10-20：原"续跑耗尽 → failure"分支随 Token 预算终止一并移除
+            // （maxRollovers 缺省 Infinity，isRolloverExhausted 恒 false），
+            // 折叠可无限续跑，防失控交给模型循环/空循环熔断与全局轮数上限。
             // 折叠本身不耗 LLM 请求、不新增 token 消耗；新段额度按均耗折算
-            // 重置，累计仍由 ContextEpochState.totalCeiling 绝对上限兜住，不可失控。
-            // 口径说明（2026-10-12）：段超限 = 本段额度烧穿（续跑已无额度），
-            // 与"绝对上限"（全任务触达 totalMultiplier×名义硬上界）语义不同——两类
-            // 失败消息不得混淆（run 63f1869a17db 排查时即被旧消息误导为绝对
-            // 上限失败）。
+            // 重置。口径说明（2026-10-12）：段压缩 = 本段增量达额度 80%，
+            // 与旧"绝对上限"（全任务触达 totalMultiplier×名义硬上界）语义
+            // 不同——后者已于 2026-10-20 移除终止语义，仅保留状态机观测口径。
             // —— 折叠：历史压成「system + 任务卡原文 + 确定性轨迹摘要 + 续跑指令」——
             // 旧历史的价值（探索过程）已被摘要覆盖，其体积才是每轮成本单调上涨的根因；
             // 折叠后每轮输入回到"任务卡 + 摘要 + 最近若干轮"，成本骤降。
@@ -1155,18 +1154,6 @@ export class LlmTaskExecutor implements P5TaskExecutor {
                   `折叠后新上下文一次请求都发不出（死折叠），执行中止。` +
                   `累计 ${currentTokens} tokens，已用 ${currentRound}/${this.maxToolRounds} 轮，` +
                   `本段已用 ${segmentTokens}/${segmentBudget}。`,
-                llmRequests,
-                sawUsage,
-                inputTokensTotal + outputTokensTotal,
-                estimatedCharsTotal
-              );
-            }
-            // rollover 耗尽门禁：耗尽时直接 failure（下一轮 while 顶部会再拦一次
-            // 但为了诚实失败信息，这里直接收口）
-            if (epochState.isRolloverExhausted()) {
-              return this.failure(
-                `Token 预算超限（段口径）：累计 ${currentTokens} tokens 已烧穿本段额度 ${segmentBudget}，` +
-                  `续跑折叠已用尽 ${epochState.epoch} 次，不再折叠，执行中止。`,
                 llmRequests,
                 sawUsage,
                 inputTokensTotal + outputTokensTotal,
@@ -1264,14 +1251,16 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             response.content.length;
         }
 
-        // b) 响应后预算检查（2026-10-09 新增；2026-10-12 修正为段额度口径）：
-        // 真实 usage 已越线且本次仍要执行工具时立即熔断——把熔断点从"下一轮顶部"
-        // 提前到"本响应之后"，不再为已知越线的会话继续执行工具/发起新请求。
-        // 终态回复（无工具调用）不拦：任务已真实完成，越线收尾交编排器阶段间检查。
+        // b) 响应后预算检查（2026-10-09 新增；2026-10-12 修正为段额度口径；
+        // 2026-10-20 终止语义移除，改为纯折叠通道）：
+        // 真实 usage 已过线且本次仍要执行工具时立即折叠——把压缩点从"下一轮顶部"
+        // 提前到"本响应之后"。终态回复（无工具调用）不拦：任务已真实完成。
         // 2026-10-12 修正为段额度口径：原实现用名义预算比对全任务累计，续跑段
         // 起步（累计必然已超名义预算）首个带工具调用的响应即被误杀，续跑段一个
         // 工具都执行不了；改为"本段增量 vs 本段额度"，首段语义完全不变
         // （baseline=0、segmentBudget=名义预算），续跑段获得真实额度。
+        // 2026-10-20：原 totalCeiling 熔断分支移除（Token 消耗不再终止），
+        // 本检查只剩"段增量达 80% → 折叠开新段，当前响应继续执行工具"一条路径。
         if (response.toolCalls.length > 0 && effectiveBudget !== undefined && epochState !== undefined) {
           const postResponseTokens = this.resolveTokensUsed(
             sawUsage,
@@ -1280,30 +1269,13 @@ export class LlmTaskExecutor implements P5TaskExecutor {
           ).tokens;
           const postSegmentTokens = postResponseTokens - epochState.baseline;
           const postSegmentBudget = epochState.budget;
-          // 全任务绝对上限（与轮顶检查同口径）：累计触达硬上界一律诚实熔断，
-          // 续跑段不得借响应后检查之外的通道继续越界烧钱。
-          const postTotalCeiling = epochState.totalCeiling;
-          if (epochState.isTotalCeilingExceeded(postResponseTokens)) {
-            return this.failure(
-              `Token 预算超限（响应后检查）：累计 ${postResponseTokens} tokens 已触达` +
-                `单任务绝对上限 ${postTotalCeiling}（名义预算 ${effectiveBudget} ×` +
-                ` ${epochState.config.totalMultiplier}，已自动压缩续跑 ${epochState.epoch} 次仍未完成），` +
-                `不再执行工具调用，执行中止`,
-              llmRequests,
-              sawUsage,
-              inputTokensTotal + outputTokensTotal,
-              estimatedCharsTotal
-            );
-          }
           if (epochState.isSegmentExceeded(postResponseTokens)) {
-            // 本段额度烧穿（与轮顶段检查同语义，2026-10-12 统一折叠路径）：
-            // 还有续跑额度 → 立即折叠历史开新段，当前响应继续正常执行工具
-            // （token 已真实消耗、工具是该请求语义的一部分，"熔断点前移"拦
-            // 的是**越线之后的新请求/新工具**，不是已发生请求的收尾）；续跑
-            // 已耗尽 → 熔断语义收口在下一轮轮顶段检查 + pre-flight 估算门禁
-            // （耗尽段零请求），此处不拦当前收尾工具，避免与"越线那次请求的
-            // 工具照常执行"的既有契约冲突。
-            if (!epochState.isRolloverExhausted()) {
+            // 本段增量达段额度 80%（与轮顶段检查同语义，2026-10-12 统一折叠路径；
+            // 2026-10-20 起 isRolloverExhausted 恒 false，折叠无条件可走）：
+            // 立即折叠历史开新段，当前响应继续正常执行工具（token 已真实消耗、
+            // 工具是该请求语义的一部分，压缩点前移拦的是**过线之后的新请求/
+            // 新工具**，不是已发生请求的收尾）。
+            {
               // 死折叠守卫（2026-10-14 P0-1）：响应后折叠的特殊语境——本轮请求
               // 已发生（token 已烧），但工具还没执行。如果剩余全局轮数不够新段
               // 跑 MIN_SEGMENT_ROUNDS 次，折叠后工具执行完 currentRound+=1 立即

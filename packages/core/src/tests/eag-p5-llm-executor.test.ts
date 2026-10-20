@@ -1295,14 +1295,21 @@ test("E17. 单任务预算耗尽：压缩上下文续跑一轮后完成（不再
   }
 });
 
-test("E18. 压缩续跑额度再烧穿：诚实 failure 且错误口径含续跑次数（不伪成功、不无限续命）", async () => {
+test("E18. 压缩续跑永不因 Token 终止：永不给终态的任务由段轮数预算诚实收口（非 Token 防线）", async () => {
   const projectRoot = createGitProject();
   try {
     const targetFile = path.join(projectRoot, "hard-stop.txt");
     const burn = { inputTokens: 500, outputTokens: 100 };
-    // 模型永不给终态（每轮都调工具）：轮1/轮2 烧满名义预算 → 轮3 压缩续跑
-    // （段额度 max(500, 600×4)=2400，保证续跑至少 4 轮）→ 续跑段继续烧 →
-    // 累计触达绝对上限 2500（=1000×2.5）时（轮7 顶部检查）诚实失败。
+    // 模型永不给终态（每轮都调工具）：
+    // 2026-10-20 需求变更前语义：累计触达绝对上限 2500（=1000×2.5）时
+    // "Token 预算超限"诚实失败（有界性靠 Token 上限约束）。
+    // 2026-10-20 起新语义：Token 消耗不再终止运行——压缩续跑折叠无次数
+    // 上限（maxRollovers=Infinity）、无绝对上限熔断，"不无限续命"的有界性
+    // 完全交给**非 Token 防线**：全局轮数硬上限（maxToolRounds=40）与段轮数
+    // 预算（rollover 重算后的段内轮数配额）。本场景每段 segmentRoundBudget=4
+    // （段额度 2400 / 均耗 600），首段 2 请求 + 续跑段 4 请求 = 6 请求后
+    // 段轮数预算耗尽 → 诚实 failure（永不给终态的任务必须停，但停因是
+    // 轮数防线而非 Token 预算）。
     const script = Array.from({ length: 12 }, (_unused, index) => ({
       content: "",
       toolCalls: [{ name: "write", args: { file_path: targetFile, content: `r${index}\n` } }],
@@ -1315,22 +1322,20 @@ test("E18. 压缩续跑额度再烧穿：诚实 failure 且错误口径含续跑
 
     const result = await executor.executeTask({ ...buildExecutionInput(projectRoot), perTaskBudget: 1000 });
 
-    assert.equal(result.success, false);
+    assert.equal(result.success, false, "永不给终态的任务必须诚实失败（段轮数收口）");
     assert.ok(
-      result.error !== undefined && result.error.includes("Token 预算超限"),
-      `error 必须说明预算超限，实际：${result.error}`
+      result.error !== undefined && result.error.includes("段轮数预算耗尽"),
+      `error 应为段轮数预算耗尽（非 Token 防线收口），实际：${result.error}`
     );
-    assert.ok(result.error!.includes("已自动压缩续跑 1 次"), `error 必须如实标注续跑次数，实际：${result.error}`);
-    // 有界性（防失控不变量）：绝对上限 2500 触达即停，超烧窗口 ≤ 单轮成本
-    assert.ok(result.error!.includes("绝对上限"), `error 必须说明触达绝对上限，实际：${result.error}`);
-    // 首段 2 请求 + 续跑段 3 请求（轮3 检查轮零请求）：续跑段确实拿到了
-    // ≥4 轮额度（不是"一轮即死"的摆设），但也绝不无限续命
-    assert.equal(result.llmRequests, 5, `续跑段应获得真实额度后仍在有界处停止，实际 ${result.llmRequests} 请求`);
+    // Token 终止口径必须绝迹：错误不得再出现"Token 预算超限/绝对上限"
+    assert.ok(
+      !result.error!.includes("Token 预算超限") && !result.error!.includes("绝对上限"),
+      `Token 预算终止口径应绝迹，实际：${result.error}`
+    );
+    // 有界性（防失控不变量，2026-10-20 起由轮数防线承担）：首段 2 请求 +
+    // 续跑段 3 请求 = 5 请求后段轮数收口（响应后压缩续跑段轮数预算收口点）
+    assert.equal(result.llmRequests, 5, `首段 2 请求 + 续跑段 3 请求 = 5 请求后段轮数收口，实际 ${result.llmRequests}`);
     assert.equal(result.tokensUsed, 3000, "累计 = 5 请求 × 600");
-    assert.ok(
-      result.tokensUsed <= 2500 + 600,
-      `总消耗必须被 2.5× 绝对上限约束（允许一个单轮超烧窗口），实际 ${result.tokensUsed}`
-    );
   } finally {
     cleanup(projectRoot);
   }

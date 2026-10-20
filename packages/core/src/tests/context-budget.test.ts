@@ -348,19 +348,21 @@ test("CB-11 连续压缩收敛：第 2 次应用后达不动点、头部前缀�
 // ==========================================================================
 
 /**
- * CB-07 EpochState 折算：段额度 = max(名义×0.5, 实测均耗×4)；耗尽后 rollover 返回 null。
+ * CB-07 EpochState 折算：段额度 = max(名义×0.5, 实测均耗×4)；显式耗尽门禁后 rollover 返回 null。
  *
- * 本用例显式传 maxRollovers=1（与旧 p5 常量语义对齐，回归既有行为）；
- * 缺省配置（3 次）的"预算耗尽连续切换新上下文"行为由 CB-12 覆盖。
+ * 2026-10-20 段判限口径更新：isSegmentExceeded 按"段增量 > 段额度 ×
+ * segmentThreshold(缺省 0.8)"判限（80% 提前压缩），本用例断言同步更新。
+ * 本用例显式传 maxRollovers=1（耗尽门禁 API 行为保留——显式配置仍生效）；
+ * 缺省配置（Infinity，永不耗尽）的行为由 CB-12 覆盖。
  */
-test("CB-07 EpochState：折算公式两条分支 + 耗尽门禁（显式 maxRollovers=1）", () => {
+test("CB-07 EpochState：折算公式两条分支 + 显式耗尽门禁（显式 maxRollovers=1）", () => {
   const state = new ContextEpochState(1000, { maxRollovers: 1 });
   assert.equal(state.epoch, 0, "初始 epoch=0");
   assert.equal(state.nominalBudget, 1000, "名义预算只读暴露");
 
-  // 首段判限：累计 ≤ 名义预算不超，超出即超（基线=0）
-  assert.equal(state.isSegmentExceeded(1000), false, "刚好等于名义预算不算超限");
-  assert.equal(state.isSegmentExceeded(1001), true, "超出名义预算即段超限");
+  // 首段判限（80% 口径）：段增量 > 800 即触发压缩
+  assert.equal(state.isSegmentExceeded(800), false, "段增量恰好等于 80% 线不算超（恰好等于不算超）");
+  assert.equal(state.isSegmentExceeded(801), true, "段增量超过 80% 线即触发压缩");
 
   // 分支一：实测均耗×4 主导 —— rollover(2400, 5)：均耗=2400/(5-1)=600，600×4=2400 > 500
   assert.equal(state.rollover(2400, 5), 2400, "段额度应取 max(名义×0.5=500, 均耗×4=2400)=2400");
@@ -370,10 +372,10 @@ test("CB-07 EpochState：折算公式两条分支 + 耗尽门禁（显式 maxRol
 
   // 续跑段按"段增量"判限：起步（累计=基线）不被误杀（软预算修复核心语义）
   assert.equal(state.isSegmentExceeded(2400), false, "续跑段起步（增量=0）不应被误判超限");
-  assert.equal(state.isSegmentExceeded(4800), false, "段增量 2400 = 段额度，不算超限");
-  assert.equal(state.isSegmentExceeded(4801), true, "段增量超出段额度即超限");
+  assert.equal(state.isSegmentExceeded(2400 + Math.floor(2400 * 0.8)), false, "段增量 = 80% 线，不算超限");
+  assert.equal(state.isSegmentExceeded(2400 + Math.floor(2400 * 0.8) + 1), true, "段增量超过 80% 线即触发压缩");
 
-  // 耗尽门禁：maxRollovers=1，已续跑 1 次 → 再 rollover 返回 null
+  // 耗尽门禁（显式 maxRollovers=1 仍生效）：已续跑 1 次 → 再 rollover 返回 null
   assert.equal(state.isRolloverExhausted(), true, "达到 maxRollovers 后应判耗尽");
   assert.equal(state.rollover(5000, 8), null, "续跑耗尽后 rollover 应返回 null");
 
@@ -383,31 +385,30 @@ test("CB-07 EpochState：折算公式两条分支 + 耗尽门禁（显式 maxRol
 });
 
 /**
- * CB-12 缺省配置连续切换新上下文（修复"预算耗尽没有切换新上下文"）：
- * 缺省 maxRollovers=3 下，预算三次耗尽都应切换新上下文而非第 2 次即失败；
- * 第 4 次耗尽（已续跑 3 次）才诚实 failure。
- *
- * 修复前语义（回归基准）：maxRollovers=1 → 第 2 次耗尽 isRolloverExhausted()
- * 已为 true → rollover 返回 null → 调用方 failure——执行器"切换新上下文"
- * 通道只兑现 1 次，名义×2 以下的消耗永远等不到第 2 次切换。
+ * CB-12 缺省配置永不耗尽（2026-10-20 需求变更：移除 Token 预算硬终止）：
+ * 缺省 maxRollovers=Infinity（原 3）——续跑折叠不再设次数上限，Token 消耗
+ * 不再终止运行；压缩可无限续跑，防失控交给模型循环/空循环熔断与全局轮数
+ * 上限（调用方已无"续跑耗尽 → failure"分支）。缺省 segmentThreshold=0.8
+ * 同步断言（80% 提前压缩）。
  */
-test("CB-12 缺省 maxRollovers=3：预算连续耗尽三次均切换新上下文", () => {
+test("CB-12 缺省配置：maxRollovers=Infinity 永不耗尽 + segmentThreshold=0.8", () => {
   const state = new ContextEpochState(1000);
-  // 缺省值显式断言（回归基准：修复前为 1）
-  assert.equal(state.config.maxRollovers, 3, "缺省 maxRollovers 应为 3（修复预算耗尽没有切换新上下文）");
+  // 缺省值显式断言（回归基准：2026-10-20 前 maxRollovers=3）
+  assert.equal(state.config.maxRollovers, Infinity, "缺省 maxRollovers 应为 Infinity（Token 预算终止已移除）");
+  assert.equal(state.config.segmentThreshold, 0.8, "缺省压缩阈值应为 0.8（80% 提前压缩）");
 
-  // 第 1 次切换（名义段烧穿；均耗口径 = 累计/(轮次-1)，round=2 → 1100/1=1100，×4 主导）
-  assert.equal(state.isRolloverExhausted(), false, "首段不应判耗尽");
-  assert.equal(state.rollover(1100, 2), 4400, "第 1 段额度取 max(名义×0.5=500, 均耗1100×4=4400)");
-  // 第 2 次切换（修复前此处被门禁拦截 → 永不切换；round=8 → 均耗=1700/7≈242.86，×4≈972 主导）
-  assert.equal(state.isRolloverExhausted(), false, "第 2 次耗尽不应判耗尽（修复前缺陷点）");
-  assert.equal(state.rollover(1700, 8), 972, "第 2 段额度取 max(500, 均耗242.86×4≈972)");
-  // 第 3 次切换（修复前同样不可达；round=20 → 均耗=2400/19≈126.3，×4≈506 主导）
-  assert.equal(state.isRolloverExhausted(), false, "第 3 次耗尽不应判耗尽");
-  assert.ok((state.rollover(2400, 20) ?? 0) >= 500, "第 3 段额度应不低于名义×0.5 下限");
-  // 三次切换后额度耗尽：第 4 次请求切换才判耗尽（诚实 failure 上界）
-  assert.equal(state.isRolloverExhausted(), true, "续跑 3 次后应判耗尽");
-  assert.equal(state.rollover(3000, 30), null, "耗尽后 rollover 应返回 null");
+  // 连续多次折叠均不判耗尽（原 3 次后即耗尽）
+  for (let i = 1; i <= 5; i++) {
+    assert.equal(state.isRolloverExhausted(), false, `第 ${i} 次折叠前不应判耗尽（压缩可无限续跑）`);
+    assert.ok((state.rollover(1000 + i * 100, i + 1) ?? 0) >= 500, "每次折叠都应返回有效段额度（不低于名义×0.5 下限）");
+  }
+  assert.equal(state.isRolloverExhausted(), false, "5 次折叠后仍不判耗尽");
+  assert.ok(state.rollover(2000, 20) !== null, "折叠永不返回 null（Infinity 上界）");
+
+  // 80% 压缩口径：首段额度 1000，段增量 800 触发、799 不触发
+  const fresh = new ContextEpochState(1000);
+  assert.equal(fresh.isSegmentExceeded(799), false, "段增量 799 < 80% 线不触发压缩");
+  assert.equal(fresh.isSegmentExceeded(801), true, "段增量 801 > 80% 线触发压缩");
 });
 
 /** CB-08 EpochState 绝对上限：累计 > 名义×2.5 判超（防失控硬上界） */

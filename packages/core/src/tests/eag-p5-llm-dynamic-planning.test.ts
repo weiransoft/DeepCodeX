@@ -781,17 +781,21 @@ function loadPreviousRunStateSafe(projectRoot: string, currentRunId = "other-run
 }
 
 // ============================================================================
-// 7. T11（F-B）：预算烧穿硬上限 → Token 熔断干净终止
+// 7. T11（F-B，2026-10-20 语义翻转）：预算烧穿不再终止——运行正常完成
 // ============================================================================
 
-test("T11. 预算烧穿硬上限 → Token 熔断干净 aborted（含'Token 预算耗尽'），fix 不再瞬败", async () => {
+test("T11. 预算烧穿硬上限 → 运行不再 Token 熔断（completed），Token 消耗仅观测", async () => {
   const projectRoot = createTempProject("eag-dynaplan-t11-");
   try {
     writeHandwrittenCards(projectRoot, [{ id: "T-001", title: "修复登录页面空指针", file: "src/services/Login.ts" }]);
-    // 执行器替身（替代 LLM 网络往返）：dev 消耗 15100/10000——
-    // dev 执行后 5b-3 后置增量检查命中硬上限熔断（软续期一次至硬上限
-    // 15000 = 名义 10000 ×(1+0.5)，15100 >= 15000 → aborted），
-    // 熔断阶段即 burn 发生的 dev 本身。
+    // 执行器替身（替代 LLM 网络往返）：dev 消耗 15100/10000。
+    // 2026-10-20 语义翻转前：dev 执行后 5b-3 后置增量检查命中硬上限熔断
+    // （软续期一次至硬上限 15000 = 名义 10000 ×(1+0.5)，15100 >= 15000 →
+    // aborted"Token 预算耗尽"）。
+    // 2026-10-20 起需求变更：Token 消耗不再终止运行——同样场景运行正常
+    // completed（dev 真实成功、任务卡 completed、verify/fix 正常走完），
+    // 上下文压力由执行器段额度 80% 自动压缩接管，防失控由模型循环/空循环
+    // 熔断与全局轮数上限负责。本测试反向验证 Token 终止口径绝迹。
     let executeTaskCalls = 0;
     const budgetBurnerExecutor: P5TaskExecutor = Object.freeze({
       async executeTask(input: Readonly<P5TaskExecutionInput>): Promise<Readonly<P5TaskExecutionResult>> {
@@ -816,27 +820,18 @@ test("T11. 预算烧穿硬上限 → Token 熔断干净 aborted（含'Token 预�
       maxTokens: 10000,
     });
 
-    assert.equal(result.finalStatus, "aborted", `应干净 aborted，实际：${result.finalStatus}`);
-    assert.ok(result.blockageReport !== undefined, "aborted 运行必须产出阻塞分析报告");
+    assert.equal(result.finalStatus, "completed", `预算烧穿不得终止运行，实际：${result.finalStatus}`);
     assert.ok(
-      result.blockageReport!.summary.includes("Token 预算耗尽"),
-      `阻塞摘要必须含"Token 预算耗尽"语义（替代 fix 瞬败），实际：${result.blockageReport!.summary}`
+      !result.blockageReport?.summary.includes("Token 预算耗尽"),
+      `不得再出现"Token 预算耗尽"终止口径，实际：${result.blockageReport?.summary}`
     );
-    assert.ok(
-      result.blockageReport!.summary.includes("dev"),
-      `阻塞摘要应登记真实熔断阶段 dev，实际：${result.blockageReport!.summary}`
-    );
-    // dev 只执行一次；fix（以及 verify 的 LLM 消耗）不再发生
-    assert.equal(executeTaskCalls, 1, "只有 dev 执行过一次任务");
-    assert.ok(result.blockageReport !== undefined, "aborted 运行必须产出阻塞分析报告");
-    assert.equal(result.blockageReport!.blockedStage, "dev", "blockedStage 必须是真实熔断阶段");
-    // 任务卡不得被假完成（F-B 收尾与 token 熔断同构：iterationFailed=true）
-    // 注：burn 的 dev 阶段本身执行 success，其任务卡按真实结果标 completed；
-    // 此处断言的是熔断后**未再执行**的后续轮次不得把其余卡假标 completed。
+    // dev 正常执行且后续阶段不再被熔断拦截
+    assert.ok(executeTaskCalls >= 1, "dev 至少执行过一次任务");
+    // 任务卡按 dev 真实成功结果标 completed（不再有"预算耗尽假完成拦截"语义）
     assert.equal(
       readCardStatus(path.join(projectRoot, ".eag", "p5", "tasks.md"), "T-001"),
-      "pending",
-      "预算耗尽 aborted 轮不得把未验证通过的任务卡假标 completed"
+      "completed",
+      "dev 真实成功且无 Token 熔断 → 任务卡正常标 completed"
     );
   } finally {
     cleanup(projectRoot);
