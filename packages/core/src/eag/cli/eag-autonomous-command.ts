@@ -41,6 +41,7 @@
 
 import type { AutonomousOrchestrator } from "../p5/autonomous-orchestrator";
 import type { AutonomousRunRequest, AutonomousRunResult } from "../p5/autonomous-orchestrator";
+import { parseEagArgs } from "./eag-args";
 
 // ============================================================================
 // 1. 常量定义（不可变，Object.freeze 冻结）
@@ -250,20 +251,9 @@ export function extractEagAutonomousRequestFromPrompt(prompt: string): EagAutono
   //   |(?!--)([^\s"']+)                           裸值（不以 -- 开头）→ 捕获组 4
   //   ))?                                         整个值组可选（支持 flag 形式）
   // - (?=\s|$)                                    前瞻断言：匹配结束位置必须是空白或字符串结尾
-  const argPattern = /--([\w][\w-]*)(?:[=\s]+(?:"([^"]*)"|'([^']*)'|(?!--)([^\s"']+)))?(?=\s|$)/g;
-  const args: Record<string, string | true> = {};
-
-  // 注意：重复参数首次匹配生效（后续覆盖被跳过）
-  let match: RegExpExecArray | null;
-  while ((match = argPattern.exec(argsPart)) !== null) {
-    const key = match[1];
-    // 三种值形式：双引号（match[2]）、单引号（match[3]）、裸值（match[4]）；均未匹配则为 flag（true）
-    const value = match[2] ?? match[3] ?? match[4] ?? true;
-    // 仅首次匹配生效（重复参数被跳过）
-    if (!(key in args)) {
-      args[key] = value;
-    }
-  }
+  // 参数解析收敛到共享实现 parseEagArgs（2026-10-21，eag-args）：支持值内转义引号 \"，
+  // 修复旧内联正则遇 goal 文本含内嵌双引号时误报「缺少必填参数 --goal」的事故。
+  const args: Record<string, string | true> = parseEagArgs(argsPart);
 
   // 步骤 4：校验必填参数 --goal（非空字符串）
   const goalRaw = args["goal"];

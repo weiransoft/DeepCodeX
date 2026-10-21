@@ -61,6 +61,7 @@ import type { EagGraphRequest } from "./eag-graph-command";
 //   --requirement / --paradigm 参数构造 DesignLoopInput（CLI 内联参数模式）
 // 注：eag-design-command.ts 不依赖本模块，无循环依赖风险
 import { extractDesignLoopInputFromPrompt } from "./eag-design-command";
+import { parseEagArgs } from "./eag-args";
 
 // ============================================================================
 // DeployRequest 接口定义（EAG-P4 批次 13 Phase 7 §5.1）
@@ -1652,21 +1653,8 @@ export function extractDeployRequestFromPrompt(prompt: string): DeployRequest {
   // - 整个值组可选（?），支持 --dry-run flag（无值）形式
   // - 前瞻 (?=\s|$) 确保匹配边界清晰，避免值尾部粘连
   // - 全局匹配（g 标志），依次取出所有 --key value 对
-  const argPattern = /--([\w][\w-]*)(?:[=\s]+(?:"([^"]*)"|'([^']*)'|(?!--)([^\s"']+)))?(?=\s|$)/g;
-  const args: Record<string, string | true> = {};
-
-  // 注意：--dry-run 是 flag（无值），匹配时 value 部分为 undefined，记录为 true
-  // 注意：重复参数首次匹配生效（后续覆盖被跳过），与设计文档 §5.1 一致
-  let match: RegExpExecArray | null;
-  while ((match = argPattern.exec(argsPart)) !== null) {
-    const key = match[1];
-    // 三种值形式：双引号（match[2]）、单引号（match[3]）、裸值（match[4]）；均未匹配则为 flag（true）
-    const value = match[2] ?? match[3] ?? match[4] ?? true;
-    // 仅首次匹配生效（重复参数被跳过，对齐设计文档"首次匹配生效"约定）
-    if (!(key in args)) {
-      args[key] = value;
-    }
-  }
+  // 参数解析收敛到共享实现 parseEagArgs（2026-10-21，eag-args；含值内转义引号支持）
+  const args: Record<string, string | true> = parseEagArgs(argsPart);
 
   // 步骤 4：校验 7 个必填参数并提取值
   // projectName: --project 参数
