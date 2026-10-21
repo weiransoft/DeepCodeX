@@ -321,6 +321,60 @@ const CHARS_PER_TOKEN_ESTIMATE = 3.5;
 const PREFLIGHT_SEGMENT_FACTOR = 2;
 
 /**
+ * 折叠后单轮成本的"每轮增量"保守字符量（post-fold 口径）。
+ *
+ * 折叠后每轮输入 ≈ 折叠基座（system + 任务卡 + 轨迹摘要）+ 该轮新增的
+ * assistant/tool 往返。基座部分由 {@link LlmTaskExecutor.estimatePostFoldRoundTokens}
+ * 按实际 rolloutSummary 长度计算，本常量只补"每轮新增往返 + 后续轮摘要
+ * 增长"的保守余量（12000 字符 ≈ 3400 tokens，按 3.5 字符/token 口径）。
+ *
+ * 2026-10-20 新增（run 68acea2de182 修复，架构师审查 R1）：段轮数预算折算
+ * 分母旧口径是**全任务累计均耗**——折叠前上下文（几十轮完整工具结果）的
+ * 均耗远高于折叠后紧凑上下文的真实单轮成本，折算出的段轮数被系统性压到
+ * MIN_SEGMENT_ROUNDS 附近（实测 run 68acea2de182：全局还剩 15 轮，段预算
+ * 只有 10 轮；cb2f5515fd2d 同型），部署/构建类多步任务"段先死于全局"，
+ * 错误文案还谎称"全局轮数不足以让新段跑出有效请求"。
+ */
+const POST_FOLD_ROUND_OVERHEAD_CHARS = 12_000;
+
+/**
+ * 折叠后新段轮数预算的**全局余量下限比例**（2026-10-20 新增，R1 修复第二半）。
+ *
+ * 段轮数预算折算值不得小于剩余全局轮数 × 该比例。依据：2026-10-20 需求变更
+ * 后 Token 不再终止运行——段额度烧穿的后果是"再折叠一次"（maxRollovers=
+ * Infinity，折叠轮不消耗轮次名额），而不是执行失败；真正终止执行的是全局
+ * 轮数硬上限与模型循环/空循环熔断。既然段额度只是"下一次折叠的触发线"，
+ * 让段轮数预算系统性低于全局余量就是自设绞索：全局明明还有轮次可跑，
+ * 段却先判"预算耗尽"。取 0.5 = 新段至少拿到剩余全局的一半轮次，防失控
+ * 仍由全局硬上限（40）与拒绝风暴/相同调用熔断承担。
+ */
+const POST_FOLD_SEGMENT_MIN_GLOBAL_RATIO = 0.5;
+
+/**
+ * 折叠后紧凑请求的模板开销字符数（折叠可解性判定与折叠后段轮数预算共用口径）。
+ *
+ * 折叠后首请求 = system + 「任务简报 + 轨迹摘要 + 续跑指令」的 user 消息；
+ * 2048 字符是续跑指令/摘要头等模板段（不含简报与摘要本体）的保守余量。
+ * 原为 pre-flight 折叠可解性判定的内联常数（2026-10-20），R1 修复后折叠后
+ * 段轮数预算折算共用同一口径，提升为模块级常量保证两处一致。
+ */
+const COMPACT_TEMPLATE_OVERHEAD_CHARS = 2048;
+
+/**
+ * 折叠后新段轮数预算的需求下限（2026-10-20 R1 修复，run 68acea2de182 事故）。
+ *
+ * 旧公式以「折叠前全量上下文的累计均耗」折算新段轮数：折叠后上下文已被压成
+ * 「system + 摘要」，真实单轮成本只有折叠前的零头，虚高均耗把新段容量压到
+ * MIN~10 轮——部署类任务（几十次工具调用）段先死于全局（剩余全局 15 轮、
+ * 本段 10 轮即判死），跨 run 稳定复现（68acea2de182 / cb2f5515fd2d）。
+ * 新公式以折叠后紧凑请求成本折算容量（见 computePostFoldSegmentRoundBudget），
+ * 本常量提供需求下限兜底：段轮数至少 min(剩余全局, 10)——全局有余就让新段
+ * 拿到足额推进空间；真实烧穿仍由段 token 额度（isSegmentExceeded /
+ * pre-flight）按 80%/2× 门禁提前收口，需求下限不会导致超烧。
+ */
+const POST_FOLD_ROUND_FLOOR = 10;
+
+/**
  * 任务执行进度事件（供 Web UI 显示 autonomous 模式的执行进展）。
  *
  * 背景（修复 Web UI 分流只显示"思考中…"但不显示执行内容 2026-10-03）：
@@ -864,7 +918,8 @@ export class LlmTaskExecutor implements P5TaskExecutor {
       }
 
       // 拒绝风暴 fail-fast（修复"同一错误静默重复烧轮"2026-10-03）：
-      // 按"被拒目标指纹"分组计数——同一目标路径/同一被拒工具重复命中即累计；
+      // 按"被拒目标指纹"分组计数——同一目标路径/同一被拒工具重复命中即累计
+      // （注：与本文件其他"指纹"口径一致，均为 name + 规范化 args 的拼接）。
       // 其他目标的合法调用穿插不清零（此前一次成功调用即整体清零，模型
       // "成功一次→再撞同一堵墙"的循环恰好绕过计数，烧满 12 轮才终止）。
       // 任一指纹达到阈值立即终止并醒目标注重复目标，交回编排器决定 fix/abort。
@@ -889,7 +944,15 @@ export class LlmTaskExecutor implements P5TaskExecutor {
       // isRolloverExhausted）与"推进"（rollover）。
       // 检查跳过。effectiveBudgetForRun 在轮顶 effectiveBudget 同款口径下于
       // 循环外定型（每轮 input.perTaskBudget 取值逻辑一致，状态机名义预算恒定）。
-      const effectiveBudgetForRun = input.perTaskBudget ?? this.perTaskBudget;
+      // 2026-10-20 修复（run 68acea2de182 R2a）：名义预算 ≤0 视为"无预算"跳过
+      // 状态机。此前编排器 perTaskBudget = max(0, maxTokens-used) 烧穿后归零，
+      // ContextEpochState(0) 派生"段额度 0 / 新段额度 4"的病理态：任何请求估算
+      // 恒超限、折叠不可解——名义上"Token 不再终止"，实际比终止更隐蔽（零请求
+      // 伪装成"折叠不可解"失败）。Token 既不终止运行，预算耗尽后压缩机制本就
+      // 无事可做，与 perTaskBudget=undefined（不启用压缩）同义。
+      const effectiveBudgetRaw = input.perTaskBudget ?? this.perTaskBudget;
+      const effectiveBudgetForRun =
+        effectiveBudgetRaw !== undefined && effectiveBudgetRaw > 0 ? effectiveBudgetRaw : undefined;
       const epochState = effectiveBudgetForRun !== undefined ? new ContextEpochState(effectiveBudgetForRun) : undefined;
 
       // ======== 主循环重构（2026-10-14 P0-1：修复"折叠不重置轮数 + 死折叠"根因） ========
@@ -1064,7 +1127,7 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             const remainingGlobalPreflight = this.maxToolRounds - currentRound + 1;
             if (remainingGlobalPreflight < MIN_SEGMENT_ROUNDS) {
               return this.failure(
-                `Token 预算预检超限且剩余轮数不足：本段已达规模上限，尝试折叠续跑...` +
+                `轮数防线收口（死折叠）：本段已达规模上限，尝试折叠续跑...` +
                   `但剩余全局轮数 ${remainingGlobalPreflight} 小于新段最低需求 ${MIN_SEGMENT_ROUNDS}，` +
                   `折叠后新上下文一次请求都发不出（死折叠），执行中止。` +
                   `累计 ${currentTokens} tokens，已用 ${currentRound}/${this.maxToolRounds} 轮，` +
@@ -1097,12 +1160,17 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             // 与"本段额度/实测均耗向上取整"两者较小值重算，保证新段既能在全局
             // 硬上限内跑完，又能在段额度约束内推进足够轮次。
             segmentRoundsUsed = 0;
-            // 均耗 = 当前累计 / max(1, currentRound - roundOffset)（轮顶语义，
-            // currentRound 尚未消耗本轮——pre-flight 在请求前，roundOffset=1）
-            const preFlightObservedAvg = currentTokens / Math.max(1, currentRound - epochState.config.roundOffset);
-            segmentRoundBudget = Math.min(
+            // R1 修复（2026-10-20）：段轮数预算按 post-fold 紧凑上下文成本折算
+            // （旧均耗公式的病理见 computePostFoldSegmentRoundBudget 注释）。
+            // 折叠后 messages[1] 即紧凑简报（buildRolledOverMessages 基座），取其真实长度。
+            const compactBriefingCharsA =
+              typeof messages[1]?.content === "string" ? String(messages[1].content).length : 0;
+            segmentRoundBudget = this.computePostFoldSegmentRoundBudget(
+              rolloutSummary.length,
+              compactBriefingCharsA,
+              newSegmentBudget,
               remainingGlobalPreflight,
-              Math.max(MIN_SEGMENT_ROUNDS, Math.ceil(newSegmentBudget / Math.max(1, preFlightObservedAvg)))
+              MIN_SEGMENT_ROUNDS
             );
             // 折叠后剩余段轮数 ≤ 3 时，注入终局收尾指令（P0-2：把"硬上限死"
             // 降级为"有终态的部分完成"，见 SYSTEM_TERMINATE_HINT）
@@ -1179,10 +1247,15 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             // 与 pre-flight 同口径：折叠轮不消耗 segmentRoundsUsed（零请求），
             // 直接重置为 0；segmentRoundBudget 按"剩余全局轮数"与"本段额度/实测均耗"较小值重算。
             segmentRoundsUsed = 0;
-            const segmentTopObservedAvg = currentTokens / Math.max(1, currentRound - epochState.config.roundOffset);
-            segmentRoundBudget = Math.min(
+            // R1 修复（2026-10-20）：post-fold 口径折算（见 computePostFoldSegmentRoundBudget）
+            const compactBriefingCharsB =
+              typeof messages[1]?.content === "string" ? String(messages[1].content).length : 0;
+            segmentRoundBudget = this.computePostFoldSegmentRoundBudget(
+              rolloutSummary.length,
+              compactBriefingCharsB,
+              newSegmentBudget,
               remainingGlobalSegmentTop,
-              Math.max(MIN_SEGMENT_ROUNDS, Math.ceil(newSegmentBudget / Math.max(1, segmentTopObservedAvg)))
+              MIN_SEGMENT_ROUNDS
             );
             // 终局收尾注入（P0-2）
             const remainingSegRounds = segmentRoundBudget - segmentRoundsUsed;
@@ -1284,7 +1357,7 @@ export class LlmTaskExecutor implements P5TaskExecutor {
               const remainingGlobalPostResp = this.maxToolRounds - currentRound + 1;
               if (remainingGlobalPostResp < MIN_SEGMENT_ROUNDS) {
                 return this.failure(
-                  `Token 预算超限（响应后检查）且剩余轮数不足：本段已烧穿额度，尝试折叠续跑...` +
+                  `轮数防线收口（死折叠·响应后检查）：本段已烧穿额度，尝试折叠续跑...` +
                     `但剩余全局轮数 ${remainingGlobalPostResp} 小于新段最低需求 ${MIN_SEGMENT_ROUNDS}，` +
                     `折叠后新上下文一次请求都发不出（死折叠），执行中止。` +
                     `累计 ${postResponseTokens} tokens，已用 ${currentRound}/${this.maxToolRounds} 轮，` +
@@ -1322,9 +1395,15 @@ export class LlmTaskExecutor implements P5TaskExecutor {
               // 变成 1，while 条件继续成立。segmentRoundBudget 按"剩余全局轮数"
               // 与"本段额度/实测均耗"较小值重算。
               segmentRoundsUsed = 0;
-              segmentRoundBudget = Math.min(
+              // R1 修复（2026-10-20）：post-fold 口径折算（见 computePostFoldSegmentRoundBudget）
+              const compactBriefingCharsC =
+                typeof messages[1]?.content === "string" ? String(messages[1].content).length : 0;
+              segmentRoundBudget = this.computePostFoldSegmentRoundBudget(
+                rolloutSummary.length,
+                compactBriefingCharsC,
+                epochState.budget,
                 remainingGlobalPostResp,
-                Math.max(MIN_SEGMENT_ROUNDS, Math.ceil(epochState.budget / Math.max(1, observedAvgCostPerRound)))
+                MIN_SEGMENT_ROUNDS
               );
               // 终局收尾注入（P0-2）：segmentRoundsUsed 在这里还没被尾部 +1，
               // 所以 segmentRoundBudget - segmentRoundsUsed 等于"本段剩余轮数 +1"
@@ -1512,7 +1591,8 @@ export class LlmTaskExecutor implements P5TaskExecutor {
         ? `工具循环达全局硬上限（${this.maxToolRounds} 轮）仍未给出终态回复`
         : `段轮数预算耗尽（本段 ${segmentRoundBudget} 轮已用完）仍未给出终态回复，` +
           `剩余全局轮数 ${Math.max(0, remainingGlobal)}（本轮 currentRound=${currentRound}）。` +
-          `续跑折叠已全部触发过或全局轮数不足以让新段跑出有效请求。`;
+          `本段轮数配额已跑满且每段均按 post-fold 口径足额分配；若仍有全局轮数，` +
+          `说明任务在反复折叠续跑中始终未收敛（可能任务超出单次执行能力，建议拆分任务卡）。`;
       emitProgress("task_end", `执行失败：${roundLimitError}`, roundLimitError);
       return this.failure(
         roundLimitError,
@@ -1949,6 +2029,48 @@ export class LlmTaskExecutor implements P5TaskExecutor {
    * @param messages 当前完整消息序列（只读，不被篡改）
    * @returns 摘要文本；尚无任何工具调用时返回空串
    */
+  /**
+   * 折叠后新段轮数预算（2026-10-20 R1 修复，run 68acea2de182 事故）
+   *
+   * 旧公式 `newSegmentBudget / 全任务累计均耗` 的分母是**折叠前全量上下文**的
+   * 均耗（几十轮完整工具结果），而折叠后上下文已被压成「system + 任务简报 +
+   * 轨迹摘要」，真实单轮成本只有旧均耗的零头——折算出的段轮数被系统性压到
+   * MIN~10（实测：全局还剩 15 轮、段预算 10 轮即判死），部署/构建类多步任务
+   * “段先死于全局”，跨 run 稳定复现（68acea2de182 / cb2f5515fd2d）。
+   *
+   * 新口径三项取最大、全局余量封顶：
+   * - capacity = 段额度 / post-fold 单轮成本估算（baseChars=system+简报+模板+摘要，
+   *   每轮再计 POST_FOLD_ROUND_OVERHEAD_CHARS 的往返增量）——真实成本口径；
+   * - globalFloor = 剩余全局轮数 × POST_FOLD_SEGMENT_MIN_GLOBAL_RATIO——Token
+   *   不再终止运行的前提下，段额度烧穿的后果是“再折叠一次”而不是失败，
+   *   段轮数系统性低于全局余量就是自设绞索；
+   * - demandFloor = min(剩余全局, POST_FOLD_ROUND_FLOOR)——全局有余就让新段
+   *   拿到足额推进空间（真实超烧仍由段 token 额度的 80%/2× 门禁收口）。
+   *
+   * @param rolloutSummaryChars 轨迹摘要字符数（折叠实际使用值）
+   * @param briefingChars 折叠后 user 简报消息字符数（含任务卡/续跑指令，实测值）
+   * @param segmentBudget 新段 token 额度
+   * @param remainingGlobal 折叠时点剩余全局轮数（含新段可用）
+   * @param minSegmentRounds 新段最低轮数（ContextEpochState.minRoundsPerEpoch）
+   */
+  private computePostFoldSegmentRoundBudget(
+    rolloutSummaryChars: number,
+    briefingChars: number,
+    segmentBudget: number,
+    remainingGlobal: number,
+    minSegmentRounds: number
+  ): number {
+    const baseChars = SYSTEM_PROMPT.length + briefingChars + COMPACT_TEMPLATE_OVERHEAD_CHARS + rolloutSummaryChars;
+    const postFoldRoundCost = Math.max(
+      1,
+      Math.ceil((baseChars + POST_FOLD_ROUND_OVERHEAD_CHARS) / CHARS_PER_TOKEN_ESTIMATE)
+    );
+    const capacity = Math.ceil(segmentBudget / postFoldRoundCost);
+    const globalFloor = Math.max(minSegmentRounds, Math.ceil(remainingGlobal * POST_FOLD_SEGMENT_MIN_GLOBAL_RATIO));
+    const demandFloor = Math.min(remainingGlobal, POST_FOLD_ROUND_FLOOR);
+    return Math.max(minSegmentRounds, Math.min(remainingGlobal, Math.max(capacity, globalFloor, demandFloor)));
+  }
+
   private buildContextRolloutSummary(messages: ReadonlyArray<SessionMessage>): string {
     const lines: string[] = [];
     // 轮次口径（2026-10-12 修正）：执行循环轮次 = 消息序列中除首条 system 外的

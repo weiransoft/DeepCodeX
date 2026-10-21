@@ -336,10 +336,18 @@ export class ContextEpochState {
   private segmentBudget: number;
 
   /**
-   * @param nominalBudget 名义预算（任务级 token 预算，>0）
+   * @param nominalBudget 名义预算（任务级 token 预算，>0）。budget≤0 属调用方
+   *   契约违规——0 额度的状态机会让每次 pre-flight 估算都判"折叠不可解"
+   *   （2026-10-20 run 68acea2de182/90611ca5db4e 事故：编排器压缩基线
+   *   max(0, maxTokens-used) 归零后，dev/fix 执行器拿到名义预算 0 的段额度，
+   *   连一次最小请求都发不出，错误信息还伪装成"折叠不可解"），直接抛错暴露
+   *   上游缺陷；执行器侧对 ≤0 预算做 fail-soft（跳过段预算检查），不会走到这里。
    * @param config epoch 配置覆盖（未覆盖字段用缺省值）
    */
   constructor(nominalBudget: number, config: Partial<ContextEpochConfig> = {}) {
+    if (!Number.isFinite(nominalBudget) || nominalBudget <= 0) {
+      throw new RangeError(`ContextEpochState 名义预算必须为正数，收到：${nominalBudget}`);
+    }
     this.nominal = nominalBudget;
     this.config = { ...DEFAULT_CONTEXT_EPOCH_CONFIG, ...config };
     this.segmentBudget = nominalBudget;

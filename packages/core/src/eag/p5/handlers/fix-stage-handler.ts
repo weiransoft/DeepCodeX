@@ -188,6 +188,26 @@ export class P5FixStageHandler implements P5StageHandler {
 
       // 2. 若无失败结果 → 返回 success（无需修复）
       if (verifyResult === null) {
+        // R4（2026-10-20，run 68acea2de182 报告误导修复）：dev 阶段本轮失败时，
+        // "无需修复（verify 阶段已通过或无测试结果）"是误导性 ✓——读者会以为
+        // 失败已被 fix 处理过。fix 的修复对象只有 verify（测试）失败，对 dev
+        // 失败的正确语义是 skip：如实说明跳过原因，不谎称"已通过"。
+        const devFailure = findDevFailure(ctx);
+        if (devFailure !== null) {
+          return createSuccessStageResult(
+            "fix",
+            `跳过修复：dev 阶段本轮执行失败（${devFailure.summary.slice(0, 120)}），` +
+              `无测试失败可分析——修复方向由下一轮 plan 的跨 run 失败记忆承接`,
+            {
+              fixSuggestion: null,
+              reason: "dev-failed-no-verify-failure",
+              devFailed: true,
+            },
+            [],
+            0,
+            Date.now() - startTime
+          );
+        }
         return createSuccessStageResult(
           "fix",
           "无需修复（verify 阶段已通过或无测试结果）",
@@ -635,6 +655,37 @@ function readStageResultIterIndex(result: Readonly<P5StageResult>): number | nul
  * @param ctx 阶段执行上下文
  * @returns 本轮（或当前批）失败的 verify 阶段结果（若无则返回 null）
  */
+/**
+ * 从 prevResults 中查找**本轮** dev 阶段的失败结果（R4，2026-10-20）
+ *
+ * 轮次隔离与 findVerifyFailure 完全同构（编排路径按轮次标签严格匹配，
+ * 单元/手搭路径按批内向前扫描），只是 stage 换为 "dev"。
+ */
+function findDevFailure(ctx: Readonly<P5StageContext>): Readonly<P5StageResult> | null {
+  const hasAlignedRound = ctx.prevResults.some((r) => readStageResultIterIndex(r) === ctx.iterIndex);
+
+  if (hasAlignedRound) {
+    for (let i = ctx.prevResults.length - 1; i >= 0; i--) {
+      const result = ctx.prevResults[i]!;
+      if (readStageResultIterIndex(result) !== ctx.iterIndex) {
+        continue;
+      }
+      if (result.stage === "dev" && result.kind !== "success") {
+        return result;
+      }
+    }
+    return null;
+  }
+
+  for (let i = ctx.prevResults.length - 1; i >= 0; i--) {
+    const result = ctx.prevResults[i]!;
+    if (result.stage === "dev" && result.kind !== "success") {
+      return result;
+    }
+  }
+  return null;
+}
+
 function findVerifyFailure(ctx: Readonly<P5StageContext>): Readonly<P5StageResult> | null {
   // 快速判定：prevResults 中存在轮次标签与 ctx.iterIndex 对齐的结果 → 编排路径，
   // 严格按本轮隔离；否则视为单元路径，走批内兼容模式。

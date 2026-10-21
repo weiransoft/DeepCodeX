@@ -112,8 +112,11 @@ test("DFG-1 段超限折叠且剩余轮数足够（≥MIN_SEGMENT_ROUNDS=4）→
     // 核心断言 2：如果成功跑完 6 次，llmRequests=6 且文件真实落盘
     if (result.success) {
       assert.equal(result.llmRequests, 6, `成功跑完 6 次 LLM 请求（含续跑段），实际 ${result.llmRequests}`);
+      // 测试缺陷修正（2026-10-20）：write 工具是覆盖语义，5 次不同内容写同一
+      // 文件后只保留最后一次（line-4）——旧断言要求同时包含 line-0 与 line-4
+      // 永远不可能成立（DFG-1 自引入起的既有失败，与执行器实现无关）。
       const content = fs.readFileSync(targetFile, "utf-8");
-      assert.ok(content.includes("line-0") && content.includes("line-4"), "5 次写入均已落盘");
+      assert.ok(content.includes("line-4"), "最后一次写入真实落盘（write 覆盖语义）");
     }
     // 如果失败，必须是诚实口径（Token 预算压缩续跑被段轮数收口），绝不是"工具循环达上限"
     if (!result.success && result.error) {
