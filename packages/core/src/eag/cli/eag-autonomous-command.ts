@@ -158,6 +158,11 @@ export interface EagAutonomousRequest {
   /** 连续失败 abort 阈值（默认 3，正整数） */
   readonly consecutiveFailureAbort: number;
   /**
+   * 宿主中断信号（2026-10-22 停止修复）：由 session 层注入本轮 controller.signal，
+   * 透传至 AutonomousRunRequest.signal，使"停止生成"能熔断自主循环。
+   */
+  readonly signal?: AbortSignal;
+  /**
    * 每轮迭代摘要回调（修复"eag 全程主会话零输出"2026-10-03）。
    * 由 session 层在构造请求时注入，透传到 AutonomousRunRequest.onIteration；
    * 命令字符串解析路径（extractEagAutonomousRequestFromPrompt）不产生该字段。
@@ -464,6 +469,8 @@ export class EagAutonomousCommandHandler {
       testCommand: request.testCommand,
       testTimeoutSec: request.testTimeoutSec,
       consecutiveFailureAbort: request.consecutiveFailureAbort,
+      // 停止修复（2026-10-22）：透传宿主中断信号到编排器
+      signal: request.signal,
       // 进度回写（修复"eag 全程主会话零输出"2026-10-03）：
       // 透传调用方（session 层）注入的每轮迭代回调，orchestrator 每轮收尾后
       // 把阶段摘要推回主会话。可选字段——未注入时保持旧行为（仅 notes 落盘）。

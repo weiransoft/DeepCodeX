@@ -6529,6 +6529,10 @@ ${agentInstructions}
     // 使用 spread 生成新请求对象（validatedRequest 是冻结的，不可原地修改）。
     const requestWithProgress: EagAutonomousRequest = {
       ...validatedRequest,
+      // 停止修复（2026-10-22）：本轮 controller 的 abort 信号贯通到编排器——
+      // "停止生成"从此能熔断 EAG 自主循环（迭代顶检查 + abort 标志文件 +
+      // 执行器 in-flight LLM/工具中断），而不是等整轮编排自然结束。
+      signal,
       onIteration: (summary) => {
         const stageLines = summary.stages
           .map((s) => `${s.success ? "✓" : "✗"} ${s.stage}: ${s.summary || (s.success ? "ok" : "failed")}`)
@@ -6561,7 +6565,8 @@ ${agentInstructions}
       this.recordAutonomousRunOutcome(sessionId, validatedRequest.goal, isAborted ? "aborted" : "failed");
       this.updateSessionEntry(sessionId, (entry) => ({
         ...entry,
-        status: "failed",
+        // 停止修复（2026-10-22）：interruptSession 已落 interrupted 时不得覆盖
+        status: entry.status === "interrupted" ? "interrupted" : "failed",
         failReason: isAborted ? `Autonomous Loop 被用户中断：${errMsg}` : `Autonomous Loop 执行异常：${errMsg}`,
         updateTime: new Date().toISOString(),
       }));
@@ -6585,7 +6590,7 @@ ${agentInstructions}
       this.recordAutonomousRunOutcome(sessionId, validatedRequest.goal, "aborted");
       this.updateSessionEntry(sessionId, (entry) => ({
         ...entry,
-        status: "failed",
+        status: entry.status === "interrupted" ? "interrupted" : "failed",
         failReason: "Autonomous Loop 被用户中断（编排完成后）",
         updateTime: new Date().toISOString(),
       }));
@@ -6616,12 +6621,20 @@ ${agentInstructions}
     // 跨 run 失败守卫写侧：无论成败，终态先落盘（触发层据 finalStatus 判定拦截/放行）。
     // success=false 且无 runResult（handler 自身异常）时归一化为 "failed"。
     this.recordAutonomousRunOutcome(sessionId, validatedRequest.goal, result.runResult?.finalStatus ?? "failed");
-    this.updateSessionEntry(sessionId, (entry) => ({
-      ...entry,
-      status: result.success ? "completed" : "failed",
-      failReason: result.success ? null : `Autonomous Loop 终止：${result.errorMessage}`,
-      updateTime: new Date().toISOString(),
-    }));
+    this.updateSessionEntry(sessionId, (entry) => {
+      const wasInterrupted = entry.status === "interrupted";
+      return {
+        ...entry,
+        // 停止修复（2026-10-22）：运行期间被停止（interrupted）不被终态渲染覆盖
+        status: wasInterrupted ? "interrupted" : result.success ? "completed" : "failed",
+        failReason: wasInterrupted
+          ? "interrupted"
+          : result.success
+            ? null
+            : `Autonomous Loop 终止：${result.errorMessage}`,
+        updateTime: new Date().toISOString(),
+      };
+    });
   }
 
   // ============================================================================
@@ -8819,6 +8832,16 @@ ${agentInstructions}
       this.sessionControllers.delete(sessionId);
     }
 
+    // 修复"点击停止生成后任务不能完全停止"（2026-10-22）：为尾部 assistant
+    // 消息中尚未应答的 tool_calls 补写"已取消"tool 响应。否则挂起的
+    // tool_calls 会留在磁盘上，用户停止后再发任意消息（如"继续"），
+    // getTrailingPendingToolCallMessage 恢复出原批次并原样重放——
+    // docker build/ssh 部署等副作用重启，表现为"停了但任务又活了"。
+    this.appendCancelledToolResponses(
+      sessionId,
+      this.messageConverter.getTrailingPendingToolCallMessage(this.listSessionMessages(sessionId)).toolCalls
+    );
+
     const now = new Date().toISOString();
     this.updateSessionEntry(sessionId, (entry) => ({
       ...entry,
@@ -8837,6 +8860,55 @@ ${agentInstructions}
     }
 
     this.onAssistantMessage(this.buildUserMessage(sessionId, { text: contentParts.join(" ") }), false);
+  }
+
+  /**
+   * 为尾部 assistant 消息中尚未应答的 tool_calls 补写"已取消"tool 响应
+   * （修复"点击停止生成后任务不能完全停止"，2026-10-22）。
+   *
+   * 背景：工具批次执行中途被 interrupt 时，appendToolMessages 直接 return，
+   * 磁盘上留下"assistant 带 N 个 tool_calls、零 tool 响应"的悬挂状态。
+   * 用户停止后再发任何消息（哪怕只是"继续"或一句新指令），主循环的
+   * getTrailingPendingToolCallMessage 都会把这批 tool_calls 原样恢复并
+   * **重新执行**——docker build、ssh 部署、写文件等副作用重启，表现为
+   * "点了停止但任务又活了"。补写取消响应后：
+   * - 悬挂批次被终态化（ok=false + metadata.interrupted），不再被恢复重放；
+   * - buildMessages 的历史配对也因此天然完整（无需合成兜底）。
+   *
+   * 幂等性：仅当尾部确为带 tool_calls 的 assistant 消息时触发（由调用方
+   * 传入 getTrailingPendingToolCallMessage 的结果保证）；已落盘的 tool
+   * 响应不在 toolCalls 集合内，不会重复补写。
+   */
+  private appendCancelledToolResponses(sessionId: string, toolCalls: unknown[]): void {
+    if (toolCalls.length === 0) {
+      return;
+    }
+    for (const toolCall of toolCalls) {
+      if (!toolCall || typeof toolCall !== "object") {
+        continue;
+      }
+      const record = toolCall as { id?: unknown; function?: { name?: unknown } };
+      if (typeof record.id !== "string" || record.id.length === 0) {
+        continue;
+      }
+      const toolName = typeof record.function?.name === "string" ? record.function.name : "tool";
+      const cancelledContent = JSON.stringify(
+        {
+          ok: false,
+          name: toolName,
+          error: "已被用户中断取消（本次调用未执行，如仍需要请在后续轮次重新发起）",
+          metadata: {
+            interrupted: true,
+            cancelledBeforeExecution: true,
+          },
+        },
+        null,
+        2
+      );
+      const toolMessage = this.buildToolMessage(sessionId, record.id, cancelledContent, record.function ?? null);
+      this.appendSessionMessage(sessionId, toolMessage);
+      this.onAssistantMessage(toolMessage, true);
+    }
   }
 
   private isInterrupted(sessionId: string): boolean {
@@ -9719,6 +9791,64 @@ ${agentInstructions}
     };
   }
 
+  /**
+   * 停止修复（2026-10-22）：中断导致工具批次早退时，把该批次落盘为终态——
+   * 已执行完成的结果补落 tool 消息（模型恢复时不丢已完成工作），未执行的
+   * 补"已取消"回执（协议自洽 + 杜绝 getTrailingPendingToolCallMessage 在
+   * 下次激活时把整批 tool_calls 原样重放，即"点了停止任务又活了"）。
+   *
+   * 幂等防护：若 interruptSession 已先行补齐取消回执（尾部不再是带 tool_calls
+   * 的 assistant 消息），此处直接跳过，避免同一 tool_call_id 双写。
+   */
+  private finalizeInterruptedToolBatch(
+    sessionId: string,
+    rawToolCalls: unknown[],
+    toolExecutions: ReadonlyArray<ToolCallExecution>,
+    cancelledToolCallIds: ReadonlyArray<string>
+  ): void {
+    const trailing = this.messageConverter.getTrailingPendingToolCallMessage(this.listSessionMessages(sessionId));
+    if (trailing.toolCalls.length === 0) {
+      return;
+    }
+    for (const execution of toolExecutions) {
+      const toolFunction = this.messageConverter.findToolFunction(rawToolCalls, execution.toolCallId);
+      this.appendSessionMessage(
+        sessionId,
+        this.buildToolMessage(sessionId, execution.toolCallId, execution.content, toolFunction)
+      );
+    }
+    const executedIds = new Set(toolExecutions.map((execution) => execution.toolCallId));
+    for (const toolCallId of cancelledToolCallIds) {
+      if (executedIds.has(toolCallId)) {
+        continue;
+      }
+      const toolFunction = this.messageConverter.findToolFunction(rawToolCalls, toolCallId);
+      const functionName =
+        toolFunction &&
+        typeof toolFunction === "object" &&
+        typeof (toolFunction as { name?: unknown }).name === "string"
+          ? (toolFunction as { name: string }).name
+          : "tool";
+      const cancelledContent = JSON.stringify(
+        {
+          ok: false,
+          name: functionName,
+          error: "已被用户中断取消（本次调用未执行，如仍需要请在后续轮次重新发起）",
+          metadata: {
+            interrupted: true,
+            cancelledBeforeExecution: true,
+          },
+        },
+        null,
+        2
+      );
+      this.appendSessionMessage(
+        sessionId,
+        this.buildToolMessage(sessionId, toolCallId, cancelledContent, toolFunction)
+      );
+    }
+  }
+
   private generateToolCallId(): string {
     return crypto.randomBytes(16).toString("hex");
   }
@@ -9888,8 +10018,16 @@ ${agentInstructions}
       .map((toolCall) => parseToolCallForPermissions(toolCall))
       .filter((toolCall): toolCall is PermissionToolCall => Boolean(toolCall));
     const toolExecutions: ToolCallExecution[] = [];
-    for (const toolCall of parsedToolCalls) {
+    // 停止修复（2026-10-22）：因用户停止而未执行的 tool_call id，早退前统一补
+    // "已取消"回执；已执行完成的结果补落 tool 消息——停止后模型不丢已完成结果，
+    // 且尾部 assistant 的每个 tool_call 都有配对消息，不再被下次激活自动重放。
+    const cancelledToolCallIds: string[] = [];
+    for (let toolCallIndex = 0; toolCallIndex < parsedToolCalls.length; toolCallIndex++) {
+      const toolCall = parsedToolCalls[toolCallIndex]!;
       if (hooks.shouldStop?.()) {
+        for (const pending of parsedToolCalls.slice(toolCallIndex)) {
+          cancelledToolCallIds.push(pending.id);
+        }
         break;
       }
       const blockedResult = buildPermissionToolExecution(toolCall, options);
@@ -9897,10 +10035,24 @@ ${agentInstructions}
         toolExecutions.push(blockedResult);
         continue;
       }
-      const executions = await this.toolExecutor.executeToolCalls(sessionId, [toolCall], hooks);
-      toolExecutions.push(...executions);
+      try {
+        const executions = await this.toolExecutor.executeToolCalls(sessionId, [toolCall], hooks);
+        toolExecutions.push(...executions);
+      } catch (error) {
+        const aborted = this.isInterrupted(sessionId) || (error instanceof Error && error.name === "AbortError");
+        if (!aborted) {
+          throw error;
+        }
+        // 工具执行中途被停止：本项与剩余项一并落"已取消"回执
+        cancelledToolCallIds.push(toolCall.id);
+        for (const pending of parsedToolCalls.slice(toolCallIndex + 1)) {
+          cancelledToolCallIds.push(pending.id);
+        }
+        break;
+      }
     }
     if (this.isInterrupted(sessionId)) {
+      this.finalizeInterruptedToolBatch(sessionId, toolCalls, toolExecutions, cancelledToolCallIds);
       return { waitingForUser: false, failedCount: 0, succeededCount: 0 };
     }
     let waitingForUser = false;

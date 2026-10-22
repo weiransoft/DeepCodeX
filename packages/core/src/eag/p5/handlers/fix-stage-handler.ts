@@ -377,6 +377,8 @@ export class P5FixStageHandler implements P5StageHandler {
         acceptanceCriteria: taskCard.acceptanceCriteria,
         feedback,
         abortFlagPath: ctx.abortFlagPath ?? "",
+        // 停止修复（2026-10-22）：宿主信号透传执行器（abort 即时打断 in-flight 请求）
+        signal: ctx.signal,
         // 运行剩余预算透传（2026-10-08 T-009/T-010 事故修复）：执行器每轮增量检查，
         // 把单阶段超烧窗口从"整轮迭代"收窄到"单轮请求"；fixtures 未注入时 undefined
         perTaskBudget: ctx.perTaskBudget,

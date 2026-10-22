@@ -1034,6 +1034,8 @@ export class P5PlanStageHandler implements P5StageHandler {
             previousRunContext,
             remainingTokenBudget: ctx.perTaskBudget ?? Number.MAX_SAFE_INTEGER,
             abortFlagPath: ctx.abortFlagPath ?? "",
+            // 停止修复（2026-10-22）：宿主信号透传规划器（abort 时跳过规划请求）
+            signal: ctx.signal,
           });
           // 规划调用的 token 消耗诚实计入 plan 阶段结果（此前 plan 恒 0）
           plannerTokensUsed = planResult.tokensUsed;

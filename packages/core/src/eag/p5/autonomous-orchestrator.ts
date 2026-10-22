@@ -291,6 +291,17 @@ export interface AutonomousRunRequest {
    * 回调异常不影响主循环（orchestrator 内部 try/catch 吞掉并记日志）。
    */
   readonly onIteration?: (summary: AutonomousIterationSummary) => void | Promise<void>;
+  /**
+   * 进程内中断信号（修复"点击停止生成后任务不能完全停止"2026-10-22）。
+   *
+   * 既有中止通道只有磁盘 abort 标志文件（/eag-autonomous-stop 跨进程路径），
+   * 宿主（session.ts 的 turn controller / Web 停止按钮 → interruptActiveSession）
+   * 的 AbortSignal 此前从未接入编排器——用户点停止后 autonomous 循环仍把
+   * 剩余迭代全部跑完（每轮 4 阶段 LLM+工具真实执行），表现为"停不下来"。
+   * 注入后：每轮迭代顶部检查、每阶段收尾检查、dev/fix 执行器 LLM 流与
+   * 工具执行、plan 规划器请求四处联动生效。
+   */
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -857,6 +868,9 @@ export class AutonomousOrchestrator {
     // 注：initialize() 也移入 try 块内，确保即使 initialize 失败，finally 块也能
     //     清理可能存在的 abort 文件（如用户预先创建的 abort 文件）
     let result: AutonomousRunResult;
+    // 停止修复（2026-10-22）：宿主 abort 信号接线（runId 确定后注册监听，finally 注销）
+    const hostSignal = request.signal;
+    let detachHostAbort: (() => void) | null = null;
     try {
       // 3a. 初始化 RunState 持久化存储（移入 try 块，确保 finally 覆盖）
       const initialState = await this.runStateStore.initialize({
@@ -872,6 +886,28 @@ export class AutonomousOrchestrator {
       currentRunState = initialState;
       runId = initialState.runId;
       this.log(`AutonomousOrchestrator.run 已初始化 RunState：runId=${runId}`, "info");
+
+      // 停止修复（2026-10-22）：宿主 signal abort → 同步落 abort 标志文件。
+      // 编排器自身是拉模型（轮询标志文件），事件里立即写文件，使迭代顶检查与
+      // 已链接该 signal 的 dev/fix 执行器（in-flight LLM 流/工具批）同帧收敛。
+      const onHostAbort = (): void => {
+        try {
+          fs.mkdirSync(path.join(projectRoot, ABORT_FLAGS_DIR), { recursive: true });
+          fs.writeFileSync(path.join(projectRoot, ABORT_FLAGS_DIR, `${runId}${ABORT_FILE_EXTENSION}`), "", {
+            encoding: "utf-8",
+          });
+        } catch {
+          // 落盘失败仍由迭代顶的 signal 直接检查兜底熔断
+        }
+      };
+      if (hostSignal) {
+        if (hostSignal.aborted) {
+          onHostAbort();
+        } else {
+          hostSignal.addEventListener("abort", onHostAbort, { once: true });
+          detachHostAbort = () => hostSignal.removeEventListener("abort", onHostAbort);
+        }
+      }
 
       // 3b. git 变更基线快照（2026-10-07 变更文件清单需求）：
       // 运行前采集工作区脏集合 + 已跟踪集合，运行结束再做终态快照差集归因。
@@ -891,7 +927,7 @@ export class AutonomousOrchestrator {
         // 使用已 resolve 的 projectRoot 局部变量（L550），而非 request.projectRoot
         // 否则相对路径会导致 stop() 创建的 abort 文件（绝对路径）与 run() 检测的路径不一致
         const abortFilePath = path.join(projectRoot, ABORT_FLAGS_DIR, `${runId}${ABORT_FILE_EXTENSION}`);
-        if (fs.existsSync(abortFilePath)) {
+        if (fs.existsSync(abortFilePath) || hostSignal?.aborted === true) {
           this.log(`检测到 abort 标志文件，中止运行: ${runId}`, "warn");
           status = "aborted";
           finalStatus = "aborted";
@@ -966,6 +1002,9 @@ export class AutonomousOrchestrator {
             // plan 自身执行时尚不知是否合成（false）；dev/verify/fix 读取真实值
             synthesizedTask: iterationSynthesized,
             abortFlagPath: abortFilePath,
+            // 停止修复（2026-10-22）：宿主信号投影到 ctx → dev/fix handler
+            // 透传给执行器，abort 即时打断进行中的 LLM 流与工具批
+            signal: hostSignal,
             // 压缩基线（2026-10-08 T-009/T-010 事故修复引入；2026-10-20 语义变更）：
             // 经 ctx 透传给 dev/fix 执行器作为 ContextEpochState 段额度基线，
             // 随 totalTokensUsed 逐阶段递减。此前该值从未注入（执行器轮内检查
@@ -1524,6 +1563,10 @@ export class AutonomousOrchestrator {
     } finally {
       // 无论 run() 以何种方式退出（成功/失败/中止/异常），清理 abort 标志文件
       // 避免遗留的 abort 文件影响下次同 runId 的运行
+      // 停止修复（2026-10-22）：注销宿主 abort 监听（防跨 run 泄漏——abort 监听
+      // 若残留，后续同实例 run 会被上一个已 aborted 的 signal 瞬间熔断）
+      detachHostAbort?.();
+      detachHostAbort = null;
       this.cleanupAbortFlag(runId, projectRoot);
       // R3（2026-10-20）：删除本 run 租约，避免并发 run 在 TTL 内继续避让
       // 已死 run 的"在途"卡（崩溃残留由 TTL 自然过期兜底）
@@ -2487,6 +2530,8 @@ export class AutonomousOrchestrator {
     readonly synthesizedTask: boolean;
     /** abort 标志文件绝对路径（透传执行器轮询） */
     readonly abortFlagPath: string;
+    /** 宿主中断信号（2026-10-22 停止修复，透传 dev/fix 执行器） */
+    readonly signal?: AbortSignal;
     /**
      * 本阶段任务执行的 Token 预算上限（运行剩余预算，2026-10-08 T-009/T-010 事故修复）。
      * 由调用点按 maxTokens - totalTokensUsed 计算并夹到 ≥0；执行器据此做每轮增量检查。
@@ -2520,6 +2565,7 @@ export class AutonomousOrchestrator {
       taskExecutor: args.taskExecutor,
       synthesizedTask: args.synthesizedTask,
       abortFlagPath: args.abortFlagPath,
+      signal: args.signal,
       // F-C 跨 run 失败反馈（可选字段，undefined 时不写入冻结对象语义无差异，
       // 显式透传保持字段完整性供调试与审计）
       lastFailureFeedback: args.lastFailureFeedback,

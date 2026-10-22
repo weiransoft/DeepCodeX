@@ -174,6 +174,13 @@ export interface P5StageContext {
    */
   readonly abortFlagPath?: string;
   /**
+   * 宿主中断信号（2026-10-22 停止修复）：orchestrator 将 AutonomousRunRequest.signal
+   * 投影到 ctx，dev/fix handler 透传给任务执行器——abort 即时打断进行中的
+   * LLM 流与工具批（进程内），abort 标志文件轮询保留为跨进程兜底。
+   * 可选字段：既有 fixtures 不传时与旧行为一致。
+   */
+  readonly signal?: AbortSignal;
+  /**
    * 跨 run 失败反馈（2026-10-09 F-C，docs/dev/eag-p5-llm-dynamic-planning.md）。
    *
    * 由 orchestrator 从上一轮 plan 阶段 artifacts.lastFailureFeedback 投影（数据

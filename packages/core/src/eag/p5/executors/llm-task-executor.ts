@@ -612,7 +612,10 @@ export class LlmTaskExecutor implements P5TaskExecutor {
    */
   async planIteration(input: Readonly<P5PlanIterationInput>): Promise<Readonly<P5PlanIterationResult>> {
     // abort 预检：标志文件已存在时不发请求（与 executeTask 轮顶检查同源）
-    if (input.abortFlagPath.length > 0 && this.isAbortRequested(input.abortFlagPath)) {
+    if (
+      input.signal?.aborted === true ||
+      (input.abortFlagPath.length > 0 && this.isAbortRequested(input.abortFlagPath))
+    ) {
       return Object.freeze({
         ok: false,
         action: "none" as const,
@@ -833,6 +836,17 @@ export class LlmTaskExecutor implements P5TaskExecutor {
     // 绝不写入 sessions-index.json，执行结束立即 clearSessionState 释放模块级状态。
     const toolSessionId = `p5-${input.runId}-i${input.iterIndex}-${input.stage}`;
     const abortController = new AbortController();
+    // 停止修复（2026-10-22）：链接宿主中断信号（停止按钮 → AutonomousRunRequest.signal
+    // → ctx.signal → 本输入）。abort 立即打断进行中的 LLM 请求与工具批——
+    // createMessage 与 executeToolCalls 的 signal 都挂在本 controller 上，bash
+    // 子进程组随 bindProcessAbort 一并 SIGKILL；标志文件轮询保留为跨进程兜底。
+    if (input.signal) {
+      if (input.signal.aborted) {
+        abortController.abort();
+      } else {
+        input.signal.addEventListener("abort", () => abortController.abort(), { once: true });
+      }
+    }
 
     // 自有 ToolExecutor：不传 openAIClient 与 mcpManager，
     // 构造函数内 registerToolHandlers() 注册全部内置真实文件工具（零 mock）。
@@ -1491,7 +1505,7 @@ export class LlmTaskExecutor implements P5TaskExecutor {
           })),
           {
             signal: abortController.signal,
-            shouldStop: () => this.isAbortRequested(input.abortFlagPath),
+            shouldStop: () => this.isAbortRequested(input.abortFlagPath) || abortController.signal.aborted,
             onBeforeToolExecution: (toolName, args) =>
               this.authorizeToolCall(toolName, args, toolSessionId, input, emitProgress),
           }
