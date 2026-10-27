@@ -188,6 +188,21 @@ export type WebLdapSettings = {
  * 原始（未归一）配置类型：解析与默认值归一在 packages/web/src/config.ts 中完成，
  * 产出 ResolvedWebSettings（含全部默认值）；core 侧仅承载类型定义。
  */
+/**
+ * Web 多工作空间条目原始配置（web.workspaces，ARCH-20261027 T04）。
+ *
+ * 仅为声明形态：id/name/root 的合法性校验与 ~ 展开、牢笼包含判定
+ * 全部在 packages/web/src/config.ts 启动期 fail-fast 完成。
+ */
+export type WebWorkspaceSettings = {
+  /** 空间标识（kebab-case，前端切换器与 createChat workspaceId 参数使用） */
+  id?: string;
+  /** 展示名（非空） */
+  name?: string;
+  /** 空间根目录（支持 ~ 展开；personalOnly 模式必须位于 uploadDir 内，共享模式必须位于 allowRoots 内） */
+  root?: string;
+};
+
 export type WebSettings = {
   /** 是否启用 Web 界面（默认 false；显式开启才允许 `deepcode web` 启动） */
   enabled?: boolean;
@@ -236,6 +251,13 @@ export type WebSettings = {
    *   灾难性命令硬拦截（bash-handler 黑名单）独立于本配置生效，无法绕过。
    */
   approvalMode?: PermissionMode;
+  /**
+   * 多工作空间列表（ARCH-20261027 T04，默认空 = 不启用工作空间语义）：
+   * personalOnly 模式下 createChat 在「本人个人区」之外接受这里配置的
+   * 个人区内共享空间；共享模式（personalOnly=false）下配置了本列表时，
+   * 新建会话的 projectRoot 必须命中其中一项。合法性在 web config 启动期校验。
+   */
+  workspaces?: WebWorkspaceSettings[];
   /** 认证配置 */
   auth?: WebAuthSettings;
   /** LDAP 配置 */

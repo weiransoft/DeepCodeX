@@ -1,13 +1,16 @@
 /**
- * 聊天端点（docs/dev/web-ui.md §3.5）。
+ * 聊天端点（docs/dev/web-ui.md §3.5；多工作空间 ARCH-20261027 T04）。
  *
- * - GET  /api/chats：会话列表（池内活跃 + 磁盘历史合并）
- * - POST /api/chats：新建会话 {projectRoot, sessionId?}（projectRoot 必须在 allowRoots 内）
+ * - GET  /api/chats?workspaceId=：会话列表（池内活跃 + 磁盘历史合并；
+ *   带 workspaceId 时按该空间根过滤）
+ * - POST /api/chats：新建会话 {projectRoot?, workspaceId?, sessionId?}
+ *   （projectRoot 必须在 allowRoots 内；workspaceId 指定已配置工作空间时以其
+ *   root 为落点；personalOnly 模式接受个人区与个人区内工作空间）
  * - GET  /api/chats/:id/messages：历史消息（刷新恢复）
  * - POST /api/chats/:id/messages：发送消息；Content-Type 为 multipart/form-data 时
  *   附件随消息上传（图片转 imageUrls 的 file:// URL，其他文件落盘并在文本中附说明）
  * - GET  /api/chats/:id/stream：SSE 事件流（llm_delta / assistant_message /
- *   permission_request / status / done）
+ *   permission_request / sedimentation_suggestion / status / done）
  * - POST /api/chats/:id/interrupt：停止生成（interruptActiveSession）
  */
 
@@ -16,6 +19,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { PermissionScope, UserToolPermission } from "@vegamo/deepcode-core";
 import { parseMultipartRequest, MultipartError } from "../multipart";
 import { ApiError, readJsonBody, sendJson } from "../http-utils";
+import { realpathAllowMissing } from "../jail";
 import { personalUploadRoot } from "../user-files";
 import type { SessionPool, SendMessageInput } from "../session-pool";
 import type { AuthContext } from "../user-identity";
@@ -29,20 +33,41 @@ const IMAGE_MIME_PREFIX = "image/";
  * @param res 响应对象
  * @param pool 会话池
  * @param ctx 认证上下文（决定可见集合）
+ * @param settings 归一后的 Web 配置（workspaceId → 空间根解析）
+ * @param workspaceId 查询参数 workspaceId（可空；非空时按该空间根过滤，
+ *   未知 id → 400）
  */
-export function handleListChats(res: ServerResponse, pool: SessionPool, ctx: AuthContext): void {
-  sendJson(res, 200, { chats: pool.listChats(ctx) });
+export async function handleListChats(
+  res: ServerResponse,
+  pool: SessionPool,
+  ctx: AuthContext,
+  settings: ResolvedWebSettings,
+  workspaceId: string | null
+): Promise<void> {
+  let workspaceRoot: string | undefined;
+  if (workspaceId !== null && workspaceId.trim() !== "") {
+    const workspace = settings.workspaces.find((item) => item.id === workspaceId.trim());
+    if (!workspace) {
+      throw new ApiError(400, `工作空间 ${workspaceId} 不存在或未配置`);
+    }
+    // 与 createChat 落点同一归一口径：realpath 消解符号链接形态
+    //（macOS /var → /private/var），否则空间过滤前缀判定会因路径形态漂移漏配
+    workspaceRoot = await realpathAllowMissing(workspace.root);
+  }
+  sendJson(res, 200, { chats: pool.listChats(ctx, workspaceRoot) });
 }
 
 /**
  * 处理 POST /api/chats：创建新会话（归属当前用户；docs/dev/web-isolation.md §3.3）。
  *
- * personalOnly 模式（docs/dev/web-workspace.md W3）：projectRoot 可缺省
- * （服务端强制拼接个人工作区）；显式传入时由 pool.createChat 校验只能等于
- * 本人个人区，否则 403。personalOnly=false 旧行为：projectRoot 必填
- * 且必须落在 allowRoots 白名单内。
+ * personalOnly 模式（docs/dev/web-workspace.md W3；工作空间 ARCH-20261027 T04）：
+ * projectRoot 可缺省（服务端强制拼接个人工作区）；显式传入时由 pool.createChat
+ * 校验只能等于本人个人区或已配置工作空间（web.workspaces），否则 403。
+ * 也可直接传 workspaceId 指定落点（以其 root 为准，projectRoot 忽略）。
+ * personalOnly=false 旧行为：projectRoot 必填且必须落在 allowRoots 白名单内；
+ * 配置了 web.workspaces 时新建会话（无 sessionId）还必须命中工作空间集合。
  *
- * @param req 请求对象（JSON：{projectRoot?, sessionId?}；sessionId 恢复时校验归属）
+ * @param req 请求对象（JSON：{projectRoot?, workspaceId?, sessionId?}；sessionId 恢复时校验归属）
  * @param res 响应对象
  * @param pool 会话池
  * @param ctx 认证上下文（会话归属者）
@@ -55,15 +80,17 @@ export async function handleCreateChat(
   ctx: AuthContext,
   settings: ResolvedWebSettings
 ): Promise<void> {
-  const body = await readJsonBody<{ projectRoot?: unknown; sessionId?: unknown }>(req);
+  const body = await readJsonBody<{ projectRoot?: unknown; workspaceId?: unknown; sessionId?: unknown }>(req);
   const requestedRoot = typeof body.projectRoot === "string" ? body.projectRoot.trim() : "";
-  // personalOnly=false（旧共享模式）保持 projectRoot 必填校验；
+  const workspaceId =
+    typeof body.workspaceId === "string" && body.workspaceId.trim() !== "" ? body.workspaceId.trim() : undefined;
+  // personalOnly=false（旧共享模式）保持 projectRoot 必填校验（workspaceId 指定时豁免）；
   // personalOnly=true 允许缺省（个人区由服务端拼接，见 session-pool.createChat）
-  if (!settings.personalOnly && requestedRoot === "") {
-    throw new ApiError(400, "请求体必须包含非空 projectRoot 字符串");
+  if (!settings.personalOnly && workspaceId === undefined && requestedRoot === "") {
+    throw new ApiError(400, "请求体必须包含非空 projectRoot 或 workspaceId 字符串");
   }
   const sessionId = typeof body.sessionId === "string" && body.sessionId !== "" ? body.sessionId : undefined;
-  const created = await pool.createChat(requestedRoot, ctx, sessionId);
+  const created = await pool.createChat(requestedRoot, ctx, sessionId, workspaceId);
   sendJson(res, 200, created);
 }
 

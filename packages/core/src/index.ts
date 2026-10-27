@@ -63,6 +63,7 @@ export type {
   ResolvedStatusLineSettings,
   StatusLineProviderConfig,
   WebSettings,
+  WebWorkspaceSettings,
   WebAuthSettings,
   WebLdapSettings,
   WebLocalUserSettings,

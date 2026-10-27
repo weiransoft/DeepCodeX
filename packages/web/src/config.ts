@@ -19,7 +19,92 @@ import {
   type DeepcodingSettings,
   type WebSettings,
 } from "@vegamo/deepcode-core";
-import type { ResolvedWebSettings } from "./types";
+import type { ResolvedWebSettings, WorkspaceConfig } from "./types";
+
+/** 工作空间 id 合法形态：kebab-case（与 agent/skill name 同一口径，ARCH-20261027 §7.1） */
+const WORKSPACE_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
+ * 解析并校验 web.workspaces 配置（ARCH-20261027 T04，启动期 fail-fast）。
+ *
+ * 校验规则（任一不满足即抛出带中文说明的错误，拒绝启动）：
+ * - 必须是对象数组；每项 id/name/root 均为必填字符串；
+ * - id 唯一且 kebab-case（^[a-z0-9]+(?:-[a-z0-9]+)*$）；
+ * - root 经 ~ 展开 + path.resolve 归一；
+ * - root 不得等于 uploadDir 本身（个人区上传根保护线，P1-1 同源语义）；
+ * - personalOnly=true  → root 必须严格位于 <uploadDir> 内（个人区子目录）；
+ * - personalOnly=false → root 必须位于某个 allowRoots 白名单目录内（含相等）。
+ *
+ * 安全注记：personalOnly 模式下空间根位于 uploadDir 内，部署方应使用独立子目录
+ * （如 <uploadDir>/workspaces/<id>）并避免与 <uploadDir>/<userId> 个人区形态重叠——
+ * userId 由服务端派生，配置期无法枚举校验，属部署纪律约束（架构文档 §8 已注明）。
+ *
+ * @param raw settings.json 中 web.workspaces 的原始值
+ * @param opts personalOnly / uploadDir / allowRoots（均应为已归一形态）
+ * @returns 归一后的 WorkspaceConfig 列表（未配置时为空数组）
+ * @throws Error 配置非法时抛出带中文说明的错误（fail-fast）
+ */
+export function parseWorkspaces(
+  raw: unknown,
+  opts: { personalOnly: boolean; uploadDir: string; allowRoots: string[] }
+): WorkspaceConfig[] {
+  if (raw === undefined || raw === null) {
+    return [];
+  }
+  if (!Array.isArray(raw)) {
+    throw new Error("web.workspaces 配置非法：必须是对象数组");
+  }
+  const uploadDir = path.resolve(opts.uploadDir);
+  const seenIds = new Set<string>();
+  const result: WorkspaceConfig[] = [];
+  for (const [index, item] of raw.entries()) {
+    const label = `web.workspaces[${index}]`;
+    if (item === null || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error(`${label} 配置非法：必须是对象（{id, name, root}）`);
+    }
+    const record = item as Record<string, unknown>;
+    const id = typeof record["id"] === "string" ? record["id"].trim() : "";
+    if (!WORKSPACE_ID_PATTERN.test(id)) {
+      throw new Error(
+        `${label}.id 配置非法（值：${JSON.stringify(record["id"] ?? null)}）：必须是非空 kebab-case（小写字母/数字/连字符）`
+      );
+    }
+    if (seenIds.has(id)) {
+      throw new Error(`${label}.id 重复（值：${id}）：工作空间 id 必须唯一`);
+    }
+    seenIds.add(id);
+    const name = typeof record["name"] === "string" ? record["name"].trim() : "";
+    if (name === "") {
+      throw new Error(`${label}.name 配置非法：必须是非空字符串`);
+    }
+    const rootRaw = typeof record["root"] === "string" ? record["root"].trim() : "";
+    if (rootRaw === "") {
+      throw new Error(`${label}.root 配置非法：必须是非空目录路径`);
+    }
+    const root = expandHomePath(rootRaw);
+    if (root === uploadDir) {
+      throw new Error(`${label}.root（${root}）不得等于 uploadDir 本身：个人区上传根受保护（P1-1）`);
+    }
+    if (opts.personalOnly) {
+      // 个人工作目录模式：root 必须严格位于 uploadDir 内（startsWith + 分隔符，
+      // 杜绝同级目录前缀误判，如 /a/bc 与 /a/b）
+      if (!root.startsWith(uploadDir + path.sep)) {
+        throw new Error(
+          `${label}.root（${root}）必须位于 uploadDir（${uploadDir}）内：个人工作目录模式仅允许个人区子目录作为工作空间`
+        );
+      }
+    } else {
+      const inside = opts.allowRoots.some((allow) => root === allow || root.startsWith(allow + path.sep));
+      if (!inside) {
+        throw new Error(
+          `${label}.root（${root}）必须位于某个 allowRoots 白名单目录内（共享模式）：${opts.allowRoots.join("、") || "（allowRoots 为空）"}`
+        );
+      }
+    }
+    result.push({ id, name, root });
+  }
+  return result;
+}
 
 /** 单文件上传上限默认值：50MB（docs/dev/web-ui.md §3.3） */
 const DEFAULT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
@@ -281,6 +366,17 @@ export function resolveWebSettings(
     throw new Error('web.approvalMode 必须是 "manual" | "auto" | "bypass"');
   }
 
+  // 6.3 多工作空间（ARCH-20261027 T04）：解析校验 web.workspaces（fail-fast）。
+  // 空间根目录尽力 mkdir（与 allowRoots 同策略：失败延迟到运行期再报错）
+  const workspaces = parseWorkspaces(merged.workspaces, { personalOnly, uploadDir, allowRoots });
+  for (const workspace of workspaces) {
+    try {
+      mkdirSync(workspace.root, { recursive: true });
+    } catch {
+      // 创建失败不视为致命错误：createChat 牢笼解析（realpath）会在运行期给出精确错误
+    }
+  }
+
   // 7. JWT 密钥校验（启动 fail-fast：密钥缺失直接拒绝启动，防止无签名服务裸奔）
   if (typeof jwtSecret !== "string" || jwtSecret.trim() === "") {
     throw new Error(
@@ -324,6 +420,8 @@ export function resolveWebSettings(
     steeringEnabled,
     // 命令审批模式（6.3 归一产物，docs/dev/web-approval.md）
     approvalMode,
+    // 多工作空间（6.3 归一产物，ARCH-20261027 T04）
+    workspaces,
     auth: {
       jwtSecret,
       sessionTtlSeconds,

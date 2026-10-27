@@ -33,6 +33,8 @@ import {
   ProviderFactory,
   SessionManager,
   P5_DANGEROUS_APPROVAL_ID_PREFIX,
+  SedimentationSuggester,
+  SedimentationWriter,
   buildAutonomousOrchestrator,
   buildDesignOrchestrator,
   buildGraphLoopOrchestratorOptions,
@@ -51,10 +53,13 @@ import {
   type EagDynamicSuggester,
   type GraphLoopOrchestratorOptions,
   type LLMClient,
+  type SedimentationScope,
+  type SedimentationSuggestion,
   type SessionStatus,
   type UserPromptContent,
   type UserToolPermission,
   type PermissionScope,
+  type WriteResult,
 } from "@vegamo/deepcode-core";
 import { ApiError } from "./http-utils";
 import { buildJailRoots, resolveInJail } from "./jail";
@@ -223,6 +228,16 @@ export type SessionPoolOptions = {
    * 基线（= 装配前行为），仅用于测试证明注入前后的可观测差异，生产禁用。
    */
   eagEnabled?: boolean;
+  /**
+   * 沉淀建议装配注入开关（ARCH-20261027 T04 测试缝合点）。缺省 true = 生产行为
+   * （建议器装配 + 轮次结束触发分析）；显式置 false 时不装配、不触发（零开销基线）。
+   */
+  sedimentationEnabled?: boolean;
+  /**
+   * 受控沉淀建议器注入（测试缝合点）：注入后 analyze/dismiss 全部走受控实例，
+   * 不再经 LLM 工厂构造真实建议器。未注入时按 createLLMClient 缝合点同源装配。
+   */
+  sedimentationSuggester?: SedimentationSuggester;
 };
 
 /**
@@ -240,12 +255,29 @@ export class SessionPool {
   private readonly eagEnabled: boolean;
   /** 用户注册表根目录注入点（测试用；默认 ~/.deepcode/web/chats，docs/dev/web-isolation.md §3.4） */
   private readonly registryBaseDir?: string;
+  /** 沉淀建议装配开关（ARCH-20261027 T04，缺省 true；false 为测试零开销基线） */
+  private readonly sedimentationEnabled: boolean;
+  /** 受控沉淀建议器注入（测试缝合点；未注入时懒构建真实实例） */
+  private readonly injectedSedimentationSuggester?: SedimentationSuggester;
 
   /**
    * EAG 装配产物（懒构建，docs/dev/eag-web-sedimentation-fixes.md §2.1）。
    * null = 尚未构建；构建后每池一份、跨全部会话共享（构建失败组件为 undefined，fail-closed）。
    */
   private eagAssemblyCache: EagAssembly | null = null;
+
+  /**
+   * 沉淀建议器懒构建缓存（ARCH-20261027 T04）。
+   * undefined = 尚未构建；null = 构建失败（fail-safe 降级，不再重试）。
+   * 建议器无会话态写入（per-session 指纹集合内部自管理），跨会话共享安全。
+   */
+  private sedimentationSuggesterCache: SedimentationSuggester | null | undefined = undefined;
+
+  /** 沉淀触发节流计数：chatId → 已收敛的轮次数（每 N 轮触发一次分析） */
+  private readonly sedimentTurnCounters = new Map<string, number>();
+
+  /** 待处置沉淀建议：chatId → (suggestionId → 建议)。confirm/dismiss 端点与 GET 拉取共用 */
+  private readonly pendingSuggestions = new Map<string, Map<string, SedimentationSuggestion>>();
 
   /**
    * 建议器自动执行一次性守卫（对齐 CLI App.tsx autoExecutedCommandsRef 防循环语义）：
@@ -272,6 +304,8 @@ export class SessionPool {
     this.classifyLlmClientFactory = options.classifyLlmClientFactory;
     this.eagEnabled = options.eagEnabled ?? true;
     this.registryBaseDir = options.registryBaseDir;
+    this.sedimentationEnabled = options.sedimentationEnabled ?? true;
+    this.injectedSedimentationSuggester = options.sedimentationSuggester;
   }
 
   /**
@@ -463,15 +497,23 @@ export class SessionPool {
    * 3. 构造 SessionManager（nonInteractive + 事件桥接）→ initMcpServers →
    *    可选恢复指定 sessionId。
    *
-   * @param projectRoot 项目根目录（personalOnly 模式下必须缺省或等于本人个人区）
+   * @param projectRoot 项目根目录（personalOnly 模式下必须缺省或等于本人个人区/已配置工作空间）
    * @param ctx 认证上下文（会话归属者；多用户隔离，docs/dev/web-isolation.md §3.3）
    * @param sessionId 可选：恢复既有底层会话（刷新后恢复历史；仅归属者可恢复）
+   * @param workspaceId 可选：web.workspaces 配置的工作空间 id（ARCH-20261027 T04）；
+   *   指定时以其 root 为会话落点（projectRoot 忽略），未知 id → 404
    * @returns chatId / sessionId / projectRoot
-   * @throws ApiError 403 personalOnly 模式下请求了个人区之外的目录
+   * @throws ApiError 403 personalOnly 模式下请求了个人区与工作空间之外的目录
+   * @throws ApiError 404 workspaceId 未配置
    * @throws JailViolationError projectRoot 越出白名单（personalOnly=false 旧路径，映射 403）
    * @throws ApiError 404 指定 sessionId 不存在或不属于当前用户
    */
-  async createChat(projectRoot: string, ctx: AuthContext, sessionId?: string): Promise<CreateChatResult> {
+  async createChat(
+    projectRoot: string,
+    ctx: AuthContext,
+    sessionId?: string,
+    workspaceId?: string
+  ): Promise<CreateChatResult> {
     // 个人工作目录模式（docs/dev/web-workspace.md R1/R2）：服务端拼接个人区，
     // 绝不经 ~ 展开或 allowRoots 解析，从源头杜绝越界与路径注入
     const personalRoot = personalUploadRoot(this.settings.uploadDir, ctx.userId);
@@ -483,16 +525,45 @@ export class SessionPool {
       mkdirSync(engineHomeDir, { recursive: true });
     }
 
-    // 牢笼校验：personalOnly 模式下 personalRoot 拼接自服务端可信配置，
-    // 仍走 resolveInJail（个人区在其自身牢笼内必然通过，同时消解 symlink）；
-    // personalOnly=false 走 allowRoots 白名单旧路径。
+    // —— 工作空间绑定校验（ARCH-20261027 T04）——
+    // workspaceId 显式指定：以其 root 为落点（前端切换器语义，projectRoot 忽略）；
+    // 未指定：personalOnly 模式缺省个人区、显式 projectRoot 允许个人区或工作空间根；
+    // 共享模式配置了 workspaces 时新建会话（无 sessionId）必须命中工作空间集合，
+    // 恢复路径（sessionId 存在）保持旧牢笼行为（历史项目根不一定属于任何空间）。
+    const workspaceRoots = this.settings.workspaces.map((item) => path.resolve(item.root));
+    const requested = (projectRoot ?? "").trim();
+    const requestedNormalized = requested !== "" ? path.resolve(requested) : "";
+    const requestedIsWorkspace = requestedNormalized !== "" && workspaceRoots.includes(requestedNormalized);
+    let targetRoot = personalRoot;
+    if (workspaceId !== undefined) {
+      const workspace = this.settings.workspaces.find((item) => item.id === workspaceId);
+      if (!workspace) {
+        throw new ApiError(404, `工作空间 ${workspaceId} 不存在或未配置`);
+      }
+      targetRoot = path.resolve(workspace.root);
+    } else if (requestedIsWorkspace) {
+      targetRoot = requestedNormalized;
+    } else if (!this.settings.personalOnly && this.settings.workspaces.length > 0 && sessionId === undefined) {
+      throw new ApiError(
+        403,
+        "会话目录必须在已配置的工作空间（web.workspaces）内：请从前端空间切换器选择或传入 workspaceId"
+      );
+    }
+
+    // 牢笼校验：workspace 绑定路径（显式 workspaceId 或 projectRoot 命中空间根，
+    // 均为启动期校验过的可信目录）按落点自身牢笼解析（消解 symlink 与等价写法）；
+    // personalOnly 缺省路径按个人区牢笼（与既有行为逐字一致）；
+    // 共享模式未绑定空间走 allowRoots 白名单旧路径（恢复历史等场景零回归）。
     // 必须先于旧历史迁移计算：恢复路径 = realpath 归一后的 resolvedRoot
     //（Mac 上 /var→/private/var 等符号链接形态），迁移的目标 projectCode、
     // 注册表改写值必须与之一致，否则数据迁入「影子目录」——迁移显示
     // 成功但 getSession 按归一形态找不到索引（404）。
-    const resolvedRoot = this.settings.personalOnly
-      ? await resolveInJail(await buildJailRoots([personalRoot]), personalRoot)
-      : await resolveInJail(this.jailRoots, projectRoot);
+    const workspaceBound = workspaceId !== undefined || requestedIsWorkspace;
+    const resolvedRoot = workspaceBound
+      ? await resolveInJail(await buildJailRoots([targetRoot]), targetRoot)
+      : this.settings.personalOnly
+        ? await resolveInJail(await buildJailRoots([personalRoot]), personalRoot)
+        : await resolveInJail(this.jailRoots, projectRoot);
 
     // W6 旧历史迁移 + 恢复防御（docs/dev/web-workspace.md 补充需求）：
     // personalOnly 模式下，恢复目标在本人注册表中的 projectRoot 落在个人区之外
@@ -527,11 +598,21 @@ export class SessionPool {
     }
 
     if (this.settings.personalOnly && !legacyMigrated) {
-      // W3：显式传入 projectRoot 时只接受本人个人区（明确 403，不静默改写）；
-      // 归一后比较，允许尾斜杠 / 相对等价写法等表达同一目录
-      const requested = (projectRoot ?? "").trim();
-      if (requested !== "" && path.resolve(requested) !== personalRoot) {
-        throw new ApiError(403, "个人工作目录模式：会话只能在你的个人工作区内创建，无法访问其他目录");
+      // W3：显式传入 projectRoot 时只接受本人个人区或已配置工作空间
+      //（明确 403，不静默改写）；归一后比较，允许尾斜杠 / 相对等价写法等
+      // 表达同一目录。workspaceId 指定时落点已经校验（404/启动期牢笼），此处跳过。
+      if (workspaceId === undefined) {
+        const requestedRoot = requested;
+        if (requestedRoot !== "") {
+          const normalizedRequest = path.resolve(requestedRoot);
+          const allowed = normalizedRequest === personalRoot || workspaceRoots.includes(normalizedRequest);
+          if (!allowed) {
+            throw new ApiError(
+              403,
+              "个人工作目录模式：会话只能在你的个人工作区或已配置的工作空间内创建，无法访问其他目录"
+            );
+          }
+        }
       }
     }
 
@@ -1222,6 +1303,11 @@ export class SessionPool {
     // App.tsx handlePrompt finally 的 F9-v2 EAG 纯文本注入通道）：done 帧已推送、
     // 注册表已回写之后触发，异步 fire-and-forget——自动执行回合绝不阻塞本轮收敛。
     this.scheduleAutoExecuteSuggestion(chat, session);
+
+    // 沉淀建议分析（ARCH-20261027 T04，对齐 CLI App.tsx 轮次结束触发）：
+    // 每 N 个 assistant 轮次（N = settings sedimentation.everyNTurns，默认 6），
+    // 异步 fire-and-forget，产出建议经 SSE sedimentation_suggestion 推送。
+    this.scheduleSedimentationAnalysis(chat);
   }
 
   /**
@@ -1345,6 +1431,241 @@ export class SessionPool {
     // 复用 runTurn：权限/异常/done 帧/注册表回写/自动再扫描（守卫已置位不会二次注入）
     // 全部语义与用户消息轮次一致
     await this.runTurn(chat, { text: commandText });
+  }
+
+  // ============================================================================
+  // 沉淀建议（ARCH-20261027 T04：轮次结束触发分析 → SSE 推送 → confirm/dismiss）
+  // ============================================================================
+
+  /**
+   * 构造沉淀日志载体（结构化事件经 console.debug 留痕，与 eag-assembly 同风格；
+   * 只记指纹/名称等非 PII 字段——事件由 core 产出，本层不加工）。
+   */
+  private readonly sedimentLog = (event: Record<string, unknown>): void => {
+    console.debug(`[sedimentation] ${JSON.stringify(event)}`);
+  };
+
+  /**
+   * 取得沉淀建议器（懒构建，每池一份；ARCH-20261027 T04）。
+   *
+   * 装配来源与 CLI App.tsx 同构（core 单一能力源）：
+   * - 测试注入 sedimentationSuggester 时直接返回受控实例；
+   * - 未注入时经 createLLMClient 缝合点同源工厂构建（无凭据返回 null，
+   *   建议器内部静默降级）。
+   * 构建失败缓存 null（fail-safe，不再重试），返回 null 时调用方跳过分析。
+   *
+   * @returns 建议器实例；不可用时为 null
+   */
+  private getSedimentationSuggester(): SedimentationSuggester | null {
+    if (this.injectedSedimentationSuggester) {
+      return this.injectedSedimentationSuggester;
+    }
+    if (!this.sedimentationEnabled) {
+      return null;
+    }
+    if (this.sedimentationSuggesterCache !== undefined) {
+      return this.sedimentationSuggesterCache;
+    }
+    try {
+      const suggester = new SedimentationSuggester({
+        createLLMClient: async () => {
+          // 与池内会话 LLM 通道同源（见 getEagAssembly 头注释的 Web 牢笼纪律：
+          // ignoreProjectSettings 解析，个人区项目级配置绝不作为凭据来源）
+          if (this.createLLMClient) {
+            return this.createLLMClient();
+          }
+          const settings = resolveCurrentSettings(this.settings.projectRoot, { ignoreProjectSettings: true });
+          if (!settings.apiKey) {
+            return null;
+          }
+          return ProviderFactory.create(settings);
+        },
+        log: this.sedimentLog,
+      });
+      this.sedimentationSuggesterCache = suggester;
+      return suggester;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[session-pool] 沉淀建议器装配失败，沉淀能力降级关闭：${message}`);
+      this.sedimentationSuggesterCache = null;
+      return null;
+    }
+  }
+
+  /**
+   * 轮次收敛后的沉淀分析调度（runTurn 末尾调用，fire-and-forget）。
+   *
+   * 节流规则（对齐 CLI App.tsx）：每 N 个 assistant 轮次触发一次，
+   * N = 会话 settings 的 sedimentation.everyNTurns（归一缺省 6）。
+   * 任一前提不满足（开关关闭 / 无底层会话 / 建议器不可用）静默返回；
+   * 分析全程 fail-safe：异常仅留痕，绝不影响会话。
+   *
+   * @param chat 收敛完成的聊天
+   */
+  private scheduleSedimentationAnalysis(chat: ChatSession): void {
+    if (!this.sedimentationEnabled || !chat.sessionId) {
+      return;
+    }
+    const suggester = this.getSedimentationSuggester();
+    if (!suggester) {
+      return;
+    }
+    // 轮次节流（与 CLI 同口径：settings sedimentation.everyNTurns，非法/缺省回 6）
+    const counter = (this.sedimentTurnCounters.get(chat.chatId) ?? 0) + 1;
+    this.sedimentTurnCounters.set(chat.chatId, counter);
+    let everyNTurns = 6;
+    try {
+      everyNTurns =
+        resolveCurrentSettings(chat.projectRoot, {
+          ignoreProjectSettings: this.settings.personalOnly,
+        }).sedimentation?.everyNTurns ?? 6;
+    } catch {
+      // settings 解析失败（目录不可读等）按默认节流继续
+    }
+    if (counter % everyNTurns !== 0) {
+      return;
+    }
+    // fire-and-forget：分析绝不阻塞轮次收敛（analyzeAndPublish 内部全 catch）
+    void this.analyzeAndPublish(chat, suggester).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[session-pool] 沉淀分析调度逃逸异常（chatId=${chat.chatId}）：${message}`);
+    });
+  }
+
+  /**
+   * 分析并发布建议（私有实现：调度与公开 runSedimentationAnalysis 共用）。
+   *
+   * @param chat 目标聊天
+   * @param suggester 沉淀建议器
+   * @returns 本轮产出的建议列表（无产出为空数组）
+   */
+  private async analyzeAndPublish(
+    chat: ChatSession,
+    suggester: SedimentationSuggester
+  ): Promise<SedimentationSuggestion[]> {
+    if (!chat.sessionId) {
+      return [];
+    }
+    const sessionId = chat.sessionId;
+    const transcript = chat.manager.listSessionMessages(sessionId);
+    // 与 CLI 同口径：纯系统/空会话不分析
+    if (!transcript.some((message) => message.role === "assistant")) {
+      return [];
+    }
+    const suggestions = await suggester.analyze(sessionId, transcript);
+    if (suggestions.length === 0) {
+      return [];
+    }
+    const store = this.pendingSuggestions.get(chat.chatId) ?? new Map<string, SedimentationSuggestion>();
+    for (const suggestion of suggestions) {
+      store.set(suggestion.id, suggestion);
+    }
+    this.pendingSuggestions.set(chat.chatId, store);
+    // SSE 推送（前端建议卡片数据源；SSE 断连场景由 GET 端点兜底拉取）
+    this.hub.publish(chat.chatId, "sedimentation_suggestion", { chatId: chat.chatId, suggestions });
+    return suggestions;
+  }
+
+  /**
+   * 执行一次沉淀分析（公开方法：测试与运维触发用；轮次路径走 scheduleSedimentationAnalysis）。
+   *
+   * 流程：读取会话消息全文 → suggester.analyze（core，失败安全返回空数组）→
+   * 非空建议写入待处置集合并经 SSE sedimentation_suggestion 推送。
+   *
+   * @param chatId Web 会话 id
+   * @param ctx 认证上下文（归属校验）
+   * @returns 本轮产出的建议列表（无产出为空数组）
+   * @throws ApiError 404 会话不存在或不属于当前用户；409 尚无底层会话（未发过消息）
+   */
+  async runSedimentationAnalysis(chatId: string, ctx: AuthContext): Promise<SedimentationSuggestion[]> {
+    const suggester = this.getSedimentationSuggester();
+    if (!suggester) {
+      return [];
+    }
+    const chat = this.getOwnedChat(chatId, ctx);
+    if (!chat.sessionId) {
+      throw new ApiError(409, "会话尚未产生底层会话（未发送过消息），无法执行沉淀分析");
+    }
+    return this.analyzeAndPublish(chat, suggester);
+  }
+
+  /**
+   * 读取会话待处置沉淀建议（GET 端点用；刷新恢复数据源）。
+   *
+   * @param chatId Web 会话 id
+   * @param ctx 认证上下文（归属校验）
+   * @returns 待处置建议列表（无则空数组）
+   * @throws ApiError 404 会话不存在或不属于当前用户
+   */
+  getSedimentationSuggestions(chatId: string, ctx: AuthContext): SedimentationSuggestion[] {
+    this.getOwnedChat(chatId, ctx);
+    return [...(this.pendingSuggestions.get(chatId)?.values() ?? [])];
+  }
+
+  /**
+   * 确认沉淀建议并落盘（POST confirm 端点用）。
+   *
+   * 落盘经 core SedimentationWriter 五条安全门槛（白名单字段/kebab/路径牢笼/
+   * 同名拒写/io 降级），scope=user 落 ~/.deepcode/skills、scope=project 落
+   * <会话 projectRoot>/.deepcode/skills。ok:true 时建议移出待处置集合；
+   * ok:false 时建议保留（用户可修正后重试）。
+   *
+   * @param chatId Web 会话 id
+   * @param ctx 认证上下文（归属校验）
+   * @param suggestionId 待处置建议 id
+   * @param scope 落盘范围（user | project）
+   * @returns WriteResult（结构化成败与拒绝原因）
+   * @throws ApiError 404 会话不存在 / 建议不存在或已处置
+   */
+  async confirmSedimentation(
+    chatId: string,
+    ctx: AuthContext,
+    suggestionId: string,
+    scope: SedimentationScope
+  ): Promise<WriteResult> {
+    const chat = this.getOwnedChat(chatId, ctx);
+    const store = this.pendingSuggestions.get(chatId);
+    const suggestion = store?.get(suggestionId);
+    if (!suggestion) {
+      throw new ApiError(404, "沉淀建议不存在或已处置");
+    }
+    // Writer 无状态，按会话 projectRoot 现用现建（scope=project 的牢笼根）
+    const writer = new SedimentationWriter({ projectRoot: chat.projectRoot, log: this.sedimentLog });
+    const result = await writer.write(suggestion.draft, scope);
+    if (result.ok && store) {
+      store.delete(suggestionId);
+    }
+    return result;
+  }
+
+  /**
+   * 忽略沉淀建议（POST dismiss 端点用）。
+   *
+   * 建议移出待处置集合，并向建议器回执指纹（同指纹本会话不再建议，
+   * 与 CLI /sediment-dismiss 语义一致）。
+   *
+   * @param chatId Web 会话 id
+   * @param ctx 认证上下文（归属校验）
+   * @param suggestionId 待处置建议 id
+   * @throws ApiError 404 会话不存在 / 建议不存在或已处置
+   */
+  dismissSedimentation(chatId: string, ctx: AuthContext, suggestionId: string): void {
+    const chat = this.getOwnedChat(chatId, ctx);
+    const store = this.pendingSuggestions.get(chatId);
+    const suggestion = store?.get(suggestionId);
+    if (!suggestion) {
+      throw new ApiError(404, "沉淀建议不存在或已处置");
+    }
+    store?.delete(suggestionId);
+    if (chat.sessionId) {
+      // 回执指纹（建议器可能未装配/已降级——回执失败不影响建议移除）
+      try {
+        this.getSedimentationSuggester()?.dismiss(chat.sessionId, suggestion.fingerprint);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`[session-pool] 沉淀建议 dismiss 回执失败（chatId=${chatId}）：${message}`);
+      }
+    }
   }
 
   /**
@@ -1551,10 +1872,14 @@ export class SessionPool {
    * 磁盘历史不再扫描 sessions-index.json（无归属者信息，全量忽略），
    * 仅取该用户注册表（chat-registry）。
    *
+   * 工作空间过滤（ARCH-20261027 T04）：传入 workspaceRoot 时仅返回
+   * projectRoot 位于该空间根内（含相等）的会话——前端空间切换器按空间过滤列表。
+   *
    * @param ctx 认证上下文（决定可见集合）
+   * @param workspaceRoot 可选：工作空间根目录（传入时按前缀包含过滤）
    * @returns 会话摘要列表
    */
-  listChats(ctx: AuthContext): ChatSummary[] {
+  listChats(ctx: AuthContext, workspaceRoot?: string): ChatSummary[] {
     /** sessionId/chatId → 摘要 */
     const merged = new Map<string, ChatSummary>();
 
@@ -1599,9 +1924,18 @@ export class SessionPool {
     }
 
     // 3. updateTime 降序
-    return [...merged.values()].sort((a, b) =>
+    const sorted = [...merged.values()].sort((a, b) =>
       a.updateTime < b.updateTime ? 1 : a.updateTime > b.updateTime ? -1 : 0
     );
+    // 4. 工作空间过滤（ARCH-20261027 T04）：projectRoot 位于空间根内（含相等）才保留
+    if (workspaceRoot !== undefined) {
+      const root = path.resolve(workspaceRoot);
+      return sorted.filter((chat) => {
+        const chatRoot = path.resolve(chat.projectRoot);
+        return chatRoot === root || chatRoot.startsWith(root + path.sep);
+      });
+    }
+    return sorted;
   }
 
   /**
@@ -1642,6 +1976,10 @@ export class SessionPool {
     this.chats.clear();
     // 池级建议器自动执行守卫随会话池一同清算（chatId 为一次性 UUID，防跨重启残留）
     this.autoExecutedCommands.clear();
+    // 沉淀建议状态清算（ARCH-20261027 T04）：待处置建议与节流计数均为池内内存态，
+    // chatId 一次性 UUID，跨重启无意义
+    this.pendingSuggestions.clear();
+    this.sedimentTurnCounters.clear();
   }
 }
 

@@ -5,7 +5,25 @@
  * ResolvedWebSettings 由 src/config.ts 的 resolveWebSettings 产出。
  */
 
-import type { PermissionMode, SessionStatus, WebLocalUserSettings } from "@vegamo/deepcode-core";
+import type {
+  PermissionMode,
+  SessionStatus,
+  SedimentationSuggestion,
+  WebLocalUserSettings,
+} from "@vegamo/deepcode-core";
+
+/**
+ * 多工作空间条目（web.workspaces 解析归一产物，ARCH-20261027 T04）。
+ * root 已做 ~ 展开 + path.resolve；牢笼包含关系在 config 启动期校验通过。
+ */
+export type WorkspaceConfig = {
+  /** 空间标识（kebab-case，唯一；createChat workspaceId 参数与前端切换器使用） */
+  id: string;
+  /** 展示名（非空） */
+  name: string;
+  /** 空间根目录（已展开归一的绝对路径） */
+  root: string;
+};
 
 /**
  * Web 配置解析产物（全部默认值已归一、路径已展开）。
@@ -63,6 +81,12 @@ export type ResolvedWebSettings = {
    * 注入 SessionManager.permissionModeOverride，与 CLI --permission-mode 同通道。
    */
   approvalMode: PermissionMode;
+  /**
+   * 多工作空间列表（ARCH-20261027 T04，默认空数组 = 不启用工作空间语义）。
+   * personalOnly=true 时 createChat 在个人区之外接受这些个人区内共享空间；
+   * personalOnly=false 且列表非空时，新建会话的 projectRoot 必须命中其中一项。
+   */
+  workspaces: WorkspaceConfig[];
   /** 认证配置（已归一） */
   auth: {
     /** JWT 签名密钥（启动 fail-fast 保证非空） */
@@ -246,6 +270,8 @@ export type DoneEvent = {
  *   多订阅者与 SSE 重连场景实时可见，docs/dev/web-steering.md W3/W4a）
  * - tool_progress：工具执行进度（来自 onSessionEntryUpdated 的通用状态流，保留扩展点）
  * - permission_request：引擎请求权限审批（askPermissions 明细）
+ * - sedimentation_suggestion：沉淀建议（ARCH-20261027 T04，轮次分析产出，
+ *   载荷见 SedimentationSuggestionEvent；前端渲染建议卡片）
  * - status：会话状态变化（快照载荷含 pendingTurns/turnActive，docs/dev/web-steering.md W1③）
  * - done：本轮 handleUserPrompt 结束
  */
@@ -255,8 +281,21 @@ export type SseEventName =
   | "user_message"
   | "tool_progress"
   | "permission_request"
+  | "sedimentation_suggestion"
   | "status"
   | "done";
+
+/**
+ * SSE sedimentation_suggestion 事件载荷（ARCH-20261027 T04）。
+ *
+ * 轮次收敛后的沉淀分析产出非空建议时推送一次；
+ * 建议明细同时可经 GET /api/sedimentation/suggestions 拉取（刷新恢复）。
+ */
+export type SedimentationSuggestionEvent = {
+  chatId: string;
+  /** 本轮分析产出的全部建议（SedimentationSuggestion，core 类型） */
+  suggestions: SedimentationSuggestion[];
+};
 
 /**
  * SSE user_message 事件载荷（docs/dev/web-steering.md W3/W4a）。

@@ -271,6 +271,9 @@ export function createResolvedSettings(overrides: Partial<ResolvedWebSettings> =
     // 默认回退旧共享模式：既有集成测试基于 allowRoots 共享浏览假设，
     // 个人工作目录模式用例显式覆盖 personalOnly=true
     personalOnly: false,
+    // 多工作空间（ARCH-20261027 T04）：默认空 = 不启用工作空间语义（旧行为零回归）；
+    // 工作空间用例经 overrides 显式注入
+    workspaces: [],
     // 补充指令（steering）默认开启（与 resolveWebSettings 归一一致）；
     // 关闭场景（分类回退排队）由用例经 overrides 显式置 false
     steeringEnabled: true,

@@ -31,6 +31,12 @@ import {
   handleStream,
 } from "./api/chat-api";
 import { handleDownloadFile, handleListFiles, handlePreviewFile, handleUploadFile } from "./api/files-api";
+import { handleListWorkspaces } from "./api/workspace-api";
+import {
+  handleConfirmSedimentation,
+  handleDismissSedimentation,
+  handleGetSedimentationSuggestions,
+} from "./api/sedimentation-api";
 import { SessionPool, type SessionPoolOptions } from "./session-pool";
 import type { PublicWebConfig, ResolvedWebSettings } from "./types";
 
@@ -271,6 +277,9 @@ export async function startWebServer(
     // §2.1 EA-03a）：此前透传缺失导致 failclosed 测试服务器实际仍注入编排器，
     // fail-closed 基线不可达。生产不传 = 缺省 true，行为零变化。
     ...(opts.eagEnabled !== undefined ? { eagEnabled: opts.eagEnabled } : {}),
+    // 沉淀建议装配透传（ARCH-20261027 T04 测试缝合点：开关 + 受控建议器注入）
+    ...(opts.sedimentationEnabled !== undefined ? { sedimentationEnabled: opts.sedimentationEnabled } : {}),
+    ...(opts.sedimentationSuggester ? { sedimentationSuggester: opts.sedimentationSuggester } : {}),
   });
   const staticDir = opts.staticDir ?? defaultStaticDir();
   /** 实际监听端口（listen(0) 时为随机分配端口；handleRequest 内静态页展示用） */
@@ -396,11 +405,32 @@ export async function startWebServer(
         return;
       }
       if (pathname === "/api/chats" && req.method === "GET") {
-        handleListChats(res, pool, ctx);
+        // 工作空间过滤（ARCH-20261027 T04）：?workspaceId= 按空间根过滤会话列表
+        await handleListChats(res, pool, ctx, resolved, url.searchParams.get("workspaceId"));
         return;
       }
       if (pathname === "/api/chats" && req.method === "POST") {
         await handleCreateChat(req, res, pool, ctx, resolved);
+        return;
+      }
+
+      // 工作空间列表（ARCH-20261027 T04）：前端空间切换器数据源
+      if (pathname === "/api/workspaces" && req.method === "GET") {
+        await handleListWorkspaces(res, resolved, ctx);
+        return;
+      }
+
+      // 沉淀建议端点（ARCH-20261027 T04）：拉取 / 确认落盘 / 忽略
+      if (pathname === "/api/sedimentation/suggestions" && req.method === "GET") {
+        handleGetSedimentationSuggestions(res, pool, url.searchParams.get("chatId"), ctx);
+        return;
+      }
+      if (pathname === "/api/sedimentation/confirm" && req.method === "POST") {
+        await handleConfirmSedimentation(req, res, pool, ctx);
+        return;
+      }
+      if (pathname === "/api/sedimentation/dismiss" && req.method === "POST") {
+        await handleDismissSedimentation(req, res, pool, ctx);
         return;
       }
 
