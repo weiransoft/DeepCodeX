@@ -7,12 +7,16 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  confirmSedimentation,
   createChat,
+  dismissSedimentation,
   fetchConfig,
   fetchMe,
   fetchMessages,
+  fetchSedimentationSuggestions,
   interruptChat,
   listChats,
+  listWorkspaces,
   logout as apiLogout,
   sendPermissionDecisions,
   sendMessageWithFiles,
@@ -24,8 +28,9 @@ import {
   type SendPermissionsPayload,
   type SendMessageResult,
   type UserInfo,
+  type WorkspaceInfo,
 } from "./api";
-import type { ChatEntry, UserAttachment } from "./chat-model";
+import type { ChatEntry, SedimentationSuggestion, UserAttachment } from "./chat-model";
 import { extractPlanFromToolContent, parseBackgroundTaskNotice, parseLeadingJsonBlock } from "./chat-model";
 import type { PermissionDecisionChoice } from "./components/PermissionCard";
 import { ChatPane } from "./components/ChatPane";
@@ -38,6 +43,7 @@ import {
   type DoneEvent,
   type LlmDeltaEvent,
   type PermissionRequestEvent,
+  type SedimentationSuggestionEvent,
   type StatusEvent,
   type ToolProgressEvent,
   type AssistantMessageEvent,
@@ -62,8 +68,22 @@ export function App() {
   const [creatingChat, setCreatingChat] = useState(false);
   /** 自动新建标记：登录后会话列表为空时置位，projectRoot 就绪后自动创建首个对话 */
   const [autoCreatePending, setAutoCreatePending] = useState(false);
-  /** 新建对话选用的项目根（默认第一个白名单根） */
+  /** 新建对话选用的项目根（默认第一个白名单根；配置工作空间后由空间切换器接管落点） */
   const [projectRoot, setProjectRoot] = useState("");
+  /**
+   * 工作空间（ARCH-20261027 T05）：可用空间列表与当前选中 id。
+   * 空列表 = 服务端未配置空间（旧部署），回退项目根选择行为零回归。
+   */
+  const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
+  const [workspaceId, setWorkspaceId] = useState("");
+
+  // ---------- 沉淀建议（ARCH-20261027 T05） ----------
+  /** 待处置建议：chatId → 建议列表（SSE 推送与 GET 拉取两路径同源归并） */
+  const [sedimentByChat, setSedimentByChat] = useState<Record<string, SedimentationSuggestion[]>>({});
+  /** 已确认落盘：建议 id → 落盘路径（「已沉淀 → 路径」只读态展示） */
+  const [sedimentResolved, setSedimentResolved] = useState<Record<string, string>>({});
+  /** 沉淀确认/忽略提交中的建议 id 集合（防连点） */
+  const [sedimentSubmittingIds, setSedimentSubmittingIds] = useState<Set<string>>(new Set());
 
   // ---------- 布局与交互 ----------
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -130,6 +150,11 @@ export function App() {
     setEntries([]);
     applyStreaming(false);
     streamRef.current?.close();
+    // 工作空间与沉淀建议状态随登录态一并清算（重新登录后重新拉取）
+    setWorkspaces([]);
+    setWorkspaceId("");
+    setSedimentByChat({});
+    setSedimentResolved({});
   }, [applyStreaming]);
 
   // ---------- SSE 事件归并（全部走函数式 setState，仅依赖稳定引用） ----------
@@ -344,6 +369,24 @@ export function App() {
   }, []);
 
   /**
+   * sedimentation_suggestion：沉淀建议推送（ARCH-20261027 T05）。
+   * 同会话覆盖式归并（每次分析产出即该会话当前最新待处置集合——服务端
+   * confirm/dismiss 后集合只减不增，SSE 帧携带的是增量产出）；
+   * 非 activeChat 的会话同样缓存（切换会话时卡片即时可见）。
+   */
+  const onSedimentationSuggestion = useCallback((e: SedimentationSuggestionEvent): void => {
+    setSedimentByChat((prev) => {
+      const existing = prev[e.chatId] ?? [];
+      // 按 id 去重合并：SSE 帧为最新增量产出，同 id 覆盖
+      const merged = new Map(existing.map((s) => [s.id, s]));
+      for (const s of e.suggestions ?? []) {
+        merged.set(s.id, s);
+      }
+      return { ...prev, [e.chatId]: [...merged.values()] };
+    });
+  }, []);
+
+  /**
    * status：运行状态同步（后端 SessionStatus 语义：processing = 执行中）；askPermissions 兜底建卡。
    * steering F1：快照载荷带 pendingTurns（W1③）——仅 processing 才置位
    * 「生成中」；非 processing（含审批等待 ask_permission）时，仅当快照明示仍有
@@ -409,6 +452,7 @@ export function App() {
     onUserMessage,
     onToolProgress,
     onPermissionRequest,
+    onSedimentationSuggestion,
     onStatus,
     onDone,
     onConnectionError,
@@ -420,6 +464,7 @@ export function App() {
     onUserMessage,
     onToolProgress,
     onPermissionRequest,
+    onSedimentationSuggestion,
     onStatus,
     onDone,
     onConnectionError,
@@ -443,6 +488,9 @@ export function App() {
       },
       get onPermissionRequest() {
         return sseCallbacksRef.current.onPermissionRequest;
+      },
+      get onSedimentationSuggestion() {
+        return sseCallbacksRef.current.onSedimentationSuggestion;
       },
       get onStatus() {
         return sseCallbacksRef.current.onStatus;
@@ -567,6 +615,14 @@ export function App() {
           }
           showToast(e instanceof Error ? e.message : "历史消息加载失败");
         });
+      // 沉淀建议hydrate（ARCH-20261027 T05）：SSE 断连窗口内产出的建议经
+      // GET 端点兜底拉取；失败静默（卡片随下次 SSE 帧自然出现）
+      fetchSedimentationSuggestions(chatId)
+        .then(({ suggestions }) => {
+          if (activeChatIdRef.current !== chatId) return;
+          setSedimentByChat((prev) => ({ ...prev, [chatId]: suggestions }));
+        })
+        .catch(() => undefined);
     },
     [applyStreaming, convertHistory, ensureStream, handleUnauthorized, showToast]
   );
@@ -637,7 +693,10 @@ export function App() {
         return null;
       }
       try {
-        const { chatId } = await createChat(root);
+        // 工作空间（ARCH-20261027 T05）：选中了可用空间时以 workspaceId 指定落点
+        //（服务端以其 root 为准，projectRoot 忽略）；未配置空间回退 projectRoot 旧语义
+        const useWorkspace = workspaceId !== "" && workspaces.some((w) => w.id === workspaceId);
+        const { chatId } = await createChat(root, undefined, useWorkspace ? workspaceId : undefined);
         const now = new Date().toISOString();
         // POST /api/chats 仅返回 {chatId, sessionId}；列表项按后端契约本地补全
         // （status 用引擎合法状态 pending；sessionId 在首个消息发出前为 null）
@@ -676,7 +735,7 @@ export function App() {
         return null;
       }
     },
-    [applyStreaming, config, ensureStream, handleUnauthorized, showToast]
+    [applyStreaming, config, ensureStream, handleUnauthorized, showToast, workspaceId, workspaces]
   );
 
   /** 新建对话（侧栏按钮入口；复用 createNewChat，创建中标记防重入） */
@@ -857,6 +916,73 @@ export function App() {
       .finally(() => handleUnauthorized());
   }, [handleUnauthorized]);
 
+  /**
+   * 确认沉淀建议（ARCH-20261027 T05）：POST confirm → ok:true 时卡片转
+   * 「已沉淀 → 路径」只读态；ok:false 时 toast 服务端中文原因（建议保留可重试）。
+   */
+  const confirmSediment = useCallback(
+    (suggestionId: string, scope: "user" | "project"): void => {
+      const chatId = activeChatIdRef.current;
+      if (chatId === null) return;
+      setSedimentSubmittingIds((prev) => new Set(prev).add(suggestionId));
+      confirmSedimentation(chatId, suggestionId, scope)
+        .then((result) => {
+          if (result.ok) {
+            setSedimentResolved((prev) => ({ ...prev, [suggestionId]: result.path ?? "" }));
+            showToast(`已沉淀 → ${result.path ?? ""}`);
+          } else {
+            showToast(`沉淀失败：${result.message ?? result.reason ?? "未知原因"}`);
+          }
+        })
+        .catch((e: unknown) => {
+          if (e instanceof ApiError && e.status === 401) {
+            handleUnauthorized();
+            return;
+          }
+          showToast(e instanceof Error ? e.message : "沉淀确认失败");
+        })
+        .finally(() => {
+          setSedimentSubmittingIds((prev) => {
+            const next = new Set(prev);
+            next.delete(suggestionId);
+            return next;
+          });
+        });
+    },
+    [handleUnauthorized, showToast]
+  );
+
+  /** 忽略沉淀建议（ARCH-20261027 T05）：204 后移出待处置集合（服务端已回执指纹） */
+  const dismissSediment = useCallback(
+    (suggestionId: string): void => {
+      const chatId = activeChatIdRef.current;
+      if (chatId === null) return;
+      setSedimentSubmittingIds((prev) => new Set(prev).add(suggestionId));
+      dismissSedimentation(chatId, suggestionId)
+        .then(() => {
+          setSedimentByChat((prev) => ({
+            ...prev,
+            [chatId]: (prev[chatId] ?? []).filter((s) => s.id !== suggestionId),
+          }));
+        })
+        .catch((e: unknown) => {
+          if (e instanceof ApiError && e.status === 401) {
+            handleUnauthorized();
+            return;
+          }
+          showToast(e instanceof Error ? e.message : "沉淀建议忽略失败");
+        })
+        .finally(() => {
+          setSedimentSubmittingIds((prev) => {
+            const next = new Set(prev);
+            next.delete(suggestionId);
+            return next;
+          });
+        });
+    },
+    [handleUnauthorized, showToast]
+  );
+
   /** 文件抽屉：作为附件插入对话 */
   const insertAttachment = useCallback((path: string, isImage: boolean): void => {
     setServerFiles((prev) =>
@@ -880,7 +1006,7 @@ export function App() {
       });
   }, []);
 
-  // authed 后拉取配置与会话列表
+  // authed 后拉取配置与可用工作空间
   useEffect(() => {
     if (authState !== "authed") return;
     fetchConfig()
@@ -902,7 +1028,31 @@ export function App() {
         }
         showToast(e instanceof Error ? e.message : "配置加载失败");
       });
-    listChats()
+    // 工作空间列表（ARCH-20261027 T05）：404（旧后端未提供该端点）静默降级为
+    // 空列表——侧栏回退项目根选择行为，绝不为旧部署制造错误提示
+    listWorkspaces()
+      .then(({ workspaces: list }) => {
+        setWorkspaces(list);
+        // 选中值兜底：当前选择失效时回退首项（personalOnly 模式首项恒为个人区）
+        setWorkspaceId((cur) => (cur !== "" && list.some((w) => w.id === cur) ? cur : (list[0]?.id ?? "")));
+      })
+      .catch((e: unknown) => {
+        if (e instanceof ApiError && e.status === 401) {
+          handleUnauthorized();
+          return;
+        }
+        if (e instanceof ApiError && e.status === 404) {
+          setWorkspaces([]);
+          return;
+        }
+        showToast(e instanceof Error ? e.message : "工作空间列表加载失败");
+      });
+  }, [authState, handleUnauthorized, showToast]);
+
+  // 会话列表（登录后 + 工作空间切换时重拉；?workspaceId= 由服务端按空间过滤）
+  useEffect(() => {
+    if (authState !== "authed") return;
+    listChats(workspaceId === "" ? undefined : workspaceId)
       .then(({ chats: list }) => {
         setChats(list);
         // 空列表标记：登录后没有任何对话时自动新建首个对话（等待 projectRoot 就绪后由下方 effect 执行）
@@ -917,7 +1067,7 @@ export function App() {
         }
         showToast(e instanceof Error ? e.message : "会话列表加载失败");
       });
-  }, [authState, handleUnauthorized, showToast]);
+  }, [authState, workspaceId, handleUnauthorized, showToast]);
 
   // 自动新建首个对话：仅当会话列表为空（autoCreatePending）且用户从未主动
   // 发送过消息时触发一次——输入框现在无会话也可直接输入（首条消息自动建会话），
@@ -983,12 +1133,15 @@ export function App() {
         user={user}
         allowRoots={config?.allowRoots ?? []}
         projectRoot={projectRoot}
+        workspaces={workspaces}
+        workspaceId={workspaceId}
         creating={creatingChat}
         version={config?.version ?? ""}
         onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
         onSelectChat={selectChat}
         onNewChat={newChat}
         onProjectRootChange={setProjectRoot}
+        onWorkspaceChange={setWorkspaceId}
         onLogout={logout}
       />
 
@@ -1002,6 +1155,11 @@ export function App() {
           onStop={stop}
           onOpenFileDrawer={() => setFileDrawerOpen(true)}
           submittingPermIds={submittingPermIds}
+          sedimentSuggestions={activeChatId !== null ? (sedimentByChat[activeChatId] ?? []) : []}
+          sedimentResolvedPaths={sedimentResolved}
+          sedimentSubmittingIds={sedimentSubmittingIds}
+          onSedimentationConfirm={confirmSediment}
+          onSedimentationDismiss={dismissSediment}
         />
         {/* 输入框永不禁用：无选中会话时发送将自动新建会话承载首条消息 */}
         <Composer

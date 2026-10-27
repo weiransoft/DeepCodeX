@@ -9,6 +9,8 @@
  *   multipart 边界，绝不手动设置 Content-Type。
  */
 
+import type { SedimentationSuggestion } from "./chat-model";
+
 /** 权限决策（审批回注） */
 export interface PermissionDecision {
   /** 工具调用 id（来自 permission_request 事件） */
@@ -285,9 +287,10 @@ export function fetchConfig(): Promise<AppConfig> {
   return request<AppConfig>("GET", "/api/config");
 }
 
-/** 会话列表 */
-export function listChats(): Promise<{ chats: ChatSummary[] }> {
-  return request<{ chats: ChatSummary[] }>("GET", "/api/chats");
+/** 会话列表（可按工作空间过滤，ARCH-20261027 T05） */
+export function listChats(workspaceId?: string): Promise<{ chats: ChatSummary[] }> {
+  const q = workspaceId !== undefined && workspaceId !== "" ? `?workspaceId=${encodeURIComponent(workspaceId)}` : "";
+  return request<{ chats: ChatSummary[] }>(`GET`, `/api/chats${q}`);
 }
 
 /**
@@ -295,10 +298,74 @@ export function listChats(): Promise<{ chats: ChatSummary[] }> {
  *
  * - 共享模式（personalOnly=false）：projectRoot 必须位于 allowRoots 内，由服务端校验；
  * - 个人工作目录模式（personalOnly=true）：projectRoot 可传空串，服务端自动落到
- *   当前用户的个人工作区（docs/dev/web-workspace.md W3）。
+ *   当前用户的个人工作区（docs/dev/web-workspace.md W3）；
+ * - workspaceId（ARCH-20261027 T04/T05）：指定 web.workspaces 配置的工作空间时，
+ *   服务端以其 root 为落点（projectRoot 忽略）。
  */
-export function createChat(projectRoot: string, sessionId?: string): Promise<{ chatId: string; sessionId: string }> {
-  return request<{ chatId: string; sessionId: string }>("POST", "/api/chats", { projectRoot, sessionId });
+export function createChat(
+  projectRoot: string,
+  sessionId?: string,
+  workspaceId?: string
+): Promise<{ chatId: string; sessionId: string }> {
+  const body: Record<string, unknown> = { projectRoot, sessionId };
+  if (workspaceId !== undefined && workspaceId !== "") {
+    body["workspaceId"] = workspaceId;
+  }
+  return request<{ chatId: string; sessionId: string }>("POST", "/api/chats", body);
+}
+
+/** 工作空间条目（GET /api/workspaces，ARCH-20261027 T04/T05） */
+export interface WorkspaceInfo {
+  /** 空间标识：个人区固定为 "personal"，配置空间为 web.workspaces[].id */
+  id: string;
+  /** 展示名 */
+  name: string;
+  /** 空间根目录（个人区为服务端拼接的 <uploadDir>/<userId>） */
+  root: string;
+  /** 种类：personal = 本人个人区；workspace = web.workspaces 配置的共享空间 */
+  kind: "personal" | "workspace";
+}
+
+/** 当前用户可用工作空间列表（空间切换器数据源；旧后端 404 时调用方降级为空列表） */
+export function listWorkspaces(): Promise<{ workspaces: WorkspaceInfo[] }> {
+  return request<{ workspaces: WorkspaceInfo[] }>("GET", "/api/workspaces");
+}
+
+/** 沉淀建议确认落盘结果（与后端 core WriteResult 契约对齐） */
+export interface SedimentationWriteResult {
+  /** 是否落盘成功 */
+  ok: boolean;
+  /** 成功时的落盘绝对路径 */
+  path?: string;
+  /** 失败原因码（invalid-name / path-escapes-root / duplicate-name / io-error 等） */
+  reason?: string;
+  /** 失败说明（中文） */
+  message?: string;
+}
+
+/** 拉取会话待处置沉淀建议（刷新恢复数据源；SSE 断连窗口的兜底通道） */
+export function fetchSedimentationSuggestions(chatId: string): Promise<{ suggestions: SedimentationSuggestion[] }> {
+  return request<{ suggestions: SedimentationSuggestion[] }>(
+    "GET",
+    `/api/sedimentation/suggestions?chatId=${encodeURIComponent(chatId)}`
+  );
+}
+
+/**
+ * 确认沉淀建议并落盘（scope=user 落 ~/.deepcode/skills，scope=project 落
+ * 会话项目 .deepcode/skills；安全门槛由服务端执行，ok=false 时 message 为中文原因）。
+ */
+export function confirmSedimentation(
+  chatId: string,
+  suggestionId: string,
+  scope: "user" | "project"
+): Promise<SedimentationWriteResult> {
+  return request<SedimentationWriteResult>("POST", "/api/sedimentation/confirm", { chatId, suggestionId, scope });
+}
+
+/** 忽略沉淀建议（204：移出待处置集合，同指纹本会话不再建议） */
+export function dismissSedimentation(chatId: string, suggestionId: string): Promise<void> {
+  return request<void>("POST", "/api/sedimentation/dismiss", { chatId, suggestionId });
 }
 
 /** 历史消息（刷新恢复） */

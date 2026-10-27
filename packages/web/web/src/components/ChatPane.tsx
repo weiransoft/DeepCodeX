@@ -10,7 +10,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { parseMarkdownToA2ui } from "../a2ui/parser";
 import { A2uiSurface } from "../a2ui/renderer";
-import type { ChatEntry, PlanTaskItem, UserAttachment } from "../chat-model";
+import type { ChatEntry, PlanTaskItem, SedimentationSuggestion, UserAttachment } from "../chat-model";
 import {
   extractToolText,
   humanizeEngineContent,
@@ -20,6 +20,7 @@ import {
 } from "../chat-model";
 import { FolderOpenIcon, PaperclipIcon, StopIcon, WrenchIcon, BotAvatarIcon, UserAvatarIcon } from "./icons";
 import { PermissionCard, type PermissionDecisionChoice } from "./PermissionCard";
+import { SedimentationCard } from "./SedimentationCard";
 
 /** ChatPane 组件属性 */
 export interface ChatPaneProps {
@@ -37,6 +38,16 @@ export interface ChatPaneProps {
   onOpenFileDrawer: () => void;
   /** 提交中审批卡片数量（>0 时对应卡片按钮禁用） */
   submittingPermIds: Set<string>;
+  /** 当前会话待处置沉淀建议（ARCH-20261027 T05；空数组不渲染卡片区） */
+  sedimentSuggestions: SedimentationSuggestion[];
+  /** 已确认落盘的建议 id → 落盘路径（「已沉淀」只读态） */
+  sedimentResolvedPaths: Record<string, string>;
+  /** 沉淀提交中的建议 id 集合（按钮禁用防连点） */
+  sedimentSubmittingIds: Set<string>;
+  /** 确认沉淀落盘 */
+  onSedimentationConfirm: (suggestionId: string, scope: "user" | "project") => void;
+  /** 忽略沉淀建议 */
+  onSedimentationDismiss: (suggestionId: string) => void;
 }
 
 /** 工具进度状态的中文展示映射 */
@@ -284,7 +295,22 @@ export function BgTaskNotice({ entry }: { entry: Extract<ChatEntry, { kind: "bgt
 
 /** ChatPane：中间对话流 */
 export function ChatPane(props: ChatPaneProps) {
-  const { entries, streaming, chatTitle, onDecide, onStop, onOpenFileDrawer, submittingPermIds } = props;
+  const {
+    entries,
+    streaming,
+    chatTitle,
+    onDecide,
+    onStop,
+    onOpenFileDrawer,
+    submittingPermIds,
+    // 沉淀建议 props（ARCH-20261027 T05）：带默认值——未传 prop 的旧调用方
+    //（既有回归测试等）保持零改动可运行
+    sedimentSuggestions = [],
+    sedimentResolvedPaths = {},
+    sedimentSubmittingIds = new Set<string>(),
+    onSedimentationConfirm = () => undefined,
+    onSedimentationDismiss = () => undefined,
+  } = props;
   /** 滚动容器引用：自动跟随到底部 */
   const scrollRef = useRef<HTMLDivElement | null>(null);
   /** 用户是否主动上翻离开底部（此时暂停自动跟随） */
@@ -474,6 +500,16 @@ export function ChatPane(props: ChatPaneProps) {
                 return null;
             }
           })}
+
+          {/* 沉淀建议卡片区（ARCH-20261027 T05）：待处置建议渲染于消息流尾部，
+              确认/忽略交互见 SedimentationCard；空列表不渲染 */}
+          <SedimentationCard
+            suggestions={sedimentSuggestions}
+            resolvedPaths={sedimentResolvedPaths}
+            submittingIds={sedimentSubmittingIds}
+            onConfirm={onSedimentationConfirm}
+            onDismiss={onSedimentationDismiss}
+          />
 
           {/* 生成中：悬浮停止条（点击中断引擎会话） */}
           {streaming && (

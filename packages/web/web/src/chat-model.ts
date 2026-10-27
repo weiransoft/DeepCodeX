@@ -14,6 +14,38 @@ export interface UserAttachment {
   image: boolean;
 }
 
+/**
+ * 沉淀草稿（ARCH-20261027 T05，与后端 core SedimentationDraft 契约逐字对齐）：
+ * 对话中挖掘出的可复用模式，确认后经 SedimentationWriter 五条安全门槛落盘。
+ */
+export interface SedimentationDraft {
+  /** 种类：skill = 普通技能；agent = 自定义 Agent（role 必填） */
+  kind: "skill" | "agent";
+  /** kebab-case 名称（落盘目录名） */
+  name: string;
+  /** 一句话描述（frontmatter description，必填） */
+  description: string;
+  /** Agent 角色身份（kind==="agent" 时必填） */
+  role?: string;
+  /** Markdown 正文 */
+  content: string;
+}
+
+/**
+ * 沉淀建议（ARCH-20261027 T05）：
+ * SSE sedimentation_suggestion 事件项 / GET /api/sedimentation/suggestions 列表项。
+ */
+export interface SedimentationSuggestion {
+  /** 建议实例 id（confirm/dismiss 请求主键） */
+  id: string;
+  /** 内容指纹（会话内去重键；dismiss 回执携带） */
+  fingerprint: string;
+  /** 待落盘草稿 */
+  draft: SedimentationDraft;
+  /** 给用户看的建议理由（中文） */
+  rationale: string;
+}
+
 /** 对话流条目（按时间序渲染） */
 export type ChatEntry =
   /** 用户消息：乐观上屏（先展示后等待 202） */

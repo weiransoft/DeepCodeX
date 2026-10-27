@@ -4,10 +4,13 @@
  * 设计要点（设计文档 §3.5）：
  * - 每个聊天会话一条 GET /api/chats/:id/stream 连接；
  * - 事件名与载荷字段与后端契约逐字一致：
- *   llm_delta / assistant_message / tool_progress / permission_request / status / done；
+ *   llm_delta / assistant_message / tool_progress / permission_request /
+ *   sedimentation_suggestion / status / done；
  * - EventSource 自带断线自动重连；连接级错误通过 onError 上抛，由上层决定是否关闭；
  * - 所有事件 data 均为 JSON：解析失败的事件防御性忽略（不中断连接）。
  */
+
+import type { SedimentationSuggestion } from "./chat-model";
 
 /** 权限请求（permission_request 事件中的单个请求项） */
 export interface PermissionRequest {
@@ -103,6 +106,17 @@ export interface PermissionRequestEvent {
   requests: PermissionRequest[];
 }
 
+/**
+ * sedimentation_suggestion 事件载荷（ARCH-20261027 T05）：
+ * 轮次收敛后的沉淀分析产出非空建议时推送一次；
+ * 建议明细同时可经 GET /api/sedimentation/suggestions 拉取（刷新恢复）。
+ */
+export interface SedimentationSuggestionEvent {
+  chatId: string;
+  /** 本轮分析产出的全部建议 */
+  suggestions: SedimentationSuggestion[];
+}
+
 /** status 事件载荷：会话状态变化 */
 export interface StatusEvent {
   chatId: string;
@@ -139,6 +153,7 @@ export interface SseCallbacks {
   onUserMessage: (e: UserMessageEvent) => void;
   onToolProgress: (e: ToolProgressEvent) => void;
   onPermissionRequest: (e: PermissionRequestEvent) => void;
+  onSedimentationSuggestion: (e: SedimentationSuggestionEvent) => void;
   onStatus: (e: StatusEvent) => void;
   onDone: (e: DoneEvent) => void;
   /** 连接级错误（EventSource 自动重连中；上层可据此提示或关闭） */
@@ -207,6 +222,7 @@ export class ChatStream {
     on<UserMessageEvent>("user_message", cb.onUserMessage);
     on<ToolProgressEvent>("tool_progress", cb.onToolProgress);
     on<PermissionRequestEvent>("permission_request", cb.onPermissionRequest);
+    on<SedimentationSuggestionEvent>("sedimentation_suggestion", cb.onSedimentationSuggestion);
     on<StatusEvent>("status", cb.onStatus);
     on<DoneEvent>("done", cb.onDone);
   }

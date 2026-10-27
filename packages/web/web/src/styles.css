@@ -1700,3 +1700,183 @@ a.icon-btn {
     border-radius: 10px;
   }
 }
+
+/* ============ 工作空间切换器（ARCH-20261027 T05） ============ */
+.workspace-switcher {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.workspace-switcher-icon {
+  color: var(--text-tertiary, #9a9a9a);
+  flex-shrink: 0;
+}
+
+.workspace-switcher-select {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-bg-elevated);
+  color: var(--app-text);
+  font-size: 12px;
+}
+
+/* ============ 沉淀建议卡片（ARCH-20261027 T05） ============ */
+.sediment-region {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 8px 0 16px;
+}
+
+.sediment-card {
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-bg-elevated);
+  padding: 12px 14px;
+  max-width: 720px;
+}
+
+.sediment-card-resolved {
+  border-color: rgba(76, 175, 80, 0.45);
+}
+
+.sediment-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sediment-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+}
+
+.sediment-badge-skill {
+  background: rgba(79, 142, 247, 0.16);
+  color: #4f8ef7;
+}
+
+.sediment-badge-agent {
+  background: rgba(156, 100, 246, 0.16);
+  color: #9c64f6;
+}
+
+.sediment-card-title {
+  font-weight: 600;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.sediment-card-desc {
+  font-size: 12px;
+  color: var(--text-tertiary, #9a9a9a);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.sediment-card-rationale {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--app-text);
+}
+
+.sediment-card-preview {
+  margin-top: 8px;
+}
+
+.sediment-card-preview-summary {
+  font-size: 12px;
+  color: var(--text-tertiary, #9a9a9a);
+  cursor: pointer;
+  user-select: none;
+}
+
+.sediment-card-preview-pre {
+  margin: 8px 0 0;
+  padding: 10px;
+  max-height: 240px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.55;
+  background: var(--bg-inset, rgba(127, 127, 127, 0.08));
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.sediment-card-actions {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sediment-scope-select {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-bg-elevated);
+  color: var(--app-text);
+  font-size: 11px;
+}
+
+.sediment-confirm-btn {
+  height: 26px;
+  padding: 0 12px;
+  font-size: 12px;
+  border: none;
+  border-radius: 6px;
+  background: #4f8ef7;
+  color: #fff;
+  cursor: pointer;
+}
+
+.sediment-confirm-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sediment-dismiss-btn {
+  height: 26px;
+  padding: 0 12px;
+  font-size: 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--app-text);
+  cursor: pointer;
+}
+
+.sediment-dismiss-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sediment-resolved-badge {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: #4caf50;
+}
+
+.sediment-resolved-path {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #4caf50;
+  word-break: break-all;
+}

@@ -1,38 +1,48 @@
 /**
- * 左侧会话侧栏（可折叠）：新建对话 + 项目根选择 + 历史会话列表 + 用户区。
+ * 左侧会话侧栏（可折叠）：新建对话 + 工作空间切换/项目根选择 + 历史会话列表 + 用户区。
  *
- * 交互（设计文档 §4）：
- * - 「新建对话」按钮：以当前选中的 projectRoot（来自 /api/config 的 allowRoots）创建会话；
+ * 交互（设计文档 §4；工作空间 ARCH-20261027 T05）：
+ * - 「新建对话」按钮：以当前选中的落点创建会话（配置了工作空间时为当前空间，
+ *   否则为 projectRoot——来自 /api/config 的 allowRoots）；
+ * - 工作空间切换器：服务端返回可用空间列表（GET /api/workspaces）非空时展示，
+ *   选中后列表仅显示该空间会话（PRD §5.1）；未配置空间的旧部署回退项目根选择；
  * - 会话列表：标题（title 优先，缺省回退 summary）+ 相对时间，当前会话高亮；
  * - 底部用户区：显示名 + 登出按钮（图标直显）；
  * - 折叠为窄条（仅保留展开按钮），展开/收起状态由 App 持有。
  */
-import type { ChatSummary, UserInfo } from "../api";
+import type { ChatSummary, UserInfo, WorkspaceInfo } from "../api";
 import { formatTime } from "../format";
 import { ChatIcon, FolderIcon, LogoutIcon, PanelLeftIcon, PlusIcon, UserAvatarIcon } from "./icons";
+import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 
 /** SessionSidebar 组件属性 */
 export interface SessionSidebarProps {
   /** 是否处于折叠态 */
   collapsed: boolean;
-  /** 会话列表 */
+  /** 会话列表（App 已按当前工作空间过滤） */
   chats: ChatSummary[];
   /** 当前选中会话 id */
   activeChatId: string | null;
   /** 当前登录用户 */
   user: UserInfo | null;
-  /** 项目根白名单（新建会话可选的项目目录） */
+  /** 项目根白名单（新建会话可选的项目目录；未配置工作空间时使用） */
   allowRoots: string[];
-  /** 当前选中的项目根 */
+  /** 当前选中的项目根（未配置工作空间时使用） */
   projectRoot: string;
+  /** 可用工作空间列表（GET /api/workspaces；空 = 未配置空间，回退项目根选择） */
+  workspaces: WorkspaceInfo[];
+  /** 当前选中的工作空间 id */
+  workspaceId: string;
   /** 展开/折叠切换 */
   onToggleCollapsed: () => void;
   /** 选中会话 */
   onSelectChat: (chatId: string) => void;
   /** 新建对话 */
   onNewChat: () => void;
-  /** 切换项目根 */
+  /** 切换项目根（未配置工作空间时使用） */
   onProjectRootChange: (root: string) => void;
+  /** 切换工作空间（App 据此重拉过滤后的会话列表并更新新建落点） */
+  onWorkspaceChange: (workspaceId: string) => void;
   /** 正在创建会话（按钮禁用防连点） */
   creating: boolean;
   /** 登出 */
@@ -56,10 +66,13 @@ export function SessionSidebar(props: SessionSidebarProps) {
     user,
     allowRoots,
     projectRoot,
+    workspaces,
+    workspaceId,
     onToggleCollapsed,
     onSelectChat,
     onNewChat,
     onProjectRootChange,
+    onWorkspaceChange,
     creating,
     onLogout,
     version,
@@ -90,8 +103,13 @@ export function SessionSidebar(props: SessionSidebarProps) {
           <PlusIcon size={15} />
           新建对话
         </button>
-        {/* 项目根选择：allowRoots 多于一个时展示（新建会话将落在该目录） */}
-        {allowRoots.length > 1 && (
+        {/* 工作空间切换器（ARCH-20261027 T05）：服务端配置了可用空间时取代项目根选择——
+            选中空间即新建落点，列表按空间过滤（App 经 ?workspaceId= 拉取） */}
+        {workspaces.length > 0 && (
+          <WorkspaceSwitcher workspaces={workspaces} value={workspaceId} onChange={onWorkspaceChange} />
+        )}
+        {/* 项目根选择（未配置工作空间的部署回退）：allowRoots 多于一个时展示（新建会话将落在该目录） */}
+        {workspaces.length === 0 && allowRoots.length > 1 && (
           <label className="project-root-row">
             <FolderIcon size={14} className="project-root-icon" />
             <select
@@ -109,7 +127,7 @@ export function SessionSidebar(props: SessionSidebarProps) {
           </label>
         )}
         {/* 空白名单引导（第一次启动未配置 web.allowRoots 时）：明确告知配置方法而非报 400 */}
-        {allowRoots.length === 0 && (
+        {workspaces.length === 0 && allowRoots.length === 0 && (
           <div className="project-root-empty" title="新建对话前需要先配置允许访问的项目目录">
             未配置项目根目录：请在 ~/.deepcode/settings.json 的 web.allowRoots 中添加目录后重启服务
           </div>
