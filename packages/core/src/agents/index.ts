@@ -7,3 +7,12 @@
  */
 
 export { AgentRegistry, type AgentDefinition, type AgentRegistryDeps } from "./agent-registry";
+
+// T02：沉淀落盘器（用户确认后写 SKILL.md，五条安全门槛）
+export {
+  SedimentationWriter,
+  type SedimentationScope,
+  type SedimentationDraft,
+  type WriteResult,
+  type SedimentationWriterDeps,
+} from "./sedimentation-writer";

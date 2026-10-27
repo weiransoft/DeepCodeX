@@ -301,7 +301,7 @@ export { logApiError } from "./common/error-logger";
 export { logOpenAIChatCompletionDebug } from "./common/debug-logger";
 // T5（docs/dev/eag-web-sedimentation-fixes.md §2.5）：沉淀事件结构化日志（Web disposeAll 兜底等共用）
 export { logSedimentEvent, getSedimentLogPath } from "./common/sediment-logger";
-export type { SedimentEvent, SedimentEventType } from "./common/sediment-logger";
+export type { SedimentEvent, SedimentEventType, SedimentLogFn } from "./common/sediment-logger";
 // 统一日志目录入口：CLI 与核心库共用 ~/.deepcodex/logs，旧版 ~/.deepcode/logs 仅只读兼容
 export { getDeepCodeXLogDir, getLegacyLogDir } from "./common/log-rotation";
 export { describeLlmError, getLlmErrorDetails } from "./common/llm-error";
@@ -1042,12 +1042,33 @@ export type {
 } from "./eag/dynamic/eag-dynamic-suggester";
 export { buildEagSuggestionPrompt } from "./eag/dynamic/prompts/eag-suggestion-prompt";
 export type { EagSuggestionPromptContext } from "./eag/dynamic/prompts/eag-suggestion-prompt";
+// T02：沉淀建议器（SedimentationSuggester，对话 → 挖掘 → 沉淀闭环的分析环节）
+export {
+  SedimentationSuggester,
+  computeSedimentationFingerprint,
+  type SedimentationSuggestion,
+  type SedimentationSuggesterDeps,
+} from "./eag/dynamic/sedimentation-suggester";
+export { buildSedimentationPrompt, SEDIMENTATION_MAX_TURNS } from "./eag/dynamic/prompts/sedimentation-prompt";
+export type {
+  SedimentationPromptContext,
+  SedimentationPromptMessage,
+  SedimentationPromptTurn,
+} from "./eag/dynamic/prompts/sedimentation-prompt";
 
 // ============================================================================
 // agents 模块（T01：自定义 Agent 定义解析与调用）
 // ============================================================================
 // AgentRegistry 为 core 单一装配源：SessionManager 内部装配，cli/web 仅经本导出消费。
 export { AgentRegistry, type AgentDefinition, type AgentRegistryDeps } from "./agents/agent-registry";
+// T02：沉淀落盘器（SedimentationWriter，五条安全门槛）
+export {
+  SedimentationWriter,
+  type SedimentationScope,
+  type SedimentationDraft,
+  type WriteResult,
+  type SedimentationWriterDeps,
+} from "./agents/sedimentation-writer";
 
 // ============================================================================
 // EAG Graph（Loop-Graph 融合方案 Phase 5）
