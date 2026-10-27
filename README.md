@@ -269,6 +269,13 @@ Deep Code 支持 MCP（Model Context Protocol），可以连接 GitHub、浏览�
 }
 ```
 
+## DeepCode Plus
+
+DeepCode Plus 旨在提供一站式的 AI 编程与创作体验。它提供 DeepSeek 模型订阅套餐，并支持图片理解、联网搜索、图片生成和视频生成等增强功能。它完全可选，使用 Deep Code 并不需要订阅 Plus。
+
+ - 中文版: https://deepcode.vegamo.cn
+ - 国际版: https://www.deepcodeplus.com
+
 ## 贡献
 
 欢迎贡献代码！以下是参与方式：

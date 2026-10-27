@@ -262,7 +262,11 @@ def query_task(task_id, api_key, timeout: float = 90):
         raise VideoError('查询响应 taskId 不匹配。')
     status = result.get('taskStatus')
     if status in ('FAILED', 'CANCEL'):
-        raise VideoError(f'视频生成终止：{status}；taskId={task_id}')
+        message = f'视频生成终止：{status}；taskId={task_id}'
+        reason = result.get('failureReason')
+        if reason and reason.strip():
+            message += f'；原因：{reason}'
+        raise VideoError(message)
     if status not in ('SUBMITTED', 'PROGRESS', 'COMPLETED'):
         raise VideoError(f'未知任务状态；taskId={task_id}')
     if status == 'COMPLETED':

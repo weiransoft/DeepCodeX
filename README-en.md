@@ -204,6 +204,12 @@ For detailed configuration instructions, see: [docs/notify_en.md](docs/notify_en
 
 No. Deep Code has a built-in fine-grained permission control mechanism that lets you confirm operations before the AI assistant executes shell commands, reads/writes files, accesses the network, and more. You can configure each permission scope's policy — always allow, always ask, or deny — via the `permissions` field in `settings.json`. See [docs/permission.md](docs/permission.md) for details.
 
+## DeepCode Plus
+
+DeepCode Plus aims to provide an all-in-one experience for AI coding and creative work. It offers DeepSeek model subscription plans and additional capabilities such as image understanding, web search, image generation, and video generation. It is entirely optional: you do not need a Plus subscription to use Deep Code.
+
+Homepage: https://www.deepcodeplus.com · https://deepcode.vegamo.cn (Chinese)
+
 ## Contributing
 
 Contributions are welcome! Here's how to get started:

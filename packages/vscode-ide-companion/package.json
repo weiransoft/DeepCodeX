@@ -1,6 +1,6 @@
 {
   "name": "deepcode-vscode",
-  "version": "0.4.3",
+  "version": "0.4.5",
   "publisher": "vegamo",
   "displayName": "Deep Code",
   "description": "Deep Code VSCode companion — AI-assisted development in your editor",
@@ -12,6 +12,10 @@
     "type": "git",
     "url": "https://github.com/lessweb/deepcode-cli.git",
     "directory": "packages/vscode-ide-companion"
+  },
+  "vsce": {
+    "baseContentUrl": "https://github.com/lessweb/deepcode-cli/blob/main/packages/vscode-ide-companion",
+    "baseImagesUrl": "https://raw.githubusercontent.com/lessweb/deepcode-cli/main/packages/vscode-ide-companion"
   },
   "engines": {
     "vscode": "^1.85.0"
