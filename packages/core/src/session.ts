@@ -3692,6 +3692,19 @@ ${agentInstructions}
   }
 
   /**
+   * 按名称将自定义 Agent 的角色约束注入当前会话（公开 API，供 CLI /agents 显式调用）。
+   *
+   * 语义与 agent 工具的内置加载路径一致：解析 agent → 注入角色约束 system 消息
+   * （meta.skill 记录，isLoaded 追踪覆盖）。fail-safe：失败返回 false，不抛出。
+   *
+   * @param sessionId 会话 ID
+   * @param agentName agent 名称（kebab-case）
+   */
+  async loadAgentIntoSession(sessionId: string, agentName: string): Promise<boolean> {
+    return this.loadAgentForTool(sessionId, agentName, new Set());
+  }
+
+  /**
    * 批量工具执行中按需加载自定义 Agent（镜像 loadSkillForToolBatch 的批内去重）。
    *
    * - 优先走宿主注入的 onLoadAgent 装配点（CLI/Web 自定义注入）；

@@ -28,6 +28,10 @@ test("buildSlashCommands prefixes skills before built-ins", () => {
     // FIX-06（多角色审查 2026-07-29）：/help 内置命令（渲染同源命令清单）
     "help",
     "skills",
+    // T03：自定义 Agent 与沉淀建议命令（注册于 skills 之后）
+    "agents",
+    "sediment-confirm",
+    "sediment-dismiss",
     "model",
     "plan",
     "new",

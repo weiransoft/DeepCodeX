@@ -67,7 +67,7 @@ import {
 } from "../hooks";
 import SlashCommandMenu, { isSkillSelected } from "./SlashCommandMenu";
 import type { ModelConfigSelection, PermissionScope } from "@vegamo/deepcode-core";
-import { FileMentionMenu, ModelsDropdown, RawModelDropdown, SkillsDropdown } from "../components";
+import { FileMentionMenu, ModelsDropdown, RawModelDropdown, SkillsDropdown, AgentsDropdown } from "../components";
 import type { SessionEntry, SkillInfo } from "@vegamo/deepcode-core";
 import type { UserToolPermission } from "@vegamo/deepcode-core";
 import type { StatusSegment } from "../statusline";
@@ -108,7 +108,16 @@ export type PromptSubmission = {
     // ===== DeepCodeX 执行历史管理命令（一期 US-EH-005） =====
     | "history"
     // ===== DeepCodeX 帮助命令（FIX-06） =====
-    | "help";
+    | "help"
+    // ===== T03：自定义 Agent 与沉淀建议命令 =====
+    // agent: 从 /agents 下拉选中后立即注入角色约束（agentName 携带名称）
+    | "agent"
+    // sediment-confirm: 确认沉淀建议并落盘（scope 由文本参数解析）
+    | "sediment-confirm"
+    // sediment-dismiss: 忽略沉淀建议（本会话静默）
+    | "sediment-dismiss";
+  /** T03：/agents 下拉选中的自定义 Agent 名称（command === "agent" 时携带） */
+  agentName?: string;
   /**
    * F8（2026-09-04）：旁路 EAG 动态建议层标记（可选）
    *
@@ -128,6 +137,8 @@ export type PromptDraft = {
 type Props = {
   projectRoot: string;
   skills: SkillInfo[];
+  /** T03：自定义 Agent 列表（/agents 下拉数据源，type: agent 的 SKILL.md 条目） */
+  agents: SkillInfo[];
   modelConfig: ModelConfigSelection;
   screenWidth: number;
   promptHistory: string[];
@@ -165,6 +176,7 @@ const PromptPrefixLine = React.memo(function PromptPrefixLine(): React.ReactElem
 export const PromptInput = React.memo(function PromptInput({
   projectRoot,
   skills,
+  agents,
   modelConfig,
   screenWidth,
   promptHistory,
@@ -196,6 +208,8 @@ export const PromptInput = React.memo(function PromptInput({
   const [pendingExit, setPendingExit] = useState(false);
   const [menuIndex, setMenuIndex] = useState(0);
   const [showSkillsDropdown, setShowSkillsDropdown] = useState(false);
+  // T03：/agents 自定义 Agent 选择下拉
+  const [showAgentsDropdown, setShowAgentsDropdown] = useState(false);
   const [openRawModelDropdown, setOpenRawModelDropdown] = useState(false);
   const [showModelDropdown, setShowModelDropdown] = useState(false);
   const [fileMentionItems, setFileMentionItems] = useState<FileMentionItem[]>(() => scanFileMentionItems(projectRoot));
@@ -225,6 +239,7 @@ export const PromptInput = React.memo(function PromptInput({
   );
   const showFileMentionMenu =
     !showSkillsDropdown &&
+    !showAgentsDropdown &&
     !showModelDropdown &&
     !openRawModelDropdown &&
     fileMentionToken !== null &&
@@ -233,12 +248,20 @@ export const PromptInput = React.memo(function PromptInput({
   const slashToken = getCurrentSlashToken(buffer);
   const slashMenu = React.useMemo(
     () =>
-      showSkillsDropdown || showModelDropdown || openRawModelDropdown || showFileMentionMenu
+      showSkillsDropdown || showAgentsDropdown || showModelDropdown || openRawModelDropdown || showFileMentionMenu
         ? []
         : slashToken
           ? filterSlashCommands(slashItems, slashToken)
           : [],
-    [showSkillsDropdown, showModelDropdown, openRawModelDropdown, showFileMentionMenu, slashToken, slashItems]
+    [
+      showSkillsDropdown,
+      showAgentsDropdown,
+      showModelDropdown,
+      openRawModelDropdown,
+      showFileMentionMenu,
+      slashToken,
+      slashItems,
+    ]
   );
   const showMenu = slashMenu.length > 0;
   const promptHistoryKey = React.useMemo(() => promptHistory.join("\0"), [promptHistory]);
@@ -262,8 +285,14 @@ export const PromptInput = React.memo(function PromptInput({
       ? busyStatusText
       : `enter send · shift+enter newline · @ files · ctrl+v image · / commands · ctrl+d exit${processOrPasteHint}`;
   const showFooterText = useMemo(
-    () => showMenu || showSkillsDropdown || openRawModelDropdown || showModelDropdown || showFileMentionMenu,
-    [showMenu, showSkillsDropdown, showModelDropdown, openRawModelDropdown, showFileMentionMenu]
+    () =>
+      showMenu ||
+      showSkillsDropdown ||
+      showAgentsDropdown ||
+      openRawModelDropdown ||
+      showModelDropdown ||
+      showFileMentionMenu,
+    [showMenu, showSkillsDropdown, showAgentsDropdown, showModelDropdown, openRawModelDropdown, showFileMentionMenu]
   );
   const inputContentWidth = Math.max(1, screenWidth - PROMPT_PREFIX_WIDTH);
 
@@ -350,6 +379,7 @@ export const PromptInput = React.memo(function PromptInput({
     setImageUrls(promptDraft.imageUrls);
     setSelectedSkills([]);
     setShowSkillsDropdown(false);
+    setShowAgentsDropdown(false);
     setOpenRawModelDropdown(false);
     exitHistoryBrowsing();
     clearPromptUndoRedoState(undoRedoRef.current);
@@ -391,6 +421,7 @@ export const PromptInput = React.memo(function PromptInput({
 
       if (isRawModeShortcut(input, key)) {
         setShowSkillsDropdown(false);
+        setShowAgentsDropdown(false);
         setShowModelDropdown(false);
         setOpenRawModelDropdown(true);
         return;
@@ -439,7 +470,7 @@ export const PromptInput = React.memo(function PromptInput({
         setPendingExit(false);
       }
 
-      if (openRawModelDropdown || showSkillsDropdown || showModelDropdown) {
+      if (openRawModelDropdown || showSkillsDropdown || showAgentsDropdown || showModelDropdown) {
         return;
       }
 
@@ -708,6 +739,7 @@ export const PromptInput = React.memo(function PromptInput({
     setImageUrls([]);
     setSelectedSkills([]);
     setShowSkillsDropdown(false);
+    setShowAgentsDropdown(false);
     exitHistoryBrowsing();
     resetPastes();
   }
@@ -724,6 +756,13 @@ export const PromptInput = React.memo(function PromptInput({
     if (item.kind === "skills") {
       clearSlashToken();
       setShowSkillsDropdown(true);
+      return;
+    }
+    // T03：/agents 打开自定义 Agent 选择下拉（选中后立即注入角色约束）
+    if (item.kind === "agents") {
+      clearSlashToken();
+      setShowSkillsDropdown(false);
+      setShowAgentsDropdown(true);
       return;
     }
     if (item.kind === "model") {
@@ -1021,6 +1060,17 @@ export const PromptInput = React.memo(function PromptInput({
         skills={skills}
         selectedSkills={selectedSkills}
         onSelect={toggleSelectedSkill}
+      />
+      {/* T03：自定义 Agent 选择下拉（选中后立即调用 loadAgentIntoSession 注入角色约束） */}
+      <AgentsDropdown
+        width={screenWidth}
+        open={showAgentsDropdown}
+        onClose={setShowAgentsDropdown}
+        agents={agents}
+        onSelect={(agent) => {
+          onSubmit({ text: "", imageUrls: [], command: "agent", agentName: agent.name });
+          resetPromptInput();
+        }}
       />
       <ModelsDropdown
         open={showModelDropdown}

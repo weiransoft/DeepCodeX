@@ -297,6 +297,12 @@ export type DeepcodingSettings = {
   enabledSkills?: EnabledSkillsSettings;
   statusline?: StatusLineSettings;
   /**
+   * Skill/Agent 沉淀建议配置（T02/T03）。
+   * everyNTurns：每 N 个 assistant 轮次触发一次沉淀分析（默认 6，最小 1）；
+   * 触发时机由宿主（CLI App / Web session-pool）按此节流，另在会话收尾 flush 兜底。
+   */
+  sedimentation?: { everyNTurns?: number };
+  /**
    * 是否放行本地/私有/元数据 baseURL（本地 Ollama/vLLM 等场景）。
    * 优先级低于环境变量 DEEPCODE_ALLOW_PRIVATE_BASE_URL。
    */
@@ -382,6 +388,8 @@ export type ResolvedDeepcodingSettings = {
   permissions: Required<PermissionSettings>;
   enabledSkills: EnabledSkillsSettings;
   statusline: ResolvedStatusLineSettings;
+  /** T02/T03：沉淀建议触发节流（resolveSettingsSources 产出缺省 6；可选以兼容既有测试 fixture） */
+  sedimentation?: { everyNTurns: number };
 };
 
 export type ModelConfigSelection = {
@@ -1274,7 +1282,28 @@ export function resolveSettingsSources(
     permissions: mergePermissions(userSettings, projectSettings),
     enabledSkills: mergeEnabledSkills(userSettings, projectSettings),
     statusline: mergeStatusLine(userSettings, projectSettings),
+    // T02/T03：沉淀建议节流（项目级 > 用户级，缺省 6，最小 1，非法值回落默认）
+    sedimentation: {
+      everyNTurns: normalizeSedimentationEveryNTurns(
+        projectSettings?.sedimentation?.everyNTurns ?? userSettings?.sedimentation?.everyNTurns
+      ),
+    },
   };
+}
+
+/** T02/T03：沉淀建议触发节流默认值（每 6 个 assistant 轮次） */
+export const DEFAULT_SEDIMENTATION_EVERY_N_TURNS = 6;
+
+/**
+ * 归一化 sedimentation.everyNTurns（T02/T03）。
+ *
+ * 非法值（非有限正数）回落默认 6；正数向下取整且最小 1。
+ */
+function normalizeSedimentationEveryNTurns(raw: unknown): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    return DEFAULT_SEDIMENTATION_EVERY_N_TURNS;
+  }
+  return Math.max(1, Math.floor(raw));
 }
 
 export function resolveSettings(

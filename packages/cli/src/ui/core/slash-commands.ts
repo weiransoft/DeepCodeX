@@ -76,7 +76,14 @@ export type SlashCommandKind =
   | "eag-autonomous-stop"
   | "eag-graph"
   // ===== EAG DESIGN Loop 命令（2026-08-19 S3.2 接线） =====
-  | "eag-design";
+  | "eag-design"
+  // ===== T03：自定义 Agent 与沉淀建议命令 =====
+  // agents: 列出并调用自定义 Agent（frontmatter type: agent 的 SKILL.md 定义）
+  // sediment-confirm: 确认沉淀建议并落盘为 SKILL.md
+  // sediment-dismiss: 忽略沉淀建议（本会话不再建议同一条目）
+  | "agents"
+  | "sediment-confirm"
+  | "sediment-dismiss";
 
 export type SlashCommandItem = {
   kind: SlashCommandKind;
@@ -100,6 +107,27 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
     name: "skills",
     label: "/skills",
     description: "List available skills",
+  },
+  // ===== T03：自定义 Agent 与沉淀建议命令 =====
+  {
+    kind: "agents",
+    name: "agents",
+    label: "/agents",
+    description: "List and invoke custom agents (frontmatter type: agent)",
+  },
+  {
+    kind: "sediment-confirm",
+    name: "sediment-confirm",
+    label: "/sediment-confirm",
+    args: ["<name>", "[user|project]"],
+    description: "Confirm a sedimentation suggestion and write it as SKILL.md (default scope: user)",
+  },
+  {
+    kind: "sediment-dismiss",
+    name: "sediment-dismiss",
+    label: "/sediment-dismiss",
+    args: ["<name>"],
+    description: "Dismiss a sedimentation suggestion (silent for the rest of this session)",
   },
   {
     kind: "model",
@@ -347,14 +375,50 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
 ];
 
 export function buildSlashCommands(skills: SkillInfo[]): SlashCommandItem[] {
-  const skillItems: SlashCommandItem[] = skills.map((skill) => ({
-    kind: "skill",
-    name: skill.name,
-    label: `/${skill.name}`,
-    description: skill.description || "(no description)",
-    skill,
-  }));
+  // T03：type:agent 条目不进 /<name> skill 命令清单（只经 /agents 列出与调用）
+  const skillItems: SlashCommandItem[] = skills
+    .filter((skill) => skill.kind !== "agent")
+    .map((skill) => ({
+      kind: "skill",
+      name: skill.name,
+      label: `/${skill.name}`,
+      description: skill.description || "(no description)",
+      skill,
+    }));
   return [...skillItems, ...BUILTIN_SLASH_COMMANDS];
+}
+
+/**
+ * T03：解析 /sediment-confirm 命令参数。
+ *
+ * 格式：/sediment-confirm <name> [user|project]
+ * - name：沉淀建议条目名（必填）
+ * - scope：落盘范围（可选，"user"（默认）或 "project"）
+ *
+ * @param text 用户输入的完整命令文本
+ * @returns 解析结果；name 为空时 valid=false
+ */
+export function parseSedimentationConfirmArgs(text: string): {
+  valid: boolean;
+  name: string;
+  scope: "user" | "project";
+} {
+  const args = extractCommandArgument(text, "sediment-confirm");
+  const tokens = args.split(/\s+/).filter(Boolean);
+  const name = tokens[0] ?? "";
+  const scopeToken = (tokens[1] ?? "").toLowerCase();
+  const scope: "user" | "project" = scopeToken === "project" ? "project" : "user";
+  return { valid: name.length > 0, name, scope };
+}
+
+/**
+ * T03：解析 /sediment-dismiss 命令参数。
+ *
+ * 格式：/sediment-dismiss <name>
+ */
+export function parseSedimentationDismissArgs(text: string): { valid: boolean; name: string } {
+  const name = extractCommandArgument(text, "sediment-dismiss");
+  return { valid: name.length > 0, name };
 }
 
 export function filterSlashCommands(items: SlashCommandItem[], token: string): SlashCommandItem[] {

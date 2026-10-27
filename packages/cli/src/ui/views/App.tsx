@@ -48,12 +48,21 @@ import {
   renderRawModeMessages,
 } from "../utils";
 import { resolveCurrentSettings, writeModelConfigSelection } from "@vegamo/deepcode-core";
+// T03：Skill/Agent 沉淀建议器与落盘器（core 单一装配源，App 层仅装配与呈现）
+import { SedimentationSuggester, SedimentationWriter } from "@vegamo/deepcode-core";
+import type { SedimentationSuggestion } from "@vegamo/deepcode-core";
 import { useStatusLine } from "../hooks";
 import type { SessionInfo } from "../statusline";
 import { isCollapsedThinking } from "../core/thinking-state";
 import { ANSI_CLEAR_SCREEN } from "../constants";
 // ADR-DI-001 动态注入与后台子 Agent 命令辅助函数（fork 特有，保留）
-import { extractCommandArgument, isResumeTaskCommand, BUILTIN_SLASH_COMMANDS } from "../core/slash-commands";
+import {
+  extractCommandArgument,
+  isResumeTaskCommand,
+  parseSedimentationConfirmArgs,
+  parseSedimentationDismissArgs,
+  BUILTIN_SLASH_COMMANDS,
+} from "../core/slash-commands";
 // 建议循环客户端兜底（2026-09-03）：从回合收尾文本提取"建议执行 /xxx"命令 + 可自动执行白名单
 import {
   AUTO_EXECUTABLE_COMMAND_KINDS,
@@ -222,6 +231,8 @@ function App({
   const [view, setView] = useState<View>("chat");
   const [busy, setBusy] = useState(false);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
+  // T03：自定义 Agent 列表（/agents 下拉数据源，与 skills 分列展示）
+  const [agents, setAgents] = useState<SkillInfo[]>([]);
   const [messages, setMessages] = useState<SessionMessage[]>([]);
   const [sessions, setSessions] = useState<SessionEntry[]>([]);
   const [undoTargets, setUndoTargets] = useState<UndoTarget[]>([]);
@@ -272,6 +283,34 @@ function App({
   messagesRef.current = messages;
 
   const clientFactory = useMemo(() => createOpenAIClientFactory(projectRoot), [projectRoot]);
+
+  // T03：沉淀建议器 + 落盘器装配（core 单一装配源模式，AgentRegistry 已由 SessionManager 内部装配）
+  // - suggester.createLLMClient 与 eagDynamicSuggester.createDecisionLLMClient 同源；
+  // - 装配异常时返回 null，沉淀能力整体降级（主对话零回归）。
+  const sedimentation = useMemo(() => {
+    try {
+      const suggester = new SedimentationSuggester({
+        createLLMClient: async () => {
+          const settings = resolveCurrentSettings(projectRoot);
+          if (!settings.apiKey) {
+            return null;
+          }
+          return ProviderFactory.create(settings);
+        },
+      });
+      const writer = new SedimentationWriter({ projectRoot });
+      return { suggester, writer };
+    } catch {
+      // fail-safe：沉淀组件构造失败不影响会话
+      return null;
+    }
+  }, [projectRoot]);
+  // T03：per-session 待处置沉淀建议（name → suggestion），/sediment-confirm 与 /sediment-dismiss 消费
+  const pendingSuggestionsRef = useRef<Map<string, Map<string, SedimentationSuggestion>>>(new Map());
+  // T03：每会话 assistant 轮次计数（沉淀触发节流依据，settings sedimentation.everyNTurns）
+  const sedimentTurnCountersRef = useRef<Map<string, number>>(new Map());
+  // T03：busy 上一帧快照（true→false 边沿 = 一个 assistant 轮次结束）
+  const prevBusyRef = useRef(false);
 
   const sessionManager = useMemo(() => {
     // 构造全局动态编排建议层
@@ -531,7 +570,11 @@ function App({
   const refreshSkills = useCallback(
     async (sessionId?: string): Promise<void> => {
       try {
-        const list = await sessionManager.listSkills(sessionId ?? sessionManager.getActiveSessionId() ?? undefined);
+        // T03：仅列普通 skill（kind=skill），agent 条目改由 /agents 下拉展示
+        const list = await sessionManager.listSkills(
+          sessionId ?? sessionManager.getActiveSessionId() ?? undefined,
+          "skill"
+        );
         setSkills(list);
       } catch {
         // ignore
@@ -539,6 +582,85 @@ function App({
     },
     [sessionManager]
   );
+
+  // T03：刷新自定义 Agent 列表（fail-safe：异常时保持旧列表/空列表）
+  const refreshAgents = useCallback(
+    async (sessionId?: string): Promise<void> => {
+      try {
+        const list = await sessionManager.listSkills(
+          sessionId ?? sessionManager.getActiveSessionId() ?? undefined,
+          "agent"
+        );
+        setAgents(list);
+      } catch {
+        // ignore
+      }
+    },
+    [sessionManager]
+  );
+
+  // T03：沉淀建议分析（轮次节流触发 + 建议 UI 注入）。
+  // 触发时机：每 N 个 assistant 轮次（N = settings sedimentation.everyNTurns，默认 6）；
+  // 另在 handleExit 做 flush 兜底。全程 fail-safe：分析失败不影响会话。
+  const runSedimentationAnalysis = useCallback(
+    async (sessionId: string, options?: { force?: boolean }): Promise<void> => {
+      if (!sedimentation) {
+        return;
+      }
+      try {
+        // 轮次节流（force 用于 flush 兜底跳过节流）
+        if (!options?.force) {
+          const everyNTurns = resolveCurrentSettings(projectRoot).sedimentation?.everyNTurns ?? 6;
+          const counters = sedimentTurnCountersRef.current;
+          const next = (counters.get(sessionId) ?? 0) + 1;
+          counters.set(sessionId, next);
+          if (next % everyNTurns !== 0) {
+            return;
+          }
+        }
+        const transcript = sessionManager.listSessionMessages(sessionId);
+        if (!transcript.some((message) => message.role === "assistant")) {
+          return;
+        }
+        const suggestions = await sedimentation.suggester.analyze(sessionId, transcript);
+        if (suggestions.length === 0) {
+          return;
+        }
+        const pending = pendingSuggestionsRef.current.get(sessionId) ?? new Map<string, SedimentationSuggestion>();
+        for (const suggestion of suggestions) {
+          pending.set(suggestion.draft.name, suggestion);
+        }
+        pendingSuggestionsRef.current.set(sessionId, pending);
+        // 建议经既有会话 system 消息通道注入（与 skill 目录同通道，用户可见）
+        const lines = suggestions.map(
+          (suggestion) =>
+            `- ${suggestion.draft.kind === "agent" ? "Agent" : "Skill"}「${suggestion.draft.name}」：${suggestion.draft.description}（${suggestion.rationale}）`
+        );
+        const content = [
+          "💡 沉淀建议：对话中发现了可复用的模式",
+          ...lines,
+          "",
+          "确认落盘：/sediment-confirm <名称> [user|project]（默认用户级 ~/.deepcode/skills）",
+          "忽略本条：/sediment-dismiss <名称>（本会话不再建议）",
+        ].join("\n");
+        sessionManager.addSessionSystemMessage(sessionId, content, true);
+      } catch {
+        // fail-safe：沉淀分析失败不影响会话
+      }
+    },
+    [sedimentation, sessionManager, projectRoot]
+  );
+
+  // T03：assistant 轮次结束（busy true→false 边沿）触发沉淀分析（内部按 everyNTurns 节流）
+  useEffect(() => {
+    if (prevBusyRef.current && !busy) {
+      const sessionId = sessionManager.getActiveSessionId();
+      if (sessionId) {
+        void runSedimentationAnalysis(sessionId);
+      }
+    }
+    prevBusyRef.current = busy;
+  }, [busy, sessionManager, runSedimentationAnalysis]);
 
   /**
    * Reset the app to the welcome screen.
@@ -569,7 +691,8 @@ function App({
   useEffect(() => {
     refreshSessionsList();
     void refreshSkills();
-  }, [refreshSessionsList, refreshSkills]);
+    void refreshAgents();
+  }, [refreshSessionsList, refreshSkills, refreshAgents]);
 
   // Eagerly create the OpenAI client on mount so the TCP+TLS connection
   // warmup (fire-and-forget inside createOpenAIClient) starts before the
@@ -629,11 +752,22 @@ function App({
           writeStdoutLine("\n");
         }
 
+        // T03：flushSedimentation 兜底——退出前对当前会话做最后一次沉淀分析
+        // （结果仅经结构化日志记录，不阻塞退出流程，也不影响退出摘要）
+        const flushSessionId = sessionManager.getActiveSessionId();
+        if (flushSessionId && sedimentation) {
+          void sedimentation.suggester
+            .analyze(flushSessionId, sessionManager.listSessionMessages(flushSessionId))
+            .catch(() => {
+              // fail-safe：flush 兜底失败静默
+            });
+        }
+
         sessionManager.dispose();
         exit();
       }, 0);
     },
-    [exit, sessionManager]
+    [exit, sessionManager, sedimentation]
   );
 
   const handlePrompt = useCallback(
@@ -705,6 +839,7 @@ function App({
           setErrorLine(null);
           refreshSessionsList();
           await refreshSkills(sessionId);
+          void refreshAgents(sessionId);
         } catch (error) {
           setErrorLine(error instanceof Error ? error.message : String(error));
         }
@@ -830,6 +965,87 @@ function App({
           ...prev,
           buildSyntheticUserMessage(submission.text, submission.imageUrls.length),
           buildSyntheticAssistantMessage(`可用命令：\n${formatBuiltinCommandList()}`),
+        ]);
+        return;
+      }
+      // ===== T03：自定义 Agent 调用与沉淀建议处置 =====
+      if (submission.command === "agent" && submission.agentName) {
+        // /agents 下拉选中 → 注入角色约束（经 SessionManager 内置加载路径，isLoaded 追踪与 agent 工具一致）
+        const sessionId = sessionManager.getActiveSessionId();
+        if (!sessionId) {
+          setErrorLine("✖ 请先开始一个会话后再调用 Agent（直接输入任务即可创建会话）");
+          return;
+        }
+        const loaded = await sessionManager.loadAgentIntoSession(sessionId, submission.agentName);
+        if (loaded) {
+          setMessages((prev) => [
+            ...prev,
+            buildSyntheticUserMessage(`/agents 调用 ${submission.agentName}`, 0),
+            buildSyntheticAssistantMessage(`已加载 Agent「${submission.agentName}」的角色约束，请描述你的任务。`),
+          ]);
+        } else {
+          setErrorLine(`✖ 未找到自定义 Agent「${submission.agentName}」（可用 /agents 查看列表）`);
+        }
+        return;
+      }
+      if (submission.command === "sediment-confirm") {
+        // /sediment-confirm <name> [user|project] —— 确认沉淀建议并落盘（SedimentationWriter 五条安全门槛）
+        const parsed = parseSedimentationConfirmArgs(submission.text);
+        const sessionId = sessionManager.getActiveSessionId();
+        if (!parsed.valid) {
+          setErrorLine("✖ /sediment-confirm <名称> [user|project] 缺少名称参数");
+          return;
+        }
+        if (!sessionId) {
+          setErrorLine("✖ 当前没有活跃会话，无法确认沉淀建议");
+          return;
+        }
+        if (!sedimentation) {
+          setErrorLine("✖ 沉淀组件不可用（装配失败已降级）");
+          return;
+        }
+        const suggestion = pendingSuggestionsRef.current.get(sessionId)?.get(parsed.name);
+        if (!suggestion) {
+          setErrorLine(`✖ 未找到沉淀建议「${parsed.name}」（可能已处理或尚未生成）`);
+          return;
+        }
+        const result = await sedimentation.writer.write(suggestion.draft, parsed.scope);
+        if (result.ok) {
+          pendingSuggestionsRef.current.get(sessionId)?.delete(parsed.name);
+          setMessages((prev) => [
+            ...prev,
+            buildSyntheticUserMessage(submission.text, 0),
+            buildSyntheticAssistantMessage(`已沉淀 → ${result.path}`),
+          ]);
+        } else {
+          // 落盘失败（同名/非法名/IO）不上抛，仅回显原因
+          setErrorLine(`✖ 沉淀落盘失败：${result.message}`);
+        }
+        return;
+      }
+      if (submission.command === "sediment-dismiss") {
+        // /sediment-dismiss <name> —— 忽略沉淀建议（记录指纹，本会话不再建议同一条目）
+        const parsed = parseSedimentationDismissArgs(submission.text);
+        const sessionId = sessionManager.getActiveSessionId();
+        if (!parsed.valid) {
+          setErrorLine("✖ /sediment-dismiss <名称> 缺少名称参数");
+          return;
+        }
+        if (!sessionId || !sedimentation) {
+          setErrorLine("✖ 当前没有活跃会话");
+          return;
+        }
+        const suggestion = pendingSuggestionsRef.current.get(sessionId)?.get(parsed.name);
+        if (!suggestion) {
+          setErrorLine(`✖ 未找到沉淀建议「${parsed.name}」`);
+          return;
+        }
+        pendingSuggestionsRef.current.get(sessionId)?.delete(parsed.name);
+        sedimentation.suggester.dismiss(sessionId, suggestion.fingerprint);
+        setMessages((prev) => [
+          ...prev,
+          buildSyntheticUserMessage(submission.text, 0),
+          buildSyntheticAssistantMessage(`已忽略「${parsed.name}」，本会话不再建议该条目`),
         ]);
         return;
       }
@@ -1832,6 +2048,7 @@ function App({
           projectRoot={projectRoot}
           screenWidth={screenWidth}
           skills={skills}
+          agents={agents}
           modelConfig={resolvedSettings}
           promptHistory={promptHistory}
           busy={busy}
