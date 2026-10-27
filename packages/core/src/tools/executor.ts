@@ -8,6 +8,8 @@ import { handleReadImageTool } from "./read-image-handler";
 import { handleReadTool } from "./read-handler";
 // v0.3.1 上游新特性：skill 工具 handler（bundled skills 执行入口）
 import { handleSkillTool } from "./skill-handler";
+// T01 新增：agent 工具 handler（自定义 Agent 角色约束注入入口，镜像 skill-handler）
+import { handleAgentTool } from "./agent-handler";
 import { handleUpdatePlanTool } from "./update-plan-handler";
 // v0.3.1 上游新特性：UnderstandImage 图片理解工具 handler
 import { handleUnderstandImageTool } from "./understand-image-handler";
@@ -159,6 +161,8 @@ export class ToolExecutor {
     this.toolHandlers.set("write", handleWriteTool);
     this.toolHandlers.set("edit", handleEditTool);
     this.toolHandlers.set("skill", handleSkillTool);
+    // T01：agent 工具 handler 注册（始终注册，与 tool definition 启用条件解耦，同 V2-P6 策略）
+    this.toolHandlers.set("agent", handleAgentTool);
     this.toolHandlers.set("AskUserQuestion", handleAskUserQuestionTool);
     this.toolHandlers.set("UpdatePlan", handleUpdatePlanTool);
     this.toolHandlers.set("UnderstandImage", handleUnderstandImageTool);
@@ -346,6 +350,8 @@ export class ToolExecutor {
         onPluginRateLimitExceeded: hooks?.onPluginRateLimitExceeded,
         // 上游 v0.3.1 新增：skill 工具加载回调（skill 工具依赖）
         onLoadSkill: hooks?.onLoadSkill,
+        // T01 新增：agent 工具加载回调（agent 工具依赖，走 SessionManager.loadAgentForTool）
+        onLoadAgent: hooks?.onLoadAgent,
         // 修复"工具调用卡死"2026-10-03：透传 session 注入的 bash 超时配置到 handler
         bashTimeoutMs: hooks?.bashTimeoutMs,
       });

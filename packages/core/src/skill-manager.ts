@@ -28,6 +28,17 @@ import { buildSkillDocumentsPrompt, getExtensionRoot } from "./prompt";
 // type-only import 不会产生运行时循环依赖（TypeScript 编译时擦除）
 import type { SessionMessage, SkillInfo } from "./session";
 
+/** 条目种类：frontmatter `type` 缺省视为 "skill"，`type: agent` 视为自定义 Agent 定义 */
+export type SkillKind = "skill" | "agent";
+
+/**
+ * frontmatter 字段白名单（架构 §7 共享知识 #1，对齐 dsh frontmatter 白名单化思想）
+ *
+ * 仅以下字段会被解析进运行时模型，其余未知字段一律丢弃（不告警刷屏）：
+ * name / description / type / role / tools / metadata.allow-implicit-invocation
+ */
+const SKILL_FRONTMATTER_WHITELIST = new Set(["name", "description", "type", "role", "tools", "metadata"]);
+
 /**
  * SkillManager 依赖上下文
  *
@@ -135,11 +146,14 @@ export class SkillManager {
    * 扫描所有技能根目录，收集 SKILL.md 文件，解析技能信息。
    * 同名技能以首次出现的为准（高优先级根目录覆盖低优先级）。
    * 如果传入 sessionId，会标记已加载的技能（isLoaded=true）。
+   * 如果传入 kind，仅返回对应种类的条目（"skill" = 普通技能，"agent" = 自定义 Agent 定义）；
+   * 缺省时返回全部条目（含 agent）。
    *
    * @param sessionId 可选的会话 ID，用于标记已加载技能
+   * @param kind 可选的条目种类过滤
    * @returns 按名称排序的技能信息数组
    */
-  async listSkills(sessionId?: string): Promise<SkillInfo[]> {
+  async listSkills(sessionId?: string, kind?: SkillKind): Promise<SkillInfo[]> {
     const skillRoots = this.getSkillScanRoots();
     const enabledSkills = this.context.getResolvedSettings().enabledSkills ?? {};
     const skillsByName = new Map<string, SkillInfo>();
@@ -212,7 +226,11 @@ export class SkillManager {
       }
     }
 
-    return Array.from(skillsByName.values()).sort((a, b) => a.name.localeCompare(b.name));
+    // kind 过滤：仅返回指定种类的条目（agent 条目不进 skill 正文目录段，反之亦然）
+    const allSkills = Array.from(skillsByName.values());
+    const filtered = kind ? allSkills.filter((skill) => (skill.kind ?? "skill") === kind) : allSkills;
+
+    return filtered.sort((a, b) => a.name.localeCompare(b.name));
   }
 
   /**
@@ -289,11 +307,17 @@ export class SkillManager {
    * ---
    * name: skill-name
    * description: 技能描述
+   * type: agent          # 可选：缺省视为 skill，"agent" 表示自定义 Agent 定义
+   * role: 资深代码评审专家 # 可选：agent 专属角色身份
+   * tools: [read, edit]  # 可选：agent 专属工具白名单声明（P0 仅透传展示）
    * metadata:
    *   allow-implicit-invocation: false
    * ---
    * 技能正文...
    * ```
+   *
+   * 白名单约束（架构 §7 共享知识 #1）：仅 name/description/type/role/tools/
+   * metadata.allow-implicit-invocation 进入运行时模型，其余未知字段一律丢弃。
    *
    * 错误处理：
    * - 文件读取失败 → 返回 fallback 技能信息（name 用 fallbackName）
@@ -325,14 +349,25 @@ export class SkillManager {
         (metadata as Record<string, unknown>)["allow-implicit-invocation"] === false
           ? false
           : undefined;
+      // 白名单字段解析：type（缺省 skill）/ role / tools（agent 专属，非法形态丢弃）
+      const frontmatter = parsed.data as Record<string, unknown>;
+      const kind: SkillKind = frontmatter.type === "agent" ? "agent" : "skill";
+      const role =
+        typeof frontmatter.role === "string" && frontmatter.role.trim() ? frontmatter.role.trim() : undefined;
+      const tools = Array.isArray(frontmatter.tools)
+        ? frontmatter.tools.filter((tool): tool is string => typeof tool === "string" && tool.trim().length > 0)
+        : undefined;
       return {
         name:
-          typeof parsed.data.name === "string" && parsed.data.name.trim()
-            ? parsed.data.name.trim()
+          typeof frontmatter.name === "string" && frontmatter.name.trim()
+            ? frontmatter.name.trim()
             : fallbackSkill.name,
         path: displayPath,
-        description: typeof parsed.data.description === "string" ? parsed.data.description.trim() : "",
+        description: typeof frontmatter.description === "string" ? frontmatter.description.trim() : "",
         allowImplicitInvocation,
+        kind,
+        ...(role ? { role } : {}),
+        ...(tools && tools.length > 0 ? { tools } : {}),
       };
     } catch {
       return fallbackSkill;

@@ -73,6 +73,8 @@ export type ToolExecutionContext = {
   onPluginRateLimitExceeded?: (tool: PluginRateLimitedTool) => void;
   /** 上游 v0.3.1 新增：技能加载回调，skill-handler 通过它按需加载技能内容 */
   onLoadSkill?: (skillName: string) => Promise<ToolExecutionResult>;
+  /** T01 新增：自定义 Agent 加载回调，agent-handler 通过它注入角色约束（true=加载成功） */
+  onLoadAgent?: (agentName: string) => Promise<boolean>;
   bashTimeoutMs?: number;
   bashMinTimeoutMs?: number;
 };
@@ -90,6 +92,8 @@ export type ToolExecutionHooks = {
   onPluginRateLimitExceeded?: (tool: PluginRateLimitedTool) => void;
   /** 上游 v0.3.1 新增：技能加载回调，skill-handler 通过它按需加载技能内容 */
   onLoadSkill?: (skillName: string) => Promise<ToolExecutionResult>;
+  /** T01 新增：自定义 Agent 加载回调，agent-handler 通过它注入角色约束（true=加载成功） */
+  onLoadAgent?: (agentName: string) => Promise<boolean>;
   /**
    * 修复"工具调用卡死"2026-10-03：bash 工具调用超时（毫秒）。
    * 由 session 从 ResolvedDeepcodingSettings.bashTimeoutMs 注入；

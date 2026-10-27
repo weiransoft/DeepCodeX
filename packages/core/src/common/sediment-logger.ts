@@ -36,6 +36,16 @@ import { rotateLogIfNeeded, getDeepCodeXLogDir } from "./log-rotation";
 /** 沉淀事件日志文件名 */
 const SEDIMENT_LOG_FILE = "sedimentation.log";
 
+/**
+ * 通用沉淀链路结构化日志函数类型（agent-registry / SedimentationWriter / SedimentationSuggester 共用）
+ *
+ * 约定（架构 §7 共享知识 #3）：
+ * - 输入为扁平事件对象（event 事件名 + sessionId + 关键字段），由调用方负责序列化；
+ * - 实现方必须自行吞掉日志异常（日志失败绝不影响沉淀主流程）；
+ * - 禁止打印 PII 与对话原文（只记指纹与名称）。
+ */
+export type SedimentLogFn = (event: Record<string, unknown>) => void;
+
 // ============================================================================
 // 类型定义
 // ============================================================================

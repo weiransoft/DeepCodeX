@@ -785,6 +785,25 @@ export function getTools(options: PromptToolOptions = {}, externalTools: ToolDef
     {
       type: "function",
       function: {
+        // T01 新增：agent 工具（按名激活自定义 Agent，注入其角色约束）
+        name: "agent",
+        description:
+          "Activate a custom agent by name from the available agents index. The agent's role identity and behavioral constraints will be injected into this conversation. Use it when the user explicitly names an agent or asks for a role-specific workflow.",
+        parameters: {
+          type: "object",
+          properties: {
+            name: {
+              type: "string",
+              description: "The exact agent name from the available agents index.",
+            },
+          },
+          required: ["name"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
         // fork 侧：read 保留图片加载能力（followUpMessages 多模态注入），描述保留 fork 版
         name: "read",
         description: "Read files from the filesystem (text, images, notebooks).",

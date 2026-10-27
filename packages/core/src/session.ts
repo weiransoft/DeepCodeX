@@ -92,6 +92,8 @@ export type { ModelUsage } from "./usage-tracker";
 // buildSkillPrompt / readSkillInfo / getSkillKey / getSkillKeyByName /
 // getLoadedSkillKeys / dedupeSkills / normalizeSkills
 import { SkillManager } from "./skill-manager";
+// 自定义 Agent 注册表（T01：包装 SkillManager 扫描链，复用 6 根/去重/enabledSkills 语义）
+import { AgentRegistry, type AgentDefinition } from "./agents/agent-registry";
 // StreamAggregator 流式聚合工具模块（从 session.ts 抽取，见 docs/dev/review.md CRITICAL-1 模块 1）
 // 包含：estimateStreamTokens / formatEstimatedTokens / isAbortLikeError / throwIfAborted / CJK_REGEX
 import {
@@ -511,6 +513,9 @@ export type MessageMeta = {
   skill?: SkillInfo;
   // 上游 v0.3.1：技能目录快照（技能列表变化时随消息持久化，供恢复会话后重建目录提示）
   skillCatalog?: Array<{ name: string; description: string }>;
+  // 自定义 Agent 索引快照（与 skillCatalog 同构：仅 name + role + description，无正文无绝对路径；
+  // type:agent 条目不进 skill 正文目录段、只进本 agent 索引段）
+  agentIndex?: Array<{ name: string; role: string; description: string }>;
   permissions?: MessageToolPermission[];
   userPrompt?: UserPromptContent;
 };
@@ -585,6 +590,12 @@ export type SkillInfo = {
   description: string;
   isLoaded?: boolean;
   allowImplicitInvocation?: boolean;
+  /** 条目种类：frontmatter `type` 缺省视为 "skill"，`type: agent` 为自定义 Agent 定义 */
+  kind?: "skill" | "agent";
+  /** agent 专属：一句话角色身份（frontmatter `role`，缺省由 AgentRegistry 回退 description 首句） */
+  role?: string;
+  /** agent 专属：工具白名单声明（frontmatter `tools`，P0 仅透传展示，不收窄权限） */
+  tools?: string[];
 };
 
 /**
@@ -664,6 +675,15 @@ export type SessionManagerOptions = {
       approvalId: string;
     }>
   ) => void;
+  /**
+   * 自定义 Agent 加载装配点（可选注入，镜像 skill 体系的 onLoadSkill 语义）。
+   *
+   * LLM 调用 `agent` 工具时经 loadAgentForTool() 走此钩子：
+   * - 已注入：由宿主自行完成角色约束注入（返回 true 表示成功）；
+   * - 未注入：走内置默认实现（AgentRegistry 解析 + system 消息注入 + isLoaded 追踪）。
+   * 返回 false 表示 agent 不存在/加载失败（fail-safe，绝不抛出中断会话）。
+   */
+  onLoadAgent?: (sessionId: string, agentName: string) => Promise<boolean>;
   /**
    * EAG-P0：独立评估器外挂（可选注入，§5.4 Goal Evaluator 接入主循环）
    *
@@ -1438,6 +1458,10 @@ export class SessionManager {
   private activePromptController: AbortController | null = null;
   // SkillManager 实例（技能扫描/解析/去重/归一化，见 docs/dev/review.md CRITICAL-1 模块 3）
   private readonly skillManager: SkillManager;
+  // AgentRegistry 实例（T01：自定义 Agent 发现/索引/注入 prompt，包装 skillManager）
+  private readonly agentRegistry: AgentRegistry;
+  // T01：自定义 Agent 加载装配点（SessionManagerOptions.onLoadAgent，缺省走内置实现）
+  private readonly onLoadAgentOption?: (sessionId: string, agentName: string) => Promise<boolean>;
   // FileHistoryCoordinator 实例（undo/file-history 域协调器，S4 首阶段拆分，
   // 抽取模式见 file-history-coordinator.ts 模块头注释，供后续域拆分复用）
   private readonly fileHistoryCoordinator: FileHistoryCoordinator;
@@ -1662,6 +1686,10 @@ export class SessionManager {
       getResolvedSettings: () => this.getResolvedSettings(),
       listSessionMessages: (sessionId: string) => this.listSessionMessages(sessionId),
     });
+    // AgentRegistry 初始化（T01）：包装既有 SkillManager，复用扫描根/去重/enabledSkills 链；
+    // 构造失败降级为空注册表（fail-safe，不阻塞 SessionManager 装配）
+    this.onLoadAgentOption = options.onLoadAgent;
+    this.agentRegistry = this.createAgentRegistrySafely();
     // FileHistoryCoordinator 初始化（最小依赖注入：projectRoot / getProjectStorage /
     // listSessionMessages / saveSessionMessages，对齐 SkillManager 回调注入模式）。
     // getProjectStorage 返回 projectDir（file-history git 目录在其下解析）；
@@ -3251,7 +3279,8 @@ Response in JSON format:
 If none of the available skills match, respond with an empty array, i.e. \`{"skillNames": []}\`.\n
 `;
     const simpleSkills = skills
-      .filter((x) => !x.isLoaded && x.allowImplicitInvocation !== false)
+      // T01：type:agent 条目不参与 skill 隐式匹配（只进 agent 索引段、经 agent 工具显式加载）
+      .filter((x) => !x.isLoaded && x.allowImplicitInvocation !== false && x.kind !== "agent")
       .map((x) => {
         return { name: x.name, description: x.description };
       });
@@ -3391,8 +3420,8 @@ ${agentInstructions}
     return this.skillManager.getBundledSkillsRoot();
   }
 
-  async listSkills(sessionId?: string): Promise<SkillInfo[]> {
-    return this.skillManager.listSkills(sessionId);
+  async listSkills(sessionId?: string, kind?: "skill" | "agent"): Promise<SkillInfo[]> {
+    return this.skillManager.listSkills(sessionId, kind);
   }
 
   private resolveSkillPath(skillPath: string): string {
@@ -3550,6 +3579,164 @@ ${agentInstructions}
       output: this.buildSkillPrompt(skill),
       metadata: { skill: { ...skill, isLoaded: true } },
     };
+  }
+
+  // === T01：自定义 Agent（发现 / 索引注入 / 加载）===
+
+  /**
+   * 安全构造 AgentRegistry（fail-safe：构造异常降级为空注册表，不阻塞 SessionManager 装配）。
+   */
+  private createAgentRegistrySafely(): AgentRegistry {
+    try {
+      return new AgentRegistry({
+        projectRoot: this.projectRoot,
+        getResolvedSettings: () => this.getResolvedSettings(),
+        skillManager: this.skillManager,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[agent-registry] 初始化失败，自定义 Agent 能力降级为空列表：${message}`);
+      return new AgentRegistry({
+        projectRoot: this.projectRoot,
+        getResolvedSettings: () => ({}),
+      });
+    }
+  }
+
+  /**
+   * 列出当前可用的自定义 Agent 定义（fail-safe：异常返回空数组）。
+   *
+   * @param sessionId 可选的会话 ID，用于标记已加载的 agent
+   */
+  async listAgents(sessionId?: string): Promise<AgentDefinition[]> {
+    try {
+      return await this.agentRegistry.listAgents(sessionId);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * 追加自定义 Agent 索引 system 消息（镜像 appendSkillCatalogMessage 的变化才追加语义）。
+   *
+   * 索引段仅含 name + role + description（无正文、无绝对路径，架构 §7 共享知识 #1/#3）。
+   * fail-safe：扫描或构建失败时静默跳过，不影响主对话流程。
+   *
+   * @param sessionId 会话 ID
+   */
+  private async appendAgentIndexMessage(sessionId: string): Promise<void> {
+    try {
+      const agents = await this.agentRegistry.listAgents(sessionId);
+      if (agents.length === 0) {
+        return;
+      }
+      const entries = agents.map((agent) => ({
+        name: agent.name,
+        role: agent.role,
+        description: agent.description,
+      }));
+      const content = this.agentRegistry.buildAgentIndexPrompt(agents);
+      const lastIndexMessage = [...this.listSessionMessages(sessionId)]
+        .reverse()
+        .find((message) => message.role === "system" && Array.isArray(message.meta?.agentIndex));
+      // 内容与最近一条索引消息相同则跳过，避免重复刷屏（与 skillCatalog 语义一致）
+      if (lastIndexMessage?.content === content) {
+        return;
+      }
+      this.appendSessionMessage(
+        sessionId,
+        this.buildSystemMessage(sessionId, content, null, false, { agentIndex: entries })
+      );
+    } catch {
+      // fail-safe 降级：agent 索引构建失败不影响主对话流程
+    }
+  }
+
+  /**
+   * 按名称加载自定义 Agent（公开 API，供 CLI /agents 显式调用）。
+   *
+   * 语义镜像 loadSkillByName：未找到 → ok:false；已加载 → 短路；正常 → 返回角色约束 prompt
+   * 并在 metadata.skill 携带 agent 信息（isLoaded 追踪与 skill 同通道）。
+   *
+   * @param sessionId 会话 ID
+   * @param agentName agent 名称（kebab-case）
+   */
+  async loadAgentByName(sessionId: string, agentName: string): Promise<ToolExecutionResult> {
+    try {
+      const agents = await this.agentRegistry.listAgents(sessionId);
+      const agent = agents.find((candidate) => candidate.name === agentName);
+      if (!agent) {
+        return {
+          ok: false,
+          name: "agent",
+          error: `Unknown agent: ${agentName}. Check the available agents index for exact agent names.`,
+        };
+      }
+      if (agent.isLoaded) {
+        return {
+          ok: true,
+          name: "agent",
+          output: `Agent already loaded: ${agent.name}.`,
+        };
+      }
+      return {
+        ok: true,
+        name: "agent",
+        output: this.agentRegistry.buildAgentPrompt(agent),
+        metadata: { skill: { ...agent, isLoaded: true } },
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { ok: false, name: "agent", error: `Agent 加载失败：${message}` };
+    }
+  }
+
+  /**
+   * 批量工具执行中按需加载自定义 Agent（镜像 loadSkillForToolBatch 的批内去重）。
+   *
+   * - 优先走宿主注入的 onLoadAgent 装配点（CLI/Web 自定义注入）；
+   * - 未注入时走内置默认实现：解析 agent → 注入角色约束 system 消息（meta.skill 记录）。
+   * fail-safe：任何异常返回 false（不抛出中断会话）。
+   *
+   * @param sessionId 会话 ID
+   * @param agentName agent 名称
+   * @param loadedAgentNames 本批次已加载的 agent 名集合（批内去重）
+   * @returns 是否加载成功
+   */
+  private async loadAgentForTool(
+    sessionId: string,
+    agentName: string,
+    loadedAgentNames: Set<string>
+  ): Promise<boolean> {
+    if (loadedAgentNames.has(agentName)) {
+      return true;
+    }
+    try {
+      // 宿主注入装配点优先（与 onLoadSkill 的 hooks 透传模式对齐）
+      if (this.onLoadAgentOption) {
+        const ok = await this.onLoadAgentOption(sessionId, agentName);
+        if (ok) {
+          loadedAgentNames.add(agentName);
+        }
+        return ok;
+      }
+      const result = await this.loadAgentByName(sessionId, agentName);
+      if (!result.ok) {
+        return false;
+      }
+      const skillMeta = this.getToolResultSkill(result.metadata);
+      if (!skillMeta) {
+        return false;
+      }
+      // 注入角色约束 system 消息（meta.skill 记录，isLoaded 追踪覆盖）
+      const message = this.buildSkillMessage(sessionId, result.output ?? "", skillMeta);
+      this.appendSessionMessage(sessionId, message);
+      this.onAssistantMessage(message, true);
+      loadedAgentNames.add(agentName);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   getActiveSessionId(): string | null {
@@ -3739,6 +3926,8 @@ ${agentInstructions}
         matchedSkills.map((skill) => ({ name: skill.name, description: skill.description }))
       )
     );
+    // T01：追加自定义 Agent 索引段（type:agent 条目只进 agent 索引，不进 skill 目录）
+    await this.appendAgentIndexMessage(sessionId);
 
     this.activeSessionId = sessionId;
     await this.activateSession(sessionId, controller);
@@ -4106,6 +4295,8 @@ ${agentInstructions}
         matchedSkills.map((skill) => ({ name: skill.name, description: skill.description }))
       )
     );
+    // T01：追加自定义 Agent 索引段（type:agent 条目只进 agent 索引，不进 skill 目录）
+    await this.appendAgentIndexMessage(sessionId);
     this.activeSessionId = sessionId;
     await this.activateSession(sessionId, controller);
   }
@@ -9829,6 +10020,8 @@ ${agentInstructions}
   ): Promise<{ waitingForUser: boolean; failedCount: number; succeededCount: number }> {
     // 上游 v0.3.1：记录本批次已加载的技能名（避免同批次重复加载）
     const loadedSkillNames = new Set<string>();
+    // T01：记录本批次已加载的自定义 Agent 名（批内去重，镜像 loadedSkillNames）
+    const loadedAgentNames = new Set<string>();
     // 修复"工具调用卡死"2026-10-03：从 settings 解析 bash 超时（毫秒），
     // 透传到 hooks.bashTimeoutMs → executor → handler。
     // getResolvedSettings 是 lazy 解析的，每次 appendToolMessages 都重新取一次
@@ -9854,6 +10047,8 @@ ${agentInstructions}
       // 上游 v0.3.1 新增 hooks：插件限流记录 + 批内技能按需加载
       onPluginRateLimitExceeded: (tool) => this.recordPluginRateLimitExceeded(sessionId, tool),
       onLoadSkill: (skillName) => this.loadSkillForToolBatch(sessionId, skillName, loadedSkillNames),
+      // T01：agent 工具按需加载自定义 Agent（批内去重，镜像 onLoadSkill）
+      onLoadAgent: (agentName) => this.loadAgentForTool(sessionId, agentName, loadedAgentNames),
       // 修复"工具调用卡死"2026-10-03：注入 bash 超时（毫秒）到 handler 上下文
       bashTimeoutMs: bashTimeoutMsFromSettings,
       // 一期 US-EH-001：执行历史记录（fire-and-forget，不阻塞主循环）
@@ -10008,6 +10203,8 @@ ${agentInstructions}
         matchedSkills.map((skill) => ({ name: skill.name, description: skill.description }))
       )
     );
+    // T01：追加自定义 Agent 索引段（type:agent 条目只进 agent 索引，不进 skill 目录）
+    await this.appendAgentIndexMessage(sessionId);
   }
 
   private buildToolParamsSnippet(toolFunction: unknown | null): string {
