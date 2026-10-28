@@ -31,6 +31,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { execFileSync } from "node:child_process";
 
 import {
   P5PlanStageHandler,
@@ -533,14 +534,78 @@ test("T-A7. 3.6 恢复守卫：本运行此前迭代已执行过该卡 → 不�
   }
 });
 
-test("T-A8. 3.6 恢复守卫：落盘失败（真实只读目录）→ fail-closed 维持 TASKS_BLOCKED，不伪造成功", async () => {
+/**
+ * 让目录真实拒绝新建文件，返回恢复函数；两种真实手段都拦不住时返回 null。
+ *
+ * 背景（2026-10-21 root 环境适配）：原实现用 chmod 0o555 模拟"落盘失败"，
+ * 但 root（含 CAP_DAC_OVERRIDE）无视目录权限位 → 原子写照常成功，测试在
+ * root CI 里必然失败（模拟失效，非产品缺陷）。策略：
+ * 1. 首选 `chattr +i`（ext4 immutable，root 也拦，需 CAP_LINUX_IMMUTABLE）；
+ * 2. 非 root 环境退回 chmod 0o555（对普通用户有效）；
+ * 3. 选定后**真实验证**目录确实拒绝新建（探针文件），拦不住则返回 null，
+ *    由调用方 t.skip——诚实跳过优于伪造断言，更优于伪失败。
+ *
+ * @param dir 目标目录（tasks.md 所在目录）
+ * @returns 恢复函数（撤销锁定，保证 cleanup 可递归删除）；无法模拟返回 null
+ */
+function blockDirForNewFiles(dir: string): (() => void) | null {
+  // 手段 1：chattr +i（root 也拦）
+  try {
+    execFileSync("chattr", ["+i", dir], { stdio: "ignore" });
+    if (!dirAcceptsNewFile(dir)) {
+      return () => {
+        try {
+          execFileSync("chattr", ["-i", dir], { stdio: "ignore" });
+        } catch {
+          // 解锁失败：留给上层/清理阶段处理
+        }
+      };
+    }
+    // 加了但拦不住（非常规文件系统）：回滚后换手段
+    try {
+      execFileSync("chattr", ["-i", dir], { stdio: "ignore" });
+    } catch {
+      // 忽略
+    }
+  } catch {
+    // 无 chattr 或不支持（tmpfs/无 CAP_LINUX_IMMUTABLE）：换手段
+  }
+  // 手段 2：chmod 555（对非 root 有效）
+  const prevMode = fs.statSync(dir).mode;
+  fs.chmodSync(dir, 0o555);
+  if (!dirAcceptsNewFile(dir)) {
+    return () => fs.chmodSync(dir, prevMode & 0o777);
+  }
+  fs.chmodSync(dir, prevMode & 0o777);
+  return null;
+}
+
+/** 探针：目录当前是否接受新建文件（可写则 true） */
+function dirAcceptsNewFile(dir: string): boolean {
+  const probe = path.join(dir, `.probe-${process.pid}-${Date.now()}`);
+  try {
+    fs.writeFileSync(probe, "x", "utf8");
+    fs.rmSync(probe, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test("T-A8. 3.6 恢复守卫：落盘失败（真实只读目录）→ fail-closed 维持 TASKS_BLOCKED，不伪造成功", async (t) => {
   const projectRoot = createTempProject("eag-tokenabort-a8-");
   try {
     const objective = "修复登录页面空指针";
     writeBlockedWithCompletedCard(projectRoot, objective, "AUTO");
     const tasksFilePath = path.join(projectRoot, ".eag", "p5", "tasks.md");
-    // 真实触发落盘失败：tasks.md 所在目录改为只读（原子写需在目录内建临时文件）
-    fs.chmodSync(path.dirname(tasksFilePath), 0o555);
+    // 真实触发落盘失败：锁定 tasks.md 所在目录使其拒绝新建文件（原子写需在
+    // 目录内建临时文件）。root 环境 chmod 555 无效，按 chattr +i → chmod
+    // 降级并在无效时诚实 skip，见 blockDirForNewFiles。
+    const restore = blockDirForNewFiles(path.dirname(tasksFilePath));
+    if (restore === null) {
+      t.skip("当前环境无法真实模拟目录拒绝写入（chattr 不可用且 chmod 被权限能力绕过）");
+      return;
+    }
     const handler = new P5PlanStageHandler();
     try {
       const result = await handler.handle(buildPlanContext(projectRoot, objective));
@@ -554,8 +619,8 @@ test("T-A8. 3.6 恢复守卫：落盘失败（真实只读目录）→ fail-clos
       const taskCard = result.artifacts["taskCard"] as { id: string } | null;
       assert.equal(taskCard, null, "落盘失败时不得选出任务卡（内存态与磁盘态不得分裂）");
     } finally {
-      // 恢复目录权限，保证 cleanup 可递归删除
-      fs.chmodSync(path.dirname(tasksFilePath), 0o755);
+      // 解锁目录，保证后续断言与 cleanup 可正常进行
+      restore();
     }
     // 磁盘原样：completed 未被半途篡改
     assert.equal(readCardStatus(tasksFilePath, "T-001"), "completed", "落盘失败时磁盘必须原样");
@@ -572,7 +637,9 @@ test("T-A9. 5d blocked 报告：根因假设与建议方案透出真实阻塞构
   const projectRoot = createTempProject("eag-tokenabort-a9-");
   try {
     // 单张 blocked 卡，标题与 objective 互含（titleEmbedded → 3.4/3.5 守卫不干扰；
-    // 非 completed → 3.6 恢复守卫不触发）→ 纯粹的 TASKS_BLOCKED → 5d failed 路径
+    // 非 completed → 3.6 恢复守卫不触发）→ 纯粹的 TASKS_BLOCKED → 5d failed 路径。
+    // 2026-10-21 调整：requirement 改为手写（F-001）——3.8 blocked AUTO 自愈守卫
+    // 只重置 AUTO 同题卡，手写 blocked 是人工有意决策不碰，保住本用例的纯阻塞场景。
     const objective = "修复登录页面空指针";
     fs.writeFileSync(
       path.join(projectRoot, ".eag", "p5", "tasks.md"),
@@ -580,7 +647,7 @@ test("T-A9. 5d blocked 报告：根因假设与建议方案透出真实阻塞构
         "# 任务清单",
         "",
         `## T-001 ${objective}`,
-        "- requirement: AUTO",
+        "- requirement: F-001",
         "- status: blocked",
         "- dependencies:",
         "- files:",

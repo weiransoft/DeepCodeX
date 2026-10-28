@@ -20,7 +20,16 @@ if (!existsSync(generatedCliDir)) {
 try {
   const gitHash = execSync("git rev-parse --short HEAD", { encoding: "utf-8" }).trim();
   if (gitHash) {
-    gitCommitInfo = gitHash;
+    // 构建自检（2026-10-22）：工作区有未提交改动时追加 -dirty 标记，
+    // 与启动横幅一起杜绝"已修 ≠ 已上线"误判
+    let dirty = false;
+    try {
+      // -uno：只看已跟踪文件的改动；untracked 杂物（web 缓存/pycache）不误报 dirty
+      dirty = execSync("git status --porcelain --untracked-files=no", { encoding: "utf-8" }).trim().length > 0;
+    } catch {
+      // ignore：dirty 检测失败不影响 hash 标注
+    }
+    gitCommitInfo = dirty ? `${gitHash}-dirty` : gitHash;
   }
 
   const pkg = JSON.parse(readFileSync(join(root, "packages", "cli", "package.json"), "utf-8"));

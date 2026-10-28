@@ -665,33 +665,32 @@ test("T8. 规划器 stop → plan taskCard=null + reason=planner-stop → 终态
 });
 
 // ============================================================================
-// 5. T9：预算闸门——perTaskBudget < 3000 不发起规划请求
+// 5. T9（2026-10-20 R2b 重写）：规划器闸门与 perTaskBudget 解耦
 // ============================================================================
 
-test("T9. perTaskBudget < 3000 → 规划闸门关闭，不发起请求，本地选卡", async () => {
+test("T9. perTaskBudget < 3000 → 规划器照常发起请求（R2b：预算不再闸门）", async () => {
+  // 旧语义（已废弃）：perTaskBudget < 3000 → 闸门关闭零请求。该闸门在
+  // run 68acea2de182 事故中恰恰关死了"最失败后最需要 replan"的时刻
+  // （perTaskBudget = max(0, 名义-已用) 烧穿后归零），是 blocked 死锁
+  // 无法自愈的直接原因之一。R2b 后闸门只检查 planIteration 能力。
   const projectRoot = createTempProject("eag-dynaplan-t9-");
   try {
     writeHandwrittenCards(projectRoot, [{ id: "T-001", title: "修复登录页面空指针", file: "src/services/Login.ts" }]);
-    const client = new StubLlmClient([
-      // 任何响应都不应被触达：闸门必须在请求之前关闭
-      { content: "不应该被执行到的规划回复" },
-    ]);
+    const client = new StubLlmClient([{ content: '{"action":"none","reasoning":"本地选卡合理"}' }]);
     const executor = buildLlmExecutor(projectRoot, client);
     const handler = new P5PlanStageHandler();
 
     const result = await handler.handle(
       buildPlanContext(projectRoot, "修复登录页面空指针", {
         taskExecutor: executor,
-        perTaskBudget: 2500, // 低于 MIN_PLANNER_TOKEN_BUDGET=3000
+        perTaskBudget: 2500, // 旧口径下低于 MIN_PLANNER_TOKEN_BUDGET=3000
       })
     );
 
     assert.equal(result.kind, "success");
-    assert.equal(client.requestCount, 0, "预算不足时不得发起规划请求");
-    assert.equal(result.tokensUsed, 0, "未发生请求，tokensUsed 必须为 0");
-    assert.equal(result.artifacts["plannerAction"], "skipped", "plannerAction 应留痕 skipped");
+    assert.equal(client.requestCount, 1, "预算剩余 2500 也必须发起规划请求（闸门只查能力）");
     const taskCard = result.artifacts["taskCard"] as { id: string } | null;
-    assert.equal(taskCard!.id, "T-001", "本地选卡兜底生效");
+    assert.equal(taskCard!.id, "T-001", "none 决策下本地选卡结果保持");
   } finally {
     cleanup(projectRoot);
   }

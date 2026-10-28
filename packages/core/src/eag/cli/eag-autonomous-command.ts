@@ -41,6 +41,7 @@
 
 import type { AutonomousOrchestrator } from "../p5/autonomous-orchestrator";
 import type { AutonomousRunRequest, AutonomousRunResult } from "../p5/autonomous-orchestrator";
+import { parseEagArgs } from "./eag-args";
 
 // ============================================================================
 // 1. 常量定义（不可变，Object.freeze 冻结）
@@ -157,6 +158,11 @@ export interface EagAutonomousRequest {
   /** 连续失败 abort 阈值（默认 3，正整数） */
   readonly consecutiveFailureAbort: number;
   /**
+   * 宿主中断信号（2026-10-22 停止修复）：由 session 层注入本轮 controller.signal，
+   * 透传至 AutonomousRunRequest.signal，使"停止生成"能熔断自主循环。
+   */
+  readonly signal?: AbortSignal;
+  /**
    * 每轮迭代摘要回调（修复"eag 全程主会话零输出"2026-10-03）。
    * 由 session 层在构造请求时注入，透传到 AutonomousRunRequest.onIteration；
    * 命令字符串解析路径（extractEagAutonomousRequestFromPrompt）不产生该字段。
@@ -250,20 +256,9 @@ export function extractEagAutonomousRequestFromPrompt(prompt: string): EagAutono
   //   |(?!--)([^\s"']+)                           裸值（不以 -- 开头）→ 捕获组 4
   //   ))?                                         整个值组可选（支持 flag 形式）
   // - (?=\s|$)                                    前瞻断言：匹配结束位置必须是空白或字符串结尾
-  const argPattern = /--([\w][\w-]*)(?:[=\s]+(?:"([^"]*)"|'([^']*)'|(?!--)([^\s"']+)))?(?=\s|$)/g;
-  const args: Record<string, string | true> = {};
-
-  // 注意：重复参数首次匹配生效（后续覆盖被跳过）
-  let match: RegExpExecArray | null;
-  while ((match = argPattern.exec(argsPart)) !== null) {
-    const key = match[1];
-    // 三种值形式：双引号（match[2]）、单引号（match[3]）、裸值（match[4]）；均未匹配则为 flag（true）
-    const value = match[2] ?? match[3] ?? match[4] ?? true;
-    // 仅首次匹配生效（重复参数被跳过）
-    if (!(key in args)) {
-      args[key] = value;
-    }
-  }
+  // 参数解析收敛到共享实现 parseEagArgs（2026-10-21，eag-args）：支持值内转义引号 \"，
+  // 修复旧内联正则遇 goal 文本含内嵌双引号时误报「缺少必填参数 --goal」的事故。
+  const args: Record<string, string | true> = parseEagArgs(argsPart);
 
   // 步骤 4：校验必填参数 --goal（非空字符串）
   const goalRaw = args["goal"];
@@ -474,6 +469,8 @@ export class EagAutonomousCommandHandler {
       testCommand: request.testCommand,
       testTimeoutSec: request.testTimeoutSec,
       consecutiveFailureAbort: request.consecutiveFailureAbort,
+      // 停止修复（2026-10-22）：透传宿主中断信号到编排器
+      signal: request.signal,
       // 进度回写（修复"eag 全程主会话零输出"2026-10-03）：
       // 透传调用方（session 层）注入的每轮迭代回调，orchestrator 每轮收尾后
       // 把阶段摘要推回主会话。可选字段——未注入时保持旧行为（仅 notes 落盘）。

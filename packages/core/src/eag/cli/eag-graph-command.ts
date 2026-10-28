@@ -51,6 +51,7 @@ import type { GraphLoopOrchestratorOptions } from "../graph/graph-loop-protocols
 import { GraphBuilder } from "../graph/graph-builder";
 import { GraphLifecycleManager } from "../graph/graph-lifecycle-manager";
 import { createGraphDebugger } from "../graph/graph-debug";
+import { parseEagArgs } from "./eag-args";
 
 // ============================================================================
 // 1. 常量定义（不可变，Object.freeze 冻结）
@@ -251,21 +252,7 @@ export function extractEagGraphRequestFromPrompt(prompt: string): EagGraphReques
   //   |(?!--)([^\s"']+)                           裸值（不以 -- 开头）→ 捕获组 4
   //   ))?                                         整个值组可选（支持 flag 形式）
   // - (?=\s|$)                                    前瞻断言：匹配结束位置必须是空白或字符串结尾
-  const argPattern = /--([\w][\w-]*)(?:[=\s]+(?:"([^"]*)"|'([^']*)'|(?!--)([^\s"']+)))?(?=\s|$)/g;
-  const args: Record<string, string | true> = {};
-
-  // 注意：重复参数首次匹配生效（后续覆盖被跳过）
-  let match: RegExpExecArray | null;
-  while ((match = argPattern.exec(argsPart)) !== null) {
-    const key = match[1];
-    // 三种值形式：双引号（match[2]）、单引号（match[3]）、裸值（match[4]）；均未匹配则为 flag（true）
-    const value = match[2] ?? match[3] ?? match[4] ?? true;
-    // 仅首次匹配生效（重复参数被跳过）
-    if (!(key in args)) {
-      args[key] = value;
-    }
-  }
-
+  const args: Record<string, string | true> = parseEagArgs(argsPart);
   // 步骤 4：校验参数互斥性：--graph-file 与 --inline-graph 不能同时提供
   const graphFileRaw = args["graph-file"];
   const inlineGraphRaw = args["inline-graph"];

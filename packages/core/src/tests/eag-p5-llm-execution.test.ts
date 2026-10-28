@@ -38,6 +38,7 @@ import {
   P5VerifyStageHandler,
   P5FixStageHandler,
   createSuccessStageResult,
+  createFailedStageResult,
   parseTaskCards,
   buildSynthesizedTasksContent,
   // reason 常量
@@ -791,6 +792,46 @@ test("F1. fix 无 verify 失败：success(no-verify-failure)，不触达执行�
     assert.equal(fix.artifacts["reason"], "no-verify-failure");
     // 执行器只在 dev 被调用 1 次，fix 直通不应再调
     assert.equal(recording.calls.length, 1);
+  } finally {
+    cleanupTempProject(projectRoot);
+  }
+});
+
+test("F1b. fix 识别同轮 dev 失败（R4）：skip 语义透出 dev 失败成因，不再谎称'无需修复'", async () => {
+  // 事故（run 68acea2de182）：dev 失败轮的 fix 输出 ✓"无需修复（verify 阶段
+  // 已通过或无测试结果）"，读者误以为失败已被处理。R4 后 fix 必须如实透出
+  // "dev 阶段本轮执行失败"并给 skip 语义（reason=dev-failed-no-verify-failure）。
+  const projectRoot = createTempProject();
+  try {
+    createTasksFile(projectRoot, 1, "pending");
+    createDeclaredFile(projectRoot, "src/services/Service1.ts");
+    const plan = await new P5PlanStageHandler().handle(buildStageContext(projectRoot, "plan"));
+    // 手搭 dev 失败结果（无轮次标签 → findDevFailure 批内模式命中）
+    const devFailed = createFailedStageResult(
+      "dev",
+      "failed",
+      "任务 T-001 执行失败：段轮数预算耗尽（本段 10 轮已用完）仍未给出终态回复",
+      "段轮数预算耗尽",
+      { reason: DEV_REASON_TASK_EXECUTION_FAILED },
+      [],
+      100,
+      1000
+    );
+
+    const recording = createRecordingTaskExecutor({ changedFiles: [] });
+    const fix = await new P5FixStageHandler().handle(
+      buildStageContext(projectRoot, "fix", {
+        prevResults: Object.freeze([plan, devFailed]),
+        taskExecutor: recording.executor,
+      })
+    );
+
+    assert.equal(fix.kind, "success", "fix 无测试可修仍 success（skip 语义），但文案必须诚实");
+    assert.equal(fix.artifacts["reason"], "dev-failed-no-verify-failure");
+    assert.equal(fix.artifacts["devFailed"], true);
+    assert.ok(fix.summary.includes("dev 阶段本轮执行失败"), `summary 必须透出 dev 失败，实际：${fix.summary}`);
+    assert.ok(!fix.summary.includes("无需修复"), "不得再出现误导性'无需修复'文案");
+    assert.equal(recording.calls.length, 0, "dev 失败无测试失败可分析，fix 不触达执行器");
   } finally {
     cleanupTempProject(projectRoot);
   }

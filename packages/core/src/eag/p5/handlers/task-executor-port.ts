@@ -103,6 +103,12 @@ export interface P5TaskExecutionInput {
    */
   readonly abortFlagPath: string;
   /**
+   * 宿主中断信号（2026-10-22 停止修复，可选）：与 abortFlagPath 双通道——
+   * signal abort 立即中断进行中的 LLM 请求与工具批（进程内即时），
+   * 标志文件轮询保留为跨进程兜底。fixtures 不传时行为与旧版一致。
+   */
+  readonly signal?: AbortSignal;
+  /**
    * 本次任务执行的 Token 预算上限（可选，2026-10-08 T-009/T-010 事故修复新增）。
    *
    * 由编排器按运行剩余预算（maxTokens - 已消耗 token）经 P5StageContext 透传到
@@ -251,6 +257,8 @@ export interface P5PlanIterationInput {
   readonly remainingTokenBudget: number;
   /** abort 标志文件绝对路径（规划请求发起前检查，存在则直接 ok=false 不发请求） */
   readonly abortFlagPath: string;
+  /** 宿主中断信号（2026-10-22 停止修复）：abort 时跳过规划请求直接返回 ok=false */
+  readonly signal?: AbortSignal;
 }
 
 /** plan 阶段动态规划结果（不可变；ok=false 时除 error/tokensUsed 外字段不可信） */

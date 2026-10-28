@@ -8,6 +8,7 @@
 
 import { validateHost, validatePort, resolveWebSettings } from "@vegamo/deepcode-web/config";
 import { startWebServer } from "@vegamo/deepcode-web/server";
+import { CLI_VERSION, GIT_COMMIT_INFO } from "./generated/git-commit";
 import { writeStderrLine, writeStdoutLine } from "./utils/stdio-helpers";
 
 /** runWebCommand 选项（来自 CLI flag，可覆盖 settings 配置） */
@@ -67,6 +68,9 @@ export async function runWebCommand(options: WebCommandOptions = {}): Promise<nu
   // 4. 启动服务器并打印访问地址
   const running = await startWebServer(resolved);
   writeStdoutLine(`DeepCodeX Web UI: http://${resolved.host}:${running.port}`);
+  // 部署自检（2026-10-22 事故复盘：修复提交 cf0b8276 未编译部署导致"已修仍复发"）：
+  // 启动即打印构建对应的 git 版本（含 -dirty 标记），杜绝"已修 ≠ 已上线"错觉。
+  writeStdoutLine(`Build: v${CLI_VERSION} @ ${GIT_COMMIT_INFO}`);
   writeStdoutLine("按 Ctrl+C 退出。");
 
   // 5. SIGINT 优雅关闭：释放会话池引擎 + 关闭 HTTP 服务后返回

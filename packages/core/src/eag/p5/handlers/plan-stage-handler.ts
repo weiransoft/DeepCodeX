@@ -34,8 +34,8 @@ import * as path from "node:path";
 import type { P5StageContext, P5StageHandler, P5StageResult } from "./types";
 import { buildGuardContext, createSuccessStageResult, createFailedStageResult, toGuardRecords } from "./types";
 import type { TaskCard } from "../guards/types";
-import type { P5PlanIterationTask } from "./task-executor-port";
 import { atomicWriteTextFile } from "../common/atomic-file";
+import { readForeignActiveLeaseTaskIds } from "../task-lease";
 // 领域专家匹配器集成：plan 阶段为任务卡匹配最合适的领域专家（可选增强）
 // 注：DomainExpertMatchResult 类型定义在 team/types.ts，需从正确路径导入
 import type { DomainExpertMatchResult } from "../../../team/types.js";
@@ -120,15 +120,6 @@ const GUARD_MAX_ROUNDS = 10;
 // ============================================================================
 // 1.1 LLM 动态规划常量（2026-10-09 F-A2，docs/dev/eag-p5-llm-dynamic-planning.md）
 // ============================================================================
-
-/**
- * plan 阶段 LLM 规划的最小剩余预算闸门。
- *
- * 剩余预算低于该值时连一次最小规划请求都发不起（system 提示 + 简报 ≈ 数千
- * 字符 / 3.5 ≈ 1k tokens，留输出余量），此时跳过 LLM 规划直接走本地规则——
- * 后续 dev 阶段的执行器 pre-flight 预检也会熔断，plan 不必白烧。
- */
-const MIN_PLANNER_TOKEN_BUDGET = 3000;
 
 /** 规划简报中 notesSnapshot 的截断长度（跨轮笔记可能很长，只保留近期要点） */
 const PLANNER_NOTES_MAX_CHARS = 4000;
@@ -482,6 +473,13 @@ export class P5PlanStageHandler implements P5StageHandler {
         );
       }
 
+      // R3（2026-10-20 并发死锁修复，run 68acea2de182）：其他存活 run 声明为
+      // 在途的任务卡集合（租约 mtime < TTL，读 .eag/p5/leases/*.json）。blocked
+      // 落盘在本地规则下是单向门（pickNextPendingTask 只认 pending，无解锁通道），
+      // 把并发 run 正在 dev 的卡在途期 blocked 会把对方推进永久死锁。消费方：
+      // 3.5 AUTO 守卫 blocked 前避让、LLM replan 合并 blocked 改写避让。
+      const foreignInFlight = readForeignActiveLeaseTaskIds(ctx.projectRoot, ctx.runId);
+
       // 3. 挑选下一张 pending 任务卡（依赖已满足）
       //    selectedCards/completedIds 为可变工作集：3.4 stale-state 守卫追加
       //    合成卡后会被替换为重新解析结果；taskCards 保持只读冻结不被篡改。
@@ -586,6 +584,9 @@ export class P5PlanStageHandler implements P5StageHandler {
         const objectiveText = typeof ctx.objective === "string" ? ctx.objective.trim() : "";
         // 守卫落盘失败原因（若有）——供循环后的诚实兜底构造错误信息
         let guardWriteError: string | null = null;
+        // foreignInFlight 已在选卡后统一定义（replan 合并共用），见 3.3 注释块
+        // 因"他 run 在途"而放弃拦截的卡（供 fail-closed 兜底给出诚实成因）
+        let leaseSkippedCard: string | null = null;
         // 有界拦截循环（2026-10-08 T-009/T-010 事故修复）：旧实现单发拦截后不复查
         // 新选中卡——落盘成功但下一张仍是无关 AUTO 旧卡时直接放行 dev 执行错卡。
         // 每轮：选中无关 AUTO 卡 → blocked 落盘 +（必要时）追加合成卡 → 回读重选卡。
@@ -602,6 +603,68 @@ export class P5PlanStageHandler implements P5StageHandler {
             `${nextTask.title} ${nextTask.requirementId}`,
           ]);
           if (titleEmbedded || singleCardRelevance >= OBJECTIVE_RELEVANCE_MIN_RATIO) break;
+          // R3 避让：该卡是其他存活 run 的在途执行卡——不得 blocked（对方正在
+          // 执行，blocked 落盘 = 对方下一轮 plan 直接判死）。本轮放弃拦截，
+          // 交由下方 fail-closed 兜底以"他 run 在途"的诚实口径收口。
+          if (foreignInFlight.has(nextTask.id)) {
+            leaseSkippedCard = nextTask.id;
+            ctx.logger?.(
+              `plan AUTO 卡语义守卫：${nextTask.id} 与 objective 无关，但该卡是其他存活 run 的在途执行卡` +
+                `（租约避让，2026-10-20 并发死锁修复），本 run 不做 blocked 拦截`,
+              "warn"
+            );
+            // E2E 增强（2026-10-21）：在途卡不可拦截 ≠ 本 run 无事可做——清单中
+            // 可能存在本 run 可执行的其他卡（3.4 刚追加的本目标合成卡 / 历史未消费
+            // 的相关卡）。排除全部他 run 在途卡后选下一张继续（纯内存选择，磁盘
+            // 不碰对方卡），两 run 各执行各的卡并行推进；无备选时落入下方
+            // fail-closed（诚实"对方在途，本 run 无法开工"收口）。
+            // 注意必须从磁盘重读（E2E 双并发验证发现）：selectedCards 是进入
+            // handler 时的旧快照，不含 3.4 守卫刚追加的本目标合成卡——旧快照
+            // 选择会让避让路径永远看不到 3.4 的新卡，B run 被确定性熔断冤杀。
+            // 与拦截循环的 reparsed 更新同构：selectedCards/completedIds 同步到
+            // 磁盘最新态（磁盘是唯一事实源，含 3.4 刚追加的本 run 合成卡）
+            const latestCards: ParsedTaskCard[] = [];
+            let altNext: ParsedTaskCard | null = null;
+            try {
+              const reparsedLatest = parseTaskCards(fs.readFileSync(tasksFilePath, "utf8"));
+              latestCards.push(...reparsedLatest);
+              altNext = pickNextPendingTask(
+                latestCards.filter((c) => !foreignInFlight.has(c.id)),
+                new Set(latestCards.filter((c) => c.status === "completed").map((c) => c.id))
+              );
+            } catch {
+              altNext = null; // 重读失败按无备选处理，落入 fail-closed
+            }
+            const latestForState: ParsedTaskCard[] = latestCards;
+            if (altNext !== null) {
+              ctx.logger?.(
+                `plan AUTO 卡语义守卫：排除他 run 在途卡后为本 run 选中备选卡 ${altNext.id}「${altNext.title}」` +
+                  `继续执行（并发不互扰）`,
+                "warn"
+              );
+              selectedCards = latestForState;
+              completedIds.clear();
+              for (const c of latestForState) {
+                if (c.status === "completed") completedIds.add(c.id);
+              }
+              nextTask = altNext;
+              continue;
+            }
+            // 无备选（E2E 双并发验证发现的第二处冤杀）：排除外来在途卡后本 run
+            // 视野已无 pending 卡——典型是本 run 目标卡已全部消费完，只剩他 run
+            // 在途的无关卡。此时把外来卡从本 run 视野剔除（不 blocked、不执行、
+            // 不计入统计），nextTask 置空交由下游 allCompleted/TASKS_BLOCKED 按
+            // 本地卡真实状态诚实收尾。若不剔除，"目标已完成"的 run 会因外来卡
+            // 避让 fail-closed 被确定性熔断冤杀（正确终态应为 completed）。
+            const foreignFreeCards = latestForState.filter((c) => !foreignInFlight.has(c.id));
+            selectedCards = foreignFreeCards;
+            completedIds.clear();
+            for (const c of foreignFreeCards) {
+              if (c.status === "completed") completedIds.add(c.id);
+            }
+            nextTask = null;
+            break;
+          }
           ctx.logger?.(
             `plan AUTO 卡语义无关守卫：${nextTask.id}「${nextTask.title}」与 objective「${objectiveText}」` +
               `相关性 ${singleCardRelevance.toFixed(2)} < 阈值 ${OBJECTIVE_RELEVANCE_MIN_RATIO.toFixed(2)}，` +
@@ -682,9 +745,11 @@ export class P5PlanStageHandler implements P5StageHandler {
           ]);
           if (!finalTitleEmbedded && finalRelevance < OBJECTIVE_RELEVANCE_MIN_RATIO) {
             const cause =
-              guardWriteError !== null
-                ? `tasks.md 写入失败（${guardWriteError}）`
-                : `无关旧 AUTO 卡数量超过单轮拦截上限（${GUARD_MAX_ROUNDS} 轮）`;
+              leaseSkippedCard !== null
+                ? `该卡为其他存活 run 的在途执行卡（租约避让），本 run 无法安全拦截替换，请等待对方完成或清理其租约`
+                : guardWriteError !== null
+                  ? `tasks.md 写入失败（${guardWriteError}）`
+                  : `无关旧 AUTO 卡数量超过单轮拦截上限（${GUARD_MAX_ROUNDS} 轮）`;
             ctx.logger?.(
               `plan AUTO 卡语义守卫：${nextTask.id} 与 objective 仍未消除无关性（${cause}），fail-closed 避免错卡执行`,
               "error"
@@ -927,11 +992,14 @@ export class P5PlanStageHandler implements P5StageHandler {
       let plannerReasoning = "";
       const planExecutor = ctx.taskExecutor ?? null;
       const planIterationFn = planExecutor?.planIteration;
-      // 前置闸门：执行器无 planIteration 能力（旧宿主/测试替身）或剩余预算
-      // 不足以发起一次最小规划请求时，跳过 LLM 规划直接走本地规则
-      const plannerGateOpen =
-        typeof planIterationFn === "function" &&
-        (ctx.perTaskBudget === undefined || ctx.perTaskBudget >= MIN_PLANNER_TOKEN_BUDGET);
+      // 前置闸门：执行器无 planIteration 能力（旧宿主/测试替身）时跳过 LLM 规划。
+      // 2026-10-20 R2b 修复（run 68acea2de182）：原实现以 perTaskBudget ≥ 3000
+      // 作为闸门——而 perTaskBudget = max(0, 名义预算 - 已用) 在烧穿后归零，
+      // 恰恰是"上一轮失败、最需要 replan 解锁 blocked"的时刻闸门被关死
+      // （实测 iter1 plan 13ms 判死、0 次 LLM 调用）。规划请求是固定小请求
+      // （PLANNER_MAX_TOKENS=2048 封顶），与运行级预算无耦合，闸门判据只保留
+      // 能力检查；预算门槛由执行器侧 planIteration 的客户端与失败兜底承担。
+      const plannerGateOpen = typeof planIterationFn === "function";
       if (plannerGateOpen) {
         // 可执行卡集合（与 pickNextPendingTask 同口径：pending + 依赖已满足），
         // select 决策只能从该集合选（架构师审查 P1-2 修正：防止选中依赖未满足的卡）
@@ -966,6 +1034,8 @@ export class P5PlanStageHandler implements P5StageHandler {
             previousRunContext,
             remainingTokenBudget: ctx.perTaskBudget ?? Number.MAX_SAFE_INTEGER,
             abortFlagPath: ctx.abortFlagPath ?? "",
+            // 停止修复（2026-10-22）：宿主信号透传规划器（abort 时跳过规划请求）
+            signal: ctx.signal,
           });
           // 规划调用的 token 消耗诚实计入 plan 阶段结果（此前 plan 恒 0）
           plannerTokensUsed = planResult.tokensUsed;
@@ -1025,6 +1095,12 @@ export class P5PlanStageHandler implements P5StageHandler {
                     existing.requirementId === "AUTO" &&
                     (entry.status === "pending" || entry.status === "blocked")
                   ) {
+                    // R3 防御纵深（2026-10-20）：replan 同样不得把其他存活 run 的
+                    // 在途卡改 blocked（租约避让，与 3.5 守卫同一事实源）
+                    if (entry.status === "blocked" && foreignInFlight.has(entry.id)) {
+                      ctx.logger?.(`plan replan：${entry.id} 为他 run 在途卡（租约避让），跳过 blocked 改写`, "warn");
+                      continue;
+                    }
                     merged = markTaskCardStatusInContent(merged, entry.id, entry.status);
                   }
                 } else if (entry.title !== undefined && entry.title.trim().length > 0) {

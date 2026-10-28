@@ -1305,12 +1305,13 @@ test("E18. 压缩续跑永不因 Token 终止：永不给终态的任务由段�
     // "Token 预算超限"诚实失败（有界性靠 Token 上限约束）。
     // 2026-10-20 起新语义：Token 消耗不再终止运行——压缩续跑折叠无次数
     // 上限（maxRollovers=Infinity）、无绝对上限熔断，"不无限续命"的有界性
-    // 完全交给**非 Token 防线**：全局轮数硬上限（maxToolRounds=40）与段轮数
-    // 预算（rollover 重算后的段内轮数配额）。本场景每段 segmentRoundBudget=4
-    // （段额度 2400 / 均耗 600），首段 2 请求 + 续跑段 4 请求 = 6 请求后
-    // 段轮数预算耗尽 → 诚实 failure（永不给终态的任务必须停，但停因是
-    // 轮数防线而非 Token 预算）。
-    const script = Array.from({ length: 12 }, (_unused, index) => ({
+    // 完全交给**非 Token 防线**：全局轮数硬上限（maxToolRounds=40）。
+    // 2026-10-20 R1 修复后再更新：段轮数预算改为 post-fold 成本口径 +
+    // 全局余量下限（computePostFoldSegmentRoundBudget），旧"均耗折算把新段
+    // 压到 4 轮"的收口点消失——本场景每段折叠前跑 3 轮（80% 门禁），折叠轮
+    // 不占名额，防线推进到**全局硬上限 40 轮**收口（路径 A）。永不给终态的
+    // 任务必须停，停因是轮数防线而非 Token 预算；有界性由 40 轮承担。
+    const script = Array.from({ length: 45 }, (_unused, index) => ({
       content: "",
       toolCalls: [{ name: "write", args: { file_path: targetFile, content: `r${index}\n` } }],
       usage: burn,
@@ -1322,20 +1323,25 @@ test("E18. 压缩续跑永不因 Token 终止：永不给终态的任务由段�
 
     const result = await executor.executeTask({ ...buildExecutionInput(projectRoot), perTaskBudget: 1000 });
 
-    assert.equal(result.success, false, "永不给终态的任务必须诚实失败（段轮数收口）");
+    assert.equal(result.success, false, "永不给终态的任务必须诚实失败（轮数防线收口）");
     assert.ok(
-      result.error !== undefined && result.error.includes("段轮数预算耗尽"),
-      `error 应为段轮数预算耗尽（非 Token 防线收口），实际：${result.error}`
+      result.error !== undefined &&
+        (result.error.includes("工具循环达全局硬上限") ||
+          result.error.includes("段轮数预算耗尽") ||
+          result.error.includes("死折叠")),
+      `error 应为轮数防线收口（全局硬上限或段轮数），实际：${result.error}`
     );
     // Token 终止口径必须绝迹：错误不得再出现"Token 预算超限/绝对上限"
     assert.ok(
       !result.error!.includes("Token 预算超限") && !result.error!.includes("绝对上限"),
       `Token 预算终止口径应绝迹，实际：${result.error}`
     );
-    // 有界性（防失控不变量，2026-10-20 起由轮数防线承担）：首段 2 请求 +
-    // 续跑段 3 请求 = 5 请求后段轮数收口（响应后压缩续跑段轮数预算收口点）
-    assert.equal(result.llmRequests, 5, `首段 2 请求 + 续跑段 3 请求 = 5 请求后段轮数收口，实际 ${result.llmRequests}`);
-    assert.equal(result.tokensUsed, 3000, "累计 = 5 请求 × 600");
+    // 有界性（防失控不变量）：收口点必须 ≤ maxToolRounds=40
+    assert.ok(result.llmRequests <= 40, `收口点不得超过全局轮数硬上限 40，实际 ${result.llmRequests}`);
+    assert.ok(
+      result.llmRequests >= 30,
+      `post-fold 口径下应显著超越旧 5 请求收口（防线推进到全局），实际 ${result.llmRequests}`
+    );
   } finally {
     cleanup(projectRoot);
   }
