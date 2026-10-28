@@ -469,3 +469,104 @@ test("J7. 多工具轮：一轮内多个 tool call，循环检测跟踪所有", 
   assert.equal(guard.decideBeforeIteration().allow, false);
   assert.equal(guard.decideBeforeIteration().action, "terminate_model_loop");
 });
+
+// ============================================================================
+// K. 空转护栏（2026-10-23 新增：连续 N 轮"空文本且无工具成功"→ 暂停咨询）
+// ============================================================================
+
+test("K1. 默认配置 maxConsecutiveEmptyTurns=5", () => {
+  assert.equal(DEFAULT_TURN_GUARD_CONFIG.maxConsecutiveEmptyTurns, 5);
+});
+
+test("K2. 连续 5 轮空转（空文本 + 无工具成功）→ consult_user_empty_turns", () => {
+  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 100 });
+  for (let i = 0; i < 5; i++) {
+    guard.recordTurn({
+      tokensUsed: 8000,
+      hadToolCalls: true,
+      allToolsFailed: true,
+      hadVisibleText: false,
+      succeededCount: 0,
+    });
+  }
+  const decision = guard.decideBeforeIteration();
+  assert.equal(decision.allow, false);
+  assert.equal(decision.action, "consult_user_empty_turns");
+  assert.ok(decision.reason.includes("空转"), `reason 应说明空转：${decision.reason}`);
+});
+
+test("K3. 有可见正文即清零空转计数（哪怕工具全失败）", () => {
+  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 100 });
+  for (let i = 0; i < 4; i++) {
+    guard.recordTurn({ tokensUsed: 100, hadToolCalls: false, allToolsFailed: false, hadVisibleText: false });
+  }
+  guard.recordTurn({ tokensUsed: 100, hadToolCalls: false, allToolsFailed: false, hadVisibleText: true });
+  for (let i = 0; i < 4; i++) {
+    guard.recordTurn({ tokensUsed: 100, hadToolCalls: false, allToolsFailed: false, hadVisibleText: false });
+  }
+  assert.equal(guard.getState().consecutiveEmptyTurns, 4);
+  assert.equal(guard.decideBeforeIteration().allow, true);
+});
+
+test("K4. 有工具成功即清零空转计数（哪怕正文为空——模型在干活不判空转）", () => {
+  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 100 });
+  guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: true, hadVisibleText: false });
+  guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: true, hadVisibleText: false });
+  guard.recordTurn({
+    tokensUsed: 100,
+    hadToolCalls: true,
+    allToolsFailed: false,
+    hadVisibleText: false,
+    succeededCount: 2,
+  });
+  guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: true, hadVisibleText: false });
+  guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: true, hadVisibleText: false });
+  assert.equal(guard.getState().consecutiveEmptyTurns, 2, "成功轮清零后重新计数");
+  assert.equal(guard.decideBeforeIteration().allow, true);
+});
+
+test("K5. 未提供 hadVisibleText 的既有调用方零回归（空转判定不启用）", () => {
+  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 100 });
+  for (let i = 0; i < 10; i++) {
+    guard.recordTurn({ tokensUsed: 100, hadToolCalls: false, allToolsFailed: false });
+  }
+  assert.equal(guard.getState().consecutiveEmptyTurns, 0);
+  assert.equal(guard.decideBeforeIteration().allow, true);
+});
+
+test("K6. maxConsecutiveEmptyTurns=0 禁用空转检测", () => {
+  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 100, maxConsecutiveEmptyTurns: 0 });
+  for (let i = 0; i < 10; i++) {
+    guard.recordTurn({ tokensUsed: 100, hadToolCalls: false, allToolsFailed: false, hadVisibleText: false });
+  }
+  assert.equal(guard.decideBeforeIteration().allow, true);
+});
+
+test("K7. acknowledgeAndContinue 清零空转计数（咨询-确认闭环）", () => {
+  const guard = new TurnGuard({ maxConsecutiveFailedTurns: 100, maxConsecutiveEmptyTurns: 2 });
+  guard.recordTurn({ tokensUsed: 100, hadToolCalls: false, allToolsFailed: false, hadVisibleText: false });
+  guard.recordTurn({ tokensUsed: 100, hadToolCalls: false, allToolsFailed: false, hadVisibleText: false });
+  assert.equal(guard.decideBeforeIteration().allow, false);
+  guard.acknowledgeAndContinue();
+  assert.equal(guard.getState().consecutiveEmptyTurns, 0);
+  assert.equal(guard.decideBeforeIteration().allow, true);
+});
+
+test("K8. 空转判定与全失败判定正交：工具部分成功的空转仅由空转线拦截", () => {
+  // 每轮：空文本 + 1 成功 1 失败 → 全失败线永不触发（有成功即清零），
+  // 但 succeededCount>0 意味着有推进——K4 语义，不判空转。
+  // 反向：空文本 + 0 成功 1 失败 → 全失败线（默认 3）与空转线都会计数，
+  // 全失败线先触发（3 < 5），空转线作为"工具成功但全空转"场景的专属兜底。
+  const guard = new TurnGuard();
+  for (let i = 0; i < 3; i++) {
+    guard.recordTurn({
+      tokensUsed: 100,
+      hadToolCalls: true,
+      allToolsFailed: true,
+      hadVisibleText: false,
+      succeededCount: 0,
+    });
+  }
+  const decision = guard.decideBeforeIteration();
+  assert.equal(decision.action, "consult_user_consecutive_failures", "全失败线先于空转线（3<5）");
+});
