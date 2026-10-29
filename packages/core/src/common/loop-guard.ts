@@ -135,6 +135,20 @@ export interface TurnGuardConfig {
    * 越大检测越准但内存开销略增。
    */
   trackedToolCallHistory: number;
+  /**
+   * 连续"空转轮"暂停咨询上限（默认 5，2026-10-23 空循环修复新增）。
+   * 设为 0 禁用空转检测。
+   *
+   * 空转轮定义：本轮 LLM 响应**可见正文为空**（content 去空白后为空串）**且**
+   * 本轮没有任何工具执行成功——模型既没说人话也没干活，纯粹在烧轮次。
+   *
+   * 事故复盘（会话 b14ab3e1，2026-10-22）：qwen3.8-flash 在"检查文档修复情况并
+   * 页面测试"任务中连续多轮仅输出 "\n\n\n"（信息全在 reasoning 里），且既有
+   * 两条护栏全部失效——模型循环检测要求**相同**工具+参数（模型每轮换命令），
+   * 连续失败咨询要求工具**全部**失败（工具其实都成功）。轮数上限与 Token 线
+   * 已按 2026-10-20 需求移除，空转成为护栏盲区，本判定补位。
+   */
+  maxConsecutiveEmptyTurns: number;
 }
 
 /**
@@ -150,7 +164,12 @@ export const DEFAULT_TURN_GUARD_CONFIG: Readonly<TurnGuardConfig> = Object.freez
   maxConsecutiveFailedTurns: 3,
   maxRepeatedToolCalls: 3,
   trackedToolCallHistory: 5,
+  maxConsecutiveEmptyTurns: 5,
 });
+
+// 注：maxConsecutiveEmptyTurns=5（2026-10-23 空转护栏）——比连续失败咨询（3）
+// 宽松两档：空转轮允许工具在推进（换命令试探），连续 5 轮"空文本且无工具
+// 成功"才咨询；0 表示禁用。
 
 /**
  * 循环护栏触发的暂停动作类型（需求124 + 2026-10-19 模型循环检测）
@@ -159,7 +178,9 @@ export type LoopGuardAction =
   /** 连续工具全失败达上限 → 暂停咨询用户（可恢复） */
   | "consult_user_consecutive_failures"
   /** 模型死循环（同一工具+参数重复调用）→ 直接终止（不可恢复） */
-  | "terminate_model_loop";
+  | "terminate_model_loop"
+  /** 连续空转轮（空文本且无工具成功）达上限 → 暂停咨询用户（可恢复，2026-10-23） */
+  | "consult_user_empty_turns";
 
 /**
  * 循环护栏判定结果（需求123/124）
@@ -468,6 +489,11 @@ export class TurnGuard {
   private tokensConsumed = 0;
   /** 连续"工具调用全部失败"的轮数（任一轮有成功工具即清零） */
   private consecutiveFailedTurns = 0;
+  /**
+   * 连续"空转轮"计数（2026-10-23 空转护栏）：本轮可见正文为空且无任何工具
+   * 执行成功 → +1；出现可见正文或任一工具成功 → 清零。
+   */
+  private consecutiveEmptyTurns = 0;
 
   /**
    * 最近 N 次 tool 调用签名队列（2026-10-19 新增，模型循环检测）。
@@ -601,6 +627,19 @@ export class TurnGuard {
       };
     }
 
+    // 3. 连续空转轮（2026-10-23 空转护栏）：模型既不产出可见正文、也没有任何
+    //    工具执行成功——与判定 1/2 正交：循环检测要求"相同参数"（模型换着命令
+    //    空跑则漏检），全失败咨询要求"工具都失败"（工具成功但任务无进展则漏检）。
+    if (this.config.maxConsecutiveEmptyTurns > 0 && this.consecutiveEmptyTurns >= this.config.maxConsecutiveEmptyTurns) {
+      return {
+        allow: false,
+        action: "consult_user_empty_turns",
+        reason:
+          `已连续 ${this.consecutiveEmptyTurns} 轮空转（回复无可见内容且无工具执行成功），` +
+          `疑似空循环。请补充更具体的指令，或确认是否继续。`,
+      };
+    }
+
     return { allow: true, reason: "" };
   }
 
@@ -610,8 +649,19 @@ export class TurnGuard {
    * @param result.tokensUsed 本轮 LLM 请求消耗 Token（total_tokens）
    * @param result.hadToolCalls 本轮响应是否包含工具调用
    * @param result.allToolsFailed 本轮工具调用是否全部失败（无工具调用时忽略）
+   * @param result.hadVisibleText 本轮响应是否有可见正文（content 去空白非空；
+   *        2026-10-23 空转护栏新增。**undefined = 调用方未提供**，本轮不参与
+   *        空转判定——既有调用方/测试零回归）
+   * @param result.succeededCount 本轮工具执行成功个数（空转判定用；未提供时
+   *        以 hadToolCalls && !allToolsFailed 近似）
    */
-  recordTurn(result: { tokensUsed: number; hadToolCalls: boolean; allToolsFailed: boolean }): void {
+  recordTurn(result: {
+    tokensUsed: number;
+    hadToolCalls: boolean;
+    allToolsFailed: boolean;
+    hadVisibleText?: boolean;
+    succeededCount?: number;
+  }): void {
     this.turnsCompleted++;
     this.tokensConsumed += Math.max(0, result.tokensUsed);
     if (result.hadToolCalls) {
@@ -623,6 +673,18 @@ export class TurnGuard {
       }
     }
     // 无工具调用（最终回复轮）不影响连续失败计数——主循环在本轮后即 return
+
+    // 2026-10-23 空转护栏：仅当调用方显式提供 hadVisibleText 时参与判定。
+    // 空转 = 可见正文为空 且 本轮无工具成功；任一信号为"有产出"即清零。
+    if (result.hadVisibleText !== undefined) {
+      const hadToolSuccess =
+        result.succeededCount !== undefined ? result.succeededCount > 0 : result.hadToolCalls && !result.allToolsFailed;
+      if (!result.hadVisibleText && !hadToolSuccess) {
+        this.consecutiveEmptyTurns++;
+      } else {
+        this.consecutiveEmptyTurns = 0;
+      }
+    }
   }
 
   /**
@@ -634,6 +696,8 @@ export class TurnGuard {
   acknowledgeAndContinue(): void {
     this.consecutiveFailedTurns = 0;
     this.turnsCompleted = 0;
+    // 2026-10-23 空转护栏：用户放行同享新的空转预算窗口
+    this.consecutiveEmptyTurns = 0;
   }
 
   /** 当前状态快照（供审计/展示） */
@@ -641,11 +705,13 @@ export class TurnGuard {
     turnsCompleted: number;
     tokensConsumed: number;
     consecutiveFailedTurns: number;
+    consecutiveEmptyTurns: number;
   }> {
     return {
       turnsCompleted: this.turnsCompleted,
       tokensConsumed: this.tokensConsumed,
       consecutiveFailedTurns: this.consecutiveFailedTurns,
+      consecutiveEmptyTurns: this.consecutiveEmptyTurns,
     };
   }
 

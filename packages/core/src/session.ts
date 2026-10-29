@@ -7988,6 +7988,10 @@ ${agentInstructions}
           tokensUsed: getTotalTokens(responseUsage),
           hadToolCalls: toolCalls !== null,
           allToolsFailed: toolCalls !== null && turnToolSucceededCount === 0 && turnToolFailedCount > 0,
+          // 2026-10-23 空转护栏：可见正文判据 = content 去空白非空（reasoning 不算，
+          // 用户不可见的内容不能证明模型在有效推进）；成功工具数供"无工具成功"判定
+          hadVisibleText: typeof content === "string" && content.trim().length > 0,
+          succeededCount: turnToolSucceededCount,
         });
 
         // 2026-10-19 新增：模型循环检测 —— 记录本轮 tool call 签名
