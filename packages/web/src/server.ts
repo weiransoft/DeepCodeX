@@ -366,6 +366,13 @@ export async function startWebServer(
         return;
       }
 
+      // —— 免认证轻探活端点（DeepCode Desktop 壳 EngineManager 健康检查用，
+      // PRD FR-1.2）：仅回 200 {ok:true}，不返回任何服务器信息
+      if (pathname === "/api/health" && req.method === "GET") {
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
       // —— 认证门禁：其余 /api/* 一律要求有效 JWT ——
       const payload = authenticateRequest(req, resolved.auth.jwtSecret);
       if (!payload) {

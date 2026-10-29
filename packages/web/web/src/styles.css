@@ -1880,3 +1880,106 @@ a.icon-btn {
   color: #4caf50;
   word-break: break-all;
 }
+
+/* ============ 桌面壳状态条（仅 DeepCode Desktop WebView 内出现，
+   检测 window.__DEEPCODE_DESKTOP__ 桥后由 App 挂载；纯浏览器零渲染） ============ */
+.desktop-statusbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  background: var(--app-bg-subtle);
+  border-bottom: 1px solid var(--app-border);
+  z-index: 1000;
+  font-size: 12px;
+  color: var(--app-text-secondary);
+  user-select: none;
+  /* macOS titleBarStyle Overlay：状态条兼作可拖拽标题栏区域 */
+  -webkit-app-region: drag;
+}
+.desktop-statusbar button,
+.desktop-status-panel button {
+  -webkit-app-region: no-drag;
+}
+.desktop-statusbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.desktop-statusbar-port {
+  font-family: var(--app-font-mono);
+  color: var(--app-text-tertiary);
+}
+.desktop-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+.desktop-dot.ok {
+  background: #34c759;
+}
+.desktop-dot.err {
+  background: var(--app-danger);
+}
+.desktop-dot.wait {
+  background: var(--app-text-tertiary);
+}
+.desktop-statusbar-right button,
+.desktop-status-panel button {
+  padding: 2px 10px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 6px;
+  background: var(--app-bg);
+  color: var(--app-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+.desktop-statusbar-right button:hover,
+.desktop-status-panel button:hover:not(:disabled) {
+  background: var(--app-bg-hover);
+}
+.desktop-status-panel {
+  position: fixed;
+  top: 36px;
+  right: 8px;
+  width: 260px;
+  padding: 12px;
+  background: var(--app-bg-elevated);
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  box-shadow: var(--app-shadow);
+  -webkit-app-region: no-drag;
+}
+.desktop-status-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+  font-size: 12px;
+  color: var(--app-text-secondary);
+}
+.desktop-status-row span:last-child {
+  color: var(--app-text);
+  font-family: var(--app-font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.desktop-status-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+/* 桌面状态条占位：主布局整体下移，避免与状态条重叠 */
+.app.has-desktop-bar {
+  padding-top: 32px;
+}

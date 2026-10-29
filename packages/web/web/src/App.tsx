@@ -32,9 +32,11 @@ import {
 } from "./api";
 import type { ChatEntry, SedimentationSuggestion, UserAttachment } from "./chat-model";
 import { extractPlanFromToolContent, parseBackgroundTaskNotice, parseLeadingJsonBlock } from "./chat-model";
+import { getDesktopBridge, type DesktopBridge } from "./desktop-bridge";
 import type { PermissionDecisionChoice } from "./components/PermissionCard";
 import { ChatPane } from "./components/ChatPane";
 import { Composer } from "./components/Composer";
+import { DesktopStatusBar } from "./components/DesktopStatusBar";
 import { FileDrawer } from "./components/FileDrawer";
 import { LoginView } from "./components/LoginView";
 import { SessionSidebar } from "./components/SessionSidebar";
@@ -94,6 +96,11 @@ export function App() {
   const [toast, setToast] = useState<string | null>(null);
   /** 决策提交中的 toolCallId 集合（禁用对应卡片按钮） */
   const [submittingPermIds, setSubmittingPermIds] = useState<Set<string>>(new Set());
+
+  // ---------- 桌面壳桥（DESKTOP-ARCH §3.6） ----------
+  /** 桥仅由 DeepCode Desktop 壳初始化脚本注入；纯浏览器访问恒为 null，
+   *  桌面专属 UI（authority 状态条等）全部隐藏，Web 独立可用零回归 */
+  const [desktopBridge] = useState<DesktopBridge | null>(() => getDesktopBridge());
 
   // ---------- refs：SSE 回调与异步流程中读取"当前值"，避免陈旧闭包 ----------
   const streamRef = useRef<ChatStream | null>(null);
@@ -1124,7 +1131,10 @@ export function App() {
   const activeChat = chats.find((c) => c.chatId === activeChatId) ?? null;
 
   return (
-    <div className="app">
+    <div className={"app" + (desktopBridge !== null ? " has-desktop-bar" : "")}>
+      {/* 桌面 authority 状态条：仅在 DeepCode Desktop WebView 内出现（纯浏览器零渲染） */}
+      {desktopBridge !== null && <DesktopStatusBar />}
+
       {/* 左侧栏 */}
       <SessionSidebar
         collapsed={sidebarCollapsed}
