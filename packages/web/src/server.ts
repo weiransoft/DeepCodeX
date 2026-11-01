@@ -12,8 +12,10 @@
 
 import { chmodSync, createReadStream, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import http, { type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { syncPresetAgents } from "@vegamo/deepcode-core";
 import { SseHub } from "./events";
 import { ApiError, sendJson } from "./http-utils";
 import { buildJailRoots, realpathAllowMissing } from "./jail";
@@ -34,7 +36,12 @@ import {
 import { handleDownloadFile, handleListFiles, handleMkdir, handlePreviewFile, handleUploadFile } from "./api/files-api";
 import { handleListWorkspaces } from "./api/workspace-api";
 import { handleListCapabilities } from "./api/capability-api";
-import { handleCreateAgent, handleCreateAgentDraft } from "./api/agents-api";
+import {
+  handleCreateAgent,
+  handleCreateAgentDraft,
+  handleImportPresetAgents,
+  handleSetDefaultAgent,
+} from "./api/agents-api";
 import { handleCreateRule, handleDeleteRule, handleListRules } from "./api/rules-api";
 import { handleGetAudit } from "./api/audit-api";
 import {
@@ -477,6 +484,18 @@ export async function startWebServer(
         return;
       }
 
+      // 预置智能体导入 / 修复（5 核心角色 + 30 领域专家 → ~/.deepcode/skills）
+      if (pathname === "/api/agents/presets" && req.method === "POST") {
+        await handleImportPresetAgents(req, res, ctx);
+        return;
+      }
+
+      // 默认智能体设置（settings.agents.default；下一轮生效，无需重启引擎）
+      if (pathname === "/api/agents/default" && req.method === "POST") {
+        await handleSetDefaultAgent(req, res, ctx);
+        return;
+      }
+
       // 全局规则管理（设置抽屉「全局规则」页签）：增删查，存储与会话注入同源
       // （personalOnly → <engineHomeRoot>/<userId>/.deepcodeX/rules/，否则 ~ 同 CLI /rules）
       if (pathname === "/api/rules" && req.method === "GET") {
@@ -605,6 +624,26 @@ export async function startWebServer(
       resolve(port);
     });
   });
+
+  // 预置智能体种子同步（2026-11-02）：core 的 5 核心角色 + 30 领域专家原本只存在
+  // 于内存，而 Agent 的唯一真相来源是文件扫描——不物化就永远「界面里看不到」。
+  // 默认 onlyMissing：绝不覆盖用户改过的同名 SKILL.md；任何异常只告警，不阻断启动。
+  try {
+    const presetRoot = path.join(os.homedir(), ".deepcode", "skills");
+    const synced = syncPresetAgents(presetRoot);
+    if (synced.written.length > 0) {
+      console.log(`[presets] 已导入预置智能体 ${synced.written.length} 个 → ${presetRoot}`);
+    }
+    if (synced.failed.length > 0) {
+      console.warn(
+        `[presets] 预置智能体写入失败 ${synced.failed.length} 个：${synced.failed
+          .map(([name, reason]) => `${name}(${reason})`)
+          .join("、")}`
+      );
+    }
+  } catch (error) {
+    console.warn(`[presets] 预置智能体同步跳过：${error instanceof Error ? error.message : String(error)}`);
+  }
 
   // 首次启动默认用户提示（docs/dev/web-ui.md §3.3）。
   // 安全需求（2026-10-29）：明文密码不得写入任何日志/文件——

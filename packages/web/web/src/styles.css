@@ -2635,6 +2635,133 @@ a.icon-btn {
   background: color-mix(in srgb, var(--app-danger) 10%, transparent);
 }
 
+/* ============ 「+」能力菜单（Composer：模型 / 技能 / 智能体） ============ */
+.composer-plus.active {
+  color: var(--app-accent);
+  background: var(--app-accent-weak);
+}
+.composer-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  /* 比 @ 面板窄一些：贴着「+」按钮展开，更像弹出菜单而不是整行面板 */
+  width: min(420px, 100%);
+  max-height: 340px;
+  display: flex;
+  flex-direction: column;
+  background: var(--app-bg-elevated);
+  border: 1px solid var(--app-border-strong);
+  border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+  z-index: 61;
+  padding: 6px;
+}
+.composer-menu-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 2px 6px;
+  border-bottom: 1px solid var(--app-border);
+  margin-bottom: 4px;
+}
+.composer-menu-tab {
+  border: none;
+  background: transparent;
+  color: var(--app-text-secondary);
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.composer-menu-tab:hover {
+  background: var(--app-hover);
+}
+.composer-menu-tab.active {
+  color: var(--app-accent);
+  background: var(--app-accent-weak);
+  font-weight: 600;
+}
+.composer-menu-spacer {
+  flex: 1;
+}
+.composer-menu-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--app-text-secondary);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 6px;
+}
+.composer-menu-close:hover {
+  background: var(--app-hover);
+}
+.composer-menu-list {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.composer-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
+  padding: 7px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--app-text-primary);
+}
+.composer-menu-item:hover:not(:disabled) {
+  background: var(--app-hover);
+}
+.composer-menu-item.active {
+  background: var(--app-accent-weak);
+}
+.composer-menu-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.composer-menu-name {
+  flex-shrink: 0;
+  font-weight: 500;
+}
+.composer-menu-meta {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--app-text-secondary);
+}
+.composer-menu-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: var(--app-accent);
+  background: var(--app-accent-weak);
+}
+.composer-menu-error {
+  font-size: 11px;
+  color: var(--app-danger);
+  padding: 4px 8px;
+}
+.composer-menu-empty {
+  padding: 12px 8px;
+  font-size: 12px;
+  color: var(--app-text-secondary);
+  text-align: center;
+  line-height: 1.6;
+}
+
 /* ============ @ 提及补全面板（web-capability T2：Composer 输入 @ 唤起） ============ */
 .composer-mention {
   position: absolute;
@@ -3287,10 +3414,62 @@ a.icon-btn {
   border-radius: 10px;
   background: var(--app-bg-elevated);
 }
+/* 默认智能体一行提示：说明「默认 = 新会话自动激活」，避免用户误以为是全局开关 */
+.agents-default-hint {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--app-text-secondary);
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--app-hover);
+  margin-bottom: 8px;
+}
+/* 「设为默认 / 默认」小按钮 */
+.agents-default-btn {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 10.5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--app-border-strong);
+  background: transparent;
+  color: var(--app-text-secondary);
+  cursor: pointer;
+}
+.agents-default-btn:hover:not(:disabled) {
+  color: var(--app-accent);
+  border-color: var(--app-accent);
+}
+.agents-default-btn.active {
+  color: var(--app-accent);
+  border-color: var(--app-accent);
+  background: var(--app-accent-weak);
+  font-weight: 600;
+}
+.agents-default-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .agents-item-head {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+/* 预置智能体的业务分组徽标（预置页签按 group 展示：核心角色 / 业务需求 / …） */
+.agents-item-group {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: var(--app-text-secondary);
+  background: var(--app-hover);
+}
+/* 「导入 / 修复预置」按钮：贴标题右侧，不与列表项争夺视觉焦点 */
+.agents-import-btn {
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 500;
 }
 .agents-item-name {
   font-size: 12.5px;

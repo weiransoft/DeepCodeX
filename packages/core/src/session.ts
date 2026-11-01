@@ -599,6 +599,10 @@ export type SkillInfo = {
   role?: string;
   /** agent 专属：工具白名单声明（frontmatter `tools`，P0 仅透传展示，不收窄权限） */
   tools?: string[];
+  /** agent 专属：是否为预置智能体（frontmatter `preset: true`，与用户自建区分展示） */
+  preset?: boolean;
+  /** agent 专属：分组名（frontmatter `group`，预置智能体用于按业务类别分组展示） */
+  group?: string;
 };
 
 /**
@@ -647,6 +651,12 @@ export type SessionManagerOptions = {
      * 缺省（undefined）等价 "llm-summary"（走既有 LLM 摘要路径，行为零变化）。
      */
     compactStrategy?: "llm-summary" | "deterministic";
+    /**
+     * 默认智能体名称（2026-11-02，settings.agents.default）。
+     * 由 SessionOptions 实现方从 ResolvedDeepcodingSettings.defaultAgent 透传；
+     * 缺省时新会话不自动激活任何智能体（旧行为）。
+     */
+    defaultAgent?: string;
   };
   renderMarkdown: (text: string) => string;
   onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
@@ -1433,6 +1443,8 @@ export class SessionManager {
      * 缺省（undefined）等价 "llm-summary"，compactSession 据此分流确定性压缩分支。
      */
     compactStrategy?: "llm-summary" | "deterministic";
+    /** 默认智能体名称（2026-11-02，settings.agents.default；缺省不自动激活） */
+    defaultAgent?: string;
   };
   private readonly onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   private readonly onSessionEntryUpdated?: (entry: SessionEntry) => void;
@@ -3746,6 +3758,15 @@ ${agentInstructions}
         sessionId,
         this.buildSystemMessage(sessionId, content, null, false, { agentIndex: entries })
       );
+
+      // 默认智能体自动激活（2026-11-02，settings.agents.default）：
+      // 用户可预置一个默认 agent，新会话准备 prompt 时自动注入其角色约束，
+      // 免去每次手写 @名称。复用 loadAgentForTool 的 isLoaded 去重——同一会话
+      // 只会注入一次；名称解析不到时静默跳过（返回 false），不影响主流程。
+      const defaultAgentName = this.getResolvedSettings().defaultAgent;
+      if (typeof defaultAgentName === "string" && defaultAgentName.trim() !== "") {
+        await this.loadAgentForTool(sessionId, defaultAgentName.trim(), new Set());
+      }
     } catch {
       // fail-safe 降级：agent 索引构建失败不影响主对话流程
     }

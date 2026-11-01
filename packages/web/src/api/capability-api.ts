@@ -29,6 +29,10 @@ export type CapabilitySkill = {
   path: string;
   /** "skill" 普通技能 / "agent" 自定义 Agent 定义 */
   kind: "skill" | "agent";
+  /** 是否预置智能体（frontmatter `preset: true`，界面据此显示「预置」徽标） */
+  preset?: boolean;
+  /** 分组名（预置智能体按业务类别分组展示；用户自建条目无此字段） */
+  group?: string;
 };
 
 /** MCP 服务器条目（脱敏：不下发 env） */
@@ -42,6 +46,8 @@ export type CapabilityMcpServer = {
 export type CapabilitiesResponse = {
   skills: CapabilitySkill[];
   mcpServers: CapabilityMcpServer[];
+  /** 默认智能体（settings.agents.default；未配置为 null） */
+  defaultAgent: string | null;
 };
 
 /**
@@ -65,6 +71,8 @@ export async function listSkillsSafe(projectRoot: string): Promise<CapabilitySki
       description: s.description ?? "",
       path: s.path,
       kind: s.kind === "agent" ? "agent" : "skill",
+      ...(s.preset === true ? { preset: true } : {}),
+      ...(typeof s.group === "string" && s.group !== "" ? { group: s.group } : {}),
     }));
   } catch {
     return [];
@@ -104,9 +112,18 @@ export async function handleListCapabilities(
 ): Promise<void> {
   const projectRoot = os.homedir();
   const [skills] = await Promise.all([listSkillsSafe(projectRoot)]);
+  // 默认智能体与技能清单同一次请求下发：设置页据此渲染「当前默认」，
+  // 免去再加一个只读端点（数据源同为 resolveCurrentSettings，无需重复解析两次以上）
+  let defaultAgent: string | null = null;
+  try {
+    defaultAgent = resolveCurrentSettings(projectRoot).defaultAgent ?? null;
+  } catch {
+    defaultAgent = null;
+  }
   const payload: CapabilitiesResponse = {
     skills,
     mcpServers: listMcpServersSafe(projectRoot),
+    defaultAgent,
   };
   sendJson(res, 200, payload);
 }

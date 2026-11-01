@@ -357,6 +357,11 @@ export class SkillManager {
       const tools = Array.isArray(frontmatter.tools)
         ? frontmatter.tools.filter((tool): tool is string => typeof tool === "string" && tool.trim().length > 0)
         : undefined;
+      // 预置标记与分组（2026-11-02）：预置智能体由 core 种子写入，界面据此展示
+      // 「预置」徽标并分组；用户自建条目无此字段，行为零变化。
+      const preset = frontmatter.preset === true ? true : undefined;
+      const group =
+        typeof frontmatter.group === "string" && frontmatter.group.trim() ? frontmatter.group.trim() : undefined;
       return {
         name:
           typeof frontmatter.name === "string" && frontmatter.name.trim()
@@ -368,6 +373,8 @@ export class SkillManager {
         kind,
         ...(role ? { role } : {}),
         ...(tools && tools.length > 0 ? { tools } : {}),
+        ...(preset ? { preset } : {}),
+        ...(group ? { group } : {}),
       };
     } catch {
       return fallbackSkill;

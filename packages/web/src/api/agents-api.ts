@@ -11,8 +11,16 @@
  */
 
 import os from "node:os";
+import path from "node:path";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { SedimentationWriter, createOpenAIClient } from "@vegamo/deepcode-core";
+import {
+  SedimentationWriter,
+  createOpenAIClient,
+  getUserSettingsPath,
+  syncPresetAgents,
+  PRESET_AGENT_COUNT,
+} from "@vegamo/deepcode-core";
 import { readJsonBody, sendJson } from "../http-utils";
 import type { AuthContext } from "../user-identity";
 
@@ -115,6 +123,134 @@ export async function handleCreateAgent(req: IncomingMessage, res: ServerRespons
     return;
   }
   sendJson(res, 201, result);
+}
+
+/** POST /api/agents/default 请求体 */
+type SetDefaultAgentInput = {
+  /** 智能体名称；空串 = 清除默认（新会话不再自动激活任何角色） */
+  name?: unknown;
+};
+
+/**
+ * 处理 POST /api/agents/default（已认证）：设置 / 清除默认智能体。
+ *
+ * 落盘位置：用户级 `~/.deepcode/settings.json` 的 `agents.default`——core
+ * `resolveCurrentSettings()` 每轮重新解析，因此**改完下一轮即生效，无需重启引擎**。
+ *
+ * 写入方式为「读 → 改 → 写」，保留文件中其余字段（模型 / MCP / web 配置等），
+ * 避免把桌面壳写入的配置覆盖掉（settings.json 是多写入方共享文件）。
+ *
+ * @param req 请求对象（`{ name: string }`）
+ * @param res 响应对象
+ * @param _ctx 认证上下文
+ */
+export async function handleSetDefaultAgent(
+  req: IncomingMessage,
+  res: ServerResponse,
+  _ctx: AuthContext
+): Promise<void> {
+  const body = await readJsonBody<SetDefaultAgentInput>(req);
+  const raw = typeof body.name === "string" ? body.name.trim() : "";
+  if (raw !== "" && !KEBAB_CASE_PATTERN.test(raw)) {
+    sendJson(res, 400, {
+      ok: false,
+      reason: "invalid-name",
+      message: "智能体名称必须为 kebab-case（小写字母/数字/连字符）",
+    });
+    return;
+  }
+
+  const settingsPath = getUserSettingsPath();
+  let root: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(settingsPath, "utf8"));
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      root = parsed as Record<string, unknown>;
+    }
+  } catch (error) {
+    // 文件不存在 = 首次设置（正常）；解析失败则拒绝写入，避免覆盖用户手写配置
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      sendJson(res, 409, {
+        ok: false,
+        reason: "settings-unreadable",
+        message: `settings.json 无法解析，已放弃写入以免覆盖现有配置：${settingsPath}`,
+      });
+      return;
+    }
+  }
+
+  const existingAgents =
+    root["agents"] !== null && typeof root["agents"] === "object" && !Array.isArray(root["agents"])
+      ? (root["agents"] as Record<string, unknown>)
+      : {};
+  if (raw === "") {
+    delete existingAgents["default"];
+  } else {
+    existingAgents["default"] = raw;
+  }
+  if (Object.keys(existingAgents).length === 0) {
+    delete root["agents"];
+  } else {
+    root["agents"] = existingAgents;
+  }
+
+  try {
+    mkdirSync(path.dirname(settingsPath), { recursive: true });
+    writeFileSync(settingsPath, `${JSON.stringify(root, null, 2)}\n`, "utf8");
+  } catch (error) {
+    sendJson(res, 500, {
+      ok: false,
+      reason: "write-failed",
+      message: `写入 settings.json 失败：${error instanceof Error ? error.message : String(error)}`,
+    });
+    return;
+  }
+  sendJson(res, 200, { ok: true, defaultAgent: raw === "" ? null : raw });
+}
+
+/** 预置智能体导入端点（POST /api/agents/presets，2026-11-02）：
+ *
+ * core 里原本有两套完整角色资产（5 核心角色 + 30 领域专家）却从未落成文件，
+ * 而 Agent 的唯一真相来源是文件扫描——于是「代码里有 35 个智能体，界面里一个
+ * 也看不到」。本端点把 `listPresetAgents()` 物化为
+ * `~/.deepcode/skills/<name>/SKILL.md`（type: agent），与用户自建智能体同构，
+ * 因此落盘后自动出现在能力发现、@ 提及、agent 工具与设置页列表中。
+ *
+ * 安全边界：默认 `onlyMissing`（不覆盖用户改过的同名文件）；`overwrite: true`
+ * 才重写。写入是幂等的，重复调用不会产生副本。
+ */
+
+/** POST /api/agents/presets 请求体 */
+type ImportPresetsInput = {
+  /** true = 覆盖已存在的同名预置文件（默认 false，保留用户修改） */
+  overwrite?: unknown;
+};
+
+/**
+ * 处理 POST /api/agents/presets（已认证）：导入 / 修复预置智能体。
+ *
+ * @param req 请求对象（可带 `{ overwrite: boolean }`）
+ * @param res 响应对象
+ * @param _ctx 认证上下文
+ */
+export async function handleImportPresetAgents(
+  req: IncomingMessage,
+  res: ServerResponse,
+  _ctx: AuthContext
+): Promise<void> {
+  const body = await readJsonBody<ImportPresetsInput>(req).catch(() => ({}) as ImportPresetsInput);
+  const overwrite = body.overwrite === true;
+  const root = path.join(os.homedir(), ".deepcode", "skills");
+  const result = syncPresetAgents(root, { overwrite });
+  // failed 非空时用 207（部分成功）：前端据 written/failed 如实提示，不谎报全成功
+  sendJson(res, result.failed.length > 0 ? 207 : 200, {
+    ok: result.failed.length === 0,
+    total: PRESET_AGENT_COUNT,
+    written: result.written.length,
+    skipped: result.skipped.length,
+    failed: result.failed,
+  });
 }
 
 /**

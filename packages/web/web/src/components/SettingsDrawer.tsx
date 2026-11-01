@@ -46,7 +46,7 @@ type SaveState = { phase: "idle" } | { phase: "saving" } | { phase: "saved" } | 
 type SkillsState =
   | { phase: "loading" }
   | { phase: "error"; message: string }
-  | { phase: "ready"; skills: CapabilitySkill[] };
+  | { phase: "ready"; skills: CapabilitySkill[]; defaultAgent: string | null };
 
 export function SettingsDrawer({ initialConfig, onSave, onClose }: SettingsDrawerProps) {
   const [tab, setTab] = useState<Tab>("models");
@@ -63,7 +63,7 @@ export function SettingsDrawer({ initialConfig, onSave, onClose }: SettingsDrawe
     let cancelled = false;
     fetchCapabilities()
       .then((data) => {
-        if (!cancelled) setSkills({ phase: "ready", skills: data.skills });
+        if (!cancelled) setSkills({ phase: "ready", skills: data.skills, defaultAgent: data.defaultAgent ?? null });
       })
       .catch((e: unknown) => {
         if (!cancelled) {
@@ -213,6 +213,7 @@ export function SettingsDrawer({ initialConfig, onSave, onClose }: SettingsDrawe
           ) : tab === "agents" ? (
             <AgentsPane
               agents={skills.phase === "ready" ? skills.skills.filter((s) => s.kind === "agent") : []}
+              defaultAgent={skills.phase === "ready" ? skills.defaultAgent : null}
               onCreated={loadCapabilities}
             />
           ) : tab === "skills" ? (

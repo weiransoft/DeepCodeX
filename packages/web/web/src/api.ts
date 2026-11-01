@@ -254,6 +254,10 @@ export interface CapabilitySkill {
   path: string;
   /** "skill" 普通技能 / "agent" 自定义 Agent 定义 */
   kind: "skill" | "agent";
+  /** 是否预置智能体（决定界面是否显示「预置」徽标） */
+  preset?: boolean;
+  /** 分组名（预置智能体按业务类别分组） */
+  group?: string;
 }
 
 /** MCP 服务器条目（脱敏：不含 env 值） */
@@ -267,6 +271,8 @@ export interface CapabilityMcpServer {
 export interface Capabilities {
   skills: CapabilitySkill[];
   mcpServers: CapabilityMcpServer[];
+  /** 默认智能体（settings.agents.default；未配置为 null） */
+  defaultAgent?: string | null;
 }
 
 /** Agent 创建结果（POST /api/agents；失败抛 ApiError，message 为结构化中文原因） */
@@ -310,6 +316,41 @@ export interface AgentDraftResult {
  */
 export function draftAgent(prompt: string): Promise<AgentDraftResult> {
   return request<AgentDraftResult>("POST", "/api/agents/draft", { prompt });
+}
+
+/** 预置智能体导入结果（POST /api/agents/presets） */
+export interface PresetImportResult {
+  ok: boolean;
+  /** 预置总数（5 核心角色 + 30 领域专家） */
+  total: number;
+  /** 本次新写入数 */
+  written: number;
+  /** 已存在未覆盖数 */
+  skipped: number;
+  /** 失败项：[名称, 原因] */
+  failed: Array<[string, string]>;
+}
+
+/**
+ * 导入 / 修复预置智能体（POST /api/agents/presets）。
+ *
+ * 落盘位置 `~/.deepcode/skills/<name>/SKILL.md`，与用户自建智能体同构，
+ * 导入后自动出现在能力发现、@ 提及与 agent 工具中（无需重启引擎）。
+ *
+ * @param overwrite true = 覆盖同名文件（会丢弃用户对该文件的修改）
+ */
+export function importPresetAgents(overwrite = false): Promise<PresetImportResult> {
+  return request<PresetImportResult>("POST", "/api/agents/presets", { overwrite });
+}
+
+/**
+ * 设置 / 清除默认智能体（POST /api/agents/default）。
+ *
+ * 写入 `~/.deepcode/settings.json` 的 `agents.default`；引擎每轮重新解析设置，
+ * 因此**下一轮起生效、无需重启**。传空串表示清除默认。
+ */
+export function setDefaultAgent(name: string): Promise<{ ok: boolean; defaultAgent: string | null }> {
+  return request<{ ok: boolean; defaultAgent: string | null }>("POST", "/api/agents/default", { name });
 }
 
 /**

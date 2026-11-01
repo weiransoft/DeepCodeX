@@ -9,12 +9,27 @@
  *   用户可随时发送补充指令（后端分类注入或排队），发送与停止按钮并排同显；
  * - @ 提及补全（web-capability T2）：输入 @ 触发候选面板（技能 / Agent / MCP 服务器），
  *   键盘上下选择、Enter/Tab 补全、Esc 关闭；数据源 GET /api/capabilities（懒加载缓存）。
+ * - 「+」能力菜单（2026-11-02，对齐 WorkBuddy 输入框）：一个入口切换 模型 / 技能 / 智能体。
+ *   技能与智能体等价于插入 @token（与 @ 补全同源）；模型为桌面壳侧默认模型切换
+ *   （模型经进程环境变量注入引擎，切换必然重启，故先确认）。
  */
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from "react";
 import { humanSize } from "../format";
 import type { UserAttachment } from "../chat-model";
 import { fetchCapabilities, type Capabilities } from "../api";
-import { CloseIcon, FileCodeIcon, FileIcon, FileImageIcon, PaperclipIcon, SendIcon, StopIcon } from "./icons";
+import { listModels, setDefaultModel, type ModelOption } from "../desktopConfig";
+import {
+  BotAvatarIcon,
+  CloseIcon,
+  FileCodeIcon,
+  FileIcon,
+  FileImageIcon,
+  PaperclipIcon,
+  PlusIcon,
+  SendIcon,
+  StopIcon,
+  WrenchIcon,
+} from "./icons";
 
 /** Composer 组件属性 */
 export interface ComposerProps {
@@ -113,6 +128,16 @@ export function Composer(props: ComposerProps) {
     active: number;
   } | null>(null);
 
+  /**
+   * 「+」能力菜单（模型 / 技能 / 智能体）。null = 关闭。
+   * 模型列表懒加载（首次打开才向桌面壳要），非桌面环境（纯浏览器）恒为空 → 只显示技能/智能体。
+   */
+  const [menu, setMenu] = useState<null | { tab: "model" | "skill" | "agent" }>(null);
+  const [models, setModels] = useState<ModelOption[] | null>(null);
+  const [menuError, setMenuError] = useState("");
+  /** 模型切换中（重启引擎需 1~3s，期间禁重复点击） */
+  const [switchingModel, setSwitchingModel] = useState(false);
+
   /** 懒加载能力清单（30s TTL；失败静默——面板仅展示空态） */
   const ensureCaps = (): void => {
     const now = Date.now();
@@ -203,6 +228,76 @@ export function Composer(props: ComposerProps) {
       for (const url of urls) URL.revokeObjectURL(url);
     };
   }, []);
+
+  /**
+   * 在光标处插入 `@token `（技能 / 智能体统一入口）。
+   *
+   * 与 @ 补全的区别只在于触发方式：菜单点选时若光标正好停在一个 @ 片段上，
+   * 复用同一替换区间（避免出现 `@old@new`）；否则纯插入。
+   */
+  const insertToken = (token: string): void => {
+    const el = textareaRef.current;
+    const caret = el !== null ? (el.selectionStart ?? text.length) : text.length;
+    const ctx = parseMentionContext(text, caret);
+    const inserted = `@${token} `;
+    const start = ctx !== null ? ctx.start : caret;
+    const next =
+      ctx !== null
+        ? text.slice(0, start) + inserted + text.slice(ctx.end)
+        : text.slice(0, caret) + inserted + text.slice(caret);
+    setText(next);
+    setMention(null);
+    if (el !== null) {
+      const nextCaret = start + inserted.length;
+      window.requestAnimationFrame(() => {
+        el.focus();
+        el.setSelectionRange(nextCaret, nextCaret);
+      });
+    }
+  };
+
+  /**
+   * 打开「+」菜单：技能/智能体复用能力缓存（与 @ 补全同源），模型向桌面壳懒加载。
+   * 加载失败不阻塞菜单（降级为空列表 + 一句可操作提示），技能/智能体仍可用。
+   */
+  const openMenu = (tab: "model" | "skill" | "agent"): void => {
+    setMenuError("");
+    setMenu({ tab });
+    if (tab !== "model") {
+      ensureCaps();
+      return;
+    }
+    if (models !== null) return;
+    listModels()
+      .then(setModels)
+      .catch((e: unknown) => {
+        // 纯浏览器 / 隧道页：壳侧会拒绝——明确告诉用户去哪儿配置，而不是静默空列表
+        setModels([]);
+        setMenuError(e instanceof Error ? e.message : "模型列表不可用");
+      });
+  };
+
+  /**
+   * 切换默认模型：确认 → 壳侧改写配置并重启引擎（页面随后自动跳转到新引擎）。
+   *
+   * 为什么要确认：模型是进程环境变量注入的，切换必然重启，进行中的对话会中断。
+   */
+  const switchModel = (item: ModelOption): void => {
+    if (switchingModel || item.isDefault || !item.enabled) return;
+    const ok = window.confirm(`切换到「${item.name}」需要重启引擎（进行中的对话会中断），是否继续？`);
+    if (!ok) return;
+    setSwitchingModel(true);
+    setMenuError("");
+    setDefaultModel(item.id)
+      .then(() => {
+        // 壳已重启并导航到新引擎地址：页面即将重载，这里无需更新状态
+        setMenu(null);
+      })
+      .catch((e: unknown) => {
+        setMenuError(e instanceof Error ? e.message : "切换模型失败");
+      })
+      .finally(() => setSwitchingModel(false));
+  };
 
   /** 追加本地文件：校验大小上限；图片建立缩略预览 */
   const addFiles = (files: FileList | File[]): void => {
@@ -310,6 +405,11 @@ export function Composer(props: ComposerProps) {
     if (e.key === "Escape" && mention !== null) {
       e.preventDefault();
       setMention(null);
+      return;
+    }
+    if (e.key === "Escape" && menu !== null) {
+      e.preventDefault();
+      setMenu(null);
     }
   };
 
@@ -392,6 +492,95 @@ export function Composer(props: ComposerProps) {
         </div>
       )}
 
+      {/* 「+」能力菜单（模型 / 技能 / 智能体）：一个入口覆盖「换模型」与「插能力」 */}
+      {menu !== null && (
+        <div className="composer-menu" role="menu" aria-label="能力选择">
+          <div className="composer-menu-tabs" role="tablist">
+            {(
+              [
+                ["model", "模型"],
+                ["skill", "技能"],
+                ["agent", "智能体"],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                type="button"
+                key={key}
+                role="tab"
+                aria-selected={menu.tab === key}
+                className={`composer-menu-tab${menu.tab === key ? " active" : ""}`}
+                onClick={() => openMenu(key)}
+              >
+                {label}
+              </button>
+            ))}
+            <span className="composer-menu-spacer" />
+            <button type="button" className="composer-menu-close" title="关闭" onClick={() => setMenu(null)}>
+              <CloseIcon size={12} />
+            </button>
+          </div>
+
+          {menuError !== "" && <div className="composer-menu-error">{menuError}</div>}
+
+          <div className="composer-menu-list">
+            {menu.tab === "model" ? (
+              models === null ? (
+                <div className="composer-menu-empty">正在加载模型…</div>
+              ) : models.length === 0 ? (
+                <div className="composer-menu-empty">
+                  当前没有可切换的模型。桌面版可在「设置 → 系统管理 → 模型管理」添加。
+                </div>
+              ) : (
+                models.map((m) => (
+                  <button
+                    type="button"
+                    key={m.id}
+                    className={`composer-menu-item${m.isDefault ? " active" : ""}`}
+                    disabled={!m.enabled || switchingModel}
+                    title={`${m.model} · ${m.baseUrl}`}
+                    onClick={() => switchModel(m)}
+                  >
+                    <WrenchIcon size={13} />
+                    <span className="composer-menu-name">{m.name}</span>
+                    <span className="composer-menu-meta">{m.model}</span>
+                    {m.isDefault && <span className="composer-menu-badge">当前</span>}
+                    {!m.enabled && <span className="composer-menu-badge">已停用</span>}
+                  </button>
+                ))
+              )
+            ) : (
+              (() => {
+                const kind = menu.tab === "agent" ? "agent" : "skill";
+                const items = (caps?.skills ?? []).filter((s) => s.kind === kind);
+                if (caps === null) return <div className="composer-menu-empty">正在加载可用能力…</div>;
+                if (items.length === 0) {
+                  return (
+                    <div className="composer-menu-empty">
+                      {kind === "agent"
+                        ? "还没有智能体。可在「设置 → 系统管理 → 智能体」创建或导入预置智能体。"
+                        : "还没有可用技能。可将 SKILL.md 放入 ~/.deepcode/skills。"}
+                    </div>
+                  );
+                }
+                return items.map((s) => (
+                  <button
+                    type="button"
+                    key={`${kind}-${s.name}`}
+                    className="composer-menu-item"
+                    title={s.path}
+                    onClick={() => insertToken(s.name)}
+                  >
+                    {kind === "agent" ? <BotAvatarIcon size={13} /> : null}
+                    <span className="composer-menu-name">{s.name}</span>
+                    <span className="composer-menu-meta">{s.description}</span>
+                  </button>
+                ));
+              })()
+            )}
+          </div>
+        </div>
+      )}
+
       {/* 附件 chips 区（本地 + 服务器路径） */}
       {(localFiles.length > 0 || serverFiles.length > 0) && (
         <div className="composer-chips">
@@ -427,6 +616,18 @@ export function Composer(props: ComposerProps) {
       {error !== "" && <div className="composer-error">{error}</div>}
 
       <div className="composer-main">
+        {/* 能力菜单入口（模型 / 技能 / 智能体）：与附件按钮并列，避免把常用操作藏进二级菜单 */}
+        <button
+          type="button"
+          className={`icon-btn composer-plus${menu !== null ? " active" : ""}`}
+          title="选择模型 / 技能 / 智能体"
+          aria-haspopup="menu"
+          aria-expanded={menu !== null}
+          disabled={inputBlocked}
+          onClick={() => (menu === null ? openMenu("model") : setMenu(null))}
+        >
+          <PlusIcon size={17} />
+        </button>
         {/* 附件选择按钮（图标直显；生成中在 steering 模式下仍可添加附件） */}
         <button
           type="button"
@@ -452,7 +653,7 @@ export function Composer(props: ComposerProps) {
         <textarea
           ref={textareaRef}
           className="composer-input"
-          placeholder="输入消息，@ 唤起技能 / MCP，Enter 发送，Shift+Enter 换行"
+          placeholder="输入消息，@ 唤起技能 / 智能体，+ 切换模型，Enter 发送，Shift+Enter 换行"
           rows={1}
           value={text}
           disabled={inputBlocked}

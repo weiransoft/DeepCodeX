@@ -1140,6 +1140,17 @@ export type {
 // ============================================================================
 // AgentRegistry 为 core 单一装配源：SessionManager 内部装配，cli/web 仅经本导出消费。
 export { AgentRegistry, type AgentDefinition, type AgentRegistryDeps } from "./agents/agent-registry";
+// 预置智能体种子（2026-11-02）：team 的 5 角色 + 30 领域专家 → 可落盘的 agent 定义。
+// 此前两套资产只存在于内存、从未进文件，导致界面「一个智能体都看不到」。
+export {
+  listPresetAgents,
+  syncPresetAgents,
+  renderPresetSkillMd,
+  PRESET_AGENT_COUNT,
+  PRESET_AGENT_CATEGORY_COUNT,
+  type PresetAgent,
+  type PresetSyncResult,
+} from "./agents/preset-agents";
 // T02：沉淀落盘器（SedimentationWriter，五条安全门槛）
 export {
   SedimentationWriter,

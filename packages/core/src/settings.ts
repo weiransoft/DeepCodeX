@@ -325,6 +325,12 @@ export type DeepcodingSettings = {
    */
   sedimentation?: { everyNTurns?: number };
   /**
+   * 智能体配置（2026-11-02）：
+   * - default：新会话首轮自动激活的智能体名称（kebab-case，须能被子扫描链解析到）。
+   *   未设置 / 解析失败时行为与既有完全一致（不注入任何角色约束）。
+   */
+  agents?: { default?: string };
+  /**
    * 是否放行本地/私有/元数据 baseURL（本地 Ollama/vLLM 等场景）。
    * 优先级低于环境变量 DEEPCODE_ALLOW_PRIVATE_BASE_URL。
    */
@@ -412,6 +418,11 @@ export type ResolvedDeepcodingSettings = {
   statusline: ResolvedStatusLineSettings;
   /** T02/T03：沉淀建议触发节流（resolveSettingsSources 产出缺省 6；可选以兼容既有测试 fixture） */
   sedimentation?: { everyNTurns: number };
+  /**
+   * 默认智能体名称（2026-11-02）：新会话首轮自动激活的角色。
+   * 未配置为 undefined；解析不到该名称时由调用方降级为「不激活」，不报错。
+   */
+  defaultAgent?: string;
 };
 
 export type ModelConfigSelection = {
@@ -1310,6 +1321,9 @@ export function resolveSettingsSources(
         projectSettings?.sedimentation?.everyNTurns ?? userSettings?.sedimentation?.everyNTurns
       ),
     },
+    // 默认智能体（2026-11-02）：项目级 > 用户级；空串/非字符串一律视为未配置
+    defaultAgent:
+      trimString(projectSettings?.agents?.default) || trimString(userSettings?.agents?.default) || undefined,
   };
 }
 
