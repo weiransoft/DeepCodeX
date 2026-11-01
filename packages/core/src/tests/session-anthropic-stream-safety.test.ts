@@ -194,12 +194,10 @@ test("TC-3: 正常 Anthropic 流应完整聚合返回", async () => {
 
 // ============================================================================
 // TC-4：streamTimeoutMs 触发时应抛 LlmStreamIdleTimeoutError（可重试错误类型）
-// 期望：OpenAI 通路空闲超时抛 LlmStreamIdleTimeoutError 并被外层重试循环
-//       （isRetryableLlmError）自动重试；Anthropic 通路 streamTimeoutMs 触发时
-//       走 AbortController 静默 abort，抛的是裸 AbortError——
-//       isRetryableLlmError 判定为不可重试 → 上游 Bad Gateway 场景下"思考中…"
-//       长时间无响应也无法自动恢复。本用例锁定语义：
-//       超时必须抛 LlmStreamIdleTimeoutError（保持两通路重试语义对等）。
+// 期望：idle 空闲超时与 streamTimeoutMs 总超时在两条通路上都归一化为
+//       LlmStreamIdleTimeoutError（isRetryableLlmError 命中 → 外层自动重试），
+//       且共用 MAX_LLM_IDLE_TIMEOUT_ATTEMPTS=2 的专属 cap。
+//       本用例锁定 Anthropic 侧语义：kind 必须为 "total"、timeoutMs 透传实际阈值。
 // ============================================================================
 test("TC-4: streamTimeoutMs 超时应抛 LlmStreamIdleTimeoutError（与 OpenAI 通路重试语义对等）", async () => {
   const client = createStubLlmClient(() => {
@@ -226,4 +224,6 @@ test("TC-4: streamTimeoutMs 超时应抛 LlmStreamIdleTimeoutError（与 OpenAI 
     err instanceof LlmStreamIdleTimeoutError,
     `超时应抛 LlmStreamIdleTimeoutError 以复用可重试判定，实际 ${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}`
   );
+  assert.equal((err as LlmStreamIdleTimeoutError).kind, "total", "总超时的 kind 应为 total（区别于 idle 空闲超时）");
+  assert.equal((err as LlmStreamIdleTimeoutError).timeoutMs, 50, "错误应携带实际超时阈值");
 });

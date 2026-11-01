@@ -3,6 +3,18 @@ import { getLlmErrorDetails } from "./llm-error";
 export const MAX_LLM_RETRIES = 5;
 export const LLM_STREAM_IDLE_TIMEOUT_MS = 60_000;
 
+/**
+ * 流超时（idle / total）专属重试上限（含首次 attempt，即最多 2 次请求）。
+ *
+ * 超时本身就是"上游长时间无数据"的信号：若再走满 MAX_LLM_RETRIES=5 的指数退避，
+ * 60s × 6 ≈ 6 分钟把用户钉在"思考中..."，与"卡死"不可区分；短任务专用超时
+ * （skill matching 15s）乘 6 更毫无意义。给偶发抖动留一次恢复机会即可。
+ *
+ * 2026-11-01 起 OpenAI / Anthropic 两条通路共用本常量（此前只有 Anthropic 侧有 cap，
+ * OpenAI 侧的总超时既不报错也不重试，语义不一致）。
+ */
+export const MAX_LLM_IDLE_TIMEOUT_ATTEMPTS = 2;
+
 const BASE_RETRY_DELAY_MS = 800;
 /**
  * LLM 重试退避硬上限（120 秒）。
@@ -26,10 +38,43 @@ const RETRYABLE_NETWORK_CODES = new Set([
   "UND_ERR_SOCKET",
 ]);
 
+/**
+ * 流超时语义区分（2026-11-01 两通路统一）
+ *
+ * - `idle`：两个 chunk 之间静默超过 LLM_STREAM_IDLE_TIMEOUT_MS（上游仍在连接但不出数据）
+ * - `total`：整条流从发起到结束超过调用方给定的 streamTimeoutMs（settings.timeout 或
+ *   短任务专用值如 skill matching 的 15s）
+ *
+ * 两者都必须归一化为可重试错误：旧实现里 OpenAI 通路的总超时只 abort 控制器、不打标记，
+ * 流循环把它当成"用户点了停止"（abortedBreak）→ 静默返回已积累内容（通常为 ""），
+ * 既不重试也不报错；而 Anthropic 通路早已归一化为本错误类型。语义拉齐后两条通路
+ * 共用同一套重试 cap 与错误提示。
+ */
+export type LlmStreamTimeoutKind = "idle" | "total";
+
+/** 毫秒转秒的可读文案：60 → "60"、200 → "0.2"、1500 → "1.5" */
+function formatTimeoutSeconds(timeoutMs: number): string {
+  const seconds = timeoutMs / 1000;
+  return Number.isInteger(seconds) ? String(seconds) : String(Number(seconds.toFixed(3)));
+}
+
 export class LlmStreamIdleTimeoutError extends Error {
-  constructor() {
-    super(`Model stream was idle for ${LLM_STREAM_IDLE_TIMEOUT_MS / 1000} seconds.`);
+  /** 超时种类：空闲静默 / 整条流总超时 */
+  readonly kind: LlmStreamTimeoutKind;
+  /** 触发本次超时的毫秒阈值 */
+  readonly timeoutMs: number;
+
+  constructor(options?: { kind?: LlmStreamTimeoutKind; timeoutMs?: number }) {
+    const kind: LlmStreamTimeoutKind = options?.kind ?? "idle";
+    const timeoutMs = options?.timeoutMs ?? LLM_STREAM_IDLE_TIMEOUT_MS;
+    super(
+      kind === "total"
+        ? `Model stream exceeded the total timeout of ${formatTimeoutSeconds(timeoutMs)} seconds.`
+        : `Model stream was idle for ${formatTimeoutSeconds(timeoutMs)} seconds.`
+    );
     this.name = "LlmStreamIdleTimeoutError";
+    this.kind = kind;
+    this.timeoutMs = timeoutMs;
   }
 }
 

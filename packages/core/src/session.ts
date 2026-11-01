@@ -9,6 +9,8 @@ import ejs from "ejs";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { launchNotifyScript } from "./common/notify";
 import { buildThinkingRequestOptions } from "./common/openai-thinking";
+// 全局规则（RLIS global 层）读取与注入格式化——详见 global-rules.ts 模块注释
+import { formatGlobalRulesPrompt, markGlobalRulesInjected, readGlobalRulesFile } from "./global-rules";
 // 合并说明：DEEPSEEK_V4_MODELS 为 fork 侧 compact 阈值特判所需；buildSkillCatalogPrompt
 // 为上游 v0.3.1 技能目录提示词所需；getDefaultSkillPrompt 为 fork 侧默认技能所需，全部保留
 import { DEEPSEEK_V4_MODELS } from "./common/model-capabilities";
@@ -257,6 +259,7 @@ import {
   LLM_STREAM_IDLE_TIMEOUT_MS,
   LlmStreamDisconnectedError,
   LlmStreamIdleTimeoutError,
+  MAX_LLM_IDLE_TIMEOUT_ATTEMPTS,
   MAX_LLM_RETRIES,
   waitForLlmRetry,
 } from "./common/llm-retry";
@@ -2336,10 +2339,20 @@ export class SessionManager {
     // 外层根据 isRetryableLlmError 决定是否跨 attempt 重试。
     const requestId = crypto.randomUUID();
     const signal = options?.signal as AbortSignal | undefined;
+    // 流超时专属重试 cap（2026-11-01 两通路统一）：与 Anthropic 通路共用同一常量，
+    // 避免"一侧超时重试 6 次、另一侧 2 次"的语义漂移。
+    let idleTimeoutAttempts = 0;
     for (let retryCount = 0; ; retryCount += 1) {
       try {
         return await this.createChatCompletionStreamAttempt(client, request, options, sessionId, debug, requestId);
       } catch (error) {
+        // 超时（idle / 总超时）达到 cap → 立即 rethrow，不再等 5 次指数退避
+        if (error instanceof LlmStreamIdleTimeoutError) {
+          idleTimeoutAttempts += 1;
+          if (idleTimeoutAttempts >= MAX_LLM_IDLE_TIMEOUT_ATTEMPTS) {
+            throw error;
+          }
+        }
         if (signal?.aborted || retryCount >= MAX_LLM_RETRIES || !isRetryableLlmError(error)) {
           throw error;
         }
@@ -2404,6 +2417,15 @@ export class SessionManager {
     //   (d) fork 的 maxReasoningLength 超限时的主动 abort
     const attemptController = new AbortController();
     let idleTimedOut = false;
+    // 2026-11-01 两通路统一：总超时（streamTimeoutMs）必须与用户主动停止可区分。
+    // 旧实现只 attemptController.abort()（无 reason、无标记），流循环首行/中间检查读到
+    // signal.aborted 便置 abortedBreak=true 并 break，随后被当成"用户点了停止"静默返回
+    // 已积累内容（多数场景为 ""）——既无错误提示也不触发重试，用户只看到一条空回复。
+    // Anthropic 通路的同名标记（createLlmMessageStreamAttempt）早已归一化为
+    // LlmStreamIdleTimeoutError，此处对齐。
+    let streamTimedOut = false;
+    // 记录本次总超时的阈值，用于错误文案（streamTimeoutMs 可能来自 skill matching 的 15s）
+    let streamTimeoutThresholdMs: number | undefined;
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
     let idleTimeoutPromise: Promise<never>;
     const forwardAbort = () => attemptController.abort(rawSignal?.reason);
@@ -2421,7 +2443,7 @@ export class SessionManager {
       idleTimeoutPromise = new Promise((_, reject) => {
         idleTimer = setTimeout(() => {
           idleTimedOut = true;
-          const error = new LlmStreamIdleTimeoutError();
+          const error = new LlmStreamIdleTimeoutError({ kind: "idle" });
           attemptController.abort(error);
           reject(error);
         }, LLM_STREAM_IDLE_TIMEOUT_MS);
@@ -2436,7 +2458,12 @@ export class SessionManager {
     // --- Fork 侧：streamTimeoutMs 总超时（聚合到 attemptController）---
     let streamTimeoutHandle: ReturnType<typeof setTimeout> | undefined;
     if (streamTimeoutMs && streamTimeoutMs > 0) {
-      streamTimeoutHandle = setTimeout(() => attemptController.abort(), streamTimeoutMs);
+      streamTimeoutThresholdMs = streamTimeoutMs;
+      streamTimeoutHandle = setTimeout(() => {
+        // 先打标记再 abort：流循环读到 aborted 后仍能区分"超时"与"用户停止"
+        streamTimedOut = true;
+        attemptController.abort(new LlmStreamIdleTimeoutError({ kind: "total", timeoutMs: streamTimeoutMs }));
+      }, streamTimeoutMs);
     }
 
     // --- SDK 选项：仅保留 SDK 认识的字段，非标准字段（maxReasoningLength/streamTimeoutMs）已在上部过滤 ---
@@ -2471,7 +2498,20 @@ export class SessionManager {
         break;
       } catch (error) {
         // idle timeout 属于流级问题，不可重试；空 body 400 是请求级瞬态，可重试
-        if (error instanceof LlmStreamIdleTimeoutError || idleTimedOut) {
+        // `|| streamTimedOut`：总超时 abort 后，SDK 可能抛出我们注入的 reason
+        // （LlmStreamIdleTimeoutError），也可能抛一个裸 AbortError——后者若不在此处
+        // 捕获就会落到"不可重试"分支，被上层 isAbortLikeError 当成用户中断静默吞掉。
+        if (error instanceof LlmStreamIdleTimeoutError || idleTimedOut || streamTimedOut) {
+          // 总超时可能在"建立流"阶段就先触发（短任务如 skill matching 的 15s 会早于 60s
+          // idle 阈值）：此时 SDK 抛出的正是我们注入的 abort reason（kind="total"），
+          // 必须按总超时归一化，不能被下面统一的 idle 语义改写——否则用户看到
+          // "idle for 60 seconds" 而实际是 15 秒总超时，排障方向直接跑偏。
+          const timeoutError = streamTimedOut
+            ? new LlmStreamIdleTimeoutError({
+                kind: "total",
+                timeoutMs: streamTimeoutThresholdMs ?? LLM_STREAM_IDLE_TIMEOUT_MS,
+              })
+            : new LlmStreamIdleTimeoutError({ kind: "idle" });
           idleTimedOut = true;
           clearAttempt();
           this.logChatCompletionDebug(debug, {
@@ -2484,7 +2524,7 @@ export class SessionManager {
             durationMs: Date.now() - startedAtMs,
             params: { ...debug?.params, options: summarizeCompletionOptions(attemptOptions) },
             request: streamRequest,
-            error: normalizeDebugError(new LlmStreamIdleTimeoutError()),
+            error: normalizeDebugError(timeoutError),
           });
           // 牢笼改造（docs/dev/web-workspace.md C8）：错误日志透传本实例 homeRoot
           logApiError(
@@ -2494,13 +2534,13 @@ export class SessionManager {
               requestId,
               sessionId,
               model: typeof request.model === "string" ? request.model : undefined,
-              error: getLlmErrorDetails(new LlmStreamIdleTimeoutError()),
+              error: getLlmErrorDetails(timeoutError),
               request: streamRequest,
             },
             this.homeRoot
           );
           this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "end", sessionId);
-          throw new LlmStreamIdleTimeoutError();
+          throw timeoutError;
         }
 
         // 判定是否可重试：仅"空 body 400"且未耗尽重试次数且未被中止
@@ -2727,6 +2767,31 @@ export class SessionManager {
           }
         }
       }
+      // 用户主动停止优先于超时判定：两者可能在同一 tick 竞态命中（用户点停止 → forwardAbort
+      // 与超时定时器几乎同时 abort attemptController）。若误判为超时，用户点了停止反而会看到
+      // 一条红色错误行并触发重试，所以这里先用 rawSignal.aborted 短路。
+      if (!rawSignal?.aborted) {
+        // idle 超时优先于 abortedBreak 判定（2026-11-01 修复"空回复"）：
+        // idle 定时器触发时会 abort attemptController，循环首行（或两个 chunk 之间的
+        // abort 检查）直接 break 并置 abortedBreak=true，随后被当成"用户主动停止"
+        // 返回已积累内容（此处为 ""）——超时既不重试也不报错，用户只看到一条空回复。
+        // 因此只要 idleTimedOut 成立，必须先还原为 LlmStreamIdleTimeoutError，
+        // 让外层 createChatCompletionStream 的 idle 专属重试 cap 生效。
+        if (idleTimedOut) {
+          throw new LlmStreamIdleTimeoutError({ kind: "idle" });
+        }
+        // 总超时与 idle 同语义（2026-11-01 两通路统一）：streamTimeoutMs 到点 abort 后，
+        // 上面的 abort 检查会把 abortedBreak 置 true——若无本分支，这条路径会被当成
+        // "用户主动停止"静默返回部分内容（多为空串），既不重试也无错误提示。
+        // `!streamCompleted` 守卫：若流已收到 finish_reason / usage，定时器只是在收尾竞态里
+        // 迟到触发，不应把一次已成功完成的调用判成超时。
+        if (streamTimedOut && !streamCompleted) {
+          throw new LlmStreamIdleTimeoutError({
+            kind: "total",
+            timeoutMs: streamTimeoutThresholdMs ?? LLM_STREAM_IDLE_TIMEOUT_MS,
+          });
+        }
+      }
       // 2026-10-19 停止按钮修复：abort 提前 break 不算 stream disconnected
       // （用户主动停止 ≠ 连接断开），允许循环正常走 finally 清理 + 返回已积累的部分内容
       if (!streamCompleted && !abortedBreak) {
@@ -2737,8 +2802,19 @@ export class SessionManager {
       if (error instanceof InjectInterruptError) {
         throw error;
       }
-      // upstream v0.4.0：idle 超时映射为专用错误类型
-      const streamError = idleTimedOut ? new LlmStreamIdleTimeoutError() : error;
+      // upstream v0.4.0 + 2026-11-01 两通路统一：idle / 总超时都归一化为专用错误类型。
+      // 裸 AbortError 会被下游 isAbortLikeError 判成"用户中断"——既不重试也无提示，
+      // UI 停在"思考中..."。用户主动停止时不归一化，保持"停止"语义。
+      const streamError = rawSignal?.aborted
+        ? error
+        : idleTimedOut
+          ? new LlmStreamIdleTimeoutError({ kind: "idle" })
+          : streamTimedOut
+            ? new LlmStreamIdleTimeoutError({
+                kind: "total",
+                timeoutMs: streamTimeoutThresholdMs ?? LLM_STREAM_IDLE_TIMEOUT_MS,
+              })
+            : error;
       this.logChatCompletionDebug(debug, {
         timestamp: new Date().toISOString(),
         location: debug?.location ?? "SessionManager.createChatCompletionStream:stream",
@@ -2895,11 +2971,11 @@ export class SessionManager {
     // 重试信号：优先取 options.signal（对等 OpenAI 侧），回落 request.signal
     const signal = options && options.signal instanceof AbortSignal ? options.signal : (request.signal ?? undefined);
     // idle timeout 专属重试 cap（报告路径C 雪崩修复）：
-    // LlmStreamIdleTimeoutError 本身就是"上游长时间静默"的信号，再等 5 次指数退避
-    // 只会把 60s × 6 ≈ 6 分钟用户钉在"思考中..."；限定最多 2 次 attempt（首次 + 1 次重试），
+    // LlmStreamIdleTimeoutError 本身就是"上游长时间静默 / 整条流迟迟不结束"的信号，再等
+    // 5 次指数退避只会把用户钉在"思考中..."；限定最多 2 次 attempt（首次 + 1 次重试），
     // 既给偶发抖动一次恢复机会，又不会雪崩。其余可重试错误（Disconnected / 5xx / 408/429）
     // 保持 MAX_LLM_RETRIES=5 的完整重试能力。
-    const MAX_IDLE_TIMEOUT_ATTEMPTS = 2;
+    // 2026-11-01：cap 值提取到 common/llm-retry 与 OpenAI 通路共用，杜绝两通路数值漂移。
     let idleTimeoutAttempts = 0;
     for (let retryCount = 0; ; retryCount += 1) {
       try {
@@ -2908,7 +2984,7 @@ export class SessionManager {
         // idle timeout 专属 cap：首次不重试、或已到 cap → 立即 rethrow
         if (error instanceof LlmStreamIdleTimeoutError) {
           idleTimeoutAttempts += 1;
-          if (idleTimeoutAttempts >= MAX_IDLE_TIMEOUT_ATTEMPTS) {
+          if (idleTimeoutAttempts >= MAX_LLM_IDLE_TIMEOUT_ATTEMPTS) {
             throw error;
           }
         }
@@ -3007,6 +3083,12 @@ export class SessionManager {
         safetyController.abort();
       }, streamTimeoutMs);
     }
+    // 有意不对等（2026-11-01 两通路统一时的边界说明）：
+    // OpenAI 通路另有 LLM_STREAM_IDLE_TIMEOUT_MS(60s) 的"两 chunk 之间静默"检测，
+    // Anthropic 通路不移植——其 provider 是 for-await 事件流，无法像手动 iterator 那样
+    // 对单次 next() 做 Promise.race；强行改写会动到 provider 的流形态与错误归一化。
+    // 实际影响有限：总超时（默认 settings.timeout=600s）仍是硬兜底，且已归一化为
+    // 可重试错误（见下方 catch），不会重现"静默空回复"。此处显式记录，避免后人误判为遗漏。
 
     // debug/error 日志共用的请求快照：不含 signal（对齐 OpenAI 侧 request 不含 signal 的现状）
     const logRequest: Record<string, unknown> = {
@@ -3024,6 +3106,9 @@ export class SessionManager {
     let usage: ModelUsage | null = null;
     // 2026-10-19 停止按钮修复：标记是否因 abort 提前 break（与 OpenAI 路径 abortedBreak 对等）
     let abortedBreak = false;
+    // 流是否已收到 message_end（对等 OpenAI 侧 streamCompleted）：用于区分
+    // "总超时打断了一条未完成的流" 与 "定时器在收尾竞态里迟到触发"。
+    let streamCompleted = false;
     const responseChunks: unknown[] = [];
     // 工具调用桶：按 id 索引（provider 层保证 start → delta* → end 顺序），
     // 同时天然支持任意交错序列，不做「同时只有一个活跃桶」假设（§4.2 规则 1/3）
@@ -3130,6 +3215,7 @@ export class SessionManager {
             break;
           }
           case "message_end":
+            streamCompleted = true;
             usage = toModelUsage(event.usage);
             // refusal 映射（§4.3）：Claude 的拒绝说明文本在 text 块中（即已聚合 content），
             // 直接复用；空内容极端情况给确定性兜底文案，避免 failed 状态无原因
@@ -3144,6 +3230,15 @@ export class SessionManager {
             throw event.error;
         }
       }
+      // 与 OpenAI 通路对等的超时收尾判定：abort 可能恰好落在最后一个 event 之后，
+      // provider 于此优雅结束 for-await 而不抛错——若不在循环外再判一次，总超时
+      // 又会被静默吃成"部分内容正常返回"（用户看到半截回复且无任何错误提示）。
+      if (streamTimedOut && !streamCompleted && !rawSignal?.aborted) {
+        throw new LlmStreamIdleTimeoutError({
+          kind: "total",
+          timeoutMs: streamTimeoutMs ?? LLM_STREAM_IDLE_TIMEOUT_MS,
+        });
+      }
     } catch (error) {
       // E3 扩展点（ADR-DI-001 §5.1.3）：InjectInterruptError 是流控制信号，不是错误
       //
@@ -3155,12 +3250,16 @@ export class SessionManager {
       if (error instanceof InjectInterruptError) {
         throw error;
       }
-      // 流总超时归一化（修复"思考中卡死"2026-10-03，对齐 OpenAI 通路 L2302 的
-      // `idleTimedOut ? new LlmStreamIdleTimeoutError() : error` 语义）：
+      // 流总超时归一化（修复"思考中卡死"2026-10-03，对齐 OpenAI 通路的超时归一化语义）：
       // streamTimeoutMs 触发的 abort 会让流循环抛裸 AbortError，若不归一化，
       // 下游 isAbortLikeError 会把"上游无响应"误判为"用户中断"——既不重试
       // 也无错误提示，UI 永远停在"思考中..."。归一化后走可重试判定自动重连。
-      const streamError = streamTimedOut ? new LlmStreamIdleTimeoutError() : error;
+      // 2026-11-01 两通路统一：错误对象带 kind="total" + 实际阈值，文案不再是
+      // 固定的"idle 60s"；用户主动停止（rawSignal.aborted）时不归一化，保持停止语义。
+      const streamError =
+        streamTimedOut && !rawSignal?.aborted
+          ? new LlmStreamIdleTimeoutError({ kind: "total", timeoutMs: streamTimeoutMs ?? LLM_STREAM_IDLE_TIMEOUT_MS })
+          : error;
       this.logChatCompletionDebug(debug, {
         timestamp: new Date().toISOString(),
         location: debug?.location ?? "SessionManager.createLlmMessageStream",
@@ -3905,6 +4004,18 @@ ${agentInstructions}
     if (agentInstructions) {
       const instructionsMessage = this.buildSystemMessage(sessionId, agentInstructions);
       this.appendSessionMessage(sessionId, instructionsMessage);
+    }
+
+    // 全局规则注入（RLIS global 层，对齐 Trae/WorkBuddy「Rules for AI」体验）：
+    // 读 <homeRoot>/.deepcodeX/rules/global-rules.json（与 CLI /rules、Web /api/rules
+    // 同一存储），非空则追加一条 system 消息。读取全容错（缺失/损坏→空→跳过），
+    // 绝不因规则文件问题阻断会话创建。仅对新会话生效（进行中会话保持创建时快照）。
+    const globalRulesPrompt = formatGlobalRulesPrompt(readGlobalRulesFile(this.homeRoot));
+    if (globalRulesPrompt) {
+      const globalRulesMessage = this.buildSystemMessage(sessionId, globalRulesPrompt);
+      this.appendSessionMessage(sessionId, globalRulesMessage);
+      // P1 证据链：注入成功即记 Wired（usageCount+1 + evidence.wiredAt，全容错）
+      markGlobalRulesInjected(this.homeRoot);
     }
 
     this.appendPlanModeTransitionMessages(sessionId, false, Boolean(userPrompt.planMode));

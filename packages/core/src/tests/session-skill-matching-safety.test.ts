@@ -18,6 +18,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { SessionManager, type SkillInfo } from "../session";
+import { LlmStreamIdleTimeoutError } from "../common/llm-retry";
 
 // ============================================================================
 // 测试辅助
@@ -159,12 +160,19 @@ function createLoopingReasoningClient(
  *
  * 每 delayMs 输出一个 reasoning chunk，模拟流式超时场景。
  * 生成器会监听 options.signal，abort 时立即退出，避免测试卡住。
+ *
+ * @returns client 桩与 create 调用计数（用于断言超时重试 cap）
  */
-function createSlowStreamClient(reasoningChunk: string, delayMs: number): { client: unknown } {
+function createSlowStreamClient(
+  reasoningChunk: string,
+  delayMs: number
+): { client: unknown; createCallCount: { value: number } } {
+  const createCallCount = { value: 0 };
   const client = {
     chat: {
       completions: {
         create: async (_request: Record<string, unknown>, options?: { signal?: AbortSignal }) => {
+          createCallCount.value++;
           const signal = options?.signal;
           return (async function* () {
             while (true) {
@@ -197,7 +205,55 @@ function createSlowStreamClient(reasoningChunk: string, delayMs: number): { clie
       },
     },
   };
-  return { client };
+  return { client, createCallCount };
+}
+
+/**
+ * 构造"建立流阶段就挂住"的 OpenAI client 桩
+ *
+ * 模拟上游接受了连接却迟迟不返回首个 chunk：create() 返回的 Promise 永不 resolve，
+ * 只在 signal abort 时 reject。用于覆盖总超时发生在"建流"而非"读流"阶段的路径。
+ *
+ * @param forwardSignalReason true=像现代 SDK 那样把 signal.reason 原样抛出；
+ *                            false=像旧版/包装层那样只抛裸 AbortError
+ * @returns client 桩与 create 调用计数
+ */
+function createHangingStreamClient(forwardSignalReason: boolean): {
+  client: unknown;
+  createCallCount: { value: number };
+} {
+  const createCallCount = { value: 0 };
+  const toAbortError = (signal?: AbortSignal): Error => {
+    const reason = signal?.reason;
+    if (forwardSignalReason && reason instanceof Error) {
+      return reason;
+    }
+    const error = new Error("This operation was aborted");
+    error.name = "AbortError";
+    return error;
+  };
+  const client = {
+    chat: {
+      completions: {
+        create: async (_request: Record<string, unknown>, options?: { signal?: AbortSignal }) => {
+          createCallCount.value++;
+          const signal = options?.signal;
+          return await new Promise((_resolve, reject) => {
+            if (!signal) {
+              reject(new Error("missing abort signal"));
+              return;
+            }
+            if (signal.aborted) {
+              reject(toAbortError(signal));
+              return;
+            }
+            signal.addEventListener("abort", () => reject(toAbortError(signal)), { once: true });
+          });
+        },
+      },
+    },
+  };
+  return { client, createCallCount };
 }
 
 /**
@@ -304,21 +360,70 @@ test("createChatCompletionStream 在流式超时时主动中断", async () => {
   const home = createTempDir("deepcode-skill-timeout-home-");
   setHomeDir(home);
 
-  const { client } = createSlowStreamClient("x", 50);
+  const { client, createCallCount } = createSlowStreamClient("x", 50);
   const manager = createSessionManager(client, "test-model", "http://localhost:8000/v1");
 
   const startMs = Date.now();
-  await assert.rejects(async () => {
+  let caught: unknown;
+  try {
     await (manager as any).createChatCompletionStream(
       client,
       { model: "test-model", messages: [] },
       { streamTimeoutMs: 200 }
     );
-  }, /aborted|timeout/i);
+    assert.fail("总超时后应抛错，而不是静默返回部分内容");
+  } catch (error) {
+    caught = error;
+  }
   const elapsedMs = Date.now() - startMs;
 
-  // 应在 200ms 左右被中断，容差 300ms
-  assert.ok(elapsedMs < 500, `流式超时应尽快中断，实际耗时 ${elapsedMs}ms`);
+  // 2026-11-01 两通路统一：总超时不再被当成"用户主动停止"静默返回空内容，
+  // 而是归一化为可重试的 LlmStreamIdleTimeoutError（kind="total"，文案带实际阈值）
+  assert.ok(
+    caught instanceof LlmStreamIdleTimeoutError,
+    `总超时应抛 LlmStreamIdleTimeoutError，实际 ${caught instanceof Error ? `${caught.name}: ${caught.message}` : String(caught)}`
+  );
+  assert.equal((caught as LlmStreamIdleTimeoutError).kind, "total", "总超时的 kind 应为 total");
+  assert.equal((caught as LlmStreamIdleTimeoutError).timeoutMs, 200, "错误应携带实际超时阈值");
+  assert.match((caught as Error).message, /total timeout of 0\.2 seconds/);
+
+  // 超时走专属重试 cap（MAX_LLM_IDLE_TIMEOUT_ATTEMPTS=2）：
+  // 超时(200ms) + 退避(800ms) + 超时(200ms) ≈ 1200ms，不含 5 次指数退避的雪崩等待
+  assert.equal(createCallCount.value, 2, "流超时最多 2 次 attempt（首次 + 1 次重试）");
+  assert.ok(elapsedMs < 3000, `流式超时应尽快放弃，实际耗时 ${elapsedMs}ms`);
+});
+
+test("createChatCompletionStream 在建立流阶段的总超时也归一化为 kind=total", async () => {
+  const home = createTempDir("deepcode-skill-timeout-create-home-");
+  setHomeDir(home);
+
+  // 两种 SDK 行为都要覆盖：转发 signal.reason（现代 SDK）与只抛裸 AbortError（包装层）。
+  // 后者若未被归一化，会被上层 isAbortLikeError 判成"用户中断"，既不重试也无提示。
+  for (const forwardSignalReason of [true, false]) {
+    const { client, createCallCount } = createHangingStreamClient(forwardSignalReason);
+    const manager = createSessionManager(client, "test-model", "http://localhost:8000/v1");
+
+    let caught: unknown;
+    try {
+      await (manager as any).createChatCompletionStream(
+        client,
+        { model: "test-model", messages: [] },
+        { streamTimeoutMs: 100 }
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    const detail = forwardSignalReason ? "SDK 转发 signal.reason" : "SDK 抛裸 AbortError";
+    assert.ok(caught instanceof Error, `${detail}：总超时后应抛错，不得静默返回`);
+    assert.ok(
+      caught instanceof LlmStreamIdleTimeoutError,
+      `${detail}：应归一化为 LlmStreamIdleTimeoutError，实际 ${(caught as Error).name}: ${(caught as Error).message}`
+    );
+    assert.equal((caught as LlmStreamIdleTimeoutError).kind, "total", `${detail}：kind 应为 total 而非 idle`);
+    assert.equal((caught as LlmStreamIdleTimeoutError).timeoutMs, 100, `${detail}：应携带实际超时阈值`);
+    assert.equal(createCallCount.value, 2, `${detail}：超时走专属 cap，最多 2 次 attempt`);
+  }
 });
 
 test("identifyMatchingSkillNames 在 reasoning 超长时安全降级为空数组", async () => {

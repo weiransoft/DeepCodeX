@@ -4,8 +4,10 @@ import {
   getLlmRetryDelayMs,
   getLlmRetryAfterMs,
   isRetryableLlmError,
+  LLM_STREAM_IDLE_TIMEOUT_MS,
   LlmStreamDisconnectedError,
   LlmStreamIdleTimeoutError,
+  MAX_LLM_IDLE_TIMEOUT_ATTEMPTS,
   waitForLlmRetry,
 } from "../common/llm-retry";
 
@@ -65,6 +67,29 @@ test("isRetryableLlmError recognizes recoverable HTTP and transport failures", (
   );
   assert.equal(isRetryableLlmError(new LlmStreamIdleTimeoutError()), true);
   assert.equal(isRetryableLlmError(new LlmStreamDisconnectedError()), true);
+});
+
+test("LlmStreamIdleTimeoutError distinguishes idle from total timeout", () => {
+  // 2026-11-01 两通路统一：同一错误类型承载两种超时语义，文案不得混淆——
+  // 旧实现无论总超时阈值多少都喊"idle for 60 seconds"，误导排障方向。
+  const idle = new LlmStreamIdleTimeoutError();
+  assert.equal(idle.kind, "idle");
+  assert.equal(idle.timeoutMs, LLM_STREAM_IDLE_TIMEOUT_MS);
+  assert.equal(idle.message, "Model stream was idle for 60 seconds.");
+
+  const total = new LlmStreamIdleTimeoutError({ kind: "total", timeoutMs: 15_000 });
+  assert.equal(total.kind, "total");
+  assert.equal(total.timeoutMs, 15_000);
+  assert.equal(total.message, "Model stream exceeded the total timeout of 15 seconds.");
+
+  // 非整秒阈值（skill matching 之外的短超时）也要可读，不能出现 "0.2 seconds" 之外的畸形数字
+  const fractional = new LlmStreamIdleTimeoutError({ kind: "total", timeoutMs: 1_500 });
+  assert.equal(fractional.message, "Model stream exceeded the total timeout of 1.5 seconds.");
+
+  // 两种 kind 都必须可重试，否则总超时会被 isAbortLikeError 吃成"用户中断"
+  assert.equal(isRetryableLlmError(idle), true);
+  assert.equal(isRetryableLlmError(total), true);
+  assert.equal(MAX_LLM_IDLE_TIMEOUT_ATTEMPTS, 2, "超时专属 cap 为 2 次 attempt（首次 + 1 次重试）");
 });
 
 test("waitForLlmRetry can be interrupted", async () => {
