@@ -273,6 +273,32 @@ export class ExecutionHistoryStore {
   // ========== 写缓冲 flush ==========
 
   /**
+   * 立即落盘所有 pending 写入（确定性，不依赖 flush 定时器）
+   *
+   * 背景：record() 是 fire-and-forget，靠 WRITE_BUFFER_FLUSH_DELAY_MS(100ms) 的
+   * 定时器合并写入。任何"写完立刻读"的调用方（测试断言、优雅退出、同步沉淀链路）
+   * 若用固定 sleep 等待，在机器负载高时必然偶发读不到数据——表现是
+   * "刚记录的命令查不到 / 沉淀出 0 条"。
+   *
+   * 本方法取消挂起的定时器并等待落盘完成，语义等价于 closeSync() 的同步 flush，
+   * 但不关闭存储，可继续写入。
+   *
+   * @returns 落盘完成后 resolve（写失败已在内部告警，不抛出）
+   */
+  async flush(): Promise<void> {
+    if (this.flushTimer !== null) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    // flushing 标志可能让内部直接返回（另一路 flush 正在进行），此时轮询等待其结束
+    for (let guard = 0; guard < 100; guard++) {
+      await this.flushPendingWritesAsync();
+      if (!this.flushing && this.pendingWrites.length === 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  }
+
+  /**
    * 异步 flush pending 队列到文件
    * —— 串行 fs appendFile 调用（一次 flush = 一次 appendFile）
    * —— flushing 标志防止 flush 过程中再次触发

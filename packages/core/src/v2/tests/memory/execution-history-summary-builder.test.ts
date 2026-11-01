@@ -30,8 +30,6 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
-
 import { ExecutionHistoryStore } from "../../memory/execution-history-store";
 import { ExecutionHistorySummaryBuilder, isLowValueRecord } from "../../memory/execution-history-summary-builder";
 import type { ExecutionRecord } from "../../memory/execution-history-types";
@@ -66,11 +64,13 @@ afterEach(() => {
 });
 
 /**
- * 等待 store flush 定时器（100ms 合并窗口）确保数据落盘
- * —— 与 store 测试里的 waitFlush 同模式
+ * 等待 store 落盘（确定性，替代固定 sleep）
+ *
+ * 2026-11-01 修复：固定 sleep 在并行跑全量测试时会被调度推迟，
+ * 导致 buildForContext 读到空数据。store.flush() 与负载无关。
  */
-async function waitFlush(ms = 150): Promise<void> {
-  await sleep(ms);
+async function waitFlush(store: ExecutionHistoryStore): Promise<void> {
+  await store.flush();
 }
 
 // ============================================================================
@@ -122,7 +122,7 @@ async function setupStore(records: RecordInput[]): Promise<ExecutionHistoryStore
     const input = makeRecord(r);
     await store.record(input);
   }
-  await waitFlush();
+  await waitFlush(store);
   return store;
 }
 
@@ -134,7 +134,7 @@ const builder = ExecutionHistorySummaryBuilder.get();
 
 test("UT-SB-001: 空 store → buildForContext 返回空 entries + totalTokens=0", async () => {
   const store = new ExecutionHistoryStore({ projectRoot: tempProject });
-  await waitFlush();
+  await waitFlush(store);
 
   const { entries, totalTokens } = builder.buildForContext(store);
   assert.equal(entries.length, 0);

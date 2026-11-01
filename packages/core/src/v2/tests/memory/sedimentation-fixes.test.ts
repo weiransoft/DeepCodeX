@@ -26,8 +26,6 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
-
 import { ExecutionHistoryStore } from "../../memory/execution-history-store";
 import { ExecutionHistoryMemorySync } from "../../memory/execution-history-memory-sync";
 import { MemoryStore } from "../../memory/memory-store";
@@ -63,9 +61,9 @@ afterEach(() => {
   }
 });
 
-/** 等待 store 的 100ms pending flush 合并窗口过去 */
-async function waitFlush(ms = 200): Promise<void> {
-  await sleep(ms);
+/** 等待 store 落盘（确定性；固定 sleep 在并行负载下会读到空数据） */
+async function waitFlush(store: ExecutionHistoryStore): Promise<void> {
+  await store.flush();
 }
 
 /** 从文件逐行读取全量执行记录（绕开任何 store 实例缓存） */
@@ -116,7 +114,7 @@ test("FB-01: syncSession 后 jsonl 中 failure 记录 fixedByExecutionId=fix.id�
     cwd: tempProject,
     timestamp: now + 5000,
   });
-  await waitFlush();
+  await waitFlush(store);
 
   // 记录 id（在 patch 之前拿——patch 只改字段不改 id）
   const before = readJsonlRecords(store.getHistoryFilePath());
@@ -169,7 +167,7 @@ test("SD-01: 成功命令 sync → experience.json 出现条目；重复 sync de
     argsSnippet: JSON.stringify({ command: "npm test" }),
     cwd: tempProject,
   });
-  await waitFlush();
+  await waitFlush(store);
 
   const memoryStore = new MemoryStore(tempProject, tempHome);
   const sync = new ExecutionHistoryMemorySync(store, memoryStore);

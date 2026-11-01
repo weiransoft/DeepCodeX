@@ -31,7 +31,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
-import { SensitiveInfoRedactor, DEFAULT_REDACTION_RULES, type RedactionRule } from "../../memory/redaction";
+import {
+  SensitiveInfoRedactor,
+  DEFAULT_REDACTION_RULES,
+  flushRedactionAuditLogs,
+  type RedactionRule,
+} from "../../memory/redaction";
 
 // ============================================================================
 // 测试 fixture：每个用例独立的临时日志目录
@@ -48,8 +53,9 @@ beforeEach(() => {
 afterEach(async () => {
   // 等待 redact() 内部异步 appendLogs 完成，避免 tempDir 被删除后日志写入触发 ENOENT 告警
   // redact() 设计为同步返回（不阻塞主流程），审计日志异步追加；
-  // 此处等待 50ms 让 microtask 队列中的 fs.appendFile 完成后再清理目录
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // 2026-11-01 修复：原先固定 sleep 50ms 靠"赌"写入已完成，并行跑测试时必偶发失败，
+  // 改为等待 redactor 暴露的在途写入集合排空（确定性，不受机器负载影响）。
+  await flushRedactionAuditLogs();
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -292,8 +298,8 @@ test("PRIV-12: 审计日志只记录规则名/位置/digest，绝不记录明文
 
   redactor.redact(plainText, "global.json");
 
-  // 等待异步日志写入完成
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // 确定性等待异步日志落盘（替代原先的固定 50ms sleep）
+  await flushRedactionAuditLogs();
 
   // 读取日志文件
   const logContent = fs.readFileSync(logPath, "utf8");

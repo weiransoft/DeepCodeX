@@ -22,7 +22,6 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
 import { ExecutionHistoryStore } from "../../memory/execution-history-store";
 import { LOW_VALUE_BASH_COMMANDS } from "../../memory/execution-history-types";
 
@@ -61,8 +60,14 @@ afterEach(() => {
  * —— 测试里 record() 是 fire-and-forget，需要等定时器跑完 fs 才真正落盘
  * —— flush 定时器启动后 100ms 触发 + fs 写入耗时 ≈ 150-200ms 足够
  */
-async function waitForFlush(maxMs = 500): Promise<void> {
-  await sleep(maxMs);
+/**
+ * 等待 store 落盘（确定性，替代固定 sleep）
+ *
+ * 2026-11-01 修复：原实现 sleep(500) 赌 100ms 合并窗口已过；
+ * 并行跑全量测试时定时器回调会被推迟，导致 query() 读到空数据（断言 0 条）。
+ */
+async function waitForFlush(store: ExecutionHistoryStore): Promise<void> {
+  await store.flush();
 }
 
 // ============================================================================
@@ -105,7 +110,7 @@ test("UT-001: record() 写入 jsonl 格式文件，每行一个 JSON，字段完
   });
 
   // 等待 flush 落盘
-  await waitForFlush();
+  await waitForFlush(store);
 
   // 验证文件存在
   const filePath = store.getHistoryFilePath();
@@ -160,7 +165,7 @@ test("UT-002: query() 多维度过滤（sessionId / toolName / ok / keyword）",
   }
 
   // 等待 flush
-  await waitForFlush();
+  await waitForFlush(store);
 
   // 全量查询
   const all = store.query();
@@ -238,7 +243,7 @@ test("UT-004: prune() 裁剪——每 session 超量 + 全局超龄", async () =
     });
   }
 
-  await waitForFlush();
+  await waitForFlush(store);
 
   // prune 裁剪（因为 maxAgeDays=0，全部按 age 裁剪掉）
   const result = store.prune();
@@ -298,7 +303,7 @@ test("UT-006: turnIndex 自增——同 session 连续递增，跨 session 独�
   await store.record({ sessionId: "sess-turn", toolName: "edit", ok: true, cwd: tempProject });
   await store.record({ sessionId: "sess-turn", toolName: "bash", ok: false, cwd: tempProject });
 
-  await waitForFlush();
+  await waitForFlush(store);
 
   const records = store.query({ sessionId: "sess-turn" });
   assert.equal(records.length, 3);
@@ -311,7 +316,7 @@ test("UT-006: turnIndex 自增——同 session 连续递增，跨 session 独�
 
   // 新建另一个 session，turnIndex 应该独立从 0 开始
   await store.record({ sessionId: "sess-turn-2", toolName: "bash", ok: true, cwd: tempProject });
-  await waitForFlush();
+  await waitForFlush(store);
 
   const records2 = store.query({ sessionId: "sess-turn-2" });
   assert.equal(records2[0].turnIndex, 0, "跨 session 新 session 的 turnIndex 应从 0 开始");
@@ -363,7 +368,7 @@ test("UT-008: buildToolQueryResult() 返回结构符合 ToolDefinition 预期", 
     durationMs: 50,
   });
 
-  await waitForFlush();
+  await waitForFlush(store);
 
   const result = store.buildToolQueryResult({ keyword: "ls" });
   assert.ok(result.ok === true);

@@ -506,12 +506,42 @@ export class RegexASTAnalyzer {
     }
 
     try {
-      const lines = content.split("\n");
-      const fileInfo = this.parseLines(lines, filePath);
-      return fileInfo;
+      return this.analyzeContent(content, filePath, failedInfo);
     } catch {
       // 解析过程异常：返回 failed 状态，不中断整体扫描（US-ERR-003）
       return failedInfo;
+    }
+  }
+
+  /**
+   * 解析内存中的文件内容（不触碰文件系统）
+   *
+   * 与 analyzeFile 同语义，但接受字符串输入：
+   * - 调用方已有内容时（增量扫描、编辑器 buffer）可省一次读盘；
+   * - 性能基准测试可只测正则解析开销，不被 fs 延迟污染。
+   *
+   * @param content 文件完整内容
+   * @param filePath 用于填充 FileInfo.path（默认 "<memory>"）
+   * @param failedInfo 解析异常时的兜底返回值（默认按 filePath 构造 failed 结果）
+   * @returns 解析结果
+   */
+  analyzeContent(content: string, filePath = "<memory>", failedInfo?: FileInfo): FileInfo {
+    const fallback: FileInfo = failedInfo ?? {
+      path: filePath,
+      language: this.language,
+      classes: [],
+      functions: [],
+      imports: [],
+      exports: [],
+      lines: 0,
+      parseStatus: "failed",
+      dependencies: [],
+    };
+    try {
+      const lines = content.split("\n");
+      return this.parseLines(lines, filePath);
+    } catch {
+      return fallback;
     }
   }
 

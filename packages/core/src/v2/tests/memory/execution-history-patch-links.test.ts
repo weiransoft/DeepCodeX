@@ -89,7 +89,7 @@ async function recordOne(
     exitCode: opts.ok ? 0 : 1,
     cwd: tempProject,
   });
-  await waitFlush();
+  await store.flush();
   const records = readJsonlRecords(store.getHistoryFilePath());
   const rec = records.find((r) => r.sessionId === sessionId && r.toolName === opts.toolName && r.ok === opts.ok);
   assert.ok(rec, "写入的记录应已落盘可查");
@@ -133,7 +133,7 @@ test("UT-PRL-002: patchRecordLinks 命中字段合并，只设传入字段且持
   const sessionId = "sess-prl-002";
   const failId = await recordOne(store, sessionId, { toolName: "bash", ok: false, command: "tsc --noEmit" });
   const fixId = await recordOne(store, sessionId, { toolName: "edit", ok: true });
-  await waitFlush();
+  await store.flush();
 
   // patch 1：failure 记录写 fixedByExecutionId + memoryEntryIds
   // patch 2：fix 记录只写 memoryEntryIds（不传 fixedByExecutionId → 保持缺省）
@@ -166,7 +166,7 @@ test("UT-PRL-003: 缓存未加载且 pending 未落盘时 patch → 不丢数据
 
   // 先落一条已 flush 的记录
   await recordOne(store, sessionId, { toolName: "bash", ok: true, command: "npm run build" });
-  await waitFlush();
+  await store.flush();
 
   // 新建实例（缓存未加载）→ 直接 record（进 pending，100ms 定时器未触发）
   // → 立即 patchRecordLinks：query() 会触发 loadFileToCache（cache 清空后从文件

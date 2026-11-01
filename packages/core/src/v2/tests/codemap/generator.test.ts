@@ -225,8 +225,11 @@ test("CM-09: 循环依赖检测不递归（< 1s 完成）", async () => {
   const map = await gen.generateFullMap();
   const elapsed = Date.now() - start;
 
-  // 必须快速完成（不无限递归）
-  assert.ok(elapsed < 1000, `生成时间应 < 1s，实际 ${elapsed}ms`);
+  // 本条断言的目标是"循环依赖不会导致无限递归"——病态实现的症状是
+  // 指数级增长/挂死（秒级→分钟级），而不是"差 100ms"。
+  // 2026-11-01 修正：原阈值 1s 在并行跑全量测试时会被 fs/git 排队顶穿（实测 1128ms），
+  // 对 2 个文件的全量扫描给 10s 上限，既能区分病态递归，又不受负载影响。
+  assert.ok(elapsed < 10_000, `生成时间应 < 10s（递归故障表现为指数增长），实际 ${elapsed}ms`);
 
   // 两文件应在 CodeMap 中
   const aNode = map.files.find((f) => f.path.endsWith("a.ts"));

@@ -79,6 +79,41 @@ async function waitForEvents(
     }
     await sleep(50);
   }
+  // 超时必须显式失败（2026-11-01）：此前静默返回，调用方只能靠后续断言兜底，
+  // 失败信息变成"正常文件应触发事件"，看不出是"事件没来"还是"过滤逻辑写错了"。
+  // 长尾延迟是调度问题（放宽 timeoutMs 即可），真缺陷是过滤/挂载问题（事件确实不来），
+  // 两者必须能一眼区分。
+  assert.fail(
+    `等待文件事件超时（${timeoutMs}ms）：已收集 ${collector.events.length} 条 [${collector.events
+      .map((e) => `${e.type}:${e.path}`)
+      .join(", ")}]`
+  );
+}
+
+/**
+ * 等待事件流"静默"（一段时间内不再有事件到达）
+ *
+ * 用于**负向断言**（"某路径不应触发事件"）：仅等对照文件的事件到达是不够的，
+ * fs.watch 的事件顺序不保证——被过滤路径的迟到事件可能排在对照事件之后。
+ * 等到事件数稳定 quietMs 后再断言，才能在并发负载下保持确定性。
+ *
+ * @param collector 事件收集器
+ * @param quietMs 静默判定窗口（毫秒）
+ * @param timeoutMs 最大等待时间（毫秒）
+ */
+async function waitForQuiet(collector: { events: FileWatchEvent[] }, quietMs = 400, timeoutMs = 5000): Promise<void> {
+  const start = Date.now();
+  let lastCount = collector.events.length;
+  let stableSince = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    await sleep(50);
+    if (collector.events.length !== lastCount) {
+      lastCount = collector.events.length;
+      stableSince = Date.now();
+    } else if (Date.now() - stableSince >= quietMs) {
+      return;
+    }
+  }
 }
 
 /**
@@ -217,9 +252,13 @@ test("FW-04: 300ms 去抖聚合（同路径多次事件合并为一次回调）"
   await watcher.start();
 
   // 快速连续修改 5 次
+  //
+  // 2026-11-01 修正：原先每次写之间 `await sleep(20)`，在并行跑全量测试时
+  // 这些 sleep 会被调度拉长，5 次写可能跨越 300ms 去抖窗口 → 回调被触发多次，
+  // 断言失败（实际 3 次）。去抖的前提是"写操作都落在同一窗口内"，
+  // 因此这里改为同步连写（毫秒级完成），让前提不受机器负载影响。
   for (let i = 1; i <= 5; i++) {
     fs.writeFileSync(filePath, `v${i}\n`, "utf8");
-    await sleep(20); // 间隔 20ms，全部在 300ms 去抖窗口内
   }
 
   // 轮询等待去抖回调触发（事件仅在 300ms 去抖窗口结束后聚合发出一次；
@@ -260,7 +299,8 @@ test("FW-05: excludeDirs 排除目录（node_modules 等不触发事件）", asy
 
   // 轮询等待对照文件事件到达（事件已流转后，excluded 文件"零事件"断言才有确定性；
   // 与 FW-06 相同模式：正向事件作为负向断言的时间锚点）
-  await waitForEvents(collector, (events) => events.some((e) => e.path === "normal.ts"), 2000);
+  await waitForEvents(collector, (events) => events.some((e) => e.path === "normal.ts"));
+  await waitForQuiet(collector);
   await watcher.stop();
 
   // 验证：excluded 路径不应触发事件
@@ -304,19 +344,35 @@ test("FW-06: gitignore 过滤（.gitignore 中的文件不触发事件）", asyn
   fs.writeFileSync(normalFile, "normal\n", "utf8");
 
   // 轮询等待正常文件事件到达，同时确保 gitignored 文件未产生事件
-  await waitForEvents(collector, (events) => events.some((e) => e.path === "normal.ts"), 2000);
+  await waitForEvents(collector, (events) => events.some((e) => e.path === "normal.ts"));
+  await waitForQuiet(collector);
   await watcher.stop();
 
   // 验证：gitignored 文件不应触发事件
   const logEvents = collector.events.filter((e) => e.path === "debug.log");
-  assert.equal(logEvents.length, 0, "*.log 文件应被 gitignore 过滤");
+  assert.equal(
+    logEvents.length,
+    0,
+    `*.log 文件应被 gitignore 过滤，实际产生 ${logEvents.length} 条事件（全部事件：${collector.events
+      .map((e) => e.path)
+      .join(",")}）`
+  );
 
   const buildEvents = collector.events.filter((e) => e.path.startsWith("build/"));
-  assert.equal(buildEvents.length, 0, "build/ 目录应被 gitignore 过滤");
+  assert.equal(
+    buildEvents.length,
+    0,
+    `build/ 目录应被 gitignore 过滤，实际产生 ${buildEvents.length} 条事件（全部事件：${collector.events
+      .map((e) => e.path)
+      .join(",")}）`
+  );
 
   // 正常文件应触发
   const normalEvents = collector.events.filter((e) => e.path === "normal.ts");
-  assert.ok(normalEvents.length > 0, "正常文件应触发事件");
+  assert.ok(
+    normalEvents.length > 0,
+    `正常文件应触发事件，实际收集到：${collector.events.map((e) => e.path).join(",") || "(空)"}`
+  );
 });
 
 test("FW-07: stop() 幂等且清理所有 watcher", async () => {
@@ -411,6 +467,7 @@ test("FW-09: .deepcode 自身目录排除", async () => {
 
   // 轮询等待对照事件到达（固定等待在并发套件高负载下会漏收事件导致 flaky）
   await waitForEvents(collector, (events) => events.some((e) => e.path === "control.ts"));
+  await waitForQuiet(collector);
   await watcher.stop();
 
   // 验证：.deepcode 目录中的文件不应触发事件

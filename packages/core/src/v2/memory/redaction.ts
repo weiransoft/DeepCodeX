@@ -203,6 +203,37 @@ export function defaultRedactionLogPath(homeDir?: string): string {
 }
 
 /**
+ * 在途审计日志写入集合（模块级）
+ *
+ * redact() 设计为同步返回（隐私关卡不能阻塞主流程），日志异步追加。
+ * 代价是"返回时日志尚未落盘"——进程退出、测试清理临时目录、
+ * 或调用方立刻读取日志文件时，都可能读到缺失/不完整的内容。
+ *
+ * 追踪在途 Promise 以暴露 flushRedactionAuditLogs()：
+ * 关闭流程（或断言前）可显式等待审计日志全部落盘，
+ * 而不是靠固定 sleep 猜测（固定 sleep 在负载高时必然偶发失败）。
+ */
+const pendingAuditWrites = new Set<Promise<void>>();
+
+/**
+ * 等待所有在途审计日志写入落盘
+ *
+ * 典型用途：进程优雅退出、测试断言日志内容、测试清理临时目录前。
+ * 会反复排空直到集合为空——因为等待期间可能有新的 redact() 触发新写入。
+ *
+ * 注意：不抛出写入错误（写入失败已在 redact() 内部告警），
+ * 本函数只保证"该等的都等完了"。
+ *
+ * @returns 所有在途写入结束后 resolve
+ */
+export async function flushRedactionAuditLogs(): Promise<void> {
+  // 上限保护：正常场景一轮即空；防御"等待期间持续产生新写入"导致的无限等待
+  for (let guard = 0; guard < 100 && pendingAuditWrites.size > 0; guard++) {
+    await Promise.allSettled(Array.from(pendingAuditWrites));
+  }
+}
+
+/**
  * 敏感信息过滤器：记忆持久化前的强制关卡
  *
  * 调用契约：
@@ -327,13 +358,22 @@ export class SensitiveInfoRedactor {
     hits.reverse();
 
     // 异步追加审计日志（不阻塞返回值，日志写入失败仅告警不抛出）
-    this.appendLogs(logEntries).catch((err) => {
-      // 隐私红线：日志写入失败不能影响主流程，但需告警
-      // 使用 console.warn 而非 throw，避免阻塞主流程
-      console.warn(
-        `[SensitiveInfoRedactor] 审计日志写入失败（不阻塞主流程）: ${err instanceof Error ? err.message : String(err)}`
-      );
-    });
+    // 同时登记到 pendingAuditWrites，供 flushRedactionAuditLogs() 确定性等待落盘
+    if (logEntries.length > 0) {
+      const write = this.appendLogs(logEntries).catch((err) => {
+        // 隐私红线：日志写入失败不能影响主流程，但需告警
+        // 使用 console.warn 而非 throw，避免阻塞主流程
+        console.warn(
+          `[SensitiveInfoRedactor] 审计日志写入失败（不阻塞主流程）: ${err instanceof Error ? err.message : String(err)}`
+        );
+      });
+      pendingAuditWrites.add(write);
+      const release = (): void => {
+        pendingAuditWrites.delete(write);
+      };
+      // 成功/失败都要出队，避免集合无限增长
+      write.then(release, release);
+    }
 
     return { sanitized, hits };
   }

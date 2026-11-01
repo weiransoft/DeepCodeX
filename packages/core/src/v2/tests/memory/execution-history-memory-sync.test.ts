@@ -22,8 +22,6 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
-
 import { ExecutionHistoryStore } from "../../memory/execution-history-store";
 import { ExecutionHistoryMemorySync } from "../../memory/execution-history-memory-sync";
 import { MemoryStore } from "../../memory/memory-store";
@@ -57,8 +55,15 @@ afterEach(() => {
   }
 });
 
-async function waitFlush(ms = 150): Promise<void> {
-  await sleep(ms);
+/**
+ * 等待 store 落盘（确定性，替代固定 sleep）
+ *
+ * 2026-11-01 修复：原实现 `setTimeout(150)` 赌 100ms 合并窗口已过，
+ * 并行跑全量测试时定时器回调被推迟，sync 读到空数据 → 断言 0 条。
+ * store.flush() 取消定时器并等待落盘完成，与机器负载无关。
+ */
+async function waitFlush(store: ExecutionHistoryStore): Promise<void> {
+  await store.flush();
 }
 
 // ============================================================================
@@ -104,7 +109,7 @@ async function setup(records: RecordInput[]): Promise<{
   for (const r of records) {
     await store.record(makeRecord(r));
   }
-  await waitFlush();
+  await waitFlush(store);
   const memoryStore = new MemoryStore(tempProject);
   const sync = new ExecutionHistoryMemorySync(store, memoryStore);
   return { store, memoryStore, sync };
@@ -250,7 +255,7 @@ test("UT-MS-007: MemoryStore 构造异常场景（无 projectRoot 仍能工作�
       argsSnippet: JSON.stringify({ command: "ls -la" }),
     })
   );
-  await waitFlush();
+  await waitFlush(store);
 
   // MemoryStore 用空字符串 projectRoot——这是 MemorySync 的 fail-safe 路径
   const memoryStore = new MemoryStore("");

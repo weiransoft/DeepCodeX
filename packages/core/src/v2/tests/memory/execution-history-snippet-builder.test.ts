@@ -23,7 +23,6 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
 
 import { ExecutionHistoryStore } from "../../memory/execution-history-store";
 import { buildExecutionHistorySnippet } from "../../context/execution-history-snippet-builder";
@@ -58,8 +57,9 @@ afterEach(() => {
   }
 });
 
-async function waitFlush(ms = 150): Promise<void> {
-  await sleep(ms);
+/** 等待 store 落盘（确定性；固定 sleep 在并行负载下会读到空数据） */
+async function waitFlush(store: ExecutionHistoryStore): Promise<void> {
+  await store.flush();
 }
 
 type RecordInput = {
@@ -87,7 +87,7 @@ async function makeStore(records: RecordInput[]): Promise<ExecutionHistoryStore>
       date: new Date(now - i * 1000).toISOString().slice(0, 10),
     });
   }
-  await waitFlush();
+  await waitFlush(store);
   return store;
 }
 
