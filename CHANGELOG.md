@@ -4,6 +4,82 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+专项审查（预算卡死 / 空循环 / 任务不执行）后的修复批次。
+
+### Added
+- **执行器折叠次数硬上限**（eag/p5/executors/llm-task-executor.ts）：三处上下文折叠点都是
+  "折叠 + continue" 且不推进 `currentRound`，理论上存在零轮零 token 的连续折叠。
+  新增 `MAX_CONTEXT_FOLDS`（连续零产出折叠上限），达限诚实 failure 而非静默挂死；
+  长任务中"折叠 → 跑几轮 → 再折叠"的正常路径不受影响（计数在推进处归零）。
+- **门禁跳过可观测**（eag/gate/gate-orchestrator.ts + gate-types.ts）：`GateOrchestrationResult`
+  新增 `skippedGates`（`no-checker` / `missing-context`）与 `strictGateCoverage` 选项。
+  此前 `LOOP_GATE_IDS.coding` 声明 G-1~G-5 而默认只有 G1/G2/G3/G6/G7，
+  G-4/G-5 被静默 `continue`，调用方看到 `allPassed=true` 以为全绿。
+- **审计日志可等待落盘**（v2/memory/redaction.ts `flushRedactionAuditLogs`、
+  v2/memory/execution-history-store.ts `flush()`）：脱敏审计日志与执行历史都是
+  "同步返回 + 异步落盘"，调用方此前只能靠固定 sleep 猜测，现在可确定性等待。
+
+### Changed
+- **Token 预算语义全局统一为"不终止运行"**（与 2026-10-20 需求变更对齐）：
+  - `LoopGuard`（common/loop-guard.ts）：仅当调用方**显式**传 `maxTokens > 0` 才把
+    Token 当硬终止；此前只传 `{ maxIterations }` 会隐式继承默认 200k 上限。
+  - `GraphGuard`（eag/graph/graph-guard.ts + graph-loop-models.ts）：新增
+    `tokenBudgetHardStop`（默认 false），超预算返回 `passed=true + severity=warning`，
+    仍记入 `triggeredGuards` 可审计。
+  - Ralph 自主循环（team/autonomous）：新增 `LoopConfig.enforceTokenBudget`（默认 false，
+    可由 `autonomous.yml` 的 `enforce_token_budget` 配置），超软上限只告警一次。
+  - `docs/eag-autonomous.md` / `_en.md` 终止条件表移除"Token 预算耗尽"一行，
+    补"空转熔断"；P5 设计文档加修订注记；CLI `--max-tokens` 文案标注"压缩基线"。
+- **规则注入预算无条件生效**（eag/rlis/rule-injector.ts）：`maxTokenBudget` 一旦给出即生效，
+  `truncateBySeverity` 从"开关"改为"策略选择"（true=分级、false=按序）；
+  截断由 `break` 改 `continue`（不再"首条超限即丢弃后续所有小规则"）；
+  `estimateTokenCount` 改 CJK 感知（中文此前被低估约 4 倍）。
+- **P5 默认轮数对齐**（eag/p5/run-state-store.ts）：`maxIterations` 默认 50 → 10，
+  与编排器 `DEFAULT_MAX_ITERATIONS` 一致（不影响实际轮数，仅报告口径）。
+- **循环内核上界**（eag/loop/kernel.ts）：`while` 条件纳入 `iterIndex < maxIterations`，
+  不再只靠循环尾 `break` 兜底。
+- **流超时语义两通路统一**（session.ts 两通路 + common/llm-retry.ts）：
+  `LlmStreamIdleTimeoutError` 新增 `kind`（`idle` / `total`）与 `timeoutMs`，
+  文案不再无论阈值多少都喊"idle for 60 seconds"；超时专属重试 cap 提取为
+  `MAX_LLM_IDLE_TIMEOUT_ATTEMPTS = 2` 由两条通路共用（此前只有 Anthropic 侧有 cap）。
+
+### Fixed
+- **P0：任务卡状态写不进去 → plan 阶段空转 → 任务永不执行**
+  （eag/p5/handlers/plan-stage-handler.ts `markTaskCardStatusInContent`）：
+  兜底插入用循环结束态的 `inTargetCard` 判定，而它在遇到下一张卡标题时被置回 false，
+  因此只有"目标卡是文件最后一张"才生效。目标卡非末位且无 `- status:` 行时，
+  写回内容与原文完全相同 → 3.5 守卫每轮重新触发 → 10 轮空转后 fail-closed。改为记录标题行的输出下标。
+  同时修复旧写法 `findIndex` 返回 -1 时状态行被插到文件开头的问题。
+- **空闲超时被当成"空回复"**（session.ts `createChatCompletionStreamAttempt`）：
+  idle 定时器触发时会 abort `attemptController`，循环首行即 `break` 并置 `abortedBreak`，
+  随后按"用户主动停止"返回已积累内容（空串）——超时既不重试也不报错。
+  现在 `idleTimedOut` 优先还原为 `LlmStreamIdleTimeoutError`，让 idle 专属重试 cap 生效。
+- **总超时被当成"用户主动停止"**（session.ts `createChatCompletionStreamAttempt` /
+  `createLlmMessageStreamAttempt`）：OpenAI 通路 `streamTimeoutMs` 到点只调用
+  `attemptController.abort()`（无 reason、无标记），流循环读到 `aborted` 便置
+  `abortedBreak=true` 静默返回已积累内容——既不重试也无错误提示；Anthropic 通路则早已
+  归一化为可重试错误，两条通路行为相反。现两侧统一为
+  `LlmStreamIdleTimeoutError({ kind: "total" })`（`!streamCompleted` 守卫防收尾竞态误判），
+  Anthropic 侧另补 for-await 之后的收尾判定（覆盖 provider 优雅结束、不抛错的窗口）。
+- **覆盖率门禁单 run 内永不阻断**（eag/testing）：计数改为实例级跨 run 保有，
+  判据从 `!coverageReport.passed`（因果循环、自增不可达）改为 `failedDimensions.length > 0`。
+- **动态建议器恒降级**（eag/dynamic/eag-dynamic-suggester.ts）：`confidence` 缺失不再按 0 处理。
+- **经验库负上限死循环**（eag/graph/experience-store.ts）：`maxCases` 构造时夹紧 ≥ 0，
+  消除 `0 > -1` 恒真 + `shift()` 返回 undefined 的零进展自旋。
+- **LL-010 断言过时**（team/tests）：实现已按 upstream 3ed02dac 把 `reasoning_effort`
+  改为顶层字段（`extra_body` 是 Python-SDK 约定，Node SDK 不展开），测试仍要求 `extra_body`。
+  测试改为断言顶层字段且不得出现 `extra_body`；同步修正 team-adapter / openai-provider / openai-thinking 的注释。
+- **时序/负载敏感测试改为确定性判定**（PRIV-12、SG-15、RA-PERF-01、UT-002、UT-MS-002/005、UT-SB-003/009/010、
+  FW-04/06/09、CM-09）：固定 `sleep` 赌异步落盘或事件到达，在并行跑全量套件时必然偶发失败——
+  - 落盘等待统一走新增的 `flush()` / `flushRedactionAuditLogs()`；
+  - SG-15 的递归删除改为 `rename`（原子、不枚举目录，也避开批量删除保护）；
+  - RA-PERF-01 改用新增的 `analyzeContent`，只测正则解析开销，不被 fs 延迟污染；
+  - FW-04 改为同步连写（去抖前提"写操作落在同一窗口"不再受调度影响）；
+  - FW-05/06/09 的负向断言补 `waitForQuiet`（事件流静默后再断言，避免迟到事件误判）；
+  - CM-09 的"不无限递归"阈值由 1s 放宽到 10s（病态递归是数量级恶化，不是 100ms 抖动）。
+
 ## [0.4.3.19] - 2026-10-19
 
 补丁版（上下文管理策略重构：移除 Token 配额硬终止 + 模型循环检测 + 流式停止修复 + 新任务切新上下文）。
