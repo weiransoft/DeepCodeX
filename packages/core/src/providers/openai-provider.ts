@@ -79,7 +79,9 @@ export class OpenAILLMClient implements LLMClient {
     // B1：DeepSeek thinking 请求参数补齐——compact/edit-handler 既有非流式调用均携带
     // thinking 开关与 reasoning_effort（buildThinkingRequestOptions），接线 provider 层后
     // 必须保持相同请求语义，否则 thinking 模式在后台总结场景静默丢失。
-    // thinking/extra_body 为 DeepSeek 非标准扩展字段，SDK 类型未覆盖，经显式类型拓宽注入。
+    // thinking/reasoning_effort 为 DeepSeek 非标准扩展字段，SDK 类型未覆盖，经显式类型拓宽注入。
+    // 注：upstream 3ed02dac 起 reasoning_effort 为**顶层**字段（extra_body 是 Python-SDK 约定，
+    // Node OpenAI SDK 不展开，包装在内会被服务端忽略）。
     const params = {
       model: this.model,
       messages,

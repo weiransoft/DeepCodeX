@@ -255,7 +255,8 @@ test("LL-009: injectedClient 非法对象（status=skipped）", async () => {
 // LL-010 / LL-011: v1.6 P1-1 新增 - thinking 参数传递与 reasoning_content fallback
 //
 // 这两个测试验证 v1.6 P1-1 修复：
-//   1. LL-010: thinkingEnabled=true 时，请求体应包含 thinking 和 extra_body.reasoning_effort 参数
+//   1. LL-010: thinkingEnabled=true 时，请求体应包含 thinking 和**顶层** reasoning_effort 参数
+//      （upstream 3ed02dac 起 reasoning_effort 改为顶层；extra_body 是 Python-SDK 约定，Node SDK 不展开）
 //      之前 bug：executeDispatch 构造请求体时未调用 buildThinkingRequestOptions，
 //      导致即使 settings.json 设置 thinkingEnabled=true，API 端也不会启用 thinking 模式
 //   2. LL-011: content 字段为空但 reasoning_content 字段有内容时，应使用 reasoning_content 作为输出
@@ -310,17 +311,12 @@ test("LL-010: thinking 参数传递（thinkingEnabled=true 时请求体含 think
   const thinkingParam = (capturedRequest as { thinking?: { type?: string } }).thinking;
   assert.equal(thinkingParam?.type, "enabled", `thinking.type 应为 "enabled"，实际: ${thinkingParam?.type}`);
 
-  // 断言 3：请求体包含 extra_body.reasoning_effort 参数
-  assert.ok(
-    "extra_body" in capturedRequest!,
-    "请求体应包含 extra_body 字段（thinkingEnabled=true 时附带 reasoning_effort）"
-  );
-  const extraBody = (capturedRequest as { extra_body?: { reasoning_effort?: string } }).extra_body;
-  assert.equal(
-    extraBody?.reasoning_effort,
-    "high",
-    `reasoning_effort 应为 "high"，实际: ${extraBody?.reasoning_effort}`
-  );
+  // 断言 3：请求体包含**顶层** reasoning_effort
+  // 依据 upstream commit 3ed02dac：extra_body 是 Python-SDK 约定，Node OpenAI SDK 不会展开它，
+  // 包装在内的 reasoning_effort 会被 DeepSeek API 静默忽略，因此必须作为顶层字段发送。
+  assert.ok(!("extra_body" in capturedRequest!), "请求体不应再包含 extra_body（Node SDK 不展开，参数会失效）");
+  const reasoningEffort = (capturedRequest as { reasoning_effort?: string }).reasoning_effort;
+  assert.equal(reasoningEffort, "high", `顶层 reasoning_effort 应为 "high"，实际: ${reasoningEffort}`);
 
   // 断言 4：请求体仍包含基本字段（model / messages / temperature）
   // 使用显式类型断言避免 TypeScript 控制流分析将 capturedRequest 收窄为 never
@@ -366,8 +362,9 @@ test("LL-010b: thinking 参数传递（thinkingEnabled=false 时请求体含 thi
   assert.ok("thinking" in capturedRequest!, "请求体应包含 thinking 字段（即使 disabled）");
   const thinkingParam = (capturedRequest as { thinking?: { type?: string } }).thinking;
   assert.equal(thinkingParam?.type, "disabled", `thinking.type 应为 "disabled"，实际: ${thinkingParam?.type}`);
-  // thinkingEnabled=false 时不应包含 extra_body（buildThinkingRequestOptions 行为）
+  // thinkingEnabled=false 时既不应包含 extra_body，也不应下发 reasoning_effort
   assert.ok(!("extra_body" in capturedRequest!), "thinkingEnabled=false 时请求体不应包含 extra_body");
+  assert.ok(!("reasoning_effort" in capturedRequest!), "thinkingEnabled=false 时请求体不应包含 reasoning_effort");
 });
 
 test("LL-011: reasoning_content fallback（content 为空但 reasoning_content 有内容）", async () => {

@@ -649,7 +649,9 @@ export async function executeDispatch(
         temperature: created.temperature,
         thinkingEnabled: created.thinkingEnabled,
         // v1.6 P1-1：传递 reasoningEffort，让 buildThinkingRequestOptions 在 thinkingEnabled=true 时
-        // 能正确构造 extra_body.reasoning_effort 参数（与 session.ts 主对话流程对齐）
+        // 能正确构造顶层 reasoning_effort 参数（与 session.ts 主对话流程对齐）。
+        // 注：upstream commit 3ed02dac 后 reasoning_effort 必须为请求体顶层字段，
+        // extra_body 是 Python-SDK 约定，Node OpenAI SDK 不展开。
         reasoningEffort: created.reasoningEffort,
         // v2.1.2 修复（架构师审查 B-02）：传递 debugLogEnabled
         // 使 team dispatch / team full-lifecycle 模式也能记录 debug.log 和 error.log
@@ -766,7 +768,15 @@ export async function executeDispatch(
         messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
         temperature?: number;
         thinking?: { type: "enabled" | "disabled" };
-        extra_body?: { reasoning_effort?: ReasoningEffort };
+        /**
+         * 顶层 reasoning_effort（upstream commit 3ed02dac 修复点）
+         *
+         * extra_body 是 Python-SDK 约定，Node OpenAI SDK 不会展开它，
+         * 包装在内的 reasoning_effort 会被 DeepSeek API 静默忽略。
+         */
+        reasoning_effort?: ReasoningEffort;
+        /** Qwen3 系列专属：vLLM 的 chat_template_kwargs 亦为顶层字段 */
+        chat_template_kwargs?: { enable_thinking: boolean; preserve_thinking?: boolean };
       } = {
         model: handle.model,
         messages,

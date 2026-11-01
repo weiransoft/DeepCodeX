@@ -86,7 +86,7 @@ function mapReasoningEffortToQwen(effort: ReasoningEffort): QwenReasoningEffort 
  * - Qwen3.8+ 系列：chat_template_kwargs.{enable_thinking, preserve_thinking}（thinking 开启时）
  *   + 顶层 reasoning_effort（xhigh/medium/low，经五档映射）
  * - Qwen3 系列（<3.8）：chat_template_kwargs.enable_thinking（顶层字段，vLLM 标准）
- * - DeepSeek V4 系列：thinking.type + extra_body.reasoning_effort
+ * - DeepSeek V4 系列：thinking.type + 顶层 reasoning_effort
  * - 其他模型：返回空对象（不传 thinking 参数，模型不支持）
  *
  * v1.1 变更：
@@ -104,7 +104,7 @@ function mapReasoningEffortToQwen(effort: ReasoningEffort): QwenReasoningEffort 
  * @param thinkingEnabled 是否启用 thinking 模式
  * @param _baseURL API 基础 URL（保留参数，当前未使用）
  * @param reasoningEffort 推理强度（五档 "low" / "medium" / "high" / "xhigh" / "max"），
- *   DeepSeek 系列经 extra_body 生效，Qwen3.8+ 经顶层 reasoning_effort 映射生效
+ *   DeepSeek 系列经顶层 reasoning_effort 生效，Qwen3.8+ 经顶层 reasoning_effort 映射生效
  * @param model 模型名称（用于判断 thinking 参数格式），默认空字符串
  * @returns thinking 请求参数对象（通过类型拓宽注入 OpenAI SDK 请求体）
  */
