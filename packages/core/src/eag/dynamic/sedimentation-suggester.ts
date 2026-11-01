@@ -18,6 +18,8 @@ import type { LLMClient, LLMRequest } from "../../providers/llm-provider";
 import type { SessionMessage } from "../../session";
 import type { SedimentLogFn } from "../../common/sediment-logger";
 import type { SedimentationDraft } from "../../agents/sedimentation-writer";
+import type { AgentFinding } from "./finding";
+import { validateFinding } from "./finding";
 import {
   buildSedimentationPrompt,
   SEDIMENTATION_MAX_TURNS,
@@ -41,6 +43,11 @@ export type SedimentationSuggestion = {
   draft: SedimentationDraft;
   /** 给用户看的建议理由（中文） */
   rationale: string;
+  /**
+   * 可选：Finding 四要素契约（P3）。LLM 产出且过 validateFinding 时携带；
+   * 缺失/非法 → 该建议属 deferred 池（partitionByEvidence 划分）。
+   */
+  finding?: AgentFinding;
 };
 
 /** SedimentationSuggester 依赖上下文（架构 §3 构造签名） */
@@ -128,8 +135,8 @@ export class SedimentationSuggester {
       const seen = this.getSessionFingerprints(sessionId);
       const suggestions: SedimentationSuggestion[] = [];
       for (const candidate of candidates) {
-        const draft = this.normalizeDraft(candidate);
-        if (!draft) {
+        const normalized = this.normalizeDraft(candidate);
+        if (!normalized) {
           this.log({
             event: "sediment-suggestion-invalid",
             sessionId,
@@ -137,6 +144,16 @@ export class SedimentationSuggester {
             message: "沉淀建议草稿非法（缺 description / name 非 kebab-case / agent 缺 role），已丢弃",
           });
           continue;
+        }
+        const { draft, finding } = normalized;
+        if (!finding && candidate.finding !== undefined && candidate.finding !== null) {
+          // P3：LLM 给了 finding 但未过 schema 关卡 → 丢弃 finding（建议保留，进 deferred 池）
+          this.log({
+            event: "sediment-finding-invalid",
+            sessionId,
+            name: draft.name,
+            message: "沉淀建议的 finding 未通过 schema 校验（缺证据/字段非法/超长），已降级为 deferred 池候选",
+          });
         }
         const fingerprint = computeSedimentationFingerprint(draft);
         // 会话内去重：已建议/已拒绝的指纹不再重复建议
@@ -152,6 +169,7 @@ export class SedimentationSuggester {
             typeof candidate.rationale === "string" && candidate.rationale.trim()
               ? candidate.rationale.trim()
               : "该模式在对话中反复出现，建议沉淀为可复用资产",
+          finding,
         });
       }
       this.log({
@@ -237,6 +255,7 @@ export class SedimentationSuggester {
     role?: string;
     content?: string;
     rationale?: string;
+    finding?: unknown;
   }> {
     if (!raw) {
       return [];
@@ -258,9 +277,10 @@ export class SedimentationSuggester {
   }
 
   /**
-   * 草稿规范化校验（白名单字段 + kebab-case + agent 必须有 role）。
+   * 草稿规范化校验（白名单字段 + kebab-case + agent 必须有 role + finding schema 关卡）。
    *
-   * 非法返回 undefined（由调用方丢弃并记日志）。
+   * 非法返回 undefined（由调用方丢弃并记日志）；finding 非法时降级为 undefined
+   * （草稿本身保留，由调用方记 deferred 日志）。
    */
   private normalizeDraft(candidate: {
     kind?: string;
@@ -268,7 +288,8 @@ export class SedimentationSuggester {
     description?: string;
     role?: string;
     content?: string;
-  }): SedimentationDraft | undefined {
+    finding?: unknown;
+  }): { draft: SedimentationDraft; finding?: AgentFinding } | undefined {
     const kind = candidate.kind === "agent" ? "agent" : candidate.kind === "skill" ? "skill" : undefined;
     if (!kind) {
       return undefined;
@@ -282,14 +303,16 @@ export class SedimentationSuggester {
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) {
       return undefined;
     }
+    // P3：finding 走 validateFinding 唯一 schema 关卡（非法 → undefined，不影响草稿）
+    const finding = validateFinding(candidate.finding);
     if (kind === "agent") {
       const role = typeof candidate.role === "string" ? candidate.role.trim() : "";
       if (!role) {
         return undefined;
       }
-      return { kind, name, description, role, content };
+      return { draft: { kind, name, description, role, content }, finding };
     }
-    return { kind, name, description, content };
+    return { draft: { kind, name, description, content }, finding };
   }
 }
 

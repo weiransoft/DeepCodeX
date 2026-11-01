@@ -20,6 +20,8 @@ import * as path from "node:path";
 import * as os from "node:os";
 import matter from "gray-matter";
 import type { SedimentLogFn } from "../common/sediment-logger";
+import type { AgentFinding } from "../eag/dynamic/finding";
+import { validateFinding } from "../eag/dynamic/finding";
 
 /** agent/skill 名称统一 kebab-case 校验（架构 §7 共享知识 #1） */
 const KEBAB_CASE_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -39,11 +41,16 @@ export type SedimentationDraft = {
   role?: string;
   /** Markdown 正文（SKILL.md frontmatter 之后的内容） */
   content: string;
+  /**
+   * 可选：Finding 四要素契约（P3）。携带时经 validateFinding 校验后
+   * 落盘为同目录 finding.json（证据可回放）；非法或缺失不影响 SKILL.md 落盘。
+   */
+  finding?: AgentFinding;
 };
 
 /** 落盘结果（成功带路径；失败带中文原因，绝不抛出） */
 export type WriteResult =
-  | { ok: true; path: string }
+  | { ok: true; path: string; findingPath?: string }
   | {
       ok: false;
       reason: "invalid-name" | "invalid-frontmatter" | "path-escapes-root" | "duplicate-name" | "io-error";
@@ -169,14 +176,21 @@ export class SedimentationWriter {
       const fileContent = matter.stringify(safeDraft.content, this.buildFrontmatter(safeDraft));
       fs.mkdirSync(targetDir, { recursive: true });
       fs.writeFileSync(targetFile, fileContent, "utf8");
+      // P3：Finding 契约落盘（finding.json 与 SKILL.md 同目录；校验失败已在校验白名单处丢弃）
+      let findingPath: string | undefined;
+      if (safeDraft.finding) {
+        const findingFile = path.join(targetDir, "finding.json");
+        fs.writeFileSync(findingFile, JSON.stringify(safeDraft.finding, null, 2) + "\n", "utf8");
+        findingPath = findingFile;
+      }
       this.log({
         event: "sediment-write-ok",
         scope,
         name: safeDraft.name,
         kind: safeDraft.kind,
-        message: `沉淀落盘成功：${safeDraft.name} → ${targetFile}`,
+        message: `沉淀落盘成功：${safeDraft.name} → ${targetFile}${findingPath ? "（含 finding.json）" : ""}`,
       });
-      return { ok: true, path: targetFile };
+      return { ok: true, path: targetFile, findingPath };
     } catch (error) {
       // 门槛 5：io-error 仅结构化日志，绝不上抛（落盘失败不影响会话）
       const message = error instanceof Error ? error.message : String(error);
@@ -199,13 +213,18 @@ export class SedimentationWriter {
   }
 
   /**
-   * 白名单字段抽取：仅保留 kind/name/description/role/content，其余一律丢弃。
+   * 白名单字段抽取：仅保留 kind/name/description/role/content/finding，其余一律丢弃。
+   *
+   * finding 走 validateFinding schema 关卡：合法则保留，非法/缺失置 undefined
+   * （不影响 SKILL.md 本体落盘，只是不写 finding.json）。
    *
    * 基本形态非法（draft 非对象 / kind 不合法 / name 非字符串）返回 undefined。
    */
-  private pickWhitelist(
-    draft: SedimentationDraft
-  ): Pick<SedimentationDraft, "kind" | "name" | "description" | "role" | "content"> | undefined {
+  private pickWhitelist(draft: SedimentationDraft):
+    | (Pick<SedimentationDraft, "kind" | "name" | "description" | "role" | "content"> & {
+        finding?: AgentFinding;
+      })
+    | undefined {
     if (!draft || typeof draft !== "object") {
       return undefined;
     }
@@ -217,6 +236,8 @@ export class SedimentationWriter {
     if (!name) {
       return undefined;
     }
+    // P3：Finding 白名单扩展——validateFinding 是唯一 schema 关卡
+    const validatedFinding = validateFinding((draft as Record<string, unknown>).finding);
     return {
       kind,
       name,
@@ -224,6 +245,7 @@ export class SedimentationWriter {
       // 仅 kind==="agent" 时保留 role（skill 落盘不写 role 字段）
       role: kind === "agent" && typeof draft.role === "string" && draft.role.trim() ? draft.role.trim() : undefined,
       content: typeof draft.content === "string" ? draft.content : "",
+      finding: validatedFinding,
     };
   }
 

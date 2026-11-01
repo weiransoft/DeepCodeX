@@ -134,6 +134,10 @@ export {
 // 上游 v0.3.1 新增：PromptToolOptions（getTools 多模态/skill 选项类型）
 export type { ToolDefinition, SkillPromptDocument, PromptToolOptions } from "./prompt";
 
+// Skill 管理（web 能力发现 API / @ 提及补全数据源：扫描技能根目录 → SkillInfo）
+export { SkillManager } from "./skill-manager";
+export type { SkillKind, SkillManagerContext } from "./skill-manager";
+
 // Tools
 export { ToolExecutor } from "./tools/executor";
 export type {
@@ -387,6 +391,56 @@ export type {
   EvaluationReport,
   IndependentEvaluator,
 } from "./eag/evaluator/types";
+// P4 证据状态与分数天花板（借鉴 Better Harness Agent Work Loop 评估模型）
+export type { WorkLoopDimension, EvidenceState } from "./eag/evaluator/types";
+export {
+  WORK_LOOP_DIMENSIONS,
+  EVIDENCE_STATES,
+  EVIDENCE_SCORE_CEILINGS,
+  capDimensionScore,
+  capDimensionScores,
+} from "./eag/evaluator/types";
+// P1 规则使用证据链（record-only）
+export type { RuleEvidenceState, RuleEvidence } from "./eag/rlis/types";
+export { RULE_EVIDENCE_STATES, RULE_EVIDENCE_MAX_ENTRIES, deriveRuleEvidenceState } from "./eag/rlis/types";
+// P5 重复工作流发现（record-only）
+export {
+  discoverRepeatedFlows,
+  discoverFromStore,
+  normalizeStep,
+  computeSequenceFingerprint,
+  DEFAULT_LOOP_DISCOVERY_OPTIONS,
+  type LoopFlowSuggestion,
+  type LoopDiscoveryOptions,
+  type LoopCoverageLadder,
+} from "./eag/discovery/loop-discovery";
+// P6 干预台账 + 确定性审计报告渲染
+export {
+  readLedger,
+  appendLedgerEntry,
+  recordVerification,
+  ledgerFilePath,
+  legacyLedgerFilePath,
+  MAX_LEDGER_ENTRIES,
+  type LedgerEntry,
+  type LedgerVerificationState,
+} from "./eag/intervention-ledger";
+export {
+  renderAuditReport,
+  validateAuditReport,
+  REQUIRED_REPORT_SECTIONS,
+  type AuditReportInput,
+} from "./eag/report-render";
+// P2 统一证据包（eag evidence-bundle）
+export { buildEvidenceBundle, validateEvidenceBundle } from "./eag/evidence-bundle";
+export type {
+  EvidenceBundle,
+  EvidenceBundleOptions,
+  EvidenceBundleDepth,
+  EvidenceExecutionRecord,
+  EvidenceRuleEntry,
+  EvidenceBundleValidation,
+} from "./eag/evidence-bundle";
 
 // RLIS (Rule Learning & Injection System) —— §5.5 三层规则存储 + 规则学习与注入
 export {
@@ -398,6 +452,17 @@ export {
 } from "./eag/rlis/seed-rules";
 export { RuleStore, SEVERITY_UPGRADE_VIOLATION_THRESHOLD, CLEANUP_USAGE_THRESHOLD } from "./eag/rlis/rule-store";
 export { RuleInjector, TOKEN_ESTIMATE_RATIO } from "./eag/rlis/rule-injector";
+// 全局规则文件助手（RLIS global 层持久化，会话注入 + Web /api/rules 共用）
+export {
+  globalRulesFilePath,
+  readGlobalRulesFile,
+  writeGlobalRulesFile,
+  addGlobalRule,
+  deleteGlobalRule,
+  formatGlobalRulesPrompt,
+  MAX_GLOBAL_RULES,
+  type GlobalRuleInput,
+} from "./global-rules";
 export {
   RuleLearner,
   CORRECTION_PATTERNS,

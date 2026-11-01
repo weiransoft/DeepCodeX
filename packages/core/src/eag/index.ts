@@ -96,6 +96,35 @@
 // - 函数：decideVerdict / buildReport
 export * from "./evaluator/types";
 
+// P6：干预台账 + 确定性审计报告渲染
+export {
+  readLedger,
+  appendLedgerEntry,
+  recordVerification,
+  ledgerFilePath,
+  legacyLedgerFilePath,
+  MAX_LEDGER_ENTRIES,
+  type LedgerEntry,
+  type LedgerVerificationState,
+} from "./intervention-ledger";
+export {
+  renderAuditReport,
+  validateAuditReport,
+  REQUIRED_REPORT_SECTIONS,
+  type AuditReportInput,
+} from "./report-render";
+
+// ============================================================================
+// 1b. evidence-bundle —— 统一证据包（P2，借鉴 Better Harness evidence-bundle 设计）
+// ============================================================================
+//
+// 公开 API：
+// - 类型：EvidenceBundle / EvidenceBundleOptions / EvidenceBundleDepth /
+//         EvidenceExecutionRecord / EvidenceRuleEntry / EvidenceBundleValidation
+// - 函数：buildEvidenceBundle / validateEvidenceBundle
+// 注：不 re-export v2 redaction 的 RedactionHit（避免与未来 redlines 证据类型混淆）
+export * from "./evidence-bundle";
+
 // ============================================================================
 // 2. redlines —— 企业红线 E1~E8（§5.1.3）
 // ============================================================================

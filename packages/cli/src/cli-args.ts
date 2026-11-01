@@ -62,6 +62,14 @@ export interface ParsedCliArgs {
   /** Rules subcommand options (key-value pairs) */
   rulesOptions: Record<string, string | boolean | number | string[] | undefined>;
   /**
+   * EAG 子命令参数（P2 证据包）。
+   * - `undefined` — 未调用 eag 子命令
+   * - `string`    — eag 子命令名（evidence-bundle / help）
+   */
+  eag: string | undefined;
+  /** EAG 子命令选项（key-value 对） */
+  eagOptions: Record<string, string | boolean | number | string[] | undefined>;
+  /**
    * Quality-check 子命令参数。
    * - `undefined` — 未调用 quality-check 子命令
    * - `string`    — quality-check 子命令名（codemap / uiux / visual / all / help）
@@ -368,6 +376,32 @@ async function configureYargs(argv?: string[]) {
           return true;
         })
     )
+    .command("eag <subcommand>", "EAG evidence tooling (evidence-bundle / help)", (y: Argv) =>
+      y
+        .positional("subcommand", {
+          type: "string",
+          choices: ["evidence-bundle"] as const,
+          describe: "EAG subcommand",
+        })
+        .option("project-root", {
+          type: "string",
+          describe: "Project root directory (default: cwd)",
+        })
+        .option("days", {
+          type: "number",
+          describe: "Lookback days (default: quick=7, normal=30)",
+        })
+        .option("depth", {
+          type: "string",
+          choices: ["quick", "normal"] as const,
+          describe: "Evidence depth (default normal)",
+        })
+        .option("format", {
+          type: "string",
+          choices: ["summary", "json"] as const,
+          describe: "Output format (default summary)",
+        })
+    )
     // ===== fork 扩展：quality-check / review 子命令（保留全部） =====
     // quality-check 子命令：质量门禁 CLI 模式（非 TUI 模式）
     // 用法：deepcode quality-check <subcommand> [targetPath] [options]
@@ -544,11 +578,13 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
       ? "team"
       : rawArgv.length >= 2 && rawArgv[0] === "rules" && rawArgv[1] === "help"
         ? "rules"
-        : rawArgv.length >= 2 && rawArgv[0] === "quality-check" && rawArgv[1] === "help"
-          ? "quality-check"
-          : rawArgv.length >= 2 && rawArgv[0] === "review" && rawArgv[1] === "help"
-            ? "review"
-            : undefined;
+        : rawArgv.length >= 2 && rawArgv[0] === "eag" && rawArgv[1] === "help"
+          ? "eag"
+          : rawArgv.length >= 2 && rawArgv[0] === "quality-check" && rawArgv[1] === "help"
+            ? "quality-check"
+            : rawArgv.length >= 2 && rawArgv[0] === "review" && rawArgv[1] === "help"
+              ? "review"
+              : undefined;
 
   const resumeRaw = parsed.resume as string | undefined;
   let resume: ParsedCliArgs["resume"];
@@ -570,6 +606,8 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
   const positionalArgs: ReadonlyArray<unknown> = Array.isArray(parsed._) ? parsed._ : [];
   const teamInvoked = positionalArgs[0] === "team" || helpAsSecondPositional === "team";
   const rulesInvoked = positionalArgs[0] === "rules" || helpAsSecondPositional === "rules";
+  // EAG 命令检测：positional[0] === "eag" 或通过 help fallback（与 team/rules 对齐）
+  const eagInvoked = positionalArgs[0] === "eag" || helpAsSecondPositional === "eag";
   // quality-check 命令检测：positional[0] === "quality-check" 或通过 help fallback
   const qualityCheckInvoked = positionalArgs[0] === "quality-check" || helpAsSecondPositional === "quality-check";
   // review 命令检测：positional[0] === "review" 或通过 help fallback
@@ -588,6 +626,11 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     (rulesInvoked ? (parsed["subcommand"] as string | undefined) : undefined) ??
     (helpAsSecondPositional === "rules" ? "help" : undefined) ??
     (parsed["rules"] as string | undefined);
+  // EAG 子命令提取：与 team/rules 同样的三段式 fallback
+  const eagRaw =
+    (eagInvoked ? (parsed["subcommand"] as string | undefined) : undefined) ??
+    (helpAsSecondPositional === "eag" ? "help" : undefined) ??
+    (parsed["eag"] as string | undefined);
   // quality-check 子命令提取：与 team/rules 同样的三段式 fallback
   const qualityCheckRaw =
     (qualityCheckInvoked ? (parsed["subcommand"] as string | undefined) : undefined) ??
@@ -647,6 +690,18 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
       const v = parsed[key];
       if (v !== undefined) {
         rulesOptions[key] = v as string | boolean | number | string[];
+      }
+    }
+  }
+
+  // 提取 EAG 子命令的选项（P2 证据包）
+  const eagOptions: Record<string, string | boolean | number | string[] | undefined> = {};
+  if (eagRaw) {
+    const optionKeys = ["project-root", "days", "depth", "format"];
+    for (const key of optionKeys) {
+      const v = parsed[key];
+      if (v !== undefined) {
+        eagOptions[key] = v as string | boolean | number | string[];
       }
     }
   }
@@ -731,6 +786,9 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     teamOptions,
     rules: rulesRaw,
     rulesOptions,
+    // fork 扩展：eag 子命令（P2 证据包）
+    eag: eagRaw,
+    eagOptions,
     qualityCheck: qualityCheckRaw,
     qualityCheckOptions,
     qualityCheckPositional: qualityCheckTarget,

@@ -29,6 +29,121 @@
  */
 
 // ============================================================================
+// 证据状态与分数天花板（P4，借鉴 Better Harness Agent Work Loop 评估模型）
+// ============================================================================
+
+/**
+ * Work Loop 维度（对齐 Better Harness 五维度评审模型）
+ *
+ * 五个稳定评审维度 ID，供 dimensionScores 使用；reader 标签由展示层解释，
+ * 存储层永远使用这里的稳定 ID。
+ */
+export type WorkLoopDimension =
+  | "task-understanding"
+  | "controlled-execution"
+  | "change-validation"
+  | "reliable-delivery"
+  | "learning-capture";
+
+/** Work Loop 全部维度（冻结） */
+export const WORK_LOOP_DIMENSIONS: ReadonlyArray<WorkLoopDimension> = Object.freeze([
+  "task-understanding",
+  "controlled-execution",
+  "change-validation",
+  "reliable-delivery",
+  "learning-capture",
+]);
+
+/**
+ * 证据状态（七级，对齐 Better Harness 证据语义）
+ *
+ * 递进四级（机制 → 接入 → 被使用 → 被佐证）：
+ * - present：存在所属机制或评审契约
+ * - wired：相关任务/触发/owner 路由能够到达它
+ * - exercised：有关联的任务片段使用过它并留有结果
+ * - outcome-supported：有后续可比结果佐证所声称的效果
+ *
+ * 边界三级（缺失/未观测/不适用——观测边界语义，绝不相互冒充）：
+ * - missing：已检证据确认所需机制或结果不存在
+ * - unobserved：现有观测边界无法判定（观测不足 ≠ 确认缺失，不得降级为 missing）
+ * - not_applicable：已检任务与项目证据证明它不适用
+ *
+ * 证据状态不是 pass/fail：被使用过的操作可能暴露缺陷，安全的拒绝也可能是正确行为。
+ */
+export type EvidenceState =
+  | "present"
+  | "wired"
+  | "exercised"
+  | "outcome-supported"
+  | "missing"
+  | "unobserved"
+  | "not_applicable";
+
+/** 证据状态全部合法值（冻结） */
+export const EVIDENCE_STATES: ReadonlyArray<EvidenceState> = Object.freeze([
+  "present",
+  "wired",
+  "exercised",
+  "outcome-supported",
+  "missing",
+  "unobserved",
+  "not_applicable",
+]);
+
+/**
+ * 证据等级 → 绝对分数天花板
+ *
+ * 「是天花板，不是公式」：分数只用于定位问题，永不制造或压制 Finding。
+ * Missing/Unobserved/Not-applicable 同档封顶 59——观测边界不足与确认缺失
+ * 都不足以支撑高分；outcome-supported 才能到 100。
+ */
+export const EVIDENCE_SCORE_CEILINGS: Readonly<Record<EvidenceState, number>> = Object.freeze({
+  missing: 59,
+  unobserved: 59,
+  not_applicable: 59,
+  present: 74,
+  wired: 84,
+  exercised: 94,
+  "outcome-supported": 100,
+});
+
+/**
+ * 按证据等级封顶单个维度分数
+ *
+ * @param state 证据状态
+ * @param score 待封顶分数（0-100 之外的值先夹紧到 0-100）
+ * @returns min(score, EVIDENCE_SCORE_CEILINGS[state])，且不低于 0
+ */
+export function capDimensionScore(state: EvidenceState, score: number): number {
+  const clamped = Math.max(0, Math.min(100, score));
+  return Math.min(clamped, EVIDENCE_SCORE_CEILINGS[state]);
+}
+
+/**
+ * 按证据等级封顶整组维度分数
+ *
+ * 纯函数：返回封顶后的新对象（copy-on-write），不影响入参。
+ * 校验方可用 VALIDATE 前置断言：分数超过天花板即实现错误，此处静默封顶
+ * 与「天花板不是公式」语义一致。
+ *
+ * @param state 证据状态
+ * @param scores 维度 → 分数映射（允许部分维度缺省）
+ * @returns 封顶后的新映射（仅含入参出现的维度）
+ */
+export function capDimensionScores(
+  state: EvidenceState,
+  scores: Readonly<Partial<Record<WorkLoopDimension, number>>>
+): Partial<Record<WorkLoopDimension, number>> {
+  const result: Partial<Record<WorkLoopDimension, number>> = {};
+  for (const dim of WORK_LOOP_DIMENSIONS) {
+    const raw = scores[dim];
+    if (raw === undefined) continue;
+    result[dim] = capDimensionScore(state, raw);
+  }
+  return result;
+}
+
+// ============================================================================
 // 类型定义
 // ============================================================================
 
@@ -166,6 +281,15 @@ export interface EvaluationReport {
   notes?: string;
   /** 修复建议汇总（verdict=fix 时，按优先级排序的修复清单） */
   fixSuggestions?: string[];
+  /**
+   * 整体证据状态（P4 可选字段，向后兼容：旧报告缺省 undefined）
+   * 表达本次评估结论的证据边界；unobserved 不得冒充 missing。
+   */
+  evidenceState?: EvidenceState;
+  /** 证据状态对应的整体分数（已按 EVIDENCE_SCORE_CEILINGS 封顶，0-100） */
+  evidenceScore?: number;
+  /** 五维度分数（可选，P4；各维度分数不得突破 evidenceState 天花板） */
+  dimensionScores?: Readonly<Partial<Record<WorkLoopDimension, number>>>;
 }
 
 /**
@@ -270,6 +394,8 @@ export function decideVerdict(
  * @param durationMs 评估耗时
  * @param maxConsecutiveFailures 连续失败次数
  * @param notes 评估器备注
+ * @param evidence 可选证据声明（P4）：传入时报告附带 evidenceState 与按天花板
+ *   封顶后的 evidenceScore/dimensionScores；不传时与旧行为完全一致
  * @returns 完整评估报告
  */
 export function buildReport(
@@ -277,7 +403,11 @@ export function buildReport(
   redlines: ReadonlyArray<RedlineDefinition>,
   durationMs: number,
   maxConsecutiveFailures: number,
-  notes?: string
+  notes?: string,
+  evidence?: {
+    state: EvidenceState;
+    dimensionScores?: Readonly<Partial<Record<WorkLoopDimension, number>>>;
+  }
 ): EvaluationReport {
   // 构建 redlineId → severity 映射
   const severityMap = new Map<string, RedlineSeverity>();
@@ -321,7 +451,7 @@ export function buildReport(
     }
   }
 
-  return {
+  const report: EvaluationReport = {
     verdict,
     redlineResults: results,
     blockerCount,
@@ -331,4 +461,15 @@ export function buildReport(
     notes,
     fixSuggestions: fixSuggestions.length > 0 ? fixSuggestions : undefined,
   };
+  if (evidence) {
+    report.evidenceState = evidence.state;
+    const cappedScores = capDimensionScores(evidence.state, evidence.dimensionScores ?? {});
+    report.dimensionScores = Object.keys(cappedScores).length > 0 ? cappedScores : undefined;
+    // 整体分取维度均值（无维度时以天花板本身为界），再按天花板封顶
+    const values = Object.values(cappedScores) as number[];
+    const mean =
+      values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : EVIDENCE_SCORE_CEILINGS[evidence.state];
+    report.evidenceScore = capDimensionScore(evidence.state, mean);
+  }
+  return report;
 }

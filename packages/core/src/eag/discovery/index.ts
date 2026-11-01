@@ -50,3 +50,18 @@ export { ChangeClassifier } from "./change-classifier.js";
 
 export { ExistingContractGuard } from "./existing-contract-guard.js";
 export type { ParadigmName } from "./existing-contract-guard.js";
+
+// ============================================================================
+// LoopDiscovery —— 重复工作流发现（P5，record-only）
+// ============================================================================
+
+export {
+  discoverRepeatedFlows,
+  discoverFromStore,
+  normalizeStep,
+  computeSequenceFingerprint,
+  DEFAULT_LOOP_DISCOVERY_OPTIONS,
+  type LoopFlowSuggestion,
+  type LoopDiscoveryOptions,
+  type LoopCoverageLadder,
+} from "./loop-discovery.js";

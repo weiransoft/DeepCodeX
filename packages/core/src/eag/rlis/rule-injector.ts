@@ -48,14 +48,22 @@ import { RULE_CATEGORIES, SEVERITY_PRIORITY } from "./types.js";
 /**
  * Token 估算系数（4 字符 ≈ 1 Token）
  *
- * 简单的 Token 估算：字符串长度 / 4。
- * 此估算不依赖 tokenizer 库，仅用于预算控制，精度足够。
- * 实际 Token 数由 LLM API 返回的 usage 字段精确统计。
+ * 简单的 Token 估算：英文按 4 字符/token，中日韩字符按 1 字符 ≈ 1 token
+ * （见 estimateTokenCount；2026-11-01 修正了原先"中文被低估约 4 倍"的口径）。
+ * 此估算不依赖 tokenizer 库，仅用于预算控制；实际 Token 数由 LLM API
+ * 返回的 usage 字段精确统计。
  *
- * 取值依据：OpenAI tokenizer 对英文文本约 4 字符/Token，
- * 中文文本因 UTF-8 编码可能略多但粗估可接受。
+ * 取值依据：OpenAI tokenizer 对英文文本约 4 字符/Token。
  */
 const TOKEN_ESTIMATE_RATIO = 4;
+
+/**
+ * CJK 字符匹配（汉字/日文假名/韩文音节/兼容汉字）
+ *
+ * 用于 estimateTokenCount 的混合口径：CJK 字符近 1 字符 ≈ 1 token，
+ * 不与 TOKEN_ESTIMATE_RATIO 的 4 字符/token 混算。
+ */
+const CJK_CHAR_PATTERN = /[\u3400-\u4DBF\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF\uF900-\uFAFF]/g;
 
 // ============================================================================
 // RuleInjector 类
@@ -97,12 +105,13 @@ export class RuleInjector {
    * 1. 按 category 分组（按 RULE_CATEGORIES 定义顺序）
    * 2. 每个 category 内按 severity 排序（BLOCKER → MAJOR → WARNING）
    * 3. 输出分组标题 + 规则列表
-   * 4. 若配置了 maxTokenBudget 且 truncateBySeverity=true：
-   *    - 超 budget 时按 severity 截断（WARNING 最先裁，然后 MAJOR，BLOCKER 永不裁）
+   * 4. 若配置了 maxTokenBudget：超 budget 时截断
+   *    - truncateBySeverity=true（默认）：按 severity 截断（WARNING 先裁，然后 MAJOR，BLOCKER 永不裁）
+   *    - truncateBySeverity=false：按输入顺序截断（不做严重级重排）
    *    - 截断时在末尾追加"（已截断 N 条 WARNING 级规则）"提示
    *
    * @param rules 规则列表
-   * @param config 注入配置（不传时默认 truncateBySeverity=false，注入全部规则）
+   * @param config 注入配置（不传时不截断，注入全部规则）
    * @returns 格式化的注入字符串（空规则列表返回空字符串）
    */
   inject(rules: ReadonlyArray<UserRule>, config?: RuleInjectionConfig): string {
@@ -111,15 +120,22 @@ export class RuleInjector {
       return "";
     }
 
-    // 默认配置：不截断
-    const truncateBySeverity = config?.truncateBySeverity ?? false;
+    // 默认配置
+    // 2026-11-01 修正：只要显式给了 maxTokenBudget 就必须生效。
+    // 原实现要求同时 truncateBySeverity=true，只配预算而忘了这个开关时
+    // 预算被**静默忽略**（调用方以为设了上限，实际全量注入）。
+    // 现在 truncateBySeverity 只决定截断策略：true=按严重级分级截断（默认），
+    // false=按输入顺序截断。
     const maxTokenBudget = config?.maxTokenBudget;
+    const truncateBySeverity = config?.truncateBySeverity ?? true;
 
-    // 若启用截断且有预算上限，先按 severity 截断规则列表
+    // 若配置了预算上限，先截断规则列表
     let effectiveRules = rules;
     let truncatedCount = 0;
-    if (truncateBySeverity && maxTokenBudget !== undefined) {
-      const truncationResult = this.truncateByTokenBudget(rules, maxTokenBudget);
+    if (maxTokenBudget !== undefined) {
+      const truncationResult = truncateBySeverity
+        ? this.truncateByTokenBudget(rules, maxTokenBudget)
+        : this.truncateByOrder(rules, maxTokenBudget);
       effectiveRules = truncationResult.rules;
       truncatedCount = truncationResult.truncatedCount;
     }
@@ -164,17 +180,25 @@ export class RuleInjector {
   }
 
   /**
-   * 估算字符串 token 数
+   * 估算字符串 token 数（CJK 感知，2026-11-01 修正）
    *
-   * 按 4 字符/token 粗估（与 TOKEN_ESTIMATE_RATIO 一致）。
-   * 用于预算控制与截断判定。
+   * 原实现一刀切 `length / 4`，对英文近似成立，但中日韩字符被低估约 4 倍
+   * （中文常见 1 字符 ≈ 1 token，`TOKEN_ESTIMATE_RATIO=4` 会把 1000 字中文
+   * 估成 250 token）。本项目规则内容以中文为主，导致预算判定形同虚设、
+   * 截断策略在真正需要时反而不触发。
+   *
+   * 修正口径：CJK 字符按 1 字符 ≈ 1 token 计，其余字符沿用 4 字符/token。
+   * 保留 TOKEN_ESTIMATE_RATIO 的对外语义（ASCII 折算系数）以兼容既有引用。
    *
    * @param text 字符串
    * @returns 估算的 token 数（向上取整）
    */
   estimateTokenCount(text: string): number {
     if (!text) return 0;
-    return Math.ceil(text.length / TOKEN_ESTIMATE_RATIO);
+    const cjkMatch = text.match(CJK_CHAR_PATTERN);
+    const cjkCount = cjkMatch === null ? 0 : cjkMatch.length;
+    const nonCjkCount = text.length - cjkCount;
+    return Math.ceil(cjkCount + nonCjkCount / TOKEN_ESTIMATE_RATIO);
   }
 
   // ========================================================================
@@ -195,6 +219,31 @@ export class RuleInjector {
       if (severityCmp !== 0) return severityCmp;
       return a.id.localeCompare(b.id);
     });
+  }
+
+  /**
+   * 按 token 预算截断（保留输入顺序，2026-11-01 新增）
+   *
+   * 当调用方显式传 truncateBySeverity=false 时使用：不做严重级重排，
+   * 依输入顺序尽量装满预算。与分级截断一样，装不下的单条**跳过而非中止**
+   * （原实现首条超限即 break，会让后面更小的规则一起被丢弃，预算利用率偏低）。
+   *
+   * @param rules 规则列表（保持输入顺序）
+   * @param maxTokenBudget token 预算上限
+   * @returns 截断结果
+   */
+  private truncateByOrder(
+    rules: ReadonlyArray<UserRule>,
+    maxTokenBudget: number
+  ): { rules: ReadonlyArray<UserRule>; truncatedCount: number } {
+    const kept: UserRule[] = [];
+    for (const rule of rules) {
+      const candidateRules = [...kept, rule];
+      const candidateTokens = this.estimateTokenCount(this.buildInjectionText(candidateRules));
+      if (candidateTokens > maxTokenBudget) continue;
+      kept.push(rule);
+    }
+    return { rules: kept, truncatedCount: rules.length - kept.length };
   }
 
   /**
@@ -247,7 +296,8 @@ export class RuleInjector {
         const candidateRules = [...currentRules, rule];
         const candidateText = this.buildInjectionText(candidateRules);
         const candidateTokens = this.estimateTokenCount(candidateText);
-        if (candidateTokens > maxTokenBudget) break;
+        // 装不下的单条跳过而非中止（原实现 break 会连带丢弃后续更小的规则）
+        if (candidateTokens > maxTokenBudget) continue;
         currentRules = candidateRules;
         remainingWarning.push(rule);
       }
@@ -263,7 +313,8 @@ export class RuleInjector {
       const candidateRules = [...currentRules, rule];
       const candidateText = this.buildInjectionText(candidateRules);
       const candidateTokens = this.estimateTokenCount(candidateText);
-      if (candidateTokens > maxTokenBudget) break;
+      // 装不下的单条跳过而非中止（同上）
+      if (candidateTokens > maxTokenBudget) continue;
       currentRules = candidateRules;
       remainingMajor.push(rule);
     }

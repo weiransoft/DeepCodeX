@@ -33,8 +33,8 @@
  * @module eag/rlis/rule-store
  */
 
-import type { RuleCategory, RuleSeverity, UserRule, RuleStoreLayer, RuleStoreSnapshot } from "./types.js";
-import { compareSeverity } from "./types.js";
+import type { RuleCategory, RuleEvidence, RuleSeverity, UserRule, RuleStoreLayer, RuleStoreSnapshot } from "./types.js";
+import { RULE_EVIDENCE_MAX_ENTRIES, compareSeverity } from "./types.js";
 
 // ============================================================================
 // 常量定义
@@ -308,6 +308,7 @@ export class RuleStore {
     this.updateRuleStats(ruleId, (rule) => ({
       ...rule,
       usageCount: rule.usageCount + 1,
+      evidence: appendEvidence(rule.evidence, "wiredAt"),
     }));
   }
 
@@ -316,6 +317,7 @@ export class RuleStore {
    *
    * 对应 EAG 方案 §5.5.4 反馈闭环：评估器按该规则打回时调用。
    * 通过 copy-on-write 模式更新规则对象，避免突变原对象。
+   * P1：同时向 evidence.exercisedAt 追加命中时间戳（规则使用证据链）。
    *
    * @param ruleId 规则 ID
    * @throws Error 当规则 ID 不存在时抛错
@@ -324,7 +326,39 @@ export class RuleStore {
     this.updateRuleStats(ruleId, (rule) => ({
       ...rule,
       violationCount: rule.violationCount + 1,
+      evidence: appendEvidence(rule.evidence, "exercisedAt"),
     }));
+  }
+
+  /**
+   * 记录评估结论佐证（P1→P4 集成点）
+   *
+   * 将一次 EvaluationReport/verdict 的引用 ID 挂到规则证据链的 verdictRefs，
+   * 使规则证据级别升级为 outcome-supported（效果被后续可比结论佐证）。
+   * 不修改 usageCount/violationCount 统计字段。
+   *
+   * @param ruleId 规则 ID
+   * @param verdictRef 评估结论引用（如 EvaluationReport ID 或 `${taskId}:${verdict}`）
+   * @throws Error 当规则 ID 不存在或 verdictRef 为空时抛错
+   */
+  recordVerdictRef(ruleId: string, verdictRef: string): void {
+    if (typeof verdictRef !== "string" || verdictRef.trim() === "") {
+      throw new Error("verdictRef 不能为空");
+    }
+    this.updateRuleStats(ruleId, (rule) => {
+      const prev = rule.evidence;
+      const refs = [...(prev?.verdictRefs ?? []), verdictRef.trim()];
+      const capped =
+        refs.length > RULE_EVIDENCE_MAX_ENTRIES ? refs.slice(refs.length - RULE_EVIDENCE_MAX_ENTRIES) : refs;
+      return {
+        ...rule,
+        evidence: Object.freeze({
+          wiredAt: prev?.wiredAt ?? [],
+          exercisedAt: prev?.exercisedAt ?? [],
+          verdictRefs: Object.freeze(capped),
+        }),
+      };
+    });
   }
 
   /**
@@ -503,6 +537,34 @@ export class RuleStore {
     // 重新合并三层规则
     this.effectiveRules = this.mergeRules(this.seedRules, this.globalRules, this.projectRules);
   }
+}
+
+// ============================================================================
+// 模块级辅助：证据链追加（P1）
+// ============================================================================
+
+/**
+ * 向规则证据链的指定时间线追加当前时刻（ISO 8601），超限丢弃最旧条目
+ *
+ * 纯函数：evidence 为 undefined 时初始化空链；返回新对象（copy-on-write，
+ * 与 updateRuleStats 的不可变纪律一致）。
+ *
+ * @param evidence 原证据链（可 undefined）
+ * @param timeline 目标时间线（wiredAt / exercisedAt）
+ * @returns 追加后的新证据链
+ */
+function appendEvidence(evidence: RuleEvidence | undefined, timeline: "wiredAt" | "exercisedAt"): RuleEvidence {
+  const now = new Date().toISOString();
+  const wiredAt = evidence?.wiredAt ?? [];
+  const exercisedAt = evidence?.exercisedAt ?? [];
+  const verdictRefs = evidence?.verdictRefs ?? [];
+  const cap = (arr: ReadonlyArray<string>): ReadonlyArray<string> =>
+    arr.length >= RULE_EVIDENCE_MAX_ENTRIES ? [...arr.slice(1), now] : [...arr, now];
+  return Object.freeze({
+    wiredAt: timeline === "wiredAt" ? cap(wiredAt) : wiredAt,
+    exercisedAt: timeline === "exercisedAt" ? cap(exercisedAt) : exercisedAt,
+    verdictRefs,
+  });
 }
 
 // ============================================================================

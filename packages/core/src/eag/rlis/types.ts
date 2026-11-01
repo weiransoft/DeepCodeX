@@ -134,6 +134,67 @@ export const RULE_CONFIRMED_BY: ReadonlyArray<RuleConfirmedBy> = Object.freeze([
 // ============================================================================
 
 /**
+ * 规则证据状态（字面量联合类型，P1 资产使用证据链）
+ *
+ * 对齐 Better Harness 七级证据状态的最小四级子集（missing/unobserved/not-applicable
+ * 属于「观测边界」状态，由评估层 P4 表达；规则资产侧只表达「配置→接入→被使用」的
+ * 递进语义，配置存在 ≠ 被观测使用）：
+ *
+ * - present：规则已配置入库（静态存在，仅证明机制存在）
+ * - wired：规则已接入注入链路（至少被注入过一次 LLM system prompt）
+ * - exercised：规则在会话中产生了可观测效果（评估器按该规则打回/命中过）
+ * - outcome-supported：规则效果被评估结论佐证（关联了 EvaluationVerdict 引用）
+ */
+export type RuleEvidenceState = "present" | "wired" | "exercised" | "outcome-supported";
+
+/**
+ * 规则证据状态全部合法值（运行时枚举与测试断言用，冻结防篡改）
+ */
+export const RULE_EVIDENCE_STATES: ReadonlyArray<RuleEvidenceState> = Object.freeze([
+  "present",
+  "wired",
+  "exercised",
+  "outcome-supported",
+]);
+
+/**
+ * 规则证据链（P1 record-only）
+ *
+ * 记录规则「配置 → 注入 → 命中 → 佐证」四阶段的时间戳证据，随 UserRule 一同持久化。
+ * 时间戳为 ISO 8601 字符串；数组按追加顺序保存（容量上限各 100 条，防止无限膨胀）。
+ *
+ * 隐私边界：只记时间戳与 verdict 引用 ID，绝不记录会话内容。
+ */
+export interface RuleEvidence {
+  /** 注入时刻列表（recordUsage 时追加，ISO 8601） */
+  readonly wiredAt: ReadonlyArray<string>;
+  /** 命中/打回时刻列表（recordViolation 时追加，ISO 8601） */
+  readonly exercisedAt: ReadonlyArray<string>;
+  /** 佐证该规则效果的评估结论引用（EvaluationReport/verdict ID，P4 集成点） */
+  readonly verdictRefs: ReadonlyArray<string>;
+}
+
+/** 证据数组单侧容量上限（超过后丢弃最旧条目） */
+export const RULE_EVIDENCE_MAX_ENTRIES = 100;
+
+/**
+ * 推导规则的当前证据级别
+ *
+ * 优先级：outcome-supported > exercised > wired > present。
+ * 同时考虑显式 evidence 时间戳与统计计数字段（usageCount/violationCount），
+ * 两者任一命中即升级（统计字段是历史数据，evidence 是 P1 后的精确时间线）。
+ *
+ * @param rule 待推导的规则
+ * @returns 证据级别
+ */
+export function deriveRuleEvidenceState(rule: UserRule): RuleEvidenceState {
+  if (rule.evidence && rule.evidence.verdictRefs.length > 0) return "outcome-supported";
+  if (rule.violationCount > 0 || (rule.evidence && rule.evidence.exercisedAt.length > 0)) return "exercised";
+  if (rule.usageCount > 0 || (rule.evidence && rule.evidence.wiredAt.length > 0)) return "wired";
+  return "present";
+}
+
+/**
  * 用户规则（UserRule）
  *
  * 对应 EAG 方案 §5.5.1 规则模型的完整定义。
@@ -172,6 +233,11 @@ export interface UserRule {
   readonly usageCount: number;
   /** 违规次数统计（评估器按该规则打回时 +1） */
   readonly violationCount: number;
+  /**
+   * 使用证据链（P1 可选字段，向后兼容：旧规则文件缺省为 undefined = present）
+   * 记录注入/命中的时间戳与佐证 verdict 引用，只含时间与引用 ID，不含会话内容。
+   */
+  readonly evidence?: RuleEvidence;
   /** 创建时间（ISO 8601 字符串） */
   readonly createdAt: string;
 }

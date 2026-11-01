@@ -106,6 +106,28 @@ async function main(): Promise<void> {
     process.exit(exitCode);
   }
 
+  // eag 子命令路由：EAG 证据工具 CLI 模式（P2 统一证据包）
+  // 用法：deepcode eag evidence-bundle [--days n] [--depth quick|normal] [--format summary|json]
+  if (parsed.eag) {
+    const { executeEagCommand, formatEagHelp } = await import("./eag/eag-cmd.js");
+    if (parsed.eag === "help") {
+      process.stdout.write(formatEagHelp());
+      process.exit(0);
+    }
+    const opts = parsed.eagOptions;
+    const daysRaw = opts["days"];
+    const exitCode = (
+      await executeEagCommand({
+        subcommand: parsed.eag as "evidence-bundle",
+        projectRoot: (opts["project-root"] as string | undefined) ?? process.cwd(),
+        days: typeof daysRaw === "number" ? daysRaw : undefined,
+        depth: opts["depth"] as "quick" | "normal" | undefined,
+        format: opts["format"] as "summary" | "json" | undefined,
+      })
+    ).exitCode;
+    process.exit(exitCode);
+  }
+
   // quality-check 子命令路由：质量门禁 CLI 模式（非 TUI 模式）
   // 用法：deepcode quality-check <subcommand> [target] [options]
   // 复用 packages/cli/src/quality/quality-cmd.ts 中 executeQualityCommand 函数

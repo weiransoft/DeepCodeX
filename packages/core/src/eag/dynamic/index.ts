@@ -34,3 +34,15 @@ export {
   type RawSedimentationOutput,
   type RawSedimentationSuggestion,
 } from "./prompts/sedimentation-prompt";
+
+// P3：Finding 四要素契约（沉淀建议 → 证据绑定 → deferred 池）
+export {
+  validateFinding,
+  partitionByEvidence,
+  FINDING_SEVERITIES,
+  FINDING_TEXT_MAX_CHARS,
+  type AgentFinding,
+  type FindingSeverity,
+  type FindingEvidenceRef,
+  type FindingPartition,
+} from "./finding";

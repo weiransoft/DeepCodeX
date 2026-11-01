@@ -24,7 +24,7 @@ export type SedimentationPromptContext = {
   turns: SedimentationPromptTurn[];
 };
 
-/** 单条沉淀建议的 LLM 原始输出（解析前） */
+/** 单条沉淀建议的 LLM 原始输出（解析前；finding 为 P3 可选契约，非法由 validateFinding 丢弃） */
 export type RawSedimentationSuggestion = {
   kind?: string;
   name?: string;
@@ -32,6 +32,7 @@ export type RawSedimentationSuggestion = {
   role?: string;
   content?: string;
   rationale?: string;
+  finding?: unknown;
 };
 
 /** LLM 原始输出结构 */
@@ -71,8 +72,13 @@ export function buildSedimentationPrompt(context: SedimentationPromptContext): S
 
 输出要求（严格 JSON，不要输出任何其他内容）：
 \`\`\`
-{ "suggestions": [ { "kind": "skill 或 agent", "name": "kebab-case 名称（小写字母/数字/连字符）", "description": "一句话描述", "role": "agent 时的角色身份，skill 时省略", "content": "完整的 Markdown 正文（frontmatter 之后的内容，可直接作为指令使用）", "rationale": "给用户看的中文建议理由（为什么值得沉淀）" } ] }
+{ "suggestions": [ { "kind": "skill 或 agent", "name": "kebab-case 名称（小写字母/数字/连字符）", "description": "一句话描述", "role": "agent 时的角色身份，skill 时省略", "content": "完整的 Markdown 正文（frontmatter 之后的内容，可直接作为指令使用）", "rationale": "给用户看的中文建议理由（为什么值得沉淀）", "finding": { "id": "finding 唯一标识", "evidence": [ { "source": "execution-history 或 v2-event 或 evidence-bundle", "ref": "证据条目的稳定引用标识", "note": "可选：该证据支撑什么（一句话）" } ], "impact": "该模式重复造成的具体影响（中文，≤500字）", "minFixScope": "最小落库动作（中文，≤500字）", "verifyRoute": "落库后如何验证生效（中文，≤500字）", "evidenceState": "present 或 wired 或 exercised 或 outcome-supported 或 missing 或 unobserved 或 not-applicable", "severity": "blocker 或 major 或 warning 或 info" } } ] }
 \`\`\`
+
+finding 字段约定（Finding 四要素，P3）：
+- finding 可省略；省略或非法时该建议进入 deferred 池（不会落库，仅保留建议理由）；
+- evidence 必须是可回放的引用（ref 指向执行历史/事件标识），禁止把对话原文整段放进 ref；
+- 无法给出真实证据时宁可不写 finding，不得编造。
 
 判定门槛：
 - 只沉淀「可复用」的模式：同样的流程/约束在对话中多次出现，或用户明确表达了"以后都这样做"的意图；
