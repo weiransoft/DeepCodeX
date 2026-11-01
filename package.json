@@ -32,7 +32,9 @@
     "prepare:package": "node scripts/prepare-package.js",
     "prepare:vscode": "node scripts/prepare-vscode.js",
     "prepare": "husky && npm run build && npm run bundle",
-    "rebuild:sqlite": "bash scripts/install-better-sqlite3.sh"
+    "rebuild:sqlite": "bash scripts/install-better-sqlite3.sh",
+    "install:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1",
+    "rebuild:sqlite:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -SqliteOnly"
   },
   "optionalDependencies": {
     "better-sqlite3": "^11.0.0"

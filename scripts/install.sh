@@ -115,7 +115,9 @@ preflight_os() {
       log_info "操作系统检查通过：${os_type}"
       ;;
     MINGW* | MSYS* | CYGWIN*)
-      log_error "检测到 Windows 类 Unix 环境；请使用 WSL，或在 Windows 上直接执行 npm install + npm run build"
+      log_error "检测到 Windows 类 Unix 环境（${os_type}）；请改用原生脚本："
+      log_error "  powershell -ExecutionPolicy Bypass -File scripts\\install.ps1"
+      log_error "或直接双击/执行仓库根目录的 setup.ps1，详见 README「Windows」小节"
       return "${EXIT_PREFLIGHT_FAILED}"
       ;;
     *)

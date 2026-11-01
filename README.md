@@ -26,6 +26,24 @@ npm install -g @vegamo/deepcode-cli
 
 在任意项目目录下运行 `deepcode` 即可启动。
 
+### Windows
+
+Windows 用 PowerShell 原生脚本（不需要 WSL / Git Bash）：
+
+```powershell
+# 源码安装（克隆 + 依赖 + 构建 + 冒烟）
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
+
+# 仅安装 CLI（拉 GitHub Release 的 tarball，最快）
+powershell -ExecutionPolicy Bypass -File .\setup.ps1 -Mode npm
+
+# 已在仓库目录内：只装依赖并构建
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+```
+
+`better-sqlite3` 预编译二进制缺失时会自动本地重编译，需要 MSVC C++ 构建工具
+（`winget install Microsoft.VisualStudio.2022.BuildTools`，勾选「使用 C++ 的桌面开发」）与 Python 3。
+
 ![intro2](resources/intro3.png)
 
 ## 配置

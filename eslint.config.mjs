@@ -117,6 +117,9 @@ export default tseslint.config(
       "packages/*/scripts/**/*.mjs",
       "packages/*/src/v2/tests/scripts/**/*.mjs",
       "./tests/*.mjs",
+      // 2026-11-01：tests/scripts 下的独立 Node 程序（如 e2e-settings-drawer-ui.mjs
+      // 直连 Chrome CDP），此前未纳入任何 globals 配置，被按无 Node 全局检查
+      "./tests/scripts/**/*.mjs",
       "packages/*/*.mjs",
       // 2026-09-19：web 包独立 runner 与前端构建脚本（src 布局之外的 Node 程序）
       "packages/*/tests/*.mjs",
@@ -126,6 +129,14 @@ export default tseslint.config(
       globals: {
         process: "readonly",
         console: "readonly",
+        // Node/Web 标准全局（CDP 脚本会用到定时器、Buffer 与 fetch）
+        Buffer: "readonly",
+        setTimeout: "readonly",
+        clearTimeout: "readonly",
+        setInterval: "readonly",
+        clearInterval: "readonly",
+        URL: "readonly",
+        fetch: "readonly",
       },
     },
   },
