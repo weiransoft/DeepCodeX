@@ -37,7 +37,7 @@
  */
 
 import type { GuardContext, GuardChainResult, GuardDecision, GuardLayer, GuardRule, GuardVerdict } from "./types";
-import { GuardViolationError, GUARD_LAYER_ORDER } from "./types";
+import { GuardViolationError, GUARD_LAYER_ORDER, createDenyVerdict } from "./types";
 import { EnvBoundaryGuard } from "./env-boundary-guard";
 import { DangerousCommandGuard } from "./dangerous-command-guard";
 import {
@@ -100,6 +100,20 @@ const DEFAULT_OPTIONS: Readonly<BlockerGuardChainOptions> = Object.freeze({
  * - 1000ms 留足余量，超过则视为异常
  */
 const CHAIN_EXECUTION_TIMEOUT_MS = 1000 as const;
+
+/**
+ * 单条 Guard 的硬超时上限（毫秒，2026-11-01 新增）
+ *
+ * 背景：CHAIN_EXECUTION_TIMEOUT_MS 只是"事后告警"——如果某个 Guard 的
+ * check() 返回一个永不 settle 的 Promise（例如误接了未设超时的网络/子进程
+ * 调用），`await` 会永久挂住，把整个阶段（乃至整轮迭代）卡死，外部表现是
+ * "任务停在这一步不动了"。此处给每条 Guard 加真实定时器，超时按 fail-closed
+ * 判 DENY，让运行以"护栏超时"的诚实理由失败，而不是无声卡住。
+ *
+ * 数值依据：6 层 Guard 实测 P99 < 5ms，5s 已是三个数量级的余量，
+ * 不会误伤任何正常判定路径。
+ */
+const PER_GUARD_TIMEOUT_MS = 5000 as const;
 
 // ============================================================================
 // 3. BlockerGuardChain 类
@@ -228,9 +242,8 @@ export class BlockerGuardChain {
 
     // 按顺序执行 6 层 Guard
     for (const { layer, guard } of this.bindings) {
-      // 调用 Guard.check()，处理同步或异步返回值
-      const verdictOrPromise = guard.check(context);
-      const verdict: GuardVerdict = verdictOrPromise instanceof Promise ? await verdictOrPromise : verdictOrPromise;
+      // 调用 Guard.check()（含单条 Guard 硬超时，见 awaitGuard）
+      const verdict: GuardVerdict = await this.awaitGuard(layer, guard, context);
 
       allVerdicts.push(verdict);
 
@@ -288,6 +301,51 @@ export class BlockerGuardChain {
     }
 
     return result;
+  }
+
+  /**
+   * 执行单条 Guard，并施加硬超时（2026-11-01 新增）
+   *
+   * 同步返回的 Guard 直接透传结果（零开销，不 settimeout）；
+   * 异步 Guard 与超时赛跑：超时按 fail-closed 返回 DENY，
+   * 避免一个永不 settle 的 check() 把整轮迭代卡死。
+   *
+   * @param layer 所属层级（仅用于告警文案）
+   * @param guard Guard 实例
+   * @param context 判定上下文
+   * @returns Guard 判定结果
+   */
+  private async awaitGuard(
+    layer: GuardLayer,
+    guard: GuardRule,
+    context: Readonly<GuardContext>
+  ): Promise<GuardVerdict> {
+    const verdictOrPromise = guard.check(context);
+    if (!(verdictOrPromise instanceof Promise)) {
+      return verdictOrPromise;
+    }
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutVerdict = new Promise<GuardVerdict>((resolve) => {
+      timer = setTimeout(() => {
+        resolve(
+          createDenyVerdict(
+            guard.ruleId,
+            "BLOCKER",
+            `${layer} 层护栏执行超时（规则 ${guard.ruleId}，>${PER_GUARD_TIMEOUT_MS}ms 未返回）`,
+            "fail-closed 中止本次判定；请检查该护栏是否存在未设超时的外部调用"
+          )
+        );
+      }, PER_GUARD_TIMEOUT_MS);
+    });
+
+    try {
+      return await Promise.race([verdictOrPromise, timeoutVerdict]);
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    }
   }
 
   /**

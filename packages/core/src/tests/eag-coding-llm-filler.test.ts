@@ -509,9 +509,13 @@ test("T4d. 单占位失败不影响其他占位", async () => {
     if (userContent.includes("PH-FAIL")) {
       throw new Error("模拟失败");
     }
+    // 2026-11-01：填充器不再"拿 files[0] 顶包"——响应必须包含目标文件本身，
+    // 否则按失败处理（防 LLM 把内容塞错文件后仍被当成填充成功）。
+    // 因此这里按提示词里出现的占位文件路径回填，模拟合规的 LLM 响应。
+    const requestedPath = /(src\/[A-Za-z0-9._-]+\.ts)/.exec(userContent)?.[1] ?? "src/test.ts";
     return {
       content: JSON.stringify({
-        files: [{ path: "src/test.ts", content: "export class Success {}" }],
+        files: [{ path: requestedPath, content: "export class Success {}" }],
       }),
       thinking: "",
       toolCalls: [],
@@ -560,10 +564,43 @@ test("T4d. 单占位失败不影响其他占位", async () => {
   assert.equal(result.fillStatus[1].status, "filled");
 });
 
+test("T4e. 响应未包含目标文件 → 诚实失败（不得拿别的文件内容顶包）", async () => {
+  // 目标占位在 src/test.ts，但 LLM 只返回了 src/other.ts 与 src/another.ts。
+  // 旧实现"未找到匹配路径 → 取 files[0].content"，会把 other.ts 的内容
+  // 直接写进 test.ts：编译可能还过，语义全错，且失败原因被完全掩盖。
+  const generator = createFixedResponseGenerator([
+    { path: "src/other.ts", content: "export class Other { static x = 1; }" },
+    { path: "src/another.ts", content: "export class Another { static y = 2; }" },
+  ]);
+  const llmClient = new InMemoryLLMClient(generator);
+  const request = createLlmFillRequest({ llmClient });
+  const filler = new LlmFiller();
+
+  const result = await filler.fill(request);
+
+  assert.equal(result.fillStatus[0].status, "failed", "路径不匹配必须判失败");
+  assert.match(result.fillStatus[0].summary, /src\/test\.ts/, "失败摘要应指明缺失的目标文件");
+  // 重试 maxRounds=3 次都拿不到目标文件 → 调用 3 次后放弃
+  assert.equal(llmClient.getCallCount(), 3);
+});
+
+test("T4f. 响应路径存在无害写法差异（./ 前缀 / 反斜杠）→ 归一化后仍判定命中", async () => {
+  const generator = createFixedResponseGenerator([
+    { path: "./src/test.ts", content: "export class Normalized { static create() {} }" },
+  ]);
+  const llmClient = new InMemoryLLMClient(generator);
+  const request = createLlmFillRequest({ llmClient });
+  const filler = new LlmFiller();
+
+  const result = await filler.fill(request);
+
+  assert.equal(result.fillStatus[0].status, "filled", "./ 前缀不应被视为不同文件");
+  assert.match(result.filledFiles[0]?.content ?? "", /Normalized/);
+});
+
 // ============================================================================
 // T5. fill 重试机制
 // ============================================================================
-
 test("T5a. 单占位 1 次失败后第 2 次成功 → 标记 filled", async () => {
   const successContent = JSON.stringify({
     files: [{ path: "src/test.ts", content: "export class Retry { static create() {} }" }],

@@ -63,8 +63,40 @@ const TASK_CARD_HEADER_RE = /^##\s+(T-\d+)\s+(.+)$/;
  *
  * 捕获组 1 = 属性名（如 requirement/status/dependencies/files/acceptance）
  * 捕获组 2 = 属性值（字符串或数组）
+ *
+ * 2026-11-01 修复（方言归一）：允许行首缩进。人工/外部工具写出的 tasks.md
+ * 常把属性行缩进两格，旧的 `^-` 锚定使这类卡整张读不到属性——尤其 status
+ * 读成默认 pending，于是"已完成的卡永远选不掉"（僵尸卡）。
  */
-const TASK_CARD_PROPERTY_RE = /^-\s+([a-zA-Z_]+)\s*:\s*(.+)$/;
+export const TASK_CARD_PROPERTY_RE = /^\s*-\s+([a-zA-Z_]+)\s*:\s*(.+)$/;
+
+/**
+ * 任务卡 status 行「宽松识别」正则（唯一权威，写侧与读侧共用）
+ *
+ * 必须覆盖历史上出现过的全部方言，否则会出现"写进去了但读不出来"：
+ * - `- status: pending`（规范形态）
+ * - `- status : pending`（冒号前有空格）
+ * - `  - status: pending`（缩进）
+ *
+ * 捕获组 1 = 行首到冒号（含缩进与 `- status`），捕获组 2 = 值（可空）。
+ * 实现说明：`status` 与 `:` 之间允许空白，是 2026-11-01 事故的直接根因——
+ * 旧写侧正则只认 `status:`，遇到 `status :` 时判定"无 status 行"，
+ * 转而插入一行新的，磁盘上留下两行状态、解析器取后者，改动等于没生效。
+ */
+export const TASK_STATUS_LINE_RE = /^(\s*-\s+status\s*:)(.*)$/;
+
+/**
+ * 把一行 status 行改写为规范形态（去缩进、`- status: <state>`）。
+ *
+ * 统一走此函数而不是各处 `line.replace(...)`，保证写出的永远是解析器
+ * 一定能读到的形态，从根上消除"写成功但状态没变"的空转。
+ *
+ * @param newState 目标状态值（如 completed / blocked / pending）
+ * @returns 规范化后的 status 行
+ */
+export function formatTaskStatusLine(newState: string): string {
+  return `- status: ${newState}`;
+}
 
 /**
  * 默认 tasks.md 文件名
@@ -686,6 +718,7 @@ export class P5PlanStageHandler implements P5StageHandler {
             );
             // 旧 AUTO 卡 status 真实改写为 blocked（内存文本）——blocked 落盘是关键：
             // 不落盘则下一轮重读磁盘时旧卡仍 pending，守卫每轮重触发
+            const blockedTaskId = nextTask.id;
             const blockedContent = markTaskCardStatusInContent(currentTasksContent, nextTask.id, "blocked");
             const contentToWrite = alreadySynthesized
               ? blockedContent
@@ -708,6 +741,20 @@ export class P5PlanStageHandler implements P5StageHandler {
               reparsed.filter((c) => c.status === "completed").map((c) => c.id)
             );
             const reparsedNext = pickNextPendingTask(reparsed, reparsedCompletedIds);
+
+            // 落盘回读校验（2026-11-01）：刚 blocked 的卡回读后必须真的是 blocked。
+            // 若没生效（历史方言：`- status : x`、缩进写法曾被写侧漏改），
+            // 旧实现会一路空转到 GUARD_MAX_ROUNDS 才 fail-closed，白烧 10 轮。
+            // 这里立即判定并跳出，把"写不进去"作为显式失败暴露出来。
+            if (reparsed.some((c) => c.id === blockedTaskId && c.status !== "blocked")) {
+              guardWriteError = `任务卡 ${blockedTaskId} 的 blocked 状态落盘后回读未生效`;
+              ctx.logger?.(
+                `plan AUTO 卡语义守卫：${guardWriteError}（疑似 tasks.md 中存在重复/异体 status 行），交由 fail-closed 兜底`,
+                "warn"
+              );
+              break;
+            }
+
             if (reparsedNext !== null) {
               selectedCards = reparsed;
               completedIds.clear();
@@ -1984,7 +2031,14 @@ export function buildAutoTaskCardContent(title: string, dependencies: ReadonlyAr
  * 区段定位规则：
  * - 目标卡区段从 `## <taskId> ` 标题行开始；
  * - 到下一张卡的 `## ` 标题行或文件尾结束；
- * - 区段内第一条 `- status: <value>` 行被改写为 `- status: <newState>`。
+ * - 区段内**所有** `- status: <value>` 行（含 `- status : x`、缩进写法）被
+ *   统一改写为规范形态 `- status: <newState>`。
+ *
+ * 兼容性说明（2026-11-01）：解析器以区段内**最后一条** status 行为准，
+ * 因此只改首条会在出现重复 status 行时失效；同时旧写侧正则不认
+ * `status :`（冒号前空格）与缩进，会误判"无 status 行"而插入新行，
+ * 造成磁盘上两行状态并存。现统一由 TASK_STATUS_LINE_RE 识别、由
+ * formatTaskStatusLine 产出，读侧写侧共用同一份定义。
  *
  * 兜底语义：若目标卡区段内没有 status 行（解析器默认按 pending 处理），
  * 则在标题行后插入一行 `- status: <newState>`——否则旧卡在磁盘上仍是
@@ -1999,7 +2053,7 @@ export function markTaskCardStatusInContent(content: string, taskId: string, new
   // taskId 进入正则前转义（防御手写清单中出现非常规 ID 字符）
   const escapedTaskId = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const headingRe = new RegExp(`^##\\s+${escapedTaskId}(?=\\s|$)`);
-  const statusLineRe = /^(\s*-\s*status:)\s*\S.*$/;
+  const statusLineRe = TASK_STATUS_LINE_RE;
   const lines = content.split(/\r?\n/);
   const output: string[] = [];
   let inTargetCard = false;
@@ -2026,10 +2080,14 @@ export function markTaskCardStatusInContent(content: string, taskId: string, new
       output.push(line);
       continue;
     }
-    if (inTargetCard && !replaced && statusLineRe.test(line)) {
-      // 区段内第一条 status 行 → 改写状态
+    if (inTargetCard && statusLineRe.test(line)) {
+      // 区段内**所有** status 行统一改写为规范形态。
+      // 2026-11-01 修复：旧实现只改首条，而 parseTaskCards 逐行覆盖、
+      // 以**最后一条** status 为准——卡片里若出现重复 status 行，
+      // "改首条"等于没改（磁盘不变 → 守卫空转 / 假未完成）。
+      // 一次性全部规范化还顺带消掉了 `- status : x`、缩进等方言。
       replaced = true;
-      output.push(line.replace(statusLineRe, `$1 ${newState}`));
+      output.push(formatTaskStatusLine(newState));
       continue;
     }
     output.push(line);
@@ -2037,7 +2095,7 @@ export function markTaskCardStatusInContent(content: string, taskId: string, new
 
   // 兜底：目标卡区段没有任何 status 行 → 在标题行后插入一行，确保磁盘状态真实变更
   if (targetHeadingIndexInOutput >= 0 && !replaced) {
-    output.splice(targetHeadingIndexInOutput + 1, 0, `- status: ${newState}`);
+    output.splice(targetHeadingIndexInOutput + 1, 0, formatTaskStatusLine(newState));
   }
   return output.join("\n");
 }

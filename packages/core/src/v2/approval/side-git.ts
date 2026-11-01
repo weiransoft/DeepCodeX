@@ -803,7 +803,7 @@ export class SideGitManager {
     let additions = 0;
     let deletions = 0;
 
-    for (const line of stdout.trim().split("\n")) {
+    for (const line of stdout.trim().split(/\r?\n/)) {
       if (!line) continue;
       const [add, del] = line.split("\t").map(Number);
       additions += add || 0;
@@ -885,14 +885,14 @@ export class SideGitManager {
 
     const snapshots: TurnSnapshot[] = [];
 
-    for (const line of stdout.trim().split("\n")) {
+    for (const line of stdout.trim().split(/\r?\n/)) {
       if (!line) continue;
 
       const [commitHash, _subject] = line.split("|", 2);
 
       // 解析 commit message（YAML frontmatter）
       const message = await this.runGit(["log", "-1", "--pretty=format:%B", commitHash]);
-      const lines = message.split("\n");
+      const lines = message.split(/\r?\n/);
 
       let turnId = "";
       let type: "pre_turn" | "post_turn" = "pre_turn";

@@ -79,6 +79,9 @@ import {
   PLAN_REASON_TASKS_FILE_NOT_FOUND,
   PLAN_REASON_NO_TASK_CARDS,
   PLAN_REASON_PLANNER_STOP,
+  TASK_STATUS_LINE_RE,
+  formatTaskStatusLine,
+  parseTaskCards,
 } from "./handlers/plan-stage-handler";
 import { atomicWriteTextFile } from "./common/atomic-file";
 import { P5_STAGE_ORDER } from "./run-state-store";
@@ -302,6 +305,16 @@ export interface AutonomousRunRequest {
    * 工具执行、plan 规划器请求四处联动生效。
    */
   readonly signal?: AbortSignal;
+  /**
+   * 用户是否确认进入无人值守模式（2026-11-01 新增，G-A6a 接线）。
+   *
+   * G-A6a《无人值守确认卡》前置此前在 buildGuardContext 中被恒写为
+   * confirmationCardAccepted=true，守卫形同虚设。现在该值经本字段投影到
+   * P5StageContext.unattendedConfirmed：
+   * - undefined（缺省）/ true：视为已确认（无人值守运行由用户显式发起）；
+   * - false：首次迭代 G-A6a DENY，运行不进入 plan 阶段即可中止。
+   */
+  readonly confirmUnattended?: boolean;
 }
 
 /**
@@ -1005,6 +1018,9 @@ export class AutonomousOrchestrator {
             // 停止修复（2026-10-22）：宿主信号投影到 ctx → dev/fix handler
             // 透传给执行器，abort 即时打断进行中的 LLM 流与工具批
             signal: hostSignal,
+            // 2026-11-01：G-A6a 无人值守确认（缺省视为已确认；显式 false 会在
+            // 首次迭代被 G-A6a DENY，运行不进入 plan 即中止）
+            unattendedConfirmed: request.confirmUnattended !== false,
             // 压缩基线（2026-10-08 T-009/T-010 事故修复引入；2026-10-20 语义变更）：
             // 经 ctx 透传给 dev/fix 执行器作为 ContextEpochState 段额度基线，
             // 随 totalTokensUsed 逐阶段递减。此前该值从未注入（执行器轮内检查
@@ -1417,6 +1433,8 @@ export class AutonomousOrchestrator {
           consecutiveFailures,
           lastGuardTriggered: triggeredGuards.length > 0 ? triggeredGuards[triggeredGuards.length - 1]!.ruleId : null,
           status: status === "running" ? "running" : this.mapToRunStateStatus(status),
+          // 仅终态写入（running 时置 undefined → 不写入 JSON，也不影响 checksum）
+          abortReason: status === "running" ? undefined : abortReason || undefined,
         });
         if (updatedRunState !== null) {
           currentRunState = updatedRunState;
@@ -1490,6 +1508,7 @@ export class AutonomousOrchestrator {
           consecutiveFailures,
           lastGuardTriggered: triggeredGuards.length > 0 ? triggeredGuards[triggeredGuards.length - 1]!.ruleId : null,
           status: "failed" as P5RunStateStatus,
+          abortReason,
         });
         if (failedState !== null) {
           currentRunState = failedState;
@@ -2532,6 +2551,8 @@ export class AutonomousOrchestrator {
     readonly abortFlagPath: string;
     /** 宿主中断信号（2026-10-22 停止修复，透传 dev/fix 执行器） */
     readonly signal?: AbortSignal;
+    /** 用户是否确认进入无人值守（2026-11-01 G-A6a 接线，来自运行请求） */
+    readonly unattendedConfirmed?: boolean;
     /**
      * 本阶段任务执行的 Token 预算上限（运行剩余预算，2026-10-08 T-009/T-010 事故修复）。
      * 由调用点按 maxTokens - totalTokensUsed 计算并夹到 ≥0；执行器据此做每轮增量检查。
@@ -2566,6 +2587,8 @@ export class AutonomousOrchestrator {
       synthesizedTask: args.synthesizedTask,
       abortFlagPath: args.abortFlagPath,
       signal: args.signal,
+      // 2026-11-01：G-A6a 真实信号源（守卫恒绿修复），由运行请求投影
+      unattendedConfirmed: args.unattendedConfirmed,
       // F-C 跨 run 失败反馈（可选字段，undefined 时不写入冻结对象语义无差异，
       // 显式透传保持字段完整性供调试与审计）
       lastFailureFeedback: args.lastFailureFeedback,
@@ -2599,7 +2622,8 @@ export class AutonomousOrchestrator {
    *
    * 行扫描语义（与 parseTaskCards 的区段模型严格对齐）：
    * - 以 `## <taskId>` 标题行定位区段起点，下一个 `## ` 标题或 EOF 为终点；
-   * - 仅替换区段内首个 `- status: pending|in-progress|blocked` 行为 completed；
+   * - 区段内所有 status 行统一改写为 `- status: completed`（共用 TASK_STATUS_LINE_RE，
+   *   兼容 `- status : x` 与缩进写法）；写盘前用 parseTaskCards 回读校验；
    * - 任务卡不存在或没有可改写的 status 行时抛错（调用方按迭代失败处理）；
    * - tmp 文件 + rename 原子写回（复用 P5 统一原子写工具，P2-3）。
    *
@@ -2625,7 +2649,8 @@ export class AutonomousOrchestrator {
     }
     let endIndex = lines.length;
     for (let i = headerIndex + 1; i < lines.length; i += 1) {
-      if (lines[i]!.startsWith("## ")) {
+      // 与 parseTaskCards / markTaskCardStatusInContent 的区段模型保持一致（^##\s）
+      if (/^##\s/.test(lines[i]!)) {
         endIndex = i;
         break;
       }
@@ -2635,23 +2660,34 @@ export class AutonomousOrchestrator {
     // done / doing 等等价别名一并接受（修复 2026-10-05 僵尸任务卡事故：人工手写
     // "- status: done" 的卡即使侥幸跑完全绿，也会因正则不认 done 而在这里抛错，
     // 被计入迭代失败——形成"无论怎么执行都出不去"的死局）。
-    // done→completed 语义本就等价，直接改写为规范值 completed。
+    // 2026-11-01 修复（方言归一）：改用与写侧/读侧共用的 TASK_STATUS_LINE_RE，
+    // 覆盖 `- status : x` 与缩进写法；同时改写区段内**所有** status 行——
+    // parseTaskCards 以最后一条为准，只改首条在重复行场景下等于没改。
     let replaced = false;
     for (let i = headerIndex + 1; i < endIndex; i += 1) {
-      if (/^-\s+status\s*:\s*(pending|in-progress|blocked|done|doing|in_progress)\s*$/i.test(lines[i]!)) {
-        lines[i] = "- status: completed";
+      if (TASK_STATUS_LINE_RE.test(lines[i]!)) {
+        lines[i] = formatTaskStatusLine("completed");
         replaced = true;
-        break;
       }
     }
     if (!replaced) {
       throw new Error(
-        `任务卡 ${taskId} 区段内没有可改写的 pending/in-progress/blocked/done 状态行` +
-          `（若卡片已完成请人工改写为 "- status: completed"）`
+        `任务卡 ${taskId} 区段内没有可改写的状态行` + `（若卡片已完成请人工改写为 "- status: completed"）`
       );
     }
 
-    atomicWriteTextFile(tasksFilePath, lines.join("\n"));
+    const nextContent = lines.join("\n");
+    // 写入前先自校验：解析结果必须真的读到 completed，否则宁可不写并抛错。
+    // 只认"落盘后可被解析器读回"的写入，杜绝任务已跑绿却记不成完成的假失败。
+    const verified = parseTaskCards(nextContent).find((c) => c.id === taskId);
+    if (!verified || verified.status !== "completed") {
+      throw new Error(
+        `任务卡 ${taskId} 的状态改写未生效（回读为 ${verified ? verified.status : "卡片缺失"}），` +
+          `为避免写坏 tasks.md 已中止本次落盘`
+      );
+    }
+
+    atomicWriteTextFile(tasksFilePath, nextContent);
   }
 
   // ------------------------------------------------------------------------
@@ -2943,6 +2979,8 @@ export class AutonomousOrchestrator {
       consecutiveFailures: number;
       lastGuardTriggered: string | null;
       status: "running" | "paused" | "completed" | "failed" | "aborted";
+      /** 终止真实原因（可选，2026-11-01 新增；仅终态时写入 RunState） */
+      abortReason?: string;
     }>
   ): Promise<Readonly<P5RunState> | null> {
     try {
@@ -2957,6 +2995,9 @@ export class AutonomousOrchestrator {
         consecutiveFailures: updates.consecutiveFailures,
         lastGuardTriggered: updates.lastGuardTriggered,
         status: updates.status,
+        // 终态时把"为什么停"落盘：RunState 是 status 查询/断点续跑/事后复盘的
+        // 唯一事实源，此前该信息只存在于进程日志与最终报告里（2026-11-01 修复）。
+        abortReason: updates.abortReason,
       });
       return newState;
     } catch (err) {

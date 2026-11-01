@@ -186,6 +186,9 @@ export {
   ENV_BOUNDARY_PROTECTED_ENV_VARS,
   ENV_BOUNDARY_SYSTEM_SENSITIVE_PREFIXES,
   ENV_BOUNDARY_PROD_CREDENTIAL_PATTERNS,
+  findPathJailViolation,
+  isSameOrUnderPath,
+  type PathJailViolation,
 } from "./guards/env-boundary-guard";
 
 export { DangerousCommandGuard } from "./guards/dangerous-command-guard";

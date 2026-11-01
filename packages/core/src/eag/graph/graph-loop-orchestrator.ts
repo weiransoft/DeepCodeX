@@ -165,6 +165,14 @@ export class GraphLoopOrchestrator {
   private currentGraph: Readonly<WorkGraph> | null;
   /** 图是否因调度器 stop_failure / stop_timeout 提前终止（用于 determineFinalStatus 区分成功完成与失败停止） */
   private prematureStop: "failed" | "timeout" | null;
+  /**
+   * 是否因遍历步数达到 MAX_TRAVERSAL_STEPS 而被迫退出主循环（2026-11-01 修复）
+   *
+   * 此前该情形无任何标记，`determineFinalStatus` 只看"有没有 failed 节点"，
+   * 于是撞上限退出 → 报 completed。10000 步通常是图里有环 / 决策函数不收敛，
+   * 报成功等于把死循环洗成通过。
+   */
+  private traversalStepLimitReached: boolean;
 
   /**
    * 构造图级编排器
@@ -193,6 +201,7 @@ export class GraphLoopOrchestrator {
     this.stopReason = null;
     this.currentGraph = null;
     this.prematureStop = null;
+    this.traversalStepLimitReached = false;
   }
 
   /**
@@ -222,6 +231,7 @@ export class GraphLoopOrchestrator {
     this.currentTriggeredGuards = [];
     this.stopReason = null;
     this.prematureStop = null;
+    this.traversalStepLimitReached = false;
     this.currentGraph = graph;
 
     // TOP-5：重置调试器，确保本次运行事件不与上一次运行串扰
@@ -542,6 +552,17 @@ export class GraphLoopOrchestrator {
       if (decision.action === "retry_node" && decision.backoffSeconds > 0) {
         await sleep(decision.backoffSeconds * 1000 + BACKOFF_WAIT_MS);
       }
+    }
+
+    // 4.1 主循环退出归因（2026-11-01 修复）
+    //     循环唯一可能"没走到 nullptr 就退出"的原因是撞了 MAX_TRAVERSAL_STEPS，
+    //     此时 currentNodeId 仍非 null。必须记录，否则会被判定成 completed。
+    if (currentNodeId !== null) {
+      this.traversalStepLimitReached = true;
+      this.logger.warn(
+        `[GraphLoopOrchestrator] 遍历步数达上限（${MAX_TRAVERSAL_STEPS} 步），` +
+          `当前仍停在节点 ${currentNodeId}；疑似图内成环或决策不收敛，最终状态记为 failed`
+      );
     }
 
     // 5. 生成运行报告
@@ -1086,6 +1107,11 @@ export class GraphLoopOrchestrator {
       return "timeout";
     }
 
+    // 遍历步数达上限（2026-11-01 修复）：图未走完，不能报 completed
+    if (this.traversalStepLimitReached) {
+      return "failed";
+    }
+
     // 图级超时兜底
     const elapsedSec = (Date.now() - context.startedAtMs) / 1000;
     if (context.config.timeoutSec > 0 && elapsedSec >= context.config.timeoutSec) {
@@ -1093,8 +1119,24 @@ export class GraphLoopOrchestrator {
     }
 
     // 检查是否有 failed 节点（未隔离的失败）
-    const hasFailed = Array.from(context.nodeResults.values()).some((r) => r.status === "failed");
+    const nodeResults = Array.from(context.nodeResults.values());
+    const hasFailed = nodeResults.some((r) => r.status === "failed");
     if (hasFailed) {
+      return "failed";
+    }
+
+    // 被隔离（isolated）的节点同样是失败（2026-11-01 修复）
+    // 隔离是"该节点反复失败，把它从图里摘掉继续跑下游"的补救措施，
+    // 其结果并不产出可用输出。此前只统计 status === "failed"，
+    // 隔离节点被摘掉后 hasFailed 为 false，整张图报 completed——
+    // 典型的"跑绿了但活儿没干"。
+    const isolatedNodes = nodeResults.filter((r) => r.status === "isolated");
+    if (isolatedNodes.length > 0) {
+      this.logger.warn(
+        `[GraphLoopOrchestrator] 图内 ${isolatedNodes.length} 个节点被隔离（${isolatedNodes
+          .map((r) => r.nodeId)
+          .join(", ")}），其产出缺失，最终状态记为 failed`
+      );
       return "failed";
     }
 

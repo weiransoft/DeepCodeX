@@ -382,7 +382,13 @@ export class LdapSynchronizer implements LdapSyncPort {
     this.config = config;
     this.ldapClient = ldapClient;
     this.mirrorStore = mirrorStore;
-    this.batchSize = config.syncBatchSize ?? DEFAULT_SYNC_BATCH_SIZE;
+    // 2026-11-01 修复（卡死不返回）：syncBatchSize 允许由配置注入，传 0 或负数时
+    // 分页循环 `offset += batchSize` 永远不推进，而 `batch.length < batchSize`
+    // 又恒为 false → while(true) 永不退出，fullSync() 卡死（用户侧表现为
+    // "同步按钮转圈不停"）。此处下限夹到 1，保证每轮至少前进一个游标。
+    const rawBatchSize = config.syncBatchSize ?? DEFAULT_SYNC_BATCH_SIZE;
+    this.batchSize =
+      Number.isFinite(rawBatchSize) && rawBatchSize >= 1 ? Math.trunc(rawBatchSize) : DEFAULT_SYNC_BATCH_SIZE;
     this.fullSyncIntervalSeconds = config.fullSyncIntervalSeconds ?? DEFAULT_FULL_SYNC_INTERVAL_SECONDS;
     this.incrementalCacheTtlSeconds = config.incrementalCacheTtlSeconds ?? DEFAULT_INCREMENTAL_CACHE_TTL_SECONDS;
     this.degradationStrategy = config.degradationStrategy ?? DEFAULT_DEGRADATION_STRATEGY;
@@ -477,7 +483,16 @@ export class LdapSynchronizer implements LdapSyncPort {
       if (batch.length < this.batchSize) {
         break;
       }
-      offset += this.batchSize;
+      // 双保险：游标必须严格前进，否则立即退出而不是空转到超时
+      const nextOffset = offset + this.batchSize;
+      if (nextOffset <= offset) {
+        errors.push({
+          entryUUID: "",
+          message: `分页游标未推进（offset=${offset}, batchSize=${this.batchSize}），已中止全量同步`,
+        });
+        break;
+      }
+      offset = nextOffset;
     }
 
     // 拉取 LDAP 全部组织并幂等写入

@@ -13,6 +13,7 @@ import {
   markFileRead,
   normalizeFilePath,
 } from "../common/state";
+import { validateWindowsFileToolPath } from "../common/windows-path-rules";
 
 const DEFAULT_LINE_LIMIT = 2000;
 const MAX_LINE_LENGTH = 2000;
@@ -212,6 +213,12 @@ export function resolveReadFilePath(
   let filePath = typeof value === "string" ? normalizeFilePath(value) : "";
   if (!filePath.trim()) {
     return { ok: false, error: 'Missing required "file_path" string.' };
+  }
+
+  // Windows 上保留设备名/非法字符会让 IO 打到设备或直接不可读，先给出可执行的报错
+  const windowsPathIssue = validateWindowsFileToolPath(filePath);
+  if (windowsPathIssue) {
+    return { ok: false, error: windowsPathIssue };
   }
 
   if (!isAbsoluteFilePath(filePath)) {

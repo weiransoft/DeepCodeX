@@ -144,6 +144,17 @@ export interface WorkGraphConfig {
   readonly enableAutoIsolation: boolean;
   /** 节点失败重试次数（图级，区别于 Loop 级的 consecutiveFailures） */
   readonly nodeRetryLimit: number;
+  /**
+   * 图级 token 预算耗尽时是否**硬终止**（默认 false，2026-11-01 新增）。
+   *
+   * 与 `GraphGuardConfig.tokenBudgetHardStop` 同一语义、同一个"是否终止"开关：
+   * 守卫负责判定与记录，调度器负责终止。此前只软化了守卫、忘了调度器，
+   * 结果 `maxTokens > 0` 的图跑到额度仍会被 `stop_failure` 静默终止——
+   * 正是"卡预算导致任务不执行"的漏网路径。
+   *
+   * 缺省（undefined）= 只告警不终止；仅显式传 true 恢复旧行为。
+   */
+  readonly tokenBudgetHardStop?: boolean;
 }
 
 /**

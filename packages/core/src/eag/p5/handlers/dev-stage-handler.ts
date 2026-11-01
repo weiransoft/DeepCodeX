@@ -252,6 +252,13 @@ export class P5DevStageHandler implements P5StageHandler {
       });
 
       // 7. 调用 guardChain.execute() 做 dev 阶段护栏判定
+      // 说明（2026-11-01）：dev 阶段**不**注入 pendingCommand——本阶段的命令由
+      // 任务执行器在 LLM 工具循环中即时产生，进入护栏时并不存在"待执行命令"，
+      // 凭空填一个（如 testCommand）会让 G-A1a/A2a/A3b 判定错对象。
+      // dev 期间的真实命令防线的位置是：
+      //   1) llm-task-executor 的破坏性命令 deny 清单（执行前，逐条）；
+      //   2) smartConfirmation 的命令级三态决策（执行前，逐条）；
+      //   3) verify 阶段注入 testCommand 的整链复核（执行后，阶段边界）。
       const guardContext = buildGuardContext(ctx, {
         currentTaskCard: taskCard,
         currentDiff: changeDiff,

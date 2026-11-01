@@ -370,6 +370,7 @@ export class K8sRollbackManager implements RollbackManager {
     const snapshotFilePath = path.join(snapshotDir, `${context.projectName}.yaml`);
 
     let snapshotDataPath: string | undefined;
+    let snapshotDataError: string | undefined;
     try {
       // 创建快照目录（recursive: true 确保父目录也存在）
       fs.mkdirSync(snapshotDir, { recursive: true });
@@ -379,9 +380,13 @@ export class K8sRollbackManager implements RollbackManager {
         mode: 0o600,
       });
       snapshotDataPath = snapshotFilePath;
-    } catch {
-      // 快照文件保存失败：非致命错误，继续执行（snapshotDataPath 保持 undefined）
-      // 不抛异常，确保 createSnapshot 仍能返回有效快照
+    } catch (err) {
+      // 快照文件保存失败：非致命（回滚预案仍可用），但必须留痕。
+      // 2026-11-01 修复：此前 catch 完全吞掉异常，snapshotDataPath=undefined
+      // 就成了唯一线索——"快照已创建"却没有任何原始 YAML，回滚时才发现无据可依。
+      snapshotDataError = `快照数据文件写入失败（${snapshotFilePath}）：${
+        err instanceof Error ? err.message : String(err)
+      }`;
     }
 
     // ---------- 步骤 6: 生成回滚预案文件 ----------
@@ -396,6 +401,7 @@ export class K8sRollbackManager implements RollbackManager {
       rollbackPlanFilePath,
       rollbackStrategy: context.rollbackStrategy ?? "rolling",
       snapshotDataPath,
+      snapshotDataError,
       projectName: context.projectName,
       namespace: context.namespace,
     };
@@ -678,7 +684,8 @@ export class K8sRollbackManager implements RollbackManager {
    * @returns 最新 revision 号（无法解析时返回 0）
    */
   private parseLatestRevision(output: string): number {
-    const lines = output.split("\n");
+    // \r?\n：Windows 上 kubectl 输出可能带 CRLF
+    const lines = output.split(/\r?\n/);
     let maxRevision = 0;
 
     for (const line of lines) {
@@ -997,6 +1004,7 @@ export class HelmRollbackManager implements RollbackManager {
     const snapshotFilePath = path.join(snapshotDir, `${context.projectName}.yaml`);
 
     let snapshotDataPath: string | undefined;
+    let snapshotDataError: string | undefined;
     try {
       fs.mkdirSync(snapshotDir, { recursive: true });
       fs.writeFileSync(snapshotFilePath, historyResult.stdout, {
@@ -1004,8 +1012,11 @@ export class HelmRollbackManager implements RollbackManager {
         mode: 0o600,
       });
       snapshotDataPath = snapshotFilePath;
-    } catch {
-      // 快照文件保存失败：非致命错误
+    } catch (err) {
+      // 快照文件保存失败：非致命，但必须留痕（2026-11-01 修复，同 K8s 分支）
+      snapshotDataError = `快照数据文件写入失败（${snapshotFilePath}）：${
+        err instanceof Error ? err.message : String(err)
+      }`;
     }
 
     // ---------- 步骤 3: 解析 YAML 输出，提取 revision 记录 ----------
@@ -1027,6 +1038,7 @@ export class HelmRollbackManager implements RollbackManager {
       rollbackPlanFilePath,
       rollbackStrategy: context.rollbackStrategy ?? "rolling",
       snapshotDataPath,
+      snapshotDataError,
       projectName: context.projectName,
       namespace: context.namespace,
     };

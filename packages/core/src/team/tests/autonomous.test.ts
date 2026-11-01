@@ -448,7 +448,7 @@ test("git-driver: commit rejects empty message", () => {
 
 test("sleep-guard: detectPlatformBackend returns valid backend", () => {
   const backend = SleepGuard.detectPlatformBackend();
-  assert.ok(["caffeinate", "systemd-inhibit", "noop"].includes(backend));
+  assert.ok(["caffeinate", "systemd-inhibit", "windows-execution-state", "noop"].includes(backend));
 });
 
 test("sleep-guard: mode=off returns noop handle", () => {

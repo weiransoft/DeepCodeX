@@ -955,6 +955,15 @@ export interface RollbackSnapshot {
   readonly projectName?: string;
   /** K8s 命名空间（可选，Phase 3 新增，rollback 时引用 namespace） */
   readonly namespace?: string;
+  /**
+   * 快照数据文件落盘失败的原始原因（可选，2026-11-01 新增）。
+   *
+   * 背景：createSnapshot 的快照写文件失败此前被 `catch {}` 完全吞掉，
+   * 只在 snapshotDataPath 上表现为 undefined——运维看到"快照有了"其实
+   * 没有数据文件，回滚时无原始 YAML 可依。现在把失败原因随快照一起返回，
+   * 让调用方/报告能显式暴露"快照数据未落盘"。
+   */
+  readonly snapshotDataError?: string;
 }
 
 /**

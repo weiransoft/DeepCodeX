@@ -518,7 +518,11 @@ test("D3. 节点重试耗尽后自动隔离，下游继续执行", async () => {
 
   assert.equal(report.nodeResults.get("A")?.status, "isolated", "A 应被隔离");
   assert.equal(report.nodeResults.get("B")?.status, "completed", "B 应 completed");
-  assert.equal(report.finalStatus, "completed", "隔离后下游继续，图应 completed");
+  // 2026-11-01 语义修正：隔离是"该节点反复失败被摘掉"，其产出缺失。
+  // 遍历确实继续（B 仍执行），但整图终态必须诚实反映"有活儿没干"，
+  // 否则 eag graph 会以 exitCode=0 报告成功（旧断言 completed 即此 bug 的固化）。
+  assert.equal(report.finalStatus, "failed", "存在被隔离节点时终态应为 failed（产出缺失）");
+  assert.ok(report.finalReport.includes("isolated") || report.finalReport.includes("隔离"), "最终报告应体现隔离事实");
 });
 
 // ============================================================================

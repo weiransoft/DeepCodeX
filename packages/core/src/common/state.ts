@@ -69,6 +69,22 @@ export function normalizeFilePath(filePath: string, platform: NodeJS.Platform = 
   return platform === "win32" ? path.win32.normalize(nativePath) : path.normalize(nativePath);
 }
 
+/**
+ * 生成会话内文件状态的索引键（大小写感知平台差异）
+ *
+ * 为什么不能直接拿 normalizeFilePath 当键：Windows 文件系统大小写不敏感，
+ * `C:\work\A.ts` 与 `c:\work\a.ts` 是同一个文件；若用原样路径做键，会分裂成两条
+ * fileState/version 记录，导致"已读过"判定失效、版本号错位。
+ *
+ * 为什么不能反过来把 normalizeFilePath 全小写：该函数输出同时用于展示与落盘
+ * （write 工具直接拿它写文件），全小写会把新建文件的真实名称改掉。
+ * 因此展示路径保持原样，只在 Map 键这一层折叠大小写。
+ */
+export function fileStateKey(filePath: string, platform: NodeJS.Platform = process.platform): string {
+  const normalized = normalizeFilePath(filePath, platform);
+  return platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
 export function normalizeNativeFilePath(filePath: string, platform: NodeJS.Platform = process.platform): string {
   if (platform !== "win32") {
     return filePath;
@@ -98,7 +114,7 @@ function isGitBashAbsolutePath(filePath: string): boolean {
 export function recordFileState(
   sessionId: string,
   state: FileState,
-  options: { incrementVersion?: boolean } = {}
+  options: { incrementVersion?: boolean; platform?: NodeJS.Platform } = {}
 ): void {
   if (!sessionId || !state.filePath) {
     return;
@@ -110,11 +126,13 @@ export function recordFileState(
     fileStatesBySession.set(sessionId, sessionState);
   }
 
-  const normalizedPath = normalizeFilePath(state.filePath);
-  const currentVersion = getFileVersion(sessionId, normalizedPath);
+  const platform = options.platform ?? process.platform;
+  const normalizedPath = normalizeFilePath(state.filePath, platform);
+  const stateKey = fileStateKey(state.filePath, platform);
+  const currentVersion = getFileVersion(sessionId, stateKey, platform);
   const nextVersion = options.incrementVersion ? currentVersion + 1 : currentVersion;
-  setFileVersion(sessionId, normalizedPath, nextVersion);
-  sessionState.set(normalizedPath, {
+  setFileVersion(sessionId, stateKey, nextVersion, platform);
+  sessionState.set(stateKey, {
     ...state,
     filePath: normalizedPath,
     version: nextVersion,
@@ -142,32 +160,40 @@ export function markFileRead(
   });
 }
 
-export function getFileState(sessionId: string, filePath: string): FileState | null {
+export function getFileState(
+  sessionId: string,
+  filePath: string,
+  platform: NodeJS.Platform = process.platform
+): FileState | null {
   if (!sessionId || !filePath) {
     return null;
   }
 
-  return fileStatesBySession.get(sessionId)?.get(normalizeFilePath(filePath)) ?? null;
+  return fileStatesBySession.get(sessionId)?.get(fileStateKey(filePath, platform)) ?? null;
 }
 
 export function wasFileRead(sessionId: string, filePath: string): boolean {
   return getFileState(sessionId, filePath) !== null;
 }
 
-export function getFileVersion(sessionId: string, filePath: string): number {
+export function getFileVersion(
+  sessionId: string,
+  filePath: string,
+  platform: NodeJS.Platform = process.platform
+): number {
   if (!sessionId || !filePath) {
     return 0;
   }
-  return fileVersionsBySession.get(sessionId)?.get(normalizeFilePath(filePath)) ?? 0;
+  return fileVersionsBySession.get(sessionId)?.get(fileStateKey(filePath, platform)) ?? 0;
 }
 
-function setFileVersion(sessionId: string, filePath: string, version: number): void {
+function setFileVersion(sessionId: string, filePath: string, version: number, platform: NodeJS.Platform): void {
   let sessionVersions = fileVersionsBySession.get(sessionId);
   if (!sessionVersions) {
     sessionVersions = new Map<string, number>();
     fileVersionsBySession.set(sessionId, sessionVersions);
   }
-  sessionVersions.set(normalizeFilePath(filePath), version);
+  sessionVersions.set(fileStateKey(filePath, platform), version);
 }
 
 export function isFullFileView(state: FileState | null): boolean {

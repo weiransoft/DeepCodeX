@@ -17,6 +17,7 @@ import {
 import { executeValidatedTool, semanticBoolean } from "../common/validate";
 import {
   createSnippet,
+  fileStateKey,
   getFileState,
   getSnippet,
   hasSnippetOutdatedFileVersion,
@@ -24,6 +25,7 @@ import {
   normalizeFilePath,
   recordFileState,
 } from "../common/state";
+import { validateWindowsFileToolPath } from "../common/windows-path-rules";
 
 const MAX_CANDIDATE_COUNT = 5;
 const REPLACE_ALL_MATCH_THRESHOLD = 5;
@@ -123,7 +125,17 @@ export async function handleEditTool(
         };
       }
 
-      if (snippet.filePath !== filePath) {
+      const windowsPathIssue = validateWindowsFileToolPath(filePath);
+      if (windowsPathIssue) {
+        return {
+          ok: false,
+          name: "edit",
+          error: windowsPathIssue,
+        };
+      }
+
+      // Windows 大小写不敏感：同一文件的不同大小写拼写不应被判为"snippet 不属于该文件"
+      if (fileStateKey(snippet.filePath) !== fileStateKey(filePath)) {
         return {
           ok: false,
           name: "edit",

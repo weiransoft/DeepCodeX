@@ -43,6 +43,8 @@ import {
   createDefaultBlockerGuardChain,
   NOOP_CIRCUIT_BREAKER_THRESHOLD,
   markTaskCardStatusInContent,
+  // N3b 方言回归：写侧改写结果必须能被读侧真实读回
+  parseTaskCards,
   LlmTaskExecutor,
   type P5StageContext,
   type P5RunState,
@@ -320,6 +322,46 @@ test("N3. markTaskCardStatusInContent：改写目标卡 / 不影响其他卡 / �
   // 分支 3：未找到目标卡 → 原样返回（不得篡改其他内容）
   const untouched = markTaskCardStatusInContent(content, "T-999", "blocked");
   assert.equal(untouched, content, "未找到目标卡时必须原样返回");
+});
+
+test("N3b. 状态行方言归一：`status :` / 缩进 / 重复 status 行都必须被真实改写并被解析器读回", () => {
+  // 场景 1：冒号前有空格（`- status : pending`）
+  // 旧写侧正则只认 `status:`，判定"无 status 行"后插入新行，
+  // 磁盘上留下两行状态，解析器取后者 → 改动等于没生效。
+  const colonSpace = ["## T-101 任务甲", "- requirement: AUTO", "- status : pending", "- files: a.ts", ""].join("\n");
+  const fixed1 = markTaskCardStatusInContent(colonSpace, "T-101", "completed");
+  const parsed1 = parseTaskCards(fixed1).find((c) => c.id === "T-101");
+  assert.equal(parsed1?.status, "completed", `冒号前空格写法必须被真实改写，实际内容：${fixed1}`);
+  assert.ok(!/- status\s*:\s*pending/.test(fixed1), "不得残留旧的 pending 状态行");
+
+  // 场景 2：缩进写法（`  - status: pending`）
+  // 解析器允许缩进（TASK_CARD_PROPERTY_RE），写侧必须同步改写而不是插入第二行。
+  const indented = ["## T-102 任务乙", "- requirement: AUTO", "  - status: pending", "- files: b.ts", ""].join("\n");
+  const fixed2 = markTaskCardStatusInContent(indented, "T-102", "blocked");
+  const parsed2 = parseTaskCards(fixed2).find((c) => c.id === "T-102");
+  assert.equal(parsed2?.status, "blocked", `缩进写法必须被真实改写，实际内容：${fixed2}`);
+
+  // 场景 3：重复 status 行（解析器以最后一条为准）
+  // 旧实现只改首条 → 解析器仍读到最后一条 pending → 守卫每轮重触发（空转）。
+  const duplicated = [
+    "## T-103 任务丙",
+    "- requirement: AUTO",
+    "- status: pending",
+    "- files: c.ts",
+    "- status: pending",
+    "",
+  ].join("\n");
+  const fixed3 = markTaskCardStatusInContent(duplicated, "T-103", "completed");
+  const parsed3 = parseTaskCards(fixed3).find((c) => c.id === "T-103");
+  assert.equal(parsed3?.status, "completed", `重复 status 行必须全部改写，实际内容：${fixed3}`);
+  assert.ok(!/- status\s*:\s*pending/.test(fixed3), "重复行不得残留 pending");
+
+  // 场景 4：其他卡（含方言写法）不得被波及
+  const mixed = ["## T-104 任务丁", "- status: pending", "", "## T-105 任务戊", "- status : in-progress", ""].join(
+    "\n"
+  );
+  const fixed4 = markTaskCardStatusInContent(mixed, "T-104", "completed");
+  assert.equal(parseTaskCards(fixed4).find((c) => c.id === "T-105")?.status, "in-progress", "非目标卡的状态不得被改写");
 });
 
 test("N4. 3.5 守卫：手写卡（requirementId≠AUTO）弱相关时不被拦截（用户显式意志不覆盖）", async () => {

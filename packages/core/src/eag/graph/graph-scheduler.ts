@@ -100,6 +100,13 @@ export class GraphSchedulerImpl implements GraphSchedulerProtocol {
   private totalRetryCount: number;
   /** 连续节点失败次数（成功时重置为 0） */
   private consecutiveNodeFailures: number;
+  /**
+   * 图级 token 预算耗尽是否已告警过（去重用）
+   *
+   * 2026-11-01 修复：token 预算默认只告警不终止，若每轮都打日志会淹没输出，
+   * 故只在首次越界时告警一次。
+   */
+  private tokenBudgetWarned: boolean;
 
   /**
    * 构造图级调度器
@@ -113,6 +120,7 @@ export class GraphSchedulerImpl implements GraphSchedulerProtocol {
     this.graph = null;
     this.totalRetryCount = 0;
     this.consecutiveNodeFailures = 0;
+    this.tokenBudgetWarned = false;
   }
 
   /**
@@ -170,15 +178,25 @@ export class GraphSchedulerImpl implements GraphSchedulerProtocol {
     }
 
     // 2. 图级 token 预算检查（maxTokens > 0 时启用）
+    //    2026-11-01 修复（与 GraphGuard 对齐）：Token 预算默认**只告警不终止**。
+    //    此前这里直接 stop_failure，而 2026-10-20 起全局语义已改为"Token 仅作压缩
+    //    基线"，守卫侧也加了 tokenBudgetHardStop（默认 false）——唯独调度器漏改，
+    //    于是 `eag graph --max-tokens N` 跑到 N 仍会中途终止（任务不执行）。
+    //    需旧行为时显式设置 config.tokenBudgetHardStop = true。
     if (context.config.maxTokens > 0 && context.totalTokensUsed >= context.config.maxTokens) {
-      this.logger.warn(
-        `[GraphScheduler] 图级 token 预算耗尽：${context.totalTokensUsed} >= ${context.config.maxTokens}`
-      );
-      return this.makeDecision(
-        "stop_failure",
-        `图级 token 预算耗尽：${context.totalTokensUsed} >= ${context.config.maxTokens}`,
-        []
-      );
+      const budgetReason = `图级 token 预算耗尽：${context.totalTokensUsed} >= ${context.config.maxTokens}`;
+      if (context.config.tokenBudgetHardStop === true) {
+        this.logger.warn(`[GraphScheduler] ${budgetReason}（tokenBudgetHardStop=true，终止图执行）`);
+        return this.makeDecision("stop_failure", budgetReason, []);
+      }
+      // 只告警一次：否则每个节点决策都刷一行，日志被淹没
+      if (!this.tokenBudgetWarned) {
+        this.tokenBudgetWarned = true;
+        this.logger.warn(
+          `[GraphScheduler] ${budgetReason}（tokenBudgetHardStop=false，仅告警不终止；` +
+            `图遍历仍受 maxDepth 与步数上限约束）`
+        );
+      }
     }
 
     // 3. 最大深度检查
@@ -271,6 +289,7 @@ export class GraphSchedulerImpl implements GraphSchedulerProtocol {
   reset(): void {
     this.totalRetryCount = 0;
     this.consecutiveNodeFailures = 0;
+    this.tokenBudgetWarned = false;
     this.graph = null;
   }
 

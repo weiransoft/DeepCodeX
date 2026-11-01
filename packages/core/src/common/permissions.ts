@@ -1,4 +1,5 @@
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import type { DeepcodingSettings, PermissionMode, PermissionScope, PermissionSettings } from "../settings";
 // 上游 v0.3.1 新增：followUpMessages 复用统一类型（role 已扩展为 "system" | "user"）
@@ -491,6 +492,23 @@ export function isPathInProject(projectRoot: string, filePath: string): boolean 
   return isPathInDirectory(projectRoot, filePath, projectRoot);
 }
 
+/**
+ * 临时目录白名单（跨平台）。
+ *
+ * 2026-11-01 跨平台补齐：原实现写死 POSIX 的 /tmp 与 /private/tmp，
+ * Windows 上临时目录是 %TEMP%（C:\Users\x\AppData\Local\Temp），
+ * 命中不了任何一项 → 所有临时文件读写被判成 out-cwd，每次都要弹审批。
+ * os.tmpdir() 在 Windows 返回 %TEMP%，一并纳入。
+ */
+function tempDirectoryCandidates(): string[] {
+  const candidates = ["/tmp", "/private/tmp", os.tmpdir()];
+  if (process.platform === "win32") {
+    if (process.env.TEMP) candidates.push(process.env.TEMP);
+    if (process.env.TMP) candidates.push(process.env.TMP);
+  }
+  return candidates.filter((dir) => Boolean(dir));
+}
+
 export function classifyFilePermissionScope(
   projectRoot: string,
   filePath: string,
@@ -500,7 +518,7 @@ export function classifyFilePermissionScope(
   if (isPathInProject(projectRoot, filePath) || isPathInAnyDirectory(projectRoot, filePath, addWorkingDirs)) {
     return operation === "read" ? "read-in-cwd" : "write-in-cwd";
   }
-  if (isPathInAnyDirectory(projectRoot, filePath, ["/tmp", "/private/tmp"])) {
+  if (isPathInAnyDirectory(projectRoot, filePath, tempDirectoryCandidates())) {
     return operation === "read" ? "read-in-tmp" : "write-in-tmp";
   }
   return operation === "read" ? "read-out-cwd" : "write-out-cwd";

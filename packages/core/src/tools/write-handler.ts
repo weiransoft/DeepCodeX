@@ -12,6 +12,7 @@ import {
 } from "../common/file-utils";
 import { executeValidatedTool } from "../common/validate";
 import { getFileState, isAbsoluteFilePath, isFullFileView, normalizeFilePath, recordFileState } from "../common/state";
+import { validateWindowsFileToolPath } from "../common/windows-path-rules";
 
 const writeSchema = z.strictObject({
   file_path: z.string().min(1, "file_path is required."),
@@ -44,6 +45,17 @@ export async function handleWriteTool(
           ok: false,
           name: "write",
           error: "file_path must be an absolute path.",
+        };
+      }
+
+      // Windows 上 `CON` / `NUL` / `COM1` 会写到设备，尾随点/空格会被静默裁剪，
+      // 超长路径报 ENOENT —— 都在这里提前拒绝，给出可执行的修复建议
+      const windowsPathIssue = validateWindowsFileToolPath(filePath);
+      if (windowsPathIssue) {
+        return {
+          ok: false,
+          name: "write",
+          error: windowsPathIssue,
         };
       }
 

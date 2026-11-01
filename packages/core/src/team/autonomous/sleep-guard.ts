@@ -9,10 +9,12 @@
  * 真实实现能力：
  *   1. macOS: caffeinate -i（阻止空闲休眠）
  *   2. Linux: systemd-inhibit（如果可用）
- *   3. Windows / 其他: no-op
- *   4. process exit 兜底（即使异常退出也 release）
- *   5. SIGTERM/SIGINT 优雅 release
- *   6. 后端启动失败时降级为 no-op（不阻塞主流程）
+ *   3. Windows: PowerShell 常驻进程调用 kernel32!SetThreadExecutionState
+ *      （ES_CONTINUOUS | ES_SYSTEM_REQUIRED），线程存活期间系统不休眠
+ *   4. 其他平台: no-op
+ *   5. process exit 兜底（即使异常退出也 release）
+ *   6. SIGTERM/SIGINT 优雅 release
+ *   7. 后端启动失败时降级为 no-op（不阻塞主流程）
  */
 
 import * as child_process from "node:child_process";
@@ -22,7 +24,7 @@ import * as os from "node:os";
 export type SleepGuardMode = "on" | "off";
 
 /** Sleep 防护后端类型 */
-export type SleepGuardBackend = "caffeinate" | "systemd-inhibit" | "noop" | "uninitialized";
+export type SleepGuardBackend = "caffeinate" | "systemd-inhibit" | "windows-execution-state" | "noop" | "uninitialized";
 
 /** Sleep 防护句柄（内部使用） */
 export interface SleepGuardHandle {
@@ -41,6 +43,25 @@ const NULL_LOG: SleepGuardLogCallback = () => {};
 let atexitRegistered = false;
 /** 全局已注册的 SleepGuard 列表（atexit 时统一 release） */
 const registeredGuards: Set<SleepGuard> = new Set();
+
+/**
+ * Windows PowerShell 可执行文件缓存
+ *
+ * undefined = 尚未探测；null = 探测失败（无可用 PowerShell）；string = 绝对可用的命令名。
+ * 探测会真实 spawn 一次，故只做一次并缓存。
+ */
+let cachedWindowsPowerShell: string | null | undefined;
+
+/** Windows 候选 PowerShell（Windows PowerShell 5.1 优先，powerShell 7 兜底） */
+const WINDOWS_POWERSHELL_CANDIDATES: readonly string[] = ["powershell.exe", "pwsh.exe"];
+
+/**
+ * ES_CONTINUOUS | ES_SYSTEM_REQUIRED = 0x80000001
+ *
+ * ES_SYSTEM_REQUIRED 声明"需要系统保持可用"，ES_CONTINUOUS 让该要求持续生效直到线程
+ * 重置执行状态或线程退出（无需反复轮询）。两个标志合起来等价于"我这个进程还活着就别睡"。
+ */
+const WINDOWS_EXECUTION_STATE_FLAGS = 2147483649;
 
 /**
  * 注册 process exit 钩子（仅一次）
@@ -67,9 +88,10 @@ function ensureAtexitRegistered(): void {
  * 设计原则：
  *   1. macOS 优先用 caffeinate -i（阻止空闲休眠）
  *   2. Linux 优先用 systemd-inhibit（如果可用）
- *   3. Windows 与未知平台 no-op
- *   4. process exit 兜底（即使异常退出也 release）
- *   5. SIGTERM/SIGINT 优雅 release
+ *   3. Windows 用 PowerShell 常驻进程持有 ES_CONTINUOUS|ES_SYSTEM_REQUIRED
+ *   4. 其他未知平台 no-op
+ *   5. process exit 兜底（即使异常退出也 release）
+ *   6. SIGTERM/SIGINT 优雅 release
  */
 export class SleepGuard {
   private readonly mode: SleepGuardMode;
@@ -108,7 +130,14 @@ export class SleepGuard {
       return this.handle;
     }
     // 启动子进程
-    const cmd = buildCommand(backend);
+    let cmd: string[];
+    try {
+      cmd = buildCommand(backend);
+    } catch (err) {
+      this.log(`[SleepGuard] ${backend} 初始化失败: ${formatError(err)}，降级为 no-op`);
+      this.handle = { mode: "on", process: null, backend: "noop" };
+      return this.handle;
+    }
     if (cmd.length === 0) {
       this.handle = { mode: "on", process: null, backend: "noop" };
       return this.handle;
@@ -118,6 +147,8 @@ export class SleepGuard {
       proc = child_process.spawn(cmd[0]!, cmd.slice(1), {
         stdio: ["ignore", "ignore", "ignore"],
         detached: process.platform !== "win32",
+        // Windows 上避免弹出控制台窗口（桌面壳内启动时尤其明显）
+        windowsHide: true,
       });
     } catch (err) {
       this.log(`[SleepGuard] 启动 ${backend} 失败: ${formatError(err)}，降级为 no-op`);
@@ -212,6 +243,11 @@ export class SleepGuard {
     if (system === "linux") {
       return whichCommand("systemd-inhibit") ? "systemd-inhibit" : "noop";
     }
+    if (system === "win32") {
+      // 仅确认 PowerShell 可启动；SetThreadExecutionState 是否真可用由 acquire() 的
+      // 同步探针判定，探针失败时 acquire() 自行降级为 no-op
+      return resolveWindowsPowerShell() ? "windows-execution-state" : "noop";
+    }
     return "noop";
   }
 
@@ -241,6 +277,9 @@ export class SleepGuard {
 
 /**
  * 构建后端启动命令
+ *
+ * @throws Windows 后端初始化失败（未找到 PowerShell 或 API 探针失败）时抛出，
+ *         由 acquire() 捕获后降级为 no-op
  */
 function buildCommand(backend: SleepGuardBackend): string[] {
   if (backend === "caffeinate") {
@@ -257,7 +296,132 @@ function buildCommand(backend: SleepGuardBackend): string[] {
       "infinity",
     ];
   }
+  if (backend === "windows-execution-state") {
+    return buildWindowsExecutionStateCommand();
+  }
   return [];
+}
+
+// ============================================================================
+// Windows 后端：SetThreadExecutionState 常驻守护
+// ============================================================================
+
+/**
+ * 解析可用的 PowerShell 命令名（结果缓存）
+ *
+ * 不用 `where.exe`：在精简容器 / PATH 异常环境下 where 不一定在 PATH 上，
+ * 直接 spawn 一次 `-Command "exit 0"` 最能反映"能不能用"。
+ */
+function resolveWindowsPowerShell(): string | null {
+  if (cachedWindowsPowerShell !== undefined) {
+    return cachedWindowsPowerShell;
+  }
+  cachedWindowsPowerShell = null;
+  for (const candidate of WINDOWS_POWERSHELL_CANDIDATES) {
+    try {
+      const probe = child_process.spawnSync(candidate, ["-NoProfile", "-NonInteractive", "-Command", "exit 0"], {
+        stdio: "ignore",
+        timeout: 15_000,
+        windowsHide: true,
+      });
+      if (!probe.error && probe.status === 0) {
+        cachedWindowsPowerShell = candidate;
+        break;
+      }
+    } catch {
+      // 候选不可用，继续下一个
+    }
+  }
+  return cachedWindowsPowerShell;
+}
+
+/** 生成 import kernel32!SetThreadExecutionState 的 PowerShell 头部（探针与常驻脚本共用） */
+function buildExecutionStatePreamble(): string[] {
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    "$signature = @'",
+    '[DllImport("kernel32.dll", SetLastError = true)]',
+    "public static extern uint SetThreadExecutionState(uint esFlags);",
+    "'@",
+    "$guardType = Add-Type -MemberDefinition $signature -Name 'DcxSleepGuard' -Namespace 'DeepCodeX' -PassThru",
+    "if ($null -eq $guardType) { exit 2 }",
+  ];
+}
+
+/**
+ * 同步探针脚本：确认 SetThreadExecutionState 在本机真实可用
+ *
+ * 为什么调用两次：该 API 成功时返回"上一次的执行状态"，失败时返回 0。新线程第一次调用
+ * 的返回值在部分 Windows 版本上也是 0，无法区分成败；第二次调用必然返回刚设置的值，
+ * 以此作为成功判据才可靠。
+ */
+function buildExecutionStateProbeScript(): string {
+  return [
+    ...buildExecutionStatePreamble(),
+    `[void]$guardType::SetThreadExecutionState([uint32]${WINDOWS_EXECUTION_STATE_FLAGS})`,
+    `$previous = $guardType::SetThreadExecutionState([uint32]${WINDOWS_EXECUTION_STATE_FLAGS})`,
+    `if ($previous -ne ${WINDOWS_EXECUTION_STATE_FLAGS}) { exit 3 }`,
+    // ES_CONTINUOUS 单独设置即清除 ES_SYSTEM_REQUIRED，探针进程退出前主动复位
+    "[void]$guardType::SetThreadExecutionState([uint32]2147483648)",
+    "exit 0",
+  ].join("\n");
+}
+
+/**
+ * 常驻脚本：先设置执行状态，再低频复设（防其他程序把状态清掉），直到进程被杀
+ */
+function buildExecutionStateKeepAliveScript(): string {
+  return [
+    ...buildExecutionStatePreamble(),
+    "while ($true) {",
+    `  [void]$guardType::SetThreadExecutionState([uint32]${WINDOWS_EXECUTION_STATE_FLAGS})`,
+    "  Start-Sleep -Seconds 25",
+    "}",
+  ].join("\n");
+}
+
+/** 把 PowerShell 脚本编码为 -EncodedCommand 需要的 UTF-16LE Base64（彻底规避引号转义） */
+function encodePowerShellCommand(script: string): string {
+  return Buffer.from(script, "utf16le").toString("base64");
+}
+
+/**
+ * 构建 Windows 防休眠命令
+ *
+ * @throws PowerShell 不可用或 API 探针失败时抛出
+ */
+function buildWindowsExecutionStateCommand(): string[] {
+  const exe = resolveWindowsPowerShell();
+  if (!exe) {
+    throw new Error("未找到 powershell.exe / pwsh.exe");
+  }
+
+  // 探针：真实调用 API，失败即抛（调用方降级 no-op），绝不假装已生效
+  const probe = child_process.spawnSync(
+    exe,
+    ["-NoProfile", "-NonInteractive", "-EncodedCommand", encodePowerShellCommand(buildExecutionStateProbeScript())],
+    {
+      stdio: "ignore",
+      timeout: 30_000,
+      windowsHide: true,
+    }
+  );
+  if (probe.error) {
+    throw new Error(`SetThreadExecutionState 探针无法执行: ${probe.error.message}`);
+  }
+  if (probe.status !== 0) {
+    throw new Error(`SetThreadExecutionState 探针失败（退出码 ${probe.status ?? "null"}）`);
+  }
+
+  return [
+    exe,
+    "-NoProfile",
+    "-NonInteractive",
+    "-WindowStyle",
+    "Hidden",
+    "-EncodedCommand",
+    encodePowerShellCommand(buildExecutionStateKeepAliveScript()),
+  ];
 }
 
 /**

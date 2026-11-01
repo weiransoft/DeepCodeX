@@ -266,6 +266,39 @@ test("A13. TC-GUARD-A1c-004：生产凭据不可达通过（无生产凭据）",
   assert.equal(verdict.decision, "PASS");
 });
 
+test("A14. G-A1c 变量名判定按 token 匹配：含 PRODUCT / 无凭据 token 的变量不得误报", () => {
+  const guard = new EnvBoundaryGuard();
+
+  // 典型误报源：PRODUCT 子串包含 PROD。旧实现用 includes("PROD") 判定，
+  // 回退 process.env 后会让"装了任何带 PRODUCT 变量的机器"完全无法跑 autonomous。
+  const productName = guard.check(
+    createContext({
+      envSnapshot: {
+        WORKBUDDY_PRODUCT_NAME: "WorkBuddy",
+        ACC_PRODUCT_CONFIG_PATH: "/var/folders/xx/config.json",
+      },
+    })
+  );
+  assert.equal(productName.decision, "PASS", "PRODUCT 不应被当成 PROD 命中");
+
+  // 有生产标识 token 但不是凭据类变量（PATH/CONFIG 等）→ 不判为生产凭据
+  const stagingPath = guard.check(
+    createContext({
+      envSnapshot: { STAGING_APP_PATH: "/Applications/DeepCodeX.app" },
+    })
+  );
+  assert.equal(stagingPath.decision, "PASS", "STAGING_APP_PATH 不是凭据类变量，不应 DENY");
+
+  // 生产标识 + 凭据类 token → 仍然 DENY（守卫不放水）
+  const prodToken = guard.check(
+    createContext({
+      envSnapshot: { STAGING_DB_PASSWORD: "p@ssw0rd-1234" },
+    })
+  );
+  assert.equal(prodToken.decision, "DENY");
+  assert.match(prodToken.reason, /STAGING/);
+});
+
 // ============================================================================
 // B. DangerousCommandGuard 测试（A-2 层，3 条 BLOCKER）
 // ============================================================================
@@ -508,10 +541,77 @@ test("B22. TC-GUARD-A2c-007：白名单前缀命中但含 | 管道 fail-closed �
   assert.match(verdict.reason, /shell 元字符/);
 });
 
+test("B23. G-A2c：用户配置的命令（commandAuthority=user-configured）不受 AUTO 白名单约束", () => {
+  const guard = new DangerousCommandGuard();
+
+  // 场景：项目自定义 runner（非 npm/pytest 惯例）作为 verify 的 testCommand。
+  // 若仍按 AUTO 白名单判定，verify 阶段会恒 ASK → 运行永远收不了尾。
+  const custom = guard.check(
+    createContext({
+      pendingCommand: `node -e 'console.log(process.argv[1])' 'Tests: 1 passed, 0 failed'`,
+      commandAuthority: "user-configured",
+    })
+  );
+  assert.equal(custom.decision, "PASS", "用户配置的命令不应被 AUTO 白名单拦下");
+
+  // 但黑名单仍然生效：用户配置也不能跑关机/破坏性命令
+  const blacklisted = guard.check(
+    createContext({
+      pendingCommand: "shutdown -h now",
+      commandAuthority: "user-configured",
+    })
+  );
+  assert.equal(blacklisted.decision, "DENY", "黑名单对所有来源的命令都生效");
+
+  // 默认（agent 来源）行为不变：非白名单命令仍 ASK
+  const agent = guard.check(
+    createContext({
+      pendingCommand: "unknown-command --flag value",
+    })
+  );
+  assert.equal(agent.decision, "ASK", "模型自主选择的命令仍受白名单约束");
+});
+
+test("B24. 用户配置的测试命令不被 G-A1a/G-A1b/G-A3b 拦（verify 不得恒拒）", () => {
+  // 2026-11-01 E2E 发现：verify 阶段把 testCommand 注入 pendingCommand 后，
+  // `export HOME=/tmp && npm test` 这类常见前置写法会被 G-A1b 判 DENY。
+  // 结果从"守卫空转"变成"守卫恒拒" —— 任务永远收不了尾，比原问题更糟。
+  //
+  // 语义边界：G-A1a/A1b/A3b 约束的是「模型自主想干什么」；用户显式配置的
+  // 测试命令属于用户授权动作，只受危险命令黑名单（G-A2a 等）约束。
+  const envGuard = new EnvBoundaryGuard();
+  const runtimeGuard = new RuntimeConstraintGuard();
+  const userCtx = {
+    pendingCommand: "export HOME=/tmp/e2e-home && npm test -- --runInBand",
+    commandAuthority: "user-configured" as const,
+  };
+
+  assert.equal(envGuard.check(createContext(userCtx)).decision, "PASS", "用户配置命令不应因 export 前置被 G-A1b 拦下");
+  assert.notEqual(envGuard.check(createContext(userCtx)).ruleId, "G-A1b", "不得命中 G-A1b");
+
+  // 模型自选来源不变：同一命令仍然被拦（豁免只对用户授权命令生效）
+  const agentVerdict = envGuard.check(
+    createContext({
+      pendingCommand: "export HOME=/tmp/e2e-home && npm test -- --runInBand",
+      commandAuthority: "agent",
+    })
+  );
+  assert.equal(agentVerdict.decision, "DENY", "模型自选的 export 命令仍被 G-A1b 拦截");
+  assert.equal(agentVerdict.ruleId, "G-A1b");
+
+  // G-A3b 清理意图：用户配置命令不参与关键词判定（否则 `npm run clean` 恒转人工）
+  const cleanupUser = runtimeGuard.check(
+    createContext({
+      pendingCommand: "npm run clean && npm test",
+      commandAuthority: "user-configured",
+    })
+  );
+  assert.notEqual(cleanupUser.ruleId, "G-A3b", "用户配置命令不应因 clean 关键词转人工");
+});
+
 // ============================================================================
 // C. ScopeLockGuard 测试（A-3 层，2 条 BLOCKER）
 // ============================================================================
-
 test("C1. ScopeLockGuard 构造与字段验证", () => {
   const guard = new ScopeLockGuard();
   assert.equal(guard.ruleId, "G-A3a");

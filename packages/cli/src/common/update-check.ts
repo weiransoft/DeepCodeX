@@ -252,8 +252,23 @@ function spawnNpm(args: string[], options: SpawnOptions): ChildProcess {
   });
 }
 
+/**
+ * 按 cmd.exe 规则为参数加引号。
+ *
+ * 2026-11-01 修正：原实现用 `\"` 转义内部双引号 —— 那是 POSIX shell 语法，
+ * cmd.exe 不认 `\"`（它把反斜杠当普通字符，引号当即闭合），
+ * 参数被 `&`、`|`、空格拆分后可能拼出非预期命令。cmd.exe 的转义规则是
+ * 用 `""` 表示一个字面双引号；无需引号的简单参数原样返回。
+ *
+ * @param arg 单个参数
+ * @returns 适配 cmd.exe 的参数文本
+ */
 function quoteCmdArg(arg: string): string {
-  return `"${String(arg).replace(/"/g, '\\"')}"`;
+  const value = String(arg);
+  if (!/[\s"&|<>^()]/.test(value)) {
+    return value;
+  }
+  return `"${value.replace(/"/g, '""')}"`;
 }
 
 export function parseNpmViewVersion(output: string): string | null {

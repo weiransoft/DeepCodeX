@@ -212,6 +212,18 @@ export interface P5RunState {
   readonly status: P5RunStateStatus;
   /** 最近触发的护栏规则 ID（null=未触发，"G-A3a"=范围锁拦截等） */
   readonly lastGuardTriggered: string | null;
+  /**
+   * 终止真实原因（可选，2026-11-01 新增）
+   *
+   * 只在 status 进入终态（failed/aborted）时写入：如"确定性命中空转熔断"、
+   * "迭代次数用尽"、"连续失败 3 次"等。此前该原因只存在于进程日志与最终报告，
+   * RunState（status 查询 / 断点续跑 / 事后复盘读的就是它）完全看不到，
+   * 于是"为什么停"这件事在持久化层是缺失的。
+   *
+   * 兼容性：可选字段，且未写入时不参与 checksum 载荷（JSON.stringify 会丢弃
+   * undefined key），历史 run-state.jsonl 仍可正常校验。
+   */
+  readonly abortReason?: string;
   /** 本行内容的局部 SHA256（前缀 "sha256:"，用于校验本行完整性） */
   readonly localChecksum: string;
   /** 累积 SHA256（前一行 cumulativeChecksum + 本行 localChecksum 的 SHA256，前缀 "sha256:"） */
@@ -872,6 +884,8 @@ export class P5RunStateStore {
       stopWhen: state.stopWhen,
       status: state.status,
       lastGuardTriggered: state.lastGuardTriggered,
+      // 2026-11-01：终止原因纳入校验；undefined 时 key 被丢弃 → 老数据仍可校验
+      abortReason: state.abortReason,
     });
     const hash = crypto.createHash("sha256").update(coreContent, "utf8").digest("hex");
     return `${P5_CHECKSUM_PREFIX}${hash}`;

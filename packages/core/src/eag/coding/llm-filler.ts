@@ -185,6 +185,37 @@ function truncateSummary(text: string, maxLength: number = SUMMARY_MAX_LENGTH): 
   return text.slice(0, maxLength) + "...";
 }
 
+/**
+ * 归一化仓库相对路径（用于路径等价比较，不做真实文件系统解析）。
+ *
+ * 2026-11-01 新增：LLM 返回的路径常带 `./` 前缀、Windows 反斜杠或首尾空白，
+ * 字符串精确比较会误判"不是同一个文件"，旧实现随后直接取 files[0]，
+ * 把别的文件内容写进目标文件。归一化后先做等价比较，能救回绝大多数
+ * 无害差异，同时不放过真正的路径错误。
+ *
+ * @param p 原始路径
+ * @returns 统一为 `/` 分隔、去 `./` 与首尾 `/`、去空白的路径
+ */
+function normalizeRepoPath(p: string): string {
+  return p
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\/{2,}/g, "/")
+    .replace(/^\.\//, "")
+    .replace(/^\/+/, "");
+}
+
+/**
+ * 取路径最后一段（文件名）。用于"唯一候选且文件名相同"的保守采纳判定。
+ *
+ * @param p 已归一化的路径
+ * @returns 文件名部分
+ */
+function basenameOf(p: string): string {
+  const idx = p.lastIndexOf("/");
+  return idx >= 0 ? p.slice(idx + 1) : p;
+}
+
 // ============================================================================
 // LlmFiller 类
 // ============================================================================
@@ -521,7 +552,10 @@ export class LlmFiller {
       }
 
       // 从 files 数组中找到匹配当前占位文件路径的内容
-      const matchingFile = parsed.files.find((f) => f.path === placeholder.filePath);
+      // 2026-11-01 修复：先按「归一化路径」比对（处理 ./ 前缀、反斜杠、
+      // 首尾空白等无害差异），避免仅因写法不同就落到下面的兜底。
+      const targetPath = normalizeRepoPath(placeholder.filePath);
+      const matchingFile = parsed.files.find((f) => normalizeRepoPath(f.path) === targetPath);
       if (matchingFile) {
         return {
           success: true,
@@ -532,19 +566,31 @@ export class LlmFiller {
         };
       }
 
-      // 未找到匹配路径 → 取第一个 file 的 content 作为填充内容（容错处理）
-      if (parsed.files.length > 0) {
+      // 仅当响应里「只有一个文件」且其 basename 与目标一致时才接受。
+      // 旧实现无条件取 files[0]：LLM 顺手改了另一个文件（或把内容塞进
+      // 错误文件）时，错误内容会被当成目标文件的填充结果直接写盘——
+      // 编译能过、语义全错，且失败的真正原因被完全掩盖。
+      const singleFile = parsed.files.length === 1 ? parsed.files[0] : undefined;
+      if (singleFile && basenameOf(normalizeRepoPath(singleFile.path)) === basenameOf(targetPath)) {
+        this.logger?.(
+          `占位 ${placeholder.id}：响应路径「${singleFile.path}」与目标「${placeholder.filePath}」不一致，` +
+            `但唯一候选文件 basename 相同，按同一文件采纳`,
+          "warn"
+        );
         return {
           success: true,
-          filledContent: parsed.files[0].content,
+          filledContent: singleFile.content,
           callCount,
           tokensUsed,
           failureReason: null,
         };
       }
 
-      lastFailureReason = "响应 files 数组为空";
-      this.logger?.(`占位 ${placeholder.id} 第 ${attempt} 次响应 files 数组为空`, "warn");
+      // 路径不匹配 → 诚实失败并重试，绝不拿别的文件内容顶包
+      lastFailureReason =
+        `响应未包含目标文件 ${placeholder.filePath} 的内容` +
+        `（实际返回：${parsed.files.map((f) => f.path).join(", ")}）`;
+      this.logger?.(`占位 ${placeholder.id} 第 ${attempt} 次${lastFailureReason}`, "warn");
     }
 
     // 所有重试都失败

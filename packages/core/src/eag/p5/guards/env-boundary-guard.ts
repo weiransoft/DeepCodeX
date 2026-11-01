@@ -27,6 +27,7 @@
  * @module eag/p5/guards/env-boundary-guard
  */
 
+import * as os from "node:os";
 import * as path from "node:path";
 import type { GuardContext, GuardVerdict, GuardRule, GuardRuleId } from "./types";
 import { createPassVerdict, createDenyVerdict } from "./types";
@@ -69,6 +70,203 @@ const SYSTEM_SENSITIVE_PREFIXES: ReadonlyArray<string> = Object.freeze([
 ]);
 
 /**
+ * Windows 系统敏感目录前缀（2026-11-01 跨平台补齐）。
+ *
+ * 原实现只有 POSIX 前缀，而 G-A1a 的绝对路径 token 又只匹配 "/" 开头，
+ * 导致 Windows 上整条路径牢笼事实上失效：`cmd /c del C:\Windows\...`
+ * 既不命中正则，也不会进入前缀校验。这里补 Windows 侧的系统目录。
+ *
+ * SystemRoot 优先取真实环境（Windows 可能装在 D:\Windows），
+ * 取不到时回退 C:\Windows。
+ */
+function windowsSensitivePrefixes(): string[] {
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR || "C:\\Windows";
+  const programFiles = process.env.ProgramFiles || "C:\\Program Files";
+  const programFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+  const programData = process.env.ProgramData || "C:\\ProgramData";
+  const systemDrive = process.env.SystemDrive || "C:";
+  return [
+    systemRoot,
+    programFiles,
+    programFilesX86,
+    programData,
+    // 盘符根目录本身（C:\）不放进前缀列表：归一化后 "C:" 是 "C:\Windows"
+    // 的前缀，会把整个盘判成敏感目录。盘符根的精确匹配在
+    // findPathJailViolation 里单独处理。
+    `${systemDrive}\\Windows`,
+  ];
+}
+
+/**
+ * 路径比较归一化：统一分隔符、去尾部分隔符、Windows 下大小写折叠。
+ *
+ * Windows 文件系统（NTFS 默认）大小写不敏感，`c:\windows` 与 `C:\Windows`
+ * 是同一目录；不折叠会让前缀校验被大小写绕过。
+ */
+function normalizePathForCompare(value: string, platform: NodeJS.Platform): string {
+  const unified = platform === "win32" ? value.replace(/\//g, "\\") : value;
+  const trimmed = unified.length > 1 ? unified.replace(/[\\/]+$/, "") : unified;
+  return platform === "win32" ? trimmed.toLowerCase() : trimmed;
+}
+
+/**
+ * target 是否等于 root 或位于其子树内（跨平台安全）。
+ *
+ * 不用 `startsWith(root + "/")`：Windows 上 path.resolve 产出反斜杠，
+ * 拼 "/" 的旧写法永远匹配不到，前缀校验会静默放行。
+ */
+export function isSameOrUnderPath(target: string, root: string, platform: NodeJS.Platform = process.platform): boolean {
+  const normalizedTarget = normalizePathForCompare(target, platform);
+  const normalizedRoot = normalizePathForCompare(root, platform);
+  if (!normalizedRoot) {
+    return false;
+  }
+  if (normalizedTarget === normalizedRoot) {
+    return true;
+  }
+  const separator = platform === "win32" ? "\\" : "/";
+  return normalizedTarget.startsWith(`${normalizedRoot}${separator}`);
+}
+
+/**
+ * 按平台返回系统敏感目录前缀（POSIX 固定列表 + Windows 动态列表）。
+ */
+function sensitivePrefixesFor(platform: NodeJS.Platform): readonly string[] {
+  if (platform !== "win32") {
+    return SYSTEM_SENSITIVE_PREFIXES;
+  }
+  return [...SYSTEM_SENSITIVE_PREFIXES, ...windowsSensitivePrefixes()];
+}
+
+/**
+ * 按平台返回临时目录白名单（临时文件写入放行）。
+ *
+ * Windows 的临时目录是 %TEMP%（如 C:\Users\x\AppData\Local\Temp），
+ * 旧的写死 "/tmp" 判断在 Windows 上恒为 false。
+ */
+function tempRootsFor(platform: NodeJS.Platform): readonly string[] {
+  const roots = ["/tmp", "/var/tmp", os.tmpdir()];
+  if (platform === "win32") {
+    roots.push(process.env.TEMP ?? "", process.env.TMP ?? "");
+  }
+  return roots.filter((root) => typeof root === "string" && root.length > 0);
+}
+
+/**
+ * 解析命令中的候选绝对路径（按平台坐标系）。
+ *
+ * Windows 下有三种绝对路径写法需要归一：
+ * - 原生 `C:\x` / `C:/x`
+ * - Git Bash 的 `/c/x` 与 `/cygdrive/c/x`
+ * - UNC `\\server\share\x`
+ * 直接把 `/c/x` 交给 path.resolve 会得到 `C:\c\x`（多一层），必须显式转换。
+ */
+function resolveCandidatePath(candidate: string, platform: NodeJS.Platform): string {
+  if (platform !== "win32") {
+    return path.resolve(candidate);
+  }
+  const gitBashDrive = /^\/(?:cygdrive\/)?([A-Za-z])(?:\/|$)/.exec(candidate);
+  if (gitBashDrive) {
+    const drive = gitBashDrive[1].toUpperCase();
+    const rest = candidate.slice(gitBashDrive[0].length);
+    return path.win32.resolve(`${drive}:\\${rest.replace(/\//g, "\\")}`);
+  }
+  return path.win32.resolve(candidate);
+}
+
+/** POSIX 绝对路径 token（/ 开头）。 */
+const POSIX_ABSOLUTE_PATH_TOKEN = /(^|\s|["'])(\/[^\s"']+)/g;
+/** Windows 绝对路径 token（盘符或 UNC）。 */
+const WINDOWS_ABSOLUTE_PATH_TOKEN = /(^|[\s"'])([A-Za-z]:[\\/][^\s"']*|\\\\[^\s"']+)/g;
+
+/** 标准设备/无害伪文件（不参与牢笼校验）。 */
+const HARMLESS_DEVICE_PATHS: ReadonlySet<string> = new Set([
+  "/dev/null",
+  "/dev/stdin",
+  "/dev/stdout",
+  "/dev/stderr",
+  "/dev/tty",
+  "nul",
+  "con",
+]);
+
+export type PathJailViolation =
+  | Readonly<{ kind: "sensitive-directory"; resolvedPath: string; prefix: string }>
+  | Readonly<{ kind: "outside-project-root"; resolvedPath: string }>;
+
+/**
+ * 在命令文本中检索路径牢笼违规（纯函数，可注入平台便于单测）。
+ *
+ * 语义与旧 checkPathJail 一致：按出现顺序取第一个违规路径即返回；
+ * 位于 projectRoot / worktreePath 子树内、或位于临时目录的路径放行。
+ *
+ * @param command 待检查命令
+ * @param projectRoot 项目根目录
+ * @param worktreePath worktree 目录
+ * @param platform 目标平台（默认 process.platform，测试可注入 "win32"）
+ * @param options.tempRoots 覆盖临时目录白名单（默认按平台推导，测试可注入）
+ * @returns 首个违规，或 null（无违规）
+ */
+export function findPathJailViolation(
+  command: string,
+  projectRoot: string,
+  worktreePath: string,
+  platform: NodeJS.Platform = process.platform,
+  options: { tempRoots?: readonly string[] } = {}
+): PathJailViolation | null {
+  // 关键：path.resolve 用的是宿主平台语义。目标平台是 win32 时必须用
+  // path.win32.resolve，否则在 macOS 上跑测试（或跨平台校验）会把
+  // "D:\work\proj" 解析成宿主 cwd 下的相对路径，前缀比较全错。
+  const resolveNative = platform === "win32" ? path.win32.resolve : path.resolve;
+  const normalizedProjectRoot = resolveNative(projectRoot);
+  const normalizedWorktree = resolveNative(worktreePath);
+  const sensitivePrefixes = sensitivePrefixesFor(platform);
+  const tempRoots = options.tempRoots ?? tempRootsFor(platform);
+
+  const tokens: string[] = [];
+  for (const pattern of [POSIX_ABSOLUTE_PATH_TOKEN, WINDOWS_ABSOLUTE_PATH_TOKEN]) {
+    pattern.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(command)) !== null) {
+      if (match[2]) {
+        tokens.push(match[2]);
+      }
+    }
+  }
+
+  for (const candidatePath of tokens) {
+    if (HARMLESS_DEVICE_PATHS.has(candidatePath.toLowerCase())) {
+      continue;
+    }
+    // 单个字符的 "/" 之类噪声跳过（不是真实路径）
+    if (candidatePath.length < 2) {
+      continue;
+    }
+    const resolved = resolveCandidatePath(candidatePath, platform);
+    // 盘符根目录（C:\）精确匹配：等价于 POSIX 的 "/"，任何写入都是灾难
+    if (platform === "win32" && /^[A-Za-z]:\\?$/.test(resolved)) {
+      return { kind: "sensitive-directory", resolvedPath: resolved, prefix: `${resolved}\\` };
+    }
+    for (const prefix of sensitivePrefixes) {
+      if (isSameOrUnderPath(resolved, prefix, platform)) {
+        return { kind: "sensitive-directory", resolvedPath: resolved, prefix };
+      }
+    }
+    const inProject = isSameOrUnderPath(resolved, normalizedProjectRoot, platform);
+    const inWorktree = isSameOrUnderPath(resolved, normalizedWorktree, platform);
+    if (inProject || inWorktree) {
+      continue;
+    }
+    if (tempRoots.some((root) => isSameOrUnderPath(resolved, root, platform))) {
+      continue;
+    }
+    return { kind: "outside-project-root", resolvedPath: resolved };
+  }
+
+  return null;
+}
+
+/**
  * 路径牢笼违规模式正则列表
  *
  * 匹配 pendingCommand 中的越界路径写入模式。
@@ -92,8 +290,27 @@ const PATH_JAIL_VIOLATION_PATTERNS: ReadonlyArray<Readonly<{ pattern: RegExp; de
   },
   // .. 外溢尝试（连续 ../ 超过 2 层，疑似逃逸 projectRoot）
   { pattern: /(^|\s|["'])(\.\.\/){3,}/, description: "命令包含连续 3 层及以上 .. 外溢尝试" },
+  // Windows 风格的 ..\ 外溢（2026-11-01 跨平台补齐）
+  { pattern: /(^|\s|["'])(\.\.\\){3,}/, description: "命令包含连续 3 层及以上 ..\\ 外溢尝试" },
   // 块设备写入（/dev/sda /dev/nvme0n1 等）
   { pattern: /\/dev\/(sd[a-z]+|nvme\d+n\d+|disk\d+|loop\d+)/i, description: "命令引用块设备路径" },
+  // === Windows 专属（2026-11-01 跨平台补齐）===
+  // 用户目录环境变量快捷方式：%USERPROFILE% 等价于 POSIX 的 ~/$HOME
+  {
+    pattern: /%(USERPROFILE|HOMEDRIVE|HOMEPATH|APPDATA|LOCALAPPDATA)%/i,
+    description: "命令引用 Windows 用户目录环境变量",
+  },
+  // 系统目录环境变量：%SystemRoot% 等价于 /usr、/System
+  {
+    pattern: /%(SystemRoot|WINDIR|ProgramFiles|ProgramFiles\(x86\)|ProgramData|SystemDrive)%/i,
+    description: "命令引用 Windows 系统目录环境变量",
+  },
+  // 系统敏感目录绝对路径（盘符形式，含 UNC 共享下的 Windows 目录）
+  {
+    pattern:
+      /(^|\s|["'])([A-Za-z]:[\\/](Windows|Program Files|Program Files \(x86\)|ProgramData|System Volume Information))(\\|\/|\s|$)/i,
+    description: "命令引用 Windows 系统敏感目录绝对路径",
+  },
 ]);
 
 // ============================================================================
@@ -143,13 +360,36 @@ const PROTECTED_ENV_VARS: ReadonlyArray<string> = Object.freeze([
   "REQUESTS_CA_BUNDLE",
   "CURL_CA_BUNDLE",
   "NODE_EXTRA_CA_CERTS",
+  // === Windows 专属受保护变量（2026-11-01 跨平台补齐）===
+  // 语义等价：USERPROFILE/HOMEDRIVE/HOMEPATH ≈ HOME，SystemRoot ≈ /usr，
+  // PATHEXT/COMSPEC 决定可执行文件解析，被改写即可劫持工具调用。
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "SYSTEMROOT",
+  "WINDIR",
+  "SYSTEMDRIVE",
+  "COMSPEC",
+  "PATHEXT",
+  "PROGRAMFILES",
+  "PROGRAMDATA",
 ]);
+
+/**
+ * 受保护变量名的大写索引（2026-11-01 跨平台补齐）。
+ *
+ * Windows 环境变量名大小写不敏感，比对前统一折成大写；
+ * POSIX 下折大小写只会更严格，不会放行任何原本被拦的写法。
+ */
+const PROTECTED_ENV_VAR_SET: ReadonlySet<string> = new Set(PROTECTED_ENV_VARS.map((name) => name.toUpperCase()));
 
 /**
  * 环境变量写操作模式正则列表
  *
- * 匹配 pendingCommand 中的环境变量写操作。
- * 支持 export / unset / set / env -u / declare -x 等多种 shell 写法。
+ * 匹配 pendingCommand 中的环境变量写操作：
+ * export / unset / set / setx / env -u / declare -x / PowerShell $env:VAR= 。
  */
 const ENV_WRITE_PATTERNS: ReadonlyArray<Readonly<{ pattern: RegExp; description: string }>> = Object.freeze([
   // export VAR=value 或 export VAR（含空格与引号）
@@ -164,11 +404,24 @@ const ENV_WRITE_PATTERNS: ReadonlyArray<Readonly<{ pattern: RegExp; description:
   { pattern: /\bdeclare\s+-x\s+([A-Z_][A-Z0-9_]*)\s*=/i, description: "declare -x 设置环境变量" },
   // VAR=value 直接赋值（行首或分号后，如 HOME=/tmp）
   { pattern: /(^|;|\s|&&|\|\|)([A-Z_][A-Z0-9_]*)\s*=\s*[^\s]/, description: "直接赋值环境变量" },
+  // PowerShell 写法 $env:VAR = value / $env:VAR="value"（2026-11-01 跨平台补齐）
+  { pattern: /\$env:([A-Za-z_][A-Za-z0-9_]*)\s*=/i, description: "PowerShell $env: 写入环境变量" },
+  // cmd.exe 写法 set VAR=value / setx VAR value（大小写不限）
+  { pattern: /\b(?:setx?)\s+([A-Za-z_][A-Za-z0-9_]*)\s*[=\s]/i, description: "cmd set/setx 设置环境变量" },
 ]);
 
 // ============================================================================
 // 3. G-A1c 生产凭据不可达常量与正则
 // ============================================================================
+
+/**
+ * 环境变量扫描值的长度上限（字符）
+ *
+ * 2026-11-01 引入：checkProdCredential 回退到 process.env 后，可能遇到超长值
+ * （证书链、序列化 token 等）。凭据模式命中的都是短串，截断后仍可检出，
+ * 同时避免正则在大文本上回溯爆炸拖慢每个阶段的护栏判定。
+ */
+const MAX_ENV_VALUE_SCAN_CHARS = 8192 as const;
 
 /**
  * 生产凭据检测模式正则列表
@@ -281,6 +534,49 @@ const PROD_ENV_NAME_KEYWORDS: ReadonlyArray<string> = Object.freeze([
   "RELEASE",
 ]);
 
+/**
+ * 「凭据类」变量名 token 白名单（2026-11-01 修复误报）。
+ *
+ * G-A1c 的变量名判定必须同时命中「生产标识 token」+「凭据类 token」：
+ * 只按子串匹配 PROD 会把 `WORKBUDDY_PRODUCT_NAME`（含 PRODUCT）、
+ * `ACC_PRODUCT_CONFIG_PATH` 判成生产凭据——生产链路回退到 process.env 后，
+ * 这类误报会直接 DENY 掉每一次 autonomous 运行（守卫从恒绿翻转成恒红）。
+ * 收紧为 token 判定 + 双重条件后，`STAGING_APP_PATH`（无凭据 token）也不再误伤。
+ */
+const CREDENTIAL_NAME_TOKENS: ReadonlyArray<string> = Object.freeze([
+  "KEY",
+  "KEYS",
+  "TOKEN",
+  "SECRET",
+  "SECRETS",
+  "PASSWORD",
+  "PASSWD",
+  "PWD",
+  "CREDENTIAL",
+  "CREDENTIALS",
+  "AUTH",
+  "DSN",
+  "URL",
+  "URI",
+  "CONN",
+  "CONNECTION",
+  "CERT",
+  "PRIVATE",
+]);
+
+/**
+ * 把环境变量名切成大写 token（`_`、`-`、`.` 等非字母数字字符作分隔）。
+ *
+ * @param varName 环境变量名
+ * @returns 大写 token 列表
+ */
+function envNameTokens(varName: string): ReadonlyArray<string> {
+  return varName
+    .toUpperCase()
+    .split(/[^A-Z0-9]+/)
+    .filter((token) => token.length > 0);
+}
+
 // ============================================================================
 // 4. EnvBoundaryGuard 类（A-1 层，3 条 BLOCKER）
 // ============================================================================
@@ -377,6 +673,16 @@ export class EnvBoundaryGuard implements GuardRule {
       return createPassVerdict();
     }
 
+    // 2026-11-01 E2E 修正：user-configured = 用户显式配置的测试命令
+    // （verify 阶段的 --test-command / settings.testCommand）。
+    // G-A1a/A1b/A3b 约束的是"模型自主想干什么"，把它们套到用户授权命令上，
+    // 会让 `export HOME=... && npm test` 这类常见写法被恒拒 —— verify 永远
+    // DENY，任务永远收不了尾（比原先"守卫空转"更糟）。
+    // 危险命令黑名单（G-A2a/A2b/A2d）不受影响，仍然照拦。
+    if (context.commandAuthority === "user-configured") {
+      return createPassVerdict();
+    }
+
     // 1. 正则匹配违规路径模式（$HOME / ~ / 系统目录 / 块设备 / .. 外溢）
     for (const { pattern, description } of PATH_JAIL_VIOLATION_PATTERNS) {
       const match = cmd.match(pattern);
@@ -391,52 +697,26 @@ export class EnvBoundaryGuard implements GuardRule {
     }
 
     // 2. 解析命令中的绝对路径，前缀校验是否在 projectRoot 内
-    const projectRoot = path.resolve(context.projectRoot);
-    const worktreePath = path.resolve(context.worktreePath);
-    // 提取命令中的绝对路径（/ 开头的 token，去除引号）
-    const absolutePathPattern = /(^|\s|["'])(\/[^\s"']+)/g;
-    let pathMatch: RegExpExecArray | null;
-    while ((pathMatch = absolutePathPattern.exec(cmd)) !== null) {
-      const candidatePath = pathMatch[2];
-      // 跳过 /dev/null / /dev/stdin 等标准设备（无害）
-      if (
-        candidatePath === "/dev/null" ||
-        candidatePath === "/dev/stdin" ||
-        candidatePath === "/dev/stdout" ||
-        candidatePath === "/dev/stderr"
-      ) {
-        continue;
-      }
-      const resolved = path.resolve(candidatePath);
-      // 检查是否在系统敏感目录前缀内
-      for (const prefix of SYSTEM_SENSITIVE_PREFIXES) {
-        if (resolved === prefix || resolved.startsWith(prefix + "/")) {
-          return createDenyVerdict(
-            "G-A1a",
-            "BLOCKER",
-            `路径牢笼违规：写入系统敏感目录 ${resolved}（前缀 ${prefix}）`,
-            "中止迭代，禁止写入系统目录"
-          );
-        }
-      }
-      // 检查是否在 projectRoot 或 worktreePath 子树内
-      const inProject = resolved === projectRoot || resolved.startsWith(projectRoot + path.sep);
-      const inWorktree = resolved === worktreePath || resolved.startsWith(worktreePath + path.sep);
-      if (!inProject && !inWorktree) {
-        // 检查是否在 /tmp（允许临时文件写入，但需监控）
-        if (resolved.startsWith("/tmp/") || resolved === "/tmp") {
-          continue; // /tmp 允许写入（临时文件）
-        }
-        return createDenyVerdict(
-          "G-A1a",
-          "BLOCKER",
-          `路径牢笼违规：绝对路径 ${resolved} 不在 projectRoot(${projectRoot}) 或 worktreePath(${worktreePath}) 子树内`,
-          "中止迭代，建议转人工确认路径白名单"
-        );
-      }
+    const violation = findPathJailViolation(cmd, context.projectRoot, context.worktreePath);
+    if (!violation) {
+      return createPassVerdict();
     }
-
-    return createPassVerdict();
+    if (violation.kind === "sensitive-directory") {
+      return createDenyVerdict(
+        "G-A1a",
+        "BLOCKER",
+        `路径牢笼违规：写入系统敏感目录 ${violation.resolvedPath}（前缀 ${violation.prefix}）`,
+        "中止迭代，禁止写入系统目录"
+      );
+    }
+    return createDenyVerdict(
+      "G-A1a",
+      "BLOCKER",
+      `路径牢笼违规：绝对路径 ${violation.resolvedPath} 不在 projectRoot(${path.resolve(
+        context.projectRoot
+      )}) 或 worktreePath(${path.resolve(context.worktreePath)}) 子树内`,
+      "中止迭代，建议转人工确认路径白名单"
+    );
   }
 
   // ===========================================================================
@@ -458,6 +738,14 @@ export class EnvBoundaryGuard implements GuardRule {
       return createPassVerdict();
     }
 
+    // 2026-11-01 E2E 修正：用户配置的测试命令豁免环境变量写保护。
+    // 理由同 checkPathJail —— `export HOME=/tmp && npm test` 是测试命令的
+    // 常见前置写法（隔离 HOME 避免污染），这属于用户授权行为。若不豁免，
+    // verify 注入 pendingCommand 后会被 G-A1b 恒拒，任务永远无法完成。
+    if (context.commandAuthority === "user-configured") {
+      return createPassVerdict();
+    }
+
     // 遍历环境变量写模式正则
     for (const { pattern, description } of ENV_WRITE_PATTERNS) {
       // 使用全局正则提取所有匹配的环境变量名
@@ -469,8 +757,11 @@ export class EnvBoundaryGuard implements GuardRule {
         if (!varName) {
           continue;
         }
-        // 校验变量名是否在受保护列表内（大小写敏感）
-        if (PROTECTED_ENV_VARS.includes(varName)) {
+        // 校验变量名是否在受保护列表内。
+        // 2026-11-01 跨平台修正：Windows 环境变量名大小写不敏感
+        // （`set Path=...` 与 `set PATH=...` 等价），按大写归一后比对，
+        // 否则 Windows 上改写 Path 可绕过保护。
+        if (PROTECTED_ENV_VAR_SET.has(varName.toUpperCase())) {
           return createDenyVerdict(
             "G-A1b",
             "BLOCKER",
@@ -509,8 +800,13 @@ export class EnvBoundaryGuard implements GuardRule {
    * @returns 判定结果
    */
   private checkProdCredential(context: Readonly<GuardContext>): Readonly<GuardVerdict> {
-    // 取环境变量快照（缺省时不检查，由调用方决定是否提供）
-    const envSnapshot = context.envSnapshot;
+    // 取环境变量快照（2026-11-01 修复：缺省时回退到 process.env）
+    //
+    // 旧实现"没有快照就直接 PASS"，而生产链路（handlers.buildGuardContext）从未
+    // 提供 envSnapshot——G-A1c 生产凭据不可达在真实运行中 100% 恒绿，等于没有
+    // 这道 BLOCKER。此处回退到进程环境变量，让守卫按设计生效；
+    // 测试/调用方显式传入快照时仍以传入值为准（可精确构造断言场景）。
+    const envSnapshot: Readonly<Record<string, string | undefined>> = context.envSnapshot ?? process.env;
     if (!envSnapshot) {
       return createPassVerdict();
     }
@@ -521,8 +817,12 @@ export class EnvBoundaryGuard implements GuardRule {
       if (!varValue || typeof varValue !== "string") {
         continue;
       }
+      // 单值长度上限：极端长值（如整份证书/证书链）不参与正则匹配，
+      // 避免回溯爆炸；凭据模式命中的都是短串，截断不影响检出。
+      const scannedValue =
+        varValue.length > MAX_ENV_VALUE_SCAN_CHARS ? varValue.slice(0, MAX_ENV_VALUE_SCAN_CHARS) : varValue;
       for (const { pattern, name, description } of PROD_CREDENTIAL_PATTERNS) {
-        const match = varValue.match(pattern);
+        const match = scannedValue.match(pattern);
         if (match) {
           return createDenyVerdict(
             "G-A1c",
@@ -535,22 +835,30 @@ export class EnvBoundaryGuard implements GuardRule {
     }
 
     // 2. 检查环境变量名是否含生产标识关键词
+    //    2026-11-01 修复：子串匹配 → token 匹配 + 凭据类 token 双重条件。
+    //    旧实现对 "PROD" 做 includes，`PRODUCT` 里的 "PROD" 也会命中，
+    //    再把任意长度≥8 的值当凭据 DENY；配合 process.env 回退即变成
+    //    "装了任何带 PRODUCT 变量的机器都跑不了 autonomous"。
     for (const varName of Object.keys(envSnapshot)) {
-      const upperName = varName.toUpperCase();
-      for (const keyword of PROD_ENV_NAME_KEYWORDS) {
-        if (upperName.includes(keyword)) {
-          // 生产标识变量且值非空，进一步检查值是否为连接串或凭据
-          const value = envSnapshot[varName];
-          if (value && typeof value === "string" && value.length >= 8) {
-            // 值长度 >= 8 且包含生产标识，疑似生产凭据
-            return createDenyVerdict(
-              "G-A1c",
-              "BLOCKER",
-              `生产凭据不可达违规：环境变量名含生产标识关键词 ${keyword}（变量：${varName}=${value.substring(0, 4)}****）`,
-              "fail-closed 拒绝启动 autonomous 模式，建议确认生产凭据来源"
-            );
-          }
-        }
+      const tokens = envNameTokens(varName);
+      const prodToken = tokens.find((token) => PROD_ENV_NAME_KEYWORDS.includes(token));
+      if (!prodToken) {
+        continue;
+      }
+      // 必须同时是凭据类变量（KEY/TOKEN/PASSWORD/URL/DSN/...），否则不判为凭据
+      const isCredentialName = tokens.some((token) => CREDENTIAL_NAME_TOKENS.includes(token));
+      if (!isCredentialName) {
+        continue;
+      }
+      const value = envSnapshot[varName];
+      if (value && typeof value === "string" && value.length >= 8) {
+        // 值长度 >= 8 且命名含生产标识 + 凭据类 token，判为疑似生产凭据
+        return createDenyVerdict(
+          "G-A1c",
+          "BLOCKER",
+          `生产凭据不可达违规：环境变量名含生产标识关键词 ${prodToken}（变量：${varName}=${value.substring(0, 4)}****）`,
+          "fail-closed 拒绝启动 autonomous 模式，建议确认生产凭据来源"
+        );
       }
     }
 

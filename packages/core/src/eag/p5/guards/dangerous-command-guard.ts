@@ -296,6 +296,80 @@ const DANGEROUS_COMMAND_PATTERNS: ReadonlyArray<
     name: "ruby-one-liner",
     description: "ruby -e 执行任意 Ruby 代码",
   },
+  // === Windows 危险操作（2026-11-01 跨平台补齐）===
+  // 背景：原黑名单 100% 覆盖 Unix，Windows 上 `format C:` / `rd /s /q` /
+  // `Remove-Item -Recurse -Force` 全部漏网。Git Bash 作为默认 shell，
+  // 这些命令经 cmd.exe / powershell.exe 仍可执行，必须一并永禁。
+  {
+    pattern: /\bformat\s+[A-Za-z]:(\s|$|\/)/i,
+    name: "windows-format-drive",
+    description: "format 格式化 Windows 磁盘卷（数据全毁）",
+  },
+  {
+    pattern: /\b(rd|rmdir)\s+(\/[a-z]\s*)*\/s\b/i,
+    name: "windows-rd-recursive",
+    description: "rd /s 递归删除目录（等价 rm -rf）",
+  },
+  {
+    // 只拦递归形态（del /s）。`del /f 单个文件` 是常规清理动作，
+    // 与 Unix 侧只禁 `rm -rf` 而不禁 `rm -f` 的粒度保持一致。
+    pattern: /\bdel\s+(\/[a-z]\s*)*\/s\b/i,
+    name: "windows-del-force-recursive",
+    description: "del /s 递归删除（等价 rm -rf）",
+  },
+  {
+    pattern: /\bdel\s+(\/[a-z]\s*)*[A-Za-z]:[\\/]?\*/i,
+    name: "windows-del-drive-root-glob",
+    description: "del 删除盘符根目录全部文件",
+  },
+  {
+    // 注意：`-Recurse` 前不能写 \b —— 空格与 "-" 都是非单词字符，\b 不成立
+    pattern: /\bremove-item\b[^\n]*-recurse\b[^\n]*-force\b/i,
+    name: "windows-remove-item-recursive",
+    description: "PowerShell Remove-Item -Recurse -Force（等价 rm -rf）",
+  },
+  {
+    pattern: /\btaskkill\b[^\n]*\/im\s+(explorer|winlogon|csrss|lsass|svchost|wininit|services)(\.exe)?\b/i,
+    name: "windows-taskkill-critical",
+    description: "taskkill 终止关键系统进程（等价 pkill 系统进程）",
+  },
+  {
+    pattern: /\bdiskpart\b/i,
+    name: "windows-diskpart",
+    description: "diskpart 磁盘分区工具（可清空磁盘）",
+  },
+  {
+    pattern: /\bvssadmin\s+delete\s+shadows/i,
+    name: "windows-delete-shadow-copies",
+    description: "vssadmin delete shadows 删除卷影副本（阻断系统还原/勒索前置动作）",
+  },
+  {
+    pattern: /\bbcdedit\b/i,
+    name: "windows-bcdedit",
+    description: "bcdedit 修改启动配置（可致系统无法启动）",
+  },
+  {
+    pattern: /\bcipher\s+\/w/i,
+    name: "windows-cipher-wipe",
+    description: "cipher /w 擦除磁盘剩余空间（不可恢复）",
+  },
+  {
+    pattern: /\breg\s+delete\s+hk(lm|cr|ey_local_machine)\b/i,
+    name: "windows-reg-delete-hive",
+    description: "reg delete 删除注册表根键（系统级破坏）",
+  },
+  {
+    pattern: /\bicacls\b[^\n]*(\/grant\b[^\n]*(everyone|users))|(\/reset\b[^\n]*\/t\b)/i,
+    name: "windows-icacls-widen",
+    description: "icacls 放开全盘权限（等价 chmod -R 777）",
+  },
+  {
+    // `-EncodedCommand` 前不写 \s：`\s+` 已吃掉 powershell 后的空格，
+    // 再加 \s- 会因回溯失败而漏判（实测："powershell -EncodedCommand xxx" 不命中）
+    pattern: /\b(powershell|pwsh)(\.exe)?\s+[^\n]*-(e|ec|enc|encodedcommand)\b/i,
+    name: "windows-powershell-encoded",
+    description: "PowerShell -EncodedCommand 执行 Base64 载荷（常见绕过手段）",
+  },
 ]);
 
 // ============================================================================
@@ -334,6 +408,16 @@ const DELETE_COMMAND_PATTERNS: ReadonlyArray<
   { pattern: /\bgit\s+rm\s+(-[a-zA-Z]*\s+)*[\w./~-]+/, description: "git rm 删除版本控制文件" },
   // trash 命令（macOS）
   { pattern: /\btrash\s+[\w./~-]+/, description: "trash 移到废纸篓" },
+  // === Windows 删除命令（2026-11-01 跨平台补齐）===
+  // 不带这些模式时，Windows 上的删除动作（del / rd / Remove-Item）完全绕过
+  // G-A2b 分级：既不比对任务卡 declaredDeletions，也不做批量阈值确认。
+  { pattern: /\bdel\s+(\/[a-z]\s*)*[^\s;&|]+/i, description: "del 删除文件" },
+  { pattern: /\berase\s+(\/[a-z]\s*)*[^\s;&|]+/i, description: "erase 删除文件" },
+  { pattern: /\b(rd|rmdir)\s+(\/[a-z]\s*)*[^\s;&|]+/i, description: "rd/rmdir 删除目录" },
+  {
+    pattern: /\bremove-item\b[^\n]*(\s-force\b|\s-recurse\b|[^\s;&|]+)/i,
+    description: "PowerShell Remove-Item 删除文件或目录",
+  },
 ]);
 
 /**
@@ -804,6 +888,14 @@ export class DangerousCommandGuard implements GuardRule {
   private checkAllowlist(context: Readonly<GuardContext>): Readonly<GuardVerdict> {
     const cmd = context.pendingCommand;
     if (!cmd) {
+      return createPassVerdict();
+    }
+
+    // 2026-11-01：用户显式配置的命令（verify 阶段的 testCommand 等）不受
+    // AUTO 白名单约束——白名单是"模型自主选命令"场景的收敛手段，用户配置
+    // 的命令已由 smartConfirmation 做过三态决策。黑名单（G-A2a/A2b）与
+    // 环境/路径边界（G-A1a/A1b）在此前已完成判定，安全性不降级。
+    if (context.commandAuthority === "user-configured") {
       return createPassVerdict();
     }
 

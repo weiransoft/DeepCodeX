@@ -239,6 +239,18 @@ export interface GuardContext {
   readonly currentTaskCard?: Readonly<TaskCard>;
   /** 当前命令（dev/verify 阶段即将执行的命令） */
   readonly pendingCommand?: string;
+  /**
+   * pendingCommand 的来源（2026-11-01 新增，G-A2c 白名单收敛的适用范围判别）。
+   *
+   * - "agent"（缺省）：命令由模型在工具循环中自行选择 → 必须过 AUTO_ALLOWLIST，
+   *   不在白名单内一律 ASK 转人工（G-A2c 的原始语义）。
+   * - "user-configured"：命令来自用户显式配置（如 AutonomousRunRequest.testCommand），
+   *   已由 smartConfirmation 做过命令级三态决策，不再受 AUTO 白名单约束——
+   *   否则任何非 npm/pytest 惯例的测试命令（如项目自定义 runner）都会让
+   *   verify 阶段恒 ASK，运行永远收不了尾。
+   *   注意：黑名单（G-A2a/G-A2b）与环境/路径边界（G-A1a/G-A1b）仍然生效。
+   */
+  readonly commandAuthority?: "agent" | "user-configured";
   /** 当前变更 diff（dev 阶段产生的代码变更） */
   readonly currentDiff?: Readonly<ChangeDiff>;
   /** 完成声明证据（verify 阶段产出） */

@@ -285,10 +285,43 @@ export class MonitoringReadinessCheckerImpl implements MonitoringReadinessChecke
   private async checkServiceMonitorExists(namespace: string): Promise<MonitoringCheckedItem> {
     // 启动 kubectl get servicemonitor 子进程（不使用 shell:true，避免命令注入）
     return new Promise<MonitoringCheckedItem>((resolve) => {
+      // 2026-11-01 修复（kubectl 挂死）：kubectlTimeoutMs 此前只是构造参数，
+      // spawn 未设置任何超时——集群不可达 / kubeconfig 指向失联 apiserver 时
+      // 子进程可能永久挂住，check() 的 Promise 永不 settle，整个部署就绪检查
+      // 静默卡死（外部表现为"任务卡在某一步不结束"）。
+      // 现在用真实定时器到点 SIGKILL 并按"检查失败"返回，让调用方拿到结论。
+      let settled = false;
+
       const child = spawn("kubectl", ["get", "servicemonitor", "-n", namespace], {
         stdio: ["pipe", "pipe", "pipe"],
         env: process.env,
       });
+
+      // 超时回调自行 settle（不复用 finish），避免 timer 与 finish 相互引用
+      const timer = setTimeout(() => {
+        // SIGKILL：kubectl 在等待 apiserver 时对 SIGTERM 可能无响应
+        child.kill("SIGKILL");
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolve(
+          Object.freeze({
+            name: CHECK_ITEM_SERVICE_MONITOR,
+            passed: false,
+            detail: `kubectl 超时（>${this.kubectlTimeoutMs}ms）未返回，已强制终止——请检查集群连通性与 kubeconfig`,
+          }) as MonitoringCheckedItem
+        );
+      }, this.kubectlTimeoutMs);
+
+      const finish = (item: MonitoringCheckedItem): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve(item);
+      };
 
       // 收集 stderr 输出（用于错误诊断）
       let stderrData = "";
@@ -300,7 +333,7 @@ export class MonitoringReadinessCheckerImpl implements MonitoringReadinessChecke
       child.on("close", (code: number | null) => {
         if (code === 0) {
           // 通过：命名空间内存在 ServiceMonitor
-          resolve(
+          finish(
             Object.freeze({
               name: CHECK_ITEM_SERVICE_MONITOR,
               passed: true,
@@ -310,7 +343,7 @@ export class MonitoringReadinessCheckerImpl implements MonitoringReadinessChecke
         } else {
           // 失败：ServiceMonitor 不存在（kubectl 退出码非 0）
           const detail = stderrData.trim() || `kubectl 退出码 ${code}`;
-          resolve(
+          finish(
             Object.freeze({
               name: CHECK_ITEM_SERVICE_MONITOR,
               passed: false,
@@ -322,7 +355,7 @@ export class MonitoringReadinessCheckerImpl implements MonitoringReadinessChecke
 
       // 子进程启动失败（如 kubectl 命令不存在）：返回失败
       child.on("error", (err: Error) => {
-        resolve(
+        finish(
           Object.freeze({
             name: CHECK_ITEM_SERVICE_MONITOR,
             passed: false,

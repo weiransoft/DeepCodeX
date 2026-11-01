@@ -426,7 +426,8 @@ export class VerifyStageHandler extends BaseStageHandler {
    * @returns 失败用例行数组（最多 10 条，避免输出过长）
    */
   private extractFailures(output: string): string[] {
-    const lines = output.split("\n");
+    // \r?\n：Windows 上子进程输出可能带 CRLF，残留的 \r 会污染行内容
+    const lines = output.split(/\r?\n/);
     return lines.filter((l) => l.includes("FAIL") || l.includes("失败")).slice(0, 10);
   }
 }

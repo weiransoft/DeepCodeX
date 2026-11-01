@@ -459,7 +459,10 @@ export class ScopeLockGuard implements GuardRule {
     const taskTitle = context.currentTaskCard?.title ?? "";
 
     // 检查命令中的清理类关键词（不区分大小写）
-    const cmdLower = cmd.toLowerCase();
+    // 2026-11-01 E2E 修正：用户配置的测试命令不参与命令关键词判定
+    // （如 `npm run clean && npm test` 会命中 clean 而恒转人工，无人值守
+    // 模式下等于卡死）。任务卡标题检查保留——它与命令来源无关。
+    const cmdLower = context.commandAuthority === "user-configured" ? "" : cmd.toLowerCase();
     for (const keyword of CLEANUP_INTENT_KEYWORDS) {
       // 词边界匹配，避免误报（如 "resetButton" 不应匹配 "reset"）
       const keywordPattern = new RegExp(`\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");

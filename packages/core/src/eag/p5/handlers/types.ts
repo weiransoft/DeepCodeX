@@ -25,6 +25,8 @@
  * @module eag/p5/handlers/types
  */
 
+import { existsSync } from "node:fs";
+
 import type { BlockerGuardChain } from "../guards/blocker-guard-chain";
 import type { GuardContext, GuardRecord, GuardVerdict, GuardChainResult } from "../guards/types";
 import type { P5SmartConfirmation } from "../smart-confirmation";
@@ -180,6 +182,17 @@ export interface P5StageContext {
    * 可选字段：既有 fixtures 不传时与旧行为一致。
    */
   readonly signal?: AbortSignal;
+  /**
+   * 用户是否已确认进入无人值守模式（2026-11-01 新增，G-A6a 真实信号源）。
+   *
+   * 背景：buildGuardContext 曾把 confirmationCardAccepted 恒写为 true，
+   * 使 G-A6a《无人值守确认卡》前置在真实链路中永远不可能 DENY（守卫恒绿）。
+   * 现在由编排器按 AutonomousRunRequest.confirmUnattended 投影：
+   * - true / undefined：视为已确认（无人值守运行只能由用户显式命令发起，
+   *   调用方未反对即视为确认，保持既有调用点行为不变）；
+   * - false：显式否认 → 首次迭代 G-A6a 真实 DENY 并中止迭代。
+   */
+  readonly unattendedConfirmed?: boolean;
   /**
    * 跨 run 失败反馈（2026-10-09 F-C，docs/dev/eag-p5-llm-dynamic-planning.md）。
    *
@@ -361,8 +374,16 @@ export function buildGuardContext(
     loopType: ctx.loopType,
     projectRoot: ctx.projectRoot,
     worktreePath: ctx.worktreePath,
-    confirmationCardAccepted: true,
-    emergencyStopRequested: false,
+    // 2026-11-01 修复（守卫恒绿）：此前恒为 true，G-A6a《无人值守确认卡》前置
+    // 在生产链路永远不可能 DENY——"确认卡"实际从未被校验。
+    // 现在由 ctx.unattendedConfirmed 承载：编排器按 AutonomousRunRequest.confirmUnattended
+    // 投影（缺省视为已确认，因为无人值守运行只能由用户显式命令/按钮发起）；
+    // 调用方显式传 false 时 G-A6a 会在首次迭代真实 DENY。
+    confirmationCardAccepted: ctx.unattendedConfirmed !== false,
+    // 2026-11-01 修复（守卫恒绿）：此前恒为 false，G-A6b 一键熔断永远不触发。
+    // 现在接真实中断信号（进程内 AbortSignal）与磁盘 abort 标志文件——
+    // 用户点停止后，下一次阶段护栏就会真实熔断，而不是继续跑完剩余阶段。
+    emergencyStopRequested: ctx.signal?.aborted === true || abortFlagExists(ctx.abortFlagPath),
     loopGuardConfig: Object.freeze({
       maxIterations: ctx.runState.maxIterations,
       maxTokens: ctx.runState.maxTokens,
@@ -370,6 +391,27 @@ export function buildGuardContext(
     }),
     ...overrides,
   });
+}
+
+/**
+ * 检查 abort 标志文件是否存在（G-A6b 熔断的真实信号源之一）。
+ *
+ * 跨进程停止通道（/eag-autonomous-stop 写入标志文件）此前只被 dev/fix 执行器
+ * 轮询，护栏链完全看不到；此处纳入，使"停止"在阶段边界即可生效。
+ *
+ * @param abortFlagPath 标志文件绝对路径（未提供时视为不存在）
+ * @returns 标志文件是否存在
+ */
+function abortFlagExists(abortFlagPath: string | undefined): boolean {
+  if (!abortFlagPath) {
+    return false;
+  }
+  try {
+    return existsSync(abortFlagPath);
+  } catch {
+    // 权限等异常按"未请求停止"处理，避免护栏误熔断整轮运行
+    return false;
+  }
 }
 
 /**

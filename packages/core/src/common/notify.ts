@@ -1,4 +1,5 @@
 import { spawn, type SpawnOptions } from "child_process";
+import { findGitBashPath } from "./shell-utils";
 
 type NotifyChildProcess = {
   once(event: "error", listener: (error: NodeJS.ErrnoException) => void): NotifyChildProcess;
@@ -10,6 +11,39 @@ export type NotifySpawn = (
   args: string[],
   options: Pick<SpawnOptions, "cwd" | "detached" | "env" | "stdio">
 ) => NotifyChildProcess;
+
+/**
+ * 按平台解析通知脚本的启动方式。
+ *
+ * 2026-11-01 跨平台补齐：Windows 的 CreateProcess 不认 shebang，
+ * 直接 spawn 一个 .sh 通知脚本必然 ENOEXEC/EINVAL，而原实现的
+ * /bin/sh 回退又被 `process.platform === "win32"` 提前 return 掉，
+ * 结果是"配了通知脚本但 Windows 上静默不执行"。
+ * 这里对 .sh/.bash 显式改走 Git Bash（Windows 上 bash 工具本就依赖它）。
+ *
+ * @param scriptPath 用户配置的通知脚本路径
+ * @param platform 目标平台（默认 process.platform，测试可注入）
+ * @param findBash Git Bash 定位函数（默认 findGitBashPath，测试可注入）
+ * @returns 实际启动的 command 与 args
+ */
+export function resolveNotifySpawnPlan(
+  scriptPath: string,
+  platform: NodeJS.Platform = process.platform,
+  findBash: () => string = findGitBashPath
+): { command: string; args: string[] } {
+  if (platform !== "win32") {
+    return { command: scriptPath, args: [] };
+  }
+  if (!/\.(sh|bash)$/i.test(scriptPath)) {
+    return { command: scriptPath, args: [] };
+  }
+  try {
+    return { command: findBash(), args: [scriptPath] };
+  } catch {
+    // 未安装 Git Bash：退回直接 spawn，由 error 事件静默吞掉（与原行为一致）
+    return { command: scriptPath, args: [] };
+  }
+}
 
 export function formatDurationSeconds(durationMs: number): string {
   const safeMs = Number.isFinite(durationMs) ? Math.max(0, durationMs) : 0;
@@ -73,7 +107,8 @@ export function launchNotifyScript(
   };
 
   try {
-    const child = spawnProcess(commandPath, [], options);
+    const spawnPlan = resolveNotifySpawnPlan(commandPath);
+    const child = spawnProcess(spawnPlan.command, spawnPlan.args, options);
     child.once("error", (error) => {
       if (process.platform === "win32") {
         return;

@@ -477,6 +477,14 @@ export class P5VerifyStageHandler implements P5StageHandler {
       const guardContext = buildGuardContext(ctx, {
         currentTaskCard: taskCard ?? undefined,
         completionEvidence: evidence,
+        // 2026-11-01 修复（守卫恒绿）：verify 是唯一"命令在阶段内确定"的阶段，
+        // 此前从未注入 pendingCommand → G-A1a 路径牢笼 / G-A1b 环境变量写保护 /
+        // G-A3b 清理意图三条 BLOCKER 在本阶段全部空转。
+        // 注入后形如 `export HOME=/tmp npm test` 的测试命令会被真实拦截。
+        pendingCommand: testCommand,
+        // 但 testCommand 是用户配置的命令，不应被 AUTO 白名单（G-A2c）拦下——
+        // 否则项目自定义 runner 会让 verify 恒 ASK、运行永远收不了尾。
+        commandAuthority: "user-configured",
       });
 
       const chainResult = await ctx.guardChain.execute(guardContext);

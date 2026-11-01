@@ -184,7 +184,8 @@ export class GitDiffAnalyzer {
    */
   private parseNumstatOutput(output: string): Map<string, DiffStat> {
     const map: Map<string, DiffStat> = new Map<string, DiffStat>();
-    const lines: string[] = output.split("\n").filter((line: string) => line.trim().length > 0);
+    // \r?\n：Windows 上残留的 \r 会让 parts[2] 文件路径带尾随回车，直接解析失败
+    const lines: string[] = output.split(/\r?\n/).filter((line: string) => line.trim().length > 0);
     for (const line of lines) {
       const parts: string[] = line.split("\t");
       if (parts.length < 3) {

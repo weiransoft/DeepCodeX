@@ -291,7 +291,20 @@ export {
 } from "./common/openai-client";
 export { buildThinkingRequestOptions } from "./common/openai-thinking";
 export { readTextFileWithMetadata, writeTextFile, buildDiffPreview, ensureParentDirectory } from "./common/file-utils";
-export { normalizeFilePath, getSnippet, clearSessionState, recordFileState, getFileState } from "./common/state";
+export {
+  normalizeFilePath,
+  fileStateKey,
+  getSnippet,
+  clearSessionState,
+  recordFileState,
+  getFileState,
+} from "./common/state";
+export {
+  findWindowsPathIssue,
+  validateWindowsFileToolPath,
+  WINDOWS_MAX_PATH,
+  WINDOWS_RESERVED_DEVICE_NAMES,
+} from "./common/windows-path-rules";
 export { GitFileHistory } from "./common/file-history";
 export { killProcessTree } from "./common/process-tree";
 // 上游 v0.3.1 新增：腾讯 npm 镜像源常量

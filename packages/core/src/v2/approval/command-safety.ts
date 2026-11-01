@@ -86,6 +86,32 @@ export const BUILTIN_BLACKLIST: string[] = [
 ];
 
 /**
+ * Windows 危险命令正则黑名单（2026-11-01 跨平台补齐）。
+ *
+ * 与 BUILTIN_BLACKLIST 分开维护的原因：
+ * - plain 名单走"词边界 + 前缀"匹配，只对命令开头生效，且模式里不能带参数；
+ * - Windows 破坏性命令的形态是 `rd /s /q C:\`、`cmd /c del /s ...`、
+ *   `powershell -Command Remove-Item -Recurse -Force ...`，
+ *   必须以正则在整个命令串中检索，才能覆盖 `cmd /c <cmd>` 之类的包裹写法。
+ *
+ * 全部用 IGNORECASE 语义（Windows 命令大小写不敏感）。
+ */
+const WINDOWS_BLACKLIST_PATTERNS: ReadonlyArray<RegExp> = Object.freeze([
+  /\bformat\s+[a-z]:/i,
+  /\b(rd|rmdir)\s+(\/[a-z]\s*)*\/s\b/i,
+  /\bdel\s+(\/[a-z]\s*)*\/s\b/i,
+  /\bdel\s+(\/[a-z]\s*)*[a-z]:[\\/]?\*/i,
+  /\bremove-item\b[^\n]*-recurse\b[^\n]*-force\b/i,
+  /\bdiskpart\b/i,
+  /\bvssadmin\s+delete\s+shadows/i,
+  /\bbcdedit\b/i,
+  /\bcipher\s+\/w/i,
+  /\breg\s+delete\s+hk(lm|cr|ey_local_machine)\b/i,
+  /\btaskkill\b[^\n]*\/im\s+(explorer|winlogon|csrss|lsass|svchost|wininit|services)/i,
+  /\b(powershell|pwsh)(\.exe)?\s+[^\n]*-(e|ec|enc|encodedcommand)\b/i,
+]);
+
+/**
  * 内置白名单（plain 格式）：匹配到的命令视为低风险（benign），可自动批准
  *
  * 仅包含无副作用的只读命令：列目录、查看文件、git 查询、版本查询等。
@@ -234,6 +260,21 @@ export const BUILTIN_BLACKLIST_REGEX: ReadonlyArray<string> = [
   "\\bbash\\s+-i\\s+>&\\s*/dev/tcp/",
   "\\bnc\\s+-l\\s+-p\\s+",
   "\\bnetcat\\s+-l\\s+-p\\s+",
+  // === Windows 危险操作（2026-11-01 跨平台补齐）===
+  // 原名单 100% 是 Unix 命令，Windows 上 format / rd /s / del /s /
+  // Remove-Item -Recurse 等破坏性操作全部漏网，autonomous 模式下会被自动批准。
+  "\\bformat\\s+[a-z]:",
+  "\\b(rd|rmdir)\\s+(/[a-z]\\s*)*/s\\b",
+  "\\bdel\\s+(/[a-z]\\s*)*/s\\b",
+  "\\bdel\\s+(/[a-z]\\s*)*[a-z]:\\\\?\\*",
+  "\\bremove-item\\b[^\\n]*-recurse\\b[^\\n]*-force\\b",
+  "\\bdiskpart\\b",
+  "\\bvssadmin\\s+delete\\s+shadows\\b",
+  "\\bbcdedit\\b",
+  "\\bcipher\\s+/w",
+  "\\breg\\s+delete\\s+hk(lm|cr|ey_local_machine)\\b",
+  "\\btaskkill\\b[^\\n]*/im\\s+(explorer|winlogon|csrss|lsass|svchost|wininit|services)",
+  "\\b(powershell|pwsh)(\\.exe)?\\s+[^\\n]*\\s-(e|ec|enc|encodedcommand)\\b",
 ];
 
 /**
@@ -348,6 +389,12 @@ export class CommandSafety {
     // 遍历黑名单，任一匹配即拒绝
     for (const entry of this.blacklist) {
       if (entry.match(normalized)) {
+        return true;
+      }
+    }
+    // Windows 危险命令（正则全串检索，覆盖 cmd /c、powershell -Command 包裹写法）
+    for (const pattern of WINDOWS_BLACKLIST_PATTERNS) {
+      if (pattern.test(normalized)) {
         return true;
       }
     }

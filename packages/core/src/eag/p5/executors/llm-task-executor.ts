@@ -169,7 +169,31 @@ const READONLY_ALLOWED_PREFIXES: ReadonlyArray<string> = Object.freeze(
  * @returns 命中任一放行前缀（或其子树）返回 true
  */
 function isReadonlyAllowedPath(resolvedPath: string): boolean {
-  return READONLY_ALLOWED_PREFIXES.some((prefix) => resolvedPath === prefix || resolvedPath.startsWith(prefix + "/"));
+  // 2026-11-01 跨平台修正：原实现用 `resolvedPath.startsWith(prefix + "/")`，
+  // Windows 上 path.resolve 产出反斜杠（C:\Users\...\Temp\a.txt），
+  // 拼 "/" 的比较恒为 false → 临时目录读取在 Windows 上被牢笼误拦。
+  return READONLY_ALLOWED_PREFIXES.some((prefix) => isPathSameOrUnder(resolvedPath, prefix));
+}
+
+/**
+ * target 是否等于 root 或位于其子树内（跨平台分隔符 + Windows 大小写不敏感）。
+ */
+function isPathSameOrUnder(target: string, root: string): boolean {
+  const isWindows = process.platform === "win32";
+  const normalize = (value: string): string => {
+    const unified = isWindows ? value.replace(/\//g, "\\") : value;
+    const trimmed = unified.length > 1 ? unified.replace(/[\\/]+$/, "") : unified;
+    return isWindows ? trimmed.toLowerCase() : trimmed;
+  };
+  const normalizedTarget = normalize(target);
+  const normalizedRoot = normalize(root);
+  if (!normalizedRoot) {
+    return false;
+  }
+  if (normalizedTarget === normalizedRoot) {
+    return true;
+  }
+  return normalizedTarget.startsWith(`${normalizedRoot}${isWindows ? "\\" : "/"}`);
 }
 
 /**
