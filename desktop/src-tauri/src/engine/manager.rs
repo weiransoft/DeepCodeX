@@ -424,9 +424,16 @@ impl EngineRuntime {
         // 启动 + 健康检查；失败重试一次（换端口）
         let mut last_err: Option<ShellError> = None;
         for attempt in 0..2 {
+            // 记录本轮 spawn 前的日志长度：健康检查失败时只取本轮新增输出做诊断，
+            // 避免把上一次成功启动的历史记录误当作本次失败原因
+            let log_offset = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
             match self.try_spawn_once(&engine, &log_path) {
-                Ok(()) => match wait_healthy(self.base_url(), *self.health_timeout.lock().unwrap())
-                {
+                Ok(()) => match wait_healthy(
+                    self.base_url(),
+                    *self.health_timeout.lock().unwrap(),
+                    &log_path,
+                    log_offset,
+                ) {
                     Ok(()) => {
                         self.set_state(state::READY);
                         self.emit_status();
@@ -832,20 +839,69 @@ fn prepare_engine_settings(
 }
 
 /// 健康检查（/api/health 200 优先；旧 dist 无该端点时回退 /api/config 401/2xx 语义）。
-fn wait_healthy(base_url: String, timeout: Duration) -> Result<(), ShellError> {
+///
+/// 失败时附带 `log_offset` 之后的新增引擎输出：引擎「未监听」有两种截然不同的
+/// 成因——已启动但端口没起来（有输出）与进程卡在极早期（零输出），只有日志能把
+/// 二者分开。缺少这段上下文时，现场只能看到「已拉起」却无从判断卡在哪里。
+fn wait_healthy(
+    base_url: String,
+    timeout: Duration,
+    log_path: &Path,
+    log_offset: u64,
+) -> Result<(), ShellError> {
     let deadline = Instant::now() + timeout;
     loop {
         if probe_health(&base_url) {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(ShellError::EngineHealth(format!(
-                "引擎在 {}s 内未就绪（{base_url}）",
-                timeout.as_secs()
-            )));
+            let tail = new_log_lines(log_path, log_offset, 12);
+            let detail = if tail.is_empty() {
+                format!(
+                    "引擎在 {}s 内未就绪（{base_url}），且该进程在此期间没有任何输出。\
+                     完整日志：{}",
+                    timeout.as_secs(),
+                    log_path.display()
+                )
+            } else {
+                format!(
+                    "引擎在 {}s 内未就绪（{base_url}）。引擎本轮输出：\n{}\n完整日志：{}",
+                    timeout.as_secs(),
+                    tail.join("\n"),
+                    log_path.display()
+                )
+            };
+            return Err(ShellError::EngineHealth(detail));
         }
         std::thread::sleep(HEALTH_INTERVAL);
     }
+}
+
+/// 读取日志中 `offset` 之后新增内容的末 `max_lines` 行（空行丢弃）。
+/// offset 超出当前文件长度（日志被截断/轮转）时从头读，避免漏掉有效输出。
+fn new_log_lines(log_path: &Path, offset: u64, max_lines: usize) -> Vec<String> {
+    use std::io::{Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(log_path) else {
+        return Vec::new();
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = if offset <= len { offset } else { 0 };
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = String::new();
+    if f.read_to_string(&mut buf).is_err() {
+        return Vec::new();
+    }
+    let mut lines: Vec<String> = buf
+        .lines()
+        .map(|l| l.trim_end().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.len() > max_lines {
+        lines.drain(..lines.len() - max_lines);
+    }
+    lines
 }
 
 /// 单轮探活：/api/health 200 即就绪；404（旧引擎）回退 /api/config 401/2xx；
@@ -1093,6 +1149,84 @@ process.on("SIGTERM", () => {
         );
         assert_eq!(rt.status().state, state::FAILED);
         rt.stop().unwrap();
+    }
+
+    /// 把 &[&str] 转成 Vec<String>（便于与 new_log_lines 返回值比较）。
+    fn strs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// 健康检查失败必须带上本轮引擎新增输出，且不得混入历史启动记录。
+    #[test]
+    fn health_failure_reports_only_new_engine_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("engine.log");
+        std::fs::write(&log, "OLD SUCCESS LINE\n").unwrap();
+        // offset = 本轮 spawn 前的长度：其后的内容才是本轮产物
+        let offset = std::fs::metadata(&log).unwrap().len();
+        {
+            let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+            f.write_all(b"MODULE LOADING\nBOOM: cannot bind port\n")
+                .unwrap();
+        }
+
+        // 不可达端口 + 极短超时 → 必然判定未就绪
+        let err = wait_healthy(
+            "http://127.0.0.1:1".to_string(),
+            Duration::from_millis(120),
+            &log,
+            offset,
+        )
+        .expect_err("不可达端口必须判定未就绪");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("MODULE LOADING") && msg.contains("BOOM: cannot bind port"),
+            "错误信息应包含本轮引擎输出，实际：{msg}"
+        );
+        assert!(
+            !msg.contains("OLD SUCCESS LINE"),
+            "不得把历史启动记录当作本次失败原因，实际：{msg}"
+        );
+    }
+
+    /// 零输出本身是独立诊断结论（进程卡在极早期），需显式说明。
+    #[test]
+    fn health_failure_flags_silent_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("engine.log");
+        std::fs::write(&log, "OLD SUCCESS LINE\n").unwrap();
+        let offset = std::fs::metadata(&log).unwrap().len();
+
+        let err = wait_healthy(
+            "http://127.0.0.1:1".to_string(),
+            Duration::from_millis(120),
+            &log,
+            offset,
+        )
+        .expect_err("静默引擎必须判定未就绪");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("没有任何输出"),
+            "应明确指出本轮零输出，实际：{msg}"
+        );
+    }
+
+    /// new_log_lines：按 offset 切片、只保留末 max_lines 行、丢弃空行，
+    /// offset 越界（日志被截断/轮转）时从头读。
+    #[test]
+    fn new_log_lines_slices_by_offset_and_keeps_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("engine.log");
+        std::fs::write(&log, "a\nb\n\nc\nd\n").unwrap();
+
+        // offset 2 落在 "b" 之前（"a\n" 之后）
+        assert_eq!(new_log_lines(&log, 2, 10), strs(&["b", "c", "d"]));
+        // 末 2 行
+        assert_eq!(new_log_lines(&log, 0, 2), strs(&["c", "d"]));
+        // offset 越界 → 从头读，不漏内容
+        assert_eq!(new_log_lines(&log, 9999, 10), strs(&["a", "b", "c", "d"]));
+        // 文件不存在 → 空（不 panic）
+        assert!(new_log_lines(&dir.path().join("missing.log"), 0, 10).is_empty());
     }
 
     /// 探活语义：/api/health 200 即就绪；连接拒绝未就绪。
