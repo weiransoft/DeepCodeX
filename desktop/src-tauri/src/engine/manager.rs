@@ -452,6 +452,10 @@ impl EngineRuntime {
         self.set_state(state::FAILED);
         self.emit_status();
         let final_err = last_err.unwrap_or_else(|| ShellError::EngineStart("未知原因".into()));
+        // 失败原因同时落到 engine.log：该文件是用户经 engine_open_logs 直接打开的
+        // 第一现场，只广播到 UI 会让「日志里看不出为什么没起来」再次发生。
+        // 内容取自脱敏后的引擎输出，回写不会引入密钥明文。
+        self.append_log(&format!("[shell] 引擎启动失败：{final_err}"));
         self.emit_error(&final_err);
         Err(final_err)
     }
@@ -855,7 +859,7 @@ fn wait_healthy(
             return Ok(());
         }
         if Instant::now() >= deadline {
-            let tail = new_log_lines(log_path, log_offset, 12);
+            let tail = new_engine_output_lines(log_path, log_offset, 12);
             let detail = if tail.is_empty() {
                 format!(
                     "引擎在 {}s 内未就绪（{base_url}），且该进程在此期间没有任何输出。\
@@ -877,9 +881,27 @@ fn wait_healthy(
     }
 }
 
-/// 读取日志中 `offset` 之后新增内容的末 `max_lines` 行（空行丢弃）。
+/// 判断一行是否为壳的编排记录（`append_log` 写的 `[shell] ...`）。
+///
+/// 壳记录可能带 unix 秒时间戳前缀（`1793548106 [shell] 引擎已拉起 ...`），
+/// 也可能不带，故先剥离「纯数字 + 空格」前缀再匹配；引擎自身输出里出现
+/// 同样形态的概率可忽略。
+fn is_shell_record(line: &str) -> bool {
+    let rest = match line.split_once(' ') {
+        Some((head, tail)) if !head.is_empty() && head.bytes().all(|b| b.is_ascii_digit()) => tail,
+        _ => line,
+    };
+    rest.starts_with("[shell] ")
+}
+
+/// 读取日志中 `offset` 之后新增的**引擎自身输出**，返回末 `max_lines` 行。
+///
+/// 同一文件混写了两类内容：壳的编排记录（`[shell] ` 前缀，如「引擎已拉起」）
+/// 与引擎 stdout/stderr。只有后者能说明引擎卡在哪，故剔除壳记录——
+/// 否则「引擎已拉起」这一行会把「零输出」误判成「有输出」，掩盖真正的成因。
+///
 /// offset 超出当前文件长度（日志被截断/轮转）时从头读，避免漏掉有效输出。
-fn new_log_lines(log_path: &Path, offset: u64, max_lines: usize) -> Vec<String> {
+fn new_engine_output_lines(log_path: &Path, offset: u64, max_lines: usize) -> Vec<String> {
     use std::io::{Seek, SeekFrom};
     let Ok(mut f) = std::fs::File::open(log_path) else {
         return Vec::new();
@@ -896,7 +918,7 @@ fn new_log_lines(log_path: &Path, offset: u64, max_lines: usize) -> Vec<String> 
     let mut lines: Vec<String> = buf
         .lines()
         .map(|l| l.trim_end().to_string())
-        .filter(|l| !l.is_empty())
+        .filter(|l| !l.is_empty() && !is_shell_record(l))
         .collect();
     if lines.len() > max_lines {
         lines.drain(..lines.len() - max_lines);
@@ -1148,10 +1170,24 @@ process.on("SIGTERM", () => {
             "失败类别应为健康检查/启动失败，实际：{err:?}"
         );
         assert_eq!(rt.status().state, state::FAILED);
+
+        // 失败原因必须落到 engine.log（用户经 engine_open_logs 打开的第一现场），
+        // 否则现场只剩「引擎已拉起」一行，无从判断为何没起来
+        let log = std::fs::read_to_string(dir.path().join("logs").join("engine.log"))
+            .unwrap_or_default();
+        assert!(
+            log.contains("引擎启动失败"),
+            "engine.log 应记录失败原因，实际内容：{log}"
+        );
+        assert!(
+            log.contains("没有任何输出"),
+            "立即退出的引擎应被标注为零输出，实际内容：{log}"
+        );
+
         rt.stop().unwrap();
     }
 
-    /// 把 &[&str] 转成 Vec<String>（便于与 new_log_lines 返回值比较）。
+    /// 把 &[&str] 转成 Vec<String>（便于与 new_engine_output_lines 返回值比较）。
     fn strs(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_string()).collect()
     }
@@ -1211,22 +1247,56 @@ process.on("SIGTERM", () => {
         );
     }
 
-    /// new_log_lines：按 offset 切片、只保留末 max_lines 行、丢弃空行，
+    /// new_engine_output_lines：按 offset 切片、只保留末 max_lines 行、丢弃空行，
     /// offset 越界（日志被截断/轮转）时从头读。
     #[test]
-    fn new_log_lines_slices_by_offset_and_keeps_tail() {
+    fn new_engine_output_lines_slices_by_offset_and_keeps_tail() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("engine.log");
         std::fs::write(&log, "a\nb\n\nc\nd\n").unwrap();
 
         // offset 2 落在 "b" 之前（"a\n" 之后）
-        assert_eq!(new_log_lines(&log, 2, 10), strs(&["b", "c", "d"]));
+        assert_eq!(new_engine_output_lines(&log, 2, 10), strs(&["b", "c", "d"]));
         // 末 2 行
-        assert_eq!(new_log_lines(&log, 0, 2), strs(&["c", "d"]));
+        assert_eq!(new_engine_output_lines(&log, 0, 2), strs(&["c", "d"]));
         // offset 越界 → 从头读，不漏内容
-        assert_eq!(new_log_lines(&log, 9999, 10), strs(&["a", "b", "c", "d"]));
+        assert_eq!(new_engine_output_lines(&log, 9999, 10), strs(&["a", "b", "c", "d"]));
         // 文件不存在 → 空（不 panic）
-        assert!(new_log_lines(&dir.path().join("missing.log"), 0, 10).is_empty());
+        assert!(new_engine_output_lines(&dir.path().join("missing.log"), 0, 10).is_empty());
+    }
+
+    /// 壳的编排记录（`[shell] ` 前缀）必须剔除：否则「引擎已拉起」这一行
+    /// 会让引擎的「零输出」被误判成「有输出」（真实故障现场就是这个形态）。
+    /// 注意壳记录实际带 unix 秒时间戳前缀，两种形态都要覆盖。
+    #[test]
+    fn engine_output_lines_skip_shell_bookkeeping() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("engine.log");
+
+        // 带时间戳（真实格式）+ 裸前缀（兼容形态）都要被剔除
+        std::fs::write(
+            &log,
+            "1793548106 [shell] 引擎已拉起 pid=Some(1) port=2（仅绑定 127.0.0.1）\n\
+             [shell] 引擎进程退出 code=Some(0)\n\
+             real engine line\n",
+        )
+        .unwrap();
+        assert_eq!(
+            new_engine_output_lines(&log, 0, 10),
+            strs(&["real engine line"]),
+            "只应保留引擎自身输出"
+        );
+
+        // 整份新增内容都是壳记录 → 等价于引擎零输出（本次故障即此形态）
+        std::fs::write(
+            &log,
+            "1793548106 [shell] 引擎已拉起 pid=Some(1) port=2（仅绑定 127.0.0.1）\n",
+        )
+        .unwrap();
+        assert!(
+            new_engine_output_lines(&log, 0, 10).is_empty(),
+            "只有壳记录时必须判为空，否则会掩盖引擎零输出"
+        );
     }
 
     /// 探活语义：/api/health 200 即就绪；连接拒绝未就绪。
