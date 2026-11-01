@@ -1112,14 +1112,23 @@ export function App() {
       .catch(() => setShowWizard(false));
   }, [desktopConfig]);
 
-  /** 系统管理保存：落盘模型 + MCP + LDAP（不关闭抽屉，便于继续编辑） */
+  /**
+   * 系统管理保存：落盘模型 + MCP + LDAP（不关闭抽屉，便于继续编辑）。
+   *
+   * 2026-11-01 修复"点击保存失败"：改为返回 Promise 并把错误抛回调用方——
+   * 抽屉据此展示真实失败原因（此前是 void + 立刻置"已保存"，失败时
+   * 用户只看到一闪而过的 ✓ 加一条 toast，无从判断到底存没存上）。
+   */
   const handleSettingsSave = useCallback(
-    (models: DesktopModel[], mcpServers: DesktopMcpServer[], ldap: DesktopLdapConfig): void => {
-      saveDesktopConfig({ models, mcpServers, ldap, setupCompleted: true })
-        .then((saved) => setDesktopConfig(saved))
-        .catch((e: unknown) => {
-          showToast(e instanceof Error ? e.message : "配置保存失败");
-        });
+    async (models: DesktopModel[], mcpServers: DesktopMcpServer[], ldap: DesktopLdapConfig): Promise<void> => {
+      try {
+        const saved = await saveDesktopConfig({ models, mcpServers, ldap, setupCompleted: true });
+        setDesktopConfig(saved);
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : "配置保存失败";
+        showToast(message);
+        throw e;
+      }
     },
     [showToast]
   );

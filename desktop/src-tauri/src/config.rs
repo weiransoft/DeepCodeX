@@ -135,18 +135,29 @@ pub fn which_node() -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = vec![
         PathBuf::from("/opt/homebrew/bin/node"),
         PathBuf::from("/usr/local/bin/node"),
+        // Windows 常见安装位置：官方 installer / winget 默认落在 Program Files
         #[cfg(windows)]
         PathBuf::from(r"C:\Program Files\nodejs\node.exe"),
+        #[cfg(windows)]
+        PathBuf::from(r"C:\Program Files (x86)\nodejs\node.exe"),
+        // Volta（Windows 下位于 %LOCALAPPDATA%\Volta\bin）
         home.join(".volta/bin/node"),
+        #[cfg(windows)]
+        home.join("AppData/Local/Volta/bin/node.exe"),
         home.join(".asdf/shims/node"),
     ];
     // 版本目录型安装（取字典序最大 = 通常最新）：nvm / WorkBuddy node / fnm
+    // Windows 上 nvm-windows 为 %APPDATA%\nvm\vX.Y.Z\node.exe，
+    // fnm 为 %APPDATA%\fnm\node-versions\vX.Y.Z\installation\node.exe——两者目录层级不同，
+    // 因此下面会同时探测 `<版本目录>/node` 与 `<版本目录>/installation/node`
     for pattern in [
         home.join(".nvm/versions/node"),
         home.join(".workbuddy/binaries/node/versions"),
         home.join("Library/Application Support/fnm/node-versions"),
         #[cfg(windows)]
         home.join("AppData/Roaming/nvm"),
+        #[cfg(windows)]
+        home.join("AppData/Roaming/fnm/node-versions"),
     ] {
         if let Ok(entries) = std::fs::read_dir(&pattern) {
             let mut dirs: Vec<PathBuf> = entries
@@ -156,7 +167,10 @@ pub fn which_node() -> Option<PathBuf> {
                 .collect();
             dirs.sort();
             if let Some(latest) = dirs.pop() {
-                candidates.push(latest.join("bin/node"));
+                // 可执行文件名与相对层级随平台不同；非命中的候选会被下方 is_file() 过滤掉
+                let node_name = if cfg!(windows) { "node.exe" } else { "bin/node" };
+                candidates.push(latest.join(node_name));
+                candidates.push(latest.join("installation").join(node_name));
             }
         }
     }

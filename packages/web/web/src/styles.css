@@ -97,7 +97,8 @@ body,
   margin: 0;
 }
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   font-size: 14px;
   color: var(--app-text);
   background: var(--app-bg);
@@ -957,9 +958,15 @@ body {
   color: var(--app-text);
 }
 /* 嵌套层级缩进（2 空格一级，CSS 属性选择器免内联样式） */
-.plan-task[data-depth="1"] { margin-left: 18px; }
-.plan-task[data-depth="2"] { margin-left: 36px; }
-.plan-task[data-depth="3"] { margin-left: 54px; }
+.plan-task[data-depth="1"] {
+  margin-left: 18px;
+}
+.plan-task[data-depth="2"] {
+  margin-left: 36px;
+}
+.plan-task[data-depth="3"] {
+  margin-left: 54px;
+}
 .plan-glyph {
   flex: 0 0 auto;
   margin-top: 3px;
@@ -1310,7 +1317,9 @@ body {
   border: 1px solid var(--app-border-strong);
   border-radius: 14px;
   background: var(--app-bg-elevated);
-  transition: border-color 0.15s, box-shadow 0.15s;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
 }
 .composer:focus-within {
   border-color: var(--app-accent);
@@ -2427,6 +2436,14 @@ a.icon-btn {
   font-size: 13px;
   color: var(--app-text-tertiary);
 }
+/* 保存失败：错误原文要能看清，且允许折行（后端信息可能较长） */
+.settings-status-error {
+  color: var(--app-danger, #d64545);
+  white-space: normal;
+  word-break: break-word;
+  max-width: 60%;
+  line-height: 1.45;
+}
 
 /* ============ 配置表单（向导 / 系统管理共用） ============ */
 .cfg-form {
@@ -2552,6 +2569,25 @@ a.icon-btn {
   font-size: 13px;
   color: var(--app-text-secondary);
   cursor: pointer;
+  /* 单选/多选标签必须单行，出现换行会退化成"每行一个字"的竖排观感 */
+  white-space: nowrap;
+}
+/*
+ * 单选/多选按钮尺寸纠偏（2026-11-01 修复"文字竖排"）：
+ * `.cfg-field input { width: 100% }` 是为文本框写的，但它同时命中了
+ * `.cfg-field` 里的 radio / checkbox —— 输入控件撑满整行，把后面的
+ * 文字挤成 1 字宽的窄列，视觉上就成了竖排（截图事故）。
+ * 这里把选择类输入还原为固有尺寸并禁止收缩。
+ */
+.cfg-field input[type="radio"],
+.cfg-field input[type="checkbox"],
+.cfg-check input[type="radio"],
+.cfg-check input[type="checkbox"] {
+  width: auto;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--app-accent);
 }
 .cfg-editor-actions {
   display: flex;

@@ -22,7 +22,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::engine::settings::{home_settings_path, read_settings, write_private, DEEPCODE_DIR};
+use crate::engine::settings::{
+    home_settings_path, read_settings, read_settings_or_backup, write_private, DEEPCODE_DIR,
+};
 use crate::error::ShellError;
 use crate::secrets::store::SecretStore;
 
@@ -87,6 +89,14 @@ pub struct ModelConfig {
     /// 思考模式（"default"/"on"/"off"）→ on/off 注入 THINKING_ENABLED
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_mode: Option<String>,
+    /// 思考强度（"default"/low/medium/high/xhigh/max）→ 注入 REASONING_EFFORT
+    ///
+    /// 2026-11-01 新增：取值与 core `ReasoningEffort` 五档逐字一致
+    /// （packages/core/src/settings.ts）。Qwen3.8 官方只有三档
+    /// （low/medium/xhigh），由 core 的 `mapReasoningEffortToQwen` 做单调映射，
+    /// 壳侧原样下发、不做特判。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_effort: Option<String>,
     /// 采样温度（0~2）→ 注入 TEMPERATURE
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
@@ -366,7 +376,9 @@ pub fn save_desktop_config(payload: DesktopConfigSave) -> Result<DesktopConfig, 
         engine_mcp.insert(s.name.trim().to_string(), Value::Object(v));
     }
     let settings_path = home_settings_path()?;
-    let mut root = read_settings(&settings_path)?;
+    // 2026-11-01：settings.json 被手工改坏（注释/尾逗号/截断）时不再让整次保存失败——
+    // 先备份为 *.corrupt-<ts>.bak 再按空对象继续合并，模型/MCP 的保存仍可完成。
+    let mut root = read_settings_or_backup(&settings_path)?;
     if !root.is_object() {
         root = Value::Object(Map::new());
     }
@@ -753,6 +765,18 @@ fn resolve_engine_launch_inner() -> EngineLaunch {
                 }
                 _ => {}
             }
+            // 思考强度 → REASONING_EFFORT（2026-11-01 新增）。
+            // 只接受 core 认识的五档；"default" 与非法值一律不注入，
+            // 让引擎走模型/设置默认值（不写死档位，避免误钳制）。
+            // 思考模式显式关闭时不注入——强度没有意义，注入反而会让
+            // 请求同时带 enable_thinking=false 与 reasoning_effort，语义矛盾。
+            if chosen.get("thinkingMode").and_then(Value::as_str) != Some("off") {
+                if let Some(effort) = chosen.get("thinkingEffort").and_then(Value::as_str) {
+                    if matches!(effort, "low" | "medium" | "high" | "xhigh" | "max") {
+                        env.insert("REASONING_EFFORT".to_string(), effort.to_string());
+                    }
+                }
+            }
             if let Some(t) = chosen.get("temperature").and_then(Value::as_f64) {
                 if (0.0..=2.0).contains(&t) {
                     env.insert("TEMPERATURE".to_string(), t.to_string());
@@ -900,6 +924,7 @@ pub(crate) mod tests {
                 max_tool_rounds: None,
                 image_input: None,
                 thinking_mode: None,
+                thinking_effort: None,
                 temperature: None,
                 top_p: None,
                 top_k: None,
@@ -1151,6 +1176,7 @@ pub(crate) mod tests {
             max_tool_rounds: None,
             image_input: None,
             thinking_mode: None,
+            thinking_effort: None,
             temperature: None,
             top_p: None,
             top_k: None,
@@ -1174,5 +1200,192 @@ pub(crate) mod tests {
         // 公网官方端点不应被放行（保持 SSRF 防御纵深）
         assert!(!is_private_base_url("https://api.openai.com/v1"));
         assert!(!is_private_base_url("https://api.anthropic.com"));
+    }
+
+    // ========================================================================
+    // 端到端（E2E）用例 —— 2026-11-01「保存系统管理失败」「思考强度」两项修复
+    //
+    // 与上面的单测不同，这里刻意不做任何 mock/stub：
+    //   - 真实临时 HOME（with_temp_home）
+    //   - 真实磁盘文件（settings.json / desktop.json / *.corrupt-*.bak）
+    //   - 真实 SQLite 密钥库（SecretStore）
+    //   - 真实 serde 序列化 → 落盘 → 反序列化回读
+    // ========================================================================
+
+    /// E2E 辅助：构造一份最小可用模型配置
+    fn sample_model(effort: Option<&str>, thinking: Option<&str>) -> ModelConfig {
+        ModelConfig {
+            id: "e2e-m1".into(),
+            name: "Qwen".into(),
+            model: "qwen3.8-max".into(),
+            model_type: "openai".into(),
+            base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".into(),
+            api_key: Some("sk-e2e".into()),
+            api_key_ref: String::new(),
+            enabled: true,
+            is_default: true,
+            created_at: "2026-11-01T00:00:00Z".into(),
+            has_key: false,
+            series: Some("qwen".into()),
+            context_input_tokens: None,
+            context_output_tokens: None,
+            max_tool_rounds: None,
+            image_input: Some("yes".into()),
+            thinking_mode: thinking.map(|s| s.to_string()),
+            thinking_effort: effort.map(|s| s.to_string()),
+            temperature: None,
+            top_p: None,
+            top_k: None,
+        }
+    }
+
+    /// 列出 `~/.deepcode` 下的坏文件备份（settings.json.corrupt-*.bak）
+    fn corrupt_backups() -> Vec<PathBuf> {
+        std::fs::read_dir(home_deepcode())
+            .map(|it| {
+                it.filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.file_name()
+                            .map(|n| n.to_string_lossy().starts_with("settings.json.corrupt-"))
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// E2E-1a：`settings.json` 被手工改坏后，点「保存」仍必须成功。
+    ///
+    /// 用户报障原话：「点击保存 系统管理 失败」。真实成因是保存流程要把
+    /// mcpServers 合并写回 settings.json，而用户手改过的文件带注释/尾逗号，
+    /// JSON 解析必然失败 → 整次保存上抛 → 模型一条都没存上。
+    ///
+    /// 断言四件事：模型真落盘、原文件逐字备份、settings.json 重建为合法 JSON、
+    /// 返回快照密钥标记正确（UI 据此显示「已保存」）。
+    #[test]
+    fn e2e_save_succeeds_when_settings_json_corrupt() {
+        let (_dir, _guard) = with_temp_home();
+        let settings = home_deepcode().join("settings.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        // 典型"手改坏"形态：JSON 不支持注释 + 尾逗号
+        let broken = "{\n  // 我手动加的注释\n  \"web\": { \"enabled\": true },\n}\n";
+        std::fs::write(&settings, broken).unwrap();
+
+        let saved = save_desktop_config(DesktopConfigSave {
+            models: vec![sample_model(Some("high"), Some("on"))],
+            mcp_servers: Vec::new(),
+            ldap: None,
+            setup_completed: true,
+        })
+        .expect("settings.json 损坏时保存仍须成功（否则 UI 只会报「保存失败」）");
+
+        // 1) 模型真的落到 desktop.json（壳权威来源），且思考强度一并持久化
+        assert_eq!(saved.models.len(), 1, "模型必须保存成功");
+        assert_eq!(saved.models[0].id, "e2e-m1");
+        assert!(saved.models[0].has_key, "密钥应已写入 SQLite 密钥库");
+        let desktop_raw = std::fs::read_to_string(home_deepcode().join("desktop.json")).unwrap();
+        let desktop: Value = serde_json::from_str(&desktop_raw).unwrap();
+        assert_eq!(desktop["models"].as_array().unwrap().len(), 1);
+        assert_eq!(desktop["models"][0]["thinkingEffort"], "high");
+        assert_eq!(desktop["models"][0]["imageInput"], "yes");
+
+        // 2) 原文件内容必须逐字备份（绝不静默丢用户手写内容）
+        let backups = corrupt_backups();
+        assert_eq!(backups.len(), 1, "坏文件必须被备份，实际：{backups:?}");
+        assert_eq!(
+            std::fs::read_to_string(&backups[0]).unwrap(),
+            broken,
+            "备份内容必须与原文件逐字一致"
+        );
+
+        // 3) settings.json 被重建为合法 JSON，且 mcpServers 节写成功
+        let rebuilt_raw = std::fs::read_to_string(&settings).unwrap();
+        let rebuilt: Value =
+            serde_json::from_str(&rebuilt_raw).expect("重建后的 settings.json 必须是合法 JSON");
+        assert!(
+            rebuilt.get("mcpServers").is_some(),
+            "mcpServers 节应被写入，实际：{rebuilt_raw}"
+        );
+    }
+
+    /// E2E-1b：思考强度必须真实注入引擎进程环境（桌面壳 → 引擎的环境变量契约）。
+    ///
+    /// 链路：UI 选择「思考强度=xhigh」→ desktop.json 持久化 → 壳启动引擎时
+    /// resolve_engine_launch() 注入 REASONING_EFFORT=xhigh → core settings.ts 读取。
+    #[test]
+    fn e2e_thinking_effort_reaches_engine_env() {
+        let (_dir, _guard) = with_temp_home();
+        save_desktop_config(DesktopConfigSave {
+            models: vec![sample_model(Some("xhigh"), Some("on"))],
+            mcp_servers: Vec::new(),
+            ldap: None,
+            setup_completed: true,
+        })
+        .expect("保存桌面配置");
+
+        let launch = resolve_engine_launch();
+        assert_eq!(
+            launch.env.get("REASONING_EFFORT").map(String::as_str),
+            Some("xhigh"),
+            "思考强度必须注入引擎环境"
+        );
+        assert_eq!(
+            launch.env.get("THINKING_ENABLED").map(String::as_str),
+            Some("true")
+        );
+        // 选中的确实是这份配置（模型 / provider / 端点均到位）
+        assert_eq!(
+            launch.env.get("DEEPCODE_MODEL").map(String::as_str),
+            Some("qwen3.8-max")
+        );
+        assert_eq!(
+            launch.env.get("DEEPCODE_PROVIDER").map(String::as_str),
+            Some("openai")
+        );
+    }
+
+    /// E2E-1c：思考关闭 / 非法档位时**不得**注入 REASONING_EFFORT。
+    ///
+    /// 关闭思考还发 reasoning_effort 会让请求同时带 enable_thinking=false
+    /// 与 reasoning_effort，语义矛盾；非法值则会被引擎当作默认档处理，
+    /// 静默改变用户预期。
+    #[test]
+    fn e2e_thinking_effort_not_injected_when_off_or_invalid() {
+        let (_dir, _guard) = with_temp_home();
+
+        // A) 思考模式显式关闭
+        save_desktop_config(DesktopConfigSave {
+            models: vec![sample_model(Some("high"), Some("off"))],
+            mcp_servers: Vec::new(),
+            ldap: None,
+            setup_completed: true,
+        })
+        .expect("保存（thinking=off）");
+        let launch = resolve_engine_launch();
+        assert_eq!(
+            launch.env.get("THINKING_ENABLED").map(String::as_str),
+            Some("false")
+        );
+        assert!(
+            !launch.env.contains_key("REASONING_EFFORT"),
+            "思考关闭时不得注入强度，实际：{:?}",
+            launch.env.get("REASONING_EFFORT")
+        );
+
+        // B) 非法档位（不在 core 五档内）
+        save_desktop_config(DesktopConfigSave {
+            models: vec![sample_model(Some("ultra"), Some("on"))],
+            mcp_servers: Vec::new(),
+            ldap: None,
+            setup_completed: true,
+        })
+        .expect("保存（effort=ultra）");
+        let launch = resolve_engine_launch();
+        assert!(
+            !launch.env.contains_key("REASONING_EFFORT"),
+            "非法档位不得注入（应回落引擎默认），实际：{:?}",
+            launch.env.get("REASONING_EFFORT")
+        );
     }
 }

@@ -24,13 +24,23 @@ function blankLdap(): DesktopLdapConfig {
 export interface SettingsDrawerProps {
   /** 当前配置（用于初始化草稿） */
   initialConfig: DesktopConfig;
-  /** 保存：提交模型 / MCP / LDAP 草稿（父级落盘） */
-  onSave: (models: DesktopModel[], mcpServers: DesktopMcpServer[], ldap: DesktopLdapConfig) => void;
+  /**
+   * 保存：提交模型 / MCP / LDAP 草稿（父级落盘）。
+   *
+   * 返回 Promise —— 2026-11-01 修复"点击保存却提示失败/假成功"：
+   * 此前签名是 void，调用方在 `onSave()` 之后立刻 `setSaved(true)`，
+   * 真正的落盘是异步的，失败时页面先闪"已保存 ✓"再弹错误 toast，
+   * 用户看到的就是"保存失败"。现在改为等 Promise 结果再定状态。
+   */
+  onSave: (models: DesktopModel[], mcpServers: DesktopMcpServer[], ldap: DesktopLdapConfig) => Promise<void>;
   /** 关闭抽屉 */
   onClose: () => void;
 }
 
 type Tab = "models" | "mcp" | "ldap" | "skills" | "agents" | "rules" | "audit";
+
+/** 保存状态：idle / saving / saved / failed（failed 携带后端原文） */
+type SaveState = { phase: "idle" } | { phase: "saving" } | { phase: "saved" } | { phase: "failed"; message: string };
 
 /** 技能列表加载状态 */
 type SkillsState =
@@ -43,7 +53,7 @@ export function SettingsDrawer({ initialConfig, onSave, onClose }: SettingsDrawe
   const [models, setModels] = useState<DesktopModel[]>(initialConfig.models ?? []);
   const [mcp, setMcp] = useState<DesktopMcpServer[]>(initialConfig.mcpServers ?? []);
   const [ldap, setLdap] = useState<DesktopLdapConfig>(initialConfig.ldap ?? blankLdap());
-  const [saved, setSaved] = useState(false);
+  const [saveState, setSaveState] = useState<SaveState>({ phase: "idle" });
 
   /** 能力发现（进入「技能」/「智能体」页签时懒加载；重新进入刷新，与 @ 提及同源） */
   const [skills, setSkills] = useState<SkillsState>({ phase: "loading" });
@@ -80,11 +90,52 @@ export function SettingsDrawer({ initialConfig, onSave, onClose }: SettingsDrawe
     }
   };
 
-  const handleSave = () => {
-    onSave(models, mcp, ldap);
-    setSaved(true);
-    window.setTimeout(() => setSaved(false), 3000);
+  const handleSave = async () => {
+    setSaveState({ phase: "saving" });
+    try {
+      await onSave(models, mcp, ldap);
+      setSaveState({ phase: "saved" });
+      window.setTimeout(() => setSaveState((cur) => (cur.phase === "saved" ? { phase: "idle" } : cur)), 3000);
+    } catch (e: unknown) {
+      setSaveState({ phase: "failed", message: e instanceof Error ? e.message : String(e) });
+    }
   };
+
+  /**
+   * 增删改即落盘（2026-11-01 用户需求：添加模型就直接保存，不需要另外点保存配置）。
+   *
+   * 触发点只在"应用草稿 / 删除"（ConfigForm 的 onApply / onDelete），
+   * 输入过程中的逐字编辑仍在本地草稿里，不会每敲一个字写一次盘。
+   */
+  const persistNow = useCallback(
+    async (nextModels: DesktopModel[], nextMcp: DesktopMcpServer[], nextLdap: DesktopLdapConfig) => {
+      setSaveState({ phase: "saving" });
+      try {
+        await onSave(nextModels, nextMcp, nextLdap);
+        setSaveState({ phase: "saved" });
+        window.setTimeout(() => setSaveState((cur) => (cur.phase === "saved" ? { phase: "idle" } : cur)), 3000);
+      } catch (e: unknown) {
+        setSaveState({ phase: "failed", message: e instanceof Error ? e.message : String(e) });
+      }
+    },
+    [onSave]
+  );
+
+  const handleModelsChange = useCallback(
+    (next: DesktopModel[]) => {
+      setModels(next);
+      void persistNow(next, mcp, ldap);
+    },
+    [mcp, ldap, persistNow]
+  );
+
+  const handleMcpChange = useCallback(
+    (next: DesktopMcpServer[]) => {
+      setMcp(next);
+      void persistNow(models, next, ldap);
+    },
+    [models, ldap, persistNow]
+  );
 
   /** LDAP 前端轻校验：启用时 server / baseDn 必填（引擎侧还有一道 fail-fast） */
   const ldapInvalid = ldap.enabled && (ldap.server.trim() === "" || ldap.baseDn.trim() === "");
@@ -200,7 +251,7 @@ export function SettingsDrawer({ initialConfig, onSave, onClose }: SettingsDrawe
               ldap={ldap}
               onChange={(next) => {
                 setLdap(next);
-                setSaved(false);
+                setSaveState({ phase: "idle" });
               }}
             />
           ) : (
@@ -208,28 +259,35 @@ export function SettingsDrawer({ initialConfig, onSave, onClose }: SettingsDrawe
               models={models}
               mcpServers={mcp}
               section={tab}
-              onModelsChange={(next) => {
-                setModels(next);
-                setSaved(false);
-              }}
-              onMcpChange={(next) => {
-                setMcp(next);
-                setSaved(false);
-              }}
+              onModelsChange={handleModelsChange}
+              onMcpChange={handleMcpChange}
             />
           )}
         </div>
 
         <footer className="settings-footer">
-          <span className="settings-status">
-            {ldapInvalid ? "LDAP 已启用：请填写服务器地址与 Base DN" : saved ? "已保存 ✓" : "修改后记得点击保存"}
+          <span className={"settings-status" + (saveState.phase === "failed" ? " settings-status-error" : "")}>
+            {ldapInvalid
+              ? "LDAP 已启用：请填写服务器地址与 Base DN"
+              : saveState.phase === "saving"
+                ? "保存中…"
+                : saveState.phase === "saved"
+                  ? "已保存 ✓"
+                  : saveState.phase === "failed"
+                    ? `保存失败：${saveState.message}`
+                    : "模型与 MCP 的增删改会自动保存"}
           </span>
           <span className="settings-footer-spacer" />
           <button type="button" className="cfg-btn cfg-btn-ghost" onClick={() => void restartEngine()}>
             重启引擎应用
           </button>
-          <button type="button" className="cfg-btn" onClick={handleSave} disabled={ldapInvalid}>
-            保存
+          <button
+            type="button"
+            className="cfg-btn"
+            onClick={() => void handleSave()}
+            disabled={ldapInvalid || saveState.phase === "saving"}
+          >
+            {saveState.phase === "saving" ? "保存中…" : "保存"}
           </button>
         </footer>
       </aside>

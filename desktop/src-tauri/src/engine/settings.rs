@@ -79,6 +79,46 @@ pub fn read_settings(path: &Path) -> Result<Value, ShellError> {
     })
 }
 
+/// 读取 settings.json 的"可继续"版本：JSON 非法时先备份再返回空对象。
+///
+/// 用途（2026-11-01 修复"保存系统管理失败"）：
+/// `save_desktop_config` 需要把 mcpServers / web.ldap 合并写回 settings.json。
+/// 用户在 CLI 里手工编辑过该文件（注释、尾逗号、被截断）时解析必然失败，
+/// 旧实现直接 `?` 上抛——结果是"模型一条都没保存，界面报保存失败"，
+/// 而真正的故障点与模型配置毫无关系，用户完全无从判断。
+///
+/// 语义取舍：
+/// - 绝不静默丢数据 —— 非法文件先复制到 `settings.json.corrupt-<ts>.bak`；
+/// - 返回空对象让上层继续写，保证"保存"这个动作对用户是可完成的；
+/// - 备份路径写进日志，用户/支持人员可据此恢复手工内容。
+pub fn read_settings_or_backup(path: &Path) -> Result<Value, ShellError> {
+    match read_settings(path) {
+        Ok(v) => Ok(v),
+        Err(_) => {
+            let raw = match std::fs::read_to_string(path) {
+                Ok(raw) => raw,
+                // 文件不可读（权限等）：不是"内容非法"，照旧上抛，别假装成功
+                Err(e) => {
+                    return Err(ShellError::Config(format!(
+                        "settings.json 读取失败：{e}"
+                    )))
+                }
+            };
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let backup = path.with_extension(format!("json.corrupt-{ts}.bak"));
+            std::fs::write(&backup, raw.as_bytes())?;
+            log::warn!(
+                "settings.json 内容非法，已备份到 {} 并按空配置继续合并写入",
+                backup.display()
+            );
+            Ok(Value::Object(Map::new()))
+        }
+    }
+}
+
 /// 确保 `~/.deepcode/settings.json` 中 `web.enabled = true`（幂等）。
 ///
 /// 合并语义：读旧 JSON → 仅改 `web.enabled` → 写回（保留全部未知字段）。

@@ -212,7 +212,7 @@ pub fn migrate_keychain_to_sqlite(accounts: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::MutexGuard;
 
     /// 与 config_persist 测试共享的 HOME 注入互斥锁（并行测试下 set_var 互扰防护）
     fn home_lock() -> MutexGuard<'static, ()> {

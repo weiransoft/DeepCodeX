@@ -6,7 +6,13 @@
  * 由用户输入并随保存上送，留空表示保持已保存密钥不变。
  */
 import { useState } from "react";
-import { type DesktopModel, type DesktopMcpServer, type ModelType, MODEL_TYPE_OPTIONS } from "../desktopConfig";
+import {
+  type DesktopModel,
+  type DesktopMcpServer,
+  type ModelType,
+  MODEL_TYPE_OPTIONS,
+  THINKING_EFFORT_OPTIONS,
+} from "../desktopConfig";
 
 /** uuid（优先 crypto.randomUUID；127.0.0.1 安全上下文可用，降级到 Math.random） */
 function uuid(): string {
@@ -194,6 +200,9 @@ function ModelsSection({ models, editing, onAdd, onEdit, onDelete, onApply, onCa
               {m.temperature != null && <span className="cfg-tag">温度 {m.temperature}</span>}
               {m.thinkingMode === "on" && <span className="cfg-tag">思考开</span>}
               {m.thinkingMode === "off" && <span className="cfg-tag">思考关</span>}
+              {m.thinkingEffort !== undefined && m.thinkingEffort !== "default" && m.thinkingMode !== "off" && (
+                <span className="cfg-tag">强度 {m.thinkingEffort}</span>
+              )}
             </div>
             {m.baseUrl && <div className="cfg-card-sub">{m.baseUrl}</div>}
             <div className="cfg-card-actions">
@@ -235,6 +244,7 @@ function ModelEditor({
     d.maxToolRounds != null ||
     (d.imageInput !== undefined && d.imageInput !== "default") ||
     (d.thinkingMode !== undefined && d.thinkingMode !== "default") ||
+    (d.thinkingEffort !== undefined && d.thinkingEffort !== "default") ||
     d.temperature != null ||
     d.topP != null ||
     d.topK != null;
@@ -430,6 +440,28 @@ function ModelEditor({
                 </label>
               ))}
             </div>
+          </div>
+
+          {/* 思考强度（2026-11-01 新增）：映射引擎 REASONING_EFFORT。
+              关闭思考时该档位无意义，直接禁用并给出说明，避免"配了不生效"。 */}
+          <div className="cfg-field">
+            <label>思考强度</label>
+            <select
+              value={d.thinkingEffort ?? "default"}
+              disabled={d.thinkingMode === "off"}
+              onChange={(e) => set({ thinkingEffort: e.target.value })}
+            >
+              {THINKING_EFFORT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+            <p className="cfg-field-hint">
+              {d.thinkingMode === "off"
+                ? "思考模式已关闭，强度不生效。"
+                : "映射引擎 REASONING_EFFORT。Qwen3.8 官方仅三档（low / medium / xhigh），高 与 最高 会向其官方档位靠拢；DeepSeek 与 OpenAI 系按五档原样下发。"}
+            </p>
           </div>
 
           <div className="cfg-field">

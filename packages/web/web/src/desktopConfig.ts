@@ -27,6 +27,27 @@ export const MODEL_TYPE_OPTIONS: { value: ModelType; label: string }[] = [
   { value: "custom", label: "自定义 / 其它" },
 ];
 
+/**
+ * 思考强度候选（2026-11-01 新增）
+ *
+ * 取值与引擎 `ReasoningEffort` 五档逐字一致（packages/core/src/settings.ts），
+ * 桌面壳按 `REASONING_EFFORT` 注入子进程环境变量，core 解析链
+ * systemEnv 优先级最高，注入即生效。
+ *
+ * Qwen 差异（packages/core/src/common/openai-thinking.ts
+ * `mapReasoningEffortToQwen`）：Qwen3.8 官方只认 low / medium / xhigh 三档，
+ * core 侧做单调映射（high → medium、max → xhigh），故这里保留五档原样下发，
+ * 由引擎按模型能力折算，UI 不做特判。
+ */
+export const THINKING_EFFORT_OPTIONS: { value: string; label: string }[] = [
+  { value: "default", label: "跟随模型默认" },
+  { value: "low", label: "低（省 token，速度优先）" },
+  { value: "medium", label: "中" },
+  { value: "high", label: "高" },
+  { value: "xhigh", label: "极高（Qwen3.8 官方默认档）" },
+  { value: "max", label: "最高（引擎默认）" },
+];
+
 /** 模型配置（与壳 ModelConfig 逐字段对齐，camelCase） */
 export interface DesktopModel {
   /** 唯一标识（前端 crypto.randomUUID 生成） */
@@ -70,6 +91,11 @@ export interface DesktopModel {
   imageInput?: string;
   /** 思考模式："default"跟随模型 / "on" / "off" → THINKING_ENABLED */
   thinkingMode?: string;
+  /**
+   * 思考强度（"default"跟随模型 / low / medium / high / xhigh / max）
+   * → REASONING_EFFORT（引擎 ReasoningEffort 五档；2026-11-01 新增）
+   */
+  thinkingEffort?: string;
   /** 采样温度（0~2，留空最佳配置）→ TEMPERATURE */
   temperature?: number | null;
   /** Top P（0~1，预留）→ DEEPCODE_TOP_P */
@@ -149,7 +175,11 @@ export interface DesktopConfigSave {
 function requireBridge() {
   const b = getDesktopBridge();
   if (!b) {
-    throw new Error("当前环境不支持桌面配置（仅 DeepCode Desktop 内可用）");
+    // 文案要能指导用户下一步：浏览器版没有壳进程，配置只能落在启动引擎的环境变量上
+    throw new Error(
+      "当前是浏览器访问，没有桌面壳进程，无法写入本地配置——请用 DeepCode 桌面客户端打开「系统管理」" +
+        "（浏览器版请通过启动引擎的环境变量配置模型）"
+    );
   }
   return b;
 }
