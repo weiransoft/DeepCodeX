@@ -861,9 +861,18 @@ fn wait_healthy(
         if Instant::now() >= deadline {
             let tail = new_engine_output_lines(log_path, log_offset, 12);
             let detail = if tail.is_empty() {
+                // 零输出时进程仍在，几乎只可能是卡在内核态 I/O。实测栈为
+                // open() ← uv_fs_open ← ReadFileSync ← GetPackageJSON ←
+                // TraverseParent：Node 模块解析沿 cwd 向上找 package.json 时挂起。
+                // 开发期引擎位于 ~/Documents（macOS TCC 保护目录），GUI 启动的
+                // 子进程首次读取会触发「想访问你的文稿文件夹」询问并阻塞等待，
+                // 终端里手动启动因继承终端授权而不复现——故此处给出权限提示。
                 format!(
                     "引擎在 {}s 内未就绪（{base_url}），且该进程在此期间没有任何输出。\
-                     完整日志：{}",
+                     这通常意味着进程卡在内核态 I/O（Node 解析模块时读取 package.json）。\
+                     若引擎位于 ~/Documents、~/Desktop 等受保护目录，请在系统弹出的\
+                     「想访问你的文稿文件夹」询问中允许，或在「系统设置 → 隐私与安全性 →\
+                     文件与文件夹 / 完全磁盘访问权限」中为 DeepCode 授权。完整日志：{}",
                     timeout.as_secs(),
                     log_path.display()
                 )
