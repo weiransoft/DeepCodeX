@@ -146,6 +146,14 @@ export function App() {
   // ---------- 桌面配置（首次登录向导 / 系统管理） ----------
   /** 桌面配置快照（模型 / MCP / 首次登录标志）；非桌面环境恒为 null */
   const [desktopConfig, setDesktopConfig] = useState<DesktopConfig | null>(null);
+  /**
+   * 桌面配置加载失败原因（2026-11-01 新增，防数据丢失）。
+   *
+   * config_save 的语义是"完整列表覆盖"（缺省即清空），所以一旦 config_get 失败、
+   * 前端手里只有空草稿，用户点保存就会把磁盘上已有的模型列表整片抹掉。
+   * 记住失败原因，保存前据此拦截，避免"看不见的覆盖"。
+   */
+  const [configLoadError, setConfigLoadError] = useState<string | null>(null);
   /** 首次登录向导是否弹出 */
   const [showWizard, setShowWizard] = useState(false);
   /** 系统管理抽屉是否打开 */
@@ -1067,11 +1075,15 @@ export function App() {
           getDesktopConfig()
             .then((cfg) => {
               setDesktopConfig(cfg);
+              setConfigLoadError(null);
               if (!cfg.firstLoginDone) setShowWizard(true);
             })
             .catch((e: unknown) => {
               if (e instanceof ApiError && e.status === 401) return;
-              showToast(e instanceof Error ? e.message : "桌面配置加载失败");
+              const message = e instanceof Error ? e.message : "桌面配置加载失败";
+              // 记录失败：保存入口据此拦截，防止用空草稿覆盖磁盘配置
+              setConfigLoadError(message);
+              showToast(message);
             });
         }
       })
@@ -1121,16 +1133,24 @@ export function App() {
    */
   const handleSettingsSave = useCallback(
     async (models: DesktopModel[], mcpServers: DesktopMcpServer[], ldap: DesktopLdapConfig): Promise<void> => {
+      // 配置从未成功加载时禁止保存：payload 是"完整列表覆盖"语义，
+      // 用空/残缺草稿落盘会把磁盘上已有的模型列表清空（2026-11-01）。
+      if (desktopConfig === null && configLoadError) {
+        const message = `配置未成功加载，已阻止保存以免覆盖现有模型（原因：${configLoadError}）`;
+        showToast(message);
+        throw new Error(message);
+      }
       try {
         const saved = await saveDesktopConfig({ models, mcpServers, ldap, setupCompleted: true });
         setDesktopConfig(saved);
+        setConfigLoadError(null);
       } catch (e: unknown) {
         const message = e instanceof Error ? e.message : "配置保存失败";
         showToast(message);
         throw e;
       }
     },
-    [showToast]
+    [showToast, desktopConfig, configLoadError]
   );
 
   // authed 后拉取配置与可用工作空间

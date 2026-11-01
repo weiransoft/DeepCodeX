@@ -1,9 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "DeepCode 主窗口最小权限集：本地产权（tauri 引导页）仅授予 WebView 核心能力；引擎本机源（http://127.0.0.1:*）经 remote 授权以注入桌面桥。自定义 IPC 面为 Rust 侧 invoke_handler 注册的白名单命令（engine_status / engine_restart / engine_open_logs / engine_log_tail / engine_credentials，其中 engine_credentials 仅对引擎 origin 放行）；shell 文件 进程 网络能力一律不暴露给前端（PRD NFR-3）。",
+  "description": "DeepCode 主窗口最小权限集：本地产权（tauri 引导页）仅授予 WebView 核心能力；引擎本机源（http://127.0.0.1:*）经 remote 授权以注入桌面桥。自定义 IPC 面为 permissions/app-ipc.toml 声明的 allow-app-ipc 权限集，逐条对应 Rust 侧 invoke_handler 注册的白名单命令（engine_status / engine_restart / engine_open_logs / engine_log_tail / engine_credentials / config_get / config_save / window_drag / window_new / boot_diag，其中 engine_credentials 仅对引擎 origin 放行）；shell 文件 进程 网络能力一律不暴露给前端（PRD NFR-3）。",
   "windows": ["boot"],
-  "permissions": ["core:default", "core:webview:default", "core:window:allow-start-dragging"],
+  "permissions": ["core:default", "core:webview:default", "core:window:allow-start-dragging", "allow-app-ipc"],
   "remote": {
     "urls": ["http://127.0.0.1:*"]
   }

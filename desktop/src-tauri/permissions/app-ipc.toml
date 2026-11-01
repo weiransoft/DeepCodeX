@@ -1,0 +1,30 @@
+# DeepCode 桌面桥自有命令的 ACL 权限集
+#
+# 背景（2026-11-01 修复 "Command config_save not allowed by ACL"）：
+# 主窗口 label 为 `boot`，启动时加载本地 boot.html，引擎就绪后该窗口会导航到
+# `http://127.0.0.1:<port>`——此时 webview 的 origin 由本地 tauri 协议变成 remote。
+# Tauri 2 的 ACL 语义是：本地 origin 调用应用自有命令默认放行，而 **remote origin
+# 的调用必须显式授予权限**，否则一律拒绝。此前 capabilities 里只有 core:* 系列，
+# 从未为自有命令定义 permission，于是"添加模型 → 保存"直接报
+# `Command config_save not allowed by ACL`。
+#
+# 安全边界：这里只放行 src/lib.rs `invoke_handler` 已注册的命令，不引入任何
+# 插件能力——shell / fs / http / process 仍然完全不可达（PRD NFR-3 不变）。
+# 命令内部的业务授权照旧生效（例如 engine_credentials 仍会自行校验调用来源
+# 必须是引擎 origin），ACL 放行不等于绕过这些检查。
+
+[[permission]]
+identifier = "allow-app-ipc"
+description = "DeepCode 桌面桥自有命令：引擎状态/重启/日志、桌面配置读写、窗口拖动与新建。仅覆盖 invoke_handler 注册面，不暴露 shell/fs/http 插件能力。"
+commands.allow = [
+  "engine_status",
+  "engine_restart",
+  "engine_open_logs",
+  "engine_log_tail",
+  "engine_credentials",
+  "config_get",
+  "config_save",
+  "window_drag",
+  "window_new",
+  "boot_diag",
+]
