@@ -62,3 +62,12 @@ coverage.deduped.lcov
 
 # 发布产物（GitHub Release asset，不入库）
 deploy/*.tgz
+
+# WorkBuddy 工作区（本机记忆日志与会话数据，不入库；本地保留不删除）
+.workbuddy/
+
+# 临时图标素材（本机挑选用，不入库）
+tmp-icon/
+
+# 一次性诊断脚本（本机排查 LLM 配置用，不入库）
+packages/web/.llm-probe.mts
