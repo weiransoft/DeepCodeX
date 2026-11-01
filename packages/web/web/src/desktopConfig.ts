@@ -171,6 +171,34 @@ export interface DesktopConfigSave {
   setupCompleted: boolean;
 }
 
+/** 保存/切换结果：配置快照 + 是否因引擎相关配置变化而自动重启 */
+export interface ConfigSaveResult {
+  /** 保存后的配置快照（密钥不回传，仅 hasKey） */
+  config: DesktopConfig;
+  /** 是否自动重启了引擎（模型/密钥/MCP 等「启动期生效」的配置发生变化） */
+  engineRestarted: boolean;
+  /** 重启后的引擎地址（未重启为 null）；壳已完成窗口导航，前端无需跳转 */
+  engineUrl: string | null;
+}
+
+/** 可切换模型（模型选择器候选项；不含任何密钥） */
+export interface ModelOption {
+  /** 模型条目标识（setDefaultModel 的入参） */
+  id: string;
+  /** 展示名 */
+  name: string;
+  /** 实际 API model id */
+  model: string;
+  /** 供应商类型 */
+  modelType: string;
+  /** API Base URL */
+  baseUrl: string;
+  /** 是否启用（禁用项不可切换） */
+  enabled: boolean;
+  /** 是否为当前默认模型 */
+  isDefault: boolean;
+}
+
 /** 取桥；非桌面环境抛错 */
 function requireBridge() {
   const b = getDesktopBridge();
@@ -189,7 +217,32 @@ export async function getDesktopConfig(): Promise<DesktopConfig> {
   return requireBridge().invoke<DesktopConfig>("config_get");
 }
 
-/** 保存桌面配置（models / mcpServers 为完整列表，缺省即清空） */
-export async function saveDesktopConfig(payload: DesktopConfigSave): Promise<DesktopConfig> {
-  return requireBridge().invoke<DesktopConfig>("config_save", { payload });
+/**
+ * 保存桌面配置（models / mcpServers 为完整列表，缺省即清空）。
+ *
+ * 模型（含 Key/baseURL/provider）与 mcpServers 都是「引擎启动期生效」配置，
+ * 壳侧会在检测到这类配置变化时自动重启引擎并导航到新地址——即保存即生效，
+ * 调用方据 `engineRestarted` 决定提示文案。
+ */
+export async function saveDesktopConfig(payload: DesktopConfigSave): Promise<ConfigSaveResult> {
+  return requireBridge().invoke<ConfigSaveResult>("config_save", { payload });
+}
+
+/**
+ * 列出可切换的模型（Composer 模型选择器）。
+ *
+ * 仅本地引擎页面可用（隧道页属远端引擎，壳会拒绝），非桌面环境抛错。
+ */
+export async function listModels(): Promise<ModelOption[]> {
+  return requireBridge().invoke<ModelOption[]>("models_list");
+}
+
+/**
+ * 切换默认模型：壳侧改写 isDefault → 重启引擎 → 导航到新地址。
+ *
+ * 切换必然重启（模型经进程环境变量注入，运行中的进程无法换模型），
+ * 进行中的对话会中断；调用方应先向用户确认。
+ */
+export async function setDefaultModel(id: string): Promise<ConfigSaveResult> {
+  return requireBridge().invoke<ConfigSaveResult>("model_set_default", { id });
 }

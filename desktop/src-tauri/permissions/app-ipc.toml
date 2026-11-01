@@ -24,6 +24,11 @@ commands.allow = [
   "engine_credentials",
   "config_get",
   "config_save",
+  # 模型切换器（Composer）：列表 + 设默认并重启。
+  # 二者都会自行校验调用来源必须是**本地**引擎 origin（隧道页属远端引擎，
+  # 改本地+重启本地引擎既无意义也会误伤本地会话），ACL 放行不绕过该检查。
+  "models_list",
+  "model_set_default",
   "window_drag",
   "window_new",
   "boot_diag",

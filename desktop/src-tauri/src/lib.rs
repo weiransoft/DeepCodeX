@@ -173,6 +173,8 @@ pub fn run() {
             ipc::engine_credentials,
             ipc::config_get,
             ipc::config_save,
+            ipc::models_list,
+            ipc::model_set_default,
             ipc::window_drag,
             ipc::window_new,
             ipc::boot_diag,

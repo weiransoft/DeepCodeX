@@ -641,6 +641,47 @@ pub fn resolve_engine_launch() -> EngineLaunch {
     resolve_engine_launch_inner()
 }
 
+/// 引擎启动指纹：把「引擎下一次启动才会消费的配置」归一为稳定哈希。
+///
+/// 用途（2026-11-02 用户需求「编辑模型保存就自动重启引擎」）：
+/// 模型（含 API Key / baseURL / provider）经**进程环境变量**注入引擎，
+/// mcpServers / web.ldap 由引擎**启动时**读取 settings.json——这两类配置改完
+/// 不重启就不生效，此前只能靠用户手动点「重启引擎应用」。保存后对比指纹，
+/// 变化即自动重启，把「保存成功」与「配置真正生效」合并成一个动作。
+///
+/// 指纹包含密钥**明文哈希**而非明文本身：既能感知密钥被替换，又不会把密钥
+/// 写入日志或返回前端（只暴露十六进制摘要）。
+///
+/// 不参与指纹的配置（会话期热读，改完立刻生效，无需重启）：
+/// `model` / `thinkingEnabled` / `reasoningEffort` / `enabledSkills` 等——
+/// core 每轮回调 `getResolvedSettings()` 重新解析，改盘即生效。
+pub fn engine_fingerprint() -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    // 1) 启动注入环境变量（模型 / provider / baseURL / API Key），按 key 排序保证稳定
+    let mut pairs: Vec<(String, String)> = resolve_engine_launch().env.into_iter().collect();
+    pairs.sort();
+    for (key, value) in &pairs {
+        hasher.update(key.as_bytes());
+        hasher.update(b"=");
+        hasher.update(value.as_bytes());
+        hasher.update(b"\n");
+    }
+    // 2) 引擎启动时读取的 settings.json 节（mcpServers / web.ldap）
+    if let Ok(path) = home_settings_path() {
+        if let Ok(value) = read_settings(&path) {
+            for section in ["mcpServers", "web"] {
+                if let Some(node) = value.get(section) {
+                    hasher.update(section.as_bytes());
+                    hasher.update(node.to_string().as_bytes());
+                }
+            }
+        }
+    }
+    format!("{:x}", hasher.finalize())
+}
+
 fn resolve_engine_launch_inner() -> EngineLaunch {
     let mut env = std::collections::HashMap::new();
     let mut redact: Vec<String> = Vec::new();

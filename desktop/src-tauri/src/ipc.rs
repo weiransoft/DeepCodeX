@@ -275,15 +275,185 @@ pub fn config_get() -> Result<crate::config_persist::DesktopConfig, ShellError> 
     crate::config_persist::read_desktop_config()
 }
 
+/// 保存桌面配置的结果：最新快照 + 是否因引擎相关配置变化而重启。
+///
+/// `engineRestarted` 为 true 时窗口已被导航到新引擎地址（端口随重启变化），
+/// 前端无需再处理——页面会自动加载到新引擎；仅用于提示文案与测试断言。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigSaveResult {
+    /// 保存后的配置快照（密钥不回传，仅 hasKey）
+    pub config: crate::config_persist::DesktopConfig,
+    /// 是否发生了自动重启（引擎相关配置指纹变化）
+    pub engine_restarted: bool,
+    /// 重启后引擎地址（未重启时为 None）
+    pub engine_url: Option<String>,
+}
+
 /// 保存桌面配置（模型元数据 + MCP 服务合并写入 settings.json；明文 API Key 进钥匙串）。
 ///
-/// 入参 `payload` 为命名参数（前端经 `invoke("config_save", { payload })` 传入）；
-/// 返回保存后的最新配置快照。
+/// **保存即生效**（2026-11-02 用户需求）：模型（含 Key/baseURL/provider）经进程
+/// 环境变量注入、mcpServers/ldap 由引擎启动时读取，两者改完不重启都不生效。
+/// 故保存前后对比 `engine_fingerprint`，变化则自动重启引擎并把窗口导航到新地址，
+/// 用户无需再手动点「重启引擎应用」。
+///
+/// 入参 `payload` 为命名参数（前端经 `invoke("config_save", { payload })` 传入）。
 #[tauri::command]
-pub fn config_save(
+pub async fn config_save(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
     payload: crate::config_persist::DesktopConfigSave,
-) -> Result<crate::config_persist::DesktopConfig, ShellError> {
-    crate::config_persist::save_desktop_config(payload)
+) -> Result<ConfigSaveResult, ShellError> {
+    // 落盘前取指纹：此时桌面配置仍是「引擎当前正在用的那一份」
+    let before = crate::config_persist::engine_fingerprint();
+    let config = crate::config_persist::save_desktop_config(payload)?;
+    let after = crate::config_persist::engine_fingerprint();
+    if before == after {
+        return Ok(ConfigSaveResult {
+            config,
+            engine_restarted: false,
+            engine_url: None,
+        });
+    }
+
+    // 重启（阻塞操作放线程池）：变更已落盘，重启后的引擎会读到新配置
+    let rt = Arc::clone(&state.engine);
+    let status = tauri::async_runtime::spawn_blocking(move || rt.restart())
+        .await
+        .map_err(|e| ShellError::EngineRuntime(format!("重启任务执行失败: {e}")))??;
+    let engine_url = state.engine.base_url();
+    // 端口随重启变化：旧页面 origin 已失效，必须导航到新地址（失败仅告警，
+    // 用户可手动刷新——不因导航失败回退「配置已生效」这一事实）
+    if status.state == "ready" {
+        if let Err(e) = navigate_to(&window, &format!("{engine_url}/")) {
+            log::warn!("配置已生效，但窗口导航到新引擎失败（{engine_url}）：{e}");
+        }
+    }
+    Ok(ConfigSaveResult {
+        config,
+        engine_restarted: true,
+        engine_url: Some(engine_url),
+    })
+}
+
+/// 模型选项（Composer 模型切换器的候选项）——**不含任何密钥**，仅展示与切换所需元数据。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelOption {
+    /// 模型条目标识（`model_set_default` 的入参）
+    pub id: String,
+    /// 展示名
+    pub name: String,
+    /// 实际 API model id（name 留空时的回落值由壳侧归一）
+    pub model: String,
+    /// 供应商类型（openai / anthropic / …）
+    pub model_type: String,
+    /// API Base URL
+    pub base_url: String,
+    /// 是否启用（禁用项不可切换）
+    pub enabled: bool,
+    /// 是否为当前默认模型
+    pub is_default: bool,
+}
+
+/// 仅允许本地引擎 origin 调用（隧道页属于远端引擎，不得改动本地模型配置）。
+///
+/// 与 `engine_credentials` 的双 origin 放行不同：这里改的是**本机**配置并会
+/// 重启**本机**引擎，远端页面调用既无意义也会误伤本地会话。
+fn require_local_engine_origin(window: &WebviewWindow, state: &State<'_, AppState>) -> Result<(), ShellError> {
+    let current = window
+        .url()
+        .map_err(|e| ShellError::Config(format!("无法读取窗口地址: {e}")))?;
+    let base = state.engine.base_url();
+    if is_engine_origin(current.as_str(), &base) {
+        return Ok(());
+    }
+    Err(ShellError::Config(
+        "该操作仅支持在本地引擎页面执行（当前页面不是本地引擎）".into(),
+    ))
+}
+
+/// 列出可切换的模型（Composer 模型选择器数据源；密钥一律不下发）。
+///
+/// 顺序与桌面配置一致（`isDefault` 优先靠前），前端可直接按序渲染。
+#[tauri::command]
+pub fn models_list(window: WebviewWindow, state: State<AppState>) -> Result<Vec<ModelOption>, ShellError> {
+    require_local_engine_origin(&window, &state)?;
+    let cfg = crate::config_persist::read_desktop_config()?;
+    let mut options: Vec<ModelOption> = cfg
+        .models
+        .iter()
+        .map(|m| ModelOption {
+            id: m.id.clone(),
+            name: m.name.clone(),
+            model: if m.model.trim().is_empty() { m.name.clone() } else { m.model.clone() },
+            model_type: m.model_type.clone(),
+            base_url: m.base_url.clone(),
+            enabled: m.enabled,
+            is_default: m.is_default,
+        })
+        .collect();
+    // 默认模型置顶：切换器首项即当前生效模型，避免用户误判
+    options.sort_by_key(|m| !m.is_default);
+    Ok(options)
+}
+
+/// 切换默认模型（Composer 选择器）：改写桌面配置的 `isDefault` → 重启引擎 → 导航到新地址。
+///
+/// 模型（含 API Key / baseURL / provider）是以**进程环境变量**注入引擎的，
+/// 运行中的进程无法换模型，所以切换必然伴随一次重启（约 1s，进行中的对话会中断）。
+/// 返回体与 `config_save` 同构，前端据此提示并等待页面自动跳转。
+#[tauri::command]
+pub async fn model_set_default(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<ConfigSaveResult, ShellError> {
+    require_local_engine_origin(&window, &state)?;
+    let current = crate::config_persist::read_desktop_config()?;
+    let target = current.models.iter().find(|m| m.id == id).ok_or_else(|| {
+        ShellError::Config("模型不存在或已被删除，请刷新后重试".into())
+    })?;
+    if !target.enabled {
+        return Err(ShellError::Config("该模型已停用，启用后才能切换".into()));
+    }
+    if target.is_default {
+        // 已是默认模型：不重启（避免无意义中断），直接回当前快照
+        return Ok(ConfigSaveResult {
+            config: current,
+            engine_restarted: false,
+            engine_url: None,
+        });
+    }
+
+    // 重写 isDefault（全局至多一个），其余字段原样回传：save 走同一落盘链路
+    let mut models = current.models.clone();
+    for model in &mut models {
+        model.is_default = model.id == id;
+    }
+    let payload = crate::config_persist::DesktopConfigSave {
+        models,
+        mcp_servers: current.mcp_servers.clone(),
+        ldap: current.ldap.clone(),
+        setup_completed: current.first_login_done,
+    };
+    let config = crate::config_persist::save_desktop_config(payload)?;
+
+    let rt = Arc::clone(&state.engine);
+    let status = tauri::async_runtime::spawn_blocking(move || rt.restart())
+        .await
+        .map_err(|e| ShellError::EngineRuntime(format!("重启任务执行失败: {e}")))??;
+    let engine_url = state.engine.base_url();
+    if status.state == "ready" {
+        if let Err(e) = navigate_to(&window, &format!("{engine_url}/")) {
+            log::warn!("模型已切换，但窗口导航到新引擎失败（{engine_url}）：{e}");
+        }
+    }
+    Ok(ConfigSaveResult {
+        config,
+        engine_restarted: true,
+        engine_url: Some(engine_url),
+    })
 }
 
 // ───────────────────────────── SSH 远程连接（M2） ─────────────────────────────

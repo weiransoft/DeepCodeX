@@ -1099,8 +1099,10 @@ export function App() {
     (models: DesktopModel[], mcpServers: DesktopMcpServer[]): void => {
       saveDesktopConfig({ models, mcpServers, setupCompleted: true })
         .then((saved) => {
-          setDesktopConfig(saved);
+          setDesktopConfig(saved.config);
           setShowWizard(false);
+          // 模型属「启动期生效」配置：壳会在检测到变化时自动重启引擎
+          if (saved.engineRestarted) showToast("模型已保存，正在重启引擎以应用配置…");
         })
         .catch((e: unknown) => {
           showToast(e instanceof Error ? e.message : "配置保存失败");
@@ -1118,7 +1120,7 @@ export function App() {
       setupCompleted: true,
     })
       .then((saved) => {
-        setDesktopConfig(saved);
+        setDesktopConfig(saved.config);
         setShowWizard(false);
       })
       .catch(() => setShowWizard(false));
@@ -1142,8 +1144,10 @@ export function App() {
       }
       try {
         const saved = await saveDesktopConfig({ models, mcpServers, ldap, setupCompleted: true });
-        setDesktopConfig(saved);
+        setDesktopConfig(saved.config);
         setConfigLoadError(null);
+        // 模型/密钥/MCP 变更 → 壳已自动重启引擎并导航到新地址（保存即生效）
+        if (saved.engineRestarted) showToast("已保存，引擎正在重启以应用新配置…");
       } catch (e: unknown) {
         const message = e instanceof Error ? e.message : "配置保存失败";
         showToast(message);
