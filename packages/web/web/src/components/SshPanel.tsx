@@ -2,13 +2,20 @@
  * 侧边栏「远程 SSH」视图（Trae 风格 Shell 重构 + DESKTOP-PRD FR-2.1~2.7）。
  *
  * 数据面属壳 M2 扩展（M1-NOTES §4b）：目标列表 / 导入 / 连接分别对应壳 IPC
- * `ssh_list_targets` / `ssh_import_config` / `ssh_connect` / `ssh_progress_events`，
- * 当前壳仅注册 M1 命令（engine_* / config_* / window_drag / boot_diag）。
+ * `ssh_list_targets` / `ssh_import_config` / `ssh_connect` / `ssh_progress_events`。
+ * 截至 2026-11-01，壳侧 `invoke_handler` 仍未注册任何 `ssh_*` 命令
+ * （`desktop/src-tauri/src/ssh/` 目录不存在，M2 子系统整体未实现），
  * 故本面板做**桥守卫优雅降级**：
  * - 桥不存在（纯浏览器）→ 整个视图不挂载（App 控制）；
  * - IPC 命令未注册（M1 壳）→ 列表区展示「M2 能力未就绪」引导，表单可填写、
  *   提交时明确提示等待壳更新，绝不静默失败；
  * - M2 壳就绪后无需改 UI：invoke 即接通（事件监听见 connect() 内注释）。
+ *
+ * 错误分类（2026-11-01 补）：探测失败**不能一律说成「M2 未就绪」**。
+ * Tauri 2 中「命令未注册」与「ACL 未授权」是两类完全不同的原因——
+ * 后者是壳的权限配置缺陷（正是 `config_save not allowed by ACL` 那类事故），
+ * 若被误报成「请更新客户端」，真实故障就会被掩盖。分类逻辑见
+ * classifySshProbeFailure。
  *
  * 安全对齐（FR-2.2）：认证方式默认「系统 ssh agent 密钥」；密码仅存组件内存、
  * 仅随单次 ssh_connect 提交，绝不写配置文件/密钥库以外路径。
@@ -52,6 +59,39 @@ const EMPTY_FORM: ConnectForm = {
   installMode: "auto",
 };
 
+/** 桥探测失败分类 */
+export type SshProbeFailureKind =
+  /** 命令未注册——壳版本尚无 M2 能力，属预期内降级 */
+  | "absent"
+  /** 命令已注册但 ACL 未授权——壳权限配置缺陷，必须当故障暴露 */
+  | "denied"
+  /** 其它真实错误（桥异常、序列化失败等） */
+  | "error";
+
+/** 一次探测失败的结构化描述 */
+export interface SshProbeFailure {
+  kind: SshProbeFailureKind;
+  /** 原始错误文本，供诊断展示 */
+  detail: string;
+}
+
+/**
+ * 归类桌面桥调用失败。
+ *
+ * 本地 origin 调用自有命令默认放行，因此这两类错误只在打包后的引擎页
+ * （remote origin）出现，本地开发根本测不到——只能靠 message 判别：
+ * - `Command ssh_list_targets not found`          → 壳未注册该命令（M2 未实现）
+ * - `Command ssh_list_targets not allowed by ACL` → 壳已注册但 ACL 未授权（配置缺陷）
+ *
+ * 顺序敏感：ACL 文案不含 `not found`，但仍先判 ACL，避免大小写/文案变体漏判。
+ */
+export function classifySshProbeFailure(err: unknown): SshProbeFailure {
+  const detail = err instanceof Error ? err.message : typeof err === "string" ? err : err == null ? "" : String(err);
+  if (/not allowed by acl/i.test(detail)) return { kind: "denied", detail };
+  if (/not found|unknown command|no command/i.test(detail)) return { kind: "absent", detail };
+  return { kind: "error", detail: detail === "" ? "未知错误（无错误信息）" : detail };
+}
+
 /** SshPanel 组件属性 */
 export interface SshPanelProps {
   /** 当前会话工作区根（本地工作区卡片展示；空 = 无活跃会话） */
@@ -69,6 +109,8 @@ export function SshPanel({ projectRoot, onAuthorityChange, onNotice }: SshPanelP
   const [targets, setTargets] = useState<SshTarget[] | null>(null);
   /** M2 能力是否可用（ssh_list_targets 探测结果） */
   const [capabilityReady, setCapabilityReady] = useState<boolean | null>(null);
+  /** 探测失败的结构化原因（成功时为 null） */
+  const [probeFailure, setProbeFailure] = useState<SshProbeFailure | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [form, setForm] = useState<ConnectForm>(EMPTY_FORM);
   const [formError, setFormError] = useState("");
@@ -81,16 +123,41 @@ export function SshPanel({ projectRoot, onAuthorityChange, onNotice }: SshPanelP
     try {
       const list = await bridge.invoke<SshTarget[]>("ssh_list_targets");
       setTargets(Array.isArray(list) ? list : []);
+      setProbeFailure(null);
       setCapabilityReady(true);
-    } catch {
+    } catch (e: unknown) {
+      const failure = classifySshProbeFailure(e);
+      setProbeFailure(failure);
       setCapabilityReady(false);
       setTargets(null);
+      // ACL 未授权 ≠ 版本落后：这是壳的权限配置缺陷，必须留痕，不能被降级文案掩盖
+      if (failure.kind === "denied") {
+        console.error(
+          `[ssh] 桌面桥拒绝 ssh_list_targets：${failure.detail}。` +
+            "请在 desktop/src-tauri/permissions/app-ipc.toml 的 commands.allow 中补入 " +
+            "ssh_list_targets / ssh_import_config / ssh_connect / ssh_disconnect 并重建客户端。"
+        );
+      }
     }
   }, [bridge]);
 
   useEffect(() => {
     void refreshTargets();
   }, [refreshTargets]);
+
+  /** 按探测失败原因给出准确提示（不得把配置缺陷说成"请更新客户端"） */
+  const probeHint = (): string => {
+    if (probeFailure?.kind === "denied") {
+      return (
+        `桌面桥权限配置缺失：${probeFailure.detail}。` +
+        "这是壳的 ACL 白名单未包含 ssh_* 命令导致，请联系维护者补齐后重建客户端（不是升级客户端能解决的）。"
+      );
+    }
+    if (probeFailure?.kind === "error") {
+      return `SSH 能力探测失败：${probeFailure.detail}`;
+    }
+    return "SSH 连接能力由桌面壳 M2 提供：请更新 DeepCode Desktop 后重试。";
+  };
 
   const setField = <K extends keyof ConnectForm>(key: K, value: ConnectForm[K]): void => {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -115,7 +182,7 @@ export function SshPanel({ projectRoot, onAuthorityChange, onNotice }: SshPanelP
       return;
     }
     if (!bridge || capabilityReady !== true) {
-      setFormError("SSH 连接能力由桌面壳 M2 提供：请更新 DeepCode Desktop 后重试。");
+      setFormError(probeHint());
       return;
     }
     // M2 事件通道：ssh_progress_events 推送 { phase: 0..3, message }，成功即上报 authority
@@ -159,7 +226,7 @@ export function SshPanel({ projectRoot, onAuthorityChange, onNotice }: SshPanelP
   const importSshConfig = (): void => {
     if (!bridge) return;
     if (capabilityReady !== true) {
-      onNotice?.("导入 ~/.ssh/config 由桌面壳 M2 提供");
+      onNotice?.(probeHint());
       return;
     }
     bridge
@@ -201,9 +268,25 @@ export function SshPanel({ projectRoot, onAuthorityChange, onNotice }: SshPanelP
         </button>
       </div>
       {capabilityReady === false && (
-        <div className="ssh-m2-hint">
-          SSH 远程连接由桌面壳 M2 扩展提供（探测环境 → 部署 Server → 隧道 → 就绪）。
-          当前壳版本尚未内置，可先在下方填写并保存连接参数，升级后即可一键连接。
+        <div className={"ssh-m2-hint" + (probeFailure && probeFailure.kind !== "absent" ? " ssh-m2-hint-danger" : "")}>
+          {probeFailure?.kind === "denied" ? (
+            <>
+              桌面桥权限配置缺失，SSH 面板不可用。
+              <br />
+              原因：{probeFailure.detail}
+              <br />
+              这不是客户端版本问题——壳的 ACL 白名单（
+              <code>permissions/app-ipc.toml</code> 的 <code>commands.allow</code>）未包含 <code>ssh_*</code>{" "}
+              命令，需补齐后重建客户端。
+            </>
+          ) : probeFailure?.kind === "error" ? (
+            <>SSH 能力探测失败：{probeFailure.detail}</>
+          ) : (
+            <>
+              SSH 远程连接由桌面壳 M2 扩展提供（探测环境 → 部署 Server → 隧道 → 就绪）。
+              当前壳版本尚未内置，可先在下方填写并保存连接参数，升级后即可一键连接。
+            </>
+          )}
         </div>
       )}
       {capabilityReady === true && targets !== null && targets.length === 0 && (

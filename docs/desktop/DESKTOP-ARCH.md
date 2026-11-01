@@ -93,7 +93,7 @@ desktop/src-tauri/src/
 │   ├── manager.rs        # EngineManager：spawn/健康检查/重启/优雅关闭
 │   ├── port.rs           # 127.0.0.1 动态端口分配（bind :0 探测）
 │   └── settings.rs       # ~/.deepcode/settings.json 读写（serde_json）
-├── ssh/
+├── ssh/                  # ⚠️ M2 规划，目录尚未创建（当前壳零 SSH 实现）
 │   ├── manager.rs        # SshManager：连接生命周期状态机
 │   ├── probe.rs          # 远端探测（uname/glibc/combo）
 │   ├── deploy.rs         # server 版本校验/下载/上传（scp）/安装
@@ -107,15 +107,31 @@ desktop/src-tauri/src/
 
 #### 关键 IPC 命令面（前端 ↔ 壳）
 
-| 命令 | 说明 |
-|------|------|
-| `engine_status` / `engine_restart` | 引擎状态与重启 |
-| `ssh_list_targets` / `ssh_import_config` | 连接管理、~/.ssh/config 导入 |
-| `ssh_connect(target_id)` → `{local_port, authority}` | 完整连接流程（探测→部署→隧道） |
-| `ssh_disconnect` / `ssh_reconnect` | 生命周期 |
-| `ssh_progress_events`（Tauri event） | 连接各阶段进度推送给 UI |
-| `provider_save/test/list/activate` | 供应商插件（Key 进 Keychain，settings 只写引用） |
-| `recent_workspaces_*` | 最近工作区持久化（壳侧 JSON） |
+> **实现状态以代码为准**（2026-11-01 核对）：壳侧 `invoke_handler` 注册 10 个命令，
+> 与 `permissions/app-ipc.toml` 的 `commands.allow` 严格相等；下表标 ⛔ 的行
+> **尚未实现**，前端已做降级处理。三者一致性由
+> `scripts/check-desktop-ipc-contract.mjs`（`npm run check:ipc`）在构建前强制校验——
+> 注册命令若漏进 ACL，remote origin 调用会报 `Command xxx not allowed by ACL`。
+
+| 命令 | 说明 | 状态 |
+|------|------|------|
+| `engine_status` / `engine_restart` | 引擎状态与重启 | ✅ M1 |
+| `engine_open_logs` / `engine_log_tail` | 打开日志目录、读取日志尾部 | ✅ M1 |
+| `engine_credentials` | 引擎 origin 自动登录凭据（Rust 侧校验来源） | ✅ M1 |
+| `config_get` / `config_save` | 桌面配置读写（完整列表覆盖语义） | ✅ M1 |
+| `window_drag` / `window_new` | 窗口拖动与新建 | ✅ M1 |
+| `boot_diag` | 引导页错误回传壳日志 | ✅ M1 |
+| `ssh_list_targets` / `ssh_import_config` | 连接管理、~/.ssh/config 导入 | ⛔ M2 未实现 |
+| `ssh_connect(target_id)` → `{local_port, authority}` | 完整连接流程（探测→部署→隧道） | ⛔ M2 未实现 |
+| `ssh_disconnect` / `ssh_reconnect` | 生命周期 | ⛔ M2 未实现 |
+| `ssh_progress_events`（Tauri event） | 连接各阶段进度推送给 UI | ⛔ M2 未实现 |
+| `provider_save/test/list/activate` | 供应商插件（Key 进 Keychain，settings 只写引用） | ⛔ 规划中，前端未接线 |
+| `recent_workspaces_*` | 最近工作区持久化（壳侧 JSON） | ⛔ 规划中，前端未接线 |
+
+M2（SSH）未实现期间的实际行为：侧边栏「远程」面板探测 `ssh_list_targets` 失败 →
+按错误类型分档展示。**命令未注册**（`Command ... not found`）视为"壳版本尚无 M2 能力"，
+提示升级客户端；**ACL 未授权**（`Command ... not allowed by ACL`）视为壳的权限配置缺陷，
+以告警样式明示"不是升级能解决的"，并在控制台留痕——避免把配置故障误报成版本落后。
 
 前端通过注入的 `window.__DEEPCODE_DESKTOP__` bridge（postMessage 代理）调用；
 纯浏览器访问 `deepcode web` 时 bridge 不存在，前端自动隐藏桌面专属 UI（保持 Web 独立可用）。
