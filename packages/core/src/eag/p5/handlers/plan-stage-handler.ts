@@ -2004,10 +2004,18 @@ export function markTaskCardStatusInContent(content: string, taskId: string, new
   const output: string[] = [];
   let inTargetCard = false;
   let replaced = false;
+  // 2026-11-01 修复：兜底插入位置必须用「标题行在 output 中的下标」记录，
+  // 不能用循环结束态的 inTargetCard 判定——目标卡不是文件最后一张时，
+  // 遇到下一张卡的 `## ` 标题会把 inTargetCard 复位为 false，导致兜底分支
+  // 永不触发 → 磁盘状态不变 → 守卫每轮重触发（空循环导致任务不执行）。
+  let targetHeadingIndexInOutput = -1;
 
   for (const line of lines) {
     if (headingRe.test(line)) {
       // 命中目标卡标题 → 进入其区段
+      if (targetHeadingIndexInOutput < 0) {
+        targetHeadingIndexInOutput = output.length;
+      }
       inTargetCard = true;
       output.push(line);
       continue;
@@ -2028,9 +2036,8 @@ export function markTaskCardStatusInContent(content: string, taskId: string, new
   }
 
   // 兜底：目标卡区段没有任何 status 行 → 在标题行后插入一行，确保磁盘状态真实变更
-  if (inTargetCard && !replaced) {
-    const headingIndex = output.findIndex((l) => headingRe.test(l));
-    output.splice(headingIndex + 1, 0, `- status: ${newState}`);
+  if (targetHeadingIndexInOutput >= 0 && !replaced) {
+    output.splice(targetHeadingIndexInOutput + 1, 0, `- status: ${newState}`);
   }
   return output.join("\n");
 }

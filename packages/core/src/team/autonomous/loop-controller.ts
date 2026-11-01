@@ -9,7 +9,7 @@
  * 真实实现能力：
  *   1. 编排每轮迭代：plan → dev → verify → fix
  *   2. 与 GitDriver / NotesMemory / RunState 协作
- *   3. 强制 runtime caps（max-iterations / max-tokens / stop-when）
+ *   3. 强制 runtime caps（max-iterations / stop-when / 连续失败；max-tokens 默认仅观测）
  *   4. 失败重试与退避（指数退避 + jitter + 连续失败 abort）
  *   5. try/finally 严格 release SleepGuard
  *   6. 4 类判定：success / failed / retriable / fatal
@@ -43,6 +43,15 @@ export interface StageResult {
 export interface LoopConfig {
   maxIterations: number;
   maxTokens: number;
+  /**
+   * Token 预算是否作为**硬终止**条件（默认 false）
+   *
+   * 2026-11-01 对齐 EAG-P5 的 2026-10-20 语义变更：Token 预算不再终止运行。
+   * 旧行为（maxTokens 默认 500_000 且硬终止）会让长任务跑到一半被静默掐断，
+   * 表现为"任务没做完、也没有报错"——最典型的"卡预算导致任务不执行"。
+   * 需要旧行为时显式设 true。
+   */
+  enforceTokenBudget?: boolean;
   stopWhen: string;
   stageOrder: ReadonlyArray<StageKind>;
   backoffBaseSec: number;
@@ -59,6 +68,7 @@ export function defaultLoopConfig(): LoopConfig {
   return {
     maxIterations: 50,
     maxTokens: 500_000,
+    enforceTokenBudget: false,
     stopWhen: "",
     stageOrder: ["plan", "dev", "verify", "fix"],
     backoffBaseSec: 1.0,
@@ -195,6 +205,8 @@ export class RalphLoopController {
   private readonly log: LogCallback;
   private readonly sleepGuard: SleepGuardLike | null;
   private prevResults: IterationResult[] = [];
+  /** token 软上限告警只发一次，避免每轮刷屏 */
+  private tokenBudgetWarned = false;
 
   constructor(args: {
     config: LoopConfig;
@@ -533,8 +545,20 @@ export class RalphLoopController {
       return true;
     }
     // 2. max_tokens（0 = 不限制，与姊妹项目 MyFlow 的 0=unlimited 约定一致）
+    // 2026-11-01：默认**不再**作为硬终止条件（对齐 EAG-P5 的 2026-10-20 语义变更）。
+    // 预算超限时只做一次性告警，终止交给 maxIterations / 连续失败 / RunState.status。
     if (this.config.maxTokens > 0 && this.runState.state.cumulativeTokens >= this.config.maxTokens) {
-      return true;
+      if (this.config.enforceTokenBudget) {
+        return true;
+      }
+      if (!this.tokenBudgetWarned) {
+        this.tokenBudgetWarned = true;
+        this.log(
+          "warn",
+          `[RalphLoop] token 预算已达软上限（${this.runState.state.cumulativeTokens}/${this.config.maxTokens}），` +
+            "继续运行；如需硬终止请设置 enforceTokenBudget=true"
+        );
+      }
     }
     // 3. RunState.status
     if (

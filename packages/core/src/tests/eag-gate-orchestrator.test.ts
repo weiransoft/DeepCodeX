@@ -314,3 +314,43 @@ test("T12. getCheckers 返回注入的检查器列表", () => {
   assert.equal(retrieved[1].gateId, "G-2");
   assert.equal(retrieved[2].gateId, "G-3");
 });
+
+// ============================================================================
+// T13. skippedGates 披露缺检查器的门禁（2026-11-01：修复"静默跳过却报全绿"）
+// ============================================================================
+
+test("T13. coding Loop 缺 G-4/G-5 检查器时 skippedGates 显式披露", () => {
+  const orchestrator = new GateOrchestrator();
+  const result = orchestrator.run(createContext());
+
+  const skipped = result.skippedGates ?? [];
+  const noChecker = skipped.filter((s) => s.reason === "no-checker").map((s) => s.gate);
+  assert.deepEqual(noChecker.sort(), ["G-4", "G-5"], "coding 要求执行 G-1..G-5，缺检查器的应被披露");
+  // 默认（非严格）不改变既有 allPassed 语义，避免破坏既有调用方
+  assert.equal(result.allPassed, true);
+});
+
+test("T14. strictGateCoverage=true 时缺检查器计入未通过（fail-closed）", () => {
+  const orchestrator = new GateOrchestrator({ strictGateCoverage: true });
+  const result = orchestrator.run(createContext());
+
+  assert.equal(result.allPassed, false, "严格模式下缺检查器必须判未通过");
+  assert.equal(result.firstFailedGate, "G-4", "未通过门禁应指向首个缺失的 G-4");
+});
+
+test("T15. testing Loop + 普通 GateContext → G-6/G-7 记为 missing-context 且不判失败", () => {
+  const orchestrator = new GateOrchestrator();
+  const result = orchestrator.run(createContext({ loopType: "testing" }));
+
+  const skipped = result.skippedGates ?? [];
+  const missingContext = skipped.filter((s) => s.reason === "missing-context").map((s) => s.gate);
+  assert.deepEqual(missingContext.sort(), ["G-6", "G-7"], "向后兼容跳过应被披露为 missing-context");
+  assert.equal(result.results.length, 0, "G-6/G-7 均跳过 → 无实际执行结果");
+});
+
+test("T16. design Loop 跳过门禁时 skippedGates 为空数组", () => {
+  const orchestrator = new GateOrchestrator();
+  const result = orchestrator.run(createContext({ loopType: "design" }));
+  assert.equal(result.allPassed, true);
+  assert.deepEqual(result.skippedGates, []);
+});

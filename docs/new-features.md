@@ -276,7 +276,7 @@ paradigm_lock: "ddd"  # ddd | clean-architecture | cqrs | microservice | ...
 | `--max-depth` | `100` | 最大遍历深度 |
 | `--max-parallelism` | `4` | 最大并行度 |
 | `--timeout-sec` | `0` | 图级超时秒数（0 表示不限制） |
-| `--max-tokens` | `0` | 图级 Token 预算 |
+| `--max-tokens` | `0` | 图级 Token 预算（默认仅告警；硬终止需 `tokenBudgetHardStop: true`） |
 | `--node-retry-limit` | `3` | 节点失败重试次数 |
 
 ---

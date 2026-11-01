@@ -359,8 +359,13 @@ export class EagDynamicSuggester {
     }
 
     // 步骤 5：置信度检查
-    const confidence = typeof raw.confidence === "number" && !Number.isNaN(raw.confidence) ? raw.confidence : 0;
-    if (confidence < this.options.confidenceThreshold) {
+    // 2026-11-01 修复：confidence 缺省曾被填成 0，导致模型不输出该字段时
+    // 100% 跌破阈值 → 建议层恒降级 direct_chat，动态编排形同虚设。
+    // 语义修正：confidence 是"可选的自我评估"，缺失视为"未提供"——不参与
+    // 阈值判定（action 合法性已在上面校验过），只有显式给出且低于阈值才降级。
+    const hasConfidence = typeof raw.confidence === "number" && Number.isFinite(raw.confidence);
+    const confidence = hasConfidence ? (raw.confidence as number) : undefined;
+    if (confidence !== undefined && confidence < this.options.confidenceThreshold) {
       return Object.freeze({
         type: "direct_chat",
         reasoning: `置信度 ${confidence} 低于阈值 ${this.options.confidenceThreshold}，降级为直接对话`,

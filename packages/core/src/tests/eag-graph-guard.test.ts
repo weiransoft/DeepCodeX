@@ -510,8 +510,10 @@ test("G10. checkPreExecution 超时时返回 stop_timeout", () => {
 // G11. checkPreExecution：token 预算耗尽 → stop_failure
 // ============================================================================
 
-test("G11. checkPreExecution token 预算耗尽时返回 stop_failure", () => {
-  const guard = new GraphGuardImpl();
+test("G11. checkPreExecution token 预算耗尽时返回 stop_failure（需显式开启硬终止）", () => {
+  // 2026-11-01：token 预算默认只告警不终止（对齐「Token 不再作硬闸」的全局语义），
+  // 硬终止必须显式开启 tokenBudgetHardStop=true。
+  const guard = new GraphGuardImpl({ tokenBudgetHardStop: true });
   const node = makeTaskNode("task1");
   const context = makeRunContext({
     totalTokensUsed: 10_000,
@@ -522,6 +524,21 @@ test("G11. checkPreExecution token 预算耗尽时返回 stop_failure", () => {
   assert.equal(result.passed, false, "token 耗尽应不通过");
   assert.equal(result.suggestedAction, "stop_failure");
   assert.match(result.reason, /token 预算耗尽/);
+});
+
+test("G11b. checkPreExecution token 预算耗尽默认仅告警（不阻断任务执行）", () => {
+  const guard = new GraphGuardImpl();
+  const node = makeTaskNode("task1");
+  const context = makeRunContext({
+    totalTokensUsed: 10_000,
+    config: { ...DEFAULT_WORK_GRAPH_CONFIG, maxTokens: 10_000 },
+  });
+
+  const result = guard.checkPreExecution(node, context);
+  assert.equal(result.passed, true, "默认 tokenBudgetHardStop=false，超预算不应阻断执行");
+  assert.equal(result.severity, "warning", "仍应以 warning 级别记入 triggeredGuards 供审计");
+  assert.match(result.reason, /token 预算耗尽/);
+  assert.match(result.reason, /仅告警不终止/);
 });
 
 // ============================================================================

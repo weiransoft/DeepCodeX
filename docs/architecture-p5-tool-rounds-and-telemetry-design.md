@@ -112,6 +112,12 @@ TaskCard 是静态声明的任务单元（从 tasks.md 解析或由 plan 阶段�
 2. **自然终态**：绝大多数编码任务在 5-12 轮内就给出终态回复。40 轮是 ceiling 而非 floor
 3. **编排器级 token 预算**（`DEFAULT_MAX_TOKENS = 200_000`）在 LoopScheduler 中独立生效，即便执行器上限 40 轮也会在总 token 耗尽前被 stop_failure 拦截
 
+> **⚠️ 2026-11-01 修订（本条已失效）**：Token 预算硬闸已于 2026-10-20 从 LoopScheduler 与
+> P5 编排器中移除——`maxTokens` 仅作为上下文压缩的基线口径，耗尽后折叠续跑，不产生 `stop_failure`。
+> 当前实际的防失控手段是：执行器 `maxToolRounds`（全局轮数硬上限，折叠不重置）、
+> 模型循环/空循环熔断（`NOOP_CIRCUIT_BREAKER_THRESHOLD=3`）、连续失败熔断。
+> 上表中"由 LoopScheduler 的 token 预算闸门独立生效"的描述仅代表当时设计，请勿据此推断现行行为。
+
 **结论：风险可控。** 从 12 → 40 的线性提升不引入结构性风险。
 
 ---
@@ -253,7 +259,7 @@ plan/verify handler 不调用 LLM，tokensUsed 保持 0 是正确语义，不需
 |---|---|---|
 | failure() 返回的 tokensUsed 是估算值（网关无 usage 时），但会被编排器当作真实值累加 | 低风险：执行器已有 `tokensEstimated` 标志；编排器不区分估算/真实，对统计用途够用 | 若需精确区分，可在 P5TaskExecutionResult 层面新增 `tokensEstimated` 聚合字段 |
 | 编排器从 tokensUsed>0 近似改为直接累加 llmRequests 后，plan/verify 阶段（无 LLM）不再贡献 +1，totalLlmCallCount 数字会**突然下降** | 预期行为：旧值本来就是错的。正确值应该是"dev 阶段真实 LLM 请求数 + fix 阶段真实 LLM 请求数" | 验收时以"执行器 llmRequests 总和 = 编排器 totalLlmCallCount"等式成立为通过标准 |
-| 默认上限提升到 40 后，某些"低效但有效"的任务（每轮一次 ls 查看、一次 edit）会自然走更长循环 | 低风险：熔断机制（拒绝风暴 6 次、相同调用 3 次）独立生效；LoopScheduler token 预算 200K 独立闸门 | 可在运行时观察"达到上限仍未收敛"的频率，若仍高发再引入方案 A 的 TaskCard 级上限 |
+| 默认上限提升到 40 后，某些"低效但有效"的任务（每轮一次 ls 查看、一次 edit）会自然走更长循环 | 低风险：熔断机制（拒绝风暴 6 次、相同调用 3 次）独立生效；轮数由 `maxToolRounds` 硬上限统一封顶（token 预算已不终止运行，见上文修订） | 可在运行时观察"达到上限仍未收敛"的频率，若仍高发再引入方案 A 的 TaskCard 级上限 |
 
 ---
 

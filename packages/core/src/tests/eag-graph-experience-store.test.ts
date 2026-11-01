@@ -203,6 +203,15 @@ test("X11. storeCase：FIFO 淘汰（超过 maxCases 时删除最早案例）", 
   assert.ok(caseIds.includes("case-4"), "case-4 应保留");
 });
 
+test("X11b. storeCase：maxCases 为负数时不得死循环（夹紧为 0）", async () => {
+  // 2026-11-01 回归：旧实现直接采用负值，`insertionOrder.length > maxCases`
+  // 在数组被 shift() 清空后恒真（0 > -1）且 shift() 返回 undefined 不推进
+  // → 零进展死循环，storeCase() 永不返回（图执行主线程锁死）。
+  const store = new ExperienceStoreImpl({ maxCases: -1 }, makeSilentLogger());
+  await store.storeCase(makeExperienceCase({ caseId: "case-neg" }));
+  assert.equal(store.size(), 0, "maxCases=-1 视为 0：不保留任何案例，且必须正常返回");
+});
+
 test("X12. recallSimilar：空案例库返回空列表", async () => {
   const store = new ExperienceStoreImpl({}, makeSilentLogger());
   const results = await store.recallSimilar({ language: "typescript" }, 5);

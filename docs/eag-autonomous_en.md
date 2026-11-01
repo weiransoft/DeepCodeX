@@ -162,8 +162,15 @@ EAG-P5 reuses the LoopScheduler decision engine from eag/loop/ to uniformly mana
 | **Iteration limit reached** | iterIndex + 1 >= maxIterations | `failed` (set uniformly by step 6) |
 | **Consecutive failure abort** | consecutiveFailures >= consecutiveFailureAbort | `aborted` (human_checkpoint takes priority) |
 | **User circuit-break** | `/eag-autonomous-stop` | `aborted` |
-| **Token budget exhausted** | totalTokensUsed >= maxTokens | `failed` |
+| **No-op circuit-break** | 3 consecutive rounds without output (plan produced no card / dev·fix noop) | `aborted` |
 | **Timeout circuit-break** | single-round timeout | `failed` |
+
+> **The token budget does not terminate a run** (requirement change, 2026-10-20): `maxTokens` is only
+> the baseline for context compaction (`perTaskBudget` floor and `ContextEpochState` segment sizing).
+> When it is exhausted the run folds context and continues instead of stopping. Runaway protection is
+> provided by the model/no-op circuit breakers plus the global tool-round ceiling (`maxToolRounds`).
+> That is why "Token budget exhausted" is no longer listed as a termination condition — treating it as
+> one silently kills long-running tasks.
 
 > LoopScheduler maps `SchedulingDecision.action` to P5 status: `human_checkpoint` → `aborted`; `stop_failure` (non-max-iter) → `aborted`; `stop_success`/`continue`/`fix` → no status change (handled by the loop condition).
 

@@ -226,6 +226,20 @@ test("置信度低于阈值时降级为 direct_chat", async () => {
   assert.match((suggestion as { reasoning: string }).reasoning, /0\.4/);
 });
 
+test("confidence 缺失时不按 0 处理（不因缺字段而恒降级）", async () => {
+  // 2026-11-01 修复：旧实现把缺失的 confidence 填 0，导致模型不输出该字段时
+  // 100% 跌破阈值 → 建议层恒降级 direct_chat。缺失应视为"未提供"，不参与判定。
+  const client = createStubLLMClient('{"action":"suggest_command","commandHint":"/eag-design"}');
+  const suggester = new EagDynamicSuggester(createSuggesterOptions(client, { confidenceThreshold: 0.6 }));
+  const suggestion = await suggester.suggest({
+    sessionId: "s-1",
+    projectRoot: "/test",
+    goal: "设计登录模块",
+    availableCommands: ALL_COMMANDS,
+  });
+  assert.equal(suggestion.type, "suggest_command", "缺 confidence 不应降级");
+});
+
 test("commandHint 不在可用清单时降级为 direct_chat", async () => {
   const client = createStubLLMClient('{"action":"suggest_command","commandHint":"/eag-unknown","confidence":0.9}');
   const suggester = new EagDynamicSuggester(createSuggesterOptions(client));

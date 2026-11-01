@@ -782,6 +782,7 @@ async function executeAutonomousCommand(args: TeamCommandArgs, startTime: number
     ...baseLoopConfig,
     maxIterations: args.maxIterations ?? autonomousConfig.maxIterations ?? baseLoopConfig.maxIterations,
     maxTokens: autonomousConfig.maxTokens ?? baseLoopConfig.maxTokens,
+    enforceTokenBudget: autonomousConfig.enforceTokenBudget ?? baseLoopConfig.enforceTokenBudget,
     stopWhen: autonomousConfig.stopWhen ?? baseLoopConfig.stopWhen,
     backoffBaseSec: autonomousConfig.backoffBaseSec ?? baseLoopConfig.backoffBaseSec,
     backoffMaxSec: autonomousConfig.backoffMaxSec ?? baseLoopConfig.backoffMaxSec,
@@ -792,7 +793,9 @@ async function executeAutonomousCommand(args: TeamCommandArgs, startTime: number
 
   writeStdoutLine(`\n📋 Autonomous 配置:\n`);
   writeStdoutLine(`  最大迭代: ${loopConfig.maxIterations}\n`);
-  writeStdoutLine(`  最大 token: ${loopConfig.maxTokens}\n`);
+  // 2026-10-20 需求变更后 token 预算只作上下文压缩基线，不再终止运行；
+  // 标注清楚避免用户误以为"烧到上限就会被掐断"。
+  writeStdoutLine(`  最大 token（压缩基线，不终止运行）: ${loopConfig.maxTokens}\n`);
   writeStdoutLine(`  连续失败上限: ${loopConfig.consecutiveFailureAbort}\n`);
   writeStdoutLine(`  目标: ${objective}\n\n`);
 

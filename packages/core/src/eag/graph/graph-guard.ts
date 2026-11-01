@@ -13,7 +13,8 @@
  *
  * 2. checkPreExecution（节点执行前调用）：
  *    - 检查图级超时（elapsedSec >= config.timeoutSec → suggestedAction=stop_timeout）
- *    - 检查图级 token 预算（totalTokensUsed >= config.maxTokens 且 maxTokens > 0 → stop_failure）
+ *    - 检查图级 token 预算（totalTokensUsed >= config.maxTokens 且 maxTokens > 0
+ *      → tokenBudgetHardStop=true 时 stop_failure；默认 false 仅告警不终止）
  *    - 检查当前遍历深度（currentDepth >= config.maxDepth → stop_failure）
  *
  * 3. checkPostExecution（节点执行后调用）：
@@ -75,6 +76,9 @@ const SINGLE_NODE_DURATION_RATIO_THRESHOLD = 0.5;
 const DEFAULT_GUARD_CONFIG: Readonly<Required<GraphGuardConfig>> = Object.freeze({
   outputContractValidationLevel: "strict",
   enableTokenBudgetCheck: true,
+  // 2026-11-01：token 预算默认只告警不终止（对齐 2026-10-20「Token 不再作硬闸」
+  // 的全局语义）。防失控由图深度检查与 MAX_TRAVERSAL_STEPS 承担。
+  tokenBudgetHardStop: false,
   enableDepthCheck: true,
   enablePostExecutionDurationCheck: true,
   customRules: Object.freeze({}),
@@ -281,16 +285,28 @@ export class GraphGuardImpl implements GraphGuardProtocol {
     }
 
     // 2. 检查图级 token 预算（maxTokens > 0 且 enableTokenBudgetCheck 开启时启用）
+    //    2026-11-01：默认只告警不终止（tokenBudgetHardStop=false）——对齐
+    //    2026-10-20「Token 预算不再作硬闸」的全局语义；硬终止仍可显式开启。
+    //    非硬终止时返回 passed=true + severity=warning，编排器 recordGuardRecord
+    //    会把该事件记入 triggeredGuards（可审计），但不会中断图遍历。
     if (
       this.config.enableTokenBudgetCheck &&
       context.config.maxTokens > 0 &&
       context.totalTokensUsed >= context.config.maxTokens
     ) {
+      const budgetReason = `图级 token 预算耗尽：totalTokensUsed=${context.totalTokensUsed} >= maxTokens=${context.config.maxTokens}`;
+      if (this.config.tokenBudgetHardStop) {
+        return {
+          passed: false,
+          reason: budgetReason,
+          suggestedAction: "stop_failure" as GraphSchedulingAction,
+          severity: "error",
+        };
+      }
       return {
-        passed: false,
-        reason: `图级 token 预算耗尽：totalTokensUsed=${context.totalTokensUsed} >= maxTokens=${context.config.maxTokens}`,
-        suggestedAction: "stop_failure" as GraphSchedulingAction,
-        severity: "error",
+        passed: true,
+        reason: `${budgetReason}（tokenBudgetHardStop=false，仅告警不终止；图遍历仍受深度与步数上限约束）`,
+        severity: "warning",
       };
     }
 
@@ -653,6 +669,7 @@ export class GraphGuardImpl implements GraphGuardProtocol {
     return {
       outputContractValidationLevel: config?.outputContractValidationLevel ?? base.outputContractValidationLevel,
       enableTokenBudgetCheck: config?.enableTokenBudgetCheck ?? base.enableTokenBudgetCheck,
+      tokenBudgetHardStop: config?.tokenBudgetHardStop ?? base.tokenBudgetHardStop,
       enableDepthCheck: config?.enableDepthCheck ?? base.enableDepthCheck,
       enablePostExecutionDurationCheck:
         config?.enablePostExecutionDurationCheck ?? base.enablePostExecutionDurationCheck,

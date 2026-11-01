@@ -390,3 +390,59 @@ test("LC-005: runOneIterationPublic async（返回 Promise）", async () => {
     rmTmpDir(dir);
   }
 });
+
+// ============================================================================
+// LC-006 / LC-007: token 预算语义（2026-11-01 对齐 EAG-P5 的"预算不终止运行"）
+//
+// 背景：maxTokens 默认 500_000 且硬终止时，长任务会在跑到一半被静默掐断
+// （表现：任务没做完、也没有报错）——最典型的"卡预算导致任务不执行"。
+// 现在默认只做软上限告警，硬终止需显式 enforceTokenBudget: true。
+// ============================================================================
+
+test("LC-006: token 超软上限不终止运行（默认只受 maxIterations 约束）", async () => {
+  const dir = makeTmpDir();
+  try {
+    const runState = new RunState(dir, "r-lc-006", "软上限测试");
+    // 每阶段 60 tokens × 4 阶段 = 240/轮；maxTokens=100 → 第一轮即超限
+    const controller = new RalphLoopController({
+      config: { ...defaultLoopConfig(), maxIterations: 3, maxTokens: 100, enforceTokenBudget: false },
+      projectRoot: dir,
+      gitDriver: makeStubGitDriver(),
+      notesMemory: null,
+      runState,
+      stageHandlers: makeHandlers({ kind: "success", summary: "ok", artifacts: { tokens: 60 } }),
+      log: () => {},
+      sleepGuard: null,
+    });
+
+    await controller.run();
+
+    assert.equal(runState.state.iterIndex, 3, "token 达到软上限后仍应跑满 maxIterations");
+    assert.ok(runState.state.cumulativeTokens >= 100, "累计 token 应已超过软上限");
+  } finally {
+    rmTmpDir(dir);
+  }
+});
+
+test("LC-007: enforceTokenBudget=true 时 token 超上限立即停止（保留旧语义）", async () => {
+  const dir = makeTmpDir();
+  try {
+    const runState = new RunState(dir, "r-lc-007", "硬上限测试");
+    const controller = new RalphLoopController({
+      config: { ...defaultLoopConfig(), maxIterations: 3, maxTokens: 100, enforceTokenBudget: true },
+      projectRoot: dir,
+      gitDriver: makeStubGitDriver(),
+      notesMemory: null,
+      runState,
+      stageHandlers: makeHandlers({ kind: "success", summary: "ok", artifacts: { tokens: 60 } }),
+      log: () => {},
+      sleepGuard: null,
+    });
+
+    await controller.run();
+
+    assert.equal(runState.state.iterIndex, 1, "显式硬上限时应在第一轮后停止");
+  } finally {
+    rmTmpDir(dir);
+  }
+});

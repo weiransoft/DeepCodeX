@@ -183,7 +183,13 @@ export interface LoopEngineeringConfig {
   readonly evaluatorMode: EvaluatorMode;
   /** 最大迭代次数（硬上限，避免无限循环，必须 >= 1） */
   readonly maxIterations: number;
-  /** 最大 token 消耗预算（硬上限，必须 >= 1） */
+  /**
+   * 最大 token 消耗预算（必须 >= 1）
+   *
+   * 2026-10-20 需求变更后**不再作为硬终止**：仅作上下文压缩的基线口径，
+   * 由 LoopScheduler 观测、由执行器折算段额度。防失控交给 maxIterations
+   * 与模型循环/空循环熔断。字段保留是为了兼容既有配置与报告口径。
+   */
   readonly maxTokens: number;
   /** 每 N 轮触发一次人类检查点，0 表示关闭（必须 >= 0） */
   readonly humanCheckpointEvery: number;

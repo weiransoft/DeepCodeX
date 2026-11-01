@@ -24,6 +24,12 @@ export interface AutonomousConfig {
   maxIterations: number;
   /** token 预算 */
   maxTokens: number;
+  /**
+   * token 预算是否硬终止（默认 false：仅观测 + 一次性告警）
+   *
+   * 对齐 2026-10-20「Token 预算不再终止运行」的产品语义；置 true 可恢复旧行为。
+   */
+  enforceTokenBudget: boolean;
   /** 停止条件（自然语言） */
   stopWhen: string;
   /** 阶段顺序：plan / dev / verify / fix */
@@ -69,6 +75,7 @@ export function defaultAutonomousConfig(projectRoot: string): AutonomousConfig {
   return {
     maxIterations: 50,
     maxTokens: 500_000,
+    enforceTokenBudget: false,
     stopWhen: "",
     stageOrder: ["plan", "dev", "verify", "fix"],
     backoffBaseSec: 1.0,
@@ -253,6 +260,7 @@ function mergeConfig(config: AutonomousConfig, raw: Record<string, unknown>): vo
   const knownKeys: ReadonlyArray<keyof AutonomousConfig> = [
     "maxIterations",
     "maxTokens",
+    "enforceTokenBudget",
     "stopWhen",
     "stageOrder",
     "backoffBaseSec",
@@ -276,6 +284,7 @@ function mergeConfig(config: AutonomousConfig, raw: Record<string, unknown>): vo
   const snakeToCamel: Record<string, keyof AutonomousConfig> = {
     max_iterations: "maxIterations",
     max_tokens: "maxTokens",
+    enforce_token_budget: "enforceTokenBudget",
     stop_when: "stopWhen",
     stage_order: "stageOrder",
     backoff_base_sec: "backoffBaseSec",
@@ -331,6 +340,7 @@ function validateField(key: keyof AutonomousConfig, value: unknown): unknown {
     }
     case "autoCommit":
     case "sleepGuardEnabled":
+    case "enforceTokenBudget":
       return Boolean(value);
     case "stageOrder": {
       if (!Array.isArray(value)) {

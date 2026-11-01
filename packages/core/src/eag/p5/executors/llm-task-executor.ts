@@ -451,7 +451,9 @@ const PLANNER_SYSTEM_PROMPT = [
   "决策原则：",
   "- 上一轮运行记忆显示某张卡反复失败时，优先换思路：把旧卡 blocked 并追加一张",
   "  分解后的新卡（title 写清具体第一步），而不是机械重跑；",
-  "- 剩余预算不足以完成哪怕最简单的一张卡时，输出 stop；",
+  // 2026-10-29 需求变更：预算限额移除——Token 消耗不再参与规划判定（执行器侧
+  // 预算仅作压缩触发基线、可无限折叠续跑），简报不再注入剩余预算，规划器
+  // 不再以"预算不足"为由输出 stop（防误杀长任务）。
   "- select 只能选[可执行]标注的卡；没有可执行卡且无法通过 replan 产出可执行卡时输出 stop；",
   "- 卡不可行（环境缺失、目标超出当前能力）时输出 stop 并在 reasoning 说明；",
   "- reasoning 必须是简体中文一句话。",
@@ -578,7 +580,12 @@ export class LlmTaskExecutor implements P5TaskExecutor {
     this.log = options.logger ?? (() => undefined);
     this.onTaskProgress = options.onTaskProgress ?? (() => undefined);
     this.dangerousCommandApproval = options.dangerousCommandApproval;
-    const rounds = options.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
+    // 轮数解析链（桌面高级配置 2026-10-30）：显式 options > env.DEEPCODE_MAX_TOOL_ROUNDS
+    // > 默认 40。桌面壳按所选模型的高级配置注入 env（工具调用轮数），CLI 用户也可
+    // 用环境变量覆盖；非法值（非正整数）静默忽略回落默认，不阻断装配。
+    const envRounds = Number.parseInt(process.env.DEEPCODE_MAX_TOOL_ROUNDS ?? "", 10);
+    const rounds =
+      options.maxToolRounds ?? (Number.isInteger(envRounds) && envRounds > 0 ? envRounds : DEFAULT_MAX_TOOL_ROUNDS);
     if (!Number.isInteger(rounds) || rounds <= 0) {
       throw new Error(`LlmTaskExecutor maxToolRounds 必须为正整数，实际：${String(rounds)}`);
     }
@@ -796,8 +803,10 @@ export class LlmTaskExecutor implements P5TaskExecutor {
   /**
    * 构造规划简报（user 消息）。
    *
-   * 把目标、卡清单、笔记、前序阶段摘要、跨 run 失败记忆、剩余预算装配为
-   * 结构化简报；长文本字段已由调用方截断，此处只做拼接。
+   * 把目标、卡清单、笔记、前序阶段摘要、跨 run 失败记忆装配为结构化简报；
+   * 长文本字段已由调用方截断，此处只做拼接。
+   * 2026-10-29 需求变更：不再注入"剩余 Token 预算"段——预算不参与规划判定
+   * （规划器无从以预算不足为由输出 stop）。
    */
   private buildPlannerUserPrompt(input: Readonly<P5PlanIterationInput>): string {
     const sections: string[] = [
@@ -816,7 +825,6 @@ export class LlmTaskExecutor implements P5TaskExecutor {
     if (input.prevStageSummaries.length > 0) {
       sections.push(`### 本迭代前序阶段摘要\n${input.prevStageSummaries}`);
     }
-    sections.push(`### 剩余 Token 预算\n${String(input.remainingTokenBudget)}`);
     sections.push(
       "### 你的任务\n根据以上信息输出一个 JSON 决策（select/replan/stop/none），" +
         "只输出 JSON，不要输出任何其他文本。"
@@ -997,6 +1005,34 @@ export class LlmTaskExecutor implements P5TaskExecutor {
       // 所以条件"剩余 ≤3 轮"永远不成立——是个死分支。
       // 正确触发路径：while 循环顶部，当全局硬上限还剩 ≤3 轮时注入一次 system 提示。
       let terminalHintInjected = false;
+      // ======== 连续零产出折叠硬上限（2026-11-01 空转收口） ========
+      // 三处折叠点（pre-flight / 段超限 / 响应后）都是"折叠 + continue"，
+      // 且**故意不推进 currentRound**（折叠轮零请求、零工具，不该吃掉全局轮数名额）。
+      // 代价是：折叠本身不受任何轮数防线约束。理论上存在"折叠 → 新段仍超限 →
+      // 再折叠"的零轮零 token 循环（previewRollover 判"可解"但实际折算后仍不可解时），
+      // 现有三道收口（preview 可解性、死折叠守卫、segmentRoundBudget≥MIN_SEGMENT_ROUNDS）
+      // 覆盖的是"折叠后跑不起来"，覆盖不了"折叠本身反复发生"。
+      // 因此补一条独立防线：**连续**折叠（其间没有任何一轮真实 LLM+工具产出）
+      // 达上限即诚实 failure，把不可见的挂死变成可诊断的终态。
+      // 计数在 while 尾部（currentRound += 1 处）归零，因此不会误伤长任务里
+      // 正常交替的"折叠 → 跑几轮 → 再折叠"。
+      const MAX_CONTEXT_FOLDS = 8;
+      let foldCount = 0;
+      const foldLimitFailure = (
+        site: string,
+        usedTokens: number,
+        usedSegmentTokens: number,
+        segmentBudgetNow: number
+      ): Readonly<P5TaskExecutionResult> =>
+        this.failure(
+          `上下文折叠次数达上限 ${MAX_CONTEXT_FOLDS}（${site}）：已连续换段 ${foldCount} 次仍未产生有效轮次，` +
+            `判定为"零消耗折叠空转"，执行中止。累计 ${usedTokens} tokens，` +
+            `已用 ${currentRound}/${this.maxToolRounds} 轮，本段已用 ${usedSegmentTokens}/${segmentBudgetNow}。`,
+          llmRequests,
+          sawUsage,
+          inputTokensTotal + outputTokensTotal,
+          estimatedCharsTotal
+        );
 
       while (currentRound <= this.maxToolRounds && segmentRoundsUsed < segmentRoundBudget) {
         // ======== 终局收尾注入（2026-10-14 P0-2 第二轮修复） ========
@@ -1152,6 +1188,10 @@ export class LlmTaskExecutor implements P5TaskExecutor {
                 estimatedCharsTotal
               );
             }
+            if (foldCount >= MAX_CONTEXT_FOLDS) {
+              return foldLimitFailure("pre-flight 折叠点", currentTokens, segmentTokens, segmentBudget);
+            }
+            foldCount += 1;
             this.log(
               `Token 预算预检（段口径）：本段已用 ${segmentTokens} + 估算输入 ≈${estimatedRequestTokens}` +
                 ` > 本段额度 ${segmentBudget}（累计 ${currentTokens}，名义预算 ${effectiveBudget}），` +
@@ -1242,6 +1282,10 @@ export class LlmTaskExecutor implements P5TaskExecutor {
                 estimatedCharsTotal
               );
             }
+            if (foldCount >= MAX_CONTEXT_FOLDS) {
+              return foldLimitFailure("段超限折叠点", currentTokens, segmentTokens, segmentBudget);
+            }
+            foldCount += 1;
             const rolloutSummary = this.buildContextRolloutSummary(messages);
             const carriedRound = currentRound;
             // 状态机先推进（折叠次数 +1、基线=当前累计、段额度按均耗折算），
@@ -1382,6 +1426,10 @@ export class LlmTaskExecutor implements P5TaskExecutor {
                   estimatedCharsTotal
                 );
               }
+              if (foldCount >= MAX_CONTEXT_FOLDS) {
+                return foldLimitFailure("响应后折叠点", postResponseTokens, postSegmentTokens, postSegmentBudget);
+              }
+              foldCount += 1;
               const rolloutSummary = this.buildContextRolloutSummary(messages);
               const carriedRound = currentRound;
               // 均耗折算分母口径保持迁移前语义：响应后折叠时本轮请求已发生，
@@ -1588,6 +1636,10 @@ export class LlmTaskExecutor implements P5TaskExecutor {
         // 已重置为 0，此处 +1 仅在"本轮完成一轮 LLM+工具"后执行。
         currentRound += 1;
         segmentRoundsUsed += 1;
+        // 本轮真实产出（LLM 请求 + 工具）已完成 → 折叠计数归零。
+        // MAX_CONTEXT_FOLDS 只惩罚"连续零产出折叠"，不惩罚长任务里
+        // 正常交替出现的"折叠 → 跑几轮 → 再折叠"。
+        foldCount = 0;
       }
 
       // while 循环退出（自然结束，无终态回复）：诚实判失败，交回编排器决定 fix/abort。

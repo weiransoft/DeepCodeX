@@ -290,6 +290,33 @@ test("N3. markTaskCardStatusInContent：改写目标卡 / 不影响其他卡 / �
   const inserted = markTaskCardStatusInContent(noStatus, "T-003", "blocked");
   assert.ok(/^## T-003 任务丙\n- status: blocked$/m.test(inserted), `无 status 行时应在标题后插入，实际：${inserted}`);
 
+  // 分支 2b（2026-11-01 回归）：目标卡「不是最后一张」且缺 status 行
+  // 旧实现的兜底用循环结束态的 inTargetCard 判定，遇到下一张卡标题即被复位为 false
+  // → 插入分支永不触发 → 函数原样返回 → 磁盘状态不变 → 守卫每轮重触发（空循环）
+  const multiCardsNoStatus = [
+    "## T-004 任务丁",
+    "- requirement: AUTO",
+    "- files: d.ts",
+    "",
+    "## T-005 任务戊",
+    "- requirement: F-005",
+    "- status: pending",
+    "- files: e.ts",
+    "",
+  ].join("\n");
+  const insertedMiddle = markTaskCardStatusInContent(multiCardsNoStatus, "T-004", "blocked");
+  assert.notEqual(insertedMiddle, multiCardsNoStatus, "目标卡非末位且缺 status 行时内容必须发生变更");
+  assert.ok(
+    /^## T-004 任务丁$/m.test(insertedMiddle) && /^## T-004 任务丁\n- status: blocked$/m.test(insertedMiddle),
+    `应在 T-004 标题行后插入 status，实际：${JSON.stringify(insertedMiddle)}`
+  );
+  assert.ok(/## T-005[\s\S]*- status: pending/.test(insertedMiddle), "T-005 状态不得被误改");
+  // 插入行必须落在 T-004 区段内，不能漂到 T-005 之后
+  assert.ok(
+    insertedMiddle.indexOf("- status: blocked") < insertedMiddle.indexOf("## T-005"),
+    "兜底 status 行必须插入在目标卡区段内"
+  );
+
   // 分支 3：未找到目标卡 → 原样返回（不得篡改其他内容）
   const untouched = markTaskCardStatusInContent(content, "T-999", "blocked");
   assert.equal(untouched, content, "未找到目标卡时必须原样返回");

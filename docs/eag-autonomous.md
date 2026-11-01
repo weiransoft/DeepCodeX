@@ -41,7 +41,7 @@ EAG 无人值守引擎（EAG-P5）是 Deep Code 的自主编程循环系统。�
 | `--confirmation` | 否 | `smart` | 确认模式：`smart`（智能三态）/ `always-ask`（始终询问）/ `fail-closed`（失败即关闭） |
 | `--test-command` | 否 | `npm test` | 测试命令字符串 |
 | `--stop-when` | 否 | 空 | 确定性停止条件，如 `"all tests passed"` |
-| `--max-tokens` | 否 | `200000` | 最大 Token 预算，正整数 |
+| `--max-tokens` | 否 | `200000` | Token 压缩基线（正整数；**不终止运行**，见下文终止条件） |
 | `--test-timeout-sec` | 否 | `600` | 测试超时秒数，正整数 |
 | `--consecutive-failure-abort` | 否 | `3` | 连续失败 abort 阈值，正整数 |
 
@@ -162,8 +162,13 @@ EAG-P5 复用 eag/loop/ 的 LoopScheduler 决策器统一管理终止条件：
 | **迭代上限到达** | iterIndex + 1 >= maxIterations | `failed`（由步骤 6 统一设置） |
 | **连续失败 abort** | consecutiveFailures >= consecutiveFailureAbort | `aborted`（human_checkpoint 优先） |
 | **用户熔断** | `/eag-autonomous-stop` | `aborted` |
-| **Token 预算耗尽** | totalTokensUsed >= maxTokens | `failed` |
+| **空转熔断** | 连续 3 轮无产出（plan 无卡 / dev·fix noop） | `aborted` |
 | **超时熔断** | 单轮超时 | `failed` |
+
+> **Token 预算不终止运行**（2026-10-20 需求变更）：`maxTokens` 仅作为上下文压缩的基线口径
+> （`perTaskBudget` 的地板值与 `ContextEpochState` 的段额度折算），耗尽后触发折叠续跑而非停止。
+> 防失控由「模型循环/空循环熔断 + 全局轮数上限（maxToolRounds）」承担。
+> 因此上表不再包含"Token 预算耗尽"一行——把它当终止条件会导致长任务被静默判死。
 
 > LoopScheduler 通过 `SchedulingDecision.action` 映射到 P5 status：`human_checkpoint` → `aborted`；`stop_failure`（非 max-iter）→ `aborted`；`stop_success`/`continue`/`fix` → 不改变 status（由循环条件处理）。
 

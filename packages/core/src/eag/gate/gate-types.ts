@@ -354,6 +354,23 @@ export interface GateOrchestrationResult {
   readonly firstFailedGate: GateId | null;
   /** 当前 Loop 类型 */
   readonly loopType: LoopType;
+  /**
+   * 未执行的门禁清单（2026-11-01 新增，修复"缺检查器却报全绿"）。
+   *
+   * 此前编排器对 enabledGateIds 中缺检查器的门禁（如 coding 的 G-4/G-5）
+   * 直接 `continue` 静默跳过，`allPassed` 仍为 true，调用方误判为"全部门禁通过"。
+   * 该字段显式披露哪些门禁没跑、为什么没跑：
+   * - `no-checker`：该 LoopType 要求执行，但编排器没有注册对应检查器（降级/未实现）
+   * - `missing-context`：G-6/G-7 因调用方传入普通 GateContext 缺扩展字段而跳过
+   *   （向后兼容语义，非缺陷）
+   *
+   * 默认不影响 `allPassed`（保持既有调用方行为）；需要 fail-closed 的调用方
+   * 可开启 `strictGateCoverage`，或用该字段自行判定。
+   */
+  readonly skippedGates?: ReadonlyArray<{
+    readonly gate: GateId;
+    readonly reason: "no-checker" | "missing-context";
+  }>;
 }
 
 // ============================================================================

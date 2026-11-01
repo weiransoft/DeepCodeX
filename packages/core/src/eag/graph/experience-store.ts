@@ -225,7 +225,12 @@ export class ExperienceStoreImpl implements ExperienceStoreProtocol {
     logger?: GraphLogger
   ) {
     this.cases = new Map();
-    this.maxCases = options?.maxCases ?? DEFAULT_MAX_CASES;
+    // 2026-11-01 加固：maxCases 必须 ≥0。若为负数（-1 常被误当作"不限量"），
+    // 下方 FIFO 淘汰循环的判据 `insertionOrder.length > maxCases` 在数组被
+    // shift() 清空后仍恒真（0 > -1），且 shift() 返回 undefined 不做任何推进
+    // → 零进展死循环，storeCase() 永不返回，图执行主线程被锁死。
+    const rawMaxCases = options?.maxCases ?? DEFAULT_MAX_CASES;
+    this.maxCases = Number.isFinite(rawMaxCases) ? Math.max(0, Math.floor(rawMaxCases)) : DEFAULT_MAX_CASES;
     this.similarityThreshold = options?.similarityThreshold ?? DEFAULT_SIMILARITY_THRESHOLD;
     this.featureWeights = options?.featureWeights;
     this.logger = logger ?? createConsoleLogger();

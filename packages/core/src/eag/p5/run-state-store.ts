@@ -54,6 +54,15 @@ import * as path from "node:path";
 const P5_LOCK_RETRY_INTERVAL_MS = 50 as const;
 
 /**
+ * RunState 默认最大迭代次数（2026-11-01 新增）
+ *
+ * 必须与 `autonomous-orchestrator.ts` 的 `DEFAULT_MAX_ITERATIONS`（10）保持一致：
+ * 该字段是"本次运行将会迭代多少轮"的落盘记录，默认值不一致会让
+ * 报告/进度表（"迭代次数 x / N"）与实际执行轮数对不上。
+ */
+const P5_DEFAULT_MAX_ITERATIONS = 10 as const;
+
+/**
  * 文件锁获取总超时（毫秒）
  *
  * 超过此时间仍无法获取锁时抛出 P5RunStateStoreError。
@@ -511,7 +520,7 @@ export class P5RunStateStore {
       readonly runId?: string;
       /** 初始 Loop 类型（默认 "design"） */
       readonly initialLoop?: P5LoopType;
-      /** 最大迭代次数（默认 50，上限 1000） */
+      /** 最大迭代次数（默认 10，与编排器 DEFAULT_MAX_ITERATIONS 对齐；上限 1000） */
       readonly maxIterations?: number;
       /** 最大 Token 预算（默认 200000） */
       readonly maxTokens?: number;
@@ -539,7 +548,11 @@ export class P5RunStateStore {
 
     // 3. 解析配置（应用默认值）
     const initialLoop: P5LoopType = request.initialLoop ?? "design";
-    const maxIterations = request.maxIterations ?? 50;
+    // 2026-11-01：默认值从 50 对齐到编排器的 DEFAULT_MAX_ITERATIONS（10）。
+    // 此前两处默认值不一致：AutonomousOrchestrator 实际按 10 轮跑，
+    // 而 RunState 若未显式传入就记 50，报告/进度表（"迭代次数 x / 50"）与实际不符。
+    // 生产路径下编排器总会显式传入，本项只影响直接调用 store 的场景与展示口径。
+    const maxIterations = request.maxIterations ?? P5_DEFAULT_MAX_ITERATIONS;
     const maxTokens = request.maxTokens ?? 200_000;
     const stopWhen = request.stopWhen ?? "";
 

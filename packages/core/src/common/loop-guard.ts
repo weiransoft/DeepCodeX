@@ -267,6 +267,20 @@ export class LoopGuard {
   private state: LoopGuardState;
   /** 手动终止标志 */
   private manuallyAborted: boolean = false;
+  /**
+   * Token 预算是否**显式**配置（2026-11-01 修复"隐式卡预算"）。
+   *
+   * 背景：2026-10-20 需求变更后，Token 预算不再作为硬终止条件（防失控改由
+   * 模型循环/空循环熔断 + 轮数上限承担），但本类的 maxTokens 仍默认取
+   * DEFAULT_LOOP_GUARD_CONFIG 的 200_000 并硬终止。EAG/team 调用方只传
+   * `{ maxIterations: 10 }` 时，会隐式继承 200k 上限 → 长任务在预算耗尽时
+   * 被静默终止（典型"卡预算导致任务不执行"）。
+   *
+   * 语义对齐：仅当调用方**显式**传入正数 maxTokens 时才把 Token 当作硬终止，
+   * 与 GraphGuard 的 `maxTokens=0 表示不限制` 约定一致；未显式配置时
+   * remainingTokens 仍按默认值计算（保持观测口径），但不触发终止。
+   */
+  private readonly tokenBudgetEnforced: boolean;
 
   /**
    * 构造 LoopGuard
@@ -278,6 +292,8 @@ export class LoopGuard {
       ...DEFAULT_LOOP_GUARD_CONFIG,
       ...config,
     });
+    this.tokenBudgetEnforced =
+      typeof config?.maxTokens === "number" && Number.isFinite(config.maxTokens) && config.maxTokens > 0;
     this.state = { ...INITIAL_LOOP_GUARD_STATE };
   }
 
@@ -290,7 +306,7 @@ export class LoopGuard {
    * 1. 手动终止（manuallyAborted=true）
    * 2. 连续失败超上限（consecutiveFailures >= maxConsecutiveFailures）
    * 3. 迭代次数超上限（iterationsCompleted >= maxIterations）
-   * 4. Token 预算耗尽（tokensConsumed >= maxTokens）
+   * 4. Token 预算耗尽（**仅当调用方显式配置 maxTokens>0 时**：tokensConsumed >= maxTokens）
    *
    * @returns 检查结果
    */
@@ -331,8 +347,8 @@ export class LoopGuard {
       };
     }
 
-    // 4. Token 预算耗尽
-    if (this.state.tokensConsumed >= this.config.maxTokens) {
+    // 4. Token 预算耗尽（仅显式配置时生效，见 tokenBudgetEnforced 注释）
+    if (this.tokenBudgetEnforced && this.state.tokensConsumed >= this.config.maxTokens) {
       return {
         allowed: false,
         stopReason: "max_tokens_exceeded",
@@ -630,7 +646,10 @@ export class TurnGuard {
     // 3. 连续空转轮（2026-10-23 空转护栏）：模型既不产出可见正文、也没有任何
     //    工具执行成功——与判定 1/2 正交：循环检测要求"相同参数"（模型换着命令
     //    空跑则漏检），全失败咨询要求"工具都失败"（工具成功但任务无进展则漏检）。
-    if (this.config.maxConsecutiveEmptyTurns > 0 && this.consecutiveEmptyTurns >= this.config.maxConsecutiveEmptyTurns) {
+    if (
+      this.config.maxConsecutiveEmptyTurns > 0 &&
+      this.consecutiveEmptyTurns >= this.config.maxConsecutiveEmptyTurns
+    ) {
       return {
         allow: false,
         action: "consult_user_empty_turns",

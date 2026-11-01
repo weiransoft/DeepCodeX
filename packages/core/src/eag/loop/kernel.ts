@@ -150,7 +150,12 @@ export class LoopKernel {
     let iterIndex = 0;
     let finalStatus: "completed" | "failed" | "aborted" = "failed";
 
-    while (!this.stopRequested) {
+    // 2026-11-01 加固：把 maxIterations 写进循环条件本身，作为结构性上界。
+    // 此前条件是 `while (!this.stopRequested)`，轮数上限只靠循环体外侧的
+    // 尾部 break（下方第 4 步）兜底——一旦 runOneCycle 的返回路径被改动、
+    // 或某个分支提前 continue 跳过尾部检查，循环就失去上界（无限空转）。
+    // 条件内加带上界后，任何路径都不可能越过 maxIterations。
+    while (!this.stopRequested && iterIndex < this.config.maxIterations) {
       // 1. 单轮执行
       const cycleResult = this.runOneCycle(objective, iterIndex);
 

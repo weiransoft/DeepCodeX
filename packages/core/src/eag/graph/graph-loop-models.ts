@@ -129,7 +129,12 @@ export interface WorkGraphConfig {
   readonly maxDepth: number;
   /** 最大并行度（fan-out 并发上限，默认 4） */
   readonly maxParallelism: number;
-  /** 图级 token 预算（所有节点 token 总和上限，0 表示不限制） */
+  /**
+   * 图级 token 预算（所有节点 token 总和上限，0 表示不限制）
+   *
+   * 默认只用于观测与报告；是否**终止**图执行由 GraphGuardConfig.tokenBudgetHardStop 决定
+   * （默认 false）。把它当成硬闸会让长图跑到额度即静默失败。
+   */
   readonly maxTokens: number;
   /** 图级超时（秒，0 表示不限制） */
   readonly timeoutSec: number;
@@ -325,7 +330,12 @@ export interface NodeLoopConfig {
   readonly evaluatorMode: EvaluatorMode;
   /** 节点级最大迭代次数（覆盖图级配置，必须 >= 1） */
   readonly maxIterations: number;
-  /** 节点级最大 token 预算（必须 >= 1） */
+  /**
+   * 节点级 token 预算（必须 >= 1）
+   *
+   * 仅作为节点 Loop 的上下文压缩基线（对齐 EAG-P5 的 2026-10-20 语义），
+   * 不再终止节点执行；节点终止由 maxIterations 与熔断器负责。
+   */
   readonly maxTokens: number;
   /** 自然语言停止条件（空字符串表示无显式停止条件） */
   readonly stopWhen: string;
@@ -668,8 +678,22 @@ export type GraphGuardCustomRule = (
 export interface GraphGuardConfig {
   /** 输出契约验证级别：strict=严格校验类型和必填性，lenient=仅校验字段存在 */
   readonly outputContractValidationLevel?: "strict" | "lenient";
-  /** 是否启用 token 预算检查（默认 true） */
+  /** 是否启用 token 预算检查（默认 true；仅"是否观测"，是否终止见 tokenBudgetHardStop） */
   readonly enableTokenBudgetCheck?: boolean;
+  /**
+   * token 预算耗尽时是否**硬终止**图执行（默认 false，2026-11-01 新增）。
+   *
+   * 背景：2026-10-20 需求变更后，Token 预算在整个工程里不再作为硬终止条件
+   * （P5/LlmTaskExecutor 的 Token 终止分支已全部移除，只作压缩基线口径），
+   * 防失控交给模型循环/空循环熔断 + 全局轮数上限（图侧即 maxDepth/遍历步数）。
+   * 但 graph-guard 仍保留 `maxTokens` 硬闸：当某个节点的 loopConfig 配了
+   * maxTokens（很多 yml 只是拿它当压缩基线），图跑到该额度就被 stop_failure
+   * 静默终止——即典型的"卡预算导致任务不执行"。
+   *
+   * 语义：默认 false = 超预算只告警不终止（与 P5 一致）；
+   * 需要旧行为的调用方显式传 true。
+   */
+  readonly tokenBudgetHardStop?: boolean;
   /** 是否启用图深度检查（默认 true） */
   readonly enableDepthCheck?: boolean;
   /** 是否启用单节点耗时检查（默认 true） */

@@ -507,15 +507,19 @@ test("H46. maxIterations=0 时首次 check 立即终止", () => {
   assert.equal(check.stopReason, "max_iterations_exceeded");
 });
 
-test("H47. maxTokens=0 时首次 check 立即终止", () => {
+test("H47. maxTokens=0 视为不启用 token 终止（与 GraphGuard 约定对齐）", () => {
   const guard = new LoopGuard({
     maxTokens: 0,
     maxIterations: 100, // 排除迭代上限干扰
   });
   const check = guard.check();
-  // tokensConsumed=0 >= maxTokens=0 → 终止
-  assert.equal(check.allowed, false);
-  assert.equal(check.stopReason, "max_tokens_exceeded");
+  // 2026-11-01 语义调整：Token 预算不再是硬终止条件（2026-10-20 需求变更），
+  // 且 maxTokens=0 统一按"未启用"处理（对齐 GraphGuard 的 maxTokens=0=禁用 约定），
+  // 避免"配了 0 就一次都跑不了"的卡预算形态。真正的失控防线是 maxIterations
+  // 与 consecutiveFailures。
+  assert.equal(check.allowed, true, "maxTokens=0 不应终止执行");
+  assert.equal(check.stopReason, undefined);
+  assert.equal(check.remainingTokens, 0, "剩余额度仍按口径计算（仅观测）");
 });
 
 test("H48. 剩余迭代/Token 不会出现负数（Math.max 兜底）", () => {
@@ -525,6 +529,19 @@ test("H48. 剩余迭代/Token 不会出现负数（Math.max 兜底）", () => {
   // remainingTokens 不应为负
   assert.ok(check.remainingTokens >= 0);
   assert.equal(check.remainingTokens, 0);
+});
+
+test("H48b. 未显式配置 maxTokens 时不因 token 耗尽终止（隐式卡预算修复）", () => {
+  // 2026-11-01：DEFAULT_LOOP_GUARD_CONFIG.maxTokens=200_000，若沿用旧语义，
+  // 调用方只传 { maxIterations } 就会隐式继承 200k 上限并被静默终止。
+  // 现语义：只有显式传正数 maxTokens 才把 Token 当硬终止。
+  const guard = new LoopGuard({ maxIterations: 100 });
+  for (let i = 0; i < 3; i++) {
+    guard.recordIteration(100_000, true); // 累计 300k > 默认 200k
+  }
+  const check = guard.check();
+  assert.equal(check.allowed, true, "未显式配置预算时不得因 token 终止");
+  assert.equal(check.stopReason, undefined);
 });
 
 test("H49. 多次成功迭代后状态持续累积", () => {

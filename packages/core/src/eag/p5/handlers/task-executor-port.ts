@@ -253,7 +253,11 @@ export interface P5PlanIterationInput {
   readonly prevStageSummaries: string;
   /** 跨 run 失败记忆（上一轮同项目 run 的终态摘要，无历史时为空串） */
   readonly previousRunContext: string;
-  /** 运行剩余 Token 预算（透明给模型，供其评估"是否还有资源继续"） */
+  /**
+   * 运行剩余 Token 预算。
+   * 2026-10-29 需求变更：预算不再注入规划简报、不参与规划判定（防"预算不足"误停）；
+   * 字段保留仅为兼容既有调用方签名，规划链路不得消费。
+   */
   readonly remainingTokenBudget: number;
   /** abort 标志文件绝对路径（规划请求发起前检查，存在则直接 ok=false 不发请求） */
   readonly abortFlagPath: string;

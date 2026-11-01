@@ -313,9 +313,15 @@ export class CoverageGate {
     const failedDimensions = this.evaluateThreshold(parsedReport, highRiskSymbolsCoverage);
 
     // 8. 应用失败升级策略
-    // 首次失败（consecutiveFailureCount=0）→ WARNING（passed=true）
-    // 连续 ≥2 次失败（consecutiveFailureCount≥1）→ BLOCKER（passed=false）
-    const isBlocker = request.consecutiveFailureCount >= COVERAGE_CONSECUTIVE_FAILURE_THRESHOLD - 1;
+    // consecutiveFailureCount = 本次之前已连续失败的次数（由调用方跨轮保有）
+    //   - 本次为第 1 次失败（count=0）→ WARNING（passed=true），留一轮修复机会
+    //   - 本次为第 N 次失败且 N ≥ COVERAGE_CONSECUTIVE_FAILURE_THRESHOLD → BLOCKER（passed=false）
+    // 2026-11-01：判据改写为显式的「第几次失败」口径（failureOrdinal），
+    // 与旧式 `count >= THRESHOLD - 1` 代数等价，但消除了"少算本次"的读数歧义——
+    // 此前该处与调用方不可达的自增分支叠加，产生了"首次失败必 passed=true
+    // 且计数永不推进 → 单 run 内永不阻断"的缺陷（调用方已在 TestingOrchestrator 修复）。
+    const failureOrdinal = request.consecutiveFailureCount + 1;
+    const isBlocker = failureOrdinal >= COVERAGE_CONSECUTIVE_FAILURE_THRESHOLD;
     const passed = failedDimensions.length === 0 || !isBlocker;
 
     // 9. 构建并冻结 CoverageReport

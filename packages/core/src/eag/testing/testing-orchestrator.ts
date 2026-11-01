@@ -216,6 +216,18 @@ export class TestingOrchestrator {
   private readonly e2eTestGenerator: E2eTestGenerator;
   /** 覆盖率门禁（依赖注入，必填——需要 pkcAccessor） */
   private readonly coverageGate: CoverageGate;
+
+  /**
+   * 覆盖率门禁"连续未达标"计数（跨 run 保有，2026-11-01 修复）。
+   *
+   * 原实现是本方法内的局部变量、每次 run 重置为 0，而 CoverageGate 在
+   * consecutiveFailureCount=0 时恒返回 passed=true（首次失败只升 WARNING），
+   * 于是 `if (!coverageReport.passed)` 分支在单次 run 内永远不成立 →
+   * 计数的自增语句不可达 → 计数永远是 0 → BLOCKER 升级阈值永远达不到，
+   * 覆盖率在单 run 内永不阻断。改为实例级状态：同一编排器实例跨 Loop 迭代
+   * 复用，计数才具备"连续失败"语义；覆盖率达标时清零。
+   */
+  private coverageConsecutiveFailureCount = 0;
   /** 既有契约保护判定器（依赖注入） */
   private readonly brownfieldContractGuard: BrownfieldContractGuard;
   /** 测试质量静态判定器注册表（依赖注入） */
@@ -326,7 +338,7 @@ export class TestingOrchestrator {
     const events: LoopEvent[] = [];
     const totalLlmCallCount = 0;
     const totalTokensUsed = 0;
-    let coverageConsecutiveFailureCount = 0;
+    let coverageConsecutiveFailureCount = this.coverageConsecutiveFailureCount;
 
     // 3. G-6 门禁检查（TESTING Loop 进入门禁）
     // EAG-P3 批次 11 S1 改造（D-S1-5）：改为委托给注入的 GateG6Checker 独立类
@@ -618,9 +630,15 @@ export class TestingOrchestrator {
         consecutiveFailureCount: coverageConsecutiveFailureCount,
       });
 
-      if (!coverageReport.passed) {
+      // 2026-11-01 修复：原判据 `if (!coverageReport.passed)` 与门禁自身的
+      // 升级策略互为因果——门禁在 consecutiveFailureCount=0（首次失败）时
+      // 恒返回 passed=true，因此该分支不可达、计数永远是 0、BLOCKER 永远不触发。
+      // 改用原始信号「存在未达标维度」累计，计数才真正推进（首次 WARNING、
+      // 第二次起 BLOCKER，对齐下方升级策略注释）。
+      if (coverageReport.failedDimensions.length > 0) {
         // 覆盖率未达标 → 递增失败计数
         coverageConsecutiveFailureCount++;
+        this.coverageConsecutiveFailureCount = coverageConsecutiveFailureCount;
         this.log(
           `覆盖率门禁未通过（连续失败 ${coverageConsecutiveFailureCount} 次）`,
           coverageConsecutiveFailureCount >= COVERAGE_CONSECUTIVE_FAILURE_THRESHOLD ? "error" : "warn"
@@ -649,8 +667,9 @@ export class TestingOrchestrator {
           );
         }
       } else {
-        // 覆盖率达标 → 重置失败计数
+        // 覆盖率达标 → 重置失败计数（实例级同步清零，保证"连续"语义）
         coverageConsecutiveFailureCount = 0;
+        this.coverageConsecutiveFailureCount = 0;
       }
 
       events.push(

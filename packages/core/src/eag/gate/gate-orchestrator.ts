@@ -183,6 +183,8 @@ export class GateOrchestratorError extends Error {
 export class GateOrchestrator {
   /** 门禁检查器列表（按注入顺序保留，run() 时按 LOOP_GATE_IDS 过滤） */
   private readonly checkers: ReadonlyArray<GateChecker>;
+  /** 严格门禁覆盖：缺检查器的门禁计入未通过（默认 false） */
+  private readonly strictGateCoverage: boolean;
 
   /**
    * @param options 编排器配置选项
@@ -190,11 +192,23 @@ export class GateOrchestrator {
    * @throws {GateOrchestratorError} 当传入的自定义检查器协议违反时（gateId 不在 GATE_EXECUTION_ORDER 中）抛出。
    *   协议校验在构造时一次性完成，避免每次 run() 都重复校验浪费性能。
    */
-  constructor(options?: { readonly checkers?: ReadonlyArray<GateChecker> }) {
+  constructor(options?: {
+    readonly checkers?: ReadonlyArray<GateChecker>;
+    /**
+     * 严格门禁覆盖（2026-11-01 新增，默认 false）。
+     *
+     * 为 true 时：某门禁被 LOOP_GATE_IDS 要求执行、但编排器未注册对应检查器
+     * （reason="no-checker"）→ `allPassed=false` 且 `firstFailedGate` 指向该门禁。
+     * 默认 false 保持既有调用方行为（G-4/G-5 需按需注入），
+     * 但 skipped 信息始终通过 `skippedGates` 披露，不再静默。
+     */
+    readonly strictGateCoverage?: boolean;
+  }) {
     // 缺省时使用默认检查器列表：
     // - G-1/G-2/G-3：CODING Loop 进入门禁（批次 8）
     // - G-6/G-7：TESTING Loop 进入与退出门禁（批次 10 新增）
-    // 注：G-4/G-5 不在默认列表中，需调用方按需注入（与批次 9 设计一致）
+    // 注：G-4/G-5 不在默认列表中，需调用方按需注入（与批次 9 设计一致）；
+    //     未注入时不再静默跳过——由 skippedGates 显式披露（reason="no-checker"）。
     const checkers =
       options?.checkers ??
       Object.freeze([
@@ -204,6 +218,7 @@ export class GateOrchestrator {
         new GateG6Checker(),
         new GateG7Checker(),
       ]);
+    this.strictGateCoverage = options?.strictGateCoverage === true;
 
     // 协议校验：构造时一次性校验所有检查器的 gateId 必须在 GATE_EXECUTION_ORDER 中
     // 对齐性能优化原则——避免每次 run() 都重复校验所有检查器
@@ -232,6 +247,8 @@ export class GateOrchestrator {
    *    - 若无扩展字段 → 跳过该 checker（不计入 results）
    * 5. 短路求值：首个失败即停止，不执行后续门禁
    * 6. 收集所有结果，计算 allPassed 与 firstFailedGate
+   * 7. 记录 skippedGates：启用了但本次未执行的门禁及原因（no-checker / missing-context），
+   *    避免"缺检查器 → 静默跳过 → 误报全绿"；strictGateCoverage=true 时 no-checker 计入未通过
    *
    * 注：检查器协议校验已移至 constructor，run() 仅校验 context.loopType 合法性
    *
@@ -256,11 +273,26 @@ export class GateOrchestrator {
         allPassed: true,
         firstFailedGate: null,
         loopType,
+        skippedGates: Object.freeze([]) as ReadonlyArray<{
+          readonly gate: GateId;
+          readonly reason: "no-checker" | "missing-context";
+        }>,
       }) as GateOrchestrationResult;
     }
 
     // 获取当前 LoopType 启用的 GateId 列表（按执行顺序）
     const enabledGateIds = LOOP_GATE_IDS[loopType];
+
+    // 静态覆盖缺口：本 LoopType 要求执行、但编排器没有注册检查器的门禁。
+    // 2026-11-01 修复：此前这类门禁在下面被 `continue` 静默跳过，
+    // allPassed 依旧为 true，调用方把"少跑两个门禁"误读成"全部门禁通过"。
+    const registeredGateIds = new Set<GateId>(this.checkers.map((c) => c.gateId));
+    const skippedGates: Array<{ gate: GateId; reason: "no-checker" | "missing-context" }> = [];
+    for (const gateId of enabledGateIds) {
+      if (!registeredGateIds.has(gateId)) {
+        skippedGates.push({ gate: gateId, reason: "no-checker" });
+      }
+    }
 
     // 按顺序执行门禁检查器（短路求值）
     // 仅执行 gateId 在 enabledGateIds 中的 checkers
@@ -275,11 +307,13 @@ export class GateOrchestrator {
 
       // 向后兼容：对 G-6/G-7 checker，检查 context 是否含扩展字段
       // 若调用方传入普通 GateContext（非 GateG6Context/GateG7Context），
-      // 跳过 G-6/G-7 校验，保证既有调用方不受影响
+      // 跳过 G-6/G-7 校验，保证既有调用方不受影响（并记入 skippedGates 披露）
       if (!isGateG6Context(context) && checker.gateId === "G-6") {
+        skippedGates.push({ gate: "G-6", reason: "missing-context" });
         continue;
       }
       if (!isGateG7Context(context) && checker.gateId === "G-7") {
+        skippedGates.push({ gate: "G-7", reason: "missing-context" });
         continue;
       }
 
@@ -293,13 +327,21 @@ export class GateOrchestrator {
     }
 
     // 计算是否全部通过
-    const allPassed = firstFailedGate === null;
+    // strictGateCoverage=true 时，缺检查器（no-checker）也算未通过 → fail-closed。
+    // missing-context 属既定向后兼容语义，不计入未通过。
+    const missingCheckerGates = skippedGates.filter((s) => s.reason === "no-checker");
+    const coverageGap = this.strictGateCoverage && missingCheckerGates.length > 0;
+    const allPassed = firstFailedGate === null && !coverageGap;
 
     return Object.freeze({
       results: Object.freeze(results) as ReadonlyArray<GateResult>,
       allPassed,
-      firstFailedGate,
+      firstFailedGate: firstFailedGate ?? (coverageGap ? (missingCheckerGates[0]!.gate as GateId) : null),
       loopType,
+      skippedGates: Object.freeze(skippedGates) as ReadonlyArray<{
+        readonly gate: GateId;
+        readonly reason: "no-checker" | "missing-context";
+      }>,
     }) as GateOrchestrationResult;
   }
 

@@ -10,20 +10,25 @@
  * §5.2.3 CODING Loop 失败处理"连续 3 次同类失败 → HUMAN_CHECKPOINT"）：
  *
  * 优先级（从高到低）：
- * 1. Token 预算硬上限：cumulativeTokens >= maxTokens → STOP_FAILURE
- * 2. 最大迭代次数硬上限：currentIter+1 >= maxIterations
+ * 1. 最大迭代次数硬上限：currentIter+1 >= maxIterations
  *    - verdict.passed=true → STOP_SUCCESS（最后一轮通过）
  *    - verdict.passed=false → STOP_FAILURE
- * 3. 验证通过（verdict.passed=true）：
+ * 2. 验证通过（verdict.passed=true）：
  *    - 满足 stop_when 停止条件 → STOP_SUCCESS
  *    - 否则 → CONTINUE
- * 4. 验证未通过（verdict.passed=false）：
+ * 3. 验证未通过（verdict.passed=false）：
  *    - consecutiveFailures+1 >= 5 → STOP_FAILURE（连续失败超上限）
  *    - consecutiveFailures+1 >= 3 → HUMAN_CHECKPOINT（连续失败需人工介入）
  *    - 否则 → FIX
  *
+ * 注（2026-10-20 需求变更，2026-11-01 同步文档）：原「优先级 1：Token 预算硬上限
+ * cumulativeTokens >= maxTokens → STOP_FAILURE」已**移除**。Token 预算不再作为
+ * 循环终止条件，maxTokens 只保留为上下文压缩的基线口径；防失控改由
+ * 模型循环/空循环熔断 + 全局轮数上限（maxIterations / maxToolRounds）承担。
+ * cumulativeTokens 仍作为入参保留，仅用于观测与报告。
+ *
  * 设计原则：
- * - 保守停止：遇到硬上限（max_iterations / max_tokens / 连续失败）必须停止
+ * - 保守停止：遇到硬上限（max_iterations / 连续失败）必须停止
  * - 人类检查点：连续 3 次同类失败触发，避免 Cognitive Surrender
  * - 动态修复：验证未通过时优先 FIX，但超过尝试次数后升级为 HUMAN_CHECKPOINT / STOP_FAILURE
  *
