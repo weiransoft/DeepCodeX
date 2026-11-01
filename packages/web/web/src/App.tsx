@@ -32,14 +32,27 @@ import {
 } from "./api";
 import type { ChatEntry, SedimentationSuggestion, UserAttachment } from "./chat-model";
 import { extractPlanFromToolContent, parseBackgroundTaskNotice, parseLeadingJsonBlock } from "./chat-model";
-import { getDesktopBridge, type DesktopBridge } from "./desktop-bridge";
+import { getDesktopBridge, isDesktop, type DesktopBridge } from "./desktop-bridge";
 import type { PermissionDecisionChoice } from "./components/PermissionCard";
+import { ActivityBar, type ActivityView } from "./components/ActivityBar";
 import { ChatPane } from "./components/ChatPane";
 import { Composer } from "./components/Composer";
 import { DesktopStatusBar } from "./components/DesktopStatusBar";
 import { FileDrawer } from "./components/FileDrawer";
 import { LoginView } from "./components/LoginView";
 import { SessionSidebar } from "./components/SessionSidebar";
+import { SetupWizard } from "./components/SetupWizard";
+import { SettingsDrawer } from "./components/SettingsDrawer";
+import { SshPanel } from "./components/SshPanel";
+import { TopTabBar } from "./components/TopTabBar";
+import {
+  getDesktopConfig,
+  saveDesktopConfig,
+  type DesktopConfig,
+  type DesktopLdapConfig,
+  type DesktopMcpServer,
+  type DesktopModel,
+} from "./desktopConfig";
 import {
   ChatStream,
   type DoneEvent,
@@ -101,6 +114,42 @@ export function App() {
   /** 桥仅由 DeepCode Desktop 壳初始化脚本注入；纯浏览器访问恒为 null，
    *  桌面专属 UI（authority 状态条等）全部隐藏，Web 独立可用零回归 */
   const [desktopBridge] = useState<DesktopBridge | null>(() => getDesktopBridge());
+
+  // ---------- 桌面 Shell 布局（Trae 风格：顶部标签页 + 活动栏 + 侧边栏视图 + 底部状态栏） ----------
+  /** 侧边栏当前视图：chats=会话 / ssh=远程（仅桌面壳渲染活动栏） */
+  const [sidebarView, setSidebarView] = useState<ActivityView>("chats");
+  /** 引擎状态面板展开（底部状态栏与活动栏引擎图标联动） */
+  const [enginePanelOpen, setEnginePanelOpen] = useState(false);
+  /** 当前 authority（null=本地；SSH 连接成功后为 ssh://…，M2 生效） */
+  const [remoteAuthority, setRemoteAuthority] = useState<string | null>(null);
+
+  /**
+   * 活动栏视图切换：重复点「会话」= 折叠/展开侧栏（Trae/VS Code 语义）；
+   * 折叠态切回会话视图时自动展开。
+   */
+  const handleViewChange = useCallback(
+    (next: ActivityView): void => {
+      if (next === "chats") {
+        if (sidebarView === "chats") {
+          setSidebarCollapsed((v) => !v);
+        } else {
+          setSidebarView("chats");
+          setSidebarCollapsed(false);
+        }
+        return;
+      }
+      setSidebarView(next);
+    },
+    [sidebarView]
+  );
+
+  // ---------- 桌面配置（首次登录向导 / 系统管理） ----------
+  /** 桌面配置快照（模型 / MCP / 首次登录标志）；非桌面环境恒为 null */
+  const [desktopConfig, setDesktopConfig] = useState<DesktopConfig | null>(null);
+  /** 首次登录向导是否弹出 */
+  const [showWizard, setShowWizard] = useState(false);
+  /** 系统管理抽屉是否打开 */
+  const [showSettings, setShowSettings] = useState(false);
 
   // ---------- refs：SSE 回调与异步流程中读取"当前值"，避免陈旧闭包 ----------
   const streamRef = useRef<ChatStream | null>(null);
@@ -701,8 +750,11 @@ export function App() {
       }
       try {
         // 工作空间（ARCH-20261027 T05）：选中了可用空间时以 workspaceId 指定落点
-        //（服务端以其 root 为准，projectRoot 忽略）；未配置空间回退 projectRoot 旧语义
-        const useWorkspace = workspaceId !== "" && workspaces.some((w) => w.id === workspaceId);
+        //（服务端以其 root 为准，projectRoot 忽略）；未配置空间回退 projectRoot 旧语义。
+        // web-personal-subworkspace T1：个人区哨兵（id="personal"）不作为 workspaceId
+        // 下发——否则服务端强制落个人区根，覆盖用户所选的子文件夹落点。
+        const useWorkspace =
+          workspaceId !== "" && workspaceId !== "personal" && workspaces.some((w) => w.id === workspaceId);
         const { chatId } = await createChat(root, undefined, useWorkspace ? workspaceId : undefined);
         const now = new Date().toISOString();
         // POST /api/chats 仅返回 {chatId, sessionId}；列表项按后端契约本地补全
@@ -745,12 +797,17 @@ export function App() {
     [applyStreaming, config, ensureStream, handleUnauthorized, showToast, workspaceId, workspaces]
   );
 
-  /** 新建对话（侧栏按钮入口；复用 createNewChat，创建中标记防重入） */
-  const newChat = useCallback((): void => {
-    if (creatingChat) return;
-    setCreatingChat(true);
-    void createNewChat(projectRoot).finally(() => setCreatingChat(false));
-  }, [createNewChat, creatingChat, projectRoot]);
+  /** 新建对话（侧栏按钮入口；复用 createNewChat，创建中标记防重入）。
+   *  web-personal-subworkspace T1：personalOnly 模式可携带所选文件夹路径作为
+   *  会话工作区；缺省（undefined）沿用 projectRoot（个人模式空串 = 服务端落个人区根）。 */
+  const newChat = useCallback(
+    (folderRoot?: string): void => {
+      if (creatingChat) return;
+      setCreatingChat(true);
+      void createNewChat(folderRoot ?? projectRoot).finally(() => setCreatingChat(false));
+    },
+    [createNewChat, creatingChat, projectRoot]
+  );
 
   /**
    * 把消息发送到指定会话（与 Composer 的 onSend 通道共用）。
@@ -1005,13 +1062,67 @@ export function App() {
       .then((me) => {
         setUser(me);
         setAuthState("authed");
+        // 桌面环境：拉取本地配置，首次登录且未完成向导则自动弹出
+        if (isDesktop()) {
+          getDesktopConfig()
+            .then((cfg) => {
+              setDesktopConfig(cfg);
+              if (!cfg.firstLoginDone) setShowWizard(true);
+            })
+            .catch((e: unknown) => {
+              if (e instanceof ApiError && e.status === 401) return;
+              showToast(e instanceof Error ? e.message : "桌面配置加载失败");
+            });
+        }
       })
       .catch((e: unknown) => {
         // 401 → 登录页；其它错误也回退登录页（无用户态无法使用）
         if (!(e instanceof ApiError)) console.warn("用户态检查失败", e);
         setAuthState("anon");
       });
-  }, []);
+  }, [showToast]);
+
+  /** 向导完成：保存模型 + MCP 并标记首次登录完毕，关闭向导 */
+  const handleWizardComplete = useCallback(
+    (models: DesktopModel[], mcpServers: DesktopMcpServer[]): void => {
+      saveDesktopConfig({ models, mcpServers, setupCompleted: true })
+        .then((saved) => {
+          setDesktopConfig(saved);
+          setShowWizard(false);
+        })
+        .catch((e: unknown) => {
+          showToast(e instanceof Error ? e.message : "配置保存失败");
+        });
+    },
+    [showToast]
+  );
+
+  /** 向导跳过：仅标记首次登录完毕（保留既有配置），关闭向导 */
+  const handleWizardSkip = useCallback((): void => {
+    const base = desktopConfig ?? { models: [], mcpServers: [], firstLoginDone: false };
+    saveDesktopConfig({
+      models: base.models,
+      mcpServers: base.mcpServers,
+      setupCompleted: true,
+    })
+      .then((saved) => {
+        setDesktopConfig(saved);
+        setShowWizard(false);
+      })
+      .catch(() => setShowWizard(false));
+  }, [desktopConfig]);
+
+  /** 系统管理保存：落盘模型 + MCP + LDAP（不关闭抽屉，便于继续编辑） */
+  const handleSettingsSave = useCallback(
+    (models: DesktopModel[], mcpServers: DesktopMcpServer[], ldap: DesktopLdapConfig): void => {
+      saveDesktopConfig({ models, mcpServers, ldap, setupCompleted: true })
+        .then((saved) => setDesktopConfig(saved))
+        .catch((e: unknown) => {
+          showToast(e instanceof Error ? e.message : "配置保存失败");
+        });
+    },
+    [showToast]
+  );
 
   // authed 后拉取配置与可用工作空间
   useEffect(() => {
@@ -1122,78 +1233,254 @@ export function App() {
     );
   }
 
-  // 未登录：登录页
+  // 未登录：登录页。桌面壳仍渲染 Shell（顶部标签页拖拽 / 底部状态栏 / 设置入口不依赖登录态），
+  // 纯浏览器登录页零渲染（Web 独立可用零回归）
   if (authState === "anon" || user === null) {
-    return <LoginView ldapEnabled={config?.ldapEnabled ?? null} onSuccess={init} />;
+    const loginView = <LoginView ldapEnabled={config?.ldapEnabled ?? null} onSuccess={init} />;
+    return (
+      <>
+        {desktopBridge !== null ? (
+          <div className="shell-root">
+            <TopTabBar
+              chats={[]}
+              activeChatId={null}
+              onSelectChat={() => {}}
+              onNewChat={() => {}}
+              authority={remoteAuthority}
+              onNotice={showToast}
+            />
+            <div className="shell-body shell-body-login">{loginView}</div>
+            <DesktopStatusBar
+              onOpenSettings={() => setShowSettings(true)}
+              ldapEnabled={config?.ldapEnabled ?? null}
+              authority={remoteAuthority}
+              panelOpen={enginePanelOpen}
+              onTogglePanel={() => setEnginePanelOpen((v) => !v)}
+            />
+          </div>
+        ) : (
+          loginView
+        )}
+        {showSettings && (
+          <SettingsDrawer
+            initialConfig={desktopConfig ?? { models: [], mcpServers: [], firstLoginDone: false }}
+            onSave={handleSettingsSave}
+            onClose={() => setShowSettings(false)}
+          />
+        )}
+      </>
+    );
   }
 
   // P0-1：会话主键为 chatId（与后端 ChatSummary 契约一致）
   const activeChat = chats.find((c) => c.chatId === activeChatId) ?? null;
 
-  return (
-    <div className={"app" + (desktopBridge !== null ? " has-desktop-bar" : "")}>
-      {/* 桌面 authority 状态条：仅在 DeepCode Desktop WebView 内出现（纯浏览器零渲染） */}
-      {desktopBridge !== null && <DesktopStatusBar />}
+  // 纯浏览器（无桌面桥）：保持原有布局（无顶栏/活动栏/底栏，Web 零回归）
+  if (desktopBridge === null) {
+    return (
+      <div className="app">
+        {showWizard && (
+          <SetupWizard
+            initialConfig={desktopConfig ?? { models: [], mcpServers: [], firstLoginDone: false }}
+            onComplete={handleWizardComplete}
+            onSkip={handleWizardSkip}
+          />
+        )}
+        {showSettings && (
+          <SettingsDrawer
+            initialConfig={desktopConfig ?? { models: [], mcpServers: [], firstLoginDone: false }}
+            onSave={handleSettingsSave}
+            onClose={() => setShowSettings(false)}
+          />
+        )}
+        <SessionSidebar
+          collapsed={sidebarCollapsed}
+          chats={chats}
+          activeChatId={activeChatId}
+          user={user}
+          allowRoots={config?.allowRoots ?? []}
+          projectRoot={projectRoot}
+          workspaces={workspaces}
+          workspaceId={workspaceId}
+          personalOnly={config?.personalOnly ?? true}
+          personalRoot={config?.personalRoot ?? ""}
+          creating={creatingChat}
+          version={config?.version ?? ""}
+          onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
+          onSelectChat={selectChat}
+          onNewChat={newChat}
+          onProjectRootChange={setProjectRoot}
+          onWorkspaceChange={setWorkspaceId}
+          onLogout={logout}
+        />
+        <div className="main-area">
+          <ChatPane
+            entries={entries}
+            streaming={streaming}
+            chatTitle={activeChat !== null ? (activeChat.title ?? "未命名对话") : null}
+            onDecide={decide}
+            onStop={stop}
+            onOpenFileDrawer={() => setFileDrawerOpen(true)}
+            submittingPermIds={submittingPermIds}
+            sedimentSuggestions={activeChatId !== null ? (sedimentByChat[activeChatId] ?? []) : []}
+            sedimentResolvedPaths={sedimentResolved}
+            sedimentSubmittingIds={sedimentSubmittingIds}
+            onSedimentationConfirm={confirmSediment}
+            onSedimentationDismiss={dismissSediment}
+          />
+          <Composer
+            streaming={streaming}
+            steeringEnabled={config?.steeringEnabled ?? false}
+            maxUploadBytes={config?.maxUploadBytes ?? 0}
+            serverFiles={serverFiles}
+            onRemoveServerFile={(i) => setServerFiles((prev) => prev.filter((_, idx) => idx !== i))}
+            onSend={sendMessage}
+            onStop={stop}
+          />
+        </div>
+        <FileDrawer
+          open={fileDrawerOpen}
+          allowRoots={config?.allowRoots ?? []}
+          personalOnly={config?.personalOnly ?? true}
+          maxPreviewBytes={config?.maxPreviewBytes ?? 0}
+          personalRoot={config?.personalRoot ?? ""}
+          workspaceRoot={activeChat?.projectRoot ?? ""}
+          onUnauthorized={handleUnauthorized}
+          onClose={() => setFileDrawerOpen(false)}
+          onInsertAttachment={insertAttachment}
+        />
+        {toast !== null && <div className="toast">{toast}</div>}
+      </div>
+    );
+  }
 
-      {/* 左侧栏 */}
-      <SessionSidebar
-        collapsed={sidebarCollapsed}
+  // 桌面壳 Shell 布局（Trae 风格五区）：
+  // 顶部标签页（拖拽 + 多会话标签 + authority 徽标）
+  // ├ 活动栏（会话/文件/远程/…/系统管理/引擎）
+  // ├ 侧边栏视图（会话列表 或 SSH 远程）｜ 主区（对话流 + Composer）｜ 右侧文件抽屉
+  // └ 底部状态栏（引擎状态 + authority/LDAP + 设置/引擎面板）
+  return (
+    <div className="shell-root">
+      <TopTabBar
         chats={chats}
         activeChatId={activeChatId}
-        user={user}
-        allowRoots={config?.allowRoots ?? []}
-        projectRoot={projectRoot}
-        workspaces={workspaces}
-        workspaceId={workspaceId}
-        creating={creatingChat}
-        version={config?.version ?? ""}
-        onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
         onSelectChat={selectChat}
         onNewChat={newChat}
-        onProjectRootChange={setProjectRoot}
-        onWorkspaceChange={setWorkspaceId}
-        onLogout={logout}
+        creating={creatingChat}
+        authority={remoteAuthority}
+        onNotice={showToast}
       />
 
-      {/* 主区：对话流 + 输入框 */}
-      <div className="main-area">
-        <ChatPane
-          entries={entries}
-          streaming={streaming}
-          chatTitle={activeChat !== null ? (activeChat.title ?? "未命名对话") : null}
-          onDecide={decide}
-          onStop={stop}
-          onOpenFileDrawer={() => setFileDrawerOpen(true)}
-          submittingPermIds={submittingPermIds}
-          sedimentSuggestions={activeChatId !== null ? (sedimentByChat[activeChatId] ?? []) : []}
-          sedimentResolvedPaths={sedimentResolved}
-          sedimentSubmittingIds={sedimentSubmittingIds}
-          onSedimentationConfirm={confirmSediment}
-          onSedimentationDismiss={dismissSediment}
+      <div className="shell-body">
+        <ActivityBar
+          view={sidebarView}
+          onViewChange={handleViewChange}
+          sidebarCollapsed={sidebarCollapsed}
+          fileDrawerOpen={fileDrawerOpen}
+          onToggleFiles={() => setFileDrawerOpen((v) => !v)}
+          settingsOpen={showSettings}
+          onOpenSettings={() => setShowSettings(true)}
+          onToggleEnginePanel={() => setEnginePanelOpen((v) => !v)}
         />
-        {/* 输入框永不禁用：无选中会话时发送将自动新建会话承载首条消息 */}
-        <Composer
-          streaming={streaming}
-          steeringEnabled={config?.steeringEnabled ?? false}
-          maxUploadBytes={config?.maxUploadBytes ?? 0}
-          serverFiles={serverFiles}
-          onRemoveServerFile={(i) => setServerFiles((prev) => prev.filter((_, idx) => idx !== i))}
-          onSend={sendMessage}
-          onStop={stop}
+
+        {/* 侧边栏视图：会话列表 / SSH 远程（M1 数据面待壳 M2，UI 守卫降级） */}
+        {sidebarView === "ssh" ? (
+          <SshPanel
+            projectRoot={activeChat?.projectRoot ?? ""}
+            onAuthorityChange={setRemoteAuthority}
+            onNotice={showToast}
+          />
+        ) : (
+          <SessionSidebar
+            collapsed={sidebarCollapsed}
+            chats={chats}
+            activeChatId={activeChatId}
+            user={user}
+            allowRoots={config?.allowRoots ?? []}
+            projectRoot={projectRoot}
+            workspaces={workspaces}
+            workspaceId={workspaceId}
+            personalOnly={config?.personalOnly ?? true}
+            personalRoot={config?.personalRoot ?? ""}
+            creating={creatingChat}
+            version={config?.version ?? ""}
+            onToggleCollapsed={() => setSidebarCollapsed((v) => !v)}
+            onSelectChat={selectChat}
+            onNewChat={newChat}
+            onProjectRootChange={setProjectRoot}
+            onWorkspaceChange={setWorkspaceId}
+            onLogout={logout}
+          />
+        )}
+
+        {/* 主区：对话流 + 输入框 */}
+        <div className="main-area">
+          <ChatPane
+            entries={entries}
+            streaming={streaming}
+            chatTitle={activeChat !== null ? (activeChat.title ?? "未命名对话") : null}
+            onDecide={decide}
+            onStop={stop}
+            onOpenFileDrawer={() => setFileDrawerOpen(true)}
+            submittingPermIds={submittingPermIds}
+            sedimentSuggestions={activeChatId !== null ? (sedimentByChat[activeChatId] ?? []) : []}
+            sedimentResolvedPaths={sedimentResolved}
+            sedimentSubmittingIds={sedimentSubmittingIds}
+            onSedimentationConfirm={confirmSediment}
+            onSedimentationDismiss={dismissSediment}
+          />
+          {/* 输入框永不禁用：无选中会话时发送将自动新建会话承载首条消息 */}
+          <Composer
+            streaming={streaming}
+            steeringEnabled={config?.steeringEnabled ?? false}
+            maxUploadBytes={config?.maxUploadBytes ?? 0}
+            serverFiles={serverFiles}
+            onRemoveServerFile={(i) => setServerFiles((prev) => prev.filter((_, idx) => idx !== i))}
+            onSend={sendMessage}
+            onStop={stop}
+          />
+        </div>
+
+        {/* 右侧文件抽屉（workspaceRoot = 活跃会话工作区：「当前工作区」文件查看数据源） */}
+        <FileDrawer
+          open={fileDrawerOpen}
+          allowRoots={config?.allowRoots ?? []}
+          personalOnly={config?.personalOnly ?? true}
+          maxPreviewBytes={config?.maxPreviewBytes ?? 0}
+          personalRoot={config?.personalRoot ?? ""}
+          workspaceRoot={activeChat?.projectRoot ?? ""}
+          onUnauthorized={handleUnauthorized}
+          onClose={() => setFileDrawerOpen(false)}
+          onInsertAttachment={insertAttachment}
         />
       </div>
 
-      {/* 右侧文件抽屉 */}
-      <FileDrawer
-        open={fileDrawerOpen}
-        allowRoots={config?.allowRoots ?? []}
-        personalOnly={config?.personalOnly ?? true}
-        maxPreviewBytes={config?.maxPreviewBytes ?? 0}
-        personalRoot={config?.personalRoot ?? ""}
-        onUnauthorized={handleUnauthorized}
-        onClose={() => setFileDrawerOpen(false)}
-        onInsertAttachment={insertAttachment}
+      {/* 底部状态栏 */}
+      <DesktopStatusBar
+        onOpenSettings={() => setShowSettings(true)}
+        ldapEnabled={config?.ldapEnabled ?? null}
+        authority={remoteAuthority}
+        panelOpen={enginePanelOpen}
+        onTogglePanel={() => setEnginePanelOpen((v) => !v)}
       />
+
+      {/* 首次登录配置向导（桌面首登自动弹出） */}
+      {showWizard && (
+        <SetupWizard
+          initialConfig={desktopConfig ?? { models: [], mcpServers: [], firstLoginDone: false }}
+          onComplete={handleWizardComplete}
+          onSkip={handleWizardSkip}
+        />
+      )}
+
+      {/* 系统管理抽屉 */}
+      {showSettings && (
+        <SettingsDrawer
+          initialConfig={desktopConfig ?? { models: [], mcpServers: [], firstLoginDone: false }}
+          onSave={handleSettingsSave}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
 
       {/* 全局轻提示 */}
       {toast !== null && <div className="toast">{toast}</div>}

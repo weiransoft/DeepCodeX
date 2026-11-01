@@ -13,8 +13,8 @@
  * - 所有路径经 resolveInJail（realpath + 前缀校验）防 `..` 与 symlink 逃逸（CWE-22）。
  */
 
-import { createReadStream } from "node:fs";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { createReadStream, existsSync } from "node:fs";
+import { mkdir, readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { resolveInJail } from "../jail";
@@ -158,6 +158,33 @@ export async function handleListFiles(res: ServerResponse, jailRoots: string[], 
     return a.name.localeCompare(b.name);
   });
   sendJson(res, 200, { path: dir, entries });
+}
+
+/**
+ * 处理 POST /api/files/mkdir?path=<目录>&scope=...：在牢笼内幂等创建目录
+ * （web-personal-subworkspace T1：个人工作区「➕ 新建对话 → 选择文件夹 →
+ * 新建文件夹」场景）。目录已存在视为成功（幂等），返回归一后的真实路径。
+ *
+ * @param res 响应对象
+ * @param jailRoots 牢笼白名单根
+ * @param dirPath 目标目录（空路径按单根牢笼缺省到根，语义与列表一致）
+ */
+export async function handleMkdir(res: ServerResponse, jailRoots: string[], dirPath: string | null): Promise<void> {
+  const dir = await guardPath(jailRoots, resolveTargetPath(jailRoots, dirPath), "目录创建");
+  // 与 upload/download 同款引擎目录保护：禁止把 `.deepcode` 引擎区当创建目标
+  guardPersonalEngineDir(jailRoots, dir);
+  try {
+    await mkdir(dir, { recursive: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "EEXIST") {
+      throw new ApiError(500, `目录创建失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (!existsSync(dir)) {
+    throw new ApiError(500, "目录创建后校验失败：目标目录仍不存在");
+  }
+  sendJson(res, 200, { path: dir });
 }
 
 /**

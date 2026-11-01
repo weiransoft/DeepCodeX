@@ -444,5 +444,7 @@ export function resolveWebSettings(
       timeoutMs: merged.ldap?.timeoutMs ?? DEFAULT_LDAP_TIMEOUT_MS,
       attrs: merged.ldap?.attrs ?? {},
     },
+    // 热读来源：LDAP 运行期开关（ldap-runtime）据此追踪本配置来源文件的后续变化
+    userSettingsPath: options.userSettingsPath ?? getUserSettingsPath(),
   };
 }

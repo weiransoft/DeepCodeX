@@ -4,8 +4,9 @@
  * 功能：
  * - 目录浏览：GET /api/files?path=&scope=（路径牢笼由服务端校验），面包屑导航 + 条目列表
  *   （类型图标直显：文件夹/图片/代码/普通文件，大小与修改时间）；
- * - 双作用域（docs/dev/web-isolation.md §3.5）：「共享目录」= 管理员配置的 allowRoots；
- *   「我的文件」= 当前用户个人上传区（聊天附件落此处，仅本人可见）；
+ * - 三作用域：「当前工作区」= 活跃会话的 projectRoot（workspace file viewer 2026-10-30，
+ *   打开抽屉默认定位，随会话切换联动；服务端牢笼仍按 shared/personal 语义校验）；
+ *   「共享目录」= 管理员配置的 allowRoots；「我的文件」= 当前用户个人上传区（聊天附件落此处）；
  * - 上传：行内上传图标按钮（多选），POST /api/files/upload?path=&scope= 后刷新；
  * - 下载：行内下载图标（<a download> 直链 GET /api/files/download?path=&scope=）；
  * - 预览（docs/dev/web-file-preview.md P2/P3）：文本/图片文件行内预览图标 + 点击文件名，
@@ -36,6 +37,9 @@ import {
   UploadIcon,
 } from "./icons";
 
+/** 抽屉作用域（UI 层）：workspace = 当前会话工作区；API 请求经 toApiScope 归一 */
+type DrawerScope = FileScope | "workspace";
+
 /** FileDrawer 组件属性 */
 export interface FileDrawerProps {
   /** 抽屉是否打开 */
@@ -59,6 +63,11 @@ export interface FileDrawerProps {
    * 列表加载前（或加载失败时）个人区面包屑据此显示完整路径。
    */
   personalRoot: string;
+  /**
+   * 当前会话工作区绝对路径（活跃会话的 projectRoot；无活跃会话为空串）：
+   * 「当前工作区」作用域的数据源——工作区文件查看（图片/MD/代码）入口。
+   */
+  workspaceRoot: string;
   /**
    * 401 统一收敛回调（会话过期/失效）：文件区任何请求收到 401 时上抛，
    * 由 App 切换到登录页——绝不在失效会话下继续渲染文件区。
@@ -100,21 +109,36 @@ export function FileDrawer({
   personalOnly,
   maxPreviewBytes,
   personalRoot,
+  workspaceRoot,
   onUnauthorized,
   onClose,
   onInsertAttachment,
 }: FileDrawerProps) {
+  /**
+   * 当前抽屉作用域（UI 层；初始有活跃工作区时优先定位「当前工作区」，
+   * 无则按模式落到个人区 / 共享区）。
+   */
+  const [scope, setScope] = useState<DrawerScope>(() =>
+    workspaceRoot !== "" ? "workspace" : personalOnly ? "personal" : "shared"
+  );
   /** 当前浏览目录（初始为第一个白名单根；无白名单时为空串由服务端决定默认） */
   const [currentPath, setCurrentPath] = useState(() => (allowRoots.length > 0 ? allowRoots[0] : ""));
-  /** 文件区作用域：shared=共享 allowRoots / personal=本人个人区（隔离设计 §3.5；个人模式下恒为 personal） */
-  const [scope, setScope] = useState<FileScope>(personalOnly ? "personal" : "shared");
+  /**
+   * UI 作用域 → API 请求 scope：工作区仅是展示层概念——个人模式下会话工作区
+   * 位于个人区（uploadDir）内 → personal 牢笼；共享模式下位于 allowRoots 内 →
+   * shared 牢笼。服务端无需感知「工作区」。
+   */
+  const toApiScope = (s: DrawerScope): FileScope => (s === "workspace" ? (personalOnly ? "personal" : "shared") : s);
+  /** API 请求 scope（渲染期复用：上传/预览/下载直链） */
+  const apiScope = toApiScope(scope);
   /** 预览目标（null = 列表态；非空 = 抽屉内容区覆盖为 FilePreview） */
   const [preview, setPreview] = useState<{ path: string; name: string; size: number } | null>(null);
 
   // 个人模式配置异步就绪（config 晚于首次渲染返回）时把作用域收敛到 personal，
   // 避免残留 shared 作用域向已被后端禁用的共享区发请求
+  // （workspace 作用域在个人模式下经 toApiScope 归一为 personal，无需收敛）
   useEffect(() => {
-    if (personalOnly && scope !== "personal") {
+    if (personalOnly && scope === "shared") {
       setScope("personal");
       setListing(null);
       setCurrentPath("");
@@ -132,10 +156,18 @@ export function FileDrawer({
 
   /**
    * 面包屑当前目录完整路径：服务端归一 listing.path 优先 → 本地 currentPath →
-   * 个人作用域回退个人区根（personalRoot）——列表加载失败/未加载时
-   * 「我的文件」仍显示完整路径，而不是「（未选择目录）」。
+   * 个人作用域回退个人区根（personalRoot）→ 工作区作用域回退会话工作区根
+   * （workspaceRoot）——列表加载失败/未加载时仍显示完整路径。
    */
-  const browsePath = listing?.path ?? (currentPath !== "" ? currentPath : scope === "personal" ? personalRoot : "");
+  const browsePath =
+    listing?.path ??
+    (currentPath !== ""
+      ? currentPath
+      : scope === "personal"
+        ? personalRoot
+        : scope === "workspace"
+          ? workspaceRoot
+          : "");
 
   /**
    * 请求错误统一处理：401 上抛给 App 切登录页（不渲染过期会话下的文件区），
@@ -166,42 +198,71 @@ export function FileDrawer({
       .finally(() => setLoading(false));
   };
 
-  // 抽屉打开时加载当前目录
+  // 抽屉打开时加载：有活跃工作区则优先定位「当前工作区」（workspace file viewer
+  // 2026-10-30），否则维持原作用域语义；每次打开重新定位（关闭重开即回工作区）
   useEffect(() => {
-    if (open) load(currentPath, scope);
+    if (!open) return;
+    if (workspaceRoot !== "" && scope !== "workspace") {
+      setScope("workspace");
+      setListing(null);
+      setCurrentPath("");
+      setPreview(null);
+      load(workspaceRoot, toApiScope("workspace"));
+      return;
+    }
+    load(currentPath, toApiScope(scope));
     // 仅在 open 变化时触发；currentPath 变化经由面包屑点击后显式 load
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  // 当前作用域尚无有效目录时自动初始化（DR2：覆盖 shared 与 personal 两作用域）：
-  // - 首次打开/切换作用域后 path 为空 → shared 取第一个白名单根，personal 空 path
-  //   由服务端缺省到个人区根；
+  // 活跃会话切换（workspaceRoot 变化）且抽屉开着处于工作区作用域 → 跟随切换到新
+  // 会话工作区根（预览目标属于旧工作区，一并退出）
+  useEffect(() => {
+    if (!open || scope !== "workspace" || workspaceRoot === "") return;
+    setPreview(null);
+    setListing(null);
+    setCurrentPath("");
+    load(workspaceRoot, toApiScope("workspace"));
+    // 仅跟随会话工作区变化；scope/open 变化由打开 effect 与 switchScope 负责
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceRoot]);
+
+  // 当前作用域尚无有效目录时自动初始化（DR2：覆盖 workspace / shared / personal 三作用域）：
+  // - 首次打开/切换作用域后 path 为空 → workspace 取会话工作区根，personal 空 path
+  //   由服务端缺省到个人区根，shared 取第一个白名单根；
   // - 上次加载失败（listing 为 null、error 非空、path 已被 DR1 清空）后，
-  //   配置（allowRoots/personalOnly）就绪或重试条件具备时自动重试。
+  //   配置（allowRoots/personalOnly/workspaceRoot）就绪或重试条件具备时自动重试。
   useEffect(() => {
     if (!open || loading || listing !== null || currentPath !== "") return;
-    if (scope === "personal") {
+    if (scope === "workspace") {
+      if (workspaceRoot !== "") load(workspaceRoot, toApiScope("workspace"));
+    } else if (scope === "personal") {
       load("", scope);
     } else if (allowRoots.length > 0) {
       load(allowRoots[0], scope);
     }
     // 仅在影响「能否初始化」的状态变化时触发；load 稳定、scope 变化已由 switchScope 显式加载
-  }, [open, allowRoots, listing, loading, currentPath, scope, personalOnly]);
+  }, [open, allowRoots, listing, loading, currentPath, scope, personalOnly, workspaceRoot]);
 
   /**
    * 切换作用域：清空路径由服务端返回各区默认目录，并立即加载。
    * 重复点击当前作用域时不直接早退——若列表处于失败空态（listing 为 null
    * 且未在加载），重新发起加载，给用户一个明确的「重试」入口。
+   * workspace 作用域：回到会话工作区根（非服务端缺省，路径由前端显式给出）。
    */
-  const switchScope = (next: FileScope): void => {
+  const switchScope = (next: DrawerScope): void => {
     if (next === scope) {
-      if (!loading && listing === null) load("", next);
+      if (!loading && listing === null) {
+        if (next === "workspace" && workspaceRoot !== "") load(workspaceRoot, toApiScope(next));
+        else load("", toApiScope(next));
+      }
       return;
     }
     setScope(next);
     setListing(null);
     setCurrentPath("");
-    load("", next);
+    if (next === "workspace" && workspaceRoot !== "") load(workspaceRoot, toApiScope(next));
+    else load("", toApiScope(next));
   };
 
   /** 执行上传后刷新列表 */
@@ -209,8 +270,8 @@ export function FileDrawer({
     if (files.length === 0) return;
     setUploading(true);
     setError("");
-    uploadFiles(currentPath, Array.from(files), scope)
-      .then(() => load(currentPath, scope))
+    uploadFiles(currentPath, Array.from(files), apiScope)
+      .then(() => load(currentPath, apiScope))
       .catch((e: unknown) => {
         // 401 → 统一收敛登录页；其它错误仅提示（列表数据仍在，不清空）
         if (e instanceof ApiError && e.status === 401) {
@@ -246,7 +307,7 @@ export function FileDrawer({
         path={preview.path}
         name={preview.name}
         size={preview.size}
-        scope={scope}
+        scope={apiScope}
         onBack={() => setPreview(null)}
         // 401 统一收敛：预览请求失效会话时上抛登录页
         onUnauthorized={onUnauthorized}
@@ -279,7 +340,7 @@ export function FileDrawer({
               className="icon-btn"
               title="刷新"
               disabled={loading}
-              onClick={() => load(currentPath, scope)}
+              onClick={() => load(currentPath, apiScope)}
             >
               <RefreshIcon size={16} />
             </button>
@@ -300,9 +361,22 @@ export function FileDrawer({
           />
         </div>
 
-        {/* 作用域切换（docs/dev/web-isolation.md §3.5）：共享目录 / 我的文件；
-            个人工作目录模式（W7）下共享区已被后端禁用，隐藏 tab 仅保留「我的文件」 */}
+        {/* 作用域切换：当前工作区 / 共享目录 / 我的文件；
+            「当前工作区」= 活跃会话 projectRoot（无活跃会话隐藏）；
+            个人工作目录模式（W7）下共享区已被后端禁用，隐藏 tab */}
         <div className="drawer-scope" role="tablist" aria-label="文件区作用域">
+          {workspaceRoot !== "" && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={scope === "workspace"}
+              className={scope === "workspace" ? "scope-tab scope-tab-active" : "scope-tab"}
+              onClick={() => switchScope("workspace")}
+              title={workspaceRoot}
+            >
+              当前工作区
+            </button>
+          )}
           {!personalOnly && (
             <button
               type="button"
@@ -325,13 +399,13 @@ export function FileDrawer({
           </button>
         </div>
 
-        {/* 多白名单根切换（仅共享区有意义；个人区恒为本人单一根） */}
+        {/* 多白名单根切换（仅共享区有意义；个人区/工作区恒为单一根） */}
         {scope === "shared" && allowRoots.length > 1 && (
           <div className="drawer-roots">
             <select
               className="drawer-root-select"
               value={allowRoots.find((r) => (listing?.path ?? currentPath).startsWith(r)) ?? allowRoots[0]}
-              onChange={(e) => load(e.target.value, scope)}
+              onChange={(e) => load(e.target.value, "shared")}
             >
               {allowRoots.map((r) => (
                 <option key={r} value={r}>
@@ -354,14 +428,16 @@ export function FileDrawer({
             className="crumb"
             onClick={() => {
               // DR3：有有效列表时回到当前目录所属作用域的根（listing.path 即当前作用域根内路径）；
-              // 无列表时按作用域缺省（shared 取第一个白名单根；personal 空 path 服务端缺省个人区根）。
-              // 绝不再把另一作用域的残留路径或空 path 发进错误牢笼。
+              // 无列表时按作用域缺省（workspace 取会话工作区根；shared 取第一个白名单根；
+              // personal 空 path 服务端缺省个人区根）。绝不再把另一作用域的残留路径或空 path 发进错误牢笼。
               if (listing !== null) {
-                load(listing.path, scope);
+                load(listing.path, apiScope);
+              } else if (scope === "workspace" && workspaceRoot !== "") {
+                load(workspaceRoot, toApiScope("workspace"));
               } else if (scope === "personal") {
-                load("", scope);
+                load("", "personal");
               } else if (allowRoots.length > 0) {
-                load(allowRoots[0], scope);
+                load(allowRoots[0], "shared");
               }
             }}
             disabled={scope === "shared" && listing === null && allowRoots.length === 0}
@@ -379,7 +455,7 @@ export function FileDrawer({
                   className="crumb"
                   onClick={() => {
                     setPreview(null); // 点目录逐级回列表
-                    load(prefix, scope);
+                    load(prefix, apiScope);
                   }}
                   title={prefix}
                 >
@@ -424,7 +500,7 @@ export function FileDrawer({
                       className="file-row file-row-dir"
                       onClick={() => {
                         setPreview(null); // 进入子目录回列表态
-                        load(full, scope);
+                        load(full, apiScope);
                       }}
                       title={full}
                     >
@@ -469,7 +545,7 @@ export function FileDrawer({
                         <InsertIcon size={15} />
                       </button>
                       {/* 原生下载直链：服务端 Content-Disposition 附件响应 */}
-                      <a className="icon-btn" href={fileDownloadUrl(full, scope)} download={e.name} title="下载">
+                      <a className="icon-btn" href={fileDownloadUrl(full, apiScope)} download={e.name} title="下载">
                         <svg viewBox="0 0 16 16" width="15" height="15" aria-label="下载" role="img">
                           <path
                             d="M8 2.5v7m0 0L5.2 6.7M8 9.5l2.8-2.8"

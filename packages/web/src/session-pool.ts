@@ -534,13 +534,31 @@ export class SessionPool {
     const requested = (projectRoot ?? "").trim();
     const requestedNormalized = requested !== "" ? path.resolve(requested) : "";
     const requestedIsWorkspace = requestedNormalized !== "" && workspaceRoots.includes(requestedNormalized);
+    // 个人区子目录落点（web-personal-subworkspace T1）：personalOnly 模式显式传入
+    // 个人区根下的子目录时以其为会话工作区（牢笼仍为个人区根，越界不可能）；
+    // 目录不存在则幂等创建（用户在文件选择器「新建文件夹」后立即建会话的场景）
+    const requestedInPersonal =
+      this.settings.personalOnly &&
+      requestedNormalized !== "" &&
+      (requestedNormalized === personalRoot || requestedNormalized.startsWith(personalRoot + path.sep));
     let targetRoot = personalRoot;
+    if (requestedInPersonal) {
+      targetRoot = requestedNormalized;
+      mkdirSync(targetRoot, { recursive: true });
+    }
     if (workspaceId !== undefined) {
-      const workspace = this.settings.workspaces.find((item) => item.id === workspaceId);
-      if (!workspace) {
-        throw new ApiError(404, `工作空间 ${workspaceId} 不存在或未配置`);
+      // personalOnly 模式下，前端 listWorkspaces 返回的个人区哨兵（id="personal"）
+      // 等价于"使用服务端强制拼接的个人区落点"——与 workspaceId 缺省行为逐字一致，
+      // 不视为未知工作空间（否则 404 "工作空间 personal 不存在或未配置"）。
+      if (this.settings.personalOnly && workspaceId === "personal") {
+        targetRoot = personalRoot;
+      } else {
+        const workspace = this.settings.workspaces.find((item) => item.id === workspaceId);
+        if (!workspace) {
+          throw new ApiError(404, `工作空间 ${workspaceId} 不存在或未配置`);
+        }
+        targetRoot = path.resolve(workspace.root);
       }
-      targetRoot = path.resolve(workspace.root);
     } else if (requestedIsWorkspace) {
       targetRoot = requestedNormalized;
     } else if (!this.settings.personalOnly && this.settings.workspaces.length > 0 && sessionId === undefined) {
@@ -562,7 +580,8 @@ export class SessionPool {
     const resolvedRoot = workspaceBound
       ? await resolveInJail(await buildJailRoots([targetRoot]), targetRoot)
       : this.settings.personalOnly
-        ? await resolveInJail(await buildJailRoots([personalRoot]), personalRoot)
+        ? // 个人区（含子目录落点）：牢笼恒为个人区根，落点可为根或其子目录
+          await resolveInJail(await buildJailRoots([personalRoot]), targetRoot)
         : await resolveInJail(this.jailRoots, projectRoot);
 
     // W6 旧历史迁移 + 恢复防御（docs/dev/web-workspace.md 补充需求）：
@@ -605,11 +624,15 @@ export class SessionPool {
         const requestedRoot = requested;
         if (requestedRoot !== "") {
           const normalizedRequest = path.resolve(requestedRoot);
-          const allowed = normalizedRequest === personalRoot || workspaceRoots.includes(normalizedRequest);
+          // 允许：个人区根或其子目录（web-personal-subworkspace T1，上面已把
+          // 落点写入 targetRoot）或已配置工作空间根
+          const inPersonal =
+            normalizedRequest === personalRoot || normalizedRequest.startsWith(personalRoot + path.sep);
+          const allowed = inPersonal || workspaceRoots.includes(normalizedRequest);
           if (!allowed) {
             throw new ApiError(
               403,
-              "个人工作目录模式：会话只能在你的个人工作区或已配置的工作空间内创建，无法访问其他目录"
+              "个人工作目录模式：会话只能在你的个人工作区（含其子文件夹）或已配置的工作空间内创建，无法访问其他目录"
             );
           }
         }
@@ -1636,6 +1659,32 @@ export class SessionPool {
       store.delete(suggestionId);
     }
     return result;
+  }
+
+  /**
+   * 激活自定义 Agent（@ 提及发送链路用）：按名称将角色约束注入当前会话。
+   *
+   * 会话定位与 classifySteering 同口径：运行时活跃会话优先，回退 chat.sessionId；
+   * 无底层会话（首条消息前）返回 false——首轮由模型经 agent 工具/索引自行加载，
+   * 不阻塞消息发送。fail-safe：任何异常返回 false（激活失败不影响消息排队）。
+   *
+   * @param chatId Web 会话 id
+   * @param ctx 认证上下文（归属校验）
+   * @param agentName agent 名称（kebab-case）
+   */
+  async activateAgent(chatId: string, ctx: AuthContext, agentName: string): Promise<boolean> {
+    const chat = this.getOwnedChat(chatId, ctx);
+    const sessionId = chat.manager.getActiveRuntimeSessionId() ?? chat.sessionId;
+    if (!sessionId) {
+      return false;
+    }
+    try {
+      return await chat.manager.loadAgentIntoSession(sessionId, agentName);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[session-pool] Agent 激活失败（chatId=${chatId} agent=${agentName}）：${message}`);
+      return false;
+    }
   }
 
   /**

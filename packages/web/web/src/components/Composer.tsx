@@ -6,11 +6,14 @@
  * - 服务器附件（文件抽屉"作为附件插入对话"）以 serverFiles 传入，一并展示与发送；
  * - 发送/停止按钮位：生成中显示停止（中断请求由 App 转发到 POST /interrupt）；
  * - steering F1（docs/dev/web-steering.md）：steeringEnabled 时生成中不禁用输入，
- *   用户可随时发送补充指令（后端分类注入或排队），发送与停止按钮并排同显。
+ *   用户可随时发送补充指令（后端分类注入或排队），发送与停止按钮并排同显；
+ * - @ 提及补全（web-capability T2）：输入 @ 触发候选面板（技能 / Agent / MCP 服务器），
+ *   键盘上下选择、Enter/Tab 补全、Esc 关闭；数据源 GET /api/capabilities（懒加载缓存）。
  */
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from "react";
 import { humanSize } from "../format";
 import type { UserAttachment } from "../chat-model";
+import { fetchCapabilities, type Capabilities } from "../api";
 import { CloseIcon, FileCodeIcon, FileIcon, FileImageIcon, PaperclipIcon, SendIcon, StopIcon } from "./icons";
 
 /** Composer 组件属性 */
@@ -36,6 +39,18 @@ export interface ComposerProps {
   onStop: () => void;
 }
 
+/** @ 提及候选条目（统一技能 / Agent / MCP 三类为同一展示模型） */
+interface MentionItem {
+  /** 补全后插入的名字（@ 后面的 token） */
+  token: string;
+  /** 种类徽标文案 */
+  kindLabel: string;
+  /** 说明（技能 description / MCP command） */
+  description: string;
+  /** 种类样式类（mention-badge-skill / -agent / -mcp） */
+  kindClass: string;
+}
+
 /** 从文件名猜测展示图标（图片/代码/普通文件） */
 function fileIcon(name: string) {
   if (/\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(name)) return <FileImageIcon size={14} />;
@@ -43,6 +58,19 @@ function fileIcon(name: string) {
     return <FileCodeIcon size={14} />;
   }
   return <FileIcon size={14} />;
+}
+
+/**
+ * 解析光标前的 @ 提及上下文：
+ * 匹配「行首或空白后的 @token」（token 不含空白与 @），返回 token 起止下标
+ * （含 @）与查询词；光标不在 @ token 内时返回 null。
+ */
+function parseMentionContext(text: string, caret: number): { start: number; end: number; query: string } | null {
+  const before = text.slice(0, caret);
+  const m = /(?:^|\s)@([^\s@]*)$/.exec(before);
+  if (m === null) return null;
+  const atStart = before.length - m[0].length + m[0].indexOf("@");
+  return { start: atStart, end: caret, query: m[1] ?? "" };
 }
 
 /** Composer：底部输入框 */
@@ -69,10 +97,104 @@ export function Composer(props: ComposerProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   /** textarea 引用：自适应高度 */
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  /** 中文输入法组合输入中（回车不应触发发送） */
+  /** 中文输入法组合输入中（回车不应触发发送/补全） */
   const composingRef = useRef(false);
   /** 全部已创建的 ObjectURL 登记（卸载时统一 revoke，防内存泄漏） */
   const allObjectUrlsRef = useRef<Set<string>>(new Set());
+
+  /** 能力清单（技能/Agent/MCP；首个 @ 懒加载，30s TTL 缓存） */
+  const [caps, setCaps] = useState<Capabilities | null>(null);
+  const capsFetchedAtRef = useRef(0);
+  const capsLoadingRef = useRef(false);
+  /** @ 提及状态：null = 面板关闭；否则为解析出的替换区间 + 候选 + 高亮项 */
+  const [mention, setMention] = useState<{
+    range: { start: number; end: number; query: string };
+    items: MentionItem[];
+    active: number;
+  } | null>(null);
+
+  /** 懒加载能力清单（30s TTL；失败静默——面板仅展示空态） */
+  const ensureCaps = (): void => {
+    const now = Date.now();
+    if (capsLoadingRef.current || now - capsFetchedAtRef.current < 30_000) return;
+    capsLoadingRef.current = true;
+    fetchCapabilities()
+      .then((data) => {
+        setCaps(data);
+        capsFetchedAtRef.current = Date.now();
+      })
+      .catch(() => {
+        // 失败不缓存：下次 @ 再试
+        capsFetchedAtRef.current = 0;
+      })
+      .finally(() => {
+        capsLoadingRef.current = false;
+      });
+  };
+
+  /** 由能力清单构建候选（按查询词过滤；技能/Agent/MCP 依次排列） */
+  const buildMentionItems = (data: Capabilities | null, query: string): MentionItem[] => {
+    if (data === null) return [];
+    const q = query.toLowerCase();
+    const hit = (name: string): boolean => q === "" || name.toLowerCase().includes(q);
+    const items: MentionItem[] = [];
+    for (const s of data.skills) {
+      if (s.kind === "skill" && hit(s.name)) {
+        items.push({ token: s.name, kindLabel: "技能", description: s.description, kindClass: "mention-badge-skill" });
+      }
+    }
+    for (const s of data.skills) {
+      if (s.kind === "agent" && hit(s.name)) {
+        items.push({ token: s.name, kindLabel: "Agent", description: s.description, kindClass: "mention-badge-agent" });
+      }
+    }
+    for (const m of data.mcpServers) {
+      if (hit(m.name)) {
+        items.push({ token: m.name, kindLabel: "MCP", description: m.command, kindClass: "mention-badge-mcp" });
+      }
+    }
+    return items.slice(0, 8);
+  };
+
+  /**
+   * 刷新 @ 提及面板：按光标位置重新解析上下文并计算候选。
+   * 光标位置从 textarea 实时读取（change / click / keyup 后均为最新）。
+   */
+  const refreshMention = (value: string): void => {
+    const el = textareaRef.current;
+    const caret = el !== null ? (el.selectionStart ?? value.length) : value.length;
+    const ctx = parseMentionContext(value, caret);
+    if (ctx === null) {
+      setMention(null);
+      return;
+    }
+    ensureCaps();
+    const items = buildMentionItems(caps, ctx.query);
+    if (items.length === 0) {
+      setMention({ range: ctx, items, active: -1 });
+      return;
+    }
+    setMention((prev) => ({ range: ctx, items, active: prev !== null ? Math.min(prev.active, items.length - 1) : 0 }));
+  };
+
+  /** 应用选中候选：把 @query 替换为 @token 并把光标落到补全文本之后 */
+  const applyMention = (item: MentionItem): void => {
+    const el = textareaRef.current;
+    if (mention === null) return;
+    const { start, end } = mention.range;
+    const inserted = `@${item.token} `;
+    const next = text.slice(0, start) + inserted + text.slice(end);
+    setText(next);
+    setMention(null);
+    if (el !== null) {
+      const caret = start + inserted.length;
+      // React 受控更新后异步定位光标
+      window.requestAnimationFrame(() => {
+        el.focus();
+        el.setSelectionRange(caret, caret);
+      });
+    }
+  };
 
   // 组件卸载时释放全部 ObjectURL
   useEffect(() => {
@@ -154,11 +276,40 @@ export function Composer(props: ComposerProps) {
     }
   };
 
-  /** 键盘发送：Enter 发送（IME 组合中除外），Shift+Enter 换行 */
+  /** 键盘发送：Enter 发送（IME 组合中除外），Shift+Enter 换行；
+   *  @ 面板打开时优先消费方向键 / Enter / Tab / Escape（不发送）。 */
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
     if (e.key === "Enter" && !e.shiftKey && !composingRef.current) {
+      // @ 面板打开且有高亮候选：Enter = 补全（不发送）
+      if (mention !== null && mention.active >= 0 && mention.items.length > 0) {
+        e.preventDefault();
+        void applyMention(mention.items[mention.active]);
+        return;
+      }
       e.preventDefault();
       doSend();
+      return;
+    }
+    if (mention !== null && mention.items.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setMention((m) => (m !== null ? { ...m, active: (m.active + 1) % m.items.length } : m));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setMention((m) => (m !== null ? { ...m, active: (m.active - 1 + m.items.length) % m.items.length } : m));
+        return;
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        void applyMention(mention.items[Math.max(mention.active, 0)]);
+        return;
+      }
+    }
+    if (e.key === "Escape" && mention !== null) {
+      e.preventDefault();
+      setMention(null);
     }
   };
 
@@ -175,6 +326,7 @@ export function Composer(props: ComposerProps) {
       return new Map();
     });
     setError("");
+    setMention(null);
   };
 
   /** textarea 自适应高度（上限 200px 后内部滚动） */
@@ -209,6 +361,36 @@ export function Composer(props: ComposerProps) {
     >
       {/* 拖拽高亮遮罩文案 */}
       {dragOver && <div className="composer-drag-tip">松开以添加附件</div>}
+
+      {/* @ 提及候选面板（悬浮于输入框上方；空态提示可输入内容过滤） */}
+      {mention !== null && (
+        <div className="composer-mention" role="listbox" aria-label="@ 提及候选">
+          <div className="composer-mention-title">技能 / Agent / MCP（↑↓ 选择，Enter 补全，Esc 关闭）</div>
+          {mention.items.length === 0 ? (
+            <div className="composer-mention-empty">{caps === null ? "正在加载可用能力…" : "无匹配项"}</div>
+          ) : (
+            mention.items.map((item, i) => (
+              <button
+                type="button"
+                key={`${item.kindLabel}-${item.token}`}
+                className={`composer-mention-item${i === mention.active ? " active" : ""}`}
+                role="option"
+                aria-selected={i === mention.active}
+                onMouseEnter={() => setMention((m) => (m !== null ? { ...m, active: i } : m))}
+                onMouseDown={(e) => {
+                  // mousedown 防止 textarea 失焦导致面板先关闭
+                  e.preventDefault();
+                  void applyMention(item);
+                }}
+              >
+                <span className={`mention-badge ${item.kindClass}`}>{item.kindLabel}</span>
+                <span className="mention-token">{item.token}</span>
+                <span className="mention-desc">{item.description}</span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
 
       {/* 附件 chips 区（本地 + 服务器路径） */}
       {(localFiles.length > 0 || serverFiles.length > 0) && (
@@ -270,14 +452,22 @@ export function Composer(props: ComposerProps) {
         <textarea
           ref={textareaRef}
           className="composer-input"
-          placeholder="输入消息，Enter 发送，Shift+Enter 换行"
+          placeholder="输入消息，@ 唤起技能 / MCP，Enter 发送，Shift+Enter 换行"
           rows={1}
           value={text}
           disabled={inputBlocked}
           onChange={(e) => {
             setText(e.target.value);
             autoResize();
+            refreshMention(e.target.value);
           }}
+          onKeyUp={(e) => {
+            // 方向键移动光标后重算 @ 上下文（不改值，仅按当前值重解析）
+            if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "Home" || e.key === "End") {
+              refreshMention(text);
+            }
+          }}
+          onClick={() => refreshMention(text)}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           onCompositionStart={() => {

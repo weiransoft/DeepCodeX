@@ -296,6 +296,9 @@ export function createResolvedSettings(overrides: Partial<ResolvedWebSettings> =
       timeoutMs: 1000,
       attrs: {},
     },
+    // 热读来源路径（ldap-runtime）：测试必须指向不存在的文件，
+    // 隔离真实 ~/.deepcode/settings.json（否则本机 LDAP 配置会污染用例）
+    userSettingsPath: path.join(tmpdir(), "deepcode-web-test-nonexistent", "settings.json"),
   };
   return {
     ...base,

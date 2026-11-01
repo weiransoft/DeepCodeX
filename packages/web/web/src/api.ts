@@ -247,6 +247,151 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
   }
 }
 
+/** 技能/Agent 条目（GET /api/capabilities，web-capability T1） */
+export interface CapabilitySkill {
+  name: string;
+  description: string;
+  path: string;
+  /** "skill" 普通技能 / "agent" 自定义 Agent 定义 */
+  kind: "skill" | "agent";
+}
+
+/** MCP 服务器条目（脱敏：不含 env 值） */
+export interface CapabilityMcpServer {
+  name: string;
+  command: string;
+  args?: string[];
+}
+
+/** 能力发现响应（@ 提及补全与设置抽屉「技能」页签数据源） */
+export interface Capabilities {
+  skills: CapabilitySkill[];
+  mcpServers: CapabilityMcpServer[];
+}
+
+/** Agent 创建结果（POST /api/agents；失败抛 ApiError，message 为结构化中文原因） */
+export interface AgentWriteResult {
+  ok: boolean;
+  /** 落盘文件绝对路径（成功时） */
+  path?: string;
+}
+
+/**
+ * 创建自定义智能体（POST /api/agents）：
+ * 服务端经 SedimentationWriter 五条安全门槛落盘 `~/.deepcode/skills/<name>/SKILL.md`
+ * （frontmatter type: agent），落盘后 @ 提及补全、智能体列表、引擎 agent 索引自动可见。
+ * 同名已存在（409）/ 非法 name（400）等失败以 ApiError.message 返回结构化中文原因。
+ */
+export function createAgent(draft: {
+  name: string;
+  description: string;
+  role: string;
+  content: string;
+}): Promise<AgentWriteResult> {
+  return request<AgentWriteResult>("POST", "/api/agents", draft);
+}
+
+/** AI 生成草稿响应（POST /api/agents/draft；失败抛 ApiError） */
+export interface AgentDraftResult {
+  ok: boolean;
+  draft: {
+    name: string;
+    description: string;
+    role: string;
+    content: string;
+  };
+}
+
+/**
+ * AI 一句话生成智能体草稿（POST /api/agents/draft）：
+ * 参考 WorkBuddy 创建专家的方式——用户一句话意图，服务端 LLM 产出
+ * name/description/role/content 四件套草稿。只生成不落盘，
+ * 前端填入表单供用户审阅修改后再走 createAgent 落盘。
+ */
+export function draftAgent(prompt: string): Promise<AgentDraftResult> {
+  return request<AgentDraftResult>("POST", "/api/agents/draft", { prompt });
+}
+
+/**
+ * 能力发现（GET /api/capabilities）：当前引擎可用的技能 / Agent / MCP 脱敏清单。
+ * 数据与引擎技能注入同源（core SkillManager），保证「看到的」=「能加载的」。
+ */
+export function fetchCapabilities(): Promise<Capabilities> {
+  return request<Capabilities>("GET", "/api/capabilities");
+}
+
+// ============================================================================
+// 全局规则（设置抽屉「全局规则」页签）：注入到每次新会话的系统提示
+// ============================================================================
+
+/** 全局规则条目（与服务端 UserRule 对齐，前端只消费展示字段） */
+export interface GlobalRuleInfo {
+  /** 规则 ID（USER-xxx） */
+  id: string;
+  /** 规则正文 */
+  content: string;
+  /** 严重级别（BLOCKER / MAJOR / WARNING） */
+  severity: string;
+  /** 规则分类（code-truth 等 6 类） */
+  category: string;
+  /** 创建时间（ISO 8601） */
+  createdAt: string;
+}
+
+/** 添加全局规则（POST /api/rules）；失败抛 ApiError（400 空内容/超长/超上限） */
+export function createRule(input: { content: string; severity?: string; category?: string }): Promise<{
+  rule: GlobalRuleInfo;
+}> {
+  return request<{ rule: GlobalRuleInfo }>("POST", "/api/rules", input);
+}
+
+/** 全局规则列表（GET /api/rules） */
+export function fetchRules(): Promise<{ rules: GlobalRuleInfo[] }> {
+  return request<{ rules: GlobalRuleInfo[] }>("GET", "/api/rules");
+}
+
+/** 删除全局规则（DELETE /api/rules/:id）；404 规则不存在 */
+export function deleteRule(id: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("DELETE", `/api/rules/${encodeURIComponent(id)}`);
+}
+
+// ============================================================================
+// EAG 工作流审计（设置抽屉「审计」页签，P6）：规则证据 + 干预台账 + 确定性报告
+// ============================================================================
+
+/** 审计响应（与服务端 AuditResponse 对齐） */
+export interface AuditInfo {
+  /** 规则使用证据（按 ruleId 排序） */
+  rules: Array<{
+    ruleId: string;
+    evidenceState: string;
+    usageCount: number;
+    violationCount: number;
+  }>;
+  /** 干预台账条目（按 appliedAt 排序） */
+  ledger: Array<{
+    findingId: string;
+    appliedAt: string;
+    owner: string;
+    expectedEffect: string;
+    assetPath?: string;
+    verification?: {
+      verifiedAt: string;
+      state: "outcome-supported" | "partial" | "blocked";
+      note?: string;
+    };
+  }>;
+  /** 确定性 Markdown 审计报告 */
+  report: string;
+  /** 报告生成时间（ISO 8601） */
+  generatedAt: string;
+}
+
+/** 拉取工作流审计聚合（GET /api/eag/audit，只读） */
+export function fetchAudit(): Promise<AuditInfo> {
+  return request<AuditInfo>("GET", "/api/eag/audit");
+}
+
 /** 登录：成功后由服务端 Set-Cookie 下发 HttpOnly JWT */
 export function login(username: string, password: string): Promise<void> {
   return request<void>("POST", "/api/auth/login", { username, password });
@@ -426,6 +571,15 @@ export function uploadFiles(path: string, files: File[], scope: FileScope = "sha
     form.append("file", f, f.name);
   }
   return request<void>("POST", `/api/files/upload?scope=${scope}&path=${encodeURIComponent(path)}`, form);
+}
+
+/**
+ * 在牢笼内幂等创建目录（web-personal-subworkspace T1）：
+ * 「新建对话 → 选择文件夹 → 新建文件夹」用；目录已存在视为成功。
+ * @returns 服务端归一后的真实绝对路径
+ */
+export function mkdir(path: string, scope: FileScope = "personal"): Promise<{ path: string }> {
+  return request<{ path: string }>("POST", `/api/files/mkdir?scope=${scope}&path=${encodeURIComponent(path)}`);
 }
 
 /** 构造下载地址：供 <a download> 直接使用（服务端 Content-Disposition 附件下载；scope 分流） */

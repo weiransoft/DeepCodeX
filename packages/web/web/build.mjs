@@ -9,7 +9,7 @@
  * 运行方式：node packages/web/web/build.mjs
  */
 import { build } from "esbuild";
-import { copyFile, mkdir, rm, stat } from "node:fs/promises";
+import { copyFile, mkdir, rm, stat, symlink } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -17,6 +17,8 @@ import { fileURLToPath } from "node:url";
 const webRoot = path.dirname(fileURLToPath(import.meta.url));
 /** 固定产物目录名 dist（后端将服务该目录） */
 const distDir = path.join(webRoot, "dist");
+/** monorepo 根（packages/web/web → 上两级），用于定位 cli dist 装配目录 */
+const repoRoot = path.join(webRoot, "..", "..", "..");
 
 // 清空旧产物，保证 dist 内容与源码严格同步
 await rm(distDir, { recursive: true, force: true });
@@ -54,5 +56,17 @@ for (const name of ["bundle.js", "bundle.css", "index.html"]) {
     throw new Error(`构建产物缺失或为空: dist/${name}`);
   }
 }
+
+// 装配到 CLI dist 布局：packages/cli/dist/cli.js 内的 defaultStaticDir 解析为
+// <cli dist>/../web/dist（即 packages/cli/dist/web/dist）；该目录不存在时
+// Web 服务会回退"UI 尚未构建"提示页。用软链把真实产物目录挂到该布局位置，
+// 源码构建与 CLI bundle 共用同一份 dist，避免二次拷贝漂移。
+const cliWebDir = path.join(repoRoot, "packages", "cli", "dist", "web");
+await mkdir(cliWebDir, { recursive: true });
+const cliDistLink = path.join(cliWebDir, "dist");
+// 先删旧链接/目录（rm force 幂等），再建 dir 型软链指向真实 dist
+await rm(cliDistLink, { recursive: true, force: true });
+await symlink(distDir, cliDistLink, "dir");
+console.log(`✅ 已链接 CLI dist 布局: ${cliDistLink} -> ${distDir}`);
 
 console.log(`\n✅ 前端构建完成: ${distDir}\n`);

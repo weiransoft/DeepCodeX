@@ -392,6 +392,20 @@ test("WS-05：未知 workspaceId → 404；缺省（无 projectRoot/workspaceId�
   assert.equal(fallback.body.projectRoot, path.join(await realpath(uploadDir), userIdA));
 });
 
+test("WS-06：personalOnly 模式下前端默认选中的 personal 哨兵 id 必须可建会话（落个人区，而非 404）", async () => {
+  // 回归：listWorkspaces 在 personalOnly 模式首项恒为 {id:'personal',kind:'personal'}，
+  // 前端默认选中并以 workspaceId='personal' 调用 createChat——此前被当成未知工作空间 404
+  // （"工作空间 personal 不存在或未配置"）。后端须将其映射为个人区落点。
+  const created = await fetchJson(personalServer.port, "POST", "/api/chats", { workspaceId: "personal" }, cookieA);
+  assert.equal(created.status, 200, `personal 哨兵必须可建会话：${JSON.stringify(created.body)}`);
+  assert.equal(created.body.projectRoot, path.join(await realpath(uploadDir), userIdA));
+
+  // 同源：GET /api/chats?workspaceId=personal 按个人区过滤（不 400）
+  const listed = await fetchJson(personalServer.port, "GET", "/api/chats?workspaceId=personal", undefined, cookieA);
+  assert.equal(listed.status, 200, "personal 哨兵列表过滤必须成功");
+  assert.ok(Array.isArray(listed.body.chats), "返回会话数组");
+});
+
 // ============================================================================
 // SH：共享模式空间集合收紧 + listChats 按空间过滤
 // ============================================================================

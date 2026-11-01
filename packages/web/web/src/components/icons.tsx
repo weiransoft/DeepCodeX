@@ -406,6 +406,86 @@ export function BotAvatarIcon(p: IconProps) {
   );
 }
 
+/** 远程连接（显示器 + 插头）：活动栏「远程 SSH」入口 */
+export function RemoteIcon(p: IconProps) {
+  return (
+    <IconBase {...p} label="远程连接">
+      <rect x="1.8" y="2.5" width="12.4" height="8.4" rx="1.4" fill="none" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M5.5 13.5h5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+      <path d="M8 10.9v2.6" stroke="currentColor" strokeWidth="1.2" />
+      {/* 屏内 </> 提示远程会话 */}
+      <path
+        d="m5.6 5.2-1.6 1.5 1.6 1.5m4.8-3 1.6 1.5-1.6 1.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </IconBase>
+  );
+}
+
+/** 设置（齿轮）：活动栏「系统管理」入口 */
+export function GearIcon(p: IconProps) {
+  return (
+    <IconBase {...p} label="系统管理">
+      {/* 经典齿轮轮廓（Lucide settings 同构，24→16 缩放）：
+          齿圈 + 中心圆孔，与「太阳」（细长射线）明确区分 */}
+      <g transform="scale(0.6667)" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+        <circle cx="12" cy="12" r="3" />
+      </g>
+    </IconBase>
+  );
+}
+
+/** 引擎状态（心电脉搏线）：与「设置齿轮」明确区分，强调「状态面板」语义 */
+export function EngineIcon(p: IconProps) {
+  return (
+    <IconBase {...p} label="引擎状态">
+      <path
+        d="M1.5 8h2.8l1.6-4 3 9.5L11 4l1.2 4h2.3"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </IconBase>
+  );
+}
+
+/** 太阳（主题切换：当前浅色，点击切深色） */
+export function SunIcon(p: IconProps) {
+  return (
+    <IconBase {...p} label="浅色主题">
+      <circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <path
+        d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M12.8 3.2l-1.1 1.1M4.3 11.7l-1.1 1.1"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+    </IconBase>
+  );
+}
+
+/** 月亮（主题切换：当前深色，点击切浅色） */
+export function MoonIcon(p: IconProps) {
+  return (
+    <IconBase {...p} label="深色主题">
+      <path
+        d="M13.2 9.6A5.8 5.8 0 0 1 6.4 2.8a5.8 5.8 0 1 0 6.8 6.8Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+    </IconBase>
+  );
+}
+
 /** 默认用户头像（登录用户/用户消息）：圆形底内人形剪影 */
 export function UserAvatarIcon(p: IconProps) {
   return (

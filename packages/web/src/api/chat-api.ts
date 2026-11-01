@@ -15,12 +15,14 @@
  */
 
 import { pathToFileURL } from "node:url";
+import os from "node:os";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { PermissionScope, UserToolPermission } from "@vegamo/deepcode-core";
 import { parseMultipartRequest, MultipartError } from "../multipart";
 import { ApiError, readJsonBody, sendJson } from "../http-utils";
 import { realpathAllowMissing } from "../jail";
 import { personalUploadRoot } from "../user-files";
+import { listSkillsSafe, type CapabilitySkill } from "./capability-api";
 import type { SessionPool, SendMessageInput } from "../session-pool";
 import type { AuthContext } from "../user-identity";
 import type { SseHub } from "../events";
@@ -46,13 +48,22 @@ export async function handleListChats(
 ): Promise<void> {
   let workspaceRoot: string | undefined;
   if (workspaceId !== null && workspaceId.trim() !== "") {
-    const workspace = settings.workspaces.find((item) => item.id === workspaceId.trim());
-    if (!workspace) {
-      throw new ApiError(400, `工作空间 ${workspaceId} 不存在或未配置`);
+    const id = workspaceId.trim();
+    // personalOnly 模式下，listWorkspaces 首项为本人个人区哨兵（id="personal"），
+    // 其落点即服务端强制拼接的个人区根（与 createChat 缺省落点逐字一致）。
+    // 不命中已配置工作空间时按个人区过滤，避免对哨兵 id 误报 400
+    // （前端默认选中该项，新建/列出会话都会带上它）。
+    if (settings.personalOnly && id === "personal") {
+      workspaceRoot = await realpathAllowMissing(personalUploadRoot(settings.uploadDir, ctx.userId));
+    } else {
+      const workspace = settings.workspaces.find((item) => item.id === id);
+      if (!workspace) {
+        throw new ApiError(400, `工作空间 ${id} 不存在或未配置`);
+      }
+      // 与 createChat 落点同一归一口径：realpath 消解符号链接形态
+      //（macOS /var → /private/var），否则空间过滤前缀判定会因路径形态漂移漏配
+      workspaceRoot = await realpathAllowMissing(workspace.root);
     }
-    // 与 createChat 落点同一归一口径：realpath 消解符号链接形态
-    //（macOS /var → /private/var），否则空间过滤前缀判定会因路径形态漂移漏配
-    workspaceRoot = await realpathAllowMissing(workspace.root);
   }
   sendJson(res, 200, { chats: pool.listChats(ctx, workspaceRoot) });
 }
@@ -233,7 +244,25 @@ function parseSessionAlwaysAllowToolCallIds(raw: unknown): string[] {
 }
 
 /**
- * 处理 POST /api/chats/:id/messages。
+ * 从消息文本提取命中的自定义 Agent 提及（@token 与已知名单求交）。
+ *
+ * token 形态与 agent/skill name 同口径（kebab-case）；负向断言保证 @code-review
+ * 整体匹配、不会截断为前缀（@code 不会误中名为 code 的 agent）。
+ * 导出复用：单元测试覆盖边界（截断/未知/大小写）。
+ */
+export function extractMentionedAgents(text: string, agents: CapabilitySkill[]): string[] {
+  const known = new Set(agents.map((a) => a.name));
+  const found = new Set<string>();
+  for (const match of text.matchAll(/@([a-z0-9]+(?:-[a-z0-9]+)*)(?![a-z0-9-])/g)) {
+    if (known.has(match[1])) {
+      found.add(match[1]);
+    }
+  }
+  return [...found];
+}
+
+/**
+ * 处理 POST /api/chats/:id/messages（消息发送，202 异步受理）。
  *
  * 两种请求形态：
  * 1. application/json：{text?, imageUrls?, permissions?, alwaysAllows?}（1MB 上限）；
@@ -415,6 +444,25 @@ export async function handleSendMessage(
       if (steeringOk) {
         return;
       }
+    }
+  }
+
+  // —— @agent 激活（排队路径；steered 补充指令不重复激活）——
+  // 消息文本含 @token 且命中已知自定义 Agent 名单时，先注入角色约束再排队，
+  // 保证激活的 system 消息先于本轮消息进入会话（await 串行，扫描+注入 <100ms）。
+  // fail-safe：扫描/激活失败仅日志，绝不阻塞消息发送。
+  if (input.text !== undefined && input.text.includes("@")) {
+    try {
+      const agents = (await listSkillsSafe(os.homedir())).filter((s) => s.kind === "agent");
+      for (const name of extractMentionedAgents(input.text, agents)) {
+        const ok = await pool.activateAgent(chatId, ctx, name);
+        if (!ok) {
+          console.warn(`[chat-api] @agent 激活未生效（chatId=${chatId} agent=${name}）`);
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[chat-api] @agent 激活扫描失败，跳过（chatId=${chatId}）：${message}`);
     }
   }
 

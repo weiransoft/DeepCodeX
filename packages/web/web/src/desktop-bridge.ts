@@ -3,7 +3,9 @@
  *
  * DeepCode Desktop（Tauri v2）壳在所有页面注入 `window.__DEEPCODE_DESKTOP__`
  * （Rust 侧初始化脚本，postMessage/invoke 代理到壳 IPC 白名单命令）；
- * 纯浏览器访问 `deepcode web` 时该对象不存在 → 桌面专属 UI 全部隐藏，
+ * 若初始化脚本注入未生效（时序/异常），本模块从 Tauri 运行时注入的
+ * `__TAURI_INTERNALS__` 直接构建等价桥（双通道兜底）。
+ * 纯浏览器访问 `deepcode web` 时两者都不存在 → 桌面专属 UI 全部隐藏，
  * Web 独立可用零回归。
  */
 
@@ -21,15 +23,68 @@ declare global {
   interface Window {
     /** DeepCode Desktop 壳注入的桥；纯浏览器访问时不存在 */
     __DEEPCODE_DESKTOP__?: DesktopBridge;
+    /** Tauri 运行时注入的 IPC 内部通道（所有页面均有） */
+    __TAURI_INTERNALS__?: {
+      invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+    };
   }
 }
 
-/** 读取桌面桥；不存在或形态非法（非桌面注入）时返回 null */
+/** 自动登录一次性标记（与壳初始化脚本 AUTO_KEY 对齐） */
+const AUTO_LOGIN_KEY = "__DEEPCODE_AUTOLOGIN_DONE__";
+
+/**
+ * 桌面账号自动登录（引擎 origin 专用）：
+ * 经 engine_credentials 取壳会话口令 → 同源登录换 HttpOnly Cookie。
+ * 已登录 / 非引擎 origin / 纯浏览器一律静默跳过。
+ */
+async function ensureDesktopAutoLogin(bridge: DesktopBridge): Promise<void> {
+  try {
+    if (sessionStorage.getItem(AUTO_LOGIN_KEY)) return;
+    sessionStorage.setItem(AUTO_LOGIN_KEY, "1");
+    const creds = await bridge.invoke<{ username: string; password: string }>("engine_credentials");
+    if (!creds || typeof creds.username !== "string") return;
+    const me = await fetch("/api/auth/me");
+    if (me.ok) return;
+    const res = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: creds.username, password: creds.password }),
+    });
+    if (res.ok) window.location.reload();
+  } catch {
+    /* 非桌面 / 凭据不可用：静默跳过，页面展示引擎自带登录页 */
+  }
+}
+
+/** 读取桌面桥：壳注入对象 → __TAURI_INTERNALS__ 回退构建；纯浏览器返回 null */
 export function getDesktopBridge(): DesktopBridge | null {
   const bridge = window.__DEEPCODE_DESKTOP__;
   if (bridge && bridge.isDesktop === true && typeof bridge.invoke === "function") {
     return bridge;
   }
+
+  // 回退通道：壳初始化脚本未生效时，从 Tauri 运行时注入的内部 IPC 通道
+  // 直接构建等价桥（与 DESKTOP_BRIDGE_SCRIPT 的 invoke 行为一致：
+  // 同为 __TAURI_INTERNALS__.invoke，命令白名单/ACL 由 Rust 侧裁决）。
+  const internals = window.__TAURI_INTERNALS__;
+  if (internals && typeof internals.invoke === "function") {
+    const fallback: DesktopBridge = {
+      isDesktop: true,
+      platform: "tauri-v2",
+      invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+        return internals.invoke!(cmd, args) as Promise<T>;
+      },
+    };
+    try {
+      window.__DEEPCODE_DESKTOP__ = fallback; // 缓存复用，后续调用走快路径
+    } catch {
+      /* 属性只读等异常场景：本次会话内仍走回退构建 */
+    }
+    void ensureDesktopAutoLogin(fallback);
+    return fallback;
+  }
+
   return null;
 }
 

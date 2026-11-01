@@ -19,8 +19,12 @@ console.log("=========================================");
 console.log("  Deep Code CLI — Build");
 console.log("=========================================");
 
-run("npm", ["run", "build", "--workspace=@vegamo/deepcode-core"], "1/3");
-run("node", ["scripts/rewrite-esm-imports.js"], "2/3");
-run("npm", ["run", "bundle"], "3/3");
+run("npm", ["run", "build", "--workspace=@vegamo/deepcode-core"], "1/4");
+run("node", ["scripts/rewrite-esm-imports.js"], "2/4");
+// web 包必须先于 bundle 编译：CLI esbuild 以 `packages: "bundle"` 把
+// @vegamo/deepcode-web 的 dist 产物打进 cli.js，编译滞后会让 cli.js
+// 永远携带旧版服务端逻辑（如 staticDir 布局探测修复）
+run("npm", ["run", "build", "--workspace=@vegamo/deepcode-web"], "3/4");
+run("npm", ["run", "bundle"], "4/4");
 
 console.log("\n✅  Build complete.\n\n");

@@ -10,7 +10,7 @@
  *    listen(0) 支持测试随机端口；close() 优雅收敛 SSE/会话池/连接。
  */
 
-import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, createReadStream, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import http, { type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -22,6 +22,7 @@ import { authenticateRequest } from "./auth/middleware";
 import { buildAuthContext, type AuthContext } from "./user-identity";
 import { getPersonalJailRoots } from "./user-files";
 import { handleLogin, handleLogout, handleMe } from "./api/auth-api";
+import { readLdapRuntimeConfig } from "./auth/ldap-runtime";
 import {
   handleCreateChat,
   handleGetMessages,
@@ -30,8 +31,12 @@ import {
   handleSendMessage,
   handleStream,
 } from "./api/chat-api";
-import { handleDownloadFile, handleListFiles, handlePreviewFile, handleUploadFile } from "./api/files-api";
+import { handleDownloadFile, handleListFiles, handleMkdir, handlePreviewFile, handleUploadFile } from "./api/files-api";
 import { handleListWorkspaces } from "./api/workspace-api";
+import { handleListCapabilities } from "./api/capability-api";
+import { handleCreateAgent, handleCreateAgentDraft } from "./api/agents-api";
+import { handleCreateRule, handleDeleteRule, handleListRules } from "./api/rules-api";
+import { handleGetAudit } from "./api/audit-api";
 import {
   handleConfirmSedimentation,
   handleDismissSedimentation,
@@ -86,12 +91,28 @@ const STATIC_MIME: Record<string, string> = {
 };
 
 /**
- * 计算默认静态资源目录：packages/web/web/dist（src 与 dist 布局下均成立）。
+ * 计算默认静态资源目录。
+ *
+ * 按候选布局依次探测（第一个真实存在的目录即命中），全部不存在时返回首选
+ * 候选路径，由 serveStatic 的统一 existsSync 判定回退"UI 尚未构建"提示页：
+ * 1. 源码/tsc 布局：packages/web/{src|dist}/server.js 向上一级 + web/dist，
+ *    即 packages/web/web/dist（tsx 直跑与 tsc 编译产物两种形态相对路径一致）；
+ * 2. CLI bundle 布局：esbuild 单文件产物（packages/cli/dist/cli.js）的
+ *    import.meta.url 指向自身，按 repo 相对锚定 packages/cli/dist/web/dist，
+ *    该路径由 packages/web/web/build.mjs 以软链装配指向真实前端产物。
  *
  * @returns dist 目录绝对路径
  */
 function defaultStaticDir(): string {
-  return path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "web", "dist");
+  const selfDir = path.dirname(fileURLToPath(import.meta.url));
+  // 候选 1：源码/tsc 布局（packages/web 包内相对定位）
+  const srcLayout = path.join(selfDir, "..", "web", "dist");
+  if (existsSync(srcLayout)) {
+    return srcLayout;
+  }
+  // 候选 2：CLI bundle 布局（selfDir 即 packages/cli/dist，软链装配位
+  // dist/web/dist 由 packages/web/web/build.mjs 创建）
+  return path.join(selfDir, "web", "dist");
 }
 
 /**
@@ -136,14 +157,22 @@ function sendPlaceholderPage(res: ServerResponse, port: number): void {
   res.end(html);
 }
 
-/** 内置 favicon（对话气泡 SVG，消除 dist 无图标文件时的 404 噪音） */
+/**
+ * 内置 favicon（DeepSeek 蓝白风格兔狲 SVG，与桌面壳图标同风格：
+ * 纯色 #4D6BFE 单色扁平兔狲头、白色镂空眼鼻（负空间），白底圆角，无渐变）。
+ */
 const FAVICON_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">' +
-  '<rect x="1" y="2" width="14" height="10" rx="3" fill="#4f8ef7"/>' +
-  '<path d="M5 12 L5 15 L9 12 Z" fill="#4f8ef7"/>' +
-  '<circle cx="5.5" cy="7" r="1.2" fill="#fff"/>' +
-  '<circle cx="8" cy="7" r="1.2" fill="#fff"/>' +
-  '<circle cx="10.5" cy="7" r="1.2" fill="#fff"/></svg>';
+  '<rect width="16" height="16" rx="3.5" fill="#fff"/>' +
+  '<circle cx="3.8" cy="5.8" r="2" fill="#4D6BFE"/>' +
+  '<circle cx="12.2" cy="5.8" r="2" fill="#4D6BFE"/>' +
+  '<ellipse cx="8" cy="9.4" rx="6" ry="5.4" fill="#4D6BFE"/>' +
+  '<circle cx="5.8" cy="8.8" r="1.5" fill="#fff"/>' +
+  '<circle cx="10.2" cy="8.8" r="1.5" fill="#fff"/>' +
+  '<circle cx="6.1" cy="8.2" r="0.75" fill="#4D6BFE"/>' +
+  '<circle cx="9.9" cy="8.2" r="0.75" fill="#4D6BFE"/>' +
+  '<path d="M7.55 10.6 L8.45 10.6 L8 11.25 Z" fill="#fff"/>' +
+  '<path d="M7.2 11.7 Q8 12.3 8.8 11.7" stroke="#fff" stroke-width="0.6" fill="none" stroke-linecap="round"/></svg>';
 
 /**
  * 静态资源处理（非 /api 路径的 GET/HEAD）。
@@ -395,7 +424,8 @@ export async function startWebServer(
           maxUploadBytes: resolved.maxUploadBytes,
           // 文本预览上限（web-file-preview P1）：前端按 size ≤ 上限显示预览入口
           maxPreviewBytes: resolved.maxPreviewBytes,
-          ldapEnabled: resolved.ldap.enabled,
+          // LDAP 启用提示（登录页 hint）与登录同源走热读：系统管理切换开关约一个 TTL 后一致
+          ldapEnabled: readLdapRuntimeConfig(resolved).enabled,
           // 个人工作目录模式（W7）：前端据此隐藏共享区 tab、放宽空 projectRoot 新建
           personalOnly: resolved.personalOnly,
           // 补充指令开关（web-steering W7）：false 时前端回退「运行中禁用输入」旧行为
@@ -424,6 +454,48 @@ export async function startWebServer(
       // 工作空间列表（ARCH-20261027 T04）：前端空间切换器数据源
       if (pathname === "/api/workspaces" && req.method === "GET") {
         await handleListWorkspaces(res, resolved, ctx);
+        return;
+      }
+
+      // 能力发现（web-capability T1）：技能 / Agent / MCP 脱敏清单，
+      // 供设置抽屉「技能」页签与 Composer「@ 提及」补全面板消费
+      if (pathname === "/api/capabilities" && req.method === "GET") {
+        await handleListCapabilities(res, req, ctx);
+        return;
+      }
+
+      // 自定义 Agent 创建（设置抽屉「智能体」页签）：
+      // 复用 SedimentationWriter 五条安全门槛，scope=user 落 ~/.deepcode/skills
+      if (pathname === "/api/agents" && req.method === "POST") {
+        await handleCreateAgent(req, res, ctx);
+        return;
+      }
+
+      // AI 一句话生成智能体草稿（不落盘，用户确认后走 POST /api/agents）
+      if (pathname === "/api/agents/draft" && req.method === "POST") {
+        await handleCreateAgentDraft(req, res, ctx);
+        return;
+      }
+
+      // 全局规则管理（设置抽屉「全局规则」页签）：增删查，存储与会话注入同源
+      // （personalOnly → <engineHomeRoot>/<userId>/.deepcodeX/rules/，否则 ~ 同 CLI /rules）
+      if (pathname === "/api/rules" && req.method === "GET") {
+        await handleListRules(res, resolved, ctx);
+        return;
+      }
+      if (pathname === "/api/rules" && req.method === "POST") {
+        await handleCreateRule(req, res, resolved, ctx);
+        return;
+      }
+      const ruleDeleteMatch = /^\/api\/rules\/([^/]+)$/.exec(pathname);
+      if (ruleDeleteMatch && req.method === "DELETE") {
+        await handleDeleteRule(res, decodeURIComponent(ruleDeleteMatch[1]), resolved, ctx);
+        return;
+      }
+
+      // EAG 工作流审计（设置抽屉「审计」页签，P6）：规则证据 + 干预台账 + 确定性报告
+      if (pathname === "/api/eag/audit" && req.method === "GET") {
+        await handleGetAudit(res, resolved, ctx);
         return;
       }
 
@@ -501,6 +573,16 @@ export async function startWebServer(
         );
         return;
       }
+      // 目录创建（web-personal-subworkspace T1）：「新建对话 → 选择文件夹 → 新建文件夹」，
+      // 牢笼/scope 与 upload 一致；目录已存在幂等成功
+      if (pathname === "/api/files/mkdir" && req.method === "POST") {
+        await handleMkdir(
+          res,
+          await resolveFileJailRoots(ctx, url.searchParams.get("scope"), url.searchParams.get("path")),
+          url.searchParams.get("path")
+        );
+        return;
+      }
 
       sendJson(res, 404, { error: `未知 API 端点：${req.method} ${pathname}` });
       return;
@@ -524,13 +606,66 @@ export async function startWebServer(
     });
   });
 
-  // 首次启动默认用户提示（docs/dev/web-ui.md §3.3）：明文密码仅此一次展示；
-  // 凭据哈希已落盘 ~/.deepcode/web/bootstrap-admin.json（0600），忘记密码可删除后重启重新生成
+  // 首次启动默认用户提示（docs/dev/web-ui.md §3.3）。
+  // 安全需求（2026-10-29）：明文密码不得写入任何日志/文件——
+  // 2026-10-30 起弃用 macOS 钥匙串（security CLI 触发系统授权框、体验差），
+  // 改存本地 SQLite 密钥库 `~/.deepcode/desktop-secrets.db`（0600，与桌面壳
+  // 共用同一数据库；node:sqlite 为 Node 22.13+ 内置模块，零新增依赖）：
+  // 1) SQLite 可写：密码写入表 secrets(service='com.vegamo.deepcode.desktop',
+  //    account='web:bootstrap')，日志仅提示取回命令；
+  // 2) SQLite 不可用：仅当 stdout 为交互式 TTY 时一次性展示
+  //    （TTY 输出不持久化；重定向到日志文件时绝不输出明文）。
   if (resolved.auth.bootstrapPassword) {
-    console.log(
-      `[web] 首次启动：已创建默认本地登录用户 admin，密码 ${resolved.auth.bootstrapPassword}` +
-        `（凭据文件 ~/.deepcode/web/bootstrap-admin.json 仅存哈希；配置 web.auth.localUsers 后可删除该文件）`
-    );
+    const pw = resolved.auth.bootstrapPassword;
+    let storedInSqlite = false;
+    try {
+      // 动态 import：node:sqlite 为 Node 22.13+ 实验性内置模块，
+      // 缺失/未启用时 catch 回落 TTY 展示；esbuild 对 node: 前缀保持 external
+      const sqlite = (await import("node:sqlite")) as unknown as {
+        DatabaseSync: new (path: string) => {
+          exec: (sql: string) => void;
+          prepare: (sql: string) => { run: (...args: unknown[]) => unknown };
+          close: () => void;
+        };
+      };
+      const dbPath = path.join(expandHomePath("~/.deepcode"), "desktop-secrets.db");
+      mkdirSync(path.dirname(dbPath), { recursive: true });
+      const db = new sqlite.DatabaseSync(dbPath);
+      // SQLite 驱动按进程 umask 建文件（默认 0644）：打开后立即收紧为 0600
+      chmodSync(dbPath, 0o600);
+      db.exec(
+        "CREATE TABLE IF NOT EXISTS secrets (" +
+          "service TEXT NOT NULL, account TEXT NOT NULL, value TEXT NOT NULL, " +
+          "PRIMARY KEY (service, account));"
+      );
+      db.prepare(
+        "INSERT INTO secrets (service, account, value) VALUES (?1, ?2, ?3) " +
+          "ON CONFLICT (service, account) DO UPDATE SET value = excluded.value"
+      ).run("com.vegamo.deepcode.desktop", "web:bootstrap", pw);
+      db.close();
+      storedInSqlite = true;
+    } catch {
+      // node:sqlite 不可用 / 打开失败：回落 TTY-only 展示
+    }
+    if (storedInSqlite) {
+      console.log(
+        `[web] 首次启动：已创建默认本地登录用户 admin，初始密码已存入本地密钥库 ` +
+          `~/.deepcode/desktop-secrets.db（secrets 表，account=web:bootstrap；` +
+          `取回：sqlite3 ~/.deepcode/desktop-secrets.db "select value from secrets where account='web:bootstrap'"；` +
+          `凭据文件 ~/.deepcode/web/bootstrap-admin.json 仅存哈希；配置 web.auth.localUsers 后可删除该文件）`
+      );
+    } else if (process.stdout.isTTY) {
+      console.log(
+        `[web] 首次启动：已创建默认本地登录用户 admin，密码 ${pw}` +
+          `（仅本次交互展示、不写入日志文件；凭据文件 ~/.deepcode/web/bootstrap-admin.json 仅存哈希；` +
+          `配置 web.auth.localUsers 后可删除该文件）`
+      );
+    } else {
+      console.log(
+        `[web] 首次启动：已创建默认本地登录用户 admin（初始密码未写入日志；` +
+          `删除 ~/.deepcode/web/bootstrap-admin.json 后重启可重新生成）`
+      );
+    }
   }
 
   return {

@@ -124,6 +124,11 @@ export type ResolvedWebSettings = {
     /** 属性映射（LDAP 属性名 → 展示字段） */
     attrs: Record<string, string>;
   };
+  /**
+   * 用户级 settings.json 路径（本配置的来源文件；LDAP 运行期热读据此追踪开关变化）。
+   * resolveWebSettings 注入真实路径；测试构造经显式覆盖指向不存在路径以隔离真实配置。
+   */
+  userSettingsPath?: string;
 };
 
 /** POST /api/auth/login 请求体 */
