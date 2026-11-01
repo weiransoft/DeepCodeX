@@ -93,12 +93,13 @@ desktop/src-tauri/src/
 │   ├── manager.rs        # EngineManager：spawn/健康检查/重启/优雅关闭
 │   ├── port.rs           # 127.0.0.1 动态端口分配（bind :0 探测）
 │   └── settings.rs       # ~/.deepcode/settings.json 读写（serde_json）
-├── ssh/                  # ⚠️ M2 规划，目录尚未创建（当前壳零 SSH 实现）
-│   ├── manager.rs        # SshManager：连接生命周期状态机
-│   ├── probe.rs          # 远端探测（uname/glibc/combo）
-│   ├── deploy.rs         # server 版本校验/下载/上传（scp）/安装
-│   ├── tunnel.rs         # -L 隧道进程管理 + ControlMaster
-│   └── sshconfig.rs      # ~/.ssh/config 解析（Host/HostName/User/Port/IdentityFile/ProxyJump）
+├── ssh/                  # ✅ 已实现（详见 §3.3）
+│   ├── mod.rs            # 模块导出
+│   ├── targets.rs        # 目标存储（JSON）+ ~/.ssh/config 解析
+│   ├── exec.rs           # ssh 子进程构造（隧道参数顺序 / askpass / 超时执行）
+│   ├── probe.rs          # 远端探测（uname / command -v / $HOME）
+│   ├── tunnel.rs         # 远端引擎拉起 + -L 转发 + 就绪探测 + 失败诊断
+│   └── manager.rs        # 连接生命周期状态机与四阶段编排（含回滚）
 ├── secrets/
 │   └── store.rs          # keychain(macOS) / windows-rs 凭据管理器
 ├── ipc.rs                # 全部 #[tauri::command]（唯一前端入口）
@@ -121,17 +122,20 @@ desktop/src-tauri/src/
 | `config_get` / `config_save` | 桌面配置读写（完整列表覆盖语义） | ✅ M1 |
 | `window_drag` / `window_new` | 窗口拖动与新建 | ✅ M1 |
 | `boot_diag` | 引导页错误回传壳日志 | ✅ M1 |
-| `ssh_list_targets` / `ssh_import_config` | 连接管理、~/.ssh/config 导入 | ⛔ M2 未实现 |
-| `ssh_connect(target_id)` → `{local_port, authority}` | 完整连接流程（探测→部署→隧道） | ⛔ M2 未实现 |
-| `ssh_disconnect` / `ssh_reconnect` | 生命周期 | ⛔ M2 未实现 |
-| `ssh_progress_events`（Tauri event） | 连接各阶段进度推送给 UI | ⛔ M2 未实现 |
+| `ssh_list_targets` / `ssh_import_config` / `ssh_remove_target` | 目标管理、~/.ssh/config 导入 | ✅ M2 |
+| `ssh_connect` → `{authority, localPort, remoteOs, remoteArch}` | 四阶段：探测 → 拉起远端引擎 → 隧道 → 就绪 | ✅ M2 |
+| `ssh_status` | 会话快照 + 连接中阶段进度（前端轮询推进进度条） | ✅ M2 |
+| `ssh_disconnect` | 断开：停隧道、停远端引擎、清临时目录 | ✅ M2 |
 | `provider_save/test/list/activate` | 供应商插件（Key 进 Keychain，settings 只写引用） | ⛔ 规划中，前端未接线 |
 | `recent_workspaces_*` | 最近工作区持久化（壳侧 JSON） | ⛔ 规划中，前端未接线 |
 
-M2（SSH）未实现期间的实际行为：侧边栏「远程」面板探测 `ssh_list_targets` 失败 →
-按错误类型分档展示。**命令未注册**（`Command ... not found`）视为"壳版本尚无 M2 能力"，
-提示升级客户端；**ACL 未授权**（`Command ... not allowed by ACL`）视为壳的权限配置缺陷，
-以告警样式明示"不是升级能解决的"，并在控制台留痕——避免把配置故障误报成版本落后。
+**闭环**：`ssh_connect` 成功 → 壳把主窗口导航到 `http://127.0.0.1:<隧道端口>`（远端
+引擎自带 Web UI）→ 注入脚本经 `engine_credentials` 拿隧道凭据自动登录 →
+`ssh_disconnect` 断开并把窗口导航回本地引擎。因此前端不代理远端 API，也就不存在
+"两套请求路径"的分叉。
+
+降级与诊断仍在：桥不存在（纯浏览器）→ 面板不挂载；壳未注册命令 → 提示能力未就绪；
+ACL 未授权 → 告警样式明示配置缺陷（见 `classifySshProbeFailure`）。
 
 前端通过注入的 `window.__DEEPCODE_DESKTOP__` bridge（postMessage 代理）调用；
 纯浏览器访问 `deepcode web` 时 bridge 不存在，前端自动隐藏桌面专属 UI（保持 Web 独立可用）。
@@ -146,22 +150,48 @@ M2（SSH）未实现期间的实际行为：侧边栏「远程」面板探测 `s
   1. **bundled**：externalBin 打包 Node SEA（Single Executable Application）的 deepcode；
   2. **system**：调用用户 PATH 的 `node <path>/cli.js`（开发/内部署模式，规避 SEA+native 依赖打包风险，better-sqlite3/sharp 为可选依赖不构成阻塞）。
 
-### 3.3 SshManager 状态机
+### 3.3 SshManager 状态机（实现现状）
 
 ```
-Idle → Probing → NeedInstall → Installing → Starting → Tunneling → Connected
-                     ↓ 失败                                   ↓ 断线
-                   Failed ←──────────────────────────── Reconnecting(≤5, 退避)
+Idle → Probing → Starting(远端引擎) → Tunneling → Ready
+              ↓ 失败                    ↓ 隧道退出
+            Failed ←── 回滚：kill 远端进程组 + 删临时目录 + 删 askpass
 ```
 
-- 所有远端操作都是 `ssh <host> '<cmd>'` 的 spawn 封装（ControlMaster `ControlPath=~/.deepcode/ssh/cm-%r@%h:%p`，`ControlPersist=300`）。
-- 探测：`uname -s`（Linux only）、`uname -m`（x86_64/aarch64）、glibc：`ldd --version | head -1` ≥ 2.28。
-- 版本一致（NFR-6）：`cat ~/.deepcode/server/VERSION` 与客户端常量比对，不符则重装。
-- 安装：远端有外网 → `curl` 远端自下载；无外网/开启上传模式 → 本地 `scp` 上传 tar 后远端解包（对齐 Zed `upload_binary_over_ssh`）。
-- 隧道：`ssh -M -N -L 127.0.0.1:<localPort>:127.0.0.1:<remotePort> <host>`；
-  隧道进程独立于命令通道，断线只重建隧道。
-- server 启动：`nohup deepcode web --host 127.0.0.1 --port <remotePort> > ~/.deepcode/server/server.log 2>&1 &`，随后本地经隧道健康检查确认可用。
-- LLM Key 注入：连接建立后，壳把本机 Keychain 中激活供应商的 Key 通过一次性 stdin 传给远端启动命令的环境（不落远端磁盘、不进 shell 历史），实现"Key 不持久化到远端"。
+实现位于 `desktop/src-tauri/src/ssh/`：`targets.rs`（存储 + config 解析）、
+`exec.rs`（`ssh` 子进程构造）、`probe.rs`（远端探测）、`tunnel.rs`（拉起 + 转发 + 就绪）、
+`manager.rs`（状态机与编排）。
+
+- **不链入 ssh2/russh**：统一调用系统 `ssh` 可执行文件。`-L` 转发、`ProxyJump`、
+  ssh-agent、证书、known_hosts、系统 `ssh_config` 语义全部由 OpenSSH 自身保证；
+  链库会引入 C 依赖与平台编译差异，与 Windows 零依赖打包约束冲突。
+- 探测：单次往返取回 `uname -s` / `uname -m` / `command -v deepcode` / `$HOME`。
+  远端非 POSIX（Windows OpenSSH 默认 cmd）直接报错，不做半吊子兼容。
+- **不自动部署远端**：要求远端已安装 DeepCodeX CLI，缺失时返回带
+  `npm install -g @vegamo/deepcode-cli` 的可行动错误。自动下载/上传需要目标架构
+  制品与 scp 通道，失败模式难诊断，收益低于复杂度；`install_mode` 字段保留但两条
+  路径行为一致（仅记日志）。
+- 远端引擎配置隔离：在远端临时目录写**项目级** `.deepcode/settings.json`
+  （`enabled: true` + `auth.localUsers` + `allowRoots: ["~"]`），在 `cwd=临时目录`
+  启动。配置了 `localUsers` 后 web 侧跳过 bootstrap 随机口令，口令由壳生成并仅留内存，
+  因此隧道建立后可自动登录；不触碰用户远端的 `~/.deepcode/settings.json`。
+  JWT secret 经 `DEEPCODE_WEB_JWT_SECRET` 注入，不落盘。
+- 引擎启动：`nohup setsid deepcode web --host 127.0.0.1 --port <remotePort> > engine.log 2>&1 &`。
+  `setsid` 让引擎成为进程组 leader，断开时按进程组回收——只 kill 主 PID 会留下孤儿
+  子进程（实测在目标机上残留）。
+- 隧道：`ssh -N -L <localPort>:127.0.0.1:<remotePort> <host>`，带
+  `ExitOnForwardFailure=yes`。**`-N`/`-L` 必须在 host 之前**：host 之后的参数是远端命令，
+  写错会让隧道静默失效（曾真实发生，现有回归用例 `tunnel_args_precede_host`）。
+- 就绪探测：一次连接同时判断隧道与引擎（`Probe::{Ok, Connected, Unreachable}`）。
+  早期先 TCP 再 HTTP 各建一次连接，会与单线程 accept 的服务端互相抢占。
+- 失败诊断：隧道 stderr 落盘，识别 `administratively prohibited`
+  → 明确提示目标机 `AllowTcpForwarding no`；并就绪失败时回传远端 `engine.log` 末 40 行。
+- 认证：`agent`/`keyfile` 用 `BatchMode=yes`；`password` 经 `SSH_ASKPASS_REQUIRE=force`
+  + 临时脚本（脚本不含口令，口令只走子进程环境变量，用完即删）。
+  **Windows 不支持密码认证**（OpenSSH for Windows 无 `SSH_ASKPASS_REQUIRE`），显式报错并引导用密钥。
+
+已实现之外的边界：不做断线自动重连、不做 `ControlMaster` 复用、不做远端版本校验与
+LLM Key 注入（远端引擎使用自己的配置）。
 
 ### 3.4 sshconfig.rs
 

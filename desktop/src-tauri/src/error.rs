@@ -37,10 +37,10 @@ pub enum ShellError {
     /// JSON 序列化/解析错误（settings.json 读写等）
     #[error("JSON 处理失败：{0}")]
     Json(#[from] serde_json::Error),
-    /// SSH 远程开发（M2）预留：当前调用即返回明确未实现错误，绝不静默占位
-    #[error("SSH 远程开发未启用：{0}")]
-    #[allow(dead_code)] // M2 SSH 远程启用
-    SshNotEnabled(String),
+    /// SSH 远程连接失败：目标不可达、认证失败、远端缺少运行时、
+    /// 隧道建立失败等。`message` 面向用户，必须可行动。
+    #[error("SSH 远程连接失败：{0}")]
+    Ssh(String),
 }
 
 /// 序列化为前端可读结构：`{ "kind": "EngineStart", "message": "..." }`。
@@ -57,7 +57,7 @@ impl Serialize for ShellError {
             ShellError::EngineRuntime(_) => "EngineRuntime",
             ShellError::Io(_) => "Io",
             ShellError::Json(_) => "Json",
-            ShellError::SshNotEnabled(_) => "SshNotEnabled",
+            ShellError::Ssh(_) => "Ssh",
         };
         let mut s = serializer.serialize_struct("ShellError", 2)?;
         s.serialize_field("kind", kind)?;

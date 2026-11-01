@@ -43,25 +43,11 @@ const PATHS = {
  * 这是**白名单式声明**：新增悬空调用必须在此登记（含原因与文档），
  * 否则校验失败。反过来，某项一旦在壳侧实现（进入注册集），本表若仍保留
  * 也会被提示清理——防止清单腐化成"永远待办"。
+ *
+ * 2026-11-01：ssh_* 五个命令已全部实现并注册（desktop/src-tauri/src/ssh/），
+ * 故此处清空。若校验报出"未声明悬空调用"，说明新增了前端调用却没做壳侧实现。
  */
-const PENDING_COMMANDS = {
-  ssh_list_targets: {
-    reason: "M2 SSH 远程连接子系统未实现：desktop/src-tauri/src/ssh/ 整个目录不存在",
-    doc: "docs/desktop/DESKTOP-ARCH.md §3.3（SshManager 状态机）",
-  },
-  ssh_import_config: {
-    reason: "同上：~/.ssh/config 解析器（sshconfig.rs）未实现",
-    doc: "docs/desktop/DESKTOP-ARCH.md §3.1（关键 IPC 命令面）",
-  },
-  ssh_connect: {
-    reason: "同上：探测(probe)/部署(deploy)/隧道(tunnel) 三阶段未实现",
-    doc: "docs/desktop/DESKTOP-ARCH.md §3.3",
-  },
-  ssh_disconnect: {
-    reason: "同上：连接生命周期状态机未实现",
-    doc: "docs/desktop/DESKTOP-ARCH.md §3.3",
-  },
-};
+const PENDING_COMMANDS = {};
 
 const errors = [];
 const warnings = [];

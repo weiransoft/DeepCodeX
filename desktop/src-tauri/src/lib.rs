@@ -16,6 +16,7 @@ mod engine;
 mod error;
 mod ipc;
 mod secrets;
+mod ssh;
 mod tray;
 
 use std::sync::Arc;
@@ -137,8 +138,14 @@ pub fn run() {
             ));
             // UI 联动（状态事件广播 + 崩溃恢复导航）
             rt.attach_app(app.handle().clone());
+
+            // SSH 远程连接（M2）：目标列表落在应用数据目录
+            let ssh_store = ssh::targets::TargetStore::new(data_dir.join("ssh-targets.json"));
+            let ssh_mgr = Arc::new(ssh::manager::SshManager::new(ssh_store));
+
             app.manage(ipc::AppState {
                 engine: Arc::clone(&rt),
+                ssh: Arc::clone(&ssh_mgr),
             });
 
             // 先挂崩溃监督，再启动引擎（崩溃自动重启 ≤3 次，FR-1.3）
@@ -168,16 +175,23 @@ pub fn run() {
             ipc::config_save,
             ipc::window_drag,
             ipc::window_new,
-            ipc::boot_diag
+            ipc::boot_diag,
+            ipc::ssh_list_targets,
+            ipc::ssh_import_config,
+            ipc::ssh_remove_target,
+            ipc::ssh_status,
+            ipc::ssh_connect,
+            ipc::ssh_disconnect
         ])
         .build(tauri::generate_context!())
         .expect("构建 DeepCode Desktop 失败")
         .run(|app_handle, event| {
             match event {
                 tauri::RunEvent::ExitRequested { .. } => {}
-                // 全部退出路径兜底：优雅关闭引擎，不留孤儿进程（FR-1.4）
+                // 全部退出路径兜底：先断 SSH（含远端进程清理）再关引擎，不留孤儿（FR-1.4）
                 tauri::RunEvent::Exit => {
                     if let Some(state) = app_handle.try_state::<ipc::AppState>() {
+                        state.ssh.disconnect();
                         engine::manager::cleanup_blocking(&state.engine);
                     }
                 }

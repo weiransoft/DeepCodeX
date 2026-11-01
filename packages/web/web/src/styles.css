@@ -3074,6 +3074,31 @@ a.icon-btn {
 .ssh-target:hover {
   border-color: var(--app-border-strong);
 }
+/* 目标项可点击连接：删除按钮常驻隐藏，hover/键盘聚焦时才出现，
+   避免误触把目标删掉 */
+.ssh-target-del {
+  margin-left: auto;
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  color: var(--app-text-tertiary);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.ssh-target:hover .ssh-target-del,
+.ssh-target-del:focus-visible {
+  opacity: 1;
+}
+.ssh-target-del:hover {
+  color: var(--app-danger);
+}
+.ssh-target:focus-visible {
+  outline: 2px solid var(--app-accent, var(--app-border-strong));
+  outline-offset: 1px;
+}
 .ssh-target-head {
   display: flex;
   align-items: center;

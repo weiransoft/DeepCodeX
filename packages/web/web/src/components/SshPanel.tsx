@@ -1,11 +1,17 @@
 /**
  * 侧边栏「远程 SSH」视图（Trae 风格 Shell 重构 + DESKTOP-PRD FR-2.1~2.7）。
  *
- * 数据面属壳 M2 扩展（M1-NOTES §4b）：目标列表 / 导入 / 连接分别对应壳 IPC
- * `ssh_list_targets` / `ssh_import_config` / `ssh_connect` / `ssh_progress_events`。
- * 截至 2026-11-01，壳侧 `invoke_handler` 仍未注册任何 `ssh_*` 命令
- * （`desktop/src-tauri/src/ssh/` 目录不存在，M2 子系统整体未实现），
- * 故本面板做**桥守卫优雅降级**：
+ * 数据面由壳侧 SSH 子系统承载（desktop/src-tauri/src/ssh/）：目标列表 / 导入 /
+ * 连接分别对应 `ssh_list_targets` / `ssh_import_config` / `ssh_connect`，
+ * 连接期间轮询 `ssh_status` 推进四阶段，断开走 `ssh_disconnect`。
+ *
+ * 闭环：连接成功后**壳把窗口导航到隧道端口**（远端引擎自带 Web UI），
+ * 本组件随页面卸载；断开时壳再导航回本地引擎。因此这里不代理远端 API，
+ * 只负责发起连接与展示阶段。
+ *
+ * 降级仍在：桥不存在（纯浏览器）→ 整个视图不挂载（App 控制）；
+ * 壳未注册命令 → 列表区提示能力未就绪；ACL 未授权 → 以告警样式明示
+ * 配置缺陷（见 classifySshProbeFailure）。
  * - 桥不存在（纯浏览器）→ 整个视图不挂载（App 控制）；
  * - IPC 命令未注册（M1 壳）→ 列表区展示「M2 能力未就绪」引导，表单可填写、
  *   提交时明确提示等待壳更新，绝不静默失败；
@@ -86,10 +92,47 @@ export interface SshProbeFailure {
  * 顺序敏感：ACL 文案不含 `not found`，但仍先判 ACL，避免大小写/文案变体漏判。
  */
 export function classifySshProbeFailure(err: unknown): SshProbeFailure {
-  const detail = err instanceof Error ? err.message : typeof err === "string" ? err : err == null ? "" : String(err);
+  const detail = errorText(err, "未知错误（无错误信息）");
   if (/not allowed by acl/i.test(detail)) return { kind: "denied", detail };
   if (/not found|unknown command|no command/i.test(detail)) return { kind: "absent", detail };
-  return { kind: "error", detail: detail === "" ? "未知错误（无错误信息）" : detail };
+  return { kind: "error", detail };
+}
+
+/**
+ * 提取可读错误文本。
+ *
+ * Tauri 命令失败时 reject 的不一定是 `Error`：`ShellError` 序列化为
+ * `{ kind, message }`，ACL 拒绝/命令缺失则是裸字符串。三者都要能取到 message，
+ * 否则用户只会看到兜底的"连接失败"，把真正原因（如 ssh 的认证失败）丢掉。
+ */
+export function errorText(err: unknown, fallback = "操作失败"): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  if (err && typeof err === "object" && "message" in err) {
+    const msg = (err as { message: unknown }).message;
+    if (typeof msg === "string" && msg !== "") return msg;
+  }
+  return fallback;
+}
+
+/** `ssh_status` 返回的会话快照（与 Rust `SessionStatus` 对齐） */
+interface SshStatus {
+  state: "idle" | "connecting" | "ready";
+  phase?: number;
+  message?: string;
+  authority?: string;
+  localPort?: number;
+  targetId?: string;
+}
+
+/** `ssh_connect` 返回（不含任何口令——口令只留在壳内存） */
+interface SshConnectResult {
+  authority: string;
+  localPort: number;
+  remoteOs: string;
+  remoteArch: string;
+  remoteUsername: string;
+  targetId: string;
 }
 
 /** SshPanel 组件属性 */
@@ -145,6 +188,22 @@ export function SshPanel({ projectRoot, onAuthorityChange, onNotice }: SshPanelP
     void refreshTargets();
   }, [refreshTargets]);
 
+  // 恢复会话状态：页面刷新、或从远端导航回本地后，以壳侧状态为准
+  useEffect(() => {
+    if (!bridge) return;
+    bridge
+      .invoke<SshStatus>("ssh_status")
+      .then((st) => {
+        if (st.state === "ready") {
+          setPhase(CONNECT_PHASES.length);
+          onAuthorityChange?.(st.authority ?? null);
+        }
+      })
+      .catch(() => {
+        /* 状态不可用不阻断面板：连接时会有明确报错 */
+      });
+  }, [bridge, onAuthorityChange]);
+
   /** 按探测失败原因给出准确提示（不得把配置缺陷说成"请更新客户端"） */
   const probeHint = (): string => {
     if (probeFailure?.kind === "denied") {
@@ -174,21 +233,59 @@ export function SshPanel({ projectRoot, onAuthorityChange, onNotice }: SshPanelP
     return "";
   };
 
-  /** 测试并连接：M2 壳就绪后经 ssh_connect + ssh_progress_events 推进四阶段 */
+  /** 连接期间轮询会话状态以推进四阶段（壳侧把进度写入 ssh_status） */
+  const startProgressPolling = (): (() => void) => {
+    if (!bridge) return () => {};
+    const timer = window.setInterval(() => {
+      bridge
+        .invoke<SshStatus>("ssh_status")
+        .then((st) => {
+          if (st.state === "connecting" && typeof st.phase === "number") setPhase(st.phase);
+        })
+        .catch(() => {
+          /* 轮询失败不打断连接：真正的失败由 ssh_connect 的 Promise 返回 */
+        });
+    }, 400);
+    return () => window.clearInterval(timer);
+  };
+
+  /** 发起连接（表单与已保存目标共用同一条路径） */
+  const doConnect = async (payload: Record<string, unknown>, label: string): Promise<void> => {
+    if (!bridge) {
+      setFormError("桌面桥不可用：请在 DeepCode Desktop 中打开本页面");
+      return;
+    }
+    if (capabilityReady !== true) {
+      setFormError(probeHint());
+      return;
+    }
+    setFormError("");
+    setPhase(0);
+    const stopPolling = startProgressPolling();
+    try {
+      const res = await bridge.invoke<SshConnectResult>("ssh_connect", payload);
+      setPhase(CONNECT_PHASES.length);
+      onAuthorityChange?.(res?.authority ?? label);
+      const env = [res?.remoteOs, res?.remoteArch].filter(Boolean).join(" ");
+      onNotice?.(env !== "" ? `已连接远端（${env}）` : "已连接远端");
+      // 壳随后把窗口导航到远端引擎，本组件即将卸载
+    } catch (e: unknown) {
+      setPhase(-1);
+      setFormError(errorText(e, "连接失败"));
+    } finally {
+      stopPolling();
+    }
+  };
+
+  /** 表单提交：新建连接 */
   const connect = (): void => {
     const err = validate();
     if (err !== "") {
       setFormError(err);
       return;
     }
-    if (!bridge || capabilityReady !== true) {
-      setFormError(probeHint());
-      return;
-    }
-    // M2 事件通道：ssh_progress_events 推送 { phase: 0..3, message }，成功即上报 authority
-    setPhase(0);
-    bridge
-      .invoke<{ authority: string }>("ssh_connect", {
+    void doConnect(
+      {
         name: form.name || `${form.username}@${form.host}`,
         host: form.host,
         port: Number(form.port),
@@ -197,16 +294,46 @@ export function SshPanel({ projectRoot, onAuthorityChange, onNotice }: SshPanelP
         // FR-2.2：密码仅随本次调用进 Rust 层，前端不留存
         password: form.authMethod === "password" ? form.password : undefined,
         installMode: form.installMode,
-      })
-      .then((res) => {
-        setPhase(CONNECT_PHASES.length);
-        onAuthorityChange?.(res?.authority ?? `ssh://${form.username}@${form.host}`);
-        onNotice?.("已连接远程引擎");
-      })
-      .catch((e: unknown) => {
-        setPhase(-1);
-        setFormError(e instanceof Error ? e.message : "连接失败");
+      },
+      `ssh://${form.username}@${form.host}`
+    );
+  };
+
+  /**
+   * 连接已保存目标。
+   *
+   * 密码认证的目标必须回到表单输入口令（口令不落盘，无法从存储取回）；
+   * 其余直接以 targetId 连接，由壳侧从存储读取 IdentityFile / ProxyJump——
+   * 这是导入 ~/.ssh/config 之后能"一键连接"的关键路径。
+   */
+  const connectSaved = (t: SshTarget): void => {
+    if (t.authMethod === "password") {
+      setForm({
+        name: t.name,
+        host: t.host,
+        port: String(t.port),
+        username: t.username,
+        authMethod: "password",
+        password: "",
+        installMode: "auto",
       });
+      setFormOpen(true);
+      onNotice?.("该目标使用密码认证：请填写密码后连接（口令不保存）");
+      return;
+    }
+    void doConnect({ targetId: t.id }, `ssh://${t.username}@${t.host}`);
+  };
+
+  /** 移除已保存目标（不触碰远端任何内容） */
+  const removeTarget = (t: SshTarget): void => {
+    if (!bridge) return;
+    bridge
+      .invoke<SshTarget[]>("ssh_remove_target", { id: t.id })
+      .then((list) => {
+        if (Array.isArray(list)) setTargets(list);
+        onNotice?.(`已移除目标 ${t.name}`);
+      })
+      .catch((e: unknown) => onNotice?.(errorText(e, "移除失败")));
   };
 
   const disconnect = (): void => {
@@ -219,7 +346,7 @@ export function SshPanel({ projectRoot, onAuthorityChange, onNotice }: SshPanelP
         onNotice?.("已断开远程，回到本地工作区");
       })
       .catch((e: unknown) => {
-        onNotice?.(e instanceof Error ? e.message : "断开失败");
+        onNotice?.(errorText(e, "断开失败"));
       });
   };
 
@@ -230,13 +357,14 @@ export function SshPanel({ projectRoot, onAuthorityChange, onNotice }: SshPanelP
       return;
     }
     bridge
-      .invoke<{ imported: number }>("ssh_import_config")
+      .invoke<{ imported: number; targets: SshTarget[] }>("ssh_import_config")
       .then((res) => {
-        onNotice?.(`已导入 ${res?.imported ?? 0} 个连接目标`);
+        if (Array.isArray(res?.targets)) setTargets(res.targets);
+        onNotice?.((res?.imported ?? 0) > 0 ? `已导入 ${res.imported} 个连接目标` : "没有新增目标（均已存在）");
         void refreshTargets();
       })
       .catch((e: unknown) => {
-        onNotice?.(e instanceof Error ? e.message : "导入失败");
+        onNotice?.(errorText(e, "导入失败"));
       });
   };
 
@@ -294,10 +422,39 @@ export function SshPanel({ projectRoot, onAuthorityChange, onNotice }: SshPanelP
       )}
       {targets !== null &&
         targets.map((t) => (
-          <div key={t.id} className="ssh-target">
+          <div
+            key={t.id}
+            className="ssh-target"
+            role="button"
+            tabIndex={0}
+            title={`连接到 ${t.name}`}
+            onClick={() => connectSaved(t)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                connectSaved(t);
+              }
+            }}
+          >
             <div className="ssh-target-head">
               <span className="ssh-target-name">{t.name}</span>
-              {t.authMethod === "password" && <span className="ssh-target-badge">密码</span>}
+              {t.authMethod === "password" ? (
+                <span className="ssh-target-badge">密码</span>
+              ) : t.authMethod === "keyfile" ? (
+                <span className="ssh-target-badge">密钥</span>
+              ) : null}
+              <button
+                type="button"
+                className="ssh-target-del"
+                title={`移除目标 ${t.name}`}
+                onClick={(e) => {
+                  // 阻止冒泡：否则会连带触发外层的"连接该目标"
+                  e.stopPropagation();
+                  removeTarget(t);
+                }}
+              >
+                ×
+              </button>
             </div>
             <div className="ssh-target-addr">
               ssh://{t.username}@{t.host}

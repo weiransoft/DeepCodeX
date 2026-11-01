@@ -24,6 +24,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # JWT secret / 会话口令随机生成
 rand = "0.9"
+# SSH 远程：远端引擎登录口令摘要。web 侧 localUsers.passwordHash =
+# sha256(password) 小写十六进制；纯 Rust 实现，无 C 依赖，不破坏零依赖打包
+sha2 = "0.10"
 # 日志（FR-1.6 引擎/壳日志落盘，stderr 同步输出便于 dev 排查）
 log = "0.4"
 env_logger = "0.11"

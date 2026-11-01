@@ -15,7 +15,7 @@
 
 [[permission]]
 identifier = "allow-app-ipc"
-description = "DeepCode 桌面桥自有命令：引擎状态/重启/日志、桌面配置读写、窗口拖动与新建。仅覆盖 invoke_handler 注册面，不暴露 shell/fs/http 插件能力。"
+description = "DeepCode 桌面桥自有命令：引擎状态/重启/日志、桌面配置读写、窗口拖动与新建、SSH 远程连接（目标管理/探测/隧道/断开）。仅覆盖 invoke_handler 注册面，不暴露 shell/fs/http 插件能力。"
 commands.allow = [
   "engine_status",
   "engine_restart",
@@ -27,4 +27,13 @@ commands.allow = [
   "window_drag",
   "window_new",
   "boot_diag",
+  # SSH 远程（M2）：连接成功后窗口会导航到 http://127.0.0.1:<隧道端口>，
+  # 该页属 remote origin——不在此授权则前端在远端页上调用 ssh_disconnect /
+  # ssh_status 会被 ACL 拒绝（与 config_save 事故同源）。
+  "ssh_list_targets",
+  "ssh_import_config",
+  "ssh_remove_target",
+  "ssh_status",
+  "ssh_connect",
+  "ssh_disconnect",
 ]

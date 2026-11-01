@@ -12,11 +12,15 @@ use tauri::{State, WebviewWindow};
 
 use crate::engine::manager::{EngineRuntime, EngineStatus};
 use crate::error::ShellError;
+use crate::ssh::manager::{ConnectRequest, ConnectResult, SessionStatus, SshManager};
+use crate::ssh::targets::SshTarget;
 
 /// 壳应用共享状态（lib.rs 定义，随 Tauri managed state 注入各命令）。
 pub struct AppState {
-    /// 本地引擎运行时（M2 增加 SshManager 后一并挂入）
+    /// 本地引擎运行时
     pub engine: Arc<EngineRuntime>,
+    /// SSH 远程连接管理器（单会话模型）
+    pub ssh: Arc<SshManager>,
 }
 
 /// 引擎状态查询（boot 页与状态条共用；纯读不阻塞）。
@@ -101,30 +105,48 @@ pub fn engine_log_tail(state: State<AppState>) -> Result<String, ShellError> {
 
 /// 桌面会话登录凭据 `(baseUrl, username, password)`。
 ///
-/// 安全边界：仅允许**引擎 origin**（http://127.0.0.1:<port>）页面调用——
-/// 初始化脚本在该页内同源 fetch `/api/auth/login` 换 HttpOnly Cookie；
+/// 安全边界：仅允许两类 origin 调用——
+/// 1. **本地引擎 origin**（`http://127.0.0.1:<本地端口>`）；
+/// 2. **活动 SSH 隧道 origin**（`http://127.0.0.1:<隧道端口>`，且必须有活动会话）。
+///
+/// 初始化脚本在页面内同源 fetch `/api/auth/login` 换 HttpOnly Cookie；
 /// boot 引导页（tauri://localhost）与任何其他 origin 一律拒绝，
-/// 口令不会跨 origin 泄露。
+/// 口令不会跨 origin 泄露（隧道端口未建立会话时也不放行）。
 #[tauri::command]
 pub fn engine_credentials(
     window: WebviewWindow,
     state: State<AppState>,
 ) -> Result<Credentials, ShellError> {
-    let base_url = state.engine.base_url();
     let current = window
         .url()
         .map_err(|e| ShellError::Config(format!("无法读取窗口地址: {e}")))?;
-    if !is_engine_origin(current.as_str(), &base_url) {
-        return Err(ShellError::Config(
-            "engine_credentials 仅允许引擎 origin 页面调用".into(),
-        ));
+
+    // 1) 本地引擎
+    let base_url = state.engine.base_url();
+    if is_engine_origin(current.as_str(), &base_url) {
+        let (username, password) = state.engine.credentials()?;
+        return Ok(Credentials {
+            base_url,
+            username,
+            password,
+        });
     }
-    let (username, password) = state.engine.credentials()?;
-    Ok(Credentials {
-        base_url,
-        username,
-        password,
-    })
+
+    // 2) 远端引擎（SSH 隧道）：凭据仅存在于活动会话期间
+    if let Some((port, username, password)) = state.ssh.tunnel_credentials() {
+        let tunnel_base = format!("http://127.0.0.1:{port}");
+        if is_engine_origin(current.as_str(), &tunnel_base) {
+            return Ok(Credentials {
+                base_url: tunnel_base,
+                username,
+                password,
+            });
+        }
+    }
+
+    Err(ShellError::Config(
+        "engine_credentials 仅允许引擎/隧道 origin 页面调用".into(),
+    ))
 }
 
 /// origin 三元组 `(scheme, host, port)`：host 小写归一、缺省端口按 scheme 归一
@@ -262,6 +284,95 @@ pub fn config_save(
     payload: crate::config_persist::DesktopConfigSave,
 ) -> Result<crate::config_persist::DesktopConfig, ShellError> {
     crate::config_persist::save_desktop_config(payload)
+}
+
+// ───────────────────────────── SSH 远程连接（M2） ─────────────────────────────
+//
+// 闭环：目标列表/导入 → ssh_connect 四阶段 → 隧道就绪 → 主窗口导航到
+// `http://127.0.0.1:<local_port>`（远端引擎）→ 注入脚本经 engine_credentials
+// 自动登录 → ssh_disconnect 断开并导航回本地引擎。
+
+/// 导入结果（前端据此提示"已导入 N 个"）。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshImportResult {
+    pub imported: usize,
+    pub targets: Vec<SshTarget>,
+}
+
+/// 已保存的 SSH 目标列表。
+#[tauri::command]
+pub fn ssh_list_targets(state: State<AppState>) -> Result<Vec<SshTarget>, ShellError> {
+    state.ssh.list_targets()
+}
+
+/// 导入 `~/.ssh/config`（按 `user@host:port` 去重合并，已存在则更新）。
+#[tauri::command]
+pub fn ssh_import_config(state: State<AppState>) -> Result<SshImportResult, ShellError> {
+    let (targets, imported) = state.ssh.import_ssh_config()?;
+    Ok(SshImportResult { imported, targets })
+}
+
+/// 删除一个目标。
+#[tauri::command]
+pub fn ssh_remove_target(state: State<AppState>, id: String) -> Result<Vec<SshTarget>, ShellError> {
+    state.ssh.forget(&id)
+}
+
+/// 会话状态（前端在连接期间轮询以推进四阶段进度；页面刷新后也可恢复）。
+#[tauri::command]
+pub fn ssh_status(state: State<AppState>) -> SessionStatus {
+    state.ssh.status()
+}
+
+/// 建立 SSH 远程连接（四阶段，阻塞操作放线程池）。
+///
+/// 成功后**导航主窗口到隧道地址**——远端引擎有自己的 Web UI，
+/// 整页交由它承载比在本地面板里代理 API 更简单也更不易走样。
+#[tauri::command]
+pub async fn ssh_connect(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    req: ConnectRequest,
+) -> Result<ConnectResult, ShellError> {
+    let mgr = Arc::clone(&state.ssh);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        // 进度已写入 mgr.progress，ssh_status 轮询可见，此处回调留空
+        mgr.connect(&req, |_, _| {})
+    })
+    .await
+    .map_err(|e| ShellError::EngineRuntime(format!("SSH 连接任务执行失败: {e}")))??;
+
+    // 导航到远端引擎：失败不回滚连接（会话仍可用，只是没能自动跳转）
+    let url = format!("http://127.0.0.1:{}/", result.local_port);
+    if let Err(e) = navigate_to(&window, &url) {
+        log::warn!("SSH 已连接，但窗口导航失败（可手动访问 {url}）：{e}");
+    }
+    Ok(result)
+}
+
+/// 断开远程连接并把窗口导航回本地引擎。
+#[tauri::command]
+pub async fn ssh_disconnect(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<(), ShellError> {
+    let mgr = Arc::clone(&state.ssh);
+    tauri::async_runtime::spawn_blocking(move || mgr.disconnect())
+        .await
+        .map_err(|e| ShellError::EngineRuntime(format!("SSH 断开任务执行失败: {e}")))?;
+
+    let base = state.engine.base_url();
+    if let Err(e) = navigate_to(&window, &format!("{base}/")) {
+        log::warn!("SSH 已断开，但窗口导航回本地引擎失败：{e}");
+    }
+    Ok(())
+}
+
+/// 让窗口导航到指定 http origin（Tauri 2 `navigate` 需要 `Url` 类型）。
+fn navigate_to(window: &WebviewWindow, url: &str) -> Result<(), String> {
+    let parsed = tauri::Url::parse(url).map_err(|e| format!("非法地址 {url}: {e}"))?;
+    window.navigate(parsed).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
