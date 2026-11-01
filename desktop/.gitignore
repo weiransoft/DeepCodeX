@@ -1,0 +1,13 @@
+# Node
+node_modules/
+
+# Rust 构建产物
+src-tauri/target/
+src-tauri/gen/
+
+# 日志与本机杂项
+*.log
+.DS_Store
+
+# 图标候选素材（本机挑选用，最终图集在 src-tauri/icons/）
+icon-candidates/

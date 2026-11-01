@@ -1,0 +1,19 @@
+{
+  "name": "deepcode-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "DeepCode Desktop 壳工程（Tauri v2，包装 deepcode web 引擎，macOS/Windows）",
+  "scripts": {
+    "tauri": "tauri",
+    "build:engine": "npm --prefix ../../DeepCodeX-cli run build",
+    "dev": "npm run build:engine && tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2"
+  }
+}

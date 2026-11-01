@@ -1,0 +1,295 @@
+<!doctype html>
+<!--
+  DeepCode Desktop 引导页（boot 壳窗口：引擎启动进度 / 错误兜底 UI）。
+  流程：
+  1. 轮询 + 事件双通道获取 engine_status；
+  2. ready → location.replace 跳转 http://127.0.0.1:<port>/
+     （引擎页加载后由初始化脚本自动完成桌面账号登录）；
+  3. crashed/failed → 展示原因 + 日志尾部 + 重启引擎 / 打开日志按钮；
+  4. starting → 进度动画。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DeepCode</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --fg: #1c1c1e;
+        --muted: #8e8e93;
+        --bg: #f7f7f8;
+        --card: #ffffff;
+        --accent: #3b82f6;
+        --danger: #dc2626;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #f2f2f7;
+          --muted: #98989f;
+          --bg: #17171a;
+          --card: #232329;
+          --accent: #60a5fa;
+          --danger: #f87171;
+        }
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+      }
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.6 -apple-system, "Segoe UI", "PingFang SC",
+          "Microsoft YaHei", sans-serif;
+      }
+      main {
+        width: 360px;
+        padding: 40px 36px;
+        background: var(--card);
+        border-radius: 14px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
+        text-align: center;
+      }
+      .logo {
+        font-size: 22px;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+      }
+      .status {
+        margin-top: 10px;
+        color: var(--muted);
+        min-height: 1.6em;
+      }
+      .error {
+        margin-top: 12px;
+        color: var(--danger);
+        font-size: 13px;
+        word-break: break-all;
+        display: none;
+        text-align: left;
+        max-height: 9em;
+        overflow: auto;
+      }
+      .spinner {
+        margin: 22px auto 0;
+        width: 26px;
+        height: 26px;
+        border: 3px solid rgba(59, 130, 246, 0.25);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.9s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      .actions {
+        display: none;
+        margin-top: 18px;
+      }
+      button {
+        padding: 8px 22px;
+        margin: 0 4px;
+        border: 0;
+        border-radius: 8px;
+        background: var(--accent);
+        color: #fff;
+        font-size: 14px;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: transparent;
+        color: var(--muted);
+        border: 1px solid var(--muted);
+      }
+      button:hover {
+        filter: brightness(1.08);
+      }
+      .hidden {
+        display: none !important;
+      }
+      .hint {
+        margin-top: 14px;
+        padding: 10px 12px;
+        border: 1px dashed var(--muted);
+        border-radius: 8px;
+        font-size: 12px;
+        line-height: 1.7;
+        color: var(--fg);
+        text-align: left;
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="logo">DeepCode</div>
+      <div class="status" id="status">正在启动本地引擎…</div>
+      <div class="spinner" id="spinner"></div>
+      <pre class="error" id="error"></pre>
+      <div class="hint" id="hint">
+        引擎启动耗时明显偏长？在 macOS 上这通常是<b>「文稿文件夹」访问权限弹窗待确认</b>：
+        请查看屏幕右上角通知（或 系统设置 → 隐私与安全性 → 文件与文件夹 → DeepCode），
+        允许访问后点「重启引擎」即可。项目位于 ~/Documents（iCloud 同步域）时也可能
+        因文件未取回而阻塞——可将项目移至非同步目录（如 ~/DeepCodeX-cli）根治。
+      </div>
+      <div class="actions" id="actions">
+        <button id="restart">重启引擎</button>
+        <button id="open-logs" class="secondary">打开日志</button>
+      </div>
+    </main>
+    <script type="module">
+      // 诊断：所有错误可见化 + 回传壳日志（boot_diag），杜绝静默死页
+      const seen = new Set();
+      function diag(msg) {
+        const key = String(msg).slice(0, 120);
+        if (seen.has(key)) return; // 去重防刷屏
+        seen.add(key);
+        try {
+          rawInvoke("boot_diag", { msg: String(msg).slice(0, 500) }).catch(() => {});
+        } catch {}
+      }
+      window.addEventListener("error", (e) =>
+        diag("window.error: " + (e.message || e.error) + " @" + (e.filename || "") + ":" + (e.lineno || ""))
+      );
+      window.addEventListener("unhandledrejection", (e) =>
+        diag("unhandledrejection: " + (e.reason && (e.reason.message || e.reason)))
+      );
+
+      // Tauri IPC：优先 withGlobalTauri 全局包，缺失时直接走 __TAURI_INTERNALS__
+      // （初始化脚本必然注入 internals；全局包是独立 bundle，注入时序更脆弱）
+      function rawInvoke(cmd, args) {
+        const g = window.__TAURI__;
+        if (g && g.core && typeof g.core.invoke === "function") {
+          return g.core.invoke(cmd, args);
+        }
+        const it = window.__TAURI_INTERNALS__;
+        if (it && typeof it.invoke === "function") {
+          return it.invoke(cmd, args);
+        }
+        return Promise.reject(new Error("Tauri IPC 均不可用（__TAURI__ 与 __TAURI_INTERNALS__ 皆缺失）"));
+      }
+      async function rawListen(event, handler) {
+        const g = window.__TAURI__;
+        if (g && g.event && typeof g.event.listen === "function") {
+          return g.event.listen(event, handler);
+        }
+        return null; // 事件通道不可用时仅依赖轮询（下方兜底）
+      }
+
+      const statusEl = document.getElementById("status");
+      const spinnerEl = document.getElementById("spinner");
+      const errorEl = document.getElementById("error");
+      const actionsEl = document.getElementById("actions");
+      const hintEl = document.getElementById("hint");
+
+      // 引擎启动挂起排查（2026-10-30 悬案）：starting 持续超 40s（远超正常秒级启动）
+      // 时展示「文稿文件夹权限」指引——open/Finder 启动的壳首次访问 ~/Documents
+      // 会触发 TCC 弹窗，弹窗待决期间文件访问被阻塞（终端直启不受影响）。
+      let startingSince = null;
+      window.setInterval(() => {
+        if (startingSince !== null && Date.now() - startingSince > 40000) {
+          hintEl.style.display = "block";
+        }
+      }, 1000);
+
+      const STATE_TEXT = {
+        stopped: "引擎未运行",
+        starting: "正在启动本地引擎…",
+        ready: "引擎就绪，正在进入工作区…",
+        crashed: "引擎异常退出，正在自动重启…",
+        failed: "引擎启动失败",
+      };
+
+      function setError(msg) {
+        errorEl.textContent = msg;
+        errorEl.style.display = "block";
+        actionsEl.style.display = "block";
+        spinnerEl.classList.add("hidden");
+      }
+
+      function clearError() {
+        errorEl.style.display = "none";
+        actionsEl.style.display = "none";
+        spinnerEl.classList.remove("hidden");
+      }
+
+      let jumped = false;
+      async function handleState(s) {
+        statusEl.textContent = STATE_TEXT[s.state] ?? s.state;
+        diag("poll: state=" + s.state + " port=" + s.port);
+        if (s.state === "starting") {
+          if (startingSince === null) startingSince = Date.now();
+        } else {
+          startingSince = null;
+          hintEl.style.display = "none";
+        }
+        if (s.state === "ready" && s.port && !jumped) {
+          // 就绪即跳转：登录由引擎页上的初始化脚本（engine_credentials）完成
+          jumped = true;
+          clearError();
+          diag("navigating -> http://127.0.0.1:" + s.port + "/");
+          window.location.replace("http://127.0.0.1:" + s.port + "/");
+        } else if (s.state === "failed") {
+          let tail = "";
+          try {
+            tail = await rawInvoke("engine_log_tail");
+          } catch {
+            /* 日志读取失败不掩盖主错误 */
+          }
+          setError(
+            "引擎启动失败。请确认已安装 Node ≥ 22 且引擎入口可执行。\n\n最近日志：\n" + tail
+          );
+        } else {
+          clearError();
+        }
+      }
+
+      // 环境自检（一次性）：注入通道存在性写进壳日志
+      diag(
+        "env: __TAURI__=" + String(typeof window.__TAURI__) +
+        " __TAURI_INTERNALS__=" + String(typeof window.__TAURI_INTERNALS__) +
+        " __DEEPCODE_DESKTOP__=" + String(typeof window.__DEEPCODE_DESKTOP__) +
+        " href=" + String(window.location.href)
+      );
+
+      // 首帧快照 + 事件推送 + 轮询兜底（三通道确保不漏状态）
+      rawInvoke("engine_status").then(handleState).catch((e) => diag("首次 engine_status 失败: " + (e && e.message)));
+      rawListen("engine-status", (ev) => handleState(ev.payload));
+      rawListen("engine-start-error", (ev) => {
+        statusEl.textContent = STATE_TEXT.failed;
+        setError(String(ev.payload));
+      });
+      window.setInterval(async () => {
+        try {
+          handleState(await rawInvoke("engine_status"));
+        } catch (e) {
+          diag("轮询 engine_status 失败: " + (e && e.message));
+          /* IPC 未就绪：下一轮重试 */
+        }
+      }, 1000);
+
+      // 重启引擎：优雅停止当前实例后重新拉起（含健康检查）
+      document.getElementById("restart").addEventListener("click", async () => {
+        clearError();
+        statusEl.textContent = "正在重启本地引擎…";
+        try {
+          handleState(await rawInvoke("engine_restart"));
+        } catch (e) {
+          setError("重启失败：" + (e && e.message ? e.message : e));
+        }
+      });
+
+      // 打开日志：macOS 在 Finder 中定位日志文件（FR-1.6）
+      document.getElementById("open-logs").addEventListener("click", () => {
+        rawInvoke("engine_open_logs").catch(() => {});
+      });
+    </script>
+  </body>
+</html>

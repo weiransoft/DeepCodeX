@@ -129,6 +129,25 @@ export default tseslint.config(
       },
     },
   },
+  // CommonJS 脚本：Node.js 环境 + CJS 全局
+  // 2026-11-01：desktop/scripts/gen-icon.cjs 等 .cjs 脚本用 require / __dirname，
+  // 此前无对应配置块，被按 ESM 检查而报 6 个 no-undef（pre-commit 直接拦住提交）。
+  // 注意 sourceType 必须是 commonjs，否则 require 会被当成未声明标识符。
+  {
+    files: ["**/*.cjs"],
+    languageOptions: {
+      sourceType: "commonjs",
+      globals: {
+        require: "readonly",
+        module: "readonly",
+        exports: "readonly",
+        __dirname: "readonly",
+        __filename: "readonly",
+        process: "readonly",
+        console: "readonly",
+      },
+    },
+  },
   // Statusline plugins: Node.js environment
   {
     files: [".deepcode/plugins/**/*.mjs", ".deepcode/plugins/**/*.js"],

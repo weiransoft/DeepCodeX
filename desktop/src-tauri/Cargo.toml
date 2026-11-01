@@ -1,0 +1,53 @@
+[package]
+name = "deepcode-desktop"
+version = "0.1.0"
+description = "DeepCode Desktop —— 包装 deepcode web 引擎的跨平台桌面壳（macOS/Windows）"
+edition = "2021"
+rust-version = "1.90"
+
+[lib]
+name = "deepcode_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# tray-icon feature：系统托盘（FR-1.5）；macos-private-api：titleBarStyle Overlay 需要
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
+# 本地 SQLite 密钥库（2026-10-30 起替代系统钥匙串：免 GUI 授权框）。
+# bundled：静态编译 SQLite，免系统依赖（Windows 交叉验证/打包同样零依赖）
+rusqlite = { version = "0.32", features = ["bundled"] }
+# 仅保留用于一次性迁移（钥匙串旧条目 → SQLite，见 secrets::store::migrate_keychain_to_sqlite）
+keyring = { version = "4", features = ["apple-native-keyring-store", "windows-native-keyring-store"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# JWT secret / 会话口令随机生成
+rand = "0.9"
+# 日志（FR-1.6 引擎/壳日志落盘，stderr 同步输出便于 dev 排查）
+log = "0.4"
+env_logger = "0.11"
+# 错误类型收敛
+thiserror = "2"
+
+[target.'cfg(unix)'.dependencies]
+# 进程组信号（setsid + killpg，SIGTERM/SIGKILL 优雅关闭）
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Windows Job Object：保证引擎子进程树随壳退出回收（对齐 macOS killpg 语义）。
+# M1 于 macOS 开发，该路径保证代码正确性、运行时验证在 Windows 机器上进行
+windows-sys = { version = "0.60", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
