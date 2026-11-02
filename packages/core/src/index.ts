@@ -1360,3 +1360,13 @@ export {
   isKnownGroup,
 } from "./agents/role-bridge.js";
 export type { AgentSkillLike, BuildRolesOptions } from "./agents/role-bridge.js";
+
+// 工具能力执行器契约（L1-1，2026-11-02）
+export type { DispatchRunner, DispatchRunnerContext, DispatchRunnerResult } from "./team/team-adapter.js";
+export { resolveDomainExpertInjection } from "./team/team-adapter.js";
+export type { DomainExpertInjection } from "./team/team-adapter.js";
+
+// 领域专家子系统（L1-2，2026-11-02）：此前 841 行匹配器 + 489 行注册表零引用且未导出
+export { DomainExpertRegistry } from "./team/domain-expert-registry.js";
+export { DomainExpertMatcher } from "./team/domain-expert-matcher.js";
+export { registerAllExperts, EXPECTED_TOTAL_EXPERTS, ALL_DOMAIN_CATEGORIES } from "./team/domain-experts/index.js";

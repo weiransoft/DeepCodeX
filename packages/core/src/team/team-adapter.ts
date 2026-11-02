@@ -8,8 +8,12 @@
  * 集成点：
  *   1. Settings：team.enabled / team.matchStrategy 等从 settings.json 读取
  *   2. Session：注入角色 system prompt 到 LLM 调用
- *   3. Tools：dispatcher 调度后调用 ToolExecutor 执行实际工具
- *   4. Prompt：getSystemPrompt 增强为多角色版
+ *   3. Tools：**由宿主通过 `DispatchOptions.runner` 注入带工具轮次的执行器**
+ *      （2026-11-02 L1-1 修正：原注释声称「dispatcher 调度后调用 ToolExecutor 执行实际工具」，
+ *       但本文件从未引用过 ToolExecutor——team 模块也没有执行工具的能力。
+ *       现改为真实的反向注入契约：不注入 runner 时仍是单次 LLM 调用，注入后拥有完整工具轮次。
+ *       该修正是「注释与实现一致性」要求的一部分，见方案 §6.1 验收 C4。）
+ *   4. Prompt：getSystemPrompt 增强为多角色版，并可按阈值追加领域专家段（L1-2）
  */
 
 import { z } from "zod";
@@ -32,17 +36,16 @@ import { logApiError } from "../common/error-logger.js";
 import { getLlmErrorDetails } from "../common/llm-error.js";
 import type { ReasoningEffort } from "../settings.js";
 import { matchRoles, matchRolesSync, type MatchOptions } from "./role-matcher.js";
-import { ROLE_MAP, getRole, ROLE_REGISTRY } from "./role-registry.js";
-import type {
-  DispatchResult,
-  DispatchStatus,
-  MatchResult,
-  RoleDefinition,
-  RoleId,
-  TaskRequirement,
-  TeamConfig,
-} from "./types.js";
-import { TeamConfig as TeamConfigSchema } from "./types.js";
+import { ROLE_MAP, getRole, ROLE_REGISTRY, listRoleIds } from "./role-registry.js";
+// L1-2（2026-11-02）：领域专家子系统接入 dispatch（此前 841 行匹配器 + 489 行注册表为死代码）
+import { DomainExpertMatcher } from "./domain-expert-matcher.js";
+import { DomainExpertRegistry } from "./domain-expert-registry.js";
+import { registerAllExperts } from "./domain-experts/index.js";
+// L1-3（2026-11-02）：dispatch 事件日志（append-only，可审计重建）
+import { DispatchEventLog, generateDispatchRunId } from "./dispatch-event-log.js";
+import type { DispatchResult, DispatchStatus, MatchResult, TaskRequirement, TeamConfig } from "./types.js";
+// RoleDefinition 需要同时作为类型与 zod schema 使用（DispatchOptions.candidates 校验）
+import { RoleDefinition, TeamConfig as TeamConfigSchema } from "./types.js";
 
 // ============================================================================
 // 第一部分：配置加载
@@ -164,8 +167,210 @@ export const DispatchOptions = z.object({
    * 用途：企业应用代码生成等长输出场景，避免因 maxTokens 限制导致代码截断
    */
   maxContinueCount: z.number().int().min(0).max(10).optional(),
+  /**
+   * 角色候选集（L0-2，2026-11-02）
+   *
+   * 未传 → 仅 5 个内置角色（行为与改动前一致）。
+   * 传入 → 该数组即全部候选，调用方负责合并内置角色与运行时角色
+   * （`buildRolesFromAgents()` 产出预置专家 / 自建智能体对应的角色定义）。
+   */
+  candidates: z.array(RoleDefinition).optional(),
+  /**
+   * 工具能力执行器（L1-1，2026-11-02）
+   *
+   * 反向依赖注入：`team/` 不能 import `session/`（会成环），因此由宿主（core 会话层 /
+   * CLI / Web）把"带工具轮次的执行体"以回调注入。运行时用 `typeof === "function"` 校验
+   * （zod 无法校验函数）。
+   *
+   * 语义：
+   * - 未传 → 沿用单次 LLM 调用（无工具，返回设计建议文本），与改动前完全一致
+   * - 传入 → 阶段 3 改为委托 runner 执行，dispatch 具备文件读写 / 命令执行能力
+   */
+  runner: z.unknown().optional(),
+  /** runner 模式下允许的最大工具轮次（默认 8，与主对话轮次护栏量级一致） */
+  maxToolRounds: z.number().int().positive().max(50).default(8),
+  /**
+   * 领域专家注入配置（L1-2，2026-11-02）
+   *
+   * - enabled：默认 true；关闭则完全不触达专家子系统（一键回滚）
+   * - minScore：匹配置信度阈值，低于阈值不注入（默认 0.6）
+   * - maxExperts：单次最多注入专家数（默认 1，控制 prompt 膨胀与 prompt caching 影响）
+   */
+  expertInjection: z
+    .object({
+      enabled: z.boolean().default(true),
+      minScore: z.number().min(0).max(1).default(0.6),
+      maxExperts: z.number().int().positive().max(3).default(1),
+    })
+    .default({ enabled: true, minScore: 0.6, maxExperts: 1 }),
+  /**
+   * 事件日志（L1-3，2026-11-02）
+   *
+   * - 未传 → 默认开启，写 `<projectRoot>/.deepcode/team-runs/<runId>/events.jsonl`
+   * - `false` → 显式关闭（测试与 CLI 轻量路径）
+   * - `{ dir }` → 自定义落盘目录（多项目共享一个审计目录等场景）
+   */
+  eventLog: z.union([z.boolean(), z.object({ dir: z.string().optional() })]).optional(),
 });
 export type DispatchOptions = z.infer<typeof DispatchOptions>;
+
+/**
+ * 工具能力执行器上下文（L1-1）
+ *
+ * 契约要点：
+ * - `requireApproval` 为字面量 `true`：把「关掉审批」这件事变成**编译期不可表达**，
+ *   避免后续维护者用 `false` 绕过（方案 §6.1 / 共识 C-06）。
+ * - `maxToolRounds` 是上限而非目标：runner 达到上限应以 `endReason: "max-rounds"` 结束，
+ *   不允许静默继续。
+ */
+export interface DispatchRunnerContext {
+  readonly roleId: string;
+  readonly roleName: string;
+  /** 已拼装好的角色 system prompt（含 Karpathy 四原则 + 领域专家段） */
+  readonly systemPrompt: string;
+  /** 任务描述（用户可读原文） */
+  readonly task: string;
+  /** 项目根目录（工具执行 cwd） */
+  readonly projectRoot: string;
+  /** 工具轮次上限 */
+  readonly maxToolRounds: number;
+  /** 审批强制开启（字面量类型，编译期不可关闭） */
+  readonly requireApproval: true;
+}
+
+/** 工具能力执行器返回值 */
+export interface DispatchRunnerResult {
+  /** 最终文本产出 */
+  text: string;
+  /** 实际发生的工具调用（供审计与用户可见证据） */
+  toolCalls: Array<{ tool: string; ok: boolean }>;
+  /** 实际消耗的轮次 */
+  rounds: number;
+  endReason: "completed" | "max-rounds" | "aborted" | "error";
+  /** endReason 非 completed 时的原因说明 */
+  error?: string;
+}
+
+/** 工具能力执行器（由宿主注入，team 模块不反向依赖 session 层） */
+export type DispatchRunner = (context: DispatchRunnerContext) => Promise<DispatchRunnerResult>;
+
+/** 判断注入值是否为合法 runner（zod 无法校验函数，运行时守卫） */
+function isDispatchRunner(value: unknown): value is DispatchRunner {
+  return typeof value === "function";
+}
+
+// ============================================================================
+// 领域专家注入（L1-2，2026-11-02）
+// ============================================================================
+
+/**
+ * 领域专家注册中心单例（惰性构造）
+ *
+ * 为什么缓存：`registerAllExperts()` 会注册 30 位专家并做三道命名冲突校验，
+ * 每次 dispatch 重建属纯浪费；注册表内容来自编译期常量，进程内不会变化。
+ * 与 `run-state` 等有状态的运行时对象不同，这里没有陈旧数据风险。
+ */
+let domainExpertRegistryPromise: Promise<DomainExpertRegistry> | null = null;
+
+async function getDomainExpertRegistry(): Promise<DomainExpertRegistry> {
+  domainExpertRegistryPromise ??= (async () => {
+    // 2026-11-02（L1-2 接线）：**刻意不传 `roleRegistry`**。
+    //
+    // v1.1 P1-7 的跨系统冲突校验假设「expertId 去掉 domain- 前缀后不得等于任一 RoleId」，
+    // 但本仓库自带的数据里这属于**合法并行**：`domain-product-manager` ↔ 内置角色
+    // `product-manager`、`domain-architect` ↔ `architect`…… 5 个核心角色都各有对应专家。
+    // 传进去会让 `registerAllExperts()` 在第一个类别（product）就抛
+    // `DomainExpertRoleIdCollisionError`；而 `resolveDomainExpertInjection` 的
+    // catch 会把异常降级成 "不注入"，于是整个 L1-2 静默失效——功能写着、测着、永不生效。
+    //
+    // 因此这里只保留"专家自身"的两道校验（expertId regex + 重复注册）。
+    // 该校验能力仍对需要它的调用方开放（`new DomainExpertRegistry({ listRoleIds })`）。
+    const registry = new DomainExpertRegistry();
+    await registerAllExperts(registry);
+    return registry;
+  })();
+  return domainExpertRegistryPromise;
+}
+
+/**
+ * 注入失败只告警一次的进程级标记
+ *
+ * 注册链是编译期常量 → 失败必为系统性失败（配置/数据问题），值得告警；
+ * 但 dispatch 会频繁调用，逐次打印会淹没日志，因此仅在首次失败时提示。
+ */
+let domainExpertInjectionWarned = false;
+
+/** 领域专家注入结果（null 表示未命中或已关闭） */
+export interface DomainExpertInjection {
+  expertId: string;
+  name: string;
+  specialty: string;
+  confidence: number;
+  /** 追加到 system prompt 末尾的段落 */
+  section: string;
+}
+
+/**
+ * 按任务匹配领域专家并生成 prompt 段落
+ *
+ * 门禁（方案 §6.2，共识 C-05）：
+ * - `expertInjection.enabled === false` → 完全不触达专家子系统（一键回滚）
+ * - 置信度 < `minScore`（默认 0.6）→ 不注入，保持原行为
+ * - 一次最多注入 `maxExperts`（默认 1）位 → 控制 prompt 膨胀与 prompt caching 影响
+ *
+ * 失败降级：注册/匹配过程任何异常都只返回 null（专家注入是增强项，不能成为 dispatch 的新故障点）。
+ */
+export async function resolveDomainExpertInjection(
+  task: TaskRequirement,
+  options: Pick<DispatchOptions, "expertInjection">
+): Promise<DomainExpertInjection | null> {
+  const config = options.expertInjection;
+  if (!config.enabled) return null;
+  try {
+    const registry = await getDomainExpertRegistry();
+    const matcher = new DomainExpertMatcher(registry);
+    const matches = await matcher.matchExperts(task, {
+      strategy: "keyword",
+      topK: config.maxExperts,
+    });
+    const best = matches[0];
+    if (!best || best.confidence < config.minScore) return null;
+
+    const expert = best.expert;
+    const section = [
+      "",
+      "## 领域专家视角（自动注入）",
+      `- 专家：${expert.name}（${expert.nameEn}）`,
+      `- 专长：${expert.specialty}`,
+      `- 匹配度：${(best.confidence * 100).toFixed(1)}%`,
+      "",
+      expert.systemPromptPrefix,
+      expert.systemPromptSuffix,
+    ]
+      .filter((line) => line !== "")
+      .join("\n");
+
+    return {
+      expertId: expert.expertId,
+      name: expert.name,
+      specialty: expert.specialty,
+      confidence: best.confidence,
+      section,
+    };
+  } catch (error) {
+    // 专家子系统是关键路径之外的增强项：任何异常都降级为"不注入"。
+    //
+    // 但**只告警一次**：上面的注册链是编译期常量，一旦失败就是系统性失败
+    // （例如命名冲突守卫误伤），如果彻底静音，"功能永远不生效"会被当成"没有相关任务"，
+    // 排查成本极高。这里用进程级一次性标记避免刷屏，又不掩盖事实。
+    if (!domainExpertInjectionWarned) {
+      domainExpertInjectionWarned = true;
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error(`[team] 领域专家注入已停用（后续不再重复提示）：${detail}`);
+    }
+    return null;
+  }
+}
 
 /**
  * 调度返回结果（含匹配信息和派生的 system prompt）
@@ -211,16 +416,19 @@ export async function dispatchToRole(
 ): Promise<TeamDispatchResult> {
   const opts = DispatchOptions.parse(options ?? {});
   const teamConfig = loadTeamConfig(opts.projectRoot);
+  // L0-2：候选集（内置 5 角色 + 调用方注入的运行时角色）
+  const pool: ReadonlyArray<RoleDefinition> = opts.candidates ?? ROLE_REGISTRY;
 
   // 如果 team 未启用 → 使用 solo-coder 默认
   if (!teamConfig.enabled) {
     const defaultTask: TaskRequirement =
       "title" in task && "requiredCapabilities" in task ? (task as TaskRequirement) : buildTask(task);
+    const defaultRole = pool.find((r) => r.roleId === teamConfig.defaultRole) ?? getRole(teamConfig.defaultRole);
     return {
       task: defaultTask,
       matches: [],
-      recommendedRole: getRole(teamConfig.defaultRole),
-      recommendedSystemPrompt: getRole(teamConfig.defaultRole).systemPromptPrefix,
+      recommendedRole: defaultRole,
+      recommendedSystemPrompt: defaultRole.systemPromptPrefix,
       aiEnhanced: false,
       teamConfig,
       dispatchId: crypto.randomUUID(),
@@ -239,13 +447,15 @@ export async function dispatchToRole(
     topK: opts.configOverride?.topK ?? teamConfig.topK,
     aiFallbackThreshold: opts.configOverride?.aiFallbackThreshold ?? teamConfig.aiFallbackThreshold,
     projectRoot: opts.projectRoot,
+    // L0-2：把候选集下传匹配器（未注入时 undefined，行为与改动前一致）
+    ...(opts.candidates ? { candidates: opts.candidates } : {}),
   };
 
   let matches: ReadonlyArray<MatchResult>;
   let aiEnhanced = false;
   if (opts.forceRole) {
-    // 强制角色模式
-    const role = ROLE_MAP.get(opts.forceRole.roleId as RoleId);
+    // 强制角色模式：先查候选集（含运行时角色），再回退内置角色表
+    const role = pool.find((r) => r.roleId === opts.forceRole!.roleId) ?? ROLE_MAP.get(opts.forceRole.roleId);
     if (!role) {
       throw new Error(`强制角色不存在: ${opts.forceRole.roleId}`);
     }
@@ -278,7 +488,7 @@ export async function dispatchToRole(
   }
 
   const top = matches[0]!;
-  const recommendedRole = getRole(top.roleId);
+  const recommendedRole = pool.find((r) => r.roleId === top.roleId) ?? getRole(top.roleId);
   const recommendedSystemPrompt = composeSystemPrompt(recommendedRole, fullTask, opts.projectRoot);
 
   return {
@@ -556,6 +766,40 @@ export async function executeDispatch(
   // 解析 options（zod 校验 + 默认值）
   const opts = DispatchOptions.parse(options);
 
+  // ==========================================================================
+  // L1-3：事件日志（append-only，可审计重建）
+  // ==========================================================================
+  // 默认开启（写 <projectRoot>/.deepcode/team-runs/<runId>/events.jsonl）；
+  // eventLog=false 显式关闭（测试 / CLI 轻量路径）。
+  // 日志设施任何异常都降级为"无日志"，绝不影响 dispatch 本身。
+  const runId = generateDispatchRunId();
+  let eventLog: DispatchEventLog | null = null;
+  if (opts.eventLog !== false) {
+    try {
+      const customDir = typeof opts.eventLog === "object" ? opts.eventLog.dir : undefined;
+      eventLog = new DispatchEventLog(runId, customDir ?? DispatchEventLog.defaultDir(opts.projectRoot, runId));
+      eventLog.open();
+      eventLog.append("dispatch/start", {
+        taskId: task.taskId,
+        title: task.title,
+        forceRole: opts.forceRole?.roleId ?? null,
+        candidates: opts.candidates?.length ?? 0,
+        runner: isDispatchRunner(opts.runner),
+      });
+    } catch {
+      eventLog = null;
+    }
+  }
+  /** 写终态并返回结果（保证每条返回路径都闭合事件流） */
+  const finish = (result: DispatchResult, reason: "completed" | "aborted" | "error" | "max-rounds"): DispatchResult => {
+    try {
+      eventLog?.end(reason, { status: result.status, outputLength: result.output?.length ?? 0 });
+    } catch {
+      // 终态写入失败不影响返回
+    }
+    return result;
+  };
+
   try {
     // ========================================================================
     // 阶段 1：角色调度（匹配角色 + 构造 system prompt）
@@ -578,6 +822,99 @@ export async function executeDispatch(
       "running",
       `已匹配角色: ${teamResult.recommendedRole.name} (${((matchedRole.confidence ?? 0) * 100) | 0}%)`
     );
+
+    try {
+      eventLog?.append("dispatch/match", {
+        roleId: matchedRole.roleId,
+        roleName: matchedRole.roleName,
+        confidence: matchedRole.confidence ?? 0,
+        strategy: matchedRole.strategy,
+        reasons: matchedRole.reasons.slice(0, 3),
+      });
+    } catch {
+      // 日志失败不影响主链路
+    }
+
+    // ========================================================================
+    // 阶段 1.5：领域专家注入（L1-2）
+    // ========================================================================
+    // 阈值以下不注入，保持与改动前完全一致的行为；命中时把专家段落追加到 system prompt。
+    const expertInjection = await resolveDomainExpertInjection(task, opts);
+    if (expertInjection) {
+      onProgress?.(
+        "running",
+        `注入领域专家: ${expertInjection.name}（${(expertInjection.confidence * 100).toFixed(1)}%）`
+      );
+      try {
+        eventLog?.append("dispatch/expert", {
+          expertId: expertInjection.expertId,
+          name: expertInjection.name,
+          confidence: expertInjection.confidence,
+        });
+      } catch {
+        // 日志失败不影响主链路
+      }
+    }
+    const systemPrompt = expertInjection
+      ? `${teamResult.recommendedSystemPrompt}\n\n${expertInjection.section}`
+      : teamResult.recommendedSystemPrompt;
+
+    // ========================================================================
+    // 阶段 2-α：宿主执行器委托（L1-1）
+    // ========================================================================
+    // 注入 runner 时：dispatch 拥有与主对话一致的完整工具轮次（文件读写 / 命令执行 /
+    // 审批 / 护栏 / token 预算 / thinking），这是 G3「dispatch 能真正改代码」的实现路径。
+    // 未注入时保持单次 LLM 调用（返回设计建议文本），CLI 独立子命令与既有测试零回归。
+    if (isDispatchRunner(opts.runner)) {
+      onProgress?.("running", `委托宿主执行器执行（工具轮次上限 ${opts.maxToolRounds}）...`);
+      try {
+        eventLog?.append("dispatch/llm-call", { delegated: true, maxToolRounds: opts.maxToolRounds });
+      } catch {
+        // 日志失败不影响主链路
+      }
+      const runResult = await opts.runner({
+        roleId: matchedRole.roleId,
+        roleName: matchedRole.roleName,
+        systemPrompt,
+        task: task.description,
+        projectRoot: opts.projectRoot,
+        maxToolRounds: opts.maxToolRounds,
+        requireApproval: true,
+      });
+      try {
+        for (const call of runResult.toolCalls) {
+          eventLog?.append("dispatch/tool-result", { tool: call.tool, ok: call.ok });
+        }
+      } catch {
+        // 日志失败不影响主链路
+      }
+      const status: DispatchStatus =
+        runResult.endReason === "completed" ? "succeeded" : runResult.endReason === "aborted" ? "cancelled" : "failed";
+      onProgress?.(
+        runResult.endReason === "completed" ? "succeeded" : status,
+        `执行器结束：${runResult.endReason}（${runResult.rounds} 轮，${runResult.toolCalls.length} 次工具调用）`
+      );
+      return finish(
+        {
+          taskId: task.taskId,
+          dispatchId,
+          matchedRole,
+          status,
+          startedAt,
+          completedAt: new Date().toISOString(),
+          durationMs: Date.now() - new Date(startedAt).getTime(),
+          output: runResult.text,
+          artifacts: [],
+          tokensConsumed: { prompt: 0, completion: 0, total: 0 },
+          cacheHit: false,
+          retryCount: 0,
+          continueCount: 0,
+          isPartial: runResult.endReason === "max-rounds",
+          error: runResult.error,
+        },
+        runResult.endReason === "completed" ? "completed" : runResult.endReason
+      );
+    }
 
     // ========================================================================
     // 阶段 2：准备 LLM 客户端（injectedClient 优先 → createOpenAIClient 兜底）
@@ -612,7 +949,7 @@ export async function executeDispatch(
           error: "注入的 LLM 客户端不可用（不符合 OpenAIClientHandle 接口），跳过 LLM 调用",
         };
         onProgress?.("skipped", "注入的 LLM 客户端不可用，跳过 LLM 调用");
-        return skipResult;
+        return finish(skipResult, "aborted");
       }
       clientHandle = opts.injectedClient;
     } else {
@@ -640,7 +977,7 @@ export async function executeDispatch(
           error: "API Key 不可用，跳过 LLM 调用",
         };
         onProgress?.("skipped", "API Key 不可用，跳过 LLM 调用");
-        return skipResult;
+        return finish(skipResult, "aborted");
       }
       clientHandle = {
         client: created.client,
@@ -673,9 +1010,13 @@ export async function executeDispatch(
 
     onProgress?.("running", `调用 LLM: ${handle.model}...`);
 
-    // 构造 messages：system prompt + user prompt
-    const systemPrompt = teamResult.recommendedSystemPrompt;
+    // 构造 messages：system prompt（含专家段，见阶段 1.5）+ user prompt
     const userPrompt = buildUserPromptFromTask(task);
+    try {
+      eventLog?.append("dispatch/llm-call", { delegated: false, model: handle.model });
+    } catch {
+      // 日志失败不影响主链路
+    }
 
     // thinking 参数（v1.6 P1-1：与 session.ts 主对话流程保持一致）
     // v2.1.3：thinkingOptions 在 callLlmOnce 中复用，保持首次调用和续写调用的 thinking 模式一致
@@ -1052,55 +1393,61 @@ export async function executeDispatch(
       : `LLM 调用完成（续写 ${continueCount} 次），消耗 ${totalUsage.total} tokens`;
     onProgress?.("succeeded", successMsg);
 
-    return {
-      taskId: task.taskId,
-      dispatchId,
-      matchedRole,
-      status: "succeeded",
-      startedAt,
-      completedAt: new Date().toISOString(),
-      durationMs: Date.now() - new Date(startedAt).getTime(),
-      output: fullContent,
-      artifacts: [],
-      tokensConsumed: totalUsage,
-      cacheHit: false,
-      retryCount: 0,
-      continueCount,
-      isPartial,
-      error: partialError,
-    };
+    return finish(
+      {
+        taskId: task.taskId,
+        dispatchId,
+        matchedRole,
+        status: "succeeded",
+        startedAt,
+        completedAt: new Date().toISOString(),
+        durationMs: Date.now() - new Date(startedAt).getTime(),
+        output: fullContent,
+        artifacts: [],
+        tokensConsumed: totalUsage,
+        cacheHit: false,
+        retryCount: 0,
+        continueCount,
+        isPartial,
+        error: partialError,
+      },
+      "completed"
+    );
   } catch (err) {
     // 错误处理：errMsg 而非 errorMsg
     // v1.6 P0-2 修正（LL-003 / LL-007 / LL-008）：error 消息前缀改为 "LLM 调用失败"
     // 原因：测试期望 error 含 "LLM 调用失败" 关键字（涵盖 AbortError / TypeError / 其他异常）
     const errMsg = err instanceof Error ? err.message : String(err);
-    return {
-      taskId: task.taskId,
-      dispatchId,
-      matchedRole: {
-        roleId: "solo-coder",
-        roleName: "独立开发者",
-        confidence: 0,
-        matchedCapabilities: [],
-        matchedSkills: [],
-        missingCapabilities: [],
-        reasons: [errMsg],
-        scoreBreakdown: { capability: 0, skill: 0, keyword: 0, priority: 0 },
-        strategy: "keyword",
+    return finish(
+      {
+        taskId: task.taskId,
+        dispatchId,
+        matchedRole: {
+          roleId: "solo-coder",
+          roleName: "独立开发者",
+          confidence: 0,
+          matchedCapabilities: [],
+          matchedSkills: [],
+          missingCapabilities: [],
+          reasons: [errMsg],
+          scoreBreakdown: { capability: 0, skill: 0, keyword: 0, priority: 0 },
+          strategy: "keyword",
+        },
+        status: "failed",
+        startedAt,
+        completedAt: new Date().toISOString(),
+        durationMs: Date.now() - new Date(startedAt).getTime(),
+        error: `LLM 调用失败: ${errMsg}`,
+        artifacts: [],
+        tokensConsumed: { prompt: 0, completion: 0, total: 0 },
+        cacheHit: false,
+        retryCount: 0,
+        // v2.1.3 新增字段：异常路径下未触发续写
+        continueCount: 0,
+        isPartial: false,
       },
-      status: "failed",
-      startedAt,
-      completedAt: new Date().toISOString(),
-      durationMs: Date.now() - new Date(startedAt).getTime(),
-      error: `LLM 调用失败: ${errMsg}`,
-      artifacts: [],
-      tokensConsumed: { prompt: 0, completion: 0, total: 0 },
-      cacheHit: false,
-      retryCount: 0,
-      // v2.1.3 新增字段：异常路径下未触发续写
-      continueCount: 0,
-      isPartial: false,
-    };
+      "error"
+    );
   }
 }
 
@@ -1119,7 +1466,7 @@ export function listAllRoles(): ReadonlyArray<RoleDefinition> {
  * 根据 roleId 获取角色定义（CLI 子命令用）
  */
 export function getRoleById(roleId: string): RoleDefinition | null {
-  return ROLE_MAP.get(roleId as RoleId) ?? null;
+  return ROLE_MAP.get(roleId) ?? null;
 }
 
 /**
