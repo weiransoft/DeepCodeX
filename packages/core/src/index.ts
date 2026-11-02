@@ -1347,3 +1347,16 @@ export {
   summarizeDispatchEvents,
 } from "./team/dispatch-event-log.js";
 export type { DispatchEvent, DispatchEventType, DispatchEndReason } from "./team/dispatch-event-log.js";
+
+// 智能体 → team 角色桥接（L0-2，2026-11-02）
+// 让 `~/.deepcode/skills` 下的 `type: agent` 智能体成为 `/team match|dispatch` 的候选，
+// 终结「35 个智能体 vs /team 只认 5 个硬编码角色」的双轨制。
+export {
+  buildRolesFromAgents,
+  mergeRoleCandidates,
+  resolveRuntimeRoleOptions,
+  getGroupKeywords,
+  getGroupLabel,
+  isKnownGroup,
+} from "./agents/role-bridge.js";
+export type { AgentSkillLike, BuildRolesOptions } from "./agents/role-bridge.js";
