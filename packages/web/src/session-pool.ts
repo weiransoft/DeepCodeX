@@ -44,6 +44,7 @@ import {
   extractSuggestedCommandText,
   extractSuggestedCommandAndGoal,
   buildAutoExecuteCommand,
+  buildTeamCommandDescriptors,
   getProjectCode,
   resolveCurrentSettings,
   type AskPermissionRequest,
@@ -410,41 +411,13 @@ export class SessionPool {
    */
   private buildWebDynamicCommandDescriptors(): ReadonlyArray<DynamicCommandDescriptor> {
     return Object.freeze([
-      // —— team 子命令（对齐 CLI ui/core/dynamic-commands.ts 的 TEAM_COMMAND_DESCRIPTORS）——
-      Object.freeze({
-        category: "team" as const,
-        id: "team-list",
-        name: "/team list",
-        description: "列出所有可用角色（架构师/产品经理/测试专家/独立开发者/UI设计师）。",
-      }),
-      Object.freeze({
-        category: "team" as const,
-        id: "team-match",
-        name: "/team match",
-        description: "根据关键词匹配最合适的角色，输出置信度和匹配理由。",
-        args: ["--keywords <kw1,kw2,...>"],
-      }),
-      Object.freeze({
-        category: "team" as const,
-        id: "team-dispatch",
-        name: "/team dispatch",
-        description: "分派任务到指定角色（自动匹配或 --role 强制指定）。适合单角色任务。",
-        args: ["--task <任务描述>"],
-      }),
-      Object.freeze({
-        category: "team" as const,
-        id: "team-autonomous",
-        name: "/team autonomous",
-        description: "启动 Ralph 自主迭代模式（plan → dev → verify → fix 4 阶段循环）。适合需要自动迭代的多步任务。",
-        args: ["--goal <目标>"],
-      }),
-      Object.freeze({
-        category: "team" as const,
-        id: "team-full-lifecycle",
-        name: "/team full-lifecycle",
-        description: "8 阶段项目全流程（需求→架构→UI→测试设计→分解→开发→测试→文档审查）。适合新项目启动。",
-        args: ["--project <项目名>"],
-      }),
+      // —— team 子命令（2026-11-02 L0-1：改由 core 提供唯一数据源）——
+      //
+      // 改造前：这里手写 5 条与 CLI 重复的描述符，且 Web 侧**没有执行体**——
+      // 用户点选或手敲 `/team dispatch` 会被当普通文本投给模型、静默降级（审计报告 §3）。
+      // 改造后：描述符来自 `buildTeamCommandDescriptors()`，执行体来自 core 的
+      // `runTeamCommand()`（session.ts 的 team 分发分支），描述符与能力不再脱节。
+      ...buildTeamCommandDescriptors(),
       // —— rules 子命令（对齐 CLI 的 RULES_COMMAND_DESCRIPTORS）——
       Object.freeze({
         category: "rules" as const,

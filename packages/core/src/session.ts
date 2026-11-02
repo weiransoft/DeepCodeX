@@ -52,6 +52,22 @@ import type {
   ResolvedDeepcodingSettings,
 } from "./settings";
 import { resolveCurrentSettings } from "./settings";
+// 2026-11-02（L0-1/L0-2/L1-1）：/team 跨宿主执行体 + 智能体→角色桥接 + 工具能力执行器契约
+// 依赖方向：session → {commands, agents, team}，禁止反向（commands 不得 import session）
+import {
+  extractTeamSubcommandToken,
+  formatTeamHelp,
+  isTeamCommandIntent,
+  parseTeamCommandLine,
+  runTeamCommand,
+  type TeamCommandArgs,
+} from "./commands/index";
+import { buildRolesFromAgents, mergeRoleCandidates, resolveRuntimeRoleOptions } from "./agents/role-bridge";
+import { ROLE_REGISTRY } from "./team/role-registry";
+import { listRoleIds } from "./team/role-registry";
+import type { RoleDefinition } from "./team/types";
+import type { DispatchRunnerContext, DispatchRunnerResult } from "./team/team-adapter";
+import { readSettingsFile } from "./settings";
 // 上游 v0.3.1：Files API 默认值与自动 compact 窗口计算，供 filesApi / autoCompactWindow 消费
 import {
   DEFAULT_FILE_EXPIRES_AFTER_SECONDS,
@@ -480,6 +496,17 @@ export type SessionEntry = {
    * 可选字段保证旧会话文件零迁移。
    */
   autonomousGoalRuns?: AutonomousGoalRunRecord[];
+  /**
+   * 临时会话标记（2026-11-02，L1-1 dispatch 工具轮次）
+   *
+   * 语义：
+   * - `listSessions()` 过滤掉该条 → 用户在会话列表看不到（消除方案 §3.4 的「幽灵会话」）
+   * - 运行结束后由 `discardEphemeralSession()` 从索引与磁盘消息中清除
+   * - 为什么仍写入索引：`getSession` / `updateSessionEntry` 全部走索引落盘，
+   *   不入索引则状态推进（processing → completed）与工具结果收集全部失效。
+   *   因此「不污染用户可见列表」靠过滤实现，而不是靠"不写"。
+   */
+  ephemeral?: boolean;
 };
 
 export type SessionsIndex = {
@@ -604,6 +631,52 @@ export type SkillInfo = {
   /** agent 专属：分组名（frontmatter `group`，预置智能体用于按业务类别分组展示） */
   group?: string;
 };
+
+/**
+ * 临时运行选项（L1-1，2026-11-02）
+ *
+ * 与 `DispatchRunnerContext` 同构：team 侧只声明"需要什么"，会话侧负责"怎么跑"。
+ * `requireApproval: true` 是字面量类型——「关掉审批」在编译期不可表达。
+ */
+export type EphemeralRunOptions = DispatchRunnerContext;
+
+/** 临时运行结果（与 `DispatchRunnerResult` 同构） */
+export type EphemeralRunResult = DispatchRunnerResult;
+
+/**
+ * `createSession` 的内部选项（仅供 SessionManager 内部与 runEphemeral 使用）
+ *
+ * 为什么不做成公开语义：临时会话是 dispatch 的实现细节，不应污染对外 API；
+ * 而 `createSession` 是公开方法，加第 3 个可选参数向后兼容。
+ */
+export interface CreateSessionInternalOptions {
+  /**
+   * 临时会话：不写会话索引、不追加 agent 索引段、结束后从会话列表与磁盘清理
+   *
+   * 语义（方案 §3.4 修正 A-01「幽灵会话」）：
+   * - 会话索引：不写入 → 用户在会话列表看不到
+   * - `appendAgentIndexMessage`：不调用 → 避免误触发默认智能体自动激活
+   * - 执行路径：与主会话完全一致（工具轮次 / 审批 / 护栏 / thinking）
+   */
+  ephemeral?: boolean;
+  /** 角色约束 system prompt（临时运行的角色身份） */
+  roleSystemPrompt?: string;
+  /** 会话 ID 生成后、开始执行前的回调（供 runEphemeral 建立轮次预算监控） */
+  onSessionCreated?: (sessionId: string) => void;
+  /**
+   * 命令专用会话（2026-11-02 L0-3）：只建会话骨架，不驱动模型轮次
+   *
+   * 为什么需要：Web 宿主**全新聊天的第一条消息**走的是 `createSession` 而不是
+   * `replySession`（见 `handleUserPrompt` 的分支）。如果 `/team ...` 的拦截只做在
+   * `replySession` 里，用户在 Web 新建聊天后第一句就敲 `/team` 仍会被当普通文本投给
+   * 模型——正是审计报告 §3.2 说的"静默降级且看起来成功"。
+   *
+   * 语义：截断到"系统消息就绪"为止，跳过技能匹配（会发一次 LLM 请求）、agent 索引段
+   * 与 `activateSession` 主循环；用户消息由调用方（`handleTeamCommand`）追加，
+   * 与 `replySession` 路径的落盘顺序逐条一致。
+   */
+  commandOnly?: boolean;
+}
 
 /**
  * 会话管理器选项（fork + 上游 v0.3.1 融合）
@@ -3909,6 +3982,25 @@ ${agentInstructions}
         }
       }
 
+      // 2026-11-02（L0-3）：slash 命令拦截必须在这条分支**之前**。
+      //
+      // `replySession` 里另有一处同样的拦截，但只覆盖"已有活跃会话"的情形；Web 宿主
+      // 新建聊天时池里还没有 core 会话，第一条消息走 `createSession`，若无此处短路，
+      // 首句 `/team list` 仍会被当普通文本投给模型（静默降级的原样复现）。
+      // 会话不存在时先建一个 `commandOnly` 骨架（只有系统消息，不驱动模型轮次），
+      // 保证 CLI / Web 两条宿主链路在"命令执行"这件事上走的是同一份代码。
+      //
+      // 判定用 `isTeamCommandIntent` 而不是"解析成功与否"：`/team`、`/team help`、
+      // `/team ls`（手误）都要落到命令通道（回显帮助 + 明确报错），绝不能回落给模型。
+      if (typeof userPrompt.text === "string" && isTeamCommandIntent(userPrompt.text)) {
+        const teamArgs = parseTeamCommandLine(userPrompt.text);
+        const reusable = this.activeSessionId && this.getSession(this.activeSessionId) ? this.activeSessionId : null;
+        const sessionId = reusable ?? (await this.createSession(userPrompt, controller, { commandOnly: true }));
+        this.activeSessionId = sessionId;
+        await this.handleTeamCommand(sessionId, userPrompt, teamArgs, controller);
+        return;
+      }
+
       if (!this.activeSessionId || !this.getSession(this.activeSessionId)) {
         await this.createSession(userPrompt, controller);
       } else {
@@ -3925,7 +4017,11 @@ ${agentInstructions}
     }
   }
 
-  async createSession(userPrompt: UserPromptContent, controller?: AbortController): Promise<string> {
+  async createSession(
+    userPrompt: UserPromptContent,
+    controller?: AbortController,
+    internalOptions?: CreateSessionInternalOptions
+  ): Promise<string> {
     const signal = controller?.signal;
     this.throwIfAborted(signal);
     await this.createOpenAIClient.prepare?.(signal);
@@ -3939,6 +4035,12 @@ ${agentInstructions}
     // fork 侧：文件历史协调器初始化会话分支（coordinator 与上游内联方法操作同一
     // <projectDir>/file-history/.git 仓库，此处用 coordinator 版本避免重复初始化）
     this.fileHistoryCoordinator.ensureFileHistorySession(sessionId);
+
+    // 2026-11-02（L1-1）：临时会话标记 + 创建回调
+    // 回调让 runEphemeral 在「开始执行前」拿到 sessionId，从而能建立轮次预算监控
+    // （createSession 内部会直接跑完整个 turn，返回值拿到时已经太晚）。
+    const ephemeral = internalOptions?.ephemeral === true;
+    internalOptions?.onSessionCreated?.(sessionId);
 
     // V2 上下文缓存刷新（新会话场景）：
     // 在 buildSystemMessage / buildMessages 之前刷新，确保首条 system message 能命中 preBuildContext 缓存。
@@ -3977,6 +4079,8 @@ ${agentInstructions}
       updateTime: now,
       processes: null,
       planMode: Boolean(userPrompt.planMode),
+      // 临时会话（dispatch 用）：不出现在用户会话列表，运行结束后清理
+      ...(ephemeral ? { ephemeral: true } : {}),
     };
     index.entries.push(entry);
     const sortedEntries = index.entries.slice().sort((a, b) => {
@@ -4003,6 +4107,14 @@ ${agentInstructions}
     const systemPrompt = getSystemPrompt(this.projectRoot, promptToolOptions);
     const systemMessage = this.buildSystemMessage(sessionId, systemPrompt);
     this.appendSessionMessage(sessionId, systemMessage);
+
+    // 2026-11-02（L1-1）：角色约束段（临时运行专用）
+    // 位置紧跟基础 system prompt：角色身份是"我是谁"，应早于技能目录 / 运行时上下文，
+    // 避免被后续段落的通用指令稀释。visible=false：这是约束，不是对用户说的话。
+    if (internalOptions?.roleSystemPrompt) {
+      const roleMessage = this.buildSystemMessage(sessionId, internalOptions.roleSystemPrompt);
+      this.appendSessionMessage(sessionId, roleMessage);
+    }
 
     // fork 侧：默认技能提示词（getDefaultSkillPrompt，含 enabledSkills 过滤）
     const defaultSkillPrompt = getDefaultSkillPrompt({ enabledSkills: this.getResolvedSettings().enabledSkills });
@@ -4039,8 +4151,15 @@ ${agentInstructions}
       markGlobalRulesInjected(this.homeRoot);
     }
 
-    this.appendPlanModeTransitionMessages(sessionId, false, Boolean(userPrompt.planMode));
+    // 2026-11-02（L0-3）：命令专用会话在此截断——系统消息已就绪，不追加用户消息、
+    // 不做技能匹配（一次 LLM 请求）、不进主循环。用户消息与命令输出由
+    // `handleTeamCommand` 追加，与 `replySession` 路径的落盘顺序逐条一致。
+    if (internalOptions?.commandOnly === true) {
+      this.activeSessionId = sessionId;
+      return sessionId;
+    }
 
+    this.appendPlanModeTransitionMessages(sessionId, false, Boolean(userPrompt.planMode));
     // fork 侧：用户提示检查点经 coordinator 记录（与上游 this.recordUserPromptCheckpoint
     // 语义一致，统一走 coordinator 保持 fork 既有调用链）
     this.fileHistoryCoordinator.recordUserPromptCheckpoint(sessionId);
@@ -4072,11 +4191,198 @@ ${agentInstructions}
       )
     );
     // T01：追加自定义 Agent 索引段（type:agent 条目只进 agent 索引，不进 skill 目录）
-    await this.appendAgentIndexMessage(sessionId);
+    // 2026-11-02：临时会话跳过——索引段末尾会自动激活 settings.agents.default，
+    // 在 dispatch 临时会话里激活默认智能体会污染角色约束（方案 §3.4 要求不调用）
+    if (!ephemeral) {
+      await this.appendAgentIndexMessage(sessionId);
+    }
 
     this.activeSessionId = sessionId;
     await this.activateSession(sessionId, controller);
     return sessionId;
+  }
+
+  /**
+   * 作为模型工具调用的事件集合（`entry.toolCalls`）通常是 OpenAI 的 tool_calls 结构，
+   * 也可能是工具执行结果数组。这里两种形状都容忍，取不到名字就标 `unknown`，
+   * 绝不因为审计字段比预期多/少而丢整次运行。
+   */
+  private extractEphemeralToolCalls(raw: unknown[]): Array<{ tool: string; ok: boolean }> {
+    const calls: Array<{ tool: string; ok: boolean }> = [];
+    for (const item of raw) {
+      if (typeof item !== "object" || item === null) continue;
+      const record = item as Record<string, unknown>;
+      const fn = record["function"];
+      const fnName = typeof fn === "object" && fn !== null ? (fn as Record<string, unknown>)["name"] : undefined;
+      const tool =
+        (typeof fnName === "string" && fnName) ||
+        (typeof record["tool"] === "string" ? (record["tool"] as string) : "") ||
+        (typeof record["name"] === "string" ? (record["name"] as string) : "") ||
+        "unknown";
+      const ok = record["ok"] !== false && record["isError"] !== true && record["error"] == null;
+      calls.push({ tool, ok });
+    }
+    return calls;
+  }
+
+  /**
+   * 行内消息构造：**一段"用户读得懂的人话"**，用于 dispatch 过程与终态回显
+   *
+   * 为什么要单独一个 helper：dispatch 的实时播报与终态回显都需要"人话 + 结构化细节"，
+   * 且两者都要走同一条 system 消息通道（Web 复用 role:"system" 渲染）。
+   */
+  private buildEphemeralNarrative(options: EphemeralRunOptions, output: EphemeralRunResult): string {
+    const lines = [
+      `【团队模式】${options.roleName}`,
+      `任务：${options.task}`,
+      `结果：${output.endReason === "completed" ? "完成" : output.endReason === "max-rounds" ? "达到工具轮次上限" : output.endReason === "aborted" ? "已中止" : "失败"}`,
+      `工具调用：${output.toolCalls.length} 次`,
+    ];
+    if (output.error) {
+      lines.push(`原因：${output.error}`);
+    }
+    return lines.join("\n");
+  }
+
+  /**
+   * 临时运行：以指定角色身份、带完整工具轮次执行一次任务（L1-1）
+   *
+   * 与 `executeDispatch` 的老路径（单次 LLM 调用、无工具）相比，这里复用了
+   * `createSession + activateSession` 的**完整主循环**：工具执行、审批、护栏、
+   * token 预算、thinking 参数全部与主对话一致。这就是 G3「dispatch 能真正改代码」的实现。
+   *
+   * ## 为什么不新建一个"轻量执行器"
+   *
+   * 团队模块拿不到工具执行器，复制一份主循环等于把 3000 行最难维护的代码分叉两条
+   * （R3 风险最高处）。临时会话是"用一个真实的会话系统执行一次任务"，
+   * 零分叉、天然继承所有护栏。
+   *
+   * ## 轮次预算的执行方式（诚实说明）
+   *
+   * 主循环的 `TurnGuard` 在 2026-10-20 需求中**已移除轮数上限**（改为连续失败/重复调用/
+   * 空转三类护栏），没有可用的每轮上限钩子。因此这里用 200ms 轮询会话工具调用计数，
+   * 超预算即 `abort()`。选轮询而非改主循环的理由：主会话是最高回归风险区
+   * （方案 R3），而预算真实生效（abort 会中断流式请求）——这是刻意的性价比取舍。
+   *
+   * @param options 角色 prompt + 任务 + 预算（`requireApproval` 字面量 true）
+   */ async runEphemeral(options: EphemeralRunOptions): Promise<EphemeralRunResult> {
+    // 编译期已用字面量类型约束，运行时再兜一层：审批不可关闭是硬约束
+    if (options.requireApproval !== true) {
+      throw new Error("runEphemeral 强制要求 requireApproval === true（dispatch 不得关闭审批）");
+    }
+
+    const controller = new AbortController();
+    let sessionId: string | null = null;
+    let abortedByBudget = false;
+
+    const toolCallCount = (): number => {
+      if (!sessionId) return 0;
+      const entry = this.getSession(sessionId);
+      return Array.isArray(entry?.toolCalls) ? entry.toolCalls.length : 0;
+    };
+
+    const timer = setInterval(() => {
+      if (!sessionId || abortedByBudget) return;
+      if (toolCallCount() > options.maxToolRounds) {
+        abortedByBudget = true;
+        controller.abort();
+      }
+    }, 200);
+    timer.unref?.();
+
+    try {
+      sessionId = await this.createSession({ text: options.task }, controller, {
+        ephemeral: true,
+        roleSystemPrompt: options.systemPrompt,
+        onSessionCreated: (id) => {
+          sessionId = id;
+        },
+      });
+
+      const entry = this.getSession(sessionId);
+      const rawCalls = Array.isArray(entry?.toolCalls) ? entry.toolCalls : [];
+      const toolCalls = this.extractEphemeralToolCalls(rawCalls);
+      const status = entry?.status ?? "failed";
+      const text = entry?.assistantReply ?? "";
+
+      let endReason: EphemeralRunResult["endReason"];
+      let error: string | undefined;
+      if (status === "completed") {
+        endReason = "completed";
+      } else if (abortedByBudget) {
+        endReason = "max-rounds";
+        error = `工具调用轮次超过预算（${options.maxToolRounds}），已中止`;
+      } else if (status === "interrupted" || controller.signal.aborted) {
+        endReason = "aborted";
+        error = "运行被中止";
+      } else if (status === "ask_permission") {
+        endReason = "aborted";
+        error = "该任务需要人工审批，请在主对话中重试（临时运行无法接收审批交互）";
+      } else {
+        endReason = "error";
+        error = entry?.failReason ?? `执行未完成（status=${status}）`;
+      }
+
+      const result: EphemeralRunResult = {
+        text,
+        toolCalls,
+        rounds: toolCalls.length,
+        endReason,
+        ...(error ? { error } : {}),
+      };
+      return result;
+    } catch (e) {
+      return {
+        text: "",
+        toolCalls: [],
+        rounds: toolCallCount(),
+        endReason: "error",
+        error: e instanceof Error ? e.message : String(e),
+      };
+    } finally {
+      clearInterval(timer);
+      if (sessionId) {
+        // 审计：临时会话的完整消息先落到 team-runs 下，再从会话存储清理
+        this.archiveEphemeralSession(sessionId);
+        this.discardEphemeralSession(sessionId);
+      }
+    }
+  }
+
+  /**
+   * 归档临时会话消息（审计用）
+   *
+   * 落盘位置：`<projectRoot>/.deepcode/team-runs/ephemeral/<sessionId>.json`
+   * 与 dispatch 事件日志（`team-runs/<runId>/events.jsonl`）同根，便于一起排查；
+   * 归档失败不阻塞（审计是增强项，不能拖垮业务）。
+   */
+  private archiveEphemeralSession(sessionId: string): void {
+    try {
+      const messages = this.listSessionMessages(sessionId);
+      if (messages.length === 0) return;
+      const dir = path.join(this.projectRoot, ".deepcode", "team-runs", "ephemeral");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, `${sessionId}.json`), JSON.stringify(messages, null, 2), "utf-8");
+    } catch {
+      // 归档失败忽略
+    }
+  }
+
+  /** 从会话索引与磁盘消息中移除临时会话（用户会话列表零残留） */
+  private discardEphemeralSession(sessionId: string): void {
+    try {
+      const index = this.loadSessionsIndex();
+      const target = index.entries.find((entry) => entry.id === sessionId);
+      if (!target) return;
+      index.entries = index.entries.filter((entry) => entry.id !== sessionId);
+      this.saveSessionsIndex(index);
+      this.cleanupSessionResources(sessionId, {
+        removeMessages: true,
+        processIds: this.getProcessIds(target.processes ?? null),
+      });
+    } catch {
+      // 清理失败不影响结果返回；下一次 listSessions 仍会过滤掉 ephemeral 条目
+    }
   }
 
   async replySession(sessionId: string, userPrompt: UserPromptContent, controller?: AbortController): Promise<void> {
@@ -4259,6 +4565,21 @@ ${agentInstructions}
     // 合并冲突修复说明：此处原为错误拼接的重复 checkpoint 块（if 语句缺失方法体导致
     // 大括号不平衡、eagCommand 声明丢失），已按 fork 版 replySession 顺序重建：
     // EAG 命令分发 → 动态建议层 → 规则学习 Hook → reportNewPrompt → 检查点 → 用户消息
+    //
+    // 2026-11-02（L0-1）：team 命令分发（在 EAG 之前，二者命令空间不重叠）
+    //
+    // 此前 Web 宿主没有 team 执行体，用户敲 `/team dispatch` 会被当普通文本投给模型，
+    // 模型"配合演出"输出一段像派单结果的文字——静默降级且看起来成功（审计报告 §3.2）。
+    // 现在 CLI / Web 共用 core 的这一条分发路径，从结构上消除双宿主分歧。
+    // 注意：必须在 EAG 解析之前短路，否则 `/team xxx` 会先落进下方建议层被当成普通消息。
+    // 与 `handleUserPrompt` 同一判定：只要意图是 `/team`（含裸 `/team`、`/team help`、
+    // 手误子命令）就进命令通道，未解析出参数时由 `handleTeamCommand` 回显帮助 + 报错。
+    if (isTeamCommandIntent(userPrompt.text ?? "")) {
+      this.activeSessionId = sessionId;
+      await this.handleTeamCommand(sessionId, userPrompt, parseTeamCommandLine(userPrompt.text!), controller);
+      return;
+    }
+
     const eagCommand = this.eagCommandParser.parse(userPrompt);
     if (eagCommand.kind !== "unknown") {
       this.activeSessionId = sessionId;
@@ -6246,6 +6567,138 @@ ${agentInstructions}
    * @param request 预装配的 EagStatusRequest（由 EagCommandParser.parse() 提取，可空）
    * @param controller 中断控制器（用于响应 abort 信号）
    */
+  /**
+   * 解析 team 命令的角色候选集（L0-2）
+   *
+   * 组成：5 个内置角色 + 由 `type: agent` 智能体映射而来的运行时角色。
+   * 开关读取 `settings.json` 的 `team.runtimeRoles`（见 `resolveRuntimeRoleOptions`）。
+   *
+   * 失败降级：任何异常都返回空数组 → `/team` 退回"只有 5 个内置角色"的旧行为。
+   * 这是**刻意的**：`/team` 不能因为技能目录损坏而整体不可用。
+   */
+  private async resolveTeamRoleCandidates(): Promise<ReadonlyArray<RoleDefinition>> {
+    try {
+      const settings = readSettingsFile(path.join(this.homeRoot, ".deepcode", "settings.json"));
+      const options = resolveRuntimeRoleOptions(settings);
+      if (!options.enabled) return [];
+      const skills = await this.listSkills(undefined, "agent");
+      // excludeRoleIds：5 个核心角色已被物化成 SKILL.md（group="core"），
+      // 它们以内置角色身份存在，不能再作为运行时角色重复进入候选集
+      const runtimeRoles = buildRolesFromAgents(skills, {
+        ...options,
+        excludeRoleIds: listRoleIds(),
+      });
+      if (runtimeRoles.length === 0) return [];
+      return mergeRoleCandidates(ROLE_REGISTRY, runtimeRoles);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * `/team` 命令执行（L0-1 / L0-3，2026-11-02）
+   *
+   * 为什么放在 core 而不是 Web 的 session-pool：
+   * 此前 CLI 有执行体、Web 只有描述符，用户在 Web 敲 `/team dispatch` 会被当普通文本
+   * 投给模型，模型"配合演出"输出一段看起来像派单结果的文字——静默降级且看起来成功，
+   * 是最危险的一类缺陷（审计报告 §3.2）。把执行体提到 core 后两个宿主共用一套，
+   * 从结构上消除这种分歧。
+   *
+   * 进度可见性（G6）：`onProgress` 收到的每个事件都落成一条 `role: "system"` 的可见消息，
+   * 因此 Web / CLI 都能看到 plan→dev→verify→fix 的阶段推进，不需要各宿主自己接进度。
+   *
+   * 工具能力（G3）：deps.runner 注入 `runEphemeral`，dispatch 从"只出建议"变为"真的改代码"。
+   *
+   * @param sessionId 当前会话
+   * @param userPrompt 用户输入（含命令原文）
+   * @param args 已解析的 team 参数
+   * @param controller 中断控制器（用户点停止时中断整个命令）
+   */
+  private async handleTeamCommand(
+    sessionId: string,
+    userPrompt: UserPromptContent,
+    args: TeamCommandArgs | null,
+    controller?: AbortController
+  ): Promise<void> {
+    const signal = controller?.signal;
+    this.throwIfAborted(signal);
+
+    const userMessage = this.buildUserMessage(sessionId, userPrompt);
+    this.appendSessionMessage(sessionId, userMessage);
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: "processing",
+      failReason: null,
+      updateTime: new Date().toISOString(),
+    }));
+
+    /** 追加一条可见 system 消息并推给宿主（Web 复用 role:"system" 渲染路径） */
+    const pushSystemMessage = (content: string): void => {
+      const message = this.buildSystemMessage(sessionId, content, null, true);
+      this.appendSessionMessage(sessionId, message);
+      this.onAssistantMessage(message, false);
+    };
+
+    // 参数非法（裸 `/team`、`/team help`、手误子命令）：回显帮助，绝不回落给模型。
+    // `/team help` / `-h` / `--help` 是**正常诉求**，按成功处理；其余非法子命令
+    // 视为参数错误（退出码 2 语义），帮助后面补一行明确的错误说明。
+    if (args === null) {
+      const token = extractTeamSubcommandToken(userPrompt.text ?? "");
+      const isHelpRequest = token === undefined || token === "help" || token === "-h" || token === "--help";
+      pushSystemMessage(
+        isHelpRequest
+          ? formatTeamHelp()
+          : `${formatTeamHelp()}\n\n未知子命令：${token}（参数错误，退出码 2）。以上为可用子命令。`
+      );
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: isHelpRequest ? "completed" : "failed",
+        failReason: isHelpRequest ? null : `/team 未知子命令：${token}`,
+        updateTime: new Date().toISOString(),
+      }));
+      return;
+    }
+
+    const candidates = await this.resolveTeamRoleCandidates();
+
+    let result;
+    try {
+      result = await runTeamCommand(args, {
+        projectRoot: this.projectRoot,
+        ...(candidates.length > 0 ? { candidates } : {}),
+        // L1-1：dispatch 走临时会话，拥有与主对话一致的工具轮次
+        runner: (ctx: DispatchRunnerContext) => this.runEphemeral(ctx),
+        onProgress: (event) => {
+          const label =
+            typeof event.index === "number" && typeof event.total === "number" && event.index > 0
+              ? `[${event.index}/${event.total}] `
+              : "";
+          pushSystemMessage(`【team】${label}${event.message}`);
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.updateSessionEntry(sessionId, (entry) => ({
+        ...entry,
+        status: "failed",
+        failReason: `/team 执行异常：${message}`,
+        updateTime: new Date().toISOString(),
+      }));
+      pushSystemMessage(`【team】✖ 执行异常：${message}`);
+      return;
+    }
+
+    const text = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
+    pushSystemMessage(text || `（/team ${args.subcommand} 无输出，退出码 ${result.exitCode}）`);
+
+    this.updateSessionEntry(sessionId, (entry) => ({
+      ...entry,
+      status: result.exitCode === 0 ? "completed" : "failed",
+      failReason: result.exitCode === 0 ? null : `/team ${args.subcommand} 退出码 ${result.exitCode}`,
+      updateTime: new Date().toISOString(),
+    }));
+  }
+
   private async handleEagStatusCommand(
     sessionId: string,
     userPrompt: UserPromptContent,
@@ -9316,7 +9769,8 @@ ${agentInstructions}
 
   listSessions(): SessionEntry[] {
     const index = this.loadSessionsIndex();
-    return index.entries;
+    // 2026-11-02：临时会话（dispatch 的 ephemeral 运行）不出现在用户会话列表
+    return index.entries.filter((entry) => entry.ephemeral !== true);
   }
 
   getSession(sessionId: string): SessionEntry | null {
