@@ -4197,7 +4197,22 @@ ${agentInstructions}
       await this.appendAgentIndexMessage(sessionId);
     }
 
-    this.activeSessionId = sessionId;
+    // 2026-11-02（接线审查）：临时会话**不得**改写 activeSessionId。
+    //
+    // 单活跃会话模型里 `activeSessionId` 表示"用户当前在聊哪一个会话"。临时会话是
+    // dispatch 的执行载体，跑完即弃（`runEphemeral` 的 finally 会把它从会话索引删掉），
+    // 若在这里写它，会留下一个**指向已删除会话**的悬空值：
+    // - Web：`session-pool` 每轮结束执行 `chat.sessionId = getActiveSessionId()`，
+    //   于是 chat 被绑定到已删除的会话；下一轮 `getSession()` 取不到 → 新建会话，
+    //   表现为"用过 /team 之后聊天失忆"。
+    // - CLI：`getActiveSessionId()` 同样拿到失效 id，下一轮另起会话。
+    // - L2 并行：同层多个子任务并发 createSession 会互相覆写，最终值不可预期。
+    //
+    // activateSession 内部全部以参数 `sessionId` 为准（未读实例字段），
+    // 故跳过赋值不影响临时会话自身的执行。
+    if (!ephemeral) {
+      this.activeSessionId = sessionId;
+    }
     await this.activateSession(sessionId, controller);
     return sessionId;
   }
