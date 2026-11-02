@@ -2442,8 +2442,7 @@ a.icon-btn {
 [data-tauri-drag-region] {
   -webkit-app-region: drag;
 }
-/* 内容层：默认不接收指针事件 → 点击穿透到拖拽层；标签/按钮单独恢复 */
-.top-tab-bar-tabs,
+/* 内容层：默认不接收指针事件 → 点击穿透到拖拽层；按钮单独恢复 */
 .top-tab-bar-right {
   position: relative;
   z-index: 1;
@@ -2455,47 +2454,6 @@ a.icon-btn {
 .top-tab-bar button {
   pointer-events: auto;
   -webkit-app-region: no-drag;
-}
-.top-tab-bar-tabs {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow-x: auto;
-  padding: 4px 6px;
-  scrollbar-width: none;
-}
-.top-tab-bar-tabs::-webkit-scrollbar {
-  display: none;
-}
-/* 左上角应用 Logo（与桌面端图标/favicon 同款 iOS 26 风格，纯装饰不接收指针） */
-.top-tab-bar-logo {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-  margin-right: 4px;
-  /* 轻微圆角阴影提升玻璃质感（SVG 自带 squircle 透明底） */
-  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.25));
-}
-.top-tab-new {
-  flex: none;
-  width: 26px;
-  height: 26px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--app-text-secondary);
-  cursor: pointer;
-}
-.top-tab-new:hover:not(:disabled) {
-  background: var(--app-bg-hover);
-  color: var(--app-text);
-}
-.top-tab-new:disabled {
-  opacity: 0.5;
-  cursor: default;
 }
 .top-tab-bar-right {
   flex: none;
