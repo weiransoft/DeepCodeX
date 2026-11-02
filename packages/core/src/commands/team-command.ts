@@ -66,6 +66,7 @@ import type {
 } from "./types.js";
 import { TEAM_SUBCOMMANDS } from "./types.js";
 import { orchestrate, type OrchestrationResult } from "../team/orchestrator/index.js";
+import { runRoundtable, type RoundtableMessage, type RoundtableResult } from "../team/roundtable/index.js";
 
 // ============================================================================
 // 输出收集器
@@ -155,6 +156,12 @@ export async function runTeamCommand(args: TeamCommandArgs, deps: TeamCommandDep
       }
       case "dispatch": {
         const result = await executeDispatchCommand(args, ctx);
+        exitCode = result.exitCode;
+        data = result.data;
+        break;
+      }
+      case "roundtable": {
+        const result = await executeRoundtableCommand(args, ctx);
         exitCode = result.exitCode;
         data = result.data;
         break;
@@ -703,6 +710,269 @@ async function executeConsensusReview(
       },
     },
   };
+}
+
+// ============================================================================
+// roundtable 子命令（多角色群聊协商 → 分工执行）
+// ============================================================================
+
+/**
+ * 默认参与者：4 个执行向内置角色
+ *
+ * 为什么不默认用全部 5 个：`product-manager` 默认担任主持人（推进议程 + 起草决议），
+ * 同时当参与者会让"谁来拍板"和"谁来提需求"混在一起。用户可用 `--roles` 显式覆盖。
+ */
+const ROUNDTABLE_DEFAULT_ROLE_IDS: ReadonlyArray<string> = Object.freeze([
+  "architect",
+  "solo-coder",
+  "test-expert",
+  "ui-designer",
+]);
+
+/** 默认主持人（负责议程与决议，不参与共识计数） */
+const ROUNDTABLE_DEFAULT_MODERATOR = "product-manager";
+
+/**
+ * 执行 `/team roundtable`
+ *
+ * 与 `--consensus` 的区别：consensus 是单轮快评（只出意见，不执行），
+ * roundtable 是完整会议（讨论 → 共识 → 分工 → 各自执行 → 疑问回流）。
+ *
+ * 退出码：共识达成且执行无失败 → 0；其余 → 1（不把"部分完成"当成功）。
+ *
+ * @param args 已解析参数
+ * @param ctx 执行上下文
+ */
+async function executeRoundtableCommand(
+  args: TeamCommandArgs,
+  ctx: RunContext
+): Promise<{ exitCode: number; data?: TeamCommandData }> {
+  const resolvedTask = resolveTaskDescription(args, "roundtable", ctx.io);
+  if (resolvedTask.status !== "ok") {
+    if (resolvedTask.status === "missing") {
+      ctx.io.err("用法: deepcode team roundtable --task <goal> [--roles a,b,c] [--moderator id] [--rounds 3]");
+    }
+    return { exitCode: 2 };
+  }
+  const taskDescription = resolvedTask.task;
+
+  // ---- 参与者解析：显式 --roles 优先，否则默认 4 角色 ----
+  const roleById = new Map(ctx.candidates.map((role) => [role.roleId, role]));
+  const requestedRoleIds = args.roles && args.roles.length > 0 ? args.roles : [...ROUNDTABLE_DEFAULT_ROLE_IDS];
+  const participants: RoleDefinition[] = [];
+  const unknownRoleIds: string[] = [];
+  for (const roleId of requestedRoleIds) {
+    const role = roleById.get(roleId);
+    if (!role) {
+      unknownRoleIds.push(roleId);
+      continue;
+    }
+    participants.push(role);
+  }
+  if (unknownRoleIds.length > 0) {
+    ctx.io.err(`✖ 未知角色: ${unknownRoleIds.join("、")}（用 /team list 查看可用角色）`);
+    return { exitCode: 2 };
+  }
+  if (participants.length < 2) {
+    ctx.io.err("✖ roundtable 至少需要 2 个参与者（共识需要多方立场）");
+    return { exitCode: 2 };
+  }
+
+  const moderatorId = args.moderator ?? ROUNDTABLE_DEFAULT_MODERATOR;
+  const moderator = roleById.get(moderatorId);
+  if (!moderator) {
+    ctx.io.err(`✖ 未知主持人角色: ${moderatorId}`);
+    return { exitCode: 2 };
+  }
+  if (participants.some((role) => role.roleId === moderator.roleId)) {
+    ctx.io.err(`✖ 主持人 ${moderatorId} 不能同时担任参与者（请用 --moderator 换一个角色）`);
+    return { exitCode: 2 };
+  }
+
+  ctx.io.out(`\n🧠 Roundtable · ${participants.length} 角色 · 主持人 ${moderator.name}\n`);
+  ctx.io.out(`目标: ${taskDescription}\n`);
+  ctx.io.progress({
+    phase: "stage",
+    level: "info",
+    message: `开始群聊协商（${participants.map((r) => r.roleId).join("、")}）`,
+    data: { participants: participants.map((r) => r.roleId), moderator: moderator.roleId },
+  });
+
+  const result = await runRoundtable({
+    projectRoot: ctx.projectRoot,
+    task: taskDescription,
+    participants,
+    moderator,
+    ...(args.rounds !== undefined ? { maxRounds: args.rounds } : {}),
+    ...(args.escalations !== undefined ? { maxEscalations: args.escalations } : {}),
+    ...(args.injectedClient ? { injectedClient: args.injectedClient } : {}),
+    ...(ctx.deps.runner ? { runner: ctx.deps.runner } : {}),
+    ...(ctx.deps.maxToolRounds ? { maxToolRounds: ctx.deps.maxToolRounds } : {}),
+    onProgress: (message) => ctx.io.progress({ phase: "dispatch", level: "info", message }),
+  });
+
+  renderRoundtable(result, ctx);
+
+  const exitCode = result.status === "consensus" ? 0 : 1;
+  if (exitCode !== 0 && result.note) {
+    ctx.io.err(`\n✖ ${result.note}\n`);
+  }
+
+  return {
+    exitCode,
+    data: {
+      kind: "roundtable",
+      status: result.status,
+      rounds: result.rounds,
+      escalations: result.escalations,
+      summary: result.decision?.summary ?? null,
+      assignments: (result.decision?.assignments ?? []).map((item) => ({
+        roleId: item.roleId,
+        roleName: item.roleName,
+        scope: item.scope,
+        deliverable: item.deliverable,
+        acceptance: item.acceptance,
+        dependsOn: item.dependsOn,
+      })),
+      executions: result.executions.map((item) => ({
+        roleId: item.roleId,
+        roleName: item.roleName,
+        status: item.status,
+        summary: item.summary,
+        questions: item.questions,
+        mode: item.mode,
+      })),
+      unparsedSpeeches: result.unparsedSpeeches,
+      ...(result.note !== undefined ? { note: result.note } : {}),
+    },
+  };
+}
+
+/**
+ * 渲染群聊过程与结论
+ *
+ * 输出顺序刻意与发生顺序一致（讨论 → 共识 → 台账 → 执行 → 回流），
+ * 这样用户能像看会议纪要一样读，而不是读一份"结果摘要"。
+ *
+ * @param result 群聊结果
+ * @param ctx 执行上下文
+ */
+function renderRoundtable(result: RoundtableResult, ctx: RunContext): void {
+  const speeches = result.messages.filter((m) => m.kind === "speech");
+  const focuses = result.messages.filter((m) => m.kind === "focus");
+  const notes = result.messages.filter((m) => m.kind === "note");
+  const taskUpdates = result.messages.filter((m) => m.kind === "task-update");
+
+  // ---- 讨论过程 ----
+  const roundsSeen = new Set<number>();
+  for (const message of [...speeches].sort((a, b) => a.round - b.round)) {
+    if (!roundsSeen.has(message.round)) {
+      roundsSeen.add(message.round);
+      const focus = focuses.find((item) => item.round === message.round - 1);
+      ctx.io.out(`\n[round ${message.round}]${focus ? ` 聚焦：${firstLine(focus.content)}` : ""}`);
+    }
+    ctx.io.out(`  ${message.roleId.padEnd(16)} ${formatSpeechLine(message)}`);
+  }
+
+  for (const note of notes) {
+    ctx.io.out(`\n  · ${note.content}`);
+  }
+
+  // ---- 共识与台账 ----
+  if (result.decision) {
+    const decision = result.decision;
+    // 统计口径必须与判定规则一致：共识可能是「全员 support」，也可能是「refine 已收敛」。
+    // 只报 support 数会出现「0/2 support 却判共识」的误导（refine 稳定即收敛）。
+    const roundSpeeches = speeches.filter((m) => m.round === decision.round);
+    const countBy = (posture: string): number => roundSpeeches.filter((m) => m.posture === posture).length;
+    const support = countBy("support");
+    const refine = countBy("refine");
+    const object = countBy("object");
+    ctx.io.out(
+      `\n━━━ 共识（round ${decision.round}，${roundSpeeches.length} 条发言：support ${support} · refine ${refine} · object ${object}）━━━\n`
+    );
+    if (refine > 0 && object === 0) {
+      ctx.io.out(`（${refine} 条 refine 意见已并入下列决议，无阻断反对）\n`);
+    }
+    ctx.io.out(`${decision.summary}\n`);
+    if (decision.decisions.length > 0) {
+      ctx.io.out(`\n决议条目:`);
+      decision.decisions.forEach((item, index) => ctx.io.out(`  ${index + 1}. ${item}`));
+    }
+    if (decision.openQuestions.length > 0) {
+      ctx.io.out(`\n留给人类的问题:`);
+      decision.openQuestions.forEach((item) => ctx.io.out(`  - ${item}`));
+    }
+
+    ctx.io.out(`\n━━━ 任务台账 ━━━\n`);
+    for (const item of decision.assignments) {
+      ctx.io.out(
+        `- ${item.roleId.padEnd(16)} ${item.deliverable}` +
+          `${item.dependsOn.length > 0 ? `（依赖：${item.dependsOn.join("、")}）` : ""}`
+      );
+    }
+
+    if (taskUpdates.length > 0) {
+      ctx.io.out(`\n━━━ 各自确认 ━━━\n`);
+      for (const item of taskUpdates) {
+        ctx.io.out(`- ${item.roleId.padEnd(16)} ${firstLine(item.content)}`);
+      }
+    }
+  }
+
+  // ---- 执行 ----
+  if (result.executions.length > 0) {
+    ctx.io.out(`\n━━━ 执行 ━━━\n`);
+    for (const item of result.executions) {
+      const modeTag = item.mode === "text" ? "（文本建议，未改动文件）" : "";
+      ctx.io.out(`- ${item.roleId.padEnd(16)} [${item.status}] ${firstLine(item.summary)}${modeTag}`);
+      if (item.questions.length > 0) {
+        ctx.io.out(`  ↳ 待澄清: ${item.questions.join("；")}`);
+      }
+      if (item.error) {
+        ctx.io.out(`  ↳ 错误: ${item.error}`);
+      }
+    }
+  }
+
+  // ---- 回流 ----
+  if (result.amendments.length > 0) {
+    ctx.io.out(`\n━━━ 疑问回流（${result.amendments.length} 次）━━━\n`);
+    for (const amendment of result.amendments) {
+      ctx.io.out(`- 提问: ${amendment.triggeredBy.join("、")} — ${firstLine(amendment.question)}`);
+      ctx.io.out(`  修订: ${firstLine(amendment.change)}`);
+      ctx.io.out(`  影响: ${amendment.affectedRoles.join("、") || "（无）"}`);
+    }
+  }
+
+  // ---- 结论行 ----
+  ctx.io.out(`\n━━━ 结论 ━━━\n`);
+  ctx.io.out(`status: ${result.status}`);
+  ctx.io.out(`rounds: ${result.rounds}    escalations: ${result.escalations}`);
+  if (result.unparsedSpeeches > 0) {
+    ctx.io.out(`unparsedSpeeches: ${result.unparsedSpeeches}（模型未按约定格式输出，已按 refine 计入）`);
+  }
+  if (result.note) {
+    ctx.io.out(`note: ${result.note}`);
+  }
+  ctx.io.out(`\n⏱  耗时: ${result.durationMs}ms\n`);
+}
+
+/** 发言的一行摘要（优先要点，否则正文首行） */
+function formatSpeechLine(message: RoundtableMessage): string {
+  const posture = message.posture ?? "?";
+  const flag = message.blocking ? "（阻断）" : "";
+  return `${posture}${flag} · ${firstLine(message.content)}`;
+}
+
+/** 取多行文本的第一行（输出排版用） */
+function firstLine(text: string): string {
+  const line =
+    text
+      .split("\n")
+      .map((item) => item.trim())
+      .find((item) => item !== "") ?? "";
+  return line.length > 120 ? `${line.slice(0, 120)}…` : line;
 }
 
 // ============================================================================
@@ -1400,6 +1670,7 @@ DeepCodeX Team - 多角色协同调度
   match --keywords <kw1,kw2,...>    根据关键词匹配角色
   dispatch --task <task>            分派任务到角色（自动匹配或 --role 强制）
   dispatch --task-file <path>       从文件读取任务描述（避免 shell 转义问题）
+  roundtable --task <goal>          多角色群聊协商：讨论→共识→分工→各自执行→疑问回流
   autonomous --goal <goal>          启动 Ralph 自主迭代（4 阶段循环）
   full-lifecycle --project <name>   8 阶段项目全流程（v2.1 P5）
   auto --goal <goal>                自动多角色拆解：拆解→分层→并行执行→聚合（L2）
@@ -1414,6 +1685,10 @@ ${roleList}
   --force-role                      禁用自动匹配（需要 --role）
   --consensus                       启用 5 角色联合评审（并行派发 + LLM 聚合共识点/分歧点/最终建议；
                                     与 --role/--force-role 互斥）
+  --roles <a,b,c>                   roundtable 参与者（默认 architect,solo-coder,test-expert,ui-designer）
+  --moderator <role-id>             roundtable 主持人（默认 product-manager，不参与共识计数）
+  --rounds <n>                      讨论轮次上限（roundtable，默认 3）
+  --escalations <n>                 疑问回流次数上限（roundtable，默认 1；0 表示不回流）
   --fail-fast                       失败时立即中止（默认开启；仅 consensus 与 full-lifecycle
                                     线性模式生效；--no-fail-fast 部分失败时继续执行并汇总）
   --max-iterations <n>              最大迭代次数（autonomous / full-lifecycle --use-loop，默认 5/3）
@@ -1446,6 +1721,8 @@ L2 auto 专属选项:
   deepcode team dispatch --task "设计用户认证模块"
   deepcode team dispatch --role architect --task "系统架构评审"
   deepcode team dispatch --task "用户登录方案" --consensus
+  deepcode team roundtable --task "为登录接口加限流，要求可观测、可回滚"
+  deepcode team roundtable --task "重构配置加载" --roles architect,solo-coder,test-expert --rounds 2
   deepcode team dispatch --role solo-coder --task-file ./task.txt
   deepcode team autonomous --goal "实现 OAuth2 登录"
   deepcode team full-lifecycle --project "电商网站"
@@ -1558,6 +1835,34 @@ export function parseTeamCommandLine(text: string): TeamCommandArgs | null {
       case "role": {
         const value = takeValue();
         if (value) args.role = value;
+        break;
+      }
+      case "roles": {
+        // roundtable 参与者列表：`--roles architect,solo-coder`
+        const value = takeValue();
+        if (value) {
+          args.roles = value
+            .split(/[,，]/)
+            .map((item) => item.trim())
+            .filter(Boolean);
+        }
+        break;
+      }
+      case "moderator": {
+        const value = takeValue();
+        if (value) args.moderator = value;
+        break;
+      }
+      case "rounds": {
+        const value = takeValue();
+        const parsed = value ? Number.parseInt(value, 10) : Number.NaN;
+        if (Number.isFinite(parsed) && parsed > 0) args.rounds = parsed;
+        break;
+      }
+      case "escalations": {
+        const value = takeValue();
+        const parsed = value ? Number.parseInt(value, 10) : Number.NaN;
+        if (Number.isFinite(parsed) && parsed >= 0) args.escalations = parsed;
         break;
       }
       case "task": {

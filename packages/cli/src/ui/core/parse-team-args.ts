@@ -58,6 +58,7 @@ export function parseTeamArgs(tokens: string[]): TeamCommandArgs {
       first === "list" ||
       first === "match" ||
       first === "dispatch" ||
+      first === "roundtable" ||
       first === "autonomous" ||
       first === "full-lifecycle" ||
       first === "auto"
@@ -107,6 +108,14 @@ export function parseTeamArgs(tokens: string[]): TeamCommandArgs {
   if (typeof raw.keywords === "string") {
     raw.keywords = (raw.keywords as string)
       .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  // --roles 逗号分隔转数组（roundtable 子命令使用；兼容中文逗号）
+  if (typeof raw.roles === "string") {
+    raw.roles = (raw.roles as string)
+      .split(/[,，]/)
       .map((s) => s.trim())
       .filter(Boolean);
   }
@@ -168,6 +177,19 @@ export function parseTeamArgs(tokens: string[]): TeamCommandArgs {
     }
   }
 
+  // roundtable：--rounds 必须 > 0，--escalations 允许 0（显式关闭回流）
+  for (const key of ["rounds", "escalations"] as const) {
+    if (typeof raw[key] === "string") {
+      const n = Number.parseInt(raw[key] as string, 10);
+      const valid = !Number.isNaN(n) && (key === "escalations" ? n >= 0 : n > 0);
+      if (valid) {
+        raw[key] = n;
+      } else {
+        delete raw[key];
+      }
+    }
+  }
+
   // S2 fail-fast 三态归一：
   //   --no-fail-fast（解析为 noFailFast=true）→ failFast=false；
   //   其余情况（未指定 / --fail-fast）→ failFast=true（默认快速失败）
@@ -192,6 +214,19 @@ export function parseTeamArgs(tokens: string[]): TeamCommandArgs {
   }
   if (Array.isArray(raw.keywords)) {
     args.keywords = raw.keywords as string[];
+  }
+  // roundtable：参与者列表 / 主持人 / 轮次 / 回流次数
+  if (Array.isArray(raw.roles)) {
+    args.roles = raw.roles as string[];
+  }
+  if (typeof raw.moderator === "string") {
+    args.moderator = raw.moderator;
+  }
+  if (typeof raw.rounds === "number") {
+    args.rounds = raw.rounds;
+  }
+  if (typeof raw.escalations === "number") {
+    args.escalations = raw.escalations;
   }
   if (typeof raw.maxIterations === "number") {
     args.maxIterations = raw.maxIterations;

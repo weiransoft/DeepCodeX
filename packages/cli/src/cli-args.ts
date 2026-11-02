@@ -251,7 +251,7 @@ async function configureYargs(argv?: string[]) {
     )
     .command(
       "team <subcommand>",
-      "Multi-role team dispatch (list / match / dispatch / autonomous / full-lifecycle / auto / help)",
+      "Multi-role team dispatch (list / match / dispatch / roundtable / autonomous / full-lifecycle / auto / help)",
       (y: Argv) =>
         y
           .positional("subcommand", {
@@ -259,7 +259,17 @@ async function configureYargs(argv?: string[]) {
             // v1.6 P0-2 修正（TC-TEAM-12）：加入 "help" 选项，支持 `team help` 显示帮助
             // cli.tsx 中 parsed.team === "help" 时调用 formatTeamHelp() 并 exit(0)
             // L2（2026-11-02）：加入 "auto"（自动多角色拆解）
-            choices: ["list", "match", "dispatch", "autonomous", "full-lifecycle", "auto", "help"] as const,
+            // 群聊（2026-11-02）：加入 "roundtable"（多轮协商 → 分工 → 执行 → 疑问回流）
+            choices: [
+              "list",
+              "match",
+              "dispatch",
+              "roundtable",
+              "autonomous",
+              "full-lifecycle",
+              "auto",
+              "help",
+            ] as const,
             describe: "Team subcommand",
           })
           .option("role", {
@@ -281,6 +291,24 @@ async function configureYargs(argv?: string[]) {
           .option("max-iterations", { type: "number", describe: "Max iterations (autonomous, default 5)" })
           .option("force-role", { type: "boolean", describe: "Disable auto role matching" })
           .option("consensus", { type: "boolean", describe: "Enable 5-role consensus review" })
+          // roundtable（群聊协商）：参与者 / 主持人 / 轮次 / 回流次数
+          .option("roles", {
+            type: "string",
+            describe:
+              "Comma-separated participant role ids (roundtable, default architect,solo-coder,test-expert,ui-designer)",
+          })
+          .option("moderator", {
+            type: "string",
+            describe: "Moderator role id (roundtable, default product-manager)",
+          })
+          .option("rounds", {
+            type: "number",
+            describe: "Max discussion rounds (roundtable, default 3)",
+          })
+          .option("escalations", {
+            type: "number",
+            describe: "Max question-escalation rounds after execution (roundtable, default 1; 0 disables)",
+          })
           .option("fail-fast", { type: "boolean", describe: "Abort on first failure (default true)" })
           .option("project-root", { type: "string", describe: "Project root directory" })
           // v1.6 P0-1.3：autonomous 子命令断点续跑开关
@@ -685,6 +713,11 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
       "max-iterations",
       "force-role",
       "consensus",
+      // 群聊（roundtable 子命令）
+      "roles",
+      "moderator",
+      "rounds",
+      "escalations",
       "fail-fast",
       "project-root",
       "resume-run",

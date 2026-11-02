@@ -28,13 +28,14 @@ import type { DispatchRunner } from "../team/team-adapter.js";
 import type { DispatchResult, MatchResult, RoleDefinition } from "../team/types.js";
 
 /** Team 子命令（唯一权威定义；CLI 侧改为 re-export） */
-export type TeamSubcommand = "list" | "match" | "dispatch" | "autonomous" | "full-lifecycle" | "auto";
+export type TeamSubcommand = "list" | "match" | "dispatch" | "roundtable" | "autonomous" | "full-lifecycle" | "auto";
 
 /** 全部子命令（供解析器与描述符复用，顺序即帮助文本顺序） */
 export const TEAM_SUBCOMMANDS: ReadonlyArray<TeamSubcommand> = Object.freeze([
   "list",
   "match",
   "dispatch",
+  "roundtable",
   "autonomous",
   "full-lifecycle",
   "auto",
@@ -63,6 +64,18 @@ export interface TeamCommandArgs {
   forceRole?: boolean;
   /** 共识模式（5 角色联合评审） */
   consensus?: boolean;
+  /**
+   * roundtable 参与者角色 ID 列表
+   *
+   * 未指定 → 由 `match` 结果或默认组合决定（见 `executeRoundtableCommand`）。
+   */
+  roles?: string[];
+  /** roundtable 主持人角色 ID（默认 product-manager） */
+  moderator?: string;
+  /** roundtable 讨论轮次上限（默认 3） */
+  rounds?: number;
+  /** roundtable 疑问回流次数上限（默认 1） */
+  escalations?: number;
   /**
    * 失败时中止（fail-fast）
    * 统一判定 `failFast !== false`（默认 true）：
@@ -220,6 +233,38 @@ export type TeamCommandData =
   | { kind: "match"; matches: TeamMatchSummary[] }
   | { kind: "dispatch"; dispatch: TeamDispatchSummary }
   | {
+      kind: "roundtable";
+      /** 群聊终态（consensus / unresolved / degraded / skipped / failed / aborted） */
+      status: string;
+      /** 实际讨论轮次 */
+      rounds: number;
+      /** 实际回流次数 */
+      escalations: number;
+      /** 共识正文（未达成时为 null） */
+      summary: string | null;
+      /** 任务台账（角色 → 范围/交付物/验收/依赖） */
+      assignments: Array<{
+        roleId: string;
+        roleName: string;
+        scope: string;
+        deliverable: string;
+        acceptance: string;
+        dependsOn: string[];
+      }>;
+      /** 执行报告 */
+      executions: Array<{
+        roleId: string;
+        roleName: string;
+        status: string;
+        summary: string;
+        questions: string[];
+        mode: "tool" | "text";
+      }>;
+      /** 未结构化发言数（质量指标） */
+      unparsedSpeeches: number;
+      note?: string;
+    }
+  | {
       kind: "autonomous";
       runId: string;
       exitCode: number;
@@ -287,6 +332,13 @@ export const TEAM_COMMAND_DESCRIPTORS: ReadonlyArray<DynamicCommandDescriptor> =
     name: "/team dispatch",
     description: "分派任务到指定角色并**真实执行**（自动匹配或 --role 强制指定），可在工作区落代码改动。",
     args: ["--task <任务描述>", "--role <role-id>", "--consensus"],
+  }),
+  Object.freeze({
+    category: "team" as const,
+    id: "team-roundtable",
+    name: "/team roundtable",
+    description: "多角色群聊协商：多轮讨论达成共识后分工，各角色确认自己的任务并执行，执行中的疑问可回流再共识。",
+    args: ["--task <目标>", "--roles <a,b,c>", "--moderator <role-id>", "--rounds <n>", "--escalations <n>"],
   }),
   Object.freeze({
     category: "team" as const,
