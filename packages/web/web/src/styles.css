@@ -2442,58 +2442,6 @@ a.icon-btn {
 [data-tauri-drag-region] {
   -webkit-app-region: drag;
 }
-/* 内容层：默认不接收指针事件 → 点击穿透到拖拽层；按钮单独恢复 */
-.top-tab-bar-right {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  pointer-events: none;
-}
-.top-tab-bar button {
-  pointer-events: auto;
-  -webkit-app-region: no-drag;
-}
-.top-tab-bar-right {
-  flex: none;
-  gap: 8px;
-  padding: 0 10px;
-}
-/* authority 徽标（顶部）：本地 = 中性；远程 = 高亮提示 */
-.authority-badge {
-  font-size: 11px;
-  font-family: var(--app-font-mono);
-  padding: 2px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--app-border-strong);
-  color: var(--app-text-secondary);
-  background: var(--app-bg-elevated);
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.authority-badge.remote {
-  color: var(--app-primary, #0a84ff);
-  border-color: var(--app-primary, #0a84ff);
-}
-.top-tab-win {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 26px;
-  padding: 0 10px;
-  border: 1px solid var(--app-border-strong);
-  border-radius: 8px;
-  background: var(--app-bg);
-  color: var(--app-text-secondary);
-  font-size: 12px;
-  cursor: pointer;
-}
-.top-tab-win:hover {
-  background: var(--app-bg-hover);
-}
 
 /* ---- 左侧活动栏 ---- */
 .activity-bar {

@@ -1408,7 +1408,7 @@ export function App() {
       <>
         {desktopBridge !== null ? (
           <div className="shell-root">
-            <TopTabBar authority={remoteAuthority} onNotice={showToast} />
+            <TopTabBar />
             <div className="shell-body shell-body-login">{loginView}</div>
             <DesktopStatusBar
               onOpenSettings={() => setShowSettings(true)}
@@ -1523,7 +1523,7 @@ export function App() {
   // └ 底部状态栏（引擎状态 + authority/LDAP + 设置/引擎面板）
   return (
     <div className="shell-root">
-      <TopTabBar authority={remoteAuthority} onNotice={showToast} />
+      <TopTabBar />
 
       <div className="shell-body">
         <ActivityBar
