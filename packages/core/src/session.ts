@@ -1606,14 +1606,21 @@ export class SessionManager {
   private readonly evaluator?: IndependentEvaluator;
   private readonly loopGuard?: LoopGuard;
   // 需求123/124：普通会话循环护栏
-  // turnGuard：每 turn 入口经 getOrCreateTurnGuard 获取（同 turn 复用、用户确认继续时
-  // acknowledgeAndContinue 清零咨询计数、新任务 resetTurnGuard 重置）。
-  // 单活跃会话模型（this.activeSessionId 全局唯一 + isInterrupted 保证上一 turn 已退出），
-  // 单实例即可承载；连续失败触达上限 → 暂停咨询用户，
-  // 模型死循环 → 硬终止（Token 配额线已移除 2026-10-19，轮数上限已移除 2026-10-20）。
+  // turnGuards：**每会话一个**护栏实例（2026-11-02 接线审查 D5）。
+  //
+  // 历史：原实现是单实例字段 `turnGuard`，前提假设是「单活跃会话模型」——同一时刻
+  // 只有一个会话在跑 turn。这个假设在引入临时会话（`runEphemeral`）后被打破：
+  // ① `createSession` 无条件 `turnGuard = new TurnGuard()`，临时会话建会话时会把
+  //    用户主会话累积的连续失败计数 / 循环检测签名队列清零（护栏静默失效一次）；
+  // ② L2 并行 dispatch（`execute.ts` / `pattern-executor.ts` 都是 Promise.all）
+  //    同时跑多个临时会话时，它们共享同一实例：A 角色的连续失败累到 B 角色头上，
+  //    可能把 B 误判成「连续失败 / 空转」而提前打断。
+  // 护栏计数天然属于会话（「这个任务失败了几轮」），不属于 manager，故改为 Map。
+  // 连续失败触达上限 → 暂停咨询用户，模型死循环 → 硬终止（Token 配额线已移除
+  // 2026-10-19，轮数上限已移除 2026-10-20）。
   // turnGuardConfig：缺省 DEFAULT_TURN_GUARD_CONFIG（连续失败 3 轮 /
-  // 循环检测 3 次签名），由 options 透传。
-  private turnGuard?: TurnGuard;
+  // 循环检测 3 次签名），由 options 透传；每会话实例各自用同一份配置构造。
+  private readonly turnGuards = new Map<string, TurnGuard>();
   private readonly turnGuardConfig?: Partial<TurnGuardConfig>;
   private readonly evaluatorRedlines?: ReadonlyArray<RedlineDefinition>;
   // EAG-P2 批次 9 S5 外挂字段（可选注入，未注入时 /eag-build 命令不可用，§4.7 / §4.9）
@@ -4044,6 +4051,80 @@ ${agentInstructions}
     }
   }
 
+  /**
+   * 护栏实例的 Map 键
+   *
+   * 单点定义「护栏归属于谁」：默认就是会话 id（每会话一份）。
+   * 独立成方法而不是到处写字面量，是为了让这个归属关系可被单点审查/变更。
+   */
+  private turnGuardKey(sessionId: string): string {
+    return sessionId;
+  }
+
+  /**
+   * 取（必要时创建）指定会话的循环护栏实例
+   *
+   * 每会话独立：主会话跨 turn 累积计数，临时会话各自从零开始，互不干扰（D5）。
+   *
+   * @param sessionId 会话 id
+   * @returns 该会话的 TurnGuard（同一会话多次调用返回同一实例）
+   */
+  private getOrCreateTurnGuard(sessionId: string): TurnGuard {
+    const key = this.turnGuardKey(sessionId);
+    let guard = this.turnGuards.get(key);
+    if (!guard) {
+      guard = new TurnGuard(this.turnGuardConfig);
+      this.turnGuards.set(key, guard);
+    }
+    return guard;
+  }
+
+  /**
+   * 重置指定会话的循环护栏（新任务 = 新预算窗口）
+   *
+   * 只影响该会话；这也是 D5 的修复点——此前 `createSession` 重置的是全局单实例，
+   * 临时会话建会话时会把主会话的计数一起清掉。
+   *
+   * @param sessionId 会话 id
+   * @returns 重置后的新实例
+   */
+  private resetTurnGuard(sessionId: string): TurnGuard {
+    const guard = new TurnGuard(this.turnGuardConfig);
+    this.turnGuards.set(this.turnGuardKey(sessionId), guard);
+    return guard;
+  }
+
+  /**
+   * 读取指定会话的护栏状态快照（不存在则 null）
+   *
+   * 可观测性接口：诊断「这条会话是不是快被护栏拦了」以及测试断言用。
+   * 只读，不会为未跑过的会话创建实例。
+   *
+   * @param sessionId 会话 id
+   * @returns 状态快照或 null
+   */
+  getTurnGuardState(sessionId: string): {
+    turnsCompleted: number;
+    tokensConsumed: number;
+    consecutiveFailedTurns: number;
+    consecutiveEmptyTurns: number;
+  } | null {
+    const guard = this.turnGuards.get(this.turnGuardKey(sessionId));
+    if (!guard) return null;
+    const state = guard.getState();
+    return {
+      turnsCompleted: state.turnsCompleted,
+      tokensConsumed: state.tokensConsumed,
+      consecutiveFailedTurns: state.consecutiveFailedTurns,
+      consecutiveEmptyTurns: state.consecutiveEmptyTurns,
+    };
+  }
+
+  /** 丢弃指定会话的护栏实例（会话被删除/临时会话跑完时调用，避免 Map 常驻） */
+  private dropTurnGuard(sessionId: string): void {
+    this.turnGuards.delete(this.turnGuardKey(sessionId));
+  }
+
   async createSession(
     userPrompt: UserPromptContent,
     controller?: AbortController,
@@ -4058,7 +4139,9 @@ ${agentInstructions}
     const sessionId = crypto.randomUUID();
     // 需求123/124：新任务（新会话）开始时重置循环护栏——护栏计数按"任务"累计，
     // 新任务应获得完整的轮数/连续失败/循环检测窗口，不受上一个任务残留计数影响。
-    this.turnGuard = new TurnGuard(this.turnGuardConfig);
+    // 2026-11-02（D5）：只重置**本会话**的实例。临时会话（runEphemeral）也走这里，
+    // 此前重置的是全局单实例，会顺手把用户主会话累积的护栏计数清零。
+    this.resetTurnGuard(sessionId);
     // fork 侧：文件历史协调器初始化会话分支（coordinator 与上游内联方法操作同一
     // <projectDir>/file-history/.git 仓库，此处用 coordinator 版本避免重复初始化）
     this.fileHistoryCoordinator.ensureFileHistorySession(sessionId);
@@ -4406,6 +4489,9 @@ ${agentInstructions}
         // 审计：临时会话的完整消息先落到 team-runs 下，再从会话存储清理
         this.archiveEphemeralSession(sessionId);
         this.discardEphemeralSession(sessionId);
+        // 2026-11-02（D5）：临时会话的护栏实例用完即弃。显式丢弃而不依赖
+        // cleanupSessionResources——索引里找不到条目时它会提前 return，guard 会残留
+        this.dropTurnGuard(sessionId);
       }
     }
   }
@@ -4495,15 +4581,18 @@ ${agentInstructions}
     // 任何普通新指令都会误清零未暂停的计数，护栏累计上限形同虚设——已废弃该判定。
     // 护栏暂停态下用户回复任意内容（含"继续"等自然语言）都视为放行，
     // 与咨询文案"回复任意内容继续"语义一致（架构审查缺陷2修复：不再要求 /continue 精确匹配）。
+    // 2026-11-02（D5）：护栏实例按会话取，且用 peek 语义——没跑过 turn 的会话
+    // 不该因为「用户发了一条消息」就被凭空创建出一个实例（保持原单实例实现的惰性）
+    const pausedTurnGuard = this.turnGuards.get(this.turnGuardKey(sessionId));
     if (
       updated &&
       !hasUserPermissionReplies(userPrompt) &&
       !this.isContinuePrompt(userPrompt) &&
       session?.status === "waiting_for_user" &&
-      this.turnGuard &&
-      (this.turnGuard.getState().turnsCompleted > 0 || this.turnGuard.getState().consecutiveFailedTurns > 0)
+      pausedTurnGuard &&
+      (pausedTurnGuard.getState().turnsCompleted > 0 || pausedTurnGuard.getState().consecutiveFailedTurns > 0)
     ) {
-      this.turnGuard.acknowledgeAndContinue();
+      pausedTurnGuard.acknowledgeAndContinue();
     }
 
     // fork 侧：会话条目更新失败（竞态下被清理）时兜底创建新会话，保持 fork 既有行为
@@ -4590,7 +4679,8 @@ ${agentInstructions}
             updateTime: archivedAt,
           }));
           // 新任务 = 新预算窗口：重置护栏（轮数/连续失败/循环检测签名队列归零）
-          this.turnGuard = new TurnGuard(this.turnGuardConfig);
+          // 2026-11-02（D5）：按会话重置，避免连带清掉别的会话（临时会话）的计数
+          this.resetTurnGuard(sessionId);
           // 可见系统消息：告知用户已切换（与护栏消息同管道，UI 原样展示）
           const switchMessage = this.buildSystemMessage(
             sessionId,
@@ -8161,13 +8251,13 @@ ${agentInstructions}
       return;
     }
 
-    // 需求123/124：循环护栏实例获取（同一 SessionManager 生命周期内复用同一实例）
+    // 需求123/124：循环护栏实例获取（每个会话一个实例，跨 turn 复用同一实例）
     // —— 护栏计数跨 turn 累积：40 轮 = 整个任务累计 40 次 LLM 迭代，
     //    触达即暂停咨询；用户任何后续消息（确认继续 / 澄清指令）都视为放行，
     //    acknowledgeAndContinue() 清零轮数与连续失败计数（Token 总量不清零）。
-    if (!this.turnGuard) {
-      this.turnGuard = new TurnGuard(this.turnGuardConfig);
-    }
+    // 2026-11-02（D5）：改为 getOrCreateTurnGuard(sessionId)，主会话与并行临时会话
+    // 各持有独立实例（原先此处创建/复用全局单实例，临时会话会污染主会话计数）。
+    this.getOrCreateTurnGuard(sessionId);
 
     // 主对话流式安全参数：与 settings.timeout 对齐，防止 LLM 长期无响应或 reasoning 无限增长。
     // OpenAI 路径当前依赖 SDK 请求级 timeout（默认 600s），此处额外提供流式整体超时；
@@ -8272,7 +8362,7 @@ ${agentInstructions}
         // - terminate_model_loop → 硬终止，会话标记 failed（Token 预算线已移除，
         //   上下文压力由自动压缩 + 新任务切新上下文接管）
         // - consult_user_* → 会话转 waiting_for_user 暂停，等待用户指示
-        const guard = this.turnGuard!;
+        const guard = this.getOrCreateTurnGuard(sessionId);
         const hasPermissionReply = Boolean(permissionPrompt && hasUserPermissionReplies(permissionPrompt));
         const isContinuePrompt = Boolean(permissionPrompt && this.isContinuePrompt(permissionPrompt));
         // 用户放行信号：本 turn 携带权限回复或 continue（即用户对上一轮暂停的回应），
@@ -8702,7 +8792,7 @@ ${agentInstructions}
 
         // 需求123/124：TurnGuard 记录本轮迭代（Token 累计 + 连续失败计数），
         // 下一轮 LLM 请求前的 decideBeforeIteration() 据此判定是否暂停咨询/终止
-        this.turnGuard!.recordTurn({
+        this.getOrCreateTurnGuard(sessionId).recordTurn({
           tokensUsed: getTotalTokens(responseUsage),
           hadToolCalls: toolCalls !== null,
           allToolsFailed: toolCalls !== null && turnToolSucceededCount === 0 && turnToolFailedCount > 0,
@@ -8722,7 +8812,7 @@ ${agentInstructions}
             const fn = t.function as Record<string, unknown> | undefined;
             return { name: String(fn?.name ?? t.name ?? ""), arguments: fn?.arguments ?? t.arguments };
           });
-          this.turnGuard!.recordToolCalls(adapted);
+          this.getOrCreateTurnGuard(sessionId).recordToolCalls(adapted);
         }
 
         if (this.isInterrupted(sessionId)) {
@@ -10339,6 +10429,8 @@ ${agentInstructions}
       controller.abort();
     }
     this.sessionControllers.delete(sessionId);
+    // 2026-11-02（D5）：会话被清理时同步丢弃它的护栏实例，避免 Map 在长跑进程中常驻
+    this.dropTurnGuard(sessionId);
     if (options.removeMessages) {
       this.removeSessionMessages([sessionId]);
       // 上游 v0.3.1：消息删除时同步清理会话图片目录（多模态图片持久化配套，尽力而为）

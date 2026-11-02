@@ -166,3 +166,65 @@ test("E5: 运行中的临时会话不出现在会话列表（ephemeral 标记必
   // 且 getSession 必须仍能读到该标记（自动拒绝分流依赖它）
   assert.equal(manager.getSession(ephemeralId)?.ephemeral, true);
 });
+
+// ============================================================================
+// D5：循环护栏实例必须按会话隔离
+//
+// 原实现是 SessionManager 上的单实例字段，`createSession` 无条件重建它。
+// 临时会话也走 createSession，于是：
+// ① 派一次 dispatch 就把主会话累积的连续失败/循环检测计数清零（护栏静默失效）；
+// ② L2 并行 dispatch 的多个临时会话共享同一实例，计数互相串号。
+// ============================================================================
+
+test("E6: 临时会话不清空主会话的护栏计数（D5）", async () => {
+  const projectRoot = createTempDir(env, "deepcode-ephemeral-");
+  const manager = createManager(projectRoot);
+
+  // 主会话跑两轮，让护栏累积到 2 次 LLM 迭代
+  await manager.handleUserPrompt({ text: "第一轮", images: [] });
+  await manager.handleUserPrompt({ text: "第二轮", images: [] });
+  const mainSessionId = manager.getActiveSessionId();
+  assert.ok(mainSessionId, "主会话应已建立");
+
+  const before = manager.getTurnGuardState(mainSessionId!);
+  assert.ok(before, "主会话应已有护栏实例");
+  assert.ok(before!.turnsCompleted >= 2, `主会话应已累积 ≥2 轮，实际 ${before!.turnsCompleted}`);
+
+  await runOneEphemeral(manager, projectRoot);
+
+  const after = manager.getTurnGuardState(mainSessionId!);
+  assert.ok(after, "临时会话不得让主会话的护栏实例消失");
+  assert.equal(
+    after!.turnsCompleted,
+    before!.turnsCompleted,
+    "临时会话建会话时把主会话的轮次计数清零了（护栏静默失效）"
+  );
+});
+
+test("E7: 临时会话持有独立护栏实例，计数从零开始（D5）", async () => {
+  const projectRoot = createTempDir(env, "deepcode-ephemeral-");
+  const manager = createManager(projectRoot);
+
+  await manager.handleUserPrompt({ text: "第一轮", images: [] });
+  await manager.handleUserPrompt({ text: "第二轮", images: [] });
+  const mainSessionId = manager.getActiveSessionId()!;
+  const mainBefore = manager.getTurnGuardState(mainSessionId)!.turnsCompleted;
+
+  const ephemeralId = await manager.createSession({ text: "临时任务" }, undefined, {
+    ephemeral: true,
+    roleSystemPrompt: "You are the coder role.",
+  });
+
+  const ephemeralState = manager.getTurnGuardState(ephemeralId);
+  assert.ok(ephemeralState, "临时会话应有自己的护栏实例");
+  assert.equal(
+    ephemeralState!.turnsCompleted,
+    1,
+    `临时会话应从零开始累计（跑 1 轮 = 1），实际 ${ephemeralState!.turnsCompleted}`
+  );
+  assert.equal(
+    manager.getTurnGuardState(mainSessionId)!.turnsCompleted,
+    mainBefore,
+    "建临时会话不得改动主会话的护栏计数"
+  );
+});
