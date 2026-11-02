@@ -2,31 +2,40 @@
 //!
 //! 退出语义 = 先优雅关闭引擎（SIGTERM → 3s → SIGKILL）再退出应用，
 //! 不留孤儿进程（PRD FR-1.4 / 验收标准 4）。
-//! 图标为程序内生成的实心圆点（避免 M1 引入二进制资源依赖；
-//! 正式应用图标已在 icons/ 就位，M5 打包时统一替换托盘图标）。
+//! 图标为 icons/tray-icon.png（白底灰色兔狲头像，macOS 菜单栏风格；
+//! 编译期嵌入，无运行时文件依赖）。
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager};
 
-/// 程序内生成 32×32 托盘图标（品牌蓝实心圆点，RGBA）。
+/// 编译期嵌入的托盘图标（64×64 RGBA PNG，白底灰色兔狲头像）。
+const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon.png");
+
+/// 解码托盘图标（PNG → RGBA，解码失败回落实心圆点）。
 fn tray_icon_image() -> tauri::image::Image<'static> {
-    const SIZE: usize = 32;
-    let mut rgba = vec![0u8; SIZE * SIZE * 4];
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let dx = x as i32 - 16;
-            let dy = y as i32 - 16;
-            if dx * dx + dy * dy <= 13 * 13 {
-                let i = (y * SIZE + x) * 4;
-                rgba[i] = 0x2E;
-                rgba[i + 1] = 0x6B;
-                rgba[i + 2] = 0xFF;
-                rgba[i + 3] = 0xFF;
+    match tauri::image::Image::from_bytes(TRAY_ICON_PNG) {
+        Ok(img) => img,
+        Err(_) => {
+            // 回落：品牌蓝实心圆点（与历史行为一致，仅防御性分支）
+            const SIZE: usize = 32;
+            let mut rgba = vec![0u8; SIZE * SIZE * 4];
+            for y in 0..SIZE {
+                for x in 0..SIZE {
+                    let dx = x as i32 - 16;
+                    let dy = y as i32 - 16;
+                    if dx * dx + dy * dy <= 13 * 13 {
+                        let i = (y * SIZE + x) * 4;
+                        rgba[i] = 0x2E;
+                        rgba[i + 1] = 0x6B;
+                        rgba[i + 2] = 0xFF;
+                        rgba[i + 3] = 0xFF;
+                    }
+                }
             }
+            tauri::image::Image::new_owned(rgba, SIZE as u32, SIZE as u32)
         }
     }
-    tauri::image::Image::new_owned(rgba, SIZE as u32, SIZE as u32)
 }
 
 /// 装配系统托盘（setup 阶段调用一次）。

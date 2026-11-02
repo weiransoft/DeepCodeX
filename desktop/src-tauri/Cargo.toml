@@ -13,8 +13,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-# tray-icon feature：系统托盘（FR-1.5）；macos-private-api：titleBarStyle Overlay 需要
-tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
+# tray-icon feature：系统托盘（FR-1.5）；image-png：托盘图标 PNG 解码；
+# macos-private-api：titleBarStyle Overlay 需要
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 # 本地 SQLite 密钥库（2026-10-30 起替代系统钥匙串：免 GUI 授权框）。
 # bundled：静态编译 SQLite，免系统依赖（Windows 交叉验证/打包同样零依赖）
 rusqlite = { version = "0.32", features = ["bundled"] }
