@@ -707,6 +707,17 @@ export class SessionPool {
       nonInteractive: true,
       // —— 事件桥接（chatId 闭包绑定）——
       onAssistantMessage: (message) => {
+        // 不可见消息不推送（2026-11-02）：与历史路径对齐——前端 convertHistory
+        // 明确过滤 `visible === false`，实时通道此前没有这道闸，导致同一会话
+        // 「实时一副面孔、刷新后另一副」。
+        //
+        // 典型形态是「模型决定调用工具那一轮」的 assistant 消息：正文全空白
+        // （`"\n\n"`）、tool_calls 与 reasoning_content 都在 messageParams 里，
+        // 引擎按 `(content || reasoning).trim()` 判定 visible=false。此前它被
+        // 推给前端，固化成空助手气泡并兜底显示「（本轮无文本回复）」——用户
+        // 看到的是「模型没说话」，实际是模型在调工具。思考内容由
+        // llm_delta.thinkingText 通道承载，不依赖本条，故丢弃不丢信息。
+        if (message.visible === false) return;
         // steering W1①：载荷补 role + meta——注入指令的 system 消息带
         // meta.steeringInject 标记（core C1②），前端据此渲染「指令注入」样式，
         // 替代脆弱的内容前缀匹配

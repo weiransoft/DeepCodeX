@@ -275,6 +275,52 @@ test("pool：sendMessage 应同步受理并经 SSE 桥接 llm_delta / assistant_
   }
 });
 
+test("pool：工具轮次的空正文助手消息不得桥接（避免「本轮无文本回复」假象）", async () => {
+  // 复现真实链路（2026-11-02）：用户发「@某智能体 chat」→ 模型这一轮只决定
+  // 调用工具、正文零输出（`content` 为 "\n\n"，tool_calls 与 reasoning_content
+  // 都在 messageParams 里）→ 引擎按 `(content||reasoning).trim()` 把这条
+  // assistant 消息标成 visible=false → 实时通道此前不看该字段，照样推给前端，
+  // 前端固化成空助手气泡并兜底显示「（本轮无文本回复）」；刷新后历史路径过滤
+  // 掉它，消息又消失了——同一会话两副面孔。
+  let requestCount = 0;
+  const p = await createTestPool((): LLMStreamEvent[] => {
+    requestCount += 1;
+    if (requestCount === 1) {
+      return [
+        { type: "tool_call_start", id: "tc-blank-1", name: "bash" },
+        { type: "tool_call_delta", id: "tc-blank-1", argumentsJsonDelta: JSON.stringify({ command: "echo noop" }) },
+        { type: "tool_call_end", id: "tc-blank-1" },
+        { type: "message_end", stopReason: "tool_use", usage: { inputTokens: 3, outputTokens: 1 } },
+      ];
+    }
+    return [
+      { type: "text_delta", text: "工具执行完成" },
+      { type: "message_end", stopReason: "end_turn", usage: { inputTokens: 2, outputTokens: 1 } },
+    ];
+  }, 5);
+  const { chatId } = await p.createChat(tmpRoot, ctx);
+  subscribeFrames(p, chatId);
+
+  p.sendMessage(chatId, { text: "跑一下" }, ctx);
+  await waitForFrame(chatId, "done");
+
+  const assistantFrames = frames.filter(
+    (frame) => frame.data?.chatId === chatId && frame.event === "assistant_message"
+  );
+  // 关键断言：任何一条 assistant_message 帧都不得是空白正文
+  for (const frame of assistantFrames) {
+    assert.ok(
+      String(frame.data.content ?? "").trim() !== "",
+      `不得桥接空正文助手消息（前端会渲染成「本轮无文本回复」），实收：${JSON.stringify(frame.data.content)}`
+    );
+  }
+  // 收尾的正常回复仍必须送达（过滤只针对不可见消息，不能把真实回复一起吞掉）
+  assert.ok(
+    assistantFrames.some((frame) => frame.data.content === "工具执行完成"),
+    "工具执行后的正式回复必须桥接"
+  );
+});
+
 test("pool：同一 chatId 的并发 sendMessage 应串行执行（第二轮在第一轮结束后开始）", async () => {
   const infiniteScript = (request: any): LLMStreamEvent[] => {
     void request;
