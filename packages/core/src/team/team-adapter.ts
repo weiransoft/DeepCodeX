@@ -249,6 +249,14 @@ export interface DispatchRunnerResult {
   endReason: "completed" | "max-rounds" | "aborted" | "error";
   /** endReason 非 completed 时的原因说明 */
   error?: string;
+  /**
+   * 因「后台执行无人可审批」而被自动拒绝的工具（2026-11-02 接线审查 D2）
+   *
+   * 为什么放在结果里：临时会话不再因待审批而整体 aborted，而是自动拒绝这几个
+   * 工具、让模型继续。调用方（dispatch 报告）必须能看到"卡在哪"，否则用户
+   * 只会拿到一份看似完成、实则缺少写操作的结果。
+   */
+  deniedTools?: Array<{ tool: string; reason: string }>;
 }
 
 /** 工具能力执行器（由宿主注入，team 模块不反向依赖 session 层） */
@@ -885,11 +893,30 @@ export async function executeDispatch(
         for (const call of runResult.toolCalls) {
           eventLog?.append("dispatch/tool-result", { tool: call.tool, ok: call.ok });
         }
+        // 被自动拒绝的工具单独留痕（denied:true 复用既有事件类型，不新增 schema 面）
+        for (const denied of runResult.deniedTools ?? []) {
+          eventLog?.append("dispatch/tool-result", {
+            tool: denied.tool,
+            ok: false,
+            denied: true,
+            reason: denied.reason,
+          });
+        }
       } catch {
         // 日志失败不影响主链路
       }
       const status: DispatchStatus =
         runResult.endReason === "completed" ? "succeeded" : runResult.endReason === "aborted" ? "cancelled" : "failed";
+      // 后台执行无人可审批 → 部分工具被自动拒绝；必须显式播报，否则用户会以为
+      // "completed" 就等于改动都已落地（2026-11-02 接线审查 D2）。
+      if (runResult.deniedTools && runResult.deniedTools.length > 0) {
+        onProgress?.(
+          status,
+          `自动拒绝 ${runResult.deniedTools.length} 项需人工审批的工具：${runResult.deniedTools
+            .map((item) => item.tool)
+            .join("、")}（后台执行无人可批准）`
+        );
+      }
       onProgress?.(
         runResult.endReason === "completed" ? "succeeded" : status,
         `执行器结束：${runResult.endReason}（${runResult.rounds} 轮，${runResult.toolCalls.length} 次工具调用）`

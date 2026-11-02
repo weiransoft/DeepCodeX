@@ -1542,6 +1542,14 @@ export class SessionManager {
    * CommandSafety 构造时编译黑名单正则，跨轮次复用避免重复编译开销。
    */
   private commandSafety: CommandSafety | undefined;
+  /**
+   * 临时会话被自动拒绝的工具（2026-11-02，接线审查 D2）
+   *
+   * key = sessionId（临时会话），value = 累积的 `{ tool, reason }` 列表。
+   * 主循环在 `applyEphemeralAutoDeny` 里写入，`runEphemeral` 收尾时读出塞进结果
+   * （供 dispatch 报告展示"卡在哪些工具上"）并删除该 key，避免临时会话 ID 常驻内存。
+   */
+  private readonly ephemeralDeniedTools = new Map<string, Array<{ tool: string; reason: string }>>();
   private activeSessionId: string | null = null;
   private activePromptController: AbortController | null = null;
   // SkillManager 实例（技能扫描/解析/去重/归一化，见 docs/dev/review.md CRITICAL-1 模块 3）
@@ -4253,6 +4261,15 @@ ${agentInstructions}
       `结果：${output.endReason === "completed" ? "完成" : output.endReason === "max-rounds" ? "达到工具轮次上限" : output.endReason === "aborted" ? "已中止" : "失败"}`,
       `工具调用：${output.toolCalls.length} 次`,
     ];
+    if (output.deniedTools && output.deniedTools.length > 0) {
+      lines.push(`自动拒绝：${output.deniedTools.length} 项工具需要人工审批（后台执行无人可批准）`);
+      for (const item of output.deniedTools.slice(0, 5)) {
+        lines.push(`  · ${item.tool}｜${item.reason}`);
+      }
+      if (output.deniedTools.length > 5) {
+        lines.push(`  · 其余 ${output.deniedTools.length - 5} 项省略`);
+      }
+    }
     if (output.error) {
       lines.push(`原因：${output.error}`);
     }
@@ -4331,32 +4348,42 @@ ${agentInstructions}
         endReason = "aborted";
         error = "运行被中止";
       } else if (status === "ask_permission") {
+        // 兜底分支：ephemeral 会话里待审批工具已在主循环被 applyEphemeralAutoDeny
+        // 就地改判 deny，正常不会走到这里。若仍出现（例如未来新增了绕过该分流的
+        // 路径），保持"明确告知而非静默降级"的原则。
         endReason = "aborted";
-        error = "该任务需要人工审批，请在主对话中重试（临时运行无法接收审批交互）";
+        error = "该任务需要人工审批，但临时运行没有审批交互端（请检查 ephemeral 自动拒绝分流是否被绕过）";
       } else {
         endReason = "error";
         error = entry?.failReason ?? `执行未完成（status=${status}）`;
       }
 
+      // 被自动拒绝的工具（可能分布在多轮里）——让 dispatch 报告能指出"卡在哪"
+      const deniedTools = this.ephemeralDeniedTools.get(sessionId) ?? [];
       const result: EphemeralRunResult = {
         text,
         toolCalls,
         rounds: toolCalls.length,
         endReason,
         ...(error ? { error } : {}),
+        ...(deniedTools.length > 0 ? { deniedTools: [...deniedTools] } : {}),
       };
       return result;
     } catch (e) {
+      const deniedOnError = sessionId ? (this.ephemeralDeniedTools.get(sessionId) ?? []) : [];
       return {
         text: "",
         toolCalls: [],
         rounds: toolCallCount(),
         endReason: "error",
         error: e instanceof Error ? e.message : String(e),
+        ...(deniedOnError.length > 0 ? { deniedTools: [...deniedOnError] } : {}),
       };
     } finally {
       clearInterval(timer);
       if (sessionId) {
+        // 汇总数据用完即清：临时会话 ID 不应在 manager 生命周期内常驻
+        this.ephemeralDeniedTools.delete(sessionId);
         // 审计：临时会话的完整消息先落到 team-runs 下，再从会话存储清理
         this.archiveEphemeralSession(sessionId);
         this.discardEphemeralSession(sessionId);
@@ -4873,6 +4900,51 @@ ${agentInstructions}
     }
     permissionPlan.askPermissions.length = 0;
     permissionPlan.askPermissions.push(...remainingAsk);
+  }
+
+  /**
+   * 临时会话的审批兜底（2026-11-02，接线审查 D2）：待审批工具就地改判 deny。
+   *
+   * ## 为什么不是"把审批卡弹给用户"
+   *
+   * 临时会话是 dispatch / L2 子任务的执行载体，`runEphemeral` 收尾时会在 finally 里
+   * 归档并**删除**该会话。主循环一旦因 `askPermissions` 非空而 `return`
+   * （status=ask_permission），就没有任何时机等待人工决策：runEphemeral 立刻把结果
+   * 判成 aborted 并清理会话，用户随后点下审批卡也指向一个已不存在的会话——这正是
+   * Web 端"幽灵审批卡"的成因。L2 同层并行多个角色时同时弹 N 张卡同样不可用。
+   *
+   * ## 语义
+   *
+   * ask → deny：主循环不再暂停，`appendToolMessages` 为这些 tool_call 合成失败回执，
+   * 文案走 `denyReasons`（说明"后台执行无法获得人工审批、请改用只读手段或如实报告"），
+   * 模型据此调整策略继续跑，最终产出一份**说明卡点**的报告，而不是笼统的 aborted。
+   *
+   * 需要 dispatch 真正改代码的用户，把 `permissions.mode` 设为 `bypass` 即可：
+   * 该模式下 `computeToolCallPermissions` 全量 allow，根本不会产生待审批项。
+   *
+   * @param sessionId 临时会话 ID（用于把被拒工具汇总进运行结果）
+   * @param permissionPlan computeToolCallPermissions 产物（就地修改）
+   * @returns toolCallId → 模型可见的拒绝原因（供 appendToolMessages 生成回执）
+   */
+  private applyEphemeralAutoDeny(sessionId: string, permissionPlan: PermissionPlan): Record<string, string> {
+    const denyReasons: Record<string, string> = {};
+    const denied = this.ephemeralDeniedTools.get(sessionId) ?? [];
+    for (const request of permissionPlan.askPermissions) {
+      const entry = permissionPlan.permissions.find((item) => item.toolCallId === request.toolCallId);
+      if (entry) {
+        entry.permission = "deny";
+      }
+      const detail = request.description || request.command || "no details";
+      denyReasons[request.toolCallId] =
+        `Tool "${request.name}" (${detail}) requires human approval, but this run is an unattended ` +
+        "background execution with no interface to approve it. Do not retry the same call. Continue with " +
+        "read-only means if that still satisfies the task, and state explicitly in your final answer what " +
+        "a human needs to run.";
+      denied.push({ tool: request.name, reason: detail });
+    }
+    this.ephemeralDeniedTools.set(sessionId, denied);
+    permissionPlan.askPermissions.length = 0;
+    return denyReasons;
   }
 
   /**
@@ -8525,6 +8597,8 @@ ${agentInstructions}
               resolveSnippetPath: (id, snippetId) => getSnippet(id, snippetId)?.filePath,
             })
           : null;
+        /** 本轮被临时会话自动拒绝的工具（toolCallId → 模型可见原因），非 ephemeral 恒为 undefined */
+        let ephemeralDenyReasons: Record<string, string> | undefined;
         // 审批分流（docs/dev/web-approval.md）：只要存在待审批项就执行两级
         // 自动放行判定——
         // 1. 会话级「总是允许」scope：任何审批模式（manual/auto/bypass 之外的
@@ -8536,6 +8610,17 @@ ${agentInstructions}
           const allowReadonlyPassthrough =
             effectivePermissionSettings?.mode === "auto" && !this.getSession(sessionId)?.planMode;
           this.applyAutoApprovalFilter(permissionPlan, allowReadonlyPassthrough);
+        }
+        // 临时会话（dispatch / L2 子任务）没有可交互的审批端：主循环一旦在
+        // askPermissions 上 return，runEphemeral 会立刻判 aborted 并删掉会话，
+        // 审批卡则被推到宿主变成"幽灵卡"。这里把残余待审批项就地改判 deny，
+        // 让模型拿到合成回执后自行调整（详见 applyEphemeralAutoDeny）。
+        if (
+          permissionPlan &&
+          permissionPlan.askPermissions.length > 0 &&
+          this.getSession(sessionId)?.ephemeral === true
+        ) {
+          ephemeralDenyReasons = this.applyEphemeralAutoDeny(sessionId, permissionPlan);
         }
         if (permissionPlan) {
           assistantMessage.meta = {
@@ -8571,6 +8656,7 @@ ${agentInstructions}
           }
           const toolAppendResult = await this.appendToolMessages(sessionId, toolCalls, {
             messagePermissions: permissionPlan?.permissions,
+            ...(ephemeralDenyReasons ? { denyReasons: ephemeralDenyReasons } : {}),
           });
           waitingForUser = toolAppendResult.waitingForUser;
           turnToolFailedCount = toolAppendResult.failedCount;
@@ -10764,6 +10850,13 @@ ${agentInstructions}
     options: {
       permissionOverrides?: UserToolPermission[];
       messagePermissions?: MessageToolPermission[];
+      /**
+       * 按 toolCallId 覆盖 deny 回执文案（2026-11-02 接线审查 D2）
+       *
+       * 临时会话的自动拒绝不能用"用户拒绝了"的默认文案，否则模型会误以为人类
+       * 主动否掉而放弃或反复重试。透传给 buildPermissionToolExecution。
+       */
+      denyReasons?: Record<string, string>;
     } = {}
   ): Promise<{ waitingForUser: boolean; failedCount: number; succeededCount: number }> {
     // 上游 v0.3.1：记录本批次已加载的技能名（避免同批次重复加载）
@@ -11368,6 +11461,10 @@ ${agentInstructions}
       // 跨 run 失败守卫（修复 2026-10-06 第二条指令空转事故）：目标终态历史
       // 反序列化时做逐条结构校验，非法记录直接丢弃（对齐 forkedFrom 的防御式风格）
       autonomousGoalRuns: this.normalizeAutonomousGoalRuns(value.autonomousGoalRuns),
+      // 临时会话标记（2026-11-02 接线审查 D2）：写侧在 createSession 落盘，读侧必须
+      // 同样保留——否则 getSession() 拿不到 ephemeral，`listSessions()` 的过滤也失效
+      // （临时会话会出现在用户会话列表里），自动拒绝分流同样判断不出来。
+      ...(value.ephemeral === true ? { ephemeral: true } : {}),
     };
   }
 

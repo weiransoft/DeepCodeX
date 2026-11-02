@@ -144,3 +144,25 @@ test("E4: 连续两次临时会话互不影响 activeSessionId", async () => {
   assert.equal(manager.getActiveSessionId(), mainSessionId);
   assert.equal(manager.listSessions().length, 1);
 });
+
+test("E5: 运行中的临时会话不出现在会话列表（ephemeral 标记必须能跨序列化保留）", async () => {
+  const projectRoot = createTempDir(env, "deepcode-ephemeral-");
+  const manager = createManager(projectRoot);
+
+  await manager.handleUserPrompt({ text: "第一轮", images: [] });
+  const mainSessionId = manager.getActiveSessionId();
+
+  // 直接建一个临时会话（不经 runEphemeral，故会话仍在索引里未被清理）
+  const ephemeralId = await manager.createSession({ text: "临时任务" }, undefined, {
+    ephemeral: true,
+    roleSystemPrompt: "You are the coder role.",
+  });
+  assert.notEqual(ephemeralId, mainSessionId);
+
+  // 修复前 normalizeSessionEntry 会丢掉 ephemeral 字段，导致过滤失效（返回 2 条）
+  const sessions = manager.listSessions();
+  assert.equal(sessions.length, 1, `临时会话不得进入列表，实际 ${sessions.length} 条`);
+  assert.equal(sessions[0]?.id, mainSessionId);
+  // 且 getSession 必须仍能读到该标记（自动拒绝分流依赖它）
+  assert.equal(manager.getSession(ephemeralId)?.ephemeral, true);
+});

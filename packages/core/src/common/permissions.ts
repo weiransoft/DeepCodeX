@@ -96,11 +96,29 @@ export function parseToolCallForPermissions(toolCall: unknown): PermissionToolCa
   };
 }
 
+/**
+ * 人工拒绝工具调用的默认回执文案
+ *
+ * 这是主对话里「用户点了拒绝」时回喂给模型的原文。临时会话（dispatch）的自动拒绝
+ * 语义不同，会通过 `denyReasons` 覆盖这段文案——见 `buildPermissionToolExecution`。
+ */
+export const DEFAULT_PERMISSION_DENY_MESSAGE =
+  "User denied the required permission for this tool call. Do not try to bypass this decision.";
+
 export function buildPermissionToolExecution(
   toolCall: PermissionToolCall,
   options: {
     permissionOverrides?: UserToolPermission[];
     messagePermissions?: MessageToolPermission[];
+    /**
+     * 按 toolCallId 覆盖 deny 回执文案（2026-11-02，临时会话自动拒绝）
+     *
+     * 为什么需要：临时会话没有可交互的审批端，被要求审批的工具会被就地改判 deny。
+     * 若沿用"用户拒绝了"的默认文案，模型会误以为是人类主动否掉，从而放弃或反复重试；
+     * 用定制文案说明"后台执行、无人可审批、请改用只读手段或如实报告"，模型才能做出
+     * 正确决策（改只读路径继续，或在产出里说明需要人工操作）。
+     */
+    denyReasons?: Readonly<Record<string, string>>;
   }
 ): PermissionToolExecution | null {
   const permission = resolveToolCallPermission(toolCall.id, options);
@@ -108,10 +126,7 @@ export function buildPermissionToolExecution(
     return null;
   }
   if (permission === "deny") {
-    return buildSyntheticToolExecution(
-      toolCall,
-      "User denied the required permission for this tool call. Do not try to bypass this decision."
-    );
+    return buildSyntheticToolExecution(toolCall, options.denyReasons?.[toolCall.id] ?? DEFAULT_PERMISSION_DENY_MESSAGE);
   }
   return buildSyntheticToolExecution(
     toolCall,
