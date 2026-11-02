@@ -452,10 +452,11 @@ export function ChatPane(props: ChatPaneProps) {
     return (
       <main className="chat-pane">
         <div className="chat-toolbar">
-          <span className="chat-toolbar-title" />
-          <button type="button" className="icon-btn" title="文件目录" onClick={onOpenFileDrawer}>
-            <FolderOpenIcon size={17} />
-          </button>
+          <div className="chat-toolbar-actions">
+            <button type="button" className="icon-btn" title="文件目录" onClick={onOpenFileDrawer}>
+              <FolderOpenIcon size={17} />
+            </button>
+          </div>
         </div>
         <div className="chat-welcome">
           <div className="chat-welcome-brand">DeepCodeX</div>
@@ -467,23 +468,22 @@ export function ChatPane(props: ChatPaneProps) {
 
   return (
     <main className="chat-pane">
-      {/* 顶栏：会话标题 + 搜索 / 文件目录入口 */}
+      {/* 顶栏：搜索 / 文件目录入口（不展示对话名称） */}
       <div className="chat-toolbar">
-        <span className="chat-toolbar-title" title={chatTitle}>
-          {chatTitle}
-        </span>
-        <button
-          type="button"
-          className="icon-btn"
-          title="搜索对话内容（⌘/Ctrl+F）"
-          aria-label="搜索对话内容"
-          onClick={() => setSearchOpen(true)}
-        >
-          <SearchIcon size={17} />
-        </button>
-        <button type="button" className="icon-btn" title="文件目录" onClick={onOpenFileDrawer}>
-          <FolderOpenIcon size={17} />
-        </button>
+        <div className="chat-toolbar-actions">
+          <button
+            type="button"
+            className="icon-btn"
+            title="搜索对话内容（⌘/Ctrl+F）"
+            aria-label="搜索对话内容"
+            onClick={() => setSearchOpen(true)}
+          >
+            <SearchIcon size={17} />
+          </button>
+          <button type="button" className="icon-btn" title="文件目录" onClick={onOpenFileDrawer}>
+            <FolderOpenIcon size={17} />
+          </button>
+        </div>
       </div>
 
       {/* 对话内全局搜索：查询 / 命中 / 筛选全部内聚在本组件，App 无需感知 */}

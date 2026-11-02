@@ -447,12 +447,12 @@ body {
   border-bottom: 1px solid var(--app-border);
   flex-shrink: 0;
 }
-.chat-toolbar-title {
-  font-size: 14px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+/* 顶栏右侧操作按钮组：对话名称已移除，仅保留搜索/文件目录等入口，靠右对齐 */
+.chat-toolbar-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .chat-scroll {
