@@ -31,7 +31,12 @@ import {
   type WorkspaceInfo,
 } from "./api";
 import type { ChatEntry, SedimentationSuggestion, UserAttachment } from "./chat-model";
-import { extractPlanFromToolContent, parseBackgroundTaskNotice, parseLeadingJsonBlock } from "./chat-model";
+import {
+  extractPlanFromToolContent,
+  parseBackgroundTaskNotice,
+  parseContextLoadMeta,
+  parseLeadingJsonBlock,
+} from "./chat-model";
 import { getDesktopBridge, isDesktop, type DesktopBridge } from "./desktop-bridge";
 import type { PermissionDecisionChoice } from "./components/PermissionCard";
 import { ActivityBar, type ActivityView } from "./components/ActivityBar";
@@ -294,6 +299,25 @@ export function App() {
     // 归并为专用通知卡片（命令/状态/耗时/输出 + 可折叠日志尾），
     // 避免整段文本进助手气泡导致命令换行碎裂、日志标签暴露
     if (e.role === "system") {
+      // 定义加载注入（智能体 / 技能，meta.skill）：那是**给模型的角色约束**
+      // （整份行为准则与红线清单），不是对话内容。此前落入下方助手气泡分支，
+      // 用户看到的就是一大段「The following custom agent definition has been
+      // loaded…」——归并为可折叠提示条，默认只显示「已加载智能体 · 中文名」
+      const load = parseContextLoadMeta(e.meta);
+      if (load !== null) {
+        setEntries((prev) => [
+          ...prev,
+          {
+            kind: "contextLoad",
+            id: `load-${e.messageId}`,
+            source: load.source,
+            name: load.name,
+            ...(load.role !== undefined ? { role: load.role } : {}),
+            raw: e.content,
+          },
+        ]);
+        return;
+      }
       const notice = parseBackgroundTaskNotice(e.content);
       if (notice !== null) {
         setEntries((prev) => [...prev, { kind: "bgtask", id: `bg-${e.messageId}`, notice }]);
@@ -592,6 +616,20 @@ export function App() {
         const raw = d.meta.steeringText;
         result.push({ kind: "steering", id: `h-${d.id}`, text: typeof raw === "string" && raw !== "" ? raw : content });
       } else if (d.role === "system") {
+        // 定义加载注入（智能体 / 技能，meta.skill）→ 可折叠提示条；
+        // 与实时路径（onAssistantMessage）同源归并，刷新前后呈现一致
+        const load = parseContextLoadMeta(d.meta);
+        if (load !== null) {
+          result.push({
+            kind: "contextLoad",
+            id: `h-${d.id}`,
+            source: load.source,
+            name: load.name,
+            ...(load.role !== undefined ? { role: load.role } : {}),
+            raw: content,
+          });
+          continue;
+        }
         // 后台任务完成/失败通知（引擎 system 消息，与实时帧同源归并）；
         // 解析失败的其他 system 消息落入下方助手管线，不静默丢弃
         const notice = parseBackgroundTaskNotice(content);

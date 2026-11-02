@@ -22,6 +22,10 @@
  * | tool | 工具名 + 可读输出（`extractToolText`），无可读文本时回退原始 JSON |
  * | plan | 执行计划正文与变更说明、后台任务命令与日志尾 |
  *
+ * 定义加载提示条（智能体 / 技能）只索引**名称与 `@token`**，不索引定义原文：
+ * 原文是几千字的角色约束（准则清单），收录进来会让每个常见词都命中一堆噪音，
+ * 与把定义折叠起来的初衷相悖。
+ *
  * 权限卡片不含可检索文本，刻意不入索引。
  *
  * @module web/search
@@ -29,6 +33,7 @@
 
 import type { ChatEntry } from "./chat-model";
 import { extractToolText } from "./chat-model";
+import { agentDisplayName } from "./agent-display";
 
 /** 搜索类别（UI 筛选维度） */
 export type SearchCategory = "user" | "assistant" | "thinking" | "tool" | "plan";
@@ -196,6 +201,18 @@ export function buildSearchDocuments(entries: ReadonlyArray<ChatEntry>): SearchD
         if (n.logTail !== undefined) parts.push(n.logTail);
         if (n.note !== undefined) parts.push(n.note);
         docs.push({ entryId: entry.id, category: "plan", label: "后台任务", text: parts.join("\n") });
+        break;
+      }
+      case "contextLoad": {
+        // 只入索引名称与 @token（不入定义原文，理由见文件头注释）：
+        // 「我当时加载的是哪个智能体」是可回忆的，定义正文不是
+        const display = entry.source === "agent" ? agentDisplayName(entry) : entry.name;
+        docs.push({
+          entryId: entry.id,
+          category: "tool",
+          label: entry.source === "agent" ? "已加载智能体" : "已加载技能",
+          text: `${display} @${entry.name}`,
+        });
         break;
       }
       case "permission":

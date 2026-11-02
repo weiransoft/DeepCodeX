@@ -1372,6 +1372,69 @@ body {
   text-align: left;
 }
 
+/* 定义加载提示条（智能体 / 技能注入）：
+   引擎注入的是给模型的角色约束（整份准则清单），不是对话内容。
+   默认只占一行，定义原文收在折叠区里——刻意做得比助手气泡「矮」很多，
+   让它在滚动时不抢视线的落点。 */
+.context-load {
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-bg-subtle);
+  font-size: 12.5px;
+  overflow: hidden;
+}
+.context-load-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+/* 收起时不要三角，展开态用 hint 文案变化表达（避免三角占位挤压名称） */
+.context-load-summary::-webkit-details-marker {
+  display: none;
+}
+.context-load:hover .context-load-hint {
+  color: var(--app-accent);
+}
+.context-load-label {
+  flex-shrink: 0;
+  color: var(--app-accent);
+  font-weight: 600;
+}
+.context-load-name {
+  flex-shrink: 0;
+  color: var(--app-text);
+  font-weight: 600;
+}
+.context-load-token {
+  flex-shrink: 0;
+  color: var(--app-text-tertiary);
+  font-family: var(--app-font-mono);
+  font-size: 11.5px;
+}
+.context-load-hint {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--app-text-tertiary);
+  font-size: 11.5px;
+}
+.context-load-raw {
+  margin: 0;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--app-border);
+  max-height: 320px;
+  overflow: auto;
+  color: var(--app-text-secondary);
+  font-family: var(--app-font-mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* ============ 文件预览（docs/dev/web-file-preview.md P3） ============ */
 /* 抽屉内容区：纵向 flex（窄屏退化 = 列表在上、预览在下） */
 .drawer-body {

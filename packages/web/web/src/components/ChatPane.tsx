@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { parseMarkdownToA2ui } from "../a2ui/parser";
 import { A2uiSurface } from "../a2ui/renderer";
+import { agentDisplayName } from "../agent-display";
 import type { ChatEntry, PlanTaskItem, SedimentationSuggestion, UserAttachment } from "../chat-model";
 import {
   extractToolText,
@@ -533,6 +534,27 @@ export function ChatPane(props: ChatPaneProps) {
                       <span className="steering-divider-label">指令注入</span>
                       <span className="steering-divider-text">{entry.text}</span>
                     </div>
+                  );
+                case "contextLoad":
+                  // 定义加载注入（智能体 / 技能）：引擎注入的是给模型的角色约束，
+                  // 不是对话内容。默认只露一行「已加载智能体 · 中文名」，
+                  // 定义原文（数千字的准则清单）收进折叠区按需查看——既保住
+                  // 「确实激活了」的可观测性，又不让它淹没正常对话。
+                  return (
+                    <details key={entry.id} className="context-load">
+                      <summary className="context-load-summary">
+                        <span className="context-load-label">
+                          {entry.source === "agent" ? "已加载智能体" : "已加载技能"}
+                        </span>
+                        <span className="context-load-name">
+                          {entry.source === "agent" ? agentDisplayName(entry) : entry.name}
+                        </span>
+                        {/* 技术标识并存：用户后续要手敲 @token 才能再次调用 */}
+                        <span className="context-load-token">@{entry.name}</span>
+                        <span className="context-load-hint">查看定义</span>
+                      </summary>
+                      <pre className="context-load-raw">{entry.raw}</pre>
+                    </details>
                   );
                 case "assistant":
                   return (

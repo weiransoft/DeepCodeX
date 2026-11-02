@@ -137,6 +137,28 @@ export type ChatEntry =
       /** 通知载荷（parseBackgroundTaskNotice 解析结果） */
       notice: BackgroundTaskNotice;
     }
+  /**
+   * 上下文注入提示条（智能体 / 技能定义加载，2026-11-02）：
+   * 引擎把 `buildAgentPrompt` / `buildSkillPrompt` 的产出作为 system 消息
+   * （visible=true，meta.skill 记录来源）注入会话——那是**给模型的指令**，
+   * 不是对话内容。此前 Web 把这类 system 消息当助手气泡渲染，整份智能体定义
+   * （行为准则、红线清单）直接糊在对话流里，用户完全无法阅读。
+   *
+   * 归并为一条极简提示条：默认只显示「已加载智能体 · 中文名」，定义原文
+   * 收进折叠区按需展开——既保住「已激活」的可观测性，又不占用阅读视线。
+   */
+  | {
+      kind: "contextLoad";
+      id: string;
+      /** 来源种类：agent = 自定义智能体；skill = 普通技能 */
+      source: "agent" | "skill";
+      /** 技术标识（kebab-case，与 @ 提及 / 目录名同源） */
+      name: string;
+      /** frontmatter `role`：中文角色身份（仅 agent 有） */
+      role?: string;
+      /** 注入给模型的定义原文（折叠区展示） */
+      raw: string;
+    }
   /** 内联权限审批卡片 */
   | {
       kind: "permission";
@@ -866,4 +888,46 @@ export function parseBackgroundTaskNotice(content: string): BackgroundTaskNotice
     notice.logTail = logBody.replace(/^\s+/, "").replace(/\s+$/, "");
   }
   return notice;
+}
+
+/** 上下文注入来源（智能体 / 技能定义加载） */
+export interface ContextLoadInfo {
+  /** 来源种类：agent = 自定义智能体；skill = 普通技能 */
+  source: "agent" | "skill";
+  /** 技术标识（kebab-case，与 @ 提及 / 目录名同源） */
+  name: string;
+  /** frontmatter `role`：中文角色身份（仅 agent 有） */
+  role?: string;
+}
+
+/**
+ * 从引擎消息 meta 识别「定义加载」注入（智能体 / 技能）。
+ *
+ * ## 契约
+ *
+ * 引擎 `buildSkillMessage()` 把 `buildAgentPrompt` / `buildSkillPrompt` 的产出
+ * 作为 system 消息注入会话，并写 `meta.skill` 记录来源（core
+ * `SessionMessage.meta.skill`）：`kind` 区分 agent / skill，`name` 为技术标识，
+ * agent 另有 `role`（中文身份）。
+ *
+ * 这条消息是**给模型的角色约束**（`<agent_content>` / `<skill_content>` 包裹的
+ * 整份定义），不是对话内容——调用方应渲染为提示条而不是助手气泡。
+ *
+ * @param meta 消息元信息（SSE 帧与历史 DTO 同形）
+ * @returns 结构化来源信息；非定义加载消息返回 null（调用方按普通消息处理）
+ */
+export function parseContextLoadMeta(meta: Record<string, unknown> | null | undefined): ContextLoadInfo | null {
+  if (meta === null || meta === undefined) return null;
+  const raw = meta.skill;
+  if (raw === null || typeof raw !== "object") return null;
+  const skill = raw as Record<string, unknown>;
+  const name = typeof skill.name === "string" ? skill.name.trim() : "";
+  // name 是唯一必需字段：空名无法展示也无法回指，视作非定义加载
+  if (name === "") return null;
+  const role = typeof skill.role === "string" && skill.role.trim() !== "" ? skill.role : undefined;
+  return {
+    source: skill.kind === "agent" ? "agent" : "skill",
+    name,
+    ...(role !== undefined ? { role } : {}),
+  };
 }
