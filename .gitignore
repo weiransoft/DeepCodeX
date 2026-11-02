@@ -24,6 +24,12 @@ out/
 *.vsix
 .deepcode/settings.json
 
+# team 运行状态（L1-3 dispatch / L2 编排事件日志：<projectRoot>/.deepcode/team-runs/<runId>/）
+# 属于运行时产物，每次 dispatch / 编排都会新增目录，不应入库。
+# 必须带 `**/`：projectRoot 可能是仓库根，也可能是 packages/core 这类子包目录
+# （测试的临时 projectRoot 一般落在 /tmp，但偶尔会落回包目录）。
+**/.deepcode/team-runs/
+
 # TypeScript build info files
 *.tsbuildinfo
 

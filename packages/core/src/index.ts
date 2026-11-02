@@ -1336,3 +1336,13 @@ export type { SuggestedCommandCapture } from "./eag/suggestion-auto";
 // 导出范围：白名单导出（仅 public API），避免内部实现泄露
 // ============================================================================
 export * from "./v2/index.js";
+
+// dispatch 事件日志（L1-3，2026-11-02）
+// append-only JSONL，可审计重建「上次为什么选这个角色、调了几次工具」。
+export {
+  DispatchEventLog,
+  generateDispatchRunId,
+  parseDispatchEvents,
+  summarizeDispatchEvents,
+} from "./team/dispatch-event-log.js";
+export type { DispatchEvent, DispatchEventType, DispatchEndReason } from "./team/dispatch-event-log.js";
