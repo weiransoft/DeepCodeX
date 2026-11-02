@@ -17,6 +17,7 @@ import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type 
 import { humanSize } from "../format";
 import type { UserAttachment } from "../chat-model";
 import { fetchCapabilities, type Capabilities } from "../api";
+import { agentDisplayName, agentMentionHint } from "../agent-display";
 import { listModels, setDefaultModel, type ModelOption } from "../desktopConfig";
 import {
   BotAvatarIcon,
@@ -58,6 +59,8 @@ export interface ComposerProps {
 interface MentionItem {
   /** 补全后插入的名字（@ 后面的 token） */
   token: string;
+  /** 展示名（Agent 有中文名时与 token 不同；技能/MCP 同 token） */
+  label: string;
   /** 种类徽标文案 */
   kindLabel: string;
   /** 说明（技能 description / MCP command） */
@@ -165,17 +168,38 @@ export function Composer(props: ComposerProps) {
     const items: MentionItem[] = [];
     for (const s of data.skills) {
       if (s.kind === "skill" && hit(s.name)) {
-        items.push({ token: s.name, kindLabel: "技能", description: s.description, kindClass: "mention-badge-skill" });
+        items.push({
+          token: s.name,
+          label: s.name,
+          kindLabel: "技能",
+          description: s.description,
+          kindClass: "mention-badge-skill",
+        });
       }
     }
     for (const s of data.skills) {
-      if (s.kind === "agent" && hit(s.name)) {
-        items.push({ token: s.name, kindLabel: "Agent", description: s.description, kindClass: "mention-badge-agent" });
+      if (s.kind === "agent") {
+        // 中文名与英文标识都能过滤：用户可能记得「产品经理」，也可能记得 token
+        const label = agentDisplayName(s);
+        if (!hit(s.name) && !hit(label)) continue;
+        items.push({
+          token: s.name,
+          label,
+          kindLabel: "Agent",
+          description: s.description,
+          kindClass: "mention-badge-agent",
+        });
       }
     }
     for (const m of data.mcpServers) {
       if (hit(m.name)) {
-        items.push({ token: m.name, kindLabel: "MCP", description: m.command, kindClass: "mention-badge-mcp" });
+        items.push({
+          token: m.name,
+          label: m.name,
+          kindLabel: "MCP",
+          description: m.command,
+          kindClass: "mention-badge-mcp",
+        });
       }
     }
     return items.slice(0, 8);
@@ -484,7 +508,12 @@ export function Composer(props: ComposerProps) {
                 }}
               >
                 <span className={`mention-badge ${item.kindClass}`}>{item.kindLabel}</span>
-                <span className="mention-token">{item.token}</span>
+                <span className="mention-token">{item.label}</span>
+                {item.label !== item.token && (
+                  <span className="mention-id" title={`补全插入 ${item.token}`}>
+                    @{item.token}
+                  </span>
+                )}
                 <span className="mention-desc">{item.description}</span>
               </button>
             ))
@@ -567,11 +596,16 @@ export function Composer(props: ComposerProps) {
                     type="button"
                     key={`${kind}-${s.name}`}
                     className="composer-menu-item"
-                    title={s.path}
+                    title={kind === "agent" ? `${agentMentionHint(s)} · ${s.path}` : s.path}
                     onClick={() => insertToken(s.name)}
                   >
                     {kind === "agent" ? <BotAvatarIcon size={13} /> : null}
-                    <span className="composer-menu-name">{s.name}</span>
+                    <span className="composer-menu-name">{kind === "agent" ? agentDisplayName(s) : s.name}</span>
+                    {kind === "agent" && (
+                      <span className="composer-menu-id" title={`插入 ${agentMentionHint(s)}`}>
+                        {agentMentionHint(s)}
+                      </span>
+                    )}
                     <span className="composer-menu-meta">{s.description}</span>
                   </button>
                 ));

@@ -258,6 +258,13 @@ export interface CapabilitySkill {
   preset?: boolean;
   /** 分组名（预置智能体按业务类别分组） */
   group?: string;
+  /**
+   * agent 专属：中文角色身份（frontmatter `role`）
+   *
+   * 展示中文名唯一来源——`name` 是技术标识（kebab-case，@ 提及 token 与目录名
+   * 同源），不能直接展示。经 `agent-display.ts` 的 `agentDisplayName()` 取值。
+   */
+  role?: string;
 }
 
 /** MCP 服务器条目（脱敏：不含 env 值） */

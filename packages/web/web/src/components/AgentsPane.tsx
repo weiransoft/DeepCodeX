@@ -12,6 +12,7 @@
  */
 import { useState } from "react";
 import { createAgent, draftAgent, importPresetAgents, setDefaultAgent, type CapabilitySkill } from "../api";
+import { agentDisplayName, agentMentionHint } from "../agent-display";
 
 /** kebab-case 校验（与 AgentRegistry / SedimentationWriter 同口径） */
 const KEBAB_CASE_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -164,10 +165,21 @@ export function AgentsPane({ agents, defaultAgent, onCreated }: AgentsPaneProps)
       .finally(() => setSubmitting(false));
   };
 
+  /**
+   * 默认智能体的中文名
+   *
+   * settings 里存的是技术标识（`agents.default` = kebab-case name），
+   * 与引擎激活链路同源，不能改；这里只是回查列表翻成中文名再展示。
+   * 列表尚未加载（或指向已删除的智能体）时原样显示标识，不隐藏信息。
+   */
+  const defaultAgentEntry = defaultAgent === null ? undefined : agents.find((a) => a.name === defaultAgent);
+  const defaultAgentLabel =
+    defaultAgent === null ? null : defaultAgentEntry !== undefined ? agentDisplayName(defaultAgentEntry) : defaultAgent;
+
   return (
     <div className="agents-pane">
       <div className="agents-default-hint">
-        默认智能体：<strong>{defaultAgent ?? "未设置"}</strong>
+        默认智能体：<strong>{defaultAgentLabel ?? "未设置"}</strong>
         {defaultAgent === null
           ? "（在下方任一智能体上点「设为默认」，新会话即自动激活其角色约束）"
           : "（新会话自动激活；点「默认」徽标可取消）"}
@@ -195,7 +207,10 @@ export function AgentsPane({ agents, defaultAgent, onCreated }: AgentsPaneProps)
           <div className="agents-item-head">
             <span className="mention-badge mention-badge-agent">Agent</span>
             {a.group !== undefined && <span className="agents-item-group">{a.group}</span>}
-            <span className="agents-item-name">{a.name}</span>
+            <span className="agents-item-name">{agentDisplayName(a)}</span>
+            <span className="agents-item-id" title="在输入框输入该标识即可调用">
+              {agentMentionHint(a)}
+            </span>
             <button
               type="button"
               className={`agents-default-btn${defaultAgent === a.name ? " active" : ""}`}
@@ -221,7 +236,10 @@ export function AgentsPane({ agents, defaultAgent, onCreated }: AgentsPaneProps)
           <div className="agents-item-head">
             <span className="mention-badge mention-badge-agent">Agent</span>
             {a.group !== undefined && <span className="agents-item-group">{a.group}</span>}
-            <span className="agents-item-name">{a.name}</span>
+            <span className="agents-item-name">{agentDisplayName(a)}</span>
+            <span className="agents-item-id" title="在输入框输入该标识即可调用">
+              {agentMentionHint(a)}
+            </span>
             <button
               type="button"
               className={`agents-default-btn${defaultAgent === a.name ? " active" : ""}`}

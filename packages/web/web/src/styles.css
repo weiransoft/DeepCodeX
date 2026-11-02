@@ -2914,6 +2914,13 @@ a.icon-btn {
   flex-shrink: 0;
   font-weight: 500;
 }
+/* 智能体菜单项的技术标识（@name）：中文名之后的次要线索 */
+.composer-menu-id {
+  flex-shrink: 0;
+  font-family: var(--app-font-mono);
+  font-size: 10px;
+  color: var(--app-text-tertiary);
+}
 .composer-menu-meta {
   flex: 1;
   min-width: 0;
@@ -3014,6 +3021,13 @@ a.icon-btn {
   font-weight: 600;
   flex-shrink: 0;
 }
+/* @ 提及候选里的技术标识：中文展示名 + @name（真正插入的 token） */
+.mention-id {
+  font-family: var(--app-font-mono);
+  font-size: 10.5px;
+  color: var(--app-text-tertiary);
+  flex-shrink: 0;
+}
 .mention-desc {
   color: var(--app-text-secondary);
   font-size: 12px;
@@ -3060,6 +3074,12 @@ a.icon-btn {
 .skills-item-name {
   font-weight: 600;
   font-size: 13px;
+}
+/* 技能页签里 Agent 条目的技术标识（@name） */
+.skills-item-id {
+  font-family: var(--app-font-mono);
+  font-size: 10.5px;
+  color: var(--app-text-tertiary);
 }
 .skills-item-desc {
   font-size: 12px;
@@ -3657,6 +3677,19 @@ a.icon-btn {
   font-size: 12.5px;
   font-weight: 600;
   color: var(--app-text);
+}
+/* 技术标识（@name）：中文名旁边的可复制线索，弱化但保持可读（不与中文名争焦点） */
+.agents-item-id {
+  font-family: var(--app-font-mono);
+  font-size: 10.5px;
+  color: var(--app-text-tertiary);
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--app-hover);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40%;
 }
 .agents-item-desc {
   margin-top: 3px;

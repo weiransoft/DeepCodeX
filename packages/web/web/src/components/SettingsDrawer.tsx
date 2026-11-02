@@ -10,6 +10,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ConfigForm } from "./ConfigForm";
 import { LdapForm } from "./LdapForm";
 import { AgentsPane } from "./AgentsPane";
+import { agentDisplayName, agentMentionHint } from "../agent-display";
 import { RulesPane } from "./RulesPane";
 import { AuditPane } from "./AuditPane";
 import { type DesktopConfig, type DesktopLdapConfig, type DesktopMcpServer, type DesktopModel } from "../desktopConfig";
@@ -238,7 +239,12 @@ export function SettingsDrawer({ initialConfig, onSave, onClose }: SettingsDrawe
                       >
                         {s.kind === "agent" ? "Agent" : "技能"}
                       </span>
-                      <span className="skills-item-name">{s.name}</span>
+                      <span className="skills-item-name">{s.kind === "agent" ? agentDisplayName(s) : s.name}</span>
+                      {s.kind === "agent" && (
+                        <span className="skills-item-id" title="在输入框输入该标识即可调用">
+                          {agentMentionHint(s)}
+                        </span>
+                      )}
                     </div>
                     {s.description !== "" && <div className="skills-item-desc">{s.description}</div>}
                     <div className="skills-item-path" title={s.path}>

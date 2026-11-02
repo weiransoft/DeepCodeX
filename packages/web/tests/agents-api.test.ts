@@ -15,7 +15,7 @@ import path from "node:path";
 import type { ServerResponse } from "node:http";
 import { handleCreateAgent, handleCreateAgentDraft, parseAgentDraftJson } from "../src/api/agents-api";
 import { extractMentionedAgents } from "../src/api/chat-api";
-import type { CapabilitySkill } from "../src/api/capability-api";
+import { listSkillsSafe, type CapabilitySkill } from "../src/api/capability-api";
 
 let homeTmp = "";
 
@@ -199,4 +199,32 @@ test("POST /api/agents/draft 无 API Key 时返回 503（llm-not-configured）",
   } as any);
   assert.equal(status(), 503);
   assert.equal(json().reason, "llm-not-configured");
+});
+
+test("listSkillsSafe：agent 条目下发中文 role（展示名数据源），技能条目不带", async () => {
+  const { res, status } = makeRes();
+  await handleCreateAgent(
+    makeReq({
+      name: "display-name-agent",
+      description: "用于校验展示名透传的智能体",
+      role: "中文角色身份（English Note）",
+      content: "",
+    }),
+    res,
+    { userId: "u1", username: "tester" } as any
+  );
+  assert.equal(status(), 201);
+
+  const skills = await listSkillsSafe(homeTmp);
+  const found = skills.find((s) => s.name === "display-name-agent");
+  assert.ok(found, "扫描结果应包含刚写入的智能体");
+  assert.equal(found.kind, "agent");
+  // 中文 role 原样下发（剥英文括注是前端展示层的事，接口不下发加工后的文本）
+  assert.equal(found.role, "中文角色身份（English Note）");
+
+  // 普通技能不带 role：前端据此只对智能体做中文名展示
+  const plainSkill = skills.find((s) => s.kind === "skill");
+  if (plainSkill !== undefined) {
+    assert.equal(plainSkill.role, undefined);
+  }
 });

@@ -9,6 +9,7 @@
  */
 import { useState } from "react";
 import type { SedimentationSuggestion } from "../chat-model";
+import { agentDisplayName } from "../agent-display";
 
 /** SedimentationCard 组件属性 */
 export interface SedimentationCardProps {
@@ -48,6 +49,15 @@ function SuggestionItem({
   // 落盘范围选择（默认用户级，与 CLI /sediment-confirm 缺省一致）
   const [scope, setScope] = useState<"user" | "project">("user");
   const isAgent = suggestion.draft.kind === "agent";
+  /**
+   * 卡片标题：智能体用中文角色身份（与智能体列表同一展示口径），技能用原名。
+   *
+   * `draft.name` 是即将落盘的目录名（kebab-case），对读者无意义；`draft.role`
+   * 才是中文身份。落盘路径行仍会显示完整路径，技术名不丢。
+   */
+  const title = isAgent
+    ? agentDisplayName({ name: suggestion.draft.name, role: suggestion.draft.role })
+    : suggestion.draft.name;
 
   // 已沉淀只读态：绿色徽标 + 落盘路径（不再提供二次操作）
   if (resolvedPath !== undefined) {
@@ -57,7 +67,9 @@ function SuggestionItem({
           <span className={`sediment-badge ${isAgent ? "sediment-badge-agent" : "sediment-badge-skill"}`}>
             {isAgent ? "Agent" : "Skill"}
           </span>
-          <span className="sediment-card-title">{suggestion.draft.name}</span>
+          <span className="sediment-card-title" title={suggestion.draft.name}>
+            {title}
+          </span>
           <span className="sediment-resolved-badge">已沉淀</span>
         </header>
         <div className="sediment-resolved-path" title={resolvedPath}>
@@ -75,7 +87,7 @@ function SuggestionItem({
           {isAgent ? "Agent" : "Skill"}
         </span>
         <span className="sediment-card-title" title={suggestion.draft.name}>
-          {suggestion.draft.name}
+          {title}
         </span>
         <span className="sediment-card-desc" title={suggestion.draft.description}>
           {suggestion.draft.description}

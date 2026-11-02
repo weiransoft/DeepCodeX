@@ -33,6 +33,14 @@ export type CapabilitySkill = {
   preset?: boolean;
   /** 分组名（预置智能体按业务类别分组展示；用户自建条目无此字段） */
   group?: string;
+  /**
+   * agent 专属：中文角色身份（frontmatter `role`）
+   *
+   * `name` 是技术标识（kebab-case，@ 提及 token 与目录名同源），不能拿来展示；
+   * 中文名只存在这个字段里。界面统一经 `agent-display.ts` 的
+   * `agentDisplayName()` 取值，缺省时回退 name。
+   */
+  role?: string;
 };
 
 /** MCP 服务器条目（脱敏：不下发 env） */
@@ -73,6 +81,8 @@ export async function listSkillsSafe(projectRoot: string): Promise<CapabilitySki
       kind: s.kind === "agent" ? "agent" : "skill",
       ...(s.preset === true ? { preset: true } : {}),
       ...(typeof s.group === "string" && s.group !== "" ? { group: s.group } : {}),
+      // 中文角色身份：仅 agent 条目有值，供前端展示（name 是技术标识，不适合展示）
+      ...(typeof s.role === "string" && s.role.trim() !== "" ? { role: s.role.trim() } : {}),
     }));
   } catch {
     return [];
