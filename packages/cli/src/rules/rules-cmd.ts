@@ -66,6 +66,14 @@ export interface RulesCommandArgs {
   readonly layer?: "user" | "project";
   /** 项目根目录（用于定位 .deepcode/rules/project-rules.json） */
   readonly projectRoot: string;
+  /**
+   * 全局用户层规则目录覆盖（可选）
+   *
+   * 缺省时使用 `~/.deepcodeX/rules`。存在两个用途：
+   * ① 测试隔离——把读写指向临时目录，避免触碰真实用户环境；
+   * ② 部署/嵌入场景自定义规则存放位置。
+   */
+  readonly globalRulesDir?: string;
 }
 
 /**
@@ -88,20 +96,36 @@ export interface RulesCommandResult {
 // ============================================================================
 
 /**
- * 全局用户层规则目录绝对路径
+ * 全局用户层规则目录（默认 `~/.deepcodeX/rules`）
  *
  * 对应 EAG 方案 §5.5.2 三层规则存储表的全局用户层。
  * 跨项目生效的个人偏好规则存放于此目录下。
+ *
+ * 2026-11-02 改为「调用时解析」而非模块级常量：原实现把 `os.homedir()` 固化在
+ * 导入期，导致测试无法把读写重定向到临时目录，只能真写用户主目录下的
+ * `~/.deepcodeX/rules`——该路径在工作区之外，受限环境下清理会被安全钩子拒绝，
+ * 整个 `eag-rules-cmd.test.ts`（29 例）因此全片失败。改为按 `args.globalRulesDir`
+ * 注入后，测试完全落在临时目录内，用户环境零污染。
+ *
+ * @param override 调用方注入的目录（缺省/空串时回退用户主目录）
+ * @returns 全局用户层规则目录绝对路径
  */
-const GLOBAL_RULES_DIR: string = path.join(os.homedir(), ".deepcodeX", "rules");
+export function resolveGlobalRulesDir(override?: string): string {
+  return override !== undefined && override !== "" ? override : path.join(os.homedir(), ".deepcodeX", "rules");
+}
 
 /**
  * 全局用户层规则文件绝对路径
  *
  * 存放用户通过 /rules add 添加的 USER-xxx 规则（source=user-explicit）。
  * 文件格式为 JSON 数组，每个元素为一条 UserRule 对象。
+ *
+ * @param override 调用方注入的目录（缺省/空串时回退用户主目录）
+ * @returns 全局用户层规则文件绝对路径
  */
-const GLOBAL_RULES_FILE: string = path.join(GLOBAL_RULES_DIR, "global-rules.json");
+export function resolveGlobalRulesFile(override?: string): string {
+  return path.join(resolveGlobalRulesDir(override), "global-rules.json");
+}
 
 /**
  * 项目层规则目录相对路径（相对于 projectRoot）
@@ -301,11 +325,12 @@ function writeRulesToFile(filePath: string, rules: ReadonlyArray<UserRule>): voi
  * 三层规则存储优先级：project > global > seed（同 ID 规则高优先级覆盖低优先级）。
  *
  * @param projectRoot 项目根目录（用于定位项目层规则文件）
+ * @param globalRulesDir 全局用户层规则目录覆盖（缺省 `~/.deepcodeX/rules`）
  * @returns 已合并三层的 RuleStore 实例
  */
-function createStore(projectRoot: string): RuleStore {
+function createStore(projectRoot: string, globalRulesDir?: string): RuleStore {
   // 读取全局用户层规则（~/.deepcodeX/rules/global-rules.json）
-  const globalRules = readRulesFromFile(GLOBAL_RULES_FILE);
+  const globalRules = readRulesFromFile(resolveGlobalRulesFile(globalRulesDir));
   // 读取项目层规则（<projectRoot>/.deepcode/rules/project-rules.json）
   const projectRules = readRulesFromFile(getProjectRulesFile(projectRoot));
   // 构造 RuleStore：seedRules 必填，globalRules 与 projectRules 可选
@@ -528,7 +553,8 @@ function executeAdd(args: RulesCommandArgs, store: RuleStore, buffer: OutputBuff
   }
 
   // 持久化到对应文件（新 RuleStore 为纯内存版，需 CLI 层负责文件 I/O）
-  const targetFile = layer === "user" ? GLOBAL_RULES_FILE : getProjectRulesFile(args.projectRoot);
+  const targetFile =
+    layer === "user" ? resolveGlobalRulesFile(args.globalRulesDir) : getProjectRulesFile(args.projectRoot);
   const existingRules = readRulesFromFile(targetFile);
   writeRulesToFile(targetFile, [...existingRules, rule]);
 
@@ -570,7 +596,7 @@ function executeRemove(args: RulesCommandArgs, _store: RuleStore, buffer: Output
   // 新 API 不支持运行时删除，输出手动编辑指引
   buffer.writeStdout(`ℹ 规则移除需手动编辑规则文件\n`);
   buffer.writeStdout(`  规则 ID: ${args.ruleId}\n`);
-  buffer.writeStdout(`  全局用户层文件: ${GLOBAL_RULES_FILE}\n`);
+  buffer.writeStdout(`  全局用户层文件: ${resolveGlobalRulesFile(args.globalRulesDir)}\n`);
   buffer.writeStdout(`  项目层文件: ${getProjectRulesFile(args.projectRoot)}\n`);
   buffer.writeStdout(`  操作指引: 编辑上述对应文件，删除该规则对象后保存即可\n`);
   buffer.writeStdout(`  提示: USER-xxx 规则在全局用户层文件，PROJ-xxx 规则在项目层文件，SEED-xxx 规则为内置不可删除\n`);
@@ -644,7 +670,7 @@ function executePath(args: RulesCommandArgs, _store: RuleStore, buffer: OutputBu
   const projectRulesFile = getProjectRulesFile(args.projectRoot);
   buffer.writeStdout("规则文件路径\n");
   buffer.writeStdout("========================================\n");
-  buffer.writeStdout(`全局用户层文件: ${GLOBAL_RULES_FILE}\n`);
+  buffer.writeStdout(`全局用户层文件: ${resolveGlobalRulesFile(args.globalRulesDir)}\n`);
   buffer.writeStdout(`项目层文件: ${projectRulesFile}\n`);
   buffer.writeStdout(`项目根目录: ${args.projectRoot}\n`);
   return 0;
@@ -672,7 +698,7 @@ export async function executeRulesCommand(
   const buffer = new OutputBuffer(printToTerminal);
 
   // 从文件系统构造 RuleStore 实例（绑定 projectRoot，合并三层规则）
-  const store = createStore(args.projectRoot);
+  const store = createStore(args.projectRoot, args.globalRulesDir);
 
   // 按子命令分发
   let exitCode: number;

@@ -38,7 +38,7 @@
  * @module cli/tests/eag-rules-cmd
  */
 
-import { test, beforeEach, afterEach } from "node:test";
+import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -54,16 +54,23 @@ import { RuleStore, SEED_RULES, type UserRule, type RuleSeverity } from "@vegamo
 // ============================================================================
 
 /**
- * 真实全局用户层规则文件路径
+ * 测试专用的全局用户层规则目录（按 projectRoot 派生，天然隔离）
  *
- * 新 RLIS API 的全局用户层规则文件位于 ~/.deepcodeX/rules/global-rules.json。
- * 由于 executeRulesCommand 内部仅接收 projectRoot，无法注入自定义路径，
- * 因此测试期间需要备份并清空此文件，避免污染用户环境。
+ * 2026-11-02 修正：原实现直接读写真实的 `~/.deepcodeX/rules`，靠 beforeEach
+ * 备份、afterEach 恢复来「不污染用户环境」。但该路径在工作区之外，受限环境下
+ * 清理会被安全钩子拒绝（`broker denied delete: path=~/.deepcodeX/rules`），
+ * 恢复动作失败后测试产生的规则就留在用户主目录里逐轮累积——实测已堆到 48 条，
+ * 反过来让「共 10 条种子规则」这类断言失败。测试不该动用户数据。
+ *
+ * 现在 `executeRulesCommand` 支持 `globalRulesDir` 注入，且目录由每次测试
+ * 独有的 projectRoot 派生：无需依赖测试钩子的执行时机，也不会跨用例串味。
+ *
+ * @param projectRoot 该测试独占的项目根目录
+ * @returns 该测试独占的全局用户层规则目录
  */
-const realGlobalRulesPath = path.join(os.homedir(), ".deepcodeX", "rules", "global-rules.json");
-
-/** 全局用户规则文件备份内容（beforeEach 设置，afterEach 恢复） */
-let globalRulesBackup: { exists: boolean; content: string } | null = null;
+function globalRulesDirFor(projectRoot: string): string {
+  return path.join(projectRoot, "__global-rules__");
+}
 
 /** 临时目录集合（每个测试独立使用，after 统一清理） */
 const tempDirs: string[] = [];
@@ -81,58 +88,17 @@ function createTempProjectRoot(prefix: string): string {
 }
 
 /**
- * 备份并清空全局用户规则文件
+ * 指定测试的全局用户层规则文件路径（位于该测试的临时 projectRoot 内）
  *
- * 由于新 RLIS API 的 RuleStore 为纯内存版，CLI 层负责读写
- * ~/.deepcodeX/rules/global-rules.json 文件。测试 add 子命令前必须先备份并清空
- * 该文件，测试结束后恢复，避免污染用户环境。
+ * @param projectRoot 该测试独占的项目根目录
+ * @returns 全局用户层规则文件绝对路径
  */
-function backupAndClearGlobalRules(): void {
-  globalRulesBackup = { exists: false, content: "" };
-  if (fs.existsSync(realGlobalRulesPath)) {
-    globalRulesBackup = {
-      exists: true,
-      content: fs.readFileSync(realGlobalRulesPath, "utf8"),
-    };
-    fs.rmSync(realGlobalRulesPath);
-  }
+function testGlobalRulesFile(projectRoot: string): string {
+  return path.join(globalRulesDirFor(projectRoot), "global-rules.json");
 }
-
-/**
- * 恢复全局用户规则文件
- *
- * 如果测试前文件存在，恢复原内容；否则删除测试期间产生的文件。
- * 同时清理测试期间可能创建的空 rules 目录（仅当目录为空时）。
- */
-function restoreGlobalRules(): void {
-  if (!globalRulesBackup) return;
-  if (globalRulesBackup.exists) {
-    fs.mkdirSync(path.dirname(realGlobalRulesPath), { recursive: true });
-    fs.writeFileSync(realGlobalRulesPath, globalRulesBackup.content, "utf8");
-  } else {
-    if (fs.existsSync(realGlobalRulesPath)) {
-      fs.rmSync(realGlobalRulesPath);
-    }
-    // 清理可能被创建的空 rules 目录：仅当目录为空时移除，避免误删用户其他文件
-    const rulesDir = path.dirname(realGlobalRulesPath);
-    if (fs.existsSync(rulesDir)) {
-      const entries = fs.readdirSync(rulesDir);
-      if (entries.length === 0) {
-        fs.rmdirSync(rulesDir);
-      }
-    }
-  }
-  globalRulesBackup = null;
-}
-
-beforeEach(() => {
-  // 每个测试开始前备份并清空全局用户规则文件，确保测试隔离
-  backupAndClearGlobalRules();
-});
 
 afterEach(() => {
-  // 测试结束后恢复用户规则文件，清理所有临时目录
-  restoreGlobalRules();
+  // 清理所有临时目录（含全局规则目录与各 projectRoot）
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -167,7 +133,7 @@ function readRulesFromFile(filePath: string): UserRule[] {
  * @returns 已合并三层的 RuleStore 实例
  */
 function createStoreFromFileSystem(projectRoot: string): RuleStore {
-  const globalRulesFile = path.join(os.homedir(), ".deepcodeX", "rules", "global-rules.json");
+  const globalRulesFile = testGlobalRulesFile(projectRoot);
   const projectRulesFile = path.join(projectRoot, ".deepcode", "rules", "project-rules.json");
   return new RuleStore(SEED_RULES, readRulesFromFile(globalRulesFile), readRulesFromFile(projectRulesFile));
 }
@@ -182,7 +148,7 @@ function createStoreFromFileSystem(projectRoot: string): RuleStore {
  * @param projectRoot 项目根目录（用于隔离测试）
  */
 function listArgs(projectRoot: string): RulesCommandArgs {
-  return { subcommand: "list", projectRoot };
+  return { subcommand: "list", projectRoot, globalRulesDir: globalRulesDirFor(projectRoot) };
 }
 
 /**
@@ -197,6 +163,7 @@ function addArgs(content: string, projectRoot: string, overrides?: Partial<Rules
     subcommand: "add",
     content,
     projectRoot,
+    globalRulesDir: globalRulesDirFor(projectRoot),
     ...overrides,
   };
 }
@@ -205,21 +172,21 @@ function addArgs(content: string, projectRoot: string, overrides?: Partial<Rules
  * 构造 remove 子命令参数
  */
 function removeArgs(ruleId: string, projectRoot: string): RulesCommandArgs {
-  return { subcommand: "remove", ruleId, projectRoot };
+  return { subcommand: "remove", ruleId, projectRoot, globalRulesDir: globalRulesDirFor(projectRoot) };
 }
 
 /**
  * 构造 show 子命令参数
  */
 function showArgs(ruleId: string, projectRoot: string): RulesCommandArgs {
-  return { subcommand: "show", ruleId, projectRoot };
+  return { subcommand: "show", ruleId, projectRoot, globalRulesDir: globalRulesDirFor(projectRoot) };
 }
 
 /**
  * 构造 path 子命令参数
  */
 function pathArgs(projectRoot: string): RulesCommandArgs {
-  return { subcommand: "path", projectRoot };
+  return { subcommand: "path", projectRoot, globalRulesDir: globalRulesDirFor(projectRoot) };
 }
 
 // ============================================================================
@@ -354,7 +321,10 @@ test("C9. add 后 list 可见新规则", async () => {
 test("C10. add 缺少 --content 参数时失败，exitCode 非 0", async () => {
   const projectRoot = createTempProjectRoot("deepcode-add-no-content-");
   // content 为 undefined
-  const result = await executeRulesCommand({ subcommand: "add", projectRoot }, false);
+  const result = await executeRulesCommand(
+    { subcommand: "add", projectRoot, globalRulesDir: globalRulesDirFor(projectRoot) },
+    false
+  );
   assert.notEqual(result.exitCode, 0);
   assert.equal(result.exitCode, 1);
   // stderr 应包含错误说明
@@ -511,6 +481,7 @@ test("G20. 未知子命令时输出错误，exitCode 非 0", async () => {
   const args = {
     subcommand: "unknown" as unknown as "list",
     projectRoot,
+    globalRulesDir: globalRulesDirFor(projectRoot),
   } as RulesCommandArgs;
   const result = await executeRulesCommand(args, false);
   assert.notEqual(result.exitCode, 0);
@@ -527,6 +498,7 @@ test("G21. 空字符串子命令时输出错误（无参数场景的等价运行
   const args = {
     subcommand: "" as unknown as "list",
     projectRoot,
+    globalRulesDir: globalRulesDirFor(projectRoot),
   } as RulesCommandArgs;
   const result = await executeRulesCommand(args, false);
   assert.notEqual(result.exitCode, 0);
@@ -767,7 +739,7 @@ test("C8e. add --layer user 持久化到全局用户层文件", async () => {
   assert.equal(result.exitCode, 0);
 
   // 验证全局用户层文件存在且包含该规则
-  const globalRulesFile = path.join(os.homedir(), ".deepcodeX", "rules", "global-rules.json");
+  const globalRulesFile = testGlobalRulesFile(projectRoot);
   assert.ok(fs.existsSync(globalRulesFile), "全局用户层文件应被创建");
   const rules = readRulesFromFile(globalRulesFile);
   assert.equal(rules.length, 1);
@@ -791,7 +763,7 @@ test("C8f. add --layer project 持久化到项目层文件", async () => {
   assert.equal(rules[0].id, "PROJ-001");
 
   // 全局用户层文件不应被创建
-  const globalRulesFile = path.join(os.homedir(), ".deepcodeX", "rules", "global-rules.json");
+  const globalRulesFile = testGlobalRulesFile(projectRoot);
   assert.ok(!fs.existsSync(globalRulesFile), "全局用户层文件不应被创建");
 });
 
@@ -801,7 +773,10 @@ test("C8f. add --layer project 持久化到项目层文件", async () => {
 
 test("D13b. remove 缺少 --rule-id 参数时失败，exitCode 非 0", async () => {
   const projectRoot = createTempProjectRoot("deepcode-remove-no-id-");
-  const result = await executeRulesCommand({ subcommand: "remove", projectRoot }, false);
+  const result = await executeRulesCommand(
+    { subcommand: "remove", projectRoot, globalRulesDir: globalRulesDirFor(projectRoot) },
+    false
+  );
   assert.notEqual(result.exitCode, 0);
   assert.equal(result.exitCode, 1);
   // stderr 应提示需要 rule-id 参数
