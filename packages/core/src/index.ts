@@ -1370,3 +1370,47 @@ export type { DomainExpertInjection } from "./team/team-adapter.js";
 export { DomainExpertRegistry } from "./team/domain-expert-registry.js";
 export { DomainExpertMatcher } from "./team/domain-expert-matcher.js";
 export { registerAllExperts, EXPECTED_TOTAL_EXPERTS, ALL_DOMAIN_CATEGORIES } from "./team/domain-experts/index.js";
+
+// 自动多角色拆解（L2，2026-11-02）
+// 目标 → 拆解 → 拓扑分层 → 层内并行 → 汇总；四阶段各自可降级。
+// 设计文档：docs/proposals/agent-team-enhancement/l2-orchestration.md
+export {
+  orchestrate,
+  generateOrchestrationRunId,
+  buildRoleBriefs,
+  formatSerializedNote,
+  renderOrchestrationReport,
+  decomposeGoal,
+  buildDecomposeUserPrompt,
+  DECOMPOSE_SYSTEM_PROMPT,
+  executeLayers,
+  aggregateResults,
+  renderLocalReport,
+  AGGREGATE_SYSTEM_PROMPT,
+  validatePlan,
+  topologicalLayers,
+  serializeFileConflicts,
+  normalizeProjectPath,
+  extractJsonObject,
+  callLlmOnce,
+  resolveLlmHandle,
+  OrchestrationBudget,
+  SubtaskNode,
+  OrchestrationPlan,
+} from "./team/orchestrator/index.js";
+export type {
+  OrchestrateParams,
+  OrchestrationProgressEvent,
+  OrchestrationResult,
+  OrchestrationSubtaskResult,
+  OrchestrationAggregate,
+  SerializedMove,
+  SubtaskStatus,
+  DecomposeResult,
+  DecomposeFailureKind,
+  RoleBrief,
+  ExecuteLayersParams,
+  ExecuteLayersResult,
+  SubtaskProgressEvent,
+  LlmOnceResult,
+} from "./team/orchestrator/index.js";
