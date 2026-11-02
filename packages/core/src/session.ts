@@ -1796,6 +1796,10 @@ export class SessionManager {
       projectRoot: this.projectRoot,
       getResolvedSettings: () => this.getResolvedSettings(),
       listSessionMessages: (sessionId: string) => this.listSessionMessages(sessionId),
+      // 2026-11-02（接线审查 D4）：用户级技能/智能体扫描根锚定本实例的引擎数据根。
+      // Web 个人模式下 homeRoot = <engineHomeRoot>/<userId>，此前写死 os.homedir()
+      // 会导致「用户建的智能体扫不到」+「所有用户共享同一份技能目录」。
+      homeRoot: this.homeRoot,
     });
     // AgentRegistry 初始化（T01）：包装既有 SkillManager，复用扫描根/去重/enabledSkills 链；
     // 构造失败降级为空注册表（fail-safe，不阻塞 SessionManager 装配）

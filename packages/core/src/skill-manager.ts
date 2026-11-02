@@ -57,6 +57,18 @@ export interface SkillManagerContext {
   getResolvedSettings: () => { enabledSkills?: Record<string, boolean> };
   /** 会话消息列表获取函数（用于追踪已加载技能） */
   listSessionMessages: (sessionId: string) => SessionMessage[];
+  /**
+   * 引擎数据根目录（可选，2026-11-02 接线审查 D4）
+   *
+   * 用户级扫描根（`~/.deepcode/skills`、`~/.agents/skills`、`~/.trae-cn/builtin_skills`）
+   * 此前一律用 `os.homedir()`。Web 个人模式（`personalOnly=true`）下每个用户的引擎
+   * 数据根是 `<engineHomeRoot>/<userId>`，与进程家目录不是一回事：
+   * - 用户在 Web 里新建的智能体写进自己的 homeRoot，扫描却读进程家目录 → 看不到；
+   * - 更糟的是**所有用户共享进程家目录下的技能/智能体**，多用户场景串号。
+   *
+   * 缺省仍是 `os.homedir()`——CLI 与既有单用户路径逐字节不变。
+   */
+  homeRoot?: string;
 }
 
 /**
@@ -100,7 +112,8 @@ export class SkillManager {
    * @returns 技能根目录数组，每项包含 root（绝对路径）和 displayRoot（展示路径）
    */
   getSkillScanRoots(): Array<{ root: string; displayRoot: string }> {
-    const homeDir = os.homedir();
+    // 用户级根锚定引擎数据根（Web 按用户隔离）；未注入时回退进程家目录，CLI 行为不变
+    const homeDir = this.context.homeRoot ?? os.homedir();
     return [
       // 项目级（最高优先级）
       { root: path.join(this.context.projectRoot, ".deepcode", "skills"), displayRoot: "./.deepcode/skills" },

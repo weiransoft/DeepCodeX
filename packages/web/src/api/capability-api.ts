@@ -16,7 +16,6 @@
  * 只读端点：不修改任何文件；扫描失败降级为空列表（不 500，前端可正常渲染其余能力）。
  */
 
-import os from "node:os";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   SkillManager,
@@ -25,6 +24,7 @@ import {
   type McpServerConfig,
 } from "@vegamo/deepcode-core";
 import { sendJson } from "../http-utils";
+import { engineHomeForUser, type EngineHomeSettings } from "../engine-home";
 import type { AuthContext } from "../user-identity";
 
 /** 技能条目（前端展示 / @ 提及候选；path 仅展示来源，不含内容） */
@@ -86,14 +86,18 @@ export type CapabilitiesResponse = {
  * 都不应拖垮整个端点——返回空数组并保持其余能力可用。
  *
  * 导出复用：chat-api 发送链路的 @agent 激活按同名扫描解析提及名单。
+ *
+ * @param projectRoot 项目根（项目级技能扫描起点）
+ * @param homeRoot 引擎数据家目录（用户级扫描根锚点，2026-11-02 D4）；缺省进程家目录
  */
-export async function listSkillsSafe(projectRoot: string): Promise<CapabilitySkill[]> {
+export async function listSkillsSafe(projectRoot: string, homeRoot?: string): Promise<CapabilitySkill[]> {
   try {
     const manager = new SkillManager({
       projectRoot,
       // 仅列表场景：无 enabledSkills 过滤、无会话消息追踪需求
       getResolvedSettings: () => ({}),
       listSessionMessages: () => [],
+      ...(homeRoot !== undefined ? { homeRoot } : {}),
     });
     // kind 缺省 = 全量（skill + agent）；此处分别取全量后归一
     const all = await manager.listSkills();
@@ -150,32 +154,38 @@ export function listCommandsSafe(): CapabilityCommand[] {
 /**
  * 处理 GET /api/capabilities（已认证）。
  *
- * projectRoot 取用户主目录：技能扫描的用户级根（~/.deepcode/skills 等）
- * 与 projectRoot 无关；bundled: 内置技能随包发布；项目级根在个人模式下
- * 各用户隔离目录内，此处以全局可见性为准（@ 提及与设置页展示全局可安装能力）。
+ * 扫描根（2026-11-02 接线审查 D4）：用户级根锚定**本用户的引擎数据家目录**
+ * （personalOnly=true 时 `<engineHomeRoot>/<userId>`），不再一律用 `os.homedir()`。
+ * 否则 Web 用户在自己 homeRoot 下建的技能/智能体扫不到，而所有人共享进程家目录
+ * 下那一份——多用户串号。
+ *
+ * projectRoot 同样取引擎数据家目录：项目级扫描根（`.deepcode/skills`）原本指向家目录，
+ * 也只是"能扫到点东西"的近似，改锚后与用户实际数据根一致。
  *
  * @param res 响应对象
  * @param _req 请求对象（当前无查询参数）
- * @param _ctx 认证上下文（保留：未来按用户过滤项目级技能）
+ * @param ctx 认证上下文（提供 userId 用于解析 per-user 引擎数据根）
+ * @param settings 归一后的 Web 配置（提供 personalOnly / engineHomeRoot）
  */
 export async function handleListCapabilities(
   res: ServerResponse,
   _req: IncomingMessage,
-  _ctx: AuthContext
+  ctx: AuthContext,
+  settings: EngineHomeSettings
 ): Promise<void> {
-  const projectRoot = os.homedir();
-  const [skills] = await Promise.all([listSkillsSafe(projectRoot)]);
+  const homeRoot = engineHomeForUser(settings, ctx.userId);
+  const [skills] = await Promise.all([listSkillsSafe(homeRoot, homeRoot)]);
   // 默认智能体与技能清单同一次请求下发：设置页据此渲染「当前默认」，
   // 免去再加一个只读端点（数据源同为 resolveCurrentSettings，无需重复解析两次以上）
   let defaultAgent: string | null = null;
   try {
-    defaultAgent = resolveCurrentSettings(projectRoot).defaultAgent ?? null;
+    defaultAgent = resolveCurrentSettings(homeRoot).defaultAgent ?? null;
   } catch {
     defaultAgent = null;
   }
   const payload: CapabilitiesResponse = {
     skills,
-    mcpServers: listMcpServersSafe(projectRoot),
+    mcpServers: listMcpServersSafe(homeRoot),
     defaultAgent,
     commands: listCommandsSafe(),
   };

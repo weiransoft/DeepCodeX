@@ -201,3 +201,38 @@ description: Project version (higher priority)
     fs.rmSync(tmpProject, { recursive: true, force: true });
   }
 });
+
+// ============================================================================
+// homeRoot 注入（2026-11-02 接线审查 D4：Web 多用户隔离）
+// ============================================================================
+
+test("getSkillScanRoots 用户级三个根锚定注入的 homeRoot（多用户隔离）", () => {
+  const engineHome = "/tmp/engine-home-user-42";
+  const manager = new SkillManager({
+    projectRoot: "/tmp/test-project",
+    getResolvedSettings: () => ({}),
+    listSessionMessages: () => [],
+    homeRoot: engineHome,
+  });
+  const roots = manager.getSkillScanRoots();
+
+  for (const display of ["~/.deepcode/skills", "~/.agents/skills", "~/.trae-cn/builtin_skills"]) {
+    const root = roots.find((item) => item.displayRoot === display);
+    assert.ok(root, `缺少用户级根：${display}`);
+    assert.equal(
+      root.root,
+      path.join(engineHome, display.replace("~/", "")),
+      `${display} 必须锚定 homeRoot（否则 Web 多用户会扫到同一个目录）`
+    );
+  }
+
+  // 项目级根不受 homeRoot 影响（那是 projectRoot 的职责）
+  assert.equal(roots[0]?.root, path.join("/tmp/test-project", ".deepcode", "skills"));
+});
+
+test("未注入 homeRoot 时回退进程家目录（CLI 与既有单用户路径零变化）", () => {
+  const manager = createTestSkillManager("/tmp/test-project");
+  const roots = manager.getSkillScanRoots();
+  const userRoot = roots.find((item) => item.displayRoot === "~/.deepcode/skills");
+  assert.equal(userRoot?.root, path.join(os.homedir(), ".deepcode", "skills"));
+});

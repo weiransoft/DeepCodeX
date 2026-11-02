@@ -467,7 +467,7 @@ export async function startWebServer(
       // 能力发现（web-capability T1）：技能 / Agent / MCP 脱敏清单，
       // 供设置抽屉「技能」页签与 Composer「@ 提及」补全面板消费
       if (pathname === "/api/capabilities" && req.method === "GET") {
-        await handleListCapabilities(res, req, ctx);
+        await handleListCapabilities(res, req, ctx, resolved);
         return;
       }
 

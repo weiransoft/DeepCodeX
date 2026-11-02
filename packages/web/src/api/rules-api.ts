@@ -15,9 +15,9 @@
  * 与 CLI `deepcode rules add` 落盘语义完全一致（source=user-explicit, confirmedBy=auto）。
  */
 
-import os from "node:os";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { addGlobalRule, deleteGlobalRule, readGlobalRulesFile, type UserRule } from "@vegamo/deepcode-core";
+import { engineHomeForUser } from "../engine-home";
 import { readJsonBody, sendJson } from "../http-utils";
 import type { AuthContext } from "../user-identity";
 import type { ResolvedWebSettings } from "../types";
@@ -45,10 +45,8 @@ type CreateRuleInput = {
  * @returns 引擎数据家目录绝对路径
  */
 function engineHomeFor(resolved: ResolvedWebSettings, ctx: AuthContext): string {
-  if (resolved.personalOnly) {
-    return `${resolved.engineHomeRoot}/${ctx.userId}`;
-  }
-  return os.homedir();
+  // 与 capability-api / chat-api / audit-api 共用同一实现（D4 收敛点）
+  return engineHomeForUser(resolved, ctx.userId);
 }
 
 /**

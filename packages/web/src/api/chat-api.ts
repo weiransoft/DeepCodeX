@@ -15,7 +15,6 @@
  */
 
 import { pathToFileURL } from "node:url";
-import os from "node:os";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { PermissionScope, UserToolPermission } from "@vegamo/deepcode-core";
 import { parseMultipartRequest, MultipartError } from "../multipart";
@@ -23,6 +22,7 @@ import { ApiError, readJsonBody, sendJson } from "../http-utils";
 import { realpathAllowMissing } from "../jail";
 import { personalUploadRoot } from "../user-files";
 import { listSkillsSafe, type CapabilitySkill } from "./capability-api";
+import { engineHomeForUser } from "../engine-home";
 import type { SessionPool, SendMessageInput } from "../session-pool";
 import type { AuthContext } from "../user-identity";
 import type { SseHub } from "../events";
@@ -453,7 +453,9 @@ export async function handleSendMessage(
   // fail-safe：扫描/激活失败仅日志，绝不阻塞消息发送。
   if (input.text !== undefined && input.text.includes("@")) {
     try {
-      const agents = (await listSkillsSafe(os.homedir())).filter((s) => s.kind === "agent");
+      // 用户级扫描根锚定本用户引擎数据根（D4）：否则 Web 用户自己建的智能体扫不到
+      const homeRoot = engineHomeForUser(settings, ctx.userId);
+      const agents = (await listSkillsSafe(homeRoot, homeRoot)).filter((s) => s.kind === "agent");
       for (const name of extractMentionedAgents(input.text, agents)) {
         const ok = await pool.activateAgent(chatId, ctx, name);
         if (!ok) {

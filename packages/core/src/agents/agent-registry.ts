@@ -49,6 +49,13 @@ export interface AgentRegistryDeps {
   /** 可选：复用宿主既有 SkillManager（SessionManager 装配时注入，共享 isLoaded 追踪）；
    *  缺省时内部新建（独立单元测试场景） */
   skillManager?: SkillManager;
+  /**
+   * 可选：引擎数据根目录（2026-11-02 接线审查 D4）
+   *
+   * 仅在内部新建 SkillManager 时生效；宿主注入了 skillManager 时以那个实例的
+   * homeRoot 为准。缺省 = os.homedir()，CLI 行为不变。
+   */
+  homeRoot?: string;
   /** 可选：结构化日志函数（缺省 console.warn 兜底；禁止打印对话原文与 PII） */
   log?: SedimentLogFn;
 }
@@ -68,6 +75,7 @@ export class AgentRegistry {
         projectRoot: deps.projectRoot,
         getResolvedSettings: deps.getResolvedSettings,
         listSessionMessages: () => [],
+        ...(deps.homeRoot !== undefined ? { homeRoot: deps.homeRoot } : {}),
       });
     this.log =
       deps.log ??
