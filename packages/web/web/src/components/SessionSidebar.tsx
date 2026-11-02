@@ -20,12 +20,14 @@ import {
   BackIcon,
   ChatIcon,
   CloseIcon,
+  EditIcon,
   FolderIcon,
   FolderOpenIcon,
   LogoutIcon,
   PanelLeftIcon,
   PlusIcon,
   RefreshIcon,
+  TrashIcon,
   UserAvatarIcon,
 } from "./icons";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
@@ -62,6 +64,10 @@ export interface SessionSidebarProps {
   onProjectRootChange: (root: string) => void;
   /** 切换工作空间（App 据此重拉过滤后的会话列表并更新新建落点） */
   onWorkspaceChange: (workspaceId: string) => void;
+  /** 重命名会话（App 调服务端 rename API 并更新列表；web-chat-manage.md R3） */
+  onRenameChat: (chatId: string, title: string) => void;
+  /** 删除会话（App 调服务端 delete API 并更新列表；web-chat-manage.md R1） */
+  onDeleteChat: (chatId: string) => void;
   /** 正在创建会话（按钮禁用防连点） */
   creating: boolean;
   /** 登出 */
@@ -114,6 +120,110 @@ function groupChats(chats: ChatSummary[], personalRoot: string, workspaces: Work
   return [...map.entries()]
     .map(([label, group]) => ({ label, chats: group }))
     .sort((a, b) => (a.chats[0]?.updateTime ?? "").localeCompare(b.chats[0]?.updateTime ?? "") * -1);
+}
+
+/** 单条会话项属性（web-chat-manage.md R1/R3：悬停操作区 + 内联重命名） */
+interface ChatItemProps {
+  /** 会话摘要 */
+  chat: ChatSummary;
+  /** 是否为当前选中会话 */
+  active: boolean;
+  /** 选中会话 */
+  onSelect: (chatId: string) => void;
+  /** 提交重命名（chatId + 新标题；空串由调用方拒绝） */
+  onRename: (chatId: string, title: string) => void;
+  /** 删除会话（内部带确认弹窗） */
+  onDelete: (chatId: string) => void;
+}
+
+/**
+ * 单条会话项（docs/dev/web-chat-manage.md R1/R3）：
+ * - 主体（图标/标题/时间/状态点）为选择按钮，点击选中会话；
+ * - 悬停右侧浮现「重命名 / 删除」操作按钮；
+ * - 重命名切换为内联输入框：Enter 或失焦提交，Esc 取消；
+ * - 删除前经 window.confirm 二次确认（真删除不可恢复）。
+ */
+function ChatItem({ chat, active, onSelect, onRename, onDelete }: ChatItemProps) {
+  /** 当前是否处于内联重命名态 */
+  const [renaming, setRenaming] = useState(false);
+  /** 重命名输入草稿 */
+  const [draft, setDraft] = useState("");
+
+  /** 进入重命名态：草稿预填当前标题 */
+  const startRename = (): void => {
+    setDraft(chatTitle(chat));
+    setRenaming(true);
+  };
+
+  /** 提交重命名：非空且确有变化才回调；无条件退出编辑态 */
+  const commitRename = (): void => {
+    setRenaming(false);
+    const next = draft.trim();
+    if (next !== "" && next !== chatTitle(chat)) {
+      onRename(chat.chatId, next);
+    }
+  };
+
+  /** 删除（带二次确认）：真删除不可恢复，确认文案明确后果 */
+  const handleDelete = (): void => {
+    const title = chatTitle(chat);
+    if (window.confirm(`删除会话「${title}」？\n该会话的聊天记录将被彻底删除，不可恢复。`)) {
+      onDelete(chat.chatId);
+    }
+  };
+
+  // 内联重命名态：输入框独占整行（Enter/失焦提交，Esc 取消）
+  if (renaming) {
+    return (
+      <div className={`chat-item chat-item-renaming${active ? " chat-item-active" : ""}`}>
+        <input
+          className="chat-item-rename-input"
+          autoFocus
+          value={draft}
+          maxLength={100}
+          aria-label="会话标题"
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commitRename();
+            if (e.key === "Escape") setRenaming(false);
+          }}
+          onBlur={commitRename}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className={`chat-item${active ? " chat-item-active" : ""}`}>
+      {/* 主体选择区：图标 + 标题/时间 + 状态点（点击选中会话） */}
+      <button type="button" className="chat-item-select" onClick={() => onSelect(chat.chatId)} title={chatTitle(chat)}>
+        <ChatIcon size={15} className="chat-item-icon" />
+        <span className="chat-item-main">
+          <span className="chat-item-title">{chatTitle(chat)}</span>
+          <span className="chat-item-time">{formatTime(chat.updateTime)}</span>
+        </span>
+        {/* 执行中的会话显示状态点（引擎状态语义：processing = 生成中） */}
+        {chat.status === "processing" && <span className="chat-item-dot" title="生成中" />}
+        {/* T7 状态语义：interrupted = 中止类终态（显式中断/服务关停），
+            与 failed（引擎真实错误）区分展示；徽标样式复用状态点并灰化 */}
+        {chat.status === "interrupted" && <span className="chat-item-dot chat-item-dot-interrupted" title="已中断" />}
+      </button>
+      {/* 悬停操作区：重命名 / 删除（web-chat-manage.md R1/R3） */}
+      <div className="chat-item-actions">
+        <button type="button" className="icon-btn chat-item-action" title="重命名" onClick={startRename}>
+          <EditIcon size={13} />
+        </button>
+        <button
+          type="button"
+          className="icon-btn chat-item-action chat-item-action-danger"
+          title="删除会话"
+          onClick={handleDelete}
+        >
+          <TrashIcon size={13} />
+        </button>
+      </div>
+    </div>
+  );
 }
 
 /** 路径拼接（选择器内部用；dir 为空时基准为个人区根） */
@@ -284,6 +394,8 @@ export function SessionSidebar(props: SessionSidebarProps) {
     onNewChat,
     onProjectRootChange,
     onWorkspaceChange,
+    onRenameChat,
+    onDeleteChat,
     creating,
     onLogout,
     version,
@@ -385,26 +497,14 @@ export function SessionSidebar(props: SessionSidebarProps) {
               <span className="chat-group-count">{g.chats.length}</span>
             </div>
             {g.chats.map((c) => (
-              <button
+              <ChatItem
                 key={c.chatId}
-                type="button"
-                className={`chat-item${c.chatId === activeChatId ? " chat-item-active" : ""}`}
-                onClick={() => onSelectChat(c.chatId)}
-                title={chatTitle(c)}
-              >
-                <ChatIcon size={15} className="chat-item-icon" />
-                <span className="chat-item-main">
-                  <span className="chat-item-title">{chatTitle(c)}</span>
-                  <span className="chat-item-time">{formatTime(c.updateTime)}</span>
-                </span>
-                {/* 执行中的会话显示状态点（引擎状态语义：processing = 生成中） */}
-                {c.status === "processing" && <span className="chat-item-dot" title="生成中" />}
-                {/* T7 状态语义：interrupted = 中止类终态（显式中断/服务关停），
-                    与 failed（引擎真实错误）区分展示；徽标样式复用状态点并灰化 */}
-                {c.status === "interrupted" && (
-                  <span className="chat-item-dot chat-item-dot-interrupted" title="已中断" />
-                )}
-              </button>
+                chat={c}
+                active={c.chatId === activeChatId}
+                onSelect={onSelectChat}
+                onRename={onRenameChat}
+                onDelete={onDeleteChat}
+              />
             ))}
           </div>
         ))}

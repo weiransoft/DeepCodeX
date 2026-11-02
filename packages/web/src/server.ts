@@ -27,9 +27,11 @@ import { handleLogin, handleLogout, handleMe } from "./api/auth-api";
 import { readLdapRuntimeConfig } from "./auth/ldap-runtime";
 import {
   handleCreateChat,
+  handleDeleteChat,
   handleGetMessages,
   handleInterrupt,
   handleListChats,
+  handleRenameChat,
   handleSendMessage,
   handleStream,
 } from "./api/chat-api";
@@ -532,11 +534,16 @@ export async function startWebServer(
         return;
       }
 
-      // /api/chats/:id/... 动态段路由
-      const chatMatch = /^\/api\/chats\/([^/]+)(?:\/(messages|stream|interrupt))?$/.exec(pathname);
+      // /api/chats/:id/... 动态段路由（rename/delete：web-chat-manage.md R1/R3）
+      const chatMatch = /^\/api\/chats\/([^/]+)(?:\/(messages|stream|interrupt|rename))?$/.exec(pathname);
       if (chatMatch) {
         const chatId = chatMatch[1];
         const sub = chatMatch[2];
+        // DELETE /api/chats/:id（无子段）：删除会话（引擎索引+磁盘消息+注册表条目）
+        if (sub === undefined && req.method === "DELETE") {
+          handleDeleteChat(res, pool, chatId, ctx);
+          return;
+        }
         if (sub === "messages" && req.method === "GET") {
           handleGetMessages(res, pool, chatId, ctx);
           return;
@@ -551,6 +558,10 @@ export async function startWebServer(
         }
         if (sub === "interrupt" && req.method === "POST") {
           handleInterrupt(res, pool, chatId, ctx);
+          return;
+        }
+        if (sub === "rename" && req.method === "POST") {
+          await handleRenameChat(req, res, pool, chatId, ctx);
           return;
         }
       }

@@ -131,6 +131,17 @@ export interface StatusEvent {
   pendingTurns?: number;
 }
 
+/**
+ * chat_title 事件载荷（docs/dev/web-chat-manage.md §3.4）：
+ * 会话标题更新（自动标题生成成功 / 用户重命名成功）时推送一次；
+ * 前端更新侧栏与顶栏标题，无需整表刷新。旧服务端不推送本事件（前端零回归）。
+ */
+export interface ChatTitleEvent {
+  chatId: string;
+  /** 更新后的标题（服务端已清洗） */
+  title: string;
+}
+
 /** done 事件载荷：一轮对话结束（P2：sessionId 在首个消息前可能为 null） */
 export interface DoneEvent {
   chatId: string;
@@ -156,6 +167,8 @@ export interface SseCallbacks {
   onSedimentationSuggestion: (e: SedimentationSuggestionEvent) => void;
   onStatus: (e: StatusEvent) => void;
   onDone: (e: DoneEvent) => void;
+  /** 会话标题更新（自动生成 / 用户重命名；docs/dev/web-chat-manage.md §3.4） */
+  onChatTitle: (e: ChatTitleEvent) => void;
   /** 连接级错误（EventSource 自动重连中；上层可据此提示或关闭） */
   onConnectionError: () => void;
   /** 连接建立成功（可选） */
@@ -225,6 +238,7 @@ export class ChatStream {
     on<SedimentationSuggestionEvent>("sedimentation_suggestion", cb.onSedimentationSuggestion);
     on<StatusEvent>("status", cb.onStatus);
     on<DoneEvent>("done", cb.onDone);
+    on<ChatTitleEvent>("chat_title", cb.onChatTitle);
   }
 
   /** 关闭当前连接（幂等） */

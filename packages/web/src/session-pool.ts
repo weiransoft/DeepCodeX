@@ -65,7 +65,7 @@ import {
 import { ApiError } from "./http-utils";
 import { buildJailRoots, resolveInJail } from "./jail";
 import { personalUploadRoot } from "./user-files";
-import { findChatBySessionId, loadUserChats, upsertUserChat } from "./chat-registry";
+import { findChatBySessionId, loadUserChats, removeUserChat, upsertUserChat } from "./chat-registry";
 import type { AuthContext } from "./user-identity";
 import type { SseHub } from "./events";
 import type { ChatMessageDto, ChatSummary, DoneEvent, ResolvedWebSettings } from "./types";
@@ -123,6 +123,17 @@ type ChatSession = {
    * 会话级读写便捷性兼顾），runTurn 收尾兜底与自动注入通道共用。
    */
   autoExecuted: Set<string>;
+  /**
+   * 用户手动命名的标题（docs/dev/web-chat-manage.md §3.2）。
+   * 语义：用户重命名后优先级最高——listChats 与注册表回写均取
+   * `titleOverride ?? 引擎 summary`，自动标题/引擎回写不得覆盖用户命名。
+   * 首条消息前重命名（引擎尚无会话条目）时仅存本字段。
+   */
+  titleOverride: string | null;
+  /** 自动标题是否已尝试生成（一次性守卫：仅首轮成功收敛后尝试一次，失败不重试） */
+  titleGenerated: boolean;
+  /** 本会话首条文本消息（自动标题生成依据；未发送过文本时为 null） */
+  firstUserText: string | null;
 };
 
 /** sendMessage 入参（已由 API 层校验过的强类型） */
@@ -655,6 +666,9 @@ export class SessionPool {
       owner: ctx.sub,
       ownerUserId: ctx.userId,
       autoExecuted: new Set<string>(),
+      titleOverride: null,
+      titleGenerated: false,
+      firstUserText: null,
     };
 
     const manager = new SessionManager({
@@ -1139,6 +1153,11 @@ export class SessionPool {
       // 该字段只是登记通道，不随轮次回注引擎（剥离，避免污染 replySession 入参语义）
       input = { ...input, sessionAlwaysAllowToolCallIds: undefined };
     }
+    // 首条文本消息捕获（web-chat-manage.md §3.1）：自动标题生成依据。
+    // 仅在尚无记录时捕获（后续轮次不覆盖）；审批回注等无文本轮次不记录。
+    if (chat.firstUserText === null && input.text !== undefined && input.text.trim() !== "") {
+      chat.firstUserText = input.text;
+    }
     // 受理计数：入队即 +1（runTurn 收敛时 -1，done 帧携带剩余值）
     chat.pendingTurns += 1;
     // W3：排队受理即广播 user_message 帧——多订阅者与 SSE 重连场景实时可见
@@ -1305,6 +1324,10 @@ export class SessionPool {
     // 注册表回写（R2）：轮次收敛点落盘归属记录（成功与异常路径均覆盖），
     // 进程重启后该用户的列表 / 恢复校验以注册表为准
     this.persistChatRegistration(chat, session);
+
+    // 自动标题生成（web-chat-manage.md §3.1）：首轮成功收敛后依据对话内容
+    // 经 LLM 生成标题并写回引擎 summary。fire-and-forget，绝不阻塞本轮收敛。
+    this.maybeAutoTitle(chat, session);
 
     // 建议循环服务端兜底（docs/dev/eag-web-sedimentation-fixes.md §2.1，对齐 CLI
     // App.tsx handlePrompt finally 的 F9-v2 EAG 纯文本注入通道）：done 帧已推送、
@@ -1718,7 +1741,8 @@ export class SessionPool {
           chatId: chat.chatId,
           sessionId: chat.sessionId,
           projectRoot: chat.projectRoot,
-          title: session?.summary ?? null,
+          // 标题优先级（web-chat-manage.md §3.2）：用户手动命名 > 引擎 summary > null
+          title: chat.titleOverride ?? session?.summary ?? null,
           status: session?.status ?? "failed",
           createTime: chat.createTime,
           updateTime: session?.updateTime ?? new Date().toISOString(),
@@ -1730,6 +1754,192 @@ export class SessionPool {
       const message = error instanceof Error ? error.message : String(error);
       console.error(`[session-pool] 注册表回写失败 chatId=${chat.chatId}: ${message}`);
     }
+  }
+
+  /**
+   * 自动标题生成守卫（docs/dev/web-chat-manage.md §3.1，runTurn 成功收敛后调用）。
+   *
+   * 触发条件（全部满足才发起 LLM 生成，且每会话仅尝试一次）：
+   * - 未生成过（titleGenerated=false）、用户未手动命名（titleOverride=null）；
+   * - 有首条文本消息与底层会话，引擎条目存在且状态为 completed（成功收敛）。
+   *
+   * 执行：fire-and-forget 异步调 core generateSessionTitle（15s 超时）→
+   * renameSession 写引擎 summary（CLI 会话列表同步可见）→ 注册表回写 →
+   * SSE `chat_title` 帧实时推送前端。任一步失败仅日志降级，保持原标题。
+   *
+   * @param chat 目标聊天
+   * @param session 引擎会话条目（可能为 null：建会话早于引擎落盘失败等）
+   */
+  private maybeAutoTitle(chat: ChatSession, session: ReturnType<SessionManager["getSession"]>): void {
+    // 守卫判定（同步，无竞态：titleGenerated 先置位再异步）
+    if (chat.titleGenerated || chat.titleOverride !== null) {
+      return;
+    }
+    if (chat.firstUserText === null || chat.sessionId === null || session === null) {
+      return;
+    }
+    if (session.status !== "completed") {
+      return;
+    }
+    chat.titleGenerated = true;
+    const chatId = chat.chatId;
+    const sessionId = chat.sessionId;
+    const firstText = chat.firstUserText;
+    void (async () => {
+      try {
+        const title = await chat.manager.generateSessionTitle(
+          firstText,
+          session.assistantReply ?? "",
+          AbortSignal.timeout(15_000)
+        );
+        // 生成窗口内会话可能已被用户删除（deleteChat 移出池）：丢弃结果
+        const current = this.chats.get(chatId);
+        if (current !== chat) {
+          return;
+        }
+        const renamed = chat.manager.renameSession(sessionId, title);
+        if (!renamed) {
+          console.warn(`[session-pool] 自动标题写回失败（会话条目不存在）chatId=${chatId}`);
+          return;
+        }
+        // 注册表回写（title = titleOverride ?? 引擎 summary，此处取引擎新 summary）
+        this.persistChatRegistration(chat, chat.manager.getSession(sessionId));
+        // SSE 实时推送：前端更新侧栏标题（无需整表刷新）
+        this.hub.publish(chatId, "chat_title", { chatId, title });
+        console.log(`[session-pool] 会话自动标题已生成 chatId=${chatId}: ${title}`);
+      } catch (error) {
+        // fail-safe：LLM 失败/超时/输出非法一律保持原截断标题，仅日志
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`[session-pool] 自动标题生成失败（保持原标题）chatId=${chatId}: ${message}`);
+      }
+    })();
+  }
+
+  /**
+   * 重命名会话（POST /api/chats/:id/rename，docs/dev/web-chat-manage.md §3.2）。
+   *
+   * 仅池内会话可改名（历史会话先经恢复入池）。执行序：
+   * 1. 归属校验 → 标题清洗（trim + 100 字符截断，空标题 400）；
+   * 2. `titleOverride` 先行落内存（listChats 立即生效，用户命名优先级最高）；
+   * 3. 引擎条目存在时同步 `renameSession`（引擎索引 summary 更新，
+   *    CLI 会话列表/后续注册表回写一致，自动标题不会覆盖用户命名）；
+   * 4. 注册表回写 + SSE `chat_title` 帧推送。
+   *
+   * @param chatId Web 会话 id
+   * @param ctx 认证上下文（归属校验）
+   * @param rawTitle 用户输入标题（原始值，方法内清洗）
+   * @returns 清洗后的最终标题
+   * @throws ApiError 404 会话不存在或不属于当前用户 / 400 标题为空
+   */
+  renameChat(chatId: string, ctx: AuthContext, rawTitle: string): { chatId: string; title: string } {
+    const title = rawTitle.trim().slice(0, 100);
+    if (title === "") {
+      throw new ApiError(400, "会话标题不能为空");
+    }
+    const chat = this.getOwnedChat(chatId, ctx);
+    chat.titleOverride = title;
+    if (chat.sessionId !== null) {
+      // 引擎条目可能已被外部删除（renameSession 返回 false）：此时仅保留内存与注册表命名
+      const renamed = chat.manager.renameSession(chat.sessionId, title);
+      if (renamed) {
+        this.persistChatRegistration(chat, chat.manager.getSession(chat.sessionId));
+      } else {
+        console.warn(`[session-pool] 重命名未写引擎条目（条目不存在），仅更新池内与注册表 chatId=${chatId}`);
+      }
+    }
+    // SSE 实时推送（含同会话多订阅者场景）
+    this.hub.publish(chatId, "chat_title", { chatId, title });
+    return { chatId, title };
+  }
+
+  /**
+   * 删除会话（DELETE /api/chats/:id，docs/dev/web-chat-manage.md §3.3）。
+   *
+   * 真删除语义：引擎索引条目 + 磁盘消息 + 用户注册表条目全部移除，不可恢复。
+   *
+   * 两条路径：
+   * - 池内活跃会话：生成中（turnActive）拒绝（409）；否则 manager.deleteSession
+   *   （引擎索引+消息）→ 移出池 → manager.dispose 释放引擎资源 → 清理池级
+   *   附属状态（沉淀计数 / 待处置建议 / 自动执行守卫，防 Map 泄漏）；
+   * - 池外历史会话（进程重启后仅存注册表）：经注册表归属定位，构造轻量
+   *   SessionManager（不装配 MCP/EAG，仅承担索引与消息文件删除）执行后即刻释放。
+   *
+   * @param chatId Web 会话 id
+   * @param ctx 认证上下文（归属校验）
+   * @throws ApiError 404 会话不存在或不属于当前用户 / 409 会话正在生成中
+   */
+  deleteChat(chatId: string, ctx: AuthContext): void {
+    const chat = this.chats.get(chatId);
+    if (chat !== undefined && chat.ownerUserId !== ctx.userId) {
+      // R5 防枚举：他人会话复用「不存在」文案
+      throw new ApiError(404, `会话 ${chatId} 不存在或已关闭`);
+    }
+    if (chat !== undefined) {
+      // 生成中或串行链上仍有排队轮次时拒绝删除：防止删除后排队轮次继续执行
+      // 重建引擎会话并经注册表回写复活已删条目（轮次收敛点会 upsert 注册表）
+      if (chat.turnActive || chat.pendingTurns > 0) {
+        throw new ApiError(409, "会话有正在执行或排队中的任务，无法删除；请先停止生成");
+      }
+      if (chat.sessionId !== null) {
+        const deleted = chat.manager.deleteSession(chat.sessionId);
+        if (!deleted) {
+          // 引擎条目可能已被外部清理：不阻断删除主流程（注册表仍会移除）
+          console.warn(`[session-pool] 引擎会话条目删除未生效（可能已不存在）chatId=${chatId}`);
+        }
+      }
+      // 先移出池再释放引擎：并发访问立即失败（404），释放失败不回滚
+      this.chats.delete(chatId);
+      try {
+        chat.manager.dispose();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`[session-pool] 引擎实例释放失败（删除继续）chatId=${chatId}: ${message}`);
+      }
+      // 池级附属状态清理（防 Map 无界增长）
+      this.sedimentTurnCounters.delete(chatId);
+      this.pendingSuggestions.delete(chatId);
+      this.autoExecutedCommands.delete(chatId);
+    } else {
+      // 池外历史会话：注册表定位（归属校验内含）→ 轻量引擎实例删除磁盘记录
+      const entry = loadUserChats(ctx.userId, this.registryBaseDir).find((item) => item.chatId === chatId);
+      if (entry === undefined) {
+        throw new ApiError(404, `会话 ${chatId} 不存在或已关闭`);
+      }
+      if (entry.sessionId !== null) {
+        // per-user 引擎数据根（与 createChat 同口径）：personalOnly 时索引/消息在用户隔离目录。
+        // 轻量实例仅承担索引/消息文件删除：必填选项给最小真实实现
+        //（连接工厂走 core 默认路由、设置按项目根解析、渲染恒等、事件桥接空实现——
+        // 本实例从不执行轮次，不会产生任何引擎事件）。
+        const manager = new SessionManager({
+          projectRoot: entry.projectRoot,
+          createOpenAIClient: () => createDefaultOpenAIClient(entry.projectRoot),
+          getResolvedSettings: () => resolveCurrentSettings(entry.projectRoot),
+          renderMarkdown: (text) => text,
+          onAssistantMessage: () => undefined,
+          ...(this.settings.personalOnly
+            ? {
+                homeDir: path.join(this.settings.engineHomeRoot, ctx.userId),
+                ignoreProjectSettings: true,
+              }
+            : {}),
+        });
+        try {
+          const deleted = manager.deleteSession(entry.sessionId);
+          if (!deleted) {
+            console.warn(`[session-pool] 历史引擎会话条目删除未生效（可能已不存在）chatId=${chatId}`);
+          }
+        } finally {
+          // 轻量实例用完即弃（失败也必须释放，防句柄泄漏）
+          try {
+            manager.dispose();
+          } catch {
+            // 尽力而为
+          }
+        }
+      }
+    }
+    // 注册表条目移除（两条路径收敛点；幂等）
+    removeUserChat(ctx.userId, chatId, this.registryBaseDir);
   }
 
   /**
@@ -1930,7 +2140,8 @@ export class SessionPool {
         chatId: chat.chatId,
         sessionId: chat.sessionId,
         projectRoot: chat.projectRoot,
-        title: entry?.summary ?? null,
+        // 标题优先级（web-chat-manage.md §3.2）：用户手动命名 > 引擎 summary > null
+        title: chat.titleOverride ?? entry?.summary ?? null,
         status: entry?.status ?? "pending",
         createTime: chat.createTime,
         updateTime: entry?.updateTime ?? chat.createTime,

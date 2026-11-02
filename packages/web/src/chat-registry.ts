@@ -170,3 +170,27 @@ export function upsertUserChat(userId: string, entry: RegisteredChat, baseDir?: 
 export function findChatBySessionId(userId: string, sessionId: string, baseDir?: string): RegisteredChat | undefined {
   return loadUserChats(userId, baseDir).find((item) => item.sessionId === sessionId);
 }
+
+/**
+ * 从用户注册表中移除指定会话条目（docs/dev/web-chat-manage.md §3.3 删除会话用）。
+ *
+ * 按 chatId 匹配移除；写入为原子替换（tmp + rename，与 upsertUserChat 同策略）。
+ * 条目不存在时为幂等 no-op（仍会重写一次相同内容，调用方无需预查存在性）。
+ *
+ * 容错策略：读取损坏视为空表（与 loadUserChats 一致）——删除路径下空表直接
+ * 视为「无条目可删」，写回空表即完成幂等清理。
+ *
+ * @param userId 用户隔离标识
+ * @param chatId 待移除的 Web 会话 id
+ * @param baseDir 可选注册表根目录覆写（测试注入点）
+ */
+export function removeUserChat(userId: string, chatId: string, baseDir?: string): void {
+  const filePath = registryPath(userId, baseDir);
+  const remaining = loadUserChats(userId, baseDir).filter((item) => item.chatId !== chatId);
+  const file: RegistryFile = { version: 1, chats: remaining };
+  // tmp 名每次唯一（与 upsertUserChat 同策略：并发写不互踩，rename 同目录原子替换）
+  const tmpPath = `${filePath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  mkdirSync(path.dirname(filePath), { recursive: true });
+  writeFileSync(tmpPath, JSON.stringify(file, null, 2), "utf8");
+  renameSync(tmpPath, filePath);
+}

@@ -340,18 +340,16 @@ body {
   font-size: 12px;
   text-align: center;
 }
+/* 会话项容器（web-chat-manage.md R1/R3）：flex 容器承载选择区 + 悬停操作区 */
 .chat-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   width: 100%;
-  padding: 8px 10px;
-  border: none;
+  padding: 0 4px 0 0;
   border-radius: 8px;
-  background: transparent;
   color: var(--app-text);
   text-align: left;
-  cursor: pointer;
 }
 .chat-item:hover {
   background: var(--app-bg-hover);
@@ -360,9 +358,59 @@ body {
   background: var(--app-bg-elevated);
   box-shadow: inset 0 0 0 1px var(--app-border);
 }
+/* 主体选择区（原 chat-item 按钮样式迁移至此）：点击选中会话 */
+.chat-item-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px 0 8px 10px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
 .chat-item-icon {
   flex-shrink: 0;
   color: var(--app-text-tertiary);
+}
+/* 悬停操作区：重命名 / 删除（web-chat-manage.md R1/R3）——默认隐藏，悬停浮现 */
+.chat-item-actions {
+  display: none;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.chat-item:hover .chat-item-actions {
+  display: flex;
+}
+.chat-item-action {
+  padding: 3px;
+  color: var(--app-text-tertiary);
+}
+.chat-item-action:hover {
+  color: var(--app-text);
+}
+/* 删除按钮悬停警示色（真删除不可恢复） */
+.chat-item-action-danger:hover {
+  color: #dc2626;
+}
+/* 内联重命名输入框：独占整行 */
+.chat-item-renaming {
+  padding: 4px 6px;
+}
+.chat-item-rename-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 5px 8px;
+  font-size: 13px;
+  color: var(--app-text);
+  background: var(--app-bg);
+  border: 1px solid var(--app-accent);
+  border-radius: 6px;
+  outline: none;
 }
 .chat-item-main {
   flex: 1 1 0;

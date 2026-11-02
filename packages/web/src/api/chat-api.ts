@@ -10,8 +10,10 @@
  * - POST /api/chats/:id/messages：发送消息；Content-Type 为 multipart/form-data 时
  *   附件随消息上传（图片转 imageUrls 的 file:// URL，其他文件落盘并在文本中附说明）
  * - GET  /api/chats/:id/stream：SSE 事件流（llm_delta / assistant_message /
- *   permission_request / sedimentation_suggestion / status / done）
+ *   permission_request / sedimentation_suggestion / chat_title / status / done）
  * - POST /api/chats/:id/interrupt：停止生成（interruptActiveSession）
+ * - DELETE /api/chats/:id：删除会话（引擎索引+磁盘消息+注册表条目，web-chat-manage.md R1）
+ * - POST /api/chats/:id/rename：重命名会话（{title}，web-chat-manage.md R3）
  */
 
 import { pathToFileURL } from "node:url";
@@ -178,6 +180,48 @@ export function handleStream(
 export function handleInterrupt(res: ServerResponse, pool: SessionPool, chatId: string, ctx: AuthContext): void {
   pool.interrupt(chatId, ctx);
   sendJson(res, 200, { ok: true });
+}
+
+/**
+ * 处理 DELETE /api/chats/:id：删除会话（仅归属者，docs/dev/web-chat-manage.md §3.3）。
+ *
+ * 真删除：引擎索引条目 + 磁盘消息 + 用户注册表条目。生成中的会话由池拒绝（409）。
+ *
+ * @param res 响应对象
+ * @param pool 会话池
+ * @param chatId Web 会话 id
+ * @param ctx 认证上下文（归属校验）
+ */
+export function handleDeleteChat(res: ServerResponse, pool: SessionPool, chatId: string, ctx: AuthContext): void {
+  pool.deleteChat(chatId, ctx);
+  sendJson(res, 200, { ok: true });
+}
+
+/**
+ * 处理 POST /api/chats/:id/rename：重命名会话（仅归属者，docs/dev/web-chat-manage.md §3.2）。
+ *
+ * 请求体 {title: string}；成功返回 {ok:true, chatId, title}（title 为清洗后终值），
+ * 并经 SSE chat_title 帧推送同会话全部订阅者。
+ *
+ * @param req 请求对象（JSON：{title}）
+ * @param res 响应对象
+ * @param pool 会话池
+ * @param chatId Web 会话 id
+ * @param ctx 认证上下文（归属校验）
+ */
+export async function handleRenameChat(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pool: SessionPool,
+  chatId: string,
+  ctx: AuthContext
+): Promise<void> {
+  const body = await readJsonBody<{ title?: unknown }>(req);
+  if (typeof body.title !== "string") {
+    throw new ApiError(400, "请求体必须包含 title 字符串字段");
+  }
+  const renamed = pool.renameChat(chatId, ctx, body.title);
+  sendJson(res, 200, { ok: true, ...renamed });
 }
 
 /**

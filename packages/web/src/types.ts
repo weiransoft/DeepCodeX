@@ -278,6 +278,7 @@ export type DoneEvent = {
  * - sedimentation_suggestion：沉淀建议（ARCH-20261027 T04，轮次分析产出，
  *   载荷见 SedimentationSuggestionEvent；前端渲染建议卡片）
  * - status：会话状态变化（快照载荷含 pendingTurns/turnActive，docs/dev/web-steering.md W1③）
+ * - chat_title：会话标题更新（自动标题生成 / 用户重命名，docs/dev/web-chat-manage.md §3.4）
  * - done：本轮 handleUserPrompt 结束
  */
 export type SseEventName =
@@ -287,6 +288,7 @@ export type SseEventName =
   | "tool_progress"
   | "permission_request"
   | "sedimentation_suggestion"
+  | "chat_title"
   | "status"
   | "done";
 

@@ -616,6 +616,29 @@ export function interruptChat(chatId: string): Promise<void> {
 }
 
 /**
+ * 删除会话（DELETE /api/chats/:id，docs/dev/web-chat-manage.md R1）。
+ *
+ * 真删除：引擎索引 + 磁盘消息 + 用户注册表条目。生成中会话服务端拒绝（409）。
+ */
+export function deleteChat(chatId: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("DELETE", `/api/chats/${encodeURIComponent(chatId)}`);
+}
+
+/**
+ * 重命名会话（POST /api/chats/:id/rename，docs/dev/web-chat-manage.md R3）。
+ * 服务端返回清洗后的最终标题（trim + 100 字符截断）。
+ */
+export function renameChat(chatId: string, title: string): Promise<{ ok: boolean; chatId: string; title: string }> {
+  return request<{ ok: boolean; chatId: string; title: string }>(
+    "POST",
+    `/api/chats/${encodeURIComponent(chatId)}/rename`,
+    {
+      title,
+    }
+  );
+}
+
+/**
  * 文件区作用域（docs/dev/web-isolation.md §3.5）：
  * shared = 管理员配置的共享 allowRoots；personal = 当前用户个人上传区。
  */

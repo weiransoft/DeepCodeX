@@ -1483,6 +1483,40 @@ export function parseSteeringIntentJson(raw: string): { intent: "steer" | "next"
 }
 
 /**
+ * 会话标题生成输出解析（docs/dev/web-chat-manage.md §3.1 配套）
+ *
+ * 对标题 LLM 的原始输出做清洗：
+ * - 取首个非空行（丢弃可能的多余说明行）；
+ * - 剥除首尾成对引号/书名号（“” " ' 「」 《》 等）与首尾空白；
+ * - 50 字符硬截断（提示词要求 ≤20 字，此为防御性上限）；
+ * - 清洗后为空返回 null（调用方 generateSessionTitle 据此抛错 → 调用方降级保持原标题）。
+ *
+ * @param raw 标题 LLM 原始文本输出
+ * @returns 清洗后的标题；无有效文本返回 null
+ */
+export function parseGeneratedTitle(raw: string): string | null {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  // 取首个非空行
+  const firstLine = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line !== "");
+  if (firstLine === undefined) {
+    return null;
+  }
+  // 剥除首尾成对引号/书名号（仅当两端构成同类配对时剥一次，避免误伤正文内容）
+  const paired = /^["'“”«»「」『』《》〈〉](.*)["'“”«»「」『』《》〈〉]$/.exec(firstLine);
+  let title = paired ? paired[1].trim() : firstLine;
+  // 防御性硬截断
+  if (title.length > 50) {
+    title = title.slice(0, 50);
+  }
+  return title === "" ? null : title;
+}
+
+/**
  * T2 增量沉淀阈值（docs/dev/eag-web-sedimentation-fixes.md §2.2）：
  * 同一会话每满 N 个「用户 prompt 激活轮次」触发一次增量沉淀。
  * MemoryStore upsert 按 dedupKey 幂等（usageCount 递增），增量安全。
@@ -9040,6 +9074,75 @@ ${agentInstructions}
       throw new Error(`classifySteeringIntent 输出非法（无法解析为契约 JSON）：${response.content.slice(0, 200)}`);
     }
     return parsed;
+  }
+
+  /**
+   * 依据首轮对话内容生成会话标题（Web 侧自动命名，docs/dev/web-chat-manage.md §3.1）。
+   *
+   * 复用 steering 分类同款 LLM 通道（classifyLlmClientFactory → createLLMClient() 回退）：
+   * 非流式直连、不经引擎重试层，产出一条简短中文/原语言标题。
+   *
+   * 输出契约：模型只输出标题纯文本（禁止引号、句号、换行、前后缀说明）；
+   * 解析规则：取首个非空行 → 去首尾成对引号/书名号 → 50 字符硬截断 → 空输出抛错。
+   *
+   * @param firstUserText 首条用户消息文本（截取前 400 字符进入提示词）
+   * @param assistantReply 助手首轮回复文本（截取前 300 字符进入提示词，可为空串）
+   * @param signal 取消信号（调用方传超时信号，如 AbortSignal.timeout(15000)）
+   * @returns 生成的标题（已清洗，非空）
+   * @throws Error 无可用 LLM 客户端（凭据缺失）/ 模型输出为空
+   */
+  async generateSessionTitle(firstUserText: string, assistantReply: string, signal?: AbortSignal): Promise<string> {
+    const client = this.classifyLlmClientFactory ? this.classifyLlmClientFactory() : this.createLLMClient();
+    if (!client) {
+      throw new Error("generateSessionTitle 失败：无可用 LLM 客户端（凭据缺失）");
+    }
+    // 标题生成系统提示词：明确长度/语言/纯文本约束，禁止任何前后缀说明
+    const systemPrompt = [
+      "你是会话标题生成器。依据对话的首条用户消息与助手回复，拟一个简洁准确的会话标题。",
+      "要求：",
+      "- 不超过 20 个字符（中文场景）；使用对话的主要语言",
+      "- 概括对话主题或任务目标，不逐字复制长句",
+      "- 只输出标题纯文本：禁止引号/书名号/句号/换行，禁止「标题：」等前后缀说明",
+    ].join("\n");
+    const userContent = `【首条用户消息】\n${firstUserText.slice(0, 400)}\n\n【助手回复（节选）】\n${assistantReply.slice(0, 300)}`;
+    const request: LLMRequest = {
+      messages: [
+        {
+          id: crypto.randomUUID(),
+          sessionId: "session-title-generator",
+          role: "system",
+          content: systemPrompt,
+          contentParams: null,
+          messageParams: null,
+          compacted: false,
+          visible: false,
+          createTime: new Date().toISOString(),
+          updateTime: new Date().toISOString(),
+        },
+        {
+          id: crypto.randomUUID(),
+          sessionId: "session-title-generator",
+          role: "user",
+          content: userContent,
+          contentParams: null,
+          messageParams: null,
+          compacted: false,
+          visible: false,
+          createTime: new Date().toISOString(),
+          updateTime: new Date().toISOString(),
+        },
+      ],
+      thinkingEnabled: false,
+      maxTokens: 100,
+      signal: signal ?? null,
+    };
+    // 非流式直连；调用失败原样抛错，由调用方（SessionPool.maybeAutoTitle）降级保持原标题
+    const response = await client.createMessage(request);
+    const title = parseGeneratedTitle(response.content);
+    if (title === null) {
+      throw new Error(`generateSessionTitle 输出为空或无有效文本：${response.content.slice(0, 120)}`);
+    }
+    return title;
   }
 
   /**

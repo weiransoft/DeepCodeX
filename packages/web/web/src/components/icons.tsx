@@ -56,6 +56,37 @@ export function ChatIcon(p: IconProps) {
   );
 }
 
+/** 重命名（铅笔） */
+export function EditIcon(p: IconProps) {
+  return (
+    <IconBase {...p} label="重命名">
+      <path
+        d="M11.3 2.6a1.6 1.6 0 0 1 2.3 2.3L5.8 12.7l-3 1 1-3 7.5-8.1Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+    </IconBase>
+  );
+}
+
+/** 删除（垃圾桶） */
+export function TrashIcon(p: IconProps) {
+  return (
+    <IconBase {...p} label="删除">
+      <path
+        d="M2.5 4.5h11M6.5 2.5h3M4 4.5l.7 8.2a1.3 1.3 0 0 0 1.3 1.2h4a1.3 1.3 0 0 0 1.3-1.2l.7-8.2M6.7 7v4.2M9.3 7v4.2"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </IconBase>
+  );
+}
+
 /** 折叠侧栏 */
 export function PanelLeftIcon(p: IconProps) {
   return (

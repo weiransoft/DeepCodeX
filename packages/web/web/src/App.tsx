@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   confirmSedimentation,
   createChat,
+  deleteChat,
   dismissSedimentation,
   fetchConfig,
   fetchMe,
@@ -18,6 +19,7 @@ import {
   listChats,
   listWorkspaces,
   logout as apiLogout,
+  renameChat,
   sendPermissionDecisions,
   sendMessageWithFiles,
   sendTextMessage,
@@ -62,6 +64,7 @@ import {
 } from "./desktopConfig";
 import {
   ChatStream,
+  type ChatTitleEvent,
   type DoneEvent,
   type LlmDeltaEvent,
   type PermissionRequestEvent,
@@ -551,6 +554,63 @@ export function App() {
     if (streamingRef.current) showToast("连接中断，正在自动重连…");
   }, [showToast]);
 
+  /**
+   * chat_title：会话标题更新（自动标题生成 / 用户重命名，docs/dev/web-chat-manage.md §3.4）。
+   * 列表项标题实时落位（侧栏 / 桌面壳标签页共用 chats 状态），无需整表刷新。
+   */
+  const onChatTitle = useCallback((e: ChatTitleEvent): void => {
+    setChats((prev) => prev.map((c) => (c.chatId === e.chatId ? { ...c, title: e.title } : c)));
+  }, []);
+
+  /**
+   * 重命名会话（侧栏内联编辑提交，docs/dev/web-chat-manage.md R3）：
+   * 调服务端 rename API（titleOverride 优先级最高），成功后本地同步标题。
+   */
+  const handleRenameChat = useCallback(
+    async (chatId: string, title: string): Promise<void> => {
+      try {
+        const result = await renameChat(chatId, title);
+        setChats((prev) => prev.map((c) => (c.chatId === chatId ? { ...c, title: result.title } : c)));
+      } catch (e: unknown) {
+        if (e instanceof ApiError && e.status === 401) {
+          handleUnauthorized();
+          return;
+        }
+        showToast(e instanceof Error ? e.message : "重命名失败");
+      }
+    },
+    [handleUnauthorized, showToast]
+  );
+
+  /**
+   * 删除会话（侧栏确认后调用，docs/dev/web-chat-manage.md R1）：
+   * 服务端真删除（引擎索引 + 磁盘消息 + 注册表条目）；删除当前活跃会话时
+   * 关闭 SSE、清空对话区（删除请求已被服务端限制：生成中 409 拒绝）。
+   */
+  const handleDeleteChat = useCallback(
+    async (chatId: string): Promise<void> => {
+      try {
+        await deleteChat(chatId);
+        setChats((prev) => prev.filter((c) => c.chatId !== chatId));
+        // 被删的是当前活跃会话：关闭订阅并清空对话区（回到欢迎页）
+        if (activeChatIdRef.current === chatId) {
+          streamRef.current?.close();
+          activeChatIdRef.current = null;
+          setActiveChatId(null);
+          setEntries([]);
+        }
+        showToast("会话已删除");
+      } catch (e: unknown) {
+        if (e instanceof ApiError && e.status === 401) {
+          handleUnauthorized();
+          return;
+        }
+        showToast(e instanceof Error ? e.message : "删除失败");
+      }
+    },
+    [handleUnauthorized, showToast]
+  );
+
   /** 稳定的 SSE 回调集合（connect 复用连接时不会重挂监听，故必须稳定） */
   const sseCallbacksRef = useRef({
     onLlmDelta,
@@ -561,6 +621,7 @@ export function App() {
     onSedimentationSuggestion,
     onStatus,
     onDone,
+    onChatTitle,
     onConnectionError,
   });
   // 每次渲染刷新回调引用（useCallback 已保证多数为稳定引用）
@@ -573,6 +634,7 @@ export function App() {
     onSedimentationSuggestion,
     onStatus,
     onDone,
+    onChatTitle,
     onConnectionError,
   };
 
@@ -603,6 +665,9 @@ export function App() {
       },
       get onDone() {
         return sseCallbacksRef.current.onDone;
+      },
+      get onChatTitle() {
+        return sseCallbacksRef.current.onChatTitle;
       },
       get onConnectionError() {
         return sseCallbacksRef.current.onConnectionError;
@@ -1413,6 +1478,8 @@ export function App() {
           onNewChat={newChat}
           onProjectRootChange={setProjectRoot}
           onWorkspaceChange={setWorkspaceId}
+          onRenameChat={(chatId, title) => void handleRenameChat(chatId, title)}
+          onDeleteChat={(chatId) => void handleDeleteChat(chatId)}
           onLogout={logout}
         />
         <div className="main-area">
@@ -1511,6 +1578,8 @@ export function App() {
             onNewChat={newChat}
             onProjectRootChange={setProjectRoot}
             onWorkspaceChange={setWorkspaceId}
+            onRenameChat={(chatId, title) => void handleRenameChat(chatId, title)}
+            onDeleteChat={(chatId) => void handleDeleteChat(chatId)}
             onLogout={logout}
           />
         )}
