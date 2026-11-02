@@ -251,14 +251,15 @@ async function configureYargs(argv?: string[]) {
     )
     .command(
       "team <subcommand>",
-      "Multi-role team dispatch (list / match / dispatch / autonomous / full-lifecycle / help)",
+      "Multi-role team dispatch (list / match / dispatch / autonomous / full-lifecycle / auto / help)",
       (y: Argv) =>
         y
           .positional("subcommand", {
             type: "string",
             // v1.6 P0-2 修正（TC-TEAM-12）：加入 "help" 选项，支持 `team help` 显示帮助
             // cli.tsx 中 parsed.team === "help" 时调用 formatTeamHelp() 并 exit(0)
-            choices: ["list", "match", "dispatch", "autonomous", "full-lifecycle", "help"] as const,
+            // L2（2026-11-02）：加入 "auto"（自动多角色拆解）
+            choices: ["list", "match", "dispatch", "autonomous", "full-lifecycle", "auto", "help"] as const,
             describe: "Team subcommand",
           })
           .option("role", {
@@ -316,6 +317,27 @@ async function configureYargs(argv?: string[]) {
           .option("test-command", {
             type: "string",
             describe: 'Test command for stage 7 verification and stage 8 D3 check (e.g. "npm test")',
+          })
+          // L2（auto 子命令）：自动多角色拆解
+          .option("dry-run", {
+            type: "boolean",
+            describe: "Plan only: decompose + layer, do not execute (auto subcommand)",
+            default: false,
+          })
+          .option("max-subtasks", {
+            type: "number",
+            describe: "Max subtasks produced by decomposition (auto, default 6)",
+          })
+          .option("max-parallel", {
+            type: "number",
+            describe: "Max concurrent subtasks per layer (auto, default 2)",
+          })
+          // yargs 的 boolean-negation 约定：`--no-aggregate` 等价于 `aggregate: false`。
+          // 因此这里声明正向开关并默认 true，用户侧仍然使用 `--no-aggregate`。
+          .option("aggregate", {
+            type: "boolean",
+            default: true,
+            describe: "Run the final LLM aggregation; disable with --no-aggregate (auto)",
           })
           .check((argv: { [x: string]: unknown }) => {
             const role = argv["role"];
@@ -672,6 +694,12 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
       "architecture-path",
       "test-plan-path",
       "test-command",
+      // L2（auto 子命令）：自动多角色拆解
+      "dry-run",
+      "max-subtasks",
+      "max-parallel",
+      // yargs 把 --no-aggregate 解析为 aggregate:false，这里收正向键
+      "aggregate",
     ];
     for (const key of optionKeys) {
       const v = parsed[key];

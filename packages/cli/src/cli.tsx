@@ -54,7 +54,7 @@ async function main(): Promise<void> {
           .filter((s) => s.length > 0)
       : undefined;
     const exitCode = await executeTeamCommand({
-      subcommand: subcommand as "list" | "match" | "dispatch" | "autonomous" | "full-lifecycle",
+      subcommand: subcommand as "list" | "match" | "dispatch" | "autonomous" | "full-lifecycle" | "auto",
       role: opts["role"] as "architect" | "solo-coder" | "test-expert" | "ui-designer" | "product-manager" | undefined,
       task: opts["task"] as string | undefined,
       // v2.1.1 E2E：透传 --task-file 选项（从文件读取任务描述，避免 shell 转义问题）
@@ -76,6 +76,12 @@ async function main(): Promise<void> {
       // v2.1.1 E2E：透传 --resume-run 选项（autonomous 模式断点续跑）
       // team-cmd.ts 的 executeAutonomousCommand 会读取此字段查找最近一次可恢复的 run
       resumeRun: opts["resume-run"] === true,
+      // L2（auto 子命令）：自动多角色拆解
+      dryRun: opts["dry-run"] === true,
+      maxSubtasks: typeof opts["max-subtasks"] === "number" ? (opts["max-subtasks"] as number) : undefined,
+      maxParallel: typeof opts["max-parallel"] === "number" ? (opts["max-parallel"] as number) : undefined,
+      // yargs 的 boolean-negation 会把 `--no-aggregate` 解析成 `aggregate: false`
+      skipAggregate: opts["aggregate"] === false,
     });
     process.exit(exitCode);
   }

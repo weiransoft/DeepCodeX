@@ -59,7 +59,8 @@ export function parseTeamArgs(tokens: string[]): TeamCommandArgs {
       first === "match" ||
       first === "dispatch" ||
       first === "autonomous" ||
-      first === "full-lifecycle"
+      first === "full-lifecycle" ||
+      first === "auto"
     ) {
       // 合法子命令：正常消费第一个 token 并从剩余 tokens 继续解析
       subcommand = first;
@@ -130,6 +131,11 @@ export function parseTeamArgs(tokens: string[]): TeamCommandArgs {
     "architecture-path": "architecturePath",
     "test-plan-path": "testPlanPath",
     "test-command": "testCommand",
+    // L2（auto 子命令）
+    "dry-run": "dryRun",
+    "max-subtasks": "maxSubtasks",
+    "max-parallel": "maxParallel",
+    "no-aggregate": "noAggregate",
   };
   for (const [kebab, camel] of Object.entries(kebabToCamelMap)) {
     if (raw[kebab] !== undefined) {
@@ -147,6 +153,18 @@ export function parseTeamArgs(tokens: string[]): TeamCommandArgs {
       raw.maxIterations = n;
     } else {
       delete raw.maxIterations;
+    }
+  }
+
+  // L2：--max-subtasks / --max-parallel 字符串转数字（同上，必须在 kebab→camel 之后）
+  for (const key of ["maxSubtasks", "maxParallel"] as const) {
+    if (typeof raw[key] === "string") {
+      const n = Number.parseInt(raw[key] as string, 10);
+      if (!Number.isNaN(n) && n > 0) {
+        raw[key] = n;
+      } else {
+        delete raw[key];
+      }
     }
   }
 
@@ -207,6 +225,19 @@ export function parseTeamArgs(tokens: string[]): TeamCommandArgs {
   }
   if (typeof raw.testCommand === "string") {
     args.testCommand = raw.testCommand;
+  }
+  // L2（auto 子命令）
+  if (raw.dryRun === true) {
+    args.dryRun = true;
+  }
+  if (typeof raw.maxSubtasks === "number") {
+    args.maxSubtasks = raw.maxSubtasks;
+  }
+  if (typeof raw.maxParallel === "number") {
+    args.maxParallel = raw.maxParallel;
+  }
+  if (raw.noAggregate === true) {
+    args.skipAggregate = true;
   }
 
   return args;

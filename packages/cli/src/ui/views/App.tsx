@@ -2226,75 +2226,31 @@ async function handleTeamSlashCommand(text: string): Promise<string> {
     };
   }
 
-  // executeTeamCommand 直接调用 writeStdoutLine/writeStderrLine 写入 process.stdout/stderr，
-  // 在 TUI 模式下会破坏 Ink 渲染。这里通过临时拦截 process.stdout.write / process.stderr.write
-  // 将输出重定向到内存缓冲，调用结束后恢复原始方法。
-  // 注意：handlePrompt 已通过 setBusy(true) 阻塞后续输入，此处不存在并发竞态。
-  const stdoutChunks: string[] = [];
-  const stderrChunks: string[] = [];
-  const originalStdoutWrite = process.stdout.write.bind(process.stdout);
-  const originalStderrWrite = process.stderr.write.bind(process.stderr);
-  // 类型安全的 write 拦截器：捕获字符串/Buffer/Uint8Array 输出
-  const interceptedStdoutWrite = (
-    chunk: string | Uint8Array,
-    encoding?: BufferEncoding | ((err?: Error | null) => void),
-    callback?: (err?: Error | null) => void
-  ): boolean => {
-    const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf-8");
-    stdoutChunks.push(text);
-    // 兼容 Node.js write 三种重载：(chunk, cb) / (chunk, encoding, cb) / (chunk, encoding, fd, cb)
-    if (typeof encoding === "function") {
-      encoding(null);
-    } else if (typeof callback === "function") {
-      callback(null);
-    }
-    return true;
-  };
-  const interceptedStderrWrite = (
-    chunk: string | Uint8Array,
-    encoding?: BufferEncoding | ((err?: Error | null) => void),
-    callback?: (err?: Error | null) => void
-  ): boolean => {
-    const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf-8");
-    stderrChunks.push(text);
-    if (typeof encoding === "function") {
-      encoding(null);
-    } else if (typeof callback === "function") {
-      callback(null);
-    }
-    return true;
-  };
+  // 2026-11-02（L0-1）：执行体已迁移到 core 的 runTeamCommand()，它是纯函数、零终端副作用，
+  // 返回 { exitCode, stdout, stderr, data }。因此这里**不再需要**劫持 process.stdout.write
+  // ——历史上那段「暂时重定向 stdout 到内存缓冲、finally 恢复」的补丁可以整体删除。
+  // 收益：既消除了漏恢复 stdout 会污染整个 TUI 的风险，也让 Web 宿主能复用同一执行体。
+  const { runTeamCommand } = await import("../../team/team-cmd.js");
 
-  process.stdout.write = interceptedStdoutWrite as typeof process.stdout.write;
-  process.stderr.write = interceptedStderrWrite as typeof process.stderr.write;
-
-  let exitCode: number;
+  let result: Awaited<ReturnType<typeof runTeamCommand>>;
   try {
-    // args 已是 TeamCommandArgs 类型（parseTeamArgs 返回值），无需类型断言
-    exitCode = await executeTeamCommand(args);
+    result = await runTeamCommand(args);
   } catch (err) {
-    exitCode = 1;
-    stderrChunks.push(`✖ 执行 /team 命令失败：${err instanceof Error ? err.message : String(err)}\n`);
-  } finally {
-    // 必须在 finally 中恢复原始 write，避免泄漏影响后续渲染
-    process.stdout.write = originalStdoutWrite;
-    process.stderr.write = originalStderrWrite;
+    return `✖ 执行 /team 命令失败：${err instanceof Error ? err.message : String(err)}`;
   }
 
-  // 合并捕获的输出，附带退出码作为前缀（失败时显式标注）
-  const stdout = stdoutChunks.join("");
-  const stderr = stderrChunks.join("");
+  // 合并输出，附带退出码（失败时显式标注）
   const parts: string[] = [];
-  if (stdout) {
-    parts.push(stdout);
+  if (result.stdout) {
+    parts.push(result.stdout);
   }
-  if (stderr) {
-    parts.push(stderr);
+  if (result.stderr) {
+    parts.push(result.stderr);
   }
-  if (exitCode !== 0 && parts.length === 0) {
-    parts.push(`✖ /team 命令失败（退出码 ${exitCode}）`);
-  } else if (exitCode !== 0) {
-    parts.push(`\n[退出码: ${exitCode}]`);
+  if (result.exitCode !== 0 && parts.length === 0) {
+    parts.push(`✖ /team 命令失败（退出码 ${result.exitCode}）`);
+  } else if (result.exitCode !== 0) {
+    parts.push(`\n[退出码: ${result.exitCode}]`);
   }
   return parts.join("\n").trim() || "(无输出)";
 }
