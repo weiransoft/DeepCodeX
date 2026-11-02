@@ -1414,3 +1414,37 @@ export type {
   SubtaskProgressEvent,
   LlmOnceResult,
 } from "./team/orchestrator/index.js";
+// 跨宿主命令层（L0-1，2026-11-02）
+//
+// 背景：`/team` 此前只有 CLI 有执行体，Web 只注册了 5 条描述符（有菜单无厨房），
+// 用户在 Web 敲 `/team dispatch` 会被当普通文本投给模型、静默降级。
+// 现将执行体提到 core，CLI 与 Web 共用（见 docs/team-wiring-audit-20261101.md §3）。
+// ============================================================================
+export {
+  TEAM_SUBCOMMANDS,
+  TEAM_COMMAND_DESCRIPTORS,
+  buildTeamCommandDescriptors,
+  isTeamCommandDescriptor,
+  toMatchSummary,
+} from "./commands/types.js";
+export type {
+  TeamSubcommand,
+  TeamCommandArgs,
+  TeamCommandResult,
+  TeamCommandData,
+  TeamCommandDeps,
+  TeamProgressEvent,
+  TeamProgressLevel,
+  TeamProgressPhase,
+  TeamRoleSummary,
+  TeamMatchSummary,
+  TeamDispatchSummary,
+  TeamStageSummary,
+} from "./commands/types.js";
+export {
+  runTeamCommand,
+  parseTeamCommandLine,
+  formatTeamHelp,
+  isTeamCommandIntent,
+  extractTeamSubcommandToken,
+} from "./commands/team-command.js";
