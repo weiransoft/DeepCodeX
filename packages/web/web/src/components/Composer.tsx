@@ -9,6 +9,9 @@
  *   用户可随时发送补充指令（后端分类注入或排队），发送与停止按钮并排同显；
  * - @ 提及补全（web-capability T2）：输入 @ 触发候选面板（技能 / Agent / MCP 服务器），
  *   键盘上下选择、Enter/Tab 补全、Esc 关闭；数据源 GET /api/capabilities（懒加载缓存）。
+ * - 斜杠命令补全（2026-11-02 接线审查 D3）：输入以 `/` 开头时提示可用命令
+ *   （当前为 /team 体系）。清单由服务端下发、来源是 core 的命令描述符单一数据源，
+ *   前端不再自己维护一份命令表。
  * - 「+」能力菜单（2026-11-02，对齐 WorkBuddy 输入框）：一个入口切换 模型 / 技能 / 智能体。
  *   技能与智能体等价于插入 @token（与 @ 补全同源）；模型为桌面壳侧默认模型切换
  *   （模型经进程环境变量注入引擎，切换必然重启，故先确认）。
@@ -16,7 +19,7 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from "react";
 import { humanSize } from "../format";
 import type { UserAttachment } from "../chat-model";
-import { fetchCapabilities, type Capabilities } from "../api";
+import { fetchCapabilities, type Capabilities, type CapabilityCommand } from "../api";
 import { agentDisplayName, agentMentionHint } from "../agent-display";
 import { listModels, setDefaultModel, type ModelOption } from "../desktopConfig";
 import {
@@ -91,8 +94,63 @@ function parseMentionContext(text: string, caret: number): { start: number; end:
   return { start: atStart, end: caret, query: m[1] ?? "" };
 }
 
-/** Composer：底部输入框 */
-export function Composer(props: ComposerProps) {
+/**
+ * 解析斜杠命令补全上下文（2026-11-02 接线审查 D3）。
+ *
+ * 触发条件刻意收紧：命令必须从**输入开头**（允许前导空白）开始，且光标仍在
+ * 第一个 token 内。理由——对话里经常出现路径（`/usr/local/bin`）、分数
+ * （`10/12`）这类文本，宽松匹配会让补全面板在正常打字时反复弹出。
+ *
+ * @param text 全文
+ * @param caret 光标位置
+ * @returns 替换区间（start 指向 `/`）与查询词；不处于命令输入态时返回 null
+ */
+function parseSlashContext(text: string, caret: number): { start: number; end: number; query: string } | null {
+  const before = text.slice(0, caret);
+  const m = /^(\s*)(\/[^\s]*)$/.exec(before);
+  if (m === null) return null;
+  const start = (m[1] ?? "").length;
+  // 命令 token 后若还有内容（已带参数），收窄到当前 token 末
+  const rest = text.slice(caret);
+  const tail = /^[^\s]*/.exec(rest)?.[0] ?? "";
+  return { start, end: caret + tail.length, query: `${m[2] ?? ""}${tail}` };
+}
+
+/**
+ * 由命令清单构建斜杠候选（2026-11-02 接线审查 D3）。
+ *
+ * 命中规则：命令名以查询词开头优先（用户通常从左往右敲），完整包含次之。
+ * 额外补一条裸 `/team`——它是帮助入口，而 core 的描述符里只有带子命令的项，
+ * 不补的话用户敲 `/team` 后看到空面板。
+ *
+ * 描述里的 Markdown 强调标记（`**真实执行**`）在补全面板里没有渲染管线，
+ * 直接显示会露出星号，这里统一剥掉。
+ *
+ * @param commands 服务端下发的命令清单
+ * @param query 当前输入的命令前缀（形如 `/te`，空串表示刚敲下 `/`）
+ * @returns 最多 8 条候选（起始匹配在前、包含匹配在后）
+ */
+export function buildSlashCandidates(commands: readonly CapabilityCommand[], query: string): CapabilityCommand[] {
+  const q = query.toLowerCase();
+  const starts: CapabilityCommand[] = [];
+  const contains: CapabilityCommand[] = [];
+  for (const command of commands) {
+    const name = command.name.toLowerCase();
+    if (name.startsWith(q)) starts.push(command);
+    else if (q !== "" && name.includes(q)) contains.push(command);
+  }
+  const items = [...starts, ...contains];
+  if ("/team".startsWith(q) && !items.some((item) => item.name === "/team")) {
+    items.unshift({ name: "/team", description: "团队模式命令总览（等价 /team help）" });
+  }
+  return items.slice(0, 8).map((item) => ({
+    ...item,
+    description: item.description.replace(/\*\*/g, ""),
+    ...(item.args !== undefined ? { args: [...item.args] } : {}),
+  }));
+}
+
+/** Composer：底部输入框 */ export function Composer(props: ComposerProps) {
   const { streaming, steeringEnabled, maxUploadBytes, serverFiles, onRemoveServerFile, onSend, onStop } = props;
   /**
    * 输入区是否禁用（steering F1）：steeringEnabled 时生成中仍可输入补充指令；
@@ -128,6 +186,15 @@ export function Composer(props: ComposerProps) {
   const [mention, setMention] = useState<{
     range: { start: number; end: number; query: string };
     items: MentionItem[];
+    active: number;
+  } | null>(null);
+  /**
+   * 斜杠命令补全状态（2026-11-02 接线审查 D3）：null = 面板关闭。
+   * 与 @ 提及互斥——命令只在输入开头出现，两个面板不会同时打开。
+   */
+  const [slash, setSlash] = useState<{
+    range: { start: number; end: number; query: string };
+    items: CapabilityCommand[];
     active: number;
   } | null>(null);
 
@@ -238,6 +305,54 @@ export function Composer(props: ComposerProps) {
     if (el !== null) {
       const caret = start + inserted.length;
       // React 受控更新后异步定位光标
+      window.requestAnimationFrame(() => {
+        el.focus();
+        el.setSelectionRange(caret, caret);
+      });
+    }
+  };
+
+  /**
+   * 由服务端命令清单构建斜杠候选（2026-11-02 接线审查 D3）。
+   *
+   * 命中规则：命令名以查询词开头优先（用户通常从左往右敲），完整包含次之。
+   * 额外补一条裸 `/team`——它是帮助入口，而 core 的描述符里只有带子命令的项，
+   * 不补的话用户敲 `/team` 后看到空面板。
+   */
+  const buildSlashItems = (data: Capabilities | null, query: string): CapabilityCommand[] =>
+    buildSlashCandidates(data?.commands ?? [], query);
+
+  /** 刷新斜杠命令面板：光标处于命令输入态时打开，否则关闭 */
+  const refreshSlash = (value: string): void => {
+    const el = textareaRef.current;
+    const caret = el !== null ? (el.selectionStart ?? value.length) : value.length;
+    const ctx = parseSlashContext(value, caret);
+    if (ctx === null) {
+      setSlash(null);
+      return;
+    }
+    ensureCaps();
+    const items = buildSlashItems(caps, ctx.query);
+    setSlash((prev) => ({
+      range: ctx,
+      items,
+      active: prev !== null ? Math.min(prev.active, Math.max(items.length - 1, 0)) : 0,
+    }));
+    // 与 @ 提及互斥（命令在输入开头，@ 不会同时在光标前）
+    setMention(null);
+  };
+
+  /** 应用选中命令：把当前命令 token 替换为完整命令名并把光标落到其后 */
+  const applySlash = (item: CapabilityCommand): void => {
+    const el = textareaRef.current;
+    if (slash === null) return;
+    const { start, end } = slash.range;
+    const inserted = `${item.name} `;
+    const next = text.slice(0, start) + inserted + text.slice(end);
+    setText(next);
+    setSlash(null);
+    if (el !== null) {
+      const caret = start + inserted.length;
       window.requestAnimationFrame(() => {
         el.focus();
         el.setSelectionRange(caret, caret);
@@ -396,9 +511,15 @@ export function Composer(props: ComposerProps) {
   };
 
   /** 键盘发送：Enter 发送（IME 组合中除外），Shift+Enter 换行；
-   *  @ 面板打开时优先消费方向键 / Enter / Tab / Escape（不发送）。 */
+   *  @ 面板 / 斜杠命令面板打开时优先消费方向键 / Enter / Tab / Escape（不发送）。 */
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
     if (e.key === "Enter" && !e.shiftKey && !composingRef.current) {
+      // 斜杠命令面板打开且有高亮候选：Enter = 补全（不发送）
+      if (slash !== null && slash.active >= 0 && slash.items.length > 0) {
+        e.preventDefault();
+        applySlash(slash.items[slash.active]!);
+        return;
+      }
       // @ 面板打开且有高亮候选：Enter = 补全（不发送）
       if (mention !== null && mention.active >= 0 && mention.items.length > 0) {
         e.preventDefault();
@@ -408,6 +529,24 @@ export function Composer(props: ComposerProps) {
       e.preventDefault();
       doSend();
       return;
+    }
+    // 斜杠命令面板优先（与 @ 面板互斥，正常不会同时打开）
+    if (slash !== null && slash.items.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSlash((s) => (s !== null ? { ...s, active: (s.active + 1) % s.items.length } : s));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSlash((s) => (s !== null ? { ...s, active: (s.active - 1 + s.items.length) % s.items.length } : s));
+        return;
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        applySlash(slash.items[Math.max(slash.active, 0)]!);
+        return;
+      }
     }
     if (mention !== null && mention.items.length > 0) {
       if (e.key === "ArrowDown") {
@@ -425,6 +564,11 @@ export function Composer(props: ComposerProps) {
         void applyMention(mention.items[Math.max(mention.active, 0)]);
         return;
       }
+    }
+    if (e.key === "Escape" && slash !== null) {
+      e.preventDefault();
+      setSlash(null);
+      return;
     }
     if (e.key === "Escape" && mention !== null) {
       e.preventDefault();
@@ -451,6 +595,7 @@ export function Composer(props: ComposerProps) {
     });
     setError("");
     setMention(null);
+    setSlash(null);
   };
 
   /** textarea 自适应高度（上限 200px 后内部滚动） */
@@ -485,6 +630,45 @@ export function Composer(props: ComposerProps) {
     >
       {/* 拖拽高亮遮罩文案 */}
       {dragOver && <div className="composer-drag-tip">松开以添加附件</div>}
+
+      {/* 斜杠命令候选面板（2026-11-02 接线审查 D3）：
+          清单来自服务端下发的 core 命令描述符，选中即把命令名补进输入框，
+          用户接着敲参数（如 `--task "..."`）。 */}
+      {slash !== null && (
+        <div className="composer-mention" role="listbox" aria-label="斜杠命令候选">
+          <div className="composer-mention-title">命令（↑↓ 选择，Enter 补全，Esc 关闭）</div>
+          {slash.items.length === 0 ? (
+            <div className="composer-mention-empty">
+              {caps === null ? "正在加载可用命令…" : `没有匹配「${slash.range.query}」的命令`}
+            </div>
+          ) : (
+            slash.items.map((item, i) => (
+              <button
+                type="button"
+                key={item.name}
+                className={`composer-mention-item${i === slash.active ? " active" : ""}`}
+                role="option"
+                aria-selected={i === slash.active}
+                onMouseEnter={() => setSlash((s) => (s !== null ? { ...s, active: i } : s))}
+                onMouseDown={(e) => {
+                  // mousedown 防止 textarea 失焦导致面板先关闭
+                  e.preventDefault();
+                  applySlash(item);
+                }}
+              >
+                <span className="mention-badge mention-badge-skill">命令</span>
+                <span className="mention-token">{item.name}</span>
+                <span className="composer-slash-desc">{item.description}</span>
+                {item.args !== undefined && item.args.length > 0 && (
+                  <span className="mention-id" title={item.args.join(" ")}>
+                    {item.args[0]}
+                  </span>
+                )}
+              </button>
+            ))
+          )}
+        </div>
+      )}
 
       {/* @ 提及候选面板（悬浮于输入框上方；空态提示可输入内容过滤） */}
       {mention !== null && (
@@ -687,7 +871,7 @@ export function Composer(props: ComposerProps) {
         <textarea
           ref={textareaRef}
           className="composer-input"
-          placeholder="输入消息，@ 唤起技能 / 智能体，+ 切换模型，Enter 发送，Shift+Enter 换行"
+          placeholder="输入消息，@ 唤起技能 / 智能体，/ 唤起命令，+ 切换模型，Enter 发送，Shift+Enter 换行"
           rows={1}
           value={text}
           disabled={inputBlocked}
@@ -695,14 +879,19 @@ export function Composer(props: ComposerProps) {
             setText(e.target.value);
             autoResize();
             refreshMention(e.target.value);
+            refreshSlash(e.target.value);
           }}
           onKeyUp={(e) => {
-            // 方向键移动光标后重算 @ 上下文（不改值，仅按当前值重解析）
+            // 方向键移动光标后重算 @ / 命令补全上下文（不改值，仅按当前值重解析）
             if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "Home" || e.key === "End") {
               refreshMention(text);
+              refreshSlash(text);
             }
           }}
-          onClick={() => refreshMention(text)}
+          onClick={() => {
+            refreshMention(text);
+            refreshSlash(text);
+          }}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           onCompositionStart={() => {

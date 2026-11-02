@@ -80,8 +80,11 @@ function createForbiddenClient(): { client: unknown; callCount: { value: number 
 function createTestManager(options: { workspace: string; client: unknown }): {
   manager: SessionManager;
   assistantTexts: string[];
+  /** 每条 assistant/system 消息的 meta（2026-11-02 D3：/team 输出标记断言用） */
+  assistantMetas: Array<Record<string, unknown> | undefined>;
 } {
   const assistantTexts: string[] = [];
+  const assistantMetas: Array<Record<string, unknown> | undefined> = [];
   const manager = new SessionManager({
     projectRoot: options.workspace,
     createOpenAIClient: () => ({
@@ -92,11 +95,12 @@ function createTestManager(options: { workspace: string; client: unknown }): {
     }),
     getResolvedSettings: () => ({ model: "test-model" }),
     renderMarkdown: (text: string) => text,
-    onAssistantMessage: (message: { content?: string }) => {
+    onAssistantMessage: (message: { content?: string; meta?: unknown }) => {
       assistantTexts.push(message.content ?? "");
+      assistantMetas.push(message.meta as Record<string, unknown> | undefined);
     },
   });
-  return { manager, assistantTexts };
+  return { manager, assistantTexts, assistantMetas };
 }
 
 test("A1：全新会话首条 /team list 不触达模型，直接执行并落会话消息", async () => {
@@ -222,4 +226,46 @@ test("A6：/teams（复数）不是命令，仍走普通消息链路", async () 
     false,
     "普通消息不得产生 team 命令输出"
   );
+});
+
+test("A7：/team 输出带 teamCommand 标记（Web 据此渲染团队卡片而非助手气泡）", async () => {
+  const workspace = createTempDir("deepcode-teamcmd-a7-workspace-");
+  const home = createTempDir("deepcode-teamcmd-a7-home-");
+  setHomeDir(home);
+
+  const { client, callCount } = createForbiddenClient();
+  const { manager, assistantMetas } = createTestManager({ workspace, client });
+
+  await manager.handleUserPrompt({ text: "/team list" });
+
+  assert.equal(callCount.value, 0, "命令路径不触达模型");
+  assert.ok(assistantMetas.length > 0, "应至少推出一条命令输出");
+  // 每条输出都必须带标记（否则前端会把它当普通助手消息）：progress 若干条 + 结果 1 条
+  const phases = assistantMetas.map((item) => (item?.["teamCommand"] as { phase?: string } | undefined)?.phase);
+  assert.ok(
+    phases.every((phase) => phase === "progress" || phase === "result"),
+    `所有输出都必须带 teamCommand 标记，实际：${JSON.stringify(phases)}`
+  );
+  assert.equal(phases.at(-1), "result", "最后一条必须是结果（前端据此渲染结果卡）");
+  const meta = assistantMetas.at(-1)?.["teamCommand"] as { subcommand?: string; phase?: string } | undefined;
+  assert.ok(meta !== undefined);
+  assert.equal(meta.subcommand, "list");
+  assert.equal(meta.phase, "result");
+});
+
+test("A8：/team 未知子命令标记为 error 阶段（前端标红而不是当正常结果）", async () => {
+  const workspace = createTempDir("deepcode-teamcmd-a8-workspace-");
+  const home = createTempDir("deepcode-teamcmd-a8-home-");
+  setHomeDir(home);
+
+  const { client } = createForbiddenClient();
+  const { manager, assistantMetas } = createTestManager({ workspace, client });
+
+  await manager.handleUserPrompt({ text: "/team nosuchsub" });
+
+  const meta = assistantMetas.at(-1)?.["teamCommand"] as { subcommand?: string; phase?: string } | undefined;
+  assert.ok(meta !== undefined);
+  assert.equal(meta.phase, "error", "参数错误必须以 error 阶段下发");
+  // 未知子命令不是合法子命令 → subcommand 回落到 help（args 为 null 分支）
+  assert.equal(meta.subcommand, "help");
 });

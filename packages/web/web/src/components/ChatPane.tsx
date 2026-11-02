@@ -535,6 +535,26 @@ export function ChatPane(props: ChatPaneProps) {
                       <span className="steering-divider-text">{entry.text}</span>
                     </div>
                   );
+                case "team":
+                  // `/team` 团队模式输出（2026-11-02 接线审查 D3）：引擎把每条产出
+                  // 落成 system 消息并打 meta.teamCommand 标记。此前它们走通用助手
+                  // 气泡，用户看不出「团队模式在跑什么、跑到哪一步」——动态组队在
+                  // 界面上等于不存在。progress 紧凑成行，result 单独成卡，error 标红。
+                  return (
+                    <div key={entry.id} className={`team-entry team-entry-${entry.phase}`}>
+                      <div className="team-entry-head">
+                        <span className="team-entry-badge">团队模式</span>
+                        <span className="team-entry-sub">/team {entry.subcommand}</span>
+                      </div>
+                      {entry.phase === "progress" ? (
+                        <div className="team-entry-progress">{entry.text}</div>
+                      ) : (
+                        // 结果/异常是多行报告（角色清单、派单结果、阶段汇总），
+                        // 用等宽 pre 保留缩进与对齐
+                        <pre className="team-entry-body">{entry.text}</pre>
+                      )}
+                    </div>
+                  );
                 case "contextLoad":
                   // 定义加载注入（智能体 / 技能）：引擎注入的是给模型的角色约束，
                   // 不是对话内容。默认只露一行「已加载智能体 · 中文名」，

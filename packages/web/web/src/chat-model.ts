@@ -168,6 +168,25 @@ export type ChatEntry =
       decided?: "allow" | "always" | "deny";
       /** 决策提交中（防重复点击） */
       submitting: boolean;
+    }
+  /**
+   * `/team` 团队模式输出（2026-11-02 接线审查 D3）
+   *
+   * 引擎把 `/team` 的每条产出都落成 `role: "system"` 的可见消息，并写
+   * `meta.teamCommand`（subcommand + phase）。此前 Web 把这些消息当普通助手气泡，
+   * 用户看不出「团队模式在跑什么、跑到哪一步」，动态组队在界面上等于不存在。
+   *
+   * 归并成专用条目后：progress 渲染为紧凑阶段行，result 渲染为可复制的结果卡，
+   * error 单独标红；三者都以「团队模式 · 子命令」领头，与对话内容明确分开。
+   */
+  | {
+      kind: "team";
+      id: string;
+      /** 子命令（list / match / dispatch / autonomous / full-lifecycle / auto / help） */
+      subcommand: string;
+      phase: "progress" | "result" | "error";
+      /** 正文（进度行已剥掉 【team】 前缀） */
+      text: string;
     };
 
 /**
@@ -930,4 +949,44 @@ export function parseContextLoadMeta(meta: Record<string, unknown> | null | unde
     name,
     ...(role !== undefined ? { role } : {}),
   };
+}
+
+/** `/team` 命令标记结构 */
+export interface TeamCommandInfo {
+  subcommand: string;
+  phase: "progress" | "result" | "error";
+}
+
+/**
+ * 从引擎消息 meta 识别 `/team` 命令输出（2026-11-02 接线审查 D3）。
+ *
+ * ## 为什么靠标记而不是文本前缀
+ *
+ * `/team` 的进度行带 `【team】` 前缀，但**最终结果不带**（那是 `result.stdout`
+ * 的多行报告）。靠前缀识别会漏掉最需要辨认的那条，最终结果只能落进通用助手
+ * 气泡——用户分不清"这是团队模式的产出"还是模型随口回的一段话。
+ * 标记由引擎写入并随消息持久化，刷新恢复后同样成立。
+ *
+ * @param meta 消息元信息（SSE 帧与历史 DTO 同形）
+ * @returns 结构化命令信息；非 /team 输出返回 null
+ */
+export function parseTeamCommandMeta(meta: Record<string, unknown> | null | undefined): TeamCommandInfo | null {
+  if (meta === null || meta === undefined) return null;
+  const raw = meta.teamCommand;
+  if (raw === null || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  const phase = record.phase;
+  if (phase !== "progress" && phase !== "result" && phase !== "error") return null;
+  const subcommand =
+    typeof record.subcommand === "string" && record.subcommand.trim() !== "" ? record.subcommand : "team";
+  return { subcommand, phase };
+}
+
+/**
+ * 剥掉进度行的 `【team】` 前缀（引擎为进度消息统一加的视觉标记）。
+ *
+ * 结果消息本来就没有前缀；带 `[n/m]` 阶段序号的由渲染层单独高亮。
+ */
+export function stripTeamPrefix(content: string): string {
+  return content.replace(/^【team】\s*/, "");
 }

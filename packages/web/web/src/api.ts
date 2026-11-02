@@ -274,12 +274,27 @@ export interface CapabilityMcpServer {
   args?: string[];
 }
 
+/** 斜杠命令条目（服务端下发，来源为 core 的命令描述符单一数据源） */
+export interface CapabilityCommand {
+  /** 命令名（含斜杠，如 "/team dispatch"） */
+  name: string;
+  description: string;
+  /** 参数提示（如 "--task <任务描述>"） */
+  args?: string[];
+}
+
 /** 能力发现响应（@ 提及补全与设置抽屉「技能」页签数据源） */
 export interface Capabilities {
   skills: CapabilitySkill[];
   mcpServers: CapabilityMcpServer[];
   /** 默认智能体（settings.agents.default；未配置为 null） */
   defaultAgent?: string | null;
+  /**
+   * 可在对话里直接执行的斜杠命令（2026-11-02 接线审查 D3）
+   *
+   * 旧服务端不返回该字段 → 前端补全面板退化为仅 @ 提及（不报错）。
+   */
+  commands?: CapabilityCommand[];
 }
 
 /** Agent 创建结果（POST /api/agents；失败抛 ApiError，message 为结构化中文原因） */

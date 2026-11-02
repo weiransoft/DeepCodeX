@@ -18,7 +18,12 @@
 
 import os from "node:os";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { SkillManager, resolveCurrentSettings, type McpServerConfig } from "@vegamo/deepcode-core";
+import {
+  SkillManager,
+  buildTeamCommandDescriptors,
+  resolveCurrentSettings,
+  type McpServerConfig,
+} from "@vegamo/deepcode-core";
 import { sendJson } from "../http-utils";
 import type { AuthContext } from "../user-identity";
 
@@ -50,12 +55,30 @@ export type CapabilityMcpServer = {
   args?: string[];
 };
 
+/**
+ * 斜杠命令条目（2026-11-02 接线审查 D3）
+ *
+ * 来源是 core 的 `buildTeamCommandDescriptors()`——与 CLI、与注入 EAG 建议层的
+ * 描述符**同一个数据源**。前端补全面板只消费这份清单，不再各自手写命令表：
+ * 过去 Web 手写 5 条与 CLI 重复的描述符，改一个子命令就要改三处，漏改即"看起来
+ * 有入口、敲了静默降级"。
+ */
+export type CapabilityCommand = {
+  /** 命令名（含斜杠，如 "/team dispatch"） */
+  name: string;
+  description: string;
+  /** 参数提示（如 "--task <任务描述>"） */
+  args?: string[];
+};
+
 /** GET /api/capabilities 响应体 */
 export type CapabilitiesResponse = {
   skills: CapabilitySkill[];
   mcpServers: CapabilityMcpServer[];
   /** 默认智能体（settings.agents.default；未配置为 null） */
   defaultAgent: string | null;
+  /** 可在对话里直接执行的斜杠命令（当前为 /team 体系） */
+  commands: CapabilityCommand[];
 };
 
 /**
@@ -105,6 +128,26 @@ function listMcpServersSafe(projectRoot: string): CapabilityMcpServer[] {
 }
 
 /**
+ * 斜杠命令清单：直接复用 core 的描述符（单一数据源），映射为前端需要的三段字段。
+ *
+ * 不抛错：描述符来自编译期常量，异常只可能是打包问题；降级为空数组时前端
+ * 仅失去补全提示，手动敲命令仍可执行（execution 不依赖本清单）。
+ *
+ * 导出供测试直接断言（无需构造 ServerResponse）。
+ */
+export function listCommandsSafe(): CapabilityCommand[] {
+  try {
+    return buildTeamCommandDescriptors().map((descriptor) => ({
+      name: descriptor.name,
+      description: descriptor.description,
+      ...(descriptor.args && descriptor.args.length > 0 ? { args: [...descriptor.args] } : {}),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
  * 处理 GET /api/capabilities（已认证）。
  *
  * projectRoot 取用户主目录：技能扫描的用户级根（~/.deepcode/skills 等）
@@ -134,6 +177,7 @@ export async function handleListCapabilities(
     skills,
     mcpServers: listMcpServersSafe(projectRoot),
     defaultAgent,
+    commands: listCommandsSafe(),
   };
   sendJson(res, 200, payload);
 }

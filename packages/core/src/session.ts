@@ -548,6 +548,21 @@ export type MessageMeta = {
   agentIndex?: Array<{ name: string; role: string; description: string }>;
   permissions?: MessageToolPermission[];
   userPrompt?: UserPromptContent;
+  /**
+   * `/team` 命令输出标记（2026-11-02 接线审查 D3）
+   *
+   * 为什么需要：`/team` 的产出分两类——带 `【team】` 前缀的进度行，和**不带任何
+   * 前缀**的最终结果（`result.stdout` 的多行报告）。前端若靠文本前缀识别，最终结果
+   * 识别不出来，只能落进通用助手气泡，用户分不清"这是团队模式的产出"还是模型的
+   * 普通回复。由引擎打标后，前端按 `phase` 渲染成专用卡片，且刷新恢复后依然成立
+   * （标记随消息持久化）。
+   */
+  teamCommand?: {
+    /** 子命令（list / match / dispatch / autonomous / full-lifecycle / auto / help） */
+    subcommand: string;
+    /** progress = 阶段进度行；result = 最终结果；error = 执行异常或参数错误 */
+    phase: "progress" | "result" | "error";
+  };
 };
 
 export type SessionMessage = {
@@ -6719,9 +6734,18 @@ ${agentInstructions}
       updateTime: new Date().toISOString(),
     }));
 
-    /** 追加一条可见 system 消息并推给宿主（Web 复用 role:"system" 渲染路径） */
-    const pushSystemMessage = (content: string): void => {
-      const message = this.buildSystemMessage(sessionId, content, null, true);
+    /**
+     * 追加一条可见 system 消息并推给宿主（Web 复用 role:"system" 渲染路径）
+     *
+     * `phase` 决定前端渲染形态，并随消息持久化（刷新后仍能识别为团队输出）：
+     * - progress：阶段推进行（plan → dev → verify）
+     * - result：最终报告
+     * - error：执行异常 / 参数错误
+     */
+    const pushSystemMessage = (content: string, phase: "progress" | "result" | "error"): void => {
+      const message = this.buildSystemMessage(sessionId, content, null, true, {
+        teamCommand: { subcommand: args?.subcommand ?? "help", phase },
+      });
       this.appendSessionMessage(sessionId, message);
       this.onAssistantMessage(message, false);
     };
@@ -6735,7 +6759,8 @@ ${agentInstructions}
       pushSystemMessage(
         isHelpRequest
           ? formatTeamHelp()
-          : `${formatTeamHelp()}\n\n未知子命令：${token}（参数错误，退出码 2）。以上为可用子命令。`
+          : `${formatTeamHelp()}\n\n未知子命令：${token}（参数错误，退出码 2）。以上为可用子命令。`,
+        isHelpRequest ? "result" : "error"
       );
       this.updateSessionEntry(sessionId, (entry) => ({
         ...entry,
@@ -6760,7 +6785,7 @@ ${agentInstructions}
             typeof event.index === "number" && typeof event.total === "number" && event.index > 0
               ? `[${event.index}/${event.total}] `
               : "";
-          pushSystemMessage(`【team】${label}${event.message}`);
+          pushSystemMessage(`【team】${label}${event.message}`, "progress");
         },
       });
     } catch (error) {
@@ -6771,12 +6796,15 @@ ${agentInstructions}
         failReason: `/team 执行异常：${message}`,
         updateTime: new Date().toISOString(),
       }));
-      pushSystemMessage(`【team】✖ 执行异常：${message}`);
+      pushSystemMessage(`【team】✖ 执行异常：${message}`, "error");
       return;
     }
 
     const text = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
-    pushSystemMessage(text || `（/team ${args.subcommand} 无输出，退出码 ${result.exitCode}）`);
+    pushSystemMessage(
+      text || `（/team ${args.subcommand} 无输出，退出码 ${result.exitCode}）`,
+      result.exitCode === 0 ? "result" : "error"
+    );
 
     this.updateSessionEntry(sessionId, (entry) => ({
       ...entry,

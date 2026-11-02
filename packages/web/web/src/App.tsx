@@ -36,6 +36,8 @@ import {
   parseBackgroundTaskNotice,
   parseContextLoadMeta,
   parseLeadingJsonBlock,
+  parseTeamCommandMeta,
+  stripTeamPrefix,
 } from "./chat-model";
 import { getDesktopBridge, isDesktop, type DesktopBridge } from "./desktop-bridge";
 import type { PermissionDecisionChoice } from "./components/PermissionCard";
@@ -299,6 +301,22 @@ export function App() {
     // 归并为专用通知卡片（命令/状态/耗时/输出 + 可折叠日志尾），
     // 避免整段文本进助手气泡导致命令换行碎裂、日志标签暴露
     if (e.role === "system") {
+      // `/team` 命令输出（meta.teamCommand）：归并为团队模式卡片——进度行紧凑、
+      // 结果单独成卡。此前落入下方助手气泡，用户看不出这是团队模式的产出
+      const team = parseTeamCommandMeta(e.meta);
+      if (team !== null) {
+        setEntries((prev) => [
+          ...prev,
+          {
+            kind: "team",
+            id: `team-${e.messageId}`,
+            subcommand: team.subcommand,
+            phase: team.phase,
+            text: stripTeamPrefix(e.content),
+          },
+        ]);
+        return;
+      }
       // 定义加载注入（智能体 / 技能，meta.skill）：那是**给模型的角色约束**
       // （整份行为准则与红线清单），不是对话内容。此前落入下方助手气泡分支，
       // 用户看到的就是一大段「The following custom agent definition has been
@@ -616,6 +634,19 @@ export function App() {
         const raw = d.meta.steeringText;
         result.push({ kind: "steering", id: `h-${d.id}`, text: typeof raw === "string" && raw !== "" ? raw : content });
       } else if (d.role === "system") {
+        // `/team` 命令输出（meta.teamCommand）→ 团队模式卡片；与实时路径
+        // （onAssistantMessage）同源归并，刷新前后呈现一致
+        const team = parseTeamCommandMeta(d.meta);
+        if (team !== null) {
+          result.push({
+            kind: "team",
+            id: `h-${d.id}`,
+            subcommand: team.subcommand,
+            phase: team.phase,
+            text: stripTeamPrefix(content),
+          });
+          continue;
+        }
         // 定义加载注入（智能体 / 技能，meta.skill）→ 可折叠提示条；
         // 与实时路径（onAssistantMessage）同源归并，刷新前后呈现一致
         const load = parseContextLoadMeta(d.meta);

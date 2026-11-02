@@ -1435,8 +1435,69 @@ body {
   overflow-wrap: anywhere;
 }
 
-/* ============ 文件预览（docs/dev/web-file-preview.md P3） ============ */
-/* 抽屉内容区：纵向 flex（窄屏退化 = 列表在上、预览在下） */
+/* ============ 团队模式输出（/team，2026-11-02 接线审查 D3） ============ */
+/*
+ * 引擎把 /team 的每条产出落成 system 消息并打 meta.teamCommand 标记。
+ * progress 是阶段推进（plan → dev → verify），条目多、信息密度低 → 压缩成单行；
+ * result 是最终报告（角色清单 / 派单结果 / 阶段汇总），多行文本需保留缩进 → pre；
+ * error 单独标红，避免和正常产出混在一起被忽略。
+ */
+.team-entry {
+  border: 1px solid var(--app-border);
+  border-left: 3px solid var(--app-accent);
+  border-radius: 8px;
+  background: var(--app-bg-subtle);
+  padding: 7px 11px;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.team-entry + .team-entry {
+  margin-top: 4px;
+}
+.team-entry-error {
+  border-left-color: var(--app-danger);
+}
+.team-entry-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.team-entry-badge {
+  flex-shrink: 0;
+  color: var(--app-accent);
+  font-weight: 600;
+}
+.team-entry-error .team-entry-badge {
+  color: var(--app-danger);
+}
+.team-entry-sub {
+  flex-shrink: 0;
+  color: var(--app-text-tertiary);
+  font-family: var(--app-font-mono);
+  font-size: 11.5px;
+}
+.team-entry-progress {
+  margin-top: 2px;
+  color: var(--app-text-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.team-entry-body {
+  margin: 6px 0 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-family: var(--app-font-mono);
+  font-size: 11.5px;
+  line-height: 1.62;
+  color: var(--app-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 520px;
+  overflow: auto;
+}
+
+/* ============ 文件预览（docs/dev/web-file-preview.md P3） ============ *//* 抽屉内容区：纵向 flex（窄屏退化 = 列表在上、预览在下） */
 .drawer-body {
   flex: 1;
   display: flex;
