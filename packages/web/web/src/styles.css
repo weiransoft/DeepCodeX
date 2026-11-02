@@ -2466,32 +2466,15 @@ a.icon-btn {
 .top-tab-bar-tabs::-webkit-scrollbar {
   display: none;
 }
-.top-tab {
-  flex: 0 1 auto;
-  max-width: 180px;
-  height: 28px;
-  padding: 0 12px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--app-text-secondary);
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.top-tab:hover {
-  background: var(--app-bg-hover);
-}
-.top-tab.active {
-  background: var(--app-bg-elevated);
-  border-color: var(--app-border);
-  color: var(--app-text);
-  font-weight: 600;
-}
-.top-tab-title {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
+/* 左上角应用 Logo（与桌面端图标/favicon 同款 iOS 26 风格，纯装饰不接收指针） */
+.top-tab-bar-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  margin-right: 4px;
+  /* 轻微圆角阴影提升玻璃质感（SVG 自带 squircle 透明底） */
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.25));
 }
 .top-tab-new {
   flex: none;

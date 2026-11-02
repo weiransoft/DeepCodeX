@@ -6,16 +6,17 @@
  * - macOS 红黄绿交通灯预留区（padding）；
  * - 透明拖拽层垫底（data-tauri-drag-region + window_drag 双通道，自 DesktopStatusBar 迁入，
  *   实现整条顶栏可拖动而按钮仍可点击）；
- * - 多会话标签：点击切换会话、➕ 新建（标题溢出省略，横向滚动）；
+ * - 左上角应用 Logo（与桌面端应用图标/favicon 同款 iOS 26 风格）+ 新建对话按钮；
  * - 右侧：authority 徽标（「本地」/ ssh://user@host，M2 由 SSH 面板联动）+ 新窗口按钮。
  *
- * Tauri v2 的 data-tauri-drag-region 仅作用于元素本身、不向下传递，
- * 因此沿用「独立空拖拽层承载 + 内容层 pointer-events:none + 按钮 auto」方案。
+ * 注：多会话标签列表已按产品要求移除（会话切换统一走左侧栏），顶栏仅保留
+ * 拖拽区 / Logo / 新建入口。Tauri v2 的 data-tauri-drag-region 仅作用于元素
+ * 本身、不向下传递，因此沿用「独立空拖拽层承载 + 内容层 pointer-events:none
+ * + 按钮 auto」方案。
  */
 import { useState } from "react";
-import { type ChatSummary } from "../api";
 import { getDesktopBridge, type DesktopBridge } from "../desktop-bridge";
-import { PlusIcon } from "./icons";
+import { AppLogo, PlusIcon } from "./icons";
 
 /** 运行平台是否为 macOS（顶栏左侧为交通灯预留空间） */
 function isMacOS(): boolean {
@@ -25,12 +26,6 @@ function isMacOS(): boolean {
 
 /** TopTabBar 组件属性 */
 export interface TopTabBarProps {
-  /** 会话列表（多标签数据源；登录页为空数组 → 仅拖拽区 + 徽标） */
-  chats: ChatSummary[];
-  /** 活跃会话 id（null = 无） */
-  activeChatId: string | null;
-  /** 切换会话 */
-  onSelectChat: (chatId: string) => void;
   /** 新建会话 */
   onNewChat: () => void;
   /** 正在新建（禁用 ➕ 防抖） */
@@ -42,15 +37,7 @@ export interface TopTabBarProps {
 }
 
 /** 顶部标签页栏组件（桌面壳专用） */
-export function TopTabBar({
-  chats,
-  activeChatId,
-  onSelectChat,
-  onNewChat,
-  creating,
-  authority,
-  onNotice,
-}: TopTabBarProps) {
+export function TopTabBar({ onNewChat, creating, authority, onNotice }: TopTabBarProps) {
   const [bridge] = useState<DesktopBridge | null>(() => getDesktopBridge());
   if (!bridge) return null;
 
@@ -70,19 +57,11 @@ export function TopTabBar({
           void bridge.invoke("window_drag").catch(() => {});
         }}
       />
-      {/* 多会话标签：内容层默认不接收指针事件，标签/按钮单独恢复 */}
+      {/* 左上角 Logo + 新建入口：内容层默认不接收指针事件，按钮单独恢复 */}
       <div className="top-tab-bar-tabs">
-        {chats.map((c) => (
-          <button
-            key={c.chatId}
-            type="button"
-            className={"top-tab" + (c.chatId === activeChatId ? " active" : "")}
-            title={c.title ?? "未命名对话"}
-            onClick={() => onSelectChat(c.chatId)}
-          >
-            <span className="top-tab-title">{c.title ?? "未命名对话"}</span>
-          </button>
-        ))}
+        <span className="top-tab-bar-logo">
+          <AppLogo size={16} />
+        </span>
         <button type="button" className="top-tab-new" title="新建对话" disabled={creating} onClick={onNewChat}>
           <PlusIcon size={13} />
         </button>

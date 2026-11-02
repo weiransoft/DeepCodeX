@@ -559,3 +559,44 @@ export function UserAvatarIcon(p: IconProps) {
     </IconBase>
   );
 }
+
+/**
+ * 应用 Logo（iOS 26 液态玻璃风格：渐变 squircle + 对话气泡 + 代码符号）。
+ *
+ * 与桌面端应用图标（desktop/src-tauri/icons，AI 生成同款设计）与
+ * 服务端 /favicon.svg（server.ts 内置）三方同源：同一几何与配色语言。
+ * 独立 viewBox（1024）+ 渐变填充，不随 currentColor 变化。
+ */
+export function AppLogo({ size = 16, className }: IconProps) {
+  return (
+    <svg viewBox="0 0 1024 1024" width={size} height={size} className={className} role="img" aria-label="DeepCode">
+      <defs>
+        <linearGradient id="dc-app-logo-grad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#2b4df0" />
+          <stop offset="0.52" stopColor="#7b3ff2" />
+          <stop offset="1" stopColor="#22d3ee" />
+        </linearGradient>
+        <linearGradient id="dc-app-logo-glass" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#ffffff" stopOpacity="0.32" />
+          <stop offset="0.45" stopColor="#ffffff" stopOpacity="0.04" />
+          <stop offset="1" stopColor="#ffffff" stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      {/* squircle 底：蓝→紫→青对角渐变 */}
+      <rect width="1024" height="1024" rx="230" fill="url(#dc-app-logo-grad)" />
+      {/* 顶部玻璃高光层 */}
+      <path d="M0 0h1024v340c-200 90-420 130-512 130S200 430 0 340Z" fill="url(#dc-app-logo-glass)" />
+      {/* 对话气泡（白玻璃描边 + 小尾巴） */}
+      <g fill="none" stroke="#ffffff" strokeWidth="46" strokeLinecap="round" strokeLinejoin="round" opacity="0.94">
+        <rect x="176" y="236" width="672" height="486" rx="118" />
+        <path d="M330 722l-26 118 128-108" />
+      </g>
+      {/* 代码符号 </> */}
+      <g fill="none" stroke="#ffffff" strokeWidth="52" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M392 420l-96 100 96 100" />
+        <path d="M632 420l96 100-96 100" />
+        <path d="M562 372l-96 300" opacity="0.96" />
+      </g>
+    </svg>
+  );
+}

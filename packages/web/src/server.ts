@@ -167,21 +167,23 @@ function sendPlaceholderPage(res: ServerResponse, port: number): void {
 }
 
 /**
- * 内置 favicon（DeepSeek 蓝白风格兔狲 SVG，与桌面壳图标同风格：
- * 纯色 #4D6BFE 单色扁平兔狲头、白色镂空眼鼻（负空间），白底圆角，无渐变）。
+ * 内置 favicon（iOS 26 液态玻璃风格，与桌面壳图标/desktop icons 与前端 AppLogo
+ * 组件三方同源：渐变 squircle 底（蓝→紫→青）+ 白描边对话气泡 + </> 代码符号）。
  */
 const FAVICON_SVG =
-  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">' +
-  '<rect width="16" height="16" rx="3.5" fill="#fff"/>' +
-  '<circle cx="3.8" cy="5.8" r="2" fill="#4D6BFE"/>' +
-  '<circle cx="12.2" cy="5.8" r="2" fill="#4D6BFE"/>' +
-  '<ellipse cx="8" cy="9.4" rx="6" ry="5.4" fill="#4D6BFE"/>' +
-  '<circle cx="5.8" cy="8.8" r="1.5" fill="#fff"/>' +
-  '<circle cx="10.2" cy="8.8" r="1.5" fill="#fff"/>' +
-  '<circle cx="6.1" cy="8.2" r="0.75" fill="#4D6BFE"/>' +
-  '<circle cx="9.9" cy="8.2" r="0.75" fill="#4D6BFE"/>' +
-  '<path d="M7.55 10.6 L8.45 10.6 L8 11.25 Z" fill="#fff"/>' +
-  '<path d="M7.2 11.7 Q8 12.3 8.8 11.7" stroke="#fff" stroke-width="0.6" fill="none" stroke-linecap="round"/></svg>';
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">' +
+  "<defs>" +
+  '<linearGradient id="g" x1="0" y1="0" x2="1" y2="1">' +
+  '<stop offset="0" stop-color="#2b4df0"/><stop offset="0.52" stop-color="#7b3ff2"/><stop offset="1" stop-color="#22d3ee"/>' +
+  "</linearGradient></defs>" +
+  '<rect width="1024" height="1024" rx="230" fill="url(#g)"/>' +
+  '<g fill="none" stroke="#fff" stroke-width="46" stroke-linecap="round" stroke-linejoin="round" opacity="0.94">' +
+  '<rect x="176" y="236" width="672" height="486" rx="118"/>' +
+  '<path d="M330 722l-26 118 128-108"/></g>' +
+  '<g fill="none" stroke="#fff" stroke-width="52" stroke-linecap="round" stroke-linejoin="round">' +
+  '<path d="M392 420l-96 100 96 100"/>' +
+  '<path d="M632 420l96 100-96 100"/>' +
+  '<path d="M562 372l-96 300" opacity="0.96"/></g></svg>';
 
 /**
  * 静态资源处理（非 /api 路径的 GET/HEAD）。
