@@ -17,9 +17,10 @@
  */
 
 import { z } from "zod";
-import type { MatchResult, MatchStrategy, RoleDefinition, ScoreBreakdown, TaskRequirement } from "./types.js";
+import type { MatchResult, MatchStrategy, ScoreBreakdown, TaskRequirement } from "./types.js";
 import { ROLE_REGISTRY } from "./role-registry.js";
-import { MatchStrategy as MatchStrategySchema } from "./types.js";
+// RoleDefinition 需要同时作为类型与 zod schema 使用（MatchOptions.candidates 校验）
+import { MatchStrategy as MatchStrategySchema, RoleDefinition } from "./types.js";
 import { createOpenAIClient } from "../common/openai-client.js";
 
 // ============================================================================
@@ -41,6 +42,70 @@ export const MATCH_WEIGHTS = {
 } as const;
 
 /**
+ * 运行时角色置信度折算系数（2026-11-02 L0-2，落地方案 §4.5「优先级约束」）
+ *
+ * ## 为什么 `priority` 不够，必须再有一个系数
+ *
+ * 方案 §4.5 期望「内置核心角色 > 预置专家 > 自建」由 `priority` 决定。但 `priority`
+ * 在排序里只是 **同分裁决**（置信度差 < 0.01 时才生效），撑不起 R2 要防的场景：
+ * 预置专家的 `keywords` 来自所属类别枚举（3~5 项），而内置角色是 9~10 项；
+ * `computeKeywordOverlap` 用 `命中数 / 关键词总数` 归一化，**分母越小越占便宜**。
+ * 实测：任务「需求 PRD 用户故事 验收标准」下，`domain-product-helper`（4 项全中
+ * → 1.0）得 0.60，而内置 `product-manager`（10 项中 5 项 → 0.5）得 0.50 ——
+ * 纯关键词路径下专家几乎必胜内置角色，这就是 R2 说的「匹配质量下降」。
+ *
+ * 因此在候选集注入路径上对运行时角色做一次**显式**折算，把「优先」变成可计算的
+ * 偏好强度：专家需比同任务的内置角色高约 25%、自建需高约 43%，才能排到前面。
+ *
+ * ## 为什么不改算法本身
+ *
+ * `computeKeywordOverlap` / `aggregateScore` / `MATCH_WEIGHTS` 一律不动 —— 改动会
+ * 让未接桥接时的结果（`/team` 只有 5 个内置角色）漂移，破坏验收 B1a「逐字段一致」。
+ * 折算只读取 `metadata.source`：内置角色该字段为空 → 系数恒为 1.0，行为零变化。
+ */
+export const RUNTIME_ROLE_SOURCE_FACTOR = {
+  /** 预置专家（`preset: true`，本仓库一方数据） */
+  preset: 0.8,
+  /** 用户自建智能体（description 用户可控） */
+  custom: 0.7,
+} as const;
+
+/**
+ * 对运行时角色应用来源折算（内置角色原样返回）
+ *
+ * @param confidence 加权原始置信度
+ * @param role 角色定义
+ */
+function applySourceFactor(confidence: number, role: RoleDefinition): number {
+  const source = role.metadata?.source;
+  if (source === "preset") return confidence * RUNTIME_ROLE_SOURCE_FACTOR.preset;
+  if (source === "custom") return confidence * RUNTIME_ROLE_SOURCE_FACTOR.custom;
+  return confidence;
+}
+
+/** 参与排序的中间结果（confidence 为**未折算**的原始值） */
+interface ScoredRole {
+  role: RoleDefinition;
+  scoreBreakdown: ScoreBreakdown;
+  confidence: number;
+  strategy: MatchStrategy;
+}
+
+/**
+ * 排序比较器：先按折算后置信度降序，接近同分时按 priority 降序
+ *
+ * 折算只在此处与 `buildMatchResultFromScored` 生效，`scored` 里始终保留原始值 ——
+ * 这样 hybrid 的 AI 重排（`ai.score * 0.6 + confidence * 0.4`）不会二次折算。
+ */
+function compareScoredRoles(a: ScoredRole, b: ScoredRole): number {
+  const diff = applySourceFactor(b.confidence, b.role) - applySourceFactor(a.confidence, a.role);
+  if (Math.abs(diff) < 0.01) {
+    return b.role.priority - a.role.priority;
+  }
+  return diff;
+}
+
+/**
  * AI 增强专用权重（与 keyword 不同的语义模型）
  */
 export const AI_MATCH_WEIGHTS = {
@@ -57,6 +122,19 @@ export const MatchOptions = z.object({
   projectRoot: z.string().default(process.cwd()),
   injectedClient: z.unknown().optional(),
   timeoutMs: z.number().int().positive().default(30000),
+  /**
+   * 角色候选集覆盖（2026-11-02 L0-2）
+   *
+   * 语义（Surgical Changes）：**只改候选集来源，不改匹配算法**。
+   * - 未传 / undefined → 沿用 `ROLE_REGISTRY`（5 个内置角色），结果与改动前逐字段一致
+   * - 传入 → 以传入数组为全部候选（调用方负责把内置角色与运行时角色合并，
+   *   典型做法：`[...ROLE_REGISTRY, ...buildRolesFromAgents(skills)]`）
+   *
+   * 为什么不把运行时角色塞进 `ROLE_REGISTRY`：该常量是编译期冻结的公开约定
+   * （`index.ts` 直接导出），且被 CLI 帮助文本、`/team list` 文案多处引用；
+   * 改为可变会让"内置角色数"失去确定性。候选集注入把可变性限制在调用点。
+   */
+  candidates: z.array(RoleDefinition).optional(),
 });
 export type MatchOptions = z.infer<typeof MatchOptions>;
 
@@ -324,18 +402,14 @@ async function scoreByAI(
 // ============================================================================
 
 async function matchByHybrid(task: TaskRequirement, options: MatchOptions): Promise<ReadonlyArray<MatchResult>> {
-  const keywordScored = ROLE_REGISTRY.map((role) => {
+  // L0-2：与 keyword / ai 分支共用同一候选集来源
+  const pool = options.candidates ?? ROLE_REGISTRY;
+  const keywordScored = pool.map((role) => {
     const scoreBreakdown = scoreByKeyword(task, role);
     return { role, scoreBreakdown, confidence: aggregateScore(scoreBreakdown), strategy: "hybrid" as const };
   });
 
-  keywordScored.sort((a, b) => {
-    const scoreDiff = b.confidence - a.confidence;
-    if (Math.abs(scoreDiff) < 0.01) {
-      return b.role.priority - a.role.priority;
-    }
-    return scoreDiff;
-  });
+  keywordScored.sort(compareScoredRoles);
 
   const topCandidates = keywordScored.slice(0, Math.max(options.topK * 2, 3));
 
@@ -361,7 +435,7 @@ async function matchByHybrid(task: TaskRequirement, options: MatchOptions): Prom
       return { role, scoreBreakdown: mergedBreakdown, confidence: hybridConfidence, strategy: "hybrid" as const };
     });
 
-    merged.sort((a, b) => b.confidence - a.confidence);
+    merged.sort(compareScoredRoles);
 
     const top1 = merged[0];
     if (top1 && (top1.scoreBreakdown.aiConfidence ?? 0) >= options.aiFallbackThreshold) {
@@ -376,13 +450,10 @@ async function matchByHybrid(task: TaskRequirement, options: MatchOptions): Prom
 // 第五部分：结果构建
 // ============================================================================
 
-function buildMatchResultFromScored(scored: {
-  role: RoleDefinition;
-  scoreBreakdown: ScoreBreakdown;
-  confidence: number;
-  strategy: MatchStrategy;
-}): MatchResult {
-  const { role, scoreBreakdown, confidence, strategy } = scored;
+function buildMatchResultFromScored(scored: ScoredRole): MatchResult {
+  const { role, scoreBreakdown, strategy } = scored;
+  // 对外暴露的置信度必须是排序用的那个值，否则「排第一但分数更低」会自相矛盾
+  const confidence = applySourceFactor(scored.confidence, role);
   const matchedCapabilities = role.capabilities.filter((c) => scoreBreakdown.capability > 0);
   const matchedSkills = role.skills.filter((s) => scoreBreakdown.skill > 0.3);
   const missingCapabilities: string[] = [];
@@ -427,10 +498,12 @@ export async function matchRoles(
   rawOptions?: Partial<MatchOptions>
 ): Promise<ReadonlyArray<MatchResult>> {
   const options = MatchOptions.parse(rawOptions ?? {});
+  // L0-2：候选集来源可注入（未传时与改动前完全一致）
+  const pool = options.candidates ?? ROLE_REGISTRY;
 
   switch (options.strategy) {
     case "keyword": {
-      const scored = ROLE_REGISTRY.map((role) => {
+      const scored = pool.map((role) => {
         const scoreBreakdown = scoreByKeyword(task, role);
         return {
           role,
@@ -439,23 +512,19 @@ export async function matchRoles(
           strategy: "keyword" as const,
         };
       });
-      scored.sort((a, b) => {
-        const diff = b.confidence - a.confidence;
-        if (Math.abs(diff) < 0.01) {
-          return b.role.priority - a.role.priority;
-        }
-        return diff;
-      });
+      scored.sort(compareScoredRoles);
       return scored.slice(0, options.topK).map(buildMatchResultFromScored);
     }
 
     case "ai": {
-      const aiResponse = await scoreByAI(task, ROLE_REGISTRY, options);
+      const aiResponse = await scoreByAI(task, pool, options);
       if (!aiResponse) {
+        // 递归回退时显式带上 candidates：options 由 zod 解析而来，
+        // 已含 candidates 字段，展开即可保持候选集一致（否则回退会静默缩小到 5 内置角色）
         return matchRoles(task, { ...options, strategy: "keyword" });
       }
       const aiMap = new Map(aiResponse.scores.map((s) => [s.roleId, s]));
-      const merged = ROLE_REGISTRY.map((role) => {
+      const merged = pool.map((role) => {
         const ai = aiMap.get(role.roleId);
         if (!ai) {
           const sb = scoreByKeyword(task, role);
@@ -481,7 +550,7 @@ export async function matchRoles(
           strategy: "ai" as const,
         };
       });
-      merged.sort((a, b) => b.confidence - a.confidence);
+      merged.sort(compareScoredRoles);
       return merged.slice(0, options.topK).map(buildMatchResultFromScored);
     }
 

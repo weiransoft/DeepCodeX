@@ -40,6 +40,24 @@ export const LogLevelEnum = {
 export const RoleId = z.enum(["architect", "product-manager", "solo-coder", "test-expert", "ui-designer"]);
 export type RoleId = z.infer<typeof RoleId>;
 
+/**
+ * 角色 ID（含运行时角色）。
+ *
+ * 背景（2026-11-02 群组接线）：角色候选集此前等价于 `RoleId` 这个 5 字面量枚举，
+ * 导致 `~/.deepcode/skills/*` 下的 `type: agent` 智能体（35 个预置 + 用户自建）
+ * 在类型层面就无法成为 team 成员。`buildRolesFromAgents()` 产出的运行时角色
+ * 使用 SKILL.md 的 name（kebab-case）作为 roleId，因此这里放宽为 kebab-case 字符串：
+ * - 允许范围：`[a-z0-9][a-z0-9-]*`，长度 2~64（与 SKILL.md name 约束一致）
+ * - 5 个内置角色全部满足该规则，校验强度实质不变（非法字符仍被拒绝）
+ * - 需要判定"是否为内置角色"时用 `RoleId.safeParse(id).success`，不要依赖类型收窄
+ */
+export const RuntimeRoleId = z
+  .string()
+  .min(2)
+  .max(64)
+  .regex(/^[a-z0-9][a-z0-9-]*$/, "roleId must be kebab-case ([a-z0-9-])");
+export type RuntimeRoleId = z.infer<typeof RuntimeRoleId>;
+
 /** 角色优先级（用于排序，10 最高） */
 export const RolePriority = z.number().int().min(0).max(10);
 export type RolePriority = z.infer<typeof RolePriority>;
@@ -58,7 +76,7 @@ export type RoleKeyword = z.infer<typeof RoleKeyword>;
 
 /** 角色定义（含完整 system prompt） */
 export const RoleDefinition = z.object({
-  roleId: RoleId,
+  roleId: RuntimeRoleId,
   name: z.string().min(1),
   nameEn: z.string().min(1),
   description: z.string().min(10),
@@ -77,6 +95,20 @@ export const RoleDefinition = z.object({
     outputFormat: z.enum(["markdown", "code", "json", "mixed"]),
     // 是否默认开启（在 settings.json 中可关闭）
     enabledByDefault: z.boolean().default(true),
+    /**
+     * 角色来源（L0-2，2026-11-02）：内置角色不填。
+     * - preset：由 `~/.deepcode/skills` 下的预置智能体（frontmatter preset: true）映射
+     * - custom：由用户自建智能体映射（需显式开关才进入候选集）
+     */
+    source: z.enum(["preset", "custom"]).optional(),
+    /**
+     * 业务类别（仅运行时角色）：8 个 DomainCategory 之一
+     *
+     * 用途：`/team list` 按类别分组展示（B8）、关键词映射（`GROUP_KEYWORDS`）。
+     * 用 string 而非 DomainCategory 枚举，避免 `team/types.ts` 与 `agents/` 之间
+     * 产生类型层面的相互依赖（依赖方向约束见方案 §2）。
+     */
+    group: z.string().optional(),
   }),
 });
 export type RoleDefinition = z.infer<typeof RoleDefinition>;
@@ -142,7 +174,7 @@ export type ScoreBreakdown = z.infer<typeof ScoreBreakdown>;
 
 /** 角色匹配结果 */
 export const MatchResult = z.object({
-  roleId: RoleId,
+  roleId: RuntimeRoleId,
   roleName: z.string(),
   confidence: z.number().min(0).max(1),
   matchedCapabilities: z.array(RoleCapability),

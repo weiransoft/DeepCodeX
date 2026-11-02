@@ -690,6 +690,7 @@ export {
   matchRolesSync,
   MATCH_WEIGHTS,
   AI_MATCH_WEIGHTS,
+  RUNTIME_ROLE_SOURCE_FACTOR,
   MatchOptions,
   AIRoleMatchRequest,
   AIRoleMatchResponse,

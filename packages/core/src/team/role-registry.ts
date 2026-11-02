@@ -6,7 +6,7 @@
  * Karpathy 4 原则：完整注入，无简化版
  */
 
-import type { RoleDefinition, RoleId } from "./types.js";
+import type { RoleDefinition } from "./types.js";
 
 // ============================================================================
 // 通用前缀：Karpathy 4 原则 + Ponytail 16 红线（强制注入）
@@ -464,11 +464,17 @@ export const ROLE_REGISTRY: ReadonlyArray<RoleDefinition> = Object.freeze([
   uiDesignerRole, // priority 6
 ]);
 
-/** 角色定义 Map（按 roleId 索引） */
-export const ROLE_MAP: ReadonlyMap<RoleId, RoleDefinition> = new Map(ROLE_REGISTRY.map((role) => [role.roleId, role]));
+/**
+ * 角色定义 Map（按 roleId 索引）
+ *
+ * 键类型放宽为 string：`getRole()` 需要能查到运行时角色（SKILL.md 智能体映射而来），
+ * 而 ROLE_MAP 只承载 5 个内置角色——运行时角色由调用方经 `candidates` 注入
+ * （见 `MatchOptions.candidates` 与 `agents/role-bridge.ts`）。
+ */
+export const ROLE_MAP: ReadonlyMap<string, RoleDefinition> = new Map(ROLE_REGISTRY.map((role) => [role.roleId, role]));
 
-/** 根据 roleId 获取角色定义 */
-export function getRole(roleId: RoleId): RoleDefinition {
+/** 根据 roleId 获取内置角色定义（不查运行时角色） */
+export function getRole(roleId: string): RoleDefinition {
   const role = ROLE_MAP.get(roleId);
   if (!role) {
     throw new Error(`Role not found: ${roleId}`);
@@ -492,7 +498,7 @@ export function findCandidatesByKeyword(keyword: string): ReadonlyArray<RoleDefi
   );
 }
 
-/** 列出所有角色 ID */
-export function listRoleIds(): ReadonlyArray<RoleId> {
+/** 列出所有内置角色 ID */
+export function listRoleIds(): ReadonlyArray<string> {
   return ROLE_REGISTRY.map((r) => r.roleId);
 }
