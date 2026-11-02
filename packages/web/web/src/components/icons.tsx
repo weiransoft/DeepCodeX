@@ -390,6 +390,32 @@ export function FolderOpenIcon(p: IconProps) {
   );
 }
 
+/** 对话内搜索（放大镜）：工具栏入口与搜索栏前缀共用 */
+export function SearchIcon(p: IconProps) {
+  return (
+    <IconBase {...p} label="搜索对话内容">
+      <circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M10.2 10.2 14 14" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </IconBase>
+  );
+}
+
+/** 搜索命中上一条/下一条（上下箭头） */
+export function ChevronIcon({ up = false, ...p }: IconProps & { up?: boolean }) {
+  return (
+    <IconBase {...p} label={up ? "上一个命中" : "下一个命中"}>
+      <path
+        d={up ? "M4 9.5 8 5.5l4 4" : "M4 6.5l4 4 4-4"}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </IconBase>
+  );
+}
+
 /** 默认机器头像（DeepCodeX 引擎/助手消息）：圆形底内机器人脸 */
 export function BotAvatarIcon(p: IconProps) {
   return (

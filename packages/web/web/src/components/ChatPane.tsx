@@ -5,9 +5,10 @@
  * - 流式阶段显示 previewText 纯文本 + 光标动画（不半截解析，避免 fence 抖动）；
  * - 工具执行进度为折叠条目（<details>，保留事件原始字段）；
  * - 内联权限审批卡片；生成中显示悬浮"停止生成"按钮；
- * - 自动滚动到底部（用户上翻时暂停跟随）。
+ * - 自动滚动到底部（用户上翻时暂停跟随）；
+ * - 对话内全局搜索（⌘/Ctrl+F）：跨内容类型检索并跳转，见 ChatSearchBar。
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { parseMarkdownToA2ui } from "../a2ui/parser";
 import { A2uiSurface } from "../a2ui/renderer";
 import type { ChatEntry, PlanTaskItem, SedimentationSuggestion, UserAttachment } from "../chat-model";
@@ -18,7 +19,17 @@ import {
   parsePlanTasks,
   setEngineToolEntryHint,
 } from "../chat-model";
-import { FolderOpenIcon, PaperclipIcon, StopIcon, WrenchIcon, BotAvatarIcon, UserAvatarIcon } from "./icons";
+import { buildSearchDocuments, searchDocuments, type SearchCategory } from "../search";
+import {
+  FolderOpenIcon,
+  PaperclipIcon,
+  SearchIcon,
+  StopIcon,
+  WrenchIcon,
+  BotAvatarIcon,
+  UserAvatarIcon,
+} from "./icons";
+import { ChatSearchBar } from "./ChatSearchBar";
 import { PermissionCard, type PermissionDecisionChoice } from "./PermissionCard";
 import { SedimentationCard } from "./SedimentationCard";
 
@@ -316,6 +327,90 @@ export function ChatPane(props: ChatPaneProps) {
   /** 用户是否主动上翻离开底部（此时暂停自动跟随） */
   const [followBottom, setFollowBottom] = useState(true);
 
+  // ---------- 对话内全局搜索（⌘/Ctrl+F） ----------
+  /** 搜索栏是否打开 */
+  const [searchOpen, setSearchOpen] = useState(false);
+  /** 查询串 */
+  const [searchQuery, setSearchQuery] = useState("");
+  /** 类别筛选（null = 全部） */
+  const [searchCategory, setSearchCategory] = useState<SearchCategory | null>(null);
+  /** 当前命中下标（越界时按 hits 长度收敛，见 activeHitIndex） */
+  const [activeIndex, setActiveIndex] = useState(0);
+  /** 正在闪烁的条目 id（跳转后的视觉落点提示） */
+  const [flashEntryId, setFlashEntryId] = useState<string | null>(null);
+  /** 闪烁定时器（连续跳转时重置，避免上一次的定时器把新的高亮清掉） */
+  const flashTimerRef = useRef<number | null>(null);
+
+  // 文档只在条目变化 / 搜索打开时重建：查询串逐字变化时不必重新归一化全量条目
+  const searchDocs = useMemo(() => (searchOpen ? buildSearchDocuments(entries) : []), [entries, searchOpen]);
+  const allHits = useMemo(() => searchDocuments(searchDocs, searchQuery), [searchDocs, searchQuery]);
+  /** 按类别筛选后的命中（筛选在命中集上做，全类别命中仍用于类别角标） */
+  const hits = useMemo(
+    () => (searchCategory === null ? allHits : allHits.filter((h) => h.category === searchCategory)),
+    [allHits, searchCategory]
+  );
+  /** 收敛后的当前下标（-1 = 无命中）：查询变化导致命中变少时不至于指向不存在的项 */
+  const activeHitIndex = hits.length === 0 ? -1 : Math.min(activeIndex, hits.length - 1);
+
+  // 查询或类别变化：回到第一条命中（否则会出现「输入新词却停在第 7 条」的错位）
+  useEffect(() => {
+    setActiveIndex(0);
+  }, [searchQuery, searchCategory]);
+
+  // ⌘/Ctrl+F 唤起、Esc 关闭（焦点不在输入框时也能关）
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (chatTitle === null) return;
+      if ((e.metaKey || e.ctrlKey) && (e.key === "f" || e.key === "F")) {
+        // 焦点在抽屉/弹层里时不劫持：那里的输入框（设置、文件搜索）有自己的查找语义，
+        // 抢过来会让用户以为快捷键失灵
+        const target = e.target instanceof HTMLElement ? e.target : null;
+        if (target !== null && target.closest('[class*="drawer"], [class*="overlay"], [class*="modal"]') !== null) {
+          return;
+        }
+        e.preventDefault();
+        setSearchOpen(true);
+        return;
+      }
+      if (e.key === "Escape" && searchOpen) setSearchOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [chatTitle, searchOpen]);
+
+  // 卸载时清掉闪烁定时器（避免对已卸载组件 setState）
+  useEffect(() => {
+    return () => {
+      if (flashTimerRef.current !== null) window.clearTimeout(flashTimerRef.current);
+    };
+  }, []);
+
+  /**
+   * 跳转到当前命中：滚动定位 + 展开折叠区 + 闪烁标记
+   *
+   * 展开是必须的一步：思考过程与工具详情默认收起，若只滚动不展开，用户看到的是
+   * 一个「明明搜到了却什么都没有」的折叠条。此处直接操作 DOM 的 open 属性，
+   * 不改条目数据——折叠只是展示态，没必要为一次跳转写回业务状态。
+   */
+  useEffect(() => {
+    if (!searchOpen || activeHitIndex < 0) return;
+    const hit = hits[activeHitIndex];
+    if (hit === undefined) return;
+    const container = scrollRef.current;
+    if (container === null) return;
+    const target = container.querySelector<HTMLElement>(`[data-entry-id="${hit.entryId}"]`);
+    if (target === null) return;
+    for (const details of target.querySelectorAll("details")) {
+      details.open = true;
+    }
+    target.scrollIntoView({ block: "center" });
+    // 跳转即离开底部：否则下一次条目更新会把视图拽回底部，用户刚定位到的位置丢失
+    setFollowBottom(false);
+    setFlashEntryId(hit.entryId);
+    if (flashTimerRef.current !== null) window.clearTimeout(flashTimerRef.current);
+    flashTimerRef.current = window.setTimeout(() => setFlashEntryId(null), 1600);
+  }, [searchOpen, hits, activeHitIndex]);
+
   // 渲染入口同步「工具折叠条目内容指纹」：助手正文可读化时据此判定引擎
   // 工具结果块是否已被折叠条目承载（双写同源 → 正文移除；否则正文兜底展示）。
   // 在组件体（map 渲染之前）执行，React 单线程保证 humanize 调用时值已就绪。
@@ -325,6 +420,15 @@ export function ChatPane(props: ChatPaneProps) {
       .map((x) => (typeof x.raw.content === "string" ? x.raw.content : ""))
       .filter((s) => s !== "")
   );
+
+  /** 关闭搜索：清空查询与筛选，下次打开是干净状态 */
+  const closeSearch = useCallback((): void => {
+    setSearchOpen(false);
+    setSearchQuery("");
+    setSearchCategory(null);
+    setActiveIndex(0);
+    setFlashEntryId(null);
+  }, []);
 
   // 条目或流式状态变化时：若用户位于底部附近则滚动到底
   useEffect(() => {
@@ -362,143 +466,183 @@ export function ChatPane(props: ChatPaneProps) {
 
   return (
     <main className="chat-pane">
-      {/* 顶栏：会话标题 + 文件目录入口 */}
+      {/* 顶栏：会话标题 + 搜索 / 文件目录入口 */}
       <div className="chat-toolbar">
         <span className="chat-toolbar-title" title={chatTitle}>
           {chatTitle}
         </span>
+        <button
+          type="button"
+          className="icon-btn"
+          title="搜索对话内容（⌘/Ctrl+F）"
+          aria-label="搜索对话内容"
+          onClick={() => setSearchOpen(true)}
+        >
+          <SearchIcon size={17} />
+        </button>
         <button type="button" className="icon-btn" title="文件目录" onClick={onOpenFileDrawer}>
           <FolderOpenIcon size={17} />
         </button>
       </div>
 
+      {/* 对话内全局搜索：查询 / 命中 / 筛选全部内聚在本组件，App 无需感知 */}
+      {searchOpen && (
+        <ChatSearchBar
+          query={searchQuery}
+          onQueryChange={setSearchQuery}
+          hits={hits}
+          allHits={allHits}
+          activeIndex={activeHitIndex}
+          onActiveIndexChange={setActiveIndex}
+          category={searchCategory}
+          onCategoryChange={setSearchCategory}
+          onClose={closeSearch}
+        />
+      )}
+
       {/* 消息滚动区 */}
       <div className="chat-scroll" ref={scrollRef} onScroll={handleScroll}>
         <div className="chat-entries">
           {entries.map((entry) => {
-            switch (entry.kind) {
-              case "user":
-                return (
-                  <div key={entry.id} className="msg-row msg-row-user">
-                    <div className="msg-user-bubble">
-                      {/* steering F2 角标：运行中补充指令的受理模式（202 mode 打标） */}
-                      {entry.mode !== undefined && (
-                        <span className={`user-mode-badge user-mode-badge-${entry.mode}`}>
-                          {entry.mode === "steered" ? "已注入当前任务" : "排队中"}
-                        </span>
-                      )}
-                      <AttachmentChips attachments={entry.attachments} />
-                      {entry.text !== "" && <div className="msg-user-text">{entry.text}</div>}
-                    </div>
-                    {/* 默认用户头像（气泡右侧，与右对齐布局一致） */}
-                    <UserAvatarIcon size={26} className="msg-avatar msg-avatar-user" />
-                  </div>
-                );
-              case "steering":
-                // steering F3/F4：执行中补充指令的注入分隔条（system + meta.steeringInject）
-                return (
-                  <div key={entry.id} className="steering-divider">
-                    <span className="steering-divider-label">指令注入</span>
-                    <span className="steering-divider-text">{entry.text}</span>
-                  </div>
-                );
-              case "assistant":
-                return (
-                  <div key={entry.id} className="msg-row msg-row-assistant">
-                    {/* 默认机器头像（DeepCodeX 引擎，内容左侧） */}
-                    <div className="msg-assistant-with-avatar">
-                      {/* 头像：固定宽度，不参与 flex shrink */}
-                      <BotAvatarIcon size={26} className="msg-avatar msg-avatar-assistant" />
-                      {/* 内容 wrapper：作为 flex row 的唯一 content 子元素，
-                          独占头像之外全部宽度，内部用 flex-direction: column 垂直排列。
-                          这样流式阶段 Fragment 展开的 thinking + preview 两个子元素
-                          不会被作为 flex row item 均分挤压（这就是"挤到一列"的根因）。 */}
-                      <div className="msg-assistant-body-wrapper">
-                        {entry.content !== null ? (
-                          <>
-                            {/* 固化态「思考过程」折叠区（web-thinking-display.md §5.2 TH6）：
-                                App.tsx 固化时保留了流式阶段累积的 thinking，此处渲染为
-                                默认收起的折叠块，位于正文（含空内容兜底提示）上方——
-                                与用户偏好一致：思考过程在最终结果上方的可折叠框中。
-                                历史恢复路径无 thinking 数据（引擎不持久化），自然不渲染 */}
-                            {entry.thinking !== undefined && entry.thinking !== "" && (
-                              <details className="chat-thinking">
-                                <summary className="chat-thinking-summary">思考过程</summary>
-                                <PreviewMarkdown
-                                  text={humanizeStreamPreview(entry.thinking)}
-                                  surfaceId={`thinking-${entry.id}`}
-                                />
-                              </details>
-                            )}
-                            {/* 完整内容：先可读化（引擎拼接的工具结果 JSON 块 → output 文本，
-                                围栏代码与非工具结果 JSON 原样保留）再进 A2UI 管线渲染。
-                                空内容兜底提示按有无 thinking 分档（TH7）：无 thinking
-                                （历史恢复）不指向不存在的折叠区 */}
-                            <AssistantA2ui
-                              content={humanizeEngineContent(entry.content)}
-                              messageId={entry.id}
-                              emptyHint={
-                                entry.thinking === undefined || entry.thinking === "" ? "（本轮无文本回复）" : undefined
-                              }
-                            />
-                          </>
-                        ) : entry.thinkingPending === true &&
-                          (entry.thinking === undefined || entry.thinking === "") &&
-                          (entry.preview === null || entry.preview === "") ? (
-                          // 「思考中」占位（萤火虫闪烁）：轮次已开始但尚无
-                          // thinking/正文内容——让用户立刻看到引擎在活动
-                          <div className="thinking-firefly">
-                            <span className="firefly firefly-1" aria-hidden="true" />
-                            <span className="firefly firefly-2" aria-hidden="true" />
-                            <span className="firefly firefly-3" aria-hidden="true" />
-                            <span className="thinking-firefly-label">思考中…</span>
-                          </div>
-                        ) : (
-                          // 流式阶段（docs/dev/web-thinking-display.md F2）：
-                          // 思考过程（可折叠，默认展开）+ 正文预览，均经容错 Markdown
-                          // 管线渲染——恢复分段与格式；未闭合围栏自动补全，防 fence 抖动。
-                          <>
-                            {entry.thinking !== undefined && entry.thinking !== "" && (
-                              <details className="chat-thinking" open>
-                                <summary className="chat-thinking-summary">思考过程</summary>
-                                <PreviewMarkdown
-                                  text={humanizeStreamPreview(entry.thinking)}
-                                  surfaceId={`thinking-${entry.id}`}
-                                />
-                              </details>
-                            )}
-                            <PreviewMarkdown
-                              text={humanizeStreamPreview(entry.preview ?? "")}
-                              surfaceId={`preview-${entry.id}`}
-                              cursor={entry.done !== true}
-                            />
-                          </>
+            // 条目包裹层：提供搜索跳转锚点（data-entry-id）与命中闪烁样式。
+            // 内部沿用原有 switch 分支（各分支自带 return），用 IIFE 取值而不是
+            // 把这段逻辑搬到组件顶部——分支依赖组件内大量 props，搬出去只会更难读。
+            const body = (() => {
+              switch (entry.kind) {
+                case "user":
+                  return (
+                    <div className="msg-row msg-row-user">
+                      <div className="msg-user-bubble">
+                        {/* steering F2 角标：运行中补充指令的受理模式（202 mode 打标） */}
+                        {entry.mode !== undefined && (
+                          <span className={`user-mode-badge user-mode-badge-${entry.mode}`}>
+                            {entry.mode === "steered" ? "已注入当前任务" : "排队中"}
+                          </span>
                         )}
+                        <AttachmentChips attachments={entry.attachments} />
+                        {entry.text !== "" && <div className="msg-user-text">{entry.text}</div>}
+                      </div>
+                      {/* 默认用户头像（气泡右侧，与右对齐布局一致） */}
+                      <UserAvatarIcon size={26} className="msg-avatar msg-avatar-user" />
+                    </div>
+                  );
+                case "steering":
+                  // steering F3/F4：执行中补充指令的注入分隔条（system + meta.steeringInject）
+                  return (
+                    <div key={entry.id} className="steering-divider">
+                      <span className="steering-divider-label">指令注入</span>
+                      <span className="steering-divider-text">{entry.text}</span>
+                    </div>
+                  );
+                case "assistant":
+                  return (
+                    <div key={entry.id} className="msg-row msg-row-assistant">
+                      {/* 默认机器头像（DeepCodeX 引擎，内容左侧） */}
+                      <div className="msg-assistant-with-avatar">
+                        {/* 头像：固定宽度，不参与 flex shrink */}
+                        <BotAvatarIcon size={26} className="msg-avatar msg-avatar-assistant" />
+                        {/* 内容 wrapper：作为 flex row 的唯一 content 子元素，
+                            独占头像之外全部宽度，内部用 flex-direction: column 垂直排列。
+                            这样流式阶段 Fragment 展开的 thinking + preview 两个子元素
+                            不会被作为 flex row item 均分挤压（这就是"挤到一列"的根因）。 */}
+                        <div className="msg-assistant-body-wrapper">
+                          {entry.content !== null ? (
+                            <>
+                              {/* 固化态「思考过程」折叠区（web-thinking-display.md §5.2 TH6）：
+                                  App.tsx 固化时保留了流式阶段累积的 thinking，此处渲染为
+                                  默认收起的折叠块，位于正文（含空内容兜底提示）上方——
+                                  与用户偏好一致：思考过程在最终结果上方的可折叠框中。
+                                  历史恢复路径无 thinking 数据（引擎不持久化），自然不渲染 */}
+                              {entry.thinking !== undefined && entry.thinking !== "" && (
+                                <details className="chat-thinking">
+                                  <summary className="chat-thinking-summary">思考过程</summary>
+                                  <PreviewMarkdown
+                                    text={humanizeStreamPreview(entry.thinking)}
+                                    surfaceId={`thinking-${entry.id}`}
+                                  />
+                                </details>
+                              )}
+                              {/* 完整内容：先可读化（引擎拼接的工具结果 JSON 块 → output 文本，
+                                  围栏代码与非工具结果 JSON 原样保留）再进 A2UI 管线渲染。
+                                  空内容兜底提示按有无 thinking 分档（TH7）：无 thinking
+                                  （历史恢复）不指向不存在的折叠区 */}
+                              <AssistantA2ui
+                                content={humanizeEngineContent(entry.content)}
+                                messageId={entry.id}
+                                emptyHint={
+                                  entry.thinking === undefined || entry.thinking === ""
+                                    ? "（本轮无文本回复）"
+                                    : undefined
+                                }
+                              />
+                            </>
+                          ) : entry.thinkingPending === true &&
+                            (entry.thinking === undefined || entry.thinking === "") &&
+                            (entry.preview === null || entry.preview === "") ? (
+                            // 「思考中」占位（萤火虫闪烁）：轮次已开始但尚无
+                            // thinking/正文内容——让用户立刻看到引擎在活动
+                            <div className="thinking-firefly">
+                              <span className="firefly firefly-1" aria-hidden="true" />
+                              <span className="firefly firefly-2" aria-hidden="true" />
+                              <span className="firefly firefly-3" aria-hidden="true" />
+                              <span className="thinking-firefly-label">思考中…</span>
+                            </div>
+                          ) : (
+                            // 流式阶段（docs/dev/web-thinking-display.md F2）：
+                            // 思考过程（可折叠，默认展开）+ 正文预览，均经容错 Markdown
+                            // 管线渲染——恢复分段与格式；未闭合围栏自动补全，防 fence 抖动。
+                            <>
+                              {entry.thinking !== undefined && entry.thinking !== "" && (
+                                <details className="chat-thinking" open>
+                                  <summary className="chat-thinking-summary">思考过程</summary>
+                                  <PreviewMarkdown
+                                    text={humanizeStreamPreview(entry.thinking)}
+                                    surfaceId={`thinking-${entry.id}`}
+                                  />
+                                </details>
+                              )}
+                              <PreviewMarkdown
+                                text={humanizeStreamPreview(entry.preview ?? "")}
+                                surfaceId={`preview-${entry.id}`}
+                                cursor={entry.done !== true}
+                              />
+                            </>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                );
-              case "tool":
-                return <ToolEntry key={entry.id} entry={entry} />;
-              case "plan":
-                return <PlanCard key={entry.id} entry={entry} />;
-              case "bgtask":
-                return <BgTaskNotice key={entry.id} entry={entry} />;
-              case "permission":
-                return (
-                  <div key={entry.id} className="msg-row msg-row-permission">
-                    <PermissionCard
-                      request={entry.request}
-                      decided={entry.decided}
-                      submitting={entry.submitting || submittingPermIds.has(entry.request.toolCallId)}
-                      onDecide={onDecide}
-                    />
-                  </div>
-                );
-              default:
-                // 穷举保护：未知条目类型不渲染（TypeScript 已保证不可达）
-                return null;
-            }
+                  );
+                case "tool":
+                  return <ToolEntry key={entry.id} entry={entry} />;
+                case "plan":
+                  return <PlanCard key={entry.id} entry={entry} />;
+                case "bgtask":
+                  return <BgTaskNotice key={entry.id} entry={entry} />;
+                case "permission":
+                  return (
+                    <div key={entry.id} className="msg-row msg-row-permission">
+                      <PermissionCard
+                        request={entry.request}
+                        decided={entry.decided}
+                        submitting={entry.submitting || submittingPermIds.has(entry.request.toolCallId)}
+                        onDecide={onDecide}
+                      />
+                    </div>
+                  );
+                default:
+                  // 穷举保护：未知条目类型不渲染（TypeScript 已保证不可达）
+                  return null;
+              }
+            })();
+            return (
+              <div
+                key={entry.id}
+                data-entry-id={entry.id}
+                className={`entry-anchor${flashEntryId === entry.id ? " entry-anchor-flash" : ""}`}
+              >
+                {body}
+              </div>
+            );
           })}
 
           {/* 沉淀建议卡片区（ARCH-20261027 T05）：待处置建议渲染于消息流尾部，

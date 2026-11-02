@@ -469,6 +469,188 @@ body {
   gap: 18px;
 }
 
+/* ============================================================================
+   对话内全局搜索（⌘/Ctrl+F）
+   - .chat-search 作为定位容器，结果面板绝对定位浮在消息区之上（不挤压布局）
+   - .entry-anchor 是每条消息的锚点包裹层：搜索跳转的落点 + 命中闪烁
+   ========================================================================== */
+.chat-search {
+  position: relative;
+  z-index: 20;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--app-border);
+  background: var(--app-bg-subtle);
+}
+.chat-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 44px;
+  padding: 0 12px;
+}
+.chat-search-icon {
+  color: var(--app-text-tertiary);
+  flex-shrink: 0;
+}
+.chat-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  font-size: 13px;
+  color: var(--app-text);
+  background: var(--app-bg-elevated);
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  outline: none;
+}
+.chat-search-input:focus {
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 2px var(--app-accent-weak);
+}
+.chat-search-count {
+  flex-shrink: 0;
+  min-width: 44px;
+  text-align: right;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--app-text-secondary);
+}
+.chat-search-nav:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+/* 类别筛选条 */
+.chat-search-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 12px 9px;
+}
+.chat-search-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  font-size: 12px;
+  color: var(--app-text-secondary);
+  background: var(--app-bg-elevated);
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.chat-search-chip:hover {
+  background: var(--app-bg-hover);
+}
+.chat-search-chip-active {
+  color: var(--app-accent);
+  border-color: var(--app-accent);
+  background: var(--app-accent-weak);
+}
+.chat-search-chip-empty {
+  opacity: 0.5;
+}
+.chat-search-chip-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--app-text-tertiary);
+}
+/* 结果面板：浮层，避免打开搜索时整段对话被顶下去。
+   高度刻意压在 1/3 视口以内——跳转用 block:center 把命中条目滚到视口中线，
+   面板若再高就会盖住落点，出现「跳过去却看不见」的错觉 */
+.chat-search-results {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  max-height: 34vh;
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--app-bg-elevated);
+  border: 1px solid var(--app-border);
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  box-shadow: var(--app-shadow);
+}
+.chat-search-hit {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 7px 9px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.chat-search-hit:hover {
+  background: var(--app-bg-hover);
+}
+.chat-search-hit-active {
+  background: var(--app-accent-weak);
+}
+.chat-search-hit-label {
+  align-self: flex-start;
+  padding: 1px 6px;
+  font-size: 11px;
+  border-radius: 4px;
+  color: var(--app-text-secondary);
+  background: var(--app-bg-badge);
+}
+/* 类别配色：靠文字色区分来源，避免引入新色板 */
+.chat-search-hit-label-user {
+  color: var(--app-accent);
+}
+.chat-search-hit-label-thinking {
+  color: var(--app-text-tertiary);
+  font-style: italic;
+}
+.chat-search-hit-label-tool {
+  color: var(--app-text);
+}
+.chat-search-hit-snippet {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--app-text);
+  word-break: break-word;
+}
+.search-hit-mark {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: #ffd66b;
+  color: #1a1a1a;
+}
+.chat-search-empty,
+.chat-search-more {
+  padding: 10px;
+  font-size: 12px;
+  color: var(--app-text-tertiary);
+  text-align: center;
+}
+/* 条目锚点：搜索跳转落点 + 命中闪烁（1.6s 后由 ChatPane 移除类名） */
+.entry-anchor {
+  display: block;
+  border-radius: 8px;
+  scroll-margin: 24px;
+}
+.entry-anchor-flash {
+  animation: entry-flash 1.6s ease-out;
+}
+@keyframes entry-flash {
+  0% {
+    background: var(--app-accent-weak);
+    box-shadow: 0 0 0 3px var(--app-accent-weak);
+  }
+  70% {
+    background: var(--app-accent-weak);
+    box-shadow: 0 0 0 3px var(--app-accent-weak);
+  }
+  100% {
+    background: transparent;
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
 /* 欢迎页 */
 .chat-welcome {
   flex: 1 1 0;
