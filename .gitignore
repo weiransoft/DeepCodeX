@@ -77,3 +77,9 @@ tmp-icon/
 
 # 一次性诊断脚本（本机排查 LLM 配置用，不入库）
 packages/web/.llm-probe.mts
+
+# web 测试运行时 cwd 落在 tests/ 时生成的会话存储（16 位 hex 文件名，运行产物）
+packages/web/tests/[0-9a-f][0-9a-f]*.json
+
+# 本机生成的临时图片素材（图标挑选等，不入库）
+generated-images/

@@ -10,16 +10,19 @@
  * 3. 若 fail-closed → 返回 fatal（黑名单命中或高风险命令）
  * 4. 若 ask-user → 返回 failed（需用户确认）
  * 5. 通过 spawnSync 真实执行测试命令（cwd=projectRoot, timeout=testTimeoutSec）
- * 6. 解析测试输出（支持 Jest/Mocha/node:test/generic 格式）
- * 7. 构造 CompletionEvidence 制品（G-A4a 证据强制）
- * 8. 调用 guardChain.execute() 做 verify 阶段护栏判定
- * 9. 返回测试结果（pass/fail/skip + 退出码 + 输出摘要）
+ * 6. 解析测试输出（支持 node:test/Jest/Mocha/unittest/generic 格式，实现见 test-output-analysis.ts）
+ * 7. 提取失败用例标识（pytest FAILED / unittest FAIL: / jest ✕ / mocha N) / TAP not ok）
+ * 8. 构造 CompletionEvidence 制品（G-A4a 证据强制，摘要为"失败窗口优先"）
+ * 9. 调用 guardChain.execute() 做 verify 阶段护栏判定
+ * 10. 返回测试结果（pass/fail/skip + 退出码 + 输出摘要 + 失败用例）
  *
  * 关键技术决策：
  * - 命令执行：child_process.spawnSync（同步阻塞，捕获 stdout/stderr/exitCode）
  * - 超时控制：spawnSync 的 timeout 选项（超时后 SIGTERM 子进程）
- * - 输出解析：基于正则的多格式解析器（Jest/Mocha/node:test/generic）
+ * - 输出解析：test-output-analysis.ts 的多格式解析器（真实 runner 输出逐条验证）
  * - 证据强制：CompletionEvidence 必须含 testExitCode + testOutputSummary（G-A4a）
+ * - 证据可用性：摘要在超长时保留"失败窗口 + 尾部统计"，禁止只留头部
+ *   （2026-11-03 run b64490b8ad78：head-only 截断导致 fix 无失败信息可依，两轮同败后熔断）
  *
  * 真实实现（禁止 mock）：
  * - 真实调用 child_process.spawnSync 执行测试命令
@@ -43,6 +46,18 @@ import type { P5StageContext, P5StageHandler, P5StageResult } from "./types";
 import { buildGuardContext, createSuccessStageResult, createFailedStageResult, toGuardRecords } from "./types";
 import type { CompletionEvidence, TaskCard } from "../guards/types";
 import { createPassVerdict } from "../guards/types";
+import {
+  buildTestOutputSummary,
+  extractFailedTestIds,
+  parseTestOutput,
+  type FailedTestIdList,
+  type TestResultStats,
+} from "./test-output-analysis";
+
+// 向后兼容导出：历史调用方（p5/index.ts、各 EAG 测试）从本模块 import parseTestOutput /
+// TestResultStats。实现已迁至 test-output-analysis.ts（失败证据分析唯一实现）。
+export { parseTestOutput } from "./test-output-analysis";
+export type { TestResultStats } from "./test-output-analysis";
 
 // ============================================================================
 // 1. 常量定义
@@ -66,33 +81,6 @@ const DEFAULT_TEST_COMMAND = "npm test" as const;
  * （覆盖前置 package.json 探测与实际执行环境不一致的边界情况）。
  */
 const NPM_NO_TEST_SCRIPT_RE = /Missing script:\s*["']?test["']?|no test script found/i;
-
-/**
- * 测试输出最大摘要长度（字符数）
- *
- * 超出此长度的输出将被截断，仅保留前 N 字符 + "...(truncated)" 后缀。
- * 取值 2000：平衡可观测性与日志体积。
- */
-const MAX_OUTPUT_SUMMARY_LENGTH = 2000 as const;
-
-/**
- * 测试输出解析正则表（按优先级排序）
- *
- * 每条规则为 [正则, 解析器名称]，按顺序尝试匹配，命中第一个即停止。
- */
-const TEST_OUTPUT_PATTERNS: ReadonlyArray<Readonly<[RegExp, string]>> = Object.freeze([
-  // Jest 格式："Tests: 12 passed, 0 failed, 2 skipped"
-  [/Tests:\s+(\d+)\s+passed(?:,\s+(\d+)\s+failed)?(?:,\s+(\d+)\s+(?:skipped|todo|skipping))?/i, "jest"],
-  // Mocha 格式："X passing (Ys)\nZ failing\nW pending"
-  [/(\d+)\s+passing(?:.*?)(\d+)\s+failing(?:.*?)(\d+)\s+pending/is, "mocha"],
-  // node:test 格式："# tests N\n# pass N\n# fail N\n# skipped N"
-  [
-    /#\s*tests\s+(\d+)\s+#\s*pass(?:ed)?\s+(\d+)\s+#\s*fail(?:ed)?\s+(\d+)(?:\s+#\s*skip(?:ped)?\s+(\d+))?/i,
-    "node-test",
-  ],
-  // 通用 PASS/FAIL 格式："N passed, M failed"
-  [/(\d+)\s+passed(?:,\s*(\d+)\s+failed)?/i, "generic-pass-fail"],
-]);
 
 /**
  * 测试命令允许执行的程序白名单。
@@ -225,22 +213,6 @@ function parseShellCommand(command: string): { program: string; args: string[] }
 // ============================================================================
 
 /**
- * 测试结果统计（pass/fail/skip）
- */
-export interface TestResultStats {
-  /** 通过的测试数量 */
-  readonly passed: number;
-  /** 失败的测试数量 */
-  readonly failed: number;
-  /** 跳过的测试数量 */
-  readonly skipped: number;
-  /** 测试总数（passed + failed + skipped） */
-  readonly total: number;
-  /** 解析器名称（jest/mocha/node-test/generic） */
-  readonly parser: string;
-}
-
-/**
  * 测试命令执行结果（spawnSync 原始输出）
  */
 interface TestCommandResult {
@@ -256,6 +228,14 @@ interface TestCommandResult {
   readonly timedOut: boolean;
   /** 执行耗时（毫秒） */
   readonly durationMs: number;
+  /**
+   * 进程未能启动时的错误信息（如 ENOENT：命令不存在 / 解释器缺失）。
+   *
+   * 2026-11-03 新增（架构评审 B5）：此前 spawnSync 的 result.error 被丢弃，
+   * "解释器不存在"会表现成 exitCode=-1 + 空输出，进而被"无测试计数"分支
+   * 降级为 skip（假绿）。现在单独承载，由调用方判 fatal 并原样上报。
+   */
+  readonly spawnError: string | null;
 }
 
 // ============================================================================
@@ -366,8 +346,31 @@ export class P5VerifyStageHandler implements P5StageHandler {
       // 5. auto-approve → 真实执行测试命令
       const cmdResult = this.executeTestCommand(testCommand, ctx);
 
+      // 5.5 命令未能启动（ENOENT/EACCES 等）→ fatal，禁止降级为 skip
+      //     （2026-11-03，架构评审 B5：旧实现丢弃 spawnSync.error，
+      //       "解释器不存在"被"无测试计数"分支当成"无测试可跑"跳过）
+      if (cmdResult.spawnError !== null) {
+        return createFailedStageResult(
+          "verify",
+          "fatal",
+          `测试命令无法启动：${cmdResult.spawnError}`,
+          `命令 "${testCommand}" 未能启动（cwd=${ctx.projectRoot}）：${cmdResult.spawnError}`,
+          {
+            testCommand,
+            spawnError: cmdResult.spawnError,
+            guardDecision: "PASS",
+          },
+          [],
+          0,
+          Date.now() - startTime
+        );
+      }
+
       // 6. 解析测试输出
       const testStats = parseTestOutput(cmdResult.stdout, cmdResult.stderr);
+      // 失败用例标识（无失败时为空列表）：失败分支的摘要与制品都用它，
+      // 保证 fix 阶段与最终报告拿到"哪个用例失败"的可操作信息。
+      const failedTests = extractFailedTestIds(`${cmdResult.stdout}\n${cmdResult.stderr}`);
 
       // 7. 构造 CompletionEvidence 制品（G-A4a 证据强制）
       //    输出摘要必须合并 stdout 与 stderr：npm/yarn 等脚本运行器会把命令头
@@ -379,10 +382,13 @@ export class P5VerifyStageHandler implements P5StageHandler {
       const combinedTestOutput = [cmdResult.stdout, cmdResult.stderr]
         .filter((chunk) => typeof chunk === "string" && chunk.length > 0)
         .join("\n");
+      // 2026-11-03 修复（run b64490b8ad78 事故）：摘要改为"失败窗口优先"。
+      // 旧实现只保留输出前 2000 字符，而 pytest/unittest/jest/mocha/node --test
+      // 的失败详情都在输出尾部——fix 阶段拿到的是一屏"进度点"，无法定位失败用例。
       const evidence: CompletionEvidence = Object.freeze({
         testCommand,
         testExitCode: cmdResult.exitCode ?? -1,
-        testOutputSummary: truncateOutput(combinedTestOutput),
+        testOutputSummary: buildTestOutputSummary(combinedTestOutput),
         coveragePercent: 0, // 代码覆盖率需要额外工具支持，默认 0
         evaluatorVerdict: cmdResult.exitCode === 0 ? "pass" : "fail",
         executedAt: new Date().toISOString(),
@@ -451,11 +457,19 @@ export class P5VerifyStageHandler implements P5StageHandler {
         return createFailedStageResult(
           "verify",
           "failed",
-          summary,
-          `测试失败：exitCode=${cmdResult.exitCode}, failed=${testStats.failed}`,
+          formatTestSummary(testStats, cmdResult, testPassed, failedTests),
+          `测试失败：exitCode=${cmdResult.exitCode}, failed=${testStats.failed}${formatFailedIdHint(failedTests)}`,
           {
             testCommand,
             testStats,
+            // 失败用例标识（pytest FAILED / unittest FAIL: / jest ✕ / mocha N) / TAP not ok）：
+            // fix 阶段据此"优先定位这些用例"，最终报告也能给出可操作信息，
+            // 不再是只有 "exitCode=1, failed=1" 的空洞结论。
+            failedTestIds: failedTests.ids,
+            failedTestTotal: failedTests.total,
+            // 原始尾部（≤4000 字符）：给 fix 阶段"从原始证据重建摘要"的兜底输入。
+            // 只传摘要会让 fix 无法在摘要被前人截断时自愈（架构评审 B7）。
+            testOutputTail: combinedTestOutput.slice(-RAW_OUTPUT_TAIL_CHARS),
             completionEvidence: evidence,
             commandResult: {
               exitCode: cmdResult.exitCode,
@@ -635,6 +649,9 @@ export class P5VerifyStageHandler implements P5StageHandler {
       stderr: result.stderr ?? "",
       timedOut,
       durationMs,
+      // 进程未启动（ENOENT/EACCES 等）时 result.error 非空：必须原样上报，
+      // 否则会被"输出无测试计数"分支误判为"无测试可跑"
+      spawnError: result.error instanceof Error ? `${result.error.name}: ${result.error.message}` : null,
     };
   }
 }
@@ -722,83 +739,9 @@ function detectDefaultTestCommand(projectRoot: string): string {
   return DEFAULT_TEST_COMMAND;
 }
 
-/**
- * 解析测试输出（stdout + stderr），提取 pass/fail/skip 统计
- *
- * 支持的格式（按优先级）：
- * 1. Jest："Tests: 12 passed, 0 failed, 2 skipped"
- * 2. Mocha："X passing (Ys)\nZ failing\nW pending"
- * 3. node:test："# tests N\n# pass N\n# fail N"
- * 4. 通用："N passed, M failed"
- *
- * 若所有格式都不匹配，返回 {passed:0, failed:0, skipped:0, total:0, parser:"unknown"}
- *
- * @param stdout 标准输出
- * @param stderr 标准错误（作为 fallback 解析源）
- * @returns 测试结果统计
- */
-export function parseTestOutput(stdout: string, stderr: string): TestResultStats {
-  // 合并 stdout + stderr 作为解析源（部分测试框架输出到 stderr）
-  const output = `${stdout}\n${stderr}`;
-
-  for (const [pattern, parserName] of TEST_OUTPUT_PATTERNS) {
-    const match = pattern.exec(output);
-    if (match) {
-      const passed = parseIntOrZero(match[1]);
-      const failed = parseIntOrZero(match[2]);
-      const skipped = parseIntOrZero(match[3]);
-      const total = passed + failed + skipped;
-      return Object.freeze({
-        passed,
-        failed,
-        skipped,
-        total,
-        parser: parserName,
-      });
-    }
-  }
-
-  // 无匹配 → 返回未知统计
-  return Object.freeze({
-    passed: 0,
-    failed: 0,
-    skipped: 0,
-    total: 0,
-    parser: "unknown",
-  });
-}
-
-/**
- * 安全解析整数（解析失败返回 0）
- *
- * @param value 待解析的字符串（可能为 undefined）
- * @returns 解析后的整数，或 0
- */
-function parseIntOrZero(value: string | undefined): number {
-  if (!value) return 0;
-  const n = parseInt(value, 10);
-  return Number.isNaN(n) ? 0 : n;
-}
-
 // ============================================================================
 // 5. 辅助函数
 // ============================================================================
-
-/**
- * 截断测试输出到最大摘要长度
- *
- * 超长输出截断后追加 "...(truncated)" 后缀。
- *
- * @param output 原始输出
- * @returns 截断后的输出
- */
-function truncateOutput(output: string): string {
-  if (!output) return "";
-  if (output.length <= MAX_OUTPUT_SUMMARY_LENGTH) {
-    return output;
-  }
-  return output.slice(0, MAX_OUTPUT_SUMMARY_LENGTH) + "...(truncated)";
-}
 
 /**
  * 格式化测试摘要
@@ -806,9 +749,15 @@ function truncateOutput(output: string): string {
  * @param stats 测试统计
  * @param cmdResult 命令执行结果
  * @param testPassed 是否通过
+ * @param failedTests 失败用例标识（失败时附在摘要尾部，最多列 5 个）
  * @returns 摘要字符串
  */
-function formatTestSummary(stats: TestResultStats, cmdResult: TestCommandResult, testPassed: boolean): string {
+function formatTestSummary(
+  stats: TestResultStats,
+  cmdResult: TestCommandResult,
+  testPassed: boolean,
+  failedTests?: Readonly<FailedTestIdList>
+): string {
   const parts: string[] = [];
   if (testPassed) {
     parts.push("测试通过");
@@ -824,7 +773,30 @@ function formatTestSummary(stats: TestResultStats, cmdResult: TestCommandResult,
   }
   parts.push(`exitCode=${cmdResult.exitCode ?? "null"}`);
   parts.push(`duration=${cmdResult.durationMs}ms`);
-  return parts.join(", ");
+  const idHint = failedTests ? formatFailedIdHint(failedTests, 5) : "";
+  return parts.join(", ") + idHint;
+}
+
+/**
+ * 原始输出尾部保留字符数（写入 artifacts.testOutputTail，供 fix 阶段重建摘要）。
+ */
+const RAW_OUTPUT_TAIL_CHARS = 4000 as const;
+
+/**
+ * 格式化"失败用例"提示片段（供摘要与 error 文本复用）。
+ *
+ * 标识按字典序排序后再展示：error 文本参与编排层的"确定性失败指纹"，
+ * 排序可消除不同 runner 输出顺序带来的指纹抖动（架构评审 B3）。
+ *
+ * @param failedTests 失败用例标识列表
+ * @param limit 最多列出条数
+ * @returns 形如 "；失败用例：a、b（已识别 3 条）"；无失败用例返回空串
+ */
+function formatFailedIdHint(failedTests: Readonly<FailedTestIdList>, limit = 3): string {
+  if (failedTests.ids.length === 0) return "";
+  const shown = [...failedTests.ids].sort().slice(0, limit);
+  const suffix = failedTests.total > shown.length ? `（已识别 ${failedTests.total} 条）` : "";
+  return `；失败用例：${shown.join("、")}${suffix}`;
 }
 
 /**

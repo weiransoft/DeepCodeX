@@ -23,8 +23,10 @@
  * {
  *   failureCategory: "assertion" | "import" | "timeout" | "syntax" | "unknown",
  *   failureSummary: "12 个测试失败，主要错误：期望 200 但得到 404",
+ *   failedTestIds: ["tests/test_x.py::test_y", ...],   // 失败用例标识（2026-11-03 新增）
+ *   failureOutputSnippet: "...(失败窗口优先摘要)",      // 失败窗口 + 尾部统计，非 head-only
  *   suggestedActions: ["检查路由配置", "验证 mock 数据", ...],
- *   filesToReview: ["src/services/OrderService.ts", ...],
+ *   filesToReview: ["src/services/OrderService.ts", ...],  // 上限 20 条
  * }
  * ```
  *
@@ -39,6 +41,7 @@
 import type { P5StageContext, P5StageHandler, P5StageResult } from "./types";
 import { buildGuardContext, createSuccessStageResult, createFailedStageResult, toGuardRecords } from "./types";
 import type { TaskCard } from "../guards/types";
+import { buildTestOutputSummary, extractFailedTestIds } from "./test-output-analysis";
 
 // ============================================================================
 // 1. 常量定义
@@ -86,8 +89,17 @@ export const FIX_REASON_TASK_EXECUTION_FAILED = "fix-task-execution-failed" as c
 /** verify 失败但上下文中找不到任务卡（状态不一致，无法定位修复目标） */
 export const FIX_REASON_TASK_CARD_MISSING = "fix-task-card-missing" as const;
 
-/** 回灌给执行器的失败输出片段最大字符数 */
-const FIX_FEEDBACK_SNIPPET_CHARS = 500;
+/** 回灌给执行器的失败输出片段最大字符数（2026-11-03：500 → 2000）
+ *
+ *  原因（run b64490b8ad78 事故）：真实 runner 的失败详情在输出尾部，
+ *  旧值 500 只能拿到头部进度点，模型无从定位失败用例，两轮修复产出相同实现
+ *  → 相同失败 → 确定性熔断。现改为与 verify 证据同源的"失败窗口优先"摘要，
+ *  长度上限与 CompletionEvidence.testOutputSummary 对齐（2000）。
+ */
+const FIX_FEEDBACK_SNIPPET_CHARS = 2000;
+
+/** 回灌给执行器的"待审查文件"清单最大条数（防止超长 declaredFiles 淹没提示词） */
+const FIX_FEEDBACK_MAX_FILES = 20;
 
 /**
  * 失败模式分类规则表（按优先级排序）
@@ -95,6 +107,14 @@ const FIX_FEEDBACK_SNIPPET_CHARS = 500;
  * 每条规则为 [关键词正则, 分类名称]，按顺序匹配，命中第一个即停止。
  */
 const FAILURE_PATTERN_RULES: ReadonlyArray<Readonly<[RegExp, FixFailureCategory]>> = Object.freeze([
+  // 环境/前置条件缺失（2026-11-03 新增）：二进制、依赖、容器挂载缺失时，
+  // 断言只是表象，盲改业务代码永远修不好（run b64490b8ad78 的 LinearDesign 集成即此类）。
+  [
+    // 说明：ASCII 关键词用 \b 限定词边界；中文关键词不能用 \b（JS 里中文不是 word 字符，
+    // "缺失" 两侧加 \b 会永不命中），因此中英文分开写在同一条交替式里。
+    /\b(?:ENOENT|No such file or directory|command not found|ModuleNotFoundError)\b|未安装|缺失|找不到可执行/i,
+    "environment",
+  ],
   // 断言失败：expected/actual/assertion/AssertionError
   [/\b(expected|actual|assertion|AssertionError)\b/i, "assertion"],
   // 导入失败：Cannot find module/ImportError/Module not found
@@ -114,9 +134,17 @@ const FAILURE_PATTERN_RULES: ReadonlyArray<Readonly<[RegExp, FixFailureCategory]
 // ============================================================================
 
 /**
- * 失败模式分类（6 类 + unknown）
+ * 失败模式分类（7 类 + unknown）
  */
-export type FixFailureCategory = "assertion" | "import" | "timeout" | "syntax" | "type" | "reference" | "unknown";
+export type FixFailureCategory =
+  | "environment"
+  | "assertion"
+  | "import"
+  | "timeout"
+  | "syntax"
+  | "type"
+  | "reference"
+  | "unknown";
 
 /**
  * 结构化修复建议
@@ -128,13 +156,19 @@ export interface FixSuggestion {
   readonly failureSummary: string;
   /** 建议动作列表（人类可读，供 LLM 消费） */
   readonly suggestedActions: ReadonlyArray<string>;
-  /** 待审查文件列表（来自任务卡 declaredFiles） */
+  /** 待审查文件列表（来自任务卡 declaredFiles，已按上限截断） */
   readonly filesToReview: ReadonlyArray<string>;
+  /** 任务卡声明文件总数（截断前） */
+  readonly declaredFileTotal: number;
   /** 失败的测试数量 */
   readonly failedTestCount: number;
   /** 测试退出码 */
   readonly testExitCode: number;
-  /** 失败输出摘要（前 N 字符） */
+  /** 失败用例标识（pytest FAILED / unittest FAIL: / jest ✕ / mocha N) / TAP not ok） */
+  readonly failedTestIds: ReadonlyArray<string>;
+  /** 识别到的失败用例总数（可能大于 failedTestIds.length） */
+  readonly failedTestTotal: number;
+  /** 失败输出片段（失败窗口优先摘取，≤ FIX_FEEDBACK_SNIPPET_CHARS） */
   readonly failureOutputSnippet: string;
 }
 
@@ -234,25 +268,43 @@ export class P5FixStageHandler implements P5StageHandler {
 
       const failedCount = testStats?.failed ?? 0;
       const exitCode = evidence?.testExitCode ?? cmdResult?.exitCode ?? -1;
-      const outputSummary = evidence?.testOutputSummary ?? verifyResult.error ?? "";
+      // 证据来源优先级（架构评审 B7）：
+      //   1) verify 新增的 artifacts.testOutputTail（原始尾部，可在摘要被前人截断时自愈）；
+      //   2) completionEvidence.testOutputSummary（已是失败窗口摘要）；
+      //   3) verify 的 error 文本（最后兜底）。
+      const rawTail = verifyResult.artifacts["testOutputTail"];
+      const outputSummary =
+        typeof rawTail === "string" && rawTail.length > 0
+          ? rawTail
+          : (evidence?.testOutputSummary ?? verifyResult.error ?? "");
 
-      // 4. 分析失败模式
+      // 4. 分析失败模式（环境/断言/导入/超时/语法/类型/引用）
       const failureCategory = analyzeFailureCategory(outputSummary);
+
+      // 4.5 失败证据：摘要用"失败窗口优先"重建，失败用例单独提取（2026-11-03 修复）
+      const failureSnippet = buildTestOutputSummary(outputSummary, FIX_FEEDBACK_SNIPPET_CHARS);
+      const failedTestIds = extractFailedTestIds(outputSummary);
 
       // 5. 生成结构化修复建议
       const taskCard = extractTaskCardFromPrevResults(ctx);
-      const filesToReview = taskCard?.declaredFiles ?? [];
+      const declaredFiles = taskCard?.declaredFiles ?? [];
+      // 文件清单：失败用例所在测试文件优先，其后按任务卡声明顺序，上限 20 条
+      // （事故任务卡声明 249 个文件，直接灌进提示词会把失败证据淹没）
+      const filesToReview = prioritizeDeclaredFiles(declaredFiles, failedTestIds.ids, FIX_FEEDBACK_MAX_FILES);
 
-      const suggestedActions = generateSuggestedActions(failureCategory, outputSummary, filesToReview);
+      const suggestedActions = generateSuggestedActions(failureCategory, outputSummary);
 
       const fixSuggestion: FixSuggestion = Object.freeze({
         failureCategory,
         failureSummary: `${failedCount} 个测试失败（exitCode=${exitCode}）`,
         suggestedActions: Object.freeze([...suggestedActions]),
         filesToReview: Object.freeze([...filesToReview]),
+        declaredFileTotal: declaredFiles.length,
         failedTestCount: failedCount,
         testExitCode: exitCode,
-        failureOutputSnippet: outputSummary.slice(0, 500),
+        failedTestIds: failedTestIds.ids,
+        failedTestTotal: failedTestIds.total,
+        failureOutputSnippet: failureSnippet,
       });
 
       // 6. 调用 guardChain.execute() 做 G-A3b 清理意图永禁预检
@@ -490,20 +542,21 @@ export function analyzeFailureCategory(output: string): FixFailureCategory {
  * 生成修复建议动作列表
  *
  * 基于失败模式生成结构化建议，供 LLM 消费生成具体修复代码。
+ * 文件清单不在建议里重复（反馈文本已单列"任务卡声明文件"），避免重复稀释提示词。
  *
  * @param category 失败模式分类
  * @param output 失败输出
- * @param filesToReview 待审查文件列表
  * @returns 建议动作列表
  */
-function generateSuggestedActions(
-  category: FixFailureCategory,
-  output: string,
-  filesToReview: ReadonlyArray<string>
-): string[] {
+function generateSuggestedActions(category: FixFailureCategory, output: string): string[] {
   const actions: string[] = [];
 
   switch (category) {
+    case "environment":
+      actions.push("先确认失败用例依赖的可执行文件/依赖/挂载项是否真实存在（whereis / ls / 容器内 PATH）");
+      actions.push("环境不可用时按项目约定提供跳过或明确失败提示，不要改断言把失败掩盖成通过");
+      actions.push("若属容器内依赖缺失，补 Dockerfile/依赖声明或给出可复现的安装步骤");
+      break;
     case "assertion":
       actions.push("检查断言期望值与实际值是否一致");
       actions.push("验证 mock 数据是否与真实数据结构匹配");
@@ -541,19 +594,61 @@ function generateSuggestedActions(
   }
 
   // 通用建议
-  if (filesToReview.length > 0) {
-    actions.push(`审查以下文件：${filesToReview.join(", ")}`);
-  }
   actions.push("检查最近的代码改动是否引入回归");
 
   return actions;
 }
 
 /**
+ * 组装"待审查文件"清单：失败用例所在测试文件优先，其后按任务卡声明顺序补齐。
+ *
+ * pytest 风格的失败用例标识含文件路径（`tests/test_x.py::test_y`），
+ * 把这类文件排到最前可让 fix 模型先看失败点；其余声明文件按原顺序补齐。
+ *
+ * @param declaredFiles 任务卡声明文件（原始顺序）
+ * @param failedTestIds 失败用例标识
+ * @param limit 返回上限
+ * @returns 去重后的文件清单（≤ limit 条）
+ */
+function prioritizeDeclaredFiles(
+  declaredFiles: ReadonlyArray<string>,
+  failedTestIds: ReadonlyArray<string>,
+  limit: number
+): string[] {
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+
+  // 1. 失败用例所在文件（标识形如 `path/to/test_x.py::case`）
+  for (const id of failedTestIds) {
+    const candidate = id.split("::")[0]?.trim() ?? "";
+    if (candidate.length === 0 || !/\.[A-Za-z0-9]+$/.test(candidate)) continue;
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
+    ordered.push(candidate);
+    if (ordered.length >= limit) return ordered;
+  }
+
+  // 2. 任务卡声明文件（跳过已在列表中的）
+  for (const file of declaredFiles) {
+    if (ordered.length >= limit) break;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    ordered.push(file);
+  }
+  return ordered;
+}
+
+/**
  * 把结构化修复建议组装为回灌执行器的反馈文本（方案 A §3.5）。
  *
- * 反馈包含：失败分类、失败测试数、退出码、失败输出片段（≤500 字）、建议动作。
- * 执行器把该文本放入 fix 轮 user 提示词，模型据此真实修改代码。
+ * 反馈包含：失败分类、失败测试数、退出码、**失败用例清单**、失败输出片段（≤2000 字）、
+ * 建议动作、任务卡声明文件（≤20 条）。执行器把该文本放入 fix 轮 user 提示词，
+ * 模型据此真实修改代码。
+ *
+ * 2026-11-03 修复（run b64490b8ad78 事故）：
+ * - 新增"失败用例"段落：明确列出失败用例标识，模型无需再从进度点里猜；
+ * - 失败输出不再 head-slice 500 字符，改用失败窗口摘要（尾部断言/堆栈可见）；
+ * - 文件清单超限时标注总数，避免"249 条文件"淹没失败证据。
  *
  * @param suggestion 结构化修复建议
  * @returns 多行反馈文本
@@ -563,10 +658,21 @@ function buildFixFeedback(suggestion: Readonly<FixSuggestion>): string {
     `失败分类：${suggestion.failureCategory}`,
     `失败测试数：${suggestion.failedTestCount}`,
     `测试退出码：${suggestion.testExitCode}`,
-    "",
-    "失败输出：",
-    suggestion.failureOutputSnippet.slice(0, FIX_FEEDBACK_SNIPPET_CHARS) || "（无输出摘要）",
   ];
+
+  // 失败用例清单：fix 的第一优先级是定位并复跑这些用例
+  if (suggestion.failedTestIds.length > 0) {
+    lines.push("", "失败用例（请优先定位并复跑这些用例，修改后自证其通过）：");
+    for (const id of suggestion.failedTestIds) {
+      lines.push(`- ${id}`);
+    }
+    if (suggestion.failedTestTotal > suggestion.failedTestIds.length) {
+      lines.push(`- …（共 ${suggestion.failedTestTotal} 个失败用例，以上为前 ${suggestion.failedTestIds.length} 个）`);
+    }
+  }
+
+  lines.push("", "失败输出：", suggestion.failureOutputSnippet || "（无输出摘要）");
+
   if (suggestion.suggestedActions.length > 0) {
     lines.push("", "参考修复方向（需结合代码实际情况判断，不要机械照做）：");
     for (const action of suggestion.suggestedActions) {
@@ -574,7 +680,11 @@ function buildFixFeedback(suggestion: Readonly<FixSuggestion>): string {
     }
   }
   if (suggestion.filesToReview.length > 0) {
-    lines.push("", `任务卡声明文件：${suggestion.filesToReview.join(", ")}`);
+    const truncatedHint =
+      suggestion.declaredFileTotal > suggestion.filesToReview.length
+        ? `（共 ${suggestion.declaredFileTotal} 个，以上为前 ${suggestion.filesToReview.length} 个）`
+        : "";
+    lines.push("", `任务卡声明文件${truncatedHint}：${suggestion.filesToReview.join(", ")}`);
   }
   return lines.join("\n");
 }

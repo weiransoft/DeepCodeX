@@ -929,6 +929,14 @@ export class AutonomousOrchestrator {
       // 采集失败（非 git 仓库 / git 不可用）→ null：清单降级为空并显式标注。
       const baselineSnapshot = this.captureGitSnapshot(projectRoot);
 
+      // 2026-11-03 新增（run b64490b8ad78 事故，架构评审 B2）：
+      // 跨迭代携带"上一轮 verify 真实失败证据"。
+      // 事故链路：iter1 dev→verify 失败→fix 修复；iter2 plan 又选同一张 pending 卡，
+      // dev 从零重跑整卡（250 个变更文件）→ 把 fix 的增量修复覆盖掉 → 相同失败。
+      // dev 此前只消费 plan 透出的"跨 run 失败记忆"，同一次 run 内的失败闭环缺失。
+      // 这里在迭代之间搬运失败证据（失败用例 + 输出尾部），让下一轮 dev 接着修而不是重来。
+      let carriedFailureFeedback: string | undefined;
+
       // 类型守卫：确保 currentRunState 非空（后续 while 循环内安全使用）
       // 此处 currentRunState 已通过 L603 赋值，理论上不可能为 null
       if (currentRunState === null) {
@@ -984,7 +992,9 @@ export class AutonomousOrchestrator {
         // 读取的记忆（artifacts.lastFailureFeedback），投影到 dev 阶段 ctx，
         // 让执行器带着"上一轮为什么失败"的认知重新实现同一任务卡。
         // 首轮迭代或 plan 未透出时为 undefined，dev 行为与修复前一致。
-        let iterationLastFailureFeedback: string | undefined;
+        // 2026-11-03：初始值改为"上一轮 verify 失败证据"（同 run 内闭环），
+        // plan 若透出跨 run 记忆则覆盖（跨 run 信息更宏观）。
+        let iterationLastFailureFeedback: string | undefined = carriedFailureFeedback;
 
         for (const stage of P5_STAGE_ORDER) {
           // F-B 阶段前置预算检查（2026-10-09 引入；2026-10-20 需求变更移除）：
@@ -1124,6 +1134,13 @@ export class AutonomousOrchestrator {
               "warn"
             );
             // 不 break：让 fix 阶段有机会修复 verify 的失败
+          }
+
+          // 5b-6.4 跨迭代失败证据搬运（2026-11-03，run b64490b8ad78）：
+          // verify 真实失败时，把"失败用例 + 输出尾部"打包进 carriedFailureFeedback，
+          // 下一轮 dev 的 feedback 会带上它——避免 dev 推倒重写覆盖 fix 的增量修复。
+          if (stage === "verify" && result.kind !== "success" && result.artifacts["skipped"] !== true) {
+            carriedFailureFeedback = this.buildVerifyFailureFeedback(result);
           }
 
           // Token 预算轮内增量检查（P1 修复 2026-10-08 引入；2026-10-20 需求变更移除）：
@@ -2860,6 +2877,37 @@ export class AutonomousOrchestrator {
       }),
       timestamp: new Date().toISOString(),
     };
+  }
+
+  /**
+   * 把 verify 阶段的真实失败证据组装为"跨迭代 dev 反馈"文本。
+   *
+   * 用途（2026-11-03，run b64490b8ad78 事故修复）：同一 run 内下一轮 plan 会再次
+   * 选中同一张仍为 pending 的任务卡，dev 从零重跑会把 fix 的增量修复覆盖掉。
+   * 把失败用例与输出尾部带入 dev 提示词后，模型在既有改动上继续修，而不是重写。
+   *
+   * @param result verify 阶段的失败结果
+   * @returns 供 dev 阶段 feedback 使用的文本（无证据时返回 undefined）
+   */
+  private buildVerifyFailureFeedback(result: Readonly<P5StageResult>): string | undefined {
+    const ids = result.artifacts["failedTestIds"];
+    const tail = result.artifacts["testOutputTail"];
+    const idList = Array.isArray(ids) ? (ids as ReadonlyArray<unknown>).filter((v) => typeof v === "string") : [];
+    const tailText = typeof tail === "string" ? tail.slice(-1500) : "";
+    const reason = result.error ?? result.summary;
+
+    if (idList.length === 0 && tailText.length === 0 && !reason) return undefined;
+
+    const lines: string[] = ["上一轮 verify 阶段测试失败（请在现有改动基础上继续修，不要推倒重写）："];
+    if (idList.length > 0) {
+      lines.push(`失败用例：${idList.join("、")}`);
+    }
+    if (tailText.length > 0) {
+      lines.push("失败输出尾部：", tailText);
+    } else if (reason) {
+      lines.push(`失败摘要：${reason}`);
+    }
+    return lines.join("\n");
   }
 
   /**
