@@ -8,6 +8,7 @@
  */
 import { useEffect, useState } from "react";
 import { fetchAudit, type AuditInfo } from "../api";
+import { Markdown } from "../markdown";
 
 /** 加载状态 */
 type AuditState = { phase: "loading" } | { phase: "error"; message: string } | { phase: "ready"; data: AuditInfo };
@@ -113,7 +114,14 @@ export function AuditPane() {
       )}
 
       <h3 className="audit-section-title">审计报告</h3>
-      <pre className="audit-report">{data.report}</pre>
+      <p className="audit-report-hint">Markdown 渲染视图（下方「原文」为服务端渲染的原始字节，可复制存档）。</p>
+      <div className="audit-report">
+        <Markdown source={data.report} />
+      </div>
+      <details className="audit-report-raw">
+        <summary>查看 Markdown 原文</summary>
+        <pre className="audit-report-pre">{data.report}</pre>
+      </details>
     </div>
   );
 }

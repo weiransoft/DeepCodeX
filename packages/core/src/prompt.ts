@@ -588,15 +588,49 @@ function getUnameInfo(): string {
   }
 }
 
+/**
+ * 扩展根目录（持有 templates/ 与 bundled/ 的那一级）
+ *
+ * ## 解析口径
+ *
+ * 所有调用点都按 `path.join(extensionRoot, "templates", …)` / `"bundled"` 取资产，
+ * 因此本函数要返回**真正含有这两个目录的那一级**，而不是固定的「bundle 上一级」。
+ *
+ * 三种实际布局：
+ *
+ * | 场景 | bundle 文件位置 | 资产位置 | extensionRoot |
+ * |---|---|---|---|
+ * | 开发（core 源码 / tsx） | packages/core/src/*.ts | packages/core/templates/ | packages/core |
+ * | CLI 打包 | packages/cli/dist/cli.js | packages/cli/dist/templates/ | packages/cli/dist |
+ * | npm 发布安装 | `<pkg>/dist/cli.js` | `<pkg>/dist/templates/` | `<pkg>/dist` |
+ *
+ * ## 为什么必须探测而不是固定 `resolve(__dirname, "..")`（2026-11-04）
+ *
+ * 打包与发布布局下 `resolve(__dirname, "..")` 落在**包根**（`<pkg>`），
+ * 而资产在 `<pkg>/dist/` 下——于是：
+ * - 22 个内置技能（docx/pdf/pptx/xlsx/browser-automation…）在能力清单里
+ *   恒为空（`bundled:` 来源扫不到）；
+ * - 工具文档（templates/tools）与 plan.md / init_command 模板全部读不到，
+ *   且是**静默降级**（读不到就跳过），几乎不露痕迹。
+ *
+ * 修法是按候选顺序探测第一个含 `templates/` 的目录，保持开发布局不变。
+ *
+ * @returns 扩展根目录绝对路径（候选均不命中时回退到历史口径）
+ */
 export function getExtensionRoot(): string {
   // Prefer `__dirname` which is always available in the CJS bundle output.
   // Fall back to `import.meta.url` for ESM test environments (tsx --test).
-  if (typeof __dirname !== "undefined") {
-    return path.resolve(__dirname, "..");
-  }
+  const baseDir = typeof __dirname !== "undefined" ? __dirname : path.dirname(fileURLToPath(import.meta.url));
 
-  const currentFilePath = fileURLToPath(import.meta.url);
-  return path.resolve(path.dirname(currentFilePath), "..");
+  // 候选顺序：先历史口径（开发布局：包根持有 templates/），再 bundle 目录本身
+  // （打包/发布布局：dist/ 同时持有 templates/ 与 bundled/）。
+  const candidates = [path.resolve(baseDir, ".."), path.resolve(baseDir)];
+  for (const candidate of candidates) {
+    if (fs.existsSync(path.join(candidate, "templates"))) {
+      return candidate;
+    }
+  }
+  return candidates[0];
 }
 
 export type ToolDefinition = {

@@ -132,12 +132,21 @@ export class SkillManager {
   /**
    * 获取内置技能根目录
    *
-   * 解析逻辑：
-   * 1. 开发模式：扩展根目录下存在 src/session.ts → 使用 templates/skills/bundled
-   * 2. 发布模式：扩展根目录解析到 dist/ → 使用 dist/bundled
-   * 3. 兜底：使用 sourceRoot（templates/skills/bundled）
+   * 解析逻辑（按优先级探测，命中即返回）：
+   * 1. 开发模式：扩展根目录下存在 src/session.ts 且 templates/skills/bundled 存在
+   *    → 用 templates/skills/bundled（源码树布局）
+   * 2. 发布模式：扩展根下的 bundled/ 存在 → 用它
+   * 3. 兜底：templates/skills/bundled
    *
-   * @returns 内置技能根目录的绝对路径
+   * ## 关于「dist/bundled」探测（2026-11-04）
+   *
+   * `getExtensionRoot()` 已在扩展层解决「资产在 dist/ 下一级」的问题
+   * （见 prompt.ts 的口径说明）——它现在返回真正持有 `templates/` 的那一级，
+   * 打包/发布布局下即 `dist/`，因此发布模式的 `bundled/` 就在扩展根下。
+   * 这里保留 `dist/bundled` 作为兜底探测，应对扩展根判定被绕过或
+   * 目录被整体上移一层的历史布局。
+   *
+   * @returns 内置技能根目录的绝对路径（可能不存在——上层按「扫不到即空列表」降级）
    */
   getBundledSkillsRoot(): string {
     const extensionRoot = getExtensionRoot();
@@ -148,9 +157,19 @@ export class SkillManager {
       return sourceRoot;
     }
 
-    // 发布模式：getExtensionRoot() 解析到 dist/，bundled 技能复制到 dist/bundled/
+    // 发布模式：bundled 技能随包复制到扩展根下的 bundled/
     const distRoot = path.join(extensionRoot, "bundled");
-    return fs.existsSync(distRoot) ? distRoot : sourceRoot;
+    if (fs.existsSync(distRoot)) {
+      return distRoot;
+    }
+
+    // 历史布局兜底：扩展根再下一级的 dist/bundled/
+    const nestedDistRoot = path.join(extensionRoot, "dist", "bundled");
+    if (fs.existsSync(nestedDistRoot)) {
+      return nestedDistRoot;
+    }
+
+    return sourceRoot;
   }
 
   /**

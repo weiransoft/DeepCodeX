@@ -21,6 +21,7 @@ import { humanSize } from "../format";
 import type { UserAttachment } from "../chat-model";
 import { fetchCapabilities, type Capabilities, type CapabilityCommand } from "../api";
 import { agentDisplayName, agentMentionHint } from "../agent-display";
+import { skillDisplayName, skillDisplaySummary } from "../skill-display";
 import { listModels, setDefaultModel, type ModelOption } from "../desktopConfig";
 import {
   BotAvatarIcon,
@@ -282,12 +283,15 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
     const hit = (name: string): boolean => q === "" || name.toLowerCase().includes(q);
     const items: MentionItem[] = [];
     for (const s of data.skills) {
-      if (s.kind === "skill" && hit(s.name)) {
+      if (s.kind === "skill") {
+        // 中文名与英文标识都能过滤：用户可能记得「前端开发」，也可能记得 token
+        const label = skillDisplayName(s);
+        if (!hit(s.name) && !hit(label)) continue;
         items.push({
           token: s.name,
-          label: s.name,
+          label,
           kindLabel: "技能",
-          description: s.description,
+          description: skillDisplaySummary(s),
           kindClass: "mention-badge-skill",
         });
       }
@@ -882,17 +886,25 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
                     type="button"
                     key={`${kind}-${s.name}`}
                     className="composer-menu-item"
-                    title={kind === "agent" ? `${agentMentionHint(s)} · ${s.path}` : s.path}
+                    title={kind === "agent" ? `${agentMentionHint(s)} · ${s.path}` : `@${s.name} · ${s.path}`}
                     onClick={() => insertToken(s.name)}
                   >
                     {kind === "agent" ? <BotAvatarIcon size={13} /> : null}
-                    <span className="composer-menu-name">{kind === "agent" ? agentDisplayName(s) : s.name}</span>
-                    {kind === "agent" && (
+                    <span className="composer-menu-name">
+                      {kind === "agent" ? agentDisplayName(s) : skillDisplayName(s)}
+                    </span>
+                    {kind === "agent" ? (
                       <span className="composer-menu-id" title={`插入 ${agentMentionHint(s)}`}>
                         {agentMentionHint(s)}
                       </span>
+                    ) : (
+                      <span className="composer-menu-id" title={`插入 @${s.name}`}>
+                        @{s.name}
+                      </span>
                     )}
-                    <span className="composer-menu-meta">{s.description}</span>
+                    <span className="composer-menu-meta">
+                      {kind === "agent" ? s.description : skillDisplaySummary(s)}
+                    </span>
                   </button>
                 ));
               })()

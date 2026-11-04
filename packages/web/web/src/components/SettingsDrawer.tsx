@@ -10,7 +10,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ConfigForm } from "./ConfigForm";
 import { LdapForm } from "./LdapForm";
 import { AgentsPane } from "./AgentsPane";
-import { agentDisplayName, agentMentionHint } from "../agent-display";
+import { SkillsPane } from "./SkillsPane";
 import { RulesPane } from "./RulesPane";
 import { AuditPane } from "./AuditPane";
 import { type DesktopConfig, type DesktopLdapConfig, type DesktopMcpServer, type DesktopModel } from "../desktopConfig";
@@ -141,7 +141,16 @@ export function SettingsDrawer({ initialConfig, onSave, onClose }: SettingsDrawe
   /** LDAP 前端轻校验：启用时 server / baseDn 必填（引擎侧还有一道 fail-fast） */
   const ldapInvalid = ldap.enabled && (ldap.server.trim() === "" || ldap.baseDn.trim() === "");
 
-  const skillCount = skills.phase === "ready" ? skills.skills.filter((s) => s.kind === "skill").length : 0;
+  /**
+   * 「技能」页签只列普通技能（kind==="skill"）
+   *
+   * 2026-11-04：此前这里渲染的是 `skills.skills` 全量——智能体条目也一并列出，
+   * 与「智能体」页签内容重复（同一个 agent 出现在两个页签）。两个页签按 kind
+   * 严格切分，互不重叠。
+   */
+  const skillEntries = skills.phase === "ready" ? skills.skills.filter((s) => s.kind === "skill") : [];
+
+  const skillCount = skillEntries.length;
   const agentCount = skills.phase === "ready" ? skills.skills.filter((s) => s.kind === "agent").length : 0;
 
   return (
@@ -219,39 +228,9 @@ export function SettingsDrawer({ initialConfig, onSave, onClose }: SettingsDrawe
             />
           ) : tab === "skills" ? (
             <div className="skills-list">
-              <p className="skills-hint">
-                技能由引擎自动扫描：项目级 .deepcode/skills、用户级 ~/.deepcode/skills 与内置技能； 对话输入{" "}
-                <code>@</code> 可直接引用。MCP 插件在「MCP 服务」页签配置。
-              </p>
               {skills.phase === "loading" && <div className="skills-empty">正在扫描已安装技能…</div>}
               {skills.phase === "error" && <div className="skills-empty">扫描失败：{skills.message}</div>}
-              {skills.phase === "ready" && skills.skills.length === 0 && (
-                <div className="skills-empty">未发现已安装技能（可将 SKILL.md 放入 ~/.deepcode/skills）</div>
-              )}
-              {skills.phase === "ready" &&
-                skills.skills.map((s) => (
-                  <div key={`${s.kind}-${s.name}`} className="skills-item">
-                    <div className="skills-item-head">
-                      <span
-                        className={
-                          "mention-badge " + (s.kind === "agent" ? "mention-badge-agent" : "mention-badge-skill")
-                        }
-                      >
-                        {s.kind === "agent" ? "Agent" : "技能"}
-                      </span>
-                      <span className="skills-item-name">{s.kind === "agent" ? agentDisplayName(s) : s.name}</span>
-                      {s.kind === "agent" && (
-                        <span className="skills-item-id" title="在输入框输入该标识即可调用">
-                          {agentMentionHint(s)}
-                        </span>
-                      )}
-                    </div>
-                    {s.description !== "" && <div className="skills-item-desc">{s.description}</div>}
-                    <div className="skills-item-path" title={s.path}>
-                      {s.path}
-                    </div>
-                  </div>
-                ))}
+              {skills.phase === "ready" && <SkillsPane skills={skillEntries} />}
             </div>
           ) : tab === "ldap" ? (
             <LdapForm
