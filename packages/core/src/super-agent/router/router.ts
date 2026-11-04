@@ -21,6 +21,8 @@
 
 import type { DecisionInput, DecisionResult, SuperAgentEngine } from "../engine/engine.js";
 import type { EvalCandidate } from "../domain/types.js";
+import type { WorkflowPlanner } from "../planner/planner.js";
+import { loadPolicy } from "../policy/policy.js";
 import { admitCandidate } from "./gate.js";
 import type { Assessor } from "../engine/engine.js";
 
@@ -30,6 +32,13 @@ export interface SuperAgentRouterOptions {
   readonly engine: SuperAgentEngine;
   /** 研判器（null = 无研判能力） */
   readonly assessor: Assessor | null;
+  /**
+   * 计划器（null = 不做动态分解，按单角色执行）
+   *
+   * 计划只对 `accept` 生效，且生成失败**不影响接单**——
+   * 计划是「怎么做」的增强，不是「要不要做」的前提。
+   */
+  readonly planner?: WorkflowPlanner | null;
 }
 
 /**
@@ -40,6 +49,8 @@ export class SuperAgentRouter {
   private readonly engine: SuperAgentEngine;
   /** 研判器 */
   private readonly assessor: Assessor | null;
+  /** 计划器 */
+  private readonly planner: WorkflowPlanner | null;
 
   /**
    * 构造 Router
@@ -49,6 +60,7 @@ export class SuperAgentRouter {
   constructor(options: SuperAgentRouterOptions) {
     this.engine = options.engine;
     this.assessor = options.assessor;
+    this.planner = options.planner ?? null;
   }
 
   /**
@@ -117,6 +129,15 @@ export class SuperAgentRouter {
     }
 
     const scope = latestTrigger?.text.slice(0, 200) ?? "";
+    // 动态分解：只在「确定会真的接单」时做——
+    // observe 模式下的推断候选只记影子，不建工单，也就不该消耗一次规划调用。
+    const policy = loadPolicy((key) => this.engine.context.repos.getKv(key));
+    const willAccept = gate.strength === "explicit" || policy.acceptMode === "auto";
+    const plan =
+      assessment.kind === "accept" && this.planner !== null && willAccept
+        ? await this.safePlan(candidate.threadId, ticketNameOf(scope), scope)
+        : undefined;
+
     return {
       threadId: candidate.threadId,
       kind: assessment.kind,
@@ -127,6 +148,41 @@ export class SuperAgentRouter {
       actor: latestTrigger?.actor,
       sourceId: latestTrigger?.sourceId,
       triggerIds,
+      plan,
     };
   }
+
+  /**
+   * 安全地生成计划
+   *
+   * 规划器自身的契约是「必定返回计划（失败即降级）」，但这里仍然兜底：
+   * 规划异常绝不能让**接单**失败——计划可以没有，工单不能没有。
+   *
+   * @param threadId Thread ID（作为工单 ID 的占位）
+   * @param ticketName 工单名称
+   * @param scope 授权范围
+   * @returns 计划；异常时 undefined
+   */
+  private async safePlan(
+    threadId: string,
+    ticketName: string,
+    scope: string
+  ): Promise<DecisionInput["plan"] | undefined> {
+    try {
+      return await (this.planner as WorkflowPlanner).plan({ ticketId: threadId, ticketName, scope });
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+/**
+ * 从请求文本推导工单名称（与 `evals.ts` 的命名口径一致）
+ *
+ * @param text 请求文本
+ * @returns 名称（首行，超长截断）
+ */
+function ticketNameOf(text: string): string {
+  const firstLine = text.split("\n")[0] ?? text;
+  return firstLine.length > 60 ? `${firstLine.slice(0, 57)}...` : firstLine;
 }

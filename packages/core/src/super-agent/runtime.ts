@@ -50,6 +50,8 @@ import { SuperAgentEngine, type Assessor, type WorkerExecutor } from "./engine/e
 import { recallHistoricalDecisions } from "./engine/history.js";
 import { estimateTokens } from "./domain/recall.js";
 import { Passes } from "./passes/passes.js";
+import type { WorkflowPlanner } from "./planner/planner.js";
+import { LlmWorkflowPlanner } from "./planner/planner.js";
 import { loadPolicy } from "./policy/policy.js";
 import { LlmAssessor, type HistoricalRecallPort } from "./router/assessment.js";
 import { SuperAgentRouter } from "./router/router.js";
@@ -87,6 +89,12 @@ export interface SuperAgentRuntimeOptions {
   readonly now?: () => Date;
   /** 研判器（null = 无研判能力，推断型一律 unavailable） */
   readonly assessor?: Assessor | null;
+  /**
+   * 计划器（undefined = 装配默认 LLM 计划器；null = 不做动态分解）
+   *
+   * 不做动态分解时，接单语义与旧版完全一致（一单一角色）。
+   */
+  readonly planner?: WorkflowPlanner | null;
   /** Worker 启动器（null = 不派工，工单如实失败） */
   readonly launcher?: WorkerLauncher | null;
   /** Worker 注入通道（null = 无法向运行中的 Worker 追加输入） */
@@ -115,6 +123,21 @@ export interface SuperAgentStatus {
   readonly sources: readonly { readonly id: string; readonly kind: string }[];
   /** 是否具备研判能力 */
   readonly assessorAvailable: boolean;
+  /** 是否具备动态分解（计划）能力 */
+  readonly plannerAvailable: boolean;
+  /** 计划与步骤进度 */
+  readonly plans: {
+    /** 有计划的总工单数 */
+    readonly total: number;
+    /** 待派工步骤 */
+    readonly pendingSteps: number;
+    /** 运行中步骤 */
+    readonly runningSteps: number;
+    /** 已完成步骤 */
+    readonly completedSteps: number;
+    /** 失败步骤 */
+    readonly failedSteps: number;
+  };
   /** 是否具备派工能力 */
   readonly executorAvailable: boolean;
   /** 是否具备向运行中 Worker 追加输入的能力 */
@@ -173,6 +196,8 @@ export class SuperAgentRuntime {
   readonly sources: SourceRegistry;
   /** 执行器（null = 不派工） */
   private readonly executor: WorkerExecutor | null;
+  /** 计划器（null = 不做动态分解） */
+  private readonly planner: WorkflowPlanner | null;
   /** 注入通道（null = 不追加输入） */
   private readonly injector: WorkerInjector | null;
   /** 写侧 */
@@ -204,6 +229,7 @@ export class SuperAgentRuntime {
     sources: SourceRegistry,
     options: {
       readonly executor: WorkerExecutor | null;
+      readonly planner: WorkflowPlanner | null;
       readonly injector: WorkerInjector | null;
       readonly writeSide: WriteSide;
       readonly effectLimit: number;
@@ -217,6 +243,7 @@ export class SuperAgentRuntime {
     this.passes = passes;
     this.sources = sources;
     this.executor = options.executor;
+    this.planner = options.planner;
     this.injector = options.injector;
     this.writeSide = options.writeSide;
     this.effectLimit = options.effectLimit;
@@ -240,6 +267,10 @@ export class SuperAgentRuntime {
         ? new LlmAssessor({ projectRoot: options.projectRoot, recall: buildRecallPort(repos, store) })
         : options.assessor;
 
+    // 计划器：undefined → 默认 LLM 计划器；null → 不做动态分解（旧语义）
+    const planner: WorkflowPlanner | null =
+      options.planner === undefined ? new LlmWorkflowPlanner({ projectRoot: options.projectRoot }) : options.planner;
+
     // Worker 执行器只依赖仓储（不依赖 Engine）——避免「Engine 要执行器、执行器要 Engine」
     // 的构造期循环。
     const workerExecutor: WorkerExecutor | null =
@@ -255,7 +286,7 @@ export class SuperAgentRuntime {
       evalTimeoutMs: options.evalTimeoutMs,
     });
 
-    const router = new SuperAgentRouter({ engine, assessor });
+    const router = new SuperAgentRouter({ engine, assessor, planner });
     const effects = new Effects(store, repos);
     const passes = new Passes({
       intervalMs: options.passIntervalMs ?? 2000,
@@ -274,6 +305,7 @@ export class SuperAgentRuntime {
 
     const runtime = new SuperAgentRuntime(store, repos, engine, router, effects, passes, sources, {
       executor: workerExecutor,
+      planner,
       injector: options.injector ?? null,
       writeSide: options.writeSide ?? defaultWriteSide,
       effectLimit: effectLimitOf(options),
@@ -378,6 +410,15 @@ export class SuperAgentRuntime {
         kind: instance.id,
       })),
       assessorAvailable: this.engine.context.assessor !== null,
+      plannerAvailable:
+        this.planner !== null && (this.planner.available === undefined ? true : this.planner.available()),
+      plans: {
+        total: this.repos.countPlans(),
+        pendingSteps: this.repos.countPlanStepsByState("pending"),
+        runningSteps: this.repos.countPlanStepsByState("running"),
+        completedSteps: this.repos.countPlanStepsByState("ready"),
+        failedSteps: this.repos.countPlanStepsByState("failed"),
+      },
       executorAvailable: this.executor !== null,
       injectorAvailable: this.injector !== null,
       candidates: {
@@ -441,10 +482,12 @@ export class SuperAgentRuntime {
       return;
     }
 
+    const step = this.repos.findPlanStepByAssignment(assignmentId);
     const sessionId = await this.executor.start({
       ticketId,
       assignmentId,
-      role: ticket.execution.role,
+      // 计划的每一步有自己的角色；无计划时退回工单角色（旧语义）
+      role: step?.role ?? ticket.execution.role,
       scope: ticket.mandate.scope,
       prompt: "",
     });
@@ -452,6 +495,9 @@ export class SuperAgentRuntime {
     this.store.write((tx) => {
       markAssignmentRunning(this.engine.context, tx, assignmentId, sessionId);
       this.repos.updateAssignment(tx, assignmentId, { startedAt: at });
+      if (step !== undefined) {
+        this.repos.updatePlanStep(tx, ticketId, step.stepId, { state: "running", startedAt: at });
+      }
     });
   }
 
@@ -470,13 +516,32 @@ export class SuperAgentRuntime {
     const pending = this.repos.listPendingInputs(ticketId);
     if (pending.length === 0) return;
 
-    const assignment = ticket.execution.assignmentId;
-    if (assignment === null) {
-      throw new Error(`工单 ${ticketId} 尚无 Assignment——投递延后重试。`);
+    // 运行中的 Assignment 可能不止一个（计划同一波内并行派工）。
+    // 投递必须**无歧义**：只有恰好一个 Worker 在跑时才投；否则如实暂存。
+    const running = this.repos.listAssignments(ticketId).filter((candidate) => candidate.state === "running");
+    if (running.length > 1) {
+      const at = this.store.now();
+      this.store.write((tx) => {
+        this.repos.insertTicketMessage(tx, {
+          id: makeId("message"),
+          ticketId,
+          direction: "out",
+          // dropped = 不入写侧发送队列：这只是一条内部说明，不是给人的通知
+          body: `当前有 ${running.length} 个并行步骤运行中，${pending.length} 条输入暂存，待波次收敛后投递。`,
+          state: "dropped",
+          attempts: 0,
+          createdAt: at,
+        });
+      });
+      return;
     }
-    const workerSessionId = this.repos.findAssignment(assignment)?.workerSessionId ?? null;
-    if (workerSessionId === null) {
+    if (running.length === 0) {
       // Worker 尚未就绪（launch 副作用可能还在队列里）：抛出 → 由 Effects 退避重试
+      throw new Error(`工单 ${ticketId} 的 Worker 尚未就绪——投递延后重试。`);
+    }
+    const assignment = running[0].id;
+    const workerSessionId = running[0].workerSessionId;
+    if (workerSessionId === null) {
       throw new Error(`工单 ${ticketId} 的 Worker 尚未就绪——投递延后重试。`);
     }
 

@@ -116,7 +116,7 @@ test("super status：真实打开 SQLite 并返回状态", async () => {
   try {
     const result = await executeSuperCommand({ subcommand: "status", projectRoot });
     assert.equal(result.exitCode, 0);
-    assert.match(result.stdout, /Super Agent 状态/);
+    assert.match(result.stdout, /司南（Sinan）· 常驻主理智能体/);
     assert.match(result.stdout, /接单模式：observe/);
     // 数据库文件确实被创建
     assert.ok(fs.existsSync(resolveDatabasePath(projectRoot)));

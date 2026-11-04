@@ -302,10 +302,15 @@ test("runMigrations：版本更高时拒绝启动；迁移链缺失时报错", (
     []
   );
   assert.deepEqual(
-    runMigrations(() => {}, 0, 1),
-    [1]
+    runMigrations(() => {}, 0, 2),
+    [1, 2]
   );
-  assert.equal(SCHEMA_VERSION, 1);
+  // v1 → v2 只追加计划表（动态分解层）
+  assert.deepEqual(
+    runMigrations(() => {}, 1, 2),
+    [2]
+  );
+  assert.equal(SCHEMA_VERSION, 2);
 });
 
 // ============================================================================

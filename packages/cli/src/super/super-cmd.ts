@@ -28,7 +28,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+  renderPlan,
   SuperAgentRuntime,
+  superAgentSignature,
   type AcceptMode,
   type Decision,
   type EvalCandidate,
@@ -49,6 +51,7 @@ export type SuperSubcommand =
   | "candidates"
   | "tickets"
   | "ticket"
+  | "plan"
   | "inject"
   | "policy"
   | "memory"
@@ -121,6 +124,8 @@ export async function executeSuperCommand(args: SuperCommandArgs): Promise<Super
         return await runTickets(args);
       case "ticket":
         return await runTicket(args);
+      case "plan":
+        return await runPlan(args);
       case "inject":
         return await runInject(args);
       case "policy":
@@ -158,11 +163,13 @@ async function runStart(args: SuperCommandArgs): Promise<SuperCommandResult> {
   await ensureDefaultPolicy(runtime);
 
   const lines: string[] = [];
-  lines.push(`Super Agent 已启动（数据库：${databasePath}）`);
+  lines.push(`${superAgentSignature()} 已启动（数据库：${databasePath}）`);
   lines.push(`接单模式：${runtime.status().acceptMode}`);
   lines.push(`事件源：${args.watch === false ? "（已关闭）" : "local-watcher（本地文件变更）"}`);
   lines.push(
-    bridge.llmAvailable ? "Worker：可用（单轮 LLM 执行 + 结构化报告）" : `Worker：不可用——${bridge.unavailableReason}`
+    bridge.llmAvailable
+      ? "Worker：可用（按计划分步派工，单轮 LLM 执行 + 结构化报告）"
+      : `Worker：不可用——${bridge.unavailableReason}`
   );
 
   if (args.once === true) {
@@ -204,7 +211,7 @@ async function runStatus(args: SuperCommandArgs): Promise<SuperCommandResult> {
       return { exitCode: 0, stdout: `${JSON.stringify(status, null, 2)}\n`, stderr: "" };
     }
     const lines: string[] = [];
-    lines.push("Super Agent 状态");
+    lines.push(`${superAgentSignature()}`);
     lines.push(`  数据库：${status.databasePath}`);
     lines.push(`  接单模式：${status.acceptMode}（Policy v${status.policyVersion}）`);
     lines.push(`  工单：${status.totalTickets}（开放 ${status.openTickets}）`);
@@ -217,6 +224,10 @@ async function runStatus(args: SuperCommandArgs): Promise<SuperCommandResult> {
       `  累计 token（估算）：${status.workerTokens.total}（输入 ${status.workerTokens.input} / 输出 ${status.workerTokens.output}）`
     );
     lines.push(`  研判能力：${status.assessorAvailable ? "可用" : "不可用"}`);
+    lines.push(`  计划能力：${status.plannerAvailable ? "可用（动态分解 + 组队）" : "不可用（按单步降级）"}`);
+    lines.push(
+      `  计划：${status.plans.total} 份（步骤 待派工 ${status.plans.pendingSteps} / 运行中 ${status.plans.runningSteps} / 已完成 ${status.plans.completedSteps} / 失败 ${status.plans.failedSteps}）`
+    );
     lines.push(`  派工能力：${status.executorAvailable ? "可用" : "不可用"}`);
     lines.push(`  注入通道：${status.injectorAvailable ? "可用" : "不可用"}`);
     lines.push(`  事件源：${status.sources.length === 0 ? "（无）" : status.sources.map((s) => s.id).join("、")}`);
@@ -303,6 +314,58 @@ async function runTicket(args: SuperCommandArgs): Promise<SuperCommandResult> {
       return { exitCode: 0, stdout: `${JSON.stringify(detail, null, 2)}\n`, stderr: "" };
     }
     return { exitCode: 0, stdout: formatTicketDetail(detail), stderr: "" };
+  } finally {
+    await runtime.stop();
+  }
+}
+
+/**
+ * 查看工单的执行计划（动态分解 / 工作流 / 组队）
+ *
+ * 这是「司南怎么想这件事」的唯一出口：目标、策略、步骤 DAG、团队分工、逐步进度。
+ * 没有计划的工单（旧版单角色执行）如实说明，不伪造一份计划。
+ *
+ * @param args 命令参数
+ * @returns 执行结果
+ */
+async function runPlan(args: SuperCommandArgs): Promise<SuperCommandResult> {
+  const ticketId = args.ticketId ?? "";
+  if (ticketId.length === 0) {
+    return { exitCode: 2, stdout: "", stderr: "plan 子命令需要工单 ID（deepcode super plan <id>）。" };
+  }
+  const runtime = await openRuntime(args.projectRoot);
+  try {
+    const detail = runtime.engine.people.getTicket(ticketId);
+    if (args.format === "json") {
+      return {
+        exitCode: 0,
+        stdout: `${JSON.stringify({ ticketId, plan: detail.plan, steps: detail.planSteps }, null, 2)}\n`,
+        stderr: "",
+      };
+    }
+    const lines: string[] = [];
+    lines.push(`${superAgentSignature()} · 工单计划`);
+    lines.push(`工单：${ticketId}（${detail.ticket.execution.name}）`);
+    lines.push("");
+    if (detail.plan === null) {
+      lines.push("该工单没有执行计划：按单角色执行（旧版语义，未做动态分解）。");
+      lines.push("原因通常是：接单时未配置计划器，或计划层尚未上线时创建的历史工单。");
+      return { exitCode: 0, stdout: `${lines.join("\n")}\n`, stderr: "" };
+    }
+    const states = new Map(detail.planSteps.map((step) => [step.stepId, step.state] as const));
+    lines.push(renderPlan(detail.plan, states));
+    lines.push("");
+    lines.push("进度：");
+    const done = detail.planSteps.filter((step) => step.state === "ready").length;
+    lines.push(`  已完成 ${done}/${detail.planSteps.length} 步`);
+    for (const step of detail.planSteps) {
+      lines.push(
+        `  - ${step.stepId} [${step.state}] 第 ${step.wave + 1} 波 / ${step.role}` +
+          `${step.assignmentId === null ? "" : ` / 派工 ${step.assignmentId}`}` +
+          `${step.summary === null ? "" : ` / ${truncate(step.summary, 60)}`}`
+      );
+    }
+    return { exitCode: 0, stdout: `${lines.join("\n")}\n`, stderr: "" };
   } finally {
     await runtime.stop();
   }
@@ -566,6 +629,18 @@ function formatTicketDetail(detail: TicketDetail): string {
   lines.push(`  授权范围：${ticket.mandate.scope || "（未指定）"}`);
   lines.push(`  匹配规则：${ticket.mandate.matchedRules.join("、") || "（无）"}`);
   lines.push(`  发起者：${ticket.mandate.actor}（来源 ${ticket.mandate.sourceId || "未知"}）`);
+  if (detail.plan === null) {
+    lines.push("  执行计划：（无——单角色执行）");
+  } else {
+    const done = detail.planSteps.filter((step) => step.state === "ready").length;
+    lines.push(
+      `  执行计划：${detail.plan.steps.length} 步 / 团队 ${detail.plan.team.length} 角色（来源 ${detail.plan.source}，已完成 ${done} 步）`
+    );
+    lines.push(`    目标：${detail.plan.objective}`);
+    for (const step of detail.planSteps) {
+      lines.push(`    - ${step.stepId} [${step.state}] 第 ${step.wave + 1} 波 · ${step.role}`);
+    }
+  }
   lines.push(`  派工（${detail.assignments.length}）：`);
   for (const assignment of detail.assignments) {
     lines.push(`    - ${assignment.id} [${assignment.state}] 会话 ${assignment.workerSessionId ?? "未启动"}`);
@@ -612,14 +687,16 @@ export function ensureDatabaseDir(projectRoot: string): string {
  */
 export function formatSuperHelp(): string {
   return [
-    "deepcode super —— Super Agent（事件 → 决策 → 工单 → 执行 → 报告）",
+    `deepcode super —— ${superAgentSignature()}`,
+    "事件 → 决策 → 动态分解 → 组队 → 分波次执行 → 报告",
     "",
     "用法：",
-    "  deepcode super start [--once] [--no-watch]   启动 Super Agent",
-    "  deepcode super status [--format json]       查看运行时状态",
+    "  deepcode super start [--once] [--no-watch]   启动（常驻模式）",
+    "  deepcode super status [--format json]       查看运行时状态（含计划与步骤进度）",
     "  deepcode super candidates                   查看候选与最近决策",
     "  deepcode super tickets [--state open|ended] 查看工单列表",
     "  deepcode super ticket <id>                  查看工单详情",
+    "  deepcode super plan <id>                    查看工单的执行计划与团队分工",
     "  deepcode super inject <文本> [--addressed] [--assess]  投递一个事件",
     "  deepcode super policy [--mode off|observe|auto]  查看/切换策略",
     "  deepcode super memory [--source <id>] [--limit N]  列出历史研判经验",
@@ -628,7 +705,8 @@ export function formatSuperHelp(): string {
     "说明：",
     '  - 默认接单模式为 observe：推断型候选只记影子（"本应接单"），不真的建工单。',
     "  - 显式请求（inject --addressed）在任何模式下都真的接单。",
-    "  - Worker 为「一次真实 LLM 调用 + 结构化报告」，未配置凭据时如实降级为只读。",
+    "  - 接单后由「司南」动态分解出计划（目标 / 步骤 / 角色），并按波次派工；",
+    "    无模型凭据时降级为单步计划，行为与旧版一致（super plan 会写明降级原因）。",
     "  - inject 默认只排队不研判（不调模型）；加 --assess 才会立即研判。",
     "  - memory 展示的历史经验由既有决策记录派生（只读），不是独立存储。",
   ].join("\n");

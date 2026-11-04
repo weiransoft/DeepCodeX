@@ -4,7 +4,7 @@
  * 覆盖范围（对应 `proposal-p3-context-v2.md` §6）：
  * - T14′ 历史经验可被召回（派生自 `decision` ⋈ `trigger`，**零新表**）
  * - T16′ 硬门槛防排序反转（不相关但更新的历史**不出现**）
- * - T19 零迁移（`SCHEMA_VERSION === 1`；既有库无需迁移即可用新功能）
+ * - T19 迁移链（v1 → v2 只追加计划表；既有数据保留；迁移幂等）
  * - I10 召回只读（调用前后领域状态不变）
  *
  * 测试约定：真实 SQLite（临时目录）+ 真实仓储；无 mock 框架。
@@ -363,12 +363,12 @@ test("I10 召回只读：调用前后领域状态不变", async () => {
   }
 });
 
-test("T19 零迁移：SCHEMA_VERSION 仍为 1，且既有库无需迁移即可用新功能", async () => {
-  assert.equal(SCHEMA_VERSION, 1);
+test("T19 迁移链：v1 库升级到 v2 只追加计划表，既有数据保留", async () => {
+  assert.equal(SCHEMA_VERSION, 2);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "super-agent-migrate-"));
   try {
     const dbPath = path.join(dir, "agent.db");
-    // 第一段：按 v1 建库并写入数据
+    // 第一段：写入 v1 时期的数据（决策记录）
     const first = await openStore({ databasePath: dbPath });
     const firstRepos = new SuperAgentRepositories(first);
     first.write((tx) => {
@@ -395,18 +395,42 @@ test("T19 零迁移：SCHEMA_VERSION 仍为 1，且既有库无需迁移即可�
         at: "2026-11-01T00:00:02.000Z",
       });
     });
+    // 回退成 v1 形态：删掉 v2 新增的两张表，版本置 1
+    first.write((tx) => {
+      tx.exec("DROP TABLE IF EXISTS plan_step;");
+      tx.exec("DROP TABLE IF EXISTS ticket_plan;");
+      tx.exec("PRAGMA user_version = 1;");
+    });
     first.close();
 
-    // 第二段：重开既有库——不跑任何迁移，直接用新功能
+    // 第二段：重开 → 自动应用 v2 迁移，既有数据仍在，计划表可用
     const second = await openStore({ databasePath: dbPath });
     const secondRepos = new SuperAgentRepositories(second);
-    const applied = runMigrations(() => {
-      throw new Error("既有库不应触发任何迁移");
-    }, 1);
-    assert.deepEqual(applied, []);
     const entries = secondRepos.listHistoricalDecisions("src-a", 10);
     assert.equal(entries.length, 1);
     assert.equal(entries[0]?.id, "dec_1");
+
+    second.write((tx) => {
+      secondRepos.insertPlan(tx, "tkt_x", {
+        version: 1,
+        objective: "验证迁移后的计划表可用",
+        strategy: "",
+        steps: [{ id: "s1", title: "写一行", role: "solo-coder", dependsOn: [], deliverable: "一行代码" }],
+        team: [],
+        source: "fallback",
+        warnings: [],
+        createdAt: "2026-11-11T00:00:00.000Z",
+      });
+    });
+    assert.equal(secondRepos.findPlan("tkt_x")?.steps.length, 1);
+
+    // 迁移幂等：已是最新版本时不再有可应用的迁移
+    assert.deepEqual(
+      runMigrations(() => {
+        throw new Error("已是最新版本，不应再执行迁移");
+      }, SCHEMA_VERSION),
+      []
+    );
     second.close();
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

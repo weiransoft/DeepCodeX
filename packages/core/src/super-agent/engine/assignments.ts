@@ -22,7 +22,9 @@
  */
 
 import { makeId } from "../domain/ids.js";
-import type { Assignment, Attention, WorkerReport } from "../domain/types.js";
+import type { Assignment, Attention, Ticket, WorkerReport } from "../domain/types.js";
+import type { WorkPlan } from "../planner/types.js";
+import { findBlockedSteps, findRunnableSteps, isPlanComplete } from "../planner/waves.js";
 import { loadPolicy } from "../policy/policy.js";
 import type { StoreTx } from "../store/store.js";
 import type { EngineContext } from "./engine.js";
@@ -86,6 +88,8 @@ export function applyReport(ctx: EngineContext, assignmentId: string, report: Wo
     }
 
     const isFinal = report.kind === "ready" || report.kind === "failed" || report.kind === "dropped";
+    const plan = ctx.repos.findPlan(ticket.id);
+    const step = ctx.repos.findPlanStepByAssignment(assignmentId);
 
     // 1) 更新 Assignment
     ctx.repos.updateAssignment(tx, assignmentId, {
@@ -97,7 +101,16 @@ export function applyReport(ctx: EngineContext, assignmentId: string, report: Wo
     // 2) 更新工单最新报告
     ctx.repos.updateTicketReport(tx, ticket.id, report);
 
-    // 3) 结构化 Attention（唯一合法的「需要人」通道）
+    // 3) 更新计划步骤进度（计划是增强项：没有计划的工单跳过本步）
+    if (plan !== undefined && step !== undefined) {
+      ctx.repos.updatePlanStep(tx, ticket.id, step.stepId, {
+        state: isFinal ? (report.kind === "failed" ? "failed" : "ready") : "running",
+        endedAt: isFinal ? ctx.now() : null,
+        summary: report.summary,
+      });
+    }
+
+    // 4) 结构化 Attention（唯一合法的「需要人」通道）
     if (report.attention !== undefined) {
       const attention = createAttention(ctx, tx, ticket.id, report.attention);
       ctx.repos.insertAttention(tx, attention);
@@ -117,22 +130,140 @@ export function applyReport(ctx: EngineContext, assignmentId: string, report: Wo
       }
     }
 
-    // 4) 最终报告结束工单
+    // 5) 最终报告：推进计划波次，或结束工单
     if (isFinal && ticket.state === "open") {
-      ctx.repos.endTicket(tx, ticket.id, "worker", finalReason(report), ctx.now());
-      const messageId = makeId("message");
-      ctx.repos.insertTicketMessage(tx, {
-        id: messageId,
-        ticketId: ticket.id,
-        direction: "out",
-        body: `工单已结束：${finalReason(report)}`,
-        state: "pending",
-        attempts: 0,
-        createdAt: ctx.now(),
-      });
-      ctx.enqueueEffect(tx, "reply", `reply:${messageId}`, { messageId, ticketId: ticket.id });
+      if (plan !== undefined && step !== undefined) {
+        advancePlan(ctx, tx, ticket, plan, step.stepId, report);
+      } else {
+        endWithMessage(ctx, tx, ticket, finalReason(report));
+      }
     }
   });
+}
+
+/**
+ * 推进计划：派发下一波步骤，或结束工单
+ *
+ * ## 判定顺序（先收尾、后派工）
+ *
+ * 1. 本步失败 → **立即结束**工单（失败不跳过、不重试未知步骤）；
+ * 2. 全部步骤就绪 → 结束工单，理由写明完成步数；
+ * 3. 仍有可派工的步骤 → 同波并行派工（一步一个 Assignment），工单保持开放；
+ * 4. 无步骤可派但计划未完成 → **如实结束**并说明「依赖无法满足」，
+ *    不让工单挂在半路无人推进。
+ *
+ * @param ctx 引擎上下文
+ * @param tx 事务句柄
+ * @param ticket 工单
+ * @param plan 计划
+ * @param completedStepId 刚完成的步骤 ID
+ * @param report 该步骤的报告
+ */
+function advancePlan(
+  ctx: EngineContext,
+  tx: StoreTx,
+  ticket: Ticket,
+  plan: WorkPlan,
+  completedStepId: string,
+  report: WorkerReport
+): void {
+  const completed = plan.steps.find((step) => step.id === completedStepId);
+  const title = completed?.title ?? completedStepId;
+
+  if (report.kind === "failed") {
+    endWithMessage(ctx, tx, ticket, `步骤 ${completedStepId}「${title}」失败：${report.summary}`);
+    return;
+  }
+
+  const records = ctx.repos.listPlanSteps(ticket.id);
+  const states = new Map(records.map((record) => [record.stepId, record.state] as const));
+  const waveOf = new Map(records.map((record) => [record.stepId, record.wave] as const));
+  const doneCount = plan.steps.filter((step) => states.get(step.id) === "ready").length;
+
+  if (isPlanComplete(plan.steps, states)) {
+    endWithMessage(ctx, tx, ticket, `已完成（${plan.steps.length} 步）：${report.summary}`);
+    return;
+  }
+
+  // 🔴 同波并行的关键判定：还有步骤「在飞」（运行中，或已派工尚未启动）时，
+  // 本步完成**不代表**可以收尾或重复派工——必须等同波其他步骤回报。
+  // 缺这一步会导致：先完成的步骤把仍在跑的波次判成「依赖无法满足」而提前结束工单。
+  const inFlight = records.filter(
+    (record) => record.state === "running" || (record.state === "pending" && record.assignmentId !== null)
+  );
+  if (inFlight.length > 0) return;
+
+  const assignmentByStep = new Map(records.map((record) => [record.stepId, record.assignmentId] as const));
+  const runnable = findRunnableSteps(plan.steps, states).filter((step) => assignmentByStep.get(step.id) === null);
+
+  if (runnable.length === 0) {
+    const blocked = findBlockedSteps(plan.steps, states);
+    endWithMessage(
+      ctx,
+      tx,
+      ticket,
+      blocked.length === 0
+        ? `计划无法继续：没有可派工的步骤（已完成 ${doneCount}/${plan.steps.length} 步）。`
+        : `计划无法继续：步骤 ${blocked.map((entry) => entry.stepId).join("、")} 的前置无法满足（已完成 ${doneCount}/${plan.steps.length} 步）。`
+    );
+    return;
+  }
+
+  const waveIndex = Math.min(...runnable.map((step) => waveOf.get(step.id) ?? 0));
+  for (const step of runnable) {
+    const assignment = createAssignment(ctx, ticket.id);
+    ctx.repos.insertAssignment(tx, assignment);
+    ctx.repos.updatePlanStep(tx, ticket.id, step.id, {
+      state: "pending",
+      assignmentId: assignment.id,
+    });
+    ctx.enqueueEffect(tx, "launch", `launch:${assignment.id}`, {
+      ticketId: ticket.id,
+      assignmentId: assignment.id,
+    });
+  }
+
+  // 新一波启动后重投积压输入：Worker 未就绪时投递会退避重试，不丢
+  if (ctx.repos.listPendingInputs(ticket.id).length > 0) {
+    ctx.enqueueEffect(tx, "delivery", `delivery:${ticket.id}`, { ticketId: ticket.id });
+  }
+
+  const messageId = makeId("message");
+  ctx.repos.insertTicketMessage(tx, {
+    id: messageId,
+    ticketId: ticket.id,
+    direction: "out",
+    body: `「${title}」已完成（${doneCount}/${plan.steps.length}）。进入第 ${waveIndex + 1} 波：${runnable
+      .map((step) => `${step.id} ${step.title}（${step.role}）`)
+      .join("、")}`,
+    state: "pending",
+    attempts: 0,
+    createdAt: ctx.now(),
+  });
+  ctx.enqueueEffect(tx, "reply", `reply:${messageId}`, { messageId, ticketId: ticket.id });
+}
+
+/**
+ * 结束工单并发出通知（结束与通知必须在同一事务内，避免「结束了但没人知道」）
+ *
+ * @param ctx 引擎上下文
+ * @param tx 事务句柄
+ * @param ticket 工单
+ * @param reason 结束原因
+ */
+function endWithMessage(ctx: EngineContext, tx: StoreTx, ticket: Ticket, reason: string): void {
+  ctx.repos.endTicket(tx, ticket.id, "worker", reason, ctx.now());
+  const messageId = makeId("message");
+  ctx.repos.insertTicketMessage(tx, {
+    id: messageId,
+    ticketId: ticket.id,
+    direction: "out",
+    body: `工单已结束：${reason}`,
+    state: "pending",
+    attempts: 0,
+    createdAt: ctx.now(),
+  });
+  ctx.enqueueEffect(tx, "reply", `reply:${messageId}`, { messageId, ticketId: ticket.id });
 }
 
 /**

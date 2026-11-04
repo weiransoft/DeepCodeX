@@ -22,6 +22,45 @@
  * @module super-agent/index
  */
 
+// --- 身份（常驻主理智能体「司南」） ---
+export { SUPER_AGENT_IDENTITY, buildIdentityPreamble, superAgentName, superAgentSignature } from "./identity.js";
+
+// --- 计划层（动态分解 / 工作流 / 组队） ---
+export {
+  LlmWorkflowPlanner,
+  NullPlanner,
+  StaticPlanner,
+  DEFAULT_PLANNER_TIMEOUT_MS,
+  PLANNER_SYSTEM_PROMPT,
+  defaultRoleNames,
+  renderPlannerRequest,
+  renderPlannerSystemPrompt,
+  type LlmWorkflowPlannerOptions,
+  type WorkflowPlanner,
+} from "./planner/planner.js";
+export {
+  buildFallbackPlan,
+  extractPlanJsonObject,
+  parsePlan,
+  renderPlan,
+  FALLBACK_ROLE,
+  MAX_PLAN_STEPS,
+  type ParsePlanOptions,
+} from "./planner/parse.js";
+export { findBlockedSteps, findRunnableSteps, isPlanComplete, planWaves, waveIndexOf } from "./planner/waves.js";
+export type {
+  BlockedStep,
+  PlanParseResult,
+  PlanRequest,
+  PlanSource,
+  PlanStep,
+  PlanStepState,
+  PlanStepStateRecord,
+  PlanWave,
+  TeamMember,
+  WorkPlan,
+} from "./planner/types.js";
+
 // --- 运行时（组合根） ---
 export {
   SuperAgentRuntime,

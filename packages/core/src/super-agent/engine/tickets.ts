@@ -22,6 +22,8 @@ import { notFound } from "../domain/errors.js";
 import { makeId } from "../domain/ids.js";
 import { findSourcePart, loadPolicy, revalidateMandate } from "../policy/policy.js";
 import type { Assignment, Mandate, Policy, Strength, Ticket, TicketExecution } from "../domain/types.js";
+import type { WorkPlan } from "../planner/types.js";
+import { planWaves } from "../planner/waves.js";
 import type { StoreTx } from "../store/store.js";
 import type { EngineContext } from "./engine.js";
 
@@ -39,6 +41,13 @@ export interface AcceptTicketInput {
   readonly role: string;
   /** 订阅的 Thread（自有） */
   readonly threadId: string;
+  /**
+   * 执行计划（可选）
+   *
+   * 提供时：按**首波**步骤派工（同波多步 = 多人并行），并把全部步骤进度落库；
+   * 不提供时：保持既有语义「一单一角色」——计划是增强项，不是接单的前提。
+   */
+  readonly plan?: WorkPlan;
 }
 
 /**
@@ -55,13 +64,27 @@ export function acceptTicket(ctx: EngineContext, tx: StoreTx, input: AcceptTicke
   const createdAt = ctx.now();
   const ticketId = makeId("ticket");
 
-  const assignment = createAssignmentRecord(ctx, ticketId);
+  const plan = input.plan !== undefined && input.plan.steps.length > 0 ? input.plan : undefined;
+  const waves = plan === undefined ? [] : planWaves(plan.steps);
+  const firstWave = waves[0]?.stepIds ?? [];
+  const dispatchable =
+    plan === undefined
+      ? [{ stepId: null as string | null, role: input.role }]
+      : plan.steps.filter((step) => firstWave.includes(step.id)).map((step) => ({ stepId: step.id, role: step.role }));
+
+  // 首波每个步骤一个 Assignment；无计划时保持「一个 Assignment」的旧语义
+  const dispatches = dispatchable.map((entry) => ({
+    stepId: entry.stepId,
+    role: entry.role,
+    assignment: createAssignmentRecord(ctx, ticketId),
+  }));
 
   const execution: TicketExecution = {
     name: input.name,
     directory: input.directory,
-    assignmentId: assignment.id,
-    role: input.role,
+    assignmentId: dispatches[dispatches.length - 1]?.assignment.id ?? null,
+    // 展示用角色：取计划首步（多角色时由 `super plan` 展开具体分工）
+    role: plan?.steps[0]?.role ?? input.role,
   };
 
   const ticket: Ticket = {
@@ -78,23 +101,55 @@ export function acceptTicket(ctx: EngineContext, tx: StoreTx, input: AcceptTicke
   };
 
   ctx.repos.insertTicket(tx, ticket);
-  ctx.repos.insertAssignment(tx, assignment);
+  for (const dispatch of dispatches) {
+    ctx.repos.insertAssignment(tx, dispatch.assignment);
+  }
   // 自有订阅：工单自己开启的 Thread——关闭判定与恢复都看它
   ctx.repos.insertSubscription(tx, { ticketId, threadId: input.threadId, own: true });
 
-  // 派工副作用：事务提交后才真正启动 Worker（I2）
-  ctx.enqueueEffect(tx, "launch", `launch:${assignment.id}`, {
-    ticketId,
-    assignmentId: assignment.id,
-  });
+  // 计划：快照 + 步骤进度（全部步骤先落 pending，首波绑定 Assignment）
+  if (plan !== undefined) {
+    ctx.repos.insertPlan(tx, ticketId, plan);
+    const waveOf = new Map<string, number>();
+    for (const wave of waves) for (const stepId of wave.stepIds) waveOf.set(stepId, wave.index);
+    const assignmentByStep = new Map<string, string>();
+    for (const dispatch of dispatches) {
+      if (dispatch.stepId !== null) assignmentByStep.set(dispatch.stepId, dispatch.assignment.id);
+    }
+    for (const step of plan.steps) {
+      ctx.repos.insertPlanStep(tx, {
+        ticketId,
+        stepId: step.id,
+        wave: waveOf.get(step.id) ?? 0,
+        state: "pending",
+        role: step.role,
+        assignmentId: assignmentByStep.get(step.id) ?? null,
+        startedAt: null,
+        endedAt: null,
+        summary: null,
+      });
+    }
+  }
 
-  // 确认消息：告诉人「已接单」
+  // 派工副作用：事务提交后才真正启动 Worker（I2）
+  for (const dispatch of dispatches) {
+    ctx.enqueueEffect(tx, "launch", `launch:${dispatch.assignment.id}`, {
+      ticketId,
+      assignmentId: dispatch.assignment.id,
+    });
+  }
+
+  // 确认消息：告诉人「已接单」（带计划摘要，让「怎么做」第一眼可见）
   const messageId = makeId("message");
+  const planSummary =
+    plan === undefined
+      ? ""
+      : `（计划 ${plan.steps.length} 步 / 团队 ${plan.team.length} 角色 / 首波 ${dispatches.length} 人）`;
   ctx.repos.insertTicketMessage(tx, {
     id: messageId,
     ticketId,
     direction: "out",
-    body: `已接单：${input.name}`,
+    body: `已接单：${input.name}${planSummary}`,
     state: "pending",
     attempts: 0,
     createdAt,

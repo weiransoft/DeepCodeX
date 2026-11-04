@@ -43,6 +43,7 @@ import type {
   WorkerReport,
 } from "../domain/types.js";
 import { loadPolicy, validatePolicy } from "../policy/policy.js";
+import type { PlanStepStateRecord, WorkPlan } from "../planner/types.js";
 import type { SuperAgentRepositories } from "../store/repositories.js";
 import type { Store, StoreTx } from "../store/store.js";
 import { applyReport, createAssignment } from "./assignments.js";
@@ -165,6 +166,10 @@ export interface TicketDetail {
   readonly messages: readonly TicketMessage[];
   readonly attention: readonly Attention[];
   readonly decisions: readonly Decision[];
+  /** 执行计划（null = 该工单没有动态分解，按单角色执行） */
+  readonly plan: WorkPlan | null;
+  /** 步骤进度（无计划时为空数组） */
+  readonly planSteps: readonly PlanStepStateRecord[];
 }
 
 /** 决策输入（Router 提交） */
@@ -187,6 +192,13 @@ export interface DecisionInput {
   readonly sourceId?: string;
   /** 触发本次决策的 Trigger ID */
   readonly triggerIds?: readonly string[];
+  /**
+   * 执行计划（accept 时生效）
+   *
+   * 由 Router 在决策事务**之外**生成（LLM 调用不能进事务），随决策一起落库：
+   * 这样「接单」与「计划」原子成立，不会出现「有工单没计划」或反之。
+   */
+  readonly plan?: WorkPlan;
 }
 
 /** 决策结果 */
@@ -342,6 +354,8 @@ export class SuperAgentEngine {
       messages: this.ctx.repos.listTicketMessages(id),
       attention: this.ctx.repos.listAttention(id),
       decisions: this.ctx.repos.listDecisions(this.ctx.repos.listSubscriptionsByTicket(id)[0]?.threadId ?? ""),
+      plan: this.ctx.repos.findPlan(id) ?? null,
+      planSteps: this.ctx.repos.listPlanSteps(id),
     };
   }
 

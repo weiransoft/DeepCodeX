@@ -208,6 +208,9 @@ function makeReposStub(options: {
     listAssignments: () => [],
     listTickets: () => [],
     listHistoricalDecisions: () => [],
+    // 计划层（2026-11-04）：无计划的工单——执行语义保持单角色
+    findPlan: () => undefined,
+    listPlanSteps: () => [],
     now: () => "2026-11-01T00:00:00.000Z",
   } as never;
 }
@@ -233,7 +236,7 @@ test("SuperAgentWorkerExecutor：prompt 组装含工单信息、授权范围与�
   assert.equal(sessionId, "session-x");
 
   const prompt = launcher.prompts[0] ?? "";
-  assert.match(prompt, /Super Agent 工单/);
+  assert.match(prompt, /司南 · 工单/);
   assert.match(prompt, /tkt_1/);
   assert.match(prompt, /修复登录/);
   assert.match(prompt, /只改 src\/auth\.ts/);
@@ -256,6 +259,8 @@ test("SuperAgentWorkerExecutor：未知角色不抛错（退化为无角色约�
     repos: {
       findTicket: () => undefined,
       listPendingInputs: () => [],
+      findPlan: () => undefined,
+      listPlanSteps: () => [],
     } as never,
     launcher,
   });

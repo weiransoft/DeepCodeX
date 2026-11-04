@@ -151,6 +151,7 @@ async function main(): Promise<void> {
         | "candidates"
         | "tickets"
         | "ticket"
+        | "plan"
         | "inject"
         | "policy"
         | "memory"

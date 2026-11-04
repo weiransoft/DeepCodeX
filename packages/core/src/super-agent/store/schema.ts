@@ -26,7 +26,7 @@
  */
 
 /** 当前 schema 版本（只增） */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /**
  * 迁移脚本表
@@ -178,6 +178,38 @@ CREATE TABLE IF NOT EXISTS kv (
   k TEXT PRIMARY KEY,
   v TEXT NOT NULL
 );
+`,
+  ],
+  // v2（2026-11-04）：动态计划层
+  //
+  // 只新增两张表，**不改动任何既有表**——v1 的库可以直接升级，
+  // 升级后旧工单没有计划行，执行语义自动回到「一单一角色」。
+  [
+    2,
+    `
+CREATE TABLE IF NOT EXISTS ticket_plan (
+  ticket_id TEXT PRIMARY KEY,
+  objective TEXT NOT NULL,
+  strategy TEXT NOT NULL,
+  source TEXT NOT NULL,
+  plan TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS plan_step (
+  ticket_id TEXT NOT NULL,
+  step_id TEXT NOT NULL,
+  wave INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL,
+  role TEXT NOT NULL,
+  assignment_id TEXT,
+  started_at TEXT,
+  ended_at TEXT,
+  summary TEXT,
+  PRIMARY KEY (ticket_id, step_id)
+);
+CREATE INDEX IF NOT EXISTS plan_step_ticket ON plan_step(ticket_id, wave);
+CREATE INDEX IF NOT EXISTS plan_step_assignment ON plan_step(assignment_id);
 `,
   ],
 ]);

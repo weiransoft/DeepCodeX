@@ -226,6 +226,7 @@ function decideOne(ctx: EngineContext, item: DecisionInput): DecisionResult {
       directory: "",
       role: "solo-coder",
       threadId: item.threadId,
+      plan: item.plan,
     });
     recordDecisionInTx(ctx, tx, item, "accept", strength, false);
     return created;

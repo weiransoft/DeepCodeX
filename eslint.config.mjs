@@ -23,6 +23,8 @@ const SA_STORE_DIRS = ["packages/core/src/super-agent/store/**/*.ts"];
 const SA_ADAPTER_DIRS = [
   "packages/core/src/super-agent/router/**/*.ts",
   "packages/core/src/super-agent/worker/**/*.ts",
+  // 计划层（2026-11-04）：需要调用既有 LLM 单次通道与角色注册表
+  "packages/core/src/super-agent/planner/**/*.ts",
 ];
 
 /** 内核禁止直接触碰的 I/O 与并发原语 */

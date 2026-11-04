@@ -396,7 +396,10 @@ async function configureYargs(argv?: string[]) {
       y
         .positional("subcommand", {
           type: "string",
-          choices: ["list", "add", "remove", "show", "path"] as const,
+          // 2026-11-04：加入 "help"——关闭 yargs 内建 help 命令后，`rules help`
+          // 不再被 yargs 提前拦截，必须作为合法值通过 choices 校验，
+          // 再由 cli.tsx 走 formatRulesHelp()。
+          choices: ["list", "add", "remove", "show", "path", "help"] as const,
           describe: "Rules subcommand",
         })
         .option("content", {
@@ -444,7 +447,8 @@ async function configureYargs(argv?: string[]) {
       y
         .positional("subcommand", {
           type: "string",
-          choices: ["evidence-bundle"] as const,
+          // 2026-11-04：加入 "help"（同 rules：不再依赖 yargs 内建 help 拦截）
+          choices: ["evidence-bundle", "help"] as const,
           describe: "EAG subcommand",
         })
         .option("project-root", {
@@ -583,7 +587,7 @@ async function configureYargs(argv?: string[]) {
     // 用法：deepcode super <subcommand> [target] [options]
     .command(
       "super <subcommand> [target]",
-      "Super Agent: start / status / candidates / tickets / ticket / inject / policy / memory",
+      "Super Agent: start / status / candidates / tickets / ticket / plan / inject / policy / memory",
       (y: Argv) =>
         y
           .positional("subcommand", {
@@ -594,6 +598,7 @@ async function configureYargs(argv?: string[]) {
               "candidates",
               "tickets",
               "ticket",
+              "plan",
               "inject",
               "policy",
               "memory",
@@ -675,6 +680,11 @@ async function configureYargs(argv?: string[]) {
   yargsInstance
     .version(await getCliVersion())
     .alias("v", "version")
+    // 2026-11-04：关闭 yargs 内建的 help **命令**（不是 --help 选项）。
+    // 原因：`deepcode super help` / `team help` 等把 help 作为第二位置参数时，
+    // yargs 会先把英文 Options 打一遍，再执行各子命令自己的中文帮助 —— 同一件事印两遍。
+    // 关闭后 `--help` 仍由下面的布尔选项 + parseArguments 的显式分支处理，行为不变。
+    .help(false)
     .option("help", {
       alias: "h",
       type: "boolean",
@@ -701,15 +711,6 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
 
   const parsed = y.parseSync() as Record<string, unknown>;
 
-  // FIX-15（多角色审查 2026-07-29）：由于禁用了 yargs 内置 .help()，
-  // --help / -h 现在只是普通布尔选项；检测到后手动输出 yargs 帮助并退出。
-  // 注意：team help / rules help 等子命令的 help 是 positional 参数，不会进入此分支，
-  // 因此不会与 cli.tsx 中的自定义中文帮助重复输出。
-  if (parsed.help === true) {
-    y.showHelp();
-    process.exit(0);
-  }
-
   // v1.6 P0-2 修正（TC-TEAM-12）：yargs 18 内置 help 机制会拦截 "help" 关键字，
   // 导致 `team help` / `rules help` 时 yargs 自动输出 help 信息并清空 parsed._。
   // 此处从原始 argv 中检测 "help" 作为第二个 positional，手动设置 team/rules = "help"。
@@ -730,6 +731,19 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
               : rawArgv.length >= 2 && rawArgv[0] === "super" && rawArgv[1] === "help"
                 ? "super"
                 : undefined;
+
+  // FIX-15（多角色审查 2026-07-29）：由于禁用了 yargs 内置 .help()，
+  // --help / -h 现在只是普通布尔选项；检测到后手动输出 yargs 帮助并退出。
+  //
+  // 2026-11-04 修正：yargs 18 在子命令的第二个位置参数为 "help" 时会把 `help`
+  // 布尔项置为 true（例如 `deepcode super help`），导致上面的 helpAsSecondPositional
+  // 兜底永远走不到——用户看到的是 yargs 的英文 Options，而不是各子命令的中文帮助。
+  // 因此这里排除「已知子命令 + help 作为第二位置参数」的情形，交给下文各自的
+  // 自定义帮助分支处理；真正的 `--help` / `-h` 行为不变。
+  if (parsed.help === true && helpAsSecondPositional === undefined) {
+    y.showHelp();
+    process.exit(0);
+  }
 
   const resumeRaw = parsed.resume as string | undefined;
   let resume: ParsedCliArgs["resume"];

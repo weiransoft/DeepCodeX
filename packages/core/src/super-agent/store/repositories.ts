@@ -35,6 +35,7 @@ import type {
   WorkerReport,
 } from "../domain/types.js";
 import { fromSqliteInt, toSqliteInt, type Store, type StoreTx } from "./store.js";
+import type { PlanStepState, PlanStepStateRecord, WorkPlan } from "../planner/types.js";
 
 // ============================================================================
 // 行映射
@@ -135,6 +136,54 @@ function mapAssignment(row: Row): Assignment {
     endedAt: strOrNull(row, "ended_at"),
     report: row["report"] ? parseJson<WorkerReport | null>(row["report"], null) : null,
   };
+}
+
+/**
+ * 映射步骤进度行
+ *
+ * @param row 数据库行
+ * @returns 步骤状态
+ */
+function mapPlanStep(row: Row): PlanStepStateRecord {
+  return {
+    ticketId: str(row, "ticket_id"),
+    stepId: str(row, "step_id"),
+    wave: num(row, "wave"),
+    state: str(row, "state") as PlanStepState,
+    role: str(row, "role"),
+    assignmentId: strOrNull(row, "assignment_id"),
+    startedAt: strOrNull(row, "started_at"),
+    endedAt: strOrNull(row, "ended_at"),
+    summary: strOrNull(row, "summary"),
+  };
+}
+
+/**
+ * 判断 JSON 是否是**结构可信**的计划
+ *
+ * 只做必要字段检查：`plan` 列是应用自写的数据，不是外部输入；
+ * 但数据库文件可能被手工改动或半写坏，因此读取时仍要兜底，
+ * 避免把损坏的计划当成有效计划去派工。
+ *
+ * @param value 解析后的值
+ * @returns 形如 WorkPlan 时返回 true
+ */
+function isWorkPlanShape(value: unknown): value is WorkPlan {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  if (record["version"] !== 1) return false;
+  if (typeof record["objective"] !== "string") return false;
+  if (!Array.isArray(record["steps"]) || record["steps"].length === 0) return false;
+  return record["steps"].every((step) => {
+    if (typeof step !== "object" || step === null) return false;
+    const entry = step as Record<string, unknown>;
+    return (
+      typeof entry["id"] === "string" &&
+      typeof entry["title"] === "string" &&
+      typeof entry["role"] === "string" &&
+      Array.isArray(entry["dependsOn"])
+    );
+  });
 }
 
 function mapDecision(row: Row): Decision {
@@ -1162,6 +1211,165 @@ export class SuperAgentRepositories {
    */
   resolveAttention(tx: StoreTx, id: string, resolution: string, resolvedAt: string): void {
     tx.prepare("UPDATE attention SET resolved_at = ?, resolution = ? WHERE id = ?").run(resolvedAt, resolution, id);
+  }
+
+  // ----------------------------------------------------------------- 计划
+
+  /**
+   * 读取某工单的执行计划
+   *
+   * 计划以 JSON 整体存储：它是**不可变快照**，不需要按字段查询；
+   * 进度记录在 `plan_step` 表（可变，按步骤单独更新）。
+   *
+   * @param ticketId 工单 ID
+   * @returns 计划；不存在或数据损坏时返回 undefined（损坏时**当作没有计划**，
+   *          执行语义回到一单一角色，而不是让整条工单无法推进）
+   */
+  findPlan(ticketId: string): WorkPlan | undefined {
+    const row = this.store.queryOne<Row>("SELECT plan FROM ticket_plan WHERE ticket_id = ?", [ticketId]);
+    if (row === undefined) return undefined;
+    try {
+      const parsed: unknown = JSON.parse(str(row, "plan"));
+      return isWorkPlanShape(parsed) ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * 写入执行计划
+   *
+   * @param tx 事务句柄
+   * @param ticketId 工单 ID
+   * @param plan 计划
+   */
+  insertPlan(tx: StoreTx, ticketId: string, plan: WorkPlan): void {
+    tx.prepare(
+      `INSERT INTO ticket_plan (ticket_id, objective, strategy, source, plan, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(ticket_id) DO UPDATE SET
+         objective = excluded.objective,
+         strategy = excluded.strategy,
+         source = excluded.source,
+         plan = excluded.plan,
+         created_at = excluded.created_at`
+    ).run(ticketId, plan.objective, plan.strategy, plan.source, JSON.stringify(plan), plan.createdAt);
+  }
+
+  /**
+   * 列出某工单的步骤进度
+   *
+   * @param ticketId 工单 ID
+   * @returns 步骤状态（按波次、步骤 ID 排序）
+   */
+  listPlanSteps(ticketId: string): PlanStepStateRecord[] {
+    return this.store
+      .query<Row>("SELECT * FROM plan_step WHERE ticket_id = ? ORDER BY wave ASC, step_id ASC", [ticketId])
+      .map(mapPlanStep);
+  }
+
+  /**
+   * 插入步骤进度行
+   *
+   * @param tx 事务句柄
+   * @param record 步骤状态
+   */
+  insertPlanStep(tx: StoreTx, record: PlanStepStateRecord): void {
+    tx.prepare(
+      `INSERT INTO plan_step
+         (ticket_id, step_id, wave, state, role, assignment_id, started_at, ended_at, summary)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(ticket_id, step_id) DO UPDATE SET
+         wave = excluded.wave,
+         state = excluded.state,
+         role = excluded.role,
+         assignment_id = excluded.assignment_id,
+         started_at = excluded.started_at,
+         ended_at = excluded.ended_at,
+         summary = excluded.summary`
+    ).run(
+      record.ticketId,
+      record.stepId,
+      record.wave,
+      record.state,
+      record.role,
+      record.assignmentId,
+      record.startedAt,
+      record.endedAt,
+      record.summary
+    );
+  }
+
+  /**
+   * 更新步骤进度
+   *
+   * @param tx 事务句柄
+   * @param ticketId 工单 ID
+   * @param stepId 步骤 ID
+   * @param patch 待更新字段
+   */
+  updatePlanStep(
+    tx: StoreTx,
+    ticketId: string,
+    stepId: string,
+    patch: {
+      readonly state?: PlanStepState;
+      readonly assignmentId?: string | null;
+      readonly startedAt?: string | null;
+      readonly endedAt?: string | null;
+      readonly summary?: string | null;
+    }
+  ): void {
+    const current = this.listPlanSteps(ticketId).find((record) => record.stepId === stepId);
+    if (current === undefined) return;
+    tx.prepare(
+      `UPDATE plan_step
+       SET state = ?, assignment_id = ?, started_at = ?, ended_at = ?, summary = ?
+       WHERE ticket_id = ? AND step_id = ?`
+    ).run(
+      patch.state ?? current.state,
+      patch.assignmentId === undefined ? current.assignmentId : patch.assignmentId,
+      patch.startedAt === undefined ? current.startedAt : patch.startedAt,
+      patch.endedAt === undefined ? current.endedAt : patch.endedAt,
+      patch.summary === undefined ? current.summary : patch.summary,
+      ticketId,
+      stepId
+    );
+  }
+
+  /**
+   * 按 Assignment 反查步骤
+   *
+   * Worker 只知道自己承担哪次 Assignment，不知道属于计划中的第几步；
+   * 派工与报告回灌都靠这一条反查把「执行」对回「计划」。
+   *
+   * @param assignmentId Assignment ID
+   * @returns 步骤状态；未找到返回 undefined
+   */
+  findPlanStepByAssignment(assignmentId: string): PlanStepStateRecord | undefined {
+    const row = this.store.queryOne<Row>("SELECT * FROM plan_step WHERE assignment_id = ?", [assignmentId]);
+    return row === undefined ? undefined : mapPlanStep(row);
+  }
+
+  /**
+   * 统计计划总数（`super status` 用）
+   *
+   * @returns 计划数
+   */
+  countPlans(): number {
+    const row = this.store.queryOne<Row>("SELECT COUNT(*) AS n FROM ticket_plan");
+    return row === undefined ? 0 : num(row, "n");
+  }
+
+  /**
+   * 按状态统计步骤数（`super status` 用）
+   *
+   * @param state 步骤状态
+   * @returns 步骤数
+   */
+  countPlanStepsByState(state: PlanStepState): number {
+    const row = this.store.queryOne<Row>("SELECT COUNT(*) AS n FROM plan_step WHERE state = ?", [state]);
+    return row === undefined ? 0 : num(row, "n");
   }
 
   // --------------------------------------------------------------------- KV
