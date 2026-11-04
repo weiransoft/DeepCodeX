@@ -463,6 +463,27 @@ export function BotAvatarIcon(p: IconProps) {
   );
 }
 
+/** 麦克风（语音输入：按住说话） */
+export function MicIcon(p: IconProps) {
+  return (
+    <IconBase {...p} label="语音输入">
+      {/* 话筒胶囊 + 支架 + 底座 */}
+      <rect x="6.2" y="2" width="3.6" height="7.2" rx="1.8" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M4 7.6v.6a4 4 0 0 0 8 0v-.6" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+      <path d="M8 12.4V14M6 14h4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </IconBase>
+  );
+}
+
+/** 停止播报（方框）：语音播报中显示 */
+export function SpeakerStopIcon(p: IconProps) {
+  return (
+    <IconBase {...p} label="停止播报">
+      <rect x="4.6" y="4.6" width="6.8" height="6.8" rx="1.6" fill="currentColor" />
+    </IconBase>
+  );
+}
+
 /** 远程连接（显示器 + 插头）：活动栏「远程 SSH」入口 */
 export function RemoteIcon(p: IconProps) {
   return (

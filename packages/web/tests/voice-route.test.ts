@@ -1,0 +1,175 @@
+/**
+ * 形象/声音配置与语音端点的路由集成测试（真实 HTTP）
+ *
+ * 单测验证处理器，这里验证**接线**与**跨层契约**：
+ *
+ * - 配置端点是合并补丁语义（只改头像不能把语音配置清空）
+ * - token 永不下发，只回 `hasToken`
+ * - 坏 endpoint 在写入口就被规范化掉（否则后端代理成了协议转发器）
+ * - sidecar 不在时语音端点回 503 且带可执行提示（不是 500）
+ * - 头像静态资源真的能被服务出来（构建产物 + 路由 + MIME 三处都得对）
+ */
+import { test, before, after } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { startWebServer, type RunningWebServer } from "../src/server";
+import { createResolvedSettings, extractAuthCookie, fetchJson, sha256Hex } from "./helpers";
+
+let server: RunningWebServer;
+let tmpRoot: string;
+let engineHomeRoot: string;
+let cookie: string;
+
+before(async () => {
+  tmpRoot = mkdtempSync(path.join(tmpdir(), "deepcode-web-voice-"));
+  engineHomeRoot = mkdtempSync(path.join(tmpdir(), "deepcode-web-voice-home-"));
+  const settings = createResolvedSettings({
+    allowRoots: [tmpRoot],
+    personalOnly: true,
+    engineHomeRoot,
+    auth: {
+      jwtSecret: "voice-route-test-secret",
+      sessionTtlSeconds: 3600,
+      localUsers: [{ username: "admin", passwordHash: sha256Hex("admin-pass-123"), displayName: "管理员" }],
+    },
+  });
+  server = await startWebServer(settings);
+  const login = await fetchJson(server.port, "POST", "/api/auth/login", {
+    username: "admin",
+    password: "admin-pass-123",
+  });
+  const authCookie = extractAuthCookie(login.headers);
+  assert.ok(authCookie, "测试前置：登录应下发 Cookie");
+  cookie = authCookie;
+});
+
+after(async () => {
+  await server.close();
+  rmSync(tmpRoot, { recursive: true, force: true });
+  rmSync(engineHomeRoot, { recursive: true, force: true });
+});
+
+test("F1 未登录读配置 → 401", async () => {
+  const { status } = await fetchJson(server.port, "GET", "/api/soul/config");
+  assert.equal(status, 401, "头像与音色是个人资产，不能裸奔");
+});
+
+test("F2 首次读配置返回默认值：默认兔狲 + 语音关闭 + 御姐预设", async () => {
+  const { status, body } = await fetchJson(server.port, "GET", "/api/soul/config", undefined, cookie);
+  assert.equal(status, 200);
+  assert.equal(body.avatar.kind, "default", "默认必须是兔狲头像");
+  assert.equal(body.voice.enabled, false, "模型没装时不该默认开语音");
+  assert.equal(body.voice.engine, "qwen3-voicedesign", "默认引擎必须是实测能跑通的那个");
+  assert.ok(typeof body.voice.voice === "string" && body.voice.voice.length > 0, "音色描述不能为空");
+  assert.ok(
+    Array.isArray(body.presets) && body.presets.some((p: { id: string }) => p.id === "yujie"),
+    "御姐预设必须下发"
+  );
+  assert.ok(typeof body.filePath === "string" && body.filePath.endsWith("config.json"), "配置文件位置必须可见");
+});
+
+test("F3 token 永不下发，只回 hasToken 布尔", async () => {
+  const { body } = await fetchJson(server.port, "GET", "/api/soul/config", undefined, cookie);
+  assert.equal(body.voice.token, undefined, "响应体里不得出现 token 字段");
+  assert.equal(typeof body.voice.hasToken, "boolean", "以布尔形式告知是否已生成");
+  assert.equal(body.voice.hasToken, true, "首次读取应自动生成 token 供 sidecar 比对");
+});
+
+test("F4 只改头像不影响语音配置（合并补丁语义）", async () => {
+  // 先把语音打开并改语速
+  const first = await fetchJson(
+    server.port,
+    "PUT",
+    "/api/soul/config",
+    { voice: { enabled: true, speed: 1.4, voice: "低沉女声" } },
+    cookie
+  );
+  assert.equal(first.status, 200);
+  assert.equal(first.body.voice.enabled, true);
+  assert.equal(first.body.voice.speed, 1.4);
+
+  // 再只改头像
+  const avatarDataUrl = "data:image/png;base64,iVBORw0KGgo=";
+  const second = await fetchJson(
+    server.port,
+    "PUT",
+    "/api/soul/config",
+    { avatar: { kind: "custom", dataUrl: avatarDataUrl } },
+    cookie
+  );
+  assert.equal(second.status, 200);
+  assert.equal(second.body.avatar.kind, "custom", "头像应更新");
+  assert.equal(second.body.voice.enabled, true, "改头像不能把语音开关清掉");
+  assert.equal(second.body.voice.speed, 1.4, "语速不能被冲回默认");
+  assert.equal(second.body.voice.voice, "低沉女声");
+});
+
+test("F5 非法 endpoint 与非法头像在写入口被规范化", async () => {
+  const { status, body } = await fetchJson(
+    server.port,
+    "PUT",
+    "/api/soul/config",
+    {
+      voice: { endpoint: "https://evil.example.com" },
+      avatar: { kind: "custom", dataUrl: "javascript:alert(1)" },
+    },
+    cookie
+  );
+  assert.equal(status, 200, "坏输入不该让保存失败（页面会因此改不了任何配置）");
+  assert.equal(body.voice.endpoint, "http://127.0.0.1:8791", "非 http 协议必须回落默认");
+  assert.equal(body.avatar.kind, "default", "非法头像回落兔狲");
+});
+
+test("F6 语音状态在 sidecar 不可达时仍返回 200 + 可执行提示", async () => {
+  const { status, body } = await fetchJson(server.port, "GET", "/api/voice/status", undefined, cookie);
+  assert.equal(status, 200, "状态查询本身是成功的，未就绪写在字段里");
+  assert.equal(body.reachable, false, "测试环境没有 sidecar");
+  assert.equal(body.asr.ready, false);
+  assert.equal(body.tts.ready, false);
+  assert.ok(typeof body.hint === "string" && body.hint.includes("setup.sh"), "提示里要给出能照着跑的命令");
+  assert.ok(typeof body.configPath === "string" && body.configPath.length > 0);
+});
+
+test("F7 TTS 空文本 → 400（不是 503，先把参数问题说清楚）", async () => {
+  const { status } = await fetchJson(server.port, "POST", "/api/voice/tts", { text: "   " }, cookie);
+  assert.equal(status, 400);
+});
+
+test("F8 TTS 超长文本 → 400（单次合成只接受一句/一段）", async () => {
+  const { status } = await fetchJson(server.port, "POST", "/api/voice/tts", { text: "啊".repeat(2001) }, cookie);
+  assert.equal(status, 400);
+});
+
+test("F9 sidecar 不可达时 TTS → 503 且说明是依赖缺失", async () => {
+  // 指向必然拒绝连接的端口，模拟「sidecar 没起」
+  await fetchJson(server.port, "PUT", "/api/soul/config", { voice: { endpoint: "http://127.0.0.1:1" } }, cookie);
+  const { status, body } = await fetchJson(server.port, "POST", "/api/voice/tts", { text: "你好" }, cookie);
+  assert.equal(status, 503, "依赖没装是 503，不是 500——两者用户的反应完全不同");
+  assert.ok(typeof body?.error === "string" && body.error.includes("语音服务不可用"));
+  assert.ok(body.error.includes("setup.sh"), "错误信息必须带可执行命令");
+});
+
+test("F10 ASR 空音频 → 400", async () => {
+  // 走原生 fetch 发原始字节（端点收的是二进制，不是 JSON）
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/voice/asr`, {
+    method: "POST",
+    headers: { "content-type": "audio/wav", cookie },
+    body: new Uint8Array(0),
+  });
+  assert.equal(response.status, 400);
+});
+
+test("F11 默认头像静态资源可访问且 MIME 正确", async () => {
+  const response = await fetch(`http://127.0.0.1:${server.port}/manul-avatar.png`);
+  assert.equal(response.status, 200, "构建产物里必须有 manul-avatar.png");
+  assert.equal(response.headers.get("content-type"), "image/png");
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  assert.ok(bytes.byteLength > 1000, "图片不能是空壳");
+  // PNG magic：89 50 4E 47
+  assert.equal(bytes[0], 0x89);
+  assert.equal(bytes[1], 0x50);
+  assert.equal(bytes[2], 0x4e);
+  assert.equal(bytes[3], 0x47);
+});

@@ -32,6 +32,9 @@
     "active": true,
     "targets": ["app", "dmg", "nsis"],
     "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"],
+    "macOS": {
+      "infoPlist": "Info.plist"
+    },
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"

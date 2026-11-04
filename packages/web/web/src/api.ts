@@ -794,3 +794,136 @@ export function rememberSoul(text: string, category?: string): Promise<RememberS
 export function forgetSoul(id: string): Promise<{ ok: boolean; snapshot: SoulSnapshot }> {
   return request<{ ok: boolean; snapshot: SoulSnapshot }>("DELETE", `/api/soul/memory/${encodeURIComponent(id)}`);
 }
+
+// ---------------------------------------------------------------------------
+// 形象与声音（GET/PUT /api/soul/config、语音三端点）
+// ---------------------------------------------------------------------------
+
+/** 头像配置（默认兔狲 / 自定义 dataUrl） */
+export interface SoulAvatarConfig {
+  kind: "default" | "custom";
+  dataUrl?: string;
+}
+
+/** 语音合成引擎（须与 core 的 VoiceEngine 保持一致） */
+export type VoiceEngine = "qwen3-voicedesign" | "qwen3-customvoice" | "kokoro";
+
+/** 语音配置视图（`token` 由服务端持有，永不下发） */
+export interface SoulVoiceConfigView {
+  enabled: boolean;
+  engine: VoiceEngine;
+  voice: string;
+  speed: number;
+  endpoint: string;
+  /** 服务端是否已持有 sidecar token（前端不需要它的值） */
+  hasToken: boolean;
+  speakReplies: boolean;
+}
+
+/** GET/PUT /api/soul/config 响应体 */
+export interface SoulConfigView {
+  avatar: SoulAvatarConfig;
+  voice: SoulVoiceConfigView;
+  /** 配置文件位置 */
+  filePath: string;
+  /** 音色预设（服务端与前端同源，避免两处维护） */
+  presets: Array<{ id: string; label: string; description: string }>;
+}
+
+/** GET /api/voice/status 响应体 */
+export interface VoiceStatus {
+  reachable: boolean;
+  enabled: boolean;
+  asr: { model: string; ready: boolean; reason?: string };
+  tts: { model: string; ready: boolean; reason?: string };
+  endpoint: string;
+  versions?: Record<string, string>;
+  hint?: string;
+  configPath: string;
+}
+
+/** 读取形象与声音配置 */
+export function fetchSoulConfig(): Promise<SoulConfigView> {
+  return request<SoulConfigView>("GET", "/api/soul/config");
+}
+
+/**
+ * 保存形象与声音配置（关键子集补丁）
+ *
+ * 只传 `avatar` 就只改头像，`voice` 同理——整体替换会让「改头像」顺手
+ * 把语音配置清空。
+ *
+ * @param patch 待更新字段
+ * @returns 落盘后的配置视图
+ */
+export function saveSoulConfig(patch: {
+  avatar?: SoulAvatarConfig;
+  voice?: Partial<Omit<SoulVoiceConfigView, "hasToken">>;
+}): Promise<SoulConfigView> {
+  return request<SoulConfigView>("PUT", "/api/soul/config", patch);
+}
+
+/** 查询语音链路状态（永远 200，未就绪写在字段里） */
+export function fetchVoiceStatus(): Promise<VoiceStatus> {
+  return request<VoiceStatus>("GET", "/api/voice/status");
+}
+
+/**
+ * 合成一段语音
+ *
+ * 返回 objectURL（调用方负责 `URL.revokeObjectURL`）。
+ * 走二进制而不是 base64：后者体积多 33%，且前端要多一次解码。
+ *
+ * @param text 待合成文本
+ * @param override 覆盖配置里的引擎/音色/语速
+ * @returns 可播放的 objectURL
+ */
+export async function synthesizeSpeech(
+  text: string,
+  override?: { engine?: VoiceEngine; voice?: string; speed?: number }
+): Promise<string> {
+  const res = await fetch("/api/voice/tts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify({ text, ...(override ?? {}) }),
+  });
+  if (!res.ok) throw new Error(await readErrorDetail(res, "语音合成失败"));
+  const blob = await res.blob();
+  if (blob.size === 0) throw new Error("语音合成返回空音频");
+  return URL.createObjectURL(blob);
+}
+
+/**
+ * 识别一段 WAV 音频
+ *
+ * @param wav PCM16 WAV 字节（前端编码，见 `voice/wav.ts`）
+ * @returns 识别文本
+ */
+export async function transcribeAudio(wav: Blob): Promise<{ text: string; durationMs: number; model: string }> {
+  const res = await fetch("/api/voice/asr", {
+    method: "POST",
+    headers: { "Content-Type": wav.type || "audio/wav" },
+    credentials: "same-origin",
+    body: wav,
+  });
+  if (!res.ok) throw new Error(await readErrorDetail(res, "语音识别失败"));
+  return (await res.json()) as { text: string; durationMs: number; model: string };
+}
+
+/**
+ * 读取失败响应里的可读原因（后端统一 `{error}`）
+ *
+ * @param res 失败响应
+ * @param fallback 兜底文案
+ * @returns 错误描述
+ */
+async function readErrorDetail(res: Response, fallback: string): Promise<string> {
+  try {
+    const body = (await res.json()) as { error?: unknown };
+    if (typeof body.error === "string" && body.error.length > 0) return body.error;
+  } catch {
+    // 非 JSON（网关 HTML 等），走兜底
+  }
+  return `${fallback}（HTTP ${res.status}）`;
+}

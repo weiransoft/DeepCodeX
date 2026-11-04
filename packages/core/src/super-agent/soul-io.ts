@@ -28,11 +28,13 @@
  */
 
 import * as fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 import { emptyMemoryFile, normalizeMemoryFile } from "./soul/recall.js";
+import { normalizeSoulConfig } from "./soul/config.js";
 import { SoulEngine, type ScopedSoulStore } from "./soul/engine.js";
-import type { Soul, SoulMemoryFile, SoulMemoryStore } from "./soul/types.js";
+import type { Soul, SoulConfig, SoulMemoryFile, SoulMemoryStore } from "./soul/types.js";
 
 /** 全局记忆目录（相对 HOME） */
 const GLOBAL_DIR = path.join(".deepcode", "soul");
@@ -242,4 +244,133 @@ export function soulMemoryLocations(
 export function soulRevealSecretsFromEnv(): boolean {
   const value = process.env.DEEPCODE_SOUL_REVEAL_SECRETS;
   return value === "1" || value === "true";
+}
+
+// ---------------------------------------------------------------------------
+// 形象与声音配置（config.json）
+// ---------------------------------------------------------------------------
+
+/** 配置文件（与 memory.json 同目录） */
+const CONFIG_FILE = "config.json";
+
+/**
+ * 解析配置文件路径
+ *
+ * 配置跟着**人**走（不是项目），所以只有全局一份——换仓库不该换头像。
+ *
+ * @param homeRoot 用户级引擎数据根（Web 多用户场景必须传）
+ * @returns 绝对路径
+ */
+export function soulConfigPath(homeRoot?: string): string {
+  return path.join(homeRoot ?? os.homedir(), GLOBAL_DIR, CONFIG_FILE);
+}
+
+/**
+ * 原子写 JSON（与记忆写入同一套：tmp + fsync + rename + chmod 0600）
+ *
+ * @param filePath 目标路径
+ * @param value 待写对象
+ */
+function writeJsonAtomic(filePath: string, value: unknown): void {
+  const directory = path.dirname(filePath);
+  fs.mkdirSync(directory, { recursive: true, mode: DIR_MODE });
+  const payload = `${JSON.stringify(value, null, 2)}\n`;
+  const tmpPath = `${filePath}.tmp`;
+  const handle = fs.openSync(tmpPath, "w", FILE_MODE);
+  try {
+    fs.writeFileSync(handle, payload, "utf8");
+    fs.fsyncSync(handle);
+  } finally {
+    fs.closeSync(handle);
+  }
+  fs.renameSync(tmpPath, filePath);
+  try {
+    fs.chmodSync(filePath, FILE_MODE);
+  } catch {
+    // 只读卷等环境不支持 chmod，忽略（权限已在 open 时给出）
+  }
+}
+
+/**
+ * 读取形象与声音配置
+ *
+ * 三种降级，与记忆一致：
+ * - 文件不存在 → 默认配置 + 生成 token 并落盘（token 必须稳定，否则每次
+ *   调用都要重配 sidecar）；
+ * - JSON 损坏 → 改名为 `.corrupted-<时间戳>` 备份后回落默认；
+ * - 字段非法 → 逐项下调为默认（`normalizeSoulConfig`）。
+ *
+ * @param homeRoot 用户级引擎数据根
+ * @returns 配置 + 文件位置
+ */
+export function loadSoulConfig(homeRoot?: string): { readonly config: SoulConfig; readonly filePath: string } {
+  const filePath = soulConfigPath(homeRoot);
+  let parsed: unknown;
+  let needPersist = false;
+
+  if (!fs.existsSync(filePath)) {
+    needPersist = true;
+  } else {
+    try {
+      parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    } catch {
+      // 损坏：备份后按"首次"处理，不让整页 500
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      try {
+        fs.renameSync(filePath, `${filePath}.corrupted-${stamp}`);
+      } catch {
+        // 备份失败继续走默认值
+      }
+      needPersist = true;
+    }
+  }
+
+  const existingToken = readToken(parsed);
+  const token = existingToken ?? randomUUID().replace(/-/g, "");
+  const config = normalizeSoulConfig(parsed, token);
+
+  // token 缺失（首启 / 手改清空）时必须回写，否则 sidecar 校验无从比对
+  if (needPersist || existingToken === null) {
+    try {
+      writeJsonAtomic(filePath, config);
+    } catch {
+      // 写失败不阻断读取：本次用内存里的 token，下次再试
+    }
+  }
+  return { config, filePath };
+}
+
+/**
+ * 从原始 JSON 中取 token（缺失返回 null）
+ *
+ * @param parsed 已解析的 JSON
+ * @returns token 或 null
+ */
+function readToken(parsed: unknown): string | null {
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const voice = (parsed as Record<string, unknown>).voice;
+  if (typeof voice !== "object" || voice === null) return null;
+  const token = (voice as Record<string, unknown>).token;
+  return typeof token === "string" && token.length > 0 ? token : null;
+}
+
+/**
+ * 保存形象与声音配置（校验后原子写）
+ *
+ * token 由调用方给出时以调用方为准；为空则沿用已存在的 token，
+ * 避免"改个语速把鉴权也改掉"。
+ *
+ * @param raw 待保存的原始配置（来自请求体，一律视为不可信）
+ * @param homeRoot 用户级引擎数据根
+ * @returns 落盘后的合法配置
+ */
+export function saveSoulConfig(
+  raw: unknown,
+  homeRoot?: string
+): { readonly config: SoulConfig; readonly filePath: string } {
+  const filePath = soulConfigPath(homeRoot);
+  const current = loadSoulConfig(homeRoot).config;
+  const config = normalizeSoulConfig(raw, current.voice.token);
+  writeJsonAtomic(filePath, config);
+  return { config, filePath };
 }

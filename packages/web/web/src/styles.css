@@ -4419,3 +4419,295 @@ a.icon-btn {
   color: var(--app-text-tertiary);
   word-break: break-all;
 }
+
+/* ============ 司南：头像、形象与声音面板（2026-11-04） ============ */
+
+/* 头像：默认是从应用图标裁出的兔狲脸（web/public/manul-avatar.png）。
+   用 object-fit + 圆角容器保证「自定义图」与「默认图」在视觉上同一规格：
+   圆形裁切、无边框、不随主题变色（头像是品牌标识，不该被主题改掉）。 */
+.soul-avatar {
+  display: inline-block;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #ffffff;
+  vertical-align: middle;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* 空对话页：把头像放大到 72px——这是「认识这个人」的唯一时机 */
+.chat-welcome-avatar {
+  margin-bottom: 14px;
+  box-shadow: 0 6px 20px rgba(16, 118, 237, 0.18);
+}
+
+/* ---------- 面板外壳 ---------- */
+.soul-appearance {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--app-border);
+  margin-bottom: 14px;
+}
+
+.soul-appearance-muted,
+.soul-appearance-error {
+  padding: 12px 2px;
+  font-size: 12.5px;
+  color: var(--app-text-tertiary);
+}
+
+.soul-appearance-error {
+  color: var(--app-danger);
+}
+
+/* ---------- 头像行 ---------- */
+.soul-avatar-row {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.soul-avatar-preview {
+  border: 1px solid var(--app-border);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.soul-avatar-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.soul-avatar-hint {
+  font-size: 12.5px;
+  color: var(--app-text-secondary);
+  line-height: 1.6;
+}
+
+.soul-avatar-buttons {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.soul-avatar-limit {
+  font-size: 11.5px;
+  color: var(--app-text-tertiary);
+}
+
+/* ---------- 表单行 ---------- */
+.soul-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--app-text);
+  cursor: pointer;
+  padding: 3px 0;
+}
+
+.soul-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.soul-field-block {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.soul-field-label {
+  flex: 0 0 76px;
+  font-size: 12.5px;
+  color: var(--app-text-secondary);
+}
+
+.soul-select,
+.soul-input,
+.soul-textarea {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 9px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--app-text);
+  background: var(--app-bg-elevated);
+  border: 1px solid var(--app-border-strong);
+  border-radius: 7px;
+  outline: none;
+}
+
+.soul-textarea {
+  width: 100%;
+  resize: vertical;
+  line-height: 1.6;
+}
+
+.soul-select:focus,
+.soul-input:focus,
+.soul-textarea:focus {
+  border-color: var(--app-accent);
+  box-shadow: 0 0 0 3px var(--app-accent-weak);
+}
+
+.soul-range {
+  flex: 1 1 auto;
+  accent-color: var(--app-accent);
+}
+
+.soul-range-value {
+  flex: 0 0 46px;
+  font-size: 12px;
+  color: var(--app-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.soul-hint {
+  font-size: 11.5px;
+  color: var(--app-text-tertiary);
+  line-height: 1.6;
+  margin-top: 4px;
+}
+
+/* ---------- 音色预设 ---------- */
+.soul-presets {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.soul-preset {
+  padding: 4px 12px;
+  font-size: 12.5px;
+  color: var(--app-text-secondary);
+  background: var(--app-bg-subtle);
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.soul-preset:hover {
+  background: var(--app-bg-hover);
+  color: var(--app-text);
+}
+
+.soul-preset-active {
+  color: var(--app-accent);
+  border-color: var(--app-accent);
+  background: var(--app-accent-weak);
+}
+
+/* ---------- 语音状态 ---------- */
+.soul-voice-actions {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+
+.soul-voice-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-top: 6px;
+  background: var(--app-bg-subtle);
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--app-text-secondary);
+  line-height: 1.65;
+}
+
+.soul-voice-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--app-text-tertiary);
+}
+
+.soul-voice-dot-on {
+  background: #22c55e;
+}
+
+.soul-voice-status-text {
+  min-width: 0;
+}
+
+.soul-voice-hint {
+  margin-top: 4px;
+  color: var(--app-text-tertiary);
+}
+
+.soul-voice-hint code {
+  font-family: var(--app-font-mono);
+  font-size: 11.5px;
+  padding: 1px 5px;
+  background: var(--app-bg-code);
+  border-radius: 4px;
+}
+
+/* ---------- 保存提示 ---------- */
+.soul-notice {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.soul-notice-ok {
+  color: #15803d;
+  background: rgba(34, 197, 94, 0.1);
+  border: 1px solid rgba(34, 197, 94, 0.28);
+}
+
+.soul-notice-error {
+  color: var(--app-danger);
+  background: rgba(217, 48, 38, 0.08);
+  border: 1px solid rgba(217, 48, 38, 0.26);
+}
+
+/* ---------- Composer 麦克风按钮 ---------- */
+/* 与发送按钮同尺寸，靠颜色区分状态：空闲=描边、录音=红、播报=强调色 */
+.composer-mic {
+  background: transparent;
+  color: var(--app-text-secondary);
+  border: 1px solid var(--app-border-strong);
+}
+
+.composer-mic:hover {
+  background: var(--app-bg-hover);
+  color: var(--app-text);
+}
+
+.composer-mic-recording {
+  color: #ffffff;
+  background: var(--app-danger);
+  border-color: var(--app-danger);
+  animation: composer-mic-pulse 1.1s ease-in-out infinite;
+}
+
+.composer-mic-speaking {
+  color: #ffffff;
+  background: var(--app-accent);
+  border-color: var(--app-accent);
+}
+
+@keyframes composer-mic-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(217, 48, 38, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(217, 48, 38, 0);
+  }
+}

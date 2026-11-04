@@ -27,17 +27,36 @@ export type {
   PersonalityMatrix,
   RecalledMemory,
   Soul,
+  SoulAvatarConfig,
+  SoulConfig,
   SoulMemory,
   SoulMemoryFile,
   SoulMemoryStore,
   SoulSnapshot,
+  SoulVoiceConfig,
   UserProfile,
+  VoiceEngine,
 } from "./types.js";
 
 export type { CategoryDefinition, ClassificationResult } from "./taxonomy.js";
 export type { RecallOptions } from "./recall.js";
 export type { RenderOptions } from "./render.js";
 export type { RememberResult, ScopedSoulStore, SoulEngineOptions } from "./engine.js";
+
+export {
+  AVATAR_DATA_URL_MAX,
+  DEFAULT_SOUL_CONFIG,
+  DEFAULT_VOICE_DESCRIPTION,
+  DEFAULT_VOICE_ENDPOINT,
+  VOICE_ENGINES,
+  VOICE_PRESETS,
+  VOICE_SPEED_MAX,
+  VOICE_SPEED_MIN,
+  findVoicePreset,
+  normalizeAvatarConfig,
+  normalizeSoulConfig,
+  normalizeVoiceConfig,
+} from "./config.js";
 
 export {
   MEMORY_CATEGORIES,

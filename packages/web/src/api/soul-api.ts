@@ -35,8 +35,13 @@ import {
   categoryHints,
   categoryLabel,
   createSoulEngine,
+  loadSoulConfig,
+  saveSoulConfig,
+  soulConfigPath,
   soulMemoryLocations,
+  VOICE_PRESETS,
   type MemoryCategory,
+  type SoulConfig,
   type SoulSnapshot,
 } from "@vegamo/deepcode-core";
 import { ApiError, readJsonBody, sendJson } from "../http-utils";
@@ -180,4 +185,116 @@ function parseCategory(raw: unknown): MemoryCategory | undefined {
   if (typeof raw !== "string" || raw.length === 0) return undefined;
   const categories = allCategories();
   return categories.includes(raw as MemoryCategory) ? (raw as MemoryCategory) : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// 形象与声音配置
+// ---------------------------------------------------------------------------
+
+/**
+ * 下发给前端的配置视图
+ *
+ * `token` **不下发**：它是引擎与 sidecar 之间的共享密钥，前端不需要也不应该
+ * 拿到它——否则任何拿到页面的人都能直接打 sidecar。只告知"是否已配置"。
+ */
+export type SoulConfigView = {
+  avatar: SoulConfig["avatar"];
+  voice: Omit<SoulConfig["voice"], "token"> & { hasToken: boolean };
+  /** 配置文件位置（便于用户备份） */
+  filePath: string;
+  /** 音色预设（避免前端再维护一份） */
+  presets: readonly { id: string; label: string; description: string }[];
+};
+
+/**
+ * 配置 → 视图（剥离 token）
+ *
+ * @param config 配置
+ * @param filePath 配置文件位置
+ * @returns 视图
+ */
+function toConfigView(config: SoulConfig, filePath: string): SoulConfigView {
+  const { token, ...voice } = config.voice;
+  return {
+    avatar: config.avatar,
+    voice: { ...voice, hasToken: token.length > 0 },
+    filePath,
+    presets: VOICE_PRESETS,
+  };
+}
+
+/**
+ * 处理 GET /api/soul/config
+ *
+ * @param res 响应对象
+ * @param ctx 认证上下文
+ * @param settings Web 配置
+ */
+export function handleGetSoulConfig(
+  res: ServerResponse,
+  ctx: AuthContext,
+  settings: EngineHomeSettings & { skillsHomeRoot?: string | null }
+): void {
+  const homeRoot = skillsHomeForUser(settings, ctx.userId);
+  const { config, filePath } = loadSoulConfig(homeRoot);
+  sendJson(res, 200, toConfigView(config, filePath));
+}
+
+/**
+ * 处理 PUT /api/soul/config
+ *
+ * 请求体是关键子集的合并补丁：只传 `avatar` 就只改头像，`voice` 同理。
+ * 不做整体替换，是因为前端两个区块各自保存，整体替换会让"改头像"把
+ * 语音配置清空——那是很容易踩的坑。
+ *
+ * @param req 请求对象
+ * @param res 响应对象
+ * @param ctx 认证上下文
+ * @param settings Web 配置
+ */
+export async function handlePutSoulConfig(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: AuthContext,
+  settings: EngineHomeSettings & { skillsHomeRoot?: string | null }
+): Promise<void> {
+  const body = (await readJsonBody(req)) as { avatar?: unknown; voice?: unknown };
+  const homeRoot = skillsHomeForUser(settings, ctx.userId);
+  const current = loadSoulConfig(homeRoot);
+
+  const next: SoulConfig = {
+    avatar: body.avatar === undefined ? current.config.avatar : (body.avatar as SoulConfig["avatar"]),
+    voice: body.voice === undefined ? current.config.voice : (body.voice as SoulConfig["voice"]),
+  };
+  const saved = saveSoulConfig(next, homeRoot);
+  sendJson(res, 200, toConfigView(saved.config, saved.filePath));
+}
+
+/**
+ * 读取配置（供语音端点复用，避免重复解析）
+ *
+ * @param ctx 认证上下文
+ * @param settings Web 配置
+ * @returns 配置 + 路径
+ */
+export function readSoulConfig(
+  ctx: AuthContext,
+  settings: EngineHomeSettings & { skillsHomeRoot?: string | null }
+): { readonly config: SoulConfig; readonly filePath: string } {
+  const homeRoot = skillsHomeForUser(settings, ctx.userId);
+  return loadSoulConfig(homeRoot);
+}
+
+/**
+ * 配置文件位置（语音端点展示"配置在哪"用）
+ *
+ * @param settings Web 配置
+ * @param userId 用户 ID
+ * @returns 路径
+ */
+export function soulConfigLocation(
+  settings: EngineHomeSettings & { skillsHomeRoot?: string | null },
+  userId: string
+): string {
+  return soulConfigPath(skillsHomeForUser(settings, userId));
 }

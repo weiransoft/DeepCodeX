@@ -38,6 +38,13 @@ out/
 # TypeScript build info files
 *.tsbuildinfo
 
+# Python（scripts/voice 的 MLX sidecar）
+# venv 里是几百 MB 的二进制轮子，模型权重另存 ~/.cache/huggingface，
+# 两者都不该进仓库；__pycache__ 每次运行都会重新生成。
+**/__pycache__/
+*.pyc
+scripts/voice/.venv/
+
 # Environment variables
 .env
 .env.local

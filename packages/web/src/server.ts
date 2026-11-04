@@ -46,7 +46,14 @@ import {
 } from "./api/agents-api";
 import { handleCreateRule, handleDeleteRule, handleListRules } from "./api/rules-api";
 import { handleGetAudit } from "./api/audit-api";
-import { handleForgetSoul, handleGetSoul, handleRememberSoul } from "./api/soul-api";
+import {
+  handleForgetSoul,
+  handleGetSoul,
+  handleGetSoulConfig,
+  handlePutSoulConfig,
+  handleRememberSoul,
+} from "./api/soul-api";
+import { handleVoiceAsr, handleVoiceStatus, handleVoiceTts } from "./api/voice-api";
 import {
   handleConfirmSedimentation,
   handleDismissSedimentation,
@@ -537,6 +544,28 @@ export async function startWebServer(
       const soulMemoryMatch = /^\/api\/soul\/memory\/([^/]+)$/.exec(pathname);
       if (soulMemoryMatch && req.method === "DELETE") {
         handleForgetSoul(res, decodeURIComponent(soulMemoryMatch[1]), ctx, resolved);
+        return;
+      }
+      // 形象与声音配置（头像 / TTS 引擎 / 御姐音描述 / sidecar 地址）
+      if (pathname === "/api/soul/config" && req.method === "GET") {
+        handleGetSoulConfig(res, ctx, resolved);
+        return;
+      }
+      if (pathname === "/api/soul/config" && req.method === "PUT") {
+        await handlePutSoulConfig(req, res, ctx, resolved);
+        return;
+      }
+      // 语音链路：状态探测 / 合成 / 识别（引擎侧代理本机 MLX sidecar）
+      if (pathname === "/api/voice/status" && req.method === "GET") {
+        await handleVoiceStatus(res, ctx, resolved);
+        return;
+      }
+      if (pathname === "/api/voice/tts" && req.method === "POST") {
+        await handleVoiceTts(req, res, ctx, resolved);
+        return;
+      }
+      if (pathname === "/api/voice/asr" && req.method === "POST") {
+        await handleVoiceAsr(req, res, ctx, resolved);
         return;
       }
 

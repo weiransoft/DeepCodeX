@@ -9,7 +9,8 @@
  * 运行方式：node packages/web/web/build.mjs
  */
 import { build } from "esbuild";
-import { copyFile, mkdir, rm, stat, symlink } from "node:fs/promises";
+import { copyFile, cp, mkdir, readdir, rm, stat, symlink } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -48,6 +49,19 @@ await build({
 // 拷贝入口 HTML 到产物目录
 const indexPath = path.join(webRoot, "index.html");
 await copyFile(indexPath, path.join(distDir, "index.html"));
+
+// 拷贝静态资产（头像等）：public/ 下每个条目原样进 dist 根，
+// 与 index.html 同级——`/manul-avatar.png` 因此可直接访问。
+// public 不存在时跳过（CI 首次构建 / 老分支没有该目录都不该让构建失败）。
+// 逐条目拷贝而不是整目录 cp：dest 已存在时整目录语义会把 dest 当成父目录
+// 生成 dist/public/*，与静态托管期望的路径不一致。
+const publicDir = path.join(webRoot, "public");
+if (existsSync(publicDir)) {
+  const entries = await readdir(publicDir, { withFileTypes: true });
+  for (const entry of entries) {
+    await cp(path.join(publicDir, entry.name), path.join(distDir, entry.name), { recursive: true });
+  }
+}
 
 // 校验关键产物存在，缺失则让构建失败（不允许静默产出残缺 dist）
 for (const name of ["bundle.js", "bundle.css", "index.html"]) {

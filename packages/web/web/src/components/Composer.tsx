@@ -23,14 +23,18 @@ import { fetchCapabilities, type Capabilities, type CapabilityCommand } from "..
 import { agentDisplayName, agentMentionHint } from "../agent-display";
 import { skillDisplayName, skillDisplaySummary } from "../skill-display";
 import { listModels, setDefaultModel, type ModelOption } from "../desktopConfig";
+import { useVoiceTalk } from "../voice/useVoiceTalk";
+import { registerVoice } from "../voice/voice-bus";
 import {
   BotAvatarIcon,
   CloseIcon,
   FileCodeIcon,
   FileIcon,
   FileImageIcon,
+  MicIcon,
   PaperclipIcon,
   PlusIcon,
+  SpeakerStopIcon,
   SendIcon,
   StopIcon,
   WrenchIcon,
@@ -181,6 +185,16 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
 
 /** Composer：底部输入框 */ export function Composer(props: ComposerProps) {
   const { streaming, steeringEnabled, maxUploadBytes, serverFiles, onRemoveServerFile, onSend, onStop } = props;
+  /**
+   * 语音能力（按住说话 / 朗读 / 打断）。
+   *
+   * 放在 Composer 而不是 App：麦克风只负责"把识别结果交给发送路径"，
+   * 不新建第二条发送链路——那会绕过附件、@ 提及与流式占位逻辑。
+   */
+  const voice = useVoiceTalk();
+
+  /** 把实例挂到喂句总线上：App 的流式增量经它进来，句级合成才能跟上生成速度 */
+  useEffect(() => registerVoice(voice), [voice]);
   /**
    * 输入区是否禁用（steering F1）：steeringEnabled 时生成中仍可输入补充指令；
    * 关闭时回退旧行为（生成中禁用 textarea/附件/发送）。
@@ -664,10 +678,13 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
     }
   };
 
-  /** 执行发送：有内容或附件才触发；发送后清空本地状态 */
-  const doSend = (): void => {
+  /** 执行发送：有内容或附件才触发；发送后清空本地状态
+   *
+   * @param override 显式文本（语音识别结果）；省略则用输入框内容
+   */
+  const doSend = (override?: string): void => {
     if (inputBlocked) return;
-    const trimmed = text.trim();
+    const trimmed = (override ?? text).trim();
     if (trimmed === "" && localFiles.length === 0 && serverFiles.length === 0) return;
     onSend(trimmed, localFiles, serverFiles);
     setText("");
@@ -1016,6 +1033,48 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
           }}
         />
 
+        {/* 语音：按住说话（松开即发送）/ 播报中显示停止 */}
+        {voice.speaking ? (
+          <button
+            type="button"
+            className="composer-send composer-mic composer-mic-speaking"
+            title="停止播报"
+            onClick={() => voice.stopSpeaking()}
+          >
+            <SpeakerStopIcon size={15} />
+          </button>
+        ) : (
+          voice.available &&
+          voice.enabled && (
+            <button
+              type="button"
+              className={`composer-send composer-mic${voice.recording ? " composer-mic-recording" : ""}`}
+              title={voice.recording ? "松开结束并发送" : "按住说话"}
+              aria-pressed={voice.recording}
+              onPointerDown={(event) => {
+                event.preventDefault();
+                void voice.startTalk();
+              }}
+              onPointerUp={(event) => {
+                event.preventDefault();
+                void voice.stopTalk().then((text) => {
+                  if (text !== null) doSend(text);
+                });
+              }}
+              onPointerLeave={() => {
+                // 手指移出按钮也要收尾，否则会一直录到 60s 上限
+                if (voice.recording) {
+                  void voice.stopTalk().then((text) => {
+                    if (text !== null) doSend(text);
+                  });
+                }
+              }}
+            >
+              <MicIcon size={15} />
+            </button>
+          )
+        )}
+
         {/* 发送 / 停止按钮位：
             - steering 关闭（旧行为）：生成中只显示停止；
             - steering 开启：生成中 发送 + 停止 并排同显（补充指令随时可发）。 */}
@@ -1035,7 +1094,7 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
               className="composer-send"
               title={streaming ? "发送补充指令" : "发送"}
               disabled={!canSend}
-              onClick={doSend}
+              onClick={() => doSend()}
             >
               <SendIcon size={15} />
             </button>

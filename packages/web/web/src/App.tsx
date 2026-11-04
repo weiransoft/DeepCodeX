@@ -74,6 +74,7 @@ import {
   type AssistantMessageEvent,
   type UserMessageEvent,
 } from "./sse";
+import { feedVoice, finishVoice } from "./voice/voice-bus";
 
 /** 登录态三阶段：checking=启动检查中；authed=已登录；anon=未登录/会话过期 */
 type AuthState = "checking" | "authed" | "anon";
@@ -238,6 +239,9 @@ export function App() {
     (e: LlmDeltaEvent): void => {
       if (e.chatId !== activeChatIdRef.current) return; // 丢弃旧会话残余事件
       applyStreaming(true);
+      // 语音：把累积正文喂给播报队列（按句切分后逐句合成）。
+      // 语音关闭或服务未就绪时总线里没有实例，这里是空操作。
+      feedVoice(e.previewText);
       setEntries((prev) => {
         const idx = prev.findIndex((x) => x.kind === "assistant" && x.id === "stream");
         if (idx >= 0) {
@@ -374,6 +378,8 @@ export function App() {
       }
       return [...prev, { kind: "assistant", id: e.messageId, content: e.content, preview: null, done: true }];
     });
+    // 正文已固化 → 让语音队列把最后一句（没有断句符的尾巴）也读完
+    finishVoice();
   }, []);
 
   /**

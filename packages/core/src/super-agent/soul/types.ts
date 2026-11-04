@@ -435,3 +435,71 @@ export interface MemoryItemView {
   /** 来源 */
   readonly source: SoulMemory["source"];
 }
+
+// ---------------------------------------------------------------------------
+// 形象与声音配置
+// ---------------------------------------------------------------------------
+
+/**
+ * 头像配置
+ *
+ * 默认为应用图标裁出的兔狲脸，静态资源路径 /manul-avatar.png；用户可上传自定义图。
+ * 自定义图以 dataUrl 存放：它是用户资产，不参与提示词，也不进仓库，
+ * 由仓库根 .gitignore 里的 soul 目录规则一并接住。
+ */
+export interface SoulAvatarConfig {
+  /** 默认兔狲 / 自定义 */
+  readonly kind: "default" | "custom";
+  /** 自定义头像（dataUrl）；kind=default 时缺省 */
+  readonly dataUrl?: string;
+}
+
+/**
+ * 语音合成引擎（与 sidecar 支持的实现一一对应）
+ *
+ * 取值来自本机实测：`mlx-audio` 0.6.4 的模型目录里**没有** CosyVoice2，
+ * 中文可用且支持「用一句话描述音色」的是 Qwen3-TTS 的 VoiceDesign 变体。
+ * 保留 kokoro 作为轻量兜底（中文一般，但确定能出声）。
+ */
+export type VoiceEngine = "qwen3-voicedesign" | "qwen3-customvoice" | "kokoro";
+
+/**
+ * 语音对话配置
+ *
+ * 全部字段都可缺省——`normalizeSoulConfig()` 会逐项兜底，
+ * 因为这份配置可能被手改、被旧版本写过、被别的客户端改过。
+ */
+export interface SoulVoiceConfig {
+  /** 总开关：关掉时语音入口不出现 */
+  readonly enabled: boolean;
+  /** 引擎（中文首选 qwen3-voicedesign；kokoro 是"至少能出声"的兜底） */
+  readonly engine: VoiceEngine;
+  /**
+   * 音色。对 VoiceDesign 是**自然语言描述**（"成熟女性，中低音区…"），
+   * 对 CustomVoice 是预置 speaker 名，对 kokoro 是音色 id。
+   * 用描述而不是固定 id，是因为「御姐音」是一组声学倾向，
+   * 不是某个现存音色——VoiceDesign 正是为这件事设计的。
+   */
+  readonly voice: string;
+  /** 语速（0.5~2.0） */
+  readonly speed: number;
+  /** sidecar 地址（仅 http://，仅回环） */
+  readonly endpoint: string;
+  /** sidecar 鉴权 token（与 sidecar 启动时读取的同一份配置比对） */
+  readonly token: string;
+  /** 是否自动朗读助手回复 */
+  readonly speakReplies: boolean;
+}
+
+/**
+ * 司南的形象与声音配置（`~/.deepcode/soul/config.json`）
+ *
+ * 与 `memory.json` 分文件存放：记忆是**给模型的事实**，配置是**给人的偏好**，
+ * 生命周期与读取方都不同（前者每轮进提示词，后者只在注入时读一次）。
+ */
+export interface SoulConfig {
+  /** 头像 */
+  readonly avatar: SoulAvatarConfig;
+  /** 语音 */
+  readonly voice: SoulVoiceConfig;
+}

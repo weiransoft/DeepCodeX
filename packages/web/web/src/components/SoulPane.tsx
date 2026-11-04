@@ -27,6 +27,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { fetchSoul, forgetSoul, rememberSoul, type SoulResponse, type SoulSnapshot } from "../api";
+import { SoulAppearancePane } from "./SoulAppearancePane";
 
 /** 加载状态 */
 type LoadState = { phase: "loading" } | { phase: "error"; message: string } | { phase: "ready"; data: SoulResponse };
@@ -355,20 +356,24 @@ export function SoulPane() {
   }
 
   return (
-    <SoulView
-      snapshot={snapshot}
-      categories={categories}
-      locations={locations}
-      text={text}
-      category={category}
-      submit={submit}
-      onTextChange={(value) => {
-        setText(value);
-        setSubmit({ phase: "idle" });
-      }}
-      onCategoryChange={setCategory}
-      onRemember={handleRemember}
-      onForget={handleForget}
-    />
+    <>
+      {/* 形象与声音放在人格之前：这是用户先看到、也最先想改的两项 */}
+      <SoulAppearancePane />
+      <SoulView
+        snapshot={snapshot}
+        categories={categories}
+        locations={locations}
+        text={text}
+        category={category}
+        submit={submit}
+        onTextChange={(value) => {
+          setText(value);
+          setSubmit({ phase: "idle" });
+        }}
+        onCategoryChange={setCategory}
+        onRemember={handleRemember}
+        onForget={handleForget}
+      />
+    </>
   );
 }

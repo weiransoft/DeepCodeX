@@ -12,7 +12,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>DeepCode</title>
+    <title>司南 · DeepCode</title>
     <style>
       :root {
         color-scheme: light dark;
@@ -59,6 +59,23 @@
         font-size: 22px;
         font-weight: 600;
         letter-spacing: 0.5px;
+      }
+      /* 启动画面先露脸：用户在等待引擎时看到的是「司南在准备」，而不是一个裸的引擎名 */
+      .avatar {
+        display: block;
+        margin: 0 auto 12px;
+        border-radius: 50%;
+        box-shadow: 0 6px 18px rgba(16, 118, 237, 0.2);
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      .latin {
+        margin-left: 6px;
+        font-size: 13px;
+        font-weight: 500;
+        letter-spacing: 1.2px;
+        color: var(--muted);
+        text-transform: uppercase;
       }
       .status {
         margin-top: 10px;
@@ -129,7 +146,8 @@
   </head>
   <body>
     <main>
-      <div class="logo">DeepCode</div>
+      <img class="avatar" src="manul-avatar.png" alt="司南" width="72" height="72" />
+      <div class="logo">司南 <span class="latin">Sinan</span></div>
       <div class="status" id="status">正在启动本地引擎…</div>
       <div class="spinner" id="spinner"></div>
       <pre class="error" id="error"></pre>

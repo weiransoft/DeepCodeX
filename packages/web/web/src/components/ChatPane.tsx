@@ -21,15 +21,9 @@ import {
   setEngineToolEntryHint,
 } from "../chat-model";
 import { buildSearchDocuments, searchDocuments, type SearchCategory } from "../search";
-import {
-  FolderOpenIcon,
-  PaperclipIcon,
-  SearchIcon,
-  StopIcon,
-  WrenchIcon,
-  BotAvatarIcon,
-  UserAvatarIcon,
-} from "./icons";
+import { FolderOpenIcon, PaperclipIcon, SearchIcon, StopIcon, WrenchIcon, UserAvatarIcon } from "./icons";
+import { SoulAvatar } from "./SoulAvatar";
+import { useSoulConfig } from "../useSoulConfig";
 import { ChatSearchBar } from "./ChatSearchBar";
 import { PermissionCard, type PermissionDecisionChoice } from "./PermissionCard";
 import { SedimentationCard } from "./SedimentationCard";
@@ -307,6 +301,9 @@ export function BgTaskNotice({ entry }: { entry: Extract<ChatEntry, { kind: "bgt
 
 /** ChatPane：中间对话流 */
 export function ChatPane(props: ChatPaneProps) {
+  // 司南头像（默认兔狲；读配置失败会回落默认，不影响对话）
+  const { config: soulConfig } = useSoulConfig();
+  const soulAvatar = soulConfig.avatar;
   const {
     entries,
     streaming,
@@ -459,6 +456,8 @@ export function ChatPane(props: ChatPaneProps) {
           </div>
         </div>
         <div className="chat-welcome">
+          {/* 头像放在名字上方：空对话页是「认识这个人」的唯一时机 */}
+          <SoulAvatar avatar={soulAvatar} size={72} className="chat-welcome-avatar" />
           {/* 名字放在最显眼处：用户需要知道「在跟谁说话」，而不是「跟哪个引擎说话」 */}
           <div className="chat-welcome-brand">
             司南<span className="chat-welcome-latin">Sinan</span>
@@ -583,10 +582,10 @@ export function ChatPane(props: ChatPaneProps) {
                 case "assistant":
                   return (
                     <div key={entry.id} className="msg-row msg-row-assistant">
-                      {/* 默认机器头像（DeepCodeX 引擎，内容左侧） */}
+                      {/* 默认兔狲头像（与桌面应用图标同源；用户可在设置里换） */}
                       <div className="msg-assistant-with-avatar">
                         {/* 头像：固定宽度，不参与 flex shrink */}
-                        <BotAvatarIcon size={26} className="msg-avatar msg-avatar-assistant" />
+                        <SoulAvatar avatar={soulAvatar} size={26} className="msg-avatar msg-avatar-assistant" />
                         {/* 内容 wrapper：作为 flex row 的唯一 content 子元素，
                             独占头像之外全部宽度，内部用 flex-direction: column 垂直排列。
                             这样流式阶段 Fragment 展开的 thinking + preview 两个子元素
