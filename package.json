@@ -37,7 +37,8 @@
     "rebuild:sqlite": "bash scripts/install-better-sqlite3.sh",
     "install:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1",
     "rebuild:sqlite:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -SqliteOnly",
-    "test:e2e:super:team": "tsx tests/scripts/super-agent-team-e2e.ts"
+    "test:e2e:super:team": "tsx tests/scripts/super-agent-team-e2e.ts",
+    "start:web": "node scripts/start.js web"
   },
   "optionalDependencies": {
     "better-sqlite3": "^11.0.0"
