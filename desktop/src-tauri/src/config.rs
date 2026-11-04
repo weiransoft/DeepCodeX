@@ -12,6 +12,17 @@ use crate::error::ShellError;
 /// 引擎 JWT secret 环境变量名（已核实 packages/web/src/config.ts L289-290）。
 pub const JWT_SECRET_ENV: &str = "DEEPCODE_WEB_JWT_SECRET";
 
+/// 引擎「用户级技能 / 智能体资产根」环境变量名（2026-11-04）。
+///
+/// 桌面壳与 CLI 是**同一个物理用户**：用户装在 CLI 里的技能 / 智能体，桌面版
+/// 应当看得见，且桌面版新建的智能体 CLI 也能用。不注入时，引擎按 Web 多用户
+/// 口径把技能锚在 per-user 引擎数据根（`<uploadDir>/.engine-home/<userId>/`）——
+/// 那是个空目录，于是桌面版「技能 / 智能体」列表恒为空。
+///
+/// 注入真实家目录后，引擎的技能根 = `~/.deepcode/skills`（与 CLI 同源）；
+/// 会话 / 记忆 / 日志仍留在 per-user 引擎数据根（隔离语义不变）。
+pub const SKILLS_HOME_ENV: &str = "DEEPCODE_WEB_SKILLS_HOME_DIR";
+
 /// 引擎 CLI 入口（DeepCodeX-cli 编译产物）。
 pub const ENGINE_CLI_ENTRY: &str = "packages/cli/dist/cli.js";
 

@@ -3011,6 +3011,25 @@ a.icon-btn {
   text-align: center;
   line-height: 1.6;
 }
+/* 能力清单加载失败时的错误文案 + 重试按钮（2026-11-04） */
+.composer-menu-error-text {
+  color: var(--app-danger);
+  margin-bottom: 8px;
+  word-break: break-word;
+}
+.composer-menu-retry {
+  border: 1px solid var(--app-border-strong);
+  background: var(--app-bg-elevated);
+  color: var(--app-text-primary);
+  border-radius: 6px;
+  padding: 3px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.composer-menu-retry:hover {
+  border-color: var(--app-accent);
+  color: var(--app-accent);
+}
 
 /* ============ @ 提及补全面板（web-capability T2：Composer 输入 @ 唤起） ============ */
 .composer-mention {

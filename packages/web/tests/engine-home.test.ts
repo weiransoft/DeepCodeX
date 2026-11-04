@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { engineHomeForUser } from "../src/engine-home";
+import { engineHomeForUser, skillsHomeForUser } from "../src/engine-home";
 import { listSkillsSafe } from "../src/api/capability-api";
 
 /** 在指定 homeRoot 下写一个用户级技能，返回技能名 */
@@ -81,6 +81,56 @@ test("用户级技能按 homeRoot 隔离：各自只扫到自己那一份", asyn
     assert.equal(namesB.includes("skill-user-a"), false, "user-b 不得看到 user-a 的技能");
   } finally {
     fs.rmSync(engineRoot, { recursive: true, force: true });
+    fs.rmSync(emptyProject, { recursive: true, force: true });
+  }
+});
+
+/* ───────────────────────── 技能资产根（2026-11-04） ───────────────────────── */
+
+test("skillsHomeForUser：未显式配置时跟随引擎数据根（团队服务器 per-user 口径不变）", () => {
+  const root = createTempDir("deepcode-engine-home-");
+  try {
+    const settings = { personalOnly: true, engineHomeRoot: root, skillsHomeRoot: null };
+    assert.equal(skillsHomeForUser(settings, "user-a"), path.join(root, "user-a"));
+    assert.equal(skillsHomeForUser(settings, "user-b"), path.join(root, "user-b"));
+    // 缺省字段（undefined）等价于 null
+    assert.equal(skillsHomeForUser({ personalOnly: true, engineHomeRoot: root }, "user-a"), path.join(root, "user-a"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("skillsHomeForUser：显式配置时直用该路径且不追加 userId 段（本机单用户部署）", () => {
+  const engineRoot = createTempDir("deepcode-engine-home-");
+  const skillsRoot = createTempDir("deepcode-skills-home-");
+  try {
+    const settings = { personalOnly: true, engineHomeRoot: engineRoot, skillsHomeRoot: skillsRoot };
+    assert.equal(skillsHomeForUser(settings, "user-a"), skillsRoot);
+    assert.equal(skillsHomeForUser(settings, "user-b"), skillsRoot);
+  } finally {
+    fs.rmSync(engineRoot, { recursive: true, force: true });
+    fs.rmSync(skillsRoot, { recursive: true, force: true });
+  }
+});
+
+test("技能资产根显式配置时：技能对所有用户可见（本机单用户部署，与 CLI 同源）", async () => {
+  const engineRoot = createTempDir("deepcode-engine-root-");
+  const skillsRoot = createTempDir("deepcode-skills-home-");
+  const emptyProject = createTempDir("deepcode-empty-project-");
+  writeUserSkill(skillsRoot, "shared-skill");
+  try {
+    const settings = { personalOnly: true, engineHomeRoot: engineRoot, skillsHomeRoot: skillsRoot };
+    const homeA = skillsHomeForUser(settings, "user-a");
+    const homeB = skillsHomeForUser(settings, "user-b");
+    const [skillsA, skillsB] = await Promise.all([
+      listSkillsSafe(emptyProject, homeA),
+      listSkillsSafe(emptyProject, homeB),
+    ]);
+    assert.ok(skillsA.map((s) => s.name).includes("shared-skill"), "user-a 应看到共享技能根里的技能");
+    assert.ok(skillsB.map((s) => s.name).includes("shared-skill"), "user-b 应看到共享技能根里的技能");
+  } finally {
+    fs.rmSync(engineRoot, { recursive: true, force: true });
+    fs.rmSync(skillsRoot, { recursive: true, force: true });
     fs.rmSync(emptyProject, { recursive: true, force: true });
   }
 });

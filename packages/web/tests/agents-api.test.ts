@@ -13,7 +13,12 @@ import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ServerResponse } from "node:http";
-import { handleCreateAgent, handleCreateAgentDraft, parseAgentDraftJson } from "../src/api/agents-api";
+import {
+  handleCreateAgent,
+  handleCreateAgentDraft,
+  handleImportPresetAgents,
+  parseAgentDraftJson,
+} from "../src/api/agents-api";
 import { extractMentionedAgents } from "../src/api/chat-api";
 import { listSkillsSafe, type CapabilitySkill } from "../src/api/capability-api";
 
@@ -75,6 +80,18 @@ function makeReq(body: unknown): any {
   return req;
 }
 
+/**
+ * 归一后的 Web 配置替身（2026-11-04）
+ *
+ * personalOnly=false → 引擎数据根 = 进程家目录（本文件已把 HOME 指向临时目录），
+ * skillsHomeRoot=null → 技能根跟随引擎数据根（团队服务器口径，行为不变）。
+ */
+const WEB_SETTINGS = {
+  personalOnly: false,
+  engineHomeRoot: path.join(homeTmp, "engine-home"),
+  skillsHomeRoot: null,
+} as unknown as Parameters<typeof handleCreateAgent>[3];
+
 function skillPath(name: string): string {
   return path.join(homeTmp, ".deepcode", "skills", name, "SKILL.md");
 }
@@ -89,7 +106,8 @@ test("POST /api/agents 创建成功：落盘用户级扫描根 + frontmatter 含
       content: "- 逐条给出问题与修复建议",
     }),
     res,
-    { userId: "u1", username: "tester" } as any
+    { userId: "u1", username: "tester" } as any,
+    WEB_SETTINGS
   );
 
   assert.equal(status(), 201);
@@ -105,10 +123,15 @@ test("POST /api/agents 创建成功：落盘用户级扫描根 + frontmatter 含
 
 test("POST /api/agents 同名拒写返回 409（duplicate-name）", async () => {
   const { res, status, json } = makeRes();
-  await handleCreateAgent(makeReq({ name: "code-reviewer", description: "重复创建", role: "r", content: "" }), res, {
-    userId: "u1",
-    username: "tester",
-  } as any);
+  await handleCreateAgent(
+    makeReq({ name: "code-reviewer", description: "重复创建", role: "r", content: "" }),
+    res,
+    {
+      userId: "u1",
+      username: "tester",
+    } as any,
+    WEB_SETTINGS
+  );
   assert.equal(status(), 409);
   assert.equal(json().ok, false);
   assert.equal(json().reason, "duplicate-name");
@@ -116,19 +139,29 @@ test("POST /api/agents 同名拒写返回 409（duplicate-name）", async () => 
 
 test("POST /api/agents 非 kebab-case 名称返回 400", async () => {
   const { res, status } = makeRes();
-  await handleCreateAgent(makeReq({ name: "My Agent", description: "d", role: "r", content: "" }), res, {
-    userId: "u1",
-    username: "tester",
-  } as any);
+  await handleCreateAgent(
+    makeReq({ name: "My Agent", description: "d", role: "r", content: "" }),
+    res,
+    {
+      userId: "u1",
+      username: "tester",
+    } as any,
+    WEB_SETTINGS
+  );
   assert.equal(status(), 400);
 });
 
 test("POST /api/agents 缺 name/description 返回 400", async () => {
   const { res, status } = makeRes();
-  await handleCreateAgent(makeReq({ description: "d", role: "r" }), res, {
-    userId: "u1",
-    username: "tester",
-  } as any);
+  await handleCreateAgent(
+    makeReq({ description: "d", role: "r" }),
+    res,
+    {
+      userId: "u1",
+      username: "tester",
+    } as any,
+    WEB_SETTINGS
+  );
   assert.equal(status(), 400);
 });
 
@@ -211,7 +244,8 @@ test("listSkillsSafe：agent 条目下发中文 role（展示名数据源），�
       content: "",
     }),
     res,
-    { userId: "u1", username: "tester" } as any
+    { userId: "u1", username: "tester" } as any,
+    WEB_SETTINGS
   );
   assert.equal(status(), 201);
 
@@ -226,5 +260,110 @@ test("listSkillsSafe：agent 条目下发中文 role（展示名数据源），�
   const plainSkill = skills.find((s) => s.kind === "skill");
   if (plainSkill !== undefined) {
     assert.equal(plainSkill.role, undefined);
+  }
+});
+
+/* ────────────── 写读同根回归（2026-11-04：桌面版技能/智能体恒为空） ────────────── */
+
+/**
+ * 本组用例锁住本次修复的核心不变量：**写入根 === 扫描根**。
+ *
+ * 修复前的错位：写侧（agents-api）落 `os.homedir()/.deepcode/skills`，
+ * 读侧（capability-api）扫 `<engineHomeRoot>/<userId>/.deepcode/skills`——
+ * 桌面版（personalOnly=true）两者不同，于是：
+ * - 预置智能体导入的 35 个 Agent 在列表里一个都看不见；
+ * - 用户新建的智能体落在一个目录、列表扫另一个目录，永远看不到。
+ */
+test("写读同根：显式 skillsHomeRoot 时，新建智能体落在技能根且能被扫到", async () => {
+  const skillsRoot = mkdtempSync(path.join(tmpdir(), "deepcode-skills-root-"));
+  try {
+    const settings = {
+      personalOnly: true,
+      engineHomeRoot: path.join(skillsRoot, "engine-home"),
+      skillsHomeRoot: skillsRoot,
+    } as unknown as Parameters<typeof handleCreateAgent>[3];
+    const { res, status } = makeRes();
+    await handleCreateAgent(
+      makeReq({ name: "same-root-agent", description: "写读同根验证", role: "验证角色", content: "" }),
+      res,
+      { userId: "u1", username: "tester" } as any,
+      settings
+    );
+    assert.equal(status(), 201);
+
+    // 落盘位置 = <skillsHomeRoot>/.deepcode/skills/<name>/SKILL.md
+    const file = path.join(skillsRoot, ".deepcode", "skills", "same-root-agent", "SKILL.md");
+    assert.ok(existsSync(file), `应落在技能资产根，实际缺失：${file}`);
+
+    // 读侧用同一根扫描 → 必须能扫到（写进去 = 扫得到）
+    const skills = await listSkillsSafe(skillsRoot, skillsRoot);
+    assert.ok(
+      skills.some((s) => s.name === "same-root-agent"),
+      `扫描结果应包含刚写入的智能体，实际：${skills.map((s) => s.name).join(",")}`
+    );
+  } finally {
+    rmSync(skillsRoot, { recursive: true, force: true });
+  }
+});
+
+test("写读同根：未显式配置时（团队服务器口径）落 per-user 引擎根且能被扫到", async () => {
+  const engineRoot = mkdtempSync(path.join(tmpdir(), "deepcode-engine-root-"));
+  try {
+    const settings = {
+      personalOnly: true,
+      engineHomeRoot: engineRoot,
+      skillsHomeRoot: null,
+    } as unknown as Parameters<typeof handleCreateAgent>[3];
+    const { res, status } = makeRes();
+    await handleCreateAgent(
+      makeReq({ name: "per-user-agent", description: "per-user 落点验证", role: "验证角色", content: "" }),
+      res,
+      { userId: "u2", username: "tester" } as any,
+      settings
+    );
+    assert.equal(status(), 201);
+
+    const userHome = path.join(engineRoot, "u2");
+    const file = path.join(userHome, ".deepcode", "skills", "per-user-agent", "SKILL.md");
+    assert.ok(existsSync(file), `应落在 per-user 引擎根，实际缺失：${file}`);
+
+    const skills = await listSkillsSafe(userHome, userHome);
+    assert.ok(
+      skills.some((s) => s.name === "per-user-agent"),
+      "扫描结果应包含刚写入的智能体"
+    );
+  } finally {
+    rmSync(engineRoot, { recursive: true, force: true });
+  }
+});
+
+test("预置智能体导入：落技能资产根（修复前落 ~/.deepcode/skills，桌面版永远扫不到）", async () => {
+  const skillsRoot = mkdtempSync(path.join(tmpdir(), "deepcode-skills-root-"));
+  try {
+    const settings = {
+      personalOnly: true,
+      engineHomeRoot: path.join(skillsRoot, "engine-home"),
+      skillsHomeRoot: skillsRoot,
+    } as unknown as Parameters<typeof handleImportPresetAgents>[3];
+    const { res, status, json } = makeRes();
+    await handleImportPresetAgents(makeReq({}), res, { userId: "u1", username: "tester" } as any, settings);
+    assert.equal(status(), 200);
+    assert.equal(json().ok, true);
+    assert.ok(json().written > 0, "应写入预置智能体");
+
+    // 预置智能体必须落在技能资产根下
+    const presetDir = path.join(skillsRoot, ".deepcode", "skills");
+    assert.ok(existsSync(presetDir), `预置智能体应落在技能资产根，实际缺失：${presetDir}`);
+
+    // 读侧同一根扫描 → 能扫到预置智能体
+    const skills = await listSkillsSafe(skillsRoot, skillsRoot);
+    const agents = skills.filter((s) => s.kind === "agent");
+    assert.ok(agents.length > 0, "扫描结果应包含预置智能体");
+    assert.ok(
+      agents.some((s) => s.preset === true),
+      "预置智能体应带 preset 标记"
+    );
+  } finally {
+    rmSync(skillsRoot, { recursive: true, force: true });
   }
 });

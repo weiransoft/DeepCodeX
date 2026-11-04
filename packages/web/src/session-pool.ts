@@ -676,6 +676,12 @@ export class SessionPool {
       // W2 牢笼注入：per-user 引擎数据根（记忆/日志/会话索引按用户物理分离）
       // 与项目级 settings 忽略开关（personalOnly=false 时两者缺省 = 旧行为）
       ...(this.settings.personalOnly ? { homeDir: engineHomeDir, ignoreProjectSettings: true } : {}),
+      // 技能 / 智能体资产根（2026-11-04）：与引擎数据根解耦——显式配置时
+      // 直读直写该路径（本机单用户部署：桌面与 CLI 同一份技能，@agent 激活
+      // 与能力列表同源）；未配置时缺省 = homeDir（per-user 隔离，行为不变）。
+      ...(this.settings.skillsHomeRoot !== null && this.settings.skillsHomeRoot !== undefined
+        ? { skillsHomeRoot: this.settings.skillsHomeRoot }
+        : {}),
       // ADR-DI-001 动态指令注入接线（docs/dev/web-steering.md W2）：注入后
       // E3 流式检查点/E2 主循环头部才生效；未注入时引擎行为零变化。
       interruptQueue,

@@ -244,3 +244,40 @@ test(
     assert.equal(noRole.reason, "invalid-frontmatter");
   })
 );
+
+// ============================================================================
+// 用户级落盘根注入（2026-11-04：写入根必须与扫描根同源）
+// ============================================================================
+
+test(
+  "scope=user 落盘根随 homeRoot 注入（不写死 os.homedir()）",
+  withTempProject(async (project, home) => {
+    // 注入一个与进程 HOME 不同的家目录锚点
+    const injected = fs.mkdtempSync(path.join(os.tmpdir(), "sediment-writer-injected-"));
+    try {
+      const writer = new SedimentationWriter({ projectRoot: project, homeRoot: injected });
+      const result = await writer.write(baseSkillDraft({ name: "injected-root-skill" }), "user");
+      assert.ok(result.ok);
+
+      const expected = path.join(injected, ".deepcode", "skills", "injected-root-skill", "SKILL.md");
+      assert.ok(fs.existsSync(expected), `应落在注入的 homeRoot 下，实际缺失：${expected}`);
+      // 不得落进进程家目录（否则读写不同源，"写进去 = 扫得到" 不成立）
+      assert.equal(fs.existsSync(path.join(home, ".deepcode", "skills", "injected-root-skill")), false);
+    } finally {
+      fs.rmSync(injected, { recursive: true, force: true });
+    }
+  })
+);
+
+test(
+  "scope=user 未注入 homeRoot 时仍落进程家目录（CLI 行为逐字节不变）",
+  withTempProject(async (project, home) => {
+    const writer = createWriter(project);
+    const result = await writer.write(baseSkillDraft({ name: "default-home-skill" }), "user");
+    assert.ok(result.ok);
+    assert.ok(
+      fs.existsSync(path.join(home, ".deepcode", "skills", "default-home-skill", "SKILL.md")),
+      "缺省应落 os.homedir()/.deepcode/skills"
+    );
+  })
+);

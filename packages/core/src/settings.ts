@@ -227,6 +227,24 @@ export type WebSettings = {
    * 默认空 = 派生 <uploadDir>/.engine-home（不在任何 allowRoot 内）。
    */
   engineHomeDir?: string;
+  /**
+   * 用户级技能 / 智能体资产根（可选，2026-11-04）
+   *
+   * 技能与智能体是**用户资产**（与 CLI 同源的那一份），而会话 / 记忆 / 日志是
+   * **引擎运行数据**（Web 多用户下必须 per-user 隔离）——两者本不该绑死。
+   *
+   * - 缺省（未配置）：技能根跟随引擎数据根 per-user 隔离
+   *   （`<engineHomeDir>/<userId>/.deepcode/skills`），团队服务器下用户互不可见；
+   * - 显式配置（绝对路径或 `~`）：技能根**直读直写该路径**（不再追加 userId 段），
+   *   即 `<skillsHomeDir>/.deepcode/skills`，与 CLI 的 `~/.deepcode/skills` 同源。
+   *
+   * 本机单用户部署（桌面壳）用后者：桌面与 CLI 是同一个物理用户，技能应当互通；
+   * 团队服务器保持缺省，避免多用户串号。
+   *
+   * 也可由环境变量 `DEEPCODE_WEB_SKILLS_HOME_DIR` 覆盖（桌面壳走此通道，
+   * 不改写用户 settings.json）。
+   */
+  skillsHomeDir?: string;
   /** 单文件上传上限（字节），默认 50MB */
   maxUploadBytes?: number;
   /**

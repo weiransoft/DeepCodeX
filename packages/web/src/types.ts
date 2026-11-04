@@ -60,6 +60,18 @@ export type ResolvedWebSettings = {
    * 缺省 = `<uploadDir>/.engine-home`。
    */
   engineHomeRoot: string;
+  /**
+   * 用户级技能 / 智能体资产根（2026-11-04）
+   *
+   * `null` = 未显式配置 → 技能根跟随引擎数据根 per-user 隔离
+   * （`<engineHomeRoot>/<userId>/.deepcode/skills`，团队服务器口径）；
+   * 非 null = 显式配置的绝对路径 → 技能根直读直写该路径下的 `.deepcode/skills`
+   * （本机单用户部署口径：桌面与 CLI 同源）。
+   *
+   * 与 `engineHomeRoot` 分开的原因见 core `WebSettings.skillsHomeDir` 注释：
+   * 技能是用户资产，会话/记忆是引擎运行数据，两者的隔离粒度本就不同。
+   */
+  skillsHomeRoot: string | null;
   /** 单文件上传上限（字节，默认 50MB） */
   maxUploadBytes: number;
   /**

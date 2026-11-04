@@ -840,6 +840,21 @@ export type SessionManagerOptions = {
    */
   homeDir?: string;
   /**
+   * 用户级技能 / 智能体资产根（可选注入，2026-11-04）
+   *
+   * 与 `homeDir` 解耦：homeDir 是**引擎运行数据**根（会话/记忆/日志，团队服务器
+   * 下必须 per-user 隔离），本项是**用户资产**根（技能/智能体，本机单用户部署
+   * 下应与 CLI 同源）。
+   *
+   * 注入后，本实例的 SkillManager 用户级扫描根锚定
+   * `<skillsHomeRoot>/.deepcode/skills`（另含 `.agents/skills`、
+   * `.trae-cn/builtin_skills`），**不再追加 userId 段**。
+   *
+   * 缺省 = homeDir ?? os.homedir()（CLI 行为逐字节不变；Web 个人模式沿用
+   * per-user 隔离）。
+   */
+  skillsHomeRoot?: string;
+  /**
    * Web 个人工作区牢笼：忽略项目级 settings.json（docs/dev/web-workspace.md C3）。
    *
    * true 时本实例内 resolveCurrentSettings 一律跳过
@@ -1530,6 +1545,14 @@ export class SessionManager {
    * 构造时锁定（options.homeDir ?? os.homedir()），会话生命周期内不可变。
    */
   private readonly homeRoot: string;
+  /**
+   * 用户级技能 / 智能体资产根（2026-11-04）：SkillManager 用户级扫描根的锚点。
+   * 构造时锁定（options.skillsHomeRoot ?? homeRoot），会话生命周期内不可变。
+   *
+   * 与 homeRoot 分开的原因：技能是用户资产（本机单用户部署应与 CLI 同源），
+   * 而 homeRoot 是引擎运行数据根（团队服务器下必须 per-user 隔离）。
+   */
+  private readonly skillsHomeRoot: string;
   /** 是否忽略项目级 settings.json（docs/dev/web-workspace.md C3，Web 牢笼防凭据劫持） */
   private readonly ignoreProjectSettings: boolean;
   private readonly createOpenAIClient: CreateOpenAIClient;
@@ -1759,6 +1782,10 @@ export class SessionManager {
     // 由调用方注入 `<engineHomeDir>/<userId>`，本实例全部引擎记忆/日志/会话
     // 索引都落在该目录下，与用户可读写的工作区（projectRoot）物理分离。
     this.homeRoot = options.homeDir ?? os.homedir();
+    // 用户级技能 / 智能体资产根（2026-11-04）：与引擎数据根解耦——本机单用户
+    // 部署（桌面壳）里技能应与 CLI 同源，而会话/记忆仍按用户隔离。
+    // 缺省 = homeRoot（CLI 与 Web 个人模式的既有行为逐字节不变）。
+    this.skillsHomeRoot = options.skillsHomeRoot ?? this.homeRoot;
     // 凭据防劫持开关（docs/dev/web-workspace.md C3）：true 时本实例的引擎设置
     // 解析全部忽略 project 级 settings（用户可写区不可注入 API_KEY/mcpServers 等），
     // 未注入时 false，行为与既有 CLI/Web 完全一致。
@@ -1840,7 +1867,9 @@ export class SessionManager {
       // 2026-11-02（接线审查 D4）：用户级技能/智能体扫描根锚定本实例的引擎数据根。
       // Web 个人模式下 homeRoot = <engineHomeRoot>/<userId>，此前写死 os.homedir()
       // 会导致「用户建的智能体扫不到」+「所有用户共享同一份技能目录」。
-      homeRoot: this.homeRoot,
+      // 2026-11-04：改锚 skillsHomeRoot（技能资产根，与引擎数据根解耦）——
+      // 显式注入时直读直写该路径（本机单用户部署：桌面与 CLI 同一份技能）。
+      homeRoot: this.skillsHomeRoot,
     });
     // AgentRegistry 初始化（T01）：包装既有 SkillManager，复用扫描根/去重/enabledSkills 链；
     // 构造失败降级为空注册表（fail-safe，不阻塞 SessionManager 装配）

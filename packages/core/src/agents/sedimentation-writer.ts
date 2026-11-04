@@ -6,7 +6,7 @@
  * Q5 安全门槛（五条，全部有单测覆盖）：
  * 1. 仅接受 Draft 白名单字段（kind/name/description/role/content），其余一律丢弃；
  * 2. name 必须过 kebab-case（^[a-z0-9]+(?:-[a-z0-9]+)*$）；
- * 3. 目标目录限定 <home>/.deepcode/skills/<name>/（scope=user）或
+ * 3. 目标目录限定 <homeRoot>/.deepcode/skills/<name>/（scope=user，homeRoot 缺省 os.homedir()）或
  *    <projectRoot>/.deepcode/skills/<name>/（scope=project），resolve 后必须位于根内
  *    （路径牢笼防穿越；牢笼校验先于 kebab 校验执行，保证任何输入都先过牢笼）；
  * 4. 同名 SKILL.md 已存在 → duplicate-name 拒写（P1-3 再做修订草稿）；
@@ -61,6 +61,18 @@ export type WriteResult =
 export interface SedimentationWriterDeps {
   /** 项目根目录（scope=project 时落盘根） */
   projectRoot: string;
+  /**
+   * 用户级落盘根的家目录锚点（可选，2026-11-04）
+   *
+   * scope=user 的落盘根 = `<homeRoot>/.deepcode/skills`。缺省 `os.homedir()`
+   * （CLI 与既有单用户路径逐字节不变）。
+   *
+   * 注入点存在的理由：**写入根必须与扫描根同源**。SkillManager 的用户级扫描根
+   * 由 `homeRoot` 注入（Web 个人模式下为 `<engineHomeRoot>/<userId>`），而本写入器
+   * 此前写死 `os.homedir()`——两端错位时，「Web 里新建的智能体」落在一个目录，
+   * 列表却扫另一个目录，用户永远看不到自己刚建的东西。
+   */
+  homeRoot?: string;
   /** 可选：结构化日志函数（缺省 console.warn 兜底；禁止打印对话原文与 PII） */
   log?: SedimentLogFn;
 }
@@ -203,13 +215,16 @@ export class SedimentationWriter {
   }
 
   /**
-   * 解析落盘根目录：scope=user → <home>/.deepcode/skills；scope=project → <projectRoot>/.deepcode/skills。
+   * 解析落盘根目录：scope=user → <homeRoot>/.deepcode/skills；scope=project → <projectRoot>/.deepcode/skills。
+   *
+   * homeRoot 缺省 `os.homedir()`（CLI 行为不变）；注入时与 SkillManager 的用户级
+   * 扫描根同源，保证「写进去 = 扫得到」。
    */
   private resolveScopeRoot(scope: SedimentationScope): string {
     if (scope === "project") {
       return path.join(this.deps.projectRoot, ".deepcode", "skills");
     }
-    return path.join(os.homedir(), ".deepcode", "skills");
+    return path.join(this.deps.homeRoot ?? os.homedir(), ".deepcode", "skills");
   }
 
   /**

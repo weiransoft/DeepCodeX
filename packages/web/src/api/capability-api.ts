@@ -24,7 +24,7 @@ import {
   type McpServerConfig,
 } from "@vegamo/deepcode-core";
 import { sendJson } from "../http-utils";
-import { engineHomeForUser, type EngineHomeSettings } from "../engine-home";
+import { skillsHomeForUser, type EngineHomeSettings } from "../engine-home";
 import type { AuthContext } from "../user-identity";
 
 /** 技能条目（前端展示 / @ 提及候选；path 仅展示来源，不含内容） */
@@ -159,21 +159,27 @@ export function listCommandsSafe(): CapabilityCommand[] {
  * 否则 Web 用户在自己 homeRoot 下建的技能/智能体扫不到，而所有人共享进程家目录
  * 下那一份——多用户串号。
  *
+ * 技能资产根（2026-11-04）：改用 `skillsHomeForUser()`——显式配置了
+ * `web.skillsHomeDir` / `DEEPCODE_WEB_SKILLS_HOME_DIR` 时直读直写该路径
+ * （本机单用户部署：桌面与 CLI 同源），否则回退 per-user 隔离。
+ * 关键不变量：**写入根与扫描根必须同源**（agents-api 的落盘根同口径），
+ * 否则「刚建的智能体」永远扫不到。
+ *
  * projectRoot 同样取引擎数据家目录：项目级扫描根（`.deepcode/skills`）原本指向家目录，
  * 也只是"能扫到点东西"的近似，改锚后与用户实际数据根一致。
  *
  * @param res 响应对象
  * @param _req 请求对象（当前无查询参数）
  * @param ctx 认证上下文（提供 userId 用于解析 per-user 引擎数据根）
- * @param settings 归一后的 Web 配置（提供 personalOnly / engineHomeRoot）
+ * @param settings 归一后的 Web 配置（提供 personalOnly / engineHomeRoot / skillsHomeRoot）
  */
 export async function handleListCapabilities(
   res: ServerResponse,
   _req: IncomingMessage,
   ctx: AuthContext,
-  settings: EngineHomeSettings
+  settings: EngineHomeSettings & { skillsHomeRoot?: string | null }
 ): Promise<void> {
-  const homeRoot = engineHomeForUser(settings, ctx.userId);
+  const homeRoot = skillsHomeForUser(settings, ctx.userId);
   const [skills] = await Promise.all([listSkillsSafe(homeRoot, homeRoot)]);
   // 默认智能体与技能清单同一次请求下发：设置页据此渲染「当前默认」，
   // 免去再加一个只读端点（数据源同为 resolveCurrentSettings，无需重复解析两次以上）

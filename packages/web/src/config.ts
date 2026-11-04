@@ -351,6 +351,17 @@ export function resolveWebSettings(
     }
   }
 
+  // 6.1.1 用户级技能 / 智能体资产根归一（2026-11-04）：
+  // - 缺省（null）→ 技能根跟随引擎数据根 per-user 隔离（团队服务器口径，现状不变）；
+  // - 显式配置 → 技能根直读直写该路径（不再追加 userId 段），与 CLI 同源。
+  // 环境变量 DEEPCODE_WEB_SKILLS_HOME_DIR 优先于 settings.json（桌面壳走此通道，
+  // 不改写用户配置）；两者都缺省时为 null。
+  const rawSkillsHomeDir = env["DEEPCODE_WEB_SKILLS_HOME_DIR"] ?? merged.skillsHomeDir;
+  const skillsHomeRoot =
+    typeof rawSkillsHomeDir === "string" && rawSkillsHomeDir.trim() !== ""
+      ? expandHomePath(rawSkillsHomeDir.trim())
+      : null;
+
   // 6.2 补充指令（steering）开关归一（docs/dev/web-steering.md W7）：
   // 默认 true——运行中补充消息经 LLM 意图分类决定注入/排队；
   // 显式配置 false 回退纯串行排队（分类器整体关闭的回退开关）。
@@ -413,6 +424,8 @@ export function resolveWebSettings(
     // 个人工作目录模式与引擎数据家目录根（6.1 归一产物，docs/dev/web-workspace.md W1）
     personalOnly,
     engineHomeRoot,
+    // 用户级技能 / 智能体资产根（6.1.1 归一产物；null = 跟随 per-user 隔离）
+    skillsHomeRoot,
     maxUploadBytes,
     // 文本预览上限（docs/dev/web-file-preview.md P1 归一产物）
     maxPreviewBytes,

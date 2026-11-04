@@ -24,7 +24,7 @@ import { ApiError, readJsonBody, sendJson } from "../http-utils";
 import { realpathAllowMissing } from "../jail";
 import { personalUploadRoot } from "../user-files";
 import { listSkillsSafe, type CapabilitySkill } from "./capability-api";
-import { engineHomeForUser } from "../engine-home";
+import { skillsHomeForUser } from "../engine-home";
 import type { SessionPool, SendMessageInput } from "../session-pool";
 import type { AuthContext } from "../user-identity";
 import type { SseHub } from "../events";
@@ -497,8 +497,10 @@ export async function handleSendMessage(
   // fail-safe：扫描/激活失败仅日志，绝不阻塞消息发送。
   if (input.text !== undefined && input.text.includes("@")) {
     try {
-      // 用户级扫描根锚定本用户引擎数据根（D4）：否则 Web 用户自己建的智能体扫不到
-      const homeRoot = engineHomeForUser(settings, ctx.userId);
+      // 用户级扫描根锚定技能资产根（2026-11-04）：与 /api/capabilities 列表
+      // 同源——列表里能看到的 Agent，@ 提及才能激活（此前两处口径不一致时，
+      // 面板里选得到、发送后却不生效）。
+      const homeRoot = skillsHomeForUser(settings, ctx.userId);
       const agents = (await listSkillsSafe(homeRoot, homeRoot)).filter((s) => s.kind === "agent");
       for (const name of extractMentionedAgents(input.text, agents)) {
         const ok = await pool.activateAgent(chatId, ctx, name);

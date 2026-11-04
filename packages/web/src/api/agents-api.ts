@@ -2,10 +2,14 @@
  * 自定义 Agent 创建端点（POST /api/agents）：
  *
  * 落盘复用 core SedimentationWriter（五条安全门槛：白名单字段 / kebab-case /
- * 路径牢笼 / 同名拒写 / io 降级），scope=user 落用户级扫描根
- * `~/.deepcode/skills/<name>/SKILL.md`（frontmatter type: agent + role）。
+ * 路径牢笼 / 同名拒写 / io 降级），scope=user 落**用户级技能资产根**
+ * `<skillsHome>/.deepcode/skills/<name>/SKILL.md`（frontmatter type: agent + role）。
  * 落盘后引擎 SkillManager 扫描链与 @ 提及补全、设置页「智能体」列表、
  * system prompt agent 索引自动可见（同一数据源，零额外注册）。
+ *
+ * 落盘根由 `skillsHomeForUser()` 解析（2026-11-04），与 GET /api/capabilities
+ * 的扫描根**同源**：未显式配置时随 per-user 引擎根隔离（团队服务器），
+ * 显式配置时直读直写该路径（桌面壳：本机单用户，与 CLI 同一份技能）。
  *
  * 只做创建：修订/删除后续迭代（同名拒写返回 duplicate-name 结构化原因）。
  */
@@ -22,6 +26,7 @@ import {
   PRESET_AGENT_COUNT,
 } from "@vegamo/deepcode-core";
 import { readJsonBody, sendJson } from "../http-utils";
+import { skillsHomeForUser, type SkillsHomeSettings } from "../engine-home";
 import type { AuthContext } from "../user-identity";
 
 /** POST /api/agents 请求体 */
@@ -98,8 +103,18 @@ export function parseAgentDraftJson(raw: string): {
  * 校验：name/description 必填字符串（role/content 可选字符串，缺省空串——
  * kind=agent 时 role 必填由 Writer 门槛兜底，返回结构化中文原因）。
  * Writer 任何失败（含 io）都不抛出：统一 4xx + WriteResult 形体返回。
+ *
+ * 落盘根（2026-11-04）：`skillsHomeForUser()` 解析出的**技能资产根**——
+ * 与 GET /api/capabilities 的扫描根同源。此前写死 `os.homedir()`、读侧却按
+ * per-user 引擎根扫描，两端错位 → 桌面版「新建的智能体」落在一个目录、列表扫
+ * 另一个目录，用户永远看不到自己刚建的东西（并与 CLI 抢同一份文件名）。
  */
-export async function handleCreateAgent(req: IncomingMessage, res: ServerResponse, _ctx: AuthContext): Promise<void> {
+export async function handleCreateAgent(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: AuthContext,
+  settings: SkillsHomeSettings
+): Promise<void> {
   const body = await readJsonBody<CreateAgentInput>(req);
   const name = typeof body.name === "string" ? body.name.trim() : "";
   const description = typeof body.description === "string" ? body.description.trim() : "";
@@ -114,8 +129,12 @@ export async function handleCreateAgent(req: IncomingMessage, res: ServerRespons
     return;
   }
 
-  // Writer 无状态，用现用现建；projectRoot 传用户主目录（scope=user 时不参与根解析）
-  const writer = new SedimentationWriter({ projectRoot: os.homedir() });
+  // Writer 无状态，用现用现建；scope=user 的落盘根由 homeRoot 注入
+  // （缺省 os.homedir()；projectRoot 仅 scope=project 才参与根解析）
+  const writer = new SedimentationWriter({
+    projectRoot: os.homedir(),
+    homeRoot: skillsHomeForUser(settings, ctx.userId),
+  });
   const result = await writer.write({ kind: "agent", name, description, role, content }, "user");
   if (!result.ok) {
     // 失败形态带结构化 reason：duplicate-name → 409，其余 → 400
@@ -230,18 +249,25 @@ type ImportPresetsInput = {
 /**
  * 处理 POST /api/agents/presets（已认证）：导入 / 修复预置智能体。
  *
+ * 落盘根（2026-11-04）：与 GET /api/capabilities 扫描根同源的**技能资产根**
+ * （`skillsHomeForUser()` → `<skillsHome>/.deepcode/skills`）。此前写死
+ * `~/.deepcode/skills`、读侧按 per-user 引擎根扫描 → 桌面版导入的 35 个预置
+ * 智能体在列表里一个都看不到（"代码里有 35 个智能体，界面里一个也看不到"）。
+ *
  * @param req 请求对象（可带 `{ overwrite: boolean }`）
  * @param res 响应对象
- * @param _ctx 认证上下文
+ * @param ctx 认证上下文
+ * @param settings 归一后的 Web 配置（解析技能资产根）
  */
 export async function handleImportPresetAgents(
   req: IncomingMessage,
   res: ServerResponse,
-  _ctx: AuthContext
+  ctx: AuthContext,
+  settings: SkillsHomeSettings
 ): Promise<void> {
   const body = await readJsonBody<ImportPresetsInput>(req).catch(() => ({}) as ImportPresetsInput);
   const overwrite = body.overwrite === true;
-  const root = path.join(os.homedir(), ".deepcode", "skills");
+  const root = path.join(skillsHomeForUser(settings, ctx.userId), ".deepcode", "skills");
   const result = syncPresetAgents(root, { overwrite });
   // failed 非空时用 207（部分成功）：前端据 written/failed 如实提示，不谎报全成功
   sendJson(res, result.failed.length > 0 ? 207 : 200, {

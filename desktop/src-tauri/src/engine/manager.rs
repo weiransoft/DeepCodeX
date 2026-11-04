@@ -487,6 +487,11 @@ impl EngineRuntime {
             // cli.js 所在目录消除该路径差异（所有文件访问均为绝对路径，cwd 无功能影响）
             .current_dir(engine_cli_dir(&engine))
             .env(JWT_SECRET_ENV, jwt_secret)
+            // 技能 / 智能体资产根 = 真实家目录（2026-11-04）：桌面与 CLI 同一份
+            // ~/.deepcode/skills。不注入时引擎按 Web 多用户口径锚在空的 per-user
+            // 引擎数据根 → 桌面版「技能 / 智能体」列表恒为空。
+            // 家目录取不到时跳过注入（引擎回退默认口径，不阻断启动）。
+            .envs(settings::skills_home_env())
             // provider 接入：把默认模型的密钥 / 模型 / provider / baseURL 经 DEEPCODE_*
             // 环境变量注入引擎进程环境（密钥取自钥匙串，绝不回写 settings.json 明文）。
             // .envs 仅向继承环境追加，不清除 PATH 等既有变量。

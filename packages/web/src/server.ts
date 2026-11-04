@@ -476,9 +476,10 @@ export async function startWebServer(
       }
 
       // 自定义 Agent 创建（设置抽屉「智能体」页签）：
-      // 复用 SedimentationWriter 五条安全门槛，scope=user 落 ~/.deepcode/skills
+      // 复用 SedimentationWriter 五条安全门槛，scope=user 落技能资产根
+      // （与 /api/capabilities 扫描根同源）
       if (pathname === "/api/agents" && req.method === "POST") {
-        await handleCreateAgent(req, res, ctx);
+        await handleCreateAgent(req, res, ctx, resolved);
         return;
       }
 
@@ -488,9 +489,9 @@ export async function startWebServer(
         return;
       }
 
-      // 预置智能体导入 / 修复（5 核心角色 + 30 领域专家 → ~/.deepcode/skills）
+      // 预置智能体导入 / 修复（5 核心角色 + 30 领域专家 → 技能资产根）
       if (pathname === "/api/agents/presets" && req.method === "POST") {
-        await handleImportPresetAgents(req, res, ctx);
+        await handleImportPresetAgents(req, res, ctx, resolved);
         return;
       }
 

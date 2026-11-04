@@ -268,3 +268,24 @@ test("config：引导密码哈希与 sha256(明文) 一致（登录校验可命�
   const expected = createHash("sha256").update(resolved.auth.bootstrapPassword!, "utf8").digest("hex").toLowerCase();
   assert.equal(resolved.auth.localUsers[0].passwordHash, expected, "哈希必须可由明文推导（登录可命中）");
 });
+
+/* ───────────── 技能资产根归一（2026-11-04） ───────────── */
+
+test("config：未配置技能根时 skillsHomeRoot=null（跟随 per-user 引擎根）", () => {
+  const { resolved } = resolveWithProjectSettings({}, { DEEPCODE_WEB_JWT_SECRET: "env-secret" });
+  assert.equal(resolved.skillsHomeRoot, null, "缺省必须为 null（行为不变）");
+});
+
+test("config：settings.json 的 skillsHomeDir ~ 展开为绝对路径", () => {
+  const { resolved } = resolveWithProjectSettings({ skillsHomeDir: "~" }, { DEEPCODE_WEB_JWT_SECRET: "env-secret" });
+  assert.equal(resolved.skillsHomeRoot, homedir(), "~ 应展开为真实家目录");
+});
+
+test("config：env DEEPCODE_WEB_SKILLS_HOME_DIR 优先于 settings.json（桌面壳注入通道）", () => {
+  const envRoot = path.join(baseTmp, "env-skills-home");
+  const { resolved } = resolveWithProjectSettings(
+    { skillsHomeDir: "/should/be/overridden" },
+    { DEEPCODE_WEB_JWT_SECRET: "env-secret", DEEPCODE_WEB_SKILLS_HOME_DIR: envRoot }
+  );
+  assert.equal(resolved.skillsHomeRoot, envRoot, "env 优先级高于 settings.json");
+});

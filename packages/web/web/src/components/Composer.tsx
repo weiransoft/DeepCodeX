@@ -35,6 +35,14 @@ import {
   WrenchIcon,
 } from "./icons";
 
+/**
+ * 能力清单的加载状态（2026-11-04）
+ *
+ * 三态显式建模，理由见 `caps` state 处注释：失败必须与"还在加载"区分开，
+ * 否则请求早已失败，界面却永远停在「正在加载可用能力…」。
+ */
+type CapsState = { phase: "loading" } | { phase: "error"; message: string } | { phase: "ready"; data: Capabilities };
+
 /** Composer 组件属性 */
 export interface ComposerProps {
   /** 生成中：发送按钮切换为停止（steeringEnabled 时发送与停止并排同显） */
@@ -70,6 +78,26 @@ interface MentionItem {
   description: string;
   /** 种类样式类（mention-badge-skill / -agent / -mcp） */
   kindClass: string;
+}
+
+/**
+ * 候选列表是否等价（2026-11-04）
+ *
+ * 用于「能力清单就绪后重算候选」的收敛保护：内容等价时返回原数组引用，
+ * 避免 setState → 重渲染 → effect 再跑 的无限循环。
+ */
+function sameMentionItems(a: readonly MentionItem[], b: readonly MentionItem[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((item, i) => {
+    const other = b[i];
+    return other !== undefined && item.token === other.token && item.label === other.label;
+  });
+}
+
+/** 斜杠候选列表是否等价（收敛保护，见 sameMentionItems） */
+function sameCommandItems(a: readonly CapabilityCommand[], b: readonly CapabilityCommand[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((item, i) => b[i]?.name === item.name);
 }
 
 /** 从文件名猜测展示图标（图片/代码/普通文件） */
@@ -178,8 +206,15 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
   /** 全部已创建的 ObjectURL 登记（卸载时统一 revoke，防内存泄漏） */
   const allObjectUrlsRef = useRef<Set<string>>(new Set());
 
-  /** 能力清单（技能/Agent/MCP；首个 @ 懒加载，30s TTL 缓存） */
-  const [caps, setCaps] = useState<Capabilities | null>(null);
+  /**
+   * 能力清单状态（技能/Agent/MCP；首个 @ 懒加载，30s TTL 缓存）
+   *
+   * 三态而非 `Capabilities | null`（2026-11-04）：失败必须**可区分**。
+   * 此前失败被静默吞掉（`.catch` 只重置 TTL），`caps` 永久为 null → 面板永远
+   * 显示「正在加载可用能力…」，既不告诉用户出了错，也没有重试入口——
+   * 请求早已失败，界面却永远在"加载中"。
+   */
+  const [caps, setCaps] = useState<CapsState>({ phase: "loading" });
   const capsFetchedAtRef = useRef(0);
   const capsLoadingRef = useRef(false);
   /** @ 提及状态：null = 面板关闭；否则为解析出的替换区间 + 候选 + 高亮项 */
@@ -208,24 +243,37 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
   /** 模型切换中（重启引擎需 1~3s，期间禁重复点击） */
   const [switchingModel, setSwitchingModel] = useState(false);
 
-  /** 懒加载能力清单（30s TTL；失败静默——面板仅展示空态） */
-  const ensureCaps = (): void => {
+  /**
+   * 懒加载能力清单（30s TTL）
+   *
+   * 失败落 **error 态**（带可读原因 + 重试入口），不再静默失败伪装成"加载中"。
+   * force=true 时忽略 TTL 立即重试（错误态下的「重试」按钮走这条路径）。
+   */
+  const ensureCaps = (force = false): void => {
     const now = Date.now();
-    if (capsLoadingRef.current || now - capsFetchedAtRef.current < 30_000) return;
+    if (capsLoadingRef.current) return;
+    if (!force && now - capsFetchedAtRef.current < 30_000) return;
     capsLoadingRef.current = true;
+    // 已有数据时保留（后台刷新不清空列表），否则回到 loading 态
+    setCaps((cur) => (cur.phase === "ready" ? cur : { phase: "loading" }));
     fetchCapabilities()
       .then((data) => {
-        setCaps(data);
+        setCaps({ phase: "ready", data });
         capsFetchedAtRef.current = Date.now();
       })
-      .catch(() => {
-        // 失败不缓存：下次 @ 再试
+      .catch((error: unknown) => {
+        // 失败不缓存：下次 @ 再试；但必须落到 error 态——否则界面永远停在"加载中"
         capsFetchedAtRef.current = 0;
+        const message = error instanceof Error ? error.message : String(error);
+        setCaps({ phase: "error", message });
       })
       .finally(() => {
         capsLoadingRef.current = false;
       });
   };
+
+  /** 已就绪的能力清单（未就绪时为 null——候选为空，界面给出对应状态提示） */
+  const capsData: Capabilities | null = caps.phase === "ready" ? caps.data : null;
 
   /** 由能力清单构建候选（按查询词过滤；技能/Agent/MCP 依次排列） */
   const buildMentionItems = (data: Capabilities | null, query: string): MentionItem[] => {
@@ -285,7 +333,7 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
       return;
     }
     ensureCaps();
-    const items = buildMentionItems(caps, ctx.query);
+    const items = buildMentionItems(capsData, ctx.query);
     if (items.length === 0) {
       setMention({ range: ctx, items, active: -1 });
       return;
@@ -332,7 +380,7 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
       return;
     }
     ensureCaps();
-    const items = buildSlashItems(caps, ctx.query);
+    const items = buildSlashItems(capsData, ctx.query);
     setSlash((prev) => ({
       range: ctx,
       items,
@@ -367,6 +415,37 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
       for (const url of urls) URL.revokeObjectURL(url);
     };
   }, []);
+
+  /**
+   * 能力清单就绪后重算候选（2026-11-04）
+   *
+   * 面板是在用户敲下 @ 的那一刻**同步**算出来的，而能力清单是**异步**到达的。
+   * 不重算的话：用户敲 "@" → 面板显示"正在加载可用能力…" → 清单到达 → 面板变成
+   * "无匹配项"，候选要等用户再敲一个字符才出现。很多人敲完 @ 就停手，
+   * 于是"看起来像加载不出来"——这正是本次修复要消掉的那类假象。
+   *
+   * 收敛保护：候选未变化时返回原对象（不触发重渲染），否则 setState → 重渲染 →
+   * effect 再跑 → 无限循环。
+   */
+  useEffect(() => {
+    if (caps.phase !== "ready") return;
+    if (mention !== null) {
+      const items = buildMentionItems(caps.data, mention.range.query);
+      setMention((prev) =>
+        prev === null || sameMentionItems(prev.items, items)
+          ? prev
+          : { ...prev, items, active: Math.min(prev.active, items.length - 1) }
+      );
+    }
+    if (slash !== null) {
+      const items = buildSlashItems(caps.data, slash.range.query);
+      setSlash((prev) =>
+        prev === null || sameCommandItems(prev.items, items)
+          ? prev
+          : { ...prev, items, active: Math.min(prev.active, Math.max(items.length - 1, 0)) }
+      );
+    }
+  }, [caps, mention, slash]);
 
   /**
    * 在光标处插入 `@token `（技能 / 智能体统一入口）。
@@ -639,7 +718,11 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
           <div className="composer-mention-title">命令（↑↓ 选择，Enter 补全，Esc 关闭）</div>
           {slash.items.length === 0 ? (
             <div className="composer-mention-empty">
-              {caps === null ? "正在加载可用命令…" : `没有匹配「${slash.range.query}」的命令`}
+              {caps.phase === "loading"
+                ? "正在加载可用命令…"
+                : caps.phase === "error"
+                  ? `命令清单加载失败：${caps.message}`
+                  : `没有匹配「${slash.range.query}」的命令`}
             </div>
           ) : (
             slash.items.map((item, i) => (
@@ -675,7 +758,13 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
         <div className="composer-mention" role="listbox" aria-label="@ 提及候选">
           <div className="composer-mention-title">技能 / Agent / MCP（↑↓ 选择，Enter 补全，Esc 关闭）</div>
           {mention.items.length === 0 ? (
-            <div className="composer-mention-empty">{caps === null ? "正在加载可用能力…" : "无匹配项"}</div>
+            <div className="composer-mention-empty">
+              {caps.phase === "loading"
+                ? "正在加载可用能力…"
+                : caps.phase === "error"
+                  ? `能力清单加载失败：${caps.message}`
+                  : "无匹配项"}
+            </div>
           ) : (
             mention.items.map((item, i) => (
               <button
@@ -764,8 +853,21 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
             ) : (
               (() => {
                 const kind = menu.tab === "agent" ? "agent" : "skill";
-                const items = (caps?.skills ?? []).filter((s) => s.kind === kind);
-                if (caps === null) return <div className="composer-menu-empty">正在加载可用能力…</div>;
+                const items = (capsData?.skills ?? []).filter((s) => s.kind === kind);
+                if (caps.phase === "loading") {
+                  return <div className="composer-menu-empty">正在加载可用能力…</div>;
+                }
+                if (caps.phase === "error") {
+                  // 失败必须给出原因 + 重试入口：不再把失败渲染成"永远加载中"
+                  return (
+                    <div className="composer-menu-empty">
+                      <div className="composer-menu-error-text">加载失败：{caps.message}</div>
+                      <button type="button" className="composer-menu-retry" onClick={() => ensureCaps(true)}>
+                        重试
+                      </button>
+                    </div>
+                  );
+                }
                 if (items.length === 0) {
                   return (
                     <div className="composer-menu-empty">

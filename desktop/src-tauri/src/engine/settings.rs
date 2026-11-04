@@ -20,11 +20,32 @@ pub const DEEPCODE_DIR: &str = ".deepcode";
 
 /// `~/.deepcode/settings.json` 路径（生产装配用；测试注入临时路径）。
 pub fn home_settings_path() -> Result<PathBuf, ShellError> {
-    let home = std::env::var_os("HOME")
+    let home = user_home_dir().ok_or_else(|| ShellError::Config("无法定位用户主目录".into()))?;
+    Ok(home.join(DEEPCODE_DIR).join("settings.json"))
+}
+
+/// 真实用户家目录（`$HOME` / `%USERPROFILE%`）；取不到时 None。
+pub fn user_home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
-        .ok_or_else(|| ShellError::Config("无法定位用户主目录".into()))?;
-    Ok(home.join(DEEPCODE_DIR).join("settings.json"))
+}
+
+/// 引擎「用户级技能 / 智能体资产根」环境变量取值（2026-11-04）。
+///
+/// 取真实家目录：桌面壳与 CLI 是**同一个物理用户**，技能资产应当同源
+/// （`~/.deepcode/skills`）。不注入时引擎按 Web 多用户口径把技能锚在空的
+/// per-user 引擎数据根 → 桌面版「技能 / 智能体」列表恒为空。
+///
+/// 取不到家目录时返回空切片：引擎回退默认口径，不阻断启动。
+pub fn skills_home_env() -> Vec<(String, String)> {
+    match user_home_dir() {
+        Some(dir) => vec![(
+            crate::config::SKILLS_HOME_ENV.to_string(),
+            dir.to_string_lossy().into_owned(),
+        )],
+        None => Vec::new(),
+    }
 }
 
 /// 写入权限为 0600 的文件（unix）；Windows 走默认 DACL（属主可写已足够）。
