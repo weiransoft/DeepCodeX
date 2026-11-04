@@ -30,6 +30,11 @@ out/
 # （测试的临时 projectRoot 一般落在 /tmp，但偶尔会落回包目录）。
 **/.deepcode/team-runs/
 
+# 司南的长期记忆（<homeRoot>/.deepcode/soul/memory.json 与 <projectRoot>/.deepcode/soul/memory.json）
+# 里面可能有项目地址、部署位置、常用密码这类原文，0600/0700 只挡本机其它用户，
+# 挡不住 `git add -A` 把凭证明文带进仓库，所以必须忽略。清空记忆走 `deepcodex super soul --forget`。
+**/.deepcode/soul/
+
 # TypeScript build info files
 *.tsbuildinfo
 

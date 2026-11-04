@@ -26,6 +26,8 @@
 import { getEnabledRoles, listRoleIds } from "../../team/role-registry.js";
 import { callLlmOnce, resolveLlmHandle } from "../../team/orchestrator/llm-once.js";
 import { buildIdentityPreamble, SUPER_AGENT_IDENTITY } from "../identity.js";
+import { renderSoulPrompt } from "../soul/render.js";
+import type { Soul } from "../soul/types.js";
 import { buildFallbackPlan, parsePlan, FALLBACK_ROLE, MAX_PLAN_STEPS } from "./parse.js";
 import type { PlanRequest, WorkPlan } from "./types.js";
 
@@ -106,6 +108,13 @@ export interface LlmWorkflowPlannerOptions {
   readonly fallbackRole?: string;
   /** 步骤上限（默认 {@link MAX_PLAN_STEPS}） */
   readonly maxSteps?: number;
+  /**
+   * 人格与记忆（可选）
+   *
+   * 有则拼进规划系统提示：规划器因此知道「这个项目怎么部署、守什么规范」，
+   * 不必在计划里塞一步「先问清楚怎么部署」。缺省则退化为无记忆规划。
+   */
+  readonly soul?: Soul;
 }
 
 /**
@@ -128,6 +137,8 @@ export class LlmWorkflowPlanner implements WorkflowPlanner {
   private readonly fallbackRole: string;
   /** 步骤上限 */
   private readonly maxSteps: number;
+  /** 人格与记忆 */
+  private readonly soul: Soul | undefined;
 
   /**
    * 构造计划器
@@ -143,6 +154,7 @@ export class LlmWorkflowPlanner implements WorkflowPlanner {
     this.roleNames = options.roleNames ?? defaultRoleNames();
     this.fallbackRole = options.fallbackRole ?? FALLBACK_ROLE;
     this.maxSteps = options.maxSteps ?? MAX_PLAN_STEPS;
+    this.soul = options.soul;
   }
 
   /**
@@ -177,7 +189,7 @@ export class LlmWorkflowPlanner implements WorkflowPlanner {
 
     const result = await callLlmOnce(
       handle,
-      renderPlannerSystemPrompt(this.allowedRoles, this.roleNames),
+      renderPlannerSystemPrompt(this.allowedRoles, this.roleNames, this.soul),
       renderPlannerRequest(request, this.maxSteps),
       this.timeoutMs
     );
@@ -285,12 +297,26 @@ export class NullPlanner implements WorkflowPlanner {
  */
 export function renderPlannerSystemPrompt(
   allowedRoles: readonly string[],
-  roleNames: Readonly<Record<string, string>>
+  roleNames: Readonly<Record<string, string>>,
+  soul?: Soul
 ): string {
   const roles = allowedRoles
     .map((roleId) => `- \`${roleId}\`（${roleNames[roleId] ?? roleId}）：${roleSummary(roleId)}`)
     .join("\n");
-  return PLANNER_SYSTEM_PROMPT.replace("{roles}", roles);
+  const base = PLANNER_SYSTEM_PROMPT.replace("{roles}", roles);
+  if (soul === undefined) return base;
+  // 人格与记忆拼在规则之后：先规则后人格，避免人格描述被模型当作规则改写依据
+  return `${base}
+
+---
+
+${renderSoulPrompt(soul)}
+
+## 记忆的使用边界（规划视角）
+
+- 上面「你记得的事」用于**减少不必要的步骤与提问**（例如已知部署方式，就不必再规划「先确认怎么部署」）。
+- 记忆可能过期。若记忆与工单里给出的事实冲突，以工单为准，并在 \`strategy\` 里说明冲突。
+- 凭证明文不在提示词中；规划步骤时不要假设自己能读到密码，需要时应规划「向用户索取」或「用环境变量」。`;
 }
 
 /**

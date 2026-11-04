@@ -587,7 +587,7 @@ async function configureYargs(argv?: string[]) {
     // 用法：deepcode super <subcommand> [target] [options]
     .command(
       "super <subcommand> [target]",
-      "Super Agent: start / status / candidates / tickets / ticket / plan / inject / policy / memory",
+      "Super Agent: start / status / candidates / tickets / ticket / plan / inject / policy / memory / soul",
       (y: Argv) =>
         y
           .positional("subcommand", {
@@ -602,6 +602,7 @@ async function configureYargs(argv?: string[]) {
               "inject",
               "policy",
               "memory",
+              "soul",
               "help",
             ] as const,
             describe: "Super subcommand",
@@ -660,6 +661,45 @@ async function configureYargs(argv?: string[]) {
           .option("limit", {
             type: "number",
             describe: "Max entries to list (memory subcommand, default 30)",
+          })
+          .option("remember", {
+            type: "string",
+            describe: "Remember a fact about this project or workflow (soul subcommand)",
+          })
+          .option("category", {
+            type: "string",
+            choices: [
+              "project",
+              "deploy",
+              "credential",
+              "convention",
+              "environment",
+              "command",
+              "preference",
+              "lesson",
+              "people",
+              "domain",
+            ] as const,
+            describe: "Memory category (soul subcommand; inferred from the text when omitted)",
+          })
+          .option("forget", {
+            type: "string",
+            describe: "Forget a memory entry by id (soul subcommand)",
+          })
+          .option("organize", {
+            type: "boolean",
+            default: false,
+            describe: "Merge duplicates, decay stale entries, drop dormant ones (soul subcommand)",
+          })
+          .option("reveal-secrets", {
+            type: "boolean",
+            default: false,
+            describe: "Print credential values in plain text (soul subcommand; local terminal only)",
+          })
+          .option("prompt", {
+            type: "boolean",
+            default: false,
+            describe: "Print the exact soul prompt injected into the model (soul subcommand)",
           })
     )
     // 上游 v0.3.1：examples 扩充（--exec 非交互、--fork、管道 stdin）
@@ -946,6 +986,13 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
       "project-root",
       "source",
       "limit",
+      // soul 子命令（人格与分类记忆）
+      "remember",
+      "category",
+      "forget",
+      "organize",
+      "reveal-secrets",
+      "prompt",
     ];
     for (const key of optionKeys) {
       const v = parsed[key];

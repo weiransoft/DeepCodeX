@@ -155,6 +155,7 @@ async function main(): Promise<void> {
         | "inject"
         | "policy"
         | "memory"
+        | "soul"
         | "help",
       projectRoot: (opts["project-root"] as string | undefined) ?? process.cwd(),
       ticketId: parsed.superPositional,
@@ -169,6 +170,12 @@ async function main(): Promise<void> {
       assess: opts["assess"] === true,
       source: opts["source"] as string | undefined,
       limit: opts["limit"] as number | undefined,
+      remember: opts["remember"] as string | undefined,
+      category: opts["category"] as string | undefined,
+      forget: opts["forget"] as string | undefined,
+      organize: opts["organize"] === true,
+      revealSecrets: opts["reveal-secrets"] === true,
+      promptOnly: opts["prompt"] === true,
     });
     if (result.stdout.length > 0) process.stdout.write(result.stdout);
     if (result.stderr.length > 0) process.stderr.write(result.stderr);

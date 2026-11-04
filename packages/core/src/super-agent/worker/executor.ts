@@ -28,6 +28,8 @@ import { getRole } from "../../team/role-registry.js";
 import { buildContext, renderTaskContext, type ContextBundle } from "../engine/context.js";
 import { SUPER_AGENT_IDENTITY } from "../identity.js";
 import type { PlanStep, PlanStepStateRecord } from "../planner/types.js";
+import { renderSoulPrompt } from "../soul/render.js";
+import type { Soul } from "../soul/types.js";
 import type { SuperAgentRepositories } from "../store/repositories.js";
 import type { WorkerExecutor } from "../engine/engine.js";
 import { WORKER_OUTPUT_CONTRACT } from "./report.js";
@@ -99,6 +101,13 @@ export interface SuperAgentWorkerExecutorOptions {
   readonly launcher: WorkerLauncher;
   /** 默认角色 */
   readonly defaultRole?: string;
+  /**
+   * 人格与记忆（可选）
+   *
+   * 有则把 Soul 段拼进 Worker 提示词：Worker 知道项目地址、部署方式、代码规范，
+   * 不必在每一步重新摸索。缺省时行为与旧版一致（零回归）。
+   */
+  readonly soul?: Soul;
 }
 
 /**
@@ -111,6 +120,8 @@ export class SuperAgentWorkerExecutor implements WorkerExecutor {
   private readonly launcher: WorkerLauncher;
   /** 默认角色 */
   private readonly defaultRole: string;
+  /** 人格与记忆 */
+  private readonly soul: Soul | undefined;
 
   /**
    * 构造执行器
@@ -121,6 +132,7 @@ export class SuperAgentWorkerExecutor implements WorkerExecutor {
     this.repos = options.repos;
     this.launcher = options.launcher;
     this.defaultRole = options.defaultRole ?? "solo-coder";
+    this.soul = options.soul;
   }
 
   /**
@@ -235,6 +247,12 @@ export class SuperAgentWorkerExecutor implements WorkerExecutor {
     if (rolePrompt.length > 0) {
       sections.push("## 角色约束");
       sections.push(rolePrompt);
+      sections.push("");
+    }
+    // 人格与记忆：放在角色约束之后、输出契约之前——先知道「谁在干、为什么要这么干」，
+    // 再看到「怎么回报」。记忆段本身在 renderSoulPrompt 里已标注为数据。
+    if (this.soul !== undefined) {
+      sections.push(renderSoulPrompt(this.soul));
       sections.push("");
     }
     sections.push("## 输出契约");

@@ -13,6 +13,7 @@
  * | `inject <text>` | 投递一个事件（走与真实 Source 完全相同的准入路径） |
  * | `policy` | 查看策略 / 切换接单模式 |
  * | `memory` | 列出历史研判经验（全局层上下文——「系统记住了什么」的唯一出口） |
+ * | `soul` | 「司南」的人格与分类记忆（查看 / 记一条 / 整理 / 打印提示词） |
  * | `help` | 帮助 |
  *
  * ## 首期诚实边界
@@ -28,13 +29,20 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+  allCategories,
+  categoryLabel,
+  createSoulEngine,
+  memoryLabel,
   renderPlan,
+  renderSoulPrompt,
+  soulMemoryLocations,
   SuperAgentRuntime,
   superAgentSignature,
   type AcceptMode,
   type Decision,
   type EvalCandidate,
   type HistoricalDecision,
+  type MemoryCategory,
   type Ticket,
   type TicketDetail,
 } from "@vegamo/deepcode-core";
@@ -55,6 +63,7 @@ export type SuperSubcommand =
   | "inject"
   | "policy"
   | "memory"
+  | "soul"
   | "help";
 
 /** Super 子命令参数 */
@@ -85,6 +94,18 @@ export interface SuperCommandArgs {
   readonly source?: string;
   /** 条数上限（memory 子命令，默认 30） */
   readonly limit?: number;
+  /** 要记住的一条事实（soul 子命令；省略则展示人格与记忆） */
+  readonly remember?: string;
+  /** 记忆分类（soul 子命令；省略则由文本推断） */
+  readonly category?: string;
+  /** 要遗忘的记忆 ID（soul 子命令） */
+  readonly forget?: string;
+  /** 整理记忆（soul 子命令） */
+  readonly organize?: boolean;
+  /** 是否显示凭证明文（soul 子命令，仅本机终端） */
+  readonly revealSecrets?: boolean;
+  /** 只打印注入模型的提示词（soul 子命令） */
+  readonly promptOnly?: boolean;
   /** 输出格式 */
   readonly format?: "text" | "json";
 }
@@ -132,6 +153,8 @@ export async function executeSuperCommand(args: SuperCommandArgs): Promise<Super
         return await runPolicy(args);
       case "memory":
         return await runMemory(args);
+      case "soul":
+        return await runSoul(args);
       default:
         return { exitCode: 2, stdout: "", stderr: `未知的 super 子命令：${String(args.subcommand)}` };
     }
@@ -230,6 +253,13 @@ async function runStatus(args: SuperCommandArgs): Promise<SuperCommandResult> {
     );
     lines.push(`  派工能力：${status.executorAvailable ? "可用" : "不可用"}`);
     lines.push(`  注入通道：${status.injectorAvailable ? "可用" : "不可用"}`);
+    lines.push(
+      `  人格与记忆：${
+        status.soul === undefined
+          ? "未装配"
+          : `${status.soul.name}（记忆 ${status.soul.memories} 条，语气 ${status.soul.tone}）`
+      }`
+    );
     lines.push(`  事件源：${status.sources.length === 0 ? "（无）" : status.sources.map((s) => s.id).join("、")}`);
     lines.push(`  副作用积压：${formatPending(status.pendingEffects)}`);
     if (status.effectHealth.some((entry) => entry.consecutiveFailures > 0)) {
@@ -509,6 +539,126 @@ async function runMemory(args: SuperCommandArgs): Promise<SuperCommandResult> {
 }
 
 /**
+ * `super soul` —— 人格与分类记忆
+ *
+ * 四种动作，一个入口（避免把 soul 拆成四个子命令再各自维护帮助）：
+ * - 无参数：展示人格 + 记忆分组 + 未记录类别 + 文件位置；
+ * - `--remember "<事实>"`：记一条（分类可显式给，省略则由文本推断）；
+ * - `--organize`：去重合并 + 陈旧衰减 + 休眠清理；
+ * - `--prompt`：打印**实际注入模型**的那段提示词（可观测，不是「应该是这样」）。
+ *
+ * 凭证默认遮蔽：`--reveal-secrets` 才显示明文，且仅在终端——不进提示词、
+ * 不进日志（原因见 `soul/render.ts` 头部）。
+ *
+ * @param args 命令参数
+ * @returns 执行结果
+ */
+async function runSoul(args: SuperCommandArgs): Promise<SuperCommandResult> {
+  const { engine } = createSoulEngine({ projectRoot: args.projectRoot });
+  const locations = soulMemoryLocations(args.projectRoot);
+  const lines: string[] = [];
+
+  // 1) 记一条
+  if (args.remember !== undefined && args.remember.trim().length > 0) {
+    const category = parseMemoryCategory(args.category);
+    const result = engine.remember({ text: args.remember.trim(), category });
+    const action = result.action === "created" ? "已记住" : "已更新";
+    lines.push(
+      `${action}：${result.memory.title}（分类 ${result.memory.category}，置信 ${(result.confidence * 100).toFixed(0)}%）`
+    );
+    if (result.fallback) {
+      lines.push("  提示：未匹配到关键词，按「协作偏好」记录；可用 --category 指定分类。");
+    } else if (result.matched.length > 0) {
+      lines.push(`  依据：命中 ${result.matched.join("、")}`);
+    }
+    if (result.secret) {
+      lines.push("  该分类为凭证：值不会进入模型提示词，只保留「已记录」与键名。");
+    }
+    lines.push("");
+  }
+
+  // 2) 忘一条
+  if (args.forget !== undefined && args.forget.length > 0) {
+    const removed = engine.forget(args.forget);
+    lines.push(removed ? `已遗忘：${args.forget}` : `未找到该记忆：${args.forget}`);
+    lines.push("");
+  }
+
+  // 3) 整理
+  if (args.organize === true) {
+    const report = engine.organize();
+    lines.push(`整理完成：合并 ${report.merged} 条，清理 ${report.pruned} 条，现存 ${report.total} 条`);
+    for (const note of report.notes) lines.push(`  - ${note}`);
+    lines.push("");
+  }
+
+  const soul = engine.soul();
+  const revealSecrets = args.revealSecrets === true;
+
+  // 4) 只打印提示词
+  if (args.promptOnly === true) {
+    return { exitCode: 0, stdout: `${renderSoulPrompt(soul, { revealSecrets })}\n`, stderr: "" };
+  }
+
+  const snapshot = engine.snapshot({ revealSecrets });
+
+  if (args.format === "json") {
+    return {
+      exitCode: 0,
+      stdout: `${JSON.stringify({ snapshot, locations }, null, 2)}\n`,
+      stderr: "",
+    };
+  }
+
+  if (lines.length === 0) lines.push(superAgentSignature());
+  lines.push(`本质：${snapshot.nature}`);
+  lines.push(`语气：${snapshot.emotion.label}（强度 ${(snapshot.emotion.intensity * 100).toFixed(0)}%）`);
+  lines.push(
+    `记忆：${snapshot.memoryStats.total} 条${
+      snapshot.memoryStats.total > 0
+        ? `（${snapshot.memoryGroups.map((group) => `${group.label} ${group.items.length}`).join(" / ")}）`
+        : ""
+    }`
+  );
+  if (snapshot.memoryStats.missing.length > 0) {
+    lines.push(`尚未记录：${snapshot.memoryStats.missing.map((category) => categoryLabel(category)).join("、")}`);
+  }
+  lines.push("");
+
+  if (snapshot.memoryGroups.length === 0) {
+    lines.push('尚无记忆。用 --remember "<事实>" 记下项目地址、部署方式、代码规范等；');
+    lines.push("记一次之后，规划器与 Worker 都不必再问。");
+  } else {
+    for (const group of snapshot.memoryGroups) {
+      lines.push(`${group.label}（${group.items.length}）`);
+      for (const item of group.items) {
+        const strength = `${(item.strength * 100).toFixed(0)}%`;
+        lines.push(`  - [${strength}] ${memoryLabel(item)}`);
+      }
+    }
+  }
+
+  lines.push("");
+  lines.push(`文件：${locations.global}`);
+  if (locations.project !== undefined) lines.push(`      ${locations.project}`);
+  lines.push("提示：--organize 整理记忆；--prompt 查看注入模型的提示词。");
+
+  return { exitCode: 0, stdout: `${lines.join("\n")}\n`, stderr: "" };
+}
+
+/**
+ * 校验并转换记忆分类
+ *
+ * @param raw 用户输入
+ * @returns 分类；非法或未给出返回 undefined（交给分类器推断）
+ */
+function parseMemoryCategory(raw: string | undefined): MemoryCategory | undefined {
+  if (raw === undefined) return undefined;
+  const categories = allCategories();
+  return categories.includes(raw as MemoryCategory) ? (raw as MemoryCategory) : undefined;
+}
+
+/**
  * 列出库中出现过的全部 Source ID
  *
  * @param runtime 运行时
@@ -700,6 +850,10 @@ export function formatSuperHelp(): string {
     "  deepcode super inject <文本> [--addressed] [--assess]  投递一个事件",
     "  deepcode super policy [--mode off|observe|auto]  查看/切换策略",
     "  deepcode super memory [--source <id>] [--limit N]  列出历史研判经验",
+    "  deepcode super soul                         查看人格与分类记忆",
+    '  deepcode super soul --remember "<事实>" [--category deploy]  记一条',
+    "  deepcode super soul --organize              整理记忆（去重 / 衰减 / 清理）",
+    "  deepcode super soul --prompt                打印注入模型的提示词",
     "  deepcode super help                         显示本帮助",
     "",
     "说明：",
@@ -709,6 +863,8 @@ export function formatSuperHelp(): string {
     "    无模型凭据时降级为单步计划，行为与旧版一致（super plan 会写明降级原因）。",
     "  - inject 默认只排队不研判（不调模型）；加 --assess 才会立即研判。",
     "  - memory 展示的历史经验由既有决策记录派生（只读），不是独立存储。",
+    "  - soul 是「司南」的人格与长期记忆：项目地址 / 部署位置与形式 / 凭证 / 代码规范等",
+    "    记一次就够，规划器与 Worker 都会带上；凭证默认遮蔽，不进提示词。",
   ].join("\n");
 }
 

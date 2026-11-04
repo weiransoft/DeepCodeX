@@ -106,9 +106,33 @@ test("super help：输出用法说明", async () => {
 
 test("formatSuperHelp：包含全部子命令", () => {
   const help = formatSuperHelp();
-  for (const sub of ["start", "status", "candidates", "tickets", "ticket", "inject", "policy", "memory"]) {
+  for (const sub of ["start", "status", "candidates", "tickets", "ticket", "inject", "policy", "memory", "soul"]) {
     assert.match(help, new RegExp(sub));
   }
+  // 司南的人格与记忆是新入口，帮助里必须能看出「记一条」怎么敲
+  assert.match(help, /--remember/);
+  assert.match(help, /--organize/);
+  assert.match(help, /--prompt/);
+});
+
+test("cli-args：soul 子命令的选项落到 superOptions", async () => {
+  const parsed = await parseArguments([
+    "super",
+    "soul",
+    "--remember",
+    "生产部署在 10.0.0.8，docker compose 起",
+    "--category",
+    "deploy",
+    "--organize",
+    "--prompt",
+    "--reveal-secrets",
+  ]);
+  assert.equal(parsed.super, "soul");
+  assert.equal(parsed.superOptions["remember"], "生产部署在 10.0.0.8，docker compose 起");
+  assert.equal(parsed.superOptions["category"], "deploy");
+  assert.equal(parsed.superOptions["organize"], true);
+  assert.equal(parsed.superOptions["prompt"], true);
+  assert.equal(parsed.superOptions["reveal-secrets"], true);
 });
 
 test("super status：真实打开 SQLite 并返回状态", async () => {

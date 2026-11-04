@@ -14,6 +14,8 @@ const SA_KERNEL_DIRS = [
   "packages/core/src/super-agent/policy/**/*.ts",
   "packages/core/src/super-agent/effects/**/*.ts",
   "packages/core/src/super-agent/passes/**/*.ts",
+  // Soul 层（2026-11-04）：四层人格与分类记忆，纯函数零 I/O
+  "packages/core/src/super-agent/soul/**/*.ts",
 ];
 
 /** Super Agent 持久层目录（唯一允许 `node:sqlite`——SQLite 事实来源） */

@@ -450,7 +450,7 @@ export function ChevronIcon({ up = false, ...p }: IconProps & { up?: boolean }) 
 /** 默认机器头像（DeepCodeX 引擎/助手消息）：圆形底内机器人脸 */
 export function BotAvatarIcon(p: IconProps) {
   return (
-    <IconBase {...p} label="DeepCodeX 助手">
+    <IconBase {...p} label="司南（常驻智能助手）">
       {/* 机器人头部圆角矩形 + 天线 */}
       <rect x="3.2" y="5" width="9.6" height="7" rx="2" fill="none" stroke="currentColor" strokeWidth="1.2" />
       <line x1="8" y1="2.6" x2="8" y2="5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />

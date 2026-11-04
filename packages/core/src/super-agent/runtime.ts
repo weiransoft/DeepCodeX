@@ -55,6 +55,8 @@ import { LlmWorkflowPlanner } from "./planner/planner.js";
 import { loadPolicy } from "./policy/policy.js";
 import { LlmAssessor, type HistoricalRecallPort } from "./router/assessment.js";
 import { SuperAgentRouter } from "./router/router.js";
+import { createSoulEngine } from "./soul-io.js";
+import type { Soul } from "./soul/types.js";
 import { localWatcherKind } from "./source/local-watcher.js";
 import { SourceRegistry, type SourceConfig } from "./source/kind.js";
 import { SuperAgentRepositories } from "./store/repositories.js";
@@ -109,6 +111,13 @@ export interface SuperAgentRuntimeOptions {
   readonly evalTimeoutMs?: number;
   /** 要启动的 Source 实例 */
   readonly sources?: readonly SuperAgentSourceSpec[];
+  /**
+   * 人格与记忆（undefined = 从磁盘加载司南 Soul；null = 不带人格与记忆）
+   *
+   * 带上之后，规划器与 Worker 都拿到同一份人格与记忆：
+   * 语气一致、不再重复问「项目在哪、怎么部署、守什么规范」。
+   */
+  readonly soul?: Soul | null;
 }
 
 /** 运行时状态快照（供 `super status` 展示） */
@@ -142,6 +151,20 @@ export interface SuperAgentStatus {
   readonly executorAvailable: boolean;
   /** 是否具备向运行中 Worker 追加输入的能力 */
   readonly injectorAvailable: boolean;
+  /**
+   * 人格与记忆摘要（未装配时为 undefined）
+   *
+   * 只放三个数：名字、记忆条数、当前语气。够回答「司南现在是它、记得多少、什么状态」，
+   * 不把整份记忆塞进状态行。
+   */
+  readonly soul?: {
+    /** 名字 */
+    readonly name: string;
+    /** 记忆条数 */
+    readonly memories: number;
+    /** 当前情感基调 */
+    readonly tone: string;
+  };
   /** 候选数（触发事件进入 Eval 的次数） */
   readonly candidates: {
     /** 当前待研判候选 */
@@ -204,6 +227,8 @@ export class SuperAgentRuntime {
   private readonly writeSide: WriteSide;
   /** 单轮副作用上限 */
   private readonly effectLimit: number;
+  /** 人格与记忆（undefined = 未装配） */
+  private readonly soul: Soul | undefined;
   /** 是否已关闭 */
   private closed = false;
 
@@ -233,6 +258,8 @@ export class SuperAgentRuntime {
       readonly injector: WorkerInjector | null;
       readonly writeSide: WriteSide;
       readonly effectLimit: number;
+      /** 人格与记忆（null 语义在 create 里已归一为 undefined） */
+      readonly soul?: Soul;
     }
   ) {
     this.store = store;
@@ -247,6 +274,7 @@ export class SuperAgentRuntime {
     this.injector = options.injector;
     this.writeSide = options.writeSide;
     this.effectLimit = options.effectLimit;
+    this.soul = options.soul;
   }
 
   /**
@@ -267,16 +295,26 @@ export class SuperAgentRuntime {
         ? new LlmAssessor({ projectRoot: options.projectRoot, recall: buildRecallPort(repos, store) })
         : options.assessor;
 
+    // 人格与记忆：undefined → 从磁盘加载（首次为空，不假装记得）；null → 不带
+    const soul: Soul | undefined =
+      options.soul === null
+        ? undefined
+        : options.soul === undefined
+          ? createSoulEngine({ projectRoot: options.projectRoot }).soul
+          : options.soul;
+
     // 计划器：undefined → 默认 LLM 计划器；null → 不做动态分解（旧语义）
     const planner: WorkflowPlanner | null =
-      options.planner === undefined ? new LlmWorkflowPlanner({ projectRoot: options.projectRoot }) : options.planner;
+      options.planner === undefined
+        ? new LlmWorkflowPlanner({ projectRoot: options.projectRoot, soul })
+        : options.planner;
 
     // Worker 执行器只依赖仓储（不依赖 Engine）——避免「Engine 要执行器、执行器要 Engine」
     // 的构造期循环。
     const workerExecutor: WorkerExecutor | null =
       options.launcher === null || options.launcher === undefined
         ? null
-        : new SuperAgentWorkerExecutor({ repos, launcher: options.launcher });
+        : new SuperAgentWorkerExecutor({ repos, launcher: options.launcher, soul });
 
     const engine = new SuperAgentEngine({
       store,
@@ -309,6 +347,7 @@ export class SuperAgentRuntime {
       injector: options.injector ?? null,
       writeSide: options.writeSide ?? defaultWriteSide,
       effectLimit: effectLimitOf(options),
+      soul,
     });
 
     runtime.registerEffectHandlers();
@@ -429,6 +468,14 @@ export class SuperAgentRuntime {
       openAttention,
       routedViaSubscription,
       workerTokens,
+      soul:
+        this.soul === undefined
+          ? undefined
+          : {
+              name: this.soul.essence.name.primary,
+              memories: this.soul.memories.length,
+              tone: this.soul.emotion.current,
+            },
     };
   }
 

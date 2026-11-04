@@ -459,8 +459,12 @@ export function ChatPane(props: ChatPaneProps) {
           </div>
         </div>
         <div className="chat-welcome">
-          <div className="chat-welcome-brand">DeepCodeX</div>
-          <div className="chat-welcome-hint">从左侧新建对话，开始与 DeepCodeX 引擎对话</div>
+          {/* 名字放在最显眼处：用户需要知道「在跟谁说话」，而不是「跟哪个引擎说话」 */}
+          <div className="chat-welcome-brand">
+            司南<span className="chat-welcome-latin">Sinan</span>
+          </div>
+          <div className="chat-welcome-tagline">拆解任务 · 编排工作流 · 组建团队 · 盯到交付</div>
+          <div className="chat-welcome-hint">从左侧新建对话；记住的事在「设置 → 系统管理 → 司南」里可查可改</div>
         </div>
       </main>
     );
@@ -588,6 +592,8 @@ export function ChatPane(props: ChatPaneProps) {
                             这样流式阶段 Fragment 展开的 thinking + preview 两个子元素
                             不会被作为 flex row item 均分挤压（这就是"挤到一列"的根因）。 */}
                         <div className="msg-assistant-body-wrapper">
+                          {/* 署名：多智能体协同时，谁说的话必须看得见（当前常驻主理人是司南） */}
+                          <div className="msg-assistant-name">司南</div>
                           {entry.content !== null ? (
                             <>
                               {/* 固化态「思考过程」折叠区（web-thinking-display.md §5.2 TH6）：

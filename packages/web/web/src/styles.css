@@ -1545,7 +1545,7 @@ body {
   overflow: auto;
 }
 
-/* ============ 文件预览（docs/dev/web-file-preview.md P3） ============ *//* 抽屉内容区：纵向 flex（窄屏退化 = 列表在上、预览在下） */
+/* ============ 文件预览（docs/dev/web-file-preview.md P3） ============ */ /* 抽屉内容区：纵向 flex（窄屏退化 = 列表在上、预览在下） */
 .drawer-body {
   flex: 1;
   display: flex;
@@ -4156,4 +4156,266 @@ a.icon-btn {
 .markdown-table th {
   background: var(--bg-subtle, rgba(175, 184, 193, 0.14));
   font-weight: 600;
+}
+
+/* ============ 司南：署名、欢迎页与人格记忆面板 ============ */
+
+/* 欢迎页：名字 + 英文名 + 一句话职责（说话的人有名字，引擎才有来历） */
+.chat-welcome-latin {
+  margin-left: 8px;
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 1px;
+  color: var(--app-text-tertiary);
+}
+.chat-welcome-tagline {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--app-text-secondary);
+}
+
+/* 助手气泡署名：小号、低对比，不抢正文 */
+.msg-assistant-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-text-tertiary);
+  margin-bottom: 4px;
+  letter-spacing: 0.5px;
+}
+
+.soul-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 4px 2px 24px;
+}
+
+.soul-header {
+  border-bottom: 1px solid var(--app-border);
+  padding-bottom: 12px;
+}
+.soul-name {
+  font-size: 22px;
+  font-weight: 700;
+}
+.soul-name-latin {
+  margin-left: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--app-text-tertiary);
+  letter-spacing: 1px;
+}
+.soul-signature {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--app-text-tertiary);
+}
+.soul-tagline {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--app-text-secondary);
+}
+.soul-badges {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.soul-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--app-bg-badge);
+  color: var(--app-text-secondary);
+}
+
+.soul-section h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-text);
+}
+.soul-text {
+  margin: 0 0 6px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--app-text);
+}
+.soul-text-muted {
+  color: var(--app-text-secondary);
+  font-size: 12px;
+}
+.soul-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--app-text-secondary);
+}
+.soul-details summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--app-text-tertiary);
+  margin-top: 6px;
+}
+.soul-prompt {
+  margin: 8px 0 0;
+  padding: 10px;
+  max-height: 320px;
+  overflow: auto;
+  background: var(--app-bg-code);
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  font-family: var(--app-font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  color: var(--app-text-secondary);
+}
+
+/* 人格量表：条状，不用数字堆砌 */
+.soul-meters {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.soul-meter {
+  display: grid;
+  grid-template-columns: 52px 1fr 32px;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--app-text-secondary);
+}
+.soul-meter-track {
+  height: 5px;
+  border-radius: 3px;
+  background: var(--app-bg-badge);
+  overflow: hidden;
+}
+.soul-meter-fill {
+  display: block;
+  height: 100%;
+  background: var(--app-accent);
+}
+.soul-meter-value {
+  text-align: right;
+  color: var(--app-text-tertiary);
+}
+
+/* 记忆录入行 */
+.soul-remember {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.soul-remember-input {
+  flex: 1;
+  min-width: 0;
+}
+.soul-remember input,
+.soul-remember select {
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 7px;
+  background: var(--app-bg);
+  color: var(--app-text);
+  font-size: 12px;
+}
+.soul-remember-select {
+  width: 108px;
+  flex: none;
+}
+
+.soul-group {
+  margin-top: 10px;
+}
+.soul-group-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-text);
+  margin-bottom: 4px;
+}
+.soul-group-count {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--app-bg-badge);
+  color: var(--app-text-tertiary);
+}
+.soul-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  margin-bottom: 4px;
+}
+.soul-item-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.soul-item-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-text);
+}
+.soul-item-value {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--app-text-secondary);
+  word-break: break-word;
+}
+.soul-item-meta {
+  font-size: 10px;
+  color: var(--app-text-tertiary);
+  flex: none;
+  padding-top: 2px;
+}
+.soul-item-delete {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--app-text-tertiary);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0 2px;
+}
+.soul-item-delete:hover {
+  color: var(--app-danger);
+}
+
+.soul-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--app-text-tertiary);
+  line-height: 1.6;
+}
+.soul-hint-ok {
+  color: var(--app-accent);
+}
+.soul-hint-error {
+  color: var(--app-danger);
+}
+.soul-empty {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--app-text-tertiary);
+}
+.soul-path {
+  font-family: var(--app-font-mono);
+  font-size: 11px;
+  color: var(--app-text-tertiary);
+  word-break: break-all;
 }

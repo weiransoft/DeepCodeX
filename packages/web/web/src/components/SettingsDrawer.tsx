@@ -13,6 +13,7 @@ import { AgentsPane } from "./AgentsPane";
 import { SkillsPane } from "./SkillsPane";
 import { RulesPane } from "./RulesPane";
 import { AuditPane } from "./AuditPane";
+import { SoulPane } from "./SoulPane";
 import { type DesktopConfig, type DesktopLdapConfig, type DesktopMcpServer, type DesktopModel } from "../desktopConfig";
 import { getDesktopBridge } from "../desktop-bridge";
 import { fetchCapabilities, type CapabilitySkill } from "../api";
@@ -38,7 +39,7 @@ export interface SettingsDrawerProps {
   onClose: () => void;
 }
 
-type Tab = "models" | "mcp" | "ldap" | "skills" | "agents" | "rules" | "audit";
+type Tab = "models" | "mcp" | "ldap" | "skills" | "agents" | "rules" | "audit" | "soul";
 
 /** 保存状态：idle / saving / saved / failed（failed 携带后端原文） */
 type SaveState = { phase: "idle" } | { phase: "saving" } | { phase: "saved" } | { phase: "failed"; message: string };
@@ -166,6 +167,13 @@ export function SettingsDrawer({ initialConfig, onSave, onClose }: SettingsDrawe
         <nav className="settings-tabs">
           <button
             type="button"
+            className={"settings-tab" + (tab === "soul" ? " active" : "")}
+            onClick={() => setTab("soul")}
+          >
+            司南
+          </button>
+          <button
+            type="button"
             className={"settings-tab" + (tab === "models" ? " active" : "")}
             onClick={() => setTab("models")}
           >
@@ -216,7 +224,9 @@ export function SettingsDrawer({ initialConfig, onSave, onClose }: SettingsDrawe
         </nav>
 
         <div className="settings-content">
-          {tab === "rules" ? (
+          {tab === "soul" ? (
+            <SoulPane />
+          ) : tab === "rules" ? (
             <RulesPane />
           ) : tab === "audit" ? (
             <AuditPane />

@@ -681,3 +681,116 @@ export function fileDownloadUrl(path: string, scope: FileScope = "shared"): stri
 export function fetchPreview(path: string, scope: FileScope = "shared"): Promise<FilePreviewResult> {
   return request<FilePreviewResult>("GET", `/api/files/preview?scope=${scope}&path=${encodeURIComponent(path)}`);
 }
+
+// ============================================================================
+// 司南 · 人格与分类记忆（GET /api/soul）
+// ============================================================================
+
+/** 单条记忆视图（凭证已遮蔽：redacted=true 时 value 是遮蔽串） */
+export interface SoulMemoryItem {
+  id: string;
+  title: string;
+  value: string;
+  redacted: boolean;
+  /** 强度 0~1 */
+  strength: number;
+  updatedAt: string;
+  source: "user_explicit" | "observed" | "system_default";
+}
+
+/** 按类别归组的记忆 */
+export interface SoulMemoryGroup {
+  category: string;
+  /** 中文名（分类表权威来源在后端，前端不重复维护） */
+  label: string;
+  /** 这一类该记什么（空态引导） */
+  hint: string;
+  items: SoulMemoryItem[];
+}
+
+/** 人格与记忆快照（与后端 SoulSnapshot 同构；前端只消费展示字段） */
+export interface SoulSnapshot {
+  /** 署名，如「司南（Sinan）· 常驻主理智能体」 */
+  signature: string;
+  tagline: string;
+  name: { primary: string; latin?: string; nicknames?: string[] };
+  nature: string;
+  purpose: string;
+  coreBeliefs: string[];
+  boundaries: string[];
+  mbti: string;
+  ocean: {
+    openness: number;
+    conscientiousness: number;
+    extraversion: number;
+    agreeableness: number;
+    neuroticism: number;
+  };
+  values: Array<{ name: string; priority: number }>;
+  emotion: { tone: string; label: string; intensity: number };
+  expression: {
+    style: string;
+    formality: number;
+    detailLevel: number;
+    catchphrases: string[];
+    forbidden: string[];
+  };
+  user: {
+    addressAs: string;
+    decisionStyle: string;
+    communicationPreferences: string[];
+    workHabits: string[];
+    forbiddenTopics: string[];
+    reportingPreference: string;
+    language: string;
+  };
+  memoryGroups: SoulMemoryGroup[];
+  memoryStats: { total: number; byCategory: Record<string, number>; missing: string[] };
+  organization: { merged: number; pruned: number; total: number; notes: string[] };
+  /** 实际注入模型的提示词（可观测，便于核对「界面与注入是否一致」） */
+  promptPreview: string;
+}
+
+/** GET /api/soul 响应体 */
+export interface SoulResponse {
+  snapshot: SoulSnapshot;
+  locations: { global: string; project?: string };
+  categories: Array<{ id: string; label: string; hint: string }>;
+}
+
+/** POST /api/soul/memory 响应体 */
+export interface RememberSoulResult {
+  ok: true;
+  action: "created" | "updated";
+  category: string;
+  categoryLabel: string;
+  confidence: number;
+  matched: string[];
+  fallback: boolean;
+  secret: boolean;
+  snapshot: SoulSnapshot;
+}
+
+/** 读取「司南」的人格与记忆（凭证值由服务端遮蔽，永不下发明文） */
+export function fetchSoul(): Promise<SoulResponse> {
+  return request<SoulResponse>("GET", "/api/soul");
+}
+
+/**
+ * 记一条事实。
+ *
+ * @param text 事实正文（如「生产部署在 10.0.0.8，docker compose 起」）
+ * @param category 分类 ID；省略则由后端按关键词推断
+ */
+export function rememberSoul(text: string, category?: string): Promise<RememberSoulResult> {
+  return request<RememberSoulResult>(
+    "POST",
+    "/api/soul/memory",
+    category === undefined ? { text } : { text, category }
+  );
+}
+
+/** 忘掉一条记忆（按 ID） */
+export function forgetSoul(id: string): Promise<{ ok: boolean; snapshot: SoulSnapshot }> {
+  return request<{ ok: boolean; snapshot: SoulSnapshot }>("DELETE", `/api/soul/memory/${encodeURIComponent(id)}`);
+}

@@ -46,6 +46,7 @@ import {
 } from "./api/agents-api";
 import { handleCreateRule, handleDeleteRule, handleListRules } from "./api/rules-api";
 import { handleGetAudit } from "./api/audit-api";
+import { handleForgetSoul, handleGetSoul, handleRememberSoul } from "./api/soul-api";
 import {
   handleConfirmSedimentation,
   handleDismissSedimentation,
@@ -520,6 +521,22 @@ export async function startWebServer(
       // EAG 工作流审计（设置抽屉「审计」页签，P6）：规则证据 + 干预台账 + 确定性报告
       if (pathname === "/api/eag/audit" && req.method === "GET") {
         await handleGetAudit(res, resolved, ctx);
+        return;
+      }
+
+      // 司南的人格与分类记忆（设置抽屉「司南」页签 + 欢迎页署名）：
+      // 凭证值不下发，只给遮蔽串；存储锚定本用户的引擎数据目录
+      if (pathname === "/api/soul" && req.method === "GET") {
+        handleGetSoul(res, ctx, resolved);
+        return;
+      }
+      if (pathname === "/api/soul/memory" && req.method === "POST") {
+        await handleRememberSoul(req, res, ctx, resolved);
+        return;
+      }
+      const soulMemoryMatch = /^\/api\/soul\/memory\/([^/]+)$/.exec(pathname);
+      if (soulMemoryMatch && req.method === "DELETE") {
+        handleForgetSoul(res, decodeURIComponent(soulMemoryMatch[1]), ctx, resolved);
         return;
       }
 
