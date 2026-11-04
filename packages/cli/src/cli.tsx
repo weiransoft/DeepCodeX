@@ -134,6 +134,46 @@ async function main(): Promise<void> {
     process.exit(exitCode);
   }
 
+  // super 子命令路由：Super Agent CLI 模式（非 TUI 模式）
+  // 用法：deepcode super <subcommand> [target] [options]
+  // 方案见 docs/proposals/super-agent/proposal-final.md
+  if (parsed.super) {
+    const { executeSuperCommand, formatSuperHelp } = await import("./super/super-cmd.js");
+    if (parsed.super === "help") {
+      process.stdout.write(formatSuperHelp());
+      process.exit(0);
+    }
+    const opts = parsed.superOptions;
+    const result = await executeSuperCommand({
+      subcommand: parsed.super as
+        | "start"
+        | "status"
+        | "candidates"
+        | "tickets"
+        | "ticket"
+        | "inject"
+        | "policy"
+        | "memory"
+        | "help",
+      projectRoot: (opts["project-root"] as string | undefined) ?? process.cwd(),
+      ticketId: parsed.superPositional,
+      text: parsed.superPositional,
+      mode: opts["mode"] as "off" | "observe" | "auto" | undefined,
+      once: opts["once"] === true,
+      watch: opts["watch"] !== false,
+      state: opts["state"] as "open" | "ended" | undefined,
+      format: opts["format"] as "text" | "json" | undefined,
+      actor: opts["actor"] as string | undefined,
+      addressed: opts["addressed"] === true,
+      assess: opts["assess"] === true,
+      source: opts["source"] as string | undefined,
+      limit: opts["limit"] as number | undefined,
+    });
+    if (result.stdout.length > 0) process.stdout.write(result.stdout);
+    if (result.stderr.length > 0) process.stderr.write(result.stderr);
+    process.exit(result.exitCode);
+  }
+
   // quality-check 子命令路由：质量门禁 CLI 模式（非 TUI 模式）
   // 用法：deepcode quality-check <subcommand> [target] [options]
   // 复用 packages/cli/src/quality/quality-cmd.ts 中 executeQualityCommand 函数

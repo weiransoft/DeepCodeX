@@ -102,6 +102,20 @@ export interface ParsedCliArgs {
    * - 对象        — `deepcode web` 的 --host / --port 覆盖项（未传字段为 undefined）
    */
   web: { host?: string; port?: string } | undefined;
+  /**
+   * Super 子命令参数（docs/proposals/super-agent/proposal-final.md）。
+   * - `undefined` — 未调用 super 子命令
+   * - `string`    — super 子命令名（start / status / candidates / tickets / ticket / inject / policy / help）
+   */
+  super: string | undefined;
+  /** Super 子命令选项（key-value 对） */
+  superOptions: Record<string, string | boolean | number | string[] | undefined>;
+  /**
+   * Super 子命令的第二个位置参数。
+   * - ticket 子命令 → 工单 ID
+   * - inject 子命令 → 事件正文
+   */
+  superPositional: string | undefined;
 }
 
 const QUALITY_CHECK_SUBCOMMANDS = ["codemap", "uiux", "visual", "all", "help"] as const;
@@ -564,6 +578,85 @@ async function configureYargs(argv?: string[]) {
           describe: "Override listen port (default from settings, 3210)",
         })
     )
+    // super 子命令：Super Agent（事件 → 决策 → 工单 → 执行 → 报告）
+    // 方案见 docs/proposals/super-agent/proposal-final.md
+    // 用法：deepcode super <subcommand> [target] [options]
+    .command(
+      "super <subcommand> [target]",
+      "Super Agent: start / status / candidates / tickets / ticket / inject / policy / memory",
+      (y: Argv) =>
+        y
+          .positional("subcommand", {
+            type: "string",
+            choices: [
+              "start",
+              "status",
+              "candidates",
+              "tickets",
+              "ticket",
+              "inject",
+              "policy",
+              "memory",
+              "help",
+            ] as const,
+            describe: "Super subcommand",
+          })
+          .positional("target", {
+            type: "string",
+            describe: "Target (ticket id for 'ticket', event text for 'inject')",
+          })
+          .option("once", {
+            type: "boolean",
+            default: false,
+            describe: "Run a single pass then exit (start subcommand)",
+          })
+          .option("watch", {
+            type: "boolean",
+            default: true,
+            describe: "Enable the local file watcher source (start subcommand); use --no-watch to disable",
+          })
+          .option("mode", {
+            type: "string",
+            choices: ["off", "observe", "auto"] as const,
+            describe: "Switch the accept mode (policy subcommand)",
+          })
+          .option("state", {
+            type: "string",
+            choices: ["open", "ended"] as const,
+            describe: "Filter tickets by state (tickets subcommand)",
+          })
+          .option("format", {
+            type: "string",
+            choices: ["text", "json"] as const,
+            describe: "Output format (default text)",
+          })
+          .option("actor", {
+            type: "string",
+            describe: "Event sender identity (inject subcommand, default local-developer)",
+          })
+          .option("addressed", {
+            type: "boolean",
+            default: false,
+            describe: "Mark the injected event as explicitly addressing the agent (inject subcommand)",
+          })
+          .option("assess", {
+            type: "boolean",
+            default: false,
+            describe: "Assess the injected event immediately (inject subcommand); calls the configured model",
+          })
+          .option("project-root", {
+            type: "string",
+            describe: "Project root directory (default: cwd)",
+          })
+          .option("source", {
+            type: "string",
+            describe: "Filter historical experience by source id (memory subcommand)",
+          })
+          .option("limit", {
+            type: "number",
+            describe: "Max entries to list (memory subcommand, default 30)",
+          })
+    )
     // 上游 v0.3.1：examples 扩充（--exec 非交互、--fork、管道 stdin）
     .example("deepcode", "Launch the interactive TUI in the current directory")
     .example("deepcode -p <prompt>", "Launch the TUI and submit a prompt")
@@ -634,7 +727,9 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
             ? "quality-check"
             : rawArgv.length >= 2 && rawArgv[0] === "review" && rawArgv[1] === "help"
               ? "review"
-              : undefined;
+              : rawArgv.length >= 2 && rawArgv[0] === "super" && rawArgv[1] === "help"
+                ? "super"
+                : undefined;
 
   const resumeRaw = parsed.resume as string | undefined;
   let resume: ParsedCliArgs["resume"];
@@ -665,6 +760,8 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
   // web 命令检测：positional[0] === "web"（无子命令，yargs 18 下 parsed["web"] 恒为 undefined，
   // 与 team/rules 的检测方式对齐，以 positional 列表为准）
   const webInvoked = positionalArgs[0] === "web";
+  // super 命令检测：positional[0] === "super" 或通过 help fallback（与 team/rules 对齐）
+  const superInvoked = positionalArgs[0] === "super" || helpAsSecondPositional === "super";
   // v1.6 P0-2 修正（TC-TEAM-12）：yargs 18 把 "help" 当成内置 help 命令，
   // 导致 `parsed["subcommand"]` 不被设置。此时从 `helpAsSecondPositional` 提取 "help"。
   // 原因：yargs 18 的内置 help 机制会拦截 "help" 关键字，不将其作为 positional 传递
@@ -696,6 +793,13 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     (reviewInvoked ? (parsed["subcommand"] as string | undefined) : undefined) ??
     (helpAsSecondPositional === "review" ? "help" : undefined) ??
     (reviewInvoked ? "full" : undefined);
+  // super 子命令提取：与 team/rules 同样的三段式 fallback
+  const superRaw =
+    (superInvoked ? (parsed["subcommand"] as string | undefined) : undefined) ??
+    (helpAsSecondPositional === "super" ? "help" : undefined) ??
+    (parsed["super"] as string | undefined);
+  // super 的第二个位置参数 target（ticket 子命令的工单 ID / inject 子命令的事件正文）
+  const superTarget = superInvoked ? (parsed["target"] as string | undefined) : undefined;
   // quality-check 的第二个位置参数 target（codemap 子命令可选）
   // yargs 18 中 positional "target" 会出现在 parsed["target"]
   const qualityCheckTarget = qualityCheckInvoked ? (parsed["target"] as string | undefined) : undefined;
@@ -812,6 +916,31 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     }
   }
 
+  // 提取 super 子命令的选项
+  // 选项清单与 packages/cli/src/super/super-cmd.ts 的 SuperCommandArgs 对齐
+  const superOptions: Record<string, string | boolean | number | string[] | undefined> = {};
+  if (superRaw) {
+    const optionKeys = [
+      "once",
+      "watch",
+      "mode",
+      "state",
+      "format",
+      "actor",
+      "addressed",
+      "assess",
+      "project-root",
+      "source",
+      "limit",
+    ];
+    for (const key of optionKeys) {
+      const v = parsed[key];
+      if (v !== undefined) {
+        superOptions[key] = v as string | boolean | number | string[];
+      }
+    }
+  }
+
   // 上游 v0.3.1：解析 --fork 参数（无值时为 true，表示取最近会话；有值为会话 ID）
   const forkRaw = parsed.fork as string | undefined;
   let fork: ParsedCliArgs["fork"];
@@ -855,6 +984,10 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     qualityCheckPositional: qualityCheckTarget,
     review: reviewRaw,
     reviewOptions,
+    // super 子命令（docs/proposals/super-agent/proposal-final.md）
+    super: superRaw,
+    superOptions,
+    superPositional: superTarget,
     // web 子命令（docs/dev/web-ui.md §3.2）：--host / --port 覆盖项
     web: webArgs,
   };

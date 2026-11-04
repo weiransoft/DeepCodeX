@@ -143,6 +143,20 @@ export interface BackgroundTaskRunnerOptions {
   readonly onTaskComplete?: (task: BackgroundTask) => void;
   /** 任务状态变更回调 */
   readonly onTaskStateChange?: (task: BackgroundTask) => void;
+  /**
+   * 注入指令回调（可选）
+   *
+   * 🔴 **接线缺口修复（2026-11-03）**：此前 runner 构造 `BackgroundTask` 时
+   * **只传 `onStart` / `onStateChange`，从不传 `onInject`**，
+   * 导致 `BackgroundTask.inject()`（`background-task.ts:565`）
+   * 的 `if (this.callbacks.onInject)` **恒为 false** → 注入**静默无操作**。
+   *
+   * 调用方（如 Super Agent 的 `BackgroundRunnerLauncher`）通过本回调
+   * 把指令送进自己持有的 `InterruptQueue`，由会话主循环消费。
+   * 不注入本回调时，`inject()` 仍不抛错（保持既有行为），
+   * 但调用方**不应**据此认为指令已送达。
+   */
+  readonly onInject?: (task: BackgroundTask, instruction: InjectedInstruction) => void;
   /** 持久化存储（可选，Phase 1 可不注入） */
   readonly taskStore?: TaskStoreLike;
 }
@@ -267,7 +281,7 @@ export class BackgroundTaskRunner {
     const taskId = `t-${crypto.randomUUID()}`;
     const controller = new AbortController();
     // 提取 options 引用（避免在回调中使用 this 别名，符合 ESLint no-this-alias 规则）
-    const { sharedSessionOptions, registry, onTaskComplete, onTaskStateChange, taskStore } = this.options;
+    const { sharedSessionOptions, registry, onTaskComplete, onTaskStateChange, onInject, taskStore } = this.options;
     // 构造 BackgroundTask
     const task = new BackgroundTask({
       id: taskId,
@@ -297,6 +311,23 @@ export class BackgroundTaskRunner {
             }
           });
         // 注：onStart 不等待 handleUserPrompt 完成，立即返回让状态转为 running
+      },
+      // 注入指令接线（2026-11-03 修复静默丢弃缺陷）：
+      // 此前此处未传 onInject，导致 task.inject() 内的回调恒不触发。
+      // 现把指令转交给调用方的 onInject（通常是把指令塞进 InterruptQueue）。
+      onInject: (t, instruction) => {
+        if (!onInject) {
+          return;
+        }
+        try {
+          onInject(t, instruction);
+        } catch (err) {
+          // 注入回调抛错不静默吞掉——记日志，调用方可通过 registry 观察
+          console.error(
+            `[BackgroundTaskRunner] onInject 回调抛错（已忽略）：`,
+            err instanceof Error ? err.message : String(err)
+          );
+        }
       },
       onStateChange: (t) => {
         // 1. 触发外部 onTaskStateChange 回调
