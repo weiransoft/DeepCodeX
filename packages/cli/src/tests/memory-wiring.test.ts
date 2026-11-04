@@ -282,7 +282,10 @@ test("TC-HELP-001: deepcode --help 输出包含由注册表生成的全部命令
   });
 
   assert.equal(result.status, 0, `--help 应退出 0，stderr: ${result.stderr}`);
-  const output = result.stdout;
+  // yargs 的 showHelp() 默认写 **stderr**（`console.error`），不是 stdout——
+  // 只看 stdout 会恒为空而误判为「EPILOG 缺失」。两个流都收，断言的是
+  // 「帮助文本里有这些命令」，与它走哪个流无关。
+  const output = `${result.stdout}${result.stderr}`;
 
   // FIX-06 审查发现的 EPILOG 缺失命令，必须全部出现在 --help 输出中
   for (const required of [
