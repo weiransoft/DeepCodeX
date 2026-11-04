@@ -70,6 +70,8 @@ async function makeFixture(
   options: {
     /** 是否写入历史决策 */
     readonly withHistory?: boolean;
+    /** 是否写入同源其他工单（带已结束报告） */
+    readonly withSiblingTicket?: boolean;
   } = {}
 ): Promise<Fixture> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "super-agent-context-"));
@@ -135,6 +137,77 @@ async function makeFixture(
       resolvedAt: null,
       resolution: null,
     });
+
+    // ---- 同源其他工单（Worker 冷启动时唯一能拿到的「之前做过什么」）----
+    if (options.withSiblingTicket === true) {
+      repos.insertTicket(tx, {
+        id: "tkt_2",
+        state: "ended",
+        origin: ["trg_2"],
+        mandate: {
+          policyVersion: 1,
+          scope: "只改 src/login.tsx",
+          strength: "explicit",
+          matchedRules: ["rule-fix"],
+          actor: "alice",
+          sourceId: "src-a",
+        },
+        execution: {
+          name: "另一个相关工单",
+          directory: "",
+          assignmentId: "asg_2",
+          role: "solo-coder",
+        },
+        latestReport: null,
+        createdAt: "2026-10-30T00:00:00.000Z",
+        endedAt: "2026-10-30T00:10:00.000Z",
+        endedBy: "worker",
+        endedReason: "已完成",
+      });
+      repos.insertAssignment(tx, {
+        id: "asg_2",
+        ticketId: "tkt_2",
+        state: "ended",
+        workerSessionId: "session-2",
+        startedAt: "2026-10-30T00:00:01.000Z",
+        endedAt: "2026-10-30T00:09:00.000Z",
+        report: { kind: "ready", summary: "同源工单上次的处理结论", artifacts: [] },
+      });
+      // 跨来源的工单——其报告**不得**进入当前工单的上下文（来源隔离）
+      repos.insertTicket(tx, {
+        id: "tkt_3",
+        state: "ended",
+        origin: ["trg_3"],
+        mandate: {
+          policyVersion: 1,
+          scope: "只改 src/other.ts",
+          strength: "explicit",
+          matchedRules: ["rule-fix"],
+          actor: "bob",
+          sourceId: "src-b",
+        },
+        execution: {
+          name: "另一个来源的工单",
+          directory: "",
+          assignmentId: "asg_3",
+          role: "solo-coder",
+        },
+        latestReport: null,
+        createdAt: "2026-10-29T00:00:00.000Z",
+        endedAt: "2026-10-29T00:09:00.000Z",
+        endedBy: "worker",
+        endedReason: "已完成",
+      });
+      repos.insertAssignment(tx, {
+        id: "asg_3",
+        ticketId: "tkt_3",
+        state: "ended",
+        workerSessionId: "session-3",
+        startedAt: "2026-10-29T00:00:01.000Z",
+        endedAt: "2026-10-29T00:09:00.000Z",
+        report: { kind: "ready", summary: "跨来源的结论不应出现", artifacts: [] },
+      });
+    }
 
     // ---- 历史决策（全局层）----
     if (options.withHistory !== false) {
@@ -253,6 +326,33 @@ test("上下文装配：direct 通道含授权范围、未决待办、最近报�
     assert.match(text, /选哪个修复方案？/);
     assert.match(text, /已定位到登录页的崩溃点/);
     assert.match(text, /上次尝试复现失败/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("上下文装配：同源其他工单的历史报告进入「历史报告摘要」（Worker 不再冷启动）", async () => {
+  const fixture = await makeFixture({ withSiblingTicket: true });
+  try {
+    const bundle = buildContext({ repos: fixture.repos, now: () => NOW }, { ticketId: "tkt_1", now: NOW });
+    const text = renderTaskContext(bundle);
+    assert.match(text, /历史报告摘要/);
+    assert.match(text, /同源工单上次的处理结论/);
+    assert.match(text, /工单「另一个相关工单」/);
+    // 本工单此前的尝试仍在
+    assert.match(text, /上次尝试复现失败/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("上下文装配：跨来源工单的历史报告**不**进入上下文（来源隔离）", async () => {
+  const fixture = await makeFixture({ withSiblingTicket: true });
+  try {
+    const bundle = buildContext({ repos: fixture.repos, now: () => NOW }, { ticketId: "tkt_1", now: NOW });
+    const text = renderTaskContext(bundle);
+    assert.equal(text.includes("跨来源的结论不应出现"), false);
+    assert.equal(text.includes("另一个来源的工单"), false);
   } finally {
     fixture.cleanup();
   }

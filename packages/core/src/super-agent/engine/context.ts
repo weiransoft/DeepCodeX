@@ -39,7 +39,7 @@
 
 import { notFound } from "../domain/errors.js";
 import { estimateTokens } from "../domain/recall.js";
-import type { Assignment, Attention, TicketInput, WorkerReport } from "../domain/types.js";
+import type { Assignment, Attention, Ticket, TicketInput, WorkerReport } from "../domain/types.js";
 import { recallHistoricalDecisions, type HistoricalRecall, type RecallDeps } from "./history.js";
 
 // ============================================================================
@@ -188,8 +188,20 @@ export function buildContext(deps: ContextDeps, input: BuildContextInput): Conte
     (assignment): assignment is Assignment & { report: WorkerReport } =>
       assignment.report !== null && assignment.id !== ticket.execution.assignmentId
   );
-  if (historyAssignments.length > 0) {
-    direct.push(buildReportHistorySnippet(historyAssignments.slice(-reportHistoryLimit)));
+  // 历史报告摘要 = 本工单此前的尝试 + 同源其他工单做过的尝试
+  // （只取同源——跨来源的历史对当前工单没有可比性）
+  const historyEntries: ReportHistoryEntry[] = [
+    ...historyAssignments.map((assignment) => ({
+      state: assignment.state,
+      kind: assignment.report.kind,
+      summary: assignment.report.summary,
+      at: assignment.endedAt ?? assignment.startedAt ?? ticket.createdAt,
+      origin: "本工单",
+    })),
+    ...collectSiblingReports(deps, ticket, reportHistoryLimit),
+  ];
+  if (historyEntries.length > 0) {
+    direct.push(buildReportHistorySnippet(historyEntries.slice(-reportHistoryLimit)));
   }
 
   // ---- scored 通道：全局层（历史研判经验）----
@@ -395,14 +407,75 @@ function buildLatestReportSnippet(report: WorkerReport): ContextSnippet {
   return makeSnippet("latest_report", "最近报告", lines.join("\n"), PRIORITY_LATEST_REPORT);
 }
 
+/**
+ * 历史报告条目（统一口径）
+ *
+ * 覆盖两类来源：
+ * - **本工单此前的尝试**（同工单的其他 Assignment）
+ * - **同源其他工单做过的尝试**（同一 Source 下的其他工单）
+ */
+interface ReportHistoryEntry {
+  /** Assignment 状态 */
+  readonly state: string;
+  /** 报告类型 */
+  readonly kind: string;
+  /** 报告摘要 */
+  readonly summary: string;
+  /** 报告落库时间 */
+  readonly at: string;
+  /** 归属工单标识 */
+  readonly origin: string;
+}
+
+/**
+ * 收集同源其他工单的历史报告
+ *
+ * **为什么需要它**：Worker 每次派工都是**冷启动**——它不知道同一来源上
+ * 之前做过什么。而「本工单此前的尝试」在首期形态下几乎恒为空
+ * （一工单一 Assignment，报告在 Worker 结束后才落库），
+ * 只靠它会让「工单上下文」段在真实运行中永不出现。
+ *
+ * 同源其他工单的既有报告是**只读投影**（I10），不产生任何新的持久化状态。
+ *
+ * @param deps 依赖（仓储 + 时钟）
+ * @param ticket 当前工单
+ * @param limit 条数上限
+ * @returns 历史条目（按时间升序）
+ */
+function collectSiblingReports(deps: ContextDeps, ticket: Ticket, limit: number): ReportHistoryEntry[] {
+  const entries: ReportHistoryEntry[] = [];
+  // 读历史是**增强层**：失败只丢这一段，不拖垮整个上下文装配
+  let siblings: readonly Ticket[] = [];
+  try {
+    siblings = deps.repos.listTickets(undefined, 200);
+  } catch {
+    return entries;
+  }
+  for (const other of siblings) {
+    if (other.id === ticket.id) continue;
+    if (other.mandate.sourceId !== ticket.mandate.sourceId) continue;
+    for (const assignment of deps.repos.listAssignments(other.id)) {
+      const report = assignment.report;
+      if (report === null) continue;
+      entries.push({
+        state: assignment.state,
+        kind: report.kind,
+        summary: report.summary,
+        at: assignment.endedAt ?? assignment.startedAt ?? other.createdAt,
+        origin: `工单「${other.execution.name}」`,
+      });
+    }
+  }
+  entries.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+  return entries.slice(-limit);
+}
+
 /** 历史报告摘要片段 */
-function buildReportHistorySnippet(assignments: readonly Assignment[]): ContextSnippet {
-  const lines = ["## 历史报告摘要（本工单此前的尝试）"];
-  assignments.forEach((assignment, index) => {
-    const report = assignment.report;
-    const kind = report === null ? "（无报告）" : report.kind;
-    const summary = report === null ? "" : report.summary;
-    lines.push(`${index + 1}. [${assignment.state}] ${kind}${summary.length > 0 ? `：${summary}` : ""}`);
+function buildReportHistorySnippet(entries: readonly ReportHistoryEntry[]): ContextSnippet {
+  const lines = ["## 历史报告摘要（此前做过的尝试）"];
+  entries.forEach((entry, index) => {
+    const summary = entry.summary.length > 0 ? `：${entry.summary}` : "";
+    lines.push(`${index + 1}. [${entry.state}] ${entry.kind}${summary}（${entry.at}，${entry.origin}）`);
   });
   return makeSnippet("report_history", "历史报告摘要", lines.join("\n"), PRIORITY_REPORT_HISTORY);
 }

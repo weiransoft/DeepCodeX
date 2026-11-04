@@ -206,6 +206,7 @@ function makeReposStub(options: {
         resolution: null,
       })),
     listAssignments: () => [],
+    listTickets: () => [],
     listHistoricalDecisions: () => [],
     now: () => "2026-11-01T00:00:00.000Z",
   } as never;

@@ -624,7 +624,7 @@ node scripts/check-coverage-threshold.js coverage.deduped.lcov --lines 71 --bran
 
 | 项 | 判据 | 结果 |
 | --- | --- | --- |
-| T13′ | Worker **首轮** prompt 即含「## 工单上下文」段 | ✅ |
+| T13′ | Worker **首轮** prompt 即含「## 工单上下文」段 | ✅（口径见 §14.3：无可投影内容时**省略空段**，不塞空标题） |
 | T14′ | 相关历史可被召回 | ✅ |
 | T15′ | Assessment prompt 含「历史经验参考」+ I12 标注 | ✅ |
 | T16′ | 硬门槛挡住「不相关但更新」的历史（防排序反转） | ✅ |
@@ -634,3 +634,84 @@ node scripts/check-coverage-threshold.js coverage.deduped.lcov --lines 71 --bran
 | T20 | 门禁生效（v2 / `node:sqlite` / 动态 `import()` 均被拦下） | ✅ |
 | T21 | F1 修复：注入未真送达时**不标记已投递** | ✅ |
 | T22 | `super memory` 输出真实历史；`super status` 显示 4 个新计数 | ✅ |
+
+---
+
+## 14. 端到端验证与 P3-4 的一处修正（2026-11-04）
+
+### 14.1 为什么要补端到端
+
+单元测试（108 例）与 CI 冒烟（19 例）覆盖的是**模块内**行为；它们无法回答
+「准入 → 研判 → 建单 → 派工 → Worker 执行 → 报告回灌 → 收尾」这条链路
+在**跨模块时序**下是否真的成立。端到端脚本补上这一层：
+
+- `tests/scripts/super-agent-e2e.ts`（已注册为 `npm run test:e2e:super`）
+- **只替换网络端点**（`chat.completions.create`），其余全部走真实生产代码：
+  `SuperAgentRuntime` / `LlmAssessor` / `SuperAgentWorkerExecutor` /
+  `BackgroundRunnerLauncher` / `BackgroundTaskRunner` / `WorkerInstructionRegistry` / SQLite 存储。
+
+### 14.2 真实模型的可达性（如实记录）
+
+本机实测：`settings.json` 无 `API_KEY`；`env.BASE_URL` 指向的远端返回 **401**；
+本地 LM 端口（1234 / 1235 / 11434 / 8080 / 8000）全部被沙箱网关拦截（**502**）。
+
+因此**真实模型的输出质量不在本轮验证范围内**——验证的是内核时序与数据落库。
+CLI 侧对「无凭据」的表现已实测为**如实降级**：
+
+```
+Worker：不可用——未配置模型凭据（settings.json 中缺少 API_KEY）——Worker 不可用，Super Agent 仅做准入与研判。
+```
+
+### 14.3 E2E 查出并修掉的一处实现缺口
+
+**现象**：首个工单的 Worker 首轮 prompt **不含**「## 工单上下文」段。
+
+**根因**（实测结论，非推测）：
+
+1. `buildContext()` 的 direct 通道 = 授权范围 + 未决待办 + 待投递输入 + 最近报告 + 历史报告摘要；
+2. 首轮渲染时排除授权范围与待投递输入（它们已有专属段落）；
+3. 派工发生在**建单瞬间**（`acceptTicket` → `launch` 副作用），此刻：
+   无未决待办、无最近报告（报告在 Worker **结束后**才落库）、
+   无同工单其他 Assignment（一工单一 Assignment）；
+4. → direct 通道**必然为空** → 该段永远不出现。
+
+**修复**（`super-agent/engine/context.ts`）：把「历史报告摘要」的口径从
+「本工单此前的尝试」扩展为「本工单此前的尝试 **+ 同源其他工单做过的尝试**」。
+
+- 同源（`mandate.sourceId` 相同）——跨来源的历史对当前工单没有可比性，
+  **来源隔离有单测守护**；
+- 仍是**只读投影**（I10 不变）：不产生任何新的持久化状态；
+- 兑现 P3 的立意：Worker 每次派工都是**冷启动**，它不知道同一来源上之前做过什么——
+  这正是同源历史报告要补的信息。
+
+同时在 `super-agent/runtime.ts` 的 `handleDelivery` 里，为**第 2 轮**追加输入
+附上当前工单上下文投影（追加输入到达时，工单上才可能出现新的可投影事实）。
+
+### 14.4 E2E 断言结果（18/18 通过）
+
+| 组 | 断言 | 结果 |
+| --- | --- | --- |
+| E2E-1 | 事件经真实准入路径入队 → 研判 accept → 真实建单 → 派工产生 Assignment | ✅ |
+| E2E-2 | Worker prompt 含工单头 / 授权范围 / 角色约束 / 输出契约；**无历史时不塞空段** | ✅ |
+| E2E-3 | **第 2 轮输入真到达 LLM**（F1 断链修复的真实验证）：追加段出现 + 正文送达 + 真送达后才标记 `deliveredAt` | ✅ |
+| E2E-4 | 无注入通道时输入**保持 pending**，不谎称已送达 | ✅ |
+| E2E-5 | 报告回灌后工单收尾（`state=ended`）+ Worker 报告落库 | ✅ |
+| E2E-6 | 决策真实落库且可派生（召回命中 1，最高分 0.6016）；**未引入 `memory_entry` / `ticket_context`**（表数仍 15）；status 含 4 个承诺计数 | ✅ |
+| E2E-7 | 第二个工单首轮 prompt 含「## 工单上下文」段，且含**同源历史报告摘要**（Worker 不再冷启动） | ✅ |
+
+### 14.5 本轮补充的自动化
+
+- `packages/core/src/tests/super-agent-context.test.ts`：新增 2 例
+  （同源历史进入上下文 / **跨来源历史被隔离**），14/14 通过。
+- `tests/scripts/super-agent-e2e.ts`：可复现的端到端脚本（`npm run test:e2e:super`）。
+
+### 14.6 本轮遗留（明确不掩盖）
+
+- **真实模型输出质量未验证**——本机无有效凭据（§14.2）。内核时序已验证，
+  但「Worker 在真实模型下能否正确遵守输出契约」仍待有凭据时复测。
+- **同源历史的口径偏宽**——同一来源的所有工单互为历史，可能包含与当前工单
+  无关的尝试。当前只按来源隔离，未做语义相关度筛选（那需要 scored 通道的
+  排序能力，属下一阶段）。
+- **第 2 轮仍不含「上一轮 Worker 产出」**——Worker 第 1 轮的输出目前不进第 2 轮
+  prompt（只进「追加输入」）。这是多轮会话形态的缺口，需在 Worker 升级为
+  真正的多轮会话时补齐。

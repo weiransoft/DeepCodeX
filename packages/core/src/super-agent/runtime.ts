@@ -45,6 +45,7 @@ import type {
 } from "./domain/types.js";
 import { Effects, type EffectHealth } from "./effects/effects.js";
 import { markAssignmentRunning } from "./engine/assignments.js";
+import { buildContext, renderTaskContext } from "./engine/context.js";
 import { SuperAgentEngine, type Assessor, type WorkerExecutor } from "./engine/engine.js";
 import { recallHistoricalDecisions } from "./engine/history.js";
 import { estimateTokens } from "./domain/recall.js";
@@ -497,7 +498,16 @@ export class SuperAgentRuntime {
     }
 
     const text = pending.map((input) => `- [${input.kind}] ${input.body}`).join("\n");
-    const outcome = await this.injector.inject({ ticketId, assignmentId: assignment, text });
+    // 🔴 第 2 轮才带「工单上下文」：**派工时刻任务层投影必然为空**
+    // （刚建单：无未决待办、无最近报告、无历史报告），只有追加输入到达时
+    // 工单上才可能出现可投影的内容。此处不附上下文 = 该段永远不出现。
+    const contextText = this.renderTaskContextFor(ticketId);
+    const injectionText = contextText.length > 0 ? `${text}\n\n## 工单上下文\n${contextText}` : text;
+    const outcome = await this.injector.inject({
+      ticketId,
+      assignmentId: assignment,
+      text: injectionText,
+    });
 
     // 🔴 只有指令**真被 Worker 接收**才标记「已送达」。
     // 此前无论注入是否真的送达都会标记，导致输入被记为已投递、实际从未到达 LLM。
@@ -513,6 +523,29 @@ export class SuperAgentRuntime {
         this.repos.markInputDelivered(tx, input.id, at);
       }
     });
+  }
+
+  /**
+   * 渲染工单的任务层上下文投影（direct 通道）
+   *
+   * **只读**：只读既有表派生视图，不产生任何新的持久化状态（I10）。
+   *
+   * 与 `worker/executor.ts` 的首轮渲染保持同一套排除规则：
+   * 授权范围与待投递输入已有专属段落，重复出现既浪费预算也可能与启动参数不一致。
+   *
+   * 装配失败（如工单已被并发删除）时**如实降级为空串**——
+   * 上下文是增强项，不该让整条投递链路失败。
+   *
+   * @param ticketId 工单 ID
+   * @returns Markdown 文本；无内容时返回空串
+   */
+  private renderTaskContextFor(ticketId: string): string {
+    try {
+      const bundle = buildContext({ repos: this.repos, now: () => this.store.now() }, { ticketId });
+      return renderTaskContext(bundle, { exclude: ["mandate", "pending_input"] });
+    } catch {
+      return "";
+    }
   }
 
   /**
