@@ -121,3 +121,34 @@ test("R5 POST 空内容 → 400", async () => {
   assert.equal(status, 400);
   assert.ok(typeof body?.error === "string" || typeof body?.message === "string", "应返回可读错误");
 });
+
+test("R6 对话模式：配置读写贯通，且快照随之切换", async () => {
+  const initial = await fetchJson(server.port, "GET", "/api/soul/config", undefined, cookie);
+  assert.equal(initial.status, 200);
+  assert.equal(initial.body.mode, "work", "默认是工作模式");
+  assert.equal(initial.body.modes.length, 2);
+  assert.ok(initial.body.companionPresets.length >= 2);
+
+  const saved = await fetchJson(
+    server.port,
+    "PUT",
+    "/api/soul/config",
+    { mode: "companion", companion: { warmth: 0.9, addressAs: "老王" } },
+    cookie
+  );
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.mode, "companion");
+  assert.equal(saved.body.companion.warmth, 0.9);
+  // 未传的字段要保持原值（补丁语义，不是整体替换）
+  assert.equal(saved.body.companion.proactivity, initial.body.companion.proactivity);
+  assert.equal(saved.body.voice.enabled, initial.body.voice.enabled);
+
+  const soul = await fetchJson(server.port, "GET", "/api/soul", undefined, cookie);
+  assert.equal(soul.body.snapshot.mode, "companion");
+  assert.ok(soul.body.snapshot.promptPreview.includes("当前模式：陪伴"));
+  assert.equal(soul.body.snapshot.user.addressAs, "老王");
+
+  // 复位：后续用例按工作模式跑
+  const reset = await fetchJson(server.port, "PUT", "/api/soul/config", { mode: "work" }, cookie);
+  assert.equal(reset.body.mode, "work");
+});

@@ -27,7 +27,8 @@ import {
 } from "./taxonomy.js";
 import { countByCategory, groupByCategory, missingCategories, organizeMemories, recallMemories } from "./recall.js";
 import { TONE_DIRECTIVES, toneLabel } from "./presets.js";
-import type { MemoryGroup, MemoryItemView, OceanTraits, Soul, SoulMemory, SoulSnapshot } from "./types.js";
+import { DEFAULT_COMPANION_CONFIG, renderModeSection, soulModeLabel } from "./modes.js";
+import type { MemoryGroup, MemoryItemView, OceanTraits, Soul, SoulMemory, SoulMode, SoulSnapshot } from "./types.js";
 
 /** 提示词中记忆区块的最大条数（超出的不渲染，避免挤占任务上下文） */
 const PROMPT_MEMORY_BUDGET = 14;
@@ -84,6 +85,13 @@ export interface RenderOptions {
   readonly memoryBudget?: number;
   /** 当前时间（测试注入） */
   readonly now?: number;
+  /**
+   * 覆盖模式段（默认跟随 `soul.mode`）
+   *
+   * 规划器与 Worker 显式传 `work`：陪伴模式是**对话**模式，不该让派工的
+   * Worker 也「先接住人」——那会让执行报告变成安慰话。
+   */
+  readonly mode?: SoulMode;
 }
 
 /**
@@ -165,6 +173,16 @@ export function renderSoulPrompt(soul: Soul, options: RenderOptions = {}): strin
   }
   lines.push(`表情：${soul.expression.emojiStyle}。`);
   lines.push(`幽默：${soul.expression.humorStyle}。`);
+
+  // ---- 模式（工作 / 陪伴）----
+  // 放在表达风格之后、用户画像之前：它约束的是「怎么说」，
+  // 与上面四层同属行为规则，但又不该挤在记忆块与服务对象之间。
+  const mode = options.mode ?? soul.mode ?? "work";
+  const modeSection = renderModeSection(mode, soul.companion ?? DEFAULT_COMPANION_CONFIG);
+  if (modeSection.length > 0) {
+    lines.push("");
+    lines.push(modeSection);
+  }
 
   // ---- 用户画像 ----
   lines.push("");
@@ -280,6 +298,8 @@ export function buildSoulSnapshot(soul: Soul, options: RenderOptions = {}): Soul
       forbidden: soul.expression.forbiddenExpressions,
     },
     user: soul.user,
+    mode: soul.mode ?? "work",
+    modeLabel: soulModeLabel(soul.mode ?? "work"),
     memoryGroups,
     memoryStats: {
       total: entries.length,

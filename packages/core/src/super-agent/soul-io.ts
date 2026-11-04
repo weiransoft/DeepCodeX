@@ -1,28 +1,30 @@
 /**
  * Soul 文件存储适配层 —— 唯一触碰文件系统的地方
  *
- * ## 位置与形态
+ * ## 位置与形态（2026-11 统一后）
  *
  * ```
- * ~/.deepcode/soul/memory.json             全局记忆（跨项目：习惯、常用凭证位置）
- * <projectRoot>/.deepcode/soul/memory.json 项目记忆（项目地址、部署、规范）
+ * ~/.deepcode/memory/global.json          全局记忆（与 V2 /memory 同一份）
+ * <projectRoot>/.deepcode/memory/project.json 项目记忆
+ * ~/.deepcode/soul/config.json            形象、声音、对话模式
  * ```
  *
- * 分开的理由和 V2 记忆一致：项目事实跟着仓库走（可提交、可审查、换人不丢），
- * 个人偏好跟着人走（换项目仍在）。合并成一个文件会出现「把生产密码提交进仓库」
- * 这种事故。
+ * **不再有** `soul/memory.json`：Soul 记忆与 V2 记忆共用一套文件，
+ * 旧文件在首次加载时迁移并改名归档（见 `soul-memory-store.ts`）。
+ * 分开的理由和 V2 记忆一致：项目事实跟着仓库走（可审查、换人不丢），
+ * 个人偏好跟着人走（换项目仍在）。
  *
  * ## 为什么文件权限要 0600
  *
- * 这个文件**可能**含凭证原文（用户显式录入时）。默认渲染不把它写进提示词，
+ * 记忆文件**可能**含凭证原文（用户显式录入时）。默认渲染不把它写进提示词，
  * 但磁盘上仍是明文——把权限收到只有本人可读，是这条链路唯一能做的硬防护。
+ * V2 侧写入沿用 `MemoryStore` 自己的原子写，权限由那里的实现负责；
+ * 配置文件仍由本模块以 0600 写入。
  *
  * ## 写入为什么是 tmp + fsync + rename
  *
- * 记忆写入发生在对话过程中，随时可能被 Ctrl-C 或进程崩溃打断。
- * 直接覆盖写会出现「半个 JSON」——下次读取整份记忆失效。
- * 先写临时文件、fsync 落盘、再原子 rename，最差情况是丢掉最后一次写入，
- * 而不是丢掉全部记忆。
+ * 配置写入发生在设置面板保存时，随时可能被打断。先写临时文件、fsync 落盘、
+ * 再原子 rename，最差情况是丢掉最后一次写入，而不是留下一份坏 JSON。
  *
  * @module super-agent/soul-io
  */
@@ -31,45 +33,68 @@ import * as fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
+import { MemoryStore } from "../v2/memory/memory-store.js";
 import { emptyMemoryFile, normalizeMemoryFile } from "./soul/recall.js";
 import { normalizeSoulConfig } from "./soul/config.js";
+import { DEFAULT_COMPANION_CONFIG } from "./soul/modes.js";
+import { migrateLegacySoulMemory, UnifiedSoulStore } from "./soul-memory-store.js";
 import { SoulEngine, type ScopedSoulStore } from "./soul/engine.js";
-import type { Soul, SoulConfig, SoulMemoryFile, SoulMemoryStore } from "./soul/types.js";
+import type { Soul, SoulCompanionConfig, SoulConfig, SoulMemoryFile, SoulMemoryStore, SoulMode } from "./soul/types.js";
 
-/** 全局记忆目录（相对 HOME） */
-const GLOBAL_DIR = path.join(".deepcode", "soul");
+/** V2 记忆目录（相对 HOME 或项目根） */
+const MEMORY_DIR = path.join(".deepcode", "memory");
 
-/** 项目记忆目录（相对项目根） */
-const PROJECT_DIR = path.join(".deepcode", "soul");
+/** 旧版 Soul 目录（仅用于迁移） */
+const LEGACY_SOUL_DIR = path.join(".deepcode", "soul");
 
-/** 记忆文件名 */
-const MEMORY_FILE = "memory.json";
+/** 旧版记忆文件名 */
+const LEGACY_MEMORY_FILE = "memory.json";
 
-/** 记忆文件权限（仅本人可读写） */
+/** 配置文件权限（仅本人可读写） */
 const FILE_MODE = 0o600;
 
 /** 目录权限 */
 const DIR_MODE = 0o700;
 
 /**
- * 解析记忆文件路径
+ * 解析记忆文件路径（统一后就是 V2 的路径）
  *
  * @param scope 作用域
  * @param projectRoot 项目根（scope=project 时必填）
+ * @param homeRoot 用户级引擎数据根（Web 多用户场景必须传）
  * @returns 绝对路径
  */
 export function soulMemoryPath(scope: SoulMemoryFile["scope"], projectRoot?: string, homeRoot?: string): string {
   if (scope === "project") {
     const root = projectRoot ?? process.cwd();
-    return path.join(root, PROJECT_DIR, MEMORY_FILE);
+    return path.join(root, MEMORY_DIR, "project.json");
   }
   // homeRoot 用于 Web 多用户场景：锚定「本用户的引擎数据目录」而不是进程家目录，
   // 否则所有 Web 用户共用同一份 soul 记忆（串号）。
-  return path.join(homeRoot ?? os.homedir(), GLOBAL_DIR, MEMORY_FILE);
+  return path.join(homeRoot ?? os.homedir(), MEMORY_DIR, "global.json");
 }
 
 /**
- * 基于文件的记忆存储
+ * 旧版记忆文件路径（只用于迁移与提示）
+ *
+ * @param scope 作用域
+ * @param projectRoot 项目根
+ * @param homeRoot 用户级引擎数据根
+ * @returns 绝对路径
+ */
+export function legacySoulMemoryPath(scope: SoulMemoryFile["scope"], projectRoot?: string, homeRoot?: string): string {
+  if (scope === "project") {
+    const root = projectRoot ?? process.cwd();
+    return path.join(root, LEGACY_SOUL_DIR, LEGACY_MEMORY_FILE);
+  }
+  return path.join(homeRoot ?? os.homedir(), LEGACY_SOUL_DIR, LEGACY_MEMORY_FILE);
+}
+
+/**
+ * 通用文件存储（单文件版）
+ *
+ * 默认路径已换成 `UnifiedSoulStore`（与 V2 同一份文件），本类保留用于
+ * 离线导出、自定义路径与测试；语义与之前一致。
  *
  * 失败语义刻意「软」：读失败返回空文件（记忆是增强项），写失败向上抛
  * （由 `SoulEngine.persist` 兜住并忽略——不中断任务）。
@@ -178,24 +203,69 @@ export class FileSoulStore implements SoulMemoryStore {
  * 顺序固定为 `[global, project]`：`SoulEngine` 按顺序合并，
  * 后者覆盖前者，因此项目记忆天然优先。
  *
+ * 两者都落在 V2 的 `MemoryStore` 文件上（`global.json` / `project.json`），
+ * 于是 `/memory list` 与人格面板看到的是同一批条目。
+ *
  * @param projectRoot 项目根（省略则不含项目存储）
+ * @param homeRoot 用户级引擎数据根（Web 多用户）
  * @returns 作用域化存储
  */
 export function defaultSoulStores(projectRoot?: string, homeRoot?: string): ScopedSoulStore[] {
   const stores: ScopedSoulStore[] = [
-    { scope: "global", store: new FileSoulStore(soulMemoryPath("global", undefined, homeRoot), "global") },
+    { scope: "global", store: new UnifiedSoulStore(new MemoryStore(null, homeRoot), "global") },
   ];
   if (projectRoot !== undefined && projectRoot.length > 0) {
     stores.push({
       scope: "project",
-      store: new FileSoulStore(soulMemoryPath("project", projectRoot, homeRoot), "project"),
+      store: new UnifiedSoulStore(new MemoryStore(projectRoot, homeRoot), "project"),
     });
   }
   return stores;
 }
 
 /**
+ * 迁移旧版 `soul/memory.json`（幂等；无旧文件时零副作用）
+ *
+ * @param projectRoot 项目根
+ * @param homeRoot 用户级引擎数据根
+ * @returns 迁移报告
+ */
+export function migrateSoulMemory(projectRoot?: string, homeRoot?: string): ReturnType<typeof migrateLegacySoulMemory> {
+  const stores = defaultSoulStores(projectRoot, homeRoot);
+  const legacyPaths: { scope: SoulMemoryFile["scope"]; path: string }[] = [
+    { scope: "global", path: legacySoulMemoryPath("global", undefined, homeRoot) },
+  ];
+  if (projectRoot !== undefined && projectRoot.length > 0) {
+    legacyPaths.push({ scope: "project", path: legacySoulMemoryPath("project", projectRoot, homeRoot) });
+  }
+  return migrateLegacySoulMemory(stores, legacyPaths);
+}
+
+/**
+ * 读取配置里的对话模式（**不写盘**）
+ *
+ * 与 `loadSoulConfig` 的区别：这个函数只读。页面渲染、引擎构造都会调用它，
+ * 若为了读一个模式顺手把 token 落盘，会给只读路径带来意外的写副作用。
+ *
+ * @param homeRoot 用户级引擎数据根
+ * @returns 模式与陪伴配置（配置缺失或损坏时回落默认）
+ */
+export function readSoulMode(homeRoot?: string): { readonly mode: SoulMode; readonly companion: SoulCompanionConfig } {
+  const filePath = soulConfigPath(homeRoot);
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    const config = normalizeSoulConfig(parsed);
+    return { mode: config.mode, companion: config.companion };
+  } catch {
+    return { mode: "work", companion: DEFAULT_COMPANION_CONFIG };
+  }
+}
+
+/**
  * 构造并加载 Soul 引擎
+ *
+ * 模式从配置读（不传 `mode` 时）——「工作/陪伴」是人的偏好，
+ * 不该由每个调用方各自决定；显式传参优先（测试与临时会话用）。
  *
  * @param options 选项
  * @returns { engine, soul }
@@ -205,11 +275,30 @@ export function createSoulEngine(
     readonly projectRoot?: string;
     readonly homeRoot?: string;
     readonly memoryOnly?: boolean;
+    readonly mode?: SoulMode;
+    readonly companion?: SoulCompanionConfig;
     readonly clock?: () => number;
   } = {}
 ): { readonly engine: SoulEngine; readonly soul: Soul } {
   const stores = options.memoryOnly === true ? [] : defaultSoulStores(options.projectRoot, options.homeRoot);
-  const engine = new SoulEngine({ stores, clock: options.clock });
+  if (options.memoryOnly !== true) {
+    // 旧文件迁移：只在旧文件存在时动作，失败不阻塞（记忆读不到也不该让引擎起不来）
+    try {
+      migrateSoulMemory(options.projectRoot, options.homeRoot);
+    } catch {
+      // 迁移失败保持旧文件原样，下次再试
+    }
+  }
+  const preset =
+    options.memoryOnly === true
+      ? { mode: "work" as SoulMode, companion: DEFAULT_COMPANION_CONFIG }
+      : readSoulMode(options.homeRoot);
+  const engine = new SoulEngine({
+    stores,
+    mode: options.mode ?? preset.mode,
+    companion: options.companion ?? preset.companion,
+    clock: options.clock,
+  });
   const soul = engine.load();
   return { engine, soul };
 }
@@ -250,8 +339,11 @@ export function soulRevealSecretsFromEnv(): boolean {
 // 形象与声音配置（config.json）
 // ---------------------------------------------------------------------------
 
-/** 配置文件（与 memory.json 同目录） */
+/** 配置文件（`~/.deepcode/soul/config.json`） */
 const CONFIG_FILE = "config.json";
+
+/** 配置目录：与记忆目录分开——配置是偏好，记忆是事实，别混在一起 */
+const CONFIG_DIR = path.join(".deepcode", "soul");
 
 /**
  * 解析配置文件路径
@@ -262,7 +354,7 @@ const CONFIG_FILE = "config.json";
  * @returns 绝对路径
  */
 export function soulConfigPath(homeRoot?: string): string {
-  return path.join(homeRoot ?? os.homedir(), GLOBAL_DIR, CONFIG_FILE);
+  return path.join(homeRoot ?? os.homedir(), CONFIG_DIR, CONFIG_FILE);
 }
 
 /**

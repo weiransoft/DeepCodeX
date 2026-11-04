@@ -79,6 +79,21 @@ export {
   normalizeAvatarConfig,
   normalizeSoulConfig,
   normalizeVoiceConfig,
+  // 对话模式（工作 / 陪伴）
+  COMPANION_PRESETS,
+  DEFAULT_COMPANION_CONFIG,
+  SOUL_MODES,
+  applySoulMode,
+  findCompanionPreset,
+  normalizeCompanionConfig,
+  parseSoulMode,
+  renderModeSection,
+  soulModeLabel,
+  soulModeOptions,
+  // 记忆统一存储（Soul ↔ V2）：纯映射在 soul/ 内核，读写适配在 soul-memory-store.ts
+  isSoulEntry,
+  memoryEntryToSoul,
+  soulEntryToMemoryEntry,
 } from "./soul/index.js";
 export type {
   CategoryDefinition,
@@ -106,11 +121,13 @@ export type {
   ScopedSoulStore,
   Soul,
   SoulAvatarConfig,
+  SoulCompanionConfig,
   SoulConfig,
   SoulEngineOptions,
   SoulMemory,
   SoulMemoryFile,
   SoulMemoryStore,
+  SoulMode,
   SoulSnapshot,
   SoulVoiceConfig,
   UserProfile,
@@ -120,13 +137,19 @@ export {
   FileSoulStore,
   createSoulEngine,
   defaultSoulStores,
+  legacySoulMemoryPath,
   loadSoulConfig,
+  migrateSoulMemory,
+  readSoulMode,
   saveSoulConfig,
   soulConfigPath,
   soulMemoryLocations,
   soulMemoryPath,
   soulRevealSecretsFromEnv,
 } from "./soul-io.js";
+// Soul 记忆的统一存储适配层：需要 node:fs 与 v2/MemoryStore，故不在 soul/ 内核下
+export { UnifiedSoulStore, migrateLegacySoulMemory } from "./soul-memory-store.js";
+export type { SoulMigrationReport } from "./soul-memory-store.js";
 
 // --- 计划层（动态分解 / 工作流 / 组队） ---
 export {

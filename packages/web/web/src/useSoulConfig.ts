@@ -20,15 +20,19 @@ const FALLBACK: SoulConfigView = {
   avatar: { kind: "default" },
   voice: {
     enabled: false,
-    engine: "cosyvoice2",
+    engine: "qwen3-voicedesign",
     voice: "",
     speed: 1,
     endpoint: "",
     hasToken: false,
     speakReplies: true,
   },
+  mode: "work",
+  companion: { addressAs: "", warmth: 0.85, proactivity: 0.55, encourageHumanContact: true },
   filePath: "",
   presets: [],
+  modes: [],
+  companionPresets: [],
 };
 
 /**

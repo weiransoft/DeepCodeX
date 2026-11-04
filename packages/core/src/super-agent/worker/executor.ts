@@ -252,7 +252,8 @@ export class SuperAgentWorkerExecutor implements WorkerExecutor {
     // 人格与记忆：放在角色约束之后、输出契约之前——先知道「谁在干、为什么要这么干」，
     // 再看到「怎么回报」。记忆段本身在 renderSoulPrompt 里已标注为数据。
     if (this.soul !== undefined) {
-      sections.push(renderSoulPrompt(this.soul));
+      // 模式固定按工作模式渲染：陪伴模式是对话模式，Worker 的任务是交付
+      sections.push(renderSoulPrompt(this.soul, { mode: "work" }));
       sections.push("");
     }
     sections.push("## 输出契约");

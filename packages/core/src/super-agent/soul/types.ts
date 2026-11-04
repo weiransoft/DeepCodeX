@@ -24,12 +24,20 @@
  * 一百句闲聊有用。因此记忆条目带 `category`（开发核心类别，见 `taxonomy.ts`）、
  * `sensitivity`（是否凭证）、`strength`（强度，可增可减）。
  *
- * ## 与 V2 `v2/memory` 的关系
+ * ## 与 V2 `v2/memory` 的关系：一套存储，两种视图
  *
- * V2 MemoryEntry 是「键值 + 置信度」，没有强度、没有敏感性、没有激活计数，
- * 且不提供 update（无法做衰减与合并）。Soul 记忆需要这些字段才能「整理」，
- * 因此单独一层，持久化在 `~/.deepcode/soul/memory.json`。
- * 两者不互相覆盖：V2 记忆是上下文素材，Soul 记忆是长期画像。
+ * 早期实现把 Soul 记忆单独放在 `~/.deepcode/soul/memory.json`，结果是
+ * `/memory add` 记下的事司南读不到、司南记下的事 `/memory list` 看不到——
+ * 同一份「事实」被分裂成两份互相不知道的副本。
+ *
+ * 现在统一到 V2 的 `MemoryStore`（`~/.deepcode/memory/global.json`、
+ * `<projectRoot>/.deepcode/memory/project.json`）：
+ *
+ * - **Soul 是写者**：Soul 条目以 `MemoryEntry` 形态落盘，强度存 `confidence`，
+ *   分类/标题/敏感性/激活计数存 `metadata.soul`，可无损还原；
+ * - **V2 是既成事实**：已有的 V2 条目（含 7 维度与 facts）**只读**映射进 Soul，
+ *   标记 `origin: "v2"`，引擎不会把它们写回，也不会在整理时裁掉；
+ * - **删除双向生效**：在人格面板里忘掉一条 V2 事实，会真的从 V2 文件里删掉。
  *
  * @module super-agent/soul/types
  */
@@ -275,6 +283,14 @@ export interface SoulMemory {
   readonly lastRecalledAt?: string;
   /** 标签 */
   readonly tags?: readonly string[];
+  /**
+   * 数据来源层
+   *
+   * - `soul`（缺省）：本层写入，引擎负责持久化；
+   * - `v2`：从 V2 `MemoryStore` 只读映射进来的既成事实，引擎**不写回**，
+   *   整理时不衰减不裁剪；用户显式遗忘时才回写删除。
+   */
+  readonly origin?: "soul" | "v2";
 }
 
 /**
@@ -289,6 +305,35 @@ export interface SoulMemoryFile {
   readonly entries: readonly SoulMemory[];
   /** 最后更新时间（ISO 8601） */
   readonly lastUpdated: string;
+}
+
+/**
+ * 对话模式
+ *
+ * - `work`：工作模式。先定方位、先给结论，效率优先（默认）。
+ * - `companion`：陪伴模式。先接住人、再谈事，情绪与关系优先。
+ *
+ * 模式的边界：只改**语气与表达倾向**（Layer 3/4）和一小部分人格倾向，
+ * 不改 Layer 1（核心本质与不可逾越的边界）。否则「换个模式」就变成换个人，
+ * 陪伴模式下开始编造、越权、泄露凭证——那不是陪伴，是失控。
+ */
+export type SoulMode = "work" | "companion";
+
+/**
+ * 陪伴模式的可调项
+ *
+ * 这些不是「人设开关」，而是把「热情」拆成可调的量：
+ * 热情过高会变成噪音，过低又回到工作模式的克制。
+ */
+export interface SoulCompanionConfig {
+  /** 称呼用户的昵称（空字符串 = 沿用 `user.addressAs`） */
+  readonly addressAs: string;
+  /** 热情度（0~1）：影响语气温度与感叹节制，不影响判断与如实 */
+  readonly warmth: number;
+  /** 主动性（0~1）：主动追问、主动开话题的强度 */
+  readonly proactivity: number;
+  /** 是否在合适时机鼓励用户联系现实中的人（防依赖，默认开） */
+  readonly encourageHumanContact: boolean;
 }
 
 /**
@@ -311,6 +356,10 @@ export interface Soul {
   readonly user: UserProfile;
   /** 记忆（按需加载，可为空） */
   readonly memories: readonly SoulMemory[];
+  /** 当前对话模式（缺省视为 `work`） */
+  readonly mode?: SoulMode;
+  /** 陪伴模式的可调项（mode=companion 时由引擎注入，渲染提示词用） */
+  readonly companion?: SoulCompanionConfig;
 }
 
 /**
@@ -349,6 +398,13 @@ export interface SoulMemoryStore {
   load(): SoulMemoryFile;
   /** 覆盖写入（实现负责原子性） */
   save(file: SoulMemoryFile): void;
+  /**
+   * 删除若干条目（可选）
+   *
+   * 只有「外部来源」的条目需要它：这些条目不在本层的覆盖写范围内，
+   * 用户显式遗忘时必须回到原来的存储里删。
+   */
+  remove?(ids: readonly string[]): void;
 }
 
 /**
@@ -387,6 +443,10 @@ export interface SoulSnapshot {
   };
   /** 用户画像 */
   readonly user: UserProfile;
+  /** 当前对话模式 */
+  readonly mode: SoulMode;
+  /** 模式中文名（UI 直接展示） */
+  readonly modeLabel: string;
   /** 记忆分组（按类别） */
   readonly memoryGroups: readonly MemoryGroup[];
   /** 记忆统计 */
@@ -492,14 +552,18 @@ export interface SoulVoiceConfig {
 }
 
 /**
- * 司南的形象与声音配置（`~/.deepcode/soul/config.json`）
+ * 司南的配置（`~/.deepcode/soul/config.json`）
  *
- * 与 `memory.json` 分文件存放：记忆是**给模型的事实**，配置是**给人的偏好**，
- * 生命周期与读取方都不同（前者每轮进提示词，后者只在注入时读一次）。
+ * 与记忆分文件存放：记忆是**给模型的事实**（存 V2 memory 目录），
+ * 配置是**给人的偏好**（形象、声音、对话模式），生命周期与读取方都不同。
  */
 export interface SoulConfig {
   /** 头像 */
   readonly avatar: SoulAvatarConfig;
   /** 语音 */
   readonly voice: SoulVoiceConfig;
+  /** 对话模式（work = 工作，companion = 陪伴） */
+  readonly mode: SoulMode;
+  /** 陪伴模式可调项（mode=work 时保留但不生效） */
+  readonly companion: SoulCompanionConfig;
 }

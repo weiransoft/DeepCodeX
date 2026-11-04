@@ -183,6 +183,139 @@ export function SoulAppearancePane() {
         </div>
       </section>
 
+      {/* ---------- 对话模式 ---------- */}
+      <section className="soul-section">
+        <h4>对话模式</h4>
+        <div className="soul-modes">
+          {config.modes.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={`soul-mode${config.mode === item.id ? " soul-mode-active" : ""}`}
+              disabled={saving}
+              onClick={() => void submit({ mode: item.id }, `已切换到${item.label}`)}
+            >
+              <span className="soul-mode-label">{item.label}</span>
+              <span className="soul-mode-tagline">{item.tagline}</span>
+            </button>
+          ))}
+        </div>
+        <div className="soul-hint">
+          工作模式先给结论与动作；陪伴模式先接情绪再谈事。模式在<strong>新建会话</strong>时生效，已开的会话保持原样。
+        </div>
+
+        {config.mode === "companion" && (
+          <div className="soul-companion">
+            {config.companionPresets.length > 0 && (
+              <div className="soul-field">
+                <span className="soul-field-label">陪伴风格</span>
+                <div className="soul-presets">
+                  {config.companionPresets.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      className={`soul-preset${
+                        preset.config.warmth === config.companion.warmth &&
+                        preset.config.proactivity === config.companion.proactivity
+                          ? " soul-preset-active"
+                          : ""
+                      }`}
+                      disabled={saving}
+                      title={preset.description}
+                      onClick={() => void submit({ companion: preset.config }, `已套用「${preset.label}」风格`)}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="soul-field">
+              <span className="soul-field-label">怎么称呼你</span>
+              <input
+                className="soul-input"
+                type="text"
+                maxLength={24}
+                defaultValue={config.companion.addressAs}
+                placeholder="留空就沿用「你」"
+                disabled={saving}
+                onBlur={(event) => void submit({ companion: { addressAs: event.target.value } }, "称呼已保存")}
+              />
+            </div>
+
+            <div className="soul-field">
+              <span className="soul-field-label">热情度</span>
+              <input
+                className="soul-range"
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={config.companion.warmth}
+                disabled={saving}
+                onChange={(event) =>
+                  setState({
+                    phase: "ready",
+                    config: { ...config, companion: { ...config.companion, warmth: Number(event.target.value) } },
+                  })
+                }
+                onMouseUp={(event) =>
+                  void submit(
+                    { companion: { warmth: Number((event.target as HTMLInputElement).value) } },
+                    "热情度已保存"
+                  )
+                }
+              />
+              <span className="soul-range-value">{Math.round(config.companion.warmth * 100)}%</span>
+            </div>
+
+            <div className="soul-field">
+              <span className="soul-field-label">主动性</span>
+              <input
+                className="soul-range"
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={config.companion.proactivity}
+                disabled={saving}
+                onChange={(event) =>
+                  setState({
+                    phase: "ready",
+                    config: { ...config, companion: { ...config.companion, proactivity: Number(event.target.value) } },
+                  })
+                }
+                onMouseUp={(event) =>
+                  void submit(
+                    { companion: { proactivity: Number((event.target as HTMLInputElement).value) } },
+                    "主动性已保存"
+                  )
+                }
+              />
+              <span className="soul-range-value">{Math.round(config.companion.proactivity * 100)}%</span>
+            </div>
+
+            <label className="soul-check">
+              <input
+                type="checkbox"
+                checked={config.companion.encourageHumanContact}
+                disabled={saving}
+                onChange={(event) =>
+                  void submit({ companion: { encourageHumanContact: event.target.checked } }, "已更新现实连接建议")
+                }
+              />
+              <span>在合适的时候鼓励我去找现实里的人（防依赖）</span>
+            </label>
+
+            <div className="soul-hint">
+              陪伴模式只改语气与顺序，不改「不编造、不越权、不泄露凭证」的边界；出现自伤/自杀表达时会转入危机应对，
+              建议拨打全国统一心理援助热线 <strong>12356</strong>，紧急情况 110 / 120。
+            </div>
+          </div>
+        )}
+      </section>
+
       {/* ---------- 声音 ---------- */}
       <section className="soul-section">
         <h4>声音（本机 MLX 语音）</h4>

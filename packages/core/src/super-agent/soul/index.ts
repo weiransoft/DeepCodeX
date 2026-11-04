@@ -28,10 +28,12 @@ export type {
   RecalledMemory,
   Soul,
   SoulAvatarConfig,
+  SoulCompanionConfig,
   SoulConfig,
   SoulMemory,
   SoulMemoryFile,
   SoulMemoryStore,
+  SoulMode,
   SoulSnapshot,
   SoulVoiceConfig,
   UserProfile,
@@ -53,10 +55,28 @@ export {
   VOICE_SPEED_MAX,
   VOICE_SPEED_MIN,
   findVoicePreset,
+  findCompanionPreset,
   normalizeAvatarConfig,
+  normalizeCompanionConfig,
   normalizeSoulConfig,
   normalizeVoiceConfig,
+  soulModeLabel,
+  soulModeOptions,
 } from "./config.js";
+
+export {
+  COMPANION_PRESETS,
+  DEFAULT_COMPANION_CONFIG,
+  SOUL_MODES,
+  applySoulMode,
+  parseSoulMode,
+  renderModeSection,
+} from "./modes.js";
+
+// 注意：这里只导出**纯映射**。`UnifiedSoulStore` 与旧文件迁移需要
+// `node:fs` 与 `v2/MemoryStore`，按内核门禁不得出现在 `soul/` 下，
+// 由适配层 `super-agent/soul-memory-store.ts` 提供并从上层 barrel 导出。
+export { isSoulEntry, memoryEntryToSoul, soulEntryToMemoryEntry } from "./unified-memory.js";
 
 export {
   MEMORY_CATEGORIES,

@@ -11,7 +11,8 @@
  * - A6 DELETE：删除 200 且快照减少；不存在 404
  *
  * 存储隔离：personalOnly=true + engineHomeRoot 指向 mkdtemp 临时目录 + 固定 userId，
- * soul 记忆落 `<engineHomeRoot>/<userId>/.deepcode/soul/memory.json`，与真实家目录无关。
+ * soul 记忆与 `/memory` 共用 `<engineHomeRoot>/<userId>/.deepcode/memory/global.json`
+ * （V2 MemoryEntry 形态，Soul 字段在 metadata.soul 里），与真实家目录无关。
  *
  * @module tests/soul-api
  */
@@ -42,7 +43,7 @@ function makeFixture() {
     exp: 4102444800,
     userId: "u-soul-0001",
   };
-  const memoryFile = path.join(engineHomeRoot, ctx.userId, ".deepcode", "soul", "memory.json");
+  const memoryFile = path.join(engineHomeRoot, ctx.userId, ".deepcode", "memory", "global.json");
   return { resolved, ctx, memoryFile };
 }
 
@@ -117,9 +118,11 @@ test("A2 POST 记一条：归类正确并落盘到本用户数据目录", async 
 
   assert.ok(existsSync(memoryFile), "记忆应落盘到本用户目录");
   const file = JSON.parse(readFileSync(memoryFile, "utf8"));
-  assert.equal(file.scope, "global");
+  assert.equal(file.version, "1.0", "落盘形态是 V2 MemoryStore 的结构");
   assert.equal(file.entries.length, 1);
-  assert.equal(file.entries[0].category, "deploy");
+  assert.equal(file.entries[0].type, "user_global");
+  assert.equal(file.entries[0].metadata.soul.category, "deploy", "Soul 分类应无损保存在 metadata 里");
+  assert.ok(file.entries[0].key.startsWith("soul."), "键带 soul. 前缀，便于与 /memory 原生条目区分");
 });
 
 test("A3 POST 凭证：响应与磁盘均不含明文片段可还原", async () => {

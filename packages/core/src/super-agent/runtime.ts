@@ -118,6 +118,13 @@ export interface SuperAgentRuntimeOptions {
    * 语气一致、不再重复问「项目在哪、怎么部署、守什么规范」。
    */
   readonly soul?: Soul | null;
+  /**
+   * 用户级引擎数据根（记忆 / 配置的落点）
+   *
+   * 未传 = 进程家目录（CLI 单机行为不变）。Web 多用户必须传，
+   * 否则不同用户会共用同一份记忆（串号）。
+   */
+  readonly homeRoot?: string;
 }
 
 /** 运行时状态快照（供 `super status` 展示） */
@@ -300,7 +307,7 @@ export class SuperAgentRuntime {
       options.soul === null
         ? undefined
         : options.soul === undefined
-          ? createSoulEngine({ projectRoot: options.projectRoot }).soul
+          ? createSoulEngine({ projectRoot: options.projectRoot, homeRoot: options.homeRoot }).soul
           : options.soul;
 
     // 计划器：undefined → 默认 LLM 计划器；null → 不做动态分解（旧语义）

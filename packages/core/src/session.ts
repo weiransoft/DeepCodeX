@@ -786,6 +786,14 @@ export type SessionManagerOptions = {
    */
   onLoadAgent?: (sessionId: string, agentName: string) => Promise<boolean>;
   /**
+   * Soul 提示词提供者（可选注入，2026-11-05）
+   *
+   * 新会话建立 system prompt 后调用一次，把「司南是谁、记得什么、当前是工作
+   * 还是陪伴模式」作为独立的 system 消息注入。返回 `null` / 抛错都视为
+   * 「本会话不带人格段」——人格是增强项，不该让会话建立失败。
+   */
+  soulPromptProvider?: () => string | null;
+  /**
    * EAG-P0：独立评估器外挂（可选注入，§5.4 Goal Evaluator 接入主循环）
    *
    * 未注入时主循环行为完全不变（向后兼容，V2 526 测试零回归）。
@@ -1630,6 +1638,13 @@ export class SessionManager {
   private readonly agentRegistry: AgentRegistry;
   // T01：自定义 Agent 加载装配点（SessionManagerOptions.onLoadAgent，缺省走内置实现）
   private readonly onLoadAgentOption?: (sessionId: string, agentName: string) => Promise<boolean>;
+  /**
+   * Soul（司南人格与记忆）提示词提供者（2026-11-05）
+   *
+   * 宿主注入（Web 按当前用户配置构造）。返回 null / 抛错都按「无人格段」处理——
+   * 人格是增强项，不该让一条会话因为读不到配置而起不来。
+   */
+  private readonly soulPromptProvider?: () => string | null;
   // FileHistoryCoordinator 实例（undo/file-history 域协调器，S4 首阶段拆分，
   // 抽取模式见 file-history-coordinator.ts 模块头注释，供后续域拆分复用）
   private readonly fileHistoryCoordinator: FileHistoryCoordinator;
@@ -1809,6 +1824,7 @@ export class SessionManager {
     this.onProcessStdout = options.onProcessStdout;
     // EAG-P5：bash 高危命令人工确认宿主回调（Web 确认框 / CLI 审批提示注入）
     this.onP5DangerousApproval = options.onP5DangerousApproval;
+    this.soulPromptProvider = options.soulPromptProvider;
     // 合并说明：ToolExecutor 第 4 参保持 fork 侧 createLLMClient 工厂（B1 统一 LLM 路由），
     // 第 5 参采纳上游 v0.3.1 的 loadSharp（sharp 图片库懒加载，ReadImage/UnderstandImage 依赖）
     this.loadSharp = options.loadSharp;
@@ -4056,6 +4072,24 @@ ${agentInstructions}
     this.onAssistantMessage(message, false);
   }
 
+  /**
+   * 取 Soul 提示词（宿主未注入 / 抛错 / 空串都返回 null）
+   *
+   * @returns 提示词片段或 null
+   */
+  private readSoulPrompt(): string | null {
+    if (this.soulPromptProvider === undefined) return null;
+    try {
+      const prompt = this.soulPromptProvider();
+      if (typeof prompt !== "string" || prompt.trim().length === 0) return null;
+      return prompt;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[session] Soul 提示词生成失败，本会话不带人格段：${message}`);
+      return null;
+    }
+  }
+
   async handleUserPrompt(userPrompt: UserPromptContent): Promise<void> {
     const controller = new AbortController();
     this.activePromptController = controller;
@@ -4280,6 +4314,17 @@ ${agentInstructions}
     const systemPrompt = getSystemPrompt(this.projectRoot, promptToolOptions);
     const systemMessage = this.buildSystemMessage(sessionId, systemPrompt);
     this.appendSessionMessage(sessionId, systemMessage);
+
+    // Soul（司南）：人格 / 记忆 / 当前模式。紧跟基础 system prompt——「我是谁」
+    // 要早于技能目录与运行时上下文，否则会被后置的通用指令稀释。
+    // 临时会话（dispatch / team worker）不注入：它们的角色人格由 roleSystemPrompt
+    // 负责，再叠一层司南会造成「到底听谁的」。
+    if (ephemeral !== true) {
+      const soulPrompt = this.readSoulPrompt();
+      if (soulPrompt !== null) {
+        this.appendSessionMessage(sessionId, this.buildSystemMessage(sessionId, soulPrompt));
+      }
+    }
 
     // 2026-11-02（L1-1）：角色约束段（临时运行专用）
     // 位置紧跟基础 system prompt：角色身份是"我是谁"，应早于技能目录 / 运行时上下文，

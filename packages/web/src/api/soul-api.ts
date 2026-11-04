@@ -23,8 +23,10 @@
  *
  * ## 存储锚点
  *
- * 记忆写在**本用户的引擎数据目录**（`skillsHomeForUser()`）下的
- * `.deepcode/soul/memory.json`，与 Web 的技能/智能体资产同源，避免多用户串号。
+ * 记忆与 `/memory` 共用同一份文件——**本用户的引擎数据目录**
+ * （`skillsHomeForUser()`）下的 `.deepcode/memory/global.json`，
+ * 与 Web 的技能/智能体资产同源，避免多用户串号。
+ * 形象、声音、对话模式在 `.deepcode/soul/config.json`（跟人走，不跟项目走）。
  *
  * @module web/api/soul-api
  */
@@ -39,7 +41,9 @@ import {
   saveSoulConfig,
   soulConfigPath,
   soulMemoryLocations,
+  COMPANION_PRESETS,
   VOICE_PRESETS,
+  soulModeOptions,
   type MemoryCategory,
   type SoulConfig,
   type SoulSnapshot,
@@ -200,10 +204,23 @@ function parseCategory(raw: unknown): MemoryCategory | undefined {
 export type SoulConfigView = {
   avatar: SoulConfig["avatar"];
   voice: Omit<SoulConfig["voice"], "token"> & { hasToken: boolean };
+  /** 对话模式（work = 工作，companion = 陪伴） */
+  mode: SoulConfig["mode"];
+  /** 陪伴模式可调项（mode=work 时保留但不生效） */
+  companion: SoulConfig["companion"];
   /** 配置文件位置（便于用户备份） */
   filePath: string;
   /** 音色预设（避免前端再维护一份） */
   presets: readonly { id: string; label: string; description: string }[];
+  /** 模式清单（同上，单一数据源在 core） */
+  modes: readonly { id: SoulConfig["mode"]; label: string; tagline: string }[];
+  /** 陪伴风格预设 */
+  companionPresets: readonly {
+    id: string;
+    label: string;
+    description: string;
+    config: SoulConfig["companion"];
+  }[];
 };
 
 /**
@@ -218,8 +235,12 @@ function toConfigView(config: SoulConfig, filePath: string): SoulConfigView {
   return {
     avatar: config.avatar,
     voice: { ...voice, hasToken: token.length > 0 },
+    mode: config.mode,
+    companion: config.companion,
     filePath,
     presets: VOICE_PRESETS,
+    modes: soulModeOptions(),
+    companionPresets: COMPANION_PRESETS,
   };
 }
 
@@ -258,13 +279,20 @@ export async function handlePutSoulConfig(
   ctx: AuthContext,
   settings: EngineHomeSettings & { skillsHomeRoot?: string | null }
 ): Promise<void> {
-  const body = (await readJsonBody(req)) as { avatar?: unknown; voice?: unknown };
+  const body = (await readJsonBody(req)) as {
+    avatar?: unknown;
+    voice?: unknown;
+    mode?: unknown;
+    companion?: unknown;
+  };
   const homeRoot = skillsHomeForUser(settings, ctx.userId);
   const current = loadSoulConfig(homeRoot);
 
   const next: SoulConfig = {
     avatar: body.avatar === undefined ? current.config.avatar : (body.avatar as SoulConfig["avatar"]),
     voice: body.voice === undefined ? current.config.voice : (body.voice as SoulConfig["voice"]),
+    mode: body.mode === undefined ? current.config.mode : (body.mode as SoulConfig["mode"]),
+    companion: body.companion === undefined ? current.config.companion : (body.companion as SoulConfig["companion"]),
   };
   const saved = saveSoulConfig(next, homeRoot);
   sendJson(res, 200, toConfigView(saved.config, saved.filePath));

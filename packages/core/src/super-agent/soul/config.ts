@@ -18,7 +18,15 @@
  * @module super-agent/soul/config
  */
 
-import type { SoulAvatarConfig, SoulConfig, SoulVoiceConfig, VoiceEngine } from "./types";
+import { DEFAULT_COMPANION_CONFIG, COMPANION_PRESETS, SOUL_MODES, parseSoulMode, soulModeLabel } from "./modes";
+import type {
+  SoulAvatarConfig,
+  SoulCompanionConfig,
+  SoulConfig,
+  SoulMode,
+  SoulVoiceConfig,
+  VoiceEngine,
+} from "./types";
 
 /** 自定义头像 dataUrl 上限（字符数，约 300KB 图；256px 头像 base64 约 10KB） */
 export const AVATAR_DATA_URL_MAX = 400_000;
@@ -64,7 +72,7 @@ export const VOICE_PRESETS: readonly { id: string; label: string; description: s
   },
 ];
 
-/** 默认配置：语音默认关闭（模型没装时不该出现麦克风） */
+/** 默认配置：语音默认关闭（模型没装时不该出现麦克风）；模式默认工作 */
 export const DEFAULT_SOUL_CONFIG: SoulConfig = {
   avatar: { kind: "default" },
   voice: {
@@ -76,6 +84,8 @@ export const DEFAULT_SOUL_CONFIG: SoulConfig = {
     token: "",
     speakReplies: true,
   },
+  mode: "work",
+  companion: DEFAULT_COMPANION_CONFIG,
 };
 
 /**
@@ -147,6 +157,27 @@ export function normalizeVoiceConfig(raw: unknown, fallbackToken = ""): SoulVoic
 }
 
 /**
+ * 校验并规范化陪伴配置
+ *
+ * 称呼限长 24 字（再长会被模型当成一句话复述出来）；两个滑杆夹到 0~1；
+ * 防依赖开关默认开，只有显式 `false` 才关——这一项不该被「手滑」关掉。
+ *
+ * @param raw 原始值
+ * @returns 合法陪伴配置
+ */
+export function normalizeCompanionConfig(raw: unknown): SoulCompanionConfig {
+  if (typeof raw !== "object" || raw === null) return DEFAULT_COMPANION_CONFIG;
+  const record = raw as Record<string, unknown>;
+  const addressAs = typeof record.addressAs === "string" ? record.addressAs.trim().slice(0, 24) : "";
+  return {
+    addressAs,
+    warmth: clampNumber(record.warmth, 0, 1, DEFAULT_COMPANION_CONFIG.warmth),
+    proactivity: clampNumber(record.proactivity, 0, 1, DEFAULT_COMPANION_CONFIG.proactivity),
+    encourageHumanContact: record.encourageHumanContact !== false,
+  };
+}
+
+/**
  * 校验并规范化整份配置
  *
  * @param raw 原始值（可能来自磁盘、请求体或旧版本）
@@ -155,12 +186,19 @@ export function normalizeVoiceConfig(raw: unknown, fallbackToken = ""): SoulVoic
  */
 export function normalizeSoulConfig(raw: unknown, fallbackToken = ""): SoulConfig {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    return { avatar: { kind: "default" }, voice: { ...DEFAULT_SOUL_CONFIG.voice, token: fallbackToken } };
+    return {
+      avatar: { kind: "default" },
+      voice: { ...DEFAULT_SOUL_CONFIG.voice, token: fallbackToken },
+      mode: DEFAULT_SOUL_CONFIG.mode,
+      companion: DEFAULT_COMPANION_CONFIG,
+    };
   }
   const record = raw as Record<string, unknown>;
   return {
     avatar: normalizeAvatarConfig(record.avatar),
     voice: normalizeVoiceConfig(record.voice, fallbackToken),
+    mode: parseSoulMode(record.mode),
+    companion: normalizeCompanionConfig(record.companion),
   };
 }
 
@@ -173,3 +211,27 @@ export function normalizeSoulConfig(raw: unknown, fallbackToken = ""): SoulConfi
 export function findVoicePreset(id: string): { id: string; label: string; description: string } | undefined {
   return VOICE_PRESETS.find((preset) => preset.id === id);
 }
+
+/**
+ * 取得某个陪伴风格预设
+ *
+ * @param id 预设 id
+ * @returns 预设（不存在返回 undefined）
+ */
+export function findCompanionPreset(
+  id: string
+): { id: string; label: string; description: string; config: SoulCompanionConfig } | undefined {
+  return COMPANION_PRESETS.find((preset) => preset.id === id);
+}
+
+/**
+ * 模式清单（转出，供 Web / CLI 展示）
+ *
+ * @returns 模式 id / 名称 / 一句话
+ */
+export function soulModeOptions(): readonly { id: SoulMode; label: string; tagline: string }[] {
+  return SOUL_MODES;
+}
+
+/** 模式中文名（转出，避免调用方各自维护映射） */
+export { soulModeLabel };

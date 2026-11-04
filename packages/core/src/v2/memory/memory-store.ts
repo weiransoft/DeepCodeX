@@ -224,6 +224,45 @@ export class MemoryStore {
   }
 
   /**
+   * 整体替换某一类型的条目集合（原子写）
+   *
+   * 供上层「按来源切片重建文件」使用：Soul 层只拥有自己那部分条目，
+   * 逐个 add/delete 会漏掉并发窗口里的中间态，整文件替换更直接。
+   *
+   * 调用方负责保证 `entries` 已经包含要保留的全部条目——这是覆盖写，
+   * 不是合并。`task` 类型不持久化，调用即抛错。
+   *
+   * @param type 记忆类型（user_global / project / experience）
+   * @param entries 新的条目集合（原样写入，不做去重）
+   */
+  replace(type: MemoryType, entries: readonly MemoryEntry[]): void {
+    if (type === "task") {
+      throw new Error("无法整体替换 task 类型记忆：该类型仅存内存");
+    }
+    if (type === "project" && !this.projectMemoryPath) {
+      throw new Error("无法写入 project 类型记忆：未提供 projectRoot（项目根目录）");
+    }
+    const storePath = this.getStorePath(type);
+    this.writeFile(storePath, {
+      entries: [...entries],
+      version: STORE_VERSION,
+      lastUpdated: new Date().toISOString(),
+    });
+  }
+
+  /**
+   * 某一类型的持久化文件路径（展示 / 备份用）
+   *
+   * @param type 记忆类型
+   * @returns 绝对路径；task 类型或无项目上下文时返回 null
+   */
+  location(type: MemoryType): string | null {
+    if (type === "task") return null;
+    if (type === "project" && !this.projectMemoryPath) return null;
+    return this.getStorePath(type);
+  }
+
+  /**
    * 删除记忆
    *
    * 跨所有存储来源查找并删除指定 ID 的记忆条目。

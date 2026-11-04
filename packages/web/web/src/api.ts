@@ -820,14 +820,33 @@ export interface SoulVoiceConfigView {
   speakReplies: boolean;
 }
 
+/** 对话模式（须与 core 的 SoulMode 保持一致） */
+export type SoulMode = "work" | "companion";
+
+/** 陪伴模式可调项 */
+export interface SoulCompanionConfig {
+  addressAs: string;
+  warmth: number;
+  proactivity: number;
+  encourageHumanContact: boolean;
+}
+
 /** GET/PUT /api/soul/config 响应体 */
 export interface SoulConfigView {
   avatar: SoulAvatarConfig;
   voice: SoulVoiceConfigView;
+  /** 对话模式 */
+  mode: SoulMode;
+  /** 陪伴模式可调项（mode=work 时保留但不生效） */
+  companion: SoulCompanionConfig;
   /** 配置文件位置 */
   filePath: string;
   /** 音色预设（服务端与前端同源，避免两处维护） */
   presets: Array<{ id: string; label: string; description: string }>;
+  /** 模式清单（同上） */
+  modes: Array<{ id: SoulMode; label: string; tagline: string }>;
+  /** 陪伴风格预设 */
+  companionPresets: Array<{ id: string; label: string; description: string; config: SoulCompanionConfig }>;
 }
 
 /** GET /api/voice/status 响应体 */
@@ -859,6 +878,8 @@ export function fetchSoulConfig(): Promise<SoulConfigView> {
 export function saveSoulConfig(patch: {
   avatar?: SoulAvatarConfig;
   voice?: Partial<Omit<SoulVoiceConfigView, "hasToken">>;
+  mode?: SoulMode;
+  companion?: Partial<SoulCompanionConfig>;
 }): Promise<SoulConfigView> {
   return request<SoulConfigView>("PUT", "/api/soul/config", patch);
 }

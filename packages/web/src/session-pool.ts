@@ -40,6 +40,8 @@ import {
   buildGraphLoopOrchestratorOptions,
   createEagDynamicSuggester,
   createOpenAIClient as createDefaultOpenAIClient,
+  createSoulEngine,
+  renderSoulPrompt,
   extractAutoExecutableEagCommandName,
   extractSuggestedCommandText,
   extractSuggestedCommandAndGoal,
@@ -725,6 +727,19 @@ export class SessionPool {
       permissionModeOverride: this.settings.approvalMode,
       renderMarkdown: (text) => text,
       nonInteractive: true,
+      // …… 事件桥接与其余注入略（见下）……
+      // Soul（司南）：人格 + 记忆 + 当前对话模式（2026-11-05）
+      // 每次新建会话读一次当前配置——模式切换对**新会话**生效，
+      // 已开会话的 system 消息保持建立时的那份（不改写历史）。
+      soulPromptProvider: () => {
+        try {
+          const { engine } = createSoulEngine({ projectRoot: resolvedRoot, homeRoot: engineHomeDir });
+          const prompt = renderSoulPrompt(engine.soul());
+          return prompt.length > 0 ? prompt : null;
+        } catch {
+          return null;
+        }
+      },
       // —— 事件桥接（chatId 闭包绑定）——
       onAssistantMessage: (message) => {
         // 不可见消息不推送（2026-11-02）：与历史路径对齐——前端 convertHistory

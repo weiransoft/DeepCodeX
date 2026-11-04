@@ -331,12 +331,17 @@ test("S14 FileSoulStore：原子写 + 0600 权限 + 损坏降级", () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("S15 soulMemoryPath：全局锚 homeRoot，项目锚项目根", () => {
+test("S15 soulMemoryPath：全局锚 homeRoot，项目锚项目根（与 V2 记忆同一份文件）", () => {
+  // 2026-11 统一后不再有独立的 soul/memory.json：记忆与 /memory 共用
+  // .deepcode/memory/{global,project}.json（见 soul/unified-store.ts）
   assert.equal(
     soulMemoryPath("global", undefined, "/tmp/home-x"),
-    path.join("/tmp/home-x", ".deepcode", "soul", "memory.json")
+    path.join("/tmp/home-x", ".deepcode", "memory", "global.json")
   );
-  assert.equal(soulMemoryPath("project", "/tmp/proj-x"), path.join("/tmp/proj-x", ".deepcode", "soul", "memory.json"));
+  assert.equal(
+    soulMemoryPath("project", "/tmp/proj-x"),
+    path.join("/tmp/proj-x", ".deepcode", "memory", "project.json")
+  );
 });
 
 test("S16 normalizeMemoryFile：手工编辑的非法条目被丢弃，合法条目保留", () => {

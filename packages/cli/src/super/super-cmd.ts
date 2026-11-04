@@ -612,6 +612,7 @@ async function runSoul(args: SuperCommandArgs): Promise<SuperCommandResult> {
 
   if (lines.length === 0) lines.push(superAgentSignature());
   lines.push(`本质：${snapshot.nature}`);
+  lines.push(`模式：${snapshot.modeLabel}${snapshot.mode === "companion" ? "（先接住人，再谈事）" : ""}`);
   lines.push(`语气：${snapshot.emotion.label}（强度 ${(snapshot.emotion.intensity * 100).toFixed(0)}%）`);
   lines.push(
     `记忆：${snapshot.memoryStats.total} 条${

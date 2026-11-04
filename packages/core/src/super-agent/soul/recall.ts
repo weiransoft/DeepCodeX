@@ -331,7 +331,9 @@ export function organizeMemories(
   // 第一步：同 category+key 合并（保留强度最高的那条，累加召回次数）
   const byKey = new Map<string, SoulMemory>();
   for (const memory of memories) {
-    const composite = `${memory.category}::${memory.key}`;
+    // 来源层进复合键：同名 key 的 V2 条目与 Soul 条目是两条事实，
+    // 合掉会丢掉其中一份（V2 那份还删不掉）
+    const composite = `${memory.origin === "v2" ? "v2" : "soul"}::${memory.category}::${memory.key}`;
     const existing = byKey.get(composite);
     if (existing === undefined) {
       byKey.set(composite, memory);
@@ -349,9 +351,15 @@ export function organizeMemories(
   if (merged > 0) notes.push(`合并重复条目 ${merged} 条`);
 
   // 第二步：长期未动（> STALE_DAYS）的条目做一次衰减
+  // V2 映射来的条目（origin=v2）不衰减：它们的时效由 V2 自己的 hygiene 管，
+  // 在这边衰减会让「界面上的强度」与「磁盘上的置信度」对不上。
   let decayed = 0;
   const decayedEntries: SoulMemory[] = [];
   for (const memory of byKey.values()) {
+    if (memory.origin === "v2") {
+      decayedEntries.push(memory);
+      continue;
+    }
     const stamp = Date.parse(memory.lastRecalledAt ?? memory.updatedAt);
     const staleDays = Number.isNaN(stamp) ? 0 : (now - stamp) / 86_400_000;
     if (staleDays <= STALE_DAYS) {
@@ -371,7 +379,8 @@ export function organizeMemories(
   const kept: SoulMemory[] = [];
   let pruned = 0;
   for (const memory of decayedEntries) {
-    if (memory.strength < DORMANT_THRESHOLD && memory.sensitivity !== "secret") {
+    // V2 条目即使强度低也不在本层清理：删它得走 V2 的接口，否则只是掩耳盗铃
+    if (memory.strength < DORMANT_THRESHOLD && memory.sensitivity !== "secret" && memory.origin !== "v2") {
       pruned += 1;
       continue;
     }
@@ -458,12 +467,17 @@ export function normalizeMemoryFile(
     const sensitivity: "normal" | "secret" = entry.sensitivity === "secret" ? "secret" : "normal";
     // 读取侧的二次防线：文件可能由旧版本写入或被手工编辑过，
     // 凭证条目的标题/键里可能残留明文——统一按脱敏标题重算。
+    // V2 映射条目（origin=v2）例外：它的键是本层生成的稳定标识（`v2.<type>.<key>`），
+    // 重算反而会把值里的片段带进键里，且破坏「同一事实同一键」。
     const safeTitle = sensitivity === "secret" ? deriveSecretTitle(entry.title) : entry.title;
     entries.push({
       id: entry.id,
       category: category as MemoryCategory,
       // 旧版本可能把明文写进凭证条目的键——读取时按脱敏标签重算
-      key: sensitivity === "secret" ? suggestMemoryKey(category as MemoryCategory, deriveLabel(safeTitle)) : entry.key,
+      key:
+        sensitivity === "secret" && entry.origin !== "v2"
+          ? suggestMemoryKey(category as MemoryCategory, deriveLabel(safeTitle))
+          : entry.key,
       title: safeTitle,
       value: entry.value,
       sensitivity,
@@ -474,6 +488,7 @@ export function normalizeMemoryFile(
       updatedAt: typeof entry.updatedAt === "string" ? entry.updatedAt : new Date(0).toISOString(),
       lastRecalledAt: typeof entry.lastRecalledAt === "string" ? entry.lastRecalledAt : undefined,
       tags: Array.isArray(entry.tags) ? entry.tags.filter((tag): tag is string => typeof tag === "string") : undefined,
+      ...(entry.origin === "v2" ? { origin: "v2" as const } : {}),
     });
   }
 

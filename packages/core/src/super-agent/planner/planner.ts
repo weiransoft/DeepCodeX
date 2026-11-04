@@ -310,7 +310,7 @@ export function renderPlannerSystemPrompt(
 
 ---
 
-${renderSoulPrompt(soul)}
+${renderSoulPrompt(soul, { mode: "work" })}
 
 ## 记忆的使用边界（规划视角）
 

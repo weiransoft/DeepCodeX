@@ -23,6 +23,7 @@
  */
 
 import { createSinanSoul } from "./presets.js";
+import { applySoulMode, DEFAULT_COMPANION_CONFIG } from "./modes.js";
 import { buildMemory, normalizeMemoryFile, organizeMemories, upsertMemory } from "./recall.js";
 import { buildSoulSnapshot } from "./render.js";
 import { classifyMemoryText } from "./taxonomy.js";
@@ -33,9 +34,11 @@ import type {
   MemorySensitivity,
   OrganizeReport,
   Soul,
+  SoulCompanionConfig,
   SoulMemory,
   SoulMemoryFile,
   SoulMemoryStore,
+  SoulMode,
   SoulSnapshot,
 } from "./types.js";
 
@@ -57,6 +60,10 @@ export interface SoulEngineOptions {
   readonly stores?: readonly ScopedSoulStore[];
   /** 基础 Soul（缺省为司南预设） */
   readonly soul?: Soul;
+  /** 对话模式（缺省 work；companion 时按陪伴覆盖层重建人格） */
+  readonly mode?: SoulMode;
+  /** 陪伴模式可调项（mode=companion 时生效） */
+  readonly companion?: SoulCompanionConfig;
   /** 时间源（测试注入） */
   readonly clock?: () => number;
 }
@@ -103,7 +110,15 @@ export class SoulEngine {
    */
   constructor(options: SoulEngineOptions = {}) {
     this.stores = options.stores ?? [];
-    this.baseSoul = options.soul ?? createSinanSoul();
+    const base = options.soul ?? createSinanSoul();
+    // 模式覆盖放在构造期：情感状态、表达风格、人格倾向一次性成型，
+    // 之后 adapt/load 都在这份覆盖上工作，避免「渲染时才套壳」导致
+    // 快照里的性格与提示词里的性格不一致。
+    this.baseSoul = applySoulMode(
+      base,
+      options.mode ?? base.mode ?? "work",
+      options.companion ?? DEFAULT_COMPANION_CONFIG
+    );
     this.clock = options.clock ?? (() => Date.now());
     this.emotion = this.baseSoul.emotion;
   }
@@ -170,7 +185,16 @@ export class SoulEngine {
    * @returns 新情感状态
    */
   adapt(context: string): EmotionalState {
-    const tone = detectTone(context);
+    const detected = detectTone(context);
+    // 陪伴模式下「对方搞不定」不是「要绷紧的故障」：同一句报错，工作模式该收紧
+    // 语气去排障，陪伴模式该先接住挫败感。真正的紧急（事故/立刻/宕机）仍然严肃——
+    // 情绪优先不等于对危险迟钝。
+    const tone: EmotionalTone =
+      this.baseSoul.mode === "companion" && (detected === "SERIOUS" || detected === "ANALYTICAL")
+        ? isUrgentContext(context)
+          ? "SERIOUS"
+          : "EMPATHETIC"
+        : detected;
     const volatility = this.baseSoul.emotion.volatility;
     const intensity =
       tone === this.emotion.current
@@ -283,8 +307,22 @@ export class SoulEngine {
   forget(id: string): boolean {
     const index = this.entries.findIndex((entry) => entry.id === id);
     if (index < 0) return false;
+    const target = this.entries[index]!;
+    const scope = this.originById.get(id) ?? this.defaultScope();
     this.entries = this.entries.filter((entry) => entry.id !== id);
     this.originById.delete(id);
+    // V2 映射来的条目：只从内存里移掉等于「下次刷新又回来」，
+    // 必须回写到它所在的 V2 文件里删——用户点「忘掉」就是真的要它消失。
+    if (target.origin === "v2") {
+      const owner = this.stores.find((item) => item.scope === scope);
+      try {
+        owner?.store.remove?.([id]);
+      } catch {
+        // 删除失败：内存里已移除，磁盘下次加载会重新出现——不静默假装成功
+        return false;
+      }
+      return true;
+    }
     this.persist();
     return true;
   }
@@ -347,7 +385,12 @@ export class SoulEngine {
     if (this.stores.length === 0) return;
     const timestamp = new Date(this.clock()).toISOString();
     for (const { scope, store } of this.stores) {
-      const own = this.entries.filter((entry) => (this.originById.get(entry.id) ?? this.defaultScope()) === scope);
+      const own = this.entries.filter(
+        (entry) =>
+          // V2 只读来源不写回：写回会把它降级成 soul 条目，
+          // 丢掉 V2 侧的结构（例如 facts 的置信度与访问计数）
+          entry.origin !== "v2" && (this.originById.get(entry.id) ?? this.defaultScope()) === scope
+      );
       const file: SoulMemoryFile = { version: 1, scope, entries: own, lastUpdated: timestamp };
       try {
         store.save(file);
@@ -356,6 +399,22 @@ export class SoulEngine {
       }
     }
   }
+}
+
+/**
+ * 是否是「真的紧急」（而不是一般的挫败）
+ *
+ * 只认明确的危险词：事故、宕机、立刻、线上挂了。陪伴模式据此决定要不要
+ * 从体谅切回严肃——两者的区别是「要不要先停手」。
+ *
+ * @param context 上下文
+ * @returns 是否紧急
+ */
+export function isUrgentContext(context: string): boolean {
+  const text = context.toLowerCase();
+  return ["线上挂了", "紧急", "严重事故", "事故", "宕机", "立刻", "马上", "urgent", "critical", "asap"].some(
+    (keyword) => text.includes(keyword)
+  );
 }
 
 /**
