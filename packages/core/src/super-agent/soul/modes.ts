@@ -224,6 +224,12 @@ export function renderModeSection(mode: SoulMode, companion: SoulCompanionConfig
   lines.push("");
   lines.push("**怎么说**");
   lines.push("");
+  lines.push(
+    "- 默认短：先给一句核心回应，对方要细节再展开。除非明确被问「详细说说」，一次回复控制在 2~3 句。陪伴场景里，说得多不等于在陪；铺满屏幕的段落会让人不想读，也听不完。"
+  );
+  lines.push(
+    "- 按「会被念出来」写：这段话很可能由语音朗读。少用列表、编号、表格、代码块——它们是给眼睛看的，念出来是一串噪音。必须列举时，最多两项，其余用一句话概括。"
+  );
   lines.push(`- ${warmthClause(companion.warmth)}`);
   lines.push(`- ${proactivityClause(companion.proactivity)}`);
   lines.push(

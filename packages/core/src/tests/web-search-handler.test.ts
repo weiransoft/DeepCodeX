@@ -6,12 +6,15 @@ import * as path from "path";
 import type OpenAI from "openai";
 import type { ToolExecutionContext } from "../tools/executor";
 import { handleWebSearchTool } from "../tools/web-search-handler";
+import { resetWebSearchGuard } from "../tools/web-search-guard";
 
 const tempDirs: string[] = [];
 const originalFetch = globalThis.fetch;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  // 缓存与熔断是进程级单例：用例之间必须复位，否则上一条的结果会被下一条命中
+  resetWebSearchGuard();
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
     if (dir) {
@@ -184,7 +187,13 @@ test("WebSearch reports and records a default API rate limit error", async () =>
   );
 
   assert.equal(result.ok, false);
-  assert.equal(result.error, "WebSearch default mode failed: WebSearch API failed: WebSearch rate limit exceeded.");
+  // 原始原因要保留（便于排查），同时必须带上「不要重试」这句给模型看的指令
+  assert.match(
+    result.error ?? "",
+    /^WebSearch default mode failed: WebSearch API failed: WebSearch rate limit exceeded\./
+  );
+  assert.match(result.error ?? "", /不要重试 WebSearch/);
+  assert.equal(result.metadata?.rateLimited, true);
   assert.deepEqual(rateLimitedTools, ["WebSearch"]);
   assert.equal((requestHeaders as Record<string, string>)["PLUS-API-KEY"], undefined);
 });
@@ -391,6 +400,174 @@ test("redactSensitiveContent covers common credential formats", async () => {
   );
   // 普通文本不受影响
   assert.equal(redactSensitiveContent("node.js release schedule 2026"), "node.js release schedule 2026");
+});
+
+/** 造一个只会回答「语言判定」的假 client，并统计被调了几次 */
+function createCountingClient(): { client: OpenAI; calls: () => number } {
+  let calls = 0;
+  const client = {
+    chat: {
+      completions: {
+        create: async () => {
+          calls += 1;
+          return {
+            choices: [
+              {
+                message: { content: '{"dominant_language":"en","reason":"English sources are more useful."}' },
+              },
+            ],
+          };
+        },
+      },
+    },
+  } as unknown as OpenAI;
+  return { client, calls: () => calls };
+}
+
+test("W1 同一 query 第二次命中缓存：不再打上游，也不再花两次 LLM 调用", async () => {
+  const workspace = createTempWorkspace();
+  const { client, calls } = createCountingClient();
+  let fetchCount = 0;
+  globalThis.fetch = (async () => {
+    fetchCount += 1;
+    return new Response(JSON.stringify({ success: true, result: "cached-result" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  const first = await handleWebSearchTool(
+    { query: "latest node release" },
+    createContext(workspace, { client, baseURL: "https://example.com/v1", machineId: "m-1" })
+  );
+  const callsAfterFirst = calls();
+  const second = await handleWebSearchTool(
+    // 大小写与多余空白不同，但归一化后是同一条 query
+    { query: "  Latest   Node   Release " },
+    createContext(workspace, { client, baseURL: "https://example.com/v1", machineId: "m-1" })
+  );
+
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+  assert.equal(second.output, "cached-result");
+  assert.equal(second.metadata?.cached, true);
+  assert.equal(fetchCount, 1, "重复的同一 query 不该再扣一次配额");
+  assert.equal(calls(), callsAfterFirst, "命中缓存连语言判定都省了");
+});
+
+test("W2 不同 query 不共享缓存", async () => {
+  const workspace = createTempWorkspace();
+  const { client } = createCountingClient();
+  let fetchCount = 0;
+  globalThis.fetch = (async () => {
+    fetchCount += 1;
+    return new Response(JSON.stringify({ success: true, result: `result-${fetchCount}` }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  await handleWebSearchTool(
+    { query: "latest node release" },
+    createContext(workspace, { client, baseURL: "https://example.com/v1", machineId: "m-1" })
+  );
+  const other = await handleWebSearchTool(
+    { query: "rust release schedule" },
+    createContext(workspace, { client, baseURL: "https://example.com/v1", machineId: "m-1" })
+  );
+
+  assert.equal(fetchCount, 2);
+  assert.equal(other.metadata?.cached, undefined);
+});
+
+test("W3 限流后熔断：第二次调用直接拒答并明确要求不要重试", async () => {
+  const workspace = createTempWorkspace();
+  const { client } = createCountingClient();
+  let fetchCount = 0;
+  globalThis.fetch = (async () => {
+    fetchCount += 1;
+    return new Response(JSON.stringify({ success: false, reason: "WebSearch rate limit exceeded." }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  const first = await handleWebSearchTool(
+    { query: "latest node release" },
+    createContext(workspace, { client, baseURL: "https://example.com/v1", machineId: "m-1" })
+  );
+  const second = await handleWebSearchTool(
+    { query: "another query entirely" },
+    createContext(workspace, { client, baseURL: "https://example.com/v1", machineId: "m-1" })
+  );
+
+  assert.equal(first.ok, false);
+  assert.equal(second.ok, false);
+  assert.equal(fetchCount, 1, "熔断期内不该再打上游——模型重试正是限流恶化的原因");
+  assert.match(second.error ?? "", /不要重试 WebSearch/);
+  assert.ok((second.metadata?.retryAfterMs as number) > 0, "要告诉模型多久之后才可能恢复");
+});
+
+test("W4 HTTP 429 同样触发熔断（不是只有 reason 文案这一条路径）", async () => {
+  const workspace = createTempWorkspace();
+  const { client } = createCountingClient();
+  let fetchCount = 0;
+  globalThis.fetch = (async () => {
+    fetchCount += 1;
+    return new Response("Too Many Requests", { status: 429 });
+  }) as typeof fetch;
+
+  const first = await handleWebSearchTool(
+    { query: "latest node release" },
+    createContext(workspace, { client, baseURL: "https://example.com/v1", machineId: "m-1" })
+  );
+  const second = await handleWebSearchTool(
+    { query: "another query entirely" },
+    createContext(workspace, { client, baseURL: "https://example.com/v1", machineId: "m-1" })
+  );
+
+  assert.equal(first.ok, false);
+  assert.match(first.error ?? "", /429/);
+  assert.match(first.error ?? "", /不要重试 WebSearch/);
+  assert.equal(fetchCount, 1, "429 之后要继续挡住重试");
+  assert.equal(second.metadata?.rateLimited, true);
+});
+
+test("W5 同一 query 并发两次只打一次上游（并行工具调用不该双倍扣配额）", async () => {
+  const workspace = createTempWorkspace();
+  const { client } = createCountingClient();
+  let fetchCount = 0;
+  let release: (() => void) | null = null;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  globalThis.fetch = (async () => {
+    fetchCount += 1;
+    await gate;
+    return new Response(JSON.stringify({ success: true, result: "shared-result" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  const firstPromise = handleWebSearchTool(
+    { query: "latest node release" },
+    createContext(workspace, { client, baseURL: "https://example.com/v1", machineId: "m-1" })
+  );
+  const secondPromise = handleWebSearchTool(
+    { query: "latest node release" },
+    createContext(workspace, { client, baseURL: "https://example.com/v1", machineId: "m-1" })
+  );
+  // 让两个请求都走到 fetch 之后才放行
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  release?.();
+  const [first, second] = await Promise.all([firstPromise, secondPromise]);
+
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+  assert.equal(first.output, "shared-result");
+  assert.equal(second.output, "shared-result");
+  assert.equal(fetchCount, 1, "并行的同一条 query 应共享同一次上游请求");
 });
 
 function createContext(

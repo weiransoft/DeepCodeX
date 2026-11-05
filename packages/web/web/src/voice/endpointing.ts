@@ -19,6 +19,10 @@
  * - **连续静音 900ms 才算说完**：中文句内逗号停顿通常 200~500ms，句间停顿
  *   600ms 以上。取 900ms 落在这两者之间：不切断一句话，也不让人等太久。
  *   这个值必须大于句内停顿的上界，否则一句话会被切成两段送出去。
+ * - **人声阈值不是常数**：原来写死 `rms >= 0.05`，麦克风增益低的人说话只有
+ *   0.02~0.04，永远判不成人声（免按住模式下表现成「点了就结束」）；环境吵
+ *   的地方底噪 0.05 以上，又永远等不到静音。现在改成「噪声底 × 2.5」，由
+ *   `NoiseFloorTracker` 按环境实时估计，取值范围夹在 `[0.012, 0.09]`。
  *
  * ## 纯状态机，不碰麦克风
  *
@@ -27,6 +31,8 @@
  *
  * @module web/voice/endpointing
  */
+
+import { NoiseFloorTracker, rmsThreshold } from "./noise-floor";
 
 /** 分析帧长（毫秒），与打断监测保持一致 */
 export const ENDPOINT_FRAME_MS = 50;
@@ -37,7 +43,23 @@ export const ENDPOINT_SILENCE_MS = 900;
 /** 一句有效话的最短人声累计（毫秒） */
 export const ENDPOINT_MIN_SPEECH_MS = 300;
 
-/** 人声 RMS 阈值（与打断监测同源，安静环境下的正常说话在 0.1~0.3） */
+/**
+ * 人声阈值下限（RMS）
+ *
+ * 噪声底压到 0 时的兜底：数字静默也有底噪，阈值不能跟着归零。
+ * 定成人声阈值的**下界**而不是固定值，见 `voice/noise-floor.ts`。
+ */
+export const ENDPOINT_RMS_THRESHOLD_MIN = 0.012;
+
+/** 人声阈值上限（RMS）：噪声底被估高时的兜底，避免把轻声说话也判成静音 */
+export const ENDPOINT_RMS_THRESHOLD_MAX = 0.09;
+
+/**
+ * 固定人声阈值（RMS）
+ *
+ * @deprecated 自适应阈值之前的常量，现在只在显式传 `threshold` 时才会用到；
+ * 保留导出是为了兼容既有调用与文档引用。
+ */
 export const ENDPOINT_RMS_THRESHOLD = 0.05;
 
 /** 一帧的判定结果 */
@@ -52,6 +74,8 @@ export interface EndpointVerdict {
   speechMs: number;
   /** 当前连续静音毫秒 */
   silenceMs: number;
+  /** 本帧实际使用的阈值（自适应结果，便于诊断与单测） */
+  threshold: number;
 }
 
 /** 判定参数（全部可选，测试与调参只改这里） */
@@ -62,8 +86,20 @@ export interface EndpointOptions {
   silenceMs?: number;
   /** 至少说多久才算一句（毫秒） */
   minSpeechMs?: number;
-  /** 人声阈值（RMS） */
+  /**
+   * 固定人声阈值（RMS）
+   *
+   * 给了就**关闭自适应**、原样使用该值——测试与特殊场景（比如录音棚里
+   * 需要精确复现）用。不传则按环境噪声底自适应。
+   */
   threshold?: number;
+  /**
+   * 噪声底跟踪器
+   *
+   * 由采集层（`MicCapture`）注入并跨轮持有：同一间屋子里的第二轮对话
+   * 不必重新标定。不传则自建一个（只在单测里发生）。
+   */
+  noiseFloor?: NoiseFloorTracker;
   /**
    * 空段超时（毫秒）：从头到尾没说过话、连续静音达到该值即收尾。
    *
@@ -83,8 +119,10 @@ export class Endpointer {
   private readonly frameMs: number;
   private readonly silenceGoal: number;
   private readonly minSpeechMs: number;
-  private readonly threshold: number;
+  /** 固定阈值；null 表示自适应 */
+  private readonly fixedThreshold: number | null;
   private readonly idleGoal: number;
+  private readonly noiseFloor: NoiseFloorTracker;
 
   /** 累计人声毫秒 */
   private speechMs = 0;
@@ -92,6 +130,10 @@ export class Endpointer {
   private silenceMs = 0;
   /** 是否已经判定过（防重复触发） */
   private fired = false;
+  /** 标定期缓存的帧（标定一结束要用新阈值重判这批帧） */
+  private pending: number[] = [];
+  /** 是否已完成标定（固定阈值时为 true） */
+  private calibrated: boolean;
 
   /**
    * @param options 判定参数
@@ -100,8 +142,54 @@ export class Endpointer {
     this.frameMs = options.frameMs ?? ENDPOINT_FRAME_MS;
     this.silenceGoal = options.silenceMs ?? ENDPOINT_SILENCE_MS;
     this.minSpeechMs = options.minSpeechMs ?? ENDPOINT_MIN_SPEECH_MS;
-    this.threshold = options.threshold ?? ENDPOINT_RMS_THRESHOLD;
     this.idleGoal = options.idleMs ?? 0;
+    this.fixedThreshold = options.threshold ?? null;
+    this.noiseFloor = options.noiseFloor ?? new NoiseFloorTracker();
+    // 跟踪器可能在本轮之前就标定过了（采集器跨轮持有），此时无需缓冲
+    this.calibrated = this.fixedThreshold !== null || !this.noiseFloor.calibrating;
+  }
+
+  /** 当前使用的人声阈值（自适应或固定） */
+  private currentThreshold(): number {
+    if (this.fixedThreshold !== null) return this.fixedThreshold;
+    return rmsThreshold(this.noiseFloor.value, undefined, ENDPOINT_RMS_THRESHOLD_MIN, ENDPOINT_RMS_THRESHOLD_MAX);
+  }
+
+  /**
+   * 按给定阈值把一帧计入计数
+   *
+   * @param rms 本帧 RMS
+   * @param threshold 本帧使用的阈值
+   * @returns 是否算人声
+   */
+  private classify(rms: number, threshold: number): boolean {
+    const active = rms >= threshold;
+    if (active) {
+      this.speechMs += this.frameMs;
+      this.silenceMs = 0;
+    } else {
+      this.silenceMs += this.frameMs;
+    }
+    return active;
+  }
+
+  /**
+   * 标定结束时，用学到的阈值重判标定期的那些帧
+   *
+   * 不做这一步会有一个隐蔽的误判：噪声底的标定需要 300ms，这 300ms 里阈值
+   * 只能用初始值（最低档），于是"吵闹房间的底噪"会被整段算成人声——刚好
+   * 凑满 300ms 的最短人声要求，等 900ms 静音一到就把一段纯噪声送去识别。
+   * 重判之后，这 300ms 会按真实环境阈值重新归类，噪声归噪声。
+   */
+  private reclassify(): void {
+    this.calibrated = true;
+    const frames = this.pending;
+    this.pending = [];
+    if (frames.length === 0) return;
+    this.speechMs = 0;
+    this.silenceMs = 0;
+    const threshold = this.currentThreshold();
+    for (const rms of frames) this.classify(rms, threshold);
   }
 
   /**
@@ -111,13 +199,22 @@ export class Endpointer {
    * @returns 判定结果
    */
   push(rms: number): EndpointVerdict {
-    const active = rms >= this.threshold;
-    if (active) {
-      this.speechMs += this.frameMs;
-      this.silenceMs = 0;
-    } else {
-      this.silenceMs += this.frameMs;
+    const before = this.currentThreshold();
+    const wasActive = this.classify(rms, before);
+
+    if (this.fixedThreshold === null) {
+      // 先用"上一帧学到的环境"判这一帧，再更新噪声底。顺序反了会让同一帧
+      // 既是输入又是输出，边界行为无法解释
+      this.noiseFloor.observe(rms, wasActive);
+      if (!this.calibrated) {
+        this.pending.push(rms);
+        if (!this.noiseFloor.calibrating) this.reclassify();
+      }
     }
+
+    // 阈值可能刚因标定结束而改变，本帧的 active 以最终阈值为准
+    const threshold = this.currentThreshold();
+    const active = rms >= threshold;
 
     let done = false;
     let idle = false;
@@ -133,7 +230,7 @@ export class Endpointer {
       }
     }
 
-    return { active, done, idle, speechMs: this.speechMs, silenceMs: this.silenceMs };
+    return { active, done, idle, speechMs: this.speechMs, silenceMs: this.silenceMs, threshold };
   }
 
   /** 是否已经说过话（用于区分「还没开口」与「说完了」） */
@@ -146,5 +243,7 @@ export class Endpointer {
     this.speechMs = 0;
     this.silenceMs = 0;
     this.fired = false;
+    this.pending = [];
+    this.noiseFloor.reset();
   }
 }

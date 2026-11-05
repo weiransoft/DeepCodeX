@@ -12,7 +12,7 @@ HTTP 划界，有三个好处：模型崩溃不拖垮应用；可以单独重启
 
     GET  /health   → 依赖与模型就绪情况（不加载模型，秒回）
     POST /tts      → {"text","engine","voice","speed"} → audio/wav
-    POST /asr      → 原始 wav 字节 → {"text","durationMs","model"}
+    POST /asr      → 原始 wav 字节 → {"text","durationMs","model","backend"}
     POST /warmup   → 触发模型加载（首次 10~30s）
 
 ## 三条设计纪律
@@ -51,7 +51,45 @@ from typing import Any
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8791
+
+# ASR：首选 Qwen3-ASR，兜底 whisper-large-v3-turbo
+#
+# ## 为什么换掉 whisper
+#
+# 用户反馈「语音转换准确率不高」。用同一批音频做过闭环 A/B（8 句 TTS 合成，
+# 干净 + SNR 8dB 加噪两路，字符级 CER）：
+#
+#     whisper-large-v3-turbo   干净 6.88%   加噪 6.88%
+#     Qwen3-ASR-0.6B           干净 3.72%   加噪 5.89%
+#
+# 错误集中在专有名词与数字：whisper 把「四零四」写成 404、「王工」→「王公」、
+# 「Qwen3」→「Q稳」，还会把简体输出成繁体（「三点」→「三點」）；Qwen3-ASR
+# 在干净条件下这些全对，加噪后英文词更脆弱（「Tauri」→「Tory」）。
+#
+# ## 为什么默认指向本地目录而不是 HF repo id
+#
+# 本机访问 huggingface.co 不通（curl 返回 000），走 repo id 会在第一次识别时
+# 卡在下载上，表现成「点了麦克风没反应」。权重改由 ModelScope 取回后放在本地
+# 目录，`mlx_audio.stt.load` 直接读目录即可（实测 965MB 权重，ModelScope 直连
+# 5.9~17MB/s）。
 DEFAULT_ASR_MODEL = "mlx-community/whisper-large-v3-turbo"
+ASR_QWEN3_MODEL_ID = "mlx-community/Qwen3-ASR-0.6B-8bit"
+DEFAULT_ASR_LOCAL_PATH = "~/.cache/qwen3-asr-mlx"
+# 语言固定中文：本产品是中文助手，不交给模型自己猜（短句上猜错会整句跑偏）
+ASR_LANGUAGE = "Chinese"
+# whisper 的语言代码（Qwen3-ASR 用自然语言名，两者不通用）
+ASR_WHISPER_LANGUAGE = "zh"
+# whisper 没有简体选项，用一段简体提示词把输出先验掰向简体
+ASR_WHISPER_PROMPT = "以下是普通话对话，请用简体中文转写。"
+
+# 专有名词提示（Qwen3-ASR 的 hotwords）
+#
+# 实测有效：同一句「把 DeepCodeX 的 Tauri 配置再检查一遍」，不带 hotwords
+# 识别成「Tori」，带上就正确。它只影响解码先验，不会往结果里插词。
+#
+# 默认表只放本产品日常会说到的英文名——热词表越长，对普通句子的干扰越大。
+# 需要加长时用环境变量覆盖：DEEPCODE_ASR_HOTWORDS="A,B,C"
+ASR_HOTWORDS_DEFAULT = ("DeepCodeX", "Tauri", "Qwen3", "MLX", "MCP")
 
 # 引擎 → 模型 id（与 core 的 VoiceEngine 枚举一一对应）
 #
@@ -208,6 +246,54 @@ def read_tokens() -> set[str]:
 # 依赖探测（导入成功不等于模型可用，分开报）
 # ---------------------------------------------------------------------------
 
+def probe_asr() -> dict[str, Any]:
+    """
+    ASR 就绪情况（不加载权重）
+
+    与 `AsrEngine._resolve` 保持同一套判定顺序：本地 Qwen3-ASR 权重优先，
+    其次 whisper。这里只验"库在 + 目录在"，真正的加载要等首次识别。
+
+    @returns {"backend","model","ready"}[,"reason"]
+    """
+    explicit = os.environ.get("DEEPCODE_ASR_MODEL_PATH", "").strip()
+    local = os.path.expanduser(explicit or DEFAULT_ASR_LOCAL_PATH)
+    if os.path.isdir(local):
+        try:
+            from mlx_audio.stt import load as _load_stt  # noqa: F401
+
+            return {
+                "backend": "qwen3-asr",
+                # model 给人看（界面直接展示），path 是实际权重目录
+                "model": ASR_QWEN3_MODEL_ID,
+                "path": local,
+                "ready": True,
+            }
+        except Exception as exc:  # noqa: BLE001 - 环境相关
+            return {
+                "backend": "qwen3-asr",
+                "model": ASR_QWEN3_MODEL_ID,
+                "path": local,
+                "ready": False,
+                "reason": f"mlx_audio.stt 不可用：{exc}",
+            }
+    try:
+        import mlx_whisper  # noqa: F401
+
+        return {
+            "backend": "whisper",
+            "model": DEFAULT_ASR_MODEL,
+            "ready": True,
+            "reason": f"未找到本地 Qwen3-ASR 权重（{local}），使用 whisper 兜底",
+        }
+    except Exception as exc:  # noqa: BLE001 - 环境相关
+        return {
+            "backend": "whisper",
+            "model": DEFAULT_ASR_MODEL,
+            "ready": False,
+            "reason": f"mlx_whisper 不可用：{exc}",
+        }
+
+
 def probe_deps() -> dict[str, Any]:
     """探测依赖与模型是否可导入（不加载权重）"""
     out: dict[str, Any] = {"versions": {}, "asr": {}, "tts": {}}
@@ -219,16 +305,10 @@ def probe_deps() -> dict[str, Any]:
         out["versions"]["mlx"] = f"missing: {exc}"
 
     try:
-        import mlx_whisper  # noqa: F401
-
-        out["asr"] = {"model": DEFAULT_ASR_MODEL, "ready": True}
+        out["asr"] = probe_asr()
         out["versions"]["mlx_whisper"] = "ok"
-    except Exception as exc:
-        out["asr"] = {
-            "model": DEFAULT_ASR_MODEL,
-            "ready": False,
-            "reason": f"mlx_whisper 不可用：{exc}",
-        }
+    except Exception as exc:  # pragma: no cover - 环境相关
+        out["asr"] = {"ready": False, "reason": str(exc)}
 
     try:
         import mlx_audio  # noqa: F401
@@ -377,61 +457,162 @@ def encode_wav_bytes(samples: "Any", sample_rate: int) -> bytes:
 
 class AsrEngine:
     """
-    Whisper 转写（不缓存模型：mlx_whisper 内部有缓存，重复调用不会重复下载）
+    转写：优先 Qwen3-ASR（本地权重），不可用时回落到 whisper
 
-    与 TTS 同样加锁：MLX 推理并发不安全，且 whisper 首次调用会下载权重，
-    并发触发会打同一个缓存目录。
+    ## 为什么要两档而不是写死一个
+
+    Qwen3-ASR 的准确性明显更好（见文件头 A/B 数据），但它需要本地权重目录。
+    目录不存在时（新机器、清过缓存、换过用户）如果直接抛错，用户看到的是
+    「语音坏了」——而 whisper 那条路本来就是能用的。所以：本地权重在就用它，
+    不在就回落 whisper，具体用了哪个由 `/health` 的 `asr.backend` 如实报出。
+
+    推理期失败也一样回落：权重损坏、版本不兼容都只该降级一次，不该让识别
+    整个不可用。
+
+    ## 为什么加锁
+
+    与 TTS 同源：MLX 推理并发不安全，且首次调用会加载权重。`ThreadingHTTPServer`
+    会并发处理请求，不加锁的表现是随机崩溃。
     """
 
     def __init__(self) -> None:
-        self.model = DEFAULT_ASR_MODEL
         self._lock = threading.Lock()
+        self._engine: Any = None
+        self._backend = ""
+        self._display = ""
+        self._model = ""
+        self._reason = ""
+
+    def _resolve(self) -> None:
+        """决定用哪个引擎（只看文件是否存在，不加载权重）"""
+        if self._backend:
+            return
+        explicit = os.environ.get("DEEPCODE_ASR_MODEL_PATH", "").strip()
+        candidate = os.path.expanduser(explicit or DEFAULT_ASR_LOCAL_PATH)
+        if os.path.isdir(candidate):
+            self._backend = "qwen3-asr"
+            self._display = ASR_QWEN3_MODEL_ID
+            self._model = candidate
+            return
+        self._backend = "whisper"
+        self._display = DEFAULT_ASR_MODEL
+        self._model = DEFAULT_ASR_MODEL
+        self._reason = f"未找到本地 Qwen3-ASR 权重（{candidate}），已回落 whisper"
+
+    def describe(self) -> dict[str, Any]:
+        """当前实际使用的后端（/health 用）"""
+        self._resolve()
+        info: dict[str, Any] = {"backend": self._backend, "model": self._display}
+        if self._model != self._display:
+            # 本地权重目录不是给人看的，单独给一个字段，界面只展示 model
+            info["path"] = self._model
+        if self._reason:
+            info["reason"] = self._reason
+        return info
 
     def transcribe(self, wav_bytes: bytes) -> dict[str, Any]:
         """把 WAV 字节转成文本"""
+        self._resolve()
+        with self._lock:
+            audio, duration_ms = decode_wav_to_mono16k(wav_bytes)
+            if self._backend == "qwen3-asr":
+                try:
+                    return self._transcribe_qwen(audio, duration_ms)
+                except Exception as exc:  # noqa: BLE001 - 任何推理失败都只降级一次
+                    self._backend = "whisper"
+                    self._display = DEFAULT_ASR_MODEL
+                    self._model = DEFAULT_ASR_MODEL
+                    self._reason = f"Qwen3-ASR 推理失败（{exc}），已回落 whisper"
+                    self._engine = None
+            return self._transcribe_whisper(audio, duration_ms)
+
+    def _transcribe_qwen(self, audio: Any, duration_ms: int) -> dict[str, Any]:
+        """Qwen3-ASR（mlx_audio）"""
+        from mlx_audio.stt import load as load_stt
+
+        if self._engine is None:
+            self._engine = load_stt(self._model)
+        # generate 接受 numpy 数组：不必落临时文件，省一次磁盘写
+        result = self._engine.generate(audio, language=ASR_LANGUAGE, hotwords=asr_hotwords())
+        text = getattr(result, "text", None)
+        if text is None:
+            text = str(result)
+        return {
+            "text": str(text).strip(),
+            "durationMs": duration_ms,
+            "model": self._display,
+            "backend": "qwen3-asr",
+        }
+
+    def _transcribe_whisper(self, audio: Any, duration_ms: int) -> dict[str, Any]:
+        """whisper 兜底（mlx_whisper）"""
         import mlx_whisper
 
-        with self._lock:
-            with wave.open(io.BytesIO(wav_bytes), "rb") as handle:
-                channels = handle.getnchannels()
-                width = handle.getsampwidth()
-                rate = handle.getframerate()
-                frames = handle.getnframes()
-                pcm = handle.readframes(frames)
+        result = mlx_whisper.transcribe(
+            audio,
+            path_or_hf_repo=self._model,
+            language=ASR_WHISPER_LANGUAGE,
+            initial_prompt=ASR_WHISPER_PROMPT,
+        )
+        return {
+            "text": (result.get("text") or "").strip(),
+            "durationMs": duration_ms,
+            "model": self._display,
+            "backend": "whisper",
+        }
 
-            duration_ms = int(frames / rate * 1000) if rate else 0
-            if width != 2:
-                raise RuntimeError(f"仅支持 16-bit PCM，收到 {width * 8}-bit")
 
-            import numpy as np
+def asr_hotwords() -> list[str]:
+    """
+    专有名词提示（Qwen3-ASR 的 hotwords）
 
-            audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
-            if channels > 1:
-                audio = audio.reshape(-1, channels).mean(axis=1)
-            if rate != 16000:
-                # 线性插值到 16k：Whisper 内部要 16k，粗略重采样对识别影响很小
-                target = int(len(audio) * 16000 / rate)
-                audio = np.interp(
-                    np.linspace(0, len(audio), target, endpoint=False),
-                    np.arange(len(audio)),
-                    audio,
-                )
+    环境变量 `DEEPCODE_ASR_HOTWORDS`（逗号分隔）优先，未设置时用默认表。
+    返回空列表也是合法输入（等于关闭热词）。
 
-            # `language="zh"` 只锁定「中文」，不区分简繁：同一段音频不同时间会给出
-            # 「之後 / 還能 / 嗎」这样的繁体输出，用户会以为自己说的是繁体字。
-            # Whisper 没有简体选项，官方推荐用一段简体中文 initial_prompt 做风格提示，
-            # 它会被当成上文，显著提高简体输出的比例（成本为零，只影响解码先验）。
-            result = mlx_whisper.transcribe(
-                audio,
-                path_or_hf_repo=self.model,
-                language="zh",
-                initial_prompt="以下是普通话对话，请用简体中文转写。",
-            )
-            return {
-                "text": (result.get("text") or "").strip(),
-                "durationMs": duration_ms,
-                "model": self.model,
-            }
+    @returns 热词列表
+    """
+    raw = os.environ.get("DEEPCODE_ASR_HOTWORDS", "").strip()
+    if raw:
+        return [word.strip() for word in raw.split(",") if word.strip()]
+    return list(ASR_HOTWORDS_DEFAULT)
+
+
+def decode_wav_to_mono16k(wav_bytes: bytes) -> tuple[Any, int]:
+    """
+    WAV 字节 → (float32 单声道 16k, 时长毫秒)
+
+    两个 ASR 后端都要 16k 单声道 float32，所以解码只做一次。前端上传的是
+    44.1k/48k 立体声（`encodeWav` 按 `audio.sampleRate` 原样写），这里不
+    转换就会让模型听到变速的声音。
+
+    @param wav_bytes 原始 WAV
+    @returns (音频数组, 时长毫秒)
+    """
+    import numpy as np
+
+    with wave.open(io.BytesIO(wav_bytes), "rb") as handle:
+        channels = handle.getnchannels()
+        width = handle.getsampwidth()
+        rate = handle.getframerate()
+        frames = handle.getnframes()
+        pcm = handle.readframes(frames)
+
+    duration_ms = int(frames / rate * 1000) if rate else 0
+    if width != 2:
+        raise RuntimeError(f"仅支持 16-bit PCM，收到 {width * 8}-bit")
+
+    audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+    if channels > 1:
+        audio = audio.reshape(-1, channels).mean(axis=1)
+    if rate != 16000:
+        # 线性插值到 16k：两个模型都按 16k 训练，粗略重采样对识别影响很小
+        target = int(len(audio) * 16000 / rate)
+        audio = np.interp(
+            np.linspace(0, len(audio), target, endpoint=False),
+            np.arange(len(audio)),
+            audio,
+        )
+    return audio, duration_ms
 
 
 # ---------------------------------------------------------------------------

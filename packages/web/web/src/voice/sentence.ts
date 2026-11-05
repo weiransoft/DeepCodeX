@@ -156,6 +156,9 @@ export function stripForSpeech(text: string): string {
       .replace(/^\s*[#>\-*+]+\s*/gm, "")
       // 表格分隔线
       .replace(/^\s*\|?[\s:|-]{4,}\|?\s*$/gm, "")
+      // 表格正文行：`| 名称 | 数值 |` 念出来是"名称 数值"的碎片，意义为零。
+      // 只删以竖线开头且以竖线结尾的整行，避免误伤正文里的竖线。
+      .replace(/^\s*\|.*\|\s*$/gm, "")
       // 压缩空白
       .replace(/\s+/g, " ")
       .trim()

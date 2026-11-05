@@ -121,3 +121,20 @@ test("M7 陪伴模式下情感基线是体谅：普通报错不绷紧，真事�
   // 真的紧急（线上挂了）仍要回到严肃——情绪优先不等于对危险迟钝
   assert.equal(engine.adapt("线上挂了，用户进不来").current, "SERIOUS");
 });
+
+test("M8 陪伴段约束「短」与「能被念出来」：默认 2~3 句、少用列表", () => {
+  const soul = applySoulMode(createSinanSoul(), "companion", COMPANION);
+  const section = renderModeSection("companion", COMPANION);
+
+  // 长度：明确给出 2~3 句的默认值，并留一个「被要求展开才展开」的出口
+  assert.ok(section.includes("2~3 句"), "必须给出可执行的句数上限，否则模型仍会写长");
+  assert.ok(section.includes("对方要细节再展开"), "要留出被要求展开的出口");
+
+  // 形态：语音场景下列表/表格/代码块是噪音
+  assert.ok(section.includes("会被念出来"), "必须点明这段话会被朗读");
+  assert.ok(section.includes("少用列表"), "必须要求少用列表/编号/表格");
+
+  // 陪伴不等于一切从简：被问「详细说说」时仍要能展开（约束不能反噬内容）
+  assert.ok(soul.expression.communicationStyle === "SUPPORTIVE");
+  assert.ok(!section.includes("不要超过一句"), "不能写成硬截断——技术问题该讲清楚时仍要讲清楚");
+});

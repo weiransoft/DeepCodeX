@@ -4,6 +4,7 @@ import { randomUUID } from "crypto";
 import { spawn } from "child_process";
 import type OpenAI from "openai";
 import type { CreateOpenAIClient, ToolExecutionContext, ToolExecutionResult } from "./executor";
+import { rateLimitCooldownMessage, webSearchGuard } from "./web-search-guard";
 
 const MAX_OUTPUT_CHARS = 30000;
 const MAX_CAPTURE_CHARS = 10 * 1024 * 1024;
@@ -132,17 +133,41 @@ async function executeDefaultWebSearch(
   context: ToolExecutionContext
 ): Promise<ToolExecutionResult> {
   context.signal?.throwIfAborted();
+  const host = resolvePlusHost(llmContext.plusApiKey);
+  const cacheKey = webSearchGuard.keyFor(query, host);
+
+  // 缓存先看：命中就完全不碰上游，连语言判定/翻译这两次 LLM 调用也省掉
+  const cached = webSearchGuard.read(cacheKey);
+  if (cached !== null) {
+    return {
+      ok: true,
+      name: "WebSearch",
+      output: cached,
+      metadata: { originalQuery: query, cached: true },
+    };
+  }
+
+  // 熔断期间直接拒答：不给模型「再试一次」的机会，否则每次重试都在真实扣配额
+  const blockedForMs = webSearchGuard.blockedForMs();
+  if (blockedForMs > 0) {
+    return {
+      ok: false,
+      name: "WebSearch",
+      error: rateLimitCooldownMessage(blockedForMs),
+      metadata: { originalQuery: query, rateLimited: true, retryAfterMs: blockedForMs },
+    };
+  }
+
   try {
     const prepared = await prepareSearchQuery(query, llmContext);
     // 上游 v0.3.1 新增：DeepSeek 官方 baseURL 分流（Responses API web_search 工具）
     // 与 plusApiKey 透传（默认 API 请求头携带 PLUS-API-KEY）
     context.signal?.throwIfAborted();
-    const output = await runDefaultWebSearchRequest(
-      prepared.resolvedQuery,
-      llmContext.machineId,
-      llmContext.plusApiKey,
-      context
+    // 并发去重：并行发出的同一条 query 共享同一次上游请求
+    const output = await webSearchGuard.share(cacheKey, () =>
+      runDefaultWebSearchRequest(prepared.resolvedQuery, llmContext.machineId, llmContext.plusApiKey, context)
     );
+    webSearchGuard.write(cacheKey, output);
 
     return {
       ok: true,
@@ -159,6 +184,16 @@ async function executeDefaultWebSearch(
   } catch (error) {
     context.signal?.throwIfAborted();
     const message = error instanceof Error ? error.message : String(error);
+    if (error instanceof WebSearchRateLimitError) {
+      // 上游明确说限流：熔断，并把「不要重试」写进模型能看到的错误里
+      webSearchGuard.trip();
+      return {
+        ok: false,
+        name: "WebSearch",
+        error: `WebSearch default mode failed: ${message}\n${rateLimitCooldownMessage(webSearchGuard.blockedForMs())}`,
+        metadata: { originalQuery: query, rateLimited: true },
+      };
+    }
     return {
       ok: false,
       name: "WebSearch",
@@ -166,6 +201,14 @@ async function executeDefaultWebSearch(
     };
   }
 }
+
+/**
+ * 上游明确返回限流时的错误类型
+ *
+ * 用类型而不是字符串匹配来区分，是因为调用方要据此熔断——字符串比较一旦
+ * 上游改了措辞就会静默失效，而"限流没被识别"的后果是重试风暴。
+ */
+class WebSearchRateLimitError extends Error {}
 
 async function runWebSearchScript(
   scriptPath: string,
@@ -418,7 +461,13 @@ async function runDefaultWebSearchRequest(
 
     if (!response.ok) {
       const body = await response.text().catch(() => "");
-      throw new Error(`WebSearch API request failed with status ${response.status}${body ? `: ${body}` : ""}`);
+      const detail = `WebSearch API request failed with status ${response.status}${body ? `: ${body}` : ""}`;
+      // 429 是限流的另一条路径（payload 里没有 reason 可解析），同样要熔断
+      if (response.status === 429) {
+        context.onPluginRateLimitExceeded?.("WebSearch");
+        throw new WebSearchRateLimitError(detail);
+      }
+      throw new Error(detail);
     }
 
     context.signal?.throwIfAborted();
@@ -436,6 +485,7 @@ async function runDefaultWebSearchRequest(
         typeof payload.reason === "string" && payload.reason.trim() ? payload.reason.trim() : "Unknown error";
       if (reason.includes("rate limit exceeded")) {
         context.onPluginRateLimitExceeded?.("WebSearch");
+        throw new WebSearchRateLimitError(`WebSearch API failed: ${reason}`);
       }
       throw new Error(`WebSearch API failed: ${reason}`);
     }

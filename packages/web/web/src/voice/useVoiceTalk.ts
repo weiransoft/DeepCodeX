@@ -56,6 +56,7 @@ import { defaultHandsFree, readHandsFree, subscribeHandsFree, writeHandsFree } f
 import { subscribeSoulConfigChanged } from "./config-events";
 import { WakeListener } from "./wake-listener";
 import { SILENCE_PEAK, isSignalAbsent, nextSmoothedLevel, quantizeLevel } from "./level";
+import { takeWithinBudget } from "./speech-budget";
 
 /** 延迟样本保留条数（够看趋势，不至于无限增长） */
 const LATENCY_SAMPLES = 10;
@@ -71,6 +72,16 @@ export interface LatencySample {
   /** 用户说完 → 第一个音出声（毫秒） */
   ttfaMs: number;
 }
+
+/**
+ * 单条回复的朗读字数预算见 `voice/speech-budget.ts`：中文朗读约 200~250
+ * 字/分钟，320 字约合 80~95 秒。超过这个长度，用户通常已经走神或转去读
+ * 屏幕了——继续念只是占着麦克风、挡住下一轮对话。
+ *
+ * 超预算后不再入队，并在收尾时说一句「后面还有内容」，让用户知道不是
+ * 被截断出错，而是可以自己看。要让模型少写，得靠陪伴模式的提示词约束；
+ * 这里是最后一道保险，防止某次模型抽风写出两千字被完整念完。
+ */
 
 /** 语音相位 */
 export type VoicePhase = "idle" | "listening" | "thinking" | "speaking";
@@ -183,6 +194,21 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   const firstAudioRef = useRef(true);
   /** 最近一次喂入的累积文本（flush 需要它取残句） */
   const lastTextRef = useRef("");
+  /** 本轮已送去合成的字数（对着 `voice/speech-budget.ts` 的预算记账） */
+  const spokenCharsRef = useRef(0);
+  /** 本轮是否已经因为预算而截断（收尾时补一句提示） */
+  const truncatedRef = useRef(false);
+  /**
+   * 本轮是否已被用户打断
+   *
+   * 打断只停音频是不够的：模型还在流式输出，下一条 `feed` 会带来新句子，
+   * 而 `enqueue` 内部会把 `stopped` 重置为 false —— 于是刚被打断的回复
+   * 又接着念起来，用户会觉得"它根本没听我的"。这里在 feed 入口做闸门，
+   * 让本轮的后续内容一律不再送合成。
+   */
+  const interruptedRef = useRef(false);
+  /** 打断后自动开录的入口（startTalk 定义在后面，用 ref 打破循环依赖） */
+  const startTalkRef = useRef<(() => Promise<void>) | null>(null);
   /**
    * 语音指令状态（跨轮默认 + 本轮快照）
    *
@@ -197,6 +223,9 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   /** options 的稳定引用（避免把回调塞进 useCallback 依赖导致整链重建） */
   const optionsRef = useRef(options);
   optionsRef.current = options;
+  /** 免按住开关的最新值（打断回调里要读，不能用闭包里的旧 state） */
+  const handsFreeRef = useRef(handsFree);
+  handsFreeRef.current = handsFree;
 
   /** thinking 兜底定时器 */
   const thinkingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -348,6 +377,15 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
    *
    * 不做成"播报回调里启动"：那会让 `queue` 与 `startBargeIn` 互相依赖，
    * 变成先有鸡还是先有蛋。改用 `speaking` 状态驱动的 effect，依赖方向单向。
+   *
+   * ## 打断之后做什么（2026-11-05 改成真正的插话）
+   *
+   * 原来只做 `queue.stop()`：用户得再点一次麦克风才能说话，"插话"断成两截。
+   * 现在免按住模式（hands-free）下打断即开录——用户正在说的这句话会继续被
+   * 收进去，说完停顿自动提交，这才是自然的插话。
+   *
+   * 按住说话模式（handsFree=false）不自动开录：那种模式下录音要求一直按着，
+   * 自动开录只会让用户莫名其妙。
    */
   const startBargeIn = useCallback(async () => {
     if (micRef.current === null) micRef.current = new MicCapture();
@@ -355,6 +393,8 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
       stopMonitorRef.current = await micRef.current.startMonitor(() => {
         queueRef.current?.stop();
         setSpeaking(false);
+        interruptedRef.current = true;
+        if (handsFreeRef.current) void startTalkRef.current?.();
       });
     } catch {
       // 麦克风不可用时不阻断播报：只是没有打断能力
@@ -447,6 +487,8 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
       resetLevelMeter();
     }
   }, [queue, stopBargeIn, stopTalk, handsFree, handleLevel, resetLevelMeter, clearSilenceTimer]);
+  // 打断回调要用到最新的 startTalk（它依赖 handsFree 等 state，不能进 [] 依赖）
+  startTalkRef.current = startTalk;
 
   /** 免按住切换 */
   const toggleTalk = useCallback(async (): Promise<string | null> => {
@@ -500,6 +542,28 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
     };
   }, [wakeEnabled, enabled, available, recording, speaking, wakeWord, startTalk]);
 
+  /**
+   * 送去合成（带字数预算）
+   *
+   * 为什么不直接把句子丢给 queue：一条长回复切出来可能有几十句，全念完
+   * 要几分钟。用户在语音场景里等不了那么久，也没必要——屏幕上有全文。
+   *
+   * 超预算时不再入队，只置标记；收尾时由 `finishFeed` 补一句说明。
+   *
+   * @param sentence 已剥 Markdown 的句子
+   */
+  const enqueueForSpeech = useCallback(
+    (sentence: string) => {
+      if (truncatedRef.current) return;
+      const slice = takeWithinBudget(sentence, spokenCharsRef.current);
+      spokenCharsRef.current = slice.used;
+      // 这句被截断 / 预算已用尽：后面的都不念了
+      if (slice.exhausted) truncatedRef.current = true;
+      if (slice.text.length > 0) queue().enqueue(slice.text);
+    },
+    [queue]
+  );
+
   /** 朗读文本 */
   const speak = useCallback(
     (text: string) => {
@@ -508,17 +572,24 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
       streamRef.current = stream;
       directiveStateRef.current = "unknown";
       directivePrefixRef.current = 0;
-      for (const sentence of stream.flush(text)) queue().enqueue(sentence);
+      spokenCharsRef.current = 0;
+      truncatedRef.current = false;
+      // 显式朗读（如点「重播」）要清掉上一轮的打断标记，否则一句都不念
+      interruptedRef.current = false;
+      for (const sentence of stream.flush(text)) enqueueForSpeech(sentence);
       speechEndAtRef.current = performance.now();
       firstAudioRef.current = true;
     },
-    [available, speakReplies, queue]
+    [available, speakReplies, enqueueForSpeech]
   );
 
   /** 喂流式增量（累积文本） */
   const feed = useCallback(
     (cumulative: string) => {
       if (!available || !speakReplies) return;
+      // 本轮已被打断：模型剩下的内容不再送合成（否则 enqueue 会把 stopped
+      // 重置回 false，刚被打断的回复又念起来）
+      if (interruptedRef.current) return;
       // 空帧直接跳过：`start` 阶段的累积文本是空串，喂进去会白白新建一个
       // SentenceStream 并把 speechEndAt 重置一次，把 TTFA 埋点算成全 0。
       if (cumulative.length === 0) return;
@@ -526,6 +597,9 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
         streamRef.current = new SentenceStream();
         directiveStateRef.current = "unknown";
         directivePrefixRef.current = 0;
+        // 新一轮开始：朗读预算与截断标记都归零
+        spokenCharsRef.current = 0;
+        truncatedRef.current = false;
         // 新一轮开始：把跨轮默认（可能为 null）重新冻结成本轮快照。
         // 上一轮的 once 指令已在这里失效，不会被这一轮继承。
         turnDirective.current.beginTurn();
@@ -553,9 +627,9 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
       }
 
       lastTextRef.current = body;
-      for (const sentence of streamRef.current.push(body)) queue().enqueue(sentence);
+      for (const sentence of streamRef.current.push(body)) enqueueForSpeech(sentence);
     },
-    [available, speakReplies, queue]
+    [available, speakReplies, enqueueForSpeech]
   );
 
   /**
@@ -569,6 +643,12 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
     streamRef.current = null;
     if (stream === null) return;
 
+    // 本轮到此结束：被打断标记只作用于本轮，下一轮要重新放行。
+    // 放在这里而不是 feed 开头，是因为被打断后 feed 会一路 return，
+    // 永远走不到重置点。
+    const interrupted = interruptedRef.current;
+    interruptedRef.current = false;
+
     let body = lastTextRef.current;
     if (directiveStateRef.current === "unknown") {
       // 整段都没有换行：再试一次是不是「一行指令」，解析不了就当正文念
@@ -580,17 +660,27 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
       directiveStateRef.current = "resolved";
     }
 
-    for (const sentence of stream.flush(body)) queue().enqueue(sentence);
+    // 被打断就不补念尾巴了——用户已经明确不要听
+    if (!interrupted) {
+      for (const sentence of stream.flush(body)) enqueueForSpeech(sentence);
+      // 因字数预算没念完：补一句说明，别让用户以为语音坏了
+      if (truncatedRef.current) {
+        truncatedRef.current = false;
+        queue().enqueue("后面还有内容，我已经放到屏幕上了。");
+      }
+    }
     lastTextRef.current = "";
 
     // once 的指令只影响这一条回复：清的是**跨轮默认**，不是本轮快照。
     // 本轮快照要留到队列里剩下的句子都合成完（下一轮 feed 才重置），
     // 否则「清得太早」会让同一回复的后半段换音色/换语速。
     turnDirective.current.endTurn();
-  }, [queue]);
+  }, [enqueueForSpeech, queue]);
 
   /** 停止播报 */
   const stopSpeaking = useCallback(() => {
+    // 手动停也视为打断：模型剩下的内容不该接着念
+    interruptedRef.current = true;
     queue().stop();
     setSpeaking(false);
   }, [queue]);

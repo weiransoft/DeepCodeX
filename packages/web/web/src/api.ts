@@ -912,6 +912,13 @@ export function fetchVoiceStatus(): Promise<VoiceStatus> {
  * 返回 objectURL（调用方负责 `URL.revokeObjectURL`）。
  * 走二进制而不是 base64：后者体积多 33%，且前端要多一次解码。
  *
+ * ## 为什么必须带超时
+ *
+ * 这个函数被播报队列**串行**调用。fetch 默认没有超时——sidecar 卡住
+ * （模型推理挂起、进程假死、连接进了黑洞）时请求会一直挂着，`drain`
+ * 就停在合成这一步：界面上一直显示"正在播报"，实际一点声音都没有，
+ * 用户只能刷新页面。服务端侧给的是 60s，这里留 15s 余量避免两边同时超时。
+ *
  * @param text 待合成文本
  * @param override 覆盖配置里的引擎/音色/语速
  * @returns 可播放的 objectURL
@@ -920,16 +927,31 @@ export async function synthesizeSpeech(
   text: string,
   override?: { engine?: VoiceEngine; voice?: string; speed?: number }
 ): Promise<string> {
-  const res = await fetch("/api/voice/tts", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "same-origin",
-    body: JSON.stringify({ text, ...(override ?? {}) }),
-  });
-  if (!res.ok) throw new Error(await readErrorDetail(res, "语音合成失败"));
-  const blob = await res.blob();
-  if (blob.size === 0) throw new Error("语音合成返回空音频");
-  return URL.createObjectURL(blob);
+  // 首次合成含模型加载，服务端给 60s；前端多留余量，超时后由队列跳过该句
+  const timeoutMs = 75_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch("/api/voice/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      signal: controller.signal,
+      body: JSON.stringify({ text, ...(override ?? {}) }),
+    });
+    if (!res.ok) throw new Error(await readErrorDetail(res, "语音合成失败"));
+    const blob = await res.blob();
+    if (blob.size === 0) throw new Error("语音合成返回空音频");
+    return URL.createObjectURL(blob);
+  } catch (error) {
+    // AbortError 对用户没有意义，翻译成能照做的提示
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error(`语音合成超时（${Math.round(timeoutMs / 1000)}s），已跳过这一句`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

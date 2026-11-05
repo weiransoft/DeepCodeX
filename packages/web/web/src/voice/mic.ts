@@ -16,6 +16,14 @@
  *
  * 这三个数都做成导出常量，测试与调参改一处即可。
  *
+ * **打断监测的阈值仍是固定的**：它工作在"助手正在外放"这个特殊时段，麦克风
+ * 听到的既有用户也有扬声器回声，噪声底估计会被回声污染。改成自适应反而可能
+ * 让阈值在播报开头降到过低、自己打断自己，因此这里保持绝对值。代价是增益
+ * 很低的麦克风难以用说话打断——这一项需要真机实测后再定，不靠推理改。
+ *
+ * 录音期的「说完判定」则走自适应阈值（见 `voice/noise-floor.ts`）：那个场景
+ * 没有回声，只有环境噪声与麦克风增益两件事。
+ *
  * ## 免按住：录音期静音收尾（对标 OpenClaw Talk Mode）
  *
  * `startRecording` 可以额外挂一个「说完判定」（见 `endpointing.ts`）：录音同时
@@ -42,6 +50,7 @@
  */
 
 import { Endpointer, type EndpointOptions, type EndpointVerdict } from "./endpointing";
+import { NoiseFloorTracker } from "./noise-floor";
 
 /** 分析帧长（毫秒） */
 export const VAD_FRAME_MS = 50;
@@ -118,6 +127,14 @@ export class MicCapture {
   private levelTimer: ReturnType<typeof setInterval> | null = null;
   /** 录音超时句柄 */
   private maxTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * 环境噪声底（跨轮持有）
+   *
+   * 放在采集器上而不是判定器里：判定器每次开录都新建，噪声底却是「这间
+   * 屋子有多吵」这个慢变量的估计。每轮重建会让第二轮又从 0.004 开始，
+   * 第一句永远按最低阈值判。见 `voice/noise-floor.ts`。
+   */
+  private readonly noiseFloor = new NoiseFloorTracker();
 
   /**
    * 打开麦克风（幂等）
@@ -181,7 +198,8 @@ export class MicCapture {
     void context.resume().catch(() => {});
 
     const buffer = new Float32Array(analyser.fftSize);
-    const endpointer = options.onEndpoint === undefined ? null : new Endpointer(options.endpoint);
+    const endpointer =
+      options.onEndpoint === undefined ? null : new Endpointer({ ...options.endpoint, noiseFloor: this.noiseFloor });
     const frameMs = options.endpoint?.frameMs ?? VAD_FRAME_MS;
 
     this.levelTimer = setInterval(() => {
