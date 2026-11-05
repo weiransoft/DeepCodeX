@@ -1522,6 +1522,7 @@ export {
   RECENCY_WEIGHT,
   // 身份（常驻主理智能体「司南」）
   SUPER_AGENT_IDENTITY,
+  resolveAgentName,
   buildIdentityPreamble,
   superAgentName,
   superAgentSignature,
@@ -1611,6 +1612,7 @@ export {
   defaultVoiceConfig,
   findVoicePreset,
   normalizeAvatarConfig,
+  normalizeIdentityConfig,
   normalizeSoulConfig,
   normalizeVoiceConfig,
   // 语音默认值的平台差异（有本机 MLX 语音模型的平台才默认开）

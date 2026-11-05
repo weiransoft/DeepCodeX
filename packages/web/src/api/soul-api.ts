@@ -38,11 +38,14 @@ import {
   categoryLabel,
   createSoulEngine,
   loadSoulConfig,
+  normalizeIdentityConfig,
+  resolveAgentName,
   saveSoulConfig,
   soulConfigPath,
   soulMemoryLocations,
   COMPANION_PRESETS,
   VOICE_PRESETS,
+  DEFAULT_WAKE_WORD,
   soulModeOptions,
   type MemoryCategory,
   type SoulConfig,
@@ -204,6 +207,19 @@ function parseCategory(raw: unknown): MemoryCategory | undefined {
 export type SoulConfigView = {
   avatar: SoulConfig["avatar"];
   voice: Omit<SoulConfig["voice"], "token"> & { hasToken: boolean };
+  /**
+   * 名字
+   *
+   * `name` / `nameEn` 是用户设置的原值（空串 = 沿用默认，不落盘默认值）；
+   * `resolved` 是实际生效的名字（含默认兜底），界面标题与署名用它。
+   * 分开给的理由：输入框要显示"我设过什么"（空就是空，占位符提示默认名），
+   * 而标题必须显示"现在叫什么"（不能因为没设过就显示空白）。
+   */
+  identity: {
+    name: string;
+    nameEn: string;
+    resolved: { name: string; nameEn: string };
+  };
   /** 对话模式（work = 工作，companion = 陪伴） */
   mode: SoulConfig["mode"];
   /** 陪伴模式可调项（mode=work 时保留但不生效） */
@@ -232,9 +248,15 @@ export type SoulConfigView = {
  */
 function toConfigView(config: SoulConfig, filePath: string): SoulConfigView {
   const { token, ...voice } = config.voice;
+  const resolved = resolveAgentName(config.identity);
   return {
     avatar: config.avatar,
     voice: { ...voice, hasToken: token.length > 0 },
+    identity: {
+      name: config.identity.name,
+      nameEn: config.identity.nameEn,
+      resolved: { name: resolved.primary, nameEn: resolved.latin ?? "" },
+    },
     mode: config.mode,
     companion: config.companion,
     filePath,
@@ -303,15 +325,27 @@ export async function handlePutSoulConfig(
   const body = (await readJsonBody(req)) as {
     avatar?: unknown;
     voice?: unknown;
+    identity?: unknown;
     mode?: unknown;
     companion?: unknown;
   };
   const homeRoot = skillsHomeForUser(settings, ctx.userId);
   const current = loadSoulConfig(homeRoot);
 
+  const identity = body.identity === undefined ? current.config.identity : normalizeIdentityConfig(body.identity);
+  let voice = body.voice === undefined ? current.config.voice : mergePatch(current.config.voice, body.voice);
+
+  // 唤醒词联动：改名字时，若唤醒词还是默认的「司南」，跟着换成新名字。
+  // 不联动的话，界面叫「小北」用户却得喊「司南」才能唤醒，属于典型的
+  // 改一处漏一处。用户显式设过自己的唤醒词（非默认值）时一律不动。
+  if (body.identity !== undefined && identity.name !== "" && current.config.voice.wakeWord === DEFAULT_WAKE_WORD) {
+    voice = { ...voice, wakeWord: identity.name };
+  }
+
   const next: SoulConfig = {
     avatar: body.avatar === undefined ? current.config.avatar : (body.avatar as SoulConfig["avatar"]),
-    voice: body.voice === undefined ? current.config.voice : mergePatch(current.config.voice, body.voice),
+    voice,
+    identity,
     mode: body.mode === undefined ? current.config.mode : (body.mode as SoulConfig["mode"]),
     companion:
       body.companion === undefined ? current.config.companion : mergePatch(current.config.companion, body.companion),

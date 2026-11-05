@@ -561,16 +561,35 @@ export interface SoulVoiceConfig {
 }
 
 /**
+ * 名字覆盖（用户可改）
+ *
+ * 名字不是界面文案：它同时进**提示词**（自称）、**署名**（消息气泡）、
+ * **唤醒词默认值**与**界面标题**。四处必须同源，否则会出现「界面叫小南、
+ * 模型自称司南」的分裂感。
+ *
+ * 因此这里只存用户显式改过的值：空串表示「没改过」，由 `SUPER_AGENT_IDENTITY`
+ * 兜底。不把默认值落盘，是为了让默认名将来能升级而不被旧配置钉死。
+ */
+export interface SoulIdentityConfig {
+  /** 中文名（自称、署名）；空串 = 用默认「司南」 */
+  readonly name: string;
+  /** 英文名（日志 / 非中文界面）；空串 = 用默认「Sinan」 */
+  readonly nameEn: string;
+}
+
+/**
  * 司南的配置（`~/.deepcode/soul/config.json`）
  *
  * 与记忆分文件存放：记忆是**给模型的事实**（存 V2 memory 目录），
- * 配置是**给人的偏好**（形象、声音、对话模式），生命周期与读取方都不同。
+ * 配置是**给人的偏好**（形象、声音、对话模式、名字），生命周期与读取方都不同。
  */
 export interface SoulConfig {
   /** 头像 */
   readonly avatar: SoulAvatarConfig;
   /** 语音 */
   readonly voice: SoulVoiceConfig;
+  /** 名字（用户可改；空串表示沿用默认） */
+  readonly identity: SoulIdentityConfig;
   /** 对话模式（work = 工作，companion = 陪伴） */
   readonly mode: SoulMode;
   /** 陪伴模式可调项（mode=work 时保留但不生效） */

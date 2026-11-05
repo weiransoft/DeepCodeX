@@ -301,9 +301,12 @@ export function BgTaskNotice({ entry }: { entry: Extract<ChatEntry, { kind: "bgt
 
 /** ChatPane：中间对话流 */
 export function ChatPane(props: ChatPaneProps) {
-  // 司南头像（默认兔狲；读配置失败会回落默认，不影响对话）
+  // 司南头像与名字（读配置失败会回落默认，不影响对话）
   const { config: soulConfig } = useSoulConfig();
   const soulAvatar = soulConfig.avatar;
+  // 名字来自配置（用户可在设置里改）；resolved 已含默认兜底，可直接显示
+  const soulName = soulConfig.identity.resolved.name;
+  const soulNameEn = soulConfig.identity.resolved.nameEn;
   const {
     entries,
     streaming,
@@ -457,13 +460,14 @@ export function ChatPane(props: ChatPaneProps) {
         </div>
         <div className="chat-welcome">
           {/* 头像放在名字上方：空对话页是「认识这个人」的唯一时机 */}
-          <SoulAvatar avatar={soulAvatar} size={72} className="chat-welcome-avatar" />
+          <SoulAvatar avatar={soulAvatar} size={72} name={soulName} className="chat-welcome-avatar" />
           {/* 名字放在最显眼处：用户需要知道「在跟谁说话」，而不是「跟哪个引擎说话」 */}
           <div className="chat-welcome-brand">
-            司南<span className="chat-welcome-latin">Sinan</span>
+            {soulName}
+            {soulNameEn !== "" && <span className="chat-welcome-latin">{soulNameEn}</span>}
           </div>
           <div className="chat-welcome-tagline">拆解任务 · 编排工作流 · 组建团队 · 盯到交付</div>
-          <div className="chat-welcome-hint">从左侧新建对话；记住的事在「设置 → 系统管理 → 司南」里可查可改</div>
+          <div className="chat-welcome-hint">从左侧新建对话；记住的事在「设置 → 系统管理 → {soulName}」里可查可改</div>
         </div>
       </main>
     );
@@ -585,14 +589,19 @@ export function ChatPane(props: ChatPaneProps) {
                       {/* 默认兔狲头像（与桌面应用图标同源；用户可在设置里换） */}
                       <div className="msg-assistant-with-avatar">
                         {/* 头像：固定宽度，不参与 flex shrink */}
-                        <SoulAvatar avatar={soulAvatar} size={26} className="msg-avatar msg-avatar-assistant" />
+                        <SoulAvatar
+                          avatar={soulAvatar}
+                          size={26}
+                          name={soulName}
+                          className="msg-avatar msg-avatar-assistant"
+                        />
                         {/* 内容 wrapper：作为 flex row 的唯一 content 子元素，
                             独占头像之外全部宽度，内部用 flex-direction: column 垂直排列。
                             这样流式阶段 Fragment 展开的 thinking + preview 两个子元素
                             不会被作为 flex row item 均分挤压（这就是"挤到一列"的根因）。 */}
                         <div className="msg-assistant-body-wrapper">
-                          {/* 署名：多智能体协同时，谁说的话必须看得见（当前常驻主理人是司南） */}
-                          <div className="msg-assistant-name">司南</div>
+                          {/* 署名：多智能体协同时，谁说的话必须看得见（名字跟随设置） */}
+                          <div className="msg-assistant-name">{soulName}</div>
                           {entry.content !== null ? (
                             <>
                               {/* 固化态「思考过程」折叠区（web-thinking-display.md §5.2 TH6）：

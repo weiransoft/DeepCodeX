@@ -24,6 +24,7 @@ import type {
   SoulAvatarConfig,
   SoulCompanionConfig,
   SoulConfig,
+  SoulIdentityConfig,
   SoulMode,
   SoulVoiceConfig,
   VoiceEngine,
@@ -31,6 +32,12 @@ import type {
 
 /** 自定义头像 dataUrl 上限（字符数，约 300KB 图；256px 头像 base64 约 10KB） */
 export const AVATAR_DATA_URL_MAX = 400_000;
+
+/** 中文名长度上限（再长在气泡署名与标题里都会挤成一团） */
+export const NAME_MAX_CHARS = 12;
+
+/** 英文名长度上限 */
+export const NAME_EN_MAX_CHARS = 24;
 
 /** 默认 sidecar 地址（仅回环） */
 export const DEFAULT_VOICE_ENDPOINT = "http://127.0.0.1:8791";
@@ -83,6 +90,7 @@ export const WAKE_WORD_MAX_LENGTH = 12;
 export const DEFAULT_SOUL_CONFIG: SoulConfig = {
   avatar: { kind: "default" },
   voice: defaultVoiceConfig(),
+  identity: { name: "", nameEn: "" },
   mode: "work",
   companion: DEFAULT_COMPANION_CONFIG,
 };
@@ -229,6 +237,52 @@ export function normalizeCompanionConfig(raw: unknown): SoulCompanionConfig {
 }
 
 /**
+ * 校验并规范化名字配置
+ *
+ * ## 为什么空串代表「沿用默认」而不是存默认值
+ *
+ * 用户没改过名字时，配置里不落任何值。这样默认名（`SUPER_AGENT_IDENTITY`）
+ * 将来还能升级；一旦把「司南」写死进每个人的配置文件，默认值就永远定格了。
+ *
+ * ## 为什么要清洗字符
+ *
+ * 名字会被拼进系统提示词（`名称：${name}`）与署名。若放任换行、
+ * 反引号、`#` 之类的字符进来，用户改个名字就能改写提示词结构——
+ * 这不是安全边界的假设问题，而是「用户自己把自己人格搞坏」的可用性问题。
+ * 因此只保留可见字符，去掉换行/控制符/Markdown 结构符。
+ *
+ * @param raw 原始值
+ * @returns 合法名字配置（空串表示沿用默认）
+ */
+export function normalizeIdentityConfig(raw: unknown): SoulIdentityConfig {
+  if (typeof raw !== "object" || raw === null) return { name: "", nameEn: "" };
+  const record = raw as Record<string, unknown>;
+  return {
+    name: cleanName(record.name, NAME_MAX_CHARS),
+    nameEn: cleanName(record.nameEn, NAME_EN_MAX_CHARS),
+  };
+}
+
+/**
+ * 清洗单个名字
+ *
+ * @param raw 原始值
+ * @param max 最大字符数
+ * @returns 清洗后的名字（非法返回空串，交由默认值兜底）
+ */
+function cleanName(raw: unknown, max: number): string {
+  if (typeof raw !== "string") return "";
+  const stripped = raw
+    // 换行 / 制表 / 零宽字符：会破坏提示词与署名的单行结构
+    .replace(/[\r\n\t\u200b-\u200f\uFEFF]/g, "")
+    // Markdown 结构符与引号：名字只该是名字，不该能改变排版
+    .replace(/[#*`>|[\](){}<>"]/g, "")
+    .trim();
+  if (stripped.length === 0) return "";
+  return [...stripped].slice(0, max).join("");
+}
+
+/**
  * 校验并规范化整份配置
  *
  * @param raw 原始值（可能来自磁盘、请求体或旧版本）
@@ -241,6 +295,7 @@ export function normalizeSoulConfig(raw: unknown, fallbackToken = "", platform: 
     return {
       avatar: { kind: "default" },
       voice: { ...defaultVoiceConfig(platform), token: fallbackToken },
+      identity: { name: "", nameEn: "" },
       mode: DEFAULT_SOUL_CONFIG.mode,
       companion: DEFAULT_COMPANION_CONFIG,
     };
@@ -249,6 +304,7 @@ export function normalizeSoulConfig(raw: unknown, fallbackToken = "", platform: 
   return {
     avatar: normalizeAvatarConfig(record.avatar),
     voice: normalizeVoiceConfig(record.voice, fallbackToken, platform),
+    identity: normalizeIdentityConfig(record.identity),
     mode: parseSoulMode(record.mode),
     companion: normalizeCompanionConfig(record.companion),
   };

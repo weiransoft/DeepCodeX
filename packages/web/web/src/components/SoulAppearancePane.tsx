@@ -144,11 +144,71 @@ export function SoulAppearancePane() {
 
   return (
     <div className="soul-appearance">
+      {/* ---------- 名字 ---------- */}
+      <section className="soul-section">
+        <h4>名字</h4>
+        <div className="soul-field">
+          <span className="soul-field-label">中文名</span>
+          <input
+            className="soul-input"
+            type="text"
+            value={config.identity.name}
+            maxLength={12}
+            disabled={saving}
+            placeholder={config.identity.resolved.name}
+            onChange={(event) =>
+              setState({
+                phase: "ready",
+                config: { ...config, identity: { ...config.identity, name: event.target.value } },
+              })
+            }
+            onBlur={(event) => {
+              if (event.target.value === config.identity.resolved.name) return;
+              // 两个字段一起提交：后端对该区块做整体规范化，只传一个会把另一个清空
+              void submit(
+                { identity: { name: event.target.value, nameEn: config.identity.nameEn } },
+                "名字已保存（新会话生效）"
+              );
+            }}
+          />
+          <div className="soul-hint">
+            留空就用默认名「{config.identity.resolved.name}」。名字会进提示词的自称、消息署名与界面标题；
+            已经开始的对话仍用旧名字，新建对话才完全切换。
+          </div>
+        </div>
+        <div className="soul-field">
+          <span className="soul-field-label">英文名</span>
+          <input
+            className="soul-input"
+            type="text"
+            value={config.identity.nameEn}
+            maxLength={24}
+            disabled={saving}
+            placeholder={config.identity.resolved.nameEn === "" ? "可留空" : config.identity.resolved.nameEn}
+            onChange={(event) =>
+              setState({
+                phase: "ready",
+                config: { ...config, identity: { ...config.identity, nameEn: event.target.value } },
+              })
+            }
+            onBlur={(event) => {
+              if (event.target.value === config.identity.resolved.nameEn) return;
+              void submit({ identity: { name: config.identity.name, nameEn: event.target.value } }, "英文名已保存");
+            }}
+          />
+        </div>
+      </section>
+
       {/* ---------- 头像 ---------- */}
       <section className="soul-section">
         <h4>形象</h4>
         <div className="soul-avatar-row">
-          <SoulAvatar avatar={config.avatar} size={64} className="soul-avatar-preview" />
+          <SoulAvatar
+            avatar={config.avatar}
+            size={64}
+            name={config.identity.resolved.name}
+            className="soul-avatar-preview"
+          />
           <div className="soul-avatar-actions">
             <div className="soul-avatar-hint">
               默认是应用图标里的兔狲（与桌面图标同一张图）。

@@ -25,6 +25,8 @@ export interface SoulAvatarProps {
   size?: number;
   /** 附加类名 */
   className?: string;
+  /** 读屏用的名字（跟随用户设置；缺省「司南」） */
+  name?: string;
 }
 
 /**
@@ -33,7 +35,7 @@ export interface SoulAvatarProps {
  * @param props 属性
  * @returns img 元素
  */
-export function SoulAvatar({ avatar, size = 22, className }: SoulAvatarProps) {
+export function SoulAvatar({ avatar, size = 22, className, name = "司南" }: SoulAvatarProps) {
   const custom = avatar?.kind === "custom" && typeof avatar.dataUrl === "string" ? avatar.dataUrl : null;
   const src = custom ?? DEFAULT_AVATAR_SRC;
   const style = { width: `${size}px`, height: `${size}px` };
@@ -42,8 +44,8 @@ export function SoulAvatar({ avatar, size = 22, className }: SoulAvatarProps) {
       className={`soul-avatar${className !== undefined ? ` ${className}` : ""}`}
       src={src}
       style={style}
-      alt="司南"
-      // 头像是装饰性的：读屏读「司南」两个字就够，不需要描述图片
+      alt={name}
+      // 头像是装饰性的：读屏读「名字」两个字就够，不需要描述图片
       role="img"
       draggable={false}
     />

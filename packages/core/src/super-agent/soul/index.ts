@@ -60,6 +60,7 @@ export {
   findVoicePreset,
   findCompanionPreset,
   normalizeAvatarConfig,
+  normalizeIdentityConfig,
   normalizeCompanionConfig,
   normalizeSoulConfig,
   normalizeVoiceConfig,

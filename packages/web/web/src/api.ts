@@ -839,6 +839,18 @@ export interface SoulCompanionConfig {
 export interface SoulConfigView {
   avatar: SoulAvatarConfig;
   voice: SoulVoiceConfigView;
+  /**
+   * 名字
+   *
+   * `name` / `nameEn` 是用户设过的原值（空串 = 沿用默认，输入框显示空以提示默认名）；
+   * `resolved` 是实际生效值，界面标题与消息署名必须用它——否则用户没设过名字时
+   * 标题会变成空白。
+   */
+  identity: {
+    name: string;
+    nameEn: string;
+    resolved: { name: string; nameEn: string };
+  };
   /** 对话模式 */
   mode: SoulMode;
   /** 陪伴模式可调项（mode=work 时保留但不生效） */
@@ -882,6 +894,7 @@ export function fetchSoulConfig(): Promise<SoulConfigView> {
 export function saveSoulConfig(patch: {
   avatar?: SoulAvatarConfig;
   voice?: Partial<Omit<SoulVoiceConfigView, "hasToken">>;
+  identity?: { name?: string; nameEn?: string };
   mode?: SoulMode;
   companion?: Partial<SoulCompanionConfig>;
 }): Promise<SoulConfigView> {

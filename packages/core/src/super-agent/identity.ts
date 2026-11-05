@@ -51,6 +51,53 @@ export function superAgentName(): string {
 }
 
 /**
+ * 用户对名字的覆盖（都可空，空表示沿用默认）
+ */
+export interface AgentNameOverride {
+  /** 中文名 */
+  readonly name?: string;
+  /** 英文名 */
+  readonly nameEn?: string;
+}
+
+/**
+ * 解析最终名字
+ *
+ * ## 为什么改名字要清掉默认昵称
+ *
+ * 默认昵称是「老南」「南工」——那是**从「司南」这个音派生**的。用户把名字
+ * 改成「小北」之后，"老南"就不再是昵称，而是一个陌生的称呼。所以昵称只在
+ * 用默认名时保留；改名后留空，由模型按新名字自然称呼。
+ *
+ * ## 为什么英文名单独判断
+ *
+ * 用户只填中文名时，不该把 `Sinan` 硬塞给「小北」——那是最典型的
+ * "界面一半中文一半英文"的分裂感来源。此时英文名留空。
+ *
+ * @param override 用户覆盖值
+ * @returns 名字身份（primary 必有；latin / nicknames 视情况）
+ */
+export function resolveAgentName(override?: AgentNameOverride): {
+  readonly primary: string;
+  readonly latin?: string;
+  readonly nicknames?: readonly string[];
+} {
+  const custom = override?.name?.trim() ?? "";
+  const customEn = override?.nameEn?.trim() ?? "";
+  const primary = custom !== "" ? custom : SUPER_AGENT_IDENTITY.name;
+  const usingDefault = primary === SUPER_AGENT_IDENTITY.name;
+
+  const latin = customEn !== "" ? customEn : usingDefault ? SUPER_AGENT_IDENTITY.nameEn : undefined;
+  const nicknames = usingDefault ? (["老南", "南工"] as const) : undefined;
+
+  return {
+    primary,
+    ...(latin !== undefined && latin !== "" ? { latin } : {}),
+    ...(nicknames !== undefined ? { nicknames } : {}),
+  };
+}
+
+/**
  * 取完整署名（用于消息、横幅、状态行）
  *
  * @returns 如 `司南（Sinan）· 常驻主理智能体`

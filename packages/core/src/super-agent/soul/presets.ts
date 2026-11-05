@@ -23,7 +23,7 @@
  * @module super-agent/soul/presets
  */
 
-import { SUPER_AGENT_IDENTITY } from "../identity.js";
+import { SUPER_AGENT_IDENTITY, resolveAgentName, type AgentNameOverride } from "../identity.js";
 import type {
   CoreEssence,
   EmotionalState,
@@ -187,11 +187,15 @@ export const SINAN_PRESET_NAME = "SINAN";
  * @param memories 已加载的记忆
  * @returns Soul 聚合
  */
-export function createSinanSoul(memories: readonly SoulMemory[] = []): Soul {
+export function createSinanSoul(memories: readonly SoulMemory[] = [], identity?: AgentNameOverride): Soul {
+  // 名字可以被用户改（设置 → 系统管理 → 司南）。改的只是名字身份这一层，
+  // 人格矩阵 / 信念 / 表达风格不变——「换个叫法不换个人」。
+  const essence: CoreEssence =
+    identity === undefined ? SINAN_ESSENCE : { ...SINAN_ESSENCE, name: resolveAgentName(identity) };
   return {
     id: "soul-sinan",
     preset: SINAN_PRESET_NAME,
-    essence: SINAN_ESSENCE,
+    essence,
     personality: SINAN_PERSONALITY,
     emotion: SINAN_EMOTION,
     expression: SINAN_EXPRESSION,

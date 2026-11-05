@@ -39,7 +39,15 @@ import { normalizeSoulConfig } from "./soul/config.js";
 import { DEFAULT_COMPANION_CONFIG } from "./soul/modes.js";
 import { migrateLegacySoulMemory, UnifiedSoulStore } from "./soul-memory-store.js";
 import { SoulEngine, type ScopedSoulStore } from "./soul/engine.js";
-import type { Soul, SoulCompanionConfig, SoulConfig, SoulMemoryFile, SoulMemoryStore, SoulMode } from "./soul/types.js";
+import type {
+  Soul,
+  SoulCompanionConfig,
+  SoulConfig,
+  SoulIdentityConfig,
+  SoulMemoryFile,
+  SoulMemoryStore,
+  SoulMode,
+} from "./soul/types.js";
 
 /** V2 记忆目录（相对 HOME 或项目根） */
 const MEMORY_DIR = path.join(".deepcode", "memory");
@@ -242,22 +250,30 @@ export function migrateSoulMemory(projectRoot?: string, homeRoot?: string): Retu
 }
 
 /**
- * 读取配置里的对话模式（**不写盘**）
+ * 读取配置里的人格偏好（**不写盘**）
  *
  * 与 `loadSoulConfig` 的区别：这个函数只读。页面渲染、引擎构造都会调用它，
  * 若为了读一个模式顺手把 token 落盘，会给只读路径带来意外的写副作用。
  *
+ * 返回三样：对话模式、陪伴偏好、名字覆盖。名字也走这条路，是因为
+ * 它必须与模式一起在**构造 Soul 引擎之前**拿到——名字进提示词，
+ * 晚了就只能等下一次会话才生效。
+ *
  * @param homeRoot 用户级引擎数据根
- * @returns 模式与陪伴配置（配置缺失或损坏时回落默认）
+ * @returns 模式 / 陪伴 / 名字（配置缺失或损坏时回落默认）
  */
-export function readSoulMode(homeRoot?: string): { readonly mode: SoulMode; readonly companion: SoulCompanionConfig } {
+export function readSoulMode(homeRoot?: string): {
+  readonly mode: SoulMode;
+  readonly companion: SoulCompanionConfig;
+  readonly identity: SoulIdentityConfig;
+} {
   const filePath = soulConfigPath(homeRoot);
   try {
     const parsed: unknown = JSON.parse(fs.readFileSync(filePath, "utf8"));
     const config = normalizeSoulConfig(parsed);
-    return { mode: config.mode, companion: config.companion };
+    return { mode: config.mode, companion: config.companion, identity: config.identity };
   } catch {
-    return { mode: "work", companion: DEFAULT_COMPANION_CONFIG };
+    return { mode: "work", companion: DEFAULT_COMPANION_CONFIG, identity: { name: "", nameEn: "" } };
   }
 }
 
@@ -291,12 +307,13 @@ export function createSoulEngine(
   }
   const preset =
     options.memoryOnly === true
-      ? { mode: "work" as SoulMode, companion: DEFAULT_COMPANION_CONFIG }
+      ? { mode: "work" as SoulMode, companion: DEFAULT_COMPANION_CONFIG, identity: { name: "", nameEn: "" } }
       : readSoulMode(options.homeRoot);
   const engine = new SoulEngine({
     stores,
     mode: options.mode ?? preset.mode,
     companion: options.companion ?? preset.companion,
+    identity: preset.identity,
     clock: options.clock,
   });
   const soul = engine.load();

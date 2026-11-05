@@ -23,7 +23,13 @@
  */
 
 // --- 身份（常驻主理智能体「司南」） ---
-export { SUPER_AGENT_IDENTITY, buildIdentityPreamble, superAgentName, superAgentSignature } from "./identity.js";
+export {
+  SUPER_AGENT_IDENTITY,
+  buildIdentityPreamble,
+  resolveAgentName,
+  superAgentName,
+  superAgentSignature,
+} from "./identity.js";
 
 // --- Soul（四层人格 + 分类记忆） ---
 export {
@@ -80,6 +86,7 @@ export {
   defaultVoiceConfig,
   findVoicePreset,
   normalizeAvatarConfig,
+  normalizeIdentityConfig,
   normalizeSoulConfig,
   normalizeVoiceConfig,
   // 语音默认值的平台差异（本机有 MLX 语音模型才默认开）

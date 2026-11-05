@@ -19,6 +19,7 @@ import { isAppleClient } from "./voice/preference";
 /** 默认回落值（与后端 DEFAULT_SOUL_CONFIG 对齐；仅用于读失败时展示） */
 const FALLBACK: SoulConfigView = {
   avatar: { kind: "default" },
+  identity: { name: "", nameEn: "", resolved: { name: "司南", nameEn: "Sinan" } },
   voice: {
     // 与后端同一套平台判断：本机有 MLX 语音模型的平台默认开
     enabled: isAppleClient(),

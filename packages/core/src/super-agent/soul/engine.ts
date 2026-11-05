@@ -22,6 +22,7 @@
  * @module super-agent/soul/engine
  */
 
+import type { AgentNameOverride } from "../identity.js";
 import { createSinanSoul } from "./presets.js";
 import { applySoulMode, DEFAULT_COMPANION_CONFIG } from "./modes.js";
 import { buildMemory, normalizeMemoryFile, organizeMemories, upsertMemory } from "./recall.js";
@@ -60,6 +61,8 @@ export interface SoulEngineOptions {
   readonly stores?: readonly ScopedSoulStore[];
   /** 基础 Soul（缺省为司南预设） */
   readonly soul?: Soul;
+  /** 名字覆盖（缺省沿用默认「司南」；仅在未显式给 `soul` 时生效） */
+  readonly identity?: AgentNameOverride;
   /** 对话模式（缺省 work；companion 时按陪伴覆盖层重建人格） */
   readonly mode?: SoulMode;
   /** 陪伴模式可调项（mode=companion 时生效） */
@@ -110,7 +113,7 @@ export class SoulEngine {
    */
   constructor(options: SoulEngineOptions = {}) {
     this.stores = options.stores ?? [];
-    const base = options.soul ?? createSinanSoul();
+    const base = options.soul ?? createSinanSoul([], options.identity);
     // 模式覆盖放在构造期：情感状态、表达风格、人格倾向一次性成型，
     // 之后 adapt/load 都在这份覆盖上工作，避免「渲染时才套壳」导致
     // 快照里的性格与提示词里的性格不一致。

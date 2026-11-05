@@ -14,6 +14,7 @@ import { SkillsPane } from "./SkillsPane";
 import { RulesPane } from "./RulesPane";
 import { AuditPane } from "./AuditPane";
 import { SoulPane } from "./SoulPane";
+import { useSoulConfig } from "../useSoulConfig";
 import { type DesktopConfig, type DesktopLdapConfig, type DesktopMcpServer, type DesktopModel } from "../desktopConfig";
 import { getDesktopBridge } from "../desktop-bridge";
 import { fetchCapabilities, type CapabilitySkill } from "../api";
@@ -154,6 +155,10 @@ export function SettingsDrawer({ initialConfig, onSave, onClose }: SettingsDrawe
   const skillCount = skillEntries.length;
   const agentCount = skills.phase === "ready" ? skills.skills.filter((s) => s.kind === "agent").length : 0;
 
+  // 页签名跟随用户设置的名字：改了名还挂着旧名字的页签，等于没改
+  const { config: soulConfig } = useSoulConfig();
+  const soulName = soulConfig.identity.resolved.name;
+
   return (
     <div className="settings-overlay" onClick={onClose}>
       <aside className="settings-drawer" onClick={(e) => e.stopPropagation()}>
@@ -170,7 +175,7 @@ export function SettingsDrawer({ initialConfig, onSave, onClose }: SettingsDrawe
             className={"settings-tab" + (tab === "soul" ? " active" : "")}
             onClick={() => setTab("soul")}
           >
-            司南
+            {soulName}
           </button>
           <button
             type="button"
