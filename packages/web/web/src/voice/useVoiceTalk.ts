@@ -50,7 +50,8 @@ import { fetchSoulConfig, fetchVoiceStatus, synthesizeSpeech, transcribeAudio, t
 import { MicCapture, explainMicError } from "./mic";
 import { SpeechQueue } from "./player";
 import { SentenceStream } from "./sentence";
-import { scanVoiceDirective, settleVoiceDirective, type VoiceDirective } from "./directive";
+import { scanVoiceDirective, settleVoiceDirective } from "./directive";
+import { TurnDirective } from "./turn-directive";
 import { defaultHandsFree, readHandsFree, subscribeHandsFree, writeHandsFree } from "./preference";
 import { subscribeSoulConfigChanged } from "./config-events";
 import { WakeListener } from "./wake-listener";
@@ -182,8 +183,13 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   const firstAudioRef = useRef(true);
   /** 最近一次喂入的累积文本（flush 需要它取残句） */
   const lastTextRef = useRef("");
-  /** 语音指令（本轮生效；once 的在收尾时清掉） */
-  const directiveRef = useRef<VoiceDirective | null>(null);
+  /**
+   * 语音指令状态（跨轮默认 + 本轮快照）
+   *
+   * 语义细节见 `voice/turn-directive.ts`：核心是「本轮快照在合成前不被清掉」，
+   * 否则同一回复的后半段会换音色/换语速。
+   */
+  const turnDirective = useRef(new TurnDirective());
   /** 首行指令的解析状态：unknown=还没判断，resolved=已判断 */
   const directiveStateRef = useRef<"unknown" | "resolved">("unknown");
   /** 首行指令被剥掉后，正文在累积文本里的起点 */
@@ -265,16 +271,17 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
     if (queueRef.current === null) {
       queueRef.current = new SpeechQueue(
         (text) => {
-          const directive = directiveRef.current;
+          // 读本轮快照而不是跨轮默认：见 TurnDirective 的说明
+          const active = turnDirective.current.current();
           // 指令里的 voice / engine / speed 覆盖配置值；没有指令时走服务端配置
           return synthesizeSpeech(
             text,
-            directive === null
+            active === null
               ? undefined
               : {
-                  ...(directive.voice !== undefined ? { voice: directive.voice } : {}),
-                  ...(directive.engine !== undefined ? { engine: directive.engine } : {}),
-                  ...(directive.speed !== undefined ? { speed: directive.speed } : {}),
+                  ...(active.voice !== undefined ? { voice: active.voice } : {}),
+                  ...(active.engine !== undefined ? { engine: active.engine } : {}),
+                  ...(active.speed !== undefined ? { speed: active.speed } : {}),
                 }
           );
         },
@@ -519,6 +526,9 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
         streamRef.current = new SentenceStream();
         directiveStateRef.current = "unknown";
         directivePrefixRef.current = 0;
+        // 新一轮开始：把跨轮默认（可能为 null）重新冻结成本轮快照。
+        // 上一轮的 once 指令已在这里失效，不会被这一轮继承。
+        turnDirective.current.beginTurn();
         speechEndAtRef.current = performance.now();
         firstAudioRef.current = true;
       }
@@ -533,7 +543,8 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
         }
         directiveStateRef.current = "resolved";
         if (scan.kind === "applied") {
-          directiveRef.current = scan.directive;
+          // 本轮立刻生效：首句就是指令之后的正文，不能等下一轮
+          turnDirective.current.apply(scan.directive);
           body = scan.text;
           directivePrefixRef.current = cumulative.length - scan.text.length;
         }
@@ -563,7 +574,7 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
       // 整段都没有换行：再试一次是不是「一行指令」，解析不了就当正文念
       const settled = settleVoiceDirective(body);
       if (settled.kind === "applied") {
-        directiveRef.current = settled.directive;
+        turnDirective.current.apply(settled.directive);
         body = settled.text;
       }
       directiveStateRef.current = "resolved";
@@ -572,8 +583,10 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
     for (const sentence of stream.flush(body)) queue().enqueue(sentence);
     lastTextRef.current = "";
 
-    // once 的指令只影响这一条回复
-    if (directiveRef.current?.once === true) directiveRef.current = null;
+    // once 的指令只影响这一条回复：清的是**跨轮默认**，不是本轮快照。
+    // 本轮快照要留到队列里剩下的句子都合成完（下一轮 feed 才重置），
+    // 否则「清得太早」会让同一回复的后半段换音色/换语速。
+    turnDirective.current.endTurn();
   }, [queue]);
 
   /** 停止播报 */

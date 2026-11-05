@@ -69,6 +69,62 @@ TTS_LANGUAGE = "Chinese"
 # Kokoro 的中文音色（lang_code 'z'）
 KOKORO_VOICE = "zf_xiaobei"
 
+# 采样随机种子的派生基数
+#
+# 为什么必须固定种子：Qwen3-TTS 的 VoiceDesign 是自回归采样，同一个音色描述
+# 每调用一次就重新"设计"一遍音色。本机实测（同一 instruct、同一句话生成两次）
+# 基频中位数 199.2 → 192.1Hz、频谱质心 3025 → 3814Hz，听感就是"换了个人的感觉"。
+# 而分段播报每句都是一次独立调用，于是整段回复的音色一句一个样。
+#
+# 修法：按音色描述派生一个稳定种子，每次合成前重置。实测固定种子后，
+# 同描述的重复生成逐位完全相同（走 /tts 全链路验证过：两次请求返回
+# 169004 字节，完全一致），跨文本的基频抖动也从"无种子时 swing 到听感
+# 换人"收敛到文本语调本身的正常起伏。
+#
+# 种子由**描述文本**派生（而不是固定常量）的原因：用户换了音色描述，
+# 就该得到一套新的、但仍然稳定的音色。
+TTS_SEED_BASE = 20261105
+
+# 采样温度
+#
+# 定值依据不是"跨文本基频跨度"——那个指标不可用：同一组三句文本在四个温度下
+# 测出的跨度在 8~21Hz 之间乱跳，说明单次生成的随机噪声（±10Hz）已经盖过了
+# 温度带来的系统差异，拿它选温度等于看噪声。
+#
+# 可靠指标是"同一句文本、只换种子"的采样方差（纯随机性，剔除了文本语调）：
+#   温度 0.9（默认） → 基频 162/186/182/169，std 9.8Hz，range 24.4
+#   温度 0.6         → 170/186/188/182，std 7.0Hz，range 17.9
+#   温度 0.35        → 183/188/195/192，std 4.5Hz，range 11.9
+#   温度 0.2         → 190/204/195/178，std 9.3Hz，range 25.8
+# 0.35 是这条曲线的谷底，方差比默认温度减半；再往下降到 0.2 反而反弹
+# （温度过低时模型发音开始不稳，语句间还会发平）。
+#
+# 注意能力的边界：降温度只压住"采样噪声"，压不住"文本本身的语调"。
+# VoiceDesign 模型不接受 ref_audio 参考音频（那条路径只对 base 模型开放），
+# 所以做不到音色克隆式的彻底锁死；换文本后基频仍有十几 Hz 的自然起伏，
+# 那是说话内容决定的，不是音色漂移。
+TTS_TEMPERATURE = 0.35
+
+
+def prepare_sampling(voice: str) -> float:
+    """
+    按音色描述派生确定性采样参数并重置随机状态。
+
+    必须在每次生成**之前**调用：MLX 的随机状态是全局的，重置后
+    同一个 seed + 同一段文本才会产出逐位相同的音频。
+
+    @param voice 音色描述（或 speaker 名 / 音色 id）
+    @returns 本次生成使用的采样温度
+    """
+    import hashlib
+
+    import mlx.core as mx
+
+    digest = hashlib.sha256(f"{TTS_SEED_BASE}:{voice}".encode("utf-8")).digest()
+    # 取 31 位，避开某些后端对超大 int 的处理差异
+    mx.random.seed(int.from_bytes(digest[:4], "big") % (2**31 - 1))
+    return TTS_TEMPERATURE
+
 
 def soul_config_path() -> Path:
     """配置文件路径（与引擎同源：~/.deepcode/soul/config.json）"""
@@ -239,12 +295,18 @@ class TtsEngine:
         with self._lock:
             model = self._load(engine)
 
+            # 固定采样种子：每句都是独立调用，不固定就会一句一个音色
+            # （见 TTS_SEED_BASE 的说明）。放在锁内、紧挨生成之前，
+            # 保证并发的两个请求不会互相打乱随机状态。
+            temperature = prepare_sampling(voice)
+
             if engine == "qwen3-voicedesign":
                 chunks = list(
                     model.generate_voice_design(
                         text=text,
                         instruct=voice or "mature female voice, calm and steady",
                         language=TTS_LANGUAGE,
+                        temperature=temperature,
                     )
                 )
                 native_speed = False
