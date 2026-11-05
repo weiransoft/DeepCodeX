@@ -32,6 +32,7 @@ import {
 } from "../api";
 import { SoulAvatar } from "./SoulAvatar";
 import { AVATAR_MAX_BYTES, readAvatarFile } from "../voice/avatar-file";
+import { notifySoulConfigChanged } from "../voice/config-events";
 import { readHandsFree, subscribeHandsFree, writeHandsFree } from "../voice/preference";
 
 /** 面板状态 */
@@ -85,6 +86,8 @@ export function SoulAppearancePane() {
       const next = await saveSoulConfig(patch);
       setState({ phase: "ready", config: next });
       setNotice({ kind: "ok", text: okText });
+      // 通知输入框那侧的语音能力重新读配置：开关类改动必须立刻生效
+      notifySoulConfigChanged();
     } catch (e: unknown) {
       setNotice({ kind: "error", text: e instanceof Error ? e.message : String(e) });
     } finally {
@@ -363,8 +366,9 @@ export function SoulAppearancePane() {
           <input
             type="checkbox"
             checked={voice.wakeEnabled}
-            // 语音总开关关掉时唤醒没有意义：麦克风都不该开
-            disabled={saving || !voice.enabled}
+            // 语音总开关关掉时不能再「打开」唤醒；但如果它当前是开着的，
+            // 必须留出关掉的路——否则用户被卡在一个勾着又点不动的框上
+            disabled={saving || (!voice.enabled && !voice.wakeEnabled)}
             onChange={(event) =>
               void submit(
                 { voice: { wakeEnabled: event.target.checked } },

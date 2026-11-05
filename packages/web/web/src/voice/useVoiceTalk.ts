@@ -52,6 +52,7 @@ import { SpeechQueue } from "./player";
 import { SentenceStream } from "./sentence";
 import { scanVoiceDirective, settleVoiceDirective, type VoiceDirective } from "./directive";
 import { defaultHandsFree, readHandsFree, subscribeHandsFree, writeHandsFree } from "./preference";
+import { subscribeSoulConfigChanged } from "./config-events";
 import { WakeListener } from "./wake-listener";
 
 /** 延迟样本保留条数（够看趋势，不至于无限增长） */
@@ -237,8 +238,13 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
     return queueRef.current;
   }, []);
 
-  /** 探测配置与状态（进入页面时一次） */
-  useEffect(() => {
+  /**
+   * 拉取配置与链路状态
+   *
+   * 进入页面时一次；之后由设置页的变更事件触发重读——语音开关与唤醒开关
+   * 必须立刻生效，否则会出现「界面说开了、实际没在听」。
+   */
+  const syncConfig = useCallback(() => {
     let cancelled = false;
     Promise.all([fetchSoulConfig(), fetchVoiceStatus().catch(() => null)])
       .then(([config, voiceStatus]) => {
@@ -257,6 +263,11 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
       cancelled = true;
     };
   }, []);
+
+  useEffect(syncConfig, [syncConfig]);
+
+  /** 设置页保存成功后重读配置（同页即时生效） */
+  useEffect(() => subscribeSoulConfigChanged(() => void syncConfig()), [syncConfig]);
 
   /**
    * 播报期间开启打断监测

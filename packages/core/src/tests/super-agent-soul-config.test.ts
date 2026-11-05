@@ -44,12 +44,15 @@ test("C2 整份是数组也算坏输入（JSON 里 [] 很常见）", () => {
   assert.equal(config.voice.speed, 1);
 });
 
-test("C3 语音默认关闭：模型没装时不该出现麦克风", () => {
-  const config = normalizeSoulConfig({}, "tok");
-  assert.equal(config.voice.enabled, false, "缺省必须是关闭");
-  // 只有显式 true 才开：字符串 "true" 不算（手改 JSON 很容易写成字符串）
-  assert.equal(normalizeVoiceConfig({ enabled: "true" }).enabled, false);
-  assert.equal(normalizeVoiceConfig({ enabled: true }).enabled, true);
+test("C3 语音默认值跟随平台（有本地语音模型的平台才默认开）", () => {
+  // 缺省时取平台默认：macOS 有本机 MLX 语音，默认开；其余平台默认关。
+  // 这里用注入的平台断言，不依赖测试跑在什么机器上。
+  assert.equal(normalizeSoulConfig({}, "tok", "darwin").voice.enabled, true);
+  assert.equal(normalizeSoulConfig({}, "tok", "win32").voice.enabled, false, "Windows 缺省必须是关闭");
+  // 字符串 "true" 不算（手改 JSON 很容易写成字符串）：在 Windows 默认关的平台上验，
+  // 这样"没被当成 true"才看得出来
+  assert.equal(normalizeVoiceConfig({ enabled: "true" }, "", "win32").enabled, false);
+  assert.equal(normalizeVoiceConfig({ enabled: true }, "", "win32").enabled, true);
 });
 
 test("C4 speed 夹取到 [0.5, 2]；非数字回落 1", () => {
@@ -106,10 +109,14 @@ test("C9 超大头像被拒（避免把 300KB 塞进 400KB 上限之外的 base6
   assert.equal(normalizeAvatarConfig({ kind: "custom", dataUrl: huge }).kind, "default");
 });
 
-test("C10 speakReplies 缺省为 true，只有显式 false 才关", () => {
-  assert.equal(normalizeVoiceConfig({}).speakReplies, true);
-  assert.equal(normalizeVoiceConfig({ speakReplies: false }).speakReplies, false);
-  assert.equal(normalizeVoiceConfig({ speakReplies: "false" }).speakReplies, true, "字符串不算");
+test("C10 speakReplies 缺省跟随平台，只有显式布尔才算数", () => {
+  // macOS 默认开、Windows 默认关（见 soul/platform.ts）
+  assert.equal(normalizeVoiceConfig({}, "", "darwin").speakReplies, true);
+  assert.equal(normalizeVoiceConfig({}, "", "win32").speakReplies, false);
+  assert.equal(normalizeVoiceConfig({ speakReplies: false }, "", "darwin").speakReplies, false);
+  // 字符串不算：在默认关的平台上才看得出"没被当成 true"
+  assert.equal(normalizeVoiceConfig({ speakReplies: "false" }, "", "darwin").speakReplies, true, "字符串不算");
+  assert.equal(normalizeVoiceConfig({ speakReplies: "true" }, "", "win32").speakReplies, false, "字符串不算");
 });
 
 test("C11 token 两端行为：有值保留，空值用兜底", () => {
