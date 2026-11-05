@@ -137,9 +137,45 @@ test("renderToString：完整 Markdown 管线真实渲染（标题/代码块/表
   assert.ok(html.includes("&lt;script&gt;"), "脚本文本必须以转义文本呈现");
 });
 
+test("renderToString：生成物图片走 /api/files/raw 内联渲染（而不是一行路径文字）", () => {
+  // 模型生成图片后，正文里通常就是一行图片的绝对路径（没有 ![]() 包装）
+  const markdown = [
+    "图已经画好了：",
+    "",
+    "/Users/me/.deepcode/projects/demo/out/render-01.png",
+    "",
+    "需要调色调的话告诉我。",
+  ].join("\n");
+  const html = renderToString(<A2uiSurface messages={parseMarkdownToA2ui(markdown, "img-1")} />);
+
+  assert.ok(html.includes("<img"), "裸图片路径必须渲染成 img 元素");
+  assert.ok(
+    html.includes("/api/files/raw?scope=shared&amp;path="),
+    "src 必须指向内联端点（否则浏览器加载到 attachment 头不会显示）"
+  );
+  // 路径原文不能作为纯文本残留在正文里——那样用户看到的是两行字加一张图
+  assert.ok(!html.includes(">/Users/me/.deepcode"), "图片路径不该同时以文本形式重复展示");
+  // alt 用文件名兜底，图裂时用户能看出是哪张
+  assert.ok(html.includes("render-01.png"), "alt 应包含文件名");
+});
+
+test("renderToString：图片 src 白名单拒绝非图片协议（javascript: / data:text）", () => {
+  // 实测行为：这类协议连 image/link 组件都不会生成，解析阶段就降级成纯文本
+  // 并做 HTML 转义。比"先生成 img 再靠白名单拦"更早一层，这里把它钉住。
+  for (const markdown of [
+    "![x](data:text/html,<script>alert(1)</script>)",
+    "![x](javascript:alert(1))",
+    "[点我](javascript:alert(1))",
+  ]) {
+    const html = renderToString(<A2uiSurface messages={parseMarkdownToA2ui(markdown, "img-2")} />);
+    assert.ok(!html.includes("<img"), `危险协议不得生成 img 元素：${markdown}`);
+    assert.ok(!html.includes("src="), `危险协议不得产生任何 src 属性：${markdown}`);
+    assert.ok(!html.includes("<script>"), `危险协议不得产生可执行脚本：${markdown}`);
+  }
+});
+
 test("renderToString：DynamicString 经 dataModelUpdate 取值；未绑定时保留原始占位", () => {
   const base = parseMarkdownToA2ui("当前用户：${user.name}", "msg-2");
-
   // 无数据模型：占位原样展示（不崩溃）
   const htmlNoModel = renderToString(<A2uiSurface messages={base} />);
   assert.ok(htmlNoModel.includes("${user.name}"), "未绑定的占位串必须原样展示");

@@ -5,6 +5,7 @@
  * - GET  /api/files?path=<目录>&scope=shared|personal：目录列表 {name, type, size, mtime}
  * - POST /api/files/upload?path=<目录>&scope=...：multipart 上传到指定目录（jail + 大小限制 + 随机名）
  * - GET  /api/files/download?path=<文件>&scope=...：流式下载（Content-Disposition attachment）
+ * - GET  /api/files/raw?path=<图片>&scope=...：内联图片（用于对话里直接渲染生成物）
  *
  * 安全约定：
  * - allowRoots 为空时 shared 一律 403；personal 牢笼为用户个人上传区（每用户独立）；
@@ -274,6 +275,86 @@ export async function handleDownloadFile(
     "Content-Length": info.size,
     "Content-Disposition": `attachment; filename="${encodeURIComponent(name)}"; filename*=UTF-8''${encodeURIComponent(name)}`,
     "X-Content-Type-Options": "nosniff",
+  });
+  await new Promise<void>((resolve, reject) => {
+    const stream = createReadStream(file);
+    stream.on("error", reject);
+    res.on("error", reject);
+    res.on("close", resolve);
+    stream.pipe(res);
+  });
+}
+
+/**
+ * 可内联渲染的图片类型（扩展名 → MIME）
+ *
+ * 为什么是一张白名单而不是"按扩展名猜 MIME"：这个端点是唯一会把文件内容
+ * 以 `image/*` 交给浏览器的通道。一旦按 Content-Type 猜，用户（或模型）
+ * 把一个 HTML/JS 文件命名成 .png 就能让它在图片上下文之外执行。
+ * 白名单把"能内联的"限定成真正没有脚本语义的位图格式。
+ *
+ * SVG 单独说明：它以 `image/svg+xml` 交给 `<img>`，而浏览器在 img 上下文里
+ * **不执行** SVG 内的 script，因此可以放行；同时响应带 CSP，纵深防御。
+ */
+const INLINE_IMAGE_TYPES: Readonly<Record<string, string>> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".avif": "image/avif",
+  ".bmp": "image/bmp",
+  ".svg": "image/svg+xml",
+};
+
+/** 内联图片大小上限（超过就该走下载而不是塞进对话流） */
+const INLINE_IMAGE_MAX_BYTES = 12 * 1024 * 1024;
+
+/**
+ * 处理 GET /api/files/raw?path=<文件>：内联输出图片。
+ *
+ * 与 `/download` 的区别只有两条：Content-Type 给真实图片类型、
+ * 不带 `Content-Disposition: attachment`。前者少了 `<img>` 渲染不出来，
+ * 后者会让浏览器当成下载。牢笼与引擎目录保护与 download 完全一致。
+ *
+ * @param res 响应对象
+ * @param jailRoots 牢笼白名单根
+ * @param filePath 请求的文件路径
+ */
+export async function handleInlineFile(
+  res: ServerResponse,
+  jailRoots: string[],
+  filePath: string | null
+): Promise<void> {
+  const file = await guardPath(jailRoots, filePath ?? "", "图片预览");
+  guardPersonalEngineDir(jailRoots, file);
+
+  const ext = path.extname(file).toLowerCase();
+  const mime = INLINE_IMAGE_TYPES[ext];
+  if (mime === undefined) {
+    // 415 而不是 403：这是"类型不支持"，不是"没权限"，用户能据此判断该下载
+    throw new ApiError(415, `只能内联查看图片（当前类型 ${ext === "" ? "无扩展名" : ext}），请使用下载`);
+  }
+
+  const info = await stat(file).catch(() => null);
+  if (info === null) {
+    throw new ApiError(404, "文件不存在");
+  }
+  if (!info.isFile()) {
+    throw new ApiError(400, "path 不是普通文件");
+  }
+  if (info.size > INLINE_IMAGE_MAX_BYTES) {
+    throw new ApiError(413, `图片超过 ${Math.round(INLINE_IMAGE_MAX_BYTES / 1024 / 1024)}MB，请下载查看`);
+  }
+
+  res.writeHead(200, {
+    "Content-Type": mime,
+    "Content-Length": info.size,
+    // 图片不该有脚本能力；即便将来有人想办法让它按文档解析也执行不了
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
+    "X-Content-Type-Options": "nosniff",
+    // 生成物常被覆盖重写，缓存太短会让用户看到旧图，太长又会频繁打服务端
+    "Cache-Control": "private, max-age=60",
   });
   await new Promise<void>((resolve, reject) => {
     const stream = createReadStream(file);

@@ -35,7 +35,14 @@ import {
   handleSendMessage,
   handleStream,
 } from "./api/chat-api";
-import { handleDownloadFile, handleListFiles, handleMkdir, handlePreviewFile, handleUploadFile } from "./api/files-api";
+import {
+  handleDownloadFile,
+  handleInlineFile,
+  handleListFiles,
+  handleMkdir,
+  handlePreviewFile,
+  handleUploadFile,
+} from "./api/files-api";
 import { handleListWorkspaces } from "./api/workspace-api";
 import { handleListCapabilities } from "./api/capability-api";
 import {
@@ -636,6 +643,16 @@ export async function startWebServer(
       }
       if (pathname === "/api/files/download" && req.method === "GET") {
         await handleDownloadFile(
+          res,
+          await resolveFileJailRoots(ctx, url.searchParams.get("scope"), url.searchParams.get("path")),
+          url.searchParams.get("path")
+        );
+        return;
+      }
+      // 内联图片（助手生成的图片直接显示在对话里）：牢笼/scope 与 download 一致，
+      // 差别只在 Content-Type 与不带 attachment——详见 files-api 的白名单说明
+      if (pathname === "/api/files/raw" && req.method === "GET") {
+        await handleInlineFile(
           res,
           await resolveFileJailRoots(ctx, url.searchParams.get("scope"), url.searchParams.get("path")),
           url.searchParams.get("path")

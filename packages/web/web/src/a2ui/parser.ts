@@ -19,6 +19,7 @@
  * 由渲染层以 React 文本节点渲染（设计文档 §3.6）。
  */
 import type { A2uiChartSeries, A2uiChartSpec, A2uiComponent, A2uiMessage } from "./types";
+import { isLocalImagePath, resolveImageSrc } from "./image-src";
 
 /** 内部块模型：解析阶段的中间表示 */
 type Block =
@@ -58,6 +59,29 @@ function matchImage(line: string): { alt: string; url: string } | null {
   const m = /^\s{0,3}!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)\s*$/.exec(line);
   if (!m) return null;
   return { alt: m[1], url: m[2] };
+}
+
+/**
+ * 判断一行是否「只有一个本地图片路径」
+ *
+ * 助手生成图片后经常直接甩一行路径（`/tmp/chart.png`、`./out/fig1.svg`），
+ * 不写 Markdown 图片语法。这种行只显示成一段等宽文字，图本身在页面上看不见。
+ *
+ * 严格限定「整行只有一个路径、且扩展名在图片白名单内」，避免把
+ * 文件清单（一行里多个路径）或正文里提到的路径误判成图片。
+ *
+ * @param line 原始行
+ * @returns 匹配时返回路径与由文件名推导的 alt
+ */
+function matchBareImagePath(line: string): { alt: string; url: string } | null {
+  const trimmed = line.trim();
+  if (trimmed === "" || trimmed.includes(" ")) return null;
+  // 排除 Markdown 结构与已有协议
+  if (/[()[\]<>`"'*|]/.test(trimmed)) return null;
+  if (/^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(trimmed)) return null;
+  if (!isLocalImagePath(trimmed)) return null;
+  const name = trimmed.split(/[?#]/)[0]?.split("/").pop() ?? trimmed;
+  return { alt: name, url: trimmed };
 }
 
 /** 判断一行是否为水平分隔线（--- / *** / ___，至少重复 3 次） */
@@ -238,7 +262,16 @@ export function parseMarkdownBlocks(markdownText: string): Block[] {
     // 独立成行的图片
     const image = matchImage(line);
     if (image !== null) {
-      blocks.push({ kind: "image", alt: image.alt, url: image.url });
+      // 本地路径 → /api/files/raw（生成物要能在页面里直接看见，而不是一行路径文字）
+      blocks.push({ kind: "image", alt: image.alt, url: resolveImageSrc(image.url) });
+      i++;
+      continue;
+    }
+
+    // 独立成行的图片文件路径（助手常见的「已生成到 /path/x.png」写法）
+    const bareImage = matchBareImagePath(line);
+    if (bareImage !== null) {
+      blocks.push({ kind: "image", alt: bareImage.alt, url: resolveImageSrc(bareImage.url) });
       i++;
       continue;
     }

@@ -506,3 +506,101 @@ test("preview：多字节字符截断不得产生残缺尾（UTF-8 安全边界�
     await limitServer.close();
   }
 });
+
+/**
+ * 内联图片端点（/api/files/raw）——对话里直接渲染生成物的通道。
+ *
+ * 为什么需要它：/api/files/download 固定返回 application/octet-stream +
+ * Content-Disposition: attachment，<img> 标签无法渲染，生成物在对话里只能
+ * 显示成一行路径文字。本端点走白名单 MIME，浏览器可以直接当图片加载。
+ *
+ * 这组用例盯的是"能不能真的当图片用"以及"放开内联后没有把牢笼放开"。
+ */
+test("files/raw：图片返回正确 MIME 与字节，且不带 attachment（可被 img 内联渲染）", async () => {
+  // 1x1 透明 PNG 真实字节，不是随手编的假头
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+    "base64"
+  );
+  const pngPath = path.join(tmpRoot, "shot.png");
+  writeFileSync(pngPath, png);
+
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/files/raw?path=${encodeURIComponent(pngPath)}`, {
+    headers: { cookie },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "image/png", "必须是图片 MIME，不能是 octet-stream");
+  assert.equal(response.headers.get("content-disposition"), null, "不能带 attachment，否则 img 不渲染");
+  assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+  assert.ok(response.headers.get("content-security-policy")?.includes("default-src 'none'"), "图片响应须禁脚本");
+
+  const received = Buffer.from(await response.arrayBuffer());
+  assert.deepEqual(received, png, "返回字节必须与原文件逐字节一致");
+});
+
+test("files/raw：扩展名大小写不敏感（.PNG 同 image/png）", async () => {
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+    "base64"
+  );
+  const upperPath = path.join(tmpRoot, "CAPS.PNG");
+  writeFileSync(upperPath, png);
+
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/files/raw?path=${encodeURIComponent(upperPath)}`, {
+    headers: { cookie },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "image/png");
+});
+
+test("files/raw：非图片必须 415（提示改用下载）", async () => {
+  const { status, body } = await fetchJson(
+    server.port,
+    "GET",
+    `/api/files/raw?path=${encodeURIComponent(path.join(tmpRoot, "hello.txt"))}`,
+    undefined,
+    cookie
+  );
+
+  assert.equal(status, 415, "文本文件不该被内联成图片");
+  assert.match(String(body?.error ?? ""), /图片/, "错误信息要告诉用户只能看图片");
+});
+
+test("files/raw：牢笼越界仍 403（放开内联不等于放开路径）", async () => {
+  const outside = path.join(tmpdir(), "definitely-outside-secret.png");
+  const { status } = await fetchJson(
+    server.port,
+    "GET",
+    `/api/files/raw?path=${encodeURIComponent(outside)}`,
+    undefined,
+    cookie
+  );
+
+  assert.equal(status, 403, "牢笼外的路径必须拒绝，不能因为换了端点就绕开");
+});
+
+test("files/raw：图片不存在 404（不泄露文件系统信息）", async () => {
+  const { status } = await fetchJson(
+    server.port,
+    "GET",
+    `/api/files/raw?path=${encodeURIComponent(path.join(tmpRoot, "nope.png"))}`,
+    undefined,
+    cookie
+  );
+
+  assert.equal(status, 404);
+});
+
+test("files/raw：SVG 按 image/svg+xml 返回，但响应头禁止脚本执行", async () => {
+  const svgPath = path.join(tmpRoot, "chart.svg");
+  writeFileSync(svgPath, '<svg xmlns="http://www.w3.org/2000/svg"><rect width="8" height="8"/></svg>', "utf8");
+
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/files/raw?path=${encodeURIComponent(svgPath)}`, {
+    headers: { cookie },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "image/svg+xml");
+  // SVG 能装 <script>，靠 CSP + nosniff 压住内联执行
+  assert.ok(response.headers.get("content-security-policy")?.includes("default-src 'none'"));
+  assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+});

@@ -135,6 +135,10 @@ function isSafeHref(url: string): boolean {
   return /^(https?:\/\/|mailto:|\/|#|\.\/)/i.test(url);
 }
 function isSafeImageSrc(url: string): boolean {
+  // 站内内联图片：只放行 /api/files/raw 这一个端点。
+  // 不写成「允许 / 开头的相对路径」——那样任何站内地址都能进 <img>，
+  // 而这个端点是唯一有牢笼校验 + 图片类型白名单的通道。
+  if (url.startsWith("/api/files/raw?")) return true;
   return /^(https?:\/\/|data:image\/|blob:)/i.test(url);
 }
 
