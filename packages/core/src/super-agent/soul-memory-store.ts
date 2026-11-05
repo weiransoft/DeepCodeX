@@ -182,7 +182,28 @@ export function migrateLegacySoulMemory(
       continue;
     }
 
-    const normalized = normalizeMemoryFile(parsed, legacy.scope).file;
+    const normalizedResult = normalizeMemoryFile(parsed, legacy.scope);
+    const normalized = normalizedResult.file;
+    /**
+     * 旧文件里"声明有条目但一条都没解析出来"时不能归档。
+     *
+     * 归档的语义是「数据已经安全搬到新家」。如果字段名不认识（比如手工编辑过、
+     * 或来自更早的格式），normalized 会是 0 条，此时再改名就等于**静默删掉**
+     * 用户的记忆——这是迁移里最不可接受的失败模式。宁可留着旧文件报 failed。
+     *
+     * `memories` 也认：更早的实现用过这个字段名，它的出现同样说明"这里有数据"。
+     */
+    const record = parsed as { entries?: unknown; memories?: unknown };
+    const declared = Array.isArray(record.entries)
+      ? record.entries.length
+      : Array.isArray(record.memories)
+        ? record.memories.length
+        : 0;
+    if (declared > 0 && normalized.entries.length === 0) {
+      failed.push(legacy.path);
+      continue;
+    }
+
     const current = target.store.load();
     const seen = new Set(current.entries.map((entry) => `${entry.category}::${entry.key}`));
     const additions: SoulMemory[] = [];
@@ -206,6 +227,12 @@ export function migrateLegacySoulMemory(
         failed.push(legacy.path);
         continue;
       }
+    }
+
+    // 有解析不出的条目：可迁的先迁，但**不归档**（否则被拒的那几条就没了）
+    if (normalizedResult.rejected > 0) {
+      failed.push(legacy.path);
+      continue;
     }
 
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");

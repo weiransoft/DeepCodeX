@@ -279,3 +279,65 @@ test("U8 V2 凭证条目推断为 secret，提示词只给占位", () => {
   assert.ok(prompt.includes("已记录"), "凭证应渲染成「已记录」占位");
   assert.ok(!prompt.includes("prod-Passw0rd-2026"), "凭证明文不得进提示词");
 });
+
+// ============================================================================
+// U9–U10 迁移的安全边界：宁可报错，也不能「归档了但没导入」
+// ============================================================================
+
+test("U9 旧文件字段不认识时不归档（归档即数据消失）", () => {
+  const { home, project } = makeRoots();
+  const legacyPath = legacySoulMemoryPath("global", undefined, home);
+  fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+  // 字段名是 memories 而不是 entries：旧版本之外的来源/手工编辑都可能这样
+  fs.writeFileSync(
+    legacyPath,
+    JSON.stringify({
+      version: 1,
+      memories: [{ id: "x", category: "deploy", key: "deploy.a", title: "t", value: "v" }],
+    }),
+    "utf8"
+  );
+
+  createSoulEngine({ projectRoot: project, homeRoot: home });
+
+  assert.equal(fs.existsSync(legacyPath), true, "解析不出条目时必须保留原文件");
+  const archived = fs.readdirSync(path.dirname(legacyPath)).filter((name) => name.includes(".migrated-"));
+  assert.equal(archived.length, 0, "不能把没有导入成功的文件改名归档");
+  assert.equal(fs.existsSync(soulMemoryPath("global", undefined, home)), false, "也不该写一个空的新文件");
+});
+
+test("U10 部分条目非法时：能迁的迁，但保留旧文件（不丢被拒的那几条）", () => {
+  const { home, project } = makeRoots();
+  const legacyPath = legacySoulMemoryPath("global", undefined, home);
+  fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+  const valid = {
+    id: "ok-1",
+    category: "preference",
+    key: "preference.tone",
+    title: "语气",
+    value: "直接一点",
+    sensitivity: "normal",
+    strength: 0.9,
+    activationCount: 0,
+    source: "user_explicit",
+    createdAt: "2026-10-01T00:00:00.000Z",
+    updatedAt: "2026-10-01T00:00:00.000Z",
+  };
+  fs.writeFileSync(
+    legacyPath,
+    JSON.stringify({
+      version: 1,
+      scope: "global",
+      lastUpdated: "2026-10-01T00:00:00.000Z",
+      entries: [valid, { id: "bad-1", category: "不存在的分类", key: "x", title: "y", value: "z" }],
+    }),
+    "utf8"
+  );
+
+  const { soul } = createSoulEngine({ projectRoot: project, homeRoot: home });
+  assert.ok(
+    soul.memories.some((memory) => memory.value === "直接一点"),
+    "合法条目仍要迁移"
+  );
+  assert.equal(fs.existsSync(legacyPath), true, "有被拒条目时必须保留原文件");
+});
