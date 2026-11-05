@@ -28,7 +28,7 @@
  * @module web/voice/mic
  */
 
-import { Endpointer, type EndpointOptions } from "./endpointing";
+import { Endpointer, type EndpointOptions, type EndpointVerdict } from "./endpointing";
 
 /** 分析帧长（毫秒） */
 export const VAD_FRAME_MS = 50;
@@ -111,11 +111,12 @@ export class MicCapture {
    * 开始录音
    *
    * @param onMaxDuration 达到上限时的回调（自动停止）
-   * @param options 说完判定（给了 `onEndpoint` 才会启动静音检测）
+   * @param options 说完判定（给了 `onEndpoint` 才会启动静音检测；
+   *   回调会带上判定结果，`idle` 为真表示这一段从头到尾没人说话）
    */
   async startRecording(
     onMaxDuration?: () => void,
-    options: { onEndpoint?: () => void; endpoint?: EndpointOptions } = {}
+    options: { onEndpoint?: (verdict: EndpointVerdict) => void; endpoint?: EndpointOptions } = {}
   ): Promise<void> {
     const stream = await this.open();
     this.chunks = [];
@@ -140,7 +141,11 @@ export class MicCapture {
    * @param onEndpoint 判定说完时的回调
    * @param endpoint 判定参数
    */
-  private watchEndpoint(stream: MediaStream, onEndpoint: () => void, endpoint?: EndpointOptions): void {
+  private watchEndpoint(
+    stream: MediaStream,
+    onEndpoint: (verdict: EndpointVerdict) => void,
+    endpoint?: EndpointOptions
+  ): void {
     this.stopEndpointWatch();
     const context = new AudioContext();
     this.endpointContext = context;
@@ -158,9 +163,10 @@ export class MicCapture {
       let sum = 0;
       for (let i = 0; i < buffer.length; i += 1) sum += buffer[i] * buffer[i];
       const rms = Math.sqrt(sum / buffer.length);
-      if (endpointer.push(rms).done) {
+      const verdict = endpointer.push(rms);
+      if (verdict.done) {
         this.stopEndpointWatch();
-        onEndpoint();
+        onEndpoint(verdict);
       }
     }, frameMs);
   }

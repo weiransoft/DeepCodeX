@@ -50,10 +50,13 @@ export {
   DEFAULT_SOUL_CONFIG,
   DEFAULT_VOICE_DESCRIPTION,
   DEFAULT_VOICE_ENDPOINT,
+  DEFAULT_WAKE_WORD,
   VOICE_ENGINES,
   VOICE_PRESETS,
   VOICE_SPEED_MAX,
   VOICE_SPEED_MIN,
+  WAKE_WORD_MAX_LENGTH,
+  defaultVoiceConfig,
   findVoicePreset,
   findCompanionPreset,
   normalizeAvatarConfig,
@@ -63,6 +66,9 @@ export {
   soulModeLabel,
   soulModeOptions,
 } from "./config.js";
+
+// 语音能力的平台默认值（有本机 MLX 语音模型的平台默认开，其余默认关）
+export { defaultSpeakReplies, defaultVoiceEnabled, isVoiceCapablePlatform } from "./platform.js";
 
 export {
   COMPANION_PRESETS,

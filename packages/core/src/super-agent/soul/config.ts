@@ -19,6 +19,7 @@
  */
 
 import { DEFAULT_COMPANION_CONFIG, COMPANION_PRESETS, SOUL_MODES, parseSoulMode, soulModeLabel } from "./modes";
+import { defaultSpeakReplies, defaultVoiceEnabled } from "./platform";
 import type {
   SoulAvatarConfig,
   SoulCompanionConfig,
@@ -72,21 +73,42 @@ export const VOICE_PRESETS: readonly { id: string; label: string; description: s
   },
 ];
 
-/** 默认配置：语音默认关闭（模型没装时不该出现麦克风）；模式默认工作 */
+/** 默认唤醒词（两个字短、开口音，误唤醒率低；用户可改） */
+export const DEFAULT_WAKE_WORD = "司南";
+
+/** 唤醒词长度上限（再长用户说不全，ASR 也更容易转错） */
+export const WAKE_WORD_MAX_LENGTH = 12;
+
+/** 默认配置：语音开关按平台（本机有 MLX 语音模型的平台默认开），模式默认工作 */
 export const DEFAULT_SOUL_CONFIG: SoulConfig = {
   avatar: { kind: "default" },
-  voice: {
-    enabled: false,
+  voice: defaultVoiceConfig(),
+  mode: "work",
+  companion: DEFAULT_COMPANION_CONFIG,
+};
+
+/**
+ * 按平台构造默认语音配置
+ *
+ * 导出而不是内联进 `DEFAULT_SOUL_CONFIG`：测试要能不依赖运行机器
+ * 直接断言某个平台下的默认值。
+ *
+ * @param platform 平台标识（默认取当前进程）
+ * @returns 默认语音配置
+ */
+export function defaultVoiceConfig(platform: string = process.platform): SoulVoiceConfig {
+  return {
+    enabled: defaultVoiceEnabled(platform),
     engine: "qwen3-voicedesign",
     voice: DEFAULT_VOICE_DESCRIPTION,
     speed: 1,
     endpoint: DEFAULT_VOICE_ENDPOINT,
     token: "",
-    speakReplies: true,
-  },
-  mode: "work",
-  companion: DEFAULT_COMPANION_CONFIG,
-};
+    speakReplies: defaultSpeakReplies(platform),
+    wakeEnabled: false,
+    wakeWord: DEFAULT_WAKE_WORD,
+  };
+}
 
 /**
  * 数值夹取（非数字 → 默认值）
@@ -122,37 +144,66 @@ export function normalizeAvatarConfig(raw: unknown): SoulAvatarConfig {
 }
 
 /**
+ * 规范化唤醒词
+ *
+ * 去空白、去零宽字符、截到上限；空值回落默认唤醒词。**不做**"必须是中文"
+ * 之类的校验——用户想用 "hey sina" 也可以，匹配器按字符编辑距离工作。
+ *
+ * @param raw 原始值
+ * @returns 可用的唤醒词
+ */
+function normalizeWakeWord(raw: unknown): string {
+  if (typeof raw !== "string") return DEFAULT_WAKE_WORD;
+  const cleaned = raw.replace(/[\s\u200b-\u200f\uFEFF]/g, "").trim();
+  if (cleaned.length === 0) return DEFAULT_WAKE_WORD;
+  return cleaned.slice(0, WAKE_WORD_MAX_LENGTH);
+}
+
+/**
  * 校验并规范化语音配置
+ *
+ * ## 两个开关的默认值为什么不写死
+ *
+ * `enabled` / `speakReplies` 缺省时按**平台**取默认（见 `platform.ts`）：
+ * 有本机 MLX 语音模型的平台默认开，没有的默认关。但只在字段**缺失**时
+ * 才用平台默认——写成 `true/false` 的一律尊重原值，升级不该把用户
+ * 手动关掉的语音又打开。
  *
  * @param raw 原始值
  * @param fallbackToken 未配置 token 时使用的兜底（由适配层生成并持有）
+ * @param platform 平台标识（默认取当前进程；注入便于测试）
  * @returns 合法语音配置
  */
-export function normalizeVoiceConfig(raw: unknown, fallbackToken = ""): SoulVoiceConfig {
+export function normalizeVoiceConfig(
+  raw: unknown,
+  fallbackToken = "",
+  platform: string = process.platform
+): SoulVoiceConfig {
+  const defaults = defaultVoiceConfig(platform);
   if (typeof raw !== "object" || raw === null) {
-    return { ...DEFAULT_SOUL_CONFIG.voice, token: fallbackToken };
+    return { ...defaults, token: fallbackToken };
   }
   const record = raw as Record<string, unknown>;
   const engine = VOICE_ENGINES.includes(record.engine as VoiceEngine)
     ? (record.engine as VoiceEngine)
-    : DEFAULT_SOUL_CONFIG.voice.engine;
+    : defaults.engine;
   const voice =
-    typeof record.voice === "string" && record.voice.trim().length > 0
-      ? record.voice.trim()
-      : DEFAULT_SOUL_CONFIG.voice.voice;
+    typeof record.voice === "string" && record.voice.trim().length > 0 ? record.voice.trim() : defaults.voice;
   const endpoint =
     typeof record.endpoint === "string" && /^http:\/\/[^\s]+$/.test(record.endpoint.trim())
       ? record.endpoint.trim().replace(/\/+$/, "")
       : DEFAULT_VOICE_ENDPOINT;
   const token = typeof record.token === "string" && record.token.length > 0 ? record.token : fallbackToken;
   return {
-    enabled: record.enabled === true,
+    enabled: typeof record.enabled === "boolean" ? record.enabled : defaults.enabled,
     engine,
     voice,
-    speed: clampNumber(record.speed, VOICE_SPEED_MIN, VOICE_SPEED_MAX, 1),
+    speed: clampNumber(record.speed, VOICE_SPEED_MIN, VOICE_SPEED_MAX, defaults.speed),
     endpoint,
     token,
-    speakReplies: record.speakReplies !== false,
+    speakReplies: typeof record.speakReplies === "boolean" ? record.speakReplies : defaults.speakReplies,
+    wakeEnabled: record.wakeEnabled === true,
+    wakeWord: normalizeWakeWord(record.wakeWord),
   };
 }
 
@@ -182,13 +233,14 @@ export function normalizeCompanionConfig(raw: unknown): SoulCompanionConfig {
  *
  * @param raw 原始值（可能来自磁盘、请求体或旧版本）
  * @param fallbackToken 未配置 token 时的兜底
+ * @param platform 平台标识（默认取当前进程；注入便于测试）
  * @returns 合法配置
  */
-export function normalizeSoulConfig(raw: unknown, fallbackToken = ""): SoulConfig {
+export function normalizeSoulConfig(raw: unknown, fallbackToken = "", platform: string = process.platform): SoulConfig {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return {
       avatar: { kind: "default" },
-      voice: { ...DEFAULT_SOUL_CONFIG.voice, token: fallbackToken },
+      voice: { ...defaultVoiceConfig(platform), token: fallbackToken },
       mode: DEFAULT_SOUL_CONFIG.mode,
       companion: DEFAULT_COMPANION_CONFIG,
     };
@@ -196,7 +248,7 @@ export function normalizeSoulConfig(raw: unknown, fallbackToken = ""): SoulConfi
   const record = raw as Record<string, unknown>;
   return {
     avatar: normalizeAvatarConfig(record.avatar),
-    voice: normalizeVoiceConfig(record.voice, fallbackToken),
+    voice: normalizeVoiceConfig(record.voice, fallbackToken, platform),
     mode: parseSoulMode(record.mode),
     companion: normalizeCompanionConfig(record.companion),
   };

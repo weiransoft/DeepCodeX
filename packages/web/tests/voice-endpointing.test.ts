@@ -83,3 +83,28 @@ test("E6 reset 后重新计数（连续两轮对话互不污染）", () => {
   const verdict = feed(endpointer, 0.005, 40);
   assert.equal(verdict.done, false, "复位后没有新的语音就不能判定");
 });
+
+test("E7 空段超时：一帧人声都没有时按 idle 收尾（唤醒监听用）", () => {
+  const endpointer = new Endpointer({ idleMs: 1000 });
+  const verdict = feed(endpointer, 0.005, 20); // 1000ms 纯静音
+  assert.equal(verdict.done, true, "到点要收尾，否则会一直录到 60s 上限");
+  assert.equal(verdict.idle, true, "必须标成空段：这段不该送去识别");
+
+  const again = feed(endpointer, 0.005, 20);
+  assert.equal(again.done, false, "idle 只触发一次");
+});
+
+test("E8 说过话的段不会走 idle 分支", () => {
+  const endpointer = new Endpointer({ idleMs: 1000 });
+  feed(endpointer, 0.2, 8); // 400ms 人声
+  const verdict = feed(endpointer, 0.005, 20);
+  assert.equal(verdict.done, true);
+  assert.equal(verdict.idle, false, "有人声的段是有内容的，要送识别");
+});
+
+test("E9 没开 idleMs 时纯静音永不触发（按住说话的老行为）", () => {
+  const endpointer = new Endpointer();
+  const verdict = feed(endpointer, 0.005, 100); // 5000ms 静音
+  assert.equal(verdict.done, false);
+  assert.equal(verdict.idle, false);
+});

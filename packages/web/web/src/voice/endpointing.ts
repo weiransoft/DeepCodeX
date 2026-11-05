@@ -46,6 +46,8 @@ export interface EndpointVerdict {
   active: boolean;
   /** 是否在此帧判定为「说完了」（只会为 true 一次） */
   done: boolean;
+  /** 本次判定是不是「没人说话」的空段（配合 `idleMs` 使用） */
+  idle: boolean;
   /** 累计人声毫秒 */
   speechMs: number;
   /** 当前连续静音毫秒 */
@@ -62,6 +64,13 @@ export interface EndpointOptions {
   minSpeechMs?: number;
   /** 人声阈值（RMS） */
   threshold?: number;
+  /**
+   * 空段超时（毫秒）：从头到尾没说过话、连续静音达到该值即收尾。
+   *
+   * 0（默认）表示关闭——按住说话的场景有 60s 上限兜底，不需要它。
+   * 唤醒监听需要：否则一段纯静音会一直录到上限，再把几十秒静音送去识别。
+   */
+  idleMs?: number;
 }
 
 /**
@@ -75,6 +84,7 @@ export class Endpointer {
   private readonly silenceGoal: number;
   private readonly minSpeechMs: number;
   private readonly threshold: number;
+  private readonly idleGoal: number;
 
   /** 累计人声毫秒 */
   private speechMs = 0;
@@ -91,6 +101,7 @@ export class Endpointer {
     this.silenceGoal = options.silenceMs ?? ENDPOINT_SILENCE_MS;
     this.minSpeechMs = options.minSpeechMs ?? ENDPOINT_MIN_SPEECH_MS;
     this.threshold = options.threshold ?? ENDPOINT_RMS_THRESHOLD;
+    this.idleGoal = options.idleMs ?? 0;
   }
 
   /**
@@ -109,12 +120,20 @@ export class Endpointer {
     }
 
     let done = false;
-    if (!this.fired && this.speechMs >= this.minSpeechMs && this.silenceMs >= this.silenceGoal) {
-      this.fired = true;
-      done = true;
+    let idle = false;
+    if (!this.fired) {
+      if (this.speechMs >= this.minSpeechMs && this.silenceMs >= this.silenceGoal) {
+        this.fired = true;
+        done = true;
+      } else if (this.idleGoal > 0 && this.speechMs === 0 && this.silenceMs >= this.idleGoal) {
+        // 从头到尾一帧人声都没有：这是空段，不该送去识别
+        this.fired = true;
+        done = true;
+        idle = true;
+      }
     }
 
-    return { active, done, speechMs: this.speechMs, silenceMs: this.silenceMs };
+    return { active, done, idle, speechMs: this.speechMs, silenceMs: this.silenceMs };
   }
 
   /** 是否已经说过话（用于区分「还没开口」与「说完了」） */

@@ -324,6 +324,11 @@ export function SoulAppearancePane() {
       <section className="soul-section">
         <h4>声音（本机 MLX 语音）</h4>
 
+        <div className="soul-hint">
+          语音跑在本机 MLX sidecar 上（mlx_whisper / mlx_audio），只有 Apple Silicon 的 macOS 装得起来——所以语音在 macOS
+          上默认打开、Windows 上默认关闭。Windows 想用需要自己另搭一套本地语音服务。
+        </div>
+
         <label className="soul-check">
           <input
             type="checkbox"
@@ -353,6 +358,45 @@ export function SoulAppearancePane() {
           <input type="checkbox" checked={handsFree} onChange={(event) => writeHandsFree(event.target.checked)} />
           <span>点一下说话，说完自动发送（免按住；关闭后改为点一下开始、再点一下结束）</span>
         </label>
+
+        <label className="soul-check">
+          <input
+            type="checkbox"
+            checked={voice.wakeEnabled}
+            // 语音总开关关掉时唤醒没有意义：麦克风都不该开
+            disabled={saving || !voice.enabled}
+            onChange={(event) =>
+              void submit(
+                { voice: { wakeEnabled: event.target.checked } },
+                event.target.checked ? "已开启语音唤醒" : "已关闭语音唤醒"
+              )
+            }
+          />
+          <span>语音唤醒（喊唤醒词就开始听；开启后麦克风会常驻监听）</span>
+        </label>
+
+        {voice.wakeEnabled && (
+          <div className="soul-field">
+            <span className="soul-field-label">唤醒词</span>
+            <input
+              className="soul-input"
+              type="text"
+              value={voice.wakeWord}
+              maxLength={12}
+              disabled={saving}
+              placeholder="司南"
+              onChange={(event) =>
+                // 与音色描述同一策略：输入过程只改本地状态，失焦才落盘
+                setState({ phase: "ready", config: { ...config, voice: { ...voice, wakeWord: event.target.value } } })
+              }
+              onBlur={(event) => void submit({ voice: { wakeWord: event.target.value } }, "唤醒词已保存")}
+            />
+            <div className="soul-hint">
+              1~12 字，建议用两个字的词（误唤醒少）。识别有同音容错，「司南」被听成「思南」也能唤醒；
+              但这套唤醒是用通用语音识别做的——每段人声都要过一次识别，比专用唤醒词模型更费电。
+            </div>
+          </div>
+        )}
 
         <div className="soul-field">
           <span className="soul-field-label">合成引擎</span>

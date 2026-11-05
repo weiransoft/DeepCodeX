@@ -818,6 +818,10 @@ export interface SoulVoiceConfigView {
   /** 服务端是否已持有 sidecar token（前端不需要它的值） */
   hasToken: boolean;
   speakReplies: boolean;
+  /** 是否常驻监听唤醒词 */
+  wakeEnabled: boolean;
+  /** 唤醒词 */
+  wakeWord: string;
 }
 
 /** 对话模式（须与 core 的 SoulMode 保持一致） */

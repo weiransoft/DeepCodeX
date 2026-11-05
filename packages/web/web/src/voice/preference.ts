@@ -24,12 +24,42 @@ export const HANDS_FREE_KEY = "dcx.voice.handsFree";
 export const HANDS_FREE_EVENT = "dcx:voice-hands-free";
 
 /**
+ * 客户端是否 Apple 平台
+ *
+ * 只看 UA，不问服务端：这个默认值是**设备上的交互习惯**，跟服务端跑在
+ * 哪台机器无关。desktop 版两者同机，结论一致；Web 版也不该因为服务器
+ * 是 Linux 就把 Mac 用户的免按住关掉。
+ *
+ * @returns 是否 Apple 设备（Mac / iPad，iPad 的 UA 也含 Macintosh）
+ */
+export function isAppleClient(): boolean {
+  try {
+    const ua = globalThis.navigator?.userAgent ?? "";
+    return /Macintosh|Mac OS X|iPhone|iPad/.test(ua);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 免按住的平台默认值
+ *
+ * Mac 默认开、Windows 默认关——与语音总开关同一条判断：
+ * 没有本地语音模型时这个开关调了也没有意义。
+ *
+ * @returns 默认是否免按住
+ */
+export function defaultHandsFree(): boolean {
+  return isAppleClient();
+}
+
+/**
  * 读取免按住偏好
  *
- * @param fallback 存储不可用时的默认值
+ * @param fallback 存储不可用时的默认值（默认按平台）
  * @returns 是否免按住
  */
-export function readHandsFree(fallback = true): boolean {
+export function readHandsFree(fallback = defaultHandsFree()): boolean {
   try {
     const raw = globalThis.localStorage?.getItem(HANDS_FREE_KEY);
     if (raw === "1") return true;

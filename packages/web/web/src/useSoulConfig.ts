@@ -14,18 +14,22 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { fetchSoulConfig, type SoulConfigView } from "./api";
+import { isAppleClient } from "./voice/preference";
 
 /** 默认回落值（与后端 DEFAULT_SOUL_CONFIG 对齐；仅用于读失败时展示） */
 const FALLBACK: SoulConfigView = {
   avatar: { kind: "default" },
   voice: {
-    enabled: false,
+    // 与后端同一套平台判断：本机有 MLX 语音模型的平台默认开
+    enabled: isAppleClient(),
     engine: "qwen3-voicedesign",
     voice: "",
     speed: 1,
     endpoint: "",
     hasToken: false,
-    speakReplies: true,
+    speakReplies: isAppleClient(),
+    wakeEnabled: false,
+    wakeWord: "司南",
   },
   mode: "work",
   companion: { addressAs: "", warmth: 0.85, proactivity: 0.55, encourageHumanContact: true },

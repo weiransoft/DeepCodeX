@@ -51,7 +51,8 @@ import { MicCapture, explainMicError } from "./mic";
 import { SpeechQueue } from "./player";
 import { SentenceStream } from "./sentence";
 import { scanVoiceDirective, settleVoiceDirective, type VoiceDirective } from "./directive";
-import { readHandsFree, subscribeHandsFree, writeHandsFree } from "./preference";
+import { defaultHandsFree, readHandsFree, subscribeHandsFree, writeHandsFree } from "./preference";
+import { WakeListener } from "./wake-listener";
 
 /** 延迟样本保留条数（够看趋势，不至于无限增长） */
 const LATENCY_SAMPLES = 10;
@@ -131,6 +132,10 @@ export interface VoiceTalk {
   stopSpeaking: () => void;
   /** 是否自动朗读 */
   speakReplies: boolean;
+  /** 是否开启了语音唤醒 */
+  wakeEnabled: boolean;
+  /** 是否正在等唤醒词 */
+  wakeListening: boolean;
 }
 
 /**
@@ -146,14 +151,19 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   const [recording, setRecording] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [waiting, setWaiting] = useState(false);
-  const [handsFree, setHandsFreeState] = useState(() => readHandsFree(options.handsFree ?? true));
+  const [handsFree, setHandsFreeState] = useState(() => readHandsFree(options.handsFree ?? defaultHandsFree()));
   const [status, setStatus] = useState<VoiceStatus | null>(null);
   const [latencies, setLatencies] = useState<LatencySample[]>([]);
   const [lastInterruption, setLastInterruption] = useState<VoiceInterruption | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** 唤醒词与开关（来自服务端配置；默认关，用户显式打开才常驻监听） */
+  const [wakeEnabled, setWakeEnabled] = useState(false);
+  const [wakeWord, setWakeWord] = useState("");
+  const [wakeListening, setWakeListening] = useState(false);
 
   const micRef = useRef<MicCapture | null>(null);
   const queueRef = useRef<SpeechQueue | null>(null);
+  const wakeRef = useRef<WakeListener | null>(null);
   const streamRef = useRef<SentenceStream | null>(null);
   const stopMonitorRef = useRef<(() => void) | null>(null);
   const speechEndAtRef = useRef(0);
@@ -235,6 +245,8 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
         if (cancelled) return;
         setEnabled(config.voice.enabled);
         setSpeakReplies(config.voice.speakReplies);
+        setWakeEnabled(config.voice.wakeEnabled);
+        setWakeWord(config.voice.wakeWord);
         setStatus(voiceStatus);
         setAvailable(voiceStatus !== null && voiceStatus.reachable && voiceStatus.asr.ready && voiceStatus.tts.ready);
       })
@@ -345,6 +357,51 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
     await startTalk();
     return null;
   }, [recording, startTalk, stopTalk]);
+
+  /**
+   * 语音唤醒：常驻监听 → 命中唤醒词 → 直接开录
+   *
+   * 只在「真的能听」的时候挂着：语音已启用、链路可达、且当前没在录音/播报。
+   * 录音或播报一开始就把监听拆掉——两台采集器抢同一个麦克风，
+   * 而且用户此刻已经在对话里，不需要再唤醒一次。
+   *
+   * 命中之后走 `startTalk()` 而不是自己录：唤醒只是"替用户点一下麦克风"，
+   * 后续的静音收尾、识别、提交全复用同一条路径，避免两套逻辑各说各话。
+   */
+  useEffect(() => {
+    const shouldListen = wakeEnabled && enabled && available && !recording && !speaking && wakeWord.length > 0;
+    if (!shouldListen) {
+      wakeRef.current?.stop();
+      wakeRef.current = null;
+      setWakeListening(false);
+      return;
+    }
+    if (wakeRef.current?.listening === true) return;
+
+    const listener = new WakeListener({
+      transcribe: async (audio) => (await transcribeAudio(audio)).text.trim(),
+      wakeWord,
+      onWake: () => {
+        setWakeListening(false);
+        void startTalk();
+      },
+      onError: (message) => {
+        setWakeListening(false);
+        setError(`语音唤醒已停止：${message}`);
+      },
+    });
+    wakeRef.current = listener;
+    setWakeListening(true);
+    void listener.start().then(() => {
+      // start() 内部失败会置为未监听，这里同步一下状态
+      if (!listener.listening) setWakeListening(false);
+    });
+    return () => {
+      listener.stop();
+      if (wakeRef.current === listener) wakeRef.current = null;
+      setWakeListening(false);
+    };
+  }, [wakeEnabled, enabled, available, recording, speaking, wakeWord, startTalk]);
 
   /** 朗读文本 */
   const speak = useCallback(
@@ -482,5 +539,7 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
     finishFeed,
     stopSpeaking,
     speakReplies,
+    wakeEnabled,
+    wakeListening,
   };
 }

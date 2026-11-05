@@ -262,11 +262,32 @@ export function handleGetSoulConfig(
 }
 
 /**
+ * 把补丁对象按字段合并到已有对象上
+ *
+ * `voice` / `companion` 都是**多字段嵌套对象**，前端每次只发改动的那一两个
+ * 字段（`{ voice: { speakReplies: false } }`）：
+ *
+ * - 整体替换 → 其余字段落到规范化默认值。实测会「改朗读开关顺手把引擎和语速
+ *   重置回默认」，甚至「切换引擎把 enabled 从 true 翻成 false」；
+ * - 字段级合并 → 只动补丁里出现的键。
+ *
+ * 非对象补丁（数组/字符串/null）一律忽略，交给规范化走默认值。
+ *
+ * @param current 已有值
+ * @param patch 补丁值
+ * @returns 合并后的值
+ */
+function mergePatch<T extends object>(current: T, patch: unknown): T {
+  if (typeof patch !== "object" || patch === null || Array.isArray(patch)) return current;
+  return { ...current, ...(patch as Record<string, unknown>) } as T;
+}
+
+/**
  * 处理 PUT /api/soul/config
  *
  * 请求体是关键子集的合并补丁：只传 `avatar` 就只改头像，`voice` 同理。
- * 不做整体替换，是因为前端两个区块各自保存，整体替换会让"改头像"把
- * 语音配置清空——那是很容易踩的坑。
+ * 嵌套对象（`voice` / `companion`）按**字段**合并，不整体替换——
+ * 否则前端保存单个开关时会连带重置同一区块里的其它设置。
  *
  * @param req 请求对象
  * @param res 响应对象
@@ -290,9 +311,10 @@ export async function handlePutSoulConfig(
 
   const next: SoulConfig = {
     avatar: body.avatar === undefined ? current.config.avatar : (body.avatar as SoulConfig["avatar"]),
-    voice: body.voice === undefined ? current.config.voice : (body.voice as SoulConfig["voice"]),
+    voice: body.voice === undefined ? current.config.voice : mergePatch(current.config.voice, body.voice),
     mode: body.mode === undefined ? current.config.mode : (body.mode as SoulConfig["mode"]),
-    companion: body.companion === undefined ? current.config.companion : (body.companion as SoulConfig["companion"]),
+    companion:
+      body.companion === undefined ? current.config.companion : mergePatch(current.config.companion, body.companion),
   };
   const saved = saveSoulConfig(next, homeRoot);
   sendJson(res, 200, toConfigView(saved.config, saved.filePath));

@@ -549,6 +549,15 @@ export interface SoulVoiceConfig {
   readonly token: string;
   /** 是否自动朗读助手回复 */
   readonly speakReplies: boolean;
+  /**
+   * 是否常驻监听唤醒词
+   *
+   * 默认关，且**不跟平台走**：总开关是"这个平台能不能用"，唤醒是
+   * "愿不愿意让麦克风一直开着"——后者是隐私选择，只能用户自己点开。
+   */
+  readonly wakeEnabled: boolean;
+  /** 唤醒词（1~12 字；空串由规范化兜底成默认值） */
+  readonly wakeWord: string;
 }
 
 /**

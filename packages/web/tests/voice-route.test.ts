@@ -15,6 +15,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { startWebServer, type RunningWebServer } from "../src/server";
+import { isVoiceCapablePlatform } from "@vegamo/deepcode-core";
 import { createResolvedSettings, extractAuthCookie, fetchJson, sha256Hex } from "./helpers";
 
 let server: RunningWebServer;
@@ -56,13 +57,21 @@ test("F1 未登录读配置 → 401", async () => {
   assert.equal(status, 401, "头像与音色是个人资产，不能裸奔");
 });
 
-test("F2 首次读配置返回默认值：默认兔狲 + 语音关闭 + 御姐预设", async () => {
+test("F2 首次读配置返回默认值：默认兔狲 + 语音默认值跟随平台 + 御姐预设", async () => {
   const { status, body } = await fetchJson(server.port, "GET", "/api/soul/config", undefined, cookie);
   assert.equal(status, 200);
   assert.equal(body.avatar.kind, "default", "默认必须是兔狲头像");
-  assert.equal(body.voice.enabled, false, "模型没装时不该默认开语音");
+  // 默认值跟平台走：有本机 MLX 语音模型的平台默认开，其余默认关。
+  // 断言用注入的同一份判断，避免测试依赖"跑测试的机器是 Mac 还是 Windows"。
+  assert.equal(
+    body.voice.enabled,
+    isVoiceCapablePlatform(),
+    "语音默认值必须跟随平台（没有本地语音模型的平台不能默认开）"
+  );
   assert.equal(body.voice.engine, "qwen3-voicedesign", "默认引擎必须是实测能跑通的那个");
   assert.ok(typeof body.voice.voice === "string" && body.voice.voice.length > 0, "音色描述不能为空");
+  assert.equal(body.voice.wakeEnabled, false, "唤醒是隐私选择，任何平台都默认关");
+  assert.ok(typeof body.voice.wakeWord === "string" && body.voice.wakeWord.length > 0, "唤醒词必须有默认值");
   assert.ok(
     Array.isArray(body.presets) && body.presets.some((p: { id: string }) => p.id === "yujie"),
     "御姐预设必须下发"
@@ -104,6 +113,39 @@ test("F4 只改头像不影响语音配置（合并补丁语义）", async () =>
   assert.equal(second.body.voice.enabled, true, "改头像不能把语音开关清掉");
   assert.equal(second.body.voice.speed, 1.4, "语速不能被冲回默认");
   assert.equal(second.body.voice.voice, "低沉女声");
+});
+
+test("F4b 只改语音的一个字段不冲掉同区块其它字段（字段级合并）", async () => {
+  // 前置：设一组与默认值都不相同的语音配置，重置了才看得出来
+  const base = await fetchJson(
+    server.port,
+    "PUT",
+    "/api/soul/config",
+    { voice: { enabled: true, engine: "kokoro", speed: 1.3, speakReplies: false, voice: "低沉女声" } },
+    cookie
+  );
+  assert.equal(base.status, 200);
+  assert.equal(base.body.voice.engine, "kokoro");
+
+  // 只改朗读开关：曾经会把 engine 冲回 qwen3-voicedesign、speed 冲回 1
+  const only = await fetchJson(server.port, "PUT", "/api/soul/config", { voice: { speakReplies: true } }, cookie);
+  assert.equal(only.body.voice.speakReplies, true, "朗读开关应更新");
+  assert.equal(only.body.voice.engine, "kokoro", "引擎不能被冲回默认");
+  assert.equal(only.body.voice.speed, 1.3, "语速不能被冲回默认");
+  assert.equal(only.body.voice.enabled, true, "语音开关不能被顺手翻掉");
+  assert.equal(only.body.voice.voice, "低沉女声", "音色描述不能被冲掉");
+
+  // 只切引擎：曾经会把 enabled 从 true 翻成 false
+  const eng = await fetchJson(
+    server.port,
+    "PUT",
+    "/api/soul/config",
+    { voice: { engine: "qwen3-voicedesign" } },
+    cookie
+  );
+  assert.equal(eng.body.voice.engine, "qwen3-voicedesign");
+  assert.equal(eng.body.voice.enabled, true, "切引擎不能把语音关掉");
+  assert.equal(eng.body.voice.speed, 1.3, "切引擎不能改语速");
 });
 
 test("F5 非法 endpoint 与非法头像在写入口被规范化", async () => {
