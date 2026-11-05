@@ -292,7 +292,16 @@ class AsrEngine:
                     audio,
                 )
 
-            result = mlx_whisper.transcribe(audio, path_or_hf_repo=self.model, language="zh")
+            # `language="zh"` 只锁定「中文」，不区分简繁：同一段音频不同时间会给出
+            # 「之後 / 還能 / 嗎」这样的繁体输出，用户会以为自己说的是繁体字。
+            # Whisper 没有简体选项，官方推荐用一段简体中文 initial_prompt 做风格提示，
+            # 它会被当成上文，显著提高简体输出的比例（成本为零，只影响解码先验）。
+            result = mlx_whisper.transcribe(
+                audio,
+                path_or_hf_repo=self.model,
+                language="zh",
+                initial_prompt="以下是普通话对话，请用简体中文转写。",
+            )
             return {
                 "text": (result.get("text") or "").strip(),
                 "durationMs": duration_ms,

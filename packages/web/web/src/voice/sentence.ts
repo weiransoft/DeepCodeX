@@ -34,6 +34,19 @@ const WEAK_BREAKS = new Set(["，", ",", "、", "：", ":"]);
 /** 弱断句的最短句长（字符） */
 const WEAK_BREAK_MIN_LENGTH = 28;
 
+/**
+ * 首句的弱断句阈值（比后续句子短得多）
+ *
+ * 首句的合成时长直接等于用户按下到听见第一个音的间隔（TTFA）。等一个
+ * 28 字的从句攒够再合成，等于把"模型写到第 28 个字"的时间全额加在等待上。
+ * 首句放到 12 字就在最近的逗号处断一次，能让出声时间明显提前——代价是
+ * 第一句可能偏短、语气略碎，后续句子恢复 28 字找回节奏。
+ *
+ * 这是 OpenClaw 用「流式播放」达到同一个目标的本机替代：我们没有增量音频，
+ * 但可以缩短第一块音频的长度。
+ */
+export const FIRST_WEAK_BREAK_MIN_LENGTH = 12;
+
 /** 单句朗读上限：超长句子在下次弱断句强制切开，避免一句读 30 秒 */
 const MAX_SENTENCE_LENGTH = 120;
 
@@ -53,9 +66,15 @@ export interface SplitResult {
  * @param text 累积文本（`llm_delta` 的 previewText）
  * @param from 上次返回的游标
  * @param flush 是否收尾（流结束时为 true，把剩余残句也吐出来）
+ * @param weakMinLength 弱断句的最短句长（首句用更短的值以降 TTFA）
  * @returns 新完成的句子 + 新游标
  */
-export function takeSentences(text: string, from = 0, flush = false): SplitResult {
+export function takeSentences(
+  text: string,
+  from = 0,
+  flush = false,
+  weakMinLength = WEAK_BREAK_MIN_LENGTH
+): SplitResult {
   const sentences: string[] = [];
   let start = from;
   /**
@@ -82,7 +101,7 @@ export function takeSentences(text: string, from = 0, flush = false): SplitResul
     const length = i - start + 1;
     const isStrong = STRONG_BREAKS.has(char);
     // 省略号「……」是连续两个 …，读到第一个就断会产生空句，交给下一次迭代
-    const isWeak = !isStrong && WEAK_BREAKS.has(char) && length >= WEAK_BREAK_MIN_LENGTH;
+    const isWeak = !isStrong && WEAK_BREAKS.has(char) && length >= weakMinLength;
     const isNewline = char === "\n";
     const isOverflow = length >= MAX_SENTENCE_LENGTH;
 
@@ -151,6 +170,8 @@ export function stripForSpeech(text: string): string {
 export class SentenceStream {
   /** 已送出到的位置 */
   private consumed = 0;
+  /** 已送出的句子数（决定用首句阈值还是常规阈值） */
+  private emitted = 0;
 
   /**
    * 喂一段累积文本
@@ -159,8 +180,9 @@ export class SentenceStream {
    * @returns 新完成的句子
    */
   push(cumulative: string): readonly string[] {
-    const result = takeSentences(cumulative, this.consumed, false);
+    const result = takeSentences(cumulative, this.consumed, false, this.weakMin());
     this.consumed = result.consumed;
+    this.emitted += result.sentences.length;
     return result.sentences;
   }
 
@@ -171,13 +193,20 @@ export class SentenceStream {
    * @returns 剩余句子
    */
   flush(cumulative: string): readonly string[] {
-    const result = takeSentences(cumulative, this.consumed, true);
+    const result = takeSentences(cumulative, this.consumed, true, this.weakMin());
     this.consumed = result.consumed;
+    this.emitted += result.sentences.length;
     return result.sentences;
+  }
+
+  /** 当前该用的弱断句阈值：一句还没送出去时用更短的首句阈值 */
+  private weakMin(): number {
+    return this.emitted === 0 ? FIRST_WEAK_BREAK_MIN_LENGTH : WEAK_BREAK_MIN_LENGTH;
   }
 
   /** 复位（新一轮回复开始时调用） */
   reset(): void {
     this.consumed = 0;
+    this.emitted = 0;
   }
 }

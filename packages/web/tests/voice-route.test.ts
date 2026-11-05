@@ -123,6 +123,10 @@ test("F5 非法 endpoint 与非法头像在写入口被规范化", async () => {
 });
 
 test("F6 语音状态在 sidecar 不可达时仍返回 200 + 可执行提示", async () => {
+  // 指向必然拒绝连接的端口，而不是假设「测试机上没跑 sidecar」：
+  // 开发者本地开着 sidecar 时，原写法会假红——而这条测的是**不可达时的降级**，
+  // 前提必须自己造出来（与 F9 同一手法）。
+  await fetchJson(server.port, "PUT", "/api/soul/config", { voice: { endpoint: "http://127.0.0.1:1" } }, cookie);
   const { status, body } = await fetchJson(server.port, "GET", "/api/voice/status", undefined, cookie);
   assert.equal(status, 200, "状态查询本身是成功的，未就绪写在字段里");
   assert.equal(body.reachable, false, "测试环境没有 sidecar");

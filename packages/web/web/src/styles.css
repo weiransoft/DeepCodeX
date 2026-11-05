@@ -4755,6 +4755,24 @@ a.icon-btn {
   border-color: var(--app-accent);
 }
 
+/* 识别中（thinking）：既不在录也不在说，用呼吸描边表达"你的话我收到了"，
+   避免这段等待在界面上完全空白（对标 OpenClaw 的 Thinking 相位）。 */
+.composer-mic-thinking {
+  color: var(--app-accent);
+  border-color: var(--app-accent);
+  animation: composer-mic-thinking 1.2s ease-in-out infinite;
+}
+
+@keyframes composer-mic-thinking {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
 @keyframes composer-mic-pulse {
   0%,
   100% {

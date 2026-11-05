@@ -186,12 +186,16 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
 /** Composer：底部输入框 */ export function Composer(props: ComposerProps) {
   const { streaming, steeringEnabled, maxUploadBytes, serverFiles, onRemoveServerFile, onSend, onStop } = props;
   /**
-   * 语音能力（按住说话 / 朗读 / 打断）。
+   * 语音能力（说话 / 朗读 / 打断 / 静音自动提交）。
    *
    * 放在 Composer 而不是 App：麦克风只负责"把识别结果交给发送路径"，
    * 不新建第二条发送链路——那会绕过附件、@ 提及与流式占位逻辑。
+   *
+   * 免按住（hands-free）模式下，说完自动提交走 `onUtterance`；它的实现
+   * 经 `voiceSendRef` 在 `doSend` 定义后再挂上（见下方赋值处）。
    */
-  const voice = useVoiceTalk();
+  const voiceSendRef = useRef<(text: string) => void>(() => {});
+  const voice = useVoiceTalk({ onUtterance: (spoken) => voiceSendRef.current(spoken) });
 
   /** 把实例挂到喂句总线上：App 的流式增量经它进来，句级合成才能跟上生成速度 */
   useEffect(() => registerVoice(voice), [voice]);
@@ -698,6 +702,10 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
     setSlash(null);
   };
 
+  // 说完自动提交的入口：语音 hook 在 doSend 之前创建，用 ref 把最新实现传过去
+  // （直接闭包会拿到旧渲染的 doSend，附件/@ 提及的状态就停在上一帧）。
+  voiceSendRef.current = (spoken: string) => doSend(spoken);
+
   /** textarea 自适应高度（上限 200px 后内部滚动） */
   const autoResize = (): void => {
     const el = textareaRef.current;
@@ -1033,7 +1041,8 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
           }}
         />
 
-        {/* 语音：按住说话（松开即发送）/ 播报中显示停止 */}
+        {/* 语音：点一下开始（免按住，说完自动提交）/ 播报中显示停止
+            交互对标 OpenClaw Talk Mode：用"停顿"表达说完了，而不是一直按着手指。 */}
         {voice.speaking ? (
           <button
             type="button"
@@ -1048,26 +1057,25 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
           voice.enabled && (
             <button
               type="button"
-              className={`composer-send composer-mic${voice.recording ? " composer-mic-recording" : ""}`}
-              title={voice.recording ? "松开结束并发送" : "按住说话"}
+              className={`composer-send composer-mic${voice.recording ? " composer-mic-recording" : ""}${
+                voice.phase === "thinking" ? " composer-mic-thinking" : ""
+              }`}
+              title={
+                voice.phase === "thinking"
+                  ? "正在识别…"
+                  : voice.recording
+                    ? voice.handsFree
+                      ? "正在听…说完自动发送（点一下提前结束）"
+                      : "点一下结束并发送"
+                    : voice.handsFree
+                      ? "点一下说话，说完自动发送"
+                      : "点一下开始录音"
+              }
               aria-pressed={voice.recording}
-              onPointerDown={(event) => {
-                event.preventDefault();
-                void voice.startTalk();
-              }}
-              onPointerUp={(event) => {
-                event.preventDefault();
-                void voice.stopTalk().then((text) => {
-                  if (text !== null) doSend(text);
+              onClick={() => {
+                void voice.toggleTalk().then((spoken) => {
+                  if (spoken !== null) doSend(spoken);
                 });
-              }}
-              onPointerLeave={() => {
-                // 手指移出按钮也要收尾，否则会一直录到 60s 上限
-                if (voice.recording) {
-                  void voice.stopTalk().then((text) => {
-                    if (text !== null) doSend(text);
-                  });
-                }
               }}
             >
               <MicIcon size={15} />

@@ -112,3 +112,28 @@ test("V12 纯代码回复不产出任何句子（宁可不出声，也别念代�
   const result = takeSentences(raw, 0, true);
   assert.deepEqual(result.sentences, []);
 });
+
+test("V13 首句用更短的弱断点（12 字）以降 TTFA，第二句恢复 28 字", () => {
+  const stream = new SentenceStream();
+  // 第一个逗号在第 7 字（低于 12），第二个在第 14 字（达到首句阈值）
+  const first = stream.push("今天天气不错，适合出门走走，不过风有点大");
+  assert.equal(first.length, 1, "首句应在第二个逗号处断开");
+  assert.equal(first[0], "今天天气不错，适合出门走走，");
+
+  // 第二句累计 21 字（含两个逗号）：低于常规阈值，不该再断——否则整段像电报
+  const full = "今天天气不错，适合出门走走，不过风有点大，后面还有一段";
+  const second = stream.push(full);
+  assert.equal(second.length, 0, "第二句不能继续用首句阈值");
+
+  // 收尾时把第二句整段吐出来
+  const tail = stream.flush(full);
+  assert.equal(tail.length, 1, "收尾必须吐出第二句");
+  assert.equal(tail[0], "不过风有点大，后面还有一段");
+});
+
+test("V14 flush 仍能收尾首句（流结束时残句不能丢）", () => {
+  const stream = new SentenceStream();
+  assert.equal(stream.push("刚开始说").length, 0);
+  const tail = stream.flush("刚开始说，还没说完");
+  assert.equal(tail.length, 1, "收尾必须吐出残句");
+});

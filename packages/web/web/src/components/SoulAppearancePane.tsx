@@ -32,6 +32,7 @@ import {
 } from "../api";
 import { SoulAvatar } from "./SoulAvatar";
 import { AVATAR_MAX_BYTES, readAvatarFile } from "../voice/avatar-file";
+import { readHandsFree, subscribeHandsFree, writeHandsFree } from "../voice/preference";
 
 /** 面板状态 */
 type LoadState =
@@ -50,6 +51,9 @@ export function SoulAppearancePane() {
   const [status, setStatus] = useState<VoiceStatus | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
   const [saving, setSaving] = useState(false);
+  /** 免按住偏好（本地设置，不走服务端配置：它跟设备走，不跟账号走） */
+  const [handsFree, setHandsFree] = useState(() => readHandsFree());
+  useEffect(() => subscribeHandsFree(setHandsFree), []);
   const [testing, setTesting] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
@@ -343,6 +347,11 @@ export function SoulAppearancePane() {
             onChange={(event) => void submit({ voice: { speakReplies: event.target.checked } }, "已更新朗读设置")}
           />
           <span>自动朗读回复</span>
+        </label>
+
+        <label className="soul-check">
+          <input type="checkbox" checked={handsFree} onChange={(event) => writeHandsFree(event.target.checked)} />
+          <span>点一下说话，说完自动发送（免按住；关闭后改为点一下开始、再点一下结束）</span>
         </label>
 
         <div className="soul-field">

@@ -1,5 +1,5 @@
 /**
- * 语音对话 hook：按住说话 + 朗读 + 打断
+ * 语音对话 hook：说话 + 朗读 + 打断 + 说完自动提交
  *
  * ## 职责边界
  *
@@ -7,11 +7,35 @@
  * 是填进输入框还是直接发送——Composer 的发送路径里还有附件、@ 提及、
  * 流式占位等逻辑，语音不该另开一条。
  *
+ * ## 三相位（对标 OpenClaw Talk Mode）
+ *
+ * `idle → listening → thinking → speaking → idle`。之前只有 `recording` /
+ * `speaking` 两个布尔，中间那段时间（已松手、模型还在想、音频还没出声）在
+ * UI 上是**完全空白**的：用户不知道是没听见、在思考、还是卡住了。
+ * 显式的 `thinking` 相位就是补这一段——它不是一个动画，而是一个承诺：
+ * "你的话我收到了，正在处理"。
+ *
+ * ## 免按住（hands-free）
+ *
+ * 点一下开始，说话时不必一直按着；麦克风侧检测到连续静音（默认 900ms）
+ * 就自动收尾、识别、交给 `onUtterance`。判定逻辑在 `voice/endpointing.ts`。
+ * 这是 OpenClaw Talk Mode 的核心体验：**用停顿表达"说完了"，而不是用手指**。
+ *
+ * 按住说话仍然可用（`startTalk` / `stopTalk` 语义不变），只是不再是唯一路径。
+ *
  * ## 打断（barge-in）怎么落地
  *
  * 播报期间持续监测麦克风电平；连续 300ms 超过（阈值的 2 倍，抵消外放回声）
  * 就停播并回调。停播后**不自动开始录音**——用户可能只是路过说了句话，
  * 直接开录会显得很唐突，改为由 UI 提示"继续按住说话"。
+ *
+ * 被打断时把「已说出来的部分」记进 `lastInterruption`：UI 可以据此提示
+ * 「上一句没说完」，也为将来把打断时间戳送进下一轮 prompt 留好出口。
+ *
+ * ## 语音指令行
+ *
+ * 回复首行若是 `{"voice":..., "speed":..., "once":true}`，解析出来用于本次
+ * 合成，并且**不朗读该行**（详见 `voice/directive.ts`）。
  *
  * ## 延迟埋点
  *
@@ -26,14 +50,43 @@ import { fetchSoulConfig, fetchVoiceStatus, synthesizeSpeech, transcribeAudio, t
 import { MicCapture, explainMicError } from "./mic";
 import { SpeechQueue } from "./player";
 import { SentenceStream } from "./sentence";
+import { scanVoiceDirective, settleVoiceDirective, type VoiceDirective } from "./directive";
+import { readHandsFree, subscribeHandsFree, writeHandsFree } from "./preference";
 
 /** 延迟样本保留条数（够看趋势，不至于无限增长） */
 const LATENCY_SAMPLES = 10;
+
+/** thinking 相位的兜底时长：模型/链路异常时不至于永远显示「在想」 */
+const THINKING_TIMEOUT_MS = 8000;
 
 /** 一轮延迟样本 */
 export interface LatencySample {
   /** 用户说完 → 第一个音出声（毫秒） */
   ttfaMs: number;
+}
+
+/** 语音相位 */
+export type VoicePhase = "idle" | "listening" | "thinking" | "speaking";
+
+/** 被打断的一次记录 */
+export interface VoiceInterruption {
+  /** 打断发生的时刻（performance.now） */
+  at: number;
+  /** 被打断前已经念出来的部分（可能是空串） */
+  spokenText: string;
+}
+
+/** hook 选项 */
+export interface VoiceTalkOptions {
+  /**
+   * 免按住模式下识别出的完整一句话
+   *
+   * 只在静音自动收尾时回调；手动 `stopTalk` 的返回值仍由调用方自己处理，
+   * 避免同一次说话被提交两遍。
+   */
+  onUtterance?: (text: string) => void;
+  /** 免按住开关的初始值（缺省 true） */
+  handsFree?: boolean;
 }
 
 /** hook 返回值 */
@@ -46,10 +99,16 @@ export interface VoiceTalk {
   recording: boolean;
   /** 是否正在播报 */
   speaking: boolean;
+  /** 当前相位（UI 用它区分「在听」「在想」「在说」） */
+  phase: VoicePhase;
+  /** 是否免按住（点一下开始，静音自动提交） */
+  handsFree: boolean;
   /** 语音链路状态（未探测为 null） */
   status: VoiceStatus | null;
   /** 最近若干轮 TTFA */
   latencies: readonly LatencySample[];
+  /** 最近一次被打断的记录（未被打断为 null） */
+  lastInterruption: VoiceInterruption | null;
   /** 错误提示（可执行文案） */
   error: string | null;
   /** 清空错误 */
@@ -58,6 +117,10 @@ export interface VoiceTalk {
   startTalk: () => Promise<void>;
   /** 结束录音并返回识别文本（空文本返回 null） */
   stopTalk: () => Promise<string | null>;
+  /** 免按住切换：没在录就开始，正在录就结束（返回识别文本） */
+  toggleTalk: () => Promise<string | null>;
+  /** 切换免按住开关 */
+  setHandsFree: (value: boolean) => void;
   /** 朗读一段文本（内部按句切分） */
   speak: (text: string) => void;
   /** 喂流式增量（累积文本） */
@@ -73,16 +136,20 @@ export interface VoiceTalk {
 /**
  * 语音对话 hook
  *
+ * @param options 选项（免按住回调等）
  * @returns 语音能力与操作
  */
-export function useVoiceTalk(): VoiceTalk {
+export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   const [available, setAvailable] = useState(false);
   const [enabled, setEnabled] = useState(false);
   const [speakReplies, setSpeakReplies] = useState(true);
   const [recording, setRecording] = useState(false);
   const [speaking, setSpeaking] = useState(false);
+  const [waiting, setWaiting] = useState(false);
+  const [handsFree, setHandsFreeState] = useState(() => readHandsFree(options.handsFree ?? true));
   const [status, setStatus] = useState<VoiceStatus | null>(null);
   const [latencies, setLatencies] = useState<LatencySample[]>([]);
+  const [lastInterruption, setLastInterruption] = useState<VoiceInterruption | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const micRef = useRef<MicCapture | null>(null);
@@ -93,22 +160,69 @@ export function useVoiceTalk(): VoiceTalk {
   const firstAudioRef = useRef(true);
   /** 最近一次喂入的累积文本（flush 需要它取残句） */
   const lastTextRef = useRef("");
+  /** 语音指令（本轮生效；once 的在收尾时清掉） */
+  const directiveRef = useRef<VoiceDirective | null>(null);
+  /** 首行指令的解析状态：unknown=还没判断，resolved=已判断 */
+  const directiveStateRef = useRef<"unknown" | "resolved">("unknown");
+  /** 首行指令被剥掉后，正文在累积文本里的起点 */
+  const directivePrefixRef = useRef(0);
+  /** options 的稳定引用（避免把回调塞进 useCallback 依赖导致整链重建） */
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
+
+  /** thinking 兜底定时器 */
+  const thinkingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /** 写入免按住偏好（设置面板与输入框共用同一份存储） */
+  const setHandsFree = useCallback((value: boolean) => {
+    setHandsFreeState(value);
+    writeHandsFree(value);
+  }, []);
+
+  /** 跟随设置面板的改动（同页事件 + 跨标签页 storage） */
+  useEffect(() => subscribeHandsFree(setHandsFreeState), []);
 
   /** 懒建队列（合成函数依赖后端，但只建一次） */
   const queue = useCallback((): SpeechQueue => {
     if (queueRef.current === null) {
-      queueRef.current = new SpeechQueue((text) => synthesizeSpeech(text), {
-        onSpeakingChange: (value) => {
-          setSpeaking(value);
-          if (value && firstAudioRef.current && speechEndAtRef.current > 0) {
-            // 首个音开始播 → 记录 TTFA（说话结束到出声的真实间隔）
-            const ttfaMs = Math.round(performance.now() - speechEndAtRef.current);
-            firstAudioRef.current = false;
-            setLatencies((prev) => [...prev.slice(-(LATENCY_SAMPLES - 1)), { ttfaMs }]);
-          }
+      queueRef.current = new SpeechQueue(
+        (text) => {
+          const directive = directiveRef.current;
+          // 指令里的 voice / engine / speed 覆盖配置值；没有指令时走服务端配置
+          return synthesizeSpeech(
+            text,
+            directive === null
+              ? undefined
+              : {
+                  ...(directive.voice !== undefined ? { voice: directive.voice } : {}),
+                  ...(directive.engine !== undefined ? { engine: directive.engine } : {}),
+                  ...(directive.speed !== undefined ? { speed: directive.speed } : {}),
+                }
+          );
         },
-        onError: (message) => setError(message),
-      });
+        {
+          onSpeakingChange: (value) => {
+            setSpeaking(value);
+            if (value) {
+              setWaiting(false);
+              if (thinkingTimerRef.current !== null) {
+                clearTimeout(thinkingTimerRef.current);
+                thinkingTimerRef.current = null;
+              }
+              if (firstAudioRef.current && speechEndAtRef.current > 0) {
+                // 首个音开始播 → 记录 TTFA（说话结束到出声的真实间隔）
+                const ttfaMs = Math.round(performance.now() - speechEndAtRef.current);
+                firstAudioRef.current = false;
+                setLatencies((prev) => [...prev.slice(-(LATENCY_SAMPLES - 1)), { ttfaMs }]);
+              }
+            }
+          },
+          onError: (message) => setError(message),
+          onInterrupted: (spokenText) => {
+            setLastInterruption({ at: performance.now(), spokenText });
+          },
+        }
+      );
     }
     return queueRef.current;
   }, []);
@@ -165,6 +279,30 @@ export function useVoiceTalk(): VoiceTalk {
     void startBargeIn();
   }, [speaking, startBargeIn, stopBargeIn]);
 
+  /** 结束录音并识别 */
+  const stopTalk = useCallback(async (): Promise<string | null> => {
+    setRecording(false);
+    const mic = micRef.current;
+    if (mic === null) return null;
+    // 识别本身就是「在想」：从这一刻起 UI 该有反馈
+    setWaiting(true);
+    try {
+      const wav = await mic.stopRecording();
+      const result = await transcribeAudio(wav);
+      const text = result.text.trim();
+      if (text.length < 2) {
+        setWaiting(false);
+        setError("没听清，再说一次？");
+        return null;
+      }
+      return text;
+    } catch (e: unknown) {
+      setWaiting(false);
+      setError(e instanceof Error ? e.message : String(e));
+      return null;
+    }
+  }, []);
+
   /** 开始录音 */
   const startTalk = useCallback(async () => {
     setError(null);
@@ -172,36 +310,41 @@ export function useVoiceTalk(): VoiceTalk {
     stopBargeIn();
     if (micRef.current === null) micRef.current = new MicCapture();
     try {
-      await micRef.current.startRecording(() => {
-        // 到达上限自动收尾，走同一条 stopTalk 路径由调用方处理
-        setRecording(false);
-      });
+      await micRef.current.startRecording(
+        () => {
+          // 到达上限自动收尾，走同一条 stopTalk 路径由调用方处理
+          setRecording(false);
+        },
+        handsFree
+          ? {
+              // 免按住：静音即收尾，识别完直接交给调用方提交
+              // 成功后**不清** thinking：真正的下一站是模型回复（播报开始的
+              // onSpeakingChange 会清掉），中间这段等待本来就该显示"在想"。
+              onEndpoint: () => {
+                void stopTalk().then((text) => {
+                  if (text === null) {
+                    setWaiting(false);
+                    return;
+                  }
+                  optionsRef.current.onUtterance?.(text);
+                });
+              },
+            }
+          : {}
+      );
       setRecording(true);
     } catch (e: unknown) {
       setError(explainMicError(e));
       setRecording(false);
     }
-  }, [queue, stopBargeIn]);
+  }, [queue, stopBargeIn, handsFree, stopTalk]);
 
-  /** 结束录音并识别 */
-  const stopTalk = useCallback(async (): Promise<string | null> => {
-    setRecording(false);
-    const mic = micRef.current;
-    if (mic === null) return null;
-    try {
-      const wav = await mic.stopRecording();
-      const result = await transcribeAudio(wav);
-      const text = result.text.trim();
-      if (text.length < 2) {
-        setError("没听清，再说一次？");
-        return null;
-      }
-      return text;
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-      return null;
-    }
-  }, []);
+  /** 免按住切换 */
+  const toggleTalk = useCallback(async (): Promise<string | null> => {
+    if (recording) return stopTalk();
+    await startTalk();
+    return null;
+  }, [recording, startTalk, stopTalk]);
 
   /** 朗读文本 */
   const speak = useCallback(
@@ -209,6 +352,8 @@ export function useVoiceTalk(): VoiceTalk {
       if (!available || !speakReplies) return;
       const stream = new SentenceStream();
       streamRef.current = stream;
+      directiveStateRef.current = "unknown";
+      directivePrefixRef.current = 0;
       for (const sentence of stream.flush(text)) queue().enqueue(sentence);
       speechEndAtRef.current = performance.now();
       firstAudioRef.current = true;
@@ -222,11 +367,32 @@ export function useVoiceTalk(): VoiceTalk {
       if (!available || !speakReplies) return;
       if (streamRef.current === null) {
         streamRef.current = new SentenceStream();
+        directiveStateRef.current = "unknown";
+        directivePrefixRef.current = 0;
         speechEndAtRef.current = performance.now();
         firstAudioRef.current = true;
       }
-      lastTextRef.current = cumulative;
-      for (const sentence of streamRef.current.push(cumulative)) queue().enqueue(sentence);
+
+      // 首行指令：必须先判定「这行要不要念」，否则用户会听到一串 JSON
+      let body = cumulative;
+      if (directiveStateRef.current === "unknown") {
+        const scan = scanVoiceDirective(cumulative);
+        if (scan.kind === "pending") {
+          // 首行还没收完：挂起，等下一批增量（此时一个字都不送 TTS）
+          return;
+        }
+        directiveStateRef.current = "resolved";
+        if (scan.kind === "applied") {
+          directiveRef.current = scan.directive;
+          body = scan.text;
+          directivePrefixRef.current = cumulative.length - scan.text.length;
+        }
+      } else if (directivePrefixRef.current > 0) {
+        body = cumulative.slice(directivePrefixRef.current);
+      }
+
+      lastTextRef.current = body;
+      for (const sentence of streamRef.current.push(body)) queue().enqueue(sentence);
     },
     [available, speakReplies, queue]
   );
@@ -241,8 +407,23 @@ export function useVoiceTalk(): VoiceTalk {
     const stream = streamRef.current;
     streamRef.current = null;
     if (stream === null) return;
-    for (const sentence of stream.flush(lastTextRef.current)) queue().enqueue(sentence);
+
+    let body = lastTextRef.current;
+    if (directiveStateRef.current === "unknown") {
+      // 整段都没有换行：再试一次是不是「一行指令」，解析不了就当正文念
+      const settled = settleVoiceDirective(body);
+      if (settled.kind === "applied") {
+        directiveRef.current = settled.directive;
+        body = settled.text;
+      }
+      directiveStateRef.current = "resolved";
+    }
+
+    for (const sentence of stream.flush(body)) queue().enqueue(sentence);
     lastTextRef.current = "";
+
+    // once 的指令只影响这一条回复
+    if (directiveRef.current?.once === true) directiveRef.current = null;
   }, [queue]);
 
   /** 停止播报 */
@@ -250,6 +431,24 @@ export function useVoiceTalk(): VoiceTalk {
     queue().stop();
     setSpeaking(false);
   }, [queue]);
+
+  /** thinking 兜底：超过上限自动落回 idle，避免一直显示「在想」 */
+  useEffect(() => {
+    if (!waiting) {
+      if (thinkingTimerRef.current !== null) {
+        clearTimeout(thinkingTimerRef.current);
+        thinkingTimerRef.current = null;
+      }
+      return;
+    }
+    thinkingTimerRef.current = setTimeout(() => setWaiting(false), THINKING_TIMEOUT_MS);
+    return () => {
+      if (thinkingTimerRef.current !== null) {
+        clearTimeout(thinkingTimerRef.current);
+        thinkingTimerRef.current = null;
+      }
+    };
+  }, [waiting]);
 
   /** 卸载时释放麦克风与音频 */
   useEffect(() => {
@@ -259,17 +458,25 @@ export function useVoiceTalk(): VoiceTalk {
     };
   }, []);
 
+  /** 相位：说的话 > 在想 > 在说（录音中不会再播报，顺序天然互斥） */
+  const phase: VoicePhase = recording ? "listening" : waiting ? "thinking" : speaking ? "speaking" : "idle";
+
   return {
     available,
     enabled,
     recording,
     speaking,
+    phase,
+    handsFree,
     status,
     latencies,
+    lastInterruption,
     error,
     clearError: () => setError(null),
     startTalk,
     stopTalk,
+    toggleTalk,
+    setHandsFree,
     speak,
     feed,
     finishFeed,

@@ -1,5 +1,5 @@
 /**
- * 麦克风采集：按住说话 + 播报期打断监测
+ * 麦克风采集：说话（可自动收尾）+ 播报期打断监测
  *
  * ## 为什么用 MediaRecorder + decodeAudioData，而不是 AudioWorklet
  *
@@ -16,8 +16,19 @@
  *
  * 这三个数都做成导出常量，测试与调参改一处即可。
  *
+ * ## 免按住：录音期静音收尾（对标 OpenClaw Talk Mode）
+ *
+ * `startRecording` 可以额外挂一个「说完判定」（见 `endpointing.ts`）：录音同时
+ * 每 50ms 算一次 RMS，连续静音够久就回调 `onEndpoint`，由调用方走正常的
+ * 停止+识别+发送路径。这样用户只需点一下开始，不用一直按着。
+ *
+ * 判定器与采集分开：这边只负责按帧喂 RMS，判「说没说完」在纯状态机里，
+ * 可以脱开浏览器单测。
+ *
  * @module web/voice/mic
  */
+
+import { Endpointer, type EndpointOptions } from "./endpointing";
 
 /** 分析帧长（毫秒） */
 export const VAD_FRAME_MS = 50;
@@ -70,6 +81,10 @@ export class MicCapture {
   private audioContext: AudioContext | null = null;
   /** 电平监测循环句柄 */
   private monitorTimer: ReturnType<typeof setInterval> | null = null;
+  /** 录音期「说完判定」的音频上下文（与打断监测分开，避免互相关闭） */
+  private endpointContext: AudioContext | null = null;
+  /** 说完判定的采样循环 */
+  private endpointTimer: ReturnType<typeof setInterval> | null = null;
   /** 录音超时句柄 */
   private maxTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -96,8 +111,12 @@ export class MicCapture {
    * 开始录音
    *
    * @param onMaxDuration 达到上限时的回调（自动停止）
+   * @param options 说完判定（给了 `onEndpoint` 才会启动静音检测）
    */
-  async startRecording(onMaxDuration?: () => void): Promise<void> {
+  async startRecording(
+    onMaxDuration?: () => void,
+    options: { onEndpoint?: () => void; endpoint?: EndpointOptions } = {}
+  ): Promise<void> {
     const stream = await this.open();
     this.chunks = [];
     const recorder = new MediaRecorder(stream);
@@ -107,6 +126,55 @@ export class MicCapture {
     recorder.start();
     this.recorder = recorder;
     this.maxTimer = setTimeout(() => onMaxDuration?.(), MAX_RECORD_MS);
+    if (options.onEndpoint !== undefined) this.watchEndpoint(stream, options.onEndpoint, options.endpoint);
+  }
+
+  /**
+   * 录音期静音收尾监测
+   *
+   * 判定逻辑全在 `Endpointer` 里，这里只按帧喂 RMS 并在判定「说完了」时
+   * 停掉自己的采样（`onEndpoint` 之后调用方通常会立刻 stopRecording，
+   * 提前停掉避免两个定时器同时读同一路音频）。
+   *
+   * @param stream 媒体流
+   * @param onEndpoint 判定说完时的回调
+   * @param endpoint 判定参数
+   */
+  private watchEndpoint(stream: MediaStream, onEndpoint: () => void, endpoint?: EndpointOptions): void {
+    this.stopEndpointWatch();
+    const context = new AudioContext();
+    this.endpointContext = context;
+    const source = context.createMediaStreamSource(stream);
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 1024;
+    source.connect(analyser);
+
+    const buffer = new Float32Array(analyser.fftSize);
+    const endpointer = new Endpointer(endpoint);
+    const frameMs = endpoint?.frameMs ?? 50;
+
+    this.endpointTimer = setInterval(() => {
+      analyser.getFloatTimeDomainData(buffer);
+      let sum = 0;
+      for (let i = 0; i < buffer.length; i += 1) sum += buffer[i] * buffer[i];
+      const rms = Math.sqrt(sum / buffer.length);
+      if (endpointer.push(rms).done) {
+        this.stopEndpointWatch();
+        onEndpoint();
+      }
+    }, frameMs);
+  }
+
+  /** 停掉说完判定（幂等） */
+  private stopEndpointWatch(): void {
+    if (this.endpointTimer !== null) {
+      clearInterval(this.endpointTimer);
+      this.endpointTimer = null;
+    }
+    if (this.endpointContext !== null) {
+      void this.endpointContext.close();
+      this.endpointContext = null;
+    }
   }
 
   /**
@@ -115,6 +183,7 @@ export class MicCapture {
    * @returns WAV Blob（无有效音频时抛错）
    */
   async stopRecording(): Promise<Blob> {
+    this.stopEndpointWatch();
     const recorder = this.recorder;
     this.recorder = null;
     if (this.maxTimer !== null) {
@@ -201,6 +270,7 @@ export class MicCapture {
   /** 释放麦克风（页面卸载/关闭语音模式时调用） */
   release(): void {
     this.stopMonitor();
+    this.stopEndpointWatch();
     if (this.recorder !== null) {
       try {
         this.recorder.stop();
