@@ -38,7 +38,8 @@
     "install:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1",
     "rebuild:sqlite:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -SqliteOnly",
     "test:e2e:super:team": "tsx tests/scripts/super-agent-team-e2e.ts",
-    "start:web": "node scripts/start.js web"
+    "start:web": "node scripts/start.js web",
+    "voice:start": "bash scripts/voice/start.sh"
   },
   "optionalDependencies": {
     "better-sqlite3": "^11.0.0"

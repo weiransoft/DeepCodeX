@@ -32,6 +32,7 @@ HTTP 划界，有三个好处：模型崩溃不拖垮应用；可以单独重启
 from __future__ import annotations
 
 import argparse
+import hmac
 import io
 import json
 import os
@@ -75,14 +76,76 @@ def soul_config_path() -> Path:
     return Path(home) / ".deepcode" / "soul" / "config.json"
 
 
-def read_token() -> str:
-    """读取引擎写入的 sidecar token（缺省空串 = 不校验，仅限本机调试）"""
+def web_engine_config_paths() -> list[Path]:
+    """
+    枚举 Web 模式各用户的 soul 配置
+
+    Web 引擎按 per-user 口径把配置落在 `.engine-home/<hash>/.deepcode/soul/`，
+    每份都带自己的 `voice.token`。桌面模式则用 `~/.deepcode/soul/config.json`。
+    这两个布局都在同一台机器上，指向同一个回环 sidecar。
+    """
+    home = os.environ.get("DEEPCODE_HOME") or str(Path.home())
+    base = Path(home) / ".deepcode" / "web-uploads" / ".engine-home"
     try:
-        data = json.loads(soul_config_path().read_text(encoding="utf-8"))
+        return sorted(base.glob("*/.deepcode/soul/config.json"))
+    except OSError:
+        return []
+
+
+def candidate_config_paths() -> list[Path]:
+    """所有可能持有一份 sidecar token 的配置文件（去重保序）"""
+    paths: list[Path] = [soul_config_path()]
+    for path in web_engine_config_paths():
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _read_tokens_uncached() -> set[str]:
+    """逐个配置文件读 `voice.token`，坏文件跳过（一个用户配置损坏不该拖垮鉴权）"""
+    tokens: set[str] = set()
+    for path in candidate_config_paths():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
         token = data.get("voice", {}).get("token", "")
-        return token if isinstance(token, str) else ""
-    except Exception:
-        return ""
+        if isinstance(token, str) and token:
+            tokens.add(token)
+    return tokens
+
+
+# 上次扫描的文件指纹（路径 + mtime）与结果；配置变更后自动重新扫描，
+# 免去「改完 token 必须重启 sidecar」这一步——那一步很容易被忘掉，
+# 忘掉的表现是语音突然 401，而错误信息指向的是「重启 sidecar」，
+# 用户会以为服务挂了。
+_token_cache: dict[str, Any] = {"fingerprint": None, "tokens": frozenset()}
+
+
+def read_tokens() -> set[str]:
+    """
+    读取本机所有引擎实例写入的 token
+
+    为什么是复数：sidecar 是**整机一份**的资源，而 token 是**按引擎实例/用户**
+    生成的。只认其中一份，另一个入口（桌面 vs Web）就必然 401——实测
+    `POST /api/voice/tts` 直接 502。接受本机全部合法 token 才能同时服务两者。
+
+    返回空集合表示「没有任何配置声明 token」，此时放行（仅本机首次调试）。
+    """
+    paths = candidate_config_paths()
+    fingerprint = []
+    for path in paths:
+        try:
+            fingerprint.append((str(path), path.stat().st_mtime_ns))
+        except OSError:
+            fingerprint.append((str(path), 0))
+    key = tuple(fingerprint)
+    if _token_cache["fingerprint"] == key:
+        return set(_token_cache["tokens"])
+    tokens = _read_tokens_uncached()
+    _token_cache["fingerprint"] = key
+    _token_cache["tokens"] = frozenset(tokens)
+    return tokens
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +382,6 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "DeepCodeVoice/1.0"
     tts = TtsEngine()
     asr = AsrEngine()
-    token = ""
 
     # ---- 工具 ----
 
@@ -335,11 +397,27 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _authorized(self) -> bool:
-        """校验 Bearer token（配置里没有 token 时放行，便于首次调试）"""
-        if not self.token:
+        """
+        校验 Bearer token
+
+        接受本机任意一份配置里的 token（见 `read_tokens` 的说明）：桌面与 Web
+        是两个引擎实例，各自生成一份 token，而 sidecar 只有一份。
+        没有任何配置声明 token 时放行，便于本机首次调试。
+        比较用 `hmac.compare_digest`，避免按字节提前返回泄漏前缀。
+        """
+        tokens = read_tokens()
+        if not tokens:
             return True
         header = self.headers.get("Authorization", "")
-        return header == f"Bearer {self.token}"
+        if not header.startswith("Bearer "):
+            return False
+        presented = header[len("Bearer ") :]
+        matched = False
+        for candidate in tokens:
+            # 不短路：每个候选都跑一次比较，耗时差可忽略，时序不泄漏"第几个命中"
+            if hmac.compare_digest(presented, candidate):
+                matched = True
+        return matched
 
     def _read_body(self) -> bytes:
         length = int(self.headers.get("Content-Length") or 0)
@@ -425,7 +503,9 @@ def main() -> int:
     parser.add_argument("--selftest", action="store_true", help="只检查依赖并退出")
     args = parser.parse_args()
 
-    Handler.token = read_token()
+    # 启动时先扫一次，让日志里能立刻看到鉴权状态；之后每次请求按 mtime 校验，
+    # 配置变更（含新增 Web 用户）无需重启 sidecar。
+    tokens = read_tokens()
 
     if args.selftest:
         deps = probe_deps()
@@ -436,7 +516,15 @@ def main() -> int:
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"[voice] 监听 http://{args.host}:{args.port}")
-    print(f"[voice] 配置：{soul_config_path()}（token {'已启用' if Handler.token else '未启用'}）")
+    print(f"[voice] 配置：{soul_config_path()}")
+    print(
+        "[voice] 鉴权："
+        + (
+            f"{len(tokens)} 份 token 已启用（本机桌面与 Web 引擎各一份；配置变动自动生效）"
+            if tokens
+            else "未声明 token（本机调试模式，任何请求都放行）"
+        )
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

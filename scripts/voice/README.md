@@ -19,16 +19,29 @@
 # 1) 装依赖（一次性，约几百 MB）
 bash scripts/voice/setup.sh
 
-# 2) 自检：只检查依赖，不起服务
-.venv/bin/python scripts/voice/mlx_voice_server.py --selftest
+# 2) 起服务（幂等：已在跑就跳过；等到真能接请求才返回）
+bash scripts/voice/start.sh          # 等价于 npm run voice:start
+bash scripts/voice/start.sh -f       # 前台运行，便于看日志
 
-# 3) 起服务
-.venv/bin/python scripts/voice/mlx_voice_server.py
+# 3) 自检：只检查依赖，不起服务
+scripts/voice/.venv/bin/python scripts/voice/mlx_voice_server.py --selftest
 ```
 
 启动后打开 Web 设置 → 司南 → 声音，点「检测」应看到 ASR/TTS 双绿。
 
 首次合成会下载模型权重（10~30s），之后就只加载一次。
+
+### 谁来启动它
+
+**没有任何一方会自动拉起 sidecar**：桌面壳只管拉起 Node 引擎，引擎只是把
+`/api/voice/*` 转发到回环地址。模型进程的生命周期是独立的——这是刻意的
+（见上文「为什么是独立进程」），代价就是需要单独启动一次。
+
+`start.sh` 把这件事收敛成一条命令：检查 venv → 带 `HF_ENDPOINT` 镜像 →
+后台启动 → 轮询 `/health` 直到就绪。日志追加到 `~/.deepcode/logs/voice.log`。
+
+已在运行时不重复启动：重复 bind 会以 `EADDRINUSE` 退出，看起来像启动失败，
+实际是"已经好了"，这种误报最容易让人去 kill 一个健康的服务。
 
 ## 端点
 
@@ -77,13 +90,24 @@ VoiceDesign 会把这段描述当成声学指令。本机实测（同一句话�
 
 ## 鉴权
 
-sidecar 与引擎读**同一份** `~/.deepcode/soul/config.json`，比对 `voice.token`：
+sidecar 是**整机一份**的资源，而 token 是**按引擎实例**生成的——桌面端一份
+（`~/.deepcode/soul/config.json`），Web 模式每个用户各一份
+（`~/.deepcode/web-uploads/.engine-home/<hash>/.deepcode/soul/config.json`）。
 
-- 配置里没有 token → 不校验（仅便于本机首次调试）
-- 有 token → 要求 `Authorization: Bearer <token>`
-- **token 在启动时读取一次**，改配置后要重启 sidecar，否则 401
+所以校验的是**白名单**：本机所有配置文件里的 `voice.token` 都接受。
+
+- 任何配置存在 token → 要求 `Authorization: Bearer <token>`，命中其一即放行
+- 一份 token 都没有 → 不校验（仅便于本机首次调试）
+- 每次请求按配置文件 mtime 重扫：**改 token 或新增 Web 用户后不用重启 sidecar**
+
+为什么必须这样：早先只认桌面那一份，结果是 Web 引擎每次合成都被挡——
+`POST /api/voice/tts` 直接返回 502「token 不匹配」，而错误信息还建议"重启
+sidecar"，照着做也没用（重启后仍然只认桌面那份）。一个服务两个入口，就不
+能只认一个凭证。
 
 `127.0.0.1` 不等于安全——同机任何进程都能 POST 到这里，所以这层校验不能省。
+白名单只是"接受本机所有合法引擎"，并没有放宽到"接受任意请求"：伪造 token
+与不带 token 一律 401。
 
 ## 已知限制（诚实边界）
 
