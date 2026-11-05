@@ -98,7 +98,7 @@ ASR_HOTWORDS_DEFAULT = ("DeepCodeX", "Tauri", "Qwen3", "MLX", "MCP")
 # VoiceDesign 变体——它接受自然语言音色描述，正好是「御姐音」的入口。
 MODEL_IDS = {
     "qwen3-voicedesign": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit",
-    "qwen3-customvoice": "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit",
+    "qwen3-customvoice": "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit",
     "kokoro": "prince-canuma/Kokoro-82M",
 }
 DEFAULT_TTS_ENGINE = "qwen3-voicedesign"
@@ -106,6 +106,78 @@ DEFAULT_TTS_ENGINE = "qwen3-voicedesign"
 TTS_LANGUAGE = "Chinese"
 # Kokoro 的中文音色（lang_code 'z'）
 KOKORO_VOICE = "zf_xiaobei"
+
+# ---------------------------------------------------------------------------
+# CustomVoice：预置音色（音色一致性最好的那条路）
+#
+# 为什么这才是「音色不跳」的正解：VoiceDesign 是**每次调用现场设计**一个音色，
+# 即使固定随机种子，换一段文本自回归轨迹就变了，基频会跟着漂——本机实测
+# 同一音色描述下四句话的基频中位数 170.2~200.0Hz（跨度 29.8Hz），听感就是
+# 「一会儿像另一个人」。CustomVoice 用的是**训练好的 speaker embedding**，
+# 音色不参与采样，跨句天生一致。
+#
+# 业界说法一致：预置固定音色「最稳定、推理开销最低、音色一致性最好，长文本
+# 不易崩音色」；而 VoiceDesign 适合角色试音，不适合长篇定稿。
+#
+# 1.7B 版本支持 instruct（情感/风格指令），0.6B 不支持——这是选 1.7B 的原因：
+# 既能锁音色，又不至于把语气说死。
+# ---------------------------------------------------------------------------
+CUSTOMVOICE_SPEAKERS = (
+    "serena",
+    "vivian",
+    "uncle_fu",
+    "ryan",
+    "aiden",
+    "ono_anna",
+    "sohee",
+    "eric",
+    "dylan",
+)
+# 默认音色：vivian 是明亮年轻女声，最接近此前自定义描述里的「少年女性、中音区、利落」
+DEFAULT_CUSTOMVOICE_SPEAKER = "vivian"
+
+# CustomVoice 权重的本地目录（ModelScope 下载；hf.co 在本机不可达）
+TTS_CUSTOMVOICE_LOCAL_PATH = "~/.cache/qwen3-tts-customvoice"
+
+
+def resolve_tts_model_id(engine: str) -> str:
+    """
+    引擎 → 实际加载的模型路径（本地权重优先于仓库 id）
+
+    本地权重的好处不只是省下载：离线可用，且不会因为上游仓库改名/删档而失效。
+
+    @param engine 引擎名
+    @returns 本地目录或 HuggingFace / ModelScope 仓库 id
+    """
+    if engine == "qwen3-customvoice":
+        explicit = os.environ.get("DEEPCODE_TTS_MODEL_PATH", "").strip()
+        local = os.path.expanduser(explicit or TTS_CUSTOMVOICE_LOCAL_PATH)
+        if os.path.isdir(local):
+            return local
+    return MODEL_IDS.get(engine, MODEL_IDS[DEFAULT_TTS_ENGINE])
+
+
+def resolve_speaker(voice: str) -> tuple[str, str | None]:
+    """
+    把 `voice` 归一成 (预置音色名, 情感指令)
+
+    CustomVoice 只认预置音色名，传一句音色描述会直接抛
+    `Speaker 'xxx' not supported`。而历史配置里存的是 VoiceDesign 语义的
+    描述文本（如「少年女性22 岁，中音区，语速正常，吐字清晰」）。两者不能
+    混用，所以在这里做一次语义转换：
+
+    - 命中预置音色名（大小写、空格、连字符不敏感）→ 直接用
+    - 否则 → 退回默认音色，原描述改当 `instruct`（1.7B 支持情感/风格指令）
+      这样「语速正常、吐字清晰、利落」这类风格要求还能保留一部分
+
+    @param voice 音色名或音色描述
+    @returns (speaker, instruct)
+    """
+    text = (voice or "").strip()
+    key = text.lower().replace("-", "_").replace(" ", "_")
+    if key in CUSTOMVOICE_SPEAKERS:
+        return key, None
+    return DEFAULT_CUSTOMVOICE_SPEAKER, (text or None)
 
 # 采样随机种子的派生基数
 #
@@ -315,11 +387,18 @@ def probe_deps() -> dict[str, Any]:
         from mlx_audio.tts.utils import load_model  # noqa: F401
 
         # mlx_audio 只是"库在"，具体模型要等首次加载才知道能不能跑
-        out["tts"] = {"model": MODEL_IDS[DEFAULT_TTS_ENGINE], "ready": True}
+        out["tts"] = {
+            "engine": DEFAULT_TTS_ENGINE,
+            "model": resolve_tts_model_id(DEFAULT_TTS_ENGINE),
+            # 预置音色列表：/health 报出来，用户才知道能填哪些名字
+            "speakers": list(CUSTOMVOICE_SPEAKERS),
+            "ready": True,
+        }
         out["versions"]["mlx_audio"] = getattr(mlx_audio, "version", None) or "ok"
     except Exception as exc:
         out["tts"] = {
-            "model": MODEL_IDS[DEFAULT_TTS_ENGINE],
+            "engine": DEFAULT_TTS_ENGINE,
+            "model": resolve_tts_model_id(DEFAULT_TTS_ENGINE),
             "ready": False,
             "reason": f"mlx_audio 不可用：{exc}",
         }
@@ -353,7 +432,7 @@ class TtsEngine:
         """按需加载并缓存模型"""
         if engine in self._models:
             return self._models[engine]
-        model_id = MODEL_IDS.get(engine, MODEL_IDS[DEFAULT_TTS_ENGINE])
+        model_id = resolve_tts_model_id(engine)
         from mlx_audio.tts.utils import load_model
 
         model = load_model(model_id)
@@ -391,11 +470,15 @@ class TtsEngine:
                 )
                 native_speed = False
             elif engine == "qwen3-customvoice":
+                # 音色锁在预置 speaker 上，跨句不再重新"设计"；原描述降级为
+                # 情感/风格指令（1.7B 支持，0.6B 会被模型内部忽略）
+                speaker, instruct = resolve_speaker(voice)
                 chunks = list(
                     model.generate_custom_voice(
                         text=text,
-                        speaker=voice or "Vivian",
+                        speaker=speaker,
                         language=TTS_LANGUAGE,
+                        instruct=instruct,
                     )
                 )
                 native_speed = False

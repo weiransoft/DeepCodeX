@@ -34,6 +34,65 @@ import type { MemoryGroup, MemoryItemView, OceanTraits, Soul, SoulMemory, SoulMo
 const PROMPT_MEMORY_BUDGET = 14;
 
 /**
+ * 默认时区
+ *
+ * 模型本身没有时钟，训练数据里也没有「今天」。不注入时间时，任何
+ * 「今天几号 / 现在几点 / 明天周几」的问题都只能靠猜——而它会用训练
+ * 截止日期当"现在"，答案必然错。
+ *
+ * 默认北京时间：这个项目的主要使用者在中国。换时区不必改代码，
+ * 设 `DEEPCODE_TIMEZONE`（IANA 名，如 `America/New_York`）即可。
+ */
+export const DEFAULT_TIME_ZONE = "Asia/Shanghai";
+
+/**
+ * 当前时区（环境变量可覆盖）
+ *
+ * @returns IANA 时区名
+ */
+export function resolveTimeZone(): string {
+  const fromEnv = process.env.DEEPCODE_TIMEZONE?.trim();
+  return fromEnv && fromEnv.length > 0 ? fromEnv : DEFAULT_TIME_ZONE;
+}
+
+/**
+ * 把时间戳渲染成一行人类可读的本地时间
+ *
+ * 自己用 `formatToParts` 拼而不是直接用 `format()`：不同 Node/ICU 版本
+ * 的中文日期格式里有细微差异（如「2026/11/5」与「2026年11月5日」），
+ * 拼装出来的字符串才是稳定可测的。
+ *
+ * @param now 时间戳（毫秒）
+ * @param timeZone IANA 时区名（非法时退回系统本地时区，而不是让提示词崩掉）
+ * @returns 形如 `2026年11月5日 星期四 23:15`
+ */
+export function formatClock(now: number, timeZone: string = DEFAULT_TIME_ZONE): string {
+  const build = (zone?: string): Intl.DateTimeFormatPart[] =>
+    new Intl.DateTimeFormat("zh-CN", {
+      ...(zone === undefined ? {} : { timeZone: zone }),
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+      weekday: "long",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(new Date(now));
+
+  let parts: Intl.DateTimeFormatPart[];
+  try {
+    parts = build(timeZone);
+  } catch {
+    // 时区名写错（RangeError）不该让整段系统提示词构造失败
+    parts = build(undefined);
+  }
+
+  const pick = (type: Intl.DateTimeFormatPartTypes): string => parts.find((part) => part.type === type)?.value ?? "";
+  const clock = `${pick("year")}年${pick("month")}月${pick("day")}日 ${pick("weekday")} ${pick("hour")}:${pick("minute")}`;
+  return clock;
+}
+
+/**
  * 遮蔽敏感值
  *
  * 保留末 4 位用于**人**区分「生产库密码」和「测试库密码」，
@@ -85,6 +144,12 @@ export interface RenderOptions {
   readonly memoryBudget?: number;
   /** 当前时间（测试注入） */
   readonly now?: number;
+  /**
+   * 时区（默认 `DEEPCODE_TIMEZONE`，再缺省为东八区）
+   *
+   * 只在测试里显式指定：生产走环境变量，避免把时区写死在调用点。
+   */
+  readonly timeZone?: string;
   /**
    * 覆盖模式段（默认跟随 `soul.mode`）
    *
@@ -235,6 +300,19 @@ export function renderSoulPrompt(soul: Soul, options: RenderOptions = {}): strin
       `尚未记录：${missing.map((category) => categoryLabel(category)).join("、")}。涉及这些事时可直接问一次并建议记下来，不要编造。`
     );
   }
+
+  // ---- 此刻 ----
+  //
+  // 放在**最后**是有意的：这一行每分钟都在变，若放在开头会让整段系统
+  // 提示词的前缀缓存全部失效（缓存按前缀匹配）。放末尾时，前面的人格与
+  // 记忆仍可命中缓存，而模型对结尾处的指令权重也不低。
+  const timeZone = options.timeZone ?? resolveTimeZone();
+  lines.push("");
+  lines.push("## 此刻");
+  lines.push(`${formatClock(now, timeZone)}（${timeZone}）。`);
+  lines.push(
+    "涉及「今天 / 明天 / 现在几点 / 过了多久」这类问题时，一律以这一行为准；不要用训练数据里的日期当今天。要换算别的时区，就以这一行为基准推算。"
+  );
 
   return lines.join("\n");
 }

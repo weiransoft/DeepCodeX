@@ -473,7 +473,7 @@ export function SoulAppearancePane() {
             }
           >
             <option value="qwen3-voicedesign">Qwen3-TTS VoiceDesign（中文首选，按描述造音色）</option>
-            <option value="qwen3-customvoice">Qwen3-TTS CustomVoice（预置音色，更轻）</option>
+            <option value="qwen3-customvoice">Qwen3-TTS CustomVoice（预置音色，跨句最稳）</option>
             <option value="kokoro">Kokoro（轻量兜底）</option>
           </select>
         </div>

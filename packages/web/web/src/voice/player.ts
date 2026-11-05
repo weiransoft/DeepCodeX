@@ -215,6 +215,15 @@ export class SpeechQueue {
           URL.revokeObjectURL(url);
           break;
         }
+        // 关键：**播之前**就把下一句送去合成，让合成与播放并行。
+        //
+        // 原先只在 `playOne` 末尾调 `warmPrefetch()`，那一刻当前句已经播完，
+        // 下一句的合成才刚开始。于是每两句之间固定空等一次完整合成时间
+        // （实测 RTF≈0.19，一句 3.5s 音频要 0.5~0.9s 合成），听感就是
+        // 「前一句说完了，停一下，后一句才出来」。
+        //
+        // 合成比播放快 5 倍，只要在播放期间就把下一句合成好，句间就没有等待。
+        this.warmPrefetch();
         await this.playOne(text, url);
       }
     } finally {

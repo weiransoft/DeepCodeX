@@ -62,8 +62,8 @@ scripts/voice/.venv/bin/python scripts/voice/mlx_voice_server.py --selftest
 |---|---|---|
 | ASR（首选） | `mlx-community/Qwen3-ASR-0.6B-8bit` | 中文更准，**需要本地权重**（见下节） |
 | ASR（兜底） | `mlx-community/whisper-large-v3-turbo` | 权重缺失或推理失败时自动回落 |
-| TTS（默认） | `mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit` | 用一句话描述音色（1.8GB） |
-| TTS（轻） | `mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit` | 预置音色 + 情感指令，更小 |
+| TTS（默认） | `mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit` | 预置音色，**跨句音色锁死**（本地权重 2.9GB） |
+| TTS（自定义音色） | `mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit` | 用一句话描述音色，但跨句会漂（见下） |
 | TTS 兜底 | `prince-canuma/Kokoro-82M` | 轻、快，"至少能出声" |
 
 ### ASR 为什么换成 Qwen3-ASR
@@ -140,6 +140,83 @@ VoiceDesign 会把这段描述当成声学指令。本机实测（同一句话�
 
 英文括号部分不是凑字数：这个模型的训练语料以英文描述为主，中英并列对
 「低沉、克制」这类倾向的还原更稳。
+
+## 音色为什么会「一会儿一个样」，怎么修
+
+用户反馈「音色还是出现了跳脱，前后不一致」。这一条在原理上是 VoiceDesign 的
+固有缺陷，不是参数没调好。
+
+### 先确认不是随机性
+
+固定 seed（按音色描述派生）+ 温度 0.35 之后，**同一句话**重复生成三次：
+
+| 引擎 | 三次基频中位数 | 三次时长 |
+|---|---|---|
+| VoiceDesign | 294.5 / 294.5 / 294.5 Hz | 4.72 / 4.72 / 4.72 s |
+| CustomVoice | 244.9 / 244.9 / 244.9 Hz | 5.92 / 5.92 / 5.92 s |
+
+逐位相同，说明随机性已经压住了。**问题出在不同文本之间**：VoiceDesign 每次
+调用都要"现场设计"一遍音色，换一段文本，自回归轨迹就变了，音色描述被重新
+诠释——同一描述下四句不同文本的基频中位数实测 170.2~200.0 Hz。
+
+### 业界怎么做
+
+- **预置音色**（CustomVoice）：音色是训练好的 speaker embedding，不参与采样，
+  跨句天生一致。业界评价是「最稳定、推理开销最低、一致性最好，长文本不易崩」
+- **先设计后克隆**（Design → Clone）：用 VoiceDesign 生成一段参考音频，再让
+  Base 模型以它为 `ref_audio` 做 ICL。能保留自定义音色且锁死声纹，代价是要多
+  一个 Base 权重、每次生成都要编码参考音频
+- **VoiceDesign**：适合角色试音，业界不建议用于长篇定稿
+
+### 现在选的是哪条
+
+`qwen3-customvoice`（1.7B）。选 1.7B 而不是 0.6B 的原因：0.6B 不支持 `instruct`，
+1.7B 支持——音色锁死的同时还能调情绪。
+
+9 个预置音色（`/health` 的 `tts.speakers` 会列出来）：
+
+```
+serena  vivian  uncle_fu  ryan  aiden  ono_anna  sohee  eric  dylan
+```
+
+切换方式（`~/.deepcode/soul/config.json`）：
+
+```json
+{ "voice": { "engine": "qwen3-customvoice", "voice": "vivian" } }
+```
+
+`voice` 填音色名时直接用它；填一段描述（旧配置的写法）会自动落到默认音色
+`vivian`，并把原描述当 `instruct` 传进去——这样「语速正常、吐字清晰、利落」
+这类风格要求还能保留一部分，但音色本身不再由描述决定。
+
+### 一个诚实的边界
+
+**没有做量化证明「听感一定更好」**。可用的度量都不够硬：基频中位数会被文本
+语调污染（陈述句与疑问句本来就不同）；频谱包络的余弦相似度两者都在
+0.96~0.98（VoiceDesign 0.9597 / CustomVoice 0.9648，方向一致但区分度低）；
+最该用的声纹编码器（`extract_speaker_embedding`）在这两个 8bit 权重上取不到。
+
+支撑结论的是原理与业界共识，不是听感对照实验。要保留自定义音色，得走
+Design-then-Clone（需要再下一份 Base 权重，本轮未做）。
+
+## 播报为什么会有句间空档
+
+用户反馈「前一句后一句中间卡顿」。实测 TTS 的 RTF≈0.19（**合成比播放快 5 倍**：
+一句 3.5s 的音频只要 0.5~0.9s 合成），所以瓶颈不在合成速度。
+
+真因在播放队列的**预取时机**：`warmPrefetch()` 原先只在 `playOne` 末尾调用，
+那一刻当前句已经播完，下一句的合成才刚开始。于是每两句之间固定空等一次完整
+合成时间——听感就是「说完了，停一下，下一句才出来」。
+
+修法是在 `playOne` **之前**就预取（`packages/web/web/src/voice/player.ts`），
+让合成与播放并行。回归用例 P7 锁住事件顺序（第二句的合成必须早于第一句的
+`ended`）；把预取挪回原位置时该用例会失败，可以确认它真的测到了这个行为。
+
+**仍然存在的**：每句仍是一个独立 `HTMLAudioElement`，元素切换本身有几十毫秒
+的启动开销。要进一步消掉，需要改成 Web Audio 的 `AudioBufferSourceNode` 按
+采样时间排程（sample-accurate，天然无缝），或者让 sidecar 走流式输出
+（`generate_*` 都支持 `stream=True`，目前用 `list(chunks)` 全量收集，没用上）。
+两者都还没做。
 
 ## 鉴权
 

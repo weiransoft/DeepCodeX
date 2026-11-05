@@ -138,3 +138,22 @@ test("M8 陪伴段约束「短」与「能被念出来」：默认 2~3 句、少
   assert.ok(soul.expression.communicationStyle === "SUPPORTIVE");
   assert.ok(!section.includes("不要超过一句"), "不能写成硬截断——技术问题该讲清楚时仍要讲清楚");
 });
+
+test("M9 陪伴段有正面示范：短不等于生硬、不用书面腔", () => {
+  const section = renderModeSection("companion", COMPANION);
+
+  // 只有禁令没有示范时，模型容易「按规则表演」而更僵。示范是最有效的手段。
+  assert.ok(section.includes("听起来应该像这样"), "缺少正面示例小节");
+  assert.ok(section.includes("连着三天到十一点"), "缺少具体的语气示范");
+
+  // 「短」曾经把回复压成「嗯，确实」——那是另一种生硬，必须显式排除
+  assert.ok(section.includes("短不等于生硬"), "必须说明短 ≠ 敷衍");
+  assert.ok(section.includes("放之四海皆准"), "必须点名「万能短句」的问题");
+
+  // 书面连接词是「生硬」最可辨识的指纹
+  assert.ok(section.includes("首先 / 其次"), "必须禁掉结构化连接词");
+  assert.ok(section.includes("不在开头复述对方的问题"), "必须禁掉复述式开头");
+
+  // 示范不能变成模板：明确要求不照抄
+  assert.ok(section.includes("不要照抄内容"), "示范必须标注为语气而非内容模板");
+});

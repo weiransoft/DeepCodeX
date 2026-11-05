@@ -48,11 +48,13 @@ class FakeAudio {
    * @param url objectURL
    * @param mode 行为模式
    * @param step 每次推进的秒数
+   * @param hooks 观测钩子（用于断言事件顺序）
    */
   constructor(
     url: string,
     private readonly mode: Mode,
-    private readonly step = 0.05
+    private readonly step = 0.05,
+    private readonly hooks: { onEnd?: () => void } = {}
   ) {
     this.src = url;
   }
@@ -77,6 +79,7 @@ class FakeAudio {
         this.ended = true;
         if (this.timer !== null) clearInterval(this.timer);
         this.timer = null;
+        this.hooks.onEnd?.();
         this.onended?.();
       }
     }, 10);
@@ -351,6 +354,45 @@ test("P6 play() 被拒（autoplay 拦截）不卡死，继续下一句", async (
       errors.some((m) => m.includes("播放失败")),
       `要提示播放失败，实际 ${JSON.stringify(errors)}`
     );
+  } finally {
+    url.restore();
+  }
+});
+
+test("P7 预取与播放并行：下一句在第一句播完之前就开始合成（回归：句间空等一次合成）", async () => {
+  // 实测 TTS 的 RTF≈0.19（合成比播放快 5 倍），所以只要在**播放期间**把下一句
+  // 送去合成，句间就不该有任何等待。原实现的 warmPrefetch() 在 playOne 末尾
+  // 才调用——那一刻当前句已经播完，下一句的合成才刚开始，于是每两句之间
+  // 固定空等一次完整合成时间（实测 0.5~0.9 秒），听感就是"前一句说完了，
+  // 停一下，后一句才出来"。
+  const url = stubObjectUrl();
+  try {
+    const events: string[] = [];
+    const queue = new SpeechQueue(
+      async (text) => {
+        events.push(`synth:${text}`);
+        return `blob:${text}`;
+      },
+      {},
+      {
+        createAudio: (u) => {
+          const label = u.replace("blob:", "");
+          // step 放慢，让"第一句播放期间"这个窗口足够宽，事件顺序才有区分度
+          const audio = new FakeAudio(u, "ok", 0.01, { onEnd: () => events.push(`end:${label}`) });
+          events.push(`play:${label}`);
+          return audio as unknown as HTMLAudioElement;
+        },
+      }
+    );
+
+    queue.enqueue("第一句。");
+    queue.enqueue("第二句。");
+    await waitFor(() => events.includes("end:第二句。"));
+
+    const synthSecond = events.indexOf("synth:第二句。");
+    const endFirst = events.indexOf("end:第一句。");
+    assert.ok(synthSecond >= 0 && endFirst >= 0, `事件不全：${events.join(" → ")}`);
+    assert.ok(synthSecond < endFirst, `第二句应在第一句播完前就开始合成，实际顺序：${events.join(" → ")}`);
   } finally {
     url.restore();
   }
