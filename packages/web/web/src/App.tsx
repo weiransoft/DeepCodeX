@@ -252,7 +252,7 @@ export function App() {
             kind: "assistant",
             id: "stream",
             content: null,
-            preview: e.previewText,
+            preview: e.previewText ?? null,
             thinking: e.thinkingText,
             done: false,
           };
@@ -265,7 +265,7 @@ export function App() {
             kind: "assistant",
             id: "stream",
             content: null,
-            preview: e.previewText,
+            preview: e.previewText ?? null,
             thinking: e.thinkingText,
             done: false,
           },

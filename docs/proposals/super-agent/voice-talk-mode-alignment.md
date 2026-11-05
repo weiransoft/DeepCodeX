@@ -164,3 +164,53 @@ mlx_whisper.transcribe(audio, ..., language="zh",
 - 没测**长会话**下模式切换的记忆一致性（此前只验证过「老会话不被改写」这一条）。
 - 没测**语音+陪伴**的合流：`speakReplies` 打开时，TTS 读的是这条回复，但「听起来」的语气（语速、停顿是否配得上陪伴）没有做主观评测。
 - 全流程仍是**手动探测**（脚本发消息 + 轮询取回复），没有沉淀成自动化用例——`api/chats` 的 SSE 事件流没有接进测试。
+
+## 七、补验：点了麦克风，界面上什么都没有动
+
+**用户报的现象**：点麦克风之后没有任何"在收音"的迹象，无从判断到底有没有在听。
+
+**根因不是麦克风坏了，是从来没画过**。`MicCapture` 录音时确实每 50ms 算一次 RMS，但这个数字只喂给 `Endpointer`（判断说没说完）就丢了；`useVoiceTalk` 没有电平状态；`Composer` 只根据 `recording` 把按钮染成红色——**这个红色和声音大小无关，麦克风被静音时它照样红**。也就是说，界面给出的那个"在用"的信号，恰恰是唯一不能证明"在收"的信号。
+
+### 7.1 改了什么
+
+| 层 | 改动 | 为什么这么改 |
+| --- | --- | --- |
+| `voice/mic.ts` | 录音期采样循环从「只在有 endpointer 时启动」改为「有 `onLevel` 或 `onEndpoint` 就启动」，一帧算一次 RMS 后**先报电平、再喂判定** | 按住说话没有 endpointer，但同样要看见电平；拆成两个循环会让同一路音频被两处独立采样，出现"条在动、判定说你在静音"的自相矛盾 |
+| `voice/level.ts`（新） | `nextSmoothedLevel`（上升 0.6 / 下降 0.18）、`quantizeLevel`（12 档）、`isSignalAbsent`、`barWeight` / `barHeight` | 原始 RMS 抖动剧烈，直接上屏是抽搐；量化到 12 档后**只有跨档才 setState**，静音时零重渲染（Composer 是千行组件，20fps 重渲染会让打字发涩） |
+| `voice/useVoiceTalk.ts` | 新增 `level` / `noSignal`；开录 2.5s 内峰值低于阈值就提示，一旦有声音立刻撤销 | 用户最需要的其实不是"条在动"，而是"**没在动的时候为什么**" |
+| `components/Composer.tsx` | 录音时输入框上方浮出 12 格阶梯条 + 状态文案；按钮光晕半径由 `--voice-level` 驱动 | 固定节奏的呼吸动画在麦克风被静音时照样跳，是**骗人**的动画，已删除 |
+| `styles.css` | `.composer-voice*` 一组样式；移除 `.composer-mic-pulse` keyframes | 同上 |
+
+两处标定值得记下来，因为都是实测调出来的：
+
+- **满量程 0.35**（不是 1.0，也不是 0.5）。正常说话 RMS 0.05~0.3，按 1.0 归一只走到 10~20%，按 0.5 也只到 40%——第一版就是 0.5，真机截图里条只走到半截，看上去仍然像"没在收"。0.35 下正常说话到 40%~70%。
+- **静音底座 16%**（`BAR_FLOOR`）。不留底座的话，安静的瞬间整排消失，用户会以为检测条没了。
+
+### 7.2 顺带修掉一个更严重的 bug
+
+真浏览器验证时抓到 `TypeError: Cannot read properties of undefined (reading 'replace')`，堆栈落在 `feed → scanVoiceDirective`。
+
+`llm_delta` 的 `previewText` 在 `start` 帧和纯 thinking 增量上是 **undefined**（core 的 `LlmStreamProgress.previewText` 声明为可选，`formatStreamPreview` 对 undefined 原样透传），但 Web 端的 `LlmDeltaEvent.previewText` 写成了必填 `string`——类型撒了谎，消费方就没人挡。
+
+后果不只是崩：`feedVoice(e.previewText)` 在 `onLlmDelta` 里跑在 `setEntries` **之前**，一抛就整帧跳过。所以真实症状是「**开了语音播报之后，某些回复的正文根本不显示**」——一个纯 UI 的流式渲染故障，起因在一万行之外的语音模块。
+
+修法三层：`sse.ts` 类型改成可选并写明为什么；`feedVoice` 在总线边界挡掉 undefined 与空串；`feed` 对空串早退（否则 `start` 帧会重建 `SentenceStream` 并把 `speechEndAtRef` 刷掉，TTFA 埋点会算成 0）。
+
+### 7.3 验证
+
+单测之外，用 Chromium 的 `--use-file-for-fake-audio-capture` 做了**真浏览器验证**：不是 mock，页面走完整链路 `getUserMedia → MediaStream → AnalyserNode → RMS → 平滑量化 → React 渲染`，只把麦克风硬件换成一段 wav。
+
+| 场景 | 结果 |
+| --- | --- |
+| 有声（220/440/660Hz 叠加 + 4Hz 包络，峰值 0.4） | 检测条高度 **6px → 18px** 连续起伏；文案「正在听…说完自动发送」；12 格齐全 |
+| 全静音 wav | 1.2s 时仍是「正在听…」（不误报）；3.5s 切警示态「没检测到声音 · 检查静音键、输入设备是否选错，或被其他应用占用」，条压成灰色底座且无起伏 |
+| 结束录音 | 检测条立即移除，无残留 |
+| 控制台 | 无 `console.error`、无未捕获异常（修复 `previewText` 之前这里每次都有两条 TypeError） |
+
+单测：`voice-level.test.ts` 10 条（平滑/量化/无信号/底座/NaN 断路）、`voice-mic-level.test.ts` 6 条（按住说话也报电平、电平与判定同帧、判定后自停、释放后不回调、无回调不建 AudioContext、一次录音只建一个 context）、`voice-bus-feed.test.ts` 5 条（undefined/空串不转发、正文照常转发、无人注册静默、注销后不喂）。web 包全量 **513/513**。
+
+### 7.4 仍然没证明什么
+
+- **真人麦克风的电平标定**。假音频是合成波，RMS 稳定可预测；真人说话的动态范围更宽，0.35 这个满量程在真实环境里是否正好，要真人实测才敢定稿。
+- **系统级 AEC 的影响**。`echoCancellation: true` 开着，外放播报时真实回声被削掉多少、会不会连带压低近讲电平，没测。
+- **移动端浏览器**。只在 Chromium（桌面）上验过；Safari 的 `AudioContext` 需要用户手势解锁，`resume()` 兜底是否足够未知。

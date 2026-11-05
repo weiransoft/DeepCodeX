@@ -48,9 +48,16 @@ export function registerVoice(voice: VoiceTalk): () => void {
 /**
  * 喂一段累积文本（无人注册时静默忽略）
  *
- * @param cumulative 累积文本
+ * 这里是 SSE → 语音的**边界**，因此要挡脏值：`llm_delta` 的 `previewText`
+ * 在 `start` 帧与纯 thinking 增量上是 undefined（core 契约允许缺省）。
+ * 不挡的话它会一路传进 `scanVoiceDirective` 的 `cumulative.replace(...)`，
+ * 抛 TypeError——而这条调用发生在 `onLlmDelta` 里 `setEntries` 之前，
+ * 一抛就整帧跳过，表现为「开了语音之后某些回复的正文根本不显示」。
+ *
+ * @param cumulative 累积正文（可能缺省）
  */
-export function feedVoice(cumulative: string): void {
+export function feedVoice(cumulative?: string): void {
+  if (typeof cumulative !== "string" || cumulative.length === 0) return;
   current?.feed(cumulative);
 }
 

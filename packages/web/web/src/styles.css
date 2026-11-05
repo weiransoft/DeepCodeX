@@ -1749,6 +1749,51 @@ body {
   font-size: 12px;
   color: var(--app-danger);
 }
+
+/* 录音电平条：12 格阶梯，格高由采集到的实时 RMS 驱动。
+   作用是让"麦克风有没有在收"变成看得见的事实，而不是只能等识别结果。 */
+.composer-voice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px 0;
+  font-size: 12px;
+  color: var(--app-text-secondary);
+}
+
+.composer-voice-bars {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 20px;
+  flex: 0 0 auto;
+}
+
+.composer-voice-bars i {
+  display: block;
+  width: 3px;
+  min-height: 2px;
+  border-radius: 2px;
+  background: var(--app-danger);
+  /* 高度由 JS 按档位内联给出；补一个短过渡把 12 档的台阶抹成连续起伏 */
+  transition: height 80ms linear;
+}
+
+.composer-voice-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 长时间一点声音都没收到：条压成灰、文案转警示色。
+   这时用户该去看静音键 / 输入设备，而不是反复重说。 */
+.composer-voice-silent .composer-voice-bars i {
+  background: var(--app-text-tertiary);
+}
+
+.composer-voice-silent .composer-voice-text {
+  color: var(--app-danger);
+}
 .composer-main {
   display: flex;
   align-items: flex-end;
@@ -4746,7 +4791,11 @@ a.icon-btn {
   color: #ffffff;
   background: var(--app-danger);
   border-color: var(--app-danger);
-  animation: composer-mic-pulse 1.1s ease-in-out infinite;
+  /* 光晕半径由实时电平（--voice-level）决定：安静时收成实心圆点，
+     一开口就撑开。这是"麦克风真的在收"最直接的证据，比固定节奏的
+     呼吸动画诚实——呼吸动画在麦克风被静音时照样跳，反而骗人。 */
+  box-shadow: 0 0 0 calc(1px + var(--voice-level, 0) * 6px) rgba(217, 48, 38, 0.3);
+  transition: box-shadow 90ms linear;
 }
 
 .composer-mic-speaking {
@@ -4770,15 +4819,5 @@ a.icon-btn {
   }
   50% {
     opacity: 0.45;
-  }
-}
-
-@keyframes composer-mic-pulse {
-  0%,
-  100% {
-    box-shadow: 0 0 0 0 rgba(217, 48, 38, 0.45);
-  }
-  50% {
-    box-shadow: 0 0 0 5px rgba(217, 48, 38, 0);
   }
 }

@@ -25,6 +25,19 @@
  * 判定器与采集分开：这边只负责按帧喂 RMS，判「说没说完」在纯状态机里，
  * 可以脱开浏览器单测。
  *
+ * ## 电平外报（`onLevel`）
+ *
+ * 录音期的 RMS 原本只喂给判定器，算完就丢——结果界面上"正在录音"只有一个
+ * 静态的按钮变色，用户根本看不出麦克风有没有真的在收东西。现在同一帧的
+ * RMS 会额外通过 `onLevel` 报出去，UI 用它画检测条。
+ *
+ * **电平与判定共用一个采样循环**：拆成两个 `AudioContext` 会对同一路音频
+ * 建两条图、两个定时器，既费电又可能因为两次采样不同步让"条在动"和
+ * "判定说静音"互相矛盾。一帧算一次、喂两处，从根上消除这种不一致。
+ *
+ * 只在 `onEndpoint` 存在时才起循环是不够的——按住说话模式没有判定器，
+ * 但同样需要看见电平，所以起循环的条件是「两个回调有一个存在」。
+ *
  * @module web/voice/mic
  */
 
@@ -44,6 +57,24 @@ export const VAD_MIN_SPEECH_MS = 300;
 
 /** 录音上限（毫秒）：防止用户按住不放生成超大文件 */
 export const MAX_RECORD_MS = 60_000;
+
+/**
+ * 一帧电平原值回调
+ *
+ * 收到的是未平滑的瞬时 RMS，平滑与量化由 `voice/level.ts` 负责——
+ * 采集层不该知道"UI 想要几档"。
+ */
+export type LevelHandler = (rms: number) => void;
+
+/** 录音选项 */
+export interface RecordingOptions {
+  /** 说完判定回调（存在才会跑静音检测） */
+  onEndpoint?: (verdict: EndpointVerdict) => void;
+  /** 说完判定参数 */
+  endpoint?: EndpointOptions;
+  /** 每帧电平回调（存在才会跑采样循环；与判定共用同一循环） */
+  onLevel?: LevelHandler;
+}
 
 /**
  * 麦克风错误的人类可读翻译
@@ -81,10 +112,10 @@ export class MicCapture {
   private audioContext: AudioContext | null = null;
   /** 电平监测循环句柄 */
   private monitorTimer: ReturnType<typeof setInterval> | null = null;
-  /** 录音期「说完判定」的音频上下文（与打断监测分开，避免互相关闭） */
-  private endpointContext: AudioContext | null = null;
-  /** 说完判定的采样循环 */
-  private endpointTimer: ReturnType<typeof setInterval> | null = null;
+  /** 录音期「电平 + 说完判定」的音频上下文（与打断监测分开，避免互相关闭） */
+  private levelContext: AudioContext | null = null;
+  /** 录音期电平/判定采样循环 */
+  private levelTimer: ReturnType<typeof setInterval> | null = null;
   /** 录音超时句柄 */
   private maxTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -111,13 +142,9 @@ export class MicCapture {
    * 开始录音
    *
    * @param onMaxDuration 达到上限时的回调（自动停止）
-   * @param options 说完判定（给了 `onEndpoint` 才会启动静音检测；
-   *   回调会带上判定结果，`idle` 为真表示这一段从头到尾没人说话）
+   * @param options 说完判定 + 电平外报（两者都没给就不起采样循环）
    */
-  async startRecording(
-    onMaxDuration?: () => void,
-    options: { onEndpoint?: (verdict: EndpointVerdict) => void; endpoint?: EndpointOptions } = {}
-  ): Promise<void> {
+  async startRecording(onMaxDuration?: () => void, options: RecordingOptions = {}): Promise<void> {
     const stream = await this.open();
     this.chunks = [];
     const recorder = new MediaRecorder(stream);
@@ -127,59 +154,60 @@ export class MicCapture {
     recorder.start();
     this.recorder = recorder;
     this.maxTimer = setTimeout(() => onMaxDuration?.(), MAX_RECORD_MS);
-    if (options.onEndpoint !== undefined) this.watchEndpoint(stream, options.onEndpoint, options.endpoint);
+    if (options.onEndpoint !== undefined || options.onLevel !== undefined) {
+      this.watchLevels(stream, options);
+    }
   }
 
   /**
-   * 录音期静音收尾监测
+   * 录音期电平采样（同时驱动说完判定）
    *
-   * 判定逻辑全在 `Endpointer` 里，这里只按帧喂 RMS 并在判定「说完了」时
-   * 停掉自己的采样（`onEndpoint` 之后调用方通常会立刻 stopRecording，
-   * 提前停掉避免两个定时器同时读同一路音频）。
+   * 一帧算一次 RMS，先报电平、再喂判定器。判定逻辑全在 `Endpointer` 里，
+   * 这里只负责按帧送数，判「说完了」之后停掉自己的采样（`onEndpoint`
+   * 之后调用方通常会立刻 stopRecording，提前停掉避免两个定时器同时读同一路音频）。
    *
    * @param stream 媒体流
-   * @param onEndpoint 判定说完时的回调
-   * @param endpoint 判定参数
+   * @param options 电平回调与判定回调
    */
-  private watchEndpoint(
-    stream: MediaStream,
-    onEndpoint: (verdict: EndpointVerdict) => void,
-    endpoint?: EndpointOptions
-  ): void {
-    this.stopEndpointWatch();
+  private watchLevels(stream: MediaStream, options: RecordingOptions): void {
+    this.stopLevelWatch();
     const context = new AudioContext();
-    this.endpointContext = context;
+    this.levelContext = context;
     const source = context.createMediaStreamSource(stream);
     const analyser = context.createAnalyser();
     analyser.fftSize = 1024;
     source.connect(analyser);
+    // 部分浏览器把新建的 AudioContext 置为 suspended，不 resume 会一直读 0
+    void context.resume().catch(() => {});
 
     const buffer = new Float32Array(analyser.fftSize);
-    const endpointer = new Endpointer(endpoint);
-    const frameMs = endpoint?.frameMs ?? 50;
+    const endpointer = options.onEndpoint === undefined ? null : new Endpointer(options.endpoint);
+    const frameMs = options.endpoint?.frameMs ?? VAD_FRAME_MS;
 
-    this.endpointTimer = setInterval(() => {
+    this.levelTimer = setInterval(() => {
       analyser.getFloatTimeDomainData(buffer);
       let sum = 0;
       for (let i = 0; i < buffer.length; i += 1) sum += buffer[i] * buffer[i];
       const rms = Math.sqrt(sum / buffer.length);
+      options.onLevel?.(rms);
+      if (endpointer === null || options.onEndpoint === undefined) return;
       const verdict = endpointer.push(rms);
       if (verdict.done) {
-        this.stopEndpointWatch();
-        onEndpoint(verdict);
+        this.stopLevelWatch();
+        options.onEndpoint(verdict);
       }
     }, frameMs);
   }
 
-  /** 停掉说完判定（幂等） */
-  private stopEndpointWatch(): void {
-    if (this.endpointTimer !== null) {
-      clearInterval(this.endpointTimer);
-      this.endpointTimer = null;
+  /** 停掉录音期电平采样（幂等） */
+  private stopLevelWatch(): void {
+    if (this.levelTimer !== null) {
+      clearInterval(this.levelTimer);
+      this.levelTimer = null;
     }
-    if (this.endpointContext !== null) {
-      void this.endpointContext.close();
-      this.endpointContext = null;
+    if (this.levelContext !== null) {
+      void this.levelContext.close();
+      this.levelContext = null;
     }
   }
 
@@ -189,7 +217,7 @@ export class MicCapture {
    * @returns WAV Blob（无有效音频时抛错）
    */
   async stopRecording(): Promise<Blob> {
-    this.stopEndpointWatch();
+    this.stopLevelWatch();
     const recorder = this.recorder;
     this.recorder = null;
     if (this.maxTimer !== null) {
@@ -276,7 +304,7 @@ export class MicCapture {
   /** 释放麦克风（页面卸载/关闭语音模式时调用） */
   release(): void {
     this.stopMonitor();
-    this.stopEndpointWatch();
+    this.stopLevelWatch();
     if (this.recorder !== null) {
       try {
         this.recorder.stop();

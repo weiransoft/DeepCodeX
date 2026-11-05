@@ -54,12 +54,16 @@ import { scanVoiceDirective, settleVoiceDirective, type VoiceDirective } from ".
 import { defaultHandsFree, readHandsFree, subscribeHandsFree, writeHandsFree } from "./preference";
 import { subscribeSoulConfigChanged } from "./config-events";
 import { WakeListener } from "./wake-listener";
+import { SILENCE_PEAK, isSignalAbsent, nextSmoothedLevel, quantizeLevel } from "./level";
 
 /** 延迟样本保留条数（够看趋势，不至于无限增长） */
 const LATENCY_SAMPLES = 10;
 
 /** thinking 相位的兜底时长：模型/链路异常时不至于永远显示「在想」 */
 const THINKING_TIMEOUT_MS = 8000;
+
+/** 开录后多久还没听到任何声音就提示「没检测到声音」 */
+const NO_SIGNAL_HINT_MS = 2500;
 
 /** 一轮延迟样本 */
 export interface LatencySample {
@@ -103,6 +107,10 @@ export interface VoiceTalk {
   speaking: boolean;
   /** 当前相位（UI 用它区分「在听」「在想」「在说」） */
   phase: VoicePhase;
+  /** 实时电平（0..1，已平滑并量化到 12 档；静音时为 0） */
+  level: number;
+  /** 开录后一直没听到声音（提示用户查静音键 / 输入设备 / 占用） */
+  noSignal: boolean;
   /** 是否免按住（点一下开始，静音自动提交） */
   handsFree: boolean;
   /** 语音链路状态（未探测为 null） */
@@ -157,6 +165,9 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   const [latencies, setLatencies] = useState<LatencySample[]>([]);
   const [lastInterruption, setLastInterruption] = useState<VoiceInterruption | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** 实时电平（量化后的 0..1）与「一直没声音」提示 */
+  const [level, setLevel] = useState(0);
+  const [noSignal, setNoSignal] = useState(false);
   /** 唤醒词与开关（来自服务端配置；默认关，用户显式打开才常驻监听） */
   const [wakeEnabled, setWakeEnabled] = useState(false);
   const [wakeWord, setWakeWord] = useState("");
@@ -183,6 +194,62 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
 
   /** thinking 兜底定时器 */
   const thinkingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /**
+   * 电平可视化用的一组 ref
+   *
+   * 全部走 ref 而不是 state，是因为 `onLevel` 每 50ms 被调一次：如果每帧都
+   * setState，整个 Composer（千行级）要重渲染 20 次/秒，打字会明显发涩。
+   * 这里的策略是「ref 里算、只在跨档时 setState」——静音时一次都不触发。
+   */
+  const levelSmoothRef = useRef(0);
+  const levelBucketRef = useRef(0);
+  const levelPeakRef = useRef(0);
+  const noSignalRef = useRef(false);
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /** 清掉「没检测到声音」的定时器 */
+  const clearSilenceTimer = useCallback(() => {
+    if (silenceTimerRef.current !== null) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+  }, []);
+
+  /** 重置电平可视化状态（开录/收尾各一次） */
+  const resetLevelMeter = useCallback(() => {
+    clearSilenceTimer();
+    levelSmoothRef.current = 0;
+    levelBucketRef.current = 0;
+    levelPeakRef.current = 0;
+    noSignalRef.current = false;
+    setLevel(0);
+    setNoSignal(false);
+  }, [clearSilenceTimer]);
+
+  /**
+   * 采集电平的一帧
+   *
+   * 顺序有讲究：先记峰值、再判「声音回来了」、最后才更新条高。这样一旦用户
+   * 开口，提示语会立刻撤掉，而不是等这一段录完。
+   *
+   * @param rms 本帧原始 RMS（来自 `MicCapture`）
+   */
+  const handleLevel = useCallback((rms: number) => {
+    if (rms > levelPeakRef.current) levelPeakRef.current = rms;
+    if (noSignalRef.current && rms >= SILENCE_PEAK) {
+      // 声音回来了：提示必须马上消失，否则会和"条在动"自相矛盾
+      noSignalRef.current = false;
+      setNoSignal(false);
+    }
+    const smoothed = nextSmoothedLevel(levelSmoothRef.current, rms);
+    levelSmoothRef.current = smoothed;
+    const bucket = quantizeLevel(smoothed);
+    if (bucket !== levelBucketRef.current) {
+      levelBucketRef.current = bucket;
+      setLevel(bucket);
+    }
+  }, []);
 
   /** 写入免按住偏好（设置面板与输入框共用同一份存储） */
   const setHandsFree = useCallback((value: boolean) => {
@@ -305,6 +372,7 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   /** 结束录音并识别 */
   const stopTalk = useCallback(async (): Promise<string | null> => {
     setRecording(false);
+    resetLevelMeter();
     const mic = micRef.current;
     if (mic === null) return null;
     // 识别本身就是「在想」：从这一刻起 UI 该有反馈
@@ -324,43 +392,54 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
       setError(e instanceof Error ? e.message : String(e));
       return null;
     }
-  }, []);
+  }, [resetLevelMeter]);
 
   /** 开始录音 */
   const startTalk = useCallback(async () => {
     setError(null);
     queue().stop();
     stopBargeIn();
+    resetLevelMeter();
     if (micRef.current === null) micRef.current = new MicCapture();
     try {
-      await micRef.current.startRecording(
-        () => {
-          // 到达上限自动收尾，走同一条 stopTalk 路径由调用方处理
-          setRecording(false);
-        },
-        handsFree
-          ? {
-              // 免按住：静音即收尾，识别完直接交给调用方提交
-              // 成功后**不清** thinking：真正的下一站是模型回复（播报开始的
-              // onSpeakingChange 会清掉），中间这段等待本来就该显示"在想"。
-              onEndpoint: () => {
-                void stopTalk().then((text) => {
-                  if (text === null) {
-                    setWaiting(false);
-                    return;
-                  }
-                  optionsRef.current.onUtterance?.(text);
-                });
-              },
-            }
-          : {}
-      );
+      const onMaxDuration = () => {
+        // 到达上限自动收尾，走同一条 stopTalk 路径由调用方处理
+        setRecording(false);
+      };
+      const endpoint = handsFree
+        ? {
+            // 免按住：静音即收尾，识别完直接交给调用方提交
+            // 成功后**不清** thinking：真正的下一站是模型回复（播报开始的
+            // onSpeakingChange 会清掉），中间这段等待本来就该显示"在想"。
+            onEndpoint: () => {
+              void stopTalk().then((text) => {
+                if (text === null) {
+                  setWaiting(false);
+                  return;
+                }
+                optionsRef.current.onUtterance?.(text);
+              });
+            },
+          }
+        : {};
+      await micRef.current.startRecording(onMaxDuration, { onLevel: handleLevel, ...endpoint });
       setRecording(true);
+      // 开录一段时间后仍然一点声音都没有：多半是静音键、选错设备或被占用。
+      // 这条提示只在真的没信号时出现，用户一开口就撤（见 handleLevel）。
+      clearSilenceTimer();
+      silenceTimerRef.current = setTimeout(() => {
+        silenceTimerRef.current = null;
+        if (isSignalAbsent(levelPeakRef.current)) {
+          noSignalRef.current = true;
+          setNoSignal(true);
+        }
+      }, NO_SIGNAL_HINT_MS);
     } catch (e: unknown) {
       setError(explainMicError(e));
       setRecording(false);
+      resetLevelMeter();
     }
-  }, [queue, stopBargeIn, handsFree, stopTalk]);
+  }, [queue, stopBargeIn, stopTalk, handsFree, handleLevel, resetLevelMeter, clearSilenceTimer]);
 
   /** 免按住切换 */
   const toggleTalk = useCallback(async (): Promise<string | null> => {
@@ -433,6 +512,9 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   const feed = useCallback(
     (cumulative: string) => {
       if (!available || !speakReplies) return;
+      // 空帧直接跳过：`start` 阶段的累积文本是空串，喂进去会白白新建一个
+      // SentenceStream 并把 speechEndAt 重置一次，把 TTFA 埋点算成全 0。
+      if (cumulative.length === 0) return;
       if (streamRef.current === null) {
         streamRef.current = new SentenceStream();
         directiveStateRef.current = "unknown";
@@ -523,6 +605,10 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
     return () => {
       queueRef.current?.stop();
       micRef.current?.release();
+      if (silenceTimerRef.current !== null) {
+        clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
+      }
     };
   }, []);
 
@@ -535,6 +621,8 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
     recording,
     speaking,
     phase,
+    level,
+    noSignal,
     handsFree,
     status,
     latencies,

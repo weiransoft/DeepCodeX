@@ -28,8 +28,15 @@ export interface LlmDeltaEvent {
   chatId: string;
   /** start=开始生成 / update=内容更新 / end=生成结束 */
   phase: "start" | "update" | "end";
-  /** 当前累积的预览文本（纯文本，未完成 Markdown 不做半截解析） */
-  previewText: string;
+  /**
+   * 当前累积的预览文本（纯文本，未完成 Markdown 不做半截解析）
+   *
+   * **可能缺省**：`start` 帧与纯 thinking 增量没有正文，core 的
+   * `LlmStreamProgress.previewText` 本就是可选（`session.ts` 的
+   * `formatStreamPreview` 对 undefined 原样透传）。这里如实标成可选，
+   * 免得消费方以为拿到的永远是字符串——语音播报就因此在 undefined 上崩过。
+   */
+  previewText?: string;
   /**
    * 思考过程累积文本（docs/dev/web-thinking-display.md W1/F1）：
    * 与正文分离的 thinking/reasoning 增量，换行保留；旧服务缺省 undefined。

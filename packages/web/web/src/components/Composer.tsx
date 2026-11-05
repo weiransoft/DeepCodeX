@@ -16,7 +16,15 @@
  *   技能与智能体等价于插入 @token（与 @ 补全同源）；模型为桌面壳侧默认模型切换
  *   （模型经进程环境变量注入引擎，切换必然重启，故先确认）。
  */
-import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type CSSProperties,
+  type DragEvent,
+  type KeyboardEvent,
+} from "react";
 import { humanSize } from "../format";
 import type { UserAttachment } from "../chat-model";
 import { fetchCapabilities, type Capabilities, type CapabilityCommand } from "../api";
@@ -25,6 +33,7 @@ import { skillDisplayName, skillDisplaySummary } from "../skill-display";
 import { listModels, setDefaultModel, type ModelOption } from "../desktopConfig";
 import { useVoiceTalk } from "../voice/useVoiceTalk";
 import { registerVoice } from "../voice/voice-bus";
+import { LEVEL_BUCKETS, barHeight } from "../voice/level";
 import {
   BotAvatarIcon,
   CloseIcon,
@@ -972,6 +981,28 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
       {/* 行内错误提示（超限文件等） */}
       {error !== "" && <div className="composer-error">{error}</div>}
 
+      {/* 语音检测条。
+          之前录音只有一个"按钮变红"的静态反馈，用户没法判断麦克风到底有没有
+          在收东西——只能等说完看识别结果，失败了也不知道是哪一环。这条电平
+          直接读采集的 RMS，动静就是"在收"的证据。
+          一直没信号时（静音键/输入设备/被占用）换成一句可执行的排查提示。 */}
+      {voice.recording && (
+        <div className={`composer-voice${voice.noSignal ? " composer-voice-silent" : ""}`} role="status">
+          <span className="composer-voice-bars" aria-hidden="true">
+            {Array.from({ length: LEVEL_BUCKETS }, (_, i) => (
+              <i key={i} style={{ height: `${Math.round(barHeight(i, LEVEL_BUCKETS, voice.level) * 100)}%` }} />
+            ))}
+          </span>
+          <span className="composer-voice-text">
+            {voice.noSignal
+              ? "没检测到声音 · 检查静音键、输入设备是否选错，或被其他应用占用"
+              : voice.handsFree
+                ? "正在听…说完自动发送"
+                : "正在听…再点麦克风结束"}
+          </span>
+        </div>
+      )}
+
       <div className="composer-main">
         {/* 能力菜单入口（模型 / 技能 / 智能体）：与附件按钮并列，避免把常用操作藏进二级菜单 */}
         <button
@@ -1060,6 +1091,9 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
               className={`composer-send composer-mic${voice.recording ? " composer-mic-recording" : ""}${
                 voice.phase === "thinking" ? " composer-mic-thinking" : ""
               }`}
+              // 把电平暴露成 CSS 变量：外圈光晕随音量涨落，按钮本身也在"呼吸"。
+              // 走 CSS 而不是改 className，是为了避免每跨一档就重建一次 class 串。
+              style={voice.recording ? ({ "--voice-level": voice.level } as CSSProperties) : undefined}
               title={
                 voice.phase === "thinking"
                   ? "正在识别…"
