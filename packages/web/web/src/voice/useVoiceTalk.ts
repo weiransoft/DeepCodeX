@@ -46,14 +46,21 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchSoulConfig, fetchVoiceStatus, synthesizeSpeech, transcribeAudio, type VoiceStatus } from "../api";
+import {
+  fetchSoulConfig,
+  fetchVoiceStatus,
+  saveSoulConfig,
+  synthesizeSpeech,
+  transcribeAudio,
+  type VoiceStatus,
+} from "../api";
 import { MicCapture, explainMicError } from "./mic";
 import { SpeechQueue } from "./player";
 import { SentenceStream } from "./sentence";
 import { scanVoiceDirective, settleVoiceDirective } from "./directive";
 import { TurnDirective } from "./turn-directive";
 import { defaultHandsFree, readHandsFree, subscribeHandsFree, writeHandsFree } from "./preference";
-import { subscribeSoulConfigChanged } from "./config-events";
+import { notifySoulConfigChanged, subscribeSoulConfigChanged } from "./config-events";
 import { WakeListener } from "./wake-listener";
 import { SILENCE_PEAK, isSignalAbsent, nextSmoothedLevel, quantizeLevel } from "./level";
 import { takeWithinBudget } from "./speech-budget";
@@ -153,6 +160,13 @@ export interface VoiceTalk {
   stopSpeaking: () => void;
   /** 是否自动朗读 */
   speakReplies: boolean;
+  /**
+   * 切换自动朗读（落盘到 soul 配置）
+   *
+   * 关掉时立刻停掉正在播的内容——只改开关不停音频的话，用户按了"关"
+   * 却还在听它说话，会以为开关坏了。
+   */
+  setSpeakReplies: (next: boolean) => void;
   /** 是否开启了语音唤醒 */
   wakeEnabled: boolean;
   /** 是否正在等唤醒词 */
@@ -168,7 +182,7 @@ export interface VoiceTalk {
 export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   const [available, setAvailable] = useState(false);
   const [enabled, setEnabled] = useState(false);
-  const [speakReplies, setSpeakReplies] = useState(true);
+  const [speakReplies, setSpeakRepliesState] = useState(true);
   const [recording, setRecording] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [waiting, setWaiting] = useState(false);
@@ -358,7 +372,7 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
       .then(([config, voiceStatus]) => {
         if (cancelled) return;
         setEnabled(config.voice.enabled);
-        setSpeakReplies(config.voice.speakReplies);
+        setSpeakRepliesState(config.voice.speakReplies);
         setWakeEnabled(config.voice.wakeEnabled);
         setWakeWord(config.voice.wakeWord);
         setStatus(voiceStatus);
@@ -696,6 +710,31 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
     setSpeaking(false);
   }, [queue]);
 
+  /**
+   * 一键开关语音播报
+   *
+   * 三件事的先后顺序是有意的：
+   * 1. **先本地翻状态**——按钮必须立刻响应，等一个 RTT 才变色会让人重复点；
+   * 2. **关掉时先停音频**——「按了关还在念」是最刺眼的失败；
+   * 3. **再落盘**——失败则回滚并报错，不能让界面显示关着而配置还是开。
+   *
+   * 落盘成功后广播 `dcx:soul-config-changed`，人设面板与其它用到配置的
+   * 地方会各自重读，不会出现两处开关互相打脸。
+   */
+  const setSpeakReplies = useCallback(
+    (next: boolean) => {
+      setSpeakRepliesState(next);
+      if (!next) stopSpeaking();
+      saveSoulConfig({ voice: { speakReplies: next } })
+        .then(() => notifySoulConfigChanged())
+        .catch((error: unknown) => {
+          setSpeakRepliesState(!next);
+          setError(`语音播报开关保存失败：${error instanceof Error ? error.message : String(error)}`);
+        });
+    },
+    [stopSpeaking]
+  );
+
   /** thinking 兜底：超过上限自动落回 idle，避免一直显示「在想」 */
   useEffect(() => {
     if (!waiting) {
@@ -752,6 +791,7 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
     finishFeed,
     stopSpeaking,
     speakReplies,
+    setSpeakReplies,
     wakeEnabled,
     wakeListening,
   };

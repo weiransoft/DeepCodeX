@@ -484,6 +484,41 @@ export function SpeakerStopIcon(p: IconProps) {
   );
 }
 
+/** 扬声器（有声）：语音播报已开启 */
+export function SpeakerOnIcon(p: IconProps) {
+  return (
+    <IconBase {...p} label="语音播报已开启">
+      {/* 喇叭本体：左侧小方块 + 向右张开的号角 */}
+      <path d="M3 6.2h2.1L8.6 3.4v9.2L5.1 9.8H3a.8.8 0 0 1-.8-.8V7a.8.8 0 0 1 .8-.8z" fill="currentColor" />
+      {/* 两道声波：近短远长 */}
+      <path
+        d="M10.4 6.1a2.8 2.8 0 0 1 0 3.8M12.2 4.4a5.3 5.3 0 0 1 0 7.2"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
+    </IconBase>
+  );
+}
+
+/** 扬声器（静音）：语音播报已关闭，斜线表示不出声 */
+export function SpeakerOffIcon(p: IconProps) {
+  return (
+    <IconBase {...p} label="语音播报已关闭">
+      <path d="M3 6.2h2.1L8.6 3.4v9.2L5.1 9.8H3a.8.8 0 0 1-.8-.8V7a.8.8 0 0 1 .8-.8z" fill="currentColor" />
+      {/* 叉号代替声波：比"只删声波"更能读出"被关掉" */}
+      <path
+        d="m11 6.2 3.4 3.6M14.4 6.2 11 9.8"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+    </IconBase>
+  );
+}
+
 /** 远程连接（显示器 + 插头）：活动栏「远程 SSH」入口 */
 export function RemoteIcon(p: IconProps) {
   return (

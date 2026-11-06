@@ -4787,6 +4787,17 @@ a.icon-btn {
   color: var(--app-text);
 }
 
+/* 语音播报开关：开启态沿用麦克风的次要色，关闭态压暗——只靠图标区分
+   在 15px 尺寸下不够，颜色差让「现在是静音」在余光里也读得出来 */
+.composer-speak-off {
+  color: var(--app-text-secondary);
+  opacity: 0.55;
+}
+
+.composer-speak-off:hover {
+  opacity: 0.85;
+}
+
 .composer-mic-recording {
   color: #ffffff;
   background: var(--app-danger);

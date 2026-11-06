@@ -51,10 +51,41 @@ scripts/voice/.venv/bin/python scripts/voice/mlx_voice_server.py --selftest
 | GET | `/health` | 依赖与就绪情况，**不加载模型**，秒回 |
 | POST | `/tts` | `{text, engine, voice, speed}` → `audio/wav` |
 | POST | `/asr` | 原始 WAV 字节 → `{text, durationMs, model, backend}` |
-| POST | `/warmup` | 触发探测（不做实际加载） |
+| POST | `/warmup` | 探测依赖（启动时已自动后台预加载配置里的引擎） |
 
 引擎侧不直接暴露这些端点，而是经 `packages/web/src/api/voice-api.ts` 代理：
 前端只跟同源 `/api/voice/*` 说话，token 永不出进程。
+
+## 每次合成为什么要显式传 `max_tokens`
+
+`generate_custom_voice` / `generate_voice_design` 的 `max_tokens` 缺省不是"按文本算"，
+而是回落到 checkpoint 里的 `max_new_tokens = 2048`——按 12.5 token/s 折算约
+**164 秒音频**。
+
+合成是持锁串行的（MLX 推理并发不安全），所以一次跑飞的生成会把后面排队的
+请求全部堵住。前端的超时是 60s，表现就是：
+
+```
+语音服务不可用（http://127.0.0.1:8791）：This operation was aborted
+```
+
+sidecar 侧同时出现一串 `BrokenPipeError`（合成完了，客户端已经走了）。
+
+现在 `max_tokens_for(text)` 按实测语速（4.1 字/秒）推上限并乘 1.5 余量：
+
+| 文本长度 | token 上限 | 折算音频上限 |
+|---|---|---|
+| ≤ 66 字 | 200（下限） | ~16s |
+| 120 字 | 548 | ~44s |
+| 160 字 | 731 | ~58s |
+| ≥ 336 字 | 1024（上限） | ~82s |
+
+实测（RTF≈0.20）：三块约 80 字的请求并发排队，最慢一块 **10.5s** 返回；
+曾经卡死 180s 的重复文本现在 **4.4s** 完成。边界用例见
+`test_max_tokens.py`（`python3 scripts/voice/test_max_tokens.py`）。
+
+另外启动时会在后台线程预热配置里的引擎：冷加载实测 13s，不预热就落在用户
+第一句上，叠上队列排队很容易啃掉 60s 预算。预热后首句合成约 **200ms**。
 
 ## 默认模型
 

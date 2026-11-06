@@ -237,6 +237,48 @@ def prepare_sampling(voice: str) -> float:
     return TTS_TEMPERATURE
 
 
+# 每秒音频对应的声学 token 数（Qwen3-TTS 是 12Hz 模型，官方口径 12.5 token/s）
+TTS_TOKENS_PER_SECOND = 12.5
+
+# 中文朗读语速（字/秒）
+#
+# 实测值，不是估值：三档文本（3 字 / 19 字 / 100 字）走 /tts 全链路量出的
+# 音频时长换算都是 4.1 字/秒，彼此吻合。
+TTS_CHARS_PER_SECOND = 4.1
+
+# 生成上限的安全系数与硬顶
+#
+# 为什么必须显式传 max_tokens（2026-11-06 实测）：
+#   `_resolve_generation_options` 在调用方不给值时会回落到 checkpoint 里的
+#   `max_new_tokens = 2048`——按 12.5 token/s 折算约 **164 秒音频**。
+#   而合成是**持锁串行**的：一个跑飞的请求会把后面排队的请求全部堵住，
+#   60 秒后前端逐个超时，表现为「语音服务不可用：This operation was aborted」，
+#   sidecar 日志里则是一串 BrokenPipe（合成完了，但客户端已经走了）。
+#
+#   1.5 倍余量是按"念得比实测慢 50%"留的（2.7 字/秒），足够覆盖停顿多的文本；
+#   再往上给只会让退化请求多跑几秒，不会让正常文本更好听。
+TTS_MAX_TOKENS_HEADROOM = 1.5
+TTS_MAX_TOKENS_FLOOR = 200
+TTS_MAX_TOKENS_CEILING = 1024
+
+
+def max_tokens_for(text: str) -> int:
+    """
+    按文本长度推导本次生成的 token 上限。
+
+    估算链：字数 → 秒数（按实测语速）→ token 数，再乘安全余量。
+    宁可略大也别太小：上限给低了会把话尾**截断**，那是听得出来的硬伤；
+    给大了最多退化时多跑几秒。
+
+    @param text 待合成文本
+    @returns token 上限（含上下限钳制）
+    """
+    chars = len(text.strip()) or 1
+    seconds = chars / TTS_CHARS_PER_SECOND
+    tokens = int(seconds * TTS_TOKENS_PER_SECOND * TTS_MAX_TOKENS_HEADROOM)
+    return max(TTS_MAX_TOKENS_FLOOR, min(TTS_MAX_TOKENS_CEILING, tokens))
+
+
 def soul_config_path() -> Path:
     """配置文件路径（与引擎同源：~/.deepcode/soul/config.json）"""
     home = os.environ.get("DEEPCODE_HOME") or str(Path.home())
@@ -266,6 +308,25 @@ def candidate_config_paths() -> list[Path]:
         if path not in paths:
             paths.append(path)
     return paths
+
+
+def configured_engine() -> str:
+    """
+    取用户配置里指定的 TTS 引擎，用于启动预热
+
+    桌面与 Web 共用同一个 sidecar，但各有一份配置。这里按 `candidate_config_paths`
+    的顺序取第一份合法值——预热只是为了省掉首句的冷加载，选错引擎最多白加载
+    一次（真正请求时按请求体里的 engine 为准）。
+    """
+    for path in candidate_config_paths():
+        try:
+            voice = json.loads(path.read_text(encoding="utf-8")).get("voice", {})
+        except Exception:
+            continue
+        engine = voice.get("engine")
+        if isinstance(engine, str) and engine in MODEL_IDS:
+            return engine
+    return DEFAULT_TTS_ENGINE
 
 
 def _read_tokens_uncached() -> set[str]:
@@ -440,6 +501,22 @@ class TtsEngine:
         self._models[engine] = model
         return model
 
+    def warm(self, engine: str) -> None:
+        """
+        预加载模型（启动时后台调用）
+
+        冷加载实测 13s。不预热这段开销就落在用户的第一句上，而播报队列会
+        预取三块，逐块排队时很容易把前端 60s 超时吃掉一截——表现为
+        「语音服务不可用：This operation was aborted」。放到启动后的后台线程
+        里，用户开口时模型已在内存，首块合成降到几百毫秒。
+
+        @param engine 要预热的引擎名（非法值回落默认引擎）
+        """
+        if engine not in MODEL_IDS:
+            engine = DEFAULT_TTS_ENGINE
+        with self._lock:
+            self._load(engine)
+
     def synthesize(self, text: str, engine: str, voice: str, speed: float) -> tuple[bytes, str, str]:
         """
         合成一段语音。
@@ -465,6 +542,8 @@ class TtsEngine:
             # （见 TTS_SEED_BASE 的说明）。放在锁内、紧挨生成之前，
             # 保证并发的两个请求不会互相打乱随机状态。
             temperature = prepare_sampling(voice)
+            # 显式给生成上限：不给会回落到 2048（≈164s 音频），退化时拖死整条队列
+            max_tokens = max_tokens_for(text)
 
             if engine == "qwen3-voicedesign":
                 chunks = list(
@@ -473,6 +552,7 @@ class TtsEngine:
                         instruct=voice or "mature female voice, calm and steady",
                         language=TTS_LANGUAGE,
                         temperature=temperature,
+                        max_tokens=max_tokens,
                     )
                 )
                 native_speed = False
@@ -492,6 +572,7 @@ class TtsEngine:
                         # 句末走向句句不同，听感就是"音色在变"。VoiceDesign 那条
                         # 分支一直传着，CustomVoice 这条漏了（2026-11-06 补）。
                         temperature=temperature,
+                        max_tokens=max_tokens,
                     )
                 )
                 native_speed = False
@@ -800,9 +881,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._handle_asr()
                 return
             self._send_json(404, {"error": f"未知路径 {self.path}"})
+        except BrokenPipeError:
+            # 兜底分支再写一次响应也会断：客户端已经走了，静默收尾
+            sys.stderr.write("[voice] 客户端已断开（BrokenPipe），本次请求丢弃\n")
         except Exception as exc:  # 兜底：任何异常都要有结构化返回，不能静默断连
             traceback.print_exc()
-            self._send_json(500, {"code": "INTERNAL", "reason": str(exc)})
+            try:
+                self._send_json(500, {"code": "INTERNAL", "reason": str(exc)})
+            except BrokenPipeError:
+                sys.stderr.write("[voice] 返回错误时客户端已断开\n")
 
     def _handle_tts(self) -> None:
         payload = json.loads(self._read_body() or b"{}")
@@ -820,16 +907,28 @@ class Handler(BaseHTTPRequestHandler):
         speed = min(2.0, max(0.5, speed))
         started = time.time()
         audio, engine_used, voice_used = self.tts.synthesize(text, engine, voice, speed)
-        self.send_response(200)
-        self.send_header("Content-Type", "audio/wav")
-        self.send_header("Content-Length", str(len(audio)))
-        self.send_header("X-Synth-Ms", str(int((time.time() - started) * 1000)))
-        # 回显实际生效的引擎与音色：排查"音色不对"时不必再猜配置。
-        # 音色可能是中文描述，URL 编码后才是合法的 ASCII 头值
-        self.send_header("X-Tts-Engine", engine_used)
-        self.send_header("X-Tts-Voice", urllib.parse.quote(voice_used))
-        self.end_headers()
-        self.wfile.write(audio)
+        elapsed = int((time.time() - started) * 1000)
+        # 一行固定格式的合成日志：正常与退化在日志里差别一目了然
+        # （正常几百毫秒，退化几十秒），排查超时不必再靠猜
+        sys.stderr.write(
+            f"[voice] tts {len(text)}字 engine={engine_used} "
+            f"max_tokens={max_tokens_for(text)} audio={len(audio) // 1024}KB {elapsed}ms\n"
+        )
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Content-Length", str(len(audio)))
+            self.send_header("X-Synth-Ms", str(elapsed))
+            # 回显实际生效的引擎与音色：排查"音色不对"时不必再猜配置。
+            # 音色可能是中文描述，URL 编码后才是合法的 ASCII 头值
+            self.send_header("X-Tts-Engine", engine_used)
+            self.send_header("X-Tts-Voice", urllib.parse.quote(voice_used))
+            self.end_headers()
+            self.wfile.write(audio)
+        except BrokenPipeError:
+            # 客户端先断了（典型是 Node 网关 60s 超时）：这不是 sidecar 故障，
+            # 打一行就够，堆栈只会淹没真正的错误
+            sys.stderr.write(f"[voice] tts 客户端已断开，丢弃 {len(audio) // 1024}KB 音频\n")
 
     def _handle_asr(self) -> None:
         audio = self._read_body()
@@ -870,6 +969,21 @@ def main() -> int:
         )
     )
     try:
+        # 后台预热：把这 13 秒的冷加载从"用户第一句"挪到"服务刚起来"。
+        # daemon 线程，失败只记日志——真正请求时会重试并报出真实原因。
+        warm_engine = configured_engine()
+
+        def _warm() -> None:
+            started = time.time()
+            try:
+                Handler.tts.warm(warm_engine)
+                sys.stderr.write(
+                    f"[voice] 预热完成 engine={warm_engine} {int((time.time() - started) * 1000)}ms\n"
+                )
+            except Exception as exc:  # noqa: BLE001
+                sys.stderr.write(f"[voice] 预热失败（不影响服务）：{exc}\n")
+
+        threading.Thread(target=_warm, name="tts-warm", daemon=True).start()
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n[voice] 退出")

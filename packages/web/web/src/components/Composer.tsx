@@ -43,6 +43,8 @@ import {
   MicIcon,
   PaperclipIcon,
   PlusIcon,
+  SpeakerOffIcon,
+  SpeakerOnIcon,
   SpeakerStopIcon,
   SendIcon,
   StopIcon,
@@ -1071,6 +1073,24 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
             composingRef.current = false;
           }}
         />
+
+        {/* 语音播报开关：一眼能看到「现在到底会不会念出来」。
+            放在麦克风左边而不是塞进设置页——用户想静音时正在对话，
+            要去三级菜单里翻一个勾选框是糟糕的体验。
+            语音能力没开（voice.enabled=false）时整条语音控件都不出现，
+            这个开关也就一起隐藏：没有麦克风就没有"播报"可说。 */}
+        {voice.available && voice.enabled && (
+          <button
+            type="button"
+            className={`composer-send composer-mic composer-speak${voice.speakReplies ? "" : " composer-speak-off"}`}
+            title={voice.speakReplies ? "语音播报：开（点击关闭）" : "语音播报：关（点击开启）"}
+            aria-label={voice.speakReplies ? "关闭语音播报" : "开启语音播报"}
+            aria-pressed={voice.speakReplies}
+            onClick={() => voice.setSpeakReplies(!voice.speakReplies)}
+          >
+            {voice.speakReplies ? <SpeakerOnIcon size={15} /> : <SpeakerOffIcon size={15} />}
+          </button>
+        )}
 
         {/* 语音：点一下开始（免按住，说完自动提交）/ 播报中显示停止
             交互对标 OpenClaw Talk Mode：用"停顿"表达说完了，而不是一直按着手指。 */}
