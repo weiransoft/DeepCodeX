@@ -16,6 +16,8 @@ import { handleUnderstandImageTool } from "./understand-image-handler";
 import { handleWebSearchTool } from "./web-search-handler";
 import { handleWriteTool } from "./write-handler";
 import type { McpManager } from "../mcp/mcp-manager";
+// 方案 §3.12：MCP 图像内容块 → 模型可见的 image follow-up 消息
+import { buildMcpImageFollowUpMessage } from "../mcp/mcp-image-content";
 // 合并说明：CreateLLMClient 为 fork 侧 B1 统一 LLM 客户端工厂类型；
 //          SharpLoader 为上游 v0.3.1 sharp 图片库懒加载类型，两者均保留
 import type {
@@ -265,7 +267,16 @@ export class ToolExecutor {
       if (this.mcpManager?.isMcpTool(toolName)) {
         const parsedArgs = this.parseToolArguments(toolCall.function.arguments);
         const args = parsedArgs.ok ? parsedArgs.args : {};
-        return this.mcpManager.executeMcpTool(toolName, args);
+        const result = await this.mcpManager.executeMcpTool(toolName, args);
+        if (result.images && result.images.length > 0) {
+          // 图像内容块不能挂在 role:"tool" 消息上（OpenAI 兼容接口只允许文本），
+          // 因此转成一条紧随其后的 user follow-up 消息承载 image_url part。
+          // 该通路与 ReadImage/UnderstandImage 完全一致，多模态开关（multimodal=off）
+          // 仍会在 messageConverter 里把 image_url 过滤掉，不会绕过既有闸门。
+          const { images, ...rest } = result;
+          return { ...rest, followUpMessages: [buildMcpImageFollowUpMessage(toolName, images)] };
+        }
+        return result;
       }
       return {
         ok: false,

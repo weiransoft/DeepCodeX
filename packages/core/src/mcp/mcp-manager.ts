@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
 import { McpClient, type McpToolDefinition, type McpPromptDefinition, type McpResourceDefinition } from "./mcp-client";
+import { describeSkippedImages, extractMcpImages, type McpImageAttachment } from "./mcp-image-content";
 import type { McpServerConfig } from "../settings";
 
 const MCP_STARTUP_TIMEOUT_MS = process.env.DEEPCODE_MCP_TIMEOUT
@@ -341,7 +342,7 @@ export class McpManager {
     name: string,
     args: Record<string, unknown>,
     timeoutMs = MCP_CALL_TOOL_TIMEOUT_MS
-  ): Promise<{ ok: boolean; name: string; output?: string; error?: string }> {
+  ): Promise<{ ok: boolean; name: string; output?: string; error?: string; images?: McpImageAttachment[] }> {
     const tool = this.tools.find((t) => t.namespacedName === name);
     if (!tool) {
       return { ok: false, name, error: `Unknown MCP tool: ${name}` };
@@ -353,10 +354,21 @@ export class McpManager {
         .filter((c) => c.type === "text" && c.text)
         .map((c) => c.text)
         .join("\n");
+      // 图像块不再被丢掉：交给 executor 拼成 follow-up user 消息送给模型。
+      // 没有 text 时也绝不能 JSON.stringify 整个 content（会把几十万字符的
+      // base64 灌进上下文），改成一句占位说明。
+      const { images, skipped } = extractMcpImages(result.content);
+      const skippedNote = describeSkippedImages(skipped);
+      const fallback =
+        images.length > 0
+          ? `[${tool.originalName}] returned ${images.length} image attachment(s) with no text content.`
+          : JSON.stringify(result.content);
+      const output = [text || fallback, skippedNote].filter(Boolean).join("\n");
       return {
         ok: !result.isError,
         name,
-        output: text || JSON.stringify(result.content),
+        output,
+        ...(images.length > 0 ? { images } : {}),
       };
     } catch (err) {
       return {

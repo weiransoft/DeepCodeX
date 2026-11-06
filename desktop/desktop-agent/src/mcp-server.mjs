@@ -4,7 +4,9 @@
  * 与 packages/core/src/mcp/mcp-client.ts 的契约对齐：
  * - 传输：stdout 逐行 JSON-RPC 2.0（**stdout 只能出现协议帧**；日志一律 stderr）
  * - 握手：initialize(protocolVersion 2025-03-26) → result → notifications/initialized
- * - 工具：tools/list 返回定义；tools/call 返回 { content:[{type:"text",text}], isError? }
+ * - 工具：tools/list 返回定义；tools/call 返回 { content:[...], isError? }
+ *   content 里除 text 块外，截图类结果会追加 { type:"image", data, mimeType }
+ *   （见 modules/mcp-content.mjs）：模型必须能看到像素，坐标点击才可能成立
  * - 兼容 ping / resources/list / prompts/list（空集，避免客户端探测报错）
  *
  * 不引入 @modelcontextprotocol/sdk：sidecar 需随桌面端分发，零 npm 依赖
@@ -13,6 +15,7 @@
 
 import { createInterface } from "node:readline";
 import { TOOLS } from "./agent.mjs";
+import { toMcpContent } from "./modules/mcp-content.mjs";
 
 const PROTOCOL_VERSION = "2025-03-26";
 
@@ -74,12 +77,14 @@ export function createMcpServer(agent, { input = process.stdin, output = process
             break;
           }
           const payload = await agent.callTool(name, args);
-          const text = JSON.stringify(payload);
-          log(`[agent] ${name} -> ${payload?.ok === true ? "ok" : payload?.code ?? "error"} (${Buffer.byteLength(text)} bytes)`);
-          result(id, {
-            content: [{ type: "text", text }],
-            isError: payload?.ok === false,
-          });
+          const { content, isError, imageAttached, dropped } = toMcpContent(payload);
+          const text = content[0].text;
+          log(
+            `[agent] ${name} -> ${payload?.ok === true ? "ok" : payload?.code ?? "error"} ` +
+              `(${Buffer.byteLength(text)} bytes${imageAttached ? `, +image ${content[1].mimeType}` : ""}` +
+              `${dropped ? `, image dropped: ${dropped.reason}` : ""})`
+          );
+          result(id, { content, isError });
           break;
         }
 

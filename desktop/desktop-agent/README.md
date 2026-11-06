@@ -259,10 +259,50 @@ base64；一步取两次也不至于把 stdio 塞满），判据是"差异格数
 | 2 | **窗口刚出现时还在渲染**：两帧静止画面差 84 格（2.05%），一开始误判「像素噪声太高」 | 不是阈值问题，是取样时机问题：先等连续两帧一致（实测 400 ms 内稳定），再取基线 |
 | 3 | **像素签名不能按「截图」计费**：`maxScreenshots=3` 下，每步 2 次会让视觉兜底两步就熔断 | 签名不计截图预算（4 KB 灰度网格不是感知截图）；上界由 `maxSteps` 兜住（每步固定 2 次） |
 
-> 仍然缺的一段：**把图喂给模型**。MCP server 目前只回 `{type:"text"}`
-> （`packages/core` 的 `executeMcpTool` 也只保留 text），所以侧车能产出坐标帧与像素证据、
-> 也能 `includeImage` 回 base64，但管线还不承载 image content block。定位模型接入是下一项，
-> 在此之前视觉兜底保持默认关闭。
+> 这一节的执行侧已经闭环，但**模型侧**当时还断着：MCP server 只回 `{type:"text"}`，
+> `packages/core` 的 `executeMcpTool` 也只保留 text，`includeImage` 回传的 base64 到不了模型。
+> 下一节补的就是这一段。
+
+### 把图喂给模型（`src/modules/mcp-content.mjs` + `packages/core/src/mcp/mcp-image-content.ts`）
+
+坐标点击的前提是**模型真的看见了那张图**。之前协议层只承载 text，等于让模型凭树猜位置——
+而"假装看过"是这类任务里最贵的一种错（它不会报错，只会点偏）。
+
+现在的链路：
+
+```
+UIA 截图 ── base64 ──▶ splitImagePayload（拆文本/图像，base64 不进 text 块）
+         ──▶ MCP 帧 content: [ {type:"text", 元数据}, {type:"image", data, mimeType} ]
+         ──▶ core extractMcpImages（mime 白名单 / base64 校验 / 4 MiB / 单次 1 张）
+         ──▶ follow-up user 消息（image_url data URL，visible:false）
+         ──▶ messageConverter（multimodal=off 时仍会过滤掉 image_url，闸门没被绕过）
+```
+
+三条设计取舍：
+
+| 取舍 | 原因 |
+| --- | --- |
+| base64 **只**出现在 image 块，text 块只留 `{mimeType, bytes, attached}` | 同一张图写两遍等于 token 花两遍；几十万字符 base64 会直接挤爆上下文 |
+| 超限/坏 base64/非白名单 mime → 丢图**并显式标注** `dropped.reason` | 让模型知道"这次没给你像素"，它会重新截图或换通道；静默丢弃会让它继续瞎猜 |
+| 图挂在 `role:"user"` 的 follow-up 消息上，不挂 `role:"tool"` | OpenAI 兼容接口的 tool 消息只接受文本；该通路与 ReadImage 完全一致 |
+
+真机证据（`reports/p2-image-content.json`，`verdict = image-content-verified`）：
+
+| 检查 | 结果 |
+| --- | --- |
+| 帧结构 | `content = ["text","image"]`，text 块内无 base64（`textCarriesBase64:false`） |
+| 像素真实性 | image 解码出 PNG，IHDR 宽高 **666×1078** 与工具回传的 `width/height` 完全一致（53 356 字节） |
+| core 消费 | 同一份帧过 `extractMcpImages` 得 1 张图；follow-up `role:user` / `visible:false` / data URL 与 base64 完全对应 |
+| 遥测 | 事件流里没有 base64（图像不落事件、不落盘） |
+
+```bash
+npm run verify:image          # 需要 tsx（根 node_modules 已装）；缺 tsx 时退化为只验证协议帧
+```
+
+> 仍差最后一道闸：`allowScreenshot` / `allowCoordinateInput` 在壳侧 `harden()` 与 sidecar
+> `hardenExternalPolicy()` 里都被**强制复位为 false**，所以桌面端目前没有任何路径能把视觉通道
+> 打开（这是刻意的纵深防御，不是 bug）。开通它需要一个独立的高风险授权流程（IPC + 用户确认 +
+> 审计），属于下一项，不在本节范围内——管线已通，闸门仍关。
 
 ### 树质量判定（`src/modules/tree-quality.mjs`）
 

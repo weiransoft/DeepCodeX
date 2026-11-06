@@ -33,7 +33,7 @@ P0 探针（桥关闭）曾判定 `continue-with-adjustment`：能枚举 34 个�
   `good / sparse / deferred / empty`，修正「按进程名猜 Electron」的误分类
   （实测 5 个真实窗口中只有 1 个真能按名字定位）；
 - **故障注入回归补齐**：窗口中途关闭、进程崩溃、桥崩溃重连、`STALE_REF`、预算熔断
-  全部锁定错误码与可恢复性，共 114 个单测通过；
+  全部锁定错误码与可恢复性，共 124 个单测通过；
 - **覆盖率达标（13 个真实应用）**：主动拉起 16 个目标应用、13 个采到树，其中 8 家可按
   名字操作、4 家只能视觉兜底、1 家（Edge）必须走 DOM/CDP，3 家因环境/权限未拉起且如实标注；
   同时把「完整度」判据做对（`snapshot.truncated` 恒真导致无法区分「没看全」与「树就这么小」）；
@@ -44,7 +44,10 @@ P0 探针（桥关闭）曾判定 `continue-with-adjustment`：能枚举 34 个�
   自动重启（`bridge-crash-loop`，零新增 spawn）、`shutdown` 208 ms 优雅退出；
 - **视觉兜底的执行侧闭环**：坐标帧换算（图像像素 → 屏幕坐标）与越界拒绝在计算器上真机验证
   （点「七」→ 显示 7、点「八」→ 78）；64×64 灰度签名补上「树不变时怎么验」，任务管理器实测
-  `treeChanged:false` + `pixelChanged:true`（§3.11）。仍缺「把图喂给模型」这一段（MCP 只传 text）；
+  `treeChanged:false` + `pixelChanged:true`（§3.11）；
+- **图能进模型了**：MCP 结果改为「text 元数据 + image 内容块」，core 侧提取后拼成 image_url
+  follow-up 消息；真机帧解出 PNG 且 IHDR 宽高与工具回传一致（666×1078，53 356 B），
+  `image-content-verified`（§3.12）。视觉通道的开关仍是硬锁（默认 false，见 §8 下一项）；
 - **Rust 用例运行闭环**：`cargo test --lib` 在 MSVC CI 与本机 GNU 上均
   **74 passed / 0 failed**；同时纠正了「MinGW 环境问题」的误判——真因是测试二进制缺
   Windows 应用清单、ComCtl32 停在 v5，已在 `build.rs` 修掉（§5.1）；
@@ -421,10 +424,42 @@ sparse 应用点击前后树完全一样，复观察拿到的还是同一棵，�
 | 2 | **窗口刚出现还在渲染**：连续两帧差 84 格（2.05%），首轮误判「像素噪声太高」 | 不是阈值问题而是取样时机：先等连续两帧一致（实测 400 ms）再取基线；验效侧同时补基线稳定性判定 |
 | 3 | **签名不能按「截图」计费**：`maxScreenshots=3` 下每步 2 次会让视觉兜底两步熔断 | 签名不计截图预算（4 KB 灰度网格不是感知截图），上界由 `maxSteps` 兜住（每步固定 2 次） |
 
-**仍缺的一段（下一项）**：**把图喂给模型**。MCP server 只回 `{type:"text"}`，
-`packages/core` 的 `executeMcpTool` 也只保留 text content，管线不承载 image content block。
-侧车现在能产出坐标帧、能 `includeImage` 回 base64，但「模型看图 → 给坐标」这一段要等
-工具结果类型支持多模态。在此之前 `allowCoordinateInput` / `allowScreenshot` 保持默认 false。
+### 3.12 把图喂给模型（P2「随后」第 3 项）
+
+§3.11 让执行侧能产出坐标帧和像素证据，但**模型看不到那张图**：`mcp-server.mjs` 只回
+`{type:"text"}`，`McpManager.executeMcpTool` 也只保留 text content。模型拿不到像素却要
+给坐标，只能凭树猜——而「假装看过」不会报错，只会点偏。
+
+**链路**（两处改动，均为纯增量）
+
+| 层 | 文件 | 改了什么 |
+| --- | --- | --- |
+| 协议帧 | `desktop-agent/src/modules/mcp-content.mjs`（新增） | `splitImagePayload` 把工具返回值拆成「文本载荷 + 图像块」：base64 **只**进 image 块，text 块只留 `{mimeType, bytes, attached}` |
+| core | `packages/core/src/mcp/mcp-image-content.ts`（新增） | `extractMcpImages` 白名单 + base64 校验 + 4 MiB/张 + 单次 1 张；`buildMcpImageFollowUpMessage` 拼 `role:"user"` 的 image_url 消息 |
+| 接线 | `mcp-manager.ts` / `executor.ts` | `executeMcpTool` 回传 `images`（无图时不带该字段，既有 `deepEqual` 用例不受影响）；executor 转成 `followUpMessages` |
+
+**三条取舍**
+
+1. **base64 不进 text 块**：同一张图写两遍等于 token 花两遍，71 K 字符的 base64 足以挤爆上下文；
+2. **丢图必须说明**：超限 / 坏 base64 / 非白名单 mime → 丢图并在文本里标 `dropped.reason`
+   （`too-large`/`invalid-base64`/`unsupported-mime`/`too-many-images`），让模型知道"这次没给像素"；
+   静默丢弃会让它继续瞎猜，比失败更贵；
+3. **图挂 `role:"user"` 而不挂 `role:"tool"`**：OpenAI 兼容接口的 tool 消息只接受文本；
+   该通路与 ReadImage 完全一致，`multimodal=off` 时 messageConverter 仍会过滤 `image_url`，闸门没被绕过。
+
+**真机证据**（`reports/p2-image-content.json`，`verdict = image-content-verified`）
+
+| 检查 | 结果 |
+| --- | --- |
+| 帧结构 | `content = ["text","image"]`，`textCarriesBase64:false` |
+| 像素真实性 | image 解出 PNG，IHDR **666×1078** 与工具回传 `width/height` 一致，53 356 B |
+| core 消费 | 同一份帧过 `extractMcpImages` 得 1 张图；follow-up `role:user`/`visible:false`，data URL 与 base64 逐字节对应 |
+| 遥测 | 事件流无 base64（图像不落事件、不落盘） |
+
+**仍未开闸**：`allowScreenshot` / `allowCoordinateInput` 在 `desktop_agent.rs::harden()` 与
+`policy-load.mjs::hardenExternalPolicy()` 里都被**强制复位为 false**——桌面端目前没有任何
+路径能把视觉通道打开（刻意的纵深防御）。开通它需要一个独立的高风险授权流程（IPC + 用户
+逐次确认 + 审计），是下一项，不属于本节的「管线」范围。
 
 ---
 
@@ -434,7 +469,7 @@ sparse 应用点击前后树完全一样，复观察拿到的还是同一棵，�
 
 | 层 | 模块 | 职责 |
 | --- | --- | --- |
-| L1 协议 | `mcp-server.mjs` | stdio JSON-RPC 2.0；`initialize` / `tools/list` / `tools/call` / `ping`；stdout 仅协议帧 |
+| L1 协议 | `mcp-server.mjs` / `mcp-content.mjs` | stdio JSON-RPC 2.0；`initialize` / `tools/list` / `tools/call` / `ping`；stdout 仅协议帧；截图结果拆成 text 元数据 + image 内容块（§3.12） |
 | L2 编排 | `agent.mjs` | 11 个工具定义与分发、三级降级通道决策、`pid` 精确目标 |
 | L3 护栏 | `policy-guard.mjs` / `policy-load.mjs` / `budget.mjs` / `telemetry.mjs` | 白名单 + 注入扫描 + 一次性确认令牌、外部策略硬化、预算原子预扣熔断、脱敏事件 |
 | L3 感知 | `perception.mjs` / `app-registry.mjs` / `tree-quality.mjs` / `target-pick.mjs` | 稳定 ref / 骨架树 / 下钻、TTL 缓存、通道矩阵、实测树质量与**完整度**判定及回写、写入落点选择（按可写面积） |
@@ -469,12 +504,13 @@ sparse 应用点击前后树完全一样，复观察拿到的还是同一棵，�
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
-| Node 单测 | `cd desktop/desktop-agent && npm test` | **114/114 通过**（11 个测试文件，约 19 s） |
+| Node 单测 | `cd desktop/desktop-agent && npm test` | **124/124 通过**（12 个测试文件，约 22 s） |
 | 真机 GUI 闭环 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:gui` | **4/4 verified**，`gui-unblocked`；连续 4 次稳定 |
 | 真实应用写入 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:real-app` | **3/3 步骤**，`real-app-write-verified`，磁盘 `persisted:true` |
 | 桥生命周期 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:lifecycle` | `lifecycle-managed`：ping 4 ms、强杀自愈 2/2、崩溃循环零新增 spawn、优雅退出 208 ms |
 | 覆盖率矩阵（主动） | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:coverage -- --with-office` | `coverage-10plus`：13/16 采到树，8 家语义树 / 4 家视觉兜底 / 1 家 DOM，3 家环境受限；均值 214 ms |
 | 视觉兜底（真机） | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:visual -- --only calc,charmap,taskmgr` | `visual-fallback-verified`：坐标帧 3/3（点「七」→7、点「八」→78、越界拒绝）、像素验效 2/2（taskmgr `treeChanged:false`/`pixelChanged:true`） |
+| 图像进模型（真机） | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:image` | `image-content-verified`：帧含 text+image 两块；PNG IHDR 666×1078 与回传一致（53 356 B）；core 提取 1 张图并拼出 `image_url` follow-up |
 | 覆盖率采样（被动） | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run coverage` | 5/5 树可用，均值 106 ms，无失败 |
 | P0 探针 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run probe` | `continue`；6 窗口 / 93 ms，能力 6/7 可用 |
 | MCP stdio 冒烟 | `printf … \| node src/index.mjs` | `initialize` 返回 `2025-03-26`；`tools/list` 11 个工具；`desktop_status` 默认 `enabled:false` |
@@ -557,14 +593,15 @@ GNU 产物串味）、先 `--list` 数一遍用例（<60 直接失败，防空�
 
 1. **写用例只覆盖 5 个应用**：记事本 / Word / Excel / 资源管理器 / Edge 已跑通（§3.9），
    浏览器按策略拒绝 GUI；其余应用要按 §3.10 的通道判定逐类补用例，尤其 4 家
-   `sparse` 应用当前只能按「拒绝」处理（执行侧已就绪，缺的是看图能力，见本条下方第 4 点）。
+   `sparse` 应用当前只能按「拒绝」处理（看图链路已通，卡在授权闸门，见本条下方第 4 点）。
 2. **UAC 未感知**：Secure Desktop 与完整性级别检测未实现，遇 UAC 一律交还人工。
 3. **分类启发式仍保留**：进程名/标题分类仍用于初始通道建议（`unknown` 占比高），
    但已不再是最终结论——观察后由 `tree-quality` 实测覆盖；未观察过的应用仍可能是错的。
-4. **视觉兜底缺「把图喂给模型」**：执行侧已闭环（坐标帧换算 / 越界拒绝 / 像素验效，§3.11），
-   但 MCP 结果只承载 text content（`mcp-server.mjs` 回 `{type:"text"}`，`packages/core`
-   的 `executeMcpTool` 也只保留 text），图片到不了模型，所以「截图 → 坐标」这一跳还没有
-   模型可接。在工具结果类型支持多模态之前，`sparse` 应用仍按「拒绝」处理。
+4. **视觉通道的开关仍是硬锁**：管线已通（§3.12：帧里真有图、core 能提取、模型能收到
+   `image_url`），但 `harden()` / `hardenExternalPolicy()` 把 `allowScreenshot` 与
+   `allowCoordinateInput` 强制复位为 false，桌面端**没有任何路径**能打开视觉通道。
+   这不是漏做，是刻意的纵深防御；要放量必须先做独立的高风险授权（IPC + 逐次确认 + 审计），
+   在那之前 `sparse` 应用仍按「拒绝」处理。
 5. **策略不热更新**：改开关/授权需重启引擎，UI 已有 `restartHint` 文案。
 6. **仅 Windows 真后端**：macOS AX / Linux AT-SPI 未实现，回落 mock。
 7. **未接线引擎生命周期**：桥进程自身的生命周期（退避 / 崩溃上限 / 僵死回收 / 优雅退出）
@@ -601,9 +638,13 @@ GNU 产物串味）、先 `--list` 数一遍用例（<60 直接失败，防空�
 
 **随后：**
 
-- ~~视觉兜底与坐标吸附（P2）~~ ✅ 执行侧已完成（§3.11）：坐标帧换算 + 越界拒绝 +
-  64×64 像素验效，真机 `visual-fallback-verified`；**剩「工具结果支持 image content block」**
-  这一段，否则模型看不到图，默认仍关闭；
+- ~~视觉兜底与坐标吸附（P2）~~ ✅ 执行侧（§3.11）与**模型侧**（§3.12）均已闭环：
+  坐标帧换算 + 越界拒绝 + 64×64 像素验效，真机 `visual-fallback-verified`；
+  MCP 图像内容块透传到 core 的 `image_url` follow-up，真机 `image-content-verified`；
+- **视觉通道的高风险授权流程**（当前唯一的拦路石）：`allowScreenshot` / `allowCoordinateInput`
+  被两侧 harden 硬锁为 false，管线通了但闸门关着。需要一次显式授权设计：
+  IPC 命令 + 逐次确认令牌 + 审计事件 + 按应用/按时段失效，并同步放开两处 harden
+  与 `locked_fields` 口径（不能只放开一侧，否则口径漂移）；
 - 接 `AgentLifecycle`（壳管 sidecar 启停 / 崩溃上限 / 策略热更新）；
 - 配置页 UI 落地 4 条 IPC（当前只有 TS 包装，无界面）；
 - 按方案 §8 补端到端度量：任务成功率、单步耗时、人工接管率、token/步数成本。
@@ -623,6 +664,7 @@ GNU 产物串味）、先 `--list` 数一遍用例（<60 直接失败，防空�
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:real-app)
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:lifecycle)
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:visual -- --only calc,charmap,taskmgr)
+(cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:image)
 npm run typecheck && npm run check:ipc
 
 # Rust（本机 GNU：PATH 里要有 MinGW 的 windres / rc.exe；用例已可本地运行，见 §5.1）

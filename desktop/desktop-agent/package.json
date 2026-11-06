@@ -22,7 +22,8 @@
     "verify:coverage": "node scripts/verify-app-coverage.mjs",
     "verify:lifecycle": "node scripts/verify-lifecycle.mjs",
     "register:mcp": "node scripts/register-mcp.mjs",
-    "verify:visual": "node scripts/verify-visual-fallback.mjs"
+    "verify:visual": "node scripts/verify-visual-fallback.mjs",
+    "verify:image": "node --import tsx scripts/verify-image-content.mjs"
   },
   "dependencies": {},
   "devDependencies": {}

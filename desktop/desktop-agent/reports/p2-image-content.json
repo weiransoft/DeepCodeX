@@ -1,0 +1,84 @@
+{
+  "generatedAt": "2026-11-06T10:15:31.164Z",
+  "platform": "win32",
+  "node": "v22.22.2",
+  "backend": "windows",
+  "cases": {
+    "calculator": {
+      "target": {
+        "appId": "applicationframehost",
+        "hwnd": 1968826,
+        "processName": "ApplicationFrameHost.exe"
+      },
+      "frame": {
+        "isError": false,
+        "contentTypes": [
+          "text",
+          "image"
+        ],
+        "textBytes": 399,
+        "textCarriesBase64": false,
+        "payload": {
+          "ok": true,
+          "width": 666,
+          "height": 1078,
+          "mimeType": "image/png",
+          "frame": {
+            "x": 77,
+            "y": 64,
+            "width": 666,
+            "height": 1078,
+            "imageWidth": 666,
+            "imageHeight": 1078,
+            "scaleX": 1,
+            "scaleY": 1
+          },
+          "coords": "image-pixel",
+          "persisted": false,
+          "untrusted": true,
+          "snapHint": "调用 desktop_click_xy 时 frame 默认 window，x/y 直接用图像像素；越界会被拒绝",
+          "image": {
+            "mimeType": "image/png",
+            "bytes": 53356,
+            "attached": true
+          }
+        },
+        "imageMimeType": "image/png",
+        "imageBase64Chars": 71144,
+        "imageBytes": 53356,
+        "imageSha256Prefix": "93e96ef84ad7cae4",
+        "pixelSize": {
+          "width": 666,
+          "height": 1078
+        },
+        "imageCount": 1
+      },
+      "coreLeg": {
+        "status": "ok",
+        "images": 1,
+        "skipped": [],
+        "imageBytes": 53356,
+        "followUpRole": "user",
+        "followUpVisible": false,
+        "dataUrlPrefix": "data:image/png;base64,iVBORw0K",
+        "dataUrlMatchesPayload": true,
+        "mentionsUntrusted": true
+      },
+      "checks": {
+        "callOk": true,
+        "twoBlocks": true,
+        "textHasNoBase64": true,
+        "imageMimePng": true,
+        "pixelSizeMatchesPayload": true,
+        "payloadMetaAttached": true,
+        "telemetryHasNoBase64": true,
+        "coreAccepted": true
+      },
+      "verdict": "image-content-verified"
+    }
+  },
+  "verdict": "image-content-verified",
+  "closed": {
+    "forced": true
+  }
+}

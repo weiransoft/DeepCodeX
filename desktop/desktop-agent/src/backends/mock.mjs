@@ -196,8 +196,9 @@ export class MockBackend {
     // rect 必须给：坐标帧换算（图像坐标 → 屏幕坐标）全靠它。
     return {
       mimeType: "image/png",
-      // 1×1 透明 PNG：假像素，但真 base64——includeImage 这条路径要能真跑通
-      bytes: 68,
+      // 1×1 透明 PNG：假像素，但真 base64——includeImage 这条路径要能真跑通。
+      // bytes 必须与 base64 解码后长度一致（70），否则上层按元数据算的字节数是假的
+      bytes: 70,
       base64:
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
       // 图像尺寸 = 窗口矩形尺寸（缩放比 1）：mock 不模拟高 DPI，缩放换算由单测覆盖

@@ -40,7 +40,11 @@ type ListToolsResult = {
 };
 
 type CallToolResult = {
-  content: Array<{ type: string; text?: string }>;
+  /**
+   * 内容块：除 text 外还可能有 { type:"image", data, mimeType }。
+   * 这里只做「透传形状」的声明，合法性校验在 mcp-image-content.ts。
+   */
+  content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
   isError?: boolean;
 };
 
