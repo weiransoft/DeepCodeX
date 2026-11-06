@@ -162,6 +162,8 @@ jobs:
   rust-msvc:
     name: Rust MSVC / cargo test --lib
     runs-on: windows-latest
+    # 冷编译约 3-4 min；卡住时别拖到默认 6 小时，早失败早看注解
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: desktop/src-tauri

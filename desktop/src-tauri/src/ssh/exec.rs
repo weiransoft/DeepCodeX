@@ -307,15 +307,23 @@ mod tests {
     #[test]
     fn expands_tilde_identity() {
         let expanded = expand_home("~/.ssh/id_ed25519");
-        assert!(!expanded.contains('~'), "~ 必须被展开：{expanded}");
-        assert!(
-            std::path::Path::new(&expanded).is_absolute(),
-            "展开后必须是绝对路径：{expanded}"
-        );
-        assert!(
-            expanded.replace('\\', "/").ends_with("/.ssh/id_ed25519"),
-            "展开后必须保留相对部分：{expanded}"
-        );
+        // 判据只取"开头那个 ~ 被换成家目录"这一条：不能用 `contains('~')`，
+        // Windows 的 8.3 短名（如 C:\Users\RUNNER~1）自带 ~；也不能断言
+        // `is_absolute`，CI 上 HOME 可能是 git-bash 形态（/c/Users/...）。
+        // 家目录本身由环境决定，这里只校验"被展开"。
+        let has_home =
+            std::env::var("HOME").is_ok() || std::env::var("USERPROFILE").is_ok();
+        if has_home {
+            assert_ne!(
+                expanded, "~/.ssh/id_ed25519",
+                "有家目录时 ~ 必须被展开：{expanded}"
+            );
+            assert!(!expanded.starts_with('~'), "展开结果不该再以 ~ 开头：{expanded}");
+            assert!(
+                expanded.replace('\\', "/").ends_with("/.ssh/id_ed25519"),
+                "展开后必须保留相对部分：{expanded}"
+            );
+        }
         assert_eq!(expand_home("/abs/key"), "/abs/key");
         assert_eq!(expand_home("rel/key"), "rel/key");
     }
