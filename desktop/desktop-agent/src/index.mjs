@@ -52,7 +52,12 @@ for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
     console.error(`[agent] ${sig} received, shutting down`);
     server.close();
-    agent.backend.close?.(); // 关闭长驻 UIA 桥，避免遗留 powershell.exe
-    process.exit(0);
+    // 先优雅关桥（发 shutdown 让 PowerShell 主循环 break），超时才 kill；
+    // 兜底定时器防止桥僵死时进程退不掉 —— 遗留 powershell.exe 比晚退 1.5s 糟糕得多
+    const hardExit = setTimeout(() => process.exit(0), 3_000);
+    hardExit.unref?.();
+    Promise.resolve(agent.backend.shutdown?.() ?? agent.backend.close?.())
+      .catch(() => {})
+      .finally(() => process.exit(0));
   });
 }

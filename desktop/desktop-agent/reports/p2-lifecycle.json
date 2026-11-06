@@ -1,0 +1,324 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-11-06T06:30:09.531Z",
+  "platform": "win32",
+  "session": "Console",
+  "steps": [
+    {
+      "step": "connected",
+      "pid": 7180,
+      "lifecycle": {
+        "healthy": true,
+        "blocked": false,
+        "blockedReason": null,
+        "blockedMessage": null,
+        "totalStarts": 1,
+        "totalCrashes": 0,
+        "totalCleanExits": 0,
+        "crashesInWindow": 0,
+        "maxRestarts": 3,
+        "windowMs": 120000,
+        "uptimeMs": 2055,
+        "lastCrash": null,
+        "lastPing": {
+          "ok": null,
+          "at": 0,
+          "latencyMs": null
+        },
+        "consecutivePingFailures": 0
+      }
+    },
+    {
+      "step": "health",
+      "allOk": true,
+      "medianLatencyMs": 4,
+      "samples": [
+        {
+          "ok": true,
+          "latencyMs": 11,
+          "uptimeMs": 2066,
+          "bridge": {
+            "requestsHandled": 2,
+            "snapshots": 0,
+            "storedRefs": 0,
+            "workingSetMb": 109,
+            "lastHwnd": 0
+          }
+        },
+        {
+          "ok": true,
+          "latencyMs": 3,
+          "uptimeMs": 2069,
+          "bridge": {
+            "requestsHandled": 3,
+            "snapshots": 0,
+            "storedRefs": 0,
+            "workingSetMb": 109,
+            "lastHwnd": 0
+          }
+        },
+        {
+          "ok": true,
+          "latencyMs": 4,
+          "uptimeMs": 2073,
+          "bridge": {
+            "requestsHandled": 4,
+            "snapshots": 0,
+            "storedRefs": 0,
+            "workingSetMb": 109,
+            "lastHwnd": 0
+          }
+        }
+      ]
+    },
+    {
+      "step": "ref-survives-health",
+      "target": "workbuddy",
+      "hwnd": 199314,
+      "snapshotId": "uia-cb5b328c9a40",
+      "nodeCount": 3,
+      "storedRefsAfterPing": 3,
+      "requestsHandled": 7,
+      "workingSetMb": 111,
+      "note": "ref 存在桥进程内，ping 只是只读探活，不应清空 SnapshotStore"
+    },
+    {
+      "step": "crash-round-1",
+      "kill": {
+        "pid": 7180,
+        "exited": true,
+        "elapsedMs": 121.86,
+        "aliveAfter": false,
+        "crashesBefore": 0,
+        "crashesAfter": 1
+      },
+      "recovered": {
+        "ok": true,
+        "elapsedMs": 1620.05
+      },
+      "crashes": 1
+    },
+    {
+      "step": "crash-round-2",
+      "kill": {
+        "pid": 9288,
+        "exited": true,
+        "elapsedMs": 131.33,
+        "aliveAfter": false,
+        "crashesBefore": 1,
+        "crashesAfter": 2
+      },
+      "recovered": {
+        "ok": true,
+        "elapsedMs": 1807.65
+      },
+      "crashes": 2
+    },
+    {
+      "step": "crash-loop-blocked",
+      "thirdKill": {
+        "pid": 13840,
+        "exited": true,
+        "elapsedMs": 123.05,
+        "aliveAfter": false,
+        "crashesBefore": 2,
+        "crashesAfter": 3
+      },
+      "loopError": {
+        "code": "CAPABILITY_UNAVAILABLE",
+        "reason": "bridge-crash-loop",
+        "message": "UIA 桥在 120s 内崩溃 3 次，已停止自动重启（上限 3）。请检查交互式桌面会话 / 是否被 UAC、锁屏打断，处理后调用 desktop_capabilities 查看，或重启引擎。",
+        "handoff": true
+      },
+      "startsBefore": 3,
+      "startsAfter": 3,
+      "reSpawned": false,
+      "reportedSupported": false,
+      "reason": "UIA 桥在 120s 内崩溃 3 次，已停止自动重启（上限 3）。请检查交互式桌面会话 / 是否被 UAC、锁屏打断，处理后调用 desktop_capabilities 查看，或重启引擎。"
+    },
+    {
+      "step": "graceful-shutdown",
+      "pid": 13040,
+      "shutdownMs": 208.4,
+      "ok": true,
+      "closed": true,
+      "graceful": true,
+      "acked": true,
+      "exitCode": 0,
+      "aliveAfter": false,
+      "lifecycle": {
+        "healthy": false,
+        "blocked": false,
+        "blockedReason": null,
+        "blockedMessage": null,
+        "totalStarts": 4,
+        "totalCrashes": 3,
+        "totalCleanExits": 1,
+        "crashesInWindow": 0,
+        "maxRestarts": 3,
+        "windowMs": 120000,
+        "uptimeMs": 0,
+        "lastCrash": {
+          "at": 1793946615841,
+          "reason": "exit-code=1",
+          "uptimeMs": 1523
+        },
+        "lastPing": {
+          "ok": null,
+          "at": 0,
+          "latencyMs": null
+        },
+        "consecutivePingFailures": 0
+      },
+      "note": "优雅退出：发 shutdown → PowerShell 主循环 break → 进程自然退出；不计入崩溃"
+    }
+  ],
+  "privacy": {
+    "windowTitlesPersisted": false
+  },
+  "capabilities": {
+    "a11yTree": true,
+    "reason": "windows-uia.ps1 长驻桥已连接（session=Console, userInteractive=true）",
+    "bridge": {
+      "connected": true,
+      "session": "Console",
+      "userInteractive": true,
+      "psVersion": "5.1.26100.9711",
+      "lifecycle": {
+        "healthy": true,
+        "blocked": false,
+        "blockedReason": null,
+        "blockedMessage": null,
+        "totalStarts": 1,
+        "totalCrashes": 0,
+        "totalCleanExits": 0,
+        "crashesInWindow": 0,
+        "maxRestarts": 3,
+        "windowMs": 120000,
+        "uptimeMs": 2055,
+        "lastCrash": null,
+        "lastPing": {
+          "ok": null,
+          "at": 0,
+          "latencyMs": null
+        },
+        "consecutivePingFailures": 0
+      },
+      "requestCount": 1
+    }
+  },
+  "crashRecovery": [
+    {
+      "round": 1,
+      "kill": {
+        "pid": 7180,
+        "exited": true,
+        "elapsedMs": 121.86,
+        "aliveAfter": false,
+        "crashesBefore": 0,
+        "crashesAfter": 1
+      },
+      "recovered": {
+        "ok": true,
+        "elapsedMs": 1620.05
+      },
+      "lifecycle": {
+        "healthy": true,
+        "blocked": false,
+        "blockedReason": null,
+        "blockedMessage": null,
+        "totalStarts": 2,
+        "totalCrashes": 1,
+        "totalCleanExits": 0,
+        "crashesInWindow": 1,
+        "maxRestarts": 3,
+        "windowMs": 120000,
+        "uptimeMs": 1404,
+        "lastCrash": {
+          "at": 1793946611940,
+          "reason": "exit-code=1",
+          "uptimeMs": 2392
+        },
+        "lastPing": {
+          "ok": true,
+          "at": 1793946611818,
+          "latencyMs": 3
+        },
+        "consecutivePingFailures": 0
+      }
+    },
+    {
+      "round": 2,
+      "kill": {
+        "pid": 9288,
+        "exited": true,
+        "elapsedMs": 131.33,
+        "aliveAfter": false,
+        "crashesBefore": 1,
+        "crashesAfter": 2
+      },
+      "recovered": {
+        "ok": true,
+        "elapsedMs": 1807.65
+      },
+      "lifecycle": {
+        "healthy": true,
+        "blocked": false,
+        "blockedReason": null,
+        "blockedMessage": null,
+        "totalStarts": 3,
+        "totalCrashes": 2,
+        "totalCleanExits": 0,
+        "crashesInWindow": 2,
+        "maxRestarts": 3,
+        "windowMs": 120000,
+        "uptimeMs": 1400,
+        "lastCrash": {
+          "at": 1793946613803,
+          "reason": "exit-code=1",
+          "uptimeMs": 1536
+        },
+        "lastPing": {
+          "ok": true,
+          "at": 1793946611818,
+          "latencyMs": 3
+        },
+        "consecutivePingFailures": 0
+      }
+    }
+  ],
+  "lifecycleAfterReset": {
+    "healthy": true,
+    "blocked": false,
+    "blockedReason": null,
+    "blockedMessage": null,
+    "totalStarts": 4,
+    "totalCrashes": 3,
+    "totalCleanExits": 0,
+    "crashesInWindow": 0,
+    "maxRestarts": 3,
+    "windowMs": 120000,
+    "uptimeMs": 1501,
+    "lastCrash": {
+      "at": 1793946615841,
+      "reason": "exit-code=1",
+      "uptimeMs": 1523
+    },
+    "lastPing": {
+      "ok": null,
+      "at": 0,
+      "latencyMs": null
+    },
+    "consecutivePingFailures": 0
+  },
+  "summary": {
+    "verdict": "lifecycle-managed",
+    "healthCheck": true,
+    "crashRecovery": true,
+    "crashLoopStops": true,
+    "gracefulExit": true,
+    "medianPingMs": 4,
+    "shutdownMs": 208.4,
+    "note": "生命周期已接管：退避重建、窗口内崩溃上限、僵死回收、优雅退出"
+  }
+}

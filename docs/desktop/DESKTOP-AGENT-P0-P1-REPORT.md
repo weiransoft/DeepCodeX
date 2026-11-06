@@ -33,7 +33,9 @@ P0 探针（桥关闭）曾判定 `continue-with-adjustment`：能枚举 34 个�
   `good / sparse / deferred / empty`，修正「按进程名猜 Electron」的误分类
   （实测 5 个真实窗口中只有 1 个真能按名字定位）；
 - **故障注入回归补齐**：窗口中途关闭、进程崩溃、桥崩溃重连、`STALE_REF`、预算熔断
-  全部锁定错误码与可恢复性，共 72 个单测通过；
+  全部锁定错误码与可恢复性，共 81 个单测通过；
+- **桥生命周期可管**：`ping` 探活 4 ms、崩溃后指数退避自愈、120 s 内崩 3 次即停止
+  自动重启（`bridge-crash-loop`，零新增 spawn）、`shutdown` 208 ms 优雅退出；
 - 仍保持默认关闭：未开桥或未授权时如实降级，不伪造能力、不静默执行。
 
 关键工程结论：**稳定 ref 要求桥进程长驻**。P1 最初「每次调用新起 `powershell.exe`」的设计
@@ -214,6 +216,36 @@ TextBox/Button/TextBlock 直接暴露 ValuePattern / InvokePattern，才能覆�
 | 预算耗尽 | `BUDGET_EXCEEDED` 熔断 | ✅ |
 | 桥崩溃（请求在途） | pending 全拒 `CAPABILITY_UNAVAILABLE`，引用与探测缓存复位，下次调用自动重启 | ✅ |
 
+### 3.8 桥生命周期（P2 准入第 3 项）
+
+「崩了下次调用再拉一个」在真实环境里会退化成重启风暴：UIA 在锁屏 / Secure Desktop /
+会话切换下会连续抛异常，没有上限的话每 200 ms 就起一个 `powershell.exe`，宿主既拿不到
+可用桥也刷满日志。新增 `src/modules/bridge-lifecycle.mjs`（纯逻辑 + 可注入时钟）接管：
+
+| 场景 | 策略 |
+| --- | --- |
+| 首次启动 | 放行，无退避 |
+| 崩溃后重启 | 指数退避 200 → 400 → 800 ms（上限 5 s） |
+| 120 s 内崩溃 ≥ 3 次 | 停止自动重启：`CAPABILITY_UNAVAILABLE` + `details.reason=bridge-crash-loop` + `handoff:true`，`desktop_capabilities` 报 `supported:false` 并给出可行动原因 |
+| 连续存活 ≥ 60 s | 视为稳定，清空崩溃窗口 |
+| 连续 ping 失败 ≥ 3 次 | 「进程在但管道僵死」→ 回收桥，下次调用按退避重建 |
+| stdin 已关闭 | 丢弃半死桥并重建一次，不让后续请求全部永久失败 |
+| `shutdown()` | 先发 `shutdown` 让 PowerShell 主循环 `break` 自然退出，超时才 `kill`；正常退出不计崩溃 |
+
+真机实测（`DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:lifecycle`，`reports/p2-lifecycle.json`）：
+
+| 验证项 | 实测 |
+| --- | --- |
+| `ping` 健康检查 | 3/3 回 pong，中位 **4 ms**（uptime / 已处理请求 / ref 数 / 工作集全部可读） |
+| ping 不伤 ref | 观察后 `storedRefs=3`，ping 之后仍为 3（快照存在桥进程内，探活只读） |
+| 崩溃自愈 | 外部 `taskkill` 强杀后下一次调用重建成功，**1.62 s / 1.81 s**（含 PowerShell 冷启动） |
+| 崩溃循环认输 | 第 3 次崩溃后再调用 → `bridge-crash-loop`，`totalStarts` **零增长**（未再 spawn） |
+| 优雅退出 | `shutdown` ack，**208 ms** 退出，`graceful:true`、进程确已消失、不计入崩溃 |
+
+`desktop_capabilities` 的 `bridge` 段落现在带 `lifecycle`（`totalStarts` / `totalCrashes` /
+`crashesInWindow` / `uptimeMs` / `lastCrash` / `lastPing` / `blocked*`），上层据此判断
+「桥在抖」还是「环境真不可用」，不必靠重试次数反推。新增 9 个单测（`tests/bridge-lifecycle.test.mjs`）。
+
 ---
 
 ## 4. P1 交付清单
@@ -227,6 +259,7 @@ TextBox/Button/TextBlock 直接暴露 ValuePattern / InvokePattern，才能覆�
 | L3 护栏 | `policy-guard.mjs` / `policy-load.mjs` / `budget.mjs` / `telemetry.mjs` | 白名单 + 注入扫描 + 一次性确认令牌、外部策略硬化、预算原子预扣熔断、脱敏事件 |
 | L3 感知 | `perception.mjs` / `app-registry.mjs` / `tree-quality.mjs` | 稳定 ref / 骨架树 / 下钻、TTL 缓存、通道矩阵、实测树质量判定与回写 |
 | L3 验证 | `verifier.mjs` | Observe→Act→Verify；旧 ref 硬返回 `STALE_REF`；有界重试 |
+| L3 可靠性 | `bridge-lifecycle.mjs` | 桥崩溃指数退避、窗口内重启上限、稳定重置、僵死回收、优雅退出 |
 | L4 后端 | `contract.mjs` / `mock.mjs` / `windows.mjs` / `windows-uia.ps1` | 可插拔契约；mock 故障注入；Windows 长驻桥客户端 + tasklist 回落；UIA 长驻桥（599 行） |
 
 ### 4.2 壳侧接线（只加「配置面」，不加执行面）
@@ -256,9 +289,10 @@ TextBox/Button/TextBlock 直接暴露 ValuePattern / InvokePattern，才能覆�
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
-| Node 单测 | `cd desktop/desktop-agent && npm test` | **72/72 通过**（8 个测试文件，约 20 s） |
+| Node 单测 | `cd desktop/desktop-agent && npm test` | **81/81 通过**（9 个测试文件，约 20 s） |
 | 真机 GUI 闭环 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:gui` | **4/4 verified**，`gui-unblocked`；连续 4 次稳定 |
 | 真实应用写入 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:real-app` | **3/3 步骤**，`real-app-write-verified`，磁盘 `persisted:true` |
+| 桥生命周期 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:lifecycle` | `lifecycle-managed`：ping 4 ms、强杀自愈 2/2、崩溃循环零新增 spawn、优雅退出 208 ms |
 | 真实应用覆盖率 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run coverage` | 5/5 树可用，均值 106 ms，无失败 |
 | P0 探针 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run probe` | `continue`；6 窗口 / 93 ms，能力 6/7 可用 |
 | MCP stdio 冒烟 | `printf … \| node src/index.mjs` | `initialize` 返回 `2025-03-26`；`tools/list` 11 个工具；`desktop_status` 默认 `enabled:false` |
@@ -302,8 +336,8 @@ CI 若用 MSVC 工具链应能直接跑全量。
    还没有「截图 → 坐标」的视觉定位能力，因此这类应用当前实际是「拒绝执行」。
 5. **策略不热更新**：改开关/授权需重启引擎，UI 已有 `restartHint` 文案。
 6. **仅 Windows 真后端**：macOS AX / Linux AT-SPI 未实现，回落 mock。
-7. **未接线引擎生命周期**：P1 是「配置即生效」的最小接线；`AgentLifecycle`
-   （随壳启停、崩溃重启上限、健康检查）属 P2。
+7. **未接线引擎生命周期**：桥进程自身的生命周期（退避 / 崩溃上限 / 僵死回收 / 优雅退出）
+   已接管（§3.8）；但「随壳启停、壳侧重启上限、策略热更新」的 `AgentLifecycle` 仍未接线。
 8. **桥对脚本编码敏感**：`windows-uia.ps1` 必须保持 UTF-8 BOM，否则 PowerShell 5.1
    按 GBK 解码会解析失败；已写入 README 与回归用例的约束说明。
 9. **交叉工作区提示**：同一工作区里 `desktop/build/*` 的 Windows 分发打包脚本是另一条
@@ -321,8 +355,8 @@ CI 若用 MSVC 工具链应能直接跑全量。
 2. 真实应用写用例从 1 个扩到 ≥ 5 个（Office、浏览器外壳、Electron 应用各一），
    验证 `expectChange` 与副作用校验的通用性；
 3. 在 MSVC CI 上跑通 `cargo test --lib`，闭环 Rust 用例运行验证；
-4. 桥进程纳入生命周期管理：健康检查、崩溃重启上限、退出清理（现为 sidecar 退出时关闭，
-   崩溃后由下一次调用惰性重启）。
+4. ~~桥进程纳入生命周期管理~~ ✅ 已完成（§3.8）：`ping` 健康检查、指数退避、
+   120 s 内崩溃 3 次的自动重启上限（`bridge-crash-loop`）、僵死回收、`shutdown` 优雅退出。
 
 **随后：**
 
@@ -342,6 +376,7 @@ CI 若用 MSVC 工具链应能直接跑全量。
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run coverage)
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:gui)
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:real-app)
+(cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:lifecycle)
 npm run typecheck && npm run check:ipc
 
 # Rust（需用户级 Rust GNU + MinGW 在 PATH）

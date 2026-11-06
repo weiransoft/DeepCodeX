@@ -43,6 +43,10 @@ $script:LastPid = 0
 $script:LastHwnd = 0
 $script:Ready = $false
 $script:MaxSnapshots = 8
+# 生命周期相关（供 Node 侧 health / shutdown 使用）
+$script:StartedAt = Get-Date
+$script:RequestCount = 0
+$script:Stopping = $false
 
 function Write-JsonLine($obj) {
     $json = $obj | ConvertTo-Json -Depth 14 -Compress
@@ -306,12 +310,32 @@ function Test-Foreground([string]$appId, [int]$targetPid, [long]$targetHwnd, [sw
 function Invoke-Dcx([string]$command, $a) {
     if ($null -eq $a) { $a = @{} }
     switch ($command) {
+        'ping' {
+            # 轻量健康检查：只读进程内状态，不碰 UIA。Node 侧据此判断
+            # 「进程活着但管道僵死」并触发回收重建。
+            $refCount = 0
+            foreach ($k in $script:SnapshotStore.Keys) {
+                try { $refCount += $script:SnapshotStore[$k].Count } catch { }
+            }
+            $uptime = [int]((Get-Date) - $script:StartedAt).TotalMilliseconds
+            $o = [ordered]@{
+                ok = $true; pong = $true; protocol = 1
+                uptimeMs = $uptime
+                requests = $script:RequestCount
+                snapshots = $script:SnapshotStore.Count
+                refs = $refCount
+                lastHwnd = [long]$script:LastHwnd
+                workingSetMb = [int]([Diagnostics.Process]::GetCurrentProcess().WorkingSet64 / 1MB)
+            }
+            return $o
+        }
         'capabilities' {
             $o = [ordered]@{
                 ok = $true; uia = $script:Ready; screenshot = $true; input = $true
                 session = [string]$env:SESSIONNAME
                 userInteractive = [bool][Environment]::UserInteractive
                 psVersion = [string]$PSVersionTable.PSVersion
+                uptimeMs = [int]((Get-Date) - $script:StartedAt).TotalMilliseconds
                 note = 'windows-uia.ps1 persistent stdio bridge'
             }
             return $o
@@ -563,7 +587,10 @@ function Invoke-Dcx([string]$command, $a) {
             return $o
         }
         'shutdown' {
-            $o = [ordered]@{ ok = $true; bye = $true }
+            # 置 Stopping 后由主循环 break 退出：让 PowerShell 走正常退栈，
+            # 而不是被 Node 侧 kill 掉（避免打断正在写盘的子进程/句柄未释放）
+            $script:Stopping = $true
+            $o = [ordered]@{ ok = $true; bye = $true; requests = $script:RequestCount }
             return $o
         }
     }
@@ -600,6 +627,7 @@ Write-JsonLine ([ordered]@{
     psVersion = [string]$PSVersionTable.PSVersion
     session = [string]$env:SESSIONNAME
     userInteractive = [bool][Environment]::UserInteractive
+    pid = $PID
 })
 
 while ($true) {
@@ -611,10 +639,12 @@ while ($true) {
         $raw = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($line.Trim()))
         $req = $raw | ConvertFrom-Json
         $id = $req.id
+        $script:RequestCount = $script:RequestCount + 1
         $res = Invoke-Dcx ([string]$req.command) $req.args
         Emit-Result $res $id
     } catch {
         Write-Diag "请求失败：$($_.Exception.Message)"
         Emit-Result (New-Fail 'INTERNAL' "桥请求处理失败：$($_.Exception.Message)") $id
     }
+    if ($script:Stopping) { Write-Diag '收到 shutdown，正常退出'; break }
 }

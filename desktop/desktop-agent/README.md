@@ -37,6 +37,7 @@ desktop-agent/
 │             policy-load.mjs      外部策略加载 + 锁定字段二次硬化
 │             perception.mjs       稳定 ref / 骨架树 / 下钻 / 视觉兜底
 │             tree-quality.mjs     实测树质量判定（good / sparse / deferred / empty）
+│             bridge-lifecycle.mjs 桥生命周期（退避 / 崩溃窗口上限 / 僵死回收 / 稳定重置）
 │             verifier.mjs         Observe→Act→Verify + STALE_REF + 有界重试
 │             app-registry.mjs     应用注册表 / TTL 缓存 / 通道矩阵 / 质量回写
 │             budget.mjs           步数·截图·token 原子预扣与熔断
@@ -46,12 +47,14 @@ desktop-agent/
 │           coverage-report.mjs    真实应用 UIA 覆盖率采样（只读）
 │           verify-gui.mjs         真机 GUI 闭环验证（受控 WPF 测试窗口）
 │           verify-real-app.mjs    真实应用写入闭环（临时文件 + 记事本，磁盘校验）
+│           verify-lifecycle.mjs   桥生命周期真机验证（ping / 崩溃自愈 / 崩溃循环 / 优雅退出）
 │           register-mcp.mjs       MCP 登记（dry-run / 写入 / 移除）
 ├── reports/p0-probe.json          P0 实测数据（窗口标题不落盘）
 │           p1-gui-verify.json     真机闭环实测数据
 │           p2-coverage.json       真实应用覆盖率实测数据
 │           p2-real-app.json       真实应用写入闭环实测数据
-└── tests/*.test.mjs               node:test，零依赖（72 个用例）
+│           p2-lifecycle.json      桥生命周期真机实测数据
+└── tests/*.test.mjs               node:test，零依赖（81 个用例）
 ```
 
 零新增 npm 依赖（Node ≥ 22，ESM）：sidecar 需要随桌面端分发，避免版本漂移与供应链面。
@@ -61,7 +64,7 @@ desktop-agent/
 ```bash
 cd desktop/desktop-agent
 
-npm test                           # 72 个单测（协议 / 策略 / 预算 / 验证 / 桥 / 故障注入 / 树质量）
+npm test                           # 81 个单测（协议 / 策略 / 预算 / 验证 / 桥 / 生命周期 / 故障注入 / 树质量）
 npm run probe                      # P0 探针（未开桥：仅 Win32 枚举）
 DEEPCODE_AGENT_UIA_BRIDGE=1 npm run probe          # 真机全能力探针
 DEEPCODE_AGENT_UIA_BRIDGE=1 npm run coverage       # 真实应用 UIA 覆盖率（只读，不执行动作）
@@ -71,6 +74,9 @@ DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:gui
 
 # 真实应用写入闭环：打开自建的 dcx-e2e-*.txt，写入 → Ctrl+S → 读盘校验后删除
 DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:real-app
+
+# 桥生命周期：ping 健康检查 → 强杀自愈 → 崩溃循环认输 → 优雅退出（会真的杀桥进程，仅验证用）
+DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:lifecycle
 
 # 直接以 stdio 启动（自动选择：win32 → windows，其余 → mock）
 DEEPCODE_AGENT_BACKEND=mock node src/index.mjs
@@ -201,6 +207,31 @@ printf '%s\n' \
 | 预算耗尽 | `BUDGET_EXCEEDED` 熔断 | ✅ 不无限重试 |
 | 桥崩溃（请求在途） | pending 全部 `CAPABILITY_UNAVAILABLE`，桥引用与探测缓存复位 | ✅ 下一次调用自动重启新桥 |
 
+### 桥的生命周期（`src/modules/bridge-lifecycle.mjs`）
+
+「崩了下次调用再拉一个」在真机上是重启风暴的种子：UIA 在锁屏 / Secure Desktop /
+会话切换下会连续抛异常，如果没上限，宿主会每 200 ms 拉起一个 `powershell.exe`，
+既拿不到可用桥也刷满日志。现在生命周期由策略层接管：
+
+| 场景 | 行为 |
+| --- | --- |
+| 首次启动 | 放行，无退避 |
+| 崩溃后重启 | 指数退避 200 → 400 → 800 ms（上限 5 s），不会紧贴崩溃点重拉 |
+| 120 s 内崩溃 ≥ 3 次 | **停止自动重启**，抛 `CAPABILITY_UNAVAILABLE` + `details.reason=bridge-crash-loop`，`desktop_capabilities` 如实报 `supported:false` + 可行动原因 |
+| 连续存活 ≥ 60 s | 视为稳定，清空崩溃窗口（避免「几天里偶发崩 3 次」被误判成循环） |
+| 连续 ping 失败 ≥ 3 次 | 判定「进程在但管道僵死」，回收桥，下次调用按退避重建 |
+| stdin 已关闭 | 直接丢弃半死桥并重建一次，不让后续每个请求都立刻失败 |
+| `close()` | 硬关闭（异常收尾）：立即放弃桥并 kill |
+| `shutdown()` | 优雅关闭：先发 `shutdown` 让 PowerShell 主循环 break，超时才 kill；正常退出**不计入崩溃** |
+
+`desktop_capabilities` 的 `bridge` 段落会带 `lifecycle`（`totalStarts` / `totalCrashes` /
+`crashesInWindow` / `uptimeMs` / `lastCrash` / `lastPing` / `blocked*`），上层据此判断
+「桥在抖」还是「环境真的不可用」，而不是靠重试次数猜。
+
+真机实测（`npm run verify:lifecycle`，`reports/p2-lifecycle.json`）：ping 中位 **4 ms**、
+ref 在 ping 后仍在（`storedRefs=3`）、两次强杀后均自愈（1.62 s / 1.81 s，含 PowerShell 冷启动）、
+第 3 次崩溃后 `bridge-crash-loop` 且 **零新增 spawn**、优雅退出 **208 ms** 且进程确已消失。
+
 ### 同进程多窗口：必须用 hwnd
 
 `explorer` 的桌面窗口与文件夹窗口共用同一个 PID，只按 `pid` 会稳定命错窗口：
@@ -287,7 +318,8 @@ WebView ── desktop_agent_toggle / permissions_set ──> Rust 壳
 2. **真实应用只覆盖记事本写入**：`verify:real-app` 已完成「写入 → 保存 → 读盘」闭环，但仅 1 个应用；覆盖采样显示 4/5 真实窗口「有名字的可操作节点为 0」，这类应用需逐个实测后才可纳入白名单，默认应拒绝或走视觉（视觉兜底还需策略显式开启，且尚无定位模型接入）。
 3. **仅 Windows 有真实后端**：macOS AX / Linux AT-SPI 未实现，回落 mock。
 4. **策略不热更新**：改开关 / 授权需重启引擎；壳侧 `platformPermissions.checkableByShell=false`，只给引导文案，不检测系统授权。
-5. **未接线引擎生命周期**：P1 是「配置即生效」的最小接线；`AgentLifecycle`（随壳启停、崩溃重启上限、健康检查）属 P2。
+5. **未接线引擎生命周期**：桥进程自身的生命周期（退避 / 崩溃上限 / 僵死回收 / 优雅退出）已接管，
+   但「随壳启停、壳侧重启上限、策略热更新」的 `AgentLifecycle` 仍属后续工作。
 6. **真机动作依赖交互式桌面会话**：服务 / 无桌面会话下 UIA 自检会失败并如实降级；`DEEPCODE_AGENT_UIA_BRIDGE=1` 必须显式开启。
 7. 与分发包的关系：`desktop/build/pack.ps1` 的「能力排除守卫」明确不打包本目录与
    `desktop_agent_*` IPC。**若在本功能分支上构建分发包**，需把 `-BaselineRef` 固定到
@@ -301,3 +333,4 @@ WebView ── desktop_agent_toggle / permissions_set ──> Rust 壳
 | `DEEPCODE_AGENT_BACKEND` | `auto` | `mock` / `windows` / `auto`（win32→windows） |
 | `DEEPCODE_AGENT_POLICY` | 壳策略 → 仓库默认 | 显式指定策略 JSON |
 | `DEEPCODE_AGENT_UIA_BRIDGE` | 未设置 | `1` 时启用 Windows UIA 长驻桥（真机 GUI 全能力） |
+| `DEEPCODE_AGENT_BRIDGE_MAX_RESTARTS` | `3` | 120 s 窗口内允许的崩溃重启次数，超限即停止自动重启（`bridge-crash-loop`） |

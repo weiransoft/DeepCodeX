@@ -14,6 +14,11 @@
  *
  * 安全：键盘/坐标动作在桥侧会校验前台窗口属于目标进程，避免误操作用户
  * 正在使用的其它窗口；截图只回传内存 base64，不落盘。
+ *
+ * 生命周期（P2）：桥的启停不再「崩溃了下次调用再拉一个」这么简单。
+ * `BridgeLifecycle` 负责指数退避、窗口内崩溃上限（超限即 `bridge-crash-loop`
+ * 停止自动重启并交还人工）、稳定运行后重置窗口、连续 ping 失败判定无响应回收；
+ * `close()` 硬关闭、`shutdown()` 优雅关闭（先发 shutdown 让 PowerShell 主循环退出）。
  */
 
 import { execFile, spawn } from "node:child_process";
@@ -22,6 +27,9 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 import { ErrorCode, AgentError } from "../errors.mjs";
+import { BridgeLifecycle } from "../modules/bridge-lifecycle.mjs";
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const execFileAsync = promisify(execFile);
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -101,19 +109,51 @@ export class WindowsBackend {
     this.bridgePath = options.bridgePath ?? join(HERE, "windows-uia.ps1");
     this.platform = options.platform ?? process.platform;
     this.bridgeTimeoutMs = options.bridgeTimeoutMs ?? 30_000;
+    this.healthTimeoutMs = options.healthTimeoutMs ?? 3_000;
     this.bridge = null;
     this._rpcSeq = 0;
     this._bridgeProbe = null;
     this.lastTarget = null; // 最近一次 snapshot 的 {appId,pid}，供动作做前台校验
     this.enumFallbackReason = null;
+    this.requestCount = 0;
+    this.lastRequestAt = 0;
+    const lcOpts = { ...(options.lifecycleOptions ?? {}) };
+    if (options.now) lcOpts.now = options.now;
+    if (options.maxRestarts != null) lcOpts.maxRestarts = options.maxRestarts;
+    if (options.restartWindowMs != null) lcOpts.restartWindowMs = options.restartWindowMs;
+    if (process.env.DEEPCODE_AGENT_BRIDGE_MAX_RESTARTS && lcOpts.maxRestarts == null) {
+      const n = Number(process.env.DEEPCODE_AGENT_BRIDGE_MAX_RESTARTS);
+      if (Number.isFinite(n) && n >= 0) lcOpts.maxRestarts = n;
+    }
+    this.lifecycle = options.lifecycle ?? new BridgeLifecycle(lcOpts);
   }
 
-  /** 启动（或复用）长驻桥；返回 ready 行。stdout 逐行 JSON，stderr 只做诊断 */
+  /**
+   * 启动（或复用）长驻桥；返回 bridge 状态对象。
+   *
+   * 崩溃后的重启先过 `admitRestart`：超限直接抛 `CAPABILITY_UNAVAILABLE`
+   * （details.reason=bridge-crash-loop），绝不无限拉起 powershell.exe。
+   */
   async _startBridge() {
     if (this.bridge) {
       await this.bridge.ready;
       return this.bridge;
     }
+    const admit = this.lifecycle.admitRestart("start");
+    if (!admit.allowed) {
+      const blocked = admit.blocked;
+      throw new AgentError(ErrorCode.CAPABILITY_UNAVAILABLE, blocked.message, {
+        reason: blocked.reason,
+        crashesInWindow: blocked.crashes,
+        windowMs: blocked.windowMs,
+        maxRestarts: this.lifecycle.maxRestarts,
+        lastCrashReason: blocked.lastCrashReason,
+        handoff: true,
+        fallback: "恢复交互式桌面会话后重启引擎，或改用 mock 后端跑逻辑测试",
+      });
+    }
+    if (admit.delayMs > 0) await sleep(admit.delayMs);
+
     const proc = this.spawnFn(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", this.bridgePath, "-Stdio"],
@@ -128,7 +168,16 @@ export class WindowsBackend {
       ready: null,
       resolveReady: null,
       rejectReady: null,
+      /** 主动关闭（close/shutdown/回收）标记：不算崩溃，不进崩溃窗口 */
+      intentional: false,
+      exited: null,
+      resolveExited: null,
+      exitCode: null,
     };
+    st.exited = new Promise((resolve) => {
+      st.resolveExited = resolve;
+    });
+
     st.ready = new Promise((resolve, reject) => {
       st.resolveReady = (v) => {
         if (st.settled) return;
@@ -179,6 +228,10 @@ export class WindowsBackend {
       st.stderr = (st.stderr + c).slice(-4000);
     });
     const onExit = (code) => {
+      // exit / error 可能先后各触发一次，只能记一次崩溃，否则崩溃窗口被凭空翻倍
+      if (st.exitHandled) return;
+      st.exitHandled = true;
+      st.exitCode = typeof code === "number" ? code : null;
       const reason = `UIA 桥进程已退出（code=${code}）${st.stderr ? `：${st.stderr.slice(-300)}` : ""}`;
       st.rejectReady(new AgentError(ErrorCode.CAPABILITY_UNAVAILABLE, reason));
       for (const p of st.pending.values()) {
@@ -186,22 +239,35 @@ export class WindowsBackend {
         p.reject(new AgentError(ErrorCode.CAPABILITY_UNAVAILABLE, reason));
       }
       st.pending.clear();
+      if (st.intentional) this.lifecycle.noteCleanExit();
+      else this.lifecycle.noteCrash(st.stderr ? st.stderr.slice(-300) : `exit-code=${code}`);
       if (this.bridge === st) {
         this.bridge = null;
         this._bridgeProbe = null; // 允许下次自检重新拉起
       }
+      st.resolveExited?.({ code: st.exitCode, intentional: st.intentional });
     };
     proc.on("exit", onExit);
     proc.on("error", (err) => onExit(err?.message ?? "spawn-error"));
 
     this.bridge = st;
+    this.lifecycle.noteStart();
     await st.ready;
     return st;
   }
 
-  /** 裸 RPC（不做能力前置校验，供自检与枚举降级使用） */
-  async _rpc(command, args = {}) {
-    const st = await this._startBridge();
+  /**
+   * 裸 RPC（不做能力前置校验，供自检与枚举降级使用）。
+   *
+   * stdin 已关闭说明桥进程已半死（进程还在、管道断了）：直接丢弃重建一次，
+   * 否则后续每个请求都会立刻失败且永不恢复。
+   */
+  async _rpc(command, args = {}, { timeoutMs = this.bridgeTimeoutMs } = {}) {
+    let st = await this._startBridge();
+    if (!st.proc.stdin.writable) {
+      this._dropBridge("stdin-closed");
+      st = await this._startBridge();
+    }
     if (!st.proc.stdin.writable) {
       throw new AgentError(ErrorCode.CAPABILITY_UNAVAILABLE, "UIA 桥 stdin 已关闭");
     }
@@ -213,13 +279,94 @@ export class WindowsBackend {
         reject(
           new AgentError(ErrorCode.OBSERVATION_FAILED, `UIA 桥请求超时：${command}`, {
             command,
-            timeoutMs: this.bridgeTimeoutMs,
+            timeoutMs,
           })
         );
-      }, this.bridgeTimeoutMs);
+      }, timeoutMs);
       st.pending.set(id, { resolve, reject, timer });
       st.proc.stdin.write(`${payload}\n`);
+      this.requestCount += 1;
+      this.lastRequestAt = Date.now();
     });
+  }
+
+  /**
+   * 健康检查：真的发一次 `ping`，拿到桥内 uptime/快照数才算健康。
+   * 连续失败达阈值 → 判定「进程在但管道僵死」，回收桥（下次调用按退避重建）。
+   */
+  async health({ timeoutMs = this.healthTimeoutMs } = {}) {
+    const st = this.bridge;
+    if (!st) {
+      return {
+        ok: false,
+        responsive: null,
+        reason: "bridge-not-started",
+        lifecycle: this.lifecycle.status(),
+      };
+    }
+    const t0 = Date.now();
+    try {
+      const res = await this._rpc("ping", {}, { timeoutMs });
+      const latencyMs = Date.now() - t0;
+      if (res?.ok) {
+        this.lifecycle.notePing(true, latencyMs);
+        this.lifecycle.noteStable();
+        return {
+          ok: true,
+          responsive: true,
+          latencyMs,
+          uptimeMs: this.lifecycle.uptimeMs(),
+          bridge: {
+            requestsHandled: res.requests ?? null,
+            snapshots: res.snapshots ?? null,
+            storedRefs: res.refs ?? null,
+            workingSetMb: res.workingSetMb ?? null,
+            lastHwnd: res.lastHwnd ?? null,
+          },
+          requestCount: this.requestCount,
+          lifecycle: this.lifecycle.status(),
+        };
+      }
+      this.lifecycle.notePing(false, latencyMs);
+      return {
+        ok: false,
+        responsive: false,
+        reason: res?.message ?? "ping 返回非预期结果",
+        recycled: false,
+        lifecycle: this.lifecycle.status(),
+      };
+    } catch (e) {
+      this.lifecycle.notePing(false, null);
+      const recycle = this.lifecycle.shouldRecycle();
+      if (recycle) this._dropBridge("ping-unresponsive");
+      return {
+        ok: false,
+        responsive: false,
+        reason: e?.message ?? String(e),
+        recycled: recycle,
+        lifecycle: this.lifecycle.status(),
+      };
+    }
+  }
+
+  /** 主动重建桥（诊断/脚本用）：仍受崩溃退避与窗口上限约束 */
+  async restart(reason = "manual") {
+    this._dropBridge(reason);
+    await this._startBridge();
+    return this.lifecycle.status();
+  }
+
+  _dropBridge(reason = "closed") {
+    const st = this.bridge;
+    if (!st) return;
+    this.bridge = null;
+    this._bridgeProbe = null;
+    st.intentional = true;
+    for (const p of st.pending.values()) {
+      clearTimeout(p.timer);
+      p.reject(new AgentError(ErrorCode.CAPABILITY_UNAVAILABLE, `UIA 桥已重建（${reason}）`));
+    }
+    st.pending.clear();
   }
 
   /** 真实自检：连得上、UIA 枚举得到窗口，才报告 supported:true */
@@ -232,6 +379,9 @@ export class WindowsBackend {
       this._bridgeProbe = unavailable("UIA 桥未启用：设置 DEEPCODE_AGENT_UIA_BRIDGE=1 且在交互式桌面会话中运行");
     } else if (!existsSync(this.bridgePath)) {
       this._bridgeProbe = unavailable(`桥脚本不存在：${this.bridgePath}`);
+    } else if (this.lifecycle.isBlocked() && !this.bridge) {
+      // 崩溃循环已封锁：不再反复 spawn，直接把可行动原因报上去
+      this._bridgeProbe = unavailable(this.lifecycle.status().blockedMessage);
     } else {
       try {
         const r = await this._rpc("capabilities", {});
@@ -279,8 +429,16 @@ export class WindowsBackend {
         reason: "Secure Desktop / 完整性级别检测超出 P1 范围，遇 UAC 一律 HANDOFF_REQUIRED",
       },
       bridge: bridge.supported
-        ? { connected: true, session: bridge.details?.session, userInteractive: bridge.details?.userInteractive, psVersion: bridge.details?.psVersion }
-        : { connected: false, reason: bridge.reason },
+        ? {
+            connected: true,
+            session: bridge.details?.session,
+            userInteractive: bridge.details?.userInteractive,
+            psVersion: bridge.details?.psVersion,
+            // 生命周期可见：重启次数 / 崩溃窗口 / uptime / 最近 ping，便于判断桥是否在抖
+            lifecycle: this.lifecycle.status(),
+            requestCount: this.requestCount,
+          }
+        : { connected: false, reason: bridge.reason, lifecycle: this.lifecycle.status() },
     };
   }
 
@@ -448,17 +606,11 @@ export class WindowsBackend {
     }
   }
 
-  /** sidecar 退出时关闭长驻桥，避免遗留 powershell.exe */
+  /** 硬关闭：立即放弃桥（退出路径/异常收尾用），不等待确认 */
   close() {
     if (!this.bridge) return;
     const st = this.bridge;
-    this.bridge = null;
-    this._bridgeProbe = null;
-    for (const p of st.pending.values()) {
-      clearTimeout(p.timer);
-      p.reject(new AgentError(ErrorCode.CAPABILITY_UNAVAILABLE, "UIA 桥已关闭"));
-    }
-    st.pending.clear();
+    this._dropBridge("close");
     try {
       st.proc.stdin.end();
     } catch {
@@ -469,6 +621,62 @@ export class WindowsBackend {
     } catch {
       /* already exited */
     }
+  }
+
+  /**
+   * 优雅关闭：先发 `shutdown` 让 PowerShell 主循环 break 并自行退出，
+   * 超时才 kill。用于 sidecar 收到 SIGINT/SIGTERM 的退出路径，
+   * 避免把桥里正在写盘的 PowerShell 直接打断。
+   */
+  async shutdown({ timeoutMs = 1_500 } = {}) {
+    const st = this.bridge;
+    if (!st) return { ok: true, closed: false, graceful: null };
+    let acked = false;
+    try {
+      const id = ++this._rpcSeq;
+      const payload = Buffer.from(JSON.stringify({ id, command: "shutdown", args: {} }), "utf8").toString("base64");
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, Math.min(600, timeoutMs));
+        st.pending.set(id, {
+          resolve: (v) => {
+            acked = Boolean(v?.ok);
+            clearTimeout(timer);
+            resolve();
+          },
+          reject: () => {
+            clearTimeout(timer);
+            resolve();
+          },
+          timer,
+        });
+        try {
+          st.proc.stdin.write(`${payload}\n`);
+        } catch {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+    } catch {
+      /* 桥已死，直接进入 kill 分支 */
+    }
+    this._dropBridge("shutdown");
+    try {
+      st.proc.stdin.end();
+    } catch {
+      /* already closed */
+    }
+    const exited = await Promise.race([
+      st.exited.then(() => true),
+      sleep(timeoutMs).then(() => false),
+    ]);
+    if (!exited) {
+      try {
+        st.proc.kill();
+      } catch {
+        /* already exited */
+      }
+    }
+    return { ok: true, closed: true, graceful: exited, acked, exitCode: st.exitCode };
   }
 }
 
