@@ -1,0 +1,207 @@
+{
+  "startedAt": "2026-11-06T09:57:36.156Z",
+  "bridge": {
+    "session": "Console",
+    "psVersion": "5.1.26100.9711"
+  },
+  "cases": [
+    {
+      "id": "calc",
+      "app": {
+        "appId": "applicationframehost",
+        "pid": 19992,
+        "hwnd": 1509616
+      },
+      "owned": true,
+      "steps": [
+        {
+          "step": "out-of-bounds-rejected",
+          "pass": true,
+          "code": "ACTION_DENIED"
+        },
+        {
+          "step": "click-7",
+          "pass": true,
+          "imagePoint": {
+            "x": 98,
+            "y": 688
+          },
+          "screenRect": {
+            "x": 98,
+            "y": 701,
+            "width": 153,
+            "height": 102
+          },
+          "clickOk": true,
+          "converted": true,
+          "resolved": {
+            "x": 175,
+            "y": 752
+          },
+          "snapped": "e0",
+          "pixelChanged": true,
+          "displayShows7": true
+        },
+        {
+          "step": "click-8",
+          "pass": true,
+          "imagePoint": {
+            "x": 255,
+            "y": 688
+          },
+          "clickOk": true,
+          "displayShows78": true
+        }
+      ],
+      "verdict": "coordinate-frame-verified",
+      "tree": {
+        "nodes": 54,
+        "verdict": "good"
+      },
+      "frame": {
+        "origin": {
+          "x": 77,
+          "y": 64
+        },
+        "size": {
+          "width": 666,
+          "height": 1078
+        },
+        "image": {
+          "width": 666,
+          "height": 1078
+        },
+        "scale": 1
+      },
+      "closed": {
+        "forced": true
+      }
+    },
+    {
+      "id": "charmap",
+      "app": {
+        "appId": "charmap",
+        "pid": 21864,
+        "hwnd": 17631806
+      },
+      "owned": true,
+      "steps": [
+        {
+          "step": "static-diff",
+          "pass": true,
+          "settledAfterMs": 400,
+          "pairs": 2,
+          "lastDiff": {
+            "changed": false,
+            "changedCells": 0,
+            "ratio": 0,
+            "cells": 4096,
+            "maxDelta": 1,
+            "verdict": "identical"
+          },
+          "verdict": "settled-identical"
+        },
+        {
+          "step": "click-and-verify",
+          "pass": true,
+          "imagePoint": {
+            "x": 439,
+            "y": 377
+          },
+          "clickOk": true,
+          "code": null,
+          "blind": false,
+          "snapped": "e0",
+          "evidence": "tree+pixels",
+          "treeChanged": true,
+          "pixelChanged": true,
+          "attempts": 1
+        }
+      ],
+      "verdict": "pixel-verify-works",
+      "tree": {
+        "nodes": 14,
+        "verdict": "sparse",
+        "reason": "有名字的可操作节点仅 1 个（阈值 3），定位可靠性不足"
+      },
+      "frame": {
+        "origin": {
+          "x": 30,
+          "y": 125
+        },
+        "size": {
+          "width": 976,
+          "height": 837
+        },
+        "scale": 1
+      },
+      "closed": {
+        "forced": true
+      }
+    },
+    {
+      "id": "taskmgr",
+      "app": {
+        "appId": "taskmgr",
+        "pid": 21976,
+        "hwnd": 2492308
+      },
+      "owned": true,
+      "steps": [
+        {
+          "step": "static-diff",
+          "pass": true,
+          "settledAfterMs": 400,
+          "pairs": 2,
+          "lastDiff": {
+            "changed": false,
+            "changedCells": 0,
+            "ratio": 0,
+            "cells": 4096,
+            "maxDelta": 0,
+            "verdict": "identical"
+          },
+          "verdict": "settled-identical"
+        },
+        {
+          "step": "click-and-verify",
+          "pass": true,
+          "imagePoint": {
+            "x": 702,
+            "y": 531
+          },
+          "clickOk": true,
+          "code": null,
+          "blind": false,
+          "snapped": "e0",
+          "evidence": "tree+pixels",
+          "treeChanged": false,
+          "pixelChanged": true,
+          "attempts": 1
+        }
+      ],
+      "verdict": "pixel-verify-works",
+      "tree": {
+        "nodes": 16,
+        "verdict": "sparse",
+        "reason": "整棵树都没有有名字的可操作节点，按名字定位不可行"
+      },
+      "frame": {
+        "origin": {
+          "x": 294,
+          "y": 294
+        },
+        "size": {
+          "width": 1560,
+          "height": 1180
+        },
+        "scale": 1
+      },
+      "closed": {
+        "forced": true
+      }
+    }
+  ],
+  "verdict": "visual-fallback-verified",
+  "finishedAt": "2026-11-06T09:57:57.204Z"
+}

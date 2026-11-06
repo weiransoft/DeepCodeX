@@ -67,10 +67,23 @@ export const TOOLS = [
   },
   {
     name: "desktop_screenshot",
-    description: "视觉兜底截图。默认关闭、不落盘、结果标记 untrusted；需先确认 a11y 树为空。",
+    description:
+      "视觉兜底截图。默认关闭、不落盘、结果标记 untrusted；需先确认 a11y 树为空/稀疏。" +
+      "返回坐标帧 frame（图像原点 + 缩放比），配合 desktop_click_xy 使用。",
     inputSchema: {
       type: "object",
-      properties: { appId: { type: "string" }, reason: { type: "string" } },
+      properties: {
+        appId: { type: "string" },
+        reason: { type: "string" },
+        includeImage: {
+          type: "boolean",
+          description: "是否回传 base64 像素（默认 false，仅回坐标帧元数据；像素很大，别默认带）",
+        },
+        activate: {
+          type: "boolean",
+          description: "截图前先把目标窗口置前台（默认 false，不抢焦点；目标被遮挡时必须开）",
+        },
+      },
       required: ["appId", "reason"],
       additionalProperties: false,
     },
@@ -95,13 +108,26 @@ export const TOOLS = [
   },
   {
     name: "desktop_click_xy",
-    description: "坐标点击兜底（自绘界面）。默认关闭，坐标会先吸附到最近 a11y 节点。",
+    description:
+      "坐标点击兜底（自绘/稀疏界面）。默认关闭。x/y 默认是**上一张截图的图像像素**" +
+      "（相对窗口左上角），内部换算成屏幕坐标、吸附到最近 a11y 节点，越界一律拒绝。" +
+      "动作成效按「结构变化 或 像素变化」判定。",
     inputSchema: {
       type: "object",
       properties: {
         appId: { type: "string" },
-        x: { type: "number" },
+        x: { type: "number", description: "frame=window 时是图像像素（相对截图左上角）；frame=screen 时是屏幕坐标" },
         y: { type: "number" },
+        frame: {
+          type: "string",
+          enum: ["window", "screen"],
+          description: "坐标所属坐标系，默认 window（必须先 desktop_screenshot）",
+        },
+        allowOutside: {
+          type: "boolean",
+          description: "允许点在窗口矩形外（弹出菜单/右键菜单等），默认 false",
+        },
+        maxSnapDistance: { type: "number", description: "吸附半径（屏幕单位），默认 80" },
         expectChange: { type: "boolean" },
         confirmationToken: { type: "string" },
       },
@@ -204,6 +230,9 @@ export class DesktopAgent {
     this.verifier = new Verifier(this.backend, {
       actuator: this.actuator,
       perception: this.perception,
+      // 像素验效属于「读」，但必须过 allowScreenshot 这道闸：截屏默认关闭，
+      // 验效通道不能成为绕过开关后门
+      policy: this.policy,
       budget: this.budget,
       telemetry: this.telemetry,
       maxRetries: limits.maxRetries ?? 2,
@@ -353,7 +382,12 @@ export class DesktopAgent {
         const app = await this._target(args);
         if (!app) throw new AgentError(ErrorCode.INVALID_ARGUMENT, `未知 appId：${args.appId}`);
         this.policy.authorize({ app, action: "screenshot", scope: "read" });
-        return this.perception.screenshot({ app, reason: args.reason });
+        return this.perception.screenshot({
+          app,
+          reason: args.reason,
+          includeImage: Boolean(args.includeImage),
+          activate: Boolean(args.activate),
+        });
       }
 
       case "desktop_click_ref": {
@@ -378,6 +412,9 @@ export class DesktopAgent {
           action: "click_xy",
           x: Number(args.x),
           y: Number(args.y),
+          frame: args.frame ?? "window",
+          allowOutside: Boolean(args.allowOutside),
+          maxSnapDistance: args.maxSnapDistance,
           expectChange: args.expectChange !== false,
           confirmationToken: args.confirmationToken,
         });

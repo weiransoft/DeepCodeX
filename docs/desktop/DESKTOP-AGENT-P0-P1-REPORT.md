@@ -33,7 +33,7 @@ P0 探针（桥关闭）曾判定 `continue-with-adjustment`：能枚举 34 个�
   `good / sparse / deferred / empty`，修正「按进程名猜 Electron」的误分类
   （实测 5 个真实窗口中只有 1 个真能按名字定位）；
 - **故障注入回归补齐**：窗口中途关闭、进程崩溃、桥崩溃重连、`STALE_REF`、预算熔断
-  全部锁定错误码与可恢复性，共 96 个单测通过；
+  全部锁定错误码与可恢复性，共 114 个单测通过；
 - **覆盖率达标（13 个真实应用）**：主动拉起 16 个目标应用、13 个采到树，其中 8 家可按
   名字操作、4 家只能视觉兜底、1 家（Edge）必须走 DOM/CDP，3 家因环境/权限未拉起且如实标注；
   同时把「完整度」判据做对（`snapshot.truncated` 恒真导致无法区分「没看全」与「树就这么小」）；
@@ -42,6 +42,9 @@ P0 探针（桥关闭）曾判定 `continue-with-adjustment`：能枚举 34 个�
   （含「中文按钮从未被点中」的 `\b` 正则 bug、老式对话框按钮是 `Pane`、Excel 落点选到公式栏）；
 - **桥生命周期可管**：`ping` 探活 4 ms、崩溃后指数退避自愈、120 s 内崩 3 次即停止
   自动重启（`bridge-crash-loop`，零新增 spawn）、`shutdown` 208 ms 优雅退出；
+- **视觉兜底的执行侧闭环**：坐标帧换算（图像像素 → 屏幕坐标）与越界拒绝在计算器上真机验证
+  （点「七」→ 显示 7、点「八」→ 78）；64×64 灰度签名补上「树不变时怎么验」，任务管理器实测
+  `treeChanged:false` + `pixelChanged:true`（§3.11）。仍缺「把图喂给模型」这一段（MCP 只传 text）；
 - **Rust 用例运行闭环**：`cargo test --lib` 在 MSVC CI 与本机 GNU 上均
   **74 passed / 0 failed**；同时纠正了「MinGW 环境问题」的误判——真因是测试二进制缺
   Windows 应用清单、ComCtl32 停在 v5，已在 `build.rs` 修掉（§5.1）；
@@ -366,6 +369,63 @@ DOM/CDP；3 家因环境或权限限制不参与统计，单独列在 `launchBlo
 复核后确认，它在 depth 8、树完整（cut = 0）时仍是 16 个 `Pane`、0 个有名字的可操作节点——
 它确实不可按名字定位，需要视觉兜底。
 
+### 3.11 视觉兜底：坐标帧与像素验效（P2「随后」第 2 项）
+
+§3.10 的 4 家 `sparse` 应用（任务管理器 / 字符映射表 / 系统信息 / 磁盘清理）此前只能拒绝。
+拒绝是对的——但「视觉兜底」当时只剩一句口号：**点不准**（坐标来自截图，不是屏幕坐标）、
+**验不了**（树前后一样，`expectChange` 恒 false）。这一轮把执行侧两条腿补上，默认仍关闭。
+
+**① 坐标帧：图像像素 ≠ 屏幕坐标**
+
+截图取的是**窗口矩形**，图像 (0,0) 是窗口左上角，不是屏幕 (0,0)；高 DPI 下截图像素数
+还与 UIA/输入 API 的单位不等（同一块区域，截图 1250 px、矩形 1000 px）。两者叠加的后果
+不是「点偏几像素」，是**整块偏移一个窗口原点**——打到别的窗口上，属 R4 不可逆误动作。
+
+- 桥侧 `screenshot` 回传 `rect`（窗口矩形，屏幕坐标）；`coords.mjs` 统一换算：
+  `screen = rect.origin + image / scale`；
+- `desktop_click_xy` 默认 `frame:"window"`（x/y 是截图像素），`frame:"screen"` 时不再换算；
+- 换算后**越界一律 `ACTION_DENIED`**（附窗口矩形与换算结果），宁可这一次不点；
+- **吸附在换算之后**：树的 `rect` 在屏幕坐标系，先吸附会吸到错元素（顺序写反就错）。
+
+**② 像素验效：树不变时唯一还剩下的证据**
+
+sparse 应用点击前后树完全一样，复观察拿到的还是同一棵，每步都被判 `verify-failed`。
+新增 `pixel-signature.mjs`：桥侧把窗口缩到 **64×64 灰度**（4096 字节 → 5.5 KB base64，
+一步取两次也不至于把 stdio 塞满），判据是**差异格数占比**而不是逐像素相等：
+
+| 参数 | 取值 | 挡住什么 |
+| --- | --- | --- |
+| `cellDelta` | 6 | 灰度编码噪声（实测静止两帧 `maxDelta ≤ 1`） |
+| `changedRatio` | 2% | 光标闪烁 / 抗锯齿 / 悬停高亮（假阳性比假阴性危险） |
+
+结构与像素**分开算再取或**，`verification.evidence` 如实标 `tree` / `tree+pixels`。
+另外：动作前连取两帧做**基线稳定性**判定；两帧不同即 `pixelStable:false`，
+`pixelChanged` 给 `null`、退回结构证据（`pixelNote:"unstable-baseline"`）——界面还在动画时，
+前后像素差**无法归因**。
+
+**③ 真机结果**（`reports/p2-visual-fallback.json`，`verdict = visual-fallback-verified`）
+
+| 用例 | 目标 | 关键证据 | 判定 |
+| --- | --- | --- | --- |
+| 坐标帧 | 计算器（UWP，窗口原点 (77,64)） | 图像 (98,688) → 屏幕 (175,752)，显示区 `显示为 7`；再点「八」→ `显示为 78`；越界回 `ACTION_DENIED` | `coordinate-frame-verified` |
+| 像素验效 | 字符映射表（`sparse`，1 个命名节点） | 静止两帧 `identical`（400 ms 内稳定）；点击后 `tree+pixels` 均变化 | `pixel-verify-works` |
+| 像素验效 | 任务管理器（`sparse`，0 个命名节点） | **`treeChanged:false` + `pixelChanged:true`**，1 次重试后成功 | `pixel-verify-works` |
+
+任务管理器那行是本节的支点：树完全没变，只有像素通道能证明动作生效。
+
+**真机上踩到的三条**
+
+| # | 现象 | 处理 |
+| --- | --- | --- |
+| 1 | **截图抓的是屏幕像素**：目标被遮挡时抓到的是遮挡物，before/after 量的是同一块别人的画面（像素验效从根上失真，且方向随机） | 新增 `activate` 开关（默认 false，不抢焦点）：验效基线帧先置前台；树为空兜底时自动开 |
+| 2 | **窗口刚出现还在渲染**：连续两帧差 84 格（2.05%），首轮误判「像素噪声太高」 | 不是阈值问题而是取样时机：先等连续两帧一致（实测 400 ms）再取基线；验效侧同时补基线稳定性判定 |
+| 3 | **签名不能按「截图」计费**：`maxScreenshots=3` 下每步 2 次会让视觉兜底两步熔断 | 签名不计截图预算（4 KB 灰度网格不是感知截图），上界由 `maxSteps` 兜住（每步固定 2 次） |
+
+**仍缺的一段（下一项）**：**把图喂给模型**。MCP server 只回 `{type:"text"}`，
+`packages/core` 的 `executeMcpTool` 也只保留 text content，管线不承载 image content block。
+侧车现在能产出坐标帧、能 `includeImage` 回 base64，但「模型看图 → 给坐标」这一段要等
+工具结果类型支持多模态。在此之前 `allowCoordinateInput` / `allowScreenshot` 保持默认 false。
+
 ---
 
 ## 4. P1 交付清单
@@ -409,11 +469,12 @@ DOM/CDP；3 家因环境或权限限制不参与统计，单独列在 `launchBlo
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
-| Node 单测 | `cd desktop/desktop-agent && npm test` | **96/96 通过**（10 个测试文件，约 29 s） |
+| Node 单测 | `cd desktop/desktop-agent && npm test` | **114/114 通过**（11 个测试文件，约 19 s） |
 | 真机 GUI 闭环 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:gui` | **4/4 verified**，`gui-unblocked`；连续 4 次稳定 |
 | 真实应用写入 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:real-app` | **3/3 步骤**，`real-app-write-verified`，磁盘 `persisted:true` |
 | 桥生命周期 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:lifecycle` | `lifecycle-managed`：ping 4 ms、强杀自愈 2/2、崩溃循环零新增 spawn、优雅退出 208 ms |
 | 覆盖率矩阵（主动） | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:coverage -- --with-office` | `coverage-10plus`：13/16 采到树，8 家语义树 / 4 家视觉兜底 / 1 家 DOM，3 家环境受限；均值 214 ms |
+| 视觉兜底（真机） | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:visual -- --only calc,charmap,taskmgr` | `visual-fallback-verified`：坐标帧 3/3（点「七」→7、点「八」→78、越界拒绝）、像素验效 2/2（taskmgr `treeChanged:false`/`pixelChanged:true`） |
 | 覆盖率采样（被动） | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run coverage` | 5/5 树可用，均值 106 ms，无失败 |
 | P0 探针 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run probe` | `continue`；6 窗口 / 93 ms，能力 6/7 可用 |
 | MCP stdio 冒烟 | `printf … \| node src/index.mjs` | `initialize` 返回 `2025-03-26`；`tools/list` 11 个工具；`desktop_status` 默认 `enabled:false` |
@@ -496,12 +557,14 @@ GNU 产物串味）、先 `--list` 数一遍用例（<60 直接失败，防空�
 
 1. **写用例只覆盖 5 个应用**：记事本 / Word / Excel / 资源管理器 / Edge 已跑通（§3.9），
    浏览器按策略拒绝 GUI；其余应用要按 §3.10 的通道判定逐类补用例，尤其 4 家
-   `sparse` 应用当前只能按「拒绝」处理（见本条下方第 4 点）。
+   `sparse` 应用当前只能按「拒绝」处理（执行侧已就绪，缺的是看图能力，见本条下方第 4 点）。
 2. **UAC 未感知**：Secure Desktop 与完整性级别检测未实现，遇 UAC 一律交还人工。
 3. **分类启发式仍保留**：进程名/标题分类仍用于初始通道建议（`unknown` 占比高），
    但已不再是最终结论——观察后由 `tree-quality` 实测覆盖；未观察过的应用仍可能是错的。
-4. **视觉兜底无定位模型**：`sparse/empty` 只给出「该走视觉」的判定与截图元数据，
-   还没有「截图 → 坐标」的视觉定位能力，因此这类应用当前实际是「拒绝执行」。
+4. **视觉兜底缺「把图喂给模型」**：执行侧已闭环（坐标帧换算 / 越界拒绝 / 像素验效，§3.11），
+   但 MCP 结果只承载 text content（`mcp-server.mjs` 回 `{type:"text"}`，`packages/core`
+   的 `executeMcpTool` 也只保留 text），图片到不了模型，所以「截图 → 坐标」这一跳还没有
+   模型可接。在工具结果类型支持多模态之前，`sparse` 应用仍按「拒绝」处理。
 5. **策略不热更新**：改开关/授权需重启引擎，UI 已有 `restartHint` 文案。
 6. **仅 Windows 真后端**：macOS AX / Linux AT-SPI 未实现，回落 mock。
 7. **未接线引擎生命周期**：桥进程自身的生命周期（退避 / 崩溃上限 / 僵死回收 / 优雅退出）
@@ -538,8 +601,10 @@ GNU 产物串味）、先 `--list` 数一遍用例（<60 直接失败，防空�
 
 **随后：**
 
+- ~~视觉兜底与坐标吸附（P2）~~ ✅ 执行侧已完成（§3.11）：坐标帧换算 + 越界拒绝 +
+  64×64 像素验效，真机 `visual-fallback-verified`；**剩「工具结果支持 image content block」**
+  这一段，否则模型看不到图，默认仍关闭；
 - 接 `AgentLifecycle`（壳管 sidecar 启停 / 崩溃上限 / 策略热更新）；
-- 视觉兜底与坐标吸附（P2），默认仍关闭；
 - 配置页 UI 落地 4 条 IPC（当前只有 TS 包装，无界面）；
 - 按方案 §8 补端到端度量：任务成功率、单步耗时、人工接管率、token/步数成本。
 
@@ -557,6 +622,7 @@ GNU 产物串味）、先 `--list` 数一遍用例（<60 直接失败，防空�
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:gui)
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:real-app)
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:lifecycle)
+(cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:visual -- --only calc,charmap,taskmgr)
 npm run typecheck && npm run check:ipc
 
 # Rust（本机 GNU：PATH 里要有 MinGW 的 windres / rc.exe；用例已可本地运行，见 §5.1）

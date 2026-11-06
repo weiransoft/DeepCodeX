@@ -36,6 +36,8 @@ desktop-agent/
 ├── src/modules/policy-guard.mjs   执行前硬校验（白名单 / 注入扫描 / 确认令牌）
 │             policy-load.mjs      外部策略加载 + 锁定字段二次硬化
 │             perception.mjs       稳定 ref / 骨架树 / 下钻 / 视觉兜底
+│             coords.mjs           坐标帧换算（图像像素 ↔ 屏幕坐标）+ 越界拒绝
+│             pixel-signature.mjs  64×64 灰度签名差异（树不变时的动作验效）
 │             tree-quality.mjs     实测树质量判定（good / sparse / deferred / empty）
 │             bridge-lifecycle.mjs 桥生命周期（退避 / 崩溃窗口上限 / 僵死回收 / 稳定重置）
 │             target-pick.mjs      写入落点选择（按可写面积，不按角色名——公式栏会骗人）
@@ -52,6 +54,7 @@ desktop-agent/
 │           verify-multi-app.mjs   真实应用写入矩阵（记事本/Word/Excel/资源管理器/Edge）
 │           probe-app.mjs          单应用 UIA 结构探针（给新应用写用例前先看清它暴露了什么）
 │           verify-lifecycle.mjs   桥生命周期真机验证（ping / 崩溃自愈 / 崩溃循环 / 优雅退出）
+│           verify-visual-fallback.mjs 视觉兜底真机验证（坐标帧换算 / 越界拒绝 / 像素验效）
 │           register-mcp.mjs       MCP 登记（dry-run / 写入 / 移除）
 ├── reports/p0-probe.json          P0 实测数据（窗口标题不落盘）
 │           p1-gui-verify.json     真机闭环实测数据
@@ -60,7 +63,8 @@ desktop-agent/
 │           p2-real-app.json       真实应用写入闭环实测数据
 │           p2-multi-app.json      真实应用写入矩阵实测数据
 │           p2-lifecycle.json      桥生命周期真机实测数据
-└── tests/*.test.mjs               node:test，零依赖（96 个用例）
+│           p2-visual-fallback.json 视觉兜底真机实测数据（计算器 / 字符映射表 / 任务管理器）
+└── tests/*.test.mjs               node:test，零依赖（114 个用例）
 ```
 
 零新增 npm 依赖（Node ≥ 22，ESM）：sidecar 需要随桌面端分发，避免版本漂移与供应链面。
@@ -167,10 +171,10 @@ printf '%s\n' \
 | Word | Office 文档模型 | good | 6 | 语义树（正文靠 `TextPattern` 读） |
 | Excel | Office 网格 | good | 223 | 语义树（`DataItem` 209 个，逐格可达） |
 | Edge | 浏览器外壳 | good（仅外壳） | 8 | **DOM/CDP**，不走 GUI |
-| 任务管理器 | Win32 现代 | sparse | 0 | 视觉兜底（当前拒绝） |
-| 字符映射表 | Win32 对话框 | sparse | 1 | 视觉兜底（当前拒绝） |
-| 系统信息 | Win32 TreeView | sparse | 0 | 视觉兜底（当前拒绝） |
-| 磁盘清理 | Win32 对话框 | sparse | 0 | 视觉兜底（当前拒绝） |
+| 任务管理器 | Win32 现代 | sparse | 0 | 视觉兜底（见下节，已可真机验证） |
+| 字符映射表 | Win32 对话框 | sparse | 1 | 视觉兜底（见下节） |
+| 系统信息 | Win32 TreeView | sparse | 0 | 视觉兜底（同 taskmgr 形态） |
+| 磁盘清理 | Win32 对话框 | sparse | 0 | 视觉兜底（同 charmap 形态） |
 | 命令提示符 / PS 5 | 控制台子系统 | — | — | 环境受限，未采到（见下） |
 | 性能监视器 | MMC | — | — | 需管理员会话 |
 
@@ -202,6 +206,63 @@ printf '%s\n' \
 被动采样（`npm run coverage`）仍保留，用于随手看一眼当前桌面。它此前把 4/5 判成
 `sparse`（`gameviewer` 28 个可操作节点全无名字、`workbuddy` 整树 3 个节点）——这个
 结论与主动矩阵一致：瓶颈不在「能不能拿到树」，而在「能不能按名字指认目标」。
+
+### 视觉兜底：坐标帧与像素验效（`npm run verify:visual`）
+
+上表那 4 家 `sparse` 应用以前只能拒绝（`CAPABILITY_UNAVAILABLE`）：树指认不了目标，
+而「视觉兜底」缺两条腿——**点不准**、**验不了**。这一节把两条腿补上了，默认仍关闭。
+
+**1. 坐标帧：图像像素 ≠ 屏幕坐标**
+
+模型看的是截图，坐标是图像像素；输入 API 要的是屏幕坐标。两者差在原点（截图取的是窗口
+矩形，不是整屏）和缩放（高 DPI 下同一块区域，截图 1250 px、UIA 矩形 1000 px）上。
+不换算不是"点不准"，是**点到别的窗口**（R4 不可逆误动作）。所以：
+
+- 桥侧 `screenshot` 回传 `rect`（窗口矩形，屏幕坐标）；`frame = rect + 图像尺寸` 一起进上下文；
+- `desktop_click_xy` 默认 `frame: "window"`（x/y 是图像像素），内部换算成屏幕坐标；
+- 换算后**越界一律拒绝**（`ACTION_DENIED`）：宁可这次不点，也不猜；
+- 吸附发生在换算**之后**——树的 rect 在屏幕坐标系，先吸附会吸到错元素。
+
+真机证据（计算器，窗口原点 (77,64)）：按树里「七」的 rect 算出图像 (98,688) → 工具换算成
+屏幕 (175,752) → 显示区变成 7；再点「八」→ 78。少了原点那 77/64 px，落点会整体偏到别的键上。
+
+**2. 像素验效：树不变时唯一还剩下的证据**
+
+sparse 应用点击前后树一模一样，`observeState` 复观察拿到同一棵树，`expectChange` 恒 false
+→ 每步都被判 `verify-failed`。现在坐标点击额外挂一条 64×64 灰度签名（4096 字节，5.5 KB
+base64；一步取两次也不至于把 stdio 塞满），判据是"差异格数占比"，不是逐像素相等：
+
+- 单格灰度差 ≤6 视为编码噪声；变化格数占比 ≤2% 视为光标闪烁/抗锯齿；
+- 结构与像素**分开算再取或**，`verification.evidence` 如实标 `tree` / `tree+pixels`。
+
+**3. 基线不稳定就不下结论**
+
+界面还在渲染/动画时，动作前后的像素差**无法归因**——硬判就会把动画当成"生效"（假阳性）。
+所以动作前连取两帧，两帧不同即标 `pixelStable=false`，`pixelChanged` 直接给 `null`、
+退回结构证据（`pixelNote: "unstable-baseline"`）。
+
+实测（`reports/p2-visual-fallback.json`，`verdict = visual-fallback-verified`）：
+
+| 用例 | 目标 | 关键证据 | 判定 |
+| --- | --- | --- | --- |
+| 坐标帧 | 计算器（UWP） | 点「七」→ `显示为 7`；点「八」→ `显示为 78`；越界坐标回 `ACTION_DENIED` | `coordinate-frame-verified` |
+| 稀疏像素验效 | 字符映射表（sparse，1 个命名节点） | 静止两帧 `identical`（400 ms 稳定）；点击后 `tree+pixels` 均变化 | `pixel-verify-works` |
+| 稀疏像素验效 | 任务管理器（sparse，0 个命名节点） | **`treeChanged: false` + `pixelChanged: true`** | `pixel-verify-works` |
+
+任务管理器那行是这一节的核心：树完全没变，只有像素通道能证明动作生效了。
+
+真机上踩到的三条：
+
+| # | 现象 | 处理 |
+| --- | --- | --- |
+| 1 | **截图抓的是屏幕像素**：目标被别的窗口挡住，抓到的是遮挡物，before/after 量的是同一块别人的画面 | 新增 `activate`（默认 false，不抢焦点）：验效的基线帧必须先置前台；`observe` 的树为空兜底也自动开 |
+| 2 | **窗口刚出现时还在渲染**：两帧静止画面差 84 格（2.05%），一开始误判「像素噪声太高」 | 不是阈值问题，是取样时机问题：先等连续两帧一致（实测 400 ms 内稳定），再取基线 |
+| 3 | **像素签名不能按「截图」计费**：`maxScreenshots=3` 下，每步 2 次会让视觉兜底两步就熔断 | 签名不计截图预算（4 KB 灰度网格不是感知截图）；上界由 `maxSteps` 兜住（每步固定 2 次） |
+
+> 仍然缺的一段：**把图喂给模型**。MCP server 目前只回 `{type:"text"}`
+> （`packages/core` 的 `executeMcpTool` 也只保留 text），所以侧车能产出坐标帧与像素证据、
+> 也能 `includeImage` 回 base64，但管线还不承载 image content block。定位模型接入是下一项，
+> 在此之前视觉兜底保持默认关闭。
 
 ### 树质量判定（`src/modules/tree-quality.mjs`）
 
@@ -431,9 +492,9 @@ WebView ── desktop_agent_toggle / permissions_set ──> Rust 壳
 | `desktop_list_apps` | 只读 | 可见窗口枚举 + 分类 + 建议通道（默认 TTL 缓存） |
 | `desktop_snapshot` | 只读 | a11y 语义骨架树 + 稳定 ref |
 | `desktop_drill_down` | 只读 | 按 `rootRef` 下钻子树，省 token |
-| `desktop_screenshot` | 只读 | 视觉兜底，默认关闭、不落盘 |
+| `desktop_screenshot` | 只读 | 视觉兜底，默认关闭、不落盘；回传坐标帧 `frame`（可 `includeImage` 要像素） |
 | `desktop_click_ref` | 写 | 按 ref 执行元素 invoke，走 Observe→Act→Verify |
-| `desktop_click_xy` | 写 | 坐标点击兜底，默认关闭，先吸附最近 a11y 节点 |
+| `desktop_click_xy` | 写 | 坐标点击兜底，默认关闭；`frame=window` 时按截图像素换算，越界拒绝，再吸附最近节点 |
 | `desktop_type` | 写 | 输入文本（优先 ValuePattern） |
 | `desktop_key` | 写 | 快捷键 |
 | `desktop_wait_for` | 只读 | 有界等待（最长 10s） |
@@ -460,7 +521,9 @@ WebView ── desktop_agent_toggle / permissions_set ──> Rust 壳
 ## 已知限制
 
 1. **UAC / 验证码 / 锁屏**：`uacAwareness=false`，Secure Desktop 与完整性级别未检测，一律 `HANDOFF_REQUIRED`，不做绕过。
-2. **真实应用只覆盖记事本写入**：`verify:real-app` 已完成「写入 → 保存 → 读盘」闭环，但仅 1 个应用；覆盖采样显示 4/5 真实窗口「有名字的可操作节点为 0」，这类应用需逐个实测后才可纳入白名单，默认应拒绝或走视觉（视觉兜底还需策略显式开启，且尚无定位模型接入）。
+2. **视觉兜底缺「喂图给模型」这一环**：坐标帧换算、越界拒绝、像素验效都已真机闭环
+   （见「视觉兜底」一节），但 MCP 管线只承载 text content block，图片还到不了模型；
+   定位模型接入前，`sparse` 应用默认仍拒绝（`allowCoordinateInput` / `allowScreenshot` 均为 false）。
 3. **仅 Windows 有真实后端**：macOS AX / Linux AT-SPI 未实现，回落 mock。
 4. **策略不热更新**：改开关 / 授权需重启引擎；壳侧 `platformPermissions.checkableByShell=false`，只给引导文案，不检测系统授权。
 5. **未接线引擎生命周期**：桥进程自身的生命周期（退避 / 崩溃上限 / 僵死回收 / 优雅退出）已接管，

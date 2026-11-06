@@ -70,6 +70,8 @@ export class MockBackend {
   constructor(options = {}) {
     this.name = "mock";
     this.clock = options.clock ?? (() => Date.now());
+    /** 坐标帧用的窗口矩形：测试可以给它一个非原点 origin，验证坐标换算真的在算 */
+    this.rect = options.rect ?? { x: 0, y: 0, width: 1280, height: 800 };
     this.snapshotSeq = 0;
     this.snapshots = new Map();
     this.state = {
@@ -91,6 +93,10 @@ export class MockBackend {
       windowClosed: false,
       /** 目标进程崩溃退出：HANDOFF_REQUIRED（不可恢复，必须交还人工） */
       appExited: false,
+      /** 坐标点击「点了但界面没变」：模拟点空 / 点错，验证视觉验效会不会误报通过 */
+      silentClick: false,
+      /** 每次签名都不同：模拟界面还在动画/渲染，用来验证「基线不稳就不信像素」 */
+      signatureJitter: false,
     };
     this.appTrees = new Map();
   }
@@ -117,6 +123,7 @@ export class MockBackend {
       appEnumeration: { supported: true, reason: "in-memory app registry" },
       a11yTree: { supported: true, reason: "synthetic semantic tree" },
       screenshot: { supported: true, reason: "synthetic placeholder (no pixels)" },
+      pixelDiff: { supported: true, reason: "state-derived 64×64 grayscale signature", grid: 64 },
       elementInvoke: { supported: true, reason: "in-memory state mutation" },
       coordinateInput: { supported: true, reason: "in-memory state mutation" },
       foregroundControl: { supported: false, reason: "not applicable" },
@@ -186,14 +193,59 @@ export class MockBackend {
 
   async screenshot({ reason = "" } = {}) {
     // 不产生真实像素、不落盘（R2）。返回元数据 + 占位，供上层做「视觉兜底」流程测试。
+    // rect 必须给：坐标帧换算（图像坐标 → 屏幕坐标）全靠它。
     return {
       mimeType: "image/png",
-      bytes: 0,
-      base64: "",
-      width: 1280,
-      height: 800,
+      // 1×1 透明 PNG：假像素，但真 base64——includeImage 这条路径要能真跑通
+      bytes: 68,
+      base64:
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      // 图像尺寸 = 窗口矩形尺寸（缩放比 1）：mock 不模拟高 DPI，缩放换算由单测覆盖
+      width: this.rect.width,
+      height: this.rect.height,
+      rect: { ...this.rect },
+      coords: "image-pixel; origin at rect.x/rect.y",
       reason,
       persisted: false,
+      untrusted: true,
+    };
+  }
+
+  /**
+   * 由内部状态派生 64×64 灰度签名：状态变了签名就变，状态没变签名稳定。
+   * 这样「像素验效」这条路径在无桌面会话的环境里也能被测到，而不是只能靠真机。
+   */
+  async pixelSignature() {
+    await this._assertAlive();
+    const grid = 64;
+    this.signatureSeq = (this.signatureSeq ?? 0) + 1;
+    const seed = JSON.stringify([
+      this.state.status,
+      this.state.text,
+      this.state.clicks,
+      this.state.submitted,
+      this.faults.signatureJitter ? this.signatureSeq : 0,
+    ]);
+    let h = 2166136261;
+    for (let i = 0; i < seed.length; i += 1) {
+      h ^= seed.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    const gray = new Uint8Array(grid * grid);
+    for (let i = 0; i < gray.length; i += 1) {
+      const x = i % grid;
+      const y = (i / grid) | 0;
+      let v = 32 + ((x * 7 + y * 13 + (h & 0xff)) % 24);
+      if (((x >> 3) + (y >> 3) + (h % 3)) % 5 === 0) v += 90;
+      gray[i] = v & 0xff;
+    }
+    return {
+      ok: true,
+      grid,
+      base64: Buffer.from(gray).toString("base64"),
+      width: this.rect.width,
+      height: this.rect.height,
+      rect: { ...this.rect },
       untrusted: true,
     };
   }
@@ -252,6 +304,10 @@ export class MockBackend {
     if (this.faults.failNextAction > 0) {
       this.faults.failNextAction -= 1;
       return { ok: false, error: "ACTION_NO_EFFECT" };
+    }
+    if (this.faults.silentClick) {
+      // 点了、后端也说成功，但界面什么都没变——这正是视觉兜底最需要识别的假成功
+      return { ok: true, via: "coordinate-input", foregroundRequired: true, snappedTo: snapTo ?? null, silent: true };
     }
     this.state.clicks += 1;
     this.state.status = `已点击坐标 (${x},${y})`;

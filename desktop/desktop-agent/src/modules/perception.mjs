@@ -13,6 +13,7 @@
 import { ErrorCode, AgentError } from "../errors.mjs";
 import { detectInjection } from "./policy-guard.mjs";
 import { assessSnapshot } from "./tree-quality.mjs";
+import { frameFromShot } from "./coords.mjs";
 
 function flatten(nodes, out = []) {
   for (const n of nodes ?? []) {
@@ -62,6 +63,8 @@ export class Perception {
     this.snapshots = new Map();
     this.maxSnapshots = options.maxSnapshots ?? 8;
     this.current = null;
+    /** 最近一次截图的坐标帧（图像 → 屏幕坐标换算的依据） */
+    this.lastFrame = null;
     /** 观察后回写树质量（registry 据此修正通道判定），签名 (app, quality) */
     this.onQuality = options.onQuality ?? null;
   }
@@ -163,7 +166,7 @@ export class Perception {
       payload.emptyTree = true;
       payload.hint = "a11y 树为空（自绘/Electron/游戏）；按三级降级链考虑视觉兜底或换通道";
       if (allowVisualFallback && this.policy?.policy?.allowScreenshot) {
-        payload.visualFallback = await this.screenshot({ app, reason: "a11y-tree-empty" });
+        payload.visualFallback = await this.screenshot({ app, reason: "a11y-tree-empty", activate: true });
       }
     } else if (treeQuality.verdict === "sparse") {
       // 树非空但指认不了目标：换通道（视觉）或明确拒绝，别在同一棵树里反复重试
@@ -216,7 +219,7 @@ export class Perception {
   }
 
   /** 截图：默认不落盘、不把 base64 写进事件流 */
-  async screenshot({ app, reason = "" } = {}) {
+  async screenshot({ app, reason = "", includeImage = false, activate = false } = {}) {
     if (!this.policy?.policy?.allowScreenshot) {
       throw new AgentError(ErrorCode.CAPABILITY_UNAVAILABLE, "截屏通道默认关闭（树优先）", {
         hint: "仅在 a11y 树为空 / 自绘界面时开启 allowScreenshot",
@@ -224,7 +227,16 @@ export class Perception {
     }
     this.budget?.charge({ screenshots: 1, steps: 1 });
     const shot = await this.telemetry.measure("observe.screenshot", { appId: app?.appId, reason }, () =>
-      this.backend.screenshot({ reason, appId: app?.appId, pid: app?.pid, hwnd: app?.hwnd })
+      this.backend.screenshot({
+        reason,
+        appId: app?.appId,
+        pid: app?.pid,
+        hwnd: app?.hwnd,
+        includeImage,
+        // 截图抓的是屏幕像素：目标被遮挡时抓到的就是遮挡物。
+        // 树为空的兜底场景必须先把目标置前台，否则像素证据从根上就是错的。
+        activate,
+      })
     );
     // 只回传元数据；base64 交给调用方按需消费，绝不经 Telemetry 落盘
     this.current && this.snapshots.has(this.current) && (this.snapshots.get(this.current).lastScreenshot = {
@@ -232,16 +244,37 @@ export class Perception {
       height: shot.height,
       bytes: shot.bytes ?? Buffer.byteLength(shot.base64 ?? "", "utf8"),
     });
-    return {
+    // 坐标帧必须跟着截图一起记下来：后续「按窗口坐标点击」全靠它把
+    // 图像像素换回屏幕坐标。窗口移动/缩放后旧帧即失效，所以带时间戳。
+    const frame = frameFromShot(shot);
+    this.lastFrame = { frame, at: Date.now(), appId: app?.appId ?? "", snapshotId: this.current };
+    this.telemetry?.emit("observe.frame", {
+      appId: app?.appId,
+      hasRect: Boolean(frame),
+      scaleX: frame?.scaleX ?? null,
+      width: shot.width,
+      height: shot.height,
+    });
+    const out = {
       ok: true,
       width: shot.width,
       height: shot.height,
       mimeType: shot.mimeType,
+      /** 坐标帧：图像 (0,0) == frame.rect 左上角；scale 是图像像素与屏幕单位的比 */
+      frame,
+      coords: "image-pixel",
       persisted: false,
       untrusted: true,
       /** 视觉定位后应吸附到最近 a11y 节点 */
-      snapHint: "调用 snapToNearestElement(tree, x, y) 后再点击，避免坐标漂移",
+      snapHint: "调用 desktop_click_xy 时 frame 默认 window，x/y 直接用图像像素；越界会被拒绝",
     };
+    if (includeImage && shot.base64) out.base64 = shot.base64;
+    return out;
+  }
+
+  /** 最近一次截图的坐标帧（含时间戳，调用方据此判断是否过期） */
+  lastShot() {
+    return this.lastFrame ?? null;
   }
 
   /** 校验 ref 是否属于当前有效快照 */

@@ -21,7 +21,8 @@
     "verify:multi-app": "node scripts/verify-multi-app.mjs",
     "verify:coverage": "node scripts/verify-app-coverage.mjs",
     "verify:lifecycle": "node scripts/verify-lifecycle.mjs",
-    "register:mcp": "node scripts/register-mcp.mjs"
+    "register:mcp": "node scripts/register-mcp.mjs",
+    "verify:visual": "node scripts/verify-visual-fallback.mjs"
   },
   "dependencies": {},
   "devDependencies": {}

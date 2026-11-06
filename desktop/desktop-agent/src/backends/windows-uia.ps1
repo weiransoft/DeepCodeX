@@ -16,8 +16,9 @@
     invokeRef 必然 STALE_REF——这是真机打不通的根因，不是沙箱权限问题。
 
     能力：
-      listWindows / snapshot（骨架+完整树+稳定 ref）/ screenshot / invokeRef /
-      clickXY / typeText / sendKey / waitFor / observeState / invalidateSnapshots
+      listWindows / snapshot（骨架+完整树+稳定 ref）/ screenshot（含坐标帧）/
+      pixelSignature（64×64 灰度签名，视觉兜底验效用）/ invokeRef / clickXY /
+      typeText / sendKey / waitFor / observeState / invalidateSnapshots
 
 .NOTES
     安全：截图只回传内存 base64，不落盘；键盘/坐标输入先校验前台窗口属于目标
@@ -307,6 +308,102 @@ function Test-Foreground([string]$appId, [int]$targetPid, [long]$targetHwnd, [sw
     return $null
 }
 
+function Get-CaptureRect($a) {
+    # 截图区域：目标窗口的 UIA 外接矩形；没有目标时退化为整个虚拟屏。
+    # 返回的矩形同时是**坐标帧的原点**——调用方拿到的图像 (0,0) 对应矩形左上角。
+    # 少了它，图像坐标就没法换回屏幕坐标，视觉兜底会整体偏移一个窗口原点。
+    $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+    $r = [ordered]@{ x = [int]$b.X; y = [int]$b.Y; width = [int]$b.Width; height = [int]$b.Height }
+    $appId = [string]$a.appId
+    $targetPid = 0
+    if ($a.pid) { $targetPid = [int]$a.pid }
+    $targetHwnd = 0
+    if ($a.hwnd) { $targetHwnd = [long]$a.hwnd }
+    if ($appId -or $targetPid -gt 0 -or $targetHwnd -gt 0) {
+        $win = Resolve-Window $appId $targetPid $targetHwnd
+        if ($null -ne $win) {
+            try {
+                $eb = $win.El.Current.BoundingRectangle
+                if ($eb.Width -gt 0 -and $eb.Height -gt 0 -and $eb.Width -lt 100000) {
+                    $r = [ordered]@{ x = [int]$eb.X; y = [int]$eb.Y; width = [int]$eb.Width; height = [int]$eb.Height }
+                }
+            } catch { }
+        }
+    }
+    return $r
+}
+
+function Get-CaptureBitmap($rect) {
+    $bmp = New-Object System.Drawing.Bitmap -ArgumentList ([int]$rect.width), ([int]$rect.height)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    try {
+        $g.CopyFromScreen([int]$rect.x, [int]$rect.y, 0, 0, $bmp.Size)
+    } finally {
+        $g.Dispose()
+    }
+    return $bmp
+}
+
+function Enter-CaptureTarget($a) {
+    # 截图抓的是**屏幕**像素：目标窗口被别的窗口挡住，抓到的就是别人的画面，
+    # 像素验效会彻底失真（before 与 after 都在量同一个遮挡物）。
+    # 因此只有调用方显式要求 activate 时才把目标置前台——默认不抢焦点，
+    # 用户可能正在别处打字。
+    if (-not $a.activate) { return $null }
+    $appId = [string]$a.appId
+    $targetPid = 0
+    if ($a.pid) { $targetPid = [int]$a.pid }
+    $targetHwnd = 0
+    if ($a.hwnd) { $targetHwnd = [long]$a.hwnd }
+    $win = Test-Foreground $appId $targetPid $targetHwnd -Activate
+    if ($null -eq $win) {
+        return (New-Fail 'ACTION_DENIED' '无法把目标窗口置前台，截图像素可能是别的窗口' @{
+            hint = '等目标窗口可见后重试，或关掉遮挡它的窗口'
+        })
+    }
+    return $null
+}
+
+function Get-PixelSignature($rect) {
+    # 64×64 灰度网格（4096 字节）：对「标签页切换 / 对话框弹出 / 列表重排」够灵敏，
+    # 又小到能一步动作取两次而不把 stdio 塞满。缩放整张图而不是逐点 GetPixel——
+    # 后者在 1000×700 的窗口上要几十万次调用，单次就是几秒。
+    $grid = 64
+    $bmp = Get-CaptureBitmap $rect
+    $small = $null
+    try {
+        $small = New-Object System.Drawing.Bitmap -ArgumentList $grid, $grid
+        $g = [System.Drawing.Graphics]::FromImage($small)
+        try {
+            $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBilinear
+            $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+            $g.DrawImage($bmp, 0, 0, $grid, $grid)
+        } finally { $g.Dispose() }
+        $lockRect = New-Object System.Drawing.Rectangle -ArgumentList 0, 0, $grid, $grid
+        $data = $small.LockBits($lockRect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+        try {
+            $stride = $data.Stride
+            $buf = [byte[]]::new($stride * $grid)
+            [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $buf, 0, $buf.Length)
+        } finally {
+            $small.UnlockBits($data)
+        }
+        $gray = [byte[]]::new($grid * $grid)
+        for ($yy = 0; $yy -lt $grid; $yy++) {
+            $row = $yy * $stride
+            for ($xx = 0; $xx -lt $grid; $xx++) {
+                $i = $row + $xx * 3
+                # 24bpp 在内存里是 BGR；用 Rec.601 权重转灰度
+                $gray[$yy * $grid + $xx] = [byte]((([int]$buf[$i + 2]) * 299 + ([int]$buf[$i + 1]) * 587 + ([int]$buf[$i]) * 114) / 1000)
+            }
+        }
+        return [Convert]::ToBase64String($gray)
+    } finally {
+        if ($null -ne $small) { $small.Dispose() }
+        $bmp.Dispose()
+    }
+}
+
 function Invoke-Dcx([string]$command, $a) {
     if ($null -eq $a) { $a = @{} }
     switch ($command) {
@@ -399,35 +496,53 @@ function Invoke-Dcx([string]$command, $a) {
             return $o
         }
         'screenshot' {
-            $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
-            $x = [int]$b.X; $y = [int]$b.Y; $w = [int]$b.Width; $h = [int]$b.Height
-            $appId = [string]$a.appId
-            $targetPid = 0
-            if ($a.pid) { $targetPid = [int]$a.pid }
-            $targetHwnd = 0
-            if ($a.hwnd) { $targetHwnd = [long]$a.hwnd }
-            if ($appId -or $targetPid -gt 0 -or $targetHwnd -gt 0) {
-                $win = Resolve-Window $appId $targetPid $targetHwnd
-                if ($null -ne $win) {
-                    try {
-                        $r = $win.El.Current.BoundingRectangle
-                        if ($r.Width -gt 0 -and $r.Height -gt 0 -and $r.Width -lt 100000) {
-                            $x = [int]$r.X; $y = [int]$r.Y; $w = [int]$r.Width; $h = [int]$r.Height
-                        }
-                    } catch { }
-                }
+            $blocked = Enter-CaptureTarget $a
+            if ($null -ne $blocked) { return $blocked }
+            $rect = Get-CaptureRect $a
+            $bmp = Get-CaptureBitmap $rect
+            $ms = [System.IO.MemoryStream]::new()
+            try {
+                $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+                $b64 = [Convert]::ToBase64String($ms.ToArray())
+                $byteCount = $ms.Length
+            } finally {
+                $bmp.Dispose(); $ms.Dispose()
             }
-            $bmp = New-Object System.Drawing.Bitmap($w, $h)
-            $g = [System.Drawing.Graphics]::FromImage($bmp)
-            $g.CopyFromScreen($x, $y, 0, 0, $bmp.Size)
-            $ms = New-Object System.IO.MemoryStream
-            $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
-            $b64 = [Convert]::ToBase64String($ms.ToArray())
-            $g.Dispose(); $bmp.Dispose(); $ms.Dispose()
             $o = [ordered]@{
                 ok = $true; mimeType = 'image/png'; base64 = $b64
-                width = $w; height = $h; bytes = $b64.Length
+                width = [int]$rect.width; height = [int]$rect.height; bytes = [int]$byteCount
+                # 坐标帧：图像 (0,0) == rect 左上角。调用方要按 rect + 图像尺寸
+                # 反算缩放比，才能把图像坐标换回屏幕坐标（高 DPI 下两者不等）。
+                rect = [ordered]@{
+                    x = [int]$rect.x; y = [int]$rect.y
+                    width = [int]$rect.width; height = [int]$rect.height
+                }
+                coords = 'image-pixel; origin at rect.x/rect.y'
                 persisted = $false; untrusted = $true
+            }
+            return $o
+        }
+        'pixelSignature' {
+            $blocked = Enter-CaptureTarget $a
+            if ($null -ne $blocked) { return $blocked }
+            # 只回 64×64 灰度签名，不回像素：视觉兜底的验效要一前一后取两次，
+            # 每次都背一张 PNG 上去会把管道变成瓶颈，也让预算不可控。
+            $rect = Get-CaptureRect $a
+            try {
+                $sig = Get-PixelSignature $rect
+            } catch {
+                return New-Fail 'CAPABILITY_UNAVAILABLE' "像素签名失败：$($_.Exception.Message)" @{
+                    hint = '锁屏 / 安全桌面 / 该会话不可截屏时无法用像素验效，改用结构或副作用证据'
+                }
+            }
+            $o = [ordered]@{
+                ok = $true; grid = 64; base64 = $sig
+                width = [int]$rect.width; height = [int]$rect.height
+                rect = [ordered]@{
+                    x = [int]$rect.x; y = [int]$rect.y
+                    width = [int]$rect.width; height = [int]$rect.height
+                }
+                untrusted = $true
             }
             return $o
         }

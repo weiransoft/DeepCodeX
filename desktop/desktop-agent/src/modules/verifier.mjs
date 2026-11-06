@@ -8,6 +8,10 @@
  */
 
 import { ErrorCode, AgentError } from "../errors.mjs";
+import { diffSignatures } from "./pixel-signature.mjs";
+
+/** 坐标帧过期阈值：窗口挪过之后旧帧就不可信，宁可要求重截 */
+const FRAME_MAX_AGE_MS = 120_000;
 
 export class Actuator {
   constructor(backend, deps) {
@@ -19,7 +23,7 @@ export class Actuator {
   }
 
   /** 统一动作入口；返回后端结果 */
-  async act({ app, action, snapshotId, ref, x, y, value, combo, confirmationToken, snapTo }) {
+  async act({ app, action, snapshotId, ref, x, y, value, combo, confirmationToken, snapTo, frame, allowOutside, maxSnapDistance }) {
     // 1) 取当前观察文本做提示注入扫描（R1）
     const snap = this.perception.snapshots.get(this.perception.currentSnapshotId());
     let texts = [];
@@ -54,14 +58,54 @@ export class Actuator {
           return this.backend.invokeRef({ ...target, ref, action, value });
         case "click_xy": {
           const { snapToNearestElement } = await import("./perception.mjs");
-          const tree = snap?.tree ?? [];
-          const nearest = snapToNearestElement(tree, x, y);
-          return this.backend.clickXY({
-            ...target,
-            x: Number.isFinite(nearest.x) ? nearest.x : x,
-            y: Number.isFinite(nearest.y) ? nearest.y : y,
-            snapTo: snapTo ?? nearest.snappedTo,
+          const { resolveClickPoint, frameContains } = await import("./coords.mjs");
+          const shot = this.perception.lastShot();
+          if (!shot?.frame && (frame ?? "window") === "window") {
+            throw new AgentError(ErrorCode.OBSERVATION_FAILED, "还没有可用截图，无法把图像坐标换算成屏幕坐标", {
+              hint: "先 desktop_screenshot 再点；或显式传 frame:\"screen\" 直接给屏幕坐标",
+              recoverable: true,
+            });
+          }
+          if (shot?.frame && Date.now() - shot.at > FRAME_MAX_AGE_MS) {
+            throw new AgentError(ErrorCode.OBSERVATION_FAILED, "截图坐标帧已过期（窗口可能已移动），拒绝按旧坐标点击", {
+              hint: "重新 desktop_screenshot 后再点",
+              recoverable: true,
+            });
+          }
+          // 1) 坐标帧换算 + 越界拒绝：图像像素 → 屏幕坐标。
+          //    这一步没做的话，图像 (0,0) 会被当成屏幕 (0,0)，整块偏移一个窗口原点。
+          const point = resolveClickPoint({
+            x,
+            y,
+            frame: frame ?? "window",
+            shot: shot?.frame,
+            allowOutside: Boolean(allowOutside),
           });
+          // 2) 吸附**必须在换算之后**：树的 rect 在屏幕坐标系里，先吸附会吸到错元素
+          const nearest = snapToNearestElement(snap?.tree ?? [], point.x, point.y, maxSnapDistance ?? 80);
+          const fx = Number.isFinite(nearest.x) ? nearest.x : point.x;
+          const fy = Number.isFinite(nearest.y) ? nearest.y : point.y;
+          if (!allowOutside && point.windowRect && !frameContains(point.windowRect, fx, fy)) {
+            throw new AgentError(ErrorCode.ACTION_DENIED, "吸附后的落点仍在目标窗口外，拒绝点击", {
+              hint: "坐标可能来自别的窗口；重新截图确认",
+              resolved: { x: fx, y: fy },
+              windowRect: point.windowRect,
+            });
+          }
+          const res = await this.backend.clickXY({ ...target, x: fx, y: fy, snapTo: snapTo ?? nearest.snappedTo });
+          return {
+            ...res,
+            // 落点来源要写清楚：converted=做过帧换算；blind=树上没有可吸附节点（纯盲点）
+            frame: point.frame,
+            converted: point.converted,
+            scaleX: point.scaleX,
+            windowRect: point.windowRect,
+            requested: { x, y },
+            resolved: { x: fx, y: fy },
+            snapped: nearest.snappedTo ?? null,
+            snapDistance: nearest.distance ?? null,
+            blind: !nearest.snappedTo,
+          };
         }
         case "type":
           return this.backend.typeText({ ...target, text: String(value ?? ""), ref });
@@ -79,6 +123,7 @@ export class Verifier {
     this.backend = backend;
     this.actuator = deps.actuator;
     this.perception = deps.perception;
+    this.policy = deps.policy;
     this.budget = deps.budget;
     this.telemetry = deps.telemetry;
     this.maxRetries = deps.maxRetries ?? 2;
@@ -94,10 +139,91 @@ export class Verifier {
     }
   }
 
+  /**
+   * 取 64×64 灰度签名。取不到就返回 null，让验证退回结构证据——
+   * 视觉验效是**补强**，不是新依赖：锁屏、安全桌面、策略关闭时不能因此崩掉整步。
+   */
+  async pixelSignature(app, { activate = false } = {}) {
+    if (typeof this.backend.pixelSignature !== "function") return null;
+    if (!this.policy?.policy?.allowScreenshot) return null;
+    // 不按「截图」计费：签名是 4 KB 灰度网格，不是感知截图；按截图扣会让
+    // 视觉兜底在 maxScreenshots=3 的预算下两步就熔断。上界仍由 maxSteps 兜住
+    // （每个 click_xy 步固定 2 次），预算并没有因此失去约束。
+    try {
+      const shot = await this.backend.pixelSignature({
+        appId: app?.appId,
+        pid: app?.pid,
+        hwnd: app?.hwnd,
+        activate,
+      });
+      return shot?.base64 ?? null;
+    } catch (err) {
+      this.telemetry.emit("verify.pixel_unavailable", { appId: app?.appId, code: err?.code });
+      return null;
+    }
+  }
+
+  /**
+   * 动作前后各取一次状态。坐标点击额外挂上像素签名：
+   * 这类动作的典型场景就是「树指认不了目标」（任务管理器/字符映射表/系统信息/磁盘清理），
+   * 这些应用的树在点击前后**完全一样**，只靠结构证据的话每一步都会被判 verify-failed。
+   */
+  async readStateFor(app, action, { activate = false, stability = false } = {}) {
+    const base = await this.readState();
+    if (action !== "click_xy") return base;
+    const pixels = await this.pixelSignature(app, { activate });
+    if (!pixels) return base;
+    const out = { ...(base ?? {}), pixels };
+    if (stability) {
+      // 再取一帧，用「两帧静止画面之间的差」估计噪声。
+      // 界面还在动（窗口刚出现、列表在滚动、动画未结束）时，动作前后的差
+      // 根本证明不了是动作造成的——这时必须如实说「像素不可信」，退回结构证据，
+      // 而不是把动画当成生效（假阳性）。
+      const again = await this.pixelSignature(app, { activate });
+      if (again) {
+        out.pixelStable = !diffSignatures(pixels, again).changed;
+        // 用后一帧当基线：即使略有抖动，也是更接近「动作前一刻」的画面
+        out.pixels = again;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 逐项比对：结构证据与像素证据分开算，再取「任一有变化」。
+   * 分开算是为了让失败可诊断——「结构变了但像素没变」（tooltip）与
+   * 「像素变了但结构没变」（自绘界面）是完全不同的两件事。
+   */
+  compare(before, after) {
+    if (!before || !after) return { changed: true, treeChanged: null, pixelChanged: null, evidence: "no-state" };
+    const { pixels: pb, pixelStable, ...restB } = before;
+    const { pixels: pa, ...restA } = after;
+    const treeChanged = JSON.stringify(restB) !== JSON.stringify(restA);
+    let pixelChanged = null;
+    let pixelNote;
+    if (pixelStable === false) {
+      // 基线自身在动 → 像素差异没有归因价值
+      pixelNote = "unstable-baseline";
+    } else if (typeof pb === "string" && typeof pa === "string") {
+      try {
+        pixelChanged = diffSignatures(pb, pa).changed;
+      } catch {
+        pixelChanged = null;
+        pixelNote = "signature-invalid";
+      }
+    }
+    return {
+      changed: treeChanged || pixelChanged === true,
+      treeChanged,
+      pixelChanged,
+      pixelNote,
+      evidence: pixelChanged === null ? "tree" : "tree+pixels",
+    };
+  }
+
   /** 两个状态是否发生了可观察变化 */
   changed(before, after) {
-    if (!before || !after) return true;
-    return JSON.stringify(before) !== JSON.stringify(after);
+    return this.compare(before, after).changed;
   }
 
   /**
@@ -133,7 +259,9 @@ export class Verifier {
         args.snapshotId = fresh.snapshotId;
       }
 
-      const before = await this.readState();
+      // 动作前先确保目标在前台：否则 before 与 after 量的是同一个遮挡物，
+      // 会得出「改了」或「没改」的随机结论
+      const before = await this.readStateFor(app, args.action, { activate: true, stability: true });
       let actResult;
       try {
         actResult = await this.actuator.act(args);
@@ -164,17 +292,36 @@ export class Verifier {
       }
 
       // 复观察：动作后必须确认状态真的变了（R4）
-      const after = await this.readState();
-      const changed = this.changed(before, after);
+      const after = await this.readStateFor(app, args.action);
+      const diff = this.compare(before, after);
+      const changed = diff.changed;
       const ok = !expectChange || changed;
       const observation = await this.perception.observe({ app });
       const result = {
         ok,
         code: ok ? undefined : ErrorCode.VERIFY_FAILED,
-        action: { ok: true, via: actResult?.via, ref: args.ref },
+        action: {
+          ok: true,
+          via: actResult?.via,
+          ref: args.ref,
+          ...(args.action === "click_xy"
+            ? {
+                frame: actResult?.frame,
+                converted: actResult?.converted,
+                resolved: actResult?.resolved,
+                snapped: actResult?.snapped,
+                blind: actResult?.blind,
+              }
+            : {}),
+        },
         verification: {
           changed,
           expectChange,
+          // 证据类型与分项结果：像素为 null 表示这一步没有像素通道（只看了结构）
+          evidence: diff.evidence,
+          treeChanged: diff.treeChanged,
+          pixelChanged: diff.pixelChanged,
+          pixelNote: diff.pixelNote,
           postActionSnapshotId: observation?.snapshotId,
         },
         attempts: attempt,

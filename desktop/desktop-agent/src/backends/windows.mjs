@@ -420,7 +420,14 @@ export class WindowsBackend {
           : "非 Windows 平台",
       },
       a11yTree: one(),
-      screenshot: one(),
+      screenshot: one("；回传坐标帧 rect（图像原点），供坐标换算"),
+      pixelDiff: {
+        supported: bridge.supported,
+        reason: bridge.supported
+          ? "64×64 灰度签名（窗口矩形内），树上看不出变化时用它做动作验效"
+          : bridge.reason,
+        grid: 64,
+      },
       elementInvoke: one(),
       coordinateInput: one(),
       foregroundControl: one(),
@@ -575,7 +582,22 @@ export class WindowsBackend {
 
   async screenshot(args = {}) {
     const res = await this._callBridge("screenshot", this._withTarget(args));
-    return { ...res, persisted: false, untrusted: true };
+    // base64 默认不回传：截图的主要用途是拿坐标帧与给视觉模型看，
+    // 而 base64 一旦进 JSON-RPC 就是几百 KB 的 stdio 往返。需要像素的调用方
+    // 显式要求（includeImage / savePath），其余场景只要 rect + 尺寸。
+    const { base64, ...meta } = res;
+    const out = { ...meta, persisted: false, untrusted: true };
+    if (args.includeImage) out.base64 = base64;
+    return out;
+  }
+
+  /**
+   * 64×64 灰度签名：树指认不了目标时的验效证据。
+   * 不返回像素本身——一步动作要取两次，两次都要背 PNG 就不划算了。
+   */
+  async pixelSignature(args = {}) {
+    const res = await this._callBridge("pixelSignature", this._withTarget(args), { throwOnError: true });
+    return { ...res, untrusted: true };
   }
 
   async invokeRef(args) {
