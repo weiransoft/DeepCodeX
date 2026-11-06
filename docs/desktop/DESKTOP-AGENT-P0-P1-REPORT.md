@@ -418,12 +418,48 @@ DOM/CDP；3 家因环境或权限限制不参与统计，单独列在 `launchBlo
 | 全仓类型检查 | `npm run typecheck` | 5 个 workspace 全过，exit 0 |
 | IPC 四方契约 | `npm run check:ipc` | 定义 22 = 注册 22 = ACL 22；前端调用点 21（`window_new` 历史未用） |
 | Rust 编译 | `cargo check` | exit 0；仅既有 `PASSWORD_ENV` dead_code 警告 |
-| Rust 测试编译 | `cargo test --lib --no-run` | exit 0，产物 `deepcode_desktop_lib-*.exe` |
+| Rust 单测（本机 GNU） | `cd desktop/src-tauri && cargo test --lib` | **74 passed / 0 failed / 1 ignored**（2.2 s；另有 7 个用例按平台门控，见 §5.1） |
 
-**已知环境限制**：`cargo test --lib` 的**运行**在本机报 `STATUS_ENTRYPOINT_NOT_FOUND`
-（MinGW GNU 测试二进制与 WebView2 DLL 加载环境），复制 `WebView2Loader.dll` 亦无效。
-这是工具链/DLL 环境问题，不是用例失败；已用 `--no-run` 证明全部 Rust 用例可编译。
-CI 若用 MSVC 工具链应能直接跑全量。
+### 5.1 Rust 用例为什么之前跑不起来（已修，§8 第 3 项）
+
+**旧结论（错）**：`cargo test --lib` 在本机报 `STATUS_ENTRYPOINT_NOT_FOUND`，
+判为「MinGW 工具链 / WebView2 DLL 环境问题」，并推断「MSVC CI 应能直接跑全量」。
+
+**证伪**：按此推断加了 MSVC job（`windows-latest` + `stable-x86_64-pc-windows-msvc`，
+干净 runner、无本地 DLL 污染），同样在**第一个用例之前**退出：
+`exit code: 0xc0000139, STATUS_ENTRYPOINT_NOT_FOUND`。与工具链无关。
+
+**真因**（tauri 生态已知问题 tauri#13419 / #14580）：`tauri` / `tray-icon`
+静态引用了只存在于 **Common Controls v6** 的入口点，而 Windows 只按 **exe 自带清单**
+决定把 `ComCtl32` 解析到 v5 还是 v6。`tauri_build::build()` 通过 tauri-winres 把
+清单只编进 **bin**（`rustc-link-arg-bins`），测试二进制一直是「裸的」——于是加载
+v5 → 导入解析失败 → 进程启动即死。`cargo test --lib --no-run` 能过，是因为那只是
+编译，从不加载 exe。
+
+**修复**（`desktop/src-tauri/build.rs` + `windows-test-manifest.xml`）：
+
+1. tauri-build 改用 `Attributes::new().windows_attributes(WindowsAttributes::new_without_app_manifest())`，
+   不再让它自己嵌清单（否则同一 exe 出现两个 `RT_MANIFEST`，链接器报 `CVT1100`）；
+2. 自己生成只含 `1 24 "windows-test-manifest.xml"` 的 `.rc`，经
+   `embed_resource::compile_for_everything` 用 `cargo:rustc-link-arg` 链进**所有**目标
+   （bin / lib 单测 / bench / example）。清单内容与 tauri-build 自带的那份**逐字节一致**；
+3. 走 `.rc` 而不是 link.exe 的 `/MANIFEST:EMBED`+`/MANIFESTINPUT`，是为了 GNU 也生效
+   （GNU 走 ld，不认后者），两条工具链共用一条代码路径。
+
+**顺带修掉两处「只在 Unix 成立」的用例**（能跑起来之后才暴露）：
+
+| 用例 | 原写法 | 问题 | 改法 |
+| --- | --- | --- | --- |
+| `engine::manager` 4 个 mock 引擎用例 | 直接 spawn 带 shebang 的 `.js` | Windows `CreateProcess` 不认 shebang（os error 193），是**脚手架选型**问题不是被测逻辑 | 门控到 `#[cfg(unix)]`（与既有 SIGKILL 用例同款），Windows 侧引擎拉起由真机 `verify:*` 覆盖 |
+| `ssh::exec::expands_tilde_identity` | 断言展开结果 `starts_with('/')` | Windows 家目录是 `C:\Users\x`，且 `expand_home` 直接拼 `/` 会得到混合分隔符 | `expand_home` 改 `Path::join`；断言改为「已展开 + `Path::is_absolute` + 尾部 `/.ssh/id_ed25519`」 |
+
+**结果**：本机 GNU `74 passed / 0 failed / 1 ignored`（2.2 s）。**副产物**：本机
+不再是「只能编译、不能运行」，Rust 用例可在本地闭环，CI 用来兜 MSVC 一侧。
+
+**已知残留（GNU only）**：链接时 ld 报
+`.rsrc merge failure: multiple non-default manifests`——GNU 侧 ld 自己也会塞一份默认清单。
+对照实验确认**改前 bin 就有这条告警**（与本次修改无关），且 exe 内清单生效（用例能跑、
+`Microsoft.Windows.Common-Controls` 字符串在产物里）；MSVC 侧只有一份清单，无此告警。
 
 ---
 
@@ -501,8 +537,11 @@ CI 若用 MSVC 工具链应能直接跑全量。
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:lifecycle)
 npm run typecheck && npm run check:ipc
 
-# Rust（需用户级 Rust GNU + MinGW 在 PATH）
-(cd desktop/src-tauri && cargo check && cargo test --lib --no-run)
+# Rust（本机 GNU：PATH 里要有 MinGW 的 windres / rc.exe；用例已可本地运行，见 §5.1）
+(cd desktop/src-tauri && cargo check && cargo test --lib)
+
+# Rust（MSVC）：CI job `rust-msvc` 自动跑，等价命令
+(cd desktop/src-tauri && cargo test --lib --locked -- --test-threads=1)
 
 # 登记 sidecar（默认 dry-run，不改文件）
 (cd desktop/desktop-agent && npm run register:mcp)

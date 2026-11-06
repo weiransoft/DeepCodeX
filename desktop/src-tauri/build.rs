@@ -27,7 +27,7 @@ fn main() {
 /// 测试二进制永远是裸的。
 ///
 /// 做法：
-/// 1. 主函数里用 `Attributes::new_without_app_manifest()` 让 tauri-build 不再
+/// 1. 主函数里用 `WindowsAttributes::new_without_app_manifest()` 让 tauri-build 不再
 ///    自己嵌清单（否则同一 exe 出现两个 RT_MANIFEST，链接器报 `CVT1100`）；
 /// 2. 这里生成只含 `1 24 "清单.xml"` 的 .rc，用 embed-resource 编译后经
 ///    `rustc-link-arg`（对所有目标生效）链进去。
@@ -43,7 +43,7 @@ fn embed_manifest_for_all_targets() {
     let manifest = std::path::PathBuf::from(
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR 由 cargo 注入"),
     )
-    .join("windows-test-manifest.xml");
+    .join("windows-manifest.xml");
 
     println!("cargo:rerun-if-changed={}", manifest.display());
 
@@ -59,7 +59,7 @@ fn embed_manifest_for_all_targets() {
         embed_resource::CompilationResult::Ok | embed_resource::CompilationResult::NotWindows => {}
         embed_resource::CompilationResult::NotAttempted(tool) => {
             // 工具缺失（如 GNU 下 windres 不在 PATH）不让 build 直接失败，
-            // 只告警：此时行为退回修复前（测试 exe 无清单）。
+            // 只告警：此时行为退回修复前（各目标都没有清单，测试 exe 仍会 0xc0000139）。
             println!(
                 "cargo:warning=应用清单未嵌入：找不到资源编译器 {tool}（PATH 里补 windres / rc.exe 后重试）"
             );
