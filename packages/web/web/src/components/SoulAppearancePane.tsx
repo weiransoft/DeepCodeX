@@ -438,7 +438,7 @@ export function SoulAppearancePane() {
             checked={streamPlayback}
             onChange={(event) => writeStreamPlayback(event.target.checked)}
           />
-          <span>流式播报（边生成边出声，首字延迟约 0.4 秒；关闭后等整句生成完再播）</span>
+          <span>流式播报（实验性：边生成边出声，首字延迟约 0.4 秒；变速时分块边界可能听出细微不连贯，默认关闭）</span>
         </label>
 
         <label className="soul-check">

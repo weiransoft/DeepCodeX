@@ -20,10 +20,14 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from mlx_voice_server import (  # noqa: E402
+    TTS_MAX_TEXT_CHARS,
     VOICE_PRESETS,
+    is_silent_chunk,
     max_tokens_for,
     resolve_speaker,
+    split_long_text,
     time_stretch_wsola,
+    trim_degenerate_tail,
 )
 
 failures: list[str] = []
@@ -104,6 +108,55 @@ def test_stream_budget_unchanged() -> None:
     check("极短文本仍有下限", max_tokens_for("嗯") >= 200)
 
 
+def test_trim_degenerate_tail() -> None:
+    """长文本退化出的尾部静音要裁掉，正常句尾停顿不能动
+
+    真机反馈「第二段讲了几句中间就中断了」：不是播放断了，是模型一路
+    生成到 max_tokens 上限，尾部吐出 21.5s 纯静音。实测退化段全在尾部，
+    正常语义停顿最长 0.68s，所以阈值取 1.0s 能精确区分。
+    """
+    sr = 24000
+    t = np.arange(sr, dtype=np.float32) / sr
+    tone = (np.sin(t * 2 * np.pi * 220) * 0.5).astype(np.float32)
+
+    normal = np.concatenate([tone, np.zeros(int(0.45 * sr), dtype=np.float32)])
+    check("正常 0.45s 句尾不裁", len(trim_degenerate_tail(normal, sr)) == len(normal))
+
+    degenerate = np.concatenate([tone, np.zeros(int(21 * sr), dtype=np.float32)])
+    trimmed = trim_degenerate_tail(degenerate, sr)
+    kept = (len(trimmed) - len(tone)) / sr
+    check("21s 退化静音裁到约 0.25s", 0.2 <= kept <= 0.35, f"实际保留 {kept:.2f}s")
+    check("裁剪不吞掉有声部分", np.array_equal(trimmed[: len(tone)], tone))
+
+    check("纯静音块判定为静音", is_silent_chunk(np.zeros(sr, dtype=np.float32)))
+    check("有声块不判静音", not is_silent_chunk(tone))
+
+
+def test_split_long_text() -> None:
+    """服务端长文本兜底：任何片段都不超过安全上限，且逐字可还原
+
+    裁尾只能去掉退化静音，救不回 96 字那种「模型念到一半就塌缩」的截断
+    （实测裁完只剩 8.00s 有声片段，应有 19.5s）。真正的修复是把请求拆短。
+    """
+    check("空文本返回空列表", split_long_text("   ") == [])
+    short = "我把这三处都核对了一遍，结论比较清楚。"
+    check("短文本不切分", split_long_text(short) == [short])
+    check("安全上限与前端一致", TTS_MAX_TEXT_CHARS == 48)
+
+    sentence = "我把这三处都核对了一遍，结论比较清楚：先处理回滚路径，再收敛音色，最后看生成延迟。"
+    long = sentence * 4
+    parts = split_long_text(long)
+    check("164 字被拆成多段", len(parts) > 1, f"实际 {len(parts)} 段")
+    check("每段都不超过上限", all(len(p) <= TTS_MAX_TEXT_CHARS for p in parts))
+    check("拼接逐字还原", "".join(parts) == long)
+    check("优先在标点处断", any(p[-1] in "。！？!?；;，,、：:" for p in parts[:-1]))
+
+    no_punct = "这里没有标点" * 20
+    parts = split_long_text(no_punct)
+    check("无标点文本也不丢字", "".join(parts) == no_punct)
+    check("无标点文本也不超上限", all(len(p) <= TTS_MAX_TEXT_CHARS for p in parts))
+
+
 print("=== WSOLA 保调变速 ===")
 test_wsola_keeps_pitch()
 test_wsola_edges()
@@ -111,6 +164,10 @@ print("=== 音色预设 ===")
 test_voice_presets()
 print("=== 生成上限回归 ===")
 test_stream_budget_unchanged()
+print("=== 退化静音裁剪 ===")
+test_trim_degenerate_tail()
+print("=== 长文本服务端兜底分段 ===")
+test_split_long_text()
 
 print()
 if failures:

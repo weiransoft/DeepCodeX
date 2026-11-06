@@ -13,7 +13,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { SpeechQueue, joinSentences } from "../web/src/voice/player";
+import { MAX_BLOCK_CHARS, SpeechQueue, joinSentences, splitLongText } from "../web/src/voice/player";
 import type { ClipPlayer, PlayOutcome, ScheduledClip } from "../web/src/voice/playout";
 
 /** 记录排程、立即播完的假后端 */
@@ -137,4 +137,39 @@ test("B5 首块比后续块小：首块为了早出声，后续块为了连贯",
   assert.equal(texts[0], "第一。第二。", "首块按 6 字封块（两句）");
   assert.equal(texts[1].length, 12, `后续块应按 12 字封块，实际 ${texts[1].length} 字`);
   assert.equal(texts[2], "第七。第八。", "剩下的尾巴由 flush 单独成块");
+});
+
+test("B6 超长单句二次切分：任何块都不超过硬上限，且不丢字", async () => {
+  const player = new InstantPlayer();
+  const texts: string[] = [];
+  const queue = new SpeechQueue(
+    async (text) => {
+      texts.push(text);
+      return "blob:x";
+    },
+    {},
+    { player, firstBlockChars: 14, blockChars: 40 }
+  );
+  // 120 字无标点的单句：真机日志里出现过 180 字单块，触发 TTS 退化
+  const long = "这里没有标点".repeat(20);
+  queue.enqueue(long);
+  queue.flush();
+  await waitFor(() => texts.length >= 3);
+  assert.ok(
+    texts.every((t) => t.length <= MAX_BLOCK_CHARS),
+    `不能有超过 ${MAX_BLOCK_CHARS} 字的块，实际 ${JSON.stringify(texts.map((t) => t.length))}`
+  );
+  assert.equal(texts.join(""), long, "切分不能吞字或重复");
+});
+
+test("B7 splitLongText 优先在标点处断，拼接回去等于原文", () => {
+  const text = "第一句说完了。第二句也说完了，但是后面还有很长的一段话没有标点只能硬切开来处理。";
+  const parts = splitLongText(text, 20);
+  assert.ok(
+    parts.every((p) => p.length <= 20),
+    `每块都要 ≤20 字，实际 ${JSON.stringify(parts)}`
+  );
+  assert.equal(parts.join(""), text, "拼回去必须逐字等于原文");
+  assert.ok(/[。！？!?；;，,、：:]$/u.test(parts[0]), `应优先在标点处断，实际首块 ${JSON.stringify(parts[0])}`);
+  assert.deepEqual(splitLongText("短句。", 20), ["短句。"], "不超上限时原样返回");
 });

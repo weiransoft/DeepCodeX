@@ -320,6 +320,61 @@ def max_tokens_for(text: str) -> int:
     return max(TTS_MAX_TOKENS_FLOOR, min(TTS_MAX_TOKENS_CEILING, tokens))
 
 
+# 单次生成的安全字数上限（与前端 player.ts 的 MAX_BLOCK_CHARS 对齐）
+#
+# 2026-11-06 实测（sidecar /tts，speed=1.2）：
+# | 字数 | 时长 | 折合语速 | 最长静音 |
+# |---|---|---|---|
+# | 41 | 8.33s | 4.92 字/秒 | 0.66s |
+# | 48 | 10.08s | 4.76 字/秒 | 0.79s |
+# | 55 | 16.75s | 3.28 字/秒 | 4.67s |
+# | 96 | 29.29s | 3.28 字/秒 | 21.49s |
+# | 164 | 50.04s | 3.25 字/秒 | 21.51s |
+#
+# 退化不只是「尾部多吐了静音」：96 字那次裁完尾音只剩 8.00s 有声片段
+# （按正常语速应有 19.5s），说明模型在长文本中途就塌缩了，后面的字
+# 根本没念。所以**只裁尾不够**，必须在模型入口把请求拆短。
+#
+# 前端 SpeechQueue 已经把单块压到 48 字；这里是服务端的第二道保险：
+# CLI、旧版 bundle、手工请求都指向同一个 sidecar，不能假设调用方都守规矩。
+TTS_MAX_TEXT_CHARS = 48
+TTS_SPLIT_PUNCT = "。！？!?；;，,、：:"
+
+
+def split_long_text(text: str, limit: int = TTS_MAX_TEXT_CHARS) -> list[str]:
+    """
+    把超长文本切成 ≤limit 字的片段，优先在标点处断
+
+    与前端 `splitLongText()` 用同一套规则，保证两端看到的分段一致。
+    拼接回去逐字等于原文（只去掉首尾空白），不会吞字也不会重复。
+
+    @param text 待切分文本
+    @param limit 每段字数上限
+    @returns 片段列表
+    """
+    rest = text.strip()
+    if not rest:
+        return []
+    if len(rest) <= limit:
+        return [rest]
+    out: list[str] = []
+    minimum = max(1, int(limit * 0.6))
+    while len(rest) > limit:
+        cut = -1
+        # 从上限往前找标点，别把一句话拦腰切断；找不到就按字数硬切
+        for i in range(limit, minimum - 1, -1):
+            if rest[i - 1] in TTS_SPLIT_PUNCT:
+                cut = i
+                break
+        if cut < 0:
+            cut = limit
+        out.append(rest[:cut])
+        rest = rest[cut:]
+    if rest:
+        out.append(rest)
+    return out
+
+
 def soul_config_path() -> Path:
     """配置文件路径（与引擎同源：~/.deepcode/soul/config.json）"""
     home = os.environ.get("DEEPCODE_HOME") or str(Path.home())
@@ -603,23 +658,54 @@ class TtsEngine:
 
         with self._lock:
             model = self._load(engine)
-            temperature = prepare_sampling(voice)
-            max_tokens = max_tokens_for(text)
             speaker, instruct = resolve_speaker(voice)
-            for chunk in model.generate_custom_voice(
-                text=text,
-                speaker=speaker,
-                language=TTS_LANGUAGE,
-                instruct=instruct,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stream=True,
-                streaming_interval=interval,
-            ):
-                samples = np.asarray(chunk.audio, dtype=np.float32).reshape(-1)
-                if speed != 1.0 and speed > 0:
-                    samples = time_stretch_wsola(samples, speed)
-                yield encode_wav_bytes(samples, int(chunk.sample_rate))
+            pieces = split_long_text(text)
+            if len(pieces) > 1:
+                sys.stderr.write(
+                    f"[voice] tts-stream {len(text)}字 超过 {TTS_MAX_TEXT_CHARS} 字安全上限，"
+                    f"自动分 {len(pieces)} 段合成\n"
+                )
+            for piece in pieces:
+                # 每段重新按音色派生固定种子，避免跨段随机状态串味
+                temperature = prepare_sampling(voice)
+                max_tokens = max_tokens_for(piece)
+                silent_run = 0
+                stopped_early = False
+                for chunk in model.generate_custom_voice(
+                    text=piece,
+                    speaker=speaker,
+                    language=TTS_LANGUAGE,
+                    instruct=instruct,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stream=True,
+                    streaming_interval=interval,
+                ):
+                    rate = int(chunk.sample_rate)
+                    samples = np.asarray(chunk.audio, dtype=np.float32).reshape(-1)
+                    if speed != 1.0 and speed > 0:
+                        samples = time_stretch_wsola(samples, speed)
+                    # 退化时模型会一路生成到 max_tokens 上限，后半段全是
+                    # 静音 chunk。连续几个全静音块就掐断本段生成器：既不把
+                    # 十几秒空白推给浏览器，也省下剩余推理时间。
+                    if is_silent_chunk(samples):
+                        silent_run += 1
+                        if silent_run > STREAM_SILENT_CHUNK_LIMIT:
+                            stopped_early = True
+                            break
+                    else:
+                        silent_run = 0
+                    # 单块内部也可能带一段退化尾音，逐块裁掉；正常语义停顿最长
+                    # 实测 0.68s，低于 1.0s 阈值，不会被误裁。
+                    samples = trim_degenerate_tail(samples, rate)
+                    if samples.size == 0:
+                        continue
+                    yield encode_wav_bytes(samples, rate)
+                if stopped_early:
+                    sys.stderr.write(
+                        f"[voice] tts-stream {len(piece)}字 检测到退化静音，"
+                        f"连续 {silent_run} 块后提前收尾\n"
+                    )
 
     def synthesize(self, text: str, engine: str, voice: str, speed: float) -> tuple[bytes, str, str]:
         """
@@ -641,64 +727,88 @@ class TtsEngine:
         # 就是这次请求到底用了哪个 speaker，而不是靠配置反推
         voice_used = voice
 
+        pieces = split_long_text(text)
+        if len(pieces) > 1:
+            sys.stderr.write(
+                f"[voice] tts {len(text)}字 超过 {TTS_MAX_TEXT_CHARS} 字安全上限，"
+                f"自动分 {len(pieces)} 段合成\n"
+            )
+
         with self._lock:
             model = self._load(engine)
 
-            # 固定采样种子：每句都是独立调用，不固定就会一句一个音色
-            # （见 TTS_SEED_BASE 的说明）。放在锁内、紧挨生成之前，
-            # 保证并发的两个请求不会互相打乱随机状态。
-            temperature = prepare_sampling(voice)
-            # 显式给生成上限：不给会回落到 2048（≈164s 音频），退化时拖死整条队列
-            max_tokens = max_tokens_for(text)
-
-            if engine == "qwen3-voicedesign":
-                chunks = list(
-                    model.generate_voice_design(
-                        text=text,
-                        instruct=voice or "mature female voice, calm and steady",
-                        language=TTS_LANGUAGE,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                    )
-                )
-                native_speed = False
-            elif engine == "qwen3-customvoice":
-                # 音色锁在预置 speaker 上，跨句不再重新"设计"；原描述降级为
-                # 情感/风格指令（1.7B 支持，0.6B 会被模型内部忽略）
+            # 音色只跟请求有关，跟片段无关：解析一次并回显给调用方
+            if engine == "qwen3-customvoice":
                 speaker, instruct = resolve_speaker(voice)
                 voice_used = speaker
-                chunks = list(
-                    model.generate_custom_voice(
-                        text=text,
-                        speaker=speaker,
-                        language=TTS_LANGUAGE,
-                        instruct=instruct,
-                        # 温度必须显式传：这个方法的默认值是模型自带的（高温），
-                        # 不传就等于每次合成都在高温下重新掷骰子——韵律、语速、
-                        # 句末走向句句不同，听感就是"音色在变"。VoiceDesign 那条
-                        # 分支一直传着，CustomVoice 这条漏了（2026-11-06 补）。
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                    )
-                )
-                native_speed = False
+            elif engine == "qwen3-voicedesign":
+                voice_used = voice
             else:
                 voice_used = voice or KOKORO_VOICE
-                chunks = list(
-                    model.generate(
-                        text=text,
-                        voice=voice_used,
-                        speed=speed,
-                        lang_code="z",
+            native_speed = engine not in ("qwen3-customvoice", "qwen3-voicedesign")
+
+            part_audio: list[Any] = []
+            rate = 24000
+            for piece in pieces:
+                # 每段都重新按音色派生固定种子：MLX 的 RNG 是全局状态，
+                # 不重置的话第二段会接着第一段的随机序列走，跨段音色就漂了。
+                # 放在锁内、紧挨生成之前，并发请求不会互相打乱随机状态。
+                temperature = prepare_sampling(voice)
+                # 显式给生成上限：不给会回落到 2048（≈164s 音频），退化时拖死整条队列
+                max_tokens = max_tokens_for(piece)
+
+                if engine == "qwen3-voicedesign":
+                    chunks = list(
+                        model.generate_voice_design(
+                            text=piece,
+                            instruct=voice or "mature female voice, calm and steady",
+                            language=TTS_LANGUAGE,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                        )
                     )
-                )
-                native_speed = True
+                elif engine == "qwen3-customvoice":
+                    # 音色锁在预置 speaker 上，跨句不再重新"设计"；原描述降级为
+                    # 情感/风格指令（1.7B 支持，0.6B 会被模型内部忽略）
+                    chunks = list(
+                        model.generate_custom_voice(
+                            text=piece,
+                            speaker=speaker,
+                            language=TTS_LANGUAGE,
+                            instruct=instruct,
+                            # 温度必须显式传：这个方法的默认值是模型自带的（高温），
+                            # 不传就等于每次合成都在高温下重新掷骰子——韵律、语速、
+                            # 句末走向句句不同，听感就是"音色在变"。VoiceDesign 那条
+                            # 分支一直传着，CustomVoice 这条漏了（2026-11-06 补）。
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                        )
+                    )
+                else:
+                    chunks = list(
+                        model.generate(
+                            text=piece,
+                            voice=voice_used,
+                            speed=speed,
+                            lang_code="z",
+                        )
+                    )
 
-            if not chunks:
+                if not chunks:
+                    continue
+                audio = np.concatenate([np.array(c.audio, dtype=np.float32).reshape(-1) for c in chunks])
+                rate = int(chunks[0].sample_rate)
+                # 每段单独裁退化尾音：某一段退化时，十几秒静音不能带进拼接结果。
+                # 拼接后才做 WSOLA，所以整段只有一次变速、没有分块边界失真。
+                part_audio.append(trim_degenerate_tail(audio, rate))
+
+            if not part_audio:
                 raise RuntimeError("模型没有产出音频")
+            audio = np.concatenate(part_audio)
 
-            audio = np.concatenate([np.array(c.audio, dtype=np.float32).reshape(-1) for c in chunks])
-            rate = int(chunks[0].sample_rate)
+        # 兜底再裁一次尾部（最后一段万一退化）。放在变速**之前**，
+        # 既省掉对静音做 WSOLA 的算力，也不会把正常句尾收尾切掉。
+        audio = trim_degenerate_tail(audio, rate)
 
         # Qwen3-TTS 的 generate_* 没有 speed 参数，只能在波形层变速。
         # 以前用 np.interp 重采样，音高跟着速度一起变（磁带快进），实测
@@ -778,6 +888,80 @@ def time_stretch_wsola(samples: "Any", speed: float) -> "Any":
     if not bool(valid.any()):
         return x
     return out[: int(np.flatnonzero(valid)[-1]) + 1]
+
+
+# 判定「有声」的相对峰值阈值（约 -34dB）。与前端 playout.ts 的
+# SILENCE_PEAK_RATIO 对齐：同一段音频在服务端与浏览器里的判定要一致。
+DEGENERATE_SILENCE_PEAK_RATIO = 0.02
+
+# 流式里连续全静音块的上限。每块约 0.8s，2 块 ≈1.6s，明显大于实测的
+# 正常最长停顿 0.68s，又远小于退化段（最短 4.67s）。
+STREAM_SILENT_CHUNK_LIMIT = 2
+
+
+def is_silent_chunk(samples: "Any") -> bool:
+    """
+    这一块是不是纯静音（退化 chunk）
+
+    @param samples float32 一维波形
+    @returns 峰值低于相对阈值时视为静音
+    """
+    import numpy as np
+
+    x = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if x.size == 0:
+        return True
+    # 绝对阈值而不是相对峰值：退化 chunk 几乎是数字静音，而正常语音即使
+    # 整体音量偏小，峰值也远高于 0.005（约 -46dB）。用相对阈值会把一整块
+    # 正常但安静的语音误判成静音。
+    return float(np.max(np.abs(x))) < 0.005
+
+
+def trim_degenerate_tail(samples: "Any", sample_rate: int, max_silence_s: float = 1.0, keep_tail_s: float = 0.25) -> "Any":
+    """
+    裁掉模型退化生成出来的超长尾部静音
+
+    2026-11-06 真机反馈「第二段讲了几句中间就中断了 + 前后两句语速不一样」。
+    实测根因不是播放链路断了，而是**长文本请求让模型一路生成到 max_tokens
+    上限**，多出来的 token 全解成静音：
+
+    | 字数 | 折合语速 | 最长连续静音 | 静音起点 |
+    |---|---|---|---|
+    | 41 | 4.92 字/秒 | 0.66s | 1.39s |
+    | 55 | 3.28 字/秒 | 4.67s | 12.08s |
+    | 96 | 3.28 字/秒 | 21.49s | 7.81s |
+    | 164 | 3.28 字/秒 | 21.51s | 28.53s |
+
+    退化后语速恒定 3.28 = 4.92 / 1.5（正好是 max_tokens 的安全余量），
+    且静音起点 + 长度 ≈ 总时长 —— **静音全部堆在尾部**。所以只需裁尾，
+    不必动中间的正常语义停顿（实测最长 0.68s）。
+
+    阈值取 1.0s：比正常句间停顿宽得多，又远小于任何实测退化段。裁完保留
+    0.25s 尾音，避免把句尾切得太硬。
+
+    @param samples float32 一维波形
+    @param sample_rate 采样率
+    @param max_silence_s 尾部静音超过这个长度才判定为退化
+    @param keep_tail_s 裁掉后保留的自然尾音
+    @returns 裁剪后的波形（未退化时原样返回）
+    """
+    import numpy as np
+
+    x = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if x.size == 0:
+        return x
+    peak = float(np.max(np.abs(x)))
+    if peak == 0:
+        return x  # 全静音交给上层报错，不要在这里凭空造声音
+    loud = np.flatnonzero(np.abs(x) >= peak * DEGENERATE_SILENCE_PEAK_RATIO)
+    if loud.size == 0:
+        return x
+    last = int(loud[-1])
+    trailing = (x.size - 1 - last) / float(sample_rate)
+    if trailing <= max_silence_s:
+        return x
+    keep = int(keep_tail_s * sample_rate)
+    return x[: min(x.size, last + 1 + keep)]
 
 
 def encode_wav_bytes(samples: "Any", sample_rate: int) -> bytes:
@@ -1091,10 +1275,14 @@ class Handler(BaseHTTPRequestHandler):
         audio, engine_used, voice_used = self.tts.synthesize(text, engine, voice, speed)
         elapsed = int((time.time() - started) * 1000)
         # 一行固定格式的合成日志：正常与退化在日志里差别一目了然
-        # （正常几百毫秒，退化几十秒），排查超时不必再靠猜
+        # （正常几百毫秒，退化几十秒），排查超时不必再靠猜。
+        # 长文本会被自动分段，所以这里报的是**实际每段**的 token 上限，
+        # 不是整段文本的估值（整段已经不会一次性进模型了）。
+        pieces = split_long_text(text)
+        per_piece_cap = max((max_tokens_for(p) for p in pieces), default=0)
         sys.stderr.write(
-            f"[voice] tts {len(text)}字 engine={engine_used} "
-            f"max_tokens={max_tokens_for(text)} audio={len(audio) // 1024}KB {elapsed}ms\n"
+            f"[voice] tts {len(text)}字 engine={engine_used} 段={len(pieces)} "
+            f"max_tokens={per_piece_cap} audio={len(audio) // 1024}KB {elapsed}ms\n"
         )
         try:
             self.send_response(200)

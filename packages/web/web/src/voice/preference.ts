@@ -114,19 +114,22 @@ export function subscribeHandsFree(handler: (value: boolean) => void): () => voi
  * 流式播放开关
  *
  * 同样是「这台设备上的偏好」而不是人格设定，所以跟着 localStorage 走。
- * 默认开：实测 41 字 / speed 1.2 时流式首块 0.39s 到达，整块要 1.92s；
- * 且 11 个流式块按采样点直接相接合计 8.399s ≈ 整块 8.333s，音色是同一次
- * 自回归，不会因为分块重起韵律。
  *
- * 仍然留一个开关：不同浏览器 / WebView 的 AudioContext 行为有差异，万一声音
- * 有异可以立刻关掉回到经过长期验证的整块链路，不必改代码。
+ * **默认关**（2026-11-06 真机反馈后改的）。流式首字延迟确实好（实测
+ * 3.59s → 0.41s），但 `speed != 1.0` 时服务端要对每个 0.8s chunk 独立
+ * 做一次 WSOLA 保调变速，而 WSOLA 是离线算法、状态不能跨块延续：实测
+ * 块边界样本跳变从 speed=1.0 的中位 0.1%/最大 1.2% 涨到 2.8%/19.4%。
+ * 用户听到的就是「前后两句语速不一样」「讲了几句中间像断了一下」。
+ *
+ * 整块链路对整段波形只做一次 WSOLA，没有这个边界问题。先把默认切回
+ * 稳定链路，流式留作可选项；等变速改成跨 chunk 有状态再默认打开。
  */
 export const STREAM_PLAYBACK_KEY = "dcx.voice.streamPlayback";
 export const STREAM_PLAYBACK_EVENT = "dcx:voice-stream-playback";
 
-/** 流式播放默认值：开 */
+/** 流式播放默认值：关（见上方实测说明） */
 export function defaultStreamPlayback(): boolean {
-  return true;
+  return false;
 }
 
 /**

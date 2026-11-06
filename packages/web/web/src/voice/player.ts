@@ -143,10 +143,29 @@ export const FIRST_BLOCK_CHARS = 14;
  * 合成一次，等于让模型自己决定这 72 字里逗号处该停多久——这正是原来
  * "每 28 字断一次、每次都重新起头"丢掉的东西。
  */
-export const BLOCK_CHARS = 72;
+export const BLOCK_CHARS = 40;
 
-/** 单块字数硬上限：再长会让打断粒度变粗、合成排队变长 */
-export const MAX_BLOCK_CHARS = 160;
+/**
+ * 单块字数硬上限
+ *
+ * **这个值是被真机反馈逼出来的**（2026-11-06「前后两句语速不一样 /
+ * 第二段讲了几句就中断」）。同一句文本走 `/tts` 全链路实测：
+ *
+ * | 字数 | 折合语速 | 最长连续静音 |
+ * |---|---|---|
+ * | 41 | 4.92 字/秒 | 0.66s |
+ * | 55 | 3.28 字/秒 | 4.67s |
+ * | 96 | 3.28 字/秒 | 21.49s |
+ * | 164 | 3.28 字/秒 | 21.51s |
+ *
+ * 超过约 50 字，Qwen3-TTS 就会退化成「一路生成到 max_tokens 上限」，
+ * 多出来的 token 全解成尾部静音。退化后语速恒定 3.28 = 4.92 / 1.5
+ * （正好是生成上限的安全余量），于是短块与长块语速差一半，且长块
+ * 播到一半开始放十几秒空白——听起来就是「讲了几句没声了」。
+ *
+ * 48 字留了一点标点余量；服务端另有 `trim_degenerate_tail` 兜底。
+ */
+export const MAX_BLOCK_CHARS = 48;
 
 /** 默认停滞上限：5 秒没有任何 currentTime 推进，就不可能还在正常播放 */
 const DEFAULT_STALL_LIMIT_MS = 5000;
@@ -194,6 +213,38 @@ export function joinSentences(parts: readonly string[]): string {
     const needSpace = /[A-Za-z0-9,.!?;:)\]]$/.test(out) && /^[A-Za-z0-9([]/.test(part);
     out += needSpace ? ` ${part}` : part;
   }
+  return out;
+}
+
+/**
+ * 把超长文本切成 ≤limit 字的块，优先在标点处断
+ *
+ * 为什么还要这一层：`sealIfReady()` 是按"累计字数到阈值"封块的，模型一次
+ * 吐出一段没有标点的长文本时，整段会一次性进 `pushBlock`。不二次切分就会
+ * 出现 180 字单块（真机日志实测过），触发 TTS 退化并播十几秒静音。
+ *
+ * @param text 待切分文本
+ * @param limit 每块字数上限
+ * @returns 按原文顺序的块（不会丢字）
+ */
+export function splitLongText(text: string, limit: number): string[] {
+  const out: string[] = [];
+  let rest = text.trim();
+  const min = Math.max(1, Math.floor(limit * 0.6));
+  while (rest.length > limit) {
+    let cut = -1;
+    // 从上限往前找标点，别把一句话拦腰切断；找不到就按字数硬切
+    for (let i = limit; i >= min; i -= 1) {
+      if ("。！？!?；;，,、：:".includes(rest[i - 1] ?? "")) {
+        cut = i;
+        break;
+      }
+    }
+    if (cut < 0) cut = limit;
+    out.push(rest.slice(0, cut));
+    rest = rest.slice(cut);
+  }
+  if (rest.length > 0) out.push(rest);
   return out;
 }
 
@@ -406,9 +457,16 @@ export class SpeechQueue {
    * @param text 块文本
    */
   private pushBlock(text: string): void {
-    if (text.trim().length === 0) return;
-    this.blocks.push(text);
-    this.sealedCount += 1;
+    const trimmed = text.trim();
+    if (trimmed.length === 0) return;
+    // 硬上限必须在这里兜住：超过 48 字的单块会让 TTS 退化出十几秒静音，
+    // 详见 MAX_BLOCK_CHARS 的实测说明。服务端裁尾只是第二道保险。
+    const parts = trimmed.length <= this.maxBlockChars ? [trimmed] : splitLongText(trimmed, this.maxBlockChars);
+    for (const part of parts) {
+      if (part.trim().length === 0) continue;
+      this.blocks.push(part);
+      this.sealedCount += 1;
+    }
   }
 
   /**
