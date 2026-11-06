@@ -1094,6 +1094,9 @@ process.on("SIGTERM", () => {
     }
 
     /// 崩溃自动重启 ≤3 次：SIGKILL 后监督线程拉起新实例；超限转 failed。
+    // SIGKILL 需 libc（仅 unix target 依赖）；Windows 下该用例不可编译也不适用，
+    // 故做平台门控，保证 `cargo test` 在 MinGW GNU 工具链下可运行。
+    #[cfg(unix)]
     #[test]
     fn engine_crash_auto_restart_capped() {
         let dir = tempfile::tempdir().unwrap();

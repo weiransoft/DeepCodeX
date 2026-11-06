@@ -1,0 +1,433 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-11-06T03:44:16.065Z",
+  "platform": "win32",
+  "session": "Console",
+  "privacy": {
+    "windowTitlesCollected": false,
+    "note": "窗口标题不落盘，仅记录存在性与长度"
+  },
+  "capabilities": {
+    "value": {
+      "platform": "windows",
+      "session": "Console",
+      "appEnumeration": {
+        "supported": true,
+        "reason": "tasklist /v /fo csv（纯 Win32 命令，无需提权）"
+      },
+      "a11yTree": {
+        "supported": false,
+        "reason": "UIA 桥未启用：设置 DEEPCODE_AGENT_UIA_BRIDGE=1 且在交互式桌面会话中运行"
+      },
+      "screenshot": {
+        "supported": false,
+        "reason": "UIA 桥未启用：设置 DEEPCODE_AGENT_UIA_BRIDGE=1 且在交互式桌面会话中运行"
+      },
+      "elementInvoke": {
+        "supported": false,
+        "reason": "UIA 桥未启用：设置 DEEPCODE_AGENT_UIA_BRIDGE=1 且在交互式桌面会话中运行"
+      },
+      "coordinateInput": {
+        "supported": false,
+        "reason": "UIA 桥未启用：设置 DEEPCODE_AGENT_UIA_BRIDGE=1 且在交互式桌面会话中运行"
+      },
+      "foregroundControl": {
+        "supported": false,
+        "reason": "UIA 桥未启用：设置 DEEPCODE_AGENT_UIA_BRIDGE=1 且在交互式桌面会话中运行"
+      },
+      "uacAwareness": {
+        "supported": false,
+        "reason": "Secure Desktop / 完整性级别检测超出 P1 范围，遇 UAC 一律 HANDOFF_REQUIRED"
+      }
+    },
+    "elapsedMs": 0.08,
+    "a11yTreeSupported": false,
+    "screenshotSupported": false
+  },
+  "enumeration": {
+    "ok": true,
+    "elapsedMs": 14805.38,
+    "count": 34,
+    "error": null,
+    "categoryDistribution": {
+      "unknown": 23,
+      "selfdrawn-likely": 3,
+      "browser": 7,
+      "productivity": 1
+    }
+  },
+  "cacheBehaviour": {
+    "coldMs": 14805.38,
+    "warmMs": 0.01,
+    "toolCallMs": 0.4,
+    "toolCallCount": 34,
+    "note": "冷枚举走 tasklist /v（约 15s）；TTL 内命中与默认工具调用不得重复枚举"
+  },
+  "channelMatrix": {
+    "ok": true,
+    "elapsedMs": 0.02,
+    "distribution": {
+      "gui-a11y": 23,
+      "gui-visual": 3,
+      "browser": 7,
+      "interface-or-gui": 1
+    },
+    "apps": [
+      {
+        "appId": "dwm",
+        "processName": "dwm.exe",
+        "pid": 1936,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 23
+      },
+      {
+        "appId": "gameviewerserver",
+        "processName": "GameViewerServer.exe",
+        "pid": 5604,
+        "category": "selfdrawn-likely",
+        "channel": "gui-visual",
+        "hasTitle": true,
+        "titleLength": 34
+      },
+      {
+        "appId": "rtkauduservice64",
+        "processName": "RtkAudUService64.exe",
+        "pid": 7116,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 39
+      },
+      {
+        "appId": "svchost",
+        "processName": "svchost.exe",
+        "pid": 7860,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 35
+      },
+      {
+        "appId": "taskhostw",
+        "processName": "taskhostw.exe",
+        "pid": 8132,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 16
+      },
+      {
+        "appId": "shellhost",
+        "processName": "ShellHost.exe",
+        "pid": 8716,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 14
+      },
+      {
+        "appId": "crossdeviceresume",
+        "processName": "CrossDeviceResume.exe",
+        "pid": 8912,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 23
+      },
+      {
+        "appId": "searchhost",
+        "processName": "SearchHost.exe",
+        "pid": 9388,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 2
+      },
+      {
+        "appId": "startmenuexperiencehost",
+        "processName": "StartMenuExperienceHost.exe",
+        "pid": 2724,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 2
+      },
+      {
+        "appId": "svchost",
+        "processName": "svchost.exe",
+        "pid": 9740,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 20
+      },
+      {
+        "appId": "msedgewebview2",
+        "processName": "msedgewebview2.exe",
+        "pid": 11504,
+        "category": "browser",
+        "channel": "browser",
+        "hasTitle": true,
+        "titleLength": 13
+      },
+      {
+        "appId": "tabtip",
+        "processName": "TabTip.exe",
+        "pid": 12556,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 24
+      },
+      {
+        "appId": "lockapp",
+        "processName": "LockApp.exe",
+        "pid": 12768,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 14
+      },
+      {
+        "appId": "rtkauduservice64",
+        "processName": "RtkAudUService64.exe",
+        "pid": 13512,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 34
+      },
+      {
+        "appId": "textinputhost",
+        "processName": "TextInputHost.exe",
+        "pid": 13884,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 12
+      },
+      {
+        "appId": "wavessvc64",
+        "processName": "WavesSvc64.exe",
+        "pid": 14240,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 25
+      },
+      {
+        "appId": "unsecapp",
+        "processName": "unsecapp.exe",
+        "pid": 13988,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 20
+      },
+      {
+        "appId": "gameviewer",
+        "processName": "GameViewer.exe",
+        "pid": 14712,
+        "category": "selfdrawn-likely",
+        "channel": "gui-visual",
+        "hasTitle": true,
+        "titleLength": 6
+      },
+      {
+        "appId": "msedgewebview2",
+        "processName": "msedgewebview2.exe",
+        "pid": 14596,
+        "category": "browser",
+        "channel": "browser",
+        "hasTitle": true,
+        "titleLength": 20
+      },
+      {
+        "appId": "msedgewebview2",
+        "processName": "msedgewebview2.exe",
+        "pid": 4632,
+        "category": "browser",
+        "channel": "browser",
+        "hasTitle": true,
+        "titleLength": 13
+      },
+      {
+        "appId": "acrotray",
+        "processName": "acrotray.exe",
+        "pid": 16420,
+        "category": "selfdrawn-likely",
+        "channel": "gui-visual",
+        "hasTitle": true,
+        "titleLength": 15
+      },
+      {
+        "appId": "notepad",
+        "processName": "Notepad.exe",
+        "pid": 12884,
+        "category": "productivity",
+        "channel": "interface-or-gui",
+        "hasTitle": true,
+        "titleLength": 25
+      },
+      {
+        "appId": "m365copilot",
+        "processName": "M365Copilot.exe",
+        "pid": 3208,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 17
+      },
+      {
+        "appId": "msedgewebview2",
+        "processName": "msedgewebview2.exe",
+        "pid": 14656,
+        "category": "browser",
+        "channel": "browser",
+        "hasTitle": true,
+        "titleLength": 20
+      },
+      {
+        "appId": "shellexperiencehost",
+        "processName": "ShellExperienceHost.exe",
+        "pid": 9076,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 3
+      },
+      {
+        "appId": "runtimebroker",
+        "processName": "RuntimeBroker.exe",
+        "pid": 8400,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 13
+      },
+      {
+        "appId": "systemsettings",
+        "processName": "SystemSettings.exe",
+        "pid": 17164,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 2
+      },
+      {
+        "appId": "msedge",
+        "processName": "msedge.exe",
+        "pid": 12672,
+        "category": "browser",
+        "channel": "browser",
+        "hasTitle": true,
+        "titleLength": 32
+      },
+      {
+        "appId": "msedge",
+        "processName": "msedge.exe",
+        "pid": 10112,
+        "category": "browser",
+        "channel": "browser",
+        "hasTitle": true,
+        "titleLength": 20
+      },
+      {
+        "appId": "taskmgr",
+        "processName": "Taskmgr.exe",
+        "pid": 10508,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 5
+      },
+      {
+        "appId": "msedge",
+        "processName": "msedge.exe",
+        "pid": 19100,
+        "category": "browser",
+        "channel": "browser",
+        "hasTitle": true,
+        "titleLength": 20
+      },
+      {
+        "appId": "taskhostw",
+        "processName": "taskhostw.exe",
+        "pid": 1488,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 16
+      },
+      {
+        "appId": "workbuddy",
+        "processName": "WorkBuddy.exe",
+        "pid": 6316,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 9
+      },
+      {
+        "appId": "workbuddy",
+        "processName": "WorkBuddy.exe",
+        "pid": 8556,
+        "category": "unknown",
+        "channel": "gui-a11y",
+        "hasTitle": true,
+        "titleLength": 20
+      }
+    ]
+  },
+  "mockBaseline": {
+    "note": "逻辑链路基线，非真机 GUI 耗时；用于判断编排/验证层是否成为瓶颈",
+    "snapshot": {
+      "ok": true,
+      "elapsedMs": 1.39,
+      "source": "a11y"
+    },
+    "step": {
+      "ok": true,
+      "elapsedMs": 1.11,
+      "outcome": "verified",
+      "code": null,
+      "attempts": 1
+    }
+  },
+  "decision": {
+    "verdict": "continue-with-adjustment",
+    "reasons": [
+      "a11y 树/截图/输入注入通道不可用（UIA 桥未启用或会话不具备条件），P1 全链路目前只能由 mock 后端验证",
+      "纯 Win32 窗口枚举可用，采到 34 个可见窗口，AppRegistry 与三级降级链可产出真实数据",
+      "下一步：在交互式桌面会话以 DEEPCODE_AGENT_UIA_BRIDGE=1 复跑本探针，确认 UIA 树覆盖率与单步耗时后再投入 P2 视觉兜底"
+    ],
+    "blockedCapabilities": [
+      {
+        "capability": "a11yTree",
+        "reason": "UIA 桥未启用：设置 DEEPCODE_AGENT_UIA_BRIDGE=1 且在交互式桌面会话中运行"
+      },
+      {
+        "capability": "screenshot",
+        "reason": "UIA 桥未启用：设置 DEEPCODE_AGENT_UIA_BRIDGE=1 且在交互式桌面会话中运行"
+      },
+      {
+        "capability": "elementInvoke",
+        "reason": "UIA 桥未启用：设置 DEEPCODE_AGENT_UIA_BRIDGE=1 且在交互式桌面会话中运行"
+      },
+      {
+        "capability": "coordinateInput",
+        "reason": "UIA 桥未启用：设置 DEEPCODE_AGENT_UIA_BRIDGE=1 且在交互式桌面会话中运行"
+      },
+      {
+        "capability": "foregroundControl",
+        "reason": "UIA 桥未启用：设置 DEEPCODE_AGENT_UIA_BRIDGE=1 且在交互式桌面会话中运行"
+      },
+      {
+        "capability": "uacAwareness",
+        "reason": "Secure Desktop / 完整性级别检测超出 P1 范围，遇 UAC 一律 HANDOFF_REQUIRED"
+      }
+    ]
+  }
+}

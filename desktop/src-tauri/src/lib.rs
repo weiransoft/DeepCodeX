@@ -12,6 +12,7 @@
 
 mod config;
 mod config_persist;
+mod desktop_agent;
 mod engine;
 mod error;
 mod ipc;
@@ -183,7 +184,13 @@ pub fn run() {
             ipc::ssh_remove_target,
             ipc::ssh_status,
             ipc::ssh_connect,
-            ipc::ssh_disconnect
+            ipc::ssh_disconnect,
+            // desktop-agent（P1）：仅状态/开关/授权四类配置命令，
+            // 不注册任何窗口枚举、截图、输入注入等执行类能力。
+            ipc::desktop_agent_status,
+            ipc::desktop_agent_toggle,
+            ipc::desktop_agent_permissions_get,
+            ipc::desktop_agent_permissions_set
         ])
         .build(tauri::generate_context!())
         .expect("构建 DeepCode Desktop 失败")

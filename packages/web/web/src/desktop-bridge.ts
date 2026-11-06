@@ -92,3 +92,68 @@ export function getDesktopBridge(): DesktopBridge | null {
 export function isDesktop(): boolean {
   return getDesktopBridge() !== null;
 }
+
+// ───────────── desktop-agent（P1）壳侧配置面 ─────────────
+//
+// 方案 §4.4 / §5「授权在壳」：WebView 只能读状态、改开关、改按应用授权。
+// 窗口枚举 / a11y 树 / 截图 / 输入注入全部由独立 sidecar 经 MCP 承担，
+// 不经这几条命令——因此桌面桥不会成为系统特权的入口。
+
+export interface DesktopAgentAppGrant {
+  appId: string;
+  always: boolean;
+  scopes: Array<"read" | "write">;
+}
+
+export interface DesktopAgentPermissions {
+  permissionMode: "manual" | "auto";
+  allowedApps: DesktopAgentAppGrant[];
+  deniedApps: string[];
+}
+
+export interface DesktopAgentStatus {
+  enabled: boolean;
+  permissions: DesktopAgentPermissions;
+  deniedCategories: string[];
+  policyPath: string;
+  sidecarRegistered: boolean;
+  /** 前端无权修改的字段（UI 应置灰并说明原因） */
+  lockedFields: string[];
+  restartHint: string;
+  platformPermissions: {
+    platform: string;
+    required: string[];
+    checkableByShell: boolean;
+    hint: string;
+  };
+}
+
+/** 查询能力开关、授权、sidecar 登记情况与系统权限引导。只读。 */
+export async function desktopAgentStatus(): Promise<DesktopAgentStatus> {
+  const bridge = getDesktopBridge();
+  if (!bridge) throw new Error("desktop-agent 配置面仅桌面端可用");
+  return bridge.invoke<DesktopAgentStatus>("desktop_agent_status");
+}
+
+/** 开启/关闭能力；关闭后 sidecar 会拒绝一切观察与动作。 */
+export async function desktopAgentToggle(enabled: boolean): Promise<DesktopAgentStatus> {
+  const bridge = getDesktopBridge();
+  if (!bridge) throw new Error("desktop-agent 配置面仅桌面端可用");
+  return bridge.invoke<DesktopAgentStatus>("desktop_agent_toggle", { enabled });
+}
+
+/** 读取当前按应用授权。 */
+export async function desktopAgentPermissionsGet(): Promise<DesktopAgentPermissions> {
+  const bridge = getDesktopBridge();
+  if (!bridge) throw new Error("desktop-agent 配置面仅桌面端可用");
+  return bridge.invoke<DesktopAgentPermissions>("desktop_agent_permissions_get");
+}
+
+/** 写入按应用授权；敏感分类与视觉/坐标通道由壳强制锁定，前端无法放宽。 */
+export async function desktopAgentPermissionsSet(
+  payload: DesktopAgentPermissions,
+): Promise<DesktopAgentStatus> {
+  const bridge = getDesktopBridge();
+  if (!bridge) throw new Error("desktop-agent 配置面仅桌面端可用");
+  return bridge.invoke<DesktopAgentStatus>("desktop_agent_permissions_set", { payload });
+}

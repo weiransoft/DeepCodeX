@@ -15,7 +15,7 @@
 
 [[permission]]
 identifier = "allow-app-ipc"
-description = "DeepCode 桌面桥自有命令：引擎状态/重启/日志、桌面配置读写、窗口拖动与新建、SSH 远程连接（目标管理/探测/隧道/断开）。仅覆盖 invoke_handler 注册面，不暴露 shell/fs/http 插件能力。"
+description = "DeepCode 桌面桥自有命令：引擎状态/重启/日志、桌面配置读写、窗口拖动与新建、SSH 远程连接（目标管理/探测/隧道/断开）、desktop-agent 策略配置面（状态/开关/授权）。仅覆盖 invoke_handler 注册面，不暴露 shell/fs/http 插件能力，也不暴露任何 GUI 执行能力。"
 commands.allow = [
   "engine_status",
   "engine_restart",
@@ -41,4 +41,11 @@ commands.allow = [
   "ssh_status",
   "ssh_connect",
   "ssh_disconnect",
+  # desktop-agent（P1）：仅配置面，能力开关与按应用授权由壳落盘。
+  # 窗口枚举 / a11y 树 / 截图 / 输入注入均由独立 sidecar 经 MCP 承担，
+  # 不经这些命令，避免把系统特权带进 WebView 的 ACL 视野。
+  "desktop_agent_status",
+  "desktop_agent_toggle",
+  "desktop_agent_permissions_get",
+  "desktop_agent_permissions_set",
 ]

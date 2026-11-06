@@ -1,0 +1,22 @@
+{
+  "name": "deepcode-desktop-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DeepCodeX desktop-agent sidecar: perception / actuation / verification for local GUI applications, exposed over MCP stdio.",
+  "main": "src/index.mjs",
+  "bin": {
+    "deepcode-desktop-agent": "./src/index.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/index.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "probe": "node scripts/probe.mjs",
+    "register:mcp": "node scripts/register-mcp.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

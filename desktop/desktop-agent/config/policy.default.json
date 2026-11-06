@@ -1,0 +1,21 @@
+{
+  "enabled": false,
+  "_comment": "默认关闭。desktop-agent 的所有观察/动作都必须经 desktop_agent_toggle 显式开启后才可用。此文件是非机密策略基线，实际生效策略由壳侧 desktop_agent_permissions_set 覆盖。",
+  "permissionMode": "manual",
+  "allowedApps": [],
+  "deniedApps": [],
+  "deniedCategories": [
+    "finance",
+    "crypto",
+    "medical",
+    "government",
+    "finance-or-sensitive"
+  ],
+  "preferBrowserChannel": true,
+  "allowCoordinateInput": false,
+  "allowScreenshot": false,
+  "maxSteps": 25,
+  "maxScreenshots": 3,
+  "maxTokens": 60000,
+  "maxRetries": 2
+}

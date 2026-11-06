@@ -539,6 +539,43 @@ pub async fn ssh_disconnect(
     Ok(())
 }
 
+// ─────────── desktop-agent 策略（P1：授权在壳，执行不在壳） ───────────
+//
+// 方案 §4.4 / §5：桌面 GUI 能力放在独立 sidecar 进程，经 MCP 进入引擎编排层；
+// 壳只保留**配置面**——能力开关、按应用授权、状态与系统权限引导。
+// 这四条命令不读取任何窗口内容、不截图、不注入输入，因此不扩大 WebView
+// 零特权面。真正的动作权限由 sidecar 的 PolicyGuard 二次裁决（纵深防御）。
+
+/// 查询 desktop-agent 状态：开关、授权、策略路径、sidecar 登记情况与系统权限引导。只读。
+#[tauri::command]
+pub fn desktop_agent_status() -> Result<crate::desktop_agent::AgentStatus, ShellError> {
+    crate::desktop_agent::status()
+}
+
+/// 开启/关闭能力。写入策略文件；sidecar 默认关闭，未显式开启时一律拒绝动作。
+#[tauri::command]
+pub fn desktop_agent_toggle(
+    enabled: bool,
+) -> Result<crate::desktop_agent::AgentStatus, ShellError> {
+    crate::desktop_agent::set_enabled(enabled)
+}
+
+/// 读取当前按应用授权（含 permissionMode）。密钥/画面内容一律不回传。
+#[tauri::command]
+pub fn desktop_agent_permissions_get(
+) -> Result<crate::desktop_agent::AgentPermissions, ShellError> {
+    Ok(crate::desktop_agent::status()?.permissions)
+}
+
+/// 写入按应用授权。入参在 desktop_agent::set_permissions 内严格校验；
+/// 敏感分类、截屏/坐标通道、预算上限为不可写字段，前端无法放宽。
+#[tauri::command]
+pub fn desktop_agent_permissions_set(
+    payload: crate::desktop_agent::AgentPermissions,
+) -> Result<crate::desktop_agent::AgentStatus, ShellError> {
+    crate::desktop_agent::set_permissions(payload)
+}
+
 /// 让窗口导航到指定 http origin（Tauri 2 `navigate` 需要 `Url` 类型）。
 fn navigate_to(window: &WebviewWindow, url: &str) -> Result<(), String> {
     let parsed = tauri::Url::parse(url).map_err(|e| format!("非法地址 {url}: {e}"))?;
