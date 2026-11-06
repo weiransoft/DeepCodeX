@@ -154,6 +154,20 @@ export const TOOLS = [
   },
 ];
 
+/**
+ * 所有带 appId 的工具都支持可选 pid：同一进程名常有多个顶层窗口
+ * （浏览器多窗口、多标签、多开应用），只按 appId 取第一个会观察错窗口。
+ * UIA 树与动作都按 pid 精确定位，避免「观察到的 A、操作到 B」。
+ */
+for (const tool of TOOLS) {
+  if (tool.inputSchema?.properties?.appId) {
+    tool.inputSchema.properties.pid = {
+      type: "number",
+      description: "可选：目标窗口所属进程 PID；同一 appId 有多个窗口时用于精确定位",
+    };
+  }
+}
+
 export class DesktopAgent {
   constructor({ backend, policy = {}, limits = {}, telemetryOptions = {} } = {}) {
     this.backend = assertBackend(backend);
@@ -236,6 +250,21 @@ export class DesktopAgent {
     return app;
   }
 
+  /**
+   * 解析目标窗口：缓存优先，未命中才重取一次；调用方给了 pid 就精确覆盖，
+   * 供 UIA 桥按进程定位具体窗口（同 appId 多窗口场景）。
+   */
+  async _target(args) {
+    let app = await this.registry.get(args.appId);
+    if (!app) app = await this.registry.get(args.appId, { refresh: true });
+    if (!app) {
+      throw new AgentError(ErrorCode.INVALID_ARGUMENT, `应用 ${args.appId} 不在当前窗口列表中`, {
+        hint: "先调用 desktop_list_apps 取有效 appId",
+      });
+    }
+    return args.pid ? { ...app, pid: Number(args.pid) } : app;
+  }
+
   /** 工具分发：统一入口，异常规范化为结构化 code */
   async callTool(name, args = {}) {
     try {
@@ -272,7 +301,7 @@ export class DesktopAgent {
       }
 
       case "desktop_snapshot": {
-        const app = await this.registry.get(args.appId);
+        const app = await this._target(args);
         if (!app) throw new AgentError(ErrorCode.INVALID_ARGUMENT, `未知 appId：${args.appId}`);
         const decision = await this.decideChannel(app);
         this.policy.authorize({ app, action: "snapshot", scope: "read" });
@@ -291,14 +320,14 @@ export class DesktopAgent {
         return this.perception.drillDown(args.snapshotId, args.rootRef, args.maxDepth ?? 3);
 
       case "desktop_screenshot": {
-        const app = await this.registry.get(args.appId);
+        const app = await this._target(args);
         if (!app) throw new AgentError(ErrorCode.INVALID_ARGUMENT, `未知 appId：${args.appId}`);
         this.policy.authorize({ app, action: "screenshot", scope: "read" });
         return this.perception.screenshot({ app, reason: args.reason });
       }
 
       case "desktop_click_ref": {
-        const app = await this.registry.get(args.appId);
+        const app = await this._target(args);
         if (!app) throw new AgentError(ErrorCode.INVALID_ARGUMENT, `未知 appId：${args.appId}`);
         return this.verifier.step({
           app,
@@ -311,7 +340,7 @@ export class DesktopAgent {
       }
 
       case "desktop_click_xy": {
-        const app = await this.registry.get(args.appId);
+        const app = await this._target(args);
         if (!app) throw new AgentError(ErrorCode.INVALID_ARGUMENT, `未知 appId：${args.appId}`);
         return this.verifier.step({
           app,
@@ -323,7 +352,7 @@ export class DesktopAgent {
       }
 
       case "desktop_type": {
-        const app = await this.registry.get(args.appId);
+        const app = await this._target(args);
         if (!app) throw new AgentError(ErrorCode.INVALID_ARGUMENT, `未知 appId：${args.appId}`);
         return this.verifier.step({
           app,
@@ -336,7 +365,7 @@ export class DesktopAgent {
       }
 
       case "desktop_key": {
-        const app = await this.registry.get(args.appId);
+        const app = await this._target(args);
         if (!app) throw new AgentError(ErrorCode.INVALID_ARGUMENT, `未知 appId：${args.appId}`);
         return this.verifier.step({
           app,
@@ -347,7 +376,7 @@ export class DesktopAgent {
       }
 
       case "desktop_wait_for": {
-        const app = await this.registry.get(args.appId);
+        const app = await this._target(args);
         if (!app) throw new AgentError(ErrorCode.INVALID_ARGUMENT, `未知 appId：${args.appId}`);
         this.budget.charge({ steps: 1 });
         const res = await this.backend.waitFor({

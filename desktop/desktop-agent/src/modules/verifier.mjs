@@ -46,25 +46,27 @@ export class Actuator {
     if (ref) this.perception.assertFresh(snapshotId, ref);
 
     const common = { appId: app.appId, action };
+    const target = { appId: app.appId, pid: app.pid, snapshotId };
     return this.telemetry.measure("act", common, async () => {
       switch (action) {
         case "click_ref":
         case "invoke":
-          return this.backend.invokeRef({ snapshotId, ref, action, value });
+          return this.backend.invokeRef({ ...target, ref, action, value });
         case "click_xy": {
           const { snapToNearestElement } = await import("./perception.mjs");
           const tree = snap?.tree ?? [];
-          const target = snapToNearestElement(tree, x, y);
+          const nearest = snapToNearestElement(tree, x, y);
           return this.backend.clickXY({
-            x: Number.isFinite(target.x) ? target.x : x,
-            y: Number.isFinite(target.y) ? target.y : y,
-            snapTo: snapTo ?? target.snappedTo,
+            ...target,
+            x: Number.isFinite(nearest.x) ? nearest.x : x,
+            y: Number.isFinite(nearest.y) ? nearest.y : y,
+            snapTo: snapTo ?? nearest.snappedTo,
           });
         }
         case "type":
-          return this.backend.typeText({ text: String(value ?? ""), ref });
+          return this.backend.typeText({ ...target, text: String(value ?? ""), ref });
         case "key":
-          return this.backend.sendKey({ combo: String(combo ?? "") });
+          return this.backend.sendKey({ ...target, combo: String(combo ?? "") });
         default:
           throw new AgentError(ErrorCode.INVALID_ARGUMENT, `未知动作：${action}`);
       }

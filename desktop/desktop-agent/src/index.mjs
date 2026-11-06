@@ -52,6 +52,7 @@ for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
     console.error(`[agent] ${sig} received, shutting down`);
     server.close();
+    agent.backend.close?.(); // 关闭长驻 UIA 桥，避免遗留 powershell.exe
     process.exit(0);
   });
 }

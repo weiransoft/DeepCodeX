@@ -1,0 +1,223 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-11-06T05:40:43.911Z",
+  "platform": "win32",
+  "session": "Console",
+  "verdict": "gui-unblocked",
+  "testWindowTitle": "DCX-GUI-TEST-mw4jq6me",
+  "privacy": {
+    "note": "只在受控测试窗口内操作，不采集用户窗口标题，不写用户文件"
+  },
+  "steps": [
+    {
+      "purpose": "ValuePattern 输入",
+      "ok": true,
+      "outcome": "verified",
+      "via": "value-pattern",
+      "elapsedMs": 149.83,
+      "result": {
+        "ok": true,
+        "code": null,
+        "outcome": "verified",
+        "attempts": 1,
+        "message": null,
+        "action": {
+          "ok": true,
+          "via": "value-pattern",
+          "ref": "e01"
+        },
+        "verification": {
+          "changed": true,
+          "expectChange": true,
+          "postActionSnapshotId": "uia-b91644b4ef82"
+        }
+      }
+    },
+    {
+      "purpose": "InvokePattern 点击",
+      "ok": true,
+      "outcome": "verified",
+      "via": "a11y-invoke",
+      "elapsedMs": 143,
+      "result": {
+        "ok": true,
+        "code": null,
+        "outcome": "verified",
+        "attempts": 1,
+        "message": null,
+        "action": {
+          "ok": true,
+          "via": "a11y-invoke",
+          "ref": "e04"
+        },
+        "verification": {
+          "changed": true,
+          "expectChange": true,
+          "postActionSnapshotId": "uia-a7ce43218c4b"
+        }
+      }
+    },
+    {
+      "purpose": "坐标点击兜底",
+      "ok": true,
+      "outcome": "verified",
+      "via": "coordinate-input",
+      "elapsedMs": 276.47,
+      "result": {
+        "ok": true,
+        "code": null,
+        "outcome": "verified",
+        "attempts": 1,
+        "message": null,
+        "action": {
+          "ok": true,
+          "via": "coordinate-input"
+        },
+        "verification": {
+          "changed": true,
+          "expectChange": true,
+          "postActionSnapshotId": "uia-95f242535474"
+        }
+      }
+    },
+    {
+      "purpose": "快捷键/关闭窗口",
+      "ok": true,
+      "outcome": "verified",
+      "via": "keyboard",
+      "elapsedMs": 288.66,
+      "result": {
+        "ok": true,
+        "code": null,
+        "outcome": "verified",
+        "attempts": 1,
+        "message": null,
+        "action": {
+          "ok": true,
+          "via": "keyboard"
+        },
+        "verification": {
+          "changed": true,
+          "expectChange": true
+        }
+      }
+    }
+  ],
+  "errors": [],
+  "capabilities": {
+    "platform": "windows",
+    "session": "Console",
+    "appEnumeration": {
+      "supported": true,
+      "reason": "UIA listWindows（优先）+ tasklist /v 回落"
+    },
+    "a11yTree": {
+      "supported": true,
+      "reason": "windows-uia.ps1 长驻桥已连接（session=Console, userInteractive=true）"
+    },
+    "screenshot": {
+      "supported": true,
+      "reason": "windows-uia.ps1 长驻桥已连接（session=Console, userInteractive=true）"
+    },
+    "elementInvoke": {
+      "supported": true,
+      "reason": "windows-uia.ps1 长驻桥已连接（session=Console, userInteractive=true）"
+    },
+    "coordinateInput": {
+      "supported": true,
+      "reason": "windows-uia.ps1 长驻桥已连接（session=Console, userInteractive=true）"
+    },
+    "foregroundControl": {
+      "supported": true,
+      "reason": "windows-uia.ps1 长驻桥已连接（session=Console, userInteractive=true）"
+    },
+    "uacAwareness": {
+      "supported": false,
+      "reason": "Secure Desktop / 完整性级别检测超出 P1 范围，遇 UAC 一律 HANDOFF_REQUIRED"
+    },
+    "bridge": {
+      "connected": true,
+      "session": "Console",
+      "userInteractive": true,
+      "psVersion": "5.1.26100.9711"
+    }
+  },
+  "testWindow": {
+    "appId": "powershell",
+    "pid": 3708,
+    "enumSource": "uia",
+    "waitedMs": 109
+  },
+  "enumeration": {
+    "count": 7,
+    "elapsedMs": 108.9,
+    "source": "uia"
+  },
+  "directSnapshot": {
+    "windowName": "DCX-GUI-TEST-mw4jq6me",
+    "nodeCount": 7,
+    "roles": [
+      "Window",
+      "Edit",
+      "ScrollBar",
+      "Button",
+      "Text"
+    ],
+    "treeSample": "[{\"ref\":\"e0\",\"role\":\"Window\",\"name\":\"DCX-GUI-TEST-mw4jq6me\",\"rect\":{\"x\":820,\"y\":532,\"width\":920,\"height\":440},\"depth\":0,\"enabled\":true,\"focused\":true,\"untrusted\":true,\"children\":[{\"ref\":\"e01\",\"role\":\"Edit\",\"name\":\"\",\"rect\":{\"x\":900,\"y\":630,\"width\":760,\"height\":60},\"depth\":1,\"enabled\":true,\"focused\":false,\"untrusted\":true,\"children\":[{\"ref\":\"e012\",\"role\":\"ScrollBar\",\"name\":\"\",\"rect\":{\"x\":0,\"y\":0,\"width\":0,\"height\":0},\"depth\":2,\"enabled\":false,\"focused\":false,\"untrusted\":true,\"children\":[]},{\"ref\":\"e013\",\"role\":\"ScrollBar\",\"name\":\"\",\"rect\":{\"x\":0,\"y\":0,\"width\":0,\"height\":0},\"depth\":2,\"enabled\":false,\"focused\":false,\"untrusted\":true,\"children\":[]}],\"value\":\"before\"},{\"ref\":\"e04\",\"role\":\"Button\",\"name\":\"Apply\",\"rect\":{\"x\":873,\"y\":714,\"width\":280,\"height\":60},\"depth\":1,\"enabled\":true,\"focused\":false,\"untrusted\":true,\"children\":[{\"ref\":\"e045\",\"role\":\"Text\",\"name\":\"Apply\",\"rect\":{\"x\":980,\"y\":729,\"width\":66,\"height\":30},\"depth\":2,\"enabled\":true,\"focused\":false,\"untrusted\":true,\"children\":[]}]},{\"ref\":\"e06\",\"role\":\"Text\",\"name\":\"idle\",\"rect\":{\"x\":873,\"y\":798,\"width\":814,\"height\":30},\"depth\":1,\"enabled\":true,\"focused\":false,\"untrusted\":true,\"children\":[]}]}]"
+  },
+  "snapshot": {
+    "snapshotId": "uia-5f816407d565",
+    "source": "a11y",
+    "nodeCount": 7,
+    "visibleNodes": 7,
+    "elapsedMs": 66.1,
+    "roles": [
+      "Window",
+      "Edit",
+      "ScrollBar",
+      "Button",
+      "Text"
+    ],
+    "editRef": "e01",
+    "buttonRef": "e04",
+    "buttonRect": {
+      "x": 873,
+      "y": 714,
+      "width": 280,
+      "height": 60
+    }
+  },
+  "stateAfterType": {
+    "editValues": [
+      "dcx-after"
+    ],
+    "texts": [
+      "Apply",
+      "Apply",
+      "idle"
+    ]
+  },
+  "screenshot": {
+    "ok": true,
+    "width": 920,
+    "height": 440,
+    "persisted": false
+  },
+  "stateAfterClick": {
+    "texts": [
+      "Apply",
+      "Apply",
+      "applied:dcx-after:2"
+    ],
+    "editValues": [
+      "dcx-after"
+    ]
+  },
+  "verifiedSteps": 4,
+  "totalSteps": 4,
+  "cleanup": {
+    "bridgeClosed": true,
+    "testWindowProcKilled": true,
+    "tempScriptRemoved": true
+  }
+}
