@@ -152,3 +152,55 @@ jobs:
       - name: EAG Gate
         if: matrix.os == 'ubuntu-latest' && matrix.node-version == '22'
         run: bash tests/scripts/ci-eag-gate.sh
+
+  # ★ desktop 壳 Rust 用例门禁（P2 第 3 项）
+  # 背景：开发机是 x86_64-pc-windows-gnu，测试二进制一启动就 STATUS_ENTRYPOINT_NOT_FOUND
+  # （0xc0000139，MinGW 运行时与 WebView2 / 系统 DLL 加载环境冲突，补 WebView2Loader.dll 亦无效）。
+  # 该环境问题只能证明"用例可编译"，证明不了"用例可运行且全绿"。
+  # MSVC 工具链无此冲突，因此把运行验证放到 CI：
+  #   本地 `cargo test --lib --no-run`（编译）+ CI `cargo test --lib`（运行）两者合起来才闭环。
+  rust-msvc:
+    name: Rust MSVC / cargo test --lib
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: desktop/src-tauri
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 显式锁定 MSVC host 工具链：runner 默认 stable 的 host 取决于镜像版本，
+      # 用完整 toolchain 名而非 --target，避免 rustup 额外拉一份 std
+      - name: Setup Rust (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+
+      # 依赖树较重（tauri / webview2-com / windows-sys / rusqlite bundled）：
+      # 冷编译 ~8-12 min，命中缓存后 ~2-4 min。key 带 msvc 标记，
+      # 防止与开发机 GNU 产物串味（两者 ABI 不兼容，混用必炸）
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+          key: msvc-stable
+
+      # 防空跑：cargo 在"没有任何用例匹配"时返回 0，若哪天 lib target 名被改，
+      # 这个 job 会静默变绿。先用 --list 数一遍，再跑真正的用例。
+      - name: Guard (lib 用例数)
+        shell: pwsh
+        run: |
+          $list = cargo test --lib --locked -- --list
+          $count = ($list | Select-String ': test$').Count
+          Write-Host "collected $count lib tests"
+          if ($count -lt 60) {
+            throw "lib 用例数异常（$count < 60）：疑似用例被误删或 lib target 未被编译"
+          }
+
+      # --locked：Cargo.lock 与 Cargo.toml 必须一致，禁止 CI 静默改依赖
+      # --test-threads=1：用例里有绑定本地端口（engine/port）、临时 SQLite（secrets/store）
+      #                   等并发敏感场景，串行跑换取确定性，82 个用例总计仅数秒
+      - name: cargo test --lib
+        run: cargo test --lib --locked -- --test-threads=1
