@@ -153,3 +153,62 @@ test("update 热更新策略即时生效；快照不泄漏确认令牌", () => {
   assert.equal(snap.pendingConfirmations, 0);
   assert.equal(Object.hasOwn(snap, "pending"), false);
 });
+
+test("视觉授权是按应用的：授权了 A 就不能截 B", () => {
+  const guard = enabled({
+    allowScreenshot: true,
+    allowCoordinateInput: true,
+    visionApps: ["charmap"],
+    allowedApps: [
+      { appId: "notepad", always: true, scopes: ["read", "write"] },
+      { appId: "charmap", always: true, scopes: ["read"] },
+    ],
+  });
+  const charmap = { appId: "charmap", category: "utilities" };
+  assert.equal(guard.authorize({ app: charmap, action: "screenshot" }).allowed, true);
+  assert.equal(guard.authorize({ app: charmap, action: "click_xy" }).allowed, true);
+
+  assert.throws(
+    () => guard.authorize({ app: notepad, action: "screenshot" }),
+    (e) => e.code === ErrorCode.CAPABILITY_UNAVAILABLE && /不在视觉授权清单/.test(e.message)
+  );
+  assert.throws(
+    () => guard.authorize({ app: notepad, action: "click_xy" }),
+    (e) => e.code === ErrorCode.CAPABILITY_UNAVAILABLE
+  );
+});
+
+test("未授权（清单为空）时行为与改前一致：截图通道关闭", () => {
+  const guard = enabled();
+  assert.throws(
+    () => guard.authorize({ app: notepad, action: "screenshot" }),
+    (e) => e.code === ErrorCode.CAPABILITY_UNAVAILABLE && /截屏通道默认关闭/.test(e.message)
+  );
+});
+
+test("视觉授权到期后立刻失效：长驻进程不能只靠启动时那一次判定", () => {
+  const NOW = 1_700_000_000_000;
+  const policy = {
+    ...defaultPolicy(),
+    enabled: true,
+    permissionMode: "auto",
+    allowedApps: [{ appId: "notepad", always: true, scopes: ["read", "write"] }],
+    allowScreenshot: true,
+    allowCoordinateInput: true,
+    visionApps: ["notepad"],
+    visionExpiresAt: NOW + 60_000,
+  };
+  const before = new PolicyGuard(policy, { clock: () => NOW + 59_999 });
+  assert.equal(before.authorize({ app: notepad, action: "screenshot" }).allowed, true);
+  assert.equal(before.authorize({ app: notepad, action: "click_xy" }).allowed, true);
+
+  // 到点即拒（>= expiresAt），不必等进程重启去重读策略
+  const atDeadline = new PolicyGuard(policy, { clock: () => NOW + 60_000 });
+  for (const action of ["screenshot", "click_xy"]) {
+    assert.throws(
+      () => atDeadline.authorize({ app: notepad, action }),
+      (e) => e.code === ErrorCode.CAPABILITY_UNAVAILABLE && /视觉授权已过期/.test(e.message),
+      `${action} 到期后必须被拒`
+    );
+  }
+});

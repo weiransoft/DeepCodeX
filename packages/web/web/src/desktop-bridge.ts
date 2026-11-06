@@ -111,11 +111,41 @@ export interface DesktopAgentPermissions {
   deniedApps: string[];
 }
 
+/** 视觉通道的限时授权状态（None = 未开）。 */
+export interface DesktopAgentVisionStatus {
+  apps: string[];
+  allowCoordinateInput: boolean;
+  grantedAt: number;
+  expiresAt: number;
+  remainingMs: number;
+  grantId: string;
+}
+
+/** 一次性确认令牌（5 分钟有效、用一次即废）。 */
+export interface DesktopAgentVisionChallenge {
+  token: string;
+  /** 必须原样展示给用户的确认文案 */
+  prompt: string;
+  expiresInMs: number;
+  maxTtlMinutes: number;
+  /** 可被授权的应用（已获 read 权限） */
+  grantableApps: string[];
+}
+
+export interface DesktopAgentVisionGrantInput {
+  token: string;
+  apps: string[];
+  allowCoordinateInput: boolean;
+  ttlMinutes: number;
+}
+
 export interface DesktopAgentStatus {
   enabled: boolean;
   permissions: DesktopAgentPermissions;
   deniedCategories: string[];
   policyPath: string;
+  /** 视觉通道授权（null = 未开） */
+  vision: DesktopAgentVisionStatus | null;
   sidecarRegistered: boolean;
   /** 前端无权修改的字段（UI 应置灰并说明原因） */
   lockedFields: string[];
@@ -156,4 +186,32 @@ export async function desktopAgentPermissionsSet(
   const bridge = getDesktopBridge();
   if (!bridge) throw new Error("desktop-agent 配置面仅桌面端可用");
   return bridge.invoke<DesktopAgentStatus>("desktop_agent_permissions_set", { payload });
+}
+
+/**
+ * 申请视觉通道的一次性确认令牌。
+ *
+ * UI 必须把返回的 `prompt` 原文展示给用户并等待确认——令牌本身不构成授权，
+ * 只是让"确认"这一步必须发生在当下（5 分钟内、用一次即废）。
+ */
+export async function desktopAgentVisionChallenge(): Promise<DesktopAgentVisionChallenge> {
+  const bridge = getDesktopBridge();
+  if (!bridge) throw new Error("desktop-agent 配置面仅桌面端可用");
+  return bridge.invoke<DesktopAgentVisionChallenge>("desktop_agent_vision_challenge");
+}
+
+/** 提交视觉授权（限时 + 按应用）。任一校验失败都不会落盘。 */
+export async function desktopAgentVisionGrant(
+  input: DesktopAgentVisionGrantInput,
+): Promise<DesktopAgentStatus> {
+  const bridge = getDesktopBridge();
+  if (!bridge) throw new Error("desktop-agent 配置面仅桌面端可用");
+  return bridge.invoke<DesktopAgentStatus>("desktop_agent_vision_grant", { input });
+}
+
+/** 立即撤销视觉授权（不必等到期）。 */
+export async function desktopAgentVisionRevoke(): Promise<DesktopAgentStatus> {
+  const bridge = getDesktopBridge();
+  if (!bridge) throw new Error("desktop-agent 配置面仅桌面端可用");
+  return bridge.invoke<DesktopAgentStatus>("desktop_agent_vision_revoke");
 }

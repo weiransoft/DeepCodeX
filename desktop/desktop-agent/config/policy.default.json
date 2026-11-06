@@ -14,6 +14,8 @@
   "preferBrowserChannel": true,
   "allowCoordinateInput": false,
   "allowScreenshot": false,
+  "_vision": "视觉通道（截图 / 坐标点击）由壳侧限时授权派生，不是可写字段：vision 为 null 时上面两个开关恒为 false。visionApps / visionExpiresAt 是 hardenExternalPolicy() 的输出，不从这里读。",
+  "vision": null,
   "maxSteps": 25,
   "maxScreenshots": 3,
   "maxTokens": 60000,

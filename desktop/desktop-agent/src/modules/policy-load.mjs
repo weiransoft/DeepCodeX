@@ -21,6 +21,14 @@ export const DEEPCODE_DIR = ".deepcode";
 export const SHELL_POLICY_FILE = "desktop-agent.json";
 export const MAX_ENTRIES = 64;
 
+/**
+ * 视觉通道授权的时限（与 `desktop/src-tauri/src/desktop_agent.rs` 完全对齐）。
+ * 两侧必须同口径：壳侧写、sidecar 读，任何一侧放宽都等于开了后门。
+ */
+export const VISION_MAX_TTL_MS = 24 * 60 * 60 * 1000;
+export const VISION_MIN_TTL_MS = 60 * 1000;
+export const VISION_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, Number.isFinite(Number(n)) ? Math.trunc(Number(n)) : lo));
 
 function validId(s) {
@@ -51,10 +59,47 @@ export function resolvePolicyPath({ env = process.env, home = homedir(), exists 
 }
 
 /**
+ * 视觉授权规范化：**过期、空清单、非法 appId、授权时刻可疑、超长**一律作废。
+ * 与 Rust 侧 `normalize_vision()` 逐条对齐（这是同一份契约的两个实现）。
+ *
+ * @returns {{apps:string[],allowCoordinateInput:boolean,grantedAt:number,expiresAt:number,grantId:string}|null}
+ */
+export function normalizeVision(raw, now = Date.now()) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const apps = [];
+  for (const item of Array.isArray(raw.apps) ? raw.apps : []) {
+    if (!validId(item)) continue;
+    const id = item.trim();
+    if (!apps.includes(id)) apps.push(id);
+    if (apps.length >= MAX_ENTRIES) break;
+  }
+  if (apps.length === 0) return null;
+
+  const grantedAt = Number(raw.grantedAt);
+  const expiresAt = Number(raw.expiresAt);
+  if (!Number.isFinite(grantedAt) || grantedAt <= 0) return null;
+  // 授权时刻在"未来"（超过令牌有效期）说明时钟可疑，不认
+  if (grantedAt > now + VISION_CHALLENGE_TTL_MS) return null;
+  if (!Number.isFinite(expiresAt) || expiresAt <= grantedAt) return null;
+
+  const capped = Math.min(expiresAt, grantedAt + VISION_MAX_TTL_MS);
+  if (capped <= now) return null;
+
+  const grantId = typeof raw.grantId === "string" && raw.grantId.trim() ? raw.grantId.trim() : "legacy";
+  return {
+    apps,
+    allowCoordinateInput: raw.allowCoordinateInput === true,
+    grantedAt,
+    expiresAt: capped,
+    grantId,
+  };
+}
+
+/**
  * 白名单式构造：只保留已知字段，未知键（含 `_comment`）一律丢弃。
  * 锁定字段与 desktop_agent.rs::harden() 完全对齐，避免两侧口径漂移。
  */
-export function hardenExternalPolicy(raw = {}) {
+export function hardenExternalPolicy(raw = {}, now = Date.now()) {
   const base = defaultPolicy();
   const src = raw && typeof raw === "object" ? raw : {};
   const allowedApps = (Array.isArray(src.allowedApps) ? src.allowedApps : [])
@@ -70,6 +115,8 @@ export function hardenExternalPolicy(raw = {}) {
     .slice(0, MAX_ENTRIES)
     .map((s) => s.trim());
 
+  const vision = normalizeVision(src.vision, now);
+
   return {
     enabled: src.enabled === true,
     permissionMode: src.permissionMode === "auto" ? "auto" : "manual", // bypass 降级
@@ -77,8 +124,11 @@ export function hardenExternalPolicy(raw = {}) {
     deniedApps,
     deniedCategories: [...DEFAULT_DENIED_CATEGORIES],
     preferBrowserChannel: true,
-    allowCoordinateInput: false,
-    allowScreenshot: false,
+    // 视觉通道由限时授权派生：没有有效授权，两个开关就是 false（不是可写字段）
+    allowCoordinateInput: vision?.allowCoordinateInput === true,
+    allowScreenshot: vision !== null,
+    visionApps: vision?.apps ?? [],
+    visionExpiresAt: vision?.expiresAt ?? 0,
     maxSteps: clamp(src.maxSteps ?? base.maxSteps, 1, 100),
     maxScreenshots: clamp(src.maxScreenshots ?? base.maxScreenshots, 0, 10),
     maxTokens: clamp(src.maxTokens ?? base.maxTokens, 1_000, 200_000),

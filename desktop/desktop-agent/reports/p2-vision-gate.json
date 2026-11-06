@@ -1,0 +1,239 @@
+{
+  "generatedAt": "2026-11-06T11:39:38.902Z",
+  "node": "v22.22.2",
+  "platform": "win32",
+  "cases": [
+    {
+      "name": "a-no-grant",
+      "backend": "mock",
+      "tool": "desktop_screenshot",
+      "args": {
+        "appId": "notepad",
+        "reason": "gate-a"
+      },
+      "observed": {
+        "isError": true,
+        "code": "CAPABILITY_UNAVAILABLE",
+        "message": "截屏通道默认关闭",
+        "contentTypes": [
+          "text"
+        ],
+        "imageMimeType": null,
+        "imageBytes": 0,
+        "textBytes": 175,
+        "textHasLongBase64": false,
+        "textKeys": [
+          "ok",
+          "code",
+          "message",
+          "recoverable",
+          "hint"
+        ],
+        "pixelSize": null,
+        "reportedSize": {}
+      },
+      "pass": true
+    },
+    {
+      "name": "b-granted-readonly",
+      "backend": "mock",
+      "tool": "desktop_screenshot",
+      "args": {
+        "appId": "notepad",
+        "reason": "gate-b",
+        "includeImage": true
+      },
+      "observed": {
+        "isError": false,
+        "code": null,
+        "message": null,
+        "contentTypes": [
+          "text",
+          "image"
+        ],
+        "imageMimeType": "image/png",
+        "imageBytes": 70,
+        "textBytes": 394,
+        "textHasLongBase64": false,
+        "textKeys": [
+          "ok",
+          "width",
+          "height",
+          "mimeType",
+          "frame",
+          "coords",
+          "persisted",
+          "untrusted",
+          "snapHint",
+          "image"
+        ],
+        "pixelSize": {
+          "width": 1,
+          "height": 1
+        },
+        "reportedSize": {
+          "width": 1280,
+          "height": 800
+        }
+      },
+      "pass": true
+    },
+    {
+      "name": "c-no-coordinate",
+      "backend": "mock",
+      "tool": "desktop_click_xy",
+      "args": {
+        "appId": "notepad",
+        "x": 10,
+        "y": 10
+      },
+      "observed": {
+        "isError": true,
+        "code": "CAPABILITY_UNAVAILABLE",
+        "message": "坐标输入通道默认关闭",
+        "contentTypes": [
+          "text"
+        ],
+        "imageMimeType": null,
+        "imageBytes": 0,
+        "textBytes": 238,
+        "textHasLongBase64": false,
+        "textKeys": [
+          "ok",
+          "code",
+          "message",
+          "recoverable",
+          "hint",
+          "attempts",
+          "outcome"
+        ],
+        "pixelSize": null,
+        "reportedSize": {}
+      },
+      "pass": true
+    },
+    {
+      "name": "d-other-app",
+      "backend": "mock",
+      "tool": "desktop_screenshot",
+      "args": {
+        "appId": "notepad",
+        "reason": "gate-d"
+      },
+      "observed": {
+        "isError": true,
+        "code": "CAPABILITY_UNAVAILABLE",
+        "message": "应用 notepad 不在视觉授权清单内",
+        "contentTypes": [
+          "text"
+        ],
+        "imageMimeType": null,
+        "imageBytes": 0,
+        "textBytes": 166,
+        "textHasLongBase64": false,
+        "textKeys": [
+          "ok",
+          "code",
+          "message",
+          "recoverable",
+          "hint"
+        ],
+        "pixelSize": null,
+        "reportedSize": {}
+      },
+      "pass": true
+    },
+    {
+      "name": "e-expired",
+      "backend": "mock",
+      "tool": "desktop_screenshot",
+      "args": {
+        "appId": "notepad",
+        "reason": "gate-e"
+      },
+      "observed": {
+        "isError": true,
+        "code": "CAPABILITY_UNAVAILABLE",
+        "message": "截屏通道默认关闭",
+        "contentTypes": [
+          "text"
+        ],
+        "imageMimeType": null,
+        "imageBytes": 0,
+        "textBytes": 175,
+        "textHasLongBase64": false,
+        "textKeys": [
+          "ok",
+          "code",
+          "message",
+          "recoverable",
+          "hint"
+        ],
+        "pixelSize": null,
+        "reportedSize": {}
+      },
+      "pass": true
+    },
+    {
+      "name": "f-real-windows",
+      "backend": "windows",
+      "tool": "desktop_screenshot",
+      "args": {
+        "appId": "applicationframehost",
+        "hwnd": 1248004,
+        "reason": "gate-f",
+        "includeImage": true,
+        "activate": true
+      },
+      "observed": {
+        "isError": false,
+        "code": null,
+        "message": null,
+        "contentTypes": [
+          "text",
+          "image"
+        ],
+        "imageMimeType": "image/png",
+        "imageBytes": 52789,
+        "textBytes": 399,
+        "textHasLongBase64": false,
+        "textKeys": [
+          "ok",
+          "width",
+          "height",
+          "mimeType",
+          "frame",
+          "coords",
+          "persisted",
+          "untrusted",
+          "snapHint",
+          "image"
+        ],
+        "pixelSize": {
+          "width": 666,
+          "height": 1078
+        },
+        "reportedSize": {
+          "width": 666,
+          "height": 1078
+        }
+      },
+      "pass": true,
+      "checks": {
+        "ok": true,
+        "imageBlock": true,
+        "decoded": true,
+        "widthMatches": true,
+        "heightMatches": true,
+        "bytesPositive": true
+      }
+    }
+  ],
+  "summary": {
+    "total": 6,
+    "passed": 6,
+    "failed": 0,
+    "skipped": 0
+  },
+  "verdict": "vision-gate-verified"
+}

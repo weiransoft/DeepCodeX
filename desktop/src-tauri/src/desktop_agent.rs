@@ -16,6 +16,8 @@
 //! sidecar）；热更新通道属 P2，故状态里显式返回 `restartHint`。
 
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -26,11 +28,125 @@ use crate::error::ShellError;
 /// 策略文件名（与 settings.json / desktop.json 同目录，避免被引擎白名单重写）。
 pub const POLICY_FILE: &str = "desktop-agent.json";
 
+/// 视觉授权的审计流水（只记 appId/时长/时间，绝不记画面或文本）。
+pub const AUDIT_FILE: &str = "desktop-agent-audit.jsonl";
+
 /// 引擎 MCP 配置中 sidecar 的约定名。
 pub const SIDECAR_MCP_NAME: &str = "desktop-agent";
 
 const MAX_ENTRIES: usize = 64;
 const MAX_ID_LEN: usize = 128;
+
+// ─────────── 视觉通道的限时授权（方案 §3.12 的闸门） ───────────
+//
+// 为什么不是"一个布尔开关"：截图 + 坐标点击能读屏、能代用户点，风险和
+// "列窗口"完全不是一个量级。所以它被设计成**一次显式、限时、按应用**的授权：
+//   - 前端要先拿 challenge（一次性令牌），再带着令牌提交 grant；
+//   - 令牌 5 分钟内有效、用一次即废，防止误触/重放；
+//   - 授权只能覆盖已经拿到 read 权限的应用，不能顺手解锁未授权应用；
+//   - 有效期上限 24 h、下限 1 min，到点自动失效（不需要用户记得来关）；
+//   - 每次授权/撤销都写审计流水（JSONL，只记 appId 与时长）。
+// 落盘文件仍是不可信输入：读取时按同一套规则重新裁剪（过期即失效）。
+
+/// 视觉授权有效期上限（24 h）
+pub const VISION_MAX_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+/// 视觉授权有效期下限（1 min）
+pub const VISION_MIN_TTL_MS: u64 = 60 * 1000;
+/// 一次性确认令牌有效期（5 min）
+pub const VISION_CHALLENGE_TTL_MS: u64 = 5 * 60 * 1000;
+
+/// 视觉通道授权（限时 + 按应用）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VisionGrant {
+    /// 允许截图/坐标点击的 appId 白名单（空 = 无效授权）
+    pub apps: Vec<String>,
+    /// 是否允许坐标点击（false = 只允许截图观察）
+    pub allow_coordinate_input: bool,
+    /// 授权时刻（Unix 毫秒）
+    pub granted_at: u64,
+    /// 失效时刻（Unix 毫秒）
+    pub expires_at: u64,
+    /// 审计 id（每次授权唯一）
+    pub grant_id: String,
+}
+
+impl Default for VisionGrant {
+    fn default() -> Self {
+        Self {
+            apps: Vec::new(),
+            allow_coordinate_input: false,
+            granted_at: 0,
+            expires_at: 0,
+            grant_id: String::new(),
+        }
+    }
+}
+
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn dedup_ids(ids: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for id in ids {
+        let id = id.trim().to_string();
+        if id.is_empty() || out.iter().any(|s| s == &id) {
+            continue;
+        }
+        out.push(id);
+    }
+    out
+}
+
+/// 规范化视觉授权：非法/过期/超长/空清单一律作废（返回 None）。
+/// 纯函数，`now` 可注入——Rust 单测与 sidecar 侧口径靠它对齐。
+fn normalize_vision(raw: Option<VisionGrant>, now: u64) -> Option<VisionGrant> {
+    let mut v = raw?;
+    v.apps.retain(|a| valid_id(a));
+    v.apps = dedup_ids(std::mem::take(&mut v.apps));
+    v.apps.truncate(MAX_ENTRIES);
+    if v.apps.is_empty() {
+        return None;
+    }
+    // 未标授权时刻、或授权时刻在"未来"（时钟可疑）一律不信
+    if v.granted_at == 0 || v.granted_at > now.saturating_add(VISION_CHALLENGE_TTL_MS) {
+        return None;
+    }
+    if v.expires_at <= v.granted_at {
+        return None;
+    }
+    let cap = v.granted_at.saturating_add(VISION_MAX_TTL_MS);
+    if v.expires_at > cap {
+        v.expires_at = cap;
+    }
+    if v.expires_at <= now {
+        return None;
+    }
+    if v.grant_id.trim().is_empty() {
+        v.grant_id = "legacy".into();
+    }
+    Some(v)
+}
+
+fn random_token() -> String {
+    use rand::RngCore;
+    let mut buf = [0u8; 16];
+    rand::rng().fill_bytes(&mut buf);
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 一次性确认令牌（进程内保存，重启即失效——授权本就是要"当场确认"）
+struct PendingChallenge {
+    token: String,
+    expires_at: u64,
+}
+
+static PENDING_VISION: Mutex<Option<PendingChallenge>> = Mutex::new(None);
+
 
 fn default_denied_categories() -> Vec<String> {
     ["finance", "crypto", "medical", "government", "finance-or-sensitive"]
@@ -82,6 +198,9 @@ pub struct AgentPolicy {
     pub prefer_browser_channel: bool,
     pub allow_coordinate_input: bool,
     pub allow_screenshot: bool,
+    /// 视觉通道的限时授权；`allow_screenshot` / `allow_coordinate_input`
+    /// 由它**派生**（见 harden），因此不能由前端直接写。
+    pub vision: Option<VisionGrant>,
     pub max_steps: u32,
     pub max_screenshots: u32,
     pub max_tokens: u64,
@@ -99,6 +218,7 @@ impl Default for AgentPolicy {
             prefer_browser_channel: true,
             allow_coordinate_input: false,
             allow_screenshot: false,
+            vision: None,
             max_steps: 25,
             max_screenshots: 3,
             max_tokens: 60_000,
@@ -135,6 +255,8 @@ pub struct AgentStatus {
     pub permissions: AgentPermissions,
     pub denied_categories: Vec<String>,
     pub policy_path: String,
+    /// 视觉通道授权（None = 未开。含到期时间，UI 可显示倒计时）
+    pub vision: Option<VisionStatus>,
     /// 引擎 settings.json 的 mcpServers 里是否已登记 sidecar
     pub sidecar_registered: bool,
     /// 前端无权修改的字段（用于 UI 置灰与审计说明）
@@ -163,8 +285,15 @@ fn valid_id(s: &str) -> bool {
  */
 fn harden(mut p: AgentPolicy) -> AgentPolicy {
     p.denied_categories = default_denied_categories();
-    p.allow_coordinate_input = false;
-    p.allow_screenshot = false;
+    // 视觉通道由限时授权**派生**，而不是可写字段：授权过期/清单为空/超长，
+    // 这里就自动收回。手工改文件放宽不了（读与写都过这里）。
+    p.vision = normalize_vision(p.vision.take(), now_ms());
+    p.allow_screenshot = p.vision.is_some();
+    p.allow_coordinate_input = p
+        .vision
+        .as_ref()
+        .map(|v| v.allow_coordinate_input)
+        .unwrap_or(false);
     p.prefer_browser_channel = true;
     if p.permission_mode != "auto" {
         p.permission_mode = "manual".into(); // bypass 一律降级
@@ -205,6 +334,226 @@ fn write_policy(p: &AgentPolicy) -> Result<(), ShellError> {
     let json = serde_json::to_string_pretty(p)
         .map_err(|e| ShellError::Config(format!("desktop-agent 策略序列化失败: {e}")))?;
     write_private(path.as_path(), json.as_bytes())
+}
+
+/// 视觉授权状态（供 UI 显示倒计时与"已授权的应用"，不含任何画面内容）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VisionStatus {
+    pub apps: Vec<String>,
+    pub allow_coordinate_input: bool,
+    pub granted_at: u64,
+    pub expires_at: u64,
+    pub remaining_ms: u64,
+    pub grant_id: String,
+}
+
+fn vision_status(p: &AgentPolicy, now: u64) -> Option<VisionStatus> {
+    p.vision.as_ref().map(|v| VisionStatus {
+        apps: v.apps.clone(),
+        allow_coordinate_input: v.allow_coordinate_input,
+        granted_at: v.granted_at,
+        expires_at: v.expires_at,
+        remaining_ms: v.expires_at.saturating_sub(now),
+        grant_id: v.grant_id.clone(),
+    })
+}
+
+/// 一次性确认令牌的发放结果。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VisionChallengeInfo {
+    pub token: String,
+    /// UI 要原样展示给用户的确认文案（人读的那一句）
+    pub prompt: String,
+    pub expires_in_ms: u64,
+    pub max_ttl_minutes: u32,
+    /// 可被授权的应用（只能是已获得 read 权限的应用）
+    pub grantable_apps: Vec<String>,
+}
+
+/// 授权入参。`token` 必须来自 `vision_challenge`，且只能用一次。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VisionGrantInput {
+    pub token: String,
+    pub apps: Vec<String>,
+    pub allow_coordinate_input: bool,
+    pub ttl_minutes: u32,
+}
+
+impl Default for VisionGrantInput {
+    fn default() -> Self {
+        Self {
+            token: String::new(),
+            apps: Vec::new(),
+            allow_coordinate_input: false,
+            ttl_minutes: 30,
+        }
+    }
+}
+
+/// 已拿到 read 权限的应用（视觉授权只能在这个集合内选）。
+fn read_grantable_apps(p: &AgentPolicy) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for g in &p.allowed_apps {
+        if g.scopes.iter().any(|s| s == "read") && !out.iter().any(|s| s == &g.app_id) {
+            out.push(g.app_id.clone());
+        }
+    }
+    out
+}
+
+/// 写一条审计流水。**只记 appId / 时长 / 时间，绝不记画面、标题或文本。**
+fn append_audit(entry: serde_json::Value) -> Result<(), ShellError> {
+    use std::io::Write;
+    let mut path = home_settings_path()?;
+    path.set_file_name(AUDIT_FILE);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let line = format!("{entry}\n");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    file.write_all(line.as_bytes())?;
+    Ok(())
+}
+
+/// 申请一次性确认令牌。UI 必须把 `prompt` 展示给用户，用户确认后再提交 grant。
+pub fn vision_challenge() -> Result<VisionChallengeInfo, ShellError> {
+    let p = read_policy()?;
+    if !p.enabled {
+        return Err(ShellError::Config(
+            "请先开启 desktop-agent，再申请视觉授权".into(),
+        ));
+    }
+    let grantable = read_grantable_apps(&p);
+    if grantable.is_empty() {
+        return Err(ShellError::Config(
+            "视觉授权只能授予已获 read 权限的应用：请先在授权列表里加入目标应用".into(),
+        ));
+    }
+    let token = random_token();
+    let expires_at = now_ms().saturating_add(VISION_CHALLENGE_TTL_MS);
+    let prompt = format!(
+        "接下来 5 分钟内确认的视觉授权，会让 desktop-agent 在这段时间里截取下列应用的屏幕\
+         （并可能代你点击坐标）：{}。授权到期自动失效，可随时撤销。",
+        grantable.join("、")
+    );
+    *PENDING_VISION.lock().unwrap() = Some(PendingChallenge { token: token.clone(), expires_at });
+    Ok(VisionChallengeInfo {
+        token,
+        prompt,
+        expires_in_ms: VISION_CHALLENGE_TTL_MS,
+        max_ttl_minutes: (VISION_MAX_TTL_MS / 60_000) as u32,
+        grantable_apps: grantable,
+    })
+}
+
+/// 校验并消费一次性令牌。失败一律拒绝（不重试、不延长）。
+fn consume_challenge(token: &str, now: u64) -> Result<(), ShellError> {
+    let mut guard = PENDING_VISION.lock().unwrap();
+    let Some(pending) = guard.as_ref() else {
+        return Err(ShellError::Config(
+            "没有待确认的视觉授权，请重新发起（令牌只能用一次）".into(),
+        ));
+    };
+    let matched = !token.trim().is_empty() && pending.token == token.trim();
+    let fresh = pending.expires_at > now;
+    // 无论成功失败都作废：令牌是一次性的，失败也得重新领
+    *guard = None;
+    if !matched {
+        return Err(ShellError::Config("确认令牌不匹配".into()));
+    }
+    if !fresh {
+        return Err(ShellError::Config("确认令牌已过期，请重新发起".into()));
+    }
+    Ok(())
+}
+
+/// 纯校验：返回规范化后的授权（不写盘），便于单测覆盖全部拒绝分支。
+fn validate_grant(
+    p: &AgentPolicy,
+    input: &VisionGrantInput,
+    now: u64,
+) -> Result<VisionGrant, ShellError> {
+    if !p.enabled {
+        return Err(ShellError::Config("desktop-agent 未开启，不能授予视觉通道".into()));
+    }
+    let apps = dedup_ids(input.apps.clone());
+    if apps.is_empty() {
+        return Err(ShellError::Config("至少选择一个应用".into()));
+    }
+    if apps.len() > MAX_ENTRIES {
+        return Err(ShellError::Config(format!("授权条目数不得超过 {MAX_ENTRIES}")));
+    }
+    let grantable = read_grantable_apps(p);
+    for app in &apps {
+        if !valid_id(app) {
+            return Err(ShellError::Config(format!("非法 appId：{app}")));
+        }
+        if !grantable.iter().any(|a| a == app) {
+            return Err(ShellError::Config(format!(
+                "{app} 不在已授权的应用列表里（需先授予 read 权限）"
+            )));
+        }
+    }
+    let ttl_ms = (input.ttl_minutes.max(1) as u64)
+        .saturating_mul(60_000)
+        .clamp(VISION_MIN_TTL_MS, VISION_MAX_TTL_MS);
+    Ok(VisionGrant {
+        apps,
+        allow_coordinate_input: input.allow_coordinate_input,
+        granted_at: now,
+        expires_at: now.saturating_add(ttl_ms),
+        grant_id: random_token(),
+    })
+}
+
+/// 提交授权：令牌校验 → 入参校验 → 落盘 → 审计。任一步失败即不授权。
+pub fn grant_vision(input: VisionGrantInput) -> Result<AgentStatus, ShellError> {
+    let now = now_ms();
+    consume_challenge(&input.token, now)?;
+    let p = read_policy()?;
+    let grant = validate_grant(&p, &input, now)?;
+    let ttl_ms = grant.expires_at.saturating_sub(grant.granted_at);
+    let audit = serde_json::json!({
+        "ts": now,
+        "event": "vision.grant",
+        "grantId": grant.grant_id,
+        "apps": grant.apps,
+        "allowCoordinateInput": grant.allow_coordinate_input,
+        "ttlMs": ttl_ms,
+    });
+    // 审计写不进去就不授权：留不下记录的授权等于没有留下边界
+    append_audit(audit)?;
+    let mut next = p;
+    next.vision = Some(grant);
+    write_policy(&harden(next))?;
+    log::info!("[desktop-agent] 视觉通道已授权（{} 个应用，{} 分钟）", input.apps.len(), ttl_ms / 60_000);
+    status()
+}
+
+/// 立即撤销（不必等到期）。
+pub fn revoke_vision() -> Result<AgentStatus, ShellError> {
+    let mut p = read_policy()?;
+    let grant_id = p.vision.as_ref().map(|v| v.grant_id.clone());
+    p.vision = None;
+    write_policy(&harden(p))?;
+    append_audit(serde_json::json!({
+        "ts": now_ms(),
+        "event": "vision.revoke",
+        "grantId": grant_id,
+    }))?;
+    log::info!("[desktop-agent] 视觉通道已撤销");
+    status()
 }
 
 /// 引擎 MCP 配置里是否登记了 sidecar（只读探测，不修改 settings.json）。
@@ -250,13 +599,13 @@ pub fn status() -> Result<AgentStatus, ShellError> {
         permissions: p.permissions(),
         denied_categories: p.denied_categories.clone(),
         policy_path: path.to_string_lossy().into_owned(),
+        vision: vision_status(&p, now_ms()),
         sidecar_registered: sidecar_registered(),
         locked_fields: vec![
             "deniedCategories".into(),
-            "allowScreenshot".into(),
-            "allowCoordinateInput".into(),
             "preferBrowserChannel".into(),
             "maxSteps/maxTokens/maxRetries".into(),
+            "allowScreenshot/allowCoordinateInput（由限时视觉授权派生，请走 visionGrant）".into(),
         ],
         restart_hint: "策略由 sidecar 启动时读取一次；修改开关或授权后需重启引擎才会生效（P2 再做热更新）".into(),
         platform_permissions: platform_guide(),
@@ -363,5 +712,167 @@ mod tests {
             scopes: vec!["admin".into()],
         });
         assert!(set_permissions(input2).is_err());
+    }
+
+    // ── 视觉通道限时授权 ──────────────────────────────────────────
+
+    fn enabled_policy() -> AgentPolicy {
+        AgentPolicy {
+            enabled: true,
+            allowed_apps: vec![
+                AppGrant {
+                    app_id: "notepad".into(),
+                    always: true,
+                    scopes: vec!["read".into(), "write".into()],
+                },
+                AppGrant {
+                    app_id: "charmap".into(),
+                    always: true,
+                    scopes: vec!["read".into()],
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn grant(apps: &[&str], coord: bool, granted_at: u64, ttl_ms: u64) -> VisionGrant {
+        VisionGrant {
+            apps: apps.iter().map(|s| (*s).to_string()).collect(),
+            allow_coordinate_input: coord,
+            granted_at,
+            expires_at: granted_at + ttl_ms,
+            grant_id: "g1".into(),
+        }
+    }
+
+    #[test]
+    fn harden_derives_vision_flags_from_grant() {
+        let now = now_ms();
+        // 无授权：截图与坐标都被收回
+        let p = AgentPolicy { vision: None, ..enabled_policy() };
+        let h = harden(p);
+        assert!(!h.allow_screenshot && !h.allow_coordinate_input);
+
+        // 只读视觉：能截图，不能坐标点击
+        let p = AgentPolicy { vision: Some(grant(&["charmap"], false, now, 60_000)), ..enabled_policy() };
+        let h = harden(p);
+        assert!(h.allow_screenshot);
+        assert!(!h.allow_coordinate_input);
+        assert_eq!(h.vision.as_ref().unwrap().apps, vec!["charmap".to_string()]);
+
+        // 带坐标点击
+        let p = AgentPolicy { vision: Some(grant(&["charmap"], true, now, 60_000)), ..enabled_policy() };
+        assert!(harden(p).allow_coordinate_input);
+    }
+
+    #[test]
+    fn harden_revokes_expired_or_malformed_vision() {
+        let now = now_ms();
+        // 已过期
+        let p = AgentPolicy {
+            vision: Some(grant(&["charmap"], true, now - 120_000, 60_000)),
+            ..enabled_policy()
+        };
+        let h = harden(p);
+        assert!(h.vision.is_none() && !h.allow_screenshot && !h.allow_coordinate_input);
+
+        // 空清单 = 无效授权（不能靠"授权了 0 个应用"解锁全局截图）
+        let p = AgentPolicy { vision: Some(grant(&[], true, now, 60_000)), ..enabled_policy() };
+        assert!(harden(p).vision.is_none());
+
+        // 非法 appId 全被剔除后也不成立
+        let p = AgentPolicy { vision: Some(grant(&["../etc", ""], true, now, 60_000)), ..enabled_policy() };
+        assert!(harden(p).vision.is_none());
+
+        // 授权时刻在未来（时钟可疑）不认
+        let p = AgentPolicy {
+            vision: Some(grant(&["charmap"], true, now + 3_600_000, 60_000)),
+            ..enabled_policy()
+        };
+        assert!(harden(p).vision.is_none());
+    }
+
+    #[test]
+    fn harden_clamps_vision_ttl_to_24h() {
+        let now = now_ms();
+        let far = now.saturating_add(VISION_MAX_TTL_MS * 3);
+        let p = AgentPolicy { vision: Some(grant(&["charmap"], true, now, far - now)), ..enabled_policy() };
+        let v = harden(p).vision.expect("授权应保留但被裁剪");
+        assert_eq!(v.expires_at, now + VISION_MAX_TTL_MS);
+    }
+
+    #[test]
+    fn validate_grant_rejects_unknown_app_and_empty_list() {
+        let now = now_ms();
+        let p = enabled_policy();
+
+        let mut input = VisionGrantInput {
+            apps: vec!["charmap".into()],
+            ..Default::default()
+        };
+        let v = validate_grant(&p, &input, now).expect("已授权应用应可授权");
+        assert_eq!(v.apps, vec!["charmap".to_string()]);
+        assert_eq!(v.expires_at, now + 30 * 60_000);
+
+        // 未在 allowed_apps 里的应用不能开视觉
+        input.apps = vec!["calc".into()];
+        assert!(validate_grant(&p, &input, now).is_err());
+
+        // 空清单拒绝
+        input.apps = vec![];
+        assert!(validate_grant(&p, &input, now).is_err());
+
+        // ttl 被 clamp 到上限 / 下限
+        input.apps = vec!["charmap".into()];
+        input.ttl_minutes = 99_999;
+        assert_eq!(
+            validate_grant(&p, &input, now).unwrap().expires_at,
+            now + VISION_MAX_TTL_MS
+        );
+        input.ttl_minutes = 0;
+        assert_eq!(
+            validate_grant(&p, &input, now).unwrap().expires_at,
+            now + VISION_MIN_TTL_MS
+        );
+
+        // 未开启能力时不许授权
+        let off = AgentPolicy { enabled: false, ..enabled_policy() };
+        input.ttl_minutes = 30;
+        assert!(validate_grant(&off, &input, now).is_err());
+    }
+
+    #[test]
+    fn challenge_token_is_single_use_and_expires() {
+        let now = 1_000_000;
+        *PENDING_VISION.lock().unwrap() = Some(PendingChallenge {
+            token: "abc".into(),
+            expires_at: now + 1_000,
+        });
+        assert!(consume_challenge("abc", now).is_ok());
+        // 已消费：再提交同一令牌必须失败（防重放）
+        assert!(consume_challenge("abc", now).is_err());
+
+        *PENDING_VISION.lock().unwrap() = Some(PendingChallenge {
+            token: "def".into(),
+            expires_at: now + 1_000,
+        });
+        assert!(consume_challenge("def", now + 2_000).is_err());
+        assert!(consume_challenge("def", now).is_err(), "过期令牌也已被消费");
+
+        *PENDING_VISION.lock().unwrap() = None;
+        assert!(consume_challenge("", now).is_err());
+    }
+
+    #[test]
+    fn vision_flags_are_not_writable_fields() {
+        // 手工把 allow_screenshot/allow_coordinate_input 写成 true，但没有授权 → 读回仍是 false
+        let p = AgentPolicy {
+            allow_screenshot: true,
+            allow_coordinate_input: true,
+            vision: None,
+            ..enabled_policy()
+        };
+        let h = harden(p);
+        assert!(!h.allow_screenshot && !h.allow_coordinate_input);
     }
 }

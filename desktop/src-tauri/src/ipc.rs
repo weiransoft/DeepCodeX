@@ -576,6 +576,30 @@ pub fn desktop_agent_permissions_set(
     crate::desktop_agent::set_permissions(payload)
 }
 
+/// 申请视觉通道的一次性确认令牌（5 分钟有效、用一次即废，不落盘）。
+///
+/// 两步式（challenge → grant）是为了让「开视觉」这件事必须经过一次**当场的人类确认**：
+/// 令牌只存在于壳进程内存里，WebView 拿不到就等于没机会被脚本静默重放。
+#[tauri::command]
+pub fn desktop_agent_vision_challenge(
+) -> Result<crate::desktop_agent::VisionChallengeInfo, ShellError> {
+    crate::desktop_agent::vision_challenge()
+}
+
+/// 提交视觉授权（限时 + 按应用）。校验/审计/落盘都在 desktop_agent 内完成。
+#[tauri::command]
+pub fn desktop_agent_vision_grant(
+    input: crate::desktop_agent::VisionGrantInput,
+) -> Result<crate::desktop_agent::AgentStatus, ShellError> {
+    crate::desktop_agent::grant_vision(input)
+}
+
+/// 立即撤销视觉授权（不必等到期）。
+#[tauri::command]
+pub fn desktop_agent_vision_revoke() -> Result<crate::desktop_agent::AgentStatus, ShellError> {
+    crate::desktop_agent::revoke_vision()
+}
+
 /// 让窗口导航到指定 http origin（Tauri 2 `navigate` 需要 `Url` 类型）。
 fn navigate_to(window: &WebviewWindow, url: &str) -> Result<(), String> {
     let parsed = tauri::Url::parse(url).map_err(|e| format!("非法地址 {url}: {e}"))?;

@@ -190,7 +190,10 @@ pub fn run() {
             ipc::desktop_agent_status,
             ipc::desktop_agent_toggle,
             ipc::desktop_agent_permissions_get,
-            ipc::desktop_agent_permissions_set
+            ipc::desktop_agent_permissions_set,
+            ipc::desktop_agent_vision_challenge,
+            ipc::desktop_agent_vision_grant,
+            ipc::desktop_agent_vision_revoke
         ])
         .build(tauri::generate_context!())
         .expect("构建 DeepCode Desktop 失败")

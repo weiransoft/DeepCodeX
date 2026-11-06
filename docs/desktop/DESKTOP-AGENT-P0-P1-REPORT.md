@@ -33,7 +33,7 @@ P0 探针（桥关闭）曾判定 `continue-with-adjustment`：能枚举 34 个�
   `good / sparse / deferred / empty`，修正「按进程名猜 Electron」的误分类
   （实测 5 个真实窗口中只有 1 个真能按名字定位）；
 - **故障注入回归补齐**：窗口中途关闭、进程崩溃、桥崩溃重连、`STALE_REF`、预算熔断
-  全部锁定错误码与可恢复性，共 124 个单测通过；
+  全部锁定错误码与可恢复性，共 131 个单测通过；
 - **覆盖率达标（13 个真实应用）**：主动拉起 16 个目标应用、13 个采到树，其中 8 家可按
   名字操作、4 家只能视觉兜底、1 家（Edge）必须走 DOM/CDP，3 家因环境/权限未拉起且如实标注；
   同时把「完整度」判据做对（`snapshot.truncated` 恒真导致无法区分「没看全」与「树就这么小」）；
@@ -47,7 +47,12 @@ P0 探针（桥关闭）曾判定 `continue-with-adjustment`：能枚举 34 个�
   `treeChanged:false` + `pixelChanged:true`（§3.11）；
 - **图能进模型了**：MCP 结果改为「text 元数据 + image 内容块」，core 侧提取后拼成 image_url
   follow-up 消息；真机帧解出 PNG 且 IHDR 宽高与工具回传一致（666×1078，53 356 B），
-  `image-content-verified`（§3.12）。视觉通道的开关仍是硬锁（默认 false，见 §8 下一项）；
+  `image-content-verified`（§3.12）；
+- **视觉通道改成「限时 + 按应用」的授权，而不是布尔开关**：一次性令牌（5 min、用一次即废）
+  → 授权（只能选已有 read 权限的应用、1 min–24 h、坐标点击单独勾选）→ 两侧读盘时按同一套
+  规则重新派生（过期即自动收回，改文件放宽不了），每次授权/撤销写审计 JSONL；真机 6/6
+  （`vision-gate-verified`：无授权/过期/越权应用/无坐标授权一律拒，授权后真截图 666×1078
+  过大到模型，§3.13）；
 - **Rust 用例运行闭环**：`cargo test --lib` 在 MSVC CI 与本机 GNU 上均
   **74 passed / 0 failed**；同时纠正了「MinGW 环境问题」的误判——真因是测试二进制缺
   Windows 应用清单、ComCtl32 停在 v5，已在 `build.rs` 修掉（§5.1）；
@@ -456,10 +461,58 @@ sparse 应用点击前后树完全一样，复观察拿到的还是同一棵，�
 | core 消费 | 同一份帧过 `extractMcpImages` 得 1 张图；follow-up `role:user`/`visible:false`，data URL 与 base64 逐字节对应 |
 | 遥测 | 事件流无 base64（图像不落事件、不落盘） |
 
-**仍未开闸**：`allowScreenshot` / `allowCoordinateInput` 在 `desktop_agent.rs::harden()` 与
-`policy-load.mjs::hardenExternalPolicy()` 里都被**强制复位为 false**——桌面端目前没有任何
-路径能把视觉通道打开（刻意的纵深防御）。开通它需要一个独立的高风险授权流程（IPC + 用户
-逐次确认 + 审计），是下一项，不属于本节的「管线」范围。
+**本节末尾的状态（随后在 §3.13 已解决）**：此时 `allowScreenshot` / `allowCoordinateInput`
+在 `desktop_agent.rs::harden()` 与 `policy-load.mjs::hardenExternalPolicy()` 里都被
+**强制复位为 false**——管线通了、闸门焊死。这不是漏做，是刻意的纵深防御：开通它需要一次
+独立的高风险授权流程（IPC + 用户逐次确认 + 审计），下一节就是这件事。
+
+---
+
+### 3.13 视觉通道的授权闸门（P2「随后」第 4 项）
+
+§3.12 把图喂通了，但闸门是焊死的：两侧 `harden` 都把 `allowScreenshot` /
+`allowCoordinateInput` 直接写死 `false`。所以 4 家 `sparse` 应用（字符映射表、任务管理器等）
+仍然只能按「拒绝」处理。
+
+**为什么不是"加一个开关"**：截图能读屏（可能带着聊天窗口、密码框、工资条），坐标点击能
+代用户点「确认转账」。这和「列窗口」不是一个风险量级，一个布尔开关只要被写进
+`desktop-agent.json` 就永久生效，用户第二天不会记得自己开过。改成**一次显式、限时、按应用**
+的授权：
+
+| 环节 | 规则 | 为什么 |
+| --- | --- | --- |
+| 申请令牌 | `vision_challenge`：5 min 有效、一次性、进程内保存 | 防误触与重放；重启即失效，授权必须"当场确认" |
+| 提交授权 | `vision_grant`：`apps` 必须 ⊆ 已有 `read` 权限的应用；`ttl ∈ [1 min, 24 h]`；坐标点击单独勾选 | 不能借视觉授权顺手解锁没授权过的应用；只读授权（不点）也支持 |
+| 派生开关 | 两侧读盘时都跑 `normalize_vision()`：过期 / 空清单 / 非法 appId / 授权时刻在未来（时钟可疑）/ 超长 → 一律作废，随后 `allowScreenshot = vision != null` | 手改文件放宽不了；到期自动收回，不依赖用户记得来关 |
+| 审计 | 每次 grant / revoke 追加一行 JSONL（只记 `grantId`/`appId`/时长/时间戳） | 留不下记录的授权等于没留边界；审计写失败则**不授权** |
+
+`normalize_vision` 是同一份契约的两个实现（Rust `desktop_agent.rs` 与 Node
+`policy-load.mjs`），常量（24 h / 1 min / 5 min）两侧同名同值，单测各自覆盖全部拒绝分支。
+
+**真机验证**（`reports/p2-vision-gate.json`，`verdict = vision-gate-verified`）
+——脚本起真的 sidecar 子进程、走真的 stdio MCP 帧，喂的就是壳侧写出的那份 JSON 形状：
+
+| # | 场景 | 期望 | 实测 |
+| --- | --- | --- | --- |
+| A | 无授权 | 拒 | `CAPABILITY_UNAVAILABLE`「截屏通道默认关闭」 |
+| B | 有效授权（只读） | 通过 + image 块 | `content=["text","image"]`，PNG 70 B |
+| C | 有效授权但不含坐标 | 拒坐标点击 | 「坐标输入通道默认关闭」 |
+| D | 授权的是别的应用 | 拒 | 「应用 notepad 不在视觉授权清单内」 |
+| E | 授权已过期 | 拒 | 「截屏通道默认关闭」（过期后两侧都当没有授权） |
+| F | 真机（计算器） | 像素真到得了模型 | PNG IHDR **666×1078** == 回传 `width/height`，50 852 B，text 块 399 B 且**不含 base64** |
+
+**验证脚本自己踩的两条坑**（都是「测试在骗自己」，记下来免得复踩）
+
+1. **闸门脚本没开桥**：`createWindowsBackend()` 默认走 `tasklist` 回落，**所有条目 `hwnd`
+   都是 null**，于是「等不到新窗口」被读成"计算器起不来"；实际是枚举源不对。现在脚本显式
+   `bridgeEnabled: true`，并在「全部无 hwnd」时直接报「UIA 桥未生效」。
+2. **判据拿到的是原始帧，不是派生观测**：`pixelSize` / `imageBytes` 是 `describe()` 算出来的，
+   `expect(info)` 里取到的是 `undefined`，于是**条件恒假、静默判失败**——真机明明全对却报
+   `broken`。现在判据收到「原始帧 + 派生观测」的合并视图，且 `expect` 可以返回逐项判据
+   （`checks`），失败时报告里能直接看出卡在哪一条。
+
+**顺带确认的边界**：授权清单只覆盖 `read` 权限应用；坐标点击要在授权时单独勾；撤销是即时的
+（`vision_revoke` 写盘 + 审计），下一次 sidecar 启动就看不到旧授权。
 
 ---
 
@@ -480,11 +533,13 @@ sparse 应用点击前后树完全一样，复观察拿到的还是同一棵，�
 ### 4.2 壳侧接线（只加「配置面」，不加执行面）
 
 - `desktop/src-tauri/src/desktop_agent.rs`：策略落盘 `~/.deepcode/desktop-agent.json`；
-  `harden()` 复位不可写字段、拒绝 `bypass`、严格校验 appId/scope；含 3 个 Rust 单测。
-- `desktop/src-tauri/src/ipc.rs` / `lib.rs`：新增 4 条命令
+  `harden()` 复位不可写字段、拒绝 `bypass`、严格校验 appId/scope；视觉通道的限时授权
+  （`vision_challenge` / `grant` / `revoke` + 审计 JSONL，§3.13）；含 9 个 Rust 单测。
+- `desktop/src-tauri/src/ipc.rs` / `lib.rs`：新增 7 条命令
   `desktop_agent_status` / `desktop_agent_toggle` / `desktop_agent_permissions_get` /
-  `desktop_agent_permissions_set`。
-- `desktop/src-tauri/permissions/app-ipc.toml`：ACL 同步（22=22）。
+  `desktop_agent_permissions_set` / `desktop_agent_vision_challenge` /
+  `desktop_agent_vision_grant` / `desktop_agent_vision_revoke`。
+- `desktop/src-tauri/permissions/app-ipc.toml`：ACL 同步（25=25）。
 - `packages/web/web/src/desktop-bridge.ts`：TypeScript invoke 包装与类型定义。
 - `desktop/src-tauri/src/engine/manager.rs`：Unix-only 崩溃重启测试加 `#[cfg(unix)]`，
   使 MinGW GNU 工具链能编译测试目标。
@@ -504,22 +559,23 @@ sparse 应用点击前后树完全一样，复观察拿到的还是同一棵，�
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
-| Node 单测 | `cd desktop/desktop-agent && npm test` | **124/124 通过**（12 个测试文件，约 22 s） |
+| Node 单测 | `cd desktop/desktop-agent && npm test` | **131/131 通过**（13 个测试文件，约 22 s） |
 | 真机 GUI 闭环 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:gui` | **4/4 verified**，`gui-unblocked`；连续 4 次稳定 |
 | 真实应用写入 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:real-app` | **3/3 步骤**，`real-app-write-verified`，磁盘 `persisted:true` |
 | 桥生命周期 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:lifecycle` | `lifecycle-managed`：ping 4 ms、强杀自愈 2/2、崩溃循环零新增 spawn、优雅退出 208 ms |
 | 覆盖率矩阵（主动） | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:coverage -- --with-office` | `coverage-10plus`：13/16 采到树，8 家语义树 / 4 家视觉兜底 / 1 家 DOM，3 家环境受限；均值 214 ms |
 | 视觉兜底（真机） | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:visual -- --only calc,charmap,taskmgr` | `visual-fallback-verified`：坐标帧 3/3（点「七」→7、点「八」→78、越界拒绝）、像素验效 2/2（taskmgr `treeChanged:false`/`pixelChanged:true`） |
 | 图像进模型（真机） | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:image` | `image-content-verified`：帧含 text+image 两块；PNG IHDR 666×1078 与回传一致（53 356 B）；core 提取 1 张图并拼出 `image_url` follow-up |
+| 视觉闸门（真机） | `npm run verify:vision` | `vision-gate-verified` 6/6：无授权 / 过期 / 越权应用 / 无坐标授权 4 条拒绝路径 + 只读授权出图 + 真机 PNG 666×1078 与回传一致 |
 | 覆盖率采样（被动） | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run coverage` | 5/5 树可用，均值 106 ms，无失败 |
 | P0 探针 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run probe` | `continue`；6 窗口 / 93 ms，能力 6/7 可用 |
 | MCP stdio 冒烟 | `printf … \| node src/index.mjs` | `initialize` 返回 `2025-03-26`；`tools/list` 11 个工具；`desktop_status` 默认 `enabled:false` |
 | 外部策略硬化 | 注入含 `bypass` / `allowScreenshot:true` / `maxSteps:9999` 的策略 | 生效值 `manual` / `false` / `false` / `maxSteps=100`；`enabled` 与白名单保留 |
 | 全仓类型检查 | `npm run typecheck` | 5 个 workspace 全过，exit 0 |
-| IPC 四方契约 | `npm run check:ipc` | 定义 22 = 注册 22 = ACL 22；前端调用点 21（`window_new` 历史未用） |
+| IPC 四方契约 | `npm run check:ipc` | 定义 25 = 注册 25 = ACL 25；前端调用点 24（`window_new` 历史未用） |
 | Rust 编译 | `cargo check` | exit 0；仅既有 `PASSWORD_ENV` dead_code 警告 |
-| Rust 单测（本机 GNU） | `cd desktop/src-tauri && cargo test --lib` | **74 passed / 0 failed / 1 ignored**（2.2 s；另有 7 个用例按平台门控，见 §5.1） |
-| Rust 单测（MSVC CI） | CI job `rust-msvc`（`windows-latest` + `stable-x86_64-pc-windows-msvc`） | **74 passed / 0 failed / 1 ignored**（用例 4.93 s，job 4 m 01 s；`--locked`，75 个用例被收集） |
+| Rust 单测（本机 GNU） | `cd desktop/src-tauri && cargo test --lib` | **80 passed / 0 failed / 1 ignored**（2.2 s；另有 7 个用例按平台门控，见 §5.1） |
+| Rust 单测（MSVC CI） | CI job `rust-msvc`（`windows-latest` + `stable-x86_64-pc-windows-msvc`） | 上一轮基线 **74 passed / 0 failed / 1 ignored**（4.93 s）；本轮新增 6 条视觉授权用例后本机 80 passed，MSVC 侧待 CI 复跑（§8 末条） |
 
 ### 5.1 Rust 用例为什么之前跑不起来（已修，§8 第 3 项）
 
@@ -557,6 +613,7 @@ v5 → 导入解析失败 → 进程启动即死。`cargo test --lib --no-run` �
 **结果**：本机 GNU `74 passed / 0 failed / 1 ignored`（2.2 s）；MSVC CI 同一组用例
 `74 passed / 0 failed / 1 ignored`（4.93 s，job 4 m 01 s）。**副产物**：本机不再是
 「只能编译、不能运行」，Rust 用例本地可闭环，CI 用来兜 MSVC 一侧。
+（§3.13 又加了 6 条视觉授权用例，本机现为 **80 passed / 1 ignored**；MSVC 侧待 CI 复跑。）
 
 **CI 侧配套**（`.github/workflows/ci.yml` 的 `rust-msvc` job）：`windows-latest` +
 `stable-x86_64-pc-windows-msvc`、`Swatinem/rust-cache`（key 带 `msvc` 前缀，避免与
@@ -580,7 +637,8 @@ GNU 产物串味）、先 `--list` 数一遍用例（<60 直接失败，防空�
 | --- | --- |
 | R1 提示注入（界面文本当指令） | 观察结果标记 `untrusted`；`detectInjection` 命中即拦写动作，且不回灌原文 |
 | R2 敏感应用 | 5 类敏感分类**先于只读分支**硬拦截；探针不落盘窗口标题；审计脱敏 |
-| R3 越权 / 提权 | 双侧 `harden()` 锁定字段、`bypass` 降级、壳 ACL 只含 4 条配置命令 |
+| R3 越权 / 提权 | 双侧 `harden()` 锁定字段、`bypass` 降级、壳 ACL 只含 7 条配置/授权命令 |
+| R3' 读屏与代点击 | 视觉通道必须经限时（≤24 h）+ 按应用授权（仅限已有 read 权限的应用）、一次性令牌、坐标点击单独勾选；开关由授权派生、两侧读盘时重判过期；grant/revoke 写审计 JSONL（§3.13） |
 | R4 不可逆动作 | 一次性 5 分钟确认令牌（内存态），不受「始终允许」豁免 |
 | R8 成本失控 | 步数 / 截图 / token 原子预扣 + 熔断，任务内后续动作全拒 |
 | R9/R10 平台能力差异 / 陈旧 ref | 真机自检能力矩阵；长驻桥保证 ref 有效；`STALE_REF` 硬失败而非带旧坐标继续点 |
@@ -592,16 +650,16 @@ GNU 产物串味）、先 `--list` 数一遍用例（<60 直接失败，防空�
 ## 7. 未解决与边界
 
 1. **写用例只覆盖 5 个应用**：记事本 / Word / Excel / 资源管理器 / Edge 已跑通（§3.9），
-   浏览器按策略拒绝 GUI；其余应用要按 §3.10 的通道判定逐类补用例，尤其 4 家
-   `sparse` 应用当前只能按「拒绝」处理（看图链路已通，卡在授权闸门，见本条下方第 4 点）。
+   浏览器按策略拒绝 GUI；其余应用要按 §3.10 的通道判定逐类补用例。4 家 `sparse` 应用
+   现在可以走视觉通道（§3.11 执行侧 + §3.12 图像 + §3.13 授权），但**真实任务级的用例还没补**：
+   目前只验到「点下去生效」，没验「按用户意图点对」。
 2. **UAC 未感知**：Secure Desktop 与完整性级别检测未实现，遇 UAC 一律交还人工。
 3. **分类启发式仍保留**：进程名/标题分类仍用于初始通道建议（`unknown` 占比高），
    但已不再是最终结论——观察后由 `tree-quality` 实测覆盖；未观察过的应用仍可能是错的。
-4. **视觉通道的开关仍是硬锁**：管线已通（§3.12：帧里真有图、core 能提取、模型能收到
-   `image_url`），但 `harden()` / `hardenExternalPolicy()` 把 `allowScreenshot` 与
-   `allowCoordinateInput` 强制复位为 false，桌面端**没有任何路径**能打开视觉通道。
-   这不是漏做，是刻意的纵深防御；要放量必须先做独立的高风险授权（IPC + 逐次确认 + 审计），
-   在那之前 `sparse` 应用仍按「拒绝」处理。
+4. **视觉通道可放量但默认关闭**：闸门已从「硬锁」改成**限时 + 按应用**的授权（§3.13），
+   两侧 `harden` 从授权派生开关、过期即收回，真机 `vision-gate-verified` 6/6。剩下的是
+   **默认值与使用体验**：默认 `vision: null`（不授权 = 不能截图），且授权仍需重启引擎才生效
+   （策略不热更新，见条目 5）。所以 4 家 `sparse` 应用现在是「授权后可用」，不再只能拒绝。
 5. **策略不热更新**：改开关/授权需重启引擎，UI 已有 `restartHint` 文案。
 6. **仅 Windows 真后端**：macOS AX / Linux AT-SPI 未实现，回落 mock。
 7. **未接线引擎生命周期**：桥进程自身的生命周期（退避 / 崩溃上限 / 僵死回收 / 优雅退出）
@@ -641,12 +699,20 @@ GNU 产物串味）、先 `--list` 数一遍用例（<60 直接失败，防空�
 - ~~视觉兜底与坐标吸附（P2）~~ ✅ 执行侧（§3.11）与**模型侧**（§3.12）均已闭环：
   坐标帧换算 + 越界拒绝 + 64×64 像素验效，真机 `visual-fallback-verified`；
   MCP 图像内容块透传到 core 的 `image_url` follow-up，真机 `image-content-verified`；
-- **视觉通道的高风险授权流程**（当前唯一的拦路石）：`allowScreenshot` / `allowCoordinateInput`
-  被两侧 harden 硬锁为 false，管线通了但闸门关着。需要一次显式授权设计：
-  IPC 命令 + 逐次确认令牌 + 审计事件 + 按应用/按时段失效，并同步放开两处 harden
-  与 `locked_fields` 口径（不能只放开一侧，否则口径漂移）；
+- ~~视觉通道的高风险授权流程~~ ✅ 已完成（§3.13）：`vision_challenge`（一次性令牌 5 min）→
+  `vision_grant`（只能选已有 read 权限的应用、1 min–24 h、坐标点击单独勾选）→
+  `vision_revoke`；两侧 harden 改为**从授权派生**开关，`locked_fields` 口径同步改；
+  审计 JSONL 只记 `grantId`/`appId`/时长；真机 `vision-gate-verified` 6/6。
+  **剩下的**：配置页 UI 还没有这三条 IPC 的界面（现在只能从设置面调），以及授权后
+  sidecar 需要重启才生效（策略热更新属 `AgentLifecycle`）；
+- **`sparse` 应用的任务级用例**：视觉通道通了，但 4 家应用只验到「点下去界面确实变了」，
+  没验「按意图点对」（例如任务管理器的结束任务流程）。补法是给 `verify:vision` 之外
+  再加一组按应用的任务脚本；
+- **MSVC CI 复跑**：本轮新增 6 条视觉授权用例（本机 80 passed），CI 侧需确认
+  `rust-msvc` job 仍绿、用例数守卫（<60 失败）未被绕过；
 - 接 `AgentLifecycle`（壳管 sidecar 启停 / 崩溃上限 / 策略热更新）；
-- 配置页 UI 落地 4 条 IPC（当前只有 TS 包装，无界面）；
+- 配置页 UI 落地 7 条 IPC（status / toggle / permissions_get / permissions_set /
+  vision_challenge / vision_grant / vision_revoke；当前只有 TS 包装，无界面）；
 - 按方案 §8 补端到端度量：任务成功率、单步耗时、人工接管率、token/步数成本。
 
 ---
@@ -665,6 +731,7 @@ GNU 产物串味）、先 `--list` 数一遍用例（<60 直接失败，防空�
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:lifecycle)
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:visual -- --only calc,charmap,taskmgr)
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:image)
+(cd desktop/desktop-agent && npm run verify:vision)
 npm run typecheck && npm run check:ipc
 
 # Rust（本机 GNU：PATH 里要有 MinGW 的 windres / rc.exe；用例已可本地运行，见 §5.1）

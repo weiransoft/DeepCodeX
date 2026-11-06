@@ -79,6 +79,10 @@ export function defaultPolicy() {
     preferBrowserChannel: true,
     allowCoordinateInput: false, // 视觉/坐标点击默认关闭（P2 才启用）
     allowScreenshot: false, // 默认不用视觉（方案 §3.3 结论 3）
+    /** 视觉授权覆盖的应用清单（壳侧限时授权派生；空 = 未授权） */
+    visionApps: [],
+    /** 视觉授权到期时刻（Unix 毫秒；0 = 未授权） */
+    visionExpiresAt: 0,
     /** 单次任务预算 */
     maxSteps: 25,
     maxScreenshots: 3,
@@ -126,6 +130,31 @@ export class PolicyGuard {
     const { allowedApps, deniedApps } = this.policy;
     if (deniedApps.includes(appId)) return false;
     return allowedApps.some((a) => a.appId === appId);
+  }
+
+  /**
+   * 视觉授权是**按应用**的（方案 §3.12 闸门）：授权清单非空时，只有清单内的
+   * 应用能截图/坐标点击。清单为空（未授权）不在这里拦——`allowScreenshot` /
+   * `allowCoordinateInput` 已经把路堵死了，这里只补"授权了 A 就不许截 B"。
+   */
+  assertVisionScope(appId, action) {
+    if (action !== "screenshot" && action !== "click_xy") return;
+    // 到期要「立刻」失效：读盘时判过一次，但 sidecar 是长驻进程，在这里不判
+    // 就等于「授权一次、管到进程重启」——限时授权也就名存实亡了
+    const expiresAt = Number(this.policy.visionExpiresAt) || 0;
+    if (expiresAt > 0 && this.clock() >= expiresAt) {
+      throw new AgentError(ErrorCode.CAPABILITY_UNAVAILABLE, "视觉授权已过期", {
+        hint: "重新走 desktop_agent_vision_challenge → vision_grant",
+        expiresAt,
+      });
+    }
+    const apps = Array.isArray(this.policy.visionApps) ? this.policy.visionApps : [];
+    if (apps.length === 0) return;
+    if (!apps.includes(appId)) {
+      throw new AgentError(ErrorCode.CAPABILITY_UNAVAILABLE, `应用 ${appId} 不在视觉授权清单内`, {
+        hint: `当前视觉授权仅覆盖：${apps.join(", ")}`,
+      });
+    }
   }
 
   /**
@@ -189,9 +218,10 @@ export class PolicyGuard {
       }
       if (action === "screenshot" && !this.policy.allowScreenshot) {
         throw new AgentError(ErrorCode.CAPABILITY_UNAVAILABLE, "截屏通道默认关闭", {
-          hint: "仅在 a11y 树为空/自绘界面时开启 allowScreenshot",
+          hint: "壳侧走 desktop_agent_vision_grant 限时授权后才能截图",
         });
       }
+      this.assertVisionScope(appId, action);
       return { allowed: true };
     }
 
@@ -208,9 +238,10 @@ export class PolicyGuard {
     }
     if (action === "click_xy" && !this.policy.allowCoordinateInput) {
       throw new AgentError(ErrorCode.CAPABILITY_UNAVAILABLE, "坐标输入通道默认关闭", {
-        hint: "优先使用 a11y 元素 invoke",
+        hint: "优先使用 a11y 元素 invoke；确需坐标点击需壳侧视觉授权（含坐标）",
       });
     }
+    this.assertVisionScope(appId, action);
 
     // 5) 不可逆动作强制逐次确认，不受「始终允许」豁免
     if (!reversible || IRREVERSIBLE_ACTIONS.has(action)) {

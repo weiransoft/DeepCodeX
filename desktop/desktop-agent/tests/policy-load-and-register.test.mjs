@@ -175,3 +175,56 @@ test("run：默认 dry-run 不落盘；--write 双写并备份；--remove 撤销
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+/* ── 视觉通道限时授权（与 Rust 侧 normalize_vision 同口径） ─────────── */
+
+const NOW = 1_700_000_000_000;
+const grantOf = (apps, { coord = false, ttl = 30 * 60_000, at = NOW } = {}) => ({
+  apps,
+  allowCoordinateInput: coord,
+  grantedAt: at,
+  expiresAt: at + ttl,
+  grantId: "g-test",
+});
+
+test("视觉授权：有效授权派生出 allowScreenshot，坐标开关跟随 grant", () => {
+  const p = hardenExternalPolicy({ enabled: true, vision: grantOf(["charmap"], { coord: false }) }, NOW);
+  assert.equal(p.allowScreenshot, true);
+  assert.equal(p.allowCoordinateInput, false);
+  assert.deepEqual(p.visionApps, ["charmap"]);
+
+  const q = hardenExternalPolicy({ enabled: true, vision: grantOf(["charmap"], { coord: true }) }, NOW);
+  assert.equal(q.allowCoordinateInput, true);
+});
+
+test("视觉授权：只写 allowScreenshot 字段无法放宽（派生而非可写）", () => {
+  const p = hardenExternalPolicy({ enabled: true, allowScreenshot: true, allowCoordinateInput: true });
+  assert.equal(p.allowScreenshot, false);
+  assert.equal(p.allowCoordinateInput, false);
+  assert.deepEqual(p.visionApps, []);
+});
+
+test("视觉授权：过期 / 空清单 / 非法 id / 时钟可疑 一律作废", () => {
+  const expired = hardenExternalPolicy({ vision: grantOf(["charmap"], { at: NOW - 120_000, ttl: 60_000 }) }, NOW);
+  assert.equal(expired.allowScreenshot, false);
+
+  const empty = hardenExternalPolicy({ vision: grantOf([]) }, NOW);
+  assert.equal(empty.allowScreenshot, false);
+
+  const illegal = hardenExternalPolicy({ vision: grantOf(["../etc", ""]) }, NOW);
+  assert.equal(illegal.allowScreenshot, false);
+
+  const future = hardenExternalPolicy({ vision: grantOf(["charmap"], { at: NOW + 3_600_000 }) }, NOW);
+  assert.equal(future.allowScreenshot, false);
+
+  const badShape = hardenExternalPolicy({ vision: "yes" }, NOW);
+  assert.equal(badShape.allowScreenshot, false);
+});
+
+test("视觉授权：有效期被裁到 24 h 上限，去重后按清单授权", () => {
+  const long = hardenExternalPolicy({ vision: grantOf(["charmap"], { ttl: 72 * 60 * 60_000 }) }, NOW);
+  assert.equal(long.visionExpiresAt - NOW, 24 * 60 * 60_000);
+
+  const dup = hardenExternalPolicy({ vision: grantOf(["charmap", "charmap", "notepad"]) }, NOW);
+  assert.deepEqual(dup.visionApps, ["charmap", "notepad"]);
+});

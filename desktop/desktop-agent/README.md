@@ -55,6 +55,8 @@ desktop-agent/
 │           probe-app.mjs          单应用 UIA 结构探针（给新应用写用例前先看清它暴露了什么）
 │           verify-lifecycle.mjs   桥生命周期真机验证（ping / 崩溃自愈 / 崩溃循环 / 优雅退出）
 │           verify-visual-fallback.mjs 视觉兜底真机验证（坐标帧换算 / 越界拒绝 / 像素验效）
+│           verify-image-content.mjs 图像内容块真机验证（帧结构 / PNG 尺寸 / core 提取）
+│           verify-vision-gate.mjs  视觉通道授权闸门验证（A–E mock + F 真机）
 │           register-mcp.mjs       MCP 登记（dry-run / 写入 / 移除）
 ├── reports/p0-probe.json          P0 实测数据（窗口标题不落盘）
 │           p1-gui-verify.json     真机闭环实测数据
@@ -64,7 +66,9 @@ desktop-agent/
 │           p2-multi-app.json      真实应用写入矩阵实测数据
 │           p2-lifecycle.json      桥生命周期真机实测数据
 │           p2-visual-fallback.json 视觉兜底真机实测数据（计算器 / 字符映射表 / 任务管理器）
-└── tests/*.test.mjs               node:test，零依赖（114 个用例）
+│           p2-image-content.json  图像内容块实测数据
+│           p2-vision-gate.json    授权闸门实测数据（6 个场景）
+└── tests/*.test.mjs               node:test，零依赖（131 个用例）
 ```
 
 零新增 npm 依赖（Node ≥ 22，ESM）：sidecar 需要随桌面端分发，避免版本漂移与供应链面。
@@ -299,10 +303,62 @@ UIA 截图 ── base64 ──▶ splitImagePayload（拆文本/图像，base64
 npm run verify:image          # 需要 tsx（根 node_modules 已装）；缺 tsx 时退化为只验证协议帧
 ```
 
-> 仍差最后一道闸：`allowScreenshot` / `allowCoordinateInput` 在壳侧 `harden()` 与 sidecar
-> `hardenExternalPolicy()` 里都被**强制复位为 false**，所以桌面端目前没有任何路径能把视觉通道
-> 打开（这是刻意的纵深防御，不是 bug）。开通它需要一个独立的高风险授权流程（IPC + 用户确认 +
-> 审计），属于下一项，不在本节范围内——管线已通，闸门仍关。
+### 视觉通道的授权闸门（`npm run verify:vision`）
+
+图能进模型之后，剩下的问题不是「能不能」，而是「该不该」：截图能读到聊天窗口、密码框、工资条，
+坐标点击能替用户点「确认转账」。所以闸门不是布尔开关，而是**一次显式、限时、按应用**的授权。
+
+```
+desktop_agent_vision_challenge        → 一次性令牌（5 min，进程内，重启即失效）
+       │                                + 要展示给用户的那句确认文案 + 可授权的应用清单
+       ▼
+desktop_agent_vision_grant            → apps ⊆ 有 read 权限的应用；ttl ∈ [1 min, 24 h]
+       │                                坐标点击单独勾（只读授权 = 只能看，不能点）
+       ▼
+~/.deepcode/desktop-agent.json        → vision: { apps, allowCoordinateInput, grantedAt, expiresAt, grantId }
+       │
+       ├─ 壳侧 harden()               → normalize_vision(now)：过期/空清单/非法 id/时钟可疑 → 作废
+       └─ sidecar hardenExternalPolicy() → 同一套规则再判一次，allowScreenshot = vision != null
+       ▼
+desktop-agent-audit.jsonl             → 每次 grant / revoke 一行（只记 grantId / appId / 时长 / 时间）
+```
+
+四条约束，缺一条就等于后门：
+
+| 约束 | 为什么 |
+| --- | --- |
+| 开关是**派生**的，不是可写字段 | 写死 false 用不了，写成可写字段则「手改 JSON 或半截写入」就能开；`allowScreenshot = vision != null` 两头都堵 |
+| 读盘时重新判过期（不是只判写入时刻） | 到期自动收回，不依赖用户记得回来关；把系统时间往前调也不会续命（授权时刻在未来即作废） |
+| 授权清单只能选已有 `read` 权限的应用 | 否则视觉授权会变成「顺手解锁一个没授权过的应用」的通道 |
+| 审计写失败 → **不授权** | 留不下记录的授权等于没留边界 |
+
+真机证据（`reports/p2-vision-gate.json`，`verdict = vision-gate-verified`）——脚本起真 sidecar
+子进程、走真 stdio MCP 帧，喂的就是壳侧写出的那份 JSON 形状：
+
+| # | 场景 | 实测 |
+| --- | --- | --- |
+| A | 无授权 | `CAPABILITY_UNAVAILABLE`「截屏通道默认关闭」 |
+| B | 有效授权（只读） | `content = ["text","image"]`，PNG 70 B |
+| C | 有效授权但不含坐标 | 「坐标输入通道默认关闭」 |
+| D | 授权的是别的应用 | 「应用 notepad 不在视觉授权清单内」 |
+| E | 授权已过期 | 「截屏通道默认关闭」 |
+| F | 真机（计算器） | PNG IHDR **666×1078** == 回传 `width/height`，50 852 B；text 块 399 B 且不含 base64 |
+
+```bash
+npm run verify:vision              # A–E 走 mock 后端，F 真机拉起计算器
+npm run verify:vision -- --skip-real   # 没有桌面会话时只跑 A–E（verdict 会标 partial，不假装通过）
+```
+
+两个坑记在这里，因为都会让**验证脚本自己骗自己**：
+
+1. 脚本里 `createWindowsBackend()` 不开桥时走 `tasklist` 回落，**所有 `hwnd` 都是 null**，
+   「等不到新窗口」会被读成「计算器起不来」；现在显式 `bridgeEnabled: true`，全无 hwnd 直接报错。
+2. 判据拿的是原始帧，而 `pixelSize` / `imageBytes` 是 `describe()` 派生的——只传原始帧时
+   这些字段恒 `undefined`，条件静默变假，真机全对却报 `broken`。现在判据收「原始帧 + 派生观测」
+   的合并视图，且可以返回逐项 `checks`，失败时报告直接指到哪一条。
+
+> 默认仍是关的：`vision: null`（不授权 = 不能截图）。授权后需要重启引擎才生效（策略不热更新），
+> 配置页 UI 尚未落地这三条 IPC。
 
 ### 树质量判定（`src/modules/tree-quality.mjs`）
 
@@ -519,8 +575,10 @@ WebView ── desktop_agent_toggle / permissions_set ──> Rust 壳
 
 - 优先级：`DEEPCODE_AGENT_POLICY`（显式指定） > 壳落盘策略 > 仓库内 `config/policy.default.json`。
 - 策略文件解析失败 → **回落到「默认关闭」**，不抛错、不带病启动。
-- 两侧共同锁定的字段：`deniedCategories`、`allowScreenshot`、`allowCoordinateInput`、
-  `preferBrowserChannel`、预算上限；`bypass` 一律降级为 `manual`。
+- 两侧共同锁定的字段：`deniedCategories`、`preferBrowserChannel`、预算上限；`bypass` 一律降级为 `manual`。
+- `allowScreenshot` / `allowCoordinateInput` **不是可写字段**：它们由 `vision`（限时授权）
+  派生，两侧 `harden` 各自用同一套规则重判（过期 / 空清单 / 非法 appId / 授权时刻在未来 → 作废）。
+  要开视觉通道只能走 `desktop_agent_vision_challenge` → `vision_grant`，不能改 JSON。
 - 策略在进程启动时读取一次，修改后返回 `restartHint`；热更新属 P2。
 - 诊断动作（`status` / `list_apps` / `events`）在关闭状态下也可查，否则用户无法诊断「为什么不能用」。
 
@@ -555,15 +613,17 @@ WebView ── desktop_agent_toggle / permissions_set ──> Rust 壳
 - 界面文本做提示注入特征扫描，命中即拦截写动作，且不把原文回灌给模型。
 - 不可逆动作（提交 / 发送 / 删除 / 支付…）强制逐次确认，令牌一次性、5 分钟过期、只在内存。
 - 审计事件脱敏；探针只记录窗口标题的「是否存在 / 长度」，不落盘标题内容。
-- 壳侧 4 条 IPC 只有状态、开关、授权读写，**没有任何窗口内容 / 截图 / 输入注入能力**；
+- 壳侧 7 条 IPC 只有状态、开关、授权读写、视觉授权（令牌/授权/撤销），
+  **没有任何窗口内容 / 截图 / 输入注入能力**（截图与注入只在 sidecar 内，且受授权闸门约束）；
   ACL 由 `permissions/app-ipc.toml` 同步，`npm run check:ipc` 做四方契约校验。
 
 ## 已知限制
 
 1. **UAC / 验证码 / 锁屏**：`uacAwareness=false`，Secure Desktop 与完整性级别未检测，一律 `HANDOFF_REQUIRED`，不做绕过。
-2. **视觉兜底缺「喂图给模型」这一环**：坐标帧换算、越界拒绝、像素验效都已真机闭环
-   （见「视觉兜底」一节），但 MCP 管线只承载 text content block，图片还到不了模型；
-   定位模型接入前，`sparse` 应用默认仍拒绝（`allowCoordinateInput` / `allowScreenshot` 均为 false）。
+2. **视觉通道默认关闭**：坐标帧、像素验效、图像进模型、授权闸门四段都已真机闭环，
+   但 `vision: null` 时 `allowScreenshot` / `allowCoordinateInput` 恒为 false，
+   必须显式授权（`vision_challenge` → `vision_grant`）并重启引擎，`sparse` 应用才可用；
+   配置页 UI 尚未落地这三条 IPC。
 3. **仅 Windows 有真实后端**：macOS AX / Linux AT-SPI 未实现，回落 mock。
 4. **策略不热更新**：改开关 / 授权需重启引擎；壳侧 `platformPermissions.checkableByShell=false`，只给引导文案，不检测系统授权。
 5. **未接线引擎生命周期**：桥进程自身的生命周期（退避 / 崩溃上限 / 僵死回收 / 优雅退出）已接管，

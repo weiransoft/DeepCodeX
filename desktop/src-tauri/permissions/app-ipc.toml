@@ -48,4 +48,9 @@ commands.allow = [
   "desktop_agent_toggle",
   "desktop_agent_permissions_get",
   "desktop_agent_permissions_set",
+  # 视觉通道：两步式限时授权（challenge 发一次性令牌 → grant 提交 → revoke 立即撤销）。
+  # 这三个命令只写授权，不截图、不注入输入，系统特权仍在 sidecar。
+  "desktop_agent_vision_challenge",
+  "desktop_agent_vision_grant",
+  "desktop_agent_vision_revoke",
 ]
