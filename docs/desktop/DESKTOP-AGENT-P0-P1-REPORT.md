@@ -42,6 +42,9 @@ P0 探针（桥关闭）曾判定 `continue-with-adjustment`：能枚举 34 个�
   （含「中文按钮从未被点中」的 `\b` 正则 bug、老式对话框按钮是 `Pane`、Excel 落点选到公式栏）；
 - **桥生命周期可管**：`ping` 探活 4 ms、崩溃后指数退避自愈、120 s 内崩 3 次即停止
   自动重启（`bridge-crash-loop`，零新增 spawn）、`shutdown` 208 ms 优雅退出；
+- **Rust 用例运行闭环**：`cargo test --lib` 在 MSVC CI 与本机 GNU 上均
+  **74 passed / 0 failed**；同时纠正了「MinGW 环境问题」的误判——真因是测试二进制缺
+  Windows 应用清单、ComCtl32 停在 v5，已在 `build.rs` 修掉（§5.1）；
 - 仍保持默认关闭：未开桥或未授权时如实降级，不伪造能力、不静默执行。
 
 关键工程结论：**稳定 ref 要求桥进程长驻**。P1 最初「每次调用新起 `powershell.exe`」的设计
@@ -419,6 +422,7 @@ DOM/CDP；3 家因环境或权限限制不参与统计，单独列在 `launchBlo
 | IPC 四方契约 | `npm run check:ipc` | 定义 22 = 注册 22 = ACL 22；前端调用点 21（`window_new` 历史未用） |
 | Rust 编译 | `cargo check` | exit 0；仅既有 `PASSWORD_ENV` dead_code 警告 |
 | Rust 单测（本机 GNU） | `cd desktop/src-tauri && cargo test --lib` | **74 passed / 0 failed / 1 ignored**（2.2 s；另有 7 个用例按平台门控，见 §5.1） |
+| Rust 单测（MSVC CI） | CI job `rust-msvc`（`windows-latest` + `stable-x86_64-pc-windows-msvc`） | **74 passed / 0 failed / 1 ignored**（用例 4.93 s，job 4 m 01 s；`--locked`，75 个用例被收集） |
 
 ### 5.1 Rust 用例为什么之前跑不起来（已修，§8 第 3 项）
 
@@ -453,8 +457,18 @@ v5 → 导入解析失败 → 进程启动即死。`cargo test --lib --no-run` �
 | `engine::manager` 4 个 mock 引擎用例 | 直接 spawn 带 shebang 的 `.js` | Windows `CreateProcess` 不认 shebang（os error 193），是**脚手架选型**问题不是被测逻辑 | 门控到 `#[cfg(unix)]`（与既有 SIGKILL 用例同款），Windows 侧引擎拉起由真机 `verify:*` 覆盖 |
 | `ssh::exec::expands_tilde_identity` | 断言展开结果 `starts_with('/')` | Windows 家目录是 `C:\Users\x`，且 `expand_home` 直接拼 `/` 会得到混合分隔符 | `expand_home` 改 `Path::join`；断言改为「已展开 + `Path::is_absolute` + 尾部 `/.ssh/id_ed25519`」 |
 
-**结果**：本机 GNU `74 passed / 0 failed / 1 ignored`（2.2 s）。**副产物**：本机
-不再是「只能编译、不能运行」，Rust 用例可在本地闭环，CI 用来兜 MSVC 一侧。
+**结果**：本机 GNU `74 passed / 0 failed / 1 ignored`（2.2 s）；MSVC CI 同一组用例
+`74 passed / 0 failed / 1 ignored`（4.93 s，job 4 m 01 s）。**副产物**：本机不再是
+「只能编译、不能运行」，Rust 用例本地可闭环，CI 用来兜 MSVC 一侧。
+
+**CI 侧配套**（`.github/workflows/ci.yml` 的 `rust-msvc` job）：`windows-latest` +
+`stable-x86_64-pc-windows-msvc`、`Swatinem/rust-cache`（key 带 `msvc` 前缀，避免与
+GNU 产物串味）、先 `--list` 数一遍用例（<60 直接失败，防空跑）、再
+`cargo test --lib --locked -- --test-threads=1`（端口 / 临时 SQLite 类用例串行求确定性）。
+另有一条工程细节：本仓 Actions 的**日志下载接口要求 admin 权限**（403），失败原因
+只有「Process completed with exit code 1」；因此该 job 把 cargo 输出尾部写进
+`::error::` 注解、把 `test result:` 写进 `::notice::` 注解——注解匿名可读，
+定位问题不必登录网页翻日志。
 
 **已知残留（GNU only）**：链接时 ld 报
 `.rsrc merge failure: multiple non-default manifests`——GNU 侧 ld 自己也会塞一份默认清单。
@@ -480,9 +494,9 @@ v5 → 导入解析失败 → 进程启动即死。`cargo test --lib --no-run` �
 
 ## 7. 未解决与边界
 
-1. **真实应用覆盖只有 1 个写用例**：记事本的「写入 → 保存 → 读盘」已闭环，但仅 1 个应用；
-   覆盖率采样显示 5 个真实窗口中 4 个「有名字的可操作节点为 0」，这类应用只能视觉兜底
-   或拒绝，需逐个实测后才能纳入白名单。
+1. **写用例只覆盖 5 个应用**：记事本 / Word / Excel / 资源管理器 / Edge 已跑通（§3.9），
+   浏览器按策略拒绝 GUI；其余应用要按 §3.10 的通道判定逐类补用例，尤其 4 家
+   `sparse` 应用当前只能按「拒绝」处理（见本条下方第 4 点）。
 2. **UAC 未感知**：Secure Desktop 与完整性级别检测未实现，遇 UAC 一律交还人工。
 3. **分类启发式仍保留**：进程名/标题分类仍用于初始通道建议（`unknown` 占比高），
    但已不再是最终结论——观察后由 `tree-quality` 实测覆盖；未观察过的应用仍可能是错的。
@@ -497,6 +511,10 @@ v5 → 导入解析失败 → 进程启动即死。`cargo test --lib --no-run` �
 9. **交叉工作区提示**：同一工作区里 `desktop/build/*` 的 Windows 分发打包脚本是另一条
    工作流，其「能力排除守卫」明确不打包本切片。若在该分支上打分发包，需用
    `-BaselineRef` 固定到不含本切片的提交，否则默认 `HEAD` 快照会带上 IPC 并触发守卫中止。
+10. **引擎启动用例在 Windows 上未覆盖**：mock 引擎是带 shebang 的 `.js`，Windows
+    `CreateProcess` 不认 shebang，故 `engine::manager` 的 4 个启动/重启/探活用例门控在
+    `#[cfg(unix)]`（§5.1）。补法是把 sidecar 改成「node + 脚本参数」形态，再给这组用例加
+    Windows 变体；当前 Windows 侧的引擎拉起由真机 `verify:*` 覆盖。
 
 ---
 
@@ -510,7 +528,11 @@ v5 → 导入解析失败 → 进程启动即死。`cargo test --lib --no-run` �
 2. ~~真实应用写用例从 1 个扩到 ≥ 5 个~~ ✅ 已完成（§3.9）：5 个用例覆盖经典 Win32 /
    Office 文档模型 / Office 网格 / Shell / 浏览器外壳，其中 4 家以读盘或文件系统为证据
    首轮全绿，浏览器按策略拒绝 GUI；`expectChange` 与副作用校验的通用性由矩阵本身证明；
-3. 在 MSVC CI 上跑通 `cargo test --lib`，闭环 Rust 用例运行验证；
+3. ~~在 MSVC CI 上跑通 `cargo test --lib`，闭环 Rust 用例运行验证~~ ✅ 已完成（§5.1）：
+   新增 `rust-msvc` job（`windows-latest` + MSVC，`--locked` + 用例数守卫 + 自诊断注解），
+   **74 passed / 0 failed / 1 ignored**（4.93 s）。过程中纠正了原「MinGW 环境问题」的误判——
+   真因是测试 exe 没有 Windows 应用清单（ComCtl32 v6 未激活），已在 `build.rs` 修掉，
+   本机 GNU 也一并受益；
 4. ~~桥进程纳入生命周期管理~~ ✅ 已完成（§3.8）：`ping` 健康检查、指数退避、
    120 s 内崩溃 3 次的自动重启上限（`bridge-crash-loop`）、僵死回收、`shutdown` 优雅退出。
 
