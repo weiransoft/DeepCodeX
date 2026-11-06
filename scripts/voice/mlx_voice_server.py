@@ -287,6 +287,41 @@ TTS_TOKENS_PER_SECOND = 12.5
 # 音频时长换算都是 4.1 字/秒，彼此吻合。
 TTS_CHARS_PER_SECOND = 4.1
 
+# ---------------------------------------------------------------------------
+# 逐块语速伺服：把「全局等比变速」换成「按实测语速收敛到固定基准」
+#
+# 2026-11-06 真机反馈「还是存在语速跳变，句子一长就不行了」。同一音色、
+# 同一 speed=1.2、同一次模型加载，实测**模型原生**语速（不入库探针
+# /tmp/probe-rate-normalize.py）：
+#
+# | 样本          | 字数 | 原生语速   |
+# |---------------|------|-----------|
+# | 短句 14 字    |   14 | 4.09 字/秒 |
+# | 短句 20 字    |   20 | 4.92 字/秒 |
+# | 标准 41 字    |   41 | 4.17 字/秒 |
+# | 无标点 41 字  |   41 | 5.08 字/秒 |
+# | 无标点 48 字  |   48 | 5.35 字/秒 |
+# | 逗号密集 48 字 |   48 | 4.72 字/秒 |
+#
+# 跨度 31%，取决于文本长度、标点密度与句法结构——模型「按块自选语速，
+# 没有上一块的记忆」（业界与我们的观察一致）。原来的
+# `time_stretch_wsola(audio, speed)` 是**整个请求一次等比变速**，只能整体
+# 放大/缩小，压不住块间相对差；块一长、标点一少就明显「忽然变快」。
+#
+# 业界标准补救（inkwell pace-fix / ElevenLabs atempo）：实测每块字/秒，
+# 用保调变速把偏离目标的部分拉回来；目标必须是**全局固定基准**，不能用
+# 本轮中位数（否则整段一起快/一起慢时检测不出来）。这里的目标就是
+# `TTS_CHARS_PER_SECOND × speed`，speed=1.2 → 4.92 字/秒。
+#
+# 离线可行性实测：按倍率 0.919~1.203 校正后，6 种文本全部收敛到
+# 4.93 字/秒（±0.2%）。每次变速仍只做一次（不叠加），音高不变。
+# ---------------------------------------------------------------------------
+TTS_RATE_SPEED_MIN = 0.75
+TTS_RATE_SPEED_MAX = 1.35
+# 段间微停顿：两次独立生成的波形硬接缝，业界用 50~200ms 微静音掩盖。
+# 60ms 比正常句间停顿短，不会听成「断了一下」，又足够盖住相位跳变。
+TTS_SEGMENT_GAP_S = 0.06
+
 # 生成上限的安全系数与硬顶
 #
 # 为什么必须显式传 max_tokens（2026-11-06 实测）：
@@ -631,20 +666,28 @@ class TtsEngine:
         self, text: str, engine: str, voice: str, speed: float, interval: float
     ) -> "Any":
         """
-        流式合成：边生成边 yield **独立的完整 WAV 字节**
+        流式合成：**段级生成 → 逐段语速伺服 → 分块 yield 独立完整 WAV**
 
         为什么每个 chunk 单独封 WAV：浏览器 `decodeAudioData` 需要完整容器，
         给一段裸 PCM 它无法解码。独立 WAV 让前端收到一块就能立刻解码、排进
-        AudioContext 时间轴，不必等整段生成完。
+        AudioContext 时间轴。
 
-        锁必须覆盖整个生成过程（生成器被消费多久就持有多久）：MLX 的计算图
-        与模型状态不是线程安全的，另一个请求插进来会串音或崩。
+        为什么要等「一段」生成完才吐（2026-11-06 语速伺服改造）：严格语速
+        归一化必须先量出这段实际读了多久，数学上不可能在只拿到第一片时预知。
+        折中是把段做小——前端 `FIRST_BLOCK_CHARS=14`，首段热态约 0.7s 就能
+        出声，后续段在前一段播放期间并行生成（RTF≈0.2），播放不会断。换来
+        的是所有段语速严格收敛到全局固定基准（离线实测 4.93 字/秒 ±0.2%）。
+
+        段内用 `StreamingWsola` 有状态变速，块边界天然连续（与整块 `/tts`
+        逐样本等价）；段间各自按实测语速归一化，用 60ms 微静音盖住两次独立
+        模型生成的相位跳变。锁只覆盖 MLX 生成，不覆盖 yield —— 客户端读得
+        慢不该占着整条语音链路共用的推理锁。
 
         @param text 待合成文本
         @param engine 引擎（目前只有 CustomVoice 支持流式）
         @param voice 音色预设 / 预置名
-        @param speed 语速（整个请求共用一条有状态 WSOLA 时间轴，不是逐块变速）
-        @param interval 每个 chunk 的目标音频秒数（实测 1.0s → 首块 0.19s）
+        @param speed 语速（作为全局目标基准的倍率：4.1 × speed 字/秒）
+        @param interval 输出切片的目标秒数（不再是模型吐块的间隔）
         @yields 单块 WAV 字节
         """
         import numpy as np
@@ -656,28 +699,29 @@ class TtsEngine:
             yield audio
             return
 
-        with self._lock:
-            model = self._load(engine)
-            speaker, instruct = resolve_speaker(voice)
-            pieces = split_long_text(text)
-            if len(pieces) > 1:
-                sys.stderr.write(
-                    f"[voice] tts-stream {len(text)}字 超过 {TTS_MAX_TEXT_CHARS} 字安全上限，"
-                    f"自动分 {len(pieces)} 段合成\n"
-                )
-            # 整个请求共用**一条** WSOLA 时间轴：所有 chunk（包括跨 48 字
-            # 分段边界）都在同一状态下变速，输出块只是这条轴的连续切片。
-            # 逐块独立变速时窗函数/搜索状态每次重启，speed=1.2 实测边界
-            # 样本跳变中位 2.8%/最大 19.4%；有状态后回到 speed=1.0 的
-            # 0.1%/1.2% 量级，流式才能真正默认打开。
-            stretcher = StreamingWsola(speed)
-            rate = 24000
-            for piece in pieces:
+        speaker, instruct = resolve_speaker(voice)
+        pieces = split_long_text(text)
+        if len(pieces) > 1:
+            sys.stderr.write(
+                f"[voice] tts-stream {len(text)}字 超过 {TTS_MAX_TEXT_CHARS} 字安全上限，"
+                f"自动分 {len(pieces)} 段合成\n"
+            )
+
+        # **逐段流水线**：一段生成完立刻吐出去，再拿锁生成下一段。首块延迟
+        # 因此只等于第一段（前端首块 14 字，热态约 0.7s）；若先把所有段都
+        # 攒齐再吐，164 字实测要等 7.7s，那就完全不是流式了。锁只覆盖
+        # MLX 推理这一段，裁剪/变速/切块/客户端读取都在锁外。
+        applied: list[float] = []
+        for seg_index, piece in enumerate(pieces):
+            with self._lock:
+                model = self._load(engine)
                 # 每段重新按音色派生固定种子，避免跨段随机状态串味
                 temperature = prepare_sampling(voice)
                 max_tokens = max_tokens_for(piece)
+                raw_chunks: list[Any] = []
                 silent_run = 0
                 stopped_early = False
+                rate = 24000
                 for chunk in model.generate_custom_voice(
                     text=piece,
                     speaker=speaker,
@@ -690,10 +734,9 @@ class TtsEngine:
                 ):
                     rate = int(chunk.sample_rate)
                     raw = np.asarray(chunk.audio, dtype=np.float32).reshape(-1)
-                    # 退化判定放在变速**之前**的原始样本上：WSOLA 不会凭空
-                    # 造静音，但逐块变速会把静音摊到不同位置。连续几块全静音
+                    # 退化判定放在变速**之前**的原始样本上：连续几块全静音
                     # 就掐断本段生成器，既不把十几秒空白推给浏览器，也省下
-                    # 剩余推理时间（这把锁是整条语音链路共用的）。
+                    # 剩余推理时间。
                     if is_silent_chunk(raw):
                         silent_run += 1
                         if silent_run > STREAM_SILENT_CHUNK_LIMIT:
@@ -701,29 +744,43 @@ class TtsEngine:
                             break
                     else:
                         silent_run = 0
-                    # 不足一帧时 feed 返回空数组，样本攒在状态机里等下一块；
-                    # 这只有约 10ms 缓冲，不影响首字延迟。
-                    samples = stretcher.feed(raw)
-                    if samples.size == 0:
-                        continue
-                    # 兜底裁掉单块内的退化长尾音；正常语义停顿最长 0.68s，
-                    # 低于 1.0s 阈值，不会误裁。
-                    samples = trim_degenerate_tail(samples, rate)
-                    if samples.size == 0:
-                        continue
-                    yield encode_wav_bytes(samples, rate)
+                    raw_chunks.append(raw)
                 if stopped_early:
                     sys.stderr.write(
                         f"[voice] tts-stream {len(piece)}字 检测到退化静音，"
                         f"连续 {silent_run} 块后提前收尾\n"
                     )
-            # flush 不能漏：最后 frame_len + search 个样本还压在 OLA 缓冲里，
-            # 少了这一步每句话末尾都会被吃掉一小截。
+
+            if not raw_chunks:
+                continue
+            samples = trim_speech_edges(trim_degenerate_tail(np.concatenate(raw_chunks), rate), rate)
+            if samples.size == 0:
+                continue
+            seg_speed = segment_stretch_speed(samples, rate, len(piece.strip()), speed)
+            applied.append(seg_speed)
+            # 段内一条有状态时间轴：分块喂与整段一次 time_stretch_wsola()
+            # 逐样本相等，流式与整块 /tts 产出的音频因此完全一致。
+            stretcher = StreamingWsola(seg_speed)
+            block = max(1, int(interval * rate))
+            for start in range(0, samples.size, block):
+                out = stretcher.feed(samples[start : start + block])
+                if out.size > 0:
+                    yield encode_wav_bytes(out, rate)
+            # flush 不能漏：最后 frame_len + search 个样本还压在 OLA 缓冲里
             tail = stretcher.flush()
             if tail.size > 0:
-                tail = trim_degenerate_tail(tail, rate)
-                if tail.size > 0:
-                    yield encode_wav_bytes(tail, rate)
+                yield encode_wav_bytes(tail, rate)
+            if seg_index < len(pieces) - 1:
+                yield encode_wav_bytes(
+                    np.zeros(int(TTS_SEGMENT_GAP_S * rate), dtype=np.float32), rate
+                )
+
+        if applied and any(abs(s - speed) > 0.05 for s in applied):
+            sys.stderr.write(
+                f"[voice] 流式语速伺服 {len(applied)}段 倍率 "
+                f"{','.join(f'{s:.2f}' for s in applied)} "
+                f"目标 {TTS_CHARS_PER_SECOND * speed:.2f}字/秒\n"
+            )
 
     def synthesize(self, text: str, engine: str, voice: str, speed: float) -> tuple[bytes, str, str]:
         """
@@ -765,8 +822,9 @@ class TtsEngine:
                 voice_used = voice or KOKORO_VOICE
             native_speed = engine not in ("qwen3-customvoice", "qwen3-voicedesign")
 
-            part_audio: list[Any] = []
-            rate = 24000
+            # 只攒原始波形，裁剪与变速放到锁外：那是纯 numpy 计算，
+            # 没必要占着整条语音链路共用的 MLX 推理锁。
+            raw_parts: list[tuple[str, Any, int]] = []
             for piece in pieces:
                 # 每段都重新按音色派生固定种子：MLX 的 RNG 是全局状态，
                 # 不重置的话第二段会接着第一段的随机序列走，跨段音色就漂了。
@@ -815,25 +873,41 @@ class TtsEngine:
                 if not chunks:
                     continue
                 audio = np.concatenate([np.array(c.audio, dtype=np.float32).reshape(-1) for c in chunks])
-                rate = int(chunks[0].sample_rate)
-                # 每段单独裁退化尾音：某一段退化时，十几秒静音不能带进拼接结果。
-                # 拼接后才做 WSOLA，所以整段只有一次变速、没有分块边界失真。
-                part_audio.append(trim_degenerate_tail(audio, rate))
+                raw_parts.append((piece, audio, int(chunks[0].sample_rate)))
 
-            if not part_audio:
-                raise RuntimeError("模型没有产出音频")
-            audio = np.concatenate(part_audio)
+        if not raw_parts:
+            raise RuntimeError("模型没有产出音频")
 
-        # 兜底再裁一次尾部（最后一段万一退化）。放在变速**之前**，
-        # 既省掉对静音做 WSOLA 的算力，也不会把正常句尾收尾切掉。
-        audio = trim_degenerate_tail(audio, rate)
+        # 逐段语速伺服：裁首尾机械静音 → 实测语速 → 一次保调变速 → 拼接。
+        # 每段独立变速而不是整段一次等比，是为了压住模型「按块自选语速」
+        # 带来的块间跳变；段内仍只变速一次，没有分块边界失真。
+        part_audio: list[Any] = []
+        rate = 24000
+        applied: list[float] = []
+        for piece, raw, rate in raw_parts:
+            samples = trim_speech_edges(trim_degenerate_tail(raw, rate), rate)
+            if samples.size == 0:
+                continue
+            if native_speed:
+                out = samples
+            else:
+                seg_speed = segment_stretch_speed(samples, rate, len(piece.strip()), speed)
+                applied.append(seg_speed)
+                out = time_stretch_wsola(samples, seg_speed)
+            # 两次独立生成的波形硬接缝，用一小段静音盖住相位跳变
+            if part_audio:
+                part_audio.append(np.zeros(int(TTS_SEGMENT_GAP_S * rate), dtype=np.float32))
+            part_audio.append(out)
 
-        # Qwen3-TTS 的 generate_* 没有 speed 参数，只能在波形层变速。
-        # 以前用 np.interp 重采样，音高跟着速度一起变（磁带快进），实测
-        # speed=1.25 让 F0 从 237.6Hz 升到 279.1Hz。改用 WSOLA 保调变速：
-        # 速度变了、音色底子不变。kokoro 有原生 speed，不做这一步。
-        if not native_speed and speed != 1.0 and speed > 0:
-            audio = time_stretch_wsola(audio, speed)
+        if not part_audio:
+            raise RuntimeError("模型没有产出音频")
+        audio = np.concatenate(part_audio)
+        if applied and any(abs(s - speed) > 0.05 for s in applied):
+            sys.stderr.write(
+                f"[voice] 语速伺服 {len(raw_parts)}段 倍率 "
+                f"{','.join(f'{s:.2f}' for s in applied)} "
+                f"目标 {TTS_CHARS_PER_SECOND * speed:.2f}字/秒\n"
+            )
 
         return encode_wav_bytes(audio, rate), engine, voice_used
 
@@ -1154,6 +1228,65 @@ def trim_degenerate_tail(samples: "Any", sample_rate: int, max_silence_s: float 
         return x
     keep = int(keep_tail_s * sample_rate)
     return x[: min(x.size, last + 1 + keep)]
+
+
+def trim_speech_edges(
+    samples: "Any", sample_rate: int, keep_head_s: float = 0.02, keep_tail_s: float = 0.08
+) -> "Any":
+    """
+    裁掉 TTS 自带的句首 / 句尾机械静音
+
+    Qwen3-TTS 每次生成都会在句首补约 88ms、句尾补约 46ms 的机械 padding。
+    它不属于语义停顿，却会被算进「字数 / 时长」，让短句看起来比长句快；
+    分段拼接时还会在接缝多出一段空白。保留一点边距是为了不切掉句首轻声
+    辅音和句尾收尾。**句内**的语义停顿不动（实测最长 0.68s），那是听感的一部分。
+
+    @param samples float32 一维波形
+    @param sample_rate 采样率
+    @param keep_head_s 首个有声样本前保留的边距
+    @param keep_tail_s 末个有声样本后保留的边距
+    @returns 裁剪后的波形；纯静音返回空数组
+    """
+    import numpy as np
+
+    x = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if x.size == 0:
+        return x
+    peak = float(np.max(np.abs(x)))
+    if peak == 0:
+        return np.zeros(0, dtype=np.float32)
+    loud = np.flatnonzero(np.abs(x) >= peak * DEGENERATE_SILENCE_PEAK_RATIO)
+    if loud.size == 0:
+        return np.zeros(0, dtype=np.float32)
+    head = max(0, int(loud[0]) - int(keep_head_s * sample_rate))
+    tail = min(x.size, int(loud[-1]) + 1 + int(keep_tail_s * sample_rate))
+    return x[head:tail]
+
+
+def segment_stretch_speed(samples: "Any", sample_rate: int, chars: int, speed: float) -> float:
+    """
+    算这一段需要的保调变速倍率，把它的实测语速拉到全局固定基准
+
+    `target = TTS_CHARS_PER_SECOND × speed`，`actual = chars / duration`，
+    倍率 = target / actual（>1 加速、<1 放慢）。钳制在 0.75~1.35：超出这个
+    范围的段多半是模型退化（不是真的读那么快/慢），硬拉只会把音质拉坏，
+    交给 `trim_degenerate_tail()` 与退化日志处理更合适。
+
+    注意目标取**全局固定值**，不能用本轮各段的中位数——否则整段一起快或
+    一起慢时伺服检测不出来，这正是业界反复强调的坑。
+
+    @param samples 已裁掉首尾机械静音与退化尾音的波形
+    @param sample_rate 采样率
+    @param chars 这一段的有效字数
+    @param speed 用户设置的语速
+    @returns 传给 `time_stretch_wsola()` / `StreamingWsola()` 的倍率
+    """
+    duration = samples.size / float(sample_rate) if sample_rate > 0 else 0.0
+    if duration <= 0 or chars <= 0:
+        return speed if speed > 0 else 1.0
+    target = TTS_CHARS_PER_SECOND * (speed if speed > 0 else 1.0)
+    actual = chars / duration
+    return max(TTS_RATE_SPEED_MIN, min(TTS_RATE_SPEED_MAX, target / actual))
 
 
 def encode_wav_bytes(samples: "Any", sample_rate: int) -> bytes:
