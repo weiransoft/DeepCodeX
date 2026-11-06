@@ -45,7 +45,8 @@ desktop-agent/
 │             telemetry.mjs        脱敏事件流
 ├── config/policy.default.json     默认策略（enabled=false）
 ├── scripts/probe.mjs              P0 探针（能力矩阵 / 枚举 / 真机只读观察）
-│           coverage-report.mjs    真实应用 UIA 覆盖率采样（只读）
+│           coverage-report.mjs    真实应用 UIA 覆盖率采样（被动：当前桌面上的窗口）
+│           verify-app-coverage.mjs 真实应用覆盖率矩阵（主动拉起固定清单，逐家给产品判定）
 │           verify-gui.mjs         真机 GUI 闭环验证（受控 WPF 测试窗口）
 │           verify-real-app.mjs    真实应用写入闭环（临时文件 + 记事本，磁盘校验）
 │           verify-multi-app.mjs   真实应用写入矩阵（记事本/Word/Excel/资源管理器/Edge）
@@ -54,11 +55,12 @@ desktop-agent/
 │           register-mcp.mjs       MCP 登记（dry-run / 写入 / 移除）
 ├── reports/p0-probe.json          P0 实测数据（窗口标题不落盘）
 │           p1-gui-verify.json     真机闭环实测数据
-│           p2-coverage.json       真实应用覆盖率实测数据
+│           p2-coverage.json       真实应用覆盖率实测数据（被动采样）
+│           p2-app-coverage.json    真实应用覆盖率矩阵（16 个目标应用 / 逐家判定）
 │           p2-real-app.json       真实应用写入闭环实测数据
 │           p2-multi-app.json      真实应用写入矩阵实测数据
 │           p2-lifecycle.json      桥生命周期真机实测数据
-└── tests/*.test.mjs               node:test，零依赖（91 个用例）
+└── tests/*.test.mjs               node:test，零依赖（96 个用例）
 ```
 
 零新增 npm 依赖（Node ≥ 22，ESM）：sidecar 需要随桌面端分发，避免版本漂移与供应链面。
@@ -142,22 +144,64 @@ printf '%s\n' \
 闭环脚本用 WPF（`XamlReader` 动态加载）而非 WinForms 测试窗体：WinForms 控件经 MSAA 桥
 会降级为 Pane，拿不到 Value/Invoke 模式；WPF 的 UIA 提供者是原生的。
 
-### 真实应用覆盖率（`npm run coverage`）
+### 真实应用覆盖率（`npm run verify:coverage`）
 
-只读采样当前桌面上的真实窗口（不执行任何动作、跳过敏感分类、不落盘标题与截图）：
+覆盖率有两个脚本，回答的是不同问题，别混用：
 
-| 应用 | 分类通道 | 骨架/完整节点 | 可操作 | 有名字可操作 | 实测判定 | 判定后通道 | 耗时 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| explorer（文件夹） | interface-or-gui | 46 / 133 | 39 | **90** | good | gui-a11y | 248 ms |
-| gameviewer（自绘） | gui-visual | 29 / 42 | 28 | **0** | sparse | gui-visual | 75 ms |
-| taskmgr | gui-a11y | 16 / 16 | 11 | **0** | sparse | gui-visual | 34 ms |
-| workbuddy（Electron） | gui-a11y | 3 / 3 | 1 | **0** | sparse | gui-visual | 149 ms |
-| explorer（桌面） | interface-or-gui | 3 / 3 | 3 | **0** | sparse | gui-visual | 24 ms |
+| 脚本 | 方式 | 适合回答 |
+| --- | --- | --- |
+| `coverage-report.mjs`（`npm run coverage`） | **被动**：采样当前桌面上碰巧开着的窗口 | 「这台机器现在树好不好」 |
+| `verify-app-coverage.mjs`（`npm run verify:coverage`） | **主动**：按固定清单逐个拉起、逐家判定 | 「我们支持哪些应用、其余怎么办」 |
 
-5/5 快照成功，均值 **106 ms**、最大 248 ms。结论不是「树能不能拿到」（都能），
-而是**「能不能按名字指认目标」**：只有 1/5 的应用满足，其余 4 个树虽非空，
-但「有名字的可操作节点」为 0——`gameviewer` 28 个可操作节点全部无名字，
-`workbuddy`（Electron）整棵树只有 3 个节点。
+主动矩阵跑 16 个目标应用（`--with-office` 含 Office），每个都用自建的空白/临时文件实例，
+**只做 snapshot，不做任何写入或点击**，结束时只关自己拉起的进程。实测（空闲桌面，1 分 16 秒）：
+
+| 应用 | 家族 | 最深质量 | 有名字可操作 | 产品判定 |
+| --- | --- | --- | --- | --- |
+| 记事本 | 经典 Win32 | good | 32 | 语义树 |
+| 计算器 | UWP / XAML | good | 37 | 语义树 |
+| 画图 | UWP 桌面桥 | good | 22 | 语义树 |
+| 资源管理器 | Shell | good | 36 | 语义树 |
+| Windows 终端 | 现代控制台宿主 | good | 7 | 语义树 |
+| 设置 | UWP（AppFrameHost） | good | 32 | 语义树 |
+| Word | Office 文档模型 | good | 6 | 语义树（正文靠 `TextPattern` 读） |
+| Excel | Office 网格 | good | 223 | 语义树（`DataItem` 209 个，逐格可达） |
+| Edge | 浏览器外壳 | good（仅外壳） | 8 | **DOM/CDP**，不走 GUI |
+| 任务管理器 | Win32 现代 | sparse | 0 | 视觉兜底（当前拒绝） |
+| 字符映射表 | Win32 对话框 | sparse | 1 | 视觉兜底（当前拒绝） |
+| 系统信息 | Win32 TreeView | sparse | 0 | 视觉兜底（当前拒绝） |
+| 磁盘清理 | Win32 对话框 | sparse | 0 | 视觉兜底（当前拒绝） |
+| 命令提示符 / PS 5 | 控制台子系统 | — | — | 环境受限，未采到（见下） |
+| 性能监视器 | MMC | — | — | 需管理员会话 |
+
+`summary.verdict = coverage-10plus`，`sampled = 13/16`：**8 家可按名字操作、4 家只能视觉兜底、
+1 家必须走 DOM**、3 家未能拉起。均值 214 ms，最慢 Word 1249 ms（Office 树的采集成本是普通
+应用的 4~8 倍，这是预算的真实约束）。
+
+关键结论来自「完整度」而不只是「质量」：**13 家的最深样本全部 `complete: true`（cut = 0）**，
+也就是说这些树在 depth 8 内已经看全了。所以那 4 个 `sparse` 不是「还没展开」，是
+**真的没暴露可指认的目标**——视觉兜底对它们是真实需求，不是过早放弃。反过来，8 家
+`good` 的应用在 depth 4 就已经 good，清单里没有出现 `deferred`，说明默认深度够用。
+
+真机上踩到的八条（每条都改了代码，不是「记录一下」）：
+
+| # | 现象 | 处理 |
+| --- | --- | --- |
+| 1 | **`snapshot.truncated` 恒为 `true`**：桥无法证明自己没漏，于是永远回 true。用它判「看全没有」等于永远判 deferred | 完整度下沉到骨架节点：`Copy-Skeleton` 只给被剪掉孩子的节点打 `truncated`，再加节点预算 1500，两者都干净才算 complete（`treeCompleteness` / `assessSnapshot`） |
+| 2 | **会误采别的应用**：拉起 PS 5 时桌面恰好弹出输入法安装器窗口，凭「只有一个新窗口」就把它当成目标采样，结论完全失真 | 认领窗口必须靠显式 `appIds` 白名单；匹配不上就继续等，不做「唯一新窗口」猜测 |
+| 3 | **闪屏会换壳**：Office 先出现启动窗口，几秒后被主窗口替换，之后所有快照都是 `OBSERVATION_FAILED` | 认领到窗口后再 `resolveTarget` 一次（优先标题带文件名的），采样中途失败也重认领一次；实测 Word `264526 → 264962`、Excel `264970 → 330130` |
+| 4 | **单实例应用根本没有新窗口**：任务管理器早就开着，再 spawn 只是聚焦旧窗口 | 回 `owned: false` 做只读采样，**收尾跳过关闭**——那不是我们拉起的窗口，不能动 |
+| 5 | **UWP 的窗口不在自己的进程里**：计算器/设置的窗口属于 `ApplicationFrameHost.exe`，按 spawn pid 或应用名都认不到 | 白名单里带上宿主进程名；同时用「拉起前后 hwnd 差集」定位新窗口 |
+| 6 | **控制台进程在这个执行环境里拿不到窗口**：`cmd`/`powershell` spawn 后立刻 `exitCode 0`，全程无窗口 | 记为 `launch-blocked`（附 `harnessNote`），**不是「应用不可自动化」**；控制台家族改用 Windows 终端覆盖（GUI 子系统，树正常） |
+| 7 | **`EACCES` 不是「没装」**：性能监视器需要管理员权限，混记成 `app-not-installed` 会把排查方向带偏 | 单独判 `NEEDS_ELEVATION`，提示需在管理员会话运行 |
+| 8 | **浏览器树 good 也只是外壳**：Edge 有 Tab/ToolBar/Button，但没有 `Document`/`Edit`，页面内容一个可操作节点都没有 | 按家族判 `dom-channel-required`：内容容器缺失即明确走 CDP，不因为「树 good」就以为能操作页面 |
+
+> 这三个 `launch-blocked` 是环境与权限的真实边界，不是失败：报告把它们单独列在
+> `launchBlocked` 里，而不是混进 `sampled` 充数。
+
+被动采样（`npm run coverage`）仍保留，用于随手看一眼当前桌面。它此前把 4/5 判成
+`sparse`（`gameviewer` 28 个可操作节点全无名字、`workbuddy` 整树 3 个节点）——这个
+结论与主动矩阵一致：瓶颈不在「能不能拿到树」，而在「能不能按名字指认目标」。
 
 ### 树质量判定（`src/modules/tree-quality.mjs`）
 
@@ -171,10 +215,16 @@ printf '%s\n' \
 | `empty` | 树为空 | 同上，并自动附带 `emptyTree` 提示 |
 | `deferred` | 节点预算耗尽，**还没看全** | 不改判，提示先 `drillDown` |
 
-判定依据是桥回传的**完整树**（比骨架深 2 层），不是被截断的骨架——早期版本用骨架
-判定，把「控件在深处」的 `taskmgr` 误判成 `sparse`。`deferred` 只保留给真的没看全
-（节点数触顶 1500）的情况，避免「永远下钻、永不下结论」。判定结果会回写注册表
-（按 `appId#hwnd` 分别记录），后续 `desktop_list_apps` 的通道列即为实测结论。
+判定依据是桥回传的**完整树**（比骨架深 2 层），**完整度**则由 `treeCompleteness` 计算：
+骨架节点上没有 `truncated` 标记、且节点数没到预算 1500，才算「看全了」。不能用
+`snapshot.truncated`（桥侧恒为 true），也不能拿 `nodeCount` 猜——两者都会把
+「树被深度截断」和「树本来就这么小」混为一谈，代价分别是要么永远下钻、要么把可下钻的
+应用判死。判定结果会回写注册表（按 `appId#hwnd` 分别记录），`desktop_list_apps` 的通道列
+即为实测结论。
+
+> 一处自我修正：早期把 `taskmgr` 判 `sparse` 归因为「骨架截断造成的误判」。用完整度判据
+> 复核后确认，它在 depth 8、树完整（cut = 0）时仍然只有 16 个 `Pane`、0 个有名字的可操作
+> 节点——**它是真的不可按名字定位**，需要视觉兜底，而不是我们没看到。
 
 ### 真实应用写入闭环（`npm run verify:real-app`）
 

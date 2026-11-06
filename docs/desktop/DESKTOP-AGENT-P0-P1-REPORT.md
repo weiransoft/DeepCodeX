@@ -33,7 +33,10 @@ P0 探针（桥关闭）曾判定 `continue-with-adjustment`：能枚举 34 个�
   `good / sparse / deferred / empty`，修正「按进程名猜 Electron」的误分类
   （实测 5 个真实窗口中只有 1 个真能按名字定位）；
 - **故障注入回归补齐**：窗口中途关闭、进程崩溃、桥崩溃重连、`STALE_REF`、预算熔断
-  全部锁定错误码与可恢复性，共 91 个单测通过；
+  全部锁定错误码与可恢复性，共 96 个单测通过；
+- **覆盖率达标（13 个真实应用）**：主动拉起 16 个目标应用、13 个采到树，其中 8 家可按
+  名字操作、4 家只能视觉兜底、1 家（Edge）必须走 DOM/CDP，3 家因环境/权限未拉起且如实标注；
+  同时把「完整度」判据做对（`snapshot.truncated` 恒真导致无法区分「没看全」与「树就这么小」）；
 - **真实应用写入矩阵四家全绿**：记事本 / Word / Excel / 资源管理器均以**读盘或文件系统**
   为成功证据（首轮通过、无重试），浏览器外壳按策略拒绝 GUI；过程中修掉 12 条真机判据
   （含「中文按钮从未被点中」的 `\b` 正则 bug、老式对话框按钮是 `Pane`、Excel 落点选到公式栏）；
@@ -303,6 +306,63 @@ Excel 的「公式栏 vs 网格」与 Word 的「保存确认框 = depth 1 嵌�
 > 两次结论都写进报告（`attempts` / `firstAttempt`），不掩盖第一次的失败。
 > 排查「界面看起来对、实际没生效」加 `--debug-shots`（三阶段截图写系统临时目录，不进仓库/报告）。
 
+### 3.10 真实应用覆盖率矩阵（P2 准入第 1 项）
+
+P2 第 1 项要求「覆盖率扩到 ≥10 个真实目标应用，并对 sparse/empty 明确产品化判定」。
+此前的 `coverage-report.mjs` 是**被动采样**（只拍当前桌面上碰巧开着的窗口），凑不齐固定
+应用集、也无法复现。新增 `scripts/verify-app-coverage.mjs` 做**主动采样**：固定清单逐个
+拉起（自建空白/临时文件实例）、多深度采样、逐家给出产品判定，**全程只 snapshot**。
+
+`--with-office` 下 16 个目标应用，一次完整跑 1 分 16 秒，`reports/p2-app-coverage.json`：
+
+| 应用 | 家族 | 最深质量 | 有名字可操作 | 判定 |
+| --- | --- | --- | --- | --- |
+| 记事本 | 经典 Win32 | good | 32 | 语义树 |
+| 计算器 | UWP / XAML | good | 37 | 语义树 |
+| 画图 | UWP 桌面桥 | good | 22 | 语义树 |
+| 资源管理器 | Shell | good | 36 | 语义树 |
+| Windows 终端 | 现代控制台宿主 | good | 7 | 语义树 |
+| 设置 | UWP（AppFrameHost） | good | 32 | 语义树 |
+| Word | Office 文档模型 | good | 6 | 语义树（正文 `TextPattern`） |
+| Excel | Office 网格 | good | 223 | 语义树（`DataItem` 209） |
+| Edge | 浏览器外壳 | good（仅外壳） | 8 | DOM/CDP |
+| 任务管理器 | Win32 现代 | sparse | 0 | 视觉兜底（当前拒绝） |
+| 字符映射表 | Win32 对话框 | sparse | 1 | 视觉兜底（当前拒绝） |
+| 系统信息 | Win32 TreeView | sparse | 0 | 视觉兜底（当前拒绝） |
+| 磁盘清理 | Win32 对话框 | sparse | 0 | 视觉兜底（当前拒绝） |
+| 命令提示符 / PS 5 | 控制台子系统 | — | — | 环境受限（`launch-blocked`） |
+| 性能监视器 | MMC | — | — | 需管理员会话（`NEEDS_ELEVATION`） |
+
+`verdict = coverage-10plus`、`sampled = 13/16`、`a11yOperable = 8`、`needsVisualFallback = 4`、
+`domChannelRequired = 1`、`launchBlocked = 3`；均值 214 ms、最慢 Word 1249 ms（Office 树的
+采集成本是普通应用的 4~8 倍）。
+
+**产品化判定（P2 要求的正是这一段）**：16 家里 8 家走语义树；4 家（任务管理器/字符映射表/
+系统信息/磁盘清卷）树非空但不可按名字定位，产品处置是**视觉兜底**——当前实现为拒绝并回
+`CAPABILITY_UNAVAILABLE`，这是已登记缺口而不是设计终局；1 家（Edge）只暴露外壳，明确走
+DOM/CDP；3 家因环境或权限限制不参与统计，单独列在 `launchBlocked` 而不是混进 `sampled`。
+
+**为什么这 4 个 sparse 可信**：13 家的最深样本全部 `complete: true`（cut = 0、预算未触顶），
+即树在 depth 8 内确实看全了。这排除了「因为没展开所以看着稀疏」的误判——视觉兜底对它们
+是真实需求。反过来，8 家 good 的应用在 depth 4 就已经 good，清单里没有 `deferred`。
+
+真机踩到八条，均已落到代码：
+
+| # | 现象 | 处理 |
+| --- | --- | --- |
+| 1 | `snapshot.truncated` **恒为 true**（桥无法证明自己没漏），用它判完整度等于永远判 deferred | 完整度下沉到骨架逐节点 `truncated` 标记 + 节点预算 1500；新增 `treeCompleteness` / `assessSnapshot`，感知层同步改用（原来用 `nodeCount < 1400` 猜） |
+| 2 | 会**误采别的应用**：拉起 PS 5 时恰好弹出输入法安装器窗口，「唯一新窗口」被当成目标，结论完全失真 | 认领窗口改为显式 `appIds` 白名单，匹配不上就继续等，不做猜测 |
+| 3 | **闪屏会换壳**：Office 启动窗口几秒后被主窗口替换，之后全部 `OBSERVATION_FAILED` | 采样前再 `resolveTarget`（优先标题带文件名），采样失败也重认领；实测 Word `264526→264962`、Excel `264970→330130` |
+| 4 | **单实例应用没有新窗口**：任务管理器早已开着，spawn 只是聚焦旧窗口 | `owned:false` 只读采样，收尾**跳过关闭**（不是我们拉起的窗口） |
+| 5 | **UWP 窗口不在自己进程里**：计算器/设置的窗口属于 `ApplicationFrameHost.exe` | 白名单含宿主进程名 + 「拉起前后 hwnd 差集」定位 |
+| 6 | **控制台进程在当前执行环境拿不到窗口**：`cmd`/`powershell` spawn 后立刻 `exitCode 0` | 记 `launch-blocked` + `harnessNote`，明确不是「应用不可自动化」；控制台家族用 Windows 终端覆盖 |
+| 7 | **`EACCES` 不是「没装」**：性能监视器需要管理员权限 | 单独判 `NEEDS_ELEVATION` |
+| 8 | **浏览器树 good 也只是外壳**：Edge 有 Tab/ToolBar/Button，无 `Document`/`Edit` | 按家族判 `dom-channel-required`，内容容器缺失即走 CDP |
+
+一处自我修正：§3.4 曾把 `taskmgr` 的 `sparse` 归因为「骨架截断造成的误判」。用完整度判据
+复核后确认，它在 depth 8、树完整（cut = 0）时仍是 16 个 `Pane`、0 个有名字的可操作节点——
+它确实不可按名字定位，需要视觉兜底。
+
 ---
 
 ## 4. P1 交付清单
@@ -314,7 +374,7 @@ Excel 的「公式栏 vs 网格」与 Word 的「保存确认框 = depth 1 嵌�
 | L1 协议 | `mcp-server.mjs` | stdio JSON-RPC 2.0；`initialize` / `tools/list` / `tools/call` / `ping`；stdout 仅协议帧 |
 | L2 编排 | `agent.mjs` | 11 个工具定义与分发、三级降级通道决策、`pid` 精确目标 |
 | L3 护栏 | `policy-guard.mjs` / `policy-load.mjs` / `budget.mjs` / `telemetry.mjs` | 白名单 + 注入扫描 + 一次性确认令牌、外部策略硬化、预算原子预扣熔断、脱敏事件 |
-| L3 感知 | `perception.mjs` / `app-registry.mjs` / `tree-quality.mjs` / `target-pick.mjs` | 稳定 ref / 骨架树 / 下钻、TTL 缓存、通道矩阵、实测树质量判定与回写、写入落点选择（按可写面积） |
+| L3 感知 | `perception.mjs` / `app-registry.mjs` / `tree-quality.mjs` / `target-pick.mjs` | 稳定 ref / 骨架树 / 下钻、TTL 缓存、通道矩阵、实测树质量与**完整度**判定及回写、写入落点选择（按可写面积） |
 | L3 验证 | `verifier.mjs` | Observe→Act→Verify；旧 ref 硬返回 `STALE_REF`；有界重试 |
 | L3 可靠性 | `bridge-lifecycle.mjs` | 桥崩溃指数退避、窗口内重启上限、稳定重置、僵死回收、优雅退出 |
 | L4 后端 | `contract.mjs` / `mock.mjs` / `windows.mjs` / `windows-uia.ps1` | 可插拔契约；mock 故障注入；Windows 长驻桥客户端 + tasklist 回落；UIA 长驻桥（599 行） |
@@ -346,11 +406,12 @@ Excel 的「公式栏 vs 网格」与 Word 的「保存确认框 = depth 1 嵌�
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
-| Node 单测 | `cd desktop/desktop-agent && npm test` | **91/91 通过**（10 个测试文件，约 20 s） |
+| Node 单测 | `cd desktop/desktop-agent && npm test` | **96/96 通过**（10 个测试文件，约 29 s） |
 | 真机 GUI 闭环 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:gui` | **4/4 verified**，`gui-unblocked`；连续 4 次稳定 |
 | 真实应用写入 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:real-app` | **3/3 步骤**，`real-app-write-verified`，磁盘 `persisted:true` |
 | 桥生命周期 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:lifecycle` | `lifecycle-managed`：ping 4 ms、强杀自愈 2/2、崩溃循环零新增 spawn、优雅退出 208 ms |
-| 真实应用覆盖率 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run coverage` | 5/5 树可用，均值 106 ms，无失败 |
+| 覆盖率矩阵（主动） | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:coverage -- --with-office` | `coverage-10plus`：13/16 采到树，8 家语义树 / 4 家视觉兜底 / 1 家 DOM，3 家环境受限；均值 214 ms |
+| 覆盖率采样（被动） | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run coverage` | 5/5 树可用，均值 106 ms，无失败 |
 | P0 探针 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run probe` | `continue`；6 窗口 / 93 ms，能力 6/7 可用 |
 | MCP stdio 冒烟 | `printf … \| node src/index.mjs` | `initialize` 返回 `2025-03-26`；`tools/list` 11 个工具；`desktop_status` 默认 `enabled:false` |
 | 外部策略硬化 | 注入含 `bypass` / `allowScreenshot:true` / `maxSteps:9999` 的策略 | 生效值 `manual` / `false` / `false` / `maxSteps=100`；`enabled` 与白名单保留 |
@@ -407,8 +468,9 @@ CI 若用 MSVC 工具链应能直接跑全量。
 
 **准入（真机闭环 / 覆盖率 / 写入闭环 / 故障注入均已达成，以下为放量前置）：**
 
-1. 覆盖率采样已跑通 5 个真实窗口；需扩到 **≥ 10 个**真实目标应用，并对 `sparse/empty`
-   应用明确「视觉兜底 / 拒绝」的产品化判定（当前是拒绝）；
+1. ~~覆盖率扩到 ≥ 10 个真实目标应用~~ ✅ 已完成（§3.10）：主动拉起 16 个目标、13 个采到树
+   （8 家语义树可操作 / 4 家视觉兜底 / 1 家 DOM），`sparse` 判定已由完整度判据复核为真；
+   视觉兜底通道本身仍未实现，这 4 家当前按「拒绝」处理并如实报 `CAPABILITY_UNAVAILABLE`；
 2. ~~真实应用写用例从 1 个扩到 ≥ 5 个~~ ✅ 已完成（§3.9）：5 个用例覆盖经典 Win32 /
    Office 文档模型 / Office 网格 / Shell / 浏览器外壳，其中 4 家以读盘或文件系统为证据
    首轮全绿，浏览器按策略拒绝 GUI；`expectChange` 与副作用校验的通用性由矩阵本身证明；
@@ -432,6 +494,8 @@ CI 若用 MSVC 工具链应能直接跑全量。
 (cd desktop/desktop-agent && npm test)
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run probe)
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run coverage)
+(cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:coverage -- --with-office)
+(cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:multi-app -- --wait-idle 90)
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:gui)
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:real-app)
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:lifecycle)

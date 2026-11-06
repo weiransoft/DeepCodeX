@@ -12,7 +12,7 @@
 
 import { ErrorCode, AgentError } from "../errors.mjs";
 import { detectInjection } from "./policy-guard.mjs";
-import { assessTree } from "./tree-quality.mjs";
+import { assessSnapshot } from "./tree-quality.mjs";
 
 function flatten(nodes, out = []) {
   for (const n of nodes ?? []) {
@@ -126,11 +126,9 @@ export class Perception {
     // 用实测树质量判定通道，而不是靠进程名猜（Electron 应用的进程名里
     // 并没有 "electron"，猜不出来）。结论回写注册表，后续 channelMatrix 生效。
     // 判定依据用**完整树**（桥已回传，比骨架深 2 层），避免骨架截断造成的
-    // 假阳性；只有节点预算被耗尽（真没看全）才降级为 deferred。
-    const qualityTree = result.fullTree ?? tree;
-    const treeQuality = assessTree(qualityTree, {
-      complete: (result.nodeCount ?? flatten(qualityTree).length) < 1400,
-    });
+    // 假阳性；完整度由 assessSnapshot 按骨架上的逐节点 truncated 标记 + 节点预算
+    // 算出——不能用 `!truncated`（桥侧恒为 true）也不用 nodeCount 猜。
+    const treeQuality = assessSnapshot(result);
     this.onQuality?.(app, treeQuality);
     this.telemetry?.emit("observe.snapshot", {
       appId: app.appId,

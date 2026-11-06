@@ -19,6 +19,7 @@
     "verify:gui": "node scripts/verify-gui.mjs",
     "verify:real-app": "node scripts/verify-real-app.mjs",
     "verify:multi-app": "node scripts/verify-multi-app.mjs",
+    "verify:coverage": "node scripts/verify-app-coverage.mjs",
     "verify:lifecycle": "node scripts/verify-lifecycle.mjs",
     "register:mcp": "node scripts/register-mcp.mjs"
   },

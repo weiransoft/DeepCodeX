@@ -110,3 +110,53 @@ export function channelForQuality(quality) {
   if (quality.verdict === "deferred") return "gui-a11y";
   return "gui-visual";
 }
+
+/**
+ * 判断一次快照「看全了没有」。
+ *
+ * 为什么不能直接用 `snapshot.truncated`：桥侧为了不撒谎，任何快照都回
+ * `truncated: true`（它无法证明自己没漏），于是这个字段恒真、没有任何区分度。
+ * 真正的信息在骨架节点上——`Copy-Skeleton` 只给**被剪掉孩子**的节点打
+ * `truncated: true`，所以「没有任何节点带这个标记」才是「深度内确实看全了」。
+ *
+ * 另有一条独立的预算边界：节点数到达 `MaxNodes`（桥侧 1500）时，枚举会被
+ * 提前掐断，即使每个节点都没被标记，也不能算完整。
+ *
+ * 这个区分直接决定产品行为：
+ *  - complete=true  + 没有可操作节点 → 真的 sparse，该走视觉兜底或拒绝；
+ *  - complete=false + 没有可操作节点 → 只是没看到，应该先下钻，别急着判死。
+ */
+export function treeCompleteness(snap, options = {}) {
+  const maxNodes = options.maxNodes ?? 1500;
+  const skeleton = flatten(snap?.tree ?? []);
+  const cutNodes = skeleton.filter((n) => n?.truncated === true).length;
+  // nodeCount 是桥侧实际枚举的节点总数（含骨架之外的两层），比 skeleton.length 更准
+  const enumerated = Number.isFinite(snap?.nodeCount) ? snap.nodeCount : flatten(snap?.fullTree ?? snap?.tree ?? []).length;
+  const budgetHit = enumerated >= maxNodes;
+  const complete = cutNodes === 0 && !budgetHit;
+  return {
+    complete,
+    cutNodes,
+    enumerated,
+    maxNodes,
+    budgetHit,
+    reason: complete
+      ? "深度预算内没有未展开的子树"
+      : budgetHit
+        ? `节点数到达预算上限 ${maxNodes}，枚举被提前掐断`
+        : `${cutNodes} 个节点在深度边界上仍有孩子，需下钻`,
+  };
+}
+
+/**
+ * 一次快照 → 树质量。把「完整度」与「质量」绑在一起判定，避免调用方
+ * 各自用 nodeCount 猜一个 complete 出来（猜错的代价是把可下钻的应用判死）。
+ */
+export function assessSnapshot(snap, options = {}) {
+  const completeness = treeCompleteness(snap, options);
+  const quality = assessTree(snap?.fullTree ?? snap?.tree ?? [], {
+    ...options,
+    complete: completeness.complete,
+  });
+  return { ...quality, completeness };
+}

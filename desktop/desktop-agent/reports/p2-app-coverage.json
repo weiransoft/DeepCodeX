@@ -1,0 +1,1878 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-11-06T08:23:54.850Z",
+  "platform": "win32",
+  "session": "Console",
+  "privacy": {
+    "windowTitlesPersisted": false,
+    "note": "只记标题长度；不截图；只拉起自建空白/临时文件实例"
+  },
+  "depths": [
+    4,
+    8
+  ],
+  "mode": "active-launch",
+  "apps": [
+    {
+      "id": "notepad",
+      "label": "记事本",
+      "family": "win32-classic",
+      "note": null,
+      "installed": true,
+      "verdict": "sampled",
+      "depths": [
+        {
+          "depth": 4,
+          "ok": true,
+          "elapsedMs": 161.94,
+          "nodeCount": 69,
+          "returnedNodes": 35,
+          "actionableNodes": 29,
+          "namedNodes": 23,
+          "quality": {
+            "nodeCount": 69,
+            "actionableCount": 33,
+            "namedCount": 57,
+            "namedActionableCount": 32,
+            "namedRatio": 0.83,
+            "complete": false,
+            "verdict": "good",
+            "reason": "有名字的可操作节点充足，可按名字定位",
+            "completeness": {
+              "complete": false,
+              "cutNodes": 1,
+              "enumerated": 69,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "1 个节点在深度边界上仍有孩子，需下钻"
+            }
+          },
+          "channel": "gui-a11y",
+          "contentSurface": [
+            "Document"
+          ],
+          "topRoles": [
+            "Button:11",
+            "Pane:9",
+            "Text:6",
+            "MenuItem:3",
+            "Window:2",
+            "Document:1"
+          ],
+          "roles": {
+            "Window": 2,
+            "Pane": 9,
+            "Document": 1,
+            "Tab": 1,
+            "List": 1,
+            "Button": 11,
+            "MenuBar": 1,
+            "MenuItem": 3,
+            "Text": 6
+          }
+        },
+        {
+          "depth": 8,
+          "ok": true,
+          "elapsedMs": 144.07,
+          "nodeCount": 69,
+          "returnedNodes": 69,
+          "actionableNodes": 37,
+          "namedNodes": 57,
+          "quality": {
+            "nodeCount": 69,
+            "actionableCount": 33,
+            "namedCount": 57,
+            "namedActionableCount": 32,
+            "namedRatio": 0.83,
+            "complete": true,
+            "verdict": "good",
+            "reason": "有名字的可操作节点充足，可按名字定位",
+            "completeness": {
+              "complete": true,
+              "cutNodes": 0,
+              "enumerated": 69,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "深度预算内没有未展开的子树"
+            }
+          },
+          "channel": "gui-a11y",
+          "contentSurface": [
+            "Document"
+          ],
+          "topRoles": [
+            "Text:23",
+            "TabItem:17",
+            "Button:11",
+            "Pane:9",
+            "MenuItem:3",
+            "Window:2"
+          ],
+          "roles": {
+            "Window": 2,
+            "Pane": 9,
+            "Document": 1,
+            "Tab": 1,
+            "List": 1,
+            "TabItem": 17,
+            "Text": 23,
+            "Button": 11,
+            "MenuBar": 1,
+            "MenuItem": 3
+          }
+        }
+      ],
+      "dir": null,
+      "spawnPid": 23196,
+      "window": {
+        "appId": "notepad",
+        "processName": "Notepad.exe",
+        "pid": 20632,
+        "hwnd": 1378218,
+        "matchedBy": "new-window",
+        "owned": true,
+        "waitedMs": 520,
+        "totalWindows": 11,
+        "enumSource": "uia",
+        "titleLength": 3
+      },
+      "ready": {
+        "ready": true,
+        "waitedMs": 792,
+        "role": "Document|Edit"
+      },
+      "decision": "operate-a11y",
+      "reason": "depth 4 起有 32 个有名字的可操作节点，可按名字定位",
+      "currentProduct": "走语义树（gui-a11y）",
+      "minDepth": 4,
+      "close": {
+        "graceful": true,
+        "forced": false,
+        "skipped": false
+      }
+    },
+    {
+      "id": "calc",
+      "label": "计算器",
+      "family": "uwp-xaml",
+      "note": null,
+      "installed": true,
+      "verdict": "sampled",
+      "depths": [
+        {
+          "depth": 4,
+          "ok": true,
+          "elapsedMs": 164.24,
+          "nodeCount": 54,
+          "returnedNodes": 25,
+          "actionableNodes": 18,
+          "namedNodes": 21,
+          "quality": {
+            "nodeCount": 54,
+            "actionableCount": 37,
+            "namedCount": 50,
+            "namedActionableCount": 37,
+            "namedRatio": 0.93,
+            "complete": false,
+            "verdict": "good",
+            "reason": "有名字的可操作节点充足，可按名字定位",
+            "completeness": {
+              "complete": false,
+              "cutNodes": 5,
+              "enumerated": 54,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "5 个节点在深度边界上仍有孩子，需下钻"
+            }
+          },
+          "channel": "gui-a11y",
+          "contentSurface": [],
+          "topRoles": [
+            "Button:7",
+            "Group:6",
+            "Text:5",
+            "Window:3",
+            "MenuBar:1",
+            "MenuItem:1"
+          ],
+          "roles": {
+            "Window": 3,
+            "MenuBar": 1,
+            "MenuItem": 1,
+            "Button": 7,
+            "Text": 5,
+            "Custom": 1,
+            "Group": 6,
+            "Pane": 1
+          }
+        },
+        {
+          "depth": 8,
+          "ok": true,
+          "elapsedMs": 145.6,
+          "nodeCount": 54,
+          "returnedNodes": 54,
+          "actionableNodes": 44,
+          "namedNodes": 50,
+          "quality": {
+            "nodeCount": 54,
+            "actionableCount": 37,
+            "namedCount": 50,
+            "namedActionableCount": 37,
+            "namedRatio": 0.93,
+            "complete": true,
+            "verdict": "good",
+            "reason": "有名字的可操作节点充足，可按名字定位",
+            "completeness": {
+              "complete": true,
+              "cutNodes": 0,
+              "enumerated": 54,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "深度预算内没有未展开的子树"
+            }
+          },
+          "channel": "gui-a11y",
+          "contentSurface": [],
+          "topRoles": [
+            "Button:36",
+            "Group:6",
+            "Text:5",
+            "Window:3",
+            "MenuBar:1",
+            "MenuItem:1"
+          ],
+          "roles": {
+            "Window": 3,
+            "MenuBar": 1,
+            "MenuItem": 1,
+            "Button": 36,
+            "Text": 5,
+            "Custom": 1,
+            "Group": 6,
+            "Pane": 1
+          }
+        }
+      ],
+      "dir": null,
+      "spawnPid": 11944,
+      "window": {
+        "appId": "applicationframehost",
+        "processName": "ApplicationFrameHost.exe",
+        "pid": 6592,
+        "hwnd": 723476,
+        "matchedBy": "new-window",
+        "owned": true,
+        "waitedMs": 762,
+        "totalWindows": 11,
+        "enumSource": "uia",
+        "titleLength": 3
+      },
+      "ready": {
+        "ready": true,
+        "waitedMs": 0,
+        "skipped": true
+      },
+      "decision": "operate-a11y",
+      "reason": "depth 4 起有 37 个有名字的可操作节点，可按名字定位",
+      "currentProduct": "走语义树（gui-a11y）",
+      "minDepth": 4,
+      "close": {
+        "graceful": false,
+        "forced": true,
+        "skipped": false
+      }
+    },
+    {
+      "id": "paint",
+      "label": "画图",
+      "family": "uwp-desktop-bridge",
+      "note": null,
+      "installed": true,
+      "verdict": "sampled",
+      "depths": [
+        {
+          "depth": 4,
+          "ok": true,
+          "elapsedMs": 125.92,
+          "nodeCount": 41,
+          "returnedNodes": 21,
+          "actionableNodes": 18,
+          "namedNodes": 15,
+          "quality": {
+            "nodeCount": 41,
+            "actionableCount": 22,
+            "namedCount": 34,
+            "namedActionableCount": 22,
+            "namedRatio": 0.83,
+            "complete": false,
+            "verdict": "good",
+            "reason": "有名字的可操作节点充足，可按名字定位",
+            "completeness": {
+              "complete": false,
+              "cutNodes": 4,
+              "enumerated": 41,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "4 个节点在深度边界上仍有孩子，需下钻"
+            }
+          },
+          "channel": "gui-a11y",
+          "contentSurface": [],
+          "topRoles": [
+            "Button:9",
+            "Pane:3",
+            "Slider:3",
+            "Window:1",
+            "Custom:1",
+            "MenuBar:1"
+          ],
+          "roles": {
+            "Window": 1,
+            "Pane": 3,
+            "Custom": 1,
+            "MenuBar": 1,
+            "Button": 9,
+            "Group": 1,
+            "Slider": 3,
+            "Text": 1,
+            "ComboBox": 1
+          }
+        },
+        {
+          "depth": 8,
+          "ok": true,
+          "elapsedMs": 233.55,
+          "nodeCount": 96,
+          "returnedNodes": 49,
+          "actionableNodes": 25,
+          "namedNodes": 34,
+          "quality": {
+            "nodeCount": 49,
+            "actionableCount": 22,
+            "namedCount": 34,
+            "namedActionableCount": 22,
+            "namedRatio": 0.69,
+            "complete": true,
+            "verdict": "good",
+            "reason": "有名字的可操作节点充足，可按名字定位",
+            "completeness": {
+              "complete": true,
+              "cutNodes": 0,
+              "enumerated": 96,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "深度预算内没有未展开的子树"
+            }
+          },
+          "channel": "gui-a11y",
+          "contentSurface": [
+            "Edit"
+          ],
+          "topRoles": [
+            "Button:14",
+            "Group:10",
+            "unknown:8",
+            "Pane:4",
+            "MenuItem:3",
+            "Slider:3"
+          ],
+          "roles": {
+            "Window": 1,
+            "Pane": 4,
+            "Custom": 1,
+            "MenuBar": 1,
+            "MenuItem": 3,
+            "Button": 14,
+            "Group": 10,
+            "unknown": 8,
+            "ScrollBar": 1,
+            "Slider": 3,
+            "Text": 1,
+            "ComboBox": 1,
+            "Edit": 1
+          }
+        }
+      ],
+      "dir": null,
+      "spawnPid": 6224,
+      "window": {
+        "appId": "mspaint",
+        "processName": "mspaint.exe",
+        "pid": 6224,
+        "hwnd": 591782,
+        "matchedBy": "new-window",
+        "owned": true,
+        "waitedMs": 632,
+        "totalWindows": 11,
+        "enumSource": "uia",
+        "titleLength": 8
+      },
+      "ready": {
+        "ready": true,
+        "waitedMs": 0,
+        "skipped": true
+      },
+      "decision": "operate-a11y",
+      "reason": "depth 4 起有 22 个有名字的可操作节点，可按名字定位",
+      "currentProduct": "走语义树（gui-a11y）",
+      "minDepth": 4,
+      "close": {
+        "graceful": true,
+        "forced": false,
+        "skipped": false
+      }
+    },
+    {
+      "id": "explorer",
+      "label": "文件资源管理器",
+      "family": "shell",
+      "note": null,
+      "installed": true,
+      "verdict": "sampled",
+      "depths": [
+        {
+          "depth": 4,
+          "ok": true,
+          "elapsedMs": 193.56,
+          "nodeCount": 83,
+          "returnedNodes": 50,
+          "actionableNodes": 35,
+          "namedNodes": 37,
+          "quality": {
+            "nodeCount": 83,
+            "actionableCount": 37,
+            "namedCount": 59,
+            "namedActionableCount": 36,
+            "namedRatio": 0.71,
+            "complete": false,
+            "verdict": "good",
+            "reason": "有名字的可操作节点充足，可按名字定位",
+            "completeness": {
+              "complete": false,
+              "cutNodes": 23,
+              "enumerated": 83,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "23 个节点在深度边界上仍有孩子，需下钻"
+            }
+          },
+          "channel": "gui-a11y",
+          "contentSurface": [
+            "Edit"
+          ],
+          "topRoles": [
+            "Button:16",
+            "SplitButton:10",
+            "Pane:8",
+            "Group:5",
+            ":3",
+            "List:2"
+          ],
+          "roles": {
+            "Window": 1,
+            "Pane": 8,
+            "StatusBar": 1,
+            "Group": 5,
+            "List": 2,
+            "Tab": 1,
+            "Button": 16,
+            "": 3,
+            "Edit": 2,
+            "SplitButton": 10,
+            "Image": 1
+          }
+        },
+        {
+          "depth": 8,
+          "ok": true,
+          "elapsedMs": 236.67,
+          "nodeCount": 87,
+          "returnedNodes": 87,
+          "actionableNodes": 55,
+          "namedNodes": 59,
+          "quality": {
+            "nodeCount": 87,
+            "actionableCount": 37,
+            "namedCount": 59,
+            "namedActionableCount": 36,
+            "namedRatio": 0.68,
+            "complete": true,
+            "verdict": "good",
+            "reason": "有名字的可操作节点充足，可按名字定位",
+            "completeness": {
+              "complete": true,
+              "cutNodes": 0,
+              "enumerated": 87,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "深度预算内没有未展开的子树"
+            }
+          },
+          "channel": "gui-a11y",
+          "contentSurface": [
+            "Edit"
+          ],
+          "topRoles": [
+            "Button:17",
+            "SplitButton:14",
+            "Text:12",
+            "Image:12",
+            "Pane:9",
+            "Group:5"
+          ],
+          "roles": {
+            "Window": 1,
+            "Pane": 9,
+            "StatusBar": 1,
+            "Group": 5,
+            "Text": 12,
+            "RadioButton": 2,
+            "List": 2,
+            "Header": 1,
+            "SplitButton": 14,
+            "unknown": 4,
+            "Tab": 1,
+            "TabItem": 1,
+            "Image": 12,
+            "Button": 17,
+            "": 3,
+            "Edit": 2
+          }
+        }
+      ],
+      "dir": null,
+      "spawnPid": 22400,
+      "window": {
+        "appId": "explorer",
+        "processName": "explorer.exe",
+        "pid": 22316,
+        "hwnd": 264310,
+        "matchedBy": "new-window",
+        "owned": true,
+        "waitedMs": 1165,
+        "totalWindows": 11,
+        "enumSource": "uia",
+        "titleLength": 33
+      },
+      "ready": {
+        "ready": true,
+        "waitedMs": 752,
+        "role": "List|ListItem"
+      },
+      "decision": "operate-a11y",
+      "reason": "depth 4 起有 36 个有名字的可操作节点，可按名字定位",
+      "currentProduct": "走语义树（gui-a11y）",
+      "minDepth": 4,
+      "close": {
+        "graceful": false,
+        "forced": true,
+        "skipped": false
+      }
+    },
+    {
+      "id": "cmd",
+      "label": "命令提示符",
+      "family": "console",
+      "note": null,
+      "installed": true,
+      "verdict": "launch-blocked",
+      "depths": [],
+      "dir": null,
+      "spawnPid": 21216,
+      "error": {
+        "code": "PROCESS_EXITED",
+        "message": "进程启动后立即退出（exitCode=0），未产生窗口",
+        "harnessNote": "控制台子系统进程在当前执行环境拿不到控制台窗口（GUI 应用正常）。这是 harness 限制，不是应用不可自动化；控制台家族另用 Windows 终端（GUI 子系统）覆盖。"
+      },
+      "decision": "reject",
+      "reason": "进程启动后立即退出（exitCode=0），未产生窗口",
+      "close": {
+        "graceful": false,
+        "forced": false,
+        "skipped": false,
+        "alreadyExited": true
+      }
+    },
+    {
+      "id": "ps5",
+      "label": "Windows PowerShell 5",
+      "family": "console",
+      "note": null,
+      "installed": true,
+      "verdict": "launch-blocked",
+      "depths": [],
+      "dir": null,
+      "spawnPid": 20596,
+      "error": {
+        "code": "PROCESS_EXITED",
+        "message": "进程启动后立即退出（exitCode=0），未产生窗口",
+        "harnessNote": "控制台子系统进程在当前执行环境拿不到控制台窗口（GUI 应用正常）。这是 harness 限制，不是应用不可自动化；控制台家族另用 Windows 终端（GUI 子系统）覆盖。"
+      },
+      "decision": "reject",
+      "reason": "进程启动后立即退出（exitCode=0），未产生窗口",
+      "close": {
+        "graceful": false,
+        "forced": false,
+        "skipped": false,
+        "alreadyExited": true
+      }
+    },
+    {
+      "id": "windowsterminal",
+      "label": "Windows 终端",
+      "family": "console-modern",
+      "note": "GUI 子系统的控制台宿主；cmd/powershell 这类控制台进程在当前 harness 里分配不到窗口",
+      "installed": true,
+      "verdict": "sampled",
+      "depths": [
+        {
+          "depth": 4,
+          "ok": true,
+          "elapsedMs": 81.53,
+          "nodeCount": 17,
+          "returnedNodes": 10,
+          "actionableNodes": 9,
+          "namedNodes": 5,
+          "quality": {
+            "nodeCount": 17,
+            "actionableCount": 8,
+            "namedCount": 11,
+            "namedActionableCount": 7,
+            "namedRatio": 0.65,
+            "complete": false,
+            "verdict": "good",
+            "reason": "有名字的可操作节点充足，可按名字定位",
+            "completeness": {
+              "complete": false,
+              "cutNodes": 2,
+              "enumerated": 17,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "2 个节点在深度边界上仍有孩子，需下钻"
+            }
+          },
+          "channel": "gui-a11y",
+          "contentSurface": [],
+          "topRoles": [
+            "Pane:2",
+            "Window:1",
+            "Tab:1",
+            "List:1",
+            "TabItem:1",
+            "SplitButton:1"
+          ],
+          "roles": {
+            "Window": 1,
+            "Pane": 2,
+            "Tab": 1,
+            "List": 1,
+            "TabItem": 1,
+            "SplitButton": 1,
+            "Custom": 1,
+            "Text": 1,
+            "ScrollBar": 1
+          }
+        },
+        {
+          "depth": 8,
+          "ok": true,
+          "elapsedMs": 70.14,
+          "nodeCount": 17,
+          "returnedNodes": 17,
+          "actionableNodes": 15,
+          "namedNodes": 11,
+          "quality": {
+            "nodeCount": 17,
+            "actionableCount": 8,
+            "namedCount": 11,
+            "namedActionableCount": 7,
+            "namedRatio": 0.65,
+            "complete": true,
+            "verdict": "good",
+            "reason": "有名字的可操作节点充足，可按名字定位",
+            "completeness": {
+              "complete": true,
+              "cutNodes": 0,
+              "enumerated": 17,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "深度预算内没有未展开的子树"
+            }
+          },
+          "channel": "gui-a11y",
+          "contentSurface": [],
+          "topRoles": [
+            "Button:5",
+            "Pane:2",
+            "Text:2",
+            "Window:1",
+            "Tab:1",
+            "List:1"
+          ],
+          "roles": {
+            "Window": 1,
+            "Pane": 2,
+            "Tab": 1,
+            "List": 1,
+            "TabItem": 1,
+            "Image": 1,
+            "Text": 2,
+            "Button": 5,
+            "SplitButton": 1,
+            "Custom": 1,
+            "ScrollBar": 1
+          }
+        }
+      ],
+      "dir": null,
+      "spawnPid": 1868,
+      "window": {
+        "appId": "windowsterminal",
+        "processName": "WindowsTerminal.exe",
+        "pid": 10884,
+        "hwnd": 395982,
+        "matchedBy": "new-window",
+        "owned": true,
+        "waitedMs": 427,
+        "totalWindows": 11,
+        "enumSource": "uia",
+        "titleLength": 18
+      },
+      "ready": {
+        "ready": true,
+        "waitedMs": 0,
+        "skipped": true
+      },
+      "decision": "operate-a11y",
+      "reason": "depth 4 起有 7 个有名字的可操作节点，可按名字定位",
+      "currentProduct": "走语义树（gui-a11y）",
+      "minDepth": 4,
+      "close": {
+        "graceful": true,
+        "forced": false,
+        "skipped": false
+      }
+    },
+    {
+      "id": "taskmgr",
+      "label": "任务管理器",
+      "family": "win32-modern",
+      "note": null,
+      "installed": true,
+      "verdict": "sampled",
+      "depths": [
+        {
+          "depth": 4,
+          "ok": true,
+          "elapsedMs": 63.35,
+          "nodeCount": 16,
+          "returnedNodes": 16,
+          "actionableNodes": 11,
+          "namedNodes": 9,
+          "quality": {
+            "nodeCount": 16,
+            "actionableCount": 0,
+            "namedCount": 9,
+            "namedActionableCount": 0,
+            "namedRatio": 0.56,
+            "complete": true,
+            "verdict": "sparse",
+            "reason": "整棵树都没有有名字的可操作节点，按名字定位不可行",
+            "completeness": {
+              "complete": true,
+              "cutNodes": 0,
+              "enumerated": 16,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "深度预算内没有未展开的子树"
+            }
+          },
+          "channel": "gui-visual",
+          "contentSurface": [],
+          "topRoles": [
+            "Pane:15",
+            "Window:1"
+          ],
+          "roles": {
+            "Window": 1,
+            "Pane": 15
+          }
+        },
+        {
+          "depth": 8,
+          "ok": true,
+          "elapsedMs": 58.1,
+          "nodeCount": 16,
+          "returnedNodes": 16,
+          "actionableNodes": 11,
+          "namedNodes": 9,
+          "quality": {
+            "nodeCount": 16,
+            "actionableCount": 0,
+            "namedCount": 9,
+            "namedActionableCount": 0,
+            "namedRatio": 0.56,
+            "complete": true,
+            "verdict": "sparse",
+            "reason": "整棵树都没有有名字的可操作节点，按名字定位不可行",
+            "completeness": {
+              "complete": true,
+              "cutNodes": 0,
+              "enumerated": 16,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "深度预算内没有未展开的子树"
+            }
+          },
+          "channel": "gui-visual",
+          "contentSurface": [],
+          "topRoles": [
+            "Pane:15",
+            "Window:1"
+          ],
+          "roles": {
+            "Window": 1,
+            "Pane": 15
+          }
+        }
+      ],
+      "dir": null,
+      "spawnPid": 21148,
+      "window": {
+        "appId": "taskmgr",
+        "processName": "Taskmgr.exe",
+        "pid": 2616,
+        "hwnd": 592076,
+        "matchedBy": "new-window",
+        "owned": true,
+        "waitedMs": 822,
+        "totalWindows": 11,
+        "enumSource": "uia",
+        "titleLength": 5
+      },
+      "ready": {
+        "ready": true,
+        "waitedMs": 0,
+        "skipped": true
+      },
+      "decision": "visual-fallback",
+      "reason": "最深只到 sparse：整棵树都没有有名字的可操作节点，按名字定位不可行（命名可操作 0 个）",
+      "currentProduct": "当前拒绝；需视觉兜底才能支持",
+      "minDepth": null,
+      "close": {
+        "graceful": false,
+        "forced": true,
+        "skipped": false
+      }
+    },
+    {
+      "id": "charmap",
+      "label": "字符映射表",
+      "family": "win32-dialog",
+      "note": null,
+      "installed": true,
+      "verdict": "sampled",
+      "depths": [
+        {
+          "depth": 4,
+          "ok": true,
+          "elapsedMs": 76.19,
+          "nodeCount": 14,
+          "returnedNodes": 14,
+          "actionableNodes": 12,
+          "namedNodes": 12,
+          "quality": {
+            "nodeCount": 14,
+            "actionableCount": 1,
+            "namedCount": 12,
+            "namedActionableCount": 1,
+            "namedRatio": 0.86,
+            "complete": true,
+            "verdict": "sparse",
+            "reason": "有名字的可操作节点仅 1 个（阈值 3），定位可靠性不足",
+            "completeness": {
+              "complete": true,
+              "cutNodes": 0,
+              "enumerated": 14,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "深度预算内没有未展开的子树"
+            }
+          },
+          "channel": "gui-visual",
+          "contentSurface": [
+            "Edit"
+          ],
+          "topRoles": [
+            "Pane:12",
+            "Window:1",
+            "Edit:1"
+          ],
+          "roles": {
+            "Window": 1,
+            "Pane": 12,
+            "Edit": 1
+          }
+        },
+        {
+          "depth": 8,
+          "ok": true,
+          "elapsedMs": 67.24,
+          "nodeCount": 14,
+          "returnedNodes": 14,
+          "actionableNodes": 12,
+          "namedNodes": 12,
+          "quality": {
+            "nodeCount": 14,
+            "actionableCount": 1,
+            "namedCount": 12,
+            "namedActionableCount": 1,
+            "namedRatio": 0.86,
+            "complete": true,
+            "verdict": "sparse",
+            "reason": "有名字的可操作节点仅 1 个（阈值 3），定位可靠性不足",
+            "completeness": {
+              "complete": true,
+              "cutNodes": 0,
+              "enumerated": 14,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "深度预算内没有未展开的子树"
+            }
+          },
+          "channel": "gui-visual",
+          "contentSurface": [
+            "Edit"
+          ],
+          "topRoles": [
+            "Pane:12",
+            "Window:1",
+            "Edit:1"
+          ],
+          "roles": {
+            "Window": 1,
+            "Pane": 12,
+            "Edit": 1
+          }
+        }
+      ],
+      "dir": null,
+      "spawnPid": 23404,
+      "window": {
+        "appId": "charmap",
+        "processName": "charmap.exe",
+        "pid": 23404,
+        "hwnd": 788724,
+        "matchedBy": "new-window",
+        "owned": true,
+        "waitedMs": 414,
+        "totalWindows": 12,
+        "enumSource": "uia",
+        "titleLength": 5
+      },
+      "ready": {
+        "ready": true,
+        "waitedMs": 0,
+        "skipped": true
+      },
+      "decision": "visual-fallback",
+      "reason": "最深只到 sparse：有名字的可操作节点仅 1 个（阈值 3），定位可靠性不足（命名可操作 1 个）",
+      "currentProduct": "当前拒绝；需视觉兜底才能支持",
+      "minDepth": null,
+      "close": {
+        "graceful": true,
+        "forced": false,
+        "skipped": false
+      }
+    },
+    {
+      "id": "msinfo32",
+      "label": "系统信息",
+      "family": "win32-treeview",
+      "note": null,
+      "installed": true,
+      "verdict": "sampled",
+      "depths": [
+        {
+          "depth": 4,
+          "ok": true,
+          "elapsedMs": 55.75,
+          "nodeCount": 10,
+          "returnedNodes": 10,
+          "actionableNodes": 8,
+          "namedNodes": 8,
+          "quality": {
+            "nodeCount": 10,
+            "actionableCount": 0,
+            "namedCount": 8,
+            "namedActionableCount": 0,
+            "namedRatio": 0.8,
+            "complete": true,
+            "verdict": "sparse",
+            "reason": "整棵树都没有有名字的可操作节点，按名字定位不可行",
+            "completeness": {
+              "complete": true,
+              "cutNodes": 0,
+              "enumerated": 10,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "深度预算内没有未展开的子树"
+            }
+          },
+          "channel": "gui-visual",
+          "contentSurface": [],
+          "topRoles": [
+            "Pane:9",
+            "Window:1"
+          ],
+          "roles": {
+            "Window": 1,
+            "Pane": 9
+          }
+        },
+        {
+          "depth": 8,
+          "ok": true,
+          "elapsedMs": 57.8,
+          "nodeCount": 10,
+          "returnedNodes": 10,
+          "actionableNodes": 8,
+          "namedNodes": 8,
+          "quality": {
+            "nodeCount": 10,
+            "actionableCount": 0,
+            "namedCount": 8,
+            "namedActionableCount": 0,
+            "namedRatio": 0.8,
+            "complete": true,
+            "verdict": "sparse",
+            "reason": "整棵树都没有有名字的可操作节点，按名字定位不可行",
+            "completeness": {
+              "complete": true,
+              "cutNodes": 0,
+              "enumerated": 10,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "深度预算内没有未展开的子树"
+            }
+          },
+          "channel": "gui-visual",
+          "contentSurface": [],
+          "topRoles": [
+            "Pane:9",
+            "Window:1"
+          ],
+          "roles": {
+            "Window": 1,
+            "Pane": 9
+          }
+        }
+      ],
+      "dir": null,
+      "spawnPid": 11944,
+      "window": {
+        "appId": "msinfo32",
+        "processName": "msinfo32.exe",
+        "pid": 11944,
+        "hwnd": 592254,
+        "matchedBy": "new-window",
+        "owned": true,
+        "waitedMs": 420,
+        "totalWindows": 12,
+        "enumSource": "uia",
+        "titleLength": 4
+      },
+      "ready": {
+        "ready": true,
+        "waitedMs": 0,
+        "skipped": true
+      },
+      "decision": "visual-fallback",
+      "reason": "最深只到 sparse：整棵树都没有有名字的可操作节点，按名字定位不可行（命名可操作 0 个）",
+      "currentProduct": "当前拒绝；需视觉兜底才能支持",
+      "minDepth": null,
+      "close": {
+        "graceful": true,
+        "forced": false,
+        "skipped": false
+      }
+    },
+    {
+      "id": "perfmon",
+      "label": "性能监视器",
+      "family": "mmc",
+      "note": null,
+      "installed": true,
+      "verdict": "launch-blocked",
+      "depths": [],
+      "dir": null,
+      "spawnPid": null,
+      "error": {
+        "code": "NEEDS_ELEVATION",
+        "message": "启动被拒绝（EACCES）：该程序需要管理员权限",
+        "harnessNote": "需要在管理员会话中运行本脚本才能采样；非管理员时该应用对 agent 同样不可见。"
+      },
+      "decision": "reject",
+      "reason": "启动被拒绝（EACCES）：该程序需要管理员权限",
+      "close": {
+        "graceful": false,
+        "forced": false,
+        "skipped": true,
+        "reason": "no-pid"
+      }
+    },
+    {
+      "id": "cleanmgr",
+      "label": "磁盘清理",
+      "family": "win32-dialog",
+      "note": null,
+      "installed": true,
+      "verdict": "sampled",
+      "depths": [
+        {
+          "depth": 4,
+          "ok": true,
+          "elapsedMs": 159.68,
+          "nodeCount": 6,
+          "returnedNodes": 6,
+          "actionableNodes": 5,
+          "namedNodes": 6,
+          "quality": {
+            "nodeCount": 6,
+            "actionableCount": 0,
+            "namedCount": 6,
+            "namedActionableCount": 0,
+            "namedRatio": 1,
+            "complete": true,
+            "verdict": "sparse",
+            "reason": "整棵树都没有有名字的可操作节点，按名字定位不可行",
+            "completeness": {
+              "complete": true,
+              "cutNodes": 0,
+              "enumerated": 6,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "深度预算内没有未展开的子树"
+            }
+          },
+          "channel": "gui-visual",
+          "contentSurface": [],
+          "topRoles": [
+            "Pane:5",
+            "Window:1"
+          ],
+          "roles": {
+            "Window": 1,
+            "Pane": 5
+          }
+        },
+        {
+          "depth": 8,
+          "ok": true,
+          "elapsedMs": 69.63,
+          "nodeCount": 6,
+          "returnedNodes": 6,
+          "actionableNodes": 5,
+          "namedNodes": 6,
+          "quality": {
+            "nodeCount": 6,
+            "actionableCount": 0,
+            "namedCount": 6,
+            "namedActionableCount": 0,
+            "namedRatio": 1,
+            "complete": true,
+            "verdict": "sparse",
+            "reason": "整棵树都没有有名字的可操作节点，按名字定位不可行",
+            "completeness": {
+              "complete": true,
+              "cutNodes": 0,
+              "enumerated": 6,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "深度预算内没有未展开的子树"
+            }
+          },
+          "channel": "gui-visual",
+          "contentSurface": [],
+          "topRoles": [
+            "Pane:5",
+            "Window:1"
+          ],
+          "roles": {
+            "Window": 1,
+            "Pane": 5
+          }
+        }
+      ],
+      "dir": null,
+      "spawnPid": 20012,
+      "window": {
+        "appId": "cleanmgr",
+        "processName": "cleanmgr.exe",
+        "pid": 20012,
+        "hwnd": 460998,
+        "matchedBy": "new-window",
+        "owned": true,
+        "waitedMs": 436,
+        "totalWindows": 12,
+        "enumSource": "uia",
+        "titleLength": 11
+      },
+      "ready": {
+        "ready": true,
+        "waitedMs": 0,
+        "skipped": true
+      },
+      "decision": "visual-fallback",
+      "reason": "最深只到 sparse：整棵树都没有有名字的可操作节点，按名字定位不可行（命名可操作 0 个）",
+      "currentProduct": "当前拒绝；需视觉兜底才能支持",
+      "minDepth": null,
+      "close": {
+        "graceful": true,
+        "forced": false,
+        "skipped": false
+      }
+    },
+    {
+      "id": "settings",
+      "label": "设置",
+      "family": "uwp-appframe",
+      "note": null,
+      "installed": true,
+      "verdict": "sampled",
+      "depths": [
+        {
+          "depth": 4,
+          "ok": true,
+          "elapsedMs": 175.18,
+          "nodeCount": 80,
+          "returnedNodes": 21,
+          "actionableNodes": 13,
+          "namedNodes": 13,
+          "quality": {
+            "nodeCount": 80,
+            "actionableCount": 32,
+            "namedCount": 69,
+            "namedActionableCount": 32,
+            "namedRatio": 0.86,
+            "complete": false,
+            "verdict": "good",
+            "reason": "有名字的可操作节点充足，可按名字定位",
+            "completeness": {
+              "complete": false,
+              "cutNodes": 5,
+              "enumerated": 80,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "5 个节点在深度边界上仍有孩子，需下钻"
+            }
+          },
+          "channel": "gui-a11y",
+          "contentSurface": [
+            "Edit"
+          ],
+          "topRoles": [
+            "Button:6",
+            "Window:4",
+            "Pane:4",
+            "Group:2",
+            "MenuBar:1",
+            "MenuItem:1"
+          ],
+          "roles": {
+            "Window": 4,
+            "MenuBar": 1,
+            "MenuItem": 1,
+            "Button": 6,
+            "Text": 1,
+            "Edit": 1,
+            "Custom": 1,
+            "Pane": 4,
+            "Group": 2
+          }
+        },
+        {
+          "depth": 8,
+          "ok": true,
+          "elapsedMs": 244.87,
+          "nodeCount": 118,
+          "returnedNodes": 99,
+          "actionableNodes": 27,
+          "namedNodes": 69,
+          "quality": {
+            "nodeCount": 99,
+            "actionableCount": 32,
+            "namedCount": 69,
+            "namedActionableCount": 32,
+            "namedRatio": 0.7,
+            "complete": true,
+            "verdict": "good",
+            "reason": "有名字的可操作节点充足，可按名字定位",
+            "completeness": {
+              "complete": true,
+              "cutNodes": 0,
+              "enumerated": 118,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "深度预算内没有未展开的子树"
+            }
+          },
+          "channel": "gui-a11y",
+          "contentSurface": [
+            "Edit",
+            "ListItem"
+          ],
+          "topRoles": [
+            "Text:20",
+            "unknown:19",
+            "Button:14",
+            "Group:13",
+            "ListItem:12",
+            "Window:4"
+          ],
+          "roles": {
+            "Window": 4,
+            "MenuBar": 1,
+            "MenuItem": 1,
+            "Button": 14,
+            "Text": 20,
+            "Edit": 1,
+            "Custom": 1,
+            "Image": 2,
+            "Pane": 4,
+            "Group": 13,
+            "ListItem": 12,
+            "unknown": 19,
+            "Hyperlink": 3,
+            "List": 2,
+            "ComboBox": 1,
+            "ScrollBar": 1
+          }
+        }
+      ],
+      "dir": null,
+      "spawnPid": 23148,
+      "window": {
+        "appId": "applicationframehost",
+        "processName": "ApplicationFrameHost.exe",
+        "pid": 23220,
+        "hwnd": 723326,
+        "matchedBy": "new-window",
+        "owned": true,
+        "waitedMs": 1293,
+        "totalWindows": 13,
+        "enumSource": "uia",
+        "titleLength": 2
+      },
+      "ready": {
+        "ready": true,
+        "waitedMs": 0,
+        "skipped": true
+      },
+      "decision": "operate-a11y",
+      "reason": "depth 4 起有 32 个有名字的可操作节点，可按名字定位",
+      "currentProduct": "走语义树（gui-a11y）",
+      "minDepth": 4,
+      "close": {
+        "graceful": false,
+        "forced": true,
+        "skipped": false
+      }
+    },
+    {
+      "id": "edge",
+      "label": "Microsoft Edge",
+      "family": "browser",
+      "note": "浏览器外壳：策略层本就拒绝 GUI 驱动，这里只测树是否可用",
+      "installed": true,
+      "verdict": "sampled",
+      "depths": [
+        {
+          "depth": 4,
+          "ok": true,
+          "elapsedMs": 109.04,
+          "nodeCount": 30,
+          "returnedNodes": 12,
+          "actionableNodes": 9,
+          "namedNodes": 4,
+          "quality": {
+            "nodeCount": 30,
+            "actionableCount": 8,
+            "namedCount": 14,
+            "namedActionableCount": 8,
+            "namedRatio": 0.47,
+            "complete": false,
+            "verdict": "good",
+            "reason": "有名字的可操作节点充足，可按名字定位",
+            "completeness": {
+              "complete": false,
+              "cutNodes": 3,
+              "enumerated": 30,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "3 个节点在深度边界上仍有孩子，需下钻"
+            }
+          },
+          "channel": "gui-a11y",
+          "contentSurface": [],
+          "topRoles": [
+            "Pane:10",
+            "Window:1",
+            "Text:1"
+          ],
+          "roles": {
+            "Window": 1,
+            "Pane": 10,
+            "Text": 1
+          }
+        },
+        {
+          "depth": 8,
+          "ok": true,
+          "elapsedMs": 143.19,
+          "nodeCount": 57,
+          "returnedNodes": 35,
+          "actionableNodes": 16,
+          "namedNodes": 14,
+          "quality": {
+            "nodeCount": 35,
+            "actionableCount": 8,
+            "namedCount": 14,
+            "namedActionableCount": 8,
+            "namedRatio": 0.4,
+            "complete": true,
+            "verdict": "good",
+            "reason": "有名字的可操作节点充足，可按名字定位",
+            "completeness": {
+              "complete": true,
+              "cutNodes": 0,
+              "enumerated": 57,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "深度预算内没有未展开的子树"
+            }
+          },
+          "channel": "gui-a11y",
+          "contentSurface": [],
+          "topRoles": [
+            "Pane:18",
+            "Button:6",
+            "unknown:5",
+            "Text:2",
+            "Window:1",
+            "ToolBar:1"
+          ],
+          "roles": {
+            "Window": 1,
+            "Pane": 18,
+            "Button": 6,
+            "ToolBar": 1,
+            "unknown": 5,
+            "Text": 2,
+            "Hyperlink": 1,
+            "Tab": 1
+          }
+        }
+      ],
+      "dir": null,
+      "spawnPid": 3668,
+      "window": {
+        "appId": "msedge",
+        "processName": "msedge.exe",
+        "pid": 3668,
+        "hwnd": 919896,
+        "matchedBy": "new-window",
+        "owned": true,
+        "waitedMs": 589,
+        "totalWindows": 13,
+        "enumSource": "uia",
+        "titleLength": 38
+      },
+      "ready": {
+        "ready": true,
+        "waitedMs": 0,
+        "skipped": true
+      },
+      "decision": "dom-channel-required",
+      "reason": "树判 good，但只有外壳（Pane:18 Button:6 unknown:5 Text:2），没有内容容器",
+      "currentProduct": "策略拒绝 GUI，走 DOM/CDP",
+      "minDepth": null,
+      "close": {
+        "graceful": true,
+        "forced": false,
+        "skipped": false
+      }
+    },
+    {
+      "id": "word",
+      "label": "Word",
+      "family": "office-doc",
+      "note": null,
+      "installed": true,
+      "verdict": "sampled",
+      "depths": [
+        {
+          "depth": 4,
+          "ok": true,
+          "elapsedMs": 374.23,
+          "nodeCount": 27,
+          "returnedNodes": 16,
+          "actionableNodes": 14,
+          "namedNodes": 12,
+          "quality": {
+            "nodeCount": 27,
+            "actionableCount": 6,
+            "namedCount": 19,
+            "namedActionableCount": 6,
+            "namedRatio": 0.7,
+            "complete": false,
+            "verdict": "good",
+            "reason": "有名字的可操作节点充足，可按名字定位",
+            "completeness": {
+              "complete": false,
+              "cutNodes": 4,
+              "enumerated": 27,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "4 个节点在深度边界上仍有孩子，需下钻"
+            }
+          },
+          "channel": "gui-a11y",
+          "contentSurface": [
+            "Document"
+          ],
+          "topRoles": [
+            "Pane:13",
+            "Window:1",
+            "Document:1",
+            "Custom:1"
+          ],
+          "roles": {
+            "Window": 1,
+            "Pane": 13,
+            "Document": 1,
+            "Custom": 1
+          }
+        },
+        {
+          "depth": 8,
+          "ok": true,
+          "elapsedMs": 1249.21,
+          "nodeCount": 73,
+          "returnedNodes": 29,
+          "actionableNodes": 18,
+          "namedNodes": 19,
+          "quality": {
+            "nodeCount": 29,
+            "actionableCount": 6,
+            "namedCount": 19,
+            "namedActionableCount": 6,
+            "namedRatio": 0.66,
+            "complete": true,
+            "verdict": "good",
+            "reason": "有名字的可操作节点充足，可按名字定位",
+            "completeness": {
+              "complete": true,
+              "cutNodes": 0,
+              "enumerated": 73,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "深度预算内没有未展开的子树"
+            }
+          },
+          "channel": "gui-a11y",
+          "contentSurface": [
+            "Document",
+            "Edit"
+          ],
+          "topRoles": [
+            "Pane:16",
+            "Button:4",
+            "unknown:2",
+            "Window:1",
+            "Document:1",
+            "Custom:1"
+          ],
+          "roles": {
+            "Window": 1,
+            "Pane": 16,
+            "unknown": 2,
+            "Document": 1,
+            "Custom": 1,
+            "Edit": 1,
+            "ScrollBar": 1,
+            "Button": 4,
+            "Thumb": 1,
+            "StatusBar": 1
+          }
+        }
+      ],
+      "dir": null,
+      "spawnPid": 15992,
+      "window": {
+        "appId": "winword",
+        "processName": "WINWORD.exe",
+        "pid": 15992,
+        "hwnd": 5769150,
+        "matchedBy": "new-window",
+        "owned": true,
+        "waitedMs": 1031,
+        "totalWindows": 13,
+        "enumSource": "uia",
+        "titleLength": 11,
+        "retargeted": {
+          "from": 5769150,
+          "to": 1312836,
+          "by": "title-hint"
+        }
+      },
+      "ready": {
+        "ready": true,
+        "waitedMs": 0,
+        "skipped": true
+      },
+      "decision": "operate-a11y",
+      "reason": "depth 4 起有 6 个有名字的可操作节点，可按名字定位",
+      "currentProduct": "走语义树（gui-a11y）",
+      "minDepth": 4,
+      "close": {
+        "graceful": true,
+        "forced": false,
+        "skipped": false
+      }
+    },
+    {
+      "id": "excel",
+      "label": "Excel",
+      "family": "office-grid",
+      "note": null,
+      "installed": true,
+      "verdict": "sampled",
+      "depths": [
+        {
+          "depth": 4,
+          "ok": true,
+          "elapsedMs": 520.04,
+          "nodeCount": 259,
+          "returnedNodes": 33,
+          "actionableNodes": 29,
+          "namedNodes": 19,
+          "quality": {
+            "nodeCount": 259,
+            "actionableCount": 223,
+            "namedCount": 240,
+            "namedActionableCount": 223,
+            "namedRatio": 0.93,
+            "complete": false,
+            "verdict": "good",
+            "reason": "有名字的可操作节点充足，可按名字定位",
+            "completeness": {
+              "complete": false,
+              "cutNodes": 6,
+              "enumerated": 259,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "6 个节点在深度边界上仍有孩子，需下钻"
+            }
+          },
+          "channel": "gui-a11y",
+          "contentSurface": [
+            "Edit",
+            "DataGrid"
+          ],
+          "topRoles": [
+            "Pane:23",
+            "Button:3",
+            "ScrollBar:2",
+            "Window:1",
+            "Edit:1",
+            "Tab:1"
+          ],
+          "roles": {
+            "Window": 1,
+            "Pane": 23,
+            "Edit": 1,
+            "ScrollBar": 2,
+            "Tab": 1,
+            "Button": 3,
+            "TabItem": 1,
+            "DataGrid": 1
+          }
+        },
+        {
+          "depth": 8,
+          "ok": true,
+          "elapsedMs": 583.36,
+          "nodeCount": 308,
+          "returnedNodes": 262,
+          "actionableNodes": 250,
+          "namedNodes": 240,
+          "quality": {
+            "nodeCount": 262,
+            "actionableCount": 223,
+            "namedCount": 240,
+            "namedActionableCount": 223,
+            "namedRatio": 0.92,
+            "complete": true,
+            "verdict": "good",
+            "reason": "有名字的可操作节点充足，可按名字定位",
+            "completeness": {
+              "complete": true,
+              "cutNodes": 0,
+              "enumerated": 308,
+              "maxNodes": 1500,
+              "budgetHit": false,
+              "reason": "深度预算内没有未展开的子树"
+            }
+          },
+          "channel": "gui-a11y",
+          "contentSurface": [
+            "Edit",
+            "DataGrid",
+            "DataItem"
+          ],
+          "topRoles": [
+            "DataItem:209",
+            "Pane:27",
+            "Button:11",
+            "unknown:3",
+            "ScrollBar:2",
+            "Thumb:2"
+          ],
+          "roles": {
+            "Window": 1,
+            "Pane": 27,
+            "StatusBar": 1,
+            "unknown": 3,
+            "Custom": 1,
+            "Edit": 1,
+            "ScrollBar": 2,
+            "Button": 11,
+            "Thumb": 2,
+            "Tab": 1,
+            "TabItem": 1,
+            "DataGrid": 1,
+            "HeaderItem": 1,
+            "DataItem": 209
+          }
+        }
+      ],
+      "dir": null,
+      "spawnPid": 20628,
+      "window": {
+        "appId": "excel",
+        "processName": "EXCEL.exe",
+        "pid": 20628,
+        "hwnd": 1510890,
+        "matchedBy": "new-window",
+        "owned": true,
+        "waitedMs": 491,
+        "totalWindows": 13,
+        "enumSource": "uia",
+        "titleLength": 12,
+        "retargeted": {
+          "from": 1510890,
+          "to": 395466,
+          "by": "title-hint"
+        }
+      },
+      "ready": {
+        "ready": true,
+        "waitedMs": 0,
+        "skipped": true
+      },
+      "decision": "operate-a11y",
+      "reason": "depth 4 起有 223 个有名字的可操作节点，可按名字定位",
+      "currentProduct": "走语义树（gui-a11y）",
+      "minDepth": 4,
+      "close": {
+        "graceful": true,
+        "forced": false,
+        "skipped": false
+      }
+    }
+  ],
+  "capabilities": {
+    "a11yTree": {
+      "supported": true,
+      "reason": "windows-uia.ps1 长驻桥已连接（session=Console, userInteractive=true）"
+    },
+    "bridge": {
+      "connected": true,
+      "session": "Console",
+      "userInteractive": true,
+      "psVersion": "5.1.26100.9711",
+      "lifecycle": {
+        "healthy": true,
+        "blocked": false,
+        "blockedReason": null,
+        "blockedMessage": null,
+        "totalStarts": 1,
+        "totalCrashes": 0,
+        "totalCleanExits": 0,
+        "crashesInWindow": 0,
+        "maxRestarts": 3,
+        "windowMs": 120000,
+        "uptimeMs": 602,
+        "lastCrash": null,
+        "lastPing": {
+          "ok": null,
+          "at": 0,
+          "latencyMs": null
+        },
+        "consecutivePingFailures": 0
+      },
+      "requestCount": 1
+    }
+  },
+  "summary": {
+    "verdict": "coverage-10plus",
+    "requested": 16,
+    "sampled": 13,
+    "a11yOperable": 8,
+    "needsVisualFallback": 4,
+    "domChannelRequired": 1,
+    "depthBudgetExhausted": 0,
+    "rejected": 0,
+    "notInstalled": [],
+    "windowNotFound": [],
+    "launchBlocked": [
+      "cmd",
+      "ps5",
+      "perfmon"
+    ],
+    "errors": [],
+    "byDecision": {
+      "operate-a11y": 8,
+      "reject": 3,
+      "visual-fallback": 4,
+      "dom-channel-required": 1
+    },
+    "byDeepestQuality": {
+      "good": 9,
+      "sparse": 4
+    },
+    "byFamily": {
+      "win32-classic": 1,
+      "uwp-xaml": 1,
+      "uwp-desktop-bridge": 1,
+      "shell": 1,
+      "console-modern": 1,
+      "win32-modern": 1,
+      "win32-dialog": 2,
+      "win32-treeview": 1,
+      "uwp-appframe": 1,
+      "browser": 1,
+      "office-doc": 1,
+      "office-grid": 1
+    },
+    "avgSnapshotMs": 214,
+    "maxSnapshotMs": 1249.21,
+    "minDepthHistogram": {
+      "d4": 8
+    },
+    "note": "只读采样，不做任何写入/点击；decision 是产品判定，不是原始数据"
+  }
+}

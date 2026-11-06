@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { assessTree, channelForQuality, normalizeRole } from "../src/modules/tree-quality.mjs";
+import { assessSnapshot, assessTree, channelForQuality, normalizeRole, treeCompleteness } from "../src/modules/tree-quality.mjs";
 import { AppRegistry } from "../src/modules/app-registry.mjs";
 import { Perception } from "../src/modules/perception.mjs";
 import { createMockBackend } from "../src/backends/mock.mjs";
@@ -126,4 +126,68 @@ test("agent 层：观察过的残缺应用，desktop_list_apps 的通道判定�
   const hit = list.apps.find((a) => a.appId === "canvas-app");
   assert.equal(hit.channel, "gui-visual");
   assert.equal(hit.treeQuality.verdict, "empty");
+});
+
+// ── 快照完整度：区分「真的小」与「被深度截断」 ──
+// 桥侧 snapshot 的 truncated 恒为 true（它无法证明自己没漏），所以判据必须下沉到
+// 骨架节点上的逐节点 truncated 标记，否则每个应用都会被判 deferred 或反过来被判死。
+
+test("完整度：没有截断标记且在节点预算内 → complete（空树才判 empty）", () => {
+  const tree = [node("Window", "记事本", [node("Edit", "文本编辑器")])];
+  const c = treeCompleteness({ tree, nodeCount: 2 });
+  assert.equal(c.complete, true);
+  assert.equal(c.cutNodes, 0);
+  assert.equal(c.budgetHit, false);
+});
+
+test("完整度：骨架里有节点被剪掉孩子 → 不完整，质量走 deferred 而不是判死", () => {
+  // 模拟 depth=4 的快照：容器在深度边界上仍有孩子，Copy-Skeleton 会打 truncated
+  const cut = node("Pane", "", [node("Pane", "")]);
+  cut.truncated = true;
+  const tree = [node("Window", "任务管理器", [cut])];
+  const c = treeCompleteness({ tree, nodeCount: 3 });
+  assert.equal(c.complete, false);
+  assert.equal(c.cutNodes, 1);
+  assert.match(c.reason, /需下钻/);
+
+  const q = assessSnapshot({ tree, fullTree: tree, nodeCount: 3 });
+  assert.equal(q.verdict, "deferred");
+  assert.equal(channelForQuality(q), "gui-a11y", "deferred 应继续走树并下钻，不该换视觉通道");
+});
+
+test("完整度：节点数打满预算也算不完整（枚举被提前掐断）", () => {
+  const tree = [node("Window", "巨型应用", [node("Button", "确定")])];
+  const c = treeCompleteness({ tree, nodeCount: 1500 }, { maxNodes: 1500 });
+  assert.equal(c.complete, false);
+  assert.equal(c.budgetHit, true);
+  assert.match(c.reason, /预算上限/);
+});
+
+test("完整度不改变质量结论：看全了却仍无命名目标 → sparse（该走视觉兜底）", () => {
+  const tree = [node("Window", "自绘面板", [node("Pane", ""), node("Pane", "")])];
+  const q = assessSnapshot({ tree, fullTree: tree, nodeCount: 3 });
+  assert.equal(q.verdict, "sparse");
+  assert.equal(q.completeness.complete, true);
+  assert.equal(channelForQuality(q), "gui-visual");
+});
+
+test("下钻收益：浅层 deferred、深层 good（Excel 网格的真实形态）", () => {
+  const shallowCut = node("Pane", "工作区", [node("Edit", "编辑栏")]);
+  shallowCut.truncated = true;
+  const shallow = { tree: [node("Window", "x.csv - Excel", [shallowCut])], nodeCount: 3 };
+  assert.equal(assessSnapshot(shallow).verdict, "deferred");
+
+  const deep = {
+    tree: [
+      node("Window", "x.csv - Excel", [
+        node("Edit", "编辑栏"),
+        node("DataGrid", "网格", [node("DataItem", "A1"), node("DataItem", "B1"), node("DataItem", "C1")]),
+      ]),
+    ],
+    nodeCount: 6,
+  };
+  const q = assessSnapshot(deep);
+  assert.equal(q.verdict, "good");
+  assert.equal(q.completeness.complete, true);
+  assert.equal(channelForQuality(q), "gui-a11y");
 });
