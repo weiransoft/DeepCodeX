@@ -13,6 +13,9 @@ crate-type = ["staticlib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# 测试目标补 Windows 应用清单用（tauri-build 只把清单编进 bin）。
+# 走 .rc 而非 link.exe 的 /MANIFEST*，是为了 GNU/MSVC 共用一条代码路径。
+embed-resource = "3"
 
 [dependencies]
 # tray-icon feature：系统托盘（FR-1.5）；image-png：托盘图标 PNG 解码；

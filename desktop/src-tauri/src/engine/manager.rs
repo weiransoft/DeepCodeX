@@ -515,8 +515,16 @@ impl EngineRuntime {
         {
             use std::os::windows::process::CommandExt as _;
             const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+            // 壳本身是窗口（GUI）子系统进程、没有控制台；若不抑制，Windows 会为
+            // 子进程 node.exe（控制台子系统）单独分配一个可见的黑窗口。引擎输出
+            // 已由 stdout/stderr 管道接管（脱敏泵），因此隐藏窗口不影响任何功能。
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
         }
+
+        // 确认标记：CREATE_NO_WINDOW 已设置（隐藏子进程控制台窗口）。
+        // 该字面量会编入二进制，便于分发包校验修复是否生效。
+        log::info!("engine child spawn: CREATE_NO_WINDOW applied (console window suppressed)");
 
         let child = cmd.spawn().map_err(|e| {
             ShellError::EngineStart(format!(
@@ -1021,6 +1029,9 @@ mod tests {
 
     /// M1 测试用 mock 引擎：模拟 deepcode web 的 /api/health 端点与
     /// SIGTERM 优雅退出行为（端口经 --port 参数传入，与真实引擎一致）。
+    // 以下三个测试脚手架只被 `#[cfg(unix)]` 用例使用：Windows 下 mock 引擎
+    // （JS + shebang）无法被 CreateProcess 直接拉起，故在 Windows 上允许未使用。
+    #[cfg_attr(windows, allow(dead_code))]
     const MOCK_ENGINE_SRC: &str = r#"#!/usr/bin/env node
 // DeepCode Desktop M1 测试 mock 引擎（进程名含 deepcode-m1-mock 便于残留检查）
 const http = require("node:http");
@@ -1043,6 +1054,7 @@ process.on("SIGTERM", () => {
 });
 "#;
 
+    #[cfg_attr(windows, allow(dead_code))]
     fn write_exec(dir: &Path, name: &str, src: &str) -> PathBuf {
         let p = dir.join(name);
         std::fs::write(&p, src).unwrap();
@@ -1054,6 +1066,7 @@ process.on("SIGTERM", () => {
         p
     }
 
+    #[cfg_attr(windows, allow(dead_code))]
     fn test_runtime(dir: &Path, entry: PathBuf) -> Arc<EngineRuntime> {
         let rt = Arc::new(EngineRuntime::new(
             EngineMode::Bundled(entry),
@@ -1065,6 +1078,13 @@ process.on("SIGTERM", () => {
     }
 
     /// 完整生命周期：spawn → healthy → SIGTERM 优雅关闭 → 收割，不留孤儿进程。
+    ///
+    /// 仅 unix：mock 引擎是带 shebang 的可执行 `.js`，靠内核 exec 直接拉起。
+    /// Windows 的 CreateProcess 不认 shebang，`Command::new("x.js")` 直接返回
+    /// os error 193（不是有效的 Win32 应用程序）——不是被测逻辑的问题，而是
+    /// 测试脚手架选型。Windows 侧的引擎拉起由真机 `verify:*` 脚本覆盖，
+    /// 待 sidecar 改为「node + 脚本参数」形态后再给这组用例加 Windows 变体。
+    #[cfg(unix)]
     #[test]
     fn engine_lifecycle_spawn_healthy_graceful_stop() {
         let dir = tempfile::tempdir().unwrap();
@@ -1150,6 +1170,8 @@ process.on("SIGTERM", () => {
     }
 
     /// 手动重启：重置重启预算并拉起新实例。
+    // 仅 unix：见 engine_lifecycle_spawn_healthy_graceful_stop 的说明（JS shebang）。
+    #[cfg(unix)]
     #[test]
     fn engine_manual_restart_resets_budget() {
         let dir = tempfile::tempdir().unwrap();
@@ -1167,6 +1189,8 @@ process.on("SIGTERM", () => {
     }
 
     /// 入口即退出的坏引擎：start 必须以 EngineHealth/EngineStart 失败收场。
+    // 仅 unix：见 engine_lifecycle_spawn_healthy_graceful_stop 的说明（JS shebang）。
+    #[cfg(unix)]
     #[test]
     fn engine_start_fails_on_immediately_exiting_entry() {
         let dir = tempfile::tempdir().unwrap();
@@ -1317,6 +1341,8 @@ process.on("SIGTERM", () => {
     }
 
     /// 探活语义：/api/health 200 即就绪；连接拒绝未就绪。
+    // 仅 unix：见 engine_lifecycle_spawn_healthy_graceful_stop 的说明（JS shebang）。
+    #[cfg(unix)]
     #[test]
     fn probe_health_semantics() {
         let dir = tempfile::tempdir().unwrap();

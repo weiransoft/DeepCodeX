@@ -123,11 +123,16 @@ fn base_command(
 /// `~` 展开（IdentityFile 常见写法 `~/.ssh/id_ed25519`）
 fn expand_home(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{home}/{rest}");
-        }
-        if let Ok(profile) = std::env::var("USERPROFILE") {
-            return format!("{profile}/{rest}");
+        // HOME 优先（unix / git-bash），回退 USERPROFILE（Windows 原生）。
+        // 用 Path::join 而不是拼 `/`：Windows 家目录是 `C:\Users\x`，
+        // 直接拼会得到 `C:\Users\x/.ssh/id` 这种混合分隔符。
+        for var in ["HOME", "USERPROFILE"] {
+            if let Ok(home) = std::env::var(var) {
+                return std::path::Path::new(&home)
+                    .join(rest)
+                    .to_string_lossy()
+                    .into_owned();
+            }
         }
     }
     path.to_string()
@@ -301,7 +306,16 @@ mod tests {
 
     #[test]
     fn expands_tilde_identity() {
-        assert!(expand_home("~/.ssh/id_ed25519").starts_with('/'));
+        let expanded = expand_home("~/.ssh/id_ed25519");
+        assert!(!expanded.contains('~'), "~ 必须被展开：{expanded}");
+        assert!(
+            std::path::Path::new(&expanded).is_absolute(),
+            "展开后必须是绝对路径：{expanded}"
+        );
+        assert!(
+            expanded.replace('\\', "/").ends_with("/.ssh/id_ed25519"),
+            "展开后必须保留相对部分：{expanded}"
+        );
         assert_eq!(expand_home("/abs/key"), "/abs/key");
         assert_eq!(expand_home("rel/key"), "rel/key");
     }
