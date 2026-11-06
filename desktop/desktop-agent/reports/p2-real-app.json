@@ -1,0 +1,144 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-11-06T06:19:25.236Z",
+  "platform": "win32",
+  "session": "Console",
+  "verdict": "real-app-write-verified",
+  "target": {
+    "app": "notepad",
+    "fileName": "dcx-e2e-mw4l3xroqiu3.txt"
+  },
+  "privacy": {
+    "note": "只操作自建临时文件 dcx-e2e-*.txt，不读取、不修改任何用户文档"
+  },
+  "guards": {
+    "baselineMatched": true,
+    "baselineSeenLength": 26
+  },
+  "steps": [
+    {
+      "purpose": "ValuePattern 写入真实应用",
+      "ok": true,
+      "elapsedMs": 239,
+      "via": "value-pattern-ref",
+      "outcome": "verified",
+      "attempts": 1,
+      "changed": true,
+      "error": null
+    },
+    {
+      "purpose": "快捷键保存",
+      "ok": true,
+      "elapsedMs": 407,
+      "via": "keyboard",
+      "outcome": "verified-no-change",
+      "attempts": 1,
+      "changed": false,
+      "error": null
+    },
+    {
+      "purpose": "关闭窗口",
+      "ok": true,
+      "elapsedMs": 417,
+      "via": "keyboard",
+      "outcome": "verified",
+      "attempts": 1,
+      "changed": true,
+      "error": null
+    }
+  ],
+  "errors": [],
+  "capabilities": {
+    "platform": "windows",
+    "session": "Console",
+    "appEnumeration": {
+      "supported": true,
+      "reason": "UIA listWindows（优先）+ tasklist /v 回落"
+    },
+    "a11yTree": {
+      "supported": true,
+      "reason": "windows-uia.ps1 长驻桥已连接（session=Console, userInteractive=true）"
+    },
+    "screenshot": {
+      "supported": true,
+      "reason": "windows-uia.ps1 长驻桥已连接（session=Console, userInteractive=true）"
+    },
+    "elementInvoke": {
+      "supported": true,
+      "reason": "windows-uia.ps1 长驻桥已连接（session=Console, userInteractive=true）"
+    },
+    "coordinateInput": {
+      "supported": true,
+      "reason": "windows-uia.ps1 长驻桥已连接（session=Console, userInteractive=true）"
+    },
+    "foregroundControl": {
+      "supported": true,
+      "reason": "windows-uia.ps1 长驻桥已连接（session=Console, userInteractive=true）"
+    },
+    "uacAwareness": {
+      "supported": false,
+      "reason": "Secure Desktop / 完整性级别检测超出 P1 范围，遇 UAC 一律 HANDOFF_REQUIRED"
+    },
+    "bridge": {
+      "connected": true,
+      "session": "Console",
+      "userInteractive": true,
+      "psVersion": "5.1.26100.9711"
+    }
+  },
+  "window": {
+    "appId": "notepad",
+    "pid": 6516,
+    "hwnd": 263884,
+    "titleLength": 34,
+    "matchedBy": "title-contains-fileName",
+    "enumSource": "uia",
+    "waitedMs": 113,
+    "totalWindows": 6
+  },
+  "snapshot": {
+    "snapshotId": "uia-0c56cba59cc7",
+    "nodeCount": 44,
+    "treeQuality": {
+      "nodeCount": 44,
+      "actionableCount": 21,
+      "namedCount": 32,
+      "namedActionableCount": 20,
+      "namedRatio": 0.73,
+      "complete": true,
+      "verdict": "good",
+      "reason": "有名字的可操作节点充足，可按名字定位"
+    },
+    "roles": [
+      "Window",
+      "Pane",
+      "Document",
+      "Tab",
+      "List",
+      "Button",
+      "MenuBar",
+      "MenuItem",
+      "Text"
+    ]
+  },
+  "targetNode": {
+    "ref": "e012",
+    "role": "Document",
+    "nameLength": 5
+  },
+  "stateAfterType": {
+    "typedSeen": true
+  },
+  "disk": {
+    "persisted": true,
+    "baselinePreserved": true,
+    "length": 73,
+    "waitedMs": 7
+  },
+  "verifiedSteps": 3,
+  "totalSteps": 3,
+  "cleanup": {
+    "tempDirRemoved": true,
+    "fileKept": false
+  }
+}

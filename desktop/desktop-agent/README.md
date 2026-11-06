@@ -17,7 +17,8 @@
 树优先、视觉仅兜底；观察结果一律标记 `untrusted`。
 
 > 当前状态：**实验性、默认关闭**，但 Windows 真机 GUI 链路已打通（需显式开启 UIA 桥）。
-> 能力矩阵 7 项中 6 项实测 `supported:true`，`verify:gui` 的 Observe→Act→Verify 闭环 4/4 verified。
+> 能力矩阵 7 项中 6 项实测 `supported:true`；`verify:gui` 受控窗口闭环 4/4 verified，
+> `verify:real-app` 在**真实记事本**上完成「写入 → 保存 → 磁盘校验」闭环 3/3。
 > 未开启桥时自动降级为纯 Win32 窗口枚举，GUI 动作返回 `CAPABILITY_UNAVAILABLE`，不会伪造能力。
 
 ## 目录
@@ -35,19 +36,22 @@ desktop-agent/
 ├── src/modules/policy-guard.mjs   执行前硬校验（白名单 / 注入扫描 / 确认令牌）
 │             policy-load.mjs      外部策略加载 + 锁定字段二次硬化
 │             perception.mjs       稳定 ref / 骨架树 / 下钻 / 视觉兜底
+│             tree-quality.mjs     实测树质量判定（good / sparse / deferred / empty）
 │             verifier.mjs         Observe→Act→Verify + STALE_REF + 有界重试
-│             app-registry.mjs     应用注册表 / TTL 缓存 / 通道矩阵
+│             app-registry.mjs     应用注册表 / TTL 缓存 / 通道矩阵 / 质量回写
 │             budget.mjs           步数·截图·token 原子预扣与熔断
 │             telemetry.mjs        脱敏事件流
 ├── config/policy.default.json     默认策略（enabled=false）
 ├── scripts/probe.mjs              P0 探针（能力矩阵 / 枚举 / 真机只读观察）
 │           coverage-report.mjs    真实应用 UIA 覆盖率采样（只读）
 │           verify-gui.mjs         真机 GUI 闭环验证（受控 WPF 测试窗口）
+│           verify-real-app.mjs    真实应用写入闭环（临时文件 + 记事本，磁盘校验）
 │           register-mcp.mjs       MCP 登记（dry-run / 写入 / 移除）
 ├── reports/p0-probe.json          P0 实测数据（窗口标题不落盘）
 │           p1-gui-verify.json     真机闭环实测数据
 │           p2-coverage.json       真实应用覆盖率实测数据
-└── tests/*.test.mjs               node:test，零依赖（55 个用例）
+│           p2-real-app.json       真实应用写入闭环实测数据
+└── tests/*.test.mjs               node:test，零依赖（72 个用例）
 ```
 
 零新增 npm 依赖（Node ≥ 22，ESM）：sidecar 需要随桌面端分发，避免版本漂移与供应链面。
@@ -57,13 +61,16 @@ desktop-agent/
 ```bash
 cd desktop/desktop-agent
 
-npm test                           # 55 个单测（协议 / 策略 / 预算 / 验证 / 桥 / 登记脚本）
+npm test                           # 72 个单测（协议 / 策略 / 预算 / 验证 / 桥 / 故障注入 / 树质量）
 npm run probe                      # P0 探针（未开桥：仅 Win32 枚举）
 DEEPCODE_AGENT_UIA_BRIDGE=1 npm run probe          # 真机全能力探针
 DEEPCODE_AGENT_UIA_BRIDGE=1 npm run coverage       # 真实应用 UIA 覆盖率（只读，不执行动作）
 
 # 真机 GUI 闭环：会短暂弹出 DCX-GUI-TEST-* 测试窗口，结束自动关闭
 DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:gui
+
+# 真实应用写入闭环：打开自建的 dcx-e2e-*.txt，写入 → Ctrl+S → 读盘校验后删除
+DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:real-app
 
 # 直接以 stdio 启动（自动选择：win32 → windows，其余 → mock）
 DEEPCODE_AGENT_BACKEND=mock node src/index.mjs
@@ -126,18 +133,73 @@ printf '%s\n' \
 
 只读采样当前桌面上的真实窗口（不执行任何动作、跳过敏感分类、不落盘标题与截图）：
 
-| 应用 | 分类 / 通道 | 节点 | 可操作 | 有名字 | 耗时 |
-| --- | --- | --- | --- | --- | --- |
-| explorer（文件夹窗口） | productivity / interface-or-gui | 46 | 39 | 33 | 215 ms |
-| notepad | productivity / interface-or-gui | 35 | 29 | 23 | 76 ms |
-| gameviewer（自绘） | selfdrawn-likely / gui-visual | 29 | 28 | **2** | 69 ms |
-| taskmgr | unknown / gui-a11y | 16 | 11 | 9 | 29 ms |
-| workbuddy（Electron） | unknown / gui-a11y | 3 | 1 | 2 | 103 ms |
-| explorer（桌面窗口） | productivity / interface-or-gui | 3 | 1 | 2 | 23 ms |
+| 应用 | 分类通道 | 骨架/完整节点 | 可操作 | 有名字可操作 | 实测判定 | 判定后通道 | 耗时 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| explorer（文件夹） | interface-or-gui | 46 / 133 | 39 | **90** | good | gui-a11y | 248 ms |
+| gameviewer（自绘） | gui-visual | 29 / 42 | 28 | **0** | sparse | gui-visual | 75 ms |
+| taskmgr | gui-a11y | 16 / 16 | 11 | **0** | sparse | gui-visual | 34 ms |
+| workbuddy（Electron） | gui-a11y | 3 / 3 | 1 | **0** | sparse | gui-visual | 149 ms |
+| explorer（桌面） | interface-or-gui | 3 / 3 | 3 | **0** | sparse | gui-visual | 24 ms |
 
-6/6 快照成功且树可用，均值 **86 ms**、最大 215 ms。关键结论：自绘 / Electron 类
-「可操作节点多、有名字节点极少」（`gameviewer` 28 个可操作节点里只有 2 个有名字），
-这类界面不能指望「按名字点」，要么走视觉兜底，要么明确拒绝——正是通道矩阵存在的意义。
+5/5 快照成功，均值 **106 ms**、最大 248 ms。结论不是「树能不能拿到」（都能），
+而是**「能不能按名字指认目标」**：只有 1/5 的应用满足，其余 4 个树虽非空，
+但「有名字的可操作节点」为 0——`gameviewer` 28 个可操作节点全部无名字，
+`workbuddy`（Electron）整棵树只有 3 个节点。
+
+### 树质量判定（`src/modules/tree-quality.mjs`）
+
+分类器只能看进程名与窗口标题，猜不出 Electron 应用（各自有独立 exe 名，
+进程名里没有 `electron`）。所以通道判定改为**观察后按实测树说话**：
+
+| 判定 | 含义 | 处置 |
+| --- | --- | --- |
+| `good` | 有名字的可操作节点充足 | 走 a11y 树，按名字定位 |
+| `sparse` | 树非空但指认不了目标 | 改判 `gui-visual`（视觉兜底需策略开启），否则明确拒绝 |
+| `empty` | 树为空 | 同上，并自动附带 `emptyTree` 提示 |
+| `deferred` | 节点预算耗尽，**还没看全** | 不改判，提示先 `drillDown` |
+
+判定依据是桥回传的**完整树**（比骨架深 2 层），不是被截断的骨架——早期版本用骨架
+判定，把「控件在深处」的 `taskmgr` 误判成 `sparse`。`deferred` 只保留给真的没看全
+（节点数触顶 1500）的情况，避免「永远下钻、永不下结论」。判定结果会回写注册表
+（按 `appId#hwnd` 分别记录），后续 `desktop_list_apps` 的通道列即为实测结论。
+
+### 真实应用写入闭环（`npm run verify:real-app`）
+
+受控窗口证明「通道能用」，真实应用才证明「改动真能落到文件」。脚本在临时目录创建
+`dcx-e2e-*.txt`，用记事本打开，写入 → `Ctrl+S` → **读磁盘校验**，最后关闭并删除临时目录。
+
+三条硬守卫（宁可少测，不能误改用户文档）：
+
+1. 窗口标题必须包含本次随机文件名；
+2. 动作前编辑框内容必须等于基线文本，否则视为「别的文档」直接放弃；
+3. 任一守卫失败即中止，不发送任何输入。
+
+实测（`reports/p2-real-app.json`）：
+
+| 步骤 | 通道 | 耗时 | 结论 |
+| --- | --- | --- | --- |
+| ValuePattern 写入真实应用 | `value-pattern-ref` | 239 ms | `verified`（状态真变） |
+| 快捷键保存 | `keyboard` | 407 ms | `verified-no-change` |
+| 关闭窗口 | `keyboard` | 417 ms | `verified` |
+| 磁盘校验 | — | 7 ms | `persisted:true`、基线保留、73 字节 |
+
+保存这一步暴露了验证器的假阴性：`Ctrl+S` 是幂等动作，界面本就不变，按「状态必须变化」
+判会误报 `verify-failed` 并白重试 3 次。现在区分出 `verified-no-change`——**不谎报已变化**，
+成效由副作用（文件内容）自证。
+
+### 故障注入（`tests/fault-injection.test.mjs`）
+
+桌面操作最怕的不是失败，而是失败以错误形态出现。每条故障都锁死「错误码 / 可恢复性 / 是否交还」：
+
+| 故障 | 期望 | 实测 |
+| --- | --- | --- |
+| 窗口中途关闭 | `OBSERVATION_FAILED` + `recoverable:true` | ✅ 不伪装成成功 |
+| 目标进程崩溃 | `HANDOFF_REQUIRED` + `recoverable:false` | ✅ 禁止继续重试 |
+| 观察阶段目标消失 | 结构化失败 + `hint` | ✅ 不抛原始堆栈 |
+| 界面变化后复用旧 ref | `STALE_REF`，`outcome=stale-ref` | ✅ 不静默重取后继续点 |
+| 动作无效果 | `VERIFY_FAILED` + `attempts` 可观测 | ✅ 有界重试 |
+| 预算耗尽 | `BUDGET_EXCEEDED` 熔断 | ✅ 不无限重试 |
+| 桥崩溃（请求在途） | pending 全部 `CAPABILITY_UNAVAILABLE`，桥引用与探测缓存复位 | ✅ 下一次调用自动重启新桥 |
 
 ### 同进程多窗口：必须用 hwnd
 
@@ -222,7 +284,7 @@ WebView ── desktop_agent_toggle / permissions_set ──> Rust 壳
 ## 已知限制
 
 1. **UAC / 验证码 / 锁屏**：`uacAwareness=false`，Secure Desktop 与完整性级别未检测，一律 `HANDOFF_REQUIRED`，不做绕过。
-2. **覆盖率仅采样、未做写操作**：`npm run coverage` 已对 6 个真实窗口做只读采样（树可用率 6/6），但真实应用的**写入**闭环仍只在受控 WPF 窗口验证过；Electron / 自绘 / 游戏类应用需逐个实测后才可纳入白名单（`gameviewer` 这类有名字节点极少的界面默认应拒绝或走视觉）。
+2. **真实应用只覆盖记事本写入**：`verify:real-app` 已完成「写入 → 保存 → 读盘」闭环，但仅 1 个应用；覆盖采样显示 4/5 真实窗口「有名字的可操作节点为 0」，这类应用需逐个实测后才可纳入白名单，默认应拒绝或走视觉（视觉兜底还需策略显式开启，且尚无定位模型接入）。
 3. **仅 Windows 有真实后端**：macOS AX / Linux AT-SPI 未实现，回落 mock。
 4. **策略不热更新**：改开关 / 授权需重启引擎；壳侧 `platformPermissions.checkableByShell=false`，只给引导文案，不检测系统授权。
 5. **未接线引擎生命周期**：P1 是「配置即生效」的最小接线；`AgentLifecycle`（随壳启停、崩溃重启上限、健康检查）属 P2。

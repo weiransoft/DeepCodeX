@@ -87,8 +87,28 @@ export class MockBackend {
       handoffOnAction: "",
       injectionText: "",
       mutateOnObserve: false,
+      /** 窗口在会话中途被关闭：观察/动作都 OBSERVATION_FAILED（可恢复） */
+      windowClosed: false,
+      /** 目标进程崩溃退出：HANDOFF_REQUIRED（不可恢复，必须交还人工） */
+      appExited: false,
     };
     this.appTrees = new Map();
+  }
+
+  /**
+   * 会话中途目标消失的统一出口。
+   * 「窗口关了」和「进程崩了」处置不同：前者可重开重试，后者必须交还
+   * 控制权（可能伴随数据丢失），错误码混用会让上层做出错误决策。
+   */
+  async _assertAlive() {
+    if (this.faults.appExited) {
+      const { AgentError, ErrorCode } = await import("../errors.mjs");
+      throw new AgentError(ErrorCode.HANDOFF_REQUIRED, "目标进程已退出，交还人工确认");
+    }
+    if (this.faults.windowClosed) {
+      const { AgentError, ErrorCode } = await import("../errors.mjs");
+      throw new AgentError(ErrorCode.OBSERVATION_FAILED, "目标窗口已关闭，需重新打开");
+    }
   }
 
   capabilities() {
@@ -109,6 +129,7 @@ export class MockBackend {
   }
 
   async snapshot({ appId = "notepad", maxDepth = 2, skeleton = false } = {}) {
+    await this._assertAlive();
     if (this.faults.observeThrows) {
       const code = this.faults.observeThrows;
       this.faults.observeThrows = "";
@@ -189,6 +210,7 @@ export class MockBackend {
   }
 
   async invokeRef({ snapshotId, ref, action = "invoke", value = "" } = {}) {
+    await this._assertAlive();
     if (this.faults.handoffOnAction) {
       const { AgentError } = await import("../errors.mjs");
       const { ErrorCode } = await import("../errors.mjs");
@@ -226,6 +248,7 @@ export class MockBackend {
   }
 
   async clickXY({ x = 0, y = 0, snapTo } = {}) {
+    await this._assertAlive();
     if (this.faults.failNextAction > 0) {
       this.faults.failNextAction -= 1;
       return { ok: false, error: "ACTION_NO_EFFECT" };
@@ -241,12 +264,14 @@ export class MockBackend {
   }
 
   async typeText({ text = "", ref } = {}) {
+    await this._assertAlive();
     this.state.text = text;
     this.state.status = `已输入 ${text.length} 字符`;
     return { ok: true, via: ref ? "value-pattern" : "keyboard", chars: text.length };
   }
 
   async sendKey({ combo = "" } = {}) {
+    await this._assertAlive();
     this.state.keys.push(combo);
     return { ok: true, combo };
   }

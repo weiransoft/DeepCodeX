@@ -165,14 +165,15 @@ export class Verifier {
 
       // 复观察：动作后必须确认状态真的变了（R4）
       const after = await this.readState();
-      const ok = !expectChange || this.changed(before, after);
+      const changed = this.changed(before, after);
+      const ok = !expectChange || changed;
       const observation = await this.perception.observe({ app });
       const result = {
         ok,
         code: ok ? undefined : ErrorCode.VERIFY_FAILED,
         action: { ok: true, via: actResult?.via, ref: args.ref },
         verification: {
-          changed: this.changed(before, after),
+          changed,
           expectChange,
           postActionSnapshotId: observation?.snapshotId,
         },
@@ -184,7 +185,10 @@ export class Verifier {
         this.budget.charge({ retries: 1 });
         continue;
       }
-      return this.finish(result, attempt, ok ? "verified" : "verify-failed");
+      // 「动作成功但界面没变」不等于「已验证」：保存/复制这类幂等动作本来就不改
+      // 界面，必须与「确认生效」区分开，由调用方用副作用（文件、剪贴板）自证。
+      const outcome = ok ? (changed ? "verified" : "verified-no-change") : "verify-failed";
+      return this.finish(result, attempt, outcome);
     }
   }
 

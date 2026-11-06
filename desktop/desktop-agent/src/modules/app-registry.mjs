@@ -14,6 +14,33 @@ export class AppRegistry {
     this.cachedAt = 0;
     this.ttlMs = options.ttlMs ?? 2000;
     this.clock = options.clock ?? (() => Date.now());
+    /** 实测树质量：key = `${appId}#${hwnd ?? pid}`，由 Perception 观察后回写 */
+    this.quality = new Map();
+  }
+
+  /**
+   * 记录一次实测树质量。按 hwnd 优先、pid 次之区分同进程多窗口——
+   * 同一个 exe 的「设置窗口」可能树很全，「主界面」却是自绘的，
+   * 只按 appId 记会把两者混为一谈。
+   */
+  noteTreeQuality(app, quality) {
+    if (!app || !quality) return;
+    const key = `${app.appId}#${app.hwnd ?? app.pid ?? 0}`;
+    this.quality.set(key, { ...quality, at: this.clock() });
+    this.telemetry?.emit("registry.tree_quality", {
+      appId: app.appId,
+      verdict: quality.verdict,
+      namedActionableCount: quality.namedActionableCount,
+    });
+  }
+
+  qualityFor(app) {
+    if (!app) return null;
+    return (
+      this.quality.get(`${app.appId}#${app.hwnd ?? app.pid ?? 0}`) ??
+      this.quality.get(`${app.appId}#${app.pid ?? 0}`) ??
+      null
+    );
   }
 
   async list({ refresh = false } = {}) {
@@ -55,7 +82,15 @@ export class AppRegistry {
         channel = "interface-or-gui";
         reason = "优先文件/CLI 接口；无接口再退 GUI";
       }
-      return { ...a, channel, reason };
+      // 实测优先于分类启发式：只要观察过且树确认残缺（sparse/empty），无论
+      // 进程名像不像 Electron 都改判视觉通道——否则模型会一直在残缺树里找目标。
+      // deferred 不改判：那只是「还没看全」，下钻即可，换通道是误判。
+      const quality = this.qualityFor(a);
+      if (channel !== "blocked" && quality && ["sparse", "empty"].includes(quality.verdict)) {
+        channel = "gui-visual";
+        reason = `实测树残缺（${quality.verdict}：${quality.reason}），需视觉兜底或换通道`;
+      }
+      return { ...a, channel, reason, treeQuality: quality ?? null };
     });
   }
 }

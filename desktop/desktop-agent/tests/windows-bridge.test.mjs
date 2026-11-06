@@ -27,6 +27,8 @@ function makeFakeBridge({ ready = { ok: true, type: "ready" }, responder } = {})
 
   const reply = (req) => {
     const value = responder ? responder(req) : { ok: true, command: req.command };
+    // 返回 undefined 表示「故意不回复」，用于制造在途请求（测试桥崩溃）
+    if (value === undefined) return;
     setImmediate(() => proc.stdout.write(`${JSON.stringify({ id: req.id, ...value })}\n`));
   };
 
@@ -231,6 +233,36 @@ test("桥未启用 / 非 Windows：不启动任何子进程，如实降级", asy
   const linux = createWindowsBackend({ platform: "linux", bridgeEnabled: true, spawn: countingSpawn });
   assert.deepEqual(await linux.listApps(), []);
   assert.equal(spawned, 0);
+});
+
+test("桥崩溃：在途请求被拒为 CAPABILITY_UNAVAILABLE，下一次调用自动重启新桥", async () => {
+  // 第一座桥收到 snapshot 故意不回，制造「请求在途时进程崩掉」
+  const first = makeFakeBridge({
+    responder: (req) => (req.command === "capabilities" ? { ok: true, uia: true } : undefined),
+  });
+  const second = makeFakeBridge({ responder: capsResponder });
+  let spawned = 0;
+  const spawnFn = () => (spawned++ === 0 ? first.spawnFn() : second.spawnFn());
+
+  const b = createWindowsBackend(opts({ spawn: spawnFn }));
+  assert.equal((await b.bridgeStatus()).supported, true);
+
+  const inflight = b._rpc("snapshot", { appId: "notepad" });
+  await new Promise((r) => setTimeout(r, 20));
+  first.proc.emit("exit", 1);
+
+  await assert.rejects(
+    () => inflight,
+    (e) => e.code === ErrorCode.CAPABILITY_UNAVAILABLE && /桥进程已退出/.test(e.message)
+  );
+  assert.equal(b.bridge, null, "崩溃后必须清空桥引用，否则后续请求会写进死管道");
+  assert.equal(b._bridgeProbe, null, "能力探测缓存必须复位，否则会继续报 supported:true");
+
+  // 下一次调用自动拉起新桥（不要求调用方重启进程）
+  const r2 = await b._rpc("capabilities", {});
+  assert.equal(r2.ok, true);
+  assert.equal(spawned, 2);
+  b.close();
 });
 
 test("工具契约：所有带 appId 的工具支持 pid/hwnd，_target 精确覆盖同进程多窗口", async () => {

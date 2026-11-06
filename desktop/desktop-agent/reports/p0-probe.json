@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-11-06T06:08:36.756Z",
+  "generatedAt": "2026-11-06T06:19:29.361Z",
   "platform": "win32",
   "session": "Console",
   "bridgeEnabled": true,
@@ -47,34 +47,34 @@
         "psVersion": "5.1.26100.9711"
       }
     },
-    "elapsedMs": 1362.59,
+    "elapsedMs": 1736.09,
     "a11yTreeSupported": true,
     "screenshotSupported": true
   },
   "enumeration": {
     "ok": true,
-    "elapsedMs": 94.47,
-    "count": 6,
+    "elapsedMs": 107.57,
+    "count": 5,
     "error": null,
     "categoryDistribution": {
       "unknown": 2,
-      "productivity": 3,
+      "productivity": 2,
       "selfdrawn-likely": 1
     }
   },
   "cacheBehaviour": {
-    "coldMs": 94.47,
-    "warmMs": 0.02,
-    "toolCallMs": 0.37,
-    "toolCallCount": 6,
+    "coldMs": 107.57,
+    "warmMs": 0.01,
+    "toolCallMs": 0.53,
+    "toolCallCount": 5,
     "note": "冷枚举走 UIA listWindows（约 0.1s）；TTL 内命中与默认工具调用不得重复枚举"
   },
   "channelMatrix": {
     "ok": true,
-    "elapsedMs": 0.08,
+    "elapsedMs": 0.11,
     "distribution": {
       "gui-a11y": 2,
-      "interface-or-gui": 3,
+      "interface-or-gui": 2,
       "gui-visual": 1
     },
     "apps": [
@@ -95,15 +95,6 @@
         "channel": "interface-or-gui",
         "hasTitle": true,
         "titleLength": 32
-      },
-      {
-        "appId": "notepad",
-        "processName": "Notepad.exe",
-        "pid": 12884,
-        "category": "productivity",
-        "channel": "interface-or-gui",
-        "hasTitle": true,
-        "titleLength": 25
       },
       {
         "appId": "gameviewer",
@@ -139,7 +130,7 @@
     "appId": "workbuddy",
     "snapshot": {
       "ok": true,
-      "elapsedMs": 103.88,
+      "elapsedMs": 120.56,
       "nodeCount": 3,
       "source": "a11y",
       "truncated": true,
@@ -150,10 +141,10 @@
     },
     "screenshot": {
       "ok": true,
-      "elapsedMs": 203.4,
+      "elapsedMs": 193.56,
       "width": 2586,
       "height": 1530,
-      "base64Bytes": 666084,
+      "base64Bytes": 612096,
       "persisted": false
     },
     "note": "只读观察，未执行任何写动作；窗口标题与画面内容不落盘"
@@ -162,12 +153,12 @@
     "note": "逻辑链路基线，非真机 GUI 耗时；用于判断编排/验证层是否成为瓶颈",
     "snapshot": {
       "ok": true,
-      "elapsedMs": 1.64,
+      "elapsedMs": 2.26,
       "source": "a11y"
     },
     "step": {
       "ok": true,
-      "elapsedMs": 1.14,
+      "elapsedMs": 1.44,
       "outcome": "verified",
       "code": null,
       "attempts": 1
@@ -177,7 +168,7 @@
     "verdict": "continue",
     "reasons": [
       "a11y 树/截图/输入注入通道已在真机打通（长驻 UIA 桥），Observe→Act→Verify 闭环已由 verify-gui 验证",
-      "真实窗口枚举可用，采到 6 个可见窗口（UIA listWindows），AppRegistry 与三级降级链可产出真实数据",
+      "真实窗口枚举可用，采到 5 个可见窗口（UIA listWindows），AppRegistry 与三级降级链可产出真实数据",
       "下一步：扩大目标应用集合测 UIA 覆盖率与单步耗时，补 P2 视觉兜底、生命周期接线与系统授权引导"
     ],
     "blockedCapabilities": [

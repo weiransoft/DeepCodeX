@@ -12,6 +12,7 @@
 
 import { ErrorCode, AgentError } from "../errors.mjs";
 import { detectInjection } from "./policy-guard.mjs";
+import { assessTree } from "./tree-quality.mjs";
 
 function flatten(nodes, out = []) {
   for (const n of nodes ?? []) {
@@ -61,6 +62,8 @@ export class Perception {
     this.snapshots = new Map();
     this.maxSnapshots = options.maxSnapshots ?? 8;
     this.current = null;
+    /** 观察后回写树质量（registry 据此修正通道判定），签名 (app, quality) */
+    this.onQuality = options.onQuality ?? null;
   }
 
   /** 当前有效快照 id（Verifier 与 Actuator 据此判定 ref 新鲜度） */
@@ -120,6 +123,15 @@ export class Perception {
 
     const texts = collectUntrustedTexts(tree);
     const injections = texts.flatMap(detectInjection);
+    // 用实测树质量判定通道，而不是靠进程名猜（Electron 应用的进程名里
+    // 并没有 "electron"，猜不出来）。结论回写注册表，后续 channelMatrix 生效。
+    // 判定依据用**完整树**（桥已回传，比骨架深 2 层），避免骨架截断造成的
+    // 假阳性；只有节点预算被耗尽（真没看全）才降级为 deferred。
+    const qualityTree = result.fullTree ?? tree;
+    const treeQuality = assessTree(qualityTree, {
+      complete: (result.nodeCount ?? flatten(qualityTree).length) < 1400,
+    });
+    this.onQuality?.(app, treeQuality);
     this.telemetry?.emit("observe.snapshot", {
       appId: app.appId,
       snapshotId: result.snapshotId,
@@ -127,6 +139,7 @@ export class Perception {
       nodeCount: result.nodeCount,
       truncated: Boolean(result.truncated),
       injectionHits: injections.length,
+      treeVerdict: treeQuality.verdict,
       elapsedMs: result.elapsedMs ?? Date.now() - started,
     });
 
@@ -139,6 +152,8 @@ export class Perception {
       nodeCount: result.nodeCount,
       truncated: Boolean(result.truncated),
       boundary: result.boundary,
+      /** 实测树质量：sparse/empty 时必须换通道或视觉兜底，别硬按名字点 */
+      treeQuality,
       /** UI 文本进入模型上下文前必须按不可信内容处理（R1） */
       untrusted: true,
       injectionHits: injections.length,
@@ -152,6 +167,12 @@ export class Perception {
       if (allowVisualFallback && this.policy?.policy?.allowScreenshot) {
         payload.visualFallback = await this.screenshot({ app, reason: "a11y-tree-empty" });
       }
+    } else if (treeQuality.verdict === "sparse") {
+      // 树非空但指认不了目标：换通道（视觉）或明确拒绝，别在同一棵树里反复重试
+      payload.hint = `${treeQuality.reason}；可先 drillDown 展开容器，或改走视觉通道`;
+    } else if (treeQuality.verdict === "deferred") {
+      // 还没看全：先下钻，此时换视觉通道是浪费（也是误判）
+      payload.hint = `${treeQuality.reason}；请对容器节点 drillDown 后再找目标`;
     }
     return payload;
   }

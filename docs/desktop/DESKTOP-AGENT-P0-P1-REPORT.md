@@ -5,7 +5,9 @@
 - 方案：[DESKTOP-COMPUTER-USE-PROPOSAL.md](./DESKTOP-COMPUTER-USE-PROPOSAL.md)
 - 实现说明：[desktop/desktop-agent/README.md](../../desktop/desktop-agent/README.md)
 - 原始数据：[p0-probe.json](../../desktop/desktop-agent/reports/p0-probe.json)、
-  [p1-gui-verify.json](../../desktop/desktop-agent/reports/p1-gui-verify.json)
+  [p1-gui-verify.json](../../desktop/desktop-agent/reports/p1-gui-verify.json)、
+  [p2-coverage.json](../../desktop/desktop-agent/reports/p2-coverage.json)、
+  [p2-real-app.json](../../desktop/desktop-agent/reports/p2-real-app.json)
 
 ---
 
@@ -23,8 +25,15 @@ P0 探针（桥关闭）曾判定 `continue-with-adjustment`：能枚举 34 个�
 - `verify:gui` 在受控 WPF 窗口上跑通 **ValuePattern 输入 / InvokePattern 点击 / 坐标点击 /
   快捷键**四条通道，连续 3 次 `gui-unblocked`、4/4 verified，并有状态证据
   （`before → dcx-after`、`idle → applied:dcx-after:2`）；
-- 真实应用覆盖率采样跑通：**6/6 真实窗口树可用**、均值 86 ms；并由此暴露并修掉
+- 真实应用覆盖率采样跑通：**5/5 真实窗口树可用**、均值 106 ms；并由此暴露并修掉
   「同进程多窗口按 pid 命错窗口」缺陷（新增 `hwnd` 端到端定位）；
+- **真实应用写入闭环跑通**：在自建临时文件的记事本上完成「ValuePattern 写入 → Ctrl+S →
+  读盘校验」，3/3 步骤通过，磁盘内容确含写入文本且基线保留；
+- **通道判定改为实测驱动**：新增 `tree-quality`，观察后用真实树判定
+  `good / sparse / deferred / empty`，修正「按进程名猜 Electron」的误分类
+  （实测 5 个真实窗口中只有 1 个真能按名字定位）；
+- **故障注入回归补齐**：窗口中途关闭、进程崩溃、桥崩溃重连、`STALE_REF`、预算熔断
+  全部锁定错误码与可恢复性，共 72 个单测通过；
 - 仍保持默认关闭：未开桥或未授权时如实降级，不伪造能力、不静默执行。
 
 关键工程结论：**稳定 ref 要求桥进程长驻**。P1 最初「每次调用新起 `powershell.exe`」的设计
@@ -126,22 +135,84 @@ TextBox/Button/TextBlock 直接暴露 ValuePattern / InvokePattern，才能覆�
 
 运行：`DEEPCODE_AGENT_UIA_BRIDGE=1 npm run coverage`（只读，不执行动作、不落盘标题与截图）
 
-| 应用 | 分类 / 通道 | 节点 | 可操作 | 有名字 | 耗时 |
-| --- | --- | --- | --- | --- | --- |
-| explorer（文件夹窗口） | productivity / interface-or-gui | 46 | 39 | 33 | 215.11 ms |
-| notepad | productivity / interface-or-gui | 35 | 29 | 23 | 76.23 ms |
-| gameviewer（自绘） | selfdrawn-likely / gui-visual | 29 | 28 | **2** | 69.44 ms |
-| taskmgr | unknown / gui-a11y | 16 | 11 | 9 | 29.27 ms |
-| workbuddy（Electron） | unknown / gui-a11y | 3 | 1 | 2 | 102.90 ms |
-| explorer（桌面窗口） | productivity / interface-or-gui | 3 | 1 | 2 | 23.48 ms |
+| 应用 | 分类通道 | 骨架/完整节点 | 可操作 | 有名字可操作 | 实测判定 | 判定后通道 | 耗时 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| explorer（文件夹） | interface-or-gui | 46 / 133 | 39 | **90** | good | gui-a11y | 247.85 ms |
+| gameviewer（自绘） | gui-visual | 29 / 42 | 28 | **0** | sparse | gui-visual | 74.76 ms |
+| taskmgr | gui-a11y | 16 / 16 | 11 | **0** | sparse | gui-visual | 33.64 ms |
+| workbuddy（Electron） | gui-a11y | 3 / 3 | 1 | **0** | sparse | gui-visual | 148.56 ms |
+| explorer（桌面窗口） | interface-or-gui | 3 / 3 | 3 | **0** | sparse | gui-visual | 23.87 ms |
 
-汇总：**6/6 快照成功且树可用**，总 132 节点 / 111 个可操作节点，均值 **86.07 ms**、
-最大 215.11 ms，无失败。
+汇总：**5/5 快照成功且树可用**，骨架 97 节点 / 完整树 197 节点，均值 **105.74 ms**、
+最大 247.85 ms，无失败。
 
 结论：真实桌面应用的语义树可用性不是瓶颈，**瓶颈是「有名字的可操作节点」**。
-`gameviewer` 28 个可操作节点里只有 2 个有名字、`workbuddy` 只有 3 个节点——这类界面
-无法靠「按名字找目标」完成操作，要么走视觉兜底，要么明确拒绝。这条数据直接支撑了
-方案里「树优先、视觉仅兜底 + 通道矩阵」的设计，而不是靠推断。
+5 个窗口里只有 1 个（文件夹窗口）有充足的可指认目标；`gameviewer` 28 个可操作节点
+全部无名字、`workbuddy` 整棵树只有 3 个节点——这类界面无法靠「按名字找目标」完成操作，
+要么走视觉兜底，要么明确拒绝。这条数据直接支撑了方案里「树优先、视觉仅兜底 + 通道矩阵」
+的设计，而不是靠推断。
+
+### 3.5 真实应用写入闭环（P2 准入第 1 项，写入侧）
+
+运行：`DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:real-app`
+
+受控 WPF 窗口只能证明「通道能用」，真实应用才证明「改动真能落到文件」。脚本在临时目录
+创建 `dcx-e2e-*.txt`，用记事本打开，写入 → `Ctrl+S` → **读磁盘校验**，最后关闭并删目录。
+
+三条硬守卫（宁可少测，不能误改用户文档）：
+
+1. 窗口标题必须包含本次随机文件名；
+2. 动作前编辑框内容必须等于基线文本，否则视为「别的文档」直接放弃；
+3. 任一守卫失败即中止，不发送任何输入。
+
+| 步骤 | 通道 | 耗时 | 结论 |
+| --- | --- | --- | --- |
+| ValuePattern 写入真实应用 | `value-pattern-ref` | 239 ms | `verified`（状态真变） |
+| 快捷键保存 | `keyboard` | 407 ms | `verified-no-change` |
+| 关闭窗口 | `keyboard` | 417 ms | `verified` |
+| 磁盘校验 | — | 7 ms | `persisted:true`、基线保留、73 字节 |
+
+判定 `real-app-write-verified`。窗口识别 113 ms、快照 44 节点（21 可操作 / 20 有名字，
+`good`），说明现代记事本的 UIA 树质量足以支撑按名字定位。
+
+这一步还暴露并修掉了验证器的假阴性：`Ctrl+S` 是幂等动作，界面本就不变，按「状态必须变化」
+判定会误报 `verify-failed` 并白重试 3 次。现在区分出 `verified-no-change`——**不谎报已变化**，
+成效由副作用自证；`desktop_*` 动作工具新增可选 `expectChange`（默认 true）。
+
+### 3.6 树质量判定（新增 `src/modules/tree-quality.mjs`）
+
+分类器只看进程名与标题，猜不出 Electron 应用（各自有独立 exe 名，进程名里没有 `electron`）。
+实测 `workbuddy` 被归为 `unknown → gui-a11y`，但它的树只有 3 个节点——按名字点必然失败。
+因此改为**观察后按实测树判定**：
+
+| 判定 | 含义 | 处置 |
+| --- | --- | --- |
+| `good` | 有名字的可操作节点充足 | 走 a11y 树 |
+| `sparse` | 树非空但指认不了目标 | 改判 `gui-visual`（视觉需策略开启），否则拒绝 |
+| `empty` | 树为空 | 同上，并附 `emptyTree` |
+| `deferred` | 节点预算耗尽，还没看全 | 不改判，提示先 `drillDown` |
+
+两个关键取舍：
+
+- 判定依据用桥回传的**完整树**（比骨架深 2 层），不是截断后的骨架。早期版本用骨架判定，
+  把「控件在深处」的 `taskmgr` 误判成 `sparse`；
+- `deferred` 只给「真没看全」（节点触顶 1500）的情形，否则会出现「永远下钻、永不下结论」。
+  判定结果按 `appId#hwnd` 回写注册表，`desktop_list_apps` 的通道列随之为实测结论。
+
+### 3.7 故障注入（P2 准入第 2 项）
+
+桌面操作最怕的不是失败，而是失败以错误形态出现（窗口关了当成功、进程崩了还在重试）。
+`tests/fault-injection.test.mjs` + 桥测试逐条锁死错误码与可恢复性：
+
+| 故障 | 期望 | 结果 |
+| --- | --- | --- |
+| 窗口中途关闭 | `OBSERVATION_FAILED` + 可恢复 | ✅ |
+| 目标进程崩溃 | `HANDOFF_REQUIRED` + 不可恢复 | ✅ |
+| 观察阶段目标消失 | 结构化失败 + `hint` | ✅ |
+| 界面变化后复用旧 ref | `STALE_REF` / `outcome=stale-ref` | ✅ |
+| 动作无效果 | `VERIFY_FAILED` + `attempts` | ✅ |
+| 预算耗尽 | `BUDGET_EXCEEDED` 熔断 | ✅ |
+| 桥崩溃（请求在途） | pending 全拒 `CAPABILITY_UNAVAILABLE`，引用与探测缓存复位，下次调用自动重启 | ✅ |
 
 ---
 
@@ -154,7 +225,7 @@ TextBox/Button/TextBlock 直接暴露 ValuePattern / InvokePattern，才能覆�
 | L1 协议 | `mcp-server.mjs` | stdio JSON-RPC 2.0；`initialize` / `tools/list` / `tools/call` / `ping`；stdout 仅协议帧 |
 | L2 编排 | `agent.mjs` | 11 个工具定义与分发、三级降级通道决策、`pid` 精确目标 |
 | L3 护栏 | `policy-guard.mjs` / `policy-load.mjs` / `budget.mjs` / `telemetry.mjs` | 白名单 + 注入扫描 + 一次性确认令牌、外部策略硬化、预算原子预扣熔断、脱敏事件 |
-| L3 感知 | `perception.mjs` / `app-registry.mjs` | 稳定 ref / 骨架树 / 下钻、TTL 缓存、通道矩阵 |
+| L3 感知 | `perception.mjs` / `app-registry.mjs` / `tree-quality.mjs` | 稳定 ref / 骨架树 / 下钻、TTL 缓存、通道矩阵、实测树质量判定与回写 |
 | L3 验证 | `verifier.mjs` | Observe→Act→Verify；旧 ref 硬返回 `STALE_REF`；有界重试 |
 | L4 后端 | `contract.mjs` / `mock.mjs` / `windows.mjs` / `windows-uia.ps1` | 可插拔契约；mock 故障注入；Windows 长驻桥客户端 + tasklist 回落；UIA 长驻桥（599 行） |
 
@@ -185,9 +256,10 @@ TextBox/Button/TextBlock 直接暴露 ValuePattern / InvokePattern，才能覆�
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
-| Node 单测 | `cd desktop/desktop-agent && npm test` | **55/55 通过**（6 个测试文件，约 16 s） |
+| Node 单测 | `cd desktop/desktop-agent && npm test` | **72/72 通过**（8 个测试文件，约 20 s） |
 | 真机 GUI 闭环 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:gui` | **4/4 verified**，`gui-unblocked`；连续 4 次稳定 |
-| 真实应用覆盖率 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run coverage` | 6/6 树可用，均值 86 ms，无失败 |
+| 真实应用写入 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:real-app` | **3/3 步骤**，`real-app-write-verified`，磁盘 `persisted:true` |
+| 真实应用覆盖率 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run coverage` | 5/5 树可用，均值 106 ms，无失败 |
 | P0 探针 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run probe` | `continue`；6 窗口 / 93 ms，能力 6/7 可用 |
 | MCP stdio 冒烟 | `printf … \| node src/index.mjs` | `initialize` 返回 `2025-03-26`；`tools/list` 11 个工具；`desktop_status` 默认 `enabled:false` |
 | 外部策略硬化 | 注入含 `bypass` / `allowScreenshot:true` / `maxSteps:9999` 的策略 | 生效值 `manual` / `false` / `false` / `maxSteps=100`；`enabled` 与白名单保留 |
@@ -220,20 +292,21 @@ CI 若用 MSVC 工具链应能直接跑全量。
 
 ## 7. 未解决与边界
 
-1. **真实应用的写入闭环未验证**：覆盖率只做只读采样（6/6 树可用），真实应用的
-   Observe→Act→Verify 仍只在受控 WPF 窗口跑通。Electron / 自绘 / 游戏类应用
-   （`workbuddy` 3 节点、`gameviewer` 28 可操作节点仅 2 个有名字）需逐个实测后才能
-   纳入白名单，否则应默认拒绝或走视觉。
+1. **真实应用覆盖只有 1 个写用例**：记事本的「写入 → 保存 → 读盘」已闭环，但仅 1 个应用；
+   覆盖率采样显示 5 个真实窗口中 4 个「有名字的可操作节点为 0」，这类应用只能视觉兜底
+   或拒绝，需逐个实测后才能纳入白名单。
 2. **UAC 未感知**：Secure Desktop 与完整性级别检测未实现，遇 UAC 一律交还人工。
-3. **分类仍偏粗**：靠进程名/标题启发式，`unknown` 占 2/6；误分会把目标送进错误通道。
-   已知误判：Electron 应用（`workbuddy`）未被 `CANVAS_HINTS` 命中，仍归 `unknown → gui-a11y`。
-4. **策略不热更新**：改开关/授权需重启引擎，UI 已有 `restartHint` 文案。
-5. **仅 Windows 真后端**：macOS AX / Linux AT-SPI 未实现，回落 mock。
-6. **未接线引擎生命周期**：P1 是「配置即生效」的最小接线；`AgentLifecycle`
+3. **分类启发式仍保留**：进程名/标题分类仍用于初始通道建议（`unknown` 占比高），
+   但已不再是最终结论——观察后由 `tree-quality` 实测覆盖；未观察过的应用仍可能是错的。
+4. **视觉兜底无定位模型**：`sparse/empty` 只给出「该走视觉」的判定与截图元数据，
+   还没有「截图 → 坐标」的视觉定位能力，因此这类应用当前实际是「拒绝执行」。
+5. **策略不热更新**：改开关/授权需重启引擎，UI 已有 `restartHint` 文案。
+6. **仅 Windows 真后端**：macOS AX / Linux AT-SPI 未实现，回落 mock。
+7. **未接线引擎生命周期**：P1 是「配置即生效」的最小接线；`AgentLifecycle`
    （随壳启停、崩溃重启上限、健康检查）属 P2。
-7. **桥对脚本编码敏感**：`windows-uia.ps1` 必须保持 UTF-8 BOM，否则 PowerShell 5.1
+8. **桥对脚本编码敏感**：`windows-uia.ps1` 必须保持 UTF-8 BOM，否则 PowerShell 5.1
    按 GBK 解码会解析失败；已写入 README 与回归用例的约束说明。
-8. **交叉工作区提示**：同一工作区里 `desktop/build/*` 的 Windows 分发打包脚本是另一条
+9. **交叉工作区提示**：同一工作区里 `desktop/build/*` 的 Windows 分发打包脚本是另一条
    工作流，其「能力排除守卫」明确不打包本切片。若在该分支上打分发包，需用
    `-BaselineRef` 固定到不含本切片的提交，否则默认 `HEAD` 快照会带上 IPC 并触发守卫中止。
 
@@ -241,14 +314,15 @@ CI 若用 MSVC 工具链应能直接跑全量。
 
 ## 8. P2 准入条件与下一步
 
-**准入（真机闭环与覆盖率采样已达成，以下为放量前置）：**
+**准入（真机闭环 / 覆盖率 / 写入闭环 / 故障注入均已达成，以下为放量前置）：**
 
-1. 覆盖率采样已跑通 6 个真实窗口（6/6 树可用）；需扩到 **≥ 10 个**真实目标应用，
-   并对树残缺应用（有名字节点占比 < 20%）明确「视觉兜底 / 拒绝」的判定规则；
-2. 补齐真实应用的**写入**闭环（当前只有受控 WPF 窗口验证过），并覆盖故障注入：权限拒绝、
-   窗口中途关闭、目标进程退出、`STALE_REF`、桥崩溃重启；
+1. 覆盖率采样已跑通 5 个真实窗口；需扩到 **≥ 10 个**真实目标应用，并对 `sparse/empty`
+   应用明确「视觉兜底 / 拒绝」的产品化判定（当前是拒绝）；
+2. 真实应用写用例从 1 个扩到 ≥ 5 个（Office、浏览器外壳、Electron 应用各一），
+   验证 `expectChange` 与副作用校验的通用性；
 3. 在 MSVC CI 上跑通 `cargo test --lib`，闭环 Rust 用例运行验证；
-4. 桥进程纳入生命周期管理：健康检查、崩溃重启上限、退出清理（现为 sidecar 退出时关闭）。
+4. 桥进程纳入生命周期管理：健康检查、崩溃重启上限、退出清理（现为 sidecar 退出时关闭，
+   崩溃后由下一次调用惰性重启）。
 
 **随后：**
 
@@ -267,6 +341,7 @@ CI 若用 MSVC 工具链应能直接跑全量。
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run probe)
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run coverage)
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:gui)
+(cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:real-app)
 npm run typecheck && npm run check:ipc
 
 # Rust（需用户级 Rust GNU + MinGW 在 PATH）

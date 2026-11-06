@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 
 import { createWindowsBackend } from "../src/backends/windows.mjs";
 import { AppRegistry } from "../src/modules/app-registry.mjs";
+import { assessTree, channelForQuality } from "../src/modules/tree-quality.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_OUT = join(HERE, "..", "reports", "p2-coverage.json");
@@ -53,7 +54,7 @@ function named(nodes) {
   return nodes.filter((n) => String(n.name ?? "").trim().length > 0).length;
 }
 
-async function one(backend, app, maxDepth) {
+async function one(backend, registry, app, maxDepth) {
   const t0 = performance.now();
   try {
     const snap = await backend.snapshot({ appId: app.appId, pid: app.pid, hwnd: app.hwnd, maxDepth });
@@ -61,6 +62,10 @@ async function one(backend, app, maxDepth) {
     const nodes = flatten(snap.tree);
     const roles = {};
     for (const n of nodes) roles[n.role ?? "unknown"] = (roles[n.role ?? "unknown"] ?? 0) + 1;
+    // 采样即测量：把质量回写注册表，通道判定此后以实测为准。
+    // 用完整树（比骨架深 2 层）判定，避免骨架截断把「控件在深处」误判成 sparse。
+    const quality = assessTree(snap.fullTree ?? snap.tree, { complete: (snap.nodeCount ?? 0) < 1400 });
+    registry?.noteTreeQuality(app, quality);
 
     const row = {
       appId: app.appId,
@@ -69,12 +74,16 @@ async function one(backend, app, maxDepth) {
       hwnd: app.hwnd ?? null,
       category: app.category,
       channel: app.channel,
+      channelAfterQuality: channelForQuality(quality),
+      treeQuality: quality,
       titleLength: String(app.title ?? "").length,
       nonAsciiTitle: /[^\x00-\x7f]/.test(String(app.title ?? "")),
       ok: true,
       elapsedMs: ms,
       nodeCount: snap.nodeCount,
       returnedNodes: nodes.length,
+      /** 完整树节点数（质量判定依据，比骨架深 2 层） */
+      fullNodeCount: flatten(snap.fullTree ?? snap.tree).length,
       truncated: Boolean(snap.truncated),
       actionableNodes: actionable(nodes),
       namedNodes: named(nodes),
@@ -148,7 +157,7 @@ async function main() {
       .slice(0, Number.isFinite(LIMIT) && LIMIT > 0 ? LIMIT : 8);
 
     for (const app of pickable) {
-      report.apps.push(await one(backend, app, 4));
+      report.apps.push(await one(backend, registry, app, report.maxDepth));
     }
 
     const okRows = report.apps.filter((r) => r.ok);
@@ -169,6 +178,17 @@ async function main() {
       maxElapsedMs: okRows.length ? Math.max(...okRows.map((r) => r.elapsedMs)) : null,
       thinTrees: okRows.filter((r) => r.returnedNodes <= 2).map((r) => `${r.appId}(pid=${r.pid})`),
       failures: report.apps.filter((r) => !r.ok).map((r) => `${r.appId}: ${r.error.code}`),
+      // 按实测质量重新分流的分布：这是「树优先」策略能覆盖多少应用的真实答案
+      channelAfterQuality: okRows.reduce((acc, r) => {
+        const k = r.channelAfterQuality ?? "unknown";
+        acc[k] = (acc[k] ?? 0) + 1;
+        return acc;
+      }, {}),
+      treeVerdicts: okRows.reduce((acc, r) => {
+        const k = r.treeQuality?.verdict ?? "unknown";
+        acc[k] = (acc[k] ?? 0) + 1;
+        return acc;
+      }, {}),
       note: "只读采样；thinTrees 表示 UIA 树几乎为空，这类应用若需操作只能走视觉兜底或直接拒绝",
     };
 

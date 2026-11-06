@@ -86,6 +86,7 @@ export const TOOLS = [
         ref: { type: "string" },
         action: { type: "string", enum: ["click_ref", "invoke", "submit", "send", "delete"] },
         value: { type: "string" },
+        expectChange: { type: "boolean", description: "默认 true；幂等动作（保存/复制）界面不变时应传 false，成效由副作用自证" },
         confirmationToken: { type: "string", description: "不可逆/manual 动作的二次确认令牌" },
       },
       required: ["appId", "snapshotId", "ref"],
@@ -101,6 +102,7 @@ export const TOOLS = [
         appId: { type: "string" },
         x: { type: "number" },
         y: { type: "number" },
+        expectChange: { type: "boolean" },
         confirmationToken: { type: "string" },
       },
       required: ["appId", "x", "y"],
@@ -117,6 +119,7 @@ export const TOOLS = [
         snapshotId: { type: "string" },
         ref: { type: "string" },
         value: { type: "string" },
+        expectChange: { type: "boolean" },
         confirmationToken: { type: "string" },
       },
       required: ["appId", "value"],
@@ -128,7 +131,12 @@ export const TOOLS = [
     description: "发送快捷键组合（如 ^s / {ENTER}）。",
     inputSchema: {
       type: "object",
-      properties: { appId: { type: "string" }, combo: { type: "string" }, confirmationToken: { type: "string" } },
+      properties: {
+        appId: { type: "string" },
+        combo: { type: "string" },
+        expectChange: { type: "boolean", description: "默认 true；^s 等保存类快捷键界面不变时应传 false" },
+        confirmationToken: { type: "string" },
+      },
       required: ["appId", "combo"],
       additionalProperties: false,
     },
@@ -184,6 +192,8 @@ export class DesktopAgent {
       policy: this.policy,
       budget: this.budget,
       telemetry: this.telemetry,
+      // 观察即测量：把实测树质量回写给注册表，通道判定不再靠进程名猜
+      onQuality: (app, quality) => this.registry.noteTreeQuality(app, quality),
     });
     this.actuator = new Actuator(this.backend, {
       perception: this.perception,
@@ -355,6 +365,7 @@ export class DesktopAgent {
           snapshotId: args.snapshotId,
           ref: args.ref,
           value: args.value,
+          expectChange: args.expectChange !== false,
           confirmationToken: args.confirmationToken,
         });
       }
@@ -367,6 +378,7 @@ export class DesktopAgent {
           action: "click_xy",
           x: Number(args.x),
           y: Number(args.y),
+          expectChange: args.expectChange !== false,
           confirmationToken: args.confirmationToken,
         });
       }
@@ -380,6 +392,7 @@ export class DesktopAgent {
           snapshotId: args.snapshotId,
           ref: args.ref,
           value: args.value,
+          expectChange: args.expectChange !== false,
           confirmationToken: args.confirmationToken,
         });
       }
@@ -391,6 +404,7 @@ export class DesktopAgent {
           app,
           action: "key",
           combo: args.combo,
+          expectChange: args.expectChange !== false,
           confirmationToken: args.confirmationToken,
         });
       }

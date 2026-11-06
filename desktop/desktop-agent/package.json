@@ -17,6 +17,7 @@
     "probe": "node scripts/probe.mjs",
     "coverage": "node scripts/coverage-report.mjs",
     "verify:gui": "node scripts/verify-gui.mjs",
+    "verify:real-app": "node scripts/verify-real-app.mjs",
     "register:mcp": "node scripts/register-mcp.mjs"
   },
   "dependencies": {},
