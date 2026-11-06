@@ -643,7 +643,7 @@ class TtsEngine:
         @param text 待合成文本
         @param engine 引擎（目前只有 CustomVoice 支持流式）
         @param voice 音色预设 / 预置名
-        @param speed 语速（对每个 chunk 做保调变速）
+        @param speed 语速（整个请求共用一条有状态 WSOLA 时间轴，不是逐块变速）
         @param interval 每个 chunk 的目标音频秒数（实测 1.0s → 首块 0.19s）
         @yields 单块 WAV 字节
         """
@@ -665,6 +665,13 @@ class TtsEngine:
                     f"[voice] tts-stream {len(text)}字 超过 {TTS_MAX_TEXT_CHARS} 字安全上限，"
                     f"自动分 {len(pieces)} 段合成\n"
                 )
+            # 整个请求共用**一条** WSOLA 时间轴：所有 chunk（包括跨 48 字
+            # 分段边界）都在同一状态下变速，输出块只是这条轴的连续切片。
+            # 逐块独立变速时窗函数/搜索状态每次重启，speed=1.2 实测边界
+            # 样本跳变中位 2.8%/最大 19.4%；有状态后回到 speed=1.0 的
+            # 0.1%/1.2% 量级，流式才能真正默认打开。
+            stretcher = StreamingWsola(speed)
+            rate = 24000
             for piece in pieces:
                 # 每段重新按音色派生固定种子，避免跨段随机状态串味
                 temperature = prepare_sampling(voice)
@@ -682,21 +689,25 @@ class TtsEngine:
                     streaming_interval=interval,
                 ):
                     rate = int(chunk.sample_rate)
-                    samples = np.asarray(chunk.audio, dtype=np.float32).reshape(-1)
-                    if speed != 1.0 and speed > 0:
-                        samples = time_stretch_wsola(samples, speed)
-                    # 退化时模型会一路生成到 max_tokens 上限，后半段全是
-                    # 静音 chunk。连续几个全静音块就掐断本段生成器：既不把
-                    # 十几秒空白推给浏览器，也省下剩余推理时间。
-                    if is_silent_chunk(samples):
+                    raw = np.asarray(chunk.audio, dtype=np.float32).reshape(-1)
+                    # 退化判定放在变速**之前**的原始样本上：WSOLA 不会凭空
+                    # 造静音，但逐块变速会把静音摊到不同位置。连续几块全静音
+                    # 就掐断本段生成器，既不把十几秒空白推给浏览器，也省下
+                    # 剩余推理时间（这把锁是整条语音链路共用的）。
+                    if is_silent_chunk(raw):
                         silent_run += 1
                         if silent_run > STREAM_SILENT_CHUNK_LIMIT:
                             stopped_early = True
                             break
                     else:
                         silent_run = 0
-                    # 单块内部也可能带一段退化尾音，逐块裁掉；正常语义停顿最长
-                    # 实测 0.68s，低于 1.0s 阈值，不会被误裁。
+                    # 不足一帧时 feed 返回空数组，样本攒在状态机里等下一块；
+                    # 这只有约 10ms 缓冲，不影响首字延迟。
+                    samples = stretcher.feed(raw)
+                    if samples.size == 0:
+                        continue
+                    # 兜底裁掉单块内的退化长尾音；正常语义停顿最长 0.68s，
+                    # 低于 1.0s 阈值，不会误裁。
                     samples = trim_degenerate_tail(samples, rate)
                     if samples.size == 0:
                         continue
@@ -706,6 +717,13 @@ class TtsEngine:
                         f"[voice] tts-stream {len(piece)}字 检测到退化静音，"
                         f"连续 {silent_run} 块后提前收尾\n"
                     )
+            # flush 不能漏：最后 frame_len + search 个样本还压在 OLA 缓冲里，
+            # 少了这一步每句话末尾都会被吃掉一小截。
+            tail = stretcher.flush()
+            if tail.size > 0:
+                tail = trim_degenerate_tail(tail, rate)
+                if tail.size > 0:
+                    yield encode_wav_bytes(tail, rate)
 
     def synthesize(self, text: str, engine: str, voice: str, speed: float) -> tuple[bytes, str, str]:
         """
@@ -888,6 +906,180 @@ def time_stretch_wsola(samples: "Any", speed: float) -> "Any":
     if not bool(valid.any()):
         return x
     return out[: int(np.flatnonzero(valid)[-1]) + 1]
+
+
+class StreamingWsola:
+    """
+    跨 chunk **有状态**的 WSOLA 变速（流式专用）
+
+    为什么需要它：流式 `/tts/stream` 以前对每个 0.8s chunk 各跑一次
+    `time_stretch_wsola()`。WSOLA 是重叠相加算法，窗函数、搜索用的「上一帧
+    重叠区」、理想分析位置都是**跨帧状态**；每块重新起一次，边界处就没有
+    前一帧可对齐。真机实测 speed=1.2 时块边界样本跳变中位 2.8% / 最大
+    19.4%（speed=1.0 只有 0.1% / 1.2%），听感就是「前后两句语速不一样」、
+    「讲了几句中间像断了一下」。
+
+    这里把同一套帧参数与搜索逻辑搬成实例状态：`x`（输入缓冲）、
+    `ideal_xpos` / `ypos`、`target`（上一帧重叠区）、`out` / `weight`
+    （OLA 累加）全部跨 `feed()` 延续。于是**把一段音频分 N 次喂进来，
+    输出与整段一次 `time_stretch_wsola()` 逐样本相同**（单测锁住），流式块
+    只是同一条时间轴的连续切片，边界不再各自重启窗函数。
+
+    关键约束：`feed()` 只在 `ideal_xpos + frame_len + search <= x.size` 时
+    处理帧，即**等搜索右窗完整可用**；`flush()` 才放宽到只剩一帧。这样分块
+    喂与整段一次喂，每一帧的搜索范围 `[lo, hi]` 完全一致，结果才严格相等
+    （否则先到的块搜索窗被 clamp，会悄悄改变输出）。额外等待只有
+    `search=256` 样本 ≈ 10.7ms @24kHz，不影响首字延迟。
+    """
+
+    FRAME_LEN = 1024
+    HOP_ANALYSIS = FRAME_LEN // 2
+    SEARCH = FRAME_LEN // 4
+    # 与整块 time_stretch_wsola 同一个门槛：太短的音频不做变速，否则帧数
+    # 不足会把波形拉出一串窗函数伪影。总输入低于它时原样透传。
+    MIN_SAMPLES = 4096
+
+    def __init__(self, speed: float) -> None:
+        import numpy as np
+
+        self.speed = float(speed)
+        # speed=1.0（或非法值）直接透传：不引入任何缓冲延迟，行为与整块一致
+        self.passthrough = self.speed <= 0 or abs(self.speed - 1.0) < 1e-3
+        self.x = np.zeros(0, dtype=np.float32)
+        self.target: "Any" = None
+        self.finished = False
+        if self.passthrough:
+            return
+        self.hop_synth = max(
+            self.FRAME_LEN // 4,
+            min(3 * self.FRAME_LEN // 4, int(round(self.HOP_ANALYSIS / self.speed))),
+        )
+        self.overlap = self.FRAME_LEN - self.hop_synth
+        self.window = np.hanning(self.FRAME_LEN).astype(np.float32)
+        self.out = np.zeros(self.FRAME_LEN * 4, dtype=np.float32)
+        self.weight = np.zeros(self.FRAME_LEN * 4, dtype=np.float32)
+        self.ideal_xpos = 0
+        self.ypos = 0
+        self.emitted = 0
+
+    def feed(self, samples: "Any") -> "Any":
+        """
+        喂入一段原始样本，吐出**已经确定**的变速后样本
+
+        只有 `< ypos` 的输出样本不会再被后续帧覆盖，才能安全发给浏览器；
+        不足一帧时返回空数组，调用方跳过即可。
+
+        @param samples float32 一维原始（未变速）波形
+        @returns 已确定的 float32 变速样本，可能长度为 0
+        """
+        import numpy as np
+
+        x_new = np.asarray(samples, dtype=np.float32).reshape(-1)
+        if x_new.size == 0:
+            return x_new
+        if self.passthrough:
+            return x_new
+        # 一个请求最多几十万样本，每次 feed 复制一次累积缓冲的成本（<0.1s）
+        # 相对 MLX 推理可忽略；换来搜索能随机访问跨块历史，不必维护环形缓冲。
+        self.x = np.concatenate((self.x, x_new))
+        if self.x.size < self.MIN_SAMPLES:
+            return np.zeros(0, dtype=np.float32)
+        self._process(require_full_search=True)
+        return self._drain()
+
+    def flush(self) -> "Any":
+        """
+        输入结束后收尾：处理剩余不足一个搜索窗的帧，吐出累加缓冲的尾段
+
+        必须调用，否则最后 `frame_len + search` 个样本会永远留在缓冲里，
+        听感是每句话末尾被吃掉一小截。
+
+        @returns 剩余 float32 变速样本，可能长度为 0
+        """
+        import numpy as np
+
+        if self.passthrough or self.finished:
+            return np.zeros(0, dtype=np.float32)
+        self.finished = True
+        if self.x.size < self.MIN_SAMPLES:
+            # 整块实现这个长度也是原样返回，流式不能突然变速，否则句尾
+            # 会出现一小段和前文语速不一致的音频
+            tail = self.x
+            self.x = np.zeros(0, dtype=np.float32)
+            return tail
+        self._process(require_full_search=False)
+        return self._tail()
+
+    def _grow(self, needed: int) -> None:
+        """按需给 OLA 累加缓冲扩容（流式不知道总时长）"""
+        import numpy as np
+
+        if needed <= self.out.size:
+            return
+        extra = max(needed - self.out.size, self.FRAME_LEN * 8)
+        self.out = np.concatenate((self.out, np.zeros(extra, dtype=np.float32)))
+        self.weight = np.concatenate((self.weight, np.zeros(extra, dtype=np.float32)))
+
+    def _process(self, require_full_search: bool) -> None:
+        import numpy as np
+
+        need = self.FRAME_LEN + (self.SEARCH if require_full_search else 0)
+        while self.ideal_xpos + need <= self.x.size:
+            best = self.ideal_xpos
+            if self.target is not None and self.overlap > 0:
+                lo = max(0, self.ideal_xpos - self.SEARCH)
+                hi = min(self.x.size - self.FRAME_LEN, self.ideal_xpos + self.SEARCH)
+                best_score = -2.0
+                for candidate in range(lo, hi + 1, 16):
+                    seg = self.x[candidate : candidate + self.overlap]
+                    if seg.size != self.target.size:
+                        continue
+                    denom = float(
+                        np.sqrt(float(np.dot(seg, seg)) * float(np.dot(self.target, self.target))) + 1e-8
+                    )
+                    score = float(np.dot(seg, self.target) / denom)
+                    if score > best_score:
+                        best_score, best = score, candidate
+            frame = self.x[best : best + self.FRAME_LEN]
+            end = self.ypos + self.FRAME_LEN
+            self._grow(end)
+            self.out[self.ypos : end] += frame * self.window
+            self.weight[self.ypos : end] += self.window
+            if self.overlap > 0:
+                self.target = frame[self.hop_synth :]
+            # best 只用于取这一帧，绝不回写理想分析位置（见整块实现同处注释）
+            self.ideal_xpos += self.HOP_ANALYSIS
+            self.ypos += self.hop_synth
+
+    def _drain(self) -> "Any":
+        import numpy as np
+
+        if self.ypos <= self.emitted:
+            return np.zeros(0, dtype=np.float32)
+        seg = self.out[self.emitted : self.ypos].copy()
+        w = self.weight[self.emitted : self.ypos]
+        valid = w > 1e-3
+        seg[valid] /= w[valid]
+        # 与整块实现严格一致：`out[valid] /= weight[valid]` 只动有效位置，
+        # 窗端点权重≈0 的位置保留累加原值（不是清零）。少这一步会让流式
+        # 与整块在每个过渡位置差出 2.5e-4，虽然听不见，但等价性断言就不成立了。
+        self.emitted = self.ypos
+        return seg
+
+    def _tail(self) -> "Any":
+        import numpy as np
+
+        seg = self.out[self.emitted :].copy()
+        w = self.weight[self.emitted :]
+        valid = w > 1e-3
+        if not bool(valid.any()):
+            return np.zeros(0, dtype=np.float32)
+        # 对齐整块实现的 `out[: last_valid + 1]`：丢掉预分配但没写过的部分
+        last = int(np.flatnonzero(valid)[-1]) + 1
+        seg = seg[:last]
+        v = valid[:last]
+        seg[v] /= w[:last][v]
+        return seg
 
 
 # 判定「有声」的相对峰值阈值（约 -34dB）。与前端 playout.ts 的

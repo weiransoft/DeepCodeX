@@ -62,7 +62,7 @@ export function SoulAppearancePane() {
   /** 免按住偏好（本地设置，不走服务端配置：它跟设备走，不跟账号走） */
   const [handsFree, setHandsFree] = useState(() => readHandsFree());
   useEffect(() => subscribeHandsFree(setHandsFree), []);
-  /** 流式播报偏好（同为本地设置；关掉即回到整块合成链路） */
+  /** 流式播报偏好（同为本地设置；默认开，关掉即回到整块合成链路） */
   const [streamPlayback, setStreamPlayback] = useState(() => readStreamPlayback());
   useEffect(() => subscribeStreamPlayback(setStreamPlayback), []);
   const [testing, setTesting] = useState(false);
@@ -438,7 +438,7 @@ export function SoulAppearancePane() {
             checked={streamPlayback}
             onChange={(event) => writeStreamPlayback(event.target.checked)}
           />
-          <span>流式播报（实验性：边生成边出声，首字延迟约 0.4 秒；变速时分块边界可能听出细微不连贯，默认关闭）</span>
+          <span>流式播报（边生成边出声，首字延迟约 0.4 秒；跨块连续变速，前后语速与音色一致，默认开启）</span>
         </label>
 
         <label className="soul-check">

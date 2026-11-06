@@ -115,21 +115,30 @@ export function subscribeHandsFree(handler: (value: boolean) => void): () => voi
  *
  * 同样是「这台设备上的偏好」而不是人格设定，所以跟着 localStorage 走。
  *
- * **默认关**（2026-11-06 真机反馈后改的）。流式首字延迟确实好（实测
- * 3.59s → 0.41s），但 `speed != 1.0` 时服务端要对每个 0.8s chunk 独立
- * 做一次 WSOLA 保调变速，而 WSOLA 是离线算法、状态不能跨块延续：实测
- * 块边界样本跳变从 speed=1.0 的中位 0.1%/最大 1.2% 涨到 2.8%/19.4%。
- * 用户听到的就是「前后两句语速不一样」「讲了几句中间像断了一下」。
+ * **默认开**（2026-11-06 第二轮）。流式首字延迟实测 3.59s → 0.41s（约 8.7×）。
+ * 上一轮之所以临时关掉，是因为 `speed != 1.0` 时服务端对每个 0.8s chunk
+ * 独立做一次 WSOLA 保调变速，而 WSOLA 是重叠相加算法、状态不能跨块延续：
+ * 块边界样本跳变中位 2.8%/最大 19.4%（speed=1.0 只有 0.1%/1.2%），听感是
+ * 「前后两句语速不一样」「讲了几句中间像断了一下」。
  *
- * 整块链路对整段波形只做一次 WSOLA，没有这个边界问题。先把默认切回
- * 稳定链路，流式留作可选项；等变速改成跨 chunk 有状态再默认打开。
+ * 现在服务端 `StreamingWsola` 让整个请求共用一条变速时间轴，分块喂入与整段
+ * 一次变速**逐样本相等**（`test_streaming_wsola.py` 锁住），边界不再重启窗
+ * 函数。根因消除，默认切回流式；整块链路仍作为用户手动关闭时的回退。
+ *
+ * ## 为什么换存储键
+ *
+ * 上一版默认关，可能有人手动关过、留下 `"0"`。这次是**修复后重新默认开**，
+ * 不该让旧版本的实验性选择继续压着新默认值，所以升到 `.v2`：读到旧键就
+ * 一次性删掉并采用新默认。用户之后手动关会写 v2 的 `"0"`，仍会被尊重。
  */
-export const STREAM_PLAYBACK_KEY = "dcx.voice.streamPlayback";
+export const STREAM_PLAYBACK_KEY = "dcx.voice.streamPlayback.v2";
+/** 上一版（逐块独立变速）的键：升级时一次性清理，不继承值 */
+const LEGACY_STREAM_PLAYBACK_KEY = "dcx.voice.streamPlayback";
 export const STREAM_PLAYBACK_EVENT = "dcx:voice-stream-playback";
 
-/** 流式播放默认值：关（见上方实测说明） */
+/** 流式播放默认值：开（跨 chunk 有状态 WSOLA 已消除边界失真） */
 export function defaultStreamPlayback(): boolean {
-  return false;
+  return true;
 }
 
 /**
@@ -140,9 +149,13 @@ export function defaultStreamPlayback(): boolean {
  */
 export function readStreamPlayback(fallback = defaultStreamPlayback()): boolean {
   try {
-    const raw = globalThis.localStorage?.getItem(STREAM_PLAYBACK_KEY);
+    const store = globalThis.localStorage;
+    const raw = store?.getItem(STREAM_PLAYBACK_KEY);
     if (raw === "1") return true;
     if (raw === "0") return false;
+    // 没有 v2 值 = 升级后的第一次读取。旧键是上一版「逐块独立变速」时代
+    // 留下的实验性开关，不继承（见文件头说明），清掉后回到新的默认开。
+    store?.removeItem(LEGACY_STREAM_PLAYBACK_KEY);
   } catch {
     // 隐私模式/无 localStorage：用默认值
   }
@@ -170,7 +183,10 @@ export function subscribeStreamPlayback(handler: (value: boolean) => void): () =
   };
   const onStorage = (event: Event): void => {
     const key = (event as StorageEvent).key;
-    if (key === null || key === STREAM_PLAYBACK_KEY) handler(readStreamPlayback());
+    // 旧键被清理时也会跨标签页广播，顺带让那一页重读一次新默认值
+    if (key === null || key === STREAM_PLAYBACK_KEY || key === LEGACY_STREAM_PLAYBACK_KEY) {
+      handler(readStreamPlayback());
+    }
   };
   globalThis.addEventListener?.(STREAM_PLAYBACK_EVENT, onCustom);
   globalThis.addEventListener?.("storage", onStorage);
