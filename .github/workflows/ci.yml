@@ -189,18 +189,47 @@ jobs:
 
       # 防空跑：cargo 在"没有任何用例匹配"时返回 0，若哪天 lib target 名被改，
       # 这个 job 会静默变绿。先用 --list 数一遍，再跑真正的用例。
+      #
+      # 为什么把 cargo 输出抓下来再写成 ::error:: / ::notice::：
+      # 本仓 Actions 日志下载接口要求 admin 权限（403），失败原因只有"exit code 1"，
+      # 看不出是编译错、还是用例数不对。注解（annotations）是匿名可读的，
+      # 所以把关键片段直接塞进注解，失败时无需登录网页也能定位。
       - name: Guard (lib 用例数)
         shell: pwsh
         run: |
-          $list = cargo test --lib --locked -- --list
-          $count = ($list | Select-String ': test$').Count
+          $out = & cargo test --lib --locked -- --list 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            Write-Host $out
+            $tail = $out.Substring([Math]::Max(0, $out.Length - 3500))
+            $tail = $tail.Replace('%', '%25').Replace("`r`n", '%0A').Replace("`n", '%0A')
+            Write-Host "::error::cargo 编译/列举失败（exit $code）。尾部输出：%0A$tail"
+            exit 1
+          }
+          $count = ([regex]::Matches($out, '(?m): test\r?$')).Count
           Write-Host "collected $count lib tests"
           if ($count -lt 60) {
-            throw "lib 用例数异常（$count < 60）：疑似用例被误删或 lib target 未被编译"
+            $head = ($out -split "`n" | Select-Object -First 20) -join ' | '
+            Write-Host "::error::lib 用例数异常（$count < 60），疑似用例被误删或 lib target 未编译。前若干行：$head"
+            exit 1
           }
+          Write-Host "::notice::collected $count lib tests"
 
       # --locked：Cargo.lock 与 Cargo.toml 必须一致，禁止 CI 静默改依赖
       # --test-threads=1：用例里有绑定本地端口（engine/port）、临时 SQLite（secrets/store）
       #                   等并发敏感场景，串行跑换取确定性，82 个用例总计仅数秒
       - name: cargo test --lib
-        run: cargo test --lib --locked -- --test-threads=1
+        shell: pwsh
+        run: |
+          $out = & cargo test --lib --locked -- --test-threads=1 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          $summary = (($out -split "`n") | Where-Object { $_ -match 'test result:' }) -join ' ; '
+          if ($code -ne 0) {
+            $tail = $out.Substring([Math]::Max(0, $out.Length - 3500))
+            $tail = $tail.Replace('%', '%25').Replace("`r`n", '%0A').Replace("`n", '%0A')
+            Write-Host "::error::cargo test --lib 失败（exit $code）。尾部输出：%0A$tail"
+            exit 1
+          }
+          # 这行注解就是"用例真的跑起来了且全绿"的凭证（日志接口读不到时的唯一证据）
+          Write-Host "::notice::$summary"
