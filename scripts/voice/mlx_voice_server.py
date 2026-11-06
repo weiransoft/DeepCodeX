@@ -448,10 +448,14 @@ def probe_deps() -> dict[str, Any]:
         import mlx_audio  # noqa: F401
         from mlx_audio.tts.utils import load_model  # noqa: F401
 
-        # mlx_audio 只是"库在"，具体模型要等首次加载才知道能不能跑
+        # mlx_audio 只是"库在"，具体模型要等首次加载才知道能不能跑。
+        # 这里报**配置里的**引擎而不是 DEFAULT_TTS_ENGINE：health 是排查
+        # 「音色不对」的第一现场，报硬编码常量会把排查方向带偏
+        # （2026-11-06 就因此以为引擎没切过来）。
+        configured = configured_engine()
         out["tts"] = {
-            "engine": DEFAULT_TTS_ENGINE,
-            "model": resolve_tts_model_id(DEFAULT_TTS_ENGINE),
+            "engine": configured,
+            "model": resolve_tts_model_id(configured),
             # 预置音色列表：/health 报出来，用户才知道能填哪些名字
             "speakers": list(CUSTOMVOICE_SPEAKERS),
             "ready": True,
@@ -490,6 +494,15 @@ class TtsEngine:
         self._models: dict[str, Any] = {}
         self._lock = threading.Lock()
 
+    def loaded(self) -> list[str]:
+        """
+        已经常驻内存的引擎名（升序）
+
+        /health 报出来，是为了区分「配置切了但权重还没加载」与「真的在跑新引擎」。
+        预热线程也可能还没跑完，列表为空就说明首句仍要冷加载。
+        """
+        return sorted(self._models)
+
     def _load(self, engine: str) -> Any:
         """按需加载并缓存模型"""
         if engine in self._models:
@@ -510,10 +523,11 @@ class TtsEngine:
         「语音服务不可用：This operation was aborted」。放到启动后的后台线程
         里，用户开口时模型已在内存，首块合成降到几百毫秒。
 
-        @param engine 要预热的引擎名（非法值回落默认引擎）
+        @param engine 要预热的引擎名（非法值回落配置里的引擎）
         """
         if engine not in MODEL_IDS:
-            engine = DEFAULT_TTS_ENGINE
+            # 预热错引擎等于白等一次冷加载：非法值按配置走，而不是硬编码默认
+            engine = configured_engine()
         with self._lock:
             self._load(engine)
 
@@ -530,7 +544,9 @@ class TtsEngine:
         import numpy as np
 
         if engine not in MODEL_IDS:
-            engine = DEFAULT_TTS_ENGINE
+            # 引擎名写错时按配置回落：硬编码回落 VoiceDesign 会静默让音色
+            # 回到"每次现场设计"的老路上，而调用方看不出异常
+            engine = configured_engine()
         # 实际生效的音色要回显给调用方：排查"音色不对"时，第一件要确认的事
         # 就是这次请求到底用了哪个 speaker，而不是靠配置反推
         voice_used = voice
@@ -851,6 +867,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": f"未知路径 {self.path}"})
             return
         deps = probe_deps()
+        # 补一项：哪些引擎已经常驻（配置报的是"该用哪个"，这里报"已经在跑的"）
+        if isinstance(deps.get("tts"), dict):
+            deps["tts"]["loaded"] = self.tts.loaded()
         self._send_json(
             200,
             {
@@ -897,7 +916,9 @@ class Handler(BaseHTTPRequestHandler):
         if not text:
             self._send_json(400, {"code": "EMPTY_TEXT", "reason": "text 不能为空"})
             return
-        engine = str(payload.get("engine") or DEFAULT_TTS_ENGINE)
+        # 请求体没带 engine 时按**配置**回落，不能回落到硬编码的 VoiceDesign：
+        # 那会让"配置已切到 CustomVoice"从直连路径上失效，音色又开始每句重设计。
+        engine = str(payload.get("engine") or configured_engine())
         voice = str(payload.get("voice") or "")
         # 手改配置 / 旧客户端可能传字符串，坏值回落 1.0 而不是抛 500
         try:
