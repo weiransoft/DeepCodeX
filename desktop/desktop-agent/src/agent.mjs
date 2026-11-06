@@ -155,15 +155,20 @@ export const TOOLS = [
 ];
 
 /**
- * 所有带 appId 的工具都支持可选 pid：同一进程名常有多个顶层窗口
- * （浏览器多窗口、多标签、多开应用），只按 appId 取第一个会观察错窗口。
- * UIA 树与动作都按 pid 精确定位，避免「观察到的 A、操作到 B」。
+ * 所有带 appId 的工具都支持可选 pid / hwnd：
+ * 同一进程名常有多个顶层窗口（浏览器多窗口、多标签、多开应用，甚至资源管理器
+ * 的桌面窗口与文件夹窗口共用同一 PID）。只按 appId 取第一个会观察错窗口；
+ * pid 仍不唯一时，hwnd 才是能落到具体窗口的标识。
  */
 for (const tool of TOOLS) {
   if (tool.inputSchema?.properties?.appId) {
     tool.inputSchema.properties.pid = {
       type: "number",
       description: "可选：目标窗口所属进程 PID；同一 appId 有多个窗口时用于精确定位",
+    };
+    tool.inputSchema.properties.hwnd = {
+      type: "number",
+      description: "可选：窗口句柄；同进程多窗口时唯一可区分（取 desktop_list_apps 返回值）",
     };
   }
 }
@@ -255,14 +260,29 @@ export class DesktopAgent {
    * 供 UIA 桥按进程定位具体窗口（同 appId 多窗口场景）。
    */
   async _target(args) {
-    let app = await this.registry.get(args.appId);
+    const hwnd = args.hwnd != null && Number.isFinite(Number(args.hwnd)) ? Number(args.hwnd) : null;
+    let app = null;
+    if (hwnd) {
+      // HWND 是唯一能区分「同进程多窗口」的标识（资源管理器桌面窗口/文件夹窗口、
+      // 多标签应用的独立窗口）。先按 hwnd 精确匹配，再退回 appId/pid。
+      const apps = await this.registry.list({ refresh: false });
+      app = apps.find((a) => Number(a.hwnd) === hwnd) ?? null;
+      if (!app) {
+        const fresh = await this.registry.list({ refresh: true });
+        app = fresh.find((a) => Number(a.hwnd) === hwnd) ?? null;
+      }
+    }
+    if (!app) app = await this.registry.get(args.appId);
     if (!app) app = await this.registry.get(args.appId, { refresh: true });
     if (!app) {
       throw new AgentError(ErrorCode.INVALID_ARGUMENT, `应用 ${args.appId} 不在当前窗口列表中`, {
-        hint: "先调用 desktop_list_apps 取有效 appId",
+        hint: "先调用 desktop_list_apps 取有效 appId（同进程多窗口请带 hwnd）",
       });
     }
-    return args.pid ? { ...app, pid: Number(args.pid) } : app;
+    const target = { ...app };
+    if (args.pid) target.pid = Number(args.pid);
+    if (hwnd) target.hwnd = hwnd;
+    return target;
   }
 
   /** 工具分发：统一入口，异常规范化为结构化 code */

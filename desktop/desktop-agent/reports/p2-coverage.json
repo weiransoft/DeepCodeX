@@ -1,0 +1,218 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-11-06T06:08:26.635Z",
+  "platform": "win32",
+  "session": "Console",
+  "privacy": {
+    "windowTitlesPersisted": false,
+    "note": "只记录标题长度与非 ASCII 特征，不落盘标题内容；默认不截图"
+  },
+  "maxDepth": 4,
+  "apps": [
+    {
+      "appId": "workbuddy",
+      "processName": "WorkBuddy.exe",
+      "pid": 6316,
+      "hwnd": 199314,
+      "category": "unknown",
+      "channel": "gui-a11y",
+      "titleLength": 9,
+      "nonAsciiTitle": false,
+      "ok": true,
+      "elapsedMs": 102.9,
+      "nodeCount": 3,
+      "returnedNodes": 3,
+      "truncated": true,
+      "actionableNodes": 1,
+      "namedNodes": 2,
+      "roles": {
+        "Window": 1,
+        "Pane": 2
+      },
+      "topRoles": [
+        "Pane:2",
+        "Window:1"
+      ]
+    },
+    {
+      "appId": "explorer",
+      "processName": "explorer.exe",
+      "pid": 8392,
+      "hwnd": 461716,
+      "category": "productivity",
+      "channel": "interface-or-gui",
+      "titleLength": 32,
+      "nonAsciiTitle": true,
+      "ok": true,
+      "elapsedMs": 215.11,
+      "nodeCount": 133,
+      "returnedNodes": 46,
+      "truncated": true,
+      "actionableNodes": 39,
+      "namedNodes": 33,
+      "roles": {
+        "Window": 1,
+        "Pane": 8,
+        "StatusBar": 1,
+        "Group": 6,
+        "List": 2,
+        "Tab": 1,
+        "Button": 16,
+        "": 3,
+        "Edit": 2,
+        "SplitButton": 5,
+        "Image": 1
+      },
+      "topRoles": [
+        "Button:16",
+        "Pane:8",
+        "Group:6",
+        "SplitButton:5",
+        ":3"
+      ]
+    },
+    {
+      "appId": "notepad",
+      "processName": "Notepad.exe",
+      "pid": 12884,
+      "hwnd": 197382,
+      "category": "productivity",
+      "channel": "interface-or-gui",
+      "titleLength": 25,
+      "nonAsciiTitle": false,
+      "ok": true,
+      "elapsedMs": 76.23,
+      "nodeCount": 37,
+      "returnedNodes": 35,
+      "truncated": true,
+      "actionableNodes": 29,
+      "namedNodes": 23,
+      "roles": {
+        "Window": 2,
+        "Pane": 9,
+        "Document": 1,
+        "Tab": 1,
+        "List": 1,
+        "Button": 11,
+        "MenuBar": 1,
+        "MenuItem": 3,
+        "Text": 6
+      },
+      "topRoles": [
+        "Button:11",
+        "Pane:9",
+        "Text:6",
+        "MenuItem:3",
+        "Window:2"
+      ]
+    },
+    {
+      "appId": "gameviewer",
+      "processName": "GameViewer.exe",
+      "pid": 14712,
+      "hwnd": 262724,
+      "category": "selfdrawn-likely",
+      "channel": "gui-visual",
+      "titleLength": 6,
+      "nonAsciiTitle": true,
+      "ok": true,
+      "elapsedMs": 69.44,
+      "nodeCount": 42,
+      "returnedNodes": 29,
+      "truncated": true,
+      "actionableNodes": 28,
+      "namedNodes": 2,
+      "roles": {
+        "Window": 1,
+        "Group": 27,
+        "Text": 1
+      },
+      "topRoles": [
+        "Group:27",
+        "Window:1",
+        "Text:1"
+      ]
+    },
+    {
+      "appId": "taskmgr",
+      "processName": "Taskmgr.exe",
+      "pid": 10508,
+      "hwnd": 460894,
+      "category": "unknown",
+      "channel": "gui-a11y",
+      "titleLength": 5,
+      "nonAsciiTitle": true,
+      "ok": true,
+      "elapsedMs": 29.27,
+      "nodeCount": 16,
+      "returnedNodes": 16,
+      "truncated": true,
+      "actionableNodes": 11,
+      "namedNodes": 9,
+      "roles": {
+        "Window": 1,
+        "Pane": 15
+      },
+      "topRoles": [
+        "Pane:15",
+        "Window:1"
+      ]
+    },
+    {
+      "appId": "explorer",
+      "processName": "explorer.exe",
+      "pid": 8392,
+      "hwnd": 65846,
+      "category": "productivity",
+      "channel": "interface-or-gui",
+      "titleLength": 15,
+      "nonAsciiTitle": false,
+      "ok": true,
+      "elapsedMs": 23.48,
+      "nodeCount": 3,
+      "returnedNodes": 3,
+      "truncated": true,
+      "actionableNodes": 3,
+      "namedNodes": 2,
+      "roles": {
+        "Pane": 3
+      },
+      "topRoles": [
+        "Pane:3"
+      ]
+    }
+  ],
+  "capabilities": {
+    "a11yTree": {
+      "supported": true,
+      "reason": "windows-uia.ps1 长驻桥已连接（session=Console, userInteractive=true）"
+    },
+    "screenshot": {
+      "supported": true,
+      "reason": "windows-uia.ps1 长驻桥已连接（session=Console, userInteractive=true）"
+    },
+    "bridge": {
+      "connected": true,
+      "session": "Console",
+      "userInteractive": true,
+      "psVersion": "5.1.26100.9711"
+    }
+  },
+  "enumeration": {
+    "count": 6,
+    "elapsedMs": 95.24
+  },
+  "summary": {
+    "verdict": "tree-usable",
+    "sampled": 6,
+    "snapshotOk": 6,
+    "treeUsable": 6,
+    "totalNodes": 132,
+    "totalActionable": 111,
+    "avgElapsedMs": 86.07,
+    "maxElapsedMs": 215.11,
+    "thinTrees": [],
+    "failures": [],
+    "note": "只读采样；thinTrees 表示 UIA 树几乎为空，这类应用若需操作只能走视觉兜底或直接拒绝"
+  }
+}

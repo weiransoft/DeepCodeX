@@ -122,7 +122,7 @@ test("snapshot：保留桥返回的 snapshotId 并规范化树，动作才能解
   assert.deepEqual(s.tree[0].children[0].rect, { x: 0, y: 0, width: 0, height: 0 }); // 缺失 rect 被补齐
   assert.deepEqual(s.fullTree[0].children[0].children, []);
   assert.equal(s.nodeCount, 2);
-  assert.deepEqual(b.lastTarget, { appId: "notepad", pid: 4321 });
+  assert.deepEqual(b.lastTarget, { appId: "notepad", pid: 4321, hwnd: 0 });
 
   const inv = await b.invokeRef({ snapshotId: s.snapshotId, ref: "e01", action: "invoke", value: "x" });
   assert.equal(inv.ok, true);
@@ -233,16 +233,53 @@ test("桥未启用 / 非 Windows：不启动任何子进程，如实降级", asy
   assert.equal(spawned, 0);
 });
 
-test("工具契约：所有带 appId 的工具支持 pid，_target 精确覆盖同 appId 多窗口", async () => {
+test("工具契约：所有带 appId 的工具支持 pid/hwnd，_target 精确覆盖同进程多窗口", async () => {
   const withAppId = TOOLS.filter((t) => t.inputSchema?.properties?.appId);
   assert.ok(withAppId.length >= 6);
   assert.ok(withAppId.every((t) => t.inputSchema.properties.pid?.type === "number"));
+  assert.ok(withAppId.every((t) => t.inputSchema.properties.hwnd?.type === "number"));
 
   const agent = new DesktopAgent({ backend: createMockBackend(), policy: defaultPolicy() });
-  agent.registry.list = async () => [{ appId: "notepad", pid: 111, title: "A", category: "productivity" }];
-  const plain = await agent._target({ appId: "notepad" });
-  assert.equal(plain.pid, 111);
-  const exact = await agent._target({ appId: "notepad", pid: 999 });
-  assert.equal(exact.pid, 999);
+  // 同进程两个窗口：只给 appId 会命中第一个；hwnd 才能落到第二个
+  const windows = [
+    { appId: "explorer", pid: 8392, hwnd: 65846, title: "Program Manager", category: "productivity" },
+    { appId: "explorer", pid: 8392, hwnd: 461716, title: "Downloads", category: "productivity" },
+    { appId: "notepad", pid: 111, hwnd: 197382, title: "Untitled - Notepad", category: "productivity" },
+  ];
+  agent.registry.list = async () => windows;
+
+  const plain = await agent._target({ appId: "explorer" });
+  assert.equal(plain.pid, 8392);
+  assert.equal(plain.hwnd, 65846);
+
+  const exact = await agent._target({ appId: "explorer", hwnd: 461716 });
+  assert.equal(exact.hwnd, 461716);
+  assert.equal(exact.title, "Downloads");
+
+  const both = await agent._target({ appId: "explorer", pid: 8392, hwnd: 461716 });
+  assert.equal(both.pid, 8392);
+  assert.equal(both.hwnd, 461716);
+
+  const pidOnly = await agent._target({ appId: "notepad", pid: 999 });
+  assert.equal(pidOnly.pid, 999);
   await assert.rejects(() => agent._target({ appId: "missing" }), (e) => e.code === ErrorCode.INVALID_ARGUMENT);
+});
+
+test("hwnd 贯穿感知链路：snapshot/screenshot/动作都带 hwnd，桥侧才能落到具体窗口", async () => {
+  const fake = makeFakeBridge({ responder: capsResponder });
+  const b = createWindowsBackend(opts({ spawn: fake.spawnFn }));
+  const snap = await b.snapshot({ appId: "notepad", pid: 4321, hwnd: 461716, maxDepth: 2 });
+  assert.equal(snap.hwnd, 461716);
+  await b.screenshot({ appId: "notepad", pid: 4321 });
+  await b.invokeRef({ snapshotId: snap.snapshotId, ref: "e01", action: "click_ref" });
+
+  const sent = fake.writes.map((w) => JSON.parse(Buffer.from(w.trim(), "base64").toString("utf8")));
+  const snapReq = sent.find((r) => r.command === "snapshot");
+  assert.equal(snapReq.args.hwnd, 461716);
+  // 截图与动作走 _withTarget，自动继承最近一次成功观察的 hwnd
+  const shotReq = sent.find((r) => r.command === "screenshot");
+  assert.equal(shotReq.args.hwnd, 461716);
+  const actReq = sent.find((r) => r.command === "invokeRef");
+  assert.equal(actReq.args.hwnd, 461716);
+  b.close();
 });

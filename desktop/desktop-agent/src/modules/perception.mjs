@@ -86,7 +86,7 @@ export class Perception {
 
     let result;
     try {
-      result = await this.backend.snapshot({ appId: app.appId, pid: app.pid, maxDepth, skeleton });
+      result = await this.backend.snapshot({ appId: app.appId, pid: app.pid, hwnd: app.hwnd, maxDepth, skeleton });
     } catch (err) {
       if (err?.code === ErrorCode.OBSERVATION_FAILED || err?.code === ErrorCode.CAPABILITY_UNAVAILABLE) {
         this.telemetry?.emit("observe.fallback", { appId: app.appId, code: err.code });
@@ -205,7 +205,7 @@ export class Perception {
     }
     this.budget?.charge({ screenshots: 1, steps: 1 });
     const shot = await this.telemetry.measure("observe.screenshot", { appId: app?.appId, reason }, () =>
-      this.backend.screenshot({ reason, appId: app?.appId, pid: app?.pid })
+      this.backend.screenshot({ reason, appId: app?.appId, pid: app?.pid, hwnd: app?.hwnd })
     );
     // 只回传元数据；base64 交给调用方按需消费，绝不经 Telemetry 落盘
     this.current && this.snapshots.has(this.current) && (this.snapshots.get(this.current).lastScreenshot = {

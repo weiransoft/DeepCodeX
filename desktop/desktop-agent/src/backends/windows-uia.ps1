@@ -40,6 +40,7 @@ $script:MaxNodes = 1500
 $script:CurrentSnapshotId = ''
 $script:LastAppId = ''
 $script:LastPid = 0
+$script:LastHwnd = 0
 $script:Ready = $false
 $script:MaxSnapshots = 8
 
@@ -151,8 +152,14 @@ function Get-TopWindows {
     return $list
 }
 
-function Resolve-Window([string]$appId, [int]$targetPid) {
+function Resolve-Window([string]$appId, [int]$targetPid, [long]$targetHwnd) {
     $wins = @(Get-TopWindows)
+    # HWND 优先：同一进程可能有多个窗口（如资源管理器的桌面窗口与文件夹窗口），
+    # 只按 pid 会稳定命中错误的那一个，后续 ref 与坐标都会落在错窗口上。
+    if ($targetHwnd -gt 0) {
+        foreach ($w in $wins) { if ([long]$w.Hwnd -eq $targetHwnd) { return $w } }
+        return $null
+    }
     if ($targetPid -gt 0) {
         foreach ($w in $wins) { if ($w.Pid -eq $targetPid) { return $w } }
     }
@@ -270,8 +277,8 @@ function Get-WindowState($w) {
     return $o
 }
 
-function Test-Foreground([string]$appId, [int]$targetPid, [switch]$Activate) {
-    $w = Resolve-Window $appId $targetPid
+function Test-Foreground([string]$appId, [int]$targetPid, [long]$targetHwnd, [switch]$Activate) {
+    $w = Resolve-Window $appId $targetPid $targetHwnd
     if ($null -eq $w) { return $null }
     if ($Activate -and $w.Hwnd -ne 0) {
         # 后台进程置前常被拒绝：多策略重试（AttachThreadInput + UIA SetFocus），
@@ -329,14 +336,17 @@ function Invoke-Dcx([string]$command, $a) {
             $appId = [string]$a.appId
             $targetPid = 0
             if ($a.pid) { $targetPid = [int]$a.pid }
+            $targetHwnd = 0
+            if ($a.hwnd) { $targetHwnd = [long]$a.hwnd }
             $maxDepth = 2
             if ($a.maxDepth) { $maxDepth = [Math]::Min([Math]::Max([int]$a.maxDepth, 1), 8) }
-            $w = Resolve-Window $appId $targetPid
+            $w = Resolve-Window $appId $targetPid $targetHwnd
             if ($null -eq $w) {
-                return New-Fail 'OBSERVATION_FAILED' "未找到目标窗口：$appId (pid=$targetPid)"
+                return New-Fail 'OBSERVATION_FAILED' "未找到目标窗口：$appId (pid=$targetPid, hwnd=$targetHwnd)"
             }
             $script:LastAppId = $appId
             $script:LastPid = [int]$w.Pid
+            $script:LastHwnd = [long]$w.Hwnd
             $script:CurrentSnapshotId = 'uia-' + [Guid]::NewGuid().ToString('N').Substring(0, 12)
             $script:NodeSeq = 0
             $script:NodeCount = 0
@@ -355,7 +365,7 @@ function Invoke-Dcx([string]$command, $a) {
             $sw.Stop()
             $o = [ordered]@{
                 ok = $true; snapshotId = $script:CurrentSnapshotId
-                appId = $appId; pid = $script:LastPid; windowName = [string]$w.Name
+                appId = $appId; pid = $script:LastPid; hwnd = $script:LastHwnd; windowName = [string]$w.Name
                 tree = $skeleton; fullTree = $fullTree
                 source = 'a11y'; nodeCount = $script:NodeCount
                 elapsedMs = [int]$sw.ElapsedMilliseconds
@@ -370,8 +380,10 @@ function Invoke-Dcx([string]$command, $a) {
             $appId = [string]$a.appId
             $targetPid = 0
             if ($a.pid) { $targetPid = [int]$a.pid }
-            if ($appId -or $targetPid -gt 0) {
-                $win = Resolve-Window $appId $targetPid
+            $targetHwnd = 0
+            if ($a.hwnd) { $targetHwnd = [long]$a.hwnd }
+            if ($appId -or $targetPid -gt 0 -or $targetHwnd -gt 0) {
+                $win = Resolve-Window $appId $targetPid $targetHwnd
                 if ($null -ne $win) {
                     try {
                         $r = $win.El.Current.BoundingRectangle
@@ -434,7 +446,9 @@ function Invoke-Dcx([string]$command, $a) {
                 $fgApp = [string]$a.appId
                 $fgPid = 0
                 if ($a.pid) { $fgPid = [int]$a.pid }
-                $fgWin = Test-Foreground $fgApp $fgPid -Activate
+                $fgHwnd = 0
+                if ($a.hwnd) { $fgHwnd = [long]$a.hwnd }
+                $fgWin = Test-Foreground $fgApp $fgPid $fgHwnd -Activate
                 if ($null -ne $fgWin) {
                     try {
                         $r = $el.Current.BoundingRectangle
@@ -460,7 +474,9 @@ function Invoke-Dcx([string]$command, $a) {
             $appId = [string]$a.appId
             $targetPid = 0
             if ($a.pid) { $targetPid = [int]$a.pid }
-            $win = Test-Foreground $appId $targetPid -Activate
+            $targetHwnd = 0
+            if ($a.hwnd) { $targetHwnd = [long]$a.hwnd }
+            $win = Test-Foreground $appId $targetPid $targetHwnd -Activate
             if ($null -eq $win) {
                 return New-Fail 'ACTION_DENIED' '坐标点击被拒绝：无法把目标窗口置为前台' @{
                     hint = '避免把点击打到用户正在使用的其它窗口'
@@ -494,7 +510,9 @@ function Invoke-Dcx([string]$command, $a) {
                 $appId = [string]$a.appId
                 $targetPid = 0
                 if ($a.pid) { $targetPid = [int]$a.pid }
-                $win = Test-Foreground $appId $targetPid -Activate
+                $targetHwnd = 0
+                if ($a.hwnd) { $targetHwnd = [long]$a.hwnd }
+                $win = Test-Foreground $appId $targetPid $targetHwnd -Activate
                 if ($null -eq $win) {
                     return New-Fail 'ACTION_DENIED' '键盘输入被拒绝：前台窗口不属于目标应用' @{
                         hint = '优先用 ValuePattern 输入（不抢焦点）；确认目标窗口已置前'
@@ -514,7 +532,9 @@ function Invoke-Dcx([string]$command, $a) {
             $appId = [string]$a.appId
             $targetPid = 0
             if ($a.pid) { $targetPid = [int]$a.pid }
-            $win = Test-Foreground $appId $targetPid -Activate
+            $targetHwnd = 0
+            if ($a.hwnd) { $targetHwnd = [long]$a.hwnd }
+            $win = Test-Foreground $appId $targetPid $targetHwnd -Activate
             if ($null -eq $win) {
                 return New-Fail 'ACTION_DENIED' '快捷键发送被拒绝：前台窗口不属于目标应用'
             }
@@ -532,8 +552,9 @@ function Invoke-Dcx([string]$command, $a) {
         }
         'observeState' {
             $w = $null
-            if ($script:LastPid -gt 0) { $w = Resolve-Window '' ([int]$script:LastPid) }
-            if ($null -eq $w -and $script:LastAppId) { $w = Resolve-Window $script:LastAppId 0 }
+            if ($script:LastHwnd -gt 0) { $w = Resolve-Window '' 0 ([long]$script:LastHwnd) }
+            if ($null -eq $w -and $script:LastPid -gt 0) { $w = Resolve-Window '' ([int]$script:LastPid) }
+            if ($null -eq $w -and $script:LastAppId) { $w = Resolve-Window $script:LastAppId 0 0 }
             return (Get-WindowState $w)
         }
         'invalidateSnapshots' {

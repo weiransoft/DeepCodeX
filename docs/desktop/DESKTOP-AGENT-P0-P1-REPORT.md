@@ -23,6 +23,8 @@ P0 探针（桥关闭）曾判定 `continue-with-adjustment`：能枚举 34 个�
 - `verify:gui` 在受控 WPF 窗口上跑通 **ValuePattern 输入 / InvokePattern 点击 / 坐标点击 /
   快捷键**四条通道，连续 3 次 `gui-unblocked`、4/4 verified，并有状态证据
   （`before → dcx-after`、`idle → applied:dcx-after:2`）；
+- 真实应用覆盖率采样跑通：**6/6 真实窗口树可用**、均值 86 ms；并由此暴露并修掉
+  「同进程多窗口按 pid 命错窗口」缺陷（新增 `hwnd` 端到端定位）；
 - 仍保持默认关闭：未开桥或未授权时如实降级，不伪造能力、不静默执行。
 
 关键工程结论：**稳定 ref 要求桥进程长驻**。P1 最初「每次调用新起 `powershell.exe`」的设计
@@ -114,9 +116,32 @@ TextBox/Button/TextBlock 直接暴露 ValuePattern / InvokePattern，才能覆�
 | 3 | 同 `appId` 多窗口定位到错误窗体 | 只按进程名解析，宿主的控制台窗口抢了先 | 所有带 `appId` 的工具支持 `pid`，`_target` 精确覆盖 |
 | 4 | 坐标点击偶发 `ACTION_DENIED` 并连锁 `BUDGET_EXCEEDED` | 后台进程 `SetForegroundWindow` 被前台锁定拒绝；重试耗尽同一任务预算 | 桥侧多重置前（`AttachThreadInput`/`SW_RESTORE`/`BringWindowToTop`/UIA `SetFocus`）+ HWND 复核；验证脚本每步重置预算 |
 | 5 | `listWindows` 返回 `ok:true` 但空数组，白等 20 s 无线索 | `Get-TopWindows` 内 `NativeWindowHandle.ToInt64()` 抛异常被 `catch` 吞掉（该属性实为 `Int32`，无此方法） | 改 `[long]` 直接强转；空列表改为回落 `tasklist` 并记录 `enumFallbackReason`，补回归用例 |
+| 6 | 同进程多窗口观察/操作到错窗口 | 桥只按 `pid` 解析，而 `explorer` 的桌面窗口与文件夹窗口共用同一 PID，`Resolve-Window` 稳定返回第一个 | 工具链全面支持 `hwnd`：`_target` 先按 hwnd 匹配、桥侧 `Resolve-Window` 优先 HWND、`snapshot` 回传 hwnd；补契约与链路测试 |
 
 第 5 条是典型的「静默降级掩盖故障」：能力自检仍然通过，枚举却全空。修复后同类问题
-会留下可观测痕迹，而不是让上层超时。
+会留下可观测痕迹，而不是让上层超时。第 6 条由覆盖率采样暴露：修复前两个 `explorer`
+窗口采到的是同一棵树（都是 46 节点），修复后分别是 46 与 3 节点。
+
+### 3.4 真实应用覆盖率（P2 准入第 1 项）
+
+运行：`DEEPCODE_AGENT_UIA_BRIDGE=1 npm run coverage`（只读，不执行动作、不落盘标题与截图）
+
+| 应用 | 分类 / 通道 | 节点 | 可操作 | 有名字 | 耗时 |
+| --- | --- | --- | --- | --- | --- |
+| explorer（文件夹窗口） | productivity / interface-or-gui | 46 | 39 | 33 | 215.11 ms |
+| notepad | productivity / interface-or-gui | 35 | 29 | 23 | 76.23 ms |
+| gameviewer（自绘） | selfdrawn-likely / gui-visual | 29 | 28 | **2** | 69.44 ms |
+| taskmgr | unknown / gui-a11y | 16 | 11 | 9 | 29.27 ms |
+| workbuddy（Electron） | unknown / gui-a11y | 3 | 1 | 2 | 102.90 ms |
+| explorer（桌面窗口） | productivity / interface-or-gui | 3 | 1 | 2 | 23.48 ms |
+
+汇总：**6/6 快照成功且树可用**，总 132 节点 / 111 个可操作节点，均值 **86.07 ms**、
+最大 215.11 ms，无失败。
+
+结论：真实桌面应用的语义树可用性不是瓶颈，**瓶颈是「有名字的可操作节点」**。
+`gameviewer` 28 个可操作节点里只有 2 个有名字、`workbuddy` 只有 3 个节点——这类界面
+无法靠「按名字找目标」完成操作，要么走视觉兜底，要么明确拒绝。这条数据直接支撑了
+方案里「树优先、视觉仅兜底 + 通道矩阵」的设计，而不是靠推断。
 
 ---
 
@@ -160,8 +185,9 @@ TextBox/Button/TextBlock 直接暴露 ValuePattern / InvokePattern，才能覆�
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
-| Node 单测 | `cd desktop/desktop-agent && npm test` | **54/54 通过**（6 个测试文件，约 13 s） |
-| 真机 GUI 闭环 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:gui` | **4/4 verified**，`gui-unblocked`；连续 3 次稳定 |
+| Node 单测 | `cd desktop/desktop-agent && npm test` | **55/55 通过**（6 个测试文件，约 16 s） |
+| 真机 GUI 闭环 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:gui` | **4/4 verified**，`gui-unblocked`；连续 4 次稳定 |
+| 真实应用覆盖率 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run coverage` | 6/6 树可用，均值 86 ms，无失败 |
 | P0 探针 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run probe` | `continue`；6 窗口 / 93 ms，能力 6/7 可用 |
 | MCP stdio 冒烟 | `printf … \| node src/index.mjs` | `initialize` 返回 `2025-03-26`；`tools/list` 11 个工具；`desktop_status` 默认 `enabled:false` |
 | 外部策略硬化 | 注入含 `bypass` / `allowScreenshot:true` / `maxSteps:9999` 的策略 | 生效值 `manual` / `false` / `false` / `maxSteps=100`；`enabled` 与白名单保留 |
@@ -194,10 +220,13 @@ CI 若用 MSVC 工具链应能直接跑全量。
 
 ## 7. 未解决与边界
 
-1. **目标应用覆盖率不足**：真机闭环在受控 WPF 窗口验证；本机实际应用只做了只读观察。
-   Electron / 自绘 / 游戏类 UIA 树残缺（`workbuddy` 仅 3 节点），需逐个实测后才能纳入白名单。
+1. **真实应用的写入闭环未验证**：覆盖率只做只读采样（6/6 树可用），真实应用的
+   Observe→Act→Verify 仍只在受控 WPF 窗口跑通。Electron / 自绘 / 游戏类应用
+   （`workbuddy` 3 节点、`gameviewer` 28 可操作节点仅 2 个有名字）需逐个实测后才能
+   纳入白名单，否则应默认拒绝或走视觉。
 2. **UAC 未感知**：Secure Desktop 与完整性级别检测未实现，遇 UAC 一律交还人工。
 3. **分类仍偏粗**：靠进程名/标题启发式，`unknown` 占 2/6；误分会把目标送进错误通道。
+   已知误判：Electron 应用（`workbuddy`）未被 `CANVAS_HINTS` 命中，仍归 `unknown → gui-a11y`。
 4. **策略不热更新**：改开关/授权需重启引擎，UI 已有 `restartHint` 文案。
 5. **仅 Windows 真后端**：macOS AX / Linux AT-SPI 未实现，回落 mock。
 6. **未接线引擎生命周期**：P1 是「配置即生效」的最小接线；`AgentLifecycle`
@@ -212,11 +241,12 @@ CI 若用 MSVC 工具链应能直接跑全量。
 
 ## 8. P2 准入条件与下一步
 
-**准入（真机闭环已达成，以下为放量前置）：**
+**准入（真机闭环与覆盖率采样已达成，以下为放量前置）：**
 
-1. 扩到 ≥ 10 个真实目标应用（含 Electron、Office、浏览器外壳）测 UIA 覆盖率与单步耗时，
-   对树残缺应用明确「视觉兜底 / 拒绝」的判定规则；
-2. 补齐故障注入回归：权限拒绝、窗口中途关闭、目标进程退出、`STALE_REF`、桥崩溃重启；
+1. 覆盖率采样已跑通 6 个真实窗口（6/6 树可用）；需扩到 **≥ 10 个**真实目标应用，
+   并对树残缺应用（有名字节点占比 < 20%）明确「视觉兜底 / 拒绝」的判定规则；
+2. 补齐真实应用的**写入**闭环（当前只有受控 WPF 窗口验证过），并覆盖故障注入：权限拒绝、
+   窗口中途关闭、目标进程退出、`STALE_REF`、桥崩溃重启；
 3. 在 MSVC CI 上跑通 `cargo test --lib`，闭环 Rust 用例运行验证；
 4. 桥进程纳入生命周期管理：健康检查、崩溃重启上限、退出清理（现为 sidecar 退出时关闭）。
 
@@ -235,6 +265,7 @@ CI 若用 MSVC 工具链应能直接跑全量。
 # 以下命令均以仓库根目录为起点（每行独立执行）
 (cd desktop/desktop-agent && npm test)
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run probe)
+(cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run coverage)
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:gui)
 npm run typecheck && npm run check:ipc
 

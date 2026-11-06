@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-11-06T05:40:43.911Z",
+  "generatedAt": "2026-11-06T06:08:33.363Z",
   "platform": "win32",
   "session": "Console",
   "verdict": "gui-unblocked",
-  "testWindowTitle": "DCX-GUI-TEST-mw4jq6me",
+  "testWindowTitle": "DCX-GUI-TEST-mw4kpys3",
   "privacy": {
     "note": "只在受控测试窗口内操作，不采集用户窗口标题，不写用户文件"
   },
@@ -14,7 +14,7 @@
       "ok": true,
       "outcome": "verified",
       "via": "value-pattern",
-      "elapsedMs": 149.83,
+      "elapsedMs": 143.56,
       "result": {
         "ok": true,
         "code": null,
@@ -29,7 +29,7 @@
         "verification": {
           "changed": true,
           "expectChange": true,
-          "postActionSnapshotId": "uia-b91644b4ef82"
+          "postActionSnapshotId": "uia-7a6b7b6c1150"
         }
       }
     },
@@ -38,7 +38,7 @@
       "ok": true,
       "outcome": "verified",
       "via": "a11y-invoke",
-      "elapsedMs": 143,
+      "elapsedMs": 173.19,
       "result": {
         "ok": true,
         "code": null,
@@ -53,7 +53,7 @@
         "verification": {
           "changed": true,
           "expectChange": true,
-          "postActionSnapshotId": "uia-a7ce43218c4b"
+          "postActionSnapshotId": "uia-0364baa98824"
         }
       }
     },
@@ -62,7 +62,7 @@
       "ok": true,
       "outcome": "verified",
       "via": "coordinate-input",
-      "elapsedMs": 276.47,
+      "elapsedMs": 283.56,
       "result": {
         "ok": true,
         "code": null,
@@ -76,7 +76,7 @@
         "verification": {
           "changed": true,
           "expectChange": true,
-          "postActionSnapshotId": "uia-95f242535474"
+          "postActionSnapshotId": "uia-c52956213187"
         }
       }
     },
@@ -85,7 +85,7 @@
       "ok": true,
       "outcome": "verified",
       "via": "keyboard",
-      "elapsedMs": 288.66,
+      "elapsedMs": 349.09,
       "result": {
         "ok": true,
         "code": null,
@@ -144,17 +144,17 @@
   },
   "testWindow": {
     "appId": "powershell",
-    "pid": 3708,
+    "pid": 1016,
     "enumSource": "uia",
-    "waitedMs": 109
+    "waitedMs": 124
   },
   "enumeration": {
     "count": 7,
-    "elapsedMs": 108.9,
+    "elapsedMs": 123.81,
     "source": "uia"
   },
   "directSnapshot": {
-    "windowName": "DCX-GUI-TEST-mw4jq6me",
+    "windowName": "DCX-GUI-TEST-mw4kpys3",
     "nodeCount": 7,
     "roles": [
       "Window",
@@ -163,14 +163,14 @@
       "Button",
       "Text"
     ],
-    "treeSample": "[{\"ref\":\"e0\",\"role\":\"Window\",\"name\":\"DCX-GUI-TEST-mw4jq6me\",\"rect\":{\"x\":820,\"y\":532,\"width\":920,\"height\":440},\"depth\":0,\"enabled\":true,\"focused\":true,\"untrusted\":true,\"children\":[{\"ref\":\"e01\",\"role\":\"Edit\",\"name\":\"\",\"rect\":{\"x\":900,\"y\":630,\"width\":760,\"height\":60},\"depth\":1,\"enabled\":true,\"focused\":false,\"untrusted\":true,\"children\":[{\"ref\":\"e012\",\"role\":\"ScrollBar\",\"name\":\"\",\"rect\":{\"x\":0,\"y\":0,\"width\":0,\"height\":0},\"depth\":2,\"enabled\":false,\"focused\":false,\"untrusted\":true,\"children\":[]},{\"ref\":\"e013\",\"role\":\"ScrollBar\",\"name\":\"\",\"rect\":{\"x\":0,\"y\":0,\"width\":0,\"height\":0},\"depth\":2,\"enabled\":false,\"focused\":false,\"untrusted\":true,\"children\":[]}],\"value\":\"before\"},{\"ref\":\"e04\",\"role\":\"Button\",\"name\":\"Apply\",\"rect\":{\"x\":873,\"y\":714,\"width\":280,\"height\":60},\"depth\":1,\"enabled\":true,\"focused\":false,\"untrusted\":true,\"children\":[{\"ref\":\"e045\",\"role\":\"Text\",\"name\":\"Apply\",\"rect\":{\"x\":980,\"y\":729,\"width\":66,\"height\":30},\"depth\":2,\"enabled\":true,\"focused\":false,\"untrusted\":true,\"children\":[]}]},{\"ref\":\"e06\",\"role\":\"Text\",\"name\":\"idle\",\"rect\":{\"x\":873,\"y\":798,\"width\":814,\"height\":30},\"depth\":1,\"enabled\":true,\"focused\":false,\"untrusted\":true,\"children\":[]}]}]"
+    "treeSample": "[{\"ref\":\"e0\",\"role\":\"Window\",\"name\":\"DCX-GUI-TEST-mw4kpys3\",\"rect\":{\"x\":820,\"y\":532,\"width\":920,\"height\":440},\"depth\":0,\"enabled\":true,\"focused\":true,\"untrusted\":true,\"children\":[{\"ref\":\"e01\",\"role\":\"Edit\",\"name\":\"\",\"rect\":{\"x\":900,\"y\":630,\"width\":760,\"height\":60},\"depth\":1,\"enabled\":true,\"focused\":false,\"untrusted\":true,\"children\":[{\"ref\":\"e012\",\"role\":\"ScrollBar\",\"name\":\"\",\"rect\":{\"x\":0,\"y\":0,\"width\":0,\"height\":0},\"depth\":2,\"enabled\":false,\"focused\":false,\"untrusted\":true,\"children\":[]},{\"ref\":\"e013\",\"role\":\"ScrollBar\",\"name\":\"\",\"rect\":{\"x\":0,\"y\":0,\"width\":0,\"height\":0},\"depth\":2,\"enabled\":false,\"focused\":false,\"untrusted\":true,\"children\":[]}],\"value\":\"before\"},{\"ref\":\"e04\",\"role\":\"Button\",\"name\":\"Apply\",\"rect\":{\"x\":873,\"y\":714,\"width\":280,\"height\":60},\"depth\":1,\"enabled\":true,\"focused\":false,\"untrusted\":true,\"children\":[{\"ref\":\"e045\",\"role\":\"Text\",\"name\":\"Apply\",\"rect\":{\"x\":980,\"y\":729,\"width\":66,\"height\":30},\"depth\":2,\"enabled\":true,\"focused\":false,\"untrusted\":true,\"children\":[]}]},{\"ref\":\"e06\",\"role\":\"Text\",\"name\":\"idle\",\"rect\":{\"x\":873,\"y\":798,\"width\":814,\"height\":30},\"depth\":1,\"enabled\":true,\"focused\":false,\"untrusted\":true,\"children\":[]}]}]"
   },
   "snapshot": {
-    "snapshotId": "uia-5f816407d565",
+    "snapshotId": "uia-c6f59db8c4d6",
     "source": "a11y",
     "nodeCount": 7,
     "visibleNodes": 7,
-    "elapsedMs": 66.1,
+    "elapsedMs": 66.5,
     "roles": [
       "Window",
       "Edit",

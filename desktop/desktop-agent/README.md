@@ -41,11 +41,13 @@ desktop-agent/
 │             telemetry.mjs        脱敏事件流
 ├── config/policy.default.json     默认策略（enabled=false）
 ├── scripts/probe.mjs              P0 探针（能力矩阵 / 枚举 / 真机只读观察）
+│           coverage-report.mjs    真实应用 UIA 覆盖率采样（只读）
 │           verify-gui.mjs         真机 GUI 闭环验证（受控 WPF 测试窗口）
 │           register-mcp.mjs       MCP 登记（dry-run / 写入 / 移除）
 ├── reports/p0-probe.json          P0 实测数据（窗口标题不落盘）
 │           p1-gui-verify.json     真机闭环实测数据
-└── tests/*.test.mjs               node:test，零依赖（54 个用例）
+│           p2-coverage.json       真实应用覆盖率实测数据
+└── tests/*.test.mjs               node:test，零依赖（55 个用例）
 ```
 
 零新增 npm 依赖（Node ≥ 22，ESM）：sidecar 需要随桌面端分发，避免版本漂移与供应链面。
@@ -55,9 +57,10 @@ desktop-agent/
 ```bash
 cd desktop/desktop-agent
 
-npm test                           # 54 个单测（协议 / 策略 / 预算 / 验证 / 桥 / 登记脚本）
+npm test                           # 55 个单测（协议 / 策略 / 预算 / 验证 / 桥 / 登记脚本）
 npm run probe                      # P0 探针（未开桥：仅 Win32 枚举）
 DEEPCODE_AGENT_UIA_BRIDGE=1 npm run probe          # 真机全能力探针
+DEEPCODE_AGENT_UIA_BRIDGE=1 npm run coverage       # 真实应用 UIA 覆盖率（只读，不执行动作）
 
 # 真机 GUI 闭环：会短暂弹出 DCX-GUI-TEST-* 测试窗口，结束自动关闭
 DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:gui
@@ -118,6 +121,30 @@ printf '%s\n' \
 
 闭环脚本用 WPF（`XamlReader` 动态加载）而非 WinForms 测试窗体：WinForms 控件经 MSAA 桥
 会降级为 Pane，拿不到 Value/Invoke 模式；WPF 的 UIA 提供者是原生的。
+
+### 真实应用覆盖率（`npm run coverage`）
+
+只读采样当前桌面上的真实窗口（不执行任何动作、跳过敏感分类、不落盘标题与截图）：
+
+| 应用 | 分类 / 通道 | 节点 | 可操作 | 有名字 | 耗时 |
+| --- | --- | --- | --- | --- | --- |
+| explorer（文件夹窗口） | productivity / interface-or-gui | 46 | 39 | 33 | 215 ms |
+| notepad | productivity / interface-or-gui | 35 | 29 | 23 | 76 ms |
+| gameviewer（自绘） | selfdrawn-likely / gui-visual | 29 | 28 | **2** | 69 ms |
+| taskmgr | unknown / gui-a11y | 16 | 11 | 9 | 29 ms |
+| workbuddy（Electron） | unknown / gui-a11y | 3 | 1 | 2 | 103 ms |
+| explorer（桌面窗口） | productivity / interface-or-gui | 3 | 1 | 2 | 23 ms |
+
+6/6 快照成功且树可用，均值 **86 ms**、最大 215 ms。关键结论：自绘 / Electron 类
+「可操作节点多、有名字节点极少」（`gameviewer` 28 个可操作节点里只有 2 个有名字），
+这类界面不能指望「按名字点」，要么走视觉兜底，要么明确拒绝——正是通道矩阵存在的意义。
+
+### 同进程多窗口：必须用 hwnd
+
+`explorer` 的桌面窗口与文件夹窗口共用同一个 PID，只按 `pid` 会稳定命错窗口：
+修复前上表两个 explorer 行采到的是同一棵树（都是 46 节点），加上 `hwnd` 后分别是
+46 与 3 节点。所有带 `appId` 的工具都支持 `hwnd`，桥侧按 HWND 精确解析，
+`snapshot` 返回值也带 `hwnd`，调用方据此固定后续动作的目标窗口。
 
 ### 登记到桌面端（开发联调）
 
@@ -195,7 +222,7 @@ WebView ── desktop_agent_toggle / permissions_set ──> Rust 壳
 ## 已知限制
 
 1. **UAC / 验证码 / 锁屏**：`uacAwareness=false`，Secure Desktop 与完整性级别未检测，一律 `HANDOFF_REQUIRED`，不做绕过。
-2. **覆盖率待扩大**：真机闭环在受控 WPF 测试窗口与本机 6–8 个窗口上验证；Electron / 自绘 / 游戏类应用的 UIA 树可能残缺，需逐个实测后才可纳入白名单。
+2. **覆盖率仅采样、未做写操作**：`npm run coverage` 已对 6 个真实窗口做只读采样（树可用率 6/6），但真实应用的**写入**闭环仍只在受控 WPF 窗口验证过；Electron / 自绘 / 游戏类应用需逐个实测后才可纳入白名单（`gameviewer` 这类有名字节点极少的界面默认应拒绝或走视觉）。
 3. **仅 Windows 有真实后端**：macOS AX / Linux AT-SPI 未实现，回落 mock。
 4. **策略不热更新**：改开关 / 授权需重启引擎；壳侧 `platformPermissions.checkableByShell=false`，只给引导文案，不检测系统授权。
 5. **未接线引擎生命周期**：P1 是「配置即生效」的最小接线；`AgentLifecycle`（随壳启停、崩溃重启上限、健康检查）属 P2。

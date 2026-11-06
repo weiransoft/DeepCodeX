@@ -370,23 +370,39 @@ export class WindowsBackend {
     return res;
   }
 
-  /** 自动补目标 appId/pid，供桥侧做「前台窗口必须属于目标进程」校验 */
+  /** 自动补目标 appId/pid/hwnd，供桥侧做「前台窗口必须属于目标进程」校验 */
   _withTarget(args = {}) {
-    return { appId: this.lastTarget?.appId ?? "", pid: this.lastTarget?.pid ?? 0, ...args };
+    return {
+      appId: this.lastTarget?.appId ?? "",
+      pid: this.lastTarget?.pid ?? 0,
+      hwnd: this.lastTarget?.hwnd ?? 0,
+      ...args,
+    };
   }
 
-  async snapshot({ appId, pid, maxDepth = 3, skeleton = true } = {}) {
+  async snapshot({ appId, pid, hwnd, maxDepth = 3, skeleton = true } = {}) {
     const res = await this._callBridge(
       "snapshot",
-      { appId, pid: pid ?? this.lastTarget?.pid ?? 0, maxDepth, skeleton },
+      {
+        appId,
+        pid: pid ?? this.lastTarget?.pid ?? 0,
+        hwnd: hwnd ?? this.lastTarget?.hwnd ?? 0,
+        maxDepth,
+        skeleton,
+      },
       { throwOnError: true }
     );
-    this.lastTarget = { appId, pid: res.pid ?? pid ?? 0 };
+    this.lastTarget = {
+      appId,
+      pid: res.pid ?? pid ?? 0,
+      hwnd: res.hwnd ?? hwnd ?? 0,
+    };
     return {
       ok: true,
       /** 关键：保留桥返回的 snapshotId，ref 与桥内 SnapshotStore 才能对上 */
       snapshotId: res.snapshotId,
       appId,
+      hwnd: res.hwnd ?? hwnd ?? null,
       source: (res.tree ?? []).length === 0 ? "empty" : "a11y",
       tree: normalizeTree(res.tree),
       fullTree: normalizeTree(res.fullTree ?? res.tree),

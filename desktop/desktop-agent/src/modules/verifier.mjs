@@ -46,7 +46,7 @@ export class Actuator {
     if (ref) this.perception.assertFresh(snapshotId, ref);
 
     const common = { appId: app.appId, action };
-    const target = { appId: app.appId, pid: app.pid, snapshotId };
+    const target = { appId: app.appId, pid: app.pid, hwnd: app.hwnd, snapshotId };
     return this.telemetry.measure("act", common, async () => {
       switch (action) {
         case "click_ref":

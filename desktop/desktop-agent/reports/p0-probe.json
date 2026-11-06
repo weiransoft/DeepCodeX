@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-11-06T05:40:47.221Z",
+  "generatedAt": "2026-11-06T06:08:36.756Z",
   "platform": "win32",
   "session": "Console",
   "bridgeEnabled": true,
@@ -47,13 +47,13 @@
         "psVersion": "5.1.26100.9711"
       }
     },
-    "elapsedMs": 1358.21,
+    "elapsedMs": 1362.59,
     "a11yTreeSupported": true,
     "screenshotSupported": true
   },
   "enumeration": {
     "ok": true,
-    "elapsedMs": 92.86,
+    "elapsedMs": 94.47,
     "count": 6,
     "error": null,
     "categoryDistribution": {
@@ -63,15 +63,15 @@
     }
   },
   "cacheBehaviour": {
-    "coldMs": 92.86,
+    "coldMs": 94.47,
     "warmMs": 0.02,
-    "toolCallMs": 0.36,
+    "toolCallMs": 0.37,
     "toolCallCount": 6,
     "note": "冷枚举走 UIA listWindows（约 0.1s）；TTL 内命中与默认工具调用不得重复枚举"
   },
   "channelMatrix": {
     "ok": true,
-    "elapsedMs": 0.09,
+    "elapsedMs": 0.08,
     "distribution": {
       "gui-a11y": 2,
       "interface-or-gui": 3,
@@ -139,7 +139,7 @@
     "appId": "workbuddy",
     "snapshot": {
       "ok": true,
-      "elapsedMs": 121.83,
+      "elapsedMs": 103.88,
       "nodeCount": 3,
       "source": "a11y",
       "truncated": true,
@@ -150,10 +150,10 @@
     },
     "screenshot": {
       "ok": true,
-      "elapsedMs": 186.2,
-      "width": 2560,
-      "height": 1504,
-      "base64Bytes": 809704,
+      "elapsedMs": 203.4,
+      "width": 2586,
+      "height": 1530,
+      "base64Bytes": 666084,
       "persisted": false
     },
     "note": "只读观察，未执行任何写动作；窗口标题与画面内容不落盘"
@@ -162,12 +162,12 @@
     "note": "逻辑链路基线，非真机 GUI 耗时；用于判断编排/验证层是否成为瓶颈",
     "snapshot": {
       "ok": true,
-      "elapsedMs": 1.65,
+      "elapsedMs": 1.64,
       "source": "a11y"
     },
     "step": {
       "ok": true,
-      "elapsedMs": 1.13,
+      "elapsedMs": 1.14,
       "outcome": "verified",
       "code": null,
       "attempts": 1
