@@ -23,6 +23,21 @@ import assert from "node:assert/strict";
 
 import { SpeechQueue } from "../web/src/voice/player";
 
+/**
+ * 造一个"一句一块"的队列
+ *
+ * 生产默认会把连续句子攒成 24/72 字的块（减少 TTS 请求次数），但那会让
+ * 这组"队列健壮性"用例的粒度变粗——它们要断言的是"第几句播了/第几句失败"。
+ * 所以这里把块阈值压到 1 字，恢复"一句一块"。
+ */
+function makeQueue(
+  synth: (text: string) => Promise<string>,
+  callbacks: Parameters<typeof SpeechQueue>[1] = {},
+  deps: Record<string, unknown> = {}
+): SpeechQueue {
+  return new SpeechQueue(synth, callbacks, { firstBlockChars: 1, blockChars: 1, ...deps });
+}
+
 /** 播放模式 */
 type Mode = "ok" | "stall" | "reject";
 
@@ -145,7 +160,7 @@ test("P1 正常播放：逐句播完并回落 speaking，URL 全部回收", asyn
     const spoken: string[] = [];
     const states: boolean[] = [];
     const made: FakeAudio[] = [];
-    const queue = new SpeechQueue(
+    const queue = makeQueue(
       async (text) => {
         spoken.push(text);
         return `blob:${text}`;
@@ -162,6 +177,8 @@ test("P1 正常播放：逐句播完并回落 speaking，URL 全部回收", asyn
 
     queue.enqueue("第一句。");
     queue.enqueue("第二句。");
+    // 句子流结束：不满一块的尾巴也要合成（否则永远不播）
+    queue.flush();
     await waitFor(() => states.length > 0 && states[states.length - 1] === false);
 
     assert.deepEqual(spoken, ["第一句。", "第二句。"], "两句都要合成");
@@ -184,7 +201,7 @@ test("P2 停滞自愈：音频不推进也没结束事件 → 超时后跳过并
     const errors: string[] = [];
     const states: boolean[] = [];
     let created = 0;
-    const queue = new SpeechQueue(
+    const queue = makeQueue(
       async (text) => `blob:${text}`,
       { onSpeakingChange: (v) => states.push(v), onError: (m) => errors.push(m) },
       {
@@ -201,6 +218,8 @@ test("P2 停滞自愈：音频不推进也没结束事件 → 超时后跳过并
 
     queue.enqueue("卡住的一句。");
     queue.enqueue("后面的一句。");
+    // 句子流结束：不满一块的尾巴也要合成（否则永远不播）
+    queue.flush();
     await waitFor(() => created === 2 && states[states.length - 1] === false);
 
     assert.equal(created, 2, "第一句卡住后必须继续播第二句（否则就是 queue 死锁）");
@@ -219,7 +238,7 @@ test("P3 打断：播放中 stop() 立刻结束等待，speaking 回落", async 
   try {
     const states: boolean[] = [];
     let audio: FakeAudio | null = null;
-    const queue = new SpeechQueue(
+    const queue = makeQueue(
       async () => "blob:x",
       { onSpeakingChange: (v) => states.push(v) },
       {
@@ -235,6 +254,8 @@ test("P3 打断：播放中 stop() 立刻结束等待，speaking 回落", async 
     );
 
     queue.enqueue("一句很长的话。");
+    // 句子流结束：不满一块的尾巴也要合成（否则永远不播）
+    queue.flush();
     await waitFor(() => audio !== null);
     await new Promise((r) => setTimeout(r, 20));
 
@@ -256,7 +277,7 @@ test("P4 打断后还能继续播（回归：stop 曾把队列永久卡死）", 
     const spoken: string[] = [];
     const states: boolean[] = [];
     let audio: FakeAudio | null = null;
-    const queue = new SpeechQueue(
+    const queue = makeQueue(
       async (text) => {
         spoken.push(text);
         return `blob:${text}`;
@@ -275,6 +296,8 @@ test("P4 打断后还能继续播（回归：stop 曾把队列永久卡死）", 
 
     // 第一轮：播到一半被打断
     queue.enqueue("被打断的话。");
+    // 句子流结束：不满一块的尾巴也要合成（否则永远不播）
+    queue.flush();
     await waitFor(() => audio !== null);
     queue.stop();
     await waitFor(() => states[states.length - 1] === false, 500);
@@ -282,6 +305,8 @@ test("P4 打断后还能继续播（回归：stop 曾把队列永久卡死）", 
     // 第二轮：打断之后新消息必须还能播出来
     const before = spoken.length;
     queue.enqueue("打断之后的新消息。");
+    // 句子流结束：不满一块的尾巴也要合成（否则永远不播）
+    queue.flush();
     await waitFor(() => spoken.length > before, 1000);
 
     assert.ok(spoken.includes("打断之后的新消息。"), `打断后必须能重新开播，实际合成过 ${JSON.stringify(spoken)}`);
@@ -297,7 +322,7 @@ test("P5 合成失败只跳过该句，后续照播", async () => {
     const errors: string[] = [];
     const states: boolean[] = [];
     const played: string[] = [];
-    const queue = new SpeechQueue(
+    const queue = makeQueue(
       async (text) => {
         if (text.includes("坏")) throw new Error("合成服务不可用");
         return `blob:${text}`;
@@ -313,6 +338,8 @@ test("P5 合成失败只跳过该句，后续照播", async () => {
 
     queue.enqueue("坏句子。");
     queue.enqueue("好句子。");
+    // 句子流结束：不满一块的尾巴也要合成（否则永远不播）
+    queue.flush();
     await waitFor(() => states.length > 0 && states[states.length - 1] === false);
 
     assert.ok(
@@ -331,7 +358,7 @@ test("P6 play() 被拒（autoplay 拦截）不卡死，继续下一句", async (
     const errors: string[] = [];
     const states: boolean[] = [];
     let created = 0;
-    const queue = new SpeechQueue(
+    const queue = makeQueue(
       async () => "blob:x",
       { onSpeakingChange: (v) => states.push(v), onError: (m) => errors.push(m) },
       {
@@ -347,6 +374,8 @@ test("P6 play() 被拒（autoplay 拦截）不卡死，继续下一句", async (
 
     queue.enqueue("第一句。");
     queue.enqueue("第二句。");
+    // 句子流结束：不满一块的尾巴也要合成（否则永远不播）
+    queue.flush();
     await waitFor(() => created === 2 && states[states.length - 1] === false);
 
     assert.equal(created, 2, "被拒的句子不能让队列停下");
@@ -368,7 +397,7 @@ test("P7 预取与播放并行：下一句在第一句播完之前就开始合�
   const url = stubObjectUrl();
   try {
     const events: string[] = [];
-    const queue = new SpeechQueue(
+    const queue = makeQueue(
       async (text) => {
         events.push(`synth:${text}`);
         return `blob:${text}`;
@@ -387,6 +416,8 @@ test("P7 预取与播放并行：下一句在第一句播完之前就开始合�
 
     queue.enqueue("第一句。");
     queue.enqueue("第二句。");
+    // 句子流结束：不满一块的尾巴也要合成（否则永远不播）
+    queue.flush();
     await waitFor(() => events.includes("end:第二句。"));
 
     const synthSecond = events.indexOf("synth:第二句。");

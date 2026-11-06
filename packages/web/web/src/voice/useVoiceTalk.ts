@@ -582,10 +582,13 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
       // 显式朗读（如点「重播」）要清掉上一轮的打断标记，否则一句都不念
       interruptedRef.current = false;
       for (const sentence of stream.flush(text)) enqueueForSpeech(sentence);
+      // 整段文本一次给完：告诉队列"没有更多句子了"，否则最后不满一块的
+      // 尾巴会一直等下一句（见 SpeechQueue.flush 的说明）
+      queue().flush();
       speechEndAtRef.current = performance.now();
       firstAudioRef.current = true;
     },
-    [available, speakReplies, enqueueForSpeech]
+    [available, speakReplies, enqueueForSpeech, queue]
   );
 
   /** 喂流式增量（累积文本） */
@@ -673,6 +676,9 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
         truncatedRef.current = false;
         queue().enqueue("后面还有内容，我已经放到屏幕上了。");
       }
+      // 本轮句子流到此结束：让队列把剩下的句子封块合成，否则最后一块
+      // 不满目标字数时会一直等"下一句"而永远不播
+      queue().flush();
     }
     lastTextRef.current = "";
 

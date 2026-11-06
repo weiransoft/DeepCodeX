@@ -40,6 +40,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.parse
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -439,17 +440,23 @@ class TtsEngine:
         self._models[engine] = model
         return model
 
-    def synthesize(self, text: str, engine: str, voice: str, speed: float) -> bytes:
+    def synthesize(self, text: str, engine: str, voice: str, speed: float) -> tuple[bytes, str, str]:
         """
-        合成一段语音，返回 WAV 字节。
+        合成一段语音。
 
-        `voice` 的语义随引擎变化：VoiceDesign 是**音色描述**，
-        CustomVoice 是预置 speaker 名，Kokoro 是音色 id。
+        @param text 待合成文本
+        @param engine 引擎名（非法值回落默认引擎）
+        @param voice 音色（语义随引擎变化，见上）
+        @param speed 语速
+        @returns (WAV 字节, 实际使用的引擎, 实际使用的音色)
         """
         import numpy as np
 
         if engine not in MODEL_IDS:
             engine = DEFAULT_TTS_ENGINE
+        # 实际生效的音色要回显给调用方：排查"音色不对"时，第一件要确认的事
+        # 就是这次请求到底用了哪个 speaker，而不是靠配置反推
+        voice_used = voice
 
         with self._lock:
             model = self._load(engine)
@@ -473,20 +480,27 @@ class TtsEngine:
                 # 音色锁在预置 speaker 上，跨句不再重新"设计"；原描述降级为
                 # 情感/风格指令（1.7B 支持，0.6B 会被模型内部忽略）
                 speaker, instruct = resolve_speaker(voice)
+                voice_used = speaker
                 chunks = list(
                     model.generate_custom_voice(
                         text=text,
                         speaker=speaker,
                         language=TTS_LANGUAGE,
                         instruct=instruct,
+                        # 温度必须显式传：这个方法的默认值是模型自带的（高温），
+                        # 不传就等于每次合成都在高温下重新掷骰子——韵律、语速、
+                        # 句末走向句句不同，听感就是"音色在变"。VoiceDesign 那条
+                        # 分支一直传着，CustomVoice 这条漏了（2026-11-06 补）。
+                        temperature=temperature,
                     )
                 )
                 native_speed = False
             else:
+                voice_used = voice or KOKORO_VOICE
                 chunks = list(
                     model.generate(
                         text=text,
-                        voice=voice or KOKORO_VOICE,
+                        voice=voice_used,
                         speed=speed,
                         lang_code="z",
                     )
@@ -510,7 +524,7 @@ class TtsEngine:
                 audio,
             )
 
-        return encode_wav_bytes(audio, rate)
+        return encode_wav_bytes(audio, rate), engine, voice_used
 
 
 def encode_wav_bytes(samples: "Any", sample_rate: int) -> bytes:
@@ -805,11 +819,15 @@ class Handler(BaseHTTPRequestHandler):
             speed = 1.0
         speed = min(2.0, max(0.5, speed))
         started = time.time()
-        audio = self.tts.synthesize(text, engine, voice, speed)
+        audio, engine_used, voice_used = self.tts.synthesize(text, engine, voice, speed)
         self.send_response(200)
         self.send_header("Content-Type", "audio/wav")
         self.send_header("Content-Length", str(len(audio)))
         self.send_header("X-Synth-Ms", str(int((time.time() - started) * 1000)))
+        # 回显实际生效的引擎与音色：排查"音色不对"时不必再猜配置。
+        # 音色可能是中文描述，URL 编码后才是合法的 ASCII 头值
+        self.send_header("X-Tts-Engine", engine_used)
+        self.send_header("X-Tts-Voice", urllib.parse.quote(voice_used))
         self.end_headers()
         self.wfile.write(audio)
 

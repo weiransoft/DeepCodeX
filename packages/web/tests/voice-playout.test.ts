@@ -263,7 +263,8 @@ test("T5 领先排程：三句都在第一句播完前完成排程（否则句�
   const queue = new SpeechQueue(
     async (text) => `blob:${text}`,
     { onSpeakingChange: (v) => states.push(v) },
-    { player, createFallbackPlayer: () => player }
+    // 这个用例要观察"每句各自排程"，所以把块阈值压到 1 字
+    { player, createFallbackPlayer: () => player, firstBlockChars: 1, blockChars: 1 }
   );
 
   queue.enqueue("第一句。");
@@ -324,6 +325,8 @@ test("T6 降级：Web Audio 恢复不了时切到元素播放，不是哑掉", a
   );
 
   queue.enqueue("一句要播的话。");
+  // 一句不满首块目标字数：必须 flush 才算"句子流结束"，否则永远不会合成
+  queue.flush();
   await waitFor(() => fallback.scheduled.length === 1);
   assert.ok(
     notices.some((m) => m.includes("已自动切回兼容播放")),
