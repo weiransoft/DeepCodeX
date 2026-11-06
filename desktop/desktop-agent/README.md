@@ -38,6 +38,7 @@ desktop-agent/
 │             perception.mjs       稳定 ref / 骨架树 / 下钻 / 视觉兜底
 │             tree-quality.mjs     实测树质量判定（good / sparse / deferred / empty）
 │             bridge-lifecycle.mjs 桥生命周期（退避 / 崩溃窗口上限 / 僵死回收 / 稳定重置）
+│             target-pick.mjs      写入落点选择（按可写面积，不按角色名——公式栏会骗人）
 │             verifier.mjs         Observe→Act→Verify + STALE_REF + 有界重试
 │             app-registry.mjs     应用注册表 / TTL 缓存 / 通道矩阵 / 质量回写
 │             budget.mjs           步数·截图·token 原子预扣与熔断
@@ -47,14 +48,17 @@ desktop-agent/
 │           coverage-report.mjs    真实应用 UIA 覆盖率采样（只读）
 │           verify-gui.mjs         真机 GUI 闭环验证（受控 WPF 测试窗口）
 │           verify-real-app.mjs    真实应用写入闭环（临时文件 + 记事本，磁盘校验）
+│           verify-multi-app.mjs   真实应用写入矩阵（记事本/Word/Excel/资源管理器/Edge）
+│           probe-app.mjs          单应用 UIA 结构探针（给新应用写用例前先看清它暴露了什么）
 │           verify-lifecycle.mjs   桥生命周期真机验证（ping / 崩溃自愈 / 崩溃循环 / 优雅退出）
 │           register-mcp.mjs       MCP 登记（dry-run / 写入 / 移除）
 ├── reports/p0-probe.json          P0 实测数据（窗口标题不落盘）
 │           p1-gui-verify.json     真机闭环实测数据
 │           p2-coverage.json       真实应用覆盖率实测数据
 │           p2-real-app.json       真实应用写入闭环实测数据
+│           p2-multi-app.json      真实应用写入矩阵实测数据
 │           p2-lifecycle.json      桥生命周期真机实测数据
-└── tests/*.test.mjs               node:test，零依赖（81 个用例）
+└── tests/*.test.mjs               node:test，零依赖（91 个用例）
 ```
 
 零新增 npm 依赖（Node ≥ 22，ESM）：sidecar 需要随桌面端分发，避免版本漂移与供应链面。
@@ -64,7 +68,7 @@ desktop-agent/
 ```bash
 cd desktop/desktop-agent
 
-npm test                           # 81 个单测（协议 / 策略 / 预算 / 验证 / 桥 / 生命周期 / 故障注入 / 树质量）
+npm test                           # 83 个单测（协议 / 策略 / 预算 / 验证 / 桥 / 生命周期 / 故障注入 / 树质量）
 npm run probe                      # P0 探针（未开桥：仅 Win32 枚举）
 DEEPCODE_AGENT_UIA_BRIDGE=1 npm run probe          # 真机全能力探针
 DEEPCODE_AGENT_UIA_BRIDGE=1 npm run coverage       # 真实应用 UIA 覆盖率（只读，不执行动作）
@@ -74,6 +78,9 @@ DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:gui
 
 # 真实应用写入闭环：打开自建的 dcx-e2e-*.txt，写入 → Ctrl+S → 读盘校验后删除
 DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:real-app
+
+# 真实应用写入矩阵（5 家应用；需空闲桌面，--wait-idle 秒数用于等操作者离开键鼠）
+DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:multi-app -- --wait-idle 120
 
 # 桥生命周期：ping 健康检查 → 强杀自愈 → 崩溃循环认输 → 优雅退出（会真的杀桥进程，仅验证用）
 DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:lifecycle
@@ -192,6 +199,94 @@ printf '%s\n' \
 保存这一步暴露了验证器的假阴性：`Ctrl+S` 是幂等动作，界面本就不变，按「状态必须变化」
 判会误报 `verify-failed` 并白重试 3 次。现在区分出 `verified-no-change`——**不谎报已变化**，
 成效由副作用（文件内容）自证。
+
+### 真实应用写入矩阵（`npm run verify:multi-app`）
+
+记事本一家不足以说明「这套判据通用」。矩阵把同一套 Observe→Act→Verify + 副作用校验
+推到不同家族的真实应用上，每个用例都只用**自建临时文件**：
+
+| 用例 | 家族 | 写入通道 | 成功证据 | 实测 |
+| --- | --- | --- | --- | --- |
+| 记事本 / `.txt` | 经典 Win32 | `value-pattern-ref` | 读盘 | ✅ 40 B / 7 ms |
+| Word / `.txt` | Office 文档模型 | `clipboard-paste` + TextPattern 校验 | 读盘 | ✅ 69 B / 1.7 s |
+| Excel / `.csv` | Office 网格 | `clipboard-paste`（落点 = `DataGrid`） | 读盘 | ✅ 42 B / 1 ms |
+| 资源管理器 / 重命名 | Shell 列表 | 选中 → `F2` → 输入 → 回车 | 文件系统改名 | ✅ `renamed` + `originalGone` |
+| Edge / 本地 HTML | 浏览器外壳 | —（**策略拒绝**） | 不适用：浏览器应走 DOM/CDP | 按设计拒绝 |
+
+一次完整跑（空闲桌面，`--wait-idle 90`）四家首轮全绿，无不稳定重试：
+
+```
+notepad-txt      write-verified  attempts=1  {"persisted":true,"length":40,"waitedMs":7}
+word-txt         write-verified  attempts=1  {"persisted":true,"length":69,"waitedMs":1745}
+excel-csv        write-verified  attempts=1  {"persisted":true,"length":42,"waitedMs":1}
+explorer-rename  write-verified  attempts=1  {"renamed":true,"originalGone":true,"waitedMs":1}
+edge-html        policy-blocked-browser      （策略层拒绝 GUI 驱动浏览器）
+→ summary.verdict = multi-app-write-verified, writeVerified = 4/5
+```
+
+> 这些绿色**全部来自读盘/文件系统**，没有一条来自「界面看起来变了」。
+
+跑出来的十二个真机坑，每个都改了代码或加进了判据：
+
+1. **窗口标题不是身份**：Word 把 `xxx.txt` 显示成 `xxx - Word(产品激活失败)`，Excel 追加
+   ` - Excel`。匹配改「进程名锁家族 + 含扩展名/去扩展名双重匹配」，随机文件名才是唯一性来源。
+2. **首启引导会吃掉输入**：第一次开 Word 时标题已是文档名，但前面叠着「Microsoft 尊重你的隐私」，
+   键盘输入全被它吃掉、`Ctrl+S` 什么也不发生——界面看起来对，实际没在编辑。
+3. **`\b` 在中文字符后面永远不成立**（最贵的一个 bug）：判断按钮名的正则原来写成
+   `/^(是|确定|保存|…)\b/i`。JS 的 `\b` 只认 `[A-Za-z0-9_]`，而「是」本身不算 word 字符，
+   于是 `^是\b` 对 `是(Y)`、`确定`、`下一步`、`关闭` 全部返回 false，只有 `OK`/`Yes` 能过。
+   后果是兜底逻辑跑了几十轮、一个中文按钮都没点过，而报告里只剩「`Ctrl+S` 返回 ok、磁盘没变」。
+   改法：`(?![A-Za-z0-9])` 负向断言，CJK 与 ASCII 都对。
+4. **老式 Office 对话框的按钮不是 `Button`**：实测「Word 上次启动失败 / 文件转换 / 是否将文档
+   保存为这种格式」三处按钮的 `ControlType` 都是 **`Pane`**（名字是 `是(Y)`），子元素还常带
+   0×0 的 `BoundingRectangle`。原来「只点 `role === Button`」的保守规则等于让兜底彻底失效。
+   现在接受 `Button/Pane/Custom/Text/ListItem`，对话框作用域内不强制要求面积，点不动再退 `{ENTER}`。
+5. **模态可能顶替主窗口成为目标**：「Word 上次启动失败」那个框标题就叫 `Microsoft Word`，
+   按文件名永远匹配不到，却挡在文件加载前面。所以匹配分两阶段：先宽松（含 6 s 后接受
+   应用家族任意窗口，交给 `settleDialogs` 答掉），再严格（必须是标题带文件名、且不是
+   `文件转换/安全模式/受保护视图` 的壳）。
+6. **答模态必须排在发 `ESC` 之前**：`ESC` 的语义是「取消」。屏幕上正挂着「文件转换 - xxx.txt」
+   时先发 `ESC` 等于**取消打开这个文件**，后面所有动作都打在一个空壳上。
+7. **应用内模态不在顶层窗口枚举里**：Word 存 `.txt` 会弹「是否将文档保存为这种格式?」，
+   实测「本进程顶层窗口 = 1」——它是主窗口子树里 **depth 1 的嵌套 `Window`**，
+   只看 `listApps` 会当成「没有对话框」。现在按树结构判定 + 把它接进「等磁盘」的循环里。
+8. **`typeText` 不能拿 `paste` 抄近路**：桥里原来先试「焦点元素的 `ValuePattern`」。Excel 的
+   焦点元素是**公式栏**（也是 `Edit`+`ValuePattern`），`SetValue` 返回成功、屏幕上什么都没变。
+   现在 `paste: true` 是显式通道选择，直接走剪贴板，不再先试 `ValuePattern`。
+9. **落点要按面积选，不能按角色名选**：Excel 树里同时有 `Edit 编辑栏`(1482×77) 与
+   `DataGrid 网格`(1327×497)。「`Edit` 优先」会把内容打进公式栏。这条规则已抽成
+   `src/modules/target-pick.mjs`，有 8 条单测（含这条回归）。
+10. **窗口出现 ≠ 能输入**：冷启动时标题几百毫秒就出来了，但编辑面还没好——这期间点网格不
+    建立选区、`^v` 被丢掉、`^s` 什么也不做，而每一步都返回 ok。现在按「目标角色连续两次
+    快照都在」等就绪（Excel 实测 1.3 s），再动手。
+11. **失败会自我强化**：保存没落盘 → 用例收尾强杀 → 下次启动弹「上次启动失败」→ 吃掉输入 →
+    又失败。这就是同一份代码「单跑能过、全量跑不过」的来源。答模态 + 优雅收尾之后抖动消失。
+12. **前台会被占用**：操作者正在用这台机器时，Windows 拒绝后台进程抢焦点
+    （这是保护用户的正确行为）。用例先用一次无害按键做前台探测，拿不到就判
+    `environment-busy` 跳过，而不是半途失败污染结论；`--wait-idle <秒>` 可等空闲再跑。
+
+> 真机 GUI 验证必须在**空闲桌面**上跑：`npm run verify:multi-app -- --wait-idle 120`。
+> 一边用电脑一边跑，结果会是 `environment-busy`，那不是应用不可自动化。
+>
+> 排查「界面看起来对、实际没生效」时加 `--debug-shots`：它会在「窗口 / 写入后 / 保存后」
+> 三个阶段各留一张截图（写系统临时目录，不进仓库、不进报告）。这一轮两个最难的结论
+> （Excel 打进公式栏、Word 保存确认框挂在那里）都是靠截图定性的。
+
+### 单应用结构探针（`scripts/probe-app.mjs`）
+
+给一个新应用写用例之前，先看清它到底暴露了什么——真机上最常见的失败不是「点不到」，
+而是**以为点到了**：
+
+```bash
+DEEPCODE_AGENT_UIA_BRIDGE=1 node scripts/probe-app.mjs \
+  --exe "C://Program Files//Microsoft Office//root//Office16//EXCEL.EXE" \
+  --file C://tmp//x.csv --hint excel --type "hello" --save
+```
+
+它打印 role 直方图、候选落点（按面积）、树轮廓、`readText` 通道，可选地做一次
+「点落点 → 粘贴 → `^s` → 每秒观察磁盘与本进程全部顶层窗口 / 嵌套模态」。
+Excel 的「公式栏 vs 网格」、Word 的「保存确认框是 depth 1 嵌套 `Window`，按钮是 `Pane`」
+都是靠它定性的。
 
 ### 故障注入（`tests/fault-injection.test.mjs`）
 

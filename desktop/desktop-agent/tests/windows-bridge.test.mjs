@@ -315,3 +315,41 @@ test("hwnd 贯穿感知链路：snapshot/screenshot/动作都带 hwnd，桥侧�
   assert.equal(actReq.args.hwnd, 461716);
   b.close();
 });
+
+test("文档正文读取：TextPattern 优先，结果标记 untrusted，失败如实返回错误码", async () => {
+  // Office 这类自绘文档模型没有 ValuePattern，只能读 TextPattern；
+  // 没有这条通道时「内容变没变」只能看界面标题，一个 tooltip 就能造成假阳性。
+  const fake = makeFakeBridge({
+    responder: (req) => {
+      if (req.command === "text") {
+        return { ok: true, via: "text-pattern", text: "HELLO\nWORLD", length: 11, truncated: false };
+      }
+      return capsResponder(req);
+    },
+  });
+  const b = createWindowsBackend(opts({ spawn: fake.spawnFn }));
+  const r = await b.readText({ appId: "winword", pid: 1, hwnd: 2, maxLength: 100 });
+  assert.equal(r.ok, true);
+  assert.equal(r.via, "text-pattern");
+  assert.match(r.text, /HELLO/);
+  assert.equal(r.untrusted, true);
+
+  const sent = JSON.parse(Buffer.from(fake.writes.at(-1).trim(), "base64").toString("utf8"));
+  assert.equal(sent.command, "text");
+  assert.equal(sent.args.maxLength, 100);
+  assert.equal(sent.args.hwnd, 2);
+  b.close();
+});
+
+test("typeText：paste 标志透传到桥（自绘文档模型走剪贴板粘贴，SendKeys 会漏字符）", async () => {
+  const fake = makeFakeBridge({ responder: (req) => (req.command === "typeText" ? { ok: true, via: "clipboard-paste", chars: 5 } : capsResponder(req)) });
+  const b = createWindowsBackend(opts({ spawn: fake.spawnFn }));
+  const r = await b.typeText({ appId: "winword", pid: 9, hwnd: 8, text: "HELLO", paste: true });
+  assert.equal(r.via, "clipboard-paste");
+  const sent = JSON.parse(Buffer.from(fake.writes.at(-1).trim(), "base64").toString("utf8"));
+  assert.equal(sent.command, "typeText");
+  assert.equal(sent.args.paste, true);
+  assert.equal(sent.args.text, "HELLO");
+  assert.equal(sent.args.appId, "winword"); // _withTarget 仍补目标，供前台校验
+  b.close();
+});

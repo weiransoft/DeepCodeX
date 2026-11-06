@@ -516,14 +516,18 @@ function Invoke-Dcx([string]$command, $a) {
             $sid = [string]$a.snapshotId
             $ref = [string]$a.ref
             $via = ''
-            if ($sid -and $ref -and $script:SnapshotStore.ContainsKey($sid) -and $script:SnapshotStore[$sid].ContainsKey($ref)) {
+            # paste 是调用方的**显式通道选择**：它意味着「这个落点是自绘文档模型，
+            # 请走应用自己的粘贴路径」。此时绝不能先用 ValuePattern 抄近路——
+            # Excel 的焦点元素是「编辑栏」（也是 Edit/ValuePattern），SetValue 会返回
+            # 成功、屏幕上却什么都没变，形成一个看起来全绿、实际零写入的假成功。
+            if (-not $a.paste -and $sid -and $ref -and $script:SnapshotStore.ContainsKey($sid) -and $script:SnapshotStore[$sid].ContainsKey($ref)) {
                 $el = $script:SnapshotStore[$sid][$ref]
                 try {
                     $vp = $el.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
                     if ($vp) { $vp.SetValue($text); $via = 'value-pattern-ref' }
                 } catch { }
             }
-            if (-not $via) {
+            if (-not $a.paste -and -not $via) {
                 try {
                     $fg = [System.Windows.Automation.AutomationElement]::FocusedElement
                     $vp = $fg.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
@@ -542,13 +546,45 @@ function Invoke-Dcx([string]$command, $a) {
                         hint = '优先用 ValuePattern 输入（不抢焦点）；确认目标窗口已置前'
                     }
                 }
-                $escaped = $text -replace '([+^%~(){}\[\]])', '{$1}'
-                [System.Windows.Forms.SendKeys]::SendWait($escaped)
-                $via = 'keyboard'
+                if ($a.paste) {
+                    # 剪贴板粘贴：Word / Excel 的自绘编辑区用 SendKeys 会稳定漏字符
+                    # （实测 "M-abc-123" → "M-abc-2"，逐字符 + 20ms 也救不回来），
+                    # 而 ^v 是应用自己的标准输入路径，一次到位。
+                    # 代价是临时占用剪贴板：写前读旧文本、写完立刻还原，只在文本格式上操作。
+                    $prev = $null
+                    try { $prev = Get-Clipboard -Raw -ErrorAction Stop } catch { }
+                    try {
+                        Set-Clipboard -Value $text
+                        Start-Sleep -Milliseconds 120
+                        [System.Windows.Forms.SendKeys]::SendWait('^v')
+                        Start-Sleep -Milliseconds 250
+                        $via = 'clipboard-paste'
+                    } catch {
+                        $via = ''
+                    } finally {
+                        try {
+                            if ($null -ne $prev -and $prev.Length -gt 0) { Set-Clipboard -Value $prev }
+                            else { Set-Clipboard -Value ' ' }
+                        } catch { }
+                    }
+                }
+                if (-not $via) {
+                    # 逐字符发送：一次 SendWait 整个字符串时，慢应用会漏字符。字符级 + 间隔相对稳，
+                    # 但对自绘文档模型仍不保证（这正是要提供 paste 通道的原因）。
+                    $perChar = 20
+                    if ($a.perCharMs) { $perChar = [Math]::Min([Math]::Max([int]$a.perCharMs, 0), 200) }
+                    for ($i = 0; $i -lt $text.Length; $i++) {
+                        $ch2 = [string]$text[$i]
+                        $escaped = $ch2 -replace '([+^%~(){}\[\]])', '{$1}'
+                        [System.Windows.Forms.SendKeys]::SendWait($escaped)
+                        if ($perChar -gt 0) { Start-Sleep -Milliseconds $perChar }
+                    }
+                    $via = 'keyboard'
+                }
             }
             $o = [ordered]@{
                 ok = $true; via = $via; chars = $text.Length
-                foregroundRequired = ($via -eq 'keyboard')
+                foregroundRequired = ($via -eq 'keyboard' -or $via -eq 'clipboard-paste')
             }
             return $o
         }
@@ -580,6 +616,59 @@ function Invoke-Dcx([string]$command, $a) {
             if ($null -eq $w -and $script:LastPid -gt 0) { $w = Resolve-Window '' ([int]$script:LastPid) }
             if ($null -eq $w -and $script:LastAppId) { $w = Resolve-Window $script:LastAppId 0 0 }
             return (Get-WindowState $w)
+        }
+        'text' {
+            # 读「文档正文」而不是控件属性：Word / Excel 这类自绘文档模型没有 ValuePattern，
+            # 只有 TextPattern。没有它，验证器只能看 UI 上的标题/提示文本变化，
+            # 一个 tooltip 冒出来就会被误判成「内容变了」。
+            $sid = [string]$a.snapshotId
+            $ref = [string]$a.ref
+            $el = $null
+            if ($sid -and $ref -and $script:SnapshotStore.ContainsKey($sid) -and $script:SnapshotStore[$sid].ContainsKey($ref)) {
+                $el = $script:SnapshotStore[$sid][$ref]
+            }
+            if ($null -eq $el) {
+                $appId = [string]$a.appId
+                $targetPid = 0
+                if ($a.pid) { $targetPid = [int]$a.pid }
+                $targetHwnd = 0
+                if ($a.hwnd) { $targetHwnd = [long]$a.hwnd }
+                if (-not $appId -and -not $targetPid -and -not $targetHwnd) {
+                    $appId = $script:LastAppId; $targetPid = $script:LastPid; $targetHwnd = $script:LastHwnd
+                }
+                $w = Resolve-Window $appId $targetPid $targetHwnd
+                if ($null -ne $w) {
+                    $docs = @($w.El.FindAll([System.Windows.Automation.TreeScope]::Descendants,
+                                            [System.Windows.Automation.Condition]::TrueCondition)) |
+                            Where-Object { try { $_.Current.ControlType.ProgrammaticName -eq 'ControlType.Document' } catch { $false } }
+                    if ($docs.Count -gt 0) { $el = $docs[0] } else { $el = $w.El }
+                }
+            }
+            if ($null -eq $el) {
+                return New-Fail 'OBSERVATION_FAILED' '未找到可读文本的目标元素（先 snapshot 或指定 appId/hwnd）'
+            }
+            $limit = 4000
+            if ($a.maxLength) { $limit = [Math]::Min([Math]::Max([int]$a.maxLength, 16), 20000) }
+            $text = $null
+            $via = ''
+            try {
+                $tp = $el.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+                if ($tp) { $text = [string]$tp.DocumentRange.GetText($limit); $via = 'text-pattern' }
+            } catch { }
+            if ($null -eq $text) {
+                try {
+                    $vp = $el.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+                    if ($vp) { $text = [string]$vp.Current.Value; $via = 'value-pattern' }
+                } catch { }
+            }
+            if ($null -eq $text) {
+                return New-Fail 'CAPABILITY_UNAVAILABLE' '目标元素既不支持 TextPattern 也不支持 ValuePattern'
+            }
+            $o = [ordered]@{
+                ok = $true; via = $via; text = $text; length = $text.Length
+                truncated = ($text.Length -ge $limit); untrusted = $true
+            }
+            return $o
         }
         'invalidateSnapshots' {
             $script:SnapshotStore = @{}

@@ -33,7 +33,10 @@ P0 探针（桥关闭）曾判定 `continue-with-adjustment`：能枚举 34 个�
   `good / sparse / deferred / empty`，修正「按进程名猜 Electron」的误分类
   （实测 5 个真实窗口中只有 1 个真能按名字定位）；
 - **故障注入回归补齐**：窗口中途关闭、进程崩溃、桥崩溃重连、`STALE_REF`、预算熔断
-  全部锁定错误码与可恢复性，共 81 个单测通过；
+  全部锁定错误码与可恢复性，共 91 个单测通过；
+- **真实应用写入矩阵四家全绿**：记事本 / Word / Excel / 资源管理器均以**读盘或文件系统**
+  为成功证据（首轮通过、无重试），浏览器外壳按策略拒绝 GUI；过程中修掉 12 条真机判据
+  （含「中文按钮从未被点中」的 `\b` 正则 bug、老式对话框按钮是 `Pane`、Excel 落点选到公式栏）；
 - **桥生命周期可管**：`ping` 探活 4 ms、崩溃后指数退避自愈、120 s 内崩 3 次即停止
   自动重启（`bridge-crash-loop`，零新增 spawn）、`shutdown` 208 ms 优雅退出；
 - 仍保持默认关闭：未开桥或未授权时如实降级，不伪造能力、不静默执行。
@@ -246,6 +249,60 @@ TextBox/Button/TextBlock 直接暴露 ValuePattern / InvokePattern，才能覆�
 `crashesInWindow` / `uptimeMs` / `lastCrash` / `lastPing` / `blocked*`），上层据此判断
 「桥在抖」还是「环境真不可用」，不必靠重试次数反推。新增 9 个单测（`tests/bridge-lifecycle.test.mjs`）。
 
+### 3.9 真实应用写入矩阵（P2 准入第 2 项）
+
+记事本一家不能证明「判据通用」。`scripts/verify-multi-app.mjs` 把同一套
+Observe→Act→Verify + 副作用校验推到五个家族，每个用例只用自建临时文件：
+
+| 用例 | 家族 | 写入通道 | 成功证据 | 实测（`reports/p2-multi-app.json`） |
+| --- | --- | --- | --- | --- |
+| 记事本 / `.txt` | 经典 Win32 | `value-pattern-ref` | 读盘 | ✅ 40 字节，7 ms |
+| Word / `.txt` | Office 文档模型 | `clipboard-paste` + `TextPattern` 校验 | 读盘 | ✅ 69 字节，1.7 s |
+| Excel / `.csv` | Office 网格 | `clipboard-paste`（落点 `DataGrid`） | 读盘 | ✅ 42 字节，1 ms |
+| 资源管理器 / 重命名 | Shell 列表 | 选中 → `F2` → 输入 → 回车 | 文件系统改名 | ✅ `renamed` + `originalGone` |
+| Edge / 本地 HTML | 浏览器外壳 | —（策略拒绝 GUI） | 不适用：浏览器应走 DOM/CDP | 按设计拒绝 |
+
+一次完整跑（空闲桌面，`--wait-idle 90`，3 分 14 秒）四家**首轮全绿、无重试**：
+
+```
+notepad-txt      write-verified  attempts=1  {"persisted":true,"length":40,"waitedMs":7}
+word-txt         write-verified  attempts=1  {"persisted":true,"length":69,"waitedMs":1745}
+excel-csv        write-verified  attempts=1  {"persisted":true,"length":42,"waitedMs":1}
+explorer-rename  write-verified  attempts=1  {"renamed":true,"originalGone":true,"waitedMs":1}
+edge-html        policy-blocked-browser      （策略层拒绝 GUI 驱动浏览器）
+→ summary.verdict = multi-app-write-verified, writeVerified = 4/5
+```
+
+必须强调：**这些绿色全部来自读盘/文件系统**，没有一条来自「界面看起来变了」。
+本轮反复出现的失败正是「每一步都返回 ok、磁盘一个字节没变」，验证器如实拒绝认账。
+
+跑真机的过程产出了十二条可复用的判据修正（每条都落到代码里，不只是「记录一下」）：
+
+| # | 现象 | 处理 |
+| --- | --- | --- |
+| 1 | **窗口标题不是身份**：Word 把 `x.txt` 显示成 `x - Word(产品激活失败)`，Excel 追加 ` - Excel` | 进程名锁家族 + 含/不含扩展名双重匹配；唯一性由随机文件名保证 |
+| 2 | **首启引导吃掉输入**：Word 第一次打开时标题已对，但前面叠着隐私引导页，输入全被吞、`Ctrl+S` 无反应 | 动作前 `settleDialogs()`：只点「下一步/接受/确定/是」，绝不点「否/取消/另存为/删除」 |
+| 3 | **`\b` 在中文字符后面永远不成立**（本轮最贵的 bug）：`/^(是|确定|保存|…)\b/i` 对 `是(Y)`、`确定`、`下一步`、`关闭` 全返回 false，只有 `OK/Yes` 能过——兜底逻辑跑了几十轮、一个中文按钮都没点过 | 改 `(?![A-Za-z0-9])` 负向断言，CJK 与 ASCII 都对；并加了「另存为/save as」危险名排除 |
+| 4 | **老式 Office 对话框按钮不是 `Button`**：三处实测 `ControlType` 都是 `Pane`（名字 `是(Y)`），子元素常带 0×0 矩形 | 接受 `Button/Pane/Custom/Text/ListItem`；对话框作用域内不强制面积；点不动退 `{ENTER}` |
+| 5 | **模态可能顶替主窗口成为目标**：「Word 上次启动失败」标题就叫 `Microsoft Word`，按文件名永远匹配不到，却挡在加载前面 | 两阶段匹配：先宽松（6 s 后接受家族任意窗口，交 `settleDialogs` 答掉），再严格（标题带文件名且非 `文件转换/安全模式/受保护视图`） |
+| 6 | **答模态必须排在发 `ESC` 之前**：`ESC` 语义是「取消」，对着「文件转换 - xxx.txt」发 `ESC` 等于取消打开这个文件 | 启动模态 → 严格确认窗口 → 再做前台探测，顺序固化在 `runCase` |
+| 7 | **应用内模态不在顶层窗口枚举里**：Word 存 `.txt` 的保存确认框实测「本进程顶层窗口 = 1」，它是主窗口子树 depth 1 的嵌套 `Window` | 按树结构判定 + 按名回答，并接进「等磁盘」循环；只靠 `listApps` 会当成「没有对话框」 |
+| 8 | **`typeText` 拿 `paste` 抄近路**：先试「焦点元素 `ValuePattern`」，而 Excel 的焦点是**公式栏**，`SetValue` 成功但什么都没变 | `paste: true` 视为显式通道选择，直接走剪贴板，不再先试 `ValuePattern`（桥侧改动） |
+| 9 | **落点不能按角色名选**：Excel 同时有 `Edit 编辑栏`(1482×77) 与 `DataGrid 网格`(1327×497)，「Edit 优先」打进公式栏 | 按可写面积选，界面部件名（编辑栏/Ribbon/搜索框）直接排除；抽成 `src/modules/target-pick.mjs` + 8 条单测 |
+| 10 | **窗口出现 ≠ 能输入**：冷启动期点网格不建选区、`^v` 被丢、`^s` 无效，每步却都返回 ok | 「目标角色连续两次快照都在」才算就绪（Excel 实测等 1.3 s）再动手 |
+| 11 | **失败会自我强化**：保存没落盘 → 收尾强杀 → 下次弹「上次启动失败」→ 吃输入 → 又失败（「单跑能过、全量跑不过」的真因） | 答模态 + 优雅收尾；修复后同一份代码全量跑稳定四绿 |
+| 12 | **前台会被占用**：操作者正在用这台机器时 Windows 拒绝后台抢焦点（这是保护用户的正确行为） | 用例前做无害前台探测，失败判 `environment-busy` 跳过；`--wait-idle <秒>` 等空闲 |
+
+配套新增 `scripts/probe-app.mjs`（单应用结构探针）：打印 role 直方图、按面积的候选落点、
+树轮廓、`readText` 通道，可选做「点落点 → 粘贴 → `^s` → 每秒观察磁盘与全部顶层窗口/嵌套模态」。
+Excel 的「公式栏 vs 网格」与 Word 的「保存确认框 = depth 1 嵌套 Window、按钮是 Pane」
+都是靠它定性的——给下一个应用写用例前先跑它，能省掉大部分试错。
+
+> 真机 GUI 验证必须在**空闲桌面**上跑：`npm run verify:multi-app -- --wait-idle 240`。
+> 一边用电脑一边跑，结果会是 `environment-busy`，那不是应用不可自动化。失败用例会自动重跑一次，
+> 两次结论都写进报告（`attempts` / `firstAttempt`），不掩盖第一次的失败。
+> 排查「界面看起来对、实际没生效」加 `--debug-shots`（三阶段截图写系统临时目录，不进仓库/报告）。
+
 ---
 
 ## 4. P1 交付清单
@@ -257,7 +314,7 @@ TextBox/Button/TextBlock 直接暴露 ValuePattern / InvokePattern，才能覆�
 | L1 协议 | `mcp-server.mjs` | stdio JSON-RPC 2.0；`initialize` / `tools/list` / `tools/call` / `ping`；stdout 仅协议帧 |
 | L2 编排 | `agent.mjs` | 11 个工具定义与分发、三级降级通道决策、`pid` 精确目标 |
 | L3 护栏 | `policy-guard.mjs` / `policy-load.mjs` / `budget.mjs` / `telemetry.mjs` | 白名单 + 注入扫描 + 一次性确认令牌、外部策略硬化、预算原子预扣熔断、脱敏事件 |
-| L3 感知 | `perception.mjs` / `app-registry.mjs` / `tree-quality.mjs` | 稳定 ref / 骨架树 / 下钻、TTL 缓存、通道矩阵、实测树质量判定与回写 |
+| L3 感知 | `perception.mjs` / `app-registry.mjs` / `tree-quality.mjs` / `target-pick.mjs` | 稳定 ref / 骨架树 / 下钻、TTL 缓存、通道矩阵、实测树质量判定与回写、写入落点选择（按可写面积） |
 | L3 验证 | `verifier.mjs` | Observe→Act→Verify；旧 ref 硬返回 `STALE_REF`；有界重试 |
 | L3 可靠性 | `bridge-lifecycle.mjs` | 桥崩溃指数退避、窗口内重启上限、稳定重置、僵死回收、优雅退出 |
 | L4 后端 | `contract.mjs` / `mock.mjs` / `windows.mjs` / `windows-uia.ps1` | 可插拔契约；mock 故障注入；Windows 长驻桥客户端 + tasklist 回落；UIA 长驻桥（599 行） |
@@ -289,7 +346,7 @@ TextBox/Button/TextBlock 直接暴露 ValuePattern / InvokePattern，才能覆�
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
-| Node 单测 | `cd desktop/desktop-agent && npm test` | **81/81 通过**（9 个测试文件，约 20 s） |
+| Node 单测 | `cd desktop/desktop-agent && npm test` | **91/91 通过**（10 个测试文件，约 20 s） |
 | 真机 GUI 闭环 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:gui` | **4/4 verified**，`gui-unblocked`；连续 4 次稳定 |
 | 真实应用写入 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:real-app` | **3/3 步骤**，`real-app-write-verified`，磁盘 `persisted:true` |
 | 桥生命周期 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:lifecycle` | `lifecycle-managed`：ping 4 ms、强杀自愈 2/2、崩溃循环零新增 spawn、优雅退出 208 ms |
@@ -352,8 +409,9 @@ CI 若用 MSVC 工具链应能直接跑全量。
 
 1. 覆盖率采样已跑通 5 个真实窗口；需扩到 **≥ 10 个**真实目标应用，并对 `sparse/empty`
    应用明确「视觉兜底 / 拒绝」的产品化判定（当前是拒绝）；
-2. 真实应用写用例从 1 个扩到 ≥ 5 个（Office、浏览器外壳、Electron 应用各一），
-   验证 `expectChange` 与副作用校验的通用性；
+2. ~~真实应用写用例从 1 个扩到 ≥ 5 个~~ ✅ 已完成（§3.9）：5 个用例覆盖经典 Win32 /
+   Office 文档模型 / Office 网格 / Shell / 浏览器外壳，其中 4 家以读盘或文件系统为证据
+   首轮全绿，浏览器按策略拒绝 GUI；`expectChange` 与副作用校验的通用性由矩阵本身证明；
 3. 在 MSVC CI 上跑通 `cargo test --lib`，闭环 Rust 用例运行验证；
 4. ~~桥进程纳入生命周期管理~~ ✅ 已完成（§3.8）：`ping` 健康检查、指数退避、
    120 s 内崩溃 3 次的自动重启上限（`bridge-crash-loop`）、僵死回收、`shutdown` 优雅退出。

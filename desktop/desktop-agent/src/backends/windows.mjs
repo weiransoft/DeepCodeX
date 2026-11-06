@@ -597,6 +597,16 @@ export class WindowsBackend {
     return this._callBridge("observeState", {});
   }
 
+  /**
+   * 读文档正文（TextPattern 优先）——Office 这类自绘文档模型没有 ValuePattern，
+   * 只能靠 TextPattern 拿到真实内容；否则「内容有没有变」只能看界面标题/提示，
+   * 一个 tooltip 就会被误判成变化（Word 上实测到过这种假阳性）。
+   */
+  async readText(args = {}) {
+    const res = await this._callBridge("text", this._withTarget(args));
+    return { ...res, untrusted: true };
+  }
+
   async invalidateSnapshots() {
     if (!this.bridge) return { ok: true, cleared: false };
     try {

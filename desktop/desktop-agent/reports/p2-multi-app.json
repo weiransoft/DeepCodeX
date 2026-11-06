@@ -1,0 +1,498 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-11-06T07:54:02.330Z",
+  "platform": "win32",
+  "session": "Console",
+  "privacy": {
+    "windowTitlesPersisted": false,
+    "note": "只记录标题长度/是否命中随机文件名，不落盘标题内容"
+  },
+  "cases": [
+    {
+      "id": "notepad-txt",
+      "family": "classic-win32",
+      "label": "记事本 / 纯文本",
+      "verdict": "write-verified",
+      "dir": null,
+      "steps": [
+        {
+          "name": "key/save",
+          "ok": true,
+          "outcome": "verified-no-change"
+        }
+      ],
+      "guards": {},
+      "channels": [
+        {
+          "action": "type",
+          "mode": "ref",
+          "outcome": "verified",
+          "via": "value-pattern-ref"
+        }
+      ],
+      "window": {
+        "appId": "notepad",
+        "pid": 1256,
+        "hwnd": 4720014,
+        "matchedBy": "title-full",
+        "waitedMs": 33,
+        "enumSource": "uia",
+        "totalWindows": 10,
+        "afterStartupModal": true
+      },
+      "ready": {
+        "waitedMs": 15535,
+        "ok": false,
+        "roles": [
+          "Edit"
+        ],
+        "timedOut": true
+      },
+      "tree": {
+        "quality": {
+          "nodeCount": 35,
+          "actionableCount": 16,
+          "namedCount": 23,
+          "namedActionableCount": 15,
+          "namedRatio": 0.66,
+          "complete": true,
+          "verdict": "good",
+          "reason": "有名字的可操作节点充足，可按名字定位"
+        },
+        "snapshotId": "uia-6e4bb367dde4",
+        "nodeCount": 66,
+        "roles": [
+          "Window",
+          "Pane",
+          "Document",
+          "Tab",
+          "List",
+          "Button",
+          "MenuBar",
+          "MenuItem",
+          "Text"
+        ]
+      },
+      "targetNode": {
+        "ref": "e012",
+        "role": "Document",
+        "nameLength": 5
+      },
+      "disk": {
+        "persisted": true,
+        "baselinePreserved": false,
+        "baselineExpected": false,
+        "length": 40,
+        "waitedMs": 7
+      },
+      "cleanup": {
+        "tempRemoved": true
+      },
+      "elapsedMs": 19008.74
+    },
+    {
+      "id": "word-txt",
+      "family": "office-word",
+      "label": "Word / 纯文本",
+      "verdict": "write-verified",
+      "dir": null,
+      "steps": [
+        {
+          "name": "key/save",
+          "ok": true,
+          "outcome": "verified"
+        }
+      ],
+      "guards": {
+        "docBaseline": true
+      },
+      "channels": [
+        {
+          "action": "type",
+          "mode": "clipboard-paste",
+          "ok": true,
+          "via": "clipboard-paste"
+        }
+      ],
+      "window": {
+        "appId": "winword",
+        "pid": 16796,
+        "hwnd": 789832,
+        "matchedBy": "title-without-extension",
+        "waitedMs": 44,
+        "enumSource": "uia",
+        "totalWindows": 10,
+        "afterStartupModal": true
+      },
+      "ready": {
+        "waitedMs": 3028,
+        "ok": true,
+        "roles": [
+          "Document"
+        ]
+      },
+      "tree": {
+        "quality": {
+          "nodeCount": 16,
+          "actionableCount": 1,
+          "namedCount": 12,
+          "namedActionableCount": 1,
+          "namedRatio": 0.75,
+          "complete": true,
+          "verdict": "sparse",
+          "reason": "有名字的可操作节点仅 1 个（阈值 3），定位可靠性不足"
+        },
+        "snapshotId": "uia-6e57df6e0e98",
+        "nodeCount": 27,
+        "roles": [
+          "Window",
+          "Pane",
+          "Document",
+          "Custom"
+        ]
+      },
+      "targetNode": {
+        "ref": "e08910",
+        "role": "Document",
+        "nameLength": 20
+      },
+      "doc": {
+        "before": {
+          "ok": true,
+          "via": "text-pattern",
+          "length": 25,
+          "baselineSeen": true
+        },
+        "afterType": {
+          "via": "text-pattern",
+          "length": 67,
+          "markerSeen": true
+        },
+        "afterSave": {
+          "length": 67,
+          "markerSeen": true
+        }
+      },
+      "saveDialogs": [
+        {
+          "kind": "in-window-modal",
+          "role": "Pane",
+          "nameLength": 4,
+          "via": "coordinate-fallback",
+          "ok": true
+        }
+      ],
+      "disk": {
+        "persisted": true,
+        "baselinePreserved": true,
+        "baselineExpected": true,
+        "length": 69,
+        "waitedMs": 1745
+      },
+      "cleanup": {
+        "tempRemoved": true
+      },
+      "elapsedMs": 30783.5
+    },
+    {
+      "id": "excel-csv",
+      "family": "office-excel",
+      "label": "Excel / CSV",
+      "verdict": "write-verified",
+      "dir": null,
+      "steps": [
+        {
+          "name": "key/save",
+          "ok": true,
+          "outcome": "verified"
+        }
+      ],
+      "guards": {
+        "docBaseline": null,
+        "docTextUnsupported": true
+      },
+      "channels": [
+        {
+          "action": "type",
+          "mode": "clipboard-paste",
+          "ok": true,
+          "via": "clipboard-paste"
+        }
+      ],
+      "window": {
+        "appId": "excel",
+        "pid": 18320,
+        "hwnd": 4654914,
+        "matchedBy": "title-without-extension",
+        "waitedMs": 36,
+        "enumSource": "uia",
+        "totalWindows": 10,
+        "afterStartupModal": true
+      },
+      "ready": {
+        "waitedMs": 1207,
+        "ok": true,
+        "roles": [
+          "DataGrid"
+        ]
+      },
+      "tree": {
+        "quality": {
+          "nodeCount": 33,
+          "actionableCount": 6,
+          "namedCount": 19,
+          "namedActionableCount": 6,
+          "namedRatio": 0.58,
+          "complete": true,
+          "verdict": "good",
+          "reason": "有名字的可操作节点充足，可按名字定位"
+        },
+        "snapshotId": "uia-ee5f55aef8ea",
+        "nodeCount": 259,
+        "roles": [
+          "Window",
+          "Pane",
+          "Edit",
+          "ScrollBar",
+          "Tab",
+          "Button",
+          "TabItem",
+          "DataGrid"
+        ]
+      },
+      "targetNode": {
+        "ref": "e023414748",
+        "role": "DataGrid",
+        "nameLength": 2
+      },
+      "doc": {
+        "before": {
+          "ok": false,
+          "via": null,
+          "length": 0,
+          "baselineSeen": false
+        }
+      },
+      "disk": {
+        "persisted": true,
+        "baselinePreserved": false,
+        "baselineExpected": false,
+        "length": 42,
+        "waitedMs": 1
+      },
+      "cleanup": {
+        "tempRemoved": true
+      },
+      "elapsedMs": 7432.53
+    },
+    {
+      "id": "explorer-rename",
+      "family": "shell",
+      "label": "资源管理器 / 重命名",
+      "verdict": "write-verified",
+      "dir": null,
+      "steps": [
+        {
+          "name": "click_ref",
+          "ok": true,
+          "elapsedMs": 0.17
+        },
+        {
+          "name": "key/F2",
+          "ok": true,
+          "elapsedMs": 1706.38
+        },
+        {
+          "name": "type/new-name",
+          "ok": true,
+          "elapsedMs": 447.47
+        },
+        {
+          "name": "key/ENTER",
+          "ok": true,
+          "elapsedMs": 2542.07
+        }
+      ],
+      "guards": {
+        "itemNamed": true
+      },
+      "channels": [
+        {
+          "action": "click"
+        },
+        {
+          "action": "key",
+          "combo": "{F2}",
+          "outcome": "verify-failed"
+        },
+        {
+          "action": "type",
+          "outcome": "verified",
+          "via": "value-pattern-focused"
+        }
+      ],
+      "window": {
+        "appId": "explorer",
+        "pid": 7736,
+        "hwnd": 3280898,
+        "matchedBy": "title-full",
+        "waitedMs": 46,
+        "enumSource": "uia",
+        "totalWindows": 10,
+        "afterStartupModal": true
+      },
+      "ready": {
+        "waitedMs": 914,
+        "ok": true,
+        "roles": [
+          "List",
+          "ListItem"
+        ]
+      },
+      "tree": {
+        "quality": {
+          "nodeCount": 87,
+          "actionableCount": 42,
+          "namedCount": 63,
+          "namedActionableCount": 41,
+          "namedRatio": 0.72,
+          "complete": true,
+          "verdict": "good",
+          "reason": "有名字的可操作节点充足，可按名字定位"
+        },
+        "snapshotId": "uia-cc6943d949ee",
+        "nodeCount": 91,
+        "roles": [
+          "Window",
+          "Pane",
+          "StatusBar",
+          "Group",
+          "Text",
+          "RadioButton",
+          "List",
+          "Header",
+          "SplitButton",
+          "ListItem",
+          "Edit",
+          "Tab",
+          "TabItem",
+          "Image"
+        ]
+      },
+      "targetNode": {
+        "ref": "e0231213",
+        "role": "List",
+        "nameLength": 4
+      },
+      "disk": {
+        "renamed": true,
+        "originalGone": true,
+        "waitedMs": 1
+      },
+      "cleanup": {
+        "tempRemoved": true
+      },
+      "elapsedMs": 9745.41
+    },
+    {
+      "id": "edge-html",
+      "family": "browser-shell",
+      "label": "Edge / 网页文本框",
+      "verdict": "policy-blocked-browser",
+      "dir": null,
+      "steps": [],
+      "guards": {},
+      "channels": [
+        {
+          "action": "type",
+          "mode": "ref",
+          "outcome": "ACTION_DENIED",
+          "via": null
+        }
+      ],
+      "window": {
+        "appId": "msedge",
+        "pid": 18908,
+        "hwnd": 3541508,
+        "matchedBy": "title-full",
+        "waitedMs": 47,
+        "enumSource": "uia",
+        "totalWindows": 11,
+        "afterStartupModal": true
+      },
+      "tree": {
+        "quality": {
+          "nodeCount": 12,
+          "actionableCount": 0,
+          "namedCount": 4,
+          "namedActionableCount": 0,
+          "namedRatio": 0.33,
+          "complete": true,
+          "verdict": "sparse",
+          "reason": "整棵树都没有有名字的可操作节点，按名字定位不可行"
+        },
+        "snapshotId": "uia-7ba48ad839ca",
+        "nodeCount": 30,
+        "roles": [
+          "Window",
+          "Pane",
+          "Text"
+        ]
+      },
+      "targetNode": {
+        "ref": "e02",
+        "role": "Pane",
+        "nameLength": 37
+      },
+      "error": {
+        "code": "ACTION_DENIED",
+        "message": "键盘通道也失败：ACTION_DENIED 浏览器目标应走 DOM/CDP 通道，而非 GUI",
+        "visible": null
+      },
+      "cleanup": {
+        "tempRemoved": true
+      },
+      "elapsedMs": 30903.79,
+      "attempts": 2,
+      "firstAttempt": {
+        "verdict": "environment-busy",
+        "error": {
+          "code": "ACTION_DENIED",
+          "message": "前台被占用（操作者正在使用该机器？），跳过本用例"
+        },
+        "disk": null
+      }
+    }
+  ],
+  "capabilities": {
+    "a11yTree": true,
+    "reason": "windows-uia.ps1 长驻桥已连接（session=Console, userInteractive=true）"
+  },
+  "summary": {
+    "verdict": "multi-app-write-verified",
+    "cases": 5,
+    "writeVerified": 4,
+    "environmentBusy": 0,
+    "byFamily": {
+      "classic-win32": "write-verified",
+      "office-word": "write-verified",
+      "office-excel": "write-verified",
+      "shell": "write-verified",
+      "browser-shell": "policy-blocked-browser"
+    },
+    "channels": [
+      "notepad-txt:value-pattern-ref",
+      "word-txt:clipboard-paste",
+      "excel-csv:clipboard-paste",
+      "explorer-rename:undefined",
+      "explorer-rename:verify-failed",
+      "explorer-rename:value-pattern-focused",
+      "edge-html:ACTION_DENIED"
+    ],
+    "treeVerdicts": {
+      "good": 3,
+      "sparse": 2
+    },
+    "note": "每个用例只用自建临时文件；写入证据以磁盘/文件系统为准，浏览器外壳只验证输入通道"
+  }
+}
