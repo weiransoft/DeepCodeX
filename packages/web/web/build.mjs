@@ -80,7 +80,15 @@ await mkdir(cliWebDir, { recursive: true });
 const cliDistLink = path.join(cliWebDir, "dist");
 // 先删旧链接/目录（rm force 幂等），再建 dir 型软链指向真实 dist
 await rm(cliDistLink, { recursive: true, force: true });
-await symlink(distDir, cliDistLink, "dir");
-console.log(`✅ 已链接 CLI dist 布局: ${cliDistLink} -> ${distDir}`);
+try {
+  await symlink(distDir, cliDistLink, "dir");
+  console.log(`✅ 已链接 CLI dist 布局: ${cliDistLink} -> ${distDir}`);
+} catch (err) {
+  // Windows 普通权限（未开启开发者模式）下创建目录软链会报 EPERM/EACCES，
+  // 此时回退为目录复制，保证构建链路可用（产物内容一致）。
+  if (err?.code !== "EPERM" && err?.code !== "EACCES") throw err;
+  await cp(distDir, cliDistLink, { recursive: true });
+  console.log(`✅ 已复制 CLI dist 布局（symlink 不可用）: ${cliDistLink} <- ${distDir}`);
+}
 
 console.log(`\n✅ 前端构建完成: ${distDir}\n`);

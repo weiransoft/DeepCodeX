@@ -7,7 +7,9 @@ rust-version = "1.90"
 
 [lib]
 name = "deepcode_desktop_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# cdylib 仅 Tauri 移动端需要；桌面端不需要。Windows + MinGW(gnu) 下链接
+# cdylib 会因 auto-export 符号过多报 "export ordinal too large"，故去掉。
+crate-type = ["staticlib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
