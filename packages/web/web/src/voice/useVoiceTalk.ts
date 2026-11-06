@@ -332,6 +332,11 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
             }
           },
           onError: (message) => setError(message),
+          onNotice: (message) => {
+            // 采样级播放不可用时的降级说明：这不是故障（声音照常出），
+            // 弹红条只会让人以为语音坏了，所以只记控制台
+            console.warn("语音播报降级", message);
+          },
           onInterrupted: (spokenText) => {
             setLastInterruption({ at: performance.now(), spokenText });
           },
