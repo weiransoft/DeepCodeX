@@ -19,6 +19,7 @@
  * |---|---|---|
  * | GET | `/api/voice/status` | 探测 sidecar（1.2s 超时），返回真实就绪状态 |
  * | POST | `/api/voice/tts` | 文本 → audio/wav（转发，超时 60s） |
+ * | POST | `/api/voice/tts/stream` | 文本 → 分块音频流（边生成边下发） |
  * | POST | `/api/voice/asr` | audio/wav → `{text}`（转发，超时 60s） |
  *
  * ## 降级纪律
@@ -237,6 +238,82 @@ export async function handleVoiceTts(
     "Cache-Control": "no-store",
   });
   res.end(audio);
+}
+
+/**
+ * 处理 POST /api/voice/tts/stream
+ *
+ * 与 `/tts` 同一套参数，但响应是**边生成边下发**的二进制流
+ * （`[4B 大端长度][独立 WAV]` 重复到结束）。这里必须逐块 `res.write`，
+ * 不能 `await arrayBuffer()` 再一次性 `end`——那会把流式收益全部吃掉。
+ *
+ * 首块延迟实测：整块 1.821s → 流式 interval=1.0 **0.192s**，总耗时不变。
+ *
+ * @param req 请求对象
+ * @param res 响应对象
+ * @param ctx 认证上下文
+ * @param settings Web 配置
+ */
+export async function handleVoiceTtsStream(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: AuthContext,
+  settings: EngineHomeSettings & { skillsHomeRoot?: string | null }
+): Promise<void> {
+  const body = (await readJsonBody(req)) as {
+    text?: unknown;
+    engine?: unknown;
+    voice?: unknown;
+    speed?: unknown;
+    interval?: unknown;
+  };
+  const text = typeof body.text === "string" ? body.text.trim() : "";
+  if (text.length === 0) throw new ApiError(400, "待合成文本不能为空");
+  if (text.length > TTS_TEXT_MAX) throw new ApiError(400, `待合成文本过长（上限 ${TTS_TEXT_MAX} 字）`);
+
+  const { config } = readSoulConfig(ctx, settings);
+  const engine =
+    typeof body.engine === "string" && VOICE_ENGINES.includes(body.engine as VoiceEngine)
+      ? (body.engine as VoiceEngine)
+      : config.voice.engine;
+  const voice = typeof body.voice === "string" && body.voice.trim().length > 0 ? body.voice.trim() : config.voice.voice;
+  const speed =
+    typeof body.speed === "number" && Number.isFinite(body.speed)
+      ? Math.min(VOICE_SPEED_MAX, Math.max(VOICE_SPEED_MIN, body.speed))
+      : config.voice.speed;
+  const interval =
+    typeof body.interval === "number" && Number.isFinite(body.interval)
+      ? Math.min(4, Math.max(0.3, body.interval))
+      : 1.0;
+
+  const upstream = await callSidecar(config.voice, "/tts/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.voice.token}` },
+    body: JSON.stringify({ text, engine, voice, speed, interval }),
+  });
+  if (!upstream.ok) {
+    const detail = await safeErrorText(upstream);
+    throw new ApiError(upstream.status === 503 ? 503 : 502, `流式语音合成失败：${detail}`);
+  }
+
+  res.writeHead(200, {
+    "Content-Type": "application/octet-stream",
+    "Cache-Control": "no-store",
+    "X-Accel-Buffering": "no",
+  });
+  if (upstream.body === null) {
+    res.end();
+    return;
+  }
+  try {
+    // Node 20+ 的 Web ReadableStream 支持异步迭代；每读一块就往下游写一块。
+    // 不设 Content-Length，靠连接结束标记流尾（sidecar 用 Connection: close）。
+    for await (const chunk of upstream.body as unknown as AsyncIterable<Uint8Array>) {
+      res.write(chunk);
+    }
+  } finally {
+    res.end();
+  }
 }
 
 /**

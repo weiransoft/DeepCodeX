@@ -955,6 +955,82 @@ export async function synthesizeSpeech(
 }
 
 /**
+ * 流式合成：每生成一块就回调一次，不必等整段生成完
+ *
+ * 线上格式 `[4B 大端长度][独立 WAV]` × N。每个 WAV 都是完整容器，
+ * 可以直接交给 `decodeAudioData` / `<audio>`，这正是分块封 WAV 的原因。
+ *
+ * 实测（41 字、热态）：首个回调在 **0.19s** 左右到达，而整块模式要 1.82s；
+ * 总生成耗时几乎不变。播放队列接入后首字延迟就从这里降下来。
+ *
+ * @param text 待合成文本
+ * @param onChunk 收到一块音频（调用方负责 revokeObjectURL）
+ * @param override 覆盖配置里的引擎/音色/语速/分块间隔
+ * @param externalSignal 打断信号：播报队列 `stop()` 会 abort，立即掐断响应流
+ * @returns 收到的音频块数
+ */
+export async function streamSpeech(
+  text: string,
+  onChunk: (url: string, index: number) => void,
+  override?: { engine?: VoiceEngine; voice?: string; speed?: number; interval?: number },
+  externalSignal?: AbortSignal
+): Promise<number> {
+  const timeoutMs = 75_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // 播报被打断时队列会 abort：必须真的掐断响应流，否则后端还在生成、
+  // 前端还在收 chunk，只是被丢弃，白占一轮模型推理
+  const onExternalAbort = (): void => controller.abort();
+  if (externalSignal?.aborted) controller.abort();
+  else externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
+  try {
+    const res = await fetch("/api/voice/tts/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      signal: controller.signal,
+      body: JSON.stringify({ text, ...(override ?? {}) }),
+    });
+    if (!res.ok) throw new Error(await readErrorDetail(res, "流式语音合成失败"));
+    if (res.body === null) throw new Error("流式语音合成返回空响应体");
+
+    const reader = res.body.getReader();
+    let pending = new Uint8Array(0);
+    let index = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const merged = new Uint8Array(pending.length + value.length);
+      merged.set(pending, 0);
+      merged.set(value, pending.length);
+      pending = merged;
+      // TCP 会粘包也会拆包：长度头或 WAV 体都可能分两次到，循环里能解析多少算多少
+      while (pending.length >= 4) {
+        const length = new DataView(pending.buffer, pending.byteOffset, 4).getUint32(0, false);
+        if (length === 0 || length > 16 * 1024 * 1024) throw new Error("流式音频长度异常");
+        if (pending.length < 4 + length) break;
+        const wav = pending.slice(4, 4 + length);
+        pending = pending.slice(4 + length);
+        onChunk(URL.createObjectURL(new Blob([wav], { type: "audio/wav" })), index);
+        index += 1;
+      }
+    }
+    if (pending.length > 0) throw new Error("流式音频结尾不完整");
+    return index;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      // 主动打断不是故障：原样抛出，让播报队列按"被打断"静默处理
+      if (externalSignal?.aborted) throw error;
+      throw new Error(`流式语音合成超时（${Math.round(timeoutMs / 1000)}s）`);
+    }
+    throw error;
+  } finally {
+    externalSignal?.removeEventListener("abort", onExternalAbort);
+    clearTimeout(timer);
+  }
+}
+
+/**
  * 识别一段 WAV 音频
  *
  * @param wav PCM16 WAV 字节（前端编码，见 `voice/wav.ts`）

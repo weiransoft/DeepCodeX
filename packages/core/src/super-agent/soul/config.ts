@@ -78,6 +78,20 @@ export const VOICE_PRESETS: readonly { id: string; label: string; description: s
     description:
       "成年女性，中高音区，语速偏快，吐字清晰，利落，不拖尾音（crisp professional female voice, slightly higher pitch, brisk, no trailing）",
   },
+  /**
+   * 司南预设（2026-11-06 重设）
+   *
+   * description 写的是 **sidecar 预设名**而不是一段音色描述：CustomVoice
+   * 引擎只认预置 speaker，传描述会落回默认音色、音色又开始漂。预设名由
+   * `scripts/voice/mlx_voice_server.py` 的 VOICE_PRESETS 展开成
+   * (speaker, instruct)，音色底子与风格指令成对管理，不会各改各的。
+   *
+   * 选 serena 的依据：同文本实测 F0 222Hz（比 vivian 的 238Hz 更低沉、
+   * 韵律跨度 94Hz 对 104Hz 更稳），贴合司南「成熟、中低音、克制」；
+   * 「语速平稳」按本轮反馈改成「语速稍快」。
+   */
+  { id: "sinan", label: "司南（推荐）", description: "sinan" },
+  { id: "sinan-bright", label: "司南·清亮", description: "sinan-bright" },
 ];
 
 /** 默认唤醒词（两个字短、开口音，误唤醒率低；用户可改） */

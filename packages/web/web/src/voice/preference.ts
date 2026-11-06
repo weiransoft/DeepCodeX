@@ -109,3 +109,70 @@ export function subscribeHandsFree(handler: (value: boolean) => void): () => voi
     globalThis.removeEventListener?.("storage", onStorage);
   };
 }
+
+/*
+ * 流式播放开关
+ *
+ * 同样是「这台设备上的偏好」而不是人格设定，所以跟着 localStorage 走。
+ * 默认开：实测 41 字 / speed 1.2 时流式首块 0.39s 到达，整块要 1.92s；
+ * 且 11 个流式块按采样点直接相接合计 8.399s ≈ 整块 8.333s，音色是同一次
+ * 自回归，不会因为分块重起韵律。
+ *
+ * 仍然留一个开关：不同浏览器 / WebView 的 AudioContext 行为有差异，万一声音
+ * 有异可以立刻关掉回到经过长期验证的整块链路，不必改代码。
+ */
+export const STREAM_PLAYBACK_KEY = "dcx.voice.streamPlayback";
+export const STREAM_PLAYBACK_EVENT = "dcx:voice-stream-playback";
+
+/** 流式播放默认值：开 */
+export function defaultStreamPlayback(): boolean {
+  return true;
+}
+
+/**
+ * 读取流式播放偏好
+ *
+ * @param fallback 存储不可用时的默认值
+ * @returns 是否启用流式播放
+ */
+export function readStreamPlayback(fallback = defaultStreamPlayback()): boolean {
+  try {
+    const raw = globalThis.localStorage?.getItem(STREAM_PLAYBACK_KEY);
+    if (raw === "1") return true;
+    if (raw === "0") return false;
+  } catch {
+    // 隐私模式/无 localStorage：用默认值
+  }
+  return fallback;
+}
+
+/** 写入流式播放偏好并广播 */
+export function writeStreamPlayback(value: boolean): void {
+  try {
+    globalThis.localStorage?.setItem(STREAM_PLAYBACK_KEY, value ? "1" : "0");
+  } catch {
+    // 存不下就只在本页生效
+  }
+  try {
+    globalThis.dispatchEvent?.(new CustomEvent(STREAM_PLAYBACK_EVENT, { detail: value }));
+  } catch {
+    // 无 window（测试环境）时忽略
+  }
+}
+
+/** 订阅流式播放变化（同页事件 + 跨标签页 storage 事件） */
+export function subscribeStreamPlayback(handler: (value: boolean) => void): () => void {
+  const onCustom = (event: Event): void => {
+    handler((event as CustomEvent<boolean>).detail === true);
+  };
+  const onStorage = (event: Event): void => {
+    const key = (event as StorageEvent).key;
+    if (key === null || key === STREAM_PLAYBACK_KEY) handler(readStreamPlayback());
+  };
+  globalThis.addEventListener?.(STREAM_PLAYBACK_EVENT, onCustom);
+  globalThis.addEventListener?.("storage", onStorage);
+  return () => {
+    globalThis.removeEventListener?.(STREAM_PLAYBACK_EVENT, onCustom);
+    globalThis.removeEventListener?.("storage", onStorage);
+  };
+}

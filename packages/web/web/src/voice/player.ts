@@ -50,6 +50,27 @@ import {
 /** 合成函数：文本 → objectURL（由后端负责回收） */
 export type SynthFn = (text: string) => Promise<string>;
 
+/**
+ * 流式合成函数：边生成边回调独立 WAV 块
+ *
+ * 与 `SynthFn` 的关键区别是**它不必等整段生成完**：模型每解出一小段音频
+ * 就 `onChunk` 一次，队列可以把这段立刻排进时间轴，首字延迟从"整段生成
+ * 耗时"降到"第一块到达耗时"（实测 1.92s → 0.39s）。
+ *
+ * 返回 0 块表示"这条路这次不走"（例如服务端不支持流式或用户关了开关），
+ * 队列据此自动回退整块合成，不报错、不哑。
+ *
+ * @param text 待合成文本
+ * @param onChunk 音频块到达（`url` 所有权交给队列，由播放后端回收）
+ * @param signal 打断信号：`stop()` 会 abort，实现方应停止读取响应流
+ * @returns 实际交付的块数
+ */
+export type StreamSynthFn = (
+  text: string,
+  onChunk: (url: string, index: number) => void,
+  signal: AbortSignal
+) => Promise<number>;
+
 /** 播放器可注入的依赖（测试用；生产走默认值） */
 export interface SpeechQueueDeps {
   /**
@@ -81,6 +102,13 @@ export interface SpeechQueueDeps {
   playStartTimeoutMs?: number;
   /** 时钟（测试可注入，默认 performance.now） */
   now?: () => number;
+  /**
+   * 流式合成函数（给了就走流式播放分支）
+   *
+   * 不给就完全是原来的「整块合成 → 排程」路径，589 条既有用例的行为
+   * 一个字都不变。这样新路径的风险不会外溢到已经稳定的链路。
+   */
+  streamSynth?: StreamSynthFn;
 }
 
 /** 播报队列回调 */
@@ -99,10 +127,14 @@ export interface SpeechQueueCallbacks {
  * 首块目标字数
  *
  * 首块的合成时长直接等于"点下去到听见第一个音"的间隔（TTFA），所以它比
- * 后续块小得多。24 字约 6 秒音频、合成 1.1 秒——比原来的 28 字切句阈值
- * 还小一点，换取的是一段完整语义（不会在半句中间断）。
+ * 后续块小得多。24 字约 6 秒音频、合成 1.1 秒；按实测语速 4.1 字/秒折算，
+ * 14 字约 3.4 秒音频、合成约 0.6 秒，首字延迟少一半。
+ *
+ * 为什么敢再压：音色一致性靠的是"块内一次自回归 + 音色锁在 speaker 上"，
+ * 首块短一点只是多一个块边界，不会像以前按 28 字切句那样每句重新起头。
+ * 代价是首块语义可能停在逗号处，所以要求切句器优先在句末断（见 sentence.ts）。
  */
-export const FIRST_BLOCK_CHARS = 24;
+export const FIRST_BLOCK_CHARS = 14;
 
 /**
  * 后续块目标字数
@@ -135,10 +167,12 @@ interface InflightClip {
 
 /** 已合成、待排程的块 */
 interface WaitingBlock {
-  /** 原文 */
+  /** 原文（流式块只有第 0 块带原文，其余为空串） */
   text: string;
   /** objectURL */
   url: string;
+  /** 流式连续块：不裁静音、不加停顿、不补尾音 */
+  continuous: boolean;
 }
 
 /**
@@ -201,8 +235,20 @@ export class SpeechQueue {
   private usedFallback = false;
   /** 回调 */
   private readonly callbacks: SpeechQueueCallbacks;
-  /** 合成函数 */
+  /** 整块合成函数 */
   private readonly synth: SynthFn;
+  /** 流式合成函数（null = 走整块路径） */
+  private readonly streamSynth: StreamSynthFn | null;
+  /** 在飞的合成任务数（流式分支用；`speaking` 也要算上它） */
+  private activeSynth = 0;
+  /** 打断代数：stop 后丢弃还在飞的结果，避免旧一轮的音频串到新一轮 */
+  private generation = 0;
+  /** 当前流式请求的终止器 */
+  private streamAbort: AbortController | null = null;
+  /** 等待"队列有变化"的唤醒器（生产者-消费者的条件变量） */
+  private wake: (() => void) | null = null;
+  /** notify 早于 wait 时记一笔，避免丢唤醒 */
+  private wakePending = false;
   /** 降级后端工厂 */
   private readonly fallbackFactory: (() => ClipPlayer) | null;
   /** 首块目标字数 */
@@ -223,6 +269,7 @@ export class SpeechQueue {
    */
   constructor(synth: SynthFn, callbacks: SpeechQueueCallbacks = {}, deps: SpeechQueueDeps = {}) {
     this.synth = synth;
+    this.streamSynth = deps.streamSynth ?? null;
     this.callbacks = callbacks;
     const now = deps.now ?? (() => performance.now());
     const elementPlayer =
@@ -258,6 +305,8 @@ export class SpeechQueue {
     this.blockBuffer.push(trimmed);
     this.blockChars += trimmed.length;
     this.sealIfReady();
+    // 流式循环可能正挂在 waitForChange() 上：新句子到达必须叫醒它
+    this.notify();
     void this.drain();
   }
 
@@ -282,6 +331,8 @@ export class SpeechQueue {
       this.pushBlock(joinSentences(parts));
     }
     this.blockChars = 0;
+    // 尾巴封块 + endOfStream 都要让流式循环立刻看见，不能等下一次网络事件
+    this.notify();
     void this.drain();
   }
 
@@ -293,6 +344,13 @@ export class SpeechQueue {
    */
   stop(): void {
     this.stopped = true;
+    // 先断代再 abort：在飞的 onChunk / synth.then 用 generation 判活，
+    // 即使它们晚到也不会把旧一轮的音频排进新一轮时间轴
+    this.generation += 1;
+    this.streamAbort?.abort();
+    this.streamAbort = null;
+    this.activeSynth = 0;
+    this.cancelWake();
     this.blockBuffer = [];
     this.blockChars = 0;
     this.blocks = [];
@@ -314,7 +372,13 @@ export class SpeechQueue {
 
   /** 是否正在播（或还有内容待播） */
   get speaking(): boolean {
-    return this.playing > 0 || this.blocks.length > 0 || this.waiting.length > 0 || this.blockBuffer.length > 0;
+    return (
+      this.playing > 0 ||
+      this.activeSynth > 0 ||
+      this.blocks.length > 0 ||
+      this.waiting.length > 0 ||
+      this.blockBuffer.length > 0
+    );
   }
 
   /** 释放后端资源（页面卸载时调用） */
@@ -356,46 +420,227 @@ export class SpeechQueue {
   private async drain(): Promise<void> {
     if (this.running) return;
     this.running = true;
-    const inflight: InflightClip[] = [];
+    this.cancelWake();
     try {
+      // 两条路径互不影响：没注入 streamSynth 就走原来那条经过 589 条用例
+      // 验证的整块链路；注入了才启用生产者-消费者。这样即使流式这条路
+      // 出问题，也能一眼关掉而不必回滚整块逻辑。
+      if (this.streamSynth !== null) await this.drainStreaming();
+      else await this.drainBuffered();
+    } catch (error) {
+      // 异常退出时把已合成未播的 objectURL 收掉，别在"没有声音"之上再叠内存泄漏
+      for (const item of this.waiting) URL.revokeObjectURL(item.url);
+      this.waiting = [];
+      this.waitingChars = 0;
+      this.callbacks.onError?.(error instanceof Error ? error.message : String(error));
+    } finally {
+      this.playing = 0;
+      this.activeSynth = 0;
+      this.streamAbort = null;
+      this.running = false;
+      // 无条件回落：stop() 已经发过一次 false，重复发是幂等的；而漏发
+      // 会让界面一直停在"正在播报"
+      this.callbacks.onSpeakingChange?.(false);
+      // 补跑一轮：分派到 drainBuffered/drainStreaming 多加了一层 await，
+      // 无块可消费时 finally 会晚一个 microtask 才执行。这期间到达的
+      // enqueue/flush 被 `if (this.running) return` 挡住，新封的块就没
+      // 人接手（表现为第二句之后再也不合成）。释放 running 后补一次即可。
+      // 只看已封块 / 待排程：blockBuffer 是还没凑够字数的残句，本来就
+      // 要等下一句，算进来会造成无进展的忙循环。
+      if (!this.stopped && (this.blocks.length > 0 || this.waiting.length > 0)) void this.drain();
+    }
+  }
+
+  /**
+   * 整块路径：合成一块、排一块，领先 maxLead 块预取
+   *
+   * 这是接流式之前的稳定实现，保持原样。
+   */
+  private async drainBuffered(): Promise<void> {
+    const inflight: InflightClip[] = [];
+    // 合成**不能**依赖播放后端：后端 prepare() 一旦卡住（例如 AudioContext
+    // 在无用户手势时 resume 永久 pending），把 resolvePlayer() 放在循环开头
+    // 会让队列连一次 synth() 都发不出来，表现为"毫无声音、也不报错"。
+    // 先按当前后端的领先量估算预取上限；随后若降级（maxLead 3→1），
+    // 只是多预取一两块，不影响正确性。
+    const bufferLimit = this.player.maxLead + 1;
+    while (!this.stopped && (this.blocks.length > 0 || this.waiting.length > 0 || inflight.length > 0)) {
+      // ① 合成：先落成音频，暂不排程
+      while (!this.stopped && this.blocks.length > 0 && this.waiting.length < bufferLimit) {
+        const text = this.blocks.shift() as string;
+        let url: string;
+        try {
+          url = await this.synth(text);
+        } catch (error) {
+          this.callbacks.onError?.(error instanceof Error ? error.message : String(error));
+          continue;
+        }
+        if (this.stopped) {
+          URL.revokeObjectURL(url);
+          break;
+        }
+        this.waiting.push({ text, url, continuous: false });
+        this.waitingChars += text.length;
+      }
+      if (this.stopped) break;
+
+      // ② 开播门槛：攒够字数或流已结束才进时间轴。
+      //    不到门槛就退出循环，等下一句 enqueue 再进来（已合成的不浪费）
+      if (!this.startedPlaying) {
+        if (this.waiting.length === 0) break;
+        if (this.waitingChars < this.warmupChars && !this.endOfStream) break;
+        this.startedPlaying = true;
+      }
+
+      // ③ 排程：到这一步才需要后端。最多 maxLead 块在飞，其余继续合成
+      if (this.stopped) break;
       const player = await this.resolvePlayer();
-      // 已合成未播的块上限：多留一块，让"下一块"永远在播完前就绪
-      const bufferLimit = player.maxLead + 1;
-      while (!this.stopped && (this.blocks.length > 0 || this.waiting.length > 0 || inflight.length > 0)) {
-        // ① 合成：先落成音频，暂不排程
-        while (!this.stopped && this.blocks.length > 0 && this.waiting.length < bufferLimit) {
-          const text = this.blocks.shift() as string;
-          let url: string;
-          try {
-            url = await this.synth(text);
-          } catch (error) {
-            this.callbacks.onError?.(error instanceof Error ? error.message : String(error));
-            continue;
-          }
-          if (this.stopped) {
+      while (!this.stopped && this.waiting.length > 0 && inflight.length < player.maxLead) {
+        const item = this.waiting.shift() as WaitingBlock;
+        this.waitingChars -= item.text.length;
+        let clip: ScheduledClip;
+        try {
+          clip = await player.schedule(item.url, this.gapFor(item.text));
+        } catch (error) {
+          this.callbacks.onError?.(error instanceof Error ? error.message : String(error));
+          continue;
+        }
+        this.scheduledCount += 1;
+        this.playing += 1;
+        this.callbacks.onSpeakingChange?.(true);
+        inflight.push({ text: item.text, clip });
+      }
+
+      if (inflight.length === 0) {
+        if (this.blocks.length === 0 && this.waiting.length === 0) break;
+        continue;
+      }
+      // ④ 等最早排的那块播完再记账，后面的仍在时间轴上继续排
+      const head = inflight.shift() as InflightClip;
+      const outcome = await head.clip.done;
+      this.playing = Math.max(0, this.playing - 1);
+      this.settleClip(head.text, outcome);
+    }
+  }
+
+  /**
+   * 流式路径：生产者-消费者
+   *
+   * 与整块路径的区别只有一件——**合成任务不再被 await 卡在循环里**：
+   * `streamSynth` 每吐出一块就 push 进 waiting 并 notify，消费侧只要在
+   * 时间轴上还有空位就立刻排程。于是"点下去到第一个音"只等第一块生成，
+   * 而不是等整段（实测 1.92s → 0.39s）。
+   *
+   * 顺序保证：同一时刻只跑一个块的流式合成，块按文本顺序启动；块内 chunk
+   * 按到达顺序 push。所以时间轴顺序永远等于原文顺序。
+   *
+   * 诚实降级：流式请求失败或返回 0 块（服务端不支持、开关关闭），把该块
+   * 文本转交整块 `synth()` 重试，**不报错、不哑**；只有整块也失败才回调错误。
+   */
+  private async drainStreaming(): Promise<void> {
+    const streamSynth = this.streamSynth;
+    if (streamSynth === null) return;
+    const abort = new AbortController();
+    this.streamAbort = abort;
+    const gen = this.generation;
+    const alive = (): boolean => !this.stopped && this.generation === gen;
+    const inflight: InflightClip[] = [];
+    /** 流式没走通、待整块重试的文本 */
+    const fallback: string[] = [];
+    // 流式块比整块小得多（实测 0.8s/块），领先窗口放宽一点才吃得下
+    // 生成比播放快 4 倍带来的块洪峰；上限仍有限，避免一次排到几十秒之后。
+    const bufferLimit = Math.max(8, this.player.maxLead * 3);
+
+    /** 启动一个块的流式合成（后台跑，不阻塞消费循环） */
+    const startBlock = (text: string): void => {
+      this.activeSynth += 1;
+      void streamSynth(
+        text,
+        (url, index) => {
+          if (!alive()) {
             URL.revokeObjectURL(url);
-            break;
+            return;
           }
-          this.waiting.push({ text, url });
+          this.waiting.push({ text: index === 0 ? text : "", url, continuous: true });
+          if (index === 0) this.waitingChars += text.length;
+          this.notify();
+        },
+        abort.signal
+      ).then(
+        (count) => {
+          this.activeSynth = Math.max(0, this.activeSynth - 1);
+          // 0 块 = 这条路本次不走（引擎不支持 / 用户关了开关）：静默回退整块
+          if (alive() && count === 0) fallback.push(text);
+          this.notify();
+        },
+        (error: unknown) => {
+          this.activeSynth = Math.max(0, this.activeSynth - 1);
+          if (alive() && !abort.signal.aborted) {
+            const reason = error instanceof Error ? error.message : String(error);
+            this.callbacks.onNotice?.(`流式合成不可用（${reason}），已回退整块合成`);
+            fallback.push(text);
+          }
+          this.notify();
+        }
+      );
+    };
+
+    /** 整块兜底任务同样后台跑，不能把消费循环卡住 */
+    const startFallback = (text: string): void => {
+      this.activeSynth += 1;
+      void this.synth(text).then(
+        (url) => {
+          this.activeSynth = Math.max(0, this.activeSynth - 1);
+          if (!alive()) {
+            URL.revokeObjectURL(url);
+            return;
+          }
+          this.waiting.push({ text, url, continuous: false });
           this.waitingChars += text.length;
+          this.notify();
+        },
+        (error: unknown) => {
+          this.activeSynth = Math.max(0, this.activeSynth - 1);
+          if (alive()) this.callbacks.onError?.(error instanceof Error ? error.message : String(error));
+          this.notify();
         }
-        if (this.stopped) break;
+      );
+    };
 
-        // ② 开播门槛：攒够字数或流已结束才进时间轴。
-        //    不到门槛就退出循环，等下一句 enqueue 再进来（已合成的不浪费）
-        if (!this.startedPlaying) {
-          if (this.waiting.length === 0) break;
-          if (this.waitingChars < this.warmupChars && !this.endOfStream) break;
-          this.startedPlaying = true;
+    while (alive()) {
+      // ① 先把流式失败的块转成整块请求（优先级高于新块，避免顺序错乱）
+      while (fallback.length > 0 && this.waiting.length < bufferLimit) {
+        startFallback(fallback.shift() as string);
+      }
+
+      // ② 启动下一个块的流式合成。一次只跑一个块：块间顺序才有保证。
+      if (this.activeSynth === 0 && this.blocks.length > 0 && this.waiting.length < bufferLimit) {
+        startBlock(this.blocks.shift() as string);
+      }
+
+      // ③ 开播门槛：首块的第一片音频到了就开播，不必等这一块全部生成完
+      if (!this.startedPlaying) {
+        if (this.waiting.length === 0 || (this.waitingChars < this.warmupChars && !this.endOfStream)) {
+          // 门槛未到：等下一片音频 / 下一句 / flush
+          if (this.hasNoPendingWork(inflight, fallback, this.blocks)) break;
+          await this.waitForChange();
+          this.cancelWake();
+          continue;
         }
+        this.startedPlaying = true;
+      }
 
-        // ③ 排程：最多 maxLead 块在飞，其余继续合成
-        while (!this.stopped && this.waiting.length > 0 && inflight.length < player.maxLead) {
+      // ④ 消费：能排多少排多少，连续块之间不留任何停顿
+      if (this.waiting.length > 0 && inflight.length < this.player.maxLead) {
+        const player = await this.resolvePlayer();
+        while (alive() && this.waiting.length > 0 && inflight.length < player.maxLead) {
           const item = this.waiting.shift() as WaitingBlock;
           this.waitingChars -= item.text.length;
           let clip: ScheduledClip;
           try {
-            clip = await player.schedule(item.url, this.gapFor(item.text));
+            clip = await player.schedule(item.url, item.continuous ? 0 : this.gapFor(item.text), {
+              continuous: item.continuous,
+            });
           } catch (error) {
             this.callbacks.onError?.(error instanceof Error ? error.message : String(error));
             continue;
@@ -405,26 +650,82 @@ export class SpeechQueue {
           this.callbacks.onSpeakingChange?.(true);
           inflight.push({ text: item.text, clip });
         }
-
-        if (inflight.length === 0) {
-          if (this.blocks.length === 0 && this.waiting.length === 0) break;
-          continue;
-        }
-        // ④ 等最早排的那块播完再记账，后面的仍在时间轴上继续排
-        const head = inflight.shift() as InflightClip;
-        const outcome = await head.clip.done;
-        this.playing = Math.max(0, this.playing - 1);
-        this.settleClip(head.text, outcome);
       }
-    } catch (error) {
-      this.callbacks.onError?.(error instanceof Error ? error.message : String(error));
-    } finally {
-      this.playing = 0;
-      this.running = false;
-      // 无条件回落：stop() 已经发过一次 false，重复发是幂等的；而漏发
-      // 会让界面一直停在"正在播报"
-      this.callbacks.onSpeakingChange?.(false);
+
+      // ⑤ 收工判定：全都处理完才退出；流未结束时也要退出，等下一句 enqueue
+      if (this.hasNoPendingWork(inflight, fallback, this.blocks)) break;
+
+      // ⑥ 等待两种事件里先到的那个：最早那块播完，或队列有新进展。
+      //    只等 clip.done 会在"生成比播放慢"时堵住新块的启动，只等 notify
+      //    又会在"生成比播放快"时空转——必须 race。
+      if (inflight.length > 0) {
+        const head = inflight[0];
+        // 用对象包一层：赋值发生在回调里，TS 的控制流分析容易把裸 let
+        // 误判成"永远是 null"，包成属性就不会被收窄
+        const state: { outcome: PlayOutcome | null } = { outcome: null };
+        const tracked = head.clip.done.then((value) => {
+          state.outcome = value;
+          return value;
+        });
+        await Promise.race([tracked, this.waitForChange()]);
+        this.cancelWake();
+        if (state.outcome !== null) {
+          inflight.shift();
+          this.playing = Math.max(0, this.playing - 1);
+          this.settleClip(head.text, state.outcome);
+        }
+      } else {
+        await this.waitForChange();
+        this.cancelWake();
+      }
     }
+  }
+
+  /** 是否还有任何未处理的工作（收工判定） */
+  private hasNoPendingWork(
+    inflight: readonly InflightClip[],
+    fallback: readonly string[],
+    blocks: readonly string[]
+  ): boolean {
+    return (
+      inflight.length === 0 &&
+      fallback.length === 0 &&
+      blocks.length === 0 &&
+      this.waiting.length === 0 &&
+      this.activeSynth === 0
+    );
+  }
+
+  /** 唤醒正在等待队列变化的消费者 */
+  private notify(): void {
+    if (this.wake !== null) {
+      const resolve = this.wake;
+      this.wake = null;
+      resolve();
+    } else {
+      this.wakePending = true;
+    }
+  }
+
+  /** 等一次队列变化（chunk 到达 / 合成完成 / enqueue / flush / stop） */
+  private async waitForChange(): Promise<void> {
+    if (this.wakePending) {
+      this.wakePending = false;
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      this.wake = resolve;
+    });
+  }
+
+  /** 取消挂起的等待（race 结束或 stop 时必须调，别留悬挂 promise） */
+  private cancelWake(): void {
+    if (this.wake !== null) {
+      const resolve = this.wake;
+      this.wake = null;
+      resolve();
+    }
+    this.wakePending = false;
   }
 
   /**

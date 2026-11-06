@@ -60,7 +60,7 @@ import {
   handlePutSoulConfig,
   handleRememberSoul,
 } from "./api/soul-api";
-import { handleVoiceAsr, handleVoiceStatus, handleVoiceTts } from "./api/voice-api";
+import { handleVoiceAsr, handleVoiceStatus, handleVoiceTts, handleVoiceTtsStream } from "./api/voice-api";
 import {
   handleConfirmSedimentation,
   handleDismissSedimentation,
@@ -569,6 +569,10 @@ export async function startWebServer(
       }
       if (pathname === "/api/voice/tts" && req.method === "POST") {
         await handleVoiceTts(req, res, ctx, resolved);
+        return;
+      }
+      if (pathname === "/api/voice/tts/stream" && req.method === "POST") {
+        await handleVoiceTtsStream(req, res, ctx, resolved);
         return;
       }
       if (pathname === "/api/voice/asr" && req.method === "POST") {

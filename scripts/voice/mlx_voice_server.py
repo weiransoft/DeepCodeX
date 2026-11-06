@@ -36,6 +36,7 @@ import hmac
 import io
 import json
 import os
+import struct
 import sys
 import threading
 import time
@@ -105,6 +106,13 @@ MODEL_IDS = {
 DEFAULT_TTS_ENGINE = "qwen3-voicedesign"
 # 合成语言。中文助手固定 zh，避免 auto 在短句上判成英文
 TTS_LANGUAGE = "Chinese"
+
+# 流式分块的目标音频秒数。真机实测（41 字、热态，CustomVoice 1.7B）：
+#   interval=2.0 → 首块 0.378s / 5 块
+#   interval=1.0 → 首块 0.192s / 11 块   ← 默认
+#   interval=0.5 → 首块 0.104s / 21 块
+# 0.5s 首块更快但块数翻倍、解码开销上升；1.0s 是首字延迟与开销的平衡点。
+TTS_STREAM_INTERVAL = 1.0
 # Kokoro 的中文音色（lang_code 'z'）
 KOKORO_VOICE = "zf_xiaobei"
 
@@ -137,6 +145,34 @@ CUSTOMVOICE_SPEAKERS = (
 # 默认音色：vivian 是明亮年轻女声，最接近此前自定义描述里的「少年女性、中音区、利落」
 DEFAULT_CUSTOMVOICE_SPEAKER = "vivian"
 
+# 司南音色预设：配置里写 voice="sinan" 就拿到一整套 (speaker, 风格指令)。
+#
+# 为什么做成预设而不是「配置里分别填 speaker 和 instruct」：
+# 1. 前端 /api/voice/tts 的 voice 字段只有一个值，网关原样转发；
+# 2. 音色底子与风格指令拆开写，改一个字就"听起来不像同一个人"，
+#    而它们本来就必须成对调整。
+#
+# 选 serena 的依据（2026-11-06 同文本 41 字实测，自相关 F0）：
+#   serena  3.82 字/秒  F0 222.2Hz  跨度 94.0Hz
+#   vivian  4.07 字/秒  F0 237.6Hz  跨度 103.7Hz  ← 偏亮的年轻女声
+# 司南要的是成熟、中低音、克制，serena 音区低 15Hz、韵律更稳；慢的那 6%
+# 由「语速稍快」指令与保调变速补回来，不用把音高一起抬上去。
+VOICE_PRESETS: dict[str, tuple[str, str | None]] = {
+    "sinan": (
+        "serena",
+        # 对齐 core 的 DEFAULT_VOICE_DESCRIPTION（成熟女性/中低音/克制不撒娇/
+        # 句尾下沉）；只把「语速平稳」按本轮反馈改成「语速稍快」。
+        "成熟女性，中低音区，语速稍快，吐字清晰，克制不撒娇，句尾下沉",
+    ),
+    # 备选：更亮、更利落的年轻女声，方便用户一句话切回来对比
+    "sinan-bright": ("vivian", "语速稍快，吐字利落，不撒娇，不拖长音"),
+}
+
+# instruct 对韵律的实测影响（同文本，speaker=vivian）：
+#   无指令          4.07 字/秒  F0 237.6Hz  跨度 103.7Hz
+#   「利落稍快」     4.38 字/秒  F0 244.9Hz  跨度  80.5Hz  ← 快 7.6% 且更稳
+# 所以风格指令里显式写「语速稍快」，而不是只靠 speed 参数硬拉。
+
 # CustomVoice 权重的本地目录（ModelScope 下载；hf.co 在本机不可达）
 TTS_CUSTOMVOICE_LOCAL_PATH = "~/.cache/qwen3-tts-customvoice"
 
@@ -167,15 +203,20 @@ def resolve_speaker(voice: str) -> tuple[str, str | None]:
     描述文本（如「少年女性22 岁，中音区，语速正常，吐字清晰」）。两者不能
     混用，所以在这里做一次语义转换：
 
+    - 命中音色预设名（如 `sinan`）→ 取预设里的 (speaker, 风格指令)
     - 命中预置音色名（大小写、空格、连字符不敏感）→ 直接用
     - 否则 → 退回默认音色，原描述改当 `instruct`（1.7B 支持情感/风格指令）
       这样「语速正常、吐字清晰、利落」这类风格要求还能保留一部分
 
-    @param voice 音色名或音色描述
+    @param voice 音色预设名、预置音色名或音色描述
     @returns (speaker, instruct)
     """
     text = (voice or "").strip()
     key = text.lower().replace("-", "_").replace(" ", "_")
+    if key.replace("_", "-") in VOICE_PRESETS:
+        return VOICE_PRESETS[key.replace("_", "-")]
+    if key in VOICE_PRESETS:
+        return VOICE_PRESETS[key]
     if key in CUSTOMVOICE_SPEAKERS:
         return key, None
     return DEFAULT_CUSTOMVOICE_SPEAKER, (text or None)
@@ -531,6 +572,55 @@ class TtsEngine:
         with self._lock:
             self._load(engine)
 
+    def iter_stream(
+        self, text: str, engine: str, voice: str, speed: float, interval: float
+    ) -> "Any":
+        """
+        流式合成：边生成边 yield **独立的完整 WAV 字节**
+
+        为什么每个 chunk 单独封 WAV：浏览器 `decodeAudioData` 需要完整容器，
+        给一段裸 PCM 它无法解码。独立 WAV 让前端收到一块就能立刻解码、排进
+        AudioContext 时间轴，不必等整段生成完。
+
+        锁必须覆盖整个生成过程（生成器被消费多久就持有多久）：MLX 的计算图
+        与模型状态不是线程安全的，另一个请求插进来会串音或崩。
+
+        @param text 待合成文本
+        @param engine 引擎（目前只有 CustomVoice 支持流式）
+        @param voice 音色预设 / 预置名
+        @param speed 语速（对每个 chunk 做保调变速）
+        @param interval 每个 chunk 的目标音频秒数（实测 1.0s → 首块 0.19s）
+        @yields 单块 WAV 字节
+        """
+        import numpy as np
+
+        if engine != "qwen3-customvoice":
+            # 其它引擎没有 stream 参数：一次性生成完再 yield，语义仍正确，
+            # 只是拿不到流式收益。不静默回落，日志里会写明。
+            audio, _, _ = self.synthesize(text, engine, voice, speed)
+            yield audio
+            return
+
+        with self._lock:
+            model = self._load(engine)
+            temperature = prepare_sampling(voice)
+            max_tokens = max_tokens_for(text)
+            speaker, instruct = resolve_speaker(voice)
+            for chunk in model.generate_custom_voice(
+                text=text,
+                speaker=speaker,
+                language=TTS_LANGUAGE,
+                instruct=instruct,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+                streaming_interval=interval,
+            ):
+                samples = np.asarray(chunk.audio, dtype=np.float32).reshape(-1)
+                if speed != 1.0 and speed > 0:
+                    samples = time_stretch_wsola(samples, speed)
+                yield encode_wav_bytes(samples, int(chunk.sample_rate))
+
     def synthesize(self, text: str, engine: str, voice: str, speed: float) -> tuple[bytes, str, str]:
         """
         合成一段语音。
@@ -610,18 +700,84 @@ class TtsEngine:
             audio = np.concatenate([np.array(c.audio, dtype=np.float32).reshape(-1) for c in chunks])
             rate = int(chunks[0].sample_rate)
 
-        # Qwen3-TTS 的 generate_* 没有 speed 参数，只能用重采样变速。
-        # 代价是音高跟着变（像磁带快进），对语音助手的 0.8~1.3 倍区间
-        # 听感可接受；kokoro 走原生 speed，不做这一步。
+        # Qwen3-TTS 的 generate_* 没有 speed 参数，只能在波形层变速。
+        # 以前用 np.interp 重采样，音高跟着速度一起变（磁带快进），实测
+        # speed=1.25 让 F0 从 237.6Hz 升到 279.1Hz。改用 WSOLA 保调变速：
+        # 速度变了、音色底子不变。kokoro 有原生 speed，不做这一步。
         if not native_speed and speed != 1.0 and speed > 0:
-            target = max(1, int(len(audio) / speed))
-            audio = np.interp(
-                np.linspace(0, len(audio), target, endpoint=False),
-                np.arange(len(audio)),
-                audio,
-            )
+            audio = time_stretch_wsola(audio, speed)
 
         return encode_wav_bytes(audio, rate), engine, voice_used
+
+
+def time_stretch_wsola(samples: "Any", speed: float) -> "Any":
+    """
+    保持音高的变速（WSOLA：波形相似重叠相加）
+
+    为什么不能用 `np.interp` 重采样：那等价于磁带快进，速度 ×1.25 时基频
+    也 ×1.25。真机实测 vivian 的 F0 中位数 237.6Hz → 279.1Hz，听起来就是
+    「声音变尖、不像同一个人」——用户报的「声音不对」有一半来自这里。
+    Qwen3-TTS 的 generate_* 没有原生 speed 参数，只能在波形层做时间伸缩。
+
+    WSOLA 的做法：把音频切成重叠帧，按目标速度重新摆放；摆放时在理想位置
+    附近搜索与上一帧重叠区最相似的一段，让拼接处波形连续。帧与帧用汉宁窗
+    叠加并归一化，避免音量起伏。对语音比 phase vocoder 更少金属感。
+
+    @param samples float32 一维波形
+    @param speed >1 加速、<1 减速、=1 原样返回
+    @returns 变速后的波形（音高不变）
+    """
+    import numpy as np
+
+    x = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if speed <= 0 or abs(speed - 1.0) < 1e-3 or x.size < 4096:
+        return x
+
+    frame_len = 1024
+    hop_analysis = frame_len // 2
+    # 合成跳距决定速度；钳一下，避免极端速度下重叠区退化成 0
+    hop_synth = max(frame_len // 4, min(3 * frame_len // 4, int(round(hop_analysis / speed))))
+    overlap = frame_len - hop_synth
+    search = frame_len // 4
+    window = np.hanning(frame_len).astype(np.float32)
+
+    out_len = int(round(x.size * hop_synth / hop_analysis)) + frame_len
+    out = np.zeros(out_len, dtype=np.float32)
+    weight = np.zeros(out_len, dtype=np.float32)
+
+    ideal_xpos = 0
+    ypos = 0
+    target: "Any" = None
+    while ideal_xpos + frame_len <= x.size and ypos + frame_len <= out_len:
+        # 搜索必须围绕"理想分析位置"，且 best 只用来取这一帧、不能回写：
+        # 否则每帧 ±search 的偏移会累积，输入被吃掉的速度偏离目标，
+        # 实测 speed=1.25 会把 1s 压成 0.57s（而非 0.8s）。
+        best = ideal_xpos
+        if target is not None and overlap > 0:
+            lo = max(0, ideal_xpos - search)
+            hi = min(x.size - frame_len, ideal_xpos + search)
+            best_score = -2.0
+            for candidate in range(lo, hi + 1, 16):
+                seg = x[candidate : candidate + overlap]
+                if seg.size != target.size:
+                    continue
+                denom = float(np.sqrt(float(np.dot(seg, seg)) * float(np.dot(target, target))) + 1e-8)
+                score = float(np.dot(seg, target) / denom)
+                if score > best_score:
+                    best_score, best = score, candidate
+        frame = x[best : best + frame_len]
+        out[ypos : ypos + frame_len] += frame * window
+        weight[ypos : ypos + frame_len] += window
+        if overlap > 0:
+            target = frame[hop_synth:]
+        ideal_xpos += hop_analysis
+        ypos += hop_synth
+
+    valid = weight > 1e-3
+    out[valid] /= weight[valid]
+    if not bool(valid.any()):
+        return x
+    return out[: int(np.flatnonzero(valid)[-1]) + 1]
 
 
 def encode_wav_bytes(samples: "Any", sample_rate: int) -> bytes:
@@ -896,6 +1052,11 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/tts":
                 self._handle_tts()
                 return
+            if self.path == "/tts/stream":
+                # 流式端点自己管连接与异常：头已经发出去之后再走外层
+                # `_send_json(500)` 会把 JSON 混进二进制流里，客户端解析必炸
+                self._handle_tts_stream()
+                return
             if self.path == "/asr":
                 self._handle_asr()
                 return
@@ -950,6 +1111,68 @@ class Handler(BaseHTTPRequestHandler):
             # 客户端先断了（典型是 Node 网关 60s 超时）：这不是 sidecar 故障，
             # 打一行就够，堆栈只会淹没真正的错误
             sys.stderr.write(f"[voice] tts 客户端已断开，丢弃 {len(audio) // 1024}KB 音频\n")
+
+    def _handle_tts_stream(self) -> None:
+        """
+        POST /tts/stream → 分块音频流（异步流式生成）
+
+        线上格式：`[4B 大端长度][独立 WAV 字节]` 重复 N 次，直到连接关闭。
+        用 `Connection: close` 而不是 HTTP chunked：Handler 是 HTTP/1.0，
+        改 protocol_version 会影响所有既有端点；close-delimited 对 Node fetch
+        的 `response.body` 一样是边到边读。
+
+        首块延迟实测（41 字、热态）：整块模式 1.821s → 流式 interval=1.0
+        **0.192s**，总生成耗时几乎不变（1.83s → 1.87s）。
+        """
+        payload = json.loads(self._read_body() or b"{}")
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            self._send_json(400, {"code": "EMPTY_TEXT", "reason": "text 不能为空"})
+            return
+        engine = str(payload.get("engine") or configured_engine())
+        voice = str(payload.get("voice") or "")
+        try:
+            speed = float(payload.get("speed") or 1.0)
+            interval = float(payload.get("interval") or TTS_STREAM_INTERVAL)
+        except (TypeError, ValueError):
+            speed, interval = 1.0, TTS_STREAM_INTERVAL
+        speed = min(2.0, max(0.5, speed))
+        interval = min(4.0, max(0.3, interval))
+
+        speaker = resolve_speaker(voice)[0]
+        started = time.time()
+        first_at: float | None = None
+        count = 0
+        total_bytes = 0
+        self.close_connection = True
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Connection", "close")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Tts-Engine", engine)
+            self.send_header("X-Tts-Voice", urllib.parse.quote(speaker))
+            self.send_header("X-Stream-Interval", str(interval))
+            self.end_headers()
+            for wav in self.tts.iter_stream(text, engine, voice, speed, interval):
+                if first_at is None:
+                    first_at = time.time() - started
+                blob = struct.pack(">I", len(wav)) + wav
+                self.wfile.write(blob)
+                self.wfile.flush()  # 不 flush 就被缓冲，等于没流式
+                count += 1
+                total_bytes += len(wav)
+            sys.stderr.write(
+                f"[voice] tts-stream {len(text)}字 engine={engine} voice={speaker} "
+                f"chunks={count} 首块={int((first_at or 0)*1000)}ms "
+                f"audio={total_bytes//1024}KB {int((time.time()-started)*1000)}ms\n"
+            )
+        except (BrokenPipeError, ConnectionResetError):
+            sys.stderr.write(f"[voice] tts-stream 客户端已断开，已发 {count} 块\n")
+        except Exception as exc:
+            # 头已经发出，不能再写 JSON 错误体：只记日志，由连接结束告诉客户端
+            traceback.print_exc()
+            sys.stderr.write(f"[voice] tts-stream 生成失败：{exc}\n")
 
     def _handle_asr(self) -> None:
         audio = self._read_body()

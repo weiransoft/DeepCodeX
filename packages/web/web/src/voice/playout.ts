@@ -41,6 +41,23 @@ export interface ScheduledClip {
 }
 
 /**
+ * 排程选项
+ *
+ * 流式分块和整句音频是**两种不同性质的音频**，不能套同一套处理：
+ * - 整句：模型在首尾加了机械 padding，需要裁掉、补 60ms 尾音、按标点加停顿；
+ * - 流式块：同一段音频被按时间切开，块内静音是模型本来生成的语义停顿，
+ *   块边界本来就是连续的，裁了反而会吞字、加停顿会听出一串吞吐。
+ *
+ * `continuous: true` 就是「按采样点直接接在前一块后面」：不裁、不加 gap、
+ * 不补尾音。实测 41 字 / speed 1.2 时 11 块合计 8.399s ≈ 整块 8.333s，
+ * 边界样本跳变中位数仅 2.8% 峰值，直接相接与整块等价。
+ */
+export interface ScheduleOptions {
+  /** 是否作为流式连续块排程（默认 false = 整句音频） */
+  readonly continuous?: boolean;
+}
+
+/**
  * 播报后端
  *
  * `speechQueue` 只依赖这个接口，不关心是 AudioBuffer 还是元素。
@@ -67,9 +84,10 @@ export interface ClipPlayer {
    * **url 的所有权转移给后端**：实现方负责 `URL.revokeObjectURL`。
    *
    * @param url 音频 objectURL
-   * @param gapBeforeMs 这句之前要留的停顿（毫秒）
+   * @param gapBeforeMs 这句之前要留的停顿（毫秒）；`continuous` 时忽略
+   * @param options 排程选项（流式连续块见 `ScheduleOptions`）
    */
-  schedule(url: string, gapBeforeMs: number): Promise<ScheduledClip>;
+  schedule(url: string, gapBeforeMs: number, options?: ScheduleOptions): Promise<ScheduledClip>;
 
   /** 立刻停掉所有正在播/已排程的音频 */
   stop(): void;
@@ -117,6 +135,17 @@ export const GAP_FIRST_MS = 0;
 
 /** Web Audio 领先排程句数 */
 export const WEB_AUDIO_MAX_LEAD = 3;
+
+/**
+ * 等待 `AudioContext.resume()` 的上限（毫秒）
+ *
+ * 自动播报没有用户手势时，WebKit/Chromium 的 `resume()` **可能既不 resolve
+ * 也不 reject，永久 pending**（不是"被拒绝"，注释里以前写错了）。没有超时
+ * 的话 `prepare()` 永不返回，`SpeechQueue.drain()` 会卡在第一步，连一次
+ * TTS 请求都发不出来——表现就是"完全没有声音、也不报错"。
+ * 超时后按"这一路不可用"降级到元素播放，宁可损失无缝也要出声。
+ */
+export const RESUME_TIMEOUT_MS = 1200;
 
 /** 排程到"现在"的最小提前量（秒）：给 ctx 一点调度余量，避免 start 落在过去 */
 const MIN_START_LEAD_S = 0.02;
@@ -205,13 +234,57 @@ export class WebAudioClipPlayer implements ClipPlayer {
 
   /**
    * @param createContext 上下文工厂（测试注入；默认按环境自动创建）
+   * @param resumeTimeoutMs 等待 resume 的上限（测试可设很小的值）
    */
-  constructor(private readonly createContext?: () => AudioContext) {}
+  constructor(
+    private readonly createContext?: () => AudioContext,
+    private readonly resumeTimeoutMs: number = RESUME_TIMEOUT_MS
+  ) {}
+
+  /**
+   * 给 `resume()` 套一层超时
+   *
+   * 不能简单用 Promise.race 就完事：resume 晚到时还要忽略它的结果，
+   * 否则降级后一个迟来的 resolve 会把状态搅乱。
+   *
+   * @param ctx 已挂起的上下文
+   * @returns resume 完成；超时抛 SinkUnavailableError
+   */
+  private resumeWithTimeout(ctx: AudioContext): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const finish = (fn: () => void): void => {
+        if (settled) return;
+        settled = true;
+        if (timer !== null) clearTimeout(timer);
+        fn();
+      };
+      timer = setTimeout(() => {
+        finish(() =>
+          reject(
+            new SinkUnavailableError(
+              `AudioContext.resume() ${this.resumeTimeoutMs}ms 内未返回（多半缺少用户手势），切回兼容播放`
+            )
+          )
+        );
+      }, this.resumeTimeoutMs);
+      try {
+        void ctx.resume().then(
+          () => finish(resolve),
+          (error: unknown) => finish(() => reject(error))
+        );
+      } catch (error) {
+        finish(() => reject(error));
+      }
+    });
+  }
 
   /**
    * 建上下文并确认它真的在跑
    *
-   * `resume()` 在没有用户手势时会被拒绝——这正是要降级的场景。
+   * `resume()` 在没有用户手势时可能被拒绝，**也可能永久挂起**；两种情况
+   * 都要在有限时间内给出结论，让调用方降级。
    */
   async prepare(): Promise<void> {
     if (this.ctx === null) {
@@ -234,8 +307,9 @@ export class WebAudioClipPlayer implements ClipPlayer {
     if (ctx.state === "closed") throw new SinkUnavailableError("AudioContext 已关闭");
     if (ctx.state === "suspended") {
       try {
-        await ctx.resume();
+        await this.resumeWithTimeout(ctx);
       } catch (error) {
+        if (error instanceof SinkUnavailableError) throw error;
         throw new SinkUnavailableError(
           `AudioContext 无法恢复（可能缺少用户手势）：${error instanceof Error ? error.message : String(error)}`
         );
@@ -248,12 +322,14 @@ export class WebAudioClipPlayer implements ClipPlayer {
    * 排程一句
    *
    * @param url 音频 objectURL（本方法负责回收）
-   * @param gapBeforeMs 句前停顿
+   * @param gapBeforeMs 句前停顿（连续块忽略）
+   * @param options 连续块不裁静音、不加停顿、不补尾音
    * @returns 句柄
    */
-  async schedule(url: string, gapBeforeMs: number): Promise<ScheduledClip> {
+  async schedule(url: string, gapBeforeMs: number, options?: ScheduleOptions): Promise<ScheduledClip> {
     const ctx = this.ctx;
     if (ctx === null) throw new SinkUnavailableError("AudioContext 未初始化");
+    const continuous = options?.continuous === true;
 
     let buffer: AudioBuffer;
     try {
@@ -265,21 +341,29 @@ export class WebAudioClipPlayer implements ClipPlayer {
       URL.revokeObjectURL(url);
     }
 
-    const samples = buffer.getChannelData(0);
-    const bounds = findSpeechBounds(samples);
-    if (bounds.end <= bounds.start) throw new Error("语音音频里没有人声，已跳过");
-
     const sampleRate = buffer.sampleRate;
-    const offset = bounds.start / sampleRate;
-    const keepTail = TAIL_KEEP_MS / 1000;
-    const duration = Math.min(buffer.duration - offset, (bounds.end - bounds.start) / sampleRate + keepTail);
+    let offset = 0;
+    let duration = buffer.duration;
+    if (continuous) {
+      // 流式块首尾是同一条波形的切点：块内的"静音"是模型生成的语义停顿，
+      // 用 findSpeechBounds 裁会把停顿和字一起吞掉；尾音也不能补，否则
+      // 11 块就多出 660ms 空转。直接整块接在 cursor 上。
+      if (duration <= 0) throw new Error("流式音频块为空，已跳过");
+    } else {
+      const samples = buffer.getChannelData(0);
+      const bounds = findSpeechBounds(samples);
+      if (bounds.end <= bounds.start) throw new Error("语音音频里没有人声，已跳过");
+      offset = bounds.start / sampleRate;
+      const keepTail = TAIL_KEEP_MS / 1000;
+      duration = Math.min(buffer.duration - offset, (bounds.end - bounds.start) / sampleRate + keepTail);
+    }
 
     const generation = this.generation;
     const now = ctx.currentTime;
     // cursor 落后于 now（合成或解码拖慢了）时不能把当次排到过去，
     // 否则 start 会被钳到"立刻"，缝隙就暴露出来——只能从 now 起算
     const base = Math.max(now + MIN_START_LEAD_S, this.cursor);
-    const when = base + gapBeforeMs / 1000;
+    const when = base + (continuous ? 0 : gapBeforeMs / 1000);
     const endAt = when + duration;
     this.cursor = endAt;
 
@@ -376,9 +460,10 @@ export class AudioElementClipPlayer implements ClipPlayer {
    *
    * @param url 音频 objectURL（本方法负责回收）
    * @param _gapBeforeMs 忽略：元素播放无法精确控制停顿
+   * @param _options 忽略：降级后端做不到采样级拼接，逐块播仍保证出声
    * @returns 句柄
    */
-  schedule(url: string, _gapBeforeMs: number): Promise<ScheduledClip> {
+  schedule(url: string, _gapBeforeMs: number, _options?: ScheduleOptions): Promise<ScheduledClip> {
     const audio = this.createAudio(url);
     this.audio = audio;
 

@@ -50,6 +50,7 @@ import {
   fetchSoulConfig,
   fetchVoiceStatus,
   saveSoulConfig,
+  streamSpeech,
   synthesizeSpeech,
   transcribeAudio,
   type VoiceStatus,
@@ -59,7 +60,7 @@ import { SpeechQueue } from "./player";
 import { SentenceStream } from "./sentence";
 import { scanVoiceDirective, settleVoiceDirective } from "./directive";
 import { TurnDirective } from "./turn-directive";
-import { defaultHandsFree, readHandsFree, subscribeHandsFree, writeHandsFree } from "./preference";
+import { defaultHandsFree, readHandsFree, readStreamPlayback, subscribeHandsFree, writeHandsFree } from "./preference";
 import { notifySoulConfigChanged, subscribeSoulConfigChanged } from "./config-events";
 import { WakeListener } from "./wake-listener";
 import { SILENCE_PEAK, isSignalAbsent, nextSmoothedLevel, quantizeLevel } from "./level";
@@ -312,22 +313,24 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   /** 懒建队列（合成函数依赖后端，但只建一次） */
   const queue = useCallback((): SpeechQueue => {
     if (queueRef.current === null) {
+      /**
+       * 本轮语音指令覆盖（voice / engine / speed）
+       *
+       * 读本轮快照而不是跨轮默认：见 TurnDirective 的说明。整块与流式两条
+       * 路径必须共用它，否则同一回复里关掉流式会换音色。
+       */
+      const voiceOverride = () => {
+        const active = turnDirective.current.current();
+        return active === null
+          ? undefined
+          : {
+              ...(active.voice !== undefined ? { voice: active.voice } : {}),
+              ...(active.engine !== undefined ? { engine: active.engine } : {}),
+              ...(active.speed !== undefined ? { speed: active.speed } : {}),
+            };
+      };
       queueRef.current = new SpeechQueue(
-        (text) => {
-          // 读本轮快照而不是跨轮默认：见 TurnDirective 的说明
-          const active = turnDirective.current.current();
-          // 指令里的 voice / engine / speed 覆盖配置值；没有指令时走服务端配置
-          return synthesizeSpeech(
-            text,
-            active === null
-              ? undefined
-              : {
-                  ...(active.voice !== undefined ? { voice: active.voice } : {}),
-                  ...(active.engine !== undefined ? { engine: active.engine } : {}),
-                  ...(active.speed !== undefined ? { speed: active.speed } : {}),
-                }
-          );
-        },
+        (text) => synthesizeSpeech(text, voiceOverride()),
         {
           onSpeakingChange: (value) => {
             setSpeaking(value);
@@ -353,6 +356,17 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
           },
           onInterrupted: (spokenText) => {
             setLastInterruption({ at: performance.now(), spokenText });
+          },
+        },
+        {
+          /**
+           * 流式合成：模型每解出一小段就交给队列排程，首字延迟从"整段
+           * 生成完"降到"第一块到达"。返回 0 块表示开关关了，队列会静默
+           * 回退整块合成，不需要这里报错。
+           */
+          streamSynth: (text, onChunk, signal) => {
+            if (!readStreamPlayback()) return Promise.resolve(0);
+            return streamSpeech(text, onChunk, voiceOverride(), signal);
           },
         }
       );
@@ -663,13 +677,17 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   const finishFeed = useCallback(() => {
     const stream = streamRef.current;
     streamRef.current = null;
-    if (stream === null) return;
 
     // 本轮到此结束：被打断标记只作用于本轮，下一轮要重新放行。
+    // **必须无条件复位**：feed 被 interruptedRef 拦住时 streamRef 可能一直是
+    // null，若在下面 `stream === null` 处提前 return，标记会永久卡住，
+    // 之后每一轮回复都不播报、连一次 TTS 请求都不发（"完全没有声音"）。
     // 放在这里而不是 feed 开头，是因为被打断后 feed 会一路 return，
     // 永远走不到重置点。
     const interrupted = interruptedRef.current;
     interruptedRef.current = false;
+
+    if (stream === null) return;
 
     let body = lastTextRef.current;
     if (directiveStateRef.current === "unknown") {
@@ -718,6 +736,11 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
    * 2. **关掉时先停音频**——「按了关还在念」是最刺眼的失败；
    * 3. **再落盘**——失败则回滚并报错，不能让界面显示关着而配置还是开。
    *
+   * 重新打开时要清掉 `interruptedRef`：关闭走的是 stopSpeaking()，它会把
+   * 本轮标记为"已打断"。若这之后没有一次完整回复来触发 finishFeed，标记
+   * 会残留，下一轮 feed 全部被拦——表现为开关明明是开、却永远没声音。
+   * 打断只该作用于**本轮**，新的一次开启就是新的一轮。
+   *
    * 落盘成功后广播 `dcx:soul-config-changed`，人设面板与其它用到配置的
    * 地方会各自重读，不会出现两处开关互相打脸。
    */
@@ -725,6 +748,7 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
     (next: boolean) => {
       setSpeakRepliesState(next);
       if (!next) stopSpeaking();
+      else interruptedRef.current = false;
       saveSoulConfig({ voice: { speakReplies: next } })
         .then(() => notifySoulConfigChanged())
         .catch((error: unknown) => {

@@ -33,7 +33,14 @@ import {
 import { SoulAvatar } from "./SoulAvatar";
 import { AVATAR_MAX_BYTES, readAvatarFile } from "../voice/avatar-file";
 import { notifySoulConfigChanged } from "../voice/config-events";
-import { readHandsFree, subscribeHandsFree, writeHandsFree } from "../voice/preference";
+import {
+  readHandsFree,
+  readStreamPlayback,
+  subscribeHandsFree,
+  subscribeStreamPlayback,
+  writeHandsFree,
+  writeStreamPlayback,
+} from "../voice/preference";
 
 /** 面板状态 */
 type LoadState =
@@ -55,6 +62,9 @@ export function SoulAppearancePane() {
   /** 免按住偏好（本地设置，不走服务端配置：它跟设备走，不跟账号走） */
   const [handsFree, setHandsFree] = useState(() => readHandsFree());
   useEffect(() => subscribeHandsFree(setHandsFree), []);
+  /** 流式播报偏好（同为本地设置；关掉即回到整块合成链路） */
+  const [streamPlayback, setStreamPlayback] = useState(() => readStreamPlayback());
+  useEffect(() => subscribeStreamPlayback(setStreamPlayback), []);
   const [testing, setTesting] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
@@ -420,6 +430,15 @@ export function SoulAppearancePane() {
         <label className="soul-check">
           <input type="checkbox" checked={handsFree} onChange={(event) => writeHandsFree(event.target.checked)} />
           <span>点一下说话，说完自动发送（免按住；关闭后改为点一下开始、再点一下结束）</span>
+        </label>
+
+        <label className="soul-check">
+          <input
+            type="checkbox"
+            checked={streamPlayback}
+            onChange={(event) => writeStreamPlayback(event.target.checked)}
+          />
+          <span>流式播报（边生成边出声，首字延迟约 0.4 秒；关闭后等整句生成完再播）</span>
         </label>
 
         <label className="soul-check">

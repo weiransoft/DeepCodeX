@@ -336,3 +336,74 @@ test("T6 降级：Web Audio 恢复不了时切到元素播放，不是哑掉", a
   fallback.finish(0);
   await waitFor(() => states[states.length - 1] === false);
 });
+
+/**
+ * resume 永不 settle 的上下文
+ *
+ * 这是真机上的坑：WebKit/Chromium 在没有用户手势时 `resume()` 可能既不
+ * resolve 也不 reject，而是**永久 pending**。之前的 `prepare()` 直接 await
+ * 它，于是整个播报队列卡在第一步，一次 TTS 请求都发不出去。
+ */
+class HangingAudioContext extends FakeAudioContext {
+  constructor() {
+    super();
+    this.state = "suspended";
+  }
+
+  override resume(): Promise<void> {
+    return new Promise<void>(() => undefined);
+  }
+}
+
+test("T7 resume 永久挂起时，prepare 必须在有限时间内判定不可用", async () => {
+  const ctx = new HangingAudioContext();
+  const player = new WebAudioClipPlayer(() => ctx as unknown as AudioContext, 20);
+  const started = Date.now();
+
+  await assert.rejects(
+    () => player.prepare(),
+    (error: unknown) => error instanceof SinkUnavailableError && /未返回/.test((error as Error).message),
+    "超时要抛 SinkUnavailableError，调用方才会降级"
+  );
+  assert.ok(Date.now() - started < 500, `不能无限等下去，实际 ${Date.now() - started}ms`);
+});
+
+test("T8 播放后端挂起也不能挡住合成：超时后降级，声音照常出", async () => {
+  const restore = stubMediaApis();
+  try {
+    const ctx = new HangingAudioContext();
+    const hung = new WebAudioClipPlayer(() => ctx as unknown as AudioContext, 20);
+    const fallback = new GatedPlayer();
+    const synthTexts: string[] = [];
+    const notices: string[] = [];
+    const queue = new SpeechQueue(
+      async (text) => {
+        synthTexts.push(text);
+        return `blob:${text}`;
+      },
+      {
+        onNotice: (m) => notices.push(m),
+        onError: (m) => {
+          throw new Error(`不该报错：${m}`);
+        },
+      },
+      { player: hung, createFallbackPlayer: () => fallback, firstBlockChars: 1, blockChars: 1 }
+    );
+
+    queue.enqueue("一句要播的话。");
+    queue.flush();
+
+    // 关键断言：合成先发生，不依赖播放后端准备完成
+    await waitFor(() => synthTexts.length === 1);
+    assert.equal(synthTexts[0], "一句要播的话。", "后端挂住也要照常发 TTS 请求");
+    // 超时后走降级，最终由元素后端排程出声
+    await waitFor(() => fallback.scheduled.length === 1);
+    assert.ok(
+      notices.some((m) => m.includes("已自动切回兼容播放")),
+      `降级要留提示，实际 ${JSON.stringify(notices)}`
+    );
+    fallback.finish(0);
+  } finally {
+    restore();
+  }
+});

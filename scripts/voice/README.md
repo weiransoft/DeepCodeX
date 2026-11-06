@@ -50,6 +50,7 @@ scripts/voice/.venv/bin/python scripts/voice/mlx_voice_server.py --selftest
 |---|---|---|
 | GET | `/health` | 依赖与就绪情况，**不加载模型**，秒回 |
 | POST | `/tts` | `{text, engine, voice, speed}` → `audio/wav` |
+| POST | `/tts/stream` | 同上 + `interval?` → **流式** `[4B 大端长度][独立 WAV]` × N |
 | POST | `/asr` | 原始 WAV 字节 → `{text, durationMs, model, backend}` |
 | POST | `/warmup` | 探测依赖（启动时已自动后台预加载配置里的引擎） |
 
@@ -86,6 +87,90 @@ sidecar 侧同时出现一串 `BrokenPipeError`（合成完了，客户端已经
 
 另外启动时会在后台线程预热配置里的引擎：冷加载实测 13s，不预热就落在用户
 第一句上，叠上队列排队很容易啃掉 60s 预算。预热后首句合成约 **200ms**。
+
+## 司南音色预设与语速（2026-11-06 重设）
+
+配置的 `voice.voice` 现在写**预设名**，由 sidecar 的 `VOICE_PRESETS` 展开成
+`(speaker, instruct)`。之所以不把两者拆成两个配置字段：前端 `/api/voice/tts`
+只有一个 `voice` 值，而且音色底子与风格指令必须成对调整。
+
+| 预设 | speaker | 风格指令 |
+|---|---|---|
+| `sinan`（默认） | `serena` | 对齐 core 的「成熟女性、中低音区、克制不撒娇、句尾下沉」，语速改「稍快」 |
+| `sinan-bright` | `vivian` | 更亮、更利落的备选 |
+
+同文本（41 字）实测：
+
+| 组合 | 语速 | F0 中位 |
+|---|---|---|
+| `vivian` / speed 1.0 | 4.07 字/秒 | 237.6Hz |
+| `sinan` / speed 1.0 | 4.10 字/秒 | **213.3Hz**（低 24Hz，更沉稳） |
+| `sinan` / speed 1.2（默认） | **4.92 字/秒** | 222.2Hz |
+
+**`speed` 用 WSOLA 保调变速，不是重采样。** 以前 `np.interp` 让音高跟着速度
+一起变：speed=1.25 时 F0 237.6 → 279.1Hz（+17%），听感是磁带快进、像换了个人。
+WSOLA 用波形相似重叠相加做时间伸缩，纯正弦上速度倍率误差 <1%、F0 完全不变；
+真实语音上 F0 估计波动约 4%。边界用例见 `test_voice_preset.py`。
+
+## 流式生成 `/tts/stream`
+
+`generate_custom_voice(stream=True, streaming_interval=...)` 是**真增量**：每攒够
+`interval × 12.5` 个声学 token 就用 `decoder.streaming_step` 解出一段音频。
+sidecar 把每段独立封成 WAV，用 `[4B 大端长度][WAV]` 逐块 flush 下发；
+网关 `/api/voice/tts/stream` 逐块 pipe，前端 `streamSpeech()` 按长度切分后
+可逐块解码排进时间轴。
+
+真机实测（41 字、热态、CustomVoice 1.7B）：
+
+| 模式 | 首个音频可用 | 总生成耗时 | 音频总长 |
+|---|---|---|---|
+| 整块 `/tts` | **1.90s** | 1.90s | 8.33s |
+| 流式 interval=1.0 | **0.394s** | 1.93s | 8.40s |
+
+即首字延迟降约 5 倍，**总耗时几乎不变**——流式只改善"多久开口"，不会让整段
+生成变快。
+
+绝对值会随 sidecar 负载波动（冷/热、连跑次数），所以又在**桌面端引擎网关上
+做了同批严格对照**：两侧都显式传 `engine=qwen3-customvoice / voice=sinan /
+speed=1.2`，返回字节数完全一致（整块 400034B、流式 403698B），确认音频等价：
+
+| 路径 | 整块首字节 | 流式首字节 | 网关额外开销 |
+|---|---|---|---|
+| 直连 sidecar | 3539ms | 368ms | — |
+| 经 `/api/voice/*` 网关 | 3591ms | **412ms** | 44~52ms |
+
+这一批负载偏高，但**倍数稳定在约 8.7 倍**，且网关逐块 pipe 只多花几十毫秒，
+没有把流式收益吃掉。
+
+### 分块边界能不能直接拼
+
+逐块实测（41 字 / speed 1.2 / interval 1.0）：11 块，每块 0.807s，合计
+**8.399s ≈ 整块 8.333s**；相邻块边界样本跳变中位数 2.8% 峰值、最大 19.4%。
+也就是说流式块**不是带重叠的 OLA 片段，而是同一段音频按时间切开**，块内的大段
+静音是模型本来就生成的语义停顿。
+
+所以播放端用 `ScheduleOptions.continuous` 走另一套规则：**不裁静音、不加标点
+停顿、不补 60ms 尾音**，直接 `start(when, 0, buffer.duration)` 接在上一块的采样
+点上。裁静音会连停顿和字一起吞掉，加 gap 会让 11 块多出数百毫秒空转。整句音频
+仍走原来的 `findSpeechBounds` + 停顿逻辑，两条路径互不干扰（S1 用例锁住）。
+
+### 播放队列已接入（2026-11-06）
+
+`SpeechQueue` 现在是**双路径**：没注入 `streamSynth` 就走经过 589 条用例验证的
+整块链路；注入了走新增的生产者-消费者分支（`drainStreaming()`）。第一片音频
+到达就排程，不必等 `streamSynth` 的 promise resolve（S2 用例锁住"整块生成还没
+结束就已出声"）。
+
+- **开关**：设置 →「形象与声音」→「流式播报」，默认开，存
+  `localStorage["dcx.voice.streamPlayback"]`（`"0"` 关闭）。关掉时 `streamSynth`
+  返回 0 块，队列静默回退整块合成，不报错也不刷提示。
+- **诚实降级**：流式请求失败或返回 0 块 → 该块转交整块 `/tts` 重试；只有整块
+  也失败才回调错误。`AudioContext` 不可用时整条链路降级到元素播放，逐块播
+  会有元素切换开销，但**一定出声**。
+- **打断**：`stop()` 会 abort 掉响应流并递增 generation，迟到的 chunk 回收掉，
+  不会串进新一轮时间轴（S5 用例锁住）。
+
+边界用例：`packages/web/tests/voice-stream.test.ts`（S1~S5）。
 
 ## 默认模型
 
@@ -243,11 +328,15 @@ Design-then-Clone（需要再下一份 Base 权重，本轮未做）。
 让合成与播放并行。回归用例 P7 锁住事件顺序（第二句的合成必须早于第一句的
 `ended`）；把预取挪回原位置时该用例会失败，可以确认它真的测到了这个行为。
 
-**仍然存在的**：每句仍是一个独立 `HTMLAudioElement`，元素切换本身有几十毫秒
-的启动开销。要进一步消掉，需要改成 Web Audio 的 `AudioBufferSourceNode` 按
-采样时间排程（sample-accurate，天然无缝），或者让 sidecar 走流式输出
-（`generate_*` 都支持 `stream=True`，目前用 `list(chunks)` 全量收集，没用上）。
-两者都还没做。
+**后续已补上的两层**（见 `voice/playout.ts` 与上文「流式生成」）：
+
+1. 采样级无缝排程：音频搬进 `AudioContext`，一次解码成 `AudioBuffer`，用
+   `start(when, offset, duration)` 排到上一句结束的采样点上；句首 88ms / 句尾
+   47ms 的机械 padding 用 `findSpeechBounds` 裁掉，停顿改由标点决定而不是模型
+   padding。`AudioContext` 不可用时降级回 `HTMLAudioElement`（有元素切换开销，
+   但一定出声）。
+2. sidecar 流式输出 + 客户端边收边排：不再 `list(chunks)` 全量收集。流式块走
+   `continuous` 规则直接相接，首字延迟 1.92s → 0.39s。
 
 ## 鉴权
 
@@ -323,7 +412,8 @@ sidecar"，照着做也没用（重启后仍然只认桌面那份）。一个服
 写在这里而不是藏在代码注释里，因为每一条都会影响你的实际体验：
 
 1. **`/health` 的 `ready:true` 只代表库可导入**，不代表权重已下载。首次合成仍要等 10~30s。
-2. **token 变更需重启 sidecar**（启动时读取一次，不热重载）。
+2. **鉴权只认本机配置文件里的 token**。sidecar 按 mtime 指纹热重扫，改 token
+   或新增 Web 用户都不用重启；但如果 token 是从别处手填进请求的，会一直 401。
 3. **ASR 只接受 16-bit PCM WAV**。前端已在浏览器侧用 `decodeAudioData` + `encodeWav` 转好，
    所以这条只影响你自己用 curl 调的场景。
 4. **识别语言固定中文**（Qwen3-ASR 传 `Chinese`，whisper 传 `zh`）。中英混说时英文词
@@ -334,11 +424,11 @@ sidecar"，照着做也没用（重启后仍然只认桌面那份）。一个服
    效果会有差异，这不是「选了就一定这样」的确定性控制。
 7. **并发被串行化**。MLX 推理不是线程安全的，所以加了锁：两个人同时说话会排队，
    排队期间第二个请求表现为「慢」而不是「错」。
-8. **语速在 Qwen3-TTS 上是重采样实现的**。它的 `generate_voice_design` /
-   `generate_custom_voice` 没有 `speed` 参数，所以变速靠重采样，音高会跟着变
-   （像磁带快进）。实测 0.8/1.0/1.3 倍的时长比例精确（5.20s / 4.16s / 3.20s），
-   在这个区间听感可接受。Kokoro 走原生 `speed`，不受影响。
-9. **首次加载占内存约 3~4GB**（ASR 约 1GB + VoiceDesign 1.8GB）。
+8. **Qwen3-TTS 没有原生 `speed`，变速在波形上做**。现在是 WSOLA 保调变速
+   （`time_stretch_wsola`），纯正弦倍率误差 <1% 且 F0 不变；早先的 `np.interp`
+   重采样会让音高跟着速度升（speed=1.25 时 +17%，像磁带快进），已弃用。
+   真实语音上 F0 估计波动约 4%。Kokoro 走原生 `speed`，不受影响。
+9. **首次加载占内存约 3~4GB**（ASR 约 1GB + CustomVoice 约 2.9GB）。
    本机 128GB 统一内存足够；8GB 机型不建议同时开两个引擎。
 10. **首次加载约 13s**（权重已缓存），首次下载 1.8GB 视网络而定（本机实测 14.5 分钟）。
 
@@ -348,6 +438,6 @@ sidecar"，照着做也没用（重启后仍然只认桌面那份）。一个服
 |---|---|---|
 | 设置页显示「未就绪」并给出 setup.sh | 依赖没装 | 跑 `setup.sh` |
 | 合成一直转圈（>30s） | 首次下载权重 | 看 sidecar 终端输出，等它下完 |
-| 401 token 不匹配 | sidecar 启动后配置被改过 | 重启 sidecar |
+| 401 token 不匹配 | 请求里的 token 不在任何本机配置中 | 确认引擎读的是哪份 `soul/config.json`；sidecar 按 mtime 热重扫，通常不用重启 |
 | `/tts` 返回 500 且提到 `generate_audio` | mlx-audio 版本布局不同 | 看错误里的候选路径，补一条到 `_resolve_generate` |
 | 识别结果为空 | 录音太短或全是静音 | 前端 VAD 已过滤 <300ms，检查麦克风权限 |
