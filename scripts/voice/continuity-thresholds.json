@@ -1,0 +1,14 @@
+{
+  "_comment": "语音连贯性验收阈值：key 与 summarize_rounds() 输出的指标名一一对应。数值依据见 README「自动化连贯性验收」章节与每次运行的 JSON 报告。",
+  "rate_spread_pct": 6.0,
+  "max_internal_gap_ms": 900.0,
+  "long_gaps_total": 2.0,
+  "stream_batch_duration_delta_pct": 3.0,
+  "boundary_jump_ratio": 3.0,
+  "f0_spread_pct": 25.0,
+  "centroid_spread_pct": 35.0,
+  "same_text_f0_drift_pct": 8.0,
+  "same_text_centroid_drift_pct": 12.0,
+  "ttfa_growth_pct": 60.0,
+  "min_stream_chunks": 2.0
+}

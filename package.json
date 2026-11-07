@@ -30,6 +30,8 @@
     "start": "node scripts/start.js",
     "build-and-start": "npm run build && npm run start",
     "test": "node tests/run-tests.mjs && npm run test --workspaces --if-present",
+    "test:voice:unit": "python3 scripts/voice/test_continuity.py",
+    "test:voice:continuity": "python3 scripts/voice/check_continuity.py",
     "release:version": "node scripts/version.js",
     "prepare:package": "node scripts/prepare-package.js",
     "prepare:vscode": "node scripts/prepare-vscode.js",
