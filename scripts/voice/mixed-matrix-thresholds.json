@@ -1,0 +1,23 @@
+{
+  "_comment": "混合内容×长度矩阵门禁阈值（2026-11-07 第五轮）。先验值来自既有真机事实：全局语速基准 4.1×speed=4.92 等效单元/秒；长文本专项 longtext_probe 单元语速极差 ≤8%、块间 F0 ≤40%、最长静音 ≤900ms、异常长静音 0；流式首片热态 192ms；playout.ts 记录的模型机械静音句首约 88ms、句尾 46~49ms，故相邻块合计约 137ms，给 1.45 倍余量定 200ms。阈值按这些先验设定，不按本次结果倒推；若要放宽必须写明真机依据。块数 <3 的格子没有块间极差，改判与全局基准/全局 F0 中位数的偏差，不拿 spread()=0 伪装通过。流式 continuous 链路的边界跳变恒为 0（边界落在 padding 静音内），无区分度，只作参考指标，硬判据改用块间机械静音。",
+  "global_rate_units_s": 4.92,
+  "rate_units_spread_pct": 8.0,
+  "rate_bias_pct": 15.0,
+  "single_block_rate_bias_pct": 20.0,
+  "block_f0_spread_pct": 40.0,
+  "single_block_f0_bias_pct": 20.0,
+  "max_internal_gap_ms": 900.0,
+  "long_gaps_total": 0.0,
+  "min_nonfirst_units": 10.0,
+  "max_inter_block_silence_ms": 200.0,
+  "ttfa_max_ms": 2000.0,
+  "ttfa_p95_ms": 1500.0,
+  "rtf_max": 1.0,
+  "cross_cell_rate_spread_pct": 12.0,
+  "cross_cell_f0_spread_pct": 25.0,
+  "length_group_rate_spread_pct": 10.0,
+  "length_group_f0_spread_pct": 15.0,
+  "kind_group_rate_spread_pct": 12.0,
+  "kind_group_f0_spread_pct": 15.0,
+  "repeat_f0_spread_pct": 2.0
+}

@@ -364,8 +364,12 @@ def run_one(name: str, text: str) -> dict:
                 "segments": metrics.segments,
             }
         )
-        # 前端在非连续块之间按标点补 gap：首块 0，其余 20/40/80ms
-        gap_ms = 0 if index == 0 else (80 if block.rstrip()[-1:] in "。！？!?" else 20 if block.rstrip()[-1:] in "，、；：,;:" else 40)
+        # 流式主链路：player.ts 的 drainStreaming 对每个 chunk 都传
+        # continuous=true，playout.ts 里 `continuous ? 0 : gapBeforeMs` 让标点
+        # 停顿被忽略——连不同请求（不同块）之间也是采样点硬拼接。旧版误用了
+        # 整块 /tts 兜底路径的 20/80ms gap，凭空加静音，还让 boundary_jumps
+        # 测到插入的零样本而不是真实波形接缝。门禁的逐块指标不受影响。
+        gap_ms = 0
         if all_samples and gap_ms > 0:
             all_samples.append(np.zeros(int(gap_ms / 1000.0 * rate), dtype=np.float32))
         boundaries.append(sum(p.size for p in all_samples))
