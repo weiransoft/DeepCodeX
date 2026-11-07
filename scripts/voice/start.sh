@@ -23,6 +23,12 @@ export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 # TTS 文本前端规范化：2026-11-07 起按产品决策默认打开（URL / JSON / 路径 /
 # 单位 / 缩写不再逐字母念）。DCX_VOICE_TNS=0 bash scripts/voice/start.sh 可一键回退。
 export DCX_VOICE_TNS="${DCX_VOICE_TNS:-1}"
+# 结构感知分块（2026-11-07 P0）：默认关，灰度通过后再默认开。
+# 打开需重启 sidecar：DCX_VOICE_ATOMIC_CHUNK=1 bash scripts/voice/start.sh
+# 前端偏好 dcx.voice.atomicChunk.v1（localStorage）是必要条件：它保证完整
+# JSON 进入同一个请求。真机 A/B 的 6.84% 正是在本变量关闭下测得，
+# 服务端这层只是「规范化后残留拉丁词」的可选增强，不是收益来源。
+export DCX_VOICE_ATOMIC_CHUNK="${DCX_VOICE_ATOMIC_CHUNK:-0}"
 LOG_DIR="${HOME}/.deepcode/logs"
 LOG_FILE="$LOG_DIR/voice.log"
 FOREGROUND=0

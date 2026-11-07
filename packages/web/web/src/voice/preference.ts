@@ -238,6 +238,35 @@ export function writeBackchannelHold(value: boolean): void {
   }
 }
 
+/*
+ * 结构感知分块（2026-11-07 P0，默认关）
+ *
+ * 前端别把 `{...}` / URL / 拉丁词 / 数字串切碎，服务端 TNS 才有机会看到
+ * 完整结构。真机 A/B：`code:xl` 块间语速极差 43.71% → 6.84%（阈值 ≤8%）。
+ * 但这是「探针复刻前端切分 + 直连 sidecar」的证据，桌面 WebView 真机听感
+ * 仍需人工确认，所以**不默认打开**：改偏好或设环境变量后重启才能灰度。
+ * 服务端另有 `DCX_VOICE_ATOMIC_CHUNK`，两侧独立，可分别回退。
+ */
+export const ATOMIC_CHUNK_KEY = "dcx.voice.atomicChunk.v1";
+
+/** 读取结构感知分块开关（默认关） */
+export function readAtomicChunk(): boolean {
+  try {
+    return globalThis.localStorage?.getItem(ATOMIC_CHUNK_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** 写入结构感知分块开关（下一次开录生效） */
+export function writeAtomicChunk(value: boolean): void {
+  try {
+    globalThis.localStorage?.setItem(ATOMIC_CHUNK_KEY, value ? "1" : "0");
+  } catch {
+    // 存不下就只在本页生效
+  }
+}
+
 /** 订阅流式播放变化（同页事件 + 跨标签页 storage 事件） */
 export function subscribeStreamPlayback(handler: (value: boolean) => void): () => void {
   const onCustom = (event: Event): void => {

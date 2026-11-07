@@ -350,12 +350,18 @@ def normalized(text: str) -> str:
 # ---------------------------------------------------------------------------
 # 单格采集
 # ---------------------------------------------------------------------------
-def run_cell(kind: str, length: str, do_single_ref: bool) -> dict[str, Any]:
+def run_cell(kind: str, length: str, do_single_ref: bool, atomic: bool | None = None) -> dict[str, Any]:
     text = matrix_text(kind, length)
     name = cell_name(kind, length)
-    blocks = lp.frontend_blocks(text)
+    # atomic=None 跟随 lp.ATOMIC（--atomic）；A/B 探针可显式传 True/False。
+    blocks = lp.frontend_blocks(text, atomic=atomic)
     units = units_of(text)
-    print(f"\n=== {name} {KIND_LABEL[kind]}/{LENGTH_LABEL[length]} {len(text)}字 {units:.1f}单元 → {len(blocks)}块 TNS={'on' if TNS else 'off'} ===", flush=True)
+    print(
+        f"\n=== {name} {KIND_LABEL[kind]}/{LENGTH_LABEL[length]} {len(text)}字 {units:.1f}单元 "
+        f"→ {len(blocks)}块 TNS={'on' if TNS else 'off'} "
+        f"atomic={'on' if (lp.ATOMIC if atomic is None else atomic) else 'off'} ===",
+        flush=True,
+    )
 
     per_block: list[dict[str, Any]] = []
     all_samples: list[np.ndarray] = []
@@ -831,6 +837,7 @@ def main() -> int:
     parser.add_argument("--voice", default=VOICE)
     parser.add_argument("--speed", type=float, default=SPEED)
     parser.add_argument("--tns", choices=("on", "off"), default="on", help="TTS 文本前端规范化开关：on=生产默认，off=旧基线对照")
+    parser.add_argument("--atomic", action="store_true", help="结构感知分块（默认关）；需前端偏好/服务端变量同时打开才是生产态")
     parser.add_argument("--out", default=str(OUT))
     parser.add_argument("--lengths", default=",".join(LENGTHS), help="逗号分隔：xs,s,m,l,xl")
     parser.add_argument("--kinds", default=",".join(DEFAULT_KINDS), help="逗号分隔：cn,mixed,num,code,plain；加 spoken 可跑口语化改写 A/B")
@@ -845,6 +852,7 @@ def main() -> int:
 
     PORT, ENGINE, VOICE, SPEED = args.port, args.engine, args.voice, args.speed
     TNS = args.tns == "on"
+    lp.ATOMIC = args.atomic
     OUT = Path(args.out)
     cell_dir = OUT / "cells"
     OUT.mkdir(parents=True, exist_ok=True)
@@ -868,6 +876,7 @@ def main() -> int:
         "voice": VOICE,
         "speed": SPEED,
         "tns": TNS,
+        "atomic": lp.ATOMIC,
         "cells_requested": [cell_name(k, l) for k, l in pairs],
         "cases": [],
         "repeats": [],

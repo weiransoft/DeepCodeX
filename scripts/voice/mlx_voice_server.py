@@ -55,6 +55,7 @@ from text_normalize import (  # noqa: E402
     request_tns_enabled,
     tns_enabled_by_env,
 )
+from atomic_chunks import atomic_spans, cut_ok, nearest_ok_cut  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -66,6 +67,11 @@ DEFAULT_PORT = 8791
 # TNS 默认打开（2026-11-07 产品决策），DCX_VOICE_TNS=0 一键回退原生文本。
 # 请求体 {"tns": false} 可只关本次，供 A/B 真机对照，不必重启 sidecar。
 TNS_ENABLED = tns_enabled_by_env()
+
+# 结构感知分块（2026-11-07 调研报告 P0）：服务端二次切分时保护残留的
+# 拉丁词 / 数字串 / 路径，避免规范化后的长文本再被硬切。默认关，
+# DCX_VOICE_ATOMIC_CHUNK=1 打开；关闭时行为与 031f1cc2 逐字节一致。
+ATOMIC_CHUNK_ENABLED = os.environ.get("DCX_VOICE_ATOMIC_CHUNK", "0") == "1"
 
 
 def apply_tns(text: str, payload: dict) -> str:
@@ -527,7 +533,9 @@ def _split_boundary_class(text: str, cut: int) -> int:
     return 2
 
 
-def rebalance_tail(prev: str, tail: str, min_units: float, limit: int) -> list[str]:
+def rebalance_tail(
+    prev: str, tail: str, min_units: float, limit: int, spans: list[tuple[int, int]] | None = None
+) -> list[str]:
     """把「前一段 + 过短尾段」重划切分点，让两段都达到最短发音量。
 
     这是长文本碎片护栏的核心，也是 2026-11-07 第四轮真机复测里最后一处
@@ -557,9 +565,17 @@ def rebalance_tail(prev: str, tail: str, min_units: float, limit: int) -> list[s
     if lo > hi:
         return [merged[:limit], merged[limit:]]
 
+    # 结构感知开关打开时，枚举先排除落在原子内部的切点；spans 为 None
+    # （默认）时完全走原口径，保证关闭状态逐字节可复现。
+    candidates = [c for c in range(lo, hi + 1) if spans is None or cut_ok(spans, c)]
+    if spans is not None and not candidates:
+        # 服务端是「每段 ≤limit」的最后一道保险，不能像前端那样放出超长块
+        # （>50 字会触发 Qwen3-TTS 退化出十几秒尾部静音）。没有合法切点就
+        # 诚实降级到无保护的原实现，宁可切开一个超长拉丁串，也不破坏长度上限。
+        return rebalance_tail(prev, tail, min_units, limit)
     valid = [
         c
-        for c in range(lo, hi + 1)
+        for c in candidates
         if speech_units(merged[:c]) >= min_units and speech_units(merged[c:]) >= min_units
     ]
     if valid:
@@ -568,7 +584,7 @@ def rebalance_tail(prev: str, tail: str, min_units: float, limit: int) -> list[s
     else:
         # 总发音量撑不起两块时，让较小那段尽量大，别把碎片甩到最后一段
         best = min(
-            range(lo, hi + 1),
+            candidates,
             key=lambda c: (
                 -min(speech_units(merged[:c]), speech_units(merged[c:])),
                 _split_boundary_class(merged, c),
@@ -578,15 +594,24 @@ def rebalance_tail(prev: str, tail: str, min_units: float, limit: int) -> list[s
     return [merged[:best], merged[best:]]
 
 
-def split_long_text(text: str, limit: int = TTS_MAX_TEXT_CHARS) -> list[str]:
+def split_long_text(
+    text: str, limit: int = TTS_MAX_TEXT_CHARS, atomic: bool | None = None
+) -> list[str]:
     """
     把超长文本切成 ≤limit 字的片段，优先在标点处断
 
     与前端 `splitLongText()` 用同一套规则，保证两端看到的分段一致。
     拼接回去逐字等于原文（只去掉首尾空白），不会吞字也不会重复。
 
+    `atomic`（默认取环境变量 `DCX_VOICE_ATOMIC_CHUNK`，默认关）打开时，
+    切点额外排除 JSON / URL / 拉丁词 / 数字串内部。这一段作用在**规范化
+    之后**的文本上，只是兜住残留的结构；真正的结构保护在前端（前端先把
+    原文送进一个请求，TNS 才有机会还原完整的 `{...}`）。关闭时与
+    `031f1cc2` 完全一致，见 `atomic_chunks.py`。
+
     @param text 待切分文本
     @param limit 每段字数上限
+    @param atomic 是否启用结构感知切分（None = 跟随环境变量）
     @returns 片段列表
     """
     rest = text.strip()
@@ -594,16 +619,22 @@ def split_long_text(text: str, limit: int = TTS_MAX_TEXT_CHARS) -> list[str]:
         return []
     if len(rest) <= limit:
         return [rest]
+    use_atomic = ATOMIC_CHUNK_ENABLED if atomic is None else atomic
     out: list[str] = []
     minimum = max(1, int(limit * 0.6))
     while len(rest) > limit:
+        spans = atomic_spans(rest) if use_atomic else None
         cut = -1
         # 从上限往前找标点，别把一句话拦腰切断；找不到就按字数硬切
         for i in range(limit, minimum - 1, -1):
-            if rest[i - 1] in TTS_SPLIT_PUNCT:
+            if rest[i - 1] in TTS_SPLIT_PUNCT and (spans is None or cut_ok(spans, i)):
                 cut = i
                 break
+        if cut < 0 and spans is not None:
+            cut = nearest_ok_cut(spans, limit, minimum)
         if cut < 0:
+            # 服务端必须守住 ≤limit：原子横跨整个回扫区间时诚实降级硬切，
+            # 不把超长块放进模型（前端那一层才允许整体挪到下一请求）。
             cut = limit
         out.append(rest[:cut])
         rest = rest[cut:]
@@ -614,7 +645,8 @@ def split_long_text(text: str, limit: int = TTS_MAX_TEXT_CHARS) -> list[str]:
     if rest and out and speech_units(rest) < TTS_SPLIT_MIN_TAIL_UNITS:
         # 借多少按等效发音单元算（见 rebalance_tail），不能拿单元缺口当字符数：
         # 中英混排 1 字符常只有 0.36 单元，按字符借会留下 7~8 单元的碎片。
-        balanced = rebalance_tail(out[-1], rest, TTS_SPLIT_MIN_TAIL_UNITS, limit)
+        merged_spans = atomic_spans(out[-1] + rest) if use_atomic else None
+        balanced = rebalance_tail(out[-1], rest, TTS_SPLIT_MIN_TAIL_UNITS, limit, merged_spans)
         out[-1] = balanced[0]
         rest = balanced[1] if len(balanced) > 1 else ""
     if rest:
@@ -1851,6 +1883,7 @@ class Handler(BaseHTTPRequestHandler):
                     "pid": str(os.getpid()),
                     "startedAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
                     "tns": TNS_VERSION if TNS_ENABLED else "off",
+                    "atomicChunk": "on" if ATOMIC_CHUNK_ENABLED else "off",
                     **deps["versions"],
                 },
             },

@@ -40,6 +40,13 @@ REPO = Path("/Users/wangwei/Documents/VG/DeepCodeX-cli")
 sys.path.insert(0, str(REPO / "scripts/voice"))
 from mlx_voice_server import rebalance_tail, speech_units  # noqa: E402
 from text_normalize import normalize_for_speech  # noqa: E402
+from atomic_chunks import (  # noqa: E402
+    atomic_spans,
+    char_inside,
+    cut_ok,
+    flat,
+    nearest_ok_cut,
+)
 from continuity import (  # noqa: E402
     SILENCE_RMS_RATIO,
     _autocorr_f0,
@@ -77,6 +84,10 @@ FIRST_BLOCK_CHARS = 14
 BLOCK_CHARS = 48
 MAX_BLOCK_CHARS = 48
 MIN_BLOCK_UNITS = 10
+
+# 结构感知分块（2026-11-07 P0）：默认关；`--atomic` 或由矩阵探针设置。
+# 关闭时 frontend_blocks() 走 031f1cc2 原实现，音频与切分逐字可复现。
+ATOMIC = False
 
 TEXTS = {
     "pure_cn": (
@@ -249,8 +260,16 @@ def balance_blocks(blocks: list[str]) -> list[str]:
     return out
 
 
-def frontend_blocks(text: str) -> list[str]:
-    """复刻修复后的 SpeechQueue：首块 14 字、后续 48 字、最短 10 单元、碎片合并。"""
+def frontend_blocks(text: str, atomic: bool | None = None) -> list[str]:
+    """复刻 SpeechQueue 的真实封块链路（首块 14 字、后续 48 字、最短 10 单元）。
+
+    `atomic` 为 None 时跟随全局 `ATOMIC`（由 `--atomic` / 矩阵探针设置）。
+    这是**门禁唯一权威实现**：`chunking_ab_probe.py`、`mixed_matrix_probe.py`
+    都调用它，避免出现两份会漂移的「前端复刻」。
+    """
+    use_atomic = ATOMIC if atomic is None else atomic
+    if use_atomic:
+        return frontend_blocks_atomic(text)
     blocks: list[str] = []
 
     def emit(chunk: str) -> None:
@@ -279,6 +298,196 @@ def frontend_blocks(text: str) -> list[str]:
     if buf.strip():
         emit(buf)
     return balance_blocks(blocks)
+
+
+# ---------------------------------------------------------------------------
+# 结构感知分块（2026-11-07 调研报告 P0）
+#
+# 三处切点全部带原子保护：断句符、48 字硬切回扫、尾段碎片重划。
+# 与前端 `packages/web/web/src/voice/atomic.ts` 同源（`atomic_chunks.py`），
+# 跨语言一致性由 `atomic-parity-fixtures.json` + 两侧单测保证。
+# 真机 A/B：`code:xl` 43.71% → 6.84%，基线精确复现验收报告数值。
+# ---------------------------------------------------------------------------
+def take_sentences_atomic(text: str) -> list[str]:
+    """复刻 sentence.ts 的切句，额外跳过结构内部的标点。"""
+    spans = atomic_spans(text)
+    out: list[str] = []
+    start = 0
+    emitted = 0
+    for i, ch in enumerate(text):
+        if char_inside(spans, i):
+            continue
+        length = i - start + 1
+        weak_min = FIRST_WEAK_MIN if emitted == 0 else WEAK_MIN
+        is_strong = ch in STRONG
+        is_weak = (not is_strong) and ch in WEAK and length >= weak_min
+        is_newline = ch == "\n"
+        is_overflow = length >= MAX_SENTENCE
+        if not (is_strong or is_weak or is_newline or is_overflow):
+            continue
+        cut = i + 1
+        if not cut_ok(spans, cut):
+            alt = nearest_ok_cut(spans, cut, start + 1)
+            if alt < 0:
+                continue
+            cut = alt
+        piece = text[start:cut].strip()
+        if piece:
+            out.append(piece)
+            emitted += 1
+        start = cut
+    if start < len(text):
+        piece = text[start:].strip()
+        if piece:
+            out.append(piece)
+    return out
+
+
+def rebalance_tail_safe(prev: str, short: str, min_units: float, limit: int) -> list[str]:
+    """与 `rebalance_tail` 同语义，枚举切点时排除原子内部。"""
+    merged = prev + short
+    if len(merged) <= limit or not prev:
+        return [merged]
+    spans = atomic_spans(merged)
+    lo = max(1, len(merged) - limit)
+    hi = min(limit, len(merged) - 1)
+    if lo > hi:
+        # 两侧都装不下：整段交给服务端（它先 TNS 再按 48 字切，结构不会碎）。
+        return [merged] if len(merged) <= 2 * limit else [merged[:limit], merged[limit:]]
+    cuts = [c for c in range(lo, hi + 1) if cut_ok(spans, c)]
+    min_side = lambda c: min(speech_units(merged[:c]), speech_units(merged[c:]))
+    if not cuts or not any(min_side(c) >= min_units for c in cuts):
+        # 没有「两段都够长」的合法切点：宁可让这一块超过 48 字，也不切开原子
+        # 或留下 <10 单元的碎片。服务端会对整块先 TNS 再按 48 字切分。
+        #
+        # **已知边界（2026-11-07 全量矩阵实测）**：这条策略在 code:m 生成
+        # 54 字块，服务端二次切出的短段带多段句内静音，单元语速掉到
+        # 3.396 u/s、块间极差 33.67%（阈值 8%）。曾试过「不合并、选
+        # minSide 最大切点」的替代策略：真机 code:xl 7.25% / code:m 0.81%
+        # 两格达标，但产生 5.9 单元碎片（F0 275.9Hz），违反既有 ≥10 单元
+        # 护栏，因此**未采用、也未放宽阈值**。根治需与 P1「短块句内静音
+        # 上限」叠加，见 atomic-chunk-p0-2026-11-07.md §5.3。
+        return (
+            [merged]
+            if len(merged) <= 2 * limit
+            else rebalance_tail(prev, short, min_units, limit)
+        )
+
+    def prefer(a: int, b: int) -> int:
+        pa = 0 if merged[a - 1] in PUNCT else 1
+        pb = 0 if merged[b - 1] in PUNCT else 1
+        return pa - pb or abs(a - len(prev)) - abs(b - len(prev))
+
+    valid = [c for c in cuts if min_side(c) >= min_units]
+    best = valid[0]
+    for c in valid[1:]:
+        if prefer(c, best) < 0:
+            best = c
+    return [merged[:best], merged[best:]]
+
+
+def split_long_atomic(text: str, limit: int = MAX_BLOCK_CHARS) -> list[str]:
+    """复刻 `splitLongText`，48 字硬切回扫时不切开原子。"""
+    rest = text.strip()
+    if not rest:
+        return []
+    if len(rest) <= limit:
+        return [rest]
+    out: list[str] = []
+    minimum = max(1, int(limit * 0.6))
+    while len(rest) > limit:
+        spans = atomic_spans(rest)
+        cut = -1
+        for i in range(limit, minimum - 1, -1):
+            if rest[i - 1] in PUNCT and cut_ok(spans, i):
+                cut = i
+                break
+        if cut < 0:
+            cut = nearest_ok_cut(spans, limit, minimum)
+        if cut < 0:
+            # 原子横跨上限：把切点后移到原子尾（允许这一请求块 >48 字），
+            # 服务端会对整块先 TNS 再按 48 字切分。单个原子 >2×limit 才硬切。
+            for start, end in spans:
+                if start < limit < end:
+                    cut = end if end <= 2 * limit else limit
+                    break
+        if cut < 0 or cut <= 0:  # 诚实降级
+            cut = limit
+        out.append(rest[:cut])
+        rest = rest[cut:]
+    if rest and out and speech_units(rest) < MIN_BLOCK_UNITS:
+        balanced = rebalance_tail_safe(out[-1], rest, MIN_BLOCK_UNITS, limit)
+        out[-1] = balanced[0]
+        rest = balanced[1] if len(balanced) > 1 else ""
+    if rest:
+        out.append(rest)
+    return out
+
+
+def balance_blocks_safe(blocks: list[str]) -> list[str]:
+    out = list(blocks)
+    for _ in range(len(out) + 2):
+        idx = next((i for i in range(1, len(out)) if speech_units(out[i]) < MIN_BLOCK_UNITS), -1)
+        if idx < 0:
+            break
+        balanced = rebalance_tail_safe(out[idx - 1], out[idx], MIN_BLOCK_UNITS, MAX_BLOCK_CHARS)
+        out[idx - 1 : idx + 1] = balanced
+    return out
+
+
+def frontend_blocks_atomic(text: str) -> list[str]:
+    """结构感知版封块：三处切点都避开原子内部，逐字可逆。"""
+    blocks: list[str] = []
+    sealed = 0
+
+    def emit(chunk: str) -> None:
+        nonlocal sealed
+        for part in split_long_atomic(chunk):
+            if speech_units(part) < MIN_BLOCK_UNITS and blocks:
+                balanced = rebalance_tail_safe(blocks[-1], part, MIN_BLOCK_UNITS, MAX_BLOCK_CHARS)
+                blocks[-1] = balanced[0]
+                part = balanced[1] if len(balanced) > 1 else ""
+                if not part:
+                    continue
+            blocks.append(part)
+            sealed += 1
+
+    buf = ""
+    for sentence in take_sentences_atomic(text):
+        buf += sentence
+        target = FIRST_BLOCK_CHARS if sealed == 0 else BLOCK_CHARS
+        if len(buf) < target and len(buf) < MAX_BLOCK_CHARS:
+            continue
+        if sealed > 0 and speech_units(buf) < MIN_BLOCK_UNITS:
+            continue
+        emit(buf)
+        buf = ""
+    if buf.strip():
+        emit(buf)
+    return balance_blocks_safe(blocks)
+
+
+def split_quality(text: str, blocks: list[str]) -> dict:
+    """离线切分质量：逐字可逆、切断原子数、最长块、最短非首块。"""
+    src = flat(text)
+    spans = atomic_spans(src)
+    joined = "".join(flat(b) for b in blocks)
+    offset = 0
+    broken = []
+    for i, block in enumerate(blocks[:-1]):
+        offset += len(flat(block))
+        if not cut_ok(spans, offset):
+            broken.append(
+                {"boundary": i + 1, "offset": offset, "context": src[max(0, offset - 14) : offset + 14]}
+            )
+    return {
+        "block_count": len(blocks),
+        "reversible": joined == src,
+        "broken_atom_boundaries": len(broken),
+        "broken_examples": broken[:6],
+        "max_chars": max((len(b) for b in blocks), default=0),
+        "min_nonfirst_units": round(min((speech_units(b) for b in blocks[1:]), default=0.0), 2),
+    }
 
 
 def time_window_features(x: np.ndarray, rate: int, window_s: float = 2.0) -> list[dict]:
@@ -502,13 +711,14 @@ def evaluate_case(case: dict[str, Any], thresholds: dict[str, float]) -> list[di
 
 
 def main() -> int:
-    global PORT, ENGINE, VOICE, SPEED, OUT, TNS
+    global PORT, ENGINE, VOICE, SPEED, OUT, TNS, ATOMIC
     parser = argparse.ArgumentParser(description="长文本语音连贯性专项验收（复刻前端分块链路）")
     parser.add_argument("--port", type=int, default=int(os.environ.get("PROBE_PORT", "8791")), help="sidecar 端口")
     parser.add_argument("--engine", default=ENGINE)
     parser.add_argument("--voice", default=VOICE)
     parser.add_argument("--speed", type=float, default=SPEED)
     parser.add_argument("--tns", choices=("on", "off"), default="on", help="TTS 文本前端规范化开关：on=生产默认，off=旧基线对照")
+    parser.add_argument("--atomic", action="store_true", help="结构感知分块（默认关，对应前端偏好 dcx.voice.atomicChunk.v1）")
     parser.add_argument("--out", default=str(OUT), help="报告输出目录")
     parser.add_argument("--cases", default="", help="逗号分隔的语料名，默认全部")
     parser.add_argument("--texts", default="", help="自定义语料文件（每行一条，# 开头为注释）")
@@ -518,6 +728,7 @@ def main() -> int:
 
     PORT, ENGINE, VOICE, SPEED = args.port, args.engine, args.voice, args.speed
     TNS = args.tns == "on"
+    ATOMIC = args.atomic
     OUT = Path(args.out)
     OUT.mkdir(parents=True, exist_ok=True)
 

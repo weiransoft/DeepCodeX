@@ -1012,6 +1012,84 @@ npm run test:voice:matrix     # 25 格矩阵，默认 TNS on；--tns off 可复�
 - 网关路径没有做脚本级端到端验证（桌面 WebView 用独立 JWT，脚本不代跑）；
   sidecar 单点生效由 `/tts/normalize` 与直连真机覆盖，**桌面端真实听感仍需本人确认**。
 
+## 结构感知分块（2026-11-07 第七轮，默认关）
+
+TNS 打开后 25 格矩阵仍剩 7 项违规，其中唯一与 TNS 相关的是 `code:xl`
+块间语速极差 **43.71%**。调研报告
+`docs/proposals/super-agent/voice/tns-residual-fix-research-2026-11-07.md`
+定位到根因**不在服务端**：服务端顺序本来就是
+`apply_tns(整个请求文本) → split_long_text(规范化后文本)`，只要一个请求里
+能看到完整的 `{...}` 就能还原结构。真正切碎 JSON 的是前端两处——
+`sentence.ts` 的弱断句符含 `,` / `:`，`player.ts` 无标点时按 48 字硬切。
+
+所以修法**不是再写一份 TS 版 TNS**（对照实验只降到 27.39%，还把 `voice`
+切成 `v`/`oice`），而是给三处切点加「原子边界保护」：成对 `{} [] ()`、
+ASCII URL、POSIX 路径、拉丁词、数字串。切点落在原子内部一律后移到边界；
+实在没有合法切点时允许单个请求块到 59 字，交给服务端规范化后二次切分。
+
+### 开关契约（三处独立，默认全关）
+
+| 位置 | 开关 | 默认 | 回退 |
+|---|---|---|---|
+| 前端 | `localStorage["dcx.voice.atomicChunk.v1"] = "1"` | 关 | 删除键或置 `"0"`，下次开录生效 |
+| 服务端 | `DCX_VOICE_ATOMIC_CHUNK=1 bash scripts/voice/start.sh` | 关 | 去掉变量重启；`/health.versions.atomicChunk` 回显 `on/off` |
+| 门禁探针 | `--atomic`（`longtext_probe` / `mixed_matrix_probe`） | 关 | 去掉参数 |
+
+**关闭时前端切块、服务端分段与 `031f1cc2` 逐字一致**：450 条文本（含
+TNS 规范化后）对比旧版 `split_long_text` 差异 0 处；`code:xl` 关闭态仍是
+26 块 / 5 处切断原子。打开后 `code:xl` 变为 23 块 / 0 处切断原子，
+逐字可逆、最短非首块 ≥10 单元。
+
+三者的关系要说清：**前端偏好是必要条件**——只有它保证完整 JSON 进入同一个
+请求，服务端 TNS 才有机会还原结构。真机 A/B 的 6.84% 是在
+`DCX_VOICE_ATOMIC_CHUNK=0`（服务端默认关）下测得的；服务端那层只兜住
+规范化后残留的拉丁词/数字串，是可选增强，不是收益来源，也没有单独 A/B。
+门禁探针的 `--atomic` 只替换「前端复刻切分」，不碰服务端开关，正好对应
+「前端打开 + 服务端默认关」这一主要生产态。
+
+### 同源实现与跨语言一致性
+
+`scripts/voice/atomic_chunks.py` 与 `packages/web/web/src/voice/atomic.ts`
+是同一套原子判定；`scripts/voice/atomic-parity-fixtures.json` 由 Python 生成，
+两侧单测读同一份数据比对 `atomicSpans` / `splitLongText` /
+`rebalanceShortBlock`，防止「门禁测的复刻」与「真实前端」漂移。
+`longtext_probe.frontend_blocks(text, atomic=...)` 是门禁唯一权威实现，
+`chunking_ab_probe.py`、`mixed_matrix_probe.py` 都调用它。
+
+### 跑法
+
+```bash
+npm run test:voice:atomic             # 离线单测：parity + 开关两态 + 25 格切分质量
+npm run test:voice:atomic:ab          # 离线 A/B 切分对照（code:xl / plain:xl）
+npm run test:voice:longtext:atomic    # 真机：四条长文本，--atomic --check
+npm run test:voice:matrix:atomic      # 真机：25 格矩阵全量，--atomic --check
+python3 scripts/voice/chunking_ab_probe.py --cells code:xl --modes baseline,atomic \
+    --out /tmp/dcx-atomic-ab          # 同机同语料真机 A/B
+```
+
+`npm run test:voice:atomic` 不需要 sidecar；真机项需要先启动 `start.sh`。
+
+### 诚实边界
+
+- 这是**灰度开关，不是默认修好**：桌面 WebView 真机听感仍需本人确认。
+  前端偏好是必要条件（保证完整 JSON 进同一个请求），服务端变量只是
+  规范化后的可选增强；只开前端就已经是 `--atomic` 矩阵对应的主要生产态。
+- 真机 A/B 的 6.84% 来自「探针复刻前端切分 + 直连 sidecar」，不是 WebView
+  端到端采集；`sentence.ts` 的 `stripForSpeech` 会剥掉裸 URL / Markdown，
+  与矩阵语料（纯文本）链路不完全等价。
+- 服务端那一层只兜住规范化后的残留拉丁词/数字串，仍严格守 ≤48 字；
+  它不是 6.84% 的必要条件，也没有单独的真机 A/B。
+- **⚠️ 全量 25 格矩阵实测（2026-11-07）**：单独打开 atomic 后 `code:xl`
+  的 43.71% 确实消失，但 `code:m` 从 1.12% 涨到 **33.67%**——尾段重划
+  合成的 54 字超长块被服务端二次切分，短段句内静音把单元语速拖到
+  3.396 u/s。语速类违规总数没降，只是换了格子，因此**不建议单独默认打开**。
+  曾试过让两格都达标的替代策略，代价是 5.9 单元碎片、违反 ≥10 单元护栏，
+  未采用也未放宽阈值。详见
+  `docs/proposals/super-agent/voice/atomic-chunk-p0-2026-11-07.md` §5.3/§5.5。
+  根治方向是把本开关与 P1「短块句内静音上限 0.3s」叠加真机验证。
+- 其余历史违规（短数字块句内静音、`plain` 首块/全局 TTFA、大写下划线
+  标识符、跨段 F0、网关 `tns` 不透传）**不在本轮修复范围**，见调研报告 §4/§7。
+
 ## 已知限制（诚实边界）
 
 写在这里而不是藏在代码注释里，因为每一条都会影响你的实际体验：

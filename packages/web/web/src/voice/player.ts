@@ -46,6 +46,7 @@ import {
   type PlayOutcome,
   type ScheduledClip,
 } from "./playout";
+import { atomEndAfter, atomicSpans, cutOk, nearestOkCut, type AtomicSpan } from "./atomic";
 
 /** 合成函数：文本 → objectURL（由后端负责回收） */
 export type SynthFn = (text: string, signal?: AbortSignal) => Promise<string>;
@@ -94,6 +95,12 @@ export interface SpeechQueueDeps {
   maxBlockChars?: number;
   /** 单块最短等效发音单元数（默认 10，低于此值不单独发合成请求） */
   minBlockUnits?: number;
+  /**
+   * 结构感知分块（默认关）：切点不落在 JSON / URL / 拉丁词 / 数字串内部。
+   * 灰度开关 `dcx.voice.atomicChunk.v1`，与服务端 `DCX_VOICE_ATOMIC_CHUNK`
+   * 相互独立；关闭时切块结果与 031f1cc2 逐字一致。
+   */
+  atomicChunk?: boolean;
   /** 开播前至少缓存多少字（默认与首块目标一致） */
   warmupChars?: number;
   /** 多久没有任何播放进展就判定停滞（默认 5000ms，仅元素后端用） */
@@ -198,21 +205,44 @@ function splitBoundaryClass(text: string, cut: number): number {
  * @param limit 单块字数硬上限
  * @returns 1~2 块，拼接后逐字等于 prev + short
  */
-export function rebalanceShortBlock(prev: string, short: string, minUnits: number, limit: number): string[] {
+export function rebalanceShortBlock(
+  prev: string,
+  short: string,
+  minUnits: number,
+  limit: number,
+  atomicChunk = false
+): string[] {
   const merged = prev + short;
   if (merged.length <= limit || prev.length === 0) return [merged];
   const lo = Math.max(1, merged.length - limit);
   const hi = Math.min(limit, merged.length - 1);
   if (lo > hi) return [merged.slice(0, limit), merged.slice(limit)];
 
+  // 结构感知开关：先排除落在原子内部的切点；关闭时 spans 为空、过滤恒真，
+  // 行为与 2026-11-07 之前的版本逐字一致。
+  const spans: readonly AtomicSpan[] = atomicChunk ? atomicSpans(merged) : [];
   const cuts: number[] = [];
-  for (let c = lo; c <= hi; c += 1) cuts.push(c);
+  for (let c = lo; c <= hi; c += 1) {
+    if (!atomicChunk || cutOk(spans, c)) cuts.push(c);
+  }
   const minSide = (c: number): number => Math.min(speechUnits(merged.slice(0, c)), speechUnits(merged.slice(c)));
+  // atomic 分支与 Python 探针 `rebalance_tail_safe` 同口径：标点优先、其次贴近
+  // 原切分点；baseline 仍用更细的 `splitBoundaryClass`（标点 > 空格 > 词中间）。
   const prefer = (a: number, b: number): number =>
-    splitBoundaryClass(merged, a) - splitBoundaryClass(merged, b) ||
-    Math.abs(a - prev.length) - Math.abs(b - prev.length);
+    atomicChunk
+      ? (SPLIT_PUNCT.includes(merged[a - 1] ?? "") ? 0 : 1) - (SPLIT_PUNCT.includes(merged[b - 1] ?? "") ? 0 : 1) ||
+        Math.abs(a - prev.length) - Math.abs(b - prev.length)
+      : splitBoundaryClass(merged, a) - splitBoundaryClass(merged, b) ||
+        Math.abs(a - prev.length) - Math.abs(b - prev.length);
 
   const valid = cuts.filter((c) => minSide(c) >= minUnits);
+  if (atomicChunk && valid.length === 0) {
+    // 没有「两段都够长」的合法切点：宁可让这一块超过 48 字，也不切开原子
+    // 或留下 <10 单元的碎片。服务端先 TNS 再按 48 字切分，是最后一道保险。
+    // 已知边界：全量矩阵 code:m 会因服务端二次切分的短段静音出现 33.67%
+    // 语速极差，见 scripts/voice/README.md 与 P0 落地报告；开关默认关。
+    return merged.length <= 2 * limit ? [merged] : rebalanceShortBlock(prev, short, minUnits, limit);
+  }
   let best: number;
   if (valid.length > 0) {
     best = valid.reduce((a, b) => (prefer(a, b) <= 0 ? a : b));
@@ -364,21 +394,31 @@ export function joinSentences(parts: readonly string[]): string {
  * @param limit 每块字数上限
  * @returns 按原文顺序的块（不会丢字）
  */
-export function splitLongText(text: string, limit: number, minUnits = MIN_BLOCK_UNITS): string[] {
+export function splitLongText(text: string, limit: number, minUnits = MIN_BLOCK_UNITS, atomicChunk = false): string[] {
   const out: string[] = [];
   let rest = text.trim();
   const punct = "。！？!?；;，,、：:";
   const min = Math.max(1, Math.floor(limit * 0.6));
   while (rest.length > limit) {
+    const spans: readonly AtomicSpan[] = atomicChunk ? atomicSpans(rest) : [];
     let cut = -1;
     // 从上限往前找标点，别把一句话拦腰切断；找不到就按字数硬切
     for (let i = limit; i >= min; i -= 1) {
-      if (punct.includes(rest[i - 1] ?? "")) {
+      if (punct.includes(rest[i - 1] ?? "") && (!atomicChunk || cutOk(spans, i))) {
         cut = i;
         break;
       }
     }
-    if (cut < 0) cut = limit;
+    if (cut < 0 && atomicChunk) cut = nearestOkCut(spans, limit, min);
+    if (cut < 0 && atomicChunk) {
+      // 原子横跨上限且回扫区间内没有合法切点：把切点后移到原子尾，
+      // 允许这一块 >48 字。服务端会对整块先 TNS 再按 48 字切分，
+      // 那时结构已还原成中文，不会再切坏 JSON / URL / 拉丁词。
+      // 单个原子 >2×limit 才诚实降级硬切。
+      const end = atomEndAfter(spans, limit, 2 * limit);
+      cut = end > 0 ? end : limit;
+    }
+    if (cut < 0 || cut <= 0) cut = limit;
     out.push(rest.slice(0, cut));
     rest = rest.slice(cut);
   }
@@ -387,7 +427,7 @@ export function splitLongText(text: string, limit: number, minUnits = MIN_BLOCK_
   // 借多少按等效发音单元算（见 rebalanceShortBlock），不能拿单元缺口当字符数：
   // 中英混排 1 字符常只有 0.36 单元，按字符借会留下 7~8 单元的碎片。
   if (rest.length > 0 && out.length > 0 && speechUnits(rest) < minUnits) {
-    const balanced = rebalanceShortBlock(out[out.length - 1], rest, minUnits, limit);
+    const balanced = rebalanceShortBlock(out[out.length - 1], rest, minUnits, limit, atomicChunk);
     out[out.length - 1] = balanced[0];
     rest = balanced[1] ?? "";
   }
@@ -457,6 +497,8 @@ export class SpeechQueue {
   private readonly maxBlockChars: number;
   /** 单块最短等效发音单元数 */
   private readonly minBlockUnits: number;
+  /** 结构感知分块开关（默认关） */
+  private readonly atomicChunk: boolean;
   /** 开播门槛字数 */
   private readonly warmupChars: number;
 
@@ -489,6 +531,7 @@ export class SpeechQueue {
     this.blockCharsTarget = deps.blockChars ?? BLOCK_CHARS;
     this.maxBlockChars = deps.maxBlockChars ?? MAX_BLOCK_CHARS;
     this.minBlockUnits = deps.minBlockUnits ?? MIN_BLOCK_UNITS;
+    this.atomicChunk = deps.atomicChunk ?? false;
     this.warmupChars = deps.warmupChars ?? this.firstBlockChars;
   }
 
@@ -634,7 +677,9 @@ export class SpeechQueue {
     // 硬上限必须在这里兜住：超过 48 字的单块会让 TTS 退化出十几秒静音，
     // 详见 MAX_BLOCK_CHARS 的实测说明。服务端裁尾只是第二道保险。
     const parts =
-      trimmed.length <= this.maxBlockChars ? [trimmed] : splitLongText(trimmed, this.maxBlockChars, this.minBlockUnits);
+      trimmed.length <= this.maxBlockChars
+        ? [trimmed]
+        : splitLongText(trimmed, this.maxBlockChars, this.minBlockUnits, this.atomicChunk);
     for (const part of parts) {
       const clean = part.trim();
       if (clean.length === 0) continue;
@@ -657,7 +702,7 @@ export class SpeechQueue {
   /** 把短碎片并入最后一块；并不下时按等效发音单元重划切分点 */
   private absorbShortIntoLast(short: string): void {
     const last = this.blocks[this.blocks.length - 1];
-    const balanced = rebalanceShortBlock(last, short, this.minBlockUnits, this.maxBlockChars);
+    const balanced = rebalanceShortBlock(last, short, this.minBlockUnits, this.maxBlockChars, this.atomicChunk);
     this.blocks[this.blocks.length - 1] = balanced[0];
     if (balanced[1]) this.appendBlock(balanced[1]);
   }

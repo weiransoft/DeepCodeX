@@ -70,6 +70,7 @@ import { scanVoiceDirective, settleVoiceDirective } from "./directive";
 import { TurnDirective } from "./turn-directive";
 import {
   defaultHandsFree,
+  readAtomicChunk,
   readBackchannelHold,
   readEndpointProfile,
   readHandsFree,
@@ -266,6 +267,15 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
 
   const micRef = useRef<MicCapture | null>(null);
   const queueRef = useRef<SpeechQueue | null>(null);
+  /**
+   * 结构感知分块开关的**单份冻结快照**。
+   *
+   * `SpeechQueue` 在首次 `queue()` 时构造一次并长期复用，`SentenceStream`
+   * 却每轮新建。若两处各自读 localStorage，用户中途改偏好就会出现
+   * 「切句按新值、封块按旧值」的半生效状态。这里首次读一次后冻结，
+   * 两条链路永远看到同一个值；改偏好需刷新页面（与其它队列级配置一致）。
+   */
+  const atomicChunkRef = useRef<boolean | null>(null);
   const wakeRef = useRef<WakeListener | null>(null);
   const streamRef = useRef<SentenceStream | null>(null);
   const stopMonitorRef = useRef<(() => void) | null>(null);
@@ -402,6 +412,12 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   /** 跟随设置面板的改动（同页事件 + 跨标签页 storage） */
   useEffect(() => subscribeHandsFree(setHandsFreeState), []);
 
+  /** 结构感知分块开关：首次读取后冻结，供队列与切句器共用 */
+  const atomicChunk = useCallback((): boolean => {
+    if (atomicChunkRef.current === null) atomicChunkRef.current = readAtomicChunk();
+    return atomicChunkRef.current;
+  }, []);
+
   /** 懒建队列（合成函数依赖后端，但只建一次） */
   const queue = useCallback((): SpeechQueue => {
     if (queueRef.current === null) {
@@ -476,6 +492,12 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
            */
           minBlockUnits: MIN_BLOCK_UNITS,
           /**
+           * 结构感知分块：默认关。偏好 `dcx.voice.atomicChunk.v1` 打开后，
+           * 切句与封块都不再切断 JSON / URL / 拉丁词 / 数字串，让服务端
+           * TNS 能看到完整结构。关闭时与 031f1cc2 逐字一致。
+           */
+          atomicChunk: atomicChunk(),
+          /**
            * 流式合成：模型每解出一小段就交给队列排程，首字延迟从"整段
            * 生成完"降到"第一块到达"。返回 0 块表示开关关了，队列会静默
            * 回退整块合成，不需要这里报错。
@@ -502,7 +524,7 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
       );
     }
     return queueRef.current;
-  }, []);
+  }, [atomicChunk]);
 
   /**
    * 拉取配置与链路状态
@@ -806,7 +828,7 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   const speak = useCallback(
     (text: string) => {
       if (!available || !speakReplies) return;
-      const stream = new SentenceStream();
+      const stream = new SentenceStream(atomicChunk());
       streamRef.current = stream;
       directiveStateRef.current = "unknown";
       directivePrefixRef.current = 0;
@@ -828,7 +850,7 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
       // 显式朗读/重播没有「用户说完」时刻，别把上一次语音输入的旧值算进来
       speechEndEpochRef.current = 0;
     },
-    [available, speakReplies, enqueueForSpeech, queue]
+    [available, speakReplies, enqueueForSpeech, queue, atomicChunk]
   );
 
   /** 喂流式增量（累积文本） */
@@ -850,7 +872,7 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
       // 重置回 false，刚被打断的回复又念起来）
       if (interruptedRef.current) return;
       if (streamRef.current === null) {
-        streamRef.current = new SentenceStream();
+        streamRef.current = new SentenceStream(atomicChunk());
         directiveStateRef.current = "unknown";
         directivePrefixRef.current = 0;
         // 新一轮开始：朗读预算与截断标记都归零
@@ -891,7 +913,7 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
       lastTextRef.current = body;
       for (const sentence of streamRef.current.push(body)) enqueueForSpeech(sentence);
     },
-    [available, speakReplies, enqueueForSpeech, resetTurnState]
+    [available, speakReplies, enqueueForSpeech, resetTurnState, atomicChunk]
   );
 
   /**

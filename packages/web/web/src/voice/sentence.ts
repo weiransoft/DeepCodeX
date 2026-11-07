@@ -50,6 +50,8 @@ export const FIRST_WEAK_BREAK_MIN_LENGTH = 12;
 /** 单句朗读上限：超长句子在下次弱断句强制切开，避免一句读 30 秒 */
 const MAX_SENTENCE_LENGTH = 120;
 
+import { atomicSpans, charInside, cutOk, nearestOkCut, type AtomicSpan } from "./atomic";
+
 /**
  * 切句结果
  */
@@ -67,16 +69,25 @@ export interface SplitResult {
  * @param from 上次返回的游标
  * @param flush 是否收尾（流结束时为 true，把剩余残句也吐出来）
  * @param weakMinLength 弱断句的最短句长（首句用更短的值以降 TTFA）
+ * @param atomicChunk 结构感知分块（默认关）：`{}`/URL/拉丁词/数字串内部的
+ *   标点一律不断句，且切点回退到最近的原子边界；关闭时行为与旧版逐字一致
  * @returns 新完成的句子 + 新游标
  */
 export function takeSentences(
   text: string,
   from = 0,
   flush = false,
-  weakMinLength = WEAK_BREAK_MIN_LENGTH
+  weakMinLength = WEAK_BREAK_MIN_LENGTH,
+  atomicChunk = false
 ): SplitResult {
   const sentences: string[] = [];
   let start = from;
+  /**
+   * 原子区间按**整段累积文本**计算（绝对下标），与 `from` 游标无关。
+   * 流式下未闭合的 `{` 会把尾巴保护到末尾，本帧因此不断句；下一帧文本
+   * 变长、结构闭合后会重新扫描并补断——游标停在结构前，不会重复朗读。
+   */
+  const spans: readonly AtomicSpan[] = atomicChunk ? atomicSpans(text) : [];
   /**
    * 是否处在围栏代码块内部
    *
@@ -97,6 +108,9 @@ export function takeSentences(
     }
     if (inFence) continue;
 
+    // JSON 里的 `true,` 与 `": "` 不是句子边界；结构内部（含溢出触发点）
+    // 一律跳过，等结构闭合后再断。这是 `code:xl` 43.71% 的第一处根因。
+    if (atomicChunk && charInside(spans, i)) continue;
     const char = text[i];
     const length = i - start + 1;
     const isStrong = STRONG_BREAKS.has(char);
@@ -112,11 +126,19 @@ export function takeSentences(
     while (end + 1 < text.length && STRONG_BREAKS.has(text[end + 1]) && STRONG_BREAKS.has(char)) {
       end += 1;
     }
-    const raw = text.slice(start, end + 1);
+    let cut = end + 1;
+    if (atomicChunk && !cutOk(spans, cut)) {
+      // 断句符后面紧跟半个原子（如 `:` 后是 JSON 内的字符串）：把切点
+      // 回退到最近的原子边界；实在找不到就整句留到下一帧重扫。
+      const alt = nearestOkCut(spans, cut, start + 1);
+      if (alt < 0) continue;
+      cut = alt;
+    }
+    const raw = text.slice(start, cut);
     const cleaned = stripForSpeech(raw);
     if (cleaned.length > 0) sentences.push(cleaned);
-    start = end + 1;
-    i = end;
+    start = cut;
+    i = cut - 1;
   }
 
   // 收尾：把没有断句符的尾巴也读出来（否则最后一句永远不播）
@@ -175,6 +197,13 @@ export class SentenceStream {
   private consumed = 0;
   /** 已送出的句子数（决定用首句阈值还是常规阈值） */
   private emitted = 0;
+  /** 结构感知分块开关（构造时冻结，默认关；改偏好下次开录生效） */
+  private readonly atomicChunk: boolean;
+
+  /** @param atomicChunk 结构感知分块，默认关 */
+  constructor(atomicChunk = false) {
+    this.atomicChunk = atomicChunk;
+  }
 
   /**
    * 喂一段累积文本
@@ -183,7 +212,7 @@ export class SentenceStream {
    * @returns 新完成的句子
    */
   push(cumulative: string): readonly string[] {
-    const result = takeSentences(cumulative, this.consumed, false, this.weakMin());
+    const result = takeSentences(cumulative, this.consumed, false, this.weakMin(), this.atomicChunk);
     this.consumed = result.consumed;
     this.emitted += result.sentences.length;
     return result.sentences;
@@ -196,7 +225,7 @@ export class SentenceStream {
    * @returns 剩余句子
    */
   flush(cumulative: string): readonly string[] {
-    const result = takeSentences(cumulative, this.consumed, true, this.weakMin());
+    const result = takeSentences(cumulative, this.consumed, true, this.weakMin(), this.atomicChunk);
     this.consumed = result.consumed;
     this.emitted += result.sentences.length;
     return result.sentences;
