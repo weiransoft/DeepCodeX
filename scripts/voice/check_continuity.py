@@ -55,6 +55,7 @@ from continuity import (  # noqa: E402
     summarize_rounds,
 )
 from mlx_voice_server import speech_units  # noqa: E402
+from text_normalize import normalize_for_speech  # noqa: E402
 
 HOME = Path.home()
 SOUL_CONFIG = HOME / ".deepcode/soul/config.json"
@@ -197,8 +198,12 @@ def collect(args: argparse.Namespace, out: Path) -> dict[str, Any]:
         args.endpoint, args.gateway_port, args.sidecar_port
     )
     texts = read_texts(args.texts, args.rounds)
-    base = {"engine": args.engine, "voice": args.voice, "speed": args.speed}
-    log(f"链路: {name} 127.0.0.1:{port}  engine={args.engine} voice={args.voice} speed={args.speed}")
+    base = {"engine": args.engine, "voice": args.voice, "speed": args.speed, "tns": args.tns == "on"}
+    if name != "sidecar" and args.tns == "off":
+        # 网关重建请求体时不带 tns；此时服务端会按环境变量默认 on 处理，
+        # 而本地 units 却按 off 算，指标会静默失真——必须说清楚。
+        log("⚠️  Web 网关不透传 tns 参数，--tns off 在 gateway 链路上无效；请改用 --endpoint sidecar 或 DCX_VOICE_TNS=0 重启")
+    log(f"链路: {name} 127.0.0.1:{port}  engine={args.engine} voice={args.voice} speed={args.speed} tns={args.tns}")
     log(f"轮次: {len(texts)}（含同文本重复对照）\n")
 
     # 预热一次：MLX 首次推理会编译 metal kernel，混进前几轮会把
@@ -229,6 +234,7 @@ def collect(args: argparse.Namespace, out: Path) -> dict[str, Any]:
         entry = {
             "index": index,
             "text": text,
+            "spoken_text": normalize_for_speech(text, args.tns == "on").text,
             "batch_file": batch_file,
             "stream_file": stream_file,
             "timing": {
@@ -273,7 +279,10 @@ def analyze_manifest(manifest: dict[str, Any], out: Path) -> dict[str, Any]:
         chunks = split_stream_chunks(stream_bytes)
         # 语速分母必须与服务端伺服同口径：等效发音单元，不是字符数。
         # 用 len(text) 会在中英混排/标点密度变化时制造假的语速跳变。
-        units = round(speech_units(entry["text"]), 2)
+        # TNS 打开后服务端念的是规范化文本：分母必须跟着变，否则
+        # 「字数 / 时长」会把中文化后的正常语速误判成跳变。旧 manifest
+        # 没有 spoken_text 时按原文处理，--replay 历史报告仍可读。
+        units = round(speech_units(entry.get("spoken_text", entry["text"])), 2)
         batch_metric = analyze_clip(batch_bytes, units).as_dict()
         comparison = compare_stream_batch(chunks, batch_bytes)
         rounds.append({
@@ -341,6 +350,7 @@ def main() -> int:
     parser.add_argument("--engine", default="qwen3-customvoice")
     parser.add_argument("--voice", default="sinan")
     parser.add_argument("--speed", type=float, default=1.2)
+    parser.add_argument("--tns", choices=["on", "off"], default="on", help="TTS 文本前端规范化开关：on=生产默认，off=旧基线对照")
     parser.add_argument("--interval", type=float, default=1.0, help="流式块目标秒数")
     parser.add_argument("--json-only", action="store_true", help="只输出 JSON 报告")
     args = parser.parse_args()

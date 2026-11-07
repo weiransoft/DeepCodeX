@@ -57,12 +57,30 @@ sys.path.insert(0, str(REPO / "scripts/voice"))
 import longtext_probe as lp  # noqa: E402
 from continuity import analyze_clip, decode_wav, drift_pct  # noqa: E402
 from mlx_voice_server import TTS_CHARS_PER_SECOND, speech_units  # noqa: E402
+from text_normalize import normalize_for_speech  # noqa: E402
 
 PORT = int(os.environ.get("PROBE_PORT", "8791"))
 ENGINE = "qwen3-customvoice"
 VOICE = "sinan"
 SPEED = 1.2
 OUT = Path("/tmp/dcx-voice-matrix")
+# TNS 默认打开（2026-11-07 产品决策）。`--tns off` 逐字复现旧基线：
+# 请求体关掉规范化，语速分母也退回原文，两次结果才可比。
+TNS = True
+
+
+def spoken(text: str) -> str:
+    """真正送进模型的文本：与服务端 apply_tns() 同口径。"""
+    return normalize_for_speech(text, TNS).text
+
+
+def units_of(text: str) -> float:
+    """分母必须是念出来的那份文本，不是界面上的原文。"""
+    return speech_units(spoken(text))
+
+
+def tts_payload(text: str) -> dict[str, Any]:
+    return {"text": text, "engine": ENGINE, "voice": VOICE, "speed": SPEED, "tns": TNS}
 
 # ---------------------------------------------------------------------------
 # 语料矩阵：5 种内容类型 × 5 个长度档位
@@ -336,8 +354,8 @@ def run_cell(kind: str, length: str, do_single_ref: bool) -> dict[str, Any]:
     text = matrix_text(kind, length)
     name = cell_name(kind, length)
     blocks = lp.frontend_blocks(text)
-    units = speech_units(text)
-    print(f"\n=== {name} {KIND_LABEL[kind]}/{LENGTH_LABEL[length]} {len(text)}字 {units:.1f}单元 → {len(blocks)}块 ===", flush=True)
+    units = units_of(text)
+    print(f"\n=== {name} {KIND_LABEL[kind]}/{LENGTH_LABEL[length]} {len(text)}字 {units:.1f}单元 → {len(blocks)}块 TNS={'on' if TNS else 'off'} ===", flush=True)
 
     per_block: list[dict[str, Any]] = []
     all_samples: list[np.ndarray] = []
@@ -348,12 +366,9 @@ def run_cell(kind: str, length: str, do_single_ref: bool) -> dict[str, Any]:
     play_t = 0.0
     underruns: list[float] = []
     for index, block in enumerate(blocks):
-        got = stream_request(
-            "/tts/stream",
-            {"text": block, "engine": ENGINE, "voice": VOICE, "speed": SPEED},
-        )
+        got = stream_request("/tts/stream", tts_payload(block))
         x, rate = wav_of(got["chunks"])
-        b_units = speech_units(block)
+        b_units = units_of(block)
         metrics = analyze_clip(lp.to_wav(x, rate), b_units)
         head_silence_ms, tail_silence_ms = edge_silence_ms(x, rate)
         duration = metrics.duration_s
@@ -499,10 +514,7 @@ def run_cell(kind: str, length: str, do_single_ref: bool) -> dict[str, Any]:
     }
 
     if do_single_ref:
-        ref = stream_request(
-            "/tts/stream",
-            {"text": text, "engine": ENGINE, "voice": VOICE, "speed": SPEED},
-        )
+        ref = stream_request("/tts/stream", tts_payload(text))
         ref_x, ref_rate = wav_of(ref["chunks"])
         ref_metrics = analyze_clip(lp.to_wav(ref_x, ref_rate), units)
         result["single_request"] = {
@@ -537,13 +549,10 @@ def run_repeat(kind: str, length: str, rounds: int) -> dict[str, Any]:
     f0s: list[float] = []
     durations: list[float] = []
     for i in range(rounds):
-        got = stream_request(
-            "/tts/stream",
-            {"text": text, "engine": ENGINE, "voice": VOICE, "speed": SPEED},
-        )
+        got = stream_request("/tts/stream", tts_payload(text))
         blob_hashes.append(hashlib.sha256(b"".join(got["chunks"])).hexdigest()[:16])
         x, rate = wav_of(got["chunks"])
-        metrics = analyze_clip(lp.to_wav(x, rate), speech_units(text))
+        metrics = analyze_clip(lp.to_wav(x, rate), units_of(text))
         # 判据必须落在**解码后的 PCM 样本**上：流式分片边界按时间窗切，
         # 每片 WAV 头不同会让拼接 blob 的哈希天然不同，那是假失败。
         hashes.append(hashlib.sha256(np.ascontiguousarray(x, dtype=np.float32).tobytes()).hexdigest()[:16])
@@ -815,12 +824,13 @@ def markdown(report: dict[str, Any], violations: list[dict[str, Any]]) -> str:
 
 
 def main() -> int:
-    global PORT, ENGINE, VOICE, SPEED, OUT
+    global PORT, ENGINE, VOICE, SPEED, OUT, TNS
     parser = argparse.ArgumentParser(description="混合内容×长度矩阵：流畅性/速度/语速/音色一致性验收")
     parser.add_argument("--port", type=int, default=int(os.environ.get("PROBE_PORT", "8791")))
     parser.add_argument("--engine", default=ENGINE)
     parser.add_argument("--voice", default=VOICE)
     parser.add_argument("--speed", type=float, default=SPEED)
+    parser.add_argument("--tns", choices=("on", "off"), default="on", help="TTS 文本前端规范化开关：on=生产默认，off=旧基线对照")
     parser.add_argument("--out", default=str(OUT))
     parser.add_argument("--lengths", default=",".join(LENGTHS), help="逗号分隔：xs,s,m,l,xl")
     parser.add_argument("--kinds", default=",".join(DEFAULT_KINDS), help="逗号分隔：cn,mixed,num,code,plain；加 spoken 可跑口语化改写 A/B")
@@ -834,6 +844,7 @@ def main() -> int:
     args = parser.parse_args()
 
     PORT, ENGINE, VOICE, SPEED = args.port, args.engine, args.voice, args.speed
+    TNS = args.tns == "on"
     OUT = Path(args.out)
     cell_dir = OUT / "cells"
     OUT.mkdir(parents=True, exist_ok=True)
@@ -856,6 +867,7 @@ def main() -> int:
         "engine": ENGINE,
         "voice": VOICE,
         "speed": SPEED,
+        "tns": TNS,
         "cells_requested": [cell_name(k, l) for k, l in pairs],
         "cases": [],
         "repeats": [],

@@ -20,6 +20,9 @@ PORT="${VOICE_PORT:-8791}"
 HOST="${VOICE_HOST:-127.0.0.1}"
 # 模型权重走镜像：HF 直连在本机历史上不可达，只 export 在安装脚本里不会继承
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+# TTS 文本前端规范化：2026-11-07 起按产品决策默认打开（URL / JSON / 路径 /
+# 单位 / 缩写不再逐字母念）。DCX_VOICE_TNS=0 bash scripts/voice/start.sh 可一键回退。
+export DCX_VOICE_TNS="${DCX_VOICE_TNS:-1}"
 LOG_DIR="${HOME}/.deepcode/logs"
 LOG_FILE="$LOG_DIR/voice.log"
 FOREGROUND=0

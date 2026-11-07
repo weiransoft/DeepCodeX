@@ -47,12 +47,38 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+# 与探针共用同一份 TNS 规则：从任意工作目录启动都要能 import 到同目录模块
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from text_normalize import (  # noqa: E402
+    TNS_VERSION,
+    normalize_for_speech,
+    request_tns_enabled,
+    tns_enabled_by_env,
+)
+
 # ---------------------------------------------------------------------------
 # 配置
 # ---------------------------------------------------------------------------
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8791
+
+# TNS 默认打开（2026-11-07 产品决策），DCX_VOICE_TNS=0 一键回退原生文本。
+# 请求体 {"tns": false} 可只关本次，供 A/B 真机对照，不必重启 sidecar。
+TNS_ENABLED = tns_enabled_by_env()
+
+
+def apply_tns(text: str, payload: dict) -> str:
+    """TTS 文本前端：只改送去合成的文本，界面上的原文一个字都不动。"""
+    if not request_tns_enabled(payload, TNS_ENABLED):
+        return text
+    norm = normalize_for_speech(text)
+    if norm.changed:
+        sys.stderr.write(
+            f"[voice] TNS {TNS_VERSION} {len(text)}字→{len(norm.text)}字 "
+            f"命中={','.join(f'{k}x{v}' for k, v in norm.hits.items())}\n"
+        )
+    return norm.text
 
 # ASR：首选 Qwen3-ASR，兜底 whisper-large-v3-turbo
 #
@@ -1824,6 +1850,7 @@ class Handler(BaseHTTPRequestHandler):
                     "python": sys.version.split()[0],
                     "pid": str(os.getpid()),
                     "startedAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "tns": TNS_VERSION if TNS_ENABLED else "off",
                     **deps["versions"],
                 },
             },
@@ -1837,6 +1864,25 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/warmup":
                 probe = probe_deps()
                 self._send_json(200, {"ok": True, "model": probe["tts"]})
+                return
+            if self.path == "/tts/normalize":
+                # 只回规范化结果、不加载模型：探针用它核对「服务端跑的到底
+                # 是哪一版规则」，避免本地规则与线上实现悄悄分叉。
+                payload = json.loads(self._read_body() or b"{}")
+                raw = str(payload.get("text") or "").strip()
+                enabled = request_tns_enabled(payload, TNS_ENABLED)
+                norm = normalize_for_speech(raw, enabled)
+                self._send_json(
+                    200,
+                    {
+                        "text": norm.text,
+                        "original": norm.original,
+                        "changed": norm.changed,
+                        "hits": norm.hits,
+                        "version": TNS_VERSION,
+                        "enabled": enabled,
+                    },
+                )
                 return
             if self.path == "/tts":
                 self._handle_tts()
@@ -1862,7 +1908,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_tts(self) -> None:
         payload = json.loads(self._read_body() or b"{}")
-        text = str(payload.get("text") or "").strip()
+        text = apply_tns(str(payload.get("text") or "").strip(), payload)
         if not text:
             self._send_json(400, {"code": "EMPTY_TEXT", "reason": "text 不能为空"})
             return
@@ -1918,7 +1964,7 @@ class Handler(BaseHTTPRequestHandler):
         **0.192s**，总生成耗时几乎不变（1.83s → 1.87s）。
         """
         payload = json.loads(self._read_body() or b"{}")
-        text = str(payload.get("text") or "").strip()
+        text = apply_tns(str(payload.get("text") or "").strip(), payload)
         if not text:
             self._send_json(400, {"code": "EMPTY_TEXT", "reason": "text 不能为空"})
             return

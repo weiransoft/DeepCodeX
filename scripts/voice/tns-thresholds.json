@@ -1,0 +1,10 @@
+{
+  "_comment": "TNS 多场景门禁阈值。先验来自 2026-11-07 既有真机事实，不按本次结果倒推：全局语速基准 4.1×speed=4.92 等效单元/秒；长文本/矩阵门禁的块内最长静音 ≤900ms、异常长静音 0；单块 N/A 替代判据的语速偏差 ≤20%；ASR 回听的荒谬模式来自上一轮 code:m 的逐字念证据。放宽任何一项必须写明新的真机依据。",
+  "global_rate_units_s": 4.92,
+  "rate_bias_pct": 20.0,
+  "max_internal_gap_ms": 900.0,
+  "long_gaps": 0,
+  "min_audio_s": 0.3,
+  "min_chunks": 1,
+  "code_version": "tns-1.0"
+}

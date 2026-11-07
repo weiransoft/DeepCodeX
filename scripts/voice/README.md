@@ -924,6 +924,94 @@ python3 scripts/voice/mixed_matrix_probe.py --cells spoken:m,spoken:l  # A/B
 - F0 / 质心只是音色代理；`spoken` 是人工改写的固定样本，证明的是规范化方向
   有效，不等于已实现通用 TNS。全部为 sidecar 客观指标，不等于桌面 WebView 听感。
 
+## TNS 文本前端规范化（2026-11-07 第六轮，默认打开）
+
+### 为什么必须做
+
+第五轮 25 格矩阵如实报出 15 项违规，ASR 回听给出了决定性证据：
+
+| 原文 | 音频 | ASR 实际念出的 |
+|---|---:|---|
+| `POST https://127.0.0.1:` | 5.54s | **Post HTTPs.** |
+| `{asr, tts}` | 6.66s | **S R T E S** |
+| `3000ms` | — | **三千米秒** |
+
+这不是语速伺服或音色参数的问题：模型对 URL / JSON / 路径这类非口语文本
+生成轨迹发散，`speech_units()` 按「拉丁串 2.8 字母折 1」折算的发音量被系统性
+低估，倍率撞上限后仍偏长。提高上限只会让指标好看、损音质；**先把送进模型的
+文本变成可朗读的中文**才是根子。人工口语化 A/B 已验证方向：语速极差
+53~72% → 0.12~1.16%、TTFA 645~739ms → 476~524ms。
+
+### 打开与回退
+
+| 层 | 做法 |
+|---|---|
+| 生产默认 | `start.sh` 显式 `export DCX_VOICE_TNS=1`；`/health.versions.tns` 回显 `tns-1.0` |
+| 一键回退 | `DCX_VOICE_TNS=0 bash scripts/voice/start.sh`（**需重启**，模块在进程启动时加载） |
+| 单次关闭 | 请求体 `{"tns": false}`，只影响本次，供 A/B 真机对照 |
+| 核对实现 | `POST /tts/normalize` 只回规范化结果、不加载模型，探针用它防「本地规则与线上分叉」 |
+
+实现只有一份权威规则 `text_normalize.py`，在 `_handle_tts` / `_handle_tts_stream`
+的 `apply_tns()` 里生效；**只改送去合成的文本，界面上展示的原文一个字不动**。
+Web 网关重建请求体时不带 `tns`，因此桌面端沿用 sidecar 的环境变量默认值，
+请求级开关仅直连 / 探针可用。
+
+### 规则（按固定顺序，全部确定性）
+
+| 顺序 | 规则 | 例子 |
+|---|---|---|
+| ① | URL / IP / 端口 / 路径 | `https://127.0.0.1:8791/tts/stream` → `加密网址 一二七点零点零点一，端口八七九一，路径 语音合成，stream` |
+| ① | 嵌套 JSON、`:`、true/false/null | `{ok: true, model: {asr, tts}}` → `ok 是 真，model 是 语音识别，语音合成` |
+| ① | 用户主目录 / 隐藏目录 / 扩展名 | `~/.deepcode/soul/config.json` → `用户主目录下的路径 隐藏目录 deepcode，soul，config 点 json` |
+| ② | 单位 / 百分比 / 版本 / 日期 / 编号 / 电话 | `3000ms` → `三千毫秒`；`18.6%` → `百分之十八点六`；`v2.14.3` → `版本二点十四点三` |
+| ③④ | 有限同义缩写白名单 | `GET`→读取、`ASR`→语音识别、`npm`→Node 包管理器 |
+| ⑤ | 符号 | `=`→等于、`#10247`→编号一零二四七、`&&`→并且、`@`→艾特、`[voice]`→voice、`A/B`→A 和 B |
+
+四条红线：
+
+- **诚实降级**：没命中的原样返回，看不懂的结构不猜语义、不补内容；超大数字退化为逐位读。
+- **幂等**：`normalize(normalize(x)) == normalize(x)`，前端若将来也做规范化不会串改。
+- **不误伤口语**：纯中文、无标点长句、普通中英混排（`session.ts` / `openai-provider` /
+  `X-Tts-Voice`）零改动；连字符复合词整体跳过缩写白名单。全大写缩写与纯缩写分开，
+  避免把「你 get 到了吗」改成「你 读取 到了吗」。
+- **口径一致**：语速分母改用 `speech_units(normalize(text))`。`longtext_probe.py`、
+  `mixed_matrix_probe.py`、`check_continuity.py` 都加了 `--tns on/off`，
+  off 逐字复现旧基线，on 才按真正念出来的文本算单元数。
+
+### 验收
+
+```bash
+npm run test:voice:tns:unit   # 119 项离线检查：15 条 golden、数字读法、幂等、降级、覆盖率
+npm run test:voice:tns        # 15 场景 × off/on 双跑 + 每路 ASR 回听 + WAV 落盘
+npm run test:voice:longtext   # 四条长文本，默认 TNS on，仍 PASS 4/4
+npm run test:voice:matrix     # 25 格矩阵，默认 TNS on；--tns off 可复现旧基线
+```
+
+`tns_probe.py` 不靠波形自证：每路音频都送回 `/asr`，看模型**实际念出了什么**，
+按 fixtures 里的同义关键词组与荒谬模式判定。可听样本落在
+`<out>/audio/<scene>-off.wav`、`-on.wav`、`ab-<scene>.wav`（off → 0.7s 静音 → on）。
+规则输出固化在 `tns-fixtures.json`，Python 单测 / 服务端 `/tts/normalize` /
+真机探针三方共用。
+
+首轮 15 场景如实报出 2 项违规：ASR 把 `config` 写成 `Config`（大小写折叠即可，
+不是 TTS 错读）、`npx tsc` 被逐字母念成「N P X T S C」拖出 23.01% 语速偏差。
+后者按 ASR 证据把 `npm/npx/tsc` 加进白名单后回到 4.88 单元每秒，
+**没有放宽任何阈值**。最终 15/15 场景、代码层 15/15 一致、门禁 0 项违规。
+25 格矩阵 on/off 全量对照与逐场景 ASR 原文见
+`docs/proposals/super-agent/voice/tns-acceptance-2026-11-07.md`。
+
+### 诚实边界
+
+- TNS 是**有限规则集**，不是通用文本理解：未知缩写、新类型非口语文本原样透传，
+  遇到就要补白名单并重跑 ASR 回听。`DCX_VOICE_RATE_SERVO` 之类大写下划线标识符
+  仍会被模型连读成含混串（真机 ASR：`DCXViewWithRadiusEverAll`），本轮没有猜语义。
+- 规范化让「看到的字」与「听到的字」略有差异，这是 TNS 的固有代价；
+  百分比、版本号、路径的中文读法由 golden fixtures 锁定，可逐条审计。
+- ASR 自己会认错字（「首块」→「手快」、「session.ts」→「session TS」），
+  关键词才用同义组；不应把 ASR 错字当成 TTS 错读。
+- 网关路径没有做脚本级端到端验证（桌面 WebView 用独立 JWT，脚本不代跑）；
+  sidecar 单点生效由 `/tts/normalize` 与直连真机覆盖，**桌面端真实听感仍需本人确认**。
+
 ## 已知限制（诚实边界）
 
 写在这里而不是藏在代码注释里，因为每一条都会影响你的实际体验：

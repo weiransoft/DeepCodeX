@@ -39,6 +39,7 @@ import numpy as np
 REPO = Path("/Users/wangwei/Documents/VG/DeepCodeX-cli")
 sys.path.insert(0, str(REPO / "scripts/voice"))
 from mlx_voice_server import rebalance_tail, speech_units  # noqa: E402
+from text_normalize import normalize_for_speech  # noqa: E402
 from continuity import (  # noqa: E402
     SILENCE_RMS_RATIO,
     _autocorr_f0,
@@ -54,6 +55,17 @@ ENGINE = "qwen3-customvoice"
 VOICE = "sinan"
 SPEED = 1.2
 OUT = Path("/tmp/dcx-longtext-probe")
+# TNS 默认打开（2026-11-07 产品决策）；`--tns off` 逐字复现旧基线。
+# 分母必须按服务端真正念出来的文本算，否则规范化后语速会被系统性低估。
+TNS = True
+
+
+def spoken(text: str) -> str:
+    return normalize_for_speech(text, TNS).text
+
+
+def tts_payload(text: str) -> dict:
+    return {"text": text, "engine": ENGINE, "voice": VOICE, "speed": SPEED, "tns": TNS}
 
 STRONG = set("。！？!?；;…")
 WEAK = set("，,、：:")
@@ -336,13 +348,10 @@ def run_one(name: str, text: str) -> dict:
     boundaries: list[int] = []
     rate = 24000
     for index, block in enumerate(blocks):
-        status, data, elapsed = post(
-            "/tts/stream",
-            {"text": block, "engine": ENGINE, "voice": VOICE, "speed": SPEED},
-        )
+        status, data, elapsed = post("/tts/stream", tts_payload(block))
         chunks = split_stream_chunks(data) if status == 200 else []
         x, rate = join_wavs(chunks)
-        units = speech_units(block)
+        units = speech_units(spoken(block))
         metrics = analyze_clip(to_wav(x, rate), len(block))
         per_block.append(
             {
@@ -388,9 +397,7 @@ def run_one(name: str, text: str) -> dict:
     jumps = boundary_jumps(full, rate, boundaries)
 
     # 对照：整段一次请求（服务端内部按 48 字分段）
-    status, data, elapsed = post(
-        "/tts/stream", {"text": text, "engine": ENGINE, "voice": VOICE, "speed": SPEED}
-    )
+    status, data, elapsed = post("/tts/stream", tts_payload(text))
     ref_chunks = split_stream_chunks(data) if status == 200 else []
     ref_x, ref_rate = join_wavs(ref_chunks)
     ref_metrics = analyze_clip(to_wav(ref_x, ref_rate), len(text))
@@ -495,12 +502,13 @@ def evaluate_case(case: dict[str, Any], thresholds: dict[str, float]) -> list[di
 
 
 def main() -> int:
-    global PORT, ENGINE, VOICE, SPEED, OUT
+    global PORT, ENGINE, VOICE, SPEED, OUT, TNS
     parser = argparse.ArgumentParser(description="长文本语音连贯性专项验收（复刻前端分块链路）")
     parser.add_argument("--port", type=int, default=int(os.environ.get("PROBE_PORT", "8791")), help="sidecar 端口")
     parser.add_argument("--engine", default=ENGINE)
     parser.add_argument("--voice", default=VOICE)
     parser.add_argument("--speed", type=float, default=SPEED)
+    parser.add_argument("--tns", choices=("on", "off"), default="on", help="TTS 文本前端规范化开关：on=生产默认，off=旧基线对照")
     parser.add_argument("--out", default=str(OUT), help="报告输出目录")
     parser.add_argument("--cases", default="", help="逗号分隔的语料名，默认全部")
     parser.add_argument("--texts", default="", help="自定义语料文件（每行一条，# 开头为注释）")
@@ -509,6 +517,7 @@ def main() -> int:
     args = parser.parse_args()
 
     PORT, ENGINE, VOICE, SPEED = args.port, args.engine, args.voice, args.speed
+    TNS = args.tns == "on"
     OUT = Path(args.out)
     OUT.mkdir(parents=True, exist_ok=True)
 
@@ -528,6 +537,7 @@ def main() -> int:
         "engine": ENGINE,
         "voice": VOICE,
         "speed": SPEED,
+        "tns": TNS,
         "cases": [],
     }
     for name in selected:

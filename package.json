@@ -35,6 +35,8 @@
     "test:voice:longtext": "python3 scripts/voice/longtext_probe.py --check",
     "test:voice:matrix": "python3 scripts/voice/mixed_matrix_probe.py --check",
     "test:voice:matrix:unit": "python3 scripts/voice/test_mixed_matrix.py",
+    "test:voice:tns": "python3 scripts/voice/tns_probe.py --check",
+    "test:voice:tns:unit": "python3 scripts/voice/test_text_normalize.py",
     "release:version": "node scripts/version.js",
     "prepare:package": "node scripts/prepare-package.js",
     "prepare:vscode": "node scripts/prepare-vscode.js",

@@ -1,0 +1,158 @@
+{
+  "_comment": "TNS 多场景 golden fixtures。expected 是人工审阅后锁定的规则输出（不是从门禁结果倒推）；Python 单测、服务端 /tts/normalize、真机 ASR 回听探针共用同一份。asr_expect 每组为同义写法（大小写折叠），命中任一即算；asr_forbid 是逐字母念/含混生成的荒谬模式。改规则必须同步更新这里并写明真机依据：cli_flags 的 npm/npx/tsc 展开来自 2026-11-07 首轮 ASR 回听「N P X T S C」与 23.01% 语速偏差。",
+  "version": "tns-1.0",
+  "scenes": [
+    {
+      "name": "url_ip_port",
+      "label": "URL / IP / 端口 / 路径",
+      "text": "POST https://127.0.0.1:8791/tts/stream 就能合成语音。",
+      "expected": "发送 加密网址 一二七点零点零点一，端口八七九一，路径 语音合成，stream 就能合成语音。",
+      "rules": ["url", "abbrev_upper"],
+      "asr_expect": [
+        ["一二七", "127"],
+        ["八七九一", "8791"],
+        ["语音合成", "合成"]
+      ],
+      "asr_forbid": ["米秒"]
+    },
+    {
+      "name": "json_nested",
+      "label": "嵌套 JSON / 布尔值 / 小写缩写",
+      "text": "返回 {ok: true, model: {asr, tts}} 就说明服务正常。",
+      "expected": "返回 ok 是 真，model 是 语音识别，语音合成 就说明服务正常。",
+      "rules": ["json", "abbrev"],
+      "asr_expect": [
+        ["真", "正常"],
+        ["语音识别", "识别"],
+        ["语音合成", "合成"]
+      ],
+      "asr_forbid": ["S R T", "S R T E S", "米秒"]
+    },
+    {
+      "name": "path_home",
+      "label": "用户主目录 / 隐藏目录 / 文件名",
+      "text": "配置写在 ~/.deepcode/soul/config.json 里。",
+      "expected": "配置写在 用户主目录下的路径 隐藏目录 deepcode，soul，config 点 json 里。",
+      "rules": ["path"],
+      "asr_expect": [["配置"], ["隐藏目录", "目录"], ["config", "配置文件"]],
+      "asr_forbid": []
+    },
+    {
+      "name": "unit_ms",
+      "label": "毫秒单位（旧版念成「米秒」）",
+      "text": "首块 192ms，整块 1821ms，超时设成 3000ms 就够。",
+      "expected": "首块 一百九十二毫秒，整块 一千八百二十一毫秒，超时设成 三千毫秒 就够。",
+      "rules": ["unit"],
+      "asr_expect": [["毫秒"], ["三千", "3000"]],
+      "asr_forbid": ["米秒"]
+    },
+    {
+      "name": "percent",
+      "label": "百分比",
+      "text": "抖动从 0.79% 和 1.66% 压到 5% 以内。",
+      "expected": "抖动从 百分之零点七九 和 百分之一点六六 压到 百分之五 以内。",
+      "rules": ["percent"],
+      "asr_expect": [["百分之"], ["以内"]],
+      "asr_forbid": []
+    },
+    {
+      "name": "version_date",
+      "label": "版本号 / 日期",
+      "text": "版本号从 v2.14.3 升到 v3.0.1，发布日期 2026-11-07。",
+      "expected": "版本号从 版本二点十四点三 升到 版本三点零点一，发布日期 二零二六年十一月七日。",
+      "rules": ["date", "version"],
+      "asr_expect": [["版本"], ["年"], ["月"]],
+      "asr_forbid": []
+    },
+    {
+      "name": "issue_phone",
+      "label": "工单编号 / 电话号码",
+      "text": "工单号 #10247，联系电话 400-800-1234。",
+      "expected": "工单号 编号一零二四七，联系电话 四零零 八零零 一二三四。",
+      "rules": ["phone", "issue"],
+      "asr_expect": [
+        ["编号", "工单"],
+        ["联系电话", "电话"]
+      ],
+      "asr_forbid": []
+    },
+    {
+      "name": "env_assign",
+      "label": "环境变量赋值 / 大写下划线标识符",
+      "text": "环境变量 DCX_VOICE_RATE_SERVO=0 可一键回退。",
+      "expected": "环境变量 DCX VOICE RATE SERVO 等于 0 可一键回退。",
+      "rules": ["upper_snake", "assign"],
+      "asr_expect": [["环境变量"], ["等于", "回退"]],
+      "asr_forbid": []
+    },
+    {
+      "name": "log_bracket",
+      "label": "方括号日志 / 等号 / 流式分片",
+      "text": "日志里 [voice] tts-stream chunks=6 表示流式生效。",
+      "expected": "日志里 voice tts-stream chunks 等于 6 表示流式生效。",
+      "rules": ["brackets", "assign"],
+      "asr_expect": [["日志"], ["流式", "生效"]],
+      "asr_forbid": ["STMA"]
+    },
+    {
+      "name": "cli_flags",
+      "label": "命令行 && / --参数",
+      "text": "跑 npm run check && npx tsc --noEmit 两条都要绿。",
+      "expected": "跑 Node 包管理器 run check 并且 Node 包执行器 TypeScript 编译检查 参数 noEmit 两条都要绿。",
+      "rules": ["cli_flag", "and", "abbrev"],
+      "asr_expect": [
+        ["并且", "两条都要绿", "都要绿"],
+        ["参数", "noEmit"]
+      ],
+      "asr_forbid": []
+    },
+    {
+      "name": "abbrev_pair",
+      "label": "HTTP 方法 / API 路径 / A斜杠B / speaker 等号",
+      "text": "GET /api/voice/health 里的 ASR/TTS 共用 speaker=serena。",
+      "expected": "读取 路径 接口，voice，health 里的 语音识别 和 语音合成 共用 speaker 等于 serena。",
+      "rules": ["path", "slash_ab", "abbrev_upper", "abbrev", "assign"],
+      "asr_expect": [
+        ["读取", "接口"],
+        ["语音识别", "语音合成"]
+      ],
+      "asr_forbid": []
+    },
+    {
+      "name": "pure_cn",
+      "label": "纯中文（对照组，必须零改动）",
+      "text": "我先把刚才那三处改动从头到尾捋了一遍，慢慢说给你听。",
+      "expected": "我先把刚才那三处改动从头到尾捋了一遍，慢慢说给你听。",
+      "rules": [],
+      "asr_expect": [["三处改动", "从头到尾"], ["慢慢说"]],
+      "asr_forbid": []
+    },
+    {
+      "name": "mixed_tech",
+      "label": "中英混排 / 连字符复合词（对照组，必须零改动）",
+      "text": "这次我把 session.ts 里的 openai-provider 重新对了一遍。",
+      "expected": "这次我把 session.ts 里的 openai-provider 重新对了一遍。",
+      "rules": [],
+      "asr_expect": [["重新对了一遍", "对了一遍"]],
+      "asr_forbid": []
+    },
+    {
+      "name": "no_punct",
+      "label": "无标点长句（对照组，必须零改动）",
+      "text": "没有标点的短文本也能暴露语速漂移",
+      "expected": "没有标点的短文本也能暴露语速漂移",
+      "rules": [],
+      "asr_expect": [["语速漂移", "没有标点"]],
+      "asr_forbid": []
+    },
+    {
+      "name": "email_at",
+      "label": "邮箱 / @ 提及",
+      "text": "有问题发到 support@example.com 或者群里 @我。",
+      "expected": "有问题发到 support 艾特 example.com 或者群里 艾特 我。",
+      "rules": ["at"],
+      "asr_expect": [["艾特"], ["或者群里", "群里"]],
+      "asr_forbid": []
+    }
+  ]
+}
