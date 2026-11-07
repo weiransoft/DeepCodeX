@@ -80,6 +80,8 @@ import {
   finishVoice,
   noteVoiceConnectionLost,
   noteVoiceConnectionRestored,
+  noteVoiceLlmTiming,
+  setVoiceInterruptHandler,
 } from "./voice/voice-bus";
 
 /** 登录态三阶段：checking=启动检查中；authed=已登录；anon=未登录/会话过期 */
@@ -247,6 +249,9 @@ export function App() {
     (e: LlmDeltaEvent): void => {
       if (e.chatId !== activeChatIdRef.current) return; // 丢弃旧会话残余事件
       applyStreaming(true);
+      // 语音延迟埋点：LLM 请求起点 / 首正文 token（TTFT）。
+      // 只写时间戳，不撤重连看门狗 —— 只有正文才证明本轮还活着。
+      noteVoiceLlmTiming(e.timing);
       // 语音：把累积正文喂给播报队列（按句切分后逐句合成）。
       // 语音关闭或服务未就绪时总线里没有实例，这里是空操作。
       feedVoice(e.previewText);
@@ -1155,6 +1160,24 @@ export function App() {
       showToast(e instanceof Error ? e.message : "停止失败");
     });
   }, [handleUnauthorized, showToast]);
+
+  /**
+   * 语音打断 → 取消在飞 LLM 生成（打断事务的一环）
+   *
+   * 只在确实有流式生成时发请求：单纯重播一条旧回复被打断，不该取消任何东西。
+   * 与手动「停止生成」不同，这里刻意**不调 `finishVoice()`** —— 用户打断的
+   * 含义是「别念了」，`finishFeed()` 会把残句补念出来，正好适得其反。
+   * 失败静默：打断后用户马上要说下一句，弹一个「停止失败」只会挡路。
+   */
+  useEffect(
+    () =>
+      setVoiceInterruptHandler(() => {
+        const chatId = activeChatIdRef.current;
+        if (chatId === null || !streamingRef.current) return;
+        interruptChat(chatId).catch(() => undefined);
+      }),
+    []
+  );
 
   /** 登出：清 Cookie 并复位全部状态 */
   const logout = useCallback((): void => {

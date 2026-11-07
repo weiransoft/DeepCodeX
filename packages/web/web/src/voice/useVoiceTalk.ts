@@ -23,14 +23,22 @@
  *
  * 按住说话仍然可用（`startTalk` / `stopTalk` 语义不变），只是不再是唯一路径。
  *
- * ## 打断（barge-in）怎么落地
+ * ## 打断（barge-in）是一次事务
  *
  * 播报期间持续监测麦克风电平；连续 300ms 超过（阈值的 2 倍，抵消外放回声）
- * 就停播并回调。停播后**不自动开始录音**——用户可能只是路过说了句话，
- * 直接开录会显得很唐突，改为由 UI 提示"继续按住说话"。
+ * 就触发。一次打断同时撤三条链路：播放队列（含在飞 TTS）、在飞 ASR、
+ * 在飞 LLM 生成（经 `voice-bus` 交给 App 发 `/interrupt`）。只停声音会让
+ * 旧回复继续占住 session-pool 串行队列，新插话排在后面 → 越聊越迟钝。
  *
- * 被打断时把「已说出来的部分」记进 `lastInterruption`：UI 可以据此提示
- * 「上一句没说完」，也为将来把打断时间戳送进下一轮 prompt 留好出口。
+ * 免按住模式下打断即自动开录（用户正在说的这句继续收进去，说完自动提交）；
+ * 按住说话模式不自动开录 —— 那种模式要求一直按着，自动开录只会让人莫名。
+ *
+ * 刻意**不复用** App 的 `stop()`：它带 `finishVoice()`，会把残句补念出来，
+ * 而用户打断的意思正是「别念了」。
+ *
+ * 被打断时把「已说出来的部分」与 `turnId` 记进 `lastInterruption`。
+ * 注意：服务端会话历史仍记完整回复文本，「只记实际听到的音频」需要改
+ * 消息协议，属于 P1，当前**未实现**。
  *
  * ## 语音指令行
  *
@@ -60,14 +68,34 @@ import { SpeechQueue } from "./player";
 import { SentenceStream, isNewTurnText } from "./sentence";
 import { scanVoiceDirective, settleVoiceDirective } from "./directive";
 import { TurnDirective } from "./turn-directive";
-import { defaultHandsFree, readHandsFree, readStreamPlayback, subscribeHandsFree, writeHandsFree } from "./preference";
+import {
+  defaultHandsFree,
+  readBackchannelHold,
+  readEndpointProfile,
+  readHandsFree,
+  readStreamPlayback,
+  subscribeHandsFree,
+  writeHandsFree,
+} from "./preference";
 import { notifySoulConfigChanged, subscribeSoulConfigChanged } from "./config-events";
 import { WakeListener } from "./wake-listener";
 import { SILENCE_PEAK, isSignalAbsent, nextSmoothedLevel, quantizeLevel } from "./level";
 import { takeWithinBudget } from "./speech-budget";
+import { requestVoiceInterrupt } from "./voice-bus";
+import {
+  mergeLlmTiming,
+  nowEpochMs,
+  summarizeVoiceTurnLatency,
+  type LlmStreamTiming,
+  type VoiceTurnLatency,
+  type VoiceTurnTiming,
+} from "./latency";
 
 /** 延迟样本保留条数（够看趋势，不至于无限增长） */
 const LATENCY_SAMPLES = 10;
+
+/** 用户说完时刻的有效期：超过就当陈旧值丢弃，不污染新轮次的分段延迟 */
+const VOICE_TRACE_MAX_AGE_MS = 30_000;
 
 /** thinking 相位的兜底时长：模型/链路异常时不至于永远显示「在想」 */
 const THINKING_TIMEOUT_MS = 8000;
@@ -77,8 +105,15 @@ const NO_SIGNAL_HINT_MS = 2500;
 
 /** 一轮延迟样本 */
 export interface LatencySample {
-  /** 用户说完 → 第一个音出声（毫秒） */
+  /** 用户说完 → 第一个音出声（毫秒，单调时钟原值） */
   ttfaMs: number;
+  /**
+   * 同一轮的分段延迟（epoch 时钟，可能缺段）
+   *
+   * 与 `ttfaMs` 口径不同、互为校验：前者稳定可比，后者回答「慢在哪一段」。
+   * 非语音输入（打字）或缺 SSE 时序的旧服务端没有完整分段。
+   */
+  breakdown?: VoiceTurnLatency;
 }
 
 /**
@@ -100,6 +135,13 @@ export interface VoiceInterruption {
   at: number;
   /** 被打断前已经念出来的部分（可能是空串） */
   spokenText: string;
+  /**
+   * 本轮标识（仅前端记账）
+   *
+   * 为后续「历史只记用户实际听到的音频」留锚点。当前**尚未**把打断位置
+   * 回注服务端会话历史 —— 那需要改消息协议，属于 P1，不要误以为已实现。
+   */
+  turnId: string;
 }
 
 /** hook 选项 */
@@ -164,6 +206,12 @@ export interface VoiceTalk {
    * 用于「上一轮的收尾事件可能缺席」时给状态机一个确定的起点。
    */
   beginTurn: () => void;
+  /**
+   * 记录本轮 LLM 时序（由 App 的 `llm_delta` 经语音总线透传）
+   *
+   * 只写时间戳，不改播放状态；语音关闭或旧服务端没有 timing 时为空操作。
+   */
+  noteLlmTiming: (timing: LlmStreamTiming) => void;
   /** 停止播报（打断） */
   stopSpeaking: () => void;
   /** 是否自动朗读 */
@@ -214,6 +262,17 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   const stopMonitorRef = useRef<(() => void) | null>(null);
   const speechEndAtRef = useRef(0);
   const firstAudioRef = useRef(true);
+  /** 本轮五时间戳（epoch ms，与 core 透传的 LLM 时序同一时钟） */
+  const traceRef = useRef<VoiceTurnTiming>({});
+  /**
+   * 用户说完的墙上时刻，等待下一轮 `feed` 采纳
+   *
+   * 不直接写 `traceRef`：`Composer.doSend()` 会调 `beginVoiceTurn()` →
+   * `resetTurnState()`，而它发生在识别完成之后，会把整条 trace 清空。
+   * 先在独立 ref 里过一道，首帧正文到达时再合并，并加 30s 新鲜度上限，
+   * 避免 ASR 失败或切会话后残留的旧时刻污染下一轮。
+   */
+  const speechEndEpochRef = useRef(0);
   /** 最近一次喂入的累积文本（flush 需要它取残句） */
   const lastTextRef = useRef("");
   /**
@@ -239,6 +298,10 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   const interruptedRef = useRef(false);
   /** 打断后自动开录的入口（startTalk 定义在后面，用 ref 打破循环依赖） */
   const startTalkRef = useRef<(() => Promise<void>) | null>(null);
+  /** 在飞的 ASR 请求（打断事务里要一并取消，见 startBargeIn） */
+  const asrAbortRef = useRef<AbortController | null>(null);
+  /** 前端轮次序号，用于给打断记录一个稳定的 turnId */
+  const turnSeqRef = useRef(0);
   /**
    * 语音指令状态（跨轮默认 + 本轮快照）
    *
@@ -348,7 +411,14 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
             };
       };
       queueRef.current = new SpeechQueue(
-        (text, signal) => synthesizeSpeech(text, voiceOverride(), signal),
+        (text, signal) =>
+          synthesizeSpeech(text, voiceOverride(), signal).then((url) => {
+            // 整块模式：整段 WAV 到手即「首字节」；流式模式在下面按首块记
+            if (traceRef.current.ttsFirstByteAtMs === undefined) {
+              traceRef.current.ttsFirstByteAtMs = nowEpochMs();
+            }
+            return url;
+          }),
         {
           onSpeakingChange: (value) => {
             setSpeaking(value);
@@ -359,10 +429,12 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
                 thinkingTimerRef.current = null;
               }
               if (firstAudioRef.current && speechEndAtRef.current > 0) {
-                // 首个音开始播 → 记录 TTFA（说话结束到出声的真实间隔）
+                // 首个音开始播 → 记录 TTFA（单调时钟）与同一轮的分段延迟
                 const ttfaMs = Math.round(performance.now() - speechEndAtRef.current);
                 firstAudioRef.current = false;
-                setLatencies((prev) => [...prev.slice(-(LATENCY_SAMPLES - 1)), { ttfaMs }]);
+                traceRef.current.firstAudioAtMs = nowEpochMs();
+                const breakdown = summarizeVoiceTurnLatency(traceRef.current);
+                setLatencies((prev) => [...prev.slice(-(LATENCY_SAMPLES - 1)), { ttfaMs, breakdown }]);
               }
             }
           },
@@ -373,7 +445,12 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
             console.warn("语音播报降级", message);
           },
           onInterrupted: (spokenText) => {
-            setLastInterruption({ at: performance.now(), spokenText });
+            turnSeqRef.current += 1;
+            setLastInterruption({
+              at: performance.now(),
+              spokenText,
+              turnId: `voice-turn-${turnSeqRef.current}`,
+            });
           },
         },
         {
@@ -384,7 +461,21 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
            */
           streamSynth: (text, onChunk, signal) => {
             if (!readStreamPlayback()) return Promise.resolve(0);
-            return streamSpeech(text, onChunk, voiceOverride(), signal);
+            let first = true;
+            return streamSpeech(
+              text,
+              (url, index) => {
+                if (first) {
+                  first = false;
+                  if (traceRef.current.ttsFirstByteAtMs === undefined) {
+                    traceRef.current.ttsFirstByteAtMs = nowEpochMs();
+                  }
+                }
+                onChunk(url, index);
+              },
+              voiceOverride(),
+              signal
+            );
           },
         }
       );
@@ -447,12 +538,21 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   const startBargeIn = useCallback(async () => {
     if (micRef.current === null) micRef.current = new MicCapture();
     try {
-      stopMonitorRef.current = await micRef.current.startMonitor(() => {
-        queueRef.current?.stop();
-        setSpeaking(false);
-        interruptedRef.current = true;
-        if (handsFreeRef.current) void startTalkRef.current?.();
-      });
+      stopMonitorRef.current = await micRef.current.startMonitor(
+        () => {
+          // 一次打断是**事务**：同时撤掉播放、在飞 ASR、在飞 LLM 三条链路。
+          // 只停声音会让旧回复继续生成并占住 session-pool 串行队列，
+          // 用户紧接着插话时新消息排在旧轮后面，表现成「越聊越迟钝」。
+          queueRef.current?.stop();
+          asrAbortRef.current?.abort();
+          requestVoiceInterrupt();
+          setSpeaking(false);
+          interruptedRef.current = true;
+          if (handsFreeRef.current) void startTalkRef.current?.();
+        },
+        // 回馈语 HOLD 默认关：开启会多等 200ms，由用户真机 A/B 决定
+        { holdBackchannels: readBackchannelHold() }
+      );
     } catch {
       // 麦克风不可用时不阻断播报：只是没有打断能力
     }
@@ -479,11 +579,18 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
     resetLevelMeter();
     const mic = micRef.current;
     if (mic === null) return null;
+    // 用户说完的时刻（端到端延迟的起点）；由下一轮 feed 采纳，见 ref 注释
+    speechEndEpochRef.current = nowEpochMs();
     // 识别本身就是「在想」：从这一刻起 UI 该有反馈
     setWaiting(true);
+    // 打断事务：新的一轮说话顶掉仍在飞的旧 ASR，避免两轮识别结果交错。
+    // 打断回调也会 abort 同一个 controller（见 startBargeIn）。
+    const abort = new AbortController();
+    asrAbortRef.current?.abort();
+    asrAbortRef.current = abort;
     try {
       const wav = await mic.stopRecording();
-      const result = await transcribeAudio(wav);
+      const result = await transcribeAudio(wav, abort.signal);
       const text = result.text.trim();
       if (text.length < 2) {
         setWaiting(false);
@@ -493,8 +600,12 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
       return text;
     } catch (e: unknown) {
       setWaiting(false);
+      // 主动取消不是错误：打断后用户马上要说下一句，弹红条只会挡路
+      if (abort.signal.aborted) return null;
       setError(e instanceof Error ? e.message : String(e));
       return null;
+    } finally {
+      if (asrAbortRef.current === abort) asrAbortRef.current = null;
     }
   }, [resetLevelMeter]);
 
@@ -510,7 +621,7 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
         // 到达上限自动收尾，走同一条 stopTalk 路径由调用方处理
         setRecording(false);
       };
-      const endpoint = handsFree
+      const handsFreeOptions = handsFree
         ? {
             // 免按住：静音即收尾，识别完直接交给调用方提交
             // 成功后**不清** thinking：真正的下一站是模型回复（播报开始的
@@ -524,9 +635,13 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
                 optionsRef.current.onUtterance?.(text);
               });
             },
+            // 动态判停档位：默认 adaptive（正常句 600ms，短语/长叙述仍 900ms）。
+            // 没有流式 ASR 就没有语义判停，只能按已说时长保守近似；
+            // localStorage 设 legacy 可完整回滚、fast 供真机 A/B。
+            endpoint: { profile: readEndpointProfile() },
           }
         : {};
-      await micRef.current.startRecording(onMaxDuration, { onLevel: handleLevel, ...endpoint });
+      await micRef.current.startRecording(onMaxDuration, { onLevel: handleLevel, ...handsFreeOptions });
       setRecording(true);
       // 开录一段时间后仍然一点声音都没有：多半是静音键、选错设备或被占用。
       // 这条提示只在真的没信号时出现，用户一开口就撤（见 handleLevel）。
@@ -635,6 +750,7 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
    * 新建切句器时才冻结新快照。
    */
   const resetTurnState = useCallback(() => {
+    traceRef.current = {};
     streamRef.current = null;
     turnTextRef.current = "";
     lastTextRef.current = "";
@@ -647,6 +763,16 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
     // TTFA 基准由下一次 feed 重新起算，不把上一次发送的耗时算进来
     speechEndAtRef.current = 0;
     firstAudioRef.current = true;
+  }, []);
+
+  /**
+   * 记录 LLM 时序（SSE → 语音总线 → 这里）
+   *
+   * 只写时间戳，不改播放状态。用 `mergeLlmTiming` 纯函数合并，首帧只带
+   * `startedAtMs` 也安全：后续带 `firstContentMs` 的帧会补上首正文时刻。
+   */
+  const noteLlmTiming = useCallback((timing: LlmStreamTiming): void => {
+    traceRef.current = mergeLlmTiming(traceRef.current, timing);
   }, []);
 
   /** 朗读文本 */
@@ -672,6 +798,8 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
       lastTextRef.current = "";
       speechEndAtRef.current = performance.now();
       firstAudioRef.current = true;
+      // 显式朗读/重播没有「用户说完」时刻，别把上一次语音输入的旧值算进来
+      speechEndEpochRef.current = 0;
     },
     [available, speakReplies, enqueueForSpeech, queue]
   );
@@ -706,6 +834,12 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
         turnDirective.current.beginTurn();
         speechEndAtRef.current = performance.now();
         firstAudioRef.current = true;
+        // 采纳本轮「用户说完」时刻；打字轮次没有，分段延迟如实留空
+        const spokenAt = speechEndEpochRef.current;
+        speechEndEpochRef.current = 0;
+        if (spokenAt > 0 && nowEpochMs() - spokenAt <= VOICE_TRACE_MAX_AGE_MS) {
+          traceRef.current.speechEndAtMs = spokenAt;
+        }
       }
 
       // 首行指令：必须先判定「这行要不要念」，否则用户会听到一串 JSON
@@ -882,6 +1016,7 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
     feed,
     finishFeed,
     beginTurn: resetTurnState,
+    noteLlmTiming,
     stopSpeaking,
     speakReplies,
     setSpeakReplies,

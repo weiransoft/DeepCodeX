@@ -36,6 +36,7 @@
  */
 
 import type { VoiceTalk } from "./useVoiceTalk";
+import type { LlmStreamTiming } from "./latency";
 
 /** 连接断开后判定「本轮已丢失」的宽限期（毫秒） */
 export const VOICE_RECONNECT_GRACE_MS = 4000;
@@ -95,6 +96,18 @@ export function feedVoice(cumulative?: string): void {
   current?.feed(cumulative);
 }
 
+/**
+ * 透传 LLM 流式时序（请求起点 / 首正文 token）
+ *
+ * 与 `feedVoice` 分开：时序帧可能先于任何正文到达（`start` 帧），也可能在
+ * 语音关闭时到达。这里不撤重连看门狗 —— 只有**正文**才证明本轮还活着，
+ * 一条 timing 不能证明，否则连接真死了会漏掉补念收尾。
+ */
+export function noteVoiceLlmTiming(timing: LlmStreamTiming | null | undefined): void {
+  if (!timing) return;
+  current?.noteLlmTiming(timing);
+}
+
 /** 本轮结束（把残句读出来） */
 export function finishVoice(): void {
   clearReconnectTimer();
@@ -136,6 +149,32 @@ export function noteVoiceConnectionRestored(): void {
 export function beginVoiceTurn(): void {
   clearReconnectTimer();
   current?.beginTurn();
+}
+
+/**
+ * 打断事务的「取消在飞生成」处理器
+ *
+ * 播报被打断时，光 `queue.stop()` 只掐掉了声音：LLM 还在流式输出、ASR 可能
+ * 在飞、session-pool 的串行队列还占着本轮。用户马上插话发新消息，就会被
+ * 排在旧轮后面 —— 这正是「越聊越迟钝」的一条暗线。
+ *
+ * 处理器由 `App` 注册（只有它知道 activeChatId），语音层只发一次请求，
+ * 不关心 HTTP 细节。刻意**不复用 App 的 `stop()`**：那个入口会调
+ * `finishVoice()` 把残句补念出来，而用户打断的含义恰恰是「别念了」。
+ */
+let interruptHandler: (() => void) | null = null;
+
+/** 注册打断处理器（后注册覆盖，注销只清自己） */
+export function setVoiceInterruptHandler(handler: () => void): () => void {
+  interruptHandler = handler;
+  return () => {
+    if (interruptHandler === handler) interruptHandler = null;
+  };
+}
+
+/** 请求取消在飞生成；无人注册时静默忽略（语音关闭/测试环境） */
+export function requestVoiceInterrupt(): void {
+  interruptHandler?.();
 }
 
 /** 当前是否已注册（测试用） */

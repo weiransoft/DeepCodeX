@@ -40,6 +40,30 @@ export const ENDPOINT_FRAME_MS = 50;
 /** 判定「说完」需要的连续静音（毫秒） */
 export const ENDPOINT_SILENCE_MS = 900;
 
+/**
+ * 轮次判停档位
+ *
+ * - `legacy`：固定 900ms（`Endpointer` 默认，保证既有单测与行为零回归）。
+ * - `adaptive`：按**已说时长**动态取窗 —— 正常一句话 600ms，短语与长叙述
+ *   仍保持 900ms。这是默认档，省 300ms 而不动两类最易误切的边缘情况。
+ * - `fast`：正常句子压到 350ms，供真机 A/B；没有语义判停时不建议默认开。
+ *
+ * 为什么按「已说时长」而不是语义：当前链路是整段录音后一次性 ASR，
+ * 判停时**没有部分转写文本**，无法知道是数字串还是「嗯」。业界
+ * `semantic_vad` / Smart Turn 需要流式 ASR，属于 P1；这里只用确定可得
+ * 的信号做保守近似，绝不假装有语义。
+ */
+export type EndpointProfile = "legacy" | "adaptive" | "fast";
+
+/** 自适应档：正常句子的静默窗 */
+export const ENDPOINT_ADAPTIVE_SILENCE_MS = 600;
+/** 激进档：正常句子的静默窗（A/B 用，默认不开） */
+export const ENDPOINT_FAST_SILENCE_MS = 350;
+/** 短于此人声时长视为短语（可能只是「嗯 / 好的」），保持保守窗 */
+export const ENDPOINT_SHORT_SPEECH_MS = 600;
+/** 长于此人声时长视为长叙述，句内停顿更长，保持保守窗 */
+export const ENDPOINT_LONG_SPEECH_MS = 3000;
+
 /** 一句有效话的最短人声累计（毫秒） */
 export const ENDPOINT_MIN_SPEECH_MS = 300;
 
@@ -76,6 +100,8 @@ export interface EndpointVerdict {
   silenceMs: number;
   /** 本帧实际使用的阈值（自适应结果，便于诊断与单测） */
   threshold: number;
+  /** 本帧实际使用的静默窗（动态档位下会随已说时长变化，便于诊断与单测） */
+  silenceGoalMs: number;
 }
 
 /** 判定参数（全部可选，测试与调参只改这里） */
@@ -107,6 +133,13 @@ export interface EndpointOptions {
    * 唤醒监听需要：否则一段纯静音会一直录到上限，再把几十秒静音送去识别。
    */
   idleMs?: number;
+  /**
+   * 轮次判停档位（缺省 `legacy` = 固定 900ms）
+   *
+   * 显式传 `silenceMs` 时始终以它为准，档位不生效 —— 单测与特殊场景的
+   * 精确复现优先。
+   */
+  profile?: EndpointProfile;
 }
 
 /**
@@ -118,6 +151,9 @@ export interface EndpointOptions {
 export class Endpointer {
   private readonly frameMs: number;
   private readonly silenceGoal: number;
+  /** 是否显式指定了静默窗（显式值永远压过档位） */
+  private readonly explicitSilence: boolean;
+  private readonly profile: EndpointProfile;
   private readonly minSpeechMs: number;
   /** 固定阈值；null 表示自适应 */
   private readonly fixedThreshold: number | null;
@@ -140,13 +176,33 @@ export class Endpointer {
    */
   constructor(options: EndpointOptions = {}) {
     this.frameMs = options.frameMs ?? ENDPOINT_FRAME_MS;
+    this.explicitSilence = options.silenceMs !== undefined;
     this.silenceGoal = options.silenceMs ?? ENDPOINT_SILENCE_MS;
+    this.profile = options.profile ?? "legacy";
     this.minSpeechMs = options.minSpeechMs ?? ENDPOINT_MIN_SPEECH_MS;
     this.idleGoal = options.idleMs ?? 0;
     this.fixedThreshold = options.threshold ?? null;
     this.noiseFloor = options.noiseFloor ?? new NoiseFloorTracker();
     // 跟踪器可能在本轮之前就标定过了（采集器跨轮持有），此时无需缓冲
     this.calibrated = this.fixedThreshold !== null || !this.noiseFloor.calibrating;
+  }
+
+  /**
+   * 本帧生效的静默窗
+   *
+   * 只在**人声帧**上可能变化（`speechMs` 只在 active 时增长，且增长会把
+   * `silenceMs` 归零），所以静音等待期间档位不会来回跳、不会把一次停顿
+   * 用两个不同的窗口判。
+   */
+  private silenceGoalFor(): number {
+    if (this.explicitSilence || this.profile === "legacy") return this.silenceGoal;
+    // 短语（可能只是「嗯 / 好的」）与长叙述（句内停顿更长）都保持 900ms，
+    // 只把「正常一句话」这一段最容易优化、也最不容易误切的区间压短。
+    if (this.speechMs < ENDPOINT_SHORT_SPEECH_MS || this.speechMs > ENDPOINT_LONG_SPEECH_MS) {
+      return this.silenceGoal;
+    }
+    const normal = this.profile === "fast" ? ENDPOINT_FAST_SILENCE_MS : ENDPOINT_ADAPTIVE_SILENCE_MS;
+    return Math.min(normal, this.silenceGoal);
   }
 
   /** 当前使用的人声阈值（自适应或固定） */
@@ -216,10 +272,11 @@ export class Endpointer {
     const threshold = this.currentThreshold();
     const active = rms >= threshold;
 
+    const silenceGoalMs = this.silenceGoalFor();
     let done = false;
     let idle = false;
     if (!this.fired) {
-      if (this.speechMs >= this.minSpeechMs && this.silenceMs >= this.silenceGoal) {
+      if (this.speechMs >= this.minSpeechMs && this.silenceMs >= silenceGoalMs) {
         this.fired = true;
         done = true;
       } else if (this.idleGoal > 0 && this.speechMs === 0 && this.silenceMs >= this.idleGoal) {
@@ -230,7 +287,7 @@ export class Endpointer {
       }
     }
 
-    return { active, done, idle, speechMs: this.speechMs, silenceMs: this.silenceMs, threshold };
+    return { active, done, idle, speechMs: this.speechMs, silenceMs: this.silenceMs, threshold, silenceGoalMs };
   }
 
   /** 是否已经说过话（用于区分「还没开口」与「说完了」） */

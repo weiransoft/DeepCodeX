@@ -102,6 +102,10 @@ export type {
   SessionManagerOptions,
 } from "./session";
 
+// 语音交互延迟：LLM 流式时序（TTFT）类型与纯函数
+export { advanceLlmStreamTiming } from "./llm-stream-timing";
+export type { LlmStreamTiming, LlmStreamTimingState, LlmStreamPhase } from "./llm-stream-timing";
+
 // Provider 抽象层导出（原生 Claude API 支持）
 export { ProviderFactory } from "./providers/provider-factory";
 export { AnthropicProvider, AnthropicLLMClient } from "./providers/anthropic-provider";

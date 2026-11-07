@@ -19,6 +19,8 @@ import {
   noteVoiceConnectionLost,
   noteVoiceConnectionRestored,
   registerVoice,
+  requestVoiceInterrupt,
+  setVoiceInterruptHandler,
   VOICE_RECONNECT_GRACE_MS,
 } from "../web/src/voice/voice-bus";
 import type { VoiceTalk } from "../web/src/voice/useVoiceTalk";
@@ -217,4 +219,69 @@ test("B13 连续连接错误只保留一个定时器；无人注册不启表", a
 test("B14 生产宽限期是秒级，不会把工具等待误判成本轮丢失", () => {
   assert.ok(VOICE_RECONNECT_GRACE_MS >= 2000, "宽限期要盖住一次自动重连");
   assert.ok(VOICE_RECONNECT_GRACE_MS <= 10_000, "太长会让断线后尾巴迟迟不出声");
+});
+
+// ---- 打断事务：取消在飞生成的处理器 ----
+
+test("B15 注册后请求能到达处理器，注销后不再到达", () => {
+  let calls = 0;
+  const off = setVoiceInterruptHandler(() => {
+    calls += 1;
+  });
+  try {
+    requestVoiceInterrupt();
+    requestVoiceInterrupt();
+    assert.equal(calls, 2, "每次打断都要发一次取消，不去重");
+  } finally {
+    off();
+  }
+  requestVoiceInterrupt();
+  assert.equal(calls, 2, "注销后不能再触发");
+});
+
+test("B16 后注册覆盖先注册，且旧注销函数不会误清新处理器", () => {
+  let first = 0;
+  let second = 0;
+  const offFirst = setVoiceInterruptHandler(() => {
+    first += 1;
+  });
+  const offSecond = setVoiceInterruptHandler(() => {
+    second += 1;
+  });
+  try {
+    requestVoiceInterrupt();
+    assert.equal(first, 0);
+    assert.equal(second, 1);
+    offFirst(); // 旧实例的注销不该把当前处理器清掉
+    requestVoiceInterrupt();
+    assert.equal(second, 2);
+  } finally {
+    offSecond();
+  }
+  requestVoiceInterrupt();
+  assert.equal(second, 2);
+});
+
+test("B17 无人注册时请求静默忽略（语音关闭 / 测试环境）", () => {
+  assert.doesNotThrow(() => requestVoiceInterrupt());
+});
+
+test("B18 打断处理器与喂句总线互不干扰", () => {
+  let calls = 0;
+  const offHandler = setVoiceInterruptHandler(() => {
+    calls += 1;
+  });
+  const { voice, fed, state } = fakeVoice();
+  const offVoice = registerVoice(voice);
+  try {
+    requestVoiceInterrupt();
+    feedVoice("你好。");
+    finishVoice();
+    assert.equal(calls, 1);
+    assert.equal(fed.length, 1);
+    assert.equal(state.finished, 1);
+  } finally {
+    offVoice();
+    offHandler();
+  }
 });

@@ -184,8 +184,18 @@ export class WakeListener {
       mic
         .startRecording(
           // 到录音上限：当作有声段处理（宁可多识别一次，也不吞掉真实语音）
-          // 录音到上限的兜底：没有真实帧，threshold 记 0 表示"非自适应判定"
-          () => resolve({ active: false, done: true, idle: false, speechMs: 0, silenceMs: 0, threshold: 0 }),
+          // 录音到上限的兜底：没有真实帧，threshold / silenceGoalMs 记 0
+          // 表示"非自适应判定"，不是真的用 0ms 静默窗判过停
+          () =>
+            resolve({
+              active: false,
+              done: true,
+              idle: false,
+              speechMs: 0,
+              silenceMs: 0,
+              threshold: 0,
+              silenceGoalMs: 0,
+            }),
           { onEndpoint: (result) => resolve(result), endpoint: { idleMs: this.options.idleMs ?? WAKE_IDLE_MS } }
         )
         .catch(() => resolve(null));

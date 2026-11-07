@@ -52,6 +52,8 @@ import type {
   ResolvedDeepcodingSettings,
 } from "./settings";
 import { resolveCurrentSettings } from "./settings";
+// 语音交互延迟可观测性：把「首正文 token」变成可外发的 TTFT（纯函数，见模块注释）
+import { advanceLlmStreamTiming, type LlmStreamTiming, type LlmStreamTimingState } from "./llm-stream-timing";
 // 2026-11-02（L0-1/L0-2/L1-1）：/team 跨宿主执行体 + 智能体→角色桥接 + 工具能力执行器契约
 // 依赖方向：session → {commands, agents, team}，禁止反向（commands 不得 import session）
 import {
@@ -1311,6 +1313,14 @@ export type LlmStreamProgress = {
    */
   thinkingText?: string;
   phase: "start" | "update" | "end";
+  /**
+   * 本帧时序（语音交互延迟可观测性，2026-11-07）
+   *
+   * `startedAt` 是 ISO 字符串，宿主只能算「跑了多久」；这里补上 epoch 毫秒的
+   * 请求起点与**首正文 token 延迟**，Web 经 SSE 透传后可与前端的
+   * speechEnd / TTS 首字节 / 首音频放进同一条时间轴。全部可选，旧宿主零回归。
+   */
+  timing?: LlmStreamTiming;
 };
 
 /**
@@ -1602,6 +1612,13 @@ export class SessionManager {
   private readonly onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   private readonly onSessionEntryUpdated?: (entry: SessionEntry) => void;
   private readonly onLlmStreamProgress?: (progress: LlmStreamProgress) => void;
+  /**
+   * 每个 LLM 请求的时序累计（requestId → 状态）
+   *
+   * `start` 建、`end` 删，异常路径若漏了 `end` 也只是留一条小记录；用
+   * `requestId` 隔离，多个会话/并发轮次互不串扰。不缓存 token、不缓存正文。
+   */
+  private readonly llmStreamTimings = new Map<string, LlmStreamTimingState>();
   private readonly onLlmRetry?: (event: LlmRetryEvent) => void;
   private readonly onMcpStatusChanged?: () => void;
   private readonly onProcessStdout?: (pid: number, chunk: string) => void;
@@ -2258,6 +2275,16 @@ export class SessionManager {
     previewText?: string,
     thinkingText?: string
   ): void {
+    const { state, timing } = advanceLlmStreamTiming(
+      this.llmStreamTimings.get(requestId) ?? null,
+      startedAt,
+      phase,
+      previewText,
+      Date.now()
+    );
+    if (phase === "end") this.llmStreamTimings.delete(requestId);
+    else this.llmStreamTimings.set(requestId, state);
+
     this.onLlmStreamProgress?.({
       requestId,
       sessionId,
@@ -2267,6 +2294,7 @@ export class SessionManager {
       previewText: this.formatStreamPreview(previewText),
       thinkingText: this.formatStreamThinking(thinkingText),
       phase,
+      timing,
     });
   }
 

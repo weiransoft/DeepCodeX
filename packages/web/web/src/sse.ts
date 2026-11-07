@@ -11,6 +11,7 @@
  */
 
 import type { SedimentationSuggestion } from "./chat-model";
+import type { LlmStreamTiming } from "./voice/latency";
 
 /** 权限请求（permission_request 事件中的单个请求项） */
 export interface PermissionRequest {
@@ -42,6 +43,13 @@ export interface LlmDeltaEvent {
    * 与正文分离的 thinking/reasoning 增量，换行保留；旧服务缺省 undefined。
    */
   thinkingText?: string;
+  /**
+   * LLM 流式时序（语音交互延迟可观测性）
+   *
+   * 由 `session-pool` 从 core `LlmStreamProgress.timing` 原样透传；旧服务没有
+   * 该字段时为 `null`。只有语音链路消费，UI 渲染完全忽略它。
+   */
+  timing?: LlmStreamTiming | null;
 }
 
 /**

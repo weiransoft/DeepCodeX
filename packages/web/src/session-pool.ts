@@ -772,6 +772,9 @@ export class SessionPool {
           phase: progress.phase,
           previewText: progress.previewText,
           thinkingText: progress.thinkingText,
+          // 语音交互延迟可观测性：LLM 请求起点 + 首正文 token（TTFT）。
+          // 旧服务/旧宿主没有该字段时传 null，前端按可选处理。
+          timing: progress.timing ?? null,
         });
       },
       // EAG-P5：bash 高危命令人工确认桥接（用户决策 2026-10-04）。

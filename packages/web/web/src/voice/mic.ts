@@ -64,6 +64,17 @@ export const VAD_PLAYBACK_FACTOR = 2;
 /** 判定为"人声开始"需要持续的毫秒数 */
 export const VAD_MIN_SPEECH_MS = 300;
 
+/**
+ * 回馈语 HOLD 的观察窗（毫秒）
+ *
+ * 开启后，人声达到 300ms 时不立刻打断，再看 200ms：短促的「嗯 / 好的」
+ * 说完就静音，判为回馈语不夺轮次；持续说到 500ms 才判为真实插话。
+ * 代价是打断延迟 300ms → 500ms，因此默认关闭，见 `voice/preference.ts`。
+ */
+export const BACKCHANNEL_OBSERVE_MS = 500;
+/** HOLD 判定中「说完」需要的连续静音（毫秒） */
+export const BACKCHANNEL_RELEASE_MS = 100;
+
 /** 录音上限（毫秒）：防止用户按住不放生成超大文件 */
 export const MAX_RECORD_MS = 60_000;
 
@@ -83,6 +94,85 @@ export interface RecordingOptions {
   endpoint?: EndpointOptions;
   /** 每帧电平回调（存在才会跑采样循环；与判定共用同一循环） */
   onLevel?: LevelHandler;
+}
+
+/**
+ * 回馈语 HOLD 判定器（纯状态机，可脱开浏览器单测）
+ *
+ * `push(active)` 返回「这一帧是否应该打断」。不开 HOLD 时等价于原来的
+ * 「连续 ≥300ms 人声触发一次」；开 HOLD 时多观察 `observeMs - minSpeechMs`
+ * 毫秒，短促一声后安静下来就判为回馈语、不夺轮次。
+ */
+export class BackchannelGate {
+  /** 连续超阈值时长 */
+  private hot = 0;
+  /** 本段人声总时长（HOLD 用） */
+  private speechMs = 0;
+  /** 段后连续静音（HOLD 用） */
+  private quiet = 0;
+  /** 本段是否已触发过打断 */
+  private fired = false;
+
+  constructor(
+    private readonly options: {
+      frameMs?: number;
+      minSpeechMs?: number;
+      observeMs?: number;
+      releaseMs?: number;
+      hold?: boolean;
+    } = {}
+  ) {}
+
+  /** 喂一帧「是否达到人声阈值」 */
+  push(active: boolean): boolean {
+    const frameMs = this.options.frameMs ?? VAD_FRAME_MS;
+    const minSpeechMs = this.options.minSpeechMs ?? VAD_MIN_SPEECH_MS;
+    const observeMs = this.options.observeMs ?? BACKCHANNEL_OBSERVE_MS;
+    const releaseMs = this.options.releaseMs ?? BACKCHANNEL_RELEASE_MS;
+    const hold = this.options.hold === true;
+
+    if (active) {
+      this.hot += frameMs;
+      if (hold) {
+        this.speechMs += frameMs;
+        this.quiet = 0;
+      }
+      if (this.hot >= minSpeechMs && !this.fired && (!hold || this.speechMs >= observeMs)) {
+        this.fired = true;
+        return true;
+      }
+      return false;
+    }
+
+    // 掉下去就清零：要求"连续"而不是"累计"，否则偶尔的噪声会攒够时长
+    this.hot = 0;
+    this.fired = false;
+    if (hold) {
+      this.quiet += frameMs;
+      // 短促一声后确实安静下来：判为回馈语，本段不打断也不累计
+      if (this.quiet >= releaseMs) {
+        this.speechMs = 0;
+        this.quiet = 0;
+      }
+    }
+    return false;
+  }
+}
+
+/** 播报期人声监测选项 */
+export interface MonitorOptions {
+  /** 阈值倍数：`false` 用基础阈值，缺省按播报期 ×2 抑制外放回声 */
+  playback?: boolean;
+  /**
+   * 回馈语 HOLD（默认关）
+   *
+   * 开启后短促的「嗯 / 好的」不会夺走轮次，代价是打断延迟
+   * 300ms → 500ms（见 `BACKCHANNEL_OBSERVE_MS`）。默认关闭是刻意的：
+   * 没有语义判停时，拿延迟换误打断率必须由用户真机听过再决定。
+   */
+  holdBackchannels?: boolean;
+  /** HOLD 观察窗（毫秒，默认 `BACKCHANNEL_OBSERVE_MS`） */
+  backchannelMs?: number;
 }
 
 /**
@@ -271,7 +361,7 @@ export class MicCapture {
    * @param options 参数（阈值倍数）
    * @returns 停止函数
    */
-  async startMonitor(onSpeech: () => void, options: { playback?: boolean } = {}): Promise<() => void> {
+  async startMonitor(onSpeech: () => void, options: MonitorOptions = {}): Promise<() => void> {
     const stream = await this.open();
     const context = new AudioContext();
     this.audioContext = context;
@@ -282,26 +372,19 @@ export class MicCapture {
 
     const threshold = VAD_BASE_THRESHOLD * (options.playback === false ? 1 : VAD_PLAYBACK_FACTOR);
     const buffer = new Float32Array(analyser.fftSize);
-    /** 连续超阈值的累计毫秒 */
-    let hot = 0;
-    let fired = false;
+    // 打断判定抽成纯状态机：不开 HOLD 时行为与原来逐字一致，开启时
+    // 由 `BackchannelGate` 决定要不要把短促回馈语挡下来。
+    const gate = new BackchannelGate({
+      hold: options.holdBackchannels === true,
+      ...(options.backchannelMs !== undefined ? { observeMs: options.backchannelMs } : {}),
+    });
 
     this.monitorTimer = setInterval(() => {
       analyser.getFloatTimeDomainData(buffer);
       let sum = 0;
       for (let i = 0; i < buffer.length; i += 1) sum += buffer[i] * buffer[i];
       const rms = Math.sqrt(sum / buffer.length);
-      if (rms >= threshold) {
-        hot += VAD_FRAME_MS;
-        if (hot >= VAD_MIN_SPEECH_MS && !fired) {
-          fired = true;
-          onSpeech();
-        }
-      } else {
-        // 掉下去就清零：要求"连续"而不是"累计"，否则偶尔的噪声会攒够时长
-        hot = 0;
-        fired = false;
-      }
+      if (gate.push(rms >= threshold)) onSpeech();
     }, VAD_FRAME_MS);
 
     return () => this.stopMonitor();

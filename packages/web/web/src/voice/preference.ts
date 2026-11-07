@@ -17,6 +17,8 @@
  * @module web/voice/preference
  */
 
+import type { EndpointProfile } from "./endpointing";
+
 /** 存储键 */
 export const HANDS_FREE_KEY = "dcx.voice.handsFree";
 
@@ -173,6 +175,66 @@ export function writeStreamPlayback(value: boolean): void {
     globalThis.dispatchEvent?.(new CustomEvent(STREAM_PLAYBACK_EVENT, { detail: value }));
   } catch {
     // 无 window（测试环境）时忽略
+  }
+}
+
+/*
+ * 轮次判停档位与回馈语 HOLD
+ *
+ * 两者都是「这台设备上的交互习惯」，跟着 localStorage 走。
+ *
+ * 判停档位默认 `adaptive`：把正常一句话的静默窗从 900ms 压到 600ms，
+ * 短语与长叙述仍保持 900ms。这是**保守**优化 —— 没有流式 ASR 就没有
+ * 语义判停，只能按已说时长做近似，所以不碰最容易误切的两类边缘情况。
+ * `legacy` 是完整回滚开关，`fast`（350ms）留给真机 A/B，默认不启用。
+ *
+ * 回馈语 HOLD 默认**关**：它要额外观察 200ms 才能区分「嗯」和真实插话，
+ * 会把打断延迟从 300ms 抬到 500ms。误打断更伤体验，但代价必须让用户
+ * 自己听完再决定，不能替他默认打开（2026-11-07 诚实降级原则）。
+ */
+export const ENDPOINT_PROFILE_KEY = "dcx.voice.endpointProfile.v1";
+export const BACKCHANNEL_HOLD_KEY = "dcx.voice.backchannelHold.v1";
+
+/** 判停档位默认值：保守自适应 */
+export function defaultEndpointProfile(): EndpointProfile {
+  return "adaptive";
+}
+
+/** 读取判停档位；非法值回落到默认，不让坏配置把端点判定卡死 */
+export function readEndpointProfile(): EndpointProfile {
+  try {
+    const raw = globalThis.localStorage?.getItem(ENDPOINT_PROFILE_KEY);
+    if (raw === "legacy" || raw === "adaptive" || raw === "fast") return raw;
+  } catch {
+    // 隐私模式/无 localStorage：用默认值
+  }
+  return defaultEndpointProfile();
+}
+
+/** 写入判停档位（下一次开录生效） */
+export function writeEndpointProfile(value: EndpointProfile): void {
+  try {
+    globalThis.localStorage?.setItem(ENDPOINT_PROFILE_KEY, value);
+  } catch {
+    // 存不下就只在本页生效
+  }
+}
+
+/** 读取回馈语 HOLD 开关（默认关） */
+export function readBackchannelHold(): boolean {
+  try {
+    return globalThis.localStorage?.getItem(BACKCHANNEL_HOLD_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** 写入回馈语 HOLD 开关 */
+export function writeBackchannelHold(value: boolean): void {
+  try {
+    globalThis.localStorage?.setItem(BACKCHANNEL_HOLD_KEY, value ? "1" : "0");
+  } catch {
+    // 存不下就只在本页生效
   }
 }
 
