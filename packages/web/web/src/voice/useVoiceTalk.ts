@@ -57,7 +57,7 @@ import {
 } from "../api";
 import { MicCapture, explainMicError } from "./mic";
 import { SpeechQueue } from "./player";
-import { SentenceStream } from "./sentence";
+import { SentenceStream, isNewTurnText } from "./sentence";
 import { scanVoiceDirective, settleVoiceDirective } from "./directive";
 import { TurnDirective } from "./turn-directive";
 import { defaultHandsFree, readHandsFree, readStreamPlayback, subscribeHandsFree, writeHandsFree } from "./preference";
@@ -157,6 +157,13 @@ export interface VoiceTalk {
   feed: (cumulative: string) => void;
   /** 本轮结束（吐出残句） */
   finishFeed: () => void;
+  /**
+   * 显式开启新一轮（用户发出新消息时调用）
+   *
+   * 与 `finishFeed` 的区别：它只复位轮次状态，不补念尾巴、不动队列。
+   * 用于「上一轮的收尾事件可能缺席」时给状态机一个确定的起点。
+   */
+  beginTurn: () => void;
   /** 停止播报（打断） */
   stopSpeaking: () => void;
   /** 是否自动朗读 */
@@ -209,6 +216,14 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   const firstAudioRef = useRef(true);
   /** 最近一次喂入的累积文本（flush 需要它取残句） */
   const lastTextRef = useRef("");
+  /**
+   * 本轮喂过的**原始**累积文本（未剥首行指令）
+   *
+   * 用它识别轮次边界：`llm_delta.previewText` 在同一轮里单调递增且前缀稳定，
+   * 一旦回退或前缀对不上就是新回复。不能拿 `lastTextRef` 代替——那是剥掉
+   * 指令行之后的正文，长度与原文不同。
+   */
+  const turnTextRef = useRef("");
   /** 本轮已送去合成的字数（对着 `voice/speech-budget.ts` 的预算记账） */
   const spokenCharsRef = useRef(0);
   /** 本轮是否已经因为预算而截断（收尾时补一句提示） */
@@ -241,6 +256,9 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   /** 免按住开关的最新值（打断回调里要读，不能用闭包里的旧 state） */
   const handsFreeRef = useRef(handsFree);
   handsFreeRef.current = handsFree;
+  /** 播报开关的最新值（设置页会绕过 setSpeakReplies 直接落盘） */
+  const speakRepliesRef = useRef(speakReplies);
+  speakRepliesRef.current = speakReplies;
 
   /** thinking 兜底定时器 */
   const thinkingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -330,7 +348,7 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
             };
       };
       queueRef.current = new SpeechQueue(
-        (text) => synthesizeSpeech(text, voiceOverride()),
+        (text, signal) => synthesizeSpeech(text, voiceOverride(), signal),
         {
           onSpeakingChange: (value) => {
             setSpeaking(value);
@@ -385,6 +403,12 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
     Promise.all([fetchSoulConfig(), fetchVoiceStatus().catch(() => null)])
       .then(([config, voiceStatus]) => {
         if (cancelled) return;
+        // 设置页的「自动朗读回复」直接落盘，不经过本 hook 的 setSpeakReplies，
+        // 关→开时没有清打断标记：这里补一次，否则界面显示开、实际整轮静默。
+        if (config.voice.speakReplies && !speakRepliesRef.current) {
+          interruptedRef.current = false;
+          truncatedRef.current = false;
+        }
         setEnabled(config.voice.enabled);
         setSpeakRepliesState(config.voice.speakReplies);
         setWakeEnabled(config.voice.wakeEnabled);
@@ -597,6 +621,34 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
     [queue]
   );
 
+  /**
+   * 复位一轮的所有流式状态（不补念、不碰队列、不切换音色快照）
+   *
+   * 这是「聊多了就不说话」的总闸。原先只有 `finishFeed()` 做复位，而它只挂在
+   * `assistant_message` 一条 SSE 事件上：工具轮（引擎丢弃 visible=false）、
+   * 用户打断、断线重连、切会话都可能让这一帧缺席。只要缺一次，
+   * `SentenceStream` 的游标就停在上一轮末尾；下一轮文本更短时切句器循环
+   * 一次都不进，连一次 TTS 请求都不会发，并且会**持续静默很多轮**。
+   *
+   * 这里刻意不动 `turnDirective`：本轮快照要留到队列里剩下的句子都合成完，
+   * 提前 `beginTurn()` 会让同一回复的后半段换音色/换语速。`feed` 在真正
+   * 新建切句器时才冻结新快照。
+   */
+  const resetTurnState = useCallback(() => {
+    streamRef.current = null;
+    turnTextRef.current = "";
+    lastTextRef.current = "";
+    directiveStateRef.current = "unknown";
+    directivePrefixRef.current = 0;
+    spokenCharsRef.current = 0;
+    truncatedRef.current = false;
+    // 打断只作用于本轮：新一轮必须放行，否则标记会跨轮残留
+    interruptedRef.current = false;
+    // TTFA 基准由下一次 feed 重新起算，不把上一次发送的耗时算进来
+    speechEndAtRef.current = 0;
+    firstAudioRef.current = true;
+  }, []);
+
   /** 朗读文本 */
   const speak = useCallback(
     (text: string) => {
@@ -613,6 +665,11 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
       // 整段文本一次给完：告诉队列"没有更多句子了"，否则最后不满一块的
       // 尾巴会一直等下一句（见 SpeechQueue.flush 的说明）
       queue().flush();
+      // 整段朗读完就不再留着这个流：否则下一次对话的 feed 会复用它的游标，
+      // 而游标已经停在本文末尾，新一轮更短的文本会一句都切不出来。
+      streamRef.current = null;
+      turnTextRef.current = "";
+      lastTextRef.current = "";
       speechEndAtRef.current = performance.now();
       firstAudioRef.current = true;
     },
@@ -623,12 +680,20 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   const feed = useCallback(
     (cumulative: string) => {
       if (!available || !speakReplies) return;
-      // 本轮已被打断：模型剩下的内容不再送合成（否则 enqueue 会把 stopped
-      // 重置回 false，刚被打断的回复又念起来）
-      if (interruptedRef.current) return;
       // 空帧直接跳过：`start` 阶段的累积文本是空串，喂进去会白白新建一个
       // SentenceStream 并把 speechEndAt 重置一次，把 TTFA 埋点算成全 0。
       if (cumulative.length === 0) return;
+
+      // 轮次边界自检（不依赖 SSE 收尾事件）：累积文本回退 / 前缀对不上，
+      // 说明已经是一条新回复。先复位再放行，缺了上一轮 finishFeed 也不会
+      // 把游标、打断标记、字数预算残留到这一轮。判断必须在 interruptedRef
+      // 闸门之前——被打断那轮的后续帧仍属同一轮，但下一轮必须解除打断。
+      if (isNewTurnText(turnTextRef.current, cumulative)) resetTurnState();
+      turnTextRef.current = cumulative;
+
+      // 本轮已被打断：模型剩下的内容不再送合成（否则 enqueue 会把 stopped
+      // 重置回 false，刚被打断的回复又念起来）
+      if (interruptedRef.current) return;
       if (streamRef.current === null) {
         streamRef.current = new SentenceStream();
         directiveStateRef.current = "unknown";
@@ -665,7 +730,7 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
       lastTextRef.current = body;
       for (const sentence of streamRef.current.push(body)) enqueueForSpeech(sentence);
     },
-    [available, speakReplies, enqueueForSpeech]
+    [available, speakReplies, enqueueForSpeech, resetTurnState]
   );
 
   /**
@@ -677,6 +742,9 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   const finishFeed = useCallback(() => {
     const stream = streamRef.current;
     streamRef.current = null;
+    // 收尾后本轮的累积文本基线必须清空，否则下一轮第一帧会被误判成
+    // 「同轮回退」，白白多复位一次（不影响播报，但会破坏 TTFA 埋点）。
+    turnTextRef.current = "";
 
     // 本轮到此结束：被打断标记只作用于本轮，下一轮要重新放行。
     // **必须无条件复位**：feed 被 interruptedRef 拦住时 streamRef 可能一直是
@@ -813,6 +881,7 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
     speak,
     feed,
     finishFeed,
+    beginTurn: resetTurnState,
     stopSpeaking,
     speakReplies,
     setSpeakReplies,

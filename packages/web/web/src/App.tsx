@@ -74,7 +74,13 @@ import {
   type AssistantMessageEvent,
   type UserMessageEvent,
 } from "./sse";
-import { feedVoice, finishVoice } from "./voice/voice-bus";
+import {
+  beginVoiceTurn,
+  feedVoice,
+  finishVoice,
+  noteVoiceConnectionLost,
+  noteVoiceConnectionRestored,
+} from "./voice/voice-bus";
 
 /** 登录态三阶段：checking=启动检查中；authed=已登录；anon=未登录/会话过期 */
 type AuthState = "checking" | "authed" | "anon";
@@ -225,6 +231,8 @@ export function App() {
     setEntries([]);
     applyStreaming(false);
     streamRef.current?.close();
+    // 登出/会话过期：清掉语音轮次状态，重新登录后从干净的起点开始
+    beginVoiceTurn();
     // 工作空间与沉淀建议状态随登录态一并清算（重新登录后重新拉取）
     setWorkspaces([]);
     setWorkspaceId("");
@@ -546,6 +554,9 @@ export function App() {
       // pendingTurns 缺省（旧契约/单轮次）时复位为空闲；> 0 表示串行链上仍有排队轮次
       const hasQueuedTurns = typeof e.pendingTurns === "number" ? e.pendingTurns > 0 : false;
       applyStreaming(hasQueuedTurns);
+      // 轮次终态兜底：assistant_message 可能被工具轮/断线吞掉，done 是最后一个
+      // 确定信号。有排队轮次时不能收尾——那会把下一轮刚开的流提前封块。
+      if (!hasQueuedTurns) finishVoice();
       // T7 状态语义：interrupted = 中止类终态（显式中断/服务关停），
       // 与 failed（引擎真实错误）区分；轻提示复用 toast 通道
       if (e.status === "interrupted" && !hasQueuedTurns) {
@@ -557,8 +568,18 @@ export function App() {
 
   /** SSE 连接错误：EventSource 自动重连；生成中时给出轻提示 */
   const onConnectionError = useCallback((): void => {
+    // 不能立刻 finishVoice()：连接断了不等于这一轮生成结束，重连后若继续推
+    // 同前缀正文，被清空的 SentenceStream 会把整段回复从头再念一遍。
+    // 改由总线起「宽限期看门狗」：还有正文 / 连接恢复就撤表，宽限期到了
+    // 仍沉默才补一次收尾，把最后一块不满字数的音频封出来。
+    noteVoiceConnectionLost();
     if (streamingRef.current) showToast("连接中断，正在自动重连…");
   }, [showToast]);
+
+  /** SSE 连接建立/重连成功：轮次还有机会继续，撤掉重连宽限期 */
+  const onConnectionOpen = useCallback((): void => {
+    noteVoiceConnectionRestored();
+  }, []);
 
   /**
    * chat_title：会话标题更新（自动标题生成 / 用户重命名，docs/dev/web-chat-manage.md §3.4）。
@@ -601,6 +622,7 @@ export function App() {
         // 被删的是当前活跃会话：关闭订阅并清空对话区（回到欢迎页）
         if (activeChatIdRef.current === chatId) {
           streamRef.current?.close();
+          beginVoiceTurn();
           activeChatIdRef.current = null;
           setActiveChatId(null);
           setEntries([]);
@@ -629,6 +651,7 @@ export function App() {
     onDone,
     onChatTitle,
     onConnectionError,
+    onConnectionOpen,
   });
   // 每次渲染刷新回调引用（useCallback 已保证多数为稳定引用）
   sseCallbacksRef.current = {
@@ -642,6 +665,7 @@ export function App() {
     onDone,
     onChatTitle,
     onConnectionError,
+    onConnectionOpen,
   };
 
   /** 建立/复用指定会话的事件流 */
@@ -677,6 +701,9 @@ export function App() {
       },
       get onConnectionError() {
         return sseCallbacksRef.current.onConnectionError;
+      },
+      get onOpen() {
+        return sseCallbacksRef.current.onConnectionOpen;
       },
     });
   }, []);
@@ -787,6 +814,8 @@ export function App() {
   const openChat = useCallback(
     (chatId: string): void => {
       if (chatId === activeChatIdRef.current) return;
+      // 切换会话：旧轮的收尾事件不会再到达，只清状态、不补念旧内容
+      beginVoiceTurn();
       activeChatIdRef.current = chatId;
       setActiveChatId(chatId);
       // —— 先清空 entries：与 fetchMessages.then 的 prev 竞态隔离 ——
@@ -922,6 +951,7 @@ export function App() {
           },
           ...prev,
         ]);
+        beginVoiceTurn();
         activeChatIdRef.current = chatId;
         setActiveChatId(chatId);
         setEntries([]);
@@ -976,6 +1006,9 @@ export function App() {
     (chatId: string, text: string, localFiles: File[], serverAttachments: UserAttachment[]): void => {
       // 发送前确保已订阅（P0-2）：订阅断线/未建连时由 connect 兜底补建
       ensureStream(chatId);
+      // 所有发送路径（输入框、语音自动提交、steering、新会话首条）都在这里
+      // 收敛：显式开新一轮，覆盖 Composer 之外没有调用 beginVoiceTurn 的入口。
+      beginVoiceTurn();
 
       // 运行中发送的补充指令才需要 mode 角标（空闲首发消息保持无角标语义）
       const isSupplement = streamingRef.current;
@@ -1112,6 +1145,8 @@ export function App() {
   const stop = useCallback((): void => {
     const chatId = activeChatIdRef.current;
     if (chatId === null) return;
+    // 用户中止生成：引擎不会再推 assistant_message，这里补一次轮次收尾
+    finishVoice();
     interruptChat(chatId).catch((e: unknown) => {
       if (e instanceof ApiError && e.status === 401) {
         handleUnauthorized();

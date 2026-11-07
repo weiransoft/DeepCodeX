@@ -213,3 +213,29 @@ export class SentenceStream {
     this.emitted = 0;
   }
 }
+
+/**
+ * 判定「累积文本」是否已经翻到新一轮
+ *
+ * SSE 的 `previewText` 是**累积**文本：同一轮里长度单调递增，且始终以本轮
+ * 开头那几个字为前缀。因此下一帧只要出现「变短」或「前缀对不上」，就说明
+ * 已经是一条新回复了——这是不依赖收尾事件也能识别轮次边界的可靠信号。
+ *
+ * 为什么需要它：轮次状态原本只在 `finishFeed()` 复位，而 `finishFeed` 只挂在
+ * `assistant_message` 上。工具轮（引擎丢弃 `visible=false`）、用户打断、断线
+ * 重连、切会话都可能让这一帧缺席；残留的游标停在上一轮末尾，下一轮文本
+ * 比它短时 `takeSentences` 循环一次都不进，连一次 TTS 请求都不会发——
+ * 也就是「聊着聊着就再也不说话了」。这里做兜底，让 feed 自己能开新一轮。
+ *
+ * @param prev 本轮上一次喂入的累积文本（空串表示本轮还没喂过）
+ * @param next 本次收到的累积文本
+ * @returns true 表示应先把轮次状态复位再处理 next
+ */
+export function isNewTurnText(prev: string, next: string): boolean {
+  if (prev.length === 0 || next.length === 0) return false;
+  // 同一轮不会变短；变短只可能是新一轮从头开始（或事件重放）
+  if (next.length < prev.length) return true;
+  // 长度没回退也要防「上一轮很短、新一轮第一帧就已经更长」：比对开头片段
+  const head = prev.slice(0, Math.min(12, prev.length));
+  return !next.startsWith(head);
+}

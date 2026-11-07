@@ -50,6 +50,15 @@ const PROBE_TIMEOUT_MS = 1200;
 /** 合成/识别超时（首次合成含模型加载，给足 60s） */
 const INFER_TIMEOUT_MS = 60_000;
 
+/**
+ * 流式逐块读取上限（毫秒）
+ *
+ * `INFER_TIMEOUT_MS` 只覆盖「等到响应头」，流的逐块读取原先完全没有上限：
+ * 客户端断开后网关仍在 `for await` 里等，sidecar 仍持着 TtsEngine._lock
+ * 生成没人听的音频。长文本单段实测约 8s，30s 足够覆盖冷启动波动。
+ */
+const STREAM_CHUNK_TIMEOUT_MS = 30_000;
+
 /** 单次合成文本上限（一句/一段，不是整篇文档） */
 const TTS_TEXT_MAX = 2000;
 
@@ -92,18 +101,79 @@ export type VoiceStatusResponse = {
 /**
  * 带超时的 fetch
  *
+ * `externalSignal` 是「本次下游请求」的信号：客户端断开 / 30s 无新数据时
+ * 由转发层 abort。监听**必须保留到 body 读完**（不能像 timer 那样在拿到
+ * 响应头后就清掉），否则中断不了上游流、sidecar 会继续占着推理锁。
+ * 该信号是每请求一个的 controller，请求对象回收时监听随之回收，不会累积。
+ *
  * @param url 目标
  * @param init 请求初始化
- * @param timeoutMs 超时
+ * @param timeoutMs 等待响应头的超时
+ * @param externalSignal 下游中断信号
  * @returns 响应
  */
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  externalSignal?: AbortSignal
+): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onExternalAbort = (): void => controller.abort();
+  if (externalSignal !== undefined) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+  }
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * 把「下游连接关闭」绑定到本次上游请求的取消信号
+ *
+ * 浏览器 abort（用户打断、前端 75s 超时、WebView 关闭）会先触发 `res` 的
+ * close。没有这层绑定时，网关与 sidecar 都不知道客户端已经走了：连接留着、
+ * 推理锁留着、后面每一轮都排在队尾——表现就是「越聊越迟钝，最后不说话」。
+ */
+function bindClientAbort(res: ServerResponse): { signal: AbortSignal; abort: () => void; cleanup: () => void } {
+  const controller = new AbortController();
+  const onClose = (): void => controller.abort();
+  res.on("close", onClose);
+  return {
+    signal: controller.signal,
+    abort: () => controller.abort(),
+    cleanup: () => {
+      res.off("close", onClose);
+      controller.abort();
+    },
+  };
+}
+
+/** 给一次 `iterator.next()` 加上限；超时后底层 promise 的失败另行接住 */
+async function nextChunkWithTimeout<T>(
+  iterator: AsyncIterator<T>,
+  timeoutMs: number,
+  onTimeout: () => void
+): Promise<IteratorResult<T>> {
+  const next = iterator.next();
+  void next.catch(() => undefined);
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      next,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          onTimeout();
+          reject(new Error(`流式语音 ${timeoutMs}ms 没有新数据`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
   }
 }
 
@@ -170,11 +240,17 @@ export async function handleVoiceStatus(
  * @param voiceConfig 语音配置
  * @param path sidecar 路径
  * @param init 请求初始化
+ * @param signal 下游中断信号（客户端断开时取消上游请求与 body）
  * @returns 响应
  */
-async function callSidecar(voiceConfig: SoulConfig["voice"], path: string, init: RequestInit): Promise<Response> {
+async function callSidecar(
+  voiceConfig: SoulConfig["voice"],
+  path: string,
+  init: RequestInit,
+  signal?: AbortSignal
+): Promise<Response> {
   try {
-    const res = await fetchWithTimeout(`${voiceConfig.endpoint}${path}`, init, INFER_TIMEOUT_MS);
+    const res = await fetchWithTimeout(`${voiceConfig.endpoint}${path}`, init, INFER_TIMEOUT_MS, signal);
     if (res.status === 401) {
       throw new ApiError(502, "语音服务拒绝了请求：token 不匹配。请重启 sidecar（它会读取最新配置里的 token）");
     }
@@ -221,23 +297,33 @@ export async function handleVoiceTts(
       ? Math.min(VOICE_SPEED_MAX, Math.max(VOICE_SPEED_MIN, body.speed))
       : config.voice.speed;
 
-  const upstream = await callSidecar(config.voice, "/tts", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.voice.token}` },
-    body: JSON.stringify({ text, engine, voice, speed }),
-  });
+  const client = bindClientAbort(res);
+  try {
+    const upstream = await callSidecar(
+      config.voice,
+      "/tts",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.voice.token}` },
+        body: JSON.stringify({ text, engine, voice, speed }),
+      },
+      client.signal
+    );
 
-  if (!upstream.ok) {
-    const detail = await safeErrorText(upstream);
-    throw new ApiError(upstream.status === 503 ? 503 : 502, `语音合成失败：${detail}`);
+    if (!upstream.ok) {
+      const detail = await safeErrorText(upstream);
+      throw new ApiError(upstream.status === 503 ? 503 : 502, `语音合成失败：${detail}`);
+    }
+    const audio = Buffer.from(await upstream.arrayBuffer());
+    res.writeHead(200, {
+      "Content-Type": upstream.headers.get("content-type") ?? "audio/wav",
+      "Content-Length": String(audio.byteLength),
+      "Cache-Control": "no-store",
+    });
+    res.end(audio);
+  } finally {
+    client.cleanup();
   }
-  const audio = Buffer.from(await upstream.arrayBuffer());
-  res.writeHead(200, {
-    "Content-Type": upstream.headers.get("content-type") ?? "audio/wav",
-    "Content-Length": String(audio.byteLength),
-    "Cache-Control": "no-store",
-  });
-  res.end(audio);
 }
 
 /**
@@ -286,33 +372,56 @@ export async function handleVoiceTtsStream(
       ? Math.min(4, Math.max(0.3, body.interval))
       : 1.0;
 
-  const upstream = await callSidecar(config.voice, "/tts/stream", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.voice.token}` },
-    body: JSON.stringify({ text, engine, voice, speed, interval }),
-  });
-  if (!upstream.ok) {
-    const detail = await safeErrorText(upstream);
-    throw new ApiError(upstream.status === 503 ? 503 : 502, `流式语音合成失败：${detail}`);
-  }
-
-  res.writeHead(200, {
-    "Content-Type": "application/octet-stream",
-    "Cache-Control": "no-store",
-    "X-Accel-Buffering": "no",
-  });
-  if (upstream.body === null) {
-    res.end();
-    return;
-  }
+  const client = bindClientAbort(res);
   try {
-    // Node 20+ 的 Web ReadableStream 支持异步迭代；每读一块就往下游写一块。
-    // 不设 Content-Length，靠连接结束标记流尾（sidecar 用 Connection: close）。
-    for await (const chunk of upstream.body as unknown as AsyncIterable<Uint8Array>) {
-      res.write(chunk);
+    const upstream = await callSidecar(
+      config.voice,
+      "/tts/stream",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.voice.token}` },
+        body: JSON.stringify({ text, engine, voice, speed, interval }),
+      },
+      client.signal
+    );
+    if (!upstream.ok) {
+      const detail = await safeErrorText(upstream);
+      throw new ApiError(upstream.status === 503 ? 503 : 502, `流式语音合成失败：${detail}`);
+    }
+
+    res.writeHead(200, {
+      "Content-Type": "application/octet-stream",
+      "Cache-Control": "no-store",
+      "X-Accel-Buffering": "no",
+    });
+    if (upstream.body !== null) {
+      // Node 20+ 的 Web ReadableStream 支持异步迭代；每读一块就往下游写一块。
+      // 不设 Content-Length，靠连接结束标记流尾（sidecar 用 Connection: close）。
+      // 用显式 iterator 而不是 for await，是为了能给「等待下一块」单独设超时：
+      // 客户端断开后 for await 会一直挂着，上游连接和推理锁都释放不了。
+      const iterator = (upstream.body as unknown as AsyncIterable<Uint8Array>)[Symbol.asyncIterator]();
+      for (;;) {
+        let step: IteratorResult<Uint8Array>;
+        try {
+          step = await nextChunkWithTimeout(iterator, STREAM_CHUNK_TIMEOUT_MS, client.abort);
+        } catch {
+          // 已经 writeHead(200)，不能再抛 ApiError 改写成 JSON 错误；结束流即可
+          client.abort();
+          break;
+        }
+        if (step.done) break;
+        if (res.destroyed || !res.writable) {
+          client.abort();
+          break;
+        }
+        res.write(step.value);
+      }
     }
   } finally {
-    res.end();
+    // 正常收尾也要掐断上游连接，让 sidecar 立刻退出生成、释放推理锁。
+    // headersSent=false 说明在响应头之前就抛错了，此时不能 end（会吞掉错误响应）。
+    client.cleanup();
+    if (res.headersSent && !res.writableEnded) res.end();
   }
 }
 
@@ -337,25 +446,35 @@ export async function handleVoiceAsr(
   if (audio.byteLength === 0) throw new ApiError(400, "音频内容为空");
 
   const { config } = readSoulConfig(ctx, settings);
-  const upstream = await callSidecar(config.voice, "/asr", {
-    method: "POST",
-    headers: {
-      "Content-Type": req.headers["content-type"] ?? "audio/wav",
-      Authorization: `Bearer ${config.voice.token}`,
-    },
-    body: new Uint8Array(audio),
-  });
+  const client = bindClientAbort(res);
+  try {
+    const upstream = await callSidecar(
+      config.voice,
+      "/asr",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": req.headers["content-type"] ?? "audio/wav",
+          Authorization: `Bearer ${config.voice.token}`,
+        },
+        body: new Uint8Array(audio),
+      },
+      client.signal
+    );
 
-  if (!upstream.ok) {
-    const detail = await safeErrorText(upstream);
-    throw new ApiError(upstream.status === 503 ? 503 : 502, `语音识别失败：${detail}`);
+    if (!upstream.ok) {
+      const detail = await safeErrorText(upstream);
+      throw new ApiError(upstream.status === 503 ? 503 : 502, `语音识别失败：${detail}`);
+    }
+    const result = (await upstream.json()) as { text?: unknown; durationMs?: unknown; model?: unknown };
+    sendJson(res, 200, {
+      text: typeof result.text === "string" ? result.text : "",
+      durationMs: typeof result.durationMs === "number" ? result.durationMs : 0,
+      model: typeof result.model === "string" ? result.model : "",
+    });
+  } finally {
+    client.cleanup();
   }
-  const result = (await upstream.json()) as { text?: unknown; durationMs?: unknown; model?: unknown };
-  sendJson(res, 200, {
-    text: typeof result.text === "string" ? result.text : "",
-    durationMs: typeof result.durationMs === "number" ? result.durationMs : 0,
-    model: typeof result.model === "string" ? result.model : "",
-  });
 }
 
 /**

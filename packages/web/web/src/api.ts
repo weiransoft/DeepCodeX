@@ -921,16 +921,23 @@ export function fetchVoiceStatus(): Promise<VoiceStatus> {
  *
  * @param text 待合成文本
  * @param override 覆盖配置里的引擎/音色/语速
+ * @param externalSignal 打断信号：队列 stop() 会 abort，掐断整块兜底请求
  * @returns 可播放的 objectURL
  */
 export async function synthesizeSpeech(
   text: string,
-  override?: { engine?: VoiceEngine; voice?: string; speed?: number }
+  override?: { engine?: VoiceEngine; voice?: string; speed?: number },
+  externalSignal?: AbortSignal
 ): Promise<string> {
   // 首次合成含模型加载，服务端给 60s；前端多留余量，超时后由队列跳过该句
   const timeoutMs = 75_000;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // 整块兜底也可能被 stop() 打断：不传信号的话旧请求会继续占着 sidecar
+  // 的推理锁，后面几轮全在排队（「越聊越迟钝」）。
+  const onExternalAbort = (): void => controller.abort();
+  if (externalSignal?.aborted) controller.abort();
+  else externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
   try {
     const res = await fetch("/api/voice/tts", {
       method: "POST",
@@ -944,12 +951,14 @@ export async function synthesizeSpeech(
     if (blob.size === 0) throw new Error("语音合成返回空音频");
     return URL.createObjectURL(blob);
   } catch (error) {
-    // AbortError 对用户没有意义，翻译成能照做的提示
+    // AbortError 对用户没有意义，翻译成能照做的提示；主动打断则原样抛出
     if (error instanceof DOMException && error.name === "AbortError") {
+      if (externalSignal?.aborted) throw error;
       throw new Error(`语音合成超时（${Math.round(timeoutMs / 1000)}s），已跳过这一句`);
     }
     throw error;
   } finally {
+    externalSignal?.removeEventListener("abort", onExternalAbort);
     clearTimeout(timer);
   }
 }
@@ -1033,18 +1042,44 @@ export async function streamSpeech(
 /**
  * 识别一段 WAV 音频
  *
+ * ASR 原先是**全链路唯一没有超时、也没有 AbortSignal 的请求**：sidecar 卡住时
+ * `await` 永久挂起，UI 停在 thinking，用户连下一轮都开不了（「反应太迟钝」）。
+ * 这里给 30s 硬上限（本地 Qwen3-ASR-0.6B 实测远低于此），并支持外部打断。
+ *
  * @param wav PCM16 WAV 字节（前端编码，见 `voice/wav.ts`）
+ * @param externalSignal 打断信号（关闭页面 / 取消录音）
  * @returns 识别文本
  */
-export async function transcribeAudio(wav: Blob): Promise<{ text: string; durationMs: number; model: string }> {
-  const res = await fetch("/api/voice/asr", {
-    method: "POST",
-    headers: { "Content-Type": wav.type || "audio/wav" },
-    credentials: "same-origin",
-    body: wav,
-  });
-  if (!res.ok) throw new Error(await readErrorDetail(res, "语音识别失败"));
-  return (await res.json()) as { text: string; durationMs: number; model: string };
+export async function transcribeAudio(
+  wav: Blob,
+  externalSignal?: AbortSignal
+): Promise<{ text: string; durationMs: number; model: string }> {
+  const timeoutMs = 30_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onExternalAbort = (): void => controller.abort();
+  if (externalSignal?.aborted) controller.abort();
+  else externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
+  try {
+    const res = await fetch("/api/voice/asr", {
+      method: "POST",
+      headers: { "Content-Type": wav.type || "audio/wav" },
+      credentials: "same-origin",
+      signal: controller.signal,
+      body: wav,
+    });
+    if (!res.ok) throw new Error(await readErrorDetail(res, "语音识别失败"));
+    return (await res.json()) as { text: string; durationMs: number; model: string };
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      if (externalSignal?.aborted) throw error;
+      throw new Error(`语音识别超时（${Math.round(timeoutMs / 1000)}s），请重试`);
+    }
+    throw error;
+  } finally {
+    externalSignal?.removeEventListener("abort", onExternalAbort);
+    clearTimeout(timer);
+  }
 }
 
 /**

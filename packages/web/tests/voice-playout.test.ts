@@ -407,3 +407,29 @@ test("T8 播放后端挂起也不能挡住合成：超时后降级，声音照�
     restore();
   }
 });
+
+/** 解码永久挂起：设备切换 / 坏 WAV / 上下文异常时 decodeAudioData 可能不 settle 也不抛错 */
+class HangingDecodeContext extends FakeAudioContext {
+  override decodeAudioData(): Promise<AudioBuffer> {
+    return new Promise<AudioBuffer>(() => undefined);
+  }
+}
+
+test("T9 解码永不 settle 时 schedule 必须在有限时间内抛错（回归：running 永久卡住、后续全静默）", async () => {
+  const restore = stubMediaApis();
+  try {
+    const ctx = new HangingDecodeContext();
+    const player = new WebAudioClipPlayer(() => ctx as unknown as AudioContext, 20, 20);
+    await player.prepare();
+    const started = Date.now();
+    await assert.rejects(
+      () => player.schedule("blob:hang", GAP_FIRST_MS),
+      (error: unknown) => error instanceof Error && /音频解码超时/.test(error.message),
+      "超时必须抛错，队列才能跳过这一块继续消费"
+    );
+    assert.ok(Date.now() - started < 1000, `不能无限等下去，实际 ${Date.now() - started}ms`);
+    assert.equal(ctx.sources.length, 0, "超时后不能还把 source 排到时间轴上");
+  } finally {
+    restore();
+  }
+});

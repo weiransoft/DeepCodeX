@@ -32,7 +32,7 @@ import { agentDisplayName, agentMentionHint } from "../agent-display";
 import { skillDisplayName, skillDisplaySummary } from "../skill-display";
 import { listModels, setDefaultModel, type ModelOption } from "../desktopConfig";
 import { useVoiceTalk } from "../voice/useVoiceTalk";
-import { registerVoice } from "../voice/voice-bus";
+import { beginVoiceTurn, registerVoice } from "../voice/voice-bus";
 import { LEVEL_BUCKETS, barHeight } from "../voice/level";
 import {
   BotAvatarIcon,
@@ -701,6 +701,10 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
     if (inputBlocked) return;
     const trimmed = (override ?? text).trim();
     if (trimmed === "" && localFiles.length === 0 && serverFiles.length === 0) return;
+    // 用户发出新消息 = 一轮对话的确定起点。先清掉上一轮可能残留的切句游标、
+    // 打断标记与字数预算——上一轮的 assistant_message 可能被工具轮/断线吞掉，
+    // 不复位的话新一轮会一句都不播（「聊多了就不说话」）。
+    beginVoiceTurn();
     onSend(trimmed, localFiles, serverFiles);
     setText("");
     setLocalFiles([]);

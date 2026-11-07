@@ -48,7 +48,7 @@ import {
 } from "./playout";
 
 /** 合成函数：文本 → objectURL（由后端负责回收） */
-export type SynthFn = (text: string) => Promise<string>;
+export type SynthFn = (text: string, signal?: AbortSignal) => Promise<string>;
 
 /**
  * 流式合成函数：边生成边回调独立 WAV 块
@@ -176,6 +176,17 @@ const DEFAULT_STALL_CHECK_MS = 1000;
 /** 默认启动超时 */
 const DEFAULT_PLAY_START_TIMEOUT_MS = 10_000;
 
+/**
+ * 待合成块的上限（有界队列）
+ *
+ * 生成速度远快于 TTS 时，无界 `blocks` 会让用户听到几分钟前的旧内容，
+ * 而且每一轮都把新请求排到队尾——表现就是「越聊越迟钝」。业界做法是
+ * 有界队列 + 背压；这里没有向 LLM 反向施压的通道，所以用「丢最旧块」
+ * 兜底：宁可漏掉过期内容，也不能让延迟无限累加。24 块 ≈ 4 分钟音频，
+ * 正常对话不会触发。
+ */
+const MAX_PENDING_BLOCKS = 24;
+
 /** 流水线里的一块 */
 interface InflightClip {
   /** 原文（记账用） */
@@ -280,8 +291,6 @@ export class SpeechQueue {
   private playing = 0;
   /** 后端 */
   private player: ClipPlayer;
-  /** 后端是否已通过 prepare 检查 */
-  private playerReady = false;
   /** 是否已经降级过（只降一次，避免来回抖） */
   private usedFallback = false;
   /** 回调 */
@@ -369,6 +378,9 @@ export class SpeechQueue {
    */
   flush(): void {
     this.endOfStream = true;
+    // stop() 之后可能只来 flush（尾巴封块）而没有新的 enqueue：不复位
+    // stopped 的话整个消费循环都进不来，最后一块永远不播。
+    this.stopped = false;
     while (this.blockBuffer.length > 0) {
       const parts: string[] = [];
       let size = 0;
@@ -464,6 +476,10 @@ export class SpeechQueue {
     const parts = trimmed.length <= this.maxBlockChars ? [trimmed] : splitLongText(trimmed, this.maxBlockChars);
     for (const part of parts) {
       if (part.trim().length === 0) continue;
+      if (this.blocks.length >= MAX_PENDING_BLOCKS) {
+        this.blocks.shift();
+        this.callbacks.onNotice?.(`播报积压超过 ${MAX_PENDING_BLOCKS} 块，已丢弃最早一块`);
+      }
       this.blocks.push(part);
       this.sealedCount += 1;
     }
@@ -516,6 +532,10 @@ export class SpeechQueue {
    */
   private async drainBuffered(): Promise<void> {
     const inflight: InflightClip[] = [];
+    // 整块路径也要能被 stop() 掐断：否则打断后当前这句仍占着 sidecar 的
+    // 推理锁，后面几轮全在排队。stop() 会 abort 这个 controller。
+    const abort = new AbortController();
+    this.streamAbort = abort;
     // 合成**不能**依赖播放后端：后端 prepare() 一旦卡住（例如 AudioContext
     // 在无用户手势时 resume 永久 pending），把 resolvePlayer() 放在循环开头
     // 会让队列连一次 synth() 都发不出来，表现为"毫无声音、也不报错"。
@@ -528,8 +548,10 @@ export class SpeechQueue {
         const text = this.blocks.shift() as string;
         let url: string;
         try {
-          url = await this.synth(text);
+          url = await this.synth(text, abort.signal);
         } catch (error) {
+          // 主动打断不是故障：别把 AbortError 弹成「语音合成超时」
+          if (this.stopped || abort.signal.aborted) break;
           this.callbacks.onError?.(error instanceof Error ? error.message : String(error));
           continue;
         }
@@ -622,17 +644,23 @@ export class SpeechQueue {
           this.waiting.push({ text: index === 0 ? text : "", url, continuous: true });
           if (index === 0) this.waitingChars += text.length;
           this.notify();
+          // 消费循环可能已经退出（hasNoPendingWork 判定为真时 break）；
+          // 这时到达的 chunk 只 notify 是没人接的，必须重新拉起 drain。
+          void this.drain();
         },
         abort.signal
       ).then(
         (count) => {
-          this.activeSynth = Math.max(0, this.activeSynth - 1);
+          // 旧代的迟到回调不能减新代的计数：否则新一轮刚启动的块会被
+          // 误判成「没有在飞任务」，hasNoPendingWork 提前为真，chunk 堆在
+          // waiting 里无人排程。
+          if (this.generation === gen) this.activeSynth = Math.max(0, this.activeSynth - 1);
           // 0 块 = 这条路本次不走（引擎不支持 / 用户关了开关）：静默回退整块
           if (alive() && count === 0) fallback.push(text);
           this.notify();
         },
         (error: unknown) => {
-          this.activeSynth = Math.max(0, this.activeSynth - 1);
+          if (this.generation === gen) this.activeSynth = Math.max(0, this.activeSynth - 1);
           if (alive() && !abort.signal.aborted) {
             const reason = error instanceof Error ? error.message : String(error);
             this.callbacks.onNotice?.(`流式合成不可用（${reason}），已回退整块合成`);
@@ -646,9 +674,11 @@ export class SpeechQueue {
     /** 整块兜底任务同样后台跑，不能把消费循环卡住 */
     const startFallback = (text: string): void => {
       this.activeSynth += 1;
-      void this.synth(text).then(
+      // 整块兜底同样要能被 stop() 掐断：否则打断后还会继续占着 sidecar 的
+      // 推理锁，后面几轮全在排队（表现就是「越聊越迟钝」）。
+      void this.synth(text, abort.signal).then(
         (url) => {
-          this.activeSynth = Math.max(0, this.activeSynth - 1);
+          if (this.generation === gen) this.activeSynth = Math.max(0, this.activeSynth - 1);
           if (!alive()) {
             URL.revokeObjectURL(url);
             return;
@@ -658,7 +688,7 @@ export class SpeechQueue {
           this.notify();
         },
         (error: unknown) => {
-          this.activeSynth = Math.max(0, this.activeSynth - 1);
+          if (this.generation === gen) this.activeSynth = Math.max(0, this.activeSynth - 1);
           if (alive()) this.callbacks.onError?.(error instanceof Error ? error.message : String(error));
           this.notify();
         }
@@ -795,7 +825,11 @@ export class SpeechQueue {
    * @returns 可用的后端
    */
   private async resolvePlayer(): Promise<ClipPlayer> {
-    if (this.playerReady) return this.player;
+    // 每次排程前都重新 prepare：AudioContext 可能在长会话中途被系统挂起
+    // （切后台、切输出设备、App Nap）。旧代码只在首次检查，之后仍把
+    // source.start() 排到 suspended 的时间轴上——currentTime 不走、
+    // onended 不来、声音也没有，界面却显示「正在播报」。prepare() 幂等，
+    // running 状态下只是读一次 state，开销可忽略。
     try {
       await this.player.prepare();
     } catch (error) {
@@ -808,7 +842,6 @@ export class SpeechQueue {
       this.player = this.fallbackFactory();
       await this.player.prepare();
     }
-    this.playerReady = true;
     return this.player;
   }
 

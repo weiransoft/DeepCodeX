@@ -11,7 +11,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { SentenceStream, stripForSpeech, takeSentences } from "../web/src/voice/sentence";
+import { SentenceStream, isNewTurnText, stripForSpeech, takeSentences } from "../web/src/voice/sentence";
 
 test("V1 围栏代码块整块剥掉，不留语言标记", () => {
   const raw = "先跑这个：\n```bash\nnpm install\n```\n然后看结果。";
@@ -136,4 +136,85 @@ test("V14 flush 仍能收尾首句（流结束时残句不能丢）", () => {
   assert.equal(stream.push("刚开始说").length, 0);
   const tail = stream.flush("刚开始说，还没说完");
   assert.equal(tail.length, 1, "收尾必须吐出残句");
+});
+
+// ---- 轮次边界自检：回归「聊了几轮之后完全不说话」 ----
+// SSE 的 previewText 是累积文本，同一轮单调递增且前缀稳定。原先轮次状态
+// 只在 finishFeed() 复位，而 finishFeed 只挂 assistant_message 一条事件：
+// 工具轮/打断/断线让这帧缺席后，切句游标停在上一轮末尾，后续短回复
+// 一句都切不出来，连 TTS 请求都不发，并且会持续很多轮。
+
+test("V15 同轮累积文本增长不误判为新一轮", () => {
+  assert.equal(isNewTurnText("我在核对回滚路径", "我在核对回滚路径，再收敛音色"), false);
+  assert.equal(isNewTurnText("", "第一轮第一帧"), false, "本轮还没喂过不算新轮");
+  assert.equal(isNewTurnText("上一轮文本", ""), false, "空帧不该触发复位");
+});
+
+test("V16 累积文本回退 = 新一轮（哪怕上一轮很短）", () => {
+  assert.equal(isNewTurnText("我把三处都核对了一遍，结论比较清楚", "好的，我记下了。"), true);
+  assert.equal(isNewTurnText("好的", "好的，记下了"), false, "同轮增长仍属同一轮");
+});
+
+test("V17 上一轮很短、新一轮首帧就更长时靠前缀识别", () => {
+  assert.equal(isNewTurnText("好的。", "稍等，我重新核对一下时间和语速设置。"), true);
+  assert.equal(isNewTurnText("稍等，我重新核对", "稍等，我重新核对一下时间和语速设置。"), false);
+});
+
+test("V18 SSE 事件重放（同前缀、长度回退）也判定为新轮，宁可复位不可静默", () => {
+  assert.equal(isNewTurnText("先说结论，第一，回滚路径没问题", "先说结论，第一"), true);
+});
+
+/** 最小轮次驱动器：复刻 useVoiceTalk.feed 的复位决策，guard=false 是旧行为 */
+function makeFeeder(guard: boolean): { feed: (t: string) => void; finish: () => void; heard: string[] } {
+  let stream: SentenceStream | null = null;
+  let turnText = "";
+  const heard: string[] = [];
+  const feed = (cumulative: string): void => {
+    if (guard && isNewTurnText(turnText, cumulative)) {
+      stream = null;
+      turnText = "";
+    }
+    turnText = cumulative;
+    if (stream === null) stream = new SentenceStream();
+    heard.push(...stream.push(cumulative));
+  };
+  const finish = (): void => {
+    if (stream !== null) heard.push(...stream.flush(turnText));
+    stream = null;
+    turnText = "";
+  };
+  return { feed, finish, heard };
+}
+
+const LONG_TURN = "我把这三处都核对了一遍，结论比较清楚：先处理回滚路径，再收敛音色，最后看生成延迟。";
+
+test("V19 旧行为复现：缺一次 finishFeed 后连续 4 轮 0 句", () => {
+  const old = makeFeeder(false);
+  old.feed(LONG_TURN);
+  assert.ok(old.heard.length > 0, "第一轮正常出句");
+  const before = old.heard.length;
+  for (const text of ["好的，我记下了。", "稍等，我再核对一下时间。", "收到。", "那就先这样吧。"]) {
+    old.feed(text);
+  }
+  assert.equal(old.heard.length, before, "旧行为：后续短回复全部静默");
+});
+
+test("V20 护栏：缺 finishFeed 后下一轮自动复位并恢复播报", () => {
+  const guarded = makeFeeder(true);
+  guarded.feed(LONG_TURN);
+  const firstTurn = guarded.heard.length;
+  assert.ok(firstTurn > 0, "第一轮正常出句");
+  guarded.feed("好的，我记下了。");
+  assert.ok(guarded.heard.length > firstTurn, "第二轮必须重新出句");
+  guarded.feed("稍等，我再核对一下时间。");
+  guarded.finish();
+  assert.ok(guarded.heard.length >= firstTurn + 2, "多轮连续对话不能再次静默");
+});
+
+test("V21 reset() 能把停在上一轮末尾的游标归零", () => {
+  const stream = new SentenceStream();
+  stream.push(LONG_TURN);
+  assert.deepEqual(stream.push("好的。"), [], "复位前游标挡住新文本");
+  stream.reset();
+  assert.deepEqual(stream.push("好的。"), ["好的。"], "复位后短句可正常切出");
 });

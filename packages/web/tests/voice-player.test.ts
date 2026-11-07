@@ -22,6 +22,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { SpeechQueue } from "../web/src/voice/player";
+import type { ClipPlayer, PlayOutcome, ScheduledClip } from "../web/src/voice/playout";
 
 /**
  * 造一个"一句一块"的队列
@@ -424,6 +425,62 @@ test("P7 预取与播放并行：下一句在第一句播完之前就开始合�
     const endFirst = events.indexOf("end:第一句。");
     assert.ok(synthSecond >= 0 && endFirst >= 0, `事件不全：${events.join(" → ")}`);
     assert.ok(synthSecond < endFirst, `第二句应在第一句播完前就开始合成，实际顺序：${events.join(" → ")}`);
+  } finally {
+    url.restore();
+  }
+});
+
+/** 可记录 prepare 次数、并能模拟「中途被系统挂起」的播放后端 */
+class RevivablePlayer implements ClipPlayer {
+  readonly maxLead = 3;
+  prepares = 0;
+  played = 0;
+  state: "running" | "suspended" = "running";
+
+  prepare(): Promise<void> {
+    this.prepares += 1;
+    // 真实 Web Audio 的 resume() 会把状态改回 running
+    this.state = "running";
+    return Promise.resolve();
+  }
+
+  schedule(): Promise<ScheduledClip> {
+    this.played += 1;
+    return Promise.resolve({ done: Promise.resolve<PlayOutcome>("ended") });
+  }
+
+  stop(): void {
+    // 无状态
+  }
+
+  dispose(): void {
+    // 无资源
+  }
+}
+
+test("P8 长会话中播放后端被挂起后仍会重新 prepare（回归：playerReady 缓存导致假播报）", async () => {
+  const url = stubObjectUrl();
+  try {
+    const player = new RevivablePlayer();
+    const queue = new SpeechQueue(async () => "blob:x", {}, { player, firstBlockChars: 1, blockChars: 1 });
+
+    queue.enqueue("第一句。");
+    queue.flush();
+    await waitFor(() => player.played >= 1);
+    const preparesAfterFirst = player.prepares;
+    assert.ok(preparesAfterFirst >= 1, "首次排程前必须 prepare");
+
+    // 模拟切后台 / 切输出设备后系统把 AudioContext 挂起
+    player.state = "suspended";
+    queue.enqueue("第二句。");
+    queue.flush();
+    await waitFor(() => player.played >= 2);
+
+    assert.ok(
+      player.prepares > preparesAfterFirst,
+      "旧实现 playerReady 恒 true 会跳过 prepare，把音频排到冻结时间轴上（不出声也不报错）"
+    );
+    assert.equal(player.state, "running", "重新 prepare 后应恢复到可播状态");
   } finally {
     url.restore();
   }

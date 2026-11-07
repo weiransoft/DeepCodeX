@@ -147,6 +147,31 @@ export const WEB_AUDIO_MAX_LEAD = 3;
  */
 export const RESUME_TIMEOUT_MS = 1200;
 
+/**
+ * 一块音频 fetch + decodeAudioData 的上限（毫秒）
+ *
+ * `decodeAudioData` 在设备切换 / 坏 WAV / 上下文挂起时可能**永不 settle 也不
+ * 抛错**。SpeechQueue 的 `running` 互斥会把之后所有 enqueue 静默丢弃，
+ * 于是「前面几句正常、之后彻底不说话」。这里给解码加硬超时，让上层能
+ * 捕获错误、跳过这一块并继续跑队列。
+ */
+export const DECODE_TIMEOUT_MS = 5000;
+
+/** 给一个 promise 加超时；超时后底层任务仍可能继续，由调用方接住其失败 */
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label}超时（${ms}ms）`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
 /** 排程到"现在"的最小提前量（秒）：给 ctx 一点调度余量，避免 start 落在过去 */
 const MIN_START_LEAD_S = 0.02;
 
@@ -235,10 +260,12 @@ export class WebAudioClipPlayer implements ClipPlayer {
   /**
    * @param createContext 上下文工厂（测试注入；默认按环境自动创建）
    * @param resumeTimeoutMs 等待 resume 的上限（测试可设很小的值）
+   * @param decodeTimeoutMs 等待一块音频解码的上限（测试可设很小的值）
    */
   constructor(
     private readonly createContext?: () => AudioContext,
-    private readonly resumeTimeoutMs: number = RESUME_TIMEOUT_MS
+    private readonly resumeTimeoutMs: number = RESUME_TIMEOUT_MS,
+    private readonly decodeTimeoutMs: number = DECODE_TIMEOUT_MS
   ) {}
 
   /**
@@ -333,9 +360,14 @@ export class WebAudioClipPlayer implements ClipPlayer {
 
     let buffer: AudioBuffer;
     try {
-      const response = await fetch(url);
-      const data = await response.arrayBuffer();
-      buffer = await ctx.decodeAudioData(data);
+      const decode = (async (): Promise<AudioBuffer> => {
+        const response = await fetch(url);
+        const data = await response.arrayBuffer();
+        return await ctx.decodeAudioData(data);
+      })();
+      // 超时后底层任务仍在跑：接住它的失败，别变成未处理的 rejection
+      void decode.catch(() => undefined);
+      buffer = await withTimeout(decode, this.decodeTimeoutMs, "音频解码");
     } finally {
       // 解码后原始字节就没用了，先放掉再算时间轴
       URL.revokeObjectURL(url);

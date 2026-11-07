@@ -11,6 +11,7 @@
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -218,4 +219,72 @@ test("F11 默认头像静态资源可访问且 MIME 正确", async () => {
   assert.equal(bytes[1], 0x50);
   assert.equal(bytes[2], 0x4e);
   assert.equal(bytes[3], 0x47);
+});
+
+test("F12 客户端 abort 流式 TTS 后，网关立即断开上游（回归：sidecar 持锁排队、越聊越迟钝）", async () => {
+  let resolveUpstreamClosed!: () => void;
+  const upstreamClosed = new Promise<void>((resolve) => {
+    resolveUpstreamClosed = resolve;
+  });
+  /** 假 sidecar：响应头立刻回来，正文永远不结束，模拟合成进行中 */
+  const sidecar = createServer((req, res) => {
+    if (req.url !== "/tts/stream") {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/octet-stream", "Cache-Control": "no-store" });
+    // 持续吐小块，确保网关已进入逐块转发循环（而不是还卡在等响应头）
+    const feed = setInterval(() => {
+      if (!res.destroyed) res.write(Buffer.from([0, 0, 0, 4, 0, 0, 0, 0]));
+    }, 30);
+    res.on("close", () => {
+      clearInterval(feed);
+      resolveUpstreamClosed();
+    });
+  });
+  await new Promise<void>((resolve) => sidecar.listen(0, "127.0.0.1", resolve));
+  const address = sidecar.address();
+  const sidecarPort = typeof address === "object" && address !== null ? address.port : 0;
+  assert.ok(sidecarPort > 0, "测试前置：假 sidecar 必须监听成功");
+
+  try {
+    // F9 把 endpoint 改成了 127.0.0.1:1，这里重新指向假 sidecar
+    const put = await fetchJson(
+      server.port,
+      "PUT",
+      "/api/soul/config",
+      { voice: { endpoint: `http://127.0.0.1:${sidecarPort}` } },
+      cookie
+    );
+    assert.equal(put.status, 200);
+
+    const controller = new AbortController();
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/voice/tts/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ text: "测试流式取消" }),
+      signal: controller.signal,
+    });
+    assert.equal(response.status, 200, "流式响应头应立刻返回");
+    const reader = response.body?.getReader();
+    const first = await reader?.read();
+    assert.equal(first?.done, false, "应至少收到一块，确认网关正在转发");
+    controller.abort();
+
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      await Promise.race([
+        upstreamClosed,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("客户端断开后 3s 内上游仍未释放")), 3000);
+        }),
+      ]);
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  } finally {
+    sidecar.closeAllConnections();
+    await new Promise<void>((resolve) => sidecar.close(() => resolve()));
+  }
 });

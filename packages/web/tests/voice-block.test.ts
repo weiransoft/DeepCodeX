@@ -173,3 +173,19 @@ test("B7 splitLongText 优先在标点处断，拼接回去等于原文", () => 
   assert.ok(/[。！？!?；;，,、：:]$/u.test(parts[0]), `应优先在标点处断，实际首块 ${JSON.stringify(parts[0])}`);
   assert.deepEqual(splitLongText("短句。", 20), ["短句。"], "不超上限时原样返回");
 });
+
+test("B8 有界队列：合成彻底卡住时丢弃最旧块并提示，不让延迟无限累加", () => {
+  const notices: string[] = [];
+  const queue = new SpeechQueue(
+    // 模拟 TTS 永久无响应：生成侧继续灌入，blocks 会一直涨
+    () => new Promise<string>(() => undefined),
+    { onNotice: (m) => notices.push(m) },
+    { player: new InstantPlayer(), firstBlockChars: 1, blockChars: 1 }
+  );
+  for (let i = 0; i < 30; i += 1) queue.enqueue(`第${i}句。`);
+  assert.ok(
+    notices.some((m) => m.includes("积压")),
+    `超过上限要留提示，实际 ${JSON.stringify(notices)}`
+  );
+  assert.ok(notices.length <= 7, `只在超限时提示，不应每块都刷屏，实际 ${notices.length} 条`);
+});
