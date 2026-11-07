@@ -121,7 +121,11 @@ export class AnthropicLLMClient implements LLMClient {
 
     // extended thinking 注入（请求级开关）
     if (request.thinkingEnabled && this.betaFeatures.includes("extended-thinking")) {
-      params.thinking = { type: "enabled", budget_tokens: this.thinkingBudgetTokens };
+      // 请求级预算优先（按回合思考深度调度）；后台调用不传字段时回落构造期快照
+      params.thinking = {
+        type: "enabled",
+        budget_tokens: request.thinkingBudgetTokens ?? this.thinkingBudgetTokens,
+      };
     }
 
     // 工具定义转换

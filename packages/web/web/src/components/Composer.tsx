@@ -32,7 +32,7 @@ import { agentDisplayName, agentMentionHint } from "../agent-display";
 import { skillDisplayName, skillDisplaySummary } from "../skill-display";
 import { listModels, setDefaultModel, type ModelOption } from "../desktopConfig";
 import { useVoiceTalk } from "../voice/useVoiceTalk";
-import { beginVoiceTurn, registerVoice } from "../voice/voice-bus";
+import { beginVoiceTurn, markVoiceOrigin, registerVoice } from "../voice/voice-bus";
 import { LEVEL_BUCKETS, barHeight } from "../voice/level";
 import {
   BotAvatarIcon,
@@ -719,7 +719,12 @@ export function buildSlashCandidates(commands: readonly CapabilityCommand[], que
 
   // 说完自动提交的入口：语音 hook 在 doSend 之前创建，用 ref 把最新实现传过去
   // （直接闭包会拿到旧渲染的 doSend，附件/@ 提及的状态就停在上一帧）。
-  voiceSendRef.current = (spoken: string) => doSend(spoken);
+  voiceSendRef.current = (spoken: string) => {
+    // 语音识别自动提交：给本轮打上时效敏感标记，思考深度调度器据此优先走快速档。
+    // 标记由 App.submitToChat() 一次性消费，键盘输入不会继承。
+    markVoiceOrigin();
+    doSend(spoken);
+  };
 
   /** textarea 自适应高度（上限 200px 后内部滚动） */
   const autoResize = (): void => {

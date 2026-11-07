@@ -36,7 +36,7 @@
  */
 
 import type { VoiceTalk } from "./useVoiceTalk";
-import type { LlmStreamTiming } from "./latency";
+import type { LlmStreamTiming, ThinkDepthSnapshot } from "./latency";
 
 /** 连接断开后判定「本轮已丢失」的宽限期（毫秒） */
 export const VOICE_RECONNECT_GRACE_MS = 4000;
@@ -180,4 +180,44 @@ export function requestVoiceInterrupt(): void {
 /** 当前是否已注册（测试用） */
 export function hasVoiceSink(): boolean {
   return current !== null;
+}
+
+// ---------------------------------------------------------------------------
+// 语音来源标记与思考深度遥测（按回合思考深度调度的前端信号）
+// ---------------------------------------------------------------------------
+
+/**
+ * 下一条待提交消息是否来自语音识别（一次性）
+ *
+ * 为什么不改成 `sendMessage` 的显式参数：所有发送路径（输入框、语音自动提交、
+ * steering、新会话首条）最终都收敛到 `App.submitToChat()`，而语音 hook 挂在
+ * `Composer` 里。用一次性标记能避免给 `onSend / sendMessage / createNewChat`
+ * 三处签名都加参数，也不会漏掉「无会话时自动建会话再发首条」这条路径。
+ * 标记由 `submitToChat()` 消费一次后即清除，键盘输入不会误继承。
+ */
+let voiceOriginPending = false;
+
+/** 标记下一条提交的消息来自语音识别 */
+export function markVoiceOrigin(): void {
+  voiceOriginPending = true;
+}
+
+/** 取出并清除语音来源标记 */
+export function consumeVoiceOrigin(): boolean {
+  const pending = voiceOriginPending;
+  voiceOriginPending = false;
+  return pending;
+}
+
+/** 仅供测试：清空标记，避免跨用例串扰 */
+export function resetVoiceOriginForTesting(): void {
+  voiceOriginPending = false;
+}
+
+/** 透传本轮思考深度决策，供延迟采样按档位分组 */
+export function noteVoiceThinkDepth(depth: ThinkDepthSnapshot | null | undefined): void {
+  if (!depth) return;
+  // 可选调用：新旧 bundle 混跑时（voice-bus 已更新、useVoiceTalk 仍是旧版）
+  // 遥测不该把整帧 llm_delta 抛掉——正文显示比埋点重要得多。
+  current?.noteThinkDepth?.(depth);
 }

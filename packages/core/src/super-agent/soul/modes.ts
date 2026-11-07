@@ -48,6 +48,15 @@ export const DEFAULT_COMPANION_CONFIG: SoulCompanionConfig = {
   encourageHumanContact: true,
 };
 
+/**
+ * 陪伴模式段在提示词里的机器可识别标记
+ *
+ * Soul 提示词只在建会话时注入一次（`session.ts` 的 `soulPromptProvider`），
+ * 按回合调度思考深度时需要知道**这一份实际生效的提示词**属于哪个模式。
+ * 让渲染与识别共用同一个常量，改文案时不会把识别逻辑悄悄弄失效。
+ */
+export const SOUL_COMPANION_MODE_MARKER = "## 当前模式：陪伴";
+
 /** 模式清单（UI 与 CLI 共用，避免前端再维护一份） */
 export const SOUL_MODES: readonly { readonly id: SoulMode; readonly label: string; readonly tagline: string }[] = [
   { id: "work", label: "工作模式", tagline: "先定方位，再谈速度" },
@@ -99,6 +108,21 @@ export function soulModeLabel(mode: SoulMode): string {
  */
 export function parseSoulMode(raw: unknown): SoulMode {
   return raw === "companion" ? "companion" : "work";
+}
+
+/**
+ * 从已注入的 Soul 系统提示词反查当前模式
+ *
+ * 与「读配置文件」相比，这里读到的是**本会话真正生效的那一份**：
+ * 会话建立后用户切换模式，历史里的提示词不会变（见 `session-pool.ts` 注释），
+ * 思考深度调度也就该继续跟随这份提示词，而不是跟随磁盘上的新值。
+ * 没有 Soul 提示词（CLI / 临时会话 / 旧服务端）一律回落 `work`。
+ *
+ * @param prompt 会话里的 Soul 系统提示词（可为空）
+ * @returns 模式
+ */
+export function detectSoulModeFromPrompt(prompt: string | null | undefined): SoulMode {
+  return typeof prompt === "string" && prompt.includes(SOUL_COMPANION_MODE_MARKER) ? "companion" : "work";
 }
 
 /**
@@ -218,7 +242,7 @@ export function applySoulMode(soul: Soul, mode: SoulMode, companion?: SoulCompan
 export function renderModeSection(mode: SoulMode, companion: SoulCompanionConfig): string {
   if (mode !== "companion") return "";
   const lines: string[] = [];
-  lines.push("## 当前模式：陪伴（先接住人，再谈事）");
+  lines.push(`${SOUL_COMPANION_MODE_MARKER}（先接住人，再谈事）`);
   lines.push("");
   lines.push("这一轮的首要目标不是交付，是让对方觉得被听见；把事情办成排在第二位。");
   lines.push("");

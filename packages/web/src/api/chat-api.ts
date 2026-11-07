@@ -288,6 +288,25 @@ function parseSessionAlwaysAllowToolCallIds(raw: unknown): string[] {
 }
 
 /**
+ * 严格白名单解析「按回合思考深度调度」元数据
+ *
+ * `UserPromptContent.messageParams` 在 CLI 侧是可携带 `codingLoopRequest` 等编排
+ * 参数的通用容器。HTTP 入口**不能**原样透传，否则浏览器可以借它触发编排命令。
+ * 这里只放行两个无副作用的信号，其它键一律丢弃，且布尔值只认字面 `true`。
+ *
+ * @param raw 请求体中的原始值
+ * @returns 白名单后的对象；无有效字段时返回 undefined
+ */
+export function parseThinkingDepthParams(raw: unknown): Record<string, unknown> | undefined {
+  if (raw === undefined || raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const record = raw as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  if (record["latencySensitive"] === true) result.latencySensitive = true;
+  if (record["thinkingDepth"] === "fixed") result.thinkingDepth = "fixed";
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
  * 从消息文本提取命中的自定义 Agent 提及（@token 与已知名单求交）。
  *
  * token 形态与 agent/skill name 同口径（kebab-case）；负向断言保证 @code-review
@@ -359,6 +378,7 @@ export async function handleSendMessage(
     let permissions: UserToolPermission[] = [];
     let alwaysAllows: PermissionScope[] = [];
     let sessionAlwaysAllowToolCallIds: string[] = [];
+    let messageParams: Record<string, unknown> | undefined;
     // 可选 payload 字段：JSON 携带 permissions/alwaysAllows（与 JSON 形态字段语义一致）
     const payloadRaw = parsed.fields["payload"];
     if (payloadRaw !== undefined && payloadRaw.trim() !== "") {
@@ -373,6 +393,7 @@ export async function handleSendMessage(
         permissions = parsePermissions(record["permissions"]);
         alwaysAllows = parseAlwaysAllows(record["alwaysAllows"]);
         sessionAlwaysAllowToolCallIds = parseSessionAlwaysAllowToolCallIds(record["sessionAlwaysAllowToolCallIds"]);
+        messageParams = parseThinkingDepthParams(record["messageParams"]);
       }
     }
 
@@ -402,6 +423,7 @@ export async function handleSendMessage(
       permissions,
       alwaysAllows,
       sessionAlwaysAllowToolCallIds,
+      messageParams,
     };
   } else {
     // —— JSON 形态 ——
@@ -411,6 +433,7 @@ export async function handleSendMessage(
       permissions?: unknown;
       alwaysAllows?: unknown;
       sessionAlwaysAllowToolCallIds?: unknown;
+      messageParams?: unknown;
     }>(req);
     // text 校验：可选字符串
     let text: string | undefined;
@@ -434,6 +457,7 @@ export async function handleSendMessage(
       permissions: parsePermissions(body.permissions),
       alwaysAllows: parseAlwaysAllows(body.alwaysAllows),
       sessionAlwaysAllowToolCallIds: parseSessionAlwaysAllowToolCallIds(body.sessionAlwaysAllowToolCallIds),
+      messageParams: parseThinkingDepthParams(body.messageParams),
     };
     // 空消息防御：无文本、无图片、无审批决策的请求无意义
     if (

@@ -134,6 +134,13 @@ export interface FilePreviewResult {
 export interface SendTextPayload {
   text: string;
   imageUrls?: string[];
+  /**
+   * 按回合思考深度调度元数据（服务端严格白名单，只认 latencySensitive / thinkingDepth）
+   *
+   * 语音自动提交的消息带 `latencySensitive: true`，让调度器知道这一轮对首响应时间
+   * 更敏感；普通键盘输入不带该字段。详见 docs/proposals/super-agent/think-depth-scheduling.md
+   */
+  messageParams?: Record<string, unknown>;
 }
 
 /** 审批回注载荷（有权限请求时即"审批回注"消息，见设计文档 §3.5） */
@@ -601,11 +608,20 @@ export function sendPermissionDecisions(chatId: string, payload: SendPermissions
  * 带附件的消息一律走排队（不参与 steering 注入，docs/dev/web-steering.md W6），
  * 响应体同 sendTextMessage（mode 恒为 queued，缺省亦可）。
  */
-export function sendMessageWithFiles(chatId: string, text: string, files: File[]): Promise<SendMessageResult> {
+export function sendMessageWithFiles(
+  chatId: string,
+  text: string,
+  files: File[],
+  messageParams?: Record<string, unknown>
+): Promise<SendMessageResult> {
   const form = new FormData();
   form.append("text", text);
   for (const f of files) {
     form.append("file", f, f.name);
+  }
+  // multipart 的可选字段走既有 payload JSON 通道（服务端 parseThinkingDepthParams 白名单）
+  if (messageParams !== undefined && Object.keys(messageParams).length > 0) {
+    form.append("payload", JSON.stringify({ messageParams }));
   }
   return request<SendMessageResult>("POST", `/api/chats/${encodeURIComponent(chatId)}/messages`, form);
 }

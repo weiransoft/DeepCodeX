@@ -10,7 +10,7 @@
  */
 
 import type { SessionMessage } from "../session";
-import type { ResolvedDeepcodingSettings } from "../settings";
+import type { ReasoningEffort, ResolvedDeepcodingSettings } from "../settings";
 
 /** Provider 标识 */
 export type ProviderName = "openai" | "anthropic";
@@ -31,6 +31,19 @@ export interface LLMRequest {
   tools?: LLMToolDefinition[];
   /** 是否启用思考模式（DeepSeek thinking / Claude extended thinking） */
   thinkingEnabled: boolean;
+  /**
+   * 本轮推理强度（按回合调度，可选）
+   *
+   * 未传时回落到 settings 的全局快照——后台任务（compact / edit-handler / team）
+   * 不需要也不应该被对话回合的调度影响，因此全部字段保持可选。
+   */
+  reasoningEffort?: ReasoningEffort;
+  /**
+   * 本轮 Claude extended thinking 预算（可选）
+   *
+   * 未传时回落到 `ANTHROPIC_THINKING_BUDGET` / 默认 4096。
+   */
+  thinkingBudgetTokens?: number;
   /** 最大输出 token 数（Claude 必填，OpenAI 可选） */
   maxTokens?: number;
   /** 采样温度（仅 OpenAI 生效；Claude 忽略并告警，由 provider 内部处理） */

@@ -152,6 +152,15 @@ export type SendMessageInput = {
    * 当前 Web 会话生命周期内生效，不写任何磁盘配置（个人区 R5 防线）。
    */
   sessionAlwaysAllowToolCallIds?: string[];
+  /**
+   * 按回合思考深度调度的元数据（已由 API 层严格白名单校验）
+   *
+   * 目前只接受两个键：`latencySensitive`（语音回合 / 时效压力）与
+   * `thinkingDepth: "fixed"`（单回合强制回到静态档位）。**不**开放任意
+   * `messageParams` 透传——CLI 侧该容器能携带 `codingLoopRequest` 等编排参数，
+   * 从 HTTP 入口放行等同把编排能力暴露给浏览器。
+   */
+  messageParams?: Record<string, unknown>;
 };
 
 /** sendMessage 受理结果（202 异步受理：轮次结果经 SSE done 事件推送，本结果不含 status） */
@@ -775,6 +784,9 @@ export class SessionPool {
           // 语音交互延迟可观测性：LLM 请求起点 + 首正文 token（TTFT）。
           // 旧服务/旧宿主没有该字段时传 null，前端按可选处理。
           timing: progress.timing ?? null,
+          // 本轮思考深度决策：场景 / 档位 / effort / 控制能力 / 决策依据。
+          // 用于按档位分组统计 TTFT，不参与 UI 渲染；旧服务缺省 null。
+          thinkDepth: progress.thinkDepth ?? null,
         });
       },
       // EAG-P5：bash 高危命令人工确认桥接（用户决策 2026-10-04）。
@@ -1285,6 +1297,9 @@ export class SessionPool {
     }
     if (input.alwaysAllows !== undefined && input.alwaysAllows.length > 0) {
       prompt.alwaysAllows = input.alwaysAllows;
+    }
+    if (input.messageParams !== undefined && Object.keys(input.messageParams).length > 0) {
+      prompt.messageParams = { ...input.messageParams };
     }
 
     // JS 语义：catch 先于 finally 执行。turnError 暂存异常，finally 同步 sessionId

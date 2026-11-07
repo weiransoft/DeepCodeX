@@ -87,6 +87,7 @@ import {
   nowEpochMs,
   summarizeVoiceTurnLatency,
   type LlmStreamTiming,
+  type ThinkDepthSnapshot,
   type VoiceTurnLatency,
   type VoiceTurnTiming,
 } from "./latency";
@@ -114,6 +115,8 @@ export interface LatencySample {
    * 非语音输入（打字）或缺 SSE 时序的旧服务端没有完整分段。
    */
   breakdown?: VoiceTurnLatency;
+  /** 本轮思考深度档位（用于按档位分组统计 TTFT / E2E） */
+  thinkDepth?: ThinkDepthSnapshot;
 }
 
 /**
@@ -212,6 +215,12 @@ export interface VoiceTalk {
    * 只写时间戳，不改播放状态；语音关闭或旧服务端没有 timing 时为空操作。
    */
   noteLlmTiming: (timing: LlmStreamTiming) => void;
+  /**
+   * 记录本轮思考深度决策（由 App 的 `llm_delta` 经语音总线透传）
+   *
+   * 只写一份快照，不改播放状态；旧服务端没有该字段时为空操作。
+   */
+  noteThinkDepth: (depth: ThinkDepthSnapshot) => void;
   /** 停止播报（打断） */
   stopSpeaking: () => void;
   /** 是否自动朗读 */
@@ -264,6 +273,8 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
   const firstAudioRef = useRef(true);
   /** 本轮五时间戳（epoch ms，与 core 透传的 LLM 时序同一时钟） */
   const traceRef = useRef<VoiceTurnTiming>({});
+  /** 本轮思考深度档位快照（随 TTFA 采样落盘） */
+  const thinkDepthRef = useRef<ThinkDepthSnapshot | null>(null);
   /**
    * 用户说完的墙上时刻，等待下一轮 `feed` 采纳
    *
@@ -434,7 +445,11 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
                 firstAudioRef.current = false;
                 traceRef.current.firstAudioAtMs = nowEpochMs();
                 const breakdown = summarizeVoiceTurnLatency(traceRef.current);
-                setLatencies((prev) => [...prev.slice(-(LATENCY_SAMPLES - 1)), { ttfaMs, breakdown }]);
+                const thinkDepth = thinkDepthRef.current ?? undefined;
+                setLatencies((prev) => [
+                  ...prev.slice(-(LATENCY_SAMPLES - 1)),
+                  { ttfaMs, breakdown, ...(thinkDepth ? { thinkDepth } : {}) },
+                ]);
               }
             }
           },
@@ -751,6 +766,7 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
    */
   const resetTurnState = useCallback(() => {
     traceRef.current = {};
+    thinkDepthRef.current = null;
     streamRef.current = null;
     turnTextRef.current = "";
     lastTextRef.current = "";
@@ -773,6 +789,11 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
    */
   const noteLlmTiming = useCallback((timing: LlmStreamTiming): void => {
     traceRef.current = mergeLlmTiming(traceRef.current, timing);
+  }, []);
+
+  /** 记录本轮思考深度（同一轮多帧 SSE 只保留最后一份，字段相同） */
+  const noteThinkDepth = useCallback((depth: ThinkDepthSnapshot): void => {
+    thinkDepthRef.current = depth;
   }, []);
 
   /** 朗读文本 */
@@ -1017,6 +1038,7 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
     finishFeed,
     beginTurn: resetTurnState,
     noteLlmTiming,
+    noteThinkDepth,
     stopSpeaking,
     speakReplies,
     setSpeakReplies,

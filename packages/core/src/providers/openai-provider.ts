@@ -94,7 +94,13 @@ export class OpenAILLMClient implements LLMClient {
             })),
           }
         : {}),
-      ...buildThinkingRequestOptions(request.thinkingEnabled, this.baseURL, this.settings.reasoningEffort, this.model),
+      // 请求级 effort 优先（按回合思考深度调度）；后台调用不传字段时 100% 回落全局快照
+      ...buildThinkingRequestOptions(
+        request.thinkingEnabled,
+        this.baseURL,
+        request.reasoningEffort ?? this.settings.reasoningEffort,
+        this.model
+      ),
     } as OpenAI.ChatCompletionCreateParamsNonStreaming;
     const completion = await client.chat.completions.create(params, { signal: request.signal ?? undefined });
 
@@ -163,7 +169,7 @@ export class OpenAILLMClient implements LLMClient {
           ...buildThinkingRequestOptions(
             request.thinkingEnabled,
             this.baseURL,
-            this.settings.reasoningEffort,
+            request.reasoningEffort ?? this.settings.reasoningEffort,
             this.model
           ),
         } as OpenAI.ChatCompletionCreateParamsStreaming,

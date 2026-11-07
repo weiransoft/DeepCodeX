@@ -11,7 +11,9 @@
  */
 
 import type { SedimentationSuggestion } from "./chat-model";
-import type { LlmStreamTiming } from "./voice/latency";
+import type { LlmStreamTiming, ThinkDepthSnapshot } from "./voice/latency";
+
+export type { ThinkDepthSnapshot } from "./voice/latency";
 
 /** 权限请求（permission_request 事件中的单个请求项） */
 export interface PermissionRequest {
@@ -50,6 +52,13 @@ export interface LlmDeltaEvent {
    * 该字段时为 `null`。只有语音链路消费，UI 渲染完全忽略它。
    */
   timing?: LlmStreamTiming | null;
+  /**
+   * 本轮思考深度决策（按回合动态调度）
+   *
+   * 由 `session-pool` 从 core `LlmStreamProgress.thinkDepth` 原样透传；旧服务
+   * 没有该字段时为 `null`。只用于延迟采样与效率验收，UI 渲染完全忽略。
+   */
+  thinkDepth?: ThinkDepthSnapshot | null;
 }
 
 /**

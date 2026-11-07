@@ -136,3 +136,127 @@ export function mergeLlmTiming(trace: VoiceTurnTiming, timing: LlmStreamTiming |
   }
   return next;
 }
+
+// ---------------------------------------------------------------------------
+// 按档位分组的效率指标（思考深度调度的可验证面）
+// ---------------------------------------------------------------------------
+
+/** core `LlmStreamProgress.thinkDepth` 经 SSE 透传后的精简快照 */
+export interface ThinkDepthSnapshot {
+  scene: string;
+  level: "off" | "light" | "balanced" | "full";
+  effort: string;
+  thinkingEnabled: boolean;
+  control: "effort" | "binary" | "budget" | "none";
+  effective: boolean;
+  fallback: boolean;
+  reasons?: string[];
+}
+
+/** 单轮效率样本（语音延迟采样 + 本轮档位） */
+export interface DepthEfficiencySample {
+  thinkDepth?: ThinkDepthSnapshot;
+  breakdown?: VoiceTurnLatency;
+  ttfaMs?: number;
+}
+
+/** 某档位的延迟分位（缺段一律留空，绝不填 0） */
+export interface DepthLatencyGroup {
+  count: number;
+  ttftP50Ms?: number;
+  ttftP95Ms?: number;
+  e2eP50Ms?: number;
+  ttfaP50Ms?: number;
+}
+
+/** 效率汇总 */
+export interface DepthEfficiencyReport {
+  /** 总样本数 */
+  total: number;
+  /** 有档位标记的样本数 */
+  grouped: number;
+  /** 降档样本占已分组样本的比例 */
+  downgradedRatio: number;
+  /** 兜底（调度关闭/异常）样本数 */
+  fallbackCount: number;
+  /** 按档位分组的延迟 */
+  byLevel: Partial<Record<ThinkDepthSnapshot["level"], DepthLatencyGroup>>;
+  /** full 档与最轻档 TTFT P50 之差；任一侧缺实测值时留空 */
+  ttftSavingP50Ms?: number;
+}
+
+function percentileOf(values: readonly number[], p: number): number | undefined {
+  if (values.length === 0) return undefined;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1))];
+}
+
+function finite(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/**
+ * 按思考档位汇总实测 TTFT / E2E / TTFA
+ *
+ * 这是「减少冗余思考是否真的缩短了首响应时间」的验收入口：同一份 golden
+ * 语料分别以 `DCX_THINK_DEPTH=off`（静态基线）与默认自适应跑一遍，把两批
+ * `DepthEfficiencySample` 喂进来对比 `byLevel.full.ttftP50Ms` 与
+ * `byLevel.off.ttftP50Ms`。没测到就留 `undefined`，不编造收益。
+ *
+ * @param samples 采样
+ * @returns 汇总
+ */
+export function summarizeDepthEfficiency(samples: readonly DepthEfficiencySample[]): DepthEfficiencyReport {
+  const byLevel: DepthEfficiencyReport["byLevel"] = {};
+  const ttft = new Map<string, number[]>();
+  const e2e = new Map<string, number[]>();
+  const ttfa = new Map<string, number[]>();
+  let total = 0;
+  let grouped = 0;
+  let downgraded = 0;
+  let fallbackCount = 0;
+
+  for (const sample of samples ?? []) {
+    total += 1;
+    const level = sample?.thinkDepth?.level;
+    if (level === undefined) continue;
+    grouped += 1;
+    if (level !== "full") downgraded += 1;
+    if (sample.thinkDepth?.fallback === true) fallbackCount += 1;
+    const group = byLevel[level] ?? { count: 0 };
+    group.count += 1;
+    byLevel[level] = group;
+    const push = (map: Map<string, number[]>, value: unknown): void => {
+      const ms = finite(value);
+      if (ms === undefined) return;
+      const list = map.get(level) ?? [];
+      list.push(ms);
+      map.set(level, list);
+    };
+    push(ttft, sample.breakdown?.llmTtftMs);
+    push(e2e, sample.breakdown?.e2eMs);
+    push(ttfa, sample.ttfaMs);
+  }
+
+  for (const [level, group] of Object.entries(byLevel) as Array<[ThinkDepthSnapshot["level"], DepthLatencyGroup]>) {
+    const p50 = percentileOf(ttft.get(level) ?? [], 50);
+    const p95 = percentileOf(ttft.get(level) ?? [], 95);
+    if (p50 !== undefined) group.ttftP50Ms = Math.round(p50);
+    if (p95 !== undefined) group.ttftP95Ms = Math.round(p95);
+    const e2eP50 = percentileOf(e2e.get(level) ?? [], 50);
+    if (e2eP50 !== undefined) group.e2eP50Ms = Math.round(e2eP50);
+    const ttfaP50 = percentileOf(ttfa.get(level) ?? [], 50);
+    if (ttfaP50 !== undefined) group.ttfaP50Ms = Math.round(ttfaP50);
+  }
+
+  const fullP50 = byLevel.full?.ttftP50Ms;
+  const lightP50 = byLevel.off?.ttftP50Ms ?? byLevel.light?.ttftP50Ms;
+  return {
+    total,
+    grouped,
+    downgradedRatio: grouped === 0 ? 0 : Math.round((downgraded / grouped) * 1000) / 1000,
+    fallbackCount,
+    byLevel,
+    ...(fullP50 !== undefined && lightP50 !== undefined ? { ttftSavingP50Ms: Math.round(fullP50 - lightP50) } : {}),
+  };
+}

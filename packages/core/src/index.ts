@@ -106,6 +106,28 @@ export type {
 export { advanceLlmStreamTiming } from "./llm-stream-timing";
 export type { LlmStreamTiming, LlmStreamTimingState, LlmStreamPhase } from "./llm-stream-timing";
 
+// 按回合思考深度调度：纯函数规则、护栏与效率指标（Web / CLI 可观测性共用）
+export {
+  analyzeTurn,
+  classifyTurnScene,
+  initialThinkingDepthState,
+  resolveThinkingDepth,
+  summarizeThinkingDepthEfficiency,
+  THINK_DEPTH_RULES_VERSION,
+} from "./think-depth";
+export type {
+  ThinkingControl,
+  ThinkingDepthBaseline,
+  ThinkingDepthEfficiency,
+  ThinkingDepthInput,
+  ThinkingDepthLevel,
+  ThinkingDepthPlan,
+  ThinkingDepthSample,
+  ThinkingDepthState,
+  TurnScene,
+  TurnSignals,
+} from "./think-depth";
+
 // Provider 抽象层导出（原生 Claude API 支持）
 export { ProviderFactory } from "./providers/provider-factory";
 export { AnthropicProvider, AnthropicLLMClient } from "./providers/anthropic-provider";

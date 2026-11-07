@@ -76,11 +76,13 @@ import {
 } from "./sse";
 import {
   beginVoiceTurn,
+  consumeVoiceOrigin,
   feedVoice,
   finishVoice,
   noteVoiceConnectionLost,
   noteVoiceConnectionRestored,
   noteVoiceLlmTiming,
+  noteVoiceThinkDepth,
   setVoiceInterruptHandler,
 } from "./voice/voice-bus";
 
@@ -252,6 +254,8 @@ export function App() {
       // 语音延迟埋点：LLM 请求起点 / 首正文 token（TTFT）。
       // 只写时间戳，不撤重连看门狗 —— 只有正文才证明本轮还活着。
       noteVoiceLlmTiming(e.timing);
+      // 本轮思考深度决策：随延迟采样落盘，用于按档位分组统计 TTFT / E2E。
+      noteVoiceThinkDepth(e.thinkDepth);
       // 语音：把累积正文喂给播报队列（按句切分后逐句合成）。
       // 语音关闭或服务未就绪时总线里没有实例，这里是空操作。
       feedVoice(e.previewText);
@@ -1014,6 +1018,10 @@ export function App() {
       // 所有发送路径（输入框、语音自动提交、steering、新会话首条）都在这里
       // 收敛：显式开新一轮，覆盖 Composer 之外没有调用 beginVoiceTurn 的入口。
       beginVoiceTurn();
+      // 语音识别自动提交的消息带一次性来源标记：消费后随请求下发，让思考深度
+      // 调度器知道这一轮对首响应时间更敏感。键盘输入不带该字段（保持原有行为）。
+      const voiceOrigin = consumeVoiceOrigin();
+      const depthParams: Record<string, unknown> | undefined = voiceOrigin ? { latencySensitive: true } : undefined;
 
       // 运行中发送的补充指令才需要 mode 角标（空闲首发消息保持无角标语义）
       const isSupplement = streamingRef.current;
@@ -1061,15 +1069,24 @@ export function App() {
       if (localFiles.length > 0) {
         // 本地附件：multipart（text 字段 + 多个 file 字段）；服务器图片路径并入文本
         const mentionImages = serverImagePaths.map((p) => `\n[图片: ${p}]`).join("");
-        sendMessageWithFiles(chatId, `${text}${mentionImages}${pathMentions}`, localFiles).then(finish).catch(fail);
+        sendMessageWithFiles(chatId, `${text}${mentionImages}${pathMentions}`, localFiles, depthParams)
+          .then(finish)
+          .catch(fail);
       } else if (serverImagePaths.length > 0) {
         // 服务器图片：JSON {text, imageUrls}（设计文档 §2.1：本地路径可传入 imageUrls）
-        sendTextMessage(chatId, { text: `${text}${pathMentions}`, imageUrls: serverImagePaths })
+        sendTextMessage(chatId, {
+          text: `${text}${pathMentions}`,
+          imageUrls: serverImagePaths,
+          ...(depthParams ? { messageParams: depthParams } : {}),
+        })
           .then(finish)
           .catch(fail);
       } else {
         // 纯文本（可能含服务器文件路径引用）
-        sendTextMessage(chatId, { text: `${text}${pathMentions}` })
+        sendTextMessage(chatId, {
+          text: `${text}${pathMentions}`,
+          ...(depthParams ? { messageParams: depthParams } : {}),
+        })
           .then(finish)
           .catch(fail);
       }

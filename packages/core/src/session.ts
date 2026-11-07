@@ -8,7 +8,17 @@ import matter from "gray-matter";
 import ejs from "ejs";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { launchNotifyScript } from "./common/notify";
-import { buildThinkingRequestOptions } from "./common/openai-thinking";
+import { buildThinkingRequestOptions, thinkingControlForModel } from "./common/openai-thinking";
+import { detectSoulModeFromPrompt } from "./super-agent/soul/modes";
+import {
+  initialThinkingDepthState,
+  resolveThinkingDepth,
+  type ThinkingDepthBaseline,
+  type ThinkingControl,
+  type ThinkingDepthInput,
+  type ThinkingDepthPlan,
+  type ThinkingDepthState,
+} from "./think-depth";
 // 全局规则（RLIS global 层）读取与注入格式化——详见 global-rules.ts 模块注释
 import { formatGlobalRulesPrompt, markGlobalRulesInjected, readGlobalRulesFile } from "./global-rules";
 // 合并说明：DEEPSEEK_V4_MODELS 为 fork 侧 compact 阈值特判所需；buildSkillCatalogPrompt
@@ -49,6 +59,7 @@ import type {
   PermissionMode,
   PermissionScope,
   PermissionSettings,
+  ReasoningEffort,
   ResolvedDeepcodingSettings,
 } from "./settings";
 import { resolveCurrentSettings } from "./settings";
@@ -1321,6 +1332,14 @@ export type LlmStreamProgress = {
    * speechEnd / TTS 首字节 / 首音频放进同一条时间轴。全部可选，旧宿主零回归。
    */
   timing?: LlmStreamTiming;
+  /**
+   * 本轮思考深度决策（2026-11-07 动态调度可观测性）
+   *
+   * 经 SSE `llm_delta` 透传给前端：场景、档位、effort、模型控制能力与决策依据。
+   * 旧宿主不消费，缺省时行为完全不变；调度器关闭/兜底时同样带 `fallback` 标记，
+   * 便于 A/B 期间按档位分组统计 TTFT 而不必猜。
+   */
+  thinkDepth?: ThinkingDepthPlan;
 };
 
 /**
@@ -1619,6 +1638,15 @@ export class SessionManager {
    * `requestId` 隔离，多个会话/并发轮次互不串扰。不缓存 token、不缓存正文。
    */
   private readonly llmStreamTimings = new Map<string, LlmStreamTimingState>();
+  /**
+   * 按回合思考深度调度：会话级滞回状态与本轮决策快照
+   *
+   * `sessionId` 隔离（session-pool 对每个 chat 串行执行轮次，不同 chat 互不串扰）。
+   * `plans` 只保留最近一轮，供 `emitLlmStreamProgress()` 把档位随 SSE 外发，
+   * 不缓存正文、不缓存 token。
+   */
+  private readonly thinkingDepthStates = new Map<string, ThinkingDepthState>();
+  private readonly thinkingDepthPlans = new Map<string, ThinkingDepthPlan>();
   private readonly onLlmRetry?: (event: LlmRetryEvent) => void;
   private readonly onMcpStatusChanged?: () => void;
   private readonly onProcessStdout?: (pid: number, chunk: string) => void;
@@ -2285,6 +2313,7 @@ export class SessionManager {
     if (phase === "end") this.llmStreamTimings.delete(requestId);
     else this.llmStreamTimings.set(requestId, state);
 
+    const thinkDepth = sessionId ? this.thinkingDepthPlans.get(sessionId) : undefined;
     this.onLlmStreamProgress?.({
       requestId,
       sessionId,
@@ -2295,6 +2324,7 @@ export class SessionManager {
       thinkingText: this.formatStreamThinking(thinkingText),
       phase,
       timing,
+      ...(thinkDepth ? { thinkDepth } : {}),
     });
   }
 
@@ -3184,6 +3214,9 @@ export class SessionManager {
       messages: SessionMessage[];
       tools?: LLMToolDefinition[];
       thinkingEnabled: boolean;
+      /** 按回合调度的推理强度 / Claude thinking 预算（可选，缺省回落 settings） */
+      reasoningEffort?: ReasoningEffort;
+      thinkingBudgetTokens?: number;
       signal?: AbortSignal | null;
     },
     options?: Record<string, unknown>,
@@ -3252,6 +3285,8 @@ export class SessionManager {
       messages: SessionMessage[];
       tools?: LLMToolDefinition[];
       thinkingEnabled: boolean;
+      reasoningEffort?: ReasoningEffort;
+      thinkingBudgetTokens?: number;
       signal?: AbortSignal | null;
     },
     options?: Record<string, unknown>,
@@ -3324,6 +3359,8 @@ export class SessionManager {
       messages: request.messages,
       tools: request.tools,
       thinkingEnabled: request.thinkingEnabled,
+      ...(request.reasoningEffort !== undefined ? { reasoningEffort: request.reasoningEffort } : {}),
+      ...(request.thinkingBudgetTokens !== undefined ? { thinkingBudgetTokens: request.thinkingBudgetTokens } : {}),
     };
 
     let content = "";
@@ -3375,6 +3412,8 @@ export class SessionManager {
         messages: request.messages,
         tools: request.tools,
         thinkingEnabled: request.thinkingEnabled,
+        ...(request.reasoningEffort !== undefined ? { reasoningEffort: request.reasoningEffort } : {}),
+        ...(request.thinkingBudgetTokens !== undefined ? { thinkingBudgetTokens: request.thinkingBudgetTokens } : {}),
         signal: safetyController.signal,
       })) {
         // 2026-10-19 停止按钮修复：每个 event 后检查 abort 信号（与 OpenAI 路径双点检查对等）
@@ -8323,6 +8362,108 @@ ${agentInstructions}
     }
   }
 
+  /**
+   * 计算本轮思考深度决策
+   *
+   * 放在 `activateSession()` 主循环里、构造 LLM 请求体之前：只看本轮用户原文、
+   * 已注入的 Soul 提示词和会话规模，不新增任何 LLM 调用（调度本身不能制造延迟）。
+   * 决策随 `llm_delta` 外发，A/B 期间可按档位分组统计 TTFT。
+   *
+   * 失败路径：任何异常/脏输入都让 `enabled=false`，由纯函数返回与调度器上线前
+   * 完全一致的静态基线，并标记 `fallback`，绝不把猜测值当成实测收益。
+   *
+   * @param sessionId 会话 id（隔离滞回状态）
+   * @param messages 本轮请求前的会话消息
+   * @param iteration 主循环迭代序号
+   * @param prompt 本轮 prompt（部分路径经 activateSession 第三参传入）
+   * @param baseline 用户在 settings 里的静态 thinking 配置
+   * @param control 模型实际支持的思考控制手段
+   * @returns 本轮决策
+   */
+  private resolveTurnThinkingDepth(
+    sessionId: string,
+    messages: readonly SessionMessage[],
+    iteration: number,
+    prompt: UserPromptContent | undefined,
+    baseline: ThinkingDepthBaseline,
+    control: ThinkingControl
+  ): ThinkingDepthPlan {
+    const state = this.thinkingDepthStates.get(sessionId) ?? initialThinkingDepthState();
+    let input: ThinkingDepthInput;
+    try {
+      let lastUser: SessionMessage | undefined;
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        if (messages[index].role === "user") {
+          lastUser = messages[index];
+          break;
+        }
+      }
+      const text = typeof lastUser?.content === "string" ? lastUser.content : "";
+      const metaPrompt = lastUser?.meta?.userPrompt;
+      const params = metaPrompt?.messageParams ?? prompt?.messageParams;
+      const latencySensitive = params?.["latencySensitive"] === true;
+      // 单回合逃生口：显式要求固定档位时完全跳过调度
+      const forceFixed = params?.["thinkingDepth"] === "fixed";
+
+      let contextChars = 0;
+      let contextMessages = 0;
+      let mode: "work" | "companion" = "work";
+      for (const message of messages) {
+        if (message.compacted) continue;
+        contextMessages += 1;
+        if (typeof message.content === "string") {
+          contextChars += message.content.length;
+          // 读的是本会话真正注入的那份 Soul 提示词，而不是磁盘上的最新配置
+          if (message.role === "system" && detectSoulModeFromPrompt(message.content) === "companion") {
+            mode = "companion";
+          }
+        }
+      }
+      const hasAttachments =
+        (metaPrompt?.imageUrls?.length ?? 0) > 0 ||
+        (prompt?.imageUrls?.length ?? 0) > 0 ||
+        text.includes("[文件:") ||
+        text.includes("[图片:");
+      const isStructuredTurn =
+        lastUser?.meta?.isAnswers === true ||
+        (metaPrompt?.permissions?.length ?? 0) > 0 ||
+        (prompt?.permissions?.length ?? 0) > 0 ||
+        params?.["codingLoopRequest"] !== undefined ||
+        /^\s*\/(?:continue|eag|team|plan)\b/i.test(text);
+
+      input = {
+        text,
+        mode,
+        contextChars,
+        contextMessages,
+        latencySensitive,
+        iteration,
+        hasAttachments,
+        isStructuredTurn,
+        control,
+        // 一键回退：DCX_THINK_DEPTH=off 时行为与上线前逐字节一致
+        enabled: process.env.DCX_THINK_DEPTH !== "off" && !forceFixed,
+      };
+    } catch {
+      input = {
+        text: "",
+        mode: "work",
+        contextChars: 0,
+        contextMessages: 0,
+        latencySensitive: false,
+        iteration: 0,
+        hasAttachments: false,
+        isStructuredTurn: false,
+        control,
+        enabled: false,
+      };
+    }
+    const { plan, state: nextState } = resolveThinkingDepth(input, baseline, state);
+    this.thinkingDepthStates.set(sessionId, nextState);
+    this.thinkingDepthPlans.set(sessionId, plan);
+    return plan;
+  }
+
   async activateSession(
     sessionId: string,
     controller?: AbortController,
@@ -8399,6 +8540,15 @@ ${agentInstructions}
     // OpenAI 路径当前依赖 SDK 请求级 timeout（默认 600s），此处额外提供流式整体超时；
     // Anthropic 路径在 createLlmMessageStream 中通过 AbortController 实现，因 Anthropic SDK 未配置 timeout。
     const settings = this.getResolvedSettings();
+    // 按回合思考深度调度：基线恒等于用户在 settings 里的静态配置（档位天花板），
+    // 控制能力由模型/provider 实际支持的字段决定，不支持的模型如实标记 none。
+    const anthropicBudget = anthropicClient ? this.resolveEngineSettings().anthropic?.thinkingBudgetTokens : undefined;
+    const thinkingDepthBaseline: ThinkingDepthBaseline = {
+      thinkingEnabled,
+      reasoningEffort: reasoningEffort ?? "max",
+      ...(anthropicBudget !== undefined ? { thinkingBudgetTokens: anthropicBudget } : {}),
+    };
+    const thinkingDepthControl: ThinkingControl = anthropicClient ? "budget" : thinkingControlForModel(model);
     const settingsTimeout = settings.timeout ?? 0;
     const streamTimeoutMs = settingsTimeout > 0 ? settingsTimeout * 1000 : undefined;
     const maxReasoningLength = 100_000;
@@ -8644,6 +8794,23 @@ ${agentInstructions}
         if (this.isInterrupted(sessionId)) {
           return;
         }
+        /**
+         * 按回合决定思考深度（2026-11-07）
+         *
+         * 这里刻意放在构造请求体之前、且不新增任何 LLM 调用：闲聊/情感陪伴降档，
+         * 任务/复杂任务/危机/工具续跑即时回弹到基线。决策同时写入会话级快照，
+         * 由 `emitLlmStreamProgress()` 随 `llm_delta` 外发，供效率指标按档位分组。
+         */
+        const thinkDepth = this.resolveTurnThinkingDepth(
+          sessionId,
+          sessionMessages,
+          iteration,
+          permissionPrompt,
+          thinkingDepthBaseline,
+          thinkingDepthControl
+        );
+        const turnThinkingEnabled = thinkDepth.thinkingEnabled;
+        const turnReasoningEffort = thinkDepth.reasoningEffort;
         // upstream：DeepSeek Files API 设置
         const filesSettings = this.getDeepSeekFilesSettings();
         if (filesSettings.enabled && !apiKey) {
@@ -8654,7 +8821,7 @@ ${agentInstructions}
         let prepared = filesSettings.enabled
           ? await this.buildMessagesWithDeepSeekFiles(
               sessionMessages,
-              thinkingEnabled,
+              turnThinkingEnabled,
               model,
               apiKey!,
               sessionController.signal
@@ -8665,12 +8832,13 @@ ${agentInstructions}
             };
         const messages = this.messageConverter.buildMessages(
           sessionMessages,
-          thinkingEnabled,
+          turnThinkingEnabled,
           model,
           this.getResolvedSettings().multimodal
         );
         // v1.1 修改：传入 model 参数，支持 Qwen3 的 chat_template_kwargs.enable_thinking 格式
-        const thinkingOptions = buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort, model);
+        // 2026-11-07：改用本轮调度值（上限恒为 settings 静态档位，任务回合与旧行为逐字段一致）
+        const thinkingOptions = buildThinkingRequestOptions(turnThinkingEnabled, baseURL, turnReasoningEffort, model);
         // 仅流式调用一处三元分支，前后逻辑共享（2026-07-18 设计 §3 调用点形态）；
         // OpenAI 分支保持原样，Anthropic 分支聚合产物与 OpenAI 形态契约完全一致，
         // 主循环消费面（content/tool_calls/reasoning_content/refusal/usage）零改动。
@@ -8702,7 +8870,11 @@ ${agentInstructions}
                     description: tool.function.description,
                     parameters: tool.function.parameters,
                   })),
-                  thinkingEnabled,
+                  thinkingEnabled: turnThinkingEnabled,
+                  reasoningEffort: turnReasoningEffort,
+                  ...(thinkDepth.thinkingBudgetTokens !== undefined
+                    ? { thinkingBudgetTokens: thinkDepth.thinkingBudgetTokens }
+                    : {}),
                   signal: sessionController.signal,
                 },
                 { signal: sessionController.signal, streamTimeoutMs, maxReasoningLength },
@@ -8710,7 +8882,13 @@ ${agentInstructions}
                 {
                   enabled: debugLogEnabled,
                   location: "SessionManager.activateSession",
-                  params: { iteration, temperature, thinkingEnabled, reasoningEffort },
+                  params: {
+                    iteration,
+                    temperature,
+                    thinkingEnabled: turnThinkingEnabled,
+                    reasoningEffort: turnReasoningEffort,
+                    thinkDepth: { scene: thinkDepth.scene, level: thinkDepth.level, control: thinkDepth.control },
+                  },
                 }
               )
             : await this.createChatCompletionStream(
@@ -8732,7 +8910,13 @@ ${agentInstructions}
                   enabled: debugLogEnabled,
                   location: "SessionManager.activateSession",
                   baseURL,
-                  params: { iteration, temperature, thinkingEnabled, reasoningEffort },
+                  params: {
+                    iteration,
+                    temperature,
+                    thinkingEnabled: turnThinkingEnabled,
+                    reasoningEffort: turnReasoningEffort,
+                    thinkDepth: { scene: thinkDepth.scene, level: thinkDepth.level, control: thinkDepth.control },
+                  },
                 }
               );
         } catch (error) {
@@ -8753,7 +8937,7 @@ ${agentInstructions}
           }
           prepared = await this.buildMessagesWithDeepSeekFiles(
             sessionMessages,
-            thinkingEnabled,
+            turnThinkingEnabled,
             model,
             apiKey!,
             sessionController.signal
@@ -8774,7 +8958,13 @@ ${agentInstructions}
               enabled: debugLogEnabled,
               location: "SessionManager.activateSession",
               baseURL,
-              params: { iteration, temperature, thinkingEnabled, reasoningEffort },
+              params: {
+                iteration,
+                temperature,
+                thinkingEnabled: turnThinkingEnabled,
+                reasoningEffort: turnReasoningEffort,
+                thinkDepth: { scene: thinkDepth.scene, level: thinkDepth.level, control: thinkDepth.control },
+              },
             }
           );
         }

@@ -80,6 +80,26 @@ function mapReasoningEffortToQwen(effort: ReasoningEffort): QwenReasoningEffort 
 }
 
 /**
+ * 判断某个模型**实际**能接受哪种思考深度控制
+ *
+ * 与 `buildThinkingRequestOptions()` 的分支严格同源：调度器据此判断请求参数
+ * 是否真的会改变模型行为。对不支持的模型返回 `none`，调度器会如实标记
+ * `effective=false`，不把「参数没生效」伪装成加速。
+ *
+ * - `effort`：Qwen3.8+ / DeepSeek V4，原生 `reasoning_effort` 档位；
+ * - `binary`：旧 Qwen3，只有 `enable_thinking` 开关；
+ * - `none`：其它 OpenAI 兼容模型，不发送任何 thinking 字段。
+ *
+ * @param model 模型名
+ * @returns 控制能力
+ */
+export function thinkingControlForModel(model: string): "effort" | "binary" | "none" {
+  if (isDeepSeekThinkingModel(model)) return "effort";
+  if (isQwen3Model(model)) return isQwen38Model(model) ? "effort" : "binary";
+  return "none";
+}
+
+/**
  * 构建 thinking 请求参数
  *
  * 根据 model 判断使用哪种 thinking 参数格式：
