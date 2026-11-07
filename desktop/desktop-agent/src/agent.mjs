@@ -208,11 +208,13 @@ for (const tool of TOOLS) {
 }
 
 export class DesktopAgent {
-  constructor({ backend, policy = {}, limits = {}, telemetryOptions = {} } = {}) {
+  constructor({ backend, policy = {}, limits = {}, telemetryOptions = {}, reloader = null } = {}) {
     this.backend = assertBackend(backend);
     this.telemetry = new Telemetry(telemetryOptions);
     this.policy = new PolicyGuard(policy, {});
     this.budget = new Budget(limits, {});
+    /** 可选：策略热重载器（stdio 入口注入；脚本/单测直接构造时为空 = 保持旧行为） */
+    this.reloader = reloader;
     this.registry = new AppRegistry(this.backend, { telemetry: this.telemetry });
     this.perception = new Perception(this.backend, {
       policy: this.policy,
@@ -240,18 +242,52 @@ export class DesktopAgent {
     this.version = "0.1.0";
   }
 
+  /** 预算字段跟着策略一起变：patch 里没写的字段保持原值 */
+  applyBudgetPatch(patch) {
+    const next = { ...this.budget.limits };
+    for (const key of ["maxSteps", "maxScreenshots", "maxTokens", "maxRetries"]) {
+      if (patch[key] !== undefined) next[key] = patch[key];
+    }
+    this.budget.limits = next;
+  }
+
   /** 策略/开关变更：热更新，不重建进程（对齐 engine_fingerprint 的保存即生效思路） */
   applyPolicy(patch) {
     const snap = this.policy.update(patch);
-    this.budget.limits = {
-      ...this.budget.limits,
-      ...(patch.maxSteps !== undefined ? { maxSteps: patch.maxSteps } : {}),
-      ...(patch.maxScreenshots !== undefined ? { maxScreenshots: patch.maxScreenshots } : {}),
-      ...(patch.maxTokens !== undefined ? { maxTokens: patch.maxTokens } : {}),
-      ...(patch.maxRetries !== undefined ? { maxRetries: patch.maxRetries } : {}),
-    };
+    this.applyBudgetPatch(patch);
     this.telemetry.emit("policy.updated", { enabled: snap.enabled, permissionMode: snap.permissionMode });
     return snap;
+  }
+
+  /**
+   * 每次工具调用前的「文件即真源」重判。
+   *
+   * 放在 `callTool` 而不是 `mcp-server`：callTool 还有验证脚本等直接入口，
+   * 只守协议层会留后门。重载器内部已对读盘/解析失败 fail-closed，这里再兜一层
+   * 异常，确保任何意外都收紧到默认策略而不是继续用旧授权放行。
+   */
+  refreshPolicy() {
+    if (!this.reloader) return { changed: false, reason: "no-reloader", revision: 0 };
+    try {
+      const state = this.reloader.current();
+      if (!state.changed) return { changed: false, reason: state.reason, revision: state.revision };
+      const snap = this.policy.replace(state.policy);
+      this.applyBudgetPatch(state.policy);
+      this.telemetry.emit("policy.reloaded", {
+        revision: state.revision,
+        reason: state.reason,
+        enabled: snap.enabled,
+        allowScreenshot: snap.allowScreenshot,
+        allowCoordinateInput: snap.allowCoordinateInput,
+        visionAppCount: snap.visionApps?.length ?? 0,
+      });
+      return { changed: true, reason: state.reason, revision: state.revision };
+    } catch (err) {
+      // 兜底：绝不因重载异常继续沿用旧策略
+      this.policy.replace({});
+      this.telemetry.emit("policy.reload_error", { message: String(err?.message ?? err) });
+      return { changed: true, reason: "fail-closed:exception", revision: -1 };
+    }
   }
 
   /** 能力矩阵（P0 探针直接消费） */
@@ -326,6 +362,9 @@ export class DesktopAgent {
 
   /** 工具分发：统一入口，异常规范化为结构化 code */
   async callTool(name, args = {}) {
+    // 撤销授权必须在「下一次动作」前生效，不能等到引擎重启。
+    // refreshPolicy 自身不抛异常（失败即 fail-closed），所以这里无需 try。
+    this.refreshPolicy();
     try {
       return await this.dispatch(name, args);
     } catch (err) {

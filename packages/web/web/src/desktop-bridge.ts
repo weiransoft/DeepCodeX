@@ -149,6 +149,7 @@ export interface DesktopAgentStatus {
   sidecarRegistered: boolean;
   /** 前端无权修改的字段（UI 应置灰并说明原因） */
   lockedFields: string[];
+  /** 何时才需要重启引擎：开关/授权/撤销已热生效，仅首次登记 MCP 服务需要 */
   restartHint: string;
   platformPermissions: {
     platform: string;

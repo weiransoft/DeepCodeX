@@ -24,7 +24,8 @@
     "register:mcp": "node scripts/register-mcp.mjs",
     "verify:visual": "node scripts/verify-visual-fallback.mjs",
     "verify:image": "node --import tsx scripts/verify-image-content.mjs",
-    "verify:vision": "node scripts/verify-vision-gate.mjs"
+    "verify:vision": "node scripts/verify-vision-gate.mjs",
+    "verify:policy": "node scripts/verify-policy-lifecycle.mjs"
   },
   "dependencies": {},
   "devDependencies": {}

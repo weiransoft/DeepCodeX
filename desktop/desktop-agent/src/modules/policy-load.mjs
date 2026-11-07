@@ -1,15 +1,19 @@
 /**
  * 外部策略加载 + 硬化（方案 §4.4「授权在壳」的 sidecar 侧对应实现）。
  *
- * 契约：壳把开关/授权写到 `~/.deepcode/desktop-agent.json`，sidecar 启动时读取。
- * 但**落盘文件是不可信输入**——壳侧 harden() 已经复位过一次，这里再独立复位
- * 一次（纵深防御）：即便用户手工改文件、或换了一个没跑壳的启动方式，
+ * 契约：壳把开关/授权写到 `~/.deepcode/desktop-agent.json`，sidecar 启动时读取，
+ * 并**在每个工具调用前重判一次**（`PolicyReloader`）——壳拿不到 sidecar 的进程
+ * 句柄，文件是唯一通道；撤销授权必须即时生效，不能等到引擎重启。
+ * 但**落盘文件是不可信输入**——壳侧 harden() 已经复位过一次，这里每次重载都
+ * 再独立复位一次（纵深防御）：即便用户手工改文件、或换了一个没跑壳的启动方式，
  * 也不能通过策略文件放宽敏感分类、视觉/坐标通道、权限模式与预算上限。
  *
  * 优先级：DEEPCODE_AGENT_POLICY（显式指定）> 壳落盘策略 > 仓库内默认策略。
- * 任何解析失败都回落到「默认关闭」的安全基线，而不是抛错让进程带病启动。
+ * 任何解析失败都回落到「默认关闭」的安全基线（fail-closed），而不是抛错让进程
+ * 带病启动、或沿用上一次的有效授权。
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -143,5 +147,123 @@ export function loadPolicy({ env = process.env, home = homedir(), read = readFil
     return { policy: hardenExternalPolicy(JSON.parse(read(path, "utf8"))), source, path, error: null };
   } catch (e) {
     return { policy: defaultPolicy(), source: "fallback", path, error: e?.message ?? String(e) };
+  }
+}
+
+/**
+ * 策略热重载：「文件即真源」，每次工具调用前重判一次。
+ *
+ * 为什么需要它（而不只是"麻烦一点、重启引擎就好了"）：
+ * 壳与 sidecar 之间只有策略文件这一条通道（sidecar 由引擎 McpManager 拉起，
+ * 壳拿不到它的进程句柄）。授权后不重启只是体验问题，但**撤销后不重启是漏洞**：
+ * 长驻 sidecar 仍握着旧的 visionApps / allowScreenshot，用户点了撤销、
+ * 到引擎重启之间照样能读屏和代点击。所以撤销必须在下一次动作前生效。
+ *
+ * 三条不变式：
+ * 1. 每次重解析都走 `hardenExternalPolicy(raw, now)`——手改 JSON 放宽不了，
+ *    且 `now` 是调用时刻，到期授权在重解析时连开关一起收回；
+ * 2. **fail-closed**：文件消失 / 写了一半 / JSON 损坏 → 回落「默认全关」，
+ *    绝不保留上一次的有效授权（否则删掉文件反而绕过了撤销）；
+ * 3. 用**内容签名**而非 mtime 判变更：编辑器原子写、mtime 精度、时钟回拨
+ *    都会让 mtime 探测漏判；策略文件只有几百字节，每次读全文算 sha256 更可靠。
+ *
+ * 不引入后台定时器：没有工具调用时策略新旧无所谓，而定时器在 stdio 进程里
+ * 只会带来「重载到一半」的中间态。同步、按调用触发，最容易被测试锁住。
+ */
+export class PolicyReloader {
+  constructor({
+    path,
+    source = "shell",
+    read = readFileSync,
+    clock = () => Date.now(),
+    onReload = null,
+    onError = null,
+  } = {}) {
+    if (!path || typeof path !== "string") throw new Error("PolicyReloader 需要策略文件路径");
+    this.path = path;
+    this.source = source;
+    this.read = read;
+    this.clock = clock;
+    this.onReload = onReload;
+    this.onError = onError;
+    /** 上次成功解析的内容签名（null = 无有效缓存，下次必须重新解析） */
+    this.signature = null;
+    this.policy = null;
+    this.revision = 0;
+    this.lastFailure = null;
+  }
+
+  static hash(text) {
+    return createHash("sha256").update(text).digest("hex").slice(0, 16);
+  }
+
+  /** 视觉授权到期后要连「开关」一起收回，不能只靠 PolicyGuard 在动作时拒绝 */
+  #visionExpired() {
+    const expiresAt = Number(this.policy?.visionExpiresAt) || 0;
+    return expiresAt > 0 && this.clock() >= expiresAt;
+  }
+
+  /** @returns {{changed:boolean, policy:object, reason:string, revision:number, failed:boolean}} */
+  #fail(reason) {
+    const first = this.lastFailure !== reason;
+    this.lastFailure = reason;
+    // 缓存作废是这里最关键的一行：文件恢复后必须重新解析，不能沿用旧授权
+    this.signature = null;
+    this.policy = defaultPolicy();
+    if (first) {
+      this.revision += 1;
+      this.onError?.(reason);
+    }
+    return {
+      changed: first,
+      policy: this.policy,
+      reason: `fail-closed:${reason}`,
+      revision: this.revision,
+      failed: true,
+    };
+  }
+
+  current() {
+    let text;
+    try {
+      text = this.read(this.path, "utf8");
+    } catch (e) {
+      return this.#fail(`unreadable:${e?.code ?? e?.message ?? "unknown"}`);
+    }
+    if (typeof text !== "string") return this.#fail("non-string-content");
+
+    const signature = PolicyReloader.hash(text);
+    const needParse =
+      this.policy === null || signature !== this.signature || this.#visionExpired();
+    if (!needParse) {
+      return { changed: false, policy: this.policy, reason: "unchanged", revision: this.revision, failed: false };
+    }
+
+    let policy;
+    try {
+      policy = hardenExternalPolicy(JSON.parse(text), this.clock());
+    } catch (e) {
+      return this.#fail(`invalid-policy:${e?.message ?? String(e)}`);
+    }
+
+    const reason =
+      this.policy === null
+        ? "initial"
+        : signature === this.signature
+          ? "vision-expired"
+          : "content-changed";
+    this.signature = signature;
+    this.policy = policy;
+    this.lastFailure = null;
+    this.revision += 1;
+    this.onReload?.({
+      revision: this.revision,
+      reason,
+      enabled: policy.enabled,
+      allowScreenshot: policy.allowScreenshot,
+      allowCoordinateInput: policy.allowCoordinateInput,
+      visionAppCount: policy.visionApps.length,
+    });
+    return { changed: true, policy, reason, revision: this.revision, failed: false };
   }
 }

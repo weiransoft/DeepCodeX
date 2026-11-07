@@ -12,8 +12,10 @@
 //!    避免 WebView 侧提示注入把权限模式提权；
 //! 3. 所有来自前端的标识与 scope 在边界处校验，非法输入直接拒绝而非静默吞掉。
 //!
-//! P1 阶段策略在 sidecar 进程启动时读取一次，变更需重启引擎（连带重启 MCP
-//! sidecar）；热更新通道属 P2，故状态里显式返回 `restartHint`。
+//! 策略通道：壳写 `desktop-agent.json`，sidecar 在启动时读一次、**并在每个工具
+//! 调用前重判一次**（`policy-load.mjs::PolicyReloader`）。因此授权与撤销都即时
+//! 生效，不需要重启引擎；`restartHint` 现在只提示「首次登记 MCP 服务」这一种
+//! 需要重启的场景。落盘文件始终按不可信输入处理，两侧各自重跑硬化规则。
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -261,6 +263,7 @@ pub struct AgentStatus {
     pub sidecar_registered: bool,
     /// 前端无权修改的字段（用于 UI 置灰与审计说明）
     pub locked_fields: Vec<String>,
+    /// 何时才需要重启引擎（策略变更已不需要，见 §3.14）
     pub restart_hint: String,
     pub platform_permissions: PlatformPermissionGuide,
 }
@@ -607,7 +610,7 @@ pub fn status() -> Result<AgentStatus, ShellError> {
             "maxSteps/maxTokens/maxRetries".into(),
             "allowScreenshot/allowCoordinateInput（由限时视觉授权派生，请走 visionGrant）".into(),
         ],
-        restart_hint: "策略由 sidecar 启动时读取一次；修改开关或授权后需重启引擎才会生效（P2 再做热更新）".into(),
+        restart_hint: "开关/授权/撤销由 sidecar 在每次工具调用前重读策略文件，即时生效，无需重启引擎；仅首次登记 desktop-agent MCP 服务后需重启引擎以让 McpManager 拉起 sidecar".into(),
         platform_permissions: platform_guide(),
     })
 }

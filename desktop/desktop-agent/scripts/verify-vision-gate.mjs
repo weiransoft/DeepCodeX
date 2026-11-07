@@ -150,7 +150,7 @@ async function scenario(dir, name, { policy, backend = "mock", tool, args, expec
   const policyPath = join(dir, `${name}.json`);
   writeFileSync(policyPath, JSON.stringify(policy, null, 2), "utf8");
   try {
-    const { frame } = await callToolOnce({ policyPath, backend, tool, args });
+    const { frame, stderr } = await callToolOnce({ policyPath, backend, tool, args });
     const info = readFrame(frame);
     // expect 允许返回对象（带 ok 与逐项判据）：失败时报告里能看出卡在哪一条，
     // 只回 false 的话原因永远是「猜」
@@ -162,6 +162,9 @@ async function scenario(dir, name, { policy, backend = "mock", tool, args, expec
     const structured = verdict !== null && typeof verdict === "object";
     const row = { name, backend, tool, args, observed, pass: structured ? verdict.ok === true : verdict === true };
     if (structured) row.checks = verdict;
+    // 失败时把 sidecar 的 stderr 尾部带上：windows 后端在桥错误时是静默降级
+    // （_callBridge 默认不抛），只看返回帧会完全不知道桥为什么没出图
+    if (!row.pass) row.stderrTail = String(stderr ?? "").slice(-1200);
     delete row.expect;
     return row;
   } catch (err) {
@@ -267,13 +270,16 @@ async function main() {
             },
             backend: "windows",
             tool: "desktop_screenshot",
-            args: { appId: target.appId, hwnd: Number(target.hwnd), reason: "gate-f", includeImage: true, activate: true },
+            // F 只验「闸门放开后像素能不能穿过协议层」，不比较像素内容归属；
+            // 抢前台属于 verify:visual 的 before/after 验效，且后台进程可能被系统拒绝
+            args: { appId: target.appId, hwnd: Number(target.hwnd), reason: "gate-f", includeImage: true, activate: false },
             expect: (info) => {
               const checks = {
                 imageBlock: imageOk(info),
                 decoded: Boolean(info.pixelSize),
-                widthMatches: info.pixelSize?.width === info.reportedSize?.width,
-                heightMatches: info.pixelSize?.height === info.reportedSize?.height,
+                // 必须先 decoded：两边都 undefined 时 `===` 会假阳性判成「尺寸一致」
+                widthMatches: Boolean(info.pixelSize) && info.pixelSize?.width === info.reportedSize?.width,
+                heightMatches: Boolean(info.pixelSize) && info.pixelSize?.height === info.reportedSize?.height,
                 bytesPositive: info.imageBytes > 0,
               };
               return { ok: Object.values(checks).every(Boolean), ...checks };

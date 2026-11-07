@@ -238,6 +238,20 @@ export class Perception {
         activate,
       })
     );
+    // 纵深防御：后端可能不是 windows.mjs（mock / 未来后端），也可能桥自己降级了。
+    // 「ok:true 但没有尺寸/像素」比报错更危险——模型会拿着 frame:null 继续点坐标，
+    // 而且不会收到任何失败信号。这里一律转成显式错误，绝不静默出空壳。
+    const code = Object.values(ErrorCode).includes(shot?.code) ? shot.code : ErrorCode.OBSERVATION_FAILED;
+    if (shot?.ok === false || !Number.isFinite(shot?.width) || !Number.isFinite(shot?.height)) {
+      throw new AgentError(code, shot?.message ?? "截图结果缺少尺寸信息（后端可能静默降级）", {
+        hint: shot?.hint ?? "检查 UIA 桥与交互式桌面会话；目标窗口需可见",
+      });
+    }
+    if (includeImage && !shot.base64) {
+      throw new AgentError(ErrorCode.OBSERVATION_FAILED, "请求了像素但后端未回传 base64", {
+        hint: "检查截图通道；不要把「没有图」当成截图成功",
+      });
+    }
     // 只回传元数据；base64 交给调用方按需消费，绝不经 Telemetry 落盘
     this.current && this.snapshots.has(this.current) && (this.snapshots.get(this.current).lastScreenshot = {
       width: shot.width,

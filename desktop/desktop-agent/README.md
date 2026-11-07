@@ -57,6 +57,7 @@ desktop-agent/
 │           verify-visual-fallback.mjs 视觉兜底真机验证（坐标帧换算 / 越界拒绝 / 像素验效）
 │           verify-image-content.mjs 图像内容块真机验证（帧结构 / PNG 尺寸 / core 提取）
 │           verify-vision-gate.mjs  视觉通道授权闸门验证（A–E mock + F 真机）
+│           verify-policy-lifecycle.mjs 策略热重载真进程验证（长驻 sidecar 不重启）
 │           register-mcp.mjs       MCP 登记（dry-run / 写入 / 移除）
 ├── reports/p0-probe.json          P0 实测数据（窗口标题不落盘）
 │           p1-gui-verify.json     真机闭环实测数据
@@ -68,7 +69,8 @@ desktop-agent/
 │           p2-visual-fallback.json 视觉兜底真机实测数据（计算器 / 字符映射表 / 任务管理器）
 │           p2-image-content.json  图像内容块实测数据
 │           p2-vision-gate.json    授权闸门实测数据（6 个场景）
-└── tests/*.test.mjs               node:test，零依赖（131 个用例）
+│           p2-policy-lifecycle.json 策略热重载实测数据（6 个场景）
+└── tests/*.test.mjs               node:test，零依赖（142 个用例）
 ```
 
 零新增 npm 依赖（Node ≥ 22，ESM）：sidecar 需要随桌面端分发，避免版本漂移与供应链面。
@@ -357,8 +359,57 @@ npm run verify:vision -- --skip-real   # 没有桌面会话时只跑 A–E（ver
    这些字段恒 `undefined`，条件静默变假，真机全对却报 `broken`。现在判据收「原始帧 + 派生观测」
    的合并视图，且可以返回逐项 `checks`，失败时报告直接指到哪一条。
 
-> 默认仍是关的：`vision: null`（不授权 = 不能截图）。授权后需要重启引擎才生效（策略不热更新），
+> 默认仍是关的：`vision: null`（不授权 = 不能截图）。授权/撤销都即时生效（见下一节），
 > 配置页 UI 尚未落地这三条 IPC。
+
+### AgentLifecycle：策略热更新（`npm run verify:policy`）
+
+报告 §8 原本把这一项写成「壳管 sidecar 启停 / 崩溃上限 / 策略热更新」。先纠正一个
+架构事实：**壳拿不到 sidecar 的进程句柄**。进程链路是
+
+```
+壳 supervisor ──> 引擎进程 ──McpManager / mcpServers──> sidecar（stdio 单 client）──> UIA 桥
+```
+
+三层各自的生命周期都已经有主：引擎由 `engine/manager.rs` 的健康检查、崩溃恢复与
+Job Object 管；sidecar 由引擎 `McpManager` 拉起；桥由 `bridge-lifecycle.mjs` 的
+ping / 指数退避 / 120 s 内崩溃 3 次熔断管理（§3.8）。壳再写一个「sidecar 进程管理器」
+既重复造轮子，又会破坏 stdio 单 client 约束。所以这一项真正要补的是**策略通道**。
+
+壳与 sidecar 之间只有 `desktop-agent.json` 这一条线。授权不重启只是麻烦，但
+**撤销不重启是漏洞**：用户点了撤销，长驻 sidecar 仍握着旧的 `visionApps`，
+到引擎重启之前照样能读屏和代点击。
+
+`PolicyReloader`（`src/modules/policy-load.mjs`）在**每次 `callTool` 前**重判一次：
+
+| 规则 | 为什么 |
+| --- | --- |
+| 内容签名（sha256）而非 mtime | 编辑器原子写 / mtime 精度 / 时钟回拨都会让 mtime 探测漏判；策略文件只有几百字节 |
+| 每次重解析都重跑 `hardenExternalPolicy(raw, now)` | 手改 JSON 放宽不了；`now` 是调用时刻，到期授权连开关一起收回 |
+| 读不到 / 写坏了一律 **fail-closed** | 回落默认全关并作废缓存；否则「删掉文件」反而绕过了撤销 |
+| `PolicyGuard.replace()` 整体替换 | merge 会让旧的 `visionApps` 残留；且必须保持实例引用（Perception / Verifier 等持有同一个 guard），旧确认令牌一并作废 |
+
+重载入口放在 `agent.callTool`，不是 `mcp-server`——验证脚本等直接入口也走 `callTool`，
+只守协议层会留后门。不设后台定时器：没有工具调用时策略新旧无所谓，定时器在 stdio
+进程里只会带来「重载到一半」的中间态。
+
+真进程证据（`reports/p2-policy-lifecycle.json`，`verdict = policy-lifecycle-verified`）：
+起一个真 sidecar 子进程、走真 stdio MCP 帧、**全程不重启进程**，中途反复改写策略文件：
+
+| # | 场景 | 实测 |
+| --- | --- | --- |
+| A | 初始无授权 | `CAPABILITY_UNAVAILABLE` |
+| B | 写入授权 | 同一个进程立刻出 `text+image` |
+| C | 授权含坐标 | `status` 里两个派生开关同时为 true，清单仅 1 个应用 |
+| D | **撤销** | 同一个进程立刻拒截屏，两个派生开关同时归零 |
+| E | 策略文件被删 | fail-closed：`enabled=false`、通道全关 |
+| F | 文件恢复 | 重新解析，不沿用删除前的授权 |
+
+报告里 `reloads=5`、`contentChangedReloads=4`、`processRestarts=0`、
+`failClosedLogged=true` —— 最后两条是防止脚本「靠重启蒙混过关」的关键。
+
+> 仍然要重启引擎的只剩一种情况：**首次登记 MCP 服务**（`npm run register:mcp -- --write`），
+> 因为 `McpManager` 只在会话启动时读 `settings.json`。`restartHint` 现在只说这件事。
 
 ### 树质量判定（`src/modules/tree-quality.mjs`）
 
@@ -564,22 +615,24 @@ npm run register:mcp -- --home <dir>      # 隔离家目录，供测试
 ### 策略契约（壳 ↔ sidecar）
 
 ```
-WebView ── desktop_agent_toggle / permissions_set ──> Rust 壳
+WebView ── toggle / permissions_set / vision_grant / vision_revoke ──> Rust 壳
                                                       │ harden()（不可写字段复位）
                                                       ▼
                                     ~/.deepcode/desktop-agent.json
-                                                      │ 启动时读取
+                                                      │ 启动读取 + 每次工具调用前重判
                                                       ▼
-                       sidecar loadPolicy() ── 二次硬化 ──> PolicyGuard
+     sidecar PolicyReloader ── hardenExternalPolicy(raw, now) ──> PolicyGuard.replace()
 ```
 
 - 优先级：`DEEPCODE_AGENT_POLICY`（显式指定） > 壳落盘策略 > 仓库内 `config/policy.default.json`。
-- 策略文件解析失败 → **回落到「默认关闭」**，不抛错、不带病启动。
+- 策略文件解析失败 → **回落到「默认关闭」**，不抛错、不带病启动；重载时同样 fail-closed，
+  不会沿用上一次的有效授权。
 - 两侧共同锁定的字段：`deniedCategories`、`preferBrowserChannel`、预算上限；`bypass` 一律降级为 `manual`。
 - `allowScreenshot` / `allowCoordinateInput` **不是可写字段**：它们由 `vision`（限时授权）
   派生，两侧 `harden` 各自用同一套规则重判（过期 / 空清单 / 非法 appId / 授权时刻在未来 → 作废）。
   要开视觉通道只能走 `desktop_agent_vision_challenge` → `vision_grant`，不能改 JSON。
-- 策略在进程启动时读取一次，修改后返回 `restartHint`；热更新属 P2。
+- 策略变更**即时生效**（`PolicyReloader`，见下节）：授权/撤销无需重启引擎；
+  `restartHint` 现在只提示「首次登记 MCP 服务」这一种需要重启的场景。
 - 诊断动作（`status` / `list_apps` / `events`）在关闭状态下也可查，否则用户无法诊断「为什么不能用」。
 
 ## 工具清单
@@ -622,12 +675,13 @@ WebView ── desktop_agent_toggle / permissions_set ──> Rust 壳
 1. **UAC / 验证码 / 锁屏**：`uacAwareness=false`，Secure Desktop 与完整性级别未检测，一律 `HANDOFF_REQUIRED`，不做绕过。
 2. **视觉通道默认关闭**：坐标帧、像素验效、图像进模型、授权闸门四段都已真机闭环，
    但 `vision: null` 时 `allowScreenshot` / `allowCoordinateInput` 恒为 false，
-   必须显式授权（`vision_challenge` → `vision_grant`）并重启引擎，`sparse` 应用才可用；
+   必须显式授权（`vision_challenge` → `vision_grant`）后 `sparse` 应用才可用（授权/撤销即时生效）；
    配置页 UI 尚未落地这三条 IPC。
 3. **仅 Windows 有真实后端**：macOS AX / Linux AT-SPI 未实现，回落 mock。
-4. **策略不热更新**：改开关 / 授权需重启引擎；壳侧 `platformPermissions.checkableByShell=false`，只给引导文案，不检测系统授权。
-5. **未接线引擎生命周期**：桥进程自身的生命周期（退避 / 崩溃上限 / 僵死回收 / 优雅退出）已接管，
-   但「随壳启停、壳侧重启上限、策略热更新」的 `AgentLifecycle` 仍属后续工作。
+4. **平台权限无法由壳检测**：`platformPermissions.checkableByShell=false`，只给引导文案，不检测系统授权。
+5. **配置页 UI 未落地**：7 条 IPC 只有 TS 包装，没有界面；`sparse` 应用的任务级用例
+   也还没补（目前只验到「点下去界面变了」，没验「按意图点对」）。`AgentLifecycle`
+   的三层进程管理分工与策略热更新已闭环，见上一节。
 6. **真机动作依赖交互式桌面会话**：服务 / 无桌面会话下 UIA 自检会失败并如实降级；`DEEPCODE_AGENT_UIA_BRIDGE=1` 必须显式开启。
 7. 与分发包的关系：`desktop/build/pack.ps1` 的「能力排除守卫」明确不打包本目录与
    `desktop_agent_*` IPC。**若在本功能分支上构建分发包**，需把 `-BaselineRef` 固定到

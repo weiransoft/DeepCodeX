@@ -117,6 +117,21 @@ export class PolicyGuard {
     return this.snapshot();
   }
 
+  /**
+   * 热重载用的**整体替换**。与 `update(patch)` 的区别很关键：
+   * update 是 merge，撤销授权时旧的 `visionApps` / `allowScreenshot` 会残留；
+   * replace 以默认策略为底重建，文件里没有的字段一律回到关闭态。
+   *
+   * 保持 `PolicyGuard` 实例引用不变：Perception / Actuator / Verifier 在构造时
+   * 就持有了这个 guard，换实例会让它们继续按旧策略判定（静默越权）。
+   * 另外，策略变更意味着授权上下文变了，已发出但未消费的逐次确认令牌一律作废。
+   */
+  replace(policy = {}) {
+    this.policy = normalizePolicy({ ...defaultPolicy(), ...policy });
+    this.pending.clear();
+    return this.snapshot();
+  }
+
   /** 只读快照（不含 token 明文；Set 转回数组以便 JSON 序列化） */
   snapshot() {
     return {

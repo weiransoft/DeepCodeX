@@ -14,7 +14,10 @@
  *
  * 安全边界：
  *  - 只拉计算器（纯计算、不碰用户文档），结束时关掉自己拉起的进程；
- *  - 截图前 activate=true 置前台：抓的是屏幕像素，被遮挡时量到的是遮挡物；
+ *  - **不抢前台**（activate=false）：本脚本只验「像素能否穿过协议层到 core」，
+ *    不做 before/after 像素比较，不需要保证像素归属；而后台进程 / 无交互式会话下
+ *    抢前台会被系统拒绝（ACTION_DENIED），让验证白白依赖桌面状态。像素归属的
+ *    保证属于 verify:visual（那里才需要 activate）。
  *  - 图像只在内存里流转，不落盘（脚本输出只记录尺寸/字节数/哈希）。
  *
  * 运行（需要 tsx 才能加载 core 的 TS 模块；缺 tsx 时仍会验证 ①②）：
@@ -228,7 +231,8 @@ async function main() {
           hwnd: Number(target.hwnd),
           reason: "verify-image-content",
           includeImage: true,
-          activate: true,
+          // 见文件头：只验图像管线，不比较像素内容，不依赖抢前台成功
+          activate: false,
         },
       },
     });

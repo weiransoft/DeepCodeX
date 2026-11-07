@@ -581,7 +581,9 @@ export class WindowsBackend {
   }
 
   async screenshot(args = {}) {
-    const res = await this._callBridge("screenshot", this._withTarget(args));
+    // 与 pixelSignature 同口径：桥返回 ok:false（例如 activate 置前台失败的
+    // ACTION_DENIED）必须抛出，不能让调用方拿到一个「成功但没像素」的空壳。
+    const res = await this._callBridge("screenshot", this._withTarget(args), { throwOnError: true });
     // base64 默认不回传：截图的主要用途是拿坐标帧与给视觉模型看，
     // 而 base64 一旦进 JSON-RPC 就是几百 KB 的 stdio 往返。需要像素的调用方
     // 显式要求（includeImage / savePath），其余场景只要 rect + 尺寸。

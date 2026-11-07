@@ -33,7 +33,7 @@ P0 探针（桥关闭）曾判定 `continue-with-adjustment`：能枚举 34 个�
   `good / sparse / deferred / empty`，修正「按进程名猜 Electron」的误分类
   （实测 5 个真实窗口中只有 1 个真能按名字定位）；
 - **故障注入回归补齐**：窗口中途关闭、进程崩溃、桥崩溃重连、`STALE_REF`、预算熔断
-  全部锁定错误码与可恢复性，共 131 个单测通过；
+  全部锁定错误码与可恢复性，共 142 个单测通过；
 - **覆盖率达标（13 个真实应用）**：主动拉起 16 个目标应用、13 个采到树，其中 8 家可按
   名字操作、4 家只能视觉兜底、1 家（Edge）必须走 DOM/CDP，3 家因环境/权限未拉起且如实标注；
   同时把「完整度」判据做对（`snapshot.truncated` 恒真导致无法区分「没看全」与「树就这么小」）；
@@ -53,6 +53,9 @@ P0 探针（桥关闭）曾判定 `continue-with-adjustment`：能枚举 34 个�
   规则重新派生（过期即自动收回，改文件放宽不了），每次授权/撤销写审计 JSONL；真机 6/6
   （`vision-gate-verified`：无授权/过期/越权应用/无坐标授权一律拒，授权后真截图 666×1078
   过大到模型，§3.13）；
+- **授权与撤销即时生效，撤销不再留安全窗口**：sidecar 每次工具调用前重判策略文件
+  （内容签名 + 重新硬化 + fail-closed 整体替换），长驻进程无需重启；真进程 6/6
+  `policy-lifecycle-verified`（`processRestarts=0`，§3.14）；
 - **Rust 用例运行闭环**：`cargo test --lib` 在 MSVC CI 与本机 GNU 上均
   **74 passed / 0 failed**；同时纠正了「MinGW 环境问题」的误判——真因是测试二进制缺
   Windows 应用清单、ComCtl32 停在 v5，已在 `build.rs` 修掉（§5.1）；
@@ -511,8 +514,63 @@ sparse 应用点击前后树完全一样，复观察拿到的还是同一棵，�
    `broken`。现在判据收到「原始帧 + 派生观测」的合并视图，且 `expect` 可以返回逐项判据
    （`checks`），失败时报告里能直接看出卡在哪一条。
 
-**顺带确认的边界**：授权清单只覆盖 `read` 权限应用；坐标点击要在授权时单独勾；撤销是即时的
-（`vision_revoke` 写盘 + 审计），下一次 sidecar 启动就看不到旧授权。
+**当时的边界（下一节解决）**：授权清单只覆盖 `read` 权限应用；坐标点击要在授权时单独勾；
+`vision_revoke` 会写盘 + 审计，但此刻要等「下一次 sidecar 启动」才看不到旧授权——
+这个重启窗口本身就是一个安全缺口，§3.14 把它关掉。
+
+---
+
+### 3.14 AgentLifecycle：策略热更新与生命周期边界（P2「随后」第 5 项）
+
+§8 曾把这一项写成「壳管 sidecar 启停 / 崩溃上限 / 策略热更新」。动手前先核对了接线，
+结论是**字面照做会重构错对象**：
+
+| 层 | 谁在管 | 已有能力 |
+| --- | --- | --- |
+| 引擎进程 | 壳 `engine/manager.rs` | 健康检查、启动失败重试换端口、崩溃恢复、Job Object 整树终止、日志脱敏 |
+| sidecar 进程 | 引擎 `McpManager`（`settings.json` 的 `mcpServers`） | stdio 拉起 / 回收；**壳没有它的进程句柄**，单 client 也插不进第二条管理通道 |
+| UIA 桥进程 | sidecar `bridge-lifecycle.mjs` | ping 探活、指数退避、120 s 内崩 3 次熔断、僵死回收、`shutdown` 优雅退出（§3.8） |
+
+三层都各有其主，再写一个「壳管 sidecar」的进程管理器是重复造轮子，还会破坏单 client
+约束。所以本项只补**真正缺的那条线：策略通道**。
+
+**动机不是体验，是安全**：授权后不重启引擎只是麻烦，但**撤销后不重启是漏洞**——
+`vision_revoke` 写了盘也写了审计，长驻 sidecar 却仍握着旧的 `visionApps` /
+`allowScreenshot`，到引擎重启之前照样能读屏和代点击。§3.13 结尾写的
+「下一次 sidecar 启动就看不到旧授权」，这个窗口本轮必须关掉。
+
+**实现**（`policy-load.mjs::PolicyReloader`，入口在 `agent.callTool`）：
+
+| 不变式 | 做法 |
+| --- | --- |
+| 变更探测可靠 | 每次调用读全文算 sha256 内容签名，不用 mtime（编辑器原子写 / mtime 精度 / 时钟回拨都会漏判；文件仅几百字节） |
+| 重载不能放宽 | 每次重解析都跑 `hardenExternalPolicy(raw, now)`：`now` 是调用时刻，到期授权连开关一起收回；手改 `allowScreenshot:true` 无效 |
+| 失败必须收紧 | 文件读不到 / JSON 损坏 → `defaultPolicy()`（全关）并**作废签名缓存**，否则「删掉文件」反而绕过撤销；持续故障不重复刷事件 |
+| 替换必须原子 | `PolicyGuard.replace()` 以默认值整体重建（`update(patch)` 是 merge，撤销时旧 `visionApps` 会残留），且**保持实例引用**——Perception / Verifier 等构造时已持有同一个 guard，换实例等于让它们继续按旧策略判定（静默越权）；未消费的逐次确认令牌一并作废 |
+| 入口不能有后门 | 重载放在 `agent.callTool` 而非 `mcp-server`：验证脚本等直接入口也走 `callTool` |
+
+不设后台定时器：没有工具调用时策略新旧无所谓，定时器在 stdio 长驻进程里只会带来
+「重载到一半」的中间态。预算上限（`maxSteps` 等）随策略一起重载。
+
+**真进程验证**（`reports/p2-policy-lifecycle.json`，`verdict = policy-lifecycle-verified`）：
+起一个真 sidecar 子进程、走真 stdio MCP 帧、**全程 `processRestarts=0`**，中途反复改写
+壳侧形状的策略文件（临时文件 + rename 原子替换）：
+
+| # | 场景 | 实测 |
+| --- | --- | --- |
+| A | 初始无授权 | `CAPABILITY_UNAVAILABLE` |
+| B | 写入授权 | 同一进程立刻出 `text+image` |
+| C | 授权含坐标 | `status` 两个派生开关同时 true、清单仅 1 个应用 |
+| D | **撤销** | 同一进程立刻拒截屏，两个派生开关同时归零 |
+| E | 文件被删 | fail-closed：`enabled=false`、通道全关 |
+| F | 文件恢复 | 重新解析，不沿用删除前的授权 |
+
+报告同时锁 `contentChangedReloads=4`、`failClosedLogged=true`：若「生效」靠的是进程重启
+或别的路径，这两条会先红。单测另锁了 mtime 还原仍能探测、到期连开关收回、
+`replace` 不改变 guard 引用、预算随策略重载等 11 条。
+
+**剩下的边界**：仍需重启引擎的只有**首次登记 MCP 服务**（`McpManager` 只在会话启动时读
+`settings.json`）；`restartHint` 已改成只说这一件事。策略热更新不改变「默认关闭」的姿态。
 
 ---
 
@@ -539,6 +597,10 @@ sparse 应用点击前后树完全一样，复观察拿到的还是同一棵，�
   `desktop_agent_status` / `desktop_agent_toggle` / `desktop_agent_permissions_get` /
   `desktop_agent_permissions_set` / `desktop_agent_vision_challenge` /
   `desktop_agent_vision_grant` / `desktop_agent_vision_revoke`。
+- `desktop/desktop-agent/src/modules/policy-load.mjs`：`PolicyReloader`（策略热重载，§3.14）；
+  `policy-guard.mjs::replace()` 整体替换保持共享 guard 引用；`agent.mjs::refreshPolicy()`
+  挂在 `callTool` 入口；`src/index.mjs` 注入重载器与 stderr 日志；新增
+  `tests/policy-reload.test.mjs`（11 条）与 `scripts/verify-policy-lifecycle.mjs`（真进程 6 场景）。
 - `desktop/src-tauri/permissions/app-ipc.toml`：ACL 同步（25=25）。
 - `packages/web/web/src/desktop-bridge.ts`：TypeScript invoke 包装与类型定义。
 - `desktop/src-tauri/src/engine/manager.rs`：Unix-only 崩溃重启测试加 `#[cfg(unix)]`，
@@ -559,7 +621,7 @@ sparse 应用点击前后树完全一样，复观察拿到的还是同一棵，�
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
-| Node 单测 | `cd desktop/desktop-agent && npm test` | **131/131 通过**（13 个测试文件，约 22 s） |
+| Node 单测 | `cd desktop/desktop-agent && npm test` | **142/142 通过**（14 个测试文件，约 22 s） |
 | 真机 GUI 闭环 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:gui` | **4/4 verified**，`gui-unblocked`；连续 4 次稳定 |
 | 真实应用写入 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:real-app` | **3/3 步骤**，`real-app-write-verified`，磁盘 `persisted:true` |
 | 桥生命周期 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:lifecycle` | `lifecycle-managed`：ping 4 ms、强杀自愈 2/2、崩溃循环零新增 spawn、优雅退出 208 ms |
@@ -567,6 +629,7 @@ sparse 应用点击前后树完全一样，复观察拿到的还是同一棵，�
 | 视觉兜底（真机） | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:visual -- --only calc,charmap,taskmgr` | `visual-fallback-verified`：坐标帧 3/3（点「七」→7、点「八」→78、越界拒绝）、像素验效 2/2（taskmgr `treeChanged:false`/`pixelChanged:true`） |
 | 图像进模型（真机） | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:image` | `image-content-verified`：帧含 text+image 两块；PNG IHDR 666×1078 与回传一致（53 356 B）；core 提取 1 张图并拼出 `image_url` follow-up |
 | 视觉闸门（真机） | `npm run verify:vision` | `vision-gate-verified` 6/6：无授权 / 过期 / 越权应用 / 无坐标授权 4 条拒绝路径 + 只读授权出图 + 真机 PNG 666×1078 与回传一致 |
+| 策略热重载（真进程） | `npm run verify:policy` | `policy-lifecycle-verified` 6/6：同一 sidecar 进程不重启，授权即时出图、**撤销即时拒截屏**、文件删除 fail-closed、恢复不沿用旧授权；`reloads=5` / `contentChangedReloads=4` / `processRestarts=0` |
 | 覆盖率采样（被动） | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run coverage` | 5/5 树可用，均值 106 ms，无失败 |
 | P0 探针 | `DEEPCODE_AGENT_UIA_BRIDGE=1 npm run probe` | `continue`；6 窗口 / 93 ms，能力 6/7 可用 |
 | MCP stdio 冒烟 | `printf … \| node src/index.mjs` | `initialize` 返回 `2025-03-26`；`tools/list` 11 个工具；`desktop_status` 默认 `enabled:false` |
@@ -639,6 +702,7 @@ GNU 产物串味）、先 `--list` 数一遍用例（<60 直接失败，防空�
 | R2 敏感应用 | 5 类敏感分类**先于只读分支**硬拦截；探针不落盘窗口标题；审计脱敏 |
 | R3 越权 / 提权 | 双侧 `harden()` 锁定字段、`bypass` 降级、壳 ACL 只含 7 条配置/授权命令 |
 | R3' 读屏与代点击 | 视觉通道必须经限时（≤24 h）+ 按应用授权（仅限已有 read 权限的应用）、一次性令牌、坐标点击单独勾选；开关由授权派生、两侧读盘时重判过期；grant/revoke 写审计 JSONL（§3.13） |
+| R3'' 撤销不及时 | 策略文件是壳 ↔ sidecar 唯一通道：每次 `callTool` 前按内容签名重判并重新硬化，撤销在**下一次动作前**生效；文件损坏/删除 fail-closed 到默认全关；整体替换保持 guard 引用，旧确认令牌作废（§3.14） |
 | R4 不可逆动作 | 一次性 5 分钟确认令牌（内存态），不受「始终允许」豁免 |
 | R8 成本失控 | 步数 / 截图 / token 原子预扣 + 熔断，任务内后续动作全拒 |
 | R9/R10 平台能力差异 / 陈旧 ref | 真机自检能力矩阵；长驻桥保证 ref 有效；`STALE_REF` 硬失败而非带旧坐标继续点 |
@@ -657,13 +721,16 @@ GNU 产物串味）、先 `--list` 数一遍用例（<60 直接失败，防空�
 3. **分类启发式仍保留**：进程名/标题分类仍用于初始通道建议（`unknown` 占比高），
    但已不再是最终结论——观察后由 `tree-quality` 实测覆盖；未观察过的应用仍可能是错的。
 4. **视觉通道可放量但默认关闭**：闸门已从「硬锁」改成**限时 + 按应用**的授权（§3.13），
-   两侧 `harden` 从授权派生开关、过期即收回，真机 `vision-gate-verified` 6/6。剩下的是
-   **默认值与使用体验**：默认 `vision: null`（不授权 = 不能截图），且授权仍需重启引擎才生效
-   （策略不热更新，见条目 5）。所以 4 家 `sparse` 应用现在是「授权后可用」，不再只能拒绝。
-5. **策略不热更新**：改开关/授权需重启引擎，UI 已有 `restartHint` 文案。
+   两侧 `harden` 从授权派生开关、过期即收回，真机 `vision-gate-verified` 6/6；授权与撤销
+   均即时生效（§3.14）。剩下的只是**默认值**：`vision: null`（不授权 = 不能截图），
+   以及配置页 UI 尚未落地三条视觉授权 IPC。4 家 `sparse` 应用现在是「授权后可用」。
+5. **平台权限无法由壳检测**：`platformPermissions.checkableByShell=false`，只给引导文案，
+   不检测系统授权。策略热更新已完成（§3.14），`restartHint` 现在只提示首次登记 MCP 服务。
 6. **仅 Windows 真后端**：macOS AX / Linux AT-SPI 未实现，回落 mock。
-7. **未接线引擎生命周期**：桥进程自身的生命周期（退避 / 崩溃上限 / 僵死回收 / 优雅退出）
-   已接管（§3.8）；但「随壳启停、壳侧重启上限、策略热更新」的 `AgentLifecycle` 仍未接线。
+7. **`AgentLifecycle` 的边界已收口，但配置页 UI 未落地**：三层进程管理各有其主
+   （引擎 supervisor / `McpManager` 管 sidecar / 桥生命周期 §3.8），策略热更新已接线
+   （§3.14）；壳**不直接持有** sidecar 进程句柄，这是 stdio 单 client 架构的结论而非漏做。
+   仍缺 7 条 IPC 的可视化界面（当前只有 TS 包装）。
 8. **桥对脚本编码敏感**：`windows-uia.ps1` 必须保持 UTF-8 BOM，否则 PowerShell 5.1
    按 GBK 解码会解析失败；已写入 README 与回归用例的约束说明。
 9. **交叉工作区提示**：同一工作区里 `desktop/build/*` 的 Windows 分发打包脚本是另一条
@@ -703,14 +770,16 @@ GNU 产物串味）、先 `--list` 数一遍用例（<60 直接失败，防空�
   `vision_grant`（只能选已有 read 权限的应用、1 min–24 h、坐标点击单独勾选）→
   `vision_revoke`；两侧 harden 改为**从授权派生**开关，`locked_fields` 口径同步改；
   审计 JSONL 只记 `grantId`/`appId`/时长；真机 `vision-gate-verified` 6/6。
-  **剩下的**：配置页 UI 还没有这三条 IPC 的界面（现在只能从设置面调），以及授权后
-  sidecar 需要重启才生效（策略热更新属 `AgentLifecycle`）；
+  **剩下的**：配置页 UI 还没有这三条 IPC 的界面（现在只能从设置面调）；授权/撤销的
+  即时生效已在 §3.14 解决；
 - **`sparse` 应用的任务级用例**：视觉通道通了，但 4 家应用只验到「点下去界面确实变了」，
   没验「按意图点对」（例如任务管理器的结束任务流程）。补法是给 `verify:vision` 之外
   再加一组按应用的任务脚本；
 - **MSVC CI 复跑**：本轮新增 6 条视觉授权用例（本机 80 passed），CI 侧需确认
   `rust-msvc` job 仍绿、用例数守卫（<60 失败）未被绕过；
-- 接 `AgentLifecycle`（壳管 sidecar 启停 / 崩溃上限 / 策略热更新）；
+- ~~接 `AgentLifecycle`~~ ✅ 已收口（§3.14）：核对接线后纠正了「壳管 sidecar 启停」的
+  表述（壳无进程句柄，三层生命周期各有其主），补上真正缺的策略热更新——**撤销在下一次
+  工具调用前生效**，真进程 `policy-lifecycle-verified` 6/6、`processRestarts=0`；
 - 配置页 UI 落地 7 条 IPC（status / toggle / permissions_get / permissions_set /
   vision_challenge / vision_grant / vision_revoke；当前只有 TS 包装，无界面）；
 - 按方案 §8 补端到端度量：任务成功率、单步耗时、人工接管率、token/步数成本。
@@ -732,6 +801,7 @@ GNU 产物串味）、先 `--list` 数一遍用例（<60 直接失败，防空�
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:visual -- --only calc,charmap,taskmgr)
 (cd desktop/desktop-agent && DEEPCODE_AGENT_UIA_BRIDGE=1 npm run verify:image)
 (cd desktop/desktop-agent && npm run verify:vision)
+(cd desktop/desktop-agent && npm run verify:policy)
 npm run typecheck && npm run check:ipc
 
 # Rust（本机 GNU：PATH 里要有 MinGW 的 windres / rc.exe；用例已可本地运行，见 §5.1）

@@ -1,0 +1,309 @@
+{
+  "verdict": "policy-lifecycle-verified",
+  "generatedAt": "2026-11-07T11:35:23.513Z",
+  "note": "真实 sidecar 子进程 + 真 stdio MCP 帧，全程不重启进程；mock 后端（策略通道验证）",
+  "cases": [
+    {
+      "name": "a-no-grant",
+      "pass": true,
+      "checks": {
+        "rejected": true,
+        "noImage": true
+      },
+      "observed": {
+        "payload": {
+          "ok": false,
+          "code": "CAPABILITY_UNAVAILABLE",
+          "message": "截屏通道默认关闭",
+          "recoverable": false,
+          "hint": "壳侧走 desktop_agent_vision_grant 限时授权后才能截图"
+        },
+        "text": "{\"ok\":false,\"code\":\"CAPABILITY_UNAVAILABLE\",\"message\":\"截屏通道默认关闭\",\"recoverable\":false,\"hint\":\"壳侧走 desktop_agent_vision_grant 限时授权后才能截图\"}",
+        "types": [
+          "text"
+        ],
+        "isError": true,
+        "imageBytes": 0
+      }
+    },
+    {
+      "name": "b-grant-live",
+      "pass": true,
+      "checks": {
+        "ok": true,
+        "hasImage": true,
+        "imageNonEmpty": true,
+        "textHasNoBase64": true
+      },
+      "observed": {
+        "payload": {
+          "ok": true,
+          "width": 1280,
+          "height": 800,
+          "mimeType": "image/png",
+          "frame": {
+            "x": 0,
+            "y": 0,
+            "width": 1280,
+            "height": 800,
+            "imageWidth": 1280,
+            "imageHeight": 800,
+            "scaleX": 1,
+            "scaleY": 1
+          },
+          "coords": "image-pixel",
+          "persisted": false,
+          "untrusted": true,
+          "snapHint": "调用 desktop_click_xy 时 frame 默认 window，x/y 直接用图像像素；越界会被拒绝",
+          "image": {
+            "mimeType": "image/png",
+            "bytes": 70,
+            "attached": true
+          }
+        },
+        "text": "{\"ok\":true,\"width\":1280,\"height\":800,\"mimeType\":\"image/png\",\"frame\":{\"x\":0,\"y\":0,\"width\":1280,\"height\":800,\"imageWidth\":1280,\"imageHeight\":800,\"scaleX\":1,\"scaleY\":1},\"coords\":\"image-pixel\",\"persisted\":false,\"untrusted\":true,\"snapHint\":\"调用 desktop_click_xy 时 frame 默认 window，x/y 直接用图像像素；越界会被拒绝\",\"image\":{\"mimeType\":\"image/png\",\"bytes\":70,\"attached\":true}}",
+        "types": [
+          "text",
+          "image"
+        ],
+        "isError": false,
+        "imageBytes": 96
+      }
+    },
+    {
+      "name": "c-grant-with-coordinate",
+      "pass": true,
+      "checks": {
+        "screenshotDerived": true,
+        "coordinateDerived": true,
+        "scopedToOneApp": true
+      },
+      "observed": {
+        "payload": {
+          "ok": true,
+          "version": "0.1.0",
+          "backend": "mock",
+          "enabled": true,
+          "policy": {
+            "enabled": true,
+            "permissionMode": "auto",
+            "allowedApps": [
+              {
+                "appId": "notepad",
+                "always": true,
+                "scopes": [
+                  "read",
+                  "write"
+                ]
+              }
+            ],
+            "deniedApps": [],
+            "deniedCategories": [
+              "finance",
+              "crypto",
+              "medical",
+              "government",
+              "finance-or-sensitive"
+            ],
+            "preferBrowserChannel": true,
+            "allowCoordinateInput": true,
+            "allowScreenshot": true,
+            "visionApps": [
+              "notepad"
+            ],
+            "visionExpiresAt": 1794053123512,
+            "maxSteps": 25,
+            "maxScreenshots": 3,
+            "maxTokens": 60000,
+            "maxRetries": 2,
+            "pendingConfirmations": 0
+          },
+          "budget": {
+            "used": {
+              "steps": 1,
+              "screenshots": 1,
+              "tokens": 0,
+              "retries": 0
+            },
+            "limits": {
+              "maxSteps": 25,
+              "maxScreenshots": 3,
+              "maxTokens": 60000,
+              "maxRetries": 2
+            },
+            "tripped": null,
+            "elapsedMs": 122
+          },
+          "capabilities": {
+            "platform": "mock",
+            "appEnumeration": {
+              "supported": true,
+              "reason": "in-memory app registry"
+            },
+            "a11yTree": {
+              "supported": true,
+              "reason": "synthetic semantic tree"
+            },
+            "screenshot": {
+              "supported": true,
+              "reason": "synthetic placeholder (no pixels)"
+            },
+            "pixelDiff": {
+              "supported": true,
+              "reason": "state-derived 64×64 grayscale signature",
+              "grid": 64
+            },
+            "elementInvoke": {
+              "supported": true,
+              "reason": "in-memory state mutation"
+            },
+            "coordinateInput": {
+              "supported": true,
+              "reason": "in-memory state mutation"
+            },
+            "foregroundControl": {
+              "supported": false,
+              "reason": "not applicable"
+            },
+            "uacAwareness": {
+              "supported": false,
+              "reason": "not applicable"
+            }
+          },
+          "metrics": {
+            "totalEvents": 7,
+            "byType": {
+              "registry.list": 1,
+              "tool.error": 1,
+              "policy.reloaded": 2,
+              "observe.screenshot.start": 1,
+              "observe.screenshot.done": 1,
+              "observe.frame": 1
+            },
+            "accumulatedElapsedMs": 0,
+            "screenshotsPersisted": 0
+          }
+        },
+        "types": [
+          "text"
+        ],
+        "text": "{\"ok\":true,\"version\":\"0.1.0\",\"backend\":\"mock\",\"enabled\":true,\"policy\":{\"enabled\":true,\"permissionMode\":\"auto\",\"allowedApps\":[{\"appId\":\"notepad\",\"always\":true,\"scopes\":[\"read\",\"write\"]}],\"deniedApps\":[],\"deniedCategories\":[\"finance\",\"crypto\",\"medical\",\"government\",\"finance-or-sensitive\"],\"preferBrowserChannel\":true,\"allowCoordinateInput\":true,\"allowScreenshot\":true,\"visionApps\":[\"notepad\"],\"visionExpiresAt\":1794053123512,\"maxSteps\":25,\"maxScreenshots\":3,\"maxTokens\":60000,\"maxRetries\":2,\"pendingConfirmations\":0},\"budget\":{\"used\":{\"steps\":1,\"screenshots\":1,\"tokens\":0,\"retries\":0},\"limits\":{\"maxSteps\":25,\"maxScreenshots\":3,\"maxTokens\":60000,\"maxRetries\":2},\"tripped\":null,\"elapsedMs\":122},\"capabilities\":{\"platform\":\"mock\",\"appEnumeration\":{\"supported\":true,\"reason\":\"in-memory app registry\"},\"a11yTree\":{\"supported\":true,\"reason\":\"synthetic semantic tree\"},\"screenshot\":{\"supported\":true,\"reason\":\"synthetic placeholder (no pixels)\"},\"pixelDiff\":{\"supported\":true,\"reason\":\"state-derived 64×64 grayscale signature\",\"grid\":64},\"elementInvoke\":{\"supported\":true,\"reason\":\"in-memory state mutation\"},\"coordinateInput\":{\"supported\":true,\"reason\":\"in-memory state mutation\"},\"foregroundControl\":{\"supported\":false,\"reason\":\"not applicable\"},\"uacAwareness\":{\"supported\":false,\"reason\":\"not applicable\"}},\"metrics\":{\"totalEvents\":7,\"byType\":{\"registry.list\":1,\"tool.error\":1,\"policy.reloaded\":2,\"observe.screenshot.start\":1,\"observe.screenshot.done\":1,\"observe.frame\":1},\"accumulatedElapsedMs\":0,\"screenshotsPersisted\":0}}",
+        "imageBytes": 0,
+        "allowScreenshot": true,
+        "allowCoordinateInput": true,
+        "visionApps": [
+          "notepad"
+        ]
+      }
+    },
+    {
+      "name": "d-revoke-live",
+      "pass": true,
+      "checks": {
+        "rejected": true,
+        "noImage": true,
+        "screenshotReclaimed": true,
+        "coordinateReclaimed": true
+      },
+      "observed": {
+        "payload": {
+          "ok": false,
+          "code": "CAPABILITY_UNAVAILABLE",
+          "message": "截屏通道默认关闭",
+          "recoverable": false,
+          "hint": "壳侧走 desktop_agent_vision_grant 限时授权后才能截图"
+        },
+        "types": [
+          "text"
+        ],
+        "text": "{\"ok\":false,\"code\":\"CAPABILITY_UNAVAILABLE\",\"message\":\"截屏通道默认关闭\",\"recoverable\":false,\"hint\":\"壳侧走 desktop_agent_vision_grant 限时授权后才能截图\"}",
+        "imageBytes": 0,
+        "allowScreenshot": false,
+        "allowCoordinateInput": false
+      }
+    },
+    {
+      "name": "e-file-removed-fail-closed",
+      "pass": true,
+      "checks": {
+        "rejected": true,
+        "noImage": true,
+        "enabledReclaimed": true,
+        "screenshotReclaimed": true
+      },
+      "observed": {
+        "payload": {
+          "ok": false,
+          "code": "ACTION_DENIED",
+          "message": "desktop-agent 能力未开启",
+          "recoverable": false,
+          "hint": "经 desktop_agent_toggle 开启后再试"
+        },
+        "types": [
+          "text"
+        ],
+        "text": "{\"ok\":false,\"code\":\"ACTION_DENIED\",\"message\":\"desktop-agent 能力未开启\",\"recoverable\":false,\"hint\":\"经 desktop_agent_toggle 开启后再试\"}",
+        "imageBytes": 0,
+        "enabled": false,
+        "allowScreenshot": false
+      }
+    },
+    {
+      "name": "f-file-restored",
+      "pass": true,
+      "checks": {
+        "rejected": true,
+        "noImage": true,
+        "enabledBack": true,
+        "stillClosed": true
+      },
+      "observed": {
+        "payload": {
+          "ok": false,
+          "code": "CAPABILITY_UNAVAILABLE",
+          "message": "截屏通道默认关闭",
+          "recoverable": false,
+          "hint": "壳侧走 desktop_agent_vision_grant 限时授权后才能截图"
+        },
+        "types": [
+          "text"
+        ],
+        "text": "{\"ok\":false,\"code\":\"CAPABILITY_UNAVAILABLE\",\"message\":\"截屏通道默认关闭\",\"recoverable\":false,\"hint\":\"壳侧走 desktop_agent_vision_grant 限时授权后才能截图\"}",
+        "imageBytes": 0,
+        "enabled": true,
+        "allowScreenshot": false
+      }
+    }
+  ],
+  "reloadLog": [
+    {
+      "revision": 1,
+      "reason": "initial"
+    },
+    {
+      "revision": 2,
+      "reason": "content-changed"
+    },
+    {
+      "revision": 3,
+      "reason": "content-changed"
+    },
+    {
+      "revision": 4,
+      "reason": "content-changed"
+    },
+    {
+      "revision": 6,
+      "reason": "content-changed"
+    }
+  ],
+  "summary": {
+    "total": 6,
+    "passed": 6,
+    "reloads": 5,
+    "contentChangedReloads": 4,
+    "failClosedLogged": true,
+    "processRestarts": 0,
+    "wiringOk": true
+  }
+}

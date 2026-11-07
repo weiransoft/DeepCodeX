@@ -16,8 +16,9 @@
  *   npm run register:mcp -- --remove --write
  *   npm run register:mcp -- --home <dir> --write   # 测试/隔离家目录
  *
- * 注意：登记后需重启引擎（配置页保存或 desktop_agent_toggle 后的重启提示），
- * McpManager 才会拉起 sidecar 子进程。
+ * 注意：**首次登记**后需重启引擎，McpManager 才会拉起 sidecar 子进程。
+ * 这之后开关/授权/撤销都是热生效的（sidecar 每次工具调用前重读策略文件），
+ * 不需要再重启；详见 `src/modules/policy-load.mjs::PolicyReloader`。
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
