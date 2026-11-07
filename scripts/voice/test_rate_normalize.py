@@ -18,10 +18,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from mlx_voice_server import (  # noqa: E402
     TTS_CHARS_PER_SECOND,
+    TTS_MAX_TEXT_CHARS,
     TTS_RATE_SPEED_MAX,
     TTS_RATE_SPEED_MIN,
     TTS_SEGMENT_GAP_S,
+    TTS_SHORT_SPEED_MAX,
+    TTS_SHORT_SPEED_MIN,
+    TTS_SPLIT_MIN_TAIL_UNITS,
+    _split_boundary_class,
+    compress_internal_gaps,
+    rebalance_tail,
+    segment_servo_speed,
     segment_stretch_speed,
+    speech_units,
+    split_long_text,
     time_stretch_wsola,
     trim_speech_edges,
 )
@@ -119,6 +129,118 @@ check(
     and (max(out_rates) - min(out_rates)) / float(np.mean(out_rates)) < 0.03,
     f"原生极差 {(max(raw_rates)-min(raw_rates))/float(np.mean(raw_rates))*100:.1f}% → 归一后 {(max(out_rates)-min(out_rates))/float(np.mean(out_rates))*100:.1f}%",
 )
+
+# ---------------------------------------------------------------------------
+# 2026-11-07 长文本专项：等效发音单元 / 短块护栏 / 尾段平衡 / 异常静音
+#
+# 真机反馈「长文本还是会变语速，音色变了」。用 316/421 字真实回复复刻前端
+# 分块链路实测：中英混排块间语速极差 76.37%、3 字碎片 F0 冲到 304Hz，
+# 根因是伺服拿「字符数」当发音量，以及几字碎片被模型当短促感叹句。
+# ---------------------------------------------------------------------------
+print("\n=== 等效发音单元：语速伺服的正确分母 ===")
+cn = "我先把刚才那三处改动捋了一遍，慢慢说给你听。"
+hanzi = sum(1 for c in cn if "\u4e00" <= c <= "\u9fff")
+check("纯中文 units == 汉字数（标点为 0）", abs(speech_units(cn) - hanzi) < 1e-6, f"{speech_units(cn):.2f} vs {hanzi}")
+check("标点不发音", abs(speech_units("你好。") - speech_units("你好")) < 1e-6)
+mixed = "resolveThinkingDepth 每轮输出 off、light、balanced、full 四档。"
+check(
+    "中英混排 units 显著小于字符数",
+    speech_units(mixed) < len(mixed) * 0.75,
+    f"{speech_units(mixed):.2f} units / {len(mixed)} chars",
+)
+check("全大写缩写逐字母念", speech_units("TTFT") > speech_units("ttft"), f"{speech_units('TTFT'):.2f} > {speech_units('ttft'):.2f}")
+check("数字串按位折算", 2.5 < speech_units("2026") < 4.5, f"{speech_units('2026'):.2f}")
+check("空文本 / 纯标点返回 0", speech_units("") == 0 and speech_units("，。！") == 0)
+
+print("\n=== 段级伺服：不同原生语速收敛到同一目标 ===")
+servo_text = "这是一段普通的中文说明文字，用来验证语速伺服是否收敛到全局目标语速。"
+servo_units = speech_units(servo_text)
+servo_rates: list[float] = []
+for native in (3.9, 4.92, 6.1):
+    seconds = servo_units / native
+    raw = tone(seconds)
+    ratio = segment_servo_speed(raw, SR, servo_text, SPEED)
+    out = time_stretch_wsola(raw, ratio)
+    rate = servo_units / (out.size / SR)
+    servo_rates.append(rate)
+    check(f"原生 {native:.2f} 单元/秒收敛到 {TARGET:.2f} ±5%", abs(rate - TARGET) / TARGET < 0.05, f"{rate:.2f} (倍率 {ratio:.3f})")
+check("收敛后跨度 < 5%", (max(servo_rates) - min(servo_rates)) / float(np.mean(servo_rates)) < 0.05)
+
+tiny = "嗯。"
+tiny_ratio = segment_servo_speed(tone(0.2), SR, tiny, SPEED)
+check(
+    "极短碎片倍率被护栏钳住（不极端变速）",
+    TTS_SHORT_SPEED_MIN <= tiny_ratio <= TTS_SHORT_SPEED_MAX,
+    f"{tiny_ratio:.3f}",
+)
+plain = tone(servo_units / 4.0)
+check(
+    "正常块不被短块护栏改写",
+    abs(segment_servo_speed(plain, SR, servo_text, SPEED) - segment_stretch_speed(plain, SR, servo_units, SPEED)) < 1e-9,
+)
+
+print("\n=== 长文本分段：不产生碎片且逐字可逆 ===")
+long_text = "没有标点的长文本最能暴露语速漂移的问题因为模型看不到任何句读提示只能自己决定在哪里换气" * 3
+parts = split_long_text(long_text)
+check("拼接逐字等于原文", "".join(parts) == long_text.strip())
+check("每段不超过安全上限", all(len(p) <= TTS_MAX_TEXT_CHARS for p in parts), str([len(p) for p in parts]))
+check("尾段达到最短发音量", speech_units(parts[-1]) >= TTS_SPLIT_MIN_TAIL_UNITS, f"{speech_units(parts[-1]):.1f} units")
+
+print("\n=== 伺服上限：纯拉丁复合词慢段也要能拉回全局基准 ===")
+# 真机实测：`openai-provider 和 anthropic-provider。` 原生只有 3.06 单元/秒，
+# 需要 1.61 倍。旧上限 1.35 把它钳在 4.14 单元/秒，成为中英混排里唯一的
+# 离群块（单元语速极差 17.08%）。这段没有长静音，是正常段而非模型退化。
+latin = "openai-provider 和 anthropic-provider。"
+latin_units = speech_units(latin)
+latin_native_s = latin_units / 3.06
+latin_ratio = segment_servo_speed(tone(latin_native_s), SR, latin, SPEED)
+check("纯拉丁慢段倍率超过旧上限 1.35", latin_ratio > 1.35, f"{latin_ratio:.3f}")
+check("倍率仍在新上限内", latin_ratio <= TTS_RATE_SPEED_MAX, f"{latin_ratio:.3f} <= {TTS_RATE_SPEED_MAX}")
+latin_out = time_stretch_wsola(tone(latin_native_s), latin_ratio)
+latin_rate = latin_units / (latin_out.size / SR)
+check("纯拉丁慢段收敛到 4.92 ±5%", abs(latin_rate - TARGET) / TARGET < 0.05, f"{latin_rate:.2f} 单元/秒")
+
+print("\n=== 碎片重划：按等效发音单元借字符，不再留 7 单元短块 ===")
+# 2026-11-07 最后一处真机漏洞：旧版把「单元缺口」直接当字符数往前借，
+# 中英混排 1 字符只值 ~0.36 单元，借 2~3 字符补不上，碎片仍被单独合成。
+prev = "balanced、full 四档之一，再透传给 openai-provider"
+tiny_tail = "和 anthropic-provider。"
+check("复现用短尾段确实 <10 单元", speech_units(tiny_tail) < 10, f"{speech_units(tiny_tail):.2f} units")
+balanced = rebalance_tail(prev, tiny_tail, TTS_SPLIT_MIN_TAIL_UNITS, TTS_MAX_TEXT_CHARS)
+check("重划后仍是 2 段", len(balanced) == 2, str([len(p) for p in balanced]))
+check("拼接逐字可逆", "".join(balanced) == prev + tiny_tail)
+check("两段都 >= 最短发音量", all(speech_units(p) >= TTS_SPLIT_MIN_TAIL_UNITS for p in balanced), str([round(speech_units(p), 2) for p in balanced]))
+check("两段都不超 48 字", all(len(p) <= TTS_MAX_TEXT_CHARS for p in balanced))
+check(
+    "切分点不落在拉丁单词中间",
+    _split_boundary_class("".join(balanced), len(balanced[0])) <= 1,
+    f"前段结尾 …{balanced[0][-14:]}",
+)
+check("合并后不超上限时直接并成一段", rebalance_tail("短句。", "嗯。", 10, 48) == ["短句。嗯。"])
+
+mixed_long = (
+    "这次我把 session.ts 里的思考深度调度链路重新对了一遍，结论是这样的："
+    "resolveThinkingDepth 每轮读四个信号，输出 off、light、balanced、full 四档之一，再透传给 "
+    "openai-provider 和 anthropic-provider。实测 short turn 的 TTFT 从 321 毫秒降到 190 毫秒左右。"
+)
+mixed_parts = split_long_text(mixed_long)
+check("中英混排分段逐字可逆", "".join(mixed_parts) == mixed_long.strip())
+check("中英混排每段不超 48 字", all(len(p) <= TTS_MAX_TEXT_CHARS for p in mixed_parts))
+check(
+    "中英混排不产生 <10 单元碎片",
+    all(speech_units(p) >= TTS_SPLIT_MIN_TAIL_UNITS for p in mixed_parts[1:]),
+    str([round(speech_units(p), 2) for p in mixed_parts]),
+)
+
+print("\n=== 段内异常长静音压缩 ===")
+voice = tone(1.0)
+long_gap = np.zeros(int(1.4 * SR), dtype=np.float32)
+with_gap = concat(voice, long_gap, voice)
+compressed = compress_internal_gaps(with_gap, SR)
+check("1.4s 异常空白压到 0.45s", abs(compressed.size / SR - 2.45) < 0.06, f"{compressed.size / SR:.3f}s")
+normal_gap = concat(voice, np.zeros(int(0.5 * SR), dtype=np.float32), voice)
+check("0.5s 自然句读原样保留", compress_internal_gaps(normal_gap, SR).size == normal_gap.size)
+check("无长静音时逐样本不变", np.array_equal(compress_internal_gaps(voice, SR), voice))
 
 print("\n=== 段间微停顿 ===")
 check("停顿落在业界建议的 50~200ms", 0.05 <= TTS_SEGMENT_GAP_S <= 0.2, f"{TTS_SEGMENT_GAP_S*1000:.0f}ms")

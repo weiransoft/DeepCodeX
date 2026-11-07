@@ -92,6 +92,8 @@ export interface SpeechQueueDeps {
   blockChars?: number;
   /** 单块字数硬上限（默认 160） */
   maxBlockChars?: number;
+  /** 单块最短等效发音单元数（默认 10，低于此值不单独发合成请求） */
+  minBlockUnits?: number;
   /** 开播前至少缓存多少字（默认与首块目标一致） */
   warmupChars?: number;
   /** 多久没有任何播放进展就判定停滞（默认 5000ms，仅元素后端用） */
@@ -139,11 +141,135 @@ export const FIRST_BLOCK_CHARS = 14;
 /**
  * 后续块目标字数
  *
- * TTS 对一段文本是一次自回归：文本越长，句内的语调起伏越自然。把 72 字
- * 合成一次，等于让模型自己决定这 72 字里逗号处该停多久——这正是原来
- * "每 28 字断一次、每次都重新起头"丢掉的东西。
+ * 提到与服务端安全上限一致（48）：长文本专项实测（2026-11-07，316/421 字
+ * 真实回复）显示，前端每多切一个块就多一次独立自回归生成，块越多音色
+ * 起伏越大——13 个块的时间窗 F0 极差 54%，而整段一次请求只有 25%。
+ * 首块仍单独压到 14 字保 TTFA，后续块尽量吃满上限以减少重新起头。
  */
-export const BLOCK_CHARS = 40;
+export const BLOCK_CHARS = 48;
+
+/**
+ * 单块最短等效发音单元数
+ *
+ * 几字碎片是长文本「忽然换人」的元凶：实测 3 字块 F0 300Hz / 质心
+ * 4998Hz、13 字块 12.4 字/秒，而正常块 F0 210~250Hz、语速 4.9 单元/秒。
+ * 模型会把极短文本当短促感叹句起头。低于这个量的块要么继续攒、要么
+ * 并入相邻块，绝不单独发一次合成请求。
+ *
+ * 阈值只覆盖真正的碎片：中英混排 48 字符折算后常只有 15~20 单元，定 20
+ * 会把正常块全误判成碎片（A/B 实测语速极差反而从 21% 涨到 63%）。
+ */
+export const MIN_BLOCK_UNITS = 10;
+
+/** 与服务端口径一致的可断句标点 */
+const SPLIT_PUNCT = "。！？!?；;，,、：:";
+
+/**
+ * 切分点的自然度：0=标点后，1=空格/中英交界，2=词中间（最差）
+ *
+ * 硬切拉丁单词会把 `openai-provider` 拆成 `opena` + `i-provider`，两块各自
+ * 起头念，听感比原来的短碎片还糟。达标切分点里必须先把词边界挑出来。
+ */
+function splitBoundaryClass(text: string, cut: number): number {
+  const before = text[cut - 1] ?? "";
+  const after = text[cut] ?? "";
+  if (SPLIT_PUNCT.includes(before)) return 0;
+  if (/\s/u.test(before) || /\s/u.test(after)) return 1;
+  if (before.charCodeAt(0) > 127 !== after.charCodeAt(0) > 127) return 1;
+  return 2;
+}
+
+/**
+ * 把「前一块 + 过短碎片」重划切分点，让两块都达到最短发音量
+ *
+ * **借多少必须按等效发音单元算**（2026-11-07 第四轮真机复测的最后一处漏洞）：
+ * 旧实现拿 `minUnits - speechUnits(short)` 当「字符数」往前借，中英混排里
+ * 1 个字符常常只值 0.36 单元，缺 3 单元只借 3 字符，借完仍是 7~8 单元的
+ * 碎片，照样单独发一次自回归生成（实测 `和 anthropic-provider。` 22 字符 /
+ * 7.07 单元，把整条语料的单元语速极差从 1.38% 拉到 21.27%）。
+ *
+ * 这里枚举合法切分点（左右都 ≤ limit 字），只保留两段都 >= minUnits 的，
+ * 优先标点、其次空格 / 中英交界、再其次贴近原切分点；发音量实在撑不起
+ * 两块时退化成让较小那段尽量大。纯拼接，不吞字不重复。
+ *
+ * @param prev 前一块
+ * @param short 过短的碎片
+ * @param minUnits 每块最短等效发音单元数
+ * @param limit 单块字数硬上限
+ * @returns 1~2 块，拼接后逐字等于 prev + short
+ */
+export function rebalanceShortBlock(prev: string, short: string, minUnits: number, limit: number): string[] {
+  const merged = prev + short;
+  if (merged.length <= limit || prev.length === 0) return [merged];
+  const lo = Math.max(1, merged.length - limit);
+  const hi = Math.min(limit, merged.length - 1);
+  if (lo > hi) return [merged.slice(0, limit), merged.slice(limit)];
+
+  const cuts: number[] = [];
+  for (let c = lo; c <= hi; c += 1) cuts.push(c);
+  const minSide = (c: number): number => Math.min(speechUnits(merged.slice(0, c)), speechUnits(merged.slice(c)));
+  const prefer = (a: number, b: number): number =>
+    splitBoundaryClass(merged, a) - splitBoundaryClass(merged, b) ||
+    Math.abs(a - prev.length) - Math.abs(b - prev.length);
+
+  const valid = cuts.filter((c) => minSide(c) >= minUnits);
+  let best: number;
+  if (valid.length > 0) {
+    best = valid.reduce((a, b) => (prefer(a, b) <= 0 ? a : b));
+  } else {
+    best = cuts.reduce((a, b) => {
+      const delta = minSide(b) - minSide(a);
+      if (delta > 1e-9) return b;
+      if (delta < -1e-9) return a;
+      return prefer(a, b) <= 0 ? a : b;
+    });
+  }
+  return [merged.slice(0, best), merged.slice(best)];
+}
+
+/** 与服务端 `speech_units()` 同规则：标点 0、汉字 1、拉丁 2.8 字母 1、数字每位 0.9 */
+export function speechUnits(text: string): number {
+  const LATIN = /[A-Za-z]/;
+  const DIGIT = /[\p{Nd}]/u;
+  const NON_SPEECH = /[\p{P}\p{Z}\p{S}\p{C}]/u;
+  let units = 0;
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (NON_SPEECH.test(ch)) {
+      i += 1;
+      continue;
+    }
+    if (LATIN.test(ch)) {
+      let j = i;
+      while (j < text.length && /[A-Za-z'’]/.test(text[j])) j += 1;
+      const word = text.slice(i, j);
+      const letters = (word.match(/[A-Za-z]/g) ?? []).length;
+      const isAbbrev = letters > 0 && letters <= 6 && word === word.toUpperCase();
+      units += isAbbrev ? letters * 0.9 : Math.max(1, letters / 2.8);
+      i = j;
+      continue;
+    }
+    if (DIGIT.test(ch)) {
+      let j = i;
+      let digits = 0;
+      let dots = 0;
+      while (j < text.length) {
+        const c = text[j];
+        if (DIGIT.test(c)) digits += 1;
+        else if (".,:/-".includes(c) && DIGIT.test(text[j + 1] ?? "")) dots += 1;
+        else break;
+        j += 1;
+      }
+      units += Math.max(0.5, digits * 0.9 + dots * 0.5);
+      i = j;
+      continue;
+    }
+    units += 1;
+    i += 1;
+  }
+  return units;
+}
 
 /**
  * 单块字数硬上限
@@ -238,15 +364,16 @@ export function joinSentences(parts: readonly string[]): string {
  * @param limit 每块字数上限
  * @returns 按原文顺序的块（不会丢字）
  */
-export function splitLongText(text: string, limit: number): string[] {
+export function splitLongText(text: string, limit: number, minUnits = MIN_BLOCK_UNITS): string[] {
   const out: string[] = [];
   let rest = text.trim();
+  const punct = "。！？!?；;，,、：:";
   const min = Math.max(1, Math.floor(limit * 0.6));
   while (rest.length > limit) {
     let cut = -1;
     // 从上限往前找标点，别把一句话拦腰切断；找不到就按字数硬切
     for (let i = limit; i >= min; i -= 1) {
-      if ("。！？!?；;，,、：:".includes(rest[i - 1] ?? "")) {
+      if (punct.includes(rest[i - 1] ?? "")) {
         cut = i;
         break;
       }
@@ -254,6 +381,15 @@ export function splitLongText(text: string, limit: number): string[] {
     if (cut < 0) cut = limit;
     out.push(rest.slice(0, cut));
     rest = rest.slice(cut);
+  }
+
+  // 尾段平衡：几字碎片单独合成会被模型当成短促感叹句（实测 F0 冲到 300Hz）。
+  // 借多少按等效发音单元算（见 rebalanceShortBlock），不能拿单元缺口当字符数：
+  // 中英混排 1 字符常只有 0.36 单元，按字符借会留下 7~8 单元的碎片。
+  if (rest.length > 0 && out.length > 0 && speechUnits(rest) < minUnits) {
+    const balanced = rebalanceShortBlock(out[out.length - 1], rest, minUnits, limit);
+    out[out.length - 1] = balanced[0];
+    rest = balanced[1] ?? "";
   }
   if (rest.length > 0) out.push(rest);
   return out;
@@ -267,6 +403,8 @@ export class SpeechQueue {
   private blockBuffer: string[] = [];
   /** 正在攒的字数 */
   private blockChars = 0;
+  /** 太短、又没赶上尚未消费的前块的碎片：先攒着，等下一块 / flush 结算 */
+  private pendingShort = "";
   /** 已封块、待合成 */
   private blocks: string[] = [];
   /** 已合成、待排程 */
@@ -317,6 +455,8 @@ export class SpeechQueue {
   private readonly blockCharsTarget: number;
   /** 单块硬上限 */
   private readonly maxBlockChars: number;
+  /** 单块最短等效发音单元数 */
+  private readonly minBlockUnits: number;
   /** 开播门槛字数 */
   private readonly warmupChars: number;
 
@@ -348,6 +488,7 @@ export class SpeechQueue {
     this.firstBlockChars = deps.firstBlockChars ?? FIRST_BLOCK_CHARS;
     this.blockCharsTarget = deps.blockChars ?? BLOCK_CHARS;
     this.maxBlockChars = deps.maxBlockChars ?? MAX_BLOCK_CHARS;
+    this.minBlockUnits = deps.minBlockUnits ?? MIN_BLOCK_UNITS;
     this.warmupChars = deps.warmupChars ?? this.firstBlockChars;
   }
 
@@ -394,6 +535,17 @@ export class SpeechQueue {
       this.pushBlock(joinSentences(parts));
     }
     this.blockChars = 0;
+    // 流结束了，攒着的短碎片必须现在结算：能并回最后一块就并，实在已经
+    // 全部进了时间轴也只能放行这一小段（诚实边界，不静默丢字）。
+    if (this.pendingShort) {
+      const tail = this.pendingShort;
+      this.pendingShort = "";
+      if (this.blocks.length > 0) {
+        this.absorbShortIntoLast(tail);
+      } else {
+        this.appendBlock(tail);
+      }
+    }
     // 尾巴封块 + endOfStream 都要让流式循环立刻看见，不能等下一次网络事件
     this.notify();
     void this.drain();
@@ -416,6 +568,7 @@ export class SpeechQueue {
     this.cancelWake();
     this.blockBuffer = [];
     this.blockChars = 0;
+    this.pendingShort = "";
     this.blocks = [];
     for (const item of this.waiting) URL.revokeObjectURL(item.url);
     this.waiting = [];
@@ -458,6 +611,11 @@ export class SpeechQueue {
   /** 攒够就封块 */
   private sealIfReady(): void {
     if (this.blockChars < this.blockTarget() && this.blockChars < this.maxBlockChars) return;
+    // 非首块必须达到最短发音量：几字碎片会被模型当短促感叹句，用高音区 /
+    // 快语速念出来。首块豁免，否则 TTFA 会被拖长（实测见 MIN_BLOCK_UNITS）。
+    if (this.sealedCount > 0 && speechUnits(joinSentences(this.blockBuffer)) < this.minBlockUnits) {
+      return;
+    }
     this.pushBlock(joinSentences(this.blockBuffer));
     this.blockBuffer = [];
     this.blockChars = 0;
@@ -469,20 +627,49 @@ export class SpeechQueue {
    * @param text 块文本
    */
   private pushBlock(text: string): void {
-    const trimmed = text.trim();
+    // 上一轮攒着的短碎片接在新文本前面：只是把切分点往回挪，逐字可逆。
+    const trimmed = (this.pendingShort + text.trim()).trim();
+    this.pendingShort = "";
     if (trimmed.length === 0) return;
     // 硬上限必须在这里兜住：超过 48 字的单块会让 TTS 退化出十几秒静音，
     // 详见 MAX_BLOCK_CHARS 的实测说明。服务端裁尾只是第二道保险。
-    const parts = trimmed.length <= this.maxBlockChars ? [trimmed] : splitLongText(trimmed, this.maxBlockChars);
+    const parts =
+      trimmed.length <= this.maxBlockChars ? [trimmed] : splitLongText(trimmed, this.maxBlockChars, this.minBlockUnits);
     for (const part of parts) {
-      if (part.trim().length === 0) continue;
-      if (this.blocks.length >= MAX_PENDING_BLOCKS) {
-        this.blocks.shift();
-        this.callbacks.onNotice?.(`播报积压超过 ${MAX_PENDING_BLOCKS} 块，已丢弃最早一块`);
+      const clean = part.trim();
+      if (clean.length === 0) continue;
+      // 首块豁免：它决定 TTFA，短一点是刻意的（见 FIRST_BLOCK_CHARS）。
+      const isFirstBlock = this.sealedCount === 0 && this.blocks.length === 0;
+      if (!isFirstBlock && speechUnits(clean) < this.minBlockUnits) {
+        if (this.blocks.length === 0) {
+          // 前一块已经被消费进合成 / 时间轴，没得可并：攒着跟下一块一起发，
+          // 绝不为了几字碎片单独起一次自回归生成。flush() 会兜底结算。
+          this.pendingShort += clean;
+          continue;
+        }
+        this.absorbShortIntoLast(clean);
+        continue;
       }
-      this.blocks.push(part);
-      this.sealedCount += 1;
+      this.appendBlock(clean);
     }
+  }
+
+  /** 把短碎片并入最后一块；并不下时按等效发音单元重划切分点 */
+  private absorbShortIntoLast(short: string): void {
+    const last = this.blocks[this.blocks.length - 1];
+    const balanced = rebalanceShortBlock(last, short, this.minBlockUnits, this.maxBlockChars);
+    this.blocks[this.blocks.length - 1] = balanced[0];
+    if (balanced[1]) this.appendBlock(balanced[1]);
+  }
+
+  /** 入队（同时守住有界队列） */
+  private appendBlock(text: string): void {
+    if (this.blocks.length >= MAX_PENDING_BLOCKS) {
+      this.blocks.shift();
+      this.callbacks.onNotice?.(`播报积压超过 ${MAX_PENDING_BLOCKS} 块，已丢弃最早一块`);
+    }
+    this.blocks.push(text);
+    this.sealedCount += 1;
   }
 
   /**

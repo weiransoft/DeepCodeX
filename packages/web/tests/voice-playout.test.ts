@@ -264,7 +264,8 @@ test("T5 领先排程：三句都在第一句播完前完成排程（否则句�
     async (text) => `blob:${text}`,
     { onSpeakingChange: (v) => states.push(v) },
     // 这个用例要观察"每句各自排程"，所以把块阈值压到 1 字
-    { player, createFallbackPlayer: () => player, firstBlockChars: 1, blockChars: 1 }
+    // 观察「每句各自排程」，显式关掉产品默认的短块下限
+    { player, createFallbackPlayer: () => player, firstBlockChars: 1, blockChars: 1, minBlockUnits: 0 }
   );
 
   queue.enqueue("第一句。");

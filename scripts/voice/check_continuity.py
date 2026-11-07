@@ -54,6 +54,7 @@ from continuity import (  # noqa: E402
     split_stream_chunks,
     summarize_rounds,
 )
+from mlx_voice_server import speech_units  # noqa: E402
 
 HOME = Path.home()
 SOUL_CONFIG = HOME / ".deepcode/soul/config.json"
@@ -270,11 +271,15 @@ def analyze_manifest(manifest: dict[str, Any], out: Path) -> dict[str, Any]:
         batch_bytes = (out / entry["batch_file"]).read_bytes()
         stream_bytes = (out / entry["stream_file"]).read_bytes()
         chunks = split_stream_chunks(stream_bytes)
-        batch_metric = analyze_clip(batch_bytes, len(entry["text"])).as_dict()
+        # 语速分母必须与服务端伺服同口径：等效发音单元，不是字符数。
+        # 用 len(text) 会在中英混排/标点密度变化时制造假的语速跳变。
+        units = round(speech_units(entry["text"]), 2)
+        batch_metric = analyze_clip(batch_bytes, units).as_dict()
         comparison = compare_stream_batch(chunks, batch_bytes)
         rounds.append({
             "index": entry["index"],
             "text": entry["text"],
+            "units": units,
             "batch": batch_metric,
             "stream": comparison,
             "timing": entry["timing"],

@@ -1,0 +1,9 @@
+{
+  "_comment": "长文本专项门禁阈值。基准值来自 2026-11-07 真机（生产 sidecar 8791 加载最终代码、sinan、speed=1.2）四条语料：单元语速极差 0.79/1.66/0.61/1.00%，块间 F0 极差 18.30/34.64/13.42/23.59%，最长静音 <=700ms，异常长静音 0，最短非首块 12.1 单元。改口径或调伺服参数后必须重跑 longtext_probe.py --check。",
+  "rate_units_spread_pct": 8.0,
+  "block_f0_spread_pct": 40.0,
+  "max_block_gap_ms": 900.0,
+  "long_gaps_total": 0.0,
+  "min_frontend_units": 10.0,
+  "min_blocks": 3.0
+}

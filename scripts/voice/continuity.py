@@ -165,10 +165,11 @@ class ClipMetrics:
 
     duration_s: float
     speech_s: float
-    chars: int
-    # 与服务端 segment_stretch_speed 同口径：字数 / 整段时长（含有声 + 语义停顿）。
-    # 不能用「只算有声」的分母：长句静音占比从 8% 涨到 25%，会把长句虚高成
-    # 「读得更快」，真机实测 4.92 字/秒会被误报成 6.59 字/秒。
+    chars: float
+    # 与服务端 segment_servo_speed 同口径：等效发音单元 / 整段时长（含有声 +
+    # 语义停顿）。不能用「只算有声」的分母：长句静音占比从 8% 涨到 25%，会把
+    # 长句虚高成「读得更快」。也不能用字符数：标点不发音、中英混排按字符计会
+    # 把发音量少算一半（2026-11-07 实测中英混排块间语速极差 76%）。
     chars_per_second: float
     # 参考值：只算有声样本。与上面一起看能分辨「语速变了」还是「停顿变多了」。
     chars_per_second_speech: float
@@ -239,17 +240,17 @@ def _spectral_centroid(frame: np.ndarray, rate: int) -> float:
     return float(np.dot(freqs, spectrum) / total)
 
 
-def analyze_clip(blob: bytes, chars: int) -> ClipMetrics:
+def analyze_clip(blob: bytes, chars: float) -> ClipMetrics:
     """分析一段 TTS WAV。
 
-    语速用**整段时长**，与服务端 `segment_stretch_speed()` 同口径：字数除以
-    samples.size/rate。不改用「只算有声」的分母——真机实测长句静音占比
-    8%→25%，那样会把 4.92 字/秒虚高成 6.59 字/秒，制造假的语速跳变。
+    语速用**整段时长**，与服务端 `segment_servo_speed()` 同口径：等效发音单元
+    除以 samples.size/rate。不改用「只算有声」的分母——真机实测长句静音占比
+    8%→25%，那样会把 4.92 单元/秒虚高成 6.59，制造假的语速跳变。
     另给 `chars_per_second_speech`，两者一起看能分辨「语速变了」还是
     「句内停顿变多了」。
 
     @param blob 完整 WAV 字节
-    @param chars 这段对应的可朗读字数
+    @param chars 这段的等效发音单元数（由 speech_units(text) 给出）
     @returns 指标
     """
     x, rate = decode_wav(blob)
@@ -292,7 +293,7 @@ def analyze_clip(blob: bytes, chars: int) -> ClipMetrics:
     return ClipMetrics(
         duration_s=round(duration_s, 4),
         speech_s=round(speech_s, 4),
-        chars=int(chars),
+        chars=round(float(chars), 2),
         # 完全没有人声时不能报一个「看起来正常」的语速，否则静音段会混过门禁
         chars_per_second=round(chars / duration_s, 3) if duration_s > 0 and speech_s > 0 else 0.0,
         chars_per_second_speech=round(chars / speech_s, 3) if speech_s > 0 else 0.0,

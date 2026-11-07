@@ -281,11 +281,99 @@ def prepare_sampling(voice: str) -> float:
 # 每秒音频对应的声学 token 数（Qwen3-TTS 是 12Hz 模型，官方口径 12.5 token/s）
 TTS_TOKENS_PER_SECOND = 12.5
 
-# 中文朗读语速（字/秒）
+# 中文朗读语速（等效发音单元/秒）
 #
 # 实测值，不是估值：三档文本（3 字 / 19 字 / 100 字）走 /tts 全链路量出的
-# 音频时长换算都是 4.1 字/秒，彼此吻合。
+# 音频时长换算都是 4.1 字/秒，彼此吻合。纯汉字文本下「单元数 == 汉字数」。
+# 口径从「字符数」改成「等效发音单元数」的依据见下方 speech_units 的实测说明。
 TTS_CHARS_PER_SECOND = 4.1
+
+# ---------------------------------------------------------------------------
+# 等效发音单元：语速伺服的正确分母（2026-11-07 长文本专项实测）
+#
+# 真机反馈「长文本还是会变语速，音色变了，讲话不自然不连贯」。用
+# /tmp/dcx-longtext-probe/probe.py 复刻前端「切句 → 14/40/48 字封块 →
+# 逐块独立请求」，两条 316/421 字真实回复的实测：
+#
+# | 语料       | 块数 | 块间语速极差 | 块间 F0 极差 | 极端块                     |
+# |------------|------|--------------|--------------|----------------------------|
+# | 纯中文     |    9 | 1.21%        | 20.57%       | —                          |
+# | 中英混排   |   13 | **76.37%**   | 54.39%       | 13字→9.42字/秒、3字→F0 304Hz |
+#
+# 根因不是模型语速不稳，而是**分母错了**：`segment_stretch_speed()` 原来拿
+# `len(piece.strip())`（字符数）当发音量。标点不发音、拉丁字母/数字按字符
+# 计数却读得快，于是中英混排段被误判成「读得飞快」，倍率撞到下限 0.75
+# 仍然压不回目标（实测冲到 9.42 字/秒）；纯中文段则按标点密度被施加
+# 0.75~1.35 各不相同的 WSOLA 变速——**变速倍率本身制造了段间音色差**。
+#
+# 修法：把分母换成「等效发音单元」，模型原生语速在正确口径下本来就稳定，
+# 于是伺服倍率普遍收敛到 1.0 附近，几乎不用做波形变速。语速与音色一起稳。
+# ---------------------------------------------------------------------------
+TTS_UNIT_LATIN_CHARS = 2.8
+TTS_UNIT_DIGIT = 0.9
+TTS_UNIT_DOT = 0.5
+TTS_UNIT_ABBREV_MAX = 6
+
+# 语速伺服总开关（诊断 / 一键回退用，默认开）。
+# 设 DCX_VOICE_RATE_SERVO=0 会完全跳过保调变速，输出模型原生音频——用于
+# 验证「原生语速在等效单元口径下是否稳定」，也方便出问题时秒回旧行为。
+TTS_RATE_SERVO = os.environ.get("DCX_VOICE_RATE_SERVO", "1") != "0"
+
+
+def speech_units(text: str) -> float:
+    """
+    把文本折算成「等效汉字发音单元数」，作为语速伺服的分母与目标口径。
+
+    规则（按实测标定，不追求语言学精确，只求跨文本可比）：
+    - 标点 / 空白 / 符号：0（不发音，但长短标点停顿的差异由音频时长体现）；
+    - CJK 汉字 / 假名 / 谚文：1；
+    - 拉丁字母连续串：字母数 / 2.8，最短 1；全大写短缩写逐字母念（每位 0.9）；
+    - 数字串：每位 0.9，内部小数点/分隔符 0.5。
+
+    @param text 待合成文本（已剥 Markdown）
+    @returns 等效发音单元数（>= 0）
+    """
+    import unicodedata
+
+    units = 0.0
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if unicodedata.category(ch)[0] in ("P", "Z", "S", "C"):
+            i += 1
+            continue
+        if ch.isascii() and ch.isalpha():
+            j = i
+            while j < n and text[j].isascii() and (text[j].isalpha() or text[j] in "'’"):
+                j += 1
+            word = text[i:j]
+            letters = sum(1 for c in word if c.isalpha())
+            if 0 < letters <= TTS_UNIT_ABBREV_MAX and word.isupper():
+                units += letters * TTS_UNIT_DIGIT
+            else:
+                units += max(1.0, letters / TTS_UNIT_LATIN_CHARS)
+            i = j
+            continue
+        if ch.isdigit():
+            j = i
+            digits = 0
+            dots = 0
+            while j < n:
+                c = text[j]
+                if c.isdigit():
+                    digits += 1
+                elif c in ".,:/-" and j + 1 < n and text[j + 1].isdigit():
+                    dots += 1
+                else:
+                    break
+                j += 1
+            units += max(0.5, digits * TTS_UNIT_DIGIT + dots * TTS_UNIT_DOT)
+            i = j
+            continue
+        units += 1.0
+        i += 1
+    return units
 
 # ---------------------------------------------------------------------------
 # 逐块语速伺服：把「全局等比变速」换成「按实测语速收敛到固定基准」
@@ -317,7 +405,14 @@ TTS_CHARS_PER_SECOND = 4.1
 # 4.93 字/秒（±0.2%）。每次变速仍只做一次（不叠加），音高不变。
 # ---------------------------------------------------------------------------
 TTS_RATE_SPEED_MIN = 0.75
-TTS_RATE_SPEED_MAX = 1.35
+# 上限从 1.35 提到 1.65（2026-11-07 长文本第四轮实测）：
+# `openai-provider 和 anthropic-provider。` 这类**纯拉丁复合词**块，模型原生
+# 只有约 3.06 等效单元/秒，要拉回 4.92 需要 1.61 倍。旧上限把它钳在 1.35，
+# 最终 4.14 单元/秒，成了整条中英混排里唯一的离群块（单元语速极差 17.08%）。
+# 它不是退化段（块内最长静音 20ms），退化另由 trim_degenerate_tail() /
+# compress_internal_gaps() / 门禁的 long_gaps_total 负责，不该靠倍率上限兜。
+# WSOLA 保调变速在 1.6 倍仍是常见听书倍速范围内，音高不变。
+TTS_RATE_SPEED_MAX = 1.65
 # 段间微停顿：两次独立生成的波形硬接缝，业界用 50~200ms 微静音掩盖。
 # 60ms 比正常句间停顿短，不会听成「断了一下」，又足够盖住相位跳变。
 TTS_SEGMENT_GAP_S = 0.06
@@ -374,6 +469,87 @@ def max_tokens_for(text: str) -> int:
 # CLI、旧版 bundle、手工请求都指向同一个 sidecar，不能假设调用方都守规矩。
 TTS_MAX_TEXT_CHARS = 48
 TTS_SPLIT_PUNCT = "。！？!?；;，,、：:"
+# 分段的最短尾段（等效单元不足这个值的碎片，模型会当成短促感叹句，用高音区、
+# 极快语速念出来——实测 3 字块 F0 303.8Hz / 质心 4454.9Hz，13 字块 9.42 字/秒）
+TTS_SPLIT_MIN_TAIL_UNITS = 10
+
+# 极短请求（前端旧 bundle / CLI / 手工调用）的伺服护栏。
+# 阈值必须只覆盖真正的碎片：中英混排的 48 字符块折算后常常只有 15~20 个
+# 等效单元，阈值定 20 会把正常块全判成碎片、禁用伺服，实测单元语速极差
+# 从 21% 反涨到 63%。只有 6 单元以下（≈3~13 字符）才是实测里 F0 冲到
+# 300Hz、语速翻倍的异常块。护栏只轻推，真正的修法是前端不产生这种块。
+TTS_SHORT_SEGMENT_UNITS = 6
+TTS_SHORT_SPEED_MIN = 0.8
+TTS_SHORT_SPEED_MAX = 1.25
+
+
+def _split_boundary_class(text: str, cut: int) -> int:
+    """切分点的自然度：0=标点后，1=空格/中英交界，2=词中间（最差）。
+
+    硬切拉丁单词会把 `openai-provider` 拆成 `opena` + `i-provider`，
+    两块各自起头念，听感比原来的短碎片还糟。所以达标切分点里必须先把
+    词边界挑出来，只有在没有任何词边界可选时才接受硬切。
+    """
+    before = text[cut - 1]
+    after = text[cut] if cut < len(text) else ""
+    if before in TTS_SPLIT_PUNCT:
+        return 0
+    if before.isspace() or (after and after.isspace()):
+        return 1
+    if (ord(before) > 127) != (bool(after) and ord(after) > 127):
+        return 1
+    return 2
+
+
+def rebalance_tail(prev: str, tail: str, min_units: float, limit: int) -> list[str]:
+    """把「前一段 + 过短尾段」重划切分点，让两段都达到最短发音量。
+
+    这是长文本碎片护栏的核心，也是 2026-11-07 第四轮真机复测里最后一处
+    漏洞：**借多少必须按等效发音单元算，不能按字符算**。旧实现直接拿
+    `min_units - speech_units(tail)` 当字符数往前借；中英混排里 1 个字符
+    常常只值 0.36 单元，缺 3 单元只借 3 字符，借完仍然是 7~8 单元的碎片，
+    照样被单独发一次合成请求（实测 `和 anthropic-provider。` 22 字符 /
+    7.07 单元，把整条语料的单元语速极差从 1.38% 拉到 21.27%）。
+
+    做法：把两段按原文顺序拼起来，在合法区间里枚举所有切分点，只保留
+    「左右两段都 >= min_units」的；优先落在标点后，其次尽量靠近原切分点
+    （少改动已经稳定的块）。发音量本来就撑不起两段时，退化成最大化
+    较小那段的发音量，绝不吞字、不重复。
+
+    @param prev 前一段
+    @param tail 过短的尾段
+    @param min_units 每段最短等效发音单元数
+    @param limit 每段字数硬上限
+    @returns 1~2 段，拼接后逐字等于 prev + tail
+    """
+    merged = prev + tail
+    if len(merged) <= limit or not prev:
+        return [merged]
+    # 切分点合法区间：左段 <= limit，右段 <= limit
+    lo = max(1, len(merged) - limit)
+    hi = min(limit, len(merged) - 1)
+    if lo > hi:
+        return [merged[:limit], merged[limit:]]
+
+    valid = [
+        c
+        for c in range(lo, hi + 1)
+        if speech_units(merged[:c]) >= min_units and speech_units(merged[c:]) >= min_units
+    ]
+    if valid:
+        # 都达标时优先自然断口（标点 > 词边界 > 词中间），其次少改动
+        best = min(valid, key=lambda c: (_split_boundary_class(merged, c), abs(c - len(prev))))
+    else:
+        # 总发音量撑不起两块时，让较小那段尽量大，别把碎片甩到最后一段
+        best = min(
+            range(lo, hi + 1),
+            key=lambda c: (
+                -min(speech_units(merged[:c]), speech_units(merged[c:])),
+                _split_boundary_class(merged, c),
+                abs(c - len(prev)),
+            ),
+        )
+    return [merged[:best], merged[best:]]
 
 
 def split_long_text(text: str, limit: int = TTS_MAX_TEXT_CHARS) -> list[str]:
@@ -405,6 +581,16 @@ def split_long_text(text: str, limit: int = TTS_MAX_TEXT_CHARS) -> list[str]:
             cut = limit
         out.append(rest[:cut])
         rest = rest[cut:]
+
+    # 尾段平衡：几字碎片会让模型用「短促感叹句」的韵律起头（高音区、快语速），
+    # 在长文本里听感就是"忽然换了个人"。能并回前段就并；并不下就从前段尾部
+    # 借一段，让两段都达到最短发音量。拼接逐字等于原文，不吞字不重复。
+    if rest and out and speech_units(rest) < TTS_SPLIT_MIN_TAIL_UNITS:
+        # 借多少按等效发音单元算（见 rebalance_tail），不能拿单元缺口当字符数：
+        # 中英混排 1 字符常只有 0.36 单元，按字符借会留下 7~8 单元的碎片。
+        balanced = rebalance_tail(out[-1], rest, TTS_SPLIT_MIN_TAIL_UNITS, limit)
+        out[-1] = balanced[0]
+        rest = balanced[1] if len(balanced) > 1 else ""
     if rest:
         out.append(rest)
     return out
@@ -753,10 +939,12 @@ class TtsEngine:
 
             if not raw_chunks:
                 continue
-            samples = trim_speech_edges(trim_degenerate_tail(np.concatenate(raw_chunks), rate), rate)
+            samples = compress_internal_gaps(
+                trim_speech_edges(trim_degenerate_tail(np.concatenate(raw_chunks), rate), rate), rate
+            )
             if samples.size == 0:
                 continue
-            seg_speed = segment_stretch_speed(samples, rate, len(piece.strip()), speed)
+            seg_speed = segment_servo_speed(samples, rate, piece, speed)
             applied.append(seg_speed)
             # 段内一条有状态时间轴：分块喂与整段一次 time_stretch_wsola()
             # 逐样本相等，流式与整块 /tts 产出的音频因此完全一致。
@@ -885,13 +1073,13 @@ class TtsEngine:
         rate = 24000
         applied: list[float] = []
         for piece, raw, rate in raw_parts:
-            samples = trim_speech_edges(trim_degenerate_tail(raw, rate), rate)
+            samples = compress_internal_gaps(trim_speech_edges(trim_degenerate_tail(raw, rate), rate), rate)
             if samples.size == 0:
                 continue
             if native_speed:
                 out = samples
             else:
-                seg_speed = segment_stretch_speed(samples, rate, len(piece.strip()), speed)
+                seg_speed = segment_servo_speed(samples, rate, piece, speed)
                 applied.append(seg_speed)
                 out = time_stretch_wsola(samples, seg_speed)
             # 两次独立生成的波形硬接缝，用一小段静音盖住相位跳变
@@ -1263,30 +1451,122 @@ def trim_speech_edges(
     return x[head:tail]
 
 
-def segment_stretch_speed(samples: "Any", sample_rate: int, chars: int, speed: float) -> float:
+# 段内异常长静音压缩（2026-11-07 长文本专项实测）
+#
+# 长文本里偶发 1.2~1.4 秒的段内空白（不是句读停顿，正常句读实测最长
+# 0.68s），听感就是「讲着讲着卡了一下」。它们通常伴随模型局部退化，
+# 裁尾解决不了（不在尾部）。只压超过 0.9s 的区间，保留 0.45s 作自然
+# 换气；阈值与 continuity.py 的 LONG_GAP_MS 对齐。
+TTS_COMPRESS_GAP_S = 0.9
+TTS_COMPRESS_KEEP_S = 0.45
+
+
+def compress_internal_gaps(
+    samples: "Any",
+    sample_rate: int,
+    max_gap_s: float = TTS_COMPRESS_GAP_S,
+    keep_s: float = TTS_COMPRESS_KEEP_S,
+) -> "Any":
+    """
+    把段内异常长的静音压短，保留自然句读停顿
+
+    @param samples 已裁首尾机械静音的波形
+    @param sample_rate 采样率
+    @param max_gap_s 超过这个长度的静音才处理
+    @param keep_s 长静音保留的长度
+    @returns 压缩后的波形；没有超长静音时原样返回
+    """
+    import numpy as np
+
+    x = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if x.size == 0 or sample_rate <= 0:
+        return x
+    frame = max(1, int(0.02 * sample_rate))
+    frames_n = x.size // frame
+    if frames_n < 3:
+        return x
+    peak = float(np.max(np.abs(x)))
+    if peak <= 0:
+        return x
+    rms = np.sqrt((x[: frames_n * frame].reshape(frames_n, frame).astype(np.float64) ** 2).mean(axis=1))
+    quiet = rms < peak * DEGENERATE_SILENCE_PEAK_RATIO
+    gap_frames = max(1, int(max_gap_s * sample_rate / frame))
+    keep_frames = max(1, int(keep_s * sample_rate / frame))
+
+    pieces: list[Any] = []
+    cursor = 0
+    i = 0
+    while i < frames_n:
+        if not quiet[i]:
+            i += 1
+            continue
+        j = i
+        while j < frames_n and quiet[j]:
+            j += 1
+        if j - i > gap_frames:
+            keep_end = min(j, i + keep_frames) * frame
+            skip_end = j * frame
+            pieces.append(x[cursor:keep_end])
+            cursor = skip_end
+        i = j
+    if cursor == 0:
+        return x
+    pieces.append(x[cursor:])
+    return np.concatenate(pieces)
+
+
+def segment_stretch_speed(samples: "Any", sample_rate: int, units: float, speed: float) -> float:
     """
     算这一段需要的保调变速倍率，把它的实测语速拉到全局固定基准
 
-    `target = TTS_CHARS_PER_SECOND × speed`，`actual = chars / duration`，
-    倍率 = target / actual（>1 加速、<1 放慢）。钳制在 0.75~1.35：超出这个
-    范围的段多半是模型退化（不是真的读那么快/慢），硬拉只会把音质拉坏，
-    交给 `trim_degenerate_tail()` 与退化日志处理更合适。
+    `target = TTS_CHARS_PER_SECOND × speed`，`actual = units / duration`，
+    倍率 = target / actual（>1 加速、<1 放慢）。钳制在 0.75~1.65：这个范围
+    覆盖真机实测的全部正常段（最慢的是纯拉丁复合词块，实测需要 1.61 倍）；
+    再往外多半是模型退化，交给 `trim_degenerate_tail()` /
+    `compress_internal_gaps()` 与退化日志处理更合适，硬拉只会把音质拉坏。
+
+    `units` 必须是 `speech_units(piece)` 的**等效发音单元数**，不是字符数：
+    标点不发音，中英混排/数字按字符计会把发音量少算一半，伺服会误判成
+    「读得飞快」并施加极端变速，制造语速与音色双重跳变（2026-11-07 实测
+    中英混排块间语速极差 76.37%）。
 
     注意目标取**全局固定值**，不能用本轮各段的中位数——否则整段一起快或
     一起慢时伺服检测不出来，这正是业界反复强调的坑。
 
     @param samples 已裁掉首尾机械静音与退化尾音的波形
     @param sample_rate 采样率
-    @param chars 这一段的有效字数
+    @param units 这一段的等效发音单元数
     @param speed 用户设置的语速
     @returns 传给 `time_stretch_wsola()` / `StreamingWsola()` 的倍率
     """
+    if not TTS_RATE_SERVO:
+        return 1.0
     duration = samples.size / float(sample_rate) if sample_rate > 0 else 0.0
-    if duration <= 0 or chars <= 0:
+    if duration <= 0 or units <= 0:
         return speed if speed > 0 else 1.0
     target = TTS_CHARS_PER_SECOND * (speed if speed > 0 else 1.0)
-    actual = chars / duration
+    actual = units / duration
     return max(TTS_RATE_SPEED_MIN, min(TTS_RATE_SPEED_MAX, target / actual))
+
+
+def segment_servo_speed(samples: "Any", sample_rate: int, piece: str, speed: float) -> float:
+    """
+    一段文本的最终伺服倍率（等效单元口径 + 极短段护栏）
+
+    `segment_stretch_speed()` 保持纯数学，便于单测；文本折算与护栏放在这里，
+    两处调用（整块 `/tts`、流式 `/tts/stream`）走同一份逻辑，不会各自漂移。
+
+    @param samples 已裁首尾静音的波形
+    @param sample_rate 采样率
+    @param piece 这一段原文（用来算等效发音单元）
+    @param speed 用户设置的语速
+    @returns 保调变速倍率
+    """
+    units = speech_units(piece)
+    ratio = segment_stretch_speed(samples, sample_rate, units, speed)
+    if units < TTS_SHORT_SEGMENT_UNITS:
+        return max(TTS_SHORT_SPEED_MIN, min(TTS_SHORT_SPEED_MAX, ratio))
+    return ratio
 
 
 def encode_wav_bytes(samples: "Any", sample_rate: int) -> bytes:

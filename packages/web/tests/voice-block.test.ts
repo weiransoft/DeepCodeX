@@ -123,7 +123,8 @@ test("B5 首块比后续块小：首块为了早出声，后续块为了连贯",
       return "blob:x";
     },
     {},
-    { player, firstBlockChars: 6, blockChars: 12 }
+    // 本用例刻意观察「小块」行为，显式关掉产品默认的短块下限/合并
+    { player, firstBlockChars: 6, blockChars: 12, minBlockUnits: 0 }
   );
 
   // 八个 3 字句（"第一。"）：首块吃两句（6 字），后续块吃四句（12 字），
@@ -180,7 +181,8 @@ test("B8 有界队列：合成彻底卡住时丢弃最旧块并提示，不让�
     // 模拟 TTS 永久无响应：生成侧继续灌入，blocks 会一直涨
     () => new Promise<string>(() => undefined),
     { onNotice: (m) => notices.push(m) },
-    { player: new InstantPlayer(), firstBlockChars: 1, blockChars: 1 }
+    // 要灌满 24 块上限，必须允许每句单独成块
+    { player: new InstantPlayer(), firstBlockChars: 1, blockChars: 1, minBlockUnits: 0 }
   );
   for (let i = 0; i < 30; i += 1) queue.enqueue(`第${i}句。`);
   assert.ok(

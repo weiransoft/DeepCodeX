@@ -64,7 +64,7 @@ import {
   type VoiceStatus,
 } from "../api";
 import { MicCapture, explainMicError } from "./mic";
-import { SpeechQueue } from "./player";
+import { MIN_BLOCK_UNITS, SpeechQueue } from "./player";
 import { SentenceStream, isNewTurnText } from "./sentence";
 import { scanVoiceDirective, settleVoiceDirective } from "./directive";
 import { TurnDirective } from "./turn-directive";
@@ -469,6 +469,12 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
           },
         },
         {
+          /**
+           * 长文本护栏：低于 10 等效发音单元的碎片不单独发合成请求。
+           * 实测几字块会被模型当短促感叹句（F0 冲到 300Hz、语速翻倍），
+           * 是长回复「忽然换人」的主要来源。首块仍按 14 字豁免保 TTFA。
+           */
+          minBlockUnits: MIN_BLOCK_UNITS,
           /**
            * 流式合成：模型每解出一小段就交给队列排程，首字延迟从"整段
            * 生成完"降到"第一块到达"。返回 0 块表示开关关了，队列会静默
