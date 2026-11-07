@@ -65,6 +65,8 @@ OUT = Path("/tmp/dcx-longtext-probe")
 # TNS 默认打开（2026-11-07 产品决策）；`--tns off` 逐字复现旧基线。
 # 分母必须按服务端真正念出来的文本算，否则规范化后语速会被系统性低估。
 TNS = True
+# 短块句内静音上限（P1，默认关）：请求级 {"shortGap": true} 只开本次。
+SHORT_GAP = False
 
 
 def spoken(text: str) -> str:
@@ -72,7 +74,10 @@ def spoken(text: str) -> str:
 
 
 def tts_payload(text: str) -> dict:
-    return {"text": text, "engine": ENGINE, "voice": VOICE, "speed": SPEED, "tns": TNS}
+    payload = {"text": text, "engine": ENGINE, "voice": VOICE, "speed": SPEED, "tns": TNS}
+    if SHORT_GAP:
+        payload["shortGap"] = True
+    return payload
 
 STRONG = set("。！？!?；;…")
 WEAK = set("，,、：:")
@@ -711,7 +716,7 @@ def evaluate_case(case: dict[str, Any], thresholds: dict[str, float]) -> list[di
 
 
 def main() -> int:
-    global PORT, ENGINE, VOICE, SPEED, OUT, TNS, ATOMIC
+    global PORT, ENGINE, VOICE, SPEED, OUT, TNS, ATOMIC, SHORT_GAP
     parser = argparse.ArgumentParser(description="长文本语音连贯性专项验收（复刻前端分块链路）")
     parser.add_argument("--port", type=int, default=int(os.environ.get("PROBE_PORT", "8791")), help="sidecar 端口")
     parser.add_argument("--engine", default=ENGINE)
@@ -719,6 +724,7 @@ def main() -> int:
     parser.add_argument("--speed", type=float, default=SPEED)
     parser.add_argument("--tns", choices=("on", "off"), default="on", help="TTS 文本前端规范化开关：on=生产默认，off=旧基线对照")
     parser.add_argument("--atomic", action="store_true", help="结构感知分块（默认关，对应前端偏好 dcx.voice.atomicChunk.v1）")
+    parser.add_argument("--short-gap", action="store_true", help='短块句内静音上限 P1（默认关）；请求级 {"shortGap": true} 只开本次，可与 --atomic 叠加')
     parser.add_argument("--out", default=str(OUT), help="报告输出目录")
     parser.add_argument("--cases", default="", help="逗号分隔的语料名，默认全部")
     parser.add_argument("--texts", default="", help="自定义语料文件（每行一条，# 开头为注释）")
@@ -729,6 +735,7 @@ def main() -> int:
     PORT, ENGINE, VOICE, SPEED = args.port, args.engine, args.voice, args.speed
     TNS = args.tns == "on"
     ATOMIC = args.atomic
+    SHORT_GAP = args.short_gap
     OUT = Path(args.out)
     OUT.mkdir(parents=True, exist_ok=True)
 
@@ -749,6 +756,8 @@ def main() -> int:
         "voice": VOICE,
         "speed": SPEED,
         "tns": TNS,
+        "atomic": ATOMIC,
+        "shortGap": SHORT_GAP,
         "cases": [],
     }
     for name in selected:

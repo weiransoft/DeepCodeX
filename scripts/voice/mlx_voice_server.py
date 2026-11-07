@@ -73,6 +73,36 @@ TNS_ENABLED = tns_enabled_by_env()
 # DCX_VOICE_ATOMIC_CHUNK=1 打开；关闭时行为与 031f1cc2 逐字节一致。
 ATOMIC_CHUNK_ENABLED = os.environ.get("DCX_VOICE_ATOMIC_CHUNK", "0") == "1"
 
+# 短块句内静音上限（2026-11-07 调研报告 P1，默认关）。
+#
+# 根因不是「读得慢」：`num:xs`（14.3 单元）有声语速 5.219 u/s 正常，但模型
+# 在短数字句里插了 4 段句内静音（最终输出合计 0.900s），把整段分母撑大到
+# 3.659s → 3.908 u/s。更关键的是**逐段语速伺服被钳在 1.65 上限**：原始段
+# 约 6.0s，即使拉满倍率也够不到 4.92 u/s 目标，所以伺服修不了它。
+# `code:m` 在 P0 atomic 下出现的 3.396 u/s 是同一类现象。
+#
+# 做法：只对 ≤20 等效发音单元的短块，把超过 0.30s 的句内静音压到 0.30s，
+# 且**在伺服之前**执行——短段变短后伺服倍率落回可达范围，语速才真正收敛。
+# 长块不动（正常句读实测最长 0.68s，是听感的一部分）。
+# 代价：短句停顿变短，需 WebView 真机听感确认，因此默认关、可一键回退。
+SHORT_GAP_ENABLED = os.environ.get("DCX_VOICE_SHORT_GAP", "0") == "1"
+SHORT_GAP_UNITS = 20.0
+SHORT_GAP_MAX_S = 0.30
+
+
+def request_short_gap_enabled(payload: dict) -> bool:
+    """请求级覆盖：`{"shortGap": true}` 只开本次，便于同一 sidecar 做 A/B。
+
+    语义与 `text_normalize.request_tns_enabled()` 一致：字符串 "0"/"false"/
+    "off"/"no" 视为关。缺省跟随环境变量（默认关）。
+    """
+    raw = payload.get("shortGap")
+    if raw is None:
+        return SHORT_GAP_ENABLED
+    if isinstance(raw, str):
+        return raw.strip().lower() not in ("0", "false", "off", "no")
+    return bool(raw)
+
 
 def apply_tns(text: str, payload: dict) -> str:
     """TTS 文本前端：只改送去合成的文本，界面上的原文一个字都不动。"""
@@ -907,7 +937,13 @@ class TtsEngine:
             self._load(engine)
 
     def iter_stream(
-        self, text: str, engine: str, voice: str, speed: float, interval: float
+        self,
+        text: str,
+        engine: str,
+        voice: str,
+        speed: float,
+        interval: float,
+        short_gap: bool | None = None,
     ) -> "Any":
         """
         流式合成：**段级生成 → 逐段语速伺服 → 分块 yield 独立完整 WAV**
@@ -939,7 +975,7 @@ class TtsEngine:
         if engine != "qwen3-customvoice":
             # 其它引擎没有 stream 参数：一次性生成完再 yield，语义仍正确，
             # 只是拿不到流式收益。不静默回落，日志里会写明。
-            audio, _, _ = self.synthesize(text, engine, voice, speed)
+            audio, _, _ = self.synthesize(text, engine, voice, speed, short_gap=short_gap)
             yield audio
             return
 
@@ -997,8 +1033,11 @@ class TtsEngine:
 
             if not raw_chunks:
                 continue
-            samples = compress_internal_gaps(
-                trim_speech_edges(trim_degenerate_tail(np.concatenate(raw_chunks), rate), rate), rate
+            samples = compress_segment_gaps(
+                trim_speech_edges(trim_degenerate_tail(np.concatenate(raw_chunks), rate), rate),
+                rate,
+                speech_units(piece),
+                short_gap,
             )
             if samples.size == 0:
                 continue
@@ -1028,7 +1067,9 @@ class TtsEngine:
                 f"目标 {TTS_CHARS_PER_SECOND * speed:.2f}字/秒\n"
             )
 
-    def synthesize(self, text: str, engine: str, voice: str, speed: float) -> tuple[bytes, str, str]:
+    def synthesize(
+        self, text: str, engine: str, voice: str, speed: float, short_gap: bool | None = None
+    ) -> tuple[bytes, str, str]:
         """
         合成一段语音。
 
@@ -1131,7 +1172,12 @@ class TtsEngine:
         rate = 24000
         applied: list[float] = []
         for piece, raw, rate in raw_parts:
-            samples = compress_internal_gaps(trim_speech_edges(trim_degenerate_tail(raw, rate), rate), rate)
+            samples = compress_segment_gaps(
+                trim_speech_edges(trim_degenerate_tail(raw, rate), rate),
+                rate,
+                speech_units(piece),
+                short_gap,
+            )
             if samples.size == 0:
                 continue
             if native_speed:
@@ -1573,6 +1619,37 @@ def compress_internal_gaps(
     return np.concatenate(pieces)
 
 
+def compress_segment_gaps(
+    samples: "Any",
+    sample_rate: int,
+    units: float,
+    short_gap: bool | None = None,
+) -> "Any":
+    """段级静音处理：异常长静音（既有）+ 短块句内静音上限（P1，默认关）。
+
+    顺序很重要：短块压缩必须在 `segment_servo_speed()` / WSOLA **之前**。
+    伺服按「整段时长」算倍率，先压缩才能把倍率从 1.65 钳位拉回可达区间，
+    这是 `num:xs` 3.908 u/s 的真正修法；若放在变速之后，流式分段就没法
+    边生成边吐（要攒齐整段才能裁），TTFA 会退化。
+
+    @param samples 已裁首尾机械静音与退化尾音的波形
+    @param sample_rate 采样率
+    @param units 本段等效发音单元数（>20 视为长块，不启用短块上限）
+    @param short_gap 请求级开关；None = 跟随环境变量（默认关）
+    @returns 波形；关闭态与既有 `compress_internal_gaps()` 逐样本一致
+    """
+    base = compress_internal_gaps(samples, sample_rate)
+    use_short_gap = SHORT_GAP_ENABLED if short_gap is None else short_gap
+    if not use_short_gap or units > SHORT_GAP_UNITS:
+        return base
+    return compress_internal_gaps(
+        base,
+        sample_rate,
+        max_gap_s=SHORT_GAP_MAX_S,
+        keep_s=SHORT_GAP_MAX_S,
+    )
+
+
 def segment_stretch_speed(samples: "Any", sample_rate: int, units: float, speed: float) -> float:
     """
     算这一段需要的保调变速倍率，把它的实测语速拉到全局固定基准
@@ -1884,6 +1961,7 @@ class Handler(BaseHTTPRequestHandler):
                     "startedAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
                     "tns": TNS_VERSION if TNS_ENABLED else "off",
                     "atomicChunk": "on" if ATOMIC_CHUNK_ENABLED else "off",
+                    "shortGap": "on" if SHORT_GAP_ENABLED else "off",
                     **deps["versions"],
                 },
             },
@@ -1942,6 +2020,7 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_tts(self) -> None:
         payload = json.loads(self._read_body() or b"{}")
         text = apply_tns(str(payload.get("text") or "").strip(), payload)
+        short_gap = request_short_gap_enabled(payload)
         if not text:
             self._send_json(400, {"code": "EMPTY_TEXT", "reason": "text 不能为空"})
             return
@@ -1956,7 +2035,9 @@ class Handler(BaseHTTPRequestHandler):
             speed = 1.0
         speed = min(2.0, max(0.5, speed))
         started = time.time()
-        audio, engine_used, voice_used = self.tts.synthesize(text, engine, voice, speed)
+        audio, engine_used, voice_used = self.tts.synthesize(
+            text, engine, voice, speed, short_gap=short_gap
+        )
         elapsed = int((time.time() - started) * 1000)
         # 一行固定格式的合成日志：正常与退化在日志里差别一目了然
         # （正常几百毫秒，退化几十秒），排查超时不必再靠猜。
@@ -1998,6 +2079,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         payload = json.loads(self._read_body() or b"{}")
         text = apply_tns(str(payload.get("text") or "").strip(), payload)
+        short_gap = request_short_gap_enabled(payload)
         if not text:
             self._send_json(400, {"code": "EMPTY_TEXT", "reason": "text 不能为空"})
             return
@@ -2026,7 +2108,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-Tts-Voice", urllib.parse.quote(speaker))
             self.send_header("X-Stream-Interval", str(interval))
             self.end_headers()
-            for wav in self.tts.iter_stream(text, engine, voice, speed, interval):
+            for wav in self.tts.iter_stream(
+                text, engine, voice, speed, interval, short_gap=short_gap
+            ):
                 if first_at is None:
                     first_at = time.time() - started
                 blob = struct.pack(">I", len(wav)) + wav

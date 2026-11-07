@@ -140,8 +140,10 @@ def asr_ok(text: str, groups: list[list[str]]) -> tuple[bool, list[list[str]]]:
     return not missed, missed
 
 
-def collect(port: int, text: str, tns: bool, th: dict[str, float], audio_dir: Path, stem: str) -> dict[str, Any]:
+def collect(port: int, text: str, tns: bool, th: dict[str, float], audio_dir: Path, stem: str, short_gap: bool = False) -> dict[str, Any]:
     payload = {"text": text, "engine": ENGINE, "voice": VOICE, "speed": SPEED, "tns": tns}
+    if short_gap:
+        payload["shortGap"] = True
     got = mm.stream_request("/tts/stream", payload)
     blobs: list[bytes] = got["chunks"]
     if got["http"] != 200 or not blobs:
@@ -289,6 +291,7 @@ def main() -> int:
     parser.add_argument("--engine", default=ENGINE)
     parser.add_argument("--voice", default=VOICE)
     parser.add_argument("--speed", type=float, default=SPEED)
+    parser.add_argument("--short-gap", action="store_true", help='短块句内静音上限 P1（默认关）；请求级 {"shortGap": true} 只开本次')
     args = parser.parse_args()
 
     ENGINE, VOICE, SPEED = args.engine, args.voice, args.speed
@@ -316,8 +319,8 @@ def main() -> int:
         name = scene["name"]
         print(f"[{i:02d}/{len(scenes)}] {name} — 代码层 + off + on + 2×ASR", flush=True)
         code = code_check(port, scene, th["code_version"])
-        off = collect(port, scene["text"], False, th, audio_dir, f"{name}-off")
-        on = collect(port, scene["text"], True, th, audio_dir, f"{name}-on")
+        off = collect(port, scene["text"], False, th, audio_dir, f"{name}-off", args.short_gap)
+        on = collect(port, scene["text"], True, th, audio_dir, f"{name}-on", args.short_gap)
         # A/B 可听对照：off → 0.7s 静音 → on
         if "samples" in off and "samples" in on:
             rate = on["sample_rate"]

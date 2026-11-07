@@ -230,3 +230,20 @@ python3 scripts/voice/chunking_ab_probe.py --cells code:xl,plain:xl \
 python3 scripts/voice/mixed_matrix_probe.py --tns on --check            # 关闭态基线
 python3 scripts/voice/mixed_matrix_probe.py --tns off --check           # 旧基线不回归
 ```
+
+---
+
+## 10. 补记（2026-11-07 第八轮 P1 实测修正）
+
+**本文 §2 与 §7.4 把服务端 `DCX_VOICE_ATOMIC_CHUNK` 写成「可选增强、不是
+收益来源」——这个判断需要修正。** 本轮重启为 `atomicChunk=on` 后补测发现：
+
+- 前端 atomic 允许放出 54~59 字请求，服务端 `split_long_text()` 必然二次切分；
+  服务端变量关闭时，同一段被切成 `…voic` + `e…`，把刚保住的拉丁词又切碎。
+  打开后切在 `voice，` 后。见 `short-gap-p1-2026-11-07.md` §5.3。
+- `code:m` 在 P0+P1 叠加下的块间语速极差：服务端 off **27.04%** → on
+  **10.87%**；`code:xl` 2.10% → 1.82%。服务端那层不是收益的**充分**条件，
+  但在 >48 字请求上是**必要**条件。
+
+本文其余结论（默认关、不建议默认打开、`code:m` 回归来自 54 字超长块被二次
+切分、替代策略未采用）保持不变：`code:m` 即使三开关全开仍为 10.87%，未达标。

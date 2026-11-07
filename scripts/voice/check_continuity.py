@@ -199,6 +199,8 @@ def collect(args: argparse.Namespace, out: Path) -> dict[str, Any]:
     )
     texts = read_texts(args.texts, args.rounds)
     base = {"engine": args.engine, "voice": args.voice, "speed": args.speed, "tns": args.tns == "on"}
+    if args.short_gap:
+        base["shortGap"] = True
     if name != "sidecar" and args.tns == "off":
         # 网关重建请求体时不带 tns；此时服务端会按环境变量默认 on 处理，
         # 而本地 units 却按 off 算，指标会静默失真——必须说清楚。
@@ -351,6 +353,7 @@ def main() -> int:
     parser.add_argument("--voice", default="sinan")
     parser.add_argument("--speed", type=float, default=1.2)
     parser.add_argument("--tns", choices=["on", "off"], default="on", help="TTS 文本前端规范化开关：on=生产默认，off=旧基线对照")
+    parser.add_argument("--short-gap", action="store_true", help='短块句内静音上限 P1（默认关）；请求级 {"shortGap": true} 只开本次')
     parser.add_argument("--interval", type=float, default=1.0, help="流式块目标秒数")
     parser.add_argument("--json-only", action="store_true", help="只输出 JSON 报告")
     args = parser.parse_args()

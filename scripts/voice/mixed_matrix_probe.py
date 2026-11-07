@@ -67,6 +67,9 @@ OUT = Path("/tmp/dcx-voice-matrix")
 # TNS 默认打开（2026-11-07 产品决策）。`--tns off` 逐字复现旧基线：
 # 请求体关掉规范化，语速分母也退回原文，两次结果才可比。
 TNS = True
+# 短块句内静音上限（P1，默认关）。请求级 {"shortGap": true} 只开本次，
+# 同一 sidecar 就能做 off/on A/B，不必重启、不必重新预热模型。
+SHORT_GAP = False
 
 
 def spoken(text: str) -> str:
@@ -80,7 +83,10 @@ def units_of(text: str) -> float:
 
 
 def tts_payload(text: str) -> dict[str, Any]:
-    return {"text": text, "engine": ENGINE, "voice": VOICE, "speed": SPEED, "tns": TNS}
+    payload = {"text": text, "engine": ENGINE, "voice": VOICE, "speed": SPEED, "tns": TNS}
+    if SHORT_GAP:
+        payload["shortGap"] = True
+    return payload
 
 # ---------------------------------------------------------------------------
 # 语料矩阵：5 种内容类型 × 5 个长度档位
@@ -830,7 +836,7 @@ def markdown(report: dict[str, Any], violations: list[dict[str, Any]]) -> str:
 
 
 def main() -> int:
-    global PORT, ENGINE, VOICE, SPEED, OUT, TNS
+    global PORT, ENGINE, VOICE, SPEED, OUT, TNS, SHORT_GAP
     parser = argparse.ArgumentParser(description="混合内容×长度矩阵：流畅性/速度/语速/音色一致性验收")
     parser.add_argument("--port", type=int, default=int(os.environ.get("PROBE_PORT", "8791")))
     parser.add_argument("--engine", default=ENGINE)
@@ -838,6 +844,7 @@ def main() -> int:
     parser.add_argument("--speed", type=float, default=SPEED)
     parser.add_argument("--tns", choices=("on", "off"), default="on", help="TTS 文本前端规范化开关：on=生产默认，off=旧基线对照")
     parser.add_argument("--atomic", action="store_true", help="结构感知分块（默认关）；需前端偏好/服务端变量同时打开才是生产态")
+    parser.add_argument("--short-gap", action="store_true", help='短块句内静音上限 P1（默认关）；请求级 {"shortGap": true} 只开本次，可与 --atomic 叠加')
     parser.add_argument("--out", default=str(OUT))
     parser.add_argument("--lengths", default=",".join(LENGTHS), help="逗号分隔：xs,s,m,l,xl")
     parser.add_argument("--kinds", default=",".join(DEFAULT_KINDS), help="逗号分隔：cn,mixed,num,code,plain；加 spoken 可跑口语化改写 A/B")
@@ -853,6 +860,7 @@ def main() -> int:
     PORT, ENGINE, VOICE, SPEED = args.port, args.engine, args.voice, args.speed
     TNS = args.tns == "on"
     lp.ATOMIC = args.atomic
+    SHORT_GAP = args.short_gap
     OUT = Path(args.out)
     cell_dir = OUT / "cells"
     OUT.mkdir(parents=True, exist_ok=True)
@@ -877,6 +885,7 @@ def main() -> int:
         "speed": SPEED,
         "tns": TNS,
         "atomic": lp.ATOMIC,
+        "shortGap": SHORT_GAP,
         "cells_requested": [cell_name(k, l) for k, l in pairs],
         "cases": [],
         "repeats": [],

@@ -29,6 +29,12 @@ export DCX_VOICE_TNS="${DCX_VOICE_TNS:-1}"
 # JSON 进入同一个请求。真机 A/B 的 6.84% 正是在本变量关闭下测得，
 # 服务端这层只是「规范化后残留拉丁词」的可选增强，不是收益来源。
 export DCX_VOICE_ATOMIC_CHUNK="${DCX_VOICE_ATOMIC_CHUNK:-0}"
+# 短块句内静音上限（2026-11-07 P1）：默认关，灰度通过后再默认开。
+# 打开需重启 sidecar：DCX_VOICE_SHORT_GAP=1 bash scripts/voice/start.sh
+# 请求体 {"shortGap": true} 可只开本次，同一 sidecar 就能做 A/B，不必重启。
+# 只对 ≤20 等效发音单元的短段生效，压 >0.30s 的句内静音；长段原样不动。
+# 代价是短句停顿变短，必须做 WebView 真机听感确认。
+export DCX_VOICE_SHORT_GAP="${DCX_VOICE_SHORT_GAP:-0}"
 LOG_DIR="${HOME}/.deepcode/logs"
 LOG_FILE="$LOG_DIR/voice.log"
 FOREGROUND=0
