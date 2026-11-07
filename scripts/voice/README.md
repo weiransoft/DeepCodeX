@@ -684,6 +684,8 @@ python3 scripts/voice/check_continuity.py --texts my.txt --thresholds my.json
 
 每轮的整块 WAV、流式每个独立 WAV、`manifest.json`、`report.json` 都会落盘。
 模型即使固定 seed 也可能有机器差异，留原始音频才能事后对证或人工拖进播放器听。
+`--replay` 写的是 `report-replay.json`，**不覆盖**原 `report.json`：重放可能带
+不同的 `--thresholds`，不能让一次复核把原始验收结论改写成别的判定。
 
 ### 六个维度与阈值依据
 

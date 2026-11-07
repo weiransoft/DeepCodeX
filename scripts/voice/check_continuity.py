@@ -283,7 +283,7 @@ def analyze_manifest(manifest: dict[str, Any], out: Path) -> dict[str, Any]:
 
 
 def print_report(manifest: dict[str, Any], result: dict[str, Any], thresholds: dict[str, float],
-                 violations: list[dict[str, Any]], out: Path, json_only: bool) -> None:
+                 violations: list[dict[str, Any]], out: Path, report_path: Path, json_only: bool) -> None:
     if json_only:
         return
     summary = result["summary"]
@@ -318,6 +318,7 @@ def print_report(manifest: dict[str, Any], result: dict[str, Any], thresholds: d
     else:
         log("\nPASS 语音连贯性全部指标达标")
     log(f"产物: {out}")
+    log(f"报告: {report_path}")
 
 
 def main() -> int:
@@ -372,11 +373,15 @@ def main() -> int:
             json.dumps(result["rounds"], ensure_ascii=False, sort_keys=True).encode()
         ).hexdigest()[:16],
     }
-    (out / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print_report(manifest, result, thresholds, violations, out, args.json_only)
+    # 重放可能带完全不同的 --thresholds，绝不能覆盖原采集那份报告：
+    # 曾经用极严阈值 replay 后把 full/report.json 从 PASS 覆写成 FAIL，
+    # 事后看报告会以为那次真机验收没过。重放单独落一份。
+    report_path = out / ("report-replay.json" if args.replay else "report.json")
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print_report(manifest, result, thresholds, violations, out, report_path, args.json_only)
     if args.json_only:
         print(json.dumps({"verdict": report["verdict"], "summary": result["summary"],
-                          "violations": violations, "report": str(out / "report.json")}, ensure_ascii=False))
+                          "violations": violations, "report": str(report_path)}, ensure_ascii=False))
     return 0 if not violations else 1
 
 
