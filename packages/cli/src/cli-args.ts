@@ -70,6 +70,16 @@ export interface ParsedCliArgs {
   /** EAG 子命令选项（key-value 对） */
   eagOptions: Record<string, string | boolean | number | string[] | undefined>;
   /**
+   * memsearch 子命令（官方 CLI 桥接）。
+   * - `undefined` — 未调用
+   * - `string` — search / index / expand / stats / help
+   */
+  memsearch: string | undefined;
+  /** memsearch 子命令选项（key-value 对） */
+  memsearchOptions: Record<string, string | boolean | number | string[] | undefined>;
+  /** memsearch 位置参数（查询词 / 路径 / chunk_hash） */
+  memsearchQuery: string[];
+  /**
    * Quality-check 子命令参数。
    * - `undefined` — 未调用 quality-check 子命令
    * - `string`    — quality-check 子命令名（codemap / uiux / visual / all / help）
@@ -470,6 +480,30 @@ async function configureYargs(argv?: string[]) {
           describe: "Output format (default summary)",
         })
     )
+    // 2026-11-08：官方 memsearch CLI 桥接（三层渐进记忆召回）
+    .command(
+      "memsearch <subcommand> [query..]",
+      "Memory search over markdown knowledge base (search|index|expand|stats|help)",
+      (y: Argv) =>
+        y
+          .positional("subcommand", {
+            type: "string",
+            choices: ["search", "index", "expand", "stats", "help"] as const,
+            describe: "Memsearch subcommand",
+          })
+          .positional("query", {
+            describe: "Search query / index paths / chunk_hash",
+          })
+          .option("top-k", { type: "number", describe: "Max results, 1-50 (default 5)" })
+          .option("collection", { type: "string", describe: "Milvus collection override" })
+          .option("source-prefix", { type: "string", describe: "Only chunks whose source starts with this path" })
+          .option("force", { type: "boolean", describe: "Force full re-embedding on index" })
+          .option("format", {
+            type: "string",
+            choices: ["summary", "json"] as const,
+            describe: "Output format (default summary)",
+          })
+    )
     // ===== fork 扩展：quality-check / review 子命令（保留全部） =====
     // quality-check 子命令：质量门禁 CLI 模式（非 TUI 模式）
     // 用法：deepcode quality-check <subcommand> [targetPath] [options]
@@ -770,7 +804,9 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
               ? "review"
               : rawArgv.length >= 2 && rawArgv[0] === "super" && rawArgv[1] === "help"
                 ? "super"
-                : undefined;
+                : rawArgv.length >= 2 && rawArgv[0] === "memsearch" && rawArgv[1] === "help"
+                  ? "memsearch"
+                  : undefined;
 
   // FIX-15（多角色审查 2026-07-29）：由于禁用了 yargs 内置 .help()，
   // --help / -h 现在只是普通布尔选项；检测到后手动输出 yargs 帮助并退出。
@@ -807,6 +843,8 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
   const rulesInvoked = positionalArgs[0] === "rules" || helpAsSecondPositional === "rules";
   // EAG 命令检测：positional[0] === "eag" 或通过 help fallback（与 team/rules 对齐）
   const eagInvoked = positionalArgs[0] === "eag" || helpAsSecondPositional === "eag";
+  // memsearch 命令检测（2026-11-08，同 eag 三段式 fallback）
+  const memsearchInvoked = positionalArgs[0] === "memsearch" || helpAsSecondPositional === "memsearch";
   // quality-check 命令检测：positional[0] === "quality-check" 或通过 help fallback
   const qualityCheckInvoked = positionalArgs[0] === "quality-check" || helpAsSecondPositional === "quality-check";
   // review 命令检测：positional[0] === "review" 或通过 help fallback
@@ -832,6 +870,9 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     (eagInvoked ? (parsed["subcommand"] as string | undefined) : undefined) ??
     (helpAsSecondPositional === "eag" ? "help" : undefined) ??
     (parsed["eag"] as string | undefined);
+  const memsearchRaw =
+    (memsearchInvoked ? (parsed["subcommand"] as string | undefined) : undefined) ??
+    (helpAsSecondPositional === "memsearch" ? "help" : undefined);
   // quality-check 子命令提取：与 team/rules 同样的三段式 fallback
   const qualityCheckRaw =
     (qualityCheckInvoked ? (parsed["subcommand"] as string | undefined) : undefined) ??
@@ -924,6 +965,23 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
       }
     }
   }
+
+  // 提取 memsearch 子命令的选项与位置参数
+  const memsearchOptions: Record<string, string | boolean | number | string[] | undefined> = {};
+  if (memsearchRaw) {
+    const optionKeys = ["top-k", "collection", "source-prefix", "force", "format"];
+    for (const key of optionKeys) {
+      const v = parsed[key];
+      if (v !== undefined) {
+        memsearchOptions[key] = v as string | boolean | number | string[];
+      }
+    }
+  }
+  const memsearchQuery: string[] = Array.isArray(parsed["query"])
+    ? (parsed["query"] as unknown[]).map((v) => String(v))
+    : typeof parsed["query"] === "string" || typeof parsed["query"] === "number"
+      ? [String(parsed["query"])]
+      : [];
 
   // 提取 quality-check 子命令的选项
   // 选项清单与 packages/cli/src/quality/quality-cmd.ts 中 parseQualityArgs 完全对齐
@@ -1040,6 +1098,10 @@ export async function parseArguments(argv?: string[]): Promise<ParsedCliArgs> {
     // fork 扩展：eag 子命令（P2 证据包）
     eag: eagRaw,
     eagOptions,
+    // 2026-11-08：memsearch 子命令（官方 CLI 桥接）
+    memsearch: memsearchRaw,
+    memsearchOptions,
+    memsearchQuery,
     qualityCheck: qualityCheckRaw,
     qualityCheckOptions,
     qualityCheckPositional: qualityCheckTarget,

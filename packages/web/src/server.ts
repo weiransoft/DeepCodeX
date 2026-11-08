@@ -61,6 +61,7 @@ import {
   handleRememberSoul,
 } from "./api/soul-api";
 import { handleVoiceAsr, handleVoiceStatus, handleVoiceTts, handleVoiceTtsStream } from "./api/voice-api";
+import { handleMemorySearch } from "./api/memory-search-api";
 import {
   handleConfirmSedimentation,
   handleDismissSedimentation,
@@ -551,6 +552,11 @@ export async function startWebServer(
       const soulMemoryMatch = /^\/api\/soul\/memory\/([^/]+)$/.exec(pathname);
       if (soulMemoryMatch && req.method === "DELETE") {
         handleForgetSoul(res, decodeURIComponent(soulMemoryMatch[1]), ctx, resolved);
+        return;
+      }
+      // 2026-11-08：按需记忆检索（外部 memsearch CLI；认证 + per-user 隔离已由上文保证）
+      if (pathname === "/api/memory/search" && req.method === "GET") {
+        await handleMemorySearch(res, ctx, resolved, url);
         return;
       }
       // 形象与声音配置（头像 / TTS 引擎 / 御姐音描述 / sidecar 地址）

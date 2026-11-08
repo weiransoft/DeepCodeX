@@ -134,6 +134,29 @@ async function main(): Promise<void> {
     process.exit(exitCode);
   }
 
+  // memsearch 子命令路由：官方 memsearch CLI 桥接（search / expand / index / stats）
+  if (parsed.memsearch) {
+    const { executeMemsearchCommand, formatMemsearchHelp } = await import("./memsearch/memsearch-cmd.js");
+    if (parsed.memsearch === "help") {
+      process.stdout.write(formatMemsearchHelp());
+      process.exit(0);
+    }
+    const opts = parsed.memsearchOptions;
+    const topKRaw = opts["top-k"];
+    const exitCode = (
+      await executeMemsearchCommand({
+        subcommand: parsed.memsearch as "search" | "index" | "expand" | "stats",
+        query: parsed.memsearchQuery ?? [],
+        topK: typeof topKRaw === "number" ? topKRaw : undefined,
+        collection: opts["collection"] as string | undefined,
+        sourcePrefix: opts["source-prefix"] as string | undefined,
+        force: opts["force"] === true,
+        format: opts["format"] as "summary" | "json" | undefined,
+      })
+    ).exitCode;
+    process.exit(exitCode);
+  }
+
   // super 子命令路由：Super Agent CLI 模式（非 TUI 模式）
   // 用法：deepcode super <subcommand> [target] [options]
   // 方案见 docs/proposals/super-agent/proposal-final.md

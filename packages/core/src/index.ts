@@ -164,6 +164,39 @@ export type { ToolDefinition, SkillPromptDocument, PromptToolOptions } from "./p
 export { SkillManager } from "./skill-manager";
 export type { SkillKind, SkillManagerContext } from "./skill-manager";
 
+// memsearch 外部 CLI 桥接（L1 search / L2 expand / index / stats；可选依赖，缺失时诚实降级）
+export {
+  MEMSEARCH_INSTALL_HINT,
+  MEMSEARCH_DEFAULT_TIMEOUT_MS,
+  createSpawnRunner,
+  memsearchBinCandidates,
+  probeMemsearch,
+  searchMemories,
+  expandMemories,
+  indexMemories,
+  memsearchStats,
+} from "./common/memsearch-bridge";
+export type {
+  MemsearchChunk,
+  MemsearchCommandResult,
+  MemsearchEnv,
+  MemsearchExpandOptions,
+  MemsearchExpandOutcome,
+  MemsearchExpansion,
+  MemsearchIndexOptions,
+  MemsearchIndexOutcome,
+  MemsearchOutcomeBase,
+  MemsearchRunner,
+  MemsearchRunOptions,
+  MemsearchSearchOptions,
+  MemsearchSearchOutcome,
+  MemsearchStatsOptions,
+  MemsearchStatsOutcome,
+  MemsearchStatus,
+} from "./common/memsearch-bridge";
+export { getMemorySearchToolDefinition, createMemorySearchHandler } from "./tools/memory-search-tool";
+export type { MemorySearchHandlerDeps } from "./tools/memory-search-tool";
+
 // Tools
 export { ToolExecutor } from "./tools/executor";
 export type {

@@ -1,7 +1,7 @@
 /**
  * /memory 命令处理器
  *
- * 处理 /memory list、/memory delete、/memory delete-all、/memory review、/memory export、/memory help 等子命令。
+ * 处理 /memory list、/memory delete、/memory delete-all、/memory review、/memory export、/memory search、/memory help 等子命令。
  * 该命令在 CLI 层处理，不发送给 LLM（用户隐私：用户应能直接管理自己的记忆）。
  *
  * 命令格式：
@@ -12,6 +12,7 @@
  *   /memory delete-all DELETE ALL   删除全部记忆文件（需严格匹配 "DELETE ALL" 令牌）
  *   /memory review             审查最近提取的记忆（显示最近 10 条）
  *   /memory export             导出所有记忆为 JSON 字符串
+ *   /memory search <query>     按需检索长期记忆（外部 memsearch CLI，L1 摘要）
  *   /memory help               显示帮助信息
  *
  * 设计依据：
@@ -27,6 +28,29 @@ import type { MemoryStore } from "./memory-store";
 import type { MemoryEntry, MemoryType } from "./types";
 import type { MemoryPrivacyManager } from "./privacy-manager";
 import { InvalidConfirmTokenError, type DeleteReport } from "./privacy-manager";
+
+/**
+ * 检索结果的结构化契约（与 common/memsearch-bridge 的 MemsearchSearchOutcome 兼容）。
+ * V2.3 P1-05 单一入口约束：V2 模块不得直接 import V1 文件，故此处用结构化类型而非导入。
+ */
+export interface MemorySearchOutcomeLike {
+  readonly ok: boolean;
+  readonly status: string;
+  readonly reason: string;
+  readonly hint: string;
+  readonly results: ReadonlyArray<{
+    readonly chunk_hash: string;
+    readonly content: string;
+    readonly source: string;
+    readonly heading: string;
+    readonly start_line: number;
+    readonly end_line: number;
+    readonly score: number;
+  }>;
+}
+
+/** 按需检索函数（由宿主注入，避免 core 命令处理器硬绑定外部进程） */
+export type MemorySearchFn = (query: string, topK?: number) => Promise<MemorySearchOutcomeLike>;
 
 /**
  * 命令处理结果
@@ -76,12 +100,14 @@ const DELETE_ALL_CONFIRM_TOKEN = "DELETE ALL";
  * @param args 命令参数字符串（如 "list"、"delete <id>"、"delete-all DELETE ALL"、"help"）
  * @param store 记忆存储实例（用于 list / delete / review / export）
  * @param privacyManager 可选的隐私管理器实例（用于 delete-all 物理删除全部记忆文件）
+ * @param searchFn 可选的按需检索函数（2026-11-08：/memory search 走外部 memsearch CLI）
  * @returns 命令处理结果的 Promise（调用方需 await）
  */
 export async function handleMemoryCommand(
   args: string,
   store: MemoryStore,
-  privacyManager?: MemoryPrivacyManager
+  privacyManager?: MemoryPrivacyManager,
+  searchFn?: MemorySearchFn
 ): Promise<MemoryCommandResult> {
   // 参数清洗：去除首尾空白，按空白拆分为 token 数组
   const trimmed = (args ?? "").trim();
@@ -104,12 +130,16 @@ export async function handleMemoryCommand(
       return handleReview(store);
     case "export":
       return handleExport(store);
+    case "search":
+      return await handleSearch(rest, searchFn);
     case "help":
       return handleHelp();
     default:
       return {
         success: false,
-        output: `未知的 /memory 子命令: ${subcommand}\n` + `可用子命令: list, delete, delete-all, review, export, help`,
+        output:
+          `未知的 /memory 子命令: ${subcommand}\n` +
+          `可用子命令: list, delete, delete-all, review, export, search, help`,
       };
   }
 }
@@ -374,6 +404,67 @@ function handleExport(store: MemoryStore): MemoryCommandResult {
 }
 
 /**
+ * /memory search - 按需检索长期记忆（外部 memsearch CLI 桥接）
+ *
+ * 2026-11-08 新增：返回 L1 摘要 + chunk_hash，完整章节可用
+ * `deepcode memsearch expand <hash>` 获取。检索函数由宿主注入，
+ * 未注入或检索失败时如实报错，不伪造命中。
+ */
+async function handleSearch(rest: readonly string[], searchFn?: MemorySearchFn): Promise<MemoryCommandResult> {
+  let topK = 5;
+  const queryParts: string[] = [];
+  for (let i = 0; i < rest.length; i += 1) {
+    if (rest[i] === "--top-k") {
+      const n = Number.parseInt(rest[i + 1] ?? "", 10);
+      if (Number.isFinite(n) && n >= 1) {
+        topK = Math.min(n, 50);
+        i += 1;
+        continue;
+      }
+    }
+    queryParts.push(rest[i]);
+  }
+  const query = queryParts.join(" ").trim();
+  if (query.length === 0) {
+    return { success: false, output: "用法: /memory search <查询文本> [--top-k n]" };
+  }
+  if (!searchFn) {
+    return {
+      success: false,
+      output:
+        "memsearch 检索未启用：宿主未注入检索函数。\n" +
+        "安装官方 CLI：uv tool install memsearch --default-index https://pypi.tuna.tsinghua.edu.cn/simple",
+    };
+  }
+
+  let outcome: MemorySearchOutcomeLike;
+  try {
+    outcome = await searchFn(query, topK);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { success: false, output: `/memory search 执行失败：${message}` };
+  }
+  if (!outcome.ok) {
+    const hint = outcome.hint ? `\n修复建议：${outcome.hint}` : "";
+    return { success: false, output: `[${outcome.status}] ${outcome.reason}${hint}` };
+  }
+
+  const lines = [`# 记忆检索：${query}（${outcome.results.length} 条）`, ""];
+  outcome.results.forEach((r, i) => {
+    lines.push(
+      `${i + 1}. [${r.score.toFixed(4)}] ${r.heading || "(无标题)"}  ${r.source}:${r.start_line}-${r.end_line}`
+    );
+    lines.push(`   hash: ${r.chunk_hash}`);
+    const flat = r.content.replace(/\s+/g, " ").slice(0, 200);
+    lines.push(`   ${flat}${r.content.length > 200 ? "…" : ""}`);
+  });
+  if (outcome.results.length === 0) {
+    lines.push("（无命中；请确认已 index 对应 markdown 语料）");
+  }
+  return { success: true, output: lines.join("\n"), data: outcome.results };
+}
+
+/**
  * /memory help - 显示帮助
  *
  * @returns 命令处理结果
@@ -390,6 +481,7 @@ function handleHelp(): MemoryCommandResult {
     "  /memory delete-all DELETE ALL 删除全部记忆文件（需严格匹配令牌）",
     "  /memory review                审查最近提取的记忆",
     "  /memory export                导出所有记忆为 JSON",
+    "  /memory search <query>        按需检索长期记忆（可选 --top-k n，返回 L1 摘要）",
     "  /memory help                  显示此帮助",
     "",
     "记忆类型:",
@@ -401,6 +493,7 @@ function handleHelp(): MemoryCommandResult {
     "示例:",
     "  /memory list",
     "  /memory list user_global",
+    "  /memory search 无进展熔断阈值",
     "  /memory delete 550e8400-e29b-41d4-a716-446655440000",
     "  /memory delete-all DELETE ALL",
   ].join("\n");

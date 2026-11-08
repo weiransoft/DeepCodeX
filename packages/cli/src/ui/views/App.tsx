@@ -2437,11 +2437,8 @@ function createEagAssemblyLogger(): AssemblyLogCallback {
 async function handleMemorySlashCommand(text: string, projectRoot: string): Promise<string> {
   // 动态导入避免启动开销；MemoryStore / MemoryPrivacyManager / handleMemoryCommand
   // 均为 core v2 公开导出（见 packages/core/src/v2/index.ts）
-  const [{ MemoryStore, MemoryPrivacyManager, handleMemoryCommand }, nodePath, nodeOs] = await Promise.all([
-    import("@vegamo/deepcode-core"),
-    import("node:path"),
-    import("node:os"),
-  ]);
+  const [{ MemoryStore, MemoryPrivacyManager, handleMemoryCommand, searchMemories }, nodePath, nodeOs] =
+    await Promise.all([import("@vegamo/deepcode-core"), import("node:path"), import("node:os")]);
 
   const trimmed = text.trim();
   // 去除前导 "/" 得到 "memory list" 等
@@ -2465,7 +2462,9 @@ async function handleMemorySlashCommand(text: string, projectRoot: string): Prom
   const privacyManager = new MemoryPrivacyManager(globalMemoryDir, projectMemoryDir);
 
   try {
-    const result = await handleMemoryCommand(argsText, store, privacyManager);
+    const result = await handleMemoryCommand(argsText, store, privacyManager, (query, topK) =>
+      searchMemories({ query, topK })
+    );
     if (result.success) {
       return result.output;
     }

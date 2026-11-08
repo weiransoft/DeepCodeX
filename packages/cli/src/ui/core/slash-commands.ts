@@ -247,7 +247,7 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
     name: "memory",
     label: "/memory",
     args: ["<subcommand>"],
-    description: "Memory management (list/delete/review/export)",
+    description: "Memory management (list/delete/review/export/search)",
   },
   // ===== DeepCodeX EAG 规则管理命令 =====
   {

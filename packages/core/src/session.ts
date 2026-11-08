@@ -97,6 +97,7 @@ import {
   getQueryExecutionHistoryToolDefinition,
   createQueryExecutionHistoryHandler,
 } from "./v2/memory/query-execution-history-tool";
+import { getMemorySearchToolDefinition, createMemorySearchHandler } from "./tools/memory-search-tool";
 // 二期新增：执行历史 → MemoryStore 双向同步 + ContextSnippet 构建
 import { ExecutionHistoryMemorySync } from "./v2/memory/execution-history-memory-sync";
 import { MemoryStore } from "./v2/memory/memory-store";
@@ -2004,6 +2005,10 @@ export class SessionManager {
       "query_execution_history",
       createQueryExecutionHistoryHandler({ store: this.executionHistoryStore })
     );
+    // 2026-11-08：按需记忆召回（L1 search / L2 expand）。外部 memsearch CLI 缺失时
+    // handler 返回 ok:false + 具体原因，不影响其它工具与既有会话（零回归）。
+    this.historyToolDefinition.push(getMemorySearchToolDefinition());
+    this.toolExecutor.registerToolHandler("memory_search", createMemorySearchHandler());
     // 二期 US-EH-006：把 executionHistoryStore 注入 DualLayerContextManager
     // —— contextHook 是 SessionContextHook 接口，没有 setExecutionHistoryStore，需要 cast
     // —— 如果 contextHook 没有这个方法（DefaultSessionContextHook），可选链直接跳过
