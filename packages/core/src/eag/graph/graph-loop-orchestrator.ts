@@ -525,7 +525,7 @@ export class GraphLoopOrchestrator {
             context
           )
         );
-        const forkResults = await this.executeFork(currentNode, graph, context);
+        const forkResults = await this.executeFork(currentNode, graph, context, nodeRetryCounts);
         // TOP-5：记录 fork 并行派发完成
         this.safeTrace(() => this.debugger.traceForkComplete(currentNode, forkResults, context));
         // fork 的并行结果合并到 nodeResults
@@ -776,7 +776,8 @@ export class GraphLoopOrchestrator {
   private async executeFork(
     forkNode: Readonly<GraphNodeDef>,
     graph: Readonly<WorkGraph>,
-    context: GraphRunContext
+    context: GraphRunContext,
+    nodeRetryCounts: Map<string, number>
   ): Promise<ReadonlyArray<GraphNodeResult>> {
     // 查询 fork 节点的所有下游边
     const downstreamEdges = graph.edges.filter((e) => e.from === forkNode.nodeId);
@@ -784,6 +785,9 @@ export class GraphLoopOrchestrator {
       this.logger.warn(`[GraphLoopOrchestrator] fork 节点 ${forkNode.nodeId} 无下游边`);
       return [];
     }
+
+    // P0-2：分支结果必须共享主路径的节点重试预算，杜绝硬编码 retryCount:0
+    const retryOf = (nodeId: string): number => nodeRetryCounts.get(nodeId) ?? 0;
 
     // 受 maxParallelism 限制的分批并行
     const maxParallelism = context.config.maxParallelism;
@@ -814,7 +818,7 @@ export class GraphLoopOrchestrator {
               output: {},
               durationSec: 0,
               failureReason: `目标节点 ${edge.to} 不存在`,
-              retryCount: 0,
+              retryCount: retryOf(edge.to),
             } as GraphNodeResult,
             tokenDelta: 0,
             branchGlobalState: null as Record<string, unknown> | null,
@@ -845,7 +849,7 @@ export class GraphLoopOrchestrator {
               output: {},
               durationSec: 0,
               failureReason: `边解析失败：${errorMsg}`,
-              retryCount: 0,
+              retryCount: retryOf(targetNode.nodeId),
             } as GraphNodeResult,
             tokenDelta: 0,
             branchGlobalState: null,
@@ -861,11 +865,42 @@ export class GraphLoopOrchestrator {
           nodeResults: branchNodeResults,
         };
 
+        // P0-2：fork 分支执行前护栏（此前直接 nodeExecutor.execute，绕开 graphGuard）
+        const preCheck = this.graphGuard.checkPreExecution(targetNode, branchContext);
+        this.recordGuardRecord(preCheck, "pre", targetNode.nodeId);
+        this.safeTrace(() => this.debugger.traceGuard(targetNode, preCheck, "pre", branchContext));
+        if (!preCheck.passed) {
+          this.logger.warn(`[GraphLoopOrchestrator] fork 分支 ${targetNode.nodeId} 执行前护栏拦截：${preCheck.reason}`);
+          const guardFailed: GraphNodeResult = {
+            nodeId: targetNode.nodeId,
+            nodeType: targetNode.nodeType,
+            status: "failed",
+            output: {},
+            durationSec: 0,
+            failureReason: `执行前护栏拦截：${preCheck.reason}`,
+            retryCount: retryOf(targetNode.nodeId),
+          };
+          this.safeTrace(() => this.debugger.traceFailure(targetNode, guardFailed, branchContext));
+          return { result: guardFailed, tokenDelta: 0, branchGlobalState: null as Record<string, unknown> | null };
+        }
+
         // TOP-5：记录分支节点开始执行
         this.safeTrace(() => this.debugger.traceNodeStart(targetNode, branchInput, branchContext));
 
         try {
-          const result = await this.nodeExecutor.execute(targetNode, branchInput, branchContext);
+          let result = await this.nodeExecutor.execute(targetNode, branchInput, branchContext);
+
+          // P0-2：fork 分支执行后护栏（此前缺失，分支失败可被静默吞掉）
+          const postCheck = this.graphGuard.checkPostExecution(targetNode, result, branchContext);
+          this.recordGuardRecord(postCheck, "post", targetNode.nodeId);
+          this.safeTrace(() => this.debugger.traceGuard(targetNode, postCheck, "post", branchContext));
+          if (!postCheck.passed) {
+            result = { ...result, status: "failed", failureReason: postCheck.reason };
+          }
+          // 补齐 retryCount（分支结果与主路径共用重试预算，不再固定 0）
+          if (result.retryCount === undefined) {
+            result = { ...result, retryCount: retryOf(targetNode.nodeId) };
+          }
 
           // v3 共识修复 B-2（架构师 B-4 + 独立开发者 B-2）：
           // 分支节点执行后立即调用 uploadExperiences 上送经验到 branchGlobalState
@@ -897,7 +932,7 @@ export class GraphLoopOrchestrator {
             output: {},
             durationSec: 0,
             failureReason: `执行异常：${errorMsg}`,
-            retryCount: 0,
+            retryCount: retryOf(targetNode.nodeId),
           } as GraphNodeResult;
           // TOP-5：记录分支节点执行失败
           this.safeTrace(() => this.debugger.traceFailure(targetNode, failedResult, branchContext));
@@ -915,7 +950,6 @@ export class GraphLoopOrchestrator {
       // 统一合并各分支的结果、token 增量、globalState 到主 context
       // 在 Promise.all 后顺序合并，避免并行写入竞态
       for (const { result, tokenDelta, branchGlobalState } of batchOutputs) {
-        allResults.push(result);
         // 累加 token 增量到主 context
         context.totalTokensUsed += tokenDelta;
         // v3 共识修复 B-1（架构师 B-4 + 独立开发者 B-1 + 测试专家 B3）：
@@ -924,9 +958,32 @@ export class GraphLoopOrchestrator {
         if (branchGlobalState) {
           mergeBranchGlobalState(context.globalState, branchGlobalState);
         }
+
+        // P0-2：分支结果纳入调度决策（decideNext）与节点重试预算（nodeRetryCounts）。
+        // 放在 Promise.all 之后顺序执行，避免并行分支竞争共享调度状态；
+        // 仅消费 retry_node 动作累计重试预算，其余动作仍由主循环（Step g）统一决策，
+        // 不改变 fork 的主遍历路径。
+        let mergedResult = result;
+        try {
+          const branchNode = graph.nodes.get(result.nodeId);
+          if (branchNode) {
+            const decision = await this.graphScheduler.decideNext(branchNode, result, context);
+            if (decision.action === "retry_node") {
+              const nextRetry = retryOf(result.nodeId) + 1;
+              nodeRetryCounts.set(result.nodeId, nextRetry);
+              mergedResult = { ...result, retryCount: nextRetry };
+            }
+          }
+        } catch (err) {
+          this.logger.warn(
+            `[GraphLoopOrchestrator] fork 分支 ${result.nodeId} 调度决策失败（不阻断合并）：${(err as Error).message}`
+          );
+        }
+
+        allResults.push(mergedResult);
         // 将并行分支节点记录到遍历路径和 visited 集合（对齐 §9.2 遍历路径记录要求）
-        this.currentTraversalPath.push(result.nodeId);
-        context.visited.add(result.nodeId);
+        this.currentTraversalPath.push(mergedResult.nodeId);
+        context.visited.add(mergedResult.nodeId);
       }
     }
 

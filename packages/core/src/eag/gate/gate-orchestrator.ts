@@ -50,6 +50,17 @@ import { GateG6Checker } from "./gate-g6-checker";
 import { GateG7Checker } from "./gate-g7-checker";
 import type { GateChecker, GateContext, GateId, GateOrchestrationResult, GateResult, LoopType } from "./gate-types";
 
+/**
+ * 紧急回退开关（2026-11-08 审查修复新增）。
+ *
+ * 默认（未设置）：strictGateCoverage 为真，任何 skippedGates（no-checker / missing-context）
+ * 都使 allPassed=false（fail-closed），缺门禁不再"静默跳过却报全绿"。
+ * 设置为 "1"：恢复修复前的宽松覆盖默认，便于线上紧急回退。
+ */
+function legacyPassThrough(): boolean {
+  return process.env.EAG_LEGACY_PASS_THROUGH === "1";
+}
+
 // ============================================================================
 // 常量与配置
 // ============================================================================
@@ -183,7 +194,7 @@ export class GateOrchestratorError extends Error {
 export class GateOrchestrator {
   /** 门禁检查器列表（按注入顺序保留，run() 时按 LOOP_GATE_IDS 过滤） */
   private readonly checkers: ReadonlyArray<GateChecker>;
-  /** 严格门禁覆盖：缺检查器的门禁计入未通过（默认 false） */
+  /** 严格门禁覆盖：任何 skippedGates 计入未通过（默认 true，2026-11-08 审查修复） */
   private readonly strictGateCoverage: boolean;
 
   /**
@@ -195,12 +206,12 @@ export class GateOrchestrator {
   constructor(options?: {
     readonly checkers?: ReadonlyArray<GateChecker>;
     /**
-     * 严格门禁覆盖（2026-11-01 新增，默认 false）。
+     * 严格门禁覆盖（2026-11-01 新增；2026-11-08 审查修复改为默认 true）。
      *
-     * 为 true 时：某门禁被 LOOP_GATE_IDS 要求执行、但编排器未注册对应检查器
-     * （reason="no-checker"）→ `allPassed=false` 且 `firstFailedGate` 指向该门禁。
-     * 默认 false 保持既有调用方行为（G-4/G-5 需按需注入），
-     * 但 skipped 信息始终通过 `skippedGates` 披露，不再静默。
+     * 为 true（默认）时：任何被跳过的门禁（no-checker / missing-context）都使
+     * `allPassed=false` 且 `firstFailedGate` 指向首个被跳过的门禁（fail-closed），
+     * 杜绝"缺检查器 → 静默跳过 → 误报全绿"。
+     * 显式传 false 或设置环境变量 EAG_LEGACY_PASS_THROUGH=1 可回退到旧的宽松默认。
      */
     readonly strictGateCoverage?: boolean;
   }) {
@@ -218,7 +229,18 @@ export class GateOrchestrator {
         new GateG6Checker(),
         new GateG7Checker(),
       ]);
-    this.strictGateCoverage = options?.strictGateCoverage === true;
+    // 2026-11-08 审查修复：默认严格门禁覆盖（fail-closed）。
+    // - 调用方显式传 strictGateCoverage: true 优先（明确要求严格，不受回退开关影响）；
+    // - 环境变量 EAG_LEGACY_PASS_THROUGH=1 可紧急回退到旧的宽松默认（仅影响未显式指定者）；
+    // - 调用方显式传 false 视为"显式确认接受宽松覆盖"，同样回退；
+    // - 其余情况（未传）一律严格。
+    if (options?.strictGateCoverage === true) {
+      this.strictGateCoverage = true;
+    } else if (legacyPassThrough() || options?.strictGateCoverage === false) {
+      this.strictGateCoverage = false;
+    } else {
+      this.strictGateCoverage = true;
+    }
 
     // 协议校验：构造时一次性校验所有检查器的 gateId 必须在 GATE_EXECUTION_ORDER 中
     // 对齐性能优化原则——避免每次 run() 都重复校验所有检查器
@@ -248,7 +270,7 @@ export class GateOrchestrator {
    * 5. 短路求值：首个失败即停止，不执行后续门禁
    * 6. 收集所有结果，计算 allPassed 与 firstFailedGate
    * 7. 记录 skippedGates：启用了但本次未执行的门禁及原因（no-checker / missing-context），
-   *    避免"缺检查器 → 静默跳过 → 误报全绿"；strictGateCoverage=true 时 no-checker 计入未通过
+   *    避免"缺检查器 → 静默跳过 → 误报全绿"；默认严格模式下任何 skippedGates 都计入未通过
    *
    * 注：检查器协议校验已移至 constructor，run() 仅校验 context.loopType 合法性
    *
@@ -327,16 +349,16 @@ export class GateOrchestrator {
     }
 
     // 计算是否全部通过
-    // strictGateCoverage=true 时，缺检查器（no-checker）也算未通过 → fail-closed。
-    // missing-context 属既定向后兼容语义，不计入未通过。
-    const missingCheckerGates = skippedGates.filter((s) => s.reason === "no-checker");
-    const coverageGap = this.strictGateCoverage && missingCheckerGates.length > 0;
+    // 2026-11-08 审查修复：严格模式下任何 skippedGates（no-checker / missing-context）
+    // 都属覆盖缺口 → allPassed=false（fail-closed），缺门禁不再"静默跳过却报全绿"。
+    // 宽松模式（显式确认或回退开关）仅按 firstFailedGate 判定，保持既有兼容语义。
+    const coverageGap = this.strictGateCoverage && skippedGates.length > 0;
     const allPassed = firstFailedGate === null && !coverageGap;
 
     return Object.freeze({
       results: Object.freeze(results) as ReadonlyArray<GateResult>,
       allPassed,
-      firstFailedGate: firstFailedGate ?? (coverageGap ? (missingCheckerGates[0]!.gate as GateId) : null),
+      firstFailedGate: firstFailedGate ?? (coverageGap ? (skippedGates[0]!.gate as GateId) : null),
       loopType,
       skippedGates: Object.freeze(skippedGates) as ReadonlyArray<{
         readonly gate: GateId;

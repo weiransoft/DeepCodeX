@@ -108,7 +108,9 @@ export function validateFinding(raw: unknown): AgentFinding | undefined {
     if (!ref || ref.length > FINDING_REF_MAX_CHARS) {
       return undefined;
     }
-    const note = typeof e.note === "string" ? e.note.trim().slice(0, FINDING_NOTE_MAX_CHARS) : undefined;
+    // P2 修复：note 是有界辅助说明字段，超长时保尾截断（尾部说明通常更关键），
+    // 不再 head-only 丢尾。结构化字段（id/ref/impact...）非法仍一律拒绝，不静默截断。
+    const note = typeof e.note === "string" ? e.note.trim().slice(-FINDING_NOTE_MAX_CHARS) : undefined;
     evidence.push(note ? { source: e.source, ref, note } : { source: e.source, ref });
   }
 
@@ -161,8 +163,11 @@ export function partitionByEvidence<T extends { finding?: AgentFinding }>(
   const bound: Array<T & { finding: AgentFinding }> = [];
   const deferred: T[] = [];
   for (const suggestion of suggestions) {
-    if (suggestion.finding) {
-      bound.push({ ...suggestion, finding: suggestion.finding });
+    // P2 修复：仅判 truthy 不足——外部可能传入未过 schema 的 finding 对象。
+    // 统一走 validateFinding 唯一 schema 关卡，非法 finding 降级进 deferred（不丢弃建议）。
+    const validated = suggestion.finding ? validateFinding(suggestion.finding) : undefined;
+    if (validated) {
+      bound.push({ ...suggestion, finding: validated });
     } else {
       deferred.push(suggestion);
     }

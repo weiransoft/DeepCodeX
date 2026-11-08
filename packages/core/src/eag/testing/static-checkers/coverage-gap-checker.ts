@@ -377,6 +377,27 @@ export class CoverageGapChecker implements TestQualityChecker {
    * @returns 判定结果（含违规项列表）
    */
   check(testFiles: ReadonlyArray<GeneratedTestFile>, context: Readonly<TestQualityContext>): TestQualityResult {
+    // P1 修复：PKC 风险热点查询不可用时，highRiskSymbols 是「空降级」而非
+    // 「PKC 真实返回空」，此时无法判定覆盖空白，必须按 unknown 处理
+    // （passed=false + 明确 evidence），不得空转判 passed。
+    // severity 置 warning：诚实记录不可判定，但不升级为 blocker 阻断整个 Loop。
+    if (context.highRiskSymbolsUnknown) {
+      return Object.freeze({
+        checkerId: CHECKER_ID,
+        passed: false,
+        severity: "warning" as TestQualitySeverity,
+        violations: Object.freeze([
+          Object.freeze({
+            filePath: "(PKC)",
+            line: 0,
+            description:
+              "PKC 风险热点查询不可用（unknown），无法判定高风险符号覆盖空白；" + "按诚实降级原则不得判 passed",
+            suggestion: "恢复 PKC 连接后重新执行测试质量静态判定",
+          }),
+        ]),
+      }) as unknown as TestQualityResult;
+    }
+
     const violations: TestQualityViolation[] = [];
 
     // 过滤出强制必测的高风险符号（风险评分 ≥ HIGH_RISK_SCORE_THRESHOLD）

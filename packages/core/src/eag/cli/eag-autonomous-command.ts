@@ -598,6 +598,21 @@ export class EagAutonomousCommandHandler {
     lines.push(`- **完成的 Loop**：${runResult.completedLoops.join(", ") || "（无）"}`);
     lines.push("");
 
+    // 失败用例（真实 verify 阶段失败标识，挂在 AutonomousRunResult 顶层）。
+    // 2026-11 修订：此前 formatSuccessReport 未渲染该字段，markdown 报告看不到
+    // 失败用例名。运行时结构检查取值，字段缺失 / 非数组 / 空数组时不编造该段。
+    const carriedFailedIds: unknown = (runResult as Readonly<{ readonly failedTestIds?: unknown }>).failedTestIds;
+    if (Array.isArray(carriedFailedIds)) {
+      const ids = carriedFailedIds.filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+      if (ids.length > 0) {
+        lines.push("## 失败用例");
+        for (const id of ids) {
+          lines.push(`- ${id}`);
+        }
+        lines.push("");
+      }
+    }
+
     // 里程碑列表
     if (runResult.milestones.length > 0) {
       lines.push("## 里程碑");

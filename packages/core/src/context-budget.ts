@@ -123,15 +123,48 @@ export function truncateToolOutput(content: string | null, maxChars: number): st
   }
   const total = content.length;
 
-  // 极小 / 非法预算：安全退化。cap=0（maxChars≤0 或 NaN/Infinity 收敛到 0）返回空串，
-  // 否则取 head + 精简尾注，总长 ≤ cap，不抛异常。
+  // 极小 / 非法预算：安全退化。cap=0（maxChars≤0 或 NaN/Infinity 收敛到 0）返回空串。
+  // 2026-11 修订：旧实现 head-only（slice(0, cap - marker)）把尾部 stderr/FAILED
+  // 证据整段砍掉，与第 0 级正常预算「head + 失败窗口 + tail」语义不一致。改为紧凑
+  // 「头部 + 首个失败窗口 + 尾部」三段保留；标记恒定携带「已截断，原共」子串，
+  // 总长严格 ≤ cap，不抛异常。
   if (!Number.isFinite(maxChars) || maxChars < TRUNCATE_SAFE_MIN_CHARS) {
     const cap = Math.max(0, Math.floor(Number.isFinite(maxChars) ? maxChars : 0));
     if (cap === 0) return "";
     const marker = `\n…（已截断，原共 ${total} 字符）…\n`;
-    const head = content.slice(0, Math.max(0, cap - marker.length));
-    const result = `${head}${marker}`;
-    return result.length <= cap ? result : result.slice(0, cap);
+    const available = cap - marker.length;
+    if (available <= 0) {
+      // 预算连标记都放不下：退化为「头部 + 标记前缀」，保证「已截断，原共」可见、长度受控。
+      const head = content.slice(0, Math.max(0, cap - marker.length));
+      return `${head}${marker}`.slice(0, cap);
+    }
+    // 尾部优先（真实失败证据多在尾部），头部至少 4 字符保前缀，剩余给失败窗口。
+    const tailLen = Math.max(1, Math.floor(available * 0.45));
+    const headLen = Math.min(available - tailLen, Math.max(4, Math.floor(available * 0.3)));
+    const windowLen = Math.max(0, available - tailLen - headLen);
+    const tailStart = total - tailLen;
+    const head = content.slice(0, headLen);
+    const tail = content.slice(tailStart);
+    let window = "";
+    const match = TOOL_FAILURE_MARKER.exec(content);
+    if (match && windowLen > 0) {
+      const center = match.index;
+      const ws = Math.max(headLen, center - Math.floor(windowLen / 2));
+      const we = Math.min(tailStart, ws + windowLen);
+      if (we > ws) {
+        window = content.slice(ws, we);
+      }
+    }
+    // 单标记拼接：头部/失败窗口同属前段（极小预算不再插第二段标记），
+    // 标记恒定携带「已截断，原共」，尾部永远完整出现。
+    const front = `${head}${window}`;
+    let result = `${front}${marker}${tail}`;
+    if (result.length > cap) {
+      // 防御：只从前段末端削减，绝不裁尾部。
+      const overflow = result.length - cap;
+      result = `${front.slice(0, Math.max(0, front.length - overflow))}${marker}${tail}`;
+    }
+    return result;
   }
 
   // 尾部：硬保证完整出现（修复核心）。tailLen 随 maxChars 线性，不随 total 变化。
@@ -246,10 +279,21 @@ export class DeterministicContextBudgetProvider implements ContextBudgetProvider
   private readonly config: ContextBudgetConfig;
 
   /**
+   * 用户红线 #3（可回退开关）：第 1/2/3 级丢弃占位「证据保留」开关。
+   *
+   * 构造时从环境变量读取一次：缺省开启（修复后行为，占位保留「失败窗口 + 尾部」
+   * 真实内容摘要）；设 DEEPCODEX_CONTEXT_DROP_EVIDENCE=0 回退到修复前「仅字符数」
+   * 的 droppedNote 占位，供依赖旧占位字节的存量集成平滑迁移。
+   * 实例只读字段，compactForRequest 运行期零副作用（不读/改入参、不落盘、不打日志）。
+   */
+  private readonly dropEvidenceEnabled: boolean;
+
+  /**
    * @param config 阈值覆盖（部分字段即可，未覆盖字段用缺省值）
    */
   constructor(config: Partial<ContextBudgetConfig> = {}) {
     this.config = { ...DEFAULT_CONTEXT_BUDGET_CONFIG, ...config };
+    this.dropEvidenceEnabled = process.env.DEEPCODEX_CONTEXT_DROP_EVIDENCE !== "0";
   }
 
   /**
@@ -296,6 +340,35 @@ export class DeterministicContextBudgetProvider implements ContextBudgetProvider
     const droppedNote = (originalChars: number): string =>
       `（上下文压缩：该工具结果共 ${originalChars} 字符已省略以控制请求规模，内容可通过工具重新执行获取）`;
 
+    // 2026-11 修订：第 1/2/3 级把保护窗外旧 tool 结果「整条」替换为占位时，
+    // 旧 droppedNote 只有字符数、无任何内容——第 0 级辛苦保留的尾部 stderr/FAILED
+    // 证据被一并抹掉。整条替换前用 truncateToolOutput 在独立小预算内抽出
+    // 「头部 + 失败窗口 + 尾部」证据摘要，保留在占位里（占位需含真实内容）。
+    // 证据总预算取 toolOutputMaxChars 的一小部分：占位远小于原始结果（压缩有效），
+    // 又严格 ≤ toolOutputMaxChars（第 0 级不会二次截断占位）。
+    const DROPPED_PREFIX = "（上下文压缩：该工具结果";
+    const evidenceTotalBudget = Math.max(0, Math.floor(this.config.toolOutputMaxChars * 0.2));
+    /** 构造带真实证据的丢弃占位：字符数说明 +「已截断，原共」+ 失败窗口/尾部摘要 */
+    const buildDroppedNoteWithEvidence = (rawContent: string | null, suffix: string): string => {
+      const originalChars = contentChars(rawContent);
+      // 可回退：开关关闭时恢复修复前「仅字符数」占位（含 level-1 重复后缀），逐字节零回归。
+      if (!this.dropEvidenceEnabled) {
+        return `${droppedNote(originalChars)}${suffix}`;
+      }
+      // 头部恒定携带「已截断，原共」子串（兼容既有断言），且以 DROPPED_PREFIX 开头
+      //（兼容 CB-03 的 startsWith 判定 + 占位重入检测）。
+      const header = `${DROPPED_PREFIX}已截断，原共 ${originalChars} 字符，以下保留失败窗口/尾部证据）${suffix}`;
+      const evidenceBudget = Math.max(0, evidenceTotalBudget - header.length - 1);
+      const evidence =
+        typeof rawContent === "string" && evidenceBudget > 0 ? truncateToolOutput(rawContent, evidenceBudget) : "";
+      const note = typeof evidence === "string" && evidence.length > 0 ? `${header}\n${evidence}` : header;
+      // 严格 ≤ toolOutputMaxChars（正常由 evidenceTotalBudget 推导已满足，防御性兜底）
+      return note.length <= this.config.toolOutputMaxChars ? note : note.slice(0, this.config.toolOutputMaxChars);
+    };
+    /** 已是丢弃占位（防止带证据的长占位被第 2/3 级二次压缩） */
+    const isDroppedPlaceholder = (content: string | null): boolean =>
+      typeof content === "string" && content.startsWith(DROPPED_PREFIX);
+
     // 计算保护窗：最近 protectedRecentTools 条 tool 消息受保护，永不整条丢弃
     const lastToolIndices: number[] = [];
     for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -335,7 +408,10 @@ export class DeterministicContextBudgetProvider implements ContextBudgetProvider
       if (message.role === "tool" && typeof rawContent === "string" && rawContent.length > this.config.dedupeMinChars) {
         if (latestToolContentIndex.has(rawContent)) {
           if (isDroppable(i, message.role)) {
-            working[i] = { ...message, content: droppedNote(rawContent.length) + "（与较近一次相同结果重复）" };
+            working[i] = {
+              ...message,
+              content: buildDroppedNoteWithEvidence(rawContent, "（与较近一次相同结果重复）"),
+            };
           }
         } else {
           latestToolContentIndex.set(rawContent, i);
@@ -353,10 +429,11 @@ export class DeterministicContextBudgetProvider implements ContextBudgetProvider
         continue;
       }
       const originalChars = contentChars(message.content);
-      if (originalChars <= droppedNote(originalChars).length) {
-        continue; // 已是占位，无压缩空间
+      if (originalChars <= droppedNote(originalChars).length || isDroppedPlaceholder(message.content)) {
+        continue; // 已是占位（含带证据的新占位），无压缩空间
       }
-      working[i] = { ...message, content: droppedNote(originalChars) };
+      // 证据取自原始 tool 输出（未经第 0 级截断），失败窗口/尾部更完整、无省略标记干扰。
+      working[i] = { ...message, content: buildDroppedNoteWithEvidence(originalToolContentAt[i], "") };
       if (totalChars(working) <= this.config.toolResultsBudgetChars) {
         return working;
       }
@@ -372,10 +449,16 @@ export class DeterministicContextBudgetProvider implements ContextBudgetProvider
         continue;
       }
       const originalChars = contentChars(message.content);
-      if (originalChars <= this.config.shortMessageMinChars) {
+      if (originalChars <= this.config.shortMessageMinChars || isDroppedPlaceholder(message.content)) {
         continue; // 短消息（assistant 决策文本/占位）无裁剪价值且可能承载推理链
       }
-      working[i] = { ...message, content: `（上下文压缩：该 ${message.role} 消息共 ${originalChars} 字符已省略）` };
+      // 仅 tool 消息补「失败窗口/尾部」证据摘要；其它角色的占位文案逐字保持
+      // 迁移语义（CB-10 对 assistant 占位逐字节锁定，不得改动）。
+      // 开关关闭时全部回退到修复前通用占位（含 tool 消息）。
+      working[i] =
+        this.dropEvidenceEnabled && message.role === "tool"
+          ? { ...message, content: buildDroppedNoteWithEvidence(originalToolContentAt[i], "") }
+          : { ...message, content: `（上下文压缩：该 ${message.role} 消息共 ${originalChars} 字符已省略）` };
       if (totalChars(working) <= this.config.requestTotalCharsCeiling) {
         return working;
       }

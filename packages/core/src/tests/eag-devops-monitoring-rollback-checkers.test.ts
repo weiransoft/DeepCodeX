@@ -998,32 +998,41 @@ test("TC-G8-004c. Prometheus 配置未含目标时 failures 含 'Prometheus scra
   }
 });
 
-test("TC-G8-004d. prometheusConfigPath 未提供时 prometheusScrapeConfig 视为通过（K-4 决策简化）", async () => {
+test("TC-G8-004d. prometheusConfigPath 未提供时该项标记 skipped / ready=false（信息不足不视为就绪）", async () => {
+  // 2026-11-08 EAG 全量审查修复：旧「K-4 决策简化：未提供配置即视为通过」被判定为
+  // 信息不足却谎报就绪。默认改为 skipped + passed=false + ready=false；
+  // EAG_LEGACY_PASS_THROUGH=1 可紧急回退。本用例同时做 A/B 对照。
+  const legacyFlag = "EAG_LEGACY_PASS_THROUGH";
+  const saved = process.env[legacyFlag];
+  delete process.env[legacyFlag];
   const { server, url } = await startMetricsServer(200);
   const { tmpDir, originalPath } = setupFakeKubectlEnv(createFakeKubectlSuccessScript());
 
   try {
     const checker = new MonitoringReadinessCheckerImpl();
     // 不提供 prometheusConfigPath
-    const result = await checker.check(
-      createMonitoringContext({
-        metricsEndpoint: url,
-      })
+    const context = createMonitoringContext({ metricsEndpoint: url });
+
+    // 默认诚实语义：该检查项没有真实跑过，绝不判就绪
+    const result = await checker.check(context);
+    assert.equal(result.ready, false, `信息不足时 ready 必须为 false，实际 failures：${result.failures.join("; ")}`);
+    assert.equal(result.checkedItems[2].passed, false, "未执行的检查项不得判通过");
+    assert.ok(
+      result.failures.some((f) => f.includes("skipped") || f.includes("无法校验")),
+      `failures 必须显式披露校验未执行，实际：${result.failures.join("; ")}`
     );
 
-    // 验证：ready=true（prometheusScrapeConfig 视为通过）
-    assert.equal(
-      result.ready,
-      true,
-      `prometheusConfigPath 未提供时应 ready=true，实际 failures：${result.failures.join("; ")}`
-    );
-    // 验证：prometheusScrapeConfig 项 passed=true
-    assert.equal(
-      result.checkedItems[2].passed,
-      true,
-      "prometheusConfigPath 未提供时 prometheusScrapeConfig 应 passed=true"
-    );
+    // A/B 回退对照：开关打开后恢复修复前「视为通过」语义
+    process.env[legacyFlag] = "1";
+    const legacy = await checker.check(context);
+    assert.equal(legacy.ready, true, "EAG_LEGACY_PASS_THROUGH=1 必须能回退到旧语义");
+    assert.equal(legacy.checkedItems[2].passed, true);
   } finally {
+    if (saved === undefined) {
+      delete process.env[legacyFlag];
+    } else {
+      process.env[legacyFlag] = saved;
+    }
     await stopMetricsServer(server);
     restoreFakeKubectlEnv(tmpDir, originalPath);
   }

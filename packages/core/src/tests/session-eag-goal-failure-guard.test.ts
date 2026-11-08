@@ -378,14 +378,23 @@ test("N4. execute_command 通道：completed 目标重放不拦（'再跑一次'
 // N5 execute_command 通道：LLM 知情重试放行（设计文档 T7）
 // ============================================================================
 
-test("N5. execute_command 通道：LLM 知情重试（acknowledgeFailedGoal=true）放行失败目标重放", async () => {
+test("N5. execute_command 通道：LLM 知情重试（acknowledgeFailedGoal=true）放行失败目标重放，且重放命令含【重放约束】", async () => {
   const workspace = createTempDir("deepcode-goalguard-ack-workspace-");
   const home = createTempDir("deepcode-goalguard-ack-home-");
   setHomeDir(home);
   globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
 
   const { client, callCount } = createCallCountingClient("主对话回复");
-  const { orchestrator, runRequests } = createSequencedOrchestrator(["aborted", "aborted"]);
+  // 修复前用 createSequencedOrchestrator（无诊断数据）复刻「知情重试 = 裸重放」；
+  // 现改用带真实诊断的桩，使知情重试放行后 buildGoalBlockedDiagnostics 能产出
+  // 真实约束（诚实取真值，不编造）。这是「修正锁死裸重放的旧断言」而非放宽刷绿：
+  // 断言从 === goal（等于把「不可拼约束」锁死）改为「含原 goal 且含【重放约束】」。
+  const ackAbortReason = "迭代次数用尽（10 轮）仍未达成完成条件";
+  const { orchestrator, runRequests } = createDiagnosticOrchestrator({
+    finalStatuses: ["aborted", "aborted"],
+    abortReason: ackAbortReason,
+    failedTestIds: ["tests/test_ack.py::test_replay_guard"],
+  });
   // 决策桩：带知情重试标记的 execute_command——LLM 结合运行终态历史判定
   // 用户输入明确表达知情重试（如"我改好配置了，重跑同一个目标"）
   const { manager, assistantTexts } = createTestManager({
@@ -401,15 +410,23 @@ test("N5. execute_command 通道：LLM 知情重试（acknowledgeFailedGoal=true
   const sessionId = await manager.createSession({ text: "" });
   const goal = "从46同步数据库到43采用full_overwrite全量覆盖";
 
-  // 第一次：运行以 aborted 终态结束（失败记录落盘）
+  // 第一次：运行以 aborted 终态结束（带真实诊断的失败记录落盘）
   await manager.handleUserPrompt({ text: goal });
   assert.equal(runRequests.length, 1);
+  // 前置条件：失败记录确实携带真实诊断（否则约束会诚实降级为 undefined）
+  const rec = (manager.getSession(sessionId)?.autonomousGoalRuns ?? [])[0] as AutonomousGoalRunRecord | undefined;
+  assert.equal(rec?.abortReason, ackAbortReason, "前置条件：失败记录含真实终止原因");
 
   // 第二次：同一失败目标 + 知情重试标记 → 守卫放行，直接派发
   const baselineLlmCalls = callCount.value;
   await manager.handleUserPrompt({ text: "配置已修复，重跑同一个目标" });
   assert.equal(runRequests.length, 2, "知情重试（acknowledgeFailedGoal=true）必须放行重放");
-  assert.equal(runRequests[1].objective, goal, "重放 goal 必须与失败记录目标一致");
+  // 修正旧断言：知情重试不再是无失败状态的第三条裸重放通道——重放 --goal 必须
+  // 同时含原目标与上一轮真实失败约束（约束来自 buildGoalBlockedDiagnostics 真值）。
+  const replayed = runRequests[1].objective;
+  assert.ok(replayed.startsWith(goal), "重放 --goal 须保留原目标前缀");
+  assert.ok(replayed.includes("【重放约束】"), "知情重试重放必须携带上一轮失败约束（修正锁死裸重放的旧断言）");
+  assert.ok(replayed.includes(ackAbortReason), "约束含上一轮真实终止原因");
   assert.equal(assistantTexts.filter((t) => t.includes("已拦截")).length, 0, "知情重试不得触发拦截提示");
   assert.equal(callCount.value, baselineLlmCalls, "放行轮不得再消耗主对话 LLM 调用");
 });

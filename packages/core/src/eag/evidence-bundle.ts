@@ -83,6 +83,13 @@ export interface EvidenceExecutionRecord {
   readonly artifactPaths: ReadonlyArray<string>;
   /** 本次脱敏命中数（审计线索，不含明文） */
   readonly redactionHits: number;
+  /**
+   * 可选：失败原因摘要（P2 修复新增）。
+   *
+   * 仅失败记录且脱敏成功后写入；内容取自 errorSnippet 的**脱敏后保尾截断**，
+   * 原始 errorSnippet 明文绝不进 bundle。成功记录不写该字段（保持既有形状）。
+   */
+  readonly errorSummary?: string;
 }
 
 /** bundle 内的单条规则资产条目（计数 + 证据级别，无正文） */
@@ -129,6 +136,16 @@ export interface EvidenceBundle {
       /** 文件 SHA256；文件缺失时为 null */
       readonly sha256: string | null;
     }>;
+    /**
+     * 可选：降级/丢弃标注（P2 修复新增，落实文件头第 17 行「降级需 manifest 标注」）。
+     *
+     * 仅在发生数据源降级（listSkills 失败）或记录被截断（maxRecords 丢弃尾部最新记录）
+     * 时出现；无降级时整个字段省略，保证既有 bundle 形状与冻结性不变。
+     */
+    readonly degradedSources?: ReadonlyArray<{
+      readonly path: string;
+      readonly reason: string;
+    }>;
   };
 }
 
@@ -150,6 +167,9 @@ const DEPTH_DEFAULT_MAX_RECORDS: Readonly<Record<EvidenceBundleDepth, number>> =
 
 /** bundle 内 args 摘要截断长度（与 execution-history buildToolQueryResult 对齐） */
 const BUNDLE_ARGS_MAX_CHARS = 500;
+
+/** bundle 内失败原因摘要脱敏后的保尾截断长度（错误信息通常在尾部） */
+const BUNDLE_ERROR_MAX_CHARS = 500;
 
 // ============================================================================
 // 内部辅助
@@ -246,16 +266,27 @@ export async function buildEvidenceBundle(options: EvidenceBundleOptions): Promi
   // ---- 数据源 1：执行历史（窗口过滤 + 升序 + 脱敏瘦身） ----
   const historyStore = new ExecutionHistoryStore({ projectRoot: options.projectRoot, homeDir: homeRoot });
   const allRecords = historyStore.query({ limit: Number.MAX_SAFE_INTEGER, order: "asc" });
-  const windowed = allRecords
+  // P2 修复：保留策略不变（升序取最早 maxRecords 条，既有契约），但如实统计被丢弃的
+  // 尾部最新记录数，并在 manifest 标注，避免消费方误以为看到了窗口内全量最新证据。
+  const sortedWindowed = allRecords
     .filter((r) => r.timestamp >= since && r.timestamp <= until)
-    .sort((a, b) => (a.timestamp - b.timestamp !== 0 ? a.timestamp - b.timestamp : a.id.localeCompare(b.id)))
-    .slice(0, maxRecords);
+    .sort((a, b) => (a.timestamp - b.timestamp !== 0 ? a.timestamp - b.timestamp : a.id.localeCompare(b.id)));
+  const windowed = sortedWindowed.slice(0, maxRecords);
+  const droppedTailCount = sortedWindowed.length - windowed.length;
+
+  const degradedSources: Array<{ path: string; reason: string }> = [];
+  if (droppedTailCount > 0) {
+    degradedSources.push({
+      path: "execution-history",
+      reason: `maxRecords=${maxRecords} 截断：保留窗口内最早 ${maxRecords} 条，丢弃尾部最新 ${droppedTailCount} 条记录（未纳入 bundle）`,
+    });
+  }
 
   const executionHistory: EvidenceExecutionRecord[] = windowed.map((r) => {
-    // 隐私红线：自由文本字段过脱敏；原始 output/errorSnippet 不进 bundle
+    // 隐私红线：自由文本字段过脱敏；原始 output/errorSnippet 明文不进 bundle
     const argsRedacted = r.argsSnippet ? redactor.redact(r.argsSnippet, "evidence-bundle") : null;
     const args = (argsRedacted?.sanitized ?? "").slice(0, BUNDLE_ARGS_MAX_CHARS);
-    return {
+    const record: EvidenceExecutionRecord = {
       id: r.id,
       sessionId: r.sessionId,
       date: r.date,
@@ -268,6 +299,18 @@ export async function buildEvidenceBundle(options: EvidenceBundleOptions): Promi
       artifactPaths: (r.outputs ?? []).map((o) => o.path),
       redactionHits: argsRedacted?.hits.length ?? 0,
     };
+    // P2 修复：失败记录保留失败原因摘要，避免「仅留 ok/exitCode 无失败原因文本」。
+    // 仅取脱敏后的**保尾**截断（错误通常在末尾）；脱敏失败宁可丢字段也不落明文。
+    if (!r.ok && typeof r.errorSnippet === "string" && r.errorSnippet.length > 0) {
+      const red = redactor.redact(r.errorSnippet, "evidence-bundle-error");
+      if (red) {
+        const tail = red.sanitized.slice(-BUNDLE_ERROR_MAX_CHARS);
+        if (tail.length > 0) {
+          return { ...record, errorSummary: tail };
+        }
+      }
+    }
+    return record;
   });
   historyStore.closeSync();
 
@@ -305,6 +348,12 @@ export async function buildEvidenceBundle(options: EvidenceBundleOptions): Promi
         .sort((a, b) => a.localeCompare(b));
     } catch {
       skillNames = []; // provider 失败 → 置空标注，不抛
+      // P2 修复：降级必须进 manifest（文件头第 17 行），否则消费方会把「数据源失败」
+      // 误读成「本窗口无技能」。固定文案保证冻结性（不含时间戳/异常明文）。
+      degradedSources.push({
+        path: "skills",
+        reason: "listSkills provider 失败：技能清单置空（数据源降级，非「无技能」）",
+      });
     }
   }
 
@@ -318,6 +367,10 @@ export async function buildEvidenceBundle(options: EvidenceBundleOptions): Promi
       sha256: sha256OrNull(projectRulesFilePath(options.projectRoot)),
     },
   ];
+
+  // P2 修复：无降级时 manifest 保持原 { sources } 形状（冻结性/向后兼容不变）；
+  // 有降级或丢弃时才附带 degradedSources，明确标注数据源失败与被丢弃的记录。
+  const manifest: EvidenceBundle["manifest"] = degradedSources.length > 0 ? { sources, degradedSources } : { sources };
 
   return {
     schemaVersion: "1",
@@ -337,7 +390,7 @@ export async function buildEvidenceBundle(options: EvidenceBundleOptions): Promi
       rules: { seed: ruleSeed, global: ruleGlobal, project: ruleProject },
       skills: { count: skillNames.length, names: skillNames },
     },
-    manifest: { sources },
+    manifest,
   };
 }
 

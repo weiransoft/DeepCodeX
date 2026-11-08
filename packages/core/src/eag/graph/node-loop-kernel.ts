@@ -66,6 +66,8 @@ import {
   /** 默认 stage order（复用，编码 Loop 内部阶段顺序） */
   DEFAULT_STAGE_ORDER,
 } from "../loop/models";
+// P1：双轨无进展判定（复用 eag/loop/kernel 导出的共用检测器，避免两套口径漂移）
+import { NoProgressDetector, stableFingerprint, captureWorkspaceSnapshot } from "../loop/kernel";
 
 // ============================================================================
 // 回调函数类型定义
@@ -293,12 +295,24 @@ export class NodeLoopKernel {
     // 用户取消时标记为 failed 并填写 failureReason，由图级编排器决定是否停止整个图
     let finalStatus: "completed" | "failed" = "failed";
     let failureReason: string | undefined;
+    // P1：标记本轮是否因「无进展熔断」而 break，防止尾部的 lastVerdict.passed 兜底误报成功
+    let noProgressTriggered = false;
 
     try {
       // 经验召回（Phase 4 集成，对齐 §12.3）
       // 在主循环开始前查询 ExperienceStore 获取相似案例，供 Discovery 阶段和 executor 引用
       // 召回失败不影响主流程（仅记录警告日志），recalledCases 保持空数组
       await this.runExperienceRecall();
+
+      // P1：双轨无进展判定（进入循环前判断 git 可用性，不可用则降级为单轨）
+      const startWorkspaceSnapshot = captureWorkspaceSnapshot(this.loopConfig.projectRoot);
+      const noProgressDetector = new NoProgressDetector({
+        degraded: startWorkspaceSnapshot === null,
+        startWorkspaceSnapshot,
+      });
+      if (noProgressDetector.isDegraded()) {
+        this.logger.warn(`[NodeLoopKernel:${nodeId}] 工作区/git 快照不可用，无进展判定降级为结果指纹单轨`);
+      }
 
       // 主循环
       while (iteration < this.loopConfig.maxIterations) {
@@ -327,6 +341,28 @@ export class NodeLoopKernel {
 
         // 5. Persistence 阶段：将本轮结果写入 events 数组
         this.runPersistence(iteration, discoveryResult, generatorResult, verdict);
+
+        // 5.5（P1）：双轨无进展判定——达阈值诚实判失败，绝不把空转报成成功。
+        // 放在 Scheduling 之前：即使后续决策是 stop_success，连续无进展也必须判失败。
+        const noProgressVerdict = noProgressDetector.observe({
+          resultFingerprint: stableFingerprint({
+            generator: generatorResult,
+            verdict: { passed: verdict.passed, reason: verdict.reason },
+          }),
+          workspaceSnapshot: captureWorkspaceSnapshot(this.loopConfig.projectRoot),
+          hasSuccessfulWrite: false,
+          // 验证失败的修复轮由 scheduler 连续失败上限管理，不计入无进展空转
+          excluded: !verdict.passed,
+        });
+        if (noProgressVerdict.stalled) {
+          finalStatus = "failed";
+          noProgressTriggered = true;
+          failureReason =
+            `无进展熔断：连续多轮未产生任何新进展（${noProgressVerdict.cause}）` +
+            (noProgressVerdict.degraded ? "；已降级为结果指纹单轨判定" : "");
+          this.logger.warn(`[NodeLoopKernel:${nodeId}] ${failureReason}`);
+          break;
+        }
 
         // 6. Scheduling 阶段：调用 LoopScheduler.decideNext() 决策
         const decision = this.runScheduling(iteration, verdict);
@@ -367,7 +403,7 @@ export class NodeLoopKernel {
       }
 
       // 达到最大迭代次数仍未终止
-      if (iteration >= this.loopConfig.maxIterations && finalStatus === "failed") {
+      if (iteration >= this.loopConfig.maxIterations && finalStatus === "failed" && !noProgressTriggered) {
         if (this.lastVerdict?.passed) {
           finalStatus = "completed";
         } else {

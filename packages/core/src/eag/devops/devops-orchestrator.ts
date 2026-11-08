@@ -54,8 +54,35 @@ import type {
   HealthCheckResult,
   SmokeTestResult,
   DevOpsEvent,
+  MonitoringCheckResult,
+  RollbackPlanCheckResult,
 } from "./types";
 import type { GateResult } from "../gate/gate-types";
+
+// ============================================================================
+// 环境变量回退开关 + 内部类型
+// ============================================================================
+
+/**
+ * 紧急回退开关（2026-11-08 审查修复新增）。
+ *
+ * 默认（未设置）：采用修复后的诚实语义——未配置/无法校验绝不默认放行。
+ * 设置为 "1"：恢复修复前"默认放行/信息不足即通过"的旧语义，便于线上紧急回退。
+ * 每次调用时读取（不缓存），便于测试与运维动态切换。
+ */
+function legacyPassThrough(): boolean {
+  return process.env.EAG_LEGACY_PASS_THROUGH === "1";
+}
+
+/** G-8 就绪度解析结果（内部使用） */
+interface Gate8Readiness {
+  readonly monitoringReady: boolean;
+  readonly rollbackPlanExists: boolean;
+  readonly monitoringCheckResult?: MonitoringCheckResult;
+  readonly rollbackPlanCheckResult?: RollbackPlanCheckResult;
+  /** 真实检查器产出的证据/失败原因（用于 errors 披露，避免泛化 guidance 掩盖真实失败） */
+  readonly evidence: ReadonlyArray<string>;
+}
 
 // ============================================================================
 // DevOpsOrchestrator 类
@@ -236,6 +263,13 @@ export class DevOpsOrchestrator {
       // 此处使用条件赋值保持类型安全
       if (deployStageResult.deployResult) {
         deployResult = deployStageResult.deployResult;
+        // 2026-11-08 审查修复：DeployStage 即使 success=true，DeployResult.errors 也必须被上层消费，
+        // 不能只在 !success 分支才收集（否则部署策略累积的错误会被吞掉，最终误报成功）。
+        for (const deployError of deployResult.errors) {
+          if (!errors.includes(deployError)) {
+            errors.push(deployError);
+          }
+        }
       }
       if (deployStageResult.smokeTestResult) {
         smokeTestResult = deployStageResult.smokeTestResult;
@@ -264,10 +298,12 @@ export class DevOpsOrchestrator {
       }
 
       // ---------- Step 5: G-8 门禁校验 ----------
-      // M-8 修复：monitoringReady / rollbackPlanExists 从 context 传入，默认 true
-      // 批次 13 暂固定为 true，批次 14 实现完整检查（Prometheus scrape / RollbackPlan 文件存在性）
+      // 2026-11-08 审查修复：不再用 `?? true` 默认放行。
+      // 优先调用真实检查器（MonitoringReadinessChecker / RollbackPlanChecker）并以 valid/ready 为准；
+      // 未注入检查器时以 context 显式布尔为准，未配置默认 false（诚实降级）。
       // 构造 GateG8Context：spread context 提供 GateContext 字段（projectId / specStatus 等），
-      // 覆盖 loopType 为 "deploy"（GateG8Context 要求固定值），扩展 G-8 特有字段
+      // 覆盖 loopType 为 "deploy"（GateG8Context 要求固定值），扩展 G-8 特有字段。
+      const readiness = await this.resolveGate8Readiness(context);
       gateResult = this.options.gateG8Checker.check({
         ...context,
         loopType: "deploy",
@@ -275,16 +311,26 @@ export class DevOpsOrchestrator {
         deployResult: deployResult as DeployResult,
         healthCheckResult: healthCheckResult as HealthCheckResult,
         smokeTestResult: smokeTestResult as SmokeTestResult,
-        monitoringReady: context.monitoringReady ?? true, // 默认 true，批次 14 实现完整检查
-        rollbackPlanExists: context.rollbackPlanExists ?? true, // 默认 true，批次 14 实现完整检查
+        monitoringReady: readiness.monitoringReady,
+        rollbackPlanExists: readiness.rollbackPlanExists,
+        // 透传真实检查结果：GateG8CheckerImpl 优先以 result.ready / exists&&valid 为准，
+        // 防止调用方仅把布尔值置 true 就绕过真实校验。
+        monitoringCheckResult: readiness.monitoringCheckResult,
+        rollbackPlanCheckResult: readiness.rollbackPlanCheckResult,
       });
 
       // G-8 门禁未通过时收集错误（不抛错，继续构造结果，由 success 字段反映失败）
       if (!gateResult.passed) {
         errors.push(`G-8 门禁未通过：${gateResult.reason}`);
+        // 附带真实检查器证据（避免泛化 guidance 掩盖真实失败原因）
+        for (const item of readiness.evidence) {
+          if (!errors.includes(item)) {
+            errors.push(item);
+          }
+        }
       }
 
-      // ---------- 完成：构造 DevOpsResult + 发射 devops-completed 事件 ----------
+      // ---------- 完成：构造 DevOpsResult + 按 success 选事件类型 ----------
       const finishedAtMs = Date.now();
       const finishedAt = new Date(finishedAtMs).toISOString();
       const result: DevOpsResult = {
@@ -302,13 +348,23 @@ export class DevOpsOrchestrator {
         errors: Object.freeze(errors) as ReadonlyArray<string>,
       };
 
-      // 发射 devops-completed 事件（携带完整 DevOpsResult）
-      this.emitEvent({
-        type: "devops-completed",
-        runId,
-        result,
-        timestamp: finishedAt,
-      });
+      // 2026-11-08 审查修复：G-8 未通过 / 存在累积错误时不得谎发 devops-completed，
+      // 按 success 选择事件类型（失败发 devops-failed 并携带真实失败证据）。
+      if (result.success) {
+        this.emitEvent({
+          type: "devops-completed",
+          runId,
+          result,
+          timestamp: finishedAt,
+        });
+      } else {
+        this.emitEvent({
+          type: "devops-failed",
+          runId,
+          error: errors.length > 0 ? errors.join("；") : gateResult.reason,
+          timestamp: finishedAt,
+        });
+      }
 
       // 不可变优先：返回冻结的 DevOpsResult
       return Object.freeze(result) as DevOpsResult;
@@ -341,11 +397,12 @@ export class DevOpsOrchestrator {
         healthCheckResult,
         smokeTestResult,
         // gateResult 如未执行（Step 5 之前失败）则使用默认失败结果
+        // 2026-11-08 审查修复：guidance 带真实失败证据（errorMessage），不再只给泛化话术
         gateResult: gateResult ?? {
           gate: "G-8",
           passed: false,
           reason: errorMessage,
-          guidance: "请检查 errors 字段中的具体失败原因，修复后重试",
+          guidance: `请检查 errors 字段中的具体失败原因并按真实证据修复后重试（失败证据：${errorMessage}）`,
           severity: "blocker",
         },
         errors: Object.freeze(errors) as ReadonlyArray<string>,
@@ -354,6 +411,100 @@ export class DevOpsOrchestrator {
       // 不可变优先：返回冻结的 failedResult
       return Object.freeze(failedResult) as DevOpsResult;
     }
+  }
+
+  /**
+   * 解析 G-8 门禁的监控就绪 / 回滚预案存在布尔值（2026-11-08 审查修复）
+   *
+   * 修复要点：
+   * - 旧实现用 `context.monitoringReady ?? true` / `context.rollbackPlanExists ?? true`
+   *   把"未配置"兜底为 true，导致 G-8 恒真放行。
+   * - 新实现：注入了真实检查器时调用检查器，以 result.ready / (exists && valid) 为准；
+   *   未注入检查器时以 context 显式布尔为准，未配置默认 false（诚实降级）。
+   * - 检查器存在但缺少校验所需上下文时同样判 false（信息不足绝不视为通过）。
+   * - 环境变量 EAG_LEGACY_PASS_THROUGH=1 可紧急回退到旧的默认放行语义。
+   *
+   * @param context DevOps 编排上下文
+   * @returns Gate8Readiness（含布尔值、真实检查结果与披露证据）
+   */
+  private async resolveGate8Readiness(context: DevOpsContext): Promise<Gate8Readiness> {
+    const evidence: string[] = [];
+
+    // 紧急回退：恢复修复前的默认放行（跳过真实检查器）
+    if (legacyPassThrough()) {
+      return {
+        monitoringReady: context.monitoringReady ?? true,
+        rollbackPlanExists: context.rollbackPlanExists ?? true,
+        evidence,
+      };
+    }
+
+    // ---------- 监控就绪 ----------
+    let monitoringReady: boolean;
+    let monitoringCheckResult: MonitoringCheckResult | undefined;
+    if (this.options.monitoringReadinessChecker) {
+      const checkContext = context.monitoringCheckContext;
+      if (!checkContext) {
+        monitoringReady = false;
+        evidence.push("G-8-4: 已注入监控就绪检查器但缺少 monitoringCheckContext，无法执行真实校验 → 判未就绪");
+      } else {
+        monitoringCheckResult = await this.options.monitoringReadinessChecker.check(checkContext);
+        monitoringReady = monitoringCheckResult.ready;
+        if (!monitoringCheckResult.ready) {
+          evidence.push(
+            `G-8-4: 监控就绪检查未通过（ready=false）：${monitoringCheckResult.failures.join("；") || "无失败详情"}`
+          );
+        }
+      }
+    } else {
+      // 未注入检查器：以 context 显式布尔为准，未配置默认 false（不再 ?? true）
+      monitoringReady = context.monitoringReady ?? false;
+      if (context.monitoringReady === undefined) {
+        evidence.push("G-8-4: 未配置 monitoringReady 且未注入真实检查器 → 默认判未就绪");
+      } else if (!context.monitoringReady) {
+        evidence.push("G-8-4: context.monitoringReady=false（显式未就绪）");
+      }
+    }
+
+    // ---------- 回滚预案存在 ----------
+    let rollbackPlanExists: boolean;
+    let rollbackPlanCheckResult: RollbackPlanCheckResult | undefined;
+    if (this.options.rollbackPlanChecker) {
+      const checkContext =
+        context.rollbackPlanCheckContext ??
+        (context.projectRoot
+          ? { projectRoot: context.projectRoot, runId: context.runId ?? context.deployContext.runId }
+          : undefined);
+      if (!checkContext) {
+        rollbackPlanExists = false;
+        evidence.push(
+          "G-8-5: 已注入回滚预案检查器但缺少 rollbackPlanCheckContext/projectRoot，无法执行真实校验 → 判不存在"
+        );
+      } else {
+        rollbackPlanCheckResult = await this.options.rollbackPlanChecker.check(checkContext);
+        rollbackPlanExists = rollbackPlanCheckResult.exists && rollbackPlanCheckResult.valid;
+        if (!rollbackPlanExists) {
+          evidence.push(
+            `G-8-5: 回滚预案检查未通过（exists=${rollbackPlanCheckResult.exists}, valid=${rollbackPlanCheckResult.valid}）：${rollbackPlanCheckResult.failures.join("；") || "无失败详情"}`
+          );
+        }
+      }
+    } else {
+      rollbackPlanExists = context.rollbackPlanExists ?? false;
+      if (context.rollbackPlanExists === undefined) {
+        evidence.push("G-8-5: 未配置 rollbackPlanExists 且未注入真实检查器 → 默认判不存在");
+      } else if (!context.rollbackPlanExists) {
+        evidence.push("G-8-5: context.rollbackPlanExists=false（显式不存在）");
+      }
+    }
+
+    return {
+      monitoringReady,
+      rollbackPlanExists,
+      monitoringCheckResult,
+      rollbackPlanCheckResult,
+      evidence,
+    };
   }
 
   /**

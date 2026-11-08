@@ -216,19 +216,46 @@ test("LoopPlugin exits when predicate met", async () => {
   assert.equal(ctx.state["loopExitReason"], "predicate");
 });
 
-test("LoopPlugin exits at max iterations", async () => {
-  const p = new LoopPlugin();
-  const { ctx } = makeCtx({
-    loop: true,
-    loopMaxIterations: 3,
-    loopExitWhen: "never",
-    loopStep: () => "working",
-  });
-  const result = await p.execute(ctx);
-  assert.equal(result.status, "succeeded");
-  const history = ctx.state["loopHistory"] as Array<{ iteration: number }>;
-  assert.equal(history.length, 3);
-  assert.equal(ctx.state["loopExitReason"], "max-iterations");
+test("LoopPlugin exits at max iterations → 默认诚实判未达成（failed）", async () => {
+  // 2026-11-08 EAG 全量审查修复：跑满轮数仍未命中退出条件 ≠ 成功。
+  // 旧语义把 max-iterations 报成 succeeded（谎报达成），现已改为 failed；
+  // DEEPCODE_LOOP_REPORT_MAX_ITER_AS_SUCCESS=1 可紧急回退。本用例做 A/B 对照。
+  const flag = "DEEPCODE_LOOP_REPORT_MAX_ITER_AS_SUCCESS";
+  const saved = process.env[flag];
+  delete process.env[flag];
+  try {
+    const p = new LoopPlugin();
+    const { ctx } = makeCtx({
+      loop: true,
+      loopMaxIterations: 3,
+      loopExitWhen: "never",
+      loopStep: () => "working",
+    });
+    const result = await p.execute(ctx);
+    assert.equal(result.status, "failed", "达 max-iterations 未达成退出条件时不得报成功");
+    const history = ctx.state["loopHistory"] as Array<{ iteration: number }>;
+    assert.equal(history.length, 3, "真实执行的轮数记录不得丢失");
+    assert.equal(ctx.state["loopExitReason"], "max-iterations");
+
+    // A/B 回退对照：开关打开后恢复修复前 succeeded 语义
+    process.env[flag] = "1";
+    const legacyPlugin = new LoopPlugin();
+    const legacyCtx = makeCtx({
+      loop: true,
+      loopMaxIterations: 3,
+      loopExitWhen: "never",
+      loopStep: () => "working",
+    });
+    const legacy = await legacyPlugin.execute(legacyCtx.ctx);
+    assert.equal(legacy.status, "succeeded", "回退开关必须能恢复旧语义");
+    assert.equal(legacyCtx.ctx.state["loopExitReason"], "max-iterations");
+  } finally {
+    if (saved === undefined) {
+      delete process.env[flag];
+    } else {
+      process.env[flag] = saved;
+    }
+  }
 });
 
 test("LoopPlugin handles cancellation", async () => {

@@ -101,8 +101,9 @@ function formatDeviationDetails(
  * 3. 累计偏离数 ≥ G3_DEVIATION_THRESHOLD（3）时返回 blocker 级失败结果
  * 4. 否则返回 passed=true（含偏离详情，便于审计）
  *
- * 特殊场景：
- * - actualChanges 为空数组时直接通过（无变更无偏离）
+ * 特殊场景（2026-11-08 审查修复）：
+ * - actualChanges 为空且 actualChangesCollected 显式为 false（采集失败）→ 判不通过，不得当作零变更
+ * - actualChanges 为空且确认采集成功（true / 未提供）→ 通过（无变更无偏离，保持既有语义）
  * - 单个文件的偏离计入累计，不要求单文件偏离 ≥ 阈值
  *
  * 使用方式：
@@ -131,8 +132,20 @@ export class GateG3Checker implements GateChecker {
   public check(context: GateContext): GateResult {
     const changes = context.actualChanges;
 
-    // 特殊场景：无变更直接通过
+    // 特殊场景：空变更列表——区分"采集失败致空"与"确认零变更"两种语义
+    // （2026-11-08 审查修复）。
     if (changes.length === 0) {
+      // 采集链路显式失败导致空集：不得当作"确认零变更"判通过（诚实降级）
+      if (context.actualChangesCollected === false) {
+        return Object.freeze({
+          passed: false,
+          gate: "G-3",
+          reason: "实际变更采集失败（actualChangesCollected=false）：空变更列表无法确认为零变更，禁止判通过",
+          guidance: "请检查 git diff 静态分析采集链路，修复后重新触发 G-3 门禁",
+          severity: "blocker",
+        }) as GateResult;
+      }
+      // 确认零变更（true / 未提供）：保持既有语义
       return Object.freeze({
         passed: true,
         gate: "G-3",

@@ -322,6 +322,48 @@ export interface CoverageReport {
   readonly failedDimensions: ReadonlyArray<CoverageFailedDimension>;
   /** 原始 c8 报告 JSON（用于审计与 PR 描述链接） */
   readonly rawReport: Readonly<Record<string, unknown>>;
+  /**
+   * PKC 风险热点查询是否不可用（2026-11 全量审查 P0-5 修复，可选字段，旧调用方零回归）。
+   *
+   * 诚实降级：查询失败 / 信息不足时置 true，高风险符号维度必须记为 unknown、
+   * 不得把空数组解释为「无必测约束」而给出 100% 覆盖率或 passed。
+   */
+  readonly pkcUnavailable?: boolean;
+  /** PKC 不可用时的错误信息（evidence，供报告与审计追溯） */
+  readonly pkcError?: string;
+}
+
+/**
+ * 测试执行结果（携带失败证据链，2026-11 全量审查 P0-4 修复）
+ *
+ * 说明：权威 TestExecutionResult 定义在 eag/gate/gate-types.ts（本组无权修改该目录）。
+ * 本接口在 testing 域内以「结构兼容的超集」形式补充可选证据字段——
+ * 字段全部可选，故可直接赋值给 GateG7Context.contractTestResults /
+ * e2eTestResults（ReadonlyArray<TestExecutionResult>），旧调用方零回归。
+ *
+ * 设计依据（P0-4）：真实 stderr、失败用例名、AssertionError 全文必须进入
+ * G-7 上下文与 PR 描述；JSON 解析失败时保留原始 stdout/stderr 片段，
+ * 不再简化为 failedCount=1 却不带原因。
+ */
+export interface TestExecutionResultWithEvidence {
+  /** 测试文件路径（相对 projectRoot，与 GeneratedTestFile.relativePath 对齐） */
+  readonly filePath: string;
+  /** 退出码（0=通过，非 0=失败） */
+  readonly exitCode: number;
+  /** 执行耗时（毫秒） */
+  readonly durationMs: number;
+  /** 失败用例数 */
+  readonly failedCount: number;
+  /** 通过用例数 */
+  readonly passedCount: number;
+  /** 子进程 stderr 原始输出（含 AssertionError 等失败证据，可能截断） */
+  readonly stderr?: string;
+  /** 失败用例名列表（来自 node --test JSON / NDJSON 报告的 status=fail 或 test:fail 事件） */
+  readonly failedCases?: ReadonlyArray<string>;
+  /** 失败摘要 / 错误信息（AssertionError 文本 / JSON 解析失败原因 / spawn 失败 / 超时等） */
+  readonly errorMessage?: string;
+  /** stdout 原始片段（JSON 解析失败时保留用于诊断，可能截断） */
+  readonly stdoutSnippet?: string;
 }
 
 // ============================================================================
@@ -624,6 +666,13 @@ export interface TestQualityContext {
   readonly highRiskSymbols: ReadonlyArray<UncoveredSymbol>;
   /** 项目根目录 */
   readonly projectRoot: string;
+  /**
+   * PKC 风险热点查询是否不可用（2026-11 全量审查 P1 修复，可选字段）。
+   *
+   * true 表示高风险符号列表来自「查询失败的空降级」而非「PKC 真实返回空」，
+   * 下游判定器（CoverageGapChecker）必须按 unknown 处理，不得空转判 passed。
+   */
+  readonly highRiskSymbolsUnknown?: boolean;
 }
 
 /**

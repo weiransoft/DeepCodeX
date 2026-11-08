@@ -134,13 +134,21 @@ export class NoOpRollbackManager implements RollbackManager {
  * - exitCode：退出码（null 表示进程被信号终止或启动失败）
  * - errorMessage：错误信息（spawn error 时填充，如 "kubectl 命令不可用"）
  */
-interface CliExecResult {
+export interface CliExecResult {
   readonly success: boolean;
   readonly stdout: string;
   readonly stderr: string;
   readonly exitCode: number | null;
   readonly errorMessage: string;
 }
+
+/**
+ * CLI 执行器函数类型（2026-11-08 审查修复新增，可选注入点）。
+ *
+ * 默认使用模块内的真实 execCli（child_process.execFile）。测试可注入确定性执行器，
+ * 以覆盖"kubectl 输出非合法 JSON"等解析失败路径，而无需依赖真实 kubectl 环境。
+ */
+export type RollbackCliExecutor = (cmd: string, args: string[], timeoutMs: number) => Promise<CliExecResult>;
 
 /**
  * 执行 CLI 命令（通过 child_process.execFile，禁止 shell:true 避免命令注入）
@@ -245,6 +253,8 @@ export interface K8sRollbackManagerOptions {
   readonly rollbackTimeoutMs?: number;
   /** 项目根目录（用于生成回滚预案文件路径与快照数据文件路径） */
   readonly projectRoot?: string;
+  /** 可注入的 CLI 执行器（可选，2026-11-08 新增；缺省使用真实 execCli，测试可注入确定性执行器） */
+  readonly cliExecutor?: RollbackCliExecutor;
 }
 
 /**
@@ -287,16 +297,19 @@ export class K8sRollbackManager implements RollbackManager {
   public readonly rollbackTimeoutMs: number;
   /** 项目根目录（用于生成回滚预案文件路径与快照数据文件路径） */
   public readonly projectRoot?: string;
+  /** CLI 执行器（默认真实 execCli，可注入用于测试解析失败路径） */
+  private readonly execCliImpl: RollbackCliExecutor;
 
   /**
    * 构造函数
    *
-   * @param options 配置选项（含 rollbackTimeoutMs / projectRoot）
+   * @param options 配置选项（含 rollbackTimeoutMs / projectRoot / cliExecutor）
    */
   constructor(options?: K8sRollbackManagerOptions) {
     // 应用默认值：rollbackTimeoutMs 默认 30000ms，projectRoot 可选
     this.rollbackTimeoutMs = options?.rollbackTimeoutMs ?? 30000;
     this.projectRoot = options?.projectRoot;
+    this.execCliImpl = options?.cliExecutor ?? execCli;
     // 冻结实例：防止运行时修改配置（对齐 P-1 不可变优先原则）
     Object.freeze(this);
   }
@@ -471,7 +484,8 @@ export class K8sRollbackManager implements RollbackManager {
    * 执行流程：
    * 1. 轮询 `kubectl get deployment <name> -n <ns> -o json`
    * 2. 解析 JSON 输出，提取 status.availableReplicas 与 spec.replicas
-   * 3. 当 availableReplicas >= replicas 时返回 success=true
+   * 3. 仅当 parseOk=true 且 expectedReplicas>0 且 availableReplicas >= replicas 时返回 success=true
+   *    （2026-11-08 审查修复：解析失败立即返回 success=false，绝不把 0/0 当成功）
    * 4. 超过超时时间后返回 success=false
    *
    * 轮询参数：
@@ -493,25 +507,38 @@ export class K8sRollbackManager implements RollbackManager {
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       // 调用 kubectl get deployment -o json 获取 Deployment 状态
-      const result = await execCli(
+      const result = await this.execCliImpl(
         "kubectl",
         ["get", "deployment", deploymentName, "-n", namespace, "-o", "json"],
         this.rollbackTimeoutMs
       );
 
       if (result.success) {
-        // 解析 JSON 输出，提取副本数
-        const { availableReplicas, expectedReplicas } = this.parseDeploymentStatus(result.stdout);
-        lastAvailableReplicas = availableReplicas;
-        lastExpectedReplicas = expectedReplicas;
+        // 解析 JSON 输出，提取副本数（含 parseOk 标志，区分"解析成功"与"解析失败"）
+        const parsed = this.parseDeploymentStatus(result.stdout);
+        lastAvailableReplicas = parsed.availableReplicas;
+        lastExpectedReplicas = parsed.expectedReplicas;
 
-        if (availableReplicas >= expectedReplicas) {
-          // 副本数达标：验证成功
+        // 2026-11-08 审查修复：只有解析成功、期望副本数 > 0 且可用副本达标时才可能判成功。
+        // 旧实现解析失败返回 0/0，`0 >= 0` 为真 → 谎报"回滚验证成功：0/0 副本可用"。
+        if (parsed.parseOk && parsed.expectedReplicas > 0 && parsed.availableReplicas >= parsed.expectedReplicas) {
           return Object.freeze({
             success: true,
-            currentReplicas: availableReplicas,
-            expectedReplicas,
-            message: `回滚验证成功：${availableReplicas}/${expectedReplicas} 副本可用`,
+            currentReplicas: parsed.availableReplicas,
+            expectedReplicas: parsed.expectedReplicas,
+            message: `回滚验证成功：${parsed.availableReplicas}/${parsed.expectedReplicas} 副本可用`,
+          }) as RollbackVerificationResult;
+        }
+
+        // 解析失败：立即返回失败（不继续轮询伪装成"等待副本就绪"，也不把 0/0 当成功）
+        if (!parsed.parseOk) {
+          return Object.freeze({
+            success: false,
+            currentReplicas: 0,
+            expectedReplicas: 0,
+            message:
+              "回滚验证失败：kubectl get deployment 输出无法解析为合法 Deployment 状态 JSON" +
+              "（parseOk=false），解析失败绝不判为成功",
           }) as RollbackVerificationResult;
         }
       }
@@ -804,27 +831,43 @@ export class K8sRollbackManager implements RollbackManager {
    * 边界场景：
    * - spec.replicas 未设置：默认 1（K8s 默认值）
    * - status.availableReplicas 未设置：默认 0（Deployment 刚创建，无可用 Pod）
-   * - JSON 解析失败：返回 availableReplicas=0, expectedReplicas=0
+   * - JSON 解析失败 / 非对象输出 / 非法数值：返回 0/0 且 parseOk=false（2026-11-08 审查修复）
    *
    * @param jsonContent kubectl get deployment -o json 的输出
-   * @returns 含 availableReplicas 与 expectedReplicas 的对象
+   * @returns 含 availableReplicas / expectedReplicas / parseOk 的对象（parseOk=false 时禁止判验证成功）
    */
-  private parseDeploymentStatus(jsonContent: string): { availableReplicas: number; expectedReplicas: number } {
+  private parseDeploymentStatus(jsonContent: string): {
+    availableReplicas: number;
+    expectedReplicas: number;
+    parseOk: boolean;
+  } {
     try {
       const deployment = JSON.parse(jsonContent) as {
         spec?: { replicas?: number };
         status?: { availableReplicas?: number; readyReplicas?: number };
-      };
+      } | null;
+
+      // 2026-11-08 审查修复：null / 非对象 / 数组输出视为解析失败
+      // （避免 "null" / "[]" 被当作合法 Deployment，导致 0/0 被判为达标）
+      if (deployment === null || typeof deployment !== "object" || Array.isArray(deployment)) {
+        return { availableReplicas: 0, expectedReplicas: 0, parseOk: false };
+      }
 
       // spec.replicas 未设置时默认 1（K8s 默认值）
       const expectedReplicas = deployment.spec?.replicas ?? 1;
       // status.availableReplicas 未设置时默认 0（Deployment 刚创建，无可用 Pod）
       const availableReplicas = deployment.status?.availableReplicas ?? 0;
 
-      return { availableReplicas, expectedReplicas };
+      // 数值必须是有限数（防止 JSON 里是字符串 / NaN 等异常值被当成合法副本数）
+      if (!Number.isFinite(expectedReplicas) || !Number.isFinite(availableReplicas)) {
+        return { availableReplicas: 0, expectedReplicas: 0, parseOk: false };
+      }
+
+      return { availableReplicas, expectedReplicas, parseOk: true };
     } catch {
-      // JSON 解析失败：返回 0/0
-      return { availableReplicas: 0, expectedReplicas: 0 };
+      // 2026-11-08 审查修复：JSON 解析失败返回 0/0 + parseOk=false
+      // （诚实降级，绝不把解析失败的 0/0 伪装成"副本达标"）
+      return { availableReplicas: 0, expectedReplicas: 0, parseOk: false };
     }
   }
 

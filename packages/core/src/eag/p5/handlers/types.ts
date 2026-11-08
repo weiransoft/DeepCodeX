@@ -238,6 +238,32 @@ export interface P5StageContext {
    * dev handler 检测后不调用 taskExecutor，直接 success + reason=dev-skipped-after-fix。
    */
   readonly skipDevAfterFix?: boolean;
+  /**
+   * 本轮 verify 失败用例的**原始全量清单**（2026-11-08 修复指令链路贯通）。
+   *
+   * 由 orchestrator 从本轮 verify 失败结果 artifacts.failedTestIds 投影；fix handler
+   * 在"基线不可用 / 提取不到用例标识"的诚实降级路径上用它回退全量（不排除任何失败）。
+   * 与顶层 failedTestIds 的区别：顶层是"给用户看的客观失败清单"，这里是"给 fix/dev 的
+   * 修复指令输入"，二者用途不同，不可混为一谈。
+   */
+  readonly verifyFailedTestIds?: ReadonlyArray<string>;
+  /**
+   * 本轮 verify 拆分出的**本任务新增失败用例**清单（已排除基线红灯，2026-11-08）。
+   *
+   * 由 orchestrator 从本轮 verify 结果 artifacts.newFailedTestIds 投影；fix handler
+   * 在 baselineAvailable===true 且可拆分时优先消费它，不再从原始输出重新解析全量清单。
+   */
+  readonly verifyNewFailedTestIds?: ReadonlyArray<string>;
+  /**
+   * 本轮 verify 的基线/新增拆分是否可信（= artifacts.baselineAvailable）。
+   * false / undefined = 诚实降级，不排除任何失败。
+   */
+  readonly verifyBaselineAvailable?: boolean;
+  /**
+   * 本轮 verify 是否"全部失败均为 run 起始既有红灯、无本任务新增失败"
+   * （= artifacts.baselineOnly）。true 时 fix/dev 修复指令不得再让模型去修基线用例。
+   */
+  readonly verifyBaselineOnly?: boolean;
 }
 
 // ============================================================================

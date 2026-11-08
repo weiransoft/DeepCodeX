@@ -61,6 +61,16 @@ import type {
   RollbackResult,
 } from "../devops/types";
 
+/**
+ * 紧急回退开关（2026-11-08 审查修复新增）。
+ *
+ * 默认（未设置）：healthyEndpoints 为空时直接判失败/回滚，杜绝"空端点数组 → 烟雾测试零用例 → 误报通过"。
+ * 设置为 "1"：恢复修复前把空数组交给 SmokeTestRunner 的旧语义，便于线上紧急回退。
+ */
+function legacyPassThrough(): boolean {
+  return process.env.EAG_LEGACY_PASS_THROUGH === "1";
+}
+
 // ============================================================================
 // DeployStageImpl 类
 // ============================================================================
@@ -384,6 +394,36 @@ export class DeployStageImpl implements DeployStage {
     // ---------- Step 4: smoke-test 烟雾测试 ----------
     // 构造烟雾测试端点列表（从 healthEndpoints 中提取健康端点 URL）
     const healthyEndpoints = healthEndpoints.filter((e) => e.healthy).map((e) => e.url);
+
+    // 2026-11-08 审查修复：没有任何健康端点 → 烟雾测试必然一条用例都跑不了。
+    // 旧实现把空数组传给 run() 得到"零失败=通过"，导致部署误报成功且不触发回滚。
+    // 这里直接判定失败并触发回滚（回退开关 EAG_LEGACY_PASS_THROUGH=1 可恢复旧行为）。
+    if (healthyEndpoints.length === 0 && !legacyPassThrough()) {
+      errors.push("部署后无健康端点（healthyEndpoints 为空），烟雾测试无法执行任何用例 → 判定失败");
+      if (this.options.rollbackManager && snapshot) {
+        try {
+          const rbResult = await this.options.rollbackManager.rollback(snapshot);
+          rollbackExecuted = true;
+          rollbackResult = rbResult;
+          if (!rbResult.success) {
+            errors.push(`回滚失败：${rbResult.errors.join("；")}`);
+          }
+        } catch (rbErr) {
+          errors.push(`回滚执行异常：${rbErr instanceof Error ? rbErr.message : String(rbErr)}`);
+        }
+      }
+      return this.buildResult(
+        false,
+        preDeployPassed,
+        deployResult,
+        postDeployPassed,
+        smokeTestResult,
+        healthEndpoints,
+        rollbackExecuted,
+        rollbackResult,
+        errors
+      );
+    }
 
     try {
       smokeTestResult = await this.options.smokeTestRunner.run(healthyEndpoints, context.smokeTestCases);

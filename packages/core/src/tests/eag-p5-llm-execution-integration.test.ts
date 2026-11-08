@@ -178,15 +178,20 @@ test("INT-B. verify 真实失败 → fix 轮收到失败输出反馈并修复 �
       "utf8"
     );
 
-    // 桩脚本序列（跨 3 轮编排，共 8 次请求；2026-10-09 F-A2 起 plan 阶段
+    // 桩脚本序列（跨 3 轮编排，共 7 次请求；2026-10-09 F-A2 起 plan 阶段
     // 有可执行卡时先发 1 次规划器请求，all-tasks-completed 收尾轮提前返回不调规划器）：
     // iter0 plan：[0] 规划器决策 none=不干预，本地合成 T-001
     // iter0 dev：[1] write 错误实现（a-b）→ [2] 终态
     // iter0 verify：真实 npm test 失败（T-001 不标 completed）
     // iter0 fix：[3] read 既有文件（fix 是独立 ToolExecutor 会话，write 已存在文件受
     //            "未读先写"保护，真实模型必须先读）→ [4] write 正确实现（a+b）→ [5] 终态
-    // iter1 plan：[6] 规划器决策 none（T-001 仍 pending，本地选卡重跑）
-    // iter1 dev：[7] 直接终态（文件已由 fix 修正，无需再改；git 仍能检出变更）
+    // iter1 plan：[6] 规划器决策 none（T-001 仍 pending，本地选卡）
+    // iter1 dev：**零 LLM 请求** —— 2026-11-08 起 skipDevAfterFix 生效：上一轮 fix
+    //            成功且本轮 plan 又选中同一张卡时，dev 直接复用 fix 的增量修复、
+    //            不调用 taskExecutor、不重跑整卡（避免把修复覆盖回错误实现）。
+    //            故脚本不再为 iter1 dev 预置终态响应；StubLlmClient 是 fail-loud，
+    //            若该跳过逻辑失效而多出第 8 次 createMessage，脚本耗尽会抛错使
+    //            run 失败，本断言即成为 skipDevAfterFix 的回归保护（不是放宽断言）。
     // iter1 verify：真实 npm test 全绿 → markTaskCompleted
     // iter2 plan：all-tasks-completed → completed（提前返回，无规划请求）
     const mathFileAbs = path.join(projectRoot, "src", "math.js");
@@ -227,7 +232,6 @@ test("INT-B. verify 真实失败 → fix 轮收到失败输出反馈并修复 �
       },
       { content: "已按失败反馈修复。" },
       { content: '{"action":"none","reasoning":"上一轮 fix 已修复，继续验证该卡"}' },
-      { content: "复核：实现已正确，本轮无需改动。" },
     ]);
 
     const taskExecutor = new LlmTaskExecutor({
@@ -247,8 +251,13 @@ test("INT-B. verify 真实失败 → fix 轮收到失败输出反馈并修复 �
     assert.equal(result.finalStatus, "completed", `修复回路应收尾 completed，报告：\n${result.finalReport}`);
     assert.equal(result.exitCode, 0);
 
-    // ---- 8 次请求全部被真实消费（脚本 fail-loud：少一轮就会抛错使 run 失败）----
-    assert.equal(client.getRequests().length, 8);
+    // ---- 7 次请求全部被真实消费 ----
+    // 2026-11-08 起 skipDevAfterFix 让 iter1 dev 零 LLM 请求，脚本同步收紧为 7 项。
+    // 这是**收紧**而非放宽：若跳过逻辑失效导致 iter1 dev 又发起 createMessage，
+    // 第 8 次调用会撞上脚本耗尽并 fail-loud 抛错 → orchestrator 判失败 → 上方
+    // finalStatus==="completed" 断言即失败；若少一轮，则本断言的 7 不相等而失败。
+    // 两个方向都被夹住，故本断言正向守护 skipDevAfterFix 这一修复回路。
+    assert.equal(client.getRequests().length, 7);
     // 规划请求（index 0/6）不暴露任何工具；任务请求暴露 5 工具白名单
     assert.deepEqual([...client.getRequests()[0]!.toolNames], [], "规划请求不得暴露任何工具");
     assert.deepEqual([...client.getRequests()[6]!.toolNames], [], "第二轮规划请求不得暴露任何工具");

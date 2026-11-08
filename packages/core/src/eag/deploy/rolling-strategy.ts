@@ -285,9 +285,12 @@ export class RollingStrategy implements DeployStrategy {
       const resources = this.parseKubectlResources(getResult, namespace, errors);
 
       // ---------- 步骤 6: 构造成功结果 ----------
-      // 即使 kubectl get 失败（如资源列表为空），只要 apply 和 rollout 成功就视为部署成功
-      // 因为 apply 已成功创建资源，kubectl get 失败只是无法获取资源列表
-      const success = errors.length === 0 || resources.length > 0;
+      // 2026-11-08 审查修复：success 必须纳入累积 errors（错误不得被吞）。
+      // 旧实现 `errors.length === 0 || resources.length > 0` 在 errors 非空但 resources 非空时仍判成功，
+      // 导致 kubectl get 失败 / JSON 解析失败等错误被吞掉，上层误报部署成功。
+      // 环境变量 EAG_LEGACY_PASS_THROUGH=1 可紧急回退到旧语义。
+      const legacy = process.env.EAG_LEGACY_PASS_THROUGH === "1";
+      const success = legacy ? errors.length === 0 || resources.length > 0 : errors.length === 0;
       return this.buildResult(success, startedAt, resources, errors);
     } finally {
       // 清理临时目录（finally 块确保异常路径下也能清理）

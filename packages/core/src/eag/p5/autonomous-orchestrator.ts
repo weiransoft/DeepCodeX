@@ -1051,6 +1051,17 @@ export class AutonomousOrchestrator {
           // 软续期（tokenBudgetRenewed / tokenHardCeiling）机制随之废弃。
           // 防失控由模型循环/空循环熔断与全局轮数上限负责（执行器内）。
 
+          // 本轮 verify 基线/新增拆分结果投影（2026-11-08 修复指令链路贯通）：
+          // fix 阶段构造 ctx 时，从本轮已完成的 verify 失败结果读取结构化拆分制品，
+          // 交给 fix handler 优先消费"新增失败"清单；plan/dev/verify 阶段尚无本轮
+          // verify 结果时字段缺省，fix handler 回退 verifyResult.artifacts / 原始输出
+          // 全量解析（诚实降级，不排除任何失败）。iterationResults 每轮清空重建、
+          // 只含本轮阶段结果，故 find 命中的就是本轮 verify，无需轮次标签。
+          const currentVerifyFailure = iterationResults.find((r) => r.stage === "verify" && r.kind !== "success");
+          const verifyArtifacts = currentVerifyFailure?.artifacts;
+          const projectedFullIds = verifyArtifacts?.["failedTestIds"];
+          const projectedNewIds = verifyArtifacts?.["newFailedTestIds"];
+
           // 5b-1. 构造 P5StageContext
           const ctx = this.buildStageContext({
             runId,
@@ -1101,6 +1112,17 @@ export class AutonomousOrchestrator {
             // stage==="dev" 时 planTaskCard 已由本轮 plan 阶段赋值（plan 先于 dev 执行）。
             skipDevAfterFix:
               stage === "dev" && previousFixAppliedCardId !== null && planTaskCard?.id === previousFixAppliedCardId,
+            // 本轮 verify 拆分结果投影（修复指令链路贯通）：fix handler 据此把"新增失败"
+            // 交给执行器，baselineOnly 时改为标注"无需改代码"，降级时回退全量失败。
+            verifyFailedTestIds: Array.isArray(projectedFullIds)
+              ? (projectedFullIds as ReadonlyArray<unknown>).filter((v): v is string => typeof v === "string")
+              : undefined,
+            verifyNewFailedTestIds: Array.isArray(projectedNewIds)
+              ? (projectedNewIds as ReadonlyArray<unknown>).filter((v): v is string => typeof v === "string")
+              : undefined,
+            verifyBaselineAvailable:
+              verifyArtifacts === undefined ? undefined : verifyArtifacts["baselineAvailable"] === true,
+            verifyBaselineOnly: verifyArtifacts === undefined ? undefined : verifyArtifacts["baselineOnly"] === true,
           });
 
           // 5b-1.5 租约心跳（2026-10-20 R3 并发死锁修复）：每阶段入口刷新本 run
@@ -1194,6 +1216,10 @@ export class AutonomousOrchestrator {
           // 5b-6.4 跨迭代失败证据搬运（2026-11-03，run b64490b8ad78）：
           // verify 真实失败时，把"失败用例 + 输出尾部"打包进 carriedFailureFeedback，
           // 下一轮 dev 的 feedback 会带上它——避免 dev 推倒重写覆盖 fix 的增量修复。
+          // 2026-11-08 修复指令链路贯通：baselineOnly（全部失败均为 run 起始既有红灯）
+          // 时 buildVerifyFailureFeedback 内部改为显式标注"与本任务无关、无需改代码"，
+          // 不再把基线用例清单与输出尾部搬给 dev；可拆分时用 newFailedTestIds，
+          // 降级时回退全量 failedTestIds（不排除任何失败）。
           if (stage === "verify" && result.kind !== "success" && result.artifacts["skipped"] !== true) {
             carriedFailureFeedback = this.buildVerifyFailureFeedback(result);
           }
@@ -2722,6 +2748,14 @@ export class AutonomousOrchestrator {
     readonly baselineDirtyPaths?: ReadonlySet<string>;
     /** P2 状态机：上一轮 fix 成功 + 同卡 → 本轮 dev 跳过整卡重跑 */
     readonly skipDevAfterFix?: boolean;
+    /** 本轮 verify 原始全量失败用例清单（修复指令链路贯通，fix 降级回退用） */
+    readonly verifyFailedTestIds?: ReadonlyArray<string>;
+    /** 本轮 verify 拆分出的新增失败用例清单（fix 优先消费） */
+    readonly verifyNewFailedTestIds?: ReadonlyArray<string>;
+    /** 本轮 verify 基线/新增拆分是否可信 */
+    readonly verifyBaselineAvailable?: boolean;
+    /** 本轮 verify 是否纯基线失败（无本任务新增失败） */
+    readonly verifyBaselineOnly?: boolean;
   }): Readonly<P5StageContext> {
     return Object.freeze({
       runId: args.runId,
@@ -2756,6 +2790,12 @@ export class AutonomousOrchestrator {
       baselineAvailable: args.baselineAvailable,
       baselineDirtyPaths: args.baselineDirtyPaths,
       skipDevAfterFix: args.skipDevAfterFix,
+      // 本轮 verify 基线/新增拆分投影（2026-11-08 修复指令链路贯通，可选字段：
+      // 无本轮 verify 结果时为 undefined，fix handler 回退 artifacts / 原始输出全量）
+      verifyFailedTestIds: args.verifyFailedTestIds,
+      verifyNewFailedTestIds: args.verifyNewFailedTestIds,
+      verifyBaselineAvailable: args.verifyBaselineAvailable,
+      verifyBaselineOnly: args.verifyBaselineOnly,
       // 阶段级日志回调：plan 阶段用它上报 tasks.md 解析告警（修复 2026-10-05
       // 僵尸任务卡事故——非法 status 静默降级 pending 完全无日志痕迹）
       logger: this.log,
@@ -3048,9 +3088,38 @@ export class AutonomousOrchestrator {
    * @returns 供 dev 阶段 feedback 使用的文本（无证据时返回 undefined）
    */
   private buildVerifyFailureFeedback(result: Readonly<P5StageResult>): string | undefined {
-    const ids = result.artifacts["failedTestIds"];
-    const tail = result.artifacts["testOutputTail"];
-    const idList = Array.isArray(ids) ? (ids as ReadonlyArray<unknown>).filter((v) => typeof v === "string") : [];
+    const artifacts = result.artifacts;
+    // 本轮全部失败均为 run 起始既有红灯（无本任务新增失败，2026-11-08 修复指令链路）：
+    // 不再把"请在现有改动基础上继续修 + 基线用例清单 + 输出尾部"搬给下一轮 dev，
+    // 否则模型会为与本任务无关的既有红灯反复改代码。改为显式标注"与本任务无关、
+    // 无需修改代码"，且绝不带用例清单/输出尾部（避免基线用例名混入修复指令）。
+    // 注意：verify 结果本身仍如实判 failed，这里只改"给 dev 的修复指令"，不改判定。
+    if (artifacts["baselineOnly"] === true) {
+      return [
+        "上一轮 verify 阶段全部失败均为 run 起始既有红灯（与本任务无关、无本任务新增失败）：",
+        "无需据此修改代码，也不要为这些既有红灯改动本任务实现；",
+        "请继续推进本任务本身的实现与验证，基线红灯的单独修复不属于本次任务范围。",
+      ].join("\n");
+    }
+
+    // 失败用例清单优先消费基线/新增拆分结果，但必须带诚实降级：
+    // canSplit 与 verify-stage-handler 同构（基线可信 且 本轮真实提取到了用例标识）。
+    // 基线探测降级（baselineAvailable=false）或提取不到用例标识时 newFailedTestIds 为空，
+    // 此时一律回退全量 failedTestIds，绝不排除任何失败（否则会变成
+    // "测试失败但反馈里没有任何失败用例"，比修复前更糟）。
+    const fullIdsRaw = artifacts["failedTestIds"];
+    const newIdsRaw = artifacts["newFailedTestIds"];
+    const fullIds: ReadonlyArray<string> = Array.isArray(fullIdsRaw)
+      ? (fullIdsRaw as ReadonlyArray<unknown>).filter((v): v is string => typeof v === "string")
+      : [];
+    const newIds: ReadonlyArray<string> = Array.isArray(newIdsRaw)
+      ? (newIdsRaw as ReadonlyArray<unknown>).filter((v): v is string => typeof v === "string")
+      : [];
+    const baselineAvailable = artifacts["baselineAvailable"] === true;
+    const canSplit = baselineAvailable && fullIds.length > 0 && Array.isArray(newIdsRaw);
+    const idList = canSplit ? newIds : fullIds;
+
+    const tail = artifacts["testOutputTail"];
     const tailText = typeof tail === "string" ? tail.slice(-1500) : "";
     const reason = result.error ?? result.summary;
 

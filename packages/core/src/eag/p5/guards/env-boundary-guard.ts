@@ -817,10 +817,14 @@ export class EnvBoundaryGuard implements GuardRule {
       if (!varValue || typeof varValue !== "string") {
         continue;
       }
-      // 单值长度上限：极端长值（如整份证书/证书链）不参与正则匹配，
-      // 避免回溯爆炸；凭据模式命中的都是短串，截断不影响检出。
+      // 单值扫描窗口（2026-11-08）：head-only 会让"超长值 + 凭据藏在尾部"逃过检出
+      // （如整份证书链末尾追加 -----BEGIN PRIVATE KEY-----）。改为「首 N + 尾 N」双窗口，
+      // 扫描总量仍夹在 2*MAX_ENV_VALUE_SCAN_CHARS 以内（正则回溯上限可控）；
+      // 用换行分隔两段，避免头尾边界拼接出原本不存在的假凭据串。短值原样全量扫描。
       const scannedValue =
-        varValue.length > MAX_ENV_VALUE_SCAN_CHARS ? varValue.slice(0, MAX_ENV_VALUE_SCAN_CHARS) : varValue;
+        varValue.length > MAX_ENV_VALUE_SCAN_CHARS
+          ? `${varValue.slice(0, MAX_ENV_VALUE_SCAN_CHARS)}\n${varValue.slice(-MAX_ENV_VALUE_SCAN_CHARS)}`
+          : varValue;
       for (const { pattern, name, description } of PROD_CREDENTIAL_PATTERNS) {
         const match = scannedValue.match(pattern);
         if (match) {

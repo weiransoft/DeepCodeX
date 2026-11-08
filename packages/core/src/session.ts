@@ -5579,6 +5579,9 @@ ${agentInstructions}
       return this.degradeExecuteToSuggestion(sessionId, suggestion, userPrompt, commandHint);
     }
 
+    // 知情重试放行时携带的上一轮失败约束（buildAutoExecuteCommand 第三参）。
+    // 无命中失败记录 / 取不到真实诊断时诚实保留 undefined（绝不编造），逐字零回归。
+    let replayFailureContext: string | undefined;
     // 守卫 D2：/eag-autonomous 且非知情重试 → 查失败运行记录，命中即硬拦截。
     // 仅 /eag-autonomous 适用（其他 EAG 命令无本轮次重放语义）；
     // goal 由 suggester parseAndValidate 保证非空，指纹判定单一来源（hint 为裸命令无内嵌 goal）。
@@ -5590,6 +5593,16 @@ ${agentInstructions}
         this.notifyFailedGoalBlocked(sessionId, goal, failedRun, commandHint);
         return true;
       }
+    } else if (commandHint.startsWith("/eag-autonomous")) {
+      // 知情重试（acknowledgeFailedGoal=true）放行重放，但「放行」≠「裸重放」：
+      // 这是继 execute_command 硬拦截 / confirm_previous 逃生门之外的第三条重放通道，
+      // 修复前只传两参、不带任何失败状态，必然逐字重演上一轮失败。命中失败记录时
+      // 取真实上一轮诊断的紧凑约束作为第三参注入 --goal；无真实诊断时
+      // buildGoalBlockedDiagnostics 返回 undefined（诚实降级，绝不编造）。
+      const failedRun = this.findFailedAutonomousRun(sessionId, goal);
+      if (failedRun) {
+        replayFailureContext = buildGoalBlockedDiagnostics(failedRun).failureContext;
+      }
     }
 
     // 防御 2：eagCommandParser 未注入时无命令分发能力，降级展示
@@ -5597,8 +5610,9 @@ ${agentInstructions}
       return this.degradeExecuteToSuggestion(sessionId, suggestion, userPrompt, commandHint);
     }
 
-    // 构造完整命令字符串（goal 转义注入 --goal 参数）并经 parser 分发到对应 handler
-    const commandString = this.buildAutoExecuteCommand(commandHint, goal);
+    // 构造完整命令字符串（goal 转义注入 --goal 参数）并经 parser 分发到对应 handler。
+    // 第三参仅在知情重试且命中带真实诊断的失败记录时非空，其余路径逐字零回归。
+    const commandString = this.buildAutoExecuteCommand(commandHint, goal, replayFailureContext);
     const dispatched = await this.dispatchEagCommandString(sessionId, commandString, controller);
     if (!dispatched) {
       console.warn(`consumeExecuteCommandDecision: 未能分发命令 "${commandString}"，降级展示建议`);
@@ -5682,8 +5696,20 @@ ${agentInstructions}
     // 一次性消费：先删除快照再执行（防执行异常后残留导致重复触发）
     this.lastEagDisplayedSuggestions.delete(sessionId);
 
-    // 用暂存的 commandHint + goal（+ 可选的上一轮重放约束）构造完整命令并分发执行
-    const commandString = this.buildAutoExecuteCommand(stored.commandHint, stored.goal, stored.failureContext);
+    // 用暂存的 commandHint + goal（+ 可选的上一轮重放约束）构造完整命令并分发执行。
+    // 逃生门消费加固：裸快照（suggest_* 展示 / 降级展示写入，无 failureContext）时，
+    // 若本会话存在该目标的真实失败记录，实时重建上一轮诊断约束再传第三参，
+    // 避免「展示通道绕开 notifyFailedGoalBlocked」形成不带失败状态的裸重放。
+    // 带真实诊断的快照（notifyFailedGoalBlocked 写入）直接透传，既有行为不变；
+    // 重建仍取真实诊断（取不到则诚实降级 undefined，绝不编造）→ N6/N11/N12 零回归。
+    let effectiveFailureContext = stored.failureContext;
+    if (effectiveFailureContext === undefined) {
+      const failedRun = this.findFailedAutonomousRun(sessionId, stored.goal);
+      if (failedRun) {
+        effectiveFailureContext = buildGoalBlockedDiagnostics(failedRun).failureContext;
+      }
+    }
+    const commandString = this.buildAutoExecuteCommand(stored.commandHint, stored.goal, effectiveFailureContext);
     const dispatched = await this.dispatchEagCommandString(sessionId, commandString, controller);
     if (!dispatched) {
       // 降级：命令解析失败（理论上不应发生——快照 commandHint 来自 /eag- 白名单），
@@ -5921,6 +5947,27 @@ ${agentInstructions}
    */
   hasFailedAutonomousRun(sessionId: string, goal: string): boolean {
     return this.findFailedAutonomousRun(sessionId, goal) !== null;
+  }
+
+  /**
+   * 失败目标「上一轮诊断」可见段（Web 宿主拦截提示复用，跨层因果链读侧出口）。
+   *
+   * Web session-pool 命中 hasFailedAutonomousRun 后需要把上一轮真实终止原因/
+   * 失败用例展示给用户，避免泛化模板掩盖真实失败。本方法复用
+   * findFailedAutonomousRun + buildGoalBlockedDiagnostics（单一事实源）：
+   * 命中失败记录且存在真实诊断时返回「【上一轮诊断】」段；无记录 / 取不到诊断
+   * 时返回空串（诚实降级，绝不编造终止原因）。
+   *
+   * @param sessionId 会话 ID
+   * @param goal 待自动执行的目标文本
+   * @returns 「上一轮诊断」可见段（可能为空串）
+   */
+  getFailedAutonomousRunDiagnostics(sessionId: string, goal: string): string {
+    const failedRun = this.findFailedAutonomousRun(sessionId, goal);
+    if (!failedRun) {
+      return "";
+    }
+    return buildGoalBlockedDiagnostics(failedRun).diagnosticBlock;
   }
 
   /**
@@ -7909,9 +7956,17 @@ ${agentInstructions}
       const isAborted = this.isAbortLikeError(e) || signal?.aborted === true;
       const errMsg = e instanceof Error ? e.message : String(e);
       // 跨 run 失败守卫写侧：终态落盘（goal 指纹 + 终态），供触发层拦截自动重放。
-      // 异常路径 handler.execute() 未产出 result，无真实诊断可取 → 传空 details
-      // （诚实降级：绝不从异常文本猜测终止原因/失败用例）。
-      this.recordAutonomousRunOutcome(sessionId, validatedRequest.goal, isAborted ? "aborted" : "failed", {});
+      // errMsg 是 handler.execute() 抛出的真实错误文本（非猜测的归因），
+      // 作为 details.abortReason 落盘——此前异常路径只传空 {}，导致 abortReason
+      // 与 failedTestIds 同时为空时 buildGoalBlockedDiagnostics 返回空诊断段，
+      // 逃生门/知情重试只能拿到裸 goal 逐字重演失败。只放真实错误文本，不编造归因。
+      const abortReason = errMsg.trim();
+      this.recordAutonomousRunOutcome(
+        sessionId,
+        validatedRequest.goal,
+        isAborted ? "aborted" : "failed",
+        abortReason.length > 0 ? { abortReason } : {}
+      );
       this.updateSessionEntry(sessionId, (entry) => ({
         ...entry,
         // 停止修复（2026-10-22）：interruptSession 已落 interrupted 时不得覆盖

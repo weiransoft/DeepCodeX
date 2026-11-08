@@ -173,6 +173,13 @@ export interface FixSuggestion {
   readonly failedTestTotal: number;
   /** 失败输出片段（失败窗口优先摘取，≤ FIX_FEEDBACK_SNIPPET_CHARS） */
   readonly failureOutputSnippet: string;
+  /**
+   * 本轮是否"全部失败均为 run 起始既有红灯、无本任务新增失败"（2026-11-08 修复指令链路）。
+   * true 时 buildFixFeedback 改为"与本任务无关、无需改代码"标注，不再让模型去修基线用例。
+   */
+  readonly baselineOnly?: boolean;
+  /** 失败用例清单是否来自 verify 的基线/新增拆分（true=仅含本任务新增失败）。 */
+  readonly failedIdsSplitApplied?: boolean;
 }
 
 // ============================================================================
@@ -284,16 +291,18 @@ export class P5FixStageHandler implements P5StageHandler {
       // 4. 分析失败模式（环境/断言/导入/超时/语法/类型/引用）
       const failureCategory = analyzeFailureCategory(outputSummary);
 
-      // 4.5 失败证据：摘要用"失败窗口优先"重建，失败用例单独提取（2026-11-03 修复）
+      // 4.5 失败证据：摘要仍用"失败窗口优先"重建（testOutputTail 仅作失败窗口摘要输入）；
+      //     失败用例清单改为优先消费 verify 的基线/新增拆分结果（结构化），不再把
+      //     从原始输出重新解析的全量清单作为优先来源（2026-11-08 修复指令链路贯通）。
       const failureSnippet = buildTestOutputSummary(outputSummary, FIX_FEEDBACK_SNIPPET_CHARS);
-      const failedTestIds = extractFailedTestIds(outputSummary);
+      const resolvedFailureIds = resolveFixFailureIds(ctx, verifyResult, outputSummary);
 
       // 5. 生成结构化修复建议
       const taskCard = extractTaskCardFromPrevResults(ctx);
       const declaredFiles = taskCard?.declaredFiles ?? [];
       // 文件清单：失败用例所在测试文件优先，其后按任务卡声明顺序，上限 20 条
       // （事故任务卡声明 249 个文件，直接灌进提示词会把失败证据淹没）
-      const filesToReview = prioritizeDeclaredFiles(declaredFiles, failedTestIds.ids, FIX_FEEDBACK_MAX_FILES);
+      const filesToReview = prioritizeDeclaredFiles(declaredFiles, resolvedFailureIds.ids, FIX_FEEDBACK_MAX_FILES);
 
       const suggestedActions = generateSuggestedActions(failureCategory, outputSummary);
 
@@ -305,9 +314,11 @@ export class P5FixStageHandler implements P5StageHandler {
         declaredFileTotal: declaredFiles.length,
         failedTestCount: failedCount,
         testExitCode: exitCode,
-        failedTestIds: failedTestIds.ids,
-        failedTestTotal: failedTestIds.total,
+        failedTestIds: resolvedFailureIds.ids,
+        failedTestTotal: resolvedFailureIds.total,
         failureOutputSnippet: failureSnippet,
+        baselineOnly: resolvedFailureIds.baselineOnly,
+        failedIdsSplitApplied: resolvedFailureIds.splitApplied,
       });
 
       // 6. 调用 guardChain.execute() 做 G-A3b 清理意图永禁预检
@@ -528,6 +539,76 @@ export class P5FixStageHandler implements P5StageHandler {
 // 4. 失败分析器
 // ============================================================================
 
+/** resolveFixFailureIds 的结果：给 fix 执行器的失败用例清单 + 拆分语义。 */
+interface FixFailureIds {
+  /** 失败用例标识清单（可拆分时仅含本任务新增失败；降级时为全量） */
+  readonly ids: ReadonlyArray<string>;
+  /** 识别到的失败用例总数（可能大于 ids.length） */
+  readonly total: number;
+  /** 本轮是否纯基线失败（无本任务新增失败） */
+  readonly baselineOnly: boolean;
+  /** ids 是否来自 verify 的基线/新增拆分（true=已排除基线用例） */
+  readonly splitApplied: boolean;
+}
+
+/** 把 unknown 值安全转为冻结的字符串数组（非数组返回 undefined）。 */
+function toOptionalStringArray(value: unknown): ReadonlyArray<string> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return Object.freeze((value as ReadonlyArray<unknown>).filter((v): v is string => typeof v === "string"));
+}
+
+/**
+ * 解析"给 fix 执行器的失败用例清单"（2026-11-08 修复指令链路贯通）。
+ *
+ * 数据源优先级：
+ * 1) orchestrator 投影到 ctx 的本轮 verify 拆分结果（verifyNewFailedTestIds /
+ *    verifyBaselineAvailable / verifyBaselineOnly / verifyFailedTestIds）；
+ * 2) 缺失时回退本轮 verify 失败结果 artifacts（fixtures 直接构造 handler 的路径）；
+ * 3) 两者都无结构化清单时，才从 outputSummary 重新解析（旧 fixtures / 旧 verify 结果）。
+ * 即 testOutputTail 只作失败窗口摘要输入，不再作为用例标识来源的优先项。
+ *
+ * 判定（与 verify-stage-handler 的 canSplit 同构）：
+ * - baselineOnly（全部失败均为 run 起始既有红灯、无本任务新增失败）→ 用例清单为空，
+ *   feedback 走"无需改代码"标注分支，绝不把基线用例交给执行器；
+ * - 可拆分（基线可信 && 本轮真实提取到了用例标识 && 拿到了新增清单数组）→
+ *   只返回新增清单（已排除基线用例）；
+ * - 否则**诚实降级**回退全量，不排除任何失败，绝不因修复而丢信息。
+ */
+function resolveFixFailureIds(
+  ctx: Readonly<P5StageContext>,
+  verifyResult: Readonly<P5StageResult>,
+  outputSummary: string
+): FixFailureIds {
+  const art = verifyResult.artifacts;
+  const fullIds = toOptionalStringArray(ctx.verifyFailedTestIds) ?? toOptionalStringArray(art["failedTestIds"]);
+  const newIds = toOptionalStringArray(ctx.verifyNewFailedTestIds) ?? toOptionalStringArray(art["newFailedTestIds"]);
+  const baselineAvailable = ctx.verifyBaselineAvailable ?? art["baselineAvailable"] === true;
+  const baselineOnly = (ctx.verifyBaselineOnly ?? art["baselineOnly"]) === true;
+  const structuredTotal = typeof art["failedTestTotal"] === "number" ? (art["failedTestTotal"] as number) : 0;
+
+  // 降级时 newFailedTestIds 为空数组；绝不能用它替换全量，否则会变成
+  // "测试失败但反馈里没有任何失败用例"。必须同时确认基线可信 + 有全量标识 +
+  // 拿到了拆分后的新增清单数组，才允许使用新增清单。
+  const canSplit = baselineAvailable && fullIds !== undefined && fullIds.length > 0 && newIds !== undefined;
+
+  if (baselineOnly && canSplit) {
+    return { ids: Object.freeze([]), total: 0, baselineOnly: true, splitApplied: true };
+  }
+  if (canSplit) {
+    return { ids: newIds!, total: newIds!.length, baselineOnly: false, splitApplied: true };
+  }
+
+  // 诚实降级：不排除任何失败。优先结构化全量清单，缺失时从原始输出重新解析。
+  const parsed = extractFailedTestIds(outputSummary);
+  const ids = fullIds ?? parsed.ids;
+  return {
+    ids,
+    total: fullIds !== undefined ? Math.max(structuredTotal, ids.length) : parsed.total,
+    baselineOnly: false,
+    splitApplied: false,
+  };
+}
+
 /**
  * 分析失败模式分类
  *
@@ -671,15 +752,32 @@ function prioritizeDeclaredFiles(
  * @returns 多行反馈文本
  */
 function buildFixFeedback(suggestion: Readonly<FixSuggestion>): string {
+  // 纯基线失败（2026-11-08 修复指令链路贯通）：本轮全部失败均为 run 起始既有红灯，
+  // 与本任务无关、无本任务新增失败。不给执行器喂用例清单 / 输出片段 / 建议动作，
+  // 避免诱导模型去"修"这些既有红灯（修了也不会让本任务更正确）。
+  // 注意：这是"修复指令"文本，verify 阶段本身仍如实判 failed，不伪造通过。
+  if (suggestion.baselineOnly === true) {
+    return [
+      "本轮 verify 阶段全部失败均为 run 起始既有红灯（与本任务无关、无本任务新增失败）：",
+      "无需据此修改代码，也不要为这些既有红灯改动本任务实现；",
+      "请继续推进本任务本身的实现与验证，基线红灯的单独修复不属于本次任务范围。",
+    ].join("\n");
+  }
+
   const lines: string[] = [
     `失败分类：${suggestion.failureCategory}`,
     `失败测试数：${suggestion.failedTestCount}`,
     `测试退出码：${suggestion.testExitCode}`,
   ];
 
-  // 失败用例清单：fix 的第一优先级是定位并复跑这些用例
+  // 失败用例清单：fix 的第一优先级是定位并复跑这些用例。
+  // 清单来自基线/新增拆分时显式标注"仅新增失败"，让模型不误以为还有基线用例要修。
   if (suggestion.failedTestIds.length > 0) {
-    lines.push("", "失败用例（请优先定位并复跑这些用例，修改后自证其通过）：");
+    const heading =
+      suggestion.failedIdsSplitApplied === true
+        ? "失败用例（以下为与本任务相关的新增失败，请优先定位并复跑这些用例，修改后自证其通过）："
+        : "失败用例（请优先定位并复跑这些用例，修改后自证其通过）：";
+    lines.push("", heading);
     for (const id of suggestion.failedTestIds) {
       lines.push(`- ${id}`);
     }

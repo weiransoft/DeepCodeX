@@ -41,6 +41,15 @@ export type LedgerEntry = {
     /** 可选：验证说明（中文） */
     note?: string;
   };
+  /**
+   * 可选：verification 解析告警（P2 修复新增）。
+   *
+   * 当原始 verification 字段存在但形态非法（verifiedAt 为空或 state 不在白名单）时写入，
+   * 明确标注「解析失败」而非静默丢弃，避免台账损坏被当成「该条目本就没有验证结果」。
+   */
+  verificationParseWarning?: string;
+  /** 可选：解析失败时保留的原始 verification 值（不伪造合法结构，供人工核对） */
+  rawVerification?: unknown;
 };
 
 /** 台账文件名（新旧根共用相对路径） */
@@ -86,6 +95,20 @@ function parseEntry(raw: unknown): LedgerEntry | undefined {
         state,
         note: typeof v.note === "string" ? v.note : undefined,
       };
+    } else {
+      // P2 修复：verification 存在但形态非法时，不再静默整个丢弃且无日志。
+      // 保留原始值 + 写解析告警标注，避免「看起来没有 verification」掩盖台账损坏/
+      // 格式不兼容（诚实降级，不伪造合法 verification）。
+      entry.rawVerification = obj.verification;
+      entry.verificationParseWarning =
+        "verification 形态非法（verifiedAt 为空或 state 不在 outcome-supported/partial/blocked 白名单），已保留原始值待人工核对";
+    }
+  }
+  // 容错读回：若条目已带解析告警（上一轮解析保留），原样透传，保证 roundtrip 不丢诊断信息
+  if (typeof obj.verificationParseWarning === "string" && obj.verificationParseWarning.length > 0) {
+    entry.verificationParseWarning = obj.verificationParseWarning;
+    if (obj.rawVerification !== undefined) {
+      entry.rawVerification = obj.rawVerification;
     }
   }
   return entry;

@@ -332,28 +332,66 @@ test("T6a. 启动本地 HTTP 服务器，所有用例通过时 passed=true", asy
 // T7. 边界场景
 // ============================================================================
 
-test("T7a. 空 endpoints 时 passed=true（空集合视为通过）", async () => {
-  const runner = new SmokeTestRunnerImpl();
-  const result = await runner.run([], [createTestCase()]);
+// 2026-11-08 EAG 全量审查修复：旧「空集合视为通过」语义已被判定为谎报成功。
+// 默认改为 passed=false + reason="no-test-executed"；EAG_LEGACY_PASS_THROUGH=1 可紧急回退。
+// 本组用例同时做 A/B 对照，正向证明「诚实默认生效」且「回退开关仍可恢复旧语义」。
+const LEGACY_FLAG = "EAG_LEGACY_PASS_THROUGH";
 
-  // endpoints 为空 → tasks 为空 → totalTests=0, failedTests=0 → passed=true
-  assert.equal(result.passed, true);
-  assert.equal(result.totalTests, 0);
-  assert.equal(result.passedTests, 0);
-  assert.equal(result.failedTests, 0);
-  assert.equal(result.failures.length, 0);
+function restoreLegacyFlag(saved: string | undefined): void {
+  if (saved === undefined) {
+    delete process.env[LEGACY_FLAG];
+  } else {
+    process.env[LEGACY_FLAG] = saved;
+  }
+}
+
+test("T7a. 空 endpoints 时 passed=false（一条用例都没跑，不得误报通过）", async () => {
+  const runner = new SmokeTestRunnerImpl();
+  const saved = process.env[LEGACY_FLAG];
+  delete process.env[LEGACY_FLAG];
+  try {
+    const result = await runner.run([], [createTestCase()]);
+
+    // 默认诚实语义：totalTests=0 时不得把「无法执行测试」报成「全部通过」
+    assert.equal(result.passed, false);
+    assert.equal(result.reason, "no-test-executed");
+    assert.equal(result.totalTests, 0);
+    assert.equal(result.passedTests, 0);
+    assert.equal(result.failedTests, 0);
+    assert.equal(result.failures.length, 0);
+
+    // A/B 回退对照：开关打开后恢复修复前「空集合视为通过」语义
+    process.env[LEGACY_FLAG] = "1";
+    const legacy = await runner.run([], [createTestCase()]);
+    assert.equal(legacy.passed, true, "EAG_LEGACY_PASS_THROUGH=1 必须能回退到旧语义");
+    assert.equal(legacy.reason, undefined);
+  } finally {
+    restoreLegacyFlag(saved);
+  }
 });
 
-test("T7b. 空 testCases 时 passed=true（空集合视为通过）", async () => {
+test("T7b. 空 testCases 时 passed=false（一条用例都没跑，不得误报通过）", async () => {
   const runner = new SmokeTestRunnerImpl();
-  const result = await runner.run(["http://127.0.0.1:1"], []);
+  const saved = process.env[LEGACY_FLAG];
+  delete process.env[LEGACY_FLAG];
+  try {
+    const result = await runner.run(["http://127.0.0.1:1"], []);
 
-  // testCases 为空 → tasks 为空 → totalTests=0, failedTests=0 → passed=true
-  assert.equal(result.passed, true);
-  assert.equal(result.totalTests, 0);
-  assert.equal(result.passedTests, 0);
-  assert.equal(result.failedTests, 0);
-  assert.equal(result.failures.length, 0);
+    assert.equal(result.passed, false);
+    assert.equal(result.reason, "no-test-executed");
+    assert.equal(result.totalTests, 0);
+    assert.equal(result.passedTests, 0);
+    assert.equal(result.failedTests, 0);
+    assert.equal(result.failures.length, 0);
+
+    // A/B 回退对照
+    process.env[LEGACY_FLAG] = "1";
+    const legacy = await runner.run(["http://127.0.0.1:1"], []);
+    assert.equal(legacy.passed, true, "EAG_LEGACY_PASS_THROUGH=1 必须能回退到旧语义");
+    assert.equal(legacy.reason, undefined);
+  } finally {
+    restoreLegacyFlag(saved);
+  }
 });
 
 // ============================================================================

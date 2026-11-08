@@ -61,7 +61,11 @@ import { DEFAULT_TEST_QUALITY_CHECKERS } from "./static-checkers/index";
 // testing-orchestrator 作为消费者应复用，避免内联重复定义导致类型分叉。
 import { GateG6Checker } from "../gate/gate-g6-checker";
 import { GateG7Checker } from "../gate/gate-g7-checker";
-import type { GateG6Context, GateG7Context, GateResult, TestExecutionResult } from "../gate/gate-types";
+import type { GateG6Context, GateG7Context, GateResult } from "../gate/gate-types";
+// P0-4 修复：TestExecutionResult 权威定义在 gate/ 目录（本组无权修改），
+// 测试执行结果改用 testing 域内结构兼容的超集 TestExecutionResultWithEvidence，
+// 额外携带 stderr / failedCases / errorMessage / stdoutSnippet 失败证据链（字段全可选）。
+import type { LLMClient, LLMRequest, LLMResponse, LLMStreamEvent, LLMUsage } from "../../providers/llm-provider";
 import type {
   AcceptanceCriterion,
   ContractCompatibilityReport,
@@ -73,12 +77,14 @@ import type {
   GeneratedTestFile,
   LogCallback,
   PkcAccessor,
+  TestExecutionResultWithEvidence,
   TestQualityChecker,
   TestQualityContext,
   TestQualityResult,
   TestingLoopFinalStatus,
   TestingLoopRequest,
   TestingLoopResult,
+  UncoveredSymbol,
 } from "./types";
 import {
   COVERAGE_CONSECUTIVE_FAILURE_THRESHOLD,
@@ -109,6 +115,264 @@ const DEFAULT_IMPLEMENTATION_ROOT = "src/" as const;
  */
 function noopLog(_message: string, _level?: "info" | "warn" | "error"): void {
   // 默认无操作
+}
+
+/**
+ * 证据文本截断上限（字符）
+ *
+ * P0-4 修复：stderr / stdout 可能含极长的堆栈，保留证据的同时避免
+ * PR 描述与事件流无限膨胀；截断时显式标注原始长度，不静默丢弃。
+ */
+const EVIDENCE_CLIP_LIMIT = 4000 as const;
+
+/**
+ * 截断证据文本，并显式标注原始长度（P0-4 修复：证据不得无声消失）
+ */
+function clipEvidence(text: string, limit: number = EVIDENCE_CLIP_LIMIT): string {
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit)}…（已截断，原始长度 ${text.length} 字符）`;
+}
+
+/**
+ * 构造测试子进程的 node 命令参数（P0-4 收尾修复，导出为纯函数作为可观察点）
+ *
+ * 背景：`--test-reporter=json` 从来不是 node:test 内置 reporter（Node v22 内置仅
+ * spec/tap/dot/junit/lcov），仓库亦未安装 `json` 包，真实运行必抛
+ * ERR_MODULE_NOT_FOUND，导致每个测试文件都拿不到 JSON 报告、P0-4 修的失败用例名
+ * 在真实运行中永远取不到。默认改用内置 `tap`。
+ *
+ * 导出为纯函数：命令构造成为确定性可观察点，单测无需引入 mock 框架即可断言
+ * 默认/回退语义；executeSingleTestFile 真实调用本函数，旧调用方零回归。
+ *
+ * 回退：EAG_LEGACY_JSON_REPORTER=1 时恢复旧 `--test-reporter=json` 命令。
+ *
+ * @param filePath 测试文件相对路径（相对 projectRoot）
+ * @returns node 子进程参数数组
+ */
+export function buildTestRunnerArgs(filePath: string): ReadonlyArray<string> {
+  const reporter = process.env.EAG_LEGACY_JSON_REPORTER === "1" ? "json" : "tap";
+  return Object.freeze(["--import", "tsx", "--test", `--test-reporter=${reporter}`, filePath]);
+}
+
+/**
+ * 解析 TAP13 报告（node --test --test-reporter=tap 的默认输出）
+ *
+ * 规则（对齐 P0-4 收尾规格）：
+ * - 识别 `ok N - <name>` / `not ok N - <name>` 提取通过/失败用例名
+ * - 跳过 `#` 注释行、`TAP version` 头、`1..N` 计划行、空行
+ * - `---` / `...` 之间的 YAML 诊断块不作用例判定，但把块内文本（error: |- /
+ *   stack: |- / name: 'AssertionError' / 断言差异等）收集为错误证据——TAP 把
+ *   AssertionError 写在 stdout 的 YAML 块而非 stderr，证据不能只依赖 stderr
+ *
+ * @param stdout 子进程 stdout
+ * @returns 是否识别为 TAP、用例列表、YAML 诊断文本
+ */
+function parseTap13(stdout: string): {
+  readonly recognized: boolean;
+  readonly cases: ReadonlyArray<{ readonly name?: string; readonly status: "pass" | "fail" }>;
+  readonly diagnosticText: string;
+} {
+  const cases: Array<{ readonly name?: string; readonly status: "pass" | "fail" }> = [];
+  const diagnosticLines: string[] = [];
+  let inYamlBlock = false;
+  let recognized = false;
+
+  for (const rawLine of stdout.split(/\r?\n/)) {
+    const trimmed = rawLine.trim();
+
+    // YAML 诊断块边界：块内文本纳入证据，但不作为用例行判定
+    if (trimmed === "---") {
+      inYamlBlock = true;
+      continue;
+    }
+    if (trimmed === "...") {
+      inYamlBlock = false;
+      continue;
+    }
+    if (inYamlBlock) {
+      diagnosticLines.push(rawLine.replace(/^\s{2}/, ""));
+      continue;
+    }
+
+    if (trimmed.length === 0) continue;
+    if (trimmed.startsWith("#")) continue;
+    if (/^TAP version \d+/i.test(trimmed)) continue;
+    if (/^1\.\.\d+/.test(trimmed)) continue;
+
+    const match = /^(not ok|ok)\s+\d+\s*(?:-\s*)?(.*)$/.exec(trimmed);
+    if (match) {
+      recognized = true;
+      const status: "pass" | "fail" = match[1] === "ok" ? "pass" : "fail";
+      // 去掉 TAP 指令后缀（# SKIP / # TODO），避免污染用例名
+      const name = match[2].replace(/\s+#\s*(?:SKIP|TODO)\b.*$/i, "").trim();
+      cases.push({ name: name.length > 0 ? name : undefined, status });
+    }
+  }
+
+  return {
+    recognized,
+    cases: Object.freeze(cases),
+    diagnosticText: diagnosticLines.join("\n").trim(),
+  };
+}
+
+/**
+ * 构造「子进程非正常退出」路径的测试执行结果（spawn 失败 / 超时 / error 事件）
+ *
+ * P0-4 修复：旧实现仅返回 failedCount=1 且不带任何原因，导致失败证据整体消失。
+ * 新实现透传真实 stderr + 明确 errorMessage（含触发原因），供 G-7 上下文与 PR 描述使用。
+ */
+function buildSpawnFailureResult(
+  filePath: string,
+  durationMs: number,
+  reason: string,
+  stderr: string
+): TestExecutionResultWithEvidence {
+  const stderrTrimmed = stderr.trim();
+  return {
+    filePath,
+    exitCode: -1,
+    durationMs,
+    failedCount: 1,
+    passedCount: 0,
+    ...(stderrTrimmed.length > 0 ? { stderr: clipEvidence(stderr) } : {}),
+    errorMessage: stderrTrimmed.length > 0 ? `${reason}\nstderr：${clipEvidence(stderrTrimmed)}` : reason,
+  };
+}
+
+/**
+ * 解析测试子进程的 stdout/stderr，组装含失败证据链的 TestExecutionResultWithEvidence
+ * （P0-4 修复新增，导出为纯函数以便确定性单测）
+ *
+ * 解析优先级（保持旧调用方零回归）：
+ * 1. 单个 JSON 对象：{ tests: [{ name, status: "pass"|"fail" }, ...] }
+ * 2. NDJSON 事件流（node --test 实际输出之一）：逐行 { type: "test:pass"|"test:fail", data: { name } }
+ * 3. TAP13（node --test --test-reporter=tap，Node 内置）：`ok N - <name>` / `not ok N - <name>`
+ *
+ * 关键约束（对齐用户红线「诚实降级」）：
+ * - 真实 stderr 原样保留（含 AssertionError），不再"收集却从不读取"
+ * - 失败用例名（name）不再被丢弃
+ * - TAP 把 AssertionError 写在 stdout 的 YAML 诊断块而非 stderr，故把
+ *   error/stack/name 等诊断文本也纳入 errorMessage / stdoutSnippet 证据
+ * - 报告解析失败时保留原始 stdout/stderr 片段并写明原因，
+ *   绝不简化为 failedCount=1 却不带原因
+ */
+export function buildTestExecutionResult(
+  filePath: string,
+  exitCode: number,
+  durationMs: number,
+  stdout: string,
+  stderr: string
+): TestExecutionResultWithEvidence {
+  const parsedCases: Array<{ readonly name?: string; readonly status: "pass" | "fail" }> = [];
+  let tapDiagnosticText = "";
+  let parseError: string | null = null;
+  let jsonParseErrorMessage = "";
+
+  // ---- 优先级 1：单个 JSON 对象 ----
+  let jsonHandled = false;
+  try {
+    const single = JSON.parse(stdout) as { tests?: Array<{ name?: string; status?: string }> };
+    if (Array.isArray(single.tests)) {
+      for (const t of single.tests) {
+        const status = t?.status;
+        if (status === "pass" || status === "fail") {
+          parsedCases.push({ name: t?.name, status });
+        }
+      }
+    } else {
+      parseError = "stdout 是合法 JSON 但缺少 tests 数组";
+    }
+    jsonHandled = true;
+  } catch (e) {
+    jsonParseErrorMessage = e instanceof Error ? e.message : String(e);
+  }
+
+  // ---- 优先级 2：NDJSON 事件流 ----
+  if (!jsonHandled) {
+    let ndjsonRecognized = false;
+    for (const line of stdout.split(/\r?\n/)) {
+      if (line.trim().length === 0) continue;
+      try {
+        const ev = JSON.parse(line) as {
+          type?: string;
+          data?: { name?: string };
+        };
+        if (typeof ev.type === "string") ndjsonRecognized = true;
+        if (ev.type === "test:pass") {
+          parsedCases.push({ name: ev.data?.name, status: "pass" });
+        } else if (ev.type === "test:fail") {
+          parsedCases.push({ name: ev.data?.name, status: "fail" });
+        }
+      } catch {
+        // 非 JSON 行（如编译器告警）忽略，保留在 stdoutSnippet 中供诊断
+      }
+    }
+
+    // ---- 优先级 3：TAP13（Node 内置 tap reporter 默认输出）----
+    if (!ndjsonRecognized) {
+      const tap = parseTap13(stdout);
+      if (tap.recognized) {
+        for (const c of tap.cases) parsedCases.push(c);
+        tapDiagnosticText = tap.diagnosticText;
+      } else {
+        parseError = `stdout 既非合法 JSON 报告、NDJSON 事件流，也非 TAP13 报告：${jsonParseErrorMessage}`;
+      }
+    }
+  }
+
+  let passedCount = 0;
+  let failedCount = 0;
+  const failedCases: string[] = [];
+  for (const c of parsedCases) {
+    if (c.status === "pass") {
+      passedCount++;
+    } else {
+      failedCount++;
+      failedCases.push(
+        typeof c.name === "string" && c.name.trim().length > 0 ? c.name : `(未命名用例 #${failedCount})`
+      );
+    }
+  }
+
+  // 三种格式都解析失败时才按退出码退化统计，但必须保留原始 stdout/stderr 片段
+  if (parseError !== null) {
+    if (exitCode === 0) {
+      passedCount = 1;
+      failedCount = 0;
+    } else {
+      passedCount = 0;
+      failedCount = 1;
+    }
+  }
+
+  const stderrTrimmed = stderr.trim();
+  // TAP 把 AssertionError 写在 stdout YAML 块，存在失败用例时把诊断文本纳入证据
+  // （避免只依赖可能为空的 stderr；正常全通过时不污染结果）
+  const tapEvidence = failedCount > 0 ? tapDiagnosticText : "";
+  const reasonParts: string[] = [];
+  if (parseError) reasonParts.push(parseError);
+  if (failedCases.length > 0) reasonParts.push(`失败用例：${failedCases.join("、")}`);
+  if (tapEvidence.length > 0) reasonParts.push(`TAP 诊断（stdout YAML 块）：${clipEvidence(tapEvidence)}`);
+  if (stderrTrimmed.length > 0) reasonParts.push(`stderr：${clipEvidence(stderrTrimmed)}`);
+  if (exitCode !== 0 && failedCases.length === 0 && reasonParts.length === 0) {
+    reasonParts.push(`测试进程退出码 ${exitCode}（stdout/stderr 未含可解析的失败用例）`);
+  }
+
+  // 解析失败保留原始 stdout；TAP 解析成功但存在失败时保留 YAML 诊断证据片段
+  const stdoutSnippetText = parseError !== null ? stdout : tapEvidence;
+
+  return {
+    filePath,
+    exitCode,
+    durationMs,
+    failedCount,
+    passedCount,
+    ...(stderrTrimmed.length > 0 ? { stderr: clipEvidence(stderr) } : {}),
+    ...(failedCases.length > 0 ? { failedCases: Object.freeze([...failedCases]) } : {}),
+    ...(reasonParts.length > 0 ? { errorMessage: reasonParts.join("\n") } : {}),
+    ...(stdoutSnippetText.length > 0 ? { stdoutSnippet: clipEvidence(stdoutSnippetText) } : {}),
+  };
 }
 
 // ============================================================================
@@ -336,8 +600,19 @@ export class TestingOrchestrator {
 
     // 2. 初始化事件流与计数器
     const events: LoopEvent[] = [];
-    const totalLlmCallCount = 0;
-    const totalTokensUsed = 0;
+    // P1 修复：旧实现是 const=0 且全文从不自增，recordIteration(0, ...) 让 token 预算护栏失效。
+    // 改为 let，并由下方 LLM 客户端包装器在每次真实 createMessage 返回后累加真实计数
+    // （取不到 LLMResponse.usage 时如实记 0，并标注来源，绝不编造）。
+    let totalLlmCallCount = 0;
+    let totalTokensUsed = 0;
+    let llmUsageReported = false;
+    const trackedLlmClient = this.wrapLlmClientWithUsage(request.llmClient, (usage) => {
+      totalLlmCallCount += 1;
+      if (usage) {
+        totalTokensUsed += (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
+        llmUsageReported = true;
+      }
+    });
     let coverageConsecutiveFailureCount = this.coverageConsecutiveFailureCount;
 
     // 3. G-6 门禁检查（TESTING Loop 进入门禁）
@@ -405,7 +680,8 @@ export class TestingOrchestrator {
         const contractTestResults = await this.contractTestGenerator.generate({
           projectRoot: request.projectRoot,
           specs: contractSpecs,
-          llmClient: request.llmClient,
+          // P1 修复：传入真实计数包装器，累加每次 createMessage 的调用数与 token
+          llmClient: trackedLlmClient,
           outputDir: DEFAULT_CONTRACT_TEST_OUTPUT_DIR,
           maxTokensPerFile: DEFAULT_MAX_TOKENS_PER_TEST_FILE,
         });
@@ -449,7 +725,8 @@ export class TestingOrchestrator {
 
       const e2eResult = await this.e2eTestGenerator.generate({
         projectRoot: request.projectRoot,
-        llmClient: request.llmClient,
+        // P1 修复：传入真实计数包装器，累加每次 createMessage 的调用数与 token
+        llmClient: trackedLlmClient,
         pkcAccessor: request.pkcAccessor,
         acceptanceCriteria: request.acceptanceCriteria,
         outputDir: DEFAULT_E2E_TEST_OUTPUT_DIR,
@@ -467,6 +744,18 @@ export class TestingOrchestrator {
           stage: "e2e-test-generation",
           fileCount: e2eTests.length,
           humanCheckpointFlowCount: humanCheckpointFlows.length,
+        })
+      );
+
+      // P1 修复：显式标注 token 计数来源，取不到真实 usage 时如实记 0（未编造）
+      events.push(
+        this.buildEvent(runId, 0, "scheduling_decision", {
+          stage: "llm-usage",
+          totalLlmCallCount,
+          totalTokensUsed,
+          source: llmUsageReported
+            ? "LLMResponse.usage（每次真实 createMessage 调用累加）"
+            : "LLM 未返回 usage（如实记 0，未编造）",
         })
       );
 
@@ -557,11 +846,29 @@ export class TestingOrchestrator {
     try {
       this.log("开始测试质量静态判定", "info");
       const allTestFiles = [...contractTests, ...e2eTests];
-      const highRiskSymbols = await this.pkcQueryRiskHotspotsSafe(request.projectRoot);
+      // P1 修复：旧实现 pkcQueryRiskHotspotsSafe() 的 try/catch 都直接 return []，
+      // 从不查询 PKC，导致 highRiskSymbols 恒空、CoverageGapChecker 空转判 passed。
+      // 新实现真正接入 pkcAccessor.queryRiskHotspots，失败时显式标 unknown 并透传下游。
+      const { symbols: highRiskSymbols, available: pkcAvailable } = await this.pkcQueryRiskHotspotsSafe(
+        request.projectRoot,
+        request.pkcAccessor,
+        DEFAULT_HIGH_RISK_TOP_N
+      );
+
+      if (!pkcAvailable) {
+        events.push(
+          this.buildEvent(runId, 0, "scheduling_decision", {
+            stage: "test-quality-checkers",
+            pkcUnavailable: true,
+            reason: "PKC 风险热点查询不可用，高风险符号维度按 unknown 处理",
+          })
+        );
+      }
 
       const qualityContext: TestQualityContext = {
         highRiskSymbols,
         projectRoot: request.projectRoot,
+        ...(pkcAvailable ? {} : { highRiskSymbolsUnknown: true }),
       };
       // 遍历注入的 staticCheckers 注册表（按 checkerId 字典序）
       // 注：不直接调用 runAllCheckers()，因为该函数硬编码使用 DEFAULT_TEST_QUALITY_CHECKERS，
@@ -705,7 +1012,43 @@ export class TestingOrchestrator {
       );
     }
 
-    // 10. 生成 PR 描述
+    // 10. 真实运行测试文件，收集 TestExecutionResultWithEvidence[]（含失败证据链）
+    // P0-4 修复：先执行测试再生成 PR 描述，保证 stderr / 失败用例名 / AssertionError
+    // 既能进入 G-7 上下文（buildGateG7Context），也能渲染进 PR 描述（generatePrDescription）。
+    // EAG-P3 批次 11 S1 改造（D-S1-5）：G-7 委托给注入的 GateG7Checker 独立类。
+    this.log("开始执行契约测试与 E2E 测试，收集 G-7 门禁所需执行结果", "info");
+    events.push(this.buildEvent(runId, 0, "verification_started", { gateId: "G-7", stage: "test-execution" }));
+    const contractTestResults: TestExecutionResultWithEvidence[] = await this.executeTestFiles(
+      contractTests,
+      request.projectRoot
+    );
+    const e2eTestResults: TestExecutionResultWithEvidence[] = await this.executeTestFiles(
+      e2eTests,
+      request.projectRoot
+    );
+
+    // 汇总失败证据摘要写入事件流，供审计追溯（不丢失真实 stderr / 用例名）
+    const allExecResults = [...contractTestResults, ...e2eTestResults];
+    const failureEvidence = allExecResults
+      .filter((r) => r.exitCode !== 0 || r.failedCount > 0)
+      .map((r) => ({
+        filePath: r.filePath,
+        exitCode: r.exitCode,
+        failedCount: r.failedCount,
+        failedCases: r.failedCases ?? [],
+        errorMessage: r.errorMessage ?? "",
+      }));
+    events.push(
+      this.buildEvent(runId, 0, "verification_passed", {
+        gateId: "G-7",
+        stage: "test-execution",
+        contractTestCount: contractTestResults.length,
+        e2eTestCount: e2eTestResults.length,
+        failureEvidence,
+      })
+    );
+
+    // 11. 生成 PR 描述（含测试执行失败证据）
     const prDescription = this.generatePrDescription({
       contractTests,
       e2eTests,
@@ -714,6 +1057,8 @@ export class TestingOrchestrator {
       acceptanceCriteria: request.acceptanceCriteria,
       humanCheckpointFlows,
       testQualityResults,
+      contractTestResults,
+      e2eTestResults,
     });
     events.push(
       this.buildEvent(runId, 0, "persistence_written", {
@@ -722,21 +1067,7 @@ export class TestingOrchestrator {
       })
     );
 
-    // 11. G-7 门禁检查（TESTING Loop 退出门禁）
-    // EAG-P3 批次 11 S1 改造（D-S1-5）：改为委托给注入的 GateG7Checker 独立类
-    // 真实运行测试文件，收集 TestExecutionResult[]（对齐 G-7 checker 的 contractTestResults/e2eTestResults 必填要求）
-    this.log("开始执行契约测试与 E2E 测试，收集 G-7 门禁所需执行结果", "info");
-    events.push(this.buildEvent(runId, 0, "verification_started", { gateId: "G-7", stage: "test-execution" }));
-    const contractTestResults: TestExecutionResult[] = await this.executeTestFiles(contractTests, request.projectRoot);
-    const e2eTestResults: TestExecutionResult[] = await this.executeTestFiles(e2eTests, request.projectRoot);
-    events.push(
-      this.buildEvent(runId, 0, "verification_passed", {
-        gateId: "G-7",
-        stage: "test-execution",
-        contractTestCount: contractTestResults.length,
-        e2eTestCount: e2eTestResults.length,
-      })
-    );
+    // 12. G-7 门禁检查（TESTING Loop 退出门禁）
 
     // 构造完整的 GateG7Context（extends GateContext），从 request 派生基础字段 + 真实测试执行结果
     const g7Context: GateG7Context = this.buildGateG7Context(request, {
@@ -777,10 +1108,11 @@ export class TestingOrchestrator {
     }
     events.push(this.buildEvent(runId, 0, "verification_passed", { gateId: "G-7" }));
 
-    // 12. LoopGuard 记录迭代（成功）
+    // 13. LoopGuard 记录迭代（成功）
+    // P1 修复：totalTokensUsed 已由真实 LLM 用量包装器累加，token 预算护栏恢复生效
     request.loopGuard.recordIteration(totalTokensUsed, true);
 
-    // 13. 构建成功结果
+    // 14. 构建成功结果
     events.push(this.buildEvent(runId, 0, "loop_completed", { finalStatus: "success" }));
     this.log("TESTING Loop 成功完成", "info");
 
@@ -799,6 +1131,66 @@ export class TestingOrchestrator {
   }
 
   // ----------------------------------------------------------------------
+  // 私有方法：LLM 真实用量计数（P1 修复）
+  // ----------------------------------------------------------------------
+
+  /**
+   * 用「真实计数包装器」包裹 LLM 客户端
+   *
+   * P1 修复：生成器（ContractTestGenerator / E2eTestGenerator）内部调用
+   * llmClient.createMessage() 但其 generate() 不暴露 token 用量，导致编排器
+   * totalLlmCallCount / totalTokensUsed 恒为 0、token 预算护栏失效。
+   *
+   * 本包装器在每次真实 createMessage 返回后回调 onUsage，累加：
+   * - 调用次数（无条件 +1）
+   * - token 数（仅当响应携带真实 LLMResponse.usage 时累加；未携带则如实记 0，
+   *   绝不编造估算值）
+   *
+   * 包装器透传 LLMClient 的全部只读字段与 createMessageStream，语义与原始客户端一致。
+   *
+   * @param inner 原始 LLM 客户端（来自 TestingLoopRequest）
+   * @param onUsage 用量回调（usage 为 LLMResponse.usage 原值，可能为 null）
+   * @returns 结构兼容的 LLMClient 包装器
+   */
+  private wrapLlmClientWithUsage(inner: LLMClient, onUsage: (usage: LLMUsage | null) => void): LLMClient {
+    return {
+      get providerName() {
+        return inner.providerName;
+      },
+      get model() {
+        return inner.model;
+      },
+      get baseURL() {
+        return inner.baseURL;
+      },
+      get supportsThinking() {
+        return inner.supportsThinking;
+      },
+      get supportsPromptCaching() {
+        return inner.supportsPromptCaching;
+      },
+      createMessage: async (req: LLMRequest): Promise<LLMResponse> => {
+        const response = await inner.createMessage(req);
+        onUsage(response.usage);
+        return response;
+      },
+      createMessageStream: (req: LLMRequest): AsyncIterable<LLMStreamEvent> => {
+        const source = inner.createMessageStream(req);
+        return (async function* (): AsyncIterable<LLMStreamEvent> {
+          let streamUsage: LLMUsage | null = null;
+          for await (const event of source) {
+            if (event.type === "message_end") {
+              streamUsage = event.usage;
+            }
+            yield event;
+          }
+          onUsage(streamUsage);
+        })();
+      },
+    } as LLMClient;
+  }
+
+  // ----------------------------------------------------------------------
   // 私有方法：G-6 / G-7 门禁上下文构造（EAG-P3 批次 11 S1 改造后新增）
   // ----------------------------------------------------------------------
   //
@@ -808,7 +1200,7 @@ export class TestingOrchestrator {
   // - 新增 buildGateG6Context / buildGateG7Context 私有方法：
   //   构造完整的 GateG6Context / GateG7Context（extends GateContext），
   //   从 TestingLoopRequest 派生基础字段 + 真实测试执行结果
-  // - 新增 executeTestFiles 私有方法：真实运行测试文件，收集 TestExecutionResult[]
+  // - 新增 executeTestFiles 私有方法：真实运行测试文件，收集 TestExecutionResultWithEvidence[]
   //   对齐 G-7 checker 的 contractTestResults / e2eTestResults 必填要求
 
   /**
@@ -880,9 +1272,9 @@ export class TestingOrchestrator {
     overrides: {
       readonly coverageReport: Readonly<CoverageReport>;
       readonly contractTests: ReadonlyArray<GeneratedTestFile>;
-      readonly contractTestResults: ReadonlyArray<TestExecutionResult>;
+      readonly contractTestResults: ReadonlyArray<TestExecutionResultWithEvidence>;
       readonly e2eTests: ReadonlyArray<GeneratedTestFile>;
-      readonly e2eTestResults: ReadonlyArray<TestExecutionResult>;
+      readonly e2eTestResults: ReadonlyArray<TestExecutionResultWithEvidence>;
       readonly complianceEvidence?: Readonly<Record<string, unknown>>;
       readonly compliancePackIds?: ReadonlyArray<string>;
       readonly prDescription: string;
@@ -923,43 +1315,44 @@ export class TestingOrchestrator {
   }
 
   /**
-   * 真实执行测试文件，收集 TestExecutionResult[]
+   * 真实执行测试文件，收集 TestExecutionResultWithEvidence[]
    *
    * EAG-P3 批次 11 S1 改造新增（D-S1-5 配套）：
    * - G-7 checker 要求 contractTestResults / e2eTestResults 必填
-   * - 本方法通过 child_process.spawn 调用 `node --test --test-reporter=json <file>`
-   *   真实运行每个测试文件，并解析 JSON 输出得到 TestExecutionResult
+   * - 本方法通过 child_process.spawn 调用 `node --test --test-reporter=tap <file>`
+   *   真实运行每个测试文件，并解析 TAP13 输出得到 TestExecutionResult
    * - 与"严禁 mock/占位/简化"原则对齐：使用真实测试执行结果，不构造假数据
    *
    * 算法：
-   * 1. 对每个 GeneratedTestFile，构造 `node --test --test-reporter=json <filePath>` 命令
+   * 1. 对每个 GeneratedTestFile，构造 `node --test --test-reporter=tap <filePath>` 命令
+   *    （EAG_LEGACY_JSON_REPORTER=1 可回退旧 json 命令，详见 buildTestRunnerArgs）
    * 2. 在 projectRoot 目录下 spawn 子进程
-   * 3. 收集 stdout（JSON 报告）与 stderr（错误日志）
+   * 3. 收集 stdout（TAP13 报告，含 YAML 诊断块）与 stderr（错误日志）
    * 4. 检查退出码：0=全部通过 / 非 0=存在失败
-   * 5. 解析 JSON 报告，统计通过/失败用例数
+   * 5. 解析 TAP13 报告（兼容 JSON / NDJSON / TAP 三种格式），统计通过/失败用例数
    * 6. 返回 TestExecutionResult（含 filePath / exitCode / durationMs / failedCount / passedCount）
    *
    * 错误处理：
    * - spawn 本身失败（如 node 未安装）→ exitCode=-1, failedCount=1, passedCount=0
    * - 测试文件不存在 → exitCode=-1, failedCount=1, passedCount=0
    * - 测试执行超时（默认 30 秒）→ exitCode=-1, failedCount=1, passedCount=0
-   * - JSON 解析失败 → 退化为基于 exitCode 的简化统计
+   * - 报告解析失败 → 退化为基于 exitCode 的简化统计，并保留原始 stdout/stderr 片段
    *
    * @param files 测试文件列表（GeneratedTestFile[]）
    * @param projectRoot 项目根目录（绝对路径）
-   * @returns 测试执行结果列表（TestExecutionResult[]，与 files 一一对应）
+   * @returns 测试执行结果列表（TestExecutionResultWithEvidence[]，与 files 一一对应）
    */
   private async executeTestFiles(
     files: ReadonlyArray<GeneratedTestFile>,
     projectRoot: string
-  ): Promise<TestExecutionResult[]> {
+  ): Promise<TestExecutionResultWithEvidence[]> {
     // 无测试文件时返回空数组（G-7 checker 会校验非空，触发失败）
     if (!files || files.length === 0) {
       return [];
     }
 
     // 串行执行每个测试文件（避免并发资源竞争）
-    const results: TestExecutionResult[] = [];
+    const results: TestExecutionResultWithEvidence[] = [];
     for (const file of files) {
       const result = await this.executeSingleTestFile(file.relativePath, projectRoot);
       results.push(result);
@@ -971,40 +1364,42 @@ export class TestingOrchestrator {
    * 执行单个测试文件，返回 TestExecutionResult
    *
    * 算法：
-   * 1. 构造命令参数：`--test --test-reporter=json <filePath>`
+   * 1. 构造命令参数：`--test --test-reporter=tap <filePath>`（默认 tap，可回退 json）
    * 2. 在 projectRoot 目录下 spawn node 子进程
    * 3. 设置 30 秒超时（避免长时间挂起）
-   * 4. 收集 stdout（JSON 报告）与 stderr（错误日志）
+   * 4. 收集 stdout（TAP13 报告，含 YAML 诊断块）与 stderr（错误日志）
    * 5. 检查退出码：0=全部通过 / 非 0=存在失败
-   * 6. 解析 JSON 报告，统计通过/失败用例数
+   * 6. 解析报告（JSON / NDJSON / TAP13），统计通过/失败用例数并保留失败证据
    *
    * @param filePath 测试文件相对路径（相对 projectRoot）
    * @param projectRoot 项目根目录（绝对路径）
    * @returns 测试执行结果
    */
-  private executeSingleTestFile(filePath: string, projectRoot: string): Promise<TestExecutionResult> {
-    return new Promise<TestExecutionResult>((resolve) => {
+  private executeSingleTestFile(filePath: string, projectRoot: string): Promise<TestExecutionResultWithEvidence> {
+    return new Promise<TestExecutionResultWithEvidence>((resolve) => {
       const startTime = Date.now();
-      // 构造 node --test --test-reporter=json <filePath> 命令
+      // P0-4 收尾修复：默认改用 Node 内置 tap reporter（json 从来不是内置 reporter、
+      // 仓库亦无 json 包，真实运行必抛 ERR_MODULE_NOT_FOUND 而拿不到报告，失败用例名
+      // 永远取不到）。命令构造抽为纯函数 buildTestRunnerArgs；
+      // EAG_LEGACY_JSON_REPORTER=1 可回退旧 --test-reporter=json 命令。
       // 使用 --import tsx 支持 TypeScript 测试文件直接执行（与 coverage-gate.ts 同构）
-      const args = ["--import", "tsx", "--test", "--test-reporter=json", filePath];
+      const args = [...buildTestRunnerArgs(filePath)];
+      // 父级 node:test 运行器会注入 NODE_TEST_CONTEXT=child-v8；嵌套 spawn 的
+      // `node --test` 继承后会判定「递归调用」并跳过所有测试文件（exit 0、无报告）。
+      // 显式剔除该变量，保证每个测试文件都以顶层运行器真实执行。
+      const childEnv: NodeJS.ProcessEnv = { ...process.env };
+      delete childEnv.NODE_TEST_CONTEXT;
       let child: ReturnType<typeof spawn>;
       try {
         child = spawn("node", args, {
           cwd: projectRoot,
           stdio: ["ignore", "pipe", "pipe"],
-          env: { ...process.env },
+          env: childEnv,
         });
       } catch (err) {
-        // spawn 本身失败（如 node 未安装）→ 返回失败结果
-        const durationMs = Date.now() - startTime;
-        resolve({
-          filePath,
-          exitCode: -1,
-          durationMs,
-          failedCount: 1,
-          passedCount: 0,
-        });
+        // P0-4 修复：spawn 失败时透传真实原因，不再返回"无理由的 failedCount=1"
+        const reason = `node 子进程 spawn 失败：${err instanceof Error ? err.message : String(err)}`;
+        resolve(buildSpawnFailureResult(filePath, Date.now() - startTime, reason, ""));
         return;
       }
 
@@ -1021,70 +1416,28 @@ export class TestingOrchestrator {
       // 30 秒超时保护（避免长时间挂起）
       const timer = setTimeout(() => {
         child.kill("SIGKILL");
-        const durationMs = Date.now() - startTime;
-        resolve({
-          filePath,
-          exitCode: -1,
-          durationMs,
-          failedCount: 1,
-          passedCount: 0,
-        });
+        resolve(buildSpawnFailureResult(filePath, Date.now() - startTime, "测试执行超时（30 秒）", stderr));
       }, 30_000);
 
       child.on("close", (code: number | null) => {
         clearTimeout(timer);
         const durationMs = Date.now() - startTime;
         const exitCode = code ?? -1;
-
-        // 解析 JSON 报告，统计通过/失败用例数
-        // node --test 的 JSON 报告格式：{ tests: [{ name, status }, ...] }
-        // status 取值：pass / fail / skipped / todo
-        let passedCount = 0;
-        let failedCount = 0;
-        try {
-          const report = JSON.parse(stdout) as { tests?: Array<{ status?: string }> };
-          if (Array.isArray(report.tests)) {
-            for (const test of report.tests) {
-              const status = test?.status;
-              if (status === "pass") {
-                passedCount++;
-              } else if (status === "fail") {
-                failedCount++;
-              }
-            }
-          }
-        } catch {
-          // JSON 解析失败 → 退化为基于 exitCode 的简化统计
-          // exitCode=0 → 全部通过（passedCount=1, failedCount=0）
-          // exitCode≠0 → 全部失败（passedCount=0, failedCount=1）
-          if (exitCode === 0) {
-            passedCount = 1;
-            failedCount = 0;
-          } else {
-            passedCount = 0;
-            failedCount = 1;
-          }
-        }
-
-        resolve({
-          filePath,
-          exitCode,
-          durationMs,
-          failedCount,
-          passedCount,
-        });
+        // P0-4 修复：把真实 stdout/stderr 交给纯判定函数，保留失败用例名与 AssertionError，
+        // 解析失败时保留原始片段并写明原因（不再简化为无理由的 failedCount=1）。
+        resolve(buildTestExecutionResult(filePath, exitCode, durationMs, stdout, stderr));
       });
 
-      child.on("error", () => {
+      child.on("error", (err: Error) => {
         clearTimeout(timer);
-        const durationMs = Date.now() - startTime;
-        resolve({
-          filePath,
-          exitCode: -1,
-          durationMs,
-          failedCount: 1,
-          passedCount: 0,
-        });
+        resolve(
+          buildSpawnFailureResult(
+            filePath,
+            Date.now() - startTime,
+            `node 子进程触发 error 事件：${err.message}`,
+            stderr
+          )
+        );
       });
     });
   }
@@ -1203,6 +1556,10 @@ export class TestingOrchestrator {
     readonly acceptanceCriteria: ReadonlyArray<AcceptanceCriterion>;
     readonly humanCheckpointFlows: ReadonlyArray<E2eTestSpec>;
     readonly testQualityResults: ReadonlyArray<TestQualityResult>;
+    /** P0-4 新增（可选）：契约测试真实执行结果（含失败证据链），旧调用方零回归 */
+    readonly contractTestResults?: ReadonlyArray<TestExecutionResultWithEvidence>;
+    /** P0-4 新增（可选）：E2E 测试真实执行结果（含失败证据链），旧调用方零回归 */
+    readonly e2eTestResults?: ReadonlyArray<TestExecutionResultWithEvidence>;
   }): string {
     const lines: string[] = [];
 
@@ -1216,7 +1573,30 @@ export class TestingOrchestrator {
     lines.push(
       `- 覆盖率：lines=${input.coverageReport.lines.toFixed(1)}% / branches=${input.coverageReport.branches.toFixed(1)}% / functions=${input.coverageReport.functions.toFixed(1)}% / highRiskSymbols=${input.coverageReport.highRiskSymbols.toFixed(1)}%`
     );
-    lines.push(`- 覆盖率门禁：${input.coverageReport.passed ? "✅ 通过" : "❌ 未通过"}`);
+
+    // P1 修复：旧实现只看 coverageReport.passed，首次失败 WARNING（passed=true 但有
+    // failedDimensions）仍显示「✅ 通过」且不列出未达标维度。改用
+    // failedDimensions.length === 0 判定并显式列出未达标维度。
+    // 注意：不改动「首次失败 passed=true、第 2 次阻断」的门禁策略，只修展示层。
+    // 环境变量 EAG_PR_DISPLAY_LEGACY=1 可回退到旧的 passed 判定（兼容已依赖旧文案的调用方）。
+    const legacyDisplay = process.env.EAG_PR_DISPLAY_LEGACY === "1";
+    const noFailedDimensions = input.coverageReport.failedDimensions.length === 0;
+    const gatePassedLabel = legacyDisplay
+      ? input.coverageReport.passed
+        ? "✅ 通过"
+        : "❌ 未通过"
+      : noFailedDimensions
+        ? "✅ 通过"
+        : "❌ 未通过";
+    lines.push(`- 覆盖率门禁：${gatePassedLabel}`);
+    if (!legacyDisplay && !noFailedDimensions) {
+      lines.push(`  - 未达标维度：${input.coverageReport.failedDimensions.join(", ")}`);
+    }
+    if (input.coverageReport.pkcUnavailable) {
+      lines.push(
+        `  - ⚠️ PKC 不可用（高风险符号维度 unknown，未判达标）：${input.coverageReport.pkcError ?? "原因未知"}`
+      );
+    }
 
     if (input.compatibilityReport) {
       lines.push(`- 既有契约兼容性：${input.compatibilityReport.compatible ? "✅ 兼容" : "❌ 有 breaking change"}`);
@@ -1320,7 +1700,49 @@ export class TestingOrchestrator {
       lines.push("");
     }
 
-    // ---- 5. 合规证据（预留） ----
+    // ---- 5. 测试执行失败证据（P0-4 新增） ----
+    // 把真实 stderr / 失败用例名 / AssertionError 透传进 PR 描述，供人工排查与审计。
+    // 仅在存在失败时渲染，避免污染正常交付的 PR。
+    const execResults: ReadonlyArray<TestExecutionResultWithEvidence> = [
+      ...(input.contractTestResults ?? []),
+      ...(input.e2eTestResults ?? []),
+    ];
+    const failedExecResults = execResults.filter((r) => r.exitCode !== 0 || r.failedCount > 0);
+    if (failedExecResults.length > 0) {
+      lines.push("## 测试执行失败证据");
+      lines.push("");
+      lines.push("> 以下为真实子进程执行输出，未简化、未编造；供 G-7 门禁与人工排查使用。");
+      lines.push("");
+      for (const r of failedExecResults) {
+        lines.push(`### ${r.filePath}`);
+        lines.push("");
+        lines.push(`- 退出码：${r.exitCode} / 失败用例数：${r.failedCount} / 通过用例数：${r.passedCount}`);
+        if (r.failedCases && r.failedCases.length > 0) {
+          lines.push(`- 失败用例名：${r.failedCases.join("、")}`);
+        }
+        if (r.errorMessage) {
+          lines.push("- 失败原因：");
+          lines.push("```");
+          lines.push(r.errorMessage);
+          lines.push("```");
+        }
+        if (r.stderr) {
+          lines.push("- stderr（原始输出）：");
+          lines.push("```");
+          lines.push(r.stderr);
+          lines.push("```");
+        }
+        if (r.stdoutSnippet) {
+          lines.push("- stdout 片段（解析失败时保留）：");
+          lines.push("```");
+          lines.push(r.stdoutSnippet);
+          lines.push("```");
+        }
+        lines.push("");
+      }
+    }
+
+    // ---- 6. 合规证据（预留） ----
     lines.push("## 合规证据");
     lines.push("");
     lines.push("（本批次未启用 ICP，合规证据预留——P3 批次 11 实现）");
@@ -1369,20 +1791,31 @@ export class TestingOrchestrator {
   }
 
   /**
-   * 安全查询 PKC 风险热点（失败时降级为空数组）
+   * 查询 PKC 风险热点（P1 修复：真正接入，失败显式标 unknown）
+   *
+   * 旧实现 try 与 catch 都 `return []`，从不查询 PKC，使
+   * TestQualityContext.highRiskSymbols 恒空、CoverageGapChecker 空转判 passed。
+   * 新实现调用真实的 pkcAccessor.queryRiskHotspots：
+   * - 查询成功 → { symbols, available: true }
+   * - 查询失败 → { symbols: [], available: false }，调用方据此把
+   *   highRiskSymbolsUnknown 置 true，下游判定器按 unknown 处理（不得判 passed）。
    *
    * @param projectRoot 项目根目录
-   * @returns 高风险符号列表（失败时为空数组）
+   * @param pkcAccessor PKC 知识库访问器（来自 TestingLoopRequest）
+   * @param topN 高风险符号 Top-N
    */
-  private async pkcQueryRiskHotspotsSafe(projectRoot: string) {
+  private async pkcQueryRiskHotspotsSafe(
+    projectRoot: string,
+    pkcAccessor: PkcAccessor,
+    topN: number
+  ): Promise<{ readonly symbols: ReadonlyArray<UncoveredSymbol>; readonly available: boolean }> {
     try {
-      // 此处通过 coverageGate 间接访问 pkcAccessor
-      // coverageGate 内部已封装 pkcAccessor.queryRiskHotspots 调用
-      // 此处直接返回空数组，由 coverageGate 内部完成查询
-      // 注：本方法保留供 TestQualityContext 使用，避免重复查询
-      return [];
-    } catch {
-      return [];
+      const symbols = await pkcAccessor.queryRiskHotspots(projectRoot, topN);
+      return { symbols, available: true };
+    } catch (e) {
+      const errorMsg = e instanceof Error ? e.message : String(e);
+      this.log(`PKC 风险热点查询失败（高风险符号维度标记 unknown）：${errorMsg}`, "warn");
+      return { symbols: [], available: false };
     }
   }
 

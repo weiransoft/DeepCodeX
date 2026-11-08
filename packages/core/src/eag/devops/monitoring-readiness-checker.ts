@@ -28,6 +28,7 @@
  * - kubectl 命令不存在时（spawn error），serviceMonitorExists 校验项返回 false
  * - HTTP 请求失败 / 超时时，metricsEndpointReachable 校验项返回 false
  * - 配置文件不存在 / 解析失败时，prometheusScrapeConfig 校验项返回 false
+ * - 缺少 prometheusConfigPath 时该项标记 skipped，ready=false（信息不足不视为通过，2026-11-08 审查修复）
  * - 不抛异常，保证 check() 始终返回结构化结果
  *
  * K-4 决策（Alertmanager 规则校验首版不实现）：
@@ -91,6 +92,17 @@ const CHECK_ITEM_SERVICE_MONITOR = "serviceMonitorExists" as const;
 const CHECK_ITEM_METRICS_ENDPOINT = "metricsEndpointReachable" as const;
 const CHECK_ITEM_PROMETHEUS_CONFIG = "prometheusScrapeConfig" as const;
 
+/**
+ * 紧急回退开关（2026-11-08 审查修复新增）。
+ *
+ * 默认（未设置）：缺失 prometheusConfigPath 视为"无法校验"（skipped），绝不把信息不足算作 ready。
+ * 设置为 "1"：恢复修复前 K-4 决策简化的"未提供路径即视为通过"语义，便于线上紧急回退。
+ * 每次调用时读取（不缓存），便于测试与运维动态切换。
+ */
+function legacyPassThrough(): boolean {
+  return process.env.EAG_LEGACY_PASS_THROUGH === "1";
+}
+
 // ============================================================================
 // 内部类型定义
 // ============================================================================
@@ -148,7 +160,8 @@ interface PrometheusScrapeJob {
  *
  * 3. Prometheus scrape 配置含目标服务（prometheusScrapeConfig）：
  *    - 若 context.prometheusConfigPath 提供：读取文件 + 自实现 YAML parser 解析 + 校验含目标服务
- *    - 若 context.prometheusConfigPath 未提供：视为通过（ServiceMonitor 已存在即代表 Prometheus 已配置 scrape，K-4 决策简化）
+ *    - 若 context.prometheusConfigPath 未提供：信息不足 → skipped=true / passed=false，不计入 ready
+ *      （2026-11-08 审查修复，旧 K-4 决策简化"视为通过"已废止，可用 EAG_LEGACY_PASS_THROUGH=1 回退）
  *    - 文件不存在 / 解析失败 / 未匹配目标 = 失败
  *
  * 真实调用（对齐 NFR-3 测试不使用 mock）：
@@ -234,13 +247,17 @@ export class MonitoringReadinessCheckerImpl implements MonitoringReadinessChecke
     // ---------- 校验 3: Prometheus scrape 配置含目标服务 ----------
     const prometheusConfigResult = await this.checkPrometheusScrapeConfig(context);
     checkedItems.push(prometheusConfigResult);
-    if (!prometheusConfigResult.passed) {
+    if (prometheusConfigResult.skipped === true) {
+      // 2026-11-08 审查修复：信息不足导致的"未执行"显式披露，且不计入 ready
+      failures.push(`Prometheus scrape 配置校验未执行（skipped）：${prometheusConfigResult.detail}`);
+    } else if (!prometheusConfigResult.passed) {
       failures.push(`Prometheus scrape 配置未含目标服务：${prometheusConfigResult.detail}`);
     }
 
     // ---------- 汇总结果 ----------
-    // ready = 3 项全过；不可变优先：深冻结返回对象
-    const ready = checkedItems.every((item) => item.passed);
+    // 2026-11-08 审查修复：ready 要求每一项都真实通过且未被 skipped；
+    // 任何"信息不足/未执行"项都使 ready=false（绝不把无法校验算作就绪）。
+    const ready = checkedItems.every((item) => item.passed && item.skipped !== true);
     return Object.freeze({
       ready,
       checkedItems: Object.freeze(checkedItems) as ReadonlyArray<MonitoringCheckedItem>,
@@ -526,9 +543,9 @@ export class MonitoringReadinessCheckerImpl implements MonitoringReadinessChecke
   /**
    * 校验 Prometheus scrape 配置是否包含目标服务
    *
-   * 执行流程（K-4 决策简化）：
-   * 1. 若 context.prometheusConfigPath 未提供：视为通过
-   *    理由：ServiceMonitor 已存在即代表 Prometheus 已配置 scrape（ServiceMonitor CR 由 Prometheus Operator 自动同步）
+   * 执行流程（2026-11-08 审查修复）：
+   * 1. 若 context.prometheusConfigPath 未提供：信息不足 → 返回 skipped=true / passed=false（不计入 ready）
+   *    理由：无法校验不得视为通过；紧急回退开关 EAG_LEGACY_PASS_THROUGH=1 可恢复旧"视为通过"语义
    * 2. 若 context.prometheusConfigPath 提供：
    *    a. 读取文件内容（fs.readFileSync）
    *    b. 调用自实现 YAML parser 解析为 PrometheusScrapeJob 数组
@@ -543,12 +560,18 @@ export class MonitoringReadinessCheckerImpl implements MonitoringReadinessChecke
    * @returns MonitoringCheckedItem，含 name="prometheusScrapeConfig" / passed / detail
    */
   private async checkPrometheusScrapeConfig(context: MonitoringCheckContext): Promise<MonitoringCheckedItem> {
-    // K-4 决策简化：prometheusConfigPath 未提供时视为通过
+    // 2026-11-08 审查修复：prometheusConfigPath 未提供 = 信息不足，无法校验 → 显式 skipped 且 passed=false。
+    // 不再把"无法校验"算作通过（旧 K-4 决策简化是"信息不足即通过"的根因）。
+    // 环境变量 EAG_LEGACY_PASS_THROUGH=1 可紧急回退到旧的"视为通过"语义。
     if (!context.prometheusConfigPath) {
+      const legacy = legacyPassThrough();
       return Object.freeze({
         name: CHECK_ITEM_PROMETHEUS_CONFIG,
-        passed: true,
-        detail: "未提供 prometheusConfigPath，跳过 Prometheus 配置校验（依赖 ServiceMonitor 已存在）",
+        passed: legacy,
+        skipped: !legacy,
+        detail: legacy
+          ? "未提供 prometheusConfigPath，回退开关启用：跳过 Prometheus 配置校验（依赖 ServiceMonitor 已存在）"
+          : "未提供 prometheusConfigPath，无法校验 Prometheus scrape 配置（skipped，不计入 ready）",
       }) as MonitoringCheckedItem;
     }
 

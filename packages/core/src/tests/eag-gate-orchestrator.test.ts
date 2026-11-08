@@ -130,33 +130,53 @@ test("T2. design Loop → 跳过所有门禁（results 为空，allPassed=true�
 // T3. testing Loop + 普通 GateContext → 向后兼容跳过 G-6/G-7
 // ============================================================================
 
-test("T3. testing Loop + 普通 GateContext → 向后兼容跳过 G-6/G-7（results 为空）", () => {
+test("T3. testing Loop + 普通 GateContext → G-6/G-7 skipped 且默认 fail-closed（results 为空）", () => {
+  // 2026-11-08 EAG 全量审查修复：旧「静默跳过 G-6/G-7 却报 allPassed=true」被判定为
+  // 误报全绿。默认严格覆盖下，任何 skippedGates 都使 allPassed=false；
+  // 显式 strictGateCoverage:false（或 EAG_LEGACY_PASS_THROUGH=1）可回退到旧宽松语义。
   const orchestrator = new GateOrchestrator();
-  // 传入普通 GateContext（非 GateG6Context/GateG7Context），run() 应跳过 G-6/G-7 校验
-  // 这是批次 10 的向后兼容策略：既有调用方传入 GateContext 不会因 G-6/G-7 而失败
+  // 传入普通 GateContext（非 GateG6Context/GateG7Context），G-6/G-7 记为 missing-context
   const ctx = createContext({
     loopType: "testing",
     specStatus: "draft",
     planStatus: "draft",
   });
   const result = orchestrator.run(ctx);
-  assert.equal(result.results.length, 0);
-  assert.equal(result.allPassed, true);
+  assert.equal(result.results.length, 0, "G-6/G-7 均跳过 → 无实际执行结果");
+  assert.equal(result.allPassed, false, "默认 fail-closed：有 skipped 门禁不得报全绿");
+  assert.equal(result.firstFailedGate, "G-6", "首个跳过门禁应被披露为 firstFailedGate");
   assert.equal(result.loopType, "testing");
+
+  // A/B 回退对照：显式确认宽松覆盖后恢复修复前语义
+  const lenient = new GateOrchestrator({ strictGateCoverage: false }).run(ctx);
+  assert.equal(lenient.allPassed, true, "显式宽松覆盖必须能回退到旧语义");
+  assert.equal(lenient.firstFailedGate, null);
 });
 
 // ============================================================================
 // T4. coding Loop 全部通过 → allPassed=true
 // ============================================================================
 
-test("T4. coding Loop 全部通过 → allPassed=true，firstFailedGate=null", () => {
+test("T4. coding Loop 默认缺 G-4/G-5 检查器 → allPassed=false，firstFailedGate=G-4", () => {
+  // 2026-11-08 EAG 全量审查修复：默认 checkers 仅 G-1/2/3/6/7，coding 要求 G-1..G-5。
+  // 旧语义「缺 G-4/G-5 却报 allPassed=true」属误报全绿，默认改 fail-closed。
+  // 本用例同时用显式宽松覆盖做 A/B 对照，证明真实执行的 G-1/G-2/G-3 仍全部通过。
   const orchestrator = new GateOrchestrator();
   const ctx = createContext();
   const result = orchestrator.run(ctx);
-  assert.equal(result.allPassed, true);
-  assert.equal(result.firstFailedGate, null);
-  assert.equal(result.results.length, 3);
+  assert.equal(result.results.length, 3, "G-1/G-2/G-3 真实执行且通过");
+  assert.ok(
+    result.results.every((r) => r.passed),
+    "三条真实执行的门禁必须全通过"
+  );
+  assert.equal(result.allPassed, false, "缺 G-4/G-5 检查器时不得报全绿");
+  assert.equal(result.firstFailedGate, "G-4", "firstFailedGate 应指向首个缺失门禁");
   assert.equal(result.loopType, "coding");
+
+  // A/B 回退对照：显式确认宽松覆盖 → 恢复修复前 allPassed=true / firstFailedGate=null
+  const lenient = new GateOrchestrator({ strictGateCoverage: false }).run(ctx);
+  assert.equal(lenient.allPassed, true);
+  assert.equal(lenient.firstFailedGate, null);
 });
 
 // ============================================================================
@@ -282,11 +302,16 @@ test("T10. firstFailedGate 在 G-1 失败时为 G-1", () => {
   assert.equal(result.firstFailedGate, "G-1");
 });
 
-test("T10b. firstFailedGate 在全部通过时为 null", () => {
+test("T10b. firstFailedGate 在真实门禁全通过但缺检查器时为 G-4（默认 fail-closed）", () => {
+  // 2026-11-08 审查修复：默认严格覆盖把「缺检查器」也计入未通过。
+  // 显式宽松覆盖时 firstFailedGate 仍为 null（回退语义 A/B 对照）。
   const orchestrator = new GateOrchestrator();
   const ctx = createContext();
   const result = orchestrator.run(ctx);
-  assert.equal(result.firstFailedGate, null);
+  assert.equal(result.firstFailedGate, "G-4");
+
+  const lenient = new GateOrchestrator({ strictGateCoverage: false }).run(ctx);
+  assert.equal(lenient.firstFailedGate, null, "显式宽松覆盖下应恢复 null");
 });
 
 // ============================================================================
@@ -319,15 +344,21 @@ test("T12. getCheckers 返回注入的检查器列表", () => {
 // T13. skippedGates 披露缺检查器的门禁（2026-11-01：修复"静默跳过却报全绿"）
 // ============================================================================
 
-test("T13. coding Loop 缺 G-4/G-5 检查器时 skippedGates 显式披露", () => {
+test("T13. coding Loop 缺 G-4/G-5 检查器时 skippedGates 显式披露且默认判未通过", () => {
+  // 2026-11-08 审查修复：旧注释「默认（非严格）不改变既有 allPassed 语义」已废止，
+  // 默认改为严格覆盖（fail-closed）；显式 strictGateCoverage:false 仍可回退到宽松语义。
   const orchestrator = new GateOrchestrator();
   const result = orchestrator.run(createContext());
 
   const skipped = result.skippedGates ?? [];
   const noChecker = skipped.filter((s) => s.reason === "no-checker").map((s) => s.gate);
   assert.deepEqual(noChecker.sort(), ["G-4", "G-5"], "coding 要求执行 G-1..G-5，缺检查器的应被披露");
-  // 默认（非严格）不改变既有 allPassed 语义，避免破坏既有调用方
-  assert.equal(result.allPassed, true);
+  assert.equal(result.allPassed, false, "默认严格模式下缺检查器必须判未通过");
+  assert.equal(result.firstFailedGate, "G-4");
+
+  // A/B 回退对照
+  const lenient = new GateOrchestrator({ strictGateCoverage: false }).run(createContext());
+  assert.equal(lenient.allPassed, true, "显式宽松覆盖必须能回退到旧语义");
 });
 
 test("T14. strictGateCoverage=true 时缺检查器计入未通过（fail-closed）", () => {
@@ -338,7 +369,9 @@ test("T14. strictGateCoverage=true 时缺检查器计入未通过（fail-closed�
   assert.equal(result.firstFailedGate, "G-4", "未通过门禁应指向首个缺失的 G-4");
 });
 
-test("T15. testing Loop + 普通 GateContext → G-6/G-7 记为 missing-context 且不判失败", () => {
+test("T15. testing Loop + 普通 GateContext → G-6/G-7 记为 missing-context（默认亦计入未通过）", () => {
+  // 2026-11-08 审查修复：默认严格覆盖下 missing-context 同样使 allPassed=false，
+  // 本用例只验证 skippedGates 的披露内容与结果条数；allPassed 契约见 T3。
   const orchestrator = new GateOrchestrator();
   const result = orchestrator.run(createContext({ loopType: "testing" }));
 
@@ -346,6 +379,7 @@ test("T15. testing Loop + 普通 GateContext → G-6/G-7 记为 missing-context 
   const missingContext = skipped.filter((s) => s.reason === "missing-context").map((s) => s.gate);
   assert.deepEqual(missingContext.sort(), ["G-6", "G-7"], "向后兼容跳过应被披露为 missing-context");
   assert.equal(result.results.length, 0, "G-6/G-7 均跳过 → 无实际执行结果");
+  assert.equal(result.allPassed, false, "默认 fail-closed：missing-context 同样计入未通过");
 });
 
 test("T16. design Loop 跳过门禁时 skippedGates 为空数组", () => {

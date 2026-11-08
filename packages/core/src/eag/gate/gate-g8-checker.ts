@@ -13,8 +13,10 @@
  * - G-8-1: IaC 模板完整性（模板数量 > 0 且全部校验通过）
  * - G-8-2: 健康检查就绪（healthCheckResult.healthy = true）
  * - G-8-3: 烟雾测试通过（smokeTestResult.passed = true）
- * - G-8-4: 监控告警就位（monitoringReady = true，批次 13 暂固定为 true，批次 14 实现 Prometheus scrape 校验）
- * - G-8-5: 回滚预案存在（rollbackPlanExists = true，批次 13 暂固定为 true，批次 14 实现 RollbackPlan 文件存在性校验）
+ * - G-8-4: 监控告警就位（monitoringReady = true；由真实 MonitoringReadinessCheckerImpl 的 result.ready 得出，
+ *   未配置默认 false——2026-11-08 审查修复，不再恒真放行）
+ * - G-8-5: 回滚预案存在（rollbackPlanExists = true；由真实 RollbackPlanCheckerImpl 的 exists && valid 得出，
+ *   未配置默认 false——2026-11-08 审查修复，不再恒真放行）
  *
  * 设计依据：
  * - EAG-P4 批次 13 设计文档 §3.6 D1-3 GateG8Checker 部署门禁
@@ -145,19 +147,24 @@ export class GateG8CheckerImpl implements GateG8Checker {
       failures.push("G-8-3: 烟雾测试未通过（smokeTestResult.passed != true）");
     }
 
-    // G-8-4: 监控告警就位——monitoringReady 必须为 true
-    // 批次 13 暂固定为 true（设计文档 §3.6 L2594 + 风险登记 R-P4-9）：
-    // 批次 13 不实现 Prometheus scrape 配置校验，由 DevOpsOrchestrator 构造上下文时固定为 true；
-    // 批次 14 实现 Prometheus scrape 配置校验 + Alertmanager 规则存在性校验
-    if (!context.monitoringReady) {
+    // G-8-4: 监控告警就位
+    // 2026-11-08 审查修复：若注入真实检查结果，以 result.ready 为准
+    // （防止调用方仅把 monitoringReady 布尔置 true 就绕过真实校验）；
+    // 否则以布尔为准，该布尔由 DevOpsOrchestrator 用真实检查器计算，未配置默认 false。
+    const monitoringReady =
+      context.monitoringCheckResult !== undefined ? context.monitoringCheckResult.ready : context.monitoringReady;
+    if (!monitoringReady) {
       failures.push("G-8-4: 监控告警未就位（monitoringReady != true）");
     }
 
-    // G-8-5: 回滚预案存在——rollbackPlanExists 必须为 true
-    // 批次 13 暂固定为 true（设计文档 §3.6 L2595 + 风险登记 R-P4-9）：
-    // 批次 13 不实现 RollbackPlan 文件存在性校验，由 DevOpsOrchestrator 构造上下文时固定为 true；
-    // 批次 14 实现 RollbackPlan 文件存在性校验（由 K8sRollbackManager / HelmRollbackManager 生成）
-    if (!context.rollbackPlanExists) {
+    // G-8-5: 回滚预案存在
+    // 2026-11-08 审查修复：若注入真实检查结果，以 exists && valid 为准；
+    // 不再因为 context.rollbackPlanExists=true 就"跳过真实校验"（旧禁用模式恒真放行的根因）。
+    const rollbackPlanExists =
+      context.rollbackPlanCheckResult !== undefined
+        ? context.rollbackPlanCheckResult.exists && context.rollbackPlanCheckResult.valid
+        : context.rollbackPlanExists;
+    if (!rollbackPlanExists) {
       failures.push("G-8-5: 回滚预案不存在（rollbackPlanExists != true）");
     }
 

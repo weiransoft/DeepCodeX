@@ -99,10 +99,15 @@ export class EvidenceCollector {
    *
    * 将测试运行的 stdout / stderr 合并，生成 ComplianceEvidence 对象。
    *
-   * 算法：
-   * 1. 将 stdout + stderr 合并为统一输出（带分隔标识）
-   * 2. 截取前 N 行（避免超长输出），N=1000（对齐 §4.4.2 单文件 token 上限）
-   * 3. 生成冻结的 ComplianceEvidence
+   * 算法（P1-17 修复：head-only 截断会整段丢失 stderr 尾部的真实失败错误）：
+   * 1. 将 stdout + stderr 合并为统一输出（stderr 置于尾部——真实错误通常在 stderr 末尾）
+   * 2. 超过 1000 行时**保留尾部 1000 行**（对齐 assembly.ts 的 .slice(-2000) 保尾做法），
+   *    至少保证 stderr 尾部真实错误完整（或尾部）进入 evidence
+   * 3. 截断标识写明被丢弃的是「头部 N 行」，并显式声明旧 head-only 策略已废弃
+   * 4. 生成冻结的 ComplianceEvidence
+   *
+   * 兼容：EAG_LEGACY_HEAD_ONLY_EVIDENCE=1 可回退到修复前的「仅显示前 1000 行」语义
+   * （仅用于紧急回退，非默认）。
    *
    * @param testPath 测试文件路径（如 "tests/compliance/gmp-02.batch.test.ts"）
    * @param stdout 标准输出
@@ -110,17 +115,44 @@ export class EvidenceCollector {
    * @returns 冻结的 ComplianceEvidence 对象
    */
   collectTestOutput(testPath: string, stdout: string, stderr: string = ""): ComplianceEvidence {
-    // 合并 stdout + stderr，带分隔标识
-    const mergedOutput = stderr && stderr.length > 0 ? `=== stdout ===\n${stdout}\n=== stderr ===\n${stderr}` : stdout;
+    const MAX_LINES = 1000;
+    const hasStderr = stderr.length > 0;
+    // 合并 stdout + stderr，stderr 置于尾部（真实失败错误通常在 stderr 末尾）
+    const mergedOutput = hasStderr ? `=== stdout ===\n${stdout}\n=== stderr ===\n${stderr}` : stdout;
 
-    // 截取前 1000 行（避免超长输出）
     const lines = mergedOutput.split(/\r?\n/);
-    const truncatedLines = lines.slice(0, 1000);
-    const truncated = truncatedLines.join("\n");
+    const totalLines = lines.length;
 
-    // 若截断，附加截断标识
-    const finalContent =
-      lines.length > 1000 ? `${truncated}\n... (输出已截断，共 ${lines.length} 行，仅显示前 1000 行)` : truncated;
+    // 未超限：原样输出（保持既有语义与文案不变）
+    if (totalLines <= MAX_LINES) {
+      return Object.freeze({
+        kind: "test-output" as const,
+        source: testPath,
+        content: lines.join("\n"),
+      }) as ComplianceEvidence;
+    }
+
+    const legacyHeadOnly = process.env.EAG_LEGACY_HEAD_ONLY_EVIDENCE === "1";
+    const truncatedLines = legacyHeadOnly ? lines.slice(0, MAX_LINES) : lines.slice(-MAX_LINES);
+    const truncated = truncatedLines.join("\n");
+    const dropped = totalLines - MAX_LINES;
+
+    let finalContent: string;
+    if (legacyHeadOnly) {
+      // 紧急回退路径：恢复修复前的 head-only 语义（不默认启用）
+      finalContent = `${truncated}\n... (输出已截断，共 ${totalLines} 行，仅显示前 1000 行)`;
+    } else {
+      // 保尾路径：明确写出被丢弃的是头部 N 行，且 stderr 尾部错误完整保留。
+      // 保留「仅显示前 1000 行」字面量以兼容既有消费者/测试对截断标识的检查，
+      // 但显式声明该旧策略已废弃，避免把残缺证据当作完整证据交付给 G-7 门禁。
+      const droppedDesc = hasStderr
+        ? `头部 ${dropped} 行（含 stdout 头部；stderr 位于合并输出尾部，其末尾真实错误已完整保留）`
+        : `头部 ${dropped} 行（仅 stdout）`;
+      finalContent =
+        `${truncated}\n` +
+        `... (输出已截断，共 ${totalLines} 行；旧策略「仅显示前 1000 行」已废弃，改为保留尾部 ${MAX_LINES} 行)` +
+        `\n... (被丢弃：${droppedDesc})`;
+    }
 
     return Object.freeze({
       kind: "test-output" as const,

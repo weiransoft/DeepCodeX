@@ -1431,13 +1431,18 @@ export class SessionPool {
     // chat 每条指令新建导致 autoExecuted 守卫失效的病灶在此被会话级记忆兜住；
     // goal 无法提取（裸命令）时不适用指纹守卫，维持原行为。
     if (capture && chat.sessionId && chat.manager.hasFailedAutonomousRun(chat.sessionId, capture.goalText)) {
+      // 上一轮诊断可见段：从 core 失败 run 记录实时重建真实终止原因 / 失败用例，
+      // 取不到诊断时返回空串（诚实降级，绝不编造），避免泛化模板掩盖真实失败。
+      // 不在此另造 confirm 消费机制——「执行这个」实际走 core 已修的
+      // consumeConfirmPreviousDecision（本文件全文件无 confirm_previous 处理逻辑）。
+      const diagnostics = chat.manager.getFailedAutonomousRunDiagnostics(chat.sessionId, capture.goalText);
       try {
         const now = new Date().toISOString();
         this.hub.publish(chat.chatId, "assistant_message", {
           chatId: chat.chatId,
           messageId: randomUUID(),
           role: "system",
-          content: `【EAG 拦截】建议中的目标在本会话已运行过且未成功完成，为避免失败目标被自动重放形成空转循环，本次自动执行已跳过。如确认要重新执行，请回复"执行这个"或提供修改后的新目标。`,
+          content: `【EAG 拦截】建议中的目标在本会话已运行过且未成功完成，为避免失败目标被自动重放形成空转循环，本次自动执行已跳过。如确认要重新执行，请回复"执行这个"或提供修改后的新目标。${diagnostics}`,
           createTime: now,
           updateTime: now,
         });

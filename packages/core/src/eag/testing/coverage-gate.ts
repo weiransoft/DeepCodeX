@@ -91,6 +91,42 @@ const C8ReportSchema = z.object({
   }),
 });
 
+/**
+ * PKC 查询失败时的诚实降级开关（P0-5，环境变量回退）
+ *
+ * 默认（未设置）：PKC 查询失败 → 高风险符号维度 unknown、门禁不得判通过（fail-closed）。
+ * 设为 "1"：回退到旧的宽松语义（忽略 PKC 错误，空数组仍按「无必测约束」处理）。
+ * 对齐用户红线「新行为若改变默认语义提供环境变量开关可回退」。
+ */
+function isPkcLenientMode(): boolean {
+  return process.env.EAG_COVERAGE_PKC_LENIENT === "1";
+}
+
+/**
+ * 计算高风险符号覆盖率（纯函数，可独立测试，P0-5 新增判定入口）
+ *
+ * - PKC 查询失败 / 信息不足（options.pkcUnavailable=true）→ 返回 0，
+ *   绝不把「无法判定」解释为 100% 覆盖率（旧实现缺陷）。
+ * - PKC 成功返回且确实无风险热点 → 100%（无必测约束，合法场景）。
+ * - 否则 → (已覆盖数 / 总数) * 100。
+ *
+ * options 为可选参数，旧的两参调用行为完全不变（保持兼容）。
+ */
+export function computeHighRiskSymbolsCoverage(
+  riskHotspots: ReadonlyArray<UncoveredSymbol>,
+  uncoveredHighRiskSymbols: ReadonlyArray<UncoveredSymbol>,
+  options?: { readonly pkcUnavailable?: boolean }
+): number {
+  if (options?.pkcUnavailable) {
+    return 0;
+  }
+  if (riskHotspots.length === 0) {
+    return 100;
+  }
+  const coveredCount = riskHotspots.length - uncoveredHighRiskSymbols.length;
+  return (coveredCount / riskHotspots.length) * 100;
+}
+
 // ============================================================================
 // 3. 自定义错误类
 // ============================================================================
@@ -135,6 +171,15 @@ export interface CoverageGateRequest {
   readonly topN: number;
   /** 失败次数（用于升级 BLOCKER 判定，由调用方维护计数） */
   readonly consecutiveFailureCount: number;
+  /**
+   * 预采集的 c8 原始 JSON 报告（P0-5 新增，可选，旧调用方零回归）。
+   *
+   * 提供时 check() 直接解析该报告、跳过 c8 子进程 spawn，用于离线 / 单测场景
+   * 确定性覆盖门禁判定逻辑（例如验证 PKC 查询失败时的诚实降级）。
+   * 未提供时行为与旧实现完全一致（真实 spawn c8）。
+   * 注：该字段只是把 c8 原本会产出的输入显式传入，不改变任何判定语义。
+   */
+  readonly c8RawReport?: string;
 }
 
 /**
@@ -284,8 +329,9 @@ export class CoverageGate {
     // 1. 校验请求字段
     this.validateRequest(request);
 
-    // 2. 调用 c8 spawn 子进程执行覆盖率采集
-    const c8RawReport = await this.runC8(request);
+    // 2. 获取 c8 原始报告：优先使用调用方显式提供的预采集报告（离线/单测），
+    //    否则按旧行为真实 spawn c8 子进程。
+    const c8RawReport = request.c8RawReport ?? (await this.runC8(request));
 
     // 3. 解析 c8 JSON 报告
     const parsedReport = this.reportParser.parse(c8RawReport);
@@ -295,36 +341,54 @@ export class CoverageGate {
     );
 
     // 4. 从 PKC 查询高风险符号
+    // P0-5 修复：旧实现 catch 后仅 log(warn)，riskHotspots 保持 []，
+    // 随后 calculateHighRiskSymbolsCoverage([]) 返回 100 → 该维度被误判达标、
+    // 门禁误通过。新实现显式标记 pkcUnavailable / pkcError 并 fail-closed。
+    const pkcLenient = isPkcLenientMode();
     let riskHotspots: ReadonlyArray<UncoveredSymbol> = [];
+    let pkcUnavailable = false;
+    let pkcError = "";
     try {
       riskHotspots = await this.pkcAccessor.queryRiskHotspots(request.projectRoot, request.topN);
     } catch (e) {
-      // PKC 查询失败不阻断覆盖率门禁，仅记录错误
-      this.log(`查询 PKC 风险热点失败（降级为无高风险符号）：${e instanceof Error ? e.message : String(e)}`, "warn");
+      const errorMsg = e instanceof Error ? e.message : String(e);
+      if (pkcLenient) {
+        // 显式回退：恢复旧宽松语义（忽略 PKC 错误）
+        this.log(`查询 PKC 风险热点失败，但 EAG_COVERAGE_PKC_LENIENT=1 已启用，回退到旧宽松语义：${errorMsg}`, "warn");
+      } else {
+        pkcUnavailable = true;
+        pkcError = errorMsg;
+        this.log(`查询 PKC 风险热点失败（PKC 不可用，高风险符号维度标记 unknown / 不判达标）：${errorMsg}`, "warn");
+      }
     }
 
     // 5. 比对 c8 报告与高风险符号列表，识别未覆盖的高风险符号
     const uncoveredHighRiskSymbols = this.identifyUncoveredHighRiskSymbols(parsedReport, riskHotspots, request);
 
-    // 6. 计算高风险符号覆盖率
-    const highRiskSymbolsCoverage = this.calculateHighRiskSymbolsCoverage(riskHotspots, uncoveredHighRiskSymbols);
+    // 6. 计算高风险符号覆盖率（PKC 不可用时返回 0，绝不返回 100）
+    const highRiskSymbolsCoverage = this.calculateHighRiskSymbolsCoverage(riskHotspots, uncoveredHighRiskSymbols, {
+      pkcUnavailable,
+    });
 
-    // 7. 按 CoverageThreshold 判定是否达标
-    const failedDimensions = this.evaluateThreshold(parsedReport, highRiskSymbolsCoverage);
+    // 7. 按 CoverageThreshold 判定是否达标（PKC 不可用时强制把 highRiskSymbols 记为未达标）
+    const failedDimensions = this.evaluateThreshold(parsedReport, highRiskSymbolsCoverage, pkcUnavailable);
 
     // 8. 应用失败升级策略
     // consecutiveFailureCount = 本次之前已连续失败的次数（由调用方跨轮保有）
     //   - 本次为第 1 次失败（count=0）→ WARNING（passed=true），留一轮修复机会
     //   - 本次为第 N 次失败且 N ≥ COVERAGE_CONSECUTIVE_FAILURE_THRESHOLD → BLOCKER（passed=false）
     // 2026-11-01：判据改写为显式的「第几次失败」口径（failureOrdinal），
-    // 与旧式 `count >= THRESHOLD - 1` 代数等价，但消除了"少算本次"的读数歧义——
-    // 此前该处与调用方不可达的自增分支叠加，产生了"首次失败必 passed=true
-    // 且计数永不推进 → 单 run 内永不阻断"的缺陷（调用方已在 TestingOrchestrator 修复）。
+    // 与旧式 `count >= THRESHOLD - 1` 代数等价，但消除了"少算本次"的读数歧义。
+    //
+    // P0-5 补充：PKC 不可用属于「信息不足 / 查询失败」，按用户红线必须降级为
+    // failed/unknown，绝不 passed。这是一条独立于「覆盖率不足首次 WARNING」的
+    // 路径——首次 WARNING 针对可修复的覆盖率缺口，而 PKC 不可用意味着根本没有
+    // 判定证据，不得放行。EAG_COVERAGE_PKC_LENIENT=1 可回退到旧语义。
     const failureOrdinal = request.consecutiveFailureCount + 1;
     const isBlocker = failureOrdinal >= COVERAGE_CONSECUTIVE_FAILURE_THRESHOLD;
-    const passed = failedDimensions.length === 0 || !isBlocker;
+    const passed = pkcUnavailable ? false : failedDimensions.length === 0 || !isBlocker;
 
-    // 9. 构建并冻结 CoverageReport
+    // 9. 构建并冻结 CoverageReport（PKC 不可用时显式标注「PKC 不可用」证据）
     const report = Object.freeze({
       lines: parsedReport.lines,
       branches: parsedReport.branches,
@@ -335,9 +399,15 @@ export class CoverageGate {
       passed,
       failedDimensions: Object.freeze([...failedDimensions]),
       rawReport: parsedReport.raw,
+      ...(pkcUnavailable ? { pkcUnavailable: true as const, pkcError } : {}),
     }) as CoverageReport;
 
-    if (!passed) {
+    if (pkcUnavailable) {
+      this.log(
+        `PKC 不可用，覆盖率门禁不通过（高风险符号维度 unknown）：${failedDimensions.join(", ")}；原因：${pkcError}`,
+        "error"
+      );
+    } else if (!passed) {
       this.log(
         `覆盖率门禁未通过（连续失败 ${request.consecutiveFailureCount + 1} 次，已升级 BLOCKER）：${failedDimensions.join(", ")}`,
         "error"
@@ -495,23 +565,25 @@ export class CoverageGate {
   /**
    * 计算高风险符号覆盖率
    *
-   * 算法：
-   * - 若无高风险符号 → 覆盖率 100%（无必测约束）
+   * 算法（P0-5 修复）：
+   * - PKC 查询失败 / 信息不可判定 → 0（绝不把空数组解释为 100%）
+   * - PKC 成功返回且确实无高风险符号 → 100%（无必测约束，合法场景）
    * - 否则：覆盖率 = (1 - 未覆盖数 / 总数) * 100
+   *
+   * options 为可选参数（新增判定入口 computeHighRiskSymbolsCoverage 的同构包装），
+   * 旧的两参调用行为完全不变，保持兼容。
    *
    * @param riskHotspots 风险热点列表
    * @param uncoveredHighRiskSymbols 未覆盖的高风险符号列表
+   * @param options 可选：pkcUnavailable 标记 PKC 查询失败
    * @returns 高风险符号覆盖率（0~100）
    */
   private calculateHighRiskSymbolsCoverage(
     riskHotspots: ReadonlyArray<UncoveredSymbol>,
-    uncoveredHighRiskSymbols: ReadonlyArray<UncoveredSymbol>
+    uncoveredHighRiskSymbols: ReadonlyArray<UncoveredSymbol>,
+    options?: { readonly pkcUnavailable?: boolean }
   ): number {
-    if (riskHotspots.length === 0) {
-      return 100;
-    }
-    const coveredCount = riskHotspots.length - uncoveredHighRiskSymbols.length;
-    return (coveredCount / riskHotspots.length) * 100;
+    return computeHighRiskSymbolsCoverage(riskHotspots, uncoveredHighRiskSymbols, options);
   }
 
   /**
@@ -522,15 +594,20 @@ export class CoverageGate {
    * 2. 比对分支覆盖率与 threshold.branches
    * 3. 比对函数覆盖率与 threshold.functions
    * 4. 比对高风险符号覆盖率与 threshold.highRiskSymbols
-   * 5. 任一维度未达标 → 加入 failedDimensions 列表
+   * 5. P0-5：PKC 不可用时强制把 highRiskSymbols 记为未达标（unknown 不得判达标）
+   * 6. 任一维度未达标 → 加入 failedDimensions 列表
+   *
+   * pkcUnavailable 为可选参数（默认 false），旧的两参调用行为完全不变，保持兼容。
    *
    * @param parsedReport c8 解析后报告
    * @param highRiskSymbolsCoverage 高风险符号覆盖率
+   * @param pkcUnavailable PKC 查询是否失败（信息不足）
    * @returns 未达标维度列表
    */
   private evaluateThreshold(
     parsedReport: Readonly<C8ParsedReport>,
-    highRiskSymbolsCoverage: number
+    highRiskSymbolsCoverage: number,
+    pkcUnavailable = false
   ): CoverageFailedDimension[] {
     const failed: CoverageFailedDimension[] = [];
 
@@ -543,7 +620,7 @@ export class CoverageGate {
     if (parsedReport.functions < this.threshold.functions) {
       failed.push("functions");
     }
-    if (highRiskSymbolsCoverage < this.threshold.highRiskSymbols) {
+    if (pkcUnavailable || highRiskSymbolsCoverage < this.threshold.highRiskSymbols) {
       failed.push("highRiskSymbols");
     }
 

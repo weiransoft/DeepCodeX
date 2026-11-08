@@ -239,6 +239,14 @@ export interface DeleteResult {
   readonly deletedAt: string;
   /** 是否已物理删除（true 表示对象不存在或已被生命周期规则清理） */
   readonly permanent: boolean;
+  /**
+   * 可选：删除未能执行时的失败原因（P1-18 修复新增）。
+   *
+   * 仅在「前置 get 因非 404 异常失败、删除流程根本未执行」且调用方选择
+   * 诚实降级（EAG_TCS_DELETE_RETURN_ERROR=1）而非抛异常时出现。
+   * 出现该字段时 permanent 必为 false——绝不谎报删除成功。
+   */
+  readonly error?: string;
 }
 
 /**

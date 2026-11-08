@@ -403,6 +403,14 @@ export interface SmokeTestResult {
   readonly duration: number;
   /** 失败用例详情列表 */
   readonly failures: ReadonlyArray<SmokeTestFailure>;
+  /**
+   * 未通过原因（可选，2026-11-08 审查修复新增）。
+   *
+   * 用于区分「一条用例都没跑」与「跑完零失败」两种空集合语义：
+   * 当 totalTests===0 时 passed=false，且本字段置为 "no-test-executed"，
+   * 避免把「无法执行测试」误报成「测试全部通过」。
+   */
+  readonly reason?: string;
 }
 
 /**
@@ -542,8 +550,10 @@ export interface DevOpsEventEmitter {
  * - iacGenerationContext：IaC 生成上下文（含项目名 / 环境 / 镜像 / 端口 / 资源配置等）
  * - deployContext：部署上下文（含 runId / 项目名 / IaC 模板 / 策略类型 / 超时）
  * - smokeTestCases：烟雾测试用例列表
- * - monitoringReady：监控告警就位标记（可选，默认 true；批次 14 实现完整监控就绪检查）
- * - rollbackPlanExists：回滚预案存在标记（可选，默认 true；批次 14 实现完整回滚预案检查）
+ * - monitoringReady：监控告警就位标记（可选；未配置且未注入真实检查器时 DevOpsOrchestrator 默认按 false 处理，
+ *   不再默认 true——2026-11-08 审查修复）
+ * - rollbackPlanExists：回滚预案存在标记（可选；未配置且未注入真实检查器时默认按 false 处理，
+ *   不再默认 true——2026-11-08 审查修复）
  *
  * 字段说明（批次 14 新增可选字段，向后兼容）：
  * - monitoringCheckContext：监控检查上下文（注入时 DevOpsOrchestrator 调用真实检查器）
@@ -560,9 +570,9 @@ export interface DevOpsContext extends GateContext {
   readonly deployContext: DeployContext;
   /** 烟雾测试用例列表 */
   readonly smokeTestCases: ReadonlyArray<SmokeTestCase>;
-  /** 监控告警就位标记（可选，默认 true） */
+  /** 监控告警就位标记（可选；未配置时 DevOpsOrchestrator 按 false 处理，不再默认 true） */
   readonly monitoringReady?: boolean;
-  /** 回滚预案存在标记（可选，默认 true） */
+  /** 回滚预案存在标记（可选；未配置时 DevOpsOrchestrator 按 false 处理，不再默认 true） */
   readonly rollbackPlanExists?: boolean;
   /** 监控检查上下文（可选，批次 14 新增，注入时 DevOpsOrchestrator 调用真实检查器） */
   readonly monitoringCheckContext?: MonitoringCheckContext;
@@ -630,8 +640,10 @@ export interface DevOpsResult {
  * 1. IaC 模板完整性（iacTemplates 数组非空，length > 0）
  * 2. 健康检查就绪（HealthCheckResult.healthy=true）
  * 3. 烟雾测试通过（SmokeTestResult.passed=true）
- * 4. 监控就绪（monitoringReady=true，批次 13 暂固定为 true，批次 14 实现）
- * 5. 回滚预案存在（rollbackPlanExists=true，批次 13 暂固定为 true，批次 14 实现）
+ * 4. 监控就绪（monitoringReady=true；由真实 MonitoringReadinessCheckerImpl 的 result.ready 得出，
+ *    未配置默认 false——2026-11-08 审查修复）
+ * 5. 回滚预案存在（rollbackPlanExists=true；由真实 RollbackPlanCheckerImpl 的 exists && valid 得出，
+ *    未配置默认 false——2026-11-08 审查修复）
  *
  * 说明：
  * - IaC 模板的 CLI 校验（terraform validate / kubectl dry-run / helm lint）由
@@ -654,10 +666,14 @@ export interface DevOpsResult {
  * - projectRoot：项目根目录（供 RollbackPlanChecker 拼接文件路径）
  * - runId：运行 ID（供 RollbackPlanChecker 拼接文件名）
  *
- * 禁用模式（向后兼容）：
- * - monitoringReady=true 显式传入时跳过真实校验
- * - rollbackPlanExists=true 显式传入时跳过真实校验
- * - 既有测试用例显式传入 true，保持行为不变
+ * 真实校验契约（2026-11-08 审查修复，替代旧的"禁用模式"）：
+ * - monitoringReady / rollbackPlanExists 是**校验结果的布尔值**，不是"跳过校验"的开关。
+ * - DevOpsOrchestrator 在构造本上下文时调用真实检查器（MonitoringReadinessCheckerImpl /
+ *   RollbackPlanCheckerImpl），以 result.ready / (result.exists && result.valid) 为准；
+ *   未配置检查器且未显式传布尔值时默认 false（诚实降级，绝不默认 true）。
+ * - 若注入了 monitoringCheckResult / rollbackPlanCheckResult，GateG8CheckerImpl 优先以真实结果为准，
+ *   防止调用方只把布尔值置 true 来绕过真实校验。
+ * - 紧急回退：环境变量 EAG_LEGACY_PASS_THROUGH=1 恢复修复前的默认放行语义（仅用于回退，非默认）。
  */
 export interface GateG8Context extends GateContext {
   /** Loop 类型（固定为 "deploy"） */
@@ -682,6 +698,10 @@ export interface GateG8Context extends GateContext {
   readonly projectRoot?: string;
   /** 运行 ID（可选，批次 14 新增，供 RollbackPlanChecker 拼接文件名） */
   readonly runId?: string;
+  /** 监控就绪真实检查结果（可选，2026-11-08 新增；注入时 G-8 以 result.ready 为准） */
+  readonly monitoringCheckResult?: MonitoringCheckResult;
+  /** 回滚预案真实检查结果（可选，2026-11-08 新增；注入时 G-8 以 exists && valid 为准） */
+  readonly rollbackPlanCheckResult?: RollbackPlanCheckResult;
 }
 
 /**
@@ -1224,6 +1244,13 @@ export interface MonitoringCheckedItem {
   readonly passed: boolean;
   /** 详情（如 ServiceMonitor 名称 / HTTP 状态码 / Prometheus 配置路径） */
   readonly detail: string;
+  /**
+   * 是否因信息不足而未执行（可选，2026-11-08 审查修复新增）。
+   *
+   * true 表示该检查项没有真实跑过（如缺少 prometheusConfigPath），
+   * 此时 passed 必须为 false，且该项不得计入 ready（信息不足绝不视为就绪）。
+   */
+  readonly skipped?: boolean;
 }
 
 // ============================================================================

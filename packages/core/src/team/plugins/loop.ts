@@ -113,6 +113,13 @@ export class LoopPlugin extends BasePlugin {
     ctx.state["loopExitReason"] = exitReason;
 
     const summary = `Loop: ${i} iterations, exit=${exitReason}, last=${formatValue(lastResult)}`;
+    // 诚实表达「未达成」：达 max-iterations（或跑满轮数仍未命中退出条件）不算成功，
+    // 绝不返回 succeeded。环境变量 DEEPCODE_LOOP_REPORT_MAX_ITER_AS_SUCCESS=1 可回退旧行为。
+    const allowMaxIterAsSuccess = process.env["DEEPCODE_LOOP_REPORT_MAX_ITER_AS_SUCCESS"] === "1";
+    if (exitReason === "max-iterations" && !allowMaxIterAsSuccess) {
+      this.log(ctx, "WARNING", `Loop: 达到最大迭代次数（${maxIterations}）仍未满足退出条件，诚实判未达成`);
+      return this.fail(ctx, `Loop: 未达成（达 max-iterations=${maxIterations} 仍未命中退出条件）— ${summary}`);
+    }
     return this.ok(ctx, summary, [`loop-${ctx.dispatch.dispatchId}-history.json`]);
   }
 }

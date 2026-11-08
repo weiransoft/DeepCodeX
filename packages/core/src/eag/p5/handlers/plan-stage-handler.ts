@@ -246,7 +246,14 @@ export function loadPreviousRunContext(projectRoot: string, currentRunId: string
     `${prev.totalLlmCallCount} 次 LLM 请求，连续失败 ${prev.consecutiveFailures}${abortReasonPart}）。` +
     `若上一轮为 aborted/failed，请勿机械重跑同一张卡：优先分析失败原因、` +
     `换思路分解任务，或在不可行时输出 stop。`;
-  return text.length > PREVIOUS_RUN_CONTEXT_MAX_CHARS ? text.slice(0, PREVIOUS_RUN_CONTEXT_MAX_CHARS) : text;
+  if (text.length <= PREVIOUS_RUN_CONTEXT_MAX_CHARS) return text;
+  // 头部 + 尾部保留（2026-11-08）：head-only（slice(0, MAX)）会在 abortReason 很长时
+  // 丢掉终止原因后半段与尾部固定建议（"请勿机械重跑同一张卡…"），而后者恰是跨 run
+  // 失败记忆里最关键的行为约束。头部给出 runId/状态/终止原因开头，尾部保留原因结尾
+  // 与固定建议；中段省略标记让模型知道记忆被截断，避免把拼接当原文。
+  const headChars = Math.ceil(PREVIOUS_RUN_CONTEXT_MAX_CHARS * 0.6);
+  const tailChars = PREVIOUS_RUN_CONTEXT_MAX_CHARS - headChars;
+  return `${text.slice(0, headChars)}\n…（跨 run 记忆中段省略）…\n${text.slice(-tailChars)}`;
 }
 
 // ============================================================================

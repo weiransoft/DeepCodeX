@@ -38,7 +38,15 @@
 
 import * as crypto from "node:crypto";
 import type { LoopType } from "../loop/models";
-import type { BlockageReport, LogCallback, MilestoneRecord, MultiLoopNode, MultiLoopPlan, RunState } from "./types";
+import type {
+  BlockageReport,
+  LogCallback,
+  MilestoneRecord,
+  MultiLoopNode,
+  MultiLoopPlan,
+  MultiLoopResumeSnapshot,
+  RunState,
+} from "./types";
 import type { GateStatusSnapshot, ResourceAccessGraph, BlockageAnalysisReport } from "./types";
 import { BLOCKAGE_TRIGGER_HUMAN_INTERVENTION_THRESHOLD, DEFAULT_MAX_MULTI_LOOP_ITERATIONS } from "./types";
 import type { MultiLoopPlanner } from "./multi-loop-planner";
@@ -139,6 +147,14 @@ export interface LoopExecutionContext {
   readonly compliancePackIds?: ReadonlyArray<string>;
   /** 当前已完成节点 ID 列表（按拓扑序） */
   readonly completedNodeIds: ReadonlyArray<string>;
+  /** 上一轮失败原因（resume 时携带失败反馈，可选；新增字段，旧调用方零回归） */
+  readonly failureReason?: string;
+  /** 上一轮失败的测试 ID 列表（resume 时携带，可选） */
+  readonly failedTestIds?: ReadonlyArray<string>;
+  /** 阻塞原因（human-checkpoint / paused，可选） */
+  readonly blockedReason?: string;
+  /** 已生成的 tasks 文档内容（resume 复用，可选） */
+  readonly tasksContent?: string;
 }
 
 /**
@@ -808,7 +824,7 @@ export class EagRunHandler {
       }
     } // 结束 if (finalStatus !== "human-checkpoint")
 
-    // ===== Step 6: 追加终态事件（run-completed / run-failed） =====
+    // ===== Step 6: 追加终态事件（run-completed / run-failed / human-checkpoint） =====
     if (finalStatus === "completed") {
       try {
         runState = await this.runStateStore.appendEvent(runState.runId, {
@@ -831,7 +847,35 @@ export class EagRunHandler {
       } catch (err) {
         this.logger(`追加 run-failed 事件失败：${err instanceof Error ? err.message : String(err)}`, "warn");
       }
+    } else if (finalStatus === "human-checkpoint") {
+      // P0-1：human-checkpoint 之前不追加任何终态事件，导致 RunState 停留在 running。
+      // 这里补写一条收尾事件持久化 blockedReason；payload.humanCheckpoint=true 让共用状态机
+      // 保持 status="human-checkpoint"（而非降级为普通 paused），/eag-resume 方能正确识别。
+      try {
+        runState = await this.runStateStore.appendEvent(runState.runId, {
+          type: "run-paused",
+          payload: {
+            reason: failureReason ?? "等待人工决策",
+            humanCheckpoint: true,
+          },
+        });
+      } catch (err) {
+        this.logger(`追加 human-checkpoint 终态事件失败：${err instanceof Error ? err.message : String(err)}`, "warn");
+      }
     }
+
+    // ===== Step 6.5: 持久化 resume 快照（P0-3） =====
+    // 把原 plan、已生成 spec/plan/tasks、失败反馈、已完成节点集合落盘，
+    // 供 /eag-resume 复用，避免用最小 spec 裸重放重建 plan、丢失失败上下文。
+    this.persistResumeSnapshot(runState.runId, request.projectRoot, {
+      plan,
+      specContent: currentSpecContent || specForPlan,
+      ...(currentPlanContent ? { planContent: currentPlanContent } : {}),
+      ...(currentTasksContent ? { tasksContent: currentTasksContent } : {}),
+      ...(failureReason ? { failureReason } : {}),
+      ...(finalStatus === "human-checkpoint" ? { blockedReason: failureReason ?? "等待人工决策" } : {}),
+      completedNodeIds: [...completedNodeIds],
+    });
 
     // ===== Step 7: 生成最终报告 =====
     const durationSec = (Date.now() - startTime) / 1000;
@@ -871,6 +915,27 @@ export class EagRunHandler {
   // ----------------------------------------------------------------------
   // 私有方法
   // ----------------------------------------------------------------------
+
+  /**
+   * 持久化 resume 复用快照（P0-3 辅助方法）
+   *
+   * 快照写入失败仅告警、不阻断主流程（快照是增强能力，缺失时 resume 会
+   * 诚实降级为重新生成 plan，绝不伪造成功）。
+   *
+   * @param runId run-id
+   * @param projectRoot 项目根目录
+   * @param snapshot 复用快照
+   */
+  private persistResumeSnapshot(runId: string, projectRoot: string, snapshot: Readonly<MultiLoopResumeSnapshot>): void {
+    try {
+      this.runStateStore.saveResumeSnapshot(runId, projectRoot, snapshot);
+    } catch (err) {
+      this.logger(
+        `持久化 resume 快照失败（不阻断主流程，resume 将降级重建 plan）：${err instanceof Error ? err.message : String(err)}`,
+        "warn"
+      );
+    }
+  }
 
   /**
    * 校验 /eag-run 请求字段

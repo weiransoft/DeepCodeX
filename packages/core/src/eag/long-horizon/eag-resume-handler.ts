@@ -34,7 +34,15 @@
 
 import * as childProcess from "node:child_process";
 import type { LoopType } from "../loop/models";
-import type { BlockageReport, LogCallback, MilestoneRecord, MultiLoopNode, MultiLoopPlan, RunState } from "./types";
+import type {
+  BlockageReport,
+  LogCallback,
+  MilestoneRecord,
+  MultiLoopNode,
+  MultiLoopPlan,
+  MultiLoopResumeSnapshot,
+  RunState,
+} from "./types";
 import { BLOCKAGE_TRIGGER_HUMAN_INTERVENTION_THRESHOLD, DEFAULT_MAX_MULTI_LOOP_ITERATIONS } from "./types";
 import type { MultiLoopPlanner } from "./multi-loop-planner";
 import type { RunStateStore } from "./run-state-store";
@@ -155,6 +163,21 @@ export interface EagResumeRequest {
   readonly maxIterations?: number;
   /** 是否自动流转（可选，默认 false） */
   readonly autoTransition?: boolean;
+  // ===== P0-3 新增字段（全部可选，旧调用方零回归） =====
+  /** 上一轮失败原因（resume 携带失败反馈，避免裸重放） */
+  readonly failureReason?: string;
+  /** 上一轮失败的测试 ID 列表 */
+  readonly failedTestIds?: ReadonlyArray<string>;
+  /** 阻塞原因（human-checkpoint / paused） */
+  readonly blockedReason?: string;
+  /** 已生成的 spec.md 内容（复用，避免最小 spec 裸重放） */
+  readonly specContent?: string;
+  /** 原 MultiLoopPlan（直接复用，不重新 plan） */
+  readonly plan?: Readonly<MultiLoopPlan>;
+  /** 已生成的 tasks 文档内容 */
+  readonly tasksContent?: string;
+  /** 已完成的节点 ID 列表（从原 plan 节点集合精确推导） */
+  readonly completedNodeIds?: ReadonlyArray<string>;
 }
 
 // ============================================================================
@@ -298,6 +321,14 @@ export class EagResumeHandler {
       );
     }
 
+    // P0-1：Step 5 追加的 run-resumed 事件会把 runState.status 覆盖为 "running"，
+    // 若此处直接读 runState.status，human-checkpoint 分支将永不触发。故在追加任何事件前
+    // 固化 load() 重建出的原始状态，供 Step 6 判定（配合 run-state-store 的重放修复生效）。
+    const statusAtLoad = runState.status;
+    // P0-3：同时固化 load() 重建出的 blockedReason（run-resumed 会将其清空），
+    // 供 resume 上下文携带失败/阻塞反馈。
+    const blockedReasonAtLoad = runState.blockedReason;
+
     this.logger(
       `RunState 加载成功：runId=${runState.runId} status=${runState.status} completedLoops=[${runState.completedLoops.join(", ")}]`,
       "info"
@@ -328,14 +359,32 @@ export class EagResumeHandler {
       this.logger("无 milestone 记录，跳过 git HEAD 一致性校验", "info");
     }
 
-    // ===== Step 4: 重建 MultiLoopPlan =====
-    // 由于 plan 不持久化，需重新生成完整 plan，然后跳过已完成的节点
+    // ===== Step 4: 复用/重建 MultiLoopPlan（P0-3） =====
+    // 优先复用调用方显式传入的原 plan，其次加载 run 时持久化的快照
+    // （EagRunHandler 终态写入 <runId>.snapshot.json），最后才回退到「最小 spec 重建」。
+    // 旧调用方 / 旧快照零回归，且不再裸重放丢失上一轮失败反馈与已生成文档。
+    const snapshot: MultiLoopResumeSnapshot | undefined = request.plan
+      ? undefined
+      : this.runStateStore.loadResumeSnapshot?.(runState.runId, request.projectRoot);
+    const reusablePlan = request.plan ?? snapshot?.plan;
+    const resumeSpecContent = request.specContent ?? snapshot?.specContent;
+    const resumeTasksContent = request.tasksContent ?? snapshot?.tasksContent;
+    const resumeFailureReason = request.failureReason ?? snapshot?.failureReason;
+    const resumeFailedTestIds = request.failedTestIds ?? snapshot?.failedTestIds;
+    const resumeBlockedReason =
+      request.blockedReason ??
+      snapshot?.blockedReason ??
+      (statusAtLoad === "human-checkpoint" ? blockedReasonAtLoad : undefined);
+
     let plan: Readonly<MultiLoopPlan>;
+    // 始终调用 planner 重建一次：保留「重建失败 → resume-failed」的错误路径
+    // （兼容既有调用方语义，如计划器不可用时必须诚实报错），同时为无可复用 plan 兜底。
+    let generatedPlan: Readonly<MultiLoopPlan>;
     try {
-      plan = await this.multiLoopPlanner.plan({
+      generatedPlan = await this.multiLoopPlanner.plan({
         runId: runState.runId,
         projectRoot: request.projectRoot,
-        specContent: this.buildMinimalSpecFromIntent(request.userIntent),
+        specContent: resumeSpecContent ?? this.buildMinimalSpecFromIntent(request.userIntent),
         autoTransition: request.autoTransition ?? false,
         rollbackOnFailure: true,
       });
@@ -346,13 +395,33 @@ export class EagResumeHandler {
         err
       );
     }
+    if (reusablePlan) {
+      // P0-3：有原 plan/快照时复用之，保持原节点集合、失败反馈与已完成节点，不裸重放
+      plan = reusablePlan;
+      this.logger(`复用原 MultiLoopPlan：planId=${plan.planId} 节点数=${plan.loops.length}`, "info");
+    } else {
+      plan = generatedPlan;
+      this.logger("未找到可复用 plan/快照，使用重新生成的 MultiLoopPlan", "info");
+    }
 
-    // 推导已完成的节点 ID 列表（基于 completedLoops）
-    // 算法：遍历 plan.loops，若 node.loopType 已在 runState.completedLoops 中，则视为已完成
+    // 推导已完成的节点 ID 列表（P0-3：从原 plan 节点集合精确推导，而非按 loopType 粗推）
+    // 优先使用快照/请求中保存的 completedNodeIds（来自原 plan.loops 的 nodeId 集合），
+    // 且只保留仍存在于当前 plan 中的 ID，防止 plan 版本漂移。
     const completedNodeIds: string[] = [];
-    for (const node of plan.loops) {
-      if (runState.completedLoops.includes(node.loopType)) {
-        completedNodeIds.push(node.nodeId);
+    const sourceCompletedIds = request.completedNodeIds ?? snapshot?.completedNodeIds;
+    if (sourceCompletedIds && sourceCompletedIds.length > 0) {
+      const validNodeIds = new Set(plan.loops.map((n) => n.nodeId));
+      for (const id of sourceCompletedIds) {
+        if (validNodeIds.has(id) && !completedNodeIds.includes(id)) {
+          completedNodeIds.push(id);
+        }
+      }
+    } else {
+      // 回退（兼容旧行为）：按节点自身状态或已完成 loopType 与 plan 节点交叉推导
+      for (const node of plan.loops) {
+        if (node.status === "completed" || runState.completedLoops.includes(node.loopType)) {
+          completedNodeIds.push(node.nodeId);
+        }
       }
     }
     this.logger(`已完成的节点：${completedNodeIds.join(", ") || "（无）"}`, "info");
@@ -390,7 +459,8 @@ export class EagResumeHandler {
     let failureReason: string | undefined;
 
     // 处理 human-checkpoint 状态：若用户提供了 userDecision，标记上一次介入为已解决
-    if (runState.status === "human-checkpoint" && request.userDecision) {
+    // 使用 statusAtLoad（load() 的原始状态），而非已被 run-resumed 覆盖的 runState.status
+    if (statusAtLoad === "human-checkpoint" && request.userDecision) {
       try {
         runState = await this.runStateStore.appendEvent(runState.runId, {
           type: "human-intervention-resolved",
@@ -450,17 +520,23 @@ export class EagResumeHandler {
         break;
       }
 
+      // P0-3：上下文携带已生成 spec/tasks 与上一轮失败反馈（failureReason /
+      // failedTestIds / blockedReason），不再以 specContent: undefined 裸重放。
       const context: Readonly<LoopExecutionContext> = Object.freeze({
         node,
         runId: runState.runId,
         projectRoot: request.projectRoot,
         userIntent: request.userIntent,
-        specContent: undefined, // resume 时不复用 spec，由 LoopExecutor 内部决定是否重新生成
+        specContent: resumeSpecContent ?? undefined,
         autoTransition: plan.autoTransition,
         maxIterations: request.maxIterations ?? DEFAULT_MAX_MULTI_LOOP_ITERATIONS,
         coverageThreshold: request.coverageThreshold,
         compliancePackIds: request.compliancePackIds,
         completedNodeIds: [...completedNodeIds],
+        ...(resumeFailureReason ? { failureReason: resumeFailureReason } : {}),
+        ...(resumeFailedTestIds ? { failedTestIds: resumeFailedTestIds } : {}),
+        ...(resumeBlockedReason ? { blockedReason: resumeBlockedReason } : {}),
+        ...(resumeTasksContent ? { tasksContent: resumeTasksContent } : {}),
       });
 
       let loopResult: Readonly<LoopExecutionResult>;
@@ -663,7 +739,8 @@ export class EagResumeHandler {
       totalLlmCallCount,
       totalTokensUsed,
       durationSec,
-      failureReason,
+      // P0-3：本轮未新产生失败时，也把复用/请求携带的上一轮失败反馈写入报告（诚实呈现）
+      failureReason: failureReason ?? resumeFailureReason ?? resumeBlockedReason,
       blockageReport,
     });
 

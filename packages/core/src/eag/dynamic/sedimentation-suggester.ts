@@ -236,13 +236,13 @@ export class SedimentationSuggester {
       }
       turns.push({
         role: message.role,
-        content: message.content.slice(0, MAX_TURN_CHARS),
+        // P2 修复：单轮内容改保尾截断（关键信息/错误结论通常在末尾）
+        content: message.content.slice(-MAX_TURN_CHARS),
       });
-      if (turns.length >= SEDIMENTATION_MAX_TURNS) {
-        break;
-      }
     }
-    return turns;
+    // P2 修复：与 sedimentation-prompt.ts 的 .slice(-SEDIMENTATION_MAX_TURNS) 对齐——
+    // 取「最近」30 轮，而非从头遍历 break 取最旧 30 轮。
+    return turns.slice(-SEDIMENTATION_MAX_TURNS);
   }
 
   /**

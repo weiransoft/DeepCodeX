@@ -309,6 +309,38 @@ export interface MultiLoopPlan {
 }
 
 /**
+ * 跨 run/resume 复用的 MultiLoopPlan + 失败反馈快照（P0-3 审查修复）
+ *
+ * 由 EagRunHandler 在终态时持久化到 <runId>.snapshot.json（独立于 JSONL 事件流），
+ * EagResumeHandler 加载后复用原 plan 与已生成 spec/plan/tasks，避免用「最小 spec」
+ * 裸重放重建 plan、丢失上一轮失败反馈（failureReason / failedTestIds / blockedReason）。
+ *
+ * 设计约束（对齐用户红线）：
+ * - 除 plan 外全部字段可选——旧调用方/旧快照零回归。
+ * - 快照是辅助缓存：缺失或损坏时 EagResumeHandler 诚实降级为重新生成 plan。
+ *
+ * 字段全部 readonly。
+ */
+export interface MultiLoopResumeSnapshot {
+  /** 原 MultiLoopPlan（resume 直接复用，不重新 plan） */
+  readonly plan: Readonly<MultiLoopPlan>;
+  /** 已生成的 spec.md 内容 */
+  readonly specContent?: string;
+  /** 已生成的 plan 文档内容 */
+  readonly planContent?: string;
+  /** 已生成的 tasks 文档内容 */
+  readonly tasksContent?: string;
+  /** 上一轮失败原因 */
+  readonly failureReason?: string;
+  /** 上一轮失败的测试 ID 列表 */
+  readonly failedTestIds?: ReadonlyArray<string>;
+  /** 阻塞原因（human-checkpoint / paused） */
+  readonly blockedReason?: string;
+  /** 已完成的节点 ID 列表（从原 plan 节点集合精确推导，而非按 loopType 粗推） */
+  readonly completedNodeIds?: ReadonlyArray<string>;
+}
+
+/**
  * 多 Loop 计划节点（DAG 中的一个节点）
  *
  * 对应 §4.9 MultiLoopNode：

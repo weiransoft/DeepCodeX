@@ -356,21 +356,35 @@ class VerifyHandler implements PhaseHandler {
 
   async run(ctx: PluginContext, runState: RunStateData): Promise<PhaseResult> {
     const start = Date.now();
-    // 真实实现：跑测试 + 收集 debt
-    // 从 ctx.state 读取测试结果（如果已执行）
-    const passed = (ctx.state["testPassed"] as number) ?? runState.iteration;
-    const failed = (ctx.state["testFailed"] as number) ?? 0;
-    const total = passed + failed;
+    // 从 ctx.state 读取「真实」测试结果。两者都取不到时视为 unknown，
+    // 绝不沿用旧口径：failed 默认 0 + passed 用 iteration 兜底 → success = (failed===0) 恒成功。
+    const rawPassed = ctx.state["testPassed"];
+    const rawFailed = ctx.state["testFailed"];
+    const hasRealResults =
+      typeof rawPassed === "number" &&
+      Number.isFinite(rawPassed) &&
+      typeof rawFailed === "number" &&
+      Number.isFinite(rawFailed);
+    const passed = hasRealResults ? (rawPassed as number) : 0;
+    const failed = hasRealResults ? (rawFailed as number) : 0;
+    const total = hasRealResults ? passed + failed : 0;
     runState.testResults = { passed, failed, total };
     runState.debtCount = (ctx.state["debtCount"] as number) ?? 0;
 
-    const success = failed === 0;
+    // 诚实降级：拿不到真实测试结果 / 未执行任何测试时判失败（unknown），不报成功。
+    // 环境变量 DEEPCODE_VERIFY_ALLOW_UNKNOWN_SUCCESS=1 可回退到旧的「默认成功」行为。
+    const allowUnknownSuccess = process.env["DEEPCODE_VERIFY_ALLOW_UNKNOWN_SUCCESS"] === "1";
+    const success = hasRealResults ? failed === 0 && total > 0 : allowUnknownSuccess;
+    const output = hasRealResults
+      ? `Verify: ${passed}/${total} passed, debt=${runState.debtCount}`
+      : `Verify: unknown（未取得真实测试结果，诚实判失败；拒绝用 failed=0 伪造通过）debt=${runState.debtCount}`;
     return {
       success,
-      output: `Verify: ${passed}/${total} passed, debt=${runState.debtCount}`,
+      output,
       durationMs: Date.now() - start,
       artifacts: [`verify-${runState.runId}-iter${runState.iteration}.json`],
-      metadata: { passed, failed, total, debt: runState.debtCount },
+      metadata: { passed, failed, total, debt: runState.debtCount, testResultsKnown: hasRealResults },
+      ...(success ? {} : { error: hasRealResults ? `${failed} 个测试失败` : "未取得真实测试结果（unknown）" }),
     };
   }
 }

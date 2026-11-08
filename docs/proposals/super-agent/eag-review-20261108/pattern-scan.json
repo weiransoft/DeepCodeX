@@ -1,0 +1,2435 @@
+[
+  {
+    "file": "packages/core/src/eag/p5/executors/llm-task-executor.ts",
+    "lines": 2636,
+    "hits": {
+      "C1_loop_cap": [264, 270, 275, 278, 518, 519],
+      "C2_own_executor": [519, 578, 634, 636, 638, 639],
+      "C3_truncation": [337, 340, 741, 1603, 1609, 1658],
+      "C4_state_rebuild": [683, 694, 736, 744, 753, 1607],
+      "C5_failure_feedback": [2228, 2230, 2231, 2237, 2468, 2469],
+      "C6_fingerprint": [93, 1014, 1025, 1028, 1288, 1381],
+      "C7_honest_degrade": [748, 1608, 1843, 2108],
+      "C8_env_switch": [632, 642],
+      "C9_stats_scope": [342, 935, 936, 1012, 1026, 1588],
+      "C10_subprocess": [28, 1947, 2563],
+      "C11_guard_chain": [15, 17, 85, 104, 127, 257],
+      "C12_llm_call": [2, 5, 6, 11, 20, 21]
+    },
+    "weight": 95
+  },
+  {
+    "file": "packages/core/src/eag/p5/autonomous-orchestrator.ts",
+    "lines": 3793,
+    "hits": {
+      "C1_loop_cap": [28, 30, 118, 262, 273, 337],
+      "C3_truncation": [1332, 1611, 1613, 2207, 3301, 3653],
+      "C4_state_rebuild": [1417, 1606, 1708, 1800, 1822, 1896],
+      "C5_failure_feedback": [238, 382, 383, 385, 388, 390],
+      "C6_fingerprint": [856, 883, 890, 954, 958, 984],
+      "C7_honest_degrade": [952, 1399, 1620, 1795, 1887, 2053],
+      "C9_stats_scope": [399, 403, 510, 575, 581, 589],
+      "C10_subprocess": [50, 2355, 2358, 2380, 3332, 3379],
+      "C11_guard_chain": [17, 25, 30, 34, 35, 52],
+      "C12_llm_call": [116, 124, 239, 306, 307, 369]
+    },
+    "weight": 78
+  },
+  {
+    "file": "packages/core/src/eag/p5/handlers/plan-stage-handler.ts",
+    "lines": 2110,
+    "hits": {
+      "C1_loop_cap": [150, 198, 227, 246, 626, 627],
+      "C3_truncation": [139, 157, 160, 163, 249, 1068],
+      "C4_state_rebuild": [1273, 1491, 1520, 1623, 1677],
+      "C5_failure_feedback": [200, 228, 241, 242, 246, 1393],
+      "C6_fingerprint": [519, 581, 740, 876, 968, 1169],
+      "C7_honest_degrade": [453, 593, 771, 888, 981, 1205],
+      "C11_guard_chain": [20, 46, 47, 94, 119, 120],
+      "C12_llm_call": [15, 124, 153, 246, 512, 785]
+    },
+    "weight": 60
+  },
+  {
+    "file": "packages/core/src/eag/p5/handlers/fix-stage-handler.ts",
+    "lines": 899,
+    "hits": {
+      "C1_loop_cap": [797, 809, 824, 837, 853, 877],
+      "C3_truncation": [57, 69, 236, 700, 704],
+      "C4_state_rebuild": [300, 452, 479],
+      "C5_failure_feedback": [26, 171, 172, 289, 296, 308],
+      "C6_fingerprint": [93, 636],
+      "C7_honest_degrade": [498],
+      "C9_stats_scope": [464, 465, 466, 484],
+      "C11_guard_chain": [434, 435],
+      "C12_llm_call": [10, 19, 160, 188, 197, 472]
+    },
+    "weight": 50
+  },
+  {
+    "file": "packages/core/src/eag/coding/llm-filler.ts",
+    "lines": 1426,
+    "hits": {
+      "C1_loop_cap": [38, 82, 86, 237, 287, 321],
+      "C3_truncation": [182, 352, 365, 547, 652, 751],
+      "C4_state_rebuild": [199, 305, 349, 362, 378, 398],
+      "C5_failure_feedback": [491, 501, 527, 528, 547, 550],
+      "C7_honest_degrade": [525, 540, 561, 581, 1303],
+      "C12_llm_call": [2, 4, 5, 9, 10, 11]
+    },
+    "weight": 46
+  },
+  {
+    "file": "packages/core/src/eag/graph/node-loop-kernel.ts",
+    "lines": 938,
+    "hits": {
+      "C1_loop_cap": [211, 288, 304, 357, 359, 370],
+      "C4_state_rebuild": [651, 725],
+      "C5_failure_feedback": [83, 90, 172, 321, 439, 443],
+      "C7_honest_degrade": [174, 377, 513],
+      "C11_guard_chain": [182, 272, 282, 308, 387],
+      "C12_llm_call": [12, 18, 77, 78, 173, 427]
+    },
+    "weight": 42
+  },
+  {
+    "file": "packages/core/src/eag/coding/fix-loop.ts",
+    "lines": 1179,
+    "hits": {
+      "C1_loop_cap": [15, 16, 35, 51, 55, 384],
+      "C3_truncation": [1029, 1116],
+      "C4_state_rebuild": [350, 774, 806, 819, 1171],
+      "C6_fingerprint": [167, 202],
+      "C7_honest_degrade": [771, 790, 802, 1070, 1148],
+      "C12_llm_call": [6, 11, 38, 72, 74, 77]
+    },
+    "weight": 38
+  },
+  {
+    "file": "packages/core/src/eag/testing/testing-orchestrator.ts",
+    "lines": 1541,
+    "hits": {
+      "C1_loop_cap": [7, 90, 199, 201, 653, 1131],
+      "C3_truncation": [851, 905, 1246, 1342],
+      "C4_state_rebuild": [849, 903, 1360, 1366, 1424, 1461],
+      "C7_honest_degrade": [422, 484, 542, 607, 686, 998],
+      "C10_subprocess": [993],
+      "C11_guard_chain": [7, 9, 20, 32, 53, 57],
+      "C12_llm_call": [197, 408, 452, 1121, 1122, 1397]
+    },
+    "weight": 37
+  },
+  {
+    "file": "packages/core/src/eag/pkc/symbol-indexer.ts",
+    "lines": 771,
+    "hits": {
+      "C1_loop_cap": [588, 608, 663, 704],
+      "C3_truncation": [718],
+      "C4_state_rebuild": [357, 393, 472, 475, 476, 495],
+      "C6_fingerprint": [246, 284, 736, 749],
+      "C7_honest_degrade": [327, 338],
+      "C9_stats_scope": [249, 250, 364, 367, 381, 386]
+    },
+    "weight": 36
+  },
+  {
+    "file": "packages/core/src/eag/long-horizon/eag-run-handler.ts",
+    "lines": 1162,
+    "hits": {
+      "C1_loop_cap": [43, 116, 135, 220, 234, 610],
+      "C3_truncation": [986],
+      "C4_state_rebuild": [482, 603, 856],
+      "C7_honest_degrade": [456, 472, 529, 545, 586, 620],
+      "C11_guard_chain": [117, 516, 517, 525, 538, 997],
+      "C12_llm_call": [117, 165, 289, 1059]
+    },
+    "weight": 34
+  },
+  {
+    "file": "packages/core/src/eag/p5/run-state-store.ts",
+    "lines": 1092,
+    "hits": {
+      "C1_loop_cap": [59, 63, 168, 169, 204, 206],
+      "C3_truncation": [851],
+      "C4_state_rebuild": [686, 922, 1058],
+      "C5_failure_feedback": [226, 888],
+      "C7_honest_degrade": [392, 418, 941, 964, 989],
+      "C11_guard_chain": [125, 126, 128, 140, 203, 211],
+      "C12_llm_call": [99, 199]
+    },
+    "weight": 34
+  },
+  {
+    "file": "packages/core/src/eag/tcs/ldap-adapter.ts",
+    "lines": 944,
+    "hits": {
+      "C1_loop_cap": [323, 362, 387, 443, 858, 859],
+      "C6_fingerprint": [439, 844],
+      "C7_honest_degrade": [447, 476, 505, 510, 521, 652]
+    },
+    "weight": 34
+  },
+  {
+    "file": "packages/core/src/eag/long-horizon/eag-resume-handler.ts",
+    "lines": 919,
+    "hits": {
+      "C1_loop_cap": [38, 155, 460, 721, 877],
+      "C4_state_rebuild": [453, 675],
+      "C7_honest_degrade": [279, 317, 342, 369, 403, 436],
+      "C10_subprocess": [21, 735, 747],
+      "C11_guard_chain": [800, 801, 807, 808, 811, 815],
+      "C12_llm_call": [852]
+    },
+    "weight": 31
+  },
+  {
+    "file": "packages/core/src/eag/p5/guards/scope-fake-cred-runtime-guards.ts",
+    "lines": 1321,
+    "hits": {
+      "C1_loop_cap": [377, 1209, 1243, 1245, 1247, 1248],
+      "C3_truncation": [69, 82, 473],
+      "C4_state_rebuild": [560, 562, 601],
+      "C9_stats_scope": [8, 104, 507, 509, 524, 539],
+      "C11_guard_chain": [6, 11, 15, 19, 27, 54],
+      "C12_llm_call": [1216]
+    },
+    "weight": 31
+  },
+  {
+    "file": "packages/core/src/eag/p5/handlers/dev-stage-handler.ts",
+    "lines": 614,
+    "hits": {
+      "C1_loop_cap": [591],
+      "C4_state_rebuild": [277, 412, 434, 458],
+      "C5_failure_feedback": [395, 396, 399],
+      "C6_fingerprint": [118],
+      "C7_honest_degrade": [474],
+      "C9_stats_scope": [270, 278, 422, 423, 425, 426],
+      "C11_guard_chain": [109, 289, 388, 389, 395],
+      "C12_llm_call": [21, 22, 286, 365, 378, 451]
+    },
+    "weight": 31
+  },
+  {
+    "file": "packages/core/src/eag/p5/edge-resolver.ts",
+    "lines": 978,
+    "hits": {
+      "C1_loop_cap": [425, 461, 533, 567, 610, 941],
+      "C6_fingerprint": [354, 356, 420, 430, 433, 606]
+    },
+    "weight": 30
+  },
+  {
+    "file": "packages/core/src/eag/loop/kernel.ts",
+    "lines": 748,
+    "hits": {
+      "C1_loop_cap": [70, 102, 153, 154, 157, 158],
+      "C3_truncation": [634, 644],
+      "C4_state_rebuild": [317, 353, 402, 458],
+      "C5_failure_feedback": [183, 589],
+      "C7_honest_degrade": [346, 428, 674],
+      "C11_guard_chain": [151, 184, 186, 187, 219, 263]
+    },
+    "weight": 28
+  },
+  {
+    "file": "packages/core/src/eag/p5/handlers/verify-stage-handler.ts",
+    "lines": 883,
+    "hits": {
+      "C1_loop_cap": [432, 860],
+      "C3_truncation": [496],
+      "C4_state_rebuild": [391],
+      "C5_failure_feedback": [513],
+      "C6_fingerprint": [91],
+      "C7_honest_degrade": [408, 410, 411, 417, 437, 442],
+      "C10_subprocess": [12, 20, 21, 28, 41, 115],
+      "C11_guard_chain": [118]
+    },
+    "weight": 28
+  },
+  {
+    "file": "packages/core/src/eag/pkc/l3/business-flow-discoverer.ts",
+    "lines": 1095,
+    "hits": {
+      "C1_loop_cap": [257, 538, 591, 670, 708, 734],
+      "C3_truncation": [595],
+      "C4_state_rebuild": [278, 289, 306, 314, 333, 339],
+      "C6_fingerprint": [254, 701, 730, 750, 949],
+      "C11_guard_chain": [1084]
+    },
+    "weight": 28
+  },
+  {
+    "file": "packages/core/src/eag/graph/graph-loop-models.ts",
+    "lines": 1111,
+    "hits": {
+      "C1_loop_cap": [145, 329, 343, 348, 368, 370],
+      "C4_state_rebuild": [172, 375, 957],
+      "C5_failure_feedback": [867],
+      "C6_fingerprint": [557],
+      "C11_guard_chain": [433, 441, 442, 515, 533, 577],
+      "C12_llm_call": [414, 449, 543, 568, 910]
+    },
+    "weight": 27
+  },
+  {
+    "file": "packages/core/src/eag/testing/contract-test-generator.ts",
+    "lines": 1085,
+    "hits": {
+      "C1_loop_cap": [494],
+      "C2_own_executor": [700, 779],
+      "C4_state_rebuild": [55, 304, 307, 308, 511, 516],
+      "C7_honest_degrade": [200, 208, 640, 709, 899],
+      "C12_llm_call": [6, 16, 18, 37, 40, 49]
+    },
+    "weight": 27
+  },
+  {
+    "file": "packages/core/src/eag/assembly.ts",
+    "lines": 531,
+    "hits": {
+      "C3_truncation": [250, 396],
+      "C5_failure_feedback": [77, 78, 185, 208, 220, 234],
+      "C7_honest_degrade": [163, 284, 455, 525],
+      "C11_guard_chain": [412, 448],
+      "C12_llm_call": [83, 222, 468, 470, 474, 480]
+    },
+    "weight": 26
+  },
+  {
+    "file": "packages/core/src/eag/coding/coding-orchestrator.ts",
+    "lines": 1074,
+    "hits": {
+      "C1_loop_cap": [60, 351, 352, 482, 642, 758],
+      "C4_state_rebuild": [553, 689, 813, 923, 925, 931],
+      "C7_honest_degrade": [491],
+      "C11_guard_chain": [6, 11, 16, 22, 28, 38],
+      "C12_llm_call": [111, 300, 307, 349, 518, 577]
+    },
+    "weight": 26
+  },
+  {
+    "file": "packages/core/src/eag/graph/graph-loop-orchestrator.ts",
+    "lines": 1352,
+    "hits": {
+      "C1_loop_cap": [326, 1339],
+      "C4_state_rebuild": [1224, 1261],
+      "C6_fingerprint": [245],
+      "C7_honest_degrade": [381, 427, 440, 496, 608, 838],
+      "C11_guard_chain": [5, 9, 90, 99, 113, 186],
+      "C12_llm_call": [425, 504, 507, 512, 536, 539]
+    },
+    "weight": 26
+  },
+  {
+    "file": "packages/core/src/eag/pkc/l3/data-dictionary-extractor.ts",
+    "lines": 1567,
+    "hits": {
+      "C1_loop_cap": [734, 779, 927, 984, 1097, 1135],
+      "C3_truncation": [1432],
+      "C4_state_rebuild": [443, 648, 649, 650, 651, 652],
+      "C6_fingerprint": [1493, 1497, 1498],
+      "C7_honest_degrade": [596]
+    },
+    "weight": 26
+  },
+  {
+    "file": "packages/core/src/eag/loop/scheduler.ts",
+    "lines": 401,
+    "hits": {
+      "C1_loop_cap": [13, 20, 21, 27, 38, 126],
+      "C2_own_executor": [27],
+      "C3_truncation": [276, 277, 304, 307, 311],
+      "C11_guard_chain": [36, 37, 83, 273, 283],
+      "C12_llm_call": [98, 323, 336]
+    },
+    "weight": 25
+  },
+  {
+    "file": "packages/core/src/eag/cli/eag-autonomous-command.ts",
+    "lines": 822,
+    "hits": {
+      "C1_loop_cap": [79, 82, 131, 147, 275, 276],
+      "C4_state_rebuild": [463, 488, 499],
+      "C7_honest_degrade": [484, 500],
+      "C11_guard_chain": [31, 113, 137, 158, 217, 354],
+      "C12_llm_call": [570, 596]
+    },
+    "weight": 24
+  },
+  {
+    "file": "packages/core/src/eag/coding/types.ts",
+    "lines": 1367,
+    "hits": {
+      "C1_loop_cap": [284, 296, 562, 575, 709, 710],
+      "C4_state_rebuild": [1088, 1147, 1203, 1274],
+      "C11_guard_chain": [26, 44, 325, 647, 693, 695],
+      "C12_llm_call": [5, 19, 25, 43, 112, 151]
+    },
+    "weight": 24
+  },
+  {
+    "file": "packages/core/src/eag/design/design-orchestrator.ts",
+    "lines": 319,
+    "hits": {
+      "C1_loop_cap": [18, 111, 137, 166, 167, 168],
+      "C5_failure_feedback": [315],
+      "C11_guard_chain": [186, 316],
+      "C12_llm_call": [23, 142, 173, 261]
+    },
+    "weight": 24
+  },
+  {
+    "file": "packages/core/src/eag/long-horizon/plan-blockage-analyzer.ts",
+    "lines": 775,
+    "hits": {
+      "C1_loop_cap": [292, 423, 587, 696],
+      "C4_state_rebuild": [221, 232, 234, 301, 356, 442],
+      "C6_fingerprint": [321, 336, 399, 401, 407, 425],
+      "C11_guard_chain": [10, 162, 225, 226, 614, 639]
+    },
+    "weight": 24
+  },
+  {
+    "file": "packages/core/src/eag/pkc/l3/database-schema-analyzer.ts",
+    "lines": 1078,
+    "hits": {
+      "C1_loop_cap": [435, 485, 500, 525, 555, 596],
+      "C3_truncation": [860],
+      "C4_state_rebuild": [334, 335, 336, 337, 338, 340],
+      "C6_fingerprint": [991, 1004],
+      "C7_honest_degrade": [283]
+    },
+    "weight": 24
+  },
+  {
+    "file": "packages/core/src/eag/testing/types.ts",
+    "lines": 1050,
+    "hits": {
+      "C1_loop_cap": [447, 685, 763, 827, 899, 900],
+      "C4_state_rebuild": [256, 762, 920, 931, 963, 966],
+      "C11_guard_chain": [24, 36, 399, 417, 438, 439],
+      "C12_llm_call": [18, 23, 35, 254, 434, 435]
+    },
+    "weight": 24
+  },
+  {
+    "file": "packages/core/src/eag/p5/notes-memory.ts",
+    "lines": 823,
+    "hits": {
+      "C1_loop_cap": [437, 451, 729, 736],
+      "C4_state_rebuild": [394, 489],
+      "C7_honest_degrade": [305, 539, 654, 667, 681],
+      "C12_llm_call": [9]
+    },
+    "weight": 23
+  },
+  {
+    "file": "packages/core/src/eag/design/design-roles-llm.ts",
+    "lines": 867,
+    "hits": {
+      "C3_truncation": [165, 183],
+      "C4_state_rebuild": [292, 490],
+      "C5_failure_feedback": [7, 454, 458, 780, 784, 794],
+      "C7_honest_degrade": [344, 550],
+      "C12_llm_call": [2, 4, 8, 12, 14, 15]
+    },
+    "weight": 22
+  },
+  {
+    "file": "packages/core/src/eag/testing/e2e-test-generator.ts",
+    "lines": 755,
+    "hits": {
+      "C2_own_executor": [292, 386],
+      "C4_state_rebuild": [59, 239, 328],
+      "C7_honest_degrade": [192, 224, 301, 510],
+      "C12_llm_call": [5, 11, 13, 30, 43, 57]
+    },
+    "weight": 22
+  },
+  {
+    "file": "packages/core/src/eag/long-horizon/run-state-store.ts",
+    "lines": 1279,
+    "hits": {
+      "C1_loop_cap": [420, 882, 1002],
+      "C3_truncation": [786],
+      "C4_state_rebuild": [427, 585, 821, 1116, 1207],
+      "C7_honest_degrade": [431, 459, 762, 842, 865, 890],
+      "C11_guard_chain": [962, 963, 965, 992, 1087, 1092]
+    },
+    "weight": 21
+  },
+  {
+    "file": "packages/core/src/eag/loop/models.ts",
+    "lines": 636,
+    "hits": {
+      "C1_loop_cap": [185, 190, 237, 250, 296, 324],
+      "C4_state_rebuild": [246, 265, 313],
+      "C5_failure_feedback": [553],
+      "C11_guard_chain": [162, 164, 165, 555, 606, 608],
+      "C12_llm_call": [169]
+    },
+    "weight": 21
+  },
+  {
+    "file": "packages/core/src/eag/config/eag-config-loader.ts",
+    "lines": 326,
+    "hits": {
+      "C1_loop_cap": [17, 40, 55, 85, 168, 232],
+      "C7_honest_degrade": [138],
+      "C11_guard_chain": [43, 60]
+    },
+    "weight": 20
+  },
+  {
+    "file": "packages/core/src/eag/devops/rollback-plan-writer.ts",
+    "lines": 755,
+    "hits": {
+      "C1_loop_cap": [332, 374, 407, 418],
+      "C4_state_rebuild": [471, 687, 702, 748],
+      "C7_honest_degrade": [588, 601, 636, 700]
+    },
+    "weight": 20
+  },
+  {
+    "file": "packages/core/src/eag/dynamic/sedimentation-suggester.ts",
+    "lines": 320,
+    "hits": {
+      "C3_truncation": [31, 239],
+      "C4_state_rebuild": [138, 285],
+      "C6_fingerprint": [41, 70, 84, 135, 158, 160],
+      "C7_honest_degrade": [182],
+      "C12_llm_call": [8, 17, 33, 47, 55, 56]
+    },
+    "weight": 20
+  },
+  {
+    "file": "packages/core/src/eag/long-horizon/blockage-analyzer.ts",
+    "lines": 1144,
+    "hits": {
+      "C1_loop_cap": [714, 968],
+      "C3_truncation": [710],
+      "C4_state_rebuild": [181, 198, 215, 232, 562, 725],
+      "C7_honest_degrade": [514, 546, 680, 700],
+      "C11_guard_chain": [104, 115, 117, 428, 429, 506],
+      "C12_llm_call": [9, 14, 15, 16, 17, 28]
+    },
+    "weight": 20
+  },
+  {
+    "file": "packages/core/src/eag/pkc/l3/peripheral-system-analyzer.ts",
+    "lines": 1200,
+    "hits": {
+      "C1_loop_cap": [778, 1049],
+      "C4_state_rebuild": [530, 531, 532, 533, 969, 1066],
+      "C6_fingerprint": [927, 948, 949, 956, 1046, 1165],
+      "C7_honest_degrade": [476],
+      "C8_env_switch": [370]
+    },
+    "weight": 20
+  },
+  {
+    "file": "packages/core/src/eag/design/design-models.ts",
+    "lines": 574,
+    "hits": {
+      "C1_loop_cap": [489, 497, 508, 515, 547, 563],
+      "C4_state_rebuild": [514],
+      "C12_llm_call": [512]
+    },
+    "weight": 19
+  },
+  {
+    "file": "packages/core/src/eag/graph/graph-scheduler.ts",
+    "lines": 642,
+    "hits": {
+      "C1_loop_cap": [13, 19, 329, 331, 335],
+      "C6_fingerprint": [414],
+      "C7_honest_degrade": [483],
+      "C11_guard_chain": [181]
+    },
+    "weight": 19
+  },
+  {
+    "file": "packages/core/src/eag/p5/smart-confirmation.ts",
+    "lines": 1333,
+    "hits": {
+      "C1_loop_cap": [591, 607, 696, 719, 1293],
+      "C3_truncation": [1211, 1214],
+      "C4_state_rebuild": [550, 563, 577, 594, 610, 628],
+      "C7_honest_degrade": [982, 1112],
+      "C11_guard_chain": [11, 12, 15, 21, 212, 213]
+    },
+    "weight": 19
+  },
+  {
+    "file": "packages/core/src/eag/coding/static-checkers/checker-utils.ts",
+    "lines": 608,
+    "hits": {
+      "C1_loop_cap": [160, 222, 306, 407, 416, 426],
+      "C4_state_rebuild": [485, 519, 522, 539, 562]
+    },
+    "weight": 18
+  },
+  {
+    "file": "packages/core/src/eag/coding/static-checkers/sql-pattern-checker.ts",
+    "lines": 245,
+    "hits": {
+      "C1_loop_cap": [129, 132, 155, 181, 201, 223]
+    },
+    "weight": 18
+  },
+  {
+    "file": "packages/core/src/eag/p5/confirmation-history-store.ts",
+    "lines": 1142,
+    "hits": {
+      "C1_loop_cap": [841],
+      "C3_truncation": [510],
+      "C4_state_rebuild": [512, 514, 515, 876],
+      "C6_fingerprint": [489],
+      "C7_honest_degrade": [546, 562, 573, 745, 796, 851],
+      "C12_llm_call": [17]
+    },
+    "weight": 18
+  },
+  {
+    "file": "packages/core/src/eag/p5/handlers/baseline-guard.ts",
+    "lines": 131,
+    "hits": {
+      "C7_honest_degrade": [17, 18, 19, 20, 42, 53],
+      "C8_env_switch": [78],
+      "C10_subprocess": [10, 26, 36, 62, 67, 87],
+      "C11_guard_chain": [8, 23]
+    },
+    "weight": 18
+  },
+  {
+    "file": "packages/core/src/eag/pkc/l4/section-builders/data-model-section.ts",
+    "lines": 647,
+    "hits": {
+      "C1_loop_cap": [158, 210, 233, 304, 318, 387],
+      "C4_state_rebuild": [499]
+    },
+    "weight": 18
+  },
+  {
+    "file": "packages/core/src/eag/coding/skeleton-generator.ts",
+    "lines": 1094,
+    "hits": {
+      "C1_loop_cap": [190, 297, 763, 772],
+      "C4_state_rebuild": [231, 339, 793, 938, 983, 997],
+      "C6_fingerprint": [721],
+      "C7_honest_degrade": [963],
+      "C12_llm_call": [6]
+    },
+    "weight": 17
+  },
+  {
+    "file": "packages/core/src/eag/long-horizon/milestone-tagger.ts",
+    "lines": 748,
+    "hits": {
+      "C4_state_rebuild": [412, 419, 672],
+      "C7_honest_degrade": [259, 559, 583, 603, 664],
+      "C10_subprocess": [21, 22, 234, 303, 304, 642],
+      "C12_llm_call": [123]
+    },
+    "weight": 17
+  },
+  {
+    "file": "packages/core/src/eag/p5/handlers/types.ts",
+    "lines": 479,
+    "hits": {
+      "C1_loop_cap": [413],
+      "C4_state_rebuild": [304, 338, 395, 412],
+      "C5_failure_feedback": [199, 201, 207],
+      "C9_stats_scope": [233],
+      "C11_guard_chain": [30, 172, 177, 180, 181, 200],
+      "C12_llm_call": [18, 50, 157, 181, 279, 360]
+    },
+    "weight": 17
+  },
+  {
+    "file": "packages/core/src/eag/pkc/l4/section-builders/risk-debt-section.ts",
+    "lines": 529,
+    "hits": {
+      "C1_loop_cap": [125, 130, 171],
+      "C3_truncation": [452],
+      "C4_state_rebuild": [387],
+      "C6_fingerprint": [238, 262, 264, 266]
+    },
+    "weight": 17
+  },
+  {
+    "file": "packages/core/src/eag/coding/index.ts",
+    "lines": 214,
+    "hits": {
+      "C1_loop_cap": [88, 90, 91],
+      "C11_guard_chain": [198, 208],
+      "C12_llm_call": [43, 93, 168, 169, 170, 171]
+    },
+    "weight": 15
+  },
+  {
+    "file": "packages/core/src/eag/coding/static-checkers/oss-pattern-checker.ts",
+    "lines": 635,
+    "hits": {
+      "C1_loop_cap": [280, 349, 462, 542, 616]
+    },
+    "weight": 15
+  },
+  {
+    "file": "packages/core/src/eag/pkc/tech-stack-fingerprint.ts",
+    "lines": 838,
+    "hits": {
+      "C1_loop_cap": [408],
+      "C4_state_rebuild": [153, 170, 184, 199, 347, 604],
+      "C6_fingerprint": [4, 13, 29, 34, 210, 222]
+    },
+    "weight": 15
+  },
+  {
+    "file": "packages/core/src/eag/suggestion-auto.ts",
+    "lines": 356,
+    "hits": {
+      "C1_loop_cap": [173],
+      "C5_failure_feedback": [256, 262, 265, 277],
+      "C6_fingerprint": [48],
+      "C12_llm_call": [8, 17]
+    },
+    "weight": 15
+  },
+  {
+    "file": "packages/core/src/eag/cli/eag-command-parser.ts",
+    "lines": 1751,
+    "hits": {
+      "C1_loop_cap": [943, 1026, 1210, 1238],
+      "C4_state_rebuild": [270, 352, 1388, 1459, 1496, 1563],
+      "C11_guard_chain": [942, 1024],
+      "C12_llm_call": [940, 1022]
+    },
+    "weight": 14
+  },
+  {
+    "file": "packages/core/src/eag/deploy/canary-strategy.ts",
+    "lines": 1074,
+    "hits": {
+      "C1_loop_cap": [275],
+      "C4_state_rebuild": [958],
+      "C7_honest_degrade": [370, 385, 805, 942, 1035],
+      "C10_subprocess": [746]
+    },
+    "weight": 14
+  },
+  {
+    "file": "packages/core/src/eag/graph/graph-context-helpers.ts",
+    "lines": 638,
+    "hits": {
+      "C3_truncation": [89, 325, 348, 351, 356],
+      "C6_fingerprint": [467, 468, 471, 472, 474, 475],
+      "C7_honest_degrade": [458]
+    },
+    "weight": 14
+  },
+  {
+    "file": "packages/core/src/eag/long-horizon/eag-status-handler.ts",
+    "lines": 618,
+    "hits": {
+      "C1_loop_cap": [431, 468, 498],
+      "C4_state_rebuild": [69, 318, 357],
+      "C7_honest_degrade": [304, 340],
+      "C11_guard_chain": [73, 382, 383, 447, 448, 453],
+      "C12_llm_call": [420]
+    },
+    "weight": 14
+  },
+  {
+    "file": "packages/core/src/eag/pkc/l4/handover-doc-builder.ts",
+    "lines": 254,
+    "hits": {
+      "C4_state_rebuild": [163, 188, 195],
+      "C6_fingerprint": [89, 90, 105, 111, 113, 119],
+      "C7_honest_degrade": [157]
+    },
+    "weight": 14
+  },
+  {
+    "file": "packages/core/src/eag/coding/static-checkers/idempotency-checker.ts",
+    "lines": 274,
+    "hits": {
+      "C1_loop_cap": [198, 210, 241],
+      "C6_fingerprint": [11, 48]
+    },
+    "weight": 13
+  },
+  {
+    "file": "packages/core/src/eag/devops/rollback-manager.ts",
+    "lines": 1490,
+    "hits": {
+      "C1_loop_cap": [494],
+      "C3_truncation": [1264],
+      "C4_state_rebuild": [510, 526, 1138, 1152, 1160],
+      "C7_honest_degrade": [218, 383, 511, 1015, 1153]
+    },
+    "weight": 13
+  },
+  {
+    "file": "packages/core/src/eag/long-horizon/multi-loop-planner.ts",
+    "lines": 610,
+    "hits": {
+      "C1_loop_cap": [332, 529, 552],
+      "C4_state_rebuild": [212, 353, 444, 471, 500, 517],
+      "C6_fingerprint": [250, 330]
+    },
+    "weight": 13
+  },
+  {
+    "file": "packages/core/src/eag/pkc/types.ts",
+    "lines": 400,
+    "hits": {
+      "C6_fingerprint": [214, 220, 231, 263, 302, 313],
+      "C12_llm_call": [22]
+    },
+    "weight": 13
+  },
+  {
+    "file": "packages/core/src/eag/deploy/deploy-stage.ts",
+    "lines": 505,
+    "hits": {
+      "C7_honest_degrade": [179, 236, 261, 277, 289, 322]
+    },
+    "weight": 12
+  },
+  {
+    "file": "packages/core/src/eag/design/design-role-prompts.ts",
+    "lines": 319,
+    "hits": {
+      "C5_failure_feedback": [269, 308],
+      "C6_fingerprint": [197],
+      "C12_llm_call": [4, 16, 44, 78, 147, 238]
+    },
+    "weight": 12
+  },
+  {
+    "file": "packages/core/src/eag/discovery/loop-discovery.ts",
+    "lines": 223,
+    "hits": {
+      "C3_truncation": [82],
+      "C4_state_rebuild": [64, 77],
+      "C6_fingerprint": [31, 89, 99, 155, 172, 173],
+      "C11_guard_chain": [11]
+    },
+    "weight": 12
+  },
+  {
+    "file": "packages/core/src/eag/index.ts",
+    "lines": 571,
+    "hits": {
+      "C5_failure_feedback": [325, 335, 336],
+      "C11_guard_chain": [24, 346, 351, 384, 543],
+      "C12_llm_call": [25, 324, 335, 359, 366, 522]
+    },
+    "weight": 12
+  },
+  {
+    "file": "packages/core/src/eag/long-horizon/types.ts",
+    "lines": 1232,
+    "hits": {
+      "C1_loop_cap": [867, 928],
+      "C4_state_rebuild": [904, 927],
+      "C11_guard_chain": [47, 133, 429, 430, 443, 445],
+      "C12_llm_call": [19, 126, 406, 446, 448, 461]
+    },
+    "weight": 12
+  },
+  {
+    "file": "packages/core/src/eag/p5/handlers/task-executor-port.ts",
+    "lines": 284,
+    "hits": {
+      "C5_failure_feedback": [99],
+      "C9_stats_scope": [164, 167],
+      "C11_guard_chain": [101, 104, 106, 107, 129, 130],
+      "C12_llm_call": [4, 6, 8, 15, 55, 107]
+    },
+    "weight": 12
+  },
+  {
+    "file": "packages/core/src/eag/pkc/index.ts",
+    "lines": 158,
+    "hits": {
+      "C6_fingerprint": [19, 24, 28, 47, 74, 77]
+    },
+    "weight": 12
+  },
+  {
+    "file": "packages/core/src/eag/tcs/cache.ts",
+    "lines": 995,
+    "hits": {
+      "C1_loop_cap": [310, 330, 356, 840]
+    },
+    "weight": 12
+  },
+  {
+    "file": "packages/core/src/eag/tcs/object-storage.ts",
+    "lines": 1488,
+    "hits": {
+      "C1_loop_cap": [916, 1260],
+      "C3_truncation": [311, 479, 821],
+      "C4_state_rebuild": [614],
+      "C7_honest_degrade": [767, 1145],
+      "C12_llm_call": [25, 595]
+    },
+    "weight": 12
+  },
+  {
+    "file": "packages/core/src/eag/testing/brownfield-contract-guard.ts",
+    "lines": 696,
+    "hits": {
+      "C4_state_rebuild": [128, 138, 153, 245, 246, 247],
+      "C6_fingerprint": [196, 198, 202, 204],
+      "C7_honest_degrade": [475, 483],
+      "C11_guard_chain": [2, 6, 29, 39, 304, 311]
+    },
+    "weight": 12
+  },
+  {
+    "file": "packages/core/src/eag/coding/context-assembler.ts",
+    "lines": 593,
+    "hits": {
+      "C4_state_rebuild": [112, 223, 264],
+      "C7_honest_degrade": [439, 451, 463, 483],
+      "C12_llm_call": [6, 100, 110]
+    },
+    "weight": 11
+  },
+  {
+    "file": "packages/core/src/eag/graph/graph-builder.ts",
+    "lines": 527,
+    "hits": {
+      "C1_loop_cap": [233, 240],
+      "C4_state_rebuild": [235, 242, 248, 253, 327, 338],
+      "C6_fingerprint": [406],
+      "C7_honest_degrade": [188],
+      "C11_guard_chain": [13, 352],
+      "C12_llm_call": [6]
+    },
+    "weight": 11
+  },
+  {
+    "file": "packages/core/src/eag/graph/graph-guard.ts",
+    "lines": 734,
+    "hits": {
+      "C1_loop_cap": [478],
+      "C4_state_rebuild": [76, 84, 170],
+      "C6_fingerprint": [472, 526, 527],
+      "C7_honest_degrade": [717],
+      "C11_guard_chain": [29, 98, 101, 107, 113, 732]
+    },
+    "weight": 11
+  },
+  {
+    "file": "packages/core/src/eag/rlis/rule-store.ts",
+    "lines": 574,
+    "hits": {
+      "C1_loop_cap": [493, 501, 510],
+      "C4_state_rebuild": [245, 281, 355, 563],
+      "C12_llm_call": [18, 301]
+    },
+    "weight": 11
+  },
+  {
+    "file": "packages/core/src/eag/cli/eag-graph-command.ts",
+    "lines": 924,
+    "hits": {
+      "C4_state_rebuild": [520, 555, 580, 601],
+      "C7_honest_degrade": [517, 552, 576, 749],
+      "C11_guard_chain": [456, 474, 598, 600, 880, 881],
+      "C12_llm_call": [829, 853]
+    },
+    "weight": 10
+  },
+  {
+    "file": "packages/core/src/eag/coding/strict-evaluator.ts",
+    "lines": 450,
+    "hits": {
+      "C6_fingerprint": [148],
+      "C7_honest_degrade": [439],
+      "C12_llm_call": [12, 14, 22, 23, 266, 413]
+    },
+    "weight": 10
+  },
+  {
+    "file": "packages/core/src/eag/devops/monitoring-readiness-checker.ts",
+    "lines": 1119,
+    "hits": {
+      "C1_loop_cap": [687],
+      "C4_state_rebuild": [244, 309, 337, 347, 359, 394],
+      "C7_honest_degrade": [392, 559, 572],
+      "C10_subprocess": [295]
+    },
+    "weight": 10
+  },
+  {
+    "file": "packages/core/src/eag/doc-driven/task-decomposition.ts",
+    "lines": 610,
+    "hits": {
+      "C1_loop_cap": [230, 335],
+      "C4_state_rebuild": [67, 80, 267, 268, 484],
+      "C6_fingerprint": [388, 468]
+    },
+    "weight": 10
+  },
+  {
+    "file": "packages/core/src/eag/p5/guards/types.ts",
+    "lines": 581,
+    "hits": {
+      "C1_loop_cap": [272, 276],
+      "C4_state_rebuild": [434, 461, 488, 540, 564],
+      "C9_stats_scope": [156, 160],
+      "C11_guard_chain": [17, 18, 127, 128, 273, 327]
+    },
+    "weight": 10
+  },
+  {
+    "file": "packages/core/src/eag/p5/symbol-graph-store.ts",
+    "lines": 1449,
+    "hits": {
+      "C4_state_rebuild": [214, 939, 989, 1069, 1107, 1192],
+      "C6_fingerprint": [1178],
+      "C7_honest_degrade": [642, 659, 669, 685]
+    },
+    "weight": 10
+  },
+  {
+    "file": "packages/core/src/eag/testing/static-checkers/coverage-gap-checker.ts",
+    "lines": 439,
+    "hits": {
+      "C1_loop_cap": [120, 168],
+      "C4_state_rebuild": [430, 431],
+      "C6_fingerprint": [156, 157]
+    },
+    "weight": 10
+  },
+  {
+    "file": "packages/core/src/eag/coding/static-checkers/cache-pattern-checker.ts",
+    "lines": 274,
+    "hits": {
+      "C1_loop_cap": [140, 212, 264]
+    },
+    "weight": 9
+  },
+  {
+    "file": "packages/core/src/eag/deploy/blue-green-strategy.ts",
+    "lines": 688,
+    "hits": {
+      "C4_state_rebuild": [605],
+      "C7_honest_degrade": [247, 261, 591, 663],
+      "C10_subprocess": [513]
+    },
+    "weight": 9
+  },
+  {
+    "file": "packages/core/src/eag/deploy/rolling-strategy.ts",
+    "lines": 633,
+    "hits": {
+      "C4_state_rebuild": [517],
+      "C7_honest_degrade": [216, 231, 496, 594],
+      "C10_subprocess": [381]
+    },
+    "weight": 9
+  },
+  {
+    "file": "packages/core/src/eag/design/index.ts",
+    "lines": 121,
+    "hits": {
+      "C5_failure_feedback": [23, 117, 118],
+      "C12_llm_call": [22, 26, 104]
+    },
+    "weight": 9
+  },
+  {
+    "file": "packages/core/src/eag/graph/graph-loop-protocols.ts",
+    "lines": 739,
+    "hits": {
+      "C1_loop_cap": [343, 354],
+      "C11_guard_chain": [23, 634, 665, 678, 694, 734],
+      "C12_llm_call": [123, 126, 130]
+    },
+    "weight": 9
+  },
+  {
+    "file": "packages/core/src/eag/p5/index.ts",
+    "lines": 495,
+    "hits": {
+      "C1_loop_cap": [83, 440],
+      "C11_guard_chain": [14, 15, 25, 101, 102, 181],
+      "C12_llm_call": [350, 376, 396]
+    },
+    "weight": 9
+  },
+  {
+    "file": "packages/core/src/eag/pkc/l2-types.ts",
+    "lines": 365,
+    "hits": {
+      "C4_state_rebuild": [85],
+      "C9_stats_scope": [255, 261, 268, 351],
+      "C12_llm_call": [21]
+    },
+    "weight": 9
+  },
+  {
+    "file": "packages/core/src/eag/dynamic/eag-dynamic-suggester.ts",
+    "lines": 571,
+    "hits": {
+      "C4_state_rebuild": [258, 297, 300, 316, 333, 354],
+      "C7_honest_degrade": [330],
+      "C12_llm_call": [12, 17, 22, 43, 93, 94]
+    },
+    "weight": 8
+  },
+  {
+    "file": "packages/core/src/eag/p5/handlers/test-output-analysis.ts",
+    "lines": 461,
+    "hits": {
+      "C1_loop_cap": [216, 446],
+      "C3_truncation": [34, 312, 319, 320, 322, 324],
+      "C4_state_rebuild": [233, 437, 457],
+      "C6_fingerprint": [439]
+    },
+    "weight": 8
+  },
+  {
+    "file": "packages/core/src/eag/pkc/l4/section-builders/runbook-section.ts",
+    "lines": 688,
+    "hits": {
+      "C1_loop_cap": [373, 378],
+      "C4_state_rebuild": [504],
+      "C6_fingerprint": [436]
+    },
+    "weight": 8
+  },
+  {
+    "file": "packages/core/src/eag/coding/templates/index.ts",
+    "lines": 657,
+    "hits": {
+      "C4_state_rebuild": [484, 485, 489, 493, 497, 501],
+      "C7_honest_degrade": [425, 448],
+      "C12_llm_call": [8, 481, 550]
+    },
+    "weight": 7
+  },
+  {
+    "file": "packages/core/src/eag/icp/compliance-engine.ts",
+    "lines": 329,
+    "hits": {
+      "C4_state_rebuild": [62, 187, 238],
+      "C7_honest_degrade": [137, 150, 169],
+      "C12_llm_call": [55]
+    },
+    "weight": 7
+  },
+  {
+    "file": "packages/core/src/eag/p5/guards/dangerous-command-guard.ts",
+    "lines": 963,
+    "hits": {
+      "C1_loop_cap": [808],
+      "C3_truncation": [922, 935],
+      "C4_state_rebuild": [758, 761, 839],
+      "C9_stats_scope": [9, 516],
+      "C11_guard_chain": [28, 536, 556, 557, 563, 918]
+    },
+    "weight": 7
+  },
+  {
+    "file": "packages/core/src/eag/pkc/l4/section-builders/module-map-section.ts",
+    "lines": 524,
+    "hits": {
+      "C1_loop_cap": [229],
+      "C4_state_rebuild": [408],
+      "C6_fingerprint": [295, 327]
+    },
+    "weight": 7
+  },
+  {
+    "file": "packages/core/src/eag/pkc/semantic-searcher.ts",
+    "lines": 746,
+    "hits": {
+      "C1_loop_cap": [727],
+      "C4_state_rebuild": [95, 96, 106, 116, 126, 441],
+      "C6_fingerprint": [373, 608]
+    },
+    "weight": 7
+  },
+  {
+    "file": "packages/core/src/eag/coding/static-checkers/contract-guard-checker.ts",
+    "lines": 354,
+    "hits": {
+      "C1_loop_cap": [76, 200],
+      "C11_guard_chain": [5, 25, 28, 29, 31, 36]
+    },
+    "weight": 6
+  },
+  {
+    "file": "packages/core/src/eag/coding/static-checkers/dto-validator-checker.ts",
+    "lines": 253,
+    "hits": {
+      "C1_loop_cap": [189, 203]
+    },
+    "weight": 6
+  },
+  {
+    "file": "packages/core/src/eag/coding/static-checkers/ldap-pattern-checker.ts",
+    "lines": 257,
+    "hits": {
+      "C1_loop_cap": [182, 216]
+    },
+    "weight": 6
+  },
+  {
+    "file": "packages/core/src/eag/dynamic/prompts/eag-suggestion-prompt.ts",
+    "lines": 246,
+    "hits": {
+      "C12_llm_call": [2, 6, 8, 12, 13, 14]
+    },
+    "weight": 6
+  },
+  {
+    "file": "packages/core/src/eag/graph/node-executor.ts",
+    "lines": 468,
+    "hits": {
+      "C3_truncation": [318],
+      "C4_state_rebuild": [413, 434],
+      "C7_honest_degrade": [195, 347],
+      "C12_llm_call": [215, 279]
+    },
+    "weight": 6
+  },
+  {
+    "file": "packages/core/src/eag/p5/guards/env-boundary-guard.ts",
+    "lines": 886,
+    "hits": {
+      "C1_loop_cap": [230, 754],
+      "C3_truncation": [424, 823, 859],
+      "C4_state_rebuild": [106, 119, 120],
+      "C8_env_switch": [83, 84, 86, 87, 150],
+      "C11_guard_chain": [27, 581, 601, 602, 608]
+    },
+    "weight": 6
+  },
+  {
+    "file": "packages/core/src/eag/pkc/l1-global-view.ts",
+    "lines": 498,
+    "hits": {
+      "C4_state_rebuild": [62, 306, 309, 477],
+      "C7_honest_degrade": [252, 271, 341]
+    },
+    "weight": 6
+  },
+  {
+    "file": "packages/core/src/eag/pkc/l4/section-builders/test-strategy-section.ts",
+    "lines": 386,
+    "hits": {
+      "C1_loop_cap": [130, 137],
+      "C3_truncation": [350],
+      "C4_state_rebuild": [258],
+      "C11_guard_chain": [371]
+    },
+    "weight": 6
+  },
+  {
+    "file": "packages/core/src/eag/testing/coverage-gate.ts",
+    "lines": 624,
+    "hits": {
+      "C4_state_rebuild": [227, 233, 328],
+      "C7_honest_degrade": [193, 301],
+      "C10_subprocess": [18, 406]
+    },
+    "weight": 6
+  },
+  {
+    "file": "packages/core/src/eag/testing/incremental/git-diff-analyzer.ts",
+    "lines": 391,
+    "hits": {
+      "C4_state_rebuild": [198, 268, 271],
+      "C10_subprocess": [13, 20, 39, 47, 114, 126]
+    },
+    "weight": 6
+  },
+  {
+    "file": "packages/core/src/eag/coding/static-checkers/saga-detector.ts",
+    "lines": 251,
+    "hits": {
+      "C1_loop_cap": [108],
+      "C6_fingerprint": [146]
+    },
+    "weight": 5
+  },
+  {
+    "file": "packages/core/src/eag/design/design-evaluator.ts",
+    "lines": 776,
+    "hits": {
+      "C4_state_rebuild": [103, 141],
+      "C6_fingerprint": [484, 536],
+      "C12_llm_call": [63]
+    },
+    "weight": 5
+  },
+  {
+    "file": "packages/core/src/eag/dynamic/prompts/sedimentation-prompt.ts",
+    "lines": 101,
+    "hits": {
+      "C3_truncation": [47, 63],
+      "C12_llm_call": [4, 15, 27, 38, 43]
+    },
+    "weight": 5
+  },
+  {
+    "file": "packages/core/src/eag/edm/edm-redlines.ts",
+    "lines": 419,
+    "hits": {
+      "C4_state_rebuild": [223, 267, 275, 415],
+      "C6_fingerprint": [265, 272],
+      "C12_llm_call": [20]
+    },
+    "weight": 5
+  },
+  {
+    "file": "packages/core/src/eag/evaluator/types.ts",
+    "lines": 475,
+    "hits": {
+      "C4_state_rebuild": [100],
+      "C12_llm_call": [9, 154, 186, 280, 302]
+    },
+    "weight": 5
+  },
+  {
+    "file": "packages/core/src/eag/evidence-bundle.ts",
+    "lines": 447,
+    "hits": {
+      "C1_loop_cap": [408],
+      "C3_truncation": [152, 257],
+      "C4_state_rebuild": [140, 146],
+      "C6_fingerprint": [278]
+    },
+    "weight": 5
+  },
+  {
+    "file": "packages/core/src/eag/graph/experience-store.ts",
+    "lines": 402,
+    "hits": {
+      "C1_loop_cap": [314],
+      "C7_honest_degrade": [184]
+    },
+    "weight": 5
+  },
+  {
+    "file": "packages/core/src/eag/p5/impact-bfs.ts",
+    "lines": 467,
+    "hits": {
+      "C1_loop_cap": [242],
+      "C4_state_rebuild": [284, 358, 405],
+      "C6_fingerprint": [216]
+    },
+    "weight": 5
+  },
+  {
+    "file": "packages/core/src/eag/pkc/l4/section-builders/api-contract-section.ts",
+    "lines": 524,
+    "hits": {
+      "C1_loop_cap": [268],
+      "C4_state_rebuild": [440],
+      "C6_fingerprint": [407]
+    },
+    "weight": 5
+  },
+  {
+    "file": "packages/core/src/eag/rlis/types.ts",
+    "lines": 392,
+    "hits": {
+      "C3_truncation": [348, 358],
+      "C4_state_rebuild": [375],
+      "C12_llm_call": [18, 144, 213, 217, 232]
+    },
+    "weight": 5
+  },
+  {
+    "file": "packages/core/src/eag/testing/incremental/blast-radius-bfs.ts",
+    "lines": 205,
+    "hits": {
+      "C1_loop_cap": [152],
+      "C4_state_rebuild": [142, 184],
+      "C6_fingerprint": [125]
+    },
+    "weight": 5
+  },
+  {
+    "file": "packages/core/src/eag/deploy/post-deploy-checker.ts",
+    "lines": 517,
+    "hits": {
+      "C4_state_rebuild": [158, 284, 323, 388],
+      "C10_subprocess": [205, 352, 423, 493]
+    },
+    "weight": 4
+  },
+  {
+    "file": "packages/core/src/eag/deploy/pre-deploy-checker.ts",
+    "lines": 297,
+    "hits": {
+      "C4_state_rebuild": [125],
+      "C10_subprocess": [153, 197, 231, 278]
+    },
+    "weight": 4
+  },
+  {
+    "file": "packages/core/src/eag/discovery/brownfield-discovery.ts",
+    "lines": 295,
+    "hits": {
+      "C4_state_rebuild": [175, 259],
+      "C6_fingerprint": [216],
+      "C12_llm_call": [38, 210]
+    },
+    "weight": 4
+  },
+  {
+    "file": "packages/core/src/eag/doc-driven/git-process-manager.ts",
+    "lines": 392,
+    "hits": {
+      "C4_state_rebuild": [320],
+      "C6_fingerprint": [126, 133]
+    },
+    "weight": 4
+  },
+  {
+    "file": "packages/core/src/eag/etsb/tech-stack-lock.ts",
+    "lines": 370,
+    "hits": {
+      "C4_state_rebuild": [101, 143, 214, 221, 317],
+      "C6_fingerprint": [211, 275]
+    },
+    "weight": 4
+  },
+  {
+    "file": "packages/core/src/eag/gate/gate-g7-checker.ts",
+    "lines": 449,
+    "hits": {
+      "C1_loop_cap": [419],
+      "C3_truncation": [350],
+      "C4_state_rebuild": [359, 370],
+      "C12_llm_call": [94]
+    },
+    "weight": 4
+  },
+  {
+    "file": "packages/core/src/eag/graph/graph-context-utils.ts",
+    "lines": 335,
+    "hits": {
+      "C6_fingerprint": [258, 261]
+    },
+    "weight": 4
+  },
+  {
+    "file": "packages/core/src/eag/graph/graph-lifecycle-manager.ts",
+    "lines": 273,
+    "hits": {
+      "C7_honest_degrade": [125, 204],
+      "C11_guard_chain": [175, 176, 199]
+    },
+    "weight": 4
+  },
+  {
+    "file": "packages/core/src/eag/long-horizon/index.ts",
+    "lines": 194,
+    "hits": {
+      "C1_loop_cap": [86],
+      "C12_llm_call": [83]
+    },
+    "weight": 4
+  },
+  {
+    "file": "packages/core/src/eag/p5/loop-executor.ts",
+    "lines": 506,
+    "hits": {
+      "C4_state_rebuild": [192, 412, 414, 492],
+      "C7_honest_degrade": [300],
+      "C10_subprocess": [47],
+      "C12_llm_call": [191]
+    },
+    "weight": 4
+  },
+  {
+    "file": "packages/core/src/eag/tcs/fixtures/ldap-fixtures.ts",
+    "lines": 229,
+    "hits": {
+      "C7_honest_degrade": [58, 107]
+    },
+    "weight": 4
+  },
+  {
+    "file": "packages/core/src/eag/tcs/types.ts",
+    "lines": 987,
+    "hits": {
+      "C6_fingerprint": [778],
+      "C12_llm_call": [21, 958]
+    },
+    "weight": 4
+  },
+  {
+    "file": "packages/core/src/eag/testing/index.ts",
+    "lines": 196,
+    "hits": {
+      "C1_loop_cap": [84],
+      "C11_guard_chain": [12, 147, 151, 153, 155, 157],
+      "C12_llm_call": [86]
+    },
+    "weight": 4
+  },
+  {
+    "file": "packages/core/src/eag/cli/eag-args.ts",
+    "lines": 75,
+    "hits": {
+      "C1_loop_cap": [63]
+    },
+    "weight": 3
+  },
+  {
+    "file": "packages/core/src/eag/coding/static-checkers/dependency-scanner.ts",
+    "lines": 364,
+    "hits": {
+      "C1_loop_cap": [171]
+    },
+    "weight": 3
+  },
+  {
+    "file": "packages/core/src/eag/coding/static-checkers/hardcode-secret-scanner.ts",
+    "lines": 424,
+    "hits": {
+      "C1_loop_cap": [368],
+      "C3_truncation": [411],
+      "C8_env_switch": [30, 282, 388, 396, 414]
+    },
+    "weight": 3
+  },
+  {
+    "file": "packages/core/src/eag/devops/iac-generator/terraform-generator.ts",
+    "lines": 579,
+    "hits": {
+      "C4_state_rebuild": [100, 107, 114],
+      "C7_honest_degrade": [199],
+      "C10_subprocess": [238]
+    },
+    "weight": 3
+  },
+  {
+    "file": "packages/core/src/eag/doc-driven/constitution-builder.ts",
+    "lines": 318,
+    "hits": {
+      "C1_loop_cap": [229]
+    },
+    "weight": 3
+  },
+  {
+    "file": "packages/core/src/eag/doc-driven/types.ts",
+    "lines": 668,
+    "hits": {
+      "C4_state_rebuild": [93, 308],
+      "C11_guard_chain": [584, 586, 597, 609, 632],
+      "C12_llm_call": [19, 86, 306]
+    },
+    "weight": 3
+  },
+  {
+    "file": "packages/core/src/eag/edm/edm-detector.ts",
+    "lines": 238,
+    "hits": {
+      "C1_loop_cap": [209]
+    },
+    "weight": 3
+  },
+  {
+    "file": "packages/core/src/eag/edm/edm-domains/role-domain.ts",
+    "lines": 159,
+    "hits": {
+      "C12_llm_call": [19, 78, 157]
+    },
+    "weight": 3
+  },
+  {
+    "file": "packages/core/src/eag/edm/edm-domains/user-domain.ts",
+    "lines": 186,
+    "hits": {
+      "C12_llm_call": [19, 117, 184]
+    },
+    "weight": 3
+  },
+  {
+    "file": "packages/core/src/eag/etsb/tech-stack-registry.ts",
+    "lines": 354,
+    "hits": {
+      "C4_state_rebuild": [50, 99, 151, 200],
+      "C12_llm_call": [23, 261, 304]
+    },
+    "weight": 3
+  },
+  {
+    "file": "packages/core/src/eag/icp/packs/alcoa-plus-pack.ts",
+    "lines": 1277,
+    "hits": {
+      "C4_state_rebuild": [326, 370, 454, 547, 725, 804],
+      "C6_fingerprint": [1008],
+      "C12_llm_call": [1255]
+    },
+    "weight": 3
+  },
+  {
+    "file": "packages/core/src/eag/icp/types.ts",
+    "lines": 661,
+    "hits": {
+      "C4_state_rebuild": [398, 486, 538, 598, 653, 655],
+      "C7_honest_degrade": [421],
+      "C12_llm_call": [26]
+    },
+    "weight": 3
+  },
+  {
+    "file": "packages/core/src/eag/intervention-ledger.ts",
+    "lines": 191,
+    "hits": {
+      "C1_loop_cap": [184],
+      "C11_guard_chain": [21, 83]
+    },
+    "weight": 3
+  },
+  {
+    "file": "packages/core/src/eag/pkc/entry-point-detector.ts",
+    "lines": 616,
+    "hits": {
+      "C1_loop_cap": [556],
+      "C4_state_rebuild": [353, 420, 465]
+    },
+    "weight": 3
+  },
+  {
+    "file": "packages/core/src/eag/pkc/l4/section-builders/architecture-section.ts",
+    "lines": 366,
+    "hits": {
+      "C1_loop_cap": [110],
+      "C4_state_rebuild": [292]
+    },
+    "weight": 3
+  },
+  {
+    "file": "packages/core/src/eag/report-render.ts",
+    "lines": 140,
+    "hits": {
+      "C12_llm_call": [5, 34, 122]
+    },
+    "weight": 3
+  },
+  {
+    "file": "packages/core/src/eag/rlis/rule-injector.ts",
+    "lines": 357,
+    "hits": {
+      "C3_truncation": [87, 92, 109, 110, 125, 127],
+      "C12_llm_call": [5, 53, 75]
+    },
+    "weight": 3
+  },
+  {
+    "file": "packages/core/src/eag/tcs/sql-optimizer.ts",
+    "lines": 863,
+    "hits": {
+      "C1_loop_cap": [578],
+      "C4_state_rebuild": [593, 686]
+    },
+    "weight": 3
+  },
+  {
+    "file": "packages/core/src/eag/testing/static-checkers/assertion-density-checker.ts",
+    "lines": 314,
+    "hits": {
+      "C1_loop_cap": [126],
+      "C4_state_rebuild": [305, 306]
+    },
+    "weight": 3
+  },
+  {
+    "file": "packages/core/src/eag/testing/static-checkers/test-naming-checker.ts",
+    "lines": 327,
+    "hits": {
+      "C1_loop_cap": [137],
+      "C4_state_rebuild": [318, 319]
+    },
+    "weight": 3
+  },
+  {
+    "file": "packages/core/src/eag/coding/static-checkers/audit-event-matcher.ts",
+    "lines": 203,
+    "hits": {
+      "C12_llm_call": [19, 20]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/coding/static-checkers/index.ts",
+    "lines": 223,
+    "hits": {
+      "C11_guard_chain": [91, 92, 119],
+      "C12_llm_call": [12, 153]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/deploy/smoke-test-runner.ts",
+    "lines": 388,
+    "hits": {
+      "C4_state_rebuild": [141, 176, 381],
+      "C7_honest_degrade": [220]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/design/design-protocols.ts",
+    "lines": 154,
+    "hits": {
+      "C12_llm_call": [17, 20]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/devops/devops-orchestrator.ts",
+    "lines": 452,
+    "hits": {
+      "C4_state_rebuild": [222, 248],
+      "C7_honest_degrade": [315]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/devops/rollback-plan-checker.ts",
+    "lines": 288,
+    "hits": {
+      "C4_state_rebuild": [183, 197, 225, 234],
+      "C7_honest_degrade": [195]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/discovery/index.ts",
+    "lines": 67,
+    "hits": {
+      "C6_fingerprint": [62],
+      "C11_guard_chain": [10, 48, 51, 52]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/dynamic/index.ts",
+    "lines": 48,
+    "hits": {
+      "C3_truncation": [43],
+      "C6_fingerprint": [24]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/eak/paradigms/clean-architecture.ts",
+    "lines": 331,
+    "hits": {
+      "C12_llm_call": [25, 329]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/eak/paradigms/ddd-layered.ts",
+    "lines": 352,
+    "hits": {
+      "C12_llm_call": [19, 350]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/eak/types.ts",
+    "lines": 269,
+    "hits": {
+      "C12_llm_call": [17, 204]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/edm/edm-domains/data-scope-domain.ts",
+    "lines": 163,
+    "hits": {
+      "C12_llm_call": [29, 161]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/edm/edm-domains/org-domain.ts",
+    "lines": 150,
+    "hits": {
+      "C12_llm_call": [20, 148]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/edm/edm-domains/permission-domain.ts",
+    "lines": 154,
+    "hits": {
+      "C12_llm_call": [22, 152]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/etsb/tech-stack-selector.ts",
+    "lines": 406,
+    "hits": {
+      "C4_state_rebuild": [144, 154, 395],
+      "C12_llm_call": [12, 67]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/gate/gate-g3-checker.ts",
+    "lines": 195,
+    "hits": {
+      "C4_state_rebuild": [136, 155, 167, 179, 188],
+      "C6_fingerprint": [64]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/gate/gate-orchestrator.ts",
+    "lines": 398,
+    "hits": {
+      "C4_state_rebuild": [73, 97, 271, 336],
+      "C12_llm_call": [71, 95]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/p5/common/atomic-file.ts",
+    "lines": 52,
+    "hits": {
+      "C3_truncation": [35],
+      "C7_honest_degrade": [41]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/p5/guards/blocker-guard-chain.ts",
+    "lines": 495,
+    "hits": {
+      "C4_state_rebuild": [88, 214, 275, 278, 402, 405],
+      "C7_honest_degrade": [143],
+      "C11_guard_chain": [5, 8, 9, 10, 11, 18]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/p5/task-lease.ts",
+    "lines": 141,
+    "hits": {
+      "C3_truncation": [75],
+      "C6_fingerprint": [117],
+      "C11_guard_chain": [3, 7, 8, 10, 14, 110]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/pkc/l4/types.ts",
+    "lines": 495,
+    "hits": {
+      "C4_state_rebuild": [73, 304, 310, 316, 322, 328],
+      "C12_llm_call": [31, 301]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/tcs/tcs-redlines.ts",
+    "lines": 601,
+    "hits": {
+      "C4_state_rebuild": [509, 594],
+      "C8_env_switch": [446],
+      "C12_llm_call": [32, 49]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/tcs/vulnerability-scanner.ts",
+    "lines": 632,
+    "hits": {
+      "C4_state_rebuild": [66],
+      "C7_honest_degrade": [509]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/testing/static-checkers/index.ts",
+    "lines": 160,
+    "hits": {
+      "C12_llm_call": [11, 75]
+    },
+    "weight": 2
+  },
+  {
+    "file": "packages/core/src/eag/coding/static-checkers/anemic-model-detector.ts",
+    "lines": 213,
+    "hits": {
+      "C12_llm_call": [23]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/coding/templates/typescript/test-spec.ejs.ts",
+    "lines": 112,
+    "hits": {
+      "C12_llm_call": [60]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/design/design-artifacts-schema.ts",
+    "lines": 351,
+    "hits": {
+      "C12_llm_call": [44]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/devops/iac-generator/helm-chart-generator.ts",
+    "lines": 627,
+    "hits": {
+      "C4_state_rebuild": [97, 109, 121, 133, 145, 158],
+      "C10_subprocess": [292]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/devops/iac-generator/k8s-manifest-generator.ts",
+    "lines": 508,
+    "hits": {
+      "C4_state_rebuild": [89, 103, 118, 131, 143, 156],
+      "C10_subprocess": [254]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/doc-driven/document-state-machine.ts",
+    "lines": 282,
+    "hits": {
+      "C4_state_rebuild": [56, 241, 273],
+      "C12_llm_call": [180]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/dynamic/finding.ts",
+    "lines": 171,
+    "hits": {
+      "C3_truncation": [63, 66, 69, 91, 108, 111],
+      "C12_llm_call": [81]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/eak/paradigms/cqrs-es.ts",
+    "lines": 380,
+    "hits": {
+      "C12_llm_call": [378]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/eak/paradigms/microservice.ts",
+    "lines": 366,
+    "hits": {
+      "C12_llm_call": [364]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/edm/types.ts",
+    "lines": 299,
+    "hits": {
+      "C4_state_rebuild": [274],
+      "C12_llm_call": [18]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/etsb/index.ts",
+    "lines": 87,
+    "hits": {
+      "C12_llm_call": [17]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/etsb/types.ts",
+    "lines": 347,
+    "hits": {
+      "C12_llm_call": [19]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/gate/gate-g2-checker.ts",
+    "lines": 202,
+    "hits": {
+      "C4_state_rebuild": [129, 140, 151, 164, 175, 186],
+      "C12_llm_call": [16]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/gate/gate-types.ts",
+    "lines": 636,
+    "hits": {
+      "C12_llm_call": [28]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/icp/packs/cfr-part11-pack.ts",
+    "lines": 796,
+    "hits": {
+      "C4_state_rebuild": [284, 331, 417, 511, 607, 714],
+      "C12_llm_call": [775]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/icp/packs/gmp-pack.ts",
+    "lines": 828,
+    "hits": {
+      "C4_state_rebuild": [199, 257, 368, 438, 547, 618],
+      "C12_llm_call": [793]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/loop/protocols.ts",
+    "lines": 188,
+    "hits": {
+      "C12_llm_call": [157]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/pkc/l3/l3-types.ts",
+    "lines": 581,
+    "hits": {
+      "C11_guard_chain": [143, 153],
+      "C12_llm_call": [19]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/redlines/enterprise-rules.ts",
+    "lines": 239,
+    "hits": {
+      "C8_env_switch": [162],
+      "C12_llm_call": [43]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/rlis/seed-rules.ts",
+    "lines": 234,
+    "hits": {
+      "C12_llm_call": [77]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/testing/incremental/types.ts",
+    "lines": 348,
+    "hits": {
+      "C11_guard_chain": [9],
+      "C12_llm_call": [18]
+    },
+    "weight": 1
+  },
+  {
+    "file": "packages/core/src/eag/cli/eag-design-command.ts",
+    "lines": 138,
+    "hits": {
+      "C3_truncation": [68],
+      "C4_state_rebuild": [126, 134]
+    },
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/cli/index.ts",
+    "lines": 69,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/coding/static-checkers/contract-existence-checker.ts",
+    "lines": 216,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/coding/static-checkers/import-analyzer.ts",
+    "lines": 230,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/coding/templates/typescript/aggregate.ejs.ts",
+    "lines": 147,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/coding/templates/typescript/application-service.ejs.ts",
+    "lines": 101,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/coding/templates/typescript/domain-event.ejs.ts",
+    "lines": 162,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/coding/templates/typescript/domain-service.ejs.ts",
+    "lines": 98,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/coding/templates/typescript/dto.ejs.ts",
+    "lines": 100,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/coding/templates/typescript/event-handler.ejs.ts",
+    "lines": 138,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/coding/templates/typescript/module-index.ejs.ts",
+    "lines": 59,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/coding/templates/typescript/repository-impl.ejs.ts",
+    "lines": 156,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/coding/templates/typescript/repository-port.ejs.ts",
+    "lines": 108,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/coding/templates/typescript/rest-controller.ejs.ts",
+    "lines": 132,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/coding/templates/typescript/saga-orchestrator.ejs.ts",
+    "lines": 153,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/coding/templates/typescript/value-object.ejs.ts",
+    "lines": 139,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/deploy/index.ts",
+    "lines": 89,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/devops/index.ts",
+    "lines": 410,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/devops/types.ts",
+    "lines": 1581,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/discovery/change-classifier.ts",
+    "lines": 149,
+    "hits": {
+      "C4_state_rebuild": [142, 143, 144, 145, 146]
+    },
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/discovery/existing-contract-guard.ts",
+    "lines": 315,
+    "hits": {
+      "C4_state_rebuild": [280],
+      "C11_guard_chain": [2, 4, 21, 39, 49, 52]
+    },
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/discovery/types.ts",
+    "lines": 206,
+    "hits": {
+      "C11_guard_chain": [160]
+    },
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/doc-driven/index.ts",
+    "lines": 109,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/doc-driven/plan-generator.ts",
+    "lines": 466,
+    "hits": {
+      "C3_truncation": [286, 293],
+      "C4_state_rebuild": [66, 78, 92]
+    },
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/doc-driven/tasks-generator.ts",
+    "lines": 349,
+    "hits": {
+      "C4_state_rebuild": [64, 209],
+      "C11_guard_chain": [68, 262]
+    },
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/eak/index.ts",
+    "lines": 83,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/eak/paradigm-registry.ts",
+    "lines": 259,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/eak/skill-registry.ts",
+    "lines": 226,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/edm/index.ts",
+    "lines": 74,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/etsb/deployment-blueprints.ts",
+    "lines": 252,
+    "hits": {
+      "C4_state_rebuild": [48, 81, 117]
+    },
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/gate/gate-g1-checker.ts",
+    "lines": 104,
+    "hits": {
+      "C4_state_rebuild": [76, 87, 97]
+    },
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/gate/gate-g4-checker.ts",
+    "lines": 238,
+    "hits": {
+      "C4_state_rebuild": [128, 140, 152, 164, 176, 194]
+    },
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/gate/gate-g5-checker.ts",
+    "lines": 232,
+    "hits": {
+      "C4_state_rebuild": [138, 150, 162, 174, 187, 198]
+    },
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/gate/gate-g6-checker.ts",
+    "lines": 162,
+    "hits": {
+      "C4_state_rebuild": [143, 153]
+    },
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/gate/gate-g8-checker.ts",
+    "lines": 183,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/gate/index.ts",
+    "lines": 156,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/graph/graph-debug.ts",
+    "lines": 709,
+    "hits": {
+      "C4_state_rebuild": [58],
+      "C11_guard_chain": [174, 269, 300, 554, 555, 562]
+    },
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/graph/graph-edge-resolver.ts",
+    "lines": 304,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/graph/graph-lifecycle-models.ts",
+    "lines": 215,
+    "hits": {
+      "C11_guard_chain": [153, 166]
+    },
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/graph/index.ts",
+    "lines": 255,
+    "hits": {
+      "C11_guard_chain": [11, 144, 151, 152]
+    },
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/graph/predicate-registry.ts",
+    "lines": 169,
+    "hits": {
+      "C11_guard_chain": [18]
+    },
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/icp/evidence-collector.ts",
+    "lines": 226,
+    "hits": {
+      "C3_truncation": [118, 119, 123],
+      "C4_state_rebuild": [90, 125, 165, 192, 220]
+    },
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/icp/index.ts",
+    "lines": 45,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/pkc/l3/index.ts",
+    "lines": 97,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/pkc/l4/index.ts",
+    "lines": 80,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/rlis/index.ts",
+    "lines": 82,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/rlis/rule-learner.ts",
+    "lines": 513,
+    "hits": {
+      "C4_state_rebuild": [263, 306, 357]
+    },
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/tcs/fixtures/cache-fixtures.ts",
+    "lines": 336,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/tcs/fixtures/index.ts",
+    "lines": 158,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/tcs/fixtures/oss-fixtures.ts",
+    "lines": 345,
+    "hits": {
+      "C8_env_switch": [50, 51]
+    },
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/tcs/fixtures/security-fixtures.ts",
+    "lines": 252,
+    "hits": {
+      "C8_env_switch": [177, 183, 211, 212, 218]
+    },
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/tcs/fixtures/sql-fixtures.ts",
+    "lines": 315,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/tcs/index.ts",
+    "lines": 257,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/testing/incremental/incremental-test-selector.ts",
+    "lines": 204,
+    "hits": {
+      "C4_state_rebuild": [155, 196]
+    },
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/testing/incremental/index.ts",
+    "lines": 42,
+    "hits": {},
+    "weight": 0
+  },
+  {
+    "file": "packages/core/src/eag/testing/incremental/risk-scorer.ts",
+    "lines": 288,
+    "hits": {
+      "C4_state_rebuild": [77, 188, 196, 218, 236, 263]
+    },
+    "weight": 0
+  }
+]

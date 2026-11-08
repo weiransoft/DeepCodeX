@@ -367,8 +367,10 @@ export class BlueGreenStrategy implements DeployStrategy {
 
         if (!deleteResult.success) {
           // Blue 清理失败：仅记录警告，不影响部署成功状态（best-effort）
+          // 2026-11-08 审查修复：best-effort 警告不再写入 errors（避免与"错误必须被消费"的
+          // success 判定冲突），改用 WARN 日志披露，与 DeployStage 快照失败的 WARN 策略一致。
           const warnMsg = this.formatKubectlError("Blue Deployment 清理", deleteResult);
-          errors.push(`Blue Deployment 清理失败（best-effort，不影响部署）：${warnMsg}`);
+          console.warn(`[BlueGreenStrategy] WARN: Blue Deployment 清理失败（best-effort，不影响部署）：${warnMsg}`);
         }
       }
 
@@ -379,9 +381,11 @@ export class BlueGreenStrategy implements DeployStrategy {
       const resources = this.parseKubectlResources(getResult, namespace, errors);
 
       // ---------- 构造成功结果 ----------
-      // 即使 kubectl get 失败，只要 apply + rollout + patch 成功就视为部署成功
-      // 因为流量已切换到 Green，部署已生效
-      const success = true;
+      // 2026-11-08 审查修复：不再硬编码 success=true 吞掉累积 errors。
+      // errors 非空（如 kubectl get 失败 / JSON 解析失败）时判失败，交由上层消费错误。
+      // 环境变量 EAG_LEGACY_PASS_THROUGH=1 可紧急回退到旧语义。
+      const legacy = process.env.EAG_LEGACY_PASS_THROUGH === "1";
+      const success = legacy ? true : errors.length === 0;
       return this.buildResult(success, startedAt, resources, errors);
     } finally {
       // 清理临时目录

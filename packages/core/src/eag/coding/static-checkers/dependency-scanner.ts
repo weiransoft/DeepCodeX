@@ -24,7 +24,7 @@
 
 import type { StaticChecker } from "../types";
 import type { RedlineDefinition, RedlineResult } from "../../evaluator/types";
-import { buildViolations, buildPass, extractFilePathFromComment, lineOf } from "./checker-utils";
+import { buildViolations, buildPass, buildUnknown, extractFilePathFromComment, lineOf } from "./checker-utils";
 
 /**
  * CVSS 高危阈值（≥ 此值视为高危漏洞）
@@ -39,6 +39,17 @@ import { buildViolations, buildPass, extractFilePathFromComment, lineOf } from "
  * 本判定器以 7.0 为高危阈值（对齐 §5.8.5 漏洞扫描规范）。
  */
 const CVSS_HIGH_THRESHOLD = 7.0;
+
+/**
+ * 依赖扫描诚实降级开关（P1 修复，环境变量回退）
+ *
+ * 默认（未设置）：package.json 解析失败 → status="unknown"（无法判定不得报 passed）。
+ * 设为 "1"：回退到旧语义（解析失败静默跳过，全部失败仍报 passed）。
+ * 对齐用户红线「新行为若改变默认语义提供环境变量开关可回退」。
+ */
+function isDependencyScannerLenientMode(): boolean {
+  return process.env.EAG_DEPENDENCY_SCANNER_LENIENT === "1";
+}
 
 /**
  * 已知高危漏洞依赖清单（内置最小集合）
@@ -281,6 +292,12 @@ export class DependencyScanner implements StaticChecker {
       readonly description: string;
       readonly fixSuggestion: string;
     }> = [];
+    /**
+     * P1 修复：package.json 解析失败证据列表。
+     * 旧实现 catch 里直接 `continue`，全部解析失败时 violations 仍为空、
+     * 末尾 `return buildPass(redline.id)` 会误报「通过」。
+     */
+    const parseFailures: string[] = [];
 
     // 第一遍：扫描 npm audit 输出文件
     let hasAuditFile = false;
@@ -319,7 +336,11 @@ export class DependencyScanner implements StaticChecker {
         let pkg: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
         try {
           pkg = JSON.parse(artifact.content);
-        } catch {
+        } catch (e) {
+          // P1 修复：不再静默跳过。累计解析失败证据（含文件与原因），
+          // 末尾据此处置为 status="unknown" + evidence（对齐 strict-evaluator.ts 的降级模式）。
+          const reason = e instanceof Error ? e.message : String(e);
+          parseFailures.push(`${filePath}: ${reason}`);
           continue;
         }
         const allDeps: Record<string, string> = {
@@ -358,6 +379,17 @@ export class DependencyScanner implements StaticChecker {
 
     if (violations.length > 0) {
       return buildViolations(redline.id, violations);
+    }
+    // P1 修复：存在无法解析的 package.json → 依赖风险无法判定，
+    // 诚实降级为 unknown（含 evidence），绝不返回 passed。
+    // EAG_DEPENDENCY_SCANNER_LENIENT=1 可回退到旧语义。
+    if (parseFailures.length > 0 && !isDependencyScannerLenientMode()) {
+      return buildUnknown(
+        redline.id,
+        `无法判定 TCS-SEC-01：${parseFailures.length} 个 package.json 解析失败，` +
+          `无法确认其依赖是否含高危漏洞（无法判定不得报 passed）。` +
+          `失败明细：${parseFailures.join("；")}`
+      );
     }
     return buildPass(redline.id);
   }

@@ -273,6 +273,9 @@ export class ComplianceEngine {
    * @returns 整体是否通过
    */
   private calculateOverallPassed(results: ReadonlyArray<ComplianceRuleResult>, pack: CompliancePack): boolean {
+    // P2 修复：规则集为空（含三条 filter 后全被过滤）时 Array.every 会返回 true，
+    // 导致「一条规则未执行却报告合规通过」。空集按「不通过/未知」处理，绝不谎报通过。
+    if (results.length === 0) return false;
     return results.every((r) => {
       // 优先使用 result 自带的 severity，兜底从 pack 查询
       const severity = r.severity ?? this.getRuleSeverity(r.ruleId, pack);
@@ -296,7 +299,11 @@ export class ComplianceEngine {
   private generateSummary(pack: CompliancePack, results: ReadonlyArray<ComplianceRuleResult>): string {
     const totalCount = results.length;
     const passedCount = results.filter((r) => r.passed).length;
-    const failedCount = totalCount - passedCount;
+    // P2 修复：与 calculateOverallPassed 统一 warning 口径——warning 失败不计入「失败」汇总
+    //（旧实现把 warning 失败算进 failedCount，却让 overallPassed 排除 warning，两套口径）。
+    // 这里只统计 blocker/major 的阻断性失败，warning 失败单独标注，避免读者误判。
+    const gatingFailedCount = results.filter((r) => r.severity !== "warning" && !r.passed).length;
+    const warningFailedCount = results.filter((r) => r.severity === "warning" && !r.passed).length;
 
     // 按严重性分组统计
     const blockerResults = results.filter((r) => r.severity === "blocker");
@@ -308,10 +315,10 @@ export class ComplianceEngine {
     const warningPassed = warningResults.filter((r) => r.passed).length;
 
     return (
-      `${pack.packName} 合规包 ${totalCount} 条规则：${passedCount} 通过 / ${failedCount} 失败` +
+      `${pack.packName} 合规包 ${totalCount} 条规则：${passedCount} 通过 / ${gatingFailedCount} 失败（阻断性）` +
       `（blocker: ${blockerPassed}/${blockerResults.length}, ` +
       `major: ${majorPassed}/${majorResults.length}, ` +
-      `warning: ${warningPassed}/${warningResults.length}）`
+      `warning: ${warningPassed}/${warningResults.length}；warning 失败 ${warningFailedCount} 条不影响整体判定）`
     );
   }
 }

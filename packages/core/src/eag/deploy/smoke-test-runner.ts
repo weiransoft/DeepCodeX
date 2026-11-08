@@ -36,6 +36,17 @@ import type { SmokeTestRunner, SmokeTestCase, SmokeTestResult, SmokeTestFailure 
  */
 const DEFAULT_TIMEOUT_MS = 5000;
 
+/**
+ * 紧急回退开关（2026-11-08 审查修复新增）。
+ *
+ * 默认（未设置）：totalTests===0（一条用例都没跑）时 passed=false，杜绝"空集合视为通过"。
+ * 设置为 "1"：恢复修复前"空集合视为通过"的旧语义，便于线上紧急回退。
+ * 每次调用时读取（不缓存），便于测试与运维动态切换。
+ */
+function legacyPassThrough(): boolean {
+  return process.env.EAG_LEGACY_PASS_THROUGH === "1";
+}
+
 // ============================================================================
 // 内部类型定义
 // ============================================================================
@@ -69,7 +80,7 @@ interface HttpRequestOutcome {
  * 5. 校验响应状态码是否匹配 expectedStatusCode
  * 6. 如 expectedBodyContains 提供，校验响应体是否包含该字符串
  * 7. 收集所有失败的测试用例到 failures 数组
- * 8. 返回 SmokeTestResult（passed = failedTests === 0）
+ * 8. 返回 SmokeTestResult（passed = totalTests>0 && failedTests===0；空集合判失败，2026-11-08 审查修复）
  *
  * 不可变优先：
  * - run() 返回的 SmokeTestResult 对象通过 Object.freeze 冻结
@@ -109,9 +120,10 @@ export class SmokeTestRunnerImpl implements SmokeTestRunner {
    * 4. 计算 totalTests / passedTests / failedTests / duration
    * 5. 构造 SmokeTestResult 并 Object.freeze 冻结返回
    *
-   * 边界场景处理：
-   * - endpoints 为空 → totalTests=0, passedTests=0, failedTests=0, passed=true
-   * - testCases 为空 → totalTests=0, passedTests=0, failedTests=0, passed=true
+   * 边界场景处理（2026-11-08 审查修复：区分"一条都没跑"与"跑完零失败"）：
+   * - endpoints 为空 → totalTests=0 → passed=false, reason="no-test-executed"（不得误报通过）
+   * - testCases 为空 → totalTests=0 → passed=false, reason="no-test-executed"（不得误报通过）
+   * - 环境变量 EAG_LEGACY_PASS_THROUGH=1 可紧急回退到旧"空集合视为通过"语义
    * - URL 解析失败 → 该用例视为失败，记录到 failures
    * - HTTP 请求超时 → 该用例视为失败，errorMessage="timeout"
    * - HTTP 请求错误（如 ECONNREFUSED）→ 该用例视为失败，记录到 failures
@@ -168,9 +180,12 @@ export class SmokeTestRunnerImpl implements SmokeTestRunner {
     // 计算总耗时（毫秒）
     const duration = Date.now() - startedAt;
 
-    // passed = failedTests === 0（无失败用例即视为通过）
-    // 边界场景：totalTests=0 时，failedTests=0，passed=true（空集合视为通过）
-    const passed = failedTests === 0;
+    // 2026-11-08 审查修复：区分"一条用例都没跑"与"跑完零失败"。
+    // totalTests===0 时 passed=false + reason="no-test-executed"（诚实降级，绝不把"无法执行测试"误报成通过）；
+    // 回退开关 EAG_LEGACY_PASS_THROUGH=1 时恢复旧语义（failedTests===0 即通过）。
+    const legacy = legacyPassThrough();
+    const noTestExecuted = totalTests === 0;
+    const passed = legacy ? failedTests === 0 : totalTests > 0 && failedTests === 0;
 
     // 构造结果对象（不可变优先：对象和数组均通过 Object.freeze 冻结）
     return Object.freeze({
@@ -180,6 +195,8 @@ export class SmokeTestRunnerImpl implements SmokeTestRunner {
       failedTests,
       duration,
       failures: Object.freeze(failures) as ReadonlyArray<SmokeTestFailure>,
+      // 仅在"未执行任何用例且判失败"时附带原因（新字段一律可选，保持既有 API 兼容）
+      ...(noTestExecuted && !passed ? { reason: "no-test-executed" } : {}),
     }) as SmokeTestResult;
   }
 

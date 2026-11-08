@@ -142,6 +142,31 @@ export interface StorageHttpClient {
 }
 
 // ============================================================================
+// 2.1 对象不存在错误（P1-18 修复：结构化区分 404 与其它异常）
+// ============================================================================
+
+/**
+ * 对象不存在错误（404 / NoSuchKey / NotFound）
+ *
+ * 由 S3Adapter.get / OssAdapter.get 在 HTTP 404 时抛出。delete() 通过
+ * `instanceof ObjectNotFoundError` 精确区分「对象确实不存在」与
+ * 「网络/认证/权限/超时/5xx 等其它失败」，避免把任意读失败吞成
+ * 「对象不存在 → permanent:true」的谎报成功。
+ *
+ * 消息同时含 "404" / "NotFound" / "不存在" 字样，兼容既有 get 抛错断言。
+ */
+export class ObjectNotFoundError extends Error {
+  /** 不存在对象的 Key */
+  public readonly key: string;
+
+  constructor(key: string, detail: string = "文件不存在") {
+    super(`对象不存在（404 / NotFound）：${detail} key=${key}`);
+    this.name = "ObjectNotFoundError";
+    this.key = key;
+  }
+}
+
+// ============================================================================
 // 3. ObjectStoragePort 抽象接口
 // ============================================================================
 
@@ -724,7 +749,7 @@ export class S3Adapter implements ObjectStoragePort {
 
     const response = await this.httpClient.request("GET", url, signedHeaders);
     if (response.status === 404) {
-      throw new Error(`S3 get 失败：文件不存在 key=${key}`);
+      throw new ObjectNotFoundError(key, "S3 get 文件不存在");
     }
     if (response.status < 200 || response.status >= 300) {
       throw new Error(`S3 get 失败：status=${response.status}, body=${response.body.toString("utf8")}`);
@@ -764,10 +789,22 @@ export class S3Adapter implements ObjectStoragePort {
     // S3 软删除通过 PUT 复制 + 元数据标记实现
     // 实际生产实现应使用 COPY 操作复制原对象到 deleted/ 前缀下并打 deleted-at 标记
     // 这里通过 GET + PUT 实现（确保适配器与具体厂商 S3 兼容协议完全解耦）
-    const existing = await this.get(key).catch(() => null);
-    if (existing === null) {
-      // 文件不存在视为已永久删除
-      return { key, deletedAt, permanent: true };
+    let existing: GetResult;
+    try {
+      existing = await this.get(key);
+    } catch (e) {
+      if (e instanceof ObjectNotFoundError) {
+        // 仅「对象确实不存在（404 / NoSuchKey）」才视为已永久删除
+        return { key, deletedAt, permanent: true };
+      }
+      // 网络/认证/权限/超时/5xx 等任意其它异常：删除流程根本没执行，
+      // 绝不谎报 permanent:true 成功（P1-18）。
+      const reason = e instanceof Error ? e.message : String(e);
+      if (process.env.EAG_TCS_DELETE_RETURN_ERROR === "1") {
+        // 诚实降级：返回带 error 的失败结果（permanent:false），不向上抛
+        return { key, deletedAt, permanent: false, error: `S3 delete 前置 get 失败：${reason}` };
+      }
+      throw new Error(`S3 delete 前置 get 失败（非 404，拒绝谎报删除成功）：${reason}`);
     }
     // 重新上传原内容并打 deleted-at 标记
     const headers: Record<string, string> = {
@@ -1111,7 +1148,7 @@ export class OssAdapter extends S3Adapter {
 
     const response = await this.httpClient.request("GET", url, signedHeaders);
     if (response.status === 404) {
-      throw new Error(`OSS get 失败：文件不存在 key=${key}`);
+      throw new ObjectNotFoundError(key, "OSS get 文件不存在");
     }
     if (response.status < 200 || response.status >= 300) {
       throw new Error(`OSS get 失败：status=${response.status}, body=${response.body.toString("utf8")}`);
@@ -1142,9 +1179,22 @@ export class OssAdapter extends S3Adapter {
    */
   async delete(key: string): Promise<DeleteResult> {
     const deletedAt = new Date().toISOString();
-    const existing = await this.get(key).catch(() => null);
-    if (existing === null) {
-      return { key, deletedAt, permanent: true };
+    let existing: GetResult;
+    try {
+      existing = await this.get(key);
+    } catch (e) {
+      if (e instanceof ObjectNotFoundError) {
+        // 仅「对象确实不存在（404 / NoSuchKey）」才视为已永久删除
+        return { key, deletedAt, permanent: true };
+      }
+      // 网络/认证/权限/超时/5xx 等任意其它异常：删除流程根本没执行，
+      // 绝不谎报 permanent:true 成功（P1-18）。
+      const reason = e instanceof Error ? e.message : String(e);
+      if (process.env.EAG_TCS_DELETE_RETURN_ERROR === "1") {
+        // 诚实降级：返回带 error 的失败结果（permanent:false），不向上抛
+        return { key, deletedAt, permanent: false, error: `OSS delete 前置 get 失败：${reason}` };
+      }
+      throw new Error(`OSS delete 前置 get 失败（非 404，拒绝谎报删除成功）：${reason}`);
     }
     const url = this.buildOssObjectUrl(key);
     const date = new Date().toUTCString();

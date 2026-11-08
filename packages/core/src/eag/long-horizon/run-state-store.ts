@@ -34,7 +34,14 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { LoopType } from "../loop/models";
-import type { HumanInterventionRecord, LogCallback, MilestoneRecord, RunState, RunStateStatus } from "./types";
+import type {
+  HumanInterventionRecord,
+  LogCallback,
+  MilestoneRecord,
+  MultiLoopResumeSnapshot,
+  RunState,
+  RunStateStatus,
+} from "./types";
 import { DEFAULT_RUN_STATE_DIR } from "./types";
 
 // ============================================================================
@@ -73,6 +80,62 @@ const JSONL_EXTENSION = ".jsonl" as const;
  */
 function noopLog(_message: string, _level?: "info" | "warn" | "error"): void {
   // 默认无操作
+}
+
+// ============================================================================
+// 事件 → 状态机（共用，消除两套重放口径漂移）
+// ============================================================================
+
+/**
+ * RunState 的「状态视图」——仅含 status 与 blockedReason。
+ *
+ * 抽成独立视图的目的是让两套重放（load()/appendEvent 的完整重放、
+ * listRuns() 的轻量重放）共用同一个事件→状态映射函数，避免两边各自维护
+ * switch 导致语义漂移（P0-1 审查项）。
+ */
+interface RunStatusView {
+  readonly status: RunStateStatus;
+  readonly blockedReason?: string;
+}
+
+/**
+ * 把单个事件应用到状态视图，返回新视图（纯函数，不修改入参）。
+ *
+ * 语义约定（两套重放一致）：
+ * - human-intervention：置 human-checkpoint，并把 payload.reason 写入 blockedReason。
+ *   「修复 P0-1」：此前完整重放只 push 记录不改 status，导致 load() 重建出
+ *   status="running"、blockedReason 丢失，/eag-resume 的 human-checkpoint 分支永不触发。
+ * - human-intervention-resolved / run-resumed：恢复 running 并清空 blockedReason。
+ * - run-paused：默认置 paused；当 payload.humanCheckpoint === true 时保持
+ *   human-checkpoint（eag-run-handler 在 human-checkpoint 终态收尾写入该标记，
+ *   避免「等待人工决策」被错误降级成普通暂停）。旧事件无此字段，行为不变。
+ * - run-completed：completed。
+ * - run-failed：failed + payload.reason。
+ * - 其余事件：状态不变（返回入参引用）。
+ */
+function applyStatusEvent(
+  current: RunStatusView,
+  event: Readonly<Pick<RunStateEvent, "type" | "payload">>
+): RunStatusView {
+  const p = event.payload;
+  const withReason = (status: RunStateStatus): RunStatusView =>
+    typeof p.reason === "string" ? { status, blockedReason: p.reason } : { status };
+
+  switch (event.type) {
+    case "human-intervention":
+      return withReason("human-checkpoint");
+    case "human-intervention-resolved":
+    case "run-resumed":
+      return { status: "running" };
+    case "run-paused":
+      return p.humanCheckpoint === true ? withReason("human-checkpoint") : withReason("paused");
+    case "run-completed":
+      return { status: "completed" };
+    case "run-failed":
+      return withReason("failed");
+    default:
+      return current;
+  }
 }
 
 // ============================================================================
@@ -984,12 +1047,12 @@ export class RunStateStore {
     const initialLoop = (startedPayload.initialLoop as LoopType) ?? "design";
 
     // 初始化可变状态（重放过程中累加）
-    let status: RunStateStatus = "running";
+    // status / blockedReason 统一由 applyStatusEvent 维护（两套重放共用状态机，P0-1）
+    let statusView: RunStatusView = { status: "running" };
     let currentLoop: LoopType = initialLoop;
     let currentIteration = 0;
     const startedAt = startedEvent.timestamp;
     let updatedAt = startedEvent.timestamp;
-    let blockedReason: string | undefined = undefined;
     let totalLlmCallCount = 0;
     let totalTokensUsed = 0;
     const completedLoops: LoopType[] = [];
@@ -1081,33 +1144,21 @@ export class RunStateStore {
           }
           break;
         }
-        case "run-paused": {
-          const p = event.payload;
-          status = "paused";
-          blockedReason = typeof p.reason === "string" ? p.reason : undefined;
+        case "run-paused":
+        case "run-resumed":
+        case "run-completed":
+        case "run-failed":
+          // status / blockedReason 由下方统一的 applyStatusEvent 处理（两套重放共用）
           break;
-        }
-        case "run-resumed": {
-          status = "running";
-          blockedReason = undefined;
-          break;
-        }
-        case "run-completed": {
-          status = "completed";
-          break;
-        }
-        case "run-failed": {
-          const p = event.payload;
-          status = "failed";
-          blockedReason = typeof p.reason === "string" ? p.reason : undefined;
-          break;
-        }
         default: {
           // 未知事件类型：跳过（前向兼容）
           this.log(`未知事件类型，跳过：${event.type}`, "warn");
           break;
         }
       }
+
+      // 统一应用事件→状态机（与 buildSummaryFromFile 共用，避免两套重放漂移）
+      statusView = applyStatusEvent(statusView, event);
     }
 
     // 最后事件的 cumulativeChecksum 作为 RunState.checksum
@@ -1128,8 +1179,7 @@ export class RunStateStore {
       humanInterventionCount: humanInterventions.length,
       totalLlmCallCount,
       totalTokensUsed,
-      status,
-      ...(blockedReason !== undefined ? { blockedReason } : {}),
+      ...statusView,
       checksum,
     });
   }
@@ -1165,7 +1215,8 @@ export class RunStateStore {
     const updatedAt = lastLine.timestamp;
 
     // 通过重放确定 status / currentLoop / completedLoops（轻量重放，不校验 SHA256）
-    let status: RunStateStatus = "running";
+    // status 复用与完整重放相同的 applyStatusEvent 状态机，避免两套口径漂移（P0-1）
+    let statusView: RunStatusView = { status: "running" };
     let currentLoop: LoopType = initialLoop;
     const completedLoops: LoopType[] = [];
     for (const line of lines) {
@@ -1179,26 +1230,11 @@ export class RunStateStore {
           if (lt && !completedLoops.includes(lt)) completedLoops.push(lt);
           break;
         }
-        case "run-paused":
-          status = "paused";
-          break;
-        case "run-resumed":
-          status = "running";
-          break;
-        case "run-completed":
-          status = "completed";
-          break;
-        case "run-failed":
-          status = "failed";
-          break;
-        case "human-intervention":
-          // 人工介入期间视为 human-checkpoint 状态
-          status = "human-checkpoint";
-          break;
-        case "human-intervention-resolved":
-          status = "running";
+        default:
+          // 其余事件：status 由下方统一状态机处理
           break;
       }
+      statusView = applyStatusEvent(statusView, evt);
     }
 
     // 完成度 = completedLoops.length / 3（design/coding/testing 三 Loop）
@@ -1208,10 +1244,63 @@ export class RunStateStore {
       runId,
       startedAt,
       updatedAt,
-      status,
+      status: statusView.status,
       currentLoop,
       completionRate,
     });
+  }
+
+  /**
+   * 持久化 MultiLoopPlan + 失败反馈快照（P0-3 审查修复）
+   *
+   * 独立于 JSONL 事件流，存到 <projectRoot>/.eag/run-state/<runId>.snapshot.json。
+   * 由 EagRunHandler 在终态时调用，供 /eag-resume 复用原 plan、已生成 spec/plan/tasks
+   * 与上一轮失败反馈，避免「最小 spec 裸重放」丢失上下文。
+   *
+   * 写入失败由调用方捕获并降级（不阻断主流程）；快照损坏/缺失时
+   * loadResumeSnapshot 返回 undefined，调用方诚实降级为重新生成 plan。
+   *
+   * @param runId run-id（仅允许字母/数字/连字符，防路径穿越）
+   * @param projectRoot 项目根目录
+   * @param snapshot 复用快照
+   */
+  saveResumeSnapshot(runId: string, projectRoot: string, snapshot: Readonly<MultiLoopResumeSnapshot>): void {
+    if (!/^[a-zA-Z0-9-]+$/.test(runId)) {
+      throw new RunStateStoreError("invalid-request", `runId 非法：${runId}`, runId);
+    }
+    const dir = path.join(path.resolve(projectRoot), DEFAULT_RUN_STATE_DIR);
+    fs.mkdirSync(dir, { recursive: true });
+    const snapshotPath = path.join(dir, `${runId}.snapshot.json`);
+    fs.writeFileSync(snapshotPath, JSON.stringify(snapshot, null, 2), "utf8");
+  }
+
+  /**
+   * 加载 resume 快照（P0-3 审查修复）
+   *
+   * 文件不存在 / JSON 损坏 / plan 结构非法时返回 undefined（诚实降级，
+   * 绝不伪造一份 plan），由调用方回退到重新生成 plan。
+   *
+   * @param runId run-id
+   * @param projectRoot 项目根目录
+   * @returns 复用快照，或 undefined
+   */
+  loadResumeSnapshot(runId: string, projectRoot: string): MultiLoopResumeSnapshot | undefined {
+    if (!/^[a-zA-Z0-9-]+$/.test(runId)) {
+      return undefined;
+    }
+    const snapshotPath = path.join(path.resolve(projectRoot), DEFAULT_RUN_STATE_DIR, `${runId}.snapshot.json`);
+    if (!fs.existsSync(snapshotPath)) {
+      return undefined;
+    }
+    try {
+      const parsed = JSON.parse(fs.readFileSync(snapshotPath, "utf8")) as MultiLoopResumeSnapshot;
+      if (!parsed || !parsed.plan || !Array.isArray(parsed.plan.loops)) {
+        return undefined;
+      }
+      return parsed;
+    } catch {
+      return undefined;
+    }
   }
 
   /**

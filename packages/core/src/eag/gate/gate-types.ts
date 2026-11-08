@@ -288,6 +288,14 @@ export interface GateContext {
   readonly taskCard: TaskCard;
   /** 实际变更列表（来自 git diff 静态分析） */
   readonly actualChanges: ReadonlyArray<FileChange>;
+  /**
+   * 实际变更采集是否成功（可选，2026-11-08 审查修复新增）。
+   *
+   * 用于区分 G-3 门禁的两种空集语义：
+   * - 显式 false：采集链路失败导致 actualChanges 为空，不得当作"确认零变更"判通过；
+   * - true 或未提供：沿用既有语义，空数组视为"确认零变更"（保持既有调用方兼容）。
+   */
+  readonly actualChangesCollected?: boolean;
 }
 
 /**
@@ -364,8 +372,8 @@ export interface GateOrchestrationResult {
    * - `missing-context`：G-6/G-7 因调用方传入普通 GateContext 缺扩展字段而跳过
    *   （向后兼容语义，非缺陷）
    *
-   * 默认不影响 `allPassed`（保持既有调用方行为）；需要 fail-closed 的调用方
-   * 可开启 `strictGateCoverage`，或用该字段自行判定。
+   * 2026-11-08 审查修复：默认严格模式下任何 skippedGates 都使 `allPassed=false`（fail-closed）；
+   * 显式 `strictGateCoverage: false` 或环境变量 EAG_LEGACY_PASS_THROUGH=1 可回退到宽松语义。
    */
   readonly skippedGates?: ReadonlyArray<{
     readonly gate: GateId;

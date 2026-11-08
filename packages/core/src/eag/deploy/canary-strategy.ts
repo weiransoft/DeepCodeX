@@ -473,8 +473,10 @@ export class CanaryStrategy implements DeployStrategy {
       if (!deleteResult.success) {
         // Stable 删除失败：仅记录警告，不影响部署成功状态（best-effort）
         // 原因：Canary 已承接全部流量，Stable 残留不影响服务可用性
+        // 2026-11-08 审查修复：best-effort 警告不再写入 errors，改用 WARN 日志披露，
+        // 避免与"错误必须被消费"的 success 判定冲突。
         const warnMsg = this.formatKubectlError("Stable Deployment 清理", deleteResult);
-        errors.push(`Stable Deployment 清理失败（best-effort，不影响部署）：${warnMsg}`);
+        console.warn(`[CanaryStrategy] WARN: Stable Deployment 清理失败（best-effort，不影响部署）：${warnMsg}`);
       }
 
       // ---------- 步骤 7: 调用 kubectl get 获取已部署资源列表 ----------
@@ -484,9 +486,11 @@ export class CanaryStrategy implements DeployStrategy {
       const resources = this.parseKubectlResources(getResult, namespace, errors);
 
       // ---------- 构造成功结果 ----------
-      // 即使 kubectl get 失败，只要 apply + 全部阶梯 + 健康检查成功就视为部署成功
-      // 因为 Canary 已承接全部流量，部署已生效
-      const success = true;
+      // 2026-11-08 审查修复：不再硬编码 success=true 吞掉累积 errors。
+      // errors 非空（如 kubectl get 失败 / JSON 解析失败）时判失败，交由上层消费错误。
+      // 环境变量 EAG_LEGACY_PASS_THROUGH=1 可紧急回退到旧语义。
+      const legacy = process.env.EAG_LEGACY_PASS_THROUGH === "1";
+      const success = legacy ? true : errors.length === 0;
       return this.buildResult(success, startedAt, resources, errors);
     } finally {
       // 清理临时目录（finally 块确保异常路径下也能清理）

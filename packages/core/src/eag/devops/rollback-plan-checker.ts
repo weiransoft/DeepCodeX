@@ -45,9 +45,13 @@
  *   ## runId
  *   <runId>
  *
- * 禁用模式说明（向后兼容）：
- * - RollbackPlanCheckerImpl 自身不处理禁用模式
- * - 禁用模式由 Phase 5 的 GateG8CheckerImpl 处理（context.rollbackPlanExists=true 时跳过真实校验）
+ * 真实校验契约说明（2026-11-08 审查修复，替代旧的"禁用模式"）：
+ * - RollbackPlanCheckerImpl 始终执行真实文件校验（fs.existsSync + fs.readFileSync + 章节解析），
+ *   没有任何"跳过真实校验"的开关。
+ * - 旧的"context.rollbackPlanExists=true 时跳过真实校验"表述已废止：rollbackPlanExists 应是
+ *   本检查器 exists && valid 的**结果**，而不是绕过校验的开关。
+ * - 装配：由 DevOpsOrchestrator 注入本检查器并调用 check()，把 exists && valid 作为布尔值传给 G-8；
+ *   GateG8CheckerImpl 在注入 rollbackPlanCheckResult 时同样以 exists && valid 为准。
  *
  * M-14-2 修复说明（路径优先级）：
  * - RollbackPlanCheckerImpl 自身不处理路径优先级（snapshot.rollbackPlanFilePath vs DevOpsContext）

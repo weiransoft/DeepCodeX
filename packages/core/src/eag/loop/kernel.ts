@@ -22,6 +22,8 @@
  * @module eag/loop/kernel
  */
 
+import * as crypto from "node:crypto";
+import * as childProcess from "node:child_process";
 import type {
   LoopEngineeringConfig,
   LogCallback,
@@ -44,6 +46,196 @@ import type { SchedulingAction } from "./models";
 // 但 type-only import 仅在编译期解析，不会触发运行期模块加载循环）
 import type { MultiLoopPlan, MultiLoopRunReport, MultiLoopNodeResult, MultiLoopNode } from "../long-horizon/types";
 import type { RunStateStore } from "../long-horizon/run-state-store";
+
+// ============================================================================
+// 无进展检测器（双轨：结果指纹 + 工作区快照）
+// ============================================================================
+
+/**
+ * 无进展熔断默认阈值（连续无进展轮数）。
+ * 对齐 p5/executors/llm-task-executor.ts：env DEEPCODE_NO_PROGRESS_LIMIT 可覆盖，
+ * 非法值回落默认 4。
+ */
+const DEFAULT_NO_PROGRESS_LIMIT = 4;
+
+function readNoProgressLimit(): number {
+  const raw = process.env["DEEPCODE_NO_PROGRESS_LIMIT"];
+  const parsed = raw === undefined ? NaN : Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_NO_PROGRESS_LIMIT;
+}
+
+/**
+ * 无进展护栏开关（默认开启 = 修复后的诚实行为）。
+ * 设 DEEPCODE_NO_PROGRESS_GUARD=0/false/off/disabled 可回退到「仅靠轮数上限」的旧行为。
+ * 契约：默认绝不把「连续无进展空转」报成成功。
+ */
+function isNoProgressGuardEnabled(): boolean {
+  const raw = (process.env["DEEPCODE_NO_PROGRESS_GUARD"] ?? "").trim().toLowerCase();
+  return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "disabled";
+}
+
+/** 单轮无进展观测输入 */
+export interface NoProgressObservation {
+  /** 本轮结果指纹（稳定序列化后的哈希） */
+  readonly resultFingerprint: string;
+  /** 工作区快照（git status）；null = 不可用（非 git 仓库 / 取不到）→ 降级单轨 */
+  readonly workspaceSnapshot: string | null;
+  /** 本轮是否有成功写入（真实产出信号，打断探索型空转计数） */
+  readonly hasSuccessfulWrite: boolean;
+  /**
+   * 本轮是否排除在无进展累计之外（如「验证失败的修复轮」）。
+   * 这类轮次有明确失败反馈、由 scheduler 的连续失败上限管理，不属于「结果重复空转」，
+   * 不应被无进展熔断抢先收口（否则会破坏连续失败 → HUMAN_CHECKPOINT/STOP_FAILURE 语义）。
+   */
+  readonly excluded?: boolean;
+}
+
+/** 无进展判定结果 */
+export interface NoProgressVerdict {
+  /** 是否达到阈值（调用方必须诚实判失败，绝不报成功） */
+  readonly stalled: boolean;
+  /** 触发原因（供报告） */
+  readonly cause?: string;
+  /** 是否降级（取不到工作区/git，仅按结果指纹单轨判定） */
+  readonly degraded: boolean;
+}
+
+/**
+ * 稳定序列化任意值（对象按 key 排序），再取 SHA256 作为结果指纹。
+ * 消除属性顺序差异；调用方应剔除时间戳等环境元数据后再传入。
+ */
+export function stableFingerprint(value: unknown): string {
+  const normalize = (v: unknown): unknown => {
+    if (v === null || typeof v !== "object") return v;
+    if (Array.isArray(v)) return v.map(normalize);
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(v as Record<string, unknown>).sort()) {
+      out[key] = normalize((v as Record<string, unknown>)[key]);
+    }
+    return out;
+  };
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(normalize(value));
+  } catch {
+    serialized = String(value);
+  }
+  return crypto.createHash("sha256").update(serialized).digest("hex");
+}
+
+/**
+ * 捕获工作区快照（git status --porcelain）。
+ * 非 git 仓库 / git 不可用 / 超时 / projectRoot 缺失 → 返回 null（诚实降级为单轨）。
+ */
+export function captureWorkspaceSnapshot(projectRoot?: string): string | null {
+  if (!projectRoot) return null;
+  try {
+    return childProcess.execSync("git status --porcelain", {
+      cwd: projectRoot,
+      encoding: "utf8",
+      timeout: 3000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 双轨无进展检测器（对齐 p5/executors/llm-task-executor.ts 思路）。
+ *
+ * - 轨道 A（结果重复）：结果指纹与上一轮相同 + 工作区快照无变化 → 连续累计。
+ * - 轨道 B（探索型空转）：结果指纹变化（模型在换命令）但工作区快照连续无变化、
+ *   无成功写入、git 快照可用 → 连续累计。
+ * - 工作区快照变化 / 成功写入 → 两轨清零（真有进展）。
+ * - 取不到工作区快照（degraded=true）→ 退化为「连续相同结果指纹」单轨，
+ *   轨道 B 禁用、轨道 A 阈值 +1，并在判定/报告中说明降级。
+ *
+ * 达阈值时 stalled=true，调用方必须诚实判失败，绝不报成功。
+ */
+export class NoProgressDetector {
+  private readonly limit: number;
+  private readonly enabled: boolean;
+  private readonly degraded: boolean;
+  private noProgressStreak = 0;
+  private explorationStreak = 0;
+  private lastResultFingerprint: string | null = null;
+  private lastWorkspaceSnapshot: string | null;
+  private firstObservation = true;
+
+  constructor(options?: {
+    readonly limit?: number;
+    readonly enabled?: boolean;
+    readonly degraded?: boolean;
+    /**
+     * 循环前采集的起始工作区快照（对齐 p5 语义）。
+     * 作为首轮比较基线，避免首轮把「已有快照」误判成工作区变化而清零计数。
+     */
+    readonly startWorkspaceSnapshot?: string | null;
+  }) {
+    this.limit = options?.limit ?? readNoProgressLimit();
+    this.enabled = options?.enabled ?? isNoProgressGuardEnabled();
+    this.degraded = options?.degraded ?? false;
+    this.lastWorkspaceSnapshot = options?.startWorkspaceSnapshot ?? null;
+  }
+
+  /** 是否处于降级（单轨）模式，供报告说明 */
+  isDegraded(): boolean {
+    return this.degraded;
+  }
+
+  observe(observation: NoProgressObservation): NoProgressVerdict {
+    if (!this.enabled) {
+      return { stalled: false, degraded: this.degraded };
+    }
+    if (observation.excluded) {
+      // 明确失败/修复轮：重置两轨并刷新基线，避免跨轮污染，但不触发熔断。
+      this.noProgressStreak = 0;
+      this.explorationStreak = 0;
+      this.lastResultFingerprint = observation.resultFingerprint;
+      this.lastWorkspaceSnapshot = observation.workspaceSnapshot;
+      this.firstObservation = false;
+      return { stalled: false, degraded: this.degraded };
+    }
+    // degraded 时 workspaceSnapshot 恒为 null，此式恒 true，等价于仅按结果指纹判定
+    const workspaceUnchanged = observation.workspaceSnapshot === this.lastWorkspaceSnapshot;
+    const resultUnchanged = this.firstObservation || observation.resultFingerprint === this.lastResultFingerprint;
+
+    if (observation.hasSuccessfulWrite || !workspaceUnchanged) {
+      // 真有进展 → 两轨清零
+      this.noProgressStreak = 0;
+      this.explorationStreak = 0;
+    } else if (this.firstObservation) {
+      // 首轮采样：连续 N 轮恰在第 N 轮触发
+      this.noProgressStreak = 1;
+      this.explorationStreak = this.degraded ? 0 : 1;
+    } else if (resultUnchanged) {
+      this.noProgressStreak += 1;
+      this.explorationStreak = 0;
+    } else {
+      this.noProgressStreak = 0;
+      this.explorationStreak = this.degraded ? 0 : this.explorationStreak + 1;
+    }
+
+    this.lastResultFingerprint = observation.resultFingerprint;
+    this.lastWorkspaceSnapshot = observation.workspaceSnapshot;
+    this.firstObservation = false;
+
+    const limitA = this.limit + (this.degraded ? 1 : 0);
+    const limitB = this.limit + 2;
+    let cause: string | undefined;
+    if (this.noProgressStreak >= limitA) {
+      cause = this.degraded
+        ? "取不到工作区/git 快照，已降级为「连续相同结果指纹」单轨判定（阈值 +1）：结果连续无变化"
+        : "结果指纹与工作区快照均无变化（结果重复）";
+    } else if (!this.degraded && this.explorationStreak >= limitB) {
+      cause = "输出变化但工作区连续无变化且无成功写入（探索型空转）";
+    }
+    return cause !== undefined
+      ? { stalled: true, cause, degraded: this.degraded }
+      : { stalled: false, degraded: this.degraded };
+  }
+}
 
 // ============================================================================
 // LoopKernel 类
@@ -150,6 +342,17 @@ export class LoopKernel {
     let iterIndex = 0;
     let finalStatus: "completed" | "failed" | "aborted" = "failed";
 
+    // P1：进入循环前采集一次工作区快照判断 git 可用性；不可用则降级为单轨判定。
+    const startWorkspaceSnapshot = captureWorkspaceSnapshot(this.config.projectRoot);
+    const noProgressDetector = new NoProgressDetector({
+      degraded: startWorkspaceSnapshot === null,
+      startWorkspaceSnapshot,
+    });
+    let noProgressReason: string | undefined;
+    if (noProgressDetector.isDegraded()) {
+      this.warn("工作区/git 快照不可用，无进展判定降级为「连续相同结果指纹」单轨（阈值 +1）");
+    }
+
     // 2026-11-01 加固：把 maxIterations 写进循环条件本身，作为结构性上界。
     // 此前条件是 `while (!this.stopRequested)`，轮数上限只靠循环体外侧的
     // 尾部 break（下方第 4 步）兜底——一旦 runOneCycle 的返回路径被改动、
@@ -158,6 +361,30 @@ export class LoopKernel {
     while (!this.stopRequested && iterIndex < this.config.maxIterations) {
       // 1. 单轮执行
       const cycleResult = this.runOneCycle(objective, iterIndex);
+
+      // 1.5（P1）：双轨无进展判定。放在处理 stop_success 之前——即使调度器给出
+      // 「最后一轮通过」的 stop_success，只要前序轮次已连续无进展，也必须诚实判失败，
+      // 绝不把「bash 空转 / 结果重复但工作区零变化」报成成功。
+      // 指纹剔除时间戳，仅取结果本体与 verdict 摘要；声明式 committed_count 不等于
+      // 真实落盘，故 hasSuccessfulWrite 保守置 false，以工作区快照变化为准。
+      const noProgressVerdict = noProgressDetector.observe({
+        resultFingerprint: stableFingerprint({
+          generator: cycleResult.generatorResult,
+          verdict: { passed: cycleResult.verdict.passed, reason: cycleResult.verdict.reason },
+        }),
+        workspaceSnapshot: captureWorkspaceSnapshot(this.config.projectRoot),
+        hasSuccessfulWrite: false,
+        // 验证失败的修复轮由 scheduler 连续失败上限管理，不计入无进展空转
+        excluded: !cycleResult.verdict.passed,
+      });
+      if (noProgressVerdict.stalled) {
+        finalStatus = "failed";
+        noProgressReason =
+          `无进展熔断：连续多轮未产生任何新进展（${noProgressVerdict.cause}）` +
+          (noProgressVerdict.degraded ? "；工作区/git 不可用，已降级为结果指纹单轨判定" : "");
+        this.warn(noProgressReason);
+        break;
+      }
 
       // 2. 根据调度决策更新状态
       const decision = cycleResult.schedulingDecision;
@@ -227,7 +454,7 @@ export class LoopKernel {
       tokenUsed,
     });
 
-    const summary = this.buildFinalSummary(objective, iterIndex, finalStatus, durationSec, tokenUsed);
+    const summary = this.buildFinalSummary(objective, iterIndex, finalStatus, durationSec, tokenUsed, noProgressReason);
 
     return {
       runId: this.runId,
@@ -305,6 +532,20 @@ export class LoopKernel {
 
     // 遍历节点（按拓扑序）
     for (const node of multiLoopPlan.loops) {
+      // P1：resume 时跳过已完成节点，避免重跑已完成的 Loop（原实现无条件重跑全部节点）
+      if (node.status === "completed") {
+        this.info(`节点 ${node.nodeId} [${node.loopType}] 已完成，跳过（resume 不重跑）`);
+        nodeStatusMap.set(node.nodeId, "completed");
+        nodeResults.push(
+          Object.freeze({
+            nodeId: node.nodeId,
+            loopType: node.loopType,
+            status: "completed",
+          }) as MultiLoopNodeResult
+        );
+        continue;
+      }
+
       // 检查依赖是否满足
       const depsNotSatisfied = node.dependencies.some((depId) => nodeStatusMap.get(depId) !== "completed");
       if (depsNotSatisfied) {
@@ -725,7 +966,8 @@ export class LoopKernel {
     lastIterIndex: number,
     finalStatus: string,
     durationSec: number,
-    tokenUsed: number
+    tokenUsed: number,
+    extraNote?: string
   ): string {
     return (
       `Loop Engineering 运行报告\n` +
@@ -737,7 +979,8 @@ export class LoopKernel {
       `- durationSec: ${durationSec.toFixed(2)}\n` +
       `- tokenUsed: ${tokenUsed}\n` +
       `- committedCount: ${this.committedCount}\n` +
-      `- humanCheckpoints: ${this.humanCheckpoints.length}\n`
+      `- humanCheckpoints: ${this.humanCheckpoints.length}\n` +
+      (extraNote ? `- noProgress: ${extraNote}\n` : "")
     );
   }
 }

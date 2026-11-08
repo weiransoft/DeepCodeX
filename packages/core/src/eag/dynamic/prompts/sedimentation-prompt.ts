@@ -60,7 +60,8 @@ export function buildSedimentationPrompt(context: SedimentationPromptContext): S
     .slice(-SEDIMENTATION_MAX_TURNS)
     .map((turn) => ({
       role: turn.role === "assistant" ? "assistant" : "user",
-      content: typeof turn.content === "string" ? turn.content.slice(0, MAX_TURN_CHARS) : "",
+      // 保尾截断：与 suggester.toTurns 一致，避免 head-only 丢掉单轮末尾的关键信息
+      content: typeof turn.content === "string" ? turn.content.slice(-MAX_TURN_CHARS) : "",
     }))
     .filter((turn) => turn.content.trim().length > 0);
 
