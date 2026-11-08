@@ -191,3 +191,22 @@ T3 / T4 / T10b / T13 默认宽松覆盖 → allPassed=true / firstFailedGate=nul
 | `docs/proposals/super-agent/eag-review-20261108/` | 6 组原始报告 + lead 复核笔记 + 扫描脚本/结果 |
 | `docs/proposals/super-agent/eag-review-fixes-20261108.md` | 本报告 |
 | `packages/core/src/tests/eag-*-review-fixes.test.ts` 等 7 个新文件 | 84 个新增回归用例 |
+
+---
+
+## 9. 提交与提交态复验
+
+**提交**：`b70092c8 fix(eag): 按全量审查结论落地 8 条 P0 与跨层 P1 修复，默认诚实可回退`，72 文件 / `+11080 / -484`，已推送 `origin/main`（`HEAD == origin/main == b70092c86ba6845c1a9b5ba872f47cb1b92ed760`），工作区干净。只读审查阶段的 3 份报告与 6 组原始材料一并归档入库。
+
+**pre-commit hook 影响**：lint-staged 对 60 个 TS/JS 与 1 个 JSON 跑 `eslint --fix` + `prettier --write`，暂存态 `+13884` 变为提交态 `+11080`。差异主要来自 `eag-review-20261108/pattern-scan.json`（2435 行）被 prettier 重排。已核实提交态 `pattern-scan.json` 仍为合法 JSON（258 个键）、报告 8 个章节与 300 行索引完整、关键修复符号（`applyStatusEvent` / `parseTap13` / `parseOk` / `pkcUnavailable` / `getFailedAutonomousRunDiagnostics` / `strictGateCoverage`）全部在提交态源码中、7 个新测试用例数不变。
+
+**提交态全量复验**（不直接沿用提交前数字）：
+
+| 项目 | 结果 |
+|---|---|
+| `npm run check` | **exit 0** ✅ |
+| 提交态定向全集（15 文件，含 team 契约） | **231 / 231 / 0** ✅ |
+| core 全量 4 runner（剥离 shim） | **8664 / 8646 / 0 / 18 skipped，exit 0，4/4 runner ✅** |
+| Web 全量 | **689 / 689 / 0** ✅ |
+
+> 项目约定：pre-commit lint-staged 会改暂存文件，因此提交后重跑相关测试与 `npm run check` 才宣布完成。本轮已执行，结果与提交前一致，**hook 未改变任何行为**。
