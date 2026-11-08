@@ -196,7 +196,7 @@ T3 / T4 / T10b / T13 默认宽松覆盖 → allPassed=true / firstFailedGate=nul
 
 ## 9. 提交与提交态复验
 
-**提交**：`b70092c8 fix(eag): 按全量审查结论落地 8 条 P0 与跨层 P1 修复，默认诚实可回退`，72 文件 / `+11080 / -484`，已推送 `origin/main`（`HEAD == origin/main == b70092c86ba6845c1a9b5ba872f47cb1b92ed760`），工作区干净。只读审查阶段的 3 份报告与 6 组原始材料一并归档入库。
+**提交**：`b70092c8 fix(eag): 按全量审查结论落地 8 条 P0 与跨层 P1 修复，默认诚实可回退`，72 文件 / `+11080 / -484`，已推送 `origin/main`（该提交落地时 `HEAD == origin/main == b70092c86ba6845c1a9b5ba872f47cb1b92ed760`），工作区干净。只读审查阶段的 3 份报告与 6 组原始材料一并归档入库。随后 `c3c37eca docs(eag): 补记修复提交 b70092c8 的提交态全量复验结果` 追加本节，当前 `HEAD == origin/main == c3c37ecaa97c54e27ebca30a64a8f67efb97c1b8`。
 
 **pre-commit hook 影响**：lint-staged 对 60 个 TS/JS 与 1 个 JSON 跑 `eslint --fix` + `prettier --write`，暂存态 `+13884` 变为提交态 `+11080`。差异主要来自 `eag-review-20261108/pattern-scan.json`（2435 行）被 prettier 重排。已核实提交态 `pattern-scan.json` 仍为合法 JSON（258 个键）、报告 8 个章节与 300 行索引完整、关键修复符号（`applyStatusEvent` / `parseTap13` / `parseOk` / `pkcUnavailable` / `getFailedAutonomousRunDiagnostics` / `strictGateCoverage`）全部在提交态源码中、7 个新测试用例数不变。
 
