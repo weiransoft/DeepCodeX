@@ -16,6 +16,7 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import http, { type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { syncPresetAgents } from "@vegamo/deepcode-core";
+import { startMemsearchAutoIndex, type AutoIndexHandle } from "./memsearch-autoindex";
 import { SseHub } from "./events";
 import { ApiError, sendJson } from "./http-utils";
 import { buildJailRoots, realpathAllowMissing } from "./jail";
@@ -77,6 +78,11 @@ export type WebServerOptions = SessionPoolOptions & {
    * 未指定时使用 packages/web/web/dist。
    */
   staticDir?: string;
+  /**
+   * 禁用启动时的 memsearch 自动增量索引（测试注入，保证确定性）。
+   * 生产默认不设置；未配置语料根时自动索引本身也不会 spawn。
+   */
+  disableMemsearchAutoIndex?: boolean;
 };
 
 /** 运行中的 Web 服务器句柄 */
@@ -712,6 +718,11 @@ export async function startWebServer(
     });
   });
 
+  // memsearch 自动增量索引（2026-11-08）：仅在显式配置语料根时启用。
+  // fire-and-forget，不 await —— embedding 网络调用不得阻塞 listen 或本函数返回；
+  // CLI 缺失 / 索引失败只记录结构化状态，既不阻断启动也绝不伪装成功。
+  const autoIndex: AutoIndexHandle | null = opts.disableMemsearchAutoIndex === true ? null : startMemsearchAutoIndex();
+
   // 预置智能体种子同步（2026-11-02）：core 的 5 核心角色 + 30 领域专家原本只存在
   // 于内存，而 Agent 的唯一真相来源是文件扫描——不物化就永远「界面里看不到」。
   // 默认 onlyMissing：绝不覆盖用户改过的同名 SKILL.md；任何异常只告警，不阻断启动。
@@ -800,6 +811,8 @@ export async function startWebServer(
     pool,
     hub,
     close: async () => {
+      // 先取消后台自动索引（避免服务已关闭仍继续写状态/日志）
+      autoIndex?.cancel();
       // 收敛顺序：SSE 订阅 → 会话池引擎 → HTTP 服务 → 残留空闲连接
       hub.closeAll();
       pool.disposeAll();

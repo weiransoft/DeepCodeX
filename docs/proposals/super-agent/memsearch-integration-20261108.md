@@ -2,6 +2,9 @@
 
 > 决策：采纳「直接安装官方 `zilliztech/memsearch` + TS 桥接」，**不**在 TypeScript 里复刻向量库 / embedding / 分块。
 > 官方 CLI 是唯一检索实现，DeepCodeX 只做参数组装、子进程调用、JSON 解析与诚实降级。
+>
+> **后续阶段（同日）**：生产 collection 灌入、启动时自动增量索引、Web 共享语料根与 `expand` 越权修复见
+> [`memsearch-autoindex-20261108.md`](./memsearch-autoindex-20261108.md)。本文 §2/§4/§7/§8 已按该阶段实测同步修正。
 
 ## 1. 为什么改方案
 
@@ -29,6 +32,7 @@ uv tool install memsearch --default-index https://pypi.tuna.tsinghua.edu.cn/simp
 [embedding]
 provider = "openai"
 model = "qwen3-embedding"
+batch_size = 16                 # 2026-11-08 补：provider 默认 256 会超 as1 的 32768 上下文
 base_url = "https://as1.hongene-sh.com/v1"
 api_key = "<本机 API key，从 ~/.deepcode/desktop-secrets.db 的 apiKeyRef 取得>"
 
@@ -70,7 +74,7 @@ collection = "deepcodex_memory"
 
 ### 诚实降级（硬约束）
 
-CLI 缺失 / 超时 / 非零退出 / JSON 非法 / 字段全不合规，一律 `ok:false` + 具体 `status`（`unavailable | error | timeout | invalid-output`）+ `reason` + `hint`，**绝不用空结果伪装成功**；stderr 原文进入 reason。只有拿到合法结果（含合法空数组）才 `ok:true`。
+CLI 缺失 / 超时 / 非零退出 / JSON 非法 / 字段全不合规，一律 `ok:false` + 具体 `status`（`unavailable | error | timeout | invalid-output`）+ `reason` + `hint`，**绝不用空结果伪装成功**；stderr 经凭据脱敏后进入 reason（2026-11-08 后续阶段补）。只有拿到合法结果（含合法空数组）才 `ok:true`。
 
 - Web：CLI 不可用 `503`，调用失败 `502`，缺参数 `400`；默认用 `--source-prefix` 限定到 `skillsHomeForUser(settings, ctx.userId)`，不接受 URL 覆盖，避免跨用户越权。
 - LLM 工具：工具描述里明写「`ok:false` 时不得编造召回事实」。
@@ -106,9 +110,9 @@ deepcode memsearch stats
 
 1. **没有替换静态 Top-N 注入**。`renderSoulPrompt()` / `injectIntoSystemPrompt()` 仍是会话创建时一次性注入；`memory_search` 是并存的「按需召回」通道，不是替换。要改成每轮自动召回需给 `refreshContextAsync(sessionId)` 补 query 透传，改动面更大，本轮未做。
 2. **L3 transcript 只由官方 CLI 直调**（`memsearch transcript <path>`），TS 桥接未封装。
-3. **Web 的 per-user 隔离是 `--source-prefix` 过滤**，前提是索引时已把各用户 markdown 语料纳入同一 collection；未索引该前缀时接口会如实返回 0 条，不会跨用户回落。
-4. **首次使用必须先 `index`**，否则搜索恒为空；这是官方设计，不是缺陷。
-5. 本机验证用临时语料 `/tmp/dcx-ms-*` 与 collection `dcx_smoke`；生产 collection `deepcodex_memory` 尚未灌入项目文档。
+3. **Web 的 per-user 隔离是 `--source-prefix` 过滤**（后续阶段已扩展）：未声明共享语料根时保持原路径；声明后改为服务端「per-user 根 + 显式共享根」本地多前缀过滤，`expand` 也强制校验 source 归属（403）。详见后续报告。
+4. **首次使用必须先 `index`**，否则搜索恒为空；这是官方设计，不是缺陷。后续阶段已灌入生产库并做启动自动增量索引。
+5. 本机初步验证用临时语料 `/tmp/dcx-ms-*` 与 collection `dcx_smoke`；**生产 collection `deepcodex_memory` 已于 2026-11-08 后续阶段灌入 2721 chunks**（102 篇 docs + 14 篇项目记忆），见后续报告。
 6. 工作区里另有**与本任务无关**的语音链路在途改动（`package.json`、`scripts/voice/*`），本轮未触碰、未提交。
 7. `memsearch config list` 会把 `env:` 引用解析成明文打印，**禁止**把它的输出写进日志或报告。
 
@@ -120,4 +124,6 @@ memsearch stats --collection deepcodex_memory
 memsearch reset --yes            # 清索引后需重新 index
 # 换 embedding 服务：改 ~/.memsearch/config.toml 后必须 --force 重建索引
 memsearch index ./docs --force
+# 常规更新不要带 --force：官方按 chunk_hash 内容增量，无变化时 0 次 embedding
+# embedding.batch_size=16 是 as1 qwen3-embedding（ctx 32768）的实测安全值，勿删
 ```

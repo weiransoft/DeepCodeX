@@ -76,6 +76,13 @@ export interface MemsearchExpandOutcome extends MemsearchOutcomeBase {
 
 export interface MemsearchIndexOutcome extends MemsearchOutcomeBase {
   readonly indexedChunks: number | null;
+  /**
+   * 官方 CLI 对单文件 embedding 失败是「logger.exception + skipping」并仍以 exit 0 结束。
+   * 这里显式统计 stderr 中的失败文件数，避免把「部分失败」误报成完整成功。
+   */
+  readonly failedFiles: number;
+  /** 部分成功：有文件失败但已写入若干 chunk */
+  readonly partial: boolean;
 }
 
 export interface MemsearchStatsOutcome extends MemsearchOutcomeBase {
@@ -129,6 +136,13 @@ export interface MemsearchIndexOptions extends MemsearchEnv {
   readonly paths: readonly string[];
   readonly collection?: string;
   readonly force?: boolean;
+  /** gitignore 风格排除模式，逐项传给 --exclude */
+  readonly excludePatterns?: readonly string[];
+  /**
+   * embedding batch 上限。OpenAI provider 默认 256，在 as1 qwen3-embedding
+   * （上下文 32768）上一次 batch 累计可超 38k tokens 而 400 失败，实测 16 稳定。
+   */
+  readonly batchSize?: number;
 }
 
 export interface MemsearchStatsOptions extends MemsearchEnv {
@@ -145,6 +159,17 @@ interface ProbeResult {
 function appendCapped(buffer: string, chunk: string): string {
   const next = buffer + chunk;
   return next.length > MAX_CAPTURED_CHARS ? next.slice(-MAX_CAPTURED_CHARS) : next;
+}
+
+/**
+ * 子进程 stderr 可能回显上游 embedding 服务的凭据（api_key / Bearer token）。
+ * 进入 reason（会被上层日志/HTTP 响应消费）前做最小脱敏。
+ */
+function redactSecrets(text: string): string {
+  return text
+    .replace(/(Bearer\s+)[A-Za-z0-9._-]+/gi, "$1<redacted>")
+    .replace(/\bsk-[A-Za-z0-9._-]{8,}/g, "<redacted>")
+    .replace(/((?:api[_-]?key|token|password|secret)\s*[=:]\s*)\S+/gi, "$1<redacted>");
 }
 
 /** 默认 runner：真实 spawn，带超时与 SIGKILL 兜底 */
@@ -296,7 +321,7 @@ async function runMemsearch(args: readonly string[], options: MemsearchEnv): Pro
     };
   }
   if (result.error || result.status !== 0) {
-    const detail = (result.error || result.stderr.trim() || "无 stderr 输出").slice(-800);
+    const detail = redactSecrets(result.error || result.stderr.trim() || "无 stderr 输出").slice(-800);
     return {
       ok: false,
       status: "error",
@@ -511,14 +536,23 @@ export async function indexMemories(options: MemsearchIndexOptions): Promise<Mem
       durationMs: 0,
       cliVersion: null,
       indexedChunks: null,
+      failedFiles: 0,
+      partial: false,
     };
   }
   const args = ["index", ...paths];
   if (options.collection) args.push("--collection", options.collection);
   if (options.force === true) args.push("--force");
+  for (const pattern of options.excludePatterns ?? []) {
+    const trimmed = pattern.trim();
+    if (trimmed.length > 0) args.push("--exclude", trimmed);
+  }
+  if (typeof options.batchSize === "number" && Number.isInteger(options.batchSize) && options.batchSize > 0) {
+    args.push("--batch-size", String(options.batchSize));
+  }
 
   const raw = await runMemsearch(args, options);
-  if (!raw.ok) return { ...stripRaw(raw), indexedChunks: null };
+  if (!raw.ok) return { ...stripRaw(raw), indexedChunks: null, failedFiles: 0, partial: false };
   const match = /Indexed\s+(\d+)\s+chunks?/i.exec(raw.stdout);
   if (!match) {
     return {
@@ -530,12 +564,41 @@ export async function indexMemories(options: MemsearchIndexOptions): Promise<Mem
         hint: "检查 memsearch 版本的 index 输出格式",
       }),
       indexedChunks: null,
+      failedFiles: 0,
+      partial: false,
     };
   }
+
+  // 2026-11-08 生产实测：官方 CLI 在 1 个文件 embedding 超长时输出
+  // "Failed to index <path>, skipping" 却仍以 exit 0 结束并报 "Indexed 2602 chunks"。
+  // 只看退出码与 stdout 会把这次部分失败伪装成完整成功，必须消费 stderr 证据。
+  const failedFiles = countFailedIndexFiles(raw.stderr);
+  const indexedChunks = Number(match[1]);
+  const partial = failedFiles > 0;
   return {
-    ...stripRaw({ ...raw, reason: `索引完成，写入 ${match[1]} 个 chunk` }),
-    indexedChunks: Number(match[1]),
+    ...stripRaw({
+      ...raw,
+      ok: !partial,
+      status: partial ? "error" : "ok",
+      reason: partial
+        ? `索引部分失败：${failedFiles} 个文件未写入（已写入 ${indexedChunks} 个 chunk），不得视为完整成功`
+        : `索引完成，写入 ${indexedChunks} 个 chunk`,
+      hint: partial ? "检查 embedding 服务的 batch/上下文限制，修复后重新执行增量 index" : "",
+    }),
+    indexedChunks,
+    failedFiles,
+    partial,
   };
+}
+
+/** 统计 "Failed to index ..., skipping" 告警的文件数（按路径去重，堆栈重复行不重复计数） */
+function countFailedIndexFiles(stderr: string): number {
+  const paths = new Set<string>();
+  for (const line of stderr.split(/\r?\n/)) {
+    const match = /Failed to index\s+(.+?),\s*skipping/.exec(line);
+    if (match) paths.add(match[1]);
+  }
+  return paths.size;
 }
 
 /** 查询索引规模 */
