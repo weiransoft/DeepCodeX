@@ -213,6 +213,31 @@ export interface P5StageContext {
    * fixtures/测试不传时静默跳过，不破坏旧调用点。
    */
   readonly logger?: ((message: string, level: "info" | "warn" | "error") => void) | null;
+  /**
+   * run 起始基线失败用例集（2026-11-08 基线红灯守卫）。
+   *
+   * 由 orchestrator 在 run 起始用 collectBaselineFailures() 真实探测一次后注入。
+   * verify 阶段据此把本轮失败用例拆成"属于基线"与"本任务新增"；未注入或降级
+   * （baselineAvailable=false）时不排除任何失败，行为与修复前一致。
+   */
+  readonly baselineFailedTestIds?: ReadonlySet<string>;
+  /** 基线探测是否得到可信清单（false=诚实降级，不排除任何失败）。 */
+  readonly baselineAvailable?: boolean;
+  /**
+   * run 起始工作区既有脏文件路径集（2026-11-08 统计口径统一）。
+   *
+   * 由 orchestrator 从 baselineSnapshot.dirty 的 keys 注入（采集失败时空集）。
+   * dev/fix handler 用它把执行器报出的"全量工作区变更文件"过滤成"本次产出"，
+   * 与最终报告的基线差集口径一致。可选：fixtures 未注入时按空集处理。
+   */
+  readonly baselineDirtyPaths?: ReadonlySet<string>;
+  /**
+   * fix 后同卡跳过 dev 整卡重跑（2026-11-08 P2 状态机）。
+   *
+   * 上一轮 fix 成功 + 本轮 plan 又选中同一张 pending 卡时由 orchestrator 置 true；
+   * dev handler 检测后不调用 taskExecutor，直接 success + reason=dev-skipped-after-fix。
+   */
+  readonly skipDevAfterFix?: boolean;
 }
 
 // ============================================================================

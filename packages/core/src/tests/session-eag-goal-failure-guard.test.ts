@@ -29,6 +29,8 @@ import {
   normalizeGoalFingerprint,
   startsWithConfirmExecutePhrase,
 } from "../session";
+import type { AutonomousGoalRunDetails, AutonomousGoalRunRecord } from "../session";
+import { buildAutoExecuteCommand } from "../eag/suggestion-auto";
 import type { EagDynamicSuggester, EagDynamicSuggestion } from "../eag/dynamic/eag-dynamic-suggester";
 import type { AutonomousOrchestrator } from "../eag/p5/autonomous-orchestrator";
 import type { AutonomousRunRequest, AutonomousRunResult } from "../eag/p5/autonomous-orchestrator";
@@ -625,4 +627,359 @@ test("N8c. 拦截提示落盘（双写）：供触发层 recentMessages 与主�
     assistantTexts.some((t) => t.includes("已拦截")),
     "拦截提示同时推送给宿主"
   );
+});
+
+// ============================================================================
+// N9-N12 失败目标「执行这个」裸重放修复（2026-11）：
+// 逃生门重放必须携带上一轮失败约束，否则必然逐字重演同一失败。
+// 设计文档：docs/research/2026-10-eag-auto-loop-trigger-guard.md
+// ============================================================================
+
+/**
+ * 修复前（2 参）buildAutoExecuteCommand 实现的逐字拷贝——R3「无第三参零回归」oracle。
+ * 新实现带可选第三参，但无第三参（含 undefined / 空串 / 纯空白）时必须与
+ * 本函数对全部输入逐字一致；拷贝旧实现作为唯一判定基准，避免自证循环。
+ */
+function legacyBuildAutoExecuteCommand(commandHint: string, goal: string): string {
+  const escapedGoal = goal.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, " ").trim();
+  const trimmedCommand = commandHint.trim();
+  if (trimmedCommand === "/eag-autonomous") {
+    return escapedGoal.length > 0
+      ? `/eag-autonomous --goal "${escapedGoal}" --max-iterations 10 --confirmation smart`
+      : "/eag-autonomous";
+  }
+  if (trimmedCommand === "/eag-design") {
+    return escapedGoal.length > 0 ? `/eag-design --requirement "${escapedGoal}" --paradigm ddd-layered` : "/eag-design";
+  }
+  const goalCommands = ["/eag-build", "/eag-test", "/eag-run", "/eag-deploy"];
+  if (goalCommands.includes(trimmedCommand)) {
+    return escapedGoal.length > 0 ? `${trimmedCommand} --goal "${escapedGoal}"` : trimmedCommand;
+  }
+  return trimmedCommand;
+}
+
+/**
+ * 构造带真实诊断数据的 AutonomousOrchestrator 桩（R2/R4 集成用）。
+ *
+ * runResult 携带真实 blockageReport.summary（终止原因）与 failedTestIds
+ * （verify 阶段失败用例，经 extractAutonomousRunDetails 的运行时结构检查取值）。
+ * 富信息桩模拟「编排器透出 verify artifacts」的形态；真实生产编排器目前不
+ * 透出 failedTestIds（见 verify-stage-handler.ts 的 P5StageResult.artifacts），
+ * 该字段会诚实降级为 undefined，本桩仅用于在集成链路验证展示/约束路径。
+ */
+function createDiagnosticOrchestrator(options: {
+  finalStatuses: string[];
+  abortReason: string;
+  failedTestIds: string[];
+}): { orchestrator: AutonomousOrchestrator; runRequests: AutonomousRunRequest[] } {
+  const runRequests: AutonomousRunRequest[] = [];
+  const orchestrator = {
+    run: async (request: AutonomousRunRequest) => {
+      runRequests.push(request);
+      const status = options.finalStatuses[Math.min(runRequests.length - 1, options.finalStatuses.length - 1)];
+      const runId = `run-diag-${runRequests.length}`;
+      const runResult = {
+        runId,
+        finalStatus: status as AutonomousRunResult["finalStatus"],
+        exitCode: status === "completed" ? 0 : 1,
+        completedLoops: [],
+        milestones: [],
+        totalIterations: 1,
+        totalLlmCallCount: 1,
+        totalTokensUsed: 100,
+        durationSec: 1,
+        finalReport: "诊断桩最终报告",
+        blockageReport: {
+          runId,
+          generatedAt: new Date().toISOString(),
+          blockedLoop: "coding",
+          blockedIteration: 0,
+          blockedStage: "verify",
+          rootCauseHypotheses: ["测试命令不适用"],
+          suggestedSolutions: ["更换测试命令或先修复基线失败"],
+          summary: options.abortReason,
+        },
+        // 富信息桩：模拟 verify artifacts 透出，供写侧提取真实失败用例
+        failedTestIds: options.failedTestIds,
+        triggeredGuards: [],
+      } as unknown as AutonomousRunResult;
+      return runResult;
+    },
+  } as unknown as AutonomousOrchestrator;
+  return { orchestrator, runRequests };
+}
+
+test("N9. R1 写侧落盘：details 全字段写入终态记录；无 details 时字段缺失不报错（旧会话兼容）", async () => {
+  const workspace = createTempDir("deepcode-goalguard-r1-workspace-");
+  const home = createTempDir("deepcode-goalguard-r1-home-");
+  setHomeDir(home);
+  globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
+
+  const { client } = createCallCountingClient("主对话回复");
+  const { orchestrator } = createSequencedOrchestrator(["completed"]);
+  const { manager } = createTestManager({ workspace, home, client, orchestrator });
+
+  const sessionId = await manager.createSession({ text: "" });
+  // 白盒单测写侧私有方法：直接调用真实 recordAutonomousRunOutcome
+  const writeOutcome = manager as unknown as {
+    recordAutonomousRunOutcome: (
+      sid: string,
+      goal: string,
+      status: string,
+      details?: Readonly<AutonomousGoalRunDetails>
+    ) => void;
+  };
+
+  // 1. 带完整 details → 记录含全部 5 个诊断字段（值取真值，非编造）
+  const goalA = "诊断明细写入目标 A";
+  const details: AutonomousGoalRunDetails = {
+    abortReason: "Token 预算耗尽：199221 >= 200000",
+    failedTestIds: ["tests/test_a.py::test_x", "tests/test_b.py::test_y"],
+    testCommand: "pytest -q",
+    projectRoot: workspace,
+    runId: "run-r1-001",
+  };
+  writeOutcome.recordAutonomousRunOutcome(sessionId, goalA, "failed", details);
+  const recA = (manager.getSession(sessionId)?.autonomousGoalRuns ?? []).find(
+    (r) => r.goalFingerprint === normalizeGoalFingerprint(goalA)
+  ) as AutonomousGoalRunRecord | undefined;
+  assert.ok(recA, "带 details 的终态记录必须落盘");
+  assert.equal(recA.abortReason, details.abortReason);
+  assert.deepEqual(recA.failedTestIds, details.failedTestIds);
+  assert.equal(recA.testCommand, details.testCommand);
+  assert.equal(recA.projectRoot, details.projectRoot);
+  assert.equal(recA.runId, details.runId);
+
+  // 2. 无 details（旧会话 / 异常路径）→ 5 个诊断字段全部缺失，4 个原始字段仍在，不报错
+  const goalB = "旧会话兼容目标 B";
+  writeOutcome.recordAutonomousRunOutcome(sessionId, goalB, "aborted");
+  const recB = (manager.getSession(sessionId)?.autonomousGoalRuns ?? []).find(
+    (r) => r.goalFingerprint === normalizeGoalFingerprint(goalB)
+  ) as AutonomousGoalRunRecord | undefined;
+  assert.ok(recB, "无 details 时记录仍应正常落盘（不报错）");
+  assert.equal(recB.abortReason, undefined, "旧记录无 abortReason 字段");
+  assert.equal(recB.failedTestIds, undefined, "旧记录无 failedTestIds 字段");
+  assert.equal(recB.testCommand, undefined, "旧记录无 testCommand 字段");
+  assert.equal(recB.projectRoot, undefined, "旧记录无 projectRoot 字段");
+  assert.equal(recB.runId, undefined, "旧记录无 runId 字段");
+  assert.equal(recB.finalStatus, "aborted");
+  assert.ok(recB.endedAt.length > 0);
+  assert.ok(!Object.prototype.hasOwnProperty.call(recB, "abortReason"), "不得落盘 undefined 键（键集合与修复前一致）");
+});
+
+test("N10. R2 拦截提示含「上一轮诊断」与失败用例名，且保留「执行这个」逃生门文案", async () => {
+  const workspace = createTempDir("deepcode-goalguard-r2-workspace-");
+  const home = createTempDir("deepcode-goalguard-r2-home-");
+  setHomeDir(home);
+  globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
+
+  const { client } = createCallCountingClient("主对话回复");
+  const abortReason = "迭代次数用尽（10 轮）仍未达成完成条件";
+  const failedIds = ["tests/test_lin.py::test_binary_missing", "tests/test_api.py::test_refund"];
+  const { orchestrator, runRequests } = createDiagnosticOrchestrator({
+    finalStatuses: ["failed"],
+    abortReason,
+    failedTestIds: failedIds,
+  });
+  const { manager, assistantTexts } = createTestManager({
+    workspace,
+    home,
+    client,
+    orchestrator,
+    suggester: createStubSuggester(createExecuteDecision("从46同步数据库到43采用full_overwrite全量覆盖")),
+  });
+
+  const sessionId = await manager.createSession({ text: "" });
+  const goal = "从46同步数据库到43采用full_overwrite全量覆盖";
+
+  // 第一轮：execute_command → 写侧落盘（诊断明细取真实 result/request 值）
+  await manager.handleUserPrompt({ text: goal });
+  assert.equal(runRequests.length, 1);
+  const rec = (manager.getSession(sessionId)?.autonomousGoalRuns ?? [])[0] as AutonomousGoalRunRecord | undefined;
+  assert.ok(rec, "终态记录必须落盘");
+  assert.equal(rec.abortReason, abortReason, "终止原因取真实 blockageReport.summary");
+  assert.deepEqual(rec.failedTestIds, failedIds, "失败用例取真实 verify artifacts");
+  assert.equal(rec.testCommand, "npm test", "测试命令取真实请求值");
+  assert.equal(rec.projectRoot, workspace, "工作目录取真实 projectRoot");
+  assert.equal(rec.runId, "run-diag-1", "runId 取真实 runResult.runId");
+
+  // 第二轮：同一失败目标被硬拦截 → 可见提示追加「上一轮诊断」
+  await manager.handleUserPrompt({ text: goal });
+  assert.equal(runRequests.length, 1, "失败目标不得被自动重放");
+  const blocked = assistantTexts.find((t) => t.includes("已拦截"));
+  assert.ok(blocked, "必须推送可见拦截说明");
+  assert.ok(blocked.includes("上一轮诊断"), "可见提示必须追加「上一轮诊断」段");
+  assert.ok(blocked.includes("终止原因"), "诊断段含终止原因行");
+  assert.ok(blocked.includes(abortReason), "诊断段回显真实终止原因");
+  assert.ok(blocked.includes(failedIds[0]), "诊断段含失败用例名");
+  assert.ok(blocked.includes(failedIds[1]), "诊断段含第二个失败用例名");
+  assert.ok(blocked.includes("测试命令"), "诊断段含测试命令行");
+  assert.ok(blocked.includes("工作目录"), "诊断段含工作目录行");
+  assert.ok(blocked.includes("runId"), "诊断段含 runId 行");
+  assert.ok(blocked.includes("执行这个"), "既有 N3/N5 逃生门文案不得破坏");
+  assert.ok(blocked.includes("failed"), "既有 N3/N5 终态回显不得破坏");
+});
+
+test("N11. R3 buildAutoExecuteCommand：无第三参逐字零回归；带 failureContext 追加约束且双引号/换行已转义", () => {
+  // 1. 无第三参（含 undefined / 空串 / 纯空白）→ 与修复前实现逐字一致（全输入矩阵）
+  const hints = [
+    "/eag-autonomous",
+    "/eag-design",
+    "/eag-build",
+    "/eag-test",
+    "/eag-run",
+    "/eag-deploy",
+    "/eag-graph",
+    "  /eag-autonomous  ",
+  ];
+  const goals = ["修复登录失败问题", "", '修复 "登录" 模块\n路径 C:\\tmp', "  带前后空白  ", 'a\\b"c\nd'];
+  for (const hint of hints) {
+    for (const g of goals) {
+      assert.equal(
+        buildAutoExecuteCommand(hint, g),
+        legacyBuildAutoExecuteCommand(hint, g),
+        `无第三参零回归：${hint} / ${JSON.stringify(g)}`
+      );
+    }
+  }
+  for (const emptyCtx of [undefined, "", "   "]) {
+    assert.equal(
+      buildAutoExecuteCommand("/eag-autonomous", "修复登录失败问题", emptyCtx),
+      legacyBuildAutoExecuteCommand("/eag-autonomous", "修复登录失败问题"),
+      `第三参为空(${JSON.stringify(emptyCtx)})时仍逐字零回归`
+    );
+  }
+
+  // 2. 带 failureContext → 约束追加进 --goal，goal 与约束走同一套转义，命令结构不破坏
+  const trickyGoal = '修复 "登录"\n改用 C:\\tmp 目录';
+  const ctx =
+    '【重放约束】上一轮因 测试命令 "npm test" 不适用 终止；' +
+    "失败用例：tests/test_a.py::test_x；请先确认目标与工作目录匹配。";
+  const full = buildAutoExecuteCommand("/eag-autonomous", trickyGoal, ctx);
+  assert.ok(!full.includes("\n"), "命令字符串不得含裸换行（--goal 不支持多行参数）");
+  assert.ok(full.includes('\\"'), '原始命令中双引号必须以 \\" 形式转义');
+  assert.ok(full !== legacyBuildAutoExecuteCommand("/eag-autonomous", trickyGoal), "带约束时输出必须与裸重放不同");
+
+  const restored = extractGoalFromCommandString(full);
+  assert.ok(restored !== null, "--goal 必须是结构完整的单一转义串（命令结构不破坏）");
+  const value = restored as string;
+  assert.ok(value.startsWith('修复 "登录" 改用 C:\\tmp 目录'), "原 goal 保留在 --goal 前缀且特殊字符正确还原");
+  assert.ok(value.includes("【重放约束】"), "约束文本追加进 --goal");
+  assert.ok(value.includes('"npm test"'), "约束文本内的双引号走同一套转义后又能正确还原");
+  assert.ok(value.includes("tests/test_a.py::test_x"), "约束文本内的失败用例保留");
+});
+
+test("N12. R4 逃生门重放：拦截后回复'执行这个' → 分发命令含上一轮失败约束；一次性消费不回归", async () => {
+  const workspace = createTempDir("deepcode-goalguard-r4-workspace-");
+  const home = createTempDir("deepcode-goalguard-r4-home-");
+  setHomeDir(home);
+  globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
+
+  const { client } = createCallCountingClient("主对话回复");
+  const { orchestrator, runRequests } = createDiagnosticOrchestrator({
+    finalStatuses: ["failed", "failed"],
+    abortReason: "迭代次数用尽（10 轮）仍未达成完成条件",
+    failedTestIds: ["tests/test_lin.py::test_binary_missing"],
+  });
+  const suggestCalls = { value: 0 };
+  const goal = "从46同步数据库到43采用full_overwrite全量覆盖";
+  const suggestions: EagDynamicSuggestion[] = [
+    createExecuteDecision(goal), // 第一轮：执行（播种 failed 记录）
+    createExecuteDecision(goal), // 第二轮：拦截（存带 failureContext 的快照）
+    { type: "confirm_previous", messageToUser: "正在执行上一条建议。", reasoning: "用户显式确认重放" },
+    { type: "confirm_previous", messageToUser: "正在执行上一条建议。", reasoning: "重复确认（一次性消费验证）" },
+  ];
+  const suggester = {
+    isEnabled: () => true,
+    suggest: async () => {
+      const suggestion = suggestions[Math.min(suggestCalls.value, suggestions.length - 1)];
+      suggestCalls.value++;
+      return suggestion;
+    },
+  } as unknown as EagDynamicSuggester;
+  const { manager, assistantTexts } = createTestManager({ workspace, home, client, orchestrator, suggester });
+
+  const sessionId = await manager.createSession({ text: "" });
+
+  // 第一轮：execute_command 派发，failed 终态 + 诊断明细落盘
+  await manager.handleUserPrompt({ text: goal });
+  assert.equal(runRequests.length, 1);
+
+  // 第二轮：同一失败目标硬拦截（存逃生门快照）
+  await manager.handleUserPrompt({ text: goal });
+  assert.equal(runRequests.length, 1);
+  assert.ok(
+    assistantTexts.some((t) => t.includes("已拦截")),
+    "前置条件：拦截提示已推送"
+  );
+
+  // 第三轮：用户显式确认重放 → 分发的命令 --goal 必须携带上一轮失败约束
+  await manager.handleUserPrompt({ text: "执行这个" });
+  assert.equal(runRequests.length, 2, "显式确认（confirm_previous 决策）必须放行重放");
+  const replayed = runRequests[1].objective;
+  assert.ok(replayed.startsWith(goal), "原目标仍保留在重放 --goal 前缀");
+  assert.ok(replayed.includes("【重放约束】"), "重放命令必须含失败约束（修复前为裸 goal）");
+  assert.ok(replayed.includes("迭代次数用尽"), "约束含上一轮终止原因");
+  assert.ok(replayed.includes("tests/test_lin.py::test_binary_missing"), "约束含失败用例");
+  assert.ok(replayed.includes("npm test"), "约束含测试命令");
+  assert.ok(replayed.includes(workspace), "约束含工作目录");
+  assert.ok(replayed.includes("请先确认目标与工作目录匹配"), "约束含避免重复上一轮做法的指引");
+
+  // 第四轮：逃生门一次性消费——无快照不得重复派发（一次性语义不回归）
+  await manager.handleUserPrompt({ text: "执行这个" });
+  assert.equal(runRequests.length, 2, "逃生门一次性消费：重复确认不得重复派发");
+  assert.ok(manager.getSession(sessionId), "会话仍可用");
+});
+
+test("N13. 补充：direct_chat 确认通道同样透传 failureContext（两条逃生路径均覆盖）；无失败用例真值时不编造该段", async () => {
+  const workspace = createTempDir("deepcode-goalguard-directchat-workspace-");
+  const home = createTempDir("deepcode-goalguard-directchat-home-");
+  setHomeDir(home);
+  globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
+
+  const { client } = createCallCountingClient("主对话回复");
+  const { orchestrator, runRequests } = createDiagnosticOrchestrator({
+    finalStatuses: ["failed", "failed"],
+    abortReason: "连续失败 3 次触发熔断",
+    failedTestIds: [], // 无失败用例真值：诚实降级（不显示该行），但终止原因仍触发约束
+  });
+  const goal = "从46同步数据库到43采用full_overwrite全量覆盖";
+  const suggestCalls = { value: 0 };
+  const suggestions: EagDynamicSuggestion[] = [
+    createExecuteDecision(goal), // 第一轮：执行（播种 failed 记录）
+    createExecuteDecision(goal), // 第二轮：拦截（存带 failureContext 的快照）
+    { type: "direct_chat", reasoning: "触发层降级，交回主对话" }, // 第三轮：direct_chat 确定性确认通道
+    { type: "direct_chat", reasoning: "触发层降级，交回主对话" }, // 第四轮：一次性消费验证
+  ];
+  const suggester = {
+    isEnabled: () => true,
+    suggest: async () => {
+      const suggestion = suggestions[Math.min(suggestCalls.value, suggestions.length - 1)];
+      suggestCalls.value++;
+      return suggestion;
+    },
+  } as unknown as EagDynamicSuggester;
+  const { manager, assistantTexts } = createTestManager({ workspace, home, client, orchestrator, suggester });
+
+  await manager.createSession({ text: "" });
+
+  await manager.handleUserPrompt({ text: goal });
+  assert.equal(runRequests.length, 1);
+  await manager.handleUserPrompt({ text: goal });
+  assert.equal(runRequests.length, 1);
+  assert.ok(
+    assistantTexts.some((t) => t.includes("已拦截")),
+    "前置条件：拦截提示已推送"
+  );
+
+  // 第三轮：direct_chat 降级 → session.ts:5152 确定性确认闭合 → 同一 consume 方法
+  await manager.handleUserPrompt({ text: "执行这个" });
+  assert.equal(runRequests.length, 2, "direct_chat 确认通道必须消费快照派发");
+  const replayed = runRequests[1].objective;
+  assert.ok(replayed.includes("【重放约束】"), "direct_chat 路径重放同样须含失败约束");
+  assert.ok(replayed.includes("连续失败 3 次触发熔断"), "约束含上一轮终止原因");
+  assert.ok(!replayed.includes("失败用例："), "无失败用例真值时不得编造该段（诚实降级）");
+
+  await manager.handleUserPrompt({ text: "执行这个" });
+  assert.equal(runRequests.length, 2, "一次性消费：重复确认不得重复派发");
 });

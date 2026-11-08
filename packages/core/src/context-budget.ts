@@ -33,7 +33,7 @@ import type { SessionMessage } from "./session";
  * {@link DEFAULT_CONTEXT_BUDGET_CONFIG}）。
  */
 export interface ContextBudgetConfig {
-  /** 第 0 级：单条 tool 内容截断上限（字符），头部保留 + 尾注 */
+  /** 第 0 级：单条 tool 内容截断上限（字符），头部 + 失败窗口 + 尾部三段保留 */
   toolOutputMaxChars: number;
   /** 第 2 级：tool 结果总量预算（字符），超出后最老 tool 整条丢弃 */
   toolResultsBudgetChars: number;
@@ -67,6 +67,126 @@ export const DEFAULT_CONTEXT_BUDGET_CONFIG: ContextBudgetConfig = Object.freeze(
   dedupeMinChars: 200,
   shortMessageMinChars: 200,
 });
+
+// ----------------------------------------------------------------------------
+// 单条 tool 输出截断（第 0 级复用）：head + 失败窗口 + tail
+//
+// 修复背景（dev 阶段空转）：旧第 0 级是 head-only（slice(0, maxChars)），
+// 真实 bash / pytest 的失败详情（stderr、FAILED、AssertionError、not ok、
+// exit code、Traceback）几乎总在输出尾部，被整段砍掉，模型只能盲试换命令。
+// 本函数改为「头部上下文 + 首个失败窗口 + 尾部统计」三段保留，并保证
+// 尾部最后 floor(maxChars*0.45) 字符一定出现、总长度严格 ≤ maxChars。
+// 实现独立、零依赖，刻意不 import eag/p5 的 buildTestOutputSummary
+// （避免 core 通用模块反向依赖 eag/p5）。
+// ----------------------------------------------------------------------------
+
+/** 失败标记：取首个匹配位置定位失败窗口（覆盖主流 runner 与通用 stderr 形态） */
+const TOOL_FAILURE_MARKER = /(?:FAILED|FAIL:|AssertionError|Error:|error:|✕|●|not ok |exit code|失败|Traceback)/i;
+
+/** 极小预算阈值：低于此值分段无意义，退化为安全 head 截断（避免负长度碎块） */
+const TRUNCATE_SAFE_MIN_CHARS = 200;
+/** 失败窗口单侧上下文长度（首个失败标记前后各取约 150 字符） */
+const FAILURE_WINDOW_HALF_CHARS = 150;
+/** 每段省略标记的预留字符数（含数字），用于保证拼接后总长 ≤ maxChars */
+const OMIT_MARKER_RESERVE = 80;
+
+/**
+ * 构造省略标记。
+ *
+ * 刻意保留旧子串「已截断，原共」以兼容既有断言与日志正则（CB-03、
+ * E1d/E1e/E1f 等用 includes("已截断") 检查截断标记）。
+ */
+function buildOmitMarker(totalChars: number, omittedChars: number): string {
+  return `\n…（已截断，原共 ${totalChars} 字符，省略 ${omittedChars} 字符，已保留失败窗口/尾部）…\n`;
+}
+
+/**
+ * 截断单条 tool 输出：头部 + 失败窗口 + 尾部三段保留，总长严格 ≤ maxChars。
+ *
+ * - null / 非字符串 / 长度 ≤ maxChars：原样返回（类型安全：不对 null 做字符串操作）；
+ * - maxChars ≤ 0、NaN / Infinity 或 < 200：退化为安全 head 截断（不抛异常、长度受控）；
+ * - 正常预算：尾部最后 floor(maxChars*0.45) 字符**一定完整出现**（修复核心），
+ *   头部约 35%，剩余预算给「首个失败标记前后各 150 字符」的失败窗口；
+ *   无失败标记时退化为「头部 + 尾部」。所有拼接处标注省略字符数。
+ *
+ * 纯函数：零 I/O、零副作用、不修改入参。生产调用点（compactForRequest 第 0 级）
+ * 仅在 contentChars(content) > maxChars 时进入，此时 content 必为 string。
+ *
+ * @param content 原始 tool 输出（string | null）
+ * @param maxChars 截断上限（字符，含省略标记本身）
+ * @returns 截断后的字符串；null 原样透传（调用方按契约只在长 string 分支使用）
+ */
+export function truncateToolOutput(content: string | null, maxChars: number): string {
+  // 透传边界（类型安全）：null / 非字符串 / 短内容不做任何字符串操作。
+  if (content === null || typeof content !== "string" || content.length <= maxChars) {
+    return content as string;
+  }
+  const total = content.length;
+
+  // 极小 / 非法预算：安全退化。cap=0（maxChars≤0 或 NaN/Infinity 收敛到 0）返回空串，
+  // 否则取 head + 精简尾注，总长 ≤ cap，不抛异常。
+  if (!Number.isFinite(maxChars) || maxChars < TRUNCATE_SAFE_MIN_CHARS) {
+    const cap = Math.max(0, Math.floor(Number.isFinite(maxChars) ? maxChars : 0));
+    if (cap === 0) return "";
+    const marker = `\n…（已截断，原共 ${total} 字符）…\n`;
+    const head = content.slice(0, Math.max(0, cap - marker.length));
+    const result = `${head}${marker}`;
+    return result.length <= cap ? result : result.slice(0, cap);
+  }
+
+  // 尾部：硬保证完整出现（修复核心）。tailLen 随 maxChars 线性，不随 total 变化。
+  const tailLen = Math.floor(maxChars * 0.45);
+  const tail = content.slice(total - tailLen);
+  const tailStart = total - tailLen;
+
+  // 头部 / 窗口预算：先扣掉尾部与两段省略标记预留，再按 35:20 分配
+  // （headLen + windowLen = budgetForHeadAndWindow，故三段 + 两段标记 ≤ maxChars）。
+  const budgetForHeadAndWindow = Math.max(0, maxChars - tailLen - 2 * OMIT_MARKER_RESERVE);
+  const headLen = Math.floor((budgetForHeadAndWindow * 35) / 55);
+  const windowLen = budgetForHeadAndWindow - headLen;
+  const head = content.slice(0, headLen);
+
+  // 失败窗口：首个失败标记前后各 150 字符，受 windowLen 约束，插在尾部之前。
+  // 窗口起点不早于 head 末尾（避免与头部重复），终点不越过 tail 起点（避免与尾部重复）。
+  const match = TOOL_FAILURE_MARKER.exec(content);
+  let windowStart = headLen;
+  let windowEnd = headLen;
+  let window = "";
+  if (match && windowLen > 0) {
+    const center = match.index;
+    windowStart = Math.max(headLen, center - FAILURE_WINDOW_HALF_CHARS);
+    const rawEnd = Math.min(total, center + FAILURE_WINDOW_HALF_CHARS);
+    windowEnd = Math.min(tailStart, windowStart + windowLen, Math.max(rawEnd, windowStart));
+    window = content.slice(windowStart, windowEnd);
+  }
+
+  // 省略字符数（两段空缺）
+  const omittedHeadToWindow = Math.max(0, windowStart - headLen);
+  const omittedWindowToTail = Math.max(0, tailStart - windowEnd);
+
+  let result = head;
+  if (window.length > 0) {
+    if (omittedHeadToWindow > 0) result += buildOmitMarker(total, omittedHeadToWindow);
+    result += window;
+    if (omittedWindowToTail > 0) result += buildOmitMarker(total, omittedWindowToTail);
+  } else {
+    // 无失败标记（或窗口落在头部/尾部区间内）：退化为 头部 + 尾部。
+    // 省略数按 head 末尾到 tail 起点的真实空缺计算，不依赖可能被窗口逻辑
+    // 改动的 windowEnd（否则窗口落在尾部区间时会误算为 0 而漏加省略标记）。
+    const omitted = Math.max(0, tailStart - head.length);
+    if (omitted > 0) result += buildOmitMarker(total, omitted);
+  }
+  result += tail;
+
+  // 防御性兜底：预算已精确预留，正常不触发；万一超长，从头部末端削减，
+  // 绝不裁尾部（尾部是本修复要保住的核心证据）。
+  if (result.length > maxChars) {
+    const overflow = result.length - maxChars;
+    const trimmedHead = head.slice(0, Math.max(0, head.length - overflow));
+    result = trimmedHead + result.slice(head.length);
+  }
+  return result;
+}
 
 // ============================================================================
 // 2. 压缩接口契约
@@ -106,7 +226,8 @@ export interface ContextBudgetProvider {
  *
  * 逐级应用、达标即停：
  * - 第 0 级（无条件触发）：单条 tool 内容截断至 toolOutputMaxChars，头部
- *   保留 + 尾注。主要膨胀源的直接治理，任何规模下只有收益；
+ *   + 失败窗口 + 尾部三段保留（见 truncateToolOutput）。主要膨胀源的直接
+ *   治理，任何规模下只有收益；尾部失败证据不再丢失（dev 空转修复）；
  * - 第 1 级：完全相同的长 tool 输出（原始内容判重，> dedupeMinChars）保留
  *   最新，旧的替换为引用占位（重复 read/grep 空转场景收益最大）；
  * - 第 2 级：tool 结果总量超 toolResultsBudgetChars 时，从最老开始整条替换
@@ -154,16 +275,19 @@ export class DeterministicContextBudgetProvider implements ContextBudgetProvider
     const firstTaskIndex = working.findIndex((m) => m.role !== "system");
     const lastIndex = working.length - 1;
 
-    // —— 第 0 级（无条件触发）：单条 tool 内容截断至上限（头部保留 + 尾注）——
+    // —— 第 0 级（无条件触发）：单条 tool 内容截断至上限（头+失败窗口+尾）——
     // 历史踩坑（2026-10-08 compactMessagesForRequest 纯函数单测暴露）：初版把
     // 本级放在"tool 总量超预算"触发线之后，导致单条大输出场景永不截断——
     // 主要膨胀源没有治理。截断在任何规模下只有收益，因此提升为无条件级别。
+    // 2026-11-08 修订：旧实现 head-only 丢掉尾部真实错误（stderr / 断言 /
+    // 失败堆栈），dev 阶段模型只能盲试换命令形成多轮空转。改为调用
+    // truncateToolOutput 保留「头部 + 失败窗口 + 尾部」，尾部失败证据不再丢失。
     for (let i = 0; i < working.length; i += 1) {
       const message = working[i]!;
       if (message.role === "tool" && contentChars(message.content) > this.config.toolOutputMaxChars) {
         working[i] = {
           ...message,
-          content: `${(message.content as string).slice(0, this.config.toolOutputMaxChars)}\n…（已截断，原共 ${message.content!.length} 字符）`,
+          content: truncateToolOutput(message.content, this.config.toolOutputMaxChars),
         };
       }
     }

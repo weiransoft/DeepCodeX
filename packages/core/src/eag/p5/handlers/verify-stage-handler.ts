@@ -115,11 +115,14 @@ const ALLOWED_TEST_PROGRAMS: ReadonlySet<string> = new Set<string>([
  * 设计理由：移除 shell:true 后，spawnSync(program, args, { shell: false }) 不会调用 shell
  * 解释器，因此引号内的 shell 元字符对系统无害，只需阻止真正的命令链/重定向/替换。
  *
+ * 2026-11-08：导出供 baseline-guard.ts 复用，保证"run 起始基线探测"与"每轮 verify"
+ * 对同一 testCommand 的解释完全一致（同一白名单、同一 tokenize，不产生口径漂移）。
+ *
  * @param command 原始命令字符串（如 "npm test"）
  * @returns 解析后的 [program, ...args]
  * @throws 含 shell 元字符、解析失败或程序不在白名单时抛出 Error
  */
-function parseShellCommand(command: string): { program: string; args: string[] } {
+export function parseShellCommand(command: string): { program: string; args: string[] } {
   const trimmed = command.trim();
   if (!trimmed) {
     throw new Error("测试命令不能为空");
@@ -454,10 +457,51 @@ export class P5VerifyStageHandler implements P5StageHandler {
             `测试命令退出码 ${cmdResult.exitCode} 但输出无任何测试计数（0 passed/0 failed/0 skipped）——判定为无测试可跑，而非测试失败`
           );
         }
+        // 基线红灯拆分（2026-11-08）：把本轮失败用例拆成"run 起始既有"与"本任务新增"。
+        // orchestrator 在 run 起始采集一次基线失败用例集并注入 ctx；未注入（fixtures
+        // 直接调 handler）或基线探测降级（baselineAvailable=false）时**不排除任何失败**，
+        // summary/error 保持原样如实报失败（不破坏既有 D1 等回归断言）。
+        const baselineSet = ctx.baselineFailedTestIds;
+        const baselineAvailable = ctx.baselineAvailable === true && baselineSet !== undefined;
+        const baselineMatched: string[] = [];
+        const newFailed: string[] = [];
+        // 仅在基线可用时做拆分；降级时两个数组都留空（表示"未做拆分、不排除任何失败"），
+        // 由 baselineOnly=false 保证编排层不把这些失败排除掉。
+        if (baselineAvailable) {
+          for (const id of failedTests.ids) {
+            if (baselineSet!.has(id)) {
+              baselineMatched.push(id);
+            } else {
+              newFailed.push(id);
+            }
+          }
+        }
+        // baselineOnly 诚实性守卫：必须本轮真实识别到了失败用例、且全部都能归因到基线，
+        // 才允许标记"无新增失败"。若本轮 failed>0 却提取不到任何用例标识（ids 为空），
+        // 绝不能把真失败说成"纯基线"借以逃过熔断——此时 baselineOnly=false。
+        const baselineOnly =
+          baselineAvailable && failedTests.ids.length > 0 && newFailed.length === 0 && baselineMatched.length > 0;
+
+        const baseSummary = formatTestSummary(testStats, cmdResult, testPassed, failedTests);
+        // 如实写"N 个基线失败 + M 个新增失败"并列出新增用例；绝不声称测试通过，
+        // 不把 testPassed 改成 true，不省略基线红灯仍失败的事实。
+        // 边界：基线数据可用但本轮 failed>0 却提取不到任何用例标识时，不做拆分，
+        // 明确写"未做拆分、不排除任何失败"，避免"0 基线 + 0 新增"的误导性表述。
+        const canSplit = baselineAvailable && failedTests.ids.length > 0;
+        const summary = !baselineAvailable
+          ? baseSummary
+          : canSplit
+            ? `${baseSummary}；基线与新增拆分：${baselineMatched.length} 个基线失败（run 起始既有，非本任务引入）、` +
+              `${newFailed.length} 个新增失败` +
+              (newFailed.length > 0 ? `；新增用例：${newFailed.slice(0, 5).join("、")}` : "") +
+              `；基线红灯仍失败，本阶段判定 failed（不得据此声明完成）`
+            : `${baseSummary}；基线数据可用但本轮未提取到失败用例标识，未做拆分（不排除任何失败）；` +
+              `基线红灯仍失败，本阶段判定 failed（不得据此声明完成）`;
+
         return createFailedStageResult(
           "verify",
           "failed",
-          formatTestSummary(testStats, cmdResult, testPassed, failedTests),
+          summary,
           `测试失败：exitCode=${cmdResult.exitCode}, failed=${testStats.failed}${formatFailedIdHint(failedTests)}`,
           {
             testCommand,
@@ -465,8 +509,15 @@ export class P5VerifyStageHandler implements P5StageHandler {
             // 失败用例标识（pytest FAILED / unittest FAIL: / jest ✕ / mocha N) / TAP not ok）：
             // fix 阶段据此"优先定位这些用例"，最终报告也能给出可操作信息，
             // 不再是只有 "exitCode=1, failed=1" 的空洞结论。
+            // 原始清单保持不变（下游 fix / 既有回归断言依赖此字段）。
             failedTestIds: failedTests.ids,
             failedTestTotal: failedTests.total,
+            // 基线拆分制品（2026-11-08）：基线数据可用时才有意义；降级时为空数组 +
+            // baselineAvailable=false + baselineOnly=false，不排除任何失败。
+            baselineOnly,
+            newFailedTestIds: Object.freeze([...newFailed]),
+            baselineFailedTestIds: Object.freeze([...baselineMatched]),
+            baselineAvailable,
             // 原始尾部（≤4000 字符）：给 fix 阶段"从原始证据重建摘要"的兜底输入。
             // 只传摘要会让 fix 无法在摘要被前人截断时自愈（架构评审 B7）。
             testOutputTail: combinedTestOutput.slice(-RAW_OUTPUT_TAIL_CHARS),

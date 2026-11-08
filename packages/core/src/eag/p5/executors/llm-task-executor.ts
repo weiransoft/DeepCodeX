@@ -29,7 +29,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { ToolExecutor } from "../../../tools/executor";
 import { getTools } from "../../../prompt";
@@ -262,6 +262,20 @@ function isCredentialProtected(relativePath: string): boolean {
  *  3. 编排器级 token 预算（DEFAULT_MAX_TOKENS=200K）在 LoopScheduler 中独立闸门拦截
  */
 const DEFAULT_MAX_TOOL_ROUNDS = 40;
+
+/**
+ * 无进展熔断阈值（默认连续 4 轮）：本轮工具结果指纹与上一轮相同、且工作区
+ * 进展快照与上一轮相同，即记一次「无进展」；连续达到该阈值即失败。
+ *
+ * 与 IDENTICAL_CALL_STORM_LIMIT（相同调用空转熔断）互补：后者只认「工具名+
+ * 参数逐字符相同」，模型每轮换一条不同的 bash 命令（ls / ls -la / pwd / find）
+ * 即逐轮重置、连续 12+ 轮零产出仍烧轮。本熔断改用「结果 + 工作区进展」判据，
+ * 与参数无关，专治此类换命令空转。
+ *
+ * 默认 4 与 IDENTICAL_CALL_STORM_LIMIT=3 的关系：连续完全相同调用时，相同
+ * 调用熔断在第 3 轮先触发（阈值更低 + 代码顺序在前），本熔断不抢先、不回归 Z9。
+ */
+const DEFAULT_NO_PROGRESS_LIMIT = 4;
 
 /**
  * 递归按 key 排序 JSON 值（相同调用空转熔断的指纹规范化用，2026-10-05）。
@@ -504,6 +518,12 @@ export interface LlmTaskExecutorOptions {
   /** 单任务工具循环最大轮数，默认 DEFAULT_MAX_TOOL_ROUNDS；测试可收窄 */
   readonly maxToolRounds?: number;
   /**
+   * 无进展熔断阈值：连续多少轮「工具结果指纹 + 工作区进展快照」均无变化即失败。
+   * 默认 DEFAULT_NO_PROGRESS_LIMIT（4）；解析链为 options > env.DEEPCODE_NO_PROGRESS_LIMIT
+   * > 默认 4，非法值回落默认。非 git 仓库（工作区快照不可用）时实际阈值 +1 更保守。
+   */
+  readonly noProgressLimit?: number;
+  /**
    * 单任务最大 Token 预算（可选，undefined 时执行器不检查，由编排器在迭代间统一检查）。
    *
    * 2026-10-07 新增增量预算守卫：让执行器在 for 循环内每轮都对比累计 tokensUsed
@@ -556,6 +576,8 @@ export class LlmTaskExecutor implements P5TaskExecutor {
   private readonly model: string | undefined;
   private readonly log: (message: string, level?: "info" | "warn" | "error") => void;
   private readonly maxToolRounds: number;
+  /** 无进展熔断阈值（连续无进展轮数上限，构造时按 options/env/默认解析） */
+  private readonly noProgressLimit: number;
   /** 单任务 Token 预算（构造时从 options.perTaskBudget 注入；undefined 表示执行器不检查） */
   private readonly perTaskBudget: number | undefined;
   /** 任务执行进度回调（默认无操作；Web 接线时推送 llm_delta 进度帧） */
@@ -614,6 +636,17 @@ export class LlmTaskExecutor implements P5TaskExecutor {
       throw new Error(`LlmTaskExecutor maxToolRounds 必须为正整数，实际：${String(rounds)}`);
     }
     this.maxToolRounds = rounds;
+    // 无进展熔断阈值解析链（与 maxToolRounds 同款）：显式 options > env.DEEPCODE_NO_PROGRESS_LIMIT
+    // > 默认 4。非法值（非正整数）静默回落默认，不阻断装配（与 maxToolRounds 抛错区分：
+    // 该阈值只是保守收口，回落默认即可，无需因配置笔误让执行器构造失败）。
+    const envNoProgress = Number.parseInt(process.env.DEEPCODE_NO_PROGRESS_LIMIT ?? "", 10);
+    const noProgressCandidate =
+      options.noProgressLimit ??
+      (Number.isInteger(envNoProgress) && envNoProgress > 0 ? envNoProgress : DEFAULT_NO_PROGRESS_LIMIT);
+    this.noProgressLimit =
+      Number.isInteger(noProgressCandidate) && noProgressCandidate > 0
+        ? noProgressCandidate
+        : DEFAULT_NO_PROGRESS_LIMIT;
     this.perTaskBudget = options.perTaskBudget;
     this.compactReplayEnabled = options.compactReplay ?? true;
   }
@@ -981,6 +1014,27 @@ export class LlmTaskExecutor implements P5TaskExecutor {
       let lastCallFingerprint: string | null = null;
       let identicalCallStreak = 0;
 
+      // ======== 无进展熔断状态（2026-11 修复「dev 阶段每轮换一条 bash 命令、连续 12+ 轮零产出」） ========
+      // 判据与工具参数无关，走双轨（真实事故里模型每轮换 ls / pwd / find，
+      // 输出确实不同，只看「结果指纹相同」会漏判）：
+      //   - 轨道 A（快速，noProgressStreak）：结果指纹与上一轮相同 + 工作区快照
+      //     无变化 → 连续 noProgressLimit(4) 轮触发「工具结果重复」成因；
+      //   - 轨道 B（慢速，explorationStreak）：结果指纹不同（模型在换命令探索）
+      //     但工作区快照连续无变化、无成功写入、非全 deny、git 可用 → 连续
+      //     noProgressLimit+2(6) 轮触发「命令输出变化但工作区无变化」成因。
+      // resultFingerprint：工具执行结果（ok + content 长度 + 首尾各 512 字符，
+      // 剥离环境元数据后哈希）；progressSnapshot：git status 工作区快照。
+      // 工作区快照变化 / 成功写入 = 真有进展 → 清零；全 deny 轮两轨都不参与。
+      let lastResultFingerprint: string | null = null;
+      let noProgressStreak = 0;
+      let explorationStreak = 0;
+      let lastProgressSnapshot: string | null;
+      // 进入循环前采集一次起始快照：既作首轮比较基线，也用于判断 git 是否可用。
+      // git 不可用（非 git 仓库是合法场景）返回 null：轨道 B 禁用，轨道 A 阈值 +1。
+      const startWorkspaceSnapshot = this.captureWorkspaceSnapshot(input.projectRoot);
+      const gitSnapshotAvailable = startWorkspaceSnapshot !== null;
+      lastProgressSnapshot = startWorkspaceSnapshot;
+
       // 上下文续跑（epoch）状态（软预算修复 2026-10-11；2026-10-12 委托化）：
       // 预算超限不再直接 failure，而是把膨胀的历史折叠成紧凑上下文续跑。
       // 判限、段额度折算、耗尽门禁、绝对上限全部委托共享模块的
@@ -1229,9 +1283,12 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             for (const message of this.buildRolledOverMessages(input, rolloutSummary, epochState.epoch)) {
               messages.push(message);
             }
-            // 折叠指纹状态重置与拒绝风暴保留策略同段超限折叠（见下方注释）
-            lastCallFingerprint = null;
-            identicalCallStreak = 0;
+            // 折叠后模型看到的是摘要，但工作区与工具结果都没有变化，重复无效动作仍需累计；
+            // 完全清零会让两种空转熔断被折叠绕过（换命令 bash 空转 + 折叠续跑即可无限续命）。
+            // 改为有界衰减，且 lastCallFingerprint 保留不清空（允许重新计数但不丢历史）。
+            identicalCallStreak = Math.min(identicalCallStreak, 1);
+            noProgressStreak = Math.min(noProgressStreak, 1);
+            explorationStreak = Math.min(explorationStreak, 1);
             // ======== 折叠后轮数重置（2026-10-14 P0-1） ========
             // 折叠轮不消耗 segmentRoundsUsed（本轮零请求、零工具），直接重置为 0
             // 让新段从"段内第 1 轮"起步。segmentRoundBudget 按"剩余全局轮数"
@@ -1321,8 +1378,10 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             }
             // 熔断指纹状态重置：新上下文里重复旧调用属于"模型看到摘要后的新决策"，
             // 应重新计数（否则旧段末尾的 1~2 连击会让续跑第一击即触发空转熔断）。
-            lastCallFingerprint = null;
-            identicalCallStreak = 0;
+            // 折叠衰减：不清零（防绕过），保留 lastCallFingerprint 历史，注释见 pre-flight 折叠点。
+            identicalCallStreak = Math.min(identicalCallStreak, 1);
+            noProgressStreak = Math.min(noProgressStreak, 1);
+            explorationStreak = Math.min(explorationStreak, 1);
             // 注意：拒绝风暴计数**故意保留**——守卫不会因折叠上下文而改判，
             // 已烧穿 6 次配额的越权目标在续跑段依然不可达，保留计数防止继续撞墙。
             // ======== 折叠后轮数重置（2026-10-14 P0-1） ========
@@ -1472,8 +1531,10 @@ export class LlmTaskExecutor implements P5TaskExecutor {
                 messages.push(message);
               }
               // 折叠指纹状态重置与拒绝风暴保留策略同轮顶折叠（见轮顶注释）
-              lastCallFingerprint = null;
-              identicalCallStreak = 0;
+              // 折叠衰减：不清零（防绕过），保留 lastCallFingerprint 历史，注释见 pre-flight 折叠点。
+              identicalCallStreak = Math.min(identicalCallStreak, 1);
+              noProgressStreak = Math.min(noProgressStreak, 1);
+              explorationStreak = Math.min(explorationStreak, 1);
               // ======== 折叠后轮数重置（2026-10-14 P0-1） ========
               // 响应后折叠的特殊性：本轮请求已发、token 已烧，但工具还没执行。
               // segmentRoundsUsed 在 while 循环尾部会被 +1（本轮工具执行完算一轮），
@@ -1655,6 +1716,94 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             estimatedCharsTotal
           );
         }
+
+        // ======== 无进展熔断判定（双轨：结果重复 / 探索型空转，2026-11） ========
+        // 放在相同调用熔断之后：连续完全相同调用时后者阈值更低（3 < 4）且先判，
+        // 由「相同调用空转熔断」优先收口，本熔断不抢先（不回归 Z9 语义）。
+        // 终态轮（response.toolCalls.length === 0）已在上方 return success，不会到这里。
+        const resultFingerprint = this.computeResultFingerprint(executions);
+        const progressSnapshot = this.captureWorkspaceSnapshot(input.projectRoot);
+        const isFirstResult = lastResultFingerprint === null;
+        const resultUnchanged = isFirstResult || resultFingerprint === lastResultFingerprint;
+        // git 不可用时 progressSnapshot / lastProgressSnapshot 恒为 null，此式恒 true，
+        // 等价于仅按结果指纹判定——轨道 B 禁用、轨道 A 阈值 +1，见 effectiveNoProgressLimit。
+        const workspaceUnchanged = progressSnapshot === lastProgressSnapshot;
+
+        // 成功写入类工具（write/edit/UpdatePlan 且 ok=true）= 真实产出：打断轨道 B
+        // （探索型计数），避免把「边写边探索」误判为空转。bash 是否落盘由快照判定。
+        let hasSuccessfulWrite = false;
+        for (let i = 0; i < executions.length; i += 1) {
+          const name = response.toolCalls[i]?.name;
+          if ((name === "write" || name === "edit" || name === "UpdatePlan") && executions[i]!.result?.ok === true) {
+            hasSuccessfulWrite = true;
+            break;
+          }
+        }
+        // 全 deny 轮豁免：被权限守卫拒绝属于「拒绝风暴」（DENIAL_STORM_LIMIT=6，
+        // 按目标指纹分组）的管辖范围——反复撞不同的墙模型往往会自行改道，且
+        // 无进展阈值(4) < 风暴阈值(6)，若把 deny 轮也计入会架空风暴的
+        // 分组语义、误伤「两个目标各 deny 5 次仍应终态成功」的场景（E12）。
+        // deny 结果仍进 resultFingerprint，只是本轮两轨都不累计/不清零。
+        const allDenied =
+          executions.length > 0 && executions.every((execution) => this.isDeniedToolExecution(execution));
+        // 轨道 B 可用条件：必须有 git 快照依据（非 git 仓库禁用，避免无快照依据误判），
+        // 且本轮无成功写入类调用。
+        const trackBAvailable = gitSnapshotAvailable && !hasSuccessfulWrite;
+
+        if (!allDenied) {
+          if (!workspaceUnchanged) {
+            // 工作区快照变化 = 真有进展 → 两轨都清零
+            noProgressStreak = 0;
+            explorationStreak = 0;
+          } else if (isFirstResult) {
+            // 首轮无上一轮结果可比：保守地给两轨各记一次采样，使「连续 N 轮」
+            // 恰在第 N 轮触发（而非 N+1 轮）；后续由结果是否变化自动分轨。
+            noProgressStreak = 1;
+            explorationStreak = trackBAvailable ? 1 : 0;
+          } else if (resultUnchanged) {
+            // 轨道 A：结果重复 + 快照无变化
+            noProgressStreak += 1;
+            explorationStreak = 0;
+          } else {
+            // 结果指纹不同：轨道 A 断，轨道 B 记一次探索型空转
+            noProgressStreak = 0;
+            explorationStreak = trackBAvailable ? explorationStreak + 1 : 0;
+          }
+        }
+        // allDenied：两轨保持原值（不累计、不清零），沿用 E12 处理
+
+        // 每轮都刷新基线（相等时刷新无副作用），保证与「上一轮」而非「起始轮」比较，
+        // 这样每轮 write 新文件（快照逐轮变化）都能被识别为有进展而不误伤。
+        lastResultFingerprint = resultFingerprint;
+        lastProgressSnapshot = progressSnapshot;
+
+        const effectiveNoProgressLimit = gitSnapshotAvailable ? this.noProgressLimit : this.noProgressLimit + 1;
+        const explorationLimit = this.noProgressLimit + 2;
+        let cause: string | null = null;
+        let streak = 0;
+        if (noProgressStreak >= effectiveNoProgressLimit) {
+          streak = noProgressStreak;
+          cause = gitSnapshotAvailable
+            ? "工具结果与工作区快照均无变化（工具结果重复）"
+            : "非 git 仓库，仅按结果指纹判定：工具结果连续无变化";
+        } else if (explorationStreak >= explorationLimit) {
+          streak = explorationStreak;
+          cause = `命令输出变化但工作区连续 ${streak} 轮无变化（探索型空转）`;
+        }
+        if (cause !== null) {
+          const noProgressError =
+            `无进展熔断：连续 ${streak} 轮工具调用未产生任何新进展（${cause}）——` +
+            `请检查任务卡目标与 projectRoot 是否匹配、测试命令是否可执行、是否存在与任务无关的基线失败。`;
+          this.log(noProgressError, "warn");
+          emitProgress("task_end", "执行失败：无进展熔断", noProgressError, currentRound);
+          return this.failure(
+            noProgressError,
+            llmRequests,
+            sawUsage,
+            inputTokensTotal + outputTokensTotal,
+            estimatedCharsTotal
+          );
+        }
         // ======== while 循环尾部：全局轮数 +1、段内轮数 +1（2026-10-14 P0-1） ========
         // 原 for 循环由 `round += 1` 自增，while 需手动推进；折叠时 segmentRoundsUsed
         // 已重置为 0，此处 +1 仅在"本轮完成一轮 LLM+工具"后执行。
@@ -1783,6 +1932,83 @@ export class LlmTaskExecutor implements P5TaskExecutor {
     } catch {
       return argumentsJson.trim().slice(0, 400);
     }
+  }
+
+  /**
+   * 采集工作区进展快照（无进展熔断用）。
+   *
+   * `git status --porcelain --untracked-files=all` 的输出按行规范化（去行尾空白、
+   * 丢空行、排序）后拼接；排序消除 git 输出顺序抖动，路径/状态码变化即代表本轮
+   * 产生了新的文件变更。非 git 仓库 / git 不可用 / 超时一律返回 null——非 git
+   * 仓库是合法场景（临时项目、纯只读任务），据此判空转会误杀真实工作。
+   */
+  private captureWorkspaceSnapshot(projectRoot: string): string | null {
+    try {
+      const stdout = execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], {
+        cwd: projectRoot,
+        timeout: GIT_STATUS_TIMEOUT_MS,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      return stdout
+        .split("\n")
+        .map((line) => line.trimEnd())
+        .filter((line) => line.length > 0)
+        .sort()
+        .join("\n");
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 规范化工具结果文本：剥离「环境元数据」，只保留真正承载结果信息的字段。
+   *
+   * ToolExecutor.formatToolResult 产出的 content 恒为 JSON，其 metadata 里：
+   *  - deadlineAt 是每轮都变的绝对时间戳（位于 JSON 尾部，会让「尾 512」逐轮抖动）；
+   *  - cwd / startCwd 在 macOS 上首轮为 `/var/...`、bash-handler 归一化 session cwd
+   *    后变成 `/private/var/...`（`/var` → `/private/var` 符号链接），同样让首轮
+   *    指纹与后续不同；shellPath / timeoutMs 是固定环境量但也无结果语义。
+   * 这些「环境」字段若纳入指纹，即使命令输出恒定，真实的「换命令零产出」空转
+   * 也会因指纹抖动而永远判不出、本次修复对目标事故失效。
+   * 剥离后仍保留 ok / name / output / error / exitCode / signal 等真正承载
+   * 「是否有新信息」的字段——read 不同内容文件、write 不同目标、命令失败原因
+   * 都仍可区分（不误伤 Z10 / N2 / N3）。
+   */
+  private normalizeResultContent(content: string): string {
+    try {
+      const parsed = JSON.parse(content) as { metadata?: Record<string, unknown> };
+      if (parsed.metadata !== null && typeof parsed.metadata === "object") {
+        for (const key of ["deadlineAt", "cwd", "startCwd", "shellPath", "timeoutMs"]) {
+          delete parsed.metadata[key];
+        }
+      }
+      return JSON.stringify(parsed);
+    } catch {
+      // 非 JSON 结果（理论上 formatToolResult 恒产出 JSON）：退化为文本级中性化，
+      // 剥离 ISO 绝对时间戳与 macOS /private 路径前缀。
+      return content.replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g, "<ts>").replace(/\/private(?=\/)/g, "");
+    }
+  }
+
+  /**
+   * 计算本轮工具执行结果指纹（无进展熔断判据之一）。
+   *
+   * 口径：每条执行结果的 `ok` 状态 + 规范化后 content 的长度 + content 首尾
+   * 各 512 字符，拼接后 sha256 取前 16 位。取首尾而非全文：尾部能带进错误信息
+   * （命令失败原因），中间的耗时/大段输出被忽略不影响「是否同一结果」的判定。
+   * 被 deny 的调用 result.ok=false、content 为固定拒绝文案，同样是一种结果。
+   */
+  private computeResultFingerprint(executions: ReadonlyArray<ToolCallExecution>): string {
+    const hash = createHash("sha256");
+    for (const execution of executions) {
+      const content = this.normalizeResultContent(execution.content ?? "");
+      const ok = execution.result?.ok === true ? "ok" : "fail";
+      const head = content.slice(0, 512);
+      const tail = content.length > 512 ? content.slice(-512) : "";
+      hash.update(`${ok}|${content.length}|${head}|${tail}\n`);
+    }
+    return hash.digest("hex").slice(0, 16);
   }
 
   /**
@@ -1983,7 +2209,7 @@ export class LlmTaskExecutor implements P5TaskExecutor {
   }
 
   /**
-   * 构造 user 提示词：任务背景 + 卡 ID/标题 + 验收标准 + fix 阶段失败反馈。
+   * 构造 user 提示词：任务背景 + 卡 ID/标题 + 验收标准 + dev/fix 阶段失败反馈。
    */
   private buildUserPrompt(input: Readonly<P5TaskExecutionInput>): string {
     const lines: string[] = [
@@ -1999,9 +2225,16 @@ export class LlmTaskExecutor implements P5TaskExecutor {
     } else {
       lines.push("验收标准：任务卡未显式列出，请按标题与目标背景做出完整、可用的实现。");
     }
-    if (input.stage === "fix") {
-      lines.push("", "本任务此前的验证失败反馈（请据此修复，不要重复导致失败的做法）：");
-      lines.push(input.feedback ?? "（未提供具体失败反馈，请重新审查实现与测试结果）");
+    // feedback 注入不再限 stage：dev-stage-handler 也会把跨 run 的 lastFailureFeedback
+    // 传进来（stage="dev"），旧实现只在 fix 阶段拼接，导致 dev 的失败反馈被静默吞掉、
+    // 模型从零重跑整卡。无 feedback 时不插入任何行。
+    if (input.feedback) {
+      if (input.stage === "fix") {
+        lines.push("", "本任务此前的验证失败反馈（请据此修复，不要重复导致失败的做法）：");
+      } else {
+        lines.push("", "本任务此前的验证失败反馈（请在既有改动上继续修，不要从零重跑整卡）：");
+      }
+      lines.push(input.feedback);
     }
     lines.push("", "现在开始：需要读取文件就调用 read，确认改动方案后用 write/edit 真实落盘，全部完成后给出终态文本。");
     return lines.join("\n");
@@ -2232,8 +2465,13 @@ export class LlmTaskExecutor implements P5TaskExecutor {
         lines.push(`- ${criterion}`);
       }
     }
-    if (input.stage === "fix" && input.feedback) {
-      lines.push("", "本任务此前的验证失败反馈（请据此修复，不要重复导致失败的做法）：", input.feedback);
+    // 与 buildUserPrompt 同口径：feedback 注入不限 stage，dev/fix 各用对应措辞。
+    if (input.feedback) {
+      if (input.stage === "fix") {
+        lines.push("", "本任务此前的验证失败反馈（请据此修复，不要重复导致失败的做法）：", input.feedback);
+      } else {
+        lines.push("", "本任务此前的验证失败反馈（请在既有改动上继续修，不要从零重跑整卡）：", input.feedback);
+      }
     }
     lines.push(
       "",

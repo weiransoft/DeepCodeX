@@ -114,8 +114,8 @@ test("CB-01 短历史（≤minMessages）直通：新数组 + 元素引用不变
   );
 });
 
-/** CB-02 单条大 tool 截断：>toolOutputMaxChars 的 tool 内容截断至上限，保留头部 + 尾注 */
-test("CB-02 单条大 tool 截断：截断至 4000 字符 + 精确尾注", () => {
+/** CB-02 单条大 tool 截断：>toolOutputMaxChars 的 tool 内容按「头+失败窗口+尾」压缩至 ≤ 上限 */
+test("CB-02 单条大 tool 截断：长度 ≤ 4000、头部/尾部保留、含旧文案子串", () => {
   const provider = new DeterministicContextBudgetProvider();
   const bigContent = "x".repeat(6000);
   const messages = [
@@ -129,8 +129,16 @@ test("CB-02 单条大 tool 截断：截断至 4000 字符 + 精确尾注", () =>
   const result = provider.compactForRequest(messages);
   const tool = result.find((m) => m.id === "m4")!;
 
-  // 截断语义与迁移源逐字一致：头部 4000 字符 + "\n…（已截断，原共 N 字符）"
-  assert.equal(tool.content, `${bigContent.slice(0, 4000)}\n…（已截断，原共 6000 字符）`);
+  // 2026-11-08 修订：第 0 级由 head-only 改为「头部 + 失败窗口 + 尾部」，
+  // 输出严格 ≤ toolOutputMaxChars（含省略标记），并保留旧子串「已截断，原共」。
+  const content = tool.content!;
+  assert.ok(
+    content.length <= DEFAULT_CONTEXT_BUDGET_CONFIG.toolOutputMaxChars,
+    `长度应 ≤ 4000，实际 ${content.length}`
+  );
+  assert.ok(content.startsWith(bigContent.slice(0, 100)), "应保留头部原文前缀");
+  assert.ok(content.endsWith(bigContent.slice(-100)), "应保留尾部原文后缀");
+  assert.ok(content.includes("已截断，原共"), "应保留旧文案子串「已截断，原共」");
   // 其余消息不受第 0 级影响
   assert.equal(result.find((m) => m.id === "m2")!.content, "task");
   assert.equal(result.find((m) => m.id === "m5")!.content, "done");
@@ -140,11 +148,16 @@ test("CB-02 单条大 tool 截断：截断至 4000 字符 + 精确尾注", () =>
  * CB-03 总量收敛：大量大 tool 输出经第 0 级截断 + 第 2 级丢弃后总量收敛至
  * toolResultsBudgetChars 内；保护窗（最近 4 条 tool）与锚点（首条非 system +
  * 末条消息）不被整条丢弃（仍可被第 0 级截断——"防丢弃不防截断"现行语义）。
+ *
+ * 2026-11-08 修订：第 0 级改为「头部+失败窗口+尾部」后单条截断更紧凑
+ * （≈3140 字符 < 旧 ≈4018），30 条总量 94K 已低于 100K 预算、第 2 级不再
+ * 触发。为保留本用例"第 2 级丢弃 + 保护窗"的验证意图，TOOL_COUNT 提到 40
+ * （40×3140≈125K > 100K，仍触发第 2 级）。
  */
 test("CB-03 总量收敛至预算内：保护窗 4 条与锚点防整条丢弃", () => {
   const provider = new DeterministicContextBudgetProvider();
-  const TOOL_COUNT = 30;
-  // 每条 tool 唯一内容（防第 1 级去重干扰）6015 字符，截断后 ≈4018 字符
+  const TOOL_COUNT = 40;
+  // 每条 tool 唯一内容（防第 1 级去重干扰）6015 字符，截断后 ≤4000 字符（含省略标记）
   const toolContent = (i: number): string => `tool-output-${String(i).padStart(2, "0")}-` + "x".repeat(6000);
 
   const messages: SessionMessage[] = [msg("sys", "system", "system prompt"), msg("task", "user", "任务卡简报")];
@@ -167,9 +180,9 @@ test("CB-03 总量收敛至预算内：保护窗 4 条与锚点防整条丢弃",
   assert.equal(result.find((m) => m.id === "task")!.content, "任务卡简报");
   assert.equal(result.find((m) => m.id === "final")!.content, "任务完成");
 
-  // 保护窗：最近 4 条 tool（tool-26..tool-29）仍是截断后的完整内容（含"已截断"尾注），
-  // 不是丢弃占位
-  for (const id of ["tool-26", "tool-27", "tool-28", "tool-29"]) {
+  // 保护窗：最近 4 条 tool 仍是截断后的完整内容（含"已截断"尾注），不是丢弃占位
+  const recentToolIds = Array.from({ length: 4 }, (_, k) => `tool-${TOOL_COUNT - 4 + k}`);
+  for (const id of recentToolIds) {
     const content = result.find((m) => m.id === id)!.content!;
     assert.ok(content.includes("已截断"), `${id} 在保护窗内应保留截断内容而非丢弃占位`);
     assert.ok(!content.startsWith("（上下文压缩：该工具结果"), `${id} 不应被整条丢弃`);
@@ -195,13 +208,12 @@ test("CB-04 配置参数化：自定义 toolOutputMaxChars 生效（非硬编码
   const defaultResult = new DeterministicContextBudgetProvider().compactForRequest(messages);
   assert.equal(defaultResult.find((m) => m.id === "m4")!.content, bigTool, "默认配置下 100 字符不应截断");
 
-  // 自定义配置：上限 50 → 截断至 50 字符 + 尾注
+  // 自定义配置：上限 50（< 200，属极小预算安全退化）→ 长度 ≤ 50、头部保留、含旧子串
   const customResult = new DeterministicContextBudgetProvider({ toolOutputMaxChars: 50 }).compactForRequest(messages);
-  assert.equal(
-    customResult.find((m) => m.id === "m4")!.content,
-    `${bigTool.slice(0, 50)}\n…（已截断，原共 100 字符）`,
-    "自定义 toolOutputMaxChars=50 应精确生效"
-  );
+  const small = customResult.find((m) => m.id === "m4")!.content!;
+  assert.ok(small.length <= 50, `自定义 toolOutputMaxChars=50 应生效：长度 ≤ 50，实际 ${small.length}`);
+  assert.ok(small.startsWith(bigTool.slice(0, 4)), "极小预算仍应保留头部原文");
+  assert.ok(small.includes("已截断，原共"), "应保留旧文案子串「已截断，原共」");
 });
 
 /** CB-05 输入只读：入参数组与消息对象均不被修改（冻结对象下运行 = 篡改即抛错） */
@@ -227,11 +239,12 @@ test("CB-05 输入只读：冻结输入下运行不抛错且内容不变", () =>
   const result = provider.compactForRequest(messages);
 
   assert.equal(JSON.stringify(messages), snapshot, "输入数组与消息对象应逐字节不变");
-  assert.equal(
-    result.find((m) => m.id === "tool-1")!.content!.length,
-    4000 + "\n…（已截断，原共 6000 字符）".length,
-    "输出应正常截断（证明压缩逻辑真实执行而非空转）"
+  const truncated = result.find((m) => m.id === "tool-1")!.content!;
+  assert.ok(
+    truncated.length <= DEFAULT_CONTEXT_BUDGET_CONFIG.toolOutputMaxChars,
+    `输出应受 4000 上限约束，实际 ${truncated.length}`
   );
+  assert.ok(truncated.includes("已截断，原共"), "应带截断标记（证明压缩逻辑真实执行而非空转）");
 });
 
 /**
@@ -304,12 +317,13 @@ test("CB-10 第 3 级兜底裁剪：>800K 场景输出与迁移语义逐字节�
 });
 
 /**
- * CB-11 连续压缩收敛：对已压缩结果再次压缩达到不动点（第 2 次应用后逐字节稳定），
+ * CB-11 连续压缩收敛：对已压缩结果再次压缩达到不动点（重复应用逐字节稳定），
  * 且已截断 tool 的内容前缀永不进一步丢失（防落盘后每轮重复压缩导致内容持续缩水）。
  *
- * 语义说明：第 0 级截断的尾注本身会使内容长度略超上限（4000+尾注≈4019>4000），
- * 再次压缩只更新尾注中的"原共 N 字符"元数据（N=上次内容长度），头部 4000 字符
- * 与迁移前 p5 行为完全一致——第二次压缩即达不动点，无信息级联丢失。
+ * 语义说明（2026-11-08 修订）：第 0 级改为「头部+失败窗口+尾部」且输出严格
+ * ≤ toolOutputMaxChars，已压缩结果再次进入时因长度 ≤ 上限直接透传，故第 1 次
+ * 压缩即达不动点，头部前缀与尾部证据均不再变化（不再有"尾注使长度超上限
+ * 而每轮重压缩"的旧问题）。
  */
 test("CB-11 连续压缩收敛：第 2 次应用后达不动点、头部前缀永不丢失", () => {
   const provider = new DeterministicContextBudgetProvider();
@@ -329,14 +343,14 @@ test("CB-11 连续压缩收敛：第 2 次应用后达不动点、头部前缀�
   const run2 = provider.compactForRequest(run1);
   const run3 = provider.compactForRequest(run2);
 
-  // 头部前缀在每轮压缩后均完整保留（无信息级联丢失）
+  // 头部前缀在每轮压缩后均完整保留（无信息级联丢失；头部预算约 35%，用安全小前缀断言）
   for (const [id, original] of [
     ["tool-a", toolA],
     ["tool-b", toolB],
   ] as const) {
     for (const run of [run1, run2, run3]) {
       const content = run.find((m) => m.id === id)!.content!;
-      assert.ok(content.startsWith(original.slice(0, 4000)), `${id} 头部 4000 字符在各轮压缩后应完整保留`);
+      assert.ok(content.startsWith(original.slice(0, 100)), `${id} 头部原文前缀在各轮压缩后应完整保留`);
     }
   }
   // 第 2 次应用后达不动点（run3 与 run2 逐字节一致 → 落盘后重复压缩稳定）
@@ -603,11 +617,11 @@ test("集成-DET-01 无凭据 deterministic 压缩落盘：分支前置 + 打点
       "tool_call_id 应保留"
     );
     const original = bigToolContent(i);
-    assert.equal(
-      tool.content,
-      `${original.slice(0, 4000)}\n…（已截断，原共 ${original.length} 字符）`,
-      `tool-${i} 应按第 0 级精确截断`
-    );
+    const truncated = tool.content!;
+    assert.ok(truncated.length <= 4000, `tool-${i} 应受第 0 级 4000 上限约束，实际 ${truncated.length}`);
+    assert.ok(truncated.startsWith(original.slice(0, 100)), `tool-${i} 应保留头部原文`);
+    assert.ok(truncated.endsWith(original.slice(-100)), `tool-${i} 应保留尾部原文`);
+    assert.ok(truncated.includes("已截断，原共"), `tool-${i} 应带旧文案子串「已截断，原共」`);
   }
   // 落盘条数与消息 id / compacted 标记保持原值（saveSessionMessages 全量覆盖写语义）
   assert.equal(messages.length, baseMessageCount + 6, "落盘条数应不变（基线 + 追加 6 条）");
@@ -689,8 +703,8 @@ test("集成-DET-02 压缩幂等：重复 compactSession 头部前缀不缩水�
   const afterSecond = manager.listSessionMessages(sessionId);
   const toolAfterSecond = afterSecond.find((m) => m.id === "tool-1")!.content!;
 
-  // 已截断 tool 的头部 4000 字符永不进一步丢失（重复压缩只更新尾注元数据）
-  assert.ok(toolAfterSecond.startsWith(bigTool.slice(0, 4000)), "第二次压缩后头部 4000 字符应完整保留");
+  // 已截断 tool 的头部原文前缀永不进一步丢失（输出 ≤ 上限，重复压缩直接透传）
+  assert.ok(toolAfterSecond.startsWith(bigTool.slice(0, 100)), "第二次压缩后头部原文前缀应完整保留");
   assert.ok(toolAfterSecond.includes("已截断"), "第二次压缩后仍应保持截断标记");
   // user/assistant 在重复压缩后依旧逐字节不变
   assert.equal(afterSecond.find((m) => m.id === "asst-final")!.content, "完成", "assistant 原文在重复压缩后应不变");

@@ -108,6 +108,14 @@ export const DEV_REASON_TASK_EXECUTOR_NOT_BOUND = "task-executor-not-bound" as c
 export const DEV_REASON_TASK_EXECUTED = "task-executed" as const;
 /** 任务执行器返回失败（凭据缺失/abort/轮数上限/异常） */
 export const DEV_REASON_TASK_EXECUTION_FAILED = "task-execution-failed" as const;
+/**
+ * 上一轮 fix 已成功应用 + 本轮 plan 再次选中同一张卡 → 复用增量修复，跳过 dev 整卡重跑
+ * （2026-11-08 P2 状态机：禁止 fix 后 dev 从零重跑覆盖掉增量修复）。
+ */
+export const DEV_REASON_SKIPPED_AFTER_FIX = "dev-skipped-after-fix" as const;
+
+/** 基线脏路径未注入时的默认空集（避免每次构造，保持过滤逻辑零副作用）。 */
+const EMPTY_PATH_SET: ReadonlySet<string> = new Set<string>();
 
 // ============================================================================
 // 2. 类型定义
@@ -187,6 +195,28 @@ export class P5DevStageHandler implements P5StageHandler {
           "dev",
           "无任务卡（plan 阶段未产出或已全部完成），dev 阶段跳过",
           { taskCard: null, reason: "no-task-card" },
+          [],
+          0,
+          Date.now() - startTime
+        );
+      }
+
+      // 2.5 P2 状态机（2026-11-08）：上一轮 fix 成功 + 本轮 plan 又选中同一张 pending 卡
+      //     → 复用上一轮 fix 的增量修复，直接进入复验，禁止 dev 从零重跑整卡把修复覆盖掉。
+      //     本分支**不调用 taskExecutor**（零执行器调用），且 noop=false：跳过 dev 不等于
+      //     空转，不能让编排层的连续空转熔断误触发。
+      if (ctx.skipDevAfterFix === true) {
+        return createSuccessStageResult(
+          "dev",
+          `任务 ${taskCard.id} 复用上一轮 fix 的增量修复，直接进入复验（跳过 dev 整卡重跑）`,
+          {
+            taskCard,
+            reason: DEV_REASON_SKIPPED_AFTER_FIX,
+            skipped: true,
+            noop: false,
+            skippedAfterFix: true,
+            guardDecision: "PASS",
+          },
           [],
           0,
           Date.now() - startTime
@@ -389,10 +419,21 @@ export class P5DevStageHandler implements P5StageHandler {
         );
       }
 
-      // 10.3 执行成功：用执行器经 git 真实检出的变更文件重建 ChangeDiff
+      // 10.3 统计口径统一（2026-11-08）：execution.changedFiles 来自执行器
+      //     `git status --porcelain -uall` 的**全量工作区**（含 run 起始既有脏文件），
+      //     与最终报告"基线差集"口径不一致，会出现"阶段报 359 个文件、报告说本次运行
+      //     无文件变更"的矛盾。这里用 orchestrator 注入的 baselineDirtyPaths 过滤出
+      //     "本次产出"，文案与 artifacts.changedFiles 全部改用过滤后的值。
+      //     不改执行器的 listGitChangedFiles（属其它模块职责）。
+      const baselineDirtyPaths = ctx.baselineDirtyPaths ?? EMPTY_PATH_SET;
+      const workspaceChangedFilesTotal = execution.changedFiles.length;
+      const thisRunChangedFiles = execution.changedFiles.filter((p) => !baselineDirtyPaths.has(p));
+      const excludedWorkspaceFiles = workspaceChangedFilesTotal - thisRunChangedFiles.length;
+
+      // 执行成功：用"本次产出"文件重建 ChangeDiff（与 artifacts.changedFiles 同口径）
       const executedChangeDiff: ChangeDiff = Object.freeze({
         changedFiles: Object.freeze(
-          execution.changedFiles.map((filePath) => ({
+          thisRunChangedFiles.map((filePath) => ({
             filePath,
             // 执行器仅检出文件名（porcelain），不做 numstat：增删行数在 verify 阶段由真实测试侧证
             additions: 0,
@@ -407,14 +448,17 @@ export class P5DevStageHandler implements P5StageHandler {
 
       return createSuccessStageResult(
         "dev",
-        `任务 ${taskCard.id} 已由 LLM 执行完成（${execution.changedFiles.length} 个变更文件，${execution.llmRequests} 次 LLM 请求）`,
+        `任务 ${taskCard.id} 已由 LLM 执行完成（本次产出 ${thisRunChangedFiles.length} 个文件；` +
+          `工作区既有 ${excludedWorkspaceFiles} 个未计入，${execution.llmRequests} 次 LLM 请求）`,
         {
           taskCard,
           reason: DEV_REASON_TASK_EXECUTED,
           changeDiff: executedChangeDiff,
           guardDecision: "PASS",
           execution: Object.freeze({ ...execution }),
-          changedFiles: Object.freeze([...execution.changedFiles]),
+          changedFiles: Object.freeze([...thisRunChangedFiles]),
+          // 审计字段：执行器报出的全量工作区变更数（未过滤），供核对口径
+          workspaceChangedFilesTotal,
           llmRequests: execution.llmRequests,
           // 空转透传（2026-10-07）：执行器检出"模型零工具调用 + 零文件变更"时为 true，
           // 编排器据此计入 consecutiveNoopIterations 空转熔断

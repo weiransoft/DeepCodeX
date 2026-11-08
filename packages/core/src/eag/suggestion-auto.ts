@@ -253,16 +253,29 @@ export function extractSuggestedCommandAndGoal(text: string): SuggestedCommandCa
  *
  * goal 中的双引号、反斜杠、换行符会被安全转义，防止命令字符串解析失败。
  *
+ * 2026-11 修复（失败目标逃生门重放）：可选 failureContext 为上一轮失败诊断的
+ * 紧凑约束文本。有值时把约束追加进 --goal 文本，与 goal 原文**走同一套转义**，
+ * 绝不单独拼未转义片段（防命令注入）。无值时输出与修复前逐字一致（零回归）。
+ *
  * @param commandHint 命令提示字符串（如 "/eag-autonomous"）
  * @param goal 用户原始目标散文（如"修复登录失败问题"）
+ * @param failureContext 可选的上一轮失败重放约束（紧凑文本，追加进 --goal）
  * @returns 完整命令字符串
  */
-export function buildAutoExecuteCommand(commandHint: string, goal: string): string {
-  // 安全转义 goal 中的特殊字符（对齐 shell 引号 + argparse 解析器）：
+export function buildAutoExecuteCommand(commandHint: string, goal: string, failureContext?: string): string {
+  // 安全转义（对齐 shell 引号 + argparse 解析器）：
   // - 反斜杠 → 双反斜杠
   // - 双引号 → 反斜杠双引号
   // - 换行符 → 空格（命令字符串不支持多行参数）
-  const escapedGoal = goal.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, " ").trim();
+  // 抽成单一函数，保证 goal 原文与追加的约束走完全相同的转义口径。
+  const escapeGoalText = (text: string): string =>
+    text.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, " ").trim();
+
+  // 有重放约束时拼进 goal 原文后统一转义；无约束时 combinedGoal === goal，
+  // escapeGoalText 的结果与修复前逐字一致。
+  const combinedGoal =
+    typeof failureContext === "string" && failureContext.trim().length > 0 ? `${goal} ${failureContext.trim()}` : goal;
+  const escapedGoal = escapeGoalText(combinedGoal);
   const trimmedCommand = commandHint.trim();
 
   // /eag-autonomous：完整参数（--goal + --max-iterations + --confirmation smart）

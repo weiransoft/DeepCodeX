@@ -73,6 +73,9 @@ import type { P5LoopExecutor } from "./loop-executor";
 import type { P5StageContext, P5StageResult, P5StageKind } from "./handlers/types";
 import type { P5TaskExecutor } from "./handlers/task-executor-port";
 import { tagStageResultIterIndex } from "./handlers/fix-stage-handler";
+// 基线红灯守卫（2026-11-08）：run 起始真实探测一次既有失败用例，供 verify 拆分与
+// 编排层排除"与本任务无关的基线红灯"，避免被拖进确定性失败熔断 / fix 整卡重跑。
+import { collectBaselineFailures } from "./handlers/baseline-guard";
 import {
   PLAN_REASON_ALL_TASKS_COMPLETED,
   PLAN_REASON_TASKS_BLOCKED,
@@ -373,6 +376,18 @@ export interface AutonomousRunResult {
   readonly finalReport: string;
   /** 阻塞分析报告（finalStatus != completed/stop_when 时填写） */
   readonly blockageReport?: Readonly<P5BlockageReport>;
+  /**
+   * 本 run 所有 verify 失败阶段解析出的失败用例标识（2026-11-08 触发层逃生门透传）。
+   *
+   * - 顶层字段、字段名严格为 failedTestIds：session.ts 的 extractAutonomousRunDetails
+   *   用 `(runResult as { readonly failedTestIds?: unknown }).failedTestIds` 精确读取，
+   *   嵌套或改名都会导致链路静默降级为 undefined；
+   * - 汇总自本次 run 全部 verify 失败结果 artifacts.failedTestIds，去重保序、上限 20、
+   *   只保留非空字符串；无失败时为 undefined（绝不编造用例名）；
+   * - 供失败目标重放约束（【重放约束】失败用例：...）显示，与 blockageReport.summary
+   *   （abortReason 来源）解耦，互不改动。
+   */
+  readonly failedTestIds?: ReadonlyArray<string>;
   /** 触发的护栏记录列表（含 BLOCKER 与 MAJOR，用于审计） */
   readonly triggeredGuards: ReadonlyArray<GuardRecord>;
   /**
@@ -929,6 +944,26 @@ export class AutonomousOrchestrator {
       // 采集失败（非 git 仓库 / git 不可用）→ null：清单降级为空并显式标注。
       const baselineSnapshot = this.captureGitSnapshot(projectRoot);
 
+      // 3c. 基线红灯采集（2026-11-08，T-068 / verify 2 个无关失败用例事故）：
+      // 用与 verify 完全同款的 testCommand 在 run 起始**真实执行一次**，解析出
+      // "run 起始既有失败用例集"。**每个 run 只跑一次**（此处在 while 循环之外），
+      // 结果作为不可变集合缓存，经 buildStageContext 注入每轮各阶段 ctx。
+      // 诚实降级：探测不可靠（无法启动/超时/无计数/命令被拒/无可识别用例/开关关闭）
+      // → available=false，此时不排除任何失败，verify 结果仍如实 failed。
+      const baselineFailures = collectBaselineFailures(projectRoot, testCommand);
+      const baselineFailedTestIdsSet: ReadonlySet<string> = new Set<string>(baselineFailures.ids);
+      const baselineAvailable = baselineFailures.available;
+      // 统计口径统一：把基线 git 快照里的脏路径集合传给 dev/fix handler 做"本次产出"过滤。
+      // baselineSnapshot 采集失败（非 git 仓库）→ 空集（不过滤，行为与修复前一致）。
+      const baselineDirtyPathsSet: ReadonlySet<string> = new Set<string>(
+        baselineSnapshot !== null ? baselineSnapshot.dirty.keys() : []
+      );
+      this.log(
+        `基线红灯采集：available=${baselineAvailable} ids=${baselineFailedTestIdsSet.size} ` +
+          `dirtyPaths=${baselineDirtyPathsSet.size} reason=${baselineFailures.reason}`,
+        "info"
+      );
+
       // 2026-11-03 新增（run b64490b8ad78 事故，架构评审 B2）：
       // 跨迭代携带"上一轮 verify 真实失败证据"。
       // 事故链路：iter1 dev→verify 失败→fix 修复；iter2 plan 又选同一张 pending 卡，
@@ -936,6 +971,17 @@ export class AutonomousOrchestrator {
       // dev 此前只消费 plan 透出的"跨 run 失败记忆"，同一次 run 内的失败闭环缺失。
       // 这里在迭代之间搬运失败证据（失败用例 + 输出尾部），让下一轮 dev 接着修而不是重来。
       let carriedFailureFeedback: string | undefined;
+
+      // P2 状态机（2026-11-08）：上一轮 fix 是否成功应用、修复的是哪张卡。
+      // 下一轮 plan 若再次选中同一张 pending 卡 → 置 ctx.skipDevAfterFix=true，
+      // dev handler 复用上一轮 fix 的增量修复直接进入复验，不再从 dev 重跑整卡。
+      let previousFixAppliedCardId: string | null = null;
+
+      // 失败用例标识透传（2026-11-08）：汇总本 run 全部 verify 失败阶段的
+      // artifacts.failedTestIds，去重保序、上限 20、只保留非空字符串，收尾时挂到
+      // AutonomousRunResult 顶层 failedTestIds 供触发层逃生门精确读取。无失败则留空。
+      const runFailedTestIds: string[] = [];
+      const seenRunFailedTestIds = new Set<string>();
 
       // 类型守卫：确保 currentRunState 非空（后续 while 循环内安全使用）
       // 此处 currentRunState 已通过 L603 赋值，理论上不可能为 null
@@ -1046,6 +1092,15 @@ export class AutonomousOrchestrator {
             // 投影到 dev 阶段（dev handler 作为 executeTask 的 feedback 注入）；
             // plan 自身执行时变量尚未赋值（undefined），与修复前行为一致。
             lastFailureFeedback: iterationLastFailureFeedback,
+            // 基线红灯守卫（2026-11-08）：run 起始探测的既有失败用例集 + 可用性，
+            // verify 阶段据此拆分基线/新增失败；dev/fix 用基线脏路径过滤"本次产出"。
+            baselineFailedTestIds: baselineFailedTestIdsSet,
+            baselineAvailable,
+            baselineDirtyPaths: baselineDirtyPathsSet,
+            // P2 状态机：上一轮 fix 成功 + 本轮 plan 又选中同一张 pending 卡 → 跳过 dev。
+            // stage==="dev" 时 planTaskCard 已由本轮 plan 阶段赋值（plan 先于 dev 执行）。
+            skipDevAfterFix:
+              stage === "dev" && previousFixAppliedCardId !== null && planTaskCard?.id === previousFixAppliedCardId,
           });
 
           // 5b-1.5 租约心跳（2026-10-20 R3 并发死锁修复）：每阶段入口刷新本 run
@@ -1165,13 +1220,69 @@ export class AutonomousOrchestrator {
           }
         }
 
+        // 5b.6 基线红灯轮识别 + P2 状态机状态更新（2026-11-08）。
+        // 本轮 verify 失败且 artifacts.baselineOnly=true → 失败全部是 run 起始既有红灯，
+        // 与本任务无关：findings 稳定化、清除确定性失败指纹累计、不累加连续失败。
+        const baselineOnlyVerify = iterationResults.find(
+          (r) => r.stage === "verify" && r.kind !== "success" && r.artifacts["baselineOnly"] === true
+        );
+        const iterationBaselineOnly = baselineOnlyVerify !== undefined;
+        const baselineOnlyInfo = iterationBaselineOnly
+          ? {
+              baselineFailedCount: Array.isArray(baselineOnlyVerify!.artifacts["baselineFailedTestIds"])
+                ? (baselineOnlyVerify!.artifacts["baselineFailedTestIds"] as ReadonlyArray<unknown>).length
+                : 0,
+              newFailedCount: Array.isArray(baselineOnlyVerify!.artifacts["newFailedTestIds"])
+                ? (baselineOnlyVerify!.artifacts["newFailedTestIds"] as ReadonlyArray<unknown>).length
+                : 0,
+            }
+          : null;
+
+        // P2 状态机：记录本轮 fix 是否成功应用 + 修复的任务卡 ID，供下一轮 dev 判断是否跳过。
+        const fixAppliedResult = iterationResults.find(
+          (r) => r.stage === "fix" && r.kind === "success" && r.artifacts["fixApplied"] === true
+        );
+        const appliedCardId = fixAppliedResult?.artifacts["fixTaskCardId"];
+        previousFixAppliedCardId = typeof appliedCardId === "string" && appliedCardId.length > 0 ? appliedCardId : null;
+
+        // 失败用例标识透传（2026-11-08）：把本轮所有 verify 失败结果携带的原始
+        // failedTestIds 汇总到 run 级清单。去重保序、上限 20、只保留非空字符串；
+        // 不区分基线/新增（透传的是"哪些用例失败了"这一客观事实，非归因结论）。
+        for (const stageResult of iterationResults) {
+          if (stageResult.stage !== "verify" || stageResult.kind === "success") {
+            continue;
+          }
+          const ids = stageResult.artifacts["failedTestIds"];
+          if (!Array.isArray(ids)) {
+            continue;
+          }
+          for (const raw of ids) {
+            if (runFailedTestIds.length >= 20) {
+              break;
+            }
+            if (typeof raw !== "string" || raw.trim().length === 0) {
+              continue;
+            }
+            if (seenRunFailedTestIds.has(raw)) {
+              continue;
+            }
+            seenRunFailedTestIds.add(raw);
+            runFailedTestIds.push(raw);
+          }
+        }
+
         // 5b.7 eag/loop/ 集成：构造 LoopEvaluationVerdict + LoopEvent，调用 LoopScheduler（方案 A）
         // 设计依据：架构师 D2 建议 —— 复用 eag/loop/ 调度层替代内联 5f 终止条件
         // 调用时机：在 5c 累加前调用，传入不含本轮失败的 consecutiveFailures，
         //          对齐 scheduler 参数语义（scheduler 内部 +1 得到 effectiveFailures）
         // 注：此步骤仅做调度决策，不改变 consecutiveFailures（由 5c 负责）
         if (status === "running") {
-          const loopVerdict = this.buildLoopEvaluationVerdict(iterationResults, iterationFatal, iterationFailed);
+          const loopVerdict = this.buildLoopEvaluationVerdict(
+            iterationResults,
+            iterationFatal,
+            iterationFailed,
+            baselineOnlyInfo
+          );
           const loopEvent = this.buildLoopEvent(runId, iterIndex, loopVerdict);
           loopEvents.push(loopEvent);
 
@@ -1187,7 +1298,15 @@ export class AutonomousOrchestrator {
           // 置 aborted → 外层 5b.7 整块跳过），本处只做非 Token 路径的调度；
           // 此前 identical-failure 熔断会抢先于 Token 预算终止，导致预算耗尽的
           // run 以"确定性失败"口径写报告，误导排查。
-          if (loopVerdict.passed || loopVerdict.findings.length === 0) {
+          if (iterationBaselineOnly) {
+            // 基线红灯轮（2026-11-08）：清除确定性失败指纹累计，使"同样的基线红灯
+            // 连续 2 轮"不再触发确定性失败熔断 abort。这些失败是 run 起始既有、
+            // 与本任务无关；在此卡上重试无意义，但也不该以"确定性失败"口径 abort
+            // 整次 run。verify 结果自身仍如实 failed（loopVerdict.passed 保持 false）。
+            // findings 已由 buildLoopEvaluationVerdict 稳定化（排除基线用例名）。
+            lastFailureFingerprint = null;
+            identicalFailureStreak = 0;
+          } else if (loopVerdict.passed || loopVerdict.findings.length === 0) {
             lastFailureFingerprint = null;
             identicalFailureStreak = 0;
           } else {
@@ -1318,7 +1437,12 @@ export class AutonomousOrchestrator {
           consecutiveFailures += 1;
         } else if (iterationFailed) {
           // failed → 累加 consecutiveFailures（含 tasks.md 完成标记写入失败）
-          consecutiveFailures += 1;
+          // 基线红灯轮例外（2026-11-08）：失败为 run 起始既有、与本任务无关，
+          // 不累加连续失败，避免 LoopScheduler 以"连续失败"口径终止 run。
+          // 该轮 verify 结果仍如实 failed，收敛由 maxIterations 兜底（诚实收尾）。
+          if (!iterationBaselineOnly) {
+            consecutiveFailures += 1;
+          }
         }
 
         // 5c.2 连续空转熔断（2026-10-07 新增，修复"成功路径上的空循环"）：
@@ -1572,6 +1696,12 @@ export class AutonomousOrchestrator {
               abortReason,
               consecutiveFailures,
               triggeredGuards,
+              // 基线红灯真实信息（2026-11-08）：用 run 起始探测到的失败用例替换泛化模板
+              baselineFailedTestIds: baselineFailedTestIdsSet,
+              baselineAvailable,
+              baselineReason: baselineFailures.reason,
+              testCommand,
+              projectRoot,
             })
           : undefined;
 
@@ -1587,6 +1717,9 @@ export class AutonomousOrchestrator {
         durationSec,
         finalReport,
         blockageReport,
+        // 失败用例标识透传（2026-11-08）：挂在 AutonomousRunResult 顶层，字段名严格
+        // failedTestIds、值 string[]（冻结）。无失败则为 undefined（诚实留空，绝不编造）。
+        failedTestIds: runFailedTestIds.length > 0 ? Object.freeze([...runFailedTestIds]) : undefined,
         triggeredGuards: Object.freeze([...triggeredGuards]),
         changedFiles: Object.freeze([...changedFiles]),
         gitAttributionAvailable,
@@ -2581,6 +2714,14 @@ export class AutonomousOrchestrator {
      * feedback 注入）。首轮迭代或 plan 未透出时为 undefined。
      */
     readonly lastFailureFeedback?: string;
+    /** run 起始基线失败用例集（2026-11-08 基线红灯守卫，verify 拆分用） */
+    readonly baselineFailedTestIds?: ReadonlySet<string>;
+    /** 基线探测是否得到可信清单（false=诚实降级，不排除任何失败） */
+    readonly baselineAvailable?: boolean;
+    /** run 起始工作区既有脏路径集（2026-11-08 统计口径统一，dev/fix 过滤"本次产出"用） */
+    readonly baselineDirtyPaths?: ReadonlySet<string>;
+    /** P2 状态机：上一轮 fix 成功 + 同卡 → 本轮 dev 跳过整卡重跑 */
+    readonly skipDevAfterFix?: boolean;
   }): Readonly<P5StageContext> {
     return Object.freeze({
       runId: args.runId,
@@ -2609,6 +2750,12 @@ export class AutonomousOrchestrator {
       // F-C 跨 run 失败反馈（可选字段，undefined 时不写入冻结对象语义无差异，
       // 显式透传保持字段完整性供调试与审计）
       lastFailureFeedback: args.lastFailureFeedback,
+      // 基线红灯守卫 + 统计口径统一 + P2 状态机（2026-11-08，可选字段：
+      // fixtures 未注入时 undefined，各 handler 按降级/空集/不跳过处理，行为不变）
+      baselineFailedTestIds: args.baselineFailedTestIds,
+      baselineAvailable: args.baselineAvailable,
+      baselineDirtyPaths: args.baselineDirtyPaths,
+      skipDevAfterFix: args.skipDevAfterFix,
       // 阶段级日志回调：plan 阶段用它上报 tasks.md 解析告警（修复 2026-10-05
       // 僵尸任务卡事故——非法 status 静默降级 pending 完全无日志痕迹）
       logger: this.log,
@@ -2815,7 +2962,13 @@ export class AutonomousOrchestrator {
   private buildLoopEvaluationVerdict(
     iterationResults: ReadonlyArray<Readonly<P5StageResult>>,
     iterationFatal: boolean,
-    iterationFailed: boolean
+    iterationFailed: boolean,
+    /**
+     * 基线红灯轮稳定化信息（2026-11-08）：非 null 时把 verify 失败 finding 替换为
+     * 稳定化摘要（排除基线用例名，只写"基线失败 N 个，无新增失败"），使 loopEvent
+     * 日志/失败指纹不受具体用例名与输出尾部噪声影响。passed 仍保持 false（如实）。
+     */
+    baselineOnlyInfo?: { readonly baselineFailedCount: number; readonly newFailedCount: number } | null
   ): LoopEvaluationVerdict {
     // 判定 passed 和 severity
     const passed = !iterationFatal && !iterationFailed;
@@ -2825,7 +2978,12 @@ export class AutonomousOrchestrator {
     const findings: string[] = [];
     for (const result of iterationResults) {
       if (result.kind === "fatal" || result.kind === "failed" || result.kind === "retriable") {
-        const detail = result.error ?? result.summary;
+        let detail = result.error ?? result.summary;
+        if (baselineOnlyInfo && result.stage === "verify") {
+          detail =
+            `基线失败 ${baselineOnlyInfo.baselineFailedCount} 个，无新增失败` +
+            `（run 起始既有红灯，非本任务引入；verify 结果仍为 failed）`;
+        }
         findings.push(`[${result.stage}] ${result.kind}: ${detail}`);
       }
     }
@@ -3473,17 +3631,40 @@ export class AutonomousOrchestrator {
     readonly abortReason: string;
     readonly consecutiveFailures: number;
     readonly triggeredGuards: ReadonlyArray<GuardRecord>;
+    /** 基线红灯真实信息（2026-11-08，用真实探测结果替换泛化模板） */
+    readonly baselineFailedTestIds?: ReadonlySet<string>;
+    readonly baselineAvailable?: boolean;
+    readonly baselineReason?: string;
+    readonly testCommand?: string;
+    readonly projectRoot?: string;
   }): Readonly<P5BlockageReport> {
     const rootCauseHypotheses: string[] = [];
     const suggestedSolutions: string[] = [];
+
+    const baselineIds = args.baselineFailedTestIds ? [...args.baselineFailedTestIds] : [];
+    const baselineHasData = args.baselineAvailable === true && baselineIds.length > 0;
 
     // 根因假设生成
     if (args.lastFatalStage !== null) {
       rootCauseHypotheses.push(`${args.lastFatalStage} 阶段发生致命错误：${args.lastFatalReason}`);
     }
-    if (args.consecutiveFailures > 0) {
+    if (baselineHasData) {
+      // 真实信息替换泛化模板：清单来自 run 起始对同一 testCommand 的真实探测。
+      const shown = baselineIds.slice(0, 8).join("、");
+      const more = baselineIds.length > 8 ? `…（共 ${baselineIds.length} 个）` : "";
       rootCauseHypotheses.push(
-        `连续失败 ${args.consecutiveFailures} 次，可能存在系统性问题（如测试命令错误 / 任务卡配置问题）`
+        `run 起始基线探测（testCommand=${args.testCommand ?? "?"}, projectRoot=${args.projectRoot ?? "?"}）` +
+          `已发现 ${baselineIds.length} 个失败用例：${shown}${more}；` +
+          `这些失败与本任务无关，却被计入本任务失败并反复重试`
+      );
+      if (args.consecutiveFailures > 0) {
+        rootCauseHypotheses.push(`连续失败 ${args.consecutiveFailures} 次中，上述 run 起始既有红灯被反复计入`);
+      }
+    } else if (args.consecutiveFailures > 0) {
+      // 无基线数据时的兜底（保留原泛化模板口径）
+      rootCauseHypotheses.push(
+        `连续失败 ${args.consecutiveFailures} 次，可能存在系统性问题（如测试命令错误 / 任务卡配置问题）` +
+          (args.baselineReason ? `（基线探测降级：${args.baselineReason}）` : "")
       );
     }
     if (args.triggeredGuards.length > 0) {
@@ -3527,6 +3708,11 @@ export class AutonomousOrchestrator {
       suggestedSolutions.push("检查任务卡声明的文件路径是否在 projectRoot 内");
       suggestedSolutions.push("确认无凭据文件（.env / secrets / .ssh 等）被声明");
     } else if (args.lastFatalStage === "verify") {
+      if (baselineHasData) {
+        suggestedSolutions.push("先单独修复或配置忽略 run 起始既有失败用例（基线红灯）");
+        suggestedSolutions.push("确认任务卡目标与 projectRoot 是否匹配（基线红灯常源于测试命令指向错误项目）");
+      }
+      // 原有两条保留但降级为通用兜底建议
       suggestedSolutions.push("检查测试命令是否可执行（如 npm test 是否配置）");
       suggestedSolutions.push("确认测试命令不命中 G-A2a 黑名单");
     } else if (args.lastFatalStage === "fix") {

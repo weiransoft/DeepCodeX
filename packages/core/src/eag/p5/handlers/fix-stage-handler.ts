@@ -89,6 +89,9 @@ export const FIX_REASON_TASK_EXECUTION_FAILED = "fix-task-execution-failed" as c
 /** verify 失败但上下文中找不到任务卡（状态不一致，无法定位修复目标） */
 export const FIX_REASON_TASK_CARD_MISSING = "fix-task-card-missing" as const;
 
+/** 基线脏路径未注入时的默认空集（统计口径统一用，避免每次构造）。 */
+const EMPTY_PATH_SET: ReadonlySet<string> = new Set<string>();
+
 /** 回灌给执行器的失败输出片段最大字符数（2026-11-03：500 → 2000）
  *
  *  原因（run b64490b8ad78 事故）：真实 runner 的失败详情在输出尾部，
@@ -456,9 +459,17 @@ export class P5FixStageHandler implements P5StageHandler {
       }
 
       // 10.4 修复执行到达终态（是否真正修好由下一轮 verify 真实测试裁定，本阶段不宣告测试通过）
+      // 统计口径统一（2026-11-08）：与 dev handler 同口径，把执行器报出的"全量工作区
+      // 变更文件"过滤成"本次产出"（排除 run 起始既有脏文件），文案/artifacts 一致。
+      const baselineDirtyPaths = ctx.baselineDirtyPaths ?? EMPTY_PATH_SET;
+      const workspaceChangedFilesTotal = execution.changedFiles.length;
+      const thisRunChangedFiles = execution.changedFiles.filter((p) => !baselineDirtyPaths.has(p));
+      const excludedWorkspaceFiles = workspaceChangedFilesTotal - thisRunChangedFiles.length;
+
       return createSuccessStageResult(
         "fix",
-        `任务 ${taskCard.id} 已带失败反馈执行修复（${execution.changedFiles.length} 个变更文件，${execution.llmRequests} 次 LLM 请求）`,
+        `任务 ${taskCard.id} 已带失败反馈执行修复（本次产出 ${thisRunChangedFiles.length} 个文件；` +
+          `工作区既有 ${excludedWorkspaceFiles} 个未计入，${execution.llmRequests} 次 LLM 请求）`,
         {
           fixSuggestion,
           reason: FIX_REASON_TASK_EXECUTED,
@@ -466,7 +477,13 @@ export class P5FixStageHandler implements P5StageHandler {
           failedTestCount: failedCount,
           guardDecision: "PASS",
           execution: Object.freeze({ ...execution }),
-          changedFiles: Object.freeze([...execution.changedFiles]),
+          // P2 状态机（2026-11-08）：标记本轮 fix 已成功应用 + 修复的任务卡 ID，
+          // orchestrator 据此在下一轮 plan 选中同一张 pending 卡时跳过 dev 整卡重跑。
+          fixApplied: true,
+          fixTaskCardId: taskCard.id,
+          changedFiles: Object.freeze([...thisRunChangedFiles]),
+          // 审计字段：执行器报出的全量工作区变更数（未过滤）
+          workspaceChangedFilesTotal,
           llmRequests: execution.llmRequests,
           // 空转透传（2026-10-07）：执行器检出"模型零工具调用 + 零文件变更"时为 true，
           // 编排器据此计入 consecutiveNoopIterations 空转熔断

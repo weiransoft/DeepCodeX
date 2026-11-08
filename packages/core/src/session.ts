@@ -470,7 +470,30 @@ export type AutonomousGoalRunRecord = {
   finalStatus: string;
   /** 终态时间（ISO 8601） */
   endedAt: string;
+  /**
+   * 上一轮终止原因（2026-11 失败目标重放修复）。
+   * 真实值来自 blockageReport.summary / errorMessage；取不到时缺失。
+   */
+  abortReason?: string;
+  /** 上一轮 verify 阶段失败用例标识（真实值，取不到时缺失） */
+  failedTestIds?: string[];
+  /** 上一轮实际使用的测试命令（真实值，取不到时缺失） */
+  testCommand?: string;
+  /** 上一轮运行工作目录（真实值，取不到时缺失） */
+  projectRoot?: string;
+  /** 上一轮 run-id（真实值，取不到时缺失） */
+  runId?: string;
 };
+
+/**
+ * 写侧可选诊断明细（recordAutonomousRunOutcome 的第 4 参）。
+ * 字段全部可选：旧会话 / 旧记录无这些字段时一切行为不变；真值取不到时留空，
+ * 绝不编造或猜测（见 extractAutonomousRunDetails）。
+ */
+export type AutonomousGoalRunDetails = Pick<
+  AutonomousGoalRunRecord,
+  "abortReason" | "failedTestIds" | "testCommand" | "projectRoot" | "runId"
+>;
 
 export type SessionEntry = {
   id: string;
@@ -1376,6 +1399,12 @@ type EagDisplayedSuggestion = {
   readonly commandHint: string;
   /** 触发本轮建议的原始用户目标（用于构造 --goal 参数） */
   readonly goal: string;
+  /**
+   * 失败目标逃生门快照携带的上一轮重放约束（2026-11 修复）。
+   * 仅 notifyFailedGoalBlocked 拦截时写入；普通 suggest_* 展示快照无此字段，
+   * 保证旧调用/旧会话零迁移。confirm_previous 消费时透传给 buildAutoExecuteCommand。
+   */
+  readonly failureContext?: string;
 };
 
 // ============================================================================
@@ -1395,6 +1424,10 @@ type EagDisplayedSuggestion = {
 const AUTONOMOUS_GOAL_RUNS_MAX = 30;
 /** 拦截提示语中目标文本的回显截断长度 */
 const AUTONOMOUS_GOAL_ECHO_MAX = 200;
+/** 拦截提示「上一轮诊断」中终止原因的回显截断长度（≤200 字） */
+const AUTONOMOUS_DIAG_REASON_MAX = 200;
+/** 拦截提示「上一轮诊断」中失败用例最多展示数量 */
+const AUTONOMOUS_DIAG_FAILED_IDS_MAX = 3;
 
 /**
  * 失败目标拦截后等待用户确认的短语前缀表（2026-10-07 附录 C 修复：
@@ -1478,6 +1511,69 @@ export function extractGoalFromCommandString(commandString: string): string | nu
 function echoTruncateGoal(goal: string): string {
   const trimmed = goal.trim().replace(/\s+/g, " ");
   return trimmed.length > AUTONOMOUS_GOAL_ECHO_MAX ? `${trimmed.slice(0, AUTONOMOUS_GOAL_ECHO_MAX)}…` : trimmed;
+}
+
+/**
+ * 上一轮诊断（拦截提示可见段 + 逃生门重放约束）的纯组装体。
+ *
+ * 2026-11 修复：失败目标被拦截后用户回复「执行这个」，此前快照只存裸
+ * commandHint+goal，重放命令不含任何失败信息，必然重复上一轮失败。本函数把
+ * 失败记录里的真实诊断组装为：
+ * - diagnosticBlock：追加到拦截提示末尾的「上一轮诊断」段（每行有才显示）；
+ * - failureContext：逃生门快照携带、追加进 --goal 的紧凑「【重放约束】」文本。
+ *
+ * 诚实降级 / 零回归：只有存在真实失败成因（终止原因 / 失败用例）时才产出。
+ * 测试命令 / 工作目录 / runId 仅作诊断补充，不单独触发——旧记录或取不到
+ * 终止原因时返回空诊断段 + undefined 约束，拦截提示与重放命令与修复前逐字一致。
+ *
+ * @param record 命中的失败运行记录（诊断字段全部可选）
+ * @returns 诊断段与可选重放约束
+ */
+function buildGoalBlockedDiagnostics(record: Readonly<AutonomousGoalRunRecord>): {
+  readonly diagnosticBlock: string;
+  readonly failureContext?: string;
+} {
+  // 终止原因（真实值，截断 ≤200 字）
+  const rawReason = typeof record.abortReason === "string" ? record.abortReason.trim() : "";
+  const reason =
+    rawReason.length > AUTONOMOUS_DIAG_REASON_MAX ? rawReason.slice(0, AUTONOMOUS_DIAG_REASON_MAX) : rawReason;
+
+  // 失败用例（真实标识，最多 3 个）
+  const ids = Array.isArray(record.failedTestIds)
+    ? record.failedTestIds
+        .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+        .slice(0, AUTONOMOUS_DIAG_FAILED_IDS_MAX)
+    : [];
+
+  // 上下文字段（有才取，绝不编造）
+  const testCommand = typeof record.testCommand === "string" ? record.testCommand.trim() : "";
+  const projectRoot = typeof record.projectRoot === "string" ? record.projectRoot.trim() : "";
+  const runId = typeof record.runId === "string" ? record.runId.trim() : "";
+
+  // 无真实失败成因 → 不追加诊断、不构造约束（旧记录零迁移 / 旧桩零回归）
+  if (reason.length === 0 && ids.length === 0) {
+    return { diagnosticBlock: "" };
+  }
+
+  // 可见提示段：每行有才显示，没有就不显示该行
+  const lines: string[] = [];
+  if (reason.length > 0) lines.push(`- 终止原因：${reason}`);
+  if (ids.length > 0) lines.push(`- 失败用例：${ids.join("、")}`);
+  if (testCommand.length > 0) lines.push(`- 测试命令：${testCommand}`);
+  if (projectRoot.length > 0) lines.push(`- 工作目录：${projectRoot}`);
+  if (runId.length > 0) lines.push(`- runId：${runId}`);
+  const diagnosticBlock = `\n【上一轮诊断】\n${lines.join("\n")}`;
+
+  // 紧凑重放约束（追加进 --goal；与 goal 走同一套转义见 buildAutoExecuteCommand）
+  const segments: string[] = [];
+  if (reason.length > 0) segments.push(`上一轮因 ${reason} 终止`);
+  if (ids.length > 0) segments.push(`失败用例：${ids.join("、")}`);
+  if (testCommand.length > 0) segments.push(`测试命令：${testCommand}`);
+  if (projectRoot.length > 0) segments.push(`工作目录：${projectRoot}`);
+  const failureContext =
+    `【重放约束】${segments.join("；")}。请先确认目标与工作目录匹配，避免重复上一轮做法；` +
+    `若失败用例与任务无关，需更换测试命令或先修复基线失败。`;
+  return { diagnosticBlock, failureContext };
 }
 
 /**
@@ -5565,7 +5661,9 @@ ${agentInstructions}
    * 1. 无快照 → return false 交回主对话（LLM 误判安全出口，不消费不记录，
    *    用户消息由 replySession 主流程统一追加）；
    * 2. 有快照 → 先删快照（一次性消费语义，防重复执行）→
-   *    buildAutoExecuteCommand(stored.commandHint, stored.goal) 构造完整命令 → 派发；
+   *    buildAutoExecuteCommand(stored.commandHint, stored.goal, stored.failureContext)
+   *    构造完整命令 → 派发（失败目标逃生门快照带 failureContext 时把上一轮
+   *    约束追加进 --goal，避免逐字重演同一失败；普通快照无第三参，逐字不变）；
    * 3. 不做跨 run 失败守卫——逃生门快照由 notifyFailedGoalBlocked 存入时，
    *    用户回复"执行这个"属显式知情确认（与原指代确认通道语义一致）；
    * 4. 派发失败 → warn 后 return false 交回主对话。
@@ -5584,8 +5682,8 @@ ${agentInstructions}
     // 一次性消费：先删除快照再执行（防执行异常后残留导致重复触发）
     this.lastEagDisplayedSuggestions.delete(sessionId);
 
-    // 用暂存的 commandHint + goal 构造完整命令并分发执行
-    const commandString = this.buildAutoExecuteCommand(stored.commandHint, stored.goal);
+    // 用暂存的 commandHint + goal（+ 可选的上一轮重放约束）构造完整命令并分发执行
+    const commandString = this.buildAutoExecuteCommand(stored.commandHint, stored.goal, stored.failureContext);
     const dispatched = await this.dispatchEagCommandString(sessionId, commandString, controller);
     if (!dispatched) {
       // 降级：命令解析失败（理论上不应发生——快照 commandHint 来自 /eag- 白名单），
@@ -5694,8 +5792,16 @@ ${agentInstructions}
    * @param sessionId 会话 ID
    * @param goal 本轮运行的目标文本（validatedRequest.goal 原值）
    * @param finalStatus 运行终态（AutonomousRunResult.finalStatus 原值）
+   * @param details 可选的上一轮诊断明细（全部可选；由 extractAutonomousRunDetails 从
+   *   handler.execute() 的真实结果抽取）。缺省 / 字段缺失时只写 4 个原始字段，
+   *   与旧会话 / 旧记录行为逐字一致。
    */
-  private recordAutonomousRunOutcome(sessionId: string, goal: string, finalStatus: string): void {
+  private recordAutonomousRunOutcome(
+    sessionId: string,
+    goal: string,
+    finalStatus: string,
+    details?: Readonly<AutonomousGoalRunDetails>
+  ): void {
     // 空目标无指纹意义（解析兜底路径可能产生空串），跳过记录
     if (!goal || goal.trim().length === 0) {
       return;
@@ -5704,15 +5810,20 @@ ${agentInstructions}
     this.updateSessionEntry(sessionId, (entry) => {
       // 同指纹 upsert：删旧插尾，保证同目标只有最新一条记录
       const previous = (entry.autonomousGoalRuns ?? []).filter((r) => r.goalFingerprint !== fingerprint);
-      const next = [
-        ...previous,
-        {
-          goalFingerprint: fingerprint,
-          goal: echoTruncateGoal(goal),
-          finalStatus,
-          endedAt: new Date().toISOString(),
-        },
-      ];
+      // 诊断字段仅在真值存在（!== undefined）时写入，避免落盘 undefined 键，
+      // 保证「无 details / 旧记录」时记录的键集合与修复前完全一致。
+      const record: AutonomousGoalRunRecord = {
+        goalFingerprint: fingerprint,
+        goal: echoTruncateGoal(goal),
+        finalStatus,
+        endedAt: new Date().toISOString(),
+        ...(details?.abortReason !== undefined ? { abortReason: details.abortReason } : {}),
+        ...(details?.failedTestIds !== undefined ? { failedTestIds: [...details.failedTestIds] } : {}),
+        ...(details?.testCommand !== undefined ? { testCommand: details.testCommand } : {}),
+        ...(details?.projectRoot !== undefined ? { projectRoot: details.projectRoot } : {}),
+        ...(details?.runId !== undefined ? { runId: details.runId } : {}),
+      };
+      const next = [...previous, record];
       // 容量淘汰：超过上限时保留最新的 AUTONOMOUS_GOAL_RUNS_MAX 条
       const trimmedHistory =
         next.length > AUTONOMOUS_GOAL_RUNS_MAX ? next.slice(next.length - AUTONOMOUS_GOAL_RUNS_MAX) : next;
@@ -5722,6 +5833,58 @@ ${agentInstructions}
         updateTime: new Date().toISOString(),
       };
     });
+  }
+
+  /**
+   * 从 handler.execute() 的真实结果抽取上一轮诊断明细（写侧唯一真值来源）。
+   *
+   * 诚实降级原则：只取运行时确实存在的值，取不到一律留 undefined，绝不编造/猜测。
+   * - abortReason：优先编排器阻塞报告摘要（failed/aborted 时的真实终止原因），
+   *   其次 handler 返回的错误信息（异常兜底路径）；两者皆空则留空。
+   * - failedTestIds：2026-11-08 起由编排层汇总本 run 全部 verify 失败阶段的
+   *   artifacts.failedTestIds，挂在 AutonomousRunResult 顶层（去重保序、上限 20）。
+   *   本方法仍按运行时结构读取：字段缺失 / 非数组 / 旧会话 / 无失败用例时留空，
+   *   绝不编造用例名；富信息桩或旧版编排结果同样由这条前向兼容检查兜底。
+   * - testCommand：本轮 EagAutonomousRequest 实际透传给 verify 阶段的测试命令（真值）。
+   * - projectRoot：handler.execute 工作目录实参 this.projectRoot（真值）。
+   * - runId：编排结果自带的真实 run-id。
+   *
+   * @param result handler.execute() 返回的冻结结果对象
+   * @param request 本轮 EagAutonomousRequest（解析后的冻结请求）
+   * @returns 诊断明细（字段全可选，取不到的字段缺失）
+   */
+  private extractAutonomousRunDetails(
+    result: Readonly<EagAutonomousCommandResult>,
+    request: Readonly<EagAutonomousRequest>
+  ): Readonly<AutonomousGoalRunDetails> {
+    const details: AutonomousGoalRunDetails = {};
+    const runResult = result.runResult;
+
+    const blockageSummary =
+      typeof runResult?.blockageReport?.summary === "string" ? runResult.blockageReport.summary.trim() : "";
+    const errorMessage = typeof result.errorMessage === "string" ? result.errorMessage.trim() : "";
+    const reason = blockageSummary.length > 0 ? blockageSummary : errorMessage;
+    if (reason.length > 0) details.abortReason = reason;
+
+    if (typeof runResult?.runId === "string" && runResult.runId.trim().length > 0) {
+      details.runId = runResult.runId;
+    }
+    if (typeof request.testCommand === "string" && request.testCommand.trim().length > 0) {
+      details.testCommand = request.testCommand;
+    }
+    if (typeof this.projectRoot === "string" && this.projectRoot.trim().length > 0) {
+      details.projectRoot = this.projectRoot;
+    }
+
+    // 失败用例：运行时结构检查，确实携带才取真值，否则留空（绝不编造用例名）
+    const carried: unknown = runResult
+      ? (runResult as unknown as { readonly failedTestIds?: unknown }).failedTestIds
+      : undefined;
+    if (Array.isArray(carried)) {
+      const ids = carried.filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+      if (ids.length > 0) details.failedTestIds = ids;
+    }
+    return details;
   }
 
   /**
@@ -5764,15 +5927,18 @@ ${agentInstructions}
    * 拦截提示 + 逃生门快照（读侧命中后的统一动作）。
    *
    * 1. 向主会话推送可见的拦截说明（对齐事故报告"注入消息可见性"诉求——
-   *    拦截必须让用户看见原因，而非静默吞掉）；
+   *    拦截必须让用户看见原因，而非静默吞掉）+ 2026-11 追加的「上一轮诊断」段；
    * 2. 存储建议快照：用户回复"执行这个"后由触发层 LLM 识别确认意图输出
    *    confirm_previous 决策，经 consumeConfirmPreviousDecision 消费快照重放
-   *    （确认路径不做失败记录守卫——显式确认属知情行为；
-   *    快照以裸 commandHint + goal 存储，重放时经 buildAutoExecuteCommand 重建命令）。
+   *    （确认路径不做失败记录守卫——显式确认属知情行为）；
+   *    快照除 commandHint + goal 外，带真实诊断时还存 failureContext，重放命令
+   *    经 buildAutoExecuteCommand 把约束追加进 --goal，避免逐字重演上一轮失败。
+   *    无真实诊断（旧记录 / 取不到终止原因）时快照仍是裸 commandHint + goal，
+   *    重放命令与修复前逐字一致。
    *
    * @param sessionId 会话 ID
    * @param goal 被拦截的目标文本
-   * @param record 命中的失败运行记录（提示语回显终态与时间）
+   * @param record 命中的失败运行记录（提示语回显终态与时间 + 上一轮诊断）
    * @param commandHint 逃生门快照存储的命令提示（裸 "/eag-autonomous"）
    */
   private notifyFailedGoalBlocked(
@@ -5781,13 +5947,20 @@ ${agentInstructions}
     record: AutonomousGoalRunRecord,
     commandHint: string
   ): void {
+    const { diagnosticBlock, failureContext } = buildGoalBlockedDiagnostics(record);
     const message =
       `[EAG] 目标 "${echoTruncateGoal(goal)}" 在本会话已于 ${record.endedAt} 运行过且未成功完成` +
       `（终态：${record.finalStatus}）。\n` +
       `为避免失败目标被自动重放形成空转循环，本次自动执行已拦截。\n` +
-      `直接回复"执行这个"我将立即重新发起该任务；建议同时提供修改后的新目标（如补充约束/更换环境）以提高成功率。`;
-    // 逃生门快照：覆盖旧快照（同会话只保留最新一条待确认建议，对齐既有语义）
-    this.lastEagDisplayedSuggestions.set(sessionId, { commandHint, goal });
+      `直接回复"执行这个"我将立即重新发起该任务；建议同时提供修改后的新目标（如补充约束/更换环境）以提高成功率。` +
+      diagnosticBlock;
+    // 逃生门快照：覆盖旧快照（同会话只保留最新一条待确认建议，对齐既有语义）。
+    // failureContext 仅在真实诊断存在时写入——普通快照 / 旧记录无此字段（零迁移）。
+    this.lastEagDisplayedSuggestions.set(sessionId, {
+      commandHint,
+      goal,
+      ...(failureContext !== undefined ? { failureContext } : {}),
+    });
     // 双写落盘（2026-10-07 附录 C 修复：拦截确认逃生门死循环）：
     // 拦截提示此前只 onAssistantMessage 不落盘——触发层决策 LLM 的
     // recentMessages 与主对话 LLM 上下文都看不到"等待确认"状态，
@@ -5836,15 +6009,16 @@ ${agentInstructions}
    *
    * @param commandHint 命令提示字符串（如 "/eag-autonomous"）
    * @param goal 用户原始目标文本（如"从46同步数据库到43采用full_overwrite全量覆盖"）
+   * @param failureContext 可选的上一轮重放约束（失败目标逃生门快照携带，追加进 --goal）
    * @returns 完整命令字符串（如 "/eag-autonomous --goal \"从46同步数据库...\" --max-iterations 10 --confirmation smart"）
    */
-  private buildAutoExecuteCommand(commandHint: string, goal: string): string {
+  private buildAutoExecuteCommand(commandHint: string, goal: string, failureContext?: string): string {
     // 委托到 eag/suggestion-auto 的公共纯函数（EA-03b 修复 2026-09-24）。
     // 原实现与 suggestion-auto.ts 里的 buildAutoExecuteCommand 完全同构，
     // 为防止两条路径独立漂移（CLI 调用 vs 本方法调用），统一委托。
     // ESM 环境下不能用 require（tsx / ESM loader 均无 require 全局），
     // 已在顶部 EAG import 区域静态导入 buildAutoExecuteCommandImpl。
-    return buildAutoExecuteCommandImpl(commandHint, goal);
+    return buildAutoExecuteCommandImpl(commandHint, goal, failureContext);
   }
 
   /**
@@ -7734,8 +7908,10 @@ ${agentInstructions}
       // 此处捕获的是 handler 自身的异常（如 validateRequest 抛错、formatSuccessReport 异常）
       const isAborted = this.isAbortLikeError(e) || signal?.aborted === true;
       const errMsg = e instanceof Error ? e.message : String(e);
-      // 跨 run 失败守卫写侧：终态落盘（goal 指纹 + 终态），供触发层拦截自动重放
-      this.recordAutonomousRunOutcome(sessionId, validatedRequest.goal, isAborted ? "aborted" : "failed");
+      // 跨 run 失败守卫写侧：终态落盘（goal 指纹 + 终态），供触发层拦截自动重放。
+      // 异常路径 handler.execute() 未产出 result，无真实诊断可取 → 传空 details
+      // （诚实降级：绝不从异常文本猜测终止原因/失败用例）。
+      this.recordAutonomousRunOutcome(sessionId, validatedRequest.goal, isAborted ? "aborted" : "failed", {});
       this.updateSessionEntry(sessionId, (entry) => ({
         ...entry,
         // 停止修复（2026-10-22）：interruptSession 已落 interrupted 时不得覆盖
@@ -7759,8 +7935,14 @@ ${agentInstructions}
     // handler.execute() 完成后再次检查 abort 信号
     // 避免 handler 完成后用户已 abort 还要继续渲染结果
     if (signal?.aborted) {
-      // 跨 run 失败守卫写侧：编排完成后被中断同样落盘终态（触发层拦自动重放）
-      this.recordAutonomousRunOutcome(sessionId, validatedRequest.goal, "aborted");
+      // 跨 run 失败守卫写侧：编排完成后被中断同样落盘终态（触发层拦自动重放）。
+      // result 已产出，诊断明细取真实结果值（取不到则由 extract 留空）。
+      this.recordAutonomousRunOutcome(
+        sessionId,
+        validatedRequest.goal,
+        "aborted",
+        this.extractAutonomousRunDetails(result, validatedRequest)
+      );
       this.updateSessionEntry(sessionId, (entry) => ({
         ...entry,
         status: entry.status === "interrupted" ? "interrupted" : "failed",
@@ -7793,7 +7975,13 @@ ${agentInstructions}
     // - success=false：session 标记 failed，failReason 取 errorMessage
     // 跨 run 失败守卫写侧：无论成败，终态先落盘（触发层据 finalStatus 判定拦截/放行）。
     // success=false 且无 runResult（handler 自身异常）时归一化为 "failed"。
-    this.recordAutonomousRunOutcome(sessionId, validatedRequest.goal, result.runResult?.finalStatus ?? "failed");
+    // 诊断明细只取真实 result/request 值（取不到则由 extract 留空，绝不编造）。
+    this.recordAutonomousRunOutcome(
+      sessionId,
+      validatedRequest.goal,
+      result.runResult?.finalStatus ?? "failed",
+      this.extractAutonomousRunDetails(result, validatedRequest)
+    );
     this.updateSessionEntry(sessionId, (entry) => {
       const wasInterrupted = entry.status === "interrupted";
       return {
@@ -11992,6 +12180,8 @@ ${agentInstructions}
    *
    * 磁盘数据不可信：逐条校验 goalFingerprint/goal/finalStatus/endedAt 四字段
    * 类型后重建，任何一条非法即丢弃该条（不影响其余合法记录）。
+   * 2026-11 失败目标重放修复：5 个可选诊断明细字段同样逐字段做类型校验，
+   * 合法则原样保留、非法/缺失则不写入（旧记录零迁移，绝不编造）。
    *
    * @param value 磁盘读出的原始值
    * @returns 校验通过的历史记录数组；无合法记录时返回 undefined（不占字段）
@@ -12018,6 +12208,14 @@ ${agentInstructions}
           goal: record.goal,
           finalStatus: record.finalStatus,
           endedAt: record.endedAt,
+          // 可选诊断字段：类型校验后原样保留，非法/缺失一律不写入（诚实降级）
+          ...(typeof record.abortReason === "string" ? { abortReason: record.abortReason } : {}),
+          ...(Array.isArray(record.failedTestIds)
+            ? { failedTestIds: record.failedTestIds.filter((v): v is string => typeof v === "string") }
+            : {}),
+          ...(typeof record.testCommand === "string" ? { testCommand: record.testCommand } : {}),
+          ...(typeof record.projectRoot === "string" ? { projectRoot: record.projectRoot } : {}),
+          ...(typeof record.runId === "string" ? { runId: record.runId } : {}),
         });
       }
     }
