@@ -186,8 +186,20 @@ import { CommandSafety } from "./v2/approval/command-safety";
 // 详细设计决策见 docs/dev/ADR-EAG-001-experimental-status.md。
 // 涉及模块：LoopGuard / Evaluator / Coding / Testing / Design / LongHorizon / RLIS /
 // DevOps / Autonomous / Graph / Dynamic / Interrupts
-import type { LoopGuard, TurnGuardConfig } from "./common/loop-guard";
-import { TurnGuard } from "./common/loop-guard";
+import type { LoopGuard, LoopGuardTurnDecision, TurnGuardConfig } from "./common/loop-guard";
+import { TurnGuard, toolResultSignature } from "./common/loop-guard";
+// 2026-11-10 jev 循环决策重构：循环是否继续/空循环判定主责移交远程 jev 模型
+// （NeoHorse-Jev-4B，System One 快思考决策模型），硬编码阈值降级为 heuristic
+// 兜底路径（jev 不可达/超时/连续异常时启用）；详见 docs/dev/jev-loop-decision-20261110.md
+import {
+  JevLoopDecision,
+  NUDGE_MESSAGE,
+  isJevEmptyTurnVerdict,
+  type JevTurnDecision,
+  type JevTurnObservation,
+} from "./common/jev-loop-decision";
+import type { JevDecisionResult } from "./common/jev-client";
+import type { JevDigestInput } from "./common/jev-loop-decision";
 import type {
   IndependentEvaluator,
   RedlineDefinition,
@@ -4326,6 +4338,225 @@ ${agentInstructions}
     return sessionId;
   }
 
+  // ==========================================================================
+  // jev 循环决策（2026-11-10 重构，docs/dev/jev-loop-decision-20261110.md）
+  // ==========================================================================
+
+  /**
+   * jev 循环决策服务实例（三条链路共享单一收敛点，架构师审查 P2-6）。
+   * undefined = 尚未初始化（惰性 fromEnv）；null = 未配置密钥/显式禁用。
+   * 测试可通过 setJevDecision() 注入指向本地测试服务器的实例。
+   */
+  private jevDecision: JevLoopDecision | null | undefined;
+
+  /**
+   * 各会话的 jev 预取决策（turn 完成后并行发起，下一轮判定点 join）。
+   * turnsCompletedAtPrefetch 为轮次序号 token（P0-2 防跨轮误用）：
+   * join 时 guard.turnsCompleted 与其不等（如用户确认继续后清零）即丢弃。
+   */
+  private pendingJevDecisions = new Map<
+    string,
+    { turnsCompletedAtPrefetch: number; promise: Promise<JevTurnDecision> }
+  >();
+
+  /**
+   * 各会话的 jev 摘要观测历史（每轮一条，最多保留 12 轮，控制请求体大小）。
+   * 内容仅含脱敏后正文与工具签名（不含工具参数原文），供 jev 判定上下文。
+   */
+  private jevTurnObservations = new Map<string, JevTurnObservation[]>();
+
+  /**
+   * 获取（惰性初始化）jev 循环决策服务
+   */
+  private getJevDecision(): JevLoopDecision | null {
+    if (this.jevDecision === undefined) {
+      this.jevDecision = JevLoopDecision.fromEnv();
+    }
+    return this.jevDecision;
+  }
+
+  /**
+   * 注入 jev 决策服务（测试专用：指向本地真实 HTTP 测试服务器，非 mock——
+   * 测试走真实 HTTP 请求/响应链路，仅服务端由测试进程提供）
+   */
+  setJevDecision(jev: JevLoopDecision | null): void {
+    this.jevDecision = jev;
+  }
+
+  /**
+   * 解析会话的 jev 判定模式（companion=闲聊陪伴 / task=任务执行）。
+   * 判据与本轮 thinking-depth 调度一致（L8659）：读会话内真正注入的
+   * Soul 系统提示词，而非磁盘最新配置。
+   */
+  private resolveJevModeForSession(sessionId: string): "companion" | "task" {
+    for (const message of this.listSessionMessages(sessionId)) {
+      if (message.compacted) continue;
+      if (
+        message.role === "system" &&
+        typeof message.content === "string" &&
+        detectSoulModeFromPrompt(message.content) === "companion"
+      ) {
+        return "companion";
+      }
+    }
+    return "task";
+  }
+
+  /**
+   * 构建本轮 jev 判定输入（摘要构建与脱敏委托 JevLoopDecision，P1-4）
+   */
+  private buildJevDigestInput(sessionId: string): JevDigestInput {
+    const guard = this.getOrCreateTurnGuard(sessionId);
+    return {
+      mode: this.resolveJevModeForSession(sessionId),
+      turnsCompleted: guard.getState().turnsCompleted,
+      recentTurns: this.jevTurnObservations.get(sessionId) ?? [],
+      latestUserText: this.getLatestUserTextForJev(sessionId),
+    };
+  }
+
+  /**
+   * 提取最近一条用户消息文本（脱敏由 buildDigestMessages 内部统一处理）
+   *
+   * NG5（校准计划阶段 C）：`[jev-nudge]` 前缀的系统注入提示不是用户任务目标，
+   * 必须跳过——否则 nudge 会反客为主占据摘要「任务目标」位，造成摘要自反催化
+   * （模型看到的目标变成「请给出可见回复」而非真实任务）。
+   */
+  private getLatestUserTextForJev(sessionId: string): string | undefined {
+    const messages = this.listSessionMessages(sessionId);
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i]!;
+      if (message.role === "user" && !message.compacted && typeof message.content === "string") {
+        const text = message.content.trim();
+        if (text.startsWith("[jev-nudge]")) continue;
+        return text.length > 0 ? text : undefined;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * 追加一轮 jev 摘要观测（最多保留 12 轮，超出即丢最旧）
+   */
+  private pushJevTurnObservation(sessionId: string, observation: JevTurnObservation): void {
+    const list = this.jevTurnObservations.get(sessionId) ?? [];
+    list.push(observation);
+    if (list.length > 12) {
+      list.splice(0, list.length - 12);
+    }
+    this.jevTurnObservations.set(sessionId, list);
+  }
+
+  /**
+   * 并行预取下一轮 jev 循环判定（P1-3：决策与下一轮 LLM 请求/工具执行并发，
+   * 下一轮判定点 join 时通常已就绪，决策不阻塞主链路）。
+   *
+   * P0-2：发起点即挂 .catch——预取 Promise 绝不进入 unhandledRejection；
+   * 早退路径（中断/等待用户/权限挂起）未消费的预取结果随 Map 沉淀，下一轮
+   * 判定点按 turnsCompletedAtPrefetch 匹配失败自动丢弃（或被新预取覆盖）。
+   */
+  private prefetchJevLoopDecision(sessionId: string): void {
+    const jev = this.getJevDecision();
+    if (jev == null || !jev.enabled) return;
+    const guard = this.getOrCreateTurnGuard(sessionId);
+    const turnsCompleted = guard.getState().turnsCompleted;
+    // 首轮完成前无可判定的循环历史，不预取（也不产生网络开销）
+    if (turnsCompleted === 0) return;
+    const input = this.buildJevDigestInput(sessionId);
+    const promise = jev
+      .decideLoop(input, turnsCompleted)
+      // 发起点兜底 catch：buildDigestMessages 等同步异常也归类为 unavailable，
+      // 调用方 mapJevDecisionToGuard 据此走 heuristic 兜底
+      .catch(
+        (): JevTurnDecision => ({
+          turnSeq: turnsCompleted,
+          result: { ok: false, status: "unavailable", reason: "jev prefetch crashed" } satisfies JevDecisionResult,
+        })
+      );
+    this.pendingJevDecisions.set(sessionId, { turnsCompletedAtPrefetch: turnsCompleted, promise });
+  }
+
+  /**
+   * 每轮 LLM 迭代前的循环判定入口（2026-11-10 jev 重构）。
+   *
+   * 判定优先级：
+   * 1. jev 未启用（未配置密钥/禁用）→ heuristic 硬兜底（行为与 jev 引入前一致）；
+   * 2. 首轮迭代（无已完成轮次）→ heuristic（无循环历史可判，且省一次网络往返）；
+   * 3. 有匹配序号的预取结果 → join（通常已就绪，join 开销 <1ms）→ jev 主判；
+   * 4. 无可用预取（异常路径）→ 同步发起一次 jev 决策；
+   * 5. jev 决策失败（超时/网关错/契约不符/降级探测失败）→ 切 heuristic 硬兜底
+   *    （setJevPrimary(false) 内含计数清零 + 降级首轮禁硬终止，架构师审查 P0-1）。
+   *
+   * @param sessionId 会话 id
+   * @param guard 该会话的 TurnGuard
+   * @returns 循环判定结果 + jev 空轮判定透传（jevEmptyTurnVerdict：
+   *          undefined = 非 jev 主判路径；true = jev 判 is_empty_turn=yes
+   *          且置信度达标——调用方据此触发空轮 nudge，本地复核见
+   *          isLastJevObservationEmpty，校准计划阶段 C）
+   */
+  private async decideLoopWithJev(
+    sessionId: string,
+    guard: TurnGuard
+  ): Promise<LoopGuardTurnDecision & { jevEmptyTurnVerdict?: boolean }> {
+    const jev = this.getJevDecision();
+    if (jev == null || !jev.enabled) {
+      if (guard.isJevPrimary()) guard.setJevPrimary(false);
+      return guard.decideBeforeIteration();
+    }
+    const turnsCompleted = guard.getState().turnsCompleted;
+    if (turnsCompleted === 0) {
+      return guard.decideBeforeIteration();
+    }
+    const pending = this.pendingJevDecisions.get(sessionId);
+    if (pending != null && pending.turnsCompletedAtPrefetch === turnsCompleted) {
+      this.pendingJevDecisions.delete(sessionId);
+      const decision = await pending.promise;
+      return this.mapJevDecisionToGuard(jev, guard, decision.result);
+    }
+    // 无可用预取：同步发起一次决策（主路径已预取，此为异常路径兜底）
+    const decision = await jev.decideLoop(this.buildJevDigestInput(sessionId), turnsCompleted);
+    return this.mapJevDecisionToGuard(jev, guard, decision.result);
+  }
+
+  /**
+   * jev 决策结果 → TurnGuard 判定映射（含 jev/heuristic 模式切换）
+   *
+   * 阶段 C：ok 时同时透传 jev 空轮判定（isJevEmptyTurnVerdict），供主循环
+   * 在 allow=true 放行后触发空轮 nudge（NG7 本地复核由调用方完成）。
+   */
+  private mapJevDecisionToGuard(
+    jev: JevLoopDecision,
+    guard: TurnGuard,
+    result: JevDecisionResult
+  ): LoopGuardTurnDecision & { jevEmptyTurnVerdict?: boolean } {
+    void jev;
+    if (result.ok) {
+      // 进入/恢复 jev 主判（模式切换内含计数清零 + 签名队列清空，P0-1）
+      if (!guard.isJevPrimary()) guard.setJevPrimary(true);
+      return {
+        ...guard.evaluateJevDecision(result.answers),
+        jevEmptyTurnVerdict: isJevEmptyTurnVerdict(result.answers),
+      };
+    }
+    // 决策失败 → 切 heuristic 硬兜底（切换内含计数清零 + 降级首轮禁硬终止）
+    if (guard.isJevPrimary()) guard.setJevPrimary(false);
+    return guard.decideBeforeIteration();
+  }
+
+  /**
+   * 本地复核：最近一轮 jev 观测是否为空轮（校准计划阶段 C / NG7）。
+   *
+   * nudge 必须双重确认：jev 判 yes（isJevEmptyTurnVerdict）**且**本地观测
+   * 证实最近一轮无可见正文且无工具成功——防 jev 误判驱动注入。
+   * 观测口径与 TurnGuard.recordTurn 空转判定一致。
+   */
+  private isLastJevObservationEmpty(sessionId: string): boolean {
+    const observations = this.jevTurnObservations.get(sessionId);
+    const last = observations?.[observations.length - 1];
+    if (last == null) return false;
+    return last.visibleText.trim().length === 0 && last.toolSucceededCount === 0;
+  }
+
   /**
    * 取（必要时创建）指定会话的循环护栏实例
    *
@@ -4373,6 +4604,8 @@ ${agentInstructions}
     tokensConsumed: number;
     consecutiveFailedTurns: number;
     consecutiveEmptyTurns: number;
+    jevConsecutiveStops: number;
+    jevPrimary: boolean;
   } | null {
     const guard = this.turnGuards.get(this.turnGuardKey(sessionId));
     if (!guard) return null;
@@ -4382,6 +4615,8 @@ ${agentInstructions}
       tokensConsumed: state.tokensConsumed,
       consecutiveFailedTurns: state.consecutiveFailedTurns,
       consecutiveEmptyTurns: state.consecutiveEmptyTurns,
+      jevConsecutiveStops: state.jevConsecutiveStops,
+      jevPrimary: state.jevPrimary,
     };
   }
 
@@ -8908,7 +9143,13 @@ ${agentInstructions}
           guard.acknowledgeAndContinue();
         }
 
-        const guardDecision = guard.decideBeforeIteration();
+        // 2026-11-10 jev 重构：循环判定主责移交 jev 模型（主判），
+        // jev 不可用/失败时降级 heuristic 硬兜底（decideLoopWithJev 内部切换）。
+        // P1-3：await 返回后立即检查中断——决策等待期间用户可能已按下停止。
+        const guardDecision = await this.decideLoopWithJev(sessionId, guard);
+        if (this.isInterrupted(sessionId)) {
+          return;
+        }
         if (!guardDecision.allow) {
           const isHardTerminate = guardDecision.action === "terminate_model_loop";
           this.updateSessionEntry(sessionId, (entry) => ({
@@ -8931,6 +9172,36 @@ ${agentInstructions}
           this.onAssistantMessage(guardMessage, false);
           this.maybeNotifyTaskCompletion(sessionId, notify, startedAt, env);
           return;
+        }
+
+        // 空轮 nudge（校准计划阶段 C：NG1-NG7）——jev 主判放行后的空轮自愈：
+        // 三重确认全部满足才注入（防 jev 误判驱动 + 防重试风暴）：
+        //   1. jevEmptyTurnVerdict=true（jev 判 is_empty_turn=yes 且 conf≥0.5）；
+        //   2. 本地复核 isLastJevObservationEmpty（最近一轮观测确实为空，NG7）；
+        //   3. guard.tryIssueNudge()（窗口预算 ≤3，耗尽后交还 consult 路径，NG3）。
+        // 注入形态：visible=false 的 user 消息（不污染用户视图）；`[jev-nudge]`
+        // 前缀保证 getLatestUserTextForJev 摘要采集时跳过（NG5 防自反催化）。
+        // 注入为同步操作，无新增 await 窗口；下一轮请求前后由既有 isInterrupted
+        // 检查覆盖中断安全（NG6 / P1-3 同款）。
+        if (
+          guardDecision.jevEmptyTurnVerdict === true &&
+          this.isLastJevObservationEmpty(sessionId) &&
+          guard.tryIssueNudge()
+        ) {
+          const nudgeTime = new Date().toISOString();
+          const nudgeMessage: SessionMessage = {
+            id: crypto.randomUUID(),
+            sessionId,
+            role: "user",
+            content: NUDGE_MESSAGE,
+            contentParams: null,
+            messageParams: null,
+            compacted: false,
+            visible: false,
+            createTime: nudgeTime,
+            updateTime: nudgeTime,
+          };
+          this.appendSessionMessage(sessionId, nudgeMessage);
         }
 
         // 2026-10-19 停止按钮修复：compactSession 是 async，
@@ -9332,6 +9603,9 @@ ${agentInstructions}
         // 需求123/124：本轮工具执行成败统计（TurnGuard 连续失败判定依据）
         let turnToolFailedCount = 0;
         let turnToolSucceededCount = 0;
+        // 2026-11-10 死循环误杀修复：toolCallId → 结果稳定签名（由 appendToolMessages
+        // 填充；在 if(toolCalls) 块外声明以便循环检测使用）
+        let toolResultSignaturesById: Record<string, string> = {};
         if (toolCalls) {
           if (permissionPlan?.askPermissions.length) {
             this.updateSessionEntry(sessionId, (entry) => ({
@@ -9357,6 +9631,7 @@ ${agentInstructions}
           waitingForUser = toolAppendResult.waitingForUser;
           turnToolFailedCount = toolAppendResult.failedCount;
           turnToolSucceededCount = toolAppendResult.succeededCount;
+          toolResultSignaturesById = toolAppendResult.resultSignatures;
           // F8：turn 因工具等待用户响应而挂起（AskUserQuestion 提问 / ask_user 审批）时，
           // 标记"主模型提问待答"，使用户的答案在下一次输入时豁免 EAG 建议器直达主对话
           if (waitingForUser) {
@@ -9365,29 +9640,69 @@ ${agentInstructions}
         }
 
         // 需求123/124：TurnGuard 记录本轮迭代（Token 累计 + 连续失败计数），
-        // 下一轮 LLM 请求前的 decideBeforeIteration() 据此判定是否暂停咨询/终止
+        // 下一轮 LLM 请求前的 decideBeforeIteration() 据此判定是否暂停咨询/终止。
+        // 2026-11-10 jev 重构：jev 主判模式下空转计数改由 jev is_empty_turn 判定
+        // 接管（evaluateJevDecision 更新），heuristic 判据停用（hadVisibleText
+        // 传 undefined = recordTurn 跳过空转判定，防双重计数）。
+        const jevPrimaryTurn = this.getOrCreateTurnGuard(sessionId).isJevPrimary();
         this.getOrCreateTurnGuard(sessionId).recordTurn({
           tokensUsed: getTotalTokens(responseUsage),
           hadToolCalls: toolCalls !== null,
           allToolsFailed: toolCalls !== null && turnToolSucceededCount === 0 && turnToolFailedCount > 0,
           // 2026-10-23 空转护栏：可见正文判据 = content 去空白非空（reasoning 不算，
           // 用户不可见的内容不能证明模型在有效推进）；成功工具数供"无工具成功"判定
-          hadVisibleText: typeof content === "string" && content.trim().length > 0,
+          hadVisibleText: jevPrimaryTurn ? undefined : typeof content === "string" && content.trim().length > 0,
           succeededCount: turnToolSucceededCount,
         });
 
         // 2026-10-19 新增：模型循环检测 —— 记录本轮 tool call 签名
         // 连续 maxRepeatedToolCalls 次调用相同工具+相同参数 → 自动终止
+        // 2026-11-10 死循环误杀修复：传入按 toolCallId 对齐的结果稳定签名，
+        // 死循环判定升级为「工具+参数+结果」三维——轮询/等待类命令（同一命令
+        // 重复执行但输出/状态在变化）不再被误终止；被拒/取消等无签名的调用
+        // 自动退化为旧的「工具+参数」两维判定。
         if (toolCalls !== null && Array.isArray(toolCalls) && toolCalls.length > 0) {
           // 适配：LLM 返回的 tool_call 结构是 { function: { name, arguments } }，
           // 而 TurnGuard.recordToolCalls 期望 { name, arguments } 扁平结构
           const adapted = toolCalls.map((tc) => {
             const t = tc as Record<string, unknown>;
             const fn = t.function as Record<string, unknown> | undefined;
-            return { name: String(fn?.name ?? t.name ?? ""), arguments: fn?.arguments ?? t.arguments };
+            const callId = typeof t.id === "string" ? t.id : "";
+            return {
+              name: String(fn?.name ?? t.name ?? ""),
+              arguments: fn?.arguments ?? t.arguments,
+              resultSignature: callId ? toolResultSignaturesById[callId] : undefined,
+            };
           });
-          this.getOrCreateTurnGuard(sessionId).recordToolCalls(adapted);
+          this.getOrCreateTurnGuard(sessionId).recordToolCalls(
+            adapted,
+            adapted.map((item) => item.resultSignature)
+          );
         }
+
+        // 2026-11-10 jev 重构：本轮观测入摘要历史（脱敏在摘要构建时统一进行，
+        // 工具参数原文不进摘要），随后并行预取下一轮循环判定（P1-3：
+        // 决策与下一轮 LLM 请求/工具执行并发，判定点 join 开销 <1ms）
+        this.pushJevTurnObservation(sessionId, {
+          visibleText: typeof content === "string" ? content : "",
+          hadToolCalls: toolCalls !== null,
+          toolSucceededCount: turnToolSucceededCount,
+          toolFailedCount: turnToolFailedCount,
+          // 摘要只带「工具名+结果签名」（签名已是 hash/稳定摘要形态），
+          // 参数原文一律不进摘要（P1-4 防泄密）
+          toolCallDigests:
+            toolCalls !== null && Array.isArray(toolCalls)
+              ? toolCalls.map((tc) => {
+                  const t = tc as Record<string, unknown>;
+                  const fn = t.function as Record<string, unknown> | undefined;
+                  const callId = typeof t.id === "string" ? t.id : "";
+                  const name = String(fn?.name ?? t.name ?? "");
+                  const signature = callId ? toolResultSignaturesById[callId] : undefined;
+                  return signature ? `${name}:${signature}` : `${name}:nosig`;
+                })
+              : [],
+        });
+        this.prefetchJevLoopDecision(sessionId);
 
         if (this.isInterrupted(sessionId)) {
           return;
@@ -11625,7 +11940,13 @@ ${agentInstructions}
        */
       denyReasons?: Record<string, string>;
     } = {}
-  ): Promise<{ waitingForUser: boolean; failedCount: number; succeededCount: number }> {
+  ): Promise<{
+    waitingForUser: boolean;
+    failedCount: number;
+    succeededCount: number;
+    /** toolCallId → 结果稳定签名（TurnGuard 死循环检测的结果维度，2026-11-10） */
+    resultSignatures: Record<string, string>;
+  }> {
     // 上游 v0.3.1：记录本批次已加载的技能名（避免同批次重复加载）
     const loadedSkillNames = new Set<string>();
     // T01：记录本批次已加载的自定义 Agent 名（批内去重，镜像 loadedSkillNames）
@@ -11726,7 +12047,7 @@ ${agentInstructions}
     }
     if (this.isInterrupted(sessionId)) {
       this.finalizeInterruptedToolBatch(sessionId, toolCalls, toolExecutions, cancelledToolCallIds);
-      return { waitingForUser: false, failedCount: 0, succeededCount: 0 };
+      return { waitingForUser: false, failedCount: 0, succeededCount: 0, resultSignatures: {} };
     }
     let waitingForUser = false;
     // 需求124：统计本批次工具执行成败（TurnGuard 连续失败判定依据）——
@@ -11734,8 +12055,13 @@ ${agentInstructions}
     // 任何一侧（等待用户不是失败）
     let failedCount = 0;
     let succeededCount = 0;
+    // 2026-11-10 死循环误杀修复：按 toolCallId 收集每条执行结果的稳定签名，
+    // 返回给调用方传入 TurnGuard.recordToolCalls —— 死循环检测因此具备"结果
+    // 维度"：参数相同但结果在变化的轮询/等待类命令不再被误判为死循环终止。
+    const resultSignatures: Record<string, string> = {};
     const followUpMessages: SessionMessage[] = [];
     for (const execution of toolExecutions) {
+      resultSignatures[execution.toolCallId] = toolResultSignature(execution.content ?? "");
       if (execution.result.awaitUserResponse === true) {
         waitingForUser = true;
       } else if (execution.result.ok) {
@@ -11764,7 +12090,7 @@ ${agentInstructions}
     for (const followUpMessage of followUpMessages) {
       this.appendSessionMessage(sessionId, followUpMessage);
     }
-    return { waitingForUser, failedCount, succeededCount };
+    return { waitingForUser, failedCount, succeededCount, resultSignatures };
   }
 
   private cloneUserPromptForMeta(prompt: UserPromptContent): UserPromptContent {

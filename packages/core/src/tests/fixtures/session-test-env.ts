@@ -669,6 +669,13 @@ fs.appendFileSync(process.env.NOTIFY_OUTPUT, JSON.stringify(record) + "\\n", "ut
 /**
  * 等待 notify 输出文件中达到 expectedCount 条记录
  *
+ * 轮询窗口说明（2026-11-10）：detached notify 子进程在 run-tests.mjs 全量
+ * 串行跑到后段时（此前已运行大量 spawn/npx/MCP 用例，系统进程表有累积负载）
+ * 启动耗时可能超过 2s——原 100×20ms 窗口在 2026-11-10 全量回归中三次在
+ * 「notifies successful completion」用例上临界越界（单独运行 620ms 即完成，
+ * 全量后段 2036-2333ms）。放宽到 500×20ms=10s，仅影响测试基建等待上限，
+ * 不改变断言语义（记录数与内容断言不变）。
+ *
  * @param outputPath 输出文件路径
  * @param expectedCount 期望记录数
  * @returns 解析后的记录数组
@@ -677,7 +684,7 @@ export async function waitForNotifyRecords(
   outputPath: string,
   expectedCount: number
 ): Promise<Array<Record<string, unknown>>> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
     if (fs.existsSync(outputPath)) {
       const records = fs
         .readFileSync(outputPath, "utf8")

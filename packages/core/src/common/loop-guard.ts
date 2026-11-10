@@ -15,8 +15,16 @@
  * - EAG 方案 §5.12.3 AU-5 硬上限已配置（LLM 在循环内不可自改上限）
  * - multi-agent-team skill scripts/autonomous/loop_controller.py 退避策略
  *
+ * jev 集成（2026-11-10，docs/dev/jev-loop-decision-20261110.md）：
+ * 5. jev 主判路径 evaluateJevDecision——循环是否继续/空循环判定交由
+ *    NeoHorse-Jev-4B 远程决策模型；硬编码阈值降级为 heuristic 兜底路径
+ *    （jev 不可达/超时/连续异常时启用），详见 jev-loop-decision.ts。
+ *
  * @module common/loop-guard
  */
+
+import type { JevAnswer } from "./jev-client";
+import { readChoiceAnswer } from "./jev-loop-decision";
 
 // ============================================================================
 // 类型定义
@@ -152,6 +160,12 @@ export interface TurnGuardConfig {
 }
 
 /**
+ * 每个预算窗口内空轮 nudge 注入硬上限（校准计划阶段 C）。
+ * 防 nudge 重试风暴：达上限后空轮治理交还既有「连续空转 → consult」路径。
+ */
+export const MAX_NUDGES_PER_WINDOW = 3;
+
+/**
  * 默认循环护栏配置（需求124 + 2026-10-19 模型循环检测 + 2026-10-20 轮数上限移除）
  *
  * 数值依据：
@@ -172,7 +186,7 @@ export const DEFAULT_TURN_GUARD_CONFIG: Readonly<TurnGuardConfig> = Object.freez
 // 成功"才咨询；0 表示禁用。
 
 /**
- * 循环护栏触发的暂停动作类型（需求124 + 2026-10-19 模型循环检测）
+ * 循环护栏触发的暂停动作类型（需求124 + 2026-10-19 模型循环检测 + 2026-11-10 jev）
  */
 export type LoopGuardAction =
   /** 连续工具全失败达上限 → 暂停咨询用户（可恢复） */
@@ -180,7 +194,14 @@ export type LoopGuardAction =
   /** 模型死循环（同一工具+参数重复调用）→ 直接终止（不可恢复） */
   | "terminate_model_loop"
   /** 连续空转轮（空文本且无工具成功）达上限 → 暂停咨询用户（可恢复，2026-10-23） */
-  | "consult_user_empty_turns";
+  | "consult_user_empty_turns"
+  /**
+   * 循环判定模块要求停止 → 暂停咨询用户（可恢复，2026-11-10 jev 重构）。
+   * 覆盖两种来源：① jev 模型 stop 判定（主判路径）；② jev 降级首轮的
+   * heuristic 疑似死循环降级（架构师审查 P0-1：禁硬终止）。终止权保留给
+   * 用户，暂停咨询后由用户决定去留。
+   */
+  | "consult_user_loop_stop";
 
 /**
  * 循环护栏判定结果（需求123/124）
@@ -464,6 +485,47 @@ export class LoopGuard {
 }
 
 // ============================================================================
+// 工具结果签名（2026-11-10 死循环误杀修复）
+// ============================================================================
+
+/**
+ * 计算工具结果的稳定签名（死循环检测的「结果维度」输入）
+ *
+ * 2026-11-10 修复：死循环检测原本只看「工具名+参数」，不看执行结果——对有状态
+ * 命令（轮询等待服务就绪、tail 进度、重试直到成功）是误杀：重复同一命令但输出
+ * /状态确实在变化是合法行为。修复后：结果签名也相同时才计入死循环；结果变化时
+ * 签名自然不同、尾部连续性被打断，不会终止。
+ *
+ * 规范化口径与 eag/p5/executors/llm-task-executor.ts 的 normalizeResultContent
+ * 对齐：剥离 bash 结果 JSON 中每轮必变的元数据（deadlineAt / cwd / timeoutMs 等），
+ * 避免「元数据时间戳变化」把真实重复的结果误判成「结果变化」；非 JSON 文本退化为
+ * 剥离 ISO 时间戳与 macOS /private 前缀。最终取长度 + 首尾各 64 字符的紧凑签名。
+ *
+ * @param content 工具执行的原始回执内容（formatToolResult 产物）
+ * @returns 稳定签名字符串
+ */
+export function toolResultSignature(content: string): string {
+  let normalized = content;
+  try {
+    const parsed = JSON.parse(content) as { metadata?: Record<string, unknown> };
+    if (parsed.metadata !== null && typeof parsed.metadata === "object") {
+      for (const key of ["deadlineAt", "cwd", "startCwd", "shellPath", "timeoutMs"]) {
+        delete parsed.metadata[key];
+      }
+    }
+    normalized = JSON.stringify(parsed);
+  } catch {
+    // 非 JSON 结果：文本级中性化，剥离绝对时间戳与 macOS /private 路径前缀
+    normalized = content
+      .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g, "<ts>")
+      .replace(/\/private(?=\/)/g, "");
+  }
+  return normalized.length > 128
+    ? `${normalized.length}#${normalized.slice(0, 64)}#${normalized.slice(-64)}`
+    : normalized;
+}
+
+// ============================================================================
 // TurnGuard：普通会话循环护栏（需求123/124，2026-10-17）
 // ============================================================================
 
@@ -519,6 +581,42 @@ export class TurnGuard {
   private readonly toolCallSignatures: string[] = [];
 
   /**
+   * jev 主判模式开关（2026-11-10 jev 重构）。
+   *
+   * true = 循环判定主责由 jev 模型承担（evaluateJevDecision 决定去留），
+   * 硬编码阈值**不参与**判定（decideBeforeIteration 仅作为 heuristic 兜底路径，
+   * 由调用方在 jev 不可用时显式切换后调用）。
+   * false = heuristic 硬兜底（既有行为）。
+   */
+  private jevPrimary = false;
+
+  /**
+   * 降级首轮禁硬终止标志（架构师审查 P0-1）。
+   *
+   * jev → heuristic 切换瞬间，硬阈值计数已由 acknowledgeAndContinue 清零，
+   * 但 recordToolCalls 的签名队列仍保留 jev 主判期间的历史——若 jev 放行期间
+   * 存在真实重复调用序列，切回 heuristic 的第一轮 decideBeforeIteration 可能
+   * 以"旧签名队列"触发 terminate_model_loop（不可恢复）。切换后第一轮：
+   * terminate 一律降级为 consult（可恢复），该轮判定完成后标志自动清除。
+   */
+  private suppressTerminateOnNextDecision = false;
+
+  /**
+   * jev 连续 stop 判定计数（观测口径 + reason 文案；架构师审查 P1-5：
+   * 清零语义 = acknowledgeAndContinue（用户放行）与模式切换统一清零）
+   */
+  private jevConsecutiveStops = 0;
+
+  /**
+   * 当前预算窗口内已注入的空轮 nudge 次数（校准计划阶段 C）。
+   *
+   * 硬上限 MAX_NUDGES_PER_WINDOW=3：防 nudge 重试风暴——nudge 是「自愈重试」，
+   * 不是无限重发；达上限后空轮治理交还既有「连续空转 → consult」咨询路径。
+   * 清零语义与 P1-5 统一：acknowledgeAndContinue（用户放行）时重置窗口。
+   */
+  private nudgesIssued = 0;
+
+  /**
    * 构造 TurnGuard
    *
    * @param config 配置（缺省字段使用 DEFAULT_TURN_GUARD_CONFIG）
@@ -558,13 +656,28 @@ export class TurnGuard {
    * 每轮迭代结束后调用（recordTurn 之后），把本次 LLM 响应中的所有
    * tool call 签名追加到队列头部，超出门槛时从尾部丢弃。
    *
+   * 2026-11-10 死循环误杀修复：签名新增可选「结果维度」——调用方按调用顺序
+   * 传入每条调用的结果签名（toolResultSignature 产物）。提供结果签名的调用，
+   * 仅当「参数相同且结果签名也相同」才计入连续重复；结果变化时签名不同、
+   * 尾部连续性被打断（轮询/等待类命令不再被误终止）。未提供结果签名的调用
+   * 保持旧行为（仅按工具名+参数判定），既有调用方/测试零回归。
+   *
    * @param toolCalls 本轮 LLM 响应中的 tool call 数组（每元素含 name 和 arguments）
+   * @param resultSignatures 可选，与 toolCalls 按下标对齐的结果签名数组
    */
-  recordToolCalls(toolCalls: ReadonlyArray<{ readonly name: string; readonly arguments?: unknown }>): void {
+  recordToolCalls(
+    toolCalls: ReadonlyArray<{ readonly name: string; readonly arguments?: unknown }>,
+    resultSignatures?: ReadonlyArray<string | undefined>
+  ): void {
     if (!toolCalls || toolCalls.length === 0) return;
     const maxHistory = this.config.trackedToolCallHistory;
-    for (const tc of toolCalls) {
-      const sig = `${tc.name}|${TurnGuard.hashToolArgs(tc.arguments)}`;
+    for (let i = 0; i < toolCalls.length; i += 1) {
+      const tc = toolCalls[i]!;
+      const resultSig = resultSignatures?.[i];
+      const sig =
+        resultSig !== undefined
+          ? `${tc.name}|${TurnGuard.hashToolArgs(tc.arguments)}|${resultSig}`
+          : `${tc.name}|${TurnGuard.hashToolArgs(tc.arguments)}`;
       this.toolCallSignatures.push(sig);
       // 超出门槛时从尾部丢弃（保持最近 N 次）
       while (this.toolCallSignatures.length > maxHistory) {
@@ -574,7 +687,8 @@ export class TurnGuard {
   }
 
   /**
-   * 检查模型是否陷入死循环（连续相同工具+参数调用，2026-10-19 新增）
+   * 检查模型是否陷入死循环（连续相同工具+参数+结果调用，2026-10-19 新增；
+   * 2026-11-10 增加结果维度：仅当调用方传入结果签名时才参与判定）
    *
    * 判定规则：
    * 1. maxRepeatedToolCalls > 0（循环检测未禁用）
@@ -612,6 +726,11 @@ export class TurnGuard {
    * 1. 模型死循环 → terminate_model_loop（硬终止，不可恢复）
    * 2. 连续工具全失败 ≥ 上限 → consult_user_consecutive_failures（暂停咨询）
    *
+   * 2026-11-10 jev 重构：本方法为 **heuristic 硬兜底路径**——仅在 jev 主判
+   * 模式关闭/降级时由调用方调用。jev 主判走 evaluateJevDecision（见下）。
+   * 降级首轮（suppressTerminateOnNextDecision）terminate 一律降级为
+   * consult_user_loop_stop（架构师审查 P0-1：stale 状态不得导致不可恢复终止）。
+   *
    * 已移除的判定：
    * - Token 预算硬终止线（2026-10-19）：上下文压力由
    *   "自动压缩 + 新任务切新上下文"策略接管，不再按 Token 配额终止会话。
@@ -622,44 +741,173 @@ export class TurnGuard {
    * @returns 判定结果（allow=false 时 reason 可直接展示给用户）
    */
   decideBeforeIteration(): LoopGuardTurnDecision {
+    // 0. jev 主判模式短路（方案 §4.1：jev 健康时硬规则不参与判定）。
+    //    正常时序下调用方仅在 setJevPrimary(false)（jev 降级/禁用）后才调用本方法；
+    //    此处兜底保证 jev 主判期间即使被误调用，硬编码终止规则也不会触发——
+    //    循环去留判定权完全归 jev 模型（用户需求 1）。
+    if (this.jevPrimary) {
+      return { allow: true, reason: "jev 主判模式：heuristic 硬兜底不参与判定" };
+    }
     // 1. 模型死循环检测（2026-10-19 新增：最高优先级，防止反复烧 Token）
     const loopInfo = this.getLoopInfo();
+    let decision: LoopGuardTurnDecision;
     if (loopInfo) {
-      return {
+      decision = {
         allow: false,
         action: "terminate_model_loop",
         reason:
           `检测到模型死循环：工具 "${loopInfo.toolName}" 连续 ${loopInfo.repeatCount} 次以相同参数被调用。` +
           `任务自动终止，请调整指令后重新开始。`,
       };
-    }
-
-    // 2. 连续工具全失败（需求124："同一请求拨通3-5次后咨询用户"）
-    if (this.consecutiveFailedTurns >= this.config.maxConsecutiveFailedTurns) {
-      return {
+    } else if (this.consecutiveFailedTurns >= this.config.maxConsecutiveFailedTurns) {
+      // 2. 连续工具全失败（需求124："同一请求拨通3-5次后咨询用户"）
+      decision = {
         allow: false,
         action: "consult_user_consecutive_failures",
         reason: `已连续 ${this.consecutiveFailedTurns} 轮工具调用全部失败，继续重试大概率无法自行解决。`,
       };
-    }
-
-    // 3. 连续空转轮（2026-10-23 空转护栏）：模型既不产出可见正文、也没有任何
-    //    工具执行成功——与判定 1/2 正交：循环检测要求"相同参数"（模型换着命令
-    //    空跑则漏检），全失败咨询要求"工具都失败"（工具成功但任务无进展则漏检）。
-    if (
+    } else if (
+      // 3. 连续空转轮（2026-10-23 空转护栏）：模型既不产出可见正文、也没有任何
+      //    工具执行成功——与判定 1/2 正交：循环检测要求"相同参数"（模型换着命令
+      //    空跑则漏检），全失败咨询要求"工具都失败"（工具成功但任务无进展则漏检）。
       this.config.maxConsecutiveEmptyTurns > 0 &&
       this.consecutiveEmptyTurns >= this.config.maxConsecutiveEmptyTurns
     ) {
-      return {
+      decision = {
         allow: false,
         action: "consult_user_empty_turns",
         reason:
           `已连续 ${this.consecutiveEmptyTurns} 轮空转（回复无可见内容且无工具执行成功），` +
           `疑似空循环。请补充更具体的指令，或确认是否继续。`,
       };
+    } else {
+      decision = { allow: true, reason: "" };
+    }
+
+    // 降级首轮禁硬终止（P0-1）：terminate 降级为可恢复咨询，标志一次性消费
+    if (this.suppressTerminateOnNextDecision && !decision.allow && decision.action === "terminate_model_loop") {
+      decision = {
+        allow: false,
+        action: "consult_user_loop_stop",
+        reason: `jev 降级首轮：检测到疑似死循环调用序列（模式切换残留），` + `暂停执行等待用户确认（不自动终止）。`,
+      };
+    }
+    // 标志一次性消费：首轮判定（无论结果）后恢复正常 heuristic 语义
+    this.suppressTerminateOnNextDecision = false;
+    return decision;
+  }
+
+  /**
+   * jev 主判模式切换（2026-11-10 jev 重构，架构师审查 P0-1）
+   *
+   * 切换语义：
+   * - **计数器统一清零**（acknowledgeAndContinue）：模式切换瞬间，heuristic
+   *   计数器（连续失败/空转/连续 stop）中的 stale 数据不再参与判定，切换即
+   *   给新的预算窗口；
+   * - **签名队列清空**：jev 主判期间的调用签名历史属于 jev 判定语境，
+   *   切回 heuristic 后不可作为死循环证据（防止 stale 队列触发误终止）；
+   * - **降级首轮禁硬终止**：jev → heuristic（降级）方向切换时设置
+   *   suppressTerminateOnNextDecision，首轮 terminate 降级为 consult。
+   *
+   * @param active true = jev 主判；false = heuristic 硬兜底
+   */
+  setJevPrimary(active: boolean): void {
+    if (this.jevPrimary === active) return;
+    this.jevPrimary = active;
+    this.acknowledgeAndContinue();
+    this.toolCallSignatures.length = 0;
+    // jev → heuristic（降级）：首轮禁硬终止；heuristic → jev：无需禁用（jev 无 terminate）
+    this.suppressTerminateOnNextDecision = !active;
+  }
+
+  /** 当前是否 jev 主判模式（观测用） */
+  isJevPrimary(): boolean {
+    return this.jevPrimary;
+  }
+
+  /**
+   * 消费 jev 决策结果并产出循环判定（jev 主判路径，2026-11-10）
+   *
+   * 判定映射（方案 §4.2）：
+   * 1. continue_loop = stop 且 confidence ≥ 0.5 → consult_user_loop_stop
+   *    （暂停咨询，可恢复；连续第 N 次写入 reason 供用户参考）；
+   * 2. continue_loop = stop 但 confidence < 0.5 → 放行（低置信不动作，观测）；
+   * 3. continue_loop = continue → 清零连续 stop 计数；
+   * 4. is_empty_turn = yes → 空转计数 +1（复用 consecutiveEmptyTurns，语义与
+   *    heuristic 空转护栏一致，但判据来自 jev 模型而非硬编码规则）；
+   *    达上限 → consult_user_empty_turns；= no → 清零。
+   *
+   * 注意：本方法**只消费 jev answers**，不读取 heuristic 计数器（除空转计数
+   * 复用外）——jev 主判模式下硬编码阈值（重复调用/连续失败）不参与判定。
+   * 调用方在 jev 决策失败/不可用时切回 heuristic 后调用 decideBeforeIteration。
+   *
+   * @param answers jev 决策 answers（continue_loop / is_empty_turn 两问）
+   * @returns 判定结果（allow=false 时 reason 可直接展示给用户）
+   */
+  evaluateJevDecision(answers: Readonly<Record<string, JevAnswer>>): LoopGuardTurnDecision {
+    // 1. 循环是否继续（jev 主判核心问题）
+    const continueLoop = readChoiceAnswer(answers, "continue_loop");
+    if (continueLoop != null && continueLoop.choice === "stop" && continueLoop.confidence >= 0.5) {
+      this.jevConsecutiveStops += 1;
+      const consecutiveNote =
+        this.jevConsecutiveStops > 1 ? `（jev 连续第 ${this.jevConsecutiveStops} 次判定停止）` : "";
+      return {
+        allow: false,
+        action: "consult_user_loop_stop",
+        reason:
+          `jev 决策模型判定当前循环应停止${consecutiveNote}` +
+          `（置信度 ${continueLoop.confidence.toFixed(2)}）。` +
+          `已暂停执行：请确认是否继续，或调整指令后重新下达。`,
+      };
+    }
+    if (continueLoop != null && continueLoop.choice === "continue") {
+      // continue → 清零连续 stop 计数（P1-5 清零语义）
+      this.jevConsecutiveStops = 0;
+    }
+
+    // 2. 空循环识别（jev 判据替代硬编码"空文本且无工具成功"规则）
+    const emptyTurn = readChoiceAnswer(answers, "is_empty_turn");
+    if (emptyTurn != null) {
+      if (emptyTurn.choice === "yes") {
+        this.consecutiveEmptyTurns += 1;
+      } else {
+        this.consecutiveEmptyTurns = 0;
+      }
+      if (
+        this.config.maxConsecutiveEmptyTurns > 0 &&
+        this.consecutiveEmptyTurns >= this.config.maxConsecutiveEmptyTurns
+      ) {
+        return {
+          allow: false,
+          action: "consult_user_empty_turns",
+          reason:
+            `jev 决策模型判定已连续 ${this.consecutiveEmptyTurns} 轮空循环` +
+            `（无可见回复且无有效工具产出）。请补充更具体的指令，或确认是否继续。`,
+        };
+      }
     }
 
     return { allow: true, reason: "" };
+  }
+
+  /**
+   * 尝试注入空轮 nudge（校准计划阶段 C：NG1-NG7）。
+   *
+   * 语义：jev 主判判定本轮空转（is_empty_turn=yes 且置信度达标）且本地复核
+   * 确认最近一轮观测确实为空后，调用方注入 NUDGE_MESSAGE 并立即发起下一轮
+   * LLM 请求——本方法仅负责预算控制：
+   * - 每个预算窗口（acknowledgeAndContinue 清零点）内最多 3 次，防重试风暴；
+   * - 达上限返回 false，空轮治理交还既有「连续空转 → consult」路径
+   *   （evaluateJevDecision 的 consecutiveEmptyTurns 达限判定不受影响）。
+   *
+   * @returns true = 允许注入（已计数）；false = 窗口预算耗尽，禁止注入
+   */
+  tryIssueNudge(): boolean {
+    if (this.nudgesIssued >= MAX_NUDGES_PER_WINDOW) {
+      return false;
+    }
+    this.nudgesIssued += 1;
+    return true;
   }
 
   /**
@@ -717,6 +965,11 @@ export class TurnGuard {
     this.turnsCompleted = 0;
     // 2026-10-23 空转护栏：用户放行同享新的空转预算窗口
     this.consecutiveEmptyTurns = 0;
+    // 2026-11-10 jev 重构（P1-5 清零语义）：连续 stop 计数一并清零——
+    // 用户放行 = 对 jev 停止判定的人工否决，给新的判定窗口
+    this.jevConsecutiveStops = 0;
+    // 校准计划阶段 C：nudge 预算窗口随用户放行重置（P1-5 清零语义统一）
+    this.nudgesIssued = 0;
   }
 
   /** 当前状态快照（供审计/展示） */
@@ -725,12 +978,18 @@ export class TurnGuard {
     tokensConsumed: number;
     consecutiveFailedTurns: number;
     consecutiveEmptyTurns: number;
+    jevConsecutiveStops: number;
+    jevPrimary: boolean;
+    nudgesIssued: number;
   }> {
     return {
       turnsCompleted: this.turnsCompleted,
       tokensConsumed: this.tokensConsumed,
       consecutiveFailedTurns: this.consecutiveFailedTurns,
       consecutiveEmptyTurns: this.consecutiveEmptyTurns,
+      jevConsecutiveStops: this.jevConsecutiveStops,
+      jevPrimary: this.jevPrimary,
+      nudgesIssued: this.nudgesIssued,
     };
   }
 

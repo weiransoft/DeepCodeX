@@ -34,6 +34,7 @@ import assert from "node:assert/strict";
 import {
   TurnGuard,
   DEFAULT_TURN_GUARD_CONFIG,
+  toolResultSignature,
   type TurnGuardConfig,
   type LoopGuardTurnDecision,
 } from "../common/loop-guard";
@@ -468,6 +469,76 @@ test("J7. 多工具轮：一轮内多个 tool call，循环检测跟踪所有", 
   guard.recordToolCalls([{ name: "bash", arguments: { cmd: "same" } }]);
   assert.equal(guard.decideBeforeIteration().allow, false);
   assert.equal(guard.decideBeforeIteration().action, "terminate_model_loop");
+});
+
+// ============================================================================
+// J+. 结果维度循环检测（2026-11-10 死循环误杀修复：轮询/等待类命令不被误终止）
+// ============================================================================
+
+test("J8. 相同工具+相同参数但结果签名逐轮变化 → 不触发死循环终止", () => {
+  const guard = new TurnGuard({
+    maxConsecutiveFailedTurns: 100,
+    maxRepeatedToolCalls: 3,
+    trackedToolCallHistory: 5,
+  });
+  // 模拟轮询等待：同一条命令重复执行，输出/状态确实在变化（sig-0/1/2/3/4）。
+  // 修复前：仅按「工具+参数」判定，第 3 次即误杀；修复后：签名含结果维度，
+  // 尾部连续性被打断，循环检测不触发。
+  for (let i = 0; i < 5; i++) {
+    guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: false });
+    guard.recordToolCalls([{ name: "bash", arguments: { command: "curl localhost:3000/health" } }], [`sig-${i}`]);
+    const decision = guard.decideBeforeIteration();
+    assert.equal(decision.allow, true, `第 ${i + 1} 次结果变化的轮询不得被终止：${decision.reason}`);
+    assert.notEqual(decision.action, "terminate_model_loop");
+  }
+});
+
+test("J9. 相同工具+相同参数+相同结果签名 → 仍终止（结果维度不弱化原防线）", () => {
+  const guard = new TurnGuard({
+    maxConsecutiveFailedTurns: 100,
+    maxRepeatedToolCalls: 3,
+    trackedToolCallHistory: 5,
+  });
+  // 3 次「参数+结果」完全相同 → 尾部 3 条签名一致 → 死循环终止（防绕过）
+  for (let i = 0; i < 3; i++) {
+    guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: false });
+    guard.recordToolCalls([{ name: "bash", arguments: { command: "ls" } }], ["identical-sig"]);
+  }
+  const decision = guard.decideBeforeIteration();
+  assert.equal(decision.allow, false);
+  assert.equal(decision.action, "terminate_model_loop");
+});
+
+test("J10. 未传结果签名 → 保持旧的「工具+参数」两维判定（既有调用方零回归）", () => {
+  const guard = new TurnGuard({
+    maxConsecutiveFailedTurns: 100,
+    maxRepeatedToolCalls: 3,
+    trackedToolCallHistory: 5,
+  });
+  for (let i = 0; i < 3; i++) {
+    guard.recordTurn({ tokensUsed: 100, hadToolCalls: true, allToolsFailed: false });
+    guard.recordToolCalls([{ name: "bash", arguments: { command: "ls" } }]);
+  }
+  const decision = guard.decideBeforeIteration();
+  assert.equal(decision.allow, false, "不传结果签名时保持旧行为：仍按两维判定终止");
+  assert.equal(decision.action, "terminate_model_loop");
+});
+
+test("J11. toolResultSignature：元数据时间戳变化不影响签名，输出变化改变签名", () => {
+  // bash 回执形态：JSON + metadata（每轮必变的 deadlineAt 等）
+  const withMeta = (deadline: string, output: string) =>
+    JSON.stringify({ ok: true, output, metadata: { deadlineAt: deadline, cwd: "/tmp", timeoutMs: 120000 } });
+  const sigA1 = toolResultSignature(withMeta("2026-11-10T00:00:00.000Z", "tick-0"));
+  const sigA2 = toolResultSignature(withMeta("2026-11-10T00:00:01.000Z", "tick-0"));
+  assert.equal(sigA1, sigA2, "仅元数据时间戳变化 → 签名必须相同（结果视为未变化）");
+  const sigB = toolResultSignature(withMeta("2026-11-10T00:00:00.000Z", "tick-1"));
+  assert.notEqual(sigA1, sigB, "真实输出变化 → 签名必须不同（结果视为变化）");
+  // 非 JSON 文本：ISO 时间戳被中性化
+  assert.equal(
+    toolResultSignature("done at 2026-11-10T00:00:00Z"),
+    toolResultSignature("done at 2026-11-10T00:00:09Z"),
+    "非 JSON 文本的时间戳应被剥离"
+  );
 });
 
 // ============================================================================

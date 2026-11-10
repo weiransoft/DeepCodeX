@@ -435,3 +435,90 @@ test("N13. 非 git 仓库下轨道 B 禁用：探索轮不触发，只按轨道 
     cleanup(projectRoot);
   }
 });
+
+// ============================================================================
+// 7. 相同调用熔断的结果维度（2026-11-10 修复"重复调用但输出/状态有变化被误熔断"）
+// ============================================================================
+
+/** 在临时工作区外建一个计数器文件路径（计数器在 git 工作区外，不污染快照）。 */
+function createExternalCounterPath(): string {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), "eag-noprog-counter-")), "counter");
+}
+
+test("N14. 相同调用但输出变化（轮询/等待型命令）→ 不触发相同调用熔断，正常收尾", async () => {
+  const projectRoot = createGitProject();
+  const counterFile = createExternalCounterPath();
+  try {
+    // 同一条命令（参数逐字符相同）每轮输出递增——模拟"轮询等待服务就绪"：
+    // 调用重复但输出/状态确实在变化，属于合法等待行为。修复前：相同调用熔断
+    // 只看「工具名+参数」，第 3 轮即误杀；修复后：结果指纹逐轮不同 → 相同调用
+    // 熔断不触发；轨道 B（探索型）计数 3 < 6，第 4 轮模型给出终态回复正常成功。
+    const command = `n=$(cat "${counterFile}" 2>/dev/null || echo 0); echo $((n+1)) > "${counterFile}"; echo "tick-$n"`;
+    const client = new StubLlmClient([
+      { content: "", toolCalls: [{ name: "bash", args: { command } }] },
+      { content: "", toolCalls: [{ name: "bash", args: { command } }] },
+      { content: "", toolCalls: [{ name: "bash", args: { command } }] },
+      { content: "服务已就绪，任务完成。" },
+    ]);
+    const executor = new LlmTaskExecutor({
+      projectRoot,
+      createLlmClient: () => client,
+      maxToolRounds: 12,
+    });
+
+    const result = await executor.executeTask(buildInput(projectRoot));
+
+    assert.equal(result.success, true, `输出在变化的等待命令不是空转：${result.summary} ${result.error ?? ""}`);
+    assert.equal(result.llmRequests, 4, "3 轮等待 + 1 轮终态，不得在第 3 轮被误熔断");
+    assert.doesNotMatch(result.error ?? result.summary, /相同调用空转熔断/);
+    // 计数器真实递增：证明三轮输出确实各不相同（结果指纹变化是真实发生的事实）
+    assert.equal(fs.readFileSync(counterFile, "utf8").trim(), "3", "外部计数器应被真实累加到 3");
+  } finally {
+    try {
+      fs.rmSync(path.dirname(counterFile), { recursive: true, force: true });
+    } catch {
+      // 清理失败不影响断言结论
+    }
+    cleanup(projectRoot);
+  }
+});
+
+test("N15. 相同调用但输出变化且持续不落盘 → 交由轨道 B 收口（第 4 轮，noProgressLimit=2）", async () => {
+  const projectRoot = createGitProject();
+  const counterFile = createExternalCounterPath();
+  try {
+    // 与 N14 同型，但模型一直不给出终态：调用相同、输出变化、工作区零变化。
+    // 相同调用熔断（结果维度）不再收口，由轨道 B（探索型空转）收口：
+    // noProgressLimit=2 → explorationLimit=4 → 第 4 轮触发，成因须为
+    // 「命令输出变化但工作区连续无变化」而非「相同调用」。
+    const command = `n=$(cat "${counterFile}" 2>/dev/null || echo 0); echo $((n+1)) > "${counterFile}"; echo "tick-$n"`;
+    const client = new StubLlmClient([
+      { content: "", toolCalls: [{ name: "bash", args: { command } }] },
+      { content: "", toolCalls: [{ name: "bash", args: { command } }] },
+      { content: "", toolCalls: [{ name: "bash", args: { command } }] },
+      { content: "", toolCalls: [{ name: "bash", args: { command } }] },
+      { content: "", toolCalls: [{ name: "bash", args: { command } }] },
+    ]);
+    const executor = new LlmTaskExecutor({
+      projectRoot,
+      createLlmClient: () => client,
+      noProgressLimit: 2,
+      maxToolRounds: 12,
+    });
+
+    const result = await executor.executeTask(buildInput(projectRoot));
+
+    assert.equal(result.success, false, "无限等待型轮询终须由轨道 B 诚实收口");
+    assert.equal(result.llmRequests, 4, "轨道 B 阈值 4（2+2）：第 4 轮收口");
+    assert.match(result.error ?? result.summary, /无进展熔断/);
+    assert.match(result.error ?? result.summary, /命令输出变化但工作区连续/, "成因须为探索型空转");
+    assert.doesNotMatch(result.error ?? result.summary, /相同调用空转熔断/, "相同调用熔断不得误抢先");
+  } finally {
+    try {
+      fs.rmSync(path.dirname(counterFile), { recursive: true, force: true });
+    } catch {
+      // 清理失败不影响断言结论
+    }
+    cleanup(projectRoot);
+  }
+});

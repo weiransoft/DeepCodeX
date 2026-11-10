@@ -56,6 +56,16 @@ import type {
   P5TaskExecutionInput,
   P5TaskExecutionResult,
 } from "../handlers/task-executor-port";
+// 2026-11-10 jev 循环决策重构（§4.4）：工具循环「是否继续/是否有进展」判定
+// 主责移交远程 jev 模型，既有硬编码熔断降级为 heuristic 兜底路径
+import {
+  JevLoopDecision,
+  readChoiceAnswer,
+  readScoreAnswer,
+  type JevTurnDecision,
+  type JevTurnObservation,
+} from "../../../common/jev-loop-decision";
+import type { JevAnswer, JevDecisionResult } from "../../../common/jev-client";
 import { detectShellCapabilityGap } from "../handlers/plan-stage-handler";
 
 // ============================================================================
@@ -518,9 +528,17 @@ export interface LlmTaskExecutorOptions {
   /** 单任务工具循环最大轮数，默认 DEFAULT_MAX_TOOL_ROUNDS；测试可收窄 */
   readonly maxToolRounds?: number;
   /**
+   * jev 循环决策服务（可选注入，2026-11-10 重构）。
+   * undefined = 未注入，走 env 装配（JevLoopDecision.fromEnv）；null = 显式禁用
+   * （测试隔离用，全程 heuristic 兜底）。详见 jevDecision 字段注释。
+   */
+  readonly jevDecision?: JevLoopDecision | null;
+  /**
    * 无进展熔断阈值：连续多少轮「工具结果指纹 + 工作区进展快照」均无变化即失败。
    * 默认 DEFAULT_NO_PROGRESS_LIMIT（4）；解析链为 options > env.DEEPCODE_NO_PROGRESS_LIMIT
    * > 默认 4，非法值回落默认。非 git 仓库（工作区快照不可用）时实际阈值 +1 更保守。
+   * 2026-11-10 jev 重构：本熔断为 **heuristic 硬兜底路径**——jev 决策可用时
+   * 不参与判定（循环继续/进展判定由 jev 模型承担）。
    */
   readonly noProgressLimit?: number;
   /**
@@ -619,6 +637,18 @@ export class LlmTaskExecutor implements P5TaskExecutor {
    */
   private readonly compactReplayEnabled: boolean;
 
+  /**
+   * jev 循环决策服务（2026-11-10 重构，docs/dev/jev-loop-decision-20261110.md §4.4）。
+   *
+   * 工具循环的「是否继续/是否有进展」判定主责移交远程 jev 模型
+   * （NeoHorse-Jev-4B）：每轮工具执行期间并行预取决策，轮末 join——
+   * stop（置信度≥0.5）→ 任务失败返回；continue → 硬阈值计数清零；
+   * jev 不可用/超时/契约不符 → 回落既有相同调用熔断 + 双轨无进展熔断
+   * （最小硬兜底，行为与 jev 引入前一致）。
+   * 注入链：显式 options（测试注入本地真实 HTTP 服务器）> env（fromEnv）。
+   */
+  private readonly jevDecision: JevLoopDecision | null;
+
   constructor(options: Readonly<LlmTaskExecutorOptions>) {
     this.projectRoot = options.projectRoot;
     this.createLlmClient = options.createLlmClient;
@@ -626,6 +656,8 @@ export class LlmTaskExecutor implements P5TaskExecutor {
     this.log = options.logger ?? (() => undefined);
     this.onTaskProgress = options.onTaskProgress ?? (() => undefined);
     this.dangerousCommandApproval = options.dangerousCommandApproval;
+    // jev 决策服务注入链：显式 options > env 配置（未配置密钥即 null → 全程 heuristic 兜底）
+    this.jevDecision = options.jevDecision !== undefined ? options.jevDecision : JevLoopDecision.fromEnv();
     // 轮数解析链（桌面高级配置 2026-10-30）：显式 options > env.DEEPCODE_MAX_TOOL_ROUNDS
     // > 默认 40。桌面壳按所选模型的高级配置注入 env（工具调用轮数），CLI 用户也可
     // 用环境变量覆盖；非法值（非正整数）静默忽略回落默认，不阻断装配。
@@ -1096,6 +1128,16 @@ export class LlmTaskExecutor implements P5TaskExecutor {
       // 正常交替的"折叠 → 跑几轮 → 再折叠"。
       const MAX_CONTEXT_FOLDS = 8;
       let foldCount = 0;
+
+      // ======== jev 循环决策状态（2026-11-10 重构 §4.4） ========
+      // jevRoundObservations：每轮一条摘要观测（正文 + 工具成败计数 + 名称/结果
+      // 形态签名），供 decideProgress 构建脱敏摘要；pendingJevRound：本轮工具
+      // 执行期间并行预取的决策（轮末 join）。jev 不可用（未配置密钥/禁用）时
+      // jevEnabled=false，全程走 heuristic 硬兜底（既有熔断行为不变）。
+      const jev = this.jevDecision;
+      const jevEnabled = jev !== null && jev.enabled;
+      const jevRoundObservations: JevTurnObservation[] = [];
+      let pendingJevRound: { round: number; promise: Promise<JevTurnDecision> } | null = null;
       const foldLimitFailure = (
         site: string,
         usedTokens: number,
@@ -1629,6 +1671,35 @@ export class LlmTaskExecutor implements P5TaskExecutor {
         );
         // 跨轮累计工具调用数（noop 判据，见 toolCallsTotal 声明处注释）
         toolCallsTotal += response.toolCalls.length;
+
+        // 2026-11-10 jev 重构（§4.4）：工具执行前并行预取本轮循环判定——
+        // 决策与工具执行并发（工具耗时通常远大于 jev p50 145ms），轮末 join
+        // 开销 ≈ 0；发起点即挂 catch（P0-2），失败由轮末 join 统一降级兜底
+        if (jevEnabled) {
+          pendingJevRound = {
+            round: currentRound,
+            promise: jev!
+              .decideProgress(
+                {
+                  mode: "task",
+                  turnsCompleted: currentRound - 1,
+                  recentTurns: jevRoundObservations.slice(-6),
+                  latestUserText: input.objective,
+                },
+                currentRound
+              )
+              .catch(
+                (): JevTurnDecision => ({
+                  turnSeq: currentRound,
+                  result: {
+                    ok: false,
+                    status: "unavailable",
+                    reason: "jev p5 prefetch crashed",
+                  } satisfies JevDecisionResult,
+                })
+              ),
+          };
+        }
         const executions: ToolCallExecution[] = await toolExecutor.executeToolCalls(
           toolSessionId,
           response.toolCalls.map((tc) => ({
@@ -1671,6 +1742,31 @@ export class LlmTaskExecutor implements P5TaskExecutor {
           }
         }
         emitProgress("tool_execution", "", `工具结果：\n${toolResults.join("\n")}`, currentRound);
+
+        // 2026-11-10：本轮观测入 jev 摘要历史（脱敏在摘要构建时统一处理，
+        // 工具参数原文不进摘要——签名只带工具名 + 结果形态 ok/denied/fail）
+        const jevSucceeded = executions.filter(
+          (execution) => !this.isDeniedToolExecution(execution) && execution.result?.ok === true
+        ).length;
+        jevRoundObservations.push({
+          visibleText: response.content ?? "",
+          hadToolCalls: true,
+          toolSucceededCount: jevSucceeded,
+          toolFailedCount: executions.length - jevSucceeded,
+          toolCallDigests: response.toolCalls.map((tc, i) => {
+            const execution = executions[i];
+            const shape =
+              execution == null
+                ? "missing"
+                : this.isDeniedToolExecution(execution)
+                  ? "denied"
+                  : execution.result?.ok === true
+                    ? "ok"
+                    : "fail";
+            return `${tc.name}:${shape}`;
+          }),
+        });
+
         if (stormHitCount >= DENIAL_STORM_LIMIT) {
           const stormError =
             `拒绝风暴：同一目标「${stormTarget}」累计 ${stormHitCount} 次被权限守卫拒绝——` +
@@ -1686,124 +1782,196 @@ export class LlmTaskExecutor implements P5TaskExecutor {
           );
         }
 
-        // 相同调用重复熔断判定（本轮全部调用之后统一评估）：把本轮工具序列
-        // 拼成一个批量指纹，与上一轮比较。连续相同即模型空转。
-        // 注意：指纹必须基于**原始完整** response.toolCalls 计算，绝不能用压缩后
-        // 回传给模型的消息内容——第三级压缩会省略最老 tool 结果，若指纹受其影响，
-        // 同一重复调用的指纹会随压缩进度漂移、熔断永远不触发（E7/熔断回归防线）。
-        const batchFingerprint = response.toolCalls
-          .map((tc) => `${tc.name}:${this.normalizeToolArgsFingerprint(tc.argumentsJson)}`)
-          .join("||");
-        if (batchFingerprint === lastCallFingerprint) {
-          identicalCallStreak += 1;
+        // ======== jev 循环判定 join（2026-11-10 §4.4） ========
+        // 本轮决策已在工具执行期间并行预取，此处 join（通常已就绪，开销 ≈ 0）。
+        // jev 主判：stop（置信度≥0.5）→ 任务失败返回；continue → 硬阈值计数清零
+        // （stale 计数不得跨主判窗口触发，架构师审查 P0-1 同源语义）。
+        // 决策失败（不可用/超时/契约不符）→ jevRoundAnswers 保持 null，
+        // 落入下方 heuristic 硬兜底分支（既有熔断逻辑原样生效）。
+        let jevRoundAnswers: Readonly<Record<string, JevAnswer>> | null = null;
+        if (pendingJevRound != null && pendingJevRound.round === currentRound) {
+          const roundDecision = await pendingJevRound.promise;
+          pendingJevRound = null;
+          if (roundDecision.result.ok && roundDecision.turnSeq === currentRound) {
+            // 局部 const 先落别名：await 之后 let 变量的类型收窄不可靠（TS 语义）
+            const roundAnswers = roundDecision.result.answers;
+            jevRoundAnswers = roundAnswers;
+            const continueLoop = readChoiceAnswer(roundAnswers, "continue_loop");
+            if (continueLoop != null && continueLoop.choice === "stop" && continueLoop.confidence >= 0.5) {
+              const jevStopError =
+                `jev 决策模型判定工具循环应终止（置信度 ${continueLoop.confidence.toFixed(2)}）：` +
+                `近期轮次重复无产出尝试。任务提前结束，交回编排器决定 fix/abort。`;
+              this.log(jevStopError, "warn");
+              emitProgress("task_end", "执行失败：jev 判定循环应终止", jevStopError, currentRound);
+              return this.failure(
+                jevStopError,
+                llmRequests,
+                sawUsage,
+                inputTokensTotal + outputTokensTotal,
+                estimatedCharsTotal
+              );
+            }
+            // continue：清零硬阈值计数与指纹基线（heuristic 兜底若在后续轮触发，
+            // 以 jev 主判结束时刻为新的预算窗口起算）
+            identicalCallStreak = 0;
+            lastCallFingerprint = null;
+            noProgressStreak = 0;
+            explorationStreak = 0;
+          }
+        }
+        // join 后立即检查中止信号（P1-3 同源：决策等待期间用户/编排器可能已请求中止）
+        if (this.isAbortRequested(input.abortFlagPath) || abortController.signal.aborted) {
+          emitProgress("task_end", "执行中止：任务被中止信号中断", "aborted：任务执行被中止信号中断", currentRound);
+          return this.failure(
+            "aborted：任务执行被中止信号中断",
+            llmRequests,
+            sawUsage,
+            inputTokensTotal + outputTokensTotal,
+            estimatedCharsTotal
+          );
+        }
+
+        if (jevRoundAnswers != null) {
+          // jev 主判分支：硬编码熔断本轮不参与判定（循环继续/进展已由 jev 判定）。
+          // progress score 仅作观测记录（评分档 legend 与标准差信息供诊断）。
+          const progressAnswer = readScoreAnswer(jevRoundAnswers, "progress");
+          if (progressAnswer != null) {
+            this.log(
+              `jev 进展评分（round ${currentRound}）：${progressAnswer.score.toFixed(2)}` +
+                `（置信度 ${progressAnswer.confidence.toFixed(2)}）`,
+              "info"
+            );
+          }
         } else {
-          lastCallFingerprint = batchFingerprint;
-          identicalCallStreak = 1;
-        }
-        if (identicalCallStreak >= LlmTaskExecutor.IDENTICAL_CALL_STORM_LIMIT) {
-          const identicalError =
-            `相同调用空转熔断：模型连续 ${identicalCallStreak} 轮输出完全相同的工具调用` +
-            `「${batchFingerprint.slice(0, 200)}」——重复执行不会带来新信息，` +
-            `任务描述大概率缺少可执行信息或与工作目录现状矛盾（如标题声称已完成/目标与项目无关）。` +
-            `请检查任务卡内容是否可执行、目标是否与当前项目匹配，或补充缺失上下文后重试。`;
-          this.log(identicalError, "warn");
-          emitProgress("task_end", `执行失败：相同调用空转熔断`, identicalError, currentRound);
-          return this.failure(
-            identicalError,
-            llmRequests,
-            sawUsage,
-            inputTokensTotal + outputTokensTotal,
-            estimatedCharsTotal
-          );
-        }
-
-        // ======== 无进展熔断判定（双轨：结果重复 / 探索型空转，2026-11） ========
-        // 放在相同调用熔断之后：连续完全相同调用时后者阈值更低（3 < 4）且先判，
-        // 由「相同调用空转熔断」优先收口，本熔断不抢先（不回归 Z9 语义）。
-        // 终态轮（response.toolCalls.length === 0）已在上方 return success，不会到这里。
-        const resultFingerprint = this.computeResultFingerprint(executions);
-        const progressSnapshot = this.captureWorkspaceSnapshot(input.projectRoot);
-        const isFirstResult = lastResultFingerprint === null;
-        const resultUnchanged = isFirstResult || resultFingerprint === lastResultFingerprint;
-        // git 不可用时 progressSnapshot / lastProgressSnapshot 恒为 null，此式恒 true，
-        // 等价于仅按结果指纹判定——轨道 B 禁用、轨道 A 阈值 +1，见 effectiveNoProgressLimit。
-        const workspaceUnchanged = progressSnapshot === lastProgressSnapshot;
-
-        // 成功写入类工具（write/edit/UpdatePlan 且 ok=true）= 真实产出：打断轨道 B
-        // （探索型计数），避免把「边写边探索」误判为空转。bash 是否落盘由快照判定。
-        let hasSuccessfulWrite = false;
-        for (let i = 0; i < executions.length; i += 1) {
-          const name = response.toolCalls[i]?.name;
-          if ((name === "write" || name === "edit" || name === "UpdatePlan") && executions[i]!.result?.ok === true) {
-            hasSuccessfulWrite = true;
-            break;
-          }
-        }
-        // 全 deny 轮豁免：被权限守卫拒绝属于「拒绝风暴」（DENIAL_STORM_LIMIT=6，
-        // 按目标指纹分组）的管辖范围——反复撞不同的墙模型往往会自行改道，且
-        // 无进展阈值(4) < 风暴阈值(6)，若把 deny 轮也计入会架空风暴的
-        // 分组语义、误伤「两个目标各 deny 5 次仍应终态成功」的场景（E12）。
-        // deny 结果仍进 resultFingerprint，只是本轮两轨都不累计/不清零。
-        const allDenied =
-          executions.length > 0 && executions.every((execution) => this.isDeniedToolExecution(execution));
-        // 轨道 B 可用条件：必须有 git 快照依据（非 git 仓库禁用，避免无快照依据误判），
-        // 且本轮无成功写入类调用。
-        const trackBAvailable = gitSnapshotAvailable && !hasSuccessfulWrite;
-
-        if (!allDenied) {
-          if (!workspaceUnchanged) {
-            // 工作区快照变化 = 真有进展 → 两轨都清零
-            noProgressStreak = 0;
-            explorationStreak = 0;
-          } else if (isFirstResult) {
-            // 首轮无上一轮结果可比：保守地给两轨各记一次采样，使「连续 N 轮」
-            // 恰在第 N 轮触发（而非 N+1 轮）；后续由结果是否变化自动分轨。
-            noProgressStreak = 1;
-            explorationStreak = trackBAvailable ? 1 : 0;
-          } else if (resultUnchanged) {
-            // 轨道 A：结果重复 + 快照无变化
-            noProgressStreak += 1;
-            explorationStreak = 0;
+          // ======== heuristic 硬兜底（jev 不可用/失败/禁用时的既有熔断逻辑，原样保留） ========
+          // 结果指纹提前计算（2026-11-10 修复"重复调用但输出/状态有变化被误熔断"）：
+          // 相同调用熔断原本只看「工具名+参数」，不看执行结果——对有状态命令
+          // （轮询等待服务就绪、tail 进度、重试直到成功）是误杀：模型重复同一
+          // 条等待命令是合法行为，输出/状态确实在变化。修复后：仅当「调用相同
+          // 且结果指纹也无变化」才计入相同调用空转；调用相同但结果变化时交给
+          // 下方双轨无进展熔断（轨道 B 专门治理"输出变化但工作区无变化"）。
+          // 注意：指纹必须基于**原始完整** response.toolCalls 计算，绝不能用压缩后
+          // 回传给模型的消息内容——第三级压缩会省略最老 tool 结果，若指纹受其影响，
+          // 同一重复调用的指纹会随压缩进度漂移、熔断永远不触发（E7/熔断回归防线）。
+          const resultFingerprint = this.computeResultFingerprint(executions);
+          const batchFingerprint = response.toolCalls
+            .map((tc) => `${tc.name}:${this.normalizeToolArgsFingerprint(tc.argumentsJson)}`)
+            .join("||");
+          const resultUnchangedForCall = lastResultFingerprint !== null && resultFingerprint === lastResultFingerprint;
+          if (batchFingerprint === lastCallFingerprint && resultUnchangedForCall) {
+            identicalCallStreak += 1;
           } else {
-            // 结果指纹不同：轨道 A 断，轨道 B 记一次探索型空转
-            noProgressStreak = 0;
-            explorationStreak = trackBAvailable ? explorationStreak + 1 : 0;
+            lastCallFingerprint = batchFingerprint;
+            identicalCallStreak = 1;
           }
-        }
-        // allDenied：两轨保持原值（不累计、不清零），沿用 E12 处理
+          if (identicalCallStreak >= LlmTaskExecutor.IDENTICAL_CALL_STORM_LIMIT) {
+            const identicalError =
+              `相同调用空转熔断：模型连续 ${identicalCallStreak} 轮输出完全相同的工具调用` +
+              `且执行结果也无任何变化「${batchFingerprint.slice(0, 200)}」——重复执行不会带来新信息，` +
+              `任务描述大概率缺少可执行信息或与工作目录现状矛盾（如标题声称已完成/目标与项目无关）。` +
+              `请检查任务卡内容是否可执行、目标是否与当前项目匹配，或补充缺失上下文后重试。`;
+            this.log(identicalError, "warn");
+            emitProgress("task_end", `执行失败：相同调用空转熔断`, identicalError, currentRound);
+            return this.failure(
+              identicalError,
+              llmRequests,
+              sawUsage,
+              inputTokensTotal + outputTokensTotal,
+              estimatedCharsTotal
+            );
+          }
 
-        // 每轮都刷新基线（相等时刷新无副作用），保证与「上一轮」而非「起始轮」比较，
-        // 这样每轮 write 新文件（快照逐轮变化）都能被识别为有进展而不误伤。
-        lastResultFingerprint = resultFingerprint;
-        lastProgressSnapshot = progressSnapshot;
+          // ======== 无进展熔断判定（双轨：结果重复 / 探索型空转，2026-11） ========
+          // 放在相同调用熔断之后：连续「相同调用+相同结果」时后者阈值更低（3 < 4）且先判，
+          // 由「相同调用空转熔断」优先收口，本熔断不抢先（不回归 Z9 语义）。
+          // 2026-11-10：相同调用但结果变化时相同调用熔断不再触发，此类轮次落到本
+          // 判定——结果变化 → 轨道 A 断、轨道 B（探索型）计数，语义分层保持一致。
+          // resultFingerprint 已在相同调用判定前计算（复用，勿重复哈希）。
+          // 终态轮（response.toolCalls.length === 0）已在上方 return success，不会到这里。
+          const progressSnapshot = this.captureWorkspaceSnapshot(input.projectRoot);
+          const isFirstResult = lastResultFingerprint === null;
+          const resultUnchanged = isFirstResult || resultFingerprint === lastResultFingerprint;
+          // git 不可用时 progressSnapshot / lastProgressSnapshot 恒为 null，此式恒 true，
+          // 等价于仅按结果指纹判定——轨道 B 禁用、轨道 A 阈值 +1，见 effectiveNoProgressLimit。
+          const workspaceUnchanged = progressSnapshot === lastProgressSnapshot;
 
-        const effectiveNoProgressLimit = gitSnapshotAvailable ? this.noProgressLimit : this.noProgressLimit + 1;
-        const explorationLimit = this.noProgressLimit + 2;
-        let cause: string | null = null;
-        let streak = 0;
-        if (noProgressStreak >= effectiveNoProgressLimit) {
-          streak = noProgressStreak;
-          cause = gitSnapshotAvailable
-            ? "工具结果与工作区快照均无变化（工具结果重复）"
-            : "非 git 仓库，仅按结果指纹判定：工具结果连续无变化";
-        } else if (explorationStreak >= explorationLimit) {
-          streak = explorationStreak;
-          cause = `命令输出变化但工作区连续 ${streak} 轮无变化（探索型空转）`;
-        }
-        if (cause !== null) {
-          const noProgressError =
-            `无进展熔断：连续 ${streak} 轮工具调用未产生任何新进展（${cause}）——` +
-            `请检查任务卡目标与 projectRoot 是否匹配、测试命令是否可执行、是否存在与任务无关的基线失败。`;
-          this.log(noProgressError, "warn");
-          emitProgress("task_end", "执行失败：无进展熔断", noProgressError, currentRound);
-          return this.failure(
-            noProgressError,
-            llmRequests,
-            sawUsage,
-            inputTokensTotal + outputTokensTotal,
-            estimatedCharsTotal
-          );
-        }
+          // 成功写入类工具（write/edit/UpdatePlan 且 ok=true）= 真实产出：打断轨道 B
+          // （探索型计数），避免把「边写边探索」误判为空转。bash 是否落盘由快照判定。
+          let hasSuccessfulWrite = false;
+          for (let i = 0; i < executions.length; i += 1) {
+            const name = response.toolCalls[i]?.name;
+            if ((name === "write" || name === "edit" || name === "UpdatePlan") && executions[i]!.result?.ok === true) {
+              hasSuccessfulWrite = true;
+              break;
+            }
+          }
+          // 全 deny 轮豁免：被权限守卫拒绝属于「拒绝风暴」（DENIAL_STORM_LIMIT=6，
+          // 按目标指纹分组）的管辖范围——反复撞不同的墙模型往往会自行改道，且
+          // 无进展阈值(4) < 风暴阈值(6)，若把 deny 轮也计入会架空风暴的
+          // 分组语义、误伤「两个目标各 deny 5 次仍应终态成功」的场景（E12）。
+          // deny 结果仍进 resultFingerprint，只是本轮两轨都不累计/不清零。
+          const allDenied =
+            executions.length > 0 && executions.every((execution) => this.isDeniedToolExecution(execution));
+          // 轨道 B 可用条件：必须有 git 快照依据（非 git 仓库禁用，避免无快照依据误判），
+          // 且本轮无成功写入类调用。
+          const trackBAvailable = gitSnapshotAvailable && !hasSuccessfulWrite;
+
+          if (!allDenied) {
+            if (!workspaceUnchanged) {
+              // 工作区快照变化 = 真有进展 → 两轨都清零
+              noProgressStreak = 0;
+              explorationStreak = 0;
+            } else if (isFirstResult) {
+              // 首轮无上一轮结果可比：保守地给两轨各记一次采样，使「连续 N 轮」
+              // 恰在第 N 轮触发（而非 N+1 轮）；后续由结果是否变化自动分轨。
+              noProgressStreak = 1;
+              explorationStreak = trackBAvailable ? 1 : 0;
+            } else if (resultUnchanged) {
+              // 轨道 A：结果重复 + 快照无变化
+              noProgressStreak += 1;
+              explorationStreak = 0;
+            } else {
+              // 结果指纹不同：轨道 A 断，轨道 B 记一次探索型空转
+              noProgressStreak = 0;
+              explorationStreak = trackBAvailable ? explorationStreak + 1 : 0;
+            }
+          }
+          // allDenied：两轨保持原值（不累计、不清零），沿用 E12 处理
+
+          // 每轮都刷新基线（相等时刷新无副作用），保证与「上一轮」而非「起始轮」比较，
+          // 这样每轮 write 新文件（快照逐轮变化）都能被识别为有进展而不误伤。
+          lastResultFingerprint = resultFingerprint;
+          lastProgressSnapshot = progressSnapshot;
+
+          const effectiveNoProgressLimit = gitSnapshotAvailable ? this.noProgressLimit : this.noProgressLimit + 1;
+          const explorationLimit = this.noProgressLimit + 2;
+          let cause: string | null = null;
+          let streak = 0;
+          if (noProgressStreak >= effectiveNoProgressLimit) {
+            streak = noProgressStreak;
+            cause = gitSnapshotAvailable
+              ? "工具结果与工作区快照均无变化（工具结果重复）"
+              : "非 git 仓库，仅按结果指纹判定：工具结果连续无变化";
+          } else if (explorationStreak >= explorationLimit) {
+            streak = explorationStreak;
+            cause = `命令输出变化但工作区连续 ${streak} 轮无变化（探索型空转）`;
+          }
+          if (cause !== null) {
+            const noProgressError =
+              `无进展熔断：连续 ${streak} 轮工具调用未产生任何新进展（${cause}）——` +
+              `请检查任务卡目标与 projectRoot 是否匹配、测试命令是否可执行、是否存在与任务无关的基线失败。`;
+            this.log(noProgressError, "warn");
+            emitProgress("task_end", "执行失败：无进展熔断", noProgressError, currentRound);
+            return this.failure(
+              noProgressError,
+              llmRequests,
+              sawUsage,
+              inputTokensTotal + outputTokensTotal,
+              estimatedCharsTotal
+            );
+          }
+        } // heuristic 硬兜底分支结束（jev 主判分支见上方 jevRoundAnswers != null）
+
         // ======== while 循环尾部：全局轮数 +1、段内轮数 +1（2026-10-14 P0-1） ========
         // 原 for 循环由 `round += 1` 自增，while 需手动推进；折叠时 segmentRoundsUsed
         // 已重置为 0，此处 +1 仅在"本轮完成一轮 LLM+工具"后执行。
