@@ -12,10 +12,13 @@
  *   请求体契约、401/坏 JSON/超时/断连错误分类；
  * - H1-H3 健康状态机：3 连败降级、恢复探测、single-flight（P2-7）；
  * - D1-D2 摘要构建：密钥脱敏（P1-4）、截断、questions 契约；
- * - T1-T6 TurnGuard jev 集成：stop 咨询、低置信放行、continue 清零、
- *   空轮计数、模式切换清零（P0-1）、降级首轮禁硬终止（P0-1）；
- * - P1-P3 P5 执行器：jev stop → 失败返回、jev continue → 硬熔断不触发、
- *   jev 不可用 → 回落既有无进展熔断（兜底语义不变）。
+ * - T1-T12 TurnGuard jev 集成：stop 咨询、低置信放行、continue 清零、
+ *   空轮计数、模式切换清零（P0-1）、降级首轮禁硬终止（P0-1），
+ *   T7-T10 本地硬下限（真实死循环收口 / 结果变化不误杀 / 回退开关 / 连续全失败），
+ *   T11-T12 session 主链路接线（真实 HTTP 决策 + decideLoopWithJev 叠加硬下限）；
+ * - P1-P7 P5 执行器：jev stop → 失败返回、jev continue → 硬熔断不触发（A/B
+ *   回退对照）、jev 不可用 → 回落既有无进展熔断，P4-P7 覆盖进展证据门否决误判
+ *   stop、jev 主判下真实死循环仍收口、以及 DEEPCODE_JEV_EVIDENCE_GUARD=0 回退。
  *
  * @module core/tests/jev-loop-decision
  */
@@ -85,8 +88,18 @@ const SUCCESS_BODY = {
   input_tokens: 37,
 };
 
-/** 启动本地 jev 网关替身（真实 TCP 监听） */
-async function startTestGateway(): Promise<TestGateway> {
+/** 每轮都判定 stop 的高置信响应（进展证据门否决误判用；缺省仍为 SUCCESS_BODY） */
+const ALWAYS_STOP_BODY = {
+  model: "NeoHorse-Jev-4B",
+  answers: {
+    continue_loop: { type: "choice", choice: "stop", probabilities: {}, confidence: 0.95 },
+    progress: { type: "score", score: 0.0, legend: {}, probabilities: {}, confidence: 0.9 },
+  },
+  input_tokens: 30,
+};
+
+/** 启动本地 jev 网关替身（真实 TCP 监听）；defaultBody 仅影响「无一次性覆盖」时的缺省响应 */
+async function startTestGateway(defaultBody: unknown = SUCCESS_BODY): Promise<TestGateway> {
   const state: { next: TestGateway["nextResponse"] } = { next: null };
   const captured: CapturedRequest[] = [];
   const server = http.createServer((req, res) => {
@@ -109,7 +122,7 @@ async function startTestGateway(): Promise<TestGateway> {
           res.end(JSON.stringify(next.body));
         } else {
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify(SUCCESS_BODY));
+          res.end(JSON.stringify(defaultBody));
         }
       };
       if (next?.delayMs != null) {
@@ -599,6 +612,136 @@ test("T6. 降级首轮禁硬终止（P0-1）：stale 签名队列的 terminate �
   assert.equal(second.action, "terminate_model_loop", "标志消费后恢复正常 heuristic 硬终止");
 });
 
+// ---------------------------------------------------------------------------
+// T7-T10：jev 主判期间的本地硬下限（2026-11-10 空转/误判双修）
+// ---------------------------------------------------------------------------
+
+test("T7. jev 主判期间相同工具+相同参数+相同结果 → 本地硬下限可恢复咨询", () => {
+  const guard = new TurnGuard({
+    maxConsecutiveFailedTurns: 3,
+    maxRepeatedToolCalls: 3,
+    trackedToolCallHistory: 5,
+    maxConsecutiveEmptyTurns: 3,
+  });
+  const call = { name: "bash", arguments: { command: "true" } };
+  for (let i = 0; i < 3; i += 1) guard.recordToolCalls([call], ["same-result"]);
+  const decision = guard.decideJevHardFloor();
+  assert.equal(decision.allow, false, "jev 放行也不能旁路本地可观测死循环证据");
+  assert.equal(decision.action, "consult_user_loop_stop", "硬下限只做可恢复咨询");
+  assert.notEqual(decision.action, "terminate_model_loop", "jev 主判语境下不得不可恢复硬终止");
+});
+
+test("T8. 结果签名逐轮变化（轮询等待服务就绪）→ 硬下限放行，不误杀", () => {
+  const guard = new TurnGuard({
+    maxConsecutiveFailedTurns: 3,
+    maxRepeatedToolCalls: 3,
+    trackedToolCallHistory: 5,
+    maxConsecutiveEmptyTurns: 3,
+  });
+  const call = { name: "bash", arguments: { command: "curl health" } };
+  for (const signature of ["starting", "warming", "ready"]) {
+    guard.recordToolCalls([call], [signature]);
+  }
+  assert.equal(guard.decideJevHardFloor().allow, true, "输出/状态在推进时不得判死循环");
+});
+
+test("T9. 回退开关 =0 → 本地硬下限放行（旧契约 A/B 对照）", () => {
+  const previous = process.env.DEEPCODE_JEV_EVIDENCE_GUARD;
+  process.env.DEEPCODE_JEV_EVIDENCE_GUARD = "0";
+  try {
+    const guard = new TurnGuard({ maxRepeatedToolCalls: 3, trackedToolCallHistory: 5 });
+    const call = { name: "bash", arguments: { command: "true" } };
+    for (let i = 0; i < 3; i += 1) guard.recordToolCalls([call], ["same-result"]);
+    assert.equal(guard.decideJevHardFloor().allow, true, "回退后 jev 独占去留权，硬下限不参与");
+  } finally {
+    if (previous === undefined) delete process.env.DEEPCODE_JEV_EVIDENCE_GUARD;
+    else process.env.DEEPCODE_JEV_EVIDENCE_GUARD = previous;
+  }
+});
+
+test("T10. 连续工具全失败 → 硬下限咨询，jeV continue 不得一路放行", () => {
+  const guard = new TurnGuard({
+    maxConsecutiveFailedTurns: 3,
+    maxRepeatedToolCalls: 0,
+    trackedToolCallHistory: 5,
+    maxConsecutiveEmptyTurns: 3,
+  });
+  for (let i = 0; i < 3; i += 1) {
+    guard.recordTurn({ tokensUsed: 10, hadToolCalls: true, allToolsFailed: true });
+  }
+  const decision = guard.decideJevHardFloor();
+  assert.equal(decision.allow, false);
+  assert.equal(decision.action, "consult_user_consecutive_failures");
+});
+
+test("T11. session 接线：jev 主判放行但本地已有真实重复调用证据 → 主链路返回可恢复咨询", async () => {
+  const manager = createNudgeTestManager();
+  const sessionId = await manager.createSession({ text: "执行任务" });
+  const gateway = await startTestGateway();
+  try {
+    manager.setJevDecision(makeJev(gateway));
+    const guard = (manager as unknown as { getOrCreateTurnGuard(id: string): TurnGuard }).getOrCreateTurnGuard(
+      sessionId
+    );
+    // 模拟首次启用 jev 的模式切换（语义内含签名队列清空，P0-1）；之后持续健康
+    // 不再切换，签名证据可跨轮累积——这正是真实主链路时序。
+    guard.setJevPrimary(true);
+    const call = { name: "bash", arguments: { command: "true" } };
+    for (let i = 0; i < 3; i += 1) {
+      guard.recordToolCalls([call], ["same-result"]);
+      guard.recordTurn({
+        tokensUsed: 10,
+        hadToolCalls: true,
+        allToolsFailed: false,
+        hadVisibleText: false,
+        succeededCount: 1,
+      });
+    }
+    const decision = await (
+      manager as unknown as {
+        decideLoopWithJev(id: string, g: TurnGuard): Promise<{ allow: boolean; action?: string }>;
+      }
+    ).decideLoopWithJev(sessionId, guard);
+    assert.equal(decision.allow, false, "jev 判 continue 也不能让主链路旁路本地死循环证据");
+    assert.equal(decision.action, "consult_user_loop_stop", "硬下限在主链路仍只做可恢复咨询");
+    assert.ok(gateway.requests.length >= 1, "决策必须走真实 HTTP 边界并成功返回");
+  } finally {
+    await gateway.close();
+  }
+});
+
+test("T12. session 接线：结果签名逐轮变化的轮询 → 主链路放行（正常重复不误杀）", async () => {
+  const manager = createNudgeTestManager();
+  const sessionId = await manager.createSession({ text: "等待服务就绪" });
+  const gateway = await startTestGateway();
+  try {
+    manager.setJevDecision(makeJev(gateway));
+    const guard = (manager as unknown as { getOrCreateTurnGuard(id: string): TurnGuard }).getOrCreateTurnGuard(
+      sessionId
+    );
+    guard.setJevPrimary(true);
+    const call = { name: "bash", arguments: { command: "curl health" } };
+    for (const signature of ["starting", "warming", "ready"]) {
+      guard.recordToolCalls([call], [signature]);
+      guard.recordTurn({
+        tokensUsed: 10,
+        hadToolCalls: true,
+        allToolsFailed: false,
+        hadVisibleText: false,
+        succeededCount: 1,
+      });
+    }
+    const decision = await (
+      manager as unknown as {
+        decideLoopWithJev(id: string, g: TurnGuard): Promise<{ allow: boolean }>;
+      }
+    ).decideLoopWithJev(sessionId, guard);
+    assert.equal(decision.allow, true, "输出/状态在推进的重复轮询不得被判死循环");
+  } finally {
+    await gateway.close();
+  }
+});
+
 // ============================================================================
 // 6. P 系列：P5 执行器 jev 集成（真实 ToolExecutor + StubLlmClient）
 // ============================================================================
@@ -672,25 +815,54 @@ test("P1. jev stop（置信度≥0.5）→ 任务失败返回，reason 注明 je
   }
 });
 
-test("P2. jev continue → 既有无进展熔断不触发（硬阈值主责已移交 jev）", async () => {
-  const projectRoot = createGitProject();
-  const gateway = await startTestGateway();
-  try {
-    // 4 轮无进展空转 + 第 5 轮给出终态回复：jev 每轮判定 continue（置信 0.95），
-    // 硬编码熔断（阈值 4）不得抢跑——这正是"判定权移交"的核心语义
-    const client = new StubLlmClient([...noopRoundScripts(4), { content: "任务完成", toolCalls: null }]);
-    const executor = new LlmTaskExecutor({
-      projectRoot,
-      createLlmClient: () => client,
-      maxToolRounds: 12,
-      jevDecision: makeJev(gateway),
-    });
-    const result = await executor.executeTask(buildInput(projectRoot));
-    assert.equal(result.success, true, "jev 持续判定 continue 时硬熔断不得触发");
-    assert.equal(gateway.requests.length >= 4, true, "每轮工具执行前都应有 jev 决策请求");
-  } finally {
-    await gateway.close();
-    cleanup(projectRoot);
+test("P2. jev continue 但本地连续无进展 → 状态感知硬下限收口（A/B：=0 回退旧契约）", async () => {
+  // A：默认契约。4 轮 noop 空转 + 第 5 轮终态回复，jev 每轮 continue（0.95）。
+  // 旧实现里 jev 主判成功即整轮旁路 heuristic、且 continue 清零计数，真实空转
+  // 会一路放行到终态成功（漏判死循环）。现在本地证据每轮照常累计，第 4 轮收口。
+  {
+    const projectRoot = createGitProject();
+    const gateway = await startTestGateway();
+    try {
+      const client = new StubLlmClient([...noopRoundScripts(4), { content: "任务完成", toolCalls: null }]);
+      const executor = new LlmTaskExecutor({
+        projectRoot,
+        createLlmClient: () => client,
+        maxToolRounds: 12,
+        jevDecision: makeJev(gateway),
+      });
+      const result = await executor.executeTask(buildInput(projectRoot));
+      assert.equal(result.success, false, "jev 持续 continue 时本地硬下限必须拦住真实空转");
+      assert.match(result.error ?? "", /无进展熔断|相同调用空转熔断/, "失败原因应为本地状态感知熔断");
+    } finally {
+      await gateway.close();
+      cleanup(projectRoot);
+    }
+  }
+
+  // B：显式回退。DEEPCODE_JEV_EVIDENCE_GUARD=0 逐字恢复 1454ea34 的「jeV 独占
+  // 去留权」契约——同一场景应由终态回复正常成功，硬熔断不得抢跑。
+  const previous = process.env.DEEPCODE_JEV_EVIDENCE_GUARD;
+  process.env.DEEPCODE_JEV_EVIDENCE_GUARD = "0";
+  {
+    const projectRoot = createGitProject();
+    const gateway = await startTestGateway();
+    try {
+      const client = new StubLlmClient([...noopRoundScripts(4), { content: "任务完成", toolCalls: null }]);
+      const executor = new LlmTaskExecutor({
+        projectRoot,
+        createLlmClient: () => client,
+        maxToolRounds: 12,
+        jevDecision: makeJev(gateway),
+      });
+      const result = await executor.executeTask(buildInput(projectRoot));
+      assert.equal(result.success, true, "回退开关下旧契约：jev continue 时硬熔断不得触发");
+      assert.equal(gateway.requests.length >= 4, true, "每轮工具执行前都应有 jev 决策请求");
+    } finally {
+      if (previous === undefined) delete process.env.DEEPCODE_JEV_EVIDENCE_GUARD;
+      else process.env.DEEPCODE_JEV_EVIDENCE_GUARD = previous;
+      await gateway.close();
+      cleanup(projectRoot);
+    }
   }
 });
 
@@ -708,6 +880,116 @@ test("P3. jev 不可达 → 回落 heuristic：同一空转场景仍由无进展
     assert.equal(result.success, false, "jev 不可用时兜底熔断必须生效");
     assert.match(result.error ?? "", /无进展熔断/, "兜底失败 reason 应为既有无进展熔断文案");
   } finally {
+    cleanup(projectRoot);
+  }
+});
+
+test("P4. jev 每轮误判 stop，但重复写同一文件 + bash 输出逐轮推进 → 进展证据门否决、不误杀", async () => {
+  const projectRoot = createGitProject();
+  // 每轮都返回高置信 stop：预取决策只含上一轮摘要，看不到本轮真实进展
+  const gateway = await startTestGateway(ALWAYS_STOP_BODY);
+  try {
+    const logFile = path.join(projectRoot, "progress.log");
+    // 关键：3 轮反复写同一个未跟踪文件，git status 行恒为 `?? progress.log`，
+    // 但文件内容在推进；bash 输出也逐轮不同。两者都是真实进展证据。
+    const scripts = [1, 2, 3].map((step) => ({
+      content: "",
+      toolCalls: [
+        { name: "bash" as const, args: { command: `echo poll-${step}` } },
+        { name: "write" as const, args: { file_path: logFile, content: `step ${step}\n` } },
+      ],
+    }));
+    const client = new StubLlmClient([...scripts, { content: "轮询完成，任务结束", toolCalls: null }]);
+    const executor = new LlmTaskExecutor({
+      projectRoot,
+      createLlmClient: () => client,
+      maxToolRounds: 12,
+      jevDecision: makeJev(gateway),
+    });
+    const result = await executor.executeTask(buildInput(projectRoot));
+    assert.equal(result.success, true, "本轮确有进展时 jev stop 必须被否决，任务正常结束");
+    assert.equal(fs.readFileSync(logFile, "utf8"), "step 3\n", "三轮写入必须真实落盘且状态推进");
+    assert.equal(gateway.requests.length, 3, "三轮有工具调用的轮次都应发起决策，且未被提前终止");
+  } finally {
+    await gateway.close();
+    cleanup(projectRoot);
+  }
+});
+
+test("P5. jev 每轮 stop 且本轮确实零进展 → 证据门不纵容，仍由 jev 终止", async () => {
+  const projectRoot = createGitProject();
+  const gateway = await startTestGateway(ALWAYS_STOP_BODY);
+  try {
+    const client = new StubLlmClient(noopRoundScripts(4));
+    const executor = new LlmTaskExecutor({
+      projectRoot,
+      createLlmClient: () => client,
+      maxToolRounds: 12,
+      jevDecision: makeJev(gateway),
+    });
+    const result = await executor.executeTask(buildInput(projectRoot));
+    assert.equal(result.success, false, "无进展证据时 jev stop 必须生效");
+    assert.match(result.error ?? "", /jev/, "失败 reason 必须注明 jev 判定来源");
+    assert.equal(gateway.requests.length, 1, "第 1 轮即终止，不应有后续决策请求");
+  } finally {
+    await gateway.close();
+    cleanup(projectRoot);
+  }
+});
+
+test("P6. jev 主判持续 continue 但调用与结果完全相同 → 真实死循环仍被本地熔断收口", async () => {
+  const projectRoot = createGitProject();
+  const gateway = await startTestGateway();
+  try {
+    // 真正死循环：逐字符相同的 bash 调用，且输出也完全相同（无任何状态推进）
+    const client = new StubLlmClient(
+      Array.from({ length: 6 }, () => ({
+        content: "",
+        toolCalls: [{ name: "bash", args: { command: "echo SAME" } }],
+      }))
+    );
+    const executor = new LlmTaskExecutor({
+      projectRoot,
+      createLlmClient: () => client,
+      maxToolRounds: 12,
+      jevDecision: makeJev(gateway),
+    });
+    const result = await executor.executeTask(buildInput(projectRoot));
+    assert.equal(result.success, false, "jeV 主判不得旁路真实死循环的本地收口");
+    assert.match(result.error ?? "", /相同调用空转熔断/, "应由相同调用空转熔断优先收口");
+  } finally {
+    await gateway.close();
+    cleanup(projectRoot);
+  }
+});
+
+test("P7. 回退开关 =0 时进展证据门关闭：P4 同场景由 jev stop 终止（旧契约）", async () => {
+  const previous = process.env.DEEPCODE_JEV_EVIDENCE_GUARD;
+  process.env.DEEPCODE_JEV_EVIDENCE_GUARD = "0";
+  const projectRoot = createGitProject();
+  const gateway = await startTestGateway(ALWAYS_STOP_BODY);
+  try {
+    const logFile = path.join(projectRoot, "progress.log");
+    const client = new StubLlmClient([
+      {
+        content: "",
+        toolCalls: [{ name: "write", args: { file_path: logFile, content: "step 1\n" } }],
+      },
+      { content: "任务完成", toolCalls: null },
+    ]);
+    const executor = new LlmTaskExecutor({
+      projectRoot,
+      createLlmClient: () => client,
+      maxToolRounds: 12,
+      jevDecision: makeJev(gateway),
+    });
+    const result = await executor.executeTask(buildInput(projectRoot));
+    assert.equal(result.success, false, "回退后证据门关闭，jev stop 按旧契约直接终止");
+    assert.match(result.error ?? "", /jev/);
+  } finally {
+    if (previous === undefined) delete process.env.DEEPCODE_JEV_EVIDENCE_GUARD;
+    else process.env.DEEPCODE_JEV_EVIDENCE_GUARD = previous;
+    await gateway.close();
     cleanup(projectRoot);
   }
 });

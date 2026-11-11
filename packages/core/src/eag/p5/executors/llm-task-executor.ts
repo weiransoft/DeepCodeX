@@ -35,6 +35,7 @@ import { ToolExecutor } from "../../../tools/executor";
 import { getTools } from "../../../prompt";
 import { clearSessionState, getSnippet } from "../../../common/state";
 import { clearSessionWorkingDir } from "../../../tools/bash-handler";
+import { captureWorkspaceProgressSnapshot } from "../../../common/workspace-progress";
 import type { ToolCallExecution } from "../../../common/tool-types";
 import type { LLMClient, LLMToolDefinition, LLMToolCall } from "../../../providers/llm-provider";
 import type { SessionMessage } from "../../../session";
@@ -1136,6 +1137,9 @@ export class LlmTaskExecutor implements P5TaskExecutor {
       // jevEnabled=false，全程走 heuristic 硬兜底（既有熔断行为不变）。
       const jev = this.jevDecision;
       const jevEnabled = jev !== null && jev.enabled;
+      // 2026-11-10 空转/误判双修：默认开启「本轮进展证据门 + 状态感知硬下限」。
+      // =0 逐字回退到 jev 主判独占的旧契约（供 A/B 对照与线上应急回退）。
+      const jevEvidenceGuardEnabled = process.env.DEEPCODE_JEV_EVIDENCE_GUARD !== "0";
       const jevRoundObservations: JevTurnObservation[] = [];
       let pendingJevRound: { round: number; promise: Promise<JevTurnDecision> } | null = null;
       const foldLimitFailure = (
@@ -1782,12 +1786,38 @@ export class LlmTaskExecutor implements P5TaskExecutor {
           );
         }
 
+        // ======== 本轮进展证据（状态感知，2026-11-10 空转/误判双修） ========
+        // jev 决策在工具执行「前」预取，摘要只含上一轮及更早的观测——不含本轮
+        // 真实输出、结果签名和工作区变化。若直接据此 stop，会把「重复 bash 轮询
+        // 但输出/状态持续推进」误判为死循环；若 jev 持续 continue 就完全旁路本地
+        // 熔断，真正的空转又会一路烧到 maxToolRounds。这里统一采集本轮可观测
+        // 证据：既作 jev stop 的证据门，也作本地状态感知熔断的输入（每轮只采一次）。
+        const resultFingerprint = this.computeResultFingerprint(executions);
+        const batchFingerprint = response.toolCalls
+          .map((tc) => `${tc.name}:${this.normalizeToolArgsFingerprint(tc.argumentsJson)}`)
+          .join("||");
+        const progressSnapshot = this.captureWorkspaceSnapshot(input.projectRoot);
+        const workspaceChanged = progressSnapshot !== lastProgressSnapshot;
+        const isFirstResult = lastResultFingerprint === null;
+        const resultChanged = !isFirstResult && resultFingerprint !== lastResultFingerprint;
+        let hasSuccessfulWrite = false;
+        for (let i = 0; i < executions.length; i += 1) {
+          const name = response.toolCalls[i]?.name;
+          if ((name === "write" || name === "edit" || name === "UpdatePlan") && executions[i]!.result?.ok === true) {
+            hasSuccessfulWrite = true;
+            break;
+          }
+        }
+        // 任一证据成立即说明本轮确有进展，不能仅凭「调用看起来重复」收口。
+        const hasProgressEvidence = hasSuccessfulWrite || workspaceChanged || resultChanged;
+
         // ======== jev 循环判定 join（2026-11-10 §4.4） ========
         // 本轮决策已在工具执行期间并行预取，此处 join（通常已就绪，开销 ≈ 0）。
-        // jev 主判：stop（置信度≥0.5）→ 任务失败返回；continue → 硬阈值计数清零
-        // （stale 计数不得跨主判窗口触发，架构师审查 P0-1 同源语义）。
+        // 2026-11-10 修复：预取输入不含本轮证据，故 stop 必须经本地进展证据门
+        // 复核；continue 不再清空本地硬阈值计数——否则每轮 continue 都重置预算，
+        // 真实空转会被 jev 一路放行到全局轮数上限。
         // 决策失败（不可用/超时/契约不符）→ jevRoundAnswers 保持 null，
-        // 落入下方 heuristic 硬兜底分支（既有熔断逻辑原样生效）。
+        // 下方状态感知硬下限仍照常执行（jev 不可用时零回归）。
         let jevRoundAnswers: Readonly<Record<string, JevAnswer>> | null = null;
         if (pendingJevRound != null && pendingJevRound.round === currentRound) {
           const roundDecision = await pendingJevRound.promise;
@@ -1798,25 +1828,36 @@ export class LlmTaskExecutor implements P5TaskExecutor {
             jevRoundAnswers = roundAnswers;
             const continueLoop = readChoiceAnswer(roundAnswers, "continue_loop");
             if (continueLoop != null && continueLoop.choice === "stop" && continueLoop.confidence >= 0.5) {
-              const jevStopError =
-                `jev 决策模型判定工具循环应终止（置信度 ${continueLoop.confidence.toFixed(2)}）：` +
-                `近期轮次重复无产出尝试。任务提前结束，交回编排器决定 fix/abort。`;
-              this.log(jevStopError, "warn");
-              emitProgress("task_end", "执行失败：jev 判定循环应终止", jevStopError, currentRound);
-              return this.failure(
-                jevStopError,
-                llmRequests,
-                sawUsage,
-                inputTokensTotal + outputTokensTotal,
-                estimatedCharsTotal
-              );
+              if (jevEvidenceGuardEnabled && hasProgressEvidence) {
+                // 预取决策只看到上一轮摘要：本轮确有可观测进展时否决 stop，
+                // 避免「重复轮询 bash 但输出/状态在推进」被误判成死循环。
+                this.log(
+                  `jev stop 被本轮进展证据否决（round ${currentRound}）：` +
+                    `成功写入=${hasSuccessfulWrite} 工作区变化=${workspaceChanged} 结果变化=${resultChanged}。` +
+                    `预取决策仅含上一轮摘要，本轮确有进展，循环继续。`,
+                  "warn"
+                );
+              } else {
+                const jevStopError =
+                  `jev 决策模型判定工具循环应终止（置信度 ${continueLoop.confidence.toFixed(2)}）：` +
+                  `近期轮次重复无产出尝试。任务提前结束，交回编排器决定 fix/abort。`;
+                this.log(jevStopError, "warn");
+                emitProgress("task_end", "执行失败：jev 判定循环应终止", jevStopError, currentRound);
+                return this.failure(
+                  jevStopError,
+                  llmRequests,
+                  sawUsage,
+                  inputTokensTotal + outputTokensTotal,
+                  estimatedCharsTotal
+                );
+              }
+            } else if (!jevEvidenceGuardEnabled) {
+              // 旧契约回退（DEEPCODE_JEV_EVIDENCE_GUARD=0）：continue 清零计数与指纹基线
+              identicalCallStreak = 0;
+              lastCallFingerprint = null;
+              noProgressStreak = 0;
+              explorationStreak = 0;
             }
-            // continue：清零硬阈值计数与指纹基线（heuristic 兜底若在后续轮触发，
-            // 以 jev 主判结束时刻为新的预算窗口起算）
-            identicalCallStreak = 0;
-            lastCallFingerprint = null;
-            noProgressStreak = 0;
-            explorationStreak = 0;
           }
         }
         // join 后立即检查中止信号（P1-3 同源：决策等待期间用户/编排器可能已请求中止）
@@ -1832,7 +1873,6 @@ export class LlmTaskExecutor implements P5TaskExecutor {
         }
 
         if (jevRoundAnswers != null) {
-          // jev 主判分支：硬编码熔断本轮不参与判定（循环继续/进展已由 jev 判定）。
           // progress score 仅作观测记录（评分档 legend 与标准差信息供诊断）。
           const progressAnswer = readScoreAnswer(jevRoundAnswers, "progress");
           if (progressAnswer != null) {
@@ -1842,21 +1882,21 @@ export class LlmTaskExecutor implements P5TaskExecutor {
               "info"
             );
           }
-        } else {
-          // ======== heuristic 硬兜底（jev 不可用/失败/禁用时的既有熔断逻辑，原样保留） ========
-          // 结果指纹提前计算（2026-11-10 修复"重复调用但输出/状态有变化被误熔断"）：
+        }
+        // 状态感知硬下限：jev 不可用，或默认开启进展证据门时，始终执行。
+        // 此前 jev 主判成功即整轮旁路本熔断、且 continue 还清零计数——真实空转
+        // 可一路烧到 maxToolRounds；改为每轮用本轮真实结果 + 工作区证据判定后，
+        // jev 主判只额外提供加速停止信号，不再独占去留权。
+        if (jevRoundAnswers == null || jevEvidenceGuardEnabled) {
+          // ======== 相同调用空转熔断（仅「调用相同且结果也无变化」才计入） ========
+          // resultFingerprint / batchFingerprint 在上方「本轮进展证据」块统一计算，
+          // 此处直接复用（勿重复哈希，也勿改用压缩后回传给模型的消息内容——
+          // 第三级压缩会省略最老 tool 结果，指纹随之漂移会让熔断永不触发，E7）。
           // 相同调用熔断原本只看「工具名+参数」，不看执行结果——对有状态命令
           // （轮询等待服务就绪、tail 进度、重试直到成功）是误杀：模型重复同一
           // 条等待命令是合法行为，输出/状态确实在变化。修复后：仅当「调用相同
           // 且结果指纹也无变化」才计入相同调用空转；调用相同但结果变化时交给
           // 下方双轨无进展熔断（轨道 B 专门治理"输出变化但工作区无变化"）。
-          // 注意：指纹必须基于**原始完整** response.toolCalls 计算，绝不能用压缩后
-          // 回传给模型的消息内容——第三级压缩会省略最老 tool 结果，若指纹受其影响，
-          // 同一重复调用的指纹会随压缩进度漂移、熔断永远不触发（E7/熔断回归防线）。
-          const resultFingerprint = this.computeResultFingerprint(executions);
-          const batchFingerprint = response.toolCalls
-            .map((tc) => `${tc.name}:${this.normalizeToolArgsFingerprint(tc.argumentsJson)}`)
-            .join("||");
           const resultUnchangedForCall = lastResultFingerprint !== null && resultFingerprint === lastResultFingerprint;
           if (batchFingerprint === lastCallFingerprint && resultUnchangedForCall) {
             identicalCallStreak += 1;
@@ -1886,10 +1926,9 @@ export class LlmTaskExecutor implements P5TaskExecutor {
           // 由「相同调用空转熔断」优先收口，本熔断不抢先（不回归 Z9 语义）。
           // 2026-11-10：相同调用但结果变化时相同调用熔断不再触发，此类轮次落到本
           // 判定——结果变化 → 轨道 A 断、轨道 B（探索型）计数，语义分层保持一致。
-          // resultFingerprint 已在相同调用判定前计算（复用，勿重复哈希）。
+          // resultFingerprint / batchFingerprint / progressSnapshot / isFirstResult /
+          // hasSuccessfulWrite 均在上方「本轮进展证据」块统一计算，此处直接复用。
           // 终态轮（response.toolCalls.length === 0）已在上方 return success，不会到这里。
-          const progressSnapshot = this.captureWorkspaceSnapshot(input.projectRoot);
-          const isFirstResult = lastResultFingerprint === null;
           const resultUnchanged = isFirstResult || resultFingerprint === lastResultFingerprint;
           // git 不可用时 progressSnapshot / lastProgressSnapshot 恒为 null，此式恒 true，
           // 等价于仅按结果指纹判定——轨道 B 禁用、轨道 A 阈值 +1，见 effectiveNoProgressLimit。
@@ -1897,14 +1936,6 @@ export class LlmTaskExecutor implements P5TaskExecutor {
 
           // 成功写入类工具（write/edit/UpdatePlan 且 ok=true）= 真实产出：打断轨道 B
           // （探索型计数），避免把「边写边探索」误判为空转。bash 是否落盘由快照判定。
-          let hasSuccessfulWrite = false;
-          for (let i = 0; i < executions.length; i += 1) {
-            const name = response.toolCalls[i]?.name;
-            if ((name === "write" || name === "edit" || name === "UpdatePlan") && executions[i]!.result?.ok === true) {
-              hasSuccessfulWrite = true;
-              break;
-            }
-          }
           // 全 deny 轮豁免：被权限守卫拒绝属于「拒绝风暴」（DENIAL_STORM_LIMIT=6，
           // 按目标指纹分组）的管辖范围——反复撞不同的墙模型往往会自行改道，且
           // 无进展阈值(4) < 风暴阈值(6)，若把 deny 轮也计入会架空风暴的
@@ -1970,7 +2001,7 @@ export class LlmTaskExecutor implements P5TaskExecutor {
               estimatedCharsTotal
             );
           }
-        } // heuristic 硬兜底分支结束（jev 主判分支见上方 jevRoundAnswers != null）
+        } // 状态感知硬下限分支结束（DEEPCODE_JEV_EVIDENCE_GUARD=0 时退回 jev 独占旧契约）
 
         // ======== while 循环尾部：全局轮数 +1、段内轮数 +1（2026-10-14 P0-1） ========
         // 原 for 循环由 `round += 1` 自增，while 需手动推进；折叠时 segmentRoundsUsed
@@ -2111,22 +2142,9 @@ export class LlmTaskExecutor implements P5TaskExecutor {
    * 仓库是合法场景（临时项目、纯只读任务），据此判空转会误杀真实工作。
    */
   private captureWorkspaceSnapshot(projectRoot: string): string | null {
-    try {
-      const stdout = execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], {
-        cwd: projectRoot,
-        timeout: GIT_STATUS_TIMEOUT_MS,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      });
-      return stdout
-        .split("\n")
-        .map((line) => line.trimEnd())
-        .filter((line) => line.length > 0)
-        .sort()
-        .join("\n");
-    } catch {
-      return null;
-    }
+    // 快照含变更文件内容摘要：反复写同一文件（计数器/进度日志）时，
+    // `git status` 行不变但状态确实推进，不能据此判「工作区无变化」。
+    return captureWorkspaceProgressSnapshot(projectRoot, GIT_STATUS_TIMEOUT_MS);
   }
 
   /**

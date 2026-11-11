@@ -23,7 +23,7 @@
  */
 
 import * as crypto from "node:crypto";
-import * as childProcess from "node:child_process";
+import { captureWorkspaceProgressSnapshot } from "../../common/workspace-progress";
 import type {
   LoopEngineeringConfig,
   LogCallback,
@@ -124,21 +124,17 @@ export function stableFingerprint(value: unknown): string {
 }
 
 /**
- * 捕获工作区快照（git status --porcelain）。
+ * 捕获工作区快照（git status + 变更文件内容摘要）。
+ *
+ * 2026-11-10 修复「状态推进被误判为空转」：只看路径/状态码时，反复写同一个
+ * 未跟踪文件（计数器、进度日志、状态文件）恒为 `?? file`，但内容确实在变，
+ * NoProgressDetector 会把真实推进计成「工作区无变化」并在第 4/6 轮熔断。
+ * 共享快照工具在状态行之外附加首尾内容摘要，让状态推进成为可核验证据。
+ *
  * 非 git 仓库 / git 不可用 / 超时 / projectRoot 缺失 → 返回 null（诚实降级为单轨）。
  */
 export function captureWorkspaceSnapshot(projectRoot?: string): string | null {
-  if (!projectRoot) return null;
-  try {
-    return childProcess.execSync("git status --porcelain", {
-      cwd: projectRoot,
-      encoding: "utf8",
-      timeout: 3000,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-  } catch {
-    return null;
-  }
+  return captureWorkspaceProgressSnapshot(projectRoot, 3000);
 }
 
 /**

@@ -891,6 +891,46 @@ export class TurnGuard {
   }
 
   /**
+   * jev 主判期间的本地硬下限（2026-11-10 空转/误判双修）。
+   *
+   * jev 决策在工具执行前预取，且健康时 decideBeforeIteration 会短路放行。若 jev
+   * 持续误判 continue，真实死循环（相同工具+相同参数+相同结果反复执行）或连续
+   * 工具全失败会绕过全部本地护栏，一路烧到用户手动停止——「始终等待却没有进展」。
+   * 本方法只读取本轮已落地的可观测证据（签名队列含结果维度、连续失败计数），
+   * 不含任何 jev 主观判据，也不查空转（空轮由 jev 判定 + nudge 自愈治理）。
+   * 结果签名逐轮变化时 detectModelLoop 不会命中，轮询/等待类正常重复不受影响。
+   *
+   * 输出一律为可恢复的 consult_*，不产生 terminate_model_loop：jev 主判语境下
+   * 不因远程模型放行期累积的签名直接硬终止会话。
+   *
+   * DEEPCODE_JEV_EVIDENCE_GUARD=0 可回退到「jeV 独占去留权」的旧契约。
+   */
+  decideJevHardFloor(): LoopGuardTurnDecision {
+    if (process.env.DEEPCODE_JEV_EVIDENCE_GUARD === "0") {
+      return { allow: true, reason: "" };
+    }
+    const loopInfo = this.getLoopInfo();
+    if (loopInfo) {
+      return {
+        allow: false,
+        action: "consult_user_loop_stop",
+        reason:
+          `本地硬下限：工具 "${loopInfo.toolName}" 连续 ${loopInfo.repeatCount} 次以相同参数执行且结果无变化。` +
+          `jev 主判判定继续，但本地未观察到任何进展；已暂停执行等待确认，请调整指令或回复继续。`,
+      };
+    }
+    if (this.consecutiveFailedTurns >= this.config.maxConsecutiveFailedTurns) {
+      return {
+        allow: false,
+        action: "consult_user_consecutive_failures",
+        reason:
+          `本地硬下限：已连续 ${this.consecutiveFailedTurns} 轮工具调用全部失败，` + `继续重试大概率无法自行解决。`,
+      };
+    }
+    return { allow: true, reason: "" };
+  }
+
+  /**
    * 尝试注入空轮 nudge（校准计划阶段 C：NG1-NG7）。
    *
    * 语义：jev 主判判定本轮空转（is_empty_turn=yes 且置信度达标）且本地复核

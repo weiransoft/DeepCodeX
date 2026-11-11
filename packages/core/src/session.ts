@@ -4533,10 +4533,17 @@ ${agentInstructions}
     if (result.ok) {
       // 进入/恢复 jev 主判（模式切换内含计数清零 + 签名队列清空，P0-1）
       if (!guard.isJevPrimary()) guard.setJevPrimary(true);
-      return {
-        ...guard.evaluateJevDecision(result.answers),
+      const jevDecision = guard.evaluateJevDecision(result.answers);
+      const verdict: LoopGuardTurnDecision & { jevEmptyTurnVerdict?: boolean } = {
+        ...jevDecision,
         jevEmptyTurnVerdict: isJevEmptyTurnVerdict(result.answers),
       };
+      if (!jevDecision.allow) return verdict;
+      // 2026-11-10：jev 放行不等于本地无证据。预取决策不含本轮真实输出，
+      // 且主判期间 heuristic 短路——叠加本地硬下限复核「工具+参数+结果」死循环
+      // 与连续全失败，防 jev 误 continue 造成始终等待却无进展的失控循环。
+      const floor = guard.decideJevHardFloor();
+      return floor.allow ? verdict : floor;
     }
     // 决策失败 → 切 heuristic 硬兜底（切换内含计数清零 + 降级首轮禁硬终止）
     if (guard.isJevPrimary()) guard.setJevPrimary(false);
