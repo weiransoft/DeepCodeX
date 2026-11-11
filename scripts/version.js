@@ -55,10 +55,10 @@ function isBumpType(v) {
 }
 
 function runSilent(cmd, args) {
+  // 安全：不启用 shell，命令与参数以数组形式直接传递，避免 shell 注入
   const result = spawnSync(cmd, args, {
     cwd: root,
     encoding: "utf-8",
-    shell: true,
   });
   if (result.status !== 0) {
     return null;

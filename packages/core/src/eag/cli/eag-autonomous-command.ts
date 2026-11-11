@@ -8,6 +8,9 @@
  * 1. 参数解析：从命令字符串 `/eag-autonomous --goal "<目标>" --max-iterations 10 --confirmation smart`
  *    提取 goal / max-iterations / confirmation / test-command / stop-when 等参数
  * 2. 请求装配：将解析后的参数映射为 AutonomousRunRequest（对齐 §4.1 接口契约）
+ *
+ * 说明：EagAutonomousOutcome 定义在共享安全层 eag-autonomous-guard.ts 中，
+ * 本模块通过下行 re-export 暴露给既有消费方，避免类型重复定义。
  * 3. 编排调度：委托 AutonomousOrchestrator.run() 执行 4 阶段循环
  * 4. 结果渲染：将 AutonomousRunResult 格式化为人类可读的 Markdown 报告
  *

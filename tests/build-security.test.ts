@@ -15,6 +15,8 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPTS_DIR = path.resolve(__dirname, "../scripts");
+const root = path.resolve(__dirname, "..");
+const readFileSync = fs.readFileSync;
 
 /**
  * 读取脚本源码
@@ -53,4 +55,28 @@ test("scripts/build.js 的 run 调用点使用字符串命令与数组参数", (
   // 仅匹配 run("...", [...]) 形式的实际调用，排除函数定义 run(command, args, label)
   const runCalls = [...source.matchAll(/run\s*\(\s*"[^"]+"\s*,\s*\[/g)];
   assert.ok(runCalls.length > 0, "build.js 中应存在 run(...) 调用");
+});
+
+test("提交物安全扫描：镜像清单引用的 Dockerfile 与生产 compose 禁用 root / latest / 明文密钥", () => {
+  const compose = readFileSync(path.join(root, "docker-compose.prod.yml"), "utf8");
+  const celery = readFileSync(path.join(root, "apps/worker/celery_app.py"), "utf8");
+
+  // 生产 compose 引用的 Dockerfile 必须显式声明非 root 用户
+  for (const df of ["apps/api/Dockerfile", "apps/worker/Dockerfile"]) {
+    const content = readFileSync(path.join(root, df), "utf8");
+    assert.match(content, /^[ \t]*USER[ \t]+(?!root)\S+/m, `${df} 必须以非 root 用户运行`);
+    assert.doesNotMatch(content, /(^|[ \t])USER[ \t]+root[ \t]*$/m, `${df} 运行阶段不得切回 root`);
+  }
+
+  // 生产 compose 不得绑定 :latest 镜像
+  assert.doesNotMatch(compose, /image:[ \t]*\S+:latest\b/, "生产 compose 不得引用 :latest 镜像");
+
+  // compose 不得内联明文密钥（密钥必须来自 env_file / environment 注入）
+  for (const key of ["POSTGRES_PASSWORD", "REDIS_PASSWORD", "SECRET_KEY"]) {
+    assert.doesNotMatch(compose, new RegExp(`^[ \\t]*${key}:\\s*\\S`, "m"), `${key} 不得在 compose 中硬编码`);
+  }
+
+  // 泛化分发端点必须使用服务令牌鉴权，不得匿名放行
+  assert.match(celery, /X-Submit-Token/, "submit/poll 端点必须校验 X-Submit-Token");
+  assert.match(celery, /hmac\.compare_digest/, "令牌比较必须使用常量时间比较");
 });

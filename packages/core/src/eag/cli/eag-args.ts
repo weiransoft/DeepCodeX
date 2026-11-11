@@ -49,13 +49,89 @@ function unescapeDoubleQuoted(raw: string): string {
 }
 
 /**
+ * argv 数组形态解析结果（T-025：规划器以 argv 数组下发指令的场景）。
+ *
+ * - command：首个非选项 token（子命令名，如 "compact" / "context"）
+ * - flags：`--key value` / `--key` 解析出的参数表（与字符串形态同一取值语义）
+ * - positional：command 之后未被选项吸收的裸 token 序列；
+ *   当 command 之后没有任何裸 token 时，回退为 [command] 本身
+ *   （保证调用方始终能在 positional 中读到命令词，兼容旧断言口径）
+ */
+export interface EagArgvParseResult {
+  command: string;
+  flags: Record<string, string | true>;
+  positional: string[];
+}
+
+/**
+ * 从 argv token 数组解析命令、选项与位置参数（T-025 新增重载）。
+ *
+ * 取值语义与字符串形态一致：`--key value` 吸收紧随其后的非 `--` token 为值；
+ * 无值（后随另一选项或结束）记为 flag（true）；`--key=value` 内联值同样支持。
+ *
+ * @param argv 完整参数数组（含命令词）
+ * @returns { command, flags, positional }
+ */
+function parseEagArgvTokens(argv: ReadonlyArray<string>): EagArgvParseResult {
+  const tokens = argv.filter((t) => t.length > 0);
+  const command = tokens[0] ?? "";
+  const flags: Record<string, string | true> = {};
+  const rest: string[] = [];
+
+  for (let i = 1; i < tokens.length; i += 1) {
+    const token = tokens[i]!;
+    if (token.startsWith("--")) {
+      const eq = token.indexOf("=");
+      const key = eq === -1 ? token.slice(2) : token.slice(2, eq);
+      if (key.length === 0) continue;
+      let value: string | true;
+      if (eq !== -1) {
+        value = token.slice(eq + 1);
+      } else {
+        const next = tokens[i + 1];
+        if (next !== undefined && !next.startsWith("--")) {
+          value = next;
+          i += 1; // 吸收值 token，避免其混入 positional
+        } else {
+          value = true;
+        }
+      }
+      if (!(key in flags)) flags[key] = value;
+    } else {
+      rest.push(token);
+    }
+  }
+
+  return { command, flags, positional: rest.length > 0 ? rest : command.length > 0 ? [command] : [] };
+}
+
+/**
  * 从命令参数字符串中解析全部 `--key value` 参数对。
  *
  * @param argsPart 已剥离命令前缀的参数字符串
  * @returns 参数映射表：值为字符串（引号/裸值）或 true（flag 形式）；
  *          重复参数保留首次匹配
  */
-export function parseEagArgs(argsPart: string): Record<string, string | true> {
+export function parseEagArgs(argsPart: string): Record<string, string | true>;
+/**
+ * 从 argv token 数组解析命令、选项与位置参数（T-025 重载）。
+ *
+ * @param argv 完整参数数组（含命令词）
+ * @returns { command, flags, positional }
+ */
+export function parseEagArgs(argv: ReadonlyArray<string>): EagArgvParseResult;
+export function parseEagArgs(
+  input: string | ReadonlyArray<string>
+): Record<string, string | true> | EagArgvParseResult {
+  // 用 typeof 而非 Array.isArray 做判别：Array.isArray 对 readonly string[] 的
+  // false 分支收窄不彻底（TS 已知行为），typeof 能把两分支分别收窄为 string / readonly string[]
+  if (typeof input === "string") {
+    return parseEagArgString(input);
+  }
+  return parseEagArgvTokens(input);
+}
+
+function parseEagArgString(argsPart: string): Record<string, string | true> {
   const argPattern = new RegExp(EAG_ARG_PATTERN_SOURCE, "g");
   const args: Record<string, string | true> = {};
 
