@@ -19,6 +19,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import mlx_voice_server as server  # noqa: E402
 from mlx_voice_server import (  # noqa: E402
     TTS_MAX_TEXT_CHARS,
     VOICE_PRESETS,
@@ -28,6 +29,7 @@ from mlx_voice_server import (  # noqa: E402
     split_long_text,
     time_stretch_wsola,
     trim_degenerate_tail,
+    voice_seed_key,
 )
 
 failures: list[str] = []
@@ -98,8 +100,55 @@ def test_voice_presets() -> None:
     check("sinan-bright 可切换", resolve_speaker("sinan-bright")[0] == "vivian")
     check("原预置音色仍可用", resolve_speaker("vivian") == ("vivian", None))
     desc = "成熟女性，中低音区"
-    check("自由描述回落为 instruct", resolve_speaker(desc) == ("vivian", desc))
+    check(
+        "自由描述归一为稳定预设",
+        resolve_speaker(desc) == VOICE_PRESETS[server.STABLE_VOICE_FALLBACK],
+        f"实际 {resolve_speaker(desc)!r}",
+    )
     check("预设表有推荐与备选", "sinan" in VOICE_PRESETS and "sinan-bright" in VOICE_PRESETS)
+
+
+def test_stable_voice_identity() -> None:
+    """第九轮：自由描述不再逐块重新诠释，且旧行为可逐字回退
+
+    契约变更不等于刷绿：同一组描述同时断言「新默认」与「关开关后的旧默认」，
+    关掉开关必须拿到逐字一致的 (vivian, 原描述)，不能只把期望值改成新结果。
+    """
+    desc = "20岁女性，高音区，语速偏快，气息柔和，耐心，句尾轻收（slow pace, soft）"
+    other = "少年女性，中音区，语速平稳，吐字清晰"
+    stable = VOICE_PRESETS[server.STABLE_VOICE_FALLBACK]
+
+    check("长描述归一到稳定预设", resolve_speaker(desc) == stable)
+    check("不同描述归一到同一身份", resolve_speaker(desc) == resolve_speaker(other))
+    check(
+        "描述里增删字词不改变身份",
+        resolve_speaker(desc) == resolve_speaker(desc + " "),
+    )
+    check("预设名不受归一影响", resolve_speaker("sinan") == VOICE_PRESETS["sinan"])
+    check("预置 speaker 名不受归一影响", resolve_speaker("vivian") == ("vivian", None))
+
+    # 种子：已有预设/speaker 路径必须逐字不变；自由描述归一后与显式写预设同键，
+    # 这样第九轮的全部真机 A/B 对「配置写 sinan」和「代码兜底归一」都成立。
+    check("预设名种子逐字保持", voice_seed_key("sinan") == "sinan")
+    check("大小写写法种子逐字保持", voice_seed_key("SINAN") == "SINAN")
+    check("speaker 名种子逐字保持", voice_seed_key("vivian") == "vivian")
+    check(
+        "自由描述归一后与预设同种子",
+        voice_seed_key(desc) == voice_seed_key(server.STABLE_VOICE_FALLBACK),
+    )
+
+    original = server.STABLE_VOICE_IDENTITY
+    try:
+        server.STABLE_VOICE_IDENTITY = False
+        check(
+            "回退开关恢复旧行为（A/B 对照）",
+            resolve_speaker(desc) == ("vivian", desc),
+            f"实际 {resolve_speaker(desc)!r}",
+        )
+        check("回退开关恢复旧种子键", voice_seed_key(desc) == desc)
+    finally:
+        server.STABLE_VOICE_IDENTITY = original
+    check("回退后重新生效新默认", resolve_speaker(desc) == stable)
 
 
 def test_stream_budget_unchanged() -> None:
@@ -162,6 +211,8 @@ test_wsola_keeps_pitch()
 test_wsola_edges()
 print("=== 音色预设 ===")
 test_voice_presets()
+print("=== 稳定音色身份（第九轮） ===")
+test_stable_voice_identity()
 print("=== 生成上限回归 ===")
 test_stream_budget_unchanged()
 print("=== 退化静音裁剪 ===")

@@ -67,6 +67,21 @@ OUT = Path("/tmp/dcx-longtext-probe")
 TNS = True
 # 短块句内静音上限（P1，默认关）：请求级 {"shortGap": true} 只开本次。
 SHORT_GAP = False
+# 段级感知对齐（第十轮，服务端默认开）。探针缺省跟随生产；`--no-align`
+# 只在请求体里关掉本次，不改服务端环境变量，因此一次进程即可 A/B。
+PERCEPTUAL_ALIGN = True
+# 第十六轮：请求级响度口径（v12 有声帧 RMS / v14 integrated gated LUFS）。
+# 缺省 None = 跟随服务端当前默认；显式传值只影响本次请求，便于同一 sidecar
+# 上跑官方门禁 A/B，不改服务端环境变量。
+ALIGN_PROFILE_REQ: str | None = None
+# 第十七轮：请求级覆盖慢变响度整形与双口径语速折中。None = 跟随服务端默认，
+# 显式传值只影响本次请求，便于同一 sidecar 跑官方门禁 A/B。
+SLOW_LEVELING_REQ: bool | None = None
+SLOW_LEVELING_STRENGTH_REQ: float | None = None
+DUAL_RATE_ALPHA_REQ: float | None = None
+
+# 长时平均谱频带（Hz）：比谱质心更抗单字/音素差异，用于观察块间音色亮度
+LTAS_BANDS = (0, 1000, 3000, 8000, 12000)
 
 
 def spoken(text: str) -> str:
@@ -77,6 +92,22 @@ def tts_payload(text: str) -> dict:
     payload = {"text": text, "engine": ENGINE, "voice": VOICE, "speed": SPEED, "tns": TNS}
     if SHORT_GAP:
         payload["shortGap"] = True
+    if not PERCEPTUAL_ALIGN:
+        # 只关本次请求，服务端全局变量不动：同一 sidecar 即可做第十轮 A/B
+        payload["perceptualAlign"] = False
+    if NO_INSTRUCT:
+        # 第十五轮：voice / 种子不变，只把 instruct 置空，验证「去掉风格指令」
+        # 后官方门禁（语速/F0/响度/静音）是否仍守得住
+        payload["instructOverride"] = ""
+    if ALIGN_PROFILE_REQ is not None:
+        # 第十六轮：只覆盖本次请求的响度口径，服务端默认不动
+        payload["alignProfile"] = ALIGN_PROFILE_REQ
+    if SLOW_LEVELING_REQ is not None:
+        payload["slowLeveling"] = SLOW_LEVELING_REQ
+    if SLOW_LEVELING_STRENGTH_REQ is not None:
+        payload["slowLevelingStrength"] = SLOW_LEVELING_STRENGTH_REQ
+    if DUAL_RATE_ALPHA_REQ is not None:
+        payload["dualRateAlpha"] = DUAL_RATE_ALPHA_REQ
     return payload
 
 STRONG = set("。！？!?；;…")
@@ -93,6 +124,15 @@ MIN_BLOCK_UNITS = 10
 # 结构感知分块（2026-11-07 P0）：默认关；`--atomic` 或由矩阵探针设置。
 # 关闭时 frontend_blocks() 走 031f1cc2 原实现，音频与切分逐字可复现。
 ATOMIC = False
+
+# 稳态分块（2026-11-11 第十四轮）：默认关，只在 `--steady` 时打开。
+# 生产前端由 useVoiceTalk 显式注入 steadyBlocks=true；门禁默认仍测旧基线，
+# 用 `--steady` 单独验证新分块不会把官方阈值跑红。**阈值文件始终不改**。
+STEADY = False
+STEADY_FIRST_BLOCK_CHARS = 32
+STEADY_MIN_TAIL_CHARS = 30
+# 第十五轮：请求级关闭 instruct 的门禁对照（默认关，只做 A/B，不改生产默认）
+NO_INSTRUCT = False
 
 TEXTS = {
     "pure_cn": (
@@ -138,6 +178,22 @@ SOUL_CONFIG = Path.home() / ".deepcode/soul/config.json"
 
 def sidecar_token() -> str:
     return str(json.loads(SOUL_CONFIG.read_text(encoding="utf-8"))["voice"]["token"])
+
+
+def production_voice_config() -> dict[str, Any]:
+    """读真实生产配置，避免门禁只测「基线参数」而漏掉用户实际用的音色/语速。
+
+    2026-11-08 第九轮：生产 `voice` 是一段 VoiceDesign 风格长描述、`speed=1.35`，
+    而本探针默认硬编码 `sinan/1.2`。同一条 316 字语料，生产配置实测单元语速
+    极差 **14.64%**，基线只有 **0.87%** —— 门禁全绿却掩盖了真机问题。
+    缺字段时保留基线值；文件损坏直接抛错，不静默退回基线。
+    """
+    voice_cfg = json.loads(SOUL_CONFIG.read_text(encoding="utf-8")).get("voice", {})
+    return {
+        "engine": str(voice_cfg.get("engine") or ENGINE),
+        "voice": str(voice_cfg.get("voice") or VOICE),
+        "speed": float(voice_cfg.get("speed") or SPEED),
+    }
 
 
 _HEADERS: dict[str, str] | None = None
@@ -265,16 +321,60 @@ def balance_blocks(blocks: list[str]) -> list[str]:
     return out
 
 
-def frontend_blocks(text: str, atomic: bool | None = None) -> list[str]:
+def resplit_steady_pair(prev: str, short: str, min_chars: int, limit: int) -> list[str] | None:
+    """复刻前端 `resplitSteadyPair`：把过短尾块与倒数第二块按标点重划。"""
+    merged = prev + short
+    if len(merged) <= limit:
+        return [merged]
+    lo = max(min_chars, len(merged) - limit)
+    hi = min(limit, len(merged) - min_chars)
+    if lo > hi:
+        return None
+    middle = len(merged) // 2
+    cuts = sorted(
+        range(lo, hi + 1),
+        key=lambda c: (0 if (merged[c - 1] in PUNCT) else 1, abs(c - middle)),
+    )
+    c = cuts[0]
+    return [merged[:c], merged[c:]]
+
+
+def steady_tail(blocks: list[str]) -> list[str]:
+    """第十四轮：**只**重划首尾两个短块，中间块保持不动。
+
+    曾试过「消除所有 <30 字块」的逐轮收敛版：mixed_tech 分块被改得过多，
+    官方门禁 `异常长静音总数` 实测 1（要求 <=0）**FAIL**，且音色 A/B 整体退化
+    （联合均值 6.021→6.69、频带 7.439→8.48）。按「不改阈值刷绿」原则回退到
+    只动首尾的版本，它是唯一两组语料门禁都 PASS 的形态。代价是纯中文里
+    差异会从 1↔2 搬到 2↔3，如实记录在 README 第十四轮，不宣称解决。
+    """
+    out = list(blocks)
+    if len(out) >= 2 and len(out[0]) < STEADY_MIN_TAIL_CHARS:
+        pair = resplit_steady_pair(out[0], out[1], STEADY_MIN_TAIL_CHARS, MAX_BLOCK_CHARS)
+        if pair:
+            out[0:2] = pair
+    if len(out) >= 2 and len(out[-1]) < STEADY_MIN_TAIL_CHARS:
+        pair = resplit_steady_pair(out[-2], out[-1], STEADY_MIN_TAIL_CHARS, MAX_BLOCK_CHARS)
+        if pair:
+            out[-2:] = pair
+    return out
+
+
+def frontend_blocks(text: str, atomic: bool | None = None, steady: bool | None = None) -> list[str]:
     """复刻 SpeechQueue 的真实封块链路（首块 14 字、后续 48 字、最短 10 单元）。
 
     `atomic` 为 None 时跟随全局 `ATOMIC`（由 `--atomic` / 矩阵探针设置）。
+    `steady` 为 None 时跟随全局 `STEADY`（由 `--steady` 设置），打开后首块
+    目标改 32 字并在末尾重划首尾短块，与生产 `useVoiceTalk` 的
+    `steadyBlocks: true` 同源。
     这是**门禁唯一权威实现**：`chunking_ab_probe.py`、`mixed_matrix_probe.py`
     都调用它，避免出现两份会漂移的「前端复刻」。
     """
     use_atomic = ATOMIC if atomic is None else atomic
+    use_steady = STEADY if steady is None else steady
     if use_atomic:
-        return frontend_blocks_atomic(text)
+        base = frontend_blocks_atomic(text)
+        return steady_tail(base) if use_steady else base
     blocks: list[str] = []
 
     def emit(chunk: str) -> None:
@@ -289,11 +389,12 @@ def frontend_blocks(text: str, atomic: bool | None = None) -> list[str]:
             blocks.append(part)
             sealed += 1
 
+    first_target = STEADY_FIRST_BLOCK_CHARS if use_steady else FIRST_BLOCK_CHARS
     sealed = 0
     buf = ""
     for sentence in take_sentences(text):
         buf += sentence
-        target = FIRST_BLOCK_CHARS if sealed == 0 else BLOCK_CHARS
+        target = first_target if sealed == 0 else BLOCK_CHARS
         if len(buf) < target and len(buf) < MAX_BLOCK_CHARS:
             continue
         if sealed > 0 and speech_units(buf) < MIN_BLOCK_UNITS:
@@ -302,7 +403,8 @@ def frontend_blocks(text: str, atomic: bool | None = None) -> list[str]:
         buf = ""
     if buf.strip():
         emit(buf)
-    return balance_blocks(blocks)
+    out = balance_blocks(blocks)
+    return steady_tail(out) if use_steady else out
 
 
 # ---------------------------------------------------------------------------
@@ -552,6 +654,39 @@ def spread(values: list[float]) -> float:
     return round((max(clean) - min(clean)) / mean * 100.0, 2) if mean > 0 else 0.0
 
 
+def spread_db(values: list[float]) -> float:
+    """响度极差用 dB：幅度是比值量，用百分比会低估人耳感受。"""
+    clean = [20 * math.log10(v) for v in values if math.isfinite(v) and v > 0]
+    return round(max(clean) - min(clean), 2) if len(clean) > 1 else 0.0
+
+
+def ltas_bands(x: np.ndarray, rate: int) -> list[float]:
+    """有声帧长时平均谱的四频带能量占比（第十轮感知指标）。
+
+    谱质心会被单字/元音/清辅音主导（真机单请求内部时间窗都有 63% 极差），
+    长时平均削弱音素差异，更适合衡量「这句听起来亮不亮、闷不闷」。
+    """
+    frames, width, _ = _windows(x, rate)
+    rms = np.sqrt((frames.astype(np.float64) ** 2).mean(axis=1))
+    peak = float(rms.max()) if rms.size else 0.0
+    if peak <= 0:
+        return [0.0, 0.0, 0.0, 0.0]
+    voiced = frames[rms > peak * SILENCE_RMS_RATIO]
+    if voiced.size == 0:
+        return [0.0, 0.0, 0.0, 0.0]
+    spectrum = np.abs(
+        np.fft.rfft(voiced * np.hanning(width).astype(np.float32), axis=1)
+    ).mean(axis=0)
+    freqs = np.fft.rfftfreq(width, d=1.0 / rate)
+    energy = spectrum.astype(np.float64) ** 2
+    bands = [
+        float(energy[(freqs >= lo) & (freqs < hi)].sum())
+        for lo, hi in zip(LTAS_BANDS[:-1], LTAS_BANDS[1:])
+    ]
+    total = sum(bands) or 1.0
+    return [round(b / total, 5) for b in bands]
+
+
 def run_one(name: str, text: str) -> dict:
     print(f"\n=== {name} ({len(text)} 字) ===", flush=True)
     blocks = frontend_blocks(text)
@@ -582,6 +717,9 @@ def run_one(name: str, text: str) -> dict:
                 "rate_speech_cps": metrics.chars_per_second_speech,
                 "f0_hz": metrics.f0_hz,
                 "centroid_hz": metrics.centroid_hz,
+                # 第十轮感知维度：响度（dB 口径）与长时平均谱频带占比
+                "rms": metrics.rms,
+                "ltas": ltas_bands(x, rate),
                 "max_gap_ms": metrics.max_internal_gap_ms,
                 "long_gaps": metrics.long_gaps,
                 "segments": metrics.segments,
@@ -628,6 +766,29 @@ def run_one(name: str, text: str) -> dict:
             "rate_units_spread_pct": spread([b["rate_units"] for b in per_block]),
             "f0_spread_pct": spread([b["f0_hz"] for b in per_block]),
             "centroid_spread_pct": spread([b["centroid_hz"] for b in per_block]),
+            # 感知域：只记录不判定，门禁阈值保持第九轮不变（不刷绿、不放宽）
+            "rms_spread_db": spread_db([b["rms"] for b in per_block]),
+            "ltas_spread_pct": [
+                spread([b["ltas"][i] for b in per_block]) for i in range(4)
+            ],
+            # 第十三轮发现的语速口径盲区（只记录、不判定，阈值文件不动）：
+            # 门禁的 rate_units 用「整块时长（含句内停顿）」作分母，伺服按它
+            # 归一化后全绿；但人耳感知的是**有声段吐字速度**。真机 22 块实测
+            # 整块口径极差 0.87/1.69%，有声段口径却是 26.55/29.91%
+            # （块内有声占比 0.74~0.99）。两者数学上不可兼得，除非统一停顿
+            # 比例，而那会牺牲自然度——先把盲区固化下来，避免再次被全绿骗过。
+            # chars_per_second_speech = len(block)/speech_s，反解出有声秒后
+            # 换算成与 rate_units 同口径的「等效单元/有声秒」。
+            "voiced_rate_units": [
+                round(b["units"] * b["rate_speech_cps"] / max(b["chars"], 1), 3)
+                for b in per_block
+            ],
+            "voiced_rate_units_spread_pct": spread(
+                [
+                    b["units"] * b["rate_speech_cps"] / max(b["chars"], 1)
+                    for b in per_block
+                ]
+            ),
             "max_internal_gap_ms": full_metrics.max_internal_gap_ms,
             "long_gaps": full_metrics.long_gaps,
             "boundary_jumps": jumps,
@@ -716,15 +877,28 @@ def evaluate_case(case: dict[str, Any], thresholds: dict[str, float]) -> list[di
 
 
 def main() -> int:
-    global PORT, ENGINE, VOICE, SPEED, OUT, TNS, ATOMIC, SHORT_GAP
+    global PORT, ENGINE, VOICE, SPEED, OUT, TNS, ATOMIC, SHORT_GAP, PERCEPTUAL_ALIGN, STEADY, NO_INSTRUCT, ALIGN_PROFILE_REQ
+    global SLOW_LEVELING_REQ, SLOW_LEVELING_STRENGTH_REQ, DUAL_RATE_ALPHA_REQ
     parser = argparse.ArgumentParser(description="长文本语音连贯性专项验收（复刻前端分块链路）")
     parser.add_argument("--port", type=int, default=int(os.environ.get("PROBE_PORT", "8791")), help="sidecar 端口")
-    parser.add_argument("--engine", default=ENGINE)
-    parser.add_argument("--voice", default=VOICE)
-    parser.add_argument("--speed", type=float, default=SPEED)
+    parser.add_argument("--engine", default=None, help="缺省用内置基线；显式传值优先于 --from-config")
+    parser.add_argument("--voice", default=None, help="缺省用内置基线 sinan")
+    parser.add_argument("--speed", type=float, default=None, help="缺省用内置基线 1.2")
+    parser.add_argument(
+        "--from-config",
+        action="store_true",
+        help="按 ~/.deepcode/soul/config.json 的真实生产 voice/engine/speed 跑（暴露门禁与生产配置不一致）",
+    )
     parser.add_argument("--tns", choices=("on", "off"), default="on", help="TTS 文本前端规范化开关：on=生产默认，off=旧基线对照")
     parser.add_argument("--atomic", action="store_true", help="结构感知分块（默认关，对应前端偏好 dcx.voice.atomicChunk.v1）")
     parser.add_argument("--short-gap", action="store_true", help='短块句内静音上限 P1（默认关）；请求级 {"shortGap": true} 只开本次，可与 --atomic 叠加')
+    parser.add_argument("--no-align", action="store_true", help='关掉段级感知对齐（第十轮 A/B 对照组）；请求级 {"perceptualAlign": false}，不改服务端默认')
+    parser.add_argument("--steady", action="store_true", help="第十四轮稳态分块（首块 32 字 + 首尾短块重划），与生产 useVoiceTalk 一致；默认仍测旧基线")
+    parser.add_argument("--no-instruct", action="store_true", help='第十五轮：请求级 {"instructOverride": ""} 关掉风格指令，验证零 instruct 下官方门禁；不改服务端默认')
+    parser.add_argument("--align-profile", choices=("v11", "v12", "v14"), default=None, help='第十六轮：请求级 {"alignProfile": "..."} 显式指定响度口径跑门禁 A/B；缺省跟随服务端默认（v14）')
+    parser.add_argument("--slow-leveling", choices=("on", "off"), default=None, help='第十七轮：请求级 {"slowLeveling": ...} 只覆盖本次；off 精确复现第十六轮')
+    parser.add_argument("--slow-leveling-strength", type=float, default=None, help='第十七轮：请求级 {"slowLevelingStrength": 0~1} 强度 A/B')
+    parser.add_argument("--dual-rate-alpha", type=float, default=None, help='第十七轮：请求级 {"dualRateAlpha": 0~1}；0 精确复现第十六轮语速伺服')
     parser.add_argument("--out", default=str(OUT), help="报告输出目录")
     parser.add_argument("--cases", default="", help="逗号分隔的语料名，默认全部")
     parser.add_argument("--texts", default="", help="自定义语料文件（每行一条，# 开头为注释）")
@@ -732,10 +906,31 @@ def main() -> int:
     parser.add_argument("--check", action="store_true", help="按阈值门禁判定，违规时退出码 1")
     args = parser.parse_args()
 
-    PORT, ENGINE, VOICE, SPEED = args.port, args.engine, args.voice, args.speed
+    PORT = args.port
+    if args.from_config:
+        cfg = production_voice_config()
+        ENGINE, VOICE, SPEED = cfg["engine"], cfg["voice"], cfg["speed"]
+        print(
+            f"[from-config] engine={ENGINE} speed={SPEED} voice={VOICE[:48]}",
+            flush=True,
+        )
+    # 命令行显式参数优先于生产配置，方便「固定配置、只改一个变量」的 A/B
+    if args.engine is not None:
+        ENGINE = args.engine
+    if args.voice is not None:
+        VOICE = args.voice
+    if args.speed is not None:
+        SPEED = args.speed
     TNS = args.tns == "on"
     ATOMIC = args.atomic
     SHORT_GAP = args.short_gap
+    PERCEPTUAL_ALIGN = not args.no_align
+    STEADY = args.steady
+    NO_INSTRUCT = args.no_instruct
+    ALIGN_PROFILE_REQ = args.align_profile
+    SLOW_LEVELING_REQ = None if args.slow_leveling is None else args.slow_leveling == "on"
+    SLOW_LEVELING_STRENGTH_REQ = args.slow_leveling_strength
+    DUAL_RATE_ALPHA_REQ = args.dual_rate_alpha
     OUT = Path(args.out)
     OUT.mkdir(parents=True, exist_ok=True)
 
@@ -758,6 +953,11 @@ def main() -> int:
         "tns": TNS,
         "atomic": ATOMIC,
         "shortGap": SHORT_GAP,
+        "perceptualAlign": PERCEPTUAL_ALIGN,
+        "steadyBlocks": STEADY,
+        "noInstruct": NO_INSTRUCT,
+        "alignProfileRequest": ALIGN_PROFILE_REQ,
+        "configSource": "production" if args.from_config else "baseline",
         "cases": [],
     }
     for name in selected:
@@ -782,7 +982,7 @@ def main() -> int:
     for case in report["cases"]:
         violations.extend(evaluate_case(case, thresholds))
     print("\n=== 长文本门禁 ===")
-    print(f"{'语料':<14} {'块数':>4} {'单元语速极差':>13} {'块间F0极差':>11} {'最长静音':>10} {'最短非首块单元':>15}")
+    print(f"{'语料':<14} {'块数':>4} {'单元语速极差':>13} {'块间F0极差':>11} {'响度极差dB':>11} {'最长静音':>10} {'最短非首块单元':>15}")
     for case in report["cases"]:
         if "error" in case:
             print(f"{case['name']:<14} 采集失败：{case['error']}")
@@ -792,8 +992,20 @@ def main() -> int:
             f"{case['name']:<14} {len(blocks):>4} "
             f"{case['frontend']['rate_units_spread_pct']:>12.2f}% "
             f"{case['frontend']['f0_spread_pct']:>10.2f}% "
+            f"{case['frontend']['rms_spread_db']:>10.2f} "
             f"{max((b['max_gap_ms'] for b in blocks), default=0):>9.0f}ms "
             f"{min((b['units'] for b in blocks[1:]), default=0):>14.1f}"
+        )
+    # 第十三轮观察项：人耳感知的「有声段吐字速度」与门禁整块口径并列打印。
+    # 不判定、不进 violations、阈值文件不动——只把曾经骗过门禁的盲区显性化。
+    print("\n观察项（不判定）：有声段单元语速极差 vs 门禁整块口径")
+    for case in report["cases"]:
+        if "error" in case:
+            continue
+        f = case["frontend"]
+        print(
+            f"  {case['name']:<14} 有声段 {f.get('voiced_rate_units_spread_pct', 0):>6.2f}%  "
+            f"整块 {f['rate_units_spread_pct']:>5.2f}%"
         )
     if violations:
         print(f"\nFAIL：{len(violations)} 项违规")

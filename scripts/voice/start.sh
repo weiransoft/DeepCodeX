@@ -35,6 +35,27 @@ export DCX_VOICE_ATOMIC_CHUNK="${DCX_VOICE_ATOMIC_CHUNK:-0}"
 # 只对 ≤20 等效发音单元的短段生效，压 >0.30s 的句内静音；长段原样不动。
 # 代价是短句停顿变短，必须做 WebView 真机听感确认。
 export DCX_VOICE_SHORT_GAP="${DCX_VOICE_SHORT_GAP:-0}"
+# 第十五轮：零 instruct（默认关，会改变音色风格；mixed_tech 门禁会 FAIL，
+# 详见 README 第十五轮）。DCX_VOICE_NO_INSTRUCT=1 bash scripts/voice/start.sh
+# 请求级 {"instructOverride": ""} 可在同一 sidecar 上单独 A/B，不必重启。
+export DCX_VOICE_NO_INSTRUCT="${DCX_VOICE_NO_INSTRUCT:-0}"
+# 第十六轮：响度口径 v14 = EBU R128 integrated gated LUFS 纯标量归一（默认）。
+# 块间 LUFS 极差 4.39/4.37dB → 0.00/0.00dB，音色指纹逐值不变。
+# 一键回退到 v12（有声帧 RMS 中位数，残留 3.34/1.90dB）需重启 sidecar：
+#   DCX_VOICE_ALIGN_PROFILE=v12 bash scripts/voice/start.sh
+# 请求级 {"alignProfile": "v12"} 可在同一 sidecar 上单独 A/B，不必重启。
+export DCX_VOICE_ALIGN_PROFILE="${DCX_VOICE_ALIGN_PROFILE:-v14}"
+# 第十七轮：块内 3s 慢变响度整形（默认开，强度 0.7）。
+# v14 只保证「整块 integrated LUFS」对齐，块内 5s 级起伏与接缝台阶仍在；
+# 整形只纠正 0.3Hz 以下漂移，之后再做一次 v14 纯标量归一，块间 0.00dB 不变。
+# 一键回退第十六轮（需重启）：
+#   DCX_VOICE_SLOW_LEVELING=0 DCX_VOICE_DUAL_RATE_ALPHA=0 bash scripts/voice/start.sh
+# 请求级 {"slowLeveling": false, "dualRateAlpha": 0} 可只关本次，不必重启。
+export DCX_VOICE_SLOW_LEVELING="${DCX_VOICE_SLOW_LEVELING:-1}"
+export DCX_VOICE_SLOW_LEVELING_STRENGTH="${DCX_VOICE_SLOW_LEVELING_STRENGTH:-0.7}"
+# 双口径语速折中：alpha=0 精确回到第十六轮伺服（只判整块单元/秒）。
+# alpha=0.3 时离线推算整块 5.60/6.12%（门禁 8% 内）、有声段 16.56/20.94%→11.62/14.56%。
+export DCX_VOICE_DUAL_RATE_ALPHA="${DCX_VOICE_DUAL_RATE_ALPHA:-0.3}"
 LOG_DIR="${HOME}/.deepcode/logs"
 LOG_FILE="$LOG_DIR/voice.log"
 FOREGROUND=0

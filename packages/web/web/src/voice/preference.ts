@@ -267,6 +267,38 @@ export function writeAtomicChunk(value: boolean): void {
   }
 }
 
+/**
+ * 稳态分块（第十四轮，2026-11-11）——**默认关的灰度项**
+ *
+ * 真机逐块音色指纹 A/B 结果是**双向的**，不足以支撑改默认：
+ *  - 纯中文：#1↔#2 联合距离 8.18→3.91（−52%）、频带 8.597→5.015dB，
+ *    但差异被搬到 #2↔#3（频带 3.21→8.032dB），频带均值 4.506→5.017 变差；
+ *  - 中英混排：全块下限后联合均值 6.021→6.69、频带 7.439→8.48，整体退化。
+ *
+ * 因此只作为可试听、可回退的灰度开关：把 `dcx.voice.steadyBlocks.v1`
+ * 写成 `"1"` 开启，删除或写 `"0"` 回到第十四轮之前的 v13 行为。
+ * 对比音频见 `scripts/voice/README.md` 第十四轮。
+ */
+export const STEADY_BLOCKS_KEY = "dcx.voice.steadyBlocks.v1";
+
+/** 读取稳态分块开关（默认关，显式 "1" 才开启） */
+export function readSteadyBlocks(): boolean {
+  try {
+    return globalThis.localStorage?.getItem(STEADY_BLOCKS_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** 写入稳态分块开关（下一次开录生效） */
+export function writeSteadyBlocks(value: boolean): void {
+  try {
+    globalThis.localStorage?.setItem(STEADY_BLOCKS_KEY, value ? "1" : "0");
+  } catch {
+    // 存不下就只在本页生效
+  }
+}
+
 /** 订阅流式播放变化（同页事件 + 跨标签页 storage 事件） */
 export function subscribeStreamPlayback(handler: (value: boolean) => void): () => void {
   const onCustom = (event: Event): void => {

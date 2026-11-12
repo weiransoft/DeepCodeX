@@ -74,6 +74,7 @@ import {
   readBackchannelHold,
   readEndpointProfile,
   readHandsFree,
+  readSteadyBlocks,
   readStreamPlayback,
   subscribeHandsFree,
   writeHandsFree,
@@ -491,6 +492,13 @@ export function useVoiceTalk(options: VoiceTalkOptions = {}): VoiceTalk {
            * 是长回复「忽然换人」的主要来源。首块仍按 14 字豁免保 TTFA。
            */
           minBlockUnits: MIN_BLOCK_UNITS,
+          /**
+           * 稳态分块（第十四轮，**默认关的灰度项**）：首块 32 字、所有块
+           * 下限 30 字。真机 A/B 是双向的（纯中文 1↔2 改善 52% 但 2↔3 退化，
+           * 中英混排整体退化），不足以改默认，故由设备偏好显式开启。
+           * `dcx.voice.steadyBlocks.v1` 写 "1" 开启，写 "0"/删除即回退 v13。
+           */
+          steadyBlocks: readSteadyBlocks(),
           /**
            * 结构感知分块：默认关。偏好 `dcx.voice.atomicChunk.v1` 打开后，
            * 切句与封块都不再切断 JSON / URL / 拉丁词 / 数字串，让服务端

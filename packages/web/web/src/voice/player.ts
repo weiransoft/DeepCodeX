@@ -101,6 +101,13 @@ export interface SpeechQueueDeps {
    * 相互独立；关闭时切块结果与 031f1cc2 逐字一致。
    */
   atomicChunk?: boolean;
+  /**
+   * 稳态分块（第十四轮，默认关）：首块抬到 32 字、尾块不足 30 字时与前块重划，
+   * 消除短块与相邻块之间的音色跳变。**默认关是刻意的**——`SpeechQueue` 的
+   * 既有单测锁的是 031f1cc2 分块契约，新行为由生产装配 `useVoiceTalk` 显式
+   * 注入开启，旧契约与回退路径都完整保留。
+   */
+  steadyBlocks?: boolean;
   /** 开播前至少缓存多少字（默认与首块目标一致） */
   warmupChars?: number;
   /** 多久没有任何播放进展就判定停滞（默认 5000ms，仅元素后端用） */
@@ -168,8 +175,57 @@ export const BLOCK_CHARS = 48;
  */
 export const MIN_BLOCK_UNITS = 10;
 
+/**
+ * 稳态分块：首块目标字数（第十四轮，2026-11-11）
+ *
+ * 真机块级音色指纹（`scripts/voice/timbre_probe.py`）显示：14~19 字的短块
+ * 与相邻 44 字块的四频带能量距离达 8.6dB，是全部相邻对里最大的；而
+ * 31~45 字的块两两只有 1.5~5.2dB。用户描述「第一、第二差异比较大，
+ * 第二、第三差异不大，后面都差不多」与这组数据逐字吻合。
+ *
+ * 同文本重复生成 / 换请求位置的指纹逐位相同（E1/E2 噪声底 = 0），
+ * 说明不是随机漂移或冷启动，而是**短块本身起音状态不同**。所以治本是
+ * 别再生成短块，而不是给短块套 EQ（后者跨文本标定 σ 达 197Hz，
+ * 是文本内容主导，按长度补偿会重演第十一轮 v11 主观翻车）。
+ *
+ * 代价是 TTFA：32 字约 7.8s 音频、合成约 1.3s，14 字约 0.6s。
+ * 仍在既有 TTFA 预算（1.7~1.9s）内。A/B 见 README 第十四轮。
+ */
+export const STEADY_FIRST_BLOCK_CHARS = 32;
+
+/** 稳态分块：尾块最短字数，低于此值与倒数第二块按标点重划 */
+export const STEADY_MIN_TAIL_CHARS = 30;
+
 /** 与服务端口径一致的可断句标点 */
 const SPLIT_PUNCT = "。！？!?；;，,、：:";
+
+/**
+ * 稳态分块：把「倒数第二块 + 过短尾块」重划成两块，两块字符数都 >= minChars
+ *
+ * 与 `rebalanceShortBlock` 的区别：后者按**等效发音单元**判碎片（阈值 10），
+ * 18 字尾块完全合法、不会被合并；这里按**字符数**判声学稳态，只动首尾两处，
+ * 中间块保持不动（真机数据里中间块两两差异本来就小）。
+ * 切点优先标点后、其次靠近中点；无合法切点时返回 null，绝不吞字。
+ *
+ * @returns 1~2 块，拼接后逐字等于 prev + short；无法重划时 null
+ */
+export function resplitSteadyPair(prev: string, short: string, minChars: number, limit: number): string[] | null {
+  const merged = prev + short;
+  if (merged.length <= limit) return [merged];
+  const lo = Math.max(minChars, merged.length - limit);
+  const hi = Math.min(limit, merged.length - minChars);
+  if (lo > hi) return null;
+  const cuts: number[] = [];
+  for (let c = lo; c <= hi; c += 1) cuts.push(c);
+  const middle = Math.floor(merged.length / 2);
+  cuts.sort(
+    (a, b) =>
+      (SPLIT_PUNCT.includes(merged[a - 1] ?? "") ? 0 : 1) - (SPLIT_PUNCT.includes(merged[b - 1] ?? "") ? 0 : 1) ||
+      Math.abs(a - middle) - Math.abs(b - middle)
+  );
+  const c = cuts[0];
+  return [merged.slice(0, c), merged.slice(c)];
+}
 
 /**
  * 切分点的自然度：0=标点后，1=空格/中英交界，2=词中间（最差）
@@ -499,6 +555,8 @@ export class SpeechQueue {
   private readonly minBlockUnits: number;
   /** 结构感知分块开关（默认关） */
   private readonly atomicChunk: boolean;
+  /** 稳态分块开关（默认关，由生产装配显式开启） */
+  private readonly steadyBlocks: boolean;
   /** 开播门槛字数 */
   private readonly warmupChars: number;
 
@@ -527,7 +585,10 @@ export class SpeechQueue {
     this.player = deps.player ?? elementPlayer ?? createDefaultPlayer();
     // 给了元素工厂就不再降级（已经是最低层），避免二次切换互相覆盖
     this.fallbackFactory = elementPlayer !== null ? null : (deps.createFallbackPlayer ?? defaultFallbackPlayer);
-    this.firstBlockChars = deps.firstBlockChars ?? FIRST_BLOCK_CHARS;
+    // 显式锁定 firstBlockChars 意味着调用方要完全接管分块：此时**整体关闭**
+    // 稳态改写，否则 30 字下限仍会把它攒成一大块，契约就不成立了。
+    this.steadyBlocks = deps.firstBlockChars === undefined && (deps.steadyBlocks ?? false);
+    this.firstBlockChars = deps.firstBlockChars ?? (this.steadyBlocks ? STEADY_FIRST_BLOCK_CHARS : FIRST_BLOCK_CHARS);
     this.blockCharsTarget = deps.blockChars ?? BLOCK_CHARS;
     this.maxBlockChars = deps.maxBlockChars ?? MAX_BLOCK_CHARS;
     this.minBlockUnits = deps.minBlockUnits ?? MIN_BLOCK_UNITS;
@@ -587,6 +648,27 @@ export class SpeechQueue {
         this.absorbShortIntoLast(tail);
       } else {
         this.appendBlock(tail);
+      }
+    }
+    // 稳态分块（第十四轮）：尾块不足 30 字时与倒数第二块按标点重划。
+    // 18 字尾块在「最短 10 单元」护栏下是合法的，却和首块一样是音色离群点
+    // （真机 #8↔#9 频带距离 6.997dB，是第二大的相邻跳变）。只动首尾两处，
+    // 中间块保持原样；重划不了就保持原块，绝不吞字。
+    if (this.steadyBlocks && this.blocks.length >= 2) {
+      // 与 Python `steady_tail` 同源：单次首尾重划，不做全块收敛
+      if (this.blocks[0].length < STEADY_MIN_TAIL_CHARS) {
+        const head = resplitSteadyPair(this.blocks[0], this.blocks[1], STEADY_MIN_TAIL_CHARS, this.maxBlockChars);
+        if (head) this.blocks.splice(0, 2, ...head);
+      }
+      const last = this.blocks[this.blocks.length - 1];
+      if (last.length < STEADY_MIN_TAIL_CHARS) {
+        const tail = resplitSteadyPair(
+          this.blocks[this.blocks.length - 2],
+          last,
+          STEADY_MIN_TAIL_CHARS,
+          this.maxBlockChars
+        );
+        if (tail) this.blocks.splice(this.blocks.length - 2, 2, ...tail);
       }
     }
     // 尾巴封块 + endOfStream 都要让流式循环立刻看见，不能等下一次网络事件
@@ -685,6 +767,10 @@ export class SpeechQueue {
       if (clean.length === 0) continue;
       // 首块豁免：它决定 TTFA，短一点是刻意的（见 FIRST_BLOCK_CHARS）。
       const isFirstBlock = this.sealedCount === 0 && this.blocks.length === 0;
+      // 稳态分块**不在这里**逐块重划：曾试过「所有非首块 >= 30 字」的
+      // 源头收敛版，mixed_tech 被改得过多，官方门禁异常长静音实测 1（要求
+      // <=0）FAIL，音色 A/B 也整体退化。只在 flush() 重划首尾两处，
+      // 那是唯一两组语料门禁都 PASS 的形态，见 README 第十四轮。
       if (!isFirstBlock && speechUnits(clean) < this.minBlockUnits) {
         if (this.blocks.length === 0) {
           // 前一块已经被消费进合成 / 时间轴，没得可并：攒着跟下一块一起发，

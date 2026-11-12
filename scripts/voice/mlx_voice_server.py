@@ -56,6 +56,34 @@ from text_normalize import (  # noqa: E402
     tns_enabled_by_env,
 )
 from atomic_chunks import atomic_spans, cut_ok, nearest_ok_cut  # noqa: E402
+from perceptual_align import (  # noqa: E402
+    LUFS_MAX_DB,
+    LUFS_TARGETS,
+    align_loudness,
+    align_loudness_lufs,
+    align_segment,
+)
+from wsola_compensation import (  # noqa: E402
+    COMPENSATION_STRENGTH,
+    WSOLA_COMPENSATION_ENABLED,
+    compensate_wsola,
+    request_wsola_compensation_enabled,
+    request_wsola_compensation_strength,
+)
+from continuity import (  # noqa: E402
+    SILENCE_RMS_RATIO,
+    _voiced_runs,
+    _windows,
+)
+from slow_leveling import (  # noqa: E402
+    SLOW_LEVELING_ENABLED,
+    SLOW_LEVELING_MAX_DB,
+    SLOW_LEVELING_SMOOTH_S,
+    SLOW_LEVELING_STRENGTH,
+    apply_loudness_chain,
+    request_slow_leveling_enabled,
+    request_slow_leveling_strength,
+)
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -102,6 +130,92 @@ def request_short_gap_enabled(payload: dict) -> bool:
     if isinstance(raw, str):
         return raw.strip().lower() not in ("0", "false", "off", "no")
     return bool(raw)
+
+
+# 段级感知一致性对齐（2026-11-08 第十轮）：默认开，见 perceptual_align.py。
+# 第九轮把语速与音色身份锁死后，人耳仍能听出块间响度 3.77dB / 谱包络 174%
+# 的差异；这里在段级把二者拉向同一份参考画像，不改时长、不动音高。
+# DCX_VOICE_PERCEPTUAL_ALIGN=0 一键回退到第九轮行为。
+PERCEPTUAL_ALIGN_ENABLED = os.environ.get("DCX_VOICE_PERCEPTUAL_ALIGN", "1") != "0"
+
+
+def request_perceptual_align_enabled(payload: dict) -> bool:
+    """请求级覆盖：`{"perceptualAlign": false}` 只关本次，便于同一 sidecar 做 A/B。
+
+    语义与 `request_short_gap_enabled()` 一致；缺省跟随环境变量（默认开）。
+    """
+    raw = payload.get("perceptualAlign")
+    if raw is None:
+        return PERCEPTUAL_ALIGN_ENABLED
+    if isinstance(raw, str):
+        return raw.strip().lower() not in ("0", "false", "off", "no")
+    return bool(raw)
+
+
+# 第十一轮（2026-11-08）：感知响度口径升级 + 接缝能量压缩。
+#
+# 第十轮用未加权 RMS 归一，真机诊断发现人耳敏感的 K 加权域仍有 0.84/1.03dB
+# 极差（加权/未加权比值逐块在 1.010~1.101 波动），且段首能量相对段内跨
+# 0.13~3.70 倍、边界台阶 |max| 22.44dB。两项都做成**独立可回退**开关，
+# 都关时输出与第十轮逐样本一致，便于同一 sidecar 上做三组 A/B。
+KWEIGHTED_ALIGN_ENABLED = os.environ.get("DCX_VOICE_KWEIGHTED_ALIGN", "1") != "0"
+EDGE_ALIGN_ENABLED = os.environ.get("DCX_VOICE_EDGE_ALIGN", "1") != "0"
+
+
+def request_align_v2(payload: dict) -> tuple[bool, bool]:
+    """请求级覆盖：`{"kweightedAlign": false, "edgeAlign": false}` 回到第十轮。
+
+    缺省跟随环境变量（默认开）。语义与 `request_short_gap_enabled()` 一致。
+    """
+
+    def pick(key: str, default: bool) -> bool:
+        raw = payload.get(key)
+        if raw is None:
+            return default
+        if isinstance(raw, str):
+            return raw.strip().lower() not in ("0", "false", "off", "no")
+        return bool(raw)
+
+    return pick("kweightedAlign", KWEIGHTED_ALIGN_ENABLED), pick(
+        "edgeAlign", EDGE_ALIGN_ENABLED
+    )
+
+
+def resolve_align_v2(kweighted: bool | None, edge: bool | None) -> tuple[bool, bool]:
+    """内部入口（非 HTTP）把 None 解析成当前默认，保证两条合成路径一致。"""
+    return (
+        KWEIGHTED_ALIGN_ENABLED if kweighted is None else kweighted,
+        EDGE_ALIGN_ENABLED if edge is None else edge,
+    )
+
+
+# 第十二轮（2026-11-09）：默认 **只做响度归一**，不再逐段 EQ / 边界增益。
+# 用户实测第十一轮主观回归（「不同句子明显不一样，比前面还差」），逐段处理量
+# 诊断显示频带增益逐段方向相反且打满 ±2.5dB、响度打满 ±3dB、边界增益段间正负
+# 交替打满 ±1.5dB —— 把模型自然的段间差换成了后处理不均匀的段间差。
+# `v14` = align_loudness_lufs（第十六轮默认，EBU R128 integrated gated LUFS）；
+# `v12` = align_loudness（有声帧 RMS 中位数，一键回退）；
+# `v11` = 旧的 align_segment（频谱+边界，第十一轮已证伪，仅保留复现能力）。
+# 真机 22 块 A/B：块间 integrated LUFS 极差 4.39/4.37dB → v12 3.01/1.65dB
+# → v14 0.00/0.00dB，且输出仍是纯标量，音色指纹逐值不变。
+ALIGN_PROFILES = ("v11", "v12", "v14")
+ALIGN_PROFILE = os.environ.get("DCX_VOICE_ALIGN_PROFILE", "v14").strip().lower()
+if ALIGN_PROFILE not in ALIGN_PROFILES:
+    ALIGN_PROFILE = "v14"
+
+
+def request_align_profile(payload: dict) -> str:
+    """请求级覆盖：`{"alignProfile": "v12"}` 可在同一 sidecar 上复现旧行为。"""
+    raw = payload.get("alignProfile")
+    if raw is None:
+        return ALIGN_PROFILE
+    value = str(raw).strip().lower()
+    return value if value in ALIGN_PROFILES else ALIGN_PROFILE
+
+
+def resolve_align_profile(profile: str | None) -> str:
+    """内部入口（非 HTTP）把 None 解析成当前默认，保证两条合成路径一致。"""
+    return ALIGN_PROFILE if profile is None else profile
 
 
 def apply_tns(text: str, payload: dict) -> str:
@@ -230,6 +344,43 @@ VOICE_PRESETS: dict[str, tuple[str, str | None]] = {
     "sinan-bright": ("vivian", "语速稍快，吐字利落，不撒娇，不拖长音"),
 }
 
+# ---------------------------------------------------------------------------
+# 自由音色描述的稳定归一（2026-11-08 第九轮，默认开）
+#
+# 真机 A/B（`longtext_probe.py` 复刻前端「切句 → 9~13 次独立请求」，
+# speed=1.35、TNS on；指标为单元语速极差 / 波形边界跳变）：
+#
+# | voice                    | pure_cn | mixed_tech | 边界跳变(纯中文/混排) |
+# |--------------------------|---------|------------|----------------------|
+# | 配置里的自由长描述        | 14.64%  | 60.94%     | 0.647 / 0.084        |
+# | sinan-bright             |  0.43%  | 28.03%     | 0.098 / 0.174        |
+# | sinan                    |  0.69%  |  9.93%     | 0.003 / 0.137        |
+#
+# 根因不是 speed（sinan/1.35 仍有 0.69%），而是 `instruct`：CustomVoice 每次
+# 自回归生成都会把 instruct 与当前文本联合解释。配置里那段 VoiceDesign 风格
+# 描述中英混杂、含互相矛盾的语速指令（「语速偏快」/「slow pace」），又和
+# speed=1.35 形成双重调速；模型于是按块自选韵律，语速、F0、频谱质心一起漂，
+# 块接缝还出现明显波形跳变。手工删掉矛盾词（描述归一实验）反而让某块吞字
+# （39 单元只剩 3.57s / 10.9 单元每秒），说明「清洗描述」不是可靠解法——
+# 必须落到经过真机验证的固定预设。
+#
+# 做法：非预设名、非预置 speaker 名的自由描述，一律归一到稳定预设。
+# `voice_seed_key()` 让自由描述归一后与显式写预设名共用同一随机种子，
+# 而预设名 / 预置 speaker 名的种子逐字不变，历史音频仍逐位可复现。
+#
+# 回退：DCX_VOICE_STABLE_IDENTITY=0 恢复「整段描述当 instruct」的旧行为；
+# DCX_VOICE_STABLE_FALLBACK 可换成 sinan-bright（中英混排会明显变差，见上表）。
+# ---------------------------------------------------------------------------
+STABLE_VOICE_IDENTITY = os.environ.get("DCX_VOICE_STABLE_IDENTITY", "1") != "0"
+STABLE_VOICE_FALLBACK = os.environ.get("DCX_VOICE_STABLE_FALLBACK", "sinan")
+if STABLE_VOICE_FALLBACK not in VOICE_PRESETS:
+    sys.stderr.write(
+        f"[voice] DCX_VOICE_STABLE_FALLBACK={STABLE_VOICE_FALLBACK!r} 未登记，回落 sinan\n"
+    )
+    STABLE_VOICE_FALLBACK = "sinan"
+# 每段合成都会调 resolve_speaker()，警告只打一次，别把日志刷爆
+_WARNED_DESCRIPTIONS: set[str] = set()
+
 # instruct 对韵律的实测影响（同文本，speaker=vivian）：
 #   无指令          4.07 字/秒  F0 237.6Hz  跨度 103.7Hz
 #   「利落稍快」     4.38 字/秒  F0 244.9Hz  跨度  80.5Hz  ← 快 7.6% 且更稳
@@ -267,8 +418,9 @@ def resolve_speaker(voice: str) -> tuple[str, str | None]:
 
     - 命中音色预设名（如 `sinan`）→ 取预设里的 (speaker, 风格指令)
     - 命中预置音色名（大小写、空格、连字符不敏感）→ 直接用
-    - 否则 → 退回默认音色，原描述改当 `instruct`（1.7B 支持情感/风格指令）
-      这样「语速正常、吐字清晰、利落」这类风格要求还能保留一部分
+    - 否则 → 归一到 `STABLE_VOICE_FALLBACK` 预设（默认开）。旧行为是把整段
+      描述当 `instruct`，实测会让长文本逐块漂移语速与音色，详见上方第九轮
+      注释；`DCX_VOICE_STABLE_IDENTITY=0` 可回到旧行为
 
     @param voice 音色预设名、预置音色名或音色描述
     @returns (speaker, instruct)
@@ -281,7 +433,54 @@ def resolve_speaker(voice: str) -> tuple[str, str | None]:
         return VOICE_PRESETS[key]
     if key in CUSTOMVOICE_SPEAKERS:
         return key, None
-    return DEFAULT_CUSTOMVOICE_SPEAKER, (text or None)
+    if not STABLE_VOICE_IDENTITY:
+        return DEFAULT_CUSTOMVOICE_SPEAKER, (text or None)
+    if text and text not in _WARNED_DESCRIPTIONS:
+        _WARNED_DESCRIPTIONS.add(text)
+        sys.stderr.write(
+            f"[voice] 自由音色描述已归一为稳定预设 {STABLE_VOICE_FALLBACK} "
+            f"（原 {len(text)} 字）；DCX_VOICE_STABLE_IDENTITY=0 可恢复旧行为\n"
+        )
+    return VOICE_PRESETS[STABLE_VOICE_FALLBACK]
+
+
+# ---------------------------------------------------------------------------
+# 请求级 instruct 覆盖（2026-11-11 第十五轮，单变量因果实验）
+#
+# `voice` 字符串同时决定 speaker / instruct / **采样种子**三段。若为了关掉
+# instruct 而把 voice 改成纯 speaker 名（如 serena），种子也会跟着变，A/B
+# 就混入了「随机采样实现不同」这个混杂变量。这里只覆盖 instruct，voice
+# 原样不动 → 种子逐位不变，唯一变量是风格指令。
+#
+# 语义：不传字段 = 完全走 resolve_speaker() 原逻辑（零回归）；
+#       ""（或纯空白）= 纯 speaker、零 instruct；
+#       非空字符串 = 用该串作 instruct。
+# 非字符串、超长一律忽略（诚实降级），防止又把整段自由描述塞回来。
+# ---------------------------------------------------------------------------
+_MAX_INSTRUCT_OVERRIDE_CHARS = 120
+# 环境变量总开关（默认关）：DCX_VOICE_NO_INSTRUCT=1 让所有未显式传
+# instructOverride 的请求都走零 instruct。请求级显式传值始终优先。
+# 真机 A/B 见 README 第十五轮：纯中文首块离群改善 ~22%，但 mixed_tech
+# 官方门禁 FAIL（异常长静音）且响度/F0 退化，故**不设为默认开**。
+NO_INSTRUCT_DEFAULT = os.environ.get("DCX_VOICE_NO_INSTRUCT", "0") == "1"
+
+
+def request_instruct_override(payload: dict) -> str | None:
+    """返回 None=不覆盖；""=显式关闭 instruct；其它字符串=覆盖值。"""
+    raw = payload.get("instructOverride")
+    if raw is None:
+        return "" if NO_INSTRUCT_DEFAULT else None
+    if not isinstance(raw, str) or len(raw) > _MAX_INSTRUCT_OVERRIDE_CHARS:
+        return None
+    return raw.strip() or ""
+
+
+def apply_instruct_override(instruct: str | None, override: str | None) -> str | None:
+    """把请求级覆盖套到 resolve_speaker() 的结果上。"""
+    if override is None:
+        return instruct
+    return override or None
+
 
 # 采样随机种子的派生基数
 #
@@ -320,6 +519,30 @@ TTS_SEED_BASE = 20261105
 TTS_TEMPERATURE = 0.35
 
 
+def voice_seed_key(voice: str) -> str:
+    """派生采样种子用的键（2026-11-08 第九轮）。
+
+    预设名 / 预置 speaker 名**逐字沿用旧值**，保证历史音频逐位可复现；
+    自由描述归一后改用 `STABLE_VOICE_FALLBACK` 作键，于是「配置里写 sinan」
+    与「填一段长描述、由代码归一到 sinan」拿到完全相同的 speaker / instruct /
+    随机种子，第九轮的全部真机实测对两条路径同时成立。回退开关关掉时，
+    自由描述也逐字沿用旧值。
+
+    @param voice 请求里的原始 voice 值
+    @returns 种子键
+    """
+    text = (voice or "").strip()
+    key = text.lower().replace("-", "_").replace(" ", "_")
+    if (
+        key.replace("_", "-") in VOICE_PRESETS
+        or key in VOICE_PRESETS
+        or key in CUSTOMVOICE_SPEAKERS
+        or not STABLE_VOICE_IDENTITY
+    ):
+        return voice
+    return STABLE_VOICE_FALLBACK
+
+
 def prepare_sampling(voice: str) -> float:
     """
     按音色描述派生确定性采样参数并重置随机状态。
@@ -334,7 +557,7 @@ def prepare_sampling(voice: str) -> float:
 
     import mlx.core as mx
 
-    digest = hashlib.sha256(f"{TTS_SEED_BASE}:{voice}".encode("utf-8")).digest()
+    digest = hashlib.sha256(f"{TTS_SEED_BASE}:{voice_seed_key(voice)}".encode("utf-8")).digest()
     # 取 31 位，避开某些后端对超大 int 的处理差异
     mx.random.seed(int.from_bytes(digest[:4], "big") % (2**31 - 1))
     return TTS_TEMPERATURE
@@ -474,7 +697,55 @@ TTS_RATE_SPEED_MIN = 0.75
 # 它不是退化段（块内最长静音 20ms），退化另由 trim_degenerate_tail() /
 # compress_internal_gaps() / 门禁的 long_gaps_total 负责，不该靠倍率上限兜。
 # WSOLA 保调变速在 1.6 倍仍是常见听书倍速范围内，音高不变。
-TTS_RATE_SPEED_MAX = 1.65
+# 2026-11-09 第十二轮：上限 1.65 → 1.85。官方门禁（`longtext_probe --from-config
+# --check`，单元口径 = `speech_units(spoken(block))` / `analyze_clip` 时长）实测
+# mixed_tech 单元语速极差 **6.42% → 1.63%**：`openai-provider…` 等拉丁复合词块
+# 需求倍率约 1.74，旧上限把它们钳成离群块。注意不要用「原文字符数 / 整段 WAV
+# 时长」自算语速——该口径会把同一份音频测成 10.05%，与门禁口径不可比。
+# 上限只影响触顶段，其余段倍率不变；段间 WSOLA 程度差因此略增，这是语速一致与
+# 音色一致的固有取舍，本论选择先消除人耳可闻的语速离群块。
+TTS_RATE_SPEED_MAX = 1.85
+
+# ---------------------------------------------------------------------------
+# 第十七轮（2026-11-12）：语速「双口径折中」伺服
+#
+# 官方门禁只判「整块单元/秒」（含句内停顿），伺服按它归一化后全绿；真机
+# 生产态实测 pure_cn / mixed_tech 分别是 0.34% / 1.19%，但人耳听的
+# **有声段吐字速度**极差却是 16.56% / 20.94%。两者数学上不可兼得：
+# WSOLA 等比例拉伸有声段与停顿，v_i / r_i = d_i / s_i 恒定，改倍率不改变
+# 这个比值。要压平 v_i 只能按块内**有声占比**给倍率一个偏置：
+#     k_new = k_old * ( (s_i/d_i) / VOICED_RATIO_REF ) ^ alpha
+# 用门禁报告里的 22 块真实 s/d（0.813~0.995）离线推算：
+#     alpha=0.3 → 整块 5.60/6.12%（门禁 8% 内），有声段 11.62/14.56%
+#     alpha=0.4 → 整块 7.39/7.94%（擦边），有声段 9.95/12.46%
+# 取 0.3 留 ~2pp 余量；固定参考值保证确定性，不用运行中位数。
+# alpha=0 时逐字回到第十六轮行为，`{"dualRateAlpha": 0}` 一键回退。
+# ---------------------------------------------------------------------------
+def _env_dual_rate_alpha() -> float:
+    raw = os.environ.get("DCX_VOICE_DUAL_RATE_ALPHA", "0.3")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 0.3
+    return value if 0.0 <= value <= 1.0 else 0.3
+
+
+DUAL_RATE_ALPHA = _env_dual_rate_alpha()
+VOICED_RATIO_REF = 0.90
+
+
+def request_dual_rate_alpha(payload: dict) -> float:
+    """请求级覆盖：`{"dualRateAlpha": 0}` 只关本次，便于同一 sidecar A/B。"""
+    raw = payload.get("dualRateAlpha")
+    if raw is None:
+        return DUAL_RATE_ALPHA
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DUAL_RATE_ALPHA
+    return value if 0.0 <= value <= 1.0 else DUAL_RATE_ALPHA
+
+
 # 段间微停顿：两次独立生成的波形硬接缝，业界用 50~200ms 微静音掩盖。
 # 60ms 比正常句间停顿短，不会听成「断了一下」，又足够盖住相位跳变。
 TTS_SEGMENT_GAP_S = 0.06
@@ -944,6 +1215,16 @@ class TtsEngine:
         speed: float,
         interval: float,
         short_gap: bool | None = None,
+        perceptual_align: bool | None = None,
+        kweighted: bool | None = None,
+        edge: bool | None = None,
+        align_profile: str | None = None,
+        wsola_compensation: bool | None = None,
+        wsola_compensation_strength: float | None = None,
+        instruct_override: str | None = None,
+        slow_leveling: bool | None = None,
+        slow_leveling_strength: float | None = None,
+        dual_rate_alpha: float | None = None,
     ) -> "Any":
         """
         流式合成：**段级生成 → 逐段语速伺服 → 分块 yield 独立完整 WAV**
@@ -958,10 +1239,16 @@ class TtsEngine:
         出声，后续段在前一段播放期间并行生成（RTF≈0.2），播放不会断。换来
         的是所有段语速严格收敛到全局固定基准（离线实测 4.93 字/秒 ±0.2%）。
 
-        段内用 `StreamingWsola` 有状态变速，块边界天然连续（与整块 `/tts`
-        逐样本等价）；段间各自按实测语速归一化，用 60ms 微静音盖住两次独立
-        模型生成的相位跳变。锁只覆盖 MLX 生成，不覆盖 yield —— 客户端读得
-        慢不该占着整条语音链路共用的推理锁。
+        段内用 `time_stretch_wsola()` 整段一次变速，再按 interval **纯切片**
+        吐出（切片不改任何样本）。第十一轮把段级感知对齐移到变速之后，
+        避免 WSOLA 重新打散响度与谱包络；生产路径因此不再使用
+        `StreamingWsola`，该类与其单测仍保留作能力备份。
+        与整块 `/tts` 用同一变速/对齐函数：真机实测样本数完全一致、最大差
+        **≤1 LSB（3.05e-05，PCM16 量化边界）**，不是逐位相同，故不宣称
+        「逐样本等价」。
+        段间各自按实测语速归一化，用 60ms 微静音盖住两次独立模型生成的
+        相位跳变。锁只覆盖 MLX 生成，不覆盖 yield —— 客户端读得慢不该
+        占着整条语音链路共用的推理锁。
 
         @param text 待合成文本
         @param engine 引擎（目前只有 CustomVoice 支持流式）
@@ -975,11 +1262,22 @@ class TtsEngine:
         if engine != "qwen3-customvoice":
             # 其它引擎没有 stream 参数：一次性生成完再 yield，语义仍正确，
             # 只是拿不到流式收益。不静默回落，日志里会写明。
-            audio, _, _ = self.synthesize(text, engine, voice, speed, short_gap=short_gap)
+            audio, _, _ = self.synthesize(
+                text, engine, voice, speed, short_gap=short_gap,
+                perceptual_align=perceptual_align,
+                kweighted=kweighted, edge=edge, align_profile=align_profile,
+                wsola_compensation=wsola_compensation,
+                wsola_compensation_strength=wsola_compensation_strength,
+                instruct_override=instruct_override,
+                slow_leveling=slow_leveling,
+                slow_leveling_strength=slow_leveling_strength,
+                dual_rate_alpha=dual_rate_alpha,
+            )
             yield audio
             return
 
         speaker, instruct = resolve_speaker(voice)
+        instruct = apply_instruct_override(instruct, instruct_override)
         pieces = split_long_text(text)
         if len(pieces) > 1:
             sys.stderr.write(
@@ -1041,20 +1339,47 @@ class TtsEngine:
             )
             if samples.size == 0:
                 continue
-            seg_speed = segment_servo_speed(samples, rate, piece, speed)
+            # **顺序修正（第十一轮 A/B 定位）**：段级对齐必须放在变速**之后**。
+            # WSOLA 倍率会改变高频 LTAS 与 K 加权感知响度，先对齐再变速会让
+            # 探针/人耳听到的最终波形被重新打散 —— 真机实测 K 加权响度极差
+            # 0.60→1.00dB、1.34→1.66dB 反而变差；离线证伪显示对齐函数本身
+            # 能把极差收敛到 0.00dB，问题只在顺序。
+            # align_segment 不改变样本数，故伺服倍率先算后算完全一致。
+            use_align = PERCEPTUAL_ALIGN_ENABLED if perceptual_align is None else perceptual_align
+            use_k, use_edge = resolve_align_v2(kweighted, edge)
+            use_comp = (
+                WSOLA_COMPENSATION_ENABLED
+                if wsola_compensation is None else wsola_compensation
+            )
+            profile = resolve_align_profile(align_profile)
+            dual_alpha = DUAL_RATE_ALPHA if dual_rate_alpha is None else dual_rate_alpha
+            seg_speed = segment_servo_speed(samples, rate, piece, speed, dual_alpha)
             applied.append(seg_speed)
-            # 段内一条有状态时间轴：分块喂与整段一次 time_stretch_wsola()
-            # 逐样本相等，流式与整块 /tts 产出的音频因此完全一致。
-            stretcher = StreamingWsola(seg_speed)
+            stretched = time_stretch_wsola(samples, seg_speed)
+            # 第十三轮：补偿 WSOLA 变速本身的确定性高频衰减。增益只由
+            # seg_speed 决定、与这段文本无关；必须在变速之后、响度对齐之前，
+            # 否则补偿曲线会被 WSOLA 重新打散（第十一轮的顺序教训）。
+            stretched, _ = compensate_wsola(
+                stretched, rate, seg_speed, use_comp,
+                wsola_compensation_strength,
+            )
+            # 与整块 /tts 用同一 time_stretch_wsola + 对齐函数（实测差异
+            # ≤1 LSB）；之后仅按 interval 切片，切片不改变任何样本，前端按
+            # 采样点连续排程，不会引入新台阶。
+            # 第十七轮统一响度链路：v14 纯标量归一 → 块内 3s 慢变整形 →
+            # 再做一次 v14 纯标量归一。v12 请求级回退 / v11 复现能力保留。
+            aligned, _ = apply_loudness_chain(
+                stretched, rate, speaker,
+                profile=profile, perceptual_align=use_align,
+                kweighted=use_k, edge=use_edge,
+                slow_leveling=slow_leveling,
+                slow_leveling_strength=slow_leveling_strength,
+            )
             block = max(1, int(interval * rate))
-            for start in range(0, samples.size, block):
-                out = stretcher.feed(samples[start : start + block])
-                if out.size > 0:
-                    yield encode_wav_bytes(out, rate)
-            # flush 不能漏：最后 frame_len + search 个样本还压在 OLA 缓冲里
-            tail = stretcher.flush()
-            if tail.size > 0:
-                yield encode_wav_bytes(tail, rate)
+            for start in range(0, aligned.size, block):
+                chunk = aligned[start : start + block]
+                if chunk.size > 0:
+                    yield encode_wav_bytes(chunk, rate)
             if seg_index < len(pieces) - 1:
                 yield encode_wav_bytes(
                     np.zeros(int(TTS_SEGMENT_GAP_S * rate), dtype=np.float32), rate
@@ -1068,7 +1393,22 @@ class TtsEngine:
             )
 
     def synthesize(
-        self, text: str, engine: str, voice: str, speed: float, short_gap: bool | None = None
+        self,
+        text: str,
+        engine: str,
+        voice: str,
+        speed: float,
+        short_gap: bool | None = None,
+        perceptual_align: bool | None = None,
+        kweighted: bool | None = None,
+        edge: bool | None = None,
+        align_profile: str | None = None,
+        wsola_compensation: bool | None = None,
+        wsola_compensation_strength: float | None = None,
+        instruct_override: str | None = None,
+        slow_leveling: bool | None = None,
+        slow_leveling_strength: float | None = None,
+        dual_rate_alpha: float | None = None,
     ) -> tuple[bytes, str, str]:
         """
         合成一段语音。
@@ -1102,6 +1442,7 @@ class TtsEngine:
             # 音色只跟请求有关，跟片段无关：解析一次并回显给调用方
             if engine == "qwen3-customvoice":
                 speaker, instruct = resolve_speaker(voice)
+                instruct = apply_instruct_override(instruct, instruct_override)
                 voice_used = speaker
             elif engine == "qwen3-voicedesign":
                 voice_used = voice
@@ -1171,6 +1512,14 @@ class TtsEngine:
         part_audio: list[Any] = []
         rate = 24000
         applied: list[float] = []
+        use_align = PERCEPTUAL_ALIGN_ENABLED if perceptual_align is None else perceptual_align
+        use_k, use_edge = resolve_align_v2(kweighted, edge)
+        use_comp = (
+            WSOLA_COMPENSATION_ENABLED
+            if wsola_compensation is None else wsola_compensation
+        )
+        profile = resolve_align_profile(align_profile)
+        dual_alpha = DUAL_RATE_ALPHA if dual_rate_alpha is None else dual_rate_alpha
         for piece, raw, rate in raw_parts:
             samples = compress_segment_gaps(
                 trim_speech_edges(trim_degenerate_tail(raw, rate), rate),
@@ -1180,12 +1529,30 @@ class TtsEngine:
             )
             if samples.size == 0:
                 continue
+            # 与 iter_stream 完全同一顺序、同一参数（实测差异 ≤1 LSB）。
+            # 第十一轮：先变速、后对齐（原因见 iter_stream 的顺序修正注释）。
             if native_speed:
-                out = samples
+                seg_speed = 1.0
+                stretched = samples
             else:
-                seg_speed = segment_servo_speed(samples, rate, piece, speed)
+                seg_speed = segment_servo_speed(samples, rate, piece, speed, dual_alpha)
                 applied.append(seg_speed)
-                out = time_stretch_wsola(samples, seg_speed)
+                stretched = time_stretch_wsola(samples, seg_speed)
+            # 第十三轮：与 iter_stream 同一位置补偿 WSOLA 确定性谱失真；
+            # native_speed 时 seg_speed=1，compensate_wsola 返回原对象。
+            stretched, _ = compensate_wsola(
+                stretched, rate, seg_speed, use_comp,
+                wsola_compensation_strength,
+            )
+            # 与 iter_stream 完全同一顺序、同一参数（实测差异 ≤1 LSB）。
+            # 第十七轮：两条路径共用 apply_loudness_chain，杜绝实现漂移。
+            out, _ = apply_loudness_chain(
+                stretched, rate, voice_used,
+                profile=profile, perceptual_align=use_align,
+                kweighted=use_k, edge=use_edge,
+                slow_leveling=slow_leveling,
+                slow_leveling_strength=slow_leveling_strength,
+            )
             # 两次独立生成的波形硬接缝，用一小段静音盖住相位跳变
             if part_audio:
                 part_audio.append(np.zeros(int(TTS_SEGMENT_GAP_S * rate), dtype=np.float32))
@@ -1650,7 +2017,14 @@ def compress_segment_gaps(
     )
 
 
-def segment_stretch_speed(samples: "Any", sample_rate: int, units: float, speed: float) -> float:
+def segment_stretch_speed(
+    samples: "Any",
+    sample_rate: int,
+    units: float,
+    speed: float,
+    dual_alpha: float = 0.0,
+    voiced_ratio: float = 1.0,
+) -> float:
     """
     算这一段需要的保调变速倍率，把它的实测语速拉到全局固定基准
 
@@ -1681,10 +2055,43 @@ def segment_stretch_speed(samples: "Any", sample_rate: int, units: float, speed:
         return speed if speed > 0 else 1.0
     target = TTS_CHARS_PER_SECOND * (speed if speed > 0 else 1.0)
     actual = units / duration
-    return max(TTS_RATE_SPEED_MIN, min(TTS_RATE_SPEED_MAX, target / actual))
+    ratio = max(TTS_RATE_SPEED_MIN, min(TTS_RATE_SPEED_MAX, target / actual))
+    # 第十七轮：按块内有声占比做「整块口径 ↔ 有声段口径」的折中偏置。
+    # dual_alpha=0（单测与旧调用）时逐字回到第十六轮行为。
+    if dual_alpha > 0.0 and 0.0 < voiced_ratio < 1.0:
+        bias = (voiced_ratio / VOICED_RATIO_REF) ** dual_alpha
+        ratio = max(TTS_RATE_SPEED_MIN, min(TTS_RATE_SPEED_MAX, ratio * bias))
+    return ratio
 
 
-def segment_servo_speed(samples: "Any", sample_rate: int, piece: str, speed: float) -> float:
+def voiced_ratio_of(samples: "Any", sample_rate: int) -> float:
+    """块内**有声样本占比**（与 continuity.analyze_clip 的 speech_s 同口径）。
+
+    复用同一套 40ms/20ms 帧与相对峰值门，避免服务端与门禁两套 VAD 口径。
+    """
+    import numpy as np
+
+    x = np.asarray(samples, dtype=np.float32).reshape(-1)
+    if x.size == 0 or sample_rate <= 0:
+        return 1.0
+    frames, width, hop = _windows(x, sample_rate)
+    rms = np.sqrt((frames.astype(np.float64) ** 2).mean(axis=1))
+    peak = float(rms.max()) if rms.size else 0.0
+    if peak <= 0:
+        return 1.0
+    voiced = rms > peak * SILENCE_RMS_RATIO
+    speech = 0
+    for start, end in _voiced_runs(voiced):
+        a = min(start * hop, x.size)
+        b = min(end * hop + width - hop, x.size)
+        if b > a:
+            speech += b - a
+    return min(1.0, max(0.01, speech / float(x.size)))
+
+
+def segment_servo_speed(
+    samples: "Any", sample_rate: int, piece: str, speed: float, dual_alpha: float = 0.0
+) -> float:
     """
     一段文本的最终伺服倍率（等效单元口径 + 极短段护栏）
 
@@ -1698,7 +2105,8 @@ def segment_servo_speed(samples: "Any", sample_rate: int, piece: str, speed: flo
     @returns 保调变速倍率
     """
     units = speech_units(piece)
-    ratio = segment_stretch_speed(samples, sample_rate, units, speed)
+    vr = voiced_ratio_of(samples, sample_rate) if dual_alpha > 0.0 else 1.0
+    ratio = segment_stretch_speed(samples, sample_rate, units, speed, dual_alpha, vr)
     if units < TTS_SHORT_SEGMENT_UNITS:
         return max(TTS_SHORT_SPEED_MIN, min(TTS_SHORT_SPEED_MAX, ratio))
     return ratio
@@ -1962,6 +2370,26 @@ class Handler(BaseHTTPRequestHandler):
                     "tns": TNS_VERSION if TNS_ENABLED else "off",
                     "atomicChunk": "on" if ATOMIC_CHUNK_ENABLED else "off",
                     "shortGap": "on" if SHORT_GAP_ENABLED else "off",
+                    "perceptualAlign": "on" if PERCEPTUAL_ALIGN_ENABLED else "off",
+                    "alignProfile": ALIGN_PROFILE,
+                    "lufsTarget": LUFS_TARGETS.get("serena"),
+                    "lufsMaxDb": LUFS_MAX_DB,
+                    "slowLeveling": "on" if SLOW_LEVELING_ENABLED else "off",
+                    "slowLevelingStrength": SLOW_LEVELING_STRENGTH,
+                    "slowLevelingSmoothS": SLOW_LEVELING_SMOOTH_S,
+                    "slowLevelingMaxDb": SLOW_LEVELING_MAX_DB,
+                    "dualRateAlpha": DUAL_RATE_ALPHA,
+                    "voicedRatioRef": VOICED_RATIO_REF,
+                    "wsolaCompensation": "on" if WSOLA_COMPENSATION_ENABLED else "off",
+                    "wsolaCompensationStrength": COMPENSATION_STRENGTH,
+                    "instructOverrideSupported": "on",
+                    "noInstructDefault": "on" if NO_INSTRUCT_DEFAULT else "off",
+                    "kweightedAlign": "on" if KWEIGHTED_ALIGN_ENABLED else "off",
+                    "edgeAlign": "on" if EDGE_ALIGN_ENABLED else "off",
+                    # 排查「音色不对」的第一现场：自由描述是否已被归一、归一到哪个预设
+                    "stableVoice": (
+                        STABLE_VOICE_FALLBACK if STABLE_VOICE_IDENTITY else "off"
+                    ),
                     **deps["versions"],
                 },
             },
@@ -2021,6 +2449,15 @@ class Handler(BaseHTTPRequestHandler):
         payload = json.loads(self._read_body() or b"{}")
         text = apply_tns(str(payload.get("text") or "").strip(), payload)
         short_gap = request_short_gap_enabled(payload)
+        perceptual_align = request_perceptual_align_enabled(payload)
+        kweighted_align, edge_align = request_align_v2(payload)
+        align_profile = request_align_profile(payload)
+        wsola_comp = request_wsola_compensation_enabled(payload)
+        wsola_comp_strength = request_wsola_compensation_strength(payload)
+        instruct_override = request_instruct_override(payload)
+        slow_leveling = request_slow_leveling_enabled(payload)
+        slow_leveling_strength = request_slow_leveling_strength(payload)
+        dual_rate_alpha = request_dual_rate_alpha(payload)
         if not text:
             self._send_json(400, {"code": "EMPTY_TEXT", "reason": "text 不能为空"})
             return
@@ -2036,7 +2473,15 @@ class Handler(BaseHTTPRequestHandler):
         speed = min(2.0, max(0.5, speed))
         started = time.time()
         audio, engine_used, voice_used = self.tts.synthesize(
-            text, engine, voice, speed, short_gap=short_gap
+            text, engine, voice, speed, short_gap=short_gap,
+            perceptual_align=perceptual_align,
+            kweighted=kweighted_align, edge=edge_align, align_profile=align_profile,
+            wsola_compensation=wsola_comp,
+            wsola_compensation_strength=wsola_comp_strength,
+            instruct_override=instruct_override,
+            slow_leveling=slow_leveling,
+            slow_leveling_strength=slow_leveling_strength,
+            dual_rate_alpha=dual_rate_alpha,
         )
         elapsed = int((time.time() - started) * 1000)
         # 一行固定格式的合成日志：正常与退化在日志里差别一目了然
@@ -2080,6 +2525,15 @@ class Handler(BaseHTTPRequestHandler):
         payload = json.loads(self._read_body() or b"{}")
         text = apply_tns(str(payload.get("text") or "").strip(), payload)
         short_gap = request_short_gap_enabled(payload)
+        perceptual_align = request_perceptual_align_enabled(payload)
+        kweighted_align, edge_align = request_align_v2(payload)
+        align_profile = request_align_profile(payload)
+        wsola_comp = request_wsola_compensation_enabled(payload)
+        wsola_comp_strength = request_wsola_compensation_strength(payload)
+        instruct_override = request_instruct_override(payload)
+        slow_leveling = request_slow_leveling_enabled(payload)
+        slow_leveling_strength = request_slow_leveling_strength(payload)
+        dual_rate_alpha = request_dual_rate_alpha(payload)
         if not text:
             self._send_json(400, {"code": "EMPTY_TEXT", "reason": "text 不能为空"})
             return
@@ -2109,7 +2563,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-Stream-Interval", str(interval))
             self.end_headers()
             for wav in self.tts.iter_stream(
-                text, engine, voice, speed, interval, short_gap=short_gap
+                text, engine, voice, speed, interval, short_gap=short_gap,
+                perceptual_align=perceptual_align,
+                kweighted=kweighted_align, edge=edge_align, align_profile=align_profile,
+                wsola_compensation=wsola_comp,
+                wsola_compensation_strength=wsola_comp_strength,
+                instruct_override=instruct_override,
+                slow_leveling=slow_leveling,
+                slow_leveling_strength=slow_leveling_strength,
+                dual_rate_alpha=dual_rate_alpha,
             ):
                 if first_at is None:
                     first_at = time.time() - started
